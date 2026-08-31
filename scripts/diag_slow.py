@@ -51,6 +51,7 @@ _IN_CHUNK = 800   # 只读 IN(...) 批大小,留余量避开 SQLITE_MAX_VARIABLE
 _SAFE_STAGES = frozenset({
     "answer", "answer_llm", "embed", "embedding", "expand", "extract", "graph", "index", "load_indexes",
     "parse", "pipeline", "ppr", "report", "retrieval", "score", "seed", "total",
+    "chunk_ann", "chunk_fts", "chunk_scale_index", "kg_candidates",
 })
 _SAFE_OBJECT_TYPES = frozenset({"concept", "claim", "formula", "procedure"})
 _ENV_BOOL_KEYS = frozenset({

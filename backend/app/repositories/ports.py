@@ -92,6 +92,10 @@ from app.models.knowledge import (
 KNOWHOW_COLUMN_KINDS = frozenset({"anchor", "procedure", "entity", "attribute"})
 
 
+class ChunkLexicalSearchTimeout(RuntimeError):
+    """One bounded generic chunk-lexical probe exhausted its own budget."""
+
+
 @dataclass
 class UploadedSourceFile:
     file_name: str

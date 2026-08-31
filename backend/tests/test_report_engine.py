@@ -1665,10 +1665,9 @@ def test_intent_coverage_probe_includes_confirmed_question_and_answers(repo, mon
     observed = []
     monkeypatch.setattr(
         eng,
-        "_probe_queries",
-        lambda notebook_id, queries, max_queries=4: observed.append(list(queries)) or {
-            "hits": 0, "base_hits": 0, "element_hits": 0, "source_hits": 0,
-        },
+        "_load_probe_query_results",
+        lambda notebook_id, query_groups, max_queries=4:
+        observed.extend(query_groups) or [[([], [])] for _ in query_groups],
     )
     contract = {
         "objective": "分析这个问题",
@@ -2614,7 +2613,142 @@ def test_probe_queries_honors_max_queries(repo, monkeypatch):
         repo.retrieval, "retrieve_elements", lambda nb, q, limit=8: [],
     )
     eng._probe_queries("nb", ["q1", "q2", "q3", "q4"], max_queries=2)
-    assert probed == ["q1", "q2"]
+    # Batch execution may start independent probes in either order; the
+    # first-N membership remains the contract.
+    assert sorted(probed) == ["q1", "q2"]
+
+
+def test_probe_sufficiency_batches_shared_queries_once_and_preserves_order(
+    repo, monkeypatch,
+):
+    """Separate section aggregates share one ordered, bounded leaf batch."""
+    from app.services.report_engine import ReportEngine
+
+    eng = ReportEngine.from_repository(repo, repo.settings)
+    calls = {"knowledge": [], "element": []}
+    monkeypatch.setattr(
+        repo.retrieval, "federated_retrieve",
+        lambda nb, query: calls["knowledge"].append(query) or [],
+    )
+    monkeypatch.setattr(
+        repo.retrieval, "retrieve_elements",
+        lambda nb, query, limit=8: calls["element"].append(query) or [],
+    )
+
+    result = eng._probe_sufficiency("nb", [
+        {"title": "first", "sub_queries": ["shared", "first-only"]},
+        {"title": "second", "sub_queries": ["shared", "second-only"]},
+    ])
+
+    assert [row["title"] for row in result] == ["first", "second"]
+    assert sorted(calls["knowledge"]) == ["first-only", "second-only", "shared"]
+    assert sorted(calls["element"]) == ["first-only", "second-only", "shared"]
+
+
+def test_probe_batch_retries_failed_shared_leaf_for_later_section(repo, monkeypatch):
+    """Batch de-duplication must not turn a transient probe failure into a miss."""
+    from app.services.report_engine import ReportEngine
+
+    eng = ReportEngine.from_repository(repo, repo.settings)
+    attempts = []
+
+    def _flaky(_notebook_id, query):
+        attempts.append(query)
+        if len(attempts) == 1:
+            raise RuntimeError("transient")
+        return []
+
+    monkeypatch.setattr(repo.retrieval, "federated_retrieve", _flaky)
+    monkeypatch.setattr(
+        repo.retrieval, "retrieve_elements", lambda *_args, **_kwargs: [],
+    )
+
+    eng._probe_sufficiency("nb", [
+        {"title": "first", "sub_queries": ["shared"]},
+        {"title": "second", "sub_queries": ["shared"]},
+    ])
+
+    assert attempts == ["shared", "shared"]
+
+
+def test_probe_batch_respects_report_wide_fanout_limit(repo, monkeypatch):
+    """Batching topics cannot turn one report into unbounded leaf I/O."""
+    import threading
+    import time
+
+    from app.services.report_engine import ReportEngine
+
+    settings = repo.settings.model_copy(
+        update={
+            "report_retrieval_fanout": 2,
+            "report_probe_channel_concurrency": 2,
+        }
+    )
+    eng = ReportEngine.from_repository(repo, settings)
+    active = 0
+    maximum = 0
+    lock = threading.Lock()
+
+    def _leaf(*_args, **_kwargs):
+        nonlocal active, maximum
+        with lock:
+            active += 1
+            maximum = max(maximum, active)
+        time.sleep(0.02)
+        with lock:
+            active -= 1
+        return []
+
+    monkeypatch.setattr(repo.retrieval, "federated_retrieve", _leaf)
+    monkeypatch.setattr(repo.retrieval, "retrieve_elements", _leaf)
+
+    eng._probe_sufficiency("nb", [{
+        "title": "A", "sub_queries": ["q1", "q2", "q3"],
+    }])
+
+    assert maximum <= settings.report_retrieval_fanout
+
+
+def test_probe_batch_uses_full_configured_fanout_for_independent_queries(
+    repo, monkeypatch,
+):
+    """Two query pairs use all four configured leaf slots, not the old fixed two."""
+    import threading
+
+    from app.services.report_engine import ReportEngine
+
+    settings = repo.settings.model_copy(
+        update={
+            "report_retrieval_fanout": 4,
+            "report_probe_channel_concurrency": 2,
+        }
+    )
+    eng = ReportEngine.from_repository(repo, settings)
+    active = 0
+    maximum = 0
+    lock = threading.Lock()
+    all_leaf_slots = threading.Barrier(settings.report_retrieval_fanout)
+
+    def _leaf(*_args, **_kwargs):
+        nonlocal active, maximum
+        with lock:
+            active += 1
+            maximum = max(maximum, active)
+        try:
+            all_leaf_slots.wait(timeout=1)
+        finally:
+            with lock:
+                active -= 1
+        return []
+
+    monkeypatch.setattr(repo.retrieval, "federated_retrieve", _leaf)
+    monkeypatch.setattr(repo.retrieval, "retrieve_elements", _leaf)
+
+    eng._probe_sufficiency("nb", [{
+        "title": "A", "sub_queries": ["q1", "q2"],
+    }])
+
+    assert maximum == settings.report_retrieval_fanout
 
 
 def test_deep_dive_seeds_confirmed_directions_and_skips_rerun(repo, monkeypatch):

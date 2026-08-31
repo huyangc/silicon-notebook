@@ -527,6 +527,37 @@ dropping either index changes planner options only: the SQL predicates, similari
 candidate limits, and ordering are unchanged, so retrieval quality must remain byte-for-byte
 equivalent in the PostgreSQL conformance test.
 
+### Bounded chunk FTS in Deep Report
+
+The composite chunk GIN index above remains required for ordinary Ask, exact/fallback
+retrieval, notebook search, and rollback-quality operation. Increasing the global
+`POSTGRES_STATEMENT_TIMEOUT_SECONDS` is not the remedy for repeated Deep Report timeouts:
+it merely makes every failing probe wait longer. Generic PostgreSQL chunk lexical calls use
+their own savepoint-scoped `POSTGRES_CHUNK_FTS_TIMEOUT_SECONDS` budget (default 1 second).
+The transaction is rolled back to that savepoint on `QueryCanceled`, and the first timeout
+opens a per-notebook circuit for the rest of the current retrieval run; later generic calls
+skip the database statement. Calls already in flight are not forcibly cancelled. Exact
+phrase/identifier lookup is a separate channel and is never covered by this circuit.
+
+When a chunk ANN index is healthy, Deep Report planning/generation skips the generic
+natural-language FTS union by default; ordinary Ask keeps ANN∪FTS. Set
+`CHUNK_FTS_WITH_ANN_ENABLED=true` to A/B or restore that report lexical supplement. If ANN
+is unavailable, the report still uses bounded FTS as its fail-open fallback. A frozen
+all-selected source list also no longer pays the HNSW Python filter callback when the
+immutable source sidecar proves every indexed source code is allowed; any unknown or
+unallowed code keeps the filtered/scoped path.
+
+Use the content-free latency events to identify the remaining cost instead of interpreting
+the legacy aggregate as pure ANN: `site=chunk_scale_index` reports
+`scale_index_load_ms`; `site=chunk_ann` splits `ann_prepare_ms`, `ann_open_ms`, `knn_ms`,
+`delta_ms`, `lexical_prepare_ms`, `chunk_fts_ms`, `hydrate_ms`, and `score_ms`; `site=_retrieve_scored` reports the broad
+`candidate_ms` plus `scale_index_ms`, `kg_ann_ms`, and `kg_lexical_ms`. The retrieval-run
+summary reports `chunk_fts_timeouts` and `chunk_fts_circuit_skips`. These events also carry
+the compatible `stage`/`latency_ms` pair (`chunk_scale_index`, `chunk_ann`, `chunk_fts`, or
+`kg_candidates`), so both `diag.py slow` and `diag.py latency` aggregate them. After deploying, verify
+that report ANN hits show near-zero `chunk_fts_ms`, FTS timeouts cost roughly the private
+deadline rather than 30 seconds, and readiness has preloaded every required scale index.
+
 ### KNN early stop for the largest notebooks (`POSTGRES_LEXICAL_KNN_ENABLED`)
 
 The composite indexes above insulate every *other* notebook from a giant one, but cannot make
@@ -835,7 +866,7 @@ The same `viz.npz` now carries the stable degree order and by-source edge order/
 
 With the default `SOURCE_PARTITIONED_GRAPH_ARTIFACTS_ENABLED=true`, the same offline index command also rebuilds `<storage>/kg_index_partitions/<notebook-id>` after the main scale artifact is published. The companion is staged and swapped atomically, contains one SHA-256-addressed directory per visible source, hashes every partition payload, and is bound to the current main manifest version. A failed, over-limit, or corrupt companion does not damage the legacy scale index, but its reader stays unavailable; older companion formats require a rebuild. Re-run the index command after repairing source-fact coverage or adjusting the documented source-subgraph rails; do not copy a companion root between scale-index generations. `SOURCE_PARTITIONED_PPR_ENABLED` may be turned off independently while retaining the files.
 
-For a production regression, capture stacks and the slow-stage breakdown with `python3 scripts/diag.py incident` and `python3 scripts/diag.py slow --since 6 --deep`. In `_retrieve_scored` events, compare `ann_ms`, `hydrate_ms`, and `fold_ms`; a small candidate count must not cause hydration work proportional to total relation or cluster rows. Before/after acceptance should use the exact replay comparison below.
+For a production regression, capture stacks and the slow-stage breakdown with `python3 scripts/diag.py incident` and `python3 scripts/diag.py slow --since 6 --deep`. In `_retrieve_scored` events, compare `candidate_ms` (then its `scale_index_ms` / `kg_ann_open_ms` / `kg_ann_knn_ms` / `kg_delta_ms` / `kg_lexical_ms` split), `hydrate_ms`, and `fold_ms`; a small candidate count must not cause hydration work proportional to total relation or cluster rows. Before/after acceptance should use the exact replay comparison below.
 
 ### Retrieval replay diff (`scripts/replay_retrieval.py`)
 

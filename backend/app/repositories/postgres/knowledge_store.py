@@ -15,13 +15,15 @@ the frozen suites keep binding.
 from __future__ import annotations
 
 import json
+import math
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
-from psycopg import sql
+from psycopg import errors, sql
 
 from app.core.json_safety import validate_finite_json
 from app.models.common import Evidence
 from app.repositories.lexical_query import corpus_gated_recall_terms
+from app.repositories.ports import ChunkLexicalSearchTimeout
 from app.repositories.postgres._store_utils import (
     execute_many,
     iso_timestamp,
@@ -2579,26 +2581,67 @@ class KnowledgeStore:
             authoritative_source_filter=authoritative_source_filter,
         )
 
-    @staticmethod
     def chunk_fts_search(
-        db, notebook_id: str, q: str, k: int = 30, *,
+        self, db, notebook_id: str, q: str, k: int = 30, *,
         allowed_source_ids: Sequence[str] | None = None,
         corpus_langs: Sequence[str] | None = None,
     ) -> List[Dict]:
-        """Return deterministic lexical chunk hits from trigram candidates."""
+        """Return deterministic lexical chunk hits under a private deadline.
+
+        The pool-wide timeout protects every statement, but this optional
+        recall/fallback leg must not be allowed to consume that whole budget.
+        A savepoint makes PostgreSQL's query-cancellation transaction abort
+        local to this probe; restoring the prior GUC keeps a caller-owned
+        transaction and the next pooled borrower byte-for-byte unchanged.
+        """
         needle = (q or "").strip()
-        return _lexical_candidate_union(
-            db,
-            notebook_id,
-            needle,
-            k,
-            candidate_rows_for_terms=chunk_candidate_rows_for_terms,
-            candidate_documents=chunk_candidate_documents,
-            output_id="chunk_id",
-            text_field="text",
-            allowed_source_ids=allowed_source_ids,
-            corpus_langs=corpus_langs,
+        if not needle or k <= 0:
+            return []
+        timeout_ms = max(
+            1,
+            math.ceil(
+                float(self.database.settings.postgres_chunk_fts_timeout_seconds)
+                * 1000
+            ),
         )
+        savepoint = "chunk_fts_budget"
+        db.execute(f"SAVEPOINT {savepoint}")
+        previous = db.execute(
+            "SELECT current_setting('statement_timeout') AS value"
+        ).fetchone()["value"]
+        try:
+            db.execute(
+                "SELECT set_config('statement_timeout', %s, true)",
+                (f"{timeout_ms}ms",),
+            )
+            result = _lexical_candidate_union(
+                db,
+                notebook_id,
+                needle,
+                k,
+                candidate_rows_for_terms=chunk_candidate_rows_for_terms,
+                candidate_documents=chunk_candidate_documents,
+                output_id="chunk_id",
+                text_field="text",
+                allowed_source_ids=allowed_source_ids,
+                corpus_langs=corpus_langs,
+            )
+        except Exception as exc:
+            # A cancelled PostgreSQL statement leaves the transaction aborted;
+            # only ROLLBACK TO SAVEPOINT can make the caller's lease usable.
+            db.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+            db.execute(f"RELEASE SAVEPOINT {savepoint}")
+            if isinstance(exc, errors.QueryCanceled):
+                raise ChunkLexicalSearchTimeout(
+                    "chunk lexical search exceeded its bounded deadline"
+                ) from None
+            raise
+        db.execute(
+            "SELECT set_config('statement_timeout', %s, true)",
+            (str(previous),),
+        )
+        db.execute(f"RELEASE SAVEPOINT {savepoint}")
+        return result
 
     @staticmethod
     def chunk_exact_search(db, notebook_id: str, needle: str, k: int = 50) -> List[Dict]:

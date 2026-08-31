@@ -1356,6 +1356,53 @@ def test_knn_probe_failure_leaves_the_transaction_usable(search_harness):
         reset_knn_index_cache()
 
 
+def test_chunk_fts_private_timeout_restores_transaction_and_pool_state(
+    search_harness, monkeypatch
+):
+    """A real QueryCanceled stays inside the chunk-FTS savepoint boundary."""
+    from app.repositories.ports import ChunkLexicalSearchTimeout
+    from app.repositories.postgres import knowledge_store as knowledge_module
+
+    search_harness.database._pool.resize(1, 1)
+    monkeypatch.setattr(
+        search_harness.database.settings,
+        "postgres_chunk_fts_timeout_seconds",
+        0.05,
+    )
+
+    def _slow_candidates(connection, *_args, **_kwargs):
+        connection.execute("SELECT pg_sleep(0.2)")
+        return []
+
+    monkeypatch.setattr(
+        knowledge_module,
+        "chunk_candidate_rows_for_terms",
+        _slow_candidates,
+    )
+
+    with search_harness.database.connect() as connection:
+        before = connection.execute(
+            "SELECT current_setting('statement_timeout') AS value"
+        ).fetchone()["value"]
+        with pytest.raises(ChunkLexicalSearchTimeout):
+            search_harness.knowledge.chunk_fts_search(
+                connection,
+                "nb-timeout",
+                "thermal control",
+                k=5,
+            )
+        assert connection.execute("SELECT 1 AS value").fetchone()["value"] == 1
+        assert connection.execute(
+            "SELECT current_setting('statement_timeout') AS value"
+        ).fetchone()["value"] == before
+
+    # Pool size one makes this the same physical connection after check-in.
+    with search_harness.database.connect() as connection:
+        assert connection.execute(
+            "SELECT current_setting('statement_timeout') AS value"
+        ).fetchone()["value"] == before
+
+
 @pytest.mark.postgres_integration
 def test_knn_lateral_statement_is_planner_usable(search_harness):
     """The parameterized LATERAL can run as an index-ordered KNN scan.

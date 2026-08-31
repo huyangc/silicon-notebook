@@ -1035,61 +1035,119 @@ class ReportEngine:
             memo[key] = found
         return found
 
-    def _probe_queries(self, notebook_id: str, queries: List[str], *,
-                       max_queries: int = 4) -> dict:
-        seen, base, elements, sources = set(), set(), set(), set()
-        # One support unit is one distinct relevant KG object or source element.
-        # Repeated retrieval of the same object through multiple sub-queries does
-        # not inflate either relevant_items or a family's numerator.
-        relevant_units: Dict[str, set[str]] = {}
+    def _bounded_probe_queries(
+        self, queries: Sequence[str], *, max_queries: int,
+    ) -> List[str]:
+        """Keep each probe's historical first-N, ordered query window."""
+        return list(dict.fromkeys(str(query) for query in queries[:max_queries]))
 
-        # Preserve the historical first-N window, then dedupe in input order.
-        # The serial memo made repeats free; concurrent duplicate submissions
-        # could race its plain dict and repay both expensive retrieval calls.
-        bounded_queries = list(dict.fromkeys(
-            str(query) for query in queries[:max_queries]
+    def _load_probe_query_results(
+        self, notebook_id: str, query_groups: Sequence[Sequence[str]], *,
+        max_queries: int,
+    ) -> List[List[Tuple[list, list]]]:
+        """Load all distinct planning probes under the report-wide leaf budget.
+
+        Intent topics and outline sections need separate coverage aggregates, but
+        their raw retrieval inputs often overlap.  Loading the union once avoids
+        a memo race between topic workers while allowing independent query pairs
+        to use the report's existing retrieval-fanout budget.
+        """
+        bounded_groups = [
+            self._bounded_probe_queries(queries, max_queries=max_queries)
+            for queries in query_groups
+        ]
+        unique_queries = list(dict.fromkeys(
+            query for queries in bounded_groups for query in queries
         ))
+        if not unique_queries:
+            return [[] for _ in bounded_groups]
 
-        def _safe(loader, query):
+        def _safe(loader, query) -> Tuple[list, bool]:
             try:
-                return loader(notebook_id, query)
+                return loader(notebook_id, query), True
             except AskCancelled:
                 # Cancellation is control flow, not a best-effort probe miss.
-                # Swallowing it can let low-depth planning persist an outline
-                # after the caller has already cancelled the report.
                 raise
             except Exception:
-                return []
+                return [], False
 
-        # KG and SourceElement are independent leaf channels.  The executor
-        # never holds a retrieval slot itself; each loader acquires the shared
-        # report-run gate immediately around its own I/O.
+        # This setting controls the two channels *within one query*.  It is
+        # deliberately not a global cap: independent queries may occupy the
+        # remaining report-wide leaf slots.  Clamp it to that existing global
+        # rail so direct test calls and production runs share one bound.
+        fanout_limit = max(1, int(getattr(
+            self.settings,
+            "report_retrieval_fanout",
+            DEFAULT_REPORT_RETRIEVAL_FANOUT,
+        )))
         channel_workers = min(
-            2,
+            fanout_limit,
             max(1, int(getattr(
                 self.settings,
                 "report_probe_channel_concurrency",
                 DEFAULT_REPORT_PROBE_CHANNEL_CONCURRENCY,
             ))),
         )
-        query_results = []
-        if bounded_queries:
+        query_workers = max(1, fanout_limit // channel_workers)
+
+        def _load_pair(query: str) -> Tuple[list, list, bool]:
+            if channel_workers == 1:
+                knowledge_hits, knowledge_ok = _safe(
+                    self._probe_knowledge_hits, query,
+                )
+                element_hits, element_ok = _safe(
+                    self._probe_element_hits, query,
+                )
+                return knowledge_hits, element_hits, knowledge_ok and element_ok
             with ThreadPoolExecutor(max_workers=channel_workers) as pool:
-                futures = []
-                for query in bounded_queries:
-                    kg_future = pool.submit(
-                        contextvars.copy_context().run,
-                        _safe, self._probe_knowledge_hits, query,
+                knowledge_future = pool.submit(
+                    contextvars.copy_context().run,
+                    _safe, self._probe_knowledge_hits, query,
+                )
+                element_future = pool.submit(
+                    contextvars.copy_context().run,
+                    _safe, self._probe_element_hits, query,
+                )
+                knowledge_hits, knowledge_ok = knowledge_future.result()
+                element_hits, element_ok = element_future.result()
+                return knowledge_hits, element_hits, knowledge_ok and element_ok
+
+        with ThreadPoolExecutor(max_workers=query_workers) as pool:
+            futures = [
+                (query, pool.submit(contextvars.copy_context().run, _load_pair, query))
+                for query in unique_queries
+            ]
+            results_by_query = {
+                query: future.result() for query, future in futures
+            }
+        result_groups: List[List[Tuple[list, list]]] = []
+        seen_query_occurrences: set[str] = set()
+        for queries in bounded_groups:
+            group_results: List[Tuple[list, list]] = []
+            for query in queries:
+                knowledge_hits, element_hits, complete = results_by_query[query]
+                if query in seen_query_occurrences and not complete:
+                    # A failed leaf is intentionally not memoized.  Preserve
+                    # the historical retry-per-probe behavior for later topics
+                    # or sections, while successful twin-channel work remains
+                    # shared through the normal engine memo.
+                    knowledge_hits, element_hits, complete = _load_pair(query)
+                    results_by_query[query] = (
+                        knowledge_hits, element_hits, complete,
                     )
-                    element_future = pool.submit(
-                        contextvars.copy_context().run,
-                        _safe, self._probe_element_hits, query,
-                    )
-                    futures.append((kg_future, element_future))
-                query_results = [
-                    (kg_future.result(), element_future.result())
-                    for kg_future, element_future in futures
-                ]
+                group_results.append((knowledge_hits, element_hits))
+                seen_query_occurrences.add(query)
+            result_groups.append(group_results)
+        return result_groups
+
+    def _summarize_probe_results(
+        self, query_results: Sequence[Tuple[list, list]],
+    ) -> dict:
+        seen, base, elements, sources = set(), set(), set(), set()
+        # One support unit is one distinct relevant KG object or source element.
+        # Repeated retrieval of the same object through multiple sub-queries does
+        # not inflate either relevant_items or a family's numerator.
+        relevant_units: Dict[str, set[str]] = {}
 
         for knowledge_hits, element_hits in query_results:
             for hit in knowledge_hits:
@@ -1182,30 +1240,41 @@ class ReportEngine:
             "source_identity_uncertain": len(unidentified_source_ids),
         }
 
+    def _probe_queries(self, notebook_id: str, queries: List[str], *,
+                       max_queries: int = 4) -> dict:
+        """Return one coverage aggregate while sharing the batch scheduler."""
+        return self._summarize_probe_results(
+            self._load_probe_query_results(
+                notebook_id, [queries], max_queries=max_queries,
+            )[0]
+        )
+
     def _probe_intent_coverage(self, notebook_id: str, intent_contract: dict, *,
                                max_queries: int = 4) -> List[dict]:
-        out: List[dict] = []
         confirmed_question = self._confirmed_research_question(
             intent_contract,
             str(intent_contract.get("objective") or ""),
         )
-        for topic in self._intent_catalog(intent_contract):
-            queries = list(dict.fromkeys([
+        topics = self._intent_catalog(intent_contract)
+        query_groups = [
+            [query for query in dict.fromkeys([
                 confirmed_question,
                 *(str(item).strip() for item in topic.get("retrieval_queries") or []),
                 str(topic.get("question") or "").strip(),
-            ]))
-            counts = self._probe_queries(
-                notebook_id,
-                [query for query in queries if query],
-                max_queries=max_queries,
-            )
-            out.append({
+            ]) if query]
+            for topic in topics
+        ]
+        query_result_groups = self._load_probe_query_results(
+            notebook_id, query_groups, max_queries=max_queries,
+        )
+        return [
+            {
                 "intent_id": topic["id"],
                 "title": topic["title"],
-                **counts,
-            })
-        return out
+                **self._summarize_probe_results(query_results),
+            }
+            for topic, query_results in zip(topics, query_result_groups)
+        ]
 
     # --- Stage A(STORM):Corpus map 0-LLM 语料侦察 ---
 
@@ -1305,14 +1374,18 @@ class ReportEngine:
     def _probe_sufficiency(self, notebook_id: str, sections: List[dict], *,
                            max_queries: int = 4) -> List[dict]:
         """0-LLM objective signal over both KG objects and raw SourceElements."""
-        out = []
-        for s in sections:
-            counts = self._probe_queries(
-                notebook_id, list(s.get("sub_queries") or []),
-                max_queries=max_queries,
-            )
-            out.append({"title": s.get("title", ""), **counts})
-        return out
+        query_result_groups = self._load_probe_query_results(
+            notebook_id,
+            [list(section.get("sub_queries") or []) for section in sections],
+            max_queries=max_queries,
+        )
+        return [
+            {
+                "title": section.get("title", ""),
+                **self._summarize_probe_results(query_results),
+            }
+            for section, query_results in zip(sections, query_result_groups)
+        ]
 
     # --- Stage A 编排:intent → intent probe → map → STORM → Judge → outline_ready ---
     def plan_outline(self, notebook_id, rid, question, history="",

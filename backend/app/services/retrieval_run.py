@@ -58,12 +58,15 @@ class RetrievalRunState:
         self._lock = threading.RLock()
         self._embedding_cache: dict[Hashable, Any] = {}
         self._embedding_pending: dict[Hashable, _PendingEmbedding] = {}
+        self._chunk_fts_open: set[str] = set()
         self.embedding_requests = 0
         self.embedding_hits = 0
         self.embedding_errors = 0
         self.fanout_acquires = 0
         self.fanout_waits = 0
         self.fanout_wait_ms = 0
+        self.chunk_fts_timeouts = 0
+        self.chunk_fts_circuit_skips = 0
 
     def memoized_embedding(self, key: Hashable, compute: Callable[[], T]) -> T:
         """Return one successful value per key, single-flight across threads.
@@ -104,6 +107,23 @@ class RetrievalRunState:
             if current is not None:
                 current.ready.set()
         return value
+
+    def chunk_fts_permitted(self, notebook_id: str) -> bool:
+        """Whether this run may issue another generic FTS probe for a library."""
+        key = str(notebook_id)
+        with self._lock:
+            if key not in self._chunk_fts_open:
+                return True
+            self.chunk_fts_circuit_skips += 1
+            return False
+
+    def note_chunk_fts_timeout(self, notebook_id: str) -> None:
+        """Open one run-local circuit after the first bounded FTS timeout."""
+        key = str(notebook_id)
+        with self._lock:
+            if key not in self._chunk_fts_open:
+                self._chunk_fts_open.add(key)
+                self.chunk_fts_timeouts += 1
 
     @contextmanager
     def fanout_slot(self) -> Iterator[None]:
@@ -155,6 +175,8 @@ class RetrievalRunState:
                 "fanout_acquires": self.fanout_acquires,
                 "fanout_waits": self.fanout_waits,
                 "fanout_wait_ms": self.fanout_wait_ms,
+                "chunk_fts_timeouts": self.chunk_fts_timeouts,
+                "chunk_fts_circuit_skips": self.chunk_fts_circuit_skips,
             }
             if self.fanout_limit is not None:
                 event["fanout_limit"] = self.fanout_limit
