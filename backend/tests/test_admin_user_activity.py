@@ -82,13 +82,14 @@ def _insert_ask(db, job_id, notebook_id, created_by, created_at, *,
 def _insert_source(db, source_id, notebook_id, created_at, *,
                     title="Doc", source_type="pdf", status="parsed",
                     parse_status="parsed", file_name="doc.pdf",
-                    error_message="") -> None:
+                    error_message="", uploaded_by=None) -> None:
     db.execute(
         "INSERT INTO sources "
         "(id,notebook_id,title,source_type,status,parse_status,file_name,"
-        "error_message,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        "error_message,created_at,updated_at,uploaded_by) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
         (source_id, notebook_id, title, source_type, status, parse_status,
-         file_name, error_message, created_at, created_at),
+         file_name, error_message, created_at, created_at, uploaded_by),
     )
 
 
@@ -1006,7 +1007,7 @@ def test_deleted_notebook_keeps_only_expiring_activity_metadata(repo):
     assert expired_usage["conversations"] == 1
     assert expired_usage["questions"] == 0
     assert expired_usage["reports"] == 0
-    assert expired_usage["last_active"] == created_at
+    assert expired_usage["last_active"] is None
     with pytest.raises(KeyError):
         with repo.guarded_ask_detail(
             "ask-1", actor_id="u1", reader_id=None
@@ -1016,6 +1017,58 @@ def test_deleted_notebook_keeps_only_expiring_activity_metadata(repo):
     repo._migrator.recover_interrupted_jobs()
     with repo._connect() as db:
         assert db.execute("SELECT COUNT(*) FROM retained_user_activity").fetchone()[0] == 0
+
+
+def test_deleted_shared_upload_keeps_actor_and_owner_accounting_separate(repo):
+    created_at = "2026-08-30T11:00:00+00:00"
+    with repo._write() as db:
+        _insert_user(db, "alice", "a00000001")
+        _insert_user(db, "bob", "b00000002")
+        _insert_notebook(db, "shared", "alice")
+        _insert_source(
+            db, "bob-upload", "shared", created_at, uploaded_by="bob"
+        )
+        _insert_ask(
+            db, "bob-shared-ask", "shared", "bob", created_at,
+        )
+
+    repo._runtime.notebook_store.delete_row_and_orphan_embeddings("shared")
+
+    with repo._connect() as db:
+        retained = db.execute(
+            "SELECT actor_id,notebook_owner_id FROM retained_user_activity "
+            "WHERE activity_type='source' AND record_id='bob-upload'"
+        ).fetchone()
+    assert (retained["actor_id"], retained["notebook_owner_id"]) == (
+        "bob", "alice",
+    )
+
+    usage = {row["id"]: row for row in repo.list_user_usage()}
+    assert usage["alice"]["sources"] == 1
+    assert usage["alice"]["last_active"] is None
+    assert usage["bob"]["sources"] == 0
+    assert usage["bob"]["last_active"] == created_at
+
+    alice_activity = repo.list_user_activity(
+        "alice", activity_type="source",
+        include_inaccessible_questions=True, limit=50,
+    )
+    bob_activity = repo.list_user_activity(
+        "bob", activity_type="source",
+        include_inaccessible_questions=True, limit=50,
+    )
+    assert [item["id"] for item in alice_activity["items"]] == ["bob-upload"]
+    assert bob_activity["items"] == []
+    # The mixed retained stream remains owner-only, matching the live mixed
+    # stream; the explicit Ask filter keeps its established creator-wide view.
+    assert repo.list_user_activity(
+        "bob", include_inaccessible_questions=True, limit=50,
+    )["items"] == []
+    bob_asks = repo.list_user_activity(
+        "bob", activity_type="ask",
+        include_inaccessible_questions=True, limit=50,
+    )
+    assert [item["id"] for item in bob_asks["items"]] == ["bob-shared-ask"]
 
 
 def test_concurrent_independent_deletes_preserve_the_winners_archive(

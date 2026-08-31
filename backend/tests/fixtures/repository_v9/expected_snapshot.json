@@ -1015,7 +1015,8 @@
         "status": "extracted",
         "summary": "A deterministic mixed-format repository fixture.",
         "title": "Fixture amplifier notes",
-        "updated_at": "<timestamp>"
+        "updated_at": "<timestamp>",
+        "uploaded_by": "<user-id-1>"
       }
     ],
     "unified_kg_state": [
@@ -1778,6 +1779,11 @@
         "type": "index"
       },
       {
+        "name": "idx_sources_uploaded_by_created",
+        "sql_sha256": "503d91d3a2452dfad0046fd9cf58b95db687fd092d5cfc1767a09978142fc36d",
+        "type": "index"
+      },
+      {
         "name": "idx_sources_visible_identity",
         "sql_sha256": "33306c8cc674aeed308cf0b87e7f16130f3ea3eb6f5e166cd41bad8514c1f44e",
         "type": "index"
@@ -2304,7 +2310,7 @@
       },
       {
         "name": "sources",
-        "sql_sha256": "1917bc77196977d858a302fe883c9092f3dc19a5efd282d5110fcc442d99c8b4",
+        "sql_sha256": "377dee25d3b7df5f8cd0fb45f7ee82da01899d5b190bee7c0c6fdd5a52da3e3c",
         "type": "table"
       },
       {
@@ -2343,6 +2349,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 65
+    "user_version": 66
   }
 }

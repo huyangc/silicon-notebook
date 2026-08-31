@@ -278,6 +278,11 @@ def _mk_user(repo, uid, email=None):
 
 def test_copy_notebook_deep_copies_and_remaps(repo):
     src = _seed_full_notebook(repo)
+    with repo._write() as db:
+        db.execute(
+            "UPDATE sources SET uploaded_by='user-local' WHERE notebook_id=?",
+            (src,),
+        )
     _mk_user(repo, "user-bob")  # created_by FK→users.id,目标用户须先存在(生产里恒成立)
     new = repo.copy_notebook(src, new_owner_id="user-bob")
     assert new.id != src and new.tier == "personal"
@@ -301,6 +306,9 @@ def test_copy_notebook_deep_copies_and_remaps(repo):
         # evidence.element_id 已重写
         ev = json.loads(_rows(repo, "knowledge_objects", new.id)[0]["evidence"])
         assert ev[0]["element_id"] in new_elem_ids
+        assert db.execute(
+            "SELECT uploaded_by FROM sources WHERE notebook_id=?", (new.id,)
+        ).fetchone()[0] is None
     # conversations 不被拷贝
     with repo._connect() as db:
         assert db.execute("SELECT COUNT(*) FROM conversations WHERE notebook_id=?", (new.id,)).fetchone()[0] == 0

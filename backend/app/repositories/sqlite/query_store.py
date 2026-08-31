@@ -736,11 +736,11 @@ class QueryStore:
                     "SELECT nb.created_by AS k,COUNT(*) AS c FROM sources s "
                     "JOIN notebooks nb ON nb.id=s.notebook_id GROUP BY nb.created_by "
                     "UNION ALL "
-                    "SELECT a.actor_id AS k,COUNT(*) AS c "
+                    "SELECT a.notebook_owner_id AS k,COUNT(*) AS c "
                     "FROM retained_user_activity a WHERE a.activity_type='source' "
                     "AND julianday(a.expires_at)>julianday('now') "
                     "AND NOT EXISTS(SELECT 1 FROM notebooks live "
-                    "WHERE live.id=a.notebook_id) GROUP BY a.actor_id"
+                    "WHERE live.id=a.notebook_id) GROUP BY a.notebook_owner_id"
                     ") GROUP BY k"
                 ).fetchall()
             }
@@ -784,11 +784,53 @@ class QueryStore:
                     ") GROUP BY k"
                 ).fetchall()
             }
+            # 「最近活跃」与管理员活动流使用同一批用户动作:上传可见来源、提交
+            # 提问、发起深度报告。取 created_at 而不是后台 worker 会继续改动的
+            # updated_at，避免用户离开后仍因解析/生成完成而被显示成刚刚活跃。
+            #
+            # SQLite 的时间列混有裸 UTC 与带 offset 的 ISO 串，不能直接 MAX(text)。
+            # 每一类先按用户压成一个候选，再只在至多 4×用户数的候选上做窗口
+            # 排序；_absolute_instant 与活动流的排序/游标使用同一条绝对时间
+            # 判据。SQLite 对单个 MIN/MAX aggregate 的 bare columns 保证取自
+            # 胜出行，因此 m/activity_id 与 MAX(sort_instant) 属于同一条活动；
+            # 绝对时刻并列时两种原始 offset 写法都表示同一个 last_active。
+            activity_candidates = (
+                "SELECT s.uploaded_by AS k,s.created_at AS m,"
+                f"MAX({_absolute_instant('s.created_at')}) AS sort_instant,"
+                "'source:'||s.id AS activity_id FROM sources s "
+                "JOIN notebooks nb ON nb.id=s.notebook_id "
+                "WHERE nb.status!='copying' "
+                "AND s.uploaded_by IS NOT NULL AND s.uploaded_by!='' "
+                f"AND {VISIBLE_SOURCE_TYPES_PREDICATE} GROUP BY s.uploaded_by "
+                "UNION ALL "
+                "SELECT j.created_by AS k,j.created_at AS m,"
+                f"MAX({_absolute_instant('j.created_at')}) AS sort_instant,"
+                "'ask:'||j.id AS activity_id FROM ask_jobs j GROUP BY j.created_by "
+                "UNION ALL "
+                "SELECT r.created_by AS k,r.created_at AS m,"
+                f"MAX({_absolute_instant('r.created_at')}) AS sort_instant,"
+                "'report:'||r.id AS activity_id FROM reports r GROUP BY r.created_by "
+                "UNION ALL "
+                "SELECT a.actor_id AS k,a.created_at AS m,"
+                f"MAX({_absolute_instant('a.created_at')}) AS sort_instant,"
+                "'retained:'||a.activity_type||':'||a.record_id AS activity_id "
+                "FROM retained_user_activity a "
+                "WHERE a.activity_type IN ('source','ask','report') "
+                "AND a.actor_id!='' "
+                "AND julianday(a.expires_at)>julianday('now') "
+                "AND NOT EXISTS(SELECT 1 FROM notebooks live "
+                "WHERE live.id=a.notebook_id) GROUP BY a.actor_id"
+            )
             active = {
-                row["k"]: row["m"]
+                row["k"]: (
+                    None
+                    if cursor_instant_text(row["m"]) == UNRESOLVED_INSTANT_ISO
+                    else cursor_instant_text(row["m"])
+                )
                 for row in db.execute(
-                    "SELECT created_by AS k, MAX(updated_at) AS m FROM conversations "
-                    "GROUP BY created_by"
+                    "SELECT k,m FROM (SELECT k,m,ROW_NUMBER() OVER ("
+                    "PARTITION BY k ORDER BY sort_instant DESC,activity_id DESC"
+                    ") AS rn FROM (" + activity_candidates + ")) WHERE rn=1"
                 ).fetchall()
             }
             # 每笔记本文档数量上限:一次批量取所有 per-user 覆盖值(仅非空行),
@@ -1143,18 +1185,32 @@ class QueryStore:
             # 后的快照只进入管理员审计（include_inaccessible_questions=True）。
             retained_rows = []
             if notebook_id is None and include_inaccessible_questions:
-                retained_params: list[Any] = [user_id]
-                retained_scope = ""
+                retained_params: list[Any] = []
                 if activity_type == "ask":
-                    retained_scope = " AND a.activity_type='ask'"
-                elif activity_type in ("source", "report"):
-                    retained_scope = (
-                        " AND a.activity_type=? AND a.notebook_owner_id=?"
-                    )
-                    retained_params.extend([activity_type, user_id])
-                else:
-                    retained_scope = " AND a.notebook_owner_id=?"
+                    retained_scope = "a.activity_type='ask' AND a.actor_id=?"
                     retained_params.append(user_id)
+                elif activity_type == "source":
+                    retained_scope = (
+                        "a.activity_type='source' AND a.notebook_owner_id=?"
+                    )
+                    retained_params.append(user_id)
+                elif activity_type == "report":
+                    retained_scope = (
+                        "a.activity_type='report' AND a.actor_id=? "
+                        "AND a.notebook_owner_id=?"
+                    )
+                    retained_params.extend([user_id, user_id])
+                else:
+                    retained_scope = (
+                        "((a.activity_type='ask' AND a.actor_id=? "
+                        "AND a.notebook_owner_id=?) OR "
+                        "(a.activity_type='source' AND a.notebook_owner_id=?) OR "
+                        "(a.activity_type='report' AND a.actor_id=? "
+                        "AND a.notebook_owner_id=?))"
+                    )
+                    retained_params.extend(
+                        [user_id, user_id, user_id, user_id, user_id]
+                    )
                 retained_range, retained_range_params = (
                     _retained_range_and_cursor_clause()
                 )
@@ -1162,11 +1218,11 @@ class QueryStore:
                 retained_rows = db.execute(
                     "SELECT a.*," + _absolute_instant("a.created_at")
                     + " AS sort_instant FROM retained_user_activity a "
-                    "WHERE a.actor_id=? "
+                    f"WHERE {retained_scope} "
                     "AND julianday(a.expires_at)>julianday('now')"
                     " AND NOT EXISTS(SELECT 1 FROM notebooks live "
                     "WHERE live.id=a.notebook_id)"
-                    f"{retained_scope}{retained_range} "
+                    f"{retained_range} "
                     f"ORDER BY {_absolute_instant('a.created_at')} DESC,"
                     "a.record_id DESC LIMIT ?",
                     [*retained_params, fetch_limit],

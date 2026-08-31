@@ -247,7 +247,7 @@ class NotebookCopyService:
                 # Agent may never delete), which is the conservative direction:
                 # carrying the id over would hand an Agent delete rights on rows
                 # in a notebook it never touched.
-                data["agent_profile_id"] = None
+                data.update(agent_profile_id=None, uploaded_by=None)
                 sources_out.append(data)
             self._store.insert_copy_rows("sources", sources_out, chunk_size=chunk_size)
 

@@ -80,7 +80,7 @@ def test_install_builds_all_eight_concurrently_and_is_idempotent(postgres_databa
     # is a true no-op ledger entry once the offline CONCURRENTLY builder has
     # already built every index online -- the documented relationship
     # between the two in this module's and the migration's docstrings.
-    assert PostgresMigrator(postgres_database).migrate() == 44
+    assert PostgresMigrator(postgres_database).migrate() == 45
     after_migration = inspect_hotpath_indexes(database_url, schema=schema)
     assert after_migration == state
 

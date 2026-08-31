@@ -28,7 +28,7 @@ from app.repositories.ports import (  # noqa: E402
     RETRIEVAL_EXPERIENCE_MAX_ENTRIES,
 )
 
-# --- 表分类(SCHEMA_VERSION=65) --------------------------------------------
+# --- 表分类(SCHEMA_VERSION=66) --------------------------------------------
 NOTEBOOKS_TABLE = "notebooks"  # 按 id 筛(自身即 notebook 行)
 
 # object_schemas 是部署级全局基线；notebook_object_schemas 才随 notebook 合并。

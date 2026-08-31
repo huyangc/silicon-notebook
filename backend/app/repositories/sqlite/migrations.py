@@ -107,7 +107,10 @@ logger = logging.getLogger("silicon_notebook.sqlite.maintenance")
 # v65 adds retained_user_activity, a content-minimal, notebook-FK-free snapshot
 # written atomically immediately before notebook deletion. Its configured
 # expires_at drives both read visibility and bounded physical cleanup.
-SCHEMA_VERSION = 65
+# v66 adds sources.uploaded_by, the user who actually created a visible source
+# row. Historical visible rows can only be attributed best-effort to their
+# notebook owner; hidden synthetic Memory/Knowhow rows remain NULL.
+SCHEMA_VERSION = 66
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -3547,6 +3550,30 @@ class SqliteMigrator:
                 CREATE INDEX IF NOT EXISTS idx_retained_activity_notebook
                   ON retained_user_activity(notebook_id);
                 """
+            )
+
+    def _migration_66(self) -> None:
+        """Record the actual user action behind a visible source upload.
+
+        Older rows have no actor provenance, so visible sources are attributed
+        best-effort to the notebook owner. Hidden projection rows are not user
+        uploads and deliberately remain NULL. The partial index keeps the
+        admin usage aggregate grouped by actor without adding write cost to
+        synthetic sources; absolute-time comparison remains an expression.
+        """
+        with self._connect() as db:
+            self._add_column_if_missing(db, "sources", "uploaded_by", "TEXT")
+            db.execute(
+                "UPDATE sources SET uploaded_by=(SELECT n.created_by FROM notebooks n "
+                "WHERE n.id=sources.notebook_id) "
+                "WHERE uploaded_by IS NULL "
+                "AND source_type NOT IN ('memory','knowhow')"
+            )
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_sources_uploaded_by_created "
+                "ON sources(uploaded_by, created_at, id) "
+                "WHERE uploaded_by IS NOT NULL "
+                "AND source_type NOT IN ('memory','knowhow')"
             )
 
     def _recover_interrupted_jobs(self) -> None:

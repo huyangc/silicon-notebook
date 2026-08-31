@@ -142,9 +142,11 @@ class SourceStore:
         database: PostgresDatabase,
         *,
         now: Callable[[], TimestampInput],
+        current_user_id: Callable[[], str] = lambda: "",
     ) -> None:
         self.database = database
         self.now = normalized_clock(now)
+        self.current_user_id = current_user_id
 
     def all_visible_source_ids(self, notebook_id: str) -> list[str]:
         """Return the current visible-source universe for graph drift checks."""
@@ -1000,8 +1002,8 @@ class SourceStore:
             "INSERT INTO sources"
             "(id,notebook_id,title,source_type,status,parse_status,file_name,file_path,"
             "source_url,file_size,file_hash,summary,doc_type,memory_id,"
-            "agent_profile_id,created_at,updated_at) "
-            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"
+            "agent_profile_id,created_at,updated_at,uploaded_by) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"
         )
         now = self.now()
         values = (
@@ -1028,6 +1030,9 @@ class SourceStore:
             (agent_profile_id or "").strip() or None,
             now,
             now,
+            ((self.current_user_id() or "").strip() or None)
+            if source_type not in {"memory", "knowhow"}
+            else None,
         )
         visible = source_type not in {"memory", "knowhow"}
         if connection is not None:

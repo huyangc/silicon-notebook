@@ -68,7 +68,7 @@ def test_notebook_delete_locks_parent_before_retention_snapshot(
     import psycopg
     from psycopg.rows import dict_row
 
-    assert PostgresMigrator(postgres_database).migrate() == 44
+    assert PostgresMigrator(postgres_database).migrate() == 45
     now = "2026-08-31T00:00:00+00:00"
     with postgres_database.write() as connection:
         connection.execute(
@@ -135,7 +135,7 @@ def test_notebook_delete_locks_parent_before_retention_snapshot(
 def test_activity_delete_race_prefers_retained_lifecycle_postgres(
     postgres_database, postgres_settings, monkeypatch
 ):
-    assert PostgresMigrator(postgres_database).migrate() == 44
+    assert PostgresMigrator(postgres_database).migrate() == 45
     now = "2026-08-31T12:00:00+00:00"
     with postgres_database.write() as connection:
         connection.execute(
@@ -215,7 +215,7 @@ def test_activity_delete_race_prefers_retained_lifecycle_postgres(
 def test_live_ask_detail_delete_race_fails_closed_postgres(
     postgres_database, monkeypatch
 ):
-    assert PostgresMigrator(postgres_database).migrate() == 44
+    assert PostgresMigrator(postgres_database).migrate() == 45
     now = "2026-08-31T12:00:00+00:00"
     with postgres_database.write() as connection:
         connection.execute(
@@ -304,7 +304,7 @@ def test_live_ask_detail_delete_race_fails_closed_postgres(
 def test_guarded_ask_detail_holds_root_lease_through_projection_postgres(
     postgres_database,
 ):
-    assert PostgresMigrator(postgres_database).migrate() == 44
+    assert PostgresMigrator(postgres_database).migrate() == 45
     now = "2026-08-31T12:00:00+00:00"
     with postgres_database.write() as connection:
         connection.execute(
@@ -383,7 +383,7 @@ def test_guarded_ask_detail_holds_root_lease_through_projection_postgres(
 def test_guarded_ask_detail_locks_group_read_authority_postgres(
     postgres_database,
 ):
-    assert PostgresMigrator(postgres_database).migrate() == 44
+    assert PostgresMigrator(postgres_database).migrate() == 45
     now = "2026-08-31T12:00:00+00:00"
     with postgres_database.write() as connection:
         for user_id in ("guard-owner", "guard-reader"):
@@ -476,7 +476,7 @@ def test_guarded_ask_detail_locks_group_read_authority_postgres(
 def test_final_answer_and_notebook_delete_share_root_first_lock_order(
     postgres_database, monkeypatch
 ):
-    assert PostgresMigrator(postgres_database).migrate() == 44
+    assert PostgresMigrator(postgres_database).migrate() == 45
     now = "2026-08-31T12:00:00+00:00"
     with postgres_database.write() as connection:
         connection.execute(
@@ -568,7 +568,7 @@ def test_final_answer_and_notebook_delete_share_root_first_lock_order(
 def test_new_job_and_final_answer_use_compatible_notebook_leases(
     postgres_database, monkeypatch
 ):
-    assert PostgresMigrator(postgres_database).migrate() == 44
+    assert PostgresMigrator(postgres_database).migrate() == 45
     now = "2026-08-31T12:00:00+00:00"
     with postgres_database.write() as connection:
         connection.execute(
@@ -657,7 +657,7 @@ def test_new_job_and_final_answer_use_compatible_notebook_leases(
 def test_bulk_conversation_delete_holds_root_against_notebook_delete(
     postgres_database, monkeypatch
 ):
-    assert PostgresMigrator(postgres_database).migrate() == 44
+    assert PostgresMigrator(postgres_database).migrate() == 45
     now = "2026-08-31T12:00:00+00:00"
     with postgres_database.write() as connection:
         connection.execute(
@@ -755,7 +755,7 @@ def test_bulk_conversation_delete_holds_root_against_notebook_delete(
 def test_single_conversation_delete_holds_root_against_notebook_delete(
     postgres_database, monkeypatch
 ):
-    assert PostgresMigrator(postgres_database).migrate() == 44
+    assert PostgresMigrator(postgres_database).migrate() == 45
     now = "2026-08-31T12:00:00+00:00"
     with postgres_database.write() as connection:
         connection.execute(
@@ -848,7 +848,7 @@ def test_single_conversation_delete_holds_root_against_notebook_delete(
 def test_paper_meta_upsert_locks_parents_before_notebook_delete(
     postgres_database, monkeypatch
 ):
-    assert PostgresMigrator(postgres_database).migrate() == 44
+    assert PostgresMigrator(postgres_database).migrate() == 45
     now = "2026-08-31T12:00:00+00:00"
     with postgres_database.write() as connection:
         connection.execute(
@@ -952,7 +952,7 @@ def test_paper_meta_upsert_locks_parents_before_notebook_delete(
 def test_notebook_delete_waits_for_existing_source_update_before_snapshot(
     postgres_database,
 ):
-    assert PostgresMigrator(postgres_database).migrate() == 44
+    assert PostgresMigrator(postgres_database).migrate() == 45
     now = "2026-08-31T12:00:00+00:00"
     with postgres_database.write() as connection:
         connection.execute(
@@ -1021,7 +1021,7 @@ def test_legacy_merge_pair_decisions_lock_all_duplicates_in_one_order(
     postgres_database,
 ):
     """Different legacy ids for one displayed pair must not deadlock."""
-    assert PostgresMigrator(postgres_database).migrate() == 44
+    assert PostgresMigrator(postgres_database).migrate() == 45
     now = "2026-08-20T00:00:00+00:00"
     with postgres_database.write() as connection:
         connection.execute(
@@ -1086,7 +1086,7 @@ def test_ask_cancel_and_atomic_save_contend_on_the_real_job_row(
     its own pooled connection. This covers both legal terminal outcomes; the
     cancelled outcome must never leave an answer row behind.
     """
-    assert PostgresMigrator(postgres_database).migrate() == 44
+    assert PostgresMigrator(postgres_database).migrate() == 45
     now = "2026-07-23T00:00:00+00:00"
     with postgres_database.write() as connection:
         connection.execute(
@@ -1190,7 +1190,7 @@ def test_ask_cancel_and_atomic_save_contend_on_the_real_job_row(
 def test_conversation_cleanup_cannot_split_continuation_job_creation(
     postgres_database, monkeypatch
 ):
-    assert PostgresMigrator(postgres_database).migrate() == 44
+    assert PostgresMigrator(postgres_database).migrate() == 45
     now = "2026-07-23T00:00:00+00:00"
     with postgres_database.write() as connection:
         connection.execute(
@@ -1379,7 +1379,7 @@ def _wait_for_memory_row_lock(postgres_database) -> None:
 def test_stale_conditional_delete_rechecks_revision_after_row_lock(
     postgres_database,
 ):
-    assert PostgresMigrator(postgres_database).migrate() == 44
+    assert PostgresMigrator(postgres_database).migrate() == 45
     _seed_memory_race(postgres_database)
     store = _memory_store(postgres_database)
     write = _confirmed_race_memory(store, "memory-stale-delete")
@@ -1422,7 +1422,7 @@ def test_stale_conditional_delete_rechecks_revision_after_row_lock(
 def test_stale_embedding_failure_rechecks_revision_after_row_lock(
     postgres_database,
 ):
-    assert PostgresMigrator(postgres_database).migrate() == 44
+    assert PostgresMigrator(postgres_database).migrate() == 45
     _seed_memory_race(postgres_database)
     store = _memory_store(postgres_database)
     write = _confirmed_race_memory(store, "memory-stale-embedding-failure")
@@ -1463,7 +1463,7 @@ def test_stale_embedding_failure_rechecks_revision_after_row_lock(
 
 @pytest.mark.postgres_integration
 def test_revoked_member_cannot_commit_save_answer_memory(postgres_database):
-    assert PostgresMigrator(postgres_database).migrate() == 44
+    assert PostgresMigrator(postgres_database).migrate() == 45
     _seed_memory_race(postgres_database, member=True)
     store = _memory_store(postgres_database)
     revoked_uncommitted = threading.Event()
@@ -1516,7 +1516,7 @@ def test_revoked_member_cannot_commit_save_answer_memory(postgres_database):
 
 @pytest.mark.postgres_integration
 def test_save_answer_holds_access_lock_until_atomic_commit(postgres_database):
-    assert PostgresMigrator(postgres_database).migrate() == 44
+    assert PostgresMigrator(postgres_database).migrate() == 45
     _seed_memory_race(postgres_database, member=True)
     store = _memory_store(postgres_database)
     save_scope_locked = threading.Event()
@@ -1573,7 +1573,7 @@ def test_save_answer_holds_access_lock_until_atomic_commit(postgres_database):
 
 @pytest.mark.postgres_integration
 def test_competing_memory_promotion_approval_is_idempotent(postgres_database):
-    assert PostgresMigrator(postgres_database).migrate() == 44
+    assert PostgresMigrator(postgres_database).migrate() == 45
     _seed_memory_race(postgres_database)
     store = _memory_store(postgres_database)
     write = MemoryWrite(
@@ -1683,7 +1683,7 @@ def _insert_gc_asset(store, tmp_path, suffix: str):
 def test_asset_writer_first_blocks_gc_then_gc_rechecks_and_retains_reference(
     postgres_database, tmp_path, monkeypatch
 ):
-    assert PostgresMigrator(postgres_database).migrate() == 44
+    assert PostgresMigrator(postgres_database).migrate() == 45
     _seed_memory_race(postgres_database)
     store, _table_id, _anchor_id, procedure_id, row_ids = _knowhow_race_store(
         postgres_database
@@ -1741,7 +1741,7 @@ def test_asset_writer_first_blocks_gc_then_gc_rechecks_and_retains_reference(
 def test_atomic_append_holds_asset_lock_until_every_row_and_sequence_commit(
     postgres_database, tmp_path, monkeypatch
 ):
-    assert PostgresMigrator(postgres_database).migrate() == 44
+    assert PostgresMigrator(postgres_database).migrate() == 45
     _seed_memory_race(postgres_database)
     store, table_id, anchor_id, procedure_id, _row_ids = _knowhow_race_store(
         postgres_database
@@ -1807,7 +1807,7 @@ def test_atomic_append_holds_asset_lock_until_every_row_and_sequence_commit(
 def test_asset_gc_first_blocks_writer_then_writer_rolls_back_missing_reference(
     postgres_database, tmp_path, monkeypatch
 ):
-    assert PostgresMigrator(postgres_database).migrate() == 44
+    assert PostgresMigrator(postgres_database).migrate() == 45
     _seed_memory_race(postgres_database)
     store, table_id, _anchor_id, procedure_id, row_ids = _knowhow_race_store(
         postgres_database
@@ -1865,7 +1865,7 @@ def test_asset_gc_first_blocks_writer_then_writer_rolls_back_missing_reference(
 def test_multi_asset_writers_canonicalize_opposite_orders_without_deadlock_and_validate_all(
     postgres_database, tmp_path, monkeypatch
 ):
-    assert PostgresMigrator(postgres_database).migrate() == 44
+    assert PostgresMigrator(postgres_database).migrate() == 45
     _seed_memory_race(postgres_database)
     store, table_a, _anchor_a, procedure_a, rows_a = _knowhow_race_store(
         postgres_database
@@ -1940,7 +1940,7 @@ def test_every_postgres_cell_insert_path_rejects_a_missing_rendered_asset(
     postgres_database,
 ):
     """Add/import, merged, CLI-guarded, and interactive-guarded share one guard."""
-    assert PostgresMigrator(postgres_database).migrate() == 44
+    assert PostgresMigrator(postgres_database).migrate() == 45
     _seed_memory_race(postgres_database)
     store, table_id, _anchor_id, procedure_id, row_ids = _knowhow_race_store(
         postgres_database
@@ -1974,7 +1974,7 @@ def test_asset_file_unlink_failure_cannot_leave_a_validatable_broken_row(
     postgres_database, tmp_path, monkeypatch
 ):
     """A filesystem failure may leak a file, never a live row without a file."""
-    assert PostgresMigrator(postgres_database).migrate() == 44
+    assert PostgresMigrator(postgres_database).migrate() == 45
     _seed_memory_race(postgres_database)
     store, table_id, _anchor_id, procedure_id, row_ids = _knowhow_race_store(
         postgres_database
@@ -2006,7 +2006,7 @@ def test_asset_file_unlink_failure_cannot_leave_a_validatable_broken_row(
 
 @pytest.mark.postgres_integration
 def test_stale_projection_pass_cannot_overwrite_newer_pending_edit(postgres_database):
-    assert PostgresMigrator(postgres_database).migrate() == 44
+    assert PostgresMigrator(postgres_database).migrate() == 45
     _seed_memory_race(postgres_database)
     store, table_id, _anchor_id, procedure_id, row_ids = _knowhow_race_store(
         postgres_database
@@ -2058,7 +2058,7 @@ def test_stale_projection_pass_cannot_overwrite_newer_pending_edit(postgres_data
 
 @pytest.mark.postgres_integration
 def test_batch_reformat_membership_drift_is_zero_write_conflict(postgres_database):
-    assert PostgresMigrator(postgres_database).migrate() == 44
+    assert PostgresMigrator(postgres_database).migrate() == 45
     _seed_memory_race(postgres_database)
     store, table_id, anchor_id, procedure_id, row_ids = _knowhow_race_store(
         postgres_database
@@ -2136,7 +2136,7 @@ def _confirmed_memory_write(memory_id: str, content: str = "Before") -> MemoryWr
 
 @pytest.mark.postgres_integration
 def test_memory_edit_and_promotion_decision_share_one_lock_order(postgres_database):
-    assert PostgresMigrator(postgres_database).migrate() == 44
+    assert PostgresMigrator(postgres_database).migrate() == 45
     _seed_memory_race(postgres_database)
     store = _memory_store(postgres_database)
     write = _confirmed_memory_write("memory-lock-order")
@@ -2216,7 +2216,7 @@ def test_memory_edit_and_promotion_decision_share_one_lock_order(postgres_databa
 def test_memory_embedding_replace_and_edit_preserve_revision_freshness(
     postgres_database,
 ):
-    assert PostgresMigrator(postgres_database).migrate() == 44
+    assert PostgresMigrator(postgres_database).migrate() == 45
     _seed_memory_race(postgres_database)
     store = _memory_store(postgres_database)
     item = store.create_candidate_with_initial_revision(
@@ -2262,7 +2262,7 @@ def test_memory_embedding_replace_and_edit_preserve_revision_freshness(
 
 @pytest.mark.postgres_integration
 def test_memory_copy_holds_source_through_vector_snapshot(postgres_database):
-    assert PostgresMigrator(postgres_database).migrate() == 44
+    assert PostgresMigrator(postgres_database).migrate() == 45
     _seed_memory_race(postgres_database)
     store = _memory_store(postgres_database)
     source_write = _confirmed_memory_write("memory-copy-source-race", "Old text")
@@ -2335,7 +2335,7 @@ def test_revoked_member_cannot_complete_full_memory_approval(postgres_database):
     from app.services.review_queue_memo import ReviewQueueMemo
     from app.services.repository_runtime import RepositoryCompatibilitySeams
 
-    assert PostgresMigrator(postgres_database).migrate() == 44
+    assert PostgresMigrator(postgres_database).migrate() == 45
     _seed_memory_race(postgres_database, member=True)
     now = "2026-07-23T00:00:00+00:00"
     with postgres_database.write() as connection:
@@ -2513,7 +2513,7 @@ def test_concurrent_demotions_cannot_both_strip_the_last_group_admin(
     """
     from app.repositories.ports import LastGroupAdminError
 
-    assert PostgresMigrator(postgres_database).migrate() == 44
+    assert PostgresMigrator(postgres_database).migrate() == 45
     now = "2026-08-18T00:00:00+00:00"
     _seed_group_world(postgres_database, now, ("user-race-a", "user-race-b"))
     store = _group_store(postgres_database, now)
@@ -2580,7 +2580,7 @@ def test_adding_a_member_to_a_concurrently_deleted_group_fails_closed(
     """
     from app.repositories.ports import GroupNotFoundError
 
-    assert PostgresMigrator(postgres_database).migrate() == 44
+    assert PostgresMigrator(postgres_database).migrate() == 45
     now = "2026-08-18T00:00:00+00:00"
     _seed_group_world(postgres_database, now, ("user-del-a", "user-del-b"))
     with postgres_database.write() as connection:
@@ -2656,7 +2656,7 @@ def test_delete_group_locks_the_group_row_before_sweeping_its_grants(
     那条刚提交的新边。把锁挪回清理之后,这条用例会看到删组照常跑完清理、最后留下一条
     指向已删群组的边。
     """
-    assert PostgresMigrator(postgres_database).migrate() == 44
+    assert PostgresMigrator(postgres_database).migrate() == 45
     _seed_memory_race(postgres_database)
     store = PostgresGroupStore(
         postgres_database,
@@ -2750,7 +2750,7 @@ def test_share_request_blocks_on_the_notebook_row_and_fails_closed(
     """
     from app.repositories.ports import NotebookNotFoundError
 
-    assert PostgresMigrator(postgres_database).migrate() == 44
+    assert PostgresMigrator(postgres_database).migrate() == 45
     _seed_memory_race(postgres_database)
     counter = iter(range(1, 50))
     counter_lock = threading.Lock()
@@ -2847,7 +2847,7 @@ def test_create_grant_owner_branch_blocks_on_the_notebook_row_and_fails_closed(
     """
     from app.repositories.ports import NotebookNotFoundError
 
-    assert PostgresMigrator(postgres_database).migrate() == 44
+    assert PostgresMigrator(postgres_database).migrate() == 45
     _seed_memory_race(postgres_database)
     counter = iter(range(1, 50))
     counter_lock = threading.Lock()
@@ -2943,7 +2943,7 @@ def test_manage_recheck_locks_the_group_membership_behind_the_edge(
     """
     from psycopg import errors
 
-    assert PostgresMigrator(postgres_database).migrate() == 44
+    assert PostgresMigrator(postgres_database).migrate() == 45
     now = "2026-07-23T00:00:00+00:00"
     _seed_group_world(postgres_database, now, ("user-chain-a", "user-chain-b"))
     with postgres_database.write() as connection:

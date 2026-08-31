@@ -44,8 +44,8 @@ Schema changes remain version-gated behind `SqliteMigrator`: append a new
 Startup recovery, stable seeds, and administrator upgrades run every boot
 outside that version gate.
 
-The current schema version is 65. This is the SQLite schema version. The committed v9 compatibility fixture
-upgrades through migrations v10–v65 and remains readable. Those migrations
+The current schema version is 66. This is the SQLite schema version. The committed v9 compatibility fixture
+upgrades through migrations v10–v66 and remains readable. Those migrations
 cover compatibility and SQLite hot-path indexes (v10–v12), Memory/Agent and
 Memory-derived source links/indexes (v13–v15), knowhow tables and cell code
 (v16/v18), paper metadata (v17), source-linked assets (v19), and multi-domain
@@ -529,6 +529,15 @@ pruning. This leaf table adds one replicated primary-key
 unique surface and no FK edge, so the current pair is SQLite 65 / PostgreSQL 44 /
 epoch 1 with 86 application tables, 115 replicated unique surfaces, and the same
 12-row-slot closure bound.
+
+SQLite v66 / PostgreSQL v45 adds nullable `sources.uploaded_by` plus the
+partial `(uploaded_by, created_at, id)` activity index for visible sources.
+New visible rows stamp the actual current user; Memory/Knowhow projections and
+deep-copy rows remain un-attributed. Existing visible rows are backfilled
+best-effort to their notebook owner because older schemas retained no upload
+actor. This adds no table, foreign key, or unique surface, so the current pair
+is SQLite 66 / PostgreSQL 45 / epoch 1 with 86 application tables, 115
+replicated unique surfaces, and the same 12-row-slot closure bound.
 
 Run it only while application/background writers are stopped:
 

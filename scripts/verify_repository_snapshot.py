@@ -3813,5 +3813,43 @@ MIGRATION_MANIFEST[(64, 65)] = {
 }
 
 
+# v66: visible-source upload actor. Existing visible rows are attributed to
+# the notebook owner because no finer historical provenance exists; hidden
+# synthetic rows remain NULL and are outside the activity index.
+SOURCE_UPLOAD_ACTOR_COLUMNS = {
+    "sources": {
+        "uploaded_by": ("uploaded_by", "TEXT", 0, None, 0),
+    },
+}
+SOURCE_UPLOAD_ACTOR_INDEXES = {
+    "idx_sources_uploaded_by_created":
+        "CREATE INDEX idx_sources_uploaded_by_created "
+        "ON sources(uploaded_by, created_at, id) "
+        "WHERE uploaded_by IS NOT NULL "
+        "AND source_type NOT IN ('memory','knowhow')",
+}
+MIGRATION_MANIFEST = {
+    (key[0], 66, *key[2:]): {
+        **manifest,
+        "columns": {
+            **manifest["columns"],
+            "sources": {
+                **manifest["columns"].get("sources", {}),
+                **SOURCE_UPLOAD_ACTOR_COLUMNS["sources"],
+            },
+        },
+        "indexes": {**manifest["indexes"], **SOURCE_UPLOAD_ACTOR_INDEXES},
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(65, 66)] = {
+    "tables": {},
+    "columns": SOURCE_UPLOAD_ACTOR_COLUMNS,
+    "indexes": SOURCE_UPLOAD_ACTOR_INDEXES,
+    "triggers": {},
+    "views": {},
+}
+
+
 if __name__ == "__main__":
     raise SystemExit(main())
