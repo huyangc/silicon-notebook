@@ -736,9 +736,11 @@ class QueryStore:
                     "SELECT nb.created_by AS k,COUNT(*) AS c FROM sources s "
                     "JOIN notebooks nb ON nb.id=s.notebook_id GROUP BY nb.created_by "
                     "UNION ALL "
-                    "SELECT actor_id AS k,COUNT(*) AS c FROM retained_user_activity "
-                    "WHERE activity_type='source' "
-                    "AND julianday(expires_at)>julianday('now') GROUP BY actor_id"
+                    "SELECT a.actor_id AS k,COUNT(*) AS c "
+                    "FROM retained_user_activity a WHERE a.activity_type='source' "
+                    "AND julianday(a.expires_at)>julianday('now') "
+                    "AND NOT EXISTS(SELECT 1 FROM notebooks live "
+                    "WHERE live.id=a.notebook_id) GROUP BY a.actor_id"
                     ") GROUP BY k"
                 ).fetchall()
             }
@@ -754,9 +756,11 @@ class QueryStore:
                     "SELECT k,SUM(c) AS c FROM ("
                     "SELECT created_by AS k,COUNT(*) AS c FROM ask_jobs GROUP BY created_by "
                     "UNION ALL "
-                    "SELECT actor_id AS k,COUNT(*) AS c FROM retained_user_activity "
-                    "WHERE activity_type='ask' "
-                    "AND julianday(expires_at)>julianday('now') GROUP BY actor_id"
+                    "SELECT a.actor_id AS k,COUNT(*) AS c "
+                    "FROM retained_user_activity a WHERE a.activity_type='ask' "
+                    "AND julianday(a.expires_at)>julianday('now') "
+                    "AND NOT EXISTS(SELECT 1 FROM notebooks live "
+                    "WHERE live.id=a.notebook_id) GROUP BY a.actor_id"
                     ") GROUP BY k"
                 ).fetchall()
             }
@@ -772,9 +776,11 @@ class QueryStore:
                     "SELECT k,SUM(c) AS c FROM ("
                     "SELECT created_by AS k,COUNT(*) AS c FROM reports GROUP BY created_by "
                     "UNION ALL "
-                    "SELECT actor_id AS k,COUNT(*) AS c FROM retained_user_activity "
-                    "WHERE activity_type='report' "
-                    "AND julianday(expires_at)>julianday('now') GROUP BY actor_id"
+                    "SELECT a.actor_id AS k,COUNT(*) AS c "
+                    "FROM retained_user_activity a WHERE a.activity_type='report' "
+                    "AND julianday(a.expires_at)>julianday('now') "
+                    "AND NOT EXISTS(SELECT 1 FROM notebooks live "
+                    "WHERE live.id=a.notebook_id) GROUP BY a.actor_id"
                     ") GROUP BY k"
                 ).fetchall()
             }
@@ -1158,6 +1164,8 @@ class QueryStore:
                     + " AS sort_instant FROM retained_user_activity a "
                     "WHERE a.actor_id=? "
                     "AND julianday(a.expires_at)>julianday('now')"
+                    " AND NOT EXISTS(SELECT 1 FROM notebooks live "
+                    "WHERE live.id=a.notebook_id)"
                     f"{retained_scope}{retained_range} "
                     f"ORDER BY {_absolute_instant('a.created_at')} DESC,"
                     "a.record_id DESC LIMIT ?",

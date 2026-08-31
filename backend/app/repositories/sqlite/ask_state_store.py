@@ -662,7 +662,9 @@ class AskStateStore:
                     "conversation_id,mode,question,status,asked_at,deleted_at,"
                     "expires_at FROM retained_user_activity "
                     "WHERE activity_type='ask' AND record_id=? "
-                    "AND julianday(expires_at)>julianday('now')",
+                    "AND julianday(expires_at)>julianday('now') "
+                    "AND NOT EXISTS(SELECT 1 FROM notebooks live "
+                    "WHERE live.id=retained_user_activity.notebook_id)",
                     (job_id,),
                 ).fetchone()
                 if retained is None:
