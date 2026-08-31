@@ -274,7 +274,7 @@ test("复制成功时按钮自己变成「已复制」并换成成功配色，�
     ));
     const copied = await screen.findByRole("button", { name: "已复制" });
     expect(copied).toHaveClass("copy-result-copied");
-    expect(screen.queryByText("邀请链接已复制。")).not.toBeInTheDocument();
+    expect(document.querySelector(".group-page-status.success")).not.toBeInTheDocument();
 
     // 结果态是 JS 状态,不像 :active 那样松手自动还原——忘了摘掉就会一直挂着,
     // 下一次点击反而看不出有没有点上。
@@ -298,7 +298,7 @@ test("复制失败时按钮说「复制失败」，并把链接选中好让用�
 
   const failed = await screen.findByRole("button", { name: "复制失败" });
   expect(failed).toHaveClass("copy-result-failed");
-  expect(screen.queryByText("复制失败，链接已选中，请手动复制。")).not.toBeInTheDocument();
+  expect(document.querySelector(".group-page-status.success")).not.toBeInTheDocument();
   const link = screen.getByDisplayValue(/group_invite=gri_copy-token/);
   expect(document.activeElement).toBe(link);
   expect((link as HTMLInputElement).selectionEnd).toBe((link as HTMLInputElement).value.length);
@@ -348,11 +348,14 @@ test("剪贴板挂着时切了群组，失败不去选中另一个群组的邀�
   await screen.findByRole("heading", { name: "另一个群组" });
   await user.click(screen.getByRole("button", { name: "成员" }));
   const secondLink = await screen.findByDisplayValue(/group_invite=gri_second-group/) as HTMLInputElement;
+  const secondCopy = await screen.findByRole("button", { name: "复制中…" });
+  expect(secondCopy).toBeDisabled();
 
   // 现在让第一次复制失败：它不能碰这个属于另一个群组的输入框。
   rejectWrite(new Error("denied"));
-  await screen.findByRole("button", { name: "复制" });
-  expect(screen.queryByText("复制失败，请手动复制链接。")).not.toBeInTheDocument();
+  await waitFor(() => expect(secondCopy).toBeEnabled());
+  expect(secondCopy).toHaveTextContent("复制");
+  expect(document.querySelector(".group-page-status.success")).not.toBeInTheDocument();
   expect(document.activeElement).not.toBe(secondLink);
   expect(secondLink.selectionStart).toBe(secondLink.selectionEnd);
 });
