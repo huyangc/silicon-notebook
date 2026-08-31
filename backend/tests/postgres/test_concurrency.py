@@ -132,11 +132,8 @@ def test_notebook_delete_locks_parent_before_retention_snapshot(
 
 @pytest.mark.postgres_integration
 def test_activity_delete_race_prefers_retained_lifecycle_postgres(
-    postgres_database, postgres_settings
+    postgres_database, postgres_settings, monkeypatch
 ):
-    import psycopg
-    from psycopg.rows import dict_row
-
     assert PostgresMigrator(postgres_database).migrate() == 44
     now = "2026-08-31T12:00:00+00:00"
     with postgres_database.write() as connection:
@@ -166,34 +163,46 @@ def test_activity_delete_race_prefers_retained_lifecycle_postgres(
         activity_retention_days=180,
     )
     queries = QueryStore(postgres_database, postgres_settings)
+    reader_reached_retained = threading.Event()
+    allow_retained_read = threading.Event()
+    original_connect = postgres_database.connect
+
+    class ConnectionProxy:
+        def __init__(self, connection):
+            self._connection = connection
+
+        def execute(self, statement, *args, **kwargs):
+            if "SELECT a.* FROM retained_user_activity" in statement:
+                reader_reached_retained.set()
+                assert allow_retained_read.wait(timeout=5)
+            return self._connection.execute(statement, *args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self._connection, name)
+
+    @contextmanager
+    def coordinated_connect(*args, **kwargs):
+        with original_connect(*args, **kwargs) as connection:
+            yield ConnectionProxy(connection)
+
+    monkeypatch.setattr(postgres_database, "connect", coordinated_connect)
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        with psycopg.connect(
-            postgres_database._database_url, row_factory=dict_row
-        ) as blocker:
-            blocker.execute(
-                "LOCK TABLE retained_user_activity IN ACCESS EXCLUSIVE MODE"
-            )
-            delete_future = executor.submit(
-                notebooks.delete_row_and_orphan_embeddings, "activity-race-nb"
-            )
-            _wait_for_lock_wait(
-                postgres_database, "DELETE FROM retained_user_activity", delete_future
-            )
-            activity_future = executor.submit(
-                queries.list_user_activity,
-                "activity-race-owner",
-                activity_type="ask",
-                include_inaccessible_questions=True,
-                limit=50,
-            )
-            _wait_for_lock_wait(
-                postgres_database,
-                "SELECT a.* FROM retained_user_activity",
-                activity_future,
-            )
-
-        assert delete_future.result(timeout=5) == []
+        activity_future = executor.submit(
+            queries.list_user_activity,
+            "activity-race-owner",
+            activity_type="ask",
+            include_inaccessible_questions=True,
+            limit=50,
+        )
+        assert reader_reached_retained.wait(timeout=5)
+        delete_future = executor.submit(
+            notebooks.delete_row_and_orphan_embeddings, "activity-race-nb"
+        )
+        try:
+            assert delete_future.result(timeout=5) == []
+        finally:
+            allow_retained_read.set()
         activity = activity_future.result(timeout=5)
 
     assert len(activity["items"]) == 1
@@ -203,11 +212,8 @@ def test_activity_delete_race_prefers_retained_lifecycle_postgres(
 
 @pytest.mark.postgres_integration
 def test_ask_detail_delete_race_falls_back_to_retained_postgres(
-    postgres_database,
+    postgres_database, monkeypatch
 ):
-    import psycopg
-    from psycopg.rows import dict_row
-
     assert PostgresMigrator(postgres_database).migrate() == 44
     now = "2026-08-31T12:00:00+00:00"
     with postgres_database.write() as connection:
@@ -247,24 +253,40 @@ def test_ask_detail_delete_race_falls_back_to_retained_postgres(
         in_chunk_size=lambda: 100,
     )
     asks = AskStateStore(postgres_database, seams)
+    reader_reached_trace = threading.Event()
+    allow_trace_read = threading.Event()
+    original_connect = postgres_database.connect
+
+    class ConnectionProxy:
+        def __init__(self, connection):
+            self._connection = connection
+
+        def execute(self, statement, *args, **kwargs):
+            if "SELECT step_json FROM ask_trace_steps" in statement:
+                reader_reached_trace.set()
+                assert allow_trace_read.wait(timeout=5)
+            return self._connection.execute(statement, *args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self._connection, name)
+
+    @contextmanager
+    def coordinated_connect(*args, **kwargs):
+        with original_connect(*args, **kwargs) as connection:
+            yield ConnectionProxy(connection)
+
+    monkeypatch.setattr(postgres_database, "connect", coordinated_connect)
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        with psycopg.connect(
-            postgres_database._database_url, row_factory=dict_row
-        ) as blocker:
-            blocker.execute("LOCK TABLE ask_trace_steps IN ACCESS EXCLUSIVE MODE")
-            delete_future = executor.submit(
-                notebooks.delete_row_and_orphan_embeddings, "detail-race-nb"
-            )
-            _wait_for_lock_wait(postgres_database, "DELETE FROM notebooks", delete_future)
-            detail_future = executor.submit(asks.ask_job_detail, "detail-race-ask")
-            _wait_for_lock_wait(
-                postgres_database,
-                "SELECT step_json FROM ask_trace_steps",
-                detail_future,
-            )
-
-        assert delete_future.result(timeout=5) == []
+        detail_future = executor.submit(asks.ask_job_detail, "detail-race-ask")
+        assert reader_reached_trace.wait(timeout=5)
+        delete_future = executor.submit(
+            notebooks.delete_row_and_orphan_embeddings, "detail-race-nb"
+        )
+        try:
+            assert delete_future.result(timeout=5) == []
+        finally:
+            allow_trace_read.set()
         detail = detail_future.result(timeout=5)
 
     assert detail["job_id"] == "detail-race-ask"
@@ -272,6 +294,94 @@ def test_ask_detail_delete_race_falls_back_to_retained_postgres(
     assert detail["retained_until"]
     assert detail["answer_id"] == ""
     assert detail["trace"] == []
+
+
+@pytest.mark.postgres_integration
+def test_final_answer_and_notebook_delete_share_root_first_lock_order(
+    postgres_database, monkeypatch
+):
+    assert PostgresMigrator(postgres_database).migrate() == 44
+    now = "2026-08-31T12:00:00+00:00"
+    with postgres_database.write() as connection:
+        connection.execute(
+            "INSERT INTO users(id,email,display_name,role,created_at,updated_at) "
+            "VALUES ('answer-delete-owner','answer-delete@x','Answer Delete',"
+            "'user',%s,%s)",
+            (now, now),
+        )
+        connection.execute(
+            "INSERT INTO notebooks(id,name,created_by,status,created_at,updated_at) "
+            "VALUES ('answer-delete-nb','Answer Delete','answer-delete-owner',"
+            "'ready',%s,%s)",
+            (now, now),
+        )
+
+    counter = iter(range(1, 20))
+    seams = RepositoryCompatibilitySeams(
+        new_id=lambda prefix: f"{prefix}-answer-delete-{next(counter)}",
+        now=lambda: now,
+        copy_chunk_size=lambda: 100,
+        remap_json_ids=lambda value, _mapping: value,
+        in_chunk_size=lambda: 100,
+    )
+    asks = AskStateStore(postgres_database, seams)
+    notebooks = NotebookStore(
+        postgres_database,
+        new_id=lambda prefix: f"{prefix}-unused",
+        now=lambda: now,
+        activity_retention_days=180,
+    )
+    job_id, conversation_id = asks.begin_durable_job(
+        "answer-delete-nb",
+        AskRequest(question="answer/delete race"),
+        "chunk",
+        "answer-delete-owner",
+    )
+    response = AskResponse(
+        answer="completed answer",
+        conclusion="completed answer",
+        citations=[],
+        anchors=[],
+    )
+    save_holds_child_locks = threading.Event()
+    allow_save = threading.Event()
+    original_conversation_lock = asks._lock_answer_conversation_on
+
+    def pause_after_conversation_lock(*args, **kwargs):
+        original_conversation_lock(*args, **kwargs)
+        save_holds_child_locks.set()
+        assert allow_save.wait(timeout=5)
+
+    monkeypatch.setattr(
+        asks, "_lock_answer_conversation_on", pause_after_conversation_lock
+    )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        save_future = executor.submit(
+            asks.save_answer_for_job,
+            job_id,
+            "answer-delete-nb",
+            conversation_id,
+            "answer/delete race",
+            response,
+            "answer-delete-owner",
+        )
+        assert save_holds_child_locks.wait(timeout=5)
+        delete_future = executor.submit(
+            notebooks.delete_row_and_orphan_embeddings, "answer-delete-nb"
+        )
+        try:
+            _wait_for_lock_wait(postgres_database, "SELECT id FROM notebooks", delete_future)
+        finally:
+            allow_save.set()
+        answer_id = save_future.result(timeout=5)
+        assert delete_future.result(timeout=5) == []
+
+    assert answer_id
+    detail = asks.ask_job_detail(job_id)
+    assert detail["status"] == "done"
+    assert detail["answer_id"] == ""
+    assert detail["notebook_deleted_at"]
 
 
 @pytest.mark.postgres_integration
