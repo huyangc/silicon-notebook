@@ -11,7 +11,10 @@ field names) — the repository-layer merge/pagination semantics of
 docs/superpowers/specs/2026-08-04-user-activity-log-view-design_zh.md §4.2
 and frontend/app/dev/logs/activity/types.ts for the frozen field contract.
 """
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 import json
+import threading
 
 import pytest
 from fastapi.testclient import TestClient
@@ -782,7 +785,7 @@ def test_admin_activity_survives_notebook_delete_without_answer_or_trace(client)
     assert owner_usage["reports"] == 1
 
 
-def test_admin_ask_detail_answer_lookup_delete_race_returns_retained(
+def test_admin_ask_detail_delete_before_guard_returns_retained(
     client, monkeypatch
 ):
     owner = _auth(client, 28)
@@ -806,17 +809,19 @@ def test_admin_ask_detail_answer_lookup_delete_race_returns_retained(
         )
 
     repo = _repo()
-    original_answer_detail = repo.ask_answer_detail
+    original_guard = repo.guarded_ask_detail
     triggered = False
 
-    def delete_before_answer_read(answer_id):
+    @contextmanager
+    def delete_before_guard(job_id):
         nonlocal triggered
         if not triggered:
             triggered = True
             repo._runtime.notebook_store.delete_row_and_orphan_embeddings(notebook_id)
-        return original_answer_detail(answer_id)
+        with original_guard(job_id) as snapshot:
+            yield snapshot
 
-    monkeypatch.setattr(repo, "ask_answer_detail", delete_before_answer_read)
+    monkeypatch.setattr(repo, "guarded_ask_detail", delete_before_guard)
     response = client.get(
         f"/api/admin/users/{owner_id}/asks/job-detail-race",
         headers=_auth_admin(client),
@@ -831,80 +836,33 @@ def test_admin_ask_detail_answer_lookup_delete_race_returns_retained(
     assert body["retained_until"]
 
 
-def test_admin_ask_detail_successful_answer_read_then_delete_returns_retained(
+def test_admin_unanswered_ask_detail_delete_before_guard_returns_retained(
     client, monkeypatch
 ):
     owner = _auth(client, 29)
-    owner_id = _me(client, owner)
-    notebook_id = _create_notebook(client, owner, "答案读取后删除竞态")
-    with _repo()._write() as db:
-        _insert_conversation(
-            db, "conv-detail-after-read", notebook_id, owner_id,
-            "2026-08-01T15:00:00+00:00",
-        )
-        _insert_answer(
-            db, "ans-detail-after-read", notebook_id, "conv-detail-after-read",
-            "答案读完再删除？",
-            {"conclusion": "不能越过删除边界", "answer": "不能越过删除边界"},
-            "2026-08-01T15:01:00+00:00",
-        )
-        _insert_ask_job(
-            db, "job-detail-after-read", notebook_id, owner_id,
-            "2026-08-01T15:00:00+00:00",
-            conversation_id="conv-detail-after-read", question="答案读完再删除？",
-            status="done", answer_id="ans-detail-after-read",
-        )
-
-    repo = _repo()
-    original_answer_detail = repo.ask_answer_detail
-
-    def delete_after_answer_read(answer_id):
-        detail = original_answer_detail(answer_id)
-        assert detail is not None
-        repo._runtime.notebook_store.delete_row_and_orphan_embeddings(notebook_id)
-        return detail
-
-    monkeypatch.setattr(repo, "ask_answer_detail", delete_after_answer_read)
-    response = client.get(
-        f"/api/admin/users/{owner_id}/asks/job-detail-after-read",
-        headers=_auth_admin(client),
-    )
-    assert response.status_code == 200
-    body = response.json()
-    assert body["answer"] is None
-    assert body["trace"] == []
-    assert body["error"] == ""
-    assert body["notebook_deleted_at"]
-    assert "不能越过删除边界" not in json.dumps(body, ensure_ascii=False)
-
-
-def test_admin_unanswered_ask_detail_rechecks_delete_lifecycle(client, monkeypatch):
-    owner = _auth(client, 30)
     owner_id = _me(client, owner)
     notebook_id = _create_notebook(client, owner, "无答案删除竞态")
     with _repo()._write() as db:
         _insert_ask_job(
             db, "job-unanswered-race", notebook_id, owner_id,
-            "2026-08-01T16:00:00+00:00", question="还没有答案？", status="failed",
+            "2026-08-01T15:00:00+00:00",
+            question="还没有答案？", status="failed",
         )
 
     repo = _repo()
-    original_job_detail = repo.ask_job_detail
-    reads = 0
+    original_guard = repo.guarded_ask_detail
 
-    def delete_before_final_lifecycle_read(job_id):
-        nonlocal reads
-        reads += 1
-        if reads == 2:
-            repo._runtime.notebook_store.delete_row_and_orphan_embeddings(notebook_id)
-        return original_job_detail(job_id)
+    @contextmanager
+    def delete_before_guard(job_id):
+        repo._runtime.notebook_store.delete_row_and_orphan_embeddings(notebook_id)
+        with original_guard(job_id) as snapshot:
+            yield snapshot
 
-    monkeypatch.setattr(repo, "ask_job_detail", delete_before_final_lifecycle_read)
+    monkeypatch.setattr(repo, "guarded_ask_detail", delete_before_guard)
     response = client.get(
         f"/api/admin/users/{owner_id}/asks/job-unanswered-race",
         headers=_auth_admin(client),
     )
-    assert reads == 2
     assert response.status_code == 200
     body = response.json()
     assert body["answer"] is None
@@ -914,9 +872,52 @@ def test_admin_unanswered_ask_detail_rechecks_delete_lifecycle(client, monkeypat
     assert body["retained_until"]
 
 
-def test_admin_ask_detail_final_delete_fence_keeps_first_live_snapshot(
-    client, monkeypatch
-):
+def test_guarded_ask_detail_holds_delete_until_snapshot_released(client):
+    owner = _auth(client, 30)
+    owner_id = _me(client, owner)
+    notebook_id = _create_notebook(client, owner, "详情删除锁")
+    with _repo()._write() as db:
+        _insert_conversation(
+            db, "conv-guarded-delete", notebook_id, owner_id,
+            "2026-08-01T16:00:00+00:00",
+        )
+        _insert_answer(
+            db, "ans-guarded-delete", notebook_id, "conv-guarded-delete",
+            "锁住删除？", {"answer": "受保护答案", "conclusion": "受保护答案"},
+            "2026-08-01T16:01:00+00:00",
+        )
+        _insert_ask_job(
+            db, "job-guarded-delete", notebook_id, owner_id,
+            "2026-08-01T16:00:00+00:00",
+            conversation_id="conv-guarded-delete", question="锁住删除？",
+            status="done", answer_id="ans-guarded-delete",
+        )
+
+    repo = _repo()
+    delete_started = threading.Event()
+    delete_finished = threading.Event()
+
+    def delete_notebook():
+        delete_started.set()
+        try:
+            repo._runtime.notebook_store.delete_row_and_orphan_embeddings(notebook_id)
+        finally:
+            delete_finished.set()
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with repo.guarded_ask_detail("job-guarded-delete") as snapshot:
+            assert snapshot["answer_detail"]["payload"]["answer"] == "受保护答案"
+            future = executor.submit(delete_notebook)
+            assert delete_started.wait(timeout=2)
+            assert not delete_finished.wait(timeout=0.1)
+        future.result(timeout=5)
+    assert delete_finished.is_set()
+    retained = repo.ask_job_detail("job-guarded-delete")
+    assert retained["notebook_deleted_at"]
+    assert retained["trace"] == []
+
+
+def test_guarded_ask_detail_freezes_running_to_done_snapshot(client):
     owner = _auth(client, 31)
     owner_id = _me(client, owner)
     notebook_id = _create_notebook(client, owner, "详情正常完成竞态")
@@ -932,13 +933,12 @@ def test_admin_ask_detail_final_delete_fence_keeps_first_live_snapshot(
         )
 
     repo = _repo()
-    original_job_detail = repo.ask_job_detail
-    reads = 0
+    finish_started = threading.Event()
+    finish_done = threading.Event()
 
-    def finish_before_delete_fence(job_id):
-        nonlocal reads
-        reads += 1
-        if reads == 2:
+    def finish_job():
+        finish_started.set()
+        try:
             with repo._write() as db:
                 _insert_answer(
                     db, "ans-finish-race", notebook_id, "conv-finish-race",
@@ -947,22 +947,21 @@ def test_admin_ask_detail_final_delete_fence_keeps_first_live_snapshot(
                 )
                 db.execute(
                     "UPDATE ask_jobs SET status='done', answer_id=? WHERE id=?",
-                    ("ans-finish-race", job_id),
+                    ("ans-finish-race", "job-finish-race"),
                 )
-        return original_job_detail(job_id)
+        finally:
+            finish_done.set()
 
-    monkeypatch.setattr(repo, "ask_job_detail", finish_before_delete_fence)
-    response = client.get(
-        f"/api/admin/users/{owner_id}/asks/job-finish-race",
-        headers=_auth_admin(client),
-    )
-    assert reads == 2
-    assert response.status_code == 200
-    body = response.json()
-    assert body["status"] == "running"
-    assert body["answer"] is None
-    assert body["answered_at"] == ""
-    assert body["notebook_deleted_at"] == ""
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with repo.guarded_ask_detail("job-finish-race") as snapshot:
+            assert snapshot["job"]["status"] == "running"
+            assert snapshot["answer_detail"] is None
+            future = executor.submit(finish_job)
+            assert finish_started.wait(timeout=2)
+            assert not finish_done.wait(timeout=0.1)
+        future.result(timeout=5)
+    assert repo.ask_job_detail("job-finish-race")["status"] == "done"
+    assert repo.ask_answer_detail("ans-finish-race") is not None
 
 
 # --- 部署开关 -------------------------------------------------------------

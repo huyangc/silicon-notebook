@@ -3919,6 +3919,10 @@ class RepositoryFacade:
         ``AskStateStore.ask_answer_detail`` docstring。"""
         return self._runtime.ask_state.ask_answer_detail(answer_id)
 
+    def guarded_ask_detail(self, job_id: str):
+        """Keep the notebook deletion fence through API response assembly."""
+        return self._runtime.ask_state.guarded_ask_detail(job_id)
+
     def _cleanup_empty_conversation(self, conversation_id: str) -> None:
         """删掉没有任何 answer 的会话(取消首轮留下的空壳);有答案则保留。"""
         return self._runtime.ask_state.cleanup_empty_conversation(conversation_id)

@@ -1,8 +1,9 @@
 """PostgreSQL Ask-domain durable state store."""
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import datetime, timedelta
-from typing import List, Optional
+from typing import Iterator, List, Optional
 
 from app.domain.retrieval_experience import project_run_step, project_trace_step
 from app.models.ask import (
@@ -632,6 +633,105 @@ class AskStateStore:
             "payload": payload,
             "created_at": iso_timestamp(row["created_at"]),
         }
+
+    @contextmanager
+    def guarded_ask_detail(self, job_id: str) -> Iterator[dict]:
+        """Yield one self-consistent admin-detail snapshot under the root lease.
+
+        The notebook ``FOR KEY SHARE`` lease conflicts with whole-notebook
+        deletion's ``FOR UPDATE`` lease. The job ``FOR SHARE`` lease also
+        freezes a running→terminal transition while its answer is projected.
+        Both remain held until the API has assembled its response object.
+        """
+        with self.database.write() as db:
+            row = db.execute(
+                "SELECT notebook_id FROM ask_jobs WHERE id=%s", (job_id,)
+            ).fetchone()
+            if row is not None:
+                notebook_id = row["notebook_id"]
+                root = db.execute(
+                    "SELECT 1 FROM notebooks WHERE id=%s FOR KEY SHARE",
+                    (notebook_id,),
+                ).fetchone()
+                if root is not None:
+                    row = db.execute(
+                        "SELECT id,notebook_id,conversation_id,created_by,mode,"
+                        "question,status,answer_id,error,asked_at FROM ask_jobs "
+                        "WHERE id=%s AND notebook_id=%s FOR SHARE",
+                        (job_id, notebook_id),
+                    ).fetchone()
+                    if row is None:
+                        raise KeyError(job_id)
+                    job = {
+                        "job_id": row["id"],
+                        "notebook_id": row["notebook_id"],
+                        "conversation_id": row["conversation_id"],
+                        "created_by": row["created_by"],
+                        "mode": row["mode"],
+                        "question": row["question"],
+                        "status": row["status"],
+                        "trace": self.read_trace(db, job_id),
+                        "answer_id": row["answer_id"],
+                        "error": row["error"],
+                        "asked_at": row["asked_at"] or "",
+                    }
+                    answer_detail = None
+                    if row["answer_id"]:
+                        answer_row = db.execute(
+                            "SELECT id, question, payload, created_at FROM answers "
+                            "WHERE id=%s",
+                            (row["answer_id"],),
+                        ).fetchone()
+                        if answer_row is not None:
+                            payload = sanitize_answer_payload(
+                                json_value(answer_row["payload"], {})
+                            )
+                            payload["answered_at"] = str(
+                                payload.get("answered_at")
+                                or iso_timestamp(answer_row["created_at"])
+                            )
+                            answer_detail = {
+                                "answer_id": answer_row["id"],
+                                "question": answer_row["question"],
+                                "payload": payload,
+                                "created_at": iso_timestamp(
+                                    answer_row["created_at"]
+                                ),
+                            }
+                    yield {"job": job, "answer_detail": answer_detail}
+                    return
+
+            retained = db.execute(
+                "SELECT record_id,notebook_id,actor_id,notebook_name,"
+                "conversation_id,mode,question,status,asked_at,deleted_at,"
+                "expires_at FROM retained_user_activity "
+                "WHERE activity_type='ask' AND record_id=%s "
+                "AND expires_at>CURRENT_TIMESTAMP "
+                "AND NOT EXISTS(SELECT 1 FROM notebooks live "
+                "WHERE live.id=retained_user_activity.notebook_id)",
+                (job_id,),
+            ).fetchone()
+            if retained is None:
+                raise KeyError(job_id)
+            yield {
+                "job": {
+                    "job_id": retained["record_id"],
+                    "notebook_id": retained["notebook_id"],
+                    "conversation_id": retained["conversation_id"],
+                    "created_by": retained["actor_id"],
+                    "mode": retained["mode"],
+                    "question": retained["question"],
+                    "status": retained["status"],
+                    "trace": [],
+                    "answer_id": "",
+                    "error": "",
+                    "asked_at": retained["asked_at"] or "",
+                    "notebook_name": retained["notebook_name"],
+                    "notebook_deleted_at": iso_timestamp(retained["deleted_at"]),
+                    "retained_until": iso_timestamp(retained["expires_at"]),
+                },
+                "answer_detail": None,
+            }
 
     # ------------------------------------------------------------------
     # answers
