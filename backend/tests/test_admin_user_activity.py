@@ -5,7 +5,10 @@
 docs/superpowers/specs/2026-08-04-user-activity-log-view-design_zh.md §4.1。
 """
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 import json
+import sqlite3
+import threading
 
 import pytest
 from app.core.activity_time import parse_activity_instant
@@ -1005,6 +1008,111 @@ def test_deleted_notebook_keeps_only_expiring_activity_metadata(repo):
     repo._migrator.recover_interrupted_jobs()
     with repo._connect() as db:
         assert db.execute("SELECT COUNT(*) FROM retained_user_activity").fetchone()[0] == 0
+
+
+def test_concurrent_independent_deletes_preserve_the_winners_archive(
+    repo, monkeypatch
+):
+    """The existence check is inside SQLite's cross-instance writer lease."""
+    with repo._write() as db:
+        _insert_user(db, "u-double-delete", "a00000012")
+        _insert_notebook(db, "n-double-delete", "u-double-delete")
+        _insert_ask(
+            db,
+            "ask-double-delete",
+            "n-double-delete",
+            "u-double-delete",
+            "2026-08-31T10:00:00+00:00",
+            question="keep this metadata",
+        )
+
+    from app.repositories.sqlite.database import SqliteDatabase
+
+    first_store = repo._runtime.notebook_store
+    primary_database = repo._runtime.database
+    second_settings = primary_database.settings.model_copy(
+        update={"db_busy_timeout_ms": 0}
+    )
+    second_database = SqliteDatabase(second_settings, primary_database.root_dir)
+    second_store = type(first_store)(
+        second_database,
+        new_id=first_store.new_id,
+        now=first_store.now,
+        activity_retention_days=first_store.activity_retention_days,
+    )
+    first_retain = first_store._retain_user_activity_before_delete
+    second_retain = second_store._retain_user_activity_before_delete
+    first_at_retain = threading.Event()
+    second_attempted_lease = threading.Event()
+    second_read_notebook = threading.Event()
+    second_at_retain = threading.Event()
+    release_first = threading.Event()
+    second_begin_immediate = second_database.begin_immediate
+    second_write = second_database.write
+
+    def pause_first(db, notebook_id):
+        first_at_retain.set()
+        assert release_first.wait(timeout=5)
+        return first_retain(db, notebook_id)
+
+    def observe_second(db, notebook_id):
+        second_at_retain.set()
+        return second_retain(db, notebook_id)
+
+    def observe_second_lease_attempt(db):
+        second_attempted_lease.set()
+        return second_begin_immediate(db)
+
+    @contextmanager
+    def observe_second_write(*, operation="sqlite.write"):
+        with second_write(operation=operation) as db:
+            def trace(statement):
+                if "SELECT 1 FROM notebooks WHERE id=" in statement:
+                    second_read_notebook.set()
+
+            db.set_trace_callback(trace)
+            try:
+                yield db
+            finally:
+                db.set_trace_callback(None)
+
+    monkeypatch.setattr(
+        first_store, "_retain_user_activity_before_delete", pause_first
+    )
+    monkeypatch.setattr(
+        second_store, "_retain_user_activity_before_delete", observe_second
+    )
+    monkeypatch.setattr(
+        second_database, "begin_immediate", observe_second_lease_attempt
+    )
+    monkeypatch.setattr(second_database, "write", observe_second_write)
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            first_future = executor.submit(
+                first_store.delete_row_and_orphan_embeddings, "n-double-delete"
+            )
+            assert first_at_retain.wait(timeout=2)
+            try:
+                with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+                    second_store.delete_row_and_orphan_embeddings("n-double-delete")
+                assert second_attempted_lease.is_set()
+                assert not second_read_notebook.is_set()
+                assert not second_at_retain.is_set()
+            finally:
+                release_first.set()
+            assert first_future.result(timeout=5) == []
+        assert second_store.delete_row_and_orphan_embeddings("n-double-delete") == []
+    finally:
+        release_first.set()
+        second_database.close()
+
+    with repo._connect() as db:
+        retained = db.execute(
+            "SELECT question FROM retained_user_activity "
+            "WHERE activity_type='ask' AND record_id='ask-double-delete'"
+        ).fetchone()
+    assert retained is not None
+    assert retained["question"] == "keep this metadata"
 
 
 def test_deletion_refreshes_merged_retained_snapshot_and_expiry(repo):

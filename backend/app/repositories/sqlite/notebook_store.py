@@ -415,6 +415,12 @@ class NotebookStore:
         source file paths for the caller to remove AFTER the commit (DB first,
         files second — never the other way around)."""
         with self.database.write(operation="notebook.delete") as db:
+            # The process-local write lock does not coordinate a second
+            # SqliteDatabase instance. Acquire SQLite's cross-instance writer
+            # lease before the existence check so two duplicate deletes cannot
+            # both pass it and let the loser replace the winner's archive with
+            # an empty snapshot after the notebook row has gone.
+            self.database.begin_immediate(db)
             if db.execute(
                 "SELECT 1 FROM notebooks WHERE id=?", (notebook_id,)
             ).fetchone() is None:
