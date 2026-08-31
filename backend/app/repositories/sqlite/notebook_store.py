@@ -497,9 +497,11 @@ class NotebookStore:
         db.execute(
             f"INSERT INTO retained_user_activity ({common_columns}) "
             "SELECT 'ask',j.id,j.created_by,j.notebook_id,n.created_by,n.name,"
-            "j.created_at,j.updated_at,j.asked_at,j.conversation_id,j.question,"
+            "j.created_at,j.updated_at,j.asked_at,j.conversation_id,"
+            "COALESCE(NULLIF(a.question,''),j.question),"
             "j.mode,j.status,'','','','',0,0,'',?,? "
             "FROM ask_jobs j JOIN notebooks n ON n.id=j.notebook_id "
+            "LEFT JOIN answers a ON a.id=j.answer_id "
             "WHERE j.notebook_id=?" + refresh_on_conflict,
             (deleted_text, expires_text, notebook_id),
         )

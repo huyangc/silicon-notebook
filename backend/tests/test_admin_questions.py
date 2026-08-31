@@ -42,11 +42,17 @@ def test_admin_questions_combines_ask_and_report_with_filters(client):
     from app.api.deps import repository
 
     now = "2026-08-31T08:00:00+00:00"
+    full_ask_question = "如何降低噪声？这是历史已完成提问的尾部检索词"
     with repository()._write() as db:
         db.execute(
-            "INSERT INTO ask_jobs(id,notebook_id,conversation_id,created_by,mode,question,status,created_at,updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?)",
-            ("ask-global", notebook["id"], "", user_id, "chunk", "如何降低噪声？", "completed", now, now),
+            "INSERT INTO answers(id,notebook_id,question,payload,created_at) "
+            "VALUES (?,?,?,?,?)",
+            ("answer-global", notebook["id"], full_ask_question, "{}", now),
+        )
+        db.execute(
+            "INSERT INTO ask_jobs(id,notebook_id,conversation_id,created_by,mode,question,status,answer_id,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            ("ask-global", notebook["id"], "", user_id, "chunk", "如何降低噪声？", "completed", "answer-global", now, now),
         )
         db.execute(
             "INSERT INTO reports(id,notebook_id,question,created_by,status,created_at,updated_at) "
@@ -63,6 +69,12 @@ def test_admin_questions_combines_ask_and_report_with_filters(client):
     assert {item["type"] for item in body["items"]} == {"ask", "report"}
     assert all(item["username"] == "d00000004" for item in body["items"])
     assert all(item["notebook_name"] == "模拟电路" for item in body["items"])
+    ask_item = next(item for item in body["items"] if item["type"] == "ask")
+    assert ask_item["question"] == full_ask_question
+
+    ask_tail = client.get("/api/admin/questions?kind=ask&q=尾部检索词", headers=admin).json()
+    assert ask_tail["total"] == 1
+    assert ask_tail["items"][0]["question"] == full_ask_question
 
     filtered = client.get("/api/admin/questions?kind=report&q=稳定", headers=admin).json()
     assert filtered["total"] == 1
@@ -74,6 +86,8 @@ def test_admin_questions_combines_ask_and_report_with_filters(client):
     assert retained["stats"] == {"total": 2, "asks": 1, "reports": 1, "active_users": 1}
     assert {item["id"] for item in retained["items"]} == {"ask-global", "report-global"}
     assert all(item["notebook_name"] == "模拟电路" for item in retained["items"])
+    retained_ask = next(item for item in retained["items"] if item["type"] == "ask")
+    assert retained_ask["question"] == full_ask_question
 
     assert client.get(
         f"/api/admin/questions?q={'😀' * 200}&limit=200", headers=admin

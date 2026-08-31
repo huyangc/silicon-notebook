@@ -244,7 +244,7 @@ class AskStateStore:
                 "asked_at,status,trace_json,answer_id,error,created_at,updated_at) "
                 "VALUES (?,?,?,?,?,?,?, 'running','','','',?,?)",
                 (job_id, notebook_id, conversation_id, user_id, mode,
-                 question[:200], payload.asked_at, now, now))
+                 question, payload.asked_at, now, now))
         return job_id, conversation_id
 
     def finish_job(
