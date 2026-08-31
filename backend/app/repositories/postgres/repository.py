@@ -30,8 +30,17 @@ class PostgresRepository(RepositoryFacade):
         ask_engine_host: AskEngineHostPort | None = None,
         indexing_pipeline_host: IndexingPipelineHostPort | None = None,
         gap_consult_host: GapConsultHostPort | None = None,
+        migrate: bool = True,
+        seed: bool = True,
     ) -> None:
-        factory = PostgresPersistenceBundleFactory()
+        """``migrate``/``seed`` forward the bundle's schema-ownership seam.
+
+        Only a process that does NOT own the schema passes ``False`` — today
+        that is the offline scale-build CLI, which runs beside a live service
+        and must neither apply DDL nor re-seed the admin credential. Every
+        other caller keeps the defaults and the current behaviour exactly.
+        """
+        factory = PostgresPersistenceBundleFactory(migrate=migrate, seed=seed)
         try:
             super().__init__(
                 settings,

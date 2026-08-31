@@ -375,6 +375,17 @@ prefix of the new `idx_clusters_nb_canonical_member` and can be retired with
 `DROP INDEX CONCURRENTLY idx_clusters_nb_canonical` once production has verified the new
 index is stable.
 
+If you intend to build scale indexes offline or off-host
+(`scripts/build_scale_index.py`, an independent process that runs *beside* the live
+service), two PostgreSQL-side prerequisites apply. First, its per-notebook mutual
+exclusion is a **session-level** `pg_try_advisory_lock`, so the deployment must use
+**session pooling or direct connections** — PgBouncer transaction pooling can move later
+statements to another backend and silently destroys lock ownership. Second, these claims
+are **non-pooled** connections: budget `max_connections` for the application pool ceiling
+plus the service's concurrent-build lock sessions plus one per concurrently running CLI
+invocation. Full procedure, the two-machine pin list and recovery steps are in
+[Operations](./operations.md#offline--off-host-scale-builds-scriptsbuild_scale_indexpy).
+
 Changing the URL never moves existing rows. For a fresh target, stop the service, change
 the URL, start, and verify the empty/bootstrap state. For an existing SQLite source, the
 delivered forward-shadow CLI can build and continuously maintain a PostgreSQL shadow while

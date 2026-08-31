@@ -60,25 +60,49 @@ def application_plugin_router_specs(
     return collect_plugin_router_specs(runtime.registry, runtime.plugin_settings)
 
 
+def application_repository_hosts(
+    runtime: ExtensionRuntime,
+) -> dict[str, object]:
+    """The extension host seats every application repository is composed with.
+
+    Extracted so a process that must build its repository itself — the offline
+    scale-build CLI needs the PostgreSQL adapter's schema-ownership seam, which
+    the backend-neutral ``create_repository`` selector deliberately does not
+    expose — still gets the SAME seats as the server. A host list that drifts
+    between the server and an offline builder is exactly how an artifact gets
+    built by a different pipeline than the one serving it.
+    """
+
+    return {
+        "retrieval_contributor_host": runtime.retrieval_contributors,
+        "parser_provider_chain_host": runtime.parser_chain,
+        "ask_completed_observer_host": runtime.ask_completed_observers,
+        "report_completed_observer_host": runtime.report_completed_observers,
+        "ask_engine_host": runtime.ask_engines,
+        "indexing_pipeline_host": runtime.indexing_pipelines,
+        "gap_consult_host": runtime.gap_consult,
+    }
+
+
 def create_application_repository(settings: Settings) -> NotebookRepository:
     runtime = application_extension_runtime()
     repository = create_repository(
-        settings,
-        retrieval_contributor_host=runtime.retrieval_contributors,
-        parser_provider_chain_host=runtime.parser_chain,
-        ask_completed_observer_host=runtime.ask_completed_observers,
-        report_completed_observer_host=runtime.report_completed_observers,
-        ask_engine_host=runtime.ask_engines,
-        indexing_pipeline_host=runtime.indexing_pipelines,
-        gap_consult_host=runtime.gap_consult,
+        settings, **application_repository_hosts(runtime)  # type: ignore[arg-type]
     )
+    prime_extension_admission(repository)
+    return repository
+
+
+def prime_extension_admission(repository: NotebookRepository) -> None:
     # Prime the admission snapshot the extension registry reads. This is the
-    # one place it can happen: the registry was frozen above and the schema
-    # migrations ran inside ``create_repository``, so the toggle table exists
-    # by now and this read is safe — and every process that composes an
-    # application repository passes through here, so servers, maintenance CLIs
-    # and batch jobs all start with the admin's switches already in effect
-    # rather than with the empty default.
+    # one place it can happen: the registry is frozen and the repository handed
+    # in is fully composed, so the toggle table exists by now and this read is
+    # safe — and every process that composes an application repository passes
+    # through here, so servers, maintenance CLIs, batch jobs and the offline
+    # scale-build CLI all start with the admin's switches already in effect
+    # rather than with the empty default. (A process that did not run the
+    # migrations itself reads the schema the running service already applied;
+    # the CLI verifies that ledger before it ever composes.)
     #
     # The failure is NOT softened: a repository that cannot answer which
     # plugins an admin disabled has no business being handed to a caller that
@@ -97,4 +121,3 @@ def create_application_repository(settings: Settings) -> NotebookRepository:
         except Exception:  # never replace the prime's diagnostic
             pass
         raise
-    return repository

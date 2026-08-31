@@ -310,6 +310,14 @@ PYTHONPATH=backend python scripts/build_hotpath_indexes.py --apply
 新增的 `idx_clusters_nb_canonical_member` 完全覆盖，生产验证新索引稳定后可用
 `DROP INDEX CONCURRENTLY idx_clusters_nb_canonical` 下线。
 
+若打算用离线 / 异机通道构建 scale 索引（`scripts/build_scale_index.py`，一个与在役服务
+**并存**的独立进程），PostgreSQL 侧有两条前提。其一，它的 per-notebook 互斥是
+**session 级** `pg_try_advisory_lock`，所以部署必须走 **session pooling 或直连**——
+PgBouncer 的 transaction pooling 会把后续语句挪到别的后端连接，持锁语义静默失效。
+其二，这些锁会话是**非池化**连接：`max_connections` 要按「应用池上限 + 服务侧并发构建的
+锁会话上限 + 同时在跑的 CLI 条数」来预算。完整步骤、两机 pin 清单与恢复方式见
+[运维文档](./operations_zh.md#离线--异机-scale-构建scriptsbuild_scale_indexpy)。
+
 改 URL 不会搬运既有行。全新目标可停服务后改 URL、启动并验证空库/bootstrap 状态。
 对于存量 SQLite，已交付的 forward-shadow CLI 可在 SQLite 继续 active 时建立并持续维护
 PostgreSQL 影子库。它要求 PostgreSQL 16、专用且可恢复的目标库、已验证的源/目标备份、

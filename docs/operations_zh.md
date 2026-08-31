@@ -696,6 +696,131 @@ PYTHONPATH=backend python scripts/batch_ingest.py reparse \
 
 前置：用 `MODEL_SERVICES_CONFIG` 指向部署 TOML，按阶段绑定所需 workload（尤其是 `chunk_embedding`、`source_element_embedding`、`knowledge_object_embedding`、`kg_extract`、`paper_metadata` 和可选的 `chunk_question_generation`），`.env` 只保存 TOML 引用的密钥。`chunk_embedding` 未绑定时 CLI 默认拒绝运行；确需无向量导入须显式加 `--allow-no-embed`。续跑从**数据库状态**推导而非读取进度文件：`ingest` 看内容哈希，`kg` 看最近一次抽取是否完成，`embed` 看向量行是否存在。parse 中断但已写入哈希的来源用 `reparse` 修复；`<storage>/batch_ingest/<notebook>.jsonl` 只是只写运行日志。
 
+### 离线 / 异机 scale 构建(`scripts/build_scale_index.py`)
+
+上面的 `batch_ingest.py index` 是**停服**通道（数据库级全局 advisory lock，要求
+`--confirm-service-stopped`）。这条脚本是另一条通道：**与运行中的服务并存**，取
+per-notebook 的跨进程构建锁，产物写 `.tmp` 后原子 rename 换目录，服务进程按既有的
+逐请求探测自动换代——**不需要重启**（rename 换上来的是新 inode，manifest 磁盘签名必变）。
+动机是大库：49 万对象的库曾把 64GB 机器打爆，scale 索引常驻约 5GB，构建要几小时；
+把这几小时挪到另一台机器上跑，是让在役服务不受影响的唯一办法。
+
+**只支持 PostgreSQL。** SQLite 部署会被直接拒绝（退出码 2）：单进程部署没有跨进程锁，
+两个 writer 会在同一个 `.tmp` 上互相踩。
+
+退出码：`0` 成功；`1` 已开始但失败（锁被别人占、构建失败、swap 前复验持锁失败）；
+`2` 未动手就拒绝（SQLite、未知 notebook、迁移账本不一致、包校验不通过）；`130` Ctrl-C。
+数据库 URL 从环境读取，**绝不打印**；收据是无内容的（只有 notebook id、固定文件名、
+大小、计数、版本）。
+
+#### 同机在线用法
+
+必须用**生产 `.env`** 运行——storage 根、embedding 维度、已发布的 indexing pipeline
+都要与在役服务一致：
+
+```bash
+# 只读体检：manifest 摘要、三个工件根的清单与大小、与 DB 版本是否一致、
+# .tmp/.old 残留、以及此刻锁被谁占（探测=非阻塞 try + 立刻释放）
+PYTHONPATH=backend python scripts/build_scale_index.py inspect --notebook nb-xxx
+
+# 全量重建（默认）/ 只折叠增量
+PYTHONPATH=backend python scripts/build_scale_index.py build --notebook nb-xxx
+PYTHONPATH=backend python scripts/build_scale_index.py build --notebook nb-xxx --fold
+```
+
+`--statement-timeout-seconds`（默认 `86400`）是**全局**参数，必须写在子命令**之前**：
+
+```bash
+PYTHONPATH=backend python scripts/build_scale_index.py \
+  --statement-timeout-seconds 43200 build --notebook nb-xxx
+```
+
+在线默认 `POSTGRES_STATEMENT_TIMEOUT_SECONDS=30` 是按交互式请求定的，会把多小时的构建
+杀掉。这个值在**组装仓库之前**写进 settings：连接池的 configure/reset 回调会
+`RESET ALL`，在借出连接上 `SET statement_timeout` 会被抹掉，是个典型的假达成。
+
+#### 异机三步：build → scp → import
+
+```bash
+# 1) 构建机（连生产库，只读取数据；工件写它自己的 storage）
+PYTHONPATH=backend python scripts/build_scale_index.py build  --notebook nb-xxx
+PYTHONPATH=backend python scripts/build_scale_index.py export --notebook nb-xxx --to /data/nb-xxx-pack
+
+# 2) 拷回（--to 目录必须不存在或为空；三个工件根各一个子目录）
+rsync -a /data/nb-xxx-pack/ prod:/data/nb-xxx-pack/
+
+# 3) 生产机（校验 → 三根各自 .tmp + rename 原子落位）
+PYTHONPATH=backend python scripts/build_scale_index.py import --notebook nb-xxx --from /data/nb-xxx-pack
+```
+
+`export` **也取锁**：swap 是两次 rename，中间那一刻 `copytree` 会拷出跨代混合的集合；
+伴生根（`kg_index_partitions`）还是在主 swap **之后**才重建，「主新伴旧」的窗口是设计
+使然。导出前会校验伴生根的 `parent_version` 等于主 manifest 的 `version`，不符拒绝导出。
+
+`import` 的发布顺序是**伴生 → viz → 主索引**：任何中途失败都让**活着的主索引**停在
+上一代，而伴生根的 `parent_version` 闸让不配对的伴生读不出来（退化成「没有伴生」），
+不会变成「伴生描述了另一代」。拷贝（慢、易失败的那一半）全部发生在 `.tmp` 里，活目录
+在最后那几次 rename 之前一个字节都不动。rename 序列期间**屏蔽 SIGINT**——Ctrl-C 落在
+`live→.old` 与 `tmp→live` 之间会让这个 notebook 一个活索引都不剩，这是全流程唯一
+一个「Ctrl-C 会丢数据」的窗口。
+
+#### 两机 pin 清单
+
+| 项 | 要求 | 不符时 |
+| --- | --- | --- |
+| 代码版本（迁移账本） | 构建机 checkout 的迁移数 == 生产库 `silicon_schema_migrations` 的 `max(version)` | 组装仓库**之前**用裸连接预检，不等直接退出码 2 |
+| 已发布 indexing pipeline | `manifest.pipeline_identity` 与该 notebook 当前发布的身份一致 | `import` 硬拒（不符会让检索侧整体丢弃 scale 核并**静默**退化） |
+| `EMBED_DIM` / `EMBED_RUNTIME_DIM` | 生效维必须相同 | `import` 硬拒（不符会让 `open_ann` fail-open → **静默零召回**）；manifest 没有 `dim` 同样拒绝 |
+| hnswlib | **严格相等** | `import` 默认硬拒；`--allow-library-mismatch` 可覆盖。`ann.bin` 没有格式版本头，失配可能被 fail-open 吞成静默零召回；任一侧版本未知也按失配处理 |
+| numpy / scipy | 建议相同 | 只告警：npy/npz 带格式版本，失配会响亮失败 |
+| 生产 `.env` | 构建机必须用生产 `.env`（storage 根可以不同） | 无自动检查——这是运维纪律 |
+
+工件本身是可移植的：manifest 无机器绑定，npy/npz 平台无关，hnswlib `.bin` 是数据。
+真正的风险全在上表里，因为 `requirements` 只给下界 `>=`，两台机器漂移是常态。
+每次构建都会把 `library_versions`（hnswlib/numpy/scipy）写进 manifest，`inspect` 会
+把它和本机版本一起打出来。
+
+#### 连接预算
+
+这条通道用的**不是**连接池里的连接：
+
+- 服务侧每一个并发 scale 构建占一条专用非池化连接（锁会话，全程持有）；
+- 本 CLI 每次 `build`/`export`/`import` 占一条（锁会话，全程持有）；
+- `inspect` 的锁探测也开一条，拿到即刻释放；
+- 迁移账本预检另开一条裸连接，读完就关。
+
+`max_connections` 紧的部署要把「服务池上限 + 服务侧构建锁会话上限 + 同时在跑的 CLI 条数」
+一起算进去，否则新构建会以「busy」的形式失败（锁会话预算耗尽与「别人占着」共用同一个
+返回值，都表示「现在别建」）。
+
+#### PgBouncer 前提
+
+锁是 **session 级** 的 `pg_try_advisory_lock(namespace, key)`。PgBouncer 的
+**transaction pooling** 下，同一 client session 的后续语句可能落到别的后端连接，
+session 级 advisory lock 的持有者语义就不成立了。这条通道要求 **session pooling
+或直连**；transaction pooling 后面跑它等于没有互斥。
+
+#### `.old` / `.tmp` 残留与人工恢复
+
+swap 序列是 `live → .old`、`tmp → live`、`rm .old`。第二步失败会自动把 `.old` 换回去；
+连回滚都失败时 `.old` 会留在盘上，并在异常 note 里点名路径。人工恢复：
+
+```bash
+# 先确认没有构建在跑（inspect 的 build_claim 是 free），再换回
+mv /data/storage/kg_index/nb-xxx.old /data/storage/kg_index/nb-xxx
+```
+
+`.tmp` 是本次构建的暂存。构建作废（swap 前复验持锁失败）时**刻意保留**它供排查，
+下一次构建会自己清掉；确认不需要时直接 `rm -rf` 即可。`inspect` 会把两类残留连同
+大小一起报告出来。Ctrl-C 时本命令会删掉**自己这次**staged 的 `.tmp` 并打印路径。
+
+#### allow_pickle 来源约束（安全）
+
+`node_ids.npy` / `ann_labels.npy` 是 object 数组，服务加载时用 `allow_pickle=True`
+反序列化——那等价于**任意代码执行**。所以：**只 import 你自己在受控机器上构建的工件**。
+不要接收、也不要转发来路不明的包。`import` 的校验只读 `.npy` 的**头部**（形状/计数，
+不反序列化），所以校验本身不构成执行面，但**发布之后**服务真正加载时会 unpickle。
+
 ### 大库检索热路径
 
 索引 KG 检索在 ANN 生成候选后仍必须保持有界。孤立节点排序降权只对每个候选执行带索引的 `EXISTS`，并且只返回已有连接的候选 id，绝不能拉取 hub 的完整邻边；canonical fold 只能通过 `cluster_fold_rows` 读取 scored id 的映射。并发推理子查询按 scale-index 实例和工件类型共享一次惰性 ANN 加载。这些优化不改变检索 id、score、阈值、PPR 行为或召回。

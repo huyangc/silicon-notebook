@@ -811,6 +811,160 @@ Options: `--owner` (notebook owner username, case-insensitive; defaults to the a
 
 Prereqs: point `MODEL_SERVICES_CONFIG` at the deployment TOML, bind the workloads required by the selected phase (notably `chunk_embedding`, `source_element_embedding`, `knowledge_object_embedding`, `kg_extract`, `paper_metadata`, and optional `chunk_question_generation`), and place only the referenced secrets in `.env`. If `chunk_embedding` is unbound, the CLI **refuses to run by default** — pass `--allow-no-embed` to import without vectors, never silently; phases whose required chat workload is unbound fail clearly. A re-run resumes from **database state**, not a progress file: `ingest` checks content hashes, `kg` checks the latest extraction run, and `embed` checks vector rows. Because a hash is stored before parsing completes, repair interrupted sources without elements using `reparse`. `<storage>/batch_ingest/<notebook>.jsonl` is a write-only run log.
 
+### Offline / off-host scale builds (`scripts/build_scale_index.py`)
+
+`batch_ingest.py index` above is the **stopped-service** channel (a
+database-wide advisory lock behind `--confirm-service-stopped`). This script is
+the other one: it runs **beside a live service**, takes the per-notebook
+cross-process build claim, stages artifacts in `.tmp` and renames them into
+place, and the serving process picks the new generation up through its existing
+per-request probing — **no restart** (a rename publishes a new inode, so the
+manifest's disk signature necessarily changes). The motivation is large
+libraries: a 490k-object notebook once exhausted a 64GB machine, the scale
+index is ~5GB resident, and a build takes hours. Moving those hours to another
+machine is the only way to keep the serving deployment unaffected.
+
+**PostgreSQL only.** A SQLite deployment is refused outright (exit code 2):
+single-process by construction, it has no cross-process claim, so two writers
+would race on the same `.tmp`.
+
+Exit codes: `0` success; `1` attempted and failed (the claim is held elsewhere,
+the build failed, the pre-swap re-verification failed); `2` refused before
+touching anything (SQLite, unknown notebook, migration-ledger drift, package
+validation); `130` Ctrl-C. The database URL is read from the environment and
+**never printed**; receipts are content-free (notebook ids, fixed artifact file
+names, sizes, counts, versions).
+
+#### Same-host, online
+
+Run with the **production `.env`** — the storage root, embedding dimension and
+published indexing pipeline all have to match the running service:
+
+```bash
+# Read-only: manifest summary, the three artifact roots with sizes, whether the
+# artifact matches the database version, .tmp/.old leftovers, and who holds the
+# claim right now (probe = non-blocking try + immediate release)
+PYTHONPATH=backend python scripts/build_scale_index.py inspect --notebook nb-xxx
+
+# Full rebuild (default) / delta fold
+PYTHONPATH=backend python scripts/build_scale_index.py build --notebook nb-xxx
+PYTHONPATH=backend python scripts/build_scale_index.py build --notebook nb-xxx --fold
+```
+
+`--statement-timeout-seconds` (default `86400`) is a **global** option and must
+precede the subcommand:
+
+```bash
+PYTHONPATH=backend python scripts/build_scale_index.py \
+  --statement-timeout-seconds 43200 build --notebook nb-xxx
+```
+
+The online default `POSTGRES_STATEMENT_TIMEOUT_SECONDS=30` is sized for
+interactive requests and would kill a multi-hour build. The value is written
+into settings **before the repository is composed**: the pool's
+configure/reset callbacks issue `RESET ALL`, so a `SET statement_timeout` on a
+borrowed connection is wiped — a classic false completion.
+
+#### Off-host in three steps: build → scp → import
+
+```bash
+# 1) Build host (reads the production database; artifacts land in ITS storage)
+PYTHONPATH=backend python scripts/build_scale_index.py build  --notebook nb-xxx
+PYTHONPATH=backend python scripts/build_scale_index.py export --notebook nb-xxx --to /data/nb-xxx-pack
+
+# 2) Ship it (--to must be absent or empty; one subdirectory per artifact root)
+rsync -a /data/nb-xxx-pack/ prod:/data/nb-xxx-pack/
+
+# 3) Production host (validate → stage each root in .tmp → atomic renames)
+PYTHONPATH=backend python scripts/build_scale_index.py import --notebook nb-xxx --from /data/nb-xxx-pack
+```
+
+`export` **also takes the claim**: a swap is two renames, and a `copytree`
+landing between them collects a set that mixes two generations. The companion
+root (`kg_index_partitions`) is rebuilt *after* the main swap, so a "new main,
+old companion" window exists by design. Export therefore verifies that the
+companion's `parent_version` equals the main manifest's `version` and refuses
+otherwise.
+
+`import` publishes in the order **companion → viz → main index**: any failure
+mid-sequence leaves the *live* main index on its previous generation, and the
+companion's `parent_version` gate makes an unpaired companion unreadable
+(degrading to "no companion") rather than describing a different generation.
+Copying — the slow, failure-prone half — happens entirely inside `.tmp`; the
+live tree is untouched until the final renames. `SIGINT` is masked across that
+rename sequence: a Ctrl-C between `live → .old` and `tmp → live` would leave the
+notebook with no live index at all, the one data-losing window in the command.
+
+#### What must be pinned across the two machines
+
+| Item | Requirement | On mismatch |
+| --- | --- | --- |
+| Code revision (migration ledger) | the build host's migration count == the production database's `max(version)` in `silicon_schema_migrations` | preflighted on a bare connection **before** the repository is composed; exit code 2 |
+| Published indexing pipeline | `manifest.pipeline_identity` matches the notebook's currently published identity | `import` refuses (a mismatch makes retrieval discard the scale core **silently**) |
+| `EMBED_DIM` / `EMBED_RUNTIME_DIM` | the effective dimension must match | `import` refuses (a mismatch makes `open_ann` fail open → **silent zero recall**); a manifest with no `dim` is refused for the same reason |
+| hnswlib | **strict equality** | `import` refuses by default; `--allow-library-mismatch` overrides. `ann.bin` has no format version header, so a mismatch can be swallowed by the fail-open into silent zero recall; an unknown version on either side counts as a mismatch |
+| numpy / scipy | same version recommended | warning only: npy/npz carry a format version and fail loudly |
+| Production `.env` | the build host must use the production `.env` (the storage root may differ) | not checked automatically — operational discipline |
+
+The artifacts themselves are portable: the manifest carries no machine binding,
+npy/npz are platform-independent, and the hnswlib `.bin` is data. Every real
+risk is in the table above, because `requirements` only pins lower bounds
+(`>=`), so drift between two machines is the normal case. Every build records
+`library_versions` (hnswlib/numpy/scipy) in the manifest, and `inspect` prints
+it next to this machine's versions.
+
+#### Connection budget
+
+This channel does **not** use pooled connections:
+
+- each concurrent scale build on the service side pins one dedicated
+  non-pooled connection (the lock session) for its whole duration;
+- each `build`/`export`/`import` run of this CLI pins one more;
+- `inspect`'s claim probe opens one and releases it immediately;
+- the migration-ledger preflight opens one bare connection and closes it.
+
+A deployment with a tight `max_connections` must budget for "pool ceiling +
+service-side lock-session ceiling + concurrently running CLI invocations".
+Otherwise new builds fail as *busy* — an exhausted lock-session budget and "held
+by somebody else" deliberately share one return value, because both mean *do not
+build now*.
+
+#### PgBouncer prerequisite
+
+The claim is a **session-level** `pg_try_advisory_lock(namespace, key)`. Under
+PgBouncer's **transaction pooling**, later statements from one client session
+can land on a different backend connection, which destroys session-level
+advisory lock ownership. This channel requires **session pooling or a direct
+connection**; running it behind transaction pooling means no mutual exclusion at
+all.
+
+#### `.old` / `.tmp` leftovers and manual recovery
+
+The swap sequence is `live → .old`, `tmp → live`, `rm .old`. A failure at the
+second step restores `.old` automatically; if even the rollback fails, `.old`
+stays on disk and the exception note names the path. Manual recovery:
+
+```bash
+# Confirm no build is running first (inspect's build_claim is "free"), then:
+mv /data/storage/kg_index/nb-xxx.old /data/storage/kg_index/nb-xxx
+```
+
+`.tmp` is this run's staging. When a build is abandoned (the pre-swap
+re-verification found the claim gone) it is **deliberately kept** for
+inspection; the next build discards it, and `rm -rf` is safe once you are done.
+`inspect` reports both kinds of leftover with their sizes. On Ctrl-C the command
+removes the `.tmp` directories **this run** staged and prints their paths.
+
+#### allow_pickle provenance constraint (security)
+
+`node_ids.npy` / `ann_labels.npy` are object arrays, deserialized with
+`allow_pickle=True` when the service loads them — which is **arbitrary code
+execution**. Therefore: **only import artifacts you built yourself on machines
+you control.** Never accept or relay a package of unknown provenance. Import
+validation reads only the `.npy` *headers* (shape/counts, no deserialization),
+so validation itself is not an execution surface — but the service unpickles the
+arrays once they are published.
+
 ### Large-library retrieval hot path
 
 Indexed KG retrieval must remain bounded after ANN candidate generation. The isolated-node rank penalty probes each candidate with indexed `EXISTS` checks and returns only connected candidate ids; it never fetches a hub's complete adjacency list. Canonical folding reads mappings only for the scored ids through `cluster_fold_rows`. Concurrent reasoning subqueries share one lazy ANN load per scale-index instance and artifact kind. These optimizations preserve the retrieved ids, scores, thresholds, PPR behavior, and recall.
