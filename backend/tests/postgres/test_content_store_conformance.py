@@ -455,7 +455,9 @@ def test_knowhow_complete_enumeration_matches_persisted_contract(content_harness
 
 
 def test_ask_and_report_state_shapes_match_persisted_golden(content_harness):
-    question = "What is deterministic state? " + "full question tail " * 20
+    question = "What is deterministic state? " + " ".join(
+        ["full question tail"] * 20
+    )
     request = AskRequest(question=question)
     job_id, conversation_id = content_harness.ask.begin_durable_job(
         "nb-content", request, "chunk", "user-content"
