@@ -2391,10 +2391,16 @@ async def test_list_sources_pages_the_selected_notebooks_visible_inventory(mcp_e
                 "2026-01-02T00:00:00Z",
             ),
             (
+                "list-source-c", notebook_id, "   ", "markdown", "ready",
+                "parsed", "legacy-name.md", "/private/source/c.md", 203,
+                "hash-c", "历史空白标题", "textbook",
+                "2026-01-03T00:00:00Z", "2026-01-03T00:00:00Z",
+            ),
+            (
                 "list-source-hidden", notebook_id, "私有 Memory 投影", "memory",
                 "ready", "parsed", "", "/private/source/memory.md", 0,
-                "hash-hidden", "不得披露", "", "2026-01-03T00:00:00Z",
-                "2026-01-03T00:00:00Z",
+                "hash-hidden", "不得披露", "", "2026-01-04T00:00:00Z",
+                "2026-01-04T00:00:00Z",
             ),
             (
                 "list-source-mounted", other_id, "参考库文档", "pdf", "ready",
@@ -2440,12 +2446,15 @@ async def test_list_sources_pages_the_selected_notebooks_visible_inventory(mcp_e
         second = _payload(await client.call(
             "list_sources", {"offset": first["next_offset"], "limit": 1}
         ))
+        third = _payload(await client.call(
+            "list_sources", {"offset": second["next_offset"], "limit": 1}
+        ))
         assert (await client.call(
             "list_sources", {"offset": -1, "limit": 1}
         )).isError
 
     assert first["notebook_id"] == notebook_id
-    assert first["total_count"] == 2
+    assert first["total_count"] == 3
     assert first["offset"] == 0 and first["limit"] == 1
     assert first["next_offset"] == 1
     assert first["items"] == [{
@@ -2466,11 +2475,16 @@ async def test_list_sources_pages_the_selected_notebooks_visible_inventory(mcp_e
         "agent_created": False,
         "created_at": "2026-01-01T00:00:00Z",
     }]
-    assert second["total_count"] == 2
-    assert second["next_offset"] is None
+    assert second["total_count"] == 3
+    assert second["next_offset"] == 2
     assert second["items"][0]["source_id"] == "list-source-b"
     assert second["items"][0]["parse_failed"] is True
-    serialized = json.dumps((first, second), ensure_ascii=False)
+    assert third["total_count"] == 3
+    assert third["next_offset"] is None
+    assert third["items"][0]["source_id"] == "list-source-c"
+    assert third["items"][0]["title"] == ""
+    assert third["items"][0]["file_name"] == "legacy-name.md"
+    serialized = json.dumps((first, second, third), ensure_ascii=False)
     assert "list-source-hidden" not in serialized
     assert "list-source-mounted" not in serialized
     assert "error_message" not in serialized
@@ -2478,6 +2492,7 @@ async def test_list_sources_pages_the_selected_notebooks_visible_inventory(mcp_e
     assert "/Users/operator" not in serialized
     _assert_budgeted(first)
     _assert_budgeted(second)
+    _assert_budgeted(third)
 
 
 @pytest.fixture
