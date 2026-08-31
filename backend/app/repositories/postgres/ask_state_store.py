@@ -689,7 +689,7 @@ class AskStateStore:
         payload = response.model_dump()
         payload["answer_id"] = answer_id
         with self.database.write() as db:
-            self._lock_answer_notebook_on(db, notebook_id)
+            self._lock_notebook_against_delete_on(db, notebook_id)
             self._lock_answer_conversation_on(
                 db, notebook_id, conversation_id, user_id
             )
@@ -699,10 +699,10 @@ class AskStateStore:
         return answer_id
 
     @staticmethod
-    def _lock_answer_notebook_on(db: object, notebook_id: str) -> None:
-        """Join the aggregate-root-first lock order used by notebook delete."""
+    def _lock_notebook_against_delete_on(db: object, notebook_id: str) -> None:
+        """Keep the root alive without conflicting with concurrent FK inserts."""
         row = db.execute(
-            "SELECT id FROM notebooks WHERE id=%s FOR UPDATE", (notebook_id,)
+            "SELECT id FROM notebooks WHERE id=%s FOR KEY SHARE", (notebook_id,)
         ).fetchone()
         if row is None:
             raise KeyError(notebook_id)
@@ -756,7 +756,7 @@ class AskStateStore:
         payload = response.model_dump()
         payload["answer_id"] = answer_id
         with self.database.write() as db:
-            self._lock_answer_notebook_on(db, notebook_id)
+            self._lock_notebook_against_delete_on(db, notebook_id)
             row = db.execute(
                 "SELECT status FROM ask_jobs WHERE id=%s AND notebook_id=%s "
                 "AND conversation_id=%s AND created_by=%s FOR UPDATE",
@@ -945,7 +945,9 @@ class AskStateStore:
     ) -> ConversationBulkDeleteResult:
         """Delete inactive conversations under their parent-row leases.
 
-        Candidate parents are locked in stable id order, then ownership,
+        A root KEY SHARE lease first excludes whole-notebook deletion while
+        remaining compatible with ordinary child inserts. Candidate parents
+        are then locked in stable id order, then ownership,
         cutoff, child-answer completion and absence of a running durable job
         are revalidated in the same transaction.  Begin/prepare/raw save all
         need the same parent lock, so none can revive a snapshotted id between
@@ -963,6 +965,7 @@ class AskStateStore:
             ).replace(microsecond=0)
         )
         with self.database.write() as db:
+            self._lock_notebook_against_delete_on(db, notebook_id)
             candidates = [
                 row["id"]
                 for row in db.execute(
