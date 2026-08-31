@@ -416,7 +416,7 @@ def _seed_live(store, notebook_id: str) -> None:
     _write_manifest(
         Path(store.scale_dir(notebook_id)), _main_manifest(version=["nb-1", 1])
     )
-    _write_manifest(Path(store.viz_dir(notebook_id)), {"generation": "old"})
+    _write_viz_root(Path(store.viz_dir(notebook_id)), {"generation": "old"})
     _write_manifest(
         Path(store.source_partition_dir(notebook_id)),
         {"parent_version": ["nb-1", 1], "published_sources": 1},
@@ -1889,6 +1889,46 @@ def test_export_refuses_a_companion_from_another_generation(
         cli.run_export(
             repository, "nb-1", tmp_path / "out", report=lambda _message: None
         )
+
+
+def test_export_refuses_a_companion_with_no_readable_manifest(
+    repository, store, tmp_path
+):
+    """codex PR#643 R16 P2: a PRESENT live companion whose manifest.json is
+    missing used to read as "no companion" here — export copied the broken
+    directory verbatim and reported success, producing a package this same
+    CLI's import validation necessarily rejects.
+
+    Mutation anchor: make ``companion_generation_error`` treat an unreadable
+    manifest as ``None`` again and this goes red — the export succeeds and
+    ``validate_import_package`` refuses its output.
+    """
+    _seed_live(store, "nb-1")
+    (Path(store.source_partition_dir("nb-1")) / "manifest.json").unlink()
+    with pytest.raises(cli.ScaleBuildCliError, match="manifest.json"):
+        cli.run_export(
+            repository, "nb-1", tmp_path / "out", report=lambda _message: None
+        )
+    assert not (tmp_path / "out").exists(), "refused before anything is copied"
+
+
+def test_export_refuses_a_live_viz_root_the_serving_loader_rejects(
+    repository, store, tmp_path
+):
+    """Same defect one root over (R15 closed the import side): a live
+    ``kg_viz`` the serving-side ``load_viz_index`` reads as ``None`` would be
+    copied verbatim into a package import now refuses.
+
+    Mutation anchor: drop the viz probe in ``run_export`` and this goes red.
+    """
+    _seed_live(store, "nb-1")
+    viz_dir = Path(store.viz_dir("nb-1"))
+    (viz_dir / "viz.npz").unlink()
+    with pytest.raises(cli.ScaleBuildCliError, match="viz"):
+        cli.run_export(
+            repository, "nb-1", tmp_path / "out", report=lambda _message: None
+        )
+    assert not (tmp_path / "out").exists(), "refused before anything is copied"
 
 
 def test_export_refuses_a_non_empty_destination(repository, store, tmp_path):

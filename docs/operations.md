@@ -963,7 +963,10 @@ landing between them collects a set that mixes two generations. The companion
 root (`kg_index_partitions`) is rebuilt *after* the main swap, so a "new main,
 old companion" window exists by design. Export therefore verifies that the
 companion's `parent_version` equals the main manifest's `version` and refuses
-otherwise.
+otherwise. A present companion with no readable `manifest.json`, or a live
+`kg_viz` the serving-side loader reads as "no viz", refuses the same way:
+copying either verbatim would produce a package this CLI's own `import`
+validation necessarily rejects.
 
 The serving process's standalone **viz** rebuild takes that same per-notebook
 claim — for the whole of its build *and* its publish — and writes `kg_viz`

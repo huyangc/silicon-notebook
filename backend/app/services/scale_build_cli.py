@@ -803,14 +803,24 @@ def validate_import_package(
 
 
 def companion_generation_error(roots: dict[str, Path]) -> Optional[str]:
-    """The same parent-version gate over LIVE roots, for export."""
-    companion_manifest = (
-        _read_manifest(roots[COMPANION_ROOT])
-        if roots[COMPANION_ROOT].is_dir()
-        else None
-    )
-    if companion_manifest is None:
+    """The same parent-version gate over LIVE roots, for export.
+
+    A companion root that is PRESENT but has no readable manifest is an error
+    here, not "no companion" (codex PR#643 R16 P2): export would copy that
+    directory verbatim and report success, yet this same CLI's import
+    validation rejects a present companion without a manifest — a package
+    that can never be imported. An absent root stays the ordinary
+    "no companion" shape and passes."""
+    if not roots[COMPANION_ROOT].is_dir():
         return None
+    companion_manifest = _read_manifest(roots[COMPANION_ROOT])
+    if companion_manifest is None:
+        return (
+            f"{roots[COMPANION_ROOT]} exists but has no readable "
+            "manifest.json; a package copied from this state is rejected by "
+            "import's own validation. Rebuild the index (or remove the "
+            "broken companion root) before exporting"
+        )
     main_manifest = _read_manifest(roots[MAIN_ROOT])
     main_version = None if main_manifest is None else main_manifest.get("version")
     parent = companion_manifest.get("parent_version")
@@ -1200,6 +1210,22 @@ def run_export(
         problem = companion_generation_error(roots)
         if problem is not None:
             raise ScaleBuildCliError(problem)
+        # Same export-side symmetry for the viz root (codex PR#643 R16 P2 by
+        # extension of R15): import now probes a present package ``kg_viz``
+        # with the serving-side loader, so exporting a live viz root that
+        # loader cannot read would produce a package import necessarily
+        # rejects. The live root being unreadable is fail-soft for SERVING
+        # (readers degrade to "no viz"), but an export of it is a dead
+        # package — refuse with the fix spelled out instead.
+        viz_live = roots["kg_viz"]
+        if viz_live.is_dir() and viz_index_module.load_viz_index(str(viz_live)) is None:
+            raise ScaleBuildCliError(
+                f"{viz_live} exists but is not readable by the serving-side "
+                "viz loader; a package copied from it is rejected by "
+                "import's own validation. Rebuild the viz index (opening the "
+                "graph view triggers it) or remove the broken directory "
+                "before exporting"
+            )
         destination.mkdir(parents=True, exist_ok=True)
         exported = []
         for name in PUBLISH_ORDER:
