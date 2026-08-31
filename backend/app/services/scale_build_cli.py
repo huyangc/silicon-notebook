@@ -1343,6 +1343,33 @@ def run_import(
                         "staging siblings) before importing."
                     )
 
+        # codex PR#643 R13 P2-b: a package entry for an OPTIONAL root
+        # (``kg_index_partitions``/``kg_viz``) that EXISTS but is not a
+        # directory — a regular file left by a corrupted transfer, for
+        # example — looks exactly like an omitted root to the staging loop
+        # below: ``source.is_dir()`` is False either way. Left unchecked,
+        # that loop would read a damaged entry as "the package doesn't have
+        # this" and retire the perfectly healthy live root for it (see
+        # ``retire_live_directory``'s docstring), silently degrading a
+        # working capability instead of refusing the obviously-broken
+        # package. The main root (``kg_index``) needs no equivalent check
+        # here: ``validate_import_package`` above already requires
+        # ``package/kg_index`` to be a directory and refuses otherwise.
+        # Checked before any staging begins, same as the nesting guards
+        # above, so a refusal here leaves nothing on disk to clean up.
+        for name in PUBLISH_ORDER:
+            if name == MAIN_ROOT:
+                continue
+            entry = package / name
+            if entry.exists() and not entry.is_dir():
+                raise ScaleBuildCliFailure(
+                    f"{entry} exists but is not a directory; this looks "
+                    "like a corrupted transfer, not a package that omits "
+                    f"the {name} root. Refusing the entire import rather "
+                    f"than retiring the live {name} artifact for it. "
+                    "Remove or fix this entry and re-run."
+                )
+
         staged: dict[str, Path] = {}
         # codex PR#643 R11 P2-a: names PUBLISH_ORDER visits that the package
         # OMITS but that still have a live directory on disk from an earlier

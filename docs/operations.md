@@ -933,6 +933,18 @@ here from the omission side instead of a mid-sequence failure. A root absent
 from **both** the package and the live tree is unaffected: that is still the
 ordinary "no companion" shape and stays skipped.
 
+A package entry present under `kg_viz` or the companion name but that is a
+**regular file, not a directory** — a corrupted transfer, for example — is
+never read as an omission either: `import` refuses the whole package before
+any staging begins, rather than silently retiring a healthy live root for it.
+
+The retirement rename shares `swap_staging_directory`'s stale-`.old`
+self-heal (see "`.old` / `.tmp-<claim_token>` leftovers" below): if an
+earlier interrupted cleanup left both a populated live directory and a
+leftover `.old` beside it, retiring that root clears the stale `.old` first,
+then renames `live` onto a fresh one — the same recovery a real swap already
+gets, so this shape needs no manual cleanup here either.
+
 Every step of `import` that touches the disk destructively re-verifies the
 claim in the instant before it does — each swap, the retirement above, each
 root's rollback, and each root's `.old` cleanup — and a refusal renames and
@@ -1131,7 +1143,11 @@ single-generation tree, then re-run. This is a *different* shape from the
 still beside it is ordinary leftover cruft from an earlier swap's own
 unfinished cleanup, and the *next* swap attempt clears it itself before doing
 anything else — unmasked, same as the interrupted-cleanup case above — with
-no manual action needed.
+no manual action needed. `import`'s optional-root *retirement* (see above)
+shares this same self-heal: a stale `.old` left beside a populated `live` is
+cleared the same unmasked way immediately before the retiring rename, so an
+earlier interrupted cleanup never blocks retiring that root on a later
+attempt either.
 
 `import` additionally holds every root's `.old` open past its own swap —
 `keep_old` — for a third identity re-check once the main index is live; see

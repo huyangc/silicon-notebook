@@ -794,7 +794,11 @@ class ScaleArtifactStore:
         ``live`` absent → nothing to retire; returns ``False`` and touches
         nothing. The caller's contract for that case is unchanged: an
         optional root absent from both the package and the live tree stays
-        skipped, same as always.
+        skipped, same as always. Reached even when a stale ``.old`` happens
+        to be sitting beside the (absent) ``live`` — that shape is left
+        completely alone here, the same as it always was: it may be another
+        process's own recovery copy, and this method has nothing to retire in
+        the first place.
 
         ``verify_held`` (P1, codex PR#643 R12) re-checks the caller's claim
         before the rename, same contract as ``swap_staging_directory``: not
@@ -806,7 +810,33 @@ class ScaleArtifactStore:
         lock session died mid-staging renames the NEW owner's live root to
         ``.old`` and no later handler puts it back. Checked before the
         existence test on purpose: a lost claim means abandon the operation,
-        not "abandon it only if there happened to be something here"."""
+        not "abandon it only if there happened to be something here".
+
+        A stale ``.old`` found beside a PRESENT ``live`` is pre-cleaned
+        before the rename, mirroring ``swap_staging_directory``'s own
+        pre-clean exactly (P2-a, codex PR#643 R13): an earlier interrupted
+        cleanup can leave both a populated ``live`` and a leftover ``.old``
+        on disk, and this rename's target is that ``.old`` path — plain
+        ``os.rename`` fails outright when the destination is a non-empty
+        directory, so every retirement attempt would keep failing until an
+        operator removed it by hand, contradicting the "next swap self-heals
+        this" contract the docs already promise for the identical shape under
+        ``swap_staging_directory``. ``live`` is confirmed present first (see
+        the "live absent" branch above), so this cannot be the OTHER stale
+        shape (``.old`` as the only surviving generation) that
+        ``swap_staging_directory`` refuses outright — that refusal has no
+        equivalent need here, since a retirement never has a ``.old``-only
+        state of its own to protect. No ``SwapInterruptGuard`` around the
+        pre-clean and no ``ignore_errors``, same reasoning as the swap's: a
+        Ctrl-C landing during a multi-GB delete of confirmed cruft is safe to
+        honour immediately, and a failed delete must stop the retirement
+        loudly rather than leave a half-deleted ``.old`` for the rename below
+        to trip over. That pre-clean can itself run for tens of seconds, long
+        enough for the claim's lock session to die and a second builder to
+        legitimately take over in the meantime — ``verify_held`` is
+        re-checked immediately afterward, right before the rename, same
+        second-check contract as ``swap_staging_directory`` (R10): only on
+        the branch that actually did the slow delete."""
         if verify_held is not None and not verify_held():
             raise ScaleBuildLockLost(
                 "scale build lock was lost before the retirement of "
@@ -816,6 +846,17 @@ class ScaleArtifactStore:
         if not os.path.exists(out_dir):
             return False
         old_dir = out_dir + ".old"
+        if os.path.exists(old_dir):
+            # ``live`` is confirmed present above, so this ``.old`` is pure
+            # cruft an earlier interrupted cleanup never finished deleting —
+            # safe to remove, mirroring ``swap_staging_directory``'s own
+            # pre-clean. See the docstring above.
+            shutil.rmtree(old_dir)
+            if verify_held is not None and not verify_held():
+                raise ScaleBuildLockLost(
+                    "scale build lock was lost before the retirement of "
+                    f"{live}; nothing was renamed"
+                )
         guard = SwapInterruptGuard(reraise=False)
         with guard:
             os.rename(out_dir, old_dir)
