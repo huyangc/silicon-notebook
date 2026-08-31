@@ -761,6 +761,8 @@ PYTHONPATH=backend python scripts/build_scale_index.py import --notebook nb-xxx 
 `export` **也取锁**：swap 是两次 rename，中间那一刻 `copytree` 会拷出跨代混合的集合；
 伴生根（`kg_index_partitions`）还是在主 swap **之后**才重建，「主新伴旧」的窗口是设计
 使然。导出前会校验伴生根的 `parent_version` 等于主 manifest 的 `version`，不符拒绝导出。
+在场却没有可读 `manifest.json` 的伴生根，或 serving 侧加载器读成「没有 viz」的活
+`kg_viz`，同样拒绝导出：照拷任意一个都会产出一个本 CLI 自己的 `import` 校验必拒的包。
 
 服务进程那条独立 **viz** 重建也取同一把 per-notebook claim——整个「构建 + 发布」期间
 都持有——并且和其它根一样，`kg_viz` 通过暂存 + 原子 swap 写入。在此之前它是直接写活
