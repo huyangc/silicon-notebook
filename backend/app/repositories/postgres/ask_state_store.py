@@ -689,6 +689,7 @@ class AskStateStore:
         payload = response.model_dump()
         payload["answer_id"] = answer_id
         with self.database.write() as db:
+            self._lock_answer_notebook_on(db, notebook_id)
             self._lock_answer_conversation_on(
                 db, notebook_id, conversation_id, user_id
             )
@@ -696,6 +697,15 @@ class AskStateStore:
                 db, answer_id, notebook_id, conversation_id, question, payload, now
             )
         return answer_id
+
+    @staticmethod
+    def _lock_answer_notebook_on(db: object, notebook_id: str) -> None:
+        """Join the aggregate-root-first lock order used by notebook delete."""
+        row = db.execute(
+            "SELECT id FROM notebooks WHERE id=%s FOR UPDATE", (notebook_id,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(notebook_id)
 
     @staticmethod
     def _lock_answer_conversation_on(
@@ -746,6 +756,7 @@ class AskStateStore:
         payload = response.model_dump()
         payload["answer_id"] = answer_id
         with self.database.write() as db:
+            self._lock_answer_notebook_on(db, notebook_id)
             row = db.execute(
                 "SELECT status FROM ask_jobs WHERE id=%s AND notebook_id=%s "
                 "AND conversation_id=%s AND created_by=%s FOR UPDATE",
