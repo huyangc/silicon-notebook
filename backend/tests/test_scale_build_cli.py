@@ -1033,20 +1033,43 @@ def test_publish_started_recognizes_a_half_finished_swap(tmp_path):
     assert cli.publish_started(live) is False, "staging alone is not publishing"
     (tmp_path / "kg_index.old").mkdir()
     assert cli.publish_started(live) is True
-    shutil.rmtree(tmp_path / "kg_index.old")
     shutil.rmtree(live)
-    assert cli.publish_started(live) is True, "tmp without live is mid-rename"
+    assert cli.publish_started(live) is True, ".old without live is mid-rename"
 
 
-def test_publish_started_recognizes_the_claim_unique_staging_shape(tmp_path):
-    """P1, codex PR#643 R1: staging can also be ``{live}.tmp-<token>``, not
-    only the legacy fixed ``{live}.tmp`` — both must be recognized."""
+def test_publish_started_does_not_mistake_first_time_staging(tmp_path):
+    """P2, codex PR#643 R7: a root that never had a live directory carries
+    the exact shape ``.tmp-<token> present, live absent`` for its ENTIRE
+    staging copy. That is normal first-publish staging — not a half-finished
+    swap — and inferring publication from it made every first-import
+    interrupt skip cleanup and print a recovery pointing at a nonexistent
+    ``.old``. Only ``.old`` itself is publish evidence.
+
+    Mutation anchor: restoring the old "tmp present while live absent"
+    inference turns this red."""
     live = tmp_path / "kg_index"
-    live.mkdir()
     (tmp_path / "kg_index.tmp-abc123").mkdir()
-    assert cli.publish_started(live) is False, "staging alone is not publishing"
-    shutil.rmtree(live)
-    assert cli.publish_started(live) is True, "tmp-<token> without live is mid-rename"
+    assert cli.publish_started(live) is False, (
+        "first-time staging (no live, no .old) must not read as publishing"
+    )
+    (tmp_path / "kg_index.tmp").mkdir()
+    assert cli.publish_started(live) is False, "legacy shape: same rule"
+    (tmp_path / "kg_index.old").mkdir()
+    assert cli.publish_started(live) is True, ".old is the only evidence"
+
+
+def test_first_time_import_interrupt_cleans_its_own_staging(tmp_path):
+    """P2, codex PR#643 R7 end-to-end shape: an interrupt during a
+    FIRST-TIME import's staging copy must discard this run's own staged
+    directories (nothing was renamed; re-import recreates them) instead of
+    keeping them behind a misleading ``.old`` recovery message."""
+    live = tmp_path / "kg_index"
+    staged = tmp_path / "kg_index.tmp-abc123"
+    staged.mkdir()
+    messages: list[str] = []
+    cli.discard_staging_unless_publishing({live: staged}, messages.append)
+    assert not staged.exists(), "first-time staging must be cleaned up"
+    assert not any(".old" in message for message in messages)
 
 
 def test_discard_staging_removes_only_what_it_is_given(tmp_path):

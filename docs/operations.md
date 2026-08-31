@@ -983,7 +983,9 @@ the ordinary facade path — see the leftovers section below):
   effect, nothing was abandoned: the command says so and exits `0` with its
   ordinary receipt. An interrupt during the *staging* copies removes this run's
   own `.tmp-<claim_token>` directories (the claim it holds the whole time names
-  them precisely) and exits `130`.
+  them precisely) and exits `130` — including a first-time import, whose
+  "staging present, live absent" shape is normal copying, not a half publish;
+  only `.old` counts as publish evidence.
 - **`build` / `build --fold`** — this command never holds the claim itself, so
   by the time it can react to Ctrl-C it no longer knows the `claim_token` its
   own staging directory (if it staged one at all) was suffixed with, and
