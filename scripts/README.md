@@ -282,6 +282,20 @@ python3 scripts/diag_pg_hotpaths.py --deep              # + 四条重探针
 `GROUP BY`。`--deep` 额外加两条 ILIKE 全文探针 + 两条缺向量反连接 COUNT（这两条正是 Z7
 从 backfill-vectors 受理路径拿掉的查询——冷库单条可超 30s），请勿在生产高峰期运行。
 
+### `diag_retrieval_latency.py` —— 检索分段分布（只读、无正文）
+
+```bash
+python3 scripts/diag_retrieval_latency.py --since 24
+```
+
+该脚本复用 `diag_common` 合并 legacy / 按日 / gzip / per-user 的 `events` 日志，并按本机
+scale manifest 的 `n_chunks` 把 `chunk_fts_ms`、ANN/KNN/索引加载、KG 词法等分段聚合成
+P50/P95/max；`retrieval_run_stats` 另按 Ask / 报告 planning / 报告 generation 汇总 FTS
+timeout 与熔断跳过次数。它只读日志和 manifest，不打开数据库，不输出 notebook id、问题、
+来源、正文、SQL 或错误文本。自定义存储目录时显式传
+`--index-root /path/to/storage/kg_index`。manifest 规模不含水位后的 delta；缺 manifest 的
+事件保留在 `unknown` 桶，不能误当成小库。
+
 ---
 
 ## 四、其它(评测 / 迁移 / 一次性,按需)
@@ -294,7 +308,7 @@ python3 scripts/diag_pg_hotpaths.py --deep              # + 四条重探针
 | `reextract_notebook.py` | 重抽一个 notebook 的所有 source |
 | `compare_kg_dbs.py` | 对比去噪前后的 KG,评估成效 |
 | `bench_sqlite_writes.py` | 离线 SQLite 写吞吐**基准**(无 LLM/嵌入);非慢因诊断 |
-| `replay_retrieval.py` | 检索**回归对照**:固定问题集跑检索管线出 JSON,`--compare` 逐问题 diff,验收"优化前后检索不变";非慢因诊断 |
+| `replay_retrieval.py` | 检索**回归/A-B 对照**：固定问题集跑检索管线出 JSON，`--compare` 逐问题 diff；`--report-run` 才会进入报告 retrieval-run 并真实触发 `CHUNK_FTS_WITH_ANN_ENABLED`，`--summary-only` 输出可回帖的无问题/命中 id 汇总；非慢因诊断。 |
 | `kg_goldgen.py` / `kg_goldgen_all.py` | 为测试章节生成 gold KG 草稿 |
 | `kg_product_smoke.py` | 用真实产品抽取链路对样例 source 冒烟 |
 | `kg_strip_attrs.py` | 一次性迁移:从 gold 草稿去掉 `attrs` |

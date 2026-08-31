@@ -558,6 +558,19 @@ the compatible `stage`/`latency_ms` pair (`chunk_scale_index`, `chunk_ann`, `chu
 that report ANN hits show near-zero `chunk_fts_ms`, FTS timeouts cost roughly the private
 deadline rather than 30 seconds, and readiness has preloaded every required scale index.
 
+For the reviewable component distribution, run:
+
+```bash
+python3 scripts/diag_retrieval_latency.py --since 24
+```
+
+This read-only, stdlib-only command joins no product rows. It buckets the content-free timing
+events by the last published scale manifest's `n_chunks`, reports P50/P95/max for the chunk
+FTS/ANN/KNN/index-load and KG candidate components, and separately totals retrieval-run FTS
+timeouts/circuit skips by Ask versus report run kind. Pass `--index-root` when scale artifacts
+do not live under `.local/storage/kg_index`. The manifest size excludes post-watermark delta;
+events without a readable manifest remain in an explicit `unknown` bucket.
+
 ### KNN early stop for the largest notebooks (`POSTGRES_LEXICAL_KNN_ENABLED`)
 
 The composite indexes above insulate every *other* notebook from a giant one, but cannot make
@@ -876,6 +889,15 @@ The acceptance tool for proving "retrieval quality is unchanged" across a perfor
 # record a run (needs the `chunk_embedding` workload bound for real query vectors; reads retrieval primitives only, no chat model required)
 python scripts/replay_retrieval.py --notebook nb-xxxx --questions questions.txt --out before.json
 
+# Report-path A/B: --report-run is required. Without it the report-only
+# CHUNK_FTS_WITH_ANN_ENABLED branch is not exercised.
+CHUNK_FTS_WITH_ANN_ENABLED=false python scripts/replay_retrieval.py \
+    --notebook nb-xxxx --questions questions.txt --report-run --out ann-only.json
+CHUNK_FTS_WITH_ANN_ENABLED=true python scripts/replay_retrieval.py \
+    --notebook nb-xxxx --questions questions.txt --report-run --out ann-fts.json
+python scripts/replay_retrieval.py --compare ann-only.json ann-fts.json \
+    --mode topk --k 30 --summary-only
+
 # --full: also runs the complete reasoning-orchestration layer once (plan/reflect are replaced with a
 # fixed-sub-query + immediate-answer stub instead of the LLM, verifying the deterministic parts of the
 # orchestration layer are equivalent); sub-queries come from plan.json
@@ -888,7 +910,7 @@ python scripts/replay_retrieval.py --compare before.json after.json             
 python scripts/replay_retrieval.py --compare before.json after.json --mode topk --k 30  # only compares top-k id set overlap + order (tolerates score drift from e.g. float32 conversion)
 ```
 
-`questions.txt` has one question per line; `plan.json` = `{"<question>": ["sub-query 1", "sub-query 2", ...]}`. **Must be run from the main checkout root** (`.env` is loaded relative to the current working directory, same as `batch_ingest.py`). `--owner` reuses the same owner-resolution as `batch_ingest.py` (case-insensitive username, defaults to `"admin"`).
+`questions.txt` has one question per line; `plan.json` = `{"<question>": ["sub-query 1", "sub-query 2", ...]}`. **Must be run from the main checkout root** (`.env` is loaded relative to the current working directory, same as `batch_ingest.py`). `--owner` reuses the same owner-resolution as `batch_ingest.py` (case-insensitive username, defaults to `"admin"`). `--report-run` gives each question an independent report retrieval run so one FTS timeout cannot hide the lexical contribution of every later question; this measures marginal recall and per-query latency, not one end-to-end report's shared-circuit wall time. `--summary-only` prints only aggregate overlap/pass counts and before/after timing percentiles, never question strings or retrieval ids; the two raw recording JSON files remain sensitive and must not be pasted.
 
 Exit codes are the verdict — safe to wire directly into CI or a script gate: `0` success (recording) or all questions match (`--compare`); `1` `--compare` found a mismatch (runs differ); `2` a precondition failed before any comparison happened (`retrieval_query_embedding` unbound, notebook not found, or owner not found) — the CLI **errors out immediately** rather than silently producing a misleading "zero recall" comparison from zero vectors.
 
