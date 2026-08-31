@@ -400,6 +400,73 @@ def test_a_companion_matching_the_main_version_passes(tmp_path):
     _validate(package)
 
 
+def test_a_same_version_companion_from_another_build_is_refused(tmp_path):
+    """P1, codex PR#643 R26: the two roots agree on ``version`` — a
+    same-version republish is a supported scenario — but were produced by two
+    different builds, which is exactly the half-published pair an interrupted
+    publish leaves behind. The build id is the only thing that separates them.
+
+    Mutation anchor: drop the ``build_generation_mismatch`` check from
+    ``validate_import_package``'s companion block and this package validates
+    cleanly, publishing a mixed generation.
+    """
+    package = _package(
+        tmp_path,
+        build_id="a" * 32,
+        companion={
+            "parent_version": ["nb-1", 7],
+            "parent_build_id": "b" * 32,
+            "published_sources": 1,
+        },
+    )
+    with pytest.raises(cli.ScaleBuildCliError, match="build id mismatch"):
+        _validate(package)
+
+
+def test_a_companion_from_the_same_build_passes(tmp_path):
+    package = _package(
+        tmp_path,
+        build_id="a" * 32,
+        companion={
+            "parent_version": ["nb-1", 7],
+            "parent_build_id": "a" * 32,
+            "published_sources": 1,
+        },
+    )
+    _validate(package)
+
+
+@pytest.mark.parametrize(
+    "main_extra, companion_extra",
+    [
+        ({}, {}),
+        ({"build_id": "a" * 32}, {}),
+        ({}, {"parent_build_id": "b" * 32}),
+    ],
+    ids=["neither-side", "main-only", "companion-only"],
+)
+def test_a_package_missing_a_build_id_on_either_side_still_pairs_on_version(
+    tmp_path, main_extra, companion_extra
+):
+    """Negative anchor for the refusal above (older-index-stays-valid). A
+    package built before ``build_id`` existed carries it on NEITHER root; a
+    package that mixes one old root with one new one carries it on exactly
+    one. All three keep pairing on ``parent_version`` alone — the residual
+    blind spot documented on ``build_generation_mismatch``, deliberately
+    accepted so an existing package does not become unimportable. A fix that
+    made the gate fail-closed on a missing id would refuse all three."""
+    package = _package(
+        tmp_path,
+        companion={
+            "parent_version": ["nb-1", 7],
+            "published_sources": 1,
+            **companion_extra,
+        },
+        **main_extra,
+    )
+    _validate(package)
+
+
 def test_an_absent_companion_is_not_a_refusal(tmp_path):
     """The switch that produces companions is off in many deployments; "one
     side missing" is the normal shape, not an error."""
@@ -546,6 +613,48 @@ def test_export_then_import_round_trips_with_a_real_transfer_manifest(
     for root in cli.artifact_roots(store, "nb-1").values():
         assert _staging_glob(root) == []
         assert not Path(str(root) + ".old").exists()
+
+
+def test_export_then_import_carries_the_build_generation_across_both_roots(
+    repository, store, tmp_path
+):
+    """P1, codex PR#643 R26, end to end on the offline path: the generation id
+    is ordinary manifest content, so ``export``/``import`` must move it
+    verbatim on BOTH roots. If either side dropped or rewrote it, the imported
+    pair would stop matching and the notebook would silently lose the
+    companion capability on arrival — a same-version import being the exact
+    case this whole gate exists for.
+    """
+    _seed_live(store, "nb-1")
+    _write_manifest(
+        Path(store.scale_dir("nb-1")),
+        _main_manifest(version=["nb-1", 1], build_id="a" * 32),
+    )
+    _write_manifest(
+        Path(store.source_partition_dir("nb-1")),
+        {
+            "parent_version": ["nb-1", 1],
+            "parent_build_id": "a" * 32,
+            "published_sources": 1,
+        },
+    )
+    destination = tmp_path / "out"
+    cli.run_export(repository, "nb-1", destination, report=lambda _m: None)
+
+    cli.run_import(
+        repository,
+        "nb-1",
+        destination,
+        allow_library_mismatch=False,
+        report=lambda _message: None,
+    )
+
+    main = json.loads((Path(store.scale_dir("nb-1")) / "manifest.json").read_text())
+    companion = json.loads(
+        (Path(store.source_partition_dir("nb-1")) / "manifest.json").read_text()
+    )
+    assert main["build_id"] == "a" * 32
+    assert companion["parent_build_id"] == "a" * 32
 
 
 def _truncate_after_header(path: Path, keep_extra_bytes: int = 8) -> None:
@@ -2337,6 +2446,58 @@ def test_export_refuses_a_companion_from_another_generation(
         cli.run_export(
             repository, "nb-1", tmp_path / "out", report=lambda _message: None
         )
+
+
+def test_export_refuses_a_same_version_companion_from_another_build(
+    repository, store, tmp_path
+):
+    """P1, codex PR#643 R26: the live pair agrees on ``version`` and still
+    belongs to two different builds — the shape a publish interrupted between
+    its two roots leaves behind on a same-version republish. Exporting it
+    would package a pair the serving side already refuses to open.
+
+    Mutation anchor: drop the ``build_generation_mismatch`` check from
+    ``companion_generation_error`` and this export succeeds.
+    """
+    _seed_live(store, "nb-1")
+    _write_manifest(
+        Path(store.scale_dir("nb-1")),
+        _main_manifest(version=["nb-1", 1], build_id="a" * 32),
+    )
+    _write_manifest(
+        Path(store.source_partition_dir("nb-1")),
+        {
+            "parent_version": ["nb-1", 1],
+            "parent_build_id": "b" * 32,
+            "published_sources": 1,
+        },
+    )
+    with pytest.raises(cli.ScaleBuildCliError, match="build id mismatch"):
+        cli.run_export(
+            repository, "nb-1", tmp_path / "out", report=lambda _message: None
+        )
+
+
+def test_export_accepts_a_live_pair_from_the_same_build(repository, store, tmp_path):
+    """Negative anchor: the identical shape with ONE build id on both roots is
+    the ordinary healthy pair and must export."""
+    _seed_live(store, "nb-1")
+    _write_manifest(
+        Path(store.scale_dir("nb-1")),
+        _main_manifest(version=["nb-1", 1], build_id="a" * 32),
+    )
+    _write_manifest(
+        Path(store.source_partition_dir("nb-1")),
+        {
+            "parent_version": ["nb-1", 1],
+            "parent_build_id": "a" * 32,
+            "published_sources": 1,
+        },
+    )
+    receipt = cli.run_export(
+        repository, "nb-1", tmp_path / "out", report=lambda _message: None
+    )
+    assert sorted(receipt["roots"]) == sorted(cli.PUBLISH_ORDER)
 
 
 def test_export_aborts_and_removes_the_package_when_the_claim_is_lost_mid_copy(

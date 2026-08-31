@@ -33,10 +33,11 @@ def repo(tmp_path, monkeypatch):
     return SQLiteRepository(Settings(_env_file=None))
 
 
-def _publish(repo, notebook_id, source_ids, version):
+def _publish(repo, notebook_id, source_ids, version, build_id=None):
     return repo._runtime.scale_artifact_store.save_source_partitions(
         notebook_id,
         parent_version=version,
+        parent_build_id=build_id,
         source_ids=source_ids,
         load_rows=lambda source_id: (
             repo._runtime.index_projections.source_graph_partition_rows(
@@ -136,16 +137,9 @@ def test_selected_partition_load_never_opens_unselected_source(repo, monkeypatch
     opened = []
     original = partition_module.load_source_partition
 
-    def recording(
-        root, *, source_id, expected_parent_version, expected_source_signature
-    ):
+    def recording(root, *, source_id, **kwargs):
         opened.append(source_id)
-        return original(
-            root,
-            source_id=source_id,
-            expected_parent_version=expected_parent_version,
-            expected_source_signature=expected_source_signature,
-        )
+        return original(root, source_id=source_id, **kwargs)
 
     monkeypatch.setattr(partition_module, "load_source_partition", recording)
     service = SourcePartitionedPprService(
@@ -355,6 +349,191 @@ def test_union_manifest_preflight_rejects_before_any_payload_open(repo, monkeypa
         )
     assert error.value.reason == "source_partition_union_limit_exceeded"
     assert opened == []
+
+
+def _write_main_manifest(repo, notebook_id, **manifest):
+    """A live main-index manifest, which is where the reader takes the
+    generation a companion has to pair with. Only the two keys this gate reads
+    are written; nothing in this suite loads the main artifact itself."""
+    directory = repo._runtime.scale_artifact_store.scale_dir(notebook_id)
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "manifest.json").write_text(json.dumps(manifest))
+
+
+def _retrieve(repo, notebook_id, source_id, version):
+    return repo._runtime.source_partitioned_ppr.retrieve(
+        notebook_id,
+        [source_id],
+        parent_version=version,
+        object_seeds={"ko-a1": 1.0},
+    )
+
+
+def test_a_same_version_companion_from_another_build_is_not_served(repo):
+    """P1, codex PR#643 R26 — the whole point of the build id, end to end.
+
+    Both roots say ``version == ["same-main-version"]`` (republishing the same
+    version is supported and the reader is asked for exactly that version), and
+    they were produced by two different builds: the shape an ``import``
+    interrupted after the companion rename but before the main one leaves
+    behind. The old version-only gate served this mixed generation. It must
+    now degrade to capability-unavailable — fail-SOFT, not an exception
+    escaping into the ask path, and never a whole-graph fallback
+    (docs/development.md:37).
+
+    Mutation anchor: make ``build_generation_mismatch`` return ``False``
+    unconditionally and this goes green with hits. (Dropping just one of the
+    two reader gates does not: the root and per-source checks are separately
+    load-bearing, pinned by
+    ``test_scale_artifact_compatibility::test_a_companion_from_another_build_
+    is_refused_at_the_root`` and by the copied-partition test below.)
+    """
+    notebook_id, source_a, _source_b = _seed(repo)
+    version = ["same-main-version"]
+    _publish(repo, notebook_id, (source_a,), version, build_id="a" * 32)
+    _write_main_manifest(repo, notebook_id, version=version, build_id="b" * 32)
+
+    result = _retrieve(repo, notebook_id, source_a, version)
+
+    assert result.capability.enabled is False
+    assert result.capability.reason == "source_partition_identity_mismatch"
+    assert not result.hits
+
+
+def test_a_companion_from_the_live_build_is_served(repo):
+    """Negative anchor for the refusal above: the identical pair with ONE
+    shared build id is the ordinary healthy publish and must answer. Also pins
+    that the id reaches every PER-SOURCE manifest, not just the root — both
+    are gates the reader applies."""
+    notebook_id, source_a, _source_b = _seed(repo)
+    version = ["same-main-version"]
+    _publish(repo, notebook_id, (source_a,), version, build_id="a" * 32)
+    _write_main_manifest(repo, notebook_id, version=version, build_id="a" * 32)
+
+    result = _retrieve(repo, notebook_id, source_a, version)
+
+    assert result.capability.enabled and result.hits
+    partition_manifest = json.loads(
+        (
+            repo._runtime.scale_artifact_store.source_partition_dir(notebook_id)
+            / source_partition_key(source_a)
+            / "manifest.json"
+        ).read_text()
+    )
+    assert partition_manifest["parent_build_id"] == "a" * 32
+
+
+def test_a_partition_copied_in_from_another_generation_is_refused(repo):
+    """The per-source gate carries its own weight, not just the root's.
+
+    A companion ROOT that pairs correctly can still contain one partition
+    directory from another generation — an operator copying a hashed source
+    directory between two companion roots is exactly what
+    docs/operations.md's "do not copy a companion root between scale-index
+    generations" warns against, and the root manifest says nothing about it.
+
+    Mutation anchor: drop the ``build_generation_mismatch`` check from
+    ``inspect_source_partition_manifest`` (leaving
+    ``validate_partition_root``'s intact) and this goes green — the root
+    check alone never opens a per-source header.
+    """
+    notebook_id, source_a, _source_b = _seed(repo)
+    version = ["same-main-version"]
+    _publish(repo, notebook_id, (source_a,), version, build_id="a" * 32)
+    _write_main_manifest(repo, notebook_id, version=version, build_id="a" * 32)
+    partition_manifest = (
+        repo._runtime.scale_artifact_store.source_partition_dir(notebook_id)
+        / source_partition_key(source_a)
+        / "manifest.json"
+    )
+    payload = json.loads(partition_manifest.read_text())
+    payload["parent_build_id"] = "b" * 32
+    partition_manifest.write_text(json.dumps(payload))
+
+    result = _retrieve(repo, notebook_id, source_a, version)
+
+    assert result.capability.enabled is False
+    assert result.capability.reason == "source_partition_identity_mismatch"
+
+
+@pytest.mark.parametrize(
+    "main_build_id, companion_build_id",
+    [(None, None), ("a" * 32, None), (None, "b" * 32)],
+    ids=["neither-side", "main-only", "companion-only"],
+)
+def test_artifacts_without_a_build_id_keep_serving_on_version_alone(
+    repo, main_build_id, companion_build_id
+):
+    """older-index-stays-valid, end to end. A companion published before this
+    key existed — or a live main manifest from before it — keeps pairing on
+    ``parent_version``, so a deploy does not silently lose the capability for
+    every notebook until its next full rebuild. The residual is recorded on
+    ``build_generation_mismatch``: such a pair still has the original
+    same-version blind spot until one build stamps both roots."""
+    notebook_id, source_a, _source_b = _seed(repo)
+    version = ["same-main-version"]
+    _publish(repo, notebook_id, (source_a,), version, build_id=companion_build_id)
+    _write_main_manifest(repo, notebook_id, version=version, build_id=main_build_id)
+
+    result = _retrieve(repo, notebook_id, source_a, version)
+
+    assert result.capability.enabled and result.hits
+
+
+def test_a_companion_still_serves_when_no_main_manifest_is_on_disk(repo):
+    """The companion root is independent of the main one on disk, and several
+    deployments/tests publish it without a main artifact beside it. "No main
+    manifest" must therefore mean "no id to compare", not "refuse" — the same
+    fail-soft ``scale_build_id`` gives a corrupt main manifest."""
+    notebook_id, source_a, _source_b = _seed(repo)
+    version = ["same-main-version"]
+    _publish(repo, notebook_id, (source_a,), version, build_id="a" * 32)
+    assert not (
+        repo._runtime.scale_artifact_store.scale_dir(notebook_id) / "manifest.json"
+    ).exists()
+
+    result = _retrieve(repo, notebook_id, source_a, version)
+
+    assert result.capability.enabled and result.hits
+
+
+def test_a_failed_companion_republish_drops_this_process_warm_entries(
+    repo, monkeypatch
+):
+    """P1, codex PR#643 R26. The main root is published FIRST and carries a
+    new ``build_id``; if the companion half then fails (a build error, a lost
+    claim), the warm entries in this process describe a pair the cold gate
+    would now refuse. Nothing else drops them — the cache key is
+    database-derived and the disk probe watches the COMPANION root, which a
+    failed publish leaves byte-identical — so the rebuild drops them on every
+    exit, not only the successful one.
+
+    Mutation anchor: move the ``invalidate_source_partition_cache`` call in
+    ``_rebuild_source_partitions`` out of its ``finally`` and back onto the
+    success path, and the retired pair stays warm.
+    """
+    notebook_id, source_a, _source_b = _seed(repo)
+    version = ["same-main-version"]
+    _publish(repo, notebook_id, (source_a,), version, build_id="a" * 32)
+    _write_main_manifest(repo, notebook_id, version=version, build_id="a" * 32)
+    service = repo._runtime.source_partitioned_ppr
+    assert _retrieve(repo, notebook_id, source_a, version).capability.enabled
+    assert service.cache_size == 1
+
+    monkeypatch.setattr(
+        repo._runtime.scale_artifact_store,
+        "save_source_partitions",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("no disk")),
+    )
+    repo._runtime.scale_builder._rebuild_source_partitions(
+        notebook_id,
+        version,
+        parent_build_id="b" * 32,
+        claim_token="token",
+        verify_held=lambda: True,
+    )
+
+    assert service.cache_size == 0
 
 
 def test_source_provenance_drift_invalidates_cache_without_main_version_change(repo):
@@ -896,6 +1075,9 @@ def test_publish_omits_incomplete_source_instead_of_guessing(repo):
     assert manifest == {
         "format_version": 2,
         "parent_version": ["v1"],
+        # No caller-supplied build id here (this store call publishes no main
+        # root), so the pair falls back to matching on version alone.
+        "parent_build_id": None,
         "published_sources": 0,
         "unavailable_sources": 1,
     }

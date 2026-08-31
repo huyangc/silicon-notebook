@@ -13,6 +13,7 @@ from typing import Any, Callable, Optional, Sequence
 
 import numpy as np
 
+from app.domain.kg.source_partition import new_build_id
 from app.repositories.scale_build_lock import ScaleBuildLockLost
 from app.services.kg import scale_index as scale_index_module
 from app.services.kg import viz_index as viz_index_module
@@ -113,6 +114,7 @@ class ScaleIndexBuilder:
         notebook_id: str,
         parent_version: Any,
         *,
+        parent_build_id: Any,
         claim_token: str,
         verify_held: Callable[[], bool],
     ) -> dict | None:
@@ -121,6 +123,10 @@ class ScaleIndexBuilder:
         Failure is fail-open for the legacy scale index and fail-closed for the
         new capability: an old companion's parent identity no longer matches,
         so runtime returns unavailable instead of traversing stale/full graph.
+        ``parent_build_id`` is what makes that true even for a republish under
+        an UNCHANGED version (P1, codex PR#643 R26) — the main manifest this
+        build just swapped in carries a fresh ``build_id``, so a companion
+        this call fails to republish keeps the previous one and stops pairing.
 
         ``ScaleBuildLockLost`` is the one exception this does NOT swallow into
         that fail-open (codex PR#643 R1 P2): the companion runs strictly AFTER
@@ -147,6 +153,7 @@ class ScaleIndexBuilder:
             manifest = self.artifacts.save_source_partitions(
                 notebook_id,
                 parent_version=parent_version,
+                parent_build_id=parent_build_id,
                 source_ids=source_ids,
                 load_rows=lambda source_id: (
                     self.projections.source_graph_partition_rows(
@@ -156,8 +163,6 @@ class ScaleIndexBuilder:
                 claim_token=claim_token,
                 verify_held=verify_held,
             )
-            if self.invalidate_source_partition_cache is not None:
-                self.invalidate_source_partition_cache(notebook_id)
             return manifest
         except ScaleBuildLockLost as error:
             raise ScaleBuildLockLost(
@@ -171,6 +176,29 @@ class ScaleIndexBuilder:
                 "source-partition artifact build failed for %s", notebook_id
             )
             return None
+        finally:
+            # Dropped on EVERY exit, not only the successful one (P1, codex
+            # PR#643 R26). The main root above is already published under a
+            # NEW ``build_id``, so if this companion publish did not happen
+            # the warm entries in this process are pairs the cold gate would
+            # now refuse — and nothing else drops them: the companion cache
+            # key is database-derived (unchanged by a same-version republish)
+            # and its disk probe watches the COMPANION root, which a failed
+            # publish leaves byte-identical. Cheap either way: this pops one
+            # notebook's entries out of a bounded dict.
+            #
+            # Residual, in the same shape R4 already registered for the
+            # companion side: this only reaches THIS process. A build in
+            # another process (the offline CLI's ``build``) whose companion
+            # step fails the same way leaves a serving replica's warm entry
+            # in place until eviction, because that replica sees neither this
+            # call nor any change to the companion root it stats. Closing it
+            # would mean stat-ing the MAIN manifest on the companion read
+            # path too; not done here — the cold path is exact, and the
+            # operator-facing repair (re-run the index command) is the
+            # documented response to a half-published generation anyway.
+            if self.invalidate_source_partition_cache is not None:
+                self.invalidate_source_partition_cache(notebook_id)
 
     def _build_ann(self, vectors):
         """Build an hnsw index from a (n, dim) float32 matrix — same frozen
@@ -498,6 +526,14 @@ class ScaleIndexBuilder:
             # B and it started serving, because the retrieval side reads the
             # manifest that arrived, never the database's version.
             "notebook_id": notebook_id,
+            # P1, codex PR#643 R26: THIS build's generation, minted fresh
+            # here and copied into every companion manifest this build
+            # publishes. ``version`` cannot serve that purpose — a
+            # same-version republish is an explicitly supported scenario, so
+            # a half-published pair (import interrupted between the two
+            # roots, or an online rebuild that loses its claim after the main
+            # swap) would carry two equal versions and be accepted as a pair.
+            "build_id": new_build_id(),
             "pipeline_identity": list(
                 self.projections.pipeline_identity(notebook_id)
             ),
@@ -585,6 +621,7 @@ class ScaleIndexBuilder:
                 lambda: self._rebuild_source_partitions(
                     notebook_id,
                     saved_manifest.get("version"),
+                    parent_build_id=saved_manifest.get("build_id"),
                     claim_token=claim_token,
                     # A FRESH re-verification, not the value already used
                     # above: this companion rebuild can run long after the
@@ -886,6 +923,15 @@ class ScaleIndexBuilder:
                     # ``library_versions`` below, and the binding the offline
                     # ``import`` checks against ``--notebook`` (W-CLI R1 P1-2).
                     "notebook_id": notebook_id,
+                    # Minted fresh, never inherited from ``idx`` (P1, codex
+                    # PR#643 R26): a fold publishes a NEW main root, and the
+                    # companion rebuild below is a separate publish that can
+                    # fail or lose the claim. Reusing the base's id would let
+                    # the previous generation's companion keep pairing with
+                    # this new main index. A fold that only manages to swap
+                    # the main root therefore leaves the companion naturally
+                    # mismatched, which is the intended fail-soft.
+                    "build_id": new_build_id(),
                     "pipeline_identity": pipeline_identity,
                     # W-CLI T-W3: refreshed, never inherited from ``idx``. A
                     # fold appends to the .bin with THIS process's hnswlib, so
@@ -949,6 +995,7 @@ class ScaleIndexBuilder:
                 self._rebuild_source_partitions(
                     notebook_id,
                     manifest.get("version"),
+                    parent_build_id=manifest.get("build_id"),
                     claim_token=claim_token,
                     # A SEPARATE live re-verification from the main swap's
                     # above — each lambda re-reads the lock at its own

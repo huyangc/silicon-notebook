@@ -763,7 +763,8 @@ claim 一丢别的构建方就可以合法地在半途 swap 某个根。丢失�
 响亮失败（活树不受影响），而不是把混代包报成成功。swap 是两次 rename，中间那一刻
 `copytree` 会拷出跨代混合的集合；
 伴生根（`kg_index_partitions`）还是在主 swap **之后**才重建，「主新伴旧」的窗口是设计
-使然。导出前会校验伴生根的 `parent_version` 等于主 manifest 的 `version`，不符拒绝导出。
+使然。导出前会校验伴生根的 `parent_version` 等于主 manifest 的 `version`，**并且两者的
+build id 一致**（见下文「代次配对」），不符拒绝导出。
 在场却没有可读 `manifest.json` 的伴生根，或 serving 侧加载器读成「没有 viz」的活
 `kg_viz`，同样拒绝导出：照拷任意一个都会产出一个本 CLI 自己的 `import` 校验必拒的包。
 每根都拷完(并复验通过)之后，`export` 会把每个已拷文件再读一遍，写出
@@ -779,8 +780,23 @@ CLI 撞上正在持有 claim 的 viz 重建，会拿到常规的「被别人占�
 立刻重试——一次 viz 发布是秒级，不是小时级。SQLite 部署根本没有跨进程 claim（本 CLI
 也直接拒绝这类部署），viz 重建在那里的行为与一贯完全一致。
 
+**代次配对以「一次构建」为单位，不是以 version 为单位。** 每一次构建——全量重建、fold，
+或本 CLI 自己的 `build`——都会给主 manifest 打上唯一的 `build_id`，并把这个值作为
+`parent_build_id` 写进同一次构建发布的伴生根 manifest 与每个来源分区 manifest。服务侧
+reader、`import` 的包校验、`export` 的活树校验，以及 `prepare_selected_source_graph.py`
+背后那个廉价就绪探针，全都要求**两者同时**相等：version 相同**且** build id 相同。同版本
+重发是受支持的操作，所以单看 version 分不出两次构建——`import` 在伴生 rename 之后、主索引
+rename 之前被打断，会留下**新**伴生配**旧**主索引、而两边 version 相同；在线重建在主 swap
+之后丢掉 claim，则是镜像的另一半。这类配对现在一律判为不匹配、退化成「没有伴生」，也就是
+预期的 fail-soft；在 build id 之前，它会被当成同一代照常服务。
+
+这个键出现之前写下的根，会有一侧或两侧没有 id。它们仍按 `version` 配对，因此升级后盘上
+已有的产物不会突然读不出来——但升级期间要知道一个残余：这类配对在某一次 rebuild 或 fold
+把两根一起重发并打上 id 之前，仍保留原来的同版本盲区。没有任何迁移动作，下一次正常的索引
+构建就会把它关掉。
+
 `import` 的发布顺序是**伴生 → viz → 主索引**：任何中途失败都让**活着的主索引**停在
-上一代，而伴生根的 `parent_version` 闸让不配对的伴生读不出来（退化成「没有伴生」），
+上一代，而伴生根的代次闸让不配对的伴生读不出来（退化成「没有伴生」），
 不会变成「伴生描述了另一代」。拷贝（慢、易失败的那一半）全部发生在按 claim 唯一的
 `.tmp-<token>` 暂存目录里（见下文）；活目录在最后那几次 rename 之前一个字节都不动。
 `import` 硬性要求包里带着 `export` 写的传输清单，并且在每根都暂存完成之后，把每个
@@ -796,7 +812,9 @@ CLI 撞上正在持有 claim 的 viz 重建，会拿到常规的「被别人占�
 和一次没有替换树的正常 swap 一模一样。没有这一步的话，包无伴生的同版本重发会让**旧**
 伴生的 `parent_version` 照样对得上（版本号没变），stat 签名也不变，reader 就会一直
 把它跟新主索引配对，尽管这次 import 根本没为它背书——这正是上面发布顺序要挡住的
-「伴生描述了另一代」，只是这次是从「省略」这一侧撞进来，不是从「中途失败」。如果
+「伴生描述了另一代」，只是这次是从「省略」这一侧撞进来，不是从「中途失败」。两根都带
+build id 时这一闸同样会拒掉这种配对，但退休照做不误：它还覆盖没有 id 的旧产物，而且退休
+那一代的目录本来也不该留在活索引旁边。如果
 一个可选根在包里**和**活树上都不存在，不受影响：那仍然是普通的「没有伴生」形态，
 照旧跳过。
 
@@ -1047,7 +1065,7 @@ CLI 运行**的陈述（见上面的连接预算）。
 
 同一份 `viz.npz` 现在还会写入有界图视图使用的稳定度序与按 source 的边 order/indptr。历史 compact 与旧 JSON 工件继续可加载，只在首次使用时派生一次；重建后这笔成本移到工件发布阶段。有界核心图只枚举 kept 节点的出边段，再恢复原边流顺序。多参考库 PPR 仍按需构造，但有序 participant 图只装配、归一一次，不再每挂一个库就复制一遍累计 CSR；差分测试钉住历史 PPR 分数与排序。后台维护任务进入互相独立的固定重型/轻型 worker 队列，突发提交只增加队列项，不再增加同量阻塞 OS 线程；排队披露仍只含脱敏元数据。
 
-默认 `SOURCE_PARTITIONED_GRAPH_ARTIFACTS_ENABLED=true`，所以同一个离线 index 命令还会在主 scale 工件发布后重建 `<storage>/kg_index_partitions/<notebook-id>`。伴生产物通过临时目录原子换入，每个可见来源使用一个 SHA-256 直寻目录，校验每个 partition payload 的摘要，并绑定当前主 manifest version。伴生产物构建失败、越界或损坏不会影响既有 scale 索引，但 reader 会保持 unavailable；旧格式伴生产物必须重建。修复来源事实覆盖或按产品文档调整来源子图护栏后重新执行 index 命令；不要在不同 scale-index 代次间复制伴生产物根目录。可单独关闭 `SOURCE_PARTITIONED_PPR_ENABLED` 而保留文件。
+默认 `SOURCE_PARTITIONED_GRAPH_ARTIFACTS_ENABLED=true`，所以同一个离线 index 命令还会在主 scale 工件发布后重建 `<storage>/kg_index_partitions/<notebook-id>`。伴生产物通过临时目录原子换入，每个可见来源使用一个 SHA-256 直寻目录，校验每个 partition payload 的摘要，并绑定当前主 manifest version **以及那一次构建的 `build_id`**（见上文「代次配对」——即使 version 没变，来自另一次构建的伴生产物也读不出来）。伴生产物构建失败、越界或损坏不会影响既有 scale 索引，但 reader 会保持 unavailable；旧格式伴生产物必须重建。修复来源事实覆盖或按产品文档调整来源子图护栏后重新执行 index 命令；不要在不同 scale-index 代次间复制伴生产物根目录。可单独关闭 `SOURCE_PARTITIONED_PPR_ENABLED` 而保留文件。
 
 生产回归时，先用 `python3 scripts/diag.py incident` 和 `python3 scripts/diag.py slow --since 6 --deep` 抓线程栈与慢阶段拆分。在 `_retrieve_scored` 事件里分别比较 `ann_ms`、`hydrate_ms`、`fold_ms`；候选数很小时，hydration 不得随全库关系行或 cluster 行数增长。前后版本验收使用下一节的 exact 回放对照。
 

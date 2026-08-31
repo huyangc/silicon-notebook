@@ -31,7 +31,10 @@ from app.repositories.knowhow_asset_refs import (  # 后端中性,与 sqlite mai
 from app.repositories.ports import OfflineMaintenanceBusyError
 from app.repositories.source_fact_backfill import project_historical_source_fact
 from app.repositories.text_whitespace import PY_WHITESPACE  # 后端中性,与 sqlite maintenance 共用
-from app.domain.kg.source_partition import SOURCE_PARTITION_FORMAT_VERSION
+from app.domain.kg.source_partition import (
+    SOURCE_PARTITION_FORMAT_VERSION,
+    build_generation_mismatch,
+)
 from psycopg import sql
 
 
@@ -1437,6 +1440,17 @@ class PostgresMaintenanceAdapter:
             ready = (
                 main_version == current_version
                 and parent_version == main_version
+                # The same per-build generation gate the reader applies (P1,
+                # codex PR#643 R26): without it this probe reports "ready" for
+                # exactly the half-published same-version pair the reader
+                # refuses to open.
+                and not build_generation_mismatch(
+                    main.get("build_id"), partition.get("parent_build_id")
+                )
+                # The same per-build generation gate the reader applies (P1,
+                # codex PR#643 R26): without it this probe reports "ready" for
+                # exactly the half-published same-version pair the reader
+                # refuses to open.
                 and partition.get("format_version")
                 == SOURCE_PARTITION_FORMAT_VERSION
             )

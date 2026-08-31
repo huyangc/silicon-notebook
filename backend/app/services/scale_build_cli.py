@@ -61,6 +61,7 @@ from app.repositories.scale_build_lock import (
     ScaleBuildBusy,
     ScaleBuildLockLost,
 )
+from app.domain.kg.source_partition import build_generation_mismatch
 from app.services.kg.scale_index import (
     MANIFEST_LIBRARY_KEY,
     runtime_library_versions,
@@ -78,9 +79,18 @@ DEFAULT_STATEMENT_TIMEOUT_SECONDS = 86_400
 # Publication order for an import. The companion goes first and the main index
 # last, so any interruption between renames leaves the *live* index on its
 # previous generation. Both partial states are fail-soft rather than wrong: the
-# companion's ``parent_version`` gate refuses a companion that does not match
-# the live main index, so a mismatched pair degrades to "no companion", never
-# to "companion describing a different generation".
+# companion's generation gate refuses a companion that does not match the live
+# main index, so a mismatched pair degrades to "no companion", never to
+# "companion describing a different generation".
+#
+# codex PR#643 R26 P1: that gate is ``parent_version`` AND ``parent_build_id``
+# — the version alone does not carry the claim this comment used to make.
+# Re-publishing the SAME version is an explicitly supported scenario, so an
+# import interrupted after the companion rename but before the main one left a
+# NEW companion beside an OLD main index with both versions equal, and the
+# version-only gate let that mixed generation serve. Every build now stamps a
+# unique ``build_id`` on its main manifest and copies it onto the companion it
+# publishes, so any half-published pair fails to match regardless of version.
 #
 # codex PR#643 R11 P2-a: an OPTIONAL root (everything but ``kg_index``) that
 # the package OMITS is not always left alone any more — if a live directory
@@ -1161,6 +1171,20 @@ def validate_import_package(
                 f"different generation (parent_version={parent!r}, main index "
                 f"version={manifest.get('version')!r})"
             )
+        # P1, codex PR#643 R26: equal versions do NOT prove one generation —
+        # a package assembled from a half-published live tree (export runs
+        # under the claim, but a package can also be built by hand) can hold
+        # two same-version roots from different builds. The build id does
+        # prove it; a package whose roots predate the key keeps pairing on
+        # version alone (older-index-stays-valid).
+        parent_build = companion_manifest.get("parent_build_id")
+        if build_generation_mismatch(manifest.get("build_id"), parent_build):
+            raise ScaleBuildCliError(
+                "the source-partition companion in this package belongs to a "
+                f"different generation (build id mismatch: "
+                f"parent_build_id={parent_build!r}, main index "
+                f"build_id={manifest.get('build_id')!r})"
+            )
 
     viz = package / "kg_viz"
     if viz.is_dir():
@@ -1214,6 +1238,19 @@ def companion_generation_error(roots: dict[str, Path]) -> Optional[str]:
             "the live source-partition companion belongs to a different "
             f"generation (parent_version={parent!r}, main index version="
             f"{main_version!r}); rebuild the index before exporting"
+        )
+    # Same build-id gate as import's, over the live tree (P1, codex PR#643
+    # R26). This is the shape a same-version publish interrupted between its
+    # two roots leaves behind, and exporting it would package a pair the
+    # serving side already refuses to use.
+    main_build = None if main_manifest is None else main_manifest.get("build_id")
+    parent_build = companion_manifest.get("parent_build_id")
+    if build_generation_mismatch(main_build, parent_build):
+        return (
+            "the live source-partition companion belongs to a different "
+            f"generation (build id mismatch: parent_build_id={parent_build!r}, "
+            f"main index build_id={main_build!r}); rebuild the index before "
+            "exporting"
         )
     return None
 
@@ -1736,7 +1773,9 @@ def run_import(
     SET of three is not. A hard kill (SIGKILL, power loss) between two of them
     leaves companion/viz from the new generation beside a main index from the
     old one. That state is fail-soft by construction — the companion's
-    ``parent_version`` gate makes it unreadable rather than wrong, and viz is
+    generation gate (``parent_version`` plus the ``parent_build_id`` that
+    makes it hold for a same-version republish too, codex PR#643 R26 P1)
+    makes it unreadable rather than wrong, and viz is
     advisory — which is exactly why the publish order is companion → viz → main.
     A cross-root journal is the only thing that would close it, and it would buy
     nothing the ordering does not already give.
