@@ -424,7 +424,21 @@ class ScaleArtifactRuntime:
         probe = getattr(self.artifacts, "manifest_stat_signature", None)
         if not callable(probe):
             return None
-        return probe(self.artifacts.viz_dir(notebook_id))
+        signature = probe(self.artifacts.viz_dir(notebook_id))
+        if signature is not MANIFEST_ABSENT:
+            return signature
+        # codex PR#643 R22 P2 (same conflation as the companion probe): one
+        # ENOENT can be the instant between a publication's two renames
+        # (``live → .old``, ``tmp → live``) — ``save_viz`` publishes through
+        # that same sequence now — or a retirement that has not reached
+        # ``finalize_swap`` and may still roll back. Only "live gone AND
+        # ``.old`` gone" is durable absence; with ``.old`` still on disk this
+        # answers "could not tell" and the warm entry keeps serving. The
+        # second stat is paid only in this corner, never on the hot path.
+        old_probe = probe(str(self.artifacts.viz_dir(notebook_id)) + ".old")
+        if old_probe is MANIFEST_ABSENT:
+            return MANIFEST_ABSENT
+        return None
 
     @staticmethod
     def _recordable_viz_signature(signature: Any) -> Any:

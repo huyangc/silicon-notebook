@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
@@ -568,9 +569,14 @@ def test_a_retired_companion_root_invalidates_the_warm_cache(repo):
     )
     assert service.cache_size == 2
 
-    # Exactly what ``import`` does for an omitted optional root.
+    # Exactly what ``import`` does for an omitted optional root — INCLUDING
+    # the ``finalize_swap`` that deletes ``.old`` once the post-swap identity
+    # check passed (codex PR#643 R22 P2: with ``.old`` still on disk the
+    # absence is a transient swap/retire window, deliberately fail-soft; only
+    # "live gone AND .old gone" is a durable retirement).
     live = store.source_partition_dir(notebook_id)
     live.rename(str(live) + ".old")
+    shutil.rmtree(str(live) + ".old")
 
     retired = service.retrieve(
         notebook_id,
@@ -587,6 +593,44 @@ def test_a_retired_companion_root_invalidates_the_warm_cache(repo):
         "every cached scope of this notebook describes the retired "
         "generation, so all of them must go — not just the one queried"
     )
+
+
+def test_the_mid_swap_window_keeps_serving_the_warm_cache(repo):
+    """codex PR#643 R22 P2: publication is two renames — ``live → .old``,
+    then ``tmp → live`` — so a stat landing between them sees the root
+    transiently invisible on a perfectly ordinary republish (and a
+    retirement that has not reached ``finalize_swap`` yet looks the same,
+    and may still be rolled back). One ENOENT with the previous generation's
+    manifest sitting at ``.old`` must stay fail-soft: warm cache preserved,
+    capability intact — NOT the durable-retirement eviction.
+
+    Mutation anchor: drop the ``.old`` confirmation in
+    ``_companion_signature`` (treat the first ENOENT as durable) and this
+    goes red — the warm scope is evicted and the request degrades.
+    """
+    notebook_id, source_a, _source_b = _seed(repo)
+    version = ["same-main-version"]
+    _publish(repo, notebook_id, (source_a,), version)
+    store = repo._runtime.scale_artifact_store
+    service = repo._runtime.source_partitioned_ppr
+    _warm(service, notebook_id, source_a, version)
+    assert service.cache_size == 1
+
+    # Freeze the mid-swap instant: live renamed away, .old present.
+    live = store.source_partition_dir(notebook_id)
+    live.rename(str(live) + ".old")
+
+    result = service.retrieve(
+        notebook_id,
+        [source_a],
+        parent_version=version,
+        object_seeds={"ko-a1": 1.0},
+    )
+    assert result.capability.enabled, (
+        "a transiently invisible root (.old still on disk) must keep the "
+        "fail-soft path, not degrade the capability"
+    )
+    assert service.cache_size == 1, "the warm scope must survive the window"
 
 
 def test_a_probeless_artifacts_adapter_still_serves_from_cache(repo):
