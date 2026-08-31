@@ -524,7 +524,7 @@ def artifact_inventory_error(directory: Path, manifest: dict) -> Optional[str]:
     for flag, files in _FLAGGED_FILES.items():
         if manifest.get(flag):
             required.extend(files)
-    missing = [name for name in required if not (directory / name).exists()]
+    missing = [name for name in required if not (directory / name).is_file()]
     if missing:
         return f"the package is missing {', '.join(sorted(missing))}"
 
@@ -964,6 +964,14 @@ def run_export(
     ``copytree`` racing a publish would walk one root before its swap and
     another after it, producing a package that mixes two generations — and the
     companion is rebuilt *after* the main swap, so that window exists by design.
+
+    ``destination`` is rejected up front if it is (or sits inside) any of the
+    three live artifact roots: ``destination.mkdir()`` below makes an empty
+    destination visible before ``copytree`` scans its source, so a destination
+    under a source root gets walked as part of that source's own tree —
+    ``--to <kg_index>/out`` grows ``<kg_index>/out/kg_index/out/kg_index/...``
+    without bound, and every one of those nested copies also writes into the
+    supposedly read-only live index (codex PR#643 R2 P2).
     """
     store = repository._runtime.scale_artifact_store  # noqa: SLF001
     roots = artifact_roots(store, notebook_id)
@@ -971,6 +979,18 @@ def run_export(
         raise ScaleBuildCliError(
             f"{notebook_id} has no published scale index to export"
         )
+    destination_resolved = destination.resolve()
+    for name, root in roots.items():
+        root_resolved = root.resolve()
+        if (
+            destination_resolved == root_resolved
+            or destination_resolved.is_relative_to(root_resolved)
+        ):
+            raise ScaleBuildCliError(
+                f"--to {destination} is inside the {name} artifact root "
+                f"{root}; copying would recurse into its own destination "
+                "and could modify the live index"
+            )
     if destination.exists():
         if not destination.is_dir():
             raise ScaleBuildCliError(f"--to {destination} is not a directory")
@@ -990,7 +1010,13 @@ def run_export(
             shutil.copytree(live, destination / name)
             exported.append(name)
             report(f"exported {name}")
-    manifest = _read_manifest(roots[MAIN_ROOT]) or {}
+        # Read the manifest that was just copied into `destination`, not the
+        # live one: the claim releases when this block exits, and another
+        # builder can publish a new generation the instant it does. Reading
+        # `roots[MAIN_ROOT]` after release would describe whatever version
+        # happens to be live at read time, not the package actually written
+        # to disk (codex PR#643 R2 P2).
+        manifest = _read_manifest(destination / MAIN_ROOT) or {}
     return {
         "notebook_id": notebook_id,
         "to": str(destination),

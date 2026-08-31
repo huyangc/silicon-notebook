@@ -252,6 +252,18 @@ def test_a_missing_core_file_is_refused(tmp_path):
         _validate(package)
 
 
+def test_a_directory_masquerading_as_a_required_artifact_is_refused(tmp_path):
+    """A corrupt package with a directory named ``idf.npy`` passes ``.exists()``
+    but the later header probe can only ever return ``None`` for it — publish
+    must not accept that as "present" (codex PR#643 R2 P2)."""
+    package = _package(tmp_path)
+    idf = package / cli.MAIN_ROOT / "idf.npy"
+    idf.unlink()
+    idf.mkdir()
+    with pytest.raises(cli.ScaleBuildCliError, match="idf.npy"):
+        _validate(package)
+
+
 def test_a_manifest_count_that_disagrees_with_the_arrays_is_refused(tmp_path):
     package = _package(tmp_path, n_nodes=99)
     with pytest.raises(cli.ScaleBuildCliError, match="n_nodes=99"):
@@ -794,6 +806,66 @@ def test_export_refuses_a_notebook_with_no_published_index(repository, tmp_path)
         cli.run_export(
             repository, "nb-1", tmp_path / "out", report=lambda _message: None
         )
+
+
+def test_export_refuses_a_destination_inside_a_source_root(repository, store, tmp_path):
+    """``destination.mkdir()`` runs before ``copytree`` scans the source, so a
+    destination under a live root gets walked as part of its own source and
+    recurses without bound — and also writes into the read-only live index
+    (codex PR#643 R2 P2)."""
+    _seed_live(store, "nb-1")
+    destination = Path(store.scale_dir("nb-1")) / "out"
+    with pytest.raises(cli.ScaleBuildCliError, match="inside the"):
+        cli.run_export(repository, "nb-1", destination, report=lambda _m: None)
+    assert not destination.exists(), "nothing should have been created at all"
+
+
+def test_export_refuses_a_destination_equal_to_a_source_root(repository, store, tmp_path):
+    _seed_live(store, "nb-1")
+    destination = Path(store.scale_dir("nb-1"))
+    with pytest.raises(cli.ScaleBuildCliError, match="inside the"):
+        cli.run_export(repository, "nb-1", destination, report=lambda _m: None)
+
+
+def test_export_receipt_describes_the_copied_package_not_a_later_live_publish(
+    repository, store, tmp_path
+):
+    """The claim is released when the ``with`` block in ``run_export`` exits;
+    another builder can publish a newer generation the instant that happens.
+    The receipt must describe what was actually copied into ``--to``, not
+    whatever happens to be live when the manifest gets read (codex PR#643 R2
+    P2)."""
+    _seed_live(store, "nb-1")
+
+    def report(message: str) -> None:
+        if message == f"exported {cli.MAIN_ROOT}":
+            # Simulate a concurrent publish landing on the live root right
+            # after this export's copy of it finished.
+            _write_manifest(
+                Path(store.scale_dir("nb-1")), _main_manifest(version=["nb-1", 99])
+            )
+
+    receipt = cli.run_export(repository, "nb-1", tmp_path / "out", report=report)
+    assert receipt["version"] == ["nb-1", 1]
+
+
+def test_swap_reports_the_actual_tokenized_staging_path_on_lock_loss(tmp_path):
+    """Recovery must be pointed at the directory that actually holds the
+    staged build — the claim-unique ``{live}.tmp-<token>`` handed in as
+    ``temporary`` — not the legacy no-suffix ``{live}.tmp`` this scheme
+    replaced and which no longer exists (codex PR#643 R2 P2;
+    docs/operations.md tokenized-path contract)."""
+    live = tmp_path / "kg_index"
+    temporary = tmp_path / "kg_index.tmp-abc123token"
+    temporary.mkdir()
+    with pytest.raises(ScaleBuildLockLost) as excinfo:
+        ScaleArtifactStore.swap_staging_directory(
+            live, temporary, verify_held=lambda: False
+        )
+    assert str(temporary) in str(excinfo.value)
+    # The staged build must genuinely still be there for the message to be
+    # actionable — the swap must not have touched it before refusing.
+    assert temporary.is_dir()
 
 
 # ──────────────────────────────────────────────────────── interrupt guard ──

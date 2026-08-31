@@ -512,7 +512,7 @@ class ScaleArtifactStore:
             raise ScaleBuildLockLost(
                 "scale build lock was lost before the artifact swap for "
                 f"{out_dir}; nothing was published and the staged build "
-                f"remains at {out_dir}.tmp"
+                f"remains at {temporary}"
             )
         # Everything below is the destructive part, and Ctrl-C landing inside it
         # is the only way this process can leave a notebook with no live index
