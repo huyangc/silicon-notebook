@@ -84,6 +84,17 @@ function AskDetailPane({
   const showPersistedTrace = persistedTrace.length > 0
     && (answer?.reasoning_trace ?? []).length === 0;
   const failure = detail?.error ?? "";
+  // The stream item may still describe a live notebook when deletion races
+  // with the detail request. In that case the detail endpoint is authoritative:
+  // it falls back to the retained row after the live ask has cascaded away.
+  const retentionItem = detail?.notebook_deleted_at
+    ? {
+        ...item,
+        notebook_name: detail.notebook_name || item.notebook_name,
+        notebook_deleted_at: detail.notebook_deleted_at,
+        retained_until: detail.retained_until || item.retained_until,
+      }
+    : item;
   return (
     <div className="activity-detail-body">
       <div className="activity-detail-head">
@@ -96,7 +107,7 @@ function AskDetailPane({
         </span>
       </div>
       <h2 className="activity-detail-title">{activityTitle(item)}</h2>
-      <RetainedActivityNotice item={item} now={now} />
+      <RetainedActivityNotice item={retentionItem} now={now} />
       {error ? <div className="errorbar">{error}</div> : null}
       {loading ? <div className="empty">加载中…</div> : null}
       {!loading && !error && failure ? (
@@ -126,7 +137,7 @@ function AskDetailPane({
           />
         </div>
       ) : null}
-      {!loading && !error && !answer && !failure && !item.notebook_deleted_at ? (
+      {!loading && !error && !answer && !failure && !retentionItem.notebook_deleted_at ? (
         <div className="empty">这次提问没有留下答案</div>
       ) : null}
     </div>

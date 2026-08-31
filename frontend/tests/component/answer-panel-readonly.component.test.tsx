@@ -239,3 +239,31 @@ test("删除笔记本后的提问详情说明留存边界且不冒充答案缺�
   expect(screen.getByRole("note")).toHaveTextContent("正文、答案、引用和推理过程已随笔记本删除");
   expect(screen.queryByText("这次提问没有留下答案")).not.toBeInTheDocument();
 });
+
+
+test("详情请求与删除竞态时以详情返回的留存状态为准", () => {
+  const retainedDetail: AskDetail = {
+    ...detailFixture(),
+    answer: null,
+    trace: [],
+    notebook_name: "请求期间删除的项目",
+    notebook_deleted_at: "2026-08-04T11:00:00",
+    retained_until: "2027-01-31T11:00:00",
+  };
+
+  render(
+    <ActivityDetail
+      askDetail={retainedDetail}
+      askDetailError=""
+      askDetailLoading={false}
+      item={ITEM}
+      notebookNames={{}}
+      now={NOW}
+    />,
+  );
+
+  expect(screen.getByRole("note")).toHaveTextContent(
+    "原笔记本《请求期间删除的项目》已删除",
+  );
+  expect(screen.queryByText("这次提问没有留下答案")).not.toBeInTheDocument();
+});
