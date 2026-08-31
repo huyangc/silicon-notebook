@@ -914,26 +914,29 @@ class ScaleIndexBuilder:
             scale_index_module.save_fold_manifest(str(temporary), manifest)
 
             # Same last-instant re-verification as the full rebuild — a fold's
-            # swap is equally destructive — but read OUTSIDE ``building_lock``
-            # (codex W-CLI R1 P2-3). That lock is process-global: every
-            # notebook's status poll and every admission takes it, and this
-            # re-verification is a PostgreSQL round trip on the lock session. A
-            # network stall there (up to the session's ``statement_timeout``)
-            # would freeze scale status and admission for EVERY notebook, not
-            # just this one. The claim is therefore proven here and the proven
-            # verdict handed to the swap, which keeps the single refusal site
-            # (and its message, and its "leave the .tmp" contract) in the store.
-            # The window this opens is the lock acquisition plus a stale-.old
-            # cleanup — microseconds of local work, versus a round trip whose
-            # tail is unbounded by anything this process controls; and it is a
-            # window of the same kind the check already lives with, since no
-            # claim can be proven to still be held one instruction later.
-            claim_held = self.verify_scale_build_lock(notebook_id)
+            # swap is equally destructive. codex PR#643 R1 P2-3 used to read
+            # this OUTSIDE ``building_lock`` and hand the swap a frozen
+            # snapshot, worried that a PostgreSQL round trip inside that
+            # process-global lock could stall every notebook's status poll
+            # and admission for a full ``statement_timeout``. That traded
+            # away the guarantee it was meant to preserve: if the session is
+            # lost after the snapshot but before the rename, the snapshot
+            # stays ``True`` forever, so a competing importer that acquires
+            # the now-released claim can be overwritten by this unclaimed
+            # fold (codex PR#643 R6 P1). The swap gets the LIVE verifier
+            # back instead — exactly like ``build()``'s swap above — and the
+            # freeze-window worry is addressed at its source:
+            # ``PostgresScaleBuildLock.verify_held`` caps its own
+            # ``pg_locks`` query to a short statement_timeout (see there), so
+            # holding ``building_lock`` through this check is bounded by that
+            # cap rather than by an unbounded network stall.
             with self.building_lock:
                 self.artifacts.swap_fold_directory(
                     notebook_id,
                     temporary,
-                    verify_held=lambda: claim_held,
+                    verify_held=lambda: self.verify_scale_build_lock(
+                        notebook_id
+                    ),
                 )
                 self.invalidate_scale_cache(notebook_id)
             if bool(
@@ -947,10 +950,10 @@ class ScaleIndexBuilder:
                     notebook_id,
                     manifest.get("version"),
                     claim_token=claim_token,
-                    # A FRESH re-verification, not the ``claim_held`` snapshot
-                    # taken above for the main swap: this companion rebuild
-                    # can run long after that snapshot was proven (codex
-                    # PR#643 R1 P2).
+                    # A SEPARATE live re-verification from the main swap's
+                    # above — each lambda re-reads the lock at its own
+                    # instant: this companion rebuild can run long after the
+                    # main swap's check already passed (codex PR#643 R1 P2).
                     verify_held=lambda: self.verify_scale_build_lock(
                         notebook_id
                     ),

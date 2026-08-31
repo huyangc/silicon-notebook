@@ -67,6 +67,15 @@ _LOCK_SESSION_KEEPALIVES = {
     "keepalives_interval": 10,
     "keepalives_count": 5,
 }
+# ``verify_held`` is now called from inside the process-global
+# ``building_lock`` (codex PR#643 R6 P1: the fold swap's claim check must be
+# live, not a pre-lock snapshot). That lock is shared by every notebook's
+# status poll and admission, so a network stall on this session's ``pg_locks``
+# round trip must not ride the pool's normal 30s ``statement_timeout`` — that
+# would freeze every notebook, not just the one being verified. ``SET LOCAL``
+# (via ``set_config(..., true)``) scopes this to the single verify query's
+# transaction and reverts to the session default on the next commit.
+_VERIFY_HELD_STATEMENT_TIMEOUT_MS = 5000
 
 
 class PostgresScaleBuildLock:
@@ -108,11 +117,24 @@ class PostgresScaleBuildLock:
         reaper, failover, operator ``pg_terminate_backend`` -- released the
         advisory lock silently, so a heartbeat that merely proves the object
         still exists in this process proves nothing about the database.
+
+        A caller (the fold swap) may hold the process-global ``building_lock``
+        for the duration of this call, so the ``pg_locks`` query is capped to
+        ``_VERIFY_HELD_STATEMENT_TIMEOUT_MS`` -- an upper bound on how long
+        that freezes every other notebook's status/admission, well under the
+        pool's normal statement_timeout. A timeout or any other failure here
+        falls through to the existing "never raises -> False" contract: an
+        unusable/slow session is conservatively treated as lock-lost, which
+        only makes the swap refuse more eagerly, never less.
         """
         with self._mutex:
             if self._released:
                 return False
             try:
+                self._connection.execute(
+                    "SELECT set_config('statement_timeout', %s, true)",
+                    (f"{_VERIFY_HELD_STATEMENT_TIMEOUT_MS}ms",),
+                )
                 row = self._connection.execute(
                     "SELECT EXISTS ("
                     "SELECT 1 FROM pg_locks "
