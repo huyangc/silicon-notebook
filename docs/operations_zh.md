@@ -431,6 +431,31 @@ FROM pg_stat_progress_create_index;
 改变 planner 路径，不改 SQL 谓词、similarity 分数、候选 limit 或排序；PostgreSQL conformance
 测试必须证明检索结果逐项一致。
 
+### 深度报告中的有界 chunk FTS
+
+上面的复合 chunk GIN 仍是普通 Ask、精确定位/回退、notebook 搜索和质量回滚路径的必需索引。
+反复 FTS 超时时不要把全局 `POSTGRES_STATEMENT_TIMEOUT_SECONDS` 调大：那只会让每个失败探针
+等待更久。PostgreSQL 通用 chunk 词法调用使用自己的 savepoint 级
+`POSTGRES_CHUNK_FTS_TIMEOUT_SECONDS` 预算（默认 1 秒）；`QueryCanceled` 时只回滚到该
+savepoint，首次超时会为当前 retrieval run 的该 notebook 打开熔断，后续通用调用不再发数据库
+语句，已经在飞的调用不做强制取消。精确短语/标识符定位是独立通道，绝不进入该熔断。
+
+chunk ANN 健康时，深度报告 planning/generation 默认跳过逐自然语言 query 的通用 FTS union；
+普通 Ask 仍保持 ANN∪FTS。可设 `CHUNK_FTS_WITH_ANN_ENABLED=true` 做 A/B 或恢复报告的这份词法
+补召回；ANN 不可用时，报告仍用有界 FTS fail-open 回退。冻结的全选来源清单在不可变 source
+sidecar 证明全部索引 source code 均获允许时，也不再支付 HNSW Python filter callback；只要出现
+未知或未授权 code，就继续走过滤/按范围路径。
+
+诊断时用无正文耗时事件，不要再把旧聚合字段当成纯 ANN：`site=chunk_scale_index` 给出
+`scale_index_load_ms`；`site=chunk_ann` 拆出 `ann_prepare_ms`、`ann_open_ms`、`knn_ms`、
+`delta_ms`、`lexical_prepare_ms`、`chunk_fts_ms`、`hydrate_ms` 与 `score_ms`；`site=_retrieve_scored` 给出宽口径
+`candidate_ms` 以及 `scale_index_ms`、`kg_ann_ms`、`kg_lexical_ms`。retrieval-run 汇总另含
+`chunk_fts_timeouts` 与 `chunk_fts_circuit_skips`。这些事件还携带兼容的 `stage` / `latency_ms`
+字段（`chunk_scale_index`、`chunk_ann`、`chunk_fts` 或 `kg_candidates`），因此
+`diag.py slow` 与 `diag.py latency` 都会聚合它们。部署后应验证：报告 ANN 命中的
+`chunk_fts_ms` 接近零；一次 FTS 超时只花独立 deadline 而非 30 秒；readiness 已预热全部必需
+scale index。
+
 ### 超大库的 KNN 早停（`POSTGRES_LEXICAL_KNN_ENABLED`）
 
 上面的复合索引让**其他**库不再为巨型库买单，但救不了巨型库自己：`ORDER BY similarity` 仍要
@@ -711,7 +736,7 @@ PYTHONPATH=backend python scripts/batch_ingest.py reparse \
 
 默认 `SOURCE_PARTITIONED_GRAPH_ARTIFACTS_ENABLED=true`，所以同一个离线 index 命令还会在主 scale 工件发布后重建 `<storage>/kg_index_partitions/<notebook-id>`。伴生产物通过临时目录原子换入，每个可见来源使用一个 SHA-256 直寻目录，校验每个 partition payload 的摘要，并绑定当前主 manifest version。伴生产物构建失败、越界或损坏不会影响既有 scale 索引，但 reader 会保持 unavailable；旧格式伴生产物必须重建。修复来源事实覆盖或按产品文档调整来源子图护栏后重新执行 index 命令；不要在不同 scale-index 代次间复制伴生产物根目录。可单独关闭 `SOURCE_PARTITIONED_PPR_ENABLED` 而保留文件。
 
-生产回归时，先用 `python3 scripts/diag.py incident` 和 `python3 scripts/diag.py slow --since 6 --deep` 抓线程栈与慢阶段拆分。在 `_retrieve_scored` 事件里分别比较 `ann_ms`、`hydrate_ms`、`fold_ms`；候选数很小时，hydration 不得随全库关系行或 cluster 行数增长。前后版本验收使用下一节的 exact 回放对照。
+生产回归时，先用 `python3 scripts/diag.py incident` 和 `python3 scripts/diag.py slow --since 6 --deep` 抓线程栈与慢阶段拆分。在 `_retrieve_scored` 事件里分别比较 `candidate_ms`（再看其 `scale_index_ms` / `kg_ann_open_ms` / `kg_ann_knn_ms` / `kg_delta_ms` / `kg_lexical_ms` 拆分）、`hydrate_ms` 与 `fold_ms`；候选数很小时，hydration 不得随全库关系行或 cluster 行数增长。前后版本验收使用下一节的 exact 回放对照。
 
 ### 检索回放对照(`scripts/replay_retrieval.py`)
 

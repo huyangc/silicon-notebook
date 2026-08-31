@@ -290,6 +290,91 @@ def test_startup_preload_refuses_to_evict_earlier_indexes(repo, monkeypatch):
         scale.preload_retrieval_artifacts()
 
 
+def test_startup_preload_refuses_more_large_indexes_than_large_cache_cap(
+    repo, monkeypatch
+):
+    scale = repo._runtime.scale_artifacts
+    monkeypatch.setattr(scale.artifacts, "indexed_notebook_ids", lambda: ["a", "b"])
+    monkeypatch.setattr(scale.projections, "notebook_tier", lambda _id: "personal")
+    monkeypatch.setattr(scale.settings, "scale_idx_cache_max", 8)
+    monkeypatch.setattr(scale.settings, "scale_idx_cache_max_large", 1)
+    monkeypatch.setattr(scale.settings, "scale_idx_large_bytes", 1)
+    monkeypatch.setattr(
+        scale.artifacts,
+        "read_manifest",
+        lambda _directory: {"n_ann": 1},
+    )
+    monkeypatch.setattr(
+        scale,
+        "_preload_one_retrieval_index",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("large-capacity check must precede loading")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="SCALE_IDX_CACHE_MAX_LARGE"):
+        scale.preload_retrieval_artifacts()
+
+
+def test_startup_preload_accepts_large_indexes_when_large_cache_cap_is_sufficient(
+    repo, monkeypatch
+):
+    scale = repo._runtime.scale_artifacts
+    monkeypatch.setattr(scale.artifacts, "indexed_notebook_ids", lambda: ["a", "b"])
+    monkeypatch.setattr(scale.projections, "notebook_tier", lambda _id: "personal")
+    monkeypatch.setattr(scale.settings, "scale_idx_cache_max", 8)
+    monkeypatch.setattr(scale.settings, "scale_idx_cache_max_large", 2)
+    monkeypatch.setattr(scale.settings, "scale_idx_large_bytes", 1)
+    monkeypatch.setattr(
+        scale.artifacts,
+        "read_manifest",
+        lambda _directory: {"n_ann": 1},
+    )
+    loaded = []
+    monkeypatch.setattr(
+        scale,
+        "_preload_one_retrieval_index",
+        lambda notebook_id: (loaded.append(notebook_id) or {
+            "ann_handles": 1,
+            "ppr_cores": 0,
+        }),
+    )
+
+    result = scale.preload_retrieval_artifacts()
+
+    assert loaded == ["a", "b"]
+    assert result == {"indexes": 2, "ann_handles": 2, "ppr_cores": 0}
+
+
+def test_startup_preload_keeps_small_indexes_on_total_capacity_rail(
+    repo, monkeypatch
+):
+    scale = repo._runtime.scale_artifacts
+    monkeypatch.setattr(scale.artifacts, "indexed_notebook_ids", lambda: ["a", "b"])
+    monkeypatch.setattr(scale.projections, "notebook_tier", lambda _id: "personal")
+    monkeypatch.setattr(scale.settings, "scale_idx_cache_max", 2)
+    monkeypatch.setattr(scale.settings, "scale_idx_cache_max_large", 1)
+    monkeypatch.setattr(scale.settings, "scale_idx_large_bytes", 1_000_000)
+    monkeypatch.setattr(
+        scale.artifacts,
+        "read_manifest",
+        lambda _directory: {"n_ann": 1},
+    )
+    loaded = []
+    monkeypatch.setattr(
+        scale,
+        "_preload_one_retrieval_index",
+        lambda notebook_id: (loaded.append(notebook_id) or {
+            "ann_handles": 0,
+            "ppr_cores": 0,
+        }),
+    )
+
+    scale.preload_retrieval_artifacts()
+
+    assert loaded == ["a", "b"]
+
+
 def test_viz_probe_is_read_only_and_never_invokes_builder(repo, monkeypatch):
     notebook = _seed(repo)
     scale = repo._runtime.scale_artifacts

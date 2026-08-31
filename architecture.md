@@ -361,7 +361,7 @@ fail closed。`get_source_status`/`get_build_status`/`get_cited_element` 是只�
 
 ### 3.6 深度报告
 
-深度报告由 `report_engine.py` 作为可取消后台 job 执行。阶段 1a 先做完全不读取语料的问题理解，停在 `intent_ready`；确认端点通过 store 级 compare-and-set 原子认领 `intent_ready → planning`，把用户已审阅的合同和澄清答案确定性冻结，不再做隐藏的二次 LLM 理解。阶段 1b 才做语料侦察与多视角大纲，停在 `outline_ready` 供用户编辑；不可复制的大库不扫描整表 element，而从有界 chunk ANN/FTS 命中的 `element_ids` 恢复精确元素。阶段二在确认大纲后按 section 并行运行 reasoning 深挖并写成带证据纪律的 Markdown，内部检索问题可含澄清答案，但可见标题只使用确认后的研究问题。状态、逐节进度、下载、批量导出、取消与删除都通过 report API 暴露，不能在请求线程内同步跑完整报告。已认证的后端批量导出先由 repository SQL 完成 notebook/creator/done/nonempty 收窄并释放连接，再把不可变最小视图交给启动冻结的 single `report.exporter` Provider；默认内建 Markdown provider 是唯一默认实现，文件名/重复后缀和 ZIP 外壳继续归 core，不存在 fallback renderer。浏览器单篇 Markdown Blob 仍是已授权详情的本地呈现，不进入 backend Provider。
+深度报告由 `report_engine.py` 作为可取消后台 job 执行。阶段 1a 先做完全不读取语料的问题理解，停在 `intent_ready`；确认端点通过 store 级 compare-and-set 原子认领 `intent_ready → planning`，把用户已审阅的合同和澄清答案确定性冻结，不再做隐藏的二次 LLM 理解。阶段 1b 才做语料侦察与多视角大纲，停在 `outline_ready` 供用户编辑；覆盖/充分性探针先按逻辑组保留各自 first-N，再把跨主题/章节重复的 query 合并为一次检索，并在 report-wide leaf fanout 内并行 KG/element 叶子；聚合仍按原输入顺序。不可复制的大库不扫描整表 element，而从有界 chunk ANN 命中的 `element_ids` 恢复精确元素；ANN 不可用时才走有界 FTS 回退，精确短语/标识符仍是独立通道。阶段二在确认大纲后按 section 并行运行 reasoning 深挖并写成带证据纪律的 Markdown，内部检索问题可含澄清答案，但可见标题只使用确认后的研究问题。状态、逐节进度、下载、批量导出、取消与删除都通过 report API 暴露，不能在请求线程内同步跑完整报告。已认证的后端批量导出先由 repository SQL 完成 notebook/creator/done/nonempty 收窄并释放连接，再把不可变最小视图交给启动冻结的 single `report.exporter` Provider；默认内建 Markdown provider 是唯一默认实现，文件名/重复后缀和 ZIP 外壳继续归 core，不存在 fallback renderer。浏览器单篇 Markdown Blob 仍是已授权详情的本地呈现，不进入 backend Provider。
 
 ### 3.7 Knowhow 表投影与 Agent 面
 

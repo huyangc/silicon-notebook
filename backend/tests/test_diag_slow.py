@@ -71,6 +71,32 @@ def test_event_report_never_prints_raw_model_error_text(tmp_path, capsys):
     assert "present" in output
 
 
+def test_event_report_aggregates_retrieval_leaf_stages(tmp_path, capsys):
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    timestamp = datetime.now().isoformat()
+    rows = [
+        {"kind": "ask_stage", "stage": stage, "site": stage,
+         "latency_ms": latency, "total_ms": latency, "ts": timestamp}
+        for stage, latency in (
+            ("chunk_scale_index", 7),
+            ("chunk_ann", 11),
+            ("chunk_fts", 13),
+            ("kg_candidates", 17),
+        )
+    ]
+    (logs / "events.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
+    )
+
+    slow = load_slow()
+    slow.report_events(str(tmp_path), timedelta(hours=1))
+    output = capsys.readouterr().out
+
+    for stage in ("chunk_scale_index", "chunk_ann", "chunk_fts", "kg_candidates"):
+        assert stage in output
+
+
 def test_default_report_caps_all_sections(tmp_path, capsys, monkeypatch):
     slow = load_slow()
     monkeypatch.setattr(slow, "report_requests", lambda *args: print("x" * 40_000))

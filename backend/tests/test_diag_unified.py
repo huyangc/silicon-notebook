@@ -114,6 +114,20 @@ def test_latency_aggregation_matches_ask_latency():
     assert diag._aggregate_stage(records) == aggregate_stage_latencies(records)
 
 
+def test_latency_aggregation_preserves_retrieval_leaf_stage_names():
+    diag = _load_diag()
+    records = [
+        _make_ask_stage("chunk_scale_index", 7),
+        _make_ask_stage("chunk_ann", 11),
+        _make_ask_stage("chunk_fts", 13),
+        _make_ask_stage("kg_candidates", 17),
+    ]
+
+    assert set(diag._aggregate_stage(records)) == {
+        "chunk_scale_index", "chunk_ann", "chunk_fts", "kg_candidates",
+    }
+
+
 def test_latency_subcommand_end_to_end(tmp_path):
     log = tmp_path / "events.jsonl"
     recs = [_make_ask_stage("score", v) for v in [10, 20, 30, 40, 100]]

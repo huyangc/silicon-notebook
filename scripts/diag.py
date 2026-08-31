@@ -68,7 +68,8 @@ def _percentile_nearest(values: list, p: float) -> float:
 _STAGE_ORDER = ["load_indexes", "score", "expand", "answer_llm", "total"]
 _SAFE_STAGES = frozenset(
     _STAGE_ORDER
-    + ["answer", "embed", "embedding", "extract", "graph", "index", "parse", "pipeline", "ppr", "report", "retrieval", "seed"]
+    + ["answer", "embed", "embedding", "extract", "graph", "index", "parse", "pipeline", "ppr", "report", "retrieval", "seed",
+       "chunk_ann", "chunk_fts", "chunk_scale_index", "kg_candidates"]
 )
 
 

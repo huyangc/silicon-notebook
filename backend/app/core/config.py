@@ -589,7 +589,13 @@ class Settings(BaseSettings):
     # 检索排序: 默认用关键词+语义加权融合; 开启后改用 BM25 与语义的 RRF 融合排序。
     retrieval_rrf_enabled: bool = Field(False, validation_alias="RETRIEVAL_RRF_ENABLED")
     retrieval_rrf_k: int = Field(60, validation_alias="RETRIEVAL_RRF_K")
-    chunk_ann_enabled: bool = Field(True, validation_alias="CHUNK_ANN_ENABLED")  # 有索引的库 chunk 检索走 ANN 核⊕delta(默认开:大库全量暴力不可扩展;小库无 scale 索引→_scale_index 返 None→自然回退暴力,零影响)。ANN 是语义候选,纯关键词命中缺口待 chunk 侧 FTS(词法∪语义)补;可用 CHUNK_ANN_ENABLED=false 关
+    chunk_ann_enabled: bool = Field(True, validation_alias="CHUNK_ANN_ENABLED")  # 有索引的库 chunk 检索走 ANN 核⊕delta(默认开:大库全量暴力不可扩展;小库无 scale 索引→_scale_index 返 None→自然回退暴力,零影响)
+    # 深度报告 run 内，已索引库的普通自然语言 chunk 探针默认只走
+    # ANN；普通 Ask、精确标识符/引用探针及 ANN 不可用时的有界 FTS 回退
+    # 均不受此闸影响。True 是报告质量回滚闸：恢复每次 ANN∪FTS。
+    chunk_fts_with_ann_enabled: bool = Field(
+        False, validation_alias="CHUNK_FTS_WITH_ANN_ENABLED"
+    )
     # Optional LLM-generated question index. ``shadow`` computes bounded
     # low-recall candidates and records counts but cannot change results;
     # only explicit ``on`` merges them. Default off keeps model cost opt-in.
@@ -1259,6 +1265,14 @@ class Settings(BaseSettings):
         30,
         validation_alias="POSTGRES_STATEMENT_TIMEOUT_SECONDS",
     )
+    # 通用 chunk FTS 是 fail-open 补召回/回退臂，不得占满整个全局
+    # statement timeout。适配器在一个 savepoint 内仅缩短该词法语句。
+    postgres_chunk_fts_timeout_seconds: float = Field(
+        1.0,
+        gt=0,
+        le=10,
+        validation_alias="POSTGRES_CHUNK_FTS_TIMEOUT_SECONDS",
+    )
     postgres_lock_timeout_seconds: int = Field(
         5,
         validation_alias="POSTGRES_LOCK_TIMEOUT_SECONDS",
@@ -1323,6 +1337,18 @@ class Settings(BaseSettings):
             raise ValueError(
                 "SCALE_BUILD_FAILURE_BACKOFF_MAX_SECONDS 必须 ≥ "
                 "SCALE_BUILD_FAILURE_BACKOFF_SECONDS(封顶不能低于起步延迟)"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def validate_chunk_fts_timeout_ceiling(self):
+        if (
+            self.postgres_chunk_fts_timeout_seconds
+            > self.postgres_statement_timeout_seconds
+        ):
+            raise ValueError(
+                "POSTGRES_CHUNK_FTS_TIMEOUT_SECONDS 不得大于 "
+                "POSTGRES_STATEMENT_TIMEOUT_SECONDS"
             )
         return self
 

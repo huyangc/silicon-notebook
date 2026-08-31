@@ -25,6 +25,7 @@ from app.core.config import (
 from app.models.common import Evidence
 from app.domain.extensions import GENERATED_QUESTION_ACCESS_CAPABILITY
 from app.domain.retrieval import ChunkRetrievalPlan
+from app.repositories.ports import ChunkLexicalSearchTimeout
 from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
 from app.services.knowledge_contracts import USABLE_STATUSES
 from app.services.retrieval import (
@@ -806,6 +807,81 @@ class CandidateRetrievalService(_RetrievalState):
             })
             return None
 
+    def _chunk_fts_hits(
+        self,
+        db,
+        notebook_id: str,
+        query: str,
+        *,
+        k: int,
+        allowed_source_ids=None,
+        corpus_langs=None,
+    ) -> list[dict]:
+        """Run one generic chunk lexical leaf with run-local fail-fast state."""
+        run = current_retrieval_run()
+        if run is not None and not run.chunk_fts_permitted(notebook_id):
+            self.event_log.emit({
+                "kind": "ask_stage",
+                "stage": "chunk_fts",
+                "site": "chunk_fts",
+                "notebook_id": notebook_id,
+                "status": "skipped_circuit_open",
+                "latency_ms": 0,
+                "chunk_fts_ms": 0,
+                "hits": 0,
+            })
+            return []
+        started = time.perf_counter()
+        try:
+            hits = self.knowledge.chunk_fts_search(
+                db,
+                notebook_id,
+                query,
+                k=k,
+                allowed_source_ids=allowed_source_ids,
+                corpus_langs=corpus_langs,
+            )
+        except ChunkLexicalSearchTimeout:
+            if run is not None:
+                run.note_chunk_fts_timeout(notebook_id)
+            elapsed_ms = round((time.perf_counter() - started) * 1000)
+            self.event_log.emit({
+                "kind": "ask_stage",
+                "stage": "chunk_fts",
+                "site": "chunk_fts",
+                "notebook_id": notebook_id,
+                "status": "timeout",
+                "latency_ms": elapsed_ms,
+                "chunk_fts_ms": elapsed_ms,
+                "hits": 0,
+            })
+            raise
+        except Exception:
+            elapsed_ms = round((time.perf_counter() - started) * 1000)
+            self.event_log.emit({
+                "kind": "ask_stage",
+                "stage": "chunk_fts",
+                "site": "chunk_fts",
+                "notebook_id": notebook_id,
+                "status": "failed_open",
+                "latency_ms": elapsed_ms,
+                "chunk_fts_ms": elapsed_ms,
+                "hits": 0,
+            })
+            raise
+        elapsed_ms = round((time.perf_counter() - started) * 1000)
+        self.event_log.emit({
+            "kind": "ask_stage",
+            "stage": "chunk_fts",
+            "site": "chunk_fts",
+            "notebook_id": notebook_id,
+            "status": "ok",
+            "latency_ms": elapsed_ms,
+            "chunk_fts_ms": elapsed_ms,
+            "hits": len(hits),
+        })
+        return hits
+
     def _embed_query(self, query: str) -> Optional[List[float]]:
         """查询 embedding(端点按原生维出向量)→ 运行时截断(EMBED_RUNTIME_DIM,
         与语料侧 build_matrix 共用 truncate_vec 同一口径)。查询/语料两侧维度
@@ -1369,26 +1445,35 @@ class CandidateRetrievalService(_RetrievalState):
         return score_relations(query, relations, query_vector=query_vector,
                                relation_sims=relation_sims,
                                downweight_edges=self.settings.kg_about_downweight_enabled)
-    def _kg_object_candidates(self, notebook_id, query_vector, idx, recall) -> dict:
+    def _kg_object_candidates(
+        self, notebook_id, query_vector, idx, recall, *, stats=None
+    ) -> dict:
         """ANN 核候选(idx.ann_path=knowledge_embeddings)⊕ delta 对象暴力。
         返回 {object_id: sim∈[0,1]}。fail-open 返回 {} 让上层退回全量。"""
         import numpy as np
         from app.services.vector_index import build_matrix, query_sims
+        t0 = time.perf_counter()
+        open_ms = 0
+        knn_ms = 0
         sims: dict = {}
         labels = getattr(idx, "ann_labels", None)
         if labels and query_vector is not None:
             qarr = np.asarray(query_vector, dtype=np.float32)
             dim = int(idx.manifest.get("dim", qarr.shape[0]))
             if dim == qarr.shape[0]:
+                open_started = time.perf_counter()
                 ann = self._open_scale_ann(idx, "kg")
+                open_ms = round((time.perf_counter() - open_started) * 1000)
                 if ann is None:
                     return {}
                 try:
+                    knn_started = time.perf_counter()
                     ann.set_ef(max(recall + 1, 64))
                     k = min(recall, len(labels))
                     labs, dists = ann.knn_query(qarr, k=k)
                     for l, d in zip(labs[0], dists[0]):
                         sims[labels[int(l)]] = max(0.0, 1.0 - float(d))
+                    knn_ms = round((time.perf_counter() - knn_started) * 1000)
                 except Exception as exc:  # noqa: BLE001 — fail-open
                     self._note_model_error(
                         "kg_obj_ann",
@@ -1397,6 +1482,7 @@ class CandidateRetrievalService(_RetrievalState):
                         service="embedding",
                     )
                     return {}
+        delta_started = time.perf_counter()
         # ⊕ delta 对象(水位后 source)暴力 —— opt-in(scale_search_include_delta,
         # 默认关):与 chunk 侧同一原则「已索引的库只检索已索引部分」,delta 由
         # scale_auto_fold_on_add 的增量 fold 收进索引(最终一致)。True 时保持
@@ -1421,6 +1507,17 @@ class CandidateRetrievalService(_RetrievalState):
                     exc,
                     service="embedding",
                 )
+        if stats is not None:
+            total_ms = round((time.perf_counter() - t0) * 1000)
+            delta_ms = round((time.perf_counter() - delta_started) * 1000)
+            stats.update({
+                "open_ms": open_ms,
+                "knn_ms": knn_ms,
+                "delta_ms": delta_ms,
+                "prepare_ms": max(
+                    0, total_ms - open_ms - knn_ms - delta_ms
+                ),
+            })
         return sims
     def _knowhow_object_types(self, notebook_id: str) -> tuple:
         """Distinct Knowhow cell-KO object types (each a table COLUMN NAME — a
@@ -1592,6 +1689,13 @@ class CandidateRetrievalService(_RetrievalState):
         candidate_filter: Optional[set[str]] = None
         lexical_candidate_count = 0
         source_index_fallback = False
+        scale_index_ms = 0
+        kg_ann_ms = 0
+        kg_ann_prepare_ms = 0
+        kg_ann_open_ms = 0
+        kg_ann_knn_ms = 0
+        kg_delta_ms = 0
+        kg_lexical_ms = 0
         if source_candidates_restricted:
             # Truly source-restricted runs never enter a notebook-wide fallback.
             # Lexical SQL applies the source predicate before LIMIT; a ready
@@ -1609,6 +1713,7 @@ class CandidateRetrievalService(_RetrievalState):
                 source_index_fallback = not self.knowledge.source_index_backfilled(
                     db, notebook_id
                 )
+                lexical_started = time.perf_counter()
                 lexical_hits = self._lexical_object_hits(
                     db, notebook_id, query, self.settings.chunk_recall,
                     site="kg_source_scoped_fts",
@@ -1618,6 +1723,9 @@ class CandidateRetrievalService(_RetrievalState):
                     # Read authoritative evidence before LIMIT instead of
                     # silently returning an empty candidate set.
                     authoritative_source_filter=source_index_fallback,
+                )
+                kg_lexical_ms += round(
+                    (time.perf_counter() - lexical_started) * 1000
                 )
             if source_index_fallback:
                 self.event_log.emit({
@@ -1633,7 +1741,11 @@ class CandidateRetrievalService(_RetrievalState):
             if not candidate_filter:
                 return []
         elif query_vector is not None:
+            scale_started = time.perf_counter()
             idx = self._scale_index(notebook_id, allow_stale=True)
+            scale_index_ms += round(
+                (time.perf_counter() - scale_started) * 1000
+            )
             if idx is None:
                 # 无 ANN 核 → 本次退回全量暴力(O(N))。O(1) once-set 兜底:大库应
                 # 自动建索引,避免长期停留在暴力回退稳态。fail-open,不影响本次检索。
@@ -1642,8 +1754,19 @@ class CandidateRetrievalService(_RetrievalState):
                 except Exception:
                     pass
             elif getattr(idx, "ann_labels", None):
+                kg_stats = {}
                 ann_sims = self._kg_object_candidates(
-                    notebook_id, query_vector, idx, self.settings.chunk_recall)
+                    notebook_id,
+                    query_vector,
+                    idx,
+                    self.settings.chunk_recall,
+                    stats=kg_stats,
+                )
+                kg_ann_prepare_ms = int(kg_stats.get("prepare_ms", 0))
+                kg_ann_open_ms = int(kg_stats.get("open_ms", 0))
+                kg_ann_knn_ms = int(kg_stats.get("knn_ms", 0))
+                kg_delta_ms = int(kg_stats.get("delta_ms", 0))
+                kg_ann_ms = kg_ann_open_ms + kg_ann_knn_ms
                 # This is a whole-notebook candidate branch.  A frozen
                 # all-selected ceiling may still be present, but it applies
                 # only at hydration/result boundaries after the ANN+FTS union.
@@ -1654,6 +1777,7 @@ class CandidateRetrievalService(_RetrievalState):
                 allow_knn = self._lexical_knn_allowed(
                     notebook_id, allowed_source_ids=None)
                 with self._connect() as db:
+                    lexical_started = time.perf_counter()
                     lexical_hits = self._lexical_object_hits(
                         db,
                         notebook_id,
@@ -1662,6 +1786,9 @@ class CandidateRetrievalService(_RetrievalState):
                         site="kg_ann_fts",
                         corpus_langs=corpus_langs,
                         allow_knn=allow_knn,
+                    )
+                    kg_lexical_ms += round(
+                        (time.perf_counter() - lexical_started) * 1000
                     )
                 lexical_ids = [hit["object_id"] for hit in lexical_hits]
                 lexical_candidate_count = len(lexical_ids)
@@ -1684,6 +1811,7 @@ class CandidateRetrievalService(_RetrievalState):
                 ),
             )
             with self._connect() as db:
+                lexical_started = time.perf_counter()
                 lex = self._lexical_object_hits(
                     db,
                     notebook_id,
@@ -1692,6 +1820,9 @@ class CandidateRetrievalService(_RetrievalState):
                     site="kg_large_fallback_fts",
                     corpus_langs=corpus_langs,
                     allow_knn=allow_knn,
+                )
+                kg_lexical_ms += round(
+                    (time.perf_counter() - lexical_started) * 1000
                 )
             self.event_log.emit({
                 "kind": "kg_bruteforce_refused", "notebook_id": notebook_id,
@@ -1824,15 +1955,28 @@ class CandidateRetrievalService(_RetrievalState):
                     notebook_id, (hit.object_id for hit in scored)
                 ),
             )
+        total_ms = round((time.perf_counter() - t0) * 1000)
         self.event_log.emit({
             "kind": "ask_stage", "site": "_retrieve_scored",
+            "stage": "kg_candidates",
             "notebook_id": notebook_id,
+            "latency_ms": total_ms,
             "embed_ms": round((t_embed - t0) * 1000),
-            "ann_ms": round((t_ann - t_embed) * 1000),
+            # This interval includes index lookup, ANN, lexical candidate SQL,
+            # and fallback routing.  Calling it pure ANN hid the production
+            # FTS timeout that motivated the split chunk-leaf events above.
+            "candidate_ms": round((t_ann - t_embed) * 1000),
+            "scale_index_ms": scale_index_ms,
+            "kg_ann_ms": kg_ann_ms,
+            "kg_ann_prepare_ms": kg_ann_prepare_ms,
+            "kg_ann_open_ms": kg_ann_open_ms,
+            "kg_ann_knn_ms": kg_ann_knn_ms,
+            "kg_delta_ms": kg_delta_ms,
+            "kg_lexical_ms": kg_lexical_ms,
             "hydrate_ms": round((t_hydrate - t_ann) * 1000),
             "score_ms": round((t_score - t_hydrate) * 1000),
             "fold_ms": round((time.perf_counter() - t_score) * 1000),
-            "total_ms": round((time.perf_counter() - t0) * 1000),
+            "total_ms": total_ms,
             "candidates": len(all_kg_objs),
             "ann_gated": candidate_filter is not None,
             "lexical_candidates": lexical_candidate_count,
@@ -2670,7 +2814,20 @@ class CandidateRetrievalService(_RetrievalState):
         query_vector = self._embed_query(query)
         if (self.settings.chunk_ann_enabled
                 and query_vector is not None):
+            scale_started = time.perf_counter()
             idx = self._scale_index(notebook_id, allow_stale=True)
+            scale_index_load_ms = round(
+                (time.perf_counter() - scale_started) * 1000
+            )
+            self.event_log.emit({
+                "kind": "ask_stage",
+                "stage": "chunk_scale_index",
+                "site": "chunk_scale_index",
+                "notebook_id": notebook_id,
+                "latency_ms": scale_index_load_ms,
+                "scale_index_load_ms": scale_index_load_ms,
+                "status": "ready" if idx is not None else "unavailable",
+            })
             if idx is not None and getattr(idx, "chunk_ann_labels", None):
                 if allowed_source_ids is None:
                     ann = self._retrieve_chunks_ann(
@@ -2775,19 +2932,16 @@ class CandidateRetrievalService(_RetrievalState):
             corpus_langs = self._lexical_corpus_langs(
                 notebook_id, source_scoped=source_restricted)
             with self._connect() as db:
-                if allowed_source_ids is None:
-                    hits = self.knowledge.chunk_fts_search(
-                        db, notebook_id, query, k=recall,
-                        corpus_langs=corpus_langs,
-                    )
-                else:
-                    hits = self.knowledge.chunk_fts_search(
-                        db, notebook_id, query, k=recall,
-                        allowed_source_ids=allowed_source_ids,
-                        corpus_langs=corpus_langs,
-                    )
+                hits = self._chunk_fts_hits(
+                    db,
+                    notebook_id,
+                    query,
+                    k=recall,
+                    allowed_source_ids=allowed_source_ids,
+                    corpus_langs=corpus_langs,
+                )
         except Exception as exc:  # noqa: BLE001 — 降级中的降级,守卫本身绝不抛
-            fts_error = f"{type(exc).__name__}: {exc}"
+            fts_error = type(exc).__name__
         event = {
             "kind": "chunk_bruteforce_skipped", "notebook_id": notebook_id,
             "reason": "large_library_no_ann", "n_chunks": n_chunks,
@@ -2822,13 +2976,14 @@ class CandidateRetrievalService(_RetrievalState):
         """ANN 候选版 chunk 检索:只对 top-recall 候选打分,避免全表 matmul+重分词。
         返回 (scored, ids, matrix) 同 _retrieve_chunks;失败返回 None(上层回退暴力)。
 
-        ``source_restricted`` 同 ``_retrieve_chunks_fts_degraded``:下方 ∪ 词法臂
-        的语料语言闸按「这次运行真被收窄了吗」路由,不按清单在不在。"""
+        ``source_restricted`` 同 ``_retrieve_chunks_fts_degraded``:启用下方词法臂时，
+        语料语言闸按「这次运行真被收窄了吗」路由,不按清单在不在。"""
         import numpy as np
         from app.services.retrieval import (
             RetrievalSupport, add_chunk_supports, score_chunks,
         )
         from app.services.vector_index import build_matrix, query_sims
+        t0 = time.perf_counter()
         labels = idx.chunk_ann_labels
         if not labels:
             return None
@@ -2857,9 +3012,12 @@ class CandidateRetrievalService(_RetrievalState):
                 "kind": "dim_mismatch", "notebook_id": notebook_id, "site": "chunk_ann",
                 "manifest_dim": dim, "query_dim": int(qarr.shape[0])})
             return None
+        t_before_open = time.perf_counter()
         ann = self._open_scale_ann(idx, "chunk")
+        t_open = time.perf_counter()
         if ann is None:
             return None
+        source_filter_mode = "none" if allowed is None else "filtered"
         try:
             ann.set_ef(max(recall + 1, 64))
             if allowed is None:
@@ -2875,20 +3033,41 @@ class CandidateRetrievalService(_RetrievalState):
                     for source_id in allowed
                     if source_id in code_by_source
                 )
+                indexed_codes = frozenset(int(code) for code in source_codes)
+                if any(
+                    code < 0 or code >= len(source_names)
+                    for code in indexed_codes
+                ):
+                    # A malformed sidecar must never turn a frozen allow-list
+                    # into an unfiltered query.  Fail to the scoped FTS lane.
+                    return None
                 eligible = sum(
                     int(source_counts[code]) for code in allowed_codes
                 )
                 if eligible:
                     k = min(recall, eligible)
-                    labs, dists = ann.knn_query(
-                        qarr,
-                        k=k,
-                        filter=lambda label: int(source_codes[int(label)])
-                        in allowed_codes,
-                    )
+                    if indexed_codes.issubset(allowed_codes):
+                        # The immutable index contains no row outside this
+                        # frozen ceiling, so the callback is provably vacuous.
+                        # This is the common all-selected case on a large
+                        # shared notebook and preserves scope byte-for-byte.
+                        source_filter_mode = "vacuous"
+                        labs, dists = ann.knn_query(qarr, k=k)
+                    else:
+                        labs, dists = ann.knn_query(
+                            qarr,
+                            k=k,
+                            filter=lambda label: int(source_codes[int(label)])
+                            in allowed_codes,
+                        )
                 else:
-                    labs = np.empty((1, 0), dtype=np.int64)
-                    dists = np.empty((1, 0), dtype=np.float32)
+                    # None of the frozen sources is represented in this
+                    # immutable ANN generation (commonly a newly added source
+                    # waiting for fold).  This is not a healthy empty ANN
+                    # result: return None so the caller uses source-bounded FTS
+                    # instead of letting the report ANN-only fast path erase
+                    # every candidate.
+                    return None
         except Exception as exc:  # noqa: BLE001 — fail-open, 回退暴力
             self._note_model_error(
                 "chunk_ann_query",
@@ -2897,13 +3076,15 @@ class CandidateRetrievalService(_RetrievalState):
                 service="embedding",
             )
             return None
+        t_knn = time.perf_counter()
         chunk_sims = {labels[int(l)]: max(0.0, 1.0 - float(d)) for l, d in zip(labs[0], dists[0])}
         cand_ids = list(chunk_sims.keys())
 
         # ⊕ delta(opt-in via scale_search_include_delta):水位后新增 source 的 chunk 不在
         # 存量 ANN → 暴力补召回(delta 小)。默认关 —— 大库 delta 暴力不可扩展,改由
-        # scale_auto_fold_on_add 排增量 fold 把 delta 收进索引(下方 FTS 词法块始终覆盖
-        # 全部 chunk,delta 关时新内容仍词法可寻)。True 时保持强一致的暴力补召回(慢)。
+        # scale_auto_fold_on_add 排增量 fold 把 delta 收进索引。普通 Ask / 报告质量
+        # 回滚闸仍由下方 FTS 覆盖全部 chunk；报告默认 ANN-only 时依赖及时 fold。
+        # True 时保持强一致的暴力补召回(慢)。
         if self.settings.scale_search_include_delta:
             try:
                 delta = self._index_delta(notebook_id)
@@ -2933,34 +3114,81 @@ class CandidateRetrievalService(_RetrievalState):
                     exc,
                     service="embedding",
                 )
+        t_delta = time.perf_counter()
 
         semantic_ids = set(chunk_sims)
         lexical_ids = set()
-        # ∪ 词法:FTS5 命中补召回(ANN 是语义候选,纯关键词命中可能漏)
-        try:
-            corpus_langs = self._lexical_corpus_langs(
-                notebook_id, source_scoped=source_restricted
-            )
-            with self._connect() as db:
-                lex = self.knowledge.chunk_fts_search(
-                    db, notebook_id, query, k=recall,
-                    allowed_source_ids=(
-                        tuple(sorted(allowed)) if allowed is not None else None
-                    ),
-                    corpus_langs=corpus_langs)
-            for h in lex:
-                cid = h["chunk_id"]
-                lexical_ids.add(cid)
-                if cid not in chunk_sims:
-                    cand_ids.append(cid)
-                    # Candidate identity and semantic evidence stay separate:
-                    # absence from chunk_sims means keyword-only fusion.
-        except Exception as exc:  # noqa: BLE001 — 词法失败不拖垮检索
-            self._note_model_error("chunk_fts", "", exc)
+        fts_leaf_ms = 0
+        # Healthy ANN is the scalable default for Deep Report's high-fanout
+        # runs only.  Ordinary Ask keeps its historical ANN∪FTS quality lane;
+        # exact identifier/quoted probes use their separate path, and ANN
+        # failure still falls back to bounded FTS.  The setting is a report
+        # quality rollback that restores the union there too.
+        run = current_retrieval_run()
+        report_ann_only = bool(
+            run is not None
+            and run.run_kind in {"report_planning", "report_generation"}
+            and not self.settings.chunk_fts_with_ann_enabled
+        )
+        if not report_ann_only:
+            try:
+                corpus_langs = self._lexical_corpus_langs(
+                    notebook_id, source_scoped=source_restricted
+                )
+                with self._connect() as db:
+                    fts_started = time.perf_counter()
+                    try:
+                        lex = self._chunk_fts_hits(
+                            db,
+                            notebook_id,
+                            query,
+                            k=recall,
+                            allowed_source_ids=(
+                                tuple(sorted(allowed))
+                                if allowed is not None else None
+                            ),
+                            corpus_langs=corpus_langs,
+                        )
+                    finally:
+                        fts_leaf_ms = round(
+                            (time.perf_counter() - fts_started) * 1000
+                        )
+                for h in lex:
+                    cid = h["chunk_id"]
+                    lexical_ids.add(cid)
+                    if cid not in chunk_sims:
+                        cand_ids.append(cid)
+                        # Candidate identity and semantic evidence stay separate:
+                        # absence from chunk_sims means keyword-only fusion.
+            except Exception as exc:  # noqa: BLE001 — 词法失败不拖垮检索
+                self._note_model_error("chunk_fts", "", exc)
+        t_fts = time.perf_counter()
 
         if not cand_ids:
+            total_ms = round((time.perf_counter() - t0) * 1000)
+            self.event_log.emit({
+                "kind": "ask_stage",
+                "stage": "chunk_ann",
+                "site": "chunk_ann",
+                "notebook_id": notebook_id,
+                "latency_ms": total_ms,
+                "ann_prepare_ms": round((t_before_open - t0) * 1000),
+                "ann_open_ms": round((t_open - t_before_open) * 1000),
+                "knn_ms": round((t_knn - t_open) * 1000),
+                "delta_ms": round((t_delta - t_knn) * 1000),
+                "lexical_prepare_ms": max(
+                    0, round((t_fts - t_delta) * 1000) - fts_leaf_ms
+                ),
+                "chunk_fts_ms": fts_leaf_ms,
+                "hydrate_ms": 0,
+                "score_ms": 0,
+                "total_ms": total_ms,
+                "source_filter_mode": source_filter_mode,
+                "candidates": 0,
+            })
             return [], [], None
         chunks, ids, mat = self._hydrate_chunk_candidates(cand_ids)
+        t_hydrate = time.perf_counter()
         if allowed is not None:
             chunks = [chunk for chunk in chunks if chunk["source_id"] in allowed]
             kept_ids = {chunk["chunk_id"] for chunk in chunks}
@@ -2981,6 +3209,28 @@ class CandidateRetrievalService(_RetrievalState):
                 )] if chunk.chunk_id in lexical_ids else []),
             ]
             for chunk in scored
+        })
+        t_score = time.perf_counter()
+        total_ms = round((time.perf_counter() - t0) * 1000)
+        self.event_log.emit({
+            "kind": "ask_stage",
+            "stage": "chunk_ann",
+            "site": "chunk_ann",
+            "notebook_id": notebook_id,
+            "latency_ms": total_ms,
+            "ann_prepare_ms": round((t_before_open - t0) * 1000),
+            "ann_open_ms": round((t_open - t_before_open) * 1000),
+            "knn_ms": round((t_knn - t_open) * 1000),
+            "delta_ms": round((t_delta - t_knn) * 1000),
+            "lexical_prepare_ms": max(
+                0, round((t_fts - t_delta) * 1000) - fts_leaf_ms
+            ),
+            "chunk_fts_ms": fts_leaf_ms,
+            "hydrate_ms": round((t_hydrate - t_fts) * 1000),
+            "score_ms": round((t_score - t_hydrate) * 1000),
+            "total_ms": total_ms,
+            "source_filter_mode": source_filter_mode,
+            "candidates": len(cand_ids),
         })
         return scored, ids, mat
     def hydrate_chunk_candidates(self, cand_ids):
@@ -3188,16 +3438,14 @@ class CandidateRetrievalService(_RetrievalState):
             corpus_langs = self._lexical_corpus_langs(
                 notebook_id, source_scoped=source_restricted)
             with self._connect() as db:
-                if allowed_source_ids is None:
-                    hits = self.knowledge.chunk_fts_search(
-                        db, notebook_id, needle, k=recall,
-                        corpus_langs=corpus_langs)
-                else:
-                    hits = self.knowledge.chunk_fts_search(
-                        db, notebook_id, needle, k=recall,
-                        allowed_source_ids=allowed_source_ids,
-                        corpus_langs=corpus_langs,
-                    )
+                hits = self._chunk_fts_hits(
+                    db,
+                    notebook_id,
+                    needle,
+                    k=recall,
+                    allowed_source_ids=allowed_source_ids,
+                    corpus_langs=corpus_langs,
+                )
             if not hits:
                 return []
             chunks, _ids, _mat = self._hydrate_chunk_candidates([h["chunk_id"] for h in hits])

@@ -63,4 +63,15 @@ def test_retrieve_scored_emits_ask_stage(repo_factory):
     assert "ask_stage" in kinds
     ev = next(e for e in events if e.get("kind") == "ask_stage")
     assert ev.get("site") == "_retrieve_scored"
+    assert ev.get("stage") == "kg_candidates"
+    assert ev.get("latency_ms") == ev.get("total_ms")
     assert "total_ms" in ev and "embed_ms" in ev and "score_ms" in ev
+    assert "ann_ms" not in ev
+    assert {
+        "candidate_ms",
+        "scale_index_ms",
+        "kg_ann_open_ms",
+        "kg_ann_knn_ms",
+        "kg_delta_ms",
+        "kg_lexical_ms",
+    } <= ev.keys()

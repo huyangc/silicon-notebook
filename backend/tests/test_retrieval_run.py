@@ -227,6 +227,19 @@ def test_retrieval_run_event_is_content_free_and_correlates_reports():
     assert not ({"notebook_id", "source_id", "query", "title", "text"} & set(event))
 
 
+def test_chunk_fts_timeout_opens_only_that_runs_library_circuit():
+    log = _Log()
+    with retrieval_run(run_kind="report_planning", event_log=log) as state:
+        assert state.chunk_fts_permitted("nb-a") is True
+        state.note_chunk_fts_timeout("nb-a")
+        state.note_chunk_fts_timeout("nb-a")
+        assert state.chunk_fts_permitted("nb-a") is False
+        assert state.chunk_fts_permitted("nb-b") is True
+
+    assert log.events[0]["chunk_fts_timeouts"] == 1
+    assert log.events[0]["chunk_fts_circuit_skips"] == 1
+
+
 def test_retrieval_run_event_does_not_echo_an_unregistered_run_kind():
     log = _Log()
     with retrieval_run(run_kind="SECRET-USER-CONTENT", event_log=log):

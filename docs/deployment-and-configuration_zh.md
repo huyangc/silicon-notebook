@@ -654,6 +654,8 @@ SCALE_INDEX_AUTO_ENABLED   # 为大库自动构建/刷新检索索引（默认 t
 SCALE_INDEX_AUTO_WHEN      # "idle"=排队到低峰窗口（默认）｜ "now"=立即构建
 STARTUP_PRELOAD_SCALE_INDEXES # readiness 前加载全部已发布 scale 索引、启用 ANN 与安全的单索引 PPR core（默认 true）
 SCALE_IDX_CACHE_MAX        # scale 索引常驻上限；开预加载时必须不少于存量有效索引数（默认 8）
+SCALE_IDX_CACHE_MAX_LARGE  # 估算 ANN 矩阵超过 SCALE_IDX_LARGE_BYTES 的大索引常驻上限；预加载也必须覆盖全部已发布大索引（默认 2）
+SCALE_IDX_LARGE_BYTES      # runtime LRU 与启动预加载共用的大索引分类阈值（默认 8GiB）
 SEARCH_CONCURRENCY_LIMIT   # 笔记本全文搜索的进程级并发上限，HTTP /search 路由与 MCP search_notebook_context 工具共用一个闸（默认 4，对齐前端集合页自身的搜索扇出档位）。等待发生在事件循环上（不占线程、不占数据库连接）且无超时——结果只会延后、绝不收窄。这是部署成本预算：POSTGRES_POOL_MAX_SIZE 较小的主机应调低；只有池有余量时才调高。
 SCALE_BUILD_CONCURRENCY    # 进程内同时执行的 scale 索引 build/fold 操作上限（默认 2）。此前每个构建都是裸的无界 daemon 线程，低峰调度器可能把整条 idle 队列一次性全部起线程、在同机上打出一次内存/CPU 峰值；超出上限的构建会先阻塞在这道闸前，构建本身一旦真正开始执行，耗时不受影响。
 SCALE_BUILD_FAILURE_BACKOFF_SECONDS     # 同一 notebook 的 scale build/fold 失败后，**自动**重跑（调度器/发布后 follow-up——不含用户显式点击「立即重建」）前的最短等待（默认 60）。指数退避：每次连续失败翻倍。
@@ -661,7 +663,8 @@ SCALE_BUILD_FAILURE_BACKOFF_MAX_SECONDS # 该指数退避的封顶值（默认 1
 ```
 
 开启启动预加载后，`/api/ready` 会在 `preloading_indexes` 阶段持续返回 false。任一必需
-工件损坏，或存量已发布索引数超过 `SCALE_IDX_CACHE_MAX`，启动都会保持 not-ready，不把冷加载
+工件损坏、存量已发布索引数超过 `SCALE_IDX_CACHE_MAX`，或其中大索引数超过
+`SCALE_IDX_CACHE_MAX_LARGE`，启动都会保持 not-ready，不把冷加载
 转嫁给首位用户。应按全部常驻索引配置 cache 与 RAM。只有在需要进入 UI/维护流程重建损坏索引
 时才临时设 `STARTUP_PRELOAD_SCALE_INDEXES=false`，修复后恢复。`scripts/backend.sh start` 默认等待
 1,800 秒并打印 readiness 阶段变化；极慢磁盘可用 `START_TIMEOUT_SECONDS` 覆盖。
@@ -778,6 +781,8 @@ RETRIEVAL_EXPERIENCE_TRIGGER # 蒸馏一批前需累计的已完成提问数（�
 USER_SEARCH_PROFILE_ENABLED  # 每用户检索/回答风格偏好文档总闸（Agentic Memory P3 B 线）：后台归纳、Ask 规划/答案注入、`PATCH /me/search-profile` 可写性都由它决定（默认 true；关闭后注入/写入两侧处处逐字回到接入前——不归纳、不注入、`PATCH` 409——但 `GET /me` 仍照常返回该行上已存在的取值，不会伪造成 `search_profile: null`）
 USER_SEARCH_PROFILE_TRIGGER  # 确定性、零 LLM 的 `answer_language` 归纳任务再次运行前，该用户需累计的已完成提问数（默认 20；ge=1）
 CHUNK_RECALL                 # chunk 大召回数（默认 200；mix 候选池 / 无 rerank 时 MMR 候选）
+CHUNK_FTS_WITH_ANN_ENABLED   # 仅深度报告：健康带索引 chunk ANN 后恢复通用词法 union（默认 false；普通 Ask、精确定位与 ANN fallback 不受影响）
+POSTGRES_CHUNK_FTS_TIMEOUT_SECONDS # 仅 PostgreSQL：单次通用 chunk 词法调用的独立 deadline（默认 1.0；>0、<=10 且 <=POSTGRES_STATEMENT_TIMEOUT_SECONDS）；超时后对本 run 的该 notebook 熔断
 LEXICAL_LANGUAGE_GATE_ENABLED # 语料采样中没有任何 CJK 字符时，丢弃纯 CJK 的词法词项（默认 true；这些探针对该库保证零命中，却各买一次真实的 PostgreSQL LATERAL 探针——7,026 块的英文库实测：64 词项冷 29.7s / 3 词项暖 0.26s，返回同样的 26 行，未过滤形态在报告多节并发下会直接超时。绝不过滤用户引号短语与整句词项，不做拉丁方向，也不作用于**真正**按来源收窄的运行——那条路的词法臂是它唯一的候选来源，而且来源谓词已经把扫描收窄了。这条豁免按「是否收窄」判定——producer 自己真正收窄的 allow-list 与请求自身的复选框收窄同等看待——而不是按「allow-list 参数是不是非 None」：默认全选请求同样带着一份下推给每个 producer 的冻结 allow-list，但那份清单覆盖整库，只按这个形状套用豁免会复原这道闸本来要挡的无界探针集合（一份物化的天花板被再转发一层——比如从元素直读回退臂转发进它自己的 chunk 召回子调用——正是这种「非 None 但未收窄」的清单，同样不得触发豁免）。冻结宇宙漂移（当前可见来源集合已不再等于全选冻结时的快照）会让谓词重新真正收窄，与真收窄一样重新进入豁免；判定这件事的「每个检索臂入口至多一次」漂移探针只用于路由，来源谓词本身无论这道闸的判定结果如何都照旧无条件下推给每个 producer。设 false 回到接入前逐字一致的行为，用于某库语言采样误判时的临时恢复）
 POSTGRES_LEXICAL_KNN_ENABLED # 主导规模 PostgreSQL 库上 KG 名词法探针的 GiST `<->` KNN 早停（默认 true，设 false 回滚；仅 PostgreSQL——SQLite 适配器声明不具备该能力，判定零成本短路）。需要一个形状匹配的 GiST trigram 索引（覆盖知识对象名表达式）——按**精确**形状探测（单 gist_trgm_ops 键、名表达式、`COLLATE "C"`），运维已建的同形索引直接生效；缺索引时旧语句原样运行——结果层面默认开对未建索引部署零差异;成本层面每次未收窄探针为规模判定付一条已索引的单行版本查询（亚毫秒,与其后的词法 LATERAL 相比是噪声,登记接受）。只对未按来源收窄、且规模 ≥ POSTGRES_LEXICAL_KNN_MIN_ROWS 的库生效。分数仍是 `similarity()`；等相似度并列类内 KNN 路径不仅可能与 legacy 取不同成员，其**自身也不是 run-to-run 稳定的**（并列成员随 GiST 遍历序变化；9.1M 行 base 实测：285 行同名 "DAC" 的 sim=1.0 类）——登记接受的取舍；需要位稳定候选集的部署设 false。同库实测：常见短词单词项 7.4s → 123ms（60×）。索引 DDL 与上线/回滚步骤见运维文档。
 POSTGRES_LEXICAL_KNN_MIN_ROWS # KNN 路由的库规模下限（nodes+chunks，默认 500000）。GiST 索引没有 notebook 键，KNN 走**全库**距离序逐行过滤——只有在整张表里占主导份额的库才划算；小份额库要在别人的行里翻找自己的候选，反而丢掉复合 GIN 快路径。请设在「除主导库外最大的那个库」之上（实测部署：主导库 1.1e7、次大 2.7e4，默认值干净分割）。低于下限走旧语句，逐字不变。
@@ -795,7 +800,7 @@ REPORT_SECTION_CHUNK_BUDGET  # 深度报告：每节 chunk 上下文字预算（
 REPORT_GENERATION_CONCURRENCY # 深度报告：每个后端进程同时准入的整篇报告数（默认 1；排队时不占数据库连接）
 REPORT_SECTION_CONCURRENCY   # 深度报告：每篇已准入报告的节级扇出（默认 5；还受模型容量和数据库连接池余量约束）
 REPORT_RETRIEVAL_FANOUT      # 深度报告：规划/生成 run 共用的叶子 KG/chunk/element/PPR I/O 扇出（默认 8）
-REPORT_PROBE_CHANNEL_CONCURRENCY # 规划探针：独立 KG/原文元素通道的并行度（1..2，默认 2）
+REPORT_PROBE_CHANNEL_CONCURRENCY # 规划探针：单 query 内 KG/原文元素通道的并行度（1..2，默认 2）；有序去重后的不同 query 共用整篇 REPORT_RETRIEVAL_FANOUT 预算
 REPORT_SUFFICIENCY_MIN_RELEVANT_ITEMS / REPORT_SUFFICIENCY_MIN_FAMILIES / REPORT_SUFFICIENCY_COMPLETE_MIN_FAMILIES / REPORT_SUFFICIENCY_MAX_TOP_FAMILY_SHARE # 集中的报告充分性规则；默认保持历史判定，精确护栏见 product-and-api
 REPORT_SECTION_MAX_TOKENS    # 深度报告：每节撰写 completion 上限（默认 65536）
 REPORT_SYNTHESIS_MAX_TOKENS  # 深度报告：全篇 JSON 蓝图 completion 上限（默认 102400）

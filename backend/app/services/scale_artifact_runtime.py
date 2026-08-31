@@ -515,6 +515,43 @@ class ScaleArtifactRuntime:
                 "published scale-index count exceeds SCALE_IDX_CACHE_MAX"
             )
 
+        # The scale cache has a second, byte-oriented admission rail for large
+        # indexes.  Checking only ``max_entries`` is insufficient: loading a
+        # third large index would evict the first one and still let this method
+        # report a successful preload.  Read manifests before loading any
+        # ScaleIndex so this guard does not transiently allocate ANN matrices.
+        # Keep the estimator shared with LargeAwareLRUCache's classifier rather
+        # than reproducing its row/dimension formula here.
+        from app.services.kg.scale_index import estimated_ann_bytes
+        from app.services.vector_index import resolve_runtime_dim
+
+        runtime_dim = resolve_runtime_dim(self.settings) or self.settings.embed_dim
+        large_count = 0
+        for notebook_id in notebook_ids:
+            manifest = self.artifacts.read_manifest(
+                self.artifacts.scale_dir(notebook_id)
+            )
+            if manifest is None:
+                # Preserve the strict readiness contract, while avoiding a
+                # second, less actionable failure later in the load loop.
+                raise RuntimeError("published scale-index manifest is not readable")
+            if estimated_ann_bytes(manifest, runtime_dim) > int(
+                self.settings.scale_idx_large_bytes
+            ):
+                large_count += 1
+        large_capacity = int(self.settings.scale_idx_cache_max_large)
+        if large_count > large_capacity:
+            self.event_log.logger.error(
+                "startup scale preload refused: large_indexes=%d exceeds "
+                "SCALE_IDX_CACHE_MAX_LARGE=%d",
+                large_count,
+                large_capacity,
+            )
+            raise RuntimeError(
+                "published large scale-index count exceeds "
+                "SCALE_IDX_CACHE_MAX_LARGE"
+            )
+
         ann_handles = 0
         ppr_cores = 0
         if progress is not None:

@@ -162,6 +162,128 @@ def test_retrieve_chunks_uses_ann_when_enabled(repo, monkeypatch):
     assert {c.chunk_id for c in scored} <= set(idx.chunk_ann_labels) | lexical_ids
 
 
+def test_report_ann_skips_generic_fts_and_reports_pure_leaf_timings(
+    repo, monkeypatch
+):
+    import numpy as np
+    from app.services.retrieval_run import retrieval_run
+
+    nb, _ = _seed_chunks(repo, ["indexed report evidence " * 20])
+    repo.rebuild_unified_kg(nb.id)
+    repo.build_scale_index(nb.id)
+    idx = repo._scale_index(nb.id, allow_stale=True)
+    calls = []
+
+    class _Ann:
+        @staticmethod
+        def set_ef(_value):
+            return None
+
+        @staticmethod
+        def knn_query(_query, *, k, **kwargs):
+            calls.append(kwargs)
+            return (
+                np.asarray([[0]], dtype=np.int64),
+                np.asarray([[0.0]], dtype=np.float32),
+            )
+
+    monkeypatch.setattr(repo.retrieval.candidates, "_open_scale_ann", lambda *_: _Ann())
+    monkeypatch.setattr(
+        repo._runtime.knowledge,
+        "chunk_fts_search",
+        lambda *_a, **_k: pytest.fail("report ANN-only lane called generic FTS"),
+    )
+    events = []
+    monkeypatch.setattr(repo.event_log, "emit", events.append)
+
+    with retrieval_run(run_kind="report_planning"):
+        out = repo._retrieve_chunks_ann(
+            nb.id,
+            "indexed report evidence",
+            repo._embed_query("indexed report evidence"),
+            idx,
+            recall=1,
+            allowed_source_ids=tuple(idx.chunk_ann_source_names),
+        )
+
+    assert out is not None and out[0]
+    assert calls == [{}]  # all indexed source codes are covered: no callback
+    timing = next(event for event in events if event.get("site") == "chunk_ann")
+    assert timing["stage"] == "chunk_ann"
+    assert timing["latency_ms"] == timing["total_ms"]
+    assert timing["source_filter_mode"] == "vacuous"
+    assert timing["chunk_fts_ms"] == 0
+    assert {
+        "ann_prepare_ms", "ann_open_ms", "knn_ms", "delta_ms",
+        "hydrate_ms", "score_ms",
+    } <= timing.keys()
+
+
+def test_chunk_fts_timeout_opens_run_circuit_and_skips_the_next_probe(
+    repo, monkeypatch
+):
+    from app.repositories.ports import ChunkLexicalSearchTimeout
+    from app.services.retrieval_run import retrieval_run
+
+    calls = []
+
+    def _timeout(*_args, **_kwargs):
+        calls.append("called")
+        raise ChunkLexicalSearchTimeout("secret database diagnostic")
+
+    monkeypatch.setattr(repo._runtime.knowledge, "chunk_fts_search", _timeout)
+    events = []
+    monkeypatch.setattr(repo.event_log, "emit", events.append)
+
+    with retrieval_run(run_kind="report_planning") as run:
+        with pytest.raises(ChunkLexicalSearchTimeout):
+            repo.retrieval.candidates._chunk_fts_hits(
+                object(), "nb-timeout", "private query", k=5
+            )
+        assert repo.retrieval.candidates._chunk_fts_hits(
+            object(), "nb-timeout", "another private query", k=5
+        ) == []
+        assert run.chunk_fts_timeouts == 1
+        assert run.chunk_fts_circuit_skips == 1
+
+    assert calls == ["called"]
+    assert [event["status"] for event in events] == [
+        "timeout",
+        "skipped_circuit_open",
+    ]
+    assert "secret database diagnostic" not in json.dumps(events)
+
+
+@pytest.mark.parametrize("query", ["set_db 命令", 'compare "timing exception"'])
+def test_report_ann_keeps_exact_channel_without_generic_fts_union(
+    repo, monkeypatch, query
+):
+    from app.services.retrieval_run import retrieval_run
+
+    nb, _ = _seed_chunks(repo, [f"manual entry {query} " * 20])
+    repo.rebuild_unified_kg(nb.id)
+    repo.build_scale_index(nb.id)
+    idx = repo._scale_index(nb.id, allow_stale=True)
+    monkeypatch.setattr(
+        repo._runtime.knowledge,
+        "chunk_fts_search",
+        lambda *_args, **_kwargs: pytest.fail(
+            "report ANN-only lane called generic FTS for an exact query"
+        ),
+    )
+    with retrieval_run(run_kind="report_planning"):
+        assert repo._retrieve_chunks_ann(
+            nb.id,
+            query,
+            repo._embed_query(query),
+            idx,
+            recall=2,
+        ) is not None
+
+    # The independent channel is covered by test_exact_lookup.py; this guard
+    # pins only that exact syntax cannot re-enable the expensive generic union.
+
+
 def test_source_scoped_ann_filters_before_topk(repo, monkeypatch):
     """An excluded row may be the nearest vector but must not occupy Top-K."""
     nb = repo.create_notebook(NotebookCreate(name="scoped ann"))
@@ -226,6 +348,103 @@ def test_source_scoped_ann_without_sidecar_requests_bounded_fts_fallback(repo):
         legacy,
         recall=1,
         allowed_source_ids=("selected",),
+    ) is None
+
+
+def test_source_scoped_ann_keeps_filter_for_partial_or_unknown_code_coverage(
+    repo, monkeypatch
+):
+    import numpy as np
+
+    calls = []
+
+    class _Ann:
+        @staticmethod
+        def set_ef(_value):
+            return None
+
+        @staticmethod
+        def knn_query(_query, *, k, **kwargs):
+            calls.append(kwargs)
+            return (
+                np.asarray([[0]], dtype=np.int64),
+                np.asarray([[0.0]], dtype=np.float32),
+            )
+
+    partial = SimpleNamespace(
+        chunk_ann_labels=["allowed-chunk", "denied-chunk"],
+        chunk_ann_source_names=["allowed", "denied"],
+        chunk_ann_source_codes=np.asarray([0, 1], dtype=np.int32),
+        chunk_ann_source_counts=np.asarray([1, 1], dtype=np.int64),
+        manifest={"dim": 16},
+    )
+    monkeypatch.setattr(repo.retrieval.candidates, "_open_scale_ann", lambda *_: _Ann())
+    monkeypatch.setattr(
+        repo.retrieval.candidates,
+        "_hydrate_chunk_candidates",
+        lambda _ids: ([], [], None),
+    )
+
+    assert repo._retrieve_chunks_ann(
+        "nb",
+        "query",
+        [0.25] * 16,
+        partial,
+        recall=1,
+        allowed_source_ids=("allowed",),
+    ) is not None
+    assert callable(calls[0].get("filter"))
+
+    malformed = SimpleNamespace(
+        chunk_ann_labels=["unknown-code"],
+        chunk_ann_source_names=["allowed"],
+        chunk_ann_source_codes=np.asarray([1], dtype=np.int32),
+        chunk_ann_source_counts=np.asarray([1], dtype=np.int64),
+        manifest={"dim": 16},
+    )
+    assert repo._retrieve_chunks_ann(
+        "nb",
+        "query",
+        [0.25] * 16,
+        malformed,
+        recall=1,
+        allowed_source_ids=("allowed",),
+    ) is None
+
+
+def test_source_scoped_ann_without_any_eligible_source_requests_fts_fallback(
+    repo, monkeypatch
+):
+    """A selected post-index source is uncovered, not an empty ANN success."""
+    import numpy as np
+
+    class _Ann:
+        @staticmethod
+        def set_ef(_value):
+            return None
+
+        @staticmethod
+        def knn_query(*_args, **_kwargs):
+            pytest.fail("no eligible ANN row should issue KNN")
+
+    index = SimpleNamespace(
+        chunk_ann_labels=["old-chunk"],
+        chunk_ann_source_names=["old-source"],
+        chunk_ann_source_codes=np.asarray([0], dtype=np.int32),
+        chunk_ann_source_counts=np.asarray([1], dtype=np.int64),
+        manifest={"dim": 16},
+    )
+    monkeypatch.setattr(
+        repo.retrieval.candidates, "_open_scale_ann", lambda *_: _Ann()
+    )
+
+    assert repo._retrieve_chunks_ann(
+        "nb",
+        "query",
+        [0.25] * 16,
+        index,
+        recall=1,
+        allowed_source_ids=("new-source",),
     ) is None
 
 
@@ -380,7 +599,16 @@ def test_ask_chunk_single_subquery_still_works(repo, monkeypatch):
 def test_chunk_ann_enabled_default_on():
     """默认开:有索引的库自动走 ANN 核⊕delta;小库无索引自然回退暴力(零影响)。"""
     from app.core.config import Settings
-    assert Settings(_env_file=None).chunk_ann_enabled is True
+    settings = Settings(_env_file=None)
+    assert settings.chunk_ann_enabled is True
+    assert settings.chunk_fts_with_ann_enabled is False
+
+
+def test_report_chunk_fts_union_can_be_restored_by_env(monkeypatch):
+    from app.core.config import Settings
+
+    monkeypatch.setenv("CHUNK_FTS_WITH_ANN_ENABLED", "true")
+    assert Settings(_env_file=None).chunk_fts_with_ann_enabled is True
 
 
 def test_chunk_fts_backfill_and_search(repo):
