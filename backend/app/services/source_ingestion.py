@@ -243,11 +243,15 @@ class SourceIngestionService:
         require_indexing_write: Callable[[str], None] = lambda _notebook_id: None,
         indexing_pipelines: IndexingPipelineHostPort | None = None,
         effective_object_types: Callable[[str], Iterable[str]] = lambda _notebook_id: (),
+        analysis_artifacts: Any = None,
+        spreadsheet_analysis: Any = None,
     ) -> None:
         self.settings = settings
         self.notebooks = notebooks
         self.sources = sources
         self.source_files = source_files
+        self.analysis_artifacts = analysis_artifacts
+        self.spreadsheet_analysis = spreadsheet_analysis
         self.chunking = chunking
         self.embedding = embedding
         self.event_log = event_log
@@ -1321,6 +1325,85 @@ class SourceIngestionService:
         """
         return trusted_proxy_origin_set(self.settings.url_import_trusted_proxy_hosts)
 
+    def _compile_spreadsheet_snapshot(self, source, elements: list) -> None:
+        """Compile the optional workbook view while this parse generation is stable."""
+        if (
+            self.spreadsheet_analysis is None
+            or not self.spreadsheet_analysis.supports(source.file_name)
+        ):
+            return
+        try:
+            notebook_row = self.notebooks.get_row(source.notebook_id)
+            row_element_ids = {
+                (
+                    str(element.metadata.get("sheet") or ""),
+                    int(element.metadata.get("row_index") or 0),
+                ): f"el-{source.id}-{index:04d}"
+                for index, element in enumerate(elements, start=1)
+                if element.metadata.get("sheet")
+                and element.metadata.get("row_index")
+            }
+            self.spreadsheet_analysis.compile_source(
+                source,
+                notebook_name=str(notebook_row["name"] or ""),
+                owner_id=str(notebook_row["created_by"] or ""),
+                row_element_ids=row_element_ids,
+            )
+        except Exception as exc:  # noqa: BLE001 - optional analysis lane
+            self.event_log.logger.warning(
+                "spreadsheet snapshot compilation lane failed (%s)",
+                type(exc).__name__,
+            )
+
+    def _resolve_source_parse_issue(self, source) -> None:
+        if self.analysis_artifacts is None:
+            return
+        try:
+            self.analysis_artifacts.resolve_issue(
+                source.notebook_id,
+                source.id,
+                "source_parse",
+                resolved_at=self.now(),
+            )
+        except Exception as exc:  # noqa: BLE001 - diagnostics cannot affect source
+            self.event_log.logger.warning(
+                "automatic analysis issue resolution failed (%s)", type(exc).__name__
+            )
+
+    def _archive_source_parse_issue(self, source) -> None:
+        if self.analysis_artifacts is None:
+            return
+        try:
+            notebook_row = self.notebooks.get_row(source.notebook_id)
+            self.analysis_artifacts.record_issue(
+                notebook_id=source.notebook_id,
+                notebook_name=str(notebook_row["name"] or ""),
+                owner_id=str(notebook_row["created_by"] or ""),
+                source_id=source.id,
+                source_title=source.title,
+                file_name=source.file_name,
+                source_type=source.type,
+                category="source_parse",
+                code="SOURCE_PARSE_FAILED",
+                summary="文档解析未完成；系统已保留脱敏诊断记录和隔离副本。",
+                occurred_at=self.now(),
+                source_path=source.file_path,
+                source_hash=source.file_hash,
+                archive_file=not bool(source.source_url),
+            )
+            self.event_log.emit({
+                "kind": "analysis_issue",
+                "source_id": source.id,
+                "notebook_id": source.notebook_id,
+                "category": "source_parse",
+                "code": "SOURCE_PARSE_FAILED",
+                "status": "open",
+            })
+        except Exception as exc:  # noqa: BLE001 - diagnostics cannot mask failure
+            self.event_log.logger.warning(
+                "automatic analysis issue archival failed (%s)", type(exc).__name__
+            )
+
     def process_source(
         self, source_id: str, hooks: SourcePipelineHooks
     ) -> SourceSummary:
@@ -1458,6 +1541,7 @@ class SourceIngestionService:
                     self.sources.clear_chunked_at(db, source_id)
                 parsed_assets_pending = False
                 parser_execution.mark_assets_committed()
+                self._compile_spreadsheet_snapshot(source, elements)
                 # 摘要(best-effort LLM)挪到 elements 落地之后:放在写库前会让 LLM 超时/
                 # 失败/hang 把 elements 一起拖没——几万源集体丢 elements、KG 无从接地的根子。
                 summary = self.summarize_source(source.title, elements)
@@ -1611,14 +1695,12 @@ class SourceIngestionService:
                         "unified-KG dirty mark failed for source %s", source_id
                     )
             else:
-                # 不抽 KG：没有 doc_type/profile 一致性可谈，直接落终态。
-                self.set_source_status(
-                    source_id, "extracted", error_message=terminal_msg
-                )
+                self.set_source_status(source_id, "extracted", error_message=terminal_msg)
             # KG ('extracted'/green) set above; wait for the background element
             # embedding to finish before declaring the whole pipeline done.
             embed_thread.join()
             stage("pipeline", "done", pipeline_started, elements=len(elements))
+            self._resolve_source_parse_issue(source)
         except Exception as exc:
             stage("pipeline", "error", pipeline_started, error=f"{type(exc).__name__}: {exc}")
             self.event_log.logger.exception("process_source failed for %s", source_id)
@@ -1628,6 +1710,7 @@ class SourceIngestionService:
                 summary="Parsing failed; see source error.",
                 error_message=str(exc),
             )
+            self._archive_source_parse_issue(source)
         finally:
             # 覆盖 try 的所有出口——成功 return、上面的 except 落 'failed'(KgBuildAborted
             # 等 Exception 子类都被它兜住)、以及未被 except 捕获而向上传出的
@@ -1793,6 +1876,16 @@ class SourceIngestionService:
             # was: this change moves the bump's time point, never its count.
             self.kg_mutations.mark_unified_kg_dirty_in_tx(db, source.notebook_id)
         self.source_files.delete(source.file_path)
+        if self.analysis_artifacts is not None:
+            try:
+                self.analysis_artifacts.redact_source(
+                    source.notebook_id, source_id, occurred_at=self.now()
+                )
+            except Exception as redact_error:  # noqa: BLE001 - source row is already deleted
+                self.event_log.logger.warning(
+                    "analysis artifact redaction failed (%s)",
+                    type(redact_error).__name__,
+                )
         self.delete_source_images(source_id)  # Task 9: cascade-clean MinerU image assets
         self.kg_mutations.invalidate_unified_cache(source.notebook_id)
         # A deletion changes the corpus exactly as much as an addition does —

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 import weakref
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping
 
@@ -617,6 +617,7 @@ class NotebookCatalogService:
         queries: QueryStorePort,
         identity: IdentityStorePort,
         storage_dir: Callable[[], Path],
+        analysis_artifacts: Any = None,
     ) -> None:
         """``storage_dir`` is a zero-arg callable resolving the LIVE storage
         root (knowhow-tables PR-2+3 Task 14) — a callable rather than a Path
@@ -633,6 +634,7 @@ class NotebookCatalogService:
         self._queries = queries
         self._identity = identity
         self._storage_dir = storage_dir
+        self._analysis_artifacts = analysis_artifacts
         self.kg_building: set = set()
         # Injected post-construction by RepositoryRuntime.wire_source_ingestion()
         # once SourceIngestionService exists (mirrors memory_retriever below —
@@ -715,6 +717,11 @@ class NotebookCatalogService:
             for file_path in file_paths:
                 _delete_source_file(file_path)
             _delete_notebook_asset_dir(self._storage_dir(), notebook_id)
+            analysis_artifacts = getattr(self, "_analysis_artifacts", None)
+            if analysis_artifacts is not None:
+                analysis_artifacts.redact_notebook(
+                    notebook_id, occurred_at=datetime.now(timezone.utc).isoformat()
+                )
 
     def mark_notebook_base(self, notebook_id: str) -> None:
         self.get_notebook(notebook_id)  # raises KeyError if missing

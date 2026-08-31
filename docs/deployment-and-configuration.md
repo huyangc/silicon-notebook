@@ -1119,6 +1119,16 @@ It never extends the lifetime of answer/source/report bodies, citations, or reas
 traces. The setting is read at backend startup and applies to notebooks deleted after
 that process starts; existing retained rows keep their stamped `expires_at`.
 
+Professional workbook analysis is deployment-controlled by
+`SPREADSHEET_ANALYSIS_ENABLED`. Its ingestion rails are
+`SPREADSHEET_ANALYSIS_MAX_CELLS`, `SPREADSHEET_ANALYSIS_MAX_SHEETS`, and
+`SPREADSHEET_ANALYSIS_MAX_CELL_CHARS`; Ask output/prompt rails are
+`SPREADSHEET_ANALYSIS_RESULT_ROWS`, `SPREADSHEET_ANALYSIS_PROMPT_ROWS`, and
+`SPREADSHEET_ANALYSIS_PLANNER_TIMEOUT_SECONDS`. It reuses the existing
+`reasoning_agent` workload and adds no model binding. `ANALYSIS_FAILURE_RETENTION_DAYS`
+controls both the issue read boundary and quarantine-copy lifetime. Exact defaults and
+validation ranges live in the [Product and API reference](./product-and-api.md#professional-excel-analysis-and-automatic-parsing-issue-archive).
+
 `MODEL_JSON_REPAIR_MODE` applies only to `reasoning_agent` and `ask_answer`.
 `off` keeps strict rejection, `shadow` records whether a response would be safely
 repairable but still rejects it, and `on` accepts conservative repairs (the default).

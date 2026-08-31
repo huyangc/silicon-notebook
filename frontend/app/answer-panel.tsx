@@ -68,6 +68,7 @@ import type {
   Citation,
   KnowhowBatchCoverage,
   KnowhowResultSet,
+  SpreadsheetAnalysisResult,
   TypedCollectionCoverage,
   TypedCollectionItem,
   TypedCollectionResult,
@@ -192,6 +193,84 @@ function KnowhowResultSetCard({
           已扫描 {coverage.scanned_rows} 行、返回 {coverage.returned_rows} 行；未扫描部分不会被表述为“全部”。
         </p>
       )}
+    </section>
+  );
+}
+
+
+const SPREADSHEET_OPERATION_LABELS: Record<string, string> = {
+  profile: "数据概况",
+  aggregate: "分组汇总",
+  top: "排序分析",
+  filter: "条件筛选",
+};
+
+function SpreadsheetResultCard({
+  resultSet,
+  onOpenSource,
+}: {
+  resultSet: SpreadsheetAnalysisResult;
+  onOpenSource?: (sourceId: string, elementId?: string) => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const visibleLimit = STRUCTURED_ENUMERATION_LIMITS.initialVisibleRows;
+  const rows = expanded ? resultSet.rows : resultSet.rows.slice(0, visibleLimit);
+  const coverage = resultSet.coverage;
+  const firstCitation = resultSet.rows.find((row) => row.citation)?.citation;
+  return (
+    <section className="answer-knowhow-result" aria-label={`Excel 分析：${resultSet.source_title || resultSet.sheet}`}>
+      <div className="answer-knowhow-result-heading">
+        <span className={`tag ${coverage.complete ? "answer-grounded" : "answer-overview"}`}>
+          {coverage.complete ? "结果完整" : "部分预览"} {coverage.returned_rows}/{coverage.total_rows}
+        </span>
+        <strong><Table2 size={14} aria-hidden="true" /> Excel 分析 · {resultSet.source_title || "未命名来源"}</strong>
+        <span>{resultSet.sheet}!{resultSet.range} · {label(SPREADSHEET_OPERATION_LABELS, resultSet.operation, "专业分析")}</span>
+        {onOpenSource && resultSet.source_id && (
+          <button
+            className="answer-knowhow-open"
+            type="button"
+            onClick={() => onOpenSource(resultSet.source_id, firstCitation?.element_id)}
+          >
+            查看来源
+          </button>
+        )}
+      </div>
+      <p className="answer-knowhow-coverage-note">
+        已扫描 {coverage.scanned_rows} 行；公式单元格 {resultSet.formula_cells} 个
+        {resultSet.unresolved_formula_cells > 0
+          ? `，其中 ${resultSet.unresolved_formula_cells} 个没有可用缓存值`
+          : ""}。
+      </p>
+      <div className="answer-table-wrap">
+        <table className="answer-table answer-knowhow-table">
+          <thead>
+            <tr>
+              <th scope="col">行</th>
+              {resultSet.columns.map((column) => <th key={column.id} scope="col">{column.name}</th>)}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.position}>
+                <th scope="row">{row.position}</th>
+                {resultSet.columns.map((column) => <td key={column.id}>{row.cells[column.id] || "—"}</td>)}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {resultSet.rows.length > visibleLimit && (
+        <button
+          type="button"
+          className="answer-knowhow-expand"
+          onClick={() => setExpanded((value) => !value)}
+        >
+          {expanded ? "收起已加载行" : `展开全部已加载的 ${resultSet.rows.length} 行`}
+        </button>
+      )}
+      {resultSet.warnings?.map((warning) => (
+        <p className="answer-knowhow-coverage-note" key={warning}>{warning}</p>
+      ))}
     </section>
   );
 }
@@ -645,7 +724,7 @@ function KnowhowResultSets({
   notebookNames,
   onOpenSource,
 }: {
-  resultSets: (KnowhowResultSet | TypedCollectionResult)[] | undefined;
+  resultSets: (KnowhowResultSet | TypedCollectionResult | SpreadsheetAnalysisResult)[] | undefined;
   batchCoverage: KnowhowBatchCoverage | undefined;
   /** 可选：不传时清单卡不渲染跳转按钮（见 KnowhowResultSetCard 上的说明）。 */
   onOpenKnowhowRow?: (tableId: string, rowId: string) => void;
@@ -699,6 +778,15 @@ function KnowhowResultSets({
               resultSet={resultSet}
               notebookId={notebookId}
               notebookNames={notebookNames}
+              onOpenSource={onOpenSource}
+            />
+          );
+        }
+        if (resultSet.kind === "spreadsheet") {
+          return (
+            <SpreadsheetResultCard
+              key={`spreadsheet-${resultSet.source_id}-${resultSet.sheet}-${resultSet.operation}`}
+              resultSet={resultSet}
               onOpenSource={onOpenSource}
             />
           );

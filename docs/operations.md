@@ -1567,3 +1567,28 @@ so complete anchor-group verification remains fail-closed while it seeks the
 group instead of scanning the entire anchor column inside its write transaction.
 
 Must be run from the main checkout root (it needs the real `.env`/database configuration, same as `batch_ingest.py`/`replay_retrieval.py` above). Safe to re-run: applying the same plan again is a no-op (each already-applied cell no longer matches its recorded "before").
+
+## Automatic analysis-failure archive
+
+Spreadsheet compiler failures and terminal source-parser failures are recorded under
+`<SILICON_NOTEBOOK_STORAGE_DIR>/analysis-artifacts/`. `spreadsheets/<notebook-id>/`
+contains replaceable professional-analysis snapshots. `issues/<notebook-id>/<source-id>/
+<category>/issue.json` is the safe metadata record and `payload` is the private copied upload
+when a local file was available. Files are best-effort mode `0600`; the directory must receive
+the same backup, encryption-at-rest, access-control, and disk-capacity treatment as uploaded
+sources. It is not a backup: expiry and source lifecycle intentionally delete it.
+
+Operators inspect records through **User usage overview → Parsing issues** or the admin-only
+`GET /api/admin/analysis-issues`; the API never returns a physical path or hash. Do not grant
+the web process or administrators a second mutation path into user notebooks. There are no
+admin retry/delete/close controls by design: recovery is a normal user-side source reparse,
+which rebuilds the snapshot, marks the matching record resolved, and removes the copied
+payload. A source/notebook deletion removes its snapshot and payload immediately and redacts
+the remaining record; an issue-list read removes expired issue directories. The retention
+window is `ANALYSIS_FAILURE_RETENTION_DAYS` (default 30 days).
+
+For incident diagnosis, use the stable `category`/`code`, timestamps, `artifact_available`,
+and the live source link. `artifact_available=false` means the copy was unavailable, already
+resolved/deleted, or cleaned; it is not permission to read the user's original source by a
+different path. If a live record has reached expiry it is already outside the supported read
+contract even before a separate filesystem inventory notices cleanup.

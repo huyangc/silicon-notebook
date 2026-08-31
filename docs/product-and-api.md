@@ -2474,6 +2474,67 @@ A new production extension point lets a deployment plugin offer pointers to mate
 | `GAP_SUGGESTION_URL_MAX_CHARS` | 2,048 |
 | `ASK_GAP_CONSULT_TIMEOUT_SECONDS` (default; deployment-configurable, `0 < x ≤ 30`) | 4.0 |
 
+## Professional Excel analysis and automatic parsing-issue archive
+
+Uploaded `.xlsx`, `.xlsm`, and legacy `.xls` sources keep the ordinary document-parsing
+path and additionally receive a deterministic spreadsheet snapshot during ingestion. The
+snapshot preserves typed cell values, detected headers, sheet/range identity, source-row
+anchors, formula counts, and formula cached-value gaps. It never executes formulas, macros,
+external links, or workbook code. Failure of this optional compiler does not change the
+source's ordinary parse status or remove it from text retrieval.
+
+Only `reasoning` Ask can consume the snapshot. The lane remains dormant unless the frozen,
+user-selected source scope contains a compiled workbook and the question has an analytical
+spreadsheet intent. It then reuses the deployment's existing `reasoning_agent` chat workload
+for at most one bounded planning call—there is no general-purpose SDK agent—and validates
+the result into the closed operations `profile`, `aggregate`, `top`, and `filter`. Aggregation
+and filters also use closed operator lists; execution is local and deterministic. A planner
+timeout or malformed plan falls back to a local profile, and any lane failure fails open to
+the ordinary reasoning answer. Successful output adds a `spreadsheet` trace step, citable
+bounded evidence, and a `result_sets[]` item with `kind="spreadsheet"`; the card discloses
+scanned/result/displayed rows, formula-cache gaps, and partial preview coverage.
+
+The professional compiler refuses shapes it cannot analyze without guessing: unreadable,
+damaged or encrypted workbooks; missing headers; dimension/sheet limits; cells over the
+character rail; and a second header-like region separated by a blank row. It never silently
+truncates a user cell or combines multiple likely tables. Such a failure opens a
+`spreadsheet_analysis` issue while ordinary text parsing continues. A terminal source-parser
+failure opens `source_parse`. The system copies an upload—not moves it—into a private
+quarantine outside the notebook source tree, stores only a content-minimal safe issue
+projection for administrators, and never exposes its physical path or source hash through
+the API.
+
+| Spreadsheet-analysis rail | Default | Accepted range |
+| --- | ---: | ---: |
+| `SPREADSHEET_ANALYSIS_ENABLED` | `true` | boolean |
+| `SPREADSHEET_ANALYSIS_MAX_CELLS` | 200,000 | 1,000..2,000,000 |
+| `SPREADSHEET_ANALYSIS_MAX_SHEETS` | 32 | 1..256 |
+| `SPREADSHEET_ANALYSIS_MAX_CELL_CHARS` | 20,000 | 256..1,000,000 |
+| `SPREADSHEET_ANALYSIS_RESULT_ROWS` | 100 | 1..1,000 |
+| `SPREADSHEET_ANALYSIS_PROMPT_ROWS` | 20 | 1..100 |
+| `SPREADSHEET_ANALYSIS_PLANNER_TIMEOUT_SECONDS` | 8.0 seconds | 1.0..60.0 |
+| `ANALYSIS_FAILURE_RETENTION_DAYS` | 30 days | 1..3,650 |
+
+Issue records have `open`/`resolved` status and a stamped expiry. A later successful
+user-initiated reparse automatically resolves the matching issue and deletes its quarantine
+copy; expiry is a hard read boundary and physical cleanup occurs on issue reads. Source or
+notebook deletion immediately removes the spreadsheet snapshot and quarantine copy, clears
+source/notebook names, ids, filenames, and hashes, and retains only category/time and a
+redacted summary until expiry.
+
+The administrator's **User usage overview** keeps its existing user-table columns and adds
+two sheets next to it: **Question analysis** (the existing “View questions” link now opens
+this fixed-Ask activity view) and **Parsing issues**. Both are read-only. Parsing issues can
+be filtered by user, status, and category; a live source links to the original notebook and
+source detail, while a deleted source shows only the redacted summary. The administrator has
+no reparse, bulk retry, close, quarantine-delete, or case-purge endpoint/control and therefore
+cannot mutate a user's notebook through this feature.
+
+- `GET /api/admin/analysis-issues?owner_id=&status=&category=&limit=` — admin-only,
+  read-only list; `status` is empty/`open`/`resolved`, `category` is empty/`source_parse`/
+  `spreadsheet_analysis`, and `limit` is `1..500` (default 200). There is deliberately no
+  POST/PATCH/DELETE companion.
+
 ## Admin observability: user activity (`/dev/logs`)
 
 `/dev/logs` shares one top scope bar (viewed user, date range) across two view tabs: **Activity** (default) and **Model calls** (the original per-day LLM-call viewer, unchanged byte-for-byte — `kind`/`status`/`model` facets, full-text search, per-day dropdown, and auto-refresh all behave exactly as before; its API remains `/api/debug/logs/...`, still gated by `DEBUG_LOGS_ENABLED`).

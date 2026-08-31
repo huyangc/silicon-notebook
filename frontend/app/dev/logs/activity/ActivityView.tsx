@@ -55,6 +55,7 @@ export function ActivityView({
   since,
   until,
   now,
+  fixedActivityType,
 }: {
   /** 已解析成具体 id 的被查看用户（顶部范围条选「我自己」时是当前用户自己的 id）。 */
   userId: string;
@@ -70,6 +71,8 @@ export function ActivityView({
   until?: string;
   /** 只为测试注入确定的“现在”；生产不传，时间格式化件各自用 new Date()。 */
   now?: Date;
+  /** 嵌入专用分析页时固定类型，并隐藏会把用户带离该页用途的类型切换。 */
+  fixedActivityType?: Exclude<ActivityTypeFilter, "">;
 }) {
   const [notebooks, setNotebooks] = useState<AdminUserNotebook[]>([]);
   const [notebooksLoading, setNotebooksLoading] = useState(false);
@@ -79,7 +82,9 @@ export function ActivityView({
   const [notebooksFailure, setNotebooksFailure] = useState("");
   const [forbidden, setForbidden] = useState(false);
   const [notebookId, setNotebookId] = useState(ALL_NOTEBOOKS);
-  const [activityType, setActivityType] = useState<ActivityTypeFilter>(initialActivityType);
+  const [activityType, setActivityType] = useState<ActivityTypeFilter>(
+    fixedActivityType ?? initialActivityType,
+  );
   const [expanded, setExpanded] = useState<string[]>([]);
   const [sources, setSources] = useState<Record<string, SourceListState>>({});
 
@@ -130,6 +135,10 @@ export function ActivityView({
     setForbidden(false);
     sourcesGenerationRef.current = {};
   }, [userId]);
+
+  useEffect(() => {
+    if (fixedActivityType) setActivityType(fixedActivityType);
+  }, [fixedActivityType]);
 
   const loadNotebooks = useCallback(() => {
     if (!userId) {
@@ -416,6 +425,7 @@ export function ActivityView({
           onActivityTypeChange={selectActivityType}
           onSelect={selectItem}
           selectedKey={selectedKey}
+          showTypeFilter={!fixedActivityType}
         />
         <ActivityDetail
           askDetail={askDetail}

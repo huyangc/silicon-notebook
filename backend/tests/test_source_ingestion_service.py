@@ -194,6 +194,36 @@ def test_upload_without_scheduler_processes_inline(repo, monkeypatch):
     assert calls == [out[0].id]
 
 
+def test_uploaded_xlsx_builds_professional_analysis_snapshot(repo):
+    from openpyxl import Workbook
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Sales"
+    sheet.append(["Region", "Amount"])
+    sheet.append(["East", 10])
+    payload = io.BytesIO()
+    workbook.save(payload)
+
+    nb = repo.create_notebook(NotebookCreate(name="spreadsheet"))
+    [source] = repo.upload_sources(
+        nb.id,
+        [UploadedSourceFile(
+            file_name="sales.xlsx",
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            content=payload.getvalue(),
+        )],
+    )
+
+    manifest = repo._runtime.analysis_artifacts.load_spreadsheet_manifest(
+        nb.id, source.id
+    )
+    assert manifest is not None
+    assert manifest["sheets"][0]["name"] == "Sales"
+    assert manifest["sheets"][0]["headers"] == ["Region", "Amount"]
+    assert manifest["sheets"][0]["rows"][0]["element_id"]
+
+
 def test_parsed_source_and_elements_commit_before_chunk_build(repo, monkeypatch):
     import app.services.parser_chain_execution as parser_execution
     monkeypatch.setattr(

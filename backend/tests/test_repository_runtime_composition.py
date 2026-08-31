@@ -53,6 +53,7 @@ RUNTIME_ATTRIBUTES = [
     "agent_observations",
     "agent_profile",
     "agent_profile_jobs",
+    "analysis_artifacts",
     "ask",
     "ask_cancellations",
     "ask_completed_observers",
@@ -135,6 +136,7 @@ RUNTIME_ATTRIBUTES = [
     "source_store",
     "source_subgraph_ppr",
     "source_subgraphs",
+    "spreadsheet_analysis",
     "unified_kg",
     "wishes",
 ]

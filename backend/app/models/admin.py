@@ -261,6 +261,34 @@ class AdminQuestionsResponse(BaseModel):
     limit: int = ADMIN_QUESTIONS_DEFAULT_LIMIT
 
 
+class AnalysisIssue(BaseModel):
+    """Content-minimal read-only projection of one automatic failure record."""
+
+    id: str
+    category: Literal["source_parse", "spreadsheet_analysis"]
+    status: Literal["open", "resolved"]
+    code: str = ""
+    summary: str = ""
+    owner_id: str = ""
+    notebook_id: str = ""
+    notebook_name: str = ""
+    source_id: str = ""
+    source_title: str = ""
+    file_name: str = ""
+    source_type: str = ""
+    created_at: str = ""
+    updated_at: str = ""
+    resolved_at: str = ""
+    expires_at: str = ""
+    artifact_available: bool = False
+    source_deleted: bool = False
+    notebook_deleted: bool = False
+
+
+class AnalysisIssueResponse(BaseModel):
+    items: List[AnalysisIssue] = Field(default_factory=list)
+
+
 class AskDetail(BaseModel):
     """右栏「选中提问」详情:GET /admin/users/{user_id}/asks/{job_id} 的响应。
 

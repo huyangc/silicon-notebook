@@ -1708,6 +1708,9 @@ export default function Home() {
           if (workspace) {
             try {
               await openNotebook(workspace.notebookId, "none", u.id);
+              if (workspace.sourceId) {
+                await openSourceDetailById(workspace.sourceId);
+              }
             } catch {
               showCollection();
               setToast("笔记本链接不可用或已失效");
@@ -1755,10 +1758,14 @@ export default function Home() {
         // 不改用 intent:popstate 要顶替的是「hash 指向的目的地」,不是「某个固定
         // intent」——它可能顶替 open,也可能顶替 memory,intent 维度在这里没有一个
         // 固定值可填,必须继续用 coalesce:false 无条件顶替。
-        openNotebook(workspace.notebookId, "none", undefined, { coalesce: false }).catch(() => {
-          showCollection();
-          setToast("笔记本链接不可用或已失效");
-        });
+        openNotebook(workspace.notebookId, "none", undefined, { coalesce: false })
+          .then(async (opened) => {
+            if (opened && workspace.sourceId) await openSourceDetailById(workspace.sourceId);
+          })
+          .catch(() => {
+            showCollection();
+            setToast("笔记本链接不可用或已失效");
+          });
         return;
       }
       // showCollection 自己的 replaceState 写的就是当前 URL(无 hash),是个 no-op。

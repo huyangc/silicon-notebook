@@ -1942,6 +1942,55 @@ provider 返回 Markdown 和按顺序排列的已签发句柄。核心对每个�
 | `GAP_SUGGESTION_URL_MAX_CHARS` | 2,048 |
 | `ASK_GAP_CONSULT_TIMEOUT_SECONDS`（默认值；部署可配置，`0 < x ≤ 30`） | 4.0 |
 
+## Excel 专业分析与解析问题自动归档
+
+用户上传的 `.xlsx`、`.xlsm` 和旧版 `.xls` 仍走普通文档解析，同时在摄取阶段建立一份
+确定性的电子表格快照。快照保留类型化单元格值、识别出的表头、工作表/区域、来源行锚点、
+公式数量与公式缓存值缺失情况；绝不执行公式、宏、外部链接或工作簿代码。这个可选编译器
+失败不会改变来源的普通解析状态，也不会让来源退出文本检索。
+
+只有 `reasoning` 问答会消费快照。冻结的用户勾选来源范围里没有已编译工作簿，或问题不具备
+表格分析意图时，这条分支完全不运行；命中时最多复用一次部署既有的 `reasoning_agent` chat
+workload 做有界规划，不引入 Anthropic SDK 一类通用 Agent。模型结果必须通过白名单校验，
+操作只允许 `profile`、`aggregate`、`top`、`filter`，聚合与筛选算子也都是封闭集合，实际计算
+在本地确定性执行。规划超时或形状错误回退本地概览，整条分支异常则 fail-open 回到原有逐步
+推理回答。成功结果新增 `spreadsheet` 轨迹步、可引用的有界证据和一个
+`result_sets[].kind="spreadsheet"` 结果卡；卡片明确披露扫描/结果/展示行数、公式缓存缺口与
+是否只是部分预览。
+
+专业编译器对不能在不猜测的前提下分析的形态直接拒绝：无法读取、损坏或加密的工作簿，
+识别不到表头，维度/工作表数超限，单元格超过字符上限，以及空白行之后出现第二个疑似表头
+的数据区域。系统不会静默截断用户单元格，也不会把多个疑似表格混在一起计算。此类失败会
+打开 `spreadsheet_analysis` 问题，但普通文本解析继续；来源解析终态失败则打开
+`source_parse`。系统把上传文件**复制**（不是移动）到笔记本来源目录之外的私有隔离区，
+管理员 API 只返回内容最小化的安全问题投影，绝不暴露物理路径或来源哈希。
+
+| Excel 专业分析护栏 | 默认值 | 合法范围 |
+| --- | ---: | ---: |
+| `SPREADSHEET_ANALYSIS_ENABLED` | `true` | 布尔值 |
+| `SPREADSHEET_ANALYSIS_MAX_CELLS` | 200,000 | 1,000..2,000,000 |
+| `SPREADSHEET_ANALYSIS_MAX_SHEETS` | 32 | 1..256 |
+| `SPREADSHEET_ANALYSIS_MAX_CELL_CHARS` | 20,000 | 256..1,000,000 |
+| `SPREADSHEET_ANALYSIS_RESULT_ROWS` | 100 | 1..1,000 |
+| `SPREADSHEET_ANALYSIS_PROMPT_ROWS` | 20 | 1..100 |
+| `SPREADSHEET_ANALYSIS_PLANNER_TIMEOUT_SECONDS` | 8.0 秒 | 1.0..60.0 |
+| `ANALYSIS_FAILURE_RETENTION_DAYS` | 30 天 | 1..3,650 |
+
+问题记录有 `open`/`resolved` 状态和写定的到期时间。用户之后自行重新解析成功时，系统自动
+把对应问题标为已解决并删除隔离副本；到期时间是强读闸，读取问题清单时执行物理清理。
+删除来源或笔记本会立即删除表格快照与隔离副本，清空来源/笔记本名称、id、文件名与哈希，
+到期前只保留分类、时间和脱敏摘要。
+
+管理员的**用户使用总览**保持既有用户表列不变，在旁边新增**提问分析**与**解析问题**两个
+页签。既有「查看提问」改为进入固定只看提问的分析页签；解析问题可按用户、状态和类型筛选。
+存活来源可跳转原笔记本及来源详情，已删除来源只展示脱敏摘要。两页均为只读：没有重新解析、
+批量重试、关闭记录、删除隔离文件或彻底清除案例的端点/控件，管理员不能借此改动用户笔记本。
+
+- `GET /api/admin/analysis-issues?owner_id=&status=&category=&limit=` —— 仅管理员可读；
+  `status` 为 空/`open`/`resolved`，`category` 为 空/`source_parse`/
+  `spreadsheet_analysis`，`limit` 为 `1..500`（默认 200）。刻意没有配套的
+  POST/PATCH/DELETE。
+
 ## 管理员用户活动日志（`/dev/logs`）
 
 `/dev/logs` 共享同一条顶部范围条（被查看用户、日期范围），分两个视图 tab：**活动**（默认）与**模型调用**（原有的按天 LLM 调用流水查看器，逐位保留——`kind`/`status`/`model` 过滤、全文搜索、按天下拉、自动刷新均未改动，其 API 仍是 `/api/debug/logs/...`，仍受 `DEBUG_LOGS_ENABLED` 门控）。

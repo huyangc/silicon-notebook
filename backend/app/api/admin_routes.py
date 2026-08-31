@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from app.api.deps import (
     _bearer_token,
     admin_query_repository,
+    analysis_issue_repository,
     extension_toggle_repository,
     get_current_user,
     model_status_service,
@@ -22,6 +23,8 @@ from app.models.admin import (
     ActivityReport,
     ActivityResponse,
     ActivitySource,
+    AnalysisIssue,
+    AnalysisIssueResponse,
     AdminExtension,
     AdminExtensionContribution,
     AdminExtensionRuntimeResult,
@@ -466,6 +469,27 @@ def get_admin_user_activity(
         has_more=raw["has_more"],
         next_cursor=raw["next_cursor"],
     )
+
+
+@router.get("/admin/analysis-issues", response_model=AnalysisIssueResponse)
+def list_admin_analysis_issues(
+    owner_id: str = Query(""),
+    status: Literal["", "open", "resolved"] = Query(""),
+    category: Literal["", "source_parse", "spreadsheet_analysis"] = Query(""),
+    limit: int = Query(200, ge=1, le=500),
+    user: UserProfile = Depends(get_current_user),
+    issue_store: Any = Depends(analysis_issue_repository),
+) -> AnalysisIssueResponse:
+    """Automatic parse/analysis failures. Admin-only and strictly read-only."""
+    if user.role != "admin":
+        raise user_error(403, "仅管理员可查看解析问题")
+    items = issue_store.list_issues(
+        owner_id=owner_id,
+        status=status,
+        category=category,
+        limit=limit,
+    )
+    return AnalysisIssueResponse(items=[AnalysisIssue(**item) for item in items])
 
 
 def _notebook_owned_by_user(user_id: str, notebook_id: str) -> bool:

@@ -149,6 +149,25 @@ test("左栏列出该用户的笔记本与界面词计数（提问用 questions�
   expect(row.textContent).toContain("报告 0");
 });
 
+test("嵌入提问分析页时固定为提问且隐藏活动类型切换", async () => {
+  mocks.fetchUserNotebooks.mockResolvedValue(NOTEBOOKS);
+  mocks.fetchUserActivity.mockResolvedValue(page([ask("ask-1", "分析问题")]))
+  render(
+    <ActivityView
+      fixedActivityType="ask"
+      now={NOW}
+      scopeKey='["admin-usage-questions","user-1"]'
+      userId="user-1"
+    />,
+  );
+
+  expect(await screen.findByText("分析问题")).toBeInTheDocument();
+  expect(mocks.fetchUserActivity).toHaveBeenCalledWith(
+    "user-1", expect.objectContaining({ activityType: "ask" }),
+  );
+  expect(screen.queryByRole("group", { name: "按活动类型筛选" })).not.toBeInTheDocument();
+});
+
 
 test("展开笔记本取回该库的来源清单，异常小字同样经 AnomalyBadge 渲染", async () => {
   const user = userEvent.setup();

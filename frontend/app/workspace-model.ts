@@ -463,6 +463,22 @@ export type KnowhowResultSet = {
   };
 };
 
+export type SpreadsheetAnalysisResult = {
+  kind: "spreadsheet";
+  source_id: string;
+  source_title?: string;
+  source_file_name?: string;
+  sheet: string;
+  range: string;
+  operation: string;
+  columns: { id: string; name: string; role?: string }[];
+  rows: { position: number; cells: Record<string, string>; citation?: Citation }[];
+  coverage: KnowhowResultSet["coverage"];
+  formula_cells: number;
+  unresolved_formula_cells: number;
+  warnings?: string[];
+};
+
 export type KnowhowBatchCoverage = {
   known_tables: number;
   selected_tables: number;
@@ -608,7 +624,7 @@ export type AskResponse = {
    * 渲染必须按 kind 分派，不能按下标猜测；未知 kind 一律跳过，不得当作 knowhow
    * 卡片渲染（会在 `.rows` 上炸出 TypeError）。
    */
-  result_sets?: (KnowhowResultSet | TypedCollectionResult)[];
+  result_sets?: (KnowhowResultSet | TypedCollectionResult | SpreadsheetAnalysisResult)[];
   /** 整个请求范围的覆盖率；与每张已选表自身的 coverage 分开。 */
   result_coverage?: KnowhowBatchCoverage;
   /** 站外来源建议（``ask.gap_consult``）：不是证据，缺席时后端按 `exclude_if`
