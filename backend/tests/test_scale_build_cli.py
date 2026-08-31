@@ -2943,6 +2943,72 @@ def test_the_store_defers_sigint_across_its_own_rename_sequence(store, tmp_path)
     assert signal.getsignal(signal.SIGINT) is previous
 
 
+def test_the_interrupt_handler_only_records_and_reports_after_the_window():
+    """P1, codex PR#643 R30: a signal handler runs at an arbitrary bytecode
+    boundary — calling ``report`` from inside it can hit Python's
+    reentrant-I/O protection when the interrupt lands while the guarded code
+    is itself writing to the same stream, and an exception escaping the
+    handler aborts the very rename sequence the guard protects. The handler
+    must only record; the notice is emitted in ``__exit__``, where a stream
+    hiccup can no longer abort anything.
+
+    Mutation anchor: move the ``report`` call back into ``_handle`` and this
+    goes red — the reentrant stream blows up inside the handler.
+    """
+    messages: list[str] = []
+
+    def reentrant_stream(message: str) -> None:
+        messages.append(message)
+        raise RuntimeError("reentrant call inside buffered writer")
+
+    guard = SwapInterruptGuard(reentrant_stream, reraise=False)
+    with guard:
+        # The interrupt lands mid-window; the handler must not touch the
+        # (currently reentrant) stream at all.
+        guard._handle(None, None)
+        assert guard.interrupted is True
+        assert messages == [], "the handler itself must not report"
+    # The deferred notice was attempted after the window — and its failure
+    # was swallowed rather than replacing the block's own outcome.
+    assert len(messages) == 1
+    assert guard.completed is True
+
+
+def test_a_copy_failure_mid_export_removes_the_partial_package(
+    repository, store, tmp_path, monkeypatch
+):
+    """P2, codex PR#643 R30: an I/O error (or Ctrl-C) inside ``copytree``
+    used to leave the partially written root on disk; the documented re-run
+    then refused on "destination is not empty" until an operator hand-deleted
+    the fragment. Any pre-success exception now gets the same cleanup as the
+    lost-claim path, and the original failure propagates untouched.
+
+    Mutation anchor: drop the ``except BaseException`` cleanup around the
+    copy loop and this goes red — the destination survives with a fragment.
+    """
+    _seed_live(store, "nb-1")
+    destination = tmp_path / "out"
+    real_copytree = shutil.copytree
+    calls = {"n": 0}
+
+    def failing(src, dst, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise OSError(28, "No space left on device")
+        return real_copytree(src, dst, **kwargs)
+
+    monkeypatch.setattr(shutil, "copytree", failing)
+    with pytest.raises(OSError, match="No space left"):
+        cli.run_export(
+            repository, "nb-1", destination, report=lambda _m: None
+        )
+
+    assert not destination.exists(), (
+        "everything this invocation wrote must be removed so the documented "
+        "re-run is not refused on a non-empty destination"
+    )
+
+
 def test_old_directory_deletion_runs_outside_the_sigint_mask(
     store, tmp_path, monkeypatch
 ):

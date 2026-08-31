@@ -131,12 +131,15 @@ class SwapInterruptGuard:
         self.completed = False
 
     def _handle(self, _signum, _frame) -> None:
+        # Record ONLY (P1, codex PR#643 R30): a signal handler runs at an
+        # arbitrary bytecode boundary, so calling ``report`` here can hit
+        # Python's reentrant-I/O protection (``RuntimeError: reentrant call``
+        # when the interrupt lands while the guarded code is itself writing
+        # to the same stream) — and an exception escaping the handler aborts
+        # the very rename sequence this guard exists to protect, leaving
+        # some roots published and some not. The notice is emitted in
+        # ``__exit__``, after the window closed.
         self.interrupted = True
-        if self._report is not None:
-            self._report(
-                "interrupt received during the artifact swap; finishing the "
-                "rename sequence first (this takes milliseconds)"
-            )
 
     def __enter__(self) -> "SwapInterruptGuard":
         # Signal handlers can only be installed on the main thread; a worker
@@ -162,6 +165,17 @@ class SwapInterruptGuard:
         if self._installed:
             signal.signal(signal.SIGINT, self._previous)
             self._installed = False
+        if self.interrupted and self._report is not None:
+            # Deferred from ``_handle`` (P1, codex PR#643 R30) — reported
+            # here, outside the signal handler and after the window closed,
+            # where a stream hiccup can no longer abort the renames.
+            try:
+                self._report(
+                    "interrupt received during the artifact swap; the rename "
+                    "sequence was finished first"
+                )
+            except Exception:
+                pass
         self.completed = exc_type is None
         # Only re-raise when the guarded block itself succeeded: a real failure
         # is the more informative one and must not be replaced.
