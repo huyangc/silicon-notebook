@@ -161,9 +161,21 @@ class SourcePartitionedPprService:
         # right); still absent means absent at BOTH probes of the live path
         # with no ``.old`` in between — durable retirement.
         recheck = probe(self._artifacts.source_partition_dir(notebook_id))
-        if recheck is MANIFEST_ABSENT:
-            return MANIFEST_ABSENT
-        return recheck
+        if recheck is not MANIFEST_ABSENT:
+            return recheck
+        # codex PR#643 R25 P2: back-to-back publications can thread all three
+        # probes — live missed during publication A, ``.old`` probed after
+        # A's finalize removed it, then publication B renames live away
+        # before the live recheck. One last ``.old`` look settles that shape:
+        # B mid-swap leaves ITS ``.old`` on disk, so "could not tell". Four
+        # consecutive misses (live, .old, live, .old) with no generation
+        # surfacing in between is durable absence — a publisher would have
+        # left at least one of the four visible.
+        if probe(
+            str(self._artifacts.source_partition_dir(notebook_id)) + ".old"
+        ) is not MANIFEST_ABSENT:
+            return None
+        return MANIFEST_ABSENT
 
     @property
     def cache_size(self) -> int:

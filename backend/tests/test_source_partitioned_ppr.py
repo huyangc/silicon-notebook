@@ -681,6 +681,52 @@ def test_a_completed_swap_between_probes_is_not_read_as_retirement(
     assert service.cache_size == 1
 
 
+def test_a_second_publication_racing_the_recheck_stays_fail_soft(
+    repo, monkeypatch
+):
+    """codex PR#643 R25 P2: back-to-back publications can thread all three
+    probes — live missed during publication A, ``.old`` missed after A's
+    finalize, live missed again because publication B already renamed it
+    away. The final ``.old`` look must catch B mid-swap (its ``.old`` is on
+    disk) and answer "could not tell" instead of durable absence.
+
+    Scripted: three ``MANIFEST_ABSENT`` answers, then the real probe against
+    a disk frozen in B's mid-swap shape (live renamed to ``.old``).
+
+    Mutation anchor: drop the final ``.old`` look and this goes red — the
+    warm scope is evicted mid-publication.
+    """
+    notebook_id, source_a, _source_b = _seed(repo)
+    version = ["same-main-version"]
+    _publish(repo, notebook_id, (source_a,), version)
+    store = repo._runtime.scale_artifact_store
+    service = repo._runtime.source_partitioned_ppr
+    _warm(service, notebook_id, source_a, version)
+
+    live = store.source_partition_dir(notebook_id)
+    live.rename(str(live) + ".old")
+    real = store.manifest_stat_signature
+    answers = iter([MANIFEST_ABSENT, MANIFEST_ABSENT, MANIFEST_ABSENT])
+
+    def racing(directory):
+        try:
+            return next(answers)
+        except StopIteration:
+            return real(directory)
+
+    monkeypatch.setattr(store, "manifest_stat_signature", racing)
+    result = service.retrieve(
+        notebook_id,
+        [source_a],
+        parent_version=version,
+        object_seeds={"ko-a1": 1.0},
+    )
+    assert result.capability.enabled, (
+        "a second publication racing the recheck must stay fail-soft"
+    )
+    assert service.cache_size == 1
+
+
 def test_a_probeless_artifacts_adapter_still_serves_from_cache(repo):
     """Negative anchor for the branch above: ``None`` from
     ``_companion_signature`` because the adapter has NO ``manifest_stat_

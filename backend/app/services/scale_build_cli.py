@@ -860,14 +860,38 @@ def verify_staged_transfer(package: Path, staged: dict[str, Path]) -> None:
     nothing — the same "no salvage value" cleanup this needs, with no
     parallel implementation.
 
-    Only roots actually in ``staged`` (the package included them) are
-    checked; a root the package OMITS never reaches staging at all (see
-    ``retiring`` in ``run_import``), and the manifest correspondingly has no
-    entries for it either.
+    The ROOT SETS must match both ways before any per-file check (P1, codex
+    PR#643 R25): a root the manifest lists but staging lacks is a WHOLE
+    directory the transfer dropped — skipping it here would let
+    ``run_import`` read the loss as an intentional omission and RETIRE the
+    healthy live root while reporting success. A root the package genuinely
+    omits has no manifest entries at all (export walks only the roots it
+    copied), so the intentional-omission shape still passes.
     """
     manifest = _read_transfer_manifest(package)
     files = manifest["files"]
     manifest_path = package / TRANSFER_MANIFEST_FILENAME
+    manifest_roots = {relative.split("/", 1)[0] for relative in files}
+    staged_roots = set(staged)
+    dropped = sorted(manifest_roots - staged_roots)
+    if dropped:
+        raise ScaleBuildCliFailure(
+            f"the staged transfer does not match {manifest_path}: the "
+            f"{dropped[0]} root is listed in the transfer manifest but the "
+            "package carries no such directory — the transfer dropped a "
+            "whole root, which is not the same thing as a package that "
+            "intentionally omits it. Nothing was published and the live "
+            "tree is untouched; re-transfer or re-export the package and "
+            "re-run import."
+        )
+    unlisted = sorted(staged_roots - manifest_roots)
+    if unlisted:
+        raise ScaleBuildCliFailure(
+            f"the staged transfer does not match {manifest_path}: the "
+            f"{unlisted[0]} root is present in the package but the transfer "
+            "manifest lists no files for it. The staged copies were not "
+            "published; re-export the package and re-run import."
+        )
     for name in PUBLISH_ORDER:
         if name not in staged:
             continue
