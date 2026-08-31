@@ -29,7 +29,7 @@ from app.repositories.postgres.schema_manifest import (
 )
 
 
-RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=64, postgres_version=43, epoch=1)
+RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=65, postgres_version=44, epoch=1)
 
 # The old design's (SQLite 24, PostgreSQL 2) COPY-ready pair predates five
 # current business tables and is no longer total.  Do not advertise a staging
@@ -38,11 +38,10 @@ COPY_READY_SCHEMA_PAIRS: frozenset[SchemaPair] = frozenset()
 
 # Declarative transform vocabulary.  A pipeline joins these names with "+";
 # later row transformers provide the direction-specific implementation.  The
-# schema kept SQLite integer flags as PostgreSQL bigint through epoch 1 for
-# every table but one: SQLite v63 / PostgreSQL v41's
-# extension_runtime_toggles.enabled is the first column selecting "boolean" —
-# a reviewed, table-specific choice (see 0041_extension_runtime_toggles.sql),
-# not a change to the bigint convention for every other integer flag.
+# schema kept SQLite integer flags as PostgreSQL bigint through epoch 1 except
+# for reviewed table-specific booleans: extension_runtime_toggles.enabled and
+# retained_user_activity.parse_failed. This does not change the convention for
+# every other integer flag.
 COLUMN_TRANSFORMS = {
     "identity": "no storage conversion",
     "timestamptz": "SQLite ISO text <-> PostgreSQL timestamptz",
@@ -761,6 +760,18 @@ _TABLES = (
         ("plugin_id",),
         ReplicationKeyKind.DECLARED_PK,
         90,
+        "timestamptz+boolean",
+    ),
+    # SQLite v65 / PostgreSQL v44: content-minimal activity retained after a
+    # notebook aggregate is deleted. It deliberately has no FK, so the
+    # appended rank is closure-safe. The exact composite primary key is the
+    # replication key; created/updated/deleted/expiry timestamps and the one
+    # reviewed boolean need the two declared transforms.
+    _table(
+        "retained_user_activity",
+        ("activity_type", "record_id"),
+        ReplicationKeyKind.DECLARED_PK,
+        91,
         "timestamptz+boolean",
     ),
 )

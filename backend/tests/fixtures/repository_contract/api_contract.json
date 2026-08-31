@@ -74,13 +74,28 @@
               "title": "Mode",
               "type": "string"
             },
+            "notebook_deleted_at": {
+              "default": "",
+              "title": "Notebook Deleted At",
+              "type": "string"
+            },
             "notebook_id": {
               "title": "Notebook Id",
+              "type": "string"
+            },
+            "notebook_name": {
+              "default": "",
+              "title": "Notebook Name",
               "type": "string"
             },
             "question": {
               "default": "",
               "title": "Question",
+              "type": "string"
+            },
+            "retained_until": {
+              "default": "",
+              "title": "Retained Until",
               "type": "string"
             },
             "status": {
@@ -142,13 +157,28 @@
               "title": "Id",
               "type": "string"
             },
+            "notebook_deleted_at": {
+              "default": "",
+              "title": "Notebook Deleted At",
+              "type": "string"
+            },
             "notebook_id": {
               "title": "Notebook Id",
+              "type": "string"
+            },
+            "notebook_name": {
+              "default": "",
+              "title": "Notebook Name",
               "type": "string"
             },
             "question": {
               "default": "",
               "title": "Question",
+              "type": "string"
+            },
+            "retained_until": {
+              "default": "",
+              "title": "Retained Until",
               "type": "string"
             },
             "status": {
@@ -248,8 +278,18 @@
               "title": "Id",
               "type": "string"
             },
+            "notebook_deleted_at": {
+              "default": "",
+              "title": "Notebook Deleted At",
+              "type": "string"
+            },
             "notebook_id": {
               "title": "Notebook Id",
+              "type": "string"
+            },
+            "notebook_name": {
+              "default": "",
+              "title": "Notebook Name",
               "type": "string"
             },
             "paper_meta_status": {
@@ -270,6 +310,11 @@
             "parse_status": {
               "default": "",
               "title": "Parse Status",
+              "type": "string"
+            },
+            "retained_until": {
+              "default": "",
+              "title": "Retained Until",
               "type": "string"
             },
             "source_type": {
@@ -1446,13 +1491,28 @@
               "title": "Mode",
               "type": "string"
             },
+            "notebook_deleted_at": {
+              "default": "",
+              "title": "Notebook Deleted At",
+              "type": "string"
+            },
             "notebook_id": {
               "title": "Notebook Id",
+              "type": "string"
+            },
+            "notebook_name": {
+              "default": "",
+              "title": "Notebook Name",
               "type": "string"
             },
             "question": {
               "default": "",
               "title": "Question",
+              "type": "string"
+            },
+            "retained_until": {
+              "default": "",
+              "title": "Retained Until",
               "type": "string"
             },
             "status": {
@@ -11982,7 +12042,7 @@
       },
       "/api/admin/users/{user_id}/asks/{job_id}": {
         "get": {
-          "description": "右栏「选中提问」详情:完整问答 + 推理轨迹。自己或 admin 可查;job_id\n不属于该用户时 404。\n\n``ask_job_detail(job_id)`` 是单行主键查询,给出\nquestion/mode/status/trace/answer_id/error/notebook_id/conversation_id/\ncreated_by/asked_at(浏览器提交时刻,ask_jobs.asked_at,job 无论终态如何\n都带这一列,不再依赖是否为「当前活跃 job」)。有 answer_id 时另按\nanswer_id 单行直查 ``ask_answer_detail``——**不**经 ``get_conversation``\n(那条路径会加载并校验整个会话的全部答案 payload,读取量随会话历史线性\n增长)。它已经把 answered_at(权威值 answers.created_at,旧 payload 从\n答案行回填)按红线口径处理好。没有 answer_id 或查不到对应答案行时\nanswered_at/answer 保持空——没有可靠数据来源时不编造。",
+          "description": "右栏「选中提问」详情。存活笔记本返回完整问答与推理轨迹；删除后的\n未到期活动只返回最小摘要。自己或 admin 可查；job_id 不属于该用户时 404。\n\n``ask_job_detail(job_id)`` 是单行主键查询,给出\nquestion/mode/status/trace/answer_id/error/notebook_id/conversation_id/\ncreated_by/asked_at(浏览器提交时刻,ask_jobs.asked_at,job 无论终态如何\n都带这一列,不再依赖是否为「当前活跃 job」)。有 answer_id 时另按\nanswer_id 单行直查 ``ask_answer_detail``——**不**经 ``get_conversation``\n(那条路径会加载并校验整个会话的全部答案 payload,读取量随会话历史线性\n增长)。它已经把 answered_at(权威值 answers.created_at,旧 payload 从\n答案行回填)按红线口径处理好。没有 answer_id 或查不到对应答案行时\nanswered_at/answer 保持空——没有可靠数据来源时不编造。",
           "operationId": "get_admin_user_ask_detail_api_admin_users__user_id__asks__job_id__get",
           "parameters": [
             {

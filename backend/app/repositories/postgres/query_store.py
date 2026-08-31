@@ -563,8 +563,13 @@ class QueryStore:
             sources = {
                 row["k"]: row["c"]
                 for row in db.execute(
-                    "SELECT nb.created_by AS k, COUNT(*) AS c FROM sources s "
-                    "JOIN notebooks nb ON nb.id = s.notebook_id GROUP BY nb.created_by"
+                    "SELECT k,SUM(c) AS c FROM ("
+                    "SELECT nb.created_by AS k,COUNT(*) AS c FROM sources s "
+                    "JOIN notebooks nb ON nb.id=s.notebook_id GROUP BY nb.created_by "
+                    "UNION ALL "
+                    "SELECT actor_id AS k,COUNT(*) AS c FROM retained_user_activity "
+                    "WHERE activity_type='source' AND expires_at>CURRENT_TIMESTAMP "
+                    "GROUP BY actor_id) retained_counts GROUP BY k"
                 ).fetchall()
             }
             conversations = {
@@ -576,7 +581,12 @@ class QueryStore:
             questions = {
                 row["k"]: row["c"]
                 for row in db.execute(
-                    "SELECT created_by AS k, COUNT(*) AS c FROM ask_jobs GROUP BY created_by"
+                    "SELECT k,SUM(c) AS c FROM ("
+                    "SELECT created_by AS k,COUNT(*) AS c FROM ask_jobs GROUP BY created_by "
+                    "UNION ALL "
+                    "SELECT actor_id AS k,COUNT(*) AS c FROM retained_user_activity "
+                    "WHERE activity_type='ask' AND expires_at>CURRENT_TIMESTAMP "
+                    "GROUP BY actor_id) retained_counts GROUP BY k"
                 ).fetchall()
             }
             # 报告按**创建者**归集,不按笔记本 owner——与 SQLite 侧同一条裁决,
@@ -584,7 +594,12 @@ class QueryStore:
             reports = {
                 row["k"]: row["c"]
                 for row in db.execute(
-                    "SELECT created_by AS k, COUNT(*) AS c FROM reports GROUP BY created_by"
+                    "SELECT k,SUM(c) AS c FROM ("
+                    "SELECT created_by AS k,COUNT(*) AS c FROM reports GROUP BY created_by "
+                    "UNION ALL "
+                    "SELECT actor_id AS k,COUNT(*) AS c FROM retained_user_activity "
+                    "WHERE activity_type='report' AND expires_at>CURRENT_TIMESTAMP "
+                    "GROUP BY actor_id) retained_counts GROUP BY k"
                 ).fetchall()
             }
             active = {
@@ -792,6 +807,24 @@ class QueryStore:
                 params.extend([before_dt, before_dt, before_id])
             return clause, params
 
+        def _retained_range_and_cursor_clause() -> tuple[str, list[Any]]:
+            instant = _absolute_instant("a.created_at")
+            clause = ""
+            params: list[Any] = []
+            if since_dt is not None:
+                clause += f" AND {instant} >= %s"
+                params.append(since_dt)
+            if until_dt is not None:
+                clause += f" AND {instant} < %s"
+                params.append(until_dt)
+            if cursor_active:
+                clause += (
+                    f" AND ({instant} < %s OR "
+                    f"({instant} = %s AND a.record_id COLLATE \"C\" < %s))"
+                )
+                params.extend([before_dt, before_dt, before_id])
+            return clause, params
+
         with self.database.connect() as db:
             if notebook_id is not None:
                 owned = db.execute(
@@ -812,16 +845,15 @@ class QueryStore:
                     ).fetchall()
                 ]
             all_question_submissions = activity_type == "ask" and notebook_id is None
-            if not owned_notebook_ids and not all_question_submissions:
-                # 三类都按自有笔记本收窄,一个都没有就没有任何活动可列。
-                return empty
             owned_placeholders = ",".join("%s" for _ in owned_notebook_ids)
 
             # 1. 提问:created_by 之外还收窄到自有笔记本(owner-only,理由同 SQLite 侧)。
             # notebook_id 已在上面解析成 owned_notebook_ids == [notebook_id],这条 IN
             # 同时兑现了「按库过滤」和「归属校验」,不需要第二条谓词。
             ask_rows = []
-            if activity_type in (None, "ask"):
+            if activity_type in (None, "ask") and (
+                all_question_submissions or owned_notebook_ids
+            ):
                 ask_notebook_clause = ""
                 ask_params: list[Any] = [user_id]
                 if all_question_submissions and not include_inaccessible_questions:
@@ -853,7 +885,7 @@ class QueryStore:
             # s.doc_type / s.error_message 一并带出仅用于 Python 侧派生
             # paper_meta_status / parse_quality_warning,两者都不作为返回字段。
             source_rows = []
-            if activity_type in (None, "source"):
+            if activity_type in (None, "source") and owned_notebook_ids:
                 source_params: list[Any] = list(owned_notebook_ids)
                 source_range_clause, source_range_params = _range_and_cursor_clause("s.")
                 source_params.extend(source_range_params)
@@ -893,7 +925,7 @@ class QueryStore:
             # 带出仅用于 Python 侧提取 generation_started_at(镜像 ReportStore.
             # row_to_dict 同一套 jsonb 提取,不发明第二套写法),本身不作为返回字段。
             report_rows = []
-            if activity_type in (None, "report"):
+            if activity_type in (None, "report") and owned_notebook_ids:
                 report_params: list[Any] = [user_id, *owned_notebook_ids]
                 report_range_clause, report_range_params = _range_and_cursor_clause("")
                 report_params.extend(report_range_params)
@@ -905,6 +937,33 @@ class QueryStore:
                     f"ORDER BY {_absolute_instant('created_at')} DESC, "
                     "id COLLATE \"C\" DESC LIMIT %s",
                     [*report_params, fetch_limit],
+                ).fetchall()
+
+            retained_rows = []
+            if notebook_id is None and include_inaccessible_questions:
+                retained_params: list[Any] = [user_id]
+                retained_scope = ""
+                if activity_type == "ask":
+                    retained_scope = " AND a.activity_type='ask'"
+                elif activity_type in ("source", "report"):
+                    retained_scope = (
+                        " AND a.activity_type=%s AND a.notebook_owner_id=%s"
+                    )
+                    retained_params.extend([activity_type, user_id])
+                else:
+                    retained_scope = " AND a.notebook_owner_id=%s"
+                    retained_params.append(user_id)
+                retained_range, retained_range_params = (
+                    _retained_range_and_cursor_clause()
+                )
+                retained_params.extend(retained_range_params)
+                retained_rows = db.execute(
+                    "SELECT a.* FROM retained_user_activity a "
+                    "WHERE a.actor_id=%s AND a.expires_at>CURRENT_TIMESTAMP"
+                    f"{retained_scope}{retained_range} "
+                    f"ORDER BY {_absolute_instant('a.created_at')} DESC,"
+                    "a.record_id COLLATE \"C\" DESC LIMIT %s",
+                    [*retained_params, fetch_limit],
                 ).fetchall()
 
         pool: list[dict[str, Any]] = []
@@ -972,6 +1031,48 @@ class QueryStore:
                     "generation_started_at": generation_started_at,
                 }
             )
+        for row in retained_rows:
+            common = {
+                "type": row["activity_type"],
+                "id": row["record_id"],
+                "notebook_id": row["notebook_id"],
+                "notebook_name": row["notebook_name"],
+                "notebook_deleted_at": row["deleted_at"],
+                "retained_until": row["expires_at"],
+                "created_at": row["created_at"],
+                "status": row["status"],
+            }
+            if row["activity_type"] == "ask":
+                item = {
+                    **common,
+                    "asked_at": row["asked_at"],
+                    "conversation_id": row["conversation_id"],
+                    "question": row["question"],
+                    "mode": row["mode"],
+                    "answer_id": "",
+                    "error": "",
+                }
+            elif row["activity_type"] == "source":
+                item = {
+                    **common,
+                    "display_title": row["display_title"],
+                    "file_name": row["file_name"],
+                    "source_type": row["source_type"],
+                    "parse_status": row["parse_status"],
+                    "parse_failed": bool(row["parse_failed"]),
+                    "extraction_warning": "",
+                    "parse_quality_warning": False,
+                    "paper_meta_status": "",
+                }
+            else:
+                item = {
+                    **common,
+                    "updated_at": row["updated_at"],
+                    "question": row["question"],
+                    "depth": int(row["depth"]),
+                    "generation_started_at": row["generation_started_at"],
+                }
+            pool.append(item)
 
         # created_at 在归并期间保持原生 datetime(与 SQLite 侧字符串同构:两者都在各
         # 自后端的结果集里同质、可直接比较),只在写出字段前经 iso_timestamp 转字符串,
@@ -989,6 +1090,7 @@ class QueryStore:
             len(ask_rows) > limit
             or len(source_rows) > limit
             or len(report_rows) > limit
+            or len(retained_rows) > limit
             or len(pool) > limit
         )
         page = pool[:limit]
@@ -1007,6 +1109,12 @@ class QueryStore:
             # created_at 之外,只有 report 的 updated_at 是 timestamptz;asked_at 在
             # PostgreSQL 侧本就是 text COLLATE "C"(见 migration 0013),无需转换。
             item["created_at"] = iso_timestamp(item["created_at"])
+            if item.get("notebook_deleted_at"):
+                item["notebook_deleted_at"] = iso_timestamp(
+                    item["notebook_deleted_at"]
+                )
+            if item.get("retained_until"):
+                item["retained_until"] = iso_timestamp(item["retained_until"])
             if item["type"] == "report":
                 item["updated_at"] = iso_timestamp(item["updated_at"])
         return {"items": page, "has_more": has_more, "next_cursor": next_cursor}

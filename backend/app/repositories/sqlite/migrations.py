@@ -104,7 +104,10 @@ logger = logging.getLogger("silicon_notebook.sqlite.maintenance")
 # canonical_id, member_object_id) — hot-path fix batch 3, parity with
 # PostgreSQL migration 0043. Pure index addition backing the concept-detail
 # hub-cluster keyset page's ORDER BY member_object_id.
-SCHEMA_VERSION = 64
+# v65 adds retained_user_activity, a content-minimal, notebook-FK-free snapshot
+# written atomically immediately before notebook deletion. Its configured
+# expires_at drives both read visibility and bounded physical cleanup.
+SCHEMA_VERSION = 65
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -3479,6 +3482,69 @@ class SqliteMigrator:
                 "ON concept_clusters(notebook_id, canonical_id, member_object_id)"
             )
 
+    def _migration_65(self) -> None:
+        """Notebook deletion must not erase the bounded user-analysis record.
+
+        This is deliberately a projection, not a second notebook aggregate:
+        it has no foreign key to notebooks and stores only fields needed by the
+        user-usage totals and Activity UI. Answers, citations, source content,
+        report sections and reasoning traces remain owned by the notebook and
+        are still deleted immediately. ``expires_at`` is stamped by the delete
+        path from ``Settings.user_activity_retention_days``; no retention
+        literal lives in this schema.
+
+        The two activity indexes mirror ``query_store._absolute_instant`` so
+        creator-wide and owner-wide keyset reads stay bounded despite SQLite's
+        historical mix of naive and offset timestamps. The expiry index backs
+        startup/delete-path physical GC.
+        """
+        with self._connect() as db:
+            db.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS retained_user_activity (
+                  activity_type TEXT NOT NULL,
+                  record_id TEXT NOT NULL,
+                  actor_id TEXT NOT NULL DEFAULT '',
+                  notebook_id TEXT NOT NULL DEFAULT '',
+                  notebook_owner_id TEXT NOT NULL DEFAULT '',
+                  notebook_name TEXT NOT NULL DEFAULT '',
+                  created_at TEXT NOT NULL DEFAULT '',
+                  updated_at TEXT NOT NULL DEFAULT '',
+                  asked_at TEXT NOT NULL DEFAULT '',
+                  conversation_id TEXT NOT NULL DEFAULT '',
+                  question TEXT NOT NULL DEFAULT '',
+                  mode TEXT NOT NULL DEFAULT '',
+                  status TEXT NOT NULL DEFAULT '',
+                  display_title TEXT NOT NULL DEFAULT '',
+                  file_name TEXT NOT NULL DEFAULT '',
+                  source_type TEXT NOT NULL DEFAULT '',
+                  parse_status TEXT NOT NULL DEFAULT '',
+                  parse_failed INTEGER NOT NULL DEFAULT 0,
+                  depth INTEGER NOT NULL DEFAULT 0,
+                  generation_started_at TEXT NOT NULL DEFAULT '',
+                  deleted_at TEXT NOT NULL,
+                  expires_at TEXT NOT NULL,
+                  PRIMARY KEY (activity_type, record_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_retained_activity_actor_type_created
+                  ON retained_user_activity(
+                    actor_id, activity_type,
+                    COALESCE(julianday(created_at),
+                      julianday('0001-01-01T00:00:00+00:00')) DESC,
+                    record_id DESC
+                  );
+                CREATE INDEX IF NOT EXISTS idx_retained_activity_owner_created
+                  ON retained_user_activity(
+                    notebook_owner_id,
+                    COALESCE(julianday(created_at),
+                      julianday('0001-01-01T00:00:00+00:00')) DESC,
+                    record_id DESC
+                  );
+                CREATE INDEX IF NOT EXISTS idx_retained_activity_expires
+                  ON retained_user_activity(julianday(expires_at));
+                """
+            )
+
     def _recover_interrupted_jobs(self) -> None:
         """服务端启动的崩溃兜底（与版本化 schema 迁移解耦，无条件运行）：后端单进程，
         merge-review / ask 等 daemon 线程任务无法跨进程重启存活，故启动时仍是 'running'
@@ -3520,6 +3586,11 @@ class SqliteMigrator:
             with self._connect() as db:
                 db.execute(sql, params)
 
+        _settle("retained_user_activity", lambda: _write(
+            "DELETE FROM retained_user_activity "
+            "WHERE julianday(expires_at) <= julianday(?)",
+            (now,),
+        ))
         _settle("merge_review_jobs", lambda: _write(
             "UPDATE merge_review_jobs SET status='failed', "
             "error='中断:服务重启' WHERE status='running'"))

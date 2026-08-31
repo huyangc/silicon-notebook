@@ -182,6 +182,7 @@ def test_retrieval_authority_filters_private_memory_in_postgres(
         postgres_database,
         new_id=lambda _prefix: "nb-contribution-authority",
         now=lambda: now,
+        activity_retention_days=180,
     )
     notebook_id = notebooks.create_row(NotebookCreate(name="authority"), alice.id)
     sources = SourceStore(postgres_database, now=lambda: now)

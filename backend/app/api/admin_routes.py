@@ -348,11 +348,18 @@ def _activity_source_item(row: dict) -> ActivitySource:
     唯一实现是 source_display_title（`docs/product-and-api.md` 契约:所有为用户命名来源的路径
     共用同一份实现)。刻意保留 source_display_title 可能返回的空串,不在这里
     造占位符,前端已按空串处理。"""
+    # Retained rows already carry the display title frozen immediately before
+    # notebook deletion. Live rows continue through the canonical synthesizer.
+    display_title = (
+        row.get("display_title")
+        if "display_title" in row
+        else source_display_title(row)
+    )
     return ActivitySource(
         id=row["id"],
         notebook_id=row["notebook_id"],
         created_at=row["created_at"],
-        display_title=source_display_title(row),
+        display_title=display_title or "",
         file_name=row.get("file_name") or "",
         source_type=row.get("source_type") or "",
         parse_status=row.get("parse_status") or "",
@@ -361,6 +368,9 @@ def _activity_source_item(row: dict) -> ActivitySource:
         extraction_warning=row.get("extraction_warning") or "",
         parse_quality_warning=bool(row.get("parse_quality_warning")),
         paper_meta_status=row.get("paper_meta_status") or "",
+        notebook_name=row.get("notebook_name") or "",
+        notebook_deleted_at=row.get("notebook_deleted_at") or "",
+        retained_until=row.get("retained_until") or "",
     )
 
 
@@ -460,8 +470,8 @@ def get_admin_user_ask_detail(
     job_id: str,
     user: UserProfile = Depends(get_current_user),
 ) -> AskDetail:
-    """右栏「选中提问」详情:完整问答 + 推理轨迹。自己或 admin 可查;job_id
-    不属于该用户时 404。
+    """右栏「选中提问」详情。存活笔记本返回完整问答与推理轨迹；删除后的
+    未到期活动只返回最小摘要。自己或 admin 可查；job_id 不属于该用户时 404。
 
     ``ask_job_detail(job_id)`` 是单行主键查询,给出
     question/mode/status/trace/answer_id/error/notebook_id/conversation_id/
@@ -510,6 +520,9 @@ def get_admin_user_ask_detail(
         error=job["error"],
         trace=job["trace"],
         answer=answer,
+        notebook_name=job.get("notebook_name") or "",
+        notebook_deleted_at=job.get("notebook_deleted_at") or "",
+        retained_until=job.get("retained_until") or "",
     )
 
 

@@ -3742,5 +3742,73 @@ MIGRATION_MANIFEST[(63, 64)] = {
 }
 
 
+# v65: deletion-independent, content-minimal activity projection. The table
+# intentionally has no notebook foreign key; its expires_at is enforced by
+# every activity read and pruned by startup/new-archive maintenance.
+RETAINED_USER_ACTIVITY_TABLES = {
+    "retained_user_activity": """CREATE TABLE retained_user_activity (
+                  activity_type TEXT NOT NULL,
+                  record_id TEXT NOT NULL,
+                  actor_id TEXT NOT NULL DEFAULT '',
+                  notebook_id TEXT NOT NULL DEFAULT '',
+                  notebook_owner_id TEXT NOT NULL DEFAULT '',
+                  notebook_name TEXT NOT NULL DEFAULT '',
+                  created_at TEXT NOT NULL DEFAULT '',
+                  updated_at TEXT NOT NULL DEFAULT '',
+                  asked_at TEXT NOT NULL DEFAULT '',
+                  conversation_id TEXT NOT NULL DEFAULT '',
+                  question TEXT NOT NULL DEFAULT '',
+                  mode TEXT NOT NULL DEFAULT '',
+                  status TEXT NOT NULL DEFAULT '',
+                  display_title TEXT NOT NULL DEFAULT '',
+                  file_name TEXT NOT NULL DEFAULT '',
+                  source_type TEXT NOT NULL DEFAULT '',
+                  parse_status TEXT NOT NULL DEFAULT '',
+                  parse_failed INTEGER NOT NULL DEFAULT 0,
+                  depth INTEGER NOT NULL DEFAULT 0,
+                  generation_started_at TEXT NOT NULL DEFAULT '',
+                  deleted_at TEXT NOT NULL,
+                  expires_at TEXT NOT NULL,
+                  PRIMARY KEY (activity_type, record_id)
+                )""",
+}
+RETAINED_USER_ACTIVITY_INDEXES = {
+    "idx_retained_activity_actor_type_created":
+        """CREATE INDEX idx_retained_activity_actor_type_created
+                  ON retained_user_activity(
+                    actor_id, activity_type,
+                    COALESCE(julianday(created_at),
+                      julianday('0001-01-01T00:00:00+00:00')) DESC,
+                    record_id DESC
+                  )""",
+    "idx_retained_activity_owner_created":
+        """CREATE INDEX idx_retained_activity_owner_created
+                  ON retained_user_activity(
+                    notebook_owner_id,
+                    COALESCE(julianday(created_at),
+                      julianday('0001-01-01T00:00:00+00:00')) DESC,
+                    record_id DESC
+                  )""",
+    "idx_retained_activity_expires":
+        """CREATE INDEX idx_retained_activity_expires
+                  ON retained_user_activity(julianday(expires_at))""",
+}
+MIGRATION_MANIFEST = {
+    (key[0], 65, *key[2:]): {
+        **manifest,
+        "tables": {**manifest["tables"], **RETAINED_USER_ACTIVITY_TABLES},
+        "indexes": {**manifest["indexes"], **RETAINED_USER_ACTIVITY_INDEXES},
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(64, 65)] = {
+    "tables": RETAINED_USER_ACTIVITY_TABLES,
+    "columns": {},
+    "indexes": RETAINED_USER_ACTIVITY_INDEXES,
+    "triggers": {},
+    "views": {},
+}
+
+
 if __name__ == "__main__":
     raise SystemExit(main())

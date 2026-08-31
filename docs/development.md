@@ -44,8 +44,8 @@ Schema changes remain version-gated behind `SqliteMigrator`: append a new
 Startup recovery, stable seeds, and administrator upgrades run every boot
 outside that version gate.
 
-The current schema version is 64. This is the SQLite schema version. The committed v9 compatibility fixture
-upgrades through migrations v10–v64 and remains readable. Those migrations
+The current schema version is 65. This is the SQLite schema version. The committed v9 compatibility fixture
+upgrades through migrations v10–v65 and remains readable. Those migrations
 cover compatibility and SQLite hot-path indexes (v10–v12), Memory/Agent and
 Memory-derived source links/indexes (v13–v15), knowhow tables and cell code
 (v16/v18), paper metadata (v17), source-linked assets (v19), and multi-domain
@@ -515,9 +515,19 @@ migration 0042's, codex #636 R1 P2). The pre-existing `idx_clusters_nb_canonical
 is now a strict prefix of the new index and is registered write-amplification
 debt, not dropped in this batch — same convention as `idx_chunks_source`'s
 retirement note in migration 0039's own header comment. No table, column,
-foreign key, or unique surface changes, so the pairing stays the same 85
-application tables, 114 replicated unique surfaces, and 12-row-slot bound;
-the current schema pair is SQLite 64 / PostgreSQL 43 / epoch 1.
+foreign key, or unique surface changes, so that pairing stayed at 85
+application tables, 114 replicated unique surfaces, and a 12-row-slot bound;
+the schema pair at that point was SQLite 64 / PostgreSQL 43 / epoch 1.
+
+SQLite v65 / PostgreSQL v44 adds `retained_user_activity`, the notebook-FK-free,
+content-minimal user-analysis projection written in the notebook-delete transaction.
+It contains only activity attribution/status/display metadata and explicit deletion/
+expiry timestamps; answer/citation/trace/source-body/report-body data never enters it.
+The actor/owner keyset indexes mirror the Activity query order and the expiry index
+backs startup/delete-path pruning. This leaf table adds one replicated primary-key
+unique surface and no FK edge, so the current pair is SQLite 65 / PostgreSQL 44 /
+epoch 1 with 86 application tables, 115 replicated unique surfaces, and the same
+12-row-slot closure bound.
 
 Run it only while application/background writers are stopped:
 

@@ -24,7 +24,7 @@
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 
 # 不可解析(SQLite 的空串/脏值)或 NULL(PostgreSQL 的 ``ask_jobs.created_at``,那一列
@@ -81,3 +81,23 @@ def parse_activity_instant(value: str, *, field: str) -> datetime:
         # 裸时间按 UTC 读(不是本机时区),与 SQLite 日期函数对裸串的解释一致。
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def activity_retention_window(
+    value: str | datetime, *, retention_days: int
+) -> tuple[datetime, datetime]:
+    """Return the normalized deletion instant and its configured expiry.
+
+    Notebook deletion is the one point at which the live aggregate still
+    exists and can be projected without races.  Both database adapters call
+    this helper before entering their archive ``INSERT ... SELECT`` statements
+    so a day means one exact 24-hour UTC duration on both backends.
+    """
+    if isinstance(value, datetime):
+        deleted_at = value
+        if deleted_at.tzinfo is None:
+            deleted_at = deleted_at.replace(tzinfo=timezone.utc)
+        deleted_at = deleted_at.astimezone(timezone.utc)
+    else:
+        deleted_at = parse_activity_instant(str(value), field="deleted_at")
+    return deleted_at, deleted_at + timedelta(days=int(retention_days))

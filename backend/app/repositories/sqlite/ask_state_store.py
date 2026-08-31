@@ -657,7 +657,32 @@ class AskStateStore:
                 "SELECT id,notebook_id,conversation_id,created_by,mode,question,status,"
                 "answer_id,error,asked_at FROM ask_jobs WHERE id=?", (job_id,)).fetchone()
             if row is None:
-                raise KeyError(job_id)
+                retained = db.execute(
+                    "SELECT record_id,notebook_id,actor_id,notebook_name,"
+                    "conversation_id,mode,question,status,asked_at,deleted_at,"
+                    "expires_at FROM retained_user_activity "
+                    "WHERE activity_type='ask' AND record_id=? "
+                    "AND julianday(expires_at)>julianday('now')",
+                    (job_id,),
+                ).fetchone()
+                if retained is None:
+                    raise KeyError(job_id)
+                return {
+                    "job_id": retained["record_id"],
+                    "notebook_id": retained["notebook_id"],
+                    "conversation_id": retained["conversation_id"],
+                    "created_by": retained["actor_id"],
+                    "mode": retained["mode"],
+                    "question": retained["question"],
+                    "status": retained["status"],
+                    "trace": [],
+                    "answer_id": "",
+                    "error": "",
+                    "asked_at": retained["asked_at"] or "",
+                    "notebook_name": retained["notebook_name"],
+                    "notebook_deleted_at": retained["deleted_at"],
+                    "retained_until": retained["expires_at"],
+                }
             trace = self.read_trace(db, job_id)
         return {"job_id": row["id"], "notebook_id": row["notebook_id"],
                 "conversation_id": row["conversation_id"], "created_by": row["created_by"],

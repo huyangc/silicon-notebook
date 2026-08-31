@@ -28,7 +28,7 @@ POSTGRES_ROWID_ORDINAL_TABLES = (
 )
 
 
-# Every ordinary application table in the current SQLite v64 / PostgreSQL v43
+# Every ordinary application table in the current SQLite v65 / PostgreSQL v44
 # compatibility pair. SQLite FTS virtual tables are rebuilt on PostgreSQL and
 # the migration ledger/shadow control tables are adapter-internal. Import and
 # shadow preflight use this reverse-totality list to reject unrelated/live
@@ -108,6 +108,7 @@ POSTGRES_BUSINESS_TABLES = (
     "object_schemas",
     "promotion_candidates",
     "relation_embeddings",
+    "retained_user_activity",
     "reports",
     "retrieval_experiences",
     "source_authors",
@@ -240,22 +241,20 @@ POSTGRES_EMPTY_TIME_SENTINELS = frozenset(
         "knowledge_objects.last_reviewed",
         "merge_review_jobs.started_at",
         "merge_review_jobs.updated_at",
+        "retained_user_activity.created_at",
+        "retained_user_activity.updated_at",
         "source_index_backfills.completed_at",
         "unified_kg_state.last_rebuild_at",
     }
 )
 
 
-# The schema-complete PostgreSQL baseline is paired with SQLite v64. A future
+# The schema-complete PostgreSQL baseline is paired with SQLite v65. A future
 # SQLite or PostgreSQL migration must add a reviewed compatibility pairing
 # rather than assuming that independently numbered schemas remain compatible.
-# postgres_version 42 (hot-path fix batch 2 / R6, migration 0042) is a
-# PostgreSQL-only addition -- no SQLite migration accompanies it, so
-# sqlite_version stayed 63 at that point. postgres_version 43 / sqlite_version
-# 64 (hot-path fix batch 3, migration 0043 / _migration_64) pairs BOTH
-# backends again: idx_clusters_nb_canonical_member on
-# concept_clusters(notebook_id, canonical_id, member_object_id).
+# PostgreSQL v44 / SQLite v65 are the paired retained-user-activity schema:
+# both add the same content-minimal table and lookup/expiry indexes.
 POSTGRES_SCHEMA_MANIFEST = PostgresSchemaManifest(
-    sqlite_version=64,
-    postgres_version=43,
+    sqlite_version=65,
+    postgres_version=44,
 )

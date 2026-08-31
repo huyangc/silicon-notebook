@@ -893,6 +893,11 @@ SILICON_NOTEBOOK_CORS_ORIGINS
 
 `.env.example` 是非服务变量与密钥槽位的权威清单，`model-services.example.toml` 是服务、绑定与容量模板；上面分组只列常用项。推理专用模型通过 TOML 把 `reasoning_agent` 绑定到独立服务，其护栏仍是 `REASONING_MAX_STEPS`、`REASONING_MAX_SUBQUERIES`、`REASONING_TIMEOUT_SECONDS`、`REASONING_MAX_RETRIES`。其余可调项还包括检索/接地参数（`PROC_MIN`、`EVIDENCE_TAU_LOW`、`EVIDENCE_TAU_HIGH`）、可选调试日志查看器（`DEBUG_LOGS_ENABLED`）和运行身份（`SILICON_NOTEBOOK_ENV`、`SILICON_NOTEBOOK_SINGLE_USER_EMAIL`、`SILICON_NOTEBOOK_SINGLE_USER_NAME`）。
 
+`USER_ACTIVITY_RETENTION_DAYS` 控制笔记本删除后最小用户分析摘要的留存天数（默认
+180，可取 1–3650）。它不会延长答案/来源/报告正文、引用或推理轨迹的生命周期。该值在
+后端启动时读取，只影响本进程启动后删除的笔记本；已经生成的摘要继续使用行上已写定的
+`expires_at`。
+
 `MODEL_JSON_REPAIR_MODE` 只作用于 `reasoning_agent` 与 `ask_answer`。`off` 保持严格拒绝，
 `shadow` 记录响应是否可安全修复但仍拒绝，`on` 接受保守修复（默认）。它不会补全被截断的
 输出，也不会放松 schema、类型或正文安全校验；修复事件不含业务内容，并用模型调用的安全

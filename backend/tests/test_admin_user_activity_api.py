@@ -676,6 +676,112 @@ def test_ask_answer_detail_backfills_answered_at_from_created_at(client):
     assert detail["payload"]["answered_at"] == "2026-08-01T12:00:05"
 
 
+def test_admin_activity_survives_notebook_delete_without_answer_or_trace(client):
+    owner = _auth(client, 27)
+    owner_id = _me(client, owner)
+    notebook_id = _create_notebook(client, owner, "即将删除的笔记本")
+    with _repo()._write() as db:
+        _insert_conversation(
+            db, "conv-retained", notebook_id, owner_id,
+            "2026-08-01T13:00:00+00:00",
+        )
+        _insert_answer(
+            db, "ans-retained", notebook_id, "conv-retained", "保留这个问题？",
+            {"conclusion": "不能保留的答案正文", "answer": "不能保留的答案正文"},
+            "2026-08-01T13:01:00+00:00",
+        )
+        _insert_ask_job(
+            db, "job-retained", notebook_id, owner_id,
+            "2026-08-01T13:00:00+00:00",
+            conversation_id="conv-retained", question="保留这个问题？",
+            mode="reasoning", status="done",
+            asked_at="2026-08-01T13:00:00+00:00", answer_id="ans-retained",
+            error="不能保留的错误诊断",
+        )
+        _insert_source(
+            db, "source-retained", notebook_id, "2026-08-01T12:59:00+00:00",
+            title="留存来源摘要",
+        )
+        db.execute(
+            "INSERT INTO reports "
+            "(id,notebook_id,question,depth,status,created_by,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (
+                "report-retained", notebook_id, "留存报告提示", 2, "done",
+                owner_id, "2026-08-01T12:58:00+00:00",
+                "2026-08-01T13:02:00+00:00",
+            ),
+        )
+        db.execute(
+            "INSERT INTO ask_trace_steps(job_id,seq,step_json,created_at) "
+            "VALUES (?,?,?,?)",
+            (
+                "job-retained", 0,
+                json.dumps({"detail": "不能保留的推理过程"}),
+                "2026-08-01T13:00:30+00:00",
+            ),
+        )
+
+    assert client.delete(
+        f"/api/notebooks/{notebook_id}", headers=owner
+    ).status_code == 204
+
+    # Self-service still follows live notebook authority after deletion.
+    for activity_type in (None, "ask", "source", "report"):
+        self_activity = client.get(
+            f"/api/admin/users/{owner_id}/activity",
+            params={"activity_type": activity_type} if activity_type else {},
+            headers=owner,
+        )
+        assert self_activity.status_code == 200
+        assert self_activity.json()["items"] == []
+    assert client.get(
+        f"/api/admin/users/{owner_id}/asks/job-retained", headers=owner,
+    ).status_code == 404
+
+    admin = _auth_admin(client)
+    mixed_activity = client.get(
+        f"/api/admin/users/{owner_id}/activity", headers=admin,
+    )
+    assert mixed_activity.status_code == 200
+    assert {row["id"] for row in mixed_activity.json()["items"]} == {
+        "job-retained", "source-retained", "report-retained",
+    }
+    activity = client.get(
+        f"/api/admin/users/{owner_id}/activity?activity_type=ask", headers=admin,
+    )
+    assert activity.status_code == 200
+    item = activity.json()["items"][0]
+    assert item["id"] == "job-retained"
+    assert item["question"] == "保留这个问题？"
+    assert item["notebook_name"] == "即将删除的笔记本"
+    assert item["notebook_deleted_at"]
+    assert item["retained_until"]
+
+    detail = client.get(
+        f"/api/admin/users/{owner_id}/asks/job-retained", headers=admin,
+    )
+    assert detail.status_code == 200
+    body = detail.json()
+    assert body["question"] == "保留这个问题？"
+    assert body["answer"] is None
+    assert body["trace"] == []
+    assert body["error"] == ""
+    assert body["notebook_name"] == "即将删除的笔记本"
+    serialized = json.dumps(body, ensure_ascii=False)
+    assert "不能保留的答案正文" not in serialized
+    assert "不能保留的推理过程" not in serialized
+    assert "不能保留的错误诊断" not in serialized
+
+    usage = client.get("/api/admin/users", headers=admin)
+    assert usage.status_code == 200
+    owner_usage = next(row for row in usage.json() if row["id"] == owner_id)
+    assert owner_usage["notebooks"] == 0
+    assert owner_usage["sources"] == 1
+    assert owner_usage["questions"] == 1
+    assert owner_usage["reports"] == 1
+
+
 # --- 部署开关 -------------------------------------------------------------
 
 def test_activity_endpoints_404_when_activity_view_disabled(tmp_path, monkeypatch):

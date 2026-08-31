@@ -156,6 +156,9 @@ class ActivityAsk(BaseModel):
     status: str = ""
     answer_id: str = ""
     error: str = ""
+    notebook_name: str = ""
+    notebook_deleted_at: str = ""
+    retained_until: str = ""
 
 
 class ActivitySource(BaseModel):
@@ -183,6 +186,9 @@ class ActivitySource(BaseModel):
     extraction_warning: str = ""
     parse_quality_warning: bool = False
     paper_meta_status: str = ""
+    notebook_name: str = ""
+    notebook_deleted_at: str = ""
+    retained_until: str = ""
 
 
 class ActivityReport(BaseModel):
@@ -197,6 +203,9 @@ class ActivityReport(BaseModel):
     depth: int = 0
     status: str = ""
     generation_started_at: str = ""
+    notebook_name: str = ""
+    notebook_deleted_at: str = ""
+    retained_until: str = ""
 
 
 # 按 type 判别的活动流条目联合类型 —— 与 frontend/app/dev/logs/activity/types.ts
@@ -241,6 +250,9 @@ class AskDetail(BaseModel):
     error: str = ""
     trace: List[dict] = Field(default_factory=list)
     answer: Optional[Dict[str, Any]] = None
+    notebook_name: str = ""
+    notebook_deleted_at: str = ""
+    retained_until: str = ""
 
     @field_validator("trace", mode="before")
     @classmethod

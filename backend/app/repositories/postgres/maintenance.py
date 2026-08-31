@@ -613,6 +613,10 @@ class PostgresMaintenanceAdapter:
             with self._runtime.database.write() as db:
                 db.execute(sql, params)
 
+        _settle("retained_user_activity", lambda: _write(
+            "DELETE FROM retained_user_activity WHERE expires_at<=%s",
+            (now,),
+        ))
         _settle("merge_review_jobs", lambda: _write(
             "UPDATE merge_review_jobs SET status='failed', "
             "error='中断:服务重启' WHERE status='running'"

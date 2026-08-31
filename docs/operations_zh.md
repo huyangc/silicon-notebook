@@ -377,7 +377,8 @@ python scripts/migrate_sqlite_to_postgres.py \
   （`postgres/bundle.py`）每次启动都用新盐重算 admin 密码哈希，并无条件 `UPDATE` 内置的
   `user-local` 行。另有两类取决于数据：`recover_interrupted_jobs()` 在 readiness 之前把遗留的
   `ask_jobs`/`merge_review_jobs`/`extraction_runs`/`kg_build_jobs` running 行、`knowhow_rows` 的
-  syncing/pending、`sources` 的 extracting/queued/parsing 收敛到终态并清空两张 KG scratch 表；
+  syncing/pending、`sources` 的 extracting/queued/parsing 收敛到终态，清理已到期的
+  `retained_user_activity` 行，并清空两张 KG scratch 表；
   `_reproject_legacy_knowhow_tables()` 在 `mark_ready()` **之后**运行，对仍带旧版固定 KO 的
   knowhow 表调度后台 cell 级重投影，**会替换 KG 对象**。所以**「可证明零写入」的回滚必须在
   第一次启动 PostgreSQL 之前决定**——不存在「已启动但没动过」的状态。bootstrap 与恢复性写入
@@ -388,6 +389,10 @@ python scripts/migrate_sqlite_to_postgres.py \
   验证两端后才能恢复 SQLite。若这套流程没有设计并演练，PostgreSQL 就是回滚边界。
 - 开发时反复切 URL 只是选择两条彼此独立的历史，任何一边都不会自动同步。不得对 PostgreSQL
   运行 SQLite-only maintenance，也不得在应用/后台 writer 仍在线时执行直连批处理写入。
+
+删除笔记本并写入一批新的用户活动摘要时，同一事务也会清理已经到期的旧摘要。
+`expires_at` 读闸才是权威边界：即使一个长期运行的进程尚未遇到启动或下一次删除这两个
+物理清理时机，行到期后也立刻不再进入管理员统计、活动流和详情；无需人工运行维护命令。
 
 ## PostgreSQL notebook-aware 词法索引
 

@@ -134,8 +134,9 @@ def test_expected_snapshot_has_rows_reads_context_and_ask_metadata():
     # _migration_61 的 docstring），以及 v62 用户提问总览的创建者/时间排序
     # 索引，v63 部署插件运行时开关 + 审计的 extension_runtime_toggles 表，
     # 以及 v64 热路径修复批 3 的概念簇 keyset 覆盖索引
-    # idx_clusters_nb_canonical_member，合法升级到当前版本。
-    assert snapshot["schema"]["user_version"] == 64
+    # idx_clusters_nb_canonical_member，以及 v65 删除笔记本后独立留存的最小
+    # 用户活动摘要表 retained_user_activity，合法升级到当前版本。
+    assert snapshot["schema"]["user_version"] == 65
     assert snapshot["rows"]["notebooks"]
     assert snapshot["reads"]["notebook"]
     assert snapshot["context"]["source_files"]

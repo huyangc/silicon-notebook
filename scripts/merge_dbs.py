@@ -28,7 +28,7 @@ from app.repositories.ports import (  # noqa: E402
     RETRIEVAL_EXPERIENCE_MAX_ENTRIES,
 )
 
-# --- 表分类(SCHEMA_VERSION=59) --------------------------------------------
+# --- 表分类(SCHEMA_VERSION=65) --------------------------------------------
 NOTEBOOKS_TABLE = "notebooks"  # 按 id 筛(自身即 notebook 行)
 
 # object_schemas 是部署级全局基线；notebook_object_schemas 才随 notebook 合并。
@@ -117,6 +117,12 @@ CHILD_TABLES = [
 GLOBAL_UNION_TABLES = [
     "users", "user_profiles", "agent_profiles", "agent_access_tokens",
     "concept_whitelist", "object_schemas",
+    # v65 删除笔记本活动留存。行在删除事务中从 ask/source/report 冻结出来，已不再
+    # 带 notebook 外键，且 (activity_type, record_id) 沿用原记录的稳定身份；因此
+    # 与 users/groups 一样做主库优先并集。若一侧仍保留 live notebook、另一侧已删
+    # 除并归档，同一活动可能在合并结果里同时以 live/archive 两种形态存在；查询层
+    # 会按各自数据生命周期展示，而不是在离线合并时猜测并删除其中一份。
+    "retained_user_activity",
     # v49 群组知识共享 P1: groups/group_members 都不带 notebook_id，与
     # agent_profiles/agent_access_tokens 同一先例——group_members 的 FK 挂在
     # groups 上而非 notebooks 上，不适用 CHILD_TABLES 的"按 sec_nb 已导入父行"

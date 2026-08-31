@@ -169,3 +169,15 @@ test("空标题渲染占位符，不回落到文件名", () => {
   expect(screen.getByText("（无标题）")).toBeInTheDocument();
   expect(screen.queryByText("q3-report.pdf")).not.toBeInTheDocument();
 });
+
+
+test("已删除笔记本的留存摘要在活动行上明确标记", () => {
+  stream([
+    ask({
+      notebook_name: "旧项目",
+      notebook_deleted_at: "2026-08-04T11:00:00",
+      retained_until: "2027-01-31T11:00:00",
+    }),
+  ]);
+  expect(screen.getByText("原笔记本已删除")).toBeInTheDocument();
+});
