@@ -903,6 +903,22 @@ Copying — the slow, failure-prone half — happens entirely inside a
 claim-unique `.tmp-<token>` staging directory (see below); the live tree is
 untouched until the final renames.
 
+An optional root (`kg_viz` or the companion — never the main index, whose
+absence is refused outright) that the **package omits** is not simply left
+alone if a live directory from an earlier generation is still there: that
+root's publish for this generation is **empty** — it is *retired*, in the
+same companion → viz → main position, by renaming it to `.old` and cleaning
+that up once the generation stands, exactly like a real swap with no
+replacement tree. Without this, a same-version republish whose package
+carries no companion would leave the *old* companion's `parent_version` still
+matching (the version number did not change) and its stat signature
+unchanged, so a reader keeps pairing it with the new main index even though
+this import never vouched for it — the exact "companion describing a
+different generation" the publish order above exists to prevent, reached
+here from the omission side instead of a mid-sequence failure. A root absent
+from **both** the package and the live tree is unaffected: that is still the
+ordinary "no companion" shape and stays skipped.
+
 The import claim does not block an indexing-pipeline switch from publishing a
 new identity, because a plugin activation is a different mechanism entirely —
 so the identity this package was validated against is re-read twice more:
@@ -981,7 +997,7 @@ the ordinary facade path — see the leftovers section below):
 | Published indexing pipeline | `manifest.pipeline_identity` matches the notebook's currently published identity | `import` refuses (a mismatch makes retrieval discard the scale core **silently**) |
 | `EMBED_DIM` / `EMBED_RUNTIME_DIM` | the effective dimension must match | `import` refuses (a mismatch makes `open_ann` fail open → **silent zero recall**); a manifest with no `dim` is refused for the same reason |
 | hnswlib | **strict equality** | `import` refuses by default; `--allow-library-mismatch` overrides. `ann.bin` has no format version header, so a mismatch can be swallowed by the fail-open into silent zero recall; an unknown version on either side counts as a mismatch |
-| `--from` package location | must not equal or sit inside any of the notebook's own artifact roots (`kg_index`, `kg_viz`, the source-partition companion), or their `.old` | `import` refuses, exit code `1`, before anything is copied — publishing would rename that root to `.old` and delete it, silently deleting the operator's own input package |
+| `--from` package location | must not equal or sit inside any of the notebook's own artifact roots (`kg_index`, `kg_viz`, the source-partition companion), their `.old`, or any `.tmp`/`.tmp-<token>` staging directory `prepare_staging_directory` would clear for one of them | `import` refuses, exit code `1`, before anything is copied — publishing would rename that root to `.old` and delete it (or, for a `.tmp*` staging directory, `rmtree` it before the copy even starts), silently deleting the operator's own input package |
 | numpy / scipy | same version recommended | warning only: npy/npz carry a format version and fail loudly |
 | Production `.env` | the build host must use the production `.env` (the storage root may differ) | not checked automatically — operational discipline |
 
@@ -1013,6 +1029,14 @@ because only one of them says anything about the notebook:
   request for the next free slot and reports `queued`, so it actually runs
   later; the CLI exits `1` with a message naming the budget, and `inspect`
   reports `build_claim: unknown` rather than inventing a builder.
+
+A third case reports the same way as the budget one, for the same reason —
+the **lock backend itself fails to answer** (the dedicated connection cannot
+open, or `pg_try_advisory_lock` errors): also not a statement about the
+notebook, so `claim`-taking commands (`build`/`export`/`import`) refuse
+cleanly with a message naming the lock backend as unavailable and changing
+nothing, and `inspect` reports the same `build_claim: unknown` rather than
+letting the bare database error escape as a traceback.
 
 #### PgBouncer prerequisite
 
@@ -1125,9 +1149,10 @@ already gone from view, so it deletes nothing; the leftover is reported by
 above for the exact per-command behavior.
 
 Note also `inspect`'s `build_claim`, which has three values: `free`,
-`held_elsewhere`, and `unknown` — the last means this process had no dedicated
-lock session left to probe with, so it is a statement about the CLI run, not
-about the notebook (see the connection budget above).
+`held_elsewhere`, and `unknown` — the last covers TWO causes that both fold
+into the same value because neither is a statement about the notebook: this
+process had no dedicated lock session left to probe with, or the probe itself
+failed (the lock backend was unavailable) — see the connection budget above.
 
 #### allow_pickle provenance constraint (security)
 

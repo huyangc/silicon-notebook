@@ -485,6 +485,107 @@ def test_import_refuses_a_package_nested_inside_a_stale_old(
         assert _staging_glob(root) == []
 
 
+def test_import_refuses_a_package_nested_inside_the_legacy_tmp_staging(
+    repository, store, tmp_path
+):
+    """codex PR#643 R11 P1: ``prepare_staging_directory`` unconditionally
+    ``rmtree``s the legacy no-suffix ``{root}.tmp`` before copying that root's
+    staged tree in — a package nested there is destroyed one step earlier
+    than the R10 nesting guard (which only checks ``{root}``/``{root}.old``)
+    ever sees it.
+
+    Mutation anchor: drop the ``staging_tmp_family`` branch of the
+    containment check and this goes red — with the fake projections here
+    reporting no identity drift, ``run_import`` runs to completion and
+    ``prepare_staging_directory`` deletes the nested package via its own
+    legacy-``.tmp`` pre-clean before anything is even staged.
+    """
+    _seed_live(store, "nb-1")
+    legacy_tmp = Path(f"{store.scale_dir('nb-1')}.tmp")
+    package = _full_package(legacy_tmp)
+
+    with pytest.raises(cli.ScaleBuildCliFailure, match=cli.MAIN_ROOT):
+        cli.run_import(
+            repository,
+            "nb-1",
+            package,
+            allow_library_mismatch=False,
+            report=lambda _message: None,
+        )
+
+    # Nothing on disk changed: the live tree is on its previous generation,
+    # and — the actual harm this guard prevents — the input package itself
+    # (still living under the legacy ``.tmp`` name) is untouched. The package
+    # itself IS a ``.tmp``-shaped sibling of ``kg_index``, so it legitimately
+    # shows up in that root's own glob; the other two roots (never touched by
+    # this refusal) must show no staging leftovers at all, and no ADDITIONAL
+    # entry (a real staging copy) must have appeared beside the package.
+    assert _published_version(store, "nb-1") == ["nb-1", 1]
+    assert (package / cli.MAIN_ROOT / "manifest.json").is_file()
+    roots = cli.artifact_roots(store, "nb-1")
+    assert _staging_glob(roots[cli.COMPANION_ROOT]) == []
+    assert _staging_glob(roots["kg_viz"]) == []
+    assert _staging_glob(roots[cli.MAIN_ROOT]) == [legacy_tmp]
+
+
+def test_import_refuses_a_package_nested_inside_another_claims_tokened_tmp(
+    repository, store, tmp_path
+):
+    """The same danger for a claim-unique ``{root}.tmp-<token>`` actually on
+    disk — not this run's own token, but some other build's (live or a
+    zombie's). ``prepare_staging_directory`` only spares tokens that are NOT
+    its own, but the containment check has to name every on-disk ``.tmp-*``
+    sibling, not just the legacy no-suffix name."""
+    _seed_live(store, "nb-1")
+    tokened_tmp = Path(f"{store.scale_dir('nb-1')}.tmp-sometoken")
+    package = _full_package(tokened_tmp)
+
+    with pytest.raises(cli.ScaleBuildCliFailure, match=cli.MAIN_ROOT):
+        cli.run_import(
+            repository,
+            "nb-1",
+            package,
+            allow_library_mismatch=False,
+            report=lambda _message: None,
+        )
+
+    assert _published_version(store, "nb-1") == ["nb-1", 1]
+    assert (package / cli.MAIN_ROOT / "manifest.json").is_file()
+    roots = cli.artifact_roots(store, "nb-1")
+    assert _staging_glob(roots[cli.COMPANION_ROOT]) == []
+    assert _staging_glob(roots["kg_viz"]) == []
+    assert _staging_glob(roots[cli.MAIN_ROOT]) == [tokened_tmp]
+
+
+def test_import_refuses_a_package_nested_inside_this_runs_own_future_tmp(
+    repository, store, tmp_path, lock
+):
+    """The claim-token directory THIS run's own ``prepare_staging_directory``
+    is about to create does not exist on disk yet at containment-check time —
+    it has to be named from ``handle.claim_token`` rather than discovered by
+    globbing, or a package staged exactly there would still slip through."""
+    _seed_live(store, "nb-1")
+    own_future_tmp = Path(f"{store.scale_dir('nb-1')}.tmp-{lock.claim_token}")
+    assert not own_future_tmp.exists(), "must be checked by name, not existence"
+    package = _full_package(own_future_tmp)
+
+    with pytest.raises(cli.ScaleBuildCliFailure, match=cli.MAIN_ROOT):
+        cli.run_import(
+            repository,
+            "nb-1",
+            package,
+            allow_library_mismatch=False,
+            report=lambda _message: None,
+        )
+
+    assert _published_version(store, "nb-1") == ["nb-1", 1]
+    assert (package / cli.MAIN_ROOT / "manifest.json").is_file()
+    roots = cli.artifact_roots(store, "nb-1")
+    assert _staging_glob(roots[cli.COMPANION_ROOT]) == []
+    assert _staging_glob(roots["kg_viz"]) == []
+    assert _staging_glob(roots[cli.MAIN_ROOT]) == [own_future_tmp]
+
+
 def test_a_staging_failure_never_touches_the_live_tree(
     repository, store, tmp_path, monkeypatch
 ):
@@ -823,6 +924,92 @@ def test_a_held_claim_makes_every_command_refuse(storage, store, tmp_path):
     assert _staging_glob(store.scale_dir("nb-1")) == []
 
 
+class _FailingLockProbeDatabase:
+    """``try_scale_build_lock`` that raises rather than returning a
+    ``ScaleBuildLockAttempt`` — stands in for the dedicated lock connection
+    or ``pg_try_advisory_lock`` itself failing (codex PR#643 R11 P2-b)."""
+
+    def try_scale_build_lock(self, notebook_id: str):
+        from app.repositories.postgres.database import PostgresDatabaseError
+
+        raise PostgresDatabaseError(
+            "PostgreSQL scale build lock acquisition failed for <redacted>"
+        )
+
+
+def test_claim_notebook_translates_a_lock_probe_failure_into_a_clean_refusal(
+    storage, store
+):
+    """codex PR#643 R11 P2-b: the online runtime
+    (``scale_artifact_runtime``'s ``_acquire_scale_build_lock``) already
+    translates a lock-probe failure into ``SCALE_BUILD_LOCK_UNAVAILABLE`` —
+    but the CLI's ``claim_notebook`` calls ``try_scale_build_lock`` directly,
+    bypassing that wrapper, so the bare ``PostgresDatabaseError`` used to
+    escape as an unhandled traceback instead of the documented "nothing
+    changed, retry later" refusal every other claim failure gets.
+
+    Mutation anchor: drop the ``except PostgresDatabaseError`` translation in
+    ``claim_notebook`` and this goes red with the raw
+    ``PostgresDatabaseError`` escaping instead of ``ScaleBuildCliFailure``.
+    """
+    repository = _Repository(
+        storage, store, _FailingLockProbeDatabase(), _Projections(PIPELINE)
+    )
+
+    with pytest.raises(cli.ScaleBuildCliFailure, match="lock backend"):
+        with cli.claim_notebook(repository, "nb-1"):
+            pytest.fail("must not yield a claim on a probe failure")
+
+
+def test_run_inspect_reports_an_unknown_claim_on_a_lock_probe_failure(
+    storage, store
+):
+    """The same probe failure, reached through ``run_inspect`` this time:
+    a lock-backend error is not a statement about the notebook any more than
+    an exhausted lock-session budget is, so it must fold into the SAME
+    documented ``unknown`` claim state — not crash the read-only inspect an
+    operator is very likely running to diagnose exactly this trouble.
+
+    Mutation anchor: drop the ``except PostgresDatabaseError`` around the
+    probe in ``run_inspect`` and this goes red with the raw exception
+    escaping instead of a clean ``build_claim: unknown`` receipt.
+    """
+    _seed_live(store, "nb-1")
+
+    class _ScaleArtifacts:
+        @staticmethod
+        def version(_notebook_id: str):
+            return ["nb-1", 1]
+
+    class _InspectRuntime(_Runtime):
+        def __init__(self, store, database, projections) -> None:
+            super().__init__(store, database, projections)
+            self.scale_artifacts = _ScaleArtifacts()
+
+    class _InspectRepository(_Repository):
+        def __init__(self, settings, store, database, projections) -> None:
+            self.settings = settings
+            self._runtime = _InspectRuntime(store, database, projections)
+
+        @staticmethod
+        def scale_index_status(_notebook_id: str):
+            return {
+                "state": "ready",
+                "exists": True,
+                "building": False,
+                "delta_chunks": 0,
+                "total_chunks": 2,
+            }
+
+    repository = _InspectRepository(
+        storage, store, _FailingLockProbeDatabase(), _Projections(PIPELINE)
+    )
+
+    receipt = cli.run_inspect(repository, "nb-1", report=lambda _message: None)
+
+    assert receipt["build_claim"] == "unknown"
+
+
 def test_a_refused_package_never_reaches_the_disk(repository, store, tmp_path):
     _seed_live(store, "nb-1")
     package = _package(tmp_path, dim=1024)
@@ -873,6 +1060,146 @@ def test_a_deferred_interrupt_that_published_everything_is_not_a_failure(
             "a fully published run must still finalize .old cleanup for "
             "every root (codex PR#643 R8 P1/P2 keep_old bookkeeping)"
         )
+
+
+def test_import_retires_a_stale_companion_when_the_package_omits_it(
+    repository, store, tmp_path
+):
+    """codex PR#643 R11 P2-a: a same-version republish whose package has no
+    companion used to leave a STALE live companion in place — its
+    ``parent_version`` still matches (same version number), its stat
+    signature never changes, so a reader keeps pairing it with the new main
+    root even though this package never vouched for it. Absent from the
+    package AND live on disk must retire the stale root, not skip it.
+
+    Mutation anchor: drop the ``retiring``/``retire_live_directory`` branch
+    in ``run_import`` and this goes red — the old companion (and its
+    ``parent_version``) survives the import untouched.
+    """
+    _seed_live(store, "nb-1")  # companion parent_version=["nb-1", 1]
+    package = _package(tmp_path, version=["nb-1", 1])  # same version, no companion
+    assert not (package / cli.COMPANION_ROOT).exists()
+    _write_manifest(package / "kg_viz", {"generation": "kept"})
+
+    receipt = cli.run_import(
+        repository,
+        "nb-1",
+        package,
+        allow_library_mismatch=False,
+        report=lambda _message: None,
+    )
+
+    assert receipt["retired"] == [cli.COMPANION_ROOT]
+    assert cli.COMPANION_ROOT in receipt["roots"]
+    companion_dir = Path(store.source_partition_dir("nb-1"))
+    assert not companion_dir.exists(), "the stale companion must be gone"
+    assert not Path(f"{companion_dir}.old").exists(), (
+        "a clean retire must finalize its own .old, not leave it behind"
+    )
+    # The root this package DID include is untouched by the retire logic.
+    assert (
+        json.loads((Path(store.viz_dir("nb-1")) / "manifest.json").read_text())
+        == {"generation": "kept"}
+    )
+
+
+def test_import_retires_a_stale_viz_root_when_the_package_omits_it(
+    repository, store, tmp_path
+):
+    """The viz root is retired the same way the companion is — a package
+    that omits it while a live viz tree still exists from an earlier
+    generation must not leave that stale tree in place."""
+    _seed_live(store, "nb-1")
+    package = _package(
+        tmp_path,
+        version=["nb-1", 7],
+        companion={"parent_version": ["nb-1", 7], "published_sources": 2},
+    )
+    assert not (package / "kg_viz").exists()
+
+    receipt = cli.run_import(
+        repository,
+        "nb-1",
+        package,
+        allow_library_mismatch=False,
+        report=lambda _message: None,
+    )
+
+    assert receipt["retired"] == ["kg_viz"]
+    viz_dir = Path(store.viz_dir("nb-1"))
+    assert not viz_dir.exists()
+    assert not Path(f"{viz_dir}.old").exists()
+
+
+def test_import_skips_an_optional_root_absent_from_both_package_and_disk(
+    repository, store, tmp_path
+):
+    """No live root to retire, and none in the package: unchanged "skip"
+    behaviour — nothing is created, nothing is reported as retired."""
+    package = _package(tmp_path)  # no companion, no live seed at all
+    assert not (package / cli.COMPANION_ROOT).exists()
+
+    receipt = cli.run_import(
+        repository,
+        "nb-1",
+        package,
+        allow_library_mismatch=False,
+        report=lambda _message: None,
+    )
+
+    assert receipt["retired"] == []
+    assert cli.COMPANION_ROOT not in receipt["roots"]
+    assert not Path(store.source_partition_dir("nb-1")).exists()
+
+
+def test_import_rolls_back_a_retired_companion_when_identity_drifts_during_the_swap(
+    storage, store, tmp_path
+):
+    """codex PR#643 R11 P2-a + R8 P1: a retired root is published inside the
+    same guarded loop as a real swap, so it must be rolled back exactly like
+    one when the post-swap pipeline-identity re-check finds a drift — the
+    companion goes back to being live, not stranded in ``.old``.
+
+    Mutation anchor: keep the retire but skip it in
+    ``ScaleArtifactStore.rollback_swap``'s ``temporary=None`` branch and this
+    goes red — the drift is still refused, but the companion never comes back
+    to its live path.
+    """
+    _seed_live(store, "nb-1")
+    package = _package(tmp_path, version=["nb-1", 1])  # no companion
+    _write_manifest(package / "kg_viz", {"generation": "kept"})
+    calls = {"n": 0}
+    projections = _Projections(PIPELINE)
+    base = projections.pipeline_identity
+
+    def drifting(notebook_id):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            return base(notebook_id)
+        return ["acme-pipeline", "3"]
+
+    projections.pipeline_identity = drifting  # type: ignore[method-assign]
+    repository = _Repository(storage, store, _Database(_Lock()), projections)
+
+    with pytest.raises(cli.ScaleBuildCliFailure, match="changed"):
+        cli.run_import(
+            repository,
+            "nb-1",
+            package,
+            allow_library_mismatch=False,
+            report=lambda _message: None,
+        )
+
+    assert calls["n"] >= 3
+    assert _published_version(store, "nb-1") == ["nb-1", 1]
+    companion_dir = Path(store.source_partition_dir("nb-1"))
+    assert companion_dir.exists(), "the retired companion must come back live"
+    assert json.loads(
+        (companion_dir / "manifest.json").read_text()
+    )["parent_version"] == ["nb-1", 1]
+    assert not Path(f"{companion_dir}.old").exists(), (
+        "rollback must restore .old back onto live, leaving no .old behind"
+    )
 
 
 # ───────────────────────────────────────────────── which library is this ──
