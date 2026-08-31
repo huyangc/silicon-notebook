@@ -895,6 +895,20 @@ old companion" window exists by design. Export therefore verifies that the
 companion's `parent_version` equals the main manifest's `version` and refuses
 otherwise.
 
+The serving process's standalone **viz** rebuild takes that same per-notebook
+claim — for the whole of its build *and* its publish — and writes `kg_viz`
+through the same staging + atomic swap every other root uses. Before this it
+wrote the live directory directly with only a process-local marker for
+company, so `export` could copy a viz root mid-write and `import` could rename
+or retire one out from under the writer. A viz rebuild that cannot take the
+claim gives way instead of waiting: the artifact is advisory and the next
+graph-view open triggers it again, so a CLI run holding the claim is never
+delayed by one. A CLI run that arrives while a viz rebuild holds it gets the
+ordinary "held by somebody else" refusal (exit `1`) and can be retried
+immediately — a viz publish is seconds, not hours. SQLite deployments have no
+cross-process claim at all, and this CLI refuses them outright, so the viz
+rebuild behaves there exactly as it always has.
+
 `import` publishes in the order **companion → viz → main index**: any failure
 mid-sequence leaves the *live* main index on its previous generation, and the
 companion's `parent_version` gate makes an unpaired companion unreadable
@@ -918,6 +932,34 @@ different generation" the publish order above exists to prevent, reached
 here from the omission side instead of a mid-sequence failure. A root absent
 from **both** the package and the live tree is unaffected: that is still the
 ordinary "no companion" shape and stays skipped.
+
+Every step of `import` that touches the disk destructively re-verifies the
+claim in the instant before it does — each swap, the retirement above, each
+root's rollback, and each root's `.old` cleanup — and a refusal renames and
+deletes nothing. What a lost claim *means* differs by step, so it is reported
+differently:
+
+- **during a swap or a retirement** — nothing further is published. The roots
+  this run already published stay as they are: rolling them back is exactly
+  as destructive as publishing them was, and that rollback re-verifies the
+  same dead claim and stops as well. The command prints, for every such root,
+  its live / `.old` / staging paths and the exact `mv` that restores it, then
+  exits `1`.
+- **during a rollback** — the walk stops where it is. Roots already reverted
+  are back on the previous generation; the rest are still exactly as this run
+  published them, and each of those is printed with its own recovery `mv`.
+  Exit `1`. If the rollback was running because a Ctrl-C hit the post-swap
+  identity read, the message names both causes.
+- **during the final `.old` cleanup** — the import itself SUCCEEDED. Every
+  root is live, identity-verified and correct; only the deletion of the
+  previous generation stopped, because after a lost claim a `.old` may be a
+  second builder's own rollback copy. The residue is a leftover `.old` on the
+  named roots — the shape "leftovers" below already covers (`rm -rf`, not
+  `mv`, since `live` holds the new generation). The command still exits `1`
+  so that leftover is never mistaken for a clean run.
+
+In all three cases: run `inspect` and confirm no other builder owns the
+notebook (`build_claim: free`) before touching anything by hand.
 
 The import claim does not block an indexing-pipeline switch from publishing a
 new identity, because a plugin activation is a different mechanism entirely —
@@ -1014,6 +1056,8 @@ This channel does **not** use pooled connections:
 
 - each concurrent scale build on the service side pins one dedicated
   non-pooled connection (the lock session) for its whole duration;
+- each standalone viz rebuild on the service side pins one for the (much
+  shorter) duration of that rebuild — it takes the same claim, see above;
 - each `build`/`export`/`import` run of this CLI pins one more;
 - `inspect`'s claim probe opens one and releases it immediately;
 - the migration-ledger preflight opens one bare connection and closes it.

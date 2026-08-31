@@ -892,6 +892,52 @@ def staging_tmp_family(root: Path, claim_token: Optional[str] = None) -> list[Pa
     return candidates
 
 
+def unrolled_root_recovery(
+    name: str, live: Path, temporary: Optional[Path], preserved: bool
+) -> str:
+    """Manual recovery for ONE root a stopped rollback could not revert.
+
+    A rollback walks the published roots in reverse and re-verifies the claim
+    before each rename (P1, codex PR#643 R12). When the claim is gone it stops
+    where it is, which leaves a mixed tree: the roots it already reverted are
+    back on the previous generation, and the ones behind it are still exactly
+    as this run published them. Guessing is not an option and neither is
+    continuing, so every un-reverted root gets a line naming its concrete
+    paths and the exact ``mv`` that undoes it — the same vocabulary the
+    ``.old``/``.tmp-<claim_token>`` leftovers section of docs/operations.md
+    already uses.
+
+    Three shapes, because a publish has three:
+
+    * ``temporary is None`` — a RETIRED root (the package omitted it). Its
+      publish was the single ``live → .old`` rename with nothing to replace
+      it, so ``live`` is simply absent and one rename puts it back.
+    * ``preserved`` — an ordinary replacing swap: this run's tree is live and
+      the previous generation is in ``.old``, so undoing it is two renames in
+      the same order ``rollback_swap`` would have used.
+    * neither — a FIRST-EVER publish for this root: there is no previous
+      generation to restore, so the only thing to undo is the publish itself.
+    """
+    old = f"{live}.old"
+    if temporary is None:
+        return (
+            f"{name}: retired by this run — {live} is absent and the previous "
+            f"generation is at {old}; restore with `mv {old} {live}`"
+        )
+    if preserved:
+        return (
+            f"{name}: still live at {live} as this run published it; the "
+            f"previous generation is at {old}; restore with "
+            f"`mv {live} {temporary} && mv {old} {live}`"
+        )
+    return (
+        f"{name}: still live at {live} as this run published it, and this "
+        "root had no previous generation (a first-ever publish), so there is "
+        f"nothing to restore; to undo the publish itself: `mv {live} "
+        f"{temporary}`"
+    )
+
+
 def run_inspect(repository, notebook_id: str, report: Callable[[str], None]) -> dict:
     """Read-only: what is on disk, what the database thinks, who holds the claim.
 
@@ -1191,6 +1237,26 @@ def run_import(
     ``package/kg_index`` is a directory) and before the staging loop makes
     its first copy.
 
+    codex PR#643 R12 P1: EVERY destructive step here re-verifies the claim
+    immediately beforehand, not just the swaps. The claim's session can die at
+    any point — an idle reaper, a failover, a terminated backend — and the
+    staging copies above are long enough for that to happen routinely; a
+    second builder then legitimately takes over. Three steps used to run
+    unverified, and each of them could damage that new owner's tree: the
+    RETIREMENT of an optional root (a ``live → .old`` rename of whatever is
+    live now), the per-root ROLLBACK the post-swap identity check may order
+    (two renames that can bury the new owner's generation under this run's
+    staging name), and the FINALIZE that deletes each ``.old`` (the new
+    owner's only rollback copy). All three now take ``verify_held`` and stop
+    without touching the disk. What a refusal MEANS differs by step, so each
+    is reported differently: a retirement refusal joins the lock-lost handler
+    below, which now also runs the (equally verified, so equally stopping)
+    rollback of anything already published and reports each root's state; a
+    rollback refusal stops the walk and names the exact ``mv`` for every root
+    it could not revert; a finalize refusal leaves a fully live, verified
+    generation with a leftover ``.old`` — the shape the leftovers docs
+    already cover — and says which roots kept one.
+
     codex PR#643 R11 P1: that R10 guard checked only ``{root}``/``{root}.old``
     — it missed a THIRD shape that is just as destructive: ``{root}.tmp`` and
     ``{root}.tmp-<token>``. ``prepare_staging_directory`` unconditionally
@@ -1298,6 +1364,69 @@ def run_import(
         # PR#643 R8 P1). Populated alongside ``published``; consumed by the
         # post-swap identity re-check further down.
         swap_state: dict[str, tuple[Optional[Path], bool]] = {}
+
+        def _rollback_published_roots(reason: str) -> list[str]:
+            """Undo every root this run published, newest first.
+
+            Each root's renames are preceded by a claim re-check (P1, codex
+            PR#643 R12): undoing a publish is exactly as destructive as making
+            one, and a rollback is decided by a database read that can outlive
+            the lock session. A refusal STOPS the walk — the roots already
+            reverted stay reverted, the rest stay as this run published them —
+            and turns into a ``ScaleBuildCliFailure`` carrying the per-root
+            recovery, because a half-reverted tree an operator cannot see is
+            worse than a loud one they can.
+
+            Defined here, above the publish loop, rather than beside its
+            original post-swap caller: the lock-lost handler needs it too.
+            """
+            pending = list(reversed(published))
+            reverted: list[str] = []
+            lost: Optional[ScaleBuildLockLost] = None
+            # One guard around the whole rollback, same reasoning as the
+            # publish loop below: an interrupt between two roots' rollback
+            # renames would leave the set mismatched.
+            rollback_guard = SwapInterruptGuard(report, reraise=False)
+            with rollback_guard:
+                for name in pending:
+                    temporary, preserved = swap_state[name]
+                    try:
+                        store.rollback_swap(
+                            roots[name],
+                            temporary,
+                            preserved,
+                            verify_held=handle.verify_held,
+                        )
+                    except ScaleBuildLockLost as error:
+                        lost = error
+                        break
+                    reverted.append(name)
+            if rollback_guard.interrupted:
+                report(
+                    "the deferred interrupt is being honoured now: the "
+                    "rollback completed first"
+                )
+            if lost is None:
+                report(
+                    f"rolled back after publish: {reason}; reverted roots: "
+                    f"{reverted}"
+                )
+                return reverted
+            stalled = [name for name in pending if name not in reverted]
+            for name in stalled:
+                temporary, preserved = swap_state[name]
+                report(unrolled_root_recovery(
+                    name, roots[name], temporary, preserved
+                ))
+            raise ScaleBuildCliFailure(
+                f"{lost} The rollback that was under way ({reason}) stopped "
+                f"there: {reverted or 'no root'} rolled back, {stalled} left "
+                "exactly as this run published them. Nothing was renamed "
+                "without the claim. Run `inspect` to confirm no other builder "
+                "owns this notebook, then restore each root above by hand; "
+                "the staged copies are left on disk."
+            ) from None
+
         # One guard around ALL the renames, not one per root: an interrupt
         # between two roots would leave the pair mismatched (fail-soft, but
         # avoidable), and the whole sequence is milliseconds. ``reraise`` is off
@@ -1366,15 +1495,18 @@ def run_import(
                     elif name in retiring:
                         # codex PR#643 R11 P2-a: publish "no such root" —
                         # ``retire_live_directory`` is the degenerate swap
-                        # with no ``temporary``. No ``verify_held`` here (the
-                        # primitive takes none): the main root's own swap,
-                        # always later in PUBLISH_ORDER, still re-verifies
-                        # the claim before it renames, and a companion/viz
-                        # retired just ahead of a lock loss there is exactly
-                        # as fail-soft as any other partial publish (see the
-                        # ``ScaleBuildLockLost`` handler below) — "no
-                        # companion" is even safer than a mismatched one.
-                        preserved = store.retire_live_directory(roots[name])
+                        # with no ``temporary``. It takes ``verify_held`` like
+                        # every other destructive step here (P1, codex PR#643
+                        # R12): a retirement is a ``live → .old`` rename, and
+                        # deferring the claim check to the MAIN root's later
+                        # swap — the old reasoning — protected nothing, since
+                        # this rename has already happened by then and no
+                        # handler puts it back. A claim that died during the
+                        # staging copies would otherwise let this run retire
+                        # the root a NEW owner has since published.
+                        preserved = store.retire_live_directory(
+                            roots[name], verify_held=handle.verify_held
+                        )
                         retiring.discard(name)
                         if preserved:
                             swap_state[name] = (None, preserved)
@@ -1400,9 +1532,27 @@ def run_import(
             ) from None
         except ScaleBuildLockLost as error:
             # The claim is the reason a second writer cannot be here; losing it
-            # mid-publish means abandoning the operation with the live tree as
-            # it stands, NOT deleting the staged copies an operator may need.
+            # mid-publish means abandoning the operation, NOT deleting the
+            # staged copies an operator may need.
             report(f"published before the claim was lost: {published or 'nothing'}")
+            if published:
+                # P1, codex PR#643 R12: roots this run already published are
+                # sent through the same rollback the post-swap check uses —
+                # which re-verifies the claim per root. With the claim gone it
+                # stops at the first one and raises with the per-root
+                # recovery, so a partial publish is reported precisely instead
+                # of being left as an unexplained mixed tree. (A test double
+                # whose ``verify_held`` recovers can complete the rollback;
+                # then, and only then, does this fall through to the receipt
+                # below.)
+                reverted = _rollback_published_roots(
+                    f"the scale build claim was lost mid-publish: {error}"
+                )
+                raise ScaleBuildCliFailure(
+                    f"{error} Every root this run had published was rolled "
+                    f"back ({reverted}); the staged copies are left on disk "
+                    "for inspection."
+                ) from None
             raise ScaleBuildCliFailure(
                 f"{error} Nothing further was published; the staged copies are "
                 "left on disk for inspection."
@@ -1440,28 +1590,6 @@ def run_import(
         # is a read that both succeeded and matched — see the ``except``
         # clauses immediately below (codex PR#643 R9 P2).
         if MAIN_ROOT in published:
-
-            def _rollback_published_roots(reason: str) -> list[str]:
-                reverted = list(reversed(published))
-                # One guard around the whole rollback, same reasoning as the
-                # publish loop above: an interrupt between two roots'
-                # rollback renames would leave the set mismatched.
-                rollback_guard = SwapInterruptGuard(report, reraise=False)
-                with rollback_guard:
-                    for name in reverted:
-                        temporary, preserved = swap_state[name]
-                        store.rollback_swap(roots[name], temporary, preserved)
-                if rollback_guard.interrupted:
-                    report(
-                        "the deferred interrupt is being honoured now: the "
-                        "rollback completed first"
-                    )
-                report(
-                    f"rolled back after publish: {reason}; reverted roots: "
-                    f"{reverted}"
-                )
-                return reverted
-
             try:
                 post_swap_pipeline_identity = projections.pipeline_identity(
                     notebook_id
@@ -1524,9 +1652,39 @@ def run_import(
         # deferring it for as long as the (potentially multi-GB) rmtree
         # takes; a leftover ``.old`` is exactly the shape ``inspect`` and
         # the manual-recovery docs already cover.
-        for name in published:
-            _, preserved = swap_state[name]
-            store.finalize_swap(roots[name], preserved)
+        #
+        # Each delete re-verifies the claim (P1, codex PR#643 R12). The
+        # window is the post-swap identity read just above — a database round
+        # trip that can outlive the lock session — plus the deletes
+        # themselves, each of which can take tens of seconds. A second
+        # builder that legitimately took over in there has its OWN rollback
+        # generation sitting at exactly these ``.old`` paths, and deleting it
+        # would strip that builder of its only way back. A refusal stops the
+        # remaining deletes: unlike a lost claim before a rename, nothing here
+        # is half-published — every root is live, identity-verified and
+        # correct — so the only residue is a leftover ``.old``, the shape the
+        # leftovers documentation already covers.
+        finalized: list[str] = []
+        try:
+            for name in published:
+                _, preserved = swap_state[name]
+                store.finalize_swap(
+                    roots[name], preserved, verify_held=handle.verify_held
+                )
+                finalized.append(name)
+        except ScaleBuildLockLost as error:
+            kept = [name for name in published if name not in finalized]
+            for name in kept:
+                report(f"{roots[name]}.old was left on disk")
+            raise ScaleBuildCliFailure(
+                f"{error} The import itself SUCCEEDED and every root is live "
+                f"on the new generation ({published}); only the cleanup of "
+                f"the previous generation stopped, leaving .old beside "
+                f"{kept}. Run `inspect` to confirm no other builder owns this "
+                "notebook, then remove those .old directories by hand "
+                "(`rm -rf`, not `mv` — live already holds the new "
+                "generation)."
+            ) from None
 
         if guard.interrupted:
             # The interrupt arrived while the renames were being deferred and

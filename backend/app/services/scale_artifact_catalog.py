@@ -29,6 +29,8 @@ import threading
 from collections import OrderedDict
 from typing import Callable
 
+from app.repositories.filesystem.scale_artifact_store import MANIFEST_ABSENT
+
 _logger = logging.getLogger(__name__)
 
 # ``_stale_manifest_admissible`` 的解析 memo 上限(每条只有两个字段,几十字节)。
@@ -56,6 +58,18 @@ def _signature_superseded(cached, signature) -> bool:
     那一瞬)刻意不算失配:那不是「换代了」,是「暂时看不见」,继续服务手上的
     实例是既有的 fail-soft 语义。
 
+    **主根为什么不需要伴生那条「确认缺失即失效」分支**(codex #643 R12 P1)。
+    伴生侧(``source_partitioned_ppr``)把 ``MANIFEST_ABSENT``——探到根**确实**
+    不在——当作立即逐出的信号,因为伴生根会被同版本 ``import`` 合法地**退休**
+    (包里省略该可选根 → ``retire_live_directory`` 把它改名走),那之后「无
+    manifest」是一个稳定的新事实,继续服务旧 CSR 永远不会自愈。主根没有这条
+    路径:``validate_import_package`` 硬拒缺 ``kg_index`` 的包,``PUBLISH_ORDER``
+    里主根永远是被替换而不是被退休,``retiring`` 集合按构造排除 ``MAIN_ROOT``。
+    所以主根上的「manifest 不在」只有两种来源——swap 两次 rename 之间那一瞬,
+    或运维手工删除——两者都是「暂时看不见」而不是「这一代已退役」,维持
+    fail-soft 是对的:换代的正常形态是**换成另一个 inode**,由下面的值比较
+    抓到。因此 ``MANIFEST_ABSENT`` 在这里与 ``None`` 同款早退,主根行为零变化。
+
     ``recorded is None``(codex #643 R5 P2)**不再**同等对待。它曾经被当成
     「这个实例理论上不该存在」的死角,按「不知道」放行——但它其实是一条真实
     可复现的窗口:``load()`` 顶部那次 ``_manifest_signature`` 恰好落在
@@ -68,7 +82,11 @@ def _signature_superseded(cached, signature) -> bool:
     值比较,不会反复重载)。``signature is None``(现在也读不到)仍然维持
     fail-soft,不因为「recorded 也是 None」被误判——上面的早退已经处理了。
     """
-    if signature is None or signature is _SIGNATURE_UNSUPPORTED:
+    if (
+        signature is None
+        or signature is MANIFEST_ABSENT
+        or signature is _SIGNATURE_UNSUPPORTED
+    ):
         return False
     recorded = getattr(cached, _DISK_SIGNATURE_ATTR, None)
     return recorded != signature
@@ -116,8 +134,12 @@ class ScaleArtifactCatalog:
         身上要记的那一代。它们必须共用同一次 ``os.stat``,否则同一次 load 会在
         热路径上 stat 好几遍(计数器测试钉住「每 load 一次」)。
 
-        返回 ``None`` = 探测到没有 manifest;``_SIGNATURE_UNSUPPORTED`` = 这个
-        ``artifacts`` 适配器根本没有探针(老测试替身),调用方一切照旧。
+        返回 ``MANIFEST_ABSENT`` = 探测到没有 manifest;``None`` = 这一次
+        ``stat`` 没问出来(权限/IO,codex #643 R12 起与前者分开);
+        ``_SIGNATURE_UNSUPPORTED`` = 这个 ``artifacts`` 适配器根本没有探针
+        (老测试替身),调用方一切照旧。主根把前两者一视同仁(见
+        ``_signature_superseded`` 里为什么主根不需要伴生那条失效分支);伴生
+        侧不是这样。
         """
         probe = getattr(self.artifacts, "manifest_stat_signature", None)
         if not callable(probe):
@@ -149,8 +171,11 @@ class ScaleArtifactCatalog:
         if signature is _COMPUTE_SIGNATURE:
             signature = self._manifest_signature(notebook_id)
         if signature is not _SIGNATURE_UNSUPPORTED:
-            if signature is None:
-                # 文件不在 = 无工件,与 read_manifest 的缺失分支同款早退。
+            if signature is None or signature is MANIFEST_ABSENT:
+                # 文件不在(``MANIFEST_ABSENT``)或这次 stat 问不出来(``None``)
+                # = 无工件,与 read_manifest 的缺失分支同款早退。两者在**这里**
+                # 仍然同款是刻意的:调用方 ``load`` 对二者的结论都是「回落 live
+                # 检索路径」,分开只会在探针失灵时多解析一份 2MB manifest。
                 return None
             with self._manifest_identity_lock:
                 cached = self._manifest_identity_memo.get(notebook_id)

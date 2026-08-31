@@ -1032,6 +1032,14 @@ class ScaleIndexBuilder:
             "n_viz_nodes": len(viz_ids),
             "n_viz_edges": len(viz_payload.get("edges", [])),
         }
+        # P2, codex PR#643 R12: the viz root is published through staging +
+        # swap like every other root, under this build's claim. The two hooks
+        # are the SAME ones ``build``/``fold`` already use — retargeted by
+        # ``ScaleArtifactRuntime`` to read whichever claim is registered for
+        # this notebook, which for a standalone viz rebuild is the one
+        # ``ScaleArtifactRuntime.build_viz`` took before calling this. A
+        # builder used directly (no runtime, no claim) keeps the defaults: a
+        # fresh random staging token and a verification that always passes.
         self.artifacts.save_viz(
             notebook_id,
             {
@@ -1043,6 +1051,8 @@ class ScaleIndexBuilder:
                 "viz_payload": viz_payload,
                 "manifest": manifest,
             },
+            claim_token=self.scale_build_claim_token(notebook_id),
+            verify_held=lambda: self.verify_scale_build_lock(notebook_id),
         )
         self.cache_viz(notebook_id, self.artifacts.load_viz(notebook_id))
         return manifest

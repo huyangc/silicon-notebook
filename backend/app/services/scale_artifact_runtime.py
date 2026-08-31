@@ -22,6 +22,7 @@ from app.repositories.scale_build_lock import (
     ScaleBuildBusy,
     ScaleBuildLock,
     ScaleBuildLockAttempt,
+    ScaleBuildLockLost,
 )
 
 
@@ -889,8 +890,104 @@ class ScaleArtifactRuntime:
             self.notify_index_done(notebook_id)
         return result
 
+    @contextmanager
+    def _claim_viz_build(self, notebook_id: str) -> Iterator[bool]:
+        """Hold this notebook's cross-process claim for a standalone viz
+        rebuild, or report that it could not be taken (P2, codex PR#643 R12).
+
+        The viz root was the last artifact writer outside the claim: the
+        offline CLI's ``export`` could copy a root this process was writing,
+        and its ``import`` could rename or retire that root out from under the
+        writer. Same probe, same three-state contract as every other claim in
+        this file (``_acquire_scale_build_lock``), and the claim is REGISTERED
+        while it is held so the builder's existing
+        ``scale_build_claim_token``/``verify_scale_build_lock`` hooks resolve
+        to it — that is what carries the token to the staging directory and
+        the re-verification to the swap.
+
+        The claim is held across build AND publish, not just the publish: the
+        derive step is the long one, and a claim taken only at the swap would
+        leave the whole derive racing the CLI it is supposed to exclude.
+
+        Three outcomes:
+
+        * held by somebody else (``None``) or unevaluable
+          (``SCALE_BUILD_LOCK_UNAVAILABLE``) → ``False``. Viz gives way. A viz
+          rebuild is advisory and has a natural retry (the next KG-view open
+          re-reads the stale manifest and triggers again), so parking or
+          queueing it would be machinery for nothing.
+        * UNSUPPORTED (SQLite — no cross-process claim exists at all, and the
+          offline CLI refuses that deployment outright) → ``True`` WITHOUT
+          registering anything. The three-state contract is explicit that
+          UNSUPPORTED is not a failure; behaviour there stays exactly the
+          in-process one it has always been, and registering the shared
+          sentinel handle would only risk displacing a concurrent build's
+          registration.
+        * a real claim → ``True``, registered for the duration and released
+          on the way out.
+        """
+        handle = self._acquire_scale_build_lock(notebook_id)
+        if handle is None or handle is SCALE_BUILD_LOCK_UNAVAILABLE:
+            yield False
+            return
+        if not getattr(handle, "supported", False):
+            try:
+                yield True
+            finally:
+                # A no-op for today's shared sentinel; released anyway so a
+                # future backend that mints an unsupported handle per call
+                # does not leak one per viz rebuild.
+                self._release_scale_build_handle(handle)
+            return
+        self._register_scale_build_lock(notebook_id, handle)
+        try:
+            yield True
+        finally:
+            self._discard_scale_build_lock(notebook_id)
+
+    def _log_viz_build_skipped(self, notebook_id: str, why: str) -> None:
+        try:
+            self.event_log.logger.info(
+                "viz index rebuild for %s skipped: %s; nothing was published "
+                "and the next trigger retries",
+                notebook_id,
+                why,
+            )
+        except Exception:  # noqa: BLE001 - logging must never fail a read path
+            pass
+
     def build_viz(self, notebook_id: str) -> Optional[dict]:
-        return self.builder.build_viz(notebook_id)
+        """Rebuild the standalone viz artifact under the cross-process claim.
+
+        A refused claim returns ``None`` — the same "nothing was built" this
+        already returns for an empty graph — which every caller handles:
+        ``_spawn_viz_build``'s worker discards its ``viz_building`` marker in
+        its own ``finally`` either way, and ``viz_index``'s small-notebook
+        synchronous branch returns whatever is already cached instead of
+        blocking an interactive request behind a builder it cannot exclude.
+
+        A claim LOST mid-build (the swap's own re-verification, raised from
+        the store) lands in the same place rather than escaping: this method
+        is reached from an interactive graph-view read, and the publish was
+        refused before any rename, so there is nothing to report but "not
+        this time".
+        """
+        with self._claim_viz_build(notebook_id) as claimed:
+            if not claimed:
+                self._log_viz_build_skipped(
+                    notebook_id,
+                    "the scale build claim is held elsewhere or could not "
+                    "be evaluated",
+                )
+                return None
+            try:
+                return self.builder.build_viz(notebook_id)
+            except ScaleBuildLockLost:
+                self._log_viz_build_skipped(
+                    notebook_id,
+                    "the scale build claim was lost before the artifact swap",
+                )
+                return None
 
     # ------------------------------ status and scheduling
 
