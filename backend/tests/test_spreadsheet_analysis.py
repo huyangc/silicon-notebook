@@ -7,11 +7,15 @@ from types import SimpleNamespace
 
 import pytest
 from openpyxl import Workbook
+from pydantic import ValidationError
 
 from app.core.config import Settings
 from app.repositories.analysis_artifacts import AnalysisArtifactStore
 from app.services.cancellation import AskCancelled
-from app.services.spreadsheet_analysis import SpreadsheetAnalysisService
+from app.services.spreadsheet_analysis import (
+    SpreadsheetAnalysisService,
+    spreadsheet_prompt_block,
+)
 
 
 class _EventLog:
@@ -50,6 +54,34 @@ class _CancelledPlanner:
 
     def chat_json(self, *args, **kwargs) -> str:
         raise AskCancelled("cancelled")
+
+
+class _CapturingProfilePlanner:
+    configured = True
+
+    def __init__(self) -> None:
+        self.prompt = ""
+
+    def chat_json(self, messages, *args, **kwargs) -> str:
+        self.prompt = messages[0]["content"]
+        return json.dumps({
+            "source_id": "src-1",
+            "sheet": "Sales",
+            "operation": "profile",
+        })
+
+
+class _AllColumnsFilterPlanner:
+    configured = True
+
+    def chat_json(self, *args, **kwargs) -> str:
+        return json.dumps({
+            "source_id": "src-1",
+            "sheet": "Sales",
+            "operation": "filter",
+            "filters": [],
+            "columns": [],
+        })
 
 
 def _settings(tmp_path: Path) -> Settings:
@@ -153,6 +185,145 @@ def test_planner_selects_whitelisted_grouped_aggregate(tmp_path):
     assert result.operation == "aggregate"
     assert result.rows[0].cells == {"Region": "East", "Amount · sum": "50"}
     assert result.rows[1].cells == {"Region": "West", "Amount · sum": "20"}
+
+
+def test_result_preview_is_bounded_by_cells_and_serialized_bytes(tmp_path):
+    path = tmp_path / "wide.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Sales"
+    sheet.append([f"C{column}" for column in range(8)])
+    for index in range(3):
+        sheet.append([f"r{index}c{column}-{'v' * 300}" for column in range(8)])
+    workbook.save(path)
+    settings = Settings(
+        _env_file=None,
+        storage_dir=str(tmp_path / "storage"),
+        event_log_enabled=False,
+        llm_log_enabled=False,
+        spreadsheet_analysis_result_cells=10,
+        spreadsheet_analysis_result_bytes=1_024,
+    )
+    service = SpreadsheetAnalysisService(
+        artifacts=AnalysisArtifactStore(Path(settings.storage_dir), retention_days=30),
+        settings=settings,
+        event_log=_EventLog(),
+        now=lambda: "2026-08-31T01:00:00+00:00",
+    )
+    assert service.compile_source(
+        _source(path), notebook_name="Notebook", owner_id="user-1",
+        row_element_ids={},
+    )
+
+    [result], _ = service.analyze(
+        notebook_id="nb-1",
+        source_ids=("src-1",),
+        question="筛选这个 Excel 的全部明细",
+        planner_client=_AllColumnsFilterPlanner(),
+    )
+    table_payload = {
+        "columns": [column.model_dump(mode="json") for column in result.columns],
+        "rows": [row.model_dump(mode="json") for row in result.rows],
+    }
+    assert len(result.columns) * (len(result.rows) + 1) <= 10
+    assert len(json.dumps(
+        table_payload, ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")) <= 1_024
+    assert result.coverage.complete is False
+    assert result.operation == "filter"
+    assert result.coverage.truncated_reason == "payload_limit"
+    assert any("仅返回前" in warning for warning in result.warnings)
+
+    prompt, evidence = spreadsheet_prompt_block(
+        [result], preview_rows=100, max_bytes=300
+    )
+    assert len(prompt.encode("utf-8")) <= 300
+    assert evidence
+
+
+def test_spreadsheet_output_and_prompt_budgets_are_validated(tmp_path):
+    invalid_values = {
+        "spreadsheet_analysis_result_cells": 9,
+        "spreadsheet_analysis_result_bytes": 1_023,
+        "spreadsheet_analysis_prompt_bytes": 1_023,
+        "spreadsheet_analysis_planner_catalog_bytes": 1_023,
+    }
+    for field, value in invalid_values.items():
+        with pytest.raises(ValidationError):
+            Settings(
+                _env_file=None,
+                storage_dir=str(tmp_path / field),
+                **{field: value},
+            )
+
+
+def test_planner_catalog_is_a_disclosed_bounded_projection(tmp_path):
+    path = tmp_path / "catalog.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Sales"
+    sheet.append([f"H{index}-{'x' * 80}" for index in range(40)])
+    sheet.append(list(range(40)))
+    workbook.save(path)
+    settings = Settings(
+        _env_file=None,
+        storage_dir=str(tmp_path / "storage"),
+        event_log_enabled=False,
+        llm_log_enabled=False,
+        spreadsheet_analysis_planner_catalog_bytes=1_024,
+    )
+    service = SpreadsheetAnalysisService(
+        artifacts=AnalysisArtifactStore(Path(settings.storage_dir), retention_days=30),
+        settings=settings,
+        event_log=_EventLog(),
+        now=lambda: "2026-08-31T01:00:00+00:00",
+    )
+    assert service.compile_source(
+        _source(path), notebook_name="Notebook", owner_id="user-1",
+        row_element_ids={},
+    )
+    planner = _CapturingProfilePlanner()
+
+    [result], _ = service.analyze(
+        notebook_id="nb-1",
+        source_ids=("src-1",),
+        question="分析这个 Excel 的数据概况",
+        planner_client=planner,
+    )
+    catalog_json = planner.prompt.split("可用工作簿：", 1)[1]
+    assert len(catalog_json.encode("utf-8")) <= 1_024
+    assert any("规划目录已按内容量上限" in warning for warning in result.warnings)
+
+
+def test_workbook_without_row_anchors_uses_source_level_citation(tmp_path):
+    path = tmp_path / "sales.xlsx"
+    _workbook(path)
+    settings = _settings(tmp_path)
+    service = SpreadsheetAnalysisService(
+        artifacts=AnalysisArtifactStore(Path(settings.storage_dir), retention_days=30),
+        settings=settings,
+        event_log=_EventLog(),
+        now=lambda: "2026-08-31T01:00:00+00:00",
+    )
+    assert service.compile_source(
+        _source(path), notebook_name="Notebook", owner_id="user-1",
+        row_element_ids={},
+    )
+
+    [result], _ = service.analyze(
+        notebook_id="nb-1",
+        source_ids=("src-1",),
+        question="分析这个 Excel 的数据概况",
+        planner_client=_OfflinePlanner(),
+    )
+    assert result.rows[0].citation is not None
+    assert result.rows[0].citation.source_id == "src-1"
+    assert result.rows[0].citation.element_id == ""
+    _, evidence = spreadsheet_prompt_block(
+        [result], preview_rows=20, max_bytes=65_536
+    )
+    assert evidence["k6001"]["object_id"] == "src-1"
+    assert evidence["k6001"]["object_type"] == "source"
 
 
 def test_planner_cancellation_is_not_downgraded_to_local_profile(tmp_path):
@@ -280,9 +451,42 @@ def test_issue_archive_resolves_redacts_and_expires(tmp_path):
         now=datetime(2026, 8, 30, 15, tzinfo=timezone.utc)
     )
     assert redacted["source_deleted"] is True
+    assert redacted["owner_id"] == ""
+    assert redacted["notebook_id"] == ""
+    assert redacted["notebook_name"] == ""
     assert redacted["source_title"] == ""
     assert redacted["file_name"] == ""
 
     assert store.list_issues(
         now=datetime(2026, 9, 1, 1, tzinfo=timezone.utc)
     ) == []
+
+
+def test_notebook_delete_does_not_fail_after_artifact_redaction_error(
+    tmp_path, monkeypatch, caplog
+):
+    from app.services import notebook_catalog
+
+    class _Store:
+        @staticmethod
+        def delete_row_and_orphan_embeddings(notebook_id: str) -> list[str]:
+            return []
+
+    class _BrokenArtifacts:
+        @staticmethod
+        def redact_notebook(notebook_id: str, *, occurred_at: str) -> None:
+            raise OSError("private filesystem detail")
+
+    service = object.__new__(notebook_catalog.NotebookCatalogService)
+    service._store = _Store()
+    service._storage_dir = lambda: tmp_path
+    service._analysis_artifacts = _BrokenArtifacts()
+    service.get_notebook = lambda notebook_id: object()
+    monkeypatch.setattr(
+        notebook_catalog, "_delete_notebook_asset_dir", lambda *args: None
+    )
+
+    service.delete_notebook("nb-1")
+
+    assert "analysis artifact redaction failed (OSError)" in caplog.text
+    assert "private filesystem detail" not in caplog.text

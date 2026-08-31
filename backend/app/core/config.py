@@ -1247,11 +1247,35 @@ class Settings(BaseSettings):
         le=1_000,
         validation_alias="SPREADSHEET_ANALYSIS_RESULT_ROWS",
     )
+    spreadsheet_analysis_result_cells: int = Field(
+        2_000,
+        ge=10,
+        le=20_000,
+        validation_alias="SPREADSHEET_ANALYSIS_RESULT_CELLS",
+    )
+    spreadsheet_analysis_result_bytes: int = Field(
+        262_144,
+        ge=1_024,
+        le=2_097_152,
+        validation_alias="SPREADSHEET_ANALYSIS_RESULT_BYTES",
+    )
     spreadsheet_analysis_prompt_rows: int = Field(
         20,
         ge=1,
         le=100,
         validation_alias="SPREADSHEET_ANALYSIS_PROMPT_ROWS",
+    )
+    spreadsheet_analysis_prompt_bytes: int = Field(
+        65_536,
+        ge=1_024,
+        le=524_288,
+        validation_alias="SPREADSHEET_ANALYSIS_PROMPT_BYTES",
+    )
+    spreadsheet_analysis_planner_catalog_bytes: int = Field(
+        32_768,
+        ge=1_024,
+        le=262_144,
+        validation_alias="SPREADSHEET_ANALYSIS_PLANNER_CATALOG_BYTES",
     )
     spreadsheet_analysis_planner_timeout_seconds: float = Field(
         8.0,

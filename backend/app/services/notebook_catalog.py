@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 import weakref
 from datetime import datetime, timezone
@@ -50,6 +51,7 @@ from app.services.notebook_templates import NOTEBOOK_TEMPLATES
 # cannot evict every source/element/KG match from that total.
 _MEMORY_SEARCH_HIT_CAP = 8
 _SEARCH_HIT_EXCERPT_CHARS = 400
+_log = logging.getLogger("silicon_notebook.notebook_catalog")
 
 
 def _created_label(value: str) -> str:
@@ -719,9 +721,14 @@ class NotebookCatalogService:
             _delete_notebook_asset_dir(self._storage_dir(), notebook_id)
             analysis_artifacts = getattr(self, "_analysis_artifacts", None)
             if analysis_artifacts is not None:
-                analysis_artifacts.redact_notebook(
-                    notebook_id, occurred_at=datetime.now(timezone.utc).isoformat()
-                )
+                try:
+                    analysis_artifacts.redact_notebook(
+                        notebook_id, occurred_at=datetime.now(timezone.utc).isoformat()
+                    )
+                except Exception as exc:  # noqa: BLE001 - database deletion committed
+                    _log.warning(
+                        "analysis artifact redaction failed (%s)", type(exc).__name__
+                    )
 
     def mark_notebook_base(self, notebook_id: str) -> None:
         self.get_notebook(notebook_id)  # raises KeyError if missing

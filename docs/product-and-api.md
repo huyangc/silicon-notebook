@@ -2492,7 +2492,12 @@ and filters also use closed operator lists; execution is local and deterministic
 timeout or malformed plan falls back to a local profile, and any lane failure fails open to
 the ordinary reasoning answer. Successful output adds a `spreadsheet` trace step, citable
 bounded evidence, and a `result_sets[]` item with `kind="spreadsheet"`; the card discloses
-scanned/result/displayed rows, formula-cache gaps, and partial preview coverage.
+scanned/result/displayed rows, formula-cache gaps, and partial preview coverage. The planner
+receives a whole-field prefix projection of the selected workbook/sheet/header catalog under
+one aggregate byte rail; omitted fields are never cut mid-value, and a result warning discloses
+when that projection was partial. The persisted/browser result is independently bounded by
+rows, cells (headers included), and serialized table bytes, while synthesis receives a further
+row-and-byte-bounded preview.
 
 The professional compiler refuses shapes it cannot analyze without guessing: unreadable,
 damaged or encrypted workbooks; missing headers; dimension/sheet limits; cells over the
@@ -2511,7 +2516,11 @@ the API.
 | `SPREADSHEET_ANALYSIS_MAX_SHEETS` | 32 | 1..256 |
 | `SPREADSHEET_ANALYSIS_MAX_CELL_CHARS` | 20,000 | 256..1,000,000 |
 | `SPREADSHEET_ANALYSIS_RESULT_ROWS` | 100 | 1..1,000 |
+| `SPREADSHEET_ANALYSIS_RESULT_CELLS` | 2,000 | 10..20,000 |
+| `SPREADSHEET_ANALYSIS_RESULT_BYTES` | 262,144 | 1,024..2,097,152 |
 | `SPREADSHEET_ANALYSIS_PROMPT_ROWS` | 20 | 1..100 |
+| `SPREADSHEET_ANALYSIS_PROMPT_BYTES` | 65,536 | 1,024..524,288 |
+| `SPREADSHEET_ANALYSIS_PLANNER_CATALOG_BYTES` | 32,768 | 1,024..262,144 |
 | `SPREADSHEET_ANALYSIS_PLANNER_TIMEOUT_SECONDS` | 8.0 seconds | 1.0..60.0 |
 | `ANALYSIS_FAILURE_RETENTION_DAYS` | 30 days | 1..3,650 |
 
@@ -2519,8 +2528,10 @@ Issue records have `open`/`resolved` status and a stamped expiry. A later succes
 user-initiated reparse automatically resolves the matching issue and deletes its quarantine
 copy; expiry is a hard read boundary and physical cleanup occurs on issue reads. Source or
 notebook deletion immediately removes the spreadsheet snapshot and quarantine copy, clears
-source/notebook names, ids, filenames, and hashes, and retains only category/time and a
-redacted summary until expiry.
+owner/source/notebook linkage, names, ids, filenames, and hashes, and retains only
+category/time and a redacted summary until expiry. This filesystem redaction is best-effort
+after a committed notebook deletion: a cleanup I/O failure is logged without making the
+already-completed DELETE appear to fail.
 
 The administrator's **User usage overview** keeps its existing user-table columns and adds
 two sheets next to it: **Question analysis** (the existing “View questions” link now opens

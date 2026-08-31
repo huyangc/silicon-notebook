@@ -64,6 +64,12 @@ def _display_cell(value: Any) -> str:
     return str(value)
 
 
+def _json_bytes(value: Any) -> int:
+    return len(
+        json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    )
+
+
 def _numeric(value: Any) -> float | None:
     if isinstance(value, bool):
         return None
@@ -560,22 +566,15 @@ class SpreadsheetAnalysisService:
         client: Any,
         cancel_event: Any,
     ) -> dict[str, Any] | None:
-        catalog = [
-            {
-                "source_id": manifest["source_id"],
-                "title": manifest.get("source_title", ""),
-                "sheets": [
-                    {
-                        "name": sheet["name"],
-                        "headers": sheet["headers"],
-                        "rows": len(sheet["rows"]),
-                    }
-                    for sheet in manifest.get("sheets", [])
-                ],
-            }
-            for manifest in manifests
-        ]
         if getattr(client, "configured", False):
+            catalog, planning_manifests, catalog_complete = (
+                self._bounded_planner_catalog(manifests)
+            )
+            if not catalog or self._default_plan(planning_manifests) is None:
+                fallback = self._default_plan(manifests)
+                if fallback is not None:
+                    fallback["__planner_catalog_complete"] = False
+                return fallback
             prompt = (
                 "为电子表格问题选择一个受限的确定性执行计划。只能使用给定 source_id、"
                 "sheet 和列名；不得生成公式、代码或 SQL。operation 只能是 profile、"
@@ -596,14 +595,78 @@ class SpreadsheetAnalysisService:
                 )
                 candidate = json.loads(raw)
                 if isinstance(candidate, dict):
-                    return self._validate_plan(candidate, manifests)
+                    normalized = self._validate_plan(candidate, planning_manifests)
+                    normalized["__planner_catalog_complete"] = catalog_complete
+                    return normalized
             except AskCancelled:
                 raise
             except Exception as exc:  # noqa: BLE001 - optional planner is fail-open
                 self.event_log.logger.warning(
                     "spreadsheet planner failed (%s)", type(exc).__name__
                 )
+            fallback = self._default_plan(planning_manifests)
+            if fallback is not None:
+                fallback["__planner_catalog_complete"] = catalog_complete
+            return fallback
         return self._default_plan(manifests)
+
+    def _bounded_planner_catalog(
+        self, manifests: Sequence[dict[str, Any]]
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], bool]:
+        """Project whole catalog fields without ever slicing user-authored text."""
+        limit = self.settings.spreadsheet_analysis_planner_catalog_bytes
+        catalog: list[dict[str, Any]] = []
+        projected: list[dict[str, Any]] = []
+        complete = True
+        stop = False
+        used_bytes = _json_bytes(catalog)
+        for manifest in manifests:
+            catalog_manifest = {
+                "source_id": manifest["source_id"],
+                "title": manifest.get("source_title", ""),
+                "sheets": [],
+            }
+            projected_manifest = {
+                "source_id": manifest["source_id"],
+                "sheets": [],
+            }
+            if _json_bytes([*catalog, catalog_manifest]) > limit:
+                complete = False
+                break
+            catalog.append(catalog_manifest)
+            projected.append(projected_manifest)
+            used_bytes = _json_bytes(catalog)
+            for sheet in manifest.get("sheets", []):
+                catalog_sheet = {
+                    "name": sheet["name"],
+                    "headers": [],
+                    "rows": len(sheet["rows"]),
+                }
+                projected_sheet = {"name": sheet["name"], "headers": []}
+                catalog_manifest["sheets"].append(catalog_sheet)
+                projected_manifest["sheets"].append(projected_sheet)
+                if _json_bytes(catalog) > limit:
+                    catalog_manifest["sheets"].pop()
+                    projected_manifest["sheets"].pop()
+                    complete = False
+                    stop = True
+                    break
+                used_bytes = _json_bytes(catalog)
+                for header in sheet.get("headers", []):
+                    header_bytes = _json_bytes(header)
+                    added_bytes = header_bytes + (1 if catalog_sheet["headers"] else 0)
+                    if used_bytes + added_bytes > limit:
+                        complete = False
+                        stop = True
+                        break
+                    catalog_sheet["headers"].append(header)
+                    projected_sheet["headers"].append(header)
+                    used_bytes += added_bytes
+                if stop:
+                    break
+            if stop:
+                break
+        return catalog, projected, complete
 
     def _default_plan(self, manifests: Sequence[dict[str, Any]]) -> dict[str, Any] | None:
         first = next(
@@ -728,19 +791,23 @@ class SpreadsheetAnalysisService:
         else:
             output = self._profile(filtered, headers)
         output_rows, output_headers = output
-        cap = self.settings.spreadsheet_analysis_result_rows
-        delivered = output_rows[:cap]
-        complete = len(delivered) == len(output_rows)
-        warnings = list(sheet.get("warnings", []))
-        if not complete:
-            warnings.append(
-                f"计算结果共 {len(output_rows)} 行，当前卡片展示前 {len(delivered)} 行。"
-            )
         citation = self._citation(manifest, sheet, filtered or input_rows)
+        delivered, delivered_headers, complete, truncated_reason, budget_warnings = (
+            self._bounded_result_preview(
+                output_rows, output_headers, citation=citation
+            )
+        )
+        warnings = list(sheet.get("warnings", []))
+        warnings.extend(budget_warnings)
+        if not plan.get("__planner_catalog_complete", True):
+            warnings.append(
+                "用于模型选表和选列的规划目录已按内容量上限做有界投影；"
+                "完整工作表仍由本地确定性执行器扫描。"
+            )
         rows = [
             SpreadsheetResultRow(
                 position=index,
-                cells={key: _display_cell(value) for key, value in row.items()},
+                cells=row,
                 citation=citation if index == 1 else None,
             )
             for index, row in enumerate(delivered, start=1)
@@ -754,7 +821,7 @@ class SpreadsheetAnalysisService:
             operation=operation,
             columns=[
                 StructuredResultColumn(id=header, name=header)
-                for header in output_headers
+                for header in delivered_headers
             ],
             rows=rows,
             coverage=StructuredResultCoverage(
@@ -762,13 +829,130 @@ class SpreadsheetAnalysisService:
                 scanned_rows=len(input_rows),
                 returned_rows=len(delivered),
                 complete=complete,
-                truncated_reason="" if complete else "result_row_limit",
-                overflow_semantics="preview" if not complete else "",
+                truncated_reason="" if complete else truncated_reason,
+                overflow_semantics="explicit_partial" if not complete else "",
             ),
             formula_cells=int(sheet.get("formula_cells") or 0),
             unresolved_formula_cells=int(sheet.get("unresolved_formula_cells") or 0),
             warnings=warnings,
         )
+
+    def _bounded_result_preview(
+        self,
+        output_rows: Sequence[dict[str, Any]],
+        output_headers: Sequence[str],
+        *,
+        citation: Citation | None,
+    ) -> tuple[list[dict[str, str]], list[str], bool, str, list[str]]:
+        """Keep whole values while bounding rows, cells, and serialized table bytes."""
+        row_cap = self.settings.spreadsheet_analysis_result_rows
+        cell_cap = self.settings.spreadsheet_analysis_result_cells
+        byte_cap = self.settings.spreadsheet_analysis_result_bytes
+        citation_payload = (
+            citation.model_dump(mode="json", exclude_none=True) if citation else None
+        )
+
+        def payload(headers: Sequence[str], rows: Sequence[dict[str, str]]) -> dict[str, Any]:
+            wire_rows = []
+            for index, row in enumerate(rows, start=1):
+                item: dict[str, Any] = {"position": index, "cells": row}
+                if index == 1 and citation_payload is not None:
+                    item["citation"] = citation_payload
+                wire_rows.append(item)
+            return {
+                "columns": [{"id": header, "name": header} for header in headers],
+                "rows": wire_rows,
+            }
+
+        def cell_bytes(header: str, value: str, *, has_previous: bool) -> int:
+            return (
+                _json_bytes(header)
+                + 1
+                + _json_bytes(value)
+                + (1 if has_previous else 0)
+            )
+
+        selected_headers: list[str] = []
+        byte_limited = False
+        cell_limited = False
+        first_row = output_rows[0] if output_rows else None
+        reserved_rows: list[dict[str, str]] = [{}] if first_row is not None else []
+        reserved_bytes = _json_bytes(payload([], reserved_rows))
+        for header in output_headers:
+            displayed = _display_cell(first_row.get(header)) if first_row is not None else ""
+            column_bytes = _json_bytes({"id": header, "name": header}) + (
+                1 if selected_headers else 0
+            )
+            value_bytes = (
+                cell_bytes(header, displayed, has_previous=bool(selected_headers))
+                if first_row is not None else 0
+            )
+            candidate_bytes = reserved_bytes + column_bytes + value_bytes
+            reserved_cells = (len(selected_headers) + 1) * (
+                2 if first_row is not None else 1
+            )
+            if reserved_cells > cell_cap:
+                cell_limited = True
+                break
+            if candidate_bytes > byte_cap:
+                byte_limited = True
+                break
+            selected_headers.append(header)
+            if first_row is not None:
+                reserved_rows[0][header] = displayed
+            reserved_bytes = candidate_bytes
+
+        if not selected_headers and output_headers:
+            first_header = output_headers[0]
+            if _json_bytes(payload([first_header], [])) <= byte_cap:
+                selected_headers.append(first_header)
+            else:
+                byte_limited = True
+
+        delivered: list[dict[str, str]] = []
+        delivered_bytes = _json_bytes(payload(selected_headers, delivered))
+        candidate_rows = output_rows[:row_cap] if selected_headers else []
+        for row in candidate_rows:
+            rendered = {
+                header: _display_cell(row.get(header)) for header in selected_headers
+            }
+            if len(selected_headers) + (len(delivered) + 1) * len(selected_headers) > cell_cap:
+                cell_limited = True
+                break
+            row_payload: dict[str, Any] = {
+                "position": len(delivered) + 1,
+                "cells": rendered,
+            }
+            if not delivered and citation_payload is not None:
+                row_payload["citation"] = citation_payload
+            added_bytes = _json_bytes(row_payload) + (1 if delivered else 0)
+            if delivered_bytes + added_bytes > byte_cap:
+                byte_limited = True
+                break
+            delivered.append(rendered)
+            delivered_bytes += added_bytes
+
+        columns_complete = len(selected_headers) == len(output_headers)
+        rows_complete = len(delivered) == len(output_rows)
+        complete = columns_complete and rows_complete
+        warnings: list[str] = []
+        if not columns_complete:
+            warnings.append(
+                f"计算结果共 {len(output_headers)} 列，受单元格或内容量上限约束，"
+                f"仅返回前 {len(selected_headers)} 列。"
+            )
+        if not rows_complete:
+            warnings.append(
+                f"计算结果共 {len(output_rows)} 行，受行数、单元格或内容量上限约束，"
+                f"仅返回前 {len(delivered)} 行。"
+            )
+        if byte_limited:
+            reason = "payload_limit"
+        elif cell_limited or not columns_complete:
+            reason = "budget"
+        else:
+            reason = "row_limit"
+        return delivered, selected_headers, complete, reason, warnings
 
     @staticmethod
     def _row_dict(row: dict[str, Any], headers: Sequence[str]) -> dict[str, Any]:
@@ -882,9 +1066,7 @@ class SpreadsheetAnalysisService:
             reverse=reverse,
         )
         headers = [key for key in ordered[0] if not key.startswith("__")] if ordered else []
-        return [
-            {key: row.get(key) for key in headers} for row in ordered
-        ], headers
+        return ordered, headers
 
     @staticmethod
     def _tabular(
@@ -893,7 +1075,7 @@ class SpreadsheetAnalysisService:
         selected = list(columns)
         if not selected and rows:
             selected = [key for key in rows[0] if not key.startswith("__")]
-        return [{key: row.get(key) for key in selected} for row in rows], selected
+        return list(rows), selected
 
     @staticmethod
     def _citation(
@@ -905,8 +1087,6 @@ class SpreadsheetAnalysisService:
             (str(row.get("__element_id") or "") for row in rows if row.get("__element_id")),
             "",
         )
-        if not element_id:
-            return None
         return Citation(
             label=f"{manifest.get('source_title', '')} · {sheet['name']}!{sheet['range']}",
             source_id=manifest["source_id"],
@@ -918,32 +1098,45 @@ class SpreadsheetAnalysisService:
 
 
 def spreadsheet_prompt_block(
-    results: Sequence[SpreadsheetAnalysisResult], *, preview_rows: int
+    results: Sequence[SpreadsheetAnalysisResult], *, preview_rows: int, max_bytes: int
 ) -> tuple[str, dict[str, dict[str, Any]]]:
     """Render bounded spreadsheet receipts into the ordinary citable map."""
     lines: list[str] = []
     evidence: dict[str, dict[str, Any]] = {}
+
+    def append_line(line: str) -> bool:
+        separator = "\n" if lines else ""
+        current_bytes = len("\n".join(lines).encode("utf-8"))
+        if current_bytes + len((separator + line).encode("utf-8")) > max_bytes:
+            return False
+        lines.append(line)
+        return True
+
     for index, result in enumerate(results, start=1):
         key = f"k{6000 + index}"
         headers = [column.name for column in result.columns]
-        lines.append(
+        if not append_line(
             f"{key}: [spreadsheet] {result.source_title} · {result.sheet}!{result.range} "
             f"operation={result.operation}; scanned={result.coverage.scanned_rows}; "
             f"result_rows={result.coverage.total_rows}"
-        )
-        if headers:
-            lines.append(" | ".join(headers))
+        ):
+            break
+        can_append_rows = not headers or append_line(" | ".join(headers))
         for row in result.rows[: max(1, preview_rows)]:
-            lines.append(" | ".join(row.cells.get(header, "") for header in headers))
+            if not can_append_rows or not append_line(
+                " | ".join(row.cells.get(header, "") for header in headers)
+            ):
+                break
         citation = next((row.citation for row in result.rows if row.citation), None)
+        element_id = citation.element_id if citation else ""
         evidence[key] = {
-            "object_id": citation.element_id if citation else result.source_id,
-            "object_type": "element" if citation else "source",
+            "object_id": element_id or result.source_id,
+            "object_type": "element" if element_id else "source",
             "name": f"{result.sheet}!{result.range}",
             "definition": "电子表格确定性分析结果",
             "snippet": lines[-1][:300],
             "source_id": result.source_id,
-            "element_id": citation.element_id if citation else "",
+            "element_id": element_id,
             "source_title": result.source_title,
             "source_file_name": result.source_file_name,
             "location_label": f"{result.sheet}!{result.range}",

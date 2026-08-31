@@ -222,7 +222,8 @@ class AnalysisArtifactStore:
             return
         self._delete_payload(metadata_path.parent)
         issue.update({
-            "notebook_id": "" if notebook_deleted else issue.get("notebook_id", ""),
+            "owner_id": "",
+            "notebook_id": "",
             "notebook_name": "",
             "source_id": "",
             "source_title": "",

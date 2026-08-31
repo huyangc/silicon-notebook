@@ -3896,6 +3896,7 @@ class AskService:
             spreadsheet_block, spreadsheet_map = spreadsheet_prompt_block(
                 spreadsheet_results,
                 preview_rows=self.settings.spreadsheet_analysis_prompt_rows,
+                max_bytes=self.settings.spreadsheet_analysis_prompt_bytes,
             )
             if spreadsheet_block:
                 structured_map.update(spreadsheet_map)
