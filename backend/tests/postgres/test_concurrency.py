@@ -790,9 +790,9 @@ def test_notebook_delete_waits_for_existing_source_update_before_snapshot(
         )
         connection.execute(
             "INSERT INTO sources(id,notebook_id,title,source_type,status,parse_status,"
-            "file_name,created_at,updated_at) VALUES ('source-update-row',"
+            "file_name,file_path,created_at,updated_at) VALUES ('source-update-row',"
             "'source-update-nb','Source','pdf','processing','processing','source.pdf',"
-            "%s,%s)",
+            "'source.pdf',%s,%s)",
             (now, now),
         )
 
