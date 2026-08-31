@@ -875,6 +875,7 @@ claim 生生灭灭都在普通门面路径内部，见下面残留一节）：
 | `EMBED_DIM` / `EMBED_RUNTIME_DIM` | 生效维必须相同 | `import` 硬拒（不符会让 `open_ann` fail-open → **静默零召回**）；manifest 没有 `dim` 同样拒绝 |
 | hnswlib | **严格相等** | `import` 默认硬拒；`--allow-library-mismatch` 可覆盖。`ann.bin` 没有格式版本头，失配可能被 fail-open 吞成静默零召回；任一侧版本未知也按失配处理 |
 | `--from` 包路径 | 不得等于或位于该笔记本自己任一工件根（`kg_index`、`kg_viz`、source-partition 伴生）之内，不得在它们的 `.old` 之内，也不得在 `prepare_staging_directory` 会为其中任何一根清理的 `.tmp`/`.tmp-<token>` 暂存目录之内 | `import` 硬拒，退出码 `1`，任何拷贝之前就报错——否则发布会把该根挪成 `.old` 再删掉（若是 `.tmp*` 暂存目录，则在拷贝开始之前就被 `rmtree`），静默删掉操作员自己的输入包 |
+| 在场的 `kg_viz` 根 | 包里带的 `kg_viz` 目录必须能被 serving 侧的 `load_viz_index` 读回（manifest.json、viz.npz、viz_adj.npz 齐全且自洽） | `import` 硬拒——空的或残缺的 viz 目录否则会原子地顶掉健康的活 viz 根、被 serving 侧读成「没有 viz」，而 import 还报成功。单纯省略 `kg_viz` 的包不受影响 |
 | numpy / scipy | 建议相同 | 只告警：npy/npz 带格式版本，失配会响亮失败 |
 | 生产 `.env` | 构建机必须用生产 `.env`（storage 根可以不同） | 无自动检查——这是运维纪律 |
 
