@@ -131,7 +131,28 @@ class SourcePartitionedPprService:
         probe = getattr(self._artifacts, "manifest_stat_signature", None)
         if not callable(probe):
             return None
-        return probe(self._artifacts.source_partition_dir(notebook_id))
+        signature = probe(self._artifacts.source_partition_dir(notebook_id))
+        if signature is not MANIFEST_ABSENT:
+            return signature
+        # codex PR#643 R22 P2: one ENOENT is NOT durable absence. The
+        # publication sequence is two renames — ``live → .old``, then
+        # ``tmp → live`` — so a stat landing between them sees the root
+        # transiently invisible on a perfectly ordinary republish. The
+        # discriminator is ``.old``: during that window (and during a
+        # retirement that has not reached ``finalize_swap`` yet) the previous
+        # generation's manifest sits at ``{root}.old``; a DURABLE retirement
+        # ends with both gone. So confirm against ``.old`` before treating
+        # the absence as fact — a second stat paid only in this corner, not
+        # on the hot path. A lingering interrupted-cleanup ``.old`` beside a
+        # deleted live root keeps this fail-soft until the operator resolves
+        # that documented recovery state (mv it back, or remove it) — the
+        # conservative side of the trade, and it converges either way.
+        old_probe = probe(
+            str(self._artifacts.source_partition_dir(notebook_id)) + ".old"
+        )
+        if old_probe is MANIFEST_ABSENT:
+            return MANIFEST_ABSENT
+        return None
 
     @property
     def cache_size(self) -> int:

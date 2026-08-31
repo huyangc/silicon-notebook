@@ -554,6 +554,28 @@ def test_a_retired_viz_root_is_evicted_instead_of_served_forever(repo, monkeypat
     assert notebook.id not in scale.viz_cache
 
 
+def test_the_viz_mid_swap_window_keeps_serving_the_warm_cache(repo, monkeypatch):
+    """codex PR#643 R22 P2, viz mirror: ``save_viz`` publishes through the
+    same two-rename sequence, so a stat landing between ``live → .old`` and
+    ``tmp → live`` sees the root transiently invisible on an ordinary
+    republish. With the previous generation's manifest still at ``.old`` the
+    probe must answer "could not tell" and the warm entry keeps serving —
+    not the durable-retirement eviction.
+
+    Mutation anchor: drop the ``.old`` confirmation in ``_viz_signature``
+    and this goes red — the warm index is evicted mid-window.
+    """
+    notebook, scale, first = _warm_standalone_viz(repo)
+    monkeypatch.setattr(scale.builder, "build_viz", lambda *_: None)
+    live = Path(str(repo._runtime.scale_artifact_store.viz_dir(notebook.id)))
+    live.rename(str(live) + ".old")
+
+    assert scale.viz_index(notebook.id) is first, (
+        "a transiently invisible root (.old still on disk) must stay fail-soft"
+    )
+    assert notebook.id in scale.viz_cache
+
+
 def test_an_adapter_without_a_stat_probe_keeps_its_warm_viz(repo, monkeypatch):
     """Negative anchor: "no probe on this adapter" is not "changed". Old test
     doubles and any artifacts adapter without ``manifest_stat_signature`` keep
