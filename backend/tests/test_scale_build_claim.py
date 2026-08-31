@@ -622,14 +622,25 @@ def test_a_fold_with_nothing_to_fold_announces_nothing(
     assert rings == [indexed_notebook]
 
 
-def test_the_fold_reverifies_its_claim_outside_the_process_global_lock(
+def test_the_fold_swap_revalidates_its_claim_live_inside_building_lock(
     repo, indexed_notebook, monkeypatch
 ):
-    """codex W-CLI R1 P2-3. ``building_lock`` guards every notebook's status
-    poll and every admission; the re-verification is a database round trip on
-    the lock session. Holding one inside the other lets a network stall freeze
-    scale status for the whole deployment. Mutation anchor: move the call back
-    inside the ``with self.building_lock`` block and this goes red."""
+    """codex PR#643 R6 P1 superseded W-CLI R1 P2-3's snapshot-outside-the-lock
+    design: a snapshot proven before ``building_lock`` stays stale forever if
+    the lock session dies in the gap before the rename, so a competing
+    importer that acquires the now-released claim could be overwritten by
+    this unclaimed fold. The main swap's re-verification is therefore LIVE
+    and runs from inside ``building_lock`` — its cost is capped by
+    ``PostgresScaleBuildLock.verify_held``'s own short statement_timeout
+    (see ``database.py``) instead of by keeping the round trip outside the
+    lock. The companion's re-verification (a SEPARATE call, for the
+    source-partition root) still runs after ``building_lock`` is released,
+    since that rebuild can run long after the main swap.
+
+    Mutation anchor: reintroduce a frozen ``claim_held = verify(...)``
+    snapshot computed BEFORE ``building_lock`` and hand ITS value to the
+    swap, and the first observation goes red — the swap would then read as
+    unlocked, not locked, at verification time."""
     scale = _scale(repo)
     _add_delta_source(repo, indexed_notebook)
     observed: list[bool] = []
@@ -641,11 +652,10 @@ def test_the_fold_reverifies_its_claim_outside_the_process_global_lock(
     monkeypatch.setattr(scale.builder, "verify_scale_build_lock", verify)
     scale.fold(indexed_notebook)
 
-    # One re-verification for the main swap, and a SECOND, independent one
-    # for the source-partition companion's own swap (codex PR#643 R1 P2,
-    # ``source_partitioned_graph_artifacts_enabled`` defaults True) — both
-    # must be read outside the lock.
-    assert observed and all(locked is False for locked in observed)
+    # Main swap's check: WITH building_lock held. Companion's check (codex
+    # PR#643 R1 P2, ``source_partitioned_graph_artifacts_enabled`` defaults
+    # True): AFTER building_lock has been released.
+    assert observed == [True, False]
 
 
 def test_a_fold_still_refuses_to_swap_when_the_claim_is_gone(
@@ -661,6 +671,53 @@ def test_a_fold_still_refuses_to_swap_when_the_claim_is_gone(
     monkeypatch.setattr(
         scale.builder, "verify_scale_build_lock", lambda _nb: False
     )
+
+    with pytest.raises(ScaleBuildLockLost):
+        scale.fold(indexed_notebook)
+
+    assert (
+        store.scale_dir(indexed_notebook) / "manifest.json"
+    ).read_bytes() == before
+    assert indexed_notebook not in scale.building
+
+
+def test_a_fold_swap_refuses_when_the_claim_dies_after_the_swap_call_begins(
+    repo, indexed_notebook, monkeypatch
+):
+    """codex PR#643 R6 P1: the OLD bug computed ``claim_held`` once, well
+    before the swap, and handed the swap that frozen value — so a claim lost
+    strictly between that snapshot and the rename left the swap free to
+    publish anyway. This drives exactly that timing: the lock reads as held
+    right up until ``fold`` hands off to the store's ``swap_fold_directory``,
+    and is released from inside a spy on that call — after the fold decided
+    to swap, but before the store's own ``verify_held()`` read runs. The live
+    verifier must observe the loss and refuse.
+
+    Mutation anchor: revert the swap's ``verify_held=`` kwarg in ``fold`` to
+    a value captured earlier (``claim_held = self.verify_scale_build_lock(...)``
+    read before this test's injection point, ``verify_held=lambda:
+    claim_held``) and this goes green while the live artifact is silently
+    overwritten by an unclaimed fold."""
+    scale = _scale(repo)
+    store = repo._runtime.scale_artifact_store
+    _add_delta_source(repo, indexed_notebook)
+    before = (store.scale_dir(indexed_notebook) / "manifest.json").read_bytes()
+
+    state = {"held": True}
+    monkeypatch.setattr(
+        scale.builder, "verify_scale_build_lock", lambda _nb: state["held"]
+    )
+
+    real_swap = store.swap_fold_directory
+
+    def losing_swap(notebook_id, temporary, *, verify_held):
+        # The claim dies exactly here: fold() has already committed to
+        # calling the swap, but the store's own re-verification has not run
+        # yet. A frozen snapshot taken before this point would miss it.
+        state["held"] = False
+        return real_swap(notebook_id, temporary, verify_held=verify_held)
+
+    monkeypatch.setattr(store, "swap_fold_directory", losing_swap)
 
     with pytest.raises(ScaleBuildLockLost):
         scale.fold(indexed_notebook)
