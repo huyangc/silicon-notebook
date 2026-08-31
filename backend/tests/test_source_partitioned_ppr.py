@@ -454,6 +454,55 @@ def test_a_warm_companion_is_dropped_when_the_main_generation_moves(repo):
     assert result.capability.reason == "source_partition_identity_mismatch"
 
 
+def test_a_main_swap_during_the_cold_load_is_not_cached_against_the_new_build(
+    repo, monkeypatch
+):
+    """P1, codex PR#643 R28: the cold load has its own TOCTOU — the main
+    root can be swapped after the pre-load signature capture (and after the
+    loader's internal gate read the OLD ``build_id``) but before the old
+    companion finishes loading. The post-load main re-probe must notice,
+    retry once with fresh signatures (the loader's own gate then refuses the
+    stale companion against the new manifest), and never cache the old
+    graph under the new generation.
+
+    Mutation anchor: drop the post-load main re-probe and this goes red —
+    the stale companion is served and cached against the new main build.
+    """
+    notebook_id, source_a, _source_b = _seed(repo)
+    version = ["same-main-version"]
+    _publish(repo, notebook_id, (source_a,), version, build_id="a" * 32)
+    _write_main_manifest(repo, notebook_id, version=version, build_id="a" * 32)
+    store = repo._runtime.scale_artifact_store
+    original = store.load_source_partitions
+    calls = {"n": 0}
+
+    def racing(notebook, source_ids, **kwargs):
+        calls["n"] += 1
+        first = calls["n"] == 1
+        result = original(notebook, source_ids, **kwargs)
+        if first:
+            # The publisher lands a new main generation while the companion
+            # load above was still in flight. (The retry call raises inside
+            # ``original`` — its pairing gate refuses companion a against
+            # main b — which is exactly the fail-closed outcome.)
+            _write_main_manifest(
+                repo, notebook_id, version=version, build_id="b" * 32
+            )
+        return result
+
+    monkeypatch.setattr(store, "load_source_partitions", racing)
+    result = _retrieve(repo, notebook_id, source_a, version)
+
+    assert calls["n"] == 2, "the load must be retried against the new manifest"
+    assert not result.capability.enabled, (
+        "a companion loaded against the superseded main generation must not "
+        "be served or cached"
+    )
+    assert result.capability.reason == "source_partition_identity_mismatch"
+    service = repo._runtime.source_partitioned_ppr
+    assert service.cache_size == 0
+
+
 def test_a_partition_copied_in_from_another_generation_is_refused(repo):
     """The per-source gate carries its own weight, not just the root's.
 
@@ -1017,7 +1066,8 @@ def test_companion_signature_is_stat_at_most_once_per_call(repo, monkeypatch):
     manifest stat must not be repeated inside a single ``retrieve()`` call.
     Two roots are statted since P1 codex PR#643 R27 — the companion (its own
     generation) and the MAIN index (the generation the pairing gate ran
-    against) — so the honest budget is exactly two stats per call, never
+    against) — so the honest budget is two stats on a warm hit and three on
+    a cold load (the post-load main re-probe, P1 codex PR#643 R28), never
     more. A durably ABSENT root instead pays the four-look absence dance
     (R22/R23/R25), which is why this test gives the main root a manifest —
     the common serving shape."""
@@ -1045,7 +1095,7 @@ def test_companion_signature_is_stat_at_most_once_per_call(repo, monkeypatch):
         parent_version=version,
         object_seeds={"ko-a1": 1.0},
     )
-    assert stat_calls == 2
+    assert stat_calls == 3
 
     stat_calls = 0
     service.retrieve(

@@ -424,26 +424,56 @@ class SourcePartitionedPprService:
                 self._cache.pop(key, None)
             if len(self._cache) >= self._CACHE_ENTRIES:
                 self._cache.popitem(last=False)
-            partitions = self._artifacts.load_source_partitions(
-                notebook_id,
-                source_ids,
-                expected_parent_version=parent_version,
-                expected_source_signatures=source_signatures,
-                max_nodes=(
-                    int(self._settings.source_subgraph_max_objects)
-                    + int(self._settings.source_subgraph_max_chunks)
-                    + int(self._settings.source_subgraph_max_cluster_memberships)
-                ),
-                max_nnz=2
-                * (
-                    int(self._settings.source_subgraph_max_relations)
-                    + int(self._settings.source_subgraph_max_memberships)
-                    + int(self._settings.source_subgraph_max_cluster_memberships)
-                ),
+            # P1, codex PR#643 R28: the cold load has its own TOCTOU — the
+            # main root can be swapped AFTER ``main_signature`` was captured
+            # (and after the loader's internal pairing gate read the OLD
+            # ``build_id``) but before the old companion finishes loading.
+            # Caching that graph would pair the previous build's companion
+            # with the newly published main generation. So the main root is
+            # re-probed AFTER the load; if it moved, both signatures are
+            # refreshed and the load runs once more — the loader's pairing
+            # gate then runs against the new live manifest and refuses a
+            # stale companion itself. A second move mid-retry fails closed;
+            # the next request heals.
+            for _attempt in (0, 1):
+                partitions = self._artifacts.load_source_partitions(
+                    notebook_id,
+                    source_ids,
+                    expected_parent_version=parent_version,
+                    expected_source_signatures=source_signatures,
+                    max_nodes=(
+                        int(self._settings.source_subgraph_max_objects)
+                        + int(self._settings.source_subgraph_max_chunks)
+                        + int(
+                            self._settings.source_subgraph_max_cluster_memberships
+                        )
+                    ),
+                    max_nnz=2
+                    * (
+                        int(self._settings.source_subgraph_max_relations)
+                        + int(self._settings.source_subgraph_max_memberships)
+                        + int(
+                            self._settings.source_subgraph_max_cluster_memberships
+                        )
+                    ),
+                )
+                graph = self._combine(partitions)
+                post_main_signature = self._main_signature(notebook_id)
+                if not _companion_signature_superseded(
+                    main_signature, post_main_signature
+                ):
+                    self._cache[key] = (graph, disk_signature, main_signature)
+                    return graph, False
+                main_signature = post_main_signature
+                disk_signature = self._companion_signature(notebook_id)
+                if disk_signature is MANIFEST_ABSENT:
+                    self.invalidate(notebook_id)
+                    raise SourcePartitionUnavailable(
+                        "source_partition_artifact_unavailable"
+                    )
+            raise SourcePartitionUnavailable(
+                "source_partition_artifact_unavailable"
             )
-            graph = self._combine(partitions)
-            self._cache[key] = (graph, disk_signature, main_signature)
-            return graph, False
 
     def retrieve(
         self,
