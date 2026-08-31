@@ -1659,37 +1659,62 @@ def run_export(
         created_destination = not destination.exists()
         destination.mkdir(parents=True, exist_ok=True)
         exported = []
-        for name in PUBLISH_ORDER:
-            live = roots[name]
-            if not live.is_dir():
-                continue
-            shutil.copytree(live, destination / name)
-            # codex PR#643 R20 P1: a copytree of a multi-GB root can outlive
-            # the advisory-lock session (failover, backend termination).
-            # Export writes nothing to the artifact tree, but once the claim
-            # is gone another builder can legally swap a root MID-WALK or
-            # between roots — the copy just made (or the next one) then mixes
-            # two generations, and for a same-version rebuild no later
-            # generation check can tell. Re-verify after every copy; on a
-            # lost claim the package on disk is unusable evidence, so remove
-            # what this run wrote and fail loudly instead of reporting a
-            # mixed package as success.
-            if handle.verify_held is not None and not handle.verify_held():
-                if created_destination:
-                    shutil.rmtree(destination, ignore_errors=True)
-                else:
-                    for copied in (*exported, name):
-                        shutil.rmtree(destination / copied, ignore_errors=True)
-                raise ScaleBuildCliFailure(
-                    f"the scale-build claim for {notebook_id} was lost while "
-                    f"copying {name}; another builder may have republished a "
-                    "root mid-copy, so the partial package cannot be trusted "
-                    f"and was removed from {destination}. The live tree is "
-                    "untouched. Re-run export once `inspect` shows the claim "
-                    "is free."
-                )
-            exported.append(name)
-            report(f"exported {name}")
+
+        def _discard_partial_package(current: Optional[str]) -> None:
+            """Remove everything THIS invocation wrote to ``destination`` —
+            an unusable partial package left behind would make the documented
+            re-run refuse on "destination is not empty" until an operator
+            hand-deleted it (P2, codex PR#643 R30)."""
+            if created_destination:
+                shutil.rmtree(destination, ignore_errors=True)
+                return
+            for copied in (*exported, *((current,) if current else ())):
+                shutil.rmtree(destination / copied, ignore_errors=True)
+
+        current_root: Optional[str] = None
+        try:
+            for name in PUBLISH_ORDER:
+                live = roots[name]
+                if not live.is_dir():
+                    continue
+                current_root = name
+                shutil.copytree(live, destination / name)
+                # codex PR#643 R20 P1: a copytree of a multi-GB root can
+                # outlive the advisory-lock session (failover, backend
+                # termination). Export writes nothing to the artifact tree,
+                # but once the claim is gone another builder can legally swap
+                # a root MID-WALK or between roots — the copy just made (or
+                # the next one) then mixes two generations, and for a
+                # same-version rebuild no later generation check can tell.
+                # Re-verify after every copy; on a lost claim the package on
+                # disk is unusable evidence, so remove what this run wrote
+                # and fail loudly instead of reporting a mixed package as
+                # success.
+                if handle.verify_held is not None and not handle.verify_held():
+                    _discard_partial_package(name)
+                    raise ScaleBuildCliFailure(
+                        f"the scale-build claim for {notebook_id} was lost "
+                        f"while copying {name}; another builder may have "
+                        "republished a root mid-copy, so the partial package "
+                        "cannot be trusted and was removed from "
+                        f"{destination}. The live tree is untouched. Re-run "
+                        "export once `inspect` shows the claim is free."
+                    )
+                exported.append(name)
+                current_root = None
+                report(f"exported {name}")
+        except ScaleBuildCliFailure:
+            raise
+        except BaseException:
+            # P2, codex PR#643 R30: an I/O error, disk exhaustion or Ctrl-C
+            # inside ``copytree`` used to leave the partially written root on
+            # disk — the documented re-run then refused on "destination is
+            # not empty" until an operator hand-deleted the fragment. Same
+            # cleanup as the lost-claim path, then the original failure
+            # propagates untouched (a KeyboardInterrupt keeps its exit-130
+            # path, everything else its own report).
+            _discard_partial_package(current_root)
+            raise
         # codex PR#643 R24 P1: a full-payload transfer manifest, written only
         # once every root has been copied AND the per-copy claim
         # re-verification above (R20) has passed for every one of them — see
