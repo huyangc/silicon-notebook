@@ -684,9 +684,9 @@ def test_paper_meta_upsert_locks_parents_before_notebook_delete(
         )
         connection.execute(
             "INSERT INTO sources(id,notebook_id,title,source_type,status,parse_status,"
-            "file_name,created_at,updated_at) VALUES ('paper-delete-source',"
+            "file_name,file_path,created_at,updated_at) VALUES ('paper-delete-source',"
             "'paper-delete-nb','Fallback Title','pdf','extracted','extracted',"
-            "'paper.pdf',%s,%s)",
+            "'paper.pdf','paper-delete/path.pdf',%s,%s)",
             (now, now),
         )
 
@@ -759,7 +759,7 @@ def test_paper_meta_upsert_locks_parents_before_notebook_delete(
         finally:
             allow_meta_upsert.set()
         assert upsert_future.result(timeout=5) is None
-        assert notebook_future.result(timeout=5) == []
+        assert notebook_future.result(timeout=5) == ["paper-delete/path.pdf"]
 
     with postgres_database.connect() as connection:
         retained = connection.execute(
