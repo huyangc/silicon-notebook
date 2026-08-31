@@ -360,31 +360,21 @@ def claim_notebook(repository, notebook_id: str) -> Iterator[object]:
 def publish_started(live) -> bool:
     """Filesystem evidence that this root's rename sequence had BEGUN.
 
-    ``{live}.old`` exists only between the two renames (it is removed as the
-    last step), and "a staging sibling present while ``live`` is absent" is
-    the same moment seen from the other side — the rename that publishes a
-    FIRST-EVER generation (no ``.old`` step at all) was cut off mid-flight.
-    Either means the staged directory may already be the only copy of a
-    generation, so it must not be deleted as "abandoned staging" — which is
-    exactly what an interrupt cleanup would otherwise do with hours of work
-    (codex W-CLI R1 B1). Checks BOTH staging shapes a sibling can carry
-    (P1, codex PR#643 R1): the legacy fixed ``.tmp`` and the claim-unique
-    ``.tmp-<claim_token>``.
+    The ONLY trustworthy evidence is ``{live}.old``: it exists strictly
+    between the two renames of a replacing publish (and is removed as the
+    last step), so its presence means the staged directory may already be
+    the only copy of a generation — never delete it as "abandoned staging"
+    (codex W-CLI R1 B1). The earlier heuristic "a staging sibling present
+    while ``live`` is absent" was WRONG (P2, codex PR#643 R7): that shape is
+    the normal state of a FIRST-TIME import for this root's entire staging
+    copy — ``live`` never existed, the ``.tmp-<token>`` tree is being
+    filled — and a first-ever publish is a single atomic rename with no
+    half state at all (either ``live`` appeared, or the tree is still plain
+    staging that this run may discard). Inferring publication from it made
+    every first-publish interrupt skip cleanup and print a recovery
+    instruction pointing at a nonexistent ``.old``.
     """
-    path = str(live)
-    if os.path.exists(path + ".old"):
-        return True
-    if os.path.exists(path):
-        return False
-    parent = os.path.dirname(path) or "."
-    prefix = os.path.basename(path) + ".tmp"
-    try:
-        siblings = os.listdir(parent)
-    except OSError:
-        return False
-    return any(
-        name == prefix or name.startswith(prefix + "-") for name in siblings
-    )
+    return os.path.exists(str(live) + ".old")
 
 
 def discard_staging(paths, report: Callable[[str], None]) -> None:
@@ -1178,13 +1168,24 @@ def run_import(
             ) from None
         except BaseException:
             # Covers a staging failure (nothing renamed yet, live tree pristine)
-            # and Ctrl-C. Only this run's own ``.tmp`` directories are removed —
-            # and only those that are not half-published (see B1 above).
+            # and Ctrl-C. ``published`` is the EXPLICIT phase marker (P2, codex
+            # PR#643 R7): once any root has been renamed this run keeps every
+            # remaining staged copy — the three roots are one generation and
+            # discarding the unpublished half would leave a torn set with no
+            # way to complete it. Before the first rename, only this run's own
+            # ``.tmp-<token>`` directories are removed, with the ``.old``
+            # evidence check as the belt for an interrupt landing inside a
+            # single root's two-rename window (see publish_started).
             if published:
-                report(f"already published before the failure: {published}")
-            discard_staging_unless_publishing(
-                {roots[name]: path for name, path in staged.items()}, report
-            )
+                report(
+                    f"already published before the failure: {published}; the "
+                    "remaining staged copies are kept so the generation can "
+                    "be completed by re-running import"
+                )
+            else:
+                discard_staging_unless_publishing(
+                    {roots[name]: path for name, path in staged.items()}, report
+                )
             raise
         if guard.interrupted:
             # The interrupt arrived while the renames were being deferred and
