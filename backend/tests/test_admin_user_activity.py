@@ -972,7 +972,12 @@ def test_deleted_notebook_keeps_only_expiring_activity_metadata(repo):
     assert all(item["notebook_name"] == "NB-n1" for item in activity["items"])
     source_item = next(item for item in activity["items"] if item["type"] == "source")
     assert source_item["display_title"] == "private.pdf"
-    detail = repo.ask_job_detail("ask-1")
+    with pytest.raises(KeyError):
+        repo.ask_job_detail("ask-1")
+    with repo.guarded_ask_detail(
+        "ask-1", actor_id="u1", reader_id=None
+    ) as snapshot:
+        detail = snapshot["job"]
     assert detail["trace"] == []
     assert detail["answer_id"] == ""
     assert detail["error"] == ""
@@ -1003,7 +1008,10 @@ def test_deleted_notebook_keeps_only_expiring_activity_metadata(repo):
     assert expired_usage["reports"] == 0
     assert expired_usage["last_active"] == created_at
     with pytest.raises(KeyError):
-        repo.ask_job_detail("ask-1")
+        with repo.guarded_ask_detail(
+            "ask-1", actor_id="u1", reader_id=None
+        ):
+            pass
 
     repo._migrator.recover_interrupted_jobs()
     with repo._connect() as db:
@@ -1241,7 +1249,7 @@ def test_activity_delete_race_prefers_retained_lifecycle(repo):
     assert activity["items"][0]["notebook_deleted_at"]
 
 
-def test_ask_detail_delete_race_falls_back_to_retained(repo):
+def test_live_ask_detail_delete_race_fails_closed(repo):
     with repo._write() as db:
         _insert_user(db, "u-detail-race", "a00000011")
         _insert_notebook(db, "n-detail-race", "u-detail-race")
@@ -1276,14 +1284,15 @@ def test_ask_detail_delete_race_falls_back_to_retained(repo):
 
         connection.set_trace_callback(delete_before_trace_select)
         try:
-            detail = repo.ask_job_detail("ask-detail-race")
+            with pytest.raises(KeyError):
+                repo.ask_job_detail("ask-detail-race")
         finally:
             connection.set_trace_callback(None)
 
     assert triggered is True
     assert delete_future is not None and delete_future.result(timeout=5) == []
-    assert detail["job_id"] == "ask-detail-race"
-    assert detail["notebook_deleted_at"]
-    assert detail["retained_until"]
-    assert detail["answer_id"] == ""
-    assert detail["trace"] == []
+    with repo.guarded_ask_detail(
+        "ask-detail-race", actor_id="u-detail-race", reader_id=None
+    ) as snapshot:
+        assert snapshot["job"]["notebook_deleted_at"]
+        assert snapshot["job"]["trace"] == []

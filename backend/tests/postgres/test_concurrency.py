@@ -212,7 +212,7 @@ def test_activity_delete_race_prefers_retained_lifecycle_postgres(
 
 
 @pytest.mark.postgres_integration
-def test_ask_detail_delete_race_falls_back_to_retained_postgres(
+def test_live_ask_detail_delete_race_fails_closed_postgres(
     postgres_database, monkeypatch
 ):
     assert PostgresMigrator(postgres_database).migrate() == 44
@@ -288,13 +288,16 @@ def test_ask_detail_delete_race_falls_back_to_retained_postgres(
             assert delete_future.result(timeout=5) == []
         finally:
             allow_trace_read.set()
-        detail = detail_future.result(timeout=5)
+        with pytest.raises(KeyError):
+            detail_future.result(timeout=5)
 
-    assert detail["job_id"] == "detail-race-ask"
-    assert detail["notebook_deleted_at"]
-    assert detail["retained_until"]
-    assert detail["answer_id"] == ""
-    assert detail["trace"] == []
+    with asks.guarded_ask_detail(
+        "detail-race-ask", actor_id="detail-race-owner", reader_id=None
+    ) as snapshot:
+        assert snapshot["job"]["notebook_deleted_at"]
+        assert snapshot["job"]["retained_until"]
+        assert snapshot["job"]["answer_id"] == ""
+        assert snapshot["job"]["trace"] == []
 
 
 @pytest.mark.postgres_integration
@@ -366,10 +369,14 @@ def test_guarded_ask_detail_holds_root_lease_through_projection_postgres(
             )
         assert delete_future.result(timeout=5) == []
 
-    retained = asks.ask_job_detail(job_id)
-    assert retained["notebook_deleted_at"]
-    assert retained["answer_id"] == ""
-    assert retained["trace"] == []
+    with pytest.raises(KeyError):
+        asks.ask_job_detail(job_id)
+    with asks.guarded_ask_detail(
+        job_id, actor_id="guard-detail-owner", reader_id=None
+    ) as snapshot:
+        assert snapshot["job"]["notebook_deleted_at"]
+        assert snapshot["job"]["answer_id"] == ""
+        assert snapshot["job"]["trace"] == []
 
 
 @pytest.mark.postgres_integration
@@ -547,10 +554,14 @@ def test_final_answer_and_notebook_delete_share_root_first_lock_order(
         assert delete_future.result(timeout=5) == []
 
     assert answer_id
-    detail = asks.ask_job_detail(job_id)
-    assert detail["status"] == "done"
-    assert detail["answer_id"] == ""
-    assert detail["notebook_deleted_at"]
+    with pytest.raises(KeyError):
+        asks.ask_job_detail(job_id)
+    with asks.guarded_ask_detail(
+        job_id, actor_id="answer-delete-owner", reader_id=None
+    ) as snapshot:
+        assert snapshot["job"]["status"] == "done"
+        assert snapshot["job"]["answer_id"] == ""
+        assert snapshot["job"]["notebook_deleted_at"]
 
 
 @pytest.mark.postgres_integration

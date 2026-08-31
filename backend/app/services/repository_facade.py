@@ -3912,6 +3912,7 @@ class RepositoryFacade:
         return self._runtime.ask_state.read_trace(db, job_id)
 
     def ask_job_detail(self, job_id: str) -> dict:
+        """Return a live ask job only; retained summaries are admin-guarded."""
         return self._runtime.ask_state.ask_job_detail(job_id)
 
     def ask_answer_detail(self, answer_id: str) -> "dict | None":

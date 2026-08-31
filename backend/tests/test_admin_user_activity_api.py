@@ -843,6 +843,50 @@ def test_admin_ask_detail_delete_before_guard_returns_retained(
     assert body["retained_until"]
 
 
+def test_user_ask_job_delete_after_read_dependency_hides_retained(
+    client, monkeypatch
+):
+    owner = _auth(client, 34)
+    owner_id = _me(client, owner)
+    notebook_id = _create_notebook(client, owner, "普通详情删除竞态")
+    with _repo()._write() as db:
+        _insert_ask_job(
+            db,
+            "job-user-delete-race",
+            notebook_id,
+            owner_id,
+            "2026-08-01T14:30:00+00:00",
+            question="删除后普通端点还能看到吗？",
+            status="done",
+        )
+
+    from app.api import ask_routes
+
+    repo = _repo()
+    triggered = False
+
+    def repository_after_dependency():
+        nonlocal triggered
+        if not triggered:
+            triggered = True
+            repo._runtime.notebook_store.delete_row_and_orphan_embeddings(notebook_id)
+        return repo
+
+    monkeypatch.setattr(ask_routes, "repository", repository_after_dependency)
+    response = client.get(
+        f"/api/notebooks/{notebook_id}/ask/jobs/job-user-delete-race",
+        headers=owner,
+    )
+    assert triggered is True
+    assert response.status_code == 404
+
+    with repo.guarded_ask_detail(
+        "job-user-delete-race", actor_id=owner_id, reader_id=None
+    ) as snapshot:
+        assert snapshot["job"]["question"] == "删除后普通端点还能看到吗？"
+        assert snapshot["job"]["notebook_deleted_at"]
+
+
 def test_admin_unanswered_ask_detail_delete_before_guard_returns_retained(
     client, monkeypatch
 ):
@@ -933,9 +977,13 @@ def test_guarded_ask_detail_holds_delete_until_snapshot_released(client):
     finally:
         second_database.close()
     assert delete_finished.is_set()
-    retained = repo.ask_job_detail("job-guarded-delete")
-    assert retained["notebook_deleted_at"]
-    assert retained["trace"] == []
+    with pytest.raises(KeyError):
+        repo.ask_job_detail("job-guarded-delete")
+    with repo.guarded_ask_detail(
+        "job-guarded-delete", actor_id=owner_id, reader_id=None
+    ) as snapshot:
+        assert snapshot["job"]["notebook_deleted_at"]
+        assert snapshot["job"]["trace"] == []
 
 
 def test_guarded_ask_detail_freezes_running_to_done_snapshot(client):
