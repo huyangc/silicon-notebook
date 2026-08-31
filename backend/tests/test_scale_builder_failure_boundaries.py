@@ -208,6 +208,11 @@ def test_fold_second_rename_failure_rolls_old_artifact_back(
 
     store = repo._runtime.scale_artifact_store
     builder = repo._runtime.scale_builder
+    # P1, codex PR#643 R1: staging is now claim-unique
+    # (``{live}.tmp-<claim_token>``); pin the token so this test can name the
+    # abandoned staging directory precisely, the way a real retry under the
+    # SAME claim would.
+    monkeypatch.setattr(builder, "scale_build_claim_token", lambda _nb: "fold-tok")
     live_dir = store.scale_dir(indexed_notebook)
     manifest = live_dir / "manifest.json"
     before = manifest.read_bytes()
@@ -230,9 +235,9 @@ def test_fold_second_rename_failure_rolls_old_artifact_back(
     assert manifest.read_bytes() == before
     assert store.load_scale(indexed_notebook) is not None
     assert not live_dir.with_name(live_dir.name + ".old").exists()
-    staging = live_dir.with_name(live_dir.name + ".tmp")
+    staging = live_dir.with_name(live_dir.name + ".tmp-fold-tok")
     assert staging.is_dir()
-    assert store.prepare_fold_directory(indexed_notebook) == staging
+    assert store.prepare_fold_directory(indexed_notebook, "fold-tok") == staging
     assert list(staging.iterdir()) == []
 
 
@@ -243,6 +248,7 @@ def test_fold_rollback_failure_preserves_old_and_primary_exception(
 
     store = repo._runtime.scale_artifact_store
     builder = repo._runtime.scale_builder
+    monkeypatch.setattr(builder, "scale_build_claim_token", lambda _nb: "fold-tok")
     live_dir = store.scale_dir(indexed_notebook)
     before = (live_dir / "manifest.json").read_bytes()
     real_rename = store_module.os.rename
@@ -267,7 +273,7 @@ def test_fold_rollback_failure_preserves_old_and_primary_exception(
     old_dir = live_dir.with_name(live_dir.name + ".old")
     assert not live_dir.exists()
     assert (old_dir / "manifest.json").read_bytes() == before
-    assert live_dir.with_name(live_dir.name + ".tmp").is_dir()
+    assert live_dir.with_name(live_dir.name + ".tmp-fold-tok").is_dir()
     assert any("rollback" in note for note in getattr(primary, "__notes__", []))
 
 

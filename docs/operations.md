@@ -816,17 +816,19 @@ Prereqs: point `MODEL_SERVICES_CONFIG` at the deployment TOML, bind the workload
 `batch_ingest.py index` above is the **stopped-service** channel (a
 database-wide advisory lock behind `--confirm-service-stopped`). This script is
 the other one: it runs **beside a live service**, takes the per-notebook
-cross-process build claim, stages artifacts in `.tmp` and renames them into
-place, and the serving process picks the new generation up through its existing
-per-request probing — **no restart** (a rename publishes a new inode, so the
-manifest's disk signature necessarily changes). The motivation is large
-libraries: a 490k-object notebook once exhausted a 64GB machine, the scale
-index is ~5GB resident, and a build takes hours. Moving those hours to another
-machine is the only way to keep the serving deployment unaffected.
+cross-process build claim, stages artifacts in a claim-unique
+`.tmp-<claim_token>` directory and renames them into place, and the serving
+process picks the new generation up through its existing per-request probing —
+**no restart** (a rename publishes a new inode, so the manifest's disk
+signature necessarily changes). The motivation is large libraries: a
+490k-object notebook once exhausted a 64GB machine, the scale index is ~5GB
+resident, and a build takes hours. Moving those hours to another machine is
+the only way to keep the serving deployment unaffected.
 
 **PostgreSQL only.** A SQLite deployment is refused outright (exit code 2):
-single-process by construction, it has no cross-process claim, so two writers
-would race on the same `.tmp`.
+single-process by construction, it has no cross-process claim to take in the
+first place, so an offline builder could never be excluded from the serving
+process here.
 
 Exit codes: `0` success; `1` attempted and failed (the claim is held elsewhere,
 the build failed, the pre-swap re-verification failed); `2` refused before
@@ -842,8 +844,8 @@ published indexing pipeline all have to match the running service:
 
 ```bash
 # Read-only: manifest summary, the three artifact roots with sizes, whether the
-# artifact matches the database version, .tmp/.old leftovers, and who holds the
-# claim right now (probe = non-blocking try + immediate release)
+# artifact matches the database version, .tmp-<token>/.old leftovers, and who
+# holds the claim right now (probe = non-blocking try + immediate release)
 PYTHONPATH=backend python scripts/build_scale_index.py inspect --notebook nb-xxx
 
 # Full rebuild (default) / delta fold
@@ -875,7 +877,7 @@ PYTHONPATH=backend python scripts/build_scale_index.py export --notebook nb-xxx 
 # 2) Ship it (--to must be absent or empty; one subdirectory per artifact root)
 rsync -a /data/nb-xxx-pack/ prod:/data/nb-xxx-pack/
 
-# 3) Production host (validate → stage each root in .tmp → atomic renames)
+# 3) Production host (validate → stage each root in its own .tmp-<token> → atomic renames)
 PYTHONPATH=backend python scripts/build_scale_index.py import --notebook nb-xxx --from /data/nb-xxx-pack
 ```
 
@@ -890,8 +892,9 @@ otherwise.
 mid-sequence leaves the *live* main index on its previous generation, and the
 companion's `parent_version` gate makes an unpaired companion unreadable
 (degrading to "no companion") rather than describing a different generation.
-Copying — the slow, failure-prone half — happens entirely inside `.tmp`; the
-live tree is untouched until the final renames.
+Copying — the slow, failure-prone half — happens entirely inside a
+claim-unique `.tmp-<token>` staging directory (see below); the live tree is
+untouched until the final renames.
 
 #### Ctrl-C: what is masked, and what a build's Ctrl-C leaves behind
 
@@ -902,25 +905,32 @@ otherwise leave the notebook with no live index at all: the one data-losing
 window in this channel. The signal is *deferred*, not ignored; the sequence
 takes milliseconds and the interrupt is honoured the instant it completes.
 
-What each command does with the interrupt:
+What each command does with the interrupt differs, because only `import`
+holds the claim for its whole run (build/fold's claim lives and dies inside
+the ordinary facade path — see the leftovers section below):
 
 - **`import`** — if every root was published before the deferred interrupt took
   effect, nothing was abandoned: the command says so and exits `0` with its
   ordinary receipt. An interrupt during the *staging* copies removes this run's
-  `.tmp` directories and exits `130`.
-- **`build` / `build --fold`** — an interrupt during the build (the hours-long
-  part) removes this run's `.tmp` and exits `130`; re-running rebuilds from
-  scratch. If the interrupt landed inside the publish instead, **nothing is
-  deleted**: the previous generation is in `{dir}.old` and the new one in
-  `{dir}.tmp`, and the command prints both paths with the `mv` that restores
-  the live directory. Do not delete either until `inspect` shows the tree you
-  expect — that `.tmp` may be the only copy of a build that took hours.
+  own `.tmp-<claim_token>` directories (the claim it holds the whole time names
+  them precisely) and exits `130`.
+- **`build` / `build --fold`** — this command never holds the claim itself, so
+  by the time it can react to Ctrl-C it no longer knows the `claim_token` its
+  own staging directory (if it staged one at all) was suffixed with, and
+  **deletes nothing**. If the interrupt landed inside the publish, the
+  previous generation is in `{dir}.old` and the new one is in a
+  `{dir}.tmp-<token>` beside it, and the command prints both paths with the
+  `mv` that restores the live directory — do not delete either until
+  `inspect` shows the tree you expect, that staged directory may be the only
+  copy of a build that took hours. Otherwise the command just points at
+  `inspect`; see "`.old` / `.tmp-<claim_token>` leftovers" below for why
+  nothing more specific can be said from here.
 
 #### What must be pinned across the two machines
 
 | Item | Requirement | On mismatch |
 | --- | --- | --- |
-| Code revision (migration ledger) | the build host's migration count == the production database's `max(version)` in `silicon_schema_migrations`, **and every recorded checksum matches this checkout's SQL** | preflighted on a bare connection **before** the repository is composed; exit code 2. The checksums are what catch two checkouts that carry the same number of migrations with different SQL (a rebase, a cherry-pick, an edited file) |
+| Code revision (migration ledger) | the production database's recorded versions in `silicon_schema_migrations` are the exact set `1..N`, no gaps or duplicates, where `N` is the build host's migration count, **and every recorded checksum matches this checkout's SQL** | preflighted on a bare connection **before** the repository is composed; exit code 2. The checksums are what catch two checkouts that carry the same number of migrations with different SQL (a rebase, a cherry-pick, an edited file); the exact-set check is what catches a *gapped* ledger (e.g. `1, 3, ..., N`, version 2 missing) that `max(version) == N` alone cannot see — the same ledger the repository's own migrator refuses to run against |
 | Notebook identity | `manifest.notebook_id` == `--notebook` (packages built before that key: `manifest.watermark_sources` must be a subset of this notebook's source ids) | `import` refuses. Nothing else in the validation notices a typed-wrong `--notebook`: pipeline identity, dim and hnswlib are deployment-wide facts, identical for every library on the host, so without this check another library's index publishes here and starts serving |
 | Published indexing pipeline | `manifest.pipeline_identity` matches the notebook's currently published identity | `import` refuses (a mismatch makes retrieval discard the scale core **silently**) |
 | `EMBED_DIM` / `EMBED_RUNTIME_DIM` | the effective dimension must match | `import` refuses (a mismatch makes `open_ann` fail open → **silent zero recall**); a manifest with no `dim` is refused for the same reason |
@@ -966,7 +976,7 @@ advisory lock ownership. This channel requires **session pooling or a direct
 connection**; running it behind transaction pooling means no mutual exclusion at
 all.
 
-#### `.old` / `.tmp` leftovers and manual recovery
+#### `.old` / `.tmp-<claim_token>` leftovers and manual recovery
 
 The swap sequence is `live → .old`, `tmp → live`, `rm .old`. A failure at the
 second step restores `.old` automatically; if even the rollback fails, `.old`
@@ -977,14 +987,39 @@ stays on disk and the exception note names the path. Manual recovery:
 mv /data/storage/kg_index/nb-xxx.old /data/storage/kg_index/nb-xxx
 ```
 
-`.tmp` is this run's staging. When a build is abandoned (the pre-swap
-re-verification found the claim gone) it is **deliberately kept** for
-inspection; the next build discards it, and `rm -rf` is safe once you are done.
-`inspect` reports both kinds of leftover with their sizes. On Ctrl-C the command
-removes the `.tmp` directories **this run** staged and prints their paths —
-unless that root shows a half-finished publish (a `.old` beside it, or a `.tmp`
-with no live directory), in which case nothing is deleted and the recovery `mv`
-is printed instead. See the Ctrl-C section above.
+Staging is `{live}.tmp-<claim_token>` — one directory per claim, not a fixed
+shared name. This closes a corruption race the old fixed `{live}.tmp` left
+open: a lock session dying mid-build does not stop the process from finishing
+its write, and a second process that then legitimately takes the now-free
+claim used to reset and reuse the *same* directory the first was still
+filling in, so both processes' writes could interleave before either swap.
+The token comes from the cross-process lock session that holds the claim (or
+a fresh random one wherever there is no such lock behind the call — a
+builder invoked directly, or a test). `prepare` only ever clears **its own
+token's** residue — a retry that reuses the same `claim_token` gets a clean
+directory, a *different* claim's `.tmp-<other token>` is left completely
+alone — with one exception: a pre-existing NO-SUFFIX `.tmp` predates this
+scheme, so nothing still running can legitimately be writing to it, and it is
+discarded as a one-time compatibility cleanup. `swap` only ever renames the
+exact directory it was handed.
+
+Because every claim's staging directory is its own, **nobody but that claim
+can tell whether a given `.tmp-<token>` is a build still writing or a
+zombie's abandoned work — so nothing auto-deletes another claim's
+`.tmp-<token>`, ever.** `inspect` reports every `.tmp-<token>` (and any
+legacy no-suffix `.tmp`) it finds under `leftovers` with byte sizes;
+cross-reference `build_claim` (and, if still ambiguous, the process list on
+both machines) before removing one by hand with `rm -rf`.
+
+What each command does on Ctrl-C differs, because only `import` holds the
+claim for its whole run: `import` knows its own token throughout (the claim
+it takes covers staging *and* publish), so an interrupt during staging
+removes precisely the directories this run created. `build` / `build --fold`
+take their claim inside the ordinary facade path and release it before this
+command regains control — by the time it can react to Ctrl-C, the token is
+already gone from view, so it deletes nothing; the leftover is reported by
+`inspect` like any other, for an operator to judge. See the Ctrl-C section
+above for the exact per-command behavior.
 
 Note also `inspect`'s `build_claim`, which has three values: `free`,
 `held_elsewhere`, and `unknown` — the last means this process had no dedicated

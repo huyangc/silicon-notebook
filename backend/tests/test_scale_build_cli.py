@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import shutil
 import signal
 from pathlib import Path
@@ -50,6 +51,7 @@ class _Lock:
     def __init__(self, *, held: bool = True) -> None:
         self._held = held
         self.released = False
+        self.claim_token = secrets.token_hex(8)
 
     def verify_held(self) -> bool:
         return self._held
@@ -304,6 +306,19 @@ def test_npy_row_count_reads_the_header_without_unpickling(tmp_path):
 
 # ────────────────────────────────────────────────────────── import publish ──
 
+def _staging_glob(root: Path) -> list[Path]:
+    """Every staging sibling ``prepare_staging_directory`` could have left
+    for this root — the legacy fixed ``{root}.tmp`` and any claim-unique
+    ``{root}.tmp-<token>`` (P1, codex PR#643 R1). Staging is no longer a
+    single guessable name, so "leaves no staging" assertions glob instead of
+    checking one literal path."""
+    matches = sorted(root.parent.glob(f"{root.name}.tmp-*"))
+    legacy = root.parent / f"{root.name}.tmp"
+    if legacy.exists():
+        matches.insert(0, legacy)
+    return matches
+
+
 def _published_version(store, notebook_id: str):
     manifest = json.loads(
         (store.scale_dir(notebook_id) / "manifest.json").read_text(encoding="utf-8")
@@ -352,7 +367,7 @@ def test_import_publishes_every_root_and_leaves_no_staging(
         (Path(store.viz_dir("nb-1")) / "manifest.json").read_text()
     ) == {"generation": "new"}
     for root in cli.artifact_roots(store, "nb-1").values():
-        assert not Path(str(root) + ".tmp").exists()
+        assert _staging_glob(root) == []
         assert not Path(str(root) + ".old").exists()
 
 
@@ -406,7 +421,7 @@ def test_a_staging_failure_never_touches_the_live_tree(
 
     assert _published_version(store, "nb-1") == ["nb-1", 1]
     for root in cli.artifact_roots(store, "nb-1").values():
-        assert not Path(str(root) + ".tmp").exists(), "half a copy must not linger"
+        assert _staging_glob(root) == [], "half a copy must not linger"
 
 
 def test_a_failed_swap_restores_the_previous_artifact(
@@ -463,8 +478,8 @@ def test_import_refuses_to_publish_when_the_claim_was_lost(
         )
 
     assert _published_version(store, "nb-1") == ["nb-1", 1]
-    staged = Path(str(store.source_partition_dir("nb-1")) + ".tmp")
-    assert staged.exists(), "the staged copy is left for the operator"
+    staged = _staging_glob(store.source_partition_dir("nb-1"))
+    assert len(staged) == 1, "the staged copy is left for the operator"
     assert lost.released is True
 
 
@@ -480,7 +495,7 @@ def test_a_held_claim_makes_every_command_refuse(storage, store, tmp_path):
             allow_library_mismatch=False,
             report=lambda _message: None,
         )
-    assert not Path(str(store.scale_dir("nb-1")) + ".tmp").exists()
+    assert _staging_glob(store.scale_dir("nb-1")) == []
 
 
 def test_a_refused_package_never_reaches_the_disk(repository, store, tmp_path):
@@ -495,7 +510,7 @@ def test_a_refused_package_never_reaches_the_disk(repository, store, tmp_path):
             report=lambda _message: None,
         )
     assert _published_version(store, "nb-1") == ["nb-1", 1]
-    assert not Path(str(store.scale_dir("nb-1")) + ".tmp").exists()
+    assert _staging_glob(store.scale_dir("nb-1")) == []
 
 
 def test_a_deferred_interrupt_that_published_everything_is_not_a_failure(
@@ -604,7 +619,7 @@ def test_an_unknown_notebook_is_refused_before_anything_is_staged(
             allow_library_mismatch=False,
             report=lambda _message: None,
         )
-    assert not Path(str(store.scale_dir("nb-1")) + ".tmp").exists()
+    assert _staging_glob(store.scale_dir("nb-1")) == []
 
 
 @pytest.mark.parametrize(
@@ -649,15 +664,44 @@ class _BuildRepository(_Repository):
     def build_scale_index(self, notebook_id, on_stage=None):
         return self._build(notebook_id)
 
+    def fold_scale_index_delta(self, notebook_id):
+        return self._build(notebook_id)
 
-def test_an_interrupt_before_the_publish_removes_this_run_s_staging(
+
+def test_build_of_an_unknown_notebook_is_a_clean_refusal(storage, store, lock):
+    """P2, codex PR#643 R1: ``require_write_admission`` (reached deep inside
+    ``build_scale_index``/``fold_scale_index_delta`` for an unknown OR
+    currently-copying notebook) raises a bare ``KeyError(notebook_id)``.
+    Uncaught, this used to surface a Python traceback instead of the
+    documented exit-code-2 refusal ``inspect``/``import`` already give.
+    Mutation anchor: drop the ``except KeyError`` clause in ``run_build`` and
+    this goes green while a raw traceback reaches the operator."""
+
+    def build(notebook_id):
+        raise KeyError(notebook_id)
+
+    repository = _BuildRepository(
+        storage, store, _Database(lock), _Projections(PIPELINE), build
+    )
+    with pytest.raises(cli.ScaleBuildCliError, match="unknown notebook"):
+        cli.run_build(repository, "nb-ghost", mode="full", report=lambda _m: None)
+    with pytest.raises(cli.ScaleBuildCliError, match="unknown notebook"):
+        cli.run_build(repository, "nb-ghost", mode="fold", report=lambda _m: None)
+
+
+def test_an_interrupt_before_the_publish_leaves_staging_for_inspect(
     storage, store, lock, tmp_path
 ):
+    """P1, codex PR#643 R1: ``run_build`` never holds the claim itself (the
+    runtime takes and releases one internally), so by the time it can react
+    to Ctrl-C the ``claim_token`` its own staging directory was suffixed
+    with is already gone from view. Unlike the old fixed-``.tmp`` behavior,
+    nothing is deleted here — ``inspect`` reports the leftover instead."""
     _seed_live(store, "nb-1")
     live = Path(store.scale_dir("nb-1"))
 
     def build(_notebook_id):
-        store.prepare_staging_directory(live)
+        store.prepare_staging_directory(live, "build-token")
         raise KeyboardInterrupt
 
     repository = _BuildRepository(
@@ -667,23 +711,25 @@ def test_an_interrupt_before_the_publish_removes_this_run_s_staging(
     with pytest.raises(KeyboardInterrupt):
         cli.run_build(repository, "nb-1", mode="full", report=messages.append)
 
-    assert not Path(str(live) + ".tmp").exists()
+    assert Path(str(live) + ".tmp-build-token").is_dir()
     assert (live / "manifest.json").is_file()
+    assert any("inspect" in message for message in messages)
 
 
 def test_an_interrupt_inside_the_publish_keeps_both_copies(
     storage, store, lock, tmp_path
 ):
-    """codex W-CLI R1 B1, the loss the reviewer found: the ``.tmp`` between the
-    two renames is not abandoned staging, it is one of the two copies of the
-    index that exist — and the previous generation is sitting in ``.old``.
-    Deleting it there discards hours of work. Mutation anchor: call
-    ``discard_staging`` unconditionally here and the staged build disappears."""
+    """codex W-CLI R1 B1, the loss the reviewer found: the staged directory
+    between the two renames is not abandoned staging, it is one of the two
+    copies of the index that exist — and the previous generation is sitting
+    in ``.old``. Deleting it there discards hours of work. Mutation anchor:
+    report unconditionally as "nothing staged" here and the recovery message
+    disappears."""
     _seed_live(store, "nb-1")
     live = Path(store.scale_dir("nb-1"))
 
     def build(_notebook_id):
-        staged = store.prepare_staging_directory(live)
+        staged = store.prepare_staging_directory(live, "build-token")
         (staged / "manifest.json").write_text("{}", encoding="utf-8")
         os.rename(live, str(live) + ".old")  # the first of the two renames
         raise KeyboardInterrupt
@@ -695,7 +741,9 @@ def test_an_interrupt_inside_the_publish_keeps_both_copies(
     with pytest.raises(KeyboardInterrupt):
         cli.run_build(repository, "nb-1", mode="full", report=messages.append)
 
-    assert Path(str(live) + ".tmp").is_dir(), "the new generation must survive"
+    assert Path(str(live) + ".tmp-build-token").is_dir(), (
+        "the new generation must survive"
+    )
     assert Path(str(live) + ".old").is_dir(), "so must the previous one"
     assert any(f"mv {live}.old {live}" in message for message in messages)
 
@@ -789,7 +837,7 @@ def test_the_store_defers_sigint_across_its_own_rename_sequence(store, tmp_path)
     live = tmp_path / "root"
     live.mkdir()
     (live / "marker").write_text("old", encoding="utf-8")
-    staged = store.prepare_staging_directory(live)
+    staged = store.prepare_staging_directory(live, "guard-token")
     (staged / "marker").write_text("new", encoding="utf-8")
 
     real_rename = os.rename
@@ -857,6 +905,17 @@ def test_publish_started_recognizes_a_half_finished_swap(tmp_path):
     shutil.rmtree(tmp_path / "kg_index.old")
     shutil.rmtree(live)
     assert cli.publish_started(live) is True, "tmp without live is mid-rename"
+
+
+def test_publish_started_recognizes_the_claim_unique_staging_shape(tmp_path):
+    """P1, codex PR#643 R1: staging can also be ``{live}.tmp-<token>``, not
+    only the legacy fixed ``{live}.tmp`` — both must be recognized."""
+    live = tmp_path / "kg_index"
+    live.mkdir()
+    (tmp_path / "kg_index.tmp-abc123").mkdir()
+    assert cli.publish_started(live) is False, "staging alone is not publishing"
+    shutil.rmtree(live)
+    assert cli.publish_started(live) is True, "tmp-<token> without live is mid-rename"
 
 
 def test_discard_staging_removes_only_what_it_is_given(tmp_path):
