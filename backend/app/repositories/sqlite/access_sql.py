@@ -84,6 +84,8 @@ search 三处,各自手写「owner ∨ 只读成员」的 EXISTS 子查询。副
 
 * `sqlite/sharing_store.py`:`user_can_access_notebook`(写权)、`user_can_admin_notebook`
   (管理权)、`user_can_read_notebook`(读权)、`is_member`(成员探测)。
+* `sqlite/ask_state_store.py::guarded_ask_detail`:在 `BEGIN IMMEDIATE` 删除/撤权
+  fence 内用 `NOTEBOOK_READ_SQL` 复核 self-service 详情读权。
 * `sqlite/memory_store.py`:`_read_access_clause`(嵌进 Memory 各处读查询)、
   `create_candidate_with_initial_revision`(写前判定)、
   `create_answer_with_initial_revision`(答案存 Memory 的范围校验;同名的

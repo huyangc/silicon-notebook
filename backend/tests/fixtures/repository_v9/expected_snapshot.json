@@ -1693,6 +1693,11 @@
         "type": "index"
       },
       {
+        "name": "idx_retained_activity_notebook",
+        "sql_sha256": "b581dd34a61065f38f89aaec0fc4b4e6206b272884caf86cacae9d968e0a21d4",
+        "type": "index"
+      },
+      {
         "name": "idx_retained_activity_owner_created",
         "sql_sha256": "8dcfe646ed5f0ff74bd67c60e205057ea56c43027e374874a0536f21f5c7361d",
         "type": "index"

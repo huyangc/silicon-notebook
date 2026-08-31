@@ -64,6 +64,7 @@ from app.repositories.ports import (
     project_report_row,
     project_run_row,
 )
+from app.repositories.sqlite.access_sql import NOTEBOOK_READ_SQL, read_access_params
 from app.repositories.sqlite.database import SqliteDatabase
 # Agentic Memory P3 (B-Profile, T7): the ONE place the question text coming
 # back from ``recent_user_ask_languages`` is turned into a closed language
@@ -728,7 +729,13 @@ class AskStateStore:
         }
 
     @contextmanager
-    def guarded_ask_detail(self, job_id: str) -> Iterator[dict]:
+    def guarded_ask_detail(
+        self,
+        job_id: str,
+        *,
+        actor_id: str,
+        reader_id: str | None,
+    ) -> Iterator[dict]:
         """Yield a detail snapshot while notebook deletion is excluded.
 
         ``BEGIN IMMEDIATE`` extends the database's cross-process writer fence
@@ -740,11 +747,17 @@ class AskStateStore:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute(
                 "SELECT id,notebook_id,conversation_id,created_by,mode,question,status,"
-                "answer_id,error,asked_at FROM ask_jobs WHERE id=?", (job_id,)
+                "answer_id,error,asked_at FROM ask_jobs WHERE id=? AND created_by=?",
+                (job_id, actor_id),
             ).fetchone()
             if row is not None and db.execute(
                 "SELECT 1 FROM notebooks WHERE id=?", (row["notebook_id"],)
             ).fetchone() is not None:
+                if reader_id is not None and db.execute(
+                    NOTEBOOK_READ_SQL,
+                    (row["notebook_id"], *read_access_params(reader_id)),
+                ).fetchone() is None:
+                    raise KeyError(job_id)
                 job = {
                     "job_id": row["id"],
                     "notebook_id": row["notebook_id"],
@@ -791,12 +804,13 @@ class AskStateStore:
                 "conversation_id,mode,question,status,asked_at,deleted_at,"
                 "expires_at FROM retained_user_activity "
                 "WHERE activity_type='ask' AND record_id=? "
+                "AND actor_id=? "
                 "AND julianday(expires_at)>julianday('now') "
                 "AND NOT EXISTS(SELECT 1 FROM notebooks live "
                 "WHERE live.id=retained_user_activity.notebook_id)",
-                (job_id,),
+                (job_id, actor_id),
             ).fetchone()
-            if retained is None:
+            if retained is None or reader_id is not None:
                 raise KeyError(job_id)
             yield {
                 "job": {

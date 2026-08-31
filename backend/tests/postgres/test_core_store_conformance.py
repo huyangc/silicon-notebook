@@ -2403,6 +2403,7 @@ def test_notebook_and_source_created_labels_use_local_calendar_date(
         core_stores.database,
         new_id=_new_id_factory(),
         now=clock,
+        activity_retention_days=core_stores.notebooks.activity_retention_days,
     )
     sources = type(core_stores.sources)(core_stores.database, now=clock)
     with _process_timezone(local_zone.key):
@@ -2475,6 +2476,7 @@ def test_replace_mounts_reuses_one_batch_timestamp(core_stores: CoreStores):
         core_stores.database,
         new_id=_new_id_factory(),
         now=increasing_clock,
+        activity_retention_days=core_stores.notebooks.activity_retention_days,
     )
     store.replace_mounts(active_id, base_ids, owner.id)
 
