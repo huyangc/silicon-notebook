@@ -461,6 +461,18 @@ sidecar 证明全部索引 source code 均获允许时，也不再支付 HNSW Py
 `chunk_fts_ms` 接近零；一次 FTS 超时只花独立 deadline 而非 30 秒；readiness 已预热全部必需
 scale index。
 
+需要可 review 的子阶段分布时运行：
+
+```bash
+python3 scripts/diag_retrieval_latency.py --since 24
+```
+
+该命令纯 stdlib、只读，不连接产品数据库。它按最近已发布 scale manifest 的 `n_chunks` 给无正文
+耗时事件分桶，输出 chunk FTS/ANN/KNN/索引加载和 KG 候选分段的 P50/P95/max，并把 retrieval-run
+的 FTS timeout/熔断跳过按 Ask、报告 planning、报告 generation 分开计数。scale 工件不在
+`.local/storage/kg_index` 时显式传 `--index-root`。manifest 规模不含水位后的 delta；没有可读
+manifest 的事件进入明确的 `unknown` 桶，不能误判为小库。
+
 ### 超大库的 KNN 早停（`POSTGRES_LEXICAL_KNN_ENABLED`）
 
 上面的复合索引让**其他**库不再为巨型库买单，但救不了巨型库自己：`ORDER BY similarity` 仍要
@@ -751,6 +763,15 @@ PYTHONPATH=backend python scripts/batch_ingest.py reparse \
 # 记录一次（需绑定 `chunk_embedding`，使用真实查询向量；仅读检索原语，不需要 chat 模型）
 python scripts/replay_retrieval.py --notebook nb-xxxx --questions questions.txt --out before.json
 
+# 报告路径 A/B 必须加 --report-run；否则不会触发只对报告生效的
+# CHUNK_FTS_WITH_ANN_ENABLED 分支。
+CHUNK_FTS_WITH_ANN_ENABLED=false python scripts/replay_retrieval.py \
+    --notebook nb-xxxx --questions questions.txt --report-run --out ann-only.json
+CHUNK_FTS_WITH_ANN_ENABLED=true python scripts/replay_retrieval.py \
+    --notebook nb-xxxx --questions questions.txt --report-run --out ann-fts.json
+python scripts/replay_retrieval.py --compare ann-only.json ann-fts.json \
+    --mode topk --k 30 --summary-only
+
 # --full:额外跑一遍完整 reasoning 编排层(plan/reflect 用固定子查询 + 立即 answer 的 stub 代替 LLM,
 # 验证编排层改动的确定性部分等价),子查询从 plan.json 里取
 python scripts/replay_retrieval.py --notebook nb-xxxx --questions questions.txt \
@@ -762,7 +783,7 @@ python scripts/replay_retrieval.py --compare before.json after.json             
 python scripts/replay_retrieval.py --compare before.json after.json --mode topk --k 30  # 只比较前 k 个 id 的集合重叠率与序(允许分数因 float32 化等改动而漂移)
 ```
 
-`questions.txt` 每行一个问题;`plan.json` = `{"<问题>": ["子查询1", "子查询2", ...]}`。**必须从主 checkout 根目录运行**(`.env` 按当前工作目录加载,与 `batch_ingest.py` 相同)。`--owner` 复用与 `batch_ingest.py` 相同的属主解析(大小写不敏感,默认 = `"admin"`)。
+`questions.txt` 每行一个问题;`plan.json` = `{"<问题>": ["子查询1", "子查询2", ...]}`。**必须从主 checkout 根目录运行**(`.env` 按当前工作目录加载,与 `batch_ingest.py` 相同)。`--owner` 复用与 `batch_ingest.py` 相同的属主解析(大小写不敏感,默认 = `"admin"`)。`--report-run` 给每个问题独立创建一次报告 retrieval run，避免第一个 FTS timeout 把后续所有问题的词法贡献都熔断掉；因此它测的是边际召回与单问耗时，不是完整报告共享熔断后的墙钟时间。`--summary-only` 只打印汇总 overlap/pass 数和前后耗时分位数，不打印问题或命中 id；两份原始记录 JSON 仍含敏感问题/检索 id，不要回帖。
 
 退出码即验收结果,可直接接入 CI/脚本判定:`0` 成功(记录模式)或 `--compare` 全部一致;`1` `--compare` 发现不一致(两次运行结果有差异);`2` 对照发生前的前置条件失败（`retrieval_query_embedding` 未绑定、notebook 不存在、或属主用户不存在）——CLI **直接报错退出**,绝不用零向量静默跑出误导性的"零召回"对照结果。
 
