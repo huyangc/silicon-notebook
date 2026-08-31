@@ -4,6 +4,7 @@
 (created_at DESC, id DESC) 归并，见
 docs/superpowers/specs/2026-08-04-user-activity-log-view-design_zh.md §4.1。
 """
+from concurrent.futures import ThreadPoolExecutor
 import json
 
 import pytest
@@ -925,6 +926,9 @@ def test_deleted_notebook_keeps_only_expiring_activity_metadata(repo):
         )
 
     repo._runtime.notebook_store.delete_row_and_orphan_embeddings("n1")
+    # A duplicate request that arrives after the winner committed is a no-op;
+    # it must not erase the winner's notebook-independent archive.
+    assert repo._runtime.notebook_store.delete_row_and_orphan_embeddings("n1") == []
 
     with repo._connect() as db:
         assert db.execute("SELECT 1 FROM notebooks WHERE id='n1'").fetchone() is None
@@ -1082,3 +1086,91 @@ def test_deletion_refreshes_merged_retained_snapshot_and_expiry(repo):
         refreshed_expiry = parse_activity_instant(row["expires_at"], field="expires_at")
         refreshed_deletion = parse_activity_instant(row["deleted_at"], field="deleted_at")
         assert (refreshed_expiry - refreshed_deletion).days == 180
+
+
+def test_activity_delete_race_prefers_retained_lifecycle(repo):
+    with repo._write() as db:
+        _insert_user(db, "u-race", "a00000010")
+        _insert_notebook(db, "n-race", "u-race")
+        _insert_ask(
+            db, "ask-race", "n-race", "u-race",
+            "2026-08-31T10:00:00+00:00", question="race question",
+        )
+
+    notebook_store = repo._runtime.notebook_store
+    notebook_store.now = lambda: "2026-08-31T12:00:00+00:00"
+    connection = repo._connect()
+    triggered = False
+    delete_future = None
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        def delete_before_retained_select(statement: str) -> None:
+            nonlocal triggered, delete_future
+            if triggered or "FROM retained_user_activity a" not in statement:
+                return
+            triggered = True
+            delete_future = executor.submit(
+                notebook_store.delete_row_and_orphan_embeddings, "n-race"
+            )
+            delete_future.result(timeout=5)
+
+        connection.set_trace_callback(delete_before_retained_select)
+        try:
+            activity = repo.list_user_activity(
+                "u-race", include_inaccessible_questions=True, limit=50,
+            )
+        finally:
+            connection.set_trace_callback(None)
+
+    assert triggered is True
+    assert delete_future is not None and delete_future.result(timeout=5) == []
+    assert len(activity["items"]) == 1
+    assert activity["items"][0]["id"] == "ask-race"
+    assert activity["items"][0]["notebook_deleted_at"]
+
+
+def test_ask_detail_delete_race_falls_back_to_retained(repo):
+    with repo._write() as db:
+        _insert_user(db, "u-detail-race", "a00000011")
+        _insert_notebook(db, "n-detail-race", "u-detail-race")
+        _insert_ask(
+            db, "ask-detail-race", "n-detail-race", "u-detail-race",
+            "2026-08-31T10:00:00+00:00", question="detail race",
+        )
+        db.execute(
+            "INSERT INTO ask_trace_steps(job_id,seq,step_json,created_at) "
+            "VALUES (?,?,?,?)",
+            (
+                "ask-detail-race", 0, json.dumps({"kind": "retrieval"}),
+                "2026-08-31T10:00:01+00:00",
+            ),
+        )
+
+    notebook_store = repo._runtime.notebook_store
+    notebook_store.now = lambda: "2026-08-31T12:00:00+00:00"
+    connection = repo._connect()
+    triggered = False
+    delete_future = None
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        def delete_before_trace_select(statement: str) -> None:
+            nonlocal triggered, delete_future
+            if triggered or "SELECT step_json FROM ask_trace_steps" not in statement:
+                return
+            triggered = True
+            delete_future = executor.submit(
+                notebook_store.delete_row_and_orphan_embeddings, "n-detail-race"
+            )
+            delete_future.result(timeout=5)
+
+        connection.set_trace_callback(delete_before_trace_select)
+        try:
+            detail = repo.ask_job_detail("ask-detail-race")
+        finally:
+            connection.set_trace_callback(None)
+
+    assert triggered is True
+    assert delete_future is not None and delete_future.result(timeout=5) == []
+    assert detail["job_id"] == "ask-detail-race"
+    assert detail["notebook_deleted_at"]
+    assert detail["retained_until"]
+    assert detail["answer_id"] == ""
+    assert detail["trace"] == []

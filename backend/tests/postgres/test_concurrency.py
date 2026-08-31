@@ -20,7 +20,36 @@ from app.repositories.postgres.maintenance import PostgresMaintenanceAdapter
 from app.repositories.postgres.memory_store import MemoryStore
 from app.repositories.postgres.migrator import PostgresMigrator
 from app.repositories.postgres.notebook_store import NotebookStore
+from app.repositories.postgres.query_store import QueryStore
 from app.services.repository_runtime import RepositoryCompatibilitySeams
+
+
+def _wait_for_lock_wait(postgres_database, needle: str, future) -> None:
+    import psycopg
+    from psycopg.rows import dict_row
+
+    deadline = time.monotonic() + 5
+    with psycopg.connect(
+        postgres_database._database_url,
+        autocommit=True,
+        row_factory=dict_row,
+    ) as inspector:
+        while time.monotonic() < deadline:
+            if future.done():
+                result = future.result()
+                raise AssertionError(
+                    f"operation finished before waiting for {needle!r}: {result!r}"
+                )
+            waiting = inspector.execute(
+                "SELECT 1 FROM pg_stat_activity WHERE pid<>pg_backend_pid() "
+                "AND wait_event_type='Lock' AND state='active' "
+                "AND query ILIKE %s LIMIT 1",
+                (f"%{needle}%",),
+            ).fetchone()
+            if waiting is not None:
+                return
+            time.sleep(0.01)
+    raise AssertionError(f"operation never waited for {needle!r}")
 
 
 @pytest.mark.postgres_integration
@@ -60,30 +89,6 @@ def test_notebook_delete_locks_parent_before_retention_snapshot(
         activity_retention_days=180,
     )
 
-    def wait_for_lock_wait(needle: str, future) -> None:
-        deadline = time.monotonic() + 5
-        with psycopg.connect(
-            postgres_database._database_url,
-            autocommit=True,
-            row_factory=dict_row,
-        ) as inspector:
-            while time.monotonic() < deadline:
-                if future.done():
-                    result = future.result()
-                    raise AssertionError(
-                        f"operation finished before waiting for {needle!r}: {result!r}"
-                    )
-                waiting = inspector.execute(
-                    "SELECT 1 FROM pg_stat_activity WHERE pid<>pg_backend_pid() "
-                    "AND wait_event_type='Lock' AND state='active' "
-                    "AND query ILIKE %s LIMIT 1",
-                    (f"%{needle}%",),
-                ).fetchone()
-                if waiting is not None:
-                    return
-                time.sleep(0.01)
-        raise AssertionError(f"operation never waited for {needle!r}")
-
     def insert_late_ask() -> str:
         try:
             with postgres_database.write() as connection:
@@ -99,17 +104,19 @@ def test_notebook_delete_locks_parent_before_retention_snapshot(
         return "committed"
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        with postgres_database.write() as blocker:
+        with psycopg.connect(
+            postgres_database._database_url, row_factory=dict_row
+        ) as blocker:
             blocker.execute(
                 "LOCK TABLE retained_user_activity IN ACCESS EXCLUSIVE MODE"
             )
             delete_future = executor.submit(
                 store.delete_row_and_orphan_embeddings, "delete-nb"
             )
-            wait_for_lock_wait("retained_user_activity", delete_future)
+            _wait_for_lock_wait(postgres_database, "retained_user_activity", delete_future)
 
             late_future = executor.submit(insert_late_ask)
-            wait_for_lock_wait("INSERT INTO ask_jobs", late_future)
+            _wait_for_lock_wait(postgres_database, "INSERT INTO ask_jobs", late_future)
 
         assert delete_future.result(timeout=5) == []
         assert late_future.result(timeout=5) == "foreign-key-rejected"
@@ -121,6 +128,218 @@ def test_notebook_delete_locks_parent_before_retention_snapshot(
         assert connection.execute(
             "SELECT 1 FROM ask_jobs WHERE id='late-ask'"
         ).fetchone() is None
+
+
+@pytest.mark.postgres_integration
+def test_activity_delete_race_prefers_retained_lifecycle_postgres(
+    postgres_database, postgres_settings
+):
+    import psycopg
+    from psycopg.rows import dict_row
+
+    assert PostgresMigrator(postgres_database).migrate() == 44
+    now = "2026-08-31T12:00:00+00:00"
+    with postgres_database.write() as connection:
+        connection.execute(
+            "INSERT INTO users(id,email,display_name,role,created_at,updated_at) "
+            "VALUES ('activity-race-owner','activity-race@x','Activity Race',"
+            "'user',%s,%s)",
+            (now, now),
+        )
+        connection.execute(
+            "INSERT INTO notebooks(id,name,created_by,status,created_at,updated_at) "
+            "VALUES ('activity-race-nb','Activity Race','activity-race-owner',"
+            "'ready',%s,%s)",
+            (now, now),
+        )
+        connection.execute(
+            "INSERT INTO ask_jobs(id,notebook_id,created_by,mode,question,status,"
+            "created_at,updated_at) VALUES ('activity-race-ask','activity-race-nb',"
+            "'activity-race-owner','chunk','race question','completed',%s,%s)",
+            (now, now),
+        )
+
+    notebooks = NotebookStore(
+        postgres_database,
+        new_id=lambda prefix: f"{prefix}-unused",
+        now=lambda: now,
+        activity_retention_days=180,
+    )
+    queries = QueryStore(postgres_database, postgres_settings)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        with psycopg.connect(
+            postgres_database._database_url, row_factory=dict_row
+        ) as blocker:
+            blocker.execute(
+                "LOCK TABLE retained_user_activity IN ACCESS EXCLUSIVE MODE"
+            )
+            delete_future = executor.submit(
+                notebooks.delete_row_and_orphan_embeddings, "activity-race-nb"
+            )
+            _wait_for_lock_wait(
+                postgres_database, "DELETE FROM retained_user_activity", delete_future
+            )
+            activity_future = executor.submit(
+                queries.list_user_activity,
+                "activity-race-owner",
+                activity_type="ask",
+                include_inaccessible_questions=True,
+                limit=50,
+            )
+            _wait_for_lock_wait(
+                postgres_database,
+                "SELECT a.* FROM retained_user_activity",
+                activity_future,
+            )
+
+        assert delete_future.result(timeout=5) == []
+        activity = activity_future.result(timeout=5)
+
+    assert len(activity["items"]) == 1
+    assert activity["items"][0]["id"] == "activity-race-ask"
+    assert activity["items"][0]["notebook_deleted_at"]
+
+
+@pytest.mark.postgres_integration
+def test_ask_detail_delete_race_falls_back_to_retained_postgres(
+    postgres_database,
+):
+    import psycopg
+    from psycopg.rows import dict_row
+
+    assert PostgresMigrator(postgres_database).migrate() == 44
+    now = "2026-08-31T12:00:00+00:00"
+    with postgres_database.write() as connection:
+        connection.execute(
+            "INSERT INTO users(id,email,display_name,role,created_at,updated_at) "
+            "VALUES ('detail-race-owner','detail-race@x','Detail Race','user',%s,%s)",
+            (now, now),
+        )
+        connection.execute(
+            "INSERT INTO notebooks(id,name,created_by,status,created_at,updated_at) "
+            "VALUES ('detail-race-nb','Detail Race','detail-race-owner','ready',%s,%s)",
+            (now, now),
+        )
+        connection.execute(
+            "INSERT INTO ask_jobs(id,notebook_id,created_by,mode,question,status,"
+            "created_at,updated_at) VALUES ('detail-race-ask','detail-race-nb',"
+            "'detail-race-owner','chunk','detail race','completed',%s,%s)",
+            (now, now),
+        )
+        connection.execute(
+            "INSERT INTO ask_trace_steps(job_id,seq,step_json,created_at) "
+            "VALUES ('detail-race-ask',0,%s,%s)",
+            (Jsonb({"kind": "retrieval"}), now),
+        )
+
+    notebooks = NotebookStore(
+        postgres_database,
+        new_id=lambda prefix: f"{prefix}-unused",
+        now=lambda: now,
+        activity_retention_days=180,
+    )
+    seams = RepositoryCompatibilitySeams(
+        new_id=lambda prefix: f"{prefix}-unused",
+        now=lambda: now,
+        copy_chunk_size=lambda: 100,
+        remap_json_ids=lambda value, _mapping: value,
+        in_chunk_size=lambda: 100,
+    )
+    asks = AskStateStore(postgres_database, seams)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        with psycopg.connect(
+            postgres_database._database_url, row_factory=dict_row
+        ) as blocker:
+            blocker.execute("LOCK TABLE ask_trace_steps IN ACCESS EXCLUSIVE MODE")
+            delete_future = executor.submit(
+                notebooks.delete_row_and_orphan_embeddings, "detail-race-nb"
+            )
+            _wait_for_lock_wait(postgres_database, "DELETE FROM notebooks", delete_future)
+            detail_future = executor.submit(asks.ask_job_detail, "detail-race-ask")
+            _wait_for_lock_wait(
+                postgres_database,
+                "SELECT step_json FROM ask_trace_steps",
+                detail_future,
+            )
+
+        assert delete_future.result(timeout=5) == []
+        detail = detail_future.result(timeout=5)
+
+    assert detail["job_id"] == "detail-race-ask"
+    assert detail["notebook_deleted_at"]
+    assert detail["retained_until"]
+    assert detail["answer_id"] == ""
+    assert detail["trace"] == []
+
+
+@pytest.mark.postgres_integration
+def test_notebook_delete_waits_for_existing_source_update_before_snapshot(
+    postgres_database,
+):
+    assert PostgresMigrator(postgres_database).migrate() == 44
+    now = "2026-08-31T12:00:00+00:00"
+    with postgres_database.write() as connection:
+        connection.execute(
+            "INSERT INTO users(id,email,display_name,role,created_at,updated_at) "
+            "VALUES ('source-update-owner','source-update@x','Source Update',"
+            "'user',%s,%s)",
+            (now, now),
+        )
+        connection.execute(
+            "INSERT INTO notebooks(id,name,created_by,status,created_at,updated_at) "
+            "VALUES ('source-update-nb','Source Update','source-update-owner',"
+            "'ready',%s,%s)",
+            (now, now),
+        )
+        connection.execute(
+            "INSERT INTO sources(id,notebook_id,title,source_type,status,parse_status,"
+            "file_name,created_at,updated_at) VALUES ('source-update-row',"
+            "'source-update-nb','Source','pdf','processing','processing','source.pdf',"
+            "%s,%s)",
+            (now, now),
+        )
+
+    notebooks = NotebookStore(
+        postgres_database,
+        new_id=lambda prefix: f"{prefix}-unused",
+        now=lambda: now,
+        activity_retention_days=180,
+    )
+    update_uncommitted = threading.Event()
+    allow_update_commit = threading.Event()
+
+    def update_source() -> None:
+        with postgres_database.write() as connection:
+            connection.execute(
+                "UPDATE sources SET status='parsed',parse_status='parsed' "
+                "WHERE id='source-update-row'"
+            )
+            update_uncommitted.set()
+            assert allow_update_commit.wait(timeout=5)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        update_future = executor.submit(update_source)
+        assert update_uncommitted.wait(timeout=5)
+        delete_future = executor.submit(
+            notebooks.delete_row_and_orphan_embeddings, "source-update-nb"
+        )
+        try:
+            _wait_for_lock_wait(
+                postgres_database, "SELECT id FROM sources", delete_future
+            )
+        finally:
+            allow_update_commit.set()
+        update_future.result(timeout=5)
+        assert delete_future.result(timeout=5) == ["source.pdf"]
+
+    with postgres_database.connect() as connection:
+        retained = connection.execute(
+            "SELECT status,parse_status FROM retained_user_activity "
+            "WHERE activity_type='source' AND record_id='source-update-row'"
+        ).fetchone()
+    assert retained == {"status": "parsed", "parse_status": "parsed"}
 
 
 @pytest.mark.postgres_integration

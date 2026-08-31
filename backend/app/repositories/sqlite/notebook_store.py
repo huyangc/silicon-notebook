@@ -415,6 +415,13 @@ class NotebookStore:
         source file paths for the caller to remove AFTER the commit (DB first,
         files second — never the other way around)."""
         with self.database.write(operation="notebook.delete") as db:
+            if db.execute(
+                "SELECT 1 FROM notebooks WHERE id=?", (notebook_id,)
+            ).fetchone() is None:
+                # A concurrent/duplicate request may have passed its service
+                # precheck before the first delete acquired the write lock.
+                # Preserve the archive committed by that winner.
+                return []
             source_rows = db.execute(
                 "SELECT file_path FROM sources WHERE notebook_id = ?",
                 (notebook_id,),

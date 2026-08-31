@@ -751,6 +751,7 @@ def test_deleted_notebook_activity_projection_matches_sqlite(
         activity_retention_days=180,
     )
     notebooks.delete_row_and_orphan_embeddings("n-retained")
+    assert notebooks.delete_row_and_orphan_embeddings("n-retained") == []
 
     result = store.list_user_activity(
         "u-retained", include_inaccessible_questions=True, limit=50,

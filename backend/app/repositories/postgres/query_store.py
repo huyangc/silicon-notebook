@@ -1085,6 +1085,15 @@ class QueryStore:
                 }
             pool.append(item)
 
+        # READ COMMITTED gives each statement its own snapshot. A deletion can
+        # therefore land between the live queries and retained query above.
+        # The retained lifecycle is appended last and reflects the later
+        # state; collapse it onto the same frontend identity deterministically.
+        by_identity: dict[tuple[str, str], dict[str, Any]] = {}
+        for item in pool:
+            by_identity[(item["type"], item["id"])] = item
+        pool = list(by_identity.values())
+
         # created_at 在归并期间保持原生 datetime(与 SQLite 侧字符串同构:两者都在各
         # 自后端的结果集里同质、可直接比较),只在写出字段前经 iso_timestamp 转字符串,
         # 避免依赖 isoformat() 的变长小数位表示做字符串比较。

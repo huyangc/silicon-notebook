@@ -1283,6 +1283,18 @@ class QueryStore:
                 }
             pool.append((row["sort_instant"], row["record_id"], item))
 
+        # Every SELECT above is bounded, but SQLite's legacy read connection
+        # does not hold one snapshot across those statements. If notebook
+        # deletion commits after the live rows and before retained_rows, both
+        # lifecycles can be present here. Retained rows are appended last and
+        # describe the later lifecycle, so they authoritatively replace the
+        # same public identity instead of producing duplicate React keys.
+        by_identity: dict[tuple[str, str], tuple[float, str, dict[str, Any]]] = {}
+        for entry in pool:
+            item = entry[2]
+            by_identity[(item["type"], item["id"])] = entry
+        pool = list(by_identity.values())
+
         pool.sort(key=lambda entry: (entry[0], entry[1]), reverse=True)
         has_more = (
             len(ask_rows) > limit

@@ -782,6 +782,55 @@ def test_admin_activity_survives_notebook_delete_without_answer_or_trace(client)
     assert owner_usage["reports"] == 1
 
 
+def test_admin_ask_detail_answer_lookup_delete_race_returns_retained(
+    client, monkeypatch
+):
+    owner = _auth(client, 28)
+    owner_id = _me(client, owner)
+    notebook_id = _create_notebook(client, owner, "详情删除竞态")
+    with _repo()._write() as db:
+        _insert_conversation(
+            db, "conv-detail-race", notebook_id, owner_id,
+            "2026-08-01T14:00:00+00:00",
+        )
+        _insert_answer(
+            db, "ans-detail-race", notebook_id, "conv-detail-race", "竞态问题？",
+            {"conclusion": "即将删除的答案", "answer": "即将删除的答案"},
+            "2026-08-01T14:01:00+00:00",
+        )
+        _insert_ask_job(
+            db, "job-detail-race", notebook_id, owner_id,
+            "2026-08-01T14:00:00+00:00",
+            conversation_id="conv-detail-race", question="竞态问题？",
+            status="done", answer_id="ans-detail-race",
+        )
+
+    repo = _repo()
+    original_answer_detail = repo.ask_answer_detail
+    triggered = False
+
+    def delete_before_answer_read(answer_id):
+        nonlocal triggered
+        if not triggered:
+            triggered = True
+            repo._runtime.notebook_store.delete_row_and_orphan_embeddings(notebook_id)
+        return original_answer_detail(answer_id)
+
+    monkeypatch.setattr(repo, "ask_answer_detail", delete_before_answer_read)
+    response = client.get(
+        f"/api/admin/users/{owner_id}/asks/job-detail-race",
+        headers=_auth_admin(client),
+    )
+    assert triggered is True
+    assert response.status_code == 200
+    body = response.json()
+    assert body["question"] == "竞态问题？"
+    assert body["answer"] is None
+    assert body["trace"] == []
+    assert body["notebook_deleted_at"]
+    assert body["retained_until"]
+
+
 # --- 部署开关 -------------------------------------------------------------
 
 def test_activity_endpoints_404_when_activity_view_disabled(tmp_path, monkeypatch):
