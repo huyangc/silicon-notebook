@@ -421,6 +421,70 @@ def test_import_publishes_the_main_root_last(repository, store, tmp_path):
     assert order[-1] == cli.MAIN_ROOT
 
 
+def test_import_refuses_a_package_nested_inside_the_kg_index_root(
+    repository, store, tmp_path
+):
+    """P2, codex PR#643 R10: staging only READS from ``package``, so one
+    nested inside a live artifact root would survive staging unnoticed — but
+    the swap below renames that very root to ``.old`` and ``finalize_swap``
+    deletes it, silently deleting the operator's own input package. Reject
+    before any copying happens, analogous to ``export --to``'s nesting guard.
+
+    Mutation anchor: drop the nesting guard and this goes red — with the
+    fake projections here reporting no identity drift, ``run_import`` runs to
+    completion and the nested package is deleted by ``finalize_swap`` along
+    with the ``.old`` it now lives inside. That deletion — not just the
+    missing exception — is the real, user-visible harm this guard exists to
+    prevent.
+    """
+    _seed_live(store, "nb-1")
+    main_root = Path(store.scale_dir("nb-1"))
+    package = _full_package(main_root)
+
+    with pytest.raises(cli.ScaleBuildCliFailure, match=cli.MAIN_ROOT):
+        cli.run_import(
+            repository,
+            "nb-1",
+            package,
+            allow_library_mismatch=False,
+            report=lambda _message: None,
+        )
+
+    # Nothing on disk changed: the live tree is on its previous generation,
+    # no staging was left behind, and — the actual harm this guard prevents —
+    # the input package itself is untouched.
+    assert _published_version(store, "nb-1") == ["nb-1", 1]
+    assert (package / cli.MAIN_ROOT / "manifest.json").is_file()
+    for root in cli.artifact_roots(store, "nb-1").values():
+        assert _staging_glob(root) == []
+
+
+def test_import_refuses_a_package_nested_inside_a_stale_old(
+    repository, store, tmp_path
+):
+    """P2, codex PR#643 R10: the swap's own pre-clean ``rmtree``s a stale
+    ``.old`` before its renames — a package staged there is destroyed just as
+    surely as one nested inside the live root itself, so ``{root}.old`` must
+    be rejected the same way ``{root}`` is."""
+    _seed_live(store, "nb-1")
+    old_root = Path(f"{store.scale_dir('nb-1')}.old")
+    package = _full_package(old_root)
+
+    with pytest.raises(cli.ScaleBuildCliFailure, match=cli.MAIN_ROOT):
+        cli.run_import(
+            repository,
+            "nb-1",
+            package,
+            allow_library_mismatch=False,
+            report=lambda _message: None,
+        )
+
+    assert _published_version(store, "nb-1") == ["nb-1", 1]
+    assert (package / cli.MAIN_ROOT / "manifest.json").is_file()
+    for root in cli.artifact_roots(store, "nb-1").values():
+        assert _staging_glob(root) == []
+
+
 def test_a_staging_failure_never_touches_the_live_tree(
     repository, store, tmp_path, monkeypatch
 ):
@@ -1415,6 +1479,87 @@ def test_stale_old_pre_clean_runs_outside_the_sigint_mask(
     )
     assert signal.getsignal(signal.SIGINT) is previous
     assert (live / "marker").read_text(encoding="utf-8") == "new"
+
+
+def test_swap_reverifies_the_claim_after_the_stale_old_preclean(tmp_path):
+    """P1, codex PR#643 R10: the pre-clean ``rmtree`` of a large stale
+    ``.old`` can itself take tens of seconds — long enough for the claim's
+    PostgreSQL lock session to die mid-delete. A second builder could then
+    legitimately acquire the now-free claim and start publishing; this swap
+    must re-check ``verify_held`` right after the pre-clean, before its own
+    first rename, or it would go on to rename over the new owner's
+    generation.
+
+    Mutation anchor: drop the second ``verify_held`` re-check that follows
+    the pre-clean ``shutil.rmtree(old_dir)`` and this goes red — the swap
+    proceeds to rename despite the claim already being gone.
+    """
+    live = tmp_path / "kg_index"
+    live.mkdir()
+    (live / "marker").write_text("live", encoding="utf-8")
+    old = Path(str(live) + ".old")
+    old.mkdir()
+    (old / "marker").write_text("stale", encoding="utf-8")
+    temporary = tmp_path / "kg_index.tmp-token"
+    temporary.mkdir()
+    (temporary / "marker").write_text("new", encoding="utf-8")
+
+    results = iter([True, False])
+    seen: list[bool] = []
+
+    def verify_held() -> bool:
+        value = next(results)
+        seen.append(value)
+        return value
+
+    with pytest.raises(ScaleBuildLockLost) as excinfo:
+        ScaleArtifactStore.swap_staging_directory(
+            live, temporary, verify_held=verify_held
+        )
+
+    message = str(excinfo.value)
+    assert "nothing was published" in message
+    assert str(temporary) in message
+    assert seen == [True, False], (
+        "verify_held must be called once at entry and once more after the "
+        "stale .old pre-clean"
+    )
+    # Nothing was renamed: live is exactly as it was before this call, and
+    # the staged build is untouched.
+    assert (live / "marker").read_text(encoding="utf-8") == "live"
+    assert temporary.is_dir()
+    assert (temporary / "marker").read_text(encoding="utf-8") == "new"
+
+
+def test_swap_does_not_reverify_the_claim_without_a_stale_old_to_clean(
+    tmp_path,
+):
+    """P1, codex PR#643 R10 (negative anchor): when there is no stale
+    ``.old``, nothing slow runs between the entry check and the renames, so
+    nothing can invalidate the claim in between — ``verify_held`` must be
+    called exactly once, not a needless second time.
+
+    Mutation anchor: call ``verify_held`` unconditionally a second time
+    (instead of only on the branch that actually ran the pre-clean rmtree)
+    and this goes red."""
+    live = tmp_path / "kg_index"
+    live.mkdir()
+    (live / "marker").write_text("live", encoding="utf-8")
+    temporary = tmp_path / "kg_index.tmp-token"
+    temporary.mkdir()
+    (temporary / "marker").write_text("new", encoding="utf-8")
+
+    calls: list[bool] = []
+
+    def verify_held() -> bool:
+        calls.append(True)
+        return True
+
+    ScaleArtifactStore.swap_staging_directory(
+        live, temporary, verify_held=verify_held
+    )
+
+    assert calls == [True]
 
 
 def test_a_real_interrupt_during_old_cleanup_is_honoured_immediately(

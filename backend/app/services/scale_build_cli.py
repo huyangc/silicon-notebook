@@ -1101,6 +1101,22 @@ def run_import(
     advisory — which is exactly why the publish order is companion → viz → main.
     A cross-root journal is the only thing that would close it, and it would buy
     nothing the ordering does not already give.
+
+    codex PR#643 R10 P2: ``package`` is rejected up front if it is (or sits
+    inside) any of the three live artifact roots, OR their ``.old`` — the
+    nesting guard already applied to ``export --to`` (see ``run_export``),
+    mirrored here. Staging only READS from ``package`` and copies into a
+    separate ``.tmp-<token>`` directory, so nothing about that copy itself
+    would fail if the package happened to live inside a root; the danger is
+    entirely downstream, at publish time. The swap below renames a root's
+    current directory to ``{root}.old`` before the replacement lands, and
+    ``finalize_swap``/the next build's pre-clean eventually deletes that
+    ``.old`` — so a package nested under a root is moved out from under
+    itself and then silently deleted, with no error anywhere pointing back at
+    the operator's own input. Checked once, right after the package is known
+    to exist (``validate_import_package`` above already confirmed
+    ``package/kg_index`` is a directory) and before the staging loop makes
+    its first copy.
     """
     runtime = repository._runtime  # noqa: SLF001
     store = runtime.scale_artifact_store
@@ -1129,6 +1145,30 @@ def run_import(
         )
         for warning in warnings:
             report(f"warning: {warning}")
+
+        # codex PR#643 R10 P2: reject a package nested under any live
+        # artifact root (or its ``.old``) before the staging loop below makes
+        # its first copy — see the docstring above. ``package`` is known to
+        # exist at this point (``validate_import_package`` already confirmed
+        # ``package/kg_index`` is a directory), so ``strict=True`` is safe; a
+        # root may not exist yet (a notebook's first import), so it and its
+        # ``.old`` are resolved without ``strict``, same as ``run_export``.
+        package_resolved = package.resolve(strict=True)
+        for name, root in roots.items():
+            for root_variant in (root, Path(f"{root}.old")):
+                root_resolved = root_variant.resolve()
+                if (
+                    package_resolved == root_resolved
+                    or package_resolved.is_relative_to(root_resolved)
+                ):
+                    raise ScaleBuildCliFailure(
+                        f"--from {package} is inside the {name} artifact "
+                        f"root {root_variant}; publishing this import would "
+                        "rename that root to .old and then delete it, "
+                        "silently deleting the input package it contains. "
+                        "Move the package outside every artifact root (and "
+                        "its .old) before importing."
+                    )
 
         staged: dict[str, Path] = {}
         published: list[str] = []
