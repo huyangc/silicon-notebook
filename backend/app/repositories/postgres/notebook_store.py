@@ -413,7 +413,7 @@ class NotebookStore:
             f"INSERT INTO retained_user_activity ({common_columns}) "
             "SELECT 'source',s.id,n.created_by,s.notebook_id,n.created_by,n.name,"
             "s.created_at,s.updated_at,'','','','',s.status,"
-            "CASE WHEN COALESCE(pm.is_paper,false)=true "
+            "CASE WHEN COALESCE(pm.is_paper,0)=1 "
             "AND btrim(COALESCE(pm.paper_title,''))<>'' "
             "THEN btrim(pm.paper_title) ELSE btrim(CASE "
             "WHEN COALESCE(s.title,'')<>'' THEN s.title "
