@@ -1004,8 +1004,9 @@ from **both** the package and the live tree is unaffected: that is still the
 ordinary "no companion" shape and stays skipped.
 
 A package entry present under `kg_viz` or the companion name but that is a
-**regular file, not a directory** — a corrupted transfer, for example — is
-never read as an omission either: `import` refuses the whole package before
+**regular file, not a directory** — or a **dangling symlink**, whose target a
+plain existence check follows and misses — a corrupted transfer, for example —
+is never read as an omission either: `import` refuses the whole package before
 any staging begins, rather than silently retiring a healthy live root for it.
 
 The retirement rename shares `swap_staging_directory`'s stale-`.old`

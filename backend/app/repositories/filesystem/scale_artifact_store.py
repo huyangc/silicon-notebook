@@ -752,14 +752,22 @@ class ScaleArtifactStore:
         builder can legitimately take over, publish its own generation and
         leave ITS ``.old`` (its only rollback copy) at this exact path; the
         unguarded ``rmtree`` would then delete another owner's rollback
-        generation. A caller with no cross-process claim passes nothing."""
+        generation. A caller with no cross-process claim passes nothing.
+
+        ``preserved`` False returns before the claim check (codex PR#643 R13
+        follow-up): a first-ever publish left no ``.old``, so there is no
+        destructive cleanup for ``verify_held`` to protect — verifying anyway
+        would turn a lock session that died AFTER the roots were fully
+        published and identity-verified into a false failure claiming
+        leftover ``.old`` directories that never existed."""
+        if not preserved:
+            return
         if verify_held is not None and not verify_held():
             raise ScaleBuildLockLost(
                 "scale build lock was lost before the .old cleanup for "
                 f"{live}; nothing was deleted and {live}.old was left on disk"
             )
-        if preserved:
-            shutil.rmtree(f"{live}.old", ignore_errors=True)
+        shutil.rmtree(f"{live}.old", ignore_errors=True)
 
     @staticmethod
     def retire_live_directory(
