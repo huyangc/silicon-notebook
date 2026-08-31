@@ -258,6 +258,9 @@ to a plain member. Owners and group admins can add notebooks they have managemen
 on, revoke group visibility, and optionally grant group admins content-management
 rights. In Members, they may also create or reopen one reusable invitation link,
 copy it, rotate it (which atomically invalidates the old link), or revoke it.
+Copying reports its result only on the pressed button (`复制` → `已复制` or
+`复制失败`) and clears that state automatically; it does not also emit a
+page-level banner.
 Opening the link preserves its bearer token through the sign-in/register gate;
 after authentication the browser removes the token from its URL history and the
 server atomically adds the caller as an ordinary member. Repeated redemption is

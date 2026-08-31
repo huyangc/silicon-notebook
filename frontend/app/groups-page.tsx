@@ -554,9 +554,6 @@ export function GroupsPage({
                       const linkInput = inviteLinkRef.current;
                       const stillThisLink = linkInput?.value === link;
                       if (!copied && stillThisLink) { linkInput.focus(); linkInput.select(); }
-                      setNotice(copied
-                        ? "邀请链接已复制。"
-                        : stillThisLink ? "复制失败，链接已选中，请手动复制。" : "复制失败，请手动复制链接。");
                     }, "复制邀请链接失败"); }}>{busy === "copy-invite" ? "复制中…" : inviteCopy.resultFor(invite.token) === "copied" ? "已复制" : inviteCopy.resultFor(invite.token) === "failed" ? "复制失败" : "复制"}</button></div></label>
                     {confirming === "rotate-invite" ? <div className="group-inline-confirm"><span>重新生成后，旧链接会立即失效。</span><button className="new-pill" disabled={Boolean(busy)} onClick={() => { void run("rotate-invite", async () => {
                       setInvite(await rotateGroupInvite(detail.id)); setConfirming(""); setNotice("已重新生成邀请链接，旧链接已失效。");
