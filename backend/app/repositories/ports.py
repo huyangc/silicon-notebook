@@ -62,6 +62,7 @@ from app.models.identity import (
     AgentTokenSummary,
     UserProfile,
 )
+from app.models.admin import ADMIN_QUESTIONS_DEFAULT_LIMIT
 from app.models.memory import MemoryHit, MemoryRecord, MemoryUpdate, PaginatedMemories
 from app.models.notebooks import (
     NotebookAnalytics,
@@ -408,6 +409,25 @@ class ExtensionToggleStorePort(Protocol):
     def set_extension_runtime_enabled(
         self, plugin_id: str, enabled: bool, actor_id: str
     ) -> dict: ...
+
+
+@runtime_checkable
+class WishStorePort(Protocol):
+    def create_wish(
+        self, *, kind: str, title: str, content: str, actor_id: str
+    ) -> dict: ...
+
+    def list_wishes(
+        self,
+        *,
+        actor_id: str,
+        kind: str | None = None,
+        sort: str = "priority",
+        offset: int = 0,
+        limit: int = 50,
+    ) -> dict: ...
+
+    def toggle_wish_vote(self, wish_id: str, actor_id: str) -> dict: ...
 
 
 @runtime_checkable
@@ -832,6 +852,15 @@ class ReportRepository(Protocol):
 
 class AdminQueryRepository(Protocol):
     def list_user_usage(self) -> list[dict[str, Any]]: ...
+    def list_admin_questions(
+        self,
+        *,
+        kind: str | None = None,
+        user_id: str | None = None,
+        query: str = "",
+        offset: int = 0,
+        limit: int = ADMIN_QUESTIONS_DEFAULT_LIMIT,
+    ) -> dict[str, Any]: ...
     def list_user_notebooks(self, user_id: str) -> list[dict[str, Any]]: ...
     def notebook_exists_for_owner(self, notebook_id: str, user_id: str) -> bool: ...
     def list_user_activity(
@@ -2764,10 +2793,6 @@ class SQLiteMaintenancePort(
     def latest_done_report(self) -> dict[str, object] | None: ...
     def sample_approved_object_payload(self, notebook_id: str) -> str | None: ...
     def chunk_notebook_map(self, chunk_ids: Sequence[str]) -> dict[str, str]: ...
-    def count_text_vector_rows(self, table: str, id_col: str, notebook_id: str | None) -> int: ...
-    def convert_text_vector_batch(self, table: str, id_col: str, notebook_id: str | None, batch_size: int, encode: VectorBatchEncoder) -> tuple[int, int]: ...
-    def begin_source_index_backfill(self, notebook_id: str, *, force: bool = False) -> dict[str, object]: ...
-    def resume_source_index_backfill_batch(self, notebook_id: str, *, batch_size: int = 2000) -> dict[str, object]: ...
     def mark_source_index_backfill_failed(self, notebook_id: str, failure_code: str) -> None: ...
     def begin_chunk_element_backfill(self, notebook_id: str, *, force: bool = False) -> dict[str, object]: ...
     def resume_chunk_element_backfill_batch(self, notebook_id: str, *, batch_size: int = 2000) -> dict[str, object]: ...

@@ -610,6 +610,121 @@
           "title": "AdminPasswordResetResult",
           "type": "object"
         },
+        "AdminQuestionItem": {
+          "description": "One cross-user question submission from Ask or Deep Report.",
+          "properties": {
+            "created_at": {
+              "title": "Created At",
+              "type": "string"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "notebook_id": {
+              "title": "Notebook Id",
+              "type": "string"
+            },
+            "notebook_name": {
+              "title": "Notebook Name",
+              "type": "string"
+            },
+            "question": {
+              "title": "Question",
+              "type": "string"
+            },
+            "status": {
+              "title": "Status",
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "ask",
+                "report"
+              ],
+              "title": "Type",
+              "type": "string"
+            },
+            "user_id": {
+              "title": "User Id",
+              "type": "string"
+            },
+            "username": {
+              "title": "Username",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "id",
+            "user_id",
+            "username",
+            "notebook_id",
+            "notebook_name",
+            "question",
+            "status",
+            "created_at"
+          ],
+          "title": "AdminQuestionItem",
+          "type": "object"
+        },
+        "AdminQuestionStats": {
+          "properties": {
+            "active_users": {
+              "default": 0,
+              "title": "Active Users",
+              "type": "integer"
+            },
+            "asks": {
+              "default": 0,
+              "title": "Asks",
+              "type": "integer"
+            },
+            "reports": {
+              "default": 0,
+              "title": "Reports",
+              "type": "integer"
+            },
+            "total": {
+              "default": 0,
+              "title": "Total",
+              "type": "integer"
+            }
+          },
+          "title": "AdminQuestionStats",
+          "type": "object"
+        },
+        "AdminQuestionsResponse": {
+          "properties": {
+            "items": {
+              "items": {
+                "$ref": "#/components/schemas/AdminQuestionItem"
+              },
+              "title": "Items",
+              "type": "array"
+            },
+            "limit": {
+              "default": 50,
+              "title": "Limit",
+              "type": "integer"
+            },
+            "offset": {
+              "default": 0,
+              "title": "Offset",
+              "type": "integer"
+            },
+            "stats": {
+              "$ref": "#/components/schemas/AdminQuestionStats"
+            },
+            "total": {
+              "default": 0,
+              "title": "Total",
+              "type": "integer"
+            }
+          },
+          "title": "AdminQuestionsResponse",
+          "type": "object"
+        },
         "AdminUserNotebook": {
           "properties": {
             "conversations": {
@@ -7727,6 +7842,34 @@
           "title": "PaginatedSources",
           "type": "object"
         },
+        "PaginatedWishes": {
+          "properties": {
+            "items": {
+              "items": {
+                "$ref": "#/components/schemas/WishItem"
+              },
+              "title": "Items",
+              "type": "array"
+            },
+            "limit": {
+              "default": 50,
+              "title": "Limit",
+              "type": "integer"
+            },
+            "offset": {
+              "default": 0,
+              "title": "Offset",
+              "type": "integer"
+            },
+            "total": {
+              "default": 0,
+              "title": "Total",
+              "type": "integer"
+            }
+          },
+          "title": "PaginatedWishes",
+          "type": "object"
+        },
         "PaperAuthor": {
           "properties": {
             "affiliation": {
@@ -11573,6 +11716,121 @@
           ],
           "title": "ValidationError",
           "type": "object"
+        },
+        "WishCreate": {
+          "additionalProperties": false,
+          "properties": {
+            "content": {
+              "title": "Content",
+              "type": "string"
+            },
+            "kind": {
+              "enum": [
+                "bug",
+                "feature",
+                "plan"
+              ],
+              "title": "Kind",
+              "type": "string"
+            },
+            "title": {
+              "title": "Title",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "title",
+            "content"
+          ],
+          "title": "WishCreate",
+          "type": "object"
+        },
+        "WishItem": {
+          "properties": {
+            "author_id": {
+              "title": "Author Id",
+              "type": "string"
+            },
+            "author_name": {
+              "title": "Author Name",
+              "type": "string"
+            },
+            "content": {
+              "title": "Content",
+              "type": "string"
+            },
+            "created_at": {
+              "title": "Created At",
+              "type": "string"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "kind": {
+              "enum": [
+                "bug",
+                "feature",
+                "plan"
+              ],
+              "title": "Kind",
+              "type": "string"
+            },
+            "title": {
+              "title": "Title",
+              "type": "string"
+            },
+            "updated_at": {
+              "title": "Updated At",
+              "type": "string"
+            },
+            "vote_count": {
+              "default": 0,
+              "title": "Vote Count",
+              "type": "integer"
+            },
+            "voted_by_me": {
+              "default": false,
+              "title": "Voted By Me",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "id",
+            "kind",
+            "title",
+            "content",
+            "author_id",
+            "author_name",
+            "created_at",
+            "updated_at"
+          ],
+          "title": "WishItem",
+          "type": "object"
+        },
+        "WishVoteResult": {
+          "properties": {
+            "vote_count": {
+              "title": "Vote Count",
+              "type": "integer"
+            },
+            "voted": {
+              "title": "Voted",
+              "type": "boolean"
+            },
+            "wish_id": {
+              "title": "Wish Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "wish_id",
+            "voted",
+            "vote_count"
+          ],
+          "title": "WishVoteResult",
+          "type": "object"
         }
       }
     },
@@ -11806,6 +12064,107 @@
             }
           },
           "summary": "List Online Users"
+        }
+      },
+      "/api/admin/questions": {
+        "get": {
+          "description": "Cross-user question overview spanning Ask and Deep Report.",
+          "operationId": "list_admin_questions_api_admin_questions_get",
+          "parameters": [
+            {
+              "in": "query",
+              "name": "kind",
+              "required": false,
+              "schema": {
+                "anyOf": [
+                  {
+                    "enum": [
+                      "ask",
+                      "report"
+                    ],
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Kind"
+              }
+            },
+            {
+              "in": "query",
+              "name": "user_id",
+              "required": false,
+              "schema": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "User Id"
+              }
+            },
+            {
+              "in": "query",
+              "name": "q",
+              "required": false,
+              "schema": {
+                "default": "",
+                "maxLength": 200,
+                "title": "Q",
+                "type": "string"
+              }
+            },
+            {
+              "in": "query",
+              "name": "offset",
+              "required": false,
+              "schema": {
+                "default": 0,
+                "minimum": 0,
+                "title": "Offset",
+                "type": "integer"
+              }
+            },
+            {
+              "in": "query",
+              "name": "limit",
+              "required": false,
+              "schema": {
+                "default": 50,
+                "maximum": 200,
+                "minimum": 1,
+                "title": "Limit",
+                "type": "integer"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/AdminQuestionsResponse"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "List Admin Questions"
         }
       },
       "/api/admin/settings/upload-limit-default": {
@@ -24152,6 +24511,169 @@
             }
           },
           "summary": "Resolve User Route"
+        }
+      },
+      "/api/wishes": {
+        "get": {
+          "operationId": "list_wishes_api_wishes_get",
+          "parameters": [
+            {
+              "in": "query",
+              "name": "kind",
+              "required": false,
+              "schema": {
+                "anyOf": [
+                  {
+                    "enum": [
+                      "bug",
+                      "feature",
+                      "plan"
+                    ],
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Kind"
+              }
+            },
+            {
+              "in": "query",
+              "name": "sort",
+              "required": false,
+              "schema": {
+                "default": "priority",
+                "enum": [
+                  "priority",
+                  "latest"
+                ],
+                "title": "Sort",
+                "type": "string"
+              }
+            },
+            {
+              "in": "query",
+              "name": "offset",
+              "required": false,
+              "schema": {
+                "default": 0,
+                "minimum": 0,
+                "title": "Offset",
+                "type": "integer"
+              }
+            },
+            {
+              "in": "query",
+              "name": "limit",
+              "required": false,
+              "schema": {
+                "default": 50,
+                "maximum": 100,
+                "minimum": 1,
+                "title": "Limit",
+                "type": "integer"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/PaginatedWishes"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "List Wishes"
+        },
+        "post": {
+          "operationId": "create_wish_api_wishes_post",
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WishCreate"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "201": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/WishItem"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Create Wish"
+        }
+      },
+      "/api/wishes/{wish_id}/vote": {
+        "post": {
+          "operationId": "toggle_wish_vote_api_wishes__wish_id__vote_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "wish_id",
+              "required": true,
+              "schema": {
+                "title": "Wish Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/WishVoteResult"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Toggle Wish Vote"
         }
       }
     }

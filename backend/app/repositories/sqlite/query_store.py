@@ -8,6 +8,7 @@ from typing import Any
 from app.core.config import Settings, get_settings
 from app.repositories.sqlite import access_sql
 from app.models.notebooks import NotebookAnalytics
+from app.models.admin import ADMIN_QUESTIONS_DEFAULT_LIMIT
 from app.models.ask import (
     SEARCH_HIT_CAP,
     NotebookSearchResponse,
@@ -24,6 +25,7 @@ from app.models.sources import (
     paper_meta_status,
 )
 from app.repositories.group_rows import SHARED_TO_GROUPS_COLUMN
+from app.repositories.like_pattern import escape_like_pattern
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.identity_store import (
     _UPLOAD_LIMIT_DEFAULT_KEY,
@@ -873,6 +875,80 @@ class QueryStore:
                 }
             )
         return result
+
+    def list_admin_questions(
+        self,
+        *,
+        kind: str | None = None,
+        user_id: str | None = None,
+        query: str = "",
+        offset: int = 0,
+        limit: int = ADMIN_QUESTIONS_DEFAULT_LIMIT,
+    ) -> dict[str, Any]:
+        """Cross-user Ask/Deep-Report question overview for administrators."""
+        cte = (
+            "WITH questions AS ("
+            "SELECT 'ask' AS type,a.id,a.created_by AS user_id,"
+            "COALESCE(NULLIF(u.username,''),a.created_by) AS username,"
+            "a.notebook_id,COALESCE(n.name,'') AS notebook_name,a.question,"
+            "a.status,a.created_at FROM ask_jobs a "
+            "JOIN users u ON u.id=a.created_by "
+            "LEFT JOIN notebooks n ON n.id=a.notebook_id "
+            "UNION ALL "
+            "SELECT 'report' AS type,r.id,r.created_by AS user_id,"
+            "COALESCE(NULLIF(u.username,''),r.created_by) AS username,"
+            "r.notebook_id,COALESCE(n.name,'') AS notebook_name,r.question,"
+            "r.status,r.created_at FROM reports r "
+            "JOIN users u ON u.id=r.created_by "
+            "LEFT JOIN notebooks n ON n.id=r.notebook_id "
+            "UNION ALL "
+            "SELECT h.activity_type AS type,h.record_id AS id,h.actor_id AS user_id,"
+            "COALESCE(NULLIF(u.username,''),h.actor_id) AS username,"
+            "h.notebook_id,h.notebook_name,h.question,h.status,h.created_at "
+            "FROM retained_user_activity h "
+            "LEFT JOIN users u ON u.id=h.actor_id "
+            "WHERE h.activity_type IN ('ask','report') "
+            "AND julianday(h.expires_at)>julianday('now') "
+            "AND NOT EXISTS(SELECT 1 FROM notebooks live "
+            "WHERE live.id=h.notebook_id)) "
+        )
+        where = "WHERE 1=1"
+        params: list[Any] = []
+        if kind is not None:
+            where += " AND type=?"
+            params.append(kind)
+        if user_id is not None:
+            where += " AND user_id=?"
+            params.append(user_id)
+        needle = query.strip()
+        if needle:
+            where += " AND question LIKE ? ESCAPE '\\' COLLATE NOCASE"
+            params.append(f"%{escape_like_pattern(needle)}%")
+        with self.database.connect() as db:
+            stats = db.execute(
+                cte
+                + "SELECT COUNT(*) AS total,"
+                "SUM(CASE WHEN type='ask' THEN 1 ELSE 0 END) AS asks,"
+                "SUM(CASE WHEN type='report' THEN 1 ELSE 0 END) AS reports,"
+                "COUNT(DISTINCT user_id) AS active_users FROM questions "
+                + where,
+                params,
+            ).fetchone()
+            rows = db.execute(
+                cte
+                + "SELECT type,id,user_id,username,notebook_id,notebook_name,"
+                "question,status,created_at FROM questions "
+                + where
+                + f" ORDER BY {_absolute_instant('created_at')} DESC,id DESC LIMIT ? OFFSET ?",
+                [*params, limit, offset],
+            ).fetchall()
+        totals = {
+            "total": int(stats["total"] or 0),
+            "asks": int(stats["asks"] or 0),
+            "reports": int(stats["reports"] or 0),
+            "active_users": int(stats["active_users"] or 0),
+        }
+        return {"items": [dict(row) for row in rows], "stats": totals, "total": totals["total"]}
 
     def list_user_notebooks(self, user_id: str) -> list[dict[str, Any]]:
         with self.database.connect() as db:

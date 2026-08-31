@@ -6,6 +6,8 @@ import {
   KeyRound,
   LogOut,
   Puzzle,
+  HeartHandshake,
+  MessagesSquare,
   SlidersHorizontal,
   Users,
   Wand2,
@@ -25,6 +27,8 @@ type AccountMenuProps = {
   /** 「我的回答偏好」入口的部署总闸（/system/config 的
    *  user_search_profile_enabled，缺失按 true）；关闭时整个菜单项不渲染。 */
   searchProfileEnabled: boolean;
+  /** 管理员「提问分析」入口的部署能力位。 */
+  activityViewEnabled: boolean;
   onOpenMemory: () => void;
   /** 打开独立群组管理页。任何登录用户都可用（项目组人人可建）。 */
   onOpenGroups: () => void;
@@ -44,6 +48,7 @@ export function AccountMenu({
   canChangePassword,
   advancedMode,
   searchProfileEnabled,
+  activityViewEnabled,
   onOpenMemory,
   onOpenGroups,
   onToggleAdvancedMode,
@@ -123,6 +128,15 @@ export function AccountMenu({
             <Bookmark size={16} />
             <span>私有记忆</span>
           </button>
+          <a
+            className="user-logout"
+            role="menuitem"
+            href="/wishes"
+            title="提交问题、功能需求或查看更新计划"
+          >
+            <HeartHandshake size={16} />
+            <span>许愿墙</span>
+          </a>
           <button
             className="user-logout"
             type="button"
@@ -191,8 +205,19 @@ export function AccountMenu({
               <span>用户总览</span>
             </a>
           )}
-          {/* 与「用户总览」同一道判据(showAdminUsage / canSeeAdminUsage):两个页面
-              的后端端点都是仅系统管理员可读,入口没有独立的能力位。 */}
+          {showAdminUsage && activityViewEnabled && (
+            <a
+              className="user-logout"
+              role="menuitem"
+              href="/admin/questions"
+              title="跨用户查看问答与深度报告中的提问"
+            >
+              <MessagesSquare size={16} />
+              <span>提问分析</span>
+            </a>
+          )}
+          {/* 管理员页面共用 showAdminUsage / canSeeAdminUsage 角色判据；提问分析
+              还需匹配后端 USER_ACTIVITY_VIEW_ENABLED 能力位。 */}
           {showAdminUsage && (
             <a
               className="user-logout"

@@ -30,7 +30,7 @@ def test_schema_on_utf8_database_with_non_c_default_collation(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_non_c_database).migrate() == 45
+    assert PostgresMigrator(postgres_non_c_database).migrate() == 46
     with postgres_non_c_database.connect() as conn:
         row = conn.execute(
             "SELECT current_database() AS database, "
@@ -69,10 +69,10 @@ def test_packaged_migrations_are_idempotent_from_empty_schema(postgres_database)
 
     migrator = PostgresMigrator(postgres_database)
     assert migrator.current_version() == 0
-    assert migrator.migrate() == 45
-    assert migrator.migrate() == 45
-    assert migrator.current_version() == 45
-    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 45
+    assert migrator.migrate() == 46
+    assert migrator.migrate() == 46
+    assert migrator.current_version() == 46
+    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 46
 
 
 @pytest.mark.postgres_integration
@@ -80,7 +80,7 @@ def test_packaged_migration_checksum_drift_is_rejected(postgres_database, tmp_pa
     from app.repositories.postgres.migrator import PostgresMigrator, load_migrations
 
     migrator = PostgresMigrator(postgres_database)
-    assert migrator.migrate() == 45
+    assert migrator.migrate() == 46
 
     copied = tmp_path / "migrations"
     shutil.copytree(MIGRATIONS_PATH, copied)
@@ -163,7 +163,7 @@ def test_pg_trgm_is_shared_outside_disposable_schema_lifetimes(postgres_scope):
             ).fetchone()["nspname"]
         assert remaining == {"indexname": "idx_chunks_text_trgm"}
         assert extension_schema == "public"
-        assert PostgresMigrator(databases[1]).migrate() == 45
+        assert PostgresMigrator(databases[1]).migrate() == 46
     finally:
         for database in databases:
             database.close()
@@ -232,6 +232,7 @@ def test_packaged_index_migration_phases_are_exact():
         (43, "concept_cluster_keyset_index"),
         (44, "retained_user_activity"),
         (45, "source_upload_actor"),
+        (46, "wish_wall"),
     ]
 
     def index_declarations(version: int) -> list[tuple[bool, str]]:
@@ -569,6 +570,20 @@ def test_packaged_index_migration_phases_are_exact():
     )
     assert "ALTER TABLE sources ADD COLUMN uploaded_by" in v45_ddl_only
     assert "source_type NOT IN ('memory', 'knowhow')" in v45_ddl_only
+
+    # Migration 46 adds the global wish wall and its one-vote-per-user
+    # relation after migration 45's independent source attribution change.
+    assert index_declarations(46) == [
+        (False, "idx_wishes_kind_created"),
+        (False, "idx_wish_votes_user"),
+    ]
+    v46_ddl_only = "\n".join(
+        line for line in migrations[46].sql.splitlines()
+        if not line.strip().startswith("--")
+    )
+    assert "CREATE TABLE wishes" in v46_ddl_only
+    assert "CREATE TABLE wish_votes" in v46_ddl_only
+    assert "PRIMARY KEY (wish_id, user_id)" in v46_ddl_only
 
 
 def test_source_index_running_timestamp_maps_to_postgres_null():

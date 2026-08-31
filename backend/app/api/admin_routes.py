@@ -46,6 +46,12 @@ from app.models.admin import (
     UploadLimitDefaultResult,
     UploadLimitDefaultUpdate,
     UploadLimitUpdate,
+    AdminQuestionItem,
+    AdminQuestionsResponse,
+    AdminQuestionStats,
+    ADMIN_QUESTIONS_DEFAULT_LIMIT,
+    ADMIN_QUESTIONS_MAX_LIMIT,
+    ADMIN_QUESTIONS_QUERY_MAX_CHARS,
 )
 from app.models.identity import UserProfile
 from app.models.model_services import ModelServiceStatusItem, ModelServicesStatus
@@ -340,6 +346,37 @@ def _require_self_or_admin(user: UserProfile, user_id: str) -> None:
     if user.id == user_id or user.role == "admin":
         return
     raise user_error(403, "无权查看该用户的信息")
+
+
+@router.get("/admin/questions", response_model=AdminQuestionsResponse)
+def list_admin_questions(
+    kind: Optional[Literal["ask", "report"]] = Query(None),
+    user_id: Optional[str] = Query(None),
+    q: str = Query("", max_length=ADMIN_QUESTIONS_QUERY_MAX_CHARS),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(
+        ADMIN_QUESTIONS_DEFAULT_LIMIT, ge=1, le=ADMIN_QUESTIONS_MAX_LIMIT
+    ),
+    user: UserProfile = Depends(get_current_user),
+) -> AdminQuestionsResponse:
+    """Cross-user question overview spanning Ask and Deep Report."""
+    _require_activity_enabled()
+    if user.role != "admin":
+        raise user_error(403, "仅管理员可查看全局提问分析")
+    result = admin_query_repository().list_admin_questions(
+        kind=kind,
+        user_id=user_id,
+        query=q,
+        offset=offset,
+        limit=limit,
+    )
+    return AdminQuestionsResponse(
+        items=[AdminQuestionItem(**item) for item in result["items"]],
+        stats=AdminQuestionStats(**result["stats"]),
+        total=result["total"],
+        offset=offset,
+        limit=limit,
+    )
 
 
 def _activity_source_item(row: dict) -> ActivitySource:

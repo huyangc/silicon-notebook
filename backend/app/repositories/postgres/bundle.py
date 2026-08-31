@@ -38,6 +38,7 @@ from app.repositories.postgres.retrieval_experience_store import (
 from app.repositories.postgres.sharing_store import SharingStore
 from app.repositories.postgres.source_store import SourceStore
 from app.repositories.postgres.unified_kg_store import UnifiedKgStore
+from app.repositories.postgres.wish_store import WishStore
 from app.domain.extraction_profiles import (
     LIST_FIELDS,
     OBJECT_SCHEMAS,
@@ -158,6 +159,7 @@ class PostgresPersistenceBundle(PersistenceBundle):
     retrieval_experiences: RetrievalExperienceStore
     agent_observations: AgentObservationStore
     extension_toggles: ExtensionToggleStore
+    wishes: WishStore
 
 
 class PostgresPersistenceBundleFactory:
@@ -242,6 +244,7 @@ class PostgresPersistenceBundleFactory:
                 database, new_id=seams.new_id, now=seams.now
             )
             extension_toggles = ExtensionToggleStore(database)
+            wishes = WishStore(database, new_id=seams.new_id, now=seams.now)
             return PostgresPersistenceBundle(
                 database=database,
                 identity=identity,
@@ -269,6 +272,7 @@ class PostgresPersistenceBundleFactory:
                 retrieval_experiences=retrieval_experiences,
                 agent_observations=agent_observations,
                 extension_toggles=extension_toggles,
+                wishes=wishes,
             )
         except BaseException:
             database.close()

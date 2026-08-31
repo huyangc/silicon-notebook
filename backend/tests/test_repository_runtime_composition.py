@@ -15,7 +15,7 @@ behavioural test:
 
 The frozen attribute set below is the cheap, permanent version of the one-off
 construction-graph diff run against ``origin/master`` in the B4 PR (key set +
-per-attribute type + intra-runtime reference topology, 86 attributes and 200
+per-attribute type + intra-runtime reference topology, 87 attributes and 200
 reference edges, all identical).
 """
 from __future__ import annotations
@@ -136,6 +136,7 @@ RUNTIME_ATTRIBUTES = [
     "source_subgraph_ppr",
     "source_subgraphs",
     "unified_kg",
+    "wishes",
 ]
 
 

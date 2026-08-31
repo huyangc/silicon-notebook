@@ -3851,5 +3851,50 @@ MIGRATION_MANIFEST[(65, 66)] = {
 }
 
 
+# v67: global wish wall and its one-vote-per-user relation. Both tables are
+# intentionally empty after upgrading an older deployment; only their schema
+# and indexes are admitted by this migration manifest.
+WISH_WALL_TABLES = {
+    "wishes": """CREATE TABLE wishes (
+                  id TEXT NOT NULL PRIMARY KEY,
+                  kind TEXT NOT NULL,
+                  title TEXT NOT NULL,
+                  content TEXT NOT NULL,
+                  author_id TEXT NOT NULL REFERENCES users(id),
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                )""",
+    "wish_votes": """CREATE TABLE wish_votes (
+                  wish_id TEXT NOT NULL REFERENCES wishes(id) ON DELETE CASCADE,
+                  user_id TEXT NOT NULL REFERENCES users(id),
+                  created_at TEXT NOT NULL,
+                  PRIMARY KEY (wish_id, user_id)
+                )""",
+}
+WISH_WALL_INDEXES = {
+    "idx_wishes_kind_created":
+        "CREATE INDEX idx_wishes_kind_created\n"
+        "                  ON wishes(kind, created_at DESC, id DESC)",
+    "idx_wish_votes_user":
+        "CREATE INDEX idx_wish_votes_user\n"
+        "                  ON wish_votes(user_id, wish_id)",
+}
+MIGRATION_MANIFEST = {
+    (key[0], 67, *key[2:]): {
+        **manifest,
+        "tables": {**manifest["tables"], **WISH_WALL_TABLES},
+        "indexes": {**manifest["indexes"], **WISH_WALL_INDEXES},
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(66, 67)] = {
+    "tables": WISH_WALL_TABLES,
+    "columns": {},
+    "indexes": WISH_WALL_INDEXES,
+    "triggers": {},
+    "views": {},
+}
+
+
 if __name__ == "__main__":
     raise SystemExit(main())

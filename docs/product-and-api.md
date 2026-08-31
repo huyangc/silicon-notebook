@@ -2290,6 +2290,12 @@ One knowingly-unbounded leftover remains, recorded rather than papered over: row
 
 The first seven live in `backend/app/services/conversation_public_view.py`.
 
+## Wish wall and global question analysis
+
+The authenticated global **Wish Wall** at `/wishes` is independent of notebooks. Any user may publish a `bug` or `feature` item; only an administrator may publish a `plan`. Titles are trimmed, required, and limited to 120 characters; details are trimmed, required, and limited to 4,000 characters. A user has at most one vote on each bug or feature, and pressing the same vote control again removes that vote. Plans do not accept votes. The default `priority` order places plans first, then bugs/features by vote count descending, and finally uses newest-first/id as a stable tie break; `latest` is also available. Lists are offset-paginated with a maximum page size of 100. The HTTP surface is `GET /api/wishes`, `POST /api/wishes`, and `POST /api/wishes/{wish_id}/vote`.
+
+Administrators have a global **Question Analysis** page at `/admin/questions`. It combines user-authored questions from ordinary Ask jobs and Deep Reports, rather than requiring the administrator to drill into one user at a time. Unexpired question projections retained after notebook deletion remain visible for the configured user-activity retention period; expired projections and retained rows whose notebook is live are excluded. It supports source type (`ask` or `report`), user, and question-text filters; returns newest-first rows with the user, notebook, status, and creation time; and reports counts for total questions, Ask questions, Deep Reports, and distinct active users under the current filter. The search rail is `ADMIN_QUESTIONS_QUERY_MAX_CHARS = 200` Unicode code points. Offset pagination defaults to `ADMIN_QUESTIONS_DEFAULT_LIMIT = 50` rows and accepts at most `ADMIN_QUESTIONS_MAX_LIMIT = 200` rows per request. The HTTP surface is `GET /api/admin/questions`; it is administrator-only and follows the existing `USER_ACTIVITY_VIEW_ENABLED` observability gate. When that gate is off, the account-menu entry is hidden and direct navigation explains that the deployment has not enabled the capability. This first version is a searchable aggregate for human analysis and does not send question content to an additional model.
+
 ## APIs
 
 Key local beta APIs:

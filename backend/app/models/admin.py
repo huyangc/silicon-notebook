@@ -6,6 +6,11 @@ from app.core.internal_observability import public_trace_steps, sanitize_answer_
 from app.models.common import Evidence
 
 
+ADMIN_QUESTIONS_QUERY_MAX_CHARS = 200
+ADMIN_QUESTIONS_DEFAULT_LIMIT = 50
+ADMIN_QUESTIONS_MAX_LIMIT = 200
+
+
 class PromotionCandidate(BaseModel):
     """A personal-KG node proposed for promotion into the base corpus (Track F)."""
 
@@ -225,6 +230,35 @@ class ActivityResponse(BaseModel):
     items: List[ActivityItem] = Field(default_factory=list)
     has_more: bool = False
     next_cursor: Optional[ActivityCursor] = None
+
+
+class AdminQuestionItem(BaseModel):
+    """One cross-user question submission from Ask or Deep Report."""
+
+    type: Literal["ask", "report"]
+    id: str
+    user_id: str
+    username: str
+    notebook_id: str
+    notebook_name: str
+    question: str
+    status: str
+    created_at: str
+
+
+class AdminQuestionStats(BaseModel):
+    total: int = 0
+    asks: int = 0
+    reports: int = 0
+    active_users: int = 0
+
+
+class AdminQuestionsResponse(BaseModel):
+    items: List[AdminQuestionItem] = Field(default_factory=list)
+    stats: AdminQuestionStats = Field(default_factory=AdminQuestionStats)
+    total: int = 0
+    offset: int = 0
+    limit: int = ADMIN_QUESTIONS_DEFAULT_LIMIT
 
 
 class AskDetail(BaseModel):

@@ -58,7 +58,7 @@ def test_fresh_database_reaches_current_schema_version_with_the_table_present(
 ):
     """Schema version 63 is where ``extension_runtime_toggles`` itself
     landed (_migration_63); the table must still be present after later
-    migrations (currently through v64's unrelated concept_clusters keyset
+    migrations (currently through v67's unrelated wish-wall tables
     index) run on top of it, so this asserts against the live
     ``SCHEMA_VERSION`` head rather than a number that drifts every time an
     unrelated migration is added."""

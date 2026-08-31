@@ -28,7 +28,7 @@ POSTGRES_ROWID_ORDINAL_TABLES = (
 )
 
 
-# Every ordinary application table in the current SQLite v66 / PostgreSQL v45
+# Every ordinary application table in the current SQLite v67 / PostgreSQL v46
 # compatibility pair. SQLite FTS virtual tables are rebuilt on PostgreSQL and
 # the migration ledger/shadow control tables are adapter-internal. Import and
 # shadow preflight use this reverse-totality list to reject unrelated/live
@@ -120,6 +120,8 @@ POSTGRES_BUSINESS_TABLES = (
     "unified_kg_state",
     "user_profiles",
     "users",
+    "wish_votes",
+    "wishes",
 )
 
 
@@ -249,12 +251,12 @@ POSTGRES_EMPTY_TIME_SENTINELS = frozenset(
 )
 
 
-# The schema-complete PostgreSQL baseline is paired with SQLite v66. A future
+# The schema-complete PostgreSQL baseline is paired with SQLite v67. A future
 # SQLite or PostgreSQL migration must add a reviewed compatibility pairing
 # rather than assuming that independently numbered schemas remain compatible.
-# PostgreSQL v45 / SQLite v66 add the visible-source upload actor and its
-# matching lookup index on top of the retained-user-activity pair.
+# PostgreSQL v45 / SQLite v66 add visible-source upload attribution; PostgreSQL
+# v46 / SQLite v67 then add the global wish wall and one-vote-per-user relation.
 POSTGRES_SCHEMA_MANIFEST = PostgresSchemaManifest(
-    sqlite_version=66,
-    postgres_version=45,
+    sqlite_version=67,
+    postgres_version=46,
 )
