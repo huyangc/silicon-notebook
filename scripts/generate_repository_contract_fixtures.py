@@ -433,7 +433,8 @@ def _validate_sqlite_wrapper_contract() -> None:
 def collect_facade_surface(
     *,
     owner_by_member: Mapping[str, str] | None = None,
-) -> dict[str, dict[str, object]]:
+    _names_only: bool = False,
+) -> dict[str, dict[str, object]] | set[str]:
     """Collect the consumer-visible facade and compatibility patch surface."""
     _validate_sqlite_wrapper_contract()
     if owner_by_member is None:
@@ -490,14 +491,30 @@ def collect_facade_surface(
     }
     module_candidates = set(COMPATIBILITY_EXPORTS)
     candidate_names = set(class_members) | instance_attributes | module_candidates
-    delegate_owners = {
-        name: owner
-        for name, owner in facade_delegate_evidence(
-            RepositoryFacade,
-            {name: "" for name in candidate_names},
-        ).items()
-        if owner
-    }
+    candidate_reference_pattern = re.compile(
+        rf"\b(?:{'|'.join(re.escape(name) for name in sorted(candidate_names))})\b"
+    )
+    repository_reference_pattern = re.compile(
+        r"(?:\brepo\b|_repo\b|repository|RepositoryFacade|SQLiteRepository|"
+        r"sqlite_repository)"
+    )
+    patch_call_pattern = re.compile(
+        r"(?:monkeypatch\s*\.\s*setattr|patch\s*\.\s*object)"
+    )
+    delegate_owners = (
+        {}
+        if _names_only
+        else {
+            name: owner
+            for name, owner in facade_delegate_evidence(
+                RepositoryFacade,
+                {name: "" for name in candidate_names},
+            ).items()
+            if owner
+        }
+    )
+    consumer_names: set[str] = set()
+    patch_names: set[str] = set()
     consumers: dict[
         str,
         dict[tuple[str, str, str, str], dict[str, str]],
@@ -515,6 +532,9 @@ def collect_facade_surface(
         kind: str,
         target: str | None = None,
     ) -> None:
+        consumer_names.add(name)
+        if _names_only:
+            return
         site = _semantic_site(
             path=path,
             scope=scope,
@@ -527,134 +547,40 @@ def collect_facade_surface(
         relative = path.relative_to(REPO_ROOT).as_posix()
         track_ordinary_consumers = not relative.startswith(TEST_CONSUMER_PREFIX)
         try:
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=relative)
-        except (SyntaxError, UnicodeDecodeError):
+            source = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
             continue
-        scopes = _semantic_scopes(tree)
+        if (
+            not track_ordinary_consumers
+            and patch_call_pattern.search(source) is None
+        ):
+            continue
+        if (
+            candidate_reference_pattern.search(source) is None
+            or repository_reference_pattern.search(source) is None
+        ):
+            continue
+        try:
+            tree = ast.parse(source, filename=relative)
+        except SyntaxError:
+            continue
+        scopes = {} if _names_only else _semantic_scopes(tree)
+
+        def scope_of(node: ast.AST) -> str:
+            return "" if _names_only else scopes[node]
+
         module_aliases = {"sqlite_repository"}
         class_aliases = {"SQLiteRepository", "RepositoryFacade"}
-        for import_node in ast.walk(tree):
-            if isinstance(import_node, ast.Import):
-                for alias in import_node.names:
-                    if alias.name == "app.services.sqlite_repository":
-                        module_aliases.add(alias.asname or alias.name.split(".")[-1])
-            elif (
-                isinstance(import_node, ast.ImportFrom)
-                and import_node.module == "app.services"
-            ):
-                for alias in import_node.names:
-                    if alias.name == "sqlite_repository":
-                        module_aliases.add(alias.asname or alias.name)
-            elif (
-                isinstance(import_node, ast.ImportFrom)
-                and import_node.module in {
-                    "app.services.repository_facade",
-                    "app.services.sqlite_repository",
-                }
-            ):
-                for alias in import_node.names:
-                    if alias.name in {"RepositoryFacade", "SQLiteRepository"}:
-                        class_aliases.add(alias.asname or alias.name)
-
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.ImportFrom) or node.module not in {
-                "app.services.repository",
-                "app.services.sqlite_repository",
-            }:
-                continue
-            for alias in node.names:
-                export = COMPATIBILITY_EXPORTS.get(alias.name)
-                if (
-                    track_ordinary_consumers
-                    and export is not None
-                    and export[0] == node.module
-                ):
-                    add_consumer(
-                        alias.name,
-                        path=relative,
-                        scope=scopes[node],
-                        kind="import",
-                        target=f"{node.module}:{alias.name}",
-                    )
-
         repo_base_pattern = re.compile(
             r"(?:[A-Za-z_]\w*\.)?(?:repo|[A-Za-z_]\w*_repo)"
         )
-        repo_variables = {
-            target.id
-            for node in ast.walk(tree)
-            if isinstance(node, (ast.Assign, ast.AnnAssign))
-            for target in (
-                node.targets if isinstance(node, ast.Assign) else [node.target]
-            )
-            if isinstance(target, ast.Name)
-            and isinstance(node.value, ast.Call)
-            and (
-                _dotted_name(node.value.func) in class_aliases
-                or _dotted_name(node.value.func).rsplit(".", 1)[-1]
-                == "repository"
-            )
-        }
+        repo_variables: set[str] = set()
         facade_classes = {
             "RepositoryFacade",
             "SQLiteRepository",
             "SQLiteIdentityMixin",
             "SQLiteNotebookSharingMixin",
         }
-
-        class ConsumerVisitor(ast.NodeVisitor):
-            def __init__(self) -> None:
-                self.class_stack: list[str] = []
-
-            def visit_ClassDef(self, node: ast.ClassDef) -> None:
-                self.class_stack.append(node.name)
-                self.generic_visit(node)
-                self.class_stack.pop()
-
-            def visit_Attribute(self, node: ast.Attribute) -> None:
-                if node.attr not in candidate_names:
-                    self.generic_visit(node)
-                    return
-                base = _dotted_name(node.value)
-                module_target = base in module_aliases
-                facade_target = (
-                    bool(repo_base_pattern.fullmatch(base))
-                    or base in class_aliases
-                    or base in repo_variables
-                    or base.endswith("repo.__class__")
-                    or (
-                        isinstance(node.value, ast.Call)
-                        and _dotted_name(node.value.func).rsplit(".", 1)[-1]
-                        == "repository"
-                    )
-                    or (
-                        isinstance(node.value, ast.Name)
-                        and node.value.id == "self"
-                        and bool(self.class_stack)
-                        and self.class_stack[-1] in facade_classes
-                    )
-                )
-                if module_target and node.attr in module_candidates:
-                    if track_ordinary_consumers:
-                        add_consumer(
-                            node.attr,
-                            path=relative,
-                            scope=scopes[node],
-                            kind="attribute",
-                        )
-                elif facade_target and (
-                    node.attr in class_members or node.attr in instance_attributes
-                ):
-                    if track_ordinary_consumers:
-                        add_consumer(
-                            node.attr,
-                            path=relative,
-                            scope=scopes[node],
-                            kind="attribute",
-                        )
-                self.generic_visit(node)
-
-        ConsumerVisitor().visit(tree)
 
         def add_patch(
             target_name: str,
@@ -674,6 +600,9 @@ def collect_facade_surface(
                 target_name not in class_members
                 and target_name not in instance_attributes
             ):
+                return
+            patch_names.add(target_name)
+            if _names_only:
                 return
             export = COMPATIBILITY_EXPORTS.get(target_name)
             exported_value = (
@@ -699,7 +628,7 @@ def collect_facade_surface(
             site = {
                 **_semantic_site(
                     path=relative,
-                    scope=scopes[node],
+                    scope=scope_of(node),
                     kind="patch",
                     target=target_name,
                 ),
@@ -715,13 +644,191 @@ def collect_facade_surface(
             )
 
         helper_targets: dict[str, tuple[int, ast.FunctionDef, str]] = {}
-        for function in (
-            node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
-        ):
-            params = [arg.arg for arg in function.args.args]
-            for call in (
-                node for node in ast.walk(function) if isinstance(node, ast.Call)
-            ):
+        calls_with_functions: list[
+            tuple[ast.Call, tuple[ast.FunctionDef, ...]]
+        ] = []
+        assignment_nodes: list[ast.Assign | ast.AnnAssign] = []
+        compatibility_imports: list[tuple[ast.ImportFrom, ast.alias]] = []
+        consumer_attributes: list[tuple[ast.Attribute, str | None]] = []
+        direct_patches: list[tuple[str, str, ast.Call]] = []
+
+        class SurfaceVisitor(ast.NodeVisitor):
+            """Collect consumers and patch calls in one context-aware pass.
+
+            Alias, assignment, and attribute resolution is deferred until the
+            pass completes, preserving the previous file-wide semantics while
+            carrying class, function, and literal-loop context only once.
+            """
+
+            def __init__(self) -> None:
+                self.class_stack: list[str] = []
+                self.function_stack: list[ast.FunctionDef] = []
+                self.loop_values: dict[str, tuple[str, ...]] = {}
+
+            def visit_ClassDef(self, node: ast.ClassDef) -> None:
+                self.class_stack.append(node.name)
+                self.generic_visit(node)
+                self.class_stack.pop()
+
+            def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+                self.function_stack.append(node)
+                self.generic_visit(node)
+                self.function_stack.pop()
+
+            def visit_For(self, node: ast.For) -> None:
+                previous_values = self.loop_values
+                if isinstance(node.target, ast.Name):
+                    values = tuple(
+                        item.value
+                        for item in getattr(node.iter, "elts", ())
+                        if isinstance(item, ast.Constant)
+                        and isinstance(item.value, str)
+                    )
+                    if values:
+                        self.loop_values = {
+                            **self.loop_values,
+                            node.target.id: values,
+                        }
+                self.generic_visit(node)
+                self.loop_values = previous_values
+
+            def visit_Import(self, node: ast.Import) -> None:
+                for alias in node.names:
+                    if alias.name == "app.services.sqlite_repository":
+                        module_aliases.add(
+                            alias.asname or alias.name.split(".")[-1]
+                        )
+
+            def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+                if node.module == "app.services":
+                    for alias in node.names:
+                        if alias.name == "sqlite_repository":
+                            module_aliases.add(alias.asname or alias.name)
+                elif node.module in {
+                    "app.services.repository_facade",
+                    "app.services.sqlite_repository",
+                }:
+                    for alias in node.names:
+                        if alias.name in {
+                            "RepositoryFacade",
+                            "SQLiteRepository",
+                        }:
+                            class_aliases.add(alias.asname or alias.name)
+                if node.module in {
+                    "app.services.repository",
+                    "app.services.sqlite_repository",
+                }:
+                    compatibility_imports.extend(
+                        (node, alias) for alias in node.names
+                    )
+
+            def visit_Assign(self, node: ast.Assign) -> None:
+                assignment_nodes.append(node)
+                self.generic_visit(node)
+
+            def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+                assignment_nodes.append(node)
+                self.generic_visit(node)
+
+            def visit_Attribute(self, node: ast.Attribute) -> None:
+                if track_ordinary_consumers and node.attr in candidate_names:
+                    consumer_attributes.append(
+                        (
+                            node,
+                            self.class_stack[-1] if self.class_stack else None,
+                        )
+                    )
+                self.generic_visit(node)
+
+            def visit_Call(self, node: ast.Call) -> None:
+                calls_with_functions.append((node, tuple(self.function_stack)))
+                if len(node.args) >= 2 and _dotted_name(node.func).endswith(
+                    ("monkeypatch.setattr", "patch.object")
+                ):
+                    target_base = _dotted_name(node.args[0])
+                    targets: tuple[str, ...] = ()
+                    target = _literal_target(node.args[1])
+                    if target:
+                        targets = (target,)
+                    elif isinstance(node.args[1], ast.Name):
+                        targets = self.loop_values.get(node.args[1].id, ())
+                    for target_name in targets:
+                        direct_patches.append((target_name, target_base, node))
+                self.generic_visit(node)
+
+        SurfaceVisitor().visit(tree)
+
+        if track_ordinary_consumers:
+            for node, alias in compatibility_imports:
+                export = COMPATIBILITY_EXPORTS.get(alias.name)
+                if export is not None and export[0] == node.module:
+                    add_consumer(
+                        alias.name,
+                        path=relative,
+                        scope=scope_of(node),
+                        kind="import",
+                        target=f"{node.module}:{alias.name}",
+                    )
+
+            for node in assignment_nodes:
+                targets = (
+                    node.targets if isinstance(node, ast.Assign) else [node.target]
+                )
+                if not isinstance(node.value, ast.Call):
+                    continue
+                call_name = _dotted_name(node.value.func)
+                if (
+                    call_name not in class_aliases
+                    and call_name.rsplit(".", 1)[-1] != "repository"
+                ):
+                    continue
+                repo_variables.update(
+                    target.id for target in targets if isinstance(target, ast.Name)
+                )
+
+            for node, class_name in consumer_attributes:
+                base = _dotted_name(node.value)
+                module_target = base in module_aliases
+                facade_target = (
+                    bool(repo_base_pattern.fullmatch(base))
+                    or base in class_aliases
+                    or base in repo_variables
+                    or base.endswith("repo.__class__")
+                    or (
+                        isinstance(node.value, ast.Call)
+                        and _dotted_name(node.value.func).rsplit(".", 1)[-1]
+                        == "repository"
+                    )
+                    or (
+                        isinstance(node.value, ast.Name)
+                        and node.value.id == "self"
+                        and class_name in facade_classes
+                    )
+                )
+                if module_target and node.attr in module_candidates:
+                    add_consumer(
+                        node.attr,
+                        path=relative,
+                        scope=scope_of(node),
+                        kind="attribute",
+                    )
+                elif facade_target and (
+                    node.attr in class_members
+                    or node.attr in instance_attributes
+                ):
+                    add_consumer(
+                        node.attr,
+                        path=relative,
+                        scope=scope_of(node),
+                        kind="attribute",
+                    )
+
+        for target_name, target_base, node in direct_patches:
+            add_patch(target_name, target_base, node)
+
+        for call, enclosing_functions in calls_with_functions:
+            for function in enclosing_functions:
+                params = [arg.arg for arg in function.args.args]
                 if not _dotted_name(call.func).endswith(
                     ("monkeypatch.setattr", "patch.object")
                 ):
@@ -742,7 +849,7 @@ def collect_facade_surface(
         helper_values: dict[str, set[str]] = {
             name: set() for name in helper_targets
         }
-        for call in (node for node in ast.walk(tree) if isinstance(node, ast.Call)):
+        for call, _enclosing_functions in calls_with_functions:
             helper = helper_targets.get(_dotted_name(call.func))
             if helper is None:
                 continue
@@ -756,33 +863,6 @@ def collect_facade_surface(
             _index, function, target_base = helper_targets[helper_name]
             for target in values:
                 add_patch(target, target_base, function)
-
-        def visit(node: ast.AST, loop_values: dict[str, tuple[str, ...]]) -> None:
-            local_values = loop_values
-            if isinstance(node, ast.For) and isinstance(node.target, ast.Name):
-                values = tuple(
-                    item.value
-                    for item in getattr(node.iter, "elts", ())
-                    if isinstance(item, ast.Constant) and isinstance(item.value, str)
-                )
-                if values:
-                    local_values = {**loop_values, node.target.id: values}
-            if isinstance(node, ast.Call) and len(node.args) >= 2:
-                call_name = _dotted_name(node.func)
-                if call_name.endswith(("monkeypatch.setattr", "patch.object")):
-                    target_base = _dotted_name(node.args[0])
-                    targets: tuple[str, ...] = ()
-                    target = _literal_target(node.args[1])
-                    if target:
-                        targets = (target,)
-                    elif isinstance(node.args[1], ast.Name):
-                        targets = local_values.get(node.args[1].id, ())
-                    for target_name in targets:
-                        add_patch(target_name, target_base, node)
-            for child in ast.iter_child_nodes(node):
-                visit(child, local_values)
-
-        visit(tree, {})
 
     for spec in ASK_MODES.values():
         add_consumer(
@@ -800,9 +880,12 @@ def collect_facade_surface(
             kind="compatibility",
         )
 
+    if _names_only:
+        return (consumer_names | patch_names) & candidate_names
+
     surface: dict[str, dict[str, object]] = {}
     for name in sorted(candidate_names):
-        if not consumers.get(name) and not patches.get(name):
+        if name not in consumer_names and name not in patch_names:
             continue
         scope = "facade"
         signature = ""
@@ -867,6 +950,20 @@ def collect_facade_surface(
         if scope == "module":
             surface[name]["modules"] = [COMPATIBILITY_EXPORTS[name][0]]
     return surface
+
+
+def collect_facade_surface_names() -> set[str]:
+    """Collect only the live semantic name set without materializing site detail.
+
+    The frozen-fixture parity test only needs membership.  Reusing the same
+    consumer and patch recognition above keeps that contract exact while
+    avoiding the full-repository scope map, signatures, owners, and sorted
+    site records that ``collect_facade_surface`` needs when regenerating the
+    detailed fixture.
+    """
+    names = collect_facade_surface(_names_only=True)
+    assert isinstance(names, set)
+    return names
 
 
 def _render_consumer_site(site: dict[str, str]) -> str:

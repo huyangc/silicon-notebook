@@ -11,7 +11,7 @@ P2-T2 在同一处新增第三条谓词——**管理权** = owner ∪ `role='ad
   把六个能力从 owner 档挪到 admin 档),**不是**这条谓词:它仍然是
   `notebook:delete` 与 Agent/MCP 面的实现,松了它就等于把删库一起送出去。
 * 管理权(`user_can_admin_notebook`)= owner ∪ 管理边。这一列是 P2 唯一的新列。
-* 包含链 `写权 ⊆ 管理权 ⊆ 读权` 逐格成立(`test_predicate_levels_are_nested`)。
+* 包含链 `写权 ⊆ 管理权 ⊆ 读权` 在同一份矩阵里逐格成立。
 * 不存在的 notebook 三权皆否(无行 → False),不抛异常、不泄露存在性。
 * `legacy_read` 一列是 P1 之前的口径(`写权 or is_member`)。它钉的是**旧口径没被
   顺手改**,外加「只许扩、不许收窄既有主体」这条单调性。它并**不**是防「全放行」的
@@ -252,49 +252,45 @@ _EMBED_SUBJECTS = (
 )
 
 
-@pytest.mark.parametrize(
-    "subject,target,expect_read,expect_admin,expect_write,legacy_read",
-    ACCESS_MATRIX,
-    ids=[f"{s}-{t}" for s, t, _r, _a, _w, _l in ACCESS_MATRIX],
-)
-def test_read_admin_and_write_predicates_match_the_matrix(
-    world, subject, target, expect_read, expect_admin, expect_write, legacy_read
-):
-    del legacy_read
-    repo = world["repo"]
-    user_id = world[subject]
-    notebook_id = world[target]
+def test_predicate_layers_match_the_matrix_and_remain_nested(world):
+    """Check matrix values, service/store parity, nesting, and legacy monotonicity.
 
-    assert repo.user_can_read_notebook(notebook_id, user_id) is expect_read
-    assert repo.user_can_admin_notebook(notebook_id, user_id) is expect_admin
-    assert repo.user_can_access_notebook(notebook_id, user_id) is expect_write
-
-
-@pytest.mark.parametrize(
-    "subject,target,expect_read,expect_admin,expect_write,legacy_read",
-    ACCESS_MATRIX,
-    ids=[f"{s}-{t}" for s, t, _r, _a, _w, _l in ACCESS_MATRIX],
-)
-def test_predicate_levels_are_nested(
-    world, subject, target, expect_read, expect_admin, expect_write, legacy_read
-):
-    """`写权 ⊆ 管理权 ⊆ 读权` 逐格成立。
-
-    这条不是重复上面那份矩阵,而是钉住三条谓词之间的**结构关系**:管理权谓词是
-    「读权那四条臂 ∧ role='admin'」拼出来的,所以它**永远**不可能比读权宽——真出现
-    「能管却不能读」的格子,只可能是有人另抄了一份主体判定并在里面漏了一条臂
-    (那正是唯一定义点要防的形态,而它在单条谓词的行为矩阵里看不出来)。
+    These are four assertions over the same immutable authorization world. One
+    traversal keeps an explicit case label on every failure without rebuilding the
+    identical SQLite schema and fixture data for every row and assertion family.
     """
-    del legacy_read
     repo = world["repo"]
-    user_id, notebook_id = world[subject], world[target]
+    store = repo._runtime.sharing_store
 
-    can_read = repo.user_can_read_notebook(notebook_id, user_id)
-    can_admin = repo.user_can_admin_notebook(notebook_id, user_id)
-    can_write = repo.user_can_access_notebook(notebook_id, user_id)
-    assert (can_read, can_admin, can_write) == (expect_read, expect_admin, expect_write)
-    assert not (can_write and not can_admin), "写权跑到管理权之外了"
-    assert not (can_admin and not can_read), "管理权跑到读权之外了"
+    for subject, target, expect_read, expect_admin, expect_write, legacy_read in (
+        ACCESS_MATRIX
+    ):
+        case = f"{subject}-{target}"
+        user_id = world[subject]
+        notebook_id = world[target]
+        store_read = store.user_can_read_notebook(notebook_id, user_id)
+        store_admin = store.user_can_admin_notebook(notebook_id, user_id)
+        store_write = store.user_can_access_notebook(notebook_id, user_id)
+        service_read = repo.user_can_read_notebook(notebook_id, user_id)
+        service_admin = repo.user_can_admin_notebook(notebook_id, user_id)
+        service_write = repo.user_can_access_notebook(notebook_id, user_id)
+
+        assert (store_read, store_admin, store_write) == (
+            expect_read,
+            expect_admin,
+            expect_write,
+        ), case
+        assert (service_read, service_admin, service_write) == (
+            store_read,
+            store_admin,
+            store_write,
+        ), case
+        assert not (store_write and not store_admin), f"{case}: 写权跑到管理权之外了"
+        assert not (store_admin and not store_read), f"{case}: 管理权跑到读权之外了"
+
+        legacy = store_write or store.is_member(notebook_id, user_id)
+        assert legacy is legacy_read, case
+        assert not (legacy and not store_read), f"{case}: 读权只许扩,不许收窄既有主体"
 
 
 def test_write_predicate_stays_owner_only_for_every_member(world):
@@ -473,41 +469,6 @@ def test_admin_grant_role_literal_agrees_across_its_three_spellings():
         assert "nga.role='admin'" in mod.read_access_clause(), (
             "读权谓词丢了 group_admins 那条臂的组成员角色条件"
         )
-
-
-@pytest.mark.parametrize(
-    "subject,target,expect_read,expect_admin,expect_write,legacy_read",
-    ACCESS_MATRIX,
-    ids=[f"{s}-{t}" for s, t, _r, _a, _w, _l in ACCESS_MATRIX],
-)
-def test_service_predicates_agree_with_the_store_predicates(
-    world, subject, target, expect_read, expect_admin, expect_write, legacy_read
-):
-    """service 一跳委托 store 之后,两层必须逐格同义(读权与管理权各一条)。
-
-    另钉住 P1 的读权扩展**恰好**发生在授权边那几格:旧口径(写权 or 成员)在老主体
-    上必须与新谓词逐格相同,只有授权边主体才允许出现「新真旧假」。反过来任何一格
-    「新假旧真」都是收窄了既有权限,一律不许。
-    """
-    del expect_write
-    repo = world["repo"]
-    user_id = world[subject]
-    notebook_id = world[target]
-    store = repo._runtime.sharing_store
-
-    store_result = store.user_can_read_notebook(notebook_id, user_id)
-    assert store_result is expect_read
-    assert repo.user_can_read_notebook(notebook_id, user_id) is store_result
-
-    store_admin = store.user_can_admin_notebook(notebook_id, user_id)
-    assert store_admin is expect_admin
-    assert repo.user_can_admin_notebook(notebook_id, user_id) is store_admin
-
-    legacy = store.user_can_access_notebook(notebook_id, user_id) or store.is_member(
-        notebook_id, user_id
-    )
-    assert legacy is legacy_read
-    assert not (legacy and not store_result), "读权只许扩,不许收窄既有主体"
 
 
 def test_predicate_follows_membership_changes(world):

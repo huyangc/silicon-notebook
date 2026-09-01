@@ -2205,15 +2205,35 @@ def test_deployment_parity_script_reports_discovery_failure_as_exit_two(
 
 
 def test_ui_vocabulary_extra_root_scans_plugin_sources_and_default_is_unchanged(
-    tmp_path, capsys
+    tmp_path, capsys, monkeypatch
 ):
     vocab = _load_script_module(
         "sn_test_check_ui_vocabulary_extra_root", "check_ui_vocabulary.py"
     )
 
+    frontend_root = tmp_path / "frontend"
+    frontend_root.mkdir()
+    (frontend_root / "page.tsx").write_text(
+        'export default function Page() { return <p>公共知识库</p> }\n',
+        encoding="utf-8",
+    )
+    backend_root = tmp_path / "backend"
+    backend_root.mkdir()
+    (backend_root / "routes.py").write_text(
+        'from app.api.deps import user_error\n\n'
+        'def handler():\n'
+        '    raise user_error(403, "仅管理员可设置公共知识库")\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(vocab, "FRONTEND_PRODUCTION_DIRS", (frontend_root,))
+    monkeypatch.setattr(vocab, "BACKEND_APP", backend_root)
+    monkeypatch.setattr(vocab, "MIN_USER_ERROR_SITES", 1)
+
     # Not passing --extra-root at all (bare main()) must behave identically to
     # explicitly passing an empty argv — both are "no extra roots" and neither
     # reads this process's real sys.argv (which, under pytest, is pytest's own).
+    # Redirect the default roots to a minimal valid project: the contracts lane
+    # owns the one real repository scan, while this test owns argv semantics.
     rc_bare = vocab.main()
     out_bare = capsys.readouterr()
     rc_empty = vocab.main([])

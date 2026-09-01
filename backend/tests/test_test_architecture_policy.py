@@ -169,8 +169,15 @@ def test_frontend_lane_recovers_the_test_file_diagnostics_next_drops():
         for line in frontend_lane.splitlines()
         if not line.lstrip().startswith("#")
     ]
-    assert "npm run lint" in commands
-    assert commands.index("npm run lint") > commands.index("npm run build")
+    sync_command = "npm run sync:ui-plugins"
+    test_command = "npm_config_ignore_scripts=true npm run test"
+    build_command = "npm_config_ignore_scripts=true npm run build"
+    lint_command = "npm_config_ignore_scripts=true npm run lint"
+    assert commands.count(sync_command) == 1
+    assert test_command in commands
+    assert build_command in commands
+    assert lint_command in commands
+    assert commands.index(lint_command) > commands.index(build_command)
 
 
 def test_openapi_framework_versions_are_exactly_pinned():

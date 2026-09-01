@@ -25,4 +25,11 @@ def fixture_generator() -> ModuleType:
 
 @lru_cache(maxsize=1)
 def live_surface() -> dict[str, dict[str, object]]:
-    return fixture_generator().collect_facade_surface()
+    surface = fixture_generator().collect_facade_surface()
+    assert isinstance(surface, dict)
+    return surface
+
+
+@lru_cache(maxsize=1)
+def live_surface_names() -> set[str]:
+    return fixture_generator().collect_facade_surface_names()

@@ -54,7 +54,23 @@ export async function parseRepositoryModule(relativePath) {
 }
 
 
-export async function appSourceModules() {
+let appSourceModulesPromise;
+
+
+export function appSourceModules() {
+  // Production sources are immutable during one guard process. Several tests in
+  // the same file query different projections, so share the directory walk and
+  // TypeScript parse while Node's per-file isolation keeps test files separate.
+  if (appSourceModulesPromise) {
+    return appSourceModulesPromise;
+  }
+
+  appSourceModulesPromise = loadAppSourceModules();
+  return appSourceModulesPromise;
+}
+
+
+async function loadAppSourceModules() {
   const appDirectory = fileURLToPath(new URL("../app/", import.meta.url));
   const featureDirectory = fileURLToPath(new URL("../features/", import.meta.url));
   const files = [];

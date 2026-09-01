@@ -13,14 +13,13 @@ for per-name detail (``owner``/``consumers``/``patch_targets``, which are
 deliberately pinned to ``SURFACE_SOURCE_COMMIT`` rather than the live tree —
 see ``scripts/generate_repository_contract_fixtures.py``'s
 ``collect_facade_surface()`` and its ``--rebaseline-surface`` branch). It
-only asserts the *name set* stays in sync. That is safe to check against the
-live default (``OWNER_BY_MEMBER``) call: ``collect_facade_surface()`` adds a
-name to the returned surface based purely on class/module/instance-attribute
-membership — the ``owner_by_member`` mapping only fills in the per-name
-``owner`` field, it never gates whether a name is present at all. So the
-owner column can legitimately drift as ``OWNER_BY_MEMBER`` evolves between
-here and ``SURFACE_SOURCE_COMMIT`` without this test caring; the *set* of
-names cannot drift silently.
+only asserts the *name set* stays in sync. ``collect_facade_surface_names()``
+uses the detailed collector's same consumer/patch recognition but omits scopes,
+signatures, owners, and site records. That is safe because ``owner_by_member``
+only fills the detailed ``owner`` field; it never gates membership. The owner
+column can legitimately drift as ``OWNER_BY_MEMBER`` evolves between here and
+``SURFACE_SOURCE_COMMIT`` without this test caring; the *set* of names cannot
+drift silently.
 """
 from __future__ import annotations
 
@@ -29,13 +28,13 @@ import json
 import pytest
 
 from tests.architecture.facade_contract import FIXTURE
-from tests.architecture.repository_contract import live_surface
+from tests.architecture.repository_contract import live_surface_names
 
 
 @pytest.mark.architecture_contract
 def test_facade_surface_fixture_name_set_matches_the_live_surface():
     frozen_names = set(json.loads(FIXTURE.read_text(encoding="utf-8")))
-    live_names = set(live_surface())
+    live_names = live_surface_names()
     assert live_names == frozen_names, (
         "facade_surface.json has drifted from the live facade/compatibility "
         f"surface (added: {sorted(live_names - frozen_names)}, removed: "

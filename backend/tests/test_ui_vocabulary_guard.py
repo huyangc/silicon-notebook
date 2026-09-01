@@ -395,6 +395,11 @@ def test_扫描面塌了要红而不是静默放行(tmp_path, monkeypatch, capsy
     """helper 改名 / 换调用写法 → 匹配数掉到 0,而退出码仍是 0,正是本轮要根治的
     那类假绿。非空性下限把它变成硬失败。"""
     (tmp_path / "empty.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "page.tsx").write_text(
+        "export default function Page() { return <p>公共知识库</p> }\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(guard, "FRONTEND_PRODUCTION_DIRS", (tmp_path,))
     monkeypatch.setattr(guard, "BACKEND_APP", tmp_path)
     assert guard.main() == 1
     assert "call sites found" in capsys.readouterr().err
@@ -428,10 +433,17 @@ def test_后端真实文案确实曾经违规过(tmp_path):
 
 
 # --------------------------------------------------------------------------
-# 6. 端到端:真实仓库当前是干净的
+# 6. 端到端归属:真实源码扫描只在 contracts lane 执行一次
 # --------------------------------------------------------------------------
 
 
 @pytest.mark.architecture_contract
-def test_真实前后端源码都通过守卫(capsys):
-    assert guard.main() == 0, capsys.readouterr().err
+def test_真实源码守卫接在_contracts_lane():
+    contracts = (_ROOT / "scripts" / "check_contracts.sh").read_text(
+        encoding="utf-8"
+    )
+    invocation = (
+        '"$ROOT_DIR/scripts/check_ui_vocabulary.py" \\\n'
+        '  --extra-root "$ROOT_DIR/examples/extensions/arxiv-search/src"'
+    )
+    assert contracts.count(invocation) == 1

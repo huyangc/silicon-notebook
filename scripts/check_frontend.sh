@@ -13,7 +13,11 @@ if [[ ! -d "$ROOT_DIR/frontend/node_modules" ]]; then
 fi
 
 cd "$ROOT_DIR/frontend"
-npm run test
+# Every standalone lifecycle keeps its own pre-hook so direct developer commands
+# remain self-contained.  The complete lane has one immutable plugin projection,
+# so sync it once and suppress only the three redundant npm pre-hooks below.
+npm run sync:ui-plugins
+npm_config_ignore_scripts=true npm run test
 # `next build` keeps TypeScript errors fatal for production code (`ignoreBuildErrors`
 # stays unset), but Next's build-time type checker silently drops every diagnostic in
 # `*.test.*`/`*.spec.*` files and `__tests__`/`__mocks__` directories (the ignoreRegex
@@ -22,5 +26,5 @@ npm run test
 # pass that sees those files. It runs after the build so `.next/types` has just been
 # regenerated (a stale tree cannot fail on generated route types), and `incremental`
 # keeps the warm re-check under a second (~5s cold).
-npm run build
-npm run lint
+npm_config_ignore_scripts=true npm run build
+npm_config_ignore_scripts=true npm run lint
