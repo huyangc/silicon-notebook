@@ -79,6 +79,7 @@ from app.services.agent_profile_block import (
 from app.services.collection_catalog import ENUMERABLE_ELEMENT_KINDS
 from app.services.kg.json_utils import safe_json
 from app.services.knowledge_contracts import USABLE_STATUSES
+from app.services.model_work import model_artifact_scope
 from app.services.prompts import (
     AGENT_OBSERVATION_UNTRUSTED_INSTRUCTION,
     AGENT_PROFILE_OVERLAY_SCHEMA_HINT,
@@ -1411,7 +1412,11 @@ class AgentProfileConsolidationService:
             return round((time.perf_counter() - started) * 1000)
 
         try:
-            outcome = self._consolidate_base(notebook_id, claim_token)
+            with model_artifact_scope(
+                notebook_id=notebook_id,
+                parent_id=claim_token,
+            ):
+                outcome = self._consolidate_base(notebook_id, claim_token)
         except AgentProfileModelUnavailable:
             result = self._fail(
                 notebook_id,
@@ -2055,7 +2060,16 @@ class AgentProfileConsolidationService:
             return round((time.perf_counter() - started) * 1000)
 
         try:
-            outcome = self._consolidate_overlay(notebook_id, user_id, claim_token)
+            with model_artifact_scope(
+                actor_id=user_id,
+                notebook_id=notebook_id,
+                parent_id=claim_token,
+            ):
+                outcome = self._consolidate_overlay(
+                    notebook_id,
+                    user_id,
+                    claim_token,
+                )
         except AgentProfileModelUnavailable:
             result = self._fail(
                 notebook_id,

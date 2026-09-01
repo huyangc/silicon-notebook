@@ -383,6 +383,33 @@ def test_the_prompt_never_contains_another_member_s_question(harness, monkeypatc
     assert "贝塔预算表" not in prompt
 
 
+def test_overlay_model_call_binds_member_and_notebook_artifact_scope(harness):
+    from app.services.model_work import ModelPriority, make_model_work_context
+
+    _add_ask(harness, "job-scope", user_id=USER_A, question=A_QUESTION)
+    client = _Client(_reply(retrieval_notes="按项目代号检索"))
+    contexts = []
+    original = client.chat_json
+
+    def spy(messages, schema_hint, **kwargs):
+        contexts.append(make_model_work_context(
+            workload_id=AGENT_PROFILE_WORKLOAD,
+            priority=ModelPriority.BACKGROUND,
+        ))
+        return original(messages, schema_hint, **kwargs)
+
+    client.chat_json = spy
+    service = _service(harness, client=client)
+    claimed = harness["profiles"].claim(NOTEBOOK_ID, USER_A)
+
+    _run_overlay(service, claimed)
+
+    assert len(contexts) == 1
+    assert contexts[0].actor_id == USER_A
+    assert contexts[0].notebook_id == NOTEBOOK_ID
+    assert contexts[0].parent_id == claimed.token
+
+
 def test_the_store_read_is_scoped_before_the_service_ever_sees_it(harness):
     """Same property one layer down: the SQL, not a Python filter, is what
     excludes the other member. ``test_agent_profile_isolation_guard.py`` pins

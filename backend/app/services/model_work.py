@@ -50,6 +50,7 @@ class _ModelWorkScope:
     actor_id: str
     notebook_id: str
     question: str
+    artifact_lifecycle_epoch: int
 
 
 @dataclass(frozen=True)
@@ -58,6 +59,7 @@ class _ModelArtifactScope:
     notebook_id: str
     question: str
     parent_id: str
+    lifecycle_epoch: int
 
 
 _CURRENT_SCOPE: contextvars.ContextVar[_ModelWorkScope | None] = (
@@ -66,6 +68,19 @@ _CURRENT_SCOPE: contextvars.ContextVar[_ModelWorkScope | None] = (
 _CURRENT_ARTIFACT_SCOPE: contextvars.ContextVar[_ModelArtifactScope | None] = (
     contextvars.ContextVar("model_artifact_scope", default=None)
 )
+
+
+def _artifact_lifecycle_epoch_for(notebook_id: str) -> int:
+    """Reuse the oldest active snapshot for this notebook, if there is one."""
+    if not notebook_id:
+        return 0
+    work_scope = _CURRENT_SCOPE.get()
+    if work_scope is not None and work_scope.notebook_id == notebook_id:
+        return work_scope.artifact_lifecycle_epoch
+    artifact_scope = _CURRENT_ARTIFACT_SCOPE.get()
+    if artifact_scope is not None and artifact_scope.notebook_id == notebook_id:
+        return artifact_scope.lifecycle_epoch
+    return current_model_artifact_lifecycle_epoch(notebook_id)
 
 
 @contextmanager
@@ -78,13 +93,15 @@ def model_artifact_scope(
 ) -> Iterator[None]:
     """Attach notebook identity to any chat workload without changing priority."""
     previous = _CURRENT_ARTIFACT_SCOPE.get()
+    effective_notebook = str(
+        notebook_id or (previous.notebook_id if previous else "")
+    )
     token = _CURRENT_ARTIFACT_SCOPE.set(_ModelArtifactScope(
         actor_id=str(actor_id or (previous.actor_id if previous else "")),
-        notebook_id=str(
-            notebook_id or (previous.notebook_id if previous else "")
-        ),
+        notebook_id=effective_notebook,
         question=str(question or (previous.question if previous else "")),
         parent_id=str(parent_id or (previous.parent_id if previous else "")),
+        lifecycle_epoch=_artifact_lifecycle_epoch_for(effective_notebook),
     ))
     try:
         yield
@@ -101,13 +118,17 @@ def model_work_scope(
     notebook_id: str = "",
     question: str = "",
 ) -> Iterator[None]:
+    effective_notebook = str(notebook_id)
     token = _CURRENT_SCOPE.set(
         _ModelWorkScope(
             priority=ModelPriority(priority),
             parent_id=str(parent_id),
             actor_id=str(actor_id),
-            notebook_id=str(notebook_id),
+            notebook_id=effective_notebook,
             question=str(question),
+            artifact_lifecycle_epoch=_artifact_lifecycle_epoch_for(
+                effective_notebook
+            ),
         )
     )
     try:
@@ -155,6 +176,15 @@ def make_model_work_context(
         if scope is not None and scope.notebook_id
         else (artifact_scope.notebook_id if artifact_scope is not None else "")
     )
+    artifact_lifecycle_epoch = (
+        scope.artifact_lifecycle_epoch
+        if scope is not None and scope.notebook_id
+        else (
+            artifact_scope.lifecycle_epoch
+            if artifact_scope is not None and artifact_scope.notebook_id
+            else 0
+        )
+    )
     now = (clock or time.monotonic)()
     return ModelWorkContext(
         actor_id=str(effective_actor or request_user_id() or "system"),
@@ -174,9 +204,7 @@ def make_model_work_context(
             else now + _DEADLINE_SECONDS[effective_priority]
         ),
         cancel_event=cancel_event,
-        artifact_lifecycle_epoch=current_model_artifact_lifecycle_epoch(
-            effective_notebook
-        ),
+        artifact_lifecycle_epoch=artifact_lifecycle_epoch,
     )
 
 

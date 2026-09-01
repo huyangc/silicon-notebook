@@ -160,6 +160,30 @@ def test_artifact_scope_adds_notebook_metadata_without_changing_priority(monkeyp
     assert context.priority is ModelPriority.BACKGROUND
 
 
+def test_nested_model_scopes_keep_the_lifecycle_epoch_from_operation_entry(
+    monkeypatch,
+):
+    epoch = {"value": 4}
+    monkeypatch.setattr(
+        model_work_module,
+        "current_model_artifact_lifecycle_epoch",
+        lambda _notebook_id: epoch["value"],
+    )
+
+    with model_artifact_scope(notebook_id="nb-lifecycle"):
+        epoch["value"] = 5
+        with model_work_scope(
+            priority=ModelPriority.INTERACTIVE,
+            notebook_id="nb-lifecycle",
+        ):
+            context = make_model_work_context(
+                workload_id="ask_answer",
+                priority=ModelPriority.INTERACTIVE,
+            )
+
+    assert context.artifact_lifecycle_epoch == 4
+
+
 def test_same_service_workloads_share_one_peak():
     scheduler = ServiceScheduler("general", maximum=2)
     release = threading.Event()
