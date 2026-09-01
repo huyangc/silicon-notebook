@@ -1187,6 +1187,132 @@ def test_redaction_waits_for_publication_then_removes_the_case(
     assert list(store.root.glob("**/artifact.json")) == []
 
 
+def test_artifact_read_holds_the_lifecycle_lock_until_content_is_assembled(
+    tmp_path,
+    monkeypatch,
+):
+    store = AnalysisArtifactStore(tmp_path, retention_days=2)
+    notebook_id = "nb-read-race"
+    issue = store.record_model_output_issue(MalformedModelInteraction(
+        workload_id="ask_answer",
+        workload_label="问答回答",
+        model_area="ask",
+        failure_kind="invalid_json",
+        support_id="mdl-read-race",
+        actor_id="user-1",
+        parent_id="ask-read-race",
+        notebook_id=notebook_id,
+        question="private question",
+        messages=({"role": "user", "content": "private content"},),
+        schema_hint='{"answer":""}',
+        response="not-json",
+        reason="invalid_json",
+        occurred_at="2026-08-30T01:00:00+00:00",
+    ))
+    artifact_read_started = threading.Event()
+    allow_artifact_read = threading.Event()
+    redaction_done = threading.Event()
+    original_read_text = Path.read_text
+    results = []
+    errors = []
+
+    def block_artifact_read(path, *args, **kwargs):
+        if path.name == "artifact.json":
+            artifact_read_started.set()
+            assert allow_artifact_read.wait(timeout=5)
+        return original_read_text(path, *args, **kwargs)
+
+    def read_artifact():
+        try:
+            results.append(store.load_model_output_artifact(
+                issue["id"],
+                now=datetime(2026, 8, 30, 2, tzinfo=timezone.utc),
+            ))
+        except BaseException as exc:
+            errors.append(exc)
+
+    def redact_notebook():
+        try:
+            store.redact_notebook(
+                notebook_id,
+                occurred_at="2026-08-30T01:00:01+00:00",
+            )
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            redaction_done.set()
+
+    monkeypatch.setattr(Path, "read_text", block_artifact_read)
+    reader = threading.Thread(target=read_artifact)
+    reader.start()
+    assert artifact_read_started.wait(timeout=5)
+    redactor = threading.Thread(target=redact_notebook)
+    redactor.start()
+
+    assert not redaction_done.wait(timeout=0.1)
+    allow_artifact_read.set()
+    reader.join(timeout=5)
+    redactor.join(timeout=5)
+
+    assert errors == []
+    assert results[0]["response"] == "not-json"
+    assert redaction_done.is_set()
+    assert list(store.root.glob("**/artifact.json")) == []
+
+
+def test_source_redaction_destroys_every_case_when_one_archive_write_fails(
+    tmp_path,
+    monkeypatch,
+):
+    from app.repositories import analysis_artifacts as artifacts_module
+
+    store = AnalysisArtifactStore(tmp_path, retention_days=2)
+    notebook_id = "nb-cleanup-failure"
+    for index in range(2):
+        store.record_model_output_issue(MalformedModelInteraction(
+            workload_id="source_summary",
+            workload_label="来源摘要",
+            model_area="source",
+            failure_kind="invalid_json",
+            support_id=f"mdl-cleanup-{index}",
+            actor_id="user-1",
+            parent_id=f"source-job-{index}",
+            notebook_id=notebook_id,
+            question=f"private question {index}",
+            messages=({"role": "user", "content": f"private {index}"},),
+            schema_hint='{"summary":""}',
+            response="not-json",
+            reason="invalid_json",
+            occurred_at="2026-08-30T01:00:00+00:00",
+        ))
+    original_atomic_json = artifacts_module._atomic_json
+    failed = False
+
+    def fail_first_redacted_metadata(path, payload):
+        nonlocal failed
+        if "redacted" in path.parts and not failed:
+            failed = True
+            raise OSError("redacted metadata unavailable")
+        original_atomic_json(path, payload)
+
+    monkeypatch.setattr(
+        artifacts_module,
+        "_atomic_json",
+        fail_first_redacted_metadata,
+    )
+
+    with pytest.raises(OSError, match="redacted metadata unavailable"):
+        store.redact_source(
+            notebook_id,
+            "src-deleted",
+            occurred_at="2026-08-30T01:00:01+00:00",
+        )
+
+    assert not (store.root / "issues" / notebook_id).exists()
+    assert list(store.root.glob("**/artifact.json")) == []
+    assert len(list((store.root / "issues" / "redacted").glob("**/issue.json"))) == 1
+
+
 def test_source_deletion_conservatively_removes_notebook_model_content(tmp_path):
     store = AnalysisArtifactStore(tmp_path, retention_days=2)
     issue = store.record_model_output_issue(MalformedModelInteraction(

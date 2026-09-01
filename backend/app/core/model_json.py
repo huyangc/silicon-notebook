@@ -284,6 +284,14 @@ def _validate_known_shape(
     if isinstance(example, dict):
         if not isinstance(value, dict):
             raise ModelJsonRepairError("invalid_type")
+        if field_name == "frame_assignments":
+            # The hint's ``facet-id`` is a placeholder. Actual keys come from
+            # the report frame and are checked against that frame downstream;
+            # this shared shape gate owns only the advertised value type.
+            item_example = next(iter(example.values()), "")
+            for item in value.values():
+                _validate_known_shape(item, item_example)
+            return
         shared_keys = set(value).intersection(example)
         # Report outline explicitly permits ``frame:{}`` when no comparison
         # frame applies. Other described nested objects still need at least one
