@@ -1527,7 +1527,7 @@ def _collect_base_recall_evidence(
             "base_recall.selection",
             deadline,
             lambda: connection.execute(
-                "SELECT id FROM notebooks WHERE tier!='base' AND status!='copying' "
+                f"SELECT id FROM notebooks WHERE tier!='base' AND {diag_common.NOTEBOOK_LIVE_SQL} "
                 "ORDER BY id LIMIT 1"
             ).fetchone(),
         )
@@ -1540,7 +1540,8 @@ def _collect_base_recall_evidence(
             "base_recall.selection",
             deadline,
             lambda: connection.execute(
-                "SELECT id FROM notebooks WHERE status!='copying' ORDER BY id LIMIT 1"
+                f"SELECT id FROM notebooks WHERE {diag_common.NOTEBOOK_LIVE_SQL} "
+                "ORDER BY id LIMIT 1"
             ).fetchone(),
         )
         if row is not None:
@@ -1625,7 +1626,9 @@ def _collect_base_recall_evidence(
         tier = str(row[1] or "personal")
         status = str(row[2] or "")
         same_owner = str(row[3] or "") == str(row[4] or "")
-        active = status != "copying" and (tier == "base" or same_owner)
+        active = status not in diag_common.NOTEBOOK_HIDDEN_STATUSES and (
+            tier == "base" or same_owner
+        )
         if active:
             active_mount_ids.add(base_id)
             reason = ""

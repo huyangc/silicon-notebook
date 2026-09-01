@@ -573,7 +573,7 @@ class QueryStore:
             + SHARED_TO_GROUPS_COLUMN
             + " FROM notebooks LEFT JOIN users u ON u.id = notebooks.created_by "
             "LEFT JOIN unified_kg_state ip ON ip.notebook_id=notebooks.id "
-            "WHERE notebooks.id = ? AND notebooks.status != 'copying'",
+            f"WHERE notebooks.id = ? AND notebooks.{access_sql.NOTEBOOK_LIVE_SQL}",
             (notebook_id,),
         ).fetchone()
 
@@ -586,7 +586,7 @@ class QueryStore:
             "AS _published_pipeline_version, " + SHARED_TO_GROUPS_COLUMN
             + " FROM notebooks LEFT JOIN unified_kg_state ip "
             "ON ip.notebook_id=notebooks.id "
-            "WHERE created_by = ? AND status != 'copying' "
+            f"WHERE created_by = ? AND {access_sql.NOTEBOOK_LIVE_SQL} "
             "ORDER BY created_at ASC",
             (user_id,),
         ).fetchall()
@@ -613,7 +613,7 @@ class QueryStore:
             "LEFT JOIN users u ON u.id = nb.created_by "
             "LEFT JOIN unified_kg_state ip ON ip.notebook_id=nb.id "
             "WHERE m.user_id = ? " + point_filter
-            + "AND nb.status != 'copying' "
+            + f"AND nb.{access_sql.NOTEBOOK_LIVE_SQL} "
             "ORDER BY m.added_at ASC",
             params,
         ).fetchall()
@@ -671,10 +671,13 @@ class QueryStore:
         **该用户加入的组数**增长(EXPLAIN QUERY PLAN 实测)。PG 侧刻意**不**照抄:
         标准 SQL 的 `CROSS JOIN` 不带 `ON`,而 PG 有真实统计信息、自己就会选对。
         """
-        # 点查那半刻意**在下面那条语句之外**算好:
-        # `test_group_partition_query_is_bounded_by_my_memberships` 把这条语句的查询
-        # 计划钉死,而它靠 `inspect.getsource` 把执行调用之后的全部字符串字面量拼成
-        # SQL —— 点查子句写在里面会被无条件粘进列表形态,参数个数当场对不上。
+        # 点查那半刻意**在下面那条语句之外**算好,只按 `notebook_id is None` 二选一:
+        # 混进大字符串字面量会让占位符个数与 `params` 的长度脱节。
+        # `test_group_partition_query_is_bounded_by_my_memberships` 不再靠
+        # `inspect.getsource` 拼源码字面量重建 SQL(批 3·W1 T-1 之前的做法——谓词
+        # 单点化后,任何变量引用形式的拼接都会被那条正则误当空白吞掉,拼出语法
+        # 错误的 SQL);现在用一个记录型假 `db` **真调用** 本方法,直接拦下解释器
+        # 实际会执行的 SQL/参数,与下面用 f-string 还是 `+` 拼接谓词无关。
         point_filter = "" if notebook_id is None else "AND ng.notebook_id = ? "
         params = (user_id,) if notebook_id is None else (user_id, notebook_id)
         return db.execute(
@@ -693,7 +696,7 @@ class QueryStore:
             "LEFT JOIN unified_kg_state ip ON ip.notebook_id=nb.id "
             "WHERE gm.user_id = ? " + point_filter
             + "AND (ng.principal_type = 'group' OR gm.role = 'admin') "
-            "AND nb.status != 'copying' "
+            + f"AND nb.{access_sql.NOTEBOOK_LIVE_SQL} "
             "ORDER BY nb.created_at ASC, nb.id ASC, g.id ASC",
             params,
         ).fetchall()
@@ -728,7 +731,7 @@ class QueryStore:
                 row["k"]: row["c"]
                 for row in db.execute(
                     "SELECT created_by AS k, COUNT(*) AS c FROM notebooks "
-                    "WHERE status != 'copying' GROUP BY created_by"
+                    f"WHERE {access_sql.NOTEBOOK_LIVE_SQL} GROUP BY created_by"
                 ).fetchall()
             }
             sources = {
@@ -801,7 +804,7 @@ class QueryStore:
                 f"MAX({_absolute_instant('s.created_at')}) AS sort_instant,"
                 "'source:'||s.id AS activity_id FROM sources s "
                 "JOIN notebooks nb ON nb.id=s.notebook_id "
-                "WHERE nb.status!='copying' "
+                f"WHERE nb.{access_sql.NOTEBOOK_LIVE_SQL} "
                 "AND s.uploaded_by IS NOT NULL AND s.uploaded_by!='' "
                 f"AND {VISIBLE_SOURCE_TYPES_PREDICATE} GROUP BY s.uploaded_by "
                 "UNION ALL "
@@ -956,7 +959,8 @@ class QueryStore:
         with self.database.connect() as db:
             notebooks = db.execute(
                 "SELECT id, name, status, created_at, updated_at FROM notebooks "
-                "WHERE created_by = ? AND status != 'copying' ORDER BY created_at DESC",
+                f"WHERE created_by = ? AND {access_sql.NOTEBOOK_LIVE_SQL} "
+                "ORDER BY created_at DESC",
                 (user_id,),
             ).fetchall()
             ids = [row["id"] for row in notebooks]
@@ -1035,7 +1039,7 @@ class QueryStore:
         with self.database.connect() as db:
             row = db.execute(
                 "SELECT 1 FROM notebooks WHERE id = ? AND created_by = ? "
-                "AND status != 'copying'",
+                f"AND {access_sql.NOTEBOOK_LIVE_SQL}",
                 (notebook_id, user_id),
             ).fetchone()
         return row is not None
@@ -1143,7 +1147,7 @@ class QueryStore:
                 # 空结果(不抛异常、不泄露存在性),口径与 list_user_notebooks 一致。
                 owned = db.execute(
                     "SELECT 1 FROM notebooks WHERE id = ? AND created_by = ? "
-                    "AND status != 'copying'",
+                    f"AND {access_sql.NOTEBOOK_LIVE_SQL}",
                     (notebook_id, user_id),
                 ).fetchone()
                 if owned is None:
@@ -1154,7 +1158,7 @@ class QueryStore:
                     row["id"]
                     for row in db.execute(
                         "SELECT id FROM notebooks WHERE created_by = ? "
-                        "AND status != 'copying'",
+                        f"AND {access_sql.NOTEBOOK_LIVE_SQL}",
                         (user_id,),
                     ).fetchall()
                 ]
@@ -1455,7 +1459,7 @@ class QueryStore:
     def notebook_analytics(self, notebook_id: str) -> NotebookAnalytics:
         with self.database.connect() as db:
             exists = db.execute(
-                "SELECT 1 FROM notebooks WHERE id = ? AND status != 'copying'",
+                f"SELECT 1 FROM notebooks WHERE id = ? AND {access_sql.NOTEBOOK_LIVE_SQL}",
                 (notebook_id,),
             ).fetchone()
             if exists is None:
@@ -1548,7 +1552,7 @@ class QueryStore:
         items: list[dict[str, Any]] = []
         with self.database.connect() as db:
             mine = db.execute(
-                "SELECT id, name FROM notebooks WHERE created_by = ? AND status != 'copying'",
+                f"SELECT id, name FROM notebooks WHERE created_by = ? AND {access_sql.NOTEBOOK_LIVE_SQL}",
                 (user_id,),
             ).fetchall()
             name_of = {row["id"]: row["name"] for row in mine}
@@ -1701,7 +1705,7 @@ class QueryStore:
         needle = query.strip().lower()
         with self.database.connect() as db:
             notebook = db.execute(
-                "SELECT * FROM notebooks WHERE id = ? AND status != 'copying'",
+                f"SELECT * FROM notebooks WHERE id = ? AND {access_sql.NOTEBOOK_LIVE_SQL}",
                 (notebook_id,),
             ).fetchone()
             if notebook is None:

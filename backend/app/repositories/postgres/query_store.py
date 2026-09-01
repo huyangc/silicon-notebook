@@ -449,7 +449,7 @@ class QueryStore:
             + SHARED_TO_GROUPS_COLUMN
             + " FROM notebooks LEFT JOIN users u ON u.id = notebooks.created_by "
             "LEFT JOIN unified_kg_state ip ON ip.notebook_id=notebooks.id "
-            "WHERE notebooks.id = %s AND notebooks.status != 'copying'",
+            f"WHERE notebooks.id = %s AND notebooks.{access_sql.NOTEBOOK_LIVE_SQL}",
             (notebook_id,),
         ).fetchone())
 
@@ -462,7 +462,7 @@ class QueryStore:
             "AS _published_pipeline_version, " + SHARED_TO_GROUPS_COLUMN
             + " FROM notebooks LEFT JOIN unified_kg_state ip "
             "ON ip.notebook_id=notebooks.id "
-            "WHERE created_by = %s AND status != 'copying' "
+            f"WHERE created_by = %s AND {access_sql.NOTEBOOK_LIVE_SQL} "
             "ORDER BY created_at ASC",
             (user_id,),
         ).fetchall())
@@ -481,7 +481,7 @@ class QueryStore:
             "LEFT JOIN users u ON u.id = nb.created_by "
             "LEFT JOIN unified_kg_state ip ON ip.notebook_id=nb.id "
             "WHERE m.user_id = %s " + point_filter
-            + "AND nb.status != 'copying' "
+            + f"AND nb.{access_sql.NOTEBOOK_LIVE_SQL} "
             "ORDER BY m.added_at ASC",
             params,
         ).fetchall())
@@ -524,7 +524,7 @@ class QueryStore:
             "LEFT JOIN unified_kg_state ip ON ip.notebook_id=nb.id "
             "WHERE gm.user_id = %s " + point_filter
             + "AND (ng.principal_type = 'group' OR gm.role = 'admin') "
-            "AND nb.status != 'copying' "
+            f"AND nb.{access_sql.NOTEBOOK_LIVE_SQL} "
             'ORDER BY nb.created_at ASC, nb.id COLLATE "C" ASC, g.id COLLATE "C" ASC',
             params,
         ).fetchall())
@@ -559,7 +559,7 @@ class QueryStore:
                 row["k"]: row["c"]
                 for row in db.execute(
                     "SELECT created_by AS k, COUNT(*) AS c FROM notebooks "
-                    "WHERE status != 'copying' GROUP BY created_by"
+                    f"WHERE {access_sql.NOTEBOOK_LIVE_SQL} GROUP BY created_by"
                 ).fetchall()
             }
             sources = {
@@ -624,7 +624,7 @@ class QueryStore:
                     "SELECT k,MAX(m) AS m FROM ("
                     "SELECT s.uploaded_by AS k,MAX(s.created_at) AS m FROM sources s "
                     "JOIN notebooks nb ON nb.id=s.notebook_id "
-                    "WHERE nb.status!='copying' "
+                    f"WHERE nb.{access_sql.NOTEBOOK_LIVE_SQL} "
                     "AND s.uploaded_by IS NOT NULL AND s.uploaded_by!='' "
                     f"AND {VISIBLE_SOURCE_TYPES_PREDICATE} GROUP BY s.uploaded_by "
                     "UNION ALL "
@@ -764,7 +764,8 @@ class QueryStore:
         with self.database.connect() as db:
             notebooks = db.execute(
                 "SELECT id, name, status, created_at, updated_at FROM notebooks "
-                "WHERE created_by = %s AND status != 'copying' ORDER BY created_at DESC",
+                f"WHERE created_by = %s AND {access_sql.NOTEBOOK_LIVE_SQL} "
+                "ORDER BY created_at DESC",
                 (user_id,),
             ).fetchall()
             ids = [row["id"] for row in notebooks]
@@ -836,7 +837,7 @@ class QueryStore:
         with self.database.connect() as db:
             row = db.execute(
                 "SELECT 1 FROM notebooks WHERE id = %s AND created_by = %s "
-                "AND status != 'copying'",
+                f"AND {access_sql.NOTEBOOK_LIVE_SQL}",
                 (notebook_id, user_id),
             ).fetchone()
         return row is not None
@@ -944,7 +945,7 @@ class QueryStore:
             if notebook_id is not None:
                 owned = db.execute(
                     "SELECT 1 FROM notebooks WHERE id = %s AND created_by = %s "
-                    "AND status != 'copying'",
+                    f"AND {access_sql.NOTEBOOK_LIVE_SQL}",
                     (notebook_id, user_id),
                 ).fetchone()
                 if owned is None:
@@ -955,7 +956,7 @@ class QueryStore:
                     row["id"]
                     for row in db.execute(
                         "SELECT id FROM notebooks WHERE created_by = %s "
-                        "AND status != 'copying'",
+                        f"AND {access_sql.NOTEBOOK_LIVE_SQL}",
                         (user_id,),
                     ).fetchall()
                 ]
@@ -1263,7 +1264,7 @@ class QueryStore:
     def notebook_analytics(self, notebook_id: str) -> NotebookAnalytics:
         with self.database.connect() as db:
             exists = db.execute(
-                "SELECT 1 FROM notebooks WHERE id = %s AND status != 'copying'",
+                f"SELECT 1 FROM notebooks WHERE id = %s AND {access_sql.NOTEBOOK_LIVE_SQL}",
                 (notebook_id,),
             ).fetchone()
             if exists is None:
@@ -1359,7 +1360,7 @@ class QueryStore:
         items: list[dict[str, Any]] = []
         with self.database.connect() as db:
             mine = db.execute(
-                "SELECT id, name FROM notebooks WHERE created_by = %s AND status != 'copying'",
+                f"SELECT id, name FROM notebooks WHERE created_by = %s AND {access_sql.NOTEBOOK_LIVE_SQL}",
                 (user_id,),
             ).fetchall()
             name_of = {row["id"]: row["name"] for row in mine}
@@ -1506,7 +1507,7 @@ class QueryStore:
         needle = query.strip().lower()
         with self.database.connect() as db:
             notebook = db.execute(
-                "SELECT * FROM notebooks WHERE id = %s AND status != 'copying'",
+                f"SELECT * FROM notebooks WHERE id = %s AND {access_sql.NOTEBOOK_LIVE_SQL}",
                 (notebook_id,),
             ).fetchone()
             if notebook is None:

@@ -1081,25 +1081,40 @@ def test_group_partition_query_is_bounded_by_my_memberships(repo):
     去掉 SQLite 那条 `CROSS JOIN` 驱动顺序提示时,planner 会改从 `notebook_grants`
     起步、只用得上 `principal_type` 单列——那是把全库群组授权边扫一遍。两者都不报错,
     也都返回同一批行,所以只有钉住计划才拦得住这次退化。
-    """
-    import inspect
-    import re
 
+    ⚠ 曾经靠 `inspect.getsource` + 正则把 `granted_notebook_rows` 的源码字符串字面量
+    拼回一条 SQL(批 3·W1 T-1 之前)。谓词单点化(`access_sql.NOTEBOOK_LIVE_SQL`)把
+    末尾那个 `AND nb.status != 'copying'` 换成了一次变量拼接——源码里不再是一段连续
+    的引号字面量,正则会把它整段吃掉,拼出语法错误的 SQL。改成**真的调用**
+    `granted_notebook_rows` 并用一个记录型假 `db` 拦下它实际执行的 SQL/参数:这样
+    拿到的是解释器真正会跑的语句,而不是源码层面的近似,顺带甩掉了「先剥注释再切」
+    这条只为绕开源码巧合而存在的脆弱前处理。
+    """
     from app.repositories.sqlite.query_store import QueryStore
 
-    # 先剥注释再切:注释里出现执行调用那几个字(说明为什么某个子句必须待在语句外面)
-    # 会让 split 切在注释上,于是拼出来的「SQL」只剩注释后面那几个字面量。剥掉之后
-    # 这条提取只看代码。
-    source = "\n".join(
-        line
-        for line in inspect.getsource(QueryStore.granted_notebook_rows).splitlines()
-        if not line.strip().startswith("#")
-    )
-    sql = "".join(
-        re.findall(r'"((?:[^"\\]|\\.)*)"', source.split("return db.execute(")[1])
-    )
+    class _SqlCapture:
+        """记录 `granted_notebook_rows` 会执行的 SQL 与参数,不碰真连接。"""
+
+        sql: str = ""
+        params: tuple = ()
+
+        def execute(self, sql: str, params: tuple = ()) -> "_SqlCapture":
+            self.sql = sql
+            self.params = params
+            return self
+
+        @staticmethod
+        def fetchall() -> list:
+            return []
+
+    capture = _SqlCapture()
+    QueryStore.granted_notebook_rows(capture, "u")
+
     with repo._connect() as db:
-        plan = [row["detail"] for row in db.execute("EXPLAIN QUERY PLAN " + sql, ("u",))]
+        plan = [
+            row["detail"]
+            for row in db.execute("EXPLAIN QUERY PLAN " + capture.sql, capture.params)
+        ]
 
     assert plan[0] == "SEARCH gm USING INDEX idx_group_members_user (user_id=?)", plan
     assert any(

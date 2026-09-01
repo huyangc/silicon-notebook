@@ -6,6 +6,7 @@
 """
 
 from app.repositories.postgres.access_sql import (
+    NOTEBOOK_LIVE_SQL,
     everyone_grant_expr,
     member_exists_expr,
     restricted_grant_access_expr,
@@ -34,7 +35,7 @@ _MOUNTER_NOT_SHARED_EXPR = (
 )
 
 MOUNT_VALID_EXPR = (
-    "(b.status != 'copying' AND (b.tier = 'base' OR b.created_by = a.created_by"
+    "(b." + NOTEBOOK_LIVE_SQL + " AND (b.tier = 'base' OR b.created_by = a.created_by"
     " OR " + everyone_grant_expr("b.id")
     + " OR (" + _BORROWED_READ_EXPR + " AND " + _MOUNTER_NOT_SHARED_EXPR + ")"
     "))"
@@ -42,7 +43,7 @@ MOUNT_VALID_EXPR = (
 
 # 借入边被「未共享门」关上的判别式(镜像 sqlite/mount_sql.py,理由写在那份)。
 MOUNT_GATE_CLOSED_EXPR = (
-    "(b.status != 'copying' AND " + _BORROWED_READ_EXPR
+    "(b." + NOTEBOOK_LIVE_SQL + " AND " + _BORROWED_READ_EXPR
     + " AND NOT " + _MOUNTER_NOT_SHARED_EXPR + ")"
 )
 

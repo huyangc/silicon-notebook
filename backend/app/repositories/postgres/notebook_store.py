@@ -13,6 +13,7 @@ from app.repositories.postgres._store_utils import (
     placeholders,
     sqlite_compatible_notebook_row,
 )
+from app.repositories.postgres.access_sql import NOTEBOOK_LIVE_SQL
 from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.postgres.mount_sql import (
     MOUNT_GATE_CLOSED_EXPR as _MOUNT_GATE_CLOSED_EXPR,
@@ -243,10 +244,8 @@ class NotebookStore:
             )
         return notebook_id
 
-    def get_row(self, notebook_id: str, *, include_copying: bool = False) -> dict:
-        statement = "SELECT * FROM notebooks WHERE id=%s"
-        if not include_copying:
-            statement += " AND status<>'copying'"
+    def get_row(self, notebook_id: str) -> dict:
+        statement = f"SELECT * FROM notebooks WHERE id=%s AND {NOTEBOOK_LIVE_SQL}"
         with self.database.connect() as connection:
             row = connection.execute(statement, (notebook_id,)).fetchone()
         if row is None:
@@ -308,7 +307,7 @@ class NotebookStore:
                 "FROM notebooks n LEFT JOIN unified_kg_state u "
                 "ON u.notebook_id=n.id LEFT JOIN kg_build_jobs j "
                 "ON j.id=n.indexing_pipeline_job_id "
-                "WHERE n.id=%s AND n.status<>'copying'",
+                f"WHERE n.id=%s AND n.{NOTEBOOK_LIVE_SQL}",
                 (notebook_id,),
             ).fetchone()
         if row is None:
@@ -336,7 +335,7 @@ class NotebookStore:
                 "UPDATE notebooks SET indexing_pipeline=%s,"
                 "indexing_pipeline_version=%s,indexing_pipeline_generation=%s,"
                 "indexing_pipeline_job_id=%s,"
-                "updated_at=%s WHERE id=%s AND status<>'copying'",
+                f"updated_at=%s WHERE id=%s AND {NOTEBOOK_LIVE_SQL}",
                 (
                     pipeline_id or None,
                     pipeline_version,

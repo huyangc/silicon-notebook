@@ -42,6 +42,8 @@ from typing import Any, Callable, Dict, Optional, Tuple
 
 from psycopg import Error
 
+from app.repositories.postgres.access_sql import NOTEBOOK_LIVE_SQL
+
 # non-deprecated 是大多数调用点想要的「活跃」集合;更窄的 USABLE_STATUSES 由
 # knowledge_contracts 定义,调用方按需自己过滤——与 sqlite 版同一分工。
 _DEPRECATED = "deprecated"
@@ -214,7 +216,7 @@ def warm_all(db: Any, progress=None) -> int:
     ids = [
         row["id"]
         for row in db.execute(
-            "SELECT id FROM notebooks WHERE status != 'copying' ORDER BY id"
+            f"SELECT id FROM notebooks WHERE {NOTEBOOK_LIVE_SQL} ORDER BY id"
         ).fetchall()
     ]
     total = len(ids)

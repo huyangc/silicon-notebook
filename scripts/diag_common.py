@@ -30,6 +30,18 @@ _STATIC_PATH_SEGMENTS = frozenset({
     "notebooks", "preview", "public", "reports", "search", "share", "shared", "sources",
     "status", "stream", "tables",
 })
+# app-free 副本(批 3·W1 T-1):`diag_db.py` 只读 stdlib,不 import `app.*`
+# (README.md「离线、纯 stdlib、app-free」),够不到
+# `app.repositories.sqlite.access_sql.NOTEBOOK_LIVE_SQL`。这份副本必须与它逐字相等——
+# 由 `test_diag_db_notebook_live_predicate_matches_access_sql`(守卫)校验,不靠约定漂移。
+NOTEBOOK_LIVE_SQL = "status NOT IN ('copying','deleting')"
+
+# 同一条谓词的 Python 侧镜像(base_recall 的挂载有效性判定是 Python 布尔表达式,
+# 不是 SQL 文本——两条 AST 守卫都够不到裸的 `status != "copying"`,codex 评审实测
+# 指出这是第三处真谓词)。内容必须与上面 NOTEBOOK_LIVE_SQL 的状态列表逐字一致,
+# 由同一条守卫断言钉住。
+NOTEBOOK_HIDDEN_STATUSES = frozenset({"copying", "deleting"})
+
 _READ_CHUNK_BYTES = 64 * 1024
 _DEFAULT_MAX_INPUT_BYTES = 64 * 1024 * 1024
 _MAX_RENDERED_PATH_BYTES = 384
