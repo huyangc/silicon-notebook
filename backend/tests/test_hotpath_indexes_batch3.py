@@ -15,8 +15,9 @@ Contract under test:
      reusing ``test_hotpath_indexes_batch2.py``'s statement regex (it
      already tolerates an absent ``USING``/``WHERE`` clause, which is this
      batch's whole shape).
-  2. ``HOTPATH_INDEX_SPECS`` totals eleven entries (eight batch-1 + two
-     batch-2 + one batch-3) and batch 1/2 are untouched by this addition.
+  2. ``HOTPATH_INDEX_SPECS`` totals fourteen entries (eight batch-1 + two
+     batch-2 + one batch-3 + three batch-4) and batch 1/2 are untouched by
+     this addition.
   3. The new spec's key columns stay byte-identical to
      ``knowledge_store.py``'s ``concept_cluster_detail_rows``/
      ``concept_cluster_member_total`` query text on both backends (the
@@ -101,9 +102,10 @@ def test_migration_file_exists_and_declares_exactly_one_statement():
 def test_batch3_spec_is_present_and_batch1_batch2_are_untouched():
     names = {spec.name for spec in HOTPATH_INDEX_SPECS}
     assert _BATCH3_NAME in names
-    assert len(HOTPATH_INDEX_SPECS) == 11, (
-        "expected eight batch-1 plus two batch-2 plus one batch-3 entry in "
-        f"HOTPATH_INDEX_SPECS, found {len(HOTPATH_INDEX_SPECS)}: {sorted(names)}"
+    assert len(HOTPATH_INDEX_SPECS) == 14, (
+        "expected eight batch-1 plus two batch-2 plus one batch-3 plus three "
+        f"batch-4 entries in HOTPATH_INDEX_SPECS, found "
+        f"{len(HOTPATH_INDEX_SPECS)}: {sorted(names)}"
     )
     # Batch 1/2 names untouched by this addition.
     batch1_names = {

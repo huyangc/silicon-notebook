@@ -74,6 +74,189 @@ def test_list_sources_page_query_filters(repo):
     assert page_fn.total_count == 1 and page_fn.items[0].id == "src-b"
 
 
+# --------------------------------------------------------------------------
+# q 过滤谓词的四腿语义(title / file_name / 作者名 / 论文标题)。
+#
+# 这组用例先在**旧的 OR-跨表 EXISTS 形态**上跑通,再换成 id 半连接三腿 UNION
+# 形态(PostgreSQL 侧同批加 GIN trgm 索引,SQLite 侧只做同构改写、不加索引),
+# 所以它们是那次改写的「语义不变」证明,而不是新形态的事后描述。PG 孪生:
+# ``tests/postgres/test_core_store_conformance.py`` 的
+# ``test_source_search_matches_every_leg_and_stays_inside_the_notebook``。
+# --------------------------------------------------------------------------
+
+
+def _seed_search_source(repo, nb_id, source_id, title, file_name, created,
+                        source_type="document"):
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO sources (id,notebook_id,title,source_type,file_name,file_path,"
+            "file_size,file_hash,summary,doc_type,parse_status,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (source_id, nb_id, title, source_type, file_name, f"/tmp/{file_name}",
+             0, f"h-{source_id}", "", "", "extracted", created, _now()),
+        )
+
+
+def _seed_paper_meta(repo, nb_id, source_id, paper_title=None, authors=()):
+    """``upsert_paper_meta`` 的原始 SQL 等价物 —— facade 不转发那个方法,而这组
+    用例要的正是「两张子表里有这样的行」,不是走服务层的写路径。"""
+    now = _now()
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO source_paper_meta (source_id,notebook_id,is_paper,paper_title,"
+            "venue,pub_year,doi,keywords,raw_json,model,created_at,updated_at) "
+            "VALUES (?,?,1,?,'',NULL,'','[]','{}','',?,?)",
+            (source_id, nb_id, paper_title, now, now),
+        )
+        for position, name in enumerate(authors):
+            db.execute(
+                "INSERT INTO source_authors (id,source_id,notebook_id,position,name,"
+                "affiliation,created_at) VALUES (?,?,?,?,?,'',?)",
+                (f"{source_id}:auth:{position:03d}", source_id, nb_id, position, name, now),
+            )
+
+
+def _search_ids(repo, nb_id, needle):
+    page = repo.list_sources_page(nb_id, q=needle, offset=0, limit=200)
+    ids = [item.id for item in page.items]
+    # total_count 与 items 必须由同一份 where 片段产生 —— 两者分叉会让「共 N 篇」
+    # 与实际列出的行数对不上,而那正是 COUNT 与页查询共用 where 的理由。
+    assert page.total_count == len(ids), (needle, page.total_count, ids)
+    return ids
+
+
+@pytest.fixture
+def search_notebooks(repo):
+    """两个 notebook:目标库 nb 与「同名作者/同名标题」的干扰库 other。"""
+    nb = repo.create_notebook(NotebookCreate(name="target"))
+    other = repo.create_notebook(NotebookCreate(name="other"))
+    # 目标库:四条腿各一条命中源,外加一条四腿同时命中的源。
+    _seed_search_source(repo, nb.id, "s-title", "Needle Voltage Reference",
+                        "vref.md", "2026-01-01T00:00:00")
+    _seed_search_source(repo, nb.id, "s-file", "Untitled import",
+                        "needle-doc.md", "2026-01-01T00:00:01")
+    _seed_search_source(repo, nb.id, "s-author", "Anonymous report",
+                        "anon.pdf", "2026-01-01T00:00:02")
+    _seed_paper_meta(repo, nb.id, "s-author", paper_title="Unrelated title",
+                     authors=("Zeta Needleman",))
+    _seed_search_source(repo, nb.id, "s-ptitle", "Scanned upload",
+                        "scan.pdf", "2026-01-01T00:00:03")
+    _seed_paper_meta(repo, nb.id, "s-ptitle", paper_title="Needle in a Haystack")
+    _seed_search_source(repo, nb.id, "s-multi", "Needle everywhere",
+                        "needle-multi.md", "2026-01-01T00:00:04")
+    _seed_paper_meta(repo, nb.id, "s-multi", paper_title="Needle title",
+                     authors=("Needle Author",))
+    _seed_search_source(repo, nb.id, "s-miss", "Nothing to see",
+                        "plain.md", "2026-01-01T00:00:05")
+    # 隐藏合成源:title 与作者名都命中,但 memory/knowhow 必须既不进 items
+    # 也不进 total_count。
+    _seed_search_source(repo, nb.id, "s-memory", "Needle memory projection",
+                        "mem.md", "2026-01-01T00:00:06", source_type="memory")
+    _seed_paper_meta(repo, nb.id, "s-memory", paper_title="Needle memory paper",
+                     authors=("Needle Ghost",))
+    _seed_search_source(repo, nb.id, "s-knowhow", "Needle knowhow projection",
+                        "kh.md", "2026-01-01T00:00:07", source_type="knowhow")
+    _seed_paper_meta(repo, nb.id, "s-knowhow", paper_title="Needle knowhow paper",
+                     authors=("Needle Ghost",))
+    # 干扰库:同名作者 + 同名论文标题 + 同名 title/file_name。
+    _seed_search_source(repo, other.id, "s-other", "Needle everywhere",
+                        "needle-multi.md", "2026-01-01T00:00:00")
+    _seed_paper_meta(repo, other.id, "s-other", paper_title="Needle title",
+                     authors=("Needle Author",))
+    return nb, other
+
+
+def test_source_search_matches_every_leg(repo, search_notebooks):
+    nb, _other = search_notebooks
+    assert _search_ids(repo, nb.id, "voltage") == ["s-title"]          # title
+    assert _search_ids(repo, nb.id, "vref.md") == ["s-title"]          # file_name
+    assert _search_ids(repo, nb.id, "zeta needleman") == ["s-author"]  # 作者名
+    assert _search_ids(repo, nb.id, "haystack") == ["s-ptitle"]        # 论文标题
+
+
+def test_source_search_counts_a_multi_leg_hit_exactly_once(repo, search_notebooks):
+    """s-multi 同时命中 title / file_name / 作者名 / 论文标题四条腿。旧形态是一
+    个布尔 OR,天然只算一次;新形态是三腿 UNION 再 id 半连接,UNION 去重与
+    ``IN`` 半连接语义共同保证同一件事 —— 这条用例把它钉住,别让哪天有人把
+    ``UNION`` 写成 ``UNION ALL`` 再 JOIN 回来。"""
+    nb, _other = search_notebooks
+    assert _search_ids(repo, nb.id, "needle-multi") == ["s-multi"]
+    ids = _search_ids(repo, nb.id, "needle")
+    assert ids.count("s-multi") == 1
+    assert ids == ["s-title", "s-file", "s-author", "s-ptitle", "s-multi"]
+
+
+def test_source_search_excludes_hidden_source_types(repo, search_notebooks):
+    """memory / knowhow 合成源即使 title、论文标题、作者名全部命中,也不能出现在
+    结果里,更不能进 total_count —— 可见口径 (VISIBLE_SOURCE_TYPES_PREDICATE)
+    对 COUNT 与页查询是同一份。"""
+    nb, _other = search_notebooks
+    ids = _search_ids(repo, nb.id, "needle")
+    assert "s-memory" not in ids and "s-knowhow" not in ids
+    assert _search_ids(repo, nb.id, "projection") == []
+    assert _search_ids(repo, nb.id, "needle ghost") == []
+
+
+def test_source_search_never_leaks_another_notebook(repo, search_notebooks):
+    """干扰库里有逐字同名的 title / file_name / 作者名 / 论文标题。四条腿都必须
+    留在本库内 —— 作者腿与论文腿在新形态里靠子表自己的 ``notebook_id=?`` 收窄,
+    在旧形态里靠 ``a.source_id=sources.id`` 回连到已限定 notebook 的外层。"""
+    nb, other = search_notebooks
+    for needle in ("needle", "needle author", "needle title", "needle-multi"):
+        assert "s-other" not in _search_ids(repo, nb.id, needle), needle
+    # 反向:干扰库自己搜得到自己那一条,搜不到目标库的任何一条。
+    assert _search_ids(repo, other.id, "needle") == ["s-other"]
+    assert _search_ids(repo, other.id, "haystack") == []
+
+
+def test_source_search_ignores_a_legacy_cross_notebook_child_row(repo, search_notebooks):
+    """**这一条是本次改写唯一一处有意的语义变化,不是等价性证明的一部分。**
+
+    当前写者写不出「子表行的 notebook_id ≠ 其 source 的 notebook_id」这种行:
+    PG 侧 ``upsert_paper_meta`` 先做归属校验,两端的深拷贝同时改写 source_id 与
+    notebook_id,全仓没有把 source 移到另一个 notebook 的路径。但早于这些写者的
+    畸形历史行可能存在 —— 仓库对这类行早有明确口径:``report_source_rows`` 家族
+    在 JOIN 上写 ``AND m.notebook_id = s.notebook_id``,``notebook_analytics`` 的
+    is_paper 计数直接按 ``source_paper_meta.notebook_id`` 分组,两处都把畸形行
+    判为「不属于这个库」。
+
+    旧的搜索谓词只按 ``m.source_id = sources.id`` 回连,是全仓唯一不看子表
+    notebook_id 的那处,于是同一行在搜索里算命中、在报表里不算。新形态把它并进
+    同一口径。这条用例把这个取舍钉住:它在旧实现上是**红**的。"""
+    nb, other = search_notebooks
+    # 先按正常口径写好,再单独改坏 notebook_id —— 与
+    # tests/test_memory_source_visibility.py 里那条既有的畸形行用例同一手法:
+    # 建模历史脏数据,不削弱写者。
+    with repo._write() as db:
+        db.execute(
+            "UPDATE source_paper_meta SET notebook_id = ? WHERE source_id = ?",
+            (other.id, "s-ptitle"),
+        )
+        db.execute(
+            "UPDATE source_authors SET notebook_id = ? WHERE source_id = ?",
+            (other.id, "s-author"),
+        )
+    assert _search_ids(repo, nb.id, "haystack") == []
+    assert _search_ids(repo, nb.id, "zeta needleman") == []
+    # 畸形行也不会因此泄漏进它被写坏成的那个库(source 本身仍在原库)。
+    assert _search_ids(repo, other.id, "haystack") == []
+    assert _search_ids(repo, other.id, "zeta needleman") == []
+    # 其余腿不受影响:source 行自己的 title/file_name 与本库判定无关。
+    assert _search_ids(repo, nb.id, "scanned") == ["s-ptitle"]
+
+
+def test_source_search_empty_query_path_is_unchanged(repo, search_notebooks):
+    """q 为空(或只有空白)时根本不进过滤分支:整库可见源全在,顺序按
+    ``(created_at, id)``。"""
+    nb, _other = search_notebooks
+    for blank in ("", "   ", None):
+        page = repo.list_sources_page(nb.id, q=blank, offset=0, limit=200)
+        assert page.total_count == 6
+        assert [item.id for item in page.items] == [
+            "s-title", "s-file", "s-author", "s-ptitle", "s-multi", "s-miss",
+        ]
+
+
 def test_get_sources_route_paginates(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path/'t.db'}")
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path/"s"))

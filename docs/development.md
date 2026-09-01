@@ -560,6 +560,49 @@ decreases. This adds no table, foreign key, or unique surface, so the current
 pair is SQLite 68 / PostgreSQL 47 / epoch 1 with the same 88 business tables,
 117 replicated unique surfaces, and 12-row-slot closure bound.
 
+PostgreSQL v48 (`0048_source_search_trgm_indexes.sql`, hot-path fix batch 4)
+adds the three notebook-scoped composite GIN trigram indexes behind the source
+tab's server-side search: `idx_sources_nb_title_file_trgm` on
+`sources(notebook_id, lower(title), lower(file_name))` partial on
+`source_type NOT IN ('memory','knowhow')`, `idx_source_authors_nb_name_trgm`,
+and `idx_source_paper_meta_nb_ptitle_trgm`. It pairs with a query rewrite that
+lands on BOTH backends: `list_sources_page`'s `q` filter changes from a
+cross-table `OR` of two `LIKE` arms and two `EXISTS` subqueries into an id
+semi-join over a three-leg `UNION`, each leg rooted at its own table's
+`notebook_id=` equality and therefore separately indexable. The production
+symptom was a 363ms COUNT on a 49k-source notebook (paid twice per request,
+since the page query reuses the same WHERE fragment): the planner answered the
+cross-table OR with hashed subplans that materialized all 210k `source_authors`
+rows and all 39k `source_paper_meta` rows per execution, which a
+two-character-vs-seven-character equal-cost measurement (360ms vs 363ms)
+identified as full scans rather than LIKE evaluation. SQLite gets the rewrite
+but NO index — it has no GIN trigram equivalent and `LIKE '%…%'` cannot use a
+B-tree prefix — so `SQLITE_SCHEMA_VERSION` is untouched and v48 stays paired
+with SQLite v68; that PostgreSQL-only split is the same one migration 0042
+registered for batch 2. The three-key composite is deliberate: a multi-column
+GIN lets each `LIKE` arm constrain `(notebook_id, its own trigram key)` and
+BitmapOr two scans of the one index, verified by live EXPLAIN (the documented
+fallback, two two-key indexes, was therefore not needed and would not have
+helped — each would carry the same `notebook_id` key at the same per-scan
+cost). Two follow-up variants were measured and rejected: two two-key
+indexes instead of the composite (each would still carry the same `notebook_id`
+key at the same per-scan cost), and splitting the query's `OR` into two
+single-arm UNION legs (a wash on selective needles, measurably worse on short
+ones, because a fourth Append branch means a second full pass over `sources`
+whenever the pattern is too short for trigram extraction). Two measured
+trade-offs are registered in the migration's own header rather than discovered
+later: a needle shorter than three characters yields no trigram keys at all
+(the one page-query regression in the benchmark, 23.6ms to 33.1ms, against a
+3.4x improvement per user action); and a GIN's fastupdate pending list inflates
+every GIN cost estimate roughly tenfold until a `VACUUM` merges it, which is
+enough to make PostgreSQL reject its own freshly built index — an artifact that
+misled this batch's own first round of plan measurements and is now documented
+in `docs/operations.md` for operators. Migration 0048 re-guards
+btree_gin (same form as 0042's) and validates any pre-existing same-named index
+before creating. No table, column, foreign key, or unique surface changes, so
+the current pair is SQLite 68 / PostgreSQL 48 / epoch 1 with the same 88
+business tables, 117 replicated unique surfaces, and 12-row-slot closure bound.
+
 Run it only while application/background writers are stopped:
 
 ```bash

@@ -268,13 +268,16 @@ PYTHONPATH=backend python scripts/build_postgres_retrieval_indexes.py --apply
 全库 trgm 命中再按 notebook 过滤，最终撞 statement timeout。监控、上线和回退步骤见
 [运维文档](./operations_zh.md#postgresql-notebook-aware-词法索引)。
 
-已有数据的 PostgreSQL 库还应在线建好热路径修复索引（批 1 六组共八条 + 批 2 两条：payload 搜索 GIN 与体检 H5 部分索引 + 批 3 一条 keyset 覆盖索引，共十一条；GIN 体积按合成低熵语料基准外推约为 knowledge_objects 表段的 1.5×（真实语料 trigram 更杂,可能更大,建后以实际为准），属登记过的写放大债，劣化超阈值可 DROP INDEX CONCURRENTLY 无损回退）
+已有数据的 PostgreSQL 库还应在线建好热路径修复索引（批 1 六组共八条 + 批 2 两条：payload 搜索 GIN 与体检 H5 部分索引 + 批 3 一条 keyset 覆盖索引 + 批 4 三条来源检索 trgm 索引，共十四条；批 2 的 GIN 体积按合成低熵语料基准外推约为 knowledge_objects 表段的 1.5×（真实语料 trigram 更杂,可能更大,建后以实际为准），属登记过的写放大债，劣化超阈值可 DROP INDEX CONCURRENTLY 无损回退）
 （`concept_clusters(notebook_id, canonical_id)`、其 `lower(canonical_name)` 搭档、三条
 反向 FK 覆盖——`extraction_runs`/`knowledge_source_fact_elements`/`memory_items`、
 `knowledge_relations(notebook_id, source_object_id, target_object_id, edge_type)`、
 `chunks(source_id, ordinal)`，以及一条 partial 的 `sources(notebook_id, source_type)`
 索引），加批 3 的 `concept_clusters(notebook_id, canonical_id, member_object_id)`
-keyset 覆盖索引，形态与上面的词法索引工具一致，同样是 inspect/apply 两档：
+keyset 覆盖索引，再加批 4 的三条来源检索索引
+（`sources(notebook_id, lower(title), lower(file_name))`，按可见来源类型 partial；
+`source_authors(notebook_id, lower(name))`；`source_paper_meta(notebook_id, lower(paper_title))`），
+形态与上面的词法索引工具一致，同样是 inspect/apply 两档：
 
 ```bash
 PYTHONPATH=backend python scripts/build_hotpath_indexes.py
@@ -287,13 +290,23 @@ PYTHONPATH=backend python scripts/build_hotpath_indexes.py --apply
 同形——词集中在别的 notebook 时不会建全局位图；`--apply` 会按需安装 btree_gin 扩展），
 对整个 jsonb-as-text 建索引，在大 `knowledge_objects` 表上单条构建是分钟级，安排窗口
 时按此预估。批 3 的 keyset 覆盖索引是普通（非 partial）btree，与批 1 同样是秒级构建，
-没有上面 GIN 那些顾虑。无论哪条，`CREATE INDEX CONCURRENTLY` 都要对表
+没有上面 GIN 那些顾虑。批 4 的三条也是 notebook 域复合 GIN trgm，但索引的是标题、
+文件名、作者名、论文标题这类短文本列而不是整份 jsonb payload：基准语料上分别约为各自
+表段的 1.0×、0.3×、1.2×，在 4.9 万 source 的 notebook 规模上是数十 MB 量级（不是批 2
+payload GIN 的双位数 GB），构建是分钟级而非数十分钟。三条各自独立可回退，逐条的
+`DROP INDEX CONCURRENTLY` 清单，以及短 needle（<3 字符）这项实测登记的取舍，都写在
+`0048_source_search_trgm_indexes.sql` 的头注释里。在新灌数据的库上建完这三条后，先对三张表
+`VACUUM`（或等 autovacuum）再判断 EXPLAIN：未合并的 GIN fastupdate pending list 会把 GIN 的
+代价估算抬高约十倍，让 PostgreSQL 拒用自己刚建的索引——见
+[运维文档](./operations_zh.md#postgresql-notebook-aware-词法索引)。
+无论哪条，`CREATE INDEX CONCURRENTLY` 都要对表
 做一次全表扫描，繁忙数据库上应避开高峰期。
-迁移文件 `0039_hotpath_batch1_indexes.sql`、`0042_hotpath_batch2_search_indexes.sql` 与
-`0043_concept_cluster_keyset_index.sql` 用的是普通 `CREATE INDEX IF NOT EXISTS`
+迁移文件 `0039_hotpath_batch1_indexes.sql`、`0042_hotpath_batch2_search_indexes.sql`、
+`0043_concept_cluster_keyset_index.sql` 与 `0048_source_search_trgm_indexes.sql`
+用的是普通 `CREATE INDEX IF NOT EXISTS`
 （迁移在事务里跑，`CONCURRENTLY` 进不了事务），一旦这个脚本已经把全部索引建好，迁移
 落地时就是 no-op 的账本记录；全新部署、还没有生产流量的库，迁移本身已经够用，先跑脚本
-是可选项。迁移 0042 与 0043 落地前还会校验同名先存索引：INVALID 残留或异形名字冲突会让迁移带着
+是可选项。迁移 0042、0043 与 0048 落地前还会校验同名先存索引：INVALID 残留或异形名字冲突会让迁移带着
 确切的在线处置指引响亮失败，而不是被 `IF NOT EXISTS` 静默跳过、账本却记成功。
 `--apply` 若报告某条索引状态是 `INVALID`（此前一次 `CONCURRENTLY` 建索引中途
 失败留下的残留），工具会打印确切的 `DROP INDEX CONCURRENTLY <name>;` 指引，重跑前先手动

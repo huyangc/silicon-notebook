@@ -30,7 +30,7 @@ def test_schema_on_utf8_database_with_non_c_default_collation(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_non_c_database).migrate() == 47
+    assert PostgresMigrator(postgres_non_c_database).migrate() == 48
     with postgres_non_c_database.connect() as conn:
         row = conn.execute(
             "SELECT current_database() AS database, "
@@ -69,10 +69,10 @@ def test_packaged_migrations_are_idempotent_from_empty_schema(postgres_database)
 
     migrator = PostgresMigrator(postgres_database)
     assert migrator.current_version() == 0
-    assert migrator.migrate() == 47
-    assert migrator.migrate() == 47
-    assert migrator.current_version() == 47
-    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 47
+    assert migrator.migrate() == 48
+    assert migrator.migrate() == 48
+    assert migrator.current_version() == 48
+    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 48
 
 
 @pytest.mark.postgres_integration
@@ -80,7 +80,7 @@ def test_packaged_migration_checksum_drift_is_rejected(postgres_database, tmp_pa
     from app.repositories.postgres.migrator import PostgresMigrator, load_migrations
 
     migrator = PostgresMigrator(postgres_database)
-    assert migrator.migrate() == 47
+    assert migrator.migrate() == 48
 
     copied = tmp_path / "migrations"
     shutil.copytree(MIGRATIONS_PATH, copied)
@@ -163,7 +163,7 @@ def test_pg_trgm_is_shared_outside_disposable_schema_lifetimes(postgres_scope):
             ).fetchone()["nspname"]
         assert remaining == {"indexname": "idx_chunks_text_trgm"}
         assert extension_schema == "public"
-        assert PostgresMigrator(databases[1]).migrate() == 47
+        assert PostgresMigrator(databases[1]).migrate() == 48
     finally:
         for database in databases:
             database.close()
@@ -234,6 +234,7 @@ def test_packaged_index_migration_phases_are_exact():
         (45, "source_upload_actor"),
         (46, "wish_wall"),
         (47, "kg_reset_epoch"),
+        (48, "source_search_trgm_indexes"),
     ]
 
     def index_declarations(version: int) -> list[tuple[bool, str]]:
@@ -600,6 +601,48 @@ def test_packaged_index_migration_phases_are_exact():
         "ALTER TABLE unified_kg_state\n  ADD COLUMN kg_reset_epoch bigint "
         "NOT NULL DEFAULT 0;" in v47_ddl_only
     )
+
+    # Migration 48 (hot-path fix batch 4) — three notebook-scoped composite GIN
+    # trigram indexes, one of them partial, serving the three legs of
+    # source_store.py:list_sources_page's rewritten search predicate; see
+    # migrations/0048_source_search_trgm_indexes.sql's header comment for the
+    # production evidence (49k-source notebook, 363ms COUNT, source_authors
+    # 210k-row parallel seq scan). Pure additions: no table, column, or FK
+    # changes. The migration re-guards btree_gin (same form as 0042's) and
+    # validates any pre-existing same-named index before creating.
+    v48_hotpath_indexes = index_declarations(48)
+    assert v48_hotpath_indexes == [
+        (False, "idx_sources_nb_title_file_trgm"),
+        (False, "idx_source_authors_nb_name_trgm"),
+        (False, "idx_source_paper_meta_nb_ptitle_trgm"),
+    ]
+    v48_ddl_only = "\n".join(
+        line for line in migrations[48].sql.splitlines()
+        if not line.strip().startswith("--")
+    )
+    assert "CREATE EXTENSION btree_gin WITH SCHEMA public" in v48_ddl_only
+    assert "installing btree_gin failed" in v48_ddl_only
+    # Three keys in ONE index on sources: the two LIKE arms are OR'd, and the
+    # planner answers that with a BitmapOr over two scans of this same index
+    # (proved by EXPLAIN in test_hotpath_indexes_batch4_live.py). Splitting it
+    # into two two-key indexes was the fallback, not the shipped shape.
+    assert "notebook_id public.text_ops," in v48_ddl_only
+    assert "lower(title) public.gin_trgm_ops," in v48_ddl_only
+    assert "lower(file_name) public.gin_trgm_ops" in v48_ddl_only
+    assert "lower(name) public.gin_trgm_ops" in v48_ddl_only
+    assert "lower(paper_title) public.gin_trgm_ops" in v48_ddl_only
+    # The partial predicate must stay byte-identical to
+    # source_store.VISIBLE_SOURCE_TYPES_PREDICATE — see
+    # backend/tests/test_hotpath_indexes_batch4.py for the dedicated
+    # reconciliation test that re-derives it from that very constant.
+    assert "WHERE source_type NOT IN ('memory','knowhow')" in v48_ddl_only
+    # No explicit COLLATE anywhere: lower() inherits its argument's collation,
+    # and title/file_name/name/paper_title are all `text COLLATE "C"` columns.
+    assert 'COLLATE "C"' not in v48_ddl_only
+    # Validation block: fail-loud on INVALID residue / shape mismatch, and
+    # never auto-drop inside the migration transaction.
+    assert "RAISE EXCEPTION" in v48_ddl_only
+    assert "DROP INDEX CONCURRENTLY" in v48_ddl_only  # operator guidance text
 
 
 def test_source_index_running_timestamp_maps_to_postgres_null():

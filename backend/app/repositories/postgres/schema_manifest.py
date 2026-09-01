@@ -258,8 +258,15 @@ POSTGRES_EMPTY_TIME_SENTINELS = frozenset(
 # v46 / SQLite v67 add the global wish wall and one-vote-per-user relation;
 # PostgreSQL v47 / SQLite v68 (batch 3 W1 PR-2) add
 # unified_kg_state.kg_reset_epoch -- a persistent per-notebook "KG reset"
-# counter, DEFAULT 0, additive only.
+# counter, DEFAULT 0, additive only. PostgreSQL v48 (hot-path fix batch 4)
+# stays paired with SQLite v68 deliberately: it adds only the three
+# notebook-scoped composite GIN trigram indexes behind the source tab's search
+# predicate, and an index-only migration carries no cross-backend shape to
+# pair. The accompanying query rewrite (list_sources_page's three-leg UNION)
+# does ship on BOTH backends, but SQLite gets no index change -- it has no GIN
+# trigram equivalent -- which is the same PostgreSQL-only split migration 0042
+# registered for hot-path batch 2.
 POSTGRES_SCHEMA_MANIFEST = PostgresSchemaManifest(
     sqlite_version=68,
-    postgres_version=47,
+    postgres_version=48,
 )

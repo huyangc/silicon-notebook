@@ -404,8 +404,29 @@ PostgreSQL 词法 SQL 始终带 `notebook_id`，但旧的单表达式 trgm 索�
 - `idx_chunks_nb_text_trgm`：对应 chunk text。
 
 热路径修复批 2 的 payload 索引（`idx_knowledge_objects_nb_payload_trgm`，迁移 0042 /
-`scripts/build_hotpath_indexes.py`）出于同一理由采用同一复合形；它走
-`docs/deployment-and-configuration_zh.md` 记录的热路径通道，不经下面这个脚本。
+`scripts/build_hotpath_indexes.py`）出于同一理由采用同一复合形；热路径修复批 4 的三条
+来源检索索引同理（`idx_sources_nb_title_file_trgm` 带两个 trgm 键 `lower(title)` 与
+`lower(file_name)`，让两条 `LIKE` 腿的 `OR` 能对同一条索引做两次扫描再 BitmapOr；另加
+`idx_source_authors_nb_name_trgm` 与 `idx_source_paper_meta_nb_ptitle_trgm`，迁移 0048）。
+它们都走 `docs/deployment-and-configuration_zh.md` 记录的热路径通道，不经下面这个脚本。
+
+看这几条 trgm 索引的计划前，有两件事值得先知道，都已实测并登记在
+`0048_source_search_trgm_indexes.sql` 头注释里。
+
+其一，`pg_trgm` 对短于 3 个字符的检索模式提取不出任何 trigram 键，所以 1~2 字符的 needle
+会退化成「本 notebook 的全部行」（只剩 `btree_gin` 的 `notebook_id` 键）加一次 heap recheck。
+
+其二，也是更常见的误判来源：**刚灌完数据就看起来「没走 GIN」，多半不是 planner 嫌它不好。**
+GIN 默认开 `fastupdate`，新插入的条目先落在未建索引的 pending list 上，而 planner 会为扫描
+这份 pending list 计入代价——在 `CREATE INDEX` 之后大批入库、恢复备份、或基准测试自己灌数据
+之后，这笔附加代价会把估算抬高约十倍，PostgreSQL 于是改选顺序扫描或 `notebook_id` 前置的
+普通 btree。3 万 source 语料上 `VACUUM` 前后实测：`lower(title)` 那条 arm 从顺序扫描
+（代价 1379）变成复合 GIN（85.52）；`title OR file_name` 从 `idx_sources_notebook_status`
+（1501）变成对复合索引两次扫描再 BitmapOr（170.80）；论文标题腿从 `idx_source_paper_meta_nb`
+（740.55）变成它自己的 GIN（85.38）。对相关表做一次 `VACUUM` 把 pending list 并进索引树，
+三条计划就都翻到预期索引；autovacuum 自己也会到达同一状态。所以在新灌数据的库上建完这些索引后，
+先 `VACUUM`（或等 autovacuum）再判断计划；若希望永久免掉这笔附加代价，可以用
+`WITH (fastupdate=off)` 建索引——迁移里的同名先存索引校验刻意容忍这个 reloption。
 
 从仓库根先只读检查，再在受控的低流量时段执行：
 
