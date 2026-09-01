@@ -9,6 +9,7 @@ from enum import StrEnum
 from typing import Callable, Iterator, Literal, Protocol
 
 from app.core.request_context import request_user_id
+from app.domain.model_artifacts import current_model_artifact_lifecycle_epoch
 
 
 class ModelPriority(StrEnum):
@@ -39,6 +40,7 @@ class ModelWorkContext:
     cancel_event: CancellationSignal | None
     notebook_id: str = ""
     question: str = ""
+    artifact_lifecycle_epoch: int = 0
 
 
 @dataclass(frozen=True)
@@ -148,17 +150,18 @@ def make_model_work_context(
             else actor_id
         )
     )
+    effective_notebook = (
+        scope.notebook_id
+        if scope is not None and scope.notebook_id
+        else (artifact_scope.notebook_id if artifact_scope is not None else "")
+    )
     now = (clock or time.monotonic)()
     return ModelWorkContext(
         actor_id=str(effective_actor or request_user_id() or "system"),
         workload_id=str(workload_id),
         priority=effective_priority,
         parent_id=effective_parent,
-        notebook_id=(
-            scope.notebook_id
-            if scope is not None and scope.notebook_id
-            else (artifact_scope.notebook_id if artifact_scope is not None else "")
-        ),
+        notebook_id=effective_notebook,
         question=(
             scope.question
             if scope is not None and scope.question
@@ -171,6 +174,9 @@ def make_model_work_context(
             else now + _DEADLINE_SECONDS[effective_priority]
         ),
         cancel_event=cancel_event,
+        artifact_lifecycle_epoch=current_model_artifact_lifecycle_epoch(
+            effective_notebook
+        ),
     )
 
 
