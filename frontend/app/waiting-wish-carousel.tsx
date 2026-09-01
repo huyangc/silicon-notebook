@@ -8,6 +8,7 @@ import { listWishes, toggleWishVote } from "./wish-wall-api.ts";
 import { WISH_KIND_LABELS, type WishItem } from "./wish-wall-model.ts";
 
 export const WAITING_WISH_ROTATION_MS = 8000;
+export const WAITING_WISH_KIND_LIMIT = 5;
 
 type WishState =
   | { kind: "loading" }
@@ -49,8 +50,8 @@ export function WaitingWishCarousel() {
       // 更新计划没有投票动作；分类型读取可避免计划占满综合列表的第一页，
       // 让等待卡始终只轮播用户确实可以赞同/取消赞同的条目。
       const [bugs, features] = await Promise.all([
-        listWishes({ kind: "bug", sort: "priority" }),
-        listWishes({ kind: "feature", sort: "priority" }),
+        listWishes({ kind: "bug", sort: "priority", limit: WAITING_WISH_KIND_LIMIT }),
+        listWishes({ kind: "feature", sort: "priority", limit: WAITING_WISH_KIND_LIMIT }),
       ]);
       if (!mounted.current || generation !== loadGeneration.current) return;
       setState({
