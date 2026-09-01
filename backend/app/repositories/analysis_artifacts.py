@@ -8,16 +8,27 @@ never physical paths, and expose no mutation endpoint.
 from __future__ import annotations
 
 from contextlib import contextmanager
-import fcntl
+import errno
 import hashlib
 import json
 import os
 import secrets
 import shutil
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
+
+try:  # POSIX advisory file locks.
+    import fcntl as _fcntl
+except ImportError:  # pragma: no cover - exercised on Windows
+    _fcntl = None
+
+try:  # Windows byte-range file locks.
+    import msvcrt as _msvcrt
+except ImportError:  # pragma: no cover - exercised on POSIX
+    _msvcrt = None
 
 from app.domain.model_artifacts import MalformedModelInteraction
 
@@ -31,6 +42,45 @@ ISSUE_STATUSES = frozenset({"open", "resolved"})
 MODEL_AREAS = frozenset({
     "ask", "report", "source", "knowledge", "memory", "knowhow", "retrieval"
 })
+_WINDOWS_LOCK_RETRY_SECONDS = 0.05
+_WINDOWS_LOCK_BUSY_ERRNOS = frozenset({errno.EACCES, errno.EDEADLK})
+
+
+def _acquire_lifecycle_file_lock(lock_file, *, exclusive: bool) -> None:
+    """Acquire a process-safe lock with the platform's native primitive."""
+    if _fcntl is not None:
+        operation = _fcntl.LOCK_EX if exclusive else _fcntl.LOCK_SH
+        _fcntl.flock(lock_file.fileno(), operation)
+        return
+    if _msvcrt is None:  # pragma: no cover - supported platforms provide one
+        raise RuntimeError("no supported file-lock implementation")
+
+    # msvcrt exposes only an exclusive byte-range lock. Serializing readers on
+    # Windows costs some concurrency but preserves the deletion/redaction
+    # guarantee. The lock file needs a byte before that range can be locked.
+    lock_file.seek(0, os.SEEK_END)
+    if lock_file.tell() == 0:
+        lock_file.write(b"\0")
+        lock_file.flush()
+    while True:
+        lock_file.seek(0)
+        try:
+            _msvcrt.locking(lock_file.fileno(), _msvcrt.LK_NBLCK, 1)
+            return
+        except OSError as exc:
+            if exc.errno not in _WINDOWS_LOCK_BUSY_ERRNOS:
+                raise
+            time.sleep(_WINDOWS_LOCK_RETRY_SECONDS)
+
+
+def _release_lifecycle_file_lock(lock_file) -> None:
+    if _fcntl is not None:
+        _fcntl.flock(lock_file.fileno(), _fcntl.LOCK_UN)
+        return
+    if _msvcrt is None:  # pragma: no cover - acquisition already fails first
+        raise RuntimeError("no supported file-lock implementation")
+    lock_file.seek(0)
+    _msvcrt.locking(lock_file.fileno(), _msvcrt.LK_UNLCK, 1)
 
 
 def _parse_time(value: str) -> datetime | None:
@@ -96,12 +146,11 @@ class AnalysisArtifactStore:
                     lock_path.chmod(0o600)
                 except OSError:
                     pass
-                operation = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
-                fcntl.flock(lock_file.fileno(), operation)
+                _acquire_lifecycle_file_lock(lock_file, exclusive=exclusive)
                 try:
                     yield
                 finally:
-                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                    _release_lifecycle_file_lock(lock_file)
 
     def _read_lifecycle_epoch_unlocked(self, notebook_id: str) -> int:
         if not notebook_id:

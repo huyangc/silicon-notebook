@@ -293,11 +293,11 @@ def _validate_known_shape(
                 _validate_known_shape(item, item_example)
             return
         shared_keys = set(value).intersection(example)
-        # Report outline explicitly permits ``frame:{}`` when no comparison
-        # frame applies. Other described nested objects still need at least one
-        # usable field, so an empty plan item remains a schema mismatch.
+        # These named nested objects have entirely optional children in their
+        # downstream contracts. Other described nested objects still need at
+        # least one usable field, so an empty plan item remains a mismatch.
         if example and not shared_keys and not (
-            field_name == "frame" and not value
+            field_name in {"frame", "validity_scope"} and not value
         ):
             raise ModelJsonRepairError("missing_expected_key")
         for key in shared_keys:
