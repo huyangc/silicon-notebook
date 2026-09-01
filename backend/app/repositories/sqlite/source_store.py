@@ -1609,10 +1609,12 @@ class SourceStore:
         ).fetchone()["count"])
         # 三个 run 子查询原本相关到 ``ko.source_id`` 并写在 EXISTS 内部,于是每扫到
         # 一行 knowledge_objects 就重算一遍;而它们只依赖 source_id,对这次调用是
-        # **常量**。提到 EXISTS 外面直接绑定 ? 之后:KO 存在性是一次半连接
-        # (idx_knowledge_objects_source,首行即停),run 判定是 ≤3 次索引探针
-        # (idx_extraction_runs_source_created)。``ko.source_id != ''`` 保留在 EXISTS
-        # 内:等值连接把它传递到绑定参数上,与原查询逐字等价。PG 侧同名方法同构。
+        # **常量**。提到 EXISTS 外面直接绑定 ? 之后:KO 存在性是一次 EXISTS 索引探针
+        # (idx_knowledge_objects_source,首行即停,单行路径没有连接),run 判定是 ≤3
+        # 次索引探针(idx_extraction_runs_source_created)。``ko.source_id != ''`` 保留
+        # 在 EXISTS 内:等值连接把它传递到绑定参数上,与原查询逐字等价。PG 侧同名方法
+        # 同构。批量兄弟见 sources_from_rows——那边驱动集是页内多个 id,才是真正的
+        # 半连接。
         kg_extracted = bool(db.execute(
             "SELECT EXISTS("
             "  SELECT 1 FROM knowledge_objects ko "
@@ -1682,8 +1684,12 @@ class SourceStore:
         """Batched sibling of source_from_row for a PAGE of source rows (house
         pattern, see _hydrate_search_hits): the 4 per-row lookups
         (source_elements COUNT, latest extraction_runs error_message,
-        kg_extracted 判定, paper-meta hydration) each become ONE query for the
-        whole page instead of one query per row — was 4*N round-trips.
+        kg_extracted 判定, paper-meta hydration) become batched per-IN_CHUNK
+        queries instead of one query per row — was 4*N round-trips. This is
+        NOT "one query for the whole page": each of the 4 lookups still runs
+        once per IN_CHUNK batch (⌈N/900⌉ batches for N ids), and
+        paper_meta_for_sources itself issues 2 statements per batch (meta +
+        authors) — 5 SQL statements per batch in total, not 4.
 
         三条是 `source_id IN (...)`;kg_extracted 那条不是,它的驱动集是页内的
         source id 本身,用 `WITH page_sources(source_id) AS (VALUES ...)` 承载

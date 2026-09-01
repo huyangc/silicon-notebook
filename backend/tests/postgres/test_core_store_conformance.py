@@ -4194,14 +4194,17 @@ def _seed_kg_extracted_matrix(core_stores: CoreStores, notebook_id: str) -> None
                 "(%s,%s,'concept','approved','','{}'::jsonb,'[]'::jsonb,%s,%s,%s)",
                 (f"ko-kgx-{index:02d}", notebook_id, source_id, NOW, NOW),
             )
-        for rank, status, error in runs:
+        # enumerate() 的 position 是这条 run 在元组里的插入序(也是 run id 后缀);
+        # rank 只用来生成 created_at 字面量,可以在多条 run 间重复(同刻场景)——两个
+        # 职责刻意分开,理由见 kg_extracted_parity_cases.py 模块 docstring。
+        for position, (rank, status, error) in enumerate(runs):
             _write_sql(
                 core_stores,
                 "INSERT INTO extraction_runs"
                 "(id,notebook_id,source_id,run_type,status,error_message,"
                 "created_at,updated_at) VALUES (%s,%s,%s,'kg',%s,%s,%s,%s)",
                 (
-                    kg_case_run_id(index, rank),
+                    kg_case_run_id(index, position),
                     notebook_id,
                     source_id,
                     status,
@@ -4246,6 +4249,119 @@ def test_kg_extracted_matrix_matches_the_shared_parity_table(core_stores: CoreSt
         label: core_stores.sources.get_source(kg_case_source_id(index)).kg_extracted
         for index, (label, _obj, _runs, _value) in enumerate(KG_EXTRACTED_CASES)
     } == expected
+
+
+def test_kg_extracted_batch_query_is_driven_by_page_source_ids(
+    core_stores: CoreStores,
+):
+    """Shape guard for 95d1268's rewrite: nothing else in this file has power
+    to catch a regression back to the pre-rewrite shape, because the whole
+    point of that rewrite was that both shapes give the SAME answer — the
+    parity matrix above only checks output.
+
+    ``sources_from_rows``'s kg_extracted judgement must be driven by the
+    PAGE's own source ids (``WITH page_sources(source_id) AS (VALUES ...)``),
+    never by scanning ``knowledge_objects`` and folding back to ``source_id``
+    with DISTINCT — the shape that cost 3650ms / 1.01M subquery executions on
+    the 49k-source fleet (see the rationale comment next to the query in
+    ``postgres/source_store.py``). This checks the *query text* the adapter
+    actually issues (captured with the same spy
+    ``test_knowledge_store_conformance.py``'s plan tests use, so a hand-copied
+    SQL string cannot drift out of sync with the real one) and the *plan*
+    EXPLAIN produces for it.
+
+    SQLite twin: ``test_sources_page_batched.py``'s
+    ``test_kg_extracted_batch_query_is_driven_by_page_source_ids``.
+    """
+    owner = core_stores.identity.create_user("k00123503", "password-18")
+    notebook_id = core_stores.notebooks.create_row(
+        NotebookCreate(name="KG shape"), owner.id
+    )
+    # Two source ids, not one: a single-row VALUES CTE gets constant-folded to
+    # a plain ``Result`` node (no ``Values Scan``) — the assertions below need
+    # a real multi-row driver, matching production's "page of many ids" shape.
+    for suffix in ("a", "b"):
+        source_id = f"src-kgshape-{suffix}"
+        core_stores.sources.insert_source(
+            source_id=source_id,
+            notebook_id=notebook_id,
+            title=f"KG shape {suffix}",
+            source_type="markdown",
+            status="extracted",
+            parse_status="extracted",
+            file_name=f"kgshape-{suffix}.md",
+            file_path=f"uploads/kgshape-{suffix}.md",
+            file_size=1,
+            file_hash=f"hash-kgshape-{suffix}",
+            summary="",
+            doc_type="",
+        )
+        _write_sql(
+            core_stores,
+            "INSERT INTO knowledge_objects"
+            "(id,notebook_id,object_type,status,owner,payload,evidence,source_id,"
+            "created_at,updated_at) VALUES "
+            "(%s,%s,'concept','approved','','{}'::jsonb,'[]'::jsonb,%s,%s,%s)",
+            (f"ko-kgshape-{suffix}", notebook_id, source_id, NOW, NOW),
+        )
+
+    with core_stores.database.connect() as connection:
+        connection.execute("SET LOCAL enable_seqscan=off")
+        rows = connection.execute(
+            "SELECT * FROM sources WHERE notebook_id=%s", (notebook_id,)
+        ).fetchall()
+
+        captured: list[tuple[str, object]] = []
+        original_execute = connection.execute
+
+        def spying_execute(sql, params=None, **kwargs):
+            text = str(sql)
+            if "knowledge_objects" in text:
+                captured.append((text, params))
+            return original_execute(sql, params, **kwargs)
+
+        connection.execute = spying_execute
+        try:
+            core_stores.sources.sources_from_rows(connection, rows)
+        finally:
+            del connection.execute
+
+        assert captured, (
+            "sources_from_rows must issue a kg_extracted judgement query "
+            "touching knowledge_objects")
+        captured_sql, captured_params = captured[0]
+        assert "WITH page_sources(source_id) AS (VALUES" in captured_sql, (
+            f"kg_extracted must be driven by the page's own source ids via a "
+            f"VALUES CTE, not by scanning knowledge_objects, got:\n{captured_sql}"
+        )
+        assert "SELECT source_id FROM page_sources" in captured_sql, (
+            f"the outer driving FROM must be page_sources, not knowledge_objects "
+            f"(knowledge_objects may still appear inside the EXISTS semi-join "
+            f"target), got:\n{captured_sql}"
+        )
+        assert "DISTINCT" not in captured_sql, (
+            f"the old shape folded knowledge_objects rows back to source_id with "
+            f"DISTINCT — the VALUES-CTE driver needs no DISTINCT at all, "
+            f"got:\n{captured_sql}"
+        )
+
+        plan_text = "\n".join(
+            str(row["QUERY PLAN"]) for row in connection.execute(
+                f"EXPLAIN (COSTS OFF) {captured_sql}", captured_params
+            ).fetchall()
+        )
+
+    assert "Values Scan" in plan_text, (
+        f"expected the page ids to drive the plan via a Values Scan, got:\n{plan_text}"
+    )
+    assert "Nested Loop Semi Join" in plan_text, (
+        f"expected the knowledge_objects EXISTS check to be a semi join off "
+        f"the page's own ids, got:\n{plan_text}"
+    )
+    assert "Unique" not in plan_text, (
+        f"a top-level DISTINCT/Unique over knowledge_objects is the OLD "
+        f"knowledge_objects-driven shape this replaced, got:\n{plan_text}"
+    )
 
 
 def test_paper_metadata_json_and_author_search_roundtrip(core_stores: CoreStores):

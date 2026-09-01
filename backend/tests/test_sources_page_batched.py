@@ -12,7 +12,6 @@ from app.core.config import Settings
 from app.services.sqlite_repository import SQLiteRepository, _now
 from app.models.schemas import NotebookCreate
 from tests.kg_extracted_parity_cases import (
-    KG_EXTRACTED_CASE_IDS,
     KG_EXTRACTED_CASES,
     kg_case_run_id,
     kg_case_source_id,
@@ -166,9 +165,12 @@ def _seed_kg_matrix(repo, notebook_id):
         _add_elements(repo, source_id, 1)
         if has_object:
             _add_kg_object(repo, notebook_id, source_id)
-        for rank, status, error_message in runs:
+        # enumerate() 的 position 是这条 run 在元组里的插入序(也是 run id 后缀);
+        # rank 只用来生成 created_at 字面量,可以在多条 run 间重复(同刻场景)——两个
+        # 职责刻意分开,理由见 kg_extracted_parity_cases.py 模块 docstring。
+        for position, (rank, status, error_message) in enumerate(runs):
             _add_extraction_run(
-                repo, notebook_id, source_id, kg_case_run_id(index, rank),
+                repo, notebook_id, source_id, kg_case_run_id(index, position),
                 f"2026-04-{rank + 1:02d}T00:00:00",
                 error_message=error_message, status=status,
             )
@@ -214,3 +216,83 @@ def test_single_row_kg_extracted_matches_the_parity_matrix(repo):
         for index, (label, _obj, _runs, _expected) in enumerate(KG_EXTRACTED_CASES)
     }
     assert got == _expected_kg_matrix()
+
+
+def test_kg_extracted_batch_query_is_driven_by_page_source_ids(repo):
+    """Shape guard for 95d1268's rewrite: nothing else in this file has power
+    to catch a regression back to the pre-rewrite shape, because the whole
+    point of that rewrite was that both shapes give the SAME answer — the
+    parity matrix above (and its PG twin) only checks output.
+
+    ``_sources_from_rows``'s kg_extracted judgement must be driven by the
+    PAGE's own source ids (``WITH page_sources(source_id) AS (VALUES ...)``),
+    never by scanning ``knowledge_objects`` and folding back to ``source_id``
+    with DISTINCT (see the rationale comment next to the query in
+    ``sqlite/source_store.py``, and the PG twin's 3650ms/1.01M-subquery
+    production number). This checks the *query text* the adapter actually
+    issues and the *plan* ``EXPLAIN QUERY PLAN`` produces for it.
+
+    PG twin: ``tests/postgres/test_core_store_conformance.py``'s
+    ``test_kg_extracted_batch_query_is_driven_by_page_source_ids``.
+    """
+    nb = repo.create_notebook(NotebookCreate(name="kg shape"))
+    # Two source ids, not one: SQLite's optimizer treats a single-row VALUES
+    # the same as any other constant, but a real page always carries many —
+    # this matches the PG twin's reason for seeding two rows.
+    _seed_source(repo, nb.id, "s-shape-a", "Doc A", "2026-01-01T00:00:00")
+    _seed_source(repo, nb.id, "s-shape-b", "Doc B", "2026-01-02T00:00:00")
+    _add_kg_object(repo, nb.id, "s-shape-a")
+    _add_kg_object(repo, nb.id, "s-shape-b")
+
+    with repo._connect() as db:
+        rows = db.execute(
+            "SELECT * FROM sources WHERE notebook_id = ?", (nb.id,)
+        ).fetchall()
+
+        captured: list[tuple[str, tuple]] = []
+        original_execute = db.execute
+
+        def spying_execute(sql, params=()):
+            text = str(sql)
+            if "knowledge_objects" in text:
+                captured.append((text, params))
+            return original_execute(sql, params)
+
+        db.execute = spying_execute
+        try:
+            repo._sources_from_rows(db, rows)
+        finally:
+            del db.execute
+
+        assert captured, (
+            "_sources_from_rows must issue a kg_extracted judgement query "
+            "touching knowledge_objects")
+        captured_sql, captured_params = captured[0]
+        assert "WITH page_sources(source_id) AS (VALUES" in captured_sql, (
+            f"kg_extracted must be driven by the page's own source ids via a "
+            f"VALUES CTE, not by scanning knowledge_objects, got:\n{captured_sql}"
+        )
+        assert "SELECT source_id FROM page_sources" in captured_sql, (
+            f"the outer driving FROM must be page_sources, not knowledge_objects "
+            f"(knowledge_objects may still appear inside the EXISTS semi-join "
+            f"target), got:\n{captured_sql}"
+        )
+        assert "DISTINCT" not in captured_sql, (
+            f"the old shape folded knowledge_objects rows back to source_id "
+            f"with DISTINCT — the VALUES-CTE driver needs no DISTINCT at all, "
+            f"got:\n{captured_sql}"
+        )
+
+        plan_text = "\n".join(
+            row["detail"] for row in
+            db.execute(f"EXPLAIN QUERY PLAN {captured_sql}", captured_params)
+        )
+
+    assert "SCAN page_sources" in plan_text or "CO-ROUTINE page_sources" in plan_text, (
+        f"expected the page ids to drive the plan (SCAN/CO-ROUTINE "
+        f"page_sources), got:\n{plan_text}"
+    )
+    assert "USING COVERING INDEX idx_knowledge_objects_source" in plan_text, (
+        f"expected the knowledge_objects EXISTS check to probe the covering "
+        f"source_id index rather than scan the table, got:\n{plan_text}"
+    )
