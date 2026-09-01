@@ -316,7 +316,9 @@ P50/P95/max；`retrieval_run_stats` 另按 Ask / 报告 planning / 报告 genera
 timeout 与熔断跳过次数。它只读日志和 manifest，不打开数据库，不输出 notebook id、问题、
 来源、正文、SQL 或错误文本。自定义存储目录时显式传
 `--index-root /path/to/storage/kg_index`。manifest 规模不含水位后的 delta；缺 manifest 的
-事件保留在 `unknown` 桶，不能误当成小库。
+事件保留在 `unknown` 桶，不能误当成小库。时间窗口默认先读最新文件并完整解码所有可能落入
+窗口的按日文件；需要限制诊断耗时时可传 `--max-input-mb N`，记录超过默认保留量时可调高
+`--max-events`。命中任一上限都会在 `log_scan` 中显示 `truncated:true`。
 
 ---
 

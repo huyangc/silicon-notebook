@@ -588,7 +588,12 @@ events by the last published scale manifest's `n_chunks`, reports P50/P95/max fo
 FTS/ANN/KNN/index-load and KG candidate components, and separately totals retrieval-run FTS
 timeouts/circuit skips by Ask versus report run kind. Pass `--index-root` when scale artifacts
 do not live under `.local/storage/kg_index`. The manifest size excludes post-watermark delta;
-events without a readable manifest remain in an explicit `unknown` bucket.
+events without a readable manifest remain in an explicit `unknown` bucket. A time-window scan
+reads newest files first and, by default, decodes every dated file that can intersect the
+requested window; older dated archives are skipped before decoding. Use `--max-input-mb N` to
+impose a decoded-byte cap when operator latency matters more than complete window coverage, and
+raise `--max-events` if `log_scan` reports more matched than retained records. Any byte or record
+cap reached is disclosed as `truncated:true`.
 
 ### KNN early stop for the largest notebooks (`POSTGRES_LEXICAL_KNN_ENABLED`)
 
