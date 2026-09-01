@@ -581,14 +581,13 @@ B-tree prefix — so `SQLITE_SCHEMA_VERSION` is untouched and v48 stays paired
 with SQLite v68; that PostgreSQL-only split is the same one migration 0042
 registered for batch 2. The three-key composite is deliberate: a multi-column
 GIN lets each `LIKE` arm constrain `(notebook_id, its own trigram key)` and
-BitmapOr two scans of the one index, verified by live EXPLAIN (the documented
-fallback, two two-key indexes, was therefore not needed and would not have
-helped — each would carry the same `notebook_id` key at the same per-scan
-cost). Two follow-up variants were measured and rejected: two two-key
-indexes instead of the composite (each would still carry the same `notebook_id`
-key at the same per-scan cost), and splitting the query's `OR` into two
-single-arm UNION legs (a wash on selective needles, measurably worse on short
-ones, because a fourth Append branch means a second full pass over `sources`
+BitmapOr two scans of the one index, verified by live EXPLAIN. Two follow-up
+variants were measured and rejected: the documented fallback, two two-key
+indexes instead of the composite, was therefore not needed and would not have
+helped — each would still carry the same `notebook_id` key at the same
+per-scan cost — and splitting the query's `OR` into two single-arm UNION legs
+(a wash on selective needles, measurably worse on short ones, because a
+fourth Append branch means a second full pass over `sources`
 whenever the pattern is too short for trigram extraction). Two measured
 trade-offs are registered in the migration's own header rather than discovered
 later: a needle shorter than three characters yields no trigram keys at all

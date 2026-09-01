@@ -1759,6 +1759,11 @@ class SourceStore:
     def paper_meta_for_sources(
         self, connection, source_ids: Sequence[str]
     ) -> dict[str, dict]:
+        """按 source_id 批量取 source_paper_meta/source_authors,不校验子表自身
+        的 notebook_id。登记在案的残留分歧:list_sources_page 的搜索谓词已改为
+        与 report_source_rows 等报表腿一样按子表 notebook_id 收窄,这条水合腿
+        没有跟着改。见
+        test_source_search_ignores_a_legacy_cross_notebook_child_row。"""
         meta_rows: dict[str, Mapping[str, Any]] = {}
         author_rows: dict[str, list[Mapping[str, Any]]] = {}
         ids = list(source_ids)

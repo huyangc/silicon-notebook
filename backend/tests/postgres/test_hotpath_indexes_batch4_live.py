@@ -189,16 +189,19 @@ def _seed_search_corpus(database) -> str:
       unindexed PENDING LIST, and ``gincostestimate`` charges every GIN plan
       for scanning it. Immediately after a bulk seed that surcharge inflates
       the estimate roughly TENFOLD and the planner rejects its own index --
-      measured on this very corpus: the title arm was costed 1379 (a
-      sequential scan won) before VACUUM and 85.52 (Bitmap Index Scan on the
-      composite) after; the ``LIKE … OR LIKE …`` form went from
-      ``idx_sources_notebook_status`` at 1501 to a BitmapOr over two scans of
-      the composite at 170.80; the paper-title leg went from
-      ``idx_source_paper_meta_nb`` at 740 to its own GIN at 85.38. A bulk-load
-      fixture without this VACUUM measures a transient state no production
-      database stays in, and every plan assertion below would be pinning that
-      artifact instead of the change. See migration 0048's header for the
-      operator-facing consequence.
+      measured on the benchmark corpus (migration 0048's own disposable
+      benchmark schema, same shape as this fixture but not this fixture
+      itself, so these exact figures are not reproducible by rerunning
+      EXPLAIN here): the title arm was costed 1379 (a sequential scan won)
+      before VACUUM and 85.52 (Bitmap Index Scan on the composite) after; the
+      ``LIKE … OR LIKE …`` form went from ``idx_sources_notebook_status`` at
+      1501 to a BitmapOr over two scans of the composite at 170.80; the
+      paper-title leg went from ``idx_source_paper_meta_nb`` at 740 to its own
+      GIN at 85.38. A bulk-load fixture without this VACUUM measures a
+      transient state no production database stays in, and every plan
+      assertion below would be pinning that artifact instead of the change.
+      See migration 0048's header for the operator-facing consequence and
+      those exact figures' source.
     """
     _seed_notebook(database, _TARGET_NOTEBOOK)
     _seed_one_notebook(
@@ -366,13 +369,17 @@ def test_author_leg_is_served_by_its_own_new_gin_index(postgres_database):
 def test_paper_title_leg_is_served_by_its_own_new_gin_index(postgres_database):
     """The paper-title leg, asserted with no planner knobs.
 
-    ``source_paper_meta`` is the smallest of the three tables (24k rows here,
-    39k in the production notebook's deployment) and it carries a pre-existing
-    plain ``idx_source_paper_meta_nb`` btree, so this leg is the one whose index
-    has the most to prove. In steady state it wins clearly: measured 85.38 for
-    the new GIN against 740.55 for the btree-plus-filter alternative. Since the
-    fixture is SMALLER than production on this table, a green here is evidence
-    for production too, not merely at production scale.
+    ``source_paper_meta`` is the smallest of the three tables (30,002 rows in
+    this fixture -- every seeded source gets a paper-meta row here, unlike
+    migration 0048's own disposable benchmark corpus, which only gives 80% of
+    its sources one and lands on 24k; 39k in the production notebook's
+    deployment) and it carries a pre-existing plain
+    ``idx_source_paper_meta_nb`` btree, so this leg is the one whose index has
+    the most to prove. In steady state it wins clearly: measured 85.38 for the
+    new GIN against 740.55 for the btree-plus-filter alternative on the
+    benchmark corpus. Since this fixture's table is smaller than production's,
+    a green here is evidence for production too, not merely at production
+    scale.
     """
     assert PostgresMigrator(postgres_database).migrate() == 48
     notebook_id = _seed_search_corpus(postgres_database)
@@ -601,3 +608,33 @@ def test_migration_rejects_an_invalid_same_named_index(postgres_database):
     with postgres_database.write() as db:
         db.execute("DROP INDEX idx_sources_nb_title_file_trgm")
     assert migrator.migrate() == 48
+
+
+@pytest.mark.xdist_group(name="postgres_hotpath_indexes_batch4")
+def test_migration_accepts_a_prebuilt_index_with_reloptions(postgres_database):
+    """0048 header 与 docs/operations 承诺:预建的复合 GIN 可以带
+    ``WITH (fastupdate = off)``(GIN 写放大的标准缓解手段),校验块只比对
+    ``_matches_shape`` 覆盖的语义维度,不比对完整 ``pg_get_indexdef``,所以这个
+    reloption 不会被判成形状不符。同款用例见批 2 的
+    ``test_migration_accepts_a_prebuilt_index_with_reloptions``。"""
+    migrator = PostgresMigrator(postgres_database)
+    assert migrator.migrate(target_version=47) == 47
+    with postgres_database.write() as db:
+        db.execute(
+            "CREATE INDEX idx_sources_nb_title_file_trgm "
+            "ON sources USING gin ("
+            "notebook_id public.text_ops, "
+            "lower(title) public.gin_trgm_ops, "
+            "lower(file_name) public.gin_trgm_ops) "
+            "WHERE source_type NOT IN ('memory','knowhow')"
+        )
+        db.execute(
+            "ALTER INDEX idx_sources_nb_title_file_trgm SET (fastupdate = off)"
+        )
+    assert migrator.migrate() == 48
+    schema = _schema_of(postgres_database)
+    state = inspect_hotpath_indexes(
+        postgres_database.settings.database_url, schema=schema
+    )
+    by_name = {row["name"]: row["state"] for row in state["indexes"]}
+    assert by_name["idx_sources_nb_title_file_trgm"] == "存在"

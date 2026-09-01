@@ -4676,10 +4676,15 @@ def test_source_search_ignores_a_legacy_cross_notebook_child_row(
     口径:``report_source_rows`` 家族在 JOIN 上写
     ``AND m.notebook_id=s.notebook_id``(见本文件
     ``test_report_source_rows_*`` 里那条同款畸形行用例),``notebook_analytics``
-    的 is_paper 计数直接按 ``source_paper_meta.notebook_id`` 分组。旧的搜索谓词
-    是全仓唯一不看子表 notebook_id 的那处;新形态把它并进同一口径。
+    的 is_paper 计数直接按 ``source_paper_meta.notebook_id`` 分组。新形态把
+    搜索腿并入这套口径 —— 搜索谓词现与 ``report_source_rows`` 等报表腿一样,
+    统一按子表自身 ``notebook_id`` 收窄。但同一调用链的水合腿
+    ``paper_meta_for_sources``(见该函数 docstring)仍只按 ``source_id`` 取
+    子表,不看子表的 notebook_id,是登记在案的残留分歧,不随本次改写统一。
 
-    这条用例在旧实现上是**红**的 —— 那正是它存在的意义。SQLite 孪生:
+    这条用例只钉住搜索腿:在这类畸形遗留行上,``display_title`` 因水合腿命中
+    而显示得到,却因搜索腿收窄而搜不到 —— 与改动前(搜得到、报表算不到)方向
+    相反。这条用例在旧实现上是**红**的 —— 那正是它存在的意义。SQLite 孪生:
     ``tests/test_sources_pagination.py`` 的同名一条。"""
     notebook_id, other_id = _seed_search_fixture(core_stores)
     _write_sql(
