@@ -52,6 +52,7 @@ from app.services.kg.run_control import KgBuildAborted
 from app.services.kg_mutation import KgMutationCoordinator
 from app.services.knowledge_lifecycle import KnowledgeLifecycleService
 from app.services.mineru_cloud_client import MinerUCloudNotConfigured
+from app.services.model_work import model_artifact_scope
 from app.services.paper_meta import (
     PAPER_META_SCHEMA_HINT,
     paper_meta_doc_type_eligible,
@@ -1404,6 +1405,24 @@ class SourceIngestionService:
                 "automatic analysis issue archival failed (%s)", type(exc).__name__
             )
 
+    def _summarize_source_scoped(self, source, elements) -> str:
+        with model_artifact_scope(
+            notebook_id=source.notebook_id,
+            parent_id=source.id,
+        ):
+            return self.summarize_source(source.title, elements)
+
+    def _augment_notebook_metadata_scoped(
+        self,
+        hooks: SourcePipelineHooks,
+        source,
+    ) -> None:
+        with model_artifact_scope(
+            notebook_id=source.notebook_id,
+            parent_id=source.id,
+        ):
+            hooks.augment_notebook_metadata(source.notebook_id, source.id)
+
     def process_source(
         self, source_id: str, hooks: SourcePipelineHooks
     ) -> SourceSummary:
@@ -1544,7 +1563,7 @@ class SourceIngestionService:
                 self._compile_spreadsheet_snapshot(source, elements)
                 # 摘要(best-effort LLM)挪到 elements 落地之后:放在写库前会让 LLM 超时/
                 # 失败/hang 把 elements 一起拖没——几万源集体丢 elements、KG 无从接地的根子。
-                summary = self.summarize_source(source.title, elements)
+                summary = self._summarize_source_scoped(source, elements)
                 self.set_source_status(source_id, "parsed", summary=summary)
 
                 # 论文元数据(best-effort):初次上传即抽,re-parse 时 force 刷新;
@@ -1615,7 +1634,7 @@ class SourceIngestionService:
             # 'extracting' — so running it before extraction gives the same input.
             # Best-effort: never fail the pipeline.
             try:
-                hooks.augment_notebook_metadata(source.notebook_id, source_id)
+                self._augment_notebook_metadata_scoped(hooks, source)
             except Exception:
                 self.event_log.logger.exception(
                     "notebook meta augmentation failed for %s", source_id
@@ -2358,22 +2377,26 @@ class SourceIngestionService:
                 max_name_chars=self.settings.indexing_pipeline_kg_name_max_chars,
             )
             plugin_started = time.perf_counter()
-            graph = kg_ingest.extract_graph(
-                kg_llm_client, raw_text, source.file_name or "source.md", kg_doc_type,
-                n=n_chars,
-                m=self.settings.kg_window_overlap_chars,
-                whitelist=whitelist,
-                refine=self.settings.kg_refine_enabled,
-                gleaning_rounds=(
-                    self.settings.kg_gleaning_rounds
-                    if self.settings.kg_gleaning_enabled else 0
-                ),
-                base_filter=base_filter,
-                kg_strategy=kg_strategy,
-                pipeline_id=pipeline_id,
-                plugin_object_types=plugin_object_types,
-                plugin_limits=plugin_limits if plugin_kg_active else None,
-            )
+            with model_artifact_scope(
+                notebook_id=source.notebook_id,
+                parent_id=source.id,
+            ):
+                graph = kg_ingest.extract_graph(
+                    kg_llm_client, raw_text, source.file_name or "source.md", kg_doc_type,
+                    n=n_chars,
+                    m=self.settings.kg_window_overlap_chars,
+                    whitelist=whitelist,
+                    refine=self.settings.kg_refine_enabled,
+                    gleaning_rounds=(
+                        self.settings.kg_gleaning_rounds
+                        if self.settings.kg_gleaning_enabled else 0
+                    ),
+                    base_filter=base_filter,
+                    kg_strategy=kg_strategy,
+                    pipeline_id=pipeline_id,
+                    plugin_object_types=plugin_object_types,
+                    plugin_limits=plugin_limits if plugin_kg_active else None,
+                )
             if plugin_kg_active:
                 self.event_log.emit(
                     {
@@ -2480,18 +2503,26 @@ class SourceIngestionService:
                 )
             completion_stats = {"mode": "off", "inserted": 0}
             try:
-                completion_stats = self.knowledge_lifecycle.complete_relations_for_source(
-                    source.notebook_id,
-                    source.id,
-                    source.title,
-                    run_id,
-                    [],
-                    [],
-                    [],
-                    cancel_check=(
-                        control.raise_if_aborted if control is not None else (lambda: None)
-                    ),
-                )
+                with model_artifact_scope(
+                    notebook_id=source.notebook_id,
+                    parent_id=source.id,
+                ):
+                    completion_stats = (
+                        self.knowledge_lifecycle.complete_relations_for_source(
+                            source.notebook_id,
+                            source.id,
+                            source.title,
+                            run_id,
+                            [],
+                            [],
+                            [],
+                            cancel_check=(
+                                control.raise_if_aborted
+                                if control is not None
+                                else (lambda: None)
+                            ),
+                        )
+                    )
                 if self._relation_completion_needs_resume(completion_stats):
                     self._schedule_relation_completion_resume(
                         source.notebook_id, source.id, source.title, run_id,
@@ -2610,12 +2641,16 @@ class SourceIngestionService:
             )[:head_chars]
             if not head_text.strip():
                 return "no_text"
-            raw = client.chat_json(
-                [{"role": "user", "content": paper_meta_prompt(head_text)}],
-                PAPER_META_SCHEMA_HINT,
-                temperature=0.0,
-                **cap_kwargs(client, "openai_compat_max_tokens"),
-            )
+            with model_artifact_scope(
+                notebook_id=source.notebook_id,
+                parent_id=source.id,
+            ):
+                raw = client.chat_json(
+                    [{"role": "user", "content": paper_meta_prompt(head_text)}],
+                    PAPER_META_SCHEMA_HINT,
+                    temperature=0.0,
+                    **cap_kwargs(client, "openai_compat_max_tokens"),
+                )
             # safe_json() always coerces to a dict (its contract), silently
             # swallowing whatever the true top-level JSON shape was — an
             # empty-dict result is then indistinguishable from a genuine

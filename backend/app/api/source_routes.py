@@ -44,6 +44,7 @@ from app.services import background_jobs
 from app.services.kg import scheduler as kg_scheduler
 from app.services.knowhow.assets import AssetService
 from app.services.mineru_cloud_client import MinerUCloudNotConfigured
+from app.services.model_work import model_artifact_scope
 from app.services.parser_registry import SUPPORTED_SOURCE_SUFFIXES
 
 
@@ -502,7 +503,15 @@ def parse_source(source_id: str, user: UserProfile = Depends(get_current_user)) 
     ):
         raise HTTPException(status_code=404, detail="Source not found")
     try:
-        return source_repository().parse_source(source_id)
+        # This URL carries only source_id, so the request dependency cannot
+        # establish notebook-scoped model diagnostics. Resolve first, then bind
+        # the synchronous source pipeline so deletion can redact its artifacts.
+        with model_artifact_scope(
+            actor_id=user.id,
+            notebook_id=notebook_id,
+            parent_id=source_id,
+        ):
+            return source_repository().parse_source(source_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Source not found")
 
