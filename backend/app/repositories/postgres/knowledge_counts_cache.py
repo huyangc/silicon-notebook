@@ -50,10 +50,12 @@ _DEPRECATED = "deprecated"
 
 _LOCK = threading.Lock()
 _MAX_NOTEBOOKS = 512  # bounded LRU;每 notebook 的值都很小(int,或 types×statuses 的小字典)
-_MEMO: "OrderedDict[str, Tuple[int, Dict[Tuple[str, str], int]]]" = OrderedDict()
-_PENDING: "OrderedDict[str, Tuple[int, int]]" = OrderedDict()
-_VISIBLE_PENDING: "OrderedDict[str, Tuple[int, int]]" = OrderedDict()
-_CHUNKS: "OrderedDict[str, Tuple[int, int]]" = OrderedDict()
+# 四个 memo 的键从裸 kg_mutation_seq 扩为 (kg_reset_epoch, kg_mutation_seq)
+# 二元组(batch-3-W1 PR-2,design doc Sec 3.2 表 #9)——见 _version_key。
+_MEMO: "OrderedDict[str, Tuple[Tuple[int, int], Dict[Tuple[str, str], int]]]" = OrderedDict()
+_PENDING: "OrderedDict[str, Tuple[Tuple[int, int], int]]" = OrderedDict()
+_VISIBLE_PENDING: "OrderedDict[str, Tuple[Tuple[int, int], int]]" = OrderedDict()
+_CHUNKS: "OrderedDict[str, Tuple[Tuple[int, int], int]]" = OrderedDict()
 
 # invalidation epoch:写回前重新核对「读之后到写之前,这个 notebook(或全局)没被
 # invalidate 过」。_GLOBAL_EPOCH 只被 invalidate(None) 推进(清空全部缓存那条路径);
@@ -72,14 +74,29 @@ _GLOBAL_EPOCH = 0
 _EPOCHS: "OrderedDict[str, int]" = OrderedDict()
 
 
-def _mutation_seq(db: Any, notebook_id: str) -> int:
+def _version_key(db: Any, notebook_id: str) -> Tuple[int, int]:
+    """``(kg_reset_epoch, kg_mutation_seq)`` — the four memos' version tag
+    (batch-3-W1 PR-2, design doc Sec 3.2 table #9). NOT the same "epoch" as
+    ``_epoch_of`` / ``_GLOBAL_EPOCH`` / ``_EPOCHS`` below: those are this
+    module's OWN process-internal in-flight-write-back race guard (best-
+    effort safety valve, unrelated to any persisted column). This function's
+    ``kg_reset_epoch`` half is the PERSISTENT, cross-process column
+    ``unified_kg_state.kg_reset_epoch``, read in the SAME query as
+    ``kg_mutation_seq`` so the pair describes one consistent row read. Before
+    it existed, a delete_notebook_kg + reingest could re-climb
+    ``kg_mutation_seq`` back to a value already cached here — the old
+    ``invalidate()`` call in ``KnowledgeLifecycleService.delete_notebook_kg``
+    covered that gap explicitly; folding the epoch into this key closes it
+    structurally instead (a notebook's epoch never repeats)."""
     row = db.execute(
-        "SELECT kg_mutation_seq FROM unified_kg_state WHERE notebook_id=%s",
+        "SELECT kg_mutation_seq,kg_reset_epoch FROM unified_kg_state WHERE notebook_id=%s",
         (notebook_id,),
     ).fetchone()
-    if row is None or row["kg_mutation_seq"] is None:
-        return 0
-    return int(row["kg_mutation_seq"])
+    if row is None:
+        return (0, 0)
+    seq = int(row["kg_mutation_seq"]) if row["kg_mutation_seq"] is not None else 0
+    epoch = int(row["kg_reset_epoch"]) if row["kg_reset_epoch"] is not None else 0
+    return (epoch, seq)
 
 
 def _epoch_of(notebook_id: str) -> Tuple[int, int]:
@@ -88,29 +105,32 @@ def _epoch_of(notebook_id: str) -> Tuple[int, int]:
 
 
 def _seq_gated(
-    memo: "OrderedDict[str, Tuple[int, Any]]",
+    memo: "OrderedDict[str, Tuple[Tuple[int, int], Any]]",
     db: Any,
     notebook_id: str,
     compute: "Callable[[], Any]",
 ) -> Any:
     """四个 memo(``_MEMO`` / ``_CHUNKS`` / ``_PENDING`` / ``_VISIBLE_PENDING``)
-    共享的 seq-gated 读写骨架:命中同 ``kg_mutation_seq`` 直接返回;miss 时锁外跑
-    ``compute()``,写回前重新核对 ``(全局 epoch, 该 notebook 的 epoch)`` 二元组没有
-    在计算期间变化——只有这个 notebook 自己被 invalidate,或全局被清空,才会拒绝写回;
+    共享的 version-gated 读写骨架:命中同 ``(kg_reset_epoch, kg_mutation_seq)``
+    直接返回(batch-3-W1 PR-2 把键从裸 ``kg_mutation_seq`` 扩为这个二元组——见
+    ``_version_key`` 的命名区分注记,别与本函数下面的 invalidation ``_epoch_of``
+    混淆,那是完全不同的另一个 best-effort 安全阀);miss 时锁外跑 ``compute()``,
+    写回前重新核对 ``(全局 epoch, 该 notebook 的 epoch)`` 二元组没有在计算期间
+    变化——只有这个 notebook 自己被 invalidate,或全局被清空,才会拒绝写回;
     别的 notebook 的 invalidate 不影响。"""
-    seq = _mutation_seq(db, notebook_id)
+    version = _version_key(db, notebook_id)
     with _LOCK:
         hit = memo.get(notebook_id)
-        if hit is not None and hit[0] == seq:
+        if hit is not None and hit[0] == version:
             memo.move_to_end(notebook_id)
             return hit[1]
-        epoch = _epoch_of(notebook_id)
+        invalidation_epoch = _epoch_of(notebook_id)
 
     value = compute()
 
     with _LOCK:
-        if epoch == _epoch_of(notebook_id):  # 期间没被 invalidate 才写回
-            memo[notebook_id] = (seq, value)
+        if invalidation_epoch == _epoch_of(notebook_id):  # 期间没被 invalidate 才写回
+            memo[notebook_id] = (version, value)
             memo.move_to_end(notebook_id)
             while len(memo) > _MAX_NOTEBOOKS:
                 memo.popitem(last=False)

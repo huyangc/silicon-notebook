@@ -1879,16 +1879,19 @@ class RepositoryRuntime:
         — ``set_conflict_status`` resolves the FACADE wrapper per call because
         the frozen confirm_conflict phase contract patches that method."""
 
-        def read_kg_mutation_seq(notebook_id: str) -> int:
-            # R3 T-A3 P1-2 / v4: point-in-time ``kg_mutation_seq`` read used by
-            # the review-queue memo's own read-order contract (``review_queue``
-            # / ``review_queue_page``'s ``read_seq`` callback, invoked BEFORE
-            # a cold ``compute()`` — see review_queue_memo's module
-            # docstring). A NEW ``connect()`` is correct here: these are
-            # ordinary reads with no write to pair the seq with, through the
-            # existing ``unified_kg.graph_seq_row`` read-only channel other
-            # services (checkup/collection_catalog/graph_retrieval) already
-            # use for the same triple.
+        def read_kg_mutation_seq(notebook_id: str) -> "tuple[int, int]":
+            # R3 T-A3 P1-2 / v4: point-in-time ``(kg_reset_epoch,
+            # kg_mutation_seq)`` read used by the review-queue memo's own
+            # read-order contract (``review_queue`` / ``review_queue_page``'s
+            # ``read_version`` callback, invoked BEFORE a cold ``compute()`` —
+            # see review_queue_memo's module docstring). Widened from a bare
+            # seq int to this tuple by batch-3-W1 PR-2 — see ReviewQueueMemo's
+            # ``_Version`` type comment for why the pair, not the seq alone,
+            # is the memo's version tag. A NEW ``connect()`` is correct here:
+            # these are ordinary reads with no write to pair the seq with,
+            # through the existing ``unified_kg.graph_seq_row`` read-only
+            # channel other services (checkup/collection_catalog/
+            # graph_retrieval) already use for the same quadruple.
             #
             # ``set_edge_review`` no longer uses this callable for its OWN
             # bump (R2 P2 fix, codex #638 R2): reading the just-bumped seq
@@ -1896,11 +1899,13 @@ class RepositoryRuntime:
             # writer's own bump land in between, decoupling "the seq this
             # call's carry uses" from "the write this call actually made" —
             # see review_queue_memo's module docstring for the two races that
-            # opened. It now gets its seq from ``mark_unified_kg_dirty_in_tx``'s
-            # return value instead, read back on the SAME connection inside
-            # the SAME transaction as its own review_status UPDATE.
+            # opened. It now gets its (seq, epoch) pair from
+            # ``mark_unified_kg_dirty_in_tx``'s return value instead, read
+            # back on the SAME connection inside the SAME transaction as its
+            # own review_status UPDATE.
             with connect() as db:
-                return int(self.unified_kg.graph_seq_row(db, notebook_id)[0])
+                row = self.unified_kg.graph_seq_row(db, notebook_id)
+                return int(row[3]), int(row[0])
 
         self.knowledge_governance = KnowledgeGovernanceService(
             settings=self.settings,
@@ -1922,7 +1927,7 @@ class RepositoryRuntime:
             rule_card=rule_card,
             set_conflict_status=set_conflict_status,
             memory_store=self.memory_store,
-            kg_mutation_seq=read_kg_mutation_seq,
+            kg_version=read_kg_mutation_seq,
             mark_unified_kg_dirty_in_tx=mark_unified_kg_dirty_in_tx,
             review_queue_memo=self.review_queue_memo,
         )
@@ -1968,7 +1973,6 @@ class RepositoryRuntime:
             note_model_error=note_model_error,
             participant_notebook_ids=self.notebook_store.participant_notebook_ids,
             invalidate_knowledge_counts=self.queries.invalidate_knowledge_counts,
-            invalidate_review_queue_memo=self.review_queue_memo.invalidate,
         )
         self.scale_artifacts.lifecycle = self.knowledge_lifecycle
         return self.knowledge_lifecycle

@@ -1031,6 +1031,7 @@
         "indexing_pipeline_id": "",
         "indexing_pipeline_version": "builtin.chunk.v1",
         "kg_mutation_seq": 3,
+        "kg_reset_epoch": 0,
         "last_rebuild_at": "<timestamp>",
         "mention_seq": -1,
         "notebook_id": "<nb-id-1>",
@@ -2330,7 +2331,7 @@
       },
       {
         "name": "unified_kg_state",
-        "sql_sha256": "4fc341956336913aae3c213682046e6dd4a7cb8a990c5648cee9ec1dc7503e22",
+        "sql_sha256": "2956049f4568c4a600beb84e8646def94ed5adffd60126eaaabb6eb96b70fea0",
         "type": "table"
       },
       {
@@ -2369,6 +2370,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 67
+    "user_version": 68
   }
 }

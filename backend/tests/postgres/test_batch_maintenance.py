@@ -598,6 +598,193 @@ def test_document_kg_wipe_preserves_memory_projection_artifacts(
             ).fetchone()["c"] == 0
 
 
+# ── batch-3-W1 PR-2: unified_kg_state seq semantics (design doc Sec 3.3) ──
+# PostgreSQL twin of backend/tests/test_kg_repository.py's SQLite-side
+# coverage — both backends share the same delete_notebook_graph_rows
+# contract (design doc's own parity requirement for this PR).
+
+
+@pytest.mark.postgres_integration
+def test_delete_notebook_kg_resets_unified_kg_state_in_place_and_advances_epoch(
+    postgres_repository,
+):
+    notebook_id = postgres_repository.create_notebook(
+        NotebookCreate(name="epoch reset")
+    ).id
+    runtime = postgres_repository._runtime
+    n_obj, n_rel = postgres_repository.store_kg(
+        notebook_id, None,
+        [{"local_id": "C1", "object_type": "concept", "payload": {"name": "x"}, "evidence": []}],
+        [],
+    )
+    assert (n_obj, n_rel) == (1, 0)
+
+    with runtime.database.connect() as db:
+        before = db.execute(
+            "SELECT * FROM unified_kg_state WHERE notebook_id=%s", (notebook_id,)
+        ).fetchone()
+    assert before is not None
+    assert int(before["kg_mutation_seq"]) > 0
+    assert int(before["kg_reset_epoch"]) == 0
+
+    postgres_repository.delete_notebook_kg(notebook_id)
+
+    with runtime.database.connect() as db:
+        after = db.execute(
+            "SELECT * FROM unified_kg_state WHERE notebook_id=%s", (notebook_id,)
+        ).fetchone()
+    assert after is not None, "the row must be RESET in place, never dropped"
+    assert int(after["kg_mutation_seq"]) == 0
+    assert int(after["cluster_mutation_seq"]) == 0
+    assert int(after["community_seq"]) == -1
+    assert int(after["canonical_rel_seq"]) == -1
+    assert int(after["mention_seq"]) == -1
+    assert after["cluster_input_version"] == ""
+    assert after["last_rebuild_at"] is None
+    assert int(after["object_count"]) == 0
+    assert int(after["relation_count"]) == 0
+    assert int(after["cluster_count"]) == 0
+    assert int(after["kg_reset_epoch"]) == 1, "the ONE writer of kg_reset_epoch must bump it by 1"
+
+    # A second delete (on the now-empty graph) advances the epoch again —
+    # only increases, never decreases or resets.
+    postgres_repository.delete_notebook_kg(notebook_id)
+    with runtime.database.connect() as db:
+        twice = db.execute(
+            "SELECT kg_reset_epoch FROM unified_kg_state WHERE notebook_id=%s", (notebook_id,)
+        ).fetchone()
+    assert int(twice["kg_reset_epoch"]) == 2
+
+
+@pytest.mark.postgres_integration
+def test_delete_notebook_kg_removes_this_notebooks_kg_analysis_artifacts_ledger(
+    postgres_repository,
+):
+    """design doc Sec 3.2 table #15: the analysis-artifact LEDGER
+    (``kg_analysis_artifacts``) is blanket-deleted alongside the graph, not
+    reset — see the SQLite twin (test_kg_repository.py) for the full
+    seq_behind rationale.
+
+    R1 (P2-1, post-review): the ledger row and its DETAIL tables
+    (``kg_community_edges`` / ``kg_source_profiles``) are a documented single
+    unit; this now also seeds and asserts on those two detail tables — see
+    the SQLite twin for the full rationale."""
+    notebook_id = postgres_repository.create_notebook(
+        NotebookCreate(name="artifact ledger")
+    ).id
+    runtime = postgres_repository._runtime
+    now = normalize_timestamp(runtime.seams.now())
+    with runtime.database.write() as db:
+        db.execute(
+            "INSERT INTO kg_analysis_artifacts (notebook_id,kind,kg_mutation_seq,payload,created_at) "
+            "VALUES (%s,%s,%s,%s,%s)",
+            (notebook_id, "cross_board_edges", 5, jsonb({}), now),
+        )
+        db.execute(
+            "INSERT INTO kg_analysis_artifacts (notebook_id,kind,kg_mutation_seq,payload,created_at) "
+            "VALUES (%s,%s,%s,%s,%s)",
+            (notebook_id, "source_board_profiles", 5, jsonb({}), now),
+        )
+        db.execute(
+            "INSERT INTO kg_community_edges (notebook_id,src_community_id,dst_community_id,weight) "
+            "VALUES (%s,%s,%s,%s)",
+            (notebook_id, "cid-a", "cid-b", 3),
+        )
+        db.execute(
+            "INSERT INTO kg_source_profiles (notebook_id,source_id) VALUES (%s,%s)",
+            (notebook_id, "src-x"),
+        )
+    with runtime.database.connect() as db:
+        assert db.execute(
+            "SELECT COUNT(*) AS c FROM kg_analysis_artifacts WHERE notebook_id=%s", (notebook_id,)
+        ).fetchone()["c"] == 2
+        assert db.execute(
+            "SELECT COUNT(*) AS c FROM kg_community_edges WHERE notebook_id=%s", (notebook_id,)
+        ).fetchone()["c"] == 1
+        assert db.execute(
+            "SELECT COUNT(*) AS c FROM kg_source_profiles WHERE notebook_id=%s", (notebook_id,)
+        ).fetchone()["c"] == 1
+
+    postgres_repository.delete_notebook_kg(notebook_id)
+
+    with runtime.database.connect() as db:
+        assert db.execute(
+            "SELECT COUNT(*) AS c FROM kg_analysis_artifacts WHERE notebook_id=%s", (notebook_id,)
+        ).fetchone()["c"] == 0
+        assert db.execute(
+            "SELECT COUNT(*) AS c FROM kg_community_edges WHERE notebook_id=%s", (notebook_id,)
+        ).fetchone()["c"] == 0
+        assert db.execute(
+            "SELECT COUNT(*) AS c FROM kg_source_profiles WHERE notebook_id=%s", (notebook_id,)
+        ).fetchone()["c"] == 0
+
+
+@pytest.mark.postgres_integration
+def test_delete_notebook_kg_upserts_when_the_state_row_was_already_missing(
+    postgres_repository,
+):
+    """R1 (P0-2, post-review): PostgreSQL twin of test_kg_repository.py's
+    SQLite-side coverage. scripts/merge_dbs.py's ``KG_STATE_TABLES``
+    deliberately DELETEs a merged notebook's ``unified_kg_state`` row; a bare
+    UPDATE against that missing row is a silent no-op (rowcount 0), so
+    kg_reset_epoch never advances and every reader's "row is None" fallback
+    keeps computing the same (epoch=0, seq=0) key across the delete — even
+    though real graph rows were removed in the same transaction."""
+    from app.repositories.postgres import knowledge_counts_cache as kcc
+
+    notebook_id = postgres_repository.create_notebook(
+        NotebookCreate(name="missing state row")
+    ).id
+    runtime = postgres_repository._runtime
+    postgres_repository.store_kg(
+        notebook_id, None,
+        [
+            {"local_id": "C1", "object_type": "concept", "payload": {"name": "x"}, "evidence": []},
+            {"local_id": "C2", "object_type": "concept", "payload": {"name": "y"}, "evidence": []},
+        ],
+        [],
+    )
+    with runtime.database.connect() as db:
+        before = db.execute(
+            "SELECT * FROM unified_kg_state WHERE notebook_id=%s", (notebook_id,)
+        ).fetchone()
+    assert before is not None
+    assert int(before["kg_mutation_seq"]) > 0
+
+    with runtime.database.write() as db:
+        db.execute("DELETE FROM unified_kg_state WHERE notebook_id=%s", (notebook_id,))
+    with runtime.database.connect() as db:
+        assert db.execute(
+            "SELECT COUNT(*) AS c FROM unified_kg_state WHERE notebook_id=%s", (notebook_id,)
+        ).fetchone()["c"] == 0
+
+    kcc.invalidate()
+    with runtime.database.connect() as db:
+        stale_counts = kcc.type_status_counts(db, notebook_id)
+    assert sum(stale_counts.values()) == 2
+
+    counts = postgres_repository.delete_notebook_kg(notebook_id)
+    assert counts["knowledge_objects"] == 2
+
+    with runtime.database.connect() as db:
+        after = db.execute(
+            "SELECT * FROM unified_kg_state WHERE notebook_id=%s", (notebook_id,)
+        ).fetchone()
+    assert after is not None, "the row must be resurrected, not left absent"
+    assert int(after["kg_mutation_seq"]) == 0
+    assert int(after["kg_reset_epoch"]) == 1, (
+        "a missing-row delete is itself a reset event: epoch must start at "
+        "1, not the 0 a bare re-insert would default to"
+    )
+
+    with runtime.database.connect() as db:
+        fresh_counts = kcc.type_status_counts(db, notebook_id)
+    assert sum(fresh_counts.values()) == 0, (
+        "the memo warmed while the row was absent must NOT keep being "
+        "served after delete_notebook_kg"
+    )
+
+
 @pytest.mark.postgres_integration
 def test_source_target_pages_use_c_keysets_and_preserve_retry_semantics(
     postgres_repository,

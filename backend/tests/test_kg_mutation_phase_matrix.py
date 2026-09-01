@@ -921,7 +921,29 @@ def _delegating_store_spy(monkeypatch, owner, name, events, *, cursor=False):
     monkeypatch.setattr(owner, name, wrapped)
 
 
-def test_delete_delegates_in_write_then_commits_before_cache_invalidation(repo, monkeypatch):
+def test_delete_delegates_in_write_then_commits_before_cache_invalidation(
+    repo, monkeypatch
+):
+    """batch-3-W1 PR-2 R1 (P0-1, restored after review): ``delete_notebook_kg``
+    no longer calls ``invalidate_knowledge_counts`` / ``invalidate_review_
+    queue_memo`` explicitly after ``delete_notebook_graph_rows`` commits —
+    those two existed only to paper over the SAME aliasing hazard that
+    ``kg_reset_epoch`` now closes structurally (folded into their memo keys
+    as (epoch, seq), which never repeats). But ``invalidate_unified_cache``
+    is DIFFERENT: it evicts ``self.unified_cache``, whose key is the bare
+    ``(notebook_id, level)`` pair (``_unified_graph_full``,
+    ``knowledge_lifecycle.py``'s ``unified_cache.get((notebook_id, level))``)
+    with NO version component at all — not kg_mutation_seq, not
+    kg_reset_epoch, nothing. ``invalidate_kg`` (the method this call
+    delegates to, ``retrieval_snapshot_cache.py``) is the ONLY eviction path
+    for that dict; it is not one of the seq-keyed aliasing patches the other
+    two calls were, it is the single mechanism this cache has. Dropping it
+    would leave a warm ``/unified-kg`` graph response serving the PRE-delete
+    graph forever (or until an unrelated write on the same notebook happens
+    to invalidate it) — not merely an aliasing risk, an outright wrong
+    answer. See ``test_knowledge_lifecycle_delegation.py::
+    test_delete_notebook_kg_evicts_the_warm_unified_graph_cache`` for the
+    behavioural proof."""
     notebook = getattr(repo, "create_notebook")(NotebookCreate(name="delete delegation"))
     runtime = object.__getattribute__(repo, "_runtime")
     events = []
@@ -940,6 +962,7 @@ def test_delete_delegates_in_write_then_commits_before_cache_invalidation(repo, 
         "write.begin", "delete_notebook_graph_rows", "write.commit", "invalidate",
     ]
     assert events[0][1] == events[1][1] == events[2][1]
+    assert events[3][1] == notebook.id
     assert counts["knowledge_objects"] == 0
 
 

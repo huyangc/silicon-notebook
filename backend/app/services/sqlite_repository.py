@@ -34,7 +34,7 @@ from app.services.knowledge_contracts import (
     KnowledgeGraphTooLargeError,
     USABLE_STATUSES,
 )
-from app.services.checkup import CheckupService, probe_scale_index_integrity
+from app.services.checkup import CheckupService, h45_version_key, probe_scale_index_integrity
 from app.services.knowledge_lifecycle import _concept_desc_sig, _fast_loads
 from app.services.mineru_client import MinerUClient
 from app.services.mineru_cloud_client import MinerUCloudClient, MinerUCloudNotConfigured
@@ -226,11 +226,13 @@ class SQLiteRepository(RepositoryFacade):
                 count_missing_element_vectors=(
                     lambda nb, exclude: self.maintenance.count_missing_element_vectors(nb, exclude)
                 ),
-                # H4/H5 memo 键的版本分量:只取三元组的 kg_mutation_seq(同 collection_catalog
-                # 的键论证——cluster/mention seq 与 chunk/element 集合无关)。
-                kg_mutation_seq=(
-                    lambda db, nb: int(rt.unified_kg.graph_seq_row(db, nb)[0])
-                ),
+                # H4/H5 memo 键的版本分量:(kg_reset_epoch, kg_mutation_seq) 二元组
+                # (batch-3-W1 PR-2 从裸 kg_mutation_seq 扩出——同 collection_catalog
+                # 的键论证:cluster/mention seq 与 chunk/element 集合无关,不折进来)。
+                # 单次 graph_seq_row 读,不重复查询。共用实现见 checkup.h45_version_key
+                # (R1 P1-1:两后端必须用同一份,PG 侧曾经独立走过一份裸 seq 的接线)。
+                # 参数名 kg_version(非 kg_mutation_seq)——R1 P3:类型早已不是裸 seq。
+                kg_version=h45_version_key(rt.unified_kg),
                 scale_index_state=(
                     lambda nb: str(rt.scale_artifacts.status(nb).get("state", ""))
                 ),

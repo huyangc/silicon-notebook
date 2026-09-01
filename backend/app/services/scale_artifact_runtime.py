@@ -481,17 +481,51 @@ class ScaleArtifactRuntime:
     # ------------------------------ version/read catalog
 
     def version(self, notebook_id: str) -> list:
+        """The scale-artifact version list — written into every on-disk
+        manifest.version and compared by exact-value equality at five sites
+        (design doc batch-3-W1 Sec 3.4: scale_artifact_catalog.py's load/
+        _still_current, this class's _viz_manifest_fresh/index-status,
+        scale_build_cli.py's inspect).
+
+        ``kg_reset_epoch`` (batch-3-W1 PR-2) is threaded through by TWO
+        DIFFERENT rules, not one — conflating them is exactly the red-line-one
+        risk this method's own version_signal call guards against:
+
+        - The PROCESS-INTERNAL memo key below (``cached[0..3]``) includes
+          epoch UNCONDITIONALLY. This memo has no on-disk/cross-process
+          compatibility surface to protect — it exists purely so repeated
+          calls in one process skip re-deriving the list — so there is no
+          reason not to fold it in, and a reason not to skip it: without it,
+          "delete_notebook_kg resets seq/cseq to a value this memo already
+          cached under" would return a stale list straight out of the memo,
+          without even reaching version_signal's fresh epoch read.
+        - The RETURNED list only appends ``["kg_reset_epoch", N]`` when
+          ``epoch > 0``. This list is what gets written into
+          manifest.version and compared byte-for-byte against a PREVIOUSLY
+          WRITTEN manifest that predates this column. Appending
+          unconditionally would make every epoch-0 notebook's freshly
+          computed list (with a trailing 0) compare UNEQUAL to its own
+          existing on-disk manifest (without one) the instant this PR ships
+          — every notebook in the fleet would judge itself stale on the next
+          read and queue a rebuild. Gating on epoch > 0 keeps an epoch-0
+          notebook's list byte-identical to what it was before this column
+          existed (no rebuild), while a notebook that HAS been through
+          delete_notebook_kg legitimately gets a new, different list (a
+          real rebuild, because its KG genuinely was reset) — see the design
+          doc's version-list behaviour matrix for the full argument.
+        """
         from app.services.kg.edge_schema import EDGE_SCHEMA_VERSION
 
-        seq, cseq, settings_tail = self.projections.version_signal(notebook_id)
+        seq, cseq, settings_tail, epoch = self.projections.version_signal(notebook_id)
         cached = self.version_memo.get(notebook_id)
         if (
             cached is not None
             and cached[0] == seq
             and cached[1] == cseq
             and cached[2] == settings_tail
+            and cached[3] == epoch
         ):
-            return list(cached[3])
+            return list(cached[4])
 
         with self.version_lock:
             nb_lock = self.version_locks.get(notebook_id)
@@ -500,24 +534,30 @@ class ScaleArtifactRuntime:
                 self.version_locks[notebook_id] = nb_lock
 
         with nb_lock:
-            seq, cseq, settings_tail = self.projections.version_signal(notebook_id)
+            seq, cseq, settings_tail, epoch = self.projections.version_signal(notebook_id)
             cached = self.version_memo.get(notebook_id)
             if (
                 cached is not None
                 and cached[0] == seq
                 and cached[1] == cseq
                 and cached[2] == settings_tail
+                and cached[3] == epoch
             ):
-                return list(cached[3])
+                return list(cached[4])
             version = (
                 self.projections.version_facts(notebook_id)
                 + list(settings_tail)
                 + ["edge_schema", EDGE_SCHEMA_VERSION]
             )
+            # Conditional, and MUST stay the trailing element — see this
+            # method's own docstring for why unconditional is red-line-one.
+            if epoch:
+                version = version + ["kg_reset_epoch", epoch]
             self.version_memo[notebook_id] = (
                 seq,
                 cseq,
                 settings_tail,
+                epoch,
                 list(version),
             )
             return version

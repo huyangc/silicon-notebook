@@ -391,9 +391,6 @@ class KnowledgeLifecycleService:
         note_model_error: Callable[..., None],
         participant_notebook_ids: Callable[[str], List[str]],
         invalidate_knowledge_counts: Callable[[str], None] = lambda _notebook_id: None,
-        invalidate_review_queue_memo: Callable[[str], None] = (
-            lambda _notebook_id: None
-        ),
     ) -> None:
         self.settings = settings
         self.event_log = event_log
@@ -444,7 +441,6 @@ class KnowledgeLifecycleService:
         self._note_model_error = note_model_error
         self.participant_notebook_ids = participant_notebook_ids
         self._invalidate_knowledge_counts = invalidate_knowledge_counts
-        self._invalidate_review_queue_memo = invalidate_review_queue_memo
         # Keep algorithm callbacks late-bound through ``self`` so established
         # lifecycle monkeypatch seams and the caller's ContextVar context remain
         # authoritative when a background worker enters the collaborator.
@@ -482,35 +478,75 @@ class KnowledgeLifecycleService:
 
     def delete_notebook_kg(self, notebook_id: str) -> dict:
         """Delete all KG artifacts for a notebook (objects, relations, clusters,
-        merge candidates, embeddings, extraction runs, unified state) while KEEPING
-        sources and source_elements so it can be re-extracted from already-parsed
-        elements. Returns {table: rows_deleted}."""
+        merge candidates, embeddings, extraction runs) and RESET unified state
+        (batch-3-W1 PR-2, design doc Sec 3.3 option C) while KEEPING sources
+        and source_elements so it can be re-extracted from already-parsed
+        elements. Returns {table: rows_deleted} — ``unified_kg_state`` itself
+        contributes a ``"unified_kg_state"`` key holding the RESET's rowcount
+        (normally 1, an UPSERT since R1 P0-2 — see the store's own docstring
+        for why a bare UPDATE is not enough), not a delete count;
+        ``"kg_analysis_artifacts"`` holds this notebook's ledger rows removed
+        (Sec 3.2 table #15); and — R1 (P2-1, post-review) —
+        ``"kg_community_edges"`` / ``"kg_source_profiles"`` hold the ledger's
+        DETAIL rows removed alongside it (the two are a documented single
+        unit; see ``discard_board_dependent_kg_analysis_artifacts``'s
+        docstring in either backend's ``unified_kg_store.py``).
+
+        batch-3-W1 PR-2 R1 (P0-1, post-review): only TWO of the three
+        pre-PR-2 explicit post-commit invalidations were removable, not
+        three. ``_invalidate_knowledge_counts`` / ``_invalidate_review_
+        queue_memo`` existed for the SAME reason: the old
+        ``delete_notebook_graph_rows`` DROPPED the ``unified_kg_state`` row,
+        so every seq-keyed process cache (both of those included) could
+        re-climb to a version it had already cached under after a
+        delete+reingest — review_queue_memo's module docstring calls this
+        out as one of its registered "seq does not advance" gaps. PR-2
+        closes THAT hazard structurally: the row is reset in place rather
+        than dropped, and ``kg_reset_epoch`` — folded into both memo keys as
+        (epoch, seq) — only increases, so a cache entry keyed under an
+        older epoch can never again compare equal to a live read. Those two
+        calls are gone for good.
+
+        ``_invalidate_unified_cache`` is DIFFERENT and stays. It evicts
+        ``self.unified_cache`` (``_unified_graph_full``'s
+        ``(notebook_id, level)``-keyed dict, no version component of ANY
+        kind — not kg_mutation_seq, not kg_reset_epoch). ``invalidate_kg``
+        (what this call delegates to) is the ONLY eviction path for that
+        cache — it is not a seq-aliasing patch alongside the other two, it
+        is the single mechanism. Dropping it would leave a warm
+        ``/unified-kg`` response serving the pre-delete graph indefinitely
+        (until some unrelated write on the same notebook happens to evict
+        it) — an outright wrong answer, not merely a version-aliasing risk
+        epoch could ever close. See
+        ``test_knowledge_lifecycle_delegation.py::
+        test_delete_notebook_kg_evicts_the_warm_unified_graph_cache`` for
+        the behavioural proof and kg_mutation.py's FULL CENSUS entry for
+        delete_notebook_kg for the full seq-vs-epoch writeup.
+        """
         self.get_notebook(notebook_id)
         with self._write() as db:
             source_index_was_certified = self.knowledge.source_index_backfilled(
                 db, notebook_id
             )
-            counts = self.knowledge.delete_notebook_graph_rows(db, notebook_id)
-            # delete_notebook_graph_rows removes unified_kg_state while keeping
-            # Memory/Knowhow objects and their forward-maintained provenance.
-            # Preserve an existing completeness certificate, but never promote
-            # a legacy/unknown notebook merely because its user-document graph
-            # was cleared: historical hidden projections may also predate
-            # forward maintenance.
+            counts = self.knowledge.delete_notebook_graph_rows(
+                db, notebook_id, self._now()
+            )
+            # delete_notebook_graph_rows RESETS unified_kg_state in place
+            # (PR-2) while keeping Memory/Knowhow objects and their
+            # forward-maintained provenance. Preserve an existing
+            # completeness certificate, but never promote a legacy/unknown
+            # notebook merely because its user-document graph was cleared:
+            # historical hidden projections may also predate forward
+            # maintenance. The reset UPDATE deliberately does not touch
+            # source_index_backfilled itself (see its own comment), so this
+            # re-assertion is belt-and-suspenders now rather than the repair
+            # it was when the row used to be dropped and re-inserted bare.
             if source_index_was_certified:
                 self.knowledge.mark_source_index_backfilled(db, notebook_id)
+        # P0-1 (post-review): unified_cache has NO version component of its
+        # own — invalidate_kg is its only eviction path, not a redundant
+        # seq-aliasing patch. See this method's own docstring.
         self._invalidate_unified_cache(notebook_id)
-        # delete_notebook_graph_rows drops the unified_kg_state row, so the count
-        # cache's seq reads 0 afterward — which ALIASES with a genuine seq 0 (e.g.
-        # a freshly copy_notebook'd nb whose counts were cached at seq 0). Drop the
-        # entry explicitly so post-delete counts (0) aren't masked by a seq-0 hit.
-        self._invalidate_knowledge_counts(notebook_id)
-        # R3 T-A2: the review-queue RANKING memo is keyed on the same seq and so
-        # has the same aliasing exposure — and a worse one, because it survives
-        # a re-ingest that climbs back to a seq it already holds an entry for
-        # (the counts would at least be re-read on the way up). Drop it here for
-        # the same reason, one line apart, so the two never diverge.
-        self._invalidate_review_queue_memo(notebook_id)
         return counts
 
     def prepare_indexing_pipeline_kg(

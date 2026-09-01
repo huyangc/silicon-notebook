@@ -349,17 +349,40 @@ class SourcePartitionedPprService:
         parent_version: Any,
     ) -> tuple[_CombinedGraph, bool]:
         signature = self._projections.source_subgraph_signature(notebook_id, source_ids)
+        # R1 (P1-2, post-review): source_subgraph_signature_on's return is
+        # CONDITIONALLY 4 or 5 elements (epoch appended only when > 0,
+        # mirroring Sec 3.4's on-disk-compatibility rule — see that
+        # function's own docstring). Both shapes are legitimate; anything
+        # else is a real corruption. Reading len(signature) not in (4, 5)
+        # here (tightened from the old "< 4") means a future bug that grows
+        # a sixth element fails loudly as source_index_unavailable instead of
+        # an IndexError two lines below being silently absorbed by whatever
+        # caller wraps this and misreported as a different failure mode.
         if (
             not isinstance(signature, tuple)
-            or len(signature) < 4
+            or len(signature) not in (4, 5)
             or not int(signature[2] or 0)
         ):
             raise SourcePartitionUnavailable("source_index_unavailable")
         per_source = tuple(signature[3] or ())
         if tuple(str(item[0]) for item in per_source) != source_ids:
             raise SourcePartitionUnavailable("source_scope_drift")
+        # kg_reset_epoch (signature[4] when present) is folded into the
+        # per-source reconstruction with the SAME conditional rule: the write
+        # side (source_graph_partition_rows_on, called per-source at publish
+        # time through this SAME signature function) bakes a 4- or 5-element
+        # tuple into each per-source manifest's "source_signature" field
+        # depending on THAT source's own epoch at publish time. Always
+        # appending (or never appending) here would make this notebook-scoped
+        # reconstruction structurally unequal to the per-source one whenever
+        # the two disagree about whether epoch was 0.
+        epoch = signature[4] if len(signature) > 4 else 0
         source_signatures = {
-            str(item[0]): (signature[0], signature[1], signature[2], (item,))
+            str(item[0]): (
+                (signature[0], signature[1], signature[2], (item,), epoch)
+                if epoch
+                else (signature[0], signature[1], signature[2], (item,))
+            )
             for item in per_source
         }
         key = (

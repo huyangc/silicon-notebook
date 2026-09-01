@@ -110,11 +110,23 @@ codex #638 R2 (set_edge_review), R4 (begin_extraction_run) and R5 (store_kg)
 were three sightings of ONE defect: a post-commit bump leaves a window where
 graph rows are durable and ``kg_mutation_seq`` still describes the world
 before them, and any exception in that window drops the bump for good. R5
-therefore stopped patching sightings and swept the matrix. Rule established:
+therefore stopped patching sightings and swept the matrix. Rule established
+(re-adjudicated by batch-3-W1 PR-2, design doc Sec 3.3 option C — see the
+``delete_notebook_kg`` census entry below for why "seq bump" alone stopped
+being the whole story):
 
     every transaction that commits ``knowledge_objects`` /
     ``knowledge_relations`` / ``concept_clusters`` rows commits its seq bump
     with them.
+
+PR-2's amendment: a transaction that commits those rows must advance its
+VERSION IDENTITY atomically with them — ``kg_mutation_seq`` for every writer
+that keeps the graph around, or ``kg_reset_epoch`` for the one writer that
+empties it. Before PR-2 there was only one version-identity primitive
+(``kg_mutation_seq``), so "commits its seq bump" and "advances its version
+identity" were the same sentence; ``delete_notebook_kg`` is what forced them
+apart — see its entry below for why bumping ``kg_mutation_seq`` itself
+(rather than resetting it) was never the available move for that writer.
 
 Graph-row writers, all now in-transaction (✓ = already was):
 
@@ -147,6 +159,22 @@ Graph-row writers, all now in-transaction (✓ = already was):
                                                   already atomic, and it is
                                                   not a licence for a second
                                                   online entry (see red lines).
+    delete_notebook_graph_rows            PR-2    knowledge_store: deletes the
+      (delete_notebook_kg's store call)            user-document knowledge_
+                                                  objects/knowledge_relations
+                                                  rows and blanket-clears
+                                                  concept_clusters, in the SAME
+                                                  transaction as the
+                                                  unified_kg_state UPDATE that
+                                                  resets kg_mutation_seq to 0
+                                                  AND advances kg_reset_epoch
+                                                  by 1. THE ONLY WRITER OF
+                                                  kg_reset_epoch in the whole
+                                                  codebase — no second online
+                                                  entry, same discipline as
+                                                  mark_unified_kg_dirty_in_tx's
+                                                  single-choke-point red line
+                                                  below.
 
 VECTOR-REPLACE CENSUS — codex #638 R6 P1
 -----------------------------------------
@@ -221,13 +249,29 @@ default), so this is additive: none of them change behavior.
 
 Deliberately NOT moved into a transaction, with the reason for each:
 
-    delete_notebook_kg          Cannot bump: it DELETES the unified_kg_state
-                                row, so the seq restarts from 0 and aliases.
-                                Keeps its explicit memo/count invalidation.
-                                Boundary unchanged — the "keep the row + bump
-                                in-tx" fix collides with kg_analysis's
-                                ``kg_mutation_seq == 0 means absent`` contract
-                                (registered in review_queue_memo, gap 2).
+    delete_notebook_kg          batch-3-W1 PR-2 MOVED THIS ENTRY UP into the
+                                in-transaction census table above (see
+                                ``delete_notebook_graph_rows``). The old
+                                reasoning here — "cannot bump: it DELETES the
+                                unified_kg_state row, so the seq restarts from
+                                0 and aliases" — is exactly the problem PR-2
+                                closes: it no longer bumps kg_mutation_seq at
+                                all (that column is RESET to 0, in-transaction,
+                                same as a fresh notebook's birth row), and the
+                                aliasing that used to force this into "keep
+                                the explicit memo/count invalidation instead"
+                                is now closed structurally by kg_reset_epoch —
+                                a persistent counter, bumped in the SAME
+                                transaction, that only increases and so never
+                                repeats. kg_analysis's ``kg_mutation_seq == 0
+                                means absent`` contract (review_queue_memo,
+                                former gap 2) is UNCHANGED: the reset row is
+                                byte-identical to a birth row on every column
+                                that contract reads, kg_reset_epoch is not one
+                                of them. See knowledge_lifecycle.delete_
+                                notebook_kg's own docstring for the full
+                                writeup of what replaced the three explicit
+                                invalidation calls this entry used to license.
     RepositoryFacade.add_relations   Fixture/test-only bare insert; never
                                 bumps at all, invalidates explicitly
                                 (review_queue_memo, gap 1).
@@ -333,7 +377,9 @@ class KgMutationCoordinator:
         with self._write() as db:
             self.mark_unified_kg_dirty_in_tx(db, notebook_id)
 
-    def mark_unified_kg_dirty_in_tx(self, connection: Any, notebook_id: str) -> int:
+    def mark_unified_kg_dirty_in_tx(
+        self, connection: Any, notebook_id: str
+    ) -> "tuple[int, int]":
         """Same effects as ``mark_unified_kg_dirty``, but riding a write
         transaction the CALLER already holds open, rather than opening its
         own.  Since codex #638 R5 this is the DEFAULT for anything that
@@ -354,14 +400,22 @@ class KgMutationCoordinator:
            UPDATE — see ``review_queue_memo``'s module docstring for the two
            races a separate post-commit bump+read used to open.
 
-        Returns the freshly-bumped ``kg_mutation_seq``, read back on the SAME
-        connection (so it observes this call's own uncommitted write —
+        Returns ``(kg_mutation_seq, kg_reset_epoch)``, both read back on the
+        SAME connection (so they observe this call's own uncommitted write —
         ordinary read-your-writes within one transaction, true for both
         backends) rather than a new post-commit connection that could race
-        another writer's own bump. Existing callers that only cared about the
-        side effect (``relink_notebook_kg``) simply ignore the return value —
-        this is a backward-compatible signature widening, not a behavior
-        change for them."""
+        another writer's own bump. This call never itself advances
+        kg_reset_epoch (only delete_notebook_graph_rows does — see the FULL
+        CENSUS), so the epoch half is a plain read of whatever the row
+        currently holds; it is returned alongside the seq (batch-3-W1 PR-2)
+        so ``set_edge_review`` can pair its ReviewQueueMemo carry's expected/
+        new version tags with the SAME epoch this transaction observed,
+        without a second read. Every OTHER existing caller only cared about
+        the seq side effect (``relink_notebook_kg`` and the rest of the
+        call sites the FULL CENSUS lists) and discards the return value
+        entirely — this is a backward-compatible signature widening
+        (int -> tuple[int, int]), not a behavior change for them, following
+        the same precedent this docstring already established once before."""
         now = self._now()
         self.unified_store.mark_dirty(connection, notebook_id, now)
         # Re-arm maybe_auto_index's once-set: the index this nb was previously
@@ -374,7 +428,8 @@ class KgMutationCoordinator:
         # re-samples. This is the single mutation funnel, so it covers chunk adds,
         # re-chunk, re-embed and KG edits — the cheapest correct invalidation site.
         self.notebook_languages.pop(notebook_id, None)
-        return int(self.unified_store.graph_seq_row(connection, notebook_id)[0])
+        row = self.unified_store.graph_seq_row(connection, notebook_id)
+        return int(row[0]), int(row[3])
 
     def bump_cluster_mutation_seq(
         self, connection: object, notebook_id: str

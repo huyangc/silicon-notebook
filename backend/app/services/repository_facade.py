@@ -2754,15 +2754,16 @@ class RepositoryFacade:
         # facade `_write` seat, so begin/commit phase traces are unchanged.
         self._runtime.kg_mutations.mark_unified_kg_dirty(notebook_id)
 
-    def _mark_unified_kg_dirty_in_tx(self, db, notebook_id: str) -> int:
+    def _mark_unified_kg_dirty_in_tx(self, db, notebook_id: str) -> "tuple[int, int]":
         # In-transaction twin of `_mark_unified_kg_dirty`: rides a write
         # transaction the CALLER already holds open (relink_notebook_kg's
         # per-source commit, and — R2 P2 fix, codex #638 R2 — set_edge_review's
         # own UPDATE) instead of opening its own — the dirty bump commits
         # atomically with the write it accompanies, so a kill -9 between that
         # commit and the run's finally cannot leave committed edges invisible
-        # to kg_mutation_seq. Returns the freshly-bumped seq (read back on the
-        # SAME connection, before commit) so a caller that needs its own
+        # to kg_mutation_seq. Returns (kg_mutation_seq, kg_reset_epoch), both
+        # read back on the SAME connection, before commit (batch-3-W1 PR-2
+        # widened this from a bare seq int) so a caller that needs its own
         # bump's value atomically paired with its own write (set_edge_review's
         # memo carry) never has to re-open a connection after commit.
         return self._runtime.kg_mutations.mark_unified_kg_dirty_in_tx(db, notebook_id)
@@ -3181,11 +3182,13 @@ class RepositoryFacade:
     # ── scale index (offline build) ──────────────────────────────────────────
 
     def _probe_scale_version_signal(self, notebook_id: str):
-        """Cheap probe: (seq, cseq, settings_tail) for `notebook_id`. O(1) — a
-        single unified_kg_state row read, no table aggregates — always run,
-        never single-flighted (it's the signal used to decide whether the
-        expensive cold path is needed at all, so it must never itself block on
-        another thread's cold compute).
+        """Cheap probe: (seq, cseq, settings_tail, kg_reset_epoch) for
+        `notebook_id` (batch-3-W1 PR-2 appended kg_reset_epoch at the
+        trailing position). O(1) — a single unified_kg_state row read, no
+        table aggregates — always run, never single-flighted (it's the
+        signal used to decide whether the expensive cold path is needed at
+        all, so it must never itself block on another thread's cold
+        compute).
 
         P0-A: clusters used to be re-read here every call via a concept_clusters
         COUNT/MAX(created_at) (millions of rows at scale) because rebuild

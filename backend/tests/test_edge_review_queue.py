@@ -536,19 +536,51 @@ def test_add_relations_facade_path_invalidates_the_review_queue_ranking(repo):
     assert memo.cached_seq(nb_id) is None
 
 
-def test_delete_notebook_kg_invalidates_the_review_queue_ranking(repo):
-    """``delete_notebook_kg`` 掉 ``unified_kg_state`` 整行,seq 因此**归零重爬**
-    ——不是单调前进,而是别名:重抽会让 seq 爬回它离开时的值,配上完全不同的图。
-    该方法已经为同一个理由显式失效计数 memo;排名 memo 必须并排跟上。"""
+def test_delete_notebook_kg_advances_kg_reset_epoch_without_an_explicit_invalidate(repo):
+    """batch-3-W1 PR-2 (design doc Sec 3.3 option C): ``delete_notebook_kg``
+    no longer drops the ``unified_kg_state`` row (and no longer calls
+    ``ReviewQueueMemo.invalidate`` explicitly — see that method's own
+    docstring, gap 2, now closed). It RESETS ``kg_mutation_seq`` to 0 and
+    advances the persistent ``kg_reset_epoch`` column by 1, in the SAME
+    transaction. The memo's version tag folds epoch in, so the pre-delete
+    warm entry (tagged at epoch 0) can never again compare equal to a
+    post-delete read (epoch >= 1) even if the raw seq value coincides — see
+    ``test_review_queue_memo.py::
+    test_alias_is_impossible_across_a_kg_reset_epoch_bump`` for the
+    deterministic unit-level proof of that property; this test proves the
+    REAL production wiring (repo -> KnowledgeGovernanceService ->
+    ReviewQueueMemo, all through ``graph_seq_row``) actually produces the
+    epoch bump end to end.
+    """
     nb_id = _seed_graph(repo)
-    repo.review_queue(nb_id)
+    first_queue = repo.review_queue(nb_id)
+    assert first_queue != []
     memo = repo._runtime.review_queue_memo
-    assert memo.cached_seq(nb_id) is not None
+    warm_version = memo.cached_version(nb_id)
+    assert warm_version is not None
+    assert warm_version[0] == 0, "a never-deleted notebook starts at kg_reset_epoch 0"
 
     repo.delete_notebook_kg(nb_id)
 
-    assert memo.cached_seq(nb_id) is None
+    # unified_kg_state.kg_mutation_seq resets to 0, and kg_reset_epoch is now 1.
+    with repo._connect() as db:
+        row = db.execute(
+            "SELECT kg_mutation_seq,kg_reset_epoch FROM unified_kg_state WHERE notebook_id=?",
+            (nb_id,),
+        ).fetchone()
+    assert int(row["kg_mutation_seq"]) == 0
+    assert int(row["kg_reset_epoch"]) == 1
+
+    # The graph is empty post-delete, so the true answer is [] regardless of
+    # caching — but the memo's own tag must reflect the NEW epoch (not the
+    # stale entry from before delete) once it is asked again.
     assert repo.review_queue(nb_id) == []
+    post_delete_version = memo.cached_version(nb_id)
+    assert post_delete_version is not None
+    assert post_delete_version[0] == 1, (
+        "the memo must be warmed under the POST-delete epoch, never left "
+        "holding the pre-delete (epoch=0) tag"
+    )
 
 
 # ── codex #638 R5 P1:store_kg 的 bump 与图行同事务 ────────────────────────

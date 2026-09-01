@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from app.core.config import Settings
+from app.models.schemas import NotebookCreate
 from app.services.sqlite_repository import SQLiteRepository
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -117,6 +118,53 @@ def test_source_ingestion_uses_direct_service_dependencies(repo):
 def test_build_calls_governance_conflict_resolution_without_a_facade_callback(repo):
     lifecycle = repo._runtime.knowledge_lifecycle
     assert lifecycle.governance is repo._runtime.knowledge_governance
+
+
+def test_delete_notebook_kg_evicts_the_warm_unified_graph_cache(repo):
+    """batch-3-W1 PR-2 R1 (P0-1): ``self.unified_cache`` is keyed on the bare
+    ``(notebook_id, level)`` pair — no kg_mutation_seq, no kg_reset_epoch, no
+    version component of any kind (``_unified_graph_full``). It is evicted
+    by exactly one mechanism, ``invalidate_kg``, called through
+    ``KnowledgeLifecycleService._invalidate_unified_cache``. If
+    ``delete_notebook_kg`` stopped calling it, a warm cache entry would keep
+    serving the pre-delete graph forever (or until an unrelated write on the
+    same notebook happens to evict it) — repro straight from review: seed a
+    graph, warm the cache with one read, delete, read again and the answer
+    must already be empty.
+
+    变异锚点:去掉 ``delete_notebook_kg`` 里恢复的 ``self._invalidate_unified_
+    cache(notebook_id)`` 调用,本条必须报红(第二次读到的还是删除前那份图)。
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="unified cache eviction"))
+    repo.store_kg(
+        notebook.id, None,
+        [
+            {"local_id": "C1", "object_type": "concept",
+             "payload": {"name": "Alpha"}, "evidence": []},
+            {"local_id": "C2", "object_type": "concept",
+             "payload": {"name": "Beta"}, "evidence": []},
+        ],
+        [{"source_local_id": "C1", "target_local_id": "C2",
+          "edge_type": "relates_to", "evidence": []}],
+    )
+
+    # Warm the cache: this READ populates self.unified_cache[(nb, "concept")].
+    warm = repo.unified_graph(notebook.id, level="concept")
+    assert len(warm["nodes"]) == 2
+    assert (notebook.id, "concept") in repo._unified_cache
+
+    repo.delete_notebook_kg(notebook.id)
+
+    assert (notebook.id, "concept") not in repo._unified_cache, (
+        "delete_notebook_kg must evict the warm (notebook_id, level) entry, "
+        "not just leave it to be overwritten by a later unrelated write"
+    )
+    after = repo.unified_graph(notebook.id, level="concept")
+    assert after["nodes"] == [], (
+        "a read right after delete must see the graph as empty, not the "
+        "cached pre-delete graph"
+    )
+    assert after["edges"] == []
 
 
 def _imports(path: Path) -> set[str]:

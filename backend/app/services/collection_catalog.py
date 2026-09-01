@@ -302,8 +302,14 @@ class CollectionCatalogService:
         self._notebook_counts: "OrderedDict[str, Tuple[str, Tuple[ElementKindCount, ...]]]" = (
             OrderedDict()
         )
-        # notebook_id -> (kg_mutation_seq, {object_type: count})
-        self._kg_counts: "OrderedDict[str, Tuple[int, Dict[str, int]]]" = OrderedDict()
+        # notebook_id -> ((kg_reset_epoch, kg_mutation_seq), {object_type: count})
+        # R1 (P2-2, post-review, batch-3-W1 PR-2): widened from a bare
+        # kg_mutation_seq int -- a delete_notebook_kg + reingest can
+        # legitimately re-climb kg_mutation_seq back to a value this memo
+        # already cached counts under; epoch is what makes that not alias
+        # (zero extra cost: graph_seq_row is already a single-row read here,
+        # this just keeps one more int from the same row).
+        self._kg_counts: "OrderedDict[str, Tuple[Tuple[int, int], Dict[str, int]]]" = OrderedDict()
         # L4 (notebook_id, kind) -> (signal fingerprint, non-zero source list).
         # L2's twin for the enumeration plan.  It exists for the same reason L2
         # does and then some: a library past ``_MAX_CACHED_SOURCES`` cannot hold
@@ -749,9 +755,12 @@ class CollectionCatalogService:
         notebook has Memory synthetic sources at all (a reference library has
         none, so it keeps paying exactly what it paid before).  Both are
         index-seeked and bounded by the Memory count, and the whole result is
-        memoized on ``kg_mutation_seq`` — which every write that can move
-        either number bumps, including ``ingest_memory_source``'s own
-        post-extraction dirty mark.
+        memoized on ``(kg_reset_epoch, kg_mutation_seq)`` (batch-3-W1 PR-2) —
+        kg_mutation_seq is bumped by every write that can move either number,
+        including ``ingest_memory_source``'s own post-extraction dirty mark;
+        kg_reset_epoch by ``delete_notebook_kg`` alone, closing the aliasing
+        window a delete + reingest re-climbing the same raw seq would
+        otherwise open.
 
         The subtraction happens here rather than inside
         ``knowledge_type_count_rows`` because that port is also
@@ -759,10 +768,11 @@ class CollectionCatalogService:
         belong.  Enumeration and the board answer different questions; giving
         them one number would mean getting one of them wrong.
         """
-        seq = int(self._unified_kg.graph_seq_row(db, notebook_id)[0])
+        row = self._unified_kg.graph_seq_row(db, notebook_id)
+        version = (int(row[3]), int(row[0]))
         with self._lock:
             cached = self._kg_counts.get(notebook_id)
-            if cached is not None and cached[0] == seq:
+            if cached is not None and cached[0] == version:
                 self._kg_counts.move_to_end(notebook_id)
                 return cached[1]
 
@@ -789,7 +799,7 @@ class CollectionCatalogService:
                     # unreachable on the next build anyway.
                     counts[object_type] = max(0, counts[object_type] - int(row["c"]))
         with self._lock:
-            self._kg_counts[notebook_id] = (seq, counts)
+            self._kg_counts[notebook_id] = (version, counts)
             self._kg_counts.move_to_end(notebook_id)
             while len(self._kg_counts) > _MAX_CACHED_NOTEBOOKS:
                 self._kg_counts.popitem(last=False)

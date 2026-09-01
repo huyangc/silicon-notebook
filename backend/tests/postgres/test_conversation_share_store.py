@@ -104,7 +104,7 @@ def _seed_conversation_with_tied_timestamps(database) -> tuple[str, str]:
 def test_public_snapshot_turn_order_matches_get_conversation_bit_for_bit(
     postgres_database,
 ):
-    assert PostgresMigrator(postgres_database).migrate() == 46
+    assert PostgresMigrator(postgres_database).migrate() == 47
     notebook_id, conversation_id = _seed_conversation_with_tied_timestamps(
         postgres_database
     )
@@ -133,7 +133,7 @@ def test_public_snapshot_freezes_at_the_watermark_and_advances_on_reshare(
     """"Freeze + explicit update" (design doc §二): a turn written after the
     share call must NOT appear until the conversation is explicitly
     re-shared ("update to latest"), which reuses the same token."""
-    assert PostgresMigrator(postgres_database).migrate() == 46
+    assert PostgresMigrator(postgres_database).migrate() == 47
     notebook_id, conversation_id = _seed_conversation_with_tied_timestamps(
         postgres_database
     )
@@ -179,7 +179,7 @@ def test_expected_through_id_pins_the_watermark_to_that_exact_answer(
     (proving we did not jump to latest), ans-b shares ans-c's instant but sorts
     AFTER it (higher ordinal) and the keyset excludes it where the pure
     ``created_at <=`` predicate would not."""
-    assert PostgresMigrator(postgres_database).migrate() == 46
+    assert PostgresMigrator(postgres_database).migrate() == 47
     notebook_id, conversation_id = _seed_conversation_with_tied_timestamps(
         postgres_database
     )
@@ -197,7 +197,7 @@ def test_expected_through_id_pins_the_watermark_to_that_exact_answer(
 def test_expected_through_id_that_no_longer_resolves_is_rejected(postgres_database):
     """Deleted disclosed boundary -> ``ConversationShareWatermarkStale`` (409),
     never a silent pin-to-latest. No token issued."""
-    assert PostgresMigrator(postgres_database).migrate() == 46
+    assert PostgresMigrator(postgres_database).migrate() == 47
     notebook_id, conversation_id = _seed_conversation_with_tied_timestamps(
         postgres_database
     )
@@ -221,7 +221,7 @@ def test_share_watermark_is_advance_only_rejecting_a_stale_expected(
     PostgreSQL comparison uses ``ordinal``. Mutation guard: dropping the
     advance-only comparison makes the stale reshare regress the watermark to
     ans-a."""
-    assert PostgresMigrator(postgres_database).migrate() == 46
+    assert PostgresMigrator(postgres_database).migrate() == 47
     notebook_id, conversation_id = _seed_conversation_with_tied_timestamps(
         postgres_database
     )
@@ -244,7 +244,7 @@ def test_share_watermark_rejects_a_tiebreak_earlier_answer(postgres_database):
     to ans-b then requesting the same-instant earlier ans-c is a regression and
     must be rejected. Mutation guard: a pure ``created_at`` comparison would let
     the reshare succeed."""
-    assert PostgresMigrator(postgres_database).migrate() == 46
+    assert PostgresMigrator(postgres_database).migrate() == 47
     notebook_id, conversation_id = _seed_conversation_with_tied_timestamps(
         postgres_database
     )
@@ -264,7 +264,7 @@ def test_share_watermark_rejects_a_tiebreak_earlier_answer(postgres_database):
 def test_resharing_the_same_watermark_is_an_idempotent_no_op(postgres_database):
     """Re-sharing the SAME boundary is the normal "share this snapshot again" and
     must return the current state without raising (codex #522 R3)."""
-    assert PostgresMigrator(postgres_database).migrate() == 46
+    assert PostgresMigrator(postgres_database).migrate() == 47
     notebook_id, conversation_id = _seed_conversation_with_tied_timestamps(
         postgres_database
     )
@@ -282,7 +282,7 @@ def test_resharing_the_same_watermark_is_an_idempotent_no_op(postgres_database):
 
 def test_share_watermark_still_advances_forward(postgres_database):
     """The advance-only guard must not block a legitimate forward move."""
-    assert PostgresMigrator(postgres_database).migrate() == 46
+    assert PostgresMigrator(postgres_database).migrate() == 47
     notebook_id, conversation_id = _seed_conversation_with_tied_timestamps(
         postgres_database
     )
@@ -301,7 +301,7 @@ def test_public_snapshot_falls_back_to_timestamp_when_boundary_answer_deleted(
     """Watermark answer deleted after a share -> the keyset has no anchor, so
     the already-shared link falls back to the pure ``created_at`` interval
     rather than fail closed to 404. Mutation guard: failing closed reds this."""
-    assert PostgresMigrator(postgres_database).migrate() == 46
+    assert PostgresMigrator(postgres_database).migrate() == 47
     notebook_id, conversation_id = _seed_conversation_with_tied_timestamps(
         postgres_database
     )
@@ -320,7 +320,7 @@ def test_public_snapshot_falls_back_to_timestamp_when_boundary_answer_deleted(
 def test_unshare_revokes_the_public_link(postgres_database):
     """After ``unshare_conversation`` the token resolves to nothing — a
     revoked link 404s exactly like a token that never existed."""
-    assert PostgresMigrator(postgres_database).migrate() == 46
+    assert PostgresMigrator(postgres_database).migrate() == 47
     notebook_id, conversation_id = _seed_conversation_with_tied_timestamps(
         postgres_database
     )
@@ -334,7 +334,7 @@ def test_unshare_revokes_the_public_link(postgres_database):
 
 
 def test_unknown_and_blank_tokens_return_none(postgres_database):
-    assert PostgresMigrator(postgres_database).migrate() == 46
+    assert PostgresMigrator(postgres_database).migrate() == 47
     store = PostgresAskStateStore(postgres_database, _seams())
 
     assert store.public_conversation_by_token("no-such-token") is None
@@ -352,7 +352,7 @@ def test_zero_answer_conversation_is_refused_atomically_and_leaves_no_token(
     share-then-compensate window. Mirrors the SQLite copy. Mutation guard:
     falling through to the UPDATE on ``through_id is None`` reds this.
     """
-    assert PostgresMigrator(postgres_database).migrate() == 46
+    assert PostgresMigrator(postgres_database).migrate() == 47
     with postgres_database.write() as connection:
         connection.execute(
             "INSERT INTO notebooks(id,name,created_at,updated_at) "
@@ -383,7 +383,7 @@ def test_zero_answer_conversation_is_refused_atomically_and_leaves_no_token(
 def test_conversation_share_state_reads_back_token_and_watermark(
     postgres_database,
 ):
-    assert PostgresMigrator(postgres_database).migrate() == 46
+    assert PostgresMigrator(postgres_database).migrate() == 47
     notebook_id, conversation_id = _seed_conversation_with_tied_timestamps(
         postgres_database
     )
@@ -416,7 +416,7 @@ def test_public_snapshot_query_is_bounded_to_cap_plus_one(
     monkeypatch.setattr(store_mod, "MAX_TURNS", 3)
     monkeypatch.setattr(view_mod, "MAX_TURNS", 3)
 
-    assert PostgresMigrator(postgres_database).migrate() == 46
+    assert PostgresMigrator(postgres_database).migrate() == 47
     with postgres_database.write() as connection:
         connection.execute(
             "INSERT INTO notebooks(id,name,created_at,updated_at) "
@@ -502,7 +502,7 @@ def test_concurrent_share_serializes_on_the_conversation_row(postgres_database):
     The SQLite adapter needs no such lock — its ``database.write()`` is a
     process-level write lock that already serializes these calls.
     """
-    assert PostgresMigrator(postgres_database).migrate() == 46
+    assert PostgresMigrator(postgres_database).migrate() == 47
     notebook_id, conversation_id = _seed_conversation_with_tied_timestamps(
         postgres_database
     )

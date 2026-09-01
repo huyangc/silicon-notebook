@@ -145,6 +145,121 @@ def test_retained_scale_runtime_does_not_transitively_retain_repository(
         scale.unified_status(notebook_id)
 
 
+# ── batch-3-W1 PR-2 (design doc Sec 3.4): conditional kg_reset_epoch in
+# version() — "上线模拟" hard gate ─────────────────────────────────────────
+
+
+def test_epoch_zero_notebooks_version_list_never_carries_kg_reset_epoch(repo):
+    """A notebook that has never been through ``delete_notebook_kg`` sits at
+    ``kg_reset_epoch == 0`` forever. Sec 3.4's "on-rollout simulation" gate:
+    such a notebook's ``version()`` list must be exactly what it always was
+    (byte-identical, no unexpected trailing element) — appending
+    unconditionally would make every existing on-disk manifest compare
+    unequal the instant this PR ships (red line one, fleet-wide rebuild
+    storm). Two independently-seeded notebooks are checked so this is not a
+    single-instance fluke.
+
+    变异锚点:把 ``version()`` 里 ``if epoch:`` 的条件追加改成无条件追加,本条
+    必须报红(mutation-verified — post-review P3-6: 原先陪跑的
+    ``test_unconditional_kg_reset_epoch_append_is_the_mutation_this_gate_
+    exists_to_catch`` 是自证的假守卫,monkeypatch 出一份手写的"无条件追加"实现
+    再断言它符合自己的描述,从不调用真实 ``version()``,删真实实现里的
+    ``if epoch:`` 也不会让它报红。已删除,改由本条 + 下面两条在真实代码上双向
+    覆盖:本条钉 epoch=0 分支,``test_delete_notebook_kg_appends_kg_reset_
+    epoch_to_the_version_list`` 钉 epoch>0 分支)。
+    """
+    scale = repo._runtime.scale_artifacts
+    for name in ("epoch-zero-a", "epoch-zero-b"):
+        notebook = repo.create_notebook(NotebookCreate(name=name))
+        repo.store_kg(
+            notebook.id, None,
+            [{"local_id": "a", "object_type": "concept",
+              "payload": {"name": "x", "section_path": ""}, "evidence": []}],
+            [],
+        )
+        version = scale.version(notebook.id)
+        assert "kg_reset_epoch" not in version, (
+            f"{name}: an epoch-0 notebook's version list must not carry "
+            "kg_reset_epoch at all"
+        )
+        with repo._connect() as db:
+            row = db.execute(
+                "SELECT kg_reset_epoch FROM unified_kg_state WHERE notebook_id=?",
+                (notebook.id,),
+            ).fetchone()
+        assert int(row["kg_reset_epoch"]) == 0
+
+
+def test_delete_notebook_kg_appends_kg_reset_epoch_to_the_version_list(repo):
+    """The ONE legitimate case the conditional append exists to serve: a
+    notebook that HAS been through delete_notebook_kg gets a version() list
+    with ``["kg_reset_epoch", N]`` as its trailing two elements — a real,
+    warranted staleness against any manifest written before the delete (the
+    KG genuinely was reset, so a rebuild is the correct outcome)."""
+    scale = repo._runtime.scale_artifacts
+    notebook = _seed(repo)
+    before = scale.version(notebook.id)
+    assert "kg_reset_epoch" not in before
+
+    repo.delete_notebook_kg(notebook.id)
+
+    after = scale.version(notebook.id)
+    assert after[-2:] == ["kg_reset_epoch", 1], (
+        "kg_reset_epoch must be appended as the LAST two elements once "
+        "epoch > 0 -- inserting it anywhere else would silently shift the "
+        "three positional [1]-index consumers (scale_artifact_runtime.py, "
+        "scale_index_builder.py)"
+    )
+    assert after != before, (
+        "a real KG reset must produce a genuinely different version list "
+        "(a warranted rebuild), not merely append-then-still-compare-equal"
+    )
+
+    # process-internal memo must not serve the pre-delete list for a
+    # post-delete read: calling version() again returns the SAME (already
+    # reflecting-the-reset) list, not the stale pre-delete one.
+    assert scale.version(notebook.id) == after
+
+
+def test_kg_reset_epoch_only_affects_the_deleted_notebook_not_its_siblings(repo):
+    """design doc Sec 3.4's behaviour matrix, per-notebook isolation half:
+    ``kg_reset_epoch`` is a per-notebook column (design doc Sec 3.3 point 2),
+    so deleting ONE notebook's KG must never touch a sibling's version()
+    list — a sibling that has never been reset stays byte-identical
+    (epoch=0, no trailing kg_reset_epoch element), exactly as if the deleted
+    notebook did not exist. This is the scenario the fleet-wide-rebuild-storm
+    hazard (Sec 3.4's red line one) is really about: an epoch bump must be
+    scoped to the one notebook whose KG genuinely was reset, never leak into
+    every OTHER notebook's manifest comparison."""
+    scale = repo._runtime.scale_artifacts
+    reset_notebook = _seed(repo)
+    sibling = repo.create_notebook(NotebookCreate(name="untouched sibling"))
+    repo.store_kg(
+        sibling.id, None,
+        [{"local_id": "s", "object_type": "concept",
+          "payload": {"name": "sibling", "section_path": ""}, "evidence": []}],
+        [],
+    )
+    sibling_before = scale.version(sibling.id)
+    assert "kg_reset_epoch" not in sibling_before
+
+    repo.delete_notebook_kg(reset_notebook.id)
+
+    # The reset notebook's own list now carries the trailing element...
+    reset_after = scale.version(reset_notebook.id)
+    assert reset_after[-2:] == ["kg_reset_epoch", 1]
+    # ...but the untouched sibling's list, and its epoch, are unaffected.
+    sibling_after = scale.version(sibling.id)
+    assert "kg_reset_epoch" not in sibling_after
+    assert sibling_after == sibling_before
+    with repo._connect() as db:
+        sibling_row = db.execute(
+            "SELECT kg_reset_epoch FROM unified_kg_state WHERE notebook_id=?",
+            (sibling.id,),
+        ).fetchone()
+    assert int(sibling_row["kg_reset_epoch"]) == 0
+
+
 def test_version_cold_failure_releases_singleflight_and_does_not_poison_memo(
     repo, monkeypatch
 ):

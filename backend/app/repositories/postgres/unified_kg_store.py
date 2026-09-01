@@ -332,13 +332,13 @@ class UnifiedKgStore:
         return (*versions, mention)
 
     @staticmethod
-    def graph_seq_row(db: Any, notebook_id: str) -> "tuple[int, int, int]":
-        """O(1) single-row monotonic seq triple for the graph/PPR version keys:
-        (kg_mutation_seq, cluster_mutation_seq, mention_seq). Replaces the
-        per-request COUNT/MAX aggregate scans (ppr_version_rows /
-        graph_version_rows / cluster_version_row) that ran on EVERY graph/PPR
-        retrieval, even on a cache HIT. Coverage of every production write path
-        (adversarially verified):
+    def graph_seq_row(db: Any, notebook_id: str) -> "tuple[int, int, int, int]":
+        """O(1) single-row monotonic seq quadruple for the graph/PPR version
+        keys: (kg_mutation_seq, cluster_mutation_seq, mention_seq,
+        kg_reset_epoch). Replaces the per-request COUNT/MAX aggregate scans
+        (ppr_version_rows / graph_version_rows / cluster_version_row) that ran
+        on EVERY graph/PPR retrieval, even on a cache HIT. Coverage of every
+        production write path (adversarially verified):
           - kg_mutation_seq: object writes (create/status/payload/delete via
             store_kg/update_knowledge/merge/promotion/conflict/relink/delete_source),
             edge-review flips (set_edge_review), and chunk writes
@@ -347,22 +347,37 @@ class UnifiedKgStore:
             append_clusters / rebuild — which DELIBERATELY keeps kg_mutation_seq
             stable) advance this instead.
           - mention_seq: the co-mention bridge rebuild.
+          - kg_reset_epoch: bumped ONLY by delete_notebook_graph_rows, in the
+            SAME transaction that resets kg_mutation_seq/cluster_mutation_seq/
+            mention_seq back to their birth-row values (design doc batch-3-W1
+            Sec 3.3 option C). Only increases, never decreases.
         A monotonic counter is STRICTLY more sensitive than (COUNT, MAX ts): it
         also catches a same-second in-place edit that a 1s-resolution timestamp
-        would miss. Absent row -> (0, 0, -1), matching version_signal's sentinel.
+        would miss. Absent row -> (0, 0, -1, 0), matching version_signal's
+        sentinel.
 
-        NOTE: the seq RESETS on delete_notebook_kg (which drops the state row),
-        so a delete+reingest of a participant can re-climb to a colliding triple
-        — retrieval_snapshot_cache.invalidate_kg therefore evicts ALL :ppr_graph
-        and :fed_rxgraph entries (not just self) as the belt-and-braces."""
+        kg_reset_epoch MUST stay the LAST element of this tuple: three
+        call sites consume this return by position — see the design doc's
+        Sec 3.2/3.4 for the full list and the "append at tuple end" rule.
+        Before kg_reset_epoch existed, kg_mutation_seq/cluster_mutation_seq/
+        mention_seq RESET on delete_notebook_kg (which used to drop the state
+        row outright), so a delete+reingest of a participant could re-climb to
+        a colliding triple — retrieval_snapshot_cache.invalidate_kg's belt-
+        and-braces full :ppr_graph/:fed_rxgraph eviction on every KG mutation
+        is what covered that gap. Folding kg_reset_epoch into this tuple's
+        consumers makes that specific collision structurally impossible (a
+        notebook's epoch never repeats), though invalidate_kg's broader sweep
+        still guards the same-second-in-place-edit case that is orthogonal to
+        the epoch fix."""
         row = db.execute(
             "SELECT COALESCE(kg_mutation_seq,0) AS ks, COALESCE(cluster_mutation_seq,0) AS cs, "
-            "COALESCE(mention_seq,-1) AS ms FROM unified_kg_state WHERE notebook_id=%s",
+            "COALESCE(mention_seq,-1) AS ms, COALESCE(kg_reset_epoch,0) AS ep "
+            "FROM unified_kg_state WHERE notebook_id=%s",
             (notebook_id,),
         ).fetchone()
         if row is None:
-            return (0, 0, -1)
-        return (int(row["ks"]), int(row["cs"]), int(row["ms"]))
+            return (0, 0, -1, 0)
+        return (int(row["ks"]), int(row["cs"]), int(row["ms"]), int(row["ep"]))
 
     @staticmethod
     def mention_rows(db: Any, notebook_id: str):

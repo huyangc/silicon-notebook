@@ -89,3 +89,46 @@ def test_checkup_h45_memo_seq_key_and_event_invalidation(postgres_repository):
     assert _h4(repo, nb) == 2                      # 键未动 → 仍命中
     repo._runtime.source_embedding.note_source_vectors_written(nb)
     assert _h4(repo, nb) == 3                      # 事件失效 → 立即重算
+
+
+def test_checkup_h45_wiring_returns_the_epoch_seq_pair_not_a_bare_int(postgres_repository):
+    """R1 (P1-1, post-review): the real ``kg_mutation_seq`` seam wired into
+    ``PostgresRepository.checkup`` (``postgres/repository.py``) once
+    independently called a bare ``int(graph_seq_row(db, nb)[0])`` — a SECOND,
+    epoch-unaware copy of the seam ``sqlite_repository.py`` had already moved
+    to ``(kg_reset_epoch, kg_mutation_seq)``. The injected-seam tests above
+    never caught it: they only ever bump kg_mutation_seq (``mark_unified_kg_
+    dirty``), which a bare-seq wiring detects just as well as an epoch-aware
+    one — the two forms only diverge once epoch itself moves. This asserts
+    the REAL wiring's shape directly, not a fake seam, so a future
+    regression back to a bare int fails here immediately regardless of
+    which mutation actually exercises it.
+
+    变异锚点:把 postgres/repository.py 的 kg_mutation_seq 接线改回裸
+    ``int(graph_seq_row(db,nb)[0])``,本条必须报红(TypeError:'int' 不可解包
+    成 2 元组,或返回值不是 tuple)。
+    """
+    repo = postgres_repository
+    nb = repo.create_notebook(NotebookCreate(name="checkup-h45-wiring")).id
+    seam = repo.checkup._kg_version
+    with repo._runtime.database.connect() as db:
+        version = seam(db, nb)
+    assert isinstance(version, tuple) and len(version) == 2, (
+        f"the wired kg_mutation_seq seam must return (epoch, seq), got {version!r}"
+    )
+    epoch, seq = version
+    assert isinstance(epoch, int) and isinstance(seq, int)
+    assert (epoch, seq) == (0, 0)  # fresh notebook, never reset, never mutated
+
+    repo.maintenance.mark_unified_kg_dirty(nb)
+    with repo._runtime.database.connect() as db:
+        after_seq_bump = seam(db, nb)
+    assert after_seq_bump == (0, 1)
+
+    repo.delete_notebook_kg(nb)
+    with repo._runtime.database.connect() as db:
+        after_delete = seam(db, nb)
+    assert after_delete == (1, 0), (
+        "delete_notebook_kg must advance the epoch half the wired seam "
+        "reports, not just the seq half"
+    )

@@ -108,7 +108,7 @@ def _service(repo, notebook_id="nb-x", **overrides):
         count_missing_element_vectors=lambda nb, exclude: 0,
         # 默认恒 0(等价「seq 从不前进」)——H4/H5 memo 的租约键/TTL/事件失效行为不被
         # seq 分量干扰;seq 驱动的失效由注入受控 seq 的专测覆盖。
-        kg_mutation_seq=lambda db, nb: 0,
+        kg_version=lambda db, nb: 0,
         scale_index_state=lambda nb: "indexed",
         # 默认每次返回全新 sentinel → H7 memo 永不命中,seam-injection 测试仍见每次 scale_index_state
         # 调用(缓存行为由下面注入受控签名的专测覆盖)。
@@ -126,6 +126,39 @@ def _service(repo, notebook_id="nb-x", **overrides):
 # ------------------------------------------------------------- composition
 def test_runtime_composes_checkup(repo):
     assert isinstance(repo.checkup, CheckupService)
+
+
+def test_checkup_h45_wiring_returns_the_epoch_seq_pair_not_a_bare_int(repo):
+    """R1 (P1-1, post-review): the REAL ``kg_mutation_seq`` seam wired into
+    ``SQLiteRepository.checkup`` (not the fake seam ``_service``/
+    ``_counting_service`` inject below) must return ``(kg_reset_epoch,
+    kg_mutation_seq)``. PostgreSQL twin:
+    ``backend/tests/postgres/test_checkup_h45_cache.py::
+    test_checkup_h45_wiring_returns_the_epoch_seq_pair_not_a_bare_int`` —
+    both backends must wire the SAME shared ``checkup.h45_version_key``
+    helper; this pair of tests is the guard that would have caught PG
+    independently wiring a bare ``int`` seam while SQLite had already moved
+    to the pair (P1-1's actual finding)."""
+    nb = repo.create_notebook(NotebookCreate(name="checkup-h45-wiring")).id
+    seam = repo.checkup._kg_version
+    with repo._runtime.database.connect() as db:
+        version = seam(db, nb)
+    assert isinstance(version, tuple) and len(version) == 2
+    assert version == (0, 0)
+
+    repo.store_kg(
+        nb, None,
+        [{"local_id": "a", "object_type": "concept", "payload": {"name": "x"}, "evidence": []}],
+        [],
+    )
+    with repo._connect() as db:
+        after_write = seam(db, nb)
+    assert after_write == (0, 1)
+
+    repo.delete_notebook_kg(nb)
+    with repo._connect() as db:
+        after_delete = seam(db, nb)
+    assert after_delete == (1, 0)
 
 
 def test_healthy_fresh_notebook(repo):
@@ -607,13 +640,46 @@ def test_h45_memo_key_includes_kg_mutation_seq(repo):
     变异锚点:键里去掉 seq 分量(退回纯租约键)→ seq 前进后第三次 run 命中旧条目,
     ``len(seen) == 4`` 红。"""
     seqs = [7]
-    svc, seen = _counting_service(repo, kg_mutation_seq=lambda db, nb: seqs[0])
+    svc, seen = _counting_service(repo, kg_version=lambda db, nb: seqs[0])
     svc.run("nb-x")
     svc.run("nb-x")
     assert len(seen) == 2                        # seq 未动 → 命中
     seqs[0] = 8
     svc.run("nb-x")
     assert len(seen) == 4                        # seq 前进 → 失配重算
+
+
+def test_h45_memo_key_includes_kg_reset_epoch(repo):
+    """batch-3-W1 PR-2 (design doc Sec 3.2 table #11): the H4/H5 memo's
+    version key is ``(kg_reset_epoch, kg_mutation_seq)``, not a bare seq.
+    delete_notebook_kg RESETS kg_mutation_seq to 0 and can legitimately
+    re-climb it back to a raw value this memo already cached counts under —
+    kg_reset_epoch is what makes that not alias. This test holds the raw
+    seq CONSTANT (7 throughout) and advances only the epoch half on the
+    SAME service instance (same cache), mirroring exactly the delete+
+    reingest scenario the design doc's Sec 3.2 table registers as reader
+    #11 — same shape as ``test_h45_memo_key_includes_kg_mutation_seq``
+    above, epoch instead of seq.
+
+    变异锚点:``_h45_missing_vector_counts`` 的键去掉 version 分量的 epoch 半
+    (退回裸 seq)→ 第三次 run(epoch 已变、seq 未变)会命中第一次的缓存条目,
+    ``len(seen) == 4`` 红(本应 6)。"""
+    epoch = [0]
+    svc, seen = _counting_service(
+        repo, kg_version=lambda db, nb: (epoch[0], 7)
+    )
+    svc.run("nb-x")
+    svc.run("nb-x")
+    assert len(seen) == 2  # same (epoch=0, seq=7) -> hit
+
+    epoch[0] = 1  # simulated delete_notebook_kg: epoch advances, raw seq (7) unchanged
+    svc.run("nb-x")
+    assert len(seen) == 4, (
+        "(epoch=1, seq=7) must MISS the (epoch=0, seq=7) entry even though "
+        "the raw seq coincides -- serving the cached counts here would mean "
+        "a post-delete/reingest checkup saw the pre-delete graph's stale "
+        "missing-vector counts"
+    )
 
 
 def test_h45_explicit_invalidation_forces_recompute(repo):

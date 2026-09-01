@@ -619,3 +619,270 @@ def test_delete_notebook_kg_preserves_memory_projection_artifacts(repo):
             assert db.execute(
                 f"SELECT COUNT(*) c FROM {table} WHERE {id_column}=?", (removed,)
             ).fetchone()["c"] == 0
+
+
+# ── batch-3-W1 PR-2: unified_kg_state seq semantics (design doc Sec 3.3) ──
+
+
+def test_delete_notebook_kg_resets_unified_kg_state_in_place_and_advances_epoch(repo):
+    """``delete_notebook_kg`` no longer DELETEs the ``unified_kg_state`` row
+    (which used to make ``kg_mutation_seq`` restart from 0 and alias with a
+    prior version — kg_mutation.py's FULL CENSUS, ``review_queue_memo``'s
+    former gap 2). It now RESETS the row in place, in the SAME transaction as
+    the graph-row deletes, and advances the new ``kg_reset_epoch`` column by
+    exactly 1. The row must still exist afterward (not re-inserted bare)."""
+    nb = repo.create_notebook(NotebookCreate(name="epoch reset"))
+    n_obj, n_rel = repo.store_kg(
+        nb.id, None,
+        [{"local_id": "C1", "object_type": "concept", "payload": {"name": "x"}, "evidence": []}],
+        [],
+    )
+    assert (n_obj, n_rel) == (1, 0)
+
+    with repo._connect() as db:
+        before = db.execute(
+            "SELECT * FROM unified_kg_state WHERE notebook_id=?", (nb.id,)
+        ).fetchone()
+    assert before is not None
+    assert int(before["kg_mutation_seq"]) > 0
+    assert int(before["kg_reset_epoch"]) == 0
+
+    repo.delete_notebook_kg(nb.id)
+
+    with repo._connect() as db:
+        after = db.execute(
+            "SELECT * FROM unified_kg_state WHERE notebook_id=?", (nb.id,)
+        ).fetchone()
+    assert after is not None, "the row must be RESET in place, never dropped"
+    assert int(after["kg_mutation_seq"]) == 0
+    assert int(after["cluster_mutation_seq"]) == 0
+    assert int(after["community_seq"]) == -1
+    assert int(after["canonical_rel_seq"]) == -1
+    assert int(after["mention_seq"]) == -1
+    assert after["cluster_input_version"] == ""
+    assert (after["last_rebuild_at"] or "") == ""
+    assert int(after["object_count"]) == 0
+    assert int(after["relation_count"]) == 0
+    assert int(after["cluster_count"]) == 0
+    assert int(after["kg_reset_epoch"]) == 1, "the ONE writer of kg_reset_epoch must bump it by 1"
+
+    # A second delete (on the now-empty graph) advances the epoch again —
+    # only increases, never decreases or resets.
+    repo.delete_notebook_kg(nb.id)
+    with repo._connect() as db:
+        twice = db.execute(
+            "SELECT kg_reset_epoch FROM unified_kg_state WHERE notebook_id=?", (nb.id,)
+        ).fetchone()
+    assert int(twice["kg_reset_epoch"]) == 2
+
+
+def test_delete_notebook_kg_matches_a_freshly_created_birth_row_byte_for_byte(repo):
+    """kg_analysis._state_view treats ``kg_mutation_seq==0 and not
+    last_rebuild_at`` as byte-identical to "row absent" (the never-written
+    notebook contract, test_born_state_row_reports_like_a_never_written_
+    notebook — deliberately NOT touched by this PR). This asserts the
+    RESET row after delete_notebook_kg matches a truly fresh notebook's birth
+    row on every column that contract reads, so the KG-analysis overview
+    keeps reporting "never computed" post-delete exactly like it always has
+    for a brand-new notebook — kg_reset_epoch is the one column that
+    legitimately differs (it is not part of that contract)."""
+    born = repo.create_notebook(NotebookCreate(name="birth"))
+    deleted = repo.create_notebook(NotebookCreate(name="to be reset"))
+    repo.store_kg(
+        deleted.id, None,
+        [{"local_id": "C1", "object_type": "concept", "payload": {"name": "x"}, "evidence": []}],
+        [],
+    )
+    repo.delete_notebook_kg(deleted.id)
+
+    with repo._connect() as db:
+        born_row = dict(db.execute(
+            "SELECT * FROM unified_kg_state WHERE notebook_id=?", (born.id,)
+        ).fetchone())
+        reset_row = dict(db.execute(
+            "SELECT * FROM unified_kg_state WHERE notebook_id=?", (deleted.id,)
+        ).fetchone())
+
+    for column in (
+        "dirty", "kg_mutation_seq", "cluster_mutation_seq", "cluster_input_version",
+        "last_rebuild_at", "object_count", "relation_count", "cluster_count",
+        "community_seq", "canonical_rel_seq", "mention_seq",
+    ):
+        assert reset_row[column] == born_row[column], (
+            f"{column} diverged from a fresh birth row: "
+            f"{reset_row[column]!r} != {born_row[column]!r}"
+        )
+    # kg_reset_epoch is deliberately NOT part of the birth-row contract.
+    assert int(born_row["kg_reset_epoch"]) == 0
+    assert int(reset_row["kg_reset_epoch"]) == 1
+
+
+def test_delete_notebook_kg_removes_this_notebooks_kg_analysis_artifacts_ledger(repo):
+    """design doc Sec 3.2 table #15: the analysis-artifact LEDGER
+    (``kg_analysis_artifacts``) is blanket-deleted alongside the graph, not
+    reset — a ledger row's whole meaning is "built at this seq", and there is
+    no meaningful reset shape for it. Before this, a cleared graph left
+    ledger rows carrying a pre-reset kg_mutation_seq, making
+    kg_analysis._artifact_freshness compute a NEGATIVE seq_behind (the
+    module's own contract treats that as "database was hand-edited").
+
+    R1 (P2-1, post-review): the ledger row and its DETAIL tables
+    (``kg_community_edges`` / ``kg_source_profiles``) are a documented single
+    unit — ``discard_board_dependent_kg_analysis_artifacts``'s own docstring
+    states plainly that leaving the detail half behind dangles pointers to a
+    board partition with no governing ledger row. This test now also seeds
+    and asserts on those two detail tables.
+
+    变异锚点:把 kg_community_edges/kg_source_profiles 从清空序列里去掉,本条
+    必须报红(明细行残留)。"""
+    nb = repo.create_notebook(NotebookCreate(name="artifact ledger"))
+    from app.services.sqlite_repository import _now
+    now = _now()
+    with repo._connect() as db:
+        db.execute(
+            "INSERT INTO kg_analysis_artifacts (notebook_id,kind,kg_mutation_seq,payload,created_at) "
+            "VALUES (?,?,?,?,?)",
+            (nb.id, "cross_board_edges", 5, "{}", now),
+        )
+        db.execute(
+            "INSERT INTO kg_analysis_artifacts (notebook_id,kind,kg_mutation_seq,payload,created_at) "
+            "VALUES (?,?,?,?,?)",
+            (nb.id, "source_board_profiles", 5, "{}", now),
+        )
+        db.execute(
+            "INSERT INTO kg_community_edges (notebook_id,src_community_id,dst_community_id,weight) "
+            "VALUES (?,?,?,?)",
+            (nb.id, "cid-a", "cid-b", 3),
+        )
+        db.execute(
+            "INSERT INTO kg_source_profiles (notebook_id,source_id) VALUES (?,?)",
+            (nb.id, "src-x"),
+        )
+    with repo._connect() as db:
+        assert db.execute(
+            "SELECT COUNT(*) c FROM kg_analysis_artifacts WHERE notebook_id=?", (nb.id,)
+        ).fetchone()["c"] == 2
+        assert db.execute(
+            "SELECT COUNT(*) c FROM kg_community_edges WHERE notebook_id=?", (nb.id,)
+        ).fetchone()["c"] == 1
+        assert db.execute(
+            "SELECT COUNT(*) c FROM kg_source_profiles WHERE notebook_id=?", (nb.id,)
+        ).fetchone()["c"] == 1
+
+    counts = repo.delete_notebook_kg(nb.id)
+
+    with repo._connect() as db:
+        assert db.execute(
+            "SELECT COUNT(*) c FROM kg_community_edges WHERE notebook_id=?", (nb.id,)
+        ).fetchone()["c"] == 0
+        assert db.execute(
+            "SELECT COUNT(*) c FROM kg_source_profiles WHERE notebook_id=?", (nb.id,)
+        ).fetchone()["c"] == 0
+        assert db.execute(
+            "SELECT COUNT(*) c FROM kg_analysis_artifacts WHERE notebook_id=?", (nb.id,)
+        ).fetchone()["c"] == 0
+    assert counts["kg_analysis_artifacts"] == 2
+
+
+def test_delete_notebook_kg_upserts_when_the_state_row_was_already_missing(repo):
+    """R1 (P0-2, post-review): scripts/merge_dbs.py's ``KG_STATE_TABLES``
+    deliberately DELETEs a merged notebook's ``unified_kg_state`` row so the
+    deployment recomputes it fresh (nothing re-creates it until the next real
+    mutation). If ``delete_notebook_kg`` runs against such a notebook before
+    anything else touches the row, a bare ``UPDATE ... WHERE notebook_id=?``
+    is a silent no-op (rowcount 0): the row stays absent, ``kg_reset_epoch``
+    never advances, and every reader's "row is None" fallback keeps computing
+    the SAME ``(epoch=0, seq=0)`` version key both before and after the call
+    — even though this same transaction just deleted real graph rows. This
+    test reproduces that exact sequence and asserts the row is
+    resurrected (not left absent) with ``kg_reset_epoch=1``, and that a memo
+    warmed while the row was absent does NOT keep serving its stale value
+    afterward.
+
+    变异锚点:把 UPSERT 改回裸 UPDATE,本条必须报红——行缺失路径下 epoch 不动、
+    memo 端出清图前的旧计数。
+    """
+    from app.repositories.sqlite import knowledge_counts_cache as kcc
+
+    nb = repo.create_notebook(NotebookCreate(name="missing state row"))
+    repo.store_kg(
+        nb.id, None,
+        [
+            {"local_id": "C1", "object_type": "concept", "payload": {"name": "x"}, "evidence": []},
+            {"local_id": "C2", "object_type": "concept", "payload": {"name": "y"}, "evidence": []},
+        ],
+        [],
+    )
+    with repo._connect() as db:
+        before = db.execute(
+            "SELECT * FROM unified_kg_state WHERE notebook_id=?", (nb.id,)
+        ).fetchone()
+    assert before is not None
+    assert int(before["kg_mutation_seq"]) > 0
+
+    # Simulate scripts/merge_dbs.py's KG_STATE_TABLES clearing: the state row
+    # is gone, but the real knowledge_objects rows it described are still here.
+    with repo._write() as db:
+        db.execute("DELETE FROM unified_kg_state WHERE notebook_id=?", (nb.id,))
+    with repo._connect() as db:
+        assert db.execute(
+            "SELECT COUNT(*) c FROM unified_kg_state WHERE notebook_id=?", (nb.id,)
+        ).fetchone()["c"] == 0
+
+    # Warm a memo while the row is absent: its version key is the "row is
+    # None" sentinel (epoch=0, seq=0), and it caches the CURRENT (pre-delete)
+    # object count.
+    kcc.invalidate()
+    with repo._connect() as db:
+        stale_counts = kcc.type_status_counts(db, nb.id)
+    assert sum(stale_counts.values()) == 2
+
+    counts = repo.delete_notebook_kg(nb.id)
+    assert counts["knowledge_objects"] == 2
+
+    with repo._connect() as db:
+        after = db.execute(
+            "SELECT * FROM unified_kg_state WHERE notebook_id=?", (nb.id,)
+        ).fetchone()
+    assert after is not None, "the row must be resurrected, not left absent"
+    assert int(after["kg_mutation_seq"]) == 0
+    assert int(after["kg_reset_epoch"]) == 1, (
+        "a missing-row delete is itself a reset event: epoch must start at "
+        "1, not the 0 a bare re-insert would default to"
+    )
+
+    with repo._connect() as db:
+        fresh_counts = kcc.type_status_counts(db, nb.id)
+    assert sum(fresh_counts.values()) == 0, (
+        "the memo warmed while the row was absent must NOT keep being "
+        "served after delete_notebook_kg -- its version key changed from "
+        "(epoch=0, seq=0) to (epoch=1, seq=0), a genuine miss"
+    )
+
+
+def test_delete_notebook_kg_upsert_epoch_still_only_increases_across_repeats(repo):
+    """The missing-row UPSERT path and the normal existing-row UPDATE path
+    must compose: once the row is resurrected at epoch=1, further deletes
+    keep incrementing normally (never resets, never repeats)."""
+    nb = repo.create_notebook(NotebookCreate(name="missing then present"))
+    repo.store_kg(
+        nb.id, None,
+        [{"local_id": "C1", "object_type": "concept", "payload": {"name": "x"}, "evidence": []}],
+        [],
+    )
+    with repo._write() as db:
+        db.execute("DELETE FROM unified_kg_state WHERE notebook_id=?", (nb.id,))
+
+    repo.delete_notebook_kg(nb.id)
+    with repo._connect() as db:
+        first = db.execute(
+            "SELECT kg_reset_epoch FROM unified_kg_state WHERE notebook_id=?", (nb.id,)
+        ).fetchone()
+    assert int(first["kg_reset_epoch"]) == 1
+
+    repo.delete_notebook_kg(nb.id)
+    with repo._connect() as db:
+        second = db.execute(
+            "SELECT kg_reset_epoch FROM unified_kg_state WHERE notebook_id=?", (nb.id,)
+        ).fetchone()
+    assert int(second["kg_reset_epoch"]) == 2

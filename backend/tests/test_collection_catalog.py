@@ -527,6 +527,68 @@ def test_kg_memo_is_lru_bounded(repo, monkeypatch):
     assert list(catalog._kg_counts) == [second.id]
 
 
+def test_kg_counts_use_epoch_not_just_raw_seq_after_a_delete_and_reingest(repo):
+    """R1 (P2-2, post-review, batch-3-W1 PR-2): ``delete_notebook_kg`` resets
+    ``unified_kg_state.kg_mutation_seq`` back to 0 in place (design doc Sec 3
+    Option C) rather than deleting the row, so a notebook that is cleared and
+    then reingested can climb the RAW seq counter back up to the exact value
+    it held before the delete. If ``_notebook_kg_counts``'s L3 memo key were
+    still a bare seq int, the post-delete-and-reingest read would silently
+    serve the stale PRE-delete counts the moment the raw counters realign —
+    the same aliasing hazard closed everywhere else in this PR.
+    ``kg_reset_epoch`` (bumped only by the delete) is what still tells the
+    two states apart, so the memo key is ``(kg_reset_epoch, kg_mutation_seq)``.
+
+    变异锚点:把 ``_notebook_kg_counts`` 的
+    ``version = (int(row[3]), int(row[0]))`` 改回裸 ``version = int(row[0])``
+    (P2-2 之前的形态),本条必须报红——预热的旧计数(2 个 concept)被当命中直接
+    返回,而不是重算出 delete-and-reingest 之后的真实计数(1 个 concept)。
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="alias-guard"))
+    _add_kg_object(repo, notebook.id, "o1", "concept")
+    _add_kg_object(repo, notebook.id, "o2", "concept")
+    _bump_kg_seq(repo, notebook.id)
+    catalog = _catalog(repo)
+    before = dict(catalog.collection_map(notebook.id).kg_objects)
+    assert before["concept"] == 2
+
+    with repo._connect() as db:
+        raw_seq_before_delete = int(
+            repo._runtime.unified_kg.graph_seq_row(db, notebook.id)[0]
+        )
+
+    repo.delete_notebook_kg(notebook.id)
+
+    # Reingest exactly ONE surviving object (bare INSERT — deliberately NOT
+    # going through ``_add_kg_object``'s manual ``.invalidate()`` call, since
+    # that would sidestep the very seq-keyed memo this test exercises).
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO knowledge_objects (id,notebook_id,source_id,object_type,"
+            "payload,evidence,status,owner,last_reviewed,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            ("o3", notebook.id, "", "concept", json.dumps({"name": "o3"}),
+             "[]", "approved", "", "", NOW, NOW),
+        )
+    repo._runtime.queries.invalidate_knowledge_counts(notebook.id)  # store 层安全阀
+    # Force the raw seq counter back to the EXACT pre-delete value — the
+    # aliasing scenario design doc Sec 3 Option C exists to close. Only
+    # kg_reset_epoch (already bumped by the delete above) still distinguishes
+    # this post-delete-and-reingest state from the pre-delete one.
+    with repo._write() as db:
+        db.execute(
+            "UPDATE unified_kg_state SET kg_mutation_seq=? WHERE notebook_id=?",
+            (raw_seq_before_delete, notebook.id),
+        )
+
+    after = dict(catalog.collection_map(notebook.id).kg_objects)
+    assert after["concept"] == 1, (
+        "post-delete-and-reingest count must reflect the ONE surviving "
+        "object, not the stale pre-delete cache the raw seq alone would "
+        f"alias onto (got {after!r})"
+    )
+
+
 def test_knowhow_table_count_covers_scope(repo):
     notebook = repo.create_notebook(NotebookCreate(name="nb"))
     base = repo.create_notebook(NotebookCreate(name="base"))

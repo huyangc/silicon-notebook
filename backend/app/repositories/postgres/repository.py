@@ -86,7 +86,11 @@ class PostgresRepository(RepositoryFacade):
         (文件系统层、后端无关)。facade 是 lru_cache 单例 → checkup 单例,H7/H8 进程内缓存跨请求存活。"""
         c = self.__dict__.get("_checkup")
         if c is None:
-            from app.services.checkup import CheckupService, probe_scale_index_integrity
+            from app.services.checkup import (
+                CheckupService,
+                h45_version_key,
+                probe_scale_index_integrity,
+            )
 
             rt = self._runtime
             c = CheckupService(
@@ -98,10 +102,13 @@ class PostgresRepository(RepositoryFacade):
                 count_missing_element_vectors=(
                     lambda nb, exclude: self.maintenance.count_missing_element_vectors(nb, exclude)
                 ),
-                # H4/H5 memo 键的版本分量:只取三元组的 kg_mutation_seq(同 sqlite 侧注释)。
-                kg_mutation_seq=(
-                    lambda db, nb: int(rt.unified_kg.graph_seq_row(db, nb)[0])
-                ),
+                # H4/H5 memo 键的版本分量:(kg_reset_epoch, kg_mutation_seq) 二元组
+                # (batch-3-W1 PR-2)。R1 (P1-1, post-review): 曾经这里独立接了一份
+                # 裸 int(graph_seq_row(db,nb)[0]) 的旧线,与 SQLite 侧改用的
+                # h45_version_key 脱节——生产 PostgreSQL 后端的 H4/H5 memo 因此仍在
+                # 对 delete+reingest 别名。现在两后端共用同一份实现,结构上不可能
+                # 再分叉。见 checkup.h45_version_key 的完整论证。
+                kg_version=h45_version_key(rt.unified_kg),
                 scale_index_state=(
                     lambda nb: str(rt.scale_artifacts.status(nb).get("state", ""))
                 ),

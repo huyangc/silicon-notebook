@@ -44,7 +44,41 @@ def source_subgraph_signature_on(
     placeholder: str,
     postgres: bool,
 ) -> tuple:
-    """Return a content-free generation signature for one frozen scope."""
+    """Return a content-free generation signature for one frozen scope.
+
+    ``kg_reset_epoch`` (batch-3-W1 PR-2, design doc Sec 3.2 table #14) is
+    appended as a FIFTH, trailing element, and — R1 (P1-2, post-review) —
+    CONDITIONALLY: only when ``epoch > 0``, mirroring Sec 3.4's rule for
+    ``ScaleArtifactRuntime.version()`` exactly. This tuple is not just a
+    process-local cache key: ``build_source_partition``
+    (``services/kg/source_partition_index.py``) bakes it verbatim into each
+    per-source partition's ON-DISK manifest.json as ``source_signature``,
+    compared byte-for-byte on every read (``inspect_source_partition_
+    manifest``). Appending unconditionally would make EVERY existing on-disk
+    manifest (written before this column existed, 4 elements) compare
+    unequal to a freshly computed 5-element signature the instant this PR
+    ships — every partition in the fleet would read as
+    ``source_partition_identity_mismatch`` and downgrade to the
+    no-partition-graph path, AND an epoch-0 notebook's signature would STILL
+    be a 5-tuple going forward with no way back to 4, so a partition built
+    post-rollout could never again match one built pre-rollout even though
+    nothing about that notebook's KG ever reset (Sec 3.4's fleet-wide-
+    rebuild-storm hazard, replayed on-disk instead of in the version() memo).
+    Gating on epoch > 0 keeps an epoch-0 notebook's signature exactly the
+    4-tuple it always was — existing manifests keep matching, no spurious
+    identity_mismatch, no forced re-partition. A notebook that HAS been
+    through delete_notebook_kg gets a 5-tuple, and its EXISTING 4-element
+    on-disk manifest legitimately fails to match: that mismatch is CORRECT,
+    not a bug — the KG really was reset since that partition was built, so
+    the old partition really is stale, and the read is meant to be refused
+    (``source_partition_identity_mismatch``) rather than served. It also
+    self-heals: version() (Sec 3.4) already made that SAME epoch bump change
+    the notebook's scale-artifact version, so the next scale build/fold
+    republishes this notebook's partitions with the new 5-element signature
+    baked in, and reads resume matching from then on. See
+    ``services/source_partitioned_ppr.py``'s ``_graph`` for the matching
+    conditional reconstruction and its ``len(signature)`` gate.
+    """
     if not source_ids:
         return (0, 0, 0, ())
     ph = _in_clause(placeholder, source_ids)
@@ -53,7 +87,8 @@ def source_subgraph_signature_on(
     state = connection.execute(
         "SELECT COALESCE(kg_mutation_seq,0) AS kg_seq,"
         "COALESCE(cluster_mutation_seq,0) AS cluster_seq,"
-        f"{source_index_expr} AS source_index_backfilled "
+        f"{source_index_expr} AS source_index_backfilled,"
+        "COALESCE(kg_reset_epoch,0) AS kg_reset_epoch "
         f"FROM unified_kg_state WHERE notebook_id={placeholder}",
         (notebook_id,),
     ).fetchone()
@@ -119,12 +154,19 @@ def source_subgraph_signature_on(
                 str(backfill.get("updated_at") or ""),
             )
         )
-    return (
+    epoch = int(state["kg_reset_epoch"]) if state else 0
+    signature = (
         int(state["kg_seq"]) if state else 0,
         int(state["cluster_seq"]) if state else 0,
         int(state["source_index_backfilled"]) if state else 0,
         tuple(per_source),
     )
+    # Conditional, and MUST stay the trailing element — see this function's
+    # own docstring for why unconditional is the same fleet-wide hazard
+    # Sec 3.4 exists to prevent, replayed on-disk.
+    if epoch:
+        signature = signature + (epoch,)
+    return signature
 
 
 def _effective_source_states(signature: tuple) -> list[dict[str, Any]]:

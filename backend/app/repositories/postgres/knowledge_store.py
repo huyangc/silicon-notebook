@@ -53,7 +53,37 @@ _GRAPH_RESET_TABLES = frozenset({
     "knowledge_embeddings",
     "extraction_runs",
     "kg_relation_completion_state",
-    "unified_kg_state",
+    # kg_analysis_artifacts: the KG-quality-analysis product LEDGER (batch-3-W1
+    # PR-2, design doc Sec 3.2 table #15). Blanket-deleted here, same as
+    # concept_clusters/concept_merge_candidates/kg_relation_completion_state —
+    # NOT reset like unified_kg_state (below), because a ledger row's whole
+    # meaning is "this artifact was built at this seq"; there is no
+    # meaningful "reset" shape for it short of not existing. Before this was
+    # added, a cleared graph left its (notebook_id, kind) rows carrying a
+    # kg_mutation_seq from BEFORE the reset, so kg_analysis's
+    # _artifact_freshness computed seq_behind = 0 - built < 0 — a value the
+    # module's own contract treats as "database was hand-edited" (see
+    # kg_analysis.py's _artifact_freshness docstring). Deleting the ledger
+    # rows here makes the post-clear read report ABSENCE_NEVER_COMPUTED
+    # instead, which is the truthful answer.
+    "kg_analysis_artifacts",
+    # kg_community_edges / kg_source_profiles: the DETAIL tables the ledger's
+    # two board-dependent kinds describe. R1 (P2-1, post-review): the ledger
+    # row and its detail rows are a documented single unit —
+    # discard_board_dependent_kg_analysis_artifacts's own docstring (both
+    # backends' unified_kg_store.py) states plainly "明细行与账本行都删...
+    # 留着的是指向已重铸板块 id 的悬空行". Deleting only the ledger kind rows
+    # here (as an earlier revision of this set did) would leave exactly that
+    # dangling half behind — at production scale up to 200k cross-board edge
+    # rows / ~source-count profile rows per notebook, never cleaned by
+    # anything else once the ledger row that would have gated a re-read of
+    # them (_detail_rows_are_readable) is gone.
+    "kg_community_edges",
+    "kg_source_profiles",
+    # unified_kg_state is DELIBERATELY NOT a member of this set: it is reset
+    # in place by the explicit UPDATE at the end of
+    # delete_notebook_graph_rows (design doc Sec 3.3 option C), not
+    # blanket-deleted by the loop below — see that UPDATE's comment for why.
 })
 
 _DELETE_OBJECT_BATCH_SIZE = 500
@@ -259,7 +289,7 @@ class KnowledgeStore:
 
     # ------------------------------------------------ lifecycle projections
     @staticmethod
-    def delete_notebook_graph_rows(db: Any, notebook_id: str) -> dict[str, int]:
+    def delete_notebook_graph_rows(db: Any, notebook_id: str, now: str) -> dict[str, int]:
         """Wipe user-document KG while preserving hidden projection lifecycles.
 
         Memory extraction is owned by confirmation/edit, and Knowhow projection
@@ -267,6 +297,12 @@ class KnowledgeStore:
         either source's objects/relations; Memory embeddings and extraction runs
         are preserved with them. Notebook-wide derived cluster/state tables are
         rebuilt from the surviving plus newly extracted objects.
+
+        ``now`` (batch-3-W1 PR-2) stamps the ``unified_kg_state`` reset's
+        ``updated_at`` — the same caller-supplied-clock seam every other
+        writer of this table already threads through (``mark_dirty`` /
+        ``bump_cluster_seq``), not a bare SQL ``now()``, so tests keep an
+        injectable clock here too.
         """
         counts: dict[str, int] = {}
         cur = db.execute(
@@ -330,6 +366,74 @@ class KnowledgeStore:
             (notebook_id, notebook_id),
         )
         counts["extraction_runs"] = cur.rowcount
+        # unified_kg_state: RESET in place to its birth-row shape, never
+        # deleted (design doc batch-3-W1 Sec 3.3 option C, D-3). Dropping the
+        # row (the pre-PR-2 behaviour) made a delete+reingest re-climb
+        # kg_mutation_seq/cluster_mutation_seq/mention_seq from the same
+        # starting values a prior version had already used — every process
+        # cache keyed on that triple (or on version_signal, which embeds it)
+        # could alias a stale entry onto genuinely different content
+        # (kg_mutation.py's FULL CENSUS "Deliberately NOT moved" entry for
+        # delete_notebook_kg; kg_analysis.py's _state_view docstring). This
+        # reproduces the exact row shape a fresh create_notebook birth row
+        # has EXCEPT it advances kg_reset_epoch instead of leaving it at 0 —
+        # so kg_analysis._state_view's ``kg_mutation_seq==0 and not
+        # last_rebuild_at`` "no KG history" judgment stays byte-identical
+        # (the epoch column is not part of that judgment), while every
+        # epoch-aware reader can now tell "notebook never had a KG" (epoch 0)
+        # apart from "notebook's KG was reset N times" (epoch N).
+        # kg_reset_epoch ONLY increases here — this is its one writer in the
+        # whole codebase (see the column's migration comment and
+        # kg_mutation.py's FULL CENSUS).
+        # source_index_backfilled / chunk_elements_indexed /
+        # indexing_pipeline_id / indexing_pipeline_version are DELIBERATELY
+        # NOT touched on the UPDATE branch: they are provenance/pipeline-
+        # identity columns, not KG content state, and the caller
+        # (knowledge_lifecycle.delete_notebook_kg) separately re-asserts the
+        # source_index_backfilled certificate when it was already set (its
+        # own docstring covers why).
+        #
+        # R1 (P0-2, post-review): UPSERT, not a bare UPDATE. A plain UPDATE
+        # WHERE notebook_id=%s is a silent no-op when the row does not exist
+        # — reachable in production (scripts/merge_dbs.py's KG_STATE_TABLES
+        # deliberately DELETEs a merged notebook's unified_kg_state row so
+        # the deployment recomputes it fresh; nothing stops delete_notebook_
+        # kg from later running against that same notebook before anything
+        # else re-creates the row). A no-op reset leaves kg_reset_epoch
+        # un-advanced AND the row still absent, so every epoch-aware reader's
+        # "row is None" fallback keeps computing the SAME (epoch=0, seq=0)
+        # version key both before and after this call — even though the
+        # graph rows this same transaction just deleted were real content.
+        # That is exactly the aliasing hazard kg_reset_epoch exists to close,
+        # reappearing through the one path that skips the UPDATE entirely.
+        # The INSERT branch therefore starts kg_reset_epoch at 1 (not 0): a
+        # missing-row delete is itself a reset event, so its post-state must
+        # be observably different from the "row never existed" sentinel the
+        # missing row is currently returning everywhere. The other INSERT-
+        # branch columns are left to their table DEFAULTs (source_index_
+        # backfilled=0, chunk_elements_indexed=0, indexing_pipeline_id='',
+        # indexing_pipeline_version='builtin.chunk.v1') — the conservative
+        # "unknown/uncertified" shape a historical row predating forward
+        # maintenance gets, deliberately NOT create_notebook's own
+        # source_index_backfilled=1 (this row is being synthesized mid-
+        # lifecycle for a notebook that already had content, not born empty).
+        cur = db.execute(
+            "INSERT INTO unified_kg_state ("
+            "notebook_id, dirty, kg_mutation_seq, cluster_mutation_seq, "
+            "cluster_input_version, last_rebuild_at, object_count, "
+            "relation_count, cluster_count, community_seq, canonical_rel_seq, "
+            "mention_seq, kg_reset_epoch, updated_at"
+            ") VALUES (%s, 0, 0, 0, '', NULL, 0, 0, 0, -1, -1, -1, 1, %s) "
+            "ON CONFLICT (notebook_id) DO UPDATE SET "
+            "dirty=0, kg_mutation_seq=0, cluster_mutation_seq=0, "
+            "cluster_input_version='', last_rebuild_at=NULL, "
+            "object_count=0, relation_count=0, cluster_count=0, "
+            "community_seq=-1, canonical_rel_seq=-1, mention_seq=-1, "
+            "kg_reset_epoch=unified_kg_state.kg_reset_epoch+1, "
+            "updated_at=excluded.updated_at",
+            (notebook_id, normalize_timestamp(now)),
+        )
+        counts["unified_kg_state"] = cur.rowcount
         # PostgreSQL search indexes derive from knowledge_objects itself.
         counts["kg_objects_fts"] = 0
         return counts

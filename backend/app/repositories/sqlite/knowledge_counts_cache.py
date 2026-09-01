@@ -69,36 +69,48 @@ from app.repositories.sqlite.access_sql import NOTEBOOK_LIVE_SQL
 # repository->service import edge).
 _DEPRECATED = "deprecated"
 
-_MEMO: "OrderedDict[str, Tuple[int, Dict[Tuple[str, str], int]]]" = OrderedDict()
-# Sibling int memos sharing _LOCK / _MAX_NOTEBOOKS / the kg_mutation_seq gate.
-_PENDING: "OrderedDict[str, Tuple[int, int]]" = OrderedDict()
-_VISIBLE_PENDING: "OrderedDict[str, Tuple[int, int]]" = OrderedDict()
-_CHUNKS: "OrderedDict[str, Tuple[int, int]]" = OrderedDict()
+# 四个 memo 的键从裸 kg_mutation_seq 扩为 (kg_reset_epoch, kg_mutation_seq)
+# 二元组(batch-3-W1 PR-2,design doc Sec 3.2 表 #9,parity with the
+# PostgreSQL twin's _version_key). NOT the same "epoch" as
+# _INVALIDATION_EPOCH below — that is this module's own process-internal
+# in-flight-write-back race guard, unrelated to the persisted column.
+_MEMO: "OrderedDict[str, Tuple[Tuple[int, int], Dict[Tuple[str, str], int]]]" = OrderedDict()
+# Sibling memos sharing _LOCK / _MAX_NOTEBOOKS / the version gate.
+_PENDING: "OrderedDict[str, Tuple[Tuple[int, int], int]]" = OrderedDict()
+_VISIBLE_PENDING: "OrderedDict[str, Tuple[Tuple[int, int], int]]" = OrderedDict()
+_CHUNKS: "OrderedDict[str, Tuple[Tuple[int, int], int]]" = OrderedDict()
 _LOCK = threading.Lock()
 _INVALIDATION_EPOCH = 0
 _MAX_NOTEBOOKS = 512  # bounded LRU; counts dict per notebook is tiny (types×statuses)
 
 
-def _mutation_seq(db: sqlite3.Connection, notebook_id: str) -> int:
+def _version_key(db: sqlite3.Connection, notebook_id: str) -> Tuple[int, int]:
+    """``(kg_reset_epoch, kg_mutation_seq)`` — see the PostgreSQL twin's
+    identically-named function for the full rationale. Before kg_reset_epoch
+    existed, a delete_notebook_kg + reingest could re-climb kg_mutation_seq
+    back to a value already cached here; folding the epoch in closes that
+    aliasing structurally (a notebook's epoch never repeats)."""
     row = db.execute(
-        "SELECT kg_mutation_seq FROM unified_kg_state WHERE notebook_id=?",
+        "SELECT kg_mutation_seq,kg_reset_epoch FROM unified_kg_state WHERE notebook_id=?",
         (notebook_id,),
     ).fetchone()
-    if row is None or row["kg_mutation_seq"] is None:
-        return 0
-    return int(row["kg_mutation_seq"])
+    if row is None:
+        return (0, 0)
+    seq = int(row["kg_mutation_seq"]) if row["kg_mutation_seq"] is not None else 0
+    epoch = int(row["kg_reset_epoch"]) if row["kg_reset_epoch"] is not None else 0
+    return (epoch, seq)
 
 
 def type_status_counts(
     db: sqlite3.Connection, notebook_id: str
 ) -> Dict[Tuple[str, str], int]:
     """``{(object_type, status): count}`` for the notebook, memoized on
-    ``kg_mutation_seq``. Returns a shared read-only dict — callers must not
-    mutate it."""
-    seq = _mutation_seq(db, notebook_id)
+    ``(kg_reset_epoch, kg_mutation_seq)``. Returns a shared read-only dict —
+    callers must not mutate it."""
+    version = _version_key(db, notebook_id)
     with _LOCK:
         hit = _MEMO.get(notebook_id)
-        if hit is not None and hit[0] == seq:
+        if hit is not None and hit[0] == version:
             _MEMO.move_to_end(notebook_id)
             return hit[1]
 
@@ -112,7 +124,7 @@ def type_status_counts(
     }
 
     with _LOCK:
-        _MEMO[notebook_id] = (seq, counts)
+        _MEMO[notebook_id] = (version, counts)
         _MEMO.move_to_end(notebook_id)
         while len(_MEMO) > _MAX_NOTEBOOKS:
             _MEMO.popitem(last=False)
@@ -229,11 +241,11 @@ def pending_source_count(db: sqlite3.Connection, notebook_id: str) -> int:
     A direct/governance graph without extraction history remains complete, but
     rows left by a failed latest KG run stay pending. Internal scheduling and
     readiness accounting use this physical count. Memoized on
-    ``(notebook_id, kg_mutation_seq)``."""
-    seq = _mutation_seq(db, notebook_id)
+    ``(notebook_id, kg_reset_epoch, kg_mutation_seq)``."""
+    version = _version_key(db, notebook_id)
     with _LOCK:
         hit = _PENDING.get(notebook_id)
-        if hit is not None and hit[0] == seq:
+        if hit is not None and hit[0] == version:
             _PENDING.move_to_end(notebook_id)
             return hit[1]
         invalidation_epoch = _INVALIDATION_EPOCH
@@ -242,7 +254,7 @@ def pending_source_count(db: sqlite3.Connection, notebook_id: str) -> int:
 
     with _LOCK:
         if invalidation_epoch == _INVALIDATION_EPOCH:
-            _PENDING[notebook_id] = (seq, count)
+            _PENDING[notebook_id] = (version, count)
             _PENDING.move_to_end(notebook_id)
             while len(_PENDING) > _MAX_NOTEBOOKS:
                 _PENDING.popitem(last=False)
@@ -256,17 +268,17 @@ def visible_pending_source_count(
 
     Excludes Memory-derived and Knowhow-table synthetic sources.
     """
-    seq = _mutation_seq(db, notebook_id)
+    version = _version_key(db, notebook_id)
     with _LOCK:
         hit = _VISIBLE_PENDING.get(notebook_id)
-        if hit is not None and hit[0] == seq:
+        if hit is not None and hit[0] == version:
             _VISIBLE_PENDING.move_to_end(notebook_id)
             return hit[1]
         invalidation_epoch = _INVALIDATION_EPOCH
     count = _pending_source_count_query(db, notebook_id, visible_only=True)
     with _LOCK:
         if invalidation_epoch == _INVALIDATION_EPOCH:
-            _VISIBLE_PENDING[notebook_id] = (seq, count)
+            _VISIBLE_PENDING[notebook_id] = (version, count)
             _VISIBLE_PENDING.move_to_end(notebook_id)
             while len(_VISIBLE_PENDING) > _MAX_NOTEBOOKS:
                 _VISIBLE_PENDING.popitem(last=False)
@@ -275,12 +287,13 @@ def visible_pending_source_count(
 
 def chunk_count(db: sqlite3.Connection, notebook_id: str) -> int:
     """``COUNT(*)`` of the notebook's chunks (``/scale-index/status`` open path),
-    memoized on ``(notebook_id, kg_mutation_seq)``. Cold it is a full covering
-    scan over millions of chunk leaf entries; warm it is one PK seq read."""
-    seq = _mutation_seq(db, notebook_id)
+    memoized on ``(notebook_id, kg_reset_epoch, kg_mutation_seq)``. Cold it is
+    a full covering scan over millions of chunk leaf entries; warm it is one
+    PK seq read."""
+    version = _version_key(db, notebook_id)
     with _LOCK:
         hit = _CHUNKS.get(notebook_id)
-        if hit is not None and hit[0] == seq:
+        if hit is not None and hit[0] == version:
             _CHUNKS.move_to_end(notebook_id)
             return hit[1]
 
@@ -291,7 +304,7 @@ def chunk_count(db: sqlite3.Connection, notebook_id: str) -> int:
     count = int(row["c"])
 
     with _LOCK:
-        _CHUNKS[notebook_id] = (seq, count)
+        _CHUNKS[notebook_id] = (version, count)
         _CHUNKS.move_to_end(notebook_id)
         while len(_CHUNKS) > _MAX_NOTEBOOKS:
             _CHUNKS.popitem(last=False)

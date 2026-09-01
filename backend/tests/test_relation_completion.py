@@ -334,7 +334,7 @@ def test_completion_keyset_state_advances_without_skipping_or_reusing_generation
             db, notebook.id, "source-page", "run-page", "shadow", 1,
             "b", "c", "completed", now,
         )
-        counts = store.delete_notebook_graph_rows(db, notebook.id)
+        counts = store.delete_notebook_graph_rows(db, notebook.id, now)
         assert counts["kg_relation_completion_state"] == 1
 
 

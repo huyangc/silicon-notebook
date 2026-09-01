@@ -35,10 +35,18 @@ notebook_copy_max_rows)``。任务简报建议改成 ``kg_mutation_seq`` + 两�
 核实后没有采用——那会**放宽**失效口径,是一处静默的语义变化:
 ``version_for`` 是 ``ScaleArtifactRuntime.version(nb)``,它自身按
 ``version_signal`` = ``(kg_mutation_seq, cluster_mutation_seq, settings_tail +
-(mention_seq, indexing_pipeline_id, indexing_pipeline_version))`` 记忆化,再展开
-成五张表的 ``COUNT``/``MAX``。也就是说今天的失效信号里除了 kg_mutation_seq,
-还有簇代次、mention 代次、管线身份与若干 settings;只用 kg_mutation_seq 当键,
-一次 rebuild(只 bump ``cluster_mutation_seq``)之后 copy_stats 会继续返回旧值。
+(mention_seq, indexing_pipeline_id, indexing_pipeline_version), kg_reset_epoch)``
+记忆化(批 3·W1 PR-2 新增末位的 ``kg_reset_epoch``,见
+``services/scale_artifact_runtime.py`` 的 ``version()``),再展开成五张表的
+``COUNT``/``MAX``,epoch>0 时在返回的 list 末尾条件式追加
+``["kg_reset_epoch", N]``。也就是说今天的失效信号里除了 kg_mutation_seq,
+还有簇代次、mention 代次、管线身份、若干 settings 与清图代次;只用
+kg_mutation_seq 当键,一次 rebuild(只 bump ``cluster_mutation_seq``)之后
+copy_stats 会继续返回旧值,一次 delete_notebook_kg(只 bump
+``kg_reset_epoch``、把 kg_mutation_seq 重置为 0)更是如此——这正是本模块沿用
+``version_for(nb)`` 整体作键、不摘出 kg_mutation_seq 单独用的理由:凡是
+``version()`` 判定为「变了」的,这里也天然判定为「变了」,不需要跟着每一次
+version_signal 的分量变化单独维护。
 本批的红线是「同值少扫」,所以这里只换存储、不换判据:失效口径逐字不变,省下的
 纯粹是跨键族挤兑造成的冷载。``version_for`` 每次调用仍是那一条 ``version_signal``
 主键读,与改造前完全一样,热路径没有新增查询。

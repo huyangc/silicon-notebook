@@ -48,6 +48,13 @@ FIXTURE_SECRETS = (
 )
 
 
+def _rollback_v68(db: sqlite3.Connection) -> None:
+    """Undo _migration_68 (batch-3-W1 PR-2's unified_kg_state.kg_reset_epoch)
+    before forging any older deployed schema. No index to drop -- a pure
+    column addition, same shape as _rollback_v66's uploaded_by column."""
+    db.execute("ALTER TABLE unified_kg_state DROP COLUMN kg_reset_epoch")
+
+
 def _rollback_v67(db: sqlite3.Connection) -> None:
     """Undo _migration_67 before forging any older deployed schema."""
     db.execute("DROP TABLE wish_votes")
@@ -713,6 +720,7 @@ def test_deployed_v13_database_verifies_through_migrations_14_to_34(tmp_path):
     upgraded.close_local()
     rollback = sqlite3.connect(database)
     try:
+        _rollback_v68(rollback)
         _rollback_v67(rollback)
         _rollback_v66(rollback)
         _rollback_v65(rollback)
@@ -800,6 +808,7 @@ def test_deployed_v20_database_verifies_through_migrations_21_to_34(tmp_path):
     upgraded.close_local()
     rollback = sqlite3.connect(database)
     try:
+        _rollback_v68(rollback)
         _rollback_v67(rollback)
         _rollback_v66(rollback)
         _rollback_v65(rollback)
@@ -882,6 +891,7 @@ def test_deployed_v21_database_verifies_through_migrations_22_to_34(tmp_path):
     upgraded.close_local()
     rollback = sqlite3.connect(database)
     try:
+        _rollback_v68(rollback)
         _rollback_v67(rollback)
         _rollback_v66(rollback)
         _rollback_v65(rollback)
@@ -947,6 +957,7 @@ def test_deployed_v22_database_verifies_through_migrations_23_to_34(tmp_path):
     upgraded.close_local()
     rollback = sqlite3.connect(database)
     try:
+        _rollback_v68(rollback)
         _rollback_v67(rollback)
         _rollback_v66(rollback)
         _rollback_v65(rollback)
@@ -1025,6 +1036,7 @@ def test_deployed_v23_database_verifies_through_migrations_24_to_34(tmp_path):
     )
     upgraded.close_local()
     with sqlite3.connect(database) as rollback:
+        _rollback_v68(rollback)
         _rollback_v67(rollback)
         _rollback_v66(rollback)
         _rollback_v65(rollback)
@@ -1098,6 +1110,7 @@ def test_deployed_v32_database_verifies_relation_keyset_indexes(tmp_path):
     )
     upgraded.close_local()
     with sqlite3.connect(database) as rollback:
+        _rollback_v68(rollback)
         _rollback_v67(rollback)
         _rollback_v66(rollback)
         _rollback_v65(rollback)
@@ -1141,6 +1154,7 @@ def test_deployed_v33_database_verifies_relation_completion_state(tmp_path):
     )
     upgraded.close_local()
     with sqlite3.connect(database) as rollback:
+        _rollback_v68(rollback)
         _rollback_v67(rollback)
         _rollback_v66(rollback)
         _rollback_v65(rollback)
@@ -1188,6 +1202,7 @@ def test_deployed_v36_database_verifies_source_element_type_index(tmp_path):
     )
     upgraded.close_local()
     with sqlite3.connect(database) as rollback:
+        _rollback_v68(rollback)
         _rollback_v67(rollback)
         _rollback_v66(rollback)
         _rollback_v65(rollback)
@@ -1266,6 +1281,7 @@ def test_deployed_v38_database_verifies_command_catalog_tables(tmp_path):
         ).fetchone() is not None
 
     with sqlite3.connect(database) as rollback:
+        _rollback_v68(rollback)
         _rollback_v67(rollback)
         _rollback_v66(rollback)
         _rollback_v65(rollback)
@@ -1315,6 +1331,7 @@ def test_deployed_v39_database_verifies_source_local_fact_tables(tmp_path):
     )
     upgraded.close_local()
     with sqlite3.connect(database) as rollback:
+        _rollback_v68(rollback)
         _rollback_v67(rollback)
         _rollback_v66(rollback)
         _rollback_v65(rollback)
@@ -1370,6 +1387,7 @@ def test_deployed_v40_database_verifies_source_fact_backfill_upgrade(tmp_path):
         rollback.execute(
             "ALTER TABLE knowledge_source_facts DROP COLUMN projection_origin"
         )
+        _rollback_v68(rollback)
         _rollback_v67(rollback)
         _rollback_v66(rollback)
         _rollback_v65(rollback)
@@ -1410,6 +1428,7 @@ def test_deployed_v41_database_verifies_source_index_progress_upgrade(tmp_path):
     )
     upgraded.close_local()
     with sqlite3.connect(database) as rollback:
+        _rollback_v68(rollback)
         _rollback_v67(rollback)
         _rollback_v66(rollback)
         _rollback_v65(rollback)
@@ -1451,6 +1470,7 @@ def test_deployed_v45_database_verifies_chunk_element_index_upgrade(tmp_path):
     )
     upgraded.close_local()
     with sqlite3.connect(database) as rollback:
+        _rollback_v68(rollback)
         _rollback_v67(rollback)
         _rollback_v66(rollback)
         _rollback_v65(rollback)
@@ -1489,6 +1509,7 @@ def test_deployed_v46_database_verifies_notebook_schema_relocation(tmp_path):
     )
     upgraded.close_local()
     with sqlite3.connect(database) as rollback:
+        _rollback_v68(rollback)
         _rollback_v67(rollback)
         _rollback_v66(rollback)
         _rollback_v65(rollback)
@@ -1556,6 +1577,7 @@ def test_deployed_v48_database_verifies_group_sharing_tables(tmp_path):
     upgraded.close_local()
 
     with sqlite3.connect(database) as rollback:
+        _rollback_v68(rollback)
         _rollback_v67(rollback)
         _rollback_v66(rollback)
         _rollback_v65(rollback)
@@ -1606,6 +1628,7 @@ def test_deployed_v49_database_verifies_share_request_table(tmp_path):
     upgraded.close_local()
 
     with sqlite3.connect(database) as rollback:
+        _rollback_v68(rollback)
         _rollback_v67(rollback)
         _rollback_v66(rollback)
         _rollback_v65(rollback)
@@ -1653,6 +1676,7 @@ def test_deployed_v50_database_verifies_agent_profile_tables(tmp_path):
     upgraded.close_local()
 
     with sqlite3.connect(database) as rollback:
+        _rollback_v68(rollback)
         _rollback_v67(rollback)
         _rollback_v66(rollback)
         _rollback_v65(rollback)
@@ -1699,6 +1723,7 @@ def test_deployed_v53_database_verifies_retrieval_experience_table(tmp_path):
     upgraded.close_local()
 
     with sqlite3.connect(database) as rollback:
+        _rollback_v68(rollback)
         _rollback_v67(rollback)
         _rollback_v66(rollback)
         _rollback_v65(rollback)
@@ -1777,6 +1802,7 @@ def _prepare_v28_cluster_duplicates(module, database, tmp_path):
     upgraded.close_local()
     db = sqlite3.connect(database)
     try:
+        _rollback_v68(db)
         _rollback_v67(db)
         _rollback_v66(db)
         _rollback_v65(db)

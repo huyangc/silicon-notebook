@@ -24,7 +24,21 @@ invalidate 连 items 带 total 一并清空(reject 类迁移可能真的改变�
 候选」:rustworkx 的 ``digraph_edge_betweenness_centrality`` 对图内每条边恒正,
 候选集合 = 全部边,``id=ANY`` 分批严格劣于现在的单次扫描。
 
-## 失效完备性论证(键 = ``kg_mutation_seq``,别的都不看)
+## 失效完备性论证(键 = ``kg_mutation_seq``,别的都不看 —— PR-2 前如此)
+
+batch-3-W1 PR-2(design doc Sec 3.2 table #10)在这条论证之上叠了一层，不是
+推翻它：本节证明的是「三样输入的**变化**都会被 ``kg_mutation_seq`` 捕获」，
+PR-2 补的是这条证明本身没打算覆盖的另一件事——「``kg_mutation_seq`` 这个数字
+本身会不会撞车」。``delete_notebook_kg`` 会把它归零重爬，一次删库+重抽完全可能
+让它重新爬回一个本 memo 已经缓存过的值，而那次重抽的图内容与那次缓存时的图
+内容毫不相干——这不是「漏了一次失效」，是「同一个标签指了两件不同的事」，本节
+的三条输入论证对此天然沉默。修法是把标签从裸 ``kg_mutation_seq`` 扩成
+``(kg_reset_epoch, kg_mutation_seq)``：``kg_reset_epoch`` 只增、只被
+``delete_notebook_graph_rows`` 一处推进，所以扩后的标签不可能重复。下面三条
+输入论证的每一句仍然成立——它们说的是「输入变了，seq 就变」，PR-2 没有改变
+任何一条输入或它们与 seq 的关系，只是让「seq 没变，但世界已经不是那个 seq
+描述的世界」这一种情况（此前只有 delete_notebook_kg 一条路径能制造它）在结构
+上不再可能。
 
 ``review_queue`` 的输入**恰好**是三样:
 
@@ -70,7 +84,8 @@ R5 因此不再逐个堵,而是把 ``kg_mutation.py`` 顶部的操作矩阵**全
 
 对本 memo 的意义:失效完备性论证的第二半——「bump 与内容同时可见」——现在有了
 覆盖全矩阵的支撑,而不再是逐个 code review 出来的个案结论。下面登记的三条豁口里,
-第 3 条已由 R4 关闭(原文保留存档);仍然有效的是前两条,它们的性质与上面这一族
+第 3 条已由 R4 关闭(原文保留存档),第 2 条已由 batch-3-W1 PR-2 关闭(原文同样
+保留存档,见其内文的更新);仍然有效的只剩第 1 条,它的性质与上面这一族
 **不同**:不是 bump 晚了,而是那条路径的 seq **根本不前进**。
 
 **已知豁口**——不是「漏了一条 bump」,而是那条路径的 seq **根本不前进**,所以
@@ -81,16 +96,22 @@ seq 闸对它们天然无效:
    照 ``knowledge_query.insert_test_object`` 的先例,该方法内显式调用本 memo 的
    ``invalidate``(与它已有的 ``invalidate_knowledge_counts`` 并排)——这是**唯一**
    还需要显式失效的豁口:它是测试专用的裸写路径,不值得为它接一条生产 bump。
-2. ``KnowledgeLifecycleService.delete_notebook_kg`` 删掉 ``unified_kg_state``
-   整行,于是 seq **归零重爬**——不是单调前进,而是**别名**:一次 delete + 重抽
-   之后 seq 会重新爬回它离开时的那些值,与那时**完全不同**的图内容撞上同一个
-   标签。这正是那里已经显式 ``invalidate_knowledge_counts`` 的原因(见该方法的
-   注释),本 memo 在同一处并排失效,**暂未**跟进「保留行 + 同事务 bump」的修法
-   (codex #638 R4 P2 评审发现:``unified_kg_state`` 行若保留,
-   ``kg_analysis._state_view`` 用 ``kg_mutation_seq==0`` 兼「行缺失」判定
-   ``present``的既有契约会被打破——``test_born_state_row_reports_like_a_never_
-   written_notebook`` 钉死了这个判据。这处冲突已上报,留待与该契约的维护者
-   一起决定解法,本豁口继续显式失效,不依赖 seq 闸)。
+2. **已关闭(batch-3-W1 PR-2)。** 原文档存:``KnowledgeLifecycleService.
+   delete_notebook_kg`` 删掉 ``unified_kg_state`` 整行,于是 seq **归零重爬**——
+   不是单调前进,而是**别名**:一次 delete + 重抽之后 seq 会重新爬回它离开时的
+   那些值,与那时**完全不同**的图内容撞上同一个标签。这正是那里曾经显式调用本
+   memo ``invalidate`` 的原因,**暂未**跟进「保留行 + 同事务 bump」的修法(codex
+   #638 R4 P2 评审发现:``unified_kg_state`` 行若保留,``kg_analysis._state_
+   view`` 用 ``kg_mutation_seq==0`` 兼「行缺失」判定 ``present`` 的既有契约会被
+   打破——``test_born_state_row_reports_like_a_never_written_notebook`` 钉死了
+   这个判据)。**现状**:PR-2(design doc Sec 3.3 option C)正是那个「留待与
+   契约维护者一起决定」的解法——``delete_notebook_graph_rows`` 不再删行,而是
+   同事务把行重置为出生行形状(字节等值,不碰上面那条判据)并推进新列
+   ``kg_reset_epoch``。别名因此结构性消失,不再需要「保留行 + 单纯 bump
+   kg_mutation_seq」这条会撞判据的路——本 memo 的键相应从裸 ``kg_mutation_seq``
+   扩为 ``(kg_reset_epoch, kg_mutation_seq)``(见模块开头的失效完备性论证与
+   ``_Version`` 的类型注记),``KnowledgeLifecycleService.delete_notebook_kg``
+   不再需要显式调用本 memo 的 ``invalidate``。
 3. ``SourceIngestionService.run_extraction`` 在 ``preserve_existing=False`` 时
    走 ``begin_extraction_run`` → ``clear_source_graph_state``,删掉该源全部
    ``knowledge_relations``/``knowledge_objects``。与前两处**不同**:这不是
@@ -106,9 +127,10 @@ seq 闸对它们天然无效:
 
 ## 读序契约(硬)
 
-冷算必须**先点读 seq、再取数据**。``top()`` 因此自己按这个顺序调用注入的
-``read_seq`` 与 ``compute``,而不是让调用方递一个已经算好的 seq 进来——顺序是
-本模块的不变量,不是调用方的自觉。
+冷算必须**先点读 version、再取数据**。``top()`` 因此自己按这个顺序调用注入的
+``read_version``(batch-3-W1 PR-2 前叫 ``read_seq``,返回裸 int;现在返回
+``(kg_reset_epoch, kg_mutation_seq)``)与 ``compute``,而不是让调用方递一个已经
+算好的 version 进来——顺序是本模块的不变量,不是调用方的自觉。
 
 理由:这样得到的条目永远满足「**内容 ≥ 标签**」。取数期间若有写入提交,内容
 可能新于标签,下一次读会因为 seq 不等而 miss、重算——多付一次冷算,方向保守。
@@ -225,6 +247,21 @@ REVIEW_QUEUE_MEMO_ITEMS = 200
 # 一个量级。
 _MAX_NOTEBOOKS = 128
 
+# (kg_reset_epoch, kg_mutation_seq) — the memo's version tag (batch-3-W1
+# PR-2, design doc Sec 3.2 table #10). NOT the same "epoch" as
+# ``ReviewQueueMemo._epoch_of`` / ``_global_epoch`` / ``_epochs`` below: those
+# are this module's OWN process-internal in-flight-write-back race guard
+# (best-effort safety valve, unrelated to any persisted column — see
+# ``top()``'s write-back guard). ``_Version``'s ``kg_reset_epoch`` half is the
+# PERSISTENT, cross-process column ``unified_kg_state.kg_reset_epoch``: it is
+# what makes a delete+reingest that re-climbs ``kg_mutation_seq`` back to a
+# value this memo already cached under fail to alias, because the epoch half
+# of the tag will differ and can never repeat. Before it existed, the SAME
+# aliasing hazard was covered by an explicit ``invalidate()`` call in
+# ``KnowledgeLifecycleService.delete_notebook_kg`` (see this module's "已知
+# 豁口" 2, now closed).
+_Version = Tuple[int, int]
+
 
 class _PendingRanking:
     """一次在途冷算:值(或异常)算出来之后唤醒所有等待者。"""
@@ -255,13 +292,13 @@ class ReviewQueueMemo:
     def __init__(self, max_notebooks: int = _MAX_NOTEBOOKS) -> None:
         self._lock = threading.Lock()
         self._max_notebooks = max_notebooks
-        self._store: "OrderedDict[str, Tuple[int, List[dict], int]]" = OrderedDict()
+        self._store: "OrderedDict[str, Tuple[_Version, List[dict], int]]" = OrderedDict()
         self._global_epoch = 0
         self._epochs: "OrderedDict[str, int]" = OrderedDict()
-        # single-flight:同一个 ``(notebook_id, seq)`` 的并发冷 miss 只跑一次全量
-        # 扫描 + betweenness,其余线程等同一个结果。键含 seq:版本不同就是两次不同
-        # 的计算,不该互相等待、更不该互相复用结果。
-        self._pending: "Dict[Tuple[str, int], _PendingRanking]" = {}
+        # single-flight:同一个 ``(notebook_id, version)`` 的并发冷 miss 只跑一次
+        # 全量扫描 + betweenness,其余线程等同一个结果。键含完整 version(epoch,
+        # seq):版本不同就是两次不同的计算,不该互相等待、更不该互相复用结果。
+        self._pending: "Dict[Tuple[str, _Version], _PendingRanking]" = {}
 
     def _epoch_of(self, notebook_id: str) -> Tuple[int, int]:
         """采样 ``(全局 epoch, 该 notebook 的 epoch)``。调用方必须已持有锁。"""
@@ -271,24 +308,26 @@ class ReviewQueueMemo:
         self,
         notebook_id: str,
         limit: int,
-        read_seq: Callable[[], int],
+        read_version: Callable[[], _Version],
         compute: Callable[[], Tuple[List[dict], int]],
     ) -> Tuple[List[dict], int]:
         """该 notebook 排名前 ``limit`` 条 + 队列真实总量(``limit <=
         REVIEW_QUEUE_MEMO_ITEMS``)。
 
-        ``read_seq`` 点读 ``kg_mutation_seq``,``compute`` 算出**完整的**
+        ``read_version`` 点读 ``(kg_reset_epoch, kg_mutation_seq)``(batch-3-
+        W1 PR-2 把参数从裸 ``read_seq``/``int`` 扩为这个二元组——见模块顶部
+        ``_Version`` 的命名区分注记),``compute`` 算出**完整的**
         ``(top-M 列表, 总量)``(调用方负责让列表就是 ``REVIEW_QUEUE_MEMO_ITEMS``
         深,总量是同一次扫描里 ``len(非 rejected 关系行)``)。两者的调用顺序是本
-        模块的读序契约,见模块 docstring。返回值的 total 与 items 永远同一个 seq
-        版本——它们来自同一次 ``compute()``、存在同一个 store 条目里,不存在
+        模块的读序契约,见模块 docstring。返回值的 total 与 items 永远同一个
+        version——它们来自同一次 ``compute()``、存在同一个 store 条目里,不存在
         「items 命中缓存、total 另外算」这种会跨版本的路径。
         """
-        seq = int(read_seq())        # ← 读序契约:seq 先于数据,不得交换
-        key = (notebook_id, seq)
+        version = read_version()     # ← 读序契约:version 先于数据,不得交换
+        key = (notebook_id, version)
         with self._lock:
             hit = self._store.get(notebook_id)
-            if hit is not None and hit[0] == seq:
+            if hit is not None and hit[0] == version:
                 self._store.move_to_end(notebook_id)
                 cached: "Optional[Tuple[List[dict], int]]" = (hit[1], hit[2])
                 pending: "Optional[_PendingRanking]" = None
@@ -336,13 +375,16 @@ class ReviewQueueMemo:
             #
             # 单调守卫(P2-3,codex 复审):epoch 守卫只挡 invalidate() 打的失效,
             # 挡不住「慢 leader 用旧 seq 算出来的值,在一个更新的 seq 已经写回
-            # 之后才姗姗来迟」——两次冷算可以并发在飞(seq 在第一次冷算跑到一半
-            # 时前进,催生了第二个 ``(nb, new_seq)`` 的独立 single-flight,它跑
-            # 得更快先写回)。旧 seq 的写回绝不能覆盖新 seq 已经落的条目。
+            # 之后才姗姗来迟」——两次冷算可以并发在飞(version 在第一次冷算跑到
+            # 一半时前进,催生了第二个 ``(nb, new_version)`` 的独立 single-flight,
+            # 它跑得更快先写回)。旧 version 的写回绝不能覆盖新 version 已经落的
+            # 条目——tuple 比较是逐元素字典序,``(epoch, seq)`` 的顺序让 epoch
+            # 的推进天然压过同一 epoch 内任何 seq 大小关系,与 kg_reset_epoch
+            # 「只增、代表更大的世代」的语义一致。
             if pending.epoch == self._epoch_of(notebook_id):
                 existing = self._store.get(notebook_id)
-                if existing is None or existing[0] <= seq:
-                    self._store[notebook_id] = (seq, items, total)
+                if existing is None or existing[0] <= version:
+                    self._store[notebook_id] = (version, items, total)
                     self._store.move_to_end(notebook_id)
                     while len(self._store) > self._max_notebooks:
                         self._store.popitem(last=False)
@@ -354,22 +396,29 @@ class ReviewQueueMemo:
     def carry(
         self,
         notebook_id: str,
-        expected_seq: int,
-        new_seq: int,
+        expected_version: _Version,
+        new_version: _Version,
         rel_id: str,
         status: str,
     ) -> None:
-        """把该 notebook 的排名从 ``expected_seq`` 续到 ``new_seq``,顺带把
-        ``rel_id`` 的 ``review_status`` 改成 ``status``。
+        """把该 notebook 的排名从 ``expected_version`` 续到 ``new_version``
+        (batch-3-W1 PR-2 把两个参数从裸 ``expected_seq``/``new_seq`` 扩为
+        ``(kg_reset_epoch, kg_mutation_seq)`` 二元组),顺带把 ``rel_id`` 的
+        ``review_status`` 改成 ``status``。
 
         只有 verified<->pending 这类**不改变任何排序输入**的迁移可以调它(判据在
         ``KnowledgeGovernanceService.set_edge_review``);任一侧涉及 'rejected' 的
-        迁移必须走 ``invalidate``。
+        迁移必须走 ``invalidate``。``set_edge_review`` 自己的事务从不推进
+        ``kg_reset_epoch``(它唯一的写者是 ``delete_notebook_graph_rows``),所以
+        ``expected_version``/``new_version`` 的 epoch 半永远相等——真正在两次
+        调用间可能变化的只有 seq 半,这正是 tuple 相等比较仍然是这里唯一需要的
+        判据的原因。
 
         全程在锁内,所以不像 ``top`` 的写回那样存在「解锁—重算」的窗口:条目的
-        seq 必须**严格等于** ``expected_seq``(调用方传自己 bump 前观察到的
-        ``new_seq - 1``),任何不符——别的写者插了队,或这本从来没暖过——都 pop 掉
-        而不是猜。下一次读多付一次冷算永远是安全的,续一个陈旧标签不是。
+        version 必须**严格等于** ``expected_version``(调用方传自己 bump 前观察到
+        的 ``(epoch, new_seq - 1)``),任何不符——别的写者插了队,这本从来没暖过,
+        或者(理论上)一次并发删库把 epoch 推进了——都 pop 掉而不是猜。下一次读
+        多付一次冷算永远是安全的,续一个陈旧标签不是。
 
         ``rel_id`` 不在 top-M 内时**照样 retag**:它是否落榜只由 ``review_priority``
         决定,而 priority 不含 ``review_status``,所以这次迁移对榜单的内容与顺序
@@ -383,7 +432,7 @@ class ReviewQueueMemo:
             hit = self._store.get(notebook_id)
             if hit is None:
                 return
-            if hit[0] != expected_seq:
+            if hit[0] != expected_version:
                 self._store.pop(notebook_id, None)
                 return
             # copy-on-write:新 list + 被改那一条的新 dict。未被改动的 item 在新旧
@@ -393,15 +442,16 @@ class ReviewQueueMemo:
                 if item.get("rel_id") == rel_id else item
                 for item in hit[1]
             ]
-            self._store[notebook_id] = (new_seq, items, hit[2])
+            self._store[notebook_id] = (new_version, items, hit[2])
             self._store.move_to_end(notebook_id)
 
     def invalidate(self, notebook_id: "Optional[str]" = None) -> None:
         """清 memo(单 notebook 或全部)。
 
-        seq 闸本身已经自失效,这里是安全阀:挡住「写已落、但它的 seq bump 尚未
-        提交」这个边缘,以及三处 seq **根本不前进**的路径(fixture 裸插入 /
-        notebook 删库重爬 / 抽取重置删图,见模块 docstring 的豁口一节)。
+        version 闸本身已经自失效,这里是安全阀:挡住「写已落、但它的 version
+        bump 尚未提交」这个边缘,以及仅存的一处 seq **根本不前进**的路径
+        (fixture 裸插入,见模块 docstring 的豁口一节——另外两处豁口已分别由
+        codex #638 R4 与 batch-3-W1 PR-2 关闭)。
 
         不打断在途的 follower(P2-5,codex 复审):它们已经拿着这次
         ``top()`` 调用之前采样的 ``pending`` 引用等在 ``ready`` 上,本方法只清
@@ -429,7 +479,20 @@ class ReviewQueueMemo:
             self._store.pop(notebook_id, None)
 
     def cached_seq(self, notebook_id: str) -> "Optional[int]":
-        """当前驻留条目的 seq 标签(没有则 ``None``)。只给测试与运维观察用。"""
+        """当前驻留条目 version 标签的 ``kg_mutation_seq`` 半(没有则 ``None``)。
+        只给测试与运维观察用。batch-3-W1 PR-2 之前这就是整个标签;现在标签是
+        ``(kg_reset_epoch, kg_mutation_seq)``,这个方法保持返回裸 seq 不变——
+        既有测试断言的都是这一半,而 ``kg_reset_epoch`` 只在
+        ``delete_notebook_kg`` 之后才可能非零,不动它们的判据。需要观察完整
+        标签(含 epoch)的用例用 ``cached_version``。"""
+        with self._lock:
+            hit = self._store.get(notebook_id)
+            return hit[0][1] if hit is not None else None
+
+    def cached_version(self, notebook_id: str) -> "Optional[_Version]":
+        """当前驻留条目的完整 ``(kg_reset_epoch, kg_mutation_seq)`` 标签(没有则
+        ``None``)。只给测试与运维观察用 —— 别名消失(delete+reingest 不串代)的
+        断言需要看到 epoch 半,``cached_seq`` 只给 seq 半不够。"""
         with self._lock:
             hit = self._store.get(notebook_id)
             return hit[0] if hit is not None else None

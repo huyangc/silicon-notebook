@@ -783,7 +783,22 @@ Ctrl-C（先跑完回滚再重新抛出——见下文「Ctrl-C」一节）。
 # 只读体检：manifest 摘要、三个工件根的清单与大小、与 DB 版本是否一致、
 # .tmp-<token>/.old 残留、以及此刻锁被谁占（探测=非阻塞 try + 立刻释放）
 PYTHONPATH=backend python scripts/build_scale_index.py inspect --notebook nb-xxx
+```
 
+**批 3·W1 PR-2（unified_kg_state.kg_reset_epoch）上线后短暂出现
+`version_matches_database: false`**：如果一个笔记本在本次上线**之前**就已经被
+`delete_notebook_kg` 清过图（整库重抽端点 `POST /api/notebooks/{id}/kg/rebuild`
+今天就会走到它——见
+[产品/API 参考文档的「KG 抽取触发」一节](./product-and-api_zh.md#kg-抽取触发)），
+它的 `kg_reset_epoch` 会是 `>= 1`，于是它那份（列还不
+存在时写下的）磁盘 manifest 的 `version` 列表与重新计算出来的那份合法地不再逐字节
+相同，`inspect` 会对它报 `version_matches_database: false`。**这是正确的，不是
+损坏**——那份产物确实是在 manifest 写下之后被清空过的库，判它过期是如实报告。
+一次重建/折叠后自愈，且对同一个笔记本不会再次出现（此后没有任何路径能让这个代次
+倒退）。从未清过图的笔记本不受影响——它的 version 列表在上线前后逐字节相同，不会
+被判过期。
+
+```bash
 # 全量重建（默认）/ 只折叠增量
 PYTHONPATH=backend python scripts/build_scale_index.py build --notebook nb-xxx
 PYTHONPATH=backend python scripts/build_scale_index.py build --notebook nb-xxx --fold

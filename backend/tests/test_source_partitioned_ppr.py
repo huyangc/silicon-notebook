@@ -52,8 +52,18 @@ def _signature_map(repo, notebook_id, source_ids):
     signature = repo._runtime.index_projections.source_subgraph_signature(
         notebook_id, allowed
     )
+    # kg_reset_epoch (batch-3-W1 PR-2) is appended CONDITIONALLY -- only when
+    # signature has a 5th element (epoch > 0) -- mirroring
+    # SourcePartitionedPprService._graph's production construction exactly
+    # (R1 P1-2: see that method's comment for why it must match the write
+    # side's own on-disk-compatibility rule).
+    epoch = signature[4] if len(signature) > 4 else 0
     return {
-        str(item[0]): (signature[0], signature[1], signature[2], (item,))
+        str(item[0]): (
+            (signature[0], signature[1], signature[2], (item,), epoch)
+            if epoch
+            else (signature[0], signature[1], signature[2], (item,))
+        )
         for item in signature[3]
     }
 
@@ -421,6 +431,105 @@ def test_a_companion_from_the_live_build_is_served(repo):
         ).read_text()
     )
     assert partition_manifest["parent_build_id"] == "a" * 32
+
+
+# ── batch-3-W1 PR-2 R1 (P1-2, post-review): conditional 5th signature
+# element, mirroring Sec 3.4's version()-list rule for on-disk compatibility.
+
+
+def test_epoch_zero_signature_is_a_plain_four_tuple_and_serves_pre_rollout_manifests(
+    repo,
+):
+    """An epoch-0 notebook's ``source_subgraph_signature`` is the SAME
+    4-tuple it always was — this is the upgrade-compatibility anchor: a
+    partition manifest published before ``kg_reset_epoch`` existed (or,
+    equivalently, published by this exact code path today since the two are
+    byte-identical at epoch 0) keeps matching and keeps being served, with no
+    forced re-partition on rollout."""
+    notebook_id, source_a, _source_b = _seed(repo)
+    signature = repo._runtime.index_projections.source_subgraph_signature(
+        notebook_id, (source_a,)
+    )
+    assert len(signature) == 4, (
+        "epoch=0 must produce the plain 4-tuple, not a 5-tuple with a "
+        "trailing 0 -- appending unconditionally would make every existing "
+        "on-disk manifest mismatch the instant this ships"
+    )
+
+    version = ["same-main-version"]
+    _publish(repo, notebook_id, (source_a,), version, build_id="a" * 32)
+    _write_main_manifest(repo, notebook_id, version=version, build_id="a" * 32)
+    partition_manifest = json.loads(
+        (
+            repo._runtime.scale_artifact_store.source_partition_dir(notebook_id)
+            / source_partition_key(source_a)
+            / "manifest.json"
+        ).read_text()
+    )
+    assert len(partition_manifest["source_signature"]) == 4
+
+    result = _retrieve(repo, notebook_id, source_a, version)
+    assert result.capability.enabled and result.hits
+
+
+def test_epoch_bump_rejects_the_stale_on_disk_partition_and_reopens_via_rebuild(
+    repo,
+):
+    """The other half of Sec 3.4's argument, replayed on disk: once
+    kg_reset_epoch advances, an EXISTING 4-element on-disk manifest
+    legitimately stops matching a freshly computed 5-element signature —
+    that mismatch is correct (the KG really was reset since the partition
+    was built), not a regression. And it self-heals: the same epoch bump
+    already changed this notebook's scale-artifact version() (Sec 3.4), so a
+    fresh publish (standing in for the rebuild/fold that would follow in
+    production) republishes the partition with the new 5-element signature
+    baked in, and reads resume matching from then on.
+
+    变异锚点:把签名条件式 5 元改回无条件追加,本条的第一段(旧 4 元清单读失败)
+    必须报红——见 test_source_subgraph_projection.py 的兜底单测钉住无条件形态
+    本身;这里钉的是它在真实分区读写路径上的后果。
+    """
+    notebook_id, source_a, _source_b = _seed(repo)
+    version = ["same-main-version"]
+    _publish(repo, notebook_id, (source_a,), version, build_id="a" * 32)
+    _write_main_manifest(repo, notebook_id, version=version, build_id="a" * 32)
+    assert _retrieve(repo, notebook_id, source_a, version).capability.enabled
+
+    # Isolate the epoch variable: bump kg_reset_epoch directly (no
+    # delete_notebook_kg, which would also change the graph content and
+    # source_index_backfilled — this test is about the epoch dimension
+    # alone).
+    with repo._write() as db:
+        db.execute(
+            "UPDATE unified_kg_state SET kg_reset_epoch=kg_reset_epoch+1 "
+            "WHERE notebook_id=?",
+            (notebook_id,),
+        )
+    signature = repo._runtime.index_projections.source_subgraph_signature(
+        notebook_id, (source_a,)
+    )
+    assert len(signature) == 5 and signature[4] == 1
+
+    stale = _retrieve(repo, notebook_id, source_a, version)
+    assert stale.capability.enabled is False
+    assert stale.capability.reason == "source_partition_identity_mismatch"
+    assert not stale.hits
+
+    # Rebuild channel open: a fresh publish (standing in for the production
+    # rebuild/fold this epoch bump would trigger via version()) republishes
+    # with the new 5-element signature, and reads resume matching.
+    _publish(repo, notebook_id, (source_a,), version, build_id="a" * 32)
+    partition_manifest = json.loads(
+        (
+            repo._runtime.scale_artifact_store.source_partition_dir(notebook_id)
+            / source_partition_key(source_a)
+            / "manifest.json"
+        ).read_text()
+    )
+    assert len(partition_manifest["source_signature"]) == 5
+    assert partition_manifest["source_signature"][4] == 1
+    healed = _retrieve(repo, notebook_id, source_a, version)
+    assert healed.capability.enabled and healed.hits
 
 
 def test_a_warm_companion_is_dropped_when_the_main_generation_moves(repo):
