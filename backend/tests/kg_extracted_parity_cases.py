@@ -16,15 +16,21 @@ vs ``ordinal``),两边各自造一套用例,就等于让每一端的夹具去迎
    (``windows_failed=N/T``,N≥1),也没有 ``retry_incomplete=1``(partial 重试的
    半成品)。
 
-「最近一次」在两端都是 ``ORDER BY created_at DESC`` 加各自的行序 tie-break,所以
-用例里的 run 用**时序序号**而不是具体时间戳表达,由各端映射到自己的时间格式。
+「最近一次」在两端都是 ``ORDER BY created_at DESC`` 加各自的行序 tie-break(PG
+``ordinal DESC``、SQLite ``rowid DESC``,两者都是插入序),所以每条用例里的 run 用
+**时序序号**(生成 ``created_at`` 字面量,允许重复以制造同刻场景)表达时间,由各端
+映射到自己的时间格式;run id 后缀与插入顺序则由这条 run 在 ``runs`` 元组里的**位置**
+决定(两端 seeder 都按元组顺序逐条插入,位置即插入序)——这两个职责刻意分开:同一张
+时序序号若还要兼任 run id 后缀,两条同刻 run 会生成同一个 id 而在插入时主键冲突。
 
 不是测试模块(没有 ``test_`` 前缀),pytest 不会收集它;两个测试文件 import。
 """
 from __future__ import annotations
 
-#: 一条 extraction_runs 记录:``(时序序号, status, error_message)``。
-#: 序号大 = 更晚,由各端翻译成自己的 ``created_at`` 字面量。
+#: 一条 extraction_runs 记录:``(时序序号, status, error_message)``。时序序号只负责
+#: 生成 ``created_at`` 字面量,可以在多条记录间重复(制造「同刻」场景);它不再兼任
+#: run id 后缀或插入序——那两者由这条记录在所属 ``runs`` 元组里的**位置**决定,见
+#: ``kg_case_run_id`` 与两端 seeder(``enumerate(runs)``)。
 RunSpec = tuple[int, str, str]
 
 #: ``(标签, 是否有 knowledge_objects 行, runs, 期望的 kg_extracted)``。
@@ -86,10 +92,22 @@ KG_EXTRACTED_CASES: tuple[tuple[str, bool, tuple[RunSpec, ...], bool], ...] = (
         ),
         False,
     ),
+    # (h) tie-break:两条 run **created_at 相同**(时序序号都是 0),先插入的干净
+    # completed、后插入的 failed —— 「最近一次」在两端都是 created_at DESC 之后再按
+    # 插入序 DESC(PG ordinal、SQLite rowid)break tie,所以后插入的那条(failed)赢,
+    # 覆盖判定应为 False。这条用例专门钉住「插入序 tie-break」这一分支:此前的用例
+    # 里时序序号与插入位置永远相等,从未表达过「created_at 打平,只能靠插入序分胜负」
+    # 的场景。
+    (
+        "同刻两条 run:插入序决定胜者(后插入的 failed 赢)",
+        True,
+        (
+            (0, "completed", "kg objects=3"),
+            (0, "failed", "RuntimeError: upstream timeout"),
+        ),
+        False,
+    ),
 )
-
-#: pytest 参数化用的 ids,以及「第 index 条用例的 source_id」这一两端共用的命名。
-KG_EXTRACTED_CASE_IDS: tuple[str, ...] = tuple(case[0] for case in KG_EXTRACTED_CASES)
 
 
 def kg_case_source_id(index: int) -> str:
@@ -97,6 +115,9 @@ def kg_case_source_id(index: int) -> str:
     return f"src-kgx-{index:02d}"
 
 
-def kg_case_run_id(index: int, rank: int) -> str:
-    """第 ``index`` 条用例、时序序号 ``rank`` 的那条 extraction_runs 记录 id。"""
-    return f"run-kgx-{index:02d}-{rank}"
+def kg_case_run_id(index: int, position: int) -> str:
+    """第 ``index`` 条用例、``runs`` 元组里第 ``position`` 条(0-based,即插入序)
+    的那条 extraction_runs 记录 id。``position`` 不是时序序号(RunSpec 的第一个字
+    段)——两条 run 可以共享同一个时序序号(同刻场景),但位置始终唯一,id 也就始终
+    唯一。"""
+    return f"run-kgx-{index:02d}-{position}"

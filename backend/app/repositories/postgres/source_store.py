@@ -1356,10 +1356,12 @@ class SourceStore:
         )
         # 三个 run 子查询原本相关到 ``o.source_id``,写在 EXISTS 内部,于是每扫到一行
         # knowledge_objects 就重算一遍;而它们只依赖 source_id,对这次调用是**常量**。
-        # 提到 EXISTS 外面直接绑定 %s 之后:KO 存在性是一次半连接(idx_knowledge_objects_source
-        # 首行即停),run 判定是 ≤3 次索引探针(idx_extraction_runs_source_created)。
-        # ``o.source_id<>''`` 保留在 EXISTS 内:等值连接把它传递到绑定参数上,与原查询
-        # 逐字等价(绑定的 id 为空串时两版都判 false)。批量兄弟见 sources_from_rows。
+        # 提到 EXISTS 外面直接绑定 %s 之后:KO 存在性是一次 EXISTS 索引探针
+        # (idx_knowledge_objects_source 首行即停,单行路径没有连接),run 判定是 ≤3 次
+        # 索引探针(idx_extraction_runs_source_created)。``o.source_id<>''`` 保留在
+        # EXISTS 内:等值连接把它传递到绑定参数上,与原查询逐字等价(绑定的 id 为空串
+        # 时两版都判 false)。批量兄弟见 sources_from_rows——那边驱动集是页内多个 id,
+        # 才是真正的半连接。
         kg_extracted = bool(
             connection.execute(
                 "SELECT EXISTS(SELECT 1 FROM knowledge_objects o "
@@ -1457,6 +1459,10 @@ class SourceStore:
             #
             # 这不依赖「每个 source 只有一条 run」这一生产观测:latest-run 的取法
             # (同一条 ORDER BY + LIMIT 1)一字未动,多条 run 时语义与原查询一致。
+            #
+            # 同一教训的前例见 knowledge_counts_cache.py 的 _pending_sql:那边把
+            # latest-run 标量子查询留在了 sources 驱动的 LATERAL 里,没有下沉进
+            # knowledge_objects 的 EXISTS。
             #
             # CTE 用 ``WITH x(col) AS (VALUES ...)`` 而不是 LATERAL 或 ``AS t(col)``
             # 表别名列名:前者两端都支持,后两者 SQLite 没有,而这条查询与 SQLite 侧

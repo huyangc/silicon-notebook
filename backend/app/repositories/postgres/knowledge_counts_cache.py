@@ -272,6 +272,9 @@ def _pending_sql(*, visible_only: bool) -> str:
     # 9.1M KO 的实库因此执行了约 27M 次 extraction_runs 索引探测。
     # 三个 LATERAL ... LIMIT 1 刻意以当前 notebook 的 sources 为驱动：
     # 每个 source 最多探测一个 element、一个最新 run 和一个 KO。
+    # 双端同构的变体见 postgres/source_store.py 的 sources_from_rows：那边把驱动集
+    # 换成页内 source id 的 VALUES CTE,同一条 latest-run 标量子查询绑在 CTE 的
+    # source_id 上而不是 knowledge_objects 行上。
     visible_clause = (
         "AND s.source_type NOT IN ('memory','knowhow') " if visible_only else ""
     )
