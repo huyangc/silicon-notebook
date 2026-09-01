@@ -12,6 +12,7 @@ from app.core.database_url import (
     redact_database_url,
     sanitize_database_url_for_error,
 )
+from app.core.query_syntax import MAX_EXACT_PHRASE_CHARS
 
 # 仓库根锚点：backend/app/core/config.py -> parents[3] = 仓库根。与
 # event_logging.py 的 _ROOT_DIR 同口径。相对路径类的设置项（storage_dir、
@@ -1027,9 +1028,20 @@ class Settings(BaseSettings):
     # 划算;小份额库要在别人的行里翻找自己的 67 条,反而丢掉它刚拿到的复合 GIN
     # 快路径。份额没有零查询的算法,用远高于 copyable 闸(5000)的绝对下限近似:
     # 请把它设在「除主导库外最大的那个库」之上(实测部署:主导库 1.1e7,次大 2.7e4,
-    # 默认 5e5 干净分割)。低于下限 → legacy,SQL 逐字不变。
+    # 默认 5e5 干净分割)。低于下限 → 结果等价的 notebook-scoped 拆分路径。
     postgres_lexical_knn_min_rows: int = Field(
         500_000, validation_alias="POSTGRES_LEXICAL_KNN_MIN_ROWS")
+    # 只让短拉丁词进入全局 GiST KNN。生产逐词项 EXPLAIN 证明 CJK 与长句会把
+    # `<->` 有序扫描退化为近全索引遍历(单词项 1–5s、几乎零命中)，而同一词项
+    # 避开 ordered KNN、走 notebook-scoped 拆分 `%` / ILIKE arm 只需毫秒级。
+    # planner 可选复合 GIN 或其他可用 bitmap 组合；该阈值只
+    # 选择等价访问路径，不裁掉词项，也不改变每词项候选预算或最终排序。
+    postgres_lexical_knn_max_term_chars: int = Field(
+        32,
+        ge=3,
+        le=MAX_EXACT_PHRASE_CHARS,
+        validation_alias="POSTGRES_LEXICAL_KNN_MAX_TERM_CHARS",
+    )
     chunk_mmr_k: int = Field(16, validation_alias="CHUNK_MMR_K")
     chunk_mmr_lambda: float = Field(0.5, validation_alias="CHUNK_MMR_LAMBDA")
     chunk_answer_budget_chars: int = Field(30000, validation_alias="CHUNK_ANSWER_BUDGET_CHARS")

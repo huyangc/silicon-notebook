@@ -119,6 +119,8 @@ def _lexical_candidate_union(
     corpus_langs: Sequence[str] | None = None,
     allow_knn: bool = False,
     authoritative_source_filter: bool = False,
+    knn_max_term_chars: int | None = None,
+    routing_stats: dict[str, int | float] | None = None,
 ) -> list[dict]:
     """Build the PostgreSQL equivalent of SQLite's bounded FTS OR query.
 
@@ -139,16 +141,21 @@ def _lexical_candidate_union(
     # a rare independent identifier.  The union stays below 4K + 64 rows.
     candidate_budget = max(result_limit * 4, len(terms), 12)
     per_term_limit = max(1, (candidate_budget + len(terms) - 1) // len(terms))
+    producer_options: dict[str, Any] = {"allow_knn": allow_knn}
+    if knn_max_term_chars is not None:
+        producer_options["knn_max_term_chars"] = knn_max_term_chars
+    if routing_stats is not None:
+        producer_options["routing_stats"] = routing_stats
     if allowed_source_ids is None:
         candidates = candidate_rows_for_terms(
-            db, notebook_id, terms, per_term_limit, allow_knn=allow_knn
+            db, notebook_id, terms, per_term_limit, **producer_options
         )
     else:
         candidates = candidate_rows_for_terms(
             db, notebook_id, terms, per_term_limit,
             list(dict.fromkeys(allowed_source_ids)),
-            allow_knn=allow_knn,
             authoritative_source_filter=authoritative_source_filter,
+            **producer_options,
         )
     if not candidates:
         return []
@@ -2667,6 +2674,8 @@ class KnowledgeStore:
         corpus_langs: Sequence[str] | None = None,
         allow_knn: bool = False,
         authoritative_source_filter: bool = False,
+        knn_max_term_chars: int | None = None,
+        routing_stats: dict[str, int | float] | None = None,
     ) -> List[Dict]:
         """Return deterministic lexical knowledge hits from trigram candidates."""
         needle = (q or "").strip()
@@ -2683,6 +2692,8 @@ class KnowledgeStore:
             corpus_langs=corpus_langs,
             allow_knn=allow_knn,
             authoritative_source_filter=authoritative_source_filter,
+            knn_max_term_chars=knn_max_term_chars,
+            routing_stats=routing_stats,
         )
 
     def chunk_fts_search(

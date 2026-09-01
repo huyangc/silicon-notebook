@@ -49,12 +49,21 @@ _TIMING_FIELDS = {
         "kg_ann_knn_ms",
         "kg_delta_ms",
         "kg_lexical_ms",
+        "kg_lexical_knn_ms",
+        "kg_lexical_legacy_ms",
+        "kg_lexical_short_fallback_ms",
         "hydrate_ms",
         "score_ms",
         "fold_ms",
         "total_ms",
     ),
 }
+_KG_LEXICAL_ROUTE_FIELDS = (
+    "kg_lexical_term_count",
+    "kg_lexical_knn_term_count",
+    "kg_lexical_direct_legacy_term_count",
+    "kg_lexical_short_fallback_term_count",
+)
 _RUN_KINDS = frozenset({
     "ask_chunk",
     "ask_reasoning",
@@ -187,6 +196,7 @@ def build_report(
     leaf_latency: dict[str, Samples] = defaultdict(Samples)
     leaf_status: dict[str, Counter[str]] = defaultdict(Counter)
     component_latency: dict[tuple[str, str, str], Samples] = defaultdict(Samples)
+    lexical_routes: dict[str, Counter[str]] = defaultdict(Counter)
     run_stats: dict[str, Counter[str]] = defaultdict(Counter)
     relevant = 0
 
@@ -227,6 +237,15 @@ def build_report(
         relevant += 1
         for field_name in fields:
             component_latency[(site, bucket, field_name)].add(event.get(field_name))
+        if site == "_retrieve_scored" and any(
+            field_name in event for field_name in _KG_LEXICAL_ROUTE_FIELDS
+        ):
+            route_stats = lexical_routes[bucket]
+            route_stats["events"] += 1
+            for field_name in _KG_LEXICAL_ROUTE_FIELDS:
+                value = _finite_number(event.get(field_name))
+                if value is not None and value >= 0 and value.is_integer():
+                    route_stats[field_name] += int(value)
 
     lines = [
         "=== Retrieval latency distribution (content-free) ===",
@@ -256,6 +275,21 @@ def build_report(
             lines.append(f"  site={site} size={bucket}")
             current_group = group
         lines.append(f"    {field_name:<24} {_format_samples(samples)}")
+
+    lines.append("\n[KG lexical routes by indexed size]")
+    if not lexical_routes:
+        lines.append("  (no adaptive-routing events)")
+    for bucket in sorted(lexical_routes):
+        stats = lexical_routes[bucket]
+        lines.append(
+            "  "
+            f"{bucket:<28} events={stats['events']} "
+            f"terms={stats['kg_lexical_term_count']} "
+            f"knn_terms={stats['kg_lexical_knn_term_count']} "
+            f"direct_legacy_terms={stats['kg_lexical_direct_legacy_term_count']} "
+            "short_fallback_terms="
+            f"{stats['kg_lexical_short_fallback_term_count']}"
+        )
 
     lines.append("\n[retrieval-run totals by run kind]")
     if not run_stats:

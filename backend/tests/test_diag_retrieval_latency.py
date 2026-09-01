@@ -39,6 +39,18 @@ def test_report_groups_leaf_and_components_without_rendering_ids():
             "total_ms": 1040,
         },
         {
+            "kind": "ask_stage",
+            "site": "_retrieve_scored",
+            "notebook_id": secret_notebook,
+            "kg_lexical_knn_ms": 12,
+            "kg_lexical_legacy_ms": 3,
+            "kg_lexical_short_fallback_ms": 2,
+            "kg_lexical_term_count": 8,
+            "kg_lexical_knn_term_count": 3,
+            "kg_lexical_direct_legacy_term_count": 5,
+            "kg_lexical_short_fallback_term_count": 1,
+        },
+        {
             "kind": "retrieval_run_stats",
             "run_kind": "report_generation",
             "chunk_fts_timeouts": 1,
@@ -58,9 +70,33 @@ def test_report_groups_leaf_and_components_without_rendering_ids():
     assert "large(>=500000)" in report
     assert "timeout=1" in report
     assert "ann_open_ms" in report
+    assert "kg_lexical_knn_ms" in report
+    assert "knn_terms=3" in report
+    assert "direct_legacy_terms=5" in report
+    assert "short_fallback_terms=1" in report
     assert "report_generation" in report
     assert "fts_timeouts=1" in report
     assert secret_notebook not in report
+
+
+def test_route_summary_ignores_malformed_or_unknown_counters():
+    report = diag.build_report(
+        [{
+            "kind": "ask_stage",
+            "site": "_retrieve_scored",
+            "notebook_id": "private-notebook",
+            "kg_lexical_term_count": float("nan"),
+            "kg_lexical_knn_term_count": -1,
+            "kg_lexical_direct_legacy_term_count": 1.5,
+            "kg_lexical_short_fallback_term_count": "not-a-number",
+            "query": "private query text",
+        }],
+        {},
+    )
+
+    assert "events=1 terms=0 knn_terms=0 direct_legacy_terms=0" in report
+    assert "private-notebook" not in report
+    assert "private query text" not in report
 
 
 def test_unknown_manifest_stays_explicit():

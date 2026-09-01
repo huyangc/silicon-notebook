@@ -292,28 +292,29 @@ def _recall_terms_with_head(query: str) -> tuple[list[str], int]:
     # evicting the lowest-priority (last non-CJK, non-phrase) terms. Only
     # active when identifiers were injected — identifier-free queries keep the
     # historical output bit-for-bit.
-    overflow_cjk = [t for t in terms[MAX_LEXICAL_TERMS:] if _has_cjk(t)]
-    kept_cjk = sum(1 for t in keep if _has_cjk(t))
+    overflow_cjk = [t for t in terms[MAX_LEXICAL_TERMS:] if has_cjk(t)]
+    kept_cjk = sum(1 for t in keep if has_cjk(t))
     need = min(len(overflow_cjk), max(0, CJK_RESERVED_TERMS - kept_cjk))
     for term in overflow_cjk[:need]:
         # Never evict the priority head: the whole-sentence term (slot 0 as
         # before) and, when the user quoted spans, the phrases ahead of it.
         for index in range(len(keep) - 1, floor - 1, -1):
-            if not _has_cjk(keep[index]):
+            if not has_cjk(keep[index]):
                 del keep[index]
                 keep.append(term)
                 break
     return keep, protected
 
 
-def _has_cjk(term: str) -> bool:
+def has_cjk(term: str) -> bool:
+    """Whether a lexical term contains any CJK unified ideograph."""
     return any(_is_cjk(char) for char in term)
 
 
 def _is_all_cjk(term: str) -> bool:
     """Every character is CJK — the exact shape the run decomposer emits.
 
-    Deliberately stricter than `_has_cjk`, because the corpus gate below needs
+    Deliberately stricter than `has_cjk`, because the corpus gate below needs
     a PROOF of zero hits, not a likelihood. Pad an all-CJK term for trigram
     extraction and every one of its trigrams still contains a CJK character, so
     against a corpus holding no CJK character at all the trigram intersection

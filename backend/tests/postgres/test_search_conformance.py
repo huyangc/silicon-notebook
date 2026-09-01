@@ -65,7 +65,9 @@ def test_multi_term_candidates_use_one_lateral_query_with_exact_quota():
     assert len(connection.calls) == 1
     statement, params = connection.calls[0]
     assert "CROSS JOIN LATERAL" in statement
-    assert statement.count("LIMIT %s") == 1
+    assert statement.count("LIMIT %s") == 3
+    assert " UNION " in statement
+    assert " OPERATOR(public.%%) lexical_terms.term OR " not in statement
     assert params == [
         0,
         "thermal",
@@ -74,6 +76,9 @@ def test_multi_term_candidates_use_one_lateral_query_with_exact_quota():
         "ZXCV9000",
         "%ZXCV9000%",
         "nb",
+        2,
+        "nb",
+        2,
         2,
     ]
 
@@ -102,7 +107,10 @@ def test_source_scope_is_inside_each_postgres_candidate_limit():
     assert "EXISTS (SELECT 1 FROM knowledge_object_sources" in lateral
     assert lateral.index("knowledge_object_sources") < lateral.index("LIMIT %s")
     assert params == [
-        0, "target command", "%target command%", "nb", ["A", "B"], 2
+        0, "target command", "%target command%",
+        "nb", ["A", "B"], 2,
+        "nb", ["A", "B"], 2,
+        2,
     ]
 
     connection = _Connection()
@@ -116,7 +124,10 @@ def test_source_scope_is_inside_each_postgres_candidate_limit():
     assert "knowledge_object_sources" not in lateral
     assert lateral.index("jsonb_array_elements") < lateral.index("LIMIT %s")
     assert params == [
-        0, "target command", "%target command%", "nb", ["A", "B"], 2
+        0, "target command", "%target command%",
+        "nb", ["A", "B"], 2,
+        "nb", ["A", "B"], 2,
+        2,
     ]
 
     connection = _Connection()
@@ -162,7 +173,89 @@ def test_lateral_probe_escapes_only_the_like_arm():
     assert "ILIKE lexical_terms.like_pattern ESCAPE '\\'" in statement
     assert "'%' || lexical_terms.term" not in statement
     assert "OPERATOR(public.%%) lexical_terms.term" in statement
-    assert params == [0, "set_db", r"%set\_db%", "nb", 2]
+    assert " OPERATOR(public.%%) lexical_terms.term OR " not in statement
+    assert params == [
+        0, "set_db", r"%set\_db%", "nb", 2, "nb", 2, 2
+    ]
+
+
+def test_knowledge_knn_routes_only_short_non_cjk_terms_and_keeps_ranks(
+    monkeypatch,
+):
+    from app.repositories.postgres import search as search_module
+
+    calls = []
+
+    def fake_knn(_connection, _notebook_id, ranked_terms, _limit, routing_stats):
+        calls.append(("knn", ranked_terms))
+        routing_stats["knn_short_fallback_term_count"] = 0
+        return [{
+            "candidate_id": "latin",
+            "term_rank": ranked_terms[0][0],
+            "candidate_similarity": 0.8,
+        }]
+
+    def fake_legacy(_connection, **kwargs):
+        calls.append(("legacy", kwargs["ranked_terms"]))
+        return [
+            {
+                "candidate_id": f"legacy-{rank}",
+                "term_rank": rank,
+                "candidate_similarity": 0.7,
+            }
+            for rank, _term in kwargs["ranked_terms"]
+        ]
+
+    monkeypatch.setattr(search_module, "knn_name_index_available", lambda _c: True)
+    monkeypatch.setattr(search_module, "_knowledge_rows_via_knn", fake_knn)
+    monkeypatch.setattr(search_module, "_candidate_rows_for_terms", fake_legacy)
+    stats = {}
+
+    rows = knowledge_candidate_rows_for_terms(
+        object(),
+        "nb",
+        ["thermal", "热设计", "latin-term-too-long"],
+        per_term_limit=2,
+        allow_knn=True,
+        knn_max_term_chars=8,
+        routing_stats=stats,
+    )
+
+    assert calls == [
+        ("knn", [(0, "thermal")]),
+        ("legacy", [(1, "热设计"), (2, "latin-term-too-long")]),
+    ]
+    assert [row["term_rank"] for row in rows] == [0, 1, 2]
+    assert stats["term_count"] == 3
+    assert stats["knn_term_count"] == 1
+    assert stats["legacy_term_count"] == 2
+
+
+def test_all_non_knn_terms_skip_the_ordered_knn_availability_probe(monkeypatch):
+    from app.repositories.postgres import search as search_module
+
+    def unexpected_probe(_connection):
+        pytest.fail("CJK/over-limit terms must not enter ordered KNN")
+
+    seen = []
+
+    def fake_legacy(_connection, **kwargs):
+        seen.extend(kwargs["terms"])
+        return []
+
+    monkeypatch.setattr(search_module, "knn_name_index_available", unexpected_probe)
+    monkeypatch.setattr(search_module, "_candidate_rows_for_terms", fake_legacy)
+
+    knowledge_candidate_rows_for_terms(
+        object(),
+        "nb",
+        ["热设计", "latin-term-too-long"],
+        per_term_limit=2,
+        allow_knn=True,
+        knn_max_term_chars=8,
+    )
+
+    assert seen == ["热设计", "latin-term-too-long"]
 
 
 @dataclass
@@ -1103,6 +1196,30 @@ def _candidate_tuples(rows):
     ]
 
 
+@pytest.mark.postgres_integration
+def test_split_legacy_arms_preserve_c_collated_ties_and_term_ranks(
+    search_harness,
+):
+    """Equal-score rows retain the legacy id tie-break for every term."""
+    terms = ["thermal", "热设计"]
+    with search_harness.database.connect() as connection:
+        pages = []
+        for per_term_limit in (1, 4, 12):
+            rows = knowledge_candidate_rows_for_terms(
+                connection, "nb-search", terms, per_term_limit
+            )
+            pages.append([
+                [row["candidate_id"] for row in rows if row["term_rank"] == rank]
+                for rank in range(len(terms))
+            ])
+
+    assert pages == [
+        [list(EXPECTED_IDS[:1]), list(EXPECTED_IDS[:1])],
+        [list(EXPECTED_IDS[:4]), list(EXPECTED_IDS[:4])],
+        [list(EXPECTED_IDS), list(EXPECTED_IDS)],
+    ]
+
+
 class _KnnCountingConnection:
     """Delegates everything while counting executed KNN-shaped statements.
 
@@ -1155,8 +1272,10 @@ def test_knn_full_page_and_top_up_both_equal_the_legacy_statement(search_harness
                 counting, KNN_NOTEBOOK, terms, per_term_limit=3
             )
             assert counting.knn_statements == 0, "legacy 调用不得发出 KNN SQL"
+            routing_stats = {}
             knn = knowledge_candidate_rows_for_terms(
-                counting, KNN_NOTEBOOK, terms, per_term_limit=3, allow_knn=True
+                counting, KNN_NOTEBOOK, terms, per_term_limit=3, allow_knn=True,
+                routing_stats=routing_stats,
             )
             assert counting.knn_statements == 1, (
                 "hinted 调用必须真的经 KNN 语句取数——否则上面的等价断言全是空转"
@@ -1187,8 +1306,17 @@ def test_knn_full_page_and_top_up_both_equal_the_legacy_statement(search_harness
         reset_knn_index_cache()
 
     assert _candidate_tuples(knn) == _candidate_tuples(legacy)
+    assert routing_stats["knn_term_count"] == 2
+    assert routing_stats["legacy_term_count"] == 0
+    assert routing_stats["knn_short_fallback_term_count"] == 1
+    assert routing_stats["knn_seconds"] >= 0
+    assert routing_stats["knn_short_fallback_seconds"] >= 0
     assert _candidate_tuples(knn_wide) == _candidate_tuples(legacy_wide)
     assert _candidate_tuples(knn_reversed) == _candidate_tuples(legacy_reversed)
+    assert [
+        row["candidate_id"] for row in legacy_wide
+        if int(row["term_rank"]) == 0
+    ] == [object_id for object_id, _name in KNN_STAIRCASE]
     assert "ko-knn-04" in {row["candidate_id"] for row in knn_wide}
     # The deprecated high-similarity twin must be OUT of every page: it ranks
     # #2 by similarity, so a KNN statement missing `status!='deprecated'`

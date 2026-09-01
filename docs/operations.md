@@ -595,20 +595,33 @@ impose a decoded-byte cap when operator latency matters more than complete windo
 raise `--max-events` if `log_scan` reports more matched than retained records. Any byte or record
 cap reached is disclosed as `truncated:true`.
 
-### KNN early stop for the largest notebooks (`POSTGRES_LEXICAL_KNN_ENABLED`)
+### Adaptive KG lexical routing (`POSTGRES_LEXICAL_KNN_ENABLED`)
 
-The composite indexes above insulate every *other* notebook from a giant one, but cannot make
-the giant notebook's own probes cheap: `ORDER BY similarity` still recomputes similarity for
-every trigram candidate before its LIMIT (measured on a 9.1M-object notebook: 7.4s for one
-common short term; a multi-term question times out and the lexical arm dies fail-open). The
-default-on `POSTGRES_LEXICAL_KNN_ENABLED` flag switches unscoped runs on notebooks at or
-above `POSTGRES_LEXICAL_KNN_MIN_ROWS` (default 500,000 nodes+chunks) to a GiST `<->` scan
-that stops at the LIMIT (measured 123ms, 60×). The floor matters: the GiST index has no
-notebook key, so the KNN scan walks global distance order and only pays off for a notebook
-that dominates the table — set the floor above your largest non-dominant notebook. Scores
-stay `similarity()`; within equal-similarity tie classes the selected members may differ from
-legacy and are not run-to-run stable (tie membership follows GiST traversal order), so a
-recall A/B must sample the same questions repeatedly rather than compare one paired run.
+Production per-term plans show that one global GiST strategy is not uniformly fast. In the
+captured 33-term query, 26 CJK trigrams consumed about 28.5s (73.7%), usually returned zero or
+one row, and each walked for 1–2s. A 54-character whole-sentence term took 5.2s and touched
+about 331k shared buffers. This was the GiST ordered scan itself, not cross-notebook filtering:
+`Rows Removed by Filter` was zero for those terms. The same CJK run through a notebook-scoped
+non-KNN plan took about 2.8ms. Conversely, common short Latin terms still benefit from GiST KNN
+(the earlier 9.1M-row measurement was 7.4s → 123ms).
+
+The default-on route therefore preserves every recall term but chooses its access path per
+term:
+
+- a term containing CJK, or longer than `POSTGRES_LEXICAL_KNN_MAX_TERM_CHARS` (default 32),
+  bypasses `<->` ordered KNN and uses notebook-scoped split trigram arms;
+- a short non-CJK term may use GiST KNN only when the run is unscoped, the notebook meets
+  `POSTGRES_LEXICAL_KNN_MIN_ROWS`, and the exact GiST shape is available;
+- a short KNN page is replaced by the same split-path result so ILIKE-only hits are kept.
+
+The split path turns `% OR ILIKE` into two independently ordered/limited arms, unions and
+deduplicates them, then reapplies the same `similarity DESC, id COLLATE "C"` top-k. Taking the
+top k from each input contains the top k of their union, so this removes the planner's costly
+BitmapOr without reducing recall or changing quotas and final ordering. The registered KNN
+equal-similarity tie jitter remains: a repeated recall A/B is still required for short Latin
+terms. PostgreSQL remains free to choose the existing notebook-aware composite GIN or another
+usable bitmap combination for each split arm; the application guarantees that ordered KNN is
+avoided, not a particular physical index. Verify the chosen plan with production `EXPLAIN`.
 
 Enablement needs one additive GiST index; availability is detected by SHAPE, so an index you
 already built for benching counts and nothing is renamed or rebuilt:
@@ -619,14 +632,22 @@ CREATE INDEX CONCURRENTLY idx_knowledge_objects_name_knn_gist ON knowledge_objec
   WHERE status != 'deprecated';
 ```
 
-Then restart the backend — the flag defaults to on, so building the index is the only step
-(availability is probed
-once per process and never re-probed). Rollback order matters for the same reason: set the
-flag off and restart FIRST, and only then drop the index — dropping it under a live flag
-leaves the cached "available" verdict pointing at a vanished index, and every KNN statement
-degrades to an unindexed distance sort until the process restarts. Terms whose KNN page comes
-back short are re-probed through the legacy statement automatically, so rare/ILIKE-only
-matches keep their legacy results.
+No new index is required when both the composite GIN installed by
+`scripts/build_postgres_retrieval_indexes.py` and the GiST above are already valid. In
+particular, do not add a composite GiST for this incident: production evidence ruled out
+notebook post-filtering as the dominant cost. Deploy the application, keep
+`POSTGRES_LEXICAL_KNN_ENABLED=true`, and normally keep the max-term default at 32. Availability
+is cached per physical table for the process lifetime. If the GiST must be removed, set the
+flag off and restart first, then drop it; otherwise a cached available verdict can leave an
+unindexed distance sort until restart.
+
+After deployment, run `python3 scripts/diag_retrieval_latency.py --since 5`. The
+`_retrieve_scored` component now separates `kg_lexical_knn_ms`, `kg_lexical_legacy_ms`, and
+`kg_lexical_short_fallback_ms`; the route summary totals all terms, KNN terms, direct legacy
+terms, and short-page fallback terms without recording query text or object ids. For the
+production shape above, CJK/long terms should move to `direct_legacy_terms`, KNN time should
+collapse to short Latin probes, and total `kg_lexical_ms` should no longer track the former
+25–30s GiST phase.
 
 ## PDF parsing with MinerU
 

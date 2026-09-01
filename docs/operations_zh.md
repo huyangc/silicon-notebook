@@ -490,17 +490,28 @@ manifest 的事件进入明确的 `unknown` 桶，不能误判为小库。时间
 窗口覆盖，可用 `--max-input-mb N` 设置解码字节上限；若 `log_scan` 显示 matched 大于 retained，
 应调高 `--max-events`。命中字节或记录上限都会明确报告 `truncated:true`。
 
-### 超大库的 KNN 早停（`POSTGRES_LEXICAL_KNN_ENABLED`）
+### KG 词法自适应路由（`POSTGRES_LEXICAL_KNN_ENABLED`）
 
-上面的复合索引让**其他**库不再为巨型库买单，但救不了巨型库自己：`ORDER BY similarity` 仍要
-对全部 trigram 候选算完相似度才能截断（9.1M 对象库实测：常见短词单词项 7.4s，多词项问题直接
-超时、词法臂 fail-open 整条阵亡）。默认开的 `POSTGRES_LEXICAL_KNN_ENABLED` 让规模 ≥
-`POSTGRES_LEXICAL_KNN_MIN_ROWS`（默认 50 万 nodes+chunks）的库的未收窄 run 改走 GiST `<->`
-扫描、到 LIMIT 即停（同库实测 123ms，60×）。这个下限是实质性的：GiST 索引没有 notebook 键，
-KNN 走的是**全库**距离序，只对在整张表里占主导份额的库划算——请把下限设在「除主导库外最大的
-那个库」之上。分数仍是 `similarity()`；等相似度并列类内的成员选择不仅可能与旧路径不同，KNN
-路径自身也不是 run-to-run 稳定的（并列成员随 GiST 遍历序变化），所以召回 A/B 必须对同一批
-问题多次采样，不能只比一轮。
+生产逐词项 plan 已证明，全局 GiST 不能一把梭覆盖所有词项。在抓到的 33 词查询中，26 个 CJK
+三字词消耗约 28.5s（73.7%），通常只返回 0–1 行，却每词扫描 1–2s；54 字整句耗时 5.2s、触碰
+约 33.1 万 shared buffers。`Rows Removed by Filter` 为零，说明慢在 GiST ordered scan 本身，
+不是跨库后过滤。同一个 CJK run 走 notebook-scoped 非 KNN plan 只需约 2.8ms。反过来，常见短
+Latin 词仍适合 GiST KNN（此前 910 万行实测 7.4s → 123ms）。
+
+因此默认开启的路由保留全部召回词，只按词项选择访问路径：
+
+- 含 CJK，或长度超过 `POSTGRES_LEXICAL_KNN_MAX_TERM_CHARS`（默认 32）的词项，绕开
+  `<->` ordered KNN，走 notebook-scoped 拆分 trigram arm；
+- 短、非 CJK 词项只有在未按来源收窄、库规模达到 `POSTGRES_LEXICAL_KNN_MIN_ROWS`、且精确
+  GiST 形状可用时才进入 KNN；
+- KNN 页取不满时，用同一拆分路径结果整体替换，保住仅 ILIKE 命中的结果。
+
+拆分路径把 `% OR ILIKE` 变为两个分别排序/截断的 arm，union 去重后再按原来的
+`similarity DESC, id COLLATE "C"` 取 top-k。每个输入各取 top-k 一定覆盖二者 union 的 top-k，
+所以它消掉 planner 的昂贵 BitmapOr，却不减召回、不改额度与最终排序。短 Latin KNN 的等相似度
+并列抖动仍是已登记取舍，召回 A/B 仍须重复采样。每个拆分 arm 的物理计划仍由 PostgreSQL
+选择：可以是既有 notebook-aware 复合 GIN，也可以是其他可用 bitmap 组合；应用保证的是避开
+ordered KNN，不是强制某个索引。上线时用生产 `EXPLAIN` 验收实际 plan。
 
 启用只需一条 additive 的 GiST 索引；可用性按**形状**探测，之前为 bench 建的同形索引直接
 生效，不需要为命名重建：
@@ -511,10 +522,17 @@ CREATE INDEX CONCURRENTLY idx_knowledge_objects_name_knn_gist ON knowledge_objec
   WHERE status != 'deprecated';
 ```
 
-随后重启后端即可——开关默认开，建索引是唯一的启用步骤（可用性按进程探测一次、不再复测）。
-回滚顺序因此是硬性的：**先关开关并重启，之后才删索引**——开关还开着就删，进程缓存里的
-「可用」指向一个已消失的索引，每条 KNN 语句都退化成无索引的距离排序，直到进程重启。KNN 页
-取不满的词项会自动经旧语句重探，罕见词/仅 ILIKE 命中的结果与旧路径一致。
+如果 `scripts/build_postgres_retrieval_indexes.py` 安装的复合 GIN 与上面的 GiST 都已 valid，本次
+不需要新增索引；尤其不要为这次事故加复合 GiST，生产证据已排除 notebook 后过滤是主耗时。部署
+新代码，保持 `POSTGRES_LEXICAL_KNN_ENABLED=true`，通常也保持最大词长默认 32。索引可用性按
+物理表在进程期缓存；若确需删除 GiST，必须先关开关并重启，再删索引，否则缓存的 available 判定
+会让查询退化为无索引距离排序，直至重启。
+
+上线后运行 `python3 scripts/diag_retrieval_latency.py --since 5`。`_retrieve_scored` 组件会拆出
+`kg_lexical_knn_ms`、`kg_lexical_legacy_ms`、`kg_lexical_short_fallback_ms`；路由汇总会统计总词项、
+KNN 词项、直接 legacy 词项与短页回退词项，且不记录 query 文本或对象 id。对于上述生产形态，
+CJK/长词应进入 `direct_legacy_terms`，KNN 耗时只剩短 Latin 探针，`kg_lexical_ms` 不应再跟着旧的
+25–30s GiST phase 走。
 
 ## 用 MinerU 解析 PDF
 
