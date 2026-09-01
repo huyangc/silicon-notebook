@@ -11,6 +11,12 @@ import pytest
 from app.core.config import Settings
 from app.services.sqlite_repository import SQLiteRepository, _now
 from app.models.schemas import NotebookCreate
+from tests.kg_extracted_parity_cases import (
+    KG_EXTRACTED_CASE_IDS,
+    KG_EXTRACTED_CASES,
+    kg_case_run_id,
+    kg_case_source_id,
+)
 
 
 @pytest.fixture
@@ -53,13 +59,15 @@ def _add_kg_object(repo, nb_id, src_id):
              "[]", src_id, now, now))
 
 
-def _add_extraction_run(repo, nb_id, src_id, run_id, created_at, error_message=""):
+def _add_extraction_run(
+    repo, nb_id, src_id, run_id, created_at, error_message="", status="completed"
+):
     now = _now()
     with repo._write() as db:
         db.execute(
             "INSERT INTO extraction_runs (id,notebook_id,source_id,run_type,status,"
             "error_message,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
-            (run_id, nb_id, src_id, "kg", "completed", error_message, created_at, now))
+            (run_id, nb_id, src_id, "kg", status, error_message, created_at, now))
 
 
 def _oracle_sources(repo, notebook_id):
@@ -138,3 +146,71 @@ def test_extraction_warning_tie_break_matches_per_row(repo):
 def test_sources_from_rows_empty_list_short_circuits(repo):
     with repo._connect() as db:
         assert repo._sources_from_rows(db, []) == []
+
+
+# --------------------------------------------------------------------------
+# kg_extracted 判定矩阵(与 PG 侧共用 tests/kg_extracted_parity_cases.py)
+# --------------------------------------------------------------------------
+
+def _seed_kg_matrix(repo, notebook_id):
+    """把整张判定矩阵种进**同一个** notebook:每条用例一条来源。
+
+    刻意同页,因为批量路径的判定是整页一条 SQL——十条用例同页才真正跑到「一页
+    多个 id」那条形状;一条用例一个 notebook 只会反复验证单元素的退化情形。"""
+    for index, (_label, has_object, runs, _expected) in enumerate(KG_EXTRACTED_CASES):
+        source_id = kg_case_source_id(index)
+        _seed_source(
+            repo, notebook_id, source_id, f"Doc {index}",
+            f"2026-03-{index + 1:02d}T00:00:00",
+        )
+        _add_elements(repo, source_id, 1)
+        if has_object:
+            _add_kg_object(repo, notebook_id, source_id)
+        for rank, status, error_message in runs:
+            _add_extraction_run(
+                repo, notebook_id, source_id, kg_case_run_id(index, rank),
+                f"2026-04-{rank + 1:02d}T00:00:00",
+                error_message=error_message, status=status,
+            )
+
+
+def _expected_kg_matrix():
+    return {label: expected for label, _obj, _runs, expected in KG_EXTRACTED_CASES}
+
+
+def test_batched_kg_extracted_matches_the_parity_matrix(repo):
+    """批量路径(list_sources / list_sources_page)的每一条判定分支。
+
+    有对象 + 最近一次跑完 + 消息干净 → True;失败窗口、未补齐的 partial 重试、
+    非 completed 的最近一次、没有对象行 → False;完全没有抽取记录按 'completed'
+    兜底 → True;多条 run 只看最近一次(两个方向)。"""
+    nb = repo.create_notebook(NotebookCreate(name="kg matrix"))
+    _seed_kg_matrix(repo, nb.id)
+
+    by_id = {item.id: item for item in repo.list_sources(nb.id)}
+    got = {
+        label: by_id[kg_case_source_id(index)].kg_extracted
+        for index, (label, _obj, _runs, _expected) in enumerate(KG_EXTRACTED_CASES)
+    }
+    assert got == _expected_kg_matrix()
+
+    # 生产上真正的热点是分页那条路径,它与 list_sources 共用同一个批量水合。
+    page = repo.list_sources_page(nb.id, offset=0, limit=50)
+    paged = {item.id: item.kg_extracted for item in page.items}
+    assert paged == {
+        kg_case_source_id(index): expected
+        for index, (_label, _obj, _runs, expected) in enumerate(KG_EXTRACTED_CASES)
+    }
+
+
+def test_single_row_kg_extracted_matches_the_parity_matrix(repo):
+    """单条路径(get_source)必须给出与批量路径逐条相同的答案——两处各有一份取数
+    SQL,漂了会让同一份来源在列表和详情里显示成两种状态。"""
+    nb = repo.create_notebook(NotebookCreate(name="kg matrix"))
+    _seed_kg_matrix(repo, nb.id)
+
+    got = {
+        label: repo.get_source(kg_case_source_id(index)).kg_extracted
+        for index, (label, _obj, _runs, _expected) in enumerate(KG_EXTRACTED_CASES)
+    }
+    assert got == _expected_kg_matrix()
