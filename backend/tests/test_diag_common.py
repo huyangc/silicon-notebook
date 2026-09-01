@@ -194,6 +194,20 @@ def test_reader_does_not_parse_a_gzip_line_larger_than_the_hard_byte_bound(tmp_p
     assert result.stats.truncated is True
 
 
+def test_unbounded_reader_keeps_an_independent_per_record_byte_bound(tmp_path):
+    path = tmp_path / "events-2026-07-21.jsonl"
+    path.write_bytes(b"x" * 512)
+    common = load_common()
+
+    rows = list(common.iter_jsonl_file(
+        path,
+        max_input_bytes=None,
+        max_record_bytes=128,
+    ))
+
+    assert rows == [(None, True, -1)]
+
+
 def test_reader_checks_deadline_before_parsing_input(tmp_path, monkeypatch):
     common = load_common()
     (tmp_path / "events.jsonl").write_text(line("deadline", "2026-07-21T10:00:00"))

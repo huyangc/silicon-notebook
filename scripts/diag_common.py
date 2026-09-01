@@ -44,6 +44,7 @@ NOTEBOOK_HIDDEN_STATUSES = frozenset({"copying", "deleting"})
 
 _READ_CHUNK_BYTES = 64 * 1024
 _DEFAULT_MAX_INPUT_BYTES = 64 * 1024 * 1024
+_MAX_RECORD_BYTES = _DEFAULT_MAX_INPUT_BYTES
 _MAX_RENDERED_PATH_BYTES = 384
 COPY_REPORT_LIMIT_BYTES = 32 * 1024
 _CAPTURE_LIMIT_BYTES = 4 * COPY_REPORT_LIMIT_BYTES
@@ -283,6 +284,7 @@ def discover_channel_files(log_dir: Path, channel: str,
 
 def iter_jsonl_file(path: Path, *, tail_bytes: Optional[int] = None,
                     max_input_bytes: Optional[int] = _DEFAULT_MAX_INPUT_BYTES,
+                    max_record_bytes: int = _MAX_RECORD_BYTES,
                     deadline: Optional[float] = None
                     ) -> Iterator[Tuple[Optional[Dict[str, Any]], bool, int]]:
     """Yield parsed JSONL without reading or parsing beyond byte/deadline bounds.
@@ -291,6 +293,7 @@ def iter_jsonl_file(path: Path, *, tail_bytes: Optional[int] = None,
     ``read_channel``. It deliberately avoids materialising an oversized line.
     """
     limit = None if max_input_bytes is None else max(1, int(max_input_bytes))
+    record_limit = max(1, int(max_record_bytes))
 
     def raw_lines() -> Iterator[Tuple[Optional[bytes], bool]]:
         is_gzip = str(path).endswith(".gz")
@@ -326,7 +329,13 @@ def iter_jsonl_file(path: Path, *, tail_bytes: Optional[int] = None,
                 while True:
                     newline = buffered.find(b"\n")
                     if newline < 0:
+                        if len(buffered) > record_limit:
+                            yield None, True
+                            return
                         break
+                    if newline + 1 > record_limit:
+                        yield None, True
+                        return
                     raw = bytes(buffered[:newline + 1])
                     del buffered[:newline + 1]
                     yield raw, False
