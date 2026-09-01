@@ -254,28 +254,53 @@ def _validate_against_example(value: Any, example: Any) -> None:
     raise ModelJsonRepairError("invalid_type")
 
 
-def _validate_known_shape(value: Any, example: Any) -> None:
+def _validate_known_shape(
+    value: Any,
+    example: Any,
+    *,
+    field_name: str = "",
+) -> None:
     """Validate fields described by a schema example without rejecting extras.
 
     Schema hints are examples rather than full JSON Schema documents.  Some
     callers intentionally tolerate provider-added fields, but a named field
     with the wrong container/scalar type is never usable by their parser.
     """
+    # A schema hint is prompt prose encoded as a JSON example, not JSON Schema.
+    # These two current workload contracts deliberately use values that the
+    # example cannot express: conflict review's payload is null or an object,
+    # and its winner placeholder explicitly permits JSON null.
+    if field_name == "resolved_payload" and (
+        value is None or isinstance(value, dict)
+    ):
+        return
+    if (
+        value is None
+        and isinstance(example, str)
+        and example.startswith("<")
+        and "null" in example.lower()
+    ):
+        return
     if isinstance(example, dict):
         if not isinstance(value, dict):
             raise ModelJsonRepairError("invalid_type")
         shared_keys = set(value).intersection(example)
-        if example and not shared_keys:
+        # Report outline explicitly permits ``frame:{}`` when no comparison
+        # frame applies. Other described nested objects still need at least one
+        # usable field, so an empty plan item remains a schema mismatch.
+        if example and not shared_keys and not (
+            field_name == "frame" and not value
+        ):
             raise ModelJsonRepairError("missing_expected_key")
         for key in shared_keys:
-            _validate_known_shape(value[key], example[key])
+            _validate_known_shape(value[key], example[key], field_name=key)
         return
     if isinstance(example, list):
         if not isinstance(value, list):
             raise ModelJsonRepairError("invalid_type")
         if example:
             for item in value:
-                _validate_known_shape(item, example[0])
+                _validate_known_shape(item, example[0], field_name=field_name)
         return
     _validate_against_example(value, example)
 

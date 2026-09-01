@@ -80,6 +80,28 @@ def test_schema_shape_validation_allows_optional_and_provider_extra_fields():
 
 
 @pytest.mark.parametrize(
+    ("raw", "schema"),
+    [
+        (
+            '{"conflict_type":"temporal","resolution":"modify",'
+            '"winner_ref":null,"resolved_payload":{"valid_from":"2020"}}',
+            '{"conflict_type":"none|mutual|temporal|granularity",'
+            '"resolution":"keep|discard|modify",'
+            '"winner_ref":"<left_ref or right_ref or null>",'
+            '"resolved_payload":null}',
+        ),
+        (
+            '{"sections":[],"frame":{}}',
+            '{"sections":[{"title":"","sub_queries":[""]}],'
+            '"frame":{"subject_kind":"","facets":[]}}',
+        ),
+    ],
+)
+def test_schema_shape_validation_accepts_current_union_contracts(raw, schema):
+    validate_model_json_shape(raw, schema)
+
+
+@pytest.mark.parametrize(
     ("raw", "reason"),
     [
         ('{"answer":"token budget cut', "incomplete_object"),

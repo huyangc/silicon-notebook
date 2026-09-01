@@ -101,6 +101,43 @@ def test_reparse_schedules_only_in_notebook_sources(tmp_path, monkeypatch):
     assert getattr(fn, "__name__", "") == "process_source"
 
 
+def test_source_id_parse_binds_notebook_model_artifact_scope(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    headers, _ = _register(client, "s00300311")
+    nb = _notebook(client, headers, "source scope")
+
+    from app.api import source_routes
+    from app.api.deps import repository
+    from app.services.model_work import ModelPriority, make_model_work_context
+
+    repo = repository()
+    _seed_source(repo, nb, "src-scoped")
+    observed = []
+
+    class _ScopedSourceRepository:
+        def parse_source(self, source_id):
+            observed.append(make_model_work_context(
+                workload_id="source_summary",
+                priority=ModelPriority.BACKGROUND,
+            ))
+            return repo.get_source(source_id)
+
+    monkeypatch.setattr(
+        source_routes,
+        "source_repository",
+        lambda: _ScopedSourceRepository(),
+    )
+    response = client.post(
+        "/api/sources/src-scoped/parse",
+        headers=headers,
+    )
+
+    assert response.status_code == 200, response.text
+    assert len(observed) == 1
+    assert observed[0].notebook_id == nb
+    assert observed[0].parent_id == "src-scoped"
+
+
 def test_reparse_dedupes_and_bounds(tmp_path, monkeypatch):
     """去重 + 限量(codex):重复 id 只排一次;超上限直接 400,一个都不排。"""
     client = _client(tmp_path, monkeypatch)
