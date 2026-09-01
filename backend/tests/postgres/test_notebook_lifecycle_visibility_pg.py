@@ -1,0 +1,191 @@
+"""行为面守卫(PG 侧代表性抽查)——`backend/tests/test_notebook_lifecycle_visibility.py`
+的 PostgreSQL 对等用例(批 3·W1 T-1;codex PR#653 第 1 轮 P2)。
+
+**取舍(不做 16 方法全量重复)**:两个后端的可见性谓词共享**同一份**
+``NOTEBOOK_LIVE_SQL`` 常量字符串(``postgres/access_sql.py`` 与
+``sqlite/access_sql.py`` 逐字相等,由
+``test_notebook_live_status_literal_guard.py::
+test_diag_db_notebook_live_predicate_matches_access_sql`` 钉住)。两侧唯一可能
+分叉的地方是各自 SQL 方言的拼接**有没有正确套用**这份常量(占位符
+``%s``/``?``、大小写、别名前缀),而不是谓词语义本身——语义已经在 SQLite 侧
+16 个方法上被行为钉逐条锁死。所以 PG 侧只需要**抽查**几个代表性拼接形态
+(裸列名、带别名前缀、跨表 JOIN)+ mount 闸,不必把 16 个方法在两个后端各测
+一遍造成成对维护负担。抽查名单:``owned_notebook_rows``(裸列名)、
+``granted_notebook_rows``(带别名前缀 + 多表 JOIN,PG 侧还有
+``CROSS JOIN``→标准 JOIN 的方言差异)、``list_user_activity``(点查分支,PG 侧
+时间列是 ``timestamptz`` 而非文本)、``notebook_exists_for_owner``(最简单的
+裸 SELECT 1)、``notebook_analytics``(KeyError 存在性判定形态)、mount 闸
+(``notebook_store.participant_ids``,PG 侧 ``MOUNT_JOIN``/``MOUNT_ORDER`` 有
+``COLLATE "C"`` 排序方言差异)。
+
+变异验证见 SQLite 侧文件与 PR 报告——两侧共享常量,变异只需在其中一侧做一次
+即可覆盖两侧(改坏常量本身两侧同时遭殃);这里额外做的是"PG 拼接没抄错"的
+确定性检验,不是谓词语义的第二次证明。
+"""
+from __future__ import annotations
+
+import pytest
+
+
+pytestmark = [
+    pytest.mark.postgres_integration,
+    pytest.mark.xdist_group(name="postgres_notebook_lifecycle_visibility"),
+]
+
+NOW = "2026-09-01T00:00:00+00:00"
+
+
+@pytest.fixture
+def postgres_repository(postgres_settings):
+    from app.repositories.postgres.repository import PostgresRepository
+
+    repository = PostgresRepository(postgres_settings)
+    try:
+        yield repository
+    finally:
+        repository.close()
+
+
+def _insert_user(db, user_id: str) -> None:
+    db.execute(
+        "INSERT INTO users (id,email,display_name,role,status,username,created_at,updated_at)"
+        " VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+        (user_id, f"{user_id}@x", user_id.upper(), "user", "active", user_id, NOW, NOW),
+    )
+
+
+def _insert_notebook(db, nid: str, owner: str) -> None:
+    db.execute(
+        "INSERT INTO notebooks (id,name,created_by,status,created_at,updated_at)"
+        " VALUES (%s,%s,%s,%s,%s,%s)",
+        (nid, f"NB-{nid}", owner, "ready", NOW, NOW),
+    )
+
+
+@pytest.fixture
+def lifecycle(postgres_repository):
+    """SQLite 侧同名 fixture 的精简版:只播种本文件实际要用到的几条腿
+    (owned/granted/activity/mount),不重建全部 16 个方法的辅助数据。"""
+    repo = postgres_repository
+    owner_id = "u-owner-pg-lifecycle"
+    member_id = "u-member-pg-lifecycle"
+    active_id, copying_id, deleting_id = (
+        "nb-active-pg-lifecycle",
+        "nb-copying-pg-lifecycle",
+        "nb-deleting-pg-lifecycle",
+    )
+    viewer_id = "nb-viewer-pg-lifecycle"
+    group_id = "grp-pg-lifecycle"
+
+    with repo._write() as db:
+        _insert_user(db, owner_id)
+        _insert_user(db, member_id)
+        for nid in (active_id, copying_id, deleting_id, viewer_id):
+            _insert_notebook(db, nid, owner_id)
+
+        db.execute(
+            "INSERT INTO groups (id,name,kind,description,created_by,owner_id,"
+            "created_at,updated_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+            (group_id, "pg-lifecycle-group", "project", "", owner_id, owner_id, NOW, NOW),
+        )
+        db.execute(
+            "INSERT INTO group_members (group_id,user_id,role,added_at,added_by) "
+            "VALUES (%s,%s,%s,%s,%s)",
+            (group_id, member_id, "member", NOW, owner_id),
+        )
+        for i, nid in enumerate((active_id, copying_id, deleting_id)):
+            db.execute(
+                "INSERT INTO notebook_grants "
+                "(id,notebook_id,principal_type,principal_id,role,created_by,created_at) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s)",
+                (f"gnt-pg-{i}", nid, "group", group_id, "viewer", owner_id, NOW),
+            )
+
+        for nid in (active_id, copying_id, deleting_id):
+            db.execute(
+                "INSERT INTO notebook_bases (notebook_id,base_notebook_id,created_at,created_by) "
+                "VALUES (%s,%s,%s,%s)",
+                (viewer_id, nid, NOW, owner_id),
+            )
+
+        for i, nid in enumerate((active_id, copying_id, deleting_id)):
+            db.execute(
+                "INSERT INTO ask_jobs "
+                "(id,notebook_id,created_by,mode,question,status,created_at,updated_at) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+                (f"ask-pg-{i}", nid, owner_id, "chunk", "q?", "completed", NOW, NOW),
+            )
+
+        db.execute("UPDATE notebooks SET status='copying' WHERE id=%s", (copying_id,))
+        db.execute("UPDATE notebooks SET status='deleting' WHERE id=%s", (deleting_id,))
+
+    return {
+        "owner_id": owner_id,
+        "member_id": member_id,
+        "active_id": active_id,
+        "copying_id": copying_id,
+        "deleting_id": deleting_id,
+        "viewer_id": viewer_id,
+        "group_id": group_id,
+    }
+
+
+def test_owned_notebook_rows(postgres_repository, lifecycle):
+    queries = postgres_repository._runtime.queries
+    with postgres_repository._connect() as db:
+        ids = {
+            r["id"]
+            for r in queries.owned_notebook_rows(db, lifecycle["owner_id"])
+        }
+    assert ids == {lifecycle["active_id"], lifecycle["viewer_id"]}
+
+
+def test_granted_notebook_rows(postgres_repository, lifecycle):
+    queries = postgres_repository._runtime.queries
+    with postgres_repository._connect() as db:
+        ids = {
+            r["id"]
+            for r in queries.granted_notebook_rows(db, lifecycle["member_id"])
+        }
+    assert ids == {lifecycle["active_id"]}
+
+
+def test_notebook_exists_for_owner(postgres_repository, lifecycle):
+    repo = postgres_repository
+    assert repo.notebook_exists_for_owner(lifecycle["active_id"], lifecycle["owner_id"]) is True
+    assert repo.notebook_exists_for_owner(lifecycle["copying_id"], lifecycle["owner_id"]) is False
+    assert repo.notebook_exists_for_owner(lifecycle["deleting_id"], lifecycle["owner_id"]) is False
+
+
+def test_notebook_analytics(postgres_repository, lifecycle):
+    repo = postgres_repository
+    repo.notebook_analytics(lifecycle["active_id"])
+    with pytest.raises(KeyError):
+        repo.notebook_analytics(lifecycle["copying_id"])
+    with pytest.raises(KeyError):
+        repo.notebook_analytics(lifecycle["deleting_id"])
+
+
+def test_list_user_activity_scoped(postgres_repository, lifecycle):
+    repo = postgres_repository
+    active = repo.list_user_activity(
+        lifecycle["owner_id"], notebook_id=lifecycle["active_id"], activity_type="ask"
+    )
+    assert [item["id"] for item in active["items"]] == ["ask-pg-0"]
+
+    copying = repo.list_user_activity(
+        lifecycle["owner_id"], notebook_id=lifecycle["copying_id"], activity_type="ask"
+    )
+    assert copying == {"items": [], "has_more": False, "next_cursor": None}
+
+    deleting = repo.list_user_activity(
+        lifecycle["owner_id"], notebook_id=lifecycle["deleting_id"], activity_type="ask"
+    )
+    assert deleting == {"items": [], "has_more": False, "next_cursor": None}
+
+
+def test_mount_gate_participant_resolution(postgres_repository, lifecycle):
+    store = postgres_repository._runtime.notebook_store
+    with postgres_repository._connect() as db:
+        ids = set(store.participant_ids(db, lifecycle["viewer_id"]))
+    assert ids == {lifecycle["viewer_id"], lifecycle["active_id"]}
