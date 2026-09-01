@@ -1276,7 +1276,8 @@ def test_both_source_lifecycle_exits_notify_the_chain():
     silently disappear here is the CALL, not its effect: drop it and every
     ingestion test stays green while the feature simply never triggers again.
     Add and reparse share ``process_source`` (``parse_source`` delegates to
-    it), so two call sites cover all three.
+    it), whose lifecycle-scoped body lives in ``_process_source_scoped``; those
+    two effective call sites therefore cover all three.
     """
     import ast
     from pathlib import Path as _Path
@@ -1291,7 +1292,7 @@ def test_both_source_lifecycle_exits_notify_the_chain():
         for node in parent.body
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
-    for name in ("process_source", "delete_source"):
+    for name in ("_process_source_scoped", "delete_source"):
         calls = {
             node.func.attr
             for node in ast.walk(functions[name])
@@ -1336,7 +1337,7 @@ def test_both_trigger_sites_gate_on_the_visible_source_predicate():
         for node in parent.body
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
-    for name in ("process_source", "delete_source"):
+    for name in ("_process_source_scoped", "delete_source"):
         guarded = False
         for node in ast.walk(functions[name]):
             if not isinstance(node, ast.If):
