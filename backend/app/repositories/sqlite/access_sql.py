@@ -455,15 +455,26 @@ def admin_grant_probe_params(notebook_id: str, user_id: str) -> tuple[str, ...]:
 
 
 # 写权(owner-only)的完整查询:有行即有写权。notebook 不存在 → 无行 → 无写权。
-NOTEBOOK_WRITE_SQL = "SELECT 1 FROM notebooks WHERE id=? AND created_by=?"
+# ⚠ 直连资源端点(/sources/{id}、/elements 等)靠这三条谓词授权,不经过
+# get_notebook 的目录寻址闸(codex #653 R2)——「deleting 后入口已 404」只对目录寻址
+# 成立,这三条必须自己把生命周期挡住,否则半拷贝/删除中的库仍能被直连端点读写。
+# 单点引用 NOTEBOOK_LIVE_SQL(批 3·W1 T-1),不折进 read_access_clause()/
+# admin_access_clause() 内部——那两个函数还喂 Memory 读查询、group_store 列表投影等
+# 更大范围的消费者,折进去会把改动面扩大到未经审视的地方(取舍与逐消费者排查
+# 见规格 T-1「授权谓词并入」小节)。
+NOTEBOOK_WRITE_SQL = (
+    f"SELECT 1 FROM notebooks WHERE id=? AND created_by=? AND {NOTEBOOK_LIVE_SQL}"
+)
 
 # 管理权(owner ∪ 管理级有效授权边)的完整查询:有行即有管理权。notebook 不存在 →
 # 无行 → 无管理权,与另外两条同口径。
 NOTEBOOK_ADMIN_SQL = (
     "SELECT 1 FROM notebooks nb WHERE nb.id=? AND " + admin_access_clause()
+    + f" AND nb.{NOTEBOOK_LIVE_SQL}"
 )
 
 # 读权(owner ∪ 只读成员 ∪ 有效授权边)的完整查询:有行即有读权。
 NOTEBOOK_READ_SQL = (
     "SELECT 1 FROM notebooks nb WHERE nb.id=? AND " + read_access_clause()
+    + f" AND nb.{NOTEBOOK_LIVE_SQL}"
 )

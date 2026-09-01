@@ -23,7 +23,12 @@
 ``query_store.notebook_analytics``、``query_store.pending_actions_projection_rows``、
 ``query_store.search_notebook``、``group_store.list_group_shared_notebooks``、
 ``knowledge_counts_cache.warm_all``(选取面)、mount 闸(``MOUNT_VALID_EXPR`` 实际
-走到的挂载参与集解析入口 ``notebook_store.participant_ids``)。
+走到的挂载参与集解析入口 ``notebook_store.participant_ids``)、**直连资源端点授权**
+(``access_sql.NOTEBOOK_READ_SQL``/``NOTEBOOK_ADMIN_SQL``/``NOTEBOOK_WRITE_SQL``,
+经 ``user_can_read_notebook``/``user_can_admin_notebook``/``user_can_access_notebook``——
+codex #653 第 2 轮发现的真规格缺口:目录寻址(``get_notebook``)已经把 deleting/
+copying 挡在入口,但 ``/sources/{id}``、``/elements`` 等直连资源端点不经过那道闸,
+必须在这三条授权谓词自己里挡住,详见规格 T-1「授权谓词并入」小节)。
 
 **PG 侧的取舍**:两个后端共享同一份 ``NOTEBOOK_LIVE_SQL`` 常量字符串(逐字相等已由
 ``test_notebook_live_status_literal_guard.py::
@@ -280,6 +285,36 @@ def test_search_notebook(repo, lifecycle):
         repo.search_notebook(lifecycle["copying_id"], "")
     with pytest.raises(KeyError):
         repo.search_notebook(lifecycle["deleting_id"], "")
+
+
+def test_direct_resource_authorization(repo, lifecycle):
+    """直连资源端点授权(codex #653 R2,真规格缺口):`/sources/{id}`、`/elements`
+    等端点不经 `get_notebook` 的目录寻址闸,直接走 `access_sql` 的
+    NOTEBOOK_READ_SQL/NOTEBOOK_ADMIN_SQL/NOTEBOOK_WRITE_SQL 授权——deleting/copying
+    必须被这三条谓词自己挡住,`user_can_read_notebook`/`user_can_admin_notebook`/
+    `user_can_access_notebook` 全部要对它们返回 False,不能指望「入口已 404」这条
+    对目录寻址成立的保证顺带覆盖直连端点。"""
+    owner_id = lifecycle["owner_id"]
+    active_id = lifecycle["active_id"]
+    hidden_ids = (lifecycle["copying_id"], lifecycle["deleting_id"])
+
+    assert repo.user_can_access_notebook(active_id, owner_id) is True
+    assert repo.user_can_admin_notebook(active_id, owner_id) is True
+    assert repo.user_can_read_notebook(active_id, owner_id) is True
+    for hidden_id in hidden_ids:
+        assert repo.user_can_access_notebook(hidden_id, owner_id) is False
+        assert repo.user_can_admin_notebook(hidden_id, owner_id) is False
+        assert repo.user_can_read_notebook(hidden_id, owner_id) is False
+
+    # 只读成员:在 active 上有读权(无写/管理权);在 copying/deleting 上三权皆无。
+    member_id = lifecycle["member_id"]
+    assert repo.user_can_read_notebook(active_id, member_id) is True
+    assert repo.user_can_access_notebook(active_id, member_id) is False
+    assert repo.user_can_admin_notebook(active_id, member_id) is False
+    for hidden_id in hidden_ids:
+        assert repo.user_can_read_notebook(hidden_id, member_id) is False
+        assert repo.user_can_access_notebook(hidden_id, member_id) is False
+        assert repo.user_can_admin_notebook(hidden_id, member_id) is False
 
 
 def test_list_group_shared_notebooks(repo, lifecycle):
