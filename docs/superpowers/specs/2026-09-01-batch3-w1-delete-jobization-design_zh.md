@@ -487,6 +487,72 @@ READ COMMITTED 下若某行在 `ARRAY(...)` 求值之后、`DELETE` 命中之前
 
 本步单独做时**行为零变化**（`deleting` 还没有任何行），先合、先审、先进 CI。
 
+#### T-1.1 授权谓词并入（codex #653 R2，PR-1 同批补齐）
+
+**发现**：§4.1 互斥矩阵原表述「`deleting` 后入口 `get_notebook` 已 404 → 谓词即闸」
+只对**目录寻址**成立——`GET /api/notebooks/{id}` 一类端点先经 `get_notebook`，
+`NOTEBOOK_LIVE_SQL` 已经把它挡住。但**直连资源端点**（`/sources/{id}`、
+`/elements` 等，路径里不带 notebook_id、不经过 `get_notebook`）走的是
+`deps.require_notebook_capability` → `sharing_store.user_can_read_notebook` /
+`user_can_admin_notebook` / `user_can_access_notebook` → 两个后端
+`access_sql.py` 的 `NOTEBOOK_READ_SQL` / `NOTEBOOK_ADMIN_SQL` /
+`NOTEBOOK_WRITE_SQL` 这三条独立谓词——T-1 折叠 40 处读侧站点时**没有覆盖它们**，
+它们在折叠前后都没有任何生命周期过滤。对 `deleting`（尚无任何行）是理论缺口；
+对**今天已存在的 `copying`** 是**真实的既有不一致**：半拷贝哨兵库理应「还不算
+存在」，但直连资源端点从未把它挡住。
+
+**修法**：两个后端的 `NOTEBOOK_WRITE_SQL` / `NOTEBOOK_ADMIN_SQL` /
+`NOTEBOOK_READ_SQL` 各自追加 `AND NOTEBOOK_LIVE_SQL`（`WRITE` 无表别名故裸引用，
+`ADMIN`/`READ` 用 `nb.` 前缀）。⚠ **加在这三条最终常量上，不折进
+`read_access_clause()` / `admin_access_clause()` 内部**：那两个函数还喂
+Memory 读查询（`memory_store._read_access_clause` 及至少两处直接调用）、
+`group_store` 的 `_notebook_name` 列投影等更大范围的消费者，折进共享子函数会把
+改动面扩大到本轮未逐一审查的地方。写权（owner-only，`created_by=%s`）本就独立
+成句，不经过任何 clause 函数，直接追加。三条都不新增字面量拼写——单点引用
+既有的 `access_sql.NOTEBOOK_LIVE_SQL`（T-1 已建），符合 T-1 的单点纪律；
+`test_access_sql_contract.py` 的双后端 parity 守卫（占位符方向、public 符号集合、
+`NOTEBOOK_ADMIN_SQL` 逐字内含受限三臂等结构断言）全部复核仍绿——矩阵夹具用的
+`status='draft'`，从未触达 `copying`/`deleting`，故这批既有断言本身不需要改。
+
+**依赖排查（先查后动，未发现依赖）**：`NotebookCopyService.copy_notebook`
+（`services/notebook_sharing.py`）全程走 **store 层**写（`insert_copy_rows` 等），
+从不对目标（正在 `copying` 的）笔记本调用 `user_can_*`/`NOTEBOOK_*_SQL`；唯一
+的 API 入口 `POST /shared/{token}/copy`（`notebook_routes.py:294-311`）是
+**同步**处理——`copy_notebook()` 跑完（状态已翻回正常）才把 `NotebookSummary`
+返给客户端，调用方在拷贝完成前无法得知新 notebook id，因而不存在「客户端在
+`copying` 窗口内直连访问新库」的路径。全仓搜索确认没有测试对 `copying` 状态的
+笔记本断言 `user_can_read_notebook`/`user_can_admin_notebook`/
+`user_can_access_notebook` 为真（PG 会话层 `test_core_store_conformance.py`
+用到的 `sharing.notebook_row` 是无条件裸取行的诊断方法，不经过这三条谓词，
+不受影响）。
+
+**行为面守卫扩展**：`backend/tests/test_notebook_lifecycle_visibility.py` 与
+`tests/postgres/test_notebook_lifecycle_visibility_pg.py` 新增
+`test_direct_resource_authorization`：为 active/copying/deleting 三本库播种
+owner 与只读成员两类主体，断言 `user_can_read_notebook` /
+`user_can_admin_notebook` / `user_can_access_notebook` 在 active 上按权限矩阵
+放行、在 copying/deleting 上三权皆否；变异（去掉追加的 `AND NOTEBOOK_LIVE_SQL`
+合取）已实测使对应断言变红。
+
+**Memory 的登记（不改，理由如下）**：Memory 的读路径不经过上述三条谓词，而是
+`memory_store.py` 自己的 `m.created_by=%s AND <owner∨成员∨授权边>` 组合
+（`_read_access_clause` 私有薄封装 + 至少两处**直接**调用模块级
+`read_access_clause()` 且各自换了不同的表别名——`memory_for_user` 之外，
+`create_answer_with_initial_revision` 的来源答案访问校验、
+`validate_promotion_approval_access_on` 的晋升审批校验都是独立形态）。
+`GET /memories/{memory_id}` 同样是直连端点、不
+经过 `get_notebook`，理论上与本条同类缺口；但权衡后**本批不动**，登记到批 3
+删库重造（T-2/T-3 落地、`deleting` 真正开始产出行的那个 PR）一并处理，理由：
+① 语义上限定于**自己**——`m.created_by=%s` 已经把可读范围收紧到「这条 Memory
+的作者本人」，即便笔记本进入 deleting，暴露面也只是作者读回自己写过的内容，
+不是任何跨用户的读权/写权穿透，风险量级与直连资源端点（任意被授权主体）不同；
+② 正确的折叠需要同时改掉 `_read_access_clause` 私有封装与至少两处直接调用
+`read_access_clause()` 的独立形态（两个后端各三处、共六处，且各自表别名不同），
+是比本条三常量修法更大的改动面，理应有自己的一轮评审与 Memory 专项测试覆盖，
+不宜在本 PR 尾部顺带塞入；③ 今天 `deleting` 尚无任何行，`copying` 状态下
+Memory 本就不构成新增暴露（半拷贝库的 Memory 行本身也还没拷贝完整），推迟到
+真正产出 `deleting` 行的那个 PR 处理不产生窗口期风险。
+
 ### T-2 tombstone 状态机
 
 `notebooks.status` 增加取值 `deleting`（**不加列**）。不需要 `deleted`（清理完成即物理删行），
@@ -875,7 +941,7 @@ row is None  或  (row["kg_mutation_seq"] == 0  且  not row["last_rebuild_at"])
 
 | 对手 | 现状 | W1 要求 | 机制 |
 | --- | --- | --- | --- |
-| 来源摄取/抽取、上传（**新请求**） | 无互斥 | 不需要：`deleting` 后入口 `get_notebook` 已 404 | 谓词即闸（T-1） |
+| 来源摄取/抽取、上传（**新请求**） | 无互斥 | 不需要：`deleting` 后新请求进不来 | 谓词即闸=**目录寻址 + 授权谓词双层**（T-1）——目录寻址（`get_notebook`）已 404；直连资源端点（`/sources/{id}` 等,不经过目录寻址)靠 `access_sql` 的 `NOTEBOOK_READ_SQL`/`NOTEBOOK_ADMIN_SQL`/`NOTEBOOK_WRITE_SQL` 自身挡住（codex #653 R2 补齐,原表述「谓词即闸」曾只指目录寻址一层,是这一格的表述缺口） |
 | **已在跑的 ask / 解析 / 抽取作业（在途写）** | 围栏行锁 | **挡不住**（摸底 2） | **相位 5 单事务**：围栏+归档+四表删同一事务（T-3.2） |
 | `rebuildkg-`（durable 簿记：`kg_build_jobs`） | 部分唯一索引单飞，**不取 advisory 锁** | 必须**等它真的停** | **相位 2 `quiesce` 腿 A**（查 `kg_build_jobs` 无 running）+ `knowledge_lifecycle.py:3176` 批边界检查点（4.2 选项 A） |
 | `relinkkg-` / `unifiedkg-`（**进程内簿记**：`KgMaintenanceJobs.jobs`，一行 `kg_build_jobs` 都不写——摸底 7b） | 进程内字典 claim（`services/kg/maintenance_jobs.py:71-88`），**不取 advisory 锁** | 同上 | **相位 2 `quiesce` 腿 B**（查进程内字典，依赖「生产单 worker」部署契约）+ **新增**检查点于 `knowledge_lifecycle.py:1409`（逐源）与 `:4389-4395` 的 `_stage`（10 个阶段边界）——今天这两条路径**一个检查点都没有** |
@@ -1279,3 +1345,10 @@ v4 是在 30s 预算下把它当兜底豁免；D-1 之后生产预算 180s 已�
 5. **三条新索引**同步进 `scripts/build_hotpath_indexes.py` 的离线通道（§1.4）。
 6. **迁移号复核**：`0047` / `_migration_68` / `SCHEMA_VERSION 68` 按动手当天的
    trunk 复核，不照抄本文。
+7. **授权谓词并入**（codex #653 R2，PR-1 内已落地，见 §T-1.1）：§4.1 互斥矩阵
+   「谓词即闸」原表述只对目录寻址成立，直连资源端点走 `NOTEBOOK_READ_SQL` /
+   `NOTEBOOK_ADMIN_SQL` / `NOTEBOOK_WRITE_SQL`，T-1 折叠 40 处读侧站点时未覆盖
+   这三条——已在同一 PR 补齐（两条各追加 `AND NOTEBOOK_LIVE_SQL`），对
+   `copying` 是闭合既有不一致，对 `deleting` 是行为零变化。Memory 的对应缺口
+   （`memory_store.py` 自己的 owner∨成员∨授权边组合，未经这三条谓词）**登记
+   不改**，理由与取舍见 §T-1.1 末段，留给 T-2/T-3 落地那个 PR 一并处理。

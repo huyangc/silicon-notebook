@@ -16,7 +16,11 @@ test_diag_db_notebook_live_predicate_matches_access_sql`` 钉住)。两侧唯一
 时间列是 ``timestamptz`` 而非文本)、``notebook_exists_for_owner``(最简单的
 裸 SELECT 1)、``notebook_analytics``(KeyError 存在性判定形态)、mount 闸
 (``notebook_store.participant_ids``,PG 侧 ``MOUNT_JOIN``/``MOUNT_ORDER`` 有
-``COLLATE "C"`` 排序方言差异)。
+``COLLATE "C"`` 排序方言差异)、**直连资源端点授权**
+(``NOTEBOOK_READ_SQL``/``NOTEBOOK_ADMIN_SQL``/``NOTEBOOK_WRITE_SQL``——codex #653
+第 2 轮发现的真规格缺口,`get_notebook` 的目录寻址闸挡不住直连资源端点,这三条
+授权谓词必须自己挡住 deleting/copying;PG 侧同样只抽查 owner 的三权 + 群组授权
+读者的读权,理由同上)。
 
 变异验证见 SQLite 侧文件与 PR 报告——两侧共享常量,变异只需在其中一侧做一次
 即可覆盖两侧(改坏常量本身两侧同时遭殃);这里额外做的是"PG 拼接没抄错"的
@@ -189,3 +193,29 @@ def test_mount_gate_participant_resolution(postgres_repository, lifecycle):
     with postgres_repository._connect() as db:
         ids = set(store.participant_ids(db, lifecycle["viewer_id"]))
     assert ids == {lifecycle["viewer_id"], lifecycle["active_id"]}
+
+
+def test_direct_resource_authorization(postgres_repository, lifecycle):
+    """直连资源端点授权(codex #653 R2,真规格缺口):`/sources/{id}`、`/elements`
+    等端点不经 `get_notebook` 的目录寻址闸,直接走 `access_sql` 的
+    NOTEBOOK_READ_SQL/NOTEBOOK_ADMIN_SQL/NOTEBOOK_WRITE_SQL 授权——deleting/copying
+    必须被这三条谓词自己挡住。PG 侧只抽查(取舍见模块 docstring):owner 的三权
+    + 群组授权读者(member_id,经 notebook_grants 而非 notebook_members 拿到读权,
+    与 SQLite 侧覆盖的成员路径互补)的读权。"""
+    repo = postgres_repository
+    owner_id = lifecycle["owner_id"]
+    active_id = lifecycle["active_id"]
+    hidden_ids = (lifecycle["copying_id"], lifecycle["deleting_id"])
+
+    assert repo.user_can_access_notebook(active_id, owner_id) is True
+    assert repo.user_can_admin_notebook(active_id, owner_id) is True
+    assert repo.user_can_read_notebook(active_id, owner_id) is True
+    for hidden_id in hidden_ids:
+        assert repo.user_can_access_notebook(hidden_id, owner_id) is False
+        assert repo.user_can_admin_notebook(hidden_id, owner_id) is False
+        assert repo.user_can_read_notebook(hidden_id, owner_id) is False
+
+    member_id = lifecycle["member_id"]
+    assert repo.user_can_read_notebook(active_id, member_id) is True
+    for hidden_id in hidden_ids:
+        assert repo.user_can_read_notebook(hidden_id, member_id) is False
