@@ -111,7 +111,18 @@ logger = logging.getLogger("silicon_notebook.sqlite.maintenance")
 # row. Historical visible rows can only be attributed best-effort to their
 # notebook owner; hidden synthetic Memory/Knowhow rows remain NULL.
 # v67 adds the global wish wall and its per-user vote relation.
-SCHEMA_VERSION = 67
+# v68 adds unified_kg_state.kg_reset_epoch (batch 3 W1 PR-2, parity with
+# PostgreSQL 0047_kg_reset_epoch.sql): a persistent, monotonically-increasing
+# per-notebook "how many times has this notebook's KG been reset to empty"
+# counter, DEFAULT 0. Written by exactly one caller (delete_notebook_graph_
+# rows), in the SAME transaction that resets kg_mutation_seq back to 0
+# instead of dropping the row. Folded into every affected memo/version key as
+# (kg_reset_epoch, seq) so a delete+reingest can never alias a stale cache
+# entry that was keyed under the pre-delete seq value (design doc
+# docs/superpowers/specs/2026-09-01-batch3-w1-delete-jobization-design_zh.md
+# Sec 3.3). Pure column addition: existing rows default to 0 and their
+# ScaleArtifactRuntime.version() list stays byte-identical (Sec 3.4).
+SCHEMA_VERSION = 68
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -3602,6 +3613,18 @@ class SqliteMigrator:
                 CREATE INDEX IF NOT EXISTS idx_wish_votes_user
                   ON wish_votes(user_id, wish_id);
                 """
+            )
+
+    def _migration_68(self) -> None:
+        """unified_kg_state.kg_reset_epoch — persistent per-notebook KG-reset
+        counter (batch 3 W1 PR-2, parity with PostgreSQL
+        0047_kg_reset_epoch.sql). Additive; pre-existing rows (and the
+        create_notebook birth row, which never resets) default to 0 and stay
+        there until their first delete_notebook_kg. See SCHEMA_VERSION's
+        docstring for the full rationale."""
+        with self._connect() as db:
+            self.add_column_if_missing(
+                db, "unified_kg_state", "kg_reset_epoch", "INTEGER NOT NULL DEFAULT 0"
             )
 
     def _recover_interrupted_jobs(self) -> None:

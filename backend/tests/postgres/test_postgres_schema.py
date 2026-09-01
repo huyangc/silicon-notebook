@@ -30,7 +30,7 @@ def test_schema_on_utf8_database_with_non_c_default_collation(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_non_c_database).migrate() == 46
+    assert PostgresMigrator(postgres_non_c_database).migrate() == 47
     with postgres_non_c_database.connect() as conn:
         row = conn.execute(
             "SELECT current_database() AS database, "
@@ -69,10 +69,10 @@ def test_packaged_migrations_are_idempotent_from_empty_schema(postgres_database)
 
     migrator = PostgresMigrator(postgres_database)
     assert migrator.current_version() == 0
-    assert migrator.migrate() == 46
-    assert migrator.migrate() == 46
-    assert migrator.current_version() == 46
-    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 46
+    assert migrator.migrate() == 47
+    assert migrator.migrate() == 47
+    assert migrator.current_version() == 47
+    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 47
 
 
 @pytest.mark.postgres_integration
@@ -80,7 +80,7 @@ def test_packaged_migration_checksum_drift_is_rejected(postgres_database, tmp_pa
     from app.repositories.postgres.migrator import PostgresMigrator, load_migrations
 
     migrator = PostgresMigrator(postgres_database)
-    assert migrator.migrate() == 46
+    assert migrator.migrate() == 47
 
     copied = tmp_path / "migrations"
     shutil.copytree(MIGRATIONS_PATH, copied)
@@ -163,7 +163,7 @@ def test_pg_trgm_is_shared_outside_disposable_schema_lifetimes(postgres_scope):
             ).fetchone()["nspname"]
         assert remaining == {"indexname": "idx_chunks_text_trgm"}
         assert extension_schema == "public"
-        assert PostgresMigrator(databases[1]).migrate() == 46
+        assert PostgresMigrator(databases[1]).migrate() == 47
     finally:
         for database in databases:
             database.close()
@@ -233,6 +233,7 @@ def test_packaged_index_migration_phases_are_exact():
         (44, "retained_user_activity"),
         (45, "source_upload_actor"),
         (46, "wish_wall"),
+        (47, "kg_reset_epoch"),
     ]
 
     def index_declarations(version: int) -> list[tuple[bool, str]]:
@@ -584,6 +585,21 @@ def test_packaged_index_migration_phases_are_exact():
     assert "CREATE TABLE wishes" in v46_ddl_only
     assert "CREATE TABLE wish_votes" in v46_ddl_only
     assert "PRIMARY KEY (wish_id, user_id)" in v46_ddl_only
+
+    # Migration 47 (batch-3-W1 PR-2) adds unified_kg_state.kg_reset_epoch, a
+    # persistent per-notebook KG-reset counter. Same shape as migration 26's
+    # provenance column: declares NO index on purpose — the three FK/keyset
+    # indexes design doc Sec 1.4 registers land in PR-3, not this migration
+    # (see the PR-2 migration file's own header comment for the boundary).
+    assert index_declarations(47) == []
+    v47_ddl_only = "\n".join(
+        line for line in migrations[47].sql.splitlines()
+        if not line.strip().startswith("--")
+    )
+    assert (
+        "ALTER TABLE unified_kg_state\n  ADD COLUMN kg_reset_epoch bigint "
+        "NOT NULL DEFAULT 0;" in v47_ddl_only
+    )
 
 
 def test_source_index_running_timestamp_maps_to_postgres_null():

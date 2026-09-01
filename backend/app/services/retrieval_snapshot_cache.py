@@ -111,12 +111,21 @@ class RetrievalSnapshotCache:
         # PPR graph (concept_clusters + knowledge_objects + chunks → HippoRAG graph).
         # Like fed_rxgraph, a PPR graph is keyed on the ACTIVE nb but includes base
         # participant(s), so a change/delete in THIS (possibly base) nb must evict
-        # every dependent :ppr_graph, not just this notebook's own. Also guards the
-        # seq-reset case: the graph version key is the (kg/cluster/mention)
-        # mutation-seq triple, which RESETS to (0,0,-1) when delete_notebook_kg
-        # drops the state row and re-climbs from 0 on re-ingest — so a
-        # delete+reingest of a base participant can collide on an identical triple
-        # with different content; evict all, don't rely on the key.
+        # every dependent :ppr_graph, not just this notebook's own. This also used
+        # to be the belt-and-braces for the seq-reset case: the graph version key
+        # is the (kg/cluster/mention, kg_reset_epoch) quadruple (batch-3-W1 PR-2
+        # appended kg_reset_epoch — see graph_seq_row's docstring), which used to
+        # RESET to (0,0,-1) with no fourth element when delete_notebook_kg dropped
+        # the state row and re-climbed from 0 on re-ingest — a delete+reingest of a
+        # base participant could collide on an identical triple with different
+        # content. PR-2 closes that structurally (the epoch element never repeats),
+        # so this loop's role for THAT specific hazard is now redundant; it still
+        # evicts every :ppr_graph entry for the SAME-SECOND-in-place-edit reason
+        # every other key family in this method exists for (an edit whose version
+        # tuple happens not to change within one second's resolution) — kept
+        # unconditional rather than narrowed to "only if key not found", because
+        # that would be the one key family in this method special-cased away from
+        # its own stated purpose.
         for key in [k for k in self.vector_cache.keys() if k.endswith(":ppr_graph")]:
             self.vector_cache.invalidate(key)
         # entity->chunk / element->chunk reverse maps (P0-5) — evict so a same-second

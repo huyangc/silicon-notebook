@@ -1,0 +1,30 @@
+-- Batch 3 · W1 · PR-2: unified_kg_state seq semantics unification (design
+-- doc docs/superpowers/specs/2026-09-01-batch3-w1-delete-jobization-design_zh.md,
+-- Sec 3.3 option C, D-3). Column ONLY -- the three FK/keyset indexes this
+-- design's Sec 1.4 registers for PR-3's delete-jobization work (0047 there,
+-- per the PR boundary in Sec 8) are deliberately NOT part of this migration.
+--
+-- kg_reset_epoch is a persistent, monotonically-increasing "how many times
+-- has this notebook's KG been reset to empty" counter. It is written by
+-- exactly one caller -- delete_notebook_graph_rows -- in the SAME
+-- transaction that resets kg_mutation_seq back to 0 (see
+-- postgres/knowledge_store.py). Before this column existed,
+-- delete_notebook_kg dropped the unified_kg_state row outright, and every
+-- (kg_mutation_seq, cluster_mutation_seq, mention_seq) triple- or
+-- version_signal-keyed process cache aliased across a delete+reingest that
+-- re-climbed to a seq value it had already cached under (kg_analysis.py's
+-- FULL CENSUS "Deliberately NOT moved" entry for delete_notebook_kg,
+-- kg_mutation.py). Folding this column into every affected memo/version key
+-- as (kg_reset_epoch, seq) makes that aliasing structurally impossible --
+-- a notebook's epoch never repeats, so a cache entry keyed under an older
+-- epoch can never again compare equal to a live read.
+--
+-- DEFAULT 0 is deliberate: every pre-existing row (and the create_notebook
+-- birth row, which never resets) starts at epoch 0 and stays there until its
+-- first delete_notebook_kg. Sec 3.4's version()-list rule ("append
+-- ["kg_reset_epoch", N] only when epoch > 0") depends on this default --
+-- an epoch-0 notebook's on-disk manifest.version list is byte-identical to
+-- what it was before this column existed, so no notebook is forced through
+-- a spurious scale-artifact rebuild on rollout.
+ALTER TABLE unified_kg_state
+  ADD COLUMN kg_reset_epoch bigint NOT NULL DEFAULT 0;

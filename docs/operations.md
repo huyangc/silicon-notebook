@@ -930,7 +930,24 @@ published indexing pipeline all have to match the running service:
 # artifact matches the database version, .tmp-<token>/.old leftovers, and who
 # holds the claim right now (probe = non-blocking try + immediate release)
 PYTHONPATH=backend python scripts/build_scale_index.py inspect --notebook nb-xxx
+```
 
+**`version_matches_database: false` right after rolling out batch-3-W1 PR-2
+(unified_kg_state.kg_reset_epoch):** if a notebook's KG has EVER been cleared
+via `delete_notebook_kg` before this rollout (the full re-extract endpoint,
+`POST /api/notebooks/{id}/kg/rebuild`, already reaches it today — see
+[product/API reference's KG extraction trigger section](./product-and-api.md#kg-extraction-trigger)),
+its `kg_reset_epoch` is `>= 1`, so its on-disk manifest's `version`
+list (written before the column existed) is now legitimately a byte
+different from a freshly computed one, and `inspect` reports
+`version_matches_database: false` for it. **This is correct, not
+corruption** — the KG really was reset since that manifest was written, so
+the artifact really is stale. It self-heals after one rebuild/fold and never
+recurs for that notebook (nothing thereafter can make the epoch decrease). A
+notebook that was never cleared is unaffected — its version list is
+byte-identical to before the rollout, so it does not appear as stale.
+
+```bash
 # Full rebuild (default) / delta fold
 PYTHONPATH=backend python scripts/build_scale_index.py build --notebook nb-xxx
 PYTHONPATH=backend python scripts/build_scale_index.py build --notebook nb-xxx --fold

@@ -82,7 +82,9 @@ class KnowledgeStore:
 
     # ------------------------------------------------ lifecycle projections
     @staticmethod
-    def delete_notebook_graph_rows(db: sqlite3.Connection, notebook_id: str) -> dict[str, int]:
+    def delete_notebook_graph_rows(
+        db: sqlite3.Connection, notebook_id: str, now: str
+    ) -> dict[str, int]:
         """Wipe user-document KG while preserving hidden projection lifecycles.
 
         Memory extraction is owned by confirmation/edit, and Knowhow projection
@@ -90,6 +92,11 @@ class KnowledgeStore:
         either source's objects/relations; Memory embeddings, extraction runs,
         and FTS rows are preserved with them. Notebook-wide derived cluster/state
         tables are rebuilt from the surviving plus newly extracted objects.
+
+        ``now`` (batch-3-W1 PR-2) stamps the ``unified_kg_state`` reset's
+        ``updated_at`` — the same caller-supplied-clock seam every other
+        writer of this table already threads through (``mark_dirty`` /
+        ``bump_cluster_seq``).
         """
         counts: dict[str, int] = {}
         cur = db.execute(
@@ -131,7 +138,20 @@ class KnowledgeStore:
         counts["knowledge_relations"] = cur.rowcount
         for table in (
             "concept_clusters", "concept_merge_candidates",
-            "kg_relation_completion_state", "unified_kg_state",
+            "kg_relation_completion_state",
+            # kg_analysis_artifacts: blanket-deleted, same reasoning as the PG
+            # twin's _GRAPH_RESET_TABLES comment (batch-3-W1 PR-2, design doc
+            # Sec 3.2 table #15) — a ledger row's meaning is "built at this
+            # seq", so a cleared graph must drop it rather than reset it.
+            "kg_analysis_artifacts",
+            # kg_community_edges / kg_source_profiles: the DETAIL tables the
+            # ledger's two board-dependent kinds describe. R1 (P2-1, post-
+            # review): must be deleted in the SAME transaction as the ledger
+            # row — discard_board_dependent_kg_analysis_artifacts's own
+            # docstring states the ledger row and its detail rows are one
+            # unit; leaving the detail half behind dangles pointers to a
+            # board partition that no longer has a governing ledger row.
+            "kg_community_edges", "kg_source_profiles",
         ):
             cur = db.execute(f"DELETE FROM {table} WHERE notebook_id = ?", (notebook_id,))
             counts[table] = cur.rowcount
@@ -156,6 +176,37 @@ class KnowledgeStore:
             (notebook_id, notebook_id),
         )
         counts["kg_objects_fts"] = cur.rowcount
+        # unified_kg_state: RESET in place to its birth-row shape, never
+        # deleted — see the PostgreSQL twin's matching UPSERT comment
+        # (design doc batch-3-W1 Sec 3.3 option C, D-3; R1 P0-2) for the
+        # full rationale, including WHY this must be an UPSERT rather than a
+        # bare UPDATE (a merge_dbs.py KG_STATE_TABLES import can leave this
+        # row absent for a notebook that already has real content). kg_reset_
+        # epoch ONLY increases here — this is its one writer in the whole
+        # codebase; the INSERT branch starts it at 1, not 0, for the same
+        # reason the PG twin does. source_index_backfilled /
+        # chunk_elements_indexed / indexing_pipeline_id /
+        # indexing_pipeline_version are deliberately left untouched on the
+        # UPDATE branch and left to their column DEFAULTs on the INSERT
+        # branch (0 / 0 / '' / 'builtin.chunk.v1' — the conservative
+        # "unknown/uncertified" shape, not create_notebook's own
+        # source_index_backfilled=1).
+        cur = db.execute(
+            "INSERT INTO unified_kg_state ("
+            "notebook_id, dirty, kg_mutation_seq, cluster_mutation_seq, "
+            "cluster_input_version, last_rebuild_at, object_count, "
+            "relation_count, cluster_count, community_seq, canonical_rel_seq, "
+            "mention_seq, kg_reset_epoch, updated_at"
+            ") VALUES (?, 0, 0, 0, '', '', 0, 0, 0, -1, -1, -1, 1, ?) "
+            "ON CONFLICT(notebook_id) DO UPDATE SET "
+            "dirty=0, kg_mutation_seq=0, cluster_mutation_seq=0, "
+            "cluster_input_version='', last_rebuild_at='', "
+            "object_count=0, relation_count=0, cluster_count=0, "
+            "community_seq=-1, canonical_rel_seq=-1, mention_seq=-1, "
+            "kg_reset_epoch=kg_reset_epoch+1, updated_at=excluded.updated_at",
+            (notebook_id, now),
+        )
+        counts["unified_kg_state"] = cur.rowcount
         return counts
 
     @staticmethod

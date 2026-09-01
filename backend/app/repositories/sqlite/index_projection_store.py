@@ -96,11 +96,18 @@ class IndexProjectionStore:
         self.vector_matrix = vector_matrix
 
     # ────────────────────────────────────────────────── version snapshots ──
-    def version_signal(self, notebook_id: str) -> "tuple[int, int, tuple]":
-        """Cheap probe: (seq, cseq, settings_tail) — a single unified_kg_state
-        row read, no table aggregates. runtime_dim / mention_seq fold into the
-        settings tail exactly as before (they flow through version_facts'
-        caller into the on-disk manifest.version comparison)."""
+    def version_signal(self, notebook_id: str) -> "tuple[int, int, tuple, int]":
+        """Cheap probe: (seq, cseq, settings_tail, kg_reset_epoch) — a single
+        unified_kg_state row read, no table aggregates. runtime_dim /
+        mention_seq fold into the settings tail exactly as before (they flow
+        through version_facts' caller into the on-disk manifest.version
+        comparison). kg_reset_epoch is a SEPARATE, trailing element — never
+        folded into settings_tail (design doc batch-3-W1 Sec 3.4: that would
+        put it inside the settings_tail component consumers already unpack by
+        position). It MUST stay LAST: three call sites read
+        ``version_signal(nb)[1]`` for cseq (scale_artifact_runtime.py,
+        scale_index_builder.py) and appending anywhere but the end would
+        silently shift what they read."""
         from app.domain.vector_index import resolve_runtime_dim
         settings_tail = (
             self.settings.ppr_variant_edge_weight,
@@ -114,8 +121,8 @@ class IndexProjectionStore:
         with self.connect() as db:
             st = db.execute(
                 "SELECT kg_mutation_seq,cluster_mutation_seq,mention_seq,"
-                "indexing_pipeline_id,indexing_pipeline_version FROM unified_kg_state "
-                "WHERE notebook_id=?",
+                "indexing_pipeline_id,indexing_pipeline_version,kg_reset_epoch "
+                "FROM unified_kg_state WHERE notebook_id=?",
                 (notebook_id,),
             ).fetchone()
             seq = int(st["kg_mutation_seq"]) if st else 0
@@ -126,7 +133,8 @@ class IndexProjectionStore:
                 str(st["indexing_pipeline_version"] or "builtin.chunk.v1")
                 if st else "builtin.chunk.v1"
             )
-        return seq, cseq, settings_tail + (mseq, pipeline_id, pipeline_version)
+            epoch = int(st["kg_reset_epoch"]) if (st and st["kg_reset_epoch"] is not None) else 0
+        return seq, cseq, settings_tail + (mseq, pipeline_id, pipeline_version), epoch
 
     def pipeline_identity(self, notebook_id: str) -> tuple[str, str]:
         with self.connect() as db:

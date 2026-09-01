@@ -169,7 +169,14 @@ class KnowledgeGovernanceService:
         rule_card: Callable[[Any], RuleCard],
         set_conflict_status: Callable[[str, str, str], None],
         memory_store: MemoryStorePort,
-        kg_mutation_seq: Callable[[str], int],
+        # (kg_reset_epoch, kg_mutation_seq) — widened from a bare seq int by
+        # batch-3-W1 PR-2, and renamed from kg_mutation_seq to kg_version
+        # (R1 P3, post-review: the parameter stopped being a bare seq).
+        # review_queue/review_queue_page pass this straight through to
+        # ReviewQueueMemo.top's read_version parameter (see that module's
+        # _Version type comment); set_edge_review's OWN bump instead gets its
+        # pair from mark_unified_kg_dirty_in_tx's return value.
+        kg_version: Callable[[str], "tuple[int, int]"],
         mark_unified_kg_dirty_in_tx: Callable[[Any, str], int],
         review_queue_memo: ReviewQueueMemo,
     ) -> None:
@@ -204,7 +211,7 @@ class KnowledgeGovernanceService:
         self._rule_card = rule_card
         self._set_conflict_status = set_conflict_status
         self.memory_store = memory_store
-        self._kg_mutation_seq_fn = kg_mutation_seq
+        self._kg_version_fn = kg_version
         # R2 P2 fix (codex #638 R2): in-transaction dirty bump + same-tx seq
         # readback, used ONLY by set_edge_review (see its docstring) so the
         # seq bump commits atomically with its own review_status UPDATE
@@ -263,7 +270,7 @@ class KnowledgeGovernanceService:
             items, _total = self._review_queue_memo.top(
                 notebook_id,
                 limit,
-                lambda: self._kg_mutation_seq_fn(notebook_id),
+                lambda: self._kg_version_fn(notebook_id),
                 lambda: self._rank_review_queue(
                     notebook_id, REVIEW_QUEUE_MEMO_ITEMS
                 ),
@@ -299,7 +306,7 @@ class KnowledgeGovernanceService:
             items, total = self._review_queue_memo.top(
                 notebook_id,
                 limit,
-                lambda: self._kg_mutation_seq_fn(notebook_id),
+                lambda: self._kg_version_fn(notebook_id),
                 lambda: self._rank_review_queue(
                     notebook_id, REVIEW_QUEUE_MEMO_ITEMS
                 ),
@@ -516,13 +523,20 @@ class KnowledgeGovernanceService:
             # review_status flips in place (relation COUNT unchanged) — bump
             # the monotonic seq, in THIS SAME transaction, so seq-keyed fast
             # paths (_scale_index_version / _cluster_input_version) don't
-            # serve a stale version for this edit, AND so the seq this call's
-            # memo carry uses is the exact one this UPDATE's own commit
-            # produced — never a later value some other writer's bump
-            # advanced to in between (R2 P2-a) and never orphaned by a bump
-            # that only ran, or only got read back, after this UPDATE was
-            # already irrevocably committed (R2 P2-b).
-            new_seq = self._mark_unified_kg_dirty_in_tx(db, notebook_id)
+            # serve a stale version for this edit, AND so the (seq, epoch)
+            # pair this call's memo carry uses is the exact one this UPDATE's
+            # own commit produced — never a later seq value some other
+            # writer's bump advanced to in between (R2 P2-a) and never
+            # orphaned by a bump that only ran, or only got read back, after
+            # this UPDATE was already irrevocably committed (R2 P2-b).
+            # kg_reset_epoch (batch-3-W1 PR-2) itself is never touched by
+            # this transaction — its only writer is delete_notebook_
+            # graph_rows — so `epoch` here is simply whatever this same
+            # connection observes it to be right now; the point of reading it
+            # on the SAME connection as the seq bump is so ``carry``'s
+            # (epoch, seq) version tags describe one consistent instant, not
+            # so it could itself be advancing.
+            new_seq, epoch = self._mark_unified_kg_dirty_in_tx(db, notebook_id)
         # Everything above is one commit/rollback unit: if the bump (or its
         # same-tx readback) had failed, the UPDATE would have rolled back
         # with it — there is no "DB changed, seq did not" straddle to reach
@@ -539,7 +553,7 @@ class KnowledgeGovernanceService:
             # carry forward together with the one item's status rewritten
             # copy-on-write.
             self._review_queue_memo.carry(
-                notebook_id, new_seq - 1, new_seq, rel_id, status
+                notebook_id, (epoch, new_seq - 1), (epoch, new_seq), rel_id, status
             )
         else:
             # Either side 'rejected' (including rejected->pending, i.e. undoing

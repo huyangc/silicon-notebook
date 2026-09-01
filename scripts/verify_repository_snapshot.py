@@ -3896,5 +3896,38 @@ MIGRATION_MANIFEST[(66, 67)] = {
 }
 
 
+# v68 (batch-3-W1 PR-2): unified_kg_state.kg_reset_epoch -- a persistent,
+# monotonically-increasing per-notebook "how many times has this notebook's
+# KG been reset to empty" counter, DEFAULT 0. Written by exactly one caller
+# (delete_notebook_graph_rows), in the SAME transaction that resets
+# kg_mutation_seq back to 0 instead of dropping the row. Pure column
+# addition -- no new tables/indexes/triggers/views.
+KG_RESET_EPOCH_COLUMNS = {
+    "unified_kg_state": {
+        "kg_reset_epoch": ("kg_reset_epoch", "INTEGER", 1, "0", 0),
+    },
+}
+MIGRATION_MANIFEST = {
+    (key[0], 68, *key[2:]): {
+        **manifest,
+        "columns": {
+            **manifest["columns"],
+            "unified_kg_state": {
+                **manifest["columns"].get("unified_kg_state", {}),
+                **KG_RESET_EPOCH_COLUMNS["unified_kg_state"],
+            },
+        },
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(67, 68)] = {
+    "tables": {},
+    "columns": KG_RESET_EPOCH_COLUMNS,
+    "indexes": {},
+    "triggers": {},
+    "views": {},
+}
+
+
 if __name__ == "__main__":
     raise SystemExit(main())

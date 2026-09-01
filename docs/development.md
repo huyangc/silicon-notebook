@@ -45,8 +45,8 @@ Schema changes remain version-gated behind `SqliteMigrator`: append a new
 Startup recovery, stable seeds, and administrator upgrades run every boot
 outside that version gate.
 
-The current schema version is 67. This is the SQLite schema version. The committed v9 compatibility fixture
-upgrades through migrations v10–v67 and remains readable. Those migrations
+The current schema version is 68. This is the SQLite schema version. The committed v9 compatibility fixture
+upgrades through migrations v10–v68 and remains readable. Those migrations
 cover compatibility and SQLite hot-path indexes (v10–v12), Memory/Agent and
 Memory-derived source links/indexes (v13–v15), knowhow tables and cell code
 (v16/v18), paper metadata (v17), source-linked assets (v19), and multi-domain
@@ -547,7 +547,18 @@ primary key `(wish_id, user_id)` is the database-level one-vote-per-user guard.
 Both adapters expose the same `WishStorePort`, and the shadow manifest includes
 both new business tables. The resulting current shadow contract is 88 business
 tables, 117 replicated unique surfaces, and the unchanged 12-row-slot ancestor
-bound. The current schema pair is SQLite 67 / PostgreSQL 46 / epoch 1.
+bound. The schema pair at that point was SQLite 67 / PostgreSQL 46 / epoch 1.
+
+SQLite v68 / PostgreSQL v47 (batch 3 W1 PR-2, seq-semantics unification) adds
+`unified_kg_state.kg_reset_epoch`, a persistent, monotonically-increasing
+per-notebook counter for "how many times has this notebook's KG been reset to
+empty." Its one writer is `delete_notebook_graph_rows`, which now RESETS the
+row in place — matching a freshly created notebook's birth-row shape on every
+column the KG-analysis "no history" contract reads — instead of dropping it,
+and advances this column in the same transaction. It is DEFAULT 0 and never
+decreases. This adds no table, foreign key, or unique surface, so the current
+pair is SQLite 68 / PostgreSQL 47 / epoch 1 with the same 88 business tables,
+117 replicated unique surfaces, and 12-row-slot closure bound.
 
 Run it only while application/background writers are stopped:
 

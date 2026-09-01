@@ -26,7 +26,11 @@ class _Cursor:
 class _FakeDB:
     """按 SQL 关键字分流到四类计数器:seq 读不计入任何一类;GROUP BY object_type,
     status → type_status_calls;``FROM chunks`` → chunk_calls;其余(pending 相关
-    子查询)→ query_calls(向后兼容既有用例的属性名)。"""
+    子查询)→ query_calls(向后兼容既有用例的属性名)。
+
+    ``epoch``(batch-3-W1 PR-2,design doc Sec 3.2 表 #9):四个 memo 的版本键从裸
+    ``kg_mutation_seq`` 扩为 ``(kg_reset_epoch, kg_mutation_seq)``,``_version_key``
+    的单条 SELECT 同时读两列——默认 0,与「从未 delete 过」的库一致。"""
 
     def __init__(
         self,
@@ -34,8 +38,10 @@ class _FakeDB:
         *,
         type_rows=None,
         chunk_count: int = 42,
+        epoch: int = 0,
     ):
         self.seq = seq
+        self.epoch = epoch
         self.query_calls = 0
         self.pending_sql: list[str] = []
         self.type_status_calls = 0
@@ -49,7 +55,7 @@ class _FakeDB:
 
     def execute(self, sql, params=()):
         if "kg_mutation_seq" in sql:
-            return _Cursor(row={"kg_mutation_seq": self.seq})
+            return _Cursor(row={"kg_mutation_seq": self.seq, "kg_reset_epoch": self.epoch})
         if "GROUP BY object_type, status" in sql:
             self.type_status_calls += 1
             return _Cursor(rows=list(self._type_rows))
@@ -200,6 +206,39 @@ def test_chunk_count_is_seq_gated_memo_independent_from_type_memo():
     # 第一次访问都必须真的冷查一次,互不借对方的命中。
     assert kcc.type_status_counts(db, "nb-c") == {("concept", "approved"): 42}
     assert db.type_status_calls == 1
+
+
+def test_a_kg_reset_epoch_bump_forces_a_recompute_even_at_the_same_raw_seq():
+    """batch-3-W1 PR-2 (design doc Sec 3.2 table #9): a delete_notebook_kg +
+    reingest can legitimately re-climb kg_mutation_seq back to a raw value
+    this memo already cached a DIFFERENT graph's counts under. Before
+    kg_reset_epoch existed, that was a genuine alias (this memo's own module
+    docstring frames it as one of the reasons ``knowledge_lifecycle.
+    delete_notebook_kg`` used to call ``invalidate()`` explicitly). Folding
+    epoch into the version key makes same-seq-different-epoch a guaranteed
+    miss.
+
+    变异锚点:把 ``_version_key`` 改回只读裸 ``kg_mutation_seq``(丢弃
+    ``kg_reset_epoch``),这条必须报红——第二次读会错误地复用第一次的计数。"""
+    kcc.invalidate()
+    db = _FakeDB(seq=5, epoch=0, type_rows=[
+        {"object_type": "concept", "status": "approved", "c": 1},
+    ])
+    assert kcc.type_status_counts(db, "nb-epoch") == {("concept", "approved"): 1}
+    assert db.type_status_calls == 1
+
+    # Simulate delete_notebook_kg + reingest: epoch advances, and the raw
+    # seq happens to re-climb back to the SAME value (5) it was cached
+    # under — a real graph, with a real (different) count.
+    db.epoch = 1
+    db.seq = 5
+    db._type_rows = [{"object_type": "concept", "status": "approved", "c": 99}]
+
+    assert kcc.type_status_counts(db, "nb-epoch") == {("concept", "approved"): 99}, (
+        "same raw seq, different epoch: must MISS the epoch-0 entry and "
+        "report the NEW graph's count, not alias onto the stale one"
+    )
+    assert db.type_status_calls == 2
 
 
 def test_invalidate_none_clears_every_memo():

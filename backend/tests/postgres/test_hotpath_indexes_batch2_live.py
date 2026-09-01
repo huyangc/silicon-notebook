@@ -118,7 +118,7 @@ def test_install_builds_both_new_indexes_and_is_idempotent(postgres_database):
     # Migration 42's own plain (in-transaction) CREATE INDEX IF NOT EXISTS is
     # a true no-op ledger entry once the offline CONCURRENTLY builder already
     # built both indexes online.
-    assert PostgresMigrator(postgres_database).migrate() == 46
+    assert PostgresMigrator(postgres_database).migrate() == 47
     after_migration = inspect_hotpath_indexes(database_url, schema=schema)
     assert after_migration == state
 
@@ -142,7 +142,7 @@ def _seed_notebook_with_source(repository, name: str, source_id: str = "src-a") 
 @pytest.mark.xdist_group(name="postgres_hotpath_indexes_batch2")
 def test_payload_trgm_index_is_usable_for_a_rare_term_ilike(postgres_repository):
     assert (
-        PostgresMigrator(postgres_repository._runtime.database).migrate() == 46
+        PostgresMigrator(postgres_repository._runtime.database).migrate() == 47
     )
     notebook_id = _seed_notebook_with_source(postgres_repository, "payload-trgm")
     runtime = postgres_repository._runtime
@@ -228,7 +228,7 @@ def test_payload_index_stays_notebook_scoped_when_term_lives_in_another_notebook
     到 heap recheck 才按 notebook 丢行(docs/operations.md 已记录的超时教训);
     复合形必须把 notebook 等值带进索引访问,位图从一开始就是空的。"""
     assert (
-        PostgresMigrator(postgres_repository._runtime.database).migrate() == 46
+        PostgresMigrator(postgres_repository._runtime.database).migrate() == 47
     )
     nb_queried = _seed_notebook_with_source(
         postgres_repository, "cross-nb-queried", source_id="src-a"
@@ -316,7 +316,7 @@ def test_nonblank_partial_index_chosen_with_literal_and_not_with_bound_param(
     postgres_repository,
 ):
     assert (
-        PostgresMigrator(postgres_repository._runtime.database).migrate() == 46
+        PostgresMigrator(postgres_repository._runtime.database).migrate() == 47
     )
     notebook_id = _seed_notebook_with_source(postgres_repository, "nonblank-partial")
     runtime = postgres_repository._runtime
@@ -406,7 +406,7 @@ def test_nonblank_partial_index_chosen_with_literal_and_not_with_bound_param(
 @pytest.mark.xdist_group(name="postgres_hotpath_indexes_batch2")
 def test_h5_nonblank_equivalence_across_whitespace_edge_cases(postgres_repository):
     assert (
-        PostgresMigrator(postgres_repository._runtime.database).migrate() == 46
+        PostgresMigrator(postgres_repository._runtime.database).migrate() == 47
     )
     notebook_id = _seed_notebook_with_source(postgres_repository, "h5-equivalence")
     runtime = postgres_repository._runtime
@@ -527,7 +527,7 @@ def test_migration_rejects_a_same_named_wrong_shape_index(postgres_database):
     # 运维按报错指引清掉同名冲突后,迁移正常走完。
     with postgres_database.write() as db:
         db.execute("DROP INDEX idx_knowledge_objects_nb_payload_trgm")
-    assert migrator.migrate() == 46
+    assert migrator.migrate() == 47
 
 
 @pytest.mark.xdist_group(name="postgres_hotpath_indexes_batch2")
@@ -554,7 +554,7 @@ def test_migration_rejects_a_same_named_index_on_the_wrong_table(postgres_databa
     assert migrator.migrate(target_version=41) == 41
     with postgres_database.write() as db:
         db.execute("DROP INDEX idx_source_elements_nonblank")
-    assert migrator.migrate() == 46
+    assert migrator.migrate() == 47
 
 
 @pytest.mark.xdist_group(name="postgres_hotpath_indexes_batch2")
@@ -599,7 +599,7 @@ def test_migration_rejects_an_invalid_same_named_index(postgres_database):
     assert migrator.migrate(target_version=41) == 41
     with postgres_database.write() as db:
         db.execute("DROP INDEX idx_knowledge_objects_nb_payload_trgm")
-    assert migrator.migrate() == 46
+    assert migrator.migrate() == 47
 
 
 @pytest.mark.xdist_group(name="postgres_hotpath_indexes_batch2")
@@ -616,7 +616,7 @@ def test_migration_accepts_a_prebuilt_index_with_reloptions(postgres_database):
             "ALTER INDEX idx_knowledge_objects_nb_payload_trgm "
             "SET (fastupdate = off)"
         )
-    assert migrator.migrate() == 46
+    assert migrator.migrate() == 47
     schema = _schema_of(postgres_database)
     state = inspect_hotpath_indexes(
         postgres_database.settings.database_url, schema=schema

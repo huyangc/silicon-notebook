@@ -251,12 +251,15 @@ POSTGRES_EMPTY_TIME_SENTINELS = frozenset(
 )
 
 
-# The schema-complete PostgreSQL baseline is paired with SQLite v67. A future
+# The schema-complete PostgreSQL baseline is paired with SQLite v68. A future
 # SQLite or PostgreSQL migration must add a reviewed compatibility pairing
 # rather than assuming that independently numbered schemas remain compatible.
 # PostgreSQL v45 / SQLite v66 add visible-source upload attribution; PostgreSQL
-# v46 / SQLite v67 then add the global wish wall and one-vote-per-user relation.
+# v46 / SQLite v67 add the global wish wall and one-vote-per-user relation;
+# PostgreSQL v47 / SQLite v68 (batch 3 W1 PR-2) add
+# unified_kg_state.kg_reset_epoch -- a persistent per-notebook "KG reset"
+# counter, DEFAULT 0, additive only.
 POSTGRES_SCHEMA_MANIFEST = PostgresSchemaManifest(
-    sqlite_version=67,
-    postgres_version=46,
+    sqlite_version=68,
+    postgres_version=47,
 )

@@ -157,6 +157,37 @@ def probe_scale_index_integrity(scale_dir: Any, *, logger: Any = None) -> int:
         return 0
 
 
+def h45_version_key(unified_kg: Any):
+    """Builds ``CheckupService``'s ``kg_version`` seam (R1 P3, post-review:
+    renamed from ``kg_mutation_seq`` — the type stopped being a bare seq
+    when P1-1 landed): ``(db, nb) -> (kg_reset_epoch, kg_mutation_seq)``,
+    the H4/H5 memo's version tag (batch-3-W1 PR-2, design doc Sec 3.2
+    table #11).
+
+    R1 (P1-1, post-review): this used to be duplicated per backend —
+    ``sqlite_repository.py`` had it, ``postgres/repository.py``'s ``checkup``
+    property still wired a bare ``int(graph_seq_row(db, nb)[0])`` seam with
+    no epoch at all, so the PRODUCTION PostgreSQL backend's H4/H5 memo kept
+    aliasing across a delete+reingest silently — the injected-seam unit
+    tests in ``test_checkup_service.py`` never exercise this real wiring
+    lambda, only the ``CheckupService`` class's own logic against a fake
+    seam, so the gap was invisible to them. One shared implementation here,
+    imported by BOTH backend facades' ``checkup`` property, is the fix: it
+    is structurally impossible for one backend to wire the epoch-aware form
+    and the other the bare-seq form ever again. ``unified_kg`` is
+    ``RepositoryRuntime.unified_kg`` (the ``UnifiedKgStorePort``, identical
+    surface on both backends) — one ``graph_seq_row`` read per call, not two
+    (a plain function, not a nested lambda, so the single read is
+    unmistakable at a glance). See ``test_checkup_h45_backend_wiring_parity``
+    (both ``test_checkup_service.py`` and ``backend/tests/postgres/
+    test_checkup_h45_cache.py``) for the guard that would have caught this.
+    """
+    def read(db: Any, notebook_id: str) -> "tuple[int, int]":
+        row = unified_kg.graph_seq_row(db, notebook_id)
+        return int(row[3]), int(row[0])
+    return read
+
+
 class CheckupService:
     """per-notebook 的只读体检聚合器(H2–H8)。
 
@@ -173,10 +204,15 @@ class CheckupService:
     - ``count_missing_chunk_vectors`` / ``count_missing_element_vectors``:H4/H5,resolve 到
       maintenance 的直连 COUNT(判据与「实际可补数」逐字一致)。收到的 exclude 仍是**原样的**
       全局租约快照(排除口径一字不动),收窄只作用在 memo 键上。
-    - ``kg_mutation_seq``:H4/H5 memo 键的版本分量,``(db, notebook_id) -> int`` 的 O(1) 单行读
-      (facade 注入 ``unified_kg.graph_seq_row(db, nb)[0]``;只取 kg_mutation_seq 一项——
-      cluster/mention seq 与 chunk/element 集合无关,折进键只会白失效,同 collection_catalog
-      的键论证)。搭在 run() 已开的读快照连接上,零新增连接。
+    - ``kg_version``(R1 P3,post-review:参数名从 ``kg_mutation_seq`` 改名,类型早已
+      不是裸 seq):H4/H5 memo 键的版本分量,``(db, notebook_id) -> (int, int)`` 的
+      O(1) 单行读,返回 ``(kg_reset_epoch, kg_mutation_seq)``(batch-3-W1 PR-2 从裸 seq int
+      扩为这个二元组,design doc Sec 3.2 表 #11:facade 注入
+      ``(graph_seq_row(db,nb)[3], graph_seq_row(db,nb)[0])``——只取 kg_mutation_seq 与
+      kg_reset_epoch 两项,cluster/mention seq 与 chunk/element 集合无关,折进键只会白失效,
+      同 collection_catalog 的键论证;kg_reset_epoch 折进来是为了在 delete_notebook_kg 重置
+      图之后,H4/H5 不会把清图前缓存的计数当作仍然有效的答案)。搭在 run() 已开的读快照
+      连接上,零新增连接。
     - ``scale_index_state``:H7,返回索引状态的 `state` 字符串('stale' 即过期/维度失配)——昂贵
       (内含 _index_delta 全量 source-id 扫),只在下面的签名变化时才调。
     - ``index_state_signature``:H7 memo 的**廉价**失效键(version_signal + manifest mtime +
@@ -195,7 +231,7 @@ class CheckupService:
         queries: Any,
         count_missing_chunk_vectors: Callable[[str, "set[str]"], int],
         count_missing_element_vectors: Callable[[str, "set[str]"], int],
-        kg_mutation_seq: Callable[[Any, str], int],
+        kg_version: Callable[[Any, str], "tuple[int, int]"],
         scale_index_state: Callable[[str], str],
         index_state_signature: Callable[[str], Any],
         index_manifest_identity: Callable[[str], "tuple[bool, Any]"],
@@ -208,7 +244,7 @@ class CheckupService:
         self._queries = queries
         self._count_missing_chunk_vectors = count_missing_chunk_vectors
         self._count_missing_element_vectors = count_missing_element_vectors
-        self._kg_mutation_seq = kg_mutation_seq
+        self._kg_version = kg_version
         self._scale_index_state = scale_index_state
         self._index_state_signature = index_state_signature
         self._index_manifest_identity = index_manifest_identity
@@ -268,13 +304,13 @@ class CheckupService:
                 if active else set()
             )
             # H4/H5 memo 键的版本分量:O(1) 单行读,搭同一读快照(零新增连接)。在计数
-            # **之前**采样——seq 若在计数期间前进,存下的条目挂着旧 seq,下次必失配重算,
-            # 方向保守(同 knowledge_counts_cache 的先读 seq 后计值)。
-            h45_seq = int(self._kg_mutation_seq(db, notebook_id))
+            # **之前**采样——version 若在计数期间前进,存下的条目挂着旧 version,下次必
+            # 失配重算,方向保守(同 knowledge_counts_cache 的先读 version 后计值)。
+            h45_version = self._kg_version(db, notebook_id)
         # H4/H5 也减活跃租约(codex):正在嵌入的源 chunk/element 已在、向量还没落,是
         # 正常在途而非损坏——不排除会每次嵌入都误报缺向量、甚至触发并发 backfill 重复模型调用。
         h4_count, h5_count = self._h45_missing_vector_counts(
-            notebook_id, active, local_active, h45_seq
+            notebook_id, active, local_active, h45_version
         )
         checks = [
             CheckupItem("H2", len(h2_hits), _sample(h2_hits), "reparse"),
@@ -303,7 +339,8 @@ class CheckupService:
 
         底层复用 ``_h45_missing_vector_counts`` 的既有 memo/事件失效/背底 TTL 机制
         (与 ``run()`` 里 H4/H5 的那份是**同一套缓存、同一个键取法**,不是另起一套):
-        active/local_active/kg_mutation_seq 三个键分量的取法与 ``run()`` 逐字一致,
+        active/local_active/kg_mutation_seq(即 ``(kg_reset_epoch, kg_mutation_seq)``
+        版本二元组,batch-3-W1 PR-2)三个键分量的取法与 ``run()`` 逐字一致,
         故两条路径算出的键永远相等,不会因为「走了不同入口」而各自命中/未命中出两份
         结果——数值同源、语义一致。为了不牵动 ``run()`` 里三条查询共用一个连接的既有
         结构(H2/H3/H6 也搭那个连接),这里为这三个分量单独开一次连接,是刻意的小重复,
@@ -314,8 +351,8 @@ class CheckupService:
                 self._queries.notebook_source_ids_among(db, notebook_id, active)
                 if active else set()
             )
-            h45_seq = int(self._kg_mutation_seq(db, notebook_id))
-        return self._h45_missing_vector_counts(notebook_id, active, local_active, h45_seq)
+            h45_version = self._kg_version(db, notebook_id)
+        return self._h45_missing_vector_counts(notebook_id, active, local_active, h45_version)
 
     # ---------------------------------------------------------------- H4/H5
     def invalidate_missing_vector_counts(self, notebook_id: str) -> None:
@@ -344,10 +381,10 @@ class CheckupService:
         notebook_id: str,
         active: "set[str]",
         local_active: "set[str]",
-        seq: int,
+        version: "tuple[int, int]",
     ) -> "tuple[int, int]":
-        """(缺 chunk 向量数, 缺 element 向量数),按 (**本库**活跃租约快照, kg_mutation_seq)
-        组合键 memo + 显式事件失效 + 背底 TTL。
+        """(缺 chunk 向量数, 缺 element 向量数),按 (**本库**活跃租约快照,
+        (kg_reset_epoch, kg_mutation_seq))组合键 memo + 显式事件失效 + 背底 TTL。
 
         **为什么需要 memo**:这两条都是全表 anti-join(element 侧还要对每行做 TRIM/btrim
         非空判定,PG 上会强制读 TOAST)。看板打开就查一次,用户点「补齐向量」后前端进入
@@ -364,17 +401,21 @@ class CheckupService:
         finally 释放)覆盖之下,两个字典的并集在交接期无空窗——故「在途中」的每次轮询
         键必变、必现算。
 
-        **键分量二:kg_mutation_seq**:它语义上是「任何会让检索/聚类输入失效的变更」的
-        总闸(migrations 注:EVERY KG write 经 _mark_unified_kg_dirty),对本缓存**过宽也
-        过窄**,两个方向都是登记过的取舍:①过宽——KG 抽取/边评审/对象改状态也 bump、
-        与向量计数无关,白失效一次只多付一次冷查,且多发生在源本就持租约(键已在变)的
-        时段;②过窄——element 落库本身不经它,「解析成功、分块在 bump 前抛错」的半途源
-        要等背底 TTL 才见 H5(≤300s,罕见失败路径)。要它的理由:build_chunks 与
-        delete_source(FK 级联)都 bump——「删掉一个没向量的源」不经 embedding 写路径、
-        也不持租约,没有 seq 分量就只剩背底 TTL。只取 kg_mutation_seq、不折 cluster/
-        mention seq(与 chunk/element 集合无关,折进来纯白失效)。⚠ seq 不是严格单调:
-        delete_notebook_kg 掉 state 行会让它归零重爬,理论上可撞回旧值命中陈旧条目——
-        单槽(重爬期间任何一次重算即覆盖)+ 背底 TTL 把它兜在 ≤300s。
+        **键分量二:kg_mutation_seq(现在与 kg_reset_epoch 成对)**:kg_mutation_seq
+        语义上是「任何会让检索/聚类输入失效的变更」的总闸(migrations 注:EVERY KG
+        write 经 _mark_unified_kg_dirty),对本缓存**过宽也过窄**,两个方向都是登记过
+        的取舍:①过宽——KG 抽取/边评审/对象改状态也 bump、与向量计数无关,白失效一次
+        只多付一次冷查,且多发生在源本就持租约(键已在变)的时段;②过窄——element
+        落库本身不经它,「解析成功、分块在 bump 前抛错」的半途源要等背底 TTL 才见 H5
+        (≤300s,罕见失败路径)。要它的理由:build_chunks 与 delete_source(FK 级联)
+        都 bump——「删掉一个没向量的源」不经 embedding 写路径、也不持租约,没有 seq
+        分量就只剩背底 TTL。只取 kg_mutation_seq、不折 cluster/mention seq(与
+        chunk/element 集合无关,折进来纯白失效)。⚠ seq 单独看不是严格单调:
+        delete_notebook_kg 会把它重置为 0(batch-3-W1 PR-2 之前是掉整行重爬,同一种
+        撞值风险),理论上可撞回旧值命中陈旧条目——这正是 kg_reset_epoch 折进键的
+        理由(design doc Sec 3.2 表 #11):它只增、只被 delete_notebook_graph_rows
+        一处推进,(epoch, seq) 这个二元组因此不可能撞车,不再仅靠单槽 + 背底 TTL
+        兜底(那两条防线仍然保留,是纵深防御,不是唯一防线)。
 
         **边界事件失效**:embed 成功不 bump seq(设计如此,rebuild 幂等性依赖 seq 稳定),
         故由写路径在**边界**通知 ``invalidate_missing_vector_counts``——整源嵌入
@@ -392,7 +433,7 @@ class CheckupService:
         **背底 TTL(``_H45_CACHE_TTL``,300s)**:键与事件都只对本进程可见;跨进程写
         (离线 CLI ``run_embed`` / batch ingest)、上面登记的 seq 覆盖不到的边角(半途
         解析、knowhow 投影在 mark_unified_dirty_in_tx 前早退/抛错、knowhow transfer 的重投影
-        调度被吞、seq 归零重爬撞值),以及任何未来漏挂通知的路径,都由 TTL 兜底,计数
+        调度被吞),以及任何未来漏挂通知的路径,都由 TTL 兜底,计数
         至多陈旧 300 秒。交互式「补齐向量」是进程内路径,
         忙碌位解除跟随事件级新鲜的计数,不再多按住一个 TTL——docs/product-and-api*.md
         的口径已同步。
@@ -407,7 +448,7 @@ class CheckupService:
         那条,键转回原值时正好命中它;单槽让中间任何一次重算都把它覆盖掉。
 
         异常不缓存:任一计数抛错就整体上抛(与改动前一致),缓存里不留半份结果。"""
-        key = (frozenset(local_active), int(seq))
+        key = (frozenset(local_active), version)
         now = time.monotonic()
         with self._h45_cache_lock:
             cached = self._h45_cache.get(notebook_id)

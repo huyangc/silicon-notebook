@@ -267,17 +267,19 @@ class ElementCursor:
 class KgObjectCursor:
     """Resume handle for KG object enumeration (see ``ElementCursor``).
 
-    ``scope_seqs`` is the opening ``(notebook_id, kg_mutation_seq)`` vector,
-    which pins the participant list and each participant's graph generation at
-    once — the notebooks already walked past are exactly the ones a
-    position-only cursor could never re-check.
+    ``scope_seqs`` is the opening ``(notebook_id, kg_reset_epoch,
+    kg_mutation_seq)`` vector (P2-2, post-review, batch-3-W1 PR-2 — widened
+    from a bare ``kg_mutation_seq`` int), which pins the participant list and
+    each participant's graph generation at once — the notebooks already
+    walked past are exactly the ones a position-only cursor could never
+    re-check.
     """
 
     object_type: str
     notebook_id: str
     created_at: Any
     object_id: str
-    scope_seqs: Tuple[Tuple[str, int], ...]
+    scope_seqs: Tuple[Tuple[str, int, int], ...]
     returned_before: int
 
 
@@ -1627,18 +1629,28 @@ class CollectionEnumerationService:
 
     def _kg_seqs(
         self, db: object, notebook_ids: Sequence[str]
-    ) -> Tuple[Tuple[str, int], ...]:
-        """The scope's ``kg_mutation_seq`` vector — one O(1) row per
-        participant, and the KG side's answer to "did the scope move?".
+    ) -> Tuple[Tuple[str, int, int], ...]:
+        """The scope's ``(kg_reset_epoch, kg_mutation_seq)`` vector — one O(1)
+        row per participant, and the KG side's answer to "did the scope
+        move?".
 
         A vector rather than a sum: two participants whose seqs move in
         opposite directions must not cancel out, and the participant list
         itself has to be part of the identity.
+
+        R1 (P2-2, post-review, batch-3-W1 PR-2): widened each element from a
+        bare ``kg_mutation_seq`` int to ``(kg_reset_epoch, kg_mutation_seq)``.
+        This vector is compared opening-vs-closing across a paginated
+        enumeration walk (``concurrent_change`` detection); a delete_
+        notebook_kg mid-walk that happens to re-climb kg_mutation_seq back to
+        the opening value before the closing read would otherwise report
+        "scope unchanged" for a participant whose graph really was reset.
         """
-        return tuple(
-            (notebook_id, int(self._unified_kg.graph_seq_row(db, notebook_id)[0]))
-            for notebook_id in notebook_ids
-        )
+        result = []
+        for notebook_id in notebook_ids:
+            row = self._unified_kg.graph_seq_row(db, notebook_id)
+            result.append((notebook_id, int(row[3]), int(row[0])))
+        return tuple(result)
 
     def _kg_total(
         self, db: object, notebook_ids: Sequence[str], object_type: str
@@ -1687,7 +1699,7 @@ def _kg_cursor(
     object_type: str,
     notebook_id: str,
     after: Optional[Tuple[Any, str]],
-    scope_seqs: Tuple[Tuple[str, int], ...],
+    scope_seqs: Tuple[Tuple[str, int, int], ...],
     walk: _Walk,
 ) -> KgObjectCursor:
     return KgObjectCursor(

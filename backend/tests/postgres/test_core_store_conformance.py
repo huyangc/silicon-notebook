@@ -81,7 +81,7 @@ def core_stores(request) -> CoreStores:
     postgres_settings = request.getfixturevalue("postgres_settings")
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 46
+    assert PostgresMigrator(postgres_database).migrate() == 47
     yield CoreStores(
         database=postgres_database,
         identity=PostgresIdentityStore(postgres_database, postgres_settings),
@@ -2167,7 +2167,7 @@ def test_pg_task6_timestamp_inputs_normalize_naive_local_seams(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 46
+    assert PostgresMigrator(postgres_database).migrate() == 47
     local_zone = ZoneInfo("America/Los_Angeles")
     naive_local = datetime(2026, 7, 22, 3, 0, 0)
     expected_utc = naive_local.replace(tzinfo=local_zone).astimezone(timezone.utc)
@@ -2250,7 +2250,7 @@ def test_pg_copy_sentinel_sweep_respects_naive_local_creation_time(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 46
+    assert PostgresMigrator(postgres_database).migrate() == 47
     settings = postgres_settings.model_copy(
         update={"notebook_copy_stale_seconds": 60}
     )
@@ -2320,7 +2320,7 @@ def test_pg_copy_sentinel_sweep_preserves_production_clock_dst_fold(
     from app.repositories.postgres import sharing_store as pg_sharing_store
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 46
+    assert PostgresMigrator(postgres_database).migrate() == 47
     settings = postgres_settings.model_copy(
         update={"notebook_copy_stale_seconds": 120}
     )

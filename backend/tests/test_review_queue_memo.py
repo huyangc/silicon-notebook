@@ -52,8 +52,8 @@ def test_cold_compute_must_read_the_seq_before_the_data():
     memo = ReviewQueueMemo()
     world = {"seq": 1, "computes": 0}
 
-    def read_seq() -> int:
-        return world["seq"]
+    def read_version() -> tuple:
+        return (0, world["seq"])
 
     def compute() -> tuple:
         world["computes"] += 1
@@ -61,12 +61,12 @@ def test_cold_compute_must_read_the_seq_before_the_data():
         world["seq"] += 1
         return _value(f"r-at-seq-{world['seq']}")
 
-    memo.top("nb", 5, read_seq, compute)
+    memo.top("nb", 5, read_version, compute)
     # 标签必须是取数**之前**读到的那个 seq,不是取数之后的。
     assert memo.cached_seq("nb") == 1
     # 行为面判据(与上面的标签断言互为佐证):世界已经走到 seq=2,这条 seq=1 的
     # 条目不得再被端上来。
-    memo.top("nb", 5, read_seq, compute)
+    memo.top("nb", 5, read_version, compute)
     assert world["computes"] == 2
 
 
@@ -80,8 +80,8 @@ def test_same_seq_is_served_without_recomputing():
         calls["n"] += 1
         return _value("r1", "r2", "r3")
 
-    first, first_total = memo.top("nb", 3, lambda: 9, compute)
-    second, second_total = memo.top("nb", 3, lambda: 9, compute)
+    first, first_total = memo.top("nb", 3, lambda: (0, 9), compute)
+    second, second_total = memo.top("nb", 3, lambda: (0, 9), compute)
     assert calls["n"] == 1
     assert first == second
     assert first_total == second_total == 3
@@ -95,8 +95,8 @@ def test_a_new_seq_recomputes():
         calls["n"] += 1
         return _value(f"r{calls['n']}")
 
-    memo.top("nb", 3, lambda: 9, compute)
-    memo.top("nb", 3, lambda: 10, compute)
+    memo.top("nb", 3, lambda: (0, 9), compute)
+    memo.top("nb", 3, lambda: (0, 10), compute)
     assert calls["n"] == 2
     assert memo.cached_seq("nb") == 10
 
@@ -106,11 +106,11 @@ def test_limit_slices_the_cached_ranking_but_not_the_total():
     切片深度读到的都是同一个数。"""
     memo = ReviewQueueMemo()
     ranking = _items("r1", "r2", "r3", "r4")
-    memo.top("nb", 4, lambda: 1, lambda: (ranking, 4))
-    items, total = memo.top("nb", 2, lambda: 1, lambda: (None, None))
+    memo.top("nb", 4, lambda: (0, 1), lambda: (ranking, 4))
+    items, total = memo.top("nb", 2, lambda: (0, 1), lambda: (None, None))
     assert [i["rel_id"] for i in items] == ["r1", "r2"]
     assert total == 4
-    items0, total0 = memo.top("nb", 0, lambda: 1, lambda: (None, None))
+    items0, total0 = memo.top("nb", 0, lambda: (0, 1), lambda: (None, None))
     assert items0 == []
     assert total0 == 4
 
@@ -119,14 +119,14 @@ def test_returned_items_are_detached_from_the_memo():
     """返回值不与 memo 共享任何可变对象:调用方(乃至 API 序列化层)怎么改都
     碰不到缓存里的那份。"""
     memo = ReviewQueueMemo()
-    memo.top("nb", 5, lambda: 1, lambda: _value("r1", "r2"))
+    memo.top("nb", 5, lambda: (0, 1), lambda: _value("r1", "r2"))
 
-    handed_out, _total = memo.top("nb", 5, lambda: 1, lambda: (None, None))
+    handed_out, _total = memo.top("nb", 5, lambda: (0, 1), lambda: (None, None))
     handed_out[0]["review_status"] = "MUTATED"
     handed_out.append({"rel_id": "injected"})
     del handed_out[0]
 
-    fresh, fresh_total = memo.top("nb", 5, lambda: 1, lambda: (None, None))
+    fresh, fresh_total = memo.top("nb", 5, lambda: (0, 1), lambda: (None, None))
     assert [i["rel_id"] for i in fresh] == ["r1", "r2"]
     assert {i["review_status"] for i in fresh} == {"pending"}
     assert fresh_total == 2
@@ -134,9 +134,9 @@ def test_returned_items_are_detached_from_the_memo():
 
 def test_two_readers_do_not_share_the_returned_objects():
     memo = ReviewQueueMemo()
-    memo.top("nb", 5, lambda: 1, lambda: _value("r1"))
-    a, _ = memo.top("nb", 5, lambda: 1, lambda: (None, None))
-    b, _ = memo.top("nb", 5, lambda: 1, lambda: (None, None))
+    memo.top("nb", 5, lambda: (0, 1), lambda: _value("r1"))
+    a, _ = memo.top("nb", 5, lambda: (0, 1), lambda: (None, None))
+    b, _ = memo.top("nb", 5, lambda: (0, 1), lambda: (None, None))
     assert a == b
     assert a is not b
     assert a[0] is not b[0]
@@ -157,8 +157,8 @@ def test_total_is_not_recomputed_on_a_memo_hit():
         world["total_calls"] += 1
         return _items("r1", "r2"), 100 + world["total_calls"]
 
-    _items1, total1 = memo.top("nb", 5, lambda: 1, compute)
-    _items2, total2 = memo.top("nb", 5, lambda: 1, compute)
+    _items1, total1 = memo.top("nb", 5, lambda: (0, 1), compute)
+    _items2, total2 = memo.top("nb", 5, lambda: (0, 1), compute)
 
     assert world["total_calls"] == 1, "命中不得触发第二次冷算"
     assert total1 == total2 == 101, (
@@ -171,9 +171,9 @@ def test_total_survives_a_limit_bypassing_read_at_the_same_seq():
     """同一个 seq 下,不同 ``limit`` 的多次读必须看到同一个 ``total``(它不随
     ``limit`` 变化,是队列的真实总量)。"""
     memo = ReviewQueueMemo()
-    memo.top("nb", 5, lambda: 1, lambda: _value("r1", "r2", "r3", total=30))
-    _, total_a = memo.top("nb", 1, lambda: 1, lambda: (None, None))
-    _, total_b = memo.top("nb", 0, lambda: 1, lambda: (None, None))
+    memo.top("nb", 5, lambda: (0, 1), lambda: _value("r1", "r2", "r3", total=30))
+    _, total_a = memo.top("nb", 1, lambda: (0, 1), lambda: (None, None))
+    _, total_b = memo.top("nb", 0, lambda: (0, 1), lambda: (None, None))
     assert total_a == total_b == 30
 
 
@@ -181,12 +181,12 @@ def test_total_survives_a_limit_bypassing_read_at_the_same_seq():
 
 def test_carry_retags_and_rewrites_only_that_relation():
     memo = ReviewQueueMemo()
-    before, before_total = memo.top("nb", 5, lambda: 7, lambda: _value("r1", "r2", "r3"))
+    before, before_total = memo.top("nb", 5, lambda: (0, 7), lambda: _value("r1", "r2", "r3"))
 
-    memo.carry("nb", 7, 8, "r2", "verified")
+    memo.carry("nb", (0, 7), (0, 8), "r2", "verified")
 
     assert memo.cached_seq("nb") == 8
-    after, after_total = memo.top("nb", 5, lambda: 8, lambda: (None, None))
+    after, after_total = memo.top("nb", 5, lambda: (0, 8), lambda: (None, None))
     assert [i["rel_id"] for i in after] == [i["rel_id"] for i in before]
     assert [i["review_status"] for i in after] == [
         "pending", "verified", "pending",
@@ -203,14 +203,14 @@ def test_carry_preserves_total_across_a_status_flip():
     所以 ``carry`` 必须原样保留 ``total``,只挪标签——绝不重算。变异锚点:如果
     ``carry`` 被改成「顺带 total-=0 之外的任何调整」或掉了 total 字段,本条报红。"""
     memo = ReviewQueueMemo()
-    _items0, total0 = memo.top("nb", 5, lambda: 7, lambda: _value("r1", "r2", total=42))
+    _items0, total0 = memo.top("nb", 5, lambda: (0, 7), lambda: _value("r1", "r2", total=42))
     assert total0 == 42
 
-    memo.carry("nb", 7, 8, "r1", "verified")
+    memo.carry("nb", (0, 7), (0, 8), "r1", "verified")
 
     # compute 若被调用会吐出一个明显不同的 total(999),用来证明这次读没有冷算。
     after_items, after_total = memo.top(
-        "nb", 5, lambda: 8, lambda: (_items("should-not-be-used"), 999)
+        "nb", 5, lambda: (0, 8), lambda: (_items("should-not-be-used"), 999)
     )
     assert after_total == 42
     assert [i["review_status"] for i in after_items] == ["verified", "pending"]
@@ -221,12 +221,12 @@ def test_carry_retags_even_when_the_relation_is_not_in_the_top_m():
     priority 不含 ``review_status``,所以这次迁移对榜单毫无影响——丢掉条目只会
     白付一次冷算。"""
     memo = ReviewQueueMemo()
-    memo.top("nb", 5, lambda: 7, lambda: _value("r1", "r2"))
+    memo.top("nb", 5, lambda: (0, 7), lambda: _value("r1", "r2"))
 
-    memo.carry("nb", 7, 8, "not-on-the-board", "verified")
+    memo.carry("nb", (0, 7), (0, 8), "not-on-the-board", "verified")
 
     assert memo.cached_seq("nb") == 8
-    after, after_total = memo.top("nb", 5, lambda: 8, lambda: (None, None))
+    after, after_total = memo.top("nb", 5, lambda: (0, 8), lambda: (None, None))
     assert [i["rel_id"] for i in after] == ["r1", "r2"]
     assert {i["review_status"] for i in after} == {"pending"}
     assert after_total == 2
@@ -235,16 +235,16 @@ def test_carry_retags_even_when_the_relation_is_not_in_the_top_m():
 def test_carry_drops_the_entry_when_the_seq_does_not_match():
     """别的写者插了队(或这本从来没暖过这个版本):整条丢弃,不猜。"""
     memo = ReviewQueueMemo()
-    memo.top("nb", 5, lambda: 7, lambda: _value("r1"))
+    memo.top("nb", 5, lambda: (0, 7), lambda: _value("r1"))
 
-    memo.carry("nb", 5, 9, "r1", "verified")   # expected 5 ≠ cached 7
+    memo.carry("nb", (0, 5), (0, 9), "r1", "verified")   # expected 5 ≠ cached 7
 
     assert memo.cached_seq("nb") is None
 
 
 def test_carry_on_a_cold_notebook_is_a_no_op():
     memo = ReviewQueueMemo()
-    memo.carry("nb", 1, 2, "r1", "verified")
+    memo.carry("nb", (0, 1), (0, 2), "r1", "verified")
     assert memo.cached_seq("nb") is None
 
 
@@ -256,12 +256,12 @@ def test_carry_does_not_mutate_a_list_already_handed_out():
     进 ``_store`` 内部:carry 前后分别记下 items list 与被改那条 item 的
     ``id()``,两者都必须换成新对象,旧对象的内容也不能被那次 carry 动过。"""
     memo = ReviewQueueMemo()
-    memo.top("nb", 5, lambda: 7, lambda: _value("r1", "r2"))
+    memo.top("nb", 5, lambda: (0, 7), lambda: _value("r1", "r2"))
 
     before_list = memo._store["nb"][1]
     before_item = next(item for item in before_list if item["rel_id"] == "r1")
 
-    memo.carry("nb", 7, 8, "r1", "verified")
+    memo.carry("nb", (0, 7), (0, 8), "r1", "verified")
 
     after_list = memo._store["nb"][1]
     after_item = next(item for item in after_list if item["rel_id"] == "r1")
@@ -300,7 +300,7 @@ def test_concurrent_cold_misses_run_one_compute():
         return _value("r1")
 
     def reader() -> tuple:
-        return memo.top("nb", 5, lambda: 4, compute)
+        return memo.top("nb", 5, lambda: (0, 4), compute)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
         leader_future = pool.submit(reader)
@@ -335,7 +335,7 @@ def test_a_failed_cold_compute_propagates_to_the_waiter_without_a_serial_retry()
         raise RuntimeError("cold ranking failed")
 
     def call() -> tuple:
-        return memo.top("nb", 5, lambda: 3, compute)
+        return memo.top("nb", 5, lambda: (0, 3), compute)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
         leader_future = pool.submit(call)
@@ -369,7 +369,7 @@ def test_all_concurrent_followers_inherit_the_leaders_error_without_serial_recom
         raise RuntimeError("cold ranking failed")
 
     def call() -> tuple:
-        return memo.top("nb", 5, lambda: 9, compute)
+        return memo.top("nb", 5, lambda: (0, 9), compute)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
         leader_future = pool.submit(call)
@@ -389,7 +389,7 @@ def test_all_concurrent_followers_inherit_the_leaders_error_without_serial_recom
 
     # 失败后新请求仍从头当 leader(不做负缓存):同一个 seq,一个全新的、
     # 会成功的 compute 必须真的被调用并生效,不被上一次的失败钉死。
-    fresh, fresh_total = memo.top("nb", 5, lambda: 9, lambda: _value("recovered"))
+    fresh, fresh_total = memo.top("nb", 5, lambda: (0, 9), lambda: _value("recovered"))
     assert (fresh, fresh_total) == (_items("recovered"), 1)
     assert calls["n"] == 1, "the fresh call must run its OWN compute, not the failing one"
 
@@ -412,11 +412,11 @@ def test_a_blocked_cold_compute_for_one_notebook_does_not_block_another():
 
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=2)
     try:
-        blocked_future = pool.submit(memo.top, "nb-A", 5, lambda: 1, blocked_compute)
+        blocked_future = pool.submit(memo.top, "nb-A", 5, lambda: (0, 1), blocked_compute)
         assert entered.wait(10)
 
         other_future = pool.submit(
-            memo.top, "nb-B", 5, lambda: 1, lambda: _value("b1")
+            memo.top, "nb-B", 5, lambda: (0, 1), lambda: _value("b1")
         )
         # nb-B 不需要等 nb-A 的 compute() 结束——给一个远小于 10s 门的短超时。
         other = other_future.result(timeout=1)
@@ -442,11 +442,11 @@ def test_writeback_from_a_slow_stale_leader_does_not_downgrade_a_fresher_entry()
         return _value("stale")
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        slow_future = pool.submit(memo.top, "nb", 5, lambda: 1, slow_compute)
+        slow_future = pool.submit(memo.top, "nb", 5, lambda: (0, 1), slow_compute)
         assert entered.wait(10)
 
         # 一个更新的 seq 在慢 leader 仍卡在 compute() 里的时候完成并写回。
-        fresh, fresh_total = memo.top("nb", 5, lambda: 2, lambda: _value("fresh"))
+        fresh, fresh_total = memo.top("nb", 5, lambda: (0, 2), lambda: _value("fresh"))
         assert (fresh, fresh_total) == (_items("fresh"), 1)
 
         release.set()
@@ -456,7 +456,7 @@ def test_writeback_from_a_slow_stale_leader_does_not_downgrade_a_fresher_entry()
     # store,不改变 leader 对自己调用者的承诺。
     assert stale_result == (_items("stale"), 1)
     assert memo.cached_seq("nb") == 2
-    after, after_total = memo.top("nb", 5, lambda: 2, lambda: (None, None))
+    after, after_total = memo.top("nb", 5, lambda: (0, 2), lambda: (None, None))
     assert [item["rel_id"] for item in after] == ["fresh"]
     assert after_total == 1
 
@@ -473,7 +473,7 @@ def test_invalidate_during_a_cold_compute_rejects_the_writeback():
         assert release.wait(10)
         return _value("r1")
 
-    reader = threading.Thread(target=lambda: memo.top("nb", 5, lambda: 2, compute))
+    reader = threading.Thread(target=lambda: memo.top("nb", 5, lambda: (0, 2), compute))
     reader.start()
     assert entered.wait(10)
     memo.invalidate("nb")
@@ -499,7 +499,7 @@ def test_evicting_the_epoch_table_fails_closed():
         assert release.wait(10)
         return _value("r1")
 
-    reader = threading.Thread(target=lambda: memo.top("nb", 5, lambda: 2, compute))
+    reader = threading.Thread(target=lambda: memo.top("nb", 5, lambda: (0, 2), compute))
     reader.start()
     assert entered.wait(10)
     memo.invalidate("nb")                 # nb 的代次前进
@@ -513,8 +513,8 @@ def test_evicting_the_epoch_table_fails_closed():
 
 def test_invalidate_all_clears_every_notebook():
     memo = ReviewQueueMemo()
-    memo.top("nb-a", 5, lambda: 1, lambda: _value("r1"))
-    memo.top("nb-b", 5, lambda: 1, lambda: _value("r2"))
+    memo.top("nb-a", 5, lambda: (0, 1), lambda: _value("r1"))
+    memo.top("nb-b", 5, lambda: (0, 1), lambda: _value("r2"))
     memo.invalidate()
     assert memo.cached_seq("nb-a") is None
     assert memo.cached_seq("nb-b") is None
@@ -522,8 +522,8 @@ def test_invalidate_all_clears_every_notebook():
 
 def test_per_notebook_invalidate_does_not_touch_a_sibling():
     memo = ReviewQueueMemo()
-    memo.top("nb-a", 5, lambda: 1, lambda: _value("r1"))
-    memo.top("nb-b", 5, lambda: 1, lambda: _value("r2"))
+    memo.top("nb-a", 5, lambda: (0, 1), lambda: _value("r1"))
+    memo.top("nb-b", 5, lambda: (0, 1), lambda: _value("r2"))
     memo.invalidate("nb-a")
     assert memo.cached_seq("nb-a") is None
     assert memo.cached_seq("nb-b") == 1
@@ -532,12 +532,55 @@ def test_per_notebook_invalidate_does_not_touch_a_sibling():
 def test_the_store_is_bounded():
     memo = ReviewQueueMemo(max_notebooks=2)
     for index in range(5):
-        memo.top(f"nb-{index}", 5, lambda: 1, lambda: _value("r1"))
+        memo.top(f"nb-{index}", 5, lambda: (0, 1), lambda: _value("r1"))
     resident = [
         f"nb-{index}" for index in range(5)
         if memo.cached_seq(f"nb-{index}") is not None
     ]
     assert resident == ["nb-3", "nb-4"]
+
+
+# ── kg_reset_epoch(batch-3-W1 PR-2)─────────────────────────────────────
+
+def test_alias_is_impossible_across_a_kg_reset_epoch_bump():
+    """delete_notebook_kg (design doc Sec 3.3 option C) resets
+    kg_mutation_seq back to 0, in the SAME transaction that advances the
+    persistent kg_reset_epoch column by 1. A delete + reingest can
+    legitimately re-climb kg_mutation_seq back to a raw value this memo
+    already cached a DIFFERENT (pre-delete) graph's ranking under — this
+    test simulates exactly that collision: two ``top()`` calls tagged with
+    the SAME seq (5) but different epoch (0 then 1).
+
+    变异锚点:把 version 元组的 epoch 分量丢掉(或让它在 reset 前后保持不变)
+    会让第二次调用命中第一次的缓存条目——本条会观察到 ``second`` 端出 r1/r2
+    (第一张图的排名),而不是 r3(第二张图真正的排名),从而报红。
+    """
+    memo = ReviewQueueMemo()
+    first, _first_total = memo.top("nb", 5, lambda: (0, 5), lambda: _value("r1", "r2"))
+    assert [i["rel_id"] for i in first] == ["r1", "r2"]
+    assert memo.cached_version("nb") == (0, 5)
+
+    # Same raw seq (5), but the epoch that a real delete_notebook_kg +
+    # reingest would have advanced to (1) — the version tag as a WHOLE must
+    # differ, or this second call would be served the FIRST graph's stale
+    # ranking.
+    second, _second_total = memo.top("nb", 5, lambda: (1, 5), lambda: _value("r3"))
+
+    assert [i["rel_id"] for i in second] == ["r3"], (
+        "a (epoch=1, seq=5) query must MISS the (epoch=0, seq=5) entry — "
+        "serving r1/r2 here would mean the post-delete/reingest graph's "
+        "query saw the pre-delete graph's stale ranking"
+    )
+    assert memo.cached_version("nb") == (1, 5)
+
+
+def test_cached_version_exposes_the_full_epoch_seq_tag():
+    memo = ReviewQueueMemo()
+    assert memo.cached_version("nb") is None
+    memo.top("nb", 5, lambda: (2, 7), lambda: _value("r1"))
+    assert memo.cached_version("nb") == (2, 7)
+    # cached_seq stays the bare kg_mutation_seq half for existing callers.
+    assert memo.cached_seq("nb") == 7
 
 
 # ── 切片等价性 ────────────────────────────────────────────────────────────

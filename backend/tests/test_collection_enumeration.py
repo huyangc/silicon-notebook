@@ -1515,6 +1515,75 @@ def test_kg_mutation_between_pages_is_not_complete(repo, monkeypatch):
     assert result.coverage.truncated_reason == TRUNCATED_CONCURRENT_CHANGE
 
 
+def test_kg_reset_epoch_bump_midwalk_that_realiases_raw_seq_is_not_complete(
+    repo, monkeypatch
+):
+    """R1 (P2-2, post-review, batch-3-W1 PR-2): ``_kg_seqs`` widened each
+    element from a bare ``kg_mutation_seq`` int to ``(kg_reset_epoch,
+    kg_mutation_seq)`` — this is the exact scenario that motivated it.
+    ``delete_notebook_kg`` resets ``kg_mutation_seq`` to 0 in place (design
+    doc Sec 3 Option C); a reingest right after can climb the raw counter
+    back up to the value it held at the walk's OPENING read. If the scope
+    vector were still a bare seq, the closing comparison would see "no
+    change" and report the walk complete, even though the graph really was
+    reset mid-walk. Only ``kg_reset_epoch`` still tells the two states apart.
+
+    Isolated from ``delete_notebook_kg``'s broader content changes (same
+    isolation technique as
+    ``test_epoch_bump_rejects_the_stale_on_disk_partition_and_reopens_via_
+    rebuild`` in ``test_source_partitioned_ppr.py``): this bumps
+    ``kg_reset_epoch`` and re-aliases ``kg_mutation_seq`` directly via SQL,
+    WITHOUT touching ``knowledge_objects``, so epoch is the only variable
+    that can make the walk report itself unstable — a version of this test
+    that instead called the real ``delete_notebook_kg`` (which also empties
+    ``knowledge_objects``) would still fail on a reverted bare-seq mutation
+    for an unrelated reason (fewer objects than ``total``), silently proving
+    nothing about this memo key specifically.
+
+    变异锚点:把 ``_kg_seqs`` 的
+    ``result.append((notebook_id, int(row[3]), int(row[0])))``
+    改回 ``result.append((notebook_id, int(row[0])))``(P2-2 之前的裸 seq 形态),
+    本条必须报红——重置 + realiased 重抽会被误判为 scope 稳定,报 complete
+    而不是 concurrent_change。
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    for index in range(4):
+        _add_kg_object(repo, notebook.id, f"o{index}", "concept")
+    _bump_kg_seq(repo, notebook.id)
+
+    with repo._connect() as db:
+        raw_seq_at_open = int(
+            repo._runtime.unified_kg.graph_seq_row(db, notebook.id)[0]
+        )
+
+    store = repo._runtime.knowledge
+    original = store.knowledge_object_page_rows
+    state = {"pages": 0}
+
+    def hook(db, notebook_id, object_type, after, limit):
+        rows = original(db, notebook_id, object_type, after, limit)
+        state["pages"] += 1
+        if state["pages"] == 1:
+            # Simulate delete_notebook_kg's sole epoch write (kg_reset_epoch
+            # += 1) and the subsequent reingest climbing kg_mutation_seq back
+            # to the walk's opening value, in one isolated write.
+            with repo._write() as write_db:
+                write_db.execute(
+                    "UPDATE unified_kg_state SET "
+                    "kg_reset_epoch = kg_reset_epoch + 1, kg_mutation_seq=? "
+                    "WHERE notebook_id=?",
+                    (raw_seq_at_open, notebook_id),
+                )
+        return rows
+
+    monkeypatch.setattr(store, "knowledge_object_page_rows", hook)
+    result = _enum(repo).enumerate_kg_objects(
+        notebook.id, "concept", budget=_budget(page_size=2)
+    )
+    assert result.coverage.complete is False
+    assert result.coverage.truncated_reason == TRUNCATED_CONCURRENT_CHANGE
+
+
 def test_kg_total_is_omitted_when_the_map_cannot_answer(repo, monkeypatch):
     """total 的两种形态。KG 侧的计数只是分母(翻页来自 keyset),取不到时
     降级成 total=None 并照常返回诚实清单——不是静默:coverage 里看得见。"""

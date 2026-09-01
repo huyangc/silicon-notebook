@@ -136,8 +136,9 @@ def test_expected_snapshot_has_rows_reads_context_and_ask_metadata():
     # 以及 v64 热路径修复批 3 的概念簇 keyset 覆盖索引
     # idx_clusters_nb_canonical_member，以及 v65 删除笔记本后独立留存的最小
     # 用户活动摘要表 retained_user_activity，以及 v66 可见来源真实上传者
-    # sources.uploaded_by，以及 v67 全局许愿墙与点赞表，合法升级到当前版本。
-    assert snapshot["schema"]["user_version"] == 67
+    # sources.uploaded_by，以及 v67 全局许愿墙与点赞表，以及 v68（批 3·W1
+    # PR-2）unified_kg_state.kg_reset_epoch 持久化清图代次列，合法升级到当前版本。
+    assert snapshot["schema"]["user_version"] == 68
     assert snapshot["rows"]["notebooks"]
     assert snapshot["reads"]["notebook"]
     assert snapshot["context"]["source_files"]
