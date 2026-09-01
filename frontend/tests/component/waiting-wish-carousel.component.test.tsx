@@ -13,6 +13,7 @@ vi.mock("../../app/wish-wall-api.ts", () => ({
 }));
 
 import {
+  WAITING_WISH_KIND_LIMIT,
   WAITING_WISH_ROTATION_MS,
   WaitingWishCarousel,
 } from "../../app/waiting-wish-carousel";
@@ -59,8 +60,16 @@ test("等待轮播分别读取可投票类型并按优先级展示", async () =>
 
   expect(await screen.findByText(feature.title)).toBeInTheDocument();
   expect(mocks.listWishes).toHaveBeenCalledTimes(2);
-  expect(mocks.listWishes).toHaveBeenCalledWith({ kind: "bug", sort: "priority" });
-  expect(mocks.listWishes).toHaveBeenCalledWith({ kind: "feature", sort: "priority" });
+  expect(mocks.listWishes).toHaveBeenCalledWith({
+    kind: "bug",
+    sort: "priority",
+    limit: WAITING_WISH_KIND_LIMIT,
+  });
+  expect(mocks.listWishes).toHaveBeenCalledWith({
+    kind: "feature",
+    sort: "priority",
+    limit: WAITING_WISH_KIND_LIMIT,
+  });
   expect(screen.getByRole("link", { name: "查看完整说明" })).toHaveAttribute("href", "/wishes");
   expect(screen.queryByText(feature.content)).not.toBeInTheDocument();
 });
