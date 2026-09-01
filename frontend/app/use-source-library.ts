@@ -99,6 +99,7 @@ export function useSourceLibrary({
   const [sourcesTotal, setSourcesTotal] = useState(0);
   const [notebookSourceTotal, setNotebookSourceTotal] = useState(0);
   const [sourcesPage, setSourcesPage] = useState(0);
+  const [sourcesPageLoading, setSourcesPageLoading] = useState(false);
   const [sourcesCollapsed, setSourcesCollapsedState] = useState(false);
   const [sourceQuery, setSourceQueryState] = useState("");
   const [sourceDetail, setSourceDetail] = useState<SourceSummary | null>(null);
@@ -123,6 +124,12 @@ export function useSourceLibrary({
   const sourcesPageRef = useRef(sourcesPage);
   const sourceQueryRef = useRef(sourceQuery);
   const pageRequestRef = useRef(0);
+  // Holds the AbortController for whichever `listSources` call is currently
+  // in flight, so a superseding request (or an owner/actor transition that
+  // abandons the request outright) can cancel the network call for real —
+  // `pageRequestRef` alone only ever discarded the stale *response*, it never
+  // stopped the request from running to completion server-side.
+  const pageAbortRef = useRef<AbortController | null>(null);
   const detailRequestRef = useRef(0);
   const deletingIdsRef = useRef<Set<string>>(new Set());
   const deletingIdsByOwnerRef = useRef<Map<string, Set<string>>>(new Map());
@@ -133,6 +140,16 @@ export function useSourceLibrary({
   const pendingActorIdRef = useRef<string | null>(null);
   const inactiveScopeSelectionRef = useRef(defaultSourceScopeSelection());
   const inactiveDeletingIdsRef = useRef(new Set<string>());
+
+  // Every site that bumps `pageRequestRef.current` outside of
+  // `loadSourcesPage` itself is abandoning whatever source-list request is
+  // currently in flight for the owner being replaced — call this alongside
+  // each one so that abandonment is a real network cancellation, not just a
+  // response that gets silently discarded on arrival.
+  function abortInFlightSourcesPage() {
+    pageAbortRef.current?.abort();
+    pageAbortRef.current = null;
+  }
 
   // Actor changes are an authority boundary, not a later cleanup concern. Invalidate
   // the owner synchronously during render so a continuation that resolves before the
@@ -148,6 +165,7 @@ export function useSourceLibrary({
       actorIdRef.current = actorId;
       generationRef.current += 1;
       ownerRef.current = null;
+      abortInFlightSourcesPage();
       pageRequestRef.current += 1;
       detailRequestRef.current += 1;
     }
@@ -186,12 +204,14 @@ export function useSourceLibrary({
     setSourceElementsLoading(false);
     setHighlightedElementId("");
     setReparsingSource(false);
+    setSourcesPageLoading(false);
     pollCountRef.current = 0;
   }
 
   function beginTransition() {
     generationRef.current += 1;
     ownerRef.current = null;
+    abortInFlightSourcesPage();
     pageRequestRef.current += 1;
     detailRequestRef.current += 1;
     setOwnerSerial((value) => value + 1);
@@ -209,6 +229,7 @@ export function useSourceLibrary({
     pendingActorIdRef.current = nextActorId;
     generationRef.current += 1;
     ownerRef.current = null;
+    abortInFlightSourcesPage();
     pageRequestRef.current += 1;
     detailRequestRef.current += 1;
   }
@@ -228,6 +249,7 @@ export function useSourceLibrary({
       generation,
     });
     ownerRef.current = owner;
+    abortInFlightSourcesPage();
     pageRequestRef.current += 1;
     detailRequestRef.current += 1;
     const deleted = deletedIdsRef.current.get(ownerKey(input.actorId, input.notebookId));
@@ -248,6 +270,7 @@ export function useSourceLibrary({
     setSourceElementStartOffset(0);
     setSourceElementsLoading(false);
     setHighlightedElementId("");
+    setSourcesPageLoading(false);
     pollCountRef.current = 0;
     setOwnerSerial((value) => value + 1);
     return owner;
@@ -277,6 +300,12 @@ export function useSourceLibrary({
     const owner = ownerRef.current;
     const notebookId = input.notebookId ?? owner?.notebookId;
     if (!owner || !notebookId || owner.notebookId !== notebookId) return;
+    // Supersede whatever source-list request is still in flight: abort it for
+    // real (the browser stops the network call, instead of just having its
+    // response discarded on arrival) before starting this one.
+    abortInFlightSourcesPage();
+    const controller = new AbortController();
+    pageAbortRef.current = controller;
     const requestId = ++pageRequestRef.current;
     let pageNum = input.page ?? 0;
     const q = input.q ?? sourceQueryRef.current;
@@ -287,6 +316,11 @@ export function useSourceLibrary({
       ownerRef.current?.notebookId ?? null,
       owns(owner) && (!input.guard || input.guard()),
     );
+    // `clampSourcePage` below can trigger a second `listSources` call for the
+    // same logical page load; both calls share one busy window, set once
+    // here and cleared once at every exit path so it never flickers off and
+    // back on between the two requests.
+    setSourcesPageLoading(true);
     let result: PaginatedSources;
     try {
       result = await listSources(
@@ -294,9 +328,25 @@ export function useSourceLibrary({
         pageNum * SOURCES_PAGE_SIZE,
         SOURCES_PAGE_SIZE,
         q,
+        controller.signal,
       );
     } catch (error) {
-      if (isCurrent()) throw error;
+      // Invariant: the only way this request's fetch can reject with an
+      // AbortError is via `pageAbortRef.current?.abort()` — called only from
+      // this same function's next invocation, or from an owner/actor
+      // transition (beginTransition / activateActor / commitNotebookSnapshot
+      // / the render-time actor-change branch). Every one of those sites also
+      // bumps `pageRequestRef.current` (here) or invalidates `ownerRef`
+      // (there) before or as it aborts, so `isCurrent()` is always already
+      // false by the time an abort-triggered rejection reaches here. That
+      // means the `throw` branch below can only ever fire for a genuine
+      // request failure, never for our own cancellation — no separate
+      // AbortError check is needed to keep it from surfacing as an error.
+      if (isCurrent()) {
+        setSourcesPageLoading(false);
+        pageAbortRef.current = null;
+        throw error;
+      }
       return;
     }
     if (!isCurrent()) return;
@@ -309,9 +359,15 @@ export function useSourceLibrary({
           pageNum * SOURCES_PAGE_SIZE,
           SOURCES_PAGE_SIZE,
           q,
+          controller.signal,
         );
       } catch (error) {
-        if (isCurrent()) throw error;
+        // Same invariant as above applies to this second, clamp-triggered call.
+        if (isCurrent()) {
+          setSourcesPageLoading(false);
+          pageAbortRef.current = null;
+          throw error;
+        }
         return;
       }
       if (!isCurrent()) return;
@@ -323,6 +379,8 @@ export function useSourceLibrary({
     setSourcesTotal(visibleTotal);
     if (!q) setNotebookSourceTotal(visibleTotal);
     setSourcesPage(pageNum);
+    setSourcesPageLoading(false);
+    pageAbortRef.current = null;
   }
 
   function setSourceQuery(value: string) {
@@ -685,6 +743,7 @@ export function useSourceLibrary({
     sourcesTotal: ownerIsActive ? sourcesTotal : 0,
     notebookSourceTotal: ownerIsActive ? notebookSourceTotal : 0,
     sourcesPage: ownerIsActive ? sourcesPage : 0,
+    sourcesPageLoading: ownerIsActive ? sourcesPageLoading : false,
     sourcesCollapsed,
     sourceQuery: ownerIsActive ? sourceQuery : "",
     sourceDetail: ownerIsActive ? sourceDetail : null,

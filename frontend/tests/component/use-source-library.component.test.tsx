@@ -329,8 +329,14 @@ test("latest source page wins without an extra list request", async () => {
       page: { items: [], total_count: 100, offset: 0, limit: 50 },
     });
   });
-  const first = value!.loadSourcesPage({ page: 0, q: "older" });
-  const second = value!.loadSourcesPage({ page: 1, q: "newer" });
+  let first!: Promise<void>;
+  act(() => {
+    first = value!.loadSourcesPage({ page: 0, q: "older" });
+  });
+  let second!: Promise<void>;
+  act(() => {
+    second = value!.loadSourcesPage({ page: 1, q: "newer" });
+  });
   newer.resolve({
     items: [source("newer", "notebook-a")],
     total_count: 100,
@@ -349,6 +355,134 @@ test("latest source page wins without an extra list request", async () => {
   expect(api.listSources).toHaveBeenCalledTimes(2);
   expect(value!.sources.map((item) => item.id)).toEqual(["newer"]);
   expect(value!.sourcesPage).toBe(1);
+});
+
+test("loadSourcesPage reports busy while the source-list request is in flight", async () => {
+  const page = deferred<{ items: SourceSummary[]; total_count: number; offset: number; limit: number }>();
+  api.listSources.mockReturnValueOnce(page.promise);
+  render(<Harness />);
+  act(() => {
+    value!.commitNotebookSnapshot({
+      actorId: "user-a",
+      notebookId: "notebook-a",
+      workspaceEpoch: 1,
+      page: { items: [], total_count: 0, offset: 0, limit: 50 },
+    });
+  });
+  expect(value!.sourcesPageLoading).toBe(false);
+
+  let loading!: Promise<void>;
+  act(() => {
+    loading = value!.loadSourcesPage({ page: 0, q: "" });
+  });
+  expect(value!.sourcesPageLoading).toBe(true);
+
+  page.resolve({ items: [], total_count: 0, offset: 0, limit: 50 });
+  await act(async () => loading);
+  expect(value!.sourcesPageLoading).toBe(false);
+});
+
+// A superseding request must cancel the one it replaces for real (an actual
+// AbortController#abort(), not just a discarded response) — see the
+// `pageRequestRef`-only design this hook used to use, where a stale response
+// still made it all the way back from the server. The stale request's
+// eventual AbortError-shaped rejection must also stay invisible to callers:
+// `isCurrent()` is always false for it by construction (superseding always
+// bumps `pageRequestRef.current` before/while aborting), so `loadSourcesPage`
+// takes the silent `return` branch, never the `throw` one, for that request.
+test("a superseding source page request aborts the stale one without surfacing its rejection", async () => {
+  const older = deferred<{ items: SourceSummary[]; total_count: number; offset: number; limit: number }>();
+  const newer = deferred<{ items: SourceSummary[]; total_count: number; offset: number; limit: number }>();
+  api.listSources.mockReturnValueOnce(older.promise).mockReturnValueOnce(newer.promise);
+  render(<Harness />);
+  act(() => {
+    value!.commitNotebookSnapshot({
+      actorId: "user-a",
+      notebookId: "notebook-a",
+      workspaceEpoch: 1,
+      page: { items: [], total_count: 100, offset: 0, limit: 50 },
+    });
+  });
+
+  let first!: Promise<void>;
+  act(() => {
+    first = value!.loadSourcesPage({ page: 0, q: "older" });
+  });
+  const firstSignal = api.listSources.mock.calls[0]?.[4] as AbortSignal;
+  expect(firstSignal).toBeInstanceOf(AbortSignal);
+  expect(firstSignal.aborted).toBe(false);
+
+  let second!: Promise<void>;
+  act(() => {
+    second = value!.loadSourcesPage({ page: 1, q: "newer" });
+  });
+  // The stale request must be cancelled for real, not merely outvoted.
+  expect(firstSignal.aborted).toBe(true);
+  // Busy must not flicker off between the superseded and superseding request.
+  expect(value!.sourcesPageLoading).toBe(true);
+
+  older.reject(new DOMException("aborted", "AbortError"));
+  await act(async () => {
+    await expect(first).resolves.toBeUndefined();
+  });
+  expect(effects.reportError).not.toHaveBeenCalled();
+  // The still in-flight superseding request keeps busy asserted.
+  expect(value!.sourcesPageLoading).toBe(true);
+
+  newer.resolve({
+    items: [source("newer", "notebook-a")],
+    total_count: 100,
+    offset: 50,
+    limit: 50,
+  });
+  await act(async () => second);
+  expect(value!.sourcesPageLoading).toBe(false);
+  expect(value!.sources.map((item) => item.id)).toEqual(["newer"]);
+});
+
+test("a clamp-triggered second request stays within the same busy window", async () => {
+  const requested = deferred<{ items: SourceSummary[]; total_count: number; offset: number; limit: number }>();
+  const clamped = deferred<{ items: SourceSummary[]; total_count: number; offset: number; limit: number }>();
+  api.listSources.mockReturnValueOnce(requested.promise).mockReturnValueOnce(clamped.promise);
+  render(<Harness />);
+  act(() => {
+    value!.commitNotebookSnapshot({
+      actorId: "user-a",
+      notebookId: "notebook-a",
+      workspaceEpoch: 1,
+      page: { items: [], total_count: 300, offset: 0, limit: 50 },
+    });
+  });
+
+  let loading!: Promise<void>;
+  act(() => {
+    // Page 5 is requested while the server still reports 300 rows (last page 5).
+    loading = value!.loadSourcesPage({ page: 5, q: "" });
+  });
+  expect(value!.sourcesPageLoading).toBe(true);
+
+  // The total shrank server-side: page 5 no longer exists, so
+  // `clampSourcePage` re-fetches page 1 (the new last page) within this same
+  // call. Busy must hold steady across that internal re-fetch.
+  act(() => {
+    requested.resolve({ items: [], total_count: 60, offset: 250, limit: 50 });
+  });
+  await act(async () => {
+    await Promise.resolve();
+  });
+  expect(api.listSources).toHaveBeenCalledTimes(2);
+  expect(value!.sourcesPageLoading).toBe(true);
+
+  clamped.resolve({
+    items: [source("clamped", "notebook-a")],
+    total_count: 60,
+    offset: 50,
+    limit: 50,
+  });
+  await act(async () => loading);
+  expect(value!.sourcesPageLoading).toBe(false);
+  expect(value!.sourcesPage).toBe(1);
+  expect(value!.sources.map((item) => item.id)).toEqual(["clamped"]);
 });
 
 // PR #557 regression: `sources`/`sourceElements` used to fall back to a bare
