@@ -4329,6 +4329,13 @@ def test_kg_extracted_batch_query_is_driven_by_page_source_ids(
         assert captured, (
             "sources_from_rows must issue a kg_extracted judgement query "
             "touching knowledge_objects")
+        # 恰好一条含 knowledge_objects 的语句——若未来在它之前/之后再插入一条
+        # 也含 knowledge_objects 的语句,``captured[0]`` 会静默指向错误的那条,
+        # 后面对 captured_sql 的所有断言就名不副实。
+        assert len(captured) == 1, (
+            f"expected exactly one knowledge_objects-touching statement, "
+            f"got {len(captured)}:\n" + "\n---\n".join(sql for sql, _ in captured)
+        )
         captured_sql, captured_params = captured[0]
         assert "WITH page_sources(source_id) AS (VALUES" in captured_sql, (
             f"kg_extracted must be driven by the page's own source ids via a "
@@ -4361,6 +4368,84 @@ def test_kg_extracted_batch_query_is_driven_by_page_source_ids(
     assert "Unique" not in plan_text, (
         f"a top-level DISTINCT/Unique over knowledge_objects is the OLD "
         f"knowledge_objects-driven shape this replaced, got:\n{plan_text}"
+    )
+
+
+def test_kg_extracted_batch_tie_break_survives_a_forced_sort_plan(
+    core_stores: CoreStores,
+):
+    """The default plan does not exercise the ``,r.ordinal DESC`` tie-break at
+    all — a reverse index scan over ``idx_extraction_runs_source_created``
+    (``source_id,created_at``) happens to finish ties on the same
+    ``created_at`` in heap-TID order, which for a freshly inserted table is
+    the same order as insertion (== ``ordinal``). Deleting the tie-break
+    clause therefore does NOT turn this file's default-plan tests red (see
+    the case (h) rationale comment in ``kg_extracted_parity_cases.py``).
+
+    This test forces the OTHER plan shape — ``SET LOCAL
+    enable_indexscan=off; enable_bitmapscan=off`` inside the transaction the
+    read connection already runs in (autocommit is off, mirroring the shape
+    guard above at ~L4308) — so the planner has no index path left and falls
+    back to Seq Scan + Sort, where the tie-break can only come from the
+    explicit ``ORDER BY ...,r.ordinal DESC`` clause itself, not from any
+    incidental scan order. It must run ``sources_from_rows`` on that SAME
+    self-owned connection (not ``core_stores.sources.list_sources``, which
+    opens its own connection and would run under the default plan again).
+    """
+    owner = core_stores.identity.create_user("k00123505", "password-19")
+    notebook_id = core_stores.notebooks.create_row(
+        NotebookCreate(name="KG tie-break sort plan"), owner.id
+    )
+    core_stores.sources.insert_source(
+        source_id="src-kg-tiebreak",
+        notebook_id=notebook_id,
+        title="Tie-break",
+        source_type="markdown",
+        status="extracted",
+        parse_status="extracted",
+        file_name="tiebreak.md",
+        file_path="uploads/tiebreak.md",
+        file_size=1,
+        file_hash="hash-tiebreak",
+        summary="",
+        doc_type="",
+    )
+    _write_sql(
+        core_stores,
+        "INSERT INTO knowledge_objects"
+        "(id,notebook_id,object_type,status,owner,payload,evidence,source_id,"
+        "created_at,updated_at) VALUES "
+        "(%s,%s,'concept','approved','','{}'::jsonb,'[]'::jsonb,%s,%s,%s)",
+        ("ko-kg-tiebreak", notebook_id, "src-kg-tiebreak", NOW, NOW),
+    )
+    # 同一个 created_at:先插入干净的 completed,后插入 failed。tie-break 应选
+    # 后插入的那条(与 kg_extracted_parity_cases.py 用例 (h) 同一个方向),
+    # 覆盖判定必须为 False。
+    for run_id, status, error in (
+        ("run-tiebreak-0", "completed", "kg objects=3"),
+        ("run-tiebreak-1", "failed", "RuntimeError: upstream timeout"),
+    ):
+        _write_sql(
+            core_stores,
+            "INSERT INTO extraction_runs"
+            "(id,notebook_id,source_id,run_type,status,error_message,created_at,updated_at) "
+            "VALUES (%s,%s,%s,'kg',%s,%s,%s,%s)",
+            (run_id, notebook_id, "src-kg-tiebreak", status, error, NOW, NOW),
+        )
+
+    with core_stores.database.connect() as connection:
+        connection.execute("SET LOCAL enable_indexscan=off")
+        connection.execute("SET LOCAL enable_bitmapscan=off")
+        rows = connection.execute(
+            "SELECT * FROM sources WHERE id=%s", ("src-kg-tiebreak",)
+        ).fetchall()
+        result = core_stores.sources.sources_from_rows(connection, rows)
+
+    assert result[0].kg_extracted is False, (
+        "under a forced Seq Scan + Sort plan, the same-created_at tie between "
+        "a completed run and a later-inserted failed run must resolve to the "
+        "LATER-INSERTED (failed) run via the explicit ordinal DESC tie-break, "
+        "not by way of an incidental index scan order"
     )
 
 
