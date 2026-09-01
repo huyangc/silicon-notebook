@@ -316,10 +316,39 @@ export function useSourceLibrary({
       ownerRef.current?.notebookId ?? null,
       owns(owner) && (!input.guard || input.guard()),
     );
+    // `isCurrent()` going false at any exit point below can mean two very
+    // different things, and only one of them is this call's job to clean up:
+    //   - Superseded: a later `loadSourcesPage` invocation (or an
+    //     owner/actor transition — beginTransition / activateActor /
+    //     commitNotebookSnapshot / the render-time actor-change branch) has
+    //     already bumped `pageRequestRef.current` and taken over
+    //     `pageAbortRef`. That successor owns the busy window now and will
+    //     clear it itself (or the transition's own resetVisibleState /
+    //     commitNotebookSnapshot already did) — this call must stay silent
+    //     and must not touch `pageAbortRef`, which no longer points at its
+    //     own controller.
+    //   - Rejected, not superseded: the owner/notebook is unchanged and
+    //     `requestId` still equals `pageRequestRef.current` (no successor
+    //     ran), but the caller-supplied `guard()` vetoed the result. Nobody
+    //     else is coming to release busy for this request — page.tsx's
+    //     poll-completion call sites hit exactly this: their own effect's
+    //     cleanup flips `cancelled` (and their `guard` reads it) before this
+    //     response lands, with no follow-up `loadSourcesPage` call to take
+    //     over. This call must clear busy itself here or it leaks `true`
+    //     forever (spinner stuck, Pagination controls stuck disabled).
+    // `requestId === pageRequestRef.current` is exactly the "no successor
+    // exists" test, so it's what gates every release below — never the
+    // stale/inverted `isCurrent()` check that conflated the two cases.
+    const releaseBusyIfWindowHolder = () => {
+      if (requestId === pageRequestRef.current) {
+        setSourcesPageLoading(false);
+        pageAbortRef.current = null;
+      }
+    };
     // `clampSourcePage` below can trigger a second `listSources` call for the
     // same logical page load; both calls share one busy window, set once
-    // here and cleared once at every exit path so it never flickers off and
-    // back on between the two requests.
+    // here and released via `releaseBusyIfWindowHolder()` at every exit path
+    // so it never flickers off and back on between the two requests.
     setSourcesPageLoading(true);
     let result: PaginatedSources;
     try {
@@ -331,25 +360,32 @@ export function useSourceLibrary({
         controller.signal,
       );
     } catch (error) {
-      // Invariant: the only way this request's fetch can reject with an
-      // AbortError is via `pageAbortRef.current?.abort()` — called only from
-      // this same function's next invocation, or from an owner/actor
-      // transition (beginTransition / activateActor / commitNotebookSnapshot
-      // / the render-time actor-change branch). Every one of those sites also
-      // bumps `pageRequestRef.current` (here) or invalidates `ownerRef`
-      // (there) before or as it aborts, so `isCurrent()` is always already
-      // false by the time an abort-triggered rejection reaches here. That
-      // means the `throw` branch below can only ever fire for a genuine
-      // request failure, never for our own cancellation — no separate
-      // AbortError check is needed to keep it from surfacing as an error.
+      // A genuine cancellation (this request's own controller aborted by one
+      // of the sites named above) must never surface as a reportable error.
+      // Invariant: every abort site bumps `pageRequestRef.current` (here) or
+      // invalidates `ownerRef` (there) before/while aborting, so `isCurrent()`
+      // is already false by the time an abort-triggered rejection reaches
+      // here — the `throw` branch below can only fire for a genuine request
+      // failure. This explicit shape check is a second, independent line of
+      // defense: if a future abort site ever forgot to keep that invariant
+      // intact, the cancellation would still be swallowed here instead of
+      // reaching a caller as an error.
+      if (error instanceof DOMException && error.name === "AbortError") {
+        releaseBusyIfWindowHolder();
+        return;
+      }
       if (isCurrent()) {
         setSourcesPageLoading(false);
         pageAbortRef.current = null;
         throw error;
       }
+      releaseBusyIfWindowHolder();
       return;
     }
-    if (!isCurrent()) return;
+    if (!isCurrent()) {
+      releaseBusyIfWindowHolder();
+      return;
+    }
     const clamped = clampSourcePage(pageNum, result.total_count, SOURCES_PAGE_SIZE);
     if (clamped !== pageNum) {
       pageNum = clamped;
@@ -362,15 +398,24 @@ export function useSourceLibrary({
           controller.signal,
         );
       } catch (error) {
-        // Same invariant as above applies to this second, clamp-triggered call.
+        // Same invariant and defense-in-depth AbortError check as above,
+        // applied to this second, clamp-triggered call.
+        if (error instanceof DOMException && error.name === "AbortError") {
+          releaseBusyIfWindowHolder();
+          return;
+        }
         if (isCurrent()) {
           setSourcesPageLoading(false);
           pageAbortRef.current = null;
           throw error;
         }
+        releaseBusyIfWindowHolder();
         return;
       }
-      if (!isCurrent()) return;
+      if (!isCurrent()) {
+        releaseBusyIfWindowHolder();
+        return;
+      }
     }
     const deleted = deletedIdsRef.current.get(ownerKey(owner.actorId, notebookId));
     const filtered = filterDeletedSourceItems(result.items, deleted);
@@ -734,6 +779,14 @@ export function useSourceLibrary({
       if (timer !== undefined) window.clearTimeout(timer);
     };
   }, [hasPending, ownerSerial]);
+
+  // Unmount is not one of the abort/invalidation sites `abortInFlightSourcesPage`
+  // is called from elsewhere in this hook (see its own comment) — none of them
+  // fire once the component is gone. Without this, a source-page request still
+  // in flight when the hook unmounts runs to completion server-side for nothing.
+  useEffect(() => () => {
+    pageAbortRef.current?.abort();
+  }, []);
 
   return {
     sources: visibleSources,

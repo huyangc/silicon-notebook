@@ -6209,6 +6209,15 @@ code.schema-detail-name {
   flex: 1 1 auto;
   min-width: 0;
   padding-right: 26px;
+  padding-left: 12px;
+}
+
+/* type=search 的原生清除按钮(✕)在有文本时会渲染在输入框右侧内边区域，与上面
+   为转圈反馈图标留出的 26px 空间重叠、叠在一起。反馈图标是这里唯一需要的右侧
+   控件，去掉浏览器自带的✕，而不是去猜它的渲染位置去避让。 */
+.source-search-wrap .source-search::-webkit-search-cancel-button {
+  -webkit-appearance: none;
+  appearance: none;
 }
 
 .source-search-spinner {
