@@ -314,6 +314,65 @@ def test_quiesce_never_forces_phase_3_on_timeout(repo):
     assert row["status"] == "waiting"
 
 
+def test_quiesce_never_sleeps_past_half_the_sweep_stale_cutoff(repo, monkeypatch):
+    """P2-a (codex PR#659 round 1): the quiesce backoff (caps at 60s) must
+    never sleep longer than half of ``NOTEBOOK_DELETE_SWEEP_SECONDS`` (the
+    SAME cutoff ``mark_running``/``list_stale`` use), or a sweep configured
+    below 60s can judge a still-alive, still-legitimately-polling worker
+    'stale' and steal its lease via driver A's resubmit — the two workers
+    then requeue each other indefinitely.
+
+    Drives the real backoff sequence (5, 10, 20, 40, 60, 60, ...) through
+    many rounds with a fully controlled fake clock (no real sleeping), then
+    asserts every single ``time.sleep(...)`` call the loop actually issued
+    stayed within the cap. Mutation: drop the cap (``time.sleep(min(backoff,
+    remaining))``) and this goes red immediately, since backoff alone grows
+    to 60s while the cap here is 5s."""
+    from app.services import notebook_delete as nd
+
+    _seed_user_and_notebook(repo)
+    with repo._runtime.database.write() as db:
+        db.execute(
+            "INSERT INTO kg_build_jobs (id,notebook_id,created_by,mode,status,"
+            "stage,total_sources,completed_sources,failed_sources,error_code,"
+            "error_message,created_at,updated_at,finished_at) VALUES "
+            "('kgj1','nb1','u1','incremental','running','extracting',1,0,0,"
+            "'','',?,?,'')",
+            (NOW, NOW),
+        )
+    runner = repo._runtime.notebook_delete
+    runner._sweep_seconds = 10  # cap = max(1, 10/2) = 5
+    runner._quiesce_timeout_seconds = 200  # many backoff rounds, fake clock only
+    job = repo._runtime.notebook_delete_jobs.request("nb1", "u1")
+
+    fake_clock = [0.0]
+    sleep_calls: list[float] = []
+
+    def fake_monotonic():
+        return fake_clock[0]
+
+    def fake_sleep(duration):
+        sleep_calls.append(duration)
+        fake_clock[0] += duration
+
+    monkeypatch.setattr(nd.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(nd.time, "sleep", fake_sleep)
+
+    runner.run(job["id"])
+
+    row = repo._runtime.notebook_delete_jobs.get(job["id"])
+    assert row["status"] == "waiting"  # quiesce eventually timed out (fake clock)
+    lease_token = row["lease_token"]
+    assert len(sleep_calls) >= 5, "退避轮数不足以覆盖到会撞 60s 上限的那几轮"
+    cap = max(1.0, runner._sweep_seconds / 2.0)
+    assert all(duration <= cap for duration in sleep_calls), (
+        f"某段睡眠 {max(sleep_calls)}s 超过了 stale cutoff 的一半 {cap}s —— "
+        "扫尾可能把这个仍在正常退避的 worker 判 stale 抢租"
+    )
+    # 每次心跳(advance_phase)都带着同一个 lease_token 写——全程未被抢走。
+    assert lease_token
+
+
 # ---------------------------------------------------------------------------
 # 3. The three in-flight-rebuild checkpoints (§4.2 option A)
 # ---------------------------------------------------------------------------

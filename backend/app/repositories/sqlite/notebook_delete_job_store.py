@@ -9,6 +9,7 @@ statement-for-statement with SQLite's dialect (``?`` placeholders, no
 """
 from __future__ import annotations
 
+import logging
 import secrets
 import sqlite3
 from datetime import datetime, timedelta
@@ -17,6 +18,8 @@ from typing import Callable
 from app.repositories.sqlite.access_sql import NOTEBOOK_LIVE_SQL
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.ports import NotebookAlreadyDeletingError
+
+_log = logging.getLogger(__name__)
 
 # §4.4/code-review P2-g: SQLite's two FTS5 shadow tables that mirror
 # `knowledge_objects`/`chunks` but carry no FK to `notebooks` (virtual
@@ -227,19 +230,30 @@ class NotebookDeleteJobStore:
         return cursor.rowcount == 1
 
     def finish(
-        self, job_id: str, status: str, *, error_code: str = "", error_message: str = ""
+        self, job_id: str, status: str, *, lease_token: str,
+        error_code: str = "", error_message: str = "",
     ) -> bool:
-        """P1-E: increments ``attempts``. No ``lease_token`` fencing —
-        see the PostgreSQL twin's docstring for why this call is
-        deliberately unfenced."""
+        """P1-E: increments ``attempts``. P2-b (codex PR#659 round 1):
+        lease-fenced — see the PostgreSQL twin's docstring for the full
+        rationale (a lost lease means a new owner is necessarily already in
+        place; letting a stale worker settle the row is the actual bug, not
+        fencing it out). ``rowcount==0`` is a normal, expected outcome (the
+        row already moved on under a new lease, or under a different
+        status), logged rather than raised."""
         now = self.now()
         with self.database.write(operation="notebook_delete.finish") as db:
             cursor = db.execute(
                 "UPDATE notebook_delete_jobs SET status=?,error_code=?,"
                 "error_message=?,attempts=attempts+1,updated_at=?,"
-                "finished_at=? WHERE id=? "
+                "finished_at=? WHERE id=? AND lease_token=? "
                 "AND status IN ('queued','running','waiting')",
-                (status, error_code, error_message, now, now, job_id),
+                (status, error_code, error_message, now, now, job_id, lease_token),
+            )
+        if cursor.rowcount != 1:
+            _log.info(
+                "notebook delete job %s: finish(%s) fenced out (lease no "
+                "longer held) — a new owner is settling this job instead",
+                job_id, status,
             )
         return cursor.rowcount == 1
 
@@ -296,13 +310,35 @@ class NotebookDeleteJobStore:
             "notebook_status": row["notebook_status"],
         }
 
-    def finish_residual(self, job_id: str) -> None:
+    def finish_residual(self, job_id: str, *, lease_token: str) -> bool:
         """§T-4 driver-A's out-of-band-delete special case (P1-A).
-        PostgreSQL twin's docstring has the full rationale."""
+        PostgreSQL twin's docstring has the full P2-b lease-fencing
+        rationale. Deliberately does NOT delegate to ``cleanup_job_on``
+        (shared with the successful-finalize path, which has no lease token
+        to fence with and is instead gated by the in-process claim's
+        ``verify_held()`` immediately before it runs) — this fences its own
+        ``notebook_delete_jobs`` DELETE first and only cascades to the
+        ``notebook_delete_files`` side table if that row was actually this
+        worker's to delete, so a fenced-out call leaves BOTH tables
+        untouched rather than half-deleted."""
         with self.database.write(
             operation="notebook_delete.finish_residual"
         ) as db:
-            self.cleanup_job_on(db, job_id)
+            cursor = db.execute(
+                "DELETE FROM notebook_delete_jobs WHERE id=? AND lease_token=?",
+                (job_id, lease_token),
+            )
+            if cursor.rowcount == 1:
+                db.execute(
+                    "DELETE FROM notebook_delete_files WHERE job_id=?", (job_id,)
+                )
+        if cursor.rowcount != 1:
+            _log.info(
+                "notebook delete job %s: finish_residual() fenced out (lease "
+                "no longer held) — a new owner is settling this job instead",
+                job_id,
+            )
+        return cursor.rowcount == 1
 
     def list_stale(self, older_than_seconds: float) -> list[dict]:
         """Sweep driver A (§T-4). PostgreSQL twin's docstring has the full

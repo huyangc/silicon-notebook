@@ -1065,10 +1065,23 @@ class NotebookDeleteJobStorePort(Protocol):
         资源」，两者对运维的含义不同，不应共用同一个状态值）。"""
         ...
     def finish(
-        self, job_id: str, status: str, *, error_code: str = "", error_message: str = ""
+        self, job_id: str, status: str, *, lease_token: str,
+        error_code: str = "", error_message: str = "",
     ) -> bool:
         """``status='failed'`` 时同事务把 ``attempts`` 自增 1（P1-E）——
-        ``recreate_for_deleting_notebook`` 靠这个值做退避与上限判定。"""
+        ``recreate_for_deleting_notebook`` 靠这个值做退避与上限判定。
+
+        P2-b（codex PR#659 round 1）：**带 ``lease_token`` 围栏**——旧版本
+        故意不围栏，理由是「必须结算一个可能已经失去所有权的作业，围栏会让
+        它永久卡死」；这个理由是错的：一个 worker 只有在 ``mark_running`` 的
+        CAS 真的被别的 worker 抢走时才会失租，而 CAS 成功恰恰意味着**新主人
+        必然在场**且已经在跑同一个 job_id——旧 worker 慢操作里抛出的异常此时
+        应当是 no-op（它已经不是这行的所有者，没有资格替新主人的进度打
+        'failed'），由新主人自己的下一次异常/成功来结算这行才是正确语义。
+        不围栏的旧实现反而会出现新主人的活行被旧 worker 的迟到异常打成
+        'failed' 并错误消耗一次 ``attempts``。``rowcount==0``（围栏未命中）
+        只记日志，不抛异常——调用方（``run()`` 的顶层 except）本身就处在
+        异常处理路径上，没有再抛一层的意义。"""
         ...
     def materialize_paths_page(
         self, job_id: str, notebook_id: str, after_id: str, limit: int
@@ -1081,14 +1094,22 @@ class NotebookDeleteJobStorePort(Protocol):
         表）的写法。返回 ``{"status", "lease_token", "notebook_status"}``；
         作业行本身已经不在则返回 ``None``。"""
         ...
-    def finish_residual(self, job_id: str) -> None:
+    def finish_residual(self, job_id: str, *, lease_token: str) -> bool:
         """§T-4 驱动 A 的「作业行在、notebooks 行不在」残渣收尾终局
         （P1-A）：只删这个作业自己的两张 side table 行（``notebook_delete_
         files``/``notebook_delete_jobs``），**绝不**触碰归档投影或
         ``notebooks`` 表（它已经不在了）——复用
         ``NotebookDeleteJobStore.cleanup_job_on`` 的同一段 DELETE，只是这次
         是它自己的事务，不是嵌在 ``delete_row_and_orphan_embeddings``
-        里面。"""
+        里面。
+
+        P2-b：**带 ``lease_token`` 围栏**，与 ``finish`` 同一份论证——只有
+        真正还持有这个 job_id 所有权的 worker 才能执行残渣收尾的终局删除；
+        失租的 worker 这里也应当是 no-op（这个 job_id 的所有权已经转移给了
+        真正在场的新 worker，让它自己去收尾）。围栏落在
+        ``notebook_delete_jobs`` 这一行本身的 DELETE 上（先删这行、按
+        rowcount 判断围栏是否命中，命中了才接着删 ``notebook_delete_files``
+        侧表；没命中则两张表都不碰，不留半删状态）。返回围栏是否命中。"""
         ...
     def purge_failed_jobs(self, notebook_id: str) -> None:
         """P1-E：在 ``recreate_for_deleting_notebook`` 新建一行之前，清掉这个

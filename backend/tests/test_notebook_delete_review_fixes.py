@@ -432,12 +432,97 @@ def test_sweep_driver_b_purges_old_failed_rows_and_their_files_before_retrying(r
 def test_finish_increments_attempts(repo):
     _seed_user_and_notebook(repo)
     job = repo._runtime.notebook_delete_jobs.request("nb1", "u1")
-    repo._runtime.notebook_delete_jobs.mark_running(job["id"], stale_cutoff_seconds=300)
-    repo._runtime.notebook_delete_jobs.finish(
-        job["id"], "failed", error_code="x", error_message="y",
+    lease_token = repo._runtime.notebook_delete_jobs.mark_running(
+        job["id"], stale_cutoff_seconds=300
     )
+    settled = repo._runtime.notebook_delete_jobs.finish(
+        job["id"], "failed", lease_token=lease_token, error_code="x", error_message="y",
+    )
+    assert settled
     row = repo._runtime.notebook_delete_jobs.get(job["id"])
     assert row["attempts"] == 1
+
+
+def test_finish_is_a_noop_when_the_lease_no_longer_matches(repo):
+    """P2-b (codex PR#659 round 1): a worker (A) that lost its lease to a
+    second claim (B) must not be able to settle B's still-live row --
+    finish() fenced out is a no-op, not a raise, and B's row is untouched."""
+    _seed_user_and_notebook(repo)
+    job = repo._runtime.notebook_delete_jobs.request("nb1", "u1")
+    stale_lease = repo._runtime.notebook_delete_jobs.mark_running(
+        job["id"], stale_cutoff_seconds=300
+    )
+    # Backdate updated_at so the sweep-driven stale-cutoff CAS branch of a
+    # SECOND mark_running (simulating driver A resubmitting) can genuinely
+    # steal it -- mark_running's own cutoff floors at 1 real second, so a
+    # same-instant test can't trigger the steal without backdating.
+    with repo._runtime.database.write() as db:
+        db.execute(
+            "UPDATE notebook_delete_jobs SET updated_at=? WHERE id=?",
+            ("2020-01-01T00:00:00", job["id"]),
+        )
+    fresh_lease = repo._runtime.notebook_delete_jobs.mark_running(
+        job["id"], stale_cutoff_seconds=300
+    )
+    assert fresh_lease is not None and fresh_lease != stale_lease
+
+    # A's late exception tries to settle the job with its now-stale lease.
+    settled = repo._runtime.notebook_delete_jobs.finish(
+        job["id"], "failed", lease_token=stale_lease,
+        error_code="x", error_message="A's late failure",
+    )
+    assert settled is False
+
+    row = repo._runtime.notebook_delete_jobs.get(job["id"])
+    assert row["status"] == "running"  # B's row, untouched
+    assert row["lease_token"] == fresh_lease
+    assert row["attempts"] == 0  # A's finish must not have consumed a retry
+
+
+def test_finish_residual_is_a_noop_when_the_lease_no_longer_matches(repo):
+    """P2-b: same fencing, residual-cleanup path — a fenced-out call leaves
+    BOTH `notebook_delete_jobs` and `notebook_delete_files` untouched."""
+    _seed_user_and_notebook(repo)
+    job = repo._runtime.notebook_delete_jobs.request("nb1", "u1")
+    stale_lease = repo._runtime.notebook_delete_jobs.mark_running(
+        job["id"], stale_cutoff_seconds=300
+    )
+    with repo._runtime.database.write() as db:
+        db.execute(
+            "INSERT INTO notebook_delete_files(job_id,ordinal,file_path) "
+            "VALUES (?,?,?)",
+            (job["id"], 0, "/tmp/whatever"),
+        )
+        db.execute(
+            "UPDATE notebook_delete_jobs SET updated_at=? WHERE id=?",
+            ("2020-01-01T00:00:00", job["id"]),
+        )
+    fresh_lease = repo._runtime.notebook_delete_jobs.mark_running(
+        job["id"], stale_cutoff_seconds=300
+    )
+    assert fresh_lease is not None and fresh_lease != stale_lease
+
+    settled = repo._runtime.notebook_delete_jobs.finish_residual(
+        job["id"], lease_token=stale_lease,
+    )
+    assert settled is False
+
+    row = repo._runtime.notebook_delete_jobs.get(job["id"])
+    assert row["lease_token"] == fresh_lease  # B's row, untouched
+    with repo._runtime.database.connect() as db:
+        remaining = db.execute(
+            "SELECT COUNT(*) AS c FROM notebook_delete_files WHERE job_id=?",
+            (job["id"],),
+        ).fetchone()
+    assert remaining["c"] == 1  # side-table row untouched too, not half-deleted
+
+    # B, holding the real lease, settles it normally.
+    settled = repo._runtime.notebook_delete_jobs.finish_residual(
+        job["id"], lease_token=fresh_lease,
+    )
+    assert settled is True
+    with pytest.raises(KeyError):
+        repo._runtime.notebook_delete_jobs.get(job["id"])
 
 
 # ---------------------------------------------------------------------------

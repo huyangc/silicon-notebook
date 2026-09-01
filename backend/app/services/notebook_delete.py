@@ -439,7 +439,7 @@ class NotebookDeleteJobRunner:
                             )
                             return
                         if residual:
-                            self._finish_residual(job_id, notebook_id)
+                            self._finish_residual(job_id, notebook_id, lease_token)
                         else:
                             self._phase_finalize(job_id, notebook_id)
                 finally:
@@ -450,7 +450,7 @@ class NotebookDeleteJobRunner:
                 job_id, notebook_id, phase,
             )
             self.delete_jobs.finish(
-                job_id, "failed",
+                job_id, "failed", lease_token=lease_token,
                 error_code="notebook_delete_failed",
                 error_message="删除作业执行失败，将由扫尾按退避重试（见§P1-E）。",
             )
@@ -559,6 +559,23 @@ class NotebookDeleteJobRunner:
         phase 3)."""
         deadline = time.monotonic() + self._quiesce_timeout_seconds
         backoff = _QUIESCE_BACKOFF_INITIAL_SECONDS
+        # P2-a (codex PR#659 round 1): every sleep segment must stay within
+        # HALF of the sweep's own stale-cutoff window (``self._sweep_seconds``
+        # -- the exact same value ``mark_running``/``list_stale`` use as
+        # ``stale_cutoff_seconds``/``older_than_seconds``, never a second,
+        # independently-configured copy). ``_QUIESCE_BACKOFF_MAX_SECONDS``
+        # (60s) can otherwise outlast a ``NOTEBOOK_DELETE_SWEEP_SECONDS``
+        # configured below 60s: the heartbeat right below only touches
+        # ``updated_at`` ONCE per sleep segment, so a segment longer than the
+        # stale cutoff lets the sweep's driver A judge this still-alive,
+        # still-legitimately-polling worker "dead", steal its lease via
+        # ``mark_running``'s CAS, and resubmit the same job_id -- the two
+        # workers then requeue each other indefinitely. Halving (not just
+        # matching) the cutoff leaves one full heartbeat of slack against
+        # clock/scheduling jitter between this heartbeat and the sweep's own
+        # read. The floor of 1 second keeps this from busy-looping when
+        # ``NOTEBOOK_DELETE_SWEEP_SECONDS`` itself is configured very low.
+        heartbeat_ceiling = max(1.0, self._sweep_seconds / 2.0)
         while True:
             leg_a = self.kg_build_jobs.has_running(notebook_id)
             leg_b = self._kg_maintenance_running(notebook_id)
@@ -586,7 +603,7 @@ class NotebookDeleteJobRunner:
             # this same job_id from driver A while this loop is still
             # legitimately polling.
             self.delete_jobs.advance_phase(job_id, "paths", lease_token=lease_token)
-            time.sleep(min(backoff, remaining))
+            time.sleep(min(backoff, remaining, heartbeat_ceiling))
             backoff = min(backoff * 2, _QUIESCE_BACKOFF_MAX_SECONDS)
 
     # ---- phase 3: rows ----
@@ -849,7 +866,9 @@ class NotebookDeleteJobRunner:
                     notebook_id, "notebook_delete",
                 )
 
-    def _finish_residual(self, job_id: str, notebook_id: str) -> None:
+    def _finish_residual(
+        self, job_id: str, notebook_id: str, lease_token: str,
+    ) -> None:
         """§T-4 driver-A's out-of-band-delete special case (P1-A): NO
         notebooks row survives to fence, and the archive projections'
         source tables (``ask_jobs``/``answers``/``sources``/``source_paper_
@@ -861,14 +880,17 @@ class NotebookDeleteJobRunner:
         distinguish "genuinely nothing to archive" from "archived
         incompletely because the source rows were already gone"), so this
         NEVER attempts phase 5's fence+archive steps. It only deletes this
-        job's own two side-table footprints."""
-        self.delete_jobs.finish_residual(job_id)
-        _log.info(
-            "notebook delete job %s (notebook %s): residual cleanup complete "
-            "(driver-A out-of-band-delete special case, §T-4) — no archive "
-            "was written or re-written",
-            job_id, notebook_id,
-        )
+        job's own two side-table footprints — lease-fenced (P2-b): a
+        fenced-out call (this worker already lost the job to a new owner)
+        logs and returns rather than settling a row it no longer owns."""
+        settled = self.delete_jobs.finish_residual(job_id, lease_token=lease_token)
+        if settled:
+            _log.info(
+                "notebook delete job %s (notebook %s): residual cleanup "
+                "complete (driver-A out-of-band-delete special case, §T-4) "
+                "— no archive was written or re-written",
+                job_id, notebook_id,
+            )
 
     # ------------------------------------------------------------------
     # §T-4: sweep — two drivers, run at startup and every
