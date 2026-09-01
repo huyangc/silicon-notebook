@@ -18,6 +18,7 @@ from typing import Any
 from app.domain.model_artifacts import (
     MalformedModelInteraction,
     model_artifact_publication_scope,
+    model_artifact_read_scope,
     model_artifact_redaction_scope,
 )
 
@@ -265,33 +266,39 @@ class AnalysisArtifactStore:
         now: datetime | None = None,
     ) -> dict[str, Any] | None:
         """Read one unexpired model artifact by opaque issue id."""
-        current = now or datetime.now(timezone.utc)
-        issue_root = self.root / "issues"
-        if not issue_root.is_dir():
-            return None
-        for metadata_path in list(issue_root.glob("*/*/*/issue.json")):
-            try:
-                issue = json.loads(metadata_path.read_text(encoding="utf-8"))
-            except (OSError, ValueError, TypeError):
-                continue
-            if not isinstance(issue, dict) or issue.get("id") != issue_id:
-                continue
-            expires = _parse_time(str(issue.get("expires_at") or ""))
-            if expires is not None and expires <= current:
-                shutil.rmtree(metadata_path.parent, ignore_errors=True)
-                self._remove_empty_parents(metadata_path.parent.parent, issue_root)
+        with model_artifact_read_scope():
+            current = now or datetime.now(timezone.utc)
+            issue_root = self.root / "issues"
+            if not issue_root.is_dir():
                 return None
-            if issue.get("category") != "model_output":
-                return None
-            try:
-                artifact = json.loads(
-                    (metadata_path.parent / "artifact.json").read_text(encoding="utf-8")
-                )
-            except (OSError, ValueError, TypeError):
-                return None
-            if not isinstance(artifact, dict):
-                return None
-            return {"issue_id": issue_id, **artifact}
+            for metadata_path in list(issue_root.glob("*/*/*/issue.json")):
+                try:
+                    issue = json.loads(metadata_path.read_text(encoding="utf-8"))
+                except (OSError, ValueError, TypeError):
+                    continue
+                if not isinstance(issue, dict) or issue.get("id") != issue_id:
+                    continue
+                expires = _parse_time(str(issue.get("expires_at") or ""))
+                if expires is not None and expires <= current:
+                    shutil.rmtree(metadata_path.parent, ignore_errors=True)
+                    self._remove_empty_parents(
+                        metadata_path.parent.parent,
+                        issue_root,
+                    )
+                    return None
+                if issue.get("category") != "model_output":
+                    return None
+                try:
+                    artifact = json.loads(
+                        (metadata_path.parent / "artifact.json").read_text(
+                            encoding="utf-8"
+                        )
+                    )
+                except (OSError, ValueError, TypeError):
+                    return None
+                if not isinstance(artifact, dict):
+                    return None
+                return {"issue_id": issue_id, **artifact}
         return None
 
     def resolve_issue(
@@ -323,29 +330,42 @@ class AnalysisArtifactStore:
         self, notebook_id: str, source_id: str, *, occurred_at: str
     ) -> None:
         with model_artifact_redaction_scope(notebook_id):
-            self.delete_spreadsheet_manifest(notebook_id, source_id)
+            failure: BaseException | None = None
+            try:
+                self.delete_spreadsheet_manifest(notebook_id, source_id)
+            except BaseException as exc:
+                failure = exc
             # Model prompts may contain evidence from several sources but the
             # scheduler boundary does not own a trustworthy source-id ledger.
             # Conservatively destroy every retained model payload for this
             # notebook when any source is deleted instead of retaining content
             # that may have come from the deleted source.
-            self._redact_model_outputs_for_notebook(notebook_id, occurred_at)
-            source_root = self.root / "issues" / notebook_id / source_id
-            if not source_root.is_dir():
-                return
             try:
-                for metadata_path in list(source_root.glob("*/issue.json")):
-                    self._redact_issue(
-                        metadata_path,
-                        occurred_at,
-                        notebook_deleted=False,
+                self._redact_model_outputs_for_notebook(notebook_id, occurred_at)
+            except BaseException as exc:
+                if failure is None:
+                    failure = exc
+            source_root = self.root / "issues" / notebook_id / source_id
+            if source_root.is_dir():
+                try:
+                    for metadata_path in list(source_root.glob("*/issue.json")):
+                        try:
+                            self._redact_issue(
+                                metadata_path,
+                                occurred_at,
+                                notebook_deleted=False,
+                            )
+                        except BaseException as exc:
+                            if failure is None:
+                                failure = exc
+                finally:
+                    shutil.rmtree(source_root, ignore_errors=True)
+                    self._remove_empty_parents(
+                        source_root.parent,
+                        self.root / "issues",
                     )
-            finally:
-                shutil.rmtree(source_root, ignore_errors=True)
-                self._remove_empty_parents(
-                    source_root.parent,
-                    self.root / "issues",
-                )
+            if failure is not None:
+                raise failure
 
     def _redact_model_outputs_for_notebook(
         self, notebook_id: str, occurred_at: str
@@ -353,14 +373,22 @@ class AnalysisArtifactStore:
         issue_root = self.root / "issues" / notebook_id
         if not issue_root.is_dir():
             return
+        failure: BaseException | None = None
         for metadata_path in list(issue_root.glob("*/model_output/issue.json")):
-            self._redact_issue(
-                metadata_path,
-                occurred_at,
-                notebook_deleted=False,
-            )
-            shutil.rmtree(metadata_path.parent.parent, ignore_errors=True)
+            try:
+                self._redact_issue(
+                    metadata_path,
+                    occurred_at,
+                    notebook_deleted=False,
+                )
+            except BaseException as exc:
+                if failure is None:
+                    failure = exc
+            finally:
+                shutil.rmtree(metadata_path.parent.parent, ignore_errors=True)
         self._remove_empty_parents(issue_root, self.root / "issues")
+        if failure is not None:
+            raise failure
 
     def redact_notebook(self, notebook_id: str, *, occurred_at: str) -> None:
         with model_artifact_redaction_scope(notebook_id):
@@ -370,15 +398,22 @@ class AnalysisArtifactStore:
             issue_root = self.root / "issues" / notebook_id
             if not issue_root.is_dir():
                 return
+            failure: BaseException | None = None
             try:
                 for metadata_path in list(issue_root.glob("*/*/issue.json")):
-                    self._redact_issue(
-                        metadata_path,
-                        occurred_at,
-                        notebook_deleted=True,
-                    )
+                    try:
+                        self._redact_issue(
+                            metadata_path,
+                            occurred_at,
+                            notebook_deleted=True,
+                        )
+                    except BaseException as exc:
+                        if failure is None:
+                            failure = exc
             finally:
                 shutil.rmtree(issue_root, ignore_errors=True)
+            if failure is not None:
+                raise failure
 
     def _redact_issue(
         self, metadata_path: Path, occurred_at: str, *, notebook_deleted: bool

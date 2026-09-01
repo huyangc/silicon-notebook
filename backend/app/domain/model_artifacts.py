@@ -27,6 +27,13 @@ def model_artifact_publication_scope(notebook_id: str) -> Iterator[int]:
 
 
 @contextmanager
+def model_artifact_read_scope() -> Iterator[None]:
+    """Keep a complete artifact read on the publication/redaction timeline."""
+    with _LIFECYCLE_LOCK:
+        yield
+
+
+@contextmanager
 def model_artifact_redaction_scope(notebook_id: str) -> Iterator[int]:
     """Invalidate in-flight generations before deleting retained content."""
     with _LIFECYCLE_LOCK:

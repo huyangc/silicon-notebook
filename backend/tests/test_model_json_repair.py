@@ -101,6 +101,25 @@ def test_schema_shape_validation_accepts_current_union_contracts(raw, schema):
     validate_model_json_shape(raw, schema)
 
 
+def test_schema_shape_validation_accepts_dynamic_report_frame_assignments():
+    validate_model_json_shape(
+        '{"markdown":"ok","claims":[{"claim_id":"c1",'
+        '"frame_assignments":{"mixer":"SSM"}}]}',
+        '{"markdown":"","claims":[{"claim_id":"",'
+        '"frame_assignments":{"facet-id":"value"}}]}',
+    )
+
+
+def test_schema_shape_validation_rejects_non_string_frame_assignment_values():
+    with pytest.raises(ModelJsonRepairError, match="invalid_type"):
+        validate_model_json_shape(
+            '{"markdown":"ok","claims":[{"claim_id":"c1",'
+            '"frame_assignments":{"mixer":["SSM"]}}]}',
+            '{"markdown":"","claims":[{"claim_id":"",'
+            '"frame_assignments":{"facet-id":"value"}}]}',
+        )
+
+
 @pytest.mark.parametrize(
     ("raw", "reason"),
     [
