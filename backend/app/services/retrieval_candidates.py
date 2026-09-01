@@ -69,6 +69,19 @@ _log = logging.getLogger("silicon_notebook.retrieval")
 
 _KG_TYPES = ("claim", "formula", "procedure", "concept")
 
+# Fixed, content-free producer counters.  Only these keys may cross the
+# repository/service seam; query terms, object ids, and SQL errors stay out of
+# retrieval telemetry.
+_KG_LEXICAL_ROUTING_STAT_KEYS = (
+    "term_count",
+    "knn_term_count",
+    "legacy_term_count",
+    "knn_short_fallback_term_count",
+    "knn_seconds",
+    "legacy_seconds",
+    "knn_short_fallback_seconds",
+)
+
 # 邻居展开(`_retrieve_neighbors`)的行读取放大系数。`REASONING_NEIGHBOR_EXPAND_LIMIT`
 # 约束的是**唯一合格邻居数**,而 SQL 的 LIMIT 只会数**关系行**——两者之间隔着
 # 「同一对端点的多条重复/佐证关系」与「被 `is_queryable_edge_pair` 判掉的行」。
@@ -1112,7 +1125,7 @@ class CandidateRetrievalService(_RetrievalState):
         零查询;开启时每次判定付一次 version-signal SELECT(memo 只挡后面的
         facts 重算)——这是缓存版本检查的既有代价,不是新形态。
 
-        三个条件缺一即 False(SQL 逐字回到 legacy):
+        三个条件缺一即 False（不走 KNN，回到结果等价的拆分 GIN 路径）:
         ① 开关开;② 调用点没有 allow-list——scoped 形状无 bench。⚠ 这一条刻意
         比语料语言闸那条**更保守**:它按「有没有清单」判,而不是按
         ``_lexical_gate_source_scoped`` 的「是否真收窄」判,所以默认全选运行(带着
@@ -1160,6 +1173,7 @@ class CandidateRetrievalService(_RetrievalState):
         allowed_source_ids=None,
         allow_knn: bool = False,
         authoritative_source_filter: bool = False,
+        routing_stats: dict[str, int | float] | None = None,
     ) -> list[dict]:
         """Fail-open bounded lexical object recall shared by KG and relations.
 
@@ -1180,17 +1194,28 @@ class CandidateRetrievalService(_RetrievalState):
         打开连接之前用 `_lexical_knn_allowed` 算好传进来(与 `corpus_langs`
         同一形态、同一理由)。
         """
+        probe_stats: dict[str, int | float] | None = (
+            {} if routing_stats is not None else None
+        )
         try:
             if allowed_source_ids is None:
                 return self.knowledge.fts_search(
                     db, notebook_id, query, k=recall, corpus_langs=corpus_langs,
                     allow_knn=allow_knn,
+                    knn_max_term_chars=(
+                        self.settings.postgres_lexical_knn_max_term_chars
+                    ),
+                    routing_stats=probe_stats,
                 )
             return self.knowledge.fts_search(
                 db, notebook_id, query, k=recall,
                 allowed_source_ids=allowed_source_ids,
                 corpus_langs=corpus_langs,
                 authoritative_source_filter=authoritative_source_filter,
+                knn_max_term_chars=(
+                    self.settings.postgres_lexical_knn_max_term_chars
+                ),
+                routing_stats=probe_stats,
             )
         except Exception as exc:  # noqa: BLE001 — lexical failure keeps ANN usable
             self.event_log.emit({
@@ -1200,6 +1225,12 @@ class CandidateRetrievalService(_RetrievalState):
                 "error_type": type(exc).__name__,
             })
             return []
+        finally:
+            if routing_stats is not None and probe_stats is not None:
+                for key in _KG_LEXICAL_ROUTING_STAT_KEYS:
+                    value = probe_stats.get(key)
+                    if isinstance(value, (int, float)):
+                        routing_stats[key] = routing_stats.get(key, 0) + value
 
     def _relation_lexical_candidate_ids(
         self, db: object, notebook_id: str, query: str, recall: int,
@@ -1705,6 +1736,7 @@ class CandidateRetrievalService(_RetrievalState):
         kg_ann_knn_ms = 0
         kg_delta_ms = 0
         kg_lexical_ms = 0
+        kg_lexical_routing_stats: dict[str, int | float] = {}
         if source_candidates_restricted:
             # Truly source-restricted runs never enter a notebook-wide fallback.
             # Lexical SQL applies the source predicate before LIMIT; a ready
@@ -1732,6 +1764,7 @@ class CandidateRetrievalService(_RetrievalState):
                     # Read authoritative evidence before LIMIT instead of
                     # silently returning an empty candidate set.
                     authoritative_source_filter=source_index_fallback,
+                    routing_stats=kg_lexical_routing_stats,
                 )
                 kg_lexical_ms += round(
                     (time.perf_counter() - lexical_started) * 1000
@@ -1795,6 +1828,7 @@ class CandidateRetrievalService(_RetrievalState):
                         site="kg_ann_fts",
                         corpus_langs=corpus_langs,
                         allow_knn=allow_knn,
+                        routing_stats=kg_lexical_routing_stats,
                     )
                     kg_lexical_ms += round(
                         (time.perf_counter() - lexical_started) * 1000
@@ -1829,6 +1863,7 @@ class CandidateRetrievalService(_RetrievalState):
                     site="kg_large_fallback_fts",
                     corpus_langs=corpus_langs,
                     allow_knn=allow_knn,
+                    routing_stats=kg_lexical_routing_stats,
                 )
                 kg_lexical_ms += round(
                     (time.perf_counter() - lexical_started) * 1000
@@ -1982,6 +2017,36 @@ class CandidateRetrievalService(_RetrievalState):
             "kg_ann_knn_ms": kg_ann_knn_ms,
             "kg_delta_ms": kg_delta_ms,
             "kg_lexical_ms": kg_lexical_ms,
+            "kg_lexical_knn_ms": round(
+                float(kg_lexical_routing_stats.get("knn_seconds", 0)) * 1000
+            ),
+            "kg_lexical_legacy_ms": round(
+                (
+                    float(kg_lexical_routing_stats.get("legacy_seconds", 0))
+                    + float(kg_lexical_routing_stats.get(
+                        "knn_short_fallback_seconds", 0
+                    ))
+                ) * 1000
+            ),
+            "kg_lexical_short_fallback_ms": round(
+                float(kg_lexical_routing_stats.get(
+                    "knn_short_fallback_seconds", 0
+                )) * 1000
+            ),
+            "kg_lexical_term_count": int(
+                kg_lexical_routing_stats.get("term_count", 0)
+            ),
+            "kg_lexical_knn_term_count": int(
+                kg_lexical_routing_stats.get("knn_term_count", 0)
+            ),
+            "kg_lexical_direct_legacy_term_count": int(
+                kg_lexical_routing_stats.get("legacy_term_count", 0)
+            ),
+            "kg_lexical_short_fallback_term_count": int(
+                kg_lexical_routing_stats.get(
+                    "knn_short_fallback_term_count", 0
+                )
+            ),
             "hydrate_ms": round((t_hydrate - t_ann) * 1000),
             "score_ms": round((t_score - t_hydrate) * 1000),
             "fold_ms": round((time.perf_counter() - t_score) * 1000),

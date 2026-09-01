@@ -2451,6 +2451,8 @@ class KnowledgeStore:
         corpus_langs: Sequence[str] | None = None,
         allow_knn: bool = False,
         authoritative_source_filter: bool = False,
+        knn_max_term_chars: int | None = None,
+        routing_stats: dict[str, int | float] | None = None,
     ) -> List[Dict]:
         """FTS5 MATCH(kg_objects_fts, trigram)。notebook 维度过滤。返回
         [{object_id, name, score, match:'lexical'}]。q 空 → []。
@@ -2458,10 +2460,11 @@ class KnowledgeStore:
         `corpus_langs` 是调用方已探得的语料语言(`_notebook_langs`);缺省 None
         = 未探测 = 不过滤,行为逐位不变。见 `corpus_gated_recall_terms`。
 
-        `allow_knn` 接受并忽略:那是 PostgreSQL 适配器的 GiST 访问路径提示,
+        `allow_knn`、`knn_max_term_chars` 与 `routing_stats` 接受并忽略:它们是
+        PostgreSQL 适配器的 GiST 访问路径提示与内容无关的内部诊断载体,
         FTS5 的候选查询本来就是有界的。收下这个 kwarg 是签名对等——service 层
         不判 dialect,同一调用必须两侧都合法。"""
-        del allow_knn
+        del allow_knn, knn_max_term_chars, routing_stats
         match_query = sqlite_fts_match_expression(q, corpus_langs)
         if not match_query:
             return []

@@ -135,19 +135,33 @@ def test_hits_helper_forwards_the_precomputed_verdict(repo):
 
     def fake_fts_search(db, nb_id, query, k, **kwargs):
         captured.update(kwargs)
+        kwargs["routing_stats"].update({
+            "term_count": 4,
+            "knn_term_count": 2,
+            "knn_seconds": 0.125,
+        })
         return []
 
     candidates.notebook_copy_stats = exploding_stats
     candidates.knowledge.fts_search = fake_fts_search
+    routing_stats: dict[str, int | float] = {}
     try:
         with repo._connect() as db:
             candidates._lexical_object_hits(
                 db, nb.id, "thermal design", 12,
                 site="test", corpus_langs=None, allow_knn=True,
+                routing_stats=routing_stats,
             )
     finally:
         candidates.notebook_copy_stats = real_stats
     assert captured.get("allow_knn") is True
+    assert captured.get("knn_max_term_chars") == 32
+    assert isinstance(captured.get("routing_stats"), dict)
+    assert routing_stats == {
+        "term_count": 4,
+        "knn_term_count": 2,
+        "knn_seconds": 0.125,
+    }
 
 
 def test_sqlite_adapter_accepts_and_ignores_the_hint(repo):

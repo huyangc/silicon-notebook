@@ -312,7 +312,8 @@ python3 scripts/diag_retrieval_latency.py --since 24
 
 该脚本复用 `diag_common` 合并 legacy / 按日 / gzip / per-user 的 `events` 日志，并按本机
 scale manifest 的 `n_chunks` 把 `chunk_fts_ms`、ANN/KNN/索引加载、KG 词法等分段聚合成
-P50/P95/max；`retrieval_run_stats` 另按 Ask / 报告 planning / 报告 generation 汇总 FTS
+P50/P95/max；KG 词法会进一步拆分 GiST KNN、复合 GIN 与短页 fallback 耗时，并汇总各路由
+词项数；`retrieval_run_stats` 另按 Ask / 报告 planning / 报告 generation 汇总 FTS
 timeout 与熔断跳过次数。它只读日志和 manifest，不打开数据库，不输出 notebook id、问题、
 来源、正文、SQL 或错误文本。自定义存储目录时显式传
 `--index-root /path/to/storage/kg_index`。manifest 规模不含水位后的 delta；缺 manifest 的

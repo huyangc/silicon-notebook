@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from time import perf_counter
 from typing import Sequence
 
 from psycopg import sql
 
+from app.repositories.lexical_query import has_cjk
 from app.repositories.like_pattern import LIKE_ESCAPE_CHAR, escape_like_pattern
 from app.repositories.postgres.access_sql import (
     read_access_exists_clause,
@@ -196,8 +198,8 @@ def chunk_candidate_rows(connection, notebook_id: str, query: str, limit: int):
 # KNN page (which contains `%`-passing rows exclusively) comes back FULL, the
 # legacy top-k provably contains no ILIKE-only row and the pages agree up to
 # equal-similarity ties.  Only a SHORT page can be missing ILIKE-only rows, and
-# for exactly those terms the legacy statement is cheap (few trigram matches),
-# so phase 2 re-runs it for the short terms and replaces their rows wholesale.
+# for exactly those terms the split legacy arms are cheap (few trigram matches),
+# so phase 2 runs them for the short terms and replaces their rows wholesale.
 #
 # Within an equal-similarity tie class the two orders may pick different
 # members (measured: 285 rows named exactly "DAC" at similarity 1.0) — a
@@ -346,10 +348,20 @@ def _knn_index_row(connection, table_oid: int):
 
 
 def _knn_candidate_rows_for_terms(
-    connection, notebook_id: str, terms: list[str], per_term_limit: int
+    connection,
+    notebook_id: str,
+    terms: list[str],
+    per_term_limit: int,
+    *,
+    term_ranks: list[int] | None = None,
 ):
     """Phase 1: one KNN LATERAL per term, `%` arm only, early-stopping."""
-    term_values = ",".join("(%s,%s)" for _ in terms)
+    if term_ranks is None:
+        term_ranks = list(range(len(terms)))
+    if len(term_ranks) != len(terms):
+        raise ValueError("term_ranks must align with terms")
+    ranked_terms = list(zip(term_ranks, terms, strict=True))
+    term_values = ",".join("(%s,%s)" for _ in ranked_terms)
     statement = (
         f"WITH lexical_terms(term_rank,term) AS (VALUES {term_values}) "
         "SELECT candidate.candidate_id,lexical_terms.term_rank,"
@@ -366,7 +378,7 @@ def _knn_candidate_rows_for_terms(
         "candidate.candidate_similarity DESC,candidate.candidate_id COLLATE \"C\""
     )
     params = [
-        value for term_rank, term in enumerate(terms)
+        value for term_rank, term in ranked_terms
         for value in (term_rank, term)
     ]
     params.append(notebook_id)
@@ -375,25 +387,40 @@ def _knn_candidate_rows_for_terms(
 
 
 def _knowledge_rows_via_knn(
-    connection, notebook_id: str, terms: list[str], per_term_limit: int
+    connection,
+    notebook_id: str,
+    ranked_terms: list[tuple[int, str]],
+    per_term_limit: int,
+    routing_stats: dict[str, int | float] | None = None,
 ):
     """Two-phase KNN probe returning the legacy row shape and ordering."""
-    knn_rows = _knn_candidate_rows_for_terms(
-        connection, notebook_id, terms, per_term_limit
-    )
+    started = perf_counter() if routing_stats is not None else 0.0
+    try:
+        knn_rows = _knn_candidate_rows_for_terms(
+            connection,
+            notebook_id,
+            [term for _rank, term in ranked_terms],
+            per_term_limit,
+            term_ranks=[rank for rank, _term in ranked_terms],
+        )
+    finally:
+        if routing_stats is not None:
+            routing_stats["knn_seconds"] = perf_counter() - started
     counts: dict[int, int] = {}
     for row in knn_rows:
         rank = int(row["term_rank"])
         counts[rank] = counts.get(rank, 0) + 1
     short_ranks = [
-        rank for rank in range(len(terms))
+        rank for rank, _term in ranked_terms
         if counts.get(rank, 0) < int(per_term_limit)
     ]
     if not short_ranks:
         return knn_rows
-    # Phase 2: the short terms rerun the LEGACY statement and their rows are
-    # replaced wholesale — legacy output is exactly what the flag-off path
-    # would have produced for them, so no merge policy has to be invented.
+    if routing_stats is not None:
+        routing_stats["knn_short_fallback_term_count"] = len(short_ranks)
+    # Phase 2: the short terms rerun the split legacy arms and their rows are
+    # replaced wholesale — that output is exactly what the flag-off path
+    # produces for them, so no merge policy has to be invented.
     #
     # No COST guarantee rides on this: a short `%` page says nothing about the
     # ILIKE arm's cardinality (a term like "test" can have a near-empty `%` arm
@@ -402,25 +429,27 @@ def _knowledge_rows_via_knn(
     # statement is bounded by an index scan of the `%` condition, and each
     # phase runs under its own statement timeout — worst case the probe's wall
     # clock doubles; it never exceeds legacy by more than the KNN scan itself.
-    legacy_rows = _candidate_rows_for_terms(
-        connection,
-        table="knowledge_objects",
-        id_column="id",
-        text_expression=PAYLOAD_NAME_EXPRESSION,
-        notebook_id=notebook_id,
-        terms=[terms[rank] for rank in short_ranks],
-        per_term_limit=per_term_limit,
-        live_only=True,
-    )
-    rank_map = dict(enumerate(short_ranks))
+    term_by_rank = dict(ranked_terms)
+    started = perf_counter() if routing_stats is not None else 0.0
+    try:
+        legacy_rows = _candidate_rows_for_terms(
+            connection,
+            table="knowledge_objects",
+            id_column="id",
+            text_expression=PAYLOAD_NAME_EXPRESSION,
+            notebook_id=notebook_id,
+            ranked_terms=[(rank, term_by_rank[rank]) for rank in short_ranks],
+            per_term_limit=per_term_limit,
+            live_only=True,
+        )
+    finally:
+        if routing_stats is not None:
+            routing_stats["knn_short_fallback_seconds"] = perf_counter() - started
     short_rank_set = set(short_ranks)
     merged = [
         row for row in knn_rows if int(row["term_rank"]) not in short_rank_set
     ]
-    for row in legacy_rows:
-        item = dict(row)
-        item["term_rank"] = rank_map[int(row["term_rank"])]
-        merged.append(item)
+    merged.extend(legacy_rows)
     # Restore the single-statement output ordering across both phases.
     merged.sort(key=lambda row: (
         int(row["term_rank"]),
@@ -437,14 +466,19 @@ def _candidate_rows_for_terms(
     id_column: str,
     text_expression: str,
     notebook_id: str,
-    terms: list[str],
+    terms: list[str] | None = None,
+    ranked_terms: list[tuple[int, str]] | None = None,
     per_term_limit: int,
     live_only: bool = False,
     allowed_source_ids: list[str] | None = None,
     authoritative_source_filter: bool = False,
 ):
-    """Run one indexed LATERAL probe per term in a single PostgreSQL query."""
-    if not terms or per_term_limit <= 0:
+    """Run bounded indexed candidate probes per term in one PostgreSQL query."""
+    if ranked_terms is None:
+        ranked_terms = list(enumerate(terms or []))
+    elif terms is not None:
+        raise ValueError("pass terms or ranked_terms, not both")
+    if not ranked_terms or per_term_limit <= 0:
         return []
     try:
         target = _SEARCH_TARGETS[(table, id_column, text_expression)]
@@ -457,62 +491,109 @@ def _candidate_rows_for_terms(
 
     table_sql = sql.Identifier(target.table).as_string()
     id_sql = sql.Identifier(target.id_column).as_string()
-    predicates = [
+    scope_predicates = [
         f"{sql.Identifier(target.notebook_column).as_string()}=%s",
     ]
     if live_only:
-        predicates.append(target.live_predicate)
+        scope_predicates.append(target.live_predicate)
     source_params: list[object] = []
     if allowed_source_ids is not None:
         if not allowed_source_ids:
             return []
         if target.table == "knowledge_objects":
             if authoritative_source_filter:
-                predicates.append(
+                scope_predicates.append(
                     f"EXISTS (SELECT 1 FROM jsonb_array_elements("
                     f"CASE WHEN jsonb_typeof({table_sql}.evidence)='array' "
                     f"THEN {table_sql}.evidence ELSE '[]'::jsonb END) ev "
                     f"WHERE ev->>'source_id'=ANY(%s))"
                 )
             else:
-                predicates.append(
+                scope_predicates.append(
                     f"EXISTS (SELECT 1 FROM knowledge_object_sources kos "
                     f"WHERE kos.notebook_id={table_sql}.notebook_id "
                     f"AND kos.object_id={table_sql}.{id_sql} AND kos.source_id=ANY(%s))"
                 )
         elif target.table == "chunks":
-            predicates.append(f"{table_sql}.source_id=ANY(%s)")
+            scope_predicates.append(f"{table_sql}.source_id=ANY(%s)")
         else:
             raise ValueError("source-scoped lexical search target is unsupported")
         source_params.append(allowed_source_ids)
-    # The LIKE pattern is escaped and wrapped in Python so LIKE metacharacters
-    # in the term stay literal; the trigram arm keeps the raw term.
-    predicates.append(
-        f"({target.text_expression} OPERATOR(public.%%) lexical_terms.term OR "
-        f"{target.text_expression} ILIKE lexical_terms.like_pattern "
-        f"ESCAPE '{LIKE_ESCAPE_CHARACTER}')"
+    term_values = ",".join("(%s,%s,%s)" for _ in ranked_terms)
+    term_params = [
+        value
+        for term_rank, term in ranked_terms
+        for value in (term_rank, term, like_contains_pattern(term))
+    ]
+    if target.table != "knowledge_objects":
+        # The adaptive split is a KG-name optimization.  Chunk text has a
+        # different length/selectivity regime and keeps its characterized SQL.
+        match_predicate = (
+            f"({target.text_expression} OPERATOR(public.%%) lexical_terms.term OR "
+            f"{target.text_expression} ILIKE lexical_terms.like_pattern "
+            f"ESCAPE '{LIKE_ESCAPE_CHARACTER}')"
+        )
+        statement = (
+            f"WITH lexical_terms(term_rank,term,like_pattern) AS "
+            f"(VALUES {term_values}) "
+            "SELECT candidate.candidate_id,lexical_terms.term_rank,"
+            "candidate.candidate_similarity FROM lexical_terms "
+            "CROSS JOIN LATERAL ("
+            f"SELECT {id_sql} AS candidate_id,"
+            f"public.similarity({target.text_expression},lexical_terms.term) "
+            f"AS candidate_similarity FROM {table_sql} "
+            f"WHERE {' AND '.join([*scope_predicates, match_predicate])} "
+            f"ORDER BY candidate_similarity DESC,{id_sql} COLLATE \"C\" LIMIT %s"
+            ") AS candidate ORDER BY lexical_terms.term_rank,"
+            "candidate.candidate_similarity DESC,"
+            "candidate.candidate_id COLLATE \"C\""
+        )
+        params = [*term_params, notebook_id, *source_params, int(per_term_limit)]
+        return connection.execute(statement, params).fetchall()
+
+    # Keep `%` and ILIKE in independent bounded KG-name scans. PostgreSQL can
+    # then use the best trigram access path for each predicate instead of
+    # planning one bitmap OR and sorting its full result. Taking the top k from
+    # each arm is exact: no row below rank k in either arm can enter the top k
+    # of their union. UNION removes rows admitted by both predicates before the
+    # final legacy ordering and quota are applied.
+    scope_sql = " AND ".join(scope_predicates)
+    similarity_sql = (
+        f"public.similarity({target.text_expression},lexical_terms.term)"
     )
-    term_values = ",".join("(%s,%s,%s)" for _ in terms)
+    selection_sql = (
+        f"SELECT {id_sql} AS candidate_id,{similarity_sql} "
+        f"AS candidate_similarity FROM {table_sql} "
+    )
+    order_sql = f"candidate_similarity DESC,{id_sql} COLLATE \"C\""
     statement = (
         f"WITH lexical_terms(term_rank,term,like_pattern) AS (VALUES {term_values}) "
         "SELECT candidate.candidate_id,lexical_terms.term_rank,"
         "candidate.candidate_similarity FROM lexical_terms "
         "CROSS JOIN LATERAL ("
-        f"SELECT {id_sql} AS candidate_id,"
-        f"public.similarity({target.text_expression},lexical_terms.term) "
-        f"AS candidate_similarity FROM {table_sql} "
-        f"WHERE {' AND '.join(predicates)} "
-        f"ORDER BY candidate_similarity DESC,{id_sql} COLLATE \"C\" LIMIT %s"
+        "SELECT arm_candidates.candidate_id,arm_candidates.candidate_similarity "
+        "FROM (("
+        f"{selection_sql}WHERE {scope_sql} AND "
+        f"{target.text_expression} OPERATOR(public.%%) lexical_terms.term "
+        f"ORDER BY {order_sql} LIMIT %s"
+        ") UNION ("
+        f"{selection_sql}WHERE {scope_sql} AND "
+        f"{target.text_expression} ILIKE lexical_terms.like_pattern "
+        f"ESCAPE '{LIKE_ESCAPE_CHARACTER}' "
+        f"ORDER BY {order_sql} LIMIT %s"
+        ")) AS arm_candidates "
+        "ORDER BY arm_candidates.candidate_similarity DESC,"
+        "arm_candidates.candidate_id COLLATE \"C\" LIMIT %s"
         ") AS candidate ORDER BY lexical_terms.term_rank,"
         "candidate.candidate_similarity DESC,candidate.candidate_id COLLATE \"C\""
     )
-    params = [
-        value
-        for term_rank, term in enumerate(terms)
-        for value in (term_rank, term, like_contains_pattern(term))
-    ]
+    params = term_params
     params.append(notebook_id)
     params.extend(source_params)
+    params.append(int(per_term_limit))
+    params.append(notebook_id)
+    params.extend(source_params)
+    params.append(int(per_term_limit))
     params.append(int(per_term_limit))
     return connection.execute(statement, params).fetchall()
 
@@ -521,33 +602,91 @@ def knowledge_candidate_rows_for_terms(
     connection, notebook_id: str, terms: list[str], per_term_limit: int,
     allowed_source_ids: list[str] | None = None, *, allow_knn: bool = False,
     authoritative_source_filter: bool = False,
+    knn_max_term_chars: int | None = None,
+    routing_stats: dict[str, int | float] | None = None,
 ):
     # `allow_knn` is a hint, not a command: it engages only when the run is
     # unscoped (the source-scoped statement carries an EXISTS predicate the KNN
     # shape has no bench for) and a conforming GiST index actually exists.
-    # Every other combination is the byte-identical legacy statement.
+    # Every other combination uses the result-equivalent split legacy arms.
+    ranked_terms = list(enumerate(terms))
+    knn_terms = [
+        (rank, term) for rank, term in ranked_terms
+        if not has_cjk(term)
+        and (knn_max_term_chars is None or len(term) <= knn_max_term_chars)
+    ]
+    if routing_stats is not None:
+        routing_stats.update({
+            "term_count": len(ranked_terms),
+            "knn_term_count": 0,
+            "legacy_term_count": len(ranked_terms),
+            "knn_short_fallback_term_count": 0,
+            "knn_seconds": 0.0,
+            "legacy_seconds": 0.0,
+            "knn_short_fallback_seconds": 0.0,
+        })
     if (
         allow_knn
         and allowed_source_ids is None
-        and terms
+        and knn_terms
         and per_term_limit > 0
         and knn_name_index_available(connection)
     ):
-        return _knowledge_rows_via_knn(
-            connection, notebook_id, terms, per_term_limit
+        if routing_stats is not None:
+            routing_stats["knn_term_count"] = len(knn_terms)
+            routing_stats["legacy_term_count"] = len(ranked_terms) - len(knn_terms)
+        knn_rows = _knowledge_rows_via_knn(
+            connection,
+            notebook_id,
+            knn_terms,
+            per_term_limit,
+            routing_stats,
         )
-    return _candidate_rows_for_terms(
-        connection,
-        table="knowledge_objects",
-        id_column="id",
-        text_expression=PAYLOAD_NAME_EXPRESSION,
-        notebook_id=notebook_id,
-        terms=terms,
-        per_term_limit=per_term_limit,
-        live_only=True,
-        allowed_source_ids=allowed_source_ids,
-        authoritative_source_filter=authoritative_source_filter,
-    )
+        knn_ranks = {rank for rank, _term in knn_terms}
+        legacy_terms = [
+            (rank, term) for rank, term in ranked_terms if rank not in knn_ranks
+        ]
+        legacy_rows = []
+        if legacy_terms:
+            started = perf_counter() if routing_stats is not None else 0.0
+            try:
+                legacy_rows = _candidate_rows_for_terms(
+                    connection,
+                    table="knowledge_objects",
+                    id_column="id",
+                    text_expression=PAYLOAD_NAME_EXPRESSION,
+                    notebook_id=notebook_id,
+                    ranked_terms=legacy_terms,
+                    per_term_limit=per_term_limit,
+                    live_only=True,
+                )
+            finally:
+                if routing_stats is not None:
+                    routing_stats["legacy_seconds"] = perf_counter() - started
+        merged = [*knn_rows, *legacy_rows]
+        merged.sort(key=lambda row: (
+            int(row["term_rank"]),
+            -float(row["candidate_similarity"] or 0.0),
+            str(row["candidate_id"]),
+        ))
+        return merged
+    started = perf_counter() if routing_stats is not None else 0.0
+    try:
+        return _candidate_rows_for_terms(
+            connection,
+            table="knowledge_objects",
+            id_column="id",
+            text_expression=PAYLOAD_NAME_EXPRESSION,
+            notebook_id=notebook_id,
+            terms=terms,
+            per_term_limit=per_term_limit,
+            live_only=True,
+            allowed_source_ids=allowed_source_ids,
+            authoritative_source_filter=authoritative_source_filter,
+        )
+    finally:
+        if routing_stats is not None:
+            routing_stats["legacy_seconds"] = perf_counter() - started
 
 
 def chunk_candidate_rows_for_terms(

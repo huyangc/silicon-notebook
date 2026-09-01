@@ -74,4 +74,11 @@ def test_retrieve_scored_emits_ask_stage(repo_factory):
         "kg_ann_knn_ms",
         "kg_delta_ms",
         "kg_lexical_ms",
+        "kg_lexical_knn_ms",
+        "kg_lexical_legacy_ms",
+        "kg_lexical_short_fallback_ms",
+        "kg_lexical_term_count",
+        "kg_lexical_knn_term_count",
+        "kg_lexical_direct_legacy_term_count",
+        "kg_lexical_short_fallback_term_count",
     } <= ev.keys()
