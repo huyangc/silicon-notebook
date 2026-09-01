@@ -913,6 +913,7 @@ class RuntimeModelProvider:
             response=str(response or ""),
             reason=str(reason or "invalid_json_contract"),
             occurred_at=datetime.now(timezone.utc).isoformat(),
+            lifecycle_epoch=context.artifact_lifecycle_epoch,
         )
         try:
             sink(interaction)

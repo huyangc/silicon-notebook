@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -1092,6 +1093,98 @@ def test_model_output_issue_removes_payload_when_metadata_publish_fails(
 
     assert list(store.root.glob("**/artifact.json")) == []
     assert list(store.root.glob("**/issue.json")) == []
+
+
+def test_model_output_started_before_redaction_cannot_publish_afterward(tmp_path):
+    from app.domain.model_artifacts import current_model_artifact_lifecycle_epoch
+
+    store = AnalysisArtifactStore(tmp_path, retention_days=2)
+    notebook_id = "nb-stale-model"
+    stale_epoch = current_model_artifact_lifecycle_epoch(notebook_id)
+    store.redact_source(
+        notebook_id,
+        "src-deleted",
+        occurred_at="2026-08-30T01:00:00+00:00",
+    )
+
+    issue = store.record_model_output_issue(MalformedModelInteraction(
+        workload_id="ask_answer",
+        workload_label="问答回答",
+        model_area="ask",
+        failure_kind="invalid_json",
+        support_id="mdl-stale",
+        actor_id="user-1",
+        parent_id="ask-1",
+        notebook_id=notebook_id,
+        question="private question",
+        messages=({"role": "user", "content": "deleted source content"},),
+        schema_hint='{"answer":""}',
+        response="not-json",
+        reason="invalid_json",
+        occurred_at="2026-08-30T01:00:01+00:00",
+        lifecycle_epoch=stale_epoch,
+    ))
+
+    assert issue == {}
+    assert list(store.root.glob("**/artifact.json")) == []
+
+
+def test_redaction_waits_for_publication_then_removes_the_case(
+    tmp_path,
+    monkeypatch,
+):
+    from app.domain.model_artifacts import current_model_artifact_lifecycle_epoch
+    from app.repositories import analysis_artifacts as artifacts_module
+
+    store = AnalysisArtifactStore(tmp_path, retention_days=2)
+    notebook_id = "nb-publication-race"
+    interaction = MalformedModelInteraction(
+        workload_id="ask_answer",
+        workload_label="问答回答",
+        model_area="ask",
+        failure_kind="invalid_json",
+        support_id="mdl-race",
+        actor_id="user-1",
+        parent_id="ask-race",
+        notebook_id=notebook_id,
+        question="private question",
+        messages=({"role": "user", "content": "private content"},),
+        schema_hint='{"answer":""}',
+        response="not-json",
+        reason="invalid_json",
+        occurred_at="2026-08-30T01:00:00+00:00",
+        lifecycle_epoch=current_model_artifact_lifecycle_epoch(notebook_id),
+    )
+    artifact_write_started = threading.Event()
+    allow_artifact_write = threading.Event()
+    original_atomic_json = artifacts_module._atomic_json
+
+    def block_artifact(path, payload):
+        if path.name == "artifact.json":
+            artifact_write_started.set()
+            assert allow_artifact_write.wait(timeout=5)
+        original_atomic_json(path, payload)
+
+    monkeypatch.setattr(artifacts_module, "_atomic_json", block_artifact)
+    publisher = threading.Thread(
+        target=store.record_model_output_issue,
+        args=(interaction,),
+    )
+    publisher.start()
+    assert artifact_write_started.wait(timeout=5)
+    redactor = threading.Thread(
+        target=store.redact_notebook,
+        args=(notebook_id,),
+        kwargs={"occurred_at": "2026-08-30T01:00:01+00:00"},
+    )
+    redactor.start()
+    allow_artifact_write.set()
+    publisher.join(timeout=5)
+    redactor.join(timeout=5)
+
+    assert not publisher.is_alive()
+    assert not redactor.is_alive()
+    assert list(store.root.glob("**/artifact.json")) == []
 
 
 def test_source_deletion_conservatively_removes_notebook_model_content(tmp_path):

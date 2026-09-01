@@ -15,7 +15,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from app.domain.model_artifacts import MalformedModelInteraction
+from app.domain.model_artifacts import (
+    MalformedModelInteraction,
+    model_artifact_publication_scope,
+    model_artifact_redaction_scope,
+)
 
 
 ISSUE_CATEGORIES = frozenset({
@@ -232,18 +236,26 @@ class AnalysisArtifactStore:
             "source_deleted": False,
             "notebook_deleted": False,
         }
-        try:
-            _atomic_json(issue_dir / "artifact.json", artifact)
-            _atomic_json(issue_dir / "issue.json", issue)
-        except BaseException:
-            # A case is discoverable only through issue.json. Never leave a
-            # prompt/response behind when publishing that metadata fails.
-            shutil.rmtree(issue_dir, ignore_errors=True)
-            self._remove_empty_parents(
-                issue_dir.parent,
-                self.root / "issues",
-            )
-            raise
+        with model_artifact_publication_scope(
+            interaction.notebook_id
+        ) as current_epoch:
+            if (
+                interaction.lifecycle_epoch is not None
+                and interaction.lifecycle_epoch != current_epoch
+            ):
+                return {}
+            try:
+                _atomic_json(issue_dir / "artifact.json", artifact)
+                _atomic_json(issue_dir / "issue.json", issue)
+            except BaseException:
+                # A case is discoverable only through issue.json. Never leave a
+                # prompt/response behind when publishing that metadata fails.
+                shutil.rmtree(issue_dir, ignore_errors=True)
+                self._remove_empty_parents(
+                    issue_dir.parent,
+                    self.root / "issues",
+                )
+                raise
         return issue
 
     def load_model_output_artifact(
@@ -310,22 +322,30 @@ class AnalysisArtifactStore:
     def redact_source(
         self, notebook_id: str, source_id: str, *, occurred_at: str
     ) -> None:
-        self.delete_spreadsheet_manifest(notebook_id, source_id)
-        # Model prompts may contain evidence from several sources but the
-        # scheduler boundary does not own a trustworthy source-id ledger.
-        # Conservatively destroy every retained model payload for this
-        # notebook when any source is deleted instead of retaining content
-        # that may have come from the deleted source.
-        self._redact_model_outputs_for_notebook(notebook_id, occurred_at)
-        source_root = self.root / "issues" / notebook_id / source_id
-        if not source_root.is_dir():
-            return
-        try:
-            for metadata_path in list(source_root.glob("*/issue.json")):
-                self._redact_issue(metadata_path, occurred_at, notebook_deleted=False)
-        finally:
-            shutil.rmtree(source_root, ignore_errors=True)
-            self._remove_empty_parents(source_root.parent, self.root / "issues")
+        with model_artifact_redaction_scope(notebook_id):
+            self.delete_spreadsheet_manifest(notebook_id, source_id)
+            # Model prompts may contain evidence from several sources but the
+            # scheduler boundary does not own a trustworthy source-id ledger.
+            # Conservatively destroy every retained model payload for this
+            # notebook when any source is deleted instead of retaining content
+            # that may have come from the deleted source.
+            self._redact_model_outputs_for_notebook(notebook_id, occurred_at)
+            source_root = self.root / "issues" / notebook_id / source_id
+            if not source_root.is_dir():
+                return
+            try:
+                for metadata_path in list(source_root.glob("*/issue.json")):
+                    self._redact_issue(
+                        metadata_path,
+                        occurred_at,
+                        notebook_deleted=False,
+                    )
+            finally:
+                shutil.rmtree(source_root, ignore_errors=True)
+                self._remove_empty_parents(
+                    source_root.parent,
+                    self.root / "issues",
+                )
 
     def _redact_model_outputs_for_notebook(
         self, notebook_id: str, occurred_at: str
@@ -343,17 +363,22 @@ class AnalysisArtifactStore:
         self._remove_empty_parents(issue_root, self.root / "issues")
 
     def redact_notebook(self, notebook_id: str, *, occurred_at: str) -> None:
-        spreadsheet_root = self.root / "spreadsheets" / notebook_id
-        if spreadsheet_root.exists():
-            shutil.rmtree(spreadsheet_root, ignore_errors=True)
-        issue_root = self.root / "issues" / notebook_id
-        if not issue_root.is_dir():
-            return
-        try:
-            for metadata_path in list(issue_root.glob("*/*/issue.json")):
-                self._redact_issue(metadata_path, occurred_at, notebook_deleted=True)
-        finally:
-            shutil.rmtree(issue_root, ignore_errors=True)
+        with model_artifact_redaction_scope(notebook_id):
+            spreadsheet_root = self.root / "spreadsheets" / notebook_id
+            if spreadsheet_root.exists():
+                shutil.rmtree(spreadsheet_root, ignore_errors=True)
+            issue_root = self.root / "issues" / notebook_id
+            if not issue_root.is_dir():
+                return
+            try:
+                for metadata_path in list(issue_root.glob("*/*/issue.json")):
+                    self._redact_issue(
+                        metadata_path,
+                        occurred_at,
+                        notebook_deleted=True,
+                    )
+            finally:
+                shutil.rmtree(issue_root, ignore_errors=True)
 
     def _redact_issue(
         self, metadata_path: Path, occurred_at: str, *, notebook_deleted: bool
