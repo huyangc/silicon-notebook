@@ -28,6 +28,8 @@ SPREADSHEET_SUFFIXES = frozenset({".xlsx", ".xlsm", ".xls"})
 PLAN_OPERATIONS = frozenset({"profile", "aggregate", "top", "filter"})
 AGGREGATIONS = frozenset({"sum", "avg", "min", "max", "count"})
 FILTER_OPERATORS = frozenset({"eq", "ne", "gt", "gte", "lt", "lte", "contains"})
+SPREADSHEET_PLAN_MAX_FILTERS = 8
+SPREADSHEET_PLAN_MAX_COLUMNS = 20
 _SPREADSHEET_CONTEXT_TERMS = (
     "excel", "workbook", "spreadsheet", "worksheet", "sheet", "table", "data",
     "工作簿", "电子表格", "表格", "数据集", "数据",
@@ -800,6 +802,15 @@ class SpreadsheetAnalysisService:
         if aggregation not in AGGREGATIONS:
             aggregation = "count"
         headers = sheet["headers"]
+        raw_columns = plan.get("columns", [])
+        raw_filters = plan.get("filters", [])
+        if not isinstance(raw_columns, list) or not isinstance(raw_filters, list):
+            return fallback
+        if (
+            len(raw_columns) > SPREADSHEET_PLAN_MAX_COLUMNS
+            or len(raw_filters) > SPREADSHEET_PLAN_MAX_FILTERS
+        ):
+            return fallback
         normalized = {
             "source_id": source_id,
             "sheet": sheet["name"],
@@ -811,12 +822,12 @@ class SpreadsheetAnalysisService:
             "order": "asc" if str(plan.get("order") or "").lower() == "asc" else "desc",
             "columns": [
                 resolved
-                for value in plan.get("columns", []) if isinstance(value, str)
+                for value in raw_columns if isinstance(value, str)
                 if (resolved := self._resolve_header(value, headers))
-            ][:20],
+            ],
             "filters": [],
         }
-        for item in plan.get("filters", [])[:8] if isinstance(plan.get("filters"), list) else []:
+        for item in raw_filters:
             if not isinstance(item, dict):
                 continue
             column = self._resolve_header(str(item.get("column") or ""), headers)
@@ -1139,15 +1150,23 @@ class SpreadsheetAnalysisService:
     ) -> tuple[list[dict[str, Any]], list[str]]:
         sort_by = plan["sort_by"]
         reverse = plan.get("order") != "asc"
-        ordered = sorted(
-            rows,
-            key=lambda row: (
-                _numeric(row.get(sort_by)) is not None,
-                _numeric(row.get(sort_by)) or 0,
-                _display_cell(row.get(sort_by)),
-            ),
+        numeric_rows = [
+            (row, number)
+            for row in rows
+            if (number := _numeric(row.get(sort_by))) is not None
+        ]
+        numeric_rows.sort(
+            key=lambda pair: (pair[1], _display_cell(pair[0].get(sort_by))),
             reverse=reverse,
         )
+        nonnumeric_rows = sorted(
+            (
+                row for row in rows
+                if _numeric(row.get(sort_by)) is None
+            ),
+            key=lambda row: _display_cell(row.get(sort_by)).casefold(),
+        )
+        ordered = [row for row, _number in numeric_rows] + nonnumeric_rows
         headers = [key for key in ordered[0] if not key.startswith("__")] if ordered else []
         return ordered, headers
 

@@ -164,6 +164,58 @@ test("解析问题深链通过管理员只读端点精确打开来源详情", as
 });
 
 
+test("解析问题深链的迟到详情不会跨到另一个笔记本范围", async () => {
+  const user = userEvent.setup();
+  const stale = deferred<ActivitySource>();
+  window.history.replaceState(
+    {},
+    "",
+    "/dev/logs?view=activity&owner=user-1&activity_type=source&notebook_id=nb-1&source_id=src-1",
+  );
+  mocks.fetchUserNotebooks.mockResolvedValue(NOTEBOOKS);
+  mocks.fetchUserActivity.mockResolvedValue(page([]));
+  mocks.fetchUserNotebookSource.mockReturnValue(stale.promise);
+
+  view();
+
+  await waitFor(() => expect(mocks.fetchUserNotebookSource).toHaveBeenCalledTimes(1));
+  await user.click(await screen.findByRole("button", { name: /^笔记本二/ }));
+  stale.resolve(streamSource());
+
+  await waitFor(() => {
+    expect(mocks.fetchUserActivity).toHaveBeenLastCalledWith(
+      "user-1", expect.objectContaining({ notebookId: "nb-2" }),
+    );
+  });
+  expect(screen.queryByRole("heading", { name: "季度报告" })).not.toBeInTheDocument();
+  window.history.replaceState({}, "", "/dev/logs");
+});
+
+
+test("解析问题深链详情失败后可就地重试", async () => {
+  const user = userEvent.setup();
+  window.history.replaceState(
+    {},
+    "",
+    "/dev/logs?view=activity&owner=user-1&activity_type=source&notebook_id=nb-1&source_id=src-1",
+  );
+  mocks.fetchUserNotebooks.mockResolvedValue(NOTEBOOKS);
+  mocks.fetchUserActivity.mockResolvedValue(page([]));
+  mocks.fetchUserNotebookSource
+    .mockRejectedValueOnce(new Error("boom"))
+    .mockResolvedValueOnce(streamSource());
+
+  view();
+
+  expect(await screen.findByText("来源详情加载失败，请重试")).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "重试" }));
+
+  expect(await screen.findByRole("heading", { name: "季度报告" })).toBeInTheDocument();
+  expect(mocks.fetchUserNotebookSource).toHaveBeenCalledTimes(2);
+  window.history.replaceState({}, "", "/dev/logs");
+});
+
+
 test("左栏列出该用户的笔记本与界面词计数（提问用 questions，不是会话容器数）", async () => {
   mocks.fetchUserNotebooks.mockResolvedValue(NOTEBOOKS);
   mocks.fetchUserActivity.mockResolvedValue(page([]));

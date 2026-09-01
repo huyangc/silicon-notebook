@@ -188,6 +188,73 @@ def test_planner_selects_whitelisted_grouped_aggregate(tmp_path):
     assert result.rows[1].cells == {"Region": "West", "Amount · sum": "20"}
 
 
+@pytest.mark.parametrize(
+    "oversized_field,oversized_value",
+    [
+        ("filters", [{"column": "Region", "operator": "eq", "value": "East"}] * 9),
+        ("columns", ["Region"] * 21),
+    ],
+)
+def test_planner_plan_over_protocol_limits_falls_back_without_partial_execution(
+    tmp_path, oversized_field, oversized_value,
+):
+    path = tmp_path / "sales.xlsx"
+    _workbook(path)
+    settings = _settings(tmp_path)
+    service = SpreadsheetAnalysisService(
+        artifacts=AnalysisArtifactStore(Path(settings.storage_dir), retention_days=30),
+        settings=settings,
+        event_log=_EventLog(),
+        now=lambda: "2026-08-31T01:00:00+00:00",
+    )
+    assert service.compile_source(
+        _source(path), notebook_name="Notebook", owner_id="user-1",
+        row_element_ids={},
+    )
+
+    class _OversizedPlanner:
+        configured = True
+
+        def chat_json(self, *args, **kwargs) -> str:
+            plan = {
+                "source_id": "src-1",
+                "sheet": "Sales",
+                "operation": "filter",
+                "filters": [],
+                "columns": ["Region"],
+            }
+            plan[oversized_field] = oversized_value
+            return json.dumps(plan)
+
+    [result], _ = service.analyze(
+        notebook_id="nb-1",
+        source_ids=("src-1",),
+        question="筛选这个 Excel 的明细",
+        planner_client=_OversizedPlanner(),
+    )
+
+    assert result.operation == "profile"
+
+
+def test_top_sort_keeps_nonnumeric_values_last_in_both_directions():
+    rows = [
+        {"Amount": ""},
+        {"Amount": "n/a"},
+        {"Amount": 10},
+        {"Amount": 2},
+    ]
+
+    ascending, _ = SpreadsheetAnalysisService._top(
+        rows, {"sort_by": "Amount", "order": "asc"}
+    )
+    descending, _ = SpreadsheetAnalysisService._top(
+        rows, {"sort_by": "Amount", "order": "desc"}
+    )
+
+    assert [row["Amount"] for row in ascending] == [2, 10, "", "n/a"]
+    assert [row["Amount"] for row in descending] == [10, 2, "", "n/a"]
+
+
 def test_analysis_loads_manifest_from_owning_participant_notebook(tmp_path):
     path = tmp_path / "base-sales.xlsx"
     _workbook(path)

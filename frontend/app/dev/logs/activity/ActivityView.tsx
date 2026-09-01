@@ -104,6 +104,10 @@ export function ActivityView({
   );
   const sourceTarget = useMemo(initialSourceTarget, []);
   const sourceTargetKeyRef = useRef("");
+  const sourceTargetAttemptRef = useRef(-1);
+  const sourceTargetFailedRef = useRef(false);
+  const sourceTargetGenerationRef = useRef(0);
+  const [sourceTargetAttempt, setSourceTargetAttempt] = useState(0);
   const [expanded, setExpanded] = useState<string[]>([]);
   const [sources, setSources] = useState<Record<string, SourceListState>>({});
 
@@ -375,25 +379,60 @@ export function ActivityView({
       || sourceTarget.ownerId !== userId
       || !sourceTarget.notebookId
       || !sourceTarget.sourceId
-      || sourceTargetKeyRef.current === targetKey
-    ) return;
+    ) {
+      sourceTargetGenerationRef.current += 1;
+      sourceTargetKeyRef.current = "";
+      sourceTargetAttemptRef.current = -1;
+      sourceTargetFailedRef.current = false;
+      return;
+    }
+    const alreadyAttempted = sourceTargetKeyRef.current === targetKey
+      && sourceTargetAttemptRef.current === sourceTargetAttempt;
+    if (alreadyAttempted) {
+      if (notebookId !== sourceTarget.notebookId) {
+        sourceTargetGenerationRef.current += 1;
+      }
+      return;
+    }
     if (notebookId !== sourceTarget.notebookId) {
+      // A deep link that already started is consumed. Switching notebooks must
+      // invalidate its late response, not pull the operator back to the old scope.
+      if (sourceTargetKeyRef.current === targetKey) {
+        sourceTargetGenerationRef.current += 1;
+        return;
+      }
       setNotebookId(sourceTarget.notebookId);
       return;
     }
+    const generation = ++sourceTargetGenerationRef.current;
     sourceTargetKeyRef.current = targetKey;
+    sourceTargetAttemptRef.current = sourceTargetAttempt;
+    sourceTargetFailedRef.current = false;
+    const fresh = () => sourceTargetGenerationRef.current === generation
+      && sourceTargetKeyRef.current === targetKey
+      && sourceTargetAttemptRef.current === sourceTargetAttempt;
     fetchUserNotebookSource(
       userId, sourceTarget.notebookId, sourceTarget.sourceId,
     )
       .then((source) => {
-        if (sourceTargetKeyRef.current === targetKey) setSelected(source);
+        if (!fresh()) return;
+        sourceTargetFailedRef.current = false;
+        setSelected(source);
       })
       .catch((cause) => {
-        if (sourceTargetKeyRef.current !== targetKey) return;
+        if (!fresh()) return;
+        sourceTargetFailedRef.current = true;
         if (isForbidden(cause)) setForbidden(true);
         else setError(toUserMessage(cause, "来源详情加载失败，请重试"));
       });
-  }, [notebookId, sourceTarget, userId]);
+  }, [notebookId, sourceTarget, sourceTargetAttempt, userId]);
+
+  const retryActivity = useCallback(() => {
+    if (sourceTargetFailedRef.current) {
+      setSourceTargetAttempt((previous) => previous + 1);
+    }
+    void reload();
+  }, [reload]);
 
   useEffect(() => {
     if (!selected || selected.type !== "ask" || !userId) {
@@ -472,7 +511,7 @@ export function ActivityView({
           loading={pending || loading}
           now={now}
           onLoadMore={() => void loadMore()}
-          onRetryActivity={() => void reload()}
+          onRetryActivity={retryActivity}
           onActivityTypeChange={selectActivityType}
           onSelect={selectItem}
           selectedKey={selectedKey}

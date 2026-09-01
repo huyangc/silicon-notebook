@@ -2496,7 +2496,10 @@ reuses the deployment's existing `reasoning_agent` chat workload
 for at most one bounded planning call—there is no general-purpose SDK agent—and validates
 the result into the closed operations `profile`, `aggregate`, `top`, and `filter`. Aggregation
 and filters also use closed operator lists; execution is local and deterministic. A planner
-timeout or malformed plan falls back to a local profile, and any lane failure fails open to
+plan may name at most 8 filters and 20 result columns; exceeding either invariant invalidates
+the whole plan and falls back to a local profile, so no prefix of a user-requested operation
+is executed as though it were complete. A planner timeout or malformed plan likewise falls
+back to a local profile, and any lane failure fails open to
 the ordinary reasoning answer. Successful output adds a `spreadsheet` trace step, citable
 bounded evidence, and a `result_sets[]` item with `kind="spreadsheet"`; the card discloses
 scanned/result/displayed rows, formula-cache gaps, and partial preview coverage. The planner
