@@ -1170,6 +1170,31 @@ def test_the_consolidation_call_uses_its_own_output_budget(harness):
     assert AGENT_PROFILE_MAX_OUTPUT_TOKENS <= 8192
 
 
+def test_base_model_call_binds_the_notebook_artifact_scope(harness):
+    from app.services.model_work import ModelPriority, make_model_work_context
+
+    client = _Client(_reply([]))
+    contexts = []
+    original = client.chat_json
+
+    def spy(messages, schema_hint, **kwargs):
+        contexts.append(make_model_work_context(
+            workload_id=AGENT_PROFILE_WORKLOAD,
+            priority=ModelPriority.BACKGROUND,
+        ))
+        return original(messages, schema_hint, **kwargs)
+
+    client.chat_json = spy
+    service = _service(harness, client=client)
+    claimed = harness["profiles"].claim(NOTEBOOK_ID, "")
+
+    _run_base(service, claimed)
+
+    assert len(contexts) == 1
+    assert contexts[0].notebook_id == NOTEBOOK_ID
+    assert contexts[0].parent_id == claimed.token
+
+
 def test_evidence_the_statistics_never_served_is_dropped(harness):
     _add_source(harness, "src-a", elements=(("table", 2),))
     service = _service(
