@@ -472,6 +472,14 @@ test("a clamp-triggered second request stays within the same busy window", async
   });
   expect(api.listSources).toHaveBeenCalledTimes(2);
   expect(value!.sourcesPageLoading).toBe(true);
+  // Both `listSources` calls inside one busy window must share the same
+  // AbortController — a fresh controller for the clamp-triggered second
+  // call would leave the first one's abort unable to cancel it.
+  const firstSignal = api.listSources.mock.calls[0]?.[4] as AbortSignal;
+  const secondSignal = api.listSources.mock.calls[1]?.[4] as AbortSignal;
+  expect(secondSignal).toBeInstanceOf(AbortSignal);
+  expect(secondSignal).toBe(firstSignal);
+  expect(secondSignal.aborted).toBe(false);
 
   clamped.resolve({
     items: [source("clamped", "notebook-a")],
@@ -483,6 +491,140 @@ test("a clamp-triggered second request stays within the same busy window", async
   expect(value!.sourcesPageLoading).toBe(false);
   expect(value!.sourcesPage).toBe(1);
   expect(value!.sources.map((item) => item.id)).toEqual(["clamped"]);
+});
+
+// PR review P0: `isCurrent()` going false must not always mean "release
+// busy" — only when this call is still the busy window's holder
+// (`requestId === pageRequestRef.current`, i.e. no superseding request has
+// taken over). A caller-supplied `guard()` veto with no owner/actor
+// transition (the exact shape of page.tsx's poll-completion call sites,
+// whose own effect cleanup can flip `cancelled` before the response lands)
+// used to leave `sourcesPageLoading` stuck `true` forever, because the old
+// code released busy only when `isCurrent()` was true.
+test("a guard veto releases busy and never commits the vetoed response", async () => {
+  const page = deferred<{ items: SourceSummary[]; total_count: number; offset: number; limit: number }>();
+  api.listSources.mockReturnValueOnce(page.promise);
+  render(<Harness />);
+  act(() => {
+    value!.commitNotebookSnapshot({
+      actorId: "user-a",
+      notebookId: "notebook-a",
+      workspaceEpoch: 1,
+      page: {
+        items: [source("existing", "notebook-a")],
+        total_count: 1,
+        offset: 0,
+        limit: 50,
+      },
+    });
+  });
+
+  let loading!: Promise<void>;
+  act(() => {
+    loading = value!.loadSourcesPage({ page: 0, q: "", guard: () => false });
+  });
+  expect(value!.sourcesPageLoading).toBe(true);
+
+  page.resolve({
+    items: [source("vetoed", "notebook-a")],
+    total_count: 1,
+    offset: 0,
+    limit: 50,
+  });
+  await act(async () => loading);
+
+  expect(value!.sourcesPageLoading).toBe(false);
+  expect(effects.reportError).not.toHaveBeenCalled();
+  expect(value!.sourcesTotal).toBe(1);
+  expect(value!.sources.map((item) => item.id)).toEqual(["existing"]);
+});
+
+// A source-page request superseded by an owner/actor transition
+// (commitNotebookSnapshot here) must both cancel the network call for real
+// and release busy — the transition itself is responsible for the release
+// (it is not the request's own window to release: a new owner is already
+// active), and the request's own eventual AbortError-shaped rejection must
+// stay invisible to callers.
+test("commitNotebookSnapshot mid-request aborts it for real and releases busy", async () => {
+  const page = deferred<{ items: SourceSummary[]; total_count: number; offset: number; limit: number }>();
+  api.listSources.mockReturnValueOnce(page.promise);
+  render(<Harness />);
+  act(() => {
+    value!.commitNotebookSnapshot({
+      actorId: "user-a",
+      notebookId: "notebook-a",
+      workspaceEpoch: 1,
+      page: { items: [], total_count: 0, offset: 0, limit: 50 },
+    });
+  });
+
+  let loading!: Promise<void>;
+  act(() => {
+    loading = value!.loadSourcesPage({ page: 0, q: "" });
+  });
+  const signal = api.listSources.mock.calls[0]?.[4] as AbortSignal;
+  expect(signal.aborted).toBe(false);
+  expect(value!.sourcesPageLoading).toBe(true);
+
+  act(() => {
+    value!.commitNotebookSnapshot({
+      actorId: "user-a",
+      notebookId: "notebook-b",
+      workspaceEpoch: 2,
+      page: { items: [], total_count: 0, offset: 0, limit: 50 },
+    });
+  });
+  expect(signal.aborted).toBe(true);
+  expect(value!.sourcesPageLoading).toBe(false);
+
+  page.reject(new DOMException("aborted", "AbortError"));
+  await act(async () => {
+    await expect(loading).resolves.toBeUndefined();
+  });
+  expect(effects.reportError).not.toHaveBeenCalled();
+  expect(value!.sourcesPageLoading).toBe(false);
+});
+
+// Unmount is not one of the owner/actor invalidation sites (beginTransition /
+// activateActor / commitNotebookSnapshot / the render-time actor-change
+// branch) that the "AbortError can only fire when isCurrent() is already
+// false" invariant relies on — the unmount cleanup effect aborts
+// `pageAbortRef` directly, without bumping `pageRequestRef` or clearing
+// `ownerRef`. So after unmount, `isCurrent()` for the in-flight request is
+// still (structurally) true when its AbortError-shaped rejection arrives.
+// Without the explicit `error.name === "AbortError"` check, the old
+// isCurrent()-gated `throw` would fire for real here, rejecting the
+// `loadSourcesPage` promise and surfacing the cancellation as an error to
+// whichever caller is awaiting or `.catch`-ing it — after the component that
+// owned the request no longer exists.
+test("unmounting aborts the in-flight source page request without surfacing an AbortError", async () => {
+  const page = deferred<{ items: SourceSummary[]; total_count: number; offset: number; limit: number }>();
+  api.listSources.mockReturnValueOnce(page.promise);
+  const view = render(<Harness />);
+  act(() => {
+    value!.commitNotebookSnapshot({
+      actorId: "user-a",
+      notebookId: "notebook-a",
+      workspaceEpoch: 1,
+      page: { items: [], total_count: 0, offset: 0, limit: 50 },
+    });
+  });
+
+  let loading!: Promise<void>;
+  act(() => {
+    loading = value!.loadSourcesPage({ page: 0, q: "" });
+  });
+  const signal = api.listSources.mock.calls[0]?.[4] as AbortSignal;
+  expect(signal.aborted).toBe(false);
+
+  act(() => {
+    view.unmount();
+  });
+  expect(signal.aborted).toBe(true);
+
+  page.reject(new DOMException("aborted", "AbortError"));
+  await expect(loading).resolves.toBeUndefined();
+  expect(effects.reportError).not.toHaveBeenCalled();
 });
 
 // PR #557 regression: `sources`/`sourceElements` used to fall back to a bare
