@@ -1,7 +1,11 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 
-import { downloadReportArchive, ReportsPanel } from "../../app/report-view";
+vi.mock("../../app/waiting-wish-carousel", () => ({
+  WaitingWishCarousel: () => <div aria-label="测试许愿轮播" />,
+}));
+
+import { downloadReportArchive, ReportsPanel, type ReportDetailT } from "../../app/report-view";
 import { reportWorkspaceFixture } from "./report-workspace-fixture";
 
 afterEach(cleanup);
@@ -67,4 +71,42 @@ test("创建动作委托给 report workspace owner", async () => {
   );
   screen.getByRole("button", { name: "生成深度报告" }).click();
   expect(submitCreate).toHaveBeenCalledOnce();
+});
+
+test("深度报告生成等待态挂载许愿轮播，终态不挂载", () => {
+  const active = {
+    id: "report-running",
+    question: "分析未来趋势",
+    status: "generating",
+    progress: "正在撰写",
+    section_count: 1,
+    created_at: "2026-08-31T10:00:00Z",
+    created_by: "user-1",
+    outline: [{ title: "趋势", scope: "", sub_queries: [] }],
+    sections: [],
+    section_status: [],
+    gaps: [],
+    content_md: "",
+    references: [],
+    error: "",
+    understanding: {},
+  } satisfies ReportDetailT;
+  const view = render(
+    <ReportsPanel
+      notebookId="nb-1"
+      workspace={reportWorkspaceFixture({ active })}
+      setToast={vi.fn()}
+    />,
+  );
+
+  expect(screen.getByLabelText("测试许愿轮播")).toBeInTheDocument();
+
+  view.rerender(
+    <ReportsPanel
+      notebookId="nb-1"
+      workspace={reportWorkspaceFixture({ active: { ...active, status: "done" } })}
+      setToast={vi.fn()}
+    />,
+  );
+  expect(screen.queryByLabelText("测试许愿轮播")).not.toBeInTheDocument();
 });

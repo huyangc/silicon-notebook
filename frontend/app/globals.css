@@ -3747,6 +3747,179 @@ button.chat-session-card {
   font-size: 15px;
 }
 
+.waiting-wish-carousel {
+  display: grid;
+  gap: 9px;
+  width: 100%;
+  margin-top: 14px;
+  padding: 12px 14px;
+  border: 1px solid #d8dfeb;
+  border-radius: 12px;
+  background: color-mix(in srgb, #fff 88%, var(--soft));
+  color: var(--ink);
+}
+
+.waiting-wish-head,
+.waiting-wish-card,
+.waiting-wish-copy,
+.waiting-wish-actions,
+.waiting-wish-vote,
+.waiting-wish-nav,
+.waiting-wish-kind,
+.waiting-wish-state {
+  display: flex;
+  align-items: center;
+}
+
+.waiting-wish-head {
+  justify-content: space-between;
+  gap: 12px;
+  color: #596579;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.waiting-wish-head a,
+.waiting-wish-copy > a {
+  color: var(--blue);
+  text-decoration: none;
+}
+
+.waiting-wish-head a:hover,
+.waiting-wish-copy > a:hover {
+  text-decoration: underline;
+}
+
+.waiting-wish-card {
+  justify-content: space-between;
+  gap: 14px;
+  min-width: 0;
+}
+
+.waiting-wish-copy {
+  gap: 9px;
+  min-width: 0;
+}
+
+.waiting-wish-copy > strong {
+  min-width: 0;
+  color: #202938;
+  font-size: 13px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.waiting-wish-copy > a {
+  flex: 0 0 auto;
+  font-size: 12px;
+}
+
+.waiting-wish-kind {
+  flex: 0 0 auto;
+  gap: 4px;
+  padding: 3px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.waiting-wish-kind.feature {
+  background: #eef4ff;
+  color: #315fbc;
+}
+
+.waiting-wish-kind.bug {
+  background: #fff1ed;
+  color: #a7442e;
+}
+
+.waiting-wish-actions {
+  flex: 0 0 auto;
+  gap: 8px;
+}
+
+.waiting-wish-vote {
+  gap: 5px;
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid #d1d8e5;
+  border-radius: 999px;
+  background: #fff;
+  color: #596579;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.waiting-wish-vote.active {
+  border-color: #ef9eae;
+  background: #fff2f5;
+  color: #ba3152;
+}
+
+.waiting-wish-actions > small {
+  max-width: 150px;
+  color: #278058;
+  font-size: 11px;
+}
+
+.waiting-wish-actions > small.error,
+.waiting-wish-state.error {
+  color: var(--danger);
+}
+
+.waiting-wish-nav {
+  gap: 5px;
+  color: #778195;
+  font-size: 11px;
+}
+
+.waiting-wish-nav button,
+.waiting-wish-state button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #d8dfeb;
+  border-radius: 7px;
+  background: #fff;
+  color: #596579;
+  cursor: pointer;
+}
+
+.waiting-wish-nav button {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+}
+
+.waiting-wish-state {
+  gap: 8px;
+  min-height: 30px;
+  margin: 0;
+  color: #6c7687;
+  font-size: 12px;
+}
+
+.waiting-wish-state button {
+  padding: 4px 9px;
+}
+
+@media (max-width: 900px) {
+  .waiting-wish-card,
+  .waiting-wish-copy {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .waiting-wish-actions {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+
+  .waiting-wish-nav {
+    margin-left: auto;
+  }
+}
+
 /* --- 本次会话提问导航侧栏：右缘一列圆点，指针靠近时 Dock 式鱼眼放大，正对的一条浮出提问 --- */
 /* 导轨对准 .chat-body 那一行(.chat-panel 的第 2 行),不是对着整个面板居中。
    它导航的只是对话区,而面板下方会长出很高的兄弟——问题理解的确认卡最高占
