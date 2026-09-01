@@ -98,6 +98,15 @@ KG_EXTRACTED_CASES: tuple[tuple[str, bool, tuple[RunSpec, ...], bool], ...] = (
     # 覆盖判定应为 False。这条用例专门钉住「插入序 tie-break」这一分支:此前的用例
     # 里时序序号与插入位置永远相等,从未表达过「created_at 打平,只能靠插入序分胜负」
     # 的场景。
+    #
+    # 这条用例本身只钉「tie-break 方向」(后插入的 run 赢),而不是任何计划相关的
+    # 巧合。删掉 tie-break 子句(PG ``,r.ordinal DESC`` / SQLite ``,rowid DESC``)后,
+    # 这张用例表在默认执行计划下往往仍不变红——原因是 PG 默认走反向索引扫描,btree
+    # 在等值 ``created_at`` 键内隐式以堆 TID 收尾,恰好给出与显式 ``ordinal DESC``
+    # 相同的顺序,把回归掩盖住。真正会取错行的是排序计划(Seq Scan+Sort / SQLite 的
+    # 临时 B-TREE):PG 侧由 ``test_core_store_conformance.py`` 里强制关闭
+    # ``enable_indexscan``/``enable_bitmapscan`` 的专用测试钉住,SQLite 没有等价的
+    # 计划强制开关,只能钉住方向本身——两端在这一点上不对称,是刻意的。
     (
         "同刻两条 run:插入序决定胜者(后插入的 failed 赢)",
         True,

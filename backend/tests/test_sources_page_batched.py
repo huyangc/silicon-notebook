@@ -267,6 +267,13 @@ def test_kg_extracted_batch_query_is_driven_by_page_source_ids(repo):
         assert captured, (
             "_sources_from_rows must issue a kg_extracted judgement query "
             "touching knowledge_objects")
+        # 恰好一条含 knowledge_objects 的语句——若未来在它之前/之后再插入一条
+        # 也含 knowledge_objects 的语句,``captured[0]`` 会静默指向错误的那条,
+        # 后面对 captured_sql 的所有断言就名不副实。
+        assert len(captured) == 1, (
+            f"expected exactly one knowledge_objects-touching statement, "
+            f"got {len(captured)}:\n" + "\n---\n".join(sql for sql, _ in captured)
+        )
         captured_sql, captured_params = captured[0]
         assert "WITH page_sources(source_id) AS (VALUES" in captured_sql, (
             f"kg_extracted must be driven by the page's own source ids via a "
