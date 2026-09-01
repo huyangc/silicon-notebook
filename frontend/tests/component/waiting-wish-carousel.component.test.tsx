@@ -51,6 +51,7 @@ beforeEach(() => {
 afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 test("等待轮播分别读取可投票类型并按优先级展示", async () => {
@@ -90,6 +91,37 @@ test("轮播自动切换，悬停与焦点重叠时持续暂停且支持手动�
   fireEvent.blur(previous);
   act(() => { vi.advanceTimersByTime(WAITING_WISH_ROTATION_MS); });
   expect(screen.getByText(bug.title)).toBeInTheDocument();
+});
+
+test("运行中切换减少动态效果会立即停止或恢复轮播", async () => {
+  vi.useFakeTimers();
+  let reduced = false;
+  let preferenceListener: (() => void) | null = null;
+  vi.stubGlobal("matchMedia", vi.fn(() => ({
+    get matches() { return reduced; },
+    media: "(prefers-reduced-motion: reduce)",
+    onchange: null,
+    addEventListener: (_type: string, listener: () => void) => { preferenceListener = listener; },
+    removeEventListener: () => { preferenceListener = null; },
+    addListener: vi.fn(),
+    removeListener: vi.fn(),
+    dispatchEvent: vi.fn(),
+  })));
+  render(<WaitingWishCarousel />);
+  await act(async () => {});
+
+  act(() => { vi.advanceTimersByTime(WAITING_WISH_ROTATION_MS); });
+  expect(screen.getByText(bug.title)).toBeInTheDocument();
+
+  reduced = true;
+  act(() => { preferenceListener?.(); });
+  act(() => { vi.advanceTimersByTime(WAITING_WISH_ROTATION_MS); });
+  expect(screen.getByText(bug.title)).toBeInTheDocument();
+
+  reduced = false;
+  act(() => { preferenceListener?.(); });
+  act(() => { vi.advanceTimersByTime(WAITING_WISH_ROTATION_MS); });
+  expect(screen.getByText(feature.title)).toBeInTheDocument();
 });
 
 test("等待卡投票会调用真实许愿接口并在控件旁显示结果", async () => {
