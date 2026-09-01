@@ -62,6 +62,8 @@ import threading
 from collections import OrderedDict
 from typing import Dict, Optional, Tuple
 
+from app.repositories.sqlite.access_sql import NOTEBOOK_LIVE_SQL
+
 # non-deprecated is the "active" set most call sites want; USABLE_STATUSES is the
 # narrower reviewed set from knowledge_contracts (imported lazily to avoid a
 # repository->service import edge).
@@ -323,7 +325,7 @@ def warm_all(db: sqlite3.Connection, progress=None) -> int:
     ids = [
         r["id"]
         for r in db.execute(
-            "SELECT id FROM notebooks WHERE status != 'copying'"
+            f"SELECT id FROM notebooks WHERE {NOTEBOOK_LIVE_SQL}"
         ).fetchall()
     ]
     total = len(ids)

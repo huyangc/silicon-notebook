@@ -7,6 +7,7 @@ from typing import Callable, List, Literal, Sequence
 from app.core.activity_time import activity_retention_window
 from app.domain.source_display import source_display_title
 from app.models.notebooks import NotebookCreate, NotebookUpdate
+from app.repositories.sqlite.access_sql import NOTEBOOK_LIVE_SQL
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.mount_sql import (
     MOUNT_GATE_CLOSED_EXPR, MOUNT_JOIN, MOUNT_ORDER, MOUNT_ORIGIN_COLUMN,
@@ -271,16 +272,13 @@ class NotebookStore:
             )
         return notebook_id
 
-    def get_row(
-        self, notebook_id: str, *, include_copying: bool = False
-    ) -> sqlite3.Row:
-        """Fetch one notebooks row; raises KeyError when absent.  By default
-        status='copying' rows (copy_notebook's in-progress sentinel, P1-4) are
-        treated as not-yet-existing; pass include_copying=True for the
-        copy/sharing paths that must see them."""
-        sql = "SELECT * FROM notebooks WHERE id = ?"
-        if not include_copying:
-            sql += " AND status != 'copying'"
+    def get_row(self, notebook_id: str) -> sqlite3.Row:
+        """Fetch one notebooks row; raises KeyError when absent.  Rows hidden by
+        ``NOTEBOOK_LIVE_SQL`` (``status='copying'`` — copy_notebook's in-progress
+        sentinel, P1-4 — or the future ``deleting`` tombstone) are treated as
+        not-yet-existing; nothing in the tree still needs to see them (the
+        previous ``include_copying`` escape hatch had zero call sites)."""
+        sql = f"SELECT * FROM notebooks WHERE id = ? AND {NOTEBOOK_LIVE_SQL}"
         with self.database.connect() as db:
             row = db.execute(sql, (notebook_id,)).fetchone()
         if row is None:
@@ -355,7 +353,7 @@ class NotebookStore:
                 "FROM notebooks n LEFT JOIN unified_kg_state u "
                 "ON u.notebook_id=n.id LEFT JOIN kg_build_jobs j "
                 "ON j.id=n.indexing_pipeline_job_id "
-                "WHERE n.id=? AND n.status!='copying'",
+                f"WHERE n.id=? AND n.{NOTEBOOK_LIVE_SQL}",
                 (notebook_id,),
             ).fetchone()
         if row is None:
@@ -384,7 +382,7 @@ class NotebookStore:
                 "UPDATE notebooks SET indexing_pipeline=?,"
                 "indexing_pipeline_version=?,indexing_pipeline_generation=?,"
                 "indexing_pipeline_job_id=?,"
-                "updated_at=? WHERE id=? AND status!='copying'",
+                f"updated_at=? WHERE id=? AND {NOTEBOOK_LIVE_SQL}",
                 (
                     pipeline_id or None,
                     pipeline_version,

@@ -103,7 +103,7 @@ search 三处,各自手写「owner ∨ 只读成员」的 EXISTS 子查询。副
 
 * `*/query_store.py::joined_notebook_rows` —— 「我加入了哪些笔记本」的**列表**查询,
   不是对某个 notebook 的授权判定:它刻意只要成员那一半(自有库由另一条查询给出,
-  合进来会让自有库在「加入的」列表里重复出现),还多一个 `status != 'copying'` 过滤。
+  合进来会让自有库在「加入的」列表里重复出现),还多一个 `NOTEBOOK_LIVE_SQL` 过滤。
   群组库要不要进这个列表是产品决策(P1 的「群组」分区由 T3 单独投影),不是谓词
   一致性问题。
 * `*/sharing_store.py` 的 `add_member` / `remove_member` / `kick_all_members` /
@@ -112,6 +112,16 @@ search 三处,各自手写「owner ∨ 只读成员」的 EXISTS 子查询。副
 **双后端同修**:`postgres/access_sql.py` 是本文件的镜像(占位符为 `%s`),两份文件
 结构逐条对应,改一侧必须改另一侧。
 """
+
+# 「这行还不算存在」的可见性谓词单点(批 3·W1 T-1,摸底 5)。折的是 40 处读侧站点
+# (`postgres/` 20 + `sqlite/` 20,逐行枚举见守卫测试),供裸列名或带别名前缀
+# (如 `"nb." + NOTEBOOK_LIVE_SQL`)两种引用形式拼接。
+# ⚠ 写侧 6 处 copying 哨兵(sharing_store.py 的 compensate_copy/sweep_stale_copies)
+# 与生产者 1 处(notebook_sharing.py 的 `status="copying"` kwarg)绝不折进这里——
+# 语义是「专指半拷贝去物理删掉它」/「置位」,和这条「还不算存在」的读侧谓词不同义。
+# `deleting` 目前没有任何行会命中(批 3·W1 T-2 之前没有代码会写这个值),
+# 所以本次折叠是纯粹的单点化,行为零变化。
+NOTEBOOK_LIVE_SQL = "status NOT IN ('copying','deleting')"
 
 # 成员探测:该用户在 notebook_members 里是否有行。供 `is_member` 与两段式带锁探测复用。
 MEMBER_PROBE_SQL = (

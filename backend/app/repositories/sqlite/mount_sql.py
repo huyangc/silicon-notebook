@@ -48,12 +48,13 @@
 参数」的契约由此保住。同 owner 那一支刻意保留、没有被读权片段吸收:它是一次纯列
 比较,能在最常见的自有库场景上把后面几层 EXISTS 整个短路掉。
 
-status='copying' 的库(notebook_sharing.copy_notebook 深拷贝期间的哨兵状态)必须
-被全部 OR 分支一起挡住:深拷贝落库那一刻 created_by 已经是新 owner,但数据要
-跨多个事务才灌完,「同 owner」分支不查 status 的话会在拷贝完成前就先满足——
-另一个请求能把它当参考库挂上并从中检索,读到写入中途的半成品,与本仓库既有的
-「copying 状态尚不可用」不变量(notebook_catalog.NotebookSummaryQuery.get /
-notebook_store.get_row 等处同款排除)矛盾(codex 评审 PR#304 第 3 轮 P2 #1)。
+被 `NOTEBOOK_LIVE_SQL` 挡在外面的库(`status='copying'`——notebook_sharing.
+copy_notebook 深拷贝期间的哨兵状态)必须被全部 OR 分支一起挡住:深拷贝落库那一刻
+created_by 已经是新 owner,但数据要跨多个事务才灌完,「同 owner」分支不查 status
+的话会在拷贝完成前就先满足——另一个请求能把它当参考库挂上并从中检索,读到写入
+中途的半成品,与本仓库既有的「copying 状态尚不可用」不变量(notebook_catalog.
+NotebookSummaryQuery.get / notebook_store.get_row 等处同款排除)矛盾(codex 评审
+PR#304 第 3 轮 P2 #1)。
 tier='base' 分支同样带上这条检查,不依赖「copy_notebook 只产出 tier='personal'
 副本」这个事实性前提才安全。
 
@@ -63,6 +64,7 @@ tier='base' 分支同样带上这条检查,不依赖「copy_notebook 只产出 t
 """
 
 from app.repositories.sqlite.access_sql import (
+    NOTEBOOK_LIVE_SQL,
     everyone_grant_expr,
     member_exists_expr,
     restricted_grant_access_expr,
@@ -98,9 +100,9 @@ _MOUNTER_NOT_SHARED_EXPR = (
 )
 
 # 有效性谓词。作为布尔表达式单独取用(如 list_mount_edges 的 active 标记)。
-# b.status != 'copying':被挂库自己正在深拷贝中(半成品)时,四个 OR 分支都不算数。
+# b.NOTEBOOK_LIVE_SQL:被挂库自己正在深拷贝中(半成品)时,四个 OR 分支都不算数。
 MOUNT_VALID_EXPR = (
-    "(b.status != 'copying' AND (b.tier = 'base' OR b.created_by = a.created_by"
+    "(b." + NOTEBOOK_LIVE_SQL + " AND (b.tier = 'base' OR b.created_by = a.created_by"
     " OR " + everyone_grant_expr("b.id")
     + " OR (" + _BORROWED_READ_EXPR + " AND " + _MOUNTER_NOT_SHARED_EXPR + ")"
     "))"
@@ -111,7 +113,7 @@ MOUNT_VALID_EXPR = (
 # 对被挂库**仍有合法读权**,名字不该被遮蔽,文案要给出「取消共享即可恢复」的
 # 出口。与 MOUNT_VALID_EXPR 同源派生,消费点不许手拼。
 MOUNT_GATE_CLOSED_EXPR = (
-    "(b.status != 'copying' AND " + _BORROWED_READ_EXPR
+    "(b." + NOTEBOOK_LIVE_SQL + " AND " + _BORROWED_READ_EXPR
     + " AND NOT " + _MOUNTER_NOT_SHARED_EXPR + ")"
 )
 

@@ -53,6 +53,7 @@ from app.repositories.ports import (
 )
 from app.repositories.sqlite.access_sql import (
     ADMIN_GRANT_PROBE_SQL,
+    NOTEBOOK_LIVE_SQL,
     admin_grant_probe_params,
     read_access_clause,
     read_access_params,
@@ -776,7 +777,7 @@ class GroupStore:
                 "JOIN notebooks nb ON nb.id=ng.notebook_id "
                 "LEFT JOIN users u ON u.id=nb.created_by "
                 f"WHERE {principal_clause} AND ng.principal_id=? "
-                "AND nb.status != 'copying' "
+                f"AND nb.{NOTEBOOK_LIVE_SQL} "
                 "ORDER BY nb.created_at ASC, nb.id ASC, ng.id ASC",
                 (group_id,),
             ).fetchall()

@@ -47,6 +47,7 @@ from app.repositories.ports import (
 from app.repositories.postgres.access_sql import (
     ADMIN_GRANT_GROUP_CHAIN_FOR_SHARE_SQL,
     ADMIN_GRANT_USER_ARM_FOR_SHARE_SQL,
+    NOTEBOOK_LIVE_SQL,
     admin_grant_group_chain_params,
     admin_grant_user_arm_params,
     read_access_clause,
@@ -758,7 +759,7 @@ class GroupStore:
                 "JOIN notebooks nb ON nb.id=ng.notebook_id "
                 "LEFT JOIN users u ON u.id=nb.created_by "
                 f"WHERE {principal_clause} "
-                "AND ng.principal_id=%s AND nb.status != 'copying' "
+                f"AND ng.principal_id=%s AND nb.{NOTEBOOK_LIVE_SQL} "
                 'ORDER BY nb.created_at ASC, nb.id COLLATE "C" ASC, '
                 'ng.id COLLATE "C" ASC',
                 (group_id,),

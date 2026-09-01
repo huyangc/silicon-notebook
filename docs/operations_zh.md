@@ -601,7 +601,7 @@ python scripts/mineru_batch_parse.py --only-failed  # 只重跑上次失败的�
 
 可移植 phase 还包括 `question-index`；它与下列 phase 一样按 `DATABASE_URL` 选择 SQLite 或 PostgreSQL。
 
-`ingest`、`kg`、`index`、`all`、`embed`、`metadata`、`reparse`、`backfill-source-index`、`backfill-chunk-elements`、`backfill-images` 会按 `DATABASE_URL` 选择 SQLite 或 PostgreSQL。PostgreSQL 直连维护严格属于离线操作：先停止 API 和全部后台 writer，再给命令追加 `--confirm-service-stopped`。该参数只声明运维人员已经停服，不会自行停止服务。数据库级 advisory lock 会 fail-fast 阻止两个维护 CLI 重叠；来源、完整/限量 KG 目标、metadata、reextract、向量、关系和反向索引驱动均使用有界 keyset 分页——包括 `index` 阶段的整库向量矩阵加载，现在按页有界读取而不是一条无界 `SELECT`。大库离线维护仍可能在这些流程里**其余**的长语句上撞到在线默认的 `POSTGRES_STATEMENT_TIMEOUT_SECONDS`（`30`，按交互式请求定的）；给维护 CLI 进程本身的环境变量调大该值（例如 `86400`）——矩阵加载已不再是流水线里最大的单条语句，但离线流水线的其余部分（以及慢盘上的分页矩阵读取本身）仍受同一条逐语句超时约束。在线维护仍应走应用/API，`--dry-run` 不打开 repository——**除 `backfill-images` 外**：它的 dry-run 是一次只读的**数据库**演练（要读每个来源的元素与 chunk 才报得出能补多少张），所以在 PostgreSQL 上同样需要 `--confirm-service-stopped`。`vectors-to-blob` 刻意只支持 SQLite，因为 PostgreSQL 向量已经是 `bytea`；PostgreSQL 会在打开 repository 前明确拒绝。
+`ingest`、`kg`、`index`、`all`、`embed`、`metadata`、`reparse`、`backfill-source-index`、`backfill-chunk-elements`、`backfill-images` 会按 `DATABASE_URL` 选择 SQLite 或 PostgreSQL。PostgreSQL 直连维护严格属于离线操作：先停止 API 和全部后台 writer，再给命令追加 `--confirm-service-stopped`。该参数只声明运维人员已经停服，不会自行停止服务。数据库级 advisory lock 会 fail-fast 阻止两个维护 CLI 重叠；来源、完整/限量 KG 目标、metadata、reextract、向量、关系和反向索引驱动均使用有界 keyset 分页——包括 `index` 阶段的整库向量矩阵加载，现在按页有界读取而不是一条无界 `SELECT`。大库离线维护仍可能在这些流程里**其余**的长语句上撞到在线默认的 `POSTGRES_STATEMENT_TIMEOUT_SECONDS`（`30`，按交互式请求定的——这是仓库默认值，生产实际值以部署配置为准）；给维护 CLI 进程本身的环境变量调大该值（例如 `86400`）——矩阵加载已不再是流水线里最大的单条语句，但离线流水线的其余部分（以及慢盘上的分页矩阵读取本身）仍受同一条逐语句超时约束。在线维护仍应走应用/API，`--dry-run` 不打开 repository——**除 `backfill-images` 外**：它的 dry-run 是一次只读的**数据库**演练（要读每个来源的元素与 chunk 才报得出能补多少张），所以在 PostgreSQL 上同样需要 `--confirm-service-stopped`。`vectors-to-blob` 刻意只支持 SQLite，因为 PostgreSQL 向量已经是 `bytea`；PostgreSQL 会在打开 repository 前明确拒绝。
 
 把一个目录里的 Markdown(及偶发 PDF)离线复用现有管线灌进库。分两阶段:
 先 `ingest`(无 LLM、快,chunk 问答即可用),再 `kg`(LLM 抽取,单独可恢复)。
@@ -797,7 +797,7 @@ PYTHONPATH=backend python scripts/build_scale_index.py \
 ```
 
 在线默认 `POSTGRES_STATEMENT_TIMEOUT_SECONDS=30` 是按交互式请求定的，会把多小时的构建
-杀掉。这个值在**组装仓库之前**写进 settings：连接池的 configure/reset 回调会
+杀掉。`30` 是仓库默认值，生产实际值以部署配置为准。这个值在**组装仓库之前**写进 settings：连接池的 configure/reset 回调会
 `RESET ALL`，在借出连接上 `SET statement_timeout` 会被抹掉，是个典型的假达成。
 
 #### 异机三步：build → scp → import

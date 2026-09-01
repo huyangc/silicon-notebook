@@ -493,14 +493,14 @@ def list_admin_analysis_issues(
 
 
 def _notebook_owned_by_user(user_id: str, notebook_id: str) -> bool:
-    """口径:notebooks.created_by = user_id AND status != 'copying'。
+    """口径:notebooks.created_by = user_id AND access_sql.NOTEBOOK_LIVE_SQL。
 
     ⚠ 刻意**不**走 list_user_notebooks:那是一次全量用量聚合(1 条 notebooks 查询 +
     4 条覆盖该用户**全部**笔记本的 GROUP BY COUNT),只为判断一行的归属;而左栏每展开
     一个笔记本就发一次。判据本身是一行的事,用 notebook_exists_for_owner 一条带主键的
     SELECT 1 回答——那正是 list_user_activity 内部 owned 分支已经在用的同一条谓词
     (见两个 query_store 的 `SELECT 1 FROM notebooks WHERE id=? AND created_by=?
-    AND status != 'copying'`),口径逐字相同,没有第二份拼写。
+    AND {access_sql.NOTEBOOK_LIVE_SQL}`),口径逐字相同,没有第二份拼写。
     """
     return admin_query_repository().notebook_exists_for_owner(notebook_id, user_id)
 

@@ -74,7 +74,7 @@ def test_source_count_excludes_hidden_projection_sources(repo):
 
 def test_notebook_exists_for_owner_matches_the_activity_owned_predicate(repo):
     """归属判定是**一行**的问题(F8);谓词必须与 list_user_activity 的 owned 分支
-    逐字相同——包括 ``status != 'copying'`` 那一半(深拷贝中的库不算)。"""
+    逐字相同——包括 ``NOTEBOOK_LIVE_SQL`` 那一半(深拷贝中的库不算)。"""
     _seed(repo)
     assert repo.notebook_exists_for_owner("n1", "u1") is True
     assert repo.notebook_exists_for_owner("n3", "u1") is False   # copying

@@ -718,7 +718,8 @@ limited KG-target, metadata, re-extraction, vector, relation, and reverse-index 
 keyset pages — including the `index` stage's whole-notebook embedding-matrix load, which reads a
 bounded page of vectors per statement instead of one unbounded `SELECT`. Large offline maintenance
 runs can still hit the online `POSTGRES_STATEMENT_TIMEOUT_SECONDS` default (`30`, sized for
-interactive requests) on the *other* long-running statements in these flows; set a larger value
+interactive requests — this is the repository default; the production value in effect is whatever
+the deployment configuration sets it to) on the *other* long-running statements in these flows; set a larger value
 (e.g. `86400`) in the environment of the maintenance CLI process itself for a large database — the
 matrix load is no longer the pipeline's largest single statement, but the rest of the offline
 pipeline (and a paged matrix read on a slow disk) still runs under the same per-statement timeout. Online maintenance should
@@ -939,7 +940,9 @@ PYTHONPATH=backend python scripts/build_scale_index.py \
 ```
 
 The online default `POSTGRES_STATEMENT_TIMEOUT_SECONDS=30` is sized for
-interactive requests and would kill a multi-hour build. The value is written
+interactive requests and would kill a multi-hour build. `30` is the repository
+default; the production value in effect is whatever the deployment configuration
+sets it to. The value is written
 into settings **before the repository is composed**: the pool's
 configure/reset callbacks issue `RESET ALL`, so a `SET statement_timeout` on a
 borrowed connection is wiped — a classic false completion.
