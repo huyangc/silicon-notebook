@@ -21,6 +21,7 @@ from app.repositories.sqlite.group_store import GroupStore
 from app.repositories.sqlite.identity_store import IdentityStore
 from app.repositories.sqlite.index_projection_store import IndexProjectionStore
 from app.repositories.sqlite.kg_build_job_store import KgBuildJobStore
+from app.repositories.sqlite.notebook_delete_job_store import NotebookDeleteJobStore
 from app.repositories.sqlite.knowhow_history_store import KnowhowHistoryStore
 from app.repositories.sqlite.knowhow_store import KnowhowStore
 from app.repositories.sqlite.knowhow_transfer_store import KnowhowTransferStore
@@ -64,6 +65,7 @@ class SqlitePersistenceBundle(PersistenceBundle):
     governance: GovernanceStore
     index_projection: IndexProjectionStore
     kg_build_jobs: KgBuildJobStore
+    notebook_delete_jobs: NotebookDeleteJobStore
     catalog: CatalogStore
     knowhow: KnowhowStore
     knowhow_history: KnowhowHistoryStore
@@ -123,6 +125,9 @@ class SqlitePersistenceBundleFactory:
         kg_build_jobs = KgBuildJobStore(
             database, new_id=seams.new_id, now=seams.now
         )
+        notebook_delete_jobs = NotebookDeleteJobStore(
+            database, new_id=seams.new_id, now=seams.now
+        )
         catalog = CatalogStore(database, new_id=seams.new_id, now=seams.now)
         groups = GroupStore(database, new_id=seams.new_id, now=seams.now)
         knowhow = KnowhowStore(database, new_id=seams.new_id, now=seams.now)
@@ -165,6 +170,7 @@ class SqlitePersistenceBundleFactory:
             governance=governance,
             index_projection=index_projection,
             kg_build_jobs=kg_build_jobs,
+            notebook_delete_jobs=notebook_delete_jobs,
             catalog=catalog,
             knowhow=knowhow,
             knowhow_history=knowhow_history,

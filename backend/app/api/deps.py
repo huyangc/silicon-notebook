@@ -43,6 +43,14 @@ def analysis_issue_repository():
 def notebook_catalog_repository() -> NotebookCatalogRepository:
     return repository()._runtime.catalog  # type: ignore[attr-defined]
 
+def notebook_delete_repository():
+    """批 3·W1 PR-3 §T-2 的删除 tombstone + 后台作业入口；不进
+    `NotebookCatalogRepository` Protocol——`delete_notebook`（同步、
+    全量、供测试/eval 直调）与新的 `request_delete`（202、tombstone、
+    后台作业）是两个不同的方法名，刻意不合并（见
+    `services/notebook_delete.py` 模块 docstring）。"""
+    return repository()._runtime.notebook_delete  # type: ignore[attr-defined]
+
 def notebook_access_repository() -> NotebookAccessRepository:
     return repository()._runtime.sharing  # type: ignore[attr-defined]
 

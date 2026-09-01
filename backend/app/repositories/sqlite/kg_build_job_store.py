@@ -99,6 +99,17 @@ class KgBuildJobStore:
             raise KeyError(job_id)
         return self._row(row)
 
+    def has_running(self, notebook_id: str) -> bool:
+        """Quiesce leg A (batch 3·W1 PR-3 §T-3.3). PostgreSQL twin's
+        docstring has the full index rationale."""
+        with self.database.connect() as db:
+            row = db.execute(
+                "SELECT 1 FROM kg_build_jobs WHERE notebook_id=? "
+                "AND status='running'",
+                (notebook_id,),
+            ).fetchone()
+        return row is not None
+
     def latest(self, notebook_id: str) -> dict | None:
         with self.database.connect() as db:
             return self.latest_on(db, notebook_id)

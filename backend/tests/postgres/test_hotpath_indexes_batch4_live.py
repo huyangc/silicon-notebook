@@ -251,7 +251,7 @@ def test_install_builds_the_three_new_indexes_and_is_idempotent(postgres_databas
     # true no-op ledger entry once the offline CONCURRENTLY builder already
     # built the indexes online -- and its validation DO block accepts them
     # (that is this test's accept-path coverage).
-    assert PostgresMigrator(postgres_database).migrate() == 48
+    assert PostgresMigrator(postgres_database).migrate() == 49
     after_migration = inspect_hotpath_indexes(database_url, schema=schema)
     assert after_migration == state
 
@@ -265,7 +265,7 @@ def test_both_trigram_keys_of_the_composite_are_live_and_chosen(postgres_databas
     ``(notebook_id, lower(file_name))``, each leaving the other key free.
     Asserted with NO planner knobs.
     """
-    assert PostgresMigrator(postgres_database).migrate() == 48
+    assert PostgresMigrator(postgres_database).migrate() == 49
     notebook_id = _seed_search_corpus(postgres_database)
 
     arms = (
@@ -316,7 +316,7 @@ def test_the_or_of_both_arms_bitmap_ors_one_composite_index(postgres_database):
     ``sources`` when the pattern is too short for trigram extraction. BitmapOr
     inside one scan node is strictly the better shape.
     """
-    assert PostgresMigrator(postgres_database).migrate() == 48
+    assert PostgresMigrator(postgres_database).migrate() == 49
     notebook_id = _seed_search_corpus(postgres_database)
 
     with postgres_database.connect() as connection:
@@ -346,7 +346,7 @@ def test_author_leg_is_served_by_its_own_new_gin_index(postgres_database):
     whole (a parallel sequential scan inside a hashed subplan) -- the dominant
     term in the 363ms COUNT. It must now enter through its own index, and this
     is asserted with NO planner knobs at all."""
-    assert PostgresMigrator(postgres_database).migrate() == 48
+    assert PostgresMigrator(postgres_database).migrate() == 49
     notebook_id = _seed_search_corpus(postgres_database)
 
     with postgres_database.connect() as connection:
@@ -381,7 +381,7 @@ def test_paper_title_leg_is_served_by_its_own_new_gin_index(postgres_database):
     a green here is evidence for production too, not merely at production
     scale.
     """
-    assert PostgresMigrator(postgres_database).migrate() == 48
+    assert PostgresMigrator(postgres_database).migrate() == 49
     notebook_id = _seed_search_corpus(postgres_database)
 
     with postgres_database.connect() as connection:
@@ -413,7 +413,7 @@ def test_list_sources_page_issues_the_union_shape_and_its_plan_uses_the_indexes(
     SQL string cannot drift out of sync with the real one) and the plan
     PostgreSQL produces for it.
     """
-    assert PostgresMigrator(postgres_database).migrate() == 48
+    assert PostgresMigrator(postgres_database).migrate() == 49
     notebook_id = _seed_search_corpus(postgres_database)
     sources = SourceStore(postgres_database, now=lambda: normalize_timestamp(NOW))
 
@@ -531,7 +531,7 @@ def test_migration_rejects_a_same_named_wrong_shape_index(postgres_database):
     assert migrator.migrate(target_version=47) == 47
     with postgres_database.write() as db:
         db.execute("DROP INDEX idx_sources_nb_title_file_trgm")
-    assert migrator.migrate() == 48
+    assert migrator.migrate() == 49
 
 
 @pytest.mark.xdist_group(name="postgres_hotpath_indexes_batch4")
@@ -556,7 +556,7 @@ def test_migration_rejects_a_gin_missing_the_partial_predicate(postgres_database
     assert migrator.migrate(target_version=47) == 47
     with postgres_database.write() as db:
         db.execute("DROP INDEX idx_sources_nb_title_file_trgm")
-    assert migrator.migrate() == 48
+    assert migrator.migrate() == 49
 
 
 @pytest.mark.xdist_group(name="postgres_hotpath_indexes_batch4")
@@ -607,7 +607,7 @@ def test_migration_rejects_an_invalid_same_named_index(postgres_database):
     assert migrator.migrate(target_version=47) == 47
     with postgres_database.write() as db:
         db.execute("DROP INDEX idx_sources_nb_title_file_trgm")
-    assert migrator.migrate() == 48
+    assert migrator.migrate() == 49
 
 
 @pytest.mark.xdist_group(name="postgres_hotpath_indexes_batch4")
@@ -631,7 +631,7 @@ def test_migration_accepts_a_prebuilt_index_with_reloptions(postgres_database):
         db.execute(
             "ALTER INDEX idx_sources_nb_title_file_trgm SET (fastupdate = off)"
         )
-    assert migrator.migrate() == 48
+    assert migrator.migrate() == 49
     schema = _schema_of(postgres_database)
     state = inspect_hotpath_indexes(
         postgres_database.settings.database_url, schema=schema

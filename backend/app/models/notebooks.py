@@ -302,6 +302,13 @@ class NotebookTemplate(BaseModel):
     taxonomy: List[str] = Field(default_factory=list)
 
 
+class NotebookDeleteResponse(BaseModel):
+    """202 响应体（批 3·W1 PR-3 §T-2/§5）：CAS tombstone 已提交、删除作业已排入
+    后台，实际清理异步进行。前端刻意零改动——`requestVoid` 只看 2xx 就丢弃
+    body，`status` 字段只为 API 契约的可读性存在，不驱动任何前端逻辑。"""
+    status: str = "deleting"
+
+
 class SetTierRequest(BaseModel):
     """Payload for POST /notebooks/{id}/tier."""
     tier: str   # "base" | "personal"

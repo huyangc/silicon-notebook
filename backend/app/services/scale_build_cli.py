@@ -418,10 +418,15 @@ def claim_notebook(repository, notebook_id: str) -> Iterator[object]:
             "changed; retry once the other builds on this host finish."
         )
     if handle is None:
+        # 批 3·W1 PR-3 §4.3: this notebook's exclusive claim is shared with
+        # notebook delete's phase 4 (§T-3b) -- "held elsewhere" is not
+        # necessarily a build anymore.
         raise ScaleBuildCliFailure(
-            f"the scale-build claim for {notebook_id} is held by another process "
-            "(a service worker, a maintenance CLI, or another run of this tool). "
-            "Nothing was changed; retry once it finishes."
+            f"the exclusive claim for {notebook_id} is held by another "
+            "process (a service worker building/folding its scale index, a "
+            "maintenance CLI, another run of this tool, or a notebook "
+            "delete in progress). Nothing was changed; retry once it "
+            "finishes."
         )
     try:
         yield handle

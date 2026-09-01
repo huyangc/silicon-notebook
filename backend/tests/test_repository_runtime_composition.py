@@ -97,6 +97,8 @@ RUNTIME_ATTRIBUTES = [
     "model_status_store",
     "models",
     "notebook_copies",
+    "notebook_delete",
+    "notebook_delete_jobs",
     "notebook_store",
     "notebook_summaries",
     "on_source_vectors_written",

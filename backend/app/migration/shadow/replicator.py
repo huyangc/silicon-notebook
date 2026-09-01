@@ -152,6 +152,13 @@ _UNIQUE_PREDICATES = {
         "client_request_id IS NOT NULL",
         ("client_request_id", "is", "not", "null"),
     ),
+    # notebook_delete_jobs (batch 3·W1 PR-3 Phase A, v48): the delete job's
+    # own single-flight defense-in-depth index. Same enumerated-status shape
+    # as idx_catalog_jobs_one_active above, three values instead of two.
+    "idx_notebook_delete_jobs_one_active": (
+        "status IN ('queued', 'running', 'waiting')",
+        ("status", "in", "'queued'", "'running'", "'waiting'"),
+    ),
 }
 
 

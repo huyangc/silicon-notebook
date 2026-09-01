@@ -55,6 +55,7 @@ _SAFE_JOB_PREFIXES = (
     ("papermeta-", "papermeta"),
     ("buildkg-", "buildkg"),
     ("index-pipeline-", "index-pipeline"),
+    ("deletenb-", "deletenb"),
 )
 _SAFE_ASK_JOB_NAMES = frozenset({"ask-chunk", "ask-reasoning", "ask-graph"})
 _CALLABLE_OPERATION = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,79}$")
@@ -100,11 +101,20 @@ _LIGHT_MAINTENANCE_OPERATIONS = frozenset({
     "knowhow-legacy-reproject",
     "knowhow-asset-sweep",
 })
-_MAINTENANCE_OPERATIONS = _HEAVY_MAINTENANCE_OPERATIONS | _LIGHT_MAINTENANCE_OPERATIONS
+# 批 3·W1 PR-3(D-2 已定):第三个池,判据同上两池同轴——量级差。删除既不是
+# LLM 扇出型重活(会被小时级重建饿死,而删除是用户已点过确认的操作),也不是
+# 秒级轻活(它是长时低 CPU 高 I/O,会挤掉单表投影)。见
+# services/notebook_delete.py 的 request()/run()。
+_DELETE_OPERATIONS = frozenset({"deletenb"})
+_MAINTENANCE_OPERATIONS = (
+    _HEAVY_MAINTENANCE_OPERATIONS | _LIGHT_MAINTENANCE_OPERATIONS | _DELETE_OPERATIONS
+)
 _HEAVY_POOL = "maintenance"
 _LIGHT_POOL = "light"
+_DELETE_POOL = "delete"
 _DEFAULT_MAINTENANCE_CONCURRENCY = 4
 _DEFAULT_LIGHT_JOB_CONCURRENCY = 4
+_DEFAULT_DELETE_CONCURRENCY = 1
 # 排队超过这么久就记一条 warning:运维要能分辨「任务在跑但很慢」与「任务压根还没
 # 开始跑」。库里的任务状态在排队期间仍是 running/queued(闸不写数据库,也不该写:
 # 那会让一个纯进程内的准入决定变成持久状态),所以日志是目前唯一的区分手段。
@@ -129,23 +139,29 @@ def _maintenance_pool(name: str | None) -> tuple[str, str] | None:
             return _HEAVY_POOL, operation
         if operation in _LIGHT_MAINTENANCE_OPERATIONS:
             return _LIGHT_POOL, operation
+        if operation in _DELETE_OPERATIONS:
+            return _DELETE_POOL, operation
         return None
     return None
 
 
 def _pool_capacity(pool: str) -> int:
-    default = (
-        _DEFAULT_MAINTENANCE_CONCURRENCY if pool == _HEAVY_POOL
-        else _DEFAULT_LIGHT_JOB_CONCURRENCY
-    )
+    if pool == _HEAVY_POOL:
+        default = _DEFAULT_MAINTENANCE_CONCURRENCY
+    elif pool == _LIGHT_POOL:
+        default = _DEFAULT_LIGHT_JOB_CONCURRENCY
+    else:
+        default = _DEFAULT_DELETE_CONCURRENCY
     try:
         from app.core.config import get_settings
 
         settings = get_settings()
-        configured = (
-            settings.background_maintenance_concurrency if pool == _HEAVY_POOL
-            else settings.background_light_job_concurrency
-        )
+        if pool == _HEAVY_POOL:
+            configured = settings.background_maintenance_concurrency
+        elif pool == _LIGHT_POOL:
+            configured = settings.background_light_job_concurrency
+        else:
+            configured = settings.notebook_delete_concurrency
         return max(1, int(configured))
     except Exception:  # noqa: BLE001 — 配置不可用时保守用默认容量,绝不放弃容量保护
         return default

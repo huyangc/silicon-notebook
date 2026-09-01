@@ -122,7 +122,19 @@ logger = logging.getLogger("silicon_notebook.sqlite.maintenance")
 # docs/superpowers/specs/2026-09-01-batch3-w1-delete-jobization-design_zh.md
 # Sec 3.3). Pure column addition: existing rows default to 0 and their
 # ScaleArtifactRuntime.version() list stays byte-identical (Sec 3.4).
-SCHEMA_VERSION = 68
+# v69 is batch 3 W1 PR-3 Phase A, parity with PostgreSQL
+# 0049_notebook_delete_jobs.sql: three FK/keyset-covering indexes design doc
+# Sec 1.4 registers as prerequisites for the delete-jobization work
+# (idx_agent_tokens_default_notebook, idx_knowhow_cell_code_column,
+# idx_conversations_notebook — plain additive index creation, no query/
+# service change here), plus the two new job-carrier tables
+# notebook_delete_jobs / notebook_delete_files (Sec T-3/T-4) the delete
+# tombstone + six-phase background job read and write. Both tables are
+# additive and empty on a fresh migration; notebook_delete_jobs deliberately
+# carries no FK to notebooks (see the migration's own header comment for why:
+# the sweep's "job row present, notebooks row absent" special case needs that
+# state to stay representable).
+SCHEMA_VERSION = 69
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -3625,6 +3637,63 @@ class SqliteMigrator:
         with self._connect() as db:
             self.add_column_if_missing(
                 db, "unified_kg_state", "kg_reset_epoch", "INTEGER NOT NULL DEFAULT 0"
+            )
+
+    def _migration_69(self) -> None:
+        """Batch 3 W1 PR-3 Phase A, parity with PostgreSQL
+        0049_notebook_delete_jobs.sql. See SCHEMA_VERSION's docstring for the
+        full rationale; see that PostgreSQL migration's header comment for
+        the per-index "which step turns from a table scan into an index
+        lookup" evidence, which is backend-neutral (same tables, same
+        columns).
+
+        SQLite has no equivalent to PostgreSQL's guarded pre-existing-index
+        shape validation (that DO block exists specifically for the
+        CONCURRENTLY-outside-a-migration split PostgreSQL needs; SQLite has
+        no CONCURRENTLY and this migration runs inside the same transaction
+        as everything else in ``migrate()``), so this is a plain ``CREATE
+        INDEX IF NOT EXISTS`` / ``CREATE TABLE IF NOT EXISTS`` — the same
+        convention every other additive SQLite migration in this file uses.
+        """
+        with self._connect() as db:
+            db.executescript(
+                """
+                CREATE INDEX IF NOT EXISTS idx_agent_tokens_default_notebook
+                  ON agent_access_tokens(default_notebook_id);
+                CREATE INDEX IF NOT EXISTS idx_knowhow_cell_code_column
+                  ON knowhow_cell_code(column_id);
+                CREATE INDEX IF NOT EXISTS idx_conversations_notebook
+                  ON conversations(notebook_id, id);
+
+                CREATE TABLE IF NOT EXISTS notebook_delete_jobs (
+                  id TEXT NOT NULL PRIMARY KEY,
+                  notebook_id TEXT NOT NULL,
+                  status TEXT NOT NULL DEFAULT 'queued',
+                  phase TEXT NOT NULL DEFAULT 'mark',
+                  cursor_table TEXT NOT NULL DEFAULT '',
+                  cursor_key TEXT NOT NULL DEFAULT '',
+                  deleted_rows INTEGER NOT NULL DEFAULT 0,
+                  lease_token TEXT NOT NULL DEFAULT '',
+                  attempts INTEGER NOT NULL DEFAULT 0,
+                  error_code TEXT NOT NULL DEFAULT '',
+                  error_message TEXT NOT NULL DEFAULT '',
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL,
+                  finished_at TEXT
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_notebook_delete_jobs_one_active
+                  ON notebook_delete_jobs(notebook_id)
+                  WHERE status IN ('queued', 'running', 'waiting');
+                CREATE INDEX IF NOT EXISTS idx_notebook_delete_jobs_status_updated
+                  ON notebook_delete_jobs(status, updated_at);
+
+                CREATE TABLE IF NOT EXISTS notebook_delete_files (
+                  job_id TEXT NOT NULL,
+                  ordinal INTEGER NOT NULL,
+                  file_path TEXT NOT NULL,
+                  PRIMARY KEY (job_id, ordinal)
+                );
+                """
             )
 
     def _recover_interrupted_jobs(self) -> None:

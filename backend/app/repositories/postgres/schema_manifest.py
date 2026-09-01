@@ -100,6 +100,8 @@ POSTGRES_BUSINESS_TABLES = (
     "model_service_status",
     "notebook_assets",
     "notebook_bases",
+    "notebook_delete_files",
+    "notebook_delete_jobs",
     "notebook_grants",
     "notebook_members",
     "notebook_object_schemas",
@@ -266,7 +268,13 @@ POSTGRES_EMPTY_TIME_SENTINELS = frozenset(
 # does ship on BOTH backends, but SQLite gets no index change -- it has no GIN
 # trigram equivalent -- which is the same PostgreSQL-only split migration 0042
 # registered for hot-path batch 2.
+# PostgreSQL v49 / SQLite v69 (batch 3 W1 PR-3 Phase A; renumbered from 48
+# after batch 4's index-only 0048 landed first on master) add three FK/keyset
+# indexes (idx_agent_tokens_default_notebook, idx_knowhow_cell_code_column,
+# idx_conversations_notebook) plus the notebook_delete_jobs /
+# notebook_delete_files delete-job carrier tables -- additive only, no
+# existing column/index/FK shape changes.
 POSTGRES_SCHEMA_MANIFEST = PostgresSchemaManifest(
-    sqlite_version=68,
-    postgres_version=48,
+    sqlite_version=69,
+    postgres_version=49,
 )

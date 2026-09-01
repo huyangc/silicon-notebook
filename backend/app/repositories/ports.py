@@ -957,6 +957,7 @@ class KgBuildJobStorePort(Protocol):
         total_sources: int,
     ) -> dict: ...
     def get(self, job_id: str) -> dict: ...
+    def has_running(self, notebook_id: str) -> bool: ...
     def latest(self, notebook_id: str) -> dict | None: ...
     def latest_on(
         self, db: object, notebook_id: str
@@ -1008,6 +1009,204 @@ class KgBuildJobStorePort(Protocol):
         """Atomically publish staged products, identity and job terminal."""
         ...
     def fail_submission(self, job_id: str) -> bool: ...
+
+
+@runtime_checkable
+class NotebookDeleteJobStorePort(Protocol):
+    """批 3·W1 PR-3 §T-3/T-4 的删除作业载体——形照 ``KgBuildJobStorePort``,
+    但没有该端口的索引管线暂存/发布方法族：删除作业只有六个相位，没有
+    per-source 的分阶段发布。
+
+    Phase B 评审后修订（owner/lease CAS，见 ``mark_running``/
+    ``ownership_snapshot``）：每次成功的 ``mark_running`` 都铸造一个新的
+    ``lease_token``，此后该次 ``run()`` 调用发出的每一次写操作都带着同一个
+    token 作 WHERE 围栏——一个被第二次 resubmit「偷走」所有权的 worker（只是
+    慢，不是真死）即使继续跑下去，它的写也全部落空（rowcount 0），不会
+    覆盖新主人的进度。"""
+
+    def request(self, notebook_id: str, created_by: str) -> dict: ...
+    def recreate_for_deleting_notebook(
+        self, notebook_id: str, *, attempts: int = 0
+    ) -> dict:
+        """§T-4 驱动 B + P1-E 的退避/上限修订：``attempts`` 是这个笔记本此前
+        失败次数的延续（不是这一次新行自己的次数——新行从这个值起继续累加），
+        调用前必须已经清掉这个笔记本的历史 failed 作业行与其 side-table 残留
+        （见 ``purge_failed_jobs``）。"""
+        ...
+    def get(self, job_id: str) -> dict: ...
+    def latest_for_notebook(self, notebook_id: str) -> dict | None: ...
+    def mark_running(
+        self, job_id: str, *, stale_cutoff_seconds: float
+    ) -> str | None:
+        """CAS ``'queued'``/``'waiting'`` → ``'running'``，**或**偷走一个
+        ``updated_at`` 已超过 ``stale_cutoff_seconds`` 的陈旧 ``'running'``
+        行（P2-a：sweep 驱动 A 对一个「实际还活着只是慢」的作业重新 submit
+        时，不能无条件接管——旧 CAS 只认 queued/waiting，会让两个 run()
+        并发跑同一个作业；新 CAS 加的这一条分支要求 updated_at 也确实陈旧，
+        一个仍在正常心跳的活 worker 不会被这条分支偷走）。成功返回新铸造的
+        ``lease_token``（此后每次写都要带它），失败返回 ``None``。"""
+        ...
+    def advance_phase(
+        self, job_id: str, phase: str, *, lease_token: str,
+        cursor_table: str = "", cursor_key: str = "", deleted_delta: int = 0,
+    ) -> bool:
+        """``lease_token`` 围栏写（P2-a）；``deleted_delta`` 累加进
+        ``deleted_rows``（P3：这一列过去只声明用途从不写入，本修订让它名副
+        其实——纯观测性质，不参与任何相位判定）。"""
+        ...
+    def mark_waiting(self, job_id: str, *, lease_token: str, note: str = "") -> bool:
+        """**专属相位 2（quiesce）超时**（P2-c）——磁盘/锁不可用一律走
+        ``mark_queued``，不再共用 'waiting'。"""
+        ...
+    def mark_queued(self, job_id: str, *, lease_token: str, note: str = "") -> bool:
+        """相位 3/4/5 的独占锁拿不到/复验丢失时的落点（P1-B/P2-c）：置回
+        ``'queued'``，交扫尾按正常节奏重排——不是 ``'waiting'``（那个状态只
+        表示「在等一个在跑的 KG 重建停下」，锁不可用是另一种「在排队等一个
+        资源」，两者对运维的含义不同，不应共用同一个状态值）。"""
+        ...
+    def finish(
+        self, job_id: str, status: str, *, error_code: str = "", error_message: str = ""
+    ) -> bool:
+        """``status='failed'`` 时同事务把 ``attempts`` 自增 1（P1-E）——
+        ``recreate_for_deleting_notebook`` 靠这个值做退避与上限判定。"""
+        ...
+    def materialize_paths_page(
+        self, job_id: str, notebook_id: str, after_id: str, limit: int
+    ) -> tuple[int, str | None]: ...
+    def notebook_exists(self, notebook_id: str) -> bool: ...
+    def ownership_snapshot(self, job_id: str) -> dict | None:
+        """P1-A/P2-a：一条查询同时给出「这个作业行自己的 status/lease_token」
+        与「它指向的 notebooks 行现在的 status（行不存在则为 None）」——
+        取代过去 ``_still_deleting`` 分两次点查（先查作业表、再查 notebooks
+        表）的写法。返回 ``{"status", "lease_token", "notebook_status"}``；
+        作业行本身已经不在则返回 ``None``。"""
+        ...
+    def finish_residual(self, job_id: str) -> None:
+        """§T-4 驱动 A 的「作业行在、notebooks 行不在」残渣收尾终局
+        （P1-A）：只删这个作业自己的两张 side table 行（``notebook_delete_
+        files``/``notebook_delete_jobs``），**绝不**触碰归档投影或
+        ``notebooks`` 表（它已经不在了）——复用
+        ``NotebookDeleteJobStore.cleanup_job_on`` 的同一段 DELETE，只是这次
+        是它自己的事务，不是嵌在 ``delete_row_and_orphan_embeddings``
+        里面。"""
+        ...
+    def purge_failed_jobs(self, notebook_id: str) -> None:
+        """P1-E：在 ``recreate_for_deleting_notebook`` 新建一行之前，清掉这个
+        笔记本此前所有 ``status='failed'`` 的旧作业行，**以及它们各自的**
+        ``notebook_delete_files`` 侧表残留——否则每次失败重试都会在
+        ``notebook_delete_files`` 里累积一份永远没人读的旧路径快照（旧作业
+        行的 job_id 早已不在活跃集里，没有任何代码路径会再回去清理它们）。"""
+        ...
+    def list_stale(self, older_than_seconds: float) -> list[dict]: ...
+    def list_notebooks_missing_job(self) -> list[dict]:
+        """P1-E 修订：每一项除 ``notebook_id`` 外，还带这个笔记本**最近一条
+        failed 作业行**的 ``(attempts, finished_at)``（没有则两者皆
+        ``None``）——调用方（``sweep_once``）用它在 Python 侧算退避窗口与
+        上限，本方法自己不做时间判断（后端中立，见
+        ``services/notebook_delete.py`` 的退避常量）。"""
+        ...
+
+    # ---- 批 3·W1 PR-3 Phase B: 相位 3(rows)批删原语（design §1.5） ----
+    def delete_direct_page_form_one(
+        self, table: str, id_column: str, filter_column: str,
+        filter_value: str, cursor: str, limit: int,
+    ) -> tuple[int, str | None]:
+        """形一：keyset 取一页 ``id_column`` → 同事务 ``DELETE ... WHERE
+        id_column = ANY(page) AND filter_column = filter_value``。返回
+        ``(本页删除行数, 本页最后一个 id 或 None)`` —— 0 即该表清空。"""
+        ...
+    def delete_direct_batch_form_two(
+        self, table: str, filter_column: str, filter_value: str, limit: int,
+    ) -> int:
+        """形二：ctid/rowid 形一批，单语句同快照（design §1.5）。返回本批
+        删除行数——调用方按「``rowcount == 0`` 且连续 3 轮无进展」响亮失败，
+        绝不用 ``rowcount < limit`` 判终止（并发 UPDATE 可让 rowcount 小于
+        limit 而仍有剩余行，见 design §1.5 的终止条件论证）。"""
+        ...
+    def delete_knowhow_rows_page(
+        self, notebook_id: str, cursor: str, limit: int,
+    ) -> tuple[int, str | None]:
+        """B 类 knowhow 链，行/单元格维度一页（P1-D 修复后拆出，跑在
+        ``delete_knowhow_tables_page`` 之前）：同事务内取一页
+        ``knowhow_rows.id``（经 ``knowhow_tables`` 关联过滤 notebook_id）→
+        按该页 row_id 删 ``knowhow_cells``/``knowhow_cell_code`` → 删本页
+        ``knowhow_rows``。一页的 fanout 上界是「本页行数 × 各自表的列数」
+        （远小于「本页表数 × 各自的行数」），这正是把行/单元格维度从原来的
+        「按表分页」拆出来单独按「按行分页」的原因——原形一页 500 张表可能
+        牵出无界的行/单元格总量（撞 SQLite 变量数上限、PG 单事务时长），按
+        行分页把每一页的上界收紧到「500 行 × 该表列数」。返回 ``(本页行数,
+        最后一个 row id 或 None)``。"""
+        ...
+    def delete_knowhow_tables_page(
+        self, notebook_id: str, cursor: str, limit: int,
+    ) -> tuple[int, str | None]:
+        """B 类 knowhow 链，表维度一页——跑在 ``delete_knowhow_rows_page``
+        清空之后（此时 rows/cells 早已不剩，本方法不再触碰它们）：同事务内
+        取一页 ``knowhow_tables.id`` → 删 ``knowhow_columns``/
+        ``knowhow_changes``/``knowhow_milestones``（按 table_id ∈ 本页，
+        fanout 上界是「本页表数 × 每表的列/变更/里程碑数」，同量级的小表，
+        不需要再拆）→ 最后删本页 ``knowhow_tables``。返回 ``(本页 table 数,
+        最后一个 table id 或 None)``。"""
+        ...
+    def delete_indexing_pipeline_stages_page(
+        self, notebook_id: str, cursor: str, limit: int,
+    ) -> tuple[int, str | None]:
+        """B 类 indexing_pipeline_stages 链一页：取一页
+        ``indexing_pipeline_stages.job_id`` → 先删
+        ``indexing_pipeline_stage_sources``（按 job_id ∈ 本页，P1-D：以
+        ctid/rowid 有界子批循环删除，绝不用一条无界 ``= ANY(job_ids)``
+        语句——一页 500 个 job 合计牵出的 source 数可能远超一批的量级）→
+        再删本页 ``indexing_pipeline_stages``。返回 ``(本页 job 数, 最后一个
+        job_id 或 None)``。"""
+        ...
+    def delete_memory_items_page(
+        self, notebook_id: str, cursor: str, limit: int,
+    ) -> tuple[int, str | None]:
+        """B 类 memory_items 链一页：取一页 ``memory_items.id`` → 先删
+        ``memory_embeddings``/``memory_provenance``/``memory_revisions``
+        （按 memory_id ∈ 本页——每条 memory 的这三张表天然行数很小，不需要
+        P1-D 那类子批拆分）→ 再删本页 ``memory_items``。返回
+        ``(本页 memory 数, 最后一个 id 或 None)``。"""
+        ...
+    def delete_source_elements_page(
+        self, notebook_id: str, cursor: str, limit: int,
+    ) -> tuple[int, str | None]:
+        """只读父链：``sources`` 是归档输入表，相位 3 不删它的行，只分页
+        读它的 ``id``（不删，独立一个只读事务）来驱动 ``source_elements``
+        的清理；子级删除（P1-D：ctid/rowid 有界子批循环，各自独立提交的
+        事务，直到这批父 source 确实一个子元素都不剩）与父页读分开——500
+        个父 source 合计可能牵出远超一批量级的子元素，绝不用一条无界
+        ``= ANY(source_ids)`` 语句删完。返回 ``(本页 source 数, 最后一个
+        source id 或 None)`` —— 终止判据是**父页为空**，不是子表删除数为 0
+        （某个 source 本就没有 element 是合法状态，不应提前终止分页）。"""
+        ...
+    def delete_ask_trace_steps_page(
+        self, notebook_id: str, cursor: str, limit: int,
+    ) -> tuple[int, str | None]:
+        """只读父链，同 ``delete_source_elements_page``（含 P1-D 的子批拆分），
+        父表换成 ``ask_jobs``，子表换成 ``ask_trace_steps``（按 job_id）。"""
+        ...
+    def table_has_rows(self, table: str, filter_column: str, filter_value: str) -> bool:
+        """形二终止条件的兜底存在性探针（design §1.5「定稿后处理」#1）：
+        ``rowcount==0`` 之后用它分辨「表已清空」（正常终止）与「行仍在但
+        连续几轮都不命中」（响亮失败信号）。"""
+        ...
+    def delete_fts_shadow(self, table: str, notebook_id: str) -> None:
+        """§4.4/P2-g：SQLite 的两张 FTS5 影子表（``kg_objects_fts``/
+        ``chunks_fts``）本没有到 ``notebooks`` 的 FK（虚表从不带级联），
+        过去挂在相位 5 的尾巴上无条件删——挪到这里，让它们跟着各自真身表的
+        相位 3 批次一起清。PostgreSQL 上是空操作（没有 FTS5 影子表）。
+        runner 对每一个 DirectTable 单元都无条件调用它，不判断后端。"""
+        ...
+
+    # ---- 相位 4（files，design §T-3b）：读相位 1 物化的路径侧表 ----
+    def list_files_page(
+        self, job_id: str, after_ordinal: int, limit: int,
+    ) -> list[dict]:
+        """按 ``ordinal`` keyset 读一页 ``notebook_delete_files``（相位 1
+        物化的全量 ``sources.file_path``）。只读——这些行留给相位 5 的
+        ``cleanup_job_on`` 随作业行一并删除（design §T-3.1）。"""
+        ...
 
 
 # Both catalog stores share these bounds. They live here, on the neutral port,
@@ -3373,6 +3572,38 @@ class NotebookNotFoundError(RuntimeError):
 
     路由映射成 **404**,与能力守卫拒绝时同一个状态码口径(不泄露存在性)。
     """
+
+
+class NotebookDeletingAbortsMaintenanceError(RuntimeError):
+    """一个 in-process KG 维护 pass（relink/unified rebuild）在下一个检查点
+    读到 ``notebooks.status == 'deleting'`` ——批 3·W1 PR-3 §4.2 选项 A、
+    §T-3.3 时序步骤 3。
+
+    退出通道是既有的 ``except Exception: settle(..., "failed")``
+    （`services/kg/maintenance_jobs.py` 的 `run_notebook_relink_job` /
+    `run_unified_kg_rebuild_job`），不新开一条通道——这正是选项 A（检查点）
+    相对选项 B（主动 abort 需要新建注册表）更便宜的地方。落点两处：
+    `knowledge_lifecycle.py` 的 `relink_notebook_kg` 逐源循环、
+    `rebuild_unified_kg` 的 `_stage`（10 个阶段边界共用一处改动）。
+
+    第三个检查点（`buildkg-`/`rebuildkg-` 的批循环）不用这个类——那条路径走
+    既有的 `KgExtractionRunControl.abort()` / `KgBuildAborted`。"""
+
+
+class NotebookAlreadyDeletingError(RuntimeError):
+    """删除 tombstone 的 CAS UPDATE 撞见该行已经处于 ``'copying'`` 或
+    ``'deleting'`` ——不是「没找到」，是「找到了但不能再次转移」（批 3·W1 PR-3
+    §T-2）。
+
+    CAS 谓词是 ``status NOT IN ('copying','deleting')``（复用
+    ``access_sql.NOTEBOOK_LIVE_SQL``，与 T-1 单点收敛同源），rowcount≠1 时
+    需要区分两种原因：行根本不存在（`KeyError`，路由映射 404）、行存在但已经
+    在 copying/deleting（本异常，路由映射 409）。`sweep_stale_copies` 误吞
+    `deleting` 库的既有缺口正是没有这条区分（摸底 5）。"""
+
+    def __init__(self, notebook_id: str) -> None:
+        super().__init__(notebook_id)
+        self.notebook_id = notebook_id
 
 
 class GroupAdminRequiredError(RuntimeError):

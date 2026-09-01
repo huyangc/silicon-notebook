@@ -3929,5 +3929,85 @@ MIGRATION_MANIFEST[(67, 68)] = {
 }
 
 
+# v69 (batch-3-W1 PR-3): three FK/keyset-covering indexes design doc
+# Sec 1.4 registers as prerequisites for the delete-jobization work
+# (idx_agent_tokens_default_notebook, idx_knowhow_cell_code_column,
+# idx_conversations_notebook -- pure additive index creation, no query/
+# service change here), plus the two new delete-job carrier tables
+# notebook_delete_jobs / notebook_delete_files (Sec T-3/T-4) and their two
+# supporting indexes. ``notebook_delete_jobs`` also carries ``lease_token``/
+# ``attempts`` (Phase B code review round: owner/lease CAS fencing and a
+# bounded failed-job retry policy, added directly to this not-yet-merged
+# migration's own CREATE TABLE rather than a follow-up ALTER -- see
+# ``sqlite/migrations.py``'s ``_migration_69`` and ``postgres/migrations/
+# 0049_notebook_delete_jobs.sql`` for the matching column comments).
+NOTEBOOK_DELETE_JOBS_TABLES = {
+    "notebook_delete_jobs": (
+        "CREATE TABLE notebook_delete_jobs (\n"
+        "                  id TEXT NOT NULL PRIMARY KEY,\n"
+        "                  notebook_id TEXT NOT NULL,\n"
+        "                  status TEXT NOT NULL DEFAULT 'queued',\n"
+        "                  phase TEXT NOT NULL DEFAULT 'mark',\n"
+        "                  cursor_table TEXT NOT NULL DEFAULT '',\n"
+        "                  cursor_key TEXT NOT NULL DEFAULT '',\n"
+        "                  deleted_rows INTEGER NOT NULL DEFAULT 0,\n"
+        "                  lease_token TEXT NOT NULL DEFAULT '',\n"
+        "                  attempts INTEGER NOT NULL DEFAULT 0,\n"
+        "                  error_code TEXT NOT NULL DEFAULT '',\n"
+        "                  error_message TEXT NOT NULL DEFAULT '',\n"
+        "                  created_at TEXT NOT NULL,\n"
+        "                  updated_at TEXT NOT NULL,\n"
+        "                  finished_at TEXT\n"
+        "                )"
+    ),
+    "notebook_delete_files": (
+        "CREATE TABLE notebook_delete_files (\n"
+        "                  job_id TEXT NOT NULL,\n"
+        "                  ordinal INTEGER NOT NULL,\n"
+        "                  file_path TEXT NOT NULL,\n"
+        "                  PRIMARY KEY (job_id, ordinal)\n"
+        "                )"
+    ),
+}
+NOTEBOOK_DELETE_JOBS_INDEXES = {
+    "idx_agent_tokens_default_notebook": (
+        "CREATE INDEX idx_agent_tokens_default_notebook\n"
+        "                  ON agent_access_tokens(default_notebook_id)"
+    ),
+    "idx_knowhow_cell_code_column": (
+        "CREATE INDEX idx_knowhow_cell_code_column\n"
+        "                  ON knowhow_cell_code(column_id)"
+    ),
+    "idx_conversations_notebook": (
+        "CREATE INDEX idx_conversations_notebook\n"
+        "                  ON conversations(notebook_id, id)"
+    ),
+    "idx_notebook_delete_jobs_one_active": (
+        "CREATE UNIQUE INDEX idx_notebook_delete_jobs_one_active\n"
+        "                  ON notebook_delete_jobs(notebook_id)\n"
+        "                  WHERE status IN ('queued', 'running', 'waiting')"
+    ),
+    "idx_notebook_delete_jobs_status_updated": (
+        "CREATE INDEX idx_notebook_delete_jobs_status_updated\n"
+        "                  ON notebook_delete_jobs(status, updated_at)"
+    ),
+}
+MIGRATION_MANIFEST = {
+    (key[0], 69, *key[2:]): {
+        **manifest,
+        "tables": {**manifest["tables"], **NOTEBOOK_DELETE_JOBS_TABLES},
+        "indexes": {**manifest["indexes"], **NOTEBOOK_DELETE_JOBS_INDEXES},
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(68, 69)] = {
+    "tables": NOTEBOOK_DELETE_JOBS_TABLES,
+    "columns": {},
+    "indexes": NOTEBOOK_DELETE_JOBS_INDEXES,
+    "triggers": {},
+    "views": {},
+}
+
+
 if __name__ == "__main__":
     raise SystemExit(main())

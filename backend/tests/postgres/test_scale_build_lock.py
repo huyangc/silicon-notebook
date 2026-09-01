@@ -254,7 +254,10 @@ def test_the_lock_session_is_named_and_keeps_its_idle_reaper_disabled(
                 "SELECT application_name FROM pg_stat_activity WHERE pid = %s",
                 (pids[0],),
             ).fetchone()
-        assert names["application_name"] == "silicon-notebook-scale-build-lock"
+        # 批 3·W1 PR-3 §4.3: renamed to reflect this session's generalized
+        # semantics (scale build OR notebook delete's phase 4 — both claim
+        # the same per-notebook namespace+key).
+        assert names["application_name"] == "silicon-notebook-notebook-exclusive-lock"
 
         # Read on the holder's own session: the GUC is session scoped.
         connection = handle._connection
@@ -306,6 +309,29 @@ def test_scale_build_lock_session_has_a_bounded_client_transport_timeout(
     assert captured["tcp_user_timeout"] == (
         database_module._LOCK_SESSION_TCP_USER_TIMEOUT_MS
     )
+
+
+def test_scale_build_lock_capacity_counts_delete_concurrency_too(postgres_settings):
+    """批 3·W1 PR-3 §4.3 point 1: the session-slot budget must be
+    ``SCALE_BUILD_CONCURRENCY + NOTEBOOK_DELETE_CONCURRENCY + 1``, not just
+    ``SCALE_BUILD_CONCURRENCY + 1`` — a long-running delete's phase 4 now
+    also occupies one of these dedicated sessions. Mutation anchor: drop the
+    ``notebook_delete_concurrency`` term and this goes red."""
+    postgres_settings.scale_build_concurrency = 2
+    postgres_settings.notebook_delete_concurrency = 1
+    database = PostgresDatabase(postgres_settings, ROOT)
+    try:
+        assert database._scale_build_lock_capacity == 2 + 1 + 1
+    finally:
+        database.close()
+
+    postgres_settings.scale_build_concurrency = 3
+    postgres_settings.notebook_delete_concurrency = 2
+    database = PostgresDatabase(postgres_settings, ROOT)
+    try:
+        assert database._scale_build_lock_capacity == 3 + 2 + 1
+    finally:
+        database.close()
 
 
 def test_scale_build_lock_sessions_are_bounded(postgres_database):

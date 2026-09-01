@@ -89,7 +89,7 @@ def retrieval_experience_harness(request) -> RetrievalExperienceHarness:
     database = request.getfixturevalue("postgres_database")
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(database).migrate() == 48
+    assert PostgresMigrator(database).migrate() == 49
     # Nothing is seeded: this table has no foreign key in either direction and
     # no tenancy column, which is the structural fact behind its deep-copy
     # exclusion and its global-union classification.

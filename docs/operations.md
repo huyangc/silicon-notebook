@@ -1328,6 +1328,48 @@ advisory lock ownership. This channel requires **session pooling or a direct
 connection**; running it behind transaction pooling means no mutual exclusion at
 all.
 
+#### Finding who holds a notebook's exclusive claim (`pg_locks`)
+
+Batch 3·W1 PR-3 (§4.3) makes this the SAME per-notebook advisory lock
+notebook delete's phase 4 claims before sweeping a notebook's disk
+artifacts — one namespace+key covers both "someone is building/folding/
+importing this notebook's scale index" and "someone is deleting this
+notebook". Every session that holds (or is trying to hold) one of these
+claims sets `application_name = 'silicon-notebook-notebook-exclusive-lock'`
+(renamed from `-scale-build-lock` in this same change — an operator who
+only looks for the old name will find nothing):
+
+```sql
+SELECT pid, state, query_start, wait_event_type, wait_event, query
+FROM pg_stat_activity
+WHERE application_name = 'silicon-notebook-notebook-exclusive-lock';
+```
+
+To find out WHICH notebook a given `pid` holds the claim for, cross-reference
+`pg_locks` (`classid`/`objid` are the namespace/key `advisory_lock_key`/
+`advisory_lock_oid` in `app/repositories/scale_build_lock.py` compute — the
+key is a CRC32 hash of the notebook id, not the id itself, so there is no
+direct SQL join back to `notebooks`; grep application logs for the
+notebook id near that `pid`'s connection time, or narrow it down via
+`notebook_delete_jobs`/an active `build`/`fold`/`import` you already know
+about):
+
+```sql
+SELECT l.pid, l.classid, l.objid, a.application_name, a.query_start
+FROM pg_locks l
+JOIN pg_stat_activity a ON a.pid = l.pid
+WHERE l.locktype = 'advisory' AND l.classid = 1396919362;  -- 0x53434C42
+```
+
+If the `pid` this returns belongs to a `notebook_delete_jobs` row currently
+`running`, that delete holds the claim — it was acquired once, right before
+phase 3 (rows) started, and is held through phases 3/4/5, releasing only
+after phase 5 commits (or immediately, if the job instead parked `queued`
+because the claim was unavailable in the first place; see "Notebook delete
+jobs" above — a `queued` row never held the claim at all). If it belongs to
+a `kg_build_jobs` row or a W-CLI process, that is an ordinary scale-build/
+fold/import holding it as always.
+
 #### `.old` / `.tmp-<claim_token>` leftovers and manual recovery
 
 The swap sequence is `live → .old`, `tmp → live`, `rm .old`. A failure at the
@@ -1640,6 +1682,248 @@ so complete anchor-group verification remains fail-closed while it seeks the
 group instead of scanning the entire anchor column inside its write transaction.
 
 Must be run from the main checkout root (it needs the real `.env`/database configuration, same as `batch_ingest.py`/`replay_retrieval.py` above). Safe to re-run: applying the same plan again is a no-op (each already-applied cell no longer matches its recorded "before").
+
+## Notebook delete jobs
+
+`DELETE /api/notebooks/{id}` (batch 3·W1 PR-3) commits a single-row
+tombstone — `notebooks.status='deleting'` — and returns 202 immediately. The
+notebook is invisible on every list/read/search/mount surface from that
+instant on (the same visibility predicate that already hides a half-copied
+notebook). The actual cleanup runs afterward as a background job in its own
+worker pool (`NOTEBOOK_DELETE_CONCURRENCY`, default 1, separate from the
+maintenance and light-job pools — see Deployment and Configuration), through
+six phases: materialize the notebook's source file paths (phase 1); wait for
+any knowledge-graph build/rebuild/relink already running against that
+notebook to stop on its own, never forced through mid-write (phase 2,
+"quiesce"); batched cleanup of every closure/closure-external table except
+five archive-input tables (`ask_jobs`/`sources`/`reports`/`source_paper_
+meta`, plus `answers` — the design doc's own text originally missed
+`answers`; see the design doc's "实现期勘误" section) (phase 3, "rows" —
+see below); the on-disk sweep: source files, the pasted-image asset
+directory, and the three scale-index artifact roots + their `.old`/`.tmp`/
+`.tmp-<token>` siblings (phase 4, "files"); and one final atomic
+transaction that fences, archives the deleted content into `retained_user_
+activity`, and drops the five archive-input tables' rows + the `notebooks`
+row itself (phase 5, "finalize" — by that point every other table is
+already empty, so the `notebooks` row's own cascade is a cheap zero-row
+probe per table rather than the multi-minute cascade a direct `DELETE FROM
+notebooks` used to pay on a large library).
+
+**Deployment contract: production runs `--workers 1`.** Quiesce's leg B
+(waiting for an in-flight `relinkkg-`/`unifiedkg-`/`conflictresolve-` pass
+to stop) reads a purely in-process registry (`KgMaintenanceJobs.jobs`, no
+`kg_build_jobs` row is ever written for these three job kinds) — it can only
+see work happening in the SAME process. This is not a new dependency this
+feature introduces: `services/kg/maintenance_jobs.py`'s own module
+docstring already registers "production runs one worker, so process-local
+ownership is the deployment contract" as the precondition these three job
+kinds' single-flight mechanism itself rests on (the same precondition
+`checkup`'s H4/H5 lease suppression and caching build on). Delete's phase 2
+quiesce leg B, and phase 3-5's SQLite in-process claim registration (both
+above), simply reuse that same existing contract — they do not strengthen
+or weaken it. If this deployment ever runs more than one worker, BOTH
+mechanisms silently stop providing cross-worker exclusion (a delete could
+proceed while a `relinkkg-`/`unifiedkg-` pass on a DIFFERENT worker is still
+writing, and two workers' scale builds/deletes on the same SQLite notebook
+could race) — the correct fix at that point is promoting these job kinds'
+claims to durable rows (merged into `kg_build_jobs` or a new table), not
+patching delete's own locking; this is registered as residual debt in the
+design doc, not solved by this feature.
+
+**Phase 3 (rows) batch size.** Every batch (both the keyset "form-one" page
+delete and the ctid/rowid "form-two" batch delete — design doc §1.5) uses a
+single, uniform batch size of 500 rows — the same starting value phase 1's
+path-materialization page already used. There is no separate `NOTEBOOK_
+DELETE_ROWS_BATCH_SIZE` environment variable; the design registers up to
+2000 as headroom for the largest A-class tables, not a required second
+knob, and a single constant (`app/services/notebook_delete.py`'s
+`_ROWS_PAGE_SIZE`) is the tuning point if a future deployment needs it
+raised.
+
+**Interrupted phase 3/4, and resuming.** Phase 3's form-one (keyset page)
+tables and every B-class chain persist their progress into the job row's
+`cursor_table`/`cursor_key` columns after every batch, the same crash-
+resumable idiom phase 1 already established — a worker that dies mid-table
+(or mid B-class chain, e.g. partway through a large `knowhow_tables`' rows/
+columns/cells) picks back up exactly where it left off on the next sweep
+tick, never re-scanning already-cleared tables from the top. Phase 3's
+form-two (ctid/rowid) tables persist no cursor at all — the ctid/rowid batch
+is self-resuming by construction (a resumed run just re-queries "any rows
+left", finds fewer, and keeps going), so there is nothing to save between
+batches for those tables. Phase 4's per-notebook exclusive claim (below)
+means an interrupted phase 4 always restarts its own steps from scratch on
+resume (source files/asset directory/artifact roots are all individually
+idempotent — deleting an already-gone file or directory is a no-op), not
+from a persisted cursor.
+
+Before every batch in phases 3/4, the runner also re-verifies ownership: the
+job row must still be `'running'` **and carry the exact lease token** this
+worker minted when it claimed the job (`mark_running` mints a fresh one on
+every claim, including a sweep-driven steal of a stale-but-still-`'running'`
+row — see below). A worker that has only gone slow, not actually died, and
+is still executing after a second resubmission stole its job writes nothing
+further once it loses that comparison — every subsequent write matches zero
+rows. This closes the race the job-row status alone cannot: two `run()`
+invocations for the same job both observing `'running'` is exactly the
+shape a slow-not-dead worker plus an over-eager sweep resubmission could
+otherwise produce.
+
+**Phases 3-5 yield to a live scale build/import (Busy semantics).** The
+notebook's exclusive lock (the same one W-CLI/online scale builds use, §4.3
+above — "Finding who holds a notebook's exclusive claim") is acquired ONCE,
+immediately before phase 3 (rows) starts, and held through phases 3, 4
+(files), and 5 (finalize) — never re-acquired per phase, and released only
+after phase 5 commits (or, for the driver-A residual-cleanup case below,
+after that cleanup's own terminal step). `verify_held()` is re-checked
+before every phase-3/4 destructive batch and once more immediately before
+phase 5's transaction. If the claim cannot be taken at all — held elsewhere,
+this process has no dedicated lock session left, or the probe itself raised
+— the job is parked **`queued`** (never `waiting`; see the status
+breakdown below for why the two are kept separate) and the sweep retries it
+later on the normal cadence — it never forces phases 3-5 through without
+holding the claim. `job.error_message` names which case it was. On SQLite
+(no cross-process lock exists there — `try_scale_build_lock` is an
+unconditionally-granted sentinel), the same claim additionally registers
+into the SAME in-process `building` set an online scale build/fold already
+checks, so an in-process build and a delete's phases 3-5 exclude each other
+exactly the way two in-process scale builds already do.
+
+**Inspecting job state.** There is no admin UI for this; query the two new
+tables directly:
+
+```sql
+-- Notebooks currently mid-delete, with their job's phase/status
+SELECT n.id, n.status, j.phase, j.status AS job_status, j.error_message,
+       j.updated_at
+FROM notebooks n
+JOIN notebook_delete_jobs j ON j.notebook_id = n.id
+WHERE n.status = 'deleting';
+```
+
+A job's `status` is `queued` (about to run, waiting for a free pool slot, OR
+parked because phases 3-5's exclusive claim was unavailable — see below),
+`running`, `waiting` (parked ONLY because phase 2's in-flight KG rebuild
+quiesce has not stopped yet — see below), or `failed` (settled after an
+unexpected error; the sweep retries it later, subject to the backoff/ceiling
+described further down). There is no `succeeded` status: a successful
+finalize deletes the job's own row in the same transaction that deletes the
+notebook, so a vanished row for a notebook that no longer appears anywhere
+is the successful outcome, not an anomaly.
+
+**Why `queued` and `waiting` are kept separate.** Both mean "parked, the
+sweep will retry it," but they name different facts an operator needs to
+tell apart: `waiting` means "an in-flight KG rebuild has not stopped yet" —
+nothing is wrong, just wait (or investigate why THAT rebuild is wedged).
+`queued` covers everything else that can park a job short of quiesce,
+including the exclusive-claim-unavailable case — an operator who only
+checks `kg_build_jobs`/`KgMaintenanceJobs` for a `waiting` row and finds
+nothing would otherwise have no lead at all on why deletion has stalled.
+
+**A job stuck in `waiting`.** Always phase 2 (quiesce) timing out.
+`job.error_message` names which leg of the knowledge-graph quiesce gate is
+still blocking it: `durable(kg_build_jobs)` (a `buildkg-`/`rebuildkg-` job
+is still running; check `SELECT * FROM kg_build_jobs WHERE notebook_id='<id>'
+AND status='running'`) or `in-process(kg_maintenance)` (a `relinkkg-`/
+`unifiedkg-` pass, which is tracked only in the serving process's memory,
+not any table — restarting that process is one way to clear a wedged one if
+it never settles on its own; see "Deployment contract: production runs
+`--workers 1`" above for why this leg can only see work in the SAME
+process). `NOTEBOOK_DELETE_QUIESCE_TIMEOUT_SECONDS` (default 1800) bounds
+how long one attempt waits before parking the job `waiting`.
+
+**A job stuck in `queued` beyond an ordinary requeue.** `job.error_message`
+names the reason when it is the exclusive-claim case: either "held
+elsewhere" (a scale build/fold/import, or another delete — see "Finding who
+holds a notebook's exclusive claim" above) or "lock backend unavailable"
+(this process's dedicated lock-session budget is exhausted, or the probe
+itself raised). Both retry on the normal sweep cadence with no special
+timeout.
+
+Either way (`waiting` or `queued`) the sweep (`NOTEBOOK_DELETE_SWEEP_
+SECONDS`, default 300) resumes the job automatically — no operator action is
+required unless the blocker itself is wedged.
+
+**A job stuck in `running` after a crash.** The sweep's other driver
+requeues any active job row whose `updated_at` has not advanced in over
+`NOTEBOOK_DELETE_SWEEP_SECONDS`; a worker that died mid-phase is picked back
+up on the next sweep tick and resumes from wherever its `phase`/cursor left
+off (every phase is crash-safe and idempotent by construction). Resuming a
+`'running'`-but-stale row mints a FRESH lease token (see above) — if the
+original worker was not actually dead, just slow, it loses ownership at
+that point and its subsequent writes are no-ops. A restart of the serving
+process also re-triggers this driver at startup, after the existing
+crash-recovery pass.
+
+**A job row present, but its notebook row is not — the residual-cleanup
+path.** An out-of-band `notebooks`-row delete (a legacy unbounded delete
+call, a `sweep_stale_copies` misfire, or a manual DBA `DELETE`) can beat a
+delete job to it. The runner detects this once per `run()` invocation (a
+plain existence check) and switches into a reduced pipeline: phases 3/4 run
+exactly as normal (most closure tables have already cascaded away with that
+out-of-band delete — since every FK in this schema's closure is `ON DELETE
+CASCADE` — so this mainly cleans up the handful of closure-external tables
+that carry no FK to `notebooks` at all, plus phase 4's disk artifacts, which
+no DB-level cascade ever touches), but phase 5's fence-and-archive steps are
+skipped entirely — there is no `notebooks` row left to fence, and the
+archive projections' own source rows may already be gone via cascade, so
+reconstructing a partial or empty archive after the fact would be strictly
+worse than not archiving at all. Only this job's own two bookkeeping rows
+(`notebook_delete_jobs`/`notebook_delete_files`) are deleted at the end. No
+`retained_user_activity` row is ever written or rewritten by this path.
+
+**A notebook whose delete keeps failing.** Each failed attempt increments
+the job row's `attempts` column and applies an exponential backoff before
+the sweep tries again (60s × 2^(attempts−1), capped at 3600s). After
+`_MAX_DELETE_ATTEMPTS` (5) consecutive failures, the sweep stops retrying
+entirely and leaves the most recent `failed` row as a terminal diagnostic —
+find it via `scripts/diag_pg_hotpaths.py`'s `notebook_delete_jobs` overview
+section (PostgreSQL) or the equivalent direct query on SQLite
+(`SELECT * FROM notebook_delete_jobs WHERE status='failed' AND notebook_id=
+'<id>' ORDER BY finished_at DESC LIMIT 1`), diagnose the underlying failure
+from `error_message`, then either fix the root cause and manually re-`DELETE
+/api/notebooks/{id}` (which raises 409 while the notebook is still
+`'deleting'` — an operator must first restore its `status`, e.g. back to
+`'ready'`, before retrying, accepting that any phase-3/4 work the failed
+attempts already committed stays applied) or clean up the remaining rows by
+hand. Each successful re-attempt purges the notebook's older `failed` job
+rows (and their `notebook_delete_files` leftovers, which a failed job never
+cleans up on its own) before starting fresh — so a healthy notebook never
+accumulates a pile of old failed rows, only a genuinely stuck one does.
+
+**Rolling back this feature (two-stage disposal — read this BEFORE
+reverting the code).** Reverting PR-3's code alone is not safe by itself:
+the pre-PR-3 code's 40 read-side visibility sites recognize only `'copying'`
+as a hidden status, so any row still sitting at `status='deleting'` after
+the revert becomes visible again — a half-deleted notebook reappears in
+lists, search, and mounts. Before (or as part of) reverting the code, an
+operator must resolve every `deleting` row by hand:
+
+```sql
+SELECT n.id, j.phase, j.status AS job_status
+FROM notebooks n
+LEFT JOIN notebook_delete_jobs j ON j.notebook_id = n.id
+WHERE n.status = 'deleting';
+```
+
+For each row: **`phase` itself never actually contains the literal value
+`'finalize'`** — phase 5 deletes the job row in the same transaction that
+completes it, so the highest value this column can ever be READ holding is
+`'files'` (phase 4 done, about to enter phase 5), and a moment later the row
+is simply gone. So: if the job row is gone entirely (finished before the
+revert, successfully or via the residual-cleanup path), the notebook is
+already fully cleaned up on the database side — nothing to do.
+Otherwise the deletion is genuinely incomplete, and there is no way to
+resume it once the code reverts (the batched cleanup/disk-sweep phases and
+the finalize transaction are gone with the code). The operator must choose,
+per notebook: physically delete it if its owner's original delete request
+should stand (run the pre-PR-3 unbounded `delete_notebook` code path, or
+the equivalent manual `DELETE FROM notebooks WHERE id=...` once every
+partially-cleaned child row is accounted for), or set `status` back to its
+pre-delete value (`'ready'` in the ordinary case) to restore it, accepting
+that any child-table rows a partially-run batched cleanup phase already
+removed before the revert are gone for good — a partial, not a clean,
+restoration. There is no third option that both keeps the code reverted and
+resumes the job.
 
 ## Automatic analysis-failure archive
 

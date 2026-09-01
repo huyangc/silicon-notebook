@@ -7246,6 +7246,18 @@
           "title": "NotebookCreate",
           "type": "object"
         },
+        "NotebookDeleteResponse": {
+          "description": "202 响应体（批 3·W1 PR-3 §T-2/§5）：CAS tombstone 已提交、删除作业已排入\n后台，实际清理异步进行。前端刻意零改动——`requestVoid` 只看 2xx 就丢弃\nbody，`status` 字段只为 API 契约的可读性存在，不驱动任何前端逻辑。",
+          "properties": {
+            "status": {
+              "default": "deleting",
+              "title": "Status",
+              "type": "string"
+            }
+          },
+          "title": "NotebookDeleteResponse",
+          "type": "object"
+        },
         "NotebookGrantItem": {
           "description": "一条授权边的只读投影。\n\n`principal_name` / `principal_kind` 只在群组主体上有值——`user` 与 `everyone`\n行如实返回、由 `principal_type` 自我标注,不在这里替它们编一个名字。",
           "properties": {
@@ -16376,6 +16388,7 @@
       },
       "/api/notebooks/{notebook_id}": {
         "delete": {
+          "description": "批 3·W1 PR-3 §T-2/§5:CAS tombstone 提交后立即返回 202——实际清理由\n后台删除作业异步完成(六相位,见 `services/notebook_delete.py`)。前端\n零改动:`requestVoid` 只看 2xx 就丢弃 body(`frontend/app/api-client.ts`),\n202 与之前的 204 对它完全透明。",
           "operationId": "delete_notebook_api_notebooks__notebook_id__delete",
           "parameters": [
             {
@@ -16389,7 +16402,14 @@
             }
           ],
           "responses": {
-            "204": {
+            "202": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/NotebookDeleteResponse"
+                  }
+                }
+              },
               "description": "Successful Response"
             },
             "422": {

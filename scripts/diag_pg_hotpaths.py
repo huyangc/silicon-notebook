@@ -525,6 +525,27 @@ def audit_reverse_fk_indexes(connection) -> list[dict]:
     return out
 
 
+def notebook_delete_jobs_overview(connection) -> list[dict]:
+    """批 3·W1 PR-3（design §5「用户可见性」提及的运维概览面）：只读地列出
+    每个删除作业状态各自有几行、以及每种状态里最老的一行等了多久——不按
+    ``notebook_id`` 限定（这张表本就小，是全库范围的运维一览，不是某个
+    notebook 的诊断项）。只读 COUNT/MAX/MIN，绝不修改任何行。"""
+    rows = connection.execute(
+        "SELECT status, COUNT(*) AS c, "
+        "MIN(updated_at) AS oldest_updated_at, MAX(updated_at) AS newest_updated_at "
+        "FROM notebook_delete_jobs GROUP BY status ORDER BY status"
+    ).fetchall()
+    return [
+        {
+            "status": row["status"],
+            "count": int(row["c"]),
+            "oldest_updated_at": row["oldest_updated_at"],
+            "newest_updated_at": row["newest_updated_at"],
+        }
+        for row in rows
+    ]
+
+
 # ---------------------------------------------------------------------------
 # EXPLAIN (FORMAT JSON) parsing / rendering — redaction lives here: only
 # structural plan fields (Node Type, Relation Name, Index Name — all schema
@@ -779,6 +800,17 @@ def run_diagnostics(connection, *, notebook_id: str, deep: bool, deep_timeout_ms
         print("  (指定热表集合内未发现外键约束)")
     for row in fk_rows:
         print(f"  [{row['state']}] {row['table']}({row['columns']})  constraint={row['name']}")
+
+    _section("notebook_delete_jobs 只读概览（全库范围，不按 notebook 过滤）")
+    delete_job_rows = notebook_delete_jobs_overview(connection)
+    if not delete_job_rows:
+        print("  (当前没有任何删除作业行——没有笔记本正在删除中)")
+    for row in delete_job_rows:
+        print(
+            f"  status={row['status']:8} count={row['count']:4} "
+            f"oldest_updated_at={row['oldest_updated_at']} "
+            f"newest_updated_at={row['newest_updated_at']}"
+        )
 
     _section("汇总")
     print(f"  语句失败次数: {failures}（0 表示全部语句成功返回一行 EXPLAIN/COUNT 结果）")

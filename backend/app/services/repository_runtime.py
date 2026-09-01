@@ -258,6 +258,7 @@ class _PersistenceSeats:
     queries: Any
     notebook_store: Any
     kg_build_jobs: Any
+    notebook_delete_jobs: Any
     # Agentic Memory P1 (T2): bare store seat, no consumer yet — T3-T6
     # wire injection/routes on top of this. See AgentProfileStorePort in
     # repositories/ports.py for the read/write contract.
@@ -375,6 +376,7 @@ def _build_persistence_seats(
         queries=bundle.queries,
         notebook_store=bundle.notebooks,
         kg_build_jobs=bundle.kg_build_jobs,
+        notebook_delete_jobs=bundle.notebook_delete_jobs,
         agent_profile=bundle.agent_profile,
         retrieval_experiences=bundle.retrieval_experiences,
         agent_observations=bundle.agent_observations,
@@ -1029,6 +1031,7 @@ class RepositoryRuntime:
         self.queries = seats.queries
         self.notebook_store = seats.notebook_store
         self.kg_build_jobs = seats.kg_build_jobs
+        self.notebook_delete_jobs = seats.notebook_delete_jobs
         self.agent_profile = seats.agent_profile
         self.retrieval_experiences = seats.retrieval_experiences
         self.agent_observations = seats.agent_observations
@@ -1076,6 +1079,12 @@ class RepositoryRuntime:
         self.knowledge_lifecycle = knowledge.knowledge_lifecycle
         self.knowledge_query = knowledge.knowledge_query
         self.pending_actions_service = knowledge.pending_actions_service
+        # Finished by wire_knowledge_lifecycle(): its collaborators
+        # (self.knowledge_lifecycle.kg_maintenance / kg_conflict_jobs) are
+        # only real once that method's own tail builds them (see that
+        # method for why NotebookDeleteJobRunner cannot be built any
+        # earlier).
+        self.notebook_delete = None
         retrieval = _build_retrieval_domain(foundation)
         self.retrieval_snapshots = retrieval.retrieval_snapshots
         self.memory_service = retrieval.memory_service
@@ -1983,9 +1992,103 @@ class RepositoryRuntime:
             note_model_error=note_model_error,
             participant_notebook_ids=self.notebook_store.participant_notebook_ids,
             invalidate_knowledge_counts=self.queries.invalidate_knowledge_counts,
+            notebook_deleting=(
+                lambda notebook_id: self.notebook_store.status_of(notebook_id)
+                == "deleting"
+            ),
         )
         self.scale_artifacts.lifecycle = self.knowledge_lifecycle
+        # 批 3·W1 PR-3 Phase A: the delete-job runner needs BOTH legs of the
+        # quiesce gate (§T-3.3) -- durable (self.kg_build_jobs, seat-eager)
+        # and in-process (self.knowledge_lifecycle.kg_maintenance /
+        # kg_conflict_jobs, only real from this point on) -- so it is built
+        # HERE, at the tail of the ONE method that finishes wiring the
+        # second leg, rather than in RepositoryRuntime.__init__ (where
+        # kg_maintenance/kg_conflict_jobs do not exist yet).
+        from app.services.notebook_delete import NotebookDeleteJobRunner
+
+        self.notebook_delete = NotebookDeleteJobRunner(
+            notebook_store=self.notebook_store,
+            delete_jobs=self.notebook_delete_jobs,
+            kg_build_jobs=self.kg_build_jobs,
+            kg_maintenance_running=self._notebook_kg_maintenance_running,
+            storage_dir=lambda: self.source_files.storage_dir,
+            analysis_artifacts=self.analysis_artifacts,
+            settings=self.settings,
+            now=self.seams.now,
+            new_id=self.seams.new_id,
+            event_log=self.event_log,
+            # Phase 4 (§T-3b/§4.1/§4.3): the SAME per-notebook independent
+            # lock scale build/W-CLI already use — see
+            # ``wire_query_services``'s own ``scale_build_lock=self.
+            # database.try_scale_build_lock`` wiring for the sibling
+            # consumer this shares the lock/session budget with.
+            scale_build_lock=self.database.try_scale_build_lock,
+            scale_artifact_store=self.scale_artifact_store,
+            # P1-B (code review): SQLite's ``try_scale_build_lock`` is an
+            # unconditionally-granted sentinel (no cross-process lock
+            # exists there at all), so without this, an in-process scale
+            # build and a delete's phases 3-5 could both believe they hold
+            # the notebook exclusively. Reusing the SAME ``building`` set
+            # ``ScaleArtifactRuntime._claim_scale_build`` already checks
+            # closes both directions at once: a build request sees
+            # ``notebook_id in building`` and backs off with
+            # ``ScaleBuildAlreadyBuilding`` (that check already existed, no
+            # change needed there), and this claim's own ``register`` call
+            # fails the same way if a build already holds it. Harmless
+            # redundancy on PostgreSQL, where the real advisory-lock session
+            # already excludes an in-process racer on its own.
+            scale_build_claim_in_process=self._claim_notebook_in_process,
+            scale_build_release_in_process=self._release_notebook_in_process,
+        )
         return self.knowledge_lifecycle
+
+    def _claim_notebook_in_process(self, notebook_id: str) -> bool:
+        """P1-B: atomically check-and-add into ``ScaleArtifactRuntime.
+        building`` (the SAME in-process set a scale build/fold claims into
+        via ``_claim_scale_build``, before it ever probes the cross-process
+        advisory lock — "生产单 worker，进程内所有权即部署契约",
+        services/kg/maintenance_jobs.py's own module docstring; this reuses
+        that deployment contract, it does not introduce a new one). Returns
+        ``True`` if this call took the claim, ``False`` if something else
+        (a build, or another delete) already holds it. The notebook is
+        already invisible everywhere via T-1's ``NOTEBOOK_LIVE_SQL`` filter
+        the instant a delete reaches this point, so a transient "building"
+        appearance in an internal checkup/status memo key is never
+        observable to a user."""
+        runtime = self.scale_artifacts
+        if runtime is None:
+            return True
+        with runtime.building_lock:
+            if notebook_id in runtime.building:
+                return False
+            runtime.building.add(notebook_id)
+            return True
+
+    def _release_notebook_in_process(self, notebook_id: str) -> None:
+        runtime = self.scale_artifacts
+        if runtime is None:
+            return
+        with runtime.building_lock:
+            runtime.building.discard(notebook_id)
+
+    def _notebook_kg_maintenance_running(self, notebook_id: str) -> bool:
+        """Quiesce leg B (§T-3.3): true while EITHER the relink/rebuild slot
+        or the conflict-detection slot's ``KgMaintenanceJobs.jobs`` dict
+        reports a 'running' entry for this notebook. Process-local by design
+        -- see ``services/kg/maintenance_jobs.py``'s own module docstring
+        for the "production runs one worker" deployment contract this leg
+        depends on, and design doc §T-3.3 for why that dependency is
+        acceptable here without strengthening or weakening it."""
+        lifecycle = self.knowledge_lifecycle
+        if lifecycle is None:
+            return False
+        for jobs_registry in (lifecycle.kg_maintenance, lifecycle.kg_conflict_jobs):
+            with jobs_registry.lock:
+                job = jobs_registry.jobs.get(notebook_id)
+                if job is not None and job["status"] == "running":
+                    return True
+        return False
 
     def wire_sharing(
         self,

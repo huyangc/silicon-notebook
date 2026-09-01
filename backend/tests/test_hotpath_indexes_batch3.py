@@ -102,9 +102,9 @@ def test_migration_file_exists_and_declares_exactly_one_statement():
 def test_batch3_spec_is_present_and_batch1_batch2_are_untouched():
     names = {spec.name for spec in HOTPATH_INDEX_SPECS}
     assert _BATCH3_NAME in names
-    assert len(HOTPATH_INDEX_SPECS) == 14, (
+    assert len(HOTPATH_INDEX_SPECS) == 17, (
         "expected eight batch-1 plus two batch-2 plus one batch-3 plus three "
-        f"batch-4 entries in HOTPATH_INDEX_SPECS, found "
+        f"batch-4 plus three batch-5 entries in HOTPATH_INDEX_SPECS, found "
         f"{len(HOTPATH_INDEX_SPECS)}: {sorted(names)}"
     )
     # Batch 1/2 names untouched by this addition.

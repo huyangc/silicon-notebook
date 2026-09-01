@@ -15,7 +15,11 @@ Batch 4 added a fourth migration,
 ``backend/app/repositories/postgres/migrations/0048_source_search_trgm_indexes.sql``,
 contributing three notebook-scoped composite GIN trigram indexes (one of them
 partial) that serve the three legs of the source tab's rewritten search
-predicate.
+predicate. Batch 5 (delete jobization, batch 3 · W1 · PR-3) added a fifth
+migration,
+``backend/app/repositories/postgres/migrations/0049_notebook_delete_jobs.sql``,
+contributing three FK/keyset-covering btree indexes alongside the delete-job
+carrier tables.
 Every migration and this module's ``HOTPATH_INDEX_SPECS`` are independent
 hand-authored copies of the same index shapes on purpose (a migration file
 cannot import Python at apply time): ``backend/tests/test_hotpath_indexes.py``
@@ -424,6 +428,44 @@ HOTPATH_INDEX_SPECS: tuple[HotpathIndexSpec, ...] = (
         opclasses=("public:text_ops", "public:gin_trgm_ops"),
         collations=("pg_catalog:C", "pg_catalog:C"),
         serves="source_store.py:list_sources_page (q search, paper-title leg)",
+    ),
+    # -- Batch 5 (batch 3 · W1 · PR-3 Phase A): three FK/keyset-covering
+    # indexes design doc Sec 1.4 registers as prerequisites for the delete-
+    # jobization work -- see migrations/0049_notebook_delete_jobs.sql for the
+    # full "which step turns from a seq scan into an index scan" evidence and
+    # backend/tests/test_hotpath_indexes_batch5.py for this module's own
+    # migration<->spec reconciliation test.
+    HotpathIndexSpec(
+        name="idx_agent_tokens_default_notebook",
+        table="agent_access_tokens",
+        columns=("default_notebook_id",),
+        predicate="",
+        predicate_shape="",
+        # 列建表即 COLLATE "C"(0001_initial.sql:12-23),普通 btree 继承列
+        # collation。opclass 为 pg_catalog 默认 text_ops。
+        opclasses=("pg_catalog:text_ops",),
+        collations=("pg_catalog:C",),
+        serves="phase 5 finalize's `DELETE FROM notebooks` FK-cascade probe (was a full seq scan -- design doc Sec 1.1)",
+    ),
+    HotpathIndexSpec(
+        name="idx_knowhow_cell_code_column",
+        table="knowhow_cell_code",
+        columns=("column_id",),
+        predicate="",
+        predicate_shape="",
+        opclasses=("pg_catalog:text_ops",),
+        collations=("pg_catalog:C",),
+        serves="B-class knowhow chain's column_id leg (Phase B's batched page cleanup)",
+    ),
+    HotpathIndexSpec(
+        name="idx_conversations_notebook",
+        table="conversations",
+        columns=("notebook_id", "id"),
+        predicate="",
+        predicate_shape="",
+        opclasses=("pg_catalog:text_ops", "pg_catalog:text_ops"),
+        collations=("pg_catalog:C", "pg_catalog:C"),
+        serves="form-two (ctid) batch-delete loop's notebook_id-leading prefix on the closure-external conversations table (Phase B)",
     ),
 )
 

@@ -1,11 +1,26 @@
-"""Per-notebook scale-build lock: handle contract, sentinel and key hashing.
+"""Per-notebook EXCLUSIVE lock: handle contract, sentinel and key hashing.
 
-The lock exists so an **offline build process can run beside a live service**
-against the same database and artifact tree.  Only the PostgreSQL adapter can
-provide it (session advisory locks); SQLite deployments are single-process by
-construction and get the explicit UNSUPPORTED sentinel below rather than a
-silent no-op — a no-op would read as "lock granted" to the offline CLI and let
-two writers race on the same ``{scale_dir}.tmp``.
+⚠ **Naming note (batch 3·W1 PR-3 §4.3)**: this module/class/function keep
+their "scale build" names for backward compatibility with every existing
+call site and test, but the lock they hand out is no longer scale-build-
+only. Notebook delete's phase 4 (design doc §T-3b) claims the SAME
+namespace+key before sweeping a notebook's on-disk artifacts, so "held
+elsewhere" now means "another scale build/fold/import OR a notebook delete
+holds this notebook's exclusive claim" — a caller's user-facing text must
+say so generically (see ``services/scale_artifact_runtime.py``'s
+``_claim_scale_build`` and the W-CLI/``batch_ingest`` messages that wrap
+it), not name "构建" specifically. ``postgres/database.py``'s
+``application_name``/module-level constant were renamed to
+``silicon-notebook-notebook-exclusive-lock`` to match — see that module's
+own comment for why the METHOD name (``try_scale_build_lock``) was kept.
+
+The lock exists so an **offline build process, or a delete job's phase 4,
+can run beside a live service** against the same database and artifact
+tree.  Only the PostgreSQL adapter can provide it (session advisory locks);
+SQLite deployments are single-process by construction and get the explicit
+UNSUPPORTED sentinel below rather than a silent no-op — a no-op would read
+as "lock granted" to the offline CLI and let two writers race on the same
+``{scale_dir}.tmp``.
 
 Ownership crosses threads (an admitting thread acquires, the worker it spawns
 releases), so this is deliberately NOT a context manager: the handle is entered

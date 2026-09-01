@@ -1029,8 +1029,14 @@ class ScaleArtifactRuntime:
                 "budget or a failing probe); nothing was built"
             )
         if handle is None:
+            # 批 3·W1 PR-3 §4.3: this notebook's exclusive claim (namespace+
+            # key) is now shared with notebook delete's phase 4 (§T-3b), so
+            # "held elsewhere" is no longer necessarily a build — generalize
+            # the wording rather than naming a build that may not exist.
             raise ScaleBuildBusy(
-                f"another process is building the scale index for {notebook_id}"
+                f"{notebook_id} is busy — its exclusive claim is held by "
+                "another process (a scale index build/fold/import, or a "
+                "notebook delete in progress)"
             )
         try:
             with self.building_lock:

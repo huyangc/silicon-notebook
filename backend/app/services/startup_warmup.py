@@ -49,6 +49,10 @@ class _LifecycleState:
     # module-global stop is what makes a defensive early return incapable of
     # reaping a *successor* lifecycle's refresher.
     admission_refresher_stop: object | None = None
+    # Stop callback for the notebook-delete-job sweeper this cycle started
+    # (batch 3·W1 PR-3 §T-4) — same per-cycle filing reason as the admission
+    # refresher immediately above.
+    notebook_delete_sweeper_stop: object | None = None
 
 
 _active_lifecycle: _LifecycleState | None = None
@@ -237,6 +241,7 @@ def _fail_lifecycle(lease: object, exc: BaseException) -> None:
     # in which one exists) must not leave a thread polling the pool this is
     # about to close, nor survive into the retry that replaces it.
     _stop_admission_refresher(lease)
+    _stop_notebook_delete_sweeper(lease)
     try:
         if repo is not None:
             _close_repository_instance(repo)
@@ -366,6 +371,82 @@ def _stop_admission_refresher(lease: object) -> None:
         _run_admission_refresher_stop(stop)
 
 
+def _sweep_notebook_delete_jobs_on_start(repo: object) -> None:
+    """One-shot delete-job sweep at startup (batch 3·W1 PR-3 §T-4), run in
+    the SAME place and for the SAME reason as ``_sweep_agent_profile_chains``
+    immediately below: only the server startup path may claim "everything
+    still 'running'/'queued'/'waiting' is last boot's wreckage", and it must
+    run before ``mark_ready()`` admits new work. ``getattr``-shaped so a
+    narrow test double with no ``notebook_delete`` seat is not an error."""
+    runner = getattr(getattr(repo, "_runtime", None), "notebook_delete", None)
+    sweep = getattr(runner, "sweep_once", None)
+    if not callable(sweep):
+        return
+    try:
+        submitted = int(sweep() or 0)
+    except Exception:
+        logger.exception("startup: notebook delete job sweep failed")
+        return
+    if submitted:
+        logger.info(
+            "startup: resubmitted %d stranded notebook delete job(s)", submitted
+        )
+
+
+def _start_notebook_delete_sweeper(lease: object, repo: object) -> None:
+    """Begin the periodic notebook-delete-job sweep in this process (batch
+    3·W1 PR-3 §T-4's two drivers, run every ``NOTEBOOK_DELETE_SWEEP_
+    SECONDS``). Mirrors ``_start_admission_refresher``'s placement and
+    failure posture exactly: started only after the lease is bound (so an
+    early-return path before the bind owns no thread to reap), best-effort
+    (a narrow test double or a zero/negative interval is not a startup
+    failure — unlike the admission refresher, an idle delete sweeper is
+    always a legitimate steady state, not a missing dependency)."""
+    runner = getattr(getattr(repo, "_runtime", None), "notebook_delete", None)
+    if runner is None:
+        return
+    from app.core.config import get_settings
+    from app.services.notebook_delete import start_notebook_delete_sweeper
+
+    interval = get_settings().notebook_delete_sweep_seconds
+    if not interval > 0:
+        return
+    stop = start_notebook_delete_sweeper(runner, interval)
+    if not _record_notebook_delete_sweeper(lease, stop):
+        _run_notebook_delete_sweeper_stop(stop)
+
+
+def _record_notebook_delete_sweeper(lease: object, stop: object) -> bool:
+    with _cleanup_lock:
+        state = _active_lifecycle
+        if state is None or state.lease is not lease:
+            return False
+        state.notebook_delete_sweeper_stop = stop
+        return True
+
+
+def _run_notebook_delete_sweeper_stop(stop: object) -> None:
+    try:
+        stop()  # type: ignore[operator]
+    except Exception:  # shutdown hygiene must never mask the real diagnostic
+        logger.error("notebook delete sweeper stop failed")
+
+
+def _stop_notebook_delete_sweeper(lease: object) -> None:
+    """Stop the sweep thread this exact lifecycle started, if any. Same
+    lease-scoped idempotence and "before the pool closes" ordering as
+    ``_stop_admission_refresher`` — the sweeper's tick borrows a connection
+    too."""
+    with _cleanup_lock:
+        state = _active_lifecycle
+        if state is None or state.lease is not lease:
+            return
+        stop = state.notebook_delete_sweeper_stop
+        state.notebook_delete_sweeper_stop = None
+    if stop is not None:
+        _run_notebook_delete_sweeper_stop(stop)
+
+
 def _sweep_agent_profile_chains(repo: object) -> None:
     """Settle understanding-consolidation rows stranded by a previous process.
 
@@ -489,6 +570,7 @@ def run_startup(lease: object | None) -> object | None:
         # an offline CLI has no right to make the "nothing else owns these
         # rows" claim while a live backend may.
         _sweep_agent_profile_chains(repo)
+        _sweep_notebook_delete_jobs_on_start(repo)
         if not _bind_repository_and_begin_warmup(lease, repo):
             # Defensive only: a valid lease cannot be detached during startup.
             # If that invariant is ever broken, do not leak the just-created
@@ -507,6 +589,7 @@ def run_startup(lease: object | None) -> object | None:
         # lifecycle that never becomes the owner cannot leave a thread polling
         # a repository nobody will close. Every later exit stops it again.
         _start_admission_refresher(lease, repo)
+        _start_notebook_delete_sweeper(lease, repo)
         logger.info("startup: migrations + recovery done; warming open-path caches…")
 
         def _progress(done: int, total: int) -> None:
@@ -525,6 +608,7 @@ def run_startup(lease: object | None) -> object | None:
         if preload_enabled and callable(preload):
             if not _begin_index_preload(lease):
                 _stop_admission_refresher(lease)
+                _stop_notebook_delete_sweeper(lease)
                 return None
 
             def _index_progress(done: int, count: int) -> None:
@@ -536,6 +620,7 @@ def run_startup(lease: object | None) -> object | None:
             preload_summary = preload(progress=_index_progress)
         if not _mark_lifecycle_ready(lease, repo):
             _stop_admission_refresher(lease)
+            _stop_notebook_delete_sweeper(lease)
             return None
         source_ingestion = getattr(
             getattr(repo, "_runtime", None), "source_ingestion", None
@@ -609,6 +694,7 @@ def close_repository(
     # (The ``failed`` form already stopped it in ``_fail_lifecycle``; the
     # handle was taken out of the state there, so this is then a no-op.)
     _stop_admission_refresher(lease)
+    _stop_notebook_delete_sweeper(lease)
     try:
         if not failed:
             _close_repository_instance(repository_instance)

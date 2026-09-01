@@ -1159,8 +1159,10 @@ row is None  或  (row["kg_mutation_seq"] == 0  且  not row["last_rebuild_at"])
   会让那几个库判一次 stale 重建，可接受。
 - **PR-3｜tombstone + 六相位删除作业 + 形二原语 + 磁盘产物 + 双腿 quiesce 闸 +
   三处重建检查点 + `0047` 的三条索引**
-  （T-2/T-3/T-3b/T-4/T-5a + 4.2 选项 A 的三个落点 + 4.3 的三处锁改动 +
-  §1.4 的三条索引 + API 202 + 文档）。
+  （T-2/T-3/T-3b/T-4 + 4.2 选项 A 的三个落点 + 4.3 的三处锁改动 +
+  §1.4 的三条索引 + API 202 + 文档。**T-5a 未随本 PR 出货**——与 PR-2
+  评审钉回的单事务不变量正面冲突，剥离为独立 PR，冲突分析与验收标尺
+  见「勘误 2」）。
   ⚠ **回滚分两段**：代码 revert 后残留的 `status='deleting'` 行会被旧代码的
   40 处 `!= 'copying'` 谓词**放行**，半删的库重新可见。revert **必须**配运维处置：
   已清完的直接物理删、未清完的置回原 status 并接受部分数据丢失。
@@ -1352,3 +1354,106 @@ v4 是在 30s 预算下把它当兜底豁免；D-1 之后生产预算 180s 已�
    `copying` 是闭合既有不一致，对 `deleting` 是行为零变化。Memory 的对应缺口
    （`memory_store.py` 自己的 owner∨成员∨授权边组合，未经这三条谓词）**登记
    不改**，理由与取舍见 §T-1.1 末段，留给 T-2/T-3 落地那个 PR 一并处理。
+
+## 实现期勘误（PR-3 阶段 B，2026-09）
+
+以下条目是实现期发现的**正文错误**（不是"定稿后处理"那类补充说明），发现
+途径统一是：Phase B 把 §1.3 的 A 类表逐条接成相位 3 的直删单元后，**一条
+与本设计无关的既有测试**（`tests/test_admin_questions.py::test_admin_
+questions_combines_ask_and_report_with_filters`）意外变红——不是 Phase B
+自己新写的用例先发现的。
+
+### 勘误 1｜`answers` 是第五张归档输入表，正文遗漏
+
+**错误**：§1.3 把 `answers` 列进 A 类 52 张表的直删名单，未加任何特殊说明；
+§T-3.2 步骤④「删这四张表的行」与其成本表都只数 `ask_jobs`/`sources`/
+`source_paper_meta`/`reports` 四张。
+
+**实际情况**：`NotebookStore._retain_user_activity_before_delete`（两侧
+后端）的 ask 投影经 `LEFT JOIN answers a ON a.id=j.answer_id` 读
+`answers.question`，用 `COALESCE(NULLIF(a.question,''), j.question)` 优先
+取回答自己的（通常更完整的）问题文本。若相位 3 把 `answers` 当成普通 A 类
+表提前删掉，这个 JOIN 会读到空值，归档出的 `retained_user_activity` 行
+静默退化成更短的 `ask_jobs.question`——直接违反 G1/G3 的「归档等价性」
+逐字段相等要求。
+
+**修正**：
+
+- §1.3 A 类 52 张表名单**删除** `answers`；A 类改记为 51 张，`answers`
+  单独归为**第五张归档输入表**，与 `ask_jobs`/`sources`/`source_paper_
+  meta`/`reports` 同组，行留给相位 5，靠 `DELETE FROM notebooks` 的最终
+  级联清空（`answers` 到 `notebooks` 的 FK 是 `ON DELETE CASCADE`，同
+  `source_paper_meta` 今天的处理方式——两者都不在
+  `delete_row_and_orphan_embeddings` 里被显式 DELETE 过）。
+- §T-3.2 步骤④改为「删**五张**表的行」，成本表追加 `answers` 一行：量级
+  与 `ask_jobs` 同阶（一次 ask 至多一个 answer），索引数 3
+  （`pk_answers`/`idx_answers_conversation`/`idx_answers_nb`，
+  `0001_initial.sql`），对总成本估算的影响可忽略（`ask_jobs` 本身的量级
+  已经涵盖同阶开销）。
+- `feedback`（FK `answer_id` CASCADE）**不受影响**：归档投影从不读它，
+  仍留在相位 3 的直删名单里（Group A，排在其余表之前）——`feedback` 先清
+  空后，相位 5 级联到 `answers` 时，`feedback` 那一路探查是零命中，不会
+  因为 `answers` 改判而退化。
+- §7 G3「终态 61 张相位 3 表 + 4 张相位 5 表 + 6 张闭包外表全为 0 行」改为
+  「60 张相位 3 表（65 闭包 − 5 张归档输入）+ 5 张相位 5 表 + 6 张闭包外
+  表全为 0 行」，闭包总数 65 不变（52 A 改 51 A + 1 张挪去相位 5，B 类 13
+  不变）。
+
+实现侧的完整记录（含发现经过、`notebook_delete_tables.py` 模块 docstring
+的对应条目、回归钉测试）见 PR-3 阶段 B 的实现报告与
+`backend/app/services/notebook_delete_tables.py`/
+`backend/tests/test_notebook_delete_review_fixes.py`。
+
+### 勘误 2｜相位 5 时长的生产尺度实测正式挪 T-0；T-5a 与既有测试冲突，未落地
+
+**背景**：`docs/development.md`/`docs/development_zh.md` 与本文档此前均未
+给出相位 5（finalize）在生产尺度库上的实测耗时——§1 开头即声明「本节不编
+数字，逐表精确行数与逐批计时由 T-0 实测回填」，相位 5 也不例外。PR-3 阶段
+B 复查（双内部评审合并修复单 P2-h）要求「PG lane 中型夹具打点入测试输出」，
+已落地：`backend/tests/postgres/test_notebook_delete_rows_and_files_pg.py::
+test_medium_library_covers_a_class_b_class_and_closure_external_on_postgres`
+用 monkeypatch 包住 `_phase_finalize` 打印相位 5 耗时（毫秒级，仅供 CI 输出
+可见性追踪，不作为断言阈值）。**正式登记**：这个中型夹具的对象/行数远小于
+生产库（单条来源、单条 memory item、单张 3 行 knowhow 表），其耗时数字
+*不能*外推到生产尺度；相位 5 在生产尺度下的真实耗时测量，与 §1 其余「本节
+不编数字」的量级一样，正式归入 **T-0**（前置只读测量脚本任务），不在
+PR-3 阶段 B 范围内。
+
+**T-5a 未落地，登记为阻塞项**：§T-5 的「T-5a（做）」要求把
+`delete_notebook_graph_rows` 的无界 DELETE（当前 13 条显式语句 + 1 条
+`unified_kg_state` upsert——正文「11 条」的计数在 R1 给
+`_GRAPH_RESET_TABLES` 补齐 `kg_community_edges`/`kg_source_profiles`
+两张明细表后已经过期，这里一并勘误）改写成 §1.5 形一/形二的分页删除
+循环，每批一事务。PR-3 阶段 B 复查中评估此项时发现：
+
+1. `delete_notebook_graph_rows` 目前是 `@staticmethod`，接收调用方已经开
+   好的单个 `db` 连接（`knowledge_lifecycle.py:540` 在
+   `with self._write() as db:` 内调用）；改成分页循环意味着这个函数必须
+   自己拥有多个独立事务（`database.write()` 每批一次），不能再依赖调用方
+   传入的单一连接——PostgreSQL 的 `PostgresDatabase.write()`
+   **禁止重入**（`_WRITE_ACTIVE` 哨兵，见 `postgres/database.py:560-563`
+   的 `NestedPostgresWriteError`），所以调用方那层 `with self._write()`
+   必须整体拆掉，不能只在内部“悄悄”多开几个事务。
+2. `backend/tests/test_kg_mutation_phase_matrix.py::
+   test_delete_delegates_in_write_then_commits_before_cache_invalidation`
+   —— 这条测试自己的 docstring 标注「batch-3-W1 PR-2 R1 (P0-1, restored
+   after review)」，即上一轮评审曾经就"要不要在这里保留单一事务语义"
+   来回过一次，最终**明确保留**了「`delete_notebook_kg` 在一个
+   `write()` 事务里调用 `delete_notebook_graph_rows`，提交后才做缓存
+   失效」这条不变量，并用连接身份断言（`events[0][1] ==
+   events[1][1] == events[2][1]`）把它钉死。T-5a 要求的「原子性从一个
+   事务变成 N 个事务」与这条已经被上一轮评审明确重申过的不变量**直接
+   冲突**——不是简单的测试更新，而是要在这一轮里推翻上一轮评审刻意做出
+   的取舍。
+
+鉴于 `delete_notebook_graph_rows` 是 `rebuildkg-` 后台作业的生产调用路径
+（与 PR-3 阶段 B 本身的笔记本删除作业流水线无关），且这条不变量此前已被
+评审明确讨论并保留过一次，本轮实现方判断这不是可以按「计划已定」直接执行
+的机械改动，而是需要架构决策的取舍——**T-5a 本轮未实现**，`delete_notebook_
+graph_rows` 仍是修改前的 13 条显式 DELETE + 1 条 upsert（无分页）。这一
+条与 P2-f 的裁决冲突留给下一轮评审/规格所有者拍板：要么明确要推翻
+P0-1 的单事务不变量（连带更新
+`test_delete_delegates_in_write_then_commits_before_cache_invalidation`
+与 `test_kg_mutation_phase_matrix.py` 里的相关连接身份断言），要么把
+T-5a 的范围重新界定为不影响这条不变量的形态（例如只分页那些不参与
+"commit 后立即失效缓存"时序契约的表）。

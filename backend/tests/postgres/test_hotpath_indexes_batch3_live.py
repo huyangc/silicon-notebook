@@ -156,7 +156,7 @@ def test_install_builds_the_new_index_and_is_idempotent(postgres_database):
     # Migration 43's own plain (in-transaction) CREATE INDEX IF NOT EXISTS is
     # a true no-op ledger entry once the offline CONCURRENTLY builder already
     # built the index online.
-    assert PostgresMigrator(postgres_database).migrate() == 48
+    assert PostgresMigrator(postgres_database).migrate() == 49
     after_migration = inspect_hotpath_indexes(database_url, schema=schema)
     assert after_migration == state
 
@@ -179,7 +179,7 @@ def test_concept_cluster_detail_page_plan_uses_the_new_index_without_a_sort(
     ``test_relink_source_page_plan_stays_inside_the_notebook``'s rationale in
     ``test_knowledge_store_conformance.py``.
     """
-    assert PostgresMigrator(postgres_database).migrate() == 48
+    assert PostgresMigrator(postgres_database).migrate() == 49
     now = normalize_timestamp("2026-01-01T00:00:00+00:00")
     notebook_id = "nb-hub-cluster"
     _seed_notebook(postgres_database, notebook_id, now)
@@ -241,7 +241,7 @@ def test_concept_cluster_member_total_plan_also_uses_the_prefix(postgres_databas
     ORDER BY), so the new index's leading two columns serve it exactly like
     the pre-existing ``idx_clusters_nb_canonical`` did -- this is a
     non-regression check, not a new win."""
-    assert PostgresMigrator(postgres_database).migrate() == 48
+    assert PostgresMigrator(postgres_database).migrate() == 49
     now = normalize_timestamp("2026-01-01T00:00:00+00:00")
     notebook_id = "nb-hub-cluster-total"
     _seed_notebook(postgres_database, notebook_id, now)
@@ -290,7 +290,7 @@ def test_migration_rejects_a_same_named_wrong_shape_index(postgres_database):
     # then the migration goes through normally.
     with postgres_database.write() as db:
         db.execute("DROP INDEX idx_clusters_nb_canonical_member")
-    assert migrator.migrate() == 48
+    assert migrator.migrate() == 49
 
 
 @pytest.mark.xdist_group(name="postgres_hotpath_indexes_batch3")
@@ -341,4 +341,4 @@ def test_migration_rejects_an_invalid_same_named_index(postgres_database):
     assert migrator.migrate(target_version=42) == 42
     with postgres_database.write() as db:
         db.execute("DROP INDEX idx_clusters_nb_canonical_member")
-    assert migrator.migrate() == 48
+    assert migrator.migrate() == 49

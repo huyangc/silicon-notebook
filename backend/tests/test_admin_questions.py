@@ -81,7 +81,11 @@ def test_admin_questions_combines_ask_and_report_with_filters(client):
     assert filtered["stats"] == {"total": 1, "asks": 0, "reports": 1, "active_users": 1}
     assert filtered["items"][0]["question"] == "分析放大器稳定性"
 
-    assert client.delete(f"/api/notebooks/{notebook['id']}", headers=user_headers).status_code == 204
+    # 批 3·W1 PR-3:DELETE 现在是 202(tombstone CAS 立即返回),实际归档由
+    # 后台删除作业完成——drain 等它跑完,下面的断言才看得到 retained_user_activity。
+    assert client.delete(f"/api/notebooks/{notebook['id']}", headers=user_headers).status_code == 202
+    from app.services import background_jobs
+    background_jobs._drain_maintenance_executors_for_tests(timeout=10.0)
     retained = client.get("/api/admin/questions", headers=admin).json()
     assert retained["stats"] == {"total": 2, "asks": 1, "reports": 1, "active_users": 1}
     assert {item["id"] for item in retained["items"]} == {"ask-global", "report-global"}

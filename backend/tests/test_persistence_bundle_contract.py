@@ -33,6 +33,7 @@ BUNDLE_STORE_PORTS = {
     "governance": "GovernanceStorePort",
     "index_projection": "IndexProjectionStorePort",
     "kg_build_jobs": "KgBuildJobStorePort",
+    "notebook_delete_jobs": "NotebookDeleteJobStorePort",
     "catalog": "CatalogStorePort",
     "knowhow": "KnowhowStorePort",
     "knowhow_history": "KnowhowHistoryStorePort",

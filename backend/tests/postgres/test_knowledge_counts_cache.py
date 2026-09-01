@@ -70,7 +70,7 @@ def _insert_run(
 
 
 def test_pending_query_preserves_latest_run_and_visibility_semantics(postgres_database):
-    assert PostgresMigrator(postgres_database).migrate() == 48
+    assert PostgresMigrator(postgres_database).migrate() == 49
     now = datetime(2026, 8, 4, tzinfo=timezone.utc)
 
     with postgres_database.write() as connection:
@@ -163,7 +163,7 @@ def test_type_counts_and_chunk_count_are_seq_gated_against_real_postgres(
     """大库打开卡死修复的移植主证:type_counts/chunk_count 在真 PostgreSQL 上算对,
     并且真的按 kg_mutation_seq memo——直插数据不 bump seq 时读到旧值,``invalidate``
     (安全阀)或 seq bump(正常路径)都能让下一次读取反映新值。"""
-    assert PostgresMigrator(postgres_database).migrate() == 48
+    assert PostgresMigrator(postgres_database).migrate() == 49
     now = datetime(2026, 8, 5, tzinfo=timezone.utc)
     notebook_id = "nb-counts"
 
