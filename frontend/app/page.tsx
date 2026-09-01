@@ -215,6 +215,7 @@ import { AskSessionHeaderActions } from "./ask-session-header";
 import { ChatTurnNav, chatTurnDomId } from "./chat-turn-nav";
 import { ChatQuestion } from "./chat-question";
 import { ChatAnswer } from "./chat-answer";
+import { WaitingWishCarousel } from "./waiting-wish-carousel";
 import { Pagination } from "./Pagination";
 import { downloadReportArchive, downloadReportMarkdown, ReportsPanel } from "./report-view";
 import {
@@ -6101,6 +6102,7 @@ export default function Home() {
                           {streamsTrace(pendingMode, askModes) ? (
                             <ReasoningTracePanel steps={pendingTrace} live />
                           ) : "思考中…"}
+                          <WaitingWishCarousel />
                         </div>
                       </div>
                     )}

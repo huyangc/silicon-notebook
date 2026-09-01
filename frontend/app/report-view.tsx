@@ -25,6 +25,7 @@ import { EffortPicker, type EffortOption } from "./effort-picker";
 import { quotedPhraseHint } from "./query-syntax";
 import { sourceImageAssetUrl } from "./source-image";
 import { isAdvanced, type UiMode } from "./ui-mode.ts";
+import { WaitingWishCarousel } from "./waiting-wish-carousel";
 import {
   DEFAULT_REPORT_MAX_SECTIONS,
   DEFAULT_REPORT_MAX_SUBQUERIES_PER_SECTION,
@@ -1424,6 +1425,7 @@ export function ReportsPanel({
             )}
           </div>
         )}
+        {isReportActive(active.status) && <WaitingWishCarousel />}
         <ReportCorpusBasis report={active} />
         <ReportCredibilitySummary report={active} />
         {active.content_md && <ReportCitationDistribution report={active} />}
