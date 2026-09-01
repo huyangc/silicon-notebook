@@ -848,6 +848,7 @@ class KnowledgeGovernanceService:
     # records everything in the queue (T1).
     # ------------------------------------------------------------------
 
+    @notebook_model_artifact_scope
     def resolve_notebook_conflicts(self, notebook_id: str) -> dict:
         """Detect, adjudicate, and (optionally) auto-apply KG conflicts for a notebook.
 

@@ -1128,6 +1128,33 @@ def test_model_output_started_before_redaction_cannot_publish_afterward(tmp_path
     assert list(store.root.glob("**/artifact.json")) == []
 
 
+def test_lifecycle_file_lock_uses_windows_fallback(tmp_path, monkeypatch):
+    from app.repositories import analysis_artifacts as artifacts_module
+
+    calls = []
+
+    class FakeMsvcrt:
+        LK_NBLCK = 1
+        LK_UNLCK = 2
+
+        @staticmethod
+        def locking(descriptor, operation, size):
+            calls.append((descriptor, operation, size))
+
+    monkeypatch.setattr(artifacts_module, "_fcntl", None)
+    monkeypatch.setattr(artifacts_module, "_msvcrt", FakeMsvcrt)
+    store = AnalysisArtifactStore(tmp_path, retention_days=2)
+
+    with store._lifecycle_scope(exclusive=False):
+        pass
+
+    assert [operation for _, operation, _ in calls] == [
+        FakeMsvcrt.LK_NBLCK,
+        FakeMsvcrt.LK_UNLCK,
+    ]
+    assert all(size == 1 for _, _, size in calls)
+
+
 def test_redaction_waits_for_publication_then_removes_the_case(
     tmp_path,
     monkeypatch,

@@ -110,6 +110,14 @@ def test_schema_shape_validation_accepts_dynamic_report_frame_assignments():
     )
 
 
+def test_schema_shape_validation_accepts_empty_optional_validity_scope():
+    validate_model_json_shape(
+        '{"nodes":[{"name":"claim","validity_scope":{}}]}',
+        '{"nodes":[{"name":"","validity_scope":'
+        '{"region":[],"assumptions":[],"approximation":"","range":""}}]}',
+    )
+
+
 def test_schema_shape_validation_rejects_non_string_frame_assignment_values():
     with pytest.raises(ModelJsonRepairError, match="invalid_type"):
         validate_model_json_shape(

@@ -147,6 +147,35 @@ def test_llm_not_configured_returns_skipped_summary(repo):
     assert result["queued"] == 0
 
 
+def test_conflict_resolution_enters_notebook_artifact_scope(repo, monkeypatch):
+    from app.services import model_work as model_work_module
+    from app.services.model_work import ModelPriority, make_model_work_context
+
+    notebook_id = "nb-conflict-scope"
+    contexts = []
+    monkeypatch.setattr(
+        model_work_module,
+        "current_model_artifact_lifecycle_epoch",
+        lambda scoped_notebook_id: 9 if scoped_notebook_id == notebook_id else 0,
+    )
+
+    def configured(_workload_id):
+        contexts.append(make_model_work_context(
+            workload_id="kg_conflict_review",
+            priority=ModelPriority.BACKGROUND,
+        ))
+        return False
+
+    governance = repo._runtime.knowledge_governance
+    monkeypatch.setattr(governance.model_clients, "configured", configured)
+
+    result = governance.resolve_notebook_conflicts(notebook_id)
+
+    assert result["skipped_llm"] is True
+    assert contexts[0].notebook_id == notebook_id
+    assert contexts[0].artifact_lifecycle_epoch == 9
+
+
 # ---------------------------------------------------------------------------
 # Test: candidates detected and queue rows written
 # ---------------------------------------------------------------------------
