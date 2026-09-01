@@ -165,7 +165,11 @@ class ReportExecutionCoordinator:
                 except Exception:
                     pass
                 with model_work_scope(
-                    priority=ModelPriority.REPORT, parent_id=report_id
+                    priority=ModelPriority.REPORT,
+                    parent_id=report_id,
+                    actor_id=user_id,
+                    notebook_id=notebook_id,
+                    question=question,
                 ):
                     engine = self.engine_factory(user_id=user_id, cancel_event=cancel)
                     from app.services.source_scope import source_scope_context
@@ -248,7 +252,11 @@ class ReportExecutionCoordinator:
                         pass
                     raise
                 with model_work_scope(
-                    priority=ModelPriority.REPORT, parent_id=report_id
+                    priority=ModelPriority.REPORT,
+                    parent_id=report_id,
+                    actor_id=user_id,
+                    notebook_id=notebook_id,
+                    question=question,
                 ):
                     from app.services.source_scope import source_scope_context
 

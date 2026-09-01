@@ -254,6 +254,48 @@ def _validate_against_example(value: Any, example: Any) -> None:
     raise ModelJsonRepairError("invalid_type")
 
 
+def _validate_known_shape(value: Any, example: Any) -> None:
+    """Validate fields described by a schema example without rejecting extras.
+
+    Schema hints are examples rather than full JSON Schema documents.  Some
+    callers intentionally tolerate provider-added fields, but a named field
+    with the wrong container/scalar type is never usable by their parser.
+    """
+    if isinstance(example, dict):
+        if not isinstance(value, dict):
+            raise ModelJsonRepairError("invalid_type")
+        shared_keys = set(value).intersection(example)
+        if example and not shared_keys:
+            raise ModelJsonRepairError("missing_expected_key")
+        for key in shared_keys:
+            _validate_known_shape(value[key], example[key])
+        return
+    if isinstance(example, list):
+        if not isinstance(value, list):
+            raise ModelJsonRepairError("invalid_type")
+        if example:
+            for item in value:
+                _validate_known_shape(item, example[0])
+        return
+    _validate_against_example(value, example)
+
+
+def validate_model_json_shape(content: str, schema_hint: str) -> None:
+    """Reject parseable objects whose advertised fields violate the hint.
+
+    Missing all top-level advertised fields (including ``{}``) is a contract
+    failure.  Individual fields remain optional because the product's hints
+    are examples and several workloads deliberately omit optional members.
+    """
+    value = _strict_object(content)
+    example = _schema_example(schema_hint)
+    if not example:
+        return
+    if not set(value).intersection(example):
+        raise ModelJsonRepairError("missing_expected_key")
+    _validate_known_shape(value, example)
+
+
 def _validate_repaired_shape(
     raw: str,
     value: dict[str, Any],

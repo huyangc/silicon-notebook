@@ -420,7 +420,8 @@ def _build_notebook_domain(
     """Domain 3 — notebook identity/catalog over domain 2's seats.
 
     Inputs: ``seats.database`` / ``queries`` / ``identity`` / ``notebook_store``
-    / ``kg_build_jobs`` from domain 2 and ``foundation.settings`` from domain 1.
+    / ``kg_build_jobs`` from domain 2 and ``foundation.settings`` / ``models``
+    from domain 1.
     """
 
     summaries = NotebookSummaryQuery(
@@ -440,6 +441,11 @@ def _build_notebook_domain(
         source_files.storage_dir,
         retention_days=foundation.settings.analysis_failure_retention_days,
     )
+    set_malformed_response_sink = getattr(
+        foundation.models, "set_malformed_response_sink", None
+    )
+    if callable(set_malformed_response_sink):
+        set_malformed_response_sink(analysis_artifacts.record_model_output_issue)
     spreadsheet_analysis = SpreadsheetAnalysisService(
         artifacts=analysis_artifacts,
         settings=foundation.settings,

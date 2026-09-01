@@ -11,6 +11,7 @@ from openpyxl import Workbook
 from pydantic import ValidationError
 
 from app.core.config import Settings
+from app.domain.model_artifacts import MalformedModelInteraction
 from app.repositories.analysis_artifacts import AnalysisArtifactStore
 from app.services.cancellation import AskCancelled
 from app.services.spreadsheet_analysis import (
@@ -981,6 +982,117 @@ def test_issue_archive_resolves_redacts_and_expires(tmp_path):
         now=datetime(2026, 9, 1, 1, tzinfo=timezone.utc)
     ) == []
     assert not (store.root / "issues" / "redacted").exists()
+
+
+def test_model_output_issue_keeps_content_out_of_list_and_serves_one_artifact(
+    tmp_path,
+):
+    store = AnalysisArtifactStore(tmp_path, retention_days=2)
+    response = '{"answer": ["wrong type"]}'
+    issue = store.record_model_output_issue(MalformedModelInteraction(
+        workload_id="ask_answer",
+        workload_label="问答回答",
+        model_area="ask",
+        failure_kind="schema_mismatch",
+        support_id="mdl-safe-1",
+        actor_id="user-1",
+        parent_id="ask-job-1",
+        notebook_id="nb-1",
+        question="不要截断的用户问题",
+        messages=({"role": "user", "content": "完整请求正文"},),
+        schema_hint='{"answer":""}',
+        response=response,
+        reason="invalid_type",
+        occurred_at="2026-08-29T00:00:00+00:00",
+    ))
+
+    [listed] = store.list_issues(
+        category="model_output", now=datetime(2026, 8, 30, tzinfo=timezone.utc)
+    )
+    assert listed["id"] == issue["id"]
+    assert "question" not in listed
+    assert "response" not in listed
+    assert store.list_issues(
+        category="model_output",
+        model_area="report",
+        now=datetime(2026, 8, 30, tzinfo=timezone.utc),
+    ) == []
+    artifact = store.load_model_output_artifact(
+        issue["id"], now=datetime(2026, 8, 30, tzinfo=timezone.utc)
+    )
+    assert artifact == {
+        "issue_id": issue["id"],
+        "question": "不要截断的用户问题",
+        "messages": [{"role": "user", "content": "完整请求正文"}],
+        "schema_hint": '{"answer":""}',
+        "response": response,
+        "workload_id": "ask_answer",
+        "workload_label": "问答回答",
+        "model_area": "ask",
+        "failure_kind": "schema_mismatch",
+        "support_id": "mdl-safe-1",
+        "parent_id": "ask-job-1",
+        "reason": "invalid_type",
+        "occurred_at": "2026-08-29T00:00:00+00:00",
+    }
+
+    store.redact_notebook(
+        "nb-1", occurred_at="2026-08-30T01:00:00+00:00"
+    )
+    assert store.load_model_output_artifact(
+        issue["id"], now=datetime(2026, 8, 30, 2, tzinfo=timezone.utc)
+    ) is None
+    [redacted] = store.list_issues(
+        category="model_output",
+        now=datetime(2026, 8, 30, 2, tzinfo=timezone.utc),
+    )
+    assert redacted["artifact_available"] is False
+    assert redacted["owner_id"] == ""
+    assert redacted["notebook_id"] == ""
+    assert redacted["support_id"] == ""
+    assert redacted["parent_id"] == ""
+    assert redacted["source_deleted"] is False
+    assert redacted["notebook_deleted"] is True
+    assert redacted["workload_id"] == "ask_answer"
+    assert redacted["model_area"] == "ask"
+
+
+def test_source_deletion_conservatively_removes_notebook_model_content(tmp_path):
+    store = AnalysisArtifactStore(tmp_path, retention_days=2)
+    issue = store.record_model_output_issue(MalformedModelInteraction(
+        workload_id="source_summary",
+        workload_label="来源摘要",
+        model_area="source",
+        failure_kind="invalid_json",
+        support_id="mdl-source-safe",
+        actor_id="user-1",
+        parent_id="source-job-1",
+        notebook_id="nb-1",
+        question="可能含有来源正文的提示",
+        messages=({"role": "user", "content": "私有来源正文"},),
+        schema_hint='{"summary":""}',
+        response="not-json",
+        reason="invalid_json",
+        occurred_at="2026-08-29T00:00:00+00:00",
+    ))
+
+    store.redact_source(
+        "nb-1", "src-1", occurred_at="2026-08-30T01:00:00+00:00"
+    )
+
+    assert store.load_model_output_artifact(
+        issue["id"], now=datetime(2026, 8, 30, 2, tzinfo=timezone.utc)
+    ) is None
+    [redacted] = store.list_issues(
+        category="model_output",
+        now=datetime(2026, 8, 30, 2, tzinfo=timezone.utc),
+    )
+    assert redacted["artifact_available"] is False
+    assert redacted["notebook_id"] == ""
+    assert redacted["support_id"] == ""
+    assert redacted["parent_id"] == ""
+    assert redacted["source_deleted"] is False
+    assert redacted["notebook_deleted"] is False
 
 
 def test_expired_issue_removes_identifier_directories(tmp_path):

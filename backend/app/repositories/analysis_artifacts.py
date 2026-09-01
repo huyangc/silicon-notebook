@@ -1,4 +1,4 @@
-"""Filesystem-owned spreadsheet snapshots and parsing-failure quarantine.
+"""Filesystem-owned analysis snapshots and failure evidence.
 
 The archive is deliberately outside the user notebook's source directory: a
 parser failure must not make the source file disappear or change the user's
@@ -15,9 +15,18 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from app.domain.model_artifacts import MalformedModelInteraction
 
-ISSUE_CATEGORIES = frozenset({"source_parse", "spreadsheet_analysis"})
+
+ISSUE_CATEGORIES = frozenset({
+    "source_parse",
+    "spreadsheet_analysis",
+    "model_output",
+})
 ISSUE_STATUSES = frozenset({"open", "resolved"})
+MODEL_AREAS = frozenset({
+    "ask", "report", "source", "knowledge", "memory", "knowhow", "retrieval"
+})
 
 
 def _parse_time(value: str) -> datetime | None:
@@ -167,6 +176,102 @@ class AnalysisArtifactStore:
         _atomic_json(metadata_path, issue)
         return issue
 
+    def record_model_output_issue(
+        self, interaction: MalformedModelInteraction
+    ) -> dict[str, Any]:
+        """Archive an exact rejected structured-model exchange.
+
+        Content lives only in ``artifact.json``.  The issue projection remains
+        content-minimal so listing the admin page never bulk-loads prompts or
+        responses.
+        """
+        case_id = secrets.token_urlsafe(16)
+        scope_directory = interaction.notebook_id or "_unscoped"
+        issue_dir = self._issue_dir(scope_directory, case_id, "model_output")
+        occurred = _parse_time(interaction.occurred_at) or datetime.now(timezone.utc)
+        expires = occurred + timedelta(days=self.retention_days)
+        artifact = {
+            "question": interaction.question,
+            "messages": list(interaction.messages),
+            "schema_hint": interaction.schema_hint,
+            "response": interaction.response,
+            "workload_id": interaction.workload_id,
+            "workload_label": interaction.workload_label,
+            "model_area": interaction.model_area,
+            "failure_kind": interaction.failure_kind,
+            "support_id": interaction.support_id,
+            "parent_id": interaction.parent_id,
+            "reason": interaction.reason,
+            "occurred_at": occurred.isoformat(),
+        }
+        _atomic_json(issue_dir / "artifact.json", artifact)
+        issue = {
+            "id": f"analysis-model-{case_id}",
+            "category": "model_output",
+            "status": "open",
+            "code": "MODEL_OUTPUT_INVALID_JSON_CONTRACT",
+            "summary": "模型回答未通过 JSON 协议校验；已保存本次提问与原始回答。",
+            "owner_id": interaction.actor_id,
+            "notebook_id": interaction.notebook_id,
+            "notebook_name": "",
+            "source_id": "",
+            "source_title": "",
+            "file_name": "",
+            "source_type": "",
+            "source_hash": "",
+            "workload_id": interaction.workload_id,
+            "workload_label": interaction.workload_label,
+            "model_area": interaction.model_area,
+            "failure_kind": interaction.failure_kind,
+            "support_id": interaction.support_id,
+            "parent_id": interaction.parent_id,
+            "created_at": occurred.isoformat(),
+            "updated_at": occurred.isoformat(),
+            "resolved_at": "",
+            "expires_at": expires.isoformat(),
+            "artifact_available": True,
+            "source_deleted": False,
+            "notebook_deleted": False,
+        }
+        _atomic_json(issue_dir / "issue.json", issue)
+        return issue
+
+    def load_model_output_artifact(
+        self,
+        issue_id: str,
+        *,
+        now: datetime | None = None,
+    ) -> dict[str, Any] | None:
+        """Read one unexpired model artifact by opaque issue id."""
+        current = now or datetime.now(timezone.utc)
+        issue_root = self.root / "issues"
+        if not issue_root.is_dir():
+            return None
+        for metadata_path in list(issue_root.glob("*/*/*/issue.json")):
+            try:
+                issue = json.loads(metadata_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError):
+                continue
+            if not isinstance(issue, dict) or issue.get("id") != issue_id:
+                continue
+            expires = _parse_time(str(issue.get("expires_at") or ""))
+            if expires is not None and expires <= current:
+                shutil.rmtree(metadata_path.parent, ignore_errors=True)
+                self._remove_empty_parents(metadata_path.parent.parent, issue_root)
+                return None
+            if issue.get("category") != "model_output":
+                return None
+            try:
+                artifact = json.loads(
+                    (metadata_path.parent / "artifact.json").read_text(encoding="utf-8")
+                )
+            except (OSError, ValueError, TypeError):
+                return None
+            if not isinstance(artifact, dict):
+                return None
+            return {"issue_id": issue_id, **artifact}
+        return None
+
     def resolve_issue(
         self,
         notebook_id: str,
@@ -196,6 +301,12 @@ class AnalysisArtifactStore:
         self, notebook_id: str, source_id: str, *, occurred_at: str
     ) -> None:
         self.delete_spreadsheet_manifest(notebook_id, source_id)
+        # Model prompts may contain evidence from several sources but the
+        # scheduler boundary does not own a trustworthy source-id ledger.
+        # Conservatively destroy every retained model payload for this
+        # notebook when any source is deleted instead of retaining content
+        # that may have come from the deleted source.
+        self._redact_model_outputs_for_notebook(notebook_id, occurred_at)
         source_root = self.root / "issues" / notebook_id / source_id
         if not source_root.is_dir():
             return
@@ -205,6 +316,21 @@ class AnalysisArtifactStore:
         finally:
             shutil.rmtree(source_root, ignore_errors=True)
             self._remove_empty_parents(source_root.parent, self.root / "issues")
+
+    def _redact_model_outputs_for_notebook(
+        self, notebook_id: str, occurred_at: str
+    ) -> None:
+        issue_root = self.root / "issues" / notebook_id
+        if not issue_root.is_dir():
+            return
+        for metadata_path in list(issue_root.glob("*/model_output/issue.json")):
+            self._redact_issue(
+                metadata_path,
+                occurred_at,
+                notebook_deleted=False,
+            )
+            shutil.rmtree(metadata_path.parent.parent, ignore_errors=True)
+        self._remove_empty_parents(issue_root, self.root / "issues")
 
     def redact_notebook(self, notebook_id: str, *, occurred_at: str) -> None:
         spreadsheet_root = self.root / "spreadsheets" / notebook_id
@@ -231,6 +357,7 @@ class AnalysisArtifactStore:
         category = str(issue.get("category") or "")
         if category not in ISSUE_CATEGORIES:
             return
+        had_source = bool(issue.get("source_id"))
         self._delete_payload(metadata_path.parent)
         neutral_id = secrets.token_hex(16)
         issue.update({
@@ -244,9 +371,11 @@ class AnalysisArtifactStore:
             "file_name": "",
             "source_type": "",
             "source_hash": "",
-            "summary": "原来源已删除；仅保留问题分类与时间信息。",
+            "support_id": "",
+            "parent_id": "",
+            "summary": "原关联内容已删除；仅保留问题分类与时间信息。",
             "artifact_available": False,
-            "source_deleted": True,
+            "source_deleted": had_source,
             "notebook_deleted": notebook_deleted,
             "updated_at": occurred_at,
         })
@@ -261,6 +390,7 @@ class AnalysisArtifactStore:
         owner_id: str = "",
         status: str = "",
         category: str = "",
+        model_area: str = "",
         limit: int = 200,
         now: datetime | None = None,
     ) -> list[dict[str, Any]]:
@@ -268,6 +398,8 @@ class AnalysisArtifactStore:
             raise ValueError("unsupported analysis issue status")
         if category and category not in ISSUE_CATEGORIES:
             raise ValueError("unsupported analysis issue category")
+        if model_area and model_area not in MODEL_AREAS:
+            raise ValueError("unsupported model analysis area")
         current = now or datetime.now(timezone.utc)
         rows: list[dict[str, Any]] = []
         issue_root = self.root / "issues"
@@ -293,6 +425,8 @@ class AnalysisArtifactStore:
                 continue
             if category and item.get("category") != category:
                 continue
+            if model_area and item.get("model_area") != model_area:
+                continue
             rows.append(item)
         rows.sort(
             key=lambda item: (str(item.get("updated_at") or ""), str(item.get("id") or "")),
@@ -302,10 +436,11 @@ class AnalysisArtifactStore:
 
     @staticmethod
     def _delete_payload(issue_dir: Path) -> None:
-        try:
-            (issue_dir / "payload").unlink()
-        except FileNotFoundError:
-            pass
+        for name in ("payload", "artifact.json"):
+            try:
+                (issue_dir / name).unlink()
+            except FileNotFoundError:
+                pass
 
     @staticmethod
     def _remove_empty_parents(path: Path, stop: Path) -> None:

@@ -24,6 +24,7 @@ from app.services.model_work import (
     ModelQueueTimeout,
     ModelServiceUnavailable,
     make_model_work_context,
+    model_artifact_scope,
     model_work_scope,
 )
 
@@ -134,6 +135,29 @@ def test_work_scope_overrides_priority_and_parent_only(monkeypatch):
     assert context.priority is ModelPriority.REPORT
     assert context.parent_id == "report-9"
     assert context.deadline_at == 1_300
+
+
+def test_artifact_scope_adds_notebook_metadata_without_changing_priority(monkeypatch):
+    clock = FakeClock()
+    monkeypatch.setattr(model_work_module, "request_user_id", lambda: None)
+
+    with model_artifact_scope(
+        actor_id="user-8",
+        notebook_id="nb-8",
+        question="归档问题",
+        parent_id="source-8",
+    ):
+        context = make_model_work_context(
+            workload_id="source_summary",
+            priority=ModelPriority.BACKGROUND,
+            clock=clock,
+        )
+
+    assert context.actor_id == "user-8"
+    assert context.notebook_id == "nb-8"
+    assert context.question == "归档问题"
+    assert context.parent_id == "source-8"
+    assert context.priority is ModelPriority.BACKGROUND
 
 
 def test_same_service_workloads_share_one_peak():

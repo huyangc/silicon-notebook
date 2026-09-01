@@ -37,25 +37,76 @@ class ModelWorkContext:
     support_id: str
     deadline_at: float
     cancel_event: CancellationSignal | None
+    notebook_id: str = ""
+    question: str = ""
 
 
 @dataclass(frozen=True)
 class _ModelWorkScope:
     priority: ModelPriority
     parent_id: str
+    actor_id: str
+    notebook_id: str
+    question: str
+
+
+@dataclass(frozen=True)
+class _ModelArtifactScope:
+    actor_id: str
+    notebook_id: str
+    question: str
+    parent_id: str
 
 
 _CURRENT_SCOPE: contextvars.ContextVar[_ModelWorkScope | None] = (
     contextvars.ContextVar("model_work_scope", default=None)
 )
+_CURRENT_ARTIFACT_SCOPE: contextvars.ContextVar[_ModelArtifactScope | None] = (
+    contextvars.ContextVar("model_artifact_scope", default=None)
+)
+
+
+@contextmanager
+def model_artifact_scope(
+    *,
+    actor_id: str = "",
+    notebook_id: str = "",
+    question: str = "",
+    parent_id: str = "",
+) -> Iterator[None]:
+    """Attach notebook identity to any chat workload without changing priority."""
+    previous = _CURRENT_ARTIFACT_SCOPE.get()
+    token = _CURRENT_ARTIFACT_SCOPE.set(_ModelArtifactScope(
+        actor_id=str(actor_id or (previous.actor_id if previous else "")),
+        notebook_id=str(
+            notebook_id or (previous.notebook_id if previous else "")
+        ),
+        question=str(question or (previous.question if previous else "")),
+        parent_id=str(parent_id or (previous.parent_id if previous else "")),
+    ))
+    try:
+        yield
+    finally:
+        _CURRENT_ARTIFACT_SCOPE.reset(token)
 
 
 @contextmanager
 def model_work_scope(
-    *, priority: ModelPriority, parent_id: str = ""
+    *,
+    priority: ModelPriority,
+    parent_id: str = "",
+    actor_id: str = "",
+    notebook_id: str = "",
+    question: str = "",
 ) -> Iterator[None]:
     token = _CURRENT_SCOPE.set(
-        _ModelWorkScope(priority=ModelPriority(priority), parent_id=str(parent_id))
+        _ModelWorkScope(
+            priority=ModelPriority(priority),
+            parent_id=str(parent_id),
+            actor_id=str(actor_id),
+            notebook_id=str(notebook_id),
+            question=str(question),
+        )
     )
     try:
         yield
@@ -77,14 +128,42 @@ def make_model_work_context(
     """Build one invocation context, inheriting only scope-owned metadata."""
 
     scope = _CURRENT_SCOPE.get()
+    artifact_scope = _CURRENT_ARTIFACT_SCOPE.get()
     effective_priority = scope.priority if scope is not None else ModelPriority(priority)
-    effective_parent = scope.parent_id if scope is not None else str(parent_id)
+    effective_parent = (
+        scope.parent_id
+        if scope is not None
+        else (
+            artifact_scope.parent_id
+            if artifact_scope is not None and artifact_scope.parent_id
+            else str(parent_id)
+        )
+    )
+    effective_actor = (
+        scope.actor_id
+        if scope is not None and scope.actor_id
+        else (
+            artifact_scope.actor_id
+            if artifact_scope is not None and artifact_scope.actor_id
+            else actor_id
+        )
+    )
     now = (clock or time.monotonic)()
     return ModelWorkContext(
-        actor_id=str(actor_id or request_user_id() or "system"),
+        actor_id=str(effective_actor or request_user_id() or "system"),
         workload_id=str(workload_id),
         priority=effective_priority,
         parent_id=effective_parent,
+        notebook_id=(
+            scope.notebook_id
+            if scope is not None and scope.notebook_id
+            else (artifact_scope.notebook_id if artifact_scope is not None else "")
+        ),
+        question=(
+            scope.question
+            if scope is not None and scope.question
+            else (artifact_scope.question if artifact_scope is not None else "")
+        ),
         support_id=str(support_id or f"mdl-{secrets.token_urlsafe(12)}"),
         deadline_at=(
             float(deadline_at)

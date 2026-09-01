@@ -48,6 +48,7 @@ from app.services.citation_markers import LOOSE_MARKER_RE
 from app.core.memory_inputs import MemoryInputError
 from app.api.task_stream import task_stream_response
 from app.services.cancellation import AskCancelled
+from app.services.model_work import model_artifact_scope
 
 
 memory_router = APIRouter()
@@ -407,11 +408,16 @@ def _answer_memory_preview_result(
         return fallback
     try:
         control = {"cancel_event": cancel_event} if cancel_event is not None else {}
-        raw = llm_client.chat_json(
-            [{"role": "user", "content": memory_preview_prompt(source["question"], source["answer"])}],
-            MEMORY_PREVIEW_SCHEMA_HINT,
-            **control,
-        )
+        with model_artifact_scope(
+            notebook_id=str(source["notebook_id"]),
+            question=str(source["question"]),
+            parent_id=answer_id,
+        ):
+            raw = llm_client.chat_json(
+                [{"role": "user", "content": memory_preview_prompt(source["question"], source["answer"])}],
+                MEMORY_PREVIEW_SCHEMA_HINT,
+                **control,
+            )
         data = json.loads(raw)
         title = str(data.get("title") or "").strip()[:80]
         content_md = str(data.get("content_md") or "").strip()

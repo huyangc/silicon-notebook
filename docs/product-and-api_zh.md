@@ -1270,6 +1270,22 @@ Deep Report 完成后处理使用独立部署护栏：`REPORT_POST_COMPLETION_EX
 
 `reasoning_agent` 决策与 `ask_answer` 合成始终先走严格 JSON 解析。严格解析失败后，共享修复层只允许接收对象首尾完整、且仅有可恢复语法错误（如缺引号/逗号）的响应。修复结果不得超出 schema example 的顶层字段，布尔字段必须是真正的 JSON boolean，枚举样例值必须留在词表内，拒绝非有限数；每个非空字符串值还必须逐字存在于原始响应中。截断对象、数组/标量、未知字段、类型混淆和字符串重构仍视为畸形响应。检索器异常会降级成可持久化的终态 Ask 回答，不再因为不存在的 result 中止编排。
 
+同一个 scheduler 出口现在覆盖当前注册表里的**全部 27 个 chat workload**，而不只覆盖问答和深度报告。严格 JSON 本身可解析后，出口还按 schema example 检查已声明的顶层及嵌套字段类型、列表项形状和枚举值；空对象或完全不含任何预期顶层字段的对象同样拒绝。由于这里的 schema 是示例而不是完整 JSON Schema，未出现的可选字段仍允许省略，模型额外返回的字段也不由这层删改。凡在这个统一 JSON 协议边界被拒绝的响应，系统都会把完整模型消息、schema 提示、原始响应、用户问题（有显式问题时）和安全 `support_id` 写入私有分析工件；普通日志和问题列表不含这些正文。没有请求级笔记本身份的后台/脚本调用仍会保存到 `_unscoped`，因此不会因缺少 Notebook 路由上下文而漏记。
+
+管理员问题列表以稳定 workload id 归入 7 类；报告执行上下文复用的共享 workload 归“深度报告”，不按其默认类误记：
+
+| 模型功能分类 | 当前 chat workload（共 27 个） |
+| --- | --- |
+| 问答 `ask` | `ask_answer`、`plugin_engine`、`reasoning_agent`、`query_rewrite`、`evidence_refine` |
+| 深度报告 `report` | `report_outline`、`report_sufficiency`、`report_section`、`report_summary` |
+| 来源处理 `source` | `source_summary`、`notebook_metadata`、`paper_metadata`、`chunk_question_generation` |
+| 知识库 `knowledge` | `kg_extract`、`kg_refine`、`kg_glean`、`kg_merge_review`、`kg_concept_description`、`kg_community_summary`、`kg_conflict_review`、`schema_induction` |
+| 记忆与库理解 `memory` | `memory_preview`、`agent_profile_consolidate` |
+| 经验表格 `knowhow` | `knowhow_optimize`、`knowhow_reformat`、`knowhow_complete` |
+| 检索优化 `retrieval` | `retrieval_experience_distill` |
+
+失败另分为 `invalid_json`（空响应、截断、非对象或 JSON 语法错误）、`schema_mismatch`（已声明字段的形状/类型/枚举不合格，或缺少全部预期顶层字段）和 `repair_rejected`（shadow 模式可修但按策略不采用）。这三类只描述模型响应为什么没通过统一 JSON 协议，不替代各产品功能自己的业务降级或用户错误合同。
+
 `/ask/stream` 的交付队列空闲时每 **5 秒**发送一条不含业务内容的空白 NDJSON 行，并关闭常见代理缓冲；既有客户端会忽略空行。这样慢反思或慢合成期间 transport 仍有字节流动，但不会伪造推理步骤；断连仍只停止该客户端接收，detached job 继续运行。心跳只处理 idle timeout——ingress/CDN 若配置总请求时长硬上限，仍需由部署者调整。
 
 交互任务按生命周期分流，而不是把所有端点强行包装成同一种 stream：
@@ -1982,6 +1998,14 @@ workload 做有界规划，不引入 Anthropic SDK 一类通用 Agent。模型�
 `source_parse`。系统把上传文件**复制**（不是移动）到笔记本来源目录之外的私有隔离区，
 管理员 API 只返回内容最小化的安全问题投影，绝不暴露物理路径或来源哈希。
 
+上述同一套私有工件还承载 `model_output`：当前 27 个结构化 chat workload 的响应只要
+在 scheduler 统一出口没有通过 JSON 语法/形状协议，就新建一个不可变案例。列表只返回
+功能分类、稳定 workload id/显示名、失败类型、时间、`support_id` 和可用的用户/笔记本/
+父任务关联；完整消息、schema 提示、原始响应与显式用户问题只在管理员按单个案例打开详情
+时读取，不进入列表批量响应。该记录不复制来源文件，也不会被模型重试或产品功能的 fallback
+标为解决；它保持 `open` 直至到期或相关笔记本删除。没有 Notebook 上下文的调用使用
+`_unscoped` 私有目录并保留相同分类，列表中以 `system` 标识执行方且不伪造用户或笔记本归属。
+
 | Excel 专业分析护栏 | 默认值 | 合法范围 |
 | --- | ---: | ---: |
 | `SPREADSHEET_ANALYSIS_ENABLED` | `true` | 布尔值 |
@@ -1997,23 +2021,31 @@ workload 做有界规划，不引入 Anthropic SDK 一类通用 Agent。模型�
 | `SPREADSHEET_ANALYSIS_PLANNER_TIMEOUT_SECONDS` | 8.0 秒 | 1.0..60.0 |
 | `ANALYSIS_FAILURE_RETENTION_DAYS` | 30 天 | 1..3,650 |
 
-问题记录有 `open`/`resolved` 状态和写定的到期时间。用户之后自行重新解析成功时，系统自动
-把对应问题标为已解决并删除隔离副本；到期时间是强读闸，读取问题清单时执行物理清理。
+问题记录有 `open`/`resolved` 状态和写定的到期时间。对于来源问题，用户之后自行重新解析成功
+时，系统自动把对应问题标为已解决并删除隔离副本；`model_output` 案例不自动重试或转为
+`resolved`。到期时间是强读闸，读取问题清单或单个模型案例时执行物理清理。
 删除来源或笔记本会立即删除表格快照与隔离副本，清空用户/来源/笔记本关联、名称、id、
-文件名与哈希，并迁移到新生成的中性案例 id 与不含原标识的归档路径；到期前只保留分类、
-时间和脱敏摘要。笔记本数据库删除已经提交之后，文件系统
+文件名、哈希、模型消息、schema、原始响应、`support_id` 与父任务 id，并迁移到新生成的中性
+案例 id 与不含原标识的归档路径；到期前只保留分类、时间和脱敏摘要。笔记本数据库删除已经提交之后，文件系统
 脱敏属于尽力清理：I/O 失败只写安全日志，不会让已经完成的 DELETE 对用户表现为失败。
+模型提示可能混入多个来源的证据，而 scheduler 边界没有可信的逐来源 id 账本；因此删除任一
+来源时，会保守销毁该笔记本下**全部**留存模型正文，而不是猜测哪些案例引用过该来源。
 
 管理员的**用户使用总览**保持既有用户表列不变，在旁边新增**提问分析**与**解析问题**两个
-页签。既有「查看提问」改为进入固定只看提问的分析页签；解析问题可按用户、状态和类型筛选。
+页签。既有「查看提问」改为进入固定只看提问的分析页签；解析问题可按用户、状态、类型和
+7 类模型功能筛选。模型输出案例只在点开该行时读取完整提问与回答；列表加载不批量读取正文。
 存活来源跳转到“用户活动”里该精确来源的管理员只读详情，而不是仍受 owner/member 权限保护的
 普通工作区；已删除来源只展示脱敏摘要。两页均为只读：没有重新解析、
 批量重试、关闭记录、删除隔离文件或彻底清除案例的端点/控件，管理员不能借此改动用户笔记本。
 
-- `GET /api/admin/analysis-issues?owner_id=&status=&category=&limit=` —— 仅管理员可读；
+- `GET /api/admin/analysis-issues?owner_id=&status=&category=&model_area=&limit=` —— 仅管理员可读；
   `status` 为 空/`open`/`resolved`，`category` 为 空/`source_parse`/
-  `spreadsheet_analysis`，`limit` 为 `1..500`（默认 200）。刻意没有配套的
+  `spreadsheet_analysis`/`model_output`，`model_area` 为 空/`ask`/`report`/`source`/
+  `knowledge`/`memory`/`knowhow`/`retrieval`，`limit` 为 `1..500`（默认 200）。刻意没有配套的
   POST/PATCH/DELETE。
+- `GET /api/admin/analysis-issues/{issue_id}/artifact` —— 仅管理员按单个未到期的
+  `model_output` 案例读取完整请求消息、schema 提示和模型原始回答；来源问题或不存在、已删除、
+  已到期的案例返回 404。该端点只读且不返回物理路径。
 - `GET /api/admin/users/{user_id}/notebooks/{notebook_id}/sources/{source_id}` —— 上述
   深链使用的内容最小化精确来源只读投影；仅当笔记本属于路径用户、且来源仍是该库内的存活
   可见来源时返回，否则 404。
