@@ -16,9 +16,10 @@ export const listSources = (
   offset = 0,
   limit = 50,
   query = "",
+  signal?: AbortSignal,
 ) => requestJson<PaginatedSources>(
   `/notebooks/${notebookId}/sources?offset=${offset}&limit=${limit}&q=${encodeURIComponent(query)}`,
-  options,
+  { ...options, signal },
 );
 
 // 返回值里可能夹着**没有新建**的既有来源（同笔记本内容相同 → 沿用原条目），
