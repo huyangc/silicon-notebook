@@ -1756,6 +1756,22 @@ An earlier revision let the intent planner emit a `source_refs` list that `/ask/
 
 `reasoning_agent` decisions and `ask_answer` synthesis are strict-JSON-first. If strict parsing fails, the shared repair seam may accept only a complete object-shaped response with recoverable syntax faults such as missing quotes/commas. The repaired object must stay within the schema example's top-level keys, actual booleans remain booleans, enum-like example values remain in vocabulary, non-finite values are refused, and every nonempty string value must still appear verbatim in the raw response. Truncated objects, arrays/scalars, unknown keys, type confusion, and string reconstruction remain malformed responses. A retriever failure degrades to a terminal persisted Ask response instead of aborting the orchestration on an absent result.
 
+That scheduler exit now covers **all 27 chat workloads** in the current registry, not only Ask and Deep Report. After strict JSON parsing succeeds, it also checks the declared top-level and nested field types, list-item shapes, and enum-like values against the schema example; an empty object or an object containing none of the expected top-level fields is rejected too. Because these hints are examples rather than full JSON Schema documents, omitted optional fields remain allowed and this boundary does not delete provider-added fields. Every response rejected at this shared JSON-contract boundary is written to the private analysis-artifact store with the complete model messages, schema hint, raw response, user question when one is explicitly available, and safe `support_id`; ordinary logs and list projections contain none of that content. Background or script calls without request-level notebook identity are still retained under `_unscoped`, so missing Notebook route context cannot make a failure disappear.
+
+The admin issue projection classifies each stable workload id into seven areas. A shared workload invoked inside report execution is classified as Report rather than by its default area:
+
+| Model area | Current chat workloads (27 total) |
+| --- | --- |
+| Ask `ask` | `ask_answer`, `plugin_engine`, `reasoning_agent`, `query_rewrite`, `evidence_refine` |
+| Deep Report `report` | `report_outline`, `report_sufficiency`, `report_section`, `report_summary` |
+| Source processing `source` | `source_summary`, `notebook_metadata`, `paper_metadata`, `chunk_question_generation` |
+| Knowledge `knowledge` | `kg_extract`, `kg_refine`, `kg_glean`, `kg_merge_review`, `kg_concept_description`, `kg_community_summary`, `kg_conflict_review`, `schema_induction` |
+| Memory and library understanding `memory` | `memory_preview`, `agent_profile_consolidate` |
+| Knowhow `knowhow` | `knowhow_optimize`, `knowhow_reformat`, `knowhow_complete` |
+| Retrieval optimization `retrieval` | `retrieval_experience_distill` |
+
+Failures are also classified as `invalid_json` (empty, truncated, non-object, or syntactically invalid JSON), `schema_mismatch` (declared shape/type/enum mismatch or none of the expected top-level fields), or `repair_rejected` (repairable in shadow mode but deliberately not accepted). These labels explain why a response failed the common JSON contract; they do not replace a product feature's own business fallback or user-error contract.
+
 `/ask/stream` sends a content-free blank NDJSON line every **5 seconds** while its delivery queue is idle and disables common proxy buffering. Existing clients ignore blank lines. This keeps the transport active during a slow reflection or synthesis call without fabricating a reasoning step; disconnect still stops only that client's delivery and the detached job still runs. The heartbeat protects against idle timeouts only—an ingress/CDN with an absolute total-request ceiling must be configured by the operator.
 
 Interactive work is split by lifetime rather than forcing every endpoint into the same transport:
@@ -2525,6 +2541,17 @@ quarantine outside the notebook source tree, stores only a content-minimal safe 
 projection for administrators, and never exposes its physical path or source hash through
 the API.
 
+The same private artifact store also owns `model_output` records. Whenever any of the current
+27 structured chat workloads fails the scheduler's shared JSON syntax/shape contract, the
+system creates a new immutable case. The list projection contains only its model area, stable
+workload id/display label, failure kind, timestamps, `support_id`, and any available actor,
+notebook, and parent-work linkage. Complete messages, the schema hint, raw response, and an
+explicit user question are read only when an administrator opens that one case; they are never
+bulk-loaded into the list response. A model-output record copies no source file and is not
+resolved by model retry or a product fallback: it stays `open` until expiry or related-notebook
+deletion. Calls without Notebook context use the private `_unscoped` directory, retain the same
+classification, identify the executor as `system`, and do not invent a user or notebook association.
+
 | Spreadsheet-analysis rail | Default | Accepted range |
 | --- | ---: | ---: |
 | `SPREADSHEET_ANALYSIS_ENABLED` | `true` | boolean |
@@ -2540,30 +2567,42 @@ the API.
 | `SPREADSHEET_ANALYSIS_PLANNER_TIMEOUT_SECONDS` | 8.0 seconds | 1.0..60.0 |
 | `ANALYSIS_FAILURE_RETENTION_DAYS` | 30 days | 1..3,650 |
 
-Issue records have `open`/`resolved` status and a stamped expiry. A later successful
-user-initiated reparse automatically resolves the matching issue and deletes its quarantine
-copy; expiry is a hard read boundary and physical cleanup occurs on issue reads. Source or
+Issue records have `open`/`resolved` status and a stamped expiry. For a source issue, a later
+successful user-initiated reparse automatically resolves the matching record and deletes its
+quarantine copy; a `model_output` case is neither retried nor auto-resolved. Expiry is a hard
+read boundary and physical cleanup occurs on list and single-model-case reads. Source or
 notebook deletion immediately removes the spreadsheet snapshot and quarantine copy, clears
-owner/source/notebook linkage, names, ids, filenames, and hashes, and retains only
+owner/source/notebook linkage, names, ids, filenames, hashes, model messages, schema, raw
+response, `support_id`, and parent-work id, and retains only
 category/time and a redacted summary under a new neutral case id and identifier-free archive
 path until expiry. This filesystem redaction is best-effort
 after a committed notebook deletion: a cleanup I/O failure is logged without making the
 already-completed DELETE appear to fail.
+Model prompts may contain evidence from several sources, and the scheduler boundary owns no
+trustworthy per-source identity ledger. Deleting any source therefore conservatively destroys
+**all** retained model content for that notebook instead of guessing which cases cited it.
 
 The administrator's **User usage overview** keeps its existing user-table columns and adds
 two sheets next to it: **Question analysis** (the existing “View questions” link now opens
 this fixed-Ask activity view) and **Parsing issues**. Both are read-only. Parsing issues can
-be filtered by user, status, and category; a live source links to the original notebook and
+be filtered by user, status, category, and the seven model areas. A model-output case loads its
+full prompt and response only when that row is explicitly opened; list loading never bulk-reads
+the content. A live source links to the original notebook and
 the exact source's read-only administrator detail in User activity (rather than the ordinary
 workspace, whose owner/member guard still applies), while a deleted source shows only the
 redacted summary. The administrator has
 no reparse, bulk retry, close, quarantine-delete, or case-purge endpoint/control and therefore
 cannot mutate a user's notebook through this feature.
 
-- `GET /api/admin/analysis-issues?owner_id=&status=&category=&limit=` — admin-only,
+- `GET /api/admin/analysis-issues?owner_id=&status=&category=&model_area=&limit=` — admin-only,
   read-only list; `status` is empty/`open`/`resolved`, `category` is empty/`source_parse`/
-  `spreadsheet_analysis`, and `limit` is `1..500` (default 200). There is deliberately no
+  `spreadsheet_analysis`/`model_output`, `model_area` is empty/`ask`/`report`/`source`/
+  `knowledge`/`memory`/`knowhow`/`retrieval`, and `limit` is `1..500` (default 200). There is deliberately no
   POST/PATCH/DELETE companion.
+- `GET /api/admin/analysis-issues/{issue_id}/artifact` — admin-only read of the complete
+  request messages, schema hint, and raw model response for one unexpired `model_output` case.
+  Source issues and missing, deleted, or expired cases return 404. It is read-only and exposes
+  no physical path.
 - `GET /api/admin/users/{user_id}/notebooks/{notebook_id}/sources/{source_id}` — the
   content-minimal, read-only exact-source projection used by that analysis deep link; it
   returns 404 unless the notebook belongs to the path user and the source is a live visible

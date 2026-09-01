@@ -33,7 +33,7 @@ export type AdminUserUsage = {
 
 export type AnalysisIssue = {
   id: string;
-  category: "source_parse" | "spreadsheet_analysis";
+  category: "source_parse" | "spreadsheet_analysis" | "model_output";
   status: "open" | "resolved";
   code: string;
   summary: string;
@@ -44,6 +44,12 @@ export type AnalysisIssue = {
   source_title: string;
   file_name: string;
   source_type: string;
+  workload_id: string;
+  workload_label: string;
+  model_area: ModelAnalysisArea | "";
+  failure_kind: string;
+  support_id: string;
+  parent_id: string;
   created_at: string;
   updated_at: string;
   resolved_at: string;
@@ -51,6 +57,25 @@ export type AnalysisIssue = {
   artifact_available: boolean;
   source_deleted: boolean;
   notebook_deleted: boolean;
+};
+
+export type ModelAnalysisArea =
+  | "ask" | "report" | "source" | "knowledge" | "memory" | "knowhow" | "retrieval";
+
+export type AnalysisIssueModelArtifact = {
+  issue_id: string;
+  question: string;
+  messages: { role: string; content: string }[];
+  schema_hint: string;
+  response: string;
+  workload_id: string;
+  workload_label: string;
+  model_area: ModelAnalysisArea | "";
+  failure_kind: string;
+  support_id: string;
+  parent_id: string;
+  reason: string;
+  occurred_at: string;
 };
 
 export type AdminUserRole = "admin" | "user";
@@ -78,12 +103,14 @@ export async function fetchAdminUsers(): Promise<AdminUserUsage[]> {
 export async function fetchAnalysisIssues(filters: {
   ownerId?: string;
   status?: "open" | "resolved" | "";
-  category?: "source_parse" | "spreadsheet_analysis" | "";
+  category?: "source_parse" | "spreadsheet_analysis" | "model_output" | "";
+  modelArea?: ModelAnalysisArea | "";
 } = {}): Promise<AnalysisIssue[]> {
   const params = new URLSearchParams();
   if (filters.ownerId) params.set("owner_id", filters.ownerId);
   if (filters.status) params.set("status", filters.status);
   if (filters.category) params.set("category", filters.category);
+  if (filters.modelArea) params.set("model_area", filters.modelArea);
   const query = params.toString();
   const res = await performApiRequest(
     `/admin/analysis-issues${query ? `?${query}` : ""}`,
@@ -93,6 +120,18 @@ export async function fetchAnalysisIssues(filters: {
   if (!res.ok) await throwHumanizedHttpError(res, "admin");
   const data = (await res.json()) as { items: AnalysisIssue[] };
   return data.items;
+}
+
+export async function fetchAnalysisIssueModelArtifact(
+  issueId: string,
+): Promise<AnalysisIssueModelArtifact> {
+  const res = await performApiRequest(
+    `/admin/analysis-issues/${encodeURIComponent(issueId)}/artifact`,
+    { tag: "admin" },
+  );
+  if (res.status === 403) await throwForbiddenSentinel(res);
+  if (!res.ok) await throwHumanizedHttpError(res, "admin");
+  return res.json();
 }
 
 export async function fetchOnlineIds(): Promise<string[]> {

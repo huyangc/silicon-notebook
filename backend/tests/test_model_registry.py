@@ -114,6 +114,53 @@ def test_chat_workloads_make_an_exhaustive_thinking_default_choice():
     )
 
 
+def test_chat_workloads_have_an_exhaustive_analysis_area():
+    expected = {
+        "ask": {
+            "ask_answer",
+            "plugin_engine",
+            "reasoning_agent",
+            "query_rewrite",
+            "evidence_refine",
+        },
+        "report": {
+            "report_outline",
+            "report_sufficiency",
+            "report_section",
+            "report_summary",
+        },
+        "source": {
+            "source_summary",
+            "notebook_metadata",
+            "paper_metadata",
+            "chunk_question_generation",
+        },
+        "knowledge": {
+            "kg_extract",
+            "kg_refine",
+            "kg_glean",
+            "kg_merge_review",
+            "kg_concept_description",
+            "kg_community_summary",
+            "kg_conflict_review",
+            "schema_induction",
+        },
+        "memory": {"memory_preview", "agent_profile_consolidate"},
+        "knowhow": {"knowhow_optimize", "knowhow_reformat", "knowhow_complete"},
+        "retrieval": {"retrieval_experience_distill"},
+    }
+
+    actual = {
+        area: {
+            key
+            for key, workload in WORKLOADS.items()
+            if workload.kind == "chat" and workload.analysis_area == area
+        }
+        for area in expected
+    }
+    assert actual == expected
+
+
 def test_empty_config_path_keeps_deterministic_offline_mode():
     registry = SystemModelServiceRegistry.load(_settings(), {})
 

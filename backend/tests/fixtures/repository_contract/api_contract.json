@@ -1369,7 +1369,8 @@
             "category": {
               "enum": [
                 "source_parse",
-                "spreadsheet_analysis"
+                "spreadsheet_analysis",
+                "model_output"
               ],
               "title": "Category",
               "type": "string"
@@ -1389,6 +1390,11 @@
               "title": "Expires At",
               "type": "string"
             },
+            "failure_kind": {
+              "default": "",
+              "title": "Failure Kind",
+              "type": "string"
+            },
             "file_name": {
               "default": "",
               "title": "File Name",
@@ -1396,6 +1402,11 @@
             },
             "id": {
               "title": "Id",
+              "type": "string"
+            },
+            "model_area": {
+              "default": "",
+              "title": "Model Area",
               "type": "string"
             },
             "notebook_deleted": {
@@ -1416,6 +1427,11 @@
             "owner_id": {
               "default": "",
               "title": "Owner Id",
+              "type": "string"
+            },
+            "parent_id": {
+              "default": "",
+              "title": "Parent Id",
               "type": "string"
             },
             "resolved_at": {
@@ -1456,9 +1472,24 @@
               "title": "Summary",
               "type": "string"
             },
+            "support_id": {
+              "default": "",
+              "title": "Support Id",
+              "type": "string"
+            },
             "updated_at": {
               "default": "",
               "title": "Updated At",
+              "type": "string"
+            },
+            "workload_id": {
+              "default": "",
+              "title": "Workload Id",
+              "type": "string"
+            },
+            "workload_label": {
+              "default": "",
+              "title": "Workload Label",
               "type": "string"
             }
           },
@@ -1468,6 +1499,98 @@
             "status"
           ],
           "title": "AnalysisIssue",
+          "type": "object"
+        },
+        "AnalysisIssueModelArtifact": {
+          "description": "Private prompt/response payload for one rejected JSON contract.",
+          "properties": {
+            "failure_kind": {
+              "default": "",
+              "title": "Failure Kind",
+              "type": "string"
+            },
+            "issue_id": {
+              "title": "Issue Id",
+              "type": "string"
+            },
+            "messages": {
+              "items": {
+                "$ref": "#/components/schemas/AnalysisIssueModelMessage"
+              },
+              "title": "Messages",
+              "type": "array"
+            },
+            "model_area": {
+              "default": "",
+              "title": "Model Area",
+              "type": "string"
+            },
+            "occurred_at": {
+              "default": "",
+              "title": "Occurred At",
+              "type": "string"
+            },
+            "parent_id": {
+              "default": "",
+              "title": "Parent Id",
+              "type": "string"
+            },
+            "question": {
+              "default": "",
+              "title": "Question",
+              "type": "string"
+            },
+            "reason": {
+              "default": "",
+              "title": "Reason",
+              "type": "string"
+            },
+            "response": {
+              "default": "",
+              "title": "Response",
+              "type": "string"
+            },
+            "schema_hint": {
+              "default": "",
+              "title": "Schema Hint",
+              "type": "string"
+            },
+            "support_id": {
+              "default": "",
+              "title": "Support Id",
+              "type": "string"
+            },
+            "workload_id": {
+              "default": "",
+              "title": "Workload Id",
+              "type": "string"
+            },
+            "workload_label": {
+              "default": "",
+              "title": "Workload Label",
+              "type": "string"
+            }
+          },
+          "required": [
+            "issue_id"
+          ],
+          "title": "AnalysisIssueModelArtifact",
+          "type": "object"
+        },
+        "AnalysisIssueModelMessage": {
+          "properties": {
+            "content": {
+              "default": "",
+              "title": "Content",
+              "type": "string"
+            },
+            "role": {
+              "default": "",
+              "title": "Role",
+              "type": "string"
+            }
+          },
+          "title": "AnalysisIssueModelMessage",
           "type": "object"
         },
         "AnalysisIssueResponse": {
@@ -12107,7 +12230,7 @@
       },
       "/api/admin/analysis-issues": {
         "get": {
-          "description": "Automatic parse/analysis failures. Admin-only and strictly read-only.",
+          "description": "Automatic parse, analysis, and model-output failures; admin read-only.",
           "operationId": "list_admin_analysis_issues_api_admin_analysis_issues_get",
           "parameters": [
             {
@@ -12144,9 +12267,30 @@
                 "enum": [
                   "",
                   "source_parse",
-                  "spreadsheet_analysis"
+                  "spreadsheet_analysis",
+                  "model_output"
                 ],
                 "title": "Category",
+                "type": "string"
+              }
+            },
+            {
+              "in": "query",
+              "name": "model_area",
+              "required": false,
+              "schema": {
+                "default": "",
+                "enum": [
+                  "",
+                  "ask",
+                  "report",
+                  "source",
+                  "knowledge",
+                  "memory",
+                  "knowhow",
+                  "retrieval"
+                ],
+                "title": "Model Area",
                 "type": "string"
               }
             },
@@ -12186,6 +12330,46 @@
             }
           },
           "summary": "List Admin Analysis Issues"
+        }
+      },
+      "/api/admin/analysis-issues/{issue_id}/artifact": {
+        "get": {
+          "description": "Read one retained malformed-model exchange; admin-only and immutable.",
+          "operationId": "get_admin_model_output_artifact_api_admin_analysis_issues__issue_id__artifact_get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "issue_id",
+              "required": true,
+              "schema": {
+                "title": "Issue Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/AnalysisIssueModelArtifact"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Get Admin Model Output Artifact"
         }
       },
       "/api/admin/cache": {

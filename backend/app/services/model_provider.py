@@ -20,7 +20,12 @@ from app.core.llm_logging import (
     current_interaction_support_id,
     interaction_support_scope,
 )
-from app.core.model_json import ModelJsonRepairError, parse_model_json_object
+from app.core.model_json import (
+    ModelJsonRepairError,
+    parse_model_json_object,
+    validate_model_json_shape,
+)
+from app.domain.model_artifacts import MalformedModelInteraction
 from app.core.model_safety import (
     MODEL_ERROR_MISSING_CONFIG,
     MODEL_ERROR_UPSTREAM,
@@ -61,6 +66,22 @@ _MODEL_CONFIG_RELOAD_INTERVAL_SECONDS = 1.0
 logger = logging.getLogger("silicon_notebook.model_provider")
 
 _JSON_REPAIR_WORKLOADS = frozenset({"reasoning_agent", "ask_answer"})
+
+_MODEL_SCHEMA_FAILURE_REASONS = frozenset({
+    "invalid_type",
+    "invalid_boolean",
+    "invalid_enum",
+    "missing_expected_key",
+    "unknown_key",
+})
+
+
+def _model_failure_kind(reason: str) -> str:
+    if reason == "repairable_shadow":
+        return "repair_rejected"
+    if reason in _MODEL_SCHEMA_FAILURE_REASONS:
+        return "schema_mismatch"
+    return "invalid_json"
 
 
 def validate_process_local_scheduler_deployment(
@@ -485,7 +506,11 @@ class ScheduledJsonChatClient(_ScheduledAdapter):
                 messages, response_schema_hint
             )
 
+        raw_response = ""
+        rejection_reason = ""
+
         def invoke() -> str:
+            nonlocal raw_response, rejection_reason
             content = runtime.raw.chat_json(
                 messages,
                 response_schema_hint,
@@ -507,6 +532,7 @@ class ScheduledJsonChatClient(_ScheduledAdapter):
                     )
                 ),
             )
+            raw_response = content if isinstance(content, str) else str(content)
             repair_mode = (
                 self.settings.model_json_repair_mode
                 if self._workload.id in _JSON_REPAIR_WORKLOADS
@@ -518,7 +544,9 @@ class ScheduledJsonChatClient(_ScheduledAdapter):
                     response_schema_hint,
                     allow_repair=repair_mode in {"shadow", "on"},
                 )
+                validate_model_json_shape(parsed.content, response_schema_hint)
             except ModelJsonRepairError as exc:
+                rejection_reason = exc.reason
                 if repair_mode in {"shadow", "on"}:
                     self._emit_json_repair_event(
                         status="rejected", reason=exc.reason
@@ -532,12 +560,29 @@ class ScheduledJsonChatClient(_ScheduledAdapter):
                     reason="syntax",
                 )
                 if repair_mode == "shadow":
+                    rejection_reason = "repairable_shadow"
                     raise MalformedModelResponse()
             return parsed.content
 
-        return self._resolve(self._submit(
-            runtime, invoke, cancel_event=cancel_event
-        ))
+        call = self._submit(runtime, invoke, cancel_event=cancel_event)
+        try:
+            return self._resolve(call)
+        except ModelInvocationError:
+            if rejection_reason:
+                self._provider._record_malformed_response(
+                    context=call.context,
+                    workload_label=self._workload.display_label,
+                    model_area=(
+                        "report"
+                        if call.context.priority is ModelPriority.REPORT
+                        else self._workload.analysis_area
+                    ),
+                    messages=messages,
+                    schema_hint=response_schema_hint,
+                    response=raw_response,
+                    reason=rejection_reason,
+                )
+            raise
 
 
 class ScheduledEmbedder(_ScheduledAdapter):
@@ -651,6 +696,9 @@ class RuntimeModelProvider:
         embedding_factory: Callable[[ModelServiceDefinition], Any] | None = None,
         rerank_factory: Callable[[ModelServiceDefinition], Any] | None = None,
         observation_sink: Callable[[ProviderObservation], None] | None = None,
+        malformed_response_sink: (
+            Callable[[MalformedModelInteraction], None] | None
+        ) = None,
     ) -> None:
         self.settings = settings
         self.event_log = event_log
@@ -670,6 +718,7 @@ class RuntimeModelProvider:
         self._closed = False
         self._close_complete = threading.Event()
         self._observation_sink = observation_sink
+        self._malformed_response_sink = malformed_response_sink
         self._observation_executor = ThreadPoolExecutor(
             max_workers=1,
             thread_name_prefix="model-status-observer",
@@ -808,6 +857,78 @@ class RuntimeModelProvider:
     ) -> None:
         with self._lock:
             self._observation_sink = sink
+
+    def set_malformed_response_sink(
+        self,
+        sink: Callable[[MalformedModelInteraction], None] | None,
+    ) -> None:
+        """Install the private artifact sink after repository composition."""
+        with self._lock:
+            self._malformed_response_sink = sink
+
+    def _record_malformed_response(
+        self,
+        *,
+        context: Any,
+        workload_label: str,
+        model_area: str,
+        messages: Any,
+        schema_hint: Any,
+        response: Any,
+        reason: str,
+    ) -> None:
+        """Persist every rejected structured chat response by stable workload."""
+        with self._lock:
+            sink = self._malformed_response_sink
+        if sink is None:
+            return
+        normalized_messages = tuple(
+            {
+                "role": str(item.get("role") or ""),
+                "content": str(item.get("content") or ""),
+            }
+            for item in messages
+            if isinstance(item, dict)
+        )
+        question = context.question or next(
+            (
+                item["content"]
+                for item in reversed(normalized_messages)
+                if item["role"] == "user" and item["content"]
+            ),
+            "",
+        )
+        interaction = MalformedModelInteraction(
+            workload_id=context.workload_id,
+            workload_label=str(workload_label),
+            model_area=str(model_area),
+            failure_kind=_model_failure_kind(reason),
+            support_id=context.support_id,
+            actor_id=context.actor_id,
+            parent_id=context.parent_id,
+            notebook_id=context.notebook_id,
+            question=question,
+            messages=normalized_messages,
+            schema_hint=str(schema_hint or ""),
+            response=str(response or ""),
+            reason=str(reason or "invalid_json_contract"),
+            occurred_at=datetime.now(timezone.utc).isoformat(),
+        )
+        try:
+            sink(interaction)
+        except Exception:
+            # The rejected model output remains rejected regardless of whether
+            # its diagnostic copy can be written.  Never log content or paths.
+            try:
+                self.event_log.emit({
+                    "kind": "model_response_archive",
+                    "status": "error",
+                    "code": "persistence_failed",
+                    "workload_id": context.workload_id,
+                    "support_id": context.support_id,
+                })
+            except Exception:
+                pass
 
     def _mark_completion(self, service_id: str, timing: dict[str, Any]) -> None:
         """Stamp actual scheduled-invoke completion, not caller wake order."""

@@ -17,6 +17,7 @@ from app.services.kg.run_control import (
 )
 from app.services import model_provider as provider_mod
 from app.services.model_registry import ModelServiceDefinition, SystemModelServiceRegistry
+from app.services.model_work import ModelPriority, model_work_scope
 
 RuntimeModelProvider = provider_mod.RuntimeModelProvider
 
@@ -210,7 +211,7 @@ class _Reranker:
 
 def _provider(
     *, registry=None, chat=None, embedder=None, reranker=None, events=None,
-    observation_sink=None,
+    observation_sink=None, malformed_response_sink=None,
 ):
     raw_chat = chat or _Chat()
     raw_embedder = embedder or _Embedder()
@@ -223,6 +224,7 @@ def _provider(
         embedding_factory=lambda _service: raw_embedder,
         rerank_factory=lambda _service: raw_reranker,
         observation_sink=observation_sink,
+        malformed_response_sink=malformed_response_sink,
     )
 
 
@@ -360,6 +362,89 @@ def test_scheduled_chat_forwards_response_validator_to_raw_client():
         assert raw.calls[-1]["kwargs"]["response_validator"] is validator
     finally:
         provider.close()
+
+
+def test_ask_contract_failure_archives_the_exact_request_and_response():
+    rejected = '{"answer":[],"grounded":true}'
+    records = []
+    provider = _provider(
+        chat=_Chat(rejected), malformed_response_sink=records.append
+    )
+    messages = [{"role": "user", "content": "完整模型请求"}]
+    try:
+        with model_work_scope(
+            priority=ModelPriority.INTERACTIVE,
+            parent_id="ask-job-1",
+            actor_id="user-1",
+            notebook_id="nb-1",
+            question="用户原始提问",
+        ):
+            with pytest.raises(provider_mod.ModelInvocationError) as caught:
+                provider.chat("ask_answer").chat_json(
+                    messages, '{"answer":"","grounded":true}'
+                )
+    finally:
+        provider.close()
+
+    assert caught.value.code == "malformed_response"
+    [record] = records
+    assert record.actor_id == "user-1"
+    assert record.notebook_id == "nb-1"
+    assert record.parent_id == "ask-job-1"
+    assert record.question == "用户原始提问"
+    assert record.messages == tuple(messages)
+    assert record.response == rejected
+    assert record.reason == "invalid_type"
+    assert record.failure_kind == "schema_mismatch"
+    assert record.model_area == "ask"
+    assert record.workload_label == "问答回答"
+
+
+def test_unscoped_contract_failure_is_still_archived_and_classified():
+    records = []
+    provider = _provider(
+        chat=_Chat("not-json"), malformed_response_sink=records.append
+    )
+    try:
+        with pytest.raises(provider_mod.ModelInvocationError):
+            provider.chat("ask_answer").chat_json(
+                [{"role": "user", "content": "background content"}],
+                '{"answer":""}',
+            )
+    finally:
+        provider.close()
+
+    [record] = records
+    assert record.notebook_id == ""
+    assert record.actor_id == "system"
+    assert record.question == "background content"
+    assert record.model_area == "ask"
+    assert record.failure_kind == "invalid_json"
+
+
+def test_shared_workload_failure_uses_report_execution_area():
+    records = []
+    provider = _provider(
+        chat=_Chat("not-json"), malformed_response_sink=records.append
+    )
+    try:
+        with model_work_scope(
+            priority=ModelPriority.REPORT,
+            parent_id="report-1",
+            notebook_id="nb-1",
+        ):
+            with pytest.raises(provider_mod.ModelInvocationError):
+                provider.chat("query_rewrite").chat_json(
+                    [{"role": "user", "content": "report query"}],
+                    '{"queries":[]}',
+                )
+    finally:
+        provider.close()
+
+    [record] = records
+    assert record.workload_id == "query_rewrite"
+    assert record.model_area == "report"
+    assert record.parent_id == "report-1"
 
 
 def test_embedding_calls_are_scheduled_and_bound_to_service_capacity():

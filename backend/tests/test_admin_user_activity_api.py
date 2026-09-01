@@ -205,6 +205,59 @@ def test_analysis_issue_log_is_admin_only_read_only_and_content_minimal(
     assert "source_hash" not in item
 
 
+def test_model_output_artifact_is_admin_only_and_loaded_separately(client, tmp_path):
+    from app.domain.model_artifacts import MalformedModelInteraction
+
+    regular = _auth(client, 67)
+    user_id = _me(client, regular)
+    admin = _auth_admin(client)
+    repo = _repo()
+    repo.storage_dir = tmp_path / "model-analysis-storage"
+    issue = repo._runtime.analysis_artifacts.record_model_output_issue(
+        MalformedModelInteraction(
+            workload_id="report_section",
+            workload_label="报告章节生成",
+            model_area="report",
+            failure_kind="schema_mismatch",
+            support_id="mdl-report-safe",
+            actor_id=user_id,
+            parent_id="report-1",
+            notebook_id="nb-report",
+            question="生成深度报告",
+            messages=({"role": "user", "content": "完整报告提示"},),
+            schema_hint='{"markdown":""}',
+            response='{"markdown":[]}',
+            reason="invalid_type",
+            occurred_at="2026-08-31T02:00:00+00:00",
+        )
+    )
+
+    listing = client.get(
+        "/api/admin/analysis-issues",
+        params={"category": "model_output"},
+        headers=admin,
+    )
+    assert listing.status_code == 200
+    [listed] = listing.json()["items"]
+    assert listed["id"] == issue["id"]
+    assert listed["workload_id"] == "report_section"
+    assert listed["workload_label"] == "报告章节生成"
+    assert listed["model_area"] == "report"
+    assert listed["failure_kind"] == "schema_mismatch"
+    assert "question" not in listed
+    assert "response" not in listed
+
+    path = f"/api/admin/analysis-issues/{issue['id']}/artifact"
+    assert client.get(path, headers=regular).status_code == 403
+    detail = client.get(path, headers=admin)
+    assert detail.status_code == 200
+    assert detail.json()["question"] == "生成深度报告"
+    assert detail.json()["messages"] == [
+        {"role": "user", "content": "完整报告提示"}
+    ]
+    assert detail.json()["response"] == '{"markdown":[]}'
+
+
 def test_activity_type_query_returns_only_questions(client):
     a = _auth(client, 33)
     uid_a = _me(client, a)

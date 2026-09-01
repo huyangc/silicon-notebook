@@ -1573,25 +1573,42 @@ Must be run from the main checkout root (it needs the real `.env`/database confi
 
 ## Automatic analysis-failure archive
 
-Spreadsheet compiler failures and terminal source-parser failures are recorded under
+Spreadsheet compiler failures, terminal source-parser failures, and responses from every
+structured chat workload that fail the shared JSON contract are recorded under
 `<SILICON_NOTEBOOK_STORAGE_DIR>/analysis-artifacts/`. `spreadsheets/<notebook-id>/`
 contains replaceable professional-analysis snapshots. `issues/<notebook-id>/<source-id>/
-<category>/issue.json` is the safe metadata record and `payload` is the private copied upload
-when a local file was available. Files are best-effort mode `0600`; the directory must receive
+<category>/issue.json` is a source issue's safe metadata record and `payload` is the private
+copied upload when a local file was available. Model cases use `issues/<notebook-id-or-
+_unscoped>/<case-id>/model_output/issue.json` for content-minimal metadata and keep the complete
+request messages, schema hint, and raw response separately in `artifact.json` beside it. Each
+failure gets a new random case id rather than overwriting an earlier sample. Files are
+best-effort mode `0600`; the directory must receive
 the same backup, encryption-at-rest, access-control, and disk-capacity treatment as uploaded
 sources. It is not a backup: expiry and source lifecycle intentionally delete it.
 
 Operators inspect records through **User usage overview → Parsing issues** or the admin-only
-`GET /api/admin/analysis-issues`; the API never returns a physical path or hash. Do not grant
+`GET /api/admin/analysis-issues`; the list can be filtered by `model_area` across `ask`,
+`report`, `source`, `knowledge`, `memory`, `knowhow`, and `retrieval`. Complete questions,
+messages, schema, and raw output are read only when an administrator explicitly opens one
+`model_output` row through `GET /api/admin/analysis-issues/{issue_id}/artifact`. The API never
+returns a physical path or hash. Do not grant
 the web process or administrators a second mutation path into user notebooks. There are no
 admin retry/delete/close controls by design: recovery is a normal user-side source reparse,
 which rebuilds the snapshot, marks the matching record resolved, and removes the copied
-payload. A source/notebook deletion removes its snapshot and payload immediately and redacts
-the remaining record; an issue-list read removes expired issue directories. The retention
+payload. A source/notebook deletion removes its snapshot, copied payload, and related model
+content immediately and redacts the remaining record; issue-list and single-model-case reads
+remove expired issue directories. Model cases are not automatically retried or resolved and
+remain `open` during retention. The retention
 window is `ANALYSIS_FAILURE_RETENTION_DAYS` (default 30 days).
+Because a model prompt may contain multi-source evidence and the archive boundary has no
+per-source ledger, deleting any source conservatively deletes every `model_output/artifact.json`
+for that notebook and redacts its metadata. This is privacy cleanup, not a relevance claim.
 
-For incident diagnosis, use the stable `category`/`code`, timestamps, `artifact_available`,
-and the live source link. `artifact_available=false` means the copy was unavailable, already
-resolved/deleted, or cleaned; it is not permission to read the user's original source by a
-different path. If a live record has reached expiry it is already outside the supported read
-contract even before a separate filesystem inventory notices cleanup.
+For incident diagnosis, start with stable `category`/`code`, `model_area`, `workload_id`,
+`failure_kind`, `support_id`, timestamps, `artifact_available`, and the live source link; read
+one case's content only when diagnosing that protocol failure. `failure_kind` is
+`invalid_json`, `schema_mismatch`, or `repair_rejected`. `artifact_available=false` means the
+source copy or model content was unavailable, already resolved/deleted, or cleaned; it is not
+permission to read the user's original source or model input by a different path. If a live
+record has reached expiry it is already outside the supported read contract even before a
+separate filesystem inventory notices cleanup.

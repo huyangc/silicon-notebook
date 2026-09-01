@@ -4,7 +4,11 @@ import json
 
 import pytest
 
-from app.core.model_json import ModelJsonRepairError, parse_model_json_object
+from app.core.model_json import (
+    ModelJsonRepairError,
+    parse_model_json_object,
+    validate_model_json_shape,
+)
 
 
 ANSWER_SCHEMA = '{"answer":"","grounded":true}'
@@ -51,6 +55,28 @@ def test_valid_json_is_returned_byte_for_byte():
 
     assert result.repaired is False
     assert result.content == raw
+
+
+@pytest.mark.parametrize(
+    ("raw", "reason"),
+    [
+        ("{}", "missing_expected_key"),
+        ('{"answer": [], "grounded": true}', "invalid_type"),
+        ('{"items":[{}]}', "missing_expected_key"),
+    ],
+)
+def test_parseable_json_with_an_unusable_schema_shape_is_rejected(raw, reason):
+    schema = '{"items":[{"index":0}]}' if "items" in raw else ANSWER_SCHEMA
+    with pytest.raises(ModelJsonRepairError) as caught:
+        validate_model_json_shape(raw, schema)
+
+    assert caught.value.reason == reason
+
+
+def test_schema_shape_validation_allows_optional_and_provider_extra_fields():
+    validate_model_json_shape(
+        '{"answer":"ok","provider_note":"extra"}', ANSWER_SCHEMA
+    )
 
 
 @pytest.mark.parametrize(

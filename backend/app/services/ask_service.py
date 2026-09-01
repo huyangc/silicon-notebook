@@ -718,10 +718,17 @@ class AskService:
         raise UnknownAskMode — never a silent fall-through. on_trace only
         reaches streaming engines (mirrors the frozen route-runner split)."""
         from app.services.retrieval_run import retrieval_run
+        from app.services.model_work import ModelPriority, model_work_scope
 
         spec = self._resolve_ask_mode(getattr(payload, "mode", None))
         handler = getattr(self, spec.handler)
-        with source_scope_context(
+        with model_work_scope(
+            priority=ModelPriority.INTERACTIVE,
+            parent_id=job_id,
+            actor_id=user_id,
+            notebook_id=notebook_id,
+            question=payload.question,
+        ), source_scope_context(
             notebook_id,
             getattr(payload, "source_scope", None),
             getattr(payload, "base_scope", None),

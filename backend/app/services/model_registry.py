@@ -21,6 +21,9 @@ from app.core.model_safety import safe_model_label
 ModelKind = Literal["chat", "embedding", "rerank"]
 ModelPriorityName = Literal["interactive", "report", "background"]
 ThinkingMode = Literal["enabled", "disabled", "provider_default"]
+ModelAnalysisArea = Literal[
+    "ask", "report", "source", "knowledge", "memory", "knowhow", "retrieval"
+]
 
 
 @dataclass(frozen=True)
@@ -30,6 +33,7 @@ class WorkloadSpec:
     default_priority: ModelPriorityName
     display_label: str
     default_thinking_mode: ThinkingMode = "provider_default"
+    analysis_area: ModelAnalysisArea = "retrieval"
 
 
 @dataclass(frozen=True)
@@ -86,6 +90,36 @@ _WORKLOAD_LABELS = MappingProxyType({
     "memory_embedding": "记忆向量",
     "knowhow_embedding": "经验表格向量",
     "retrieval_rerank": "检索结果重排",
+})
+
+_WORKLOAD_ANALYSIS_AREAS: Mapping[str, ModelAnalysisArea] = MappingProxyType({
+    "ask_answer": "ask",
+    "plugin_engine": "ask",
+    "reasoning_agent": "ask",
+    "query_rewrite": "ask",
+    "evidence_refine": "ask",
+    "report_outline": "report",
+    "report_sufficiency": "report",
+    "report_section": "report",
+    "report_summary": "report",
+    "source_summary": "source",
+    "notebook_metadata": "source",
+    "paper_metadata": "source",
+    "chunk_question_generation": "source",
+    "kg_extract": "knowledge",
+    "kg_refine": "knowledge",
+    "kg_glean": "knowledge",
+    "kg_merge_review": "knowledge",
+    "kg_concept_description": "knowledge",
+    "kg_community_summary": "knowledge",
+    "kg_conflict_review": "knowledge",
+    "schema_induction": "knowledge",
+    "memory_preview": "memory",
+    "agent_profile_consolidate": "memory",
+    "retrieval_experience_distill": "retrieval",
+    "knowhow_optimize": "knowhow",
+    "knowhow_reformat": "knowhow",
+    "knowhow_complete": "knowhow",
 })
 
 # Every chat workload makes an explicit product-level choice.  The small set
@@ -146,6 +180,10 @@ def workload_map(
         raise ValueError(
             "chat workload catalog does not match thinking defaults"
         )
+    if set(chat) != set(_WORKLOAD_ANALYSIS_AREAS):
+        raise ValueError(
+            "chat workload catalog does not match analysis-area registry"
+        )
     result: dict[str, WorkloadSpec] = {}
     for kind, items in (("chat", chat), ("embedding", embedding), ("rerank", rerank)):
         for workload_id, priority in items.items():
@@ -163,6 +201,7 @@ def workload_map(
                 _CHAT_THINKING_DEFAULTS.get(
                     workload_id, "provider_default"
                 ),
+                _WORKLOAD_ANALYSIS_AREAS.get(workload_id, "retrieval"),
             )
     if set(result) != set(_WORKLOAD_LABELS):
         raise ValueError("workload catalog does not match its display-label registry")

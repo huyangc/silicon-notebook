@@ -1323,20 +1323,33 @@ v21 为 `(column_id, JS-trim(content_md), row_id)` 建立索引；guarded 成员
 
 ## 解析问题自动归档
 
-Excel 专业编译失败与来源解析终态失败统一记录在
+Excel 专业编译失败、来源解析终态失败，以及全部结构化 chat workload 未通过统一 JSON
+协议的模型响应，统一记录在
 `<SILICON_NOTEBOOK_STORAGE_DIR>/analysis-artifacts/`。`spreadsheets/<notebook-id>/`
 存放可替换的专业分析快照；`issues/<notebook-id>/<source-id>/<category>/issue.json`
-是安全元数据，来源为本地文件且复制成功时，同目录 `payload` 是私有隔离副本。文件尽力设为
+是来源问题的安全元数据，来源为本地文件且复制成功时，同目录 `payload` 是私有隔离副本。
+模型问题使用 `issues/<notebook-id-or-_unscoped>/<case-id>/model_output/issue.json` 保存
+内容最小化元数据，并把完整请求消息、schema 提示和原始响应单独放在同目录
+`artifact.json`。每次失败使用新的随机案例 id，不覆盖前一次样本。文件尽力设为
 `0600`；这个目录应与上传来源采用相同的备份、静态加密、访问控制和磁盘容量策略。它不是
 备份：到期和来源生命周期会有意删除其中内容。
 
 运维通过**用户使用总览 → 解析问题**或管理员只读的
-`GET /api/admin/analysis-issues` 查看；API 永不返回物理路径或哈希。不要给网页进程或管理员
+`GET /api/admin/analysis-issues` 查看；列表可按 `model_area` 的 `ask`/`report`/`source`/
+`knowledge`/`memory`/`knowhow`/`retrieval` 分类筛选。只有管理员显式打开某条
+`model_output` 记录时，`GET /api/admin/analysis-issues/{issue_id}/artifact` 才读取完整
+提问、模型消息、schema 与原始回答；API 永不返回物理路径或哈希。不要给网页进程或管理员
 再开一条修改用户笔记本的通道。设计上没有管理员重试、删除、关闭控件：恢复只能由用户侧
 正常重新解析来源触发；成功后会重建快照、自动把对应记录标为已解决并删除隔离副本。删除
-来源/笔记本会立即删除快照与副本并脱敏剩余记录；读取问题清单时会物理删除已过期目录。
+来源/笔记本会立即删除快照、隔离副本和对应模型正文，并脱敏剩余记录；读取问题清单或单个
+模型案例时会物理删除已过期目录。模型问题不会自动重试或解决，保留期内维持 `open`。
 留存窗口由 `ANALYSIS_FAILURE_RETENTION_DAYS` 控制（默认 30 天）。
+由于模型提示可能含有多来源证据且归档边界没有逐来源账本，删除任一来源会保守删除该笔记本
+全部 `model_output/artifact.json` 并脱敏其元数据；这是隐私清理，不是对案例相关性的判断。
 
-排障时只使用稳定的 `category`/`code`、时间、`artifact_available` 与存活来源跳转。
-`artifact_available=false` 表示副本未取得、已解决/删除或已清理，不代表可以改走其它路径读取
-用户原文件。存活记录一旦到期就已经越过受支持的读取合同，即使独立磁盘盘点尚未观察到清理。
+排障先使用稳定的 `category`/`code`、`model_area`、`workload_id`、`failure_kind`、
+`support_id`、时间、`artifact_available` 与存活来源跳转；只有确需分析协议失败时才按单个
+案例读取正文。`failure_kind` 为 `invalid_json`、`schema_mismatch` 或 `repair_rejected`。
+`artifact_available=false` 表示来源副本或模型正文未取得、已解决/删除或已清理，不代表可以
+改走其它路径读取用户原文件或模型输入。存活记录一旦到期就已经越过受支持的读取合同，即使
+独立磁盘盘点尚未观察到清理。

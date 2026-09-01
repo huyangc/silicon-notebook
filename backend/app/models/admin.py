@@ -265,7 +265,7 @@ class AnalysisIssue(BaseModel):
     """Content-minimal read-only projection of one automatic failure record."""
 
     id: str
-    category: Literal["source_parse", "spreadsheet_analysis"]
+    category: Literal["source_parse", "spreadsheet_analysis", "model_output"]
     status: Literal["open", "resolved"]
     code: str = ""
     summary: str = ""
@@ -276,6 +276,12 @@ class AnalysisIssue(BaseModel):
     source_title: str = ""
     file_name: str = ""
     source_type: str = ""
+    workload_id: str = ""
+    workload_label: str = ""
+    model_area: str = ""
+    failure_kind: str = ""
+    support_id: str = ""
+    parent_id: str = ""
     created_at: str = ""
     updated_at: str = ""
     resolved_at: str = ""
@@ -287,6 +293,29 @@ class AnalysisIssue(BaseModel):
 
 class AnalysisIssueResponse(BaseModel):
     items: List[AnalysisIssue] = Field(default_factory=list)
+
+
+class AnalysisIssueModelMessage(BaseModel):
+    role: str = ""
+    content: str = ""
+
+
+class AnalysisIssueModelArtifact(BaseModel):
+    """Private prompt/response payload for one rejected JSON contract."""
+
+    issue_id: str
+    question: str = ""
+    messages: List[AnalysisIssueModelMessage] = Field(default_factory=list)
+    schema_hint: str = ""
+    response: str = ""
+    workload_id: str = ""
+    workload_label: str = ""
+    model_area: str = ""
+    failure_kind: str = ""
+    support_id: str = ""
+    parent_id: str = ""
+    reason: str = ""
+    occurred_at: str = ""
 
 
 class AskDetail(BaseModel):

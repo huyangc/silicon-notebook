@@ -24,6 +24,7 @@ from app.models.admin import (
     ActivityResponse,
     ActivitySource,
     AnalysisIssue,
+    AnalysisIssueModelArtifact,
     AnalysisIssueResponse,
     AdminExtension,
     AdminExtensionContribution,
@@ -475,21 +476,45 @@ def get_admin_user_activity(
 def list_admin_analysis_issues(
     owner_id: str = Query(""),
     status: Literal["", "open", "resolved"] = Query(""),
-    category: Literal["", "source_parse", "spreadsheet_analysis"] = Query(""),
+    category: Literal[
+        "", "source_parse", "spreadsheet_analysis", "model_output"
+    ] = Query(""),
+    model_area: Literal[
+        "", "ask", "report", "source", "knowledge", "memory", "knowhow", "retrieval"
+    ] = Query(""),
     limit: int = Query(200, ge=1, le=500),
     user: UserProfile = Depends(get_current_user),
     issue_store: Any = Depends(analysis_issue_repository),
 ) -> AnalysisIssueResponse:
-    """Automatic parse/analysis failures. Admin-only and strictly read-only."""
+    """Automatic parse, analysis, and model-output failures; admin read-only."""
     if user.role != "admin":
         raise user_error(403, "仅管理员可查看解析问题")
     items = issue_store.list_issues(
         owner_id=owner_id,
         status=status,
         category=category,
+        model_area=model_area,
         limit=limit,
     )
     return AnalysisIssueResponse(items=[AnalysisIssue(**item) for item in items])
+
+
+@router.get(
+    "/admin/analysis-issues/{issue_id}/artifact",
+    response_model=AnalysisIssueModelArtifact,
+)
+def get_admin_model_output_artifact(
+    issue_id: str,
+    user: UserProfile = Depends(get_current_user),
+    issue_store: Any = Depends(analysis_issue_repository),
+) -> AnalysisIssueModelArtifact:
+    """Read one retained malformed-model exchange; admin-only and immutable."""
+    if user.role != "admin":
+        raise user_error(403, "仅管理员可查看模型异常回答")
+    artifact = issue_store.load_model_output_artifact(issue_id)
+    if artifact is None:
+        raise user_error(404, "模型异常回答不存在或已到期清理")
+    return AnalysisIssueModelArtifact(**artifact)
 
 
 def _notebook_owned_by_user(user_id: str, notebook_id: str) -> bool:

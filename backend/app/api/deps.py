@@ -8,6 +8,7 @@ from starlette.concurrency import run_in_threadpool
 from app.core.config import get_settings
 from app.core.audit_actor import session_audit_principal
 from app.core.request_context import set_request_user, reset_request_user
+from app.services.model_work import model_artifact_scope
 from app.models.identity import UserProfile
 from app.bootstrap import application_extension_runtime, create_application_repository
 from app.domain.report_export import ReportExporterHostPort
@@ -95,7 +96,11 @@ async def get_current_user(request: Request) -> AsyncIterator[UserProfile]:
 
     ctx_token = set_request_user(user)
     try:
-        yield user
+        with model_artifact_scope(
+            actor_id=user.id,
+            notebook_id=str(request.path_params.get("notebook_id") or ""),
+        ):
+            yield user
     finally:
         reset_request_user(ctx_token)
 
