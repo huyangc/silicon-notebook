@@ -245,15 +245,35 @@ class SourceStore:
         where = f"WHERE notebook_id = ? AND {VISIBLE_SOURCE_TYPES_PREDICATE}"
         params: List[object] = [notebook_id]
         if needle:
+            # 三腿 UNION 的 id 半连接,与 PostgreSQL 侧 ``postgres/source_store.py``
+            # 的 ``list_sources_page`` **同构**(那边写着完整的生产实测数字与逐条
+            # 等价论证:旧的跨表 OR-EXISTS 让 planner 选 hashed subplan,在 4.9 万
+            # source 的库上把 source_authors 21 万行、source_paper_meta 3.9 万行
+            # 整表扫掉,带 q 的 COUNT 单次 363ms)。三条要点在这里同样成立:
+            # ①第一腿重复 visible 谓词只收窄 UNION 集合,外层交集不变;②作者腿/
+            # 论文腿改用子表自己的 ``notebook_id = ?`` 收窄,依赖「子表行的
+            # notebook_id 恒等于其 source 的 notebook_id」——全仓无 source 换库
+            # 路径,写者已逐个核实(见 PG 侧注释的清单),历史畸形行按
+            # report_source_rows 家族早已确立的口径不再算作本库命中;
+            # ③``paper_title`` 可空,LIKE 对 NULL 在两种形态里同为 falsy。
+            #
+            # 与 PG 侧唯一的分歧是索引:migration 0048 只在 PostgreSQL 侧建三条
+            # 复合 GIN trgm 索引,SQLite 侧**不加任何索引**(与迁移 0042 的
+            # 「本批 PostgreSQL-only」先例同一处理:SQLite 没有 GIN trgm 的等价
+            # 物,`LIKE '%…%'` 也吃不到 B-tree 前缀)。改写在这边是纯形态对齐,
+            # 图的是两端 SQL 不分叉;SQLITE_SCHEMA_VERSION 不动。
             where += (
-                " AND (LOWER(title) LIKE ? OR LOWER(file_name) LIKE ?"
-                " OR EXISTS(SELECT 1 FROM source_authors a"
-                "    WHERE a.source_id = sources.id AND LOWER(a.name) LIKE ?)"
-                " OR EXISTS(SELECT 1 FROM source_paper_meta m"
-                "    WHERE m.source_id = sources.id AND LOWER(m.paper_title) LIKE ?))"
+                " AND sources.id IN ("
+                "SELECT id FROM sources WHERE notebook_id = ?"
+                f" AND {VISIBLE_SOURCE_TYPES_PREDICATE}"
+                " AND (LOWER(title) LIKE ? OR LOWER(file_name) LIKE ?)"
+                " UNION SELECT a.source_id FROM source_authors a"
+                " WHERE a.notebook_id = ? AND LOWER(a.name) LIKE ?"
+                " UNION SELECT m.source_id FROM source_paper_meta m"
+                " WHERE m.notebook_id = ? AND LOWER(m.paper_title) LIKE ?)"
             )
             like = f"%{needle}%"
-            params += [like, like, like, like]
+            params += [notebook_id, like, like, notebook_id, like, notebook_id, like]
         with self.database.connect() as db:
             total = db.execute(
                 f"SELECT COUNT(*) c FROM sources {where}", params).fetchone()["c"]

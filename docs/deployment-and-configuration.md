@@ -318,14 +318,17 @@ common lexical terms may scan global trigram matches before filtering by noteboo
 hit the statement timeout. See the monitored rollout and rollback procedure in
 [Operations](./operations.md#postgresql-notebook-aware-lexical-indexes).
 
-An already-populated PostgreSQL database should also get the accumulated hot-path fix indexes (batch 1's six groups / eight indexes, plus batch 2's payload-search GIN and checkup-H5 partial index, plus batch 3's one keyset-covering index — eleven in total; the GIN ran about 1.5x the knowledge_objects table segment on a synthetic low-entropy benchmark (real payloads have richer trigrams and may run larger; measure after building) and is a registered write-amplification debt, reversible via DROP INDEX CONCURRENTLY)
+An already-populated PostgreSQL database should also get the accumulated hot-path fix indexes (batch 1's six groups / eight indexes, plus batch 2's payload-search GIN and checkup-H5 partial index, plus batch 3's one keyset-covering index, plus batch 4's three source-search GIN trigram indexes — fourteen in total; batch 2's GIN ran about 1.5x the knowledge_objects table segment on a synthetic low-entropy benchmark (real payloads have richer trigrams and may run larger; measure after building) and is a registered write-amplification debt, reversible via DROP INDEX CONCURRENTLY)
 across six query-family groups (`concept_clusters(notebook_id, canonical_id)`, its
 `lower(canonical_name)` companion, three reverse-FK covers on
 `extraction_runs`/`knowledge_source_fact_elements`/`memory_items`,
 `knowledge_relations(notebook_id, source_object_id, target_object_id, edge_type)`,
 `chunks(source_id, ordinal)`, and a partial `sources(notebook_id, source_type)` index) plus
 batch 3's `concept_clusters(notebook_id, canonical_id, member_object_id)` keyset-covering
-index, built online, same inspect/apply shape as the retrieval-index tool above:
+index and batch 4's three source-search trigram indexes
+(`sources(notebook_id, lower(title), lower(file_name))` partial on the visible source types,
+`source_authors(notebook_id, lower(name))`, `source_paper_meta(notebook_id, lower(paper_title))`),
+built online, same inspect/apply shape as the retrieval-index tool above:
 
 ```bash
 PYTHONPATH=backend python scripts/build_hotpath_indexes.py
@@ -340,11 +343,23 @@ composite partial GIN over the full jsonb-as-text (`notebook_id` leads via btree
 builds a global bitmap; `--apply` installs the btree_gin extension on demand) and
 is minutes-scale on a large `knowledge_objects` table — schedule the window accordingly.
 Batch 3's keyset-covering index is a plain (non-partial) btree, same seconds-scale build
-profile as batch 1's, with none of the GIN-specific concerns above. In
+profile as batch 1's, with none of the GIN-specific concerns above. Batch 4's three are
+notebook-scoped composite GIN trigram indexes over short text columns (title, file name,
+author name, paper title) rather than a whole jsonb payload, so they measured roughly 1.0x,
+0.3x and 1.2x their own tables' heaps on a benchmark corpus — tens of megabytes at the
+scale of a 49k-source notebook, not the double-digit gigabytes batch 2's payload GIN
+implies, and minutes rather than tens of minutes to build. Each is independently
+reversible; see `0048_source_search_trgm_indexes.sql`'s header for the per-index
+`DROP INDEX CONCURRENTLY` list and for the measured, registered trade-off on short (<3
+character) needles. After building them on a freshly loaded database, `VACUUM` the three
+tables (or wait for autovacuum) before judging any EXPLAIN: an unmerged GIN fastupdate
+pending list inflates every GIN cost estimate roughly tenfold and makes PostgreSQL reject
+its own index — see [Operations](./operations.md#postgresql-notebook-aware-lexical-indexes). In
 every case `CREATE INDEX CONCURRENTLY` still takes a full table scan per index and should
 run outside peak hours on a busy database.
-Migrations `0039_hotpath_batch1_indexes.sql`, `0042_hotpath_batch2_search_indexes.sql`, and
-`0043_concept_cluster_keyset_index.sql` use plain `CREATE INDEX IF NOT EXISTS` (a
+Migrations `0039_hotpath_batch1_indexes.sql`, `0042_hotpath_batch2_search_indexes.sql`,
+`0043_concept_cluster_keyset_index.sql`, and `0048_source_search_trgm_indexes.sql` use plain
+`CREATE INDEX IF NOT EXISTS` (a
 migration runs inside a transaction, where `CONCURRENTLY` cannot run) and becomes a no-op
 ledger entry once this script has built every index; on a fresh database with no existing
 traffic, the migration alone is sufficient and running the script first is optional.

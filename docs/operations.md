@@ -488,8 +488,35 @@ only after heap recheck. The two operational indexes prepend `notebook_id` with 
 
 The hot-path fix batch 2 payload index (`idx_knowledge_objects_nb_payload_trgm`,
 migration 0042 / `scripts/build_hotpath_indexes.py`) follows this same composite shape
-for the same reason; it ships through the hot-path channel documented in
+for the same reason, and so do hot-path fix batch 4's three source-search indexes
+(`idx_sources_nb_title_file_trgm` — which carries two trigram keys, `lower(title)` and
+`lower(file_name)`, so an `OR` of the two `LIKE` arms can BitmapOr two scans of one index —
+plus `idx_source_authors_nb_name_trgm` and `idx_source_paper_meta_nb_ptitle_trgm`,
+migration 0048). All of them ship through the hot-path channel documented in
 `docs/deployment-and-configuration.md`, not through the script below.
+
+Two things are worth knowing before reading a plan against any of these trigram indexes,
+both measured and registered in `0048_source_search_trgm_indexes.sql`'s header.
+
+First, `pg_trgm` extracts no trigram keys from a search pattern shorter than three
+characters, so a one- or two-character needle degenerates to "every row of this notebook"
+(the `btree_gin` `notebook_id` key alone) plus a heap recheck.
+
+Second, and the more common source of confusion: **a GIN index that looks unused right after
+a bulk load usually is not being rejected on merit.** With `fastupdate` on (the default) GIN
+parks freshly inserted entries in an unindexed pending list, and the planner charges every
+GIN plan for scanning it — right after a `CREATE INDEX` followed by heavy ingestion, a
+restore, or a benchmark's own seeding, that surcharge inflates the estimate roughly tenfold
+and PostgreSQL will pick a sequential scan or a plain `notebook_id` btree instead. Measured
+on a 30k-source corpus, before a `VACUUM` versus after: the `lower(title)` arm went from a
+sequential scan (cost 1379) to the composite GIN (85.52); the `title OR file_name` form from
+`idx_sources_notebook_status` (1501) to a BitmapOr over two scans of the composite (170.80);
+the paper-title leg from `idx_source_paper_meta_nb` (740.55) to its own GIN (85.38). One
+`VACUUM` of the affected tables merges the pending list and all three flip to the intended
+index; autovacuum reaches the same state on its own. So after building these indexes on a
+freshly loaded database, `VACUUM` (or wait for autovacuum) before judging any plan — and if
+the surcharge is unwanted permanently, the indexes may be built `WITH (fastupdate=off)`,
+which the migration's pre-existing-index validation deliberately tolerates.
 
 From the repository root, first inspect without changing the database, then apply during a
 controlled low-traffic window:

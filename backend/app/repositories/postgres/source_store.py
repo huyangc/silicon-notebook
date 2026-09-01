@@ -232,15 +232,72 @@ class SourceStore:
         where = f"WHERE notebook_id=%s AND {VISIBLE_SOURCE_TYPES_PREDICATE}"
         params: list[object] = [notebook_id]
         if needle:
+            # 三腿 UNION 的 id 半连接,不是一个跨表 OR。生产实测(4.9 万 source 的
+            # notebook):旧的 `LOWER(title) LIKE ? OR LOWER(file_name) LIKE ?
+            # OR EXISTS(source_authors …) OR EXISTS(source_paper_meta …)` 让
+            # planner 对整个 OR 结构选 hashed subplan —— source_authors 全表并行
+            # 扫 21 万行、source_paper_meta 全表扫 3.9 万行,带 q 的 COUNT 单次
+            # 363ms,页查询对同一份 where 再付一遍。判据是「2 个汉字的短词与 7
+            # 字符的长词耗时几乎相同」(360ms vs 363ms):瓶颈是全表扫,不是 LIKE
+            # 匹配本身。OR 底下的跨表 EXISTS 无法用索引各自收窄,而拆成三条各自
+            # 独立、各自可走索引的腿再取并集就可以 —— 每条腿都以自己表的
+            # `notebook_id=` 等值打头,配 migration 0048 的三条复合 GIN trgm 索引
+            # (idx_sources_nb_title_file_trgm / idx_source_authors_nb_name_trgm /
+            # idx_source_paper_meta_nb_ptitle_trgm)走 Bitmap Index Scan。
+            #
+            # 语义等价论证(三条,逐条对应一处写法):
+            #
+            # 1. 第一腿重复了外层的 `notebook_id=` 与 visible 谓词,不是冗余:
+            #    外层 WHERE 已经把结果限定在「本 notebook 且可见」,所以 IN 集合
+            #    只需要**包含**全部「可见且命中」的 id,多包含谁都被外层交掉。
+            #    把 visible 谓词写进第一腿只会收窄 UNION 集合(交集不变),而它
+            #    是 idx_sources_nb_title_file_trgm 那条 partial 索引可用的前提
+            #    —— 谓词在 SQL 文本里是内联字面量(VISIBLE_SOURCE_TYPES_PREDICATE),
+            #    所以 partial 谓词的蕴含在 generic plan 下同样成立(与迁移 0042
+            #    Group 2 记的是同一套机制)。作者腿/论文腿不带 visible 谓词:
+            #    隐藏源即使有作者行也进不了结果,外层交集拦得住。
+            #
+            # 2. 作者腿/论文腿改用**子表自己的** `notebook_id=` 收窄(旧形态是
+            #    `a.source_id=sources.id` 回连外层),两者等价依赖「子表行的
+            #    notebook_id 恒等于其 source 的 notebook_id」。核实过的写者:
+            #    本文件的 upsert_paper_meta 先 `SELECT id FROM sources WHERE
+            #    id=%s AND notebook_id=%s FOR KEY SHARE` 做归属校验再写两张表,
+            #    ON CONFLICT 不更新 notebook_id;clear_paper_meta / 删源只 DELETE;
+            #    notebook_sharing.py 的深拷贝对两张子表都同时改写 source_id 与
+            #    notebook_id 到新库;sqlite_to_postgres / shadow 复制与
+            #    scripts/merge_dbs.py 都是按列原样搬运。全仓没有任何一处
+            #    `UPDATE sources SET notebook_id=…`,即不存在把 source 移到另一个
+            #    notebook 的路径。
+            #    历史脏数据的取舍(不是等价性漏洞,是明写的口径统一):早于当前
+            #    写者的畸形行**可能**带着与其 source 不一致的 notebook_id ——
+            #    report_source_rows 家族早就为此在 JOIN 上写了
+            #    `AND m.notebook_id=s.notebook_id`,query_store 的 is_paper 计数
+            #    也直接按 `source_paper_meta.notebook_id` 分组。本次改写把搜索腿
+            #    收进同一口径:这类行不再算作本库的命中。两端各有一条用例把这个
+            #    取舍钉死。
+            #
+            # 3. `paper_title` 可空,而 LIKE 对 NULL 求值为 NULL,在 WHERE 里与
+            #    FALSE 同为 falsy —— 旧的 EXISTS 子查询与新的 UNION 腿在这一点上
+            #    逐字同形,不需要额外的 IS NOT NULL。needle 里的 `%` / `_` 一如
+            #    既往不转义(既有行为,本次不动)。
+            #
+            # 子查询里的 `FROM sources` 遮蔽了外层同名关系,这是有意的:IN 左边的
+            # `sources.id` 在外层作用域求值,腿内的裸列名全部解析到腿自己的
+            # `sources`,两侧都不需要别名。
             where += (
-                " AND (LOWER(title) LIKE %s OR LOWER(file_name) LIKE %s "
-                "OR EXISTS(SELECT 1 FROM source_authors a "
-                "WHERE a.source_id=sources.id AND LOWER(a.name) LIKE %s) "
-                "OR EXISTS(SELECT 1 FROM source_paper_meta m "
-                "WHERE m.source_id=sources.id AND LOWER(m.paper_title) LIKE %s))"
+                " AND sources.id IN ("
+                "SELECT id FROM sources WHERE notebook_id=%s "
+                f"AND {VISIBLE_SOURCE_TYPES_PREDICATE} "
+                "AND (LOWER(title) LIKE %s OR LOWER(file_name) LIKE %s) "
+                "UNION SELECT a.source_id FROM source_authors a "
+                "WHERE a.notebook_id=%s AND LOWER(a.name) LIKE %s "
+                "UNION SELECT m.source_id FROM source_paper_meta m "
+                "WHERE m.notebook_id=%s AND LOWER(m.paper_title) LIKE %s)"
             )
             like = f"%{needle}%"
-            params.extend((like, like, like, like))
+            params.extend(
+                (notebook_id, like, like, notebook_id, like, notebook_id, like)
+            )
         with self.database.connect() as connection:
             total = connection.execute(
                 f"SELECT COUNT(*) AS c FROM sources {where}", params

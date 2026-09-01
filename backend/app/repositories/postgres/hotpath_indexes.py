@@ -11,22 +11,32 @@ first non-btree entry, hence the ``using``/``ddl_columns`` fields below) and
 one partial btree index. Batch 3 added a third migration,
 ``backend/app/repositories/postgres/migrations/0043_concept_cluster_keyset_index.sql``,
 contributing one plain (non-partial) composite btree keyset-covering index.
+Batch 4 added a fourth migration,
+``backend/app/repositories/postgres/migrations/0048_source_search_trgm_indexes.sql``,
+contributing three notebook-scoped composite GIN trigram indexes (one of them
+partial) that serve the three legs of the source tab's rewritten search
+predicate.
 Every migration and this module's ``HOTPATH_INDEX_SPECS`` are independent
 hand-authored copies of the same index shapes on purpose (a migration file
 cannot import Python at apply time): ``backend/tests/test_hotpath_indexes.py``
 cross-checks migration 0039 against its eight batch-1 specs,
 ``backend/tests/test_hotpath_indexes_batch2.py`` cross-checks migration 0042
-against its two batch-2 specs, and ``backend/tests/test_hotpath_indexes_batch3.py``
-cross-checks migration 0043 against its one batch-3 spec, so no pairing can
-silently drift. One shared builder/inspector serves every batch: there is a
-single advisory lock name and a single ``HOTPATH_INDEX_SPECS`` tuple that
-grows with each batch, not a lock/tuple per batch.
+against its two batch-2 specs, ``backend/tests/test_hotpath_indexes_batch3.py``
+cross-checks migration 0043 against its one batch-3 spec, and
+``backend/tests/test_hotpath_indexes_batch4.py`` cross-checks migration 0048
+against its three batch-4 specs, so no pairing can silently drift. One shared
+builder/inspector serves every batch: there is a single advisory lock name and
+a single ``HOTPATH_INDEX_SPECS`` tuple that grows with each batch, not a
+lock/tuple per batch.
 
 This is the sibling of ``retrieval_indexes.py`` (GIN trigram indexes for
 large, notebook-scoped tables) but far simpler: every spec here is either a
 plain btree/partial index, or (since batch 2) a notebook-scoped composite
 GIN in the same ``(notebook_id public.text_ops, expr gin_trgm_ops)`` shape
-as ``idx_knowledge_objects_nb_name_trgm`` -- but with no legacy-index
+as ``idx_knowledge_objects_nb_name_trgm`` -- batch 4 widens that shape to a
+second trigram key on one entry (``(notebook_id, lower(title),
+lower(file_name))``, so an OR of two LIKE arms can BitmapOr two scans of the
+SAME index) but changes nothing structural. There is still no legacy-index
 retirement dance, so ``HotpathIndexSpec`` stays a flat dataclass instead of
 ``retrieval_indexes.py``'s richer ``IndexShape``/collation-oid machinery.
 
@@ -310,6 +320,110 @@ HOTPATH_INDEX_SPECS: tuple[HotpathIndexSpec, ...] = (
             "knowledge_store.py:concept_cluster_detail_rows / "
             "concept_cluster_member_total (concept-detail hub-cluster keyset pagination)"
         ),
+    ),
+    # -- Batch 4: the source-tab search predicate -- see
+    # migrations/0048_source_search_trgm_indexes.sql for the full production
+    # evidence (49k-source notebook, 363ms COUNT, source_authors 210k-row
+    # parallel seq scan, source_paper_meta 39k-row seq scan, and the
+    # two-char-vs-seven-char equal-cost diagnostic that proves the scans, not
+    # the LIKE, are the bottleneck) and
+    # backend/tests/test_hotpath_indexes_batch4.py for this module's own
+    # migration<->spec reconciliation test. All three serve one leg each of
+    # postgres/source_store.py:list_sources_page's rewritten three-leg UNION.
+    HotpathIndexSpec(
+        name="idx_sources_nb_title_file_trgm",
+        table="sources",
+        using="gin",
+        # Bare per-key shape a live catalog read reports back: a PostgreSQL 16
+        # ``pg_get_indexdef(indexrelid, n, true)`` echoes ``lower(title)`` with
+        # neither the opclass nor a COLLATE qualifier, the same asymmetry
+        # batch 2's two entries document.
+        columns=("notebook_id", "lower(title)", "lower(file_name)"),
+        # THREE keys in ONE index, deliberately: the query's two LIKE arms are
+        # OR'd, and a multi-column GIN lets each arm constrain the subset
+        # ``(notebook_id, its own trigram column)`` and leave the third key
+        # free, so the planner answers the OR with a BitmapOr over two scans of
+        # THIS index -- by default, no planner knobs. Verified by live EXPLAIN,
+        # not assumed: see the migration's header and
+        # test_hotpath_indexes_batch4_live.py, which pins that plan shape. Two
+        # alternatives were measured and rejected: two separate two-key indexes
+        # (each would still carry the same ``notebook_id`` key at the same
+        # per-scan cost) and splitting the query's OR into two single-arm UNION
+        # legs (a wash on selective needles, measurably worse on short ones).
+        #
+        # If an EXPLAIN ever shows this index NOT being used, check the GIN
+        # fastupdate pending list before concluding anything -- right after a
+        # bulk load it inflates every GIN cost estimate ~10x and the planner
+        # rejects its own index until a VACUUM merges it. The migration header
+        # carries the measured before/after.
+        #
+        # No explicit COLLATE, unlike batch 2's payload GIN: ``title`` and
+        # ``file_name`` are ``text COLLATE "C"`` at table-creation time
+        # (0001_initial.sql), and ``lower()`` derives its result collation from
+        # its argument, so both expression keys already resolve to
+        # pg_catalog:C (verified against a live catalog read). 0042's
+        # ``(payload::text)`` needed the qualifier because a cast of a jsonb
+        # column inherits nothing.
+        ddl_columns=(
+            "notebook_id public.text_ops, "
+            "lower(title) public.gin_trgm_ops, "
+            "lower(file_name) public.gin_trgm_ops"
+        ),
+        # Byte-identical to source_store.py's VISIBLE_SOURCE_TYPES_PREDICATE,
+        # which list_sources_page interpolates into its SQL as a LITERAL (never
+        # a bound parameter), so the partial-predicate implication holds even
+        # under a generic, parameter-value-blind plan -- the mechanics
+        # idx_source_elements_nonblank's comment above works through in full.
+        predicate="source_type NOT IN ('memory','knowhow')",
+        # PostgreSQL canonicalizes ``NOT IN (...)`` to ``<> ALL (ARRAY[...])``
+        # on store, and casts each element to ``::text`` because ``source_type``
+        # is ``text`` -- the mirror image of batch 1's
+        # idx_sources_nb_hidden_type, whose ``IN (...)`` becomes
+        # ``= ANY (ARRAY[...])``. Captured from a live PostgreSQL 16 catalog
+        # read, not hand-guessed.
+        predicate_shape=(
+            "source_type <> ALL (ARRAY['memory'::text, 'knowhow'::text])"
+        ),
+        opclasses=("public:text_ops", "public:gin_trgm_ops", "public:gin_trgm_ops"),
+        collations=("pg_catalog:C", "pg_catalog:C", "pg_catalog:C"),
+        serves=(
+            "source_store.py:list_sources_page (q search, title/file_name leg)"
+        ),
+    ),
+    HotpathIndexSpec(
+        name="idx_source_authors_nb_name_trgm",
+        table="source_authors",
+        using="gin",
+        columns=("notebook_id", "lower(name)"),
+        ddl_columns=(
+            "notebook_id public.text_ops, lower(name) public.gin_trgm_ops"
+        ),
+        # Non-partial: source_authors carries no visibility dimension of its
+        # own (the outer query's intersection with ``sources`` supplies it) and
+        # every author row is a legitimate search target.
+        predicate="",
+        predicate_shape="",
+        opclasses=("public:text_ops", "public:gin_trgm_ops"),
+        collations=("pg_catalog:C", "pg_catalog:C"),
+        serves="source_store.py:list_sources_page (q search, author-name leg)",
+    ),
+    HotpathIndexSpec(
+        name="idx_source_paper_meta_nb_ptitle_trgm",
+        table="source_paper_meta",
+        using="gin",
+        # ``paper_title`` is NULLABLE. A GIN trigram index simply stores no
+        # entry for a NULL expression, and ``LOWER(NULL) LIKE %s`` is NULL --
+        # falsy in a WHERE -- in both the old and the rewritten query, so the
+        # missing entries cost nothing.
+        columns=("notebook_id", "lower(paper_title)"),
+        ddl_columns=(
+            "notebook_id public.text_ops, lower(paper_title) public.gin_trgm_ops"
+        ),
+        predicate="",
+        predicate_shape="",
+        opclasses=("public:text_ops", "public:gin_trgm_ops"),
+        collations=("pg_catalog:C", "pg_catalog:C"),
+        serves="source_store.py:list_sources_page (q search, paper-title leg)",
     ),
 )
 

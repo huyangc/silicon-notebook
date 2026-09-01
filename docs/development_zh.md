@@ -234,6 +234,35 @@ SQLite v68 / PostgreSQL v47（批 3·W1 PR-2，seq 语义统一）新增
 本次不增加表、外键或 unique surface；当前配对为 SQLite 68 / PostgreSQL 47 /
 epoch 1，仍为 88 张业务表、117 个复制面 unique surface 与 12 个 row slot 闭包上界。
 
+PostgreSQL v48（`0048_source_search_trgm_indexes.sql`，热路径修复批 4）新增来源页签
+服务端检索背后的三条 notebook 域复合 GIN trgm 索引：`idx_sources_nb_title_file_trgm`
+建在 `sources(notebook_id, lower(title), lower(file_name))` 上并按
+`source_type NOT IN ('memory','knowhow')` partial，另加
+`idx_source_authors_nb_name_trgm` 与 `idx_source_paper_meta_nb_ptitle_trgm`。它与一处
+**两端同构**的查询改写配套：`list_sources_page` 的 q 过滤从「两条 `LIKE` 加两个跨表
+`EXISTS` 的布尔 OR」改为「id 半连接一个三腿 `UNION`」，每条腿都以自己表的
+`notebook_id=` 等值打头，因而各自可索引。生产实测症状是 4.9 万 source 的 notebook 上
+带 q 的 COUNT 单次 363ms（且页查询共用同一份 where，一次请求付两遍）：planner 对跨表 OR
+选了 hashed subplan，每次执行都把 `source_authors` 21 万行、`source_paper_meta` 3.9 万行
+整表materialize；「2 字符与 7 字符 needle 耗时几乎相同（360ms vs 363ms）」这条判据说明
+瓶颈是全表扫而非 LIKE 匹配。SQLite 只拿改写、**不加索引**——它没有 GIN trgm 的等价物，
+`LIKE '%…%'` 也吃不到 B-tree 前缀——所以 `SQLITE_SCHEMA_VERSION` 不动、v48 仍与 SQLite
+v68 配对；这一「PostgreSQL-only」分歧与迁移 0042 为批 2 登记的是同一种。三键复合是刻意
+选择：多列 GIN 允许每条 `LIKE` 腿只约束 `(notebook_id, 自己那个 trgm 键)`，对同一条索引
+扫两次再 BitmapOr，已由 live EXPLAIN 验证（因此不需要退回「两个双键索引」那个备选，而且
+退回也没用——两条索引各自仍带同一个 `notebook_id` 键，单次扫描成本一样）。另有两个后续变体经实测后否决：用两条双键索引代替复合索引
+（两条各自仍带同一个 `notebook_id` 键，单次扫描成本一样），以及把查询里的 `OR` 拆成两条
+单 arm UNION 腿（选择性 needle 上是打平，短 needle 上实测更差——多出的第四条 Append 分支
+意味着模式短到提取不出 trigram 时要对 `sources` 再全扫一遍）。两项实测取舍写在迁移头注释里
+而不是留给后来人重新发现：短于 3 个字符的 needle 提取不出任何 trigram 键（这也是基准表里
+唯一一处页查询劣化，23.6ms→33.1ms，而按「一次用户动作」计仍快 3.4 倍）；以及 GIN 的
+fastupdate pending list 在 `VACUUM` 合并之前会把 GIN 的代价估算抬高约十倍，足以让 PostgreSQL
+拒用自己刚建好的索引——这个假象一度误导了本批第一轮的计划实测，现已写进
+`docs/operations_zh.md` 供运维参考。迁移 0048 重复了 0042 的 btree_gin
+守卫，并在建索引前校验任何同名先存索引。不增加表、列、外键或 unique surface；当前配对为
+SQLite 68 / PostgreSQL 48 / epoch 1，仍为 88 张业务表、117 个复制面 unique surface 与
+12 个 row slot 闭包上界。
+
 只能在应用/API 与后台 writer 停止后执行：
 
 ```bash

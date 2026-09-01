@@ -24,7 +24,7 @@ def _seed_user(database, user_id: str, role: str) -> None:
 
 @pytest.fixture
 def store(postgres_database):
-    assert PostgresMigrator(postgres_database).migrate() == 47
+    assert PostgresMigrator(postgres_database).migrate() == 48
     counter = iter(("wish-feature", "wish-rejected", "wish-plan"))
     return WishStore(
         postgres_database,

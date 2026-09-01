@@ -86,7 +86,7 @@ def core_stores(request) -> CoreStores:
     postgres_settings = request.getfixturevalue("postgres_settings")
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 47
+    assert PostgresMigrator(postgres_database).migrate() == 48
     yield CoreStores(
         database=postgres_database,
         identity=PostgresIdentityStore(postgres_database, postgres_settings),
@@ -2172,7 +2172,7 @@ def test_pg_task6_timestamp_inputs_normalize_naive_local_seams(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 47
+    assert PostgresMigrator(postgres_database).migrate() == 48
     local_zone = ZoneInfo("America/Los_Angeles")
     naive_local = datetime(2026, 7, 22, 3, 0, 0)
     expected_utc = naive_local.replace(tzinfo=local_zone).astimezone(timezone.utc)
@@ -2255,7 +2255,7 @@ def test_pg_copy_sentinel_sweep_respects_naive_local_creation_time(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 47
+    assert PostgresMigrator(postgres_database).migrate() == 48
     settings = postgres_settings.model_copy(
         update={"notebook_copy_stale_seconds": 60}
     )
@@ -2325,7 +2325,7 @@ def test_pg_copy_sentinel_sweep_preserves_production_clock_dst_fold(
     from app.repositories.postgres import sharing_store as pg_sharing_store
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 47
+    assert PostgresMigrator(postgres_database).migrate() == 48
     settings = postgres_settings.model_copy(
         update={"notebook_copy_stale_seconds": 120}
     )
@@ -4406,6 +4406,226 @@ def test_paper_metadata_json_and_author_search_roundtrip(core_stores: CoreStores
     result = core_stores.sources.list_sources_page(notebook_id, q="alice wu")
     assert result.total_count == 1
     assert result.items[0].id == "src-paper"
+
+
+# ---------------------------------------------------------------------------
+# ``list_sources_page`` 的 q 过滤谓词:四腿语义(title / file_name / 作者名 /
+# 论文标题)。
+#
+# 这组用例先在**旧的 OR-跨表 EXISTS 形态**上跑通,再换成 id 半连接三腿 UNION
+# 形态(见 postgres/source_store.py:list_sources_page 里的等价论证注释),所以
+# 它们是那次改写的「语义不变」证明,而不是新形态的事后描述。计划形状的守卫
+# (真的走上新的三条 GIN trgm 索引、真的发出 UNION 形状的 SQL)在
+# ``tests/postgres/test_hotpath_indexes_batch4_live.py``;这里只管语义。
+# SQLite 孪生:``tests/test_sources_pagination.py`` 的同名一组。
+# ---------------------------------------------------------------------------
+
+
+def _seed_search_source(
+    stores: CoreStores, notebook_id: str, source_id: str, title: str,
+    file_name: str, created: str, source_type: str = "markdown",
+) -> None:
+    """隐藏类型(memory/knowhow)要用原始 SQL 落行:``insert_source`` 的容量闸与
+    Memory 投影写路径各有自己的前置条件,而这组用例要的只是「表里有这样一行」。
+    ``created`` 逐条递增,让下面的顺序断言吃 ``(created_at, id)`` 主键而不是
+    并列时间戳下的 id tie-break —— 与 SQLite 孪生的播种顺序逐条对齐。"""
+    _write_sql(
+        stores,
+        "INSERT INTO sources(id,notebook_id,title,source_type,status,parse_status,"
+        "file_name,file_path,file_size,file_hash,summary,doc_type,created_at,updated_at) "
+        "VALUES (%s,%s,%s,%s,'extracted','extracted',%s,%s,1,%s,'','',%s,%s)",
+        (
+            source_id, notebook_id, title, source_type, file_name,
+            f"uploads/{file_name}", f"hash-{source_id}", created, NOW,
+        ),
+    )
+
+
+def _seed_search_paper_meta(
+    stores: CoreStores, notebook_id: str, source_id: str,
+    paper_title: "str | None" = None, authors: "tuple[str, ...]" = (),
+) -> None:
+    _write_sql(
+        stores,
+        "INSERT INTO source_paper_meta(source_id,notebook_id,is_paper,paper_title,"
+        "venue,pub_year,doi,keywords,raw_json,model,created_at,updated_at) "
+        "VALUES (%s,%s,1,%s,'',NULL,'','[]'::jsonb,'{}'::jsonb,'',%s,%s)",
+        (source_id, notebook_id, paper_title, NOW, NOW),
+    )
+    for position, name in enumerate(authors):
+        _write_sql(
+            stores,
+            "INSERT INTO source_authors(id,source_id,notebook_id,position,name,"
+            "affiliation,created_at) VALUES (%s,%s,%s,%s,%s,'',%s)",
+            (
+                f"{source_id}:auth:{position:03d}", source_id, notebook_id,
+                position, name, NOW,
+            ),
+        )
+
+
+def _search_ids(stores: CoreStores, notebook_id: str, needle) -> list[str]:
+    page = stores.sources.list_sources_page(
+        notebook_id, offset=0, limit=200, q=needle
+    )
+    ids = [item.id for item in page.items]
+    # COUNT 与页查询共用同一份 where 片段;两者分叉会让「共 N 篇」与实际列出的
+    # 行数对不上。
+    assert page.total_count == len(ids), (needle, page.total_count, ids)
+    return ids
+
+
+def _seed_search_fixture(stores: CoreStores) -> "tuple[str, str]":
+    owner = stores.identity.create_user("q00123456", "password-19")
+    notebook_id = stores.notebooks.create_row(
+        NotebookCreate(name="Search target"), owner.id
+    )
+    other_id = stores.notebooks.create_row(
+        NotebookCreate(name="Search other"), owner.id
+    )
+    day = "2026-07-22T10:00:0{}+00:00".format
+    _seed_search_source(
+        stores, notebook_id, "s-title", "Needle Voltage Reference", "vref.md", day(0)
+    )
+    _seed_search_source(
+        stores, notebook_id, "s-file", "Untitled import", "needle-doc.md", day(1)
+    )
+    _seed_search_source(
+        stores, notebook_id, "s-author", "Anonymous report", "anon.pdf", day(2)
+    )
+    _seed_search_paper_meta(
+        stores, notebook_id, "s-author", paper_title="Unrelated title",
+        authors=("Zeta Needleman",),
+    )
+    _seed_search_source(
+        stores, notebook_id, "s-ptitle", "Scanned upload", "scan.pdf", day(3)
+    )
+    _seed_search_paper_meta(
+        stores, notebook_id, "s-ptitle", paper_title="Needle in a Haystack"
+    )
+    _seed_search_source(
+        stores, notebook_id, "s-multi", "Needle everywhere", "needle-multi.md", day(4)
+    )
+    _seed_search_paper_meta(
+        stores, notebook_id, "s-multi", paper_title="Needle title",
+        authors=("Needle Author",),
+    )
+    _seed_search_source(
+        stores, notebook_id, "s-miss", "Nothing to see", "plain.md", day(5)
+    )
+    _seed_search_source(
+        stores, notebook_id, "s-memory", "Needle memory projection", "mem.md", day(6),
+        source_type="memory",
+    )
+    _seed_search_paper_meta(
+        stores, notebook_id, "s-memory", paper_title="Needle memory paper",
+        authors=("Needle Ghost",),
+    )
+    _seed_search_source(
+        stores, notebook_id, "s-knowhow", "Needle knowhow projection", "kh.md", day(7),
+        source_type="knowhow",
+    )
+    _seed_search_paper_meta(
+        stores, notebook_id, "s-knowhow", paper_title="Needle knowhow paper",
+        authors=("Needle Ghost",),
+    )
+    _seed_search_source(
+        stores, other_id, "s-other", "Needle everywhere", "needle-multi.md", day(0)
+    )
+    _seed_search_paper_meta(
+        stores, other_id, "s-other", paper_title="Needle title",
+        authors=("Needle Author",),
+    )
+    return notebook_id, other_id
+
+
+def test_source_search_matches_every_leg(core_stores: CoreStores):
+    notebook_id, _other = _seed_search_fixture(core_stores)
+    assert _search_ids(core_stores, notebook_id, "voltage") == ["s-title"]
+    assert _search_ids(core_stores, notebook_id, "vref.md") == ["s-title"]
+    assert _search_ids(core_stores, notebook_id, "zeta needleman") == ["s-author"]
+    assert _search_ids(core_stores, notebook_id, "haystack") == ["s-ptitle"]
+
+
+def test_source_search_counts_a_multi_leg_hit_exactly_once(core_stores: CoreStores):
+    """``s-multi`` 四条腿同时命中。旧形态是一个布尔 OR,天然只算一次;新形态是
+    三腿 UNION 再 id 半连接,靠 UNION 去重 + ``IN`` 半连接语义保证同一件事 ——
+    把 ``UNION`` 写成 ``UNION ALL`` 再 JOIN 回来就会在这里变红。"""
+    notebook_id, _other = _seed_search_fixture(core_stores)
+    assert _search_ids(core_stores, notebook_id, "needle-multi") == ["s-multi"]
+    ids = _search_ids(core_stores, notebook_id, "needle")
+    assert ids.count("s-multi") == 1
+    assert ids == ["s-title", "s-file", "s-author", "s-ptitle", "s-multi"]
+
+
+def test_source_search_excludes_hidden_source_types(core_stores: CoreStores):
+    """memory / knowhow 合成源即使 title、论文标题、作者名全部命中也不能出现,
+    更不能进 total_count。新形态里 UNION 第一腿自己也带 visible 谓词(既是
+    partial 索引可用的前提,也让三腿的并集不含隐藏源),外层交集不变。"""
+    notebook_id, _other = _seed_search_fixture(core_stores)
+    ids = _search_ids(core_stores, notebook_id, "needle")
+    assert "s-memory" not in ids and "s-knowhow" not in ids
+    assert _search_ids(core_stores, notebook_id, "projection") == []
+    assert _search_ids(core_stores, notebook_id, "needle ghost") == []
+
+
+def test_source_search_never_leaks_another_notebook(core_stores: CoreStores):
+    """干扰库里有逐字同名的 title / file_name / 作者名 / 论文标题,四条腿都必须
+    留在本库内。"""
+    notebook_id, other_id = _seed_search_fixture(core_stores)
+    for needle in ("needle", "needle author", "needle title", "needle-multi"):
+        assert "s-other" not in _search_ids(core_stores, notebook_id, needle), needle
+    assert _search_ids(core_stores, other_id, "needle") == ["s-other"]
+    assert _search_ids(core_stores, other_id, "haystack") == []
+
+
+def test_source_search_ignores_a_legacy_cross_notebook_child_row(
+    core_stores: CoreStores,
+):
+    """**本次改写唯一一处有意的语义变化,不属于等价性证明。**
+
+    当前写者写不出「子表行的 notebook_id ≠ 其 source 的 notebook_id」这种行
+    (``upsert_paper_meta`` 先 ``SELECT id FROM sources WHERE id=%s AND
+    notebook_id=%s FOR KEY SHARE`` 做归属校验;深拷贝同时改写两个字段;全仓无
+    source 换库路径),但早于这些写者的畸形历史行可能存在。仓库对这类行早有
+    口径:``report_source_rows`` 家族在 JOIN 上写
+    ``AND m.notebook_id=s.notebook_id``(见本文件
+    ``test_report_source_rows_*`` 里那条同款畸形行用例),``notebook_analytics``
+    的 is_paper 计数直接按 ``source_paper_meta.notebook_id`` 分组。旧的搜索谓词
+    是全仓唯一不看子表 notebook_id 的那处;新形态把它并进同一口径。
+
+    这条用例在旧实现上是**红**的 —— 那正是它存在的意义。SQLite 孪生:
+    ``tests/test_sources_pagination.py`` 的同名一条。"""
+    notebook_id, other_id = _seed_search_fixture(core_stores)
+    _write_sql(
+        core_stores,
+        "UPDATE source_paper_meta SET notebook_id=%s WHERE source_id=%s",
+        (other_id, "s-ptitle"),
+    )
+    _write_sql(
+        core_stores,
+        "UPDATE source_authors SET notebook_id=%s WHERE source_id=%s",
+        (other_id, "s-author"),
+    )
+    assert _search_ids(core_stores, notebook_id, "haystack") == []
+    assert _search_ids(core_stores, notebook_id, "zeta needleman") == []
+    # 也不会泄漏进它被写坏成的那个库(source 行本身仍在原库)。
+    assert _search_ids(core_stores, other_id, "haystack") == []
+    assert _search_ids(core_stores, other_id, "zeta needleman") == []
+    # 其余腿不受影响。
+    assert _search_ids(core_stores, notebook_id, "scanned") == ["s-ptitle"]
+
+
+def test_source_search_empty_query_path_is_unchanged(core_stores: CoreStores):
+    notebook_id, _other = _seed_search_fixture(core_stores)
+    for blank in ("", "   ", None):
+        page = core_stores.sources.list_sources_page(
+            notebook_id, offset=0, limit=200, q=blank
+        )
+        assert page.total_count == 6
+        assert [item.id for item in page.items] == [
+            "s-title", "s-file", "s-author", "s-ptitle", "s-multi", "s-miss",
+        ]
 
 
 def test_chunk_jsonb_and_ordinal_language_probe(core_stores: CoreStores):
