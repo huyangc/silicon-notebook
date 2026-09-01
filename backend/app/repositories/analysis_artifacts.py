@@ -204,7 +204,6 @@ class AnalysisArtifactStore:
             "reason": interaction.reason,
             "occurred_at": occurred.isoformat(),
         }
-        _atomic_json(issue_dir / "artifact.json", artifact)
         issue = {
             "id": f"analysis-model-{case_id}",
             "category": "model_output",
@@ -233,7 +232,18 @@ class AnalysisArtifactStore:
             "source_deleted": False,
             "notebook_deleted": False,
         }
-        _atomic_json(issue_dir / "issue.json", issue)
+        try:
+            _atomic_json(issue_dir / "artifact.json", artifact)
+            _atomic_json(issue_dir / "issue.json", issue)
+        except BaseException:
+            # A case is discoverable only through issue.json. Never leave a
+            # prompt/response behind when publishing that metadata fails.
+            shutil.rmtree(issue_dir, ignore_errors=True)
+            self._remove_empty_parents(
+                issue_dir.parent,
+                self.root / "issues",
+            )
+            raise
         return issue
 
     def load_model_output_artifact(

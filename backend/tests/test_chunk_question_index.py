@@ -41,6 +41,23 @@ class _InvalidSchemaChat:
         return json.dumps(self.payload)
 
 
+class _ScopeCapturingChat(_Chat):
+    def __init__(self):
+        self.contexts = []
+
+    def chat_json(self, messages, schema_hint):
+        from app.services.model_work import (
+            ModelPriority,
+            make_model_work_context,
+        )
+
+        self.contexts.append(make_model_work_context(
+            workload_id="chunk_question_generation",
+            priority=ModelPriority.BACKGROUND,
+        ))
+        return super().chat_json(messages, schema_hint)
+
+
 class _Models:
     def __init__(self):
         self.chat_client = _Chat()
@@ -144,6 +161,25 @@ def test_offline_builder_stores_stable_question_rows_and_counts():
     assert all(row[0].startswith("cq-") for row in stored[3])
     assert events.rows[-1]["kind"] == "chunk_question_index_build"
     assert "notebook_id" not in events.rows[-1]
+
+
+def test_offline_builder_binds_notebook_and_source_artifact_scope():
+    models = _Models()
+    models.chat_client = _ScopeCapturingChat()
+    service = ChunkQuestionIndexService(
+        settings=Settings(generated_question_index_mode="shadow"),
+        chunks=_Chunks(),
+        models=models,
+        event_log=_Events(),
+        now=lambda: "2026-08-10T00:00:00+00:00",
+    )
+
+    counts = service.build_notebook("nb", workers=2)
+
+    assert counts["chunks_stored"] == 1
+    [context] = models.chat_client.contexts
+    assert context.notebook_id == "nb"
+    assert context.parent_id == "source-1"
 
 
 @pytest.mark.parametrize(

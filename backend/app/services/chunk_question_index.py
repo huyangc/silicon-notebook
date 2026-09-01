@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable
 
 from app.core.config import Settings
+from app.services.model_work import model_artifact_scope
 
 
 _QUESTION_BUILD_PAGE_ROWS = 100
@@ -103,15 +104,19 @@ class ChunkQuestionIndexService:
                 created_at=self.now(),
             )
             return "skipped", 0
-        raw = chat_client.chat_json(
-            [{
-                "role": "user",
-                "content": question_generation_prompt(
-                    text, self.settings.generated_question_questions_per_chunk
-                ),
-            }],
-            _QUESTION_SCHEMA_HINT,
-        )
+        with model_artifact_scope(
+            notebook_id=str(row.get("notebook_id") or ""),
+            parent_id=str(row["source_id"]),
+        ):
+            raw = chat_client.chat_json(
+                [{
+                    "role": "user",
+                    "content": question_generation_prompt(
+                        text, self.settings.generated_question_questions_per_chunk
+                    ),
+                }],
+                _QUESTION_SCHEMA_HINT,
+            )
         valid, questions = _parse_generated_questions(
             raw,
             maximum=self.settings.generated_question_questions_per_chunk,

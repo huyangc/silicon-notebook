@@ -1057,6 +1057,43 @@ def test_model_output_issue_keeps_content_out_of_list_and_serves_one_artifact(
     assert redacted["model_area"] == "ask"
 
 
+def test_model_output_issue_removes_payload_when_metadata_publish_fails(
+    tmp_path,
+    monkeypatch,
+):
+    from app.repositories import analysis_artifacts as artifacts_module
+
+    store = AnalysisArtifactStore(tmp_path, retention_days=2)
+    original_atomic_json = artifacts_module._atomic_json
+
+    def fail_metadata(path, payload):
+        if path.name == "issue.json":
+            raise OSError("metadata unavailable")
+        original_atomic_json(path, payload)
+
+    monkeypatch.setattr(artifacts_module, "_atomic_json", fail_metadata)
+    with pytest.raises(OSError, match="metadata unavailable"):
+        store.record_model_output_issue(MalformedModelInteraction(
+            workload_id="source_summary",
+            workload_label="来源摘要",
+            model_area="source",
+            failure_kind="invalid_json",
+            support_id="mdl-orphan-guard",
+            actor_id="user-1",
+            parent_id="source-1",
+            notebook_id="nb-1",
+            question="private question",
+            messages=({"role": "user", "content": "private prompt"},),
+            schema_hint='{"summary":""}',
+            response="not-json",
+            reason="invalid_json",
+            occurred_at="2026-08-29T00:00:00+00:00",
+        ))
+
+    assert list(store.root.glob("**/artifact.json")) == []
+    assert list(store.root.glob("**/issue.json")) == []
+
+
 def test_source_deletion_conservatively_removes_notebook_model_content(tmp_path):
     store = AnalysisArtifactStore(tmp_path, retention_days=2)
     issue = store.record_model_output_issue(MalformedModelInteraction(
