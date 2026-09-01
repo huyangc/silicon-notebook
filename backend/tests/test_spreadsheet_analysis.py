@@ -85,6 +85,48 @@ class _AllColumnsFilterPlanner:
         })
 
 
+class _TopPlanner:
+    configured = True
+
+    def chat_json(self, *args, **kwargs) -> str:
+        return json.dumps({
+            "source_id": "src-1",
+            "sheet": "Sales",
+            "operation": "top",
+            "sort_by": "Amount",
+            "order": "desc",
+        })
+
+
+class _EmptyCountPlanner:
+    configured = True
+
+    def chat_json(self, *args, **kwargs) -> str:
+        return json.dumps({
+            "source_id": "src-1",
+            "sheet": "Sales",
+            "operation": "aggregate",
+            "aggregation": "count",
+            "filters": [{"column": "Region", "operator": "eq", "value": "Missing"}],
+        })
+
+
+class _PartiallyInvalidFilterPlanner:
+    configured = True
+
+    def chat_json(self, *args, **kwargs) -> str:
+        return json.dumps({
+            "source_id": "src-1",
+            "sheet": "Sales",
+            "operation": "filter",
+            "filters": [
+                {"column": "Region", "operator": "eq", "value": "East"},
+                {"column": "Missing", "operator": "eq", "value": "x"},
+            ],
+            "columns": ["Region", "Amount"],
+        })
+
+
 def _settings(tmp_path: Path) -> Settings:
     return Settings(
         _env_file=None,
@@ -252,7 +294,150 @@ def test_top_sort_keeps_nonnumeric_values_last_in_both_directions():
     )
 
     assert [row["Amount"] for row in ascending] == [2, 10, "", "n/a"]
-    assert [row["Amount"] for row in descending] == [10, 2, "", "n/a"]
+    assert [row["Amount"] for row in descending] == [10, 2, "n/a", ""]
+
+    text_descending, _ = SpreadsheetAnalysisService._top(
+        [{"Owner": "A"}, {"Owner": "C"}, {"Owner": "B"}],
+        {"sort_by": "Owner", "order": "desc"},
+    )
+    assert [row["Owner"] for row in text_descending] == ["C", "B", "A"]
+
+
+def test_numeric_header_labels_are_not_replaced_by_a_later_text_row(tmp_path):
+    path = tmp_path / "year-columns.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Sales"
+    sheet.append(["Region", 2024, 2025])
+    sheet.append(["North", "High", "Low"])
+    sheet.append(["South", "Low", "High"])
+    workbook.save(path)
+    settings = _settings(tmp_path)
+    artifacts = AnalysisArtifactStore(Path(settings.storage_dir), retention_days=30)
+    service = SpreadsheetAnalysisService(
+        artifacts=artifacts,
+        settings=settings,
+        event_log=_EventLog(),
+        now=lambda: "2026-08-31T01:00:00+00:00",
+    )
+
+    assert service.compile_source(
+        _source(path), notebook_name="Notebook", owner_id="user-1",
+        row_element_ids={},
+    )
+    manifest = artifacts.load_spreadsheet_manifest("nb-1", "src-1")
+
+    assert manifest is not None
+    assert manifest["sheets"][0]["headers"] == ["Region", "2024", "2025"]
+    assert manifest["sheets"][0]["rows"][0]["cells"] == ["North", "High", "Low"]
+
+
+def test_empty_ungrouped_count_returns_zero(tmp_path):
+    path = tmp_path / "sales.xlsx"
+    _workbook(path)
+    settings = _settings(tmp_path)
+    service = SpreadsheetAnalysisService(
+        artifacts=AnalysisArtifactStore(Path(settings.storage_dir), retention_days=30),
+        settings=settings,
+        event_log=_EventLog(),
+        now=lambda: "2026-08-31T01:00:00+00:00",
+    )
+    assert service.compile_source(
+        _source(path), notebook_name="Notebook", owner_id="user-1",
+        row_element_ids={},
+    )
+
+    [result], _ = service.analyze(
+        notebook_id="nb-1",
+        source_ids=("src-1",),
+        question="筛选不存在的 Region 后统计这个 Excel 的行数",
+        planner_client=_EmptyCountPlanner(),
+    )
+
+    assert result.operation == "aggregate"
+    assert result.rows[0].cells == {"计数": "0"}
+
+
+def test_top_result_citation_anchors_the_first_sorted_row(tmp_path):
+    path = tmp_path / "sales.xlsx"
+    _workbook(path)
+    settings = _settings(tmp_path)
+    service = SpreadsheetAnalysisService(
+        artifacts=AnalysisArtifactStore(Path(settings.storage_dir), retention_days=30),
+        settings=settings,
+        event_log=_EventLog(),
+        now=lambda: "2026-08-31T01:00:00+00:00",
+    )
+    assert service.compile_source(
+        _source(path), notebook_name="Notebook", owner_id="user-1",
+        row_element_ids={
+            ("Sales", 2): "el-east-10",
+            ("Sales", 3): "el-west-20",
+            ("Sales", 4): "el-east-40",
+        },
+    )
+
+    [result], _ = service.analyze(
+        notebook_id="nb-1",
+        source_ids=("src-1",),
+        question="列出这个 Excel 中 Amount 最大的行",
+        planner_client=_TopPlanner(),
+    )
+
+    assert result.rows[0].cells["Amount"] == "40"
+    assert result.rows[0].citation is not None
+    assert result.rows[0].citation.element_id == "el-east-40"
+
+
+def test_partially_invalid_planner_filter_falls_back_instead_of_dropping_it(tmp_path):
+    path = tmp_path / "sales.xlsx"
+    _workbook(path)
+    settings = _settings(tmp_path)
+    service = SpreadsheetAnalysisService(
+        artifacts=AnalysisArtifactStore(Path(settings.storage_dir), retention_days=30),
+        settings=settings,
+        event_log=_EventLog(),
+        now=lambda: "2026-08-31T01:00:00+00:00",
+    )
+    assert service.compile_source(
+        _source(path), notebook_name="Notebook", owner_id="user-1",
+        row_element_ids={},
+    )
+
+    [result], _ = service.analyze(
+        notebook_id="nb-1",
+        source_ids=("src-1",),
+        question="筛选这个 Excel 的 East 明细",
+        planner_client=_PartiallyInvalidFilterPlanner(),
+    )
+
+    assert result.operation == "profile"
+    assert result.coverage.scanned_rows == 3
+
+
+def test_empty_filter_result_preserves_requested_table_columns():
+    rows, columns = SpreadsheetAnalysisService._tabular(
+        [], [], ["Region", "Amount", "Owner"]
+    )
+
+    assert rows == []
+    assert columns == ["Region", "Amount", "Owner"]
+
+
+def test_aggregate_keeps_empty_numeric_groups_after_negative_values():
+    rows, columns = SpreadsheetAnalysisService._aggregate(
+        [
+            {"Region": "Measured", "Amount": -10},
+            {"Region": "Missing", "Amount": "n/a"},
+        ],
+        {"group_by": "Region", "aggregation": "sum", "measure": "Amount"},
+    )
+
+    assert columns == ["Region", "Amount · sum"]
+    assert rows == [
+        {"Region": "Measured", "Amount · sum": -10.0},
+        {"Region": "Missing", "Amount · sum": ""},
+    ]
 
 
 def test_analysis_loads_manifest_from_owning_participant_notebook(tmp_path):

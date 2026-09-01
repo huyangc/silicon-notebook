@@ -165,27 +165,20 @@ def _unique_headers(values: Sequence[Any]) -> list[str]:
 
 
 def _header_index(rows: Sequence[dict[str, Any]]) -> int:
-    candidates: list[tuple[int, int, int]] = []
-    for index, row in enumerate(rows[:20]):
+    for index, row in enumerate(rows):
         values = row["cells"]
         populated = sum(value not in (None, "") for value in values)
         if populated < 2:
             continue
-        textual = sum(
-            isinstance(value, str) and bool(value.strip()) for value in values
-        )
-        has_following = any(
-            any(value not in (None, "") for value in following["cells"])
-            for following in rows[index + 1:index + 4]
-        )
-        if has_following:
-            candidates.append((textual * 4 + populated, -index, index))
-    if not candidates:
-        raise SpreadsheetCompileError(
-            "SPREADSHEET_HEADER_NOT_FOUND",
-            "工作表中没有识别到可分析的表头和数据区域。",
-        )
-    return max(candidates)[2]
+        if index + 1 < len(rows):
+            # Header values may legitimately be numbers (for example year
+            # columns). Prefer the earliest structurally plausible row instead
+            # of letting a later all-text data row outscore it.
+            return index
+    raise SpreadsheetCompileError(
+        "SPREADSHEET_HEADER_NOT_FOUND",
+        "工作表中没有识别到可分析的表头和数据区域。",
+    )
 
 
 def _looks_like_header(row: dict[str, Any]) -> bool:
@@ -784,23 +777,23 @@ class SpreadsheetAnalysisService:
         source_id = str(plan.get("source_id") or "")
         manifest = next((row for row in manifests if row["source_id"] == source_id), None)
         if manifest is None:
-            manifest = next(iter(manifests))
-            source_id = manifest["source_id"]
+            return fallback
         sheet_name = str(plan.get("sheet") or "")
         sheet = next(
             (row for row in manifest.get("sheets", []) if row["name"] == sheet_name),
             None,
         )
         if sheet is None:
-            sheet = next(iter(manifest.get("sheets", [])), None)
-        if sheet is None:
             return fallback
         operation = str(plan.get("operation") or "profile").lower()
         if operation not in PLAN_OPERATIONS:
-            operation = "profile"
+            return fallback
         aggregation = str(plan.get("aggregation") or "count").lower()
         if aggregation not in AGGREGATIONS:
-            aggregation = "count"
+            return fallback
+        raw_order = str(plan.get("order") or "").lower()
+        if operation == "top" and raw_order not in {"", "asc", "desc"}:
+            return fallback
         headers = sheet["headers"]
         raw_columns = plan.get("columns", [])
         raw_filters = plan.get("filters", [])
@@ -811,37 +804,55 @@ class SpreadsheetAnalysisService:
             or len(raw_filters) > SPREADSHEET_PLAN_MAX_FILTERS
         ):
             return fallback
+        measure_input = str(plan.get("measure") or "")
+        group_by_input = str(plan.get("group_by") or "")
+        sort_by_input = str(plan.get("sort_by") or "")
+        measure = self._resolve_header(measure_input, headers)
+        group_by = self._resolve_header(group_by_input, headers)
+        sort_by = self._resolve_header(sort_by_input, headers)
+        if (
+            (measure_input.strip() and not measure)
+            or (group_by_input.strip() and not group_by)
+            or (sort_by_input.strip() and not sort_by)
+        ):
+            return fallback
+        columns: list[str] = []
+        for value in raw_columns:
+            if not isinstance(value, str):
+                return fallback
+            resolved = self._resolve_header(value, headers)
+            if not resolved:
+                return fallback
+            columns.append(resolved)
+        filters: list[dict[str, Any]] = []
+        for item in raw_filters:
+            if not isinstance(item, dict):
+                return fallback
+            column = self._resolve_header(str(item.get("column") or ""), headers)
+            operator = str(item.get("operator") or "eq").lower()
+            if not column or operator not in FILTER_OPERATORS:
+                return fallback
+            filters.append({
+                "column": column,
+                "operator": operator,
+                "value": _json_cell(item.get("value")),
+            })
         normalized = {
             "source_id": source_id,
             "sheet": sheet["name"],
             "operation": operation,
             "aggregation": aggregation,
-            "measure": self._resolve_header(str(plan.get("measure") or ""), headers),
-            "group_by": self._resolve_header(str(plan.get("group_by") or ""), headers),
-            "sort_by": self._resolve_header(str(plan.get("sort_by") or ""), headers),
-            "order": "asc" if str(plan.get("order") or "").lower() == "asc" else "desc",
-            "columns": [
-                resolved
-                for value in raw_columns if isinstance(value, str)
-                if (resolved := self._resolve_header(value, headers))
-            ],
-            "filters": [],
+            "measure": measure,
+            "group_by": group_by,
+            "sort_by": sort_by,
+            "order": "asc" if raw_order == "asc" else "desc",
+            "columns": columns,
+            "filters": filters,
         }
-        for item in raw_filters:
-            if not isinstance(item, dict):
-                continue
-            column = self._resolve_header(str(item.get("column") or ""), headers)
-            operator = str(item.get("operator") or "eq").lower()
-            if column and operator in FILTER_OPERATORS:
-                normalized["filters"].append({
-                    "column": column,
-                    "operator": operator,
-                    "value": _json_cell(item.get("value")),
-                })
         if operation == "aggregate" and aggregation != "count" and not normalized["measure"]:
-            normalized["operation"] = "profile"
+            return fallback
         if operation == "top" and not normalized["sort_by"]:
-            normalized["operation"] = "profile"
+            return fallback
         return normalized
 
     @staticmethod
@@ -878,11 +889,12 @@ class SpreadsheetAnalysisService:
         elif operation == "top":
             output = self._top(filtered, plan)
         elif operation == "filter":
-            output = self._tabular(filtered, plan.get("columns", []))
+            output = self._tabular(filtered, plan.get("columns", []), headers)
         else:
             output = self._profile(filtered, headers)
         output_rows, output_headers = output
-        citation = self._citation(manifest, sheet, filtered or input_rows)
+        citation_rows = output_rows if operation in {"top", "filter"} else filtered
+        citation = self._citation(manifest, sheet, citation_rows)
         delivered, delivered_headers, complete, truncated_reason, budget_warnings = (
             self._bounded_result_preview(
                 output_rows, output_headers, citation=citation
@@ -1115,6 +1127,8 @@ class SpreadsheetAnalysisService:
         aggregation = plan["aggregation"]
         measure = plan.get("measure") or ""
         groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        if aggregation == "count" and not group_by:
+            groups["全部"] = []
         for row in rows:
             groups[_display_cell(row.get(group_by)) if group_by else "全部"].append(row)
         value_label = "计数" if aggregation == "count" else f"{measure} · {aggregation}"
@@ -1140,7 +1154,16 @@ class SpreadsheetAnalysisService:
             if group_by:
                 row = {group_by: key, **row}
             output.append(row)
-        output.sort(key=lambda row: _numeric(row.get(value_label)) or 0, reverse=True)
+        numeric_output = [
+            (row, number)
+            for row in output
+            if (number := _numeric(row.get(value_label))) is not None
+        ]
+        numeric_output.sort(key=lambda pair: pair[1], reverse=True)
+        nonnumeric_output = [
+            row for row in output if _numeric(row.get(value_label)) is None
+        ]
+        output = [row for row, _number in numeric_output] + nonnumeric_output
         columns = ([group_by] if group_by else []) + [value_label]
         return output, columns
 
@@ -1165,6 +1188,7 @@ class SpreadsheetAnalysisService:
                 if _numeric(row.get(sort_by)) is None
             ),
             key=lambda row: _display_cell(row.get(sort_by)).casefold(),
+            reverse=reverse,
         )
         ordered = [row for row, _number in numeric_rows] + nonnumeric_rows
         headers = [key for key in ordered[0] if not key.startswith("__")] if ordered else []
@@ -1172,11 +1196,11 @@ class SpreadsheetAnalysisService:
 
     @staticmethod
     def _tabular(
-        rows: Sequence[dict[str, Any]], columns: Sequence[str]
+        rows: Sequence[dict[str, Any]], columns: Sequence[str], headers: Sequence[str]
     ) -> tuple[list[dict[str, Any]], list[str]]:
         selected = list(columns)
-        if not selected and rows:
-            selected = [key for key in rows[0] if not key.startswith("__")]
+        if not selected:
+            selected = list(headers)
         return list(rows), selected
 
     @staticmethod

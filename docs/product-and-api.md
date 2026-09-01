@@ -2482,6 +2482,8 @@ snapshot preserves typed cell values, detected headers, sheet/range identity, so
 anchors, formula counts, and formula cached-value gaps. It never executes formulas, macros,
 external links, or workbook code. Failure of this optional compiler does not change the
 source's ordinary parse status or remove it from text retrieval.
+Header detection keeps the earliest structurally plausible row, including numeric labels
+such as year columns; a later all-text data row cannot silently replace it.
 
 Only `reasoning` Ask can consume the snapshot. The lane remains dormant unless the frozen,
 user-selected source scope contains a compiled workbook and the question has an analytical
