@@ -249,9 +249,9 @@ PostgreSQL v48（`0048_source_search_trgm_indexes.sql`，热路径修复批 4）
 `LIKE '%…%'` 也吃不到 B-tree 前缀——所以 `SQLITE_SCHEMA_VERSION` 不动、v48 仍与 SQLite
 v68 配对；这一「PostgreSQL-only」分歧与迁移 0042 为批 2 登记的是同一种。三键复合是刻意
 选择：多列 GIN 允许每条 `LIKE` 腿只约束 `(notebook_id, 自己那个 trgm 键)`，对同一条索引
-扫两次再 BitmapOr，已由 live EXPLAIN 验证（因此不需要退回「两个双键索引」那个备选，而且
-退回也没用——两条索引各自仍带同一个 `notebook_id` 键，单次扫描成本一样）。另有两个后续变体经实测后否决：用两条双键索引代替复合索引
-（两条各自仍带同一个 `notebook_id` 键，单次扫描成本一样），以及把查询里的 `OR` 拆成两条
+扫两次再 BitmapOr，已由 live EXPLAIN 验证。另有两个后续变体经实测后否决：文档记录的
+备选「用两条双键索引代替复合索引」因此本就不需要、也帮不上忙——两条索引各自仍带同一个
+`notebook_id` 键，单次扫描成本一样；以及把查询里的 `OR` 拆成两条
 单 arm UNION 腿（选择性 needle 上是打平，短 needle 上实测更差——多出的第四条 Append 分支
 意味着模式短到提取不出 trigram 时要对 `sources` 再全扫一遍）。两项实测取舍写在迁移头注释里
 而不是留给后来人重新发现：短于 3 个字符的 needle 提取不出任何 trigram 键（这也是基准表里

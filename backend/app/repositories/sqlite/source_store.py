@@ -260,8 +260,12 @@ class SourceStore:
             # 与 PG 侧唯一的分歧是索引:migration 0048 只在 PostgreSQL 侧建三条
             # 复合 GIN trgm 索引,SQLite 侧**不加任何索引**(与迁移 0042 的
             # 「本批 PostgreSQL-only」先例同一处理:SQLite 没有 GIN trgm 的等价
-            # 物,`LIKE '%…%'` 也吃不到 B-tree 前缀)。改写在这边是纯形态对齐,
-            # 图的是两端 SQL 不分叉;SQLITE_SCHEMA_VERSION 不动。
+            # 物,`LIKE '%…%'` 也吃不到 B-tree 前缀)。改写在这边不是纯形态对齐:
+            # 实测 2 万 source 库上 2 字符多命中 needle 每请求中位数从 47.1ms
+            # 涨到 54.1ms(+15%,叠加干扰库后 +25%),成因与 PG 侧已登记的一致
+            # ——IN 集合先物化再排序,丢了旧形态沿 `(notebook_id, created_at)`
+            # 提前终止的窗口。其余场景持平或明显更快(同一 2 万库上 0 命中长词
+            # 94.9ms→47.9ms),净收益为正;SQLITE_SCHEMA_VERSION 不动。
             where += (
                 " AND sources.id IN ("
                 "SELECT id FROM sources WHERE notebook_id = ?"
@@ -2009,7 +2013,11 @@ class SourceStore:
     def paper_meta_for_sources(self, db: sqlite3.Connection,
                                source_ids: Sequence[str]) -> Dict[str, dict]:
         """批量水合(IN 分批守 999 变量上限,同 sources_from_rows 惯例)。
-        无 meta 行的源不在返回里。"""
+        无 meta 行的源不在返回里。按 source_id 取子表,不校验子表自身的
+        notebook_id。登记在案的残留分歧:list_sources_page 的搜索谓词已改为
+        与 report_source_rows 等报表腿一样按子表 notebook_id 收窄,这条水合腿
+        没有跟着改。见
+        test_source_search_ignores_a_legacy_cross_notebook_child_row。"""
         meta_rows: Dict[str, sqlite3.Row] = {}
         author_rows: Dict[str, List[sqlite3.Row]] = {}
         ids = list(source_ids)

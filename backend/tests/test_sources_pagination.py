@@ -220,9 +220,16 @@ def test_source_search_ignores_a_legacy_cross_notebook_child_row(repo, search_no
     is_paper 计数直接按 ``source_paper_meta.notebook_id`` 分组,两处都把畸形行
     判为「不属于这个库」。
 
-    旧的搜索谓词只按 ``m.source_id = sources.id`` 回连,是全仓唯一不看子表
-    notebook_id 的那处,于是同一行在搜索里算命中、在报表里不算。新形态把它并进
-    同一口径。这条用例把这个取舍钉住:它在旧实现上是**红**的。"""
+    旧的搜索谓词只按 ``m.source_id = sources.id`` 回连,不看子表自身的
+    notebook_id。新形态把搜索腿并入这套口径 —— 搜索谓词现与
+    ``report_source_rows`` 等报表腿一样,统一按子表自身 ``notebook_id`` 收窄。
+    但同一调用链的水合腿 ``paper_meta_for_sources``(见该函数 docstring)仍只
+    按 ``source_id`` 取子表,不看子表的 notebook_id,是登记在案的残留分歧,不
+    随本次改写统一。
+
+    这条用例只钉住搜索腿:在这类畸形遗留行上,``display_title`` 因水合腿命中
+    而显示得到,却因搜索腿收窄而搜不到 —— 与改动前(搜得到、报表算不到)方向
+    相反。这条用例把这个取舍钉住:它在旧实现上是**红**的。"""
     nb, other = search_notebooks
     # 先按正常口径写好,再单独改坏 notebook_id —— 与
     # tests/test_memory_source_visibility.py 里那条既有的畸形行用例同一手法:
