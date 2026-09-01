@@ -370,13 +370,22 @@ export function useSourceLibrary({
       // defense: if a future abort site ever forgot to keep that invariant
       // intact, the cancellation would still be swallowed here instead of
       // reaching a caller as an error.
-      if (error instanceof DOMException && error.name === "AbortError") {
+      // `controller.signal.aborted` is checked first and wins regardless of
+      // the rejection's shape: undici raises a plain `TypeError: terminated`
+      // (not a DOMException) when the request is aborted mid body-stream-read,
+      // and the unmount cleanup effect below is exactly a site that aborts
+      // without bumping `pageRequestRef` or invalidating `ownerRef` — relying
+      // on the DOMException shape alone there would let that abort mis-fire
+      // the `throw` branch instead of being swallowed here.
+      if (
+        controller.signal.aborted
+        || (error instanceof DOMException && error.name === "AbortError")
+      ) {
         releaseBusyIfWindowHolder();
         return;
       }
       if (isCurrent()) {
-        setSourcesPageLoading(false);
-        pageAbortRef.current = null;
+        releaseBusyIfWindowHolder();
         throw error;
       }
       releaseBusyIfWindowHolder();
@@ -398,15 +407,18 @@ export function useSourceLibrary({
           controller.signal,
         );
       } catch (error) {
-        // Same invariant and defense-in-depth AbortError check as above,
-        // applied to this second, clamp-triggered call.
-        if (error instanceof DOMException && error.name === "AbortError") {
+        // Same invariant, `controller.signal.aborted` precedence, and
+        // defense-in-depth AbortError check as above, applied to this
+        // second, clamp-triggered call.
+        if (
+          controller.signal.aborted
+          || (error instanceof DOMException && error.name === "AbortError")
+        ) {
           releaseBusyIfWindowHolder();
           return;
         }
         if (isCurrent()) {
-          setSourcesPageLoading(false);
-          pageAbortRef.current = null;
+          releaseBusyIfWindowHolder();
           throw error;
         }
         releaseBusyIfWindowHolder();

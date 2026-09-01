@@ -539,16 +539,129 @@ test("a guard veto releases busy and never commits the vetoed response", async (
   expect(value!.sources.map((item) => item.id)).toEqual(["existing"]);
 });
 
-// A source-page request superseded by an owner/actor transition
-// (commitNotebookSnapshot here) must both cancel the network call for real
-// and release busy — the transition itself is responsible for the release
-// (it is not the request's own window to release: a new owner is already
-// active), and the request's own eventual AbortError-shaped rejection must
-// stay invisible to callers.
-test("commitNotebookSnapshot mid-request aborts it for real and releases busy", async () => {
+// Same P0 shape as the guard-veto test above, but for the clamp-triggered
+// *second* `listSources` call's success path (~415): the first response
+// resolves fine (guard still passes) and shrinks `total_count` enough to
+// trigger `clampSourcePage`'s internal re-fetch, then the guard is vetoed
+// before the second, clamp-triggered response lands. `requestId` still
+// equals `pageRequestRef.current` throughout (nobody superseded this call),
+// so nothing else is coming to release busy — this call must still release
+// it itself via the same `releaseBusyIfWindowHolder()` path, and must not
+// commit the vetoed response.
+test("a guard veto after a clamp-triggered second request still releases busy", async () => {
+  const requested = deferred<{ items: SourceSummary[]; total_count: number; offset: number; limit: number }>();
+  const clamped = deferred<{ items: SourceSummary[]; total_count: number; offset: number; limit: number }>();
+  api.listSources.mockReturnValueOnce(requested.promise).mockReturnValueOnce(clamped.promise);
+  render(<Harness />);
+  act(() => {
+    value!.commitNotebookSnapshot({
+      actorId: "user-a",
+      notebookId: "notebook-a",
+      workspaceEpoch: 1,
+      page: { items: [], total_count: 300, offset: 0, limit: 50 },
+    });
+  });
+
+  let guardPass = true;
+  const guard = () => guardPass;
+
+  let loading!: Promise<void>;
+  act(() => {
+    loading = value!.loadSourcesPage({ page: 5, q: "", guard });
+  });
+  expect(value!.sourcesPageLoading).toBe(true);
+
+  // The total shrank server-side, triggering the clamp-driven re-fetch —
+  // guard still passes for this first response.
+  act(() => {
+    requested.resolve({ items: [], total_count: 60, offset: 250, limit: 50 });
+  });
+  await act(async () => {
+    await Promise.resolve();
+  });
+  expect(api.listSources).toHaveBeenCalledTimes(2);
+  expect(value!.sourcesPageLoading).toBe(true);
+
+  // Guard is vetoed before the clamp-triggered second response lands.
+  guardPass = false;
+  clamped.resolve({
+    items: [source("clamped", "notebook-a")],
+    total_count: 60,
+    offset: 50,
+    limit: 50,
+  });
+  await act(async () => loading);
+
+  expect(value!.sourcesPageLoading).toBe(false);
+  expect(effects.reportError).not.toHaveBeenCalled();
+  expect(value!.sources).toEqual([]);
+});
+
+// Same P0 shape, but for the *first* `listSources` call's error path (~377):
+// a genuine network failure (not an abort) rejects while the guard is
+// already vetoed. `isCurrent()` is false because of the guard, not because
+// of a superseding request, so `requestId` still equals
+// `pageRequestRef.current` — this call must release busy itself and must
+// swallow the rejection silently (no throw), matching page.tsx's
+// poll-completion call sites where the guard can flip before the response
+// lands with no follow-up `loadSourcesPage` call to take over.
+test("a guard veto releases busy on a genuine network failure without surfacing it", async () => {
   const page = deferred<{ items: SourceSummary[]; total_count: number; offset: number; limit: number }>();
   api.listSources.mockReturnValueOnce(page.promise);
   render(<Harness />);
+  act(() => {
+    value!.commitNotebookSnapshot({
+      actorId: "user-a",
+      notebookId: "notebook-a",
+      workspaceEpoch: 1,
+      page: { items: [], total_count: 0, offset: 0, limit: 50 },
+    });
+  });
+
+  let loading!: Promise<void>;
+  act(() => {
+    loading = value!.loadSourcesPage({ page: 0, q: "", guard: () => false });
+  });
+  expect(value!.sourcesPageLoading).toBe(true);
+
+  page.reject(new TypeError("network error"));
+  await act(async () => {
+    await expect(loading).resolves.toBeUndefined();
+  });
+
+  expect(value!.sourcesPageLoading).toBe(false);
+  expect(effects.reportError).not.toHaveBeenCalled();
+});
+
+// A source-page request superseded by any of this hook's abort sites —
+// commitNotebookSnapshot, beginTransition, or the render-time actor-change
+// branch (~168) — must both cancel the network call for real and release (or
+// mask) busy: the site itself is responsible for the release (it is not the
+// request's own window to release: a new owner is already active, or none
+// is), and the request's own eventual AbortError-shaped rejection must stay
+// invisible to callers. Shared setup/assertions so each site is exercised
+// through the identical shape; only the abort action itself differs.
+//
+// `activateActor` bumps `pageRequestRef`/aborts too (mirroring every other
+// site here), but it is deliberately NOT covered by this same-shape harness:
+// its own guard (`actorIdRef.current !== null` → return) only lets it
+// proceed past the guard when no actor is active yet — and `ownerRef`/a
+// live `loadSourcesPage` request can only exist once `actorIdRef.current` is
+// already non-null (commitNotebookSnapshot requires `actorIdRef.current ===
+// input.actorId`, a non-empty string). So there is no reachable state where
+// `activateActor` runs its body with a genuinely in-flight page request to
+// cancel — its `abortInFlightSourcesPage()` call can only ever fire against
+// an already-empty `pageAbortRef` (see the "authenticated bootstrap" test
+// above, the only scenario that exercises this function's body at all: it
+// always runs before any owner/request exists). A test asserting that shape
+// would not go red if that call were deleted, so per the same allowance this
+// review gave the render-time branch, no test is added for it here.
+async function assertAbortSiteReleasesBusyMidRequest(
+  performAbortSite: (view: ReturnType<typeof render>) => void,
+) {
+  const page = deferred<{ items: SourceSummary[]; total_count: number; offset: number; limit: number }>();
+  api.listSources.mockReturnValueOnce(page.promise);
+  const view = render(<Harness />);
   act(() => {
     value!.commitNotebookSnapshot({
       actorId: "user-a",
@@ -567,12 +680,7 @@ test("commitNotebookSnapshot mid-request aborts it for real and releases busy", 
   expect(value!.sourcesPageLoading).toBe(true);
 
   act(() => {
-    value!.commitNotebookSnapshot({
-      actorId: "user-a",
-      notebookId: "notebook-b",
-      workspaceEpoch: 2,
-      page: { items: [], total_count: 0, offset: 0, limit: 50 },
-    });
+    performAbortSite(view);
   });
   expect(signal.aborted).toBe(true);
   expect(value!.sourcesPageLoading).toBe(false);
@@ -583,6 +691,39 @@ test("commitNotebookSnapshot mid-request aborts it for real and releases busy", 
   });
   expect(effects.reportError).not.toHaveBeenCalled();
   expect(value!.sourcesPageLoading).toBe(false);
+}
+
+test("commitNotebookSnapshot mid-request aborts it for real and releases busy", async () => {
+  await assertAbortSiteReleasesBusyMidRequest(() => {
+    value!.commitNotebookSnapshot({
+      actorId: "user-a",
+      notebookId: "notebook-b",
+      workspaceEpoch: 2,
+      page: { items: [], total_count: 0, offset: 0, limit: 50 },
+    });
+  });
+});
+
+test("beginTransition mid-request aborts it for real and releases busy", async () => {
+  await assertAbortSiteReleasesBusyMidRequest(() => {
+    value!.beginTransition();
+  });
+});
+
+// The render-time actor-change branch (~168) fires on any actorId prop
+// change while an owner is active — unlike `activateActor` above, it is
+// reachable with a genuinely in-flight request: rerender with a different
+// actorId while `loadSourcesPage` is outstanding. It does not call
+// `setSourcesPageLoading(false)` directly (unlike beginTransition /
+// commitNotebookSnapshot); busy instead goes false because it invalidates
+// `ownerRef`, which makes the hook's returned `sourcesPageLoading` field
+// masked to `false` (`ownerIsActive ? sourcesPageLoading : false`) — the
+// "busy 被遮蔽" case the shared assertion above also covers correctly, since
+// it only reads the hook's returned field.
+test("an actor-change rerender mid-request aborts it for real and masks busy", async () => {
+  await assertAbortSiteReleasesBusyMidRequest((view) => {
+    view.rerender(<Harness actorId="user-b" />);
+  });
 });
 
 // Unmount is not one of the owner/actor invalidation sites (beginTransition /
@@ -623,6 +764,85 @@ test("unmounting aborts the in-flight source page request without surfacing an A
   expect(signal.aborted).toBe(true);
 
   page.reject(new DOMException("aborted", "AbortError"));
+  await expect(loading).resolves.toBeUndefined();
+  expect(effects.reportError).not.toHaveBeenCalled();
+});
+
+// Same unmount scenario as above — `isCurrent()` still (structurally) true
+// when the rejection arrives — but with the rejection shaped the way undici
+// actually raises it on an aborted body-stream-read: a plain `TypeError:
+// terminated`, not a DOMException. Without also checking
+// `controller.signal.aborted`, `error instanceof DOMException` is false here,
+// so the code would fall through to the `isCurrent()`-gated `throw`, which is
+// still true post-unmount — rejecting `loadSourcesPage` and surfacing the
+// cancellation as a real error after the owning component is gone.
+test("unmounting still swallows the abort when the rejection is a plain TypeError, not a DOMException", async () => {
+  const page = deferred<{ items: SourceSummary[]; total_count: number; offset: number; limit: number }>();
+  api.listSources.mockReturnValueOnce(page.promise);
+  const view = render(<Harness />);
+  act(() => {
+    value!.commitNotebookSnapshot({
+      actorId: "user-a",
+      notebookId: "notebook-a",
+      workspaceEpoch: 1,
+      page: { items: [], total_count: 0, offset: 0, limit: 50 },
+    });
+  });
+
+  let loading!: Promise<void>;
+  act(() => {
+    loading = value!.loadSourcesPage({ page: 0, q: "" });
+  });
+  const signal = api.listSources.mock.calls[0]?.[4] as AbortSignal;
+  expect(signal.aborted).toBe(false);
+
+  act(() => {
+    view.unmount();
+  });
+  expect(signal.aborted).toBe(true);
+
+  page.reject(new TypeError("terminated"));
+  await expect(loading).resolves.toBeUndefined();
+  expect(effects.reportError).not.toHaveBeenCalled();
+});
+
+// Same TypeError-shaped abort, but landing on the clamp-triggered *second*
+// `listSources` call's catch (~413) instead of the first. Both calls inside
+// one busy window share a single AbortController (see the clamp busy-window
+// test above), so unmounting mid clamp-refetch aborts the same controller
+// the second call is awaiting on.
+test("unmounting mid clamp-triggered refetch still swallows a plain TypeError abort", async () => {
+  const requested = deferred<{ items: SourceSummary[]; total_count: number; offset: number; limit: number }>();
+  const clamped = deferred<{ items: SourceSummary[]; total_count: number; offset: number; limit: number }>();
+  api.listSources.mockReturnValueOnce(requested.promise).mockReturnValueOnce(clamped.promise);
+  const view = render(<Harness />);
+  act(() => {
+    value!.commitNotebookSnapshot({
+      actorId: "user-a",
+      notebookId: "notebook-a",
+      workspaceEpoch: 1,
+      page: { items: [], total_count: 300, offset: 0, limit: 50 },
+    });
+  });
+
+  let loading!: Promise<void>;
+  act(() => {
+    loading = value!.loadSourcesPage({ page: 5, q: "" });
+  });
+
+  act(() => {
+    requested.resolve({ items: [], total_count: 60, offset: 250, limit: 50 });
+  });
+  await act(async () => {
+    await Promise.resolve();
+  });
+  expect(api.listSources).toHaveBeenCalledTimes(2);
+
+  act(() => {
+    view.unmount();
+  });
+
+  clamped.reject(new TypeError("terminated"));
   await expect(loading).resolves.toBeUndefined();
   expect(effects.reportError).not.toHaveBeenCalled();
 });
