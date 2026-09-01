@@ -29,7 +29,7 @@ from app.repositories.postgres.schema_manifest import (
 )
 
 
-RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=68, postgres_version=48, epoch=1)
+RUNNING_SCHEMA_PAIR = SchemaPair(sqlite_version=69, postgres_version=49, epoch=1)
 
 # The old design's (SQLite 24, PostgreSQL 2) COPY-ready pair predates five
 # current business tables and is no longer total.  Do not advertise a staging
@@ -51,7 +51,9 @@ COLUMN_TRANSFORMS = {
 }
 
 _IDENTIFIER = re.compile(r"^[a-z][a-z0-9_]*$")
-_FILESYSTEM_PATH_COLUMNS = frozenset({"sources.file_path"})
+_FILESYSTEM_PATH_COLUMNS = frozenset(
+    {"sources.file_path", "notebook_delete_files.file_path"}
+)
 _NON_FILESYSTEM_PATH_COLUMNS = frozenset(
     {"chunks.section_path", "catalog_candidates.section_path"}
 )
@@ -785,6 +787,25 @@ _TABLES = (
         ReplicationKeyKind.DECLARED_PK,
         93,
         "timestamptz",
+    ),
+    # SQLite v69 / PostgreSQL v48 (batch 3 W1 PR-3 Phase A): the delete-job
+    # carrier. Deliberately no FK to notebooks (see the PostgreSQL migration's
+    # own header comment: the sweep's "job row present, notebooks row absent"
+    # special case needs that state to stay representable), so -- same as
+    # retained_user_activity above -- the appended rank is closure-safe.
+    # notebook_delete_jobs precedes notebook_delete_files because the latter
+    # references it (job_id, no formal FK constraint but the same ordering
+    # discipline as every other parent/child pair in this list).
+    _table(
+        "notebook_delete_jobs", ("id",), ReplicationKeyKind.DECLARED_PK, 94, "timestamptz"
+    ),
+    _table(
+        "notebook_delete_files",
+        ("job_id", "ordinal"),
+        ReplicationKeyKind.DECLARED_PK,
+        95,
+        "identity",
+        path_columns=("file_path",),
     ),
 )
 

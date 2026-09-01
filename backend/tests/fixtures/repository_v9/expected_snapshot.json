@@ -1150,6 +1150,11 @@
         "type": "index"
       },
       {
+        "name": "idx_agent_tokens_default_notebook",
+        "sql_sha256": "00e70967eede82ea62a6e55315784decae0ed533d6370d924bd1099e41ca6e45",
+        "type": "index"
+      },
+      {
         "name": "idx_agent_tokens_profile",
         "sql_sha256": "25dca1b0d3d0f0b97c7dcb48a54d58aeb33603509ba700d1d64d187020da5828",
         "type": "index"
@@ -1320,6 +1325,11 @@
         "type": "index"
       },
       {
+        "name": "idx_conversations_notebook",
+        "sql_sha256": "2e42153b916d5cab38fc97c5dcb0fa04fc068710a44670dfe1e5f32ae0f70c10",
+        "type": "index"
+      },
+      {
         "name": "idx_conversations_share_token",
         "sql_sha256": "adb8379ab2933fa2972568676eafb4d4d9492f5a445c4d1e00e511a56b9dadd8",
         "type": "index"
@@ -1402,6 +1412,11 @@
       {
         "name": "idx_kg_source_profiles_nb_mainstream",
         "sql_sha256": "763b739c36d1375a31dbccc46580ae29d157c850f0a7b76256f78b0a28d28a8a",
+        "type": "index"
+      },
+      {
+        "name": "idx_knowhow_cell_code_column",
+        "sql_sha256": "7d03bf1c8745853c3f78b791e9879f6d0b40867e6905cc4bb1fb26c144543fd1",
         "type": "index"
       },
       {
@@ -1627,6 +1642,16 @@
       {
         "name": "idx_notebook_bases_base",
         "sql_sha256": "fcbcb19078ddd0e66e5dec668b3c7e96a58eebfc49021cbecf16851564b4dfb4",
+        "type": "index"
+      },
+      {
+        "name": "idx_notebook_delete_jobs_one_active",
+        "sql_sha256": "f96ae3f50e4827012c029e52bef26bad5e0ffd19015398ad79ceb674f1141c6a",
+        "type": "index"
+      },
+      {
+        "name": "idx_notebook_delete_jobs_status_updated",
+        "sql_sha256": "7329413ba9ddbc4935bcc34ab32439507e437b7096ca0eab35b42a9a27651779",
         "type": "index"
       },
       {
@@ -2235,6 +2260,16 @@
         "type": "table"
       },
       {
+        "name": "notebook_delete_files",
+        "sql_sha256": "e8320be8ab601820bab3f63c421d14d4a6b01fd511b64d51eefa0d5dfef421d9",
+        "type": "table"
+      },
+      {
+        "name": "notebook_delete_jobs",
+        "sql_sha256": "af7d7b98e69d6bef3ef91e134de4ca1d5636a8e5713e7ebd135e22b3a7f59868",
+        "type": "table"
+      },
+      {
         "name": "notebook_grants",
         "sql_sha256": "02fad53f9fbf15a411853975c094c8eedcc62606cae4fee36dbdf1ff0067f4e3",
         "type": "table"
@@ -2370,6 +2405,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 68
+    "user_version": 69
   }
 }

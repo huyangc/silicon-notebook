@@ -9,6 +9,7 @@ from app.domain.source_display import source_display_title
 from app.models.notebooks import NotebookCreate, NotebookUpdate
 from app.repositories.sqlite.access_sql import NOTEBOOK_LIVE_SQL
 from app.repositories.sqlite.database import SqliteDatabase
+from app.repositories.sqlite.notebook_delete_job_store import NotebookDeleteJobStore
 from app.repositories.sqlite.mount_sql import (
     MOUNT_GATE_CLOSED_EXPR, MOUNT_JOIN, MOUNT_ORDER, MOUNT_ORIGIN_COLUMN,
     MOUNT_VALID, MOUNT_VALID_EXPR,
@@ -408,10 +409,30 @@ class NotebookStore:
             )
         return changed.rowcount == 1
 
-    def delete_row_and_orphan_embeddings(self, notebook_id: str) -> list[str]:
+    def status_of(self, notebook_id: str) -> str | None:
+        """Raw ``notebooks.status`` read -- NO ``NOTEBOOK_LIVE_SQL`` filter.
+        PostgreSQL twin's docstring has the full rationale (batch 3·W1 PR-3
+        §4.2's three in-flight-rebuild checkpoints)."""
+        with self.database.connect() as db:
+            row = db.execute(
+                "SELECT status FROM notebooks WHERE id=?", (notebook_id,)
+            ).fetchone()
+        return row["status"] if row is not None else None
+
+    def delete_row_and_orphan_embeddings(
+        self, notebook_id: str, *, job_id: str | None = None
+    ) -> list[str]:
         """Delete the notebooks row in ONE committed transaction and return the
         source file paths for the caller to remove AFTER the commit (DB first,
-        files second — never the other way around)."""
+        files second — never the other way around).
+
+        ``job_id`` (batch 3·W1 PR-3 Phase A): see the PostgreSQL twin's
+        docstring for the full byte-identity rationale — ``None`` (every
+        pre-existing caller) keeps this method's behavior exactly as it was
+        before this parameter existed; SQLite has no per-transaction
+        statement_timeout knob to tighten (D-4 is PostgreSQL-only), so the
+        only added work when ``job_id`` is given is the two extra DELETEs at
+        the end, run in both the early-return branch and the normal path."""
         with self.database.write(operation="notebook.delete") as db:
             # The process-local write lock does not coordinate a second
             # SqliteDatabase instance. Acquire SQLite's cross-instance writer
@@ -425,6 +446,8 @@ class NotebookStore:
                 # A concurrent/duplicate request may have passed its service
                 # precheck before the first delete acquired the write lock.
                 # Preserve the archive committed by that winner.
+                if job_id is not None:
+                    NotebookDeleteJobStore.cleanup_job_on(db, job_id)
                 return []
             source_rows = db.execute(
                 "SELECT file_path FROM sources WHERE notebook_id = ?",
@@ -440,9 +463,28 @@ class NotebookStore:
                 "DELETE FROM knowledge_embeddings WHERE notebook_id = ?",
                 (notebook_id,),
             )
-            db.execute("DELETE FROM kg_objects_fts WHERE notebook_id = ?", (notebook_id,))
-            db.execute("DELETE FROM chunks_fts WHERE notebook_id = ?", (notebook_id,))
+            if job_id is None:
+                # §4.4/P2-g: the JOBIZED path (job_id given) already cleared
+                # both FTS5 shadows in phase 3, alongside knowledge_objects/
+                # chunks' own batched delete (see NotebookDeleteJobStore.
+                # delete_fts_shadow) -- redoing it here would just be a
+                # harmless no-op WHERE match, but skipping it keeps this
+                # tail doing exactly what phase 3 already did, not a
+                # parallel implementation of the same fact. The LEGACY
+                # synchronous path (job_id is None -- every test/eval direct
+                # caller) never runs phase 3 at all, so this is its ONLY
+                # chance to clear them; deleting it here unconditionally
+                # would violate the G1 byte-identity contract this
+                # parameter's whole docstring is built on.
+                db.execute(
+                    "DELETE FROM kg_objects_fts WHERE notebook_id = ?", (notebook_id,)
+                )
+                db.execute(
+                    "DELETE FROM chunks_fts WHERE notebook_id = ?", (notebook_id,)
+                )
             db.execute("DELETE FROM notebooks WHERE id = ?", (notebook_id,))
+            if job_id is not None:
+                NotebookDeleteJobStore.cleanup_job_on(db, job_id)
         return [row["file_path"] for row in source_rows]
 
     def _retain_user_activity_before_delete(

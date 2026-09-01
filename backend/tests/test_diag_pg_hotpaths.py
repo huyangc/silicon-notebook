@@ -355,6 +355,8 @@ def _fake_hotpath_row_for(sql_upper: str) -> "dict | list":
         return {"c": 7}
     if sql_upper.startswith("SET") or sql_upper.startswith("SELECT SET_CONFIG"):
         return None
+    if "FROM NOTEBOOK_DELETE_JOBS" in sql_upper:
+        return []  # no active delete jobs in this fake fixture
     raise AssertionError(f"unscripted statement in run_diagnostics: {sql_upper[:80]!r}")
 
 

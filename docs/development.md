@@ -45,8 +45,8 @@ Schema changes remain version-gated behind `SqliteMigrator`: append a new
 Startup recovery, stable seeds, and administrator upgrades run every boot
 outside that version gate.
 
-The current schema version is 68. This is the SQLite schema version. The committed v9 compatibility fixture
-upgrades through migrations v10–v68 and remains readable. Those migrations
+The current schema version is 69. This is the SQLite schema version. The committed v9 compatibility fixture
+upgrades through migrations v10–v69 and remains readable. Those migrations
 cover compatibility and SQLite hot-path indexes (v10–v12), Memory/Agent and
 Memory-derived source links/indexes (v13–v15), knowhow tables and cell code
 (v16/v18), paper metadata (v17), source-linked assets (v19), and multi-domain
@@ -601,6 +601,26 @@ btree_gin (same form as 0042's) and validates any pre-existing same-named index
 before creating. No table, column, foreign key, or unique surface changes, so
 the current pair is SQLite 68 / PostgreSQL 48 / epoch 1 with the same 88
 business tables, 117 replicated unique surfaces, and 12-row-slot closure bound.
+
+SQLite v69 / PostgreSQL v49 (batch 3 W1 PR-3 Phase A, delete-jobization;
+renumbered from 48 after hot-path batch 4's index-only 0048 landed first) adds
+three FK/keyset-covering indexes design doc Sec 1.4 registers as
+prerequisites for the delete-job work — `idx_agent_tokens_default_notebook`
+(closes the one L1 FK column, `agent_access_tokens.default_notebook_id`,
+that previously had no leading index, so a notebook-deletion FK cascade
+probe was a full table scan), `idx_knowhow_cell_code_column`, and
+`idx_conversations_notebook` — plus two new tables, `notebook_delete_jobs`
+and `notebook_delete_files`, the delete tombstone's background job carrier
+and its source-file-path staging side table. Both tables deliberately carry
+no foreign key to `notebooks` (the sweep's "job row present, notebooks row
+absent" special case needs that state to stay representable — see the
+PostgreSQL migration's own header comment), and `notebook_delete_jobs`
+carries one partial unique index (`idx_notebook_delete_jobs_one_active`,
+defense-in-depth behind the tombstone's own CAS single-flight). The current
+pair is SQLite 69 / PostgreSQL 49 / epoch 1 with 90 business tables, 120
+replicated unique surfaces, and the unchanged 12-row-slot closure bound (both
+new tables are leaves with no incoming FK, so the deepest closure chain is
+unaffected).
 
 Run it only while application/background writers are stopped:
 

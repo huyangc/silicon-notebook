@@ -373,6 +373,26 @@ class Settings(BaseSettings):
     # 小时级重建就能把「用户点一下就该出结果」的格子投影饿死到几十分钟后。
     background_light_job_concurrency: int = Field(
         4, ge=1, validation_alias="BACKGROUND_LIGHT_JOB_CONCURRENCY")
+    # 批 3·W1 PR-3(D-2 已定):删除既不是 LLM 扇出型重活(会被小时级重建饿死，
+    # 而删除是用户已点过确认的操作)，也不是秒级轻活（它是长时低 CPU 高 I/O，
+    # 会挤掉单表投影），故独立第三个池。默认 1，允许配到 2——判据与上面两池
+    # 同轴（background_jobs.py:61-73）。
+    notebook_delete_concurrency: int = Field(
+        1, ge=1, le=2, validation_alias="NOTEBOOK_DELETE_CONCURRENCY")
+    # 删除作业扫尾的轮询间隔（双驱动：孤儿作业行重排 + 无作业行的 deleting 库
+    # 补建）。与 checkup.py 的 _H45_CACHE_TTL 同量级（300s）。
+    notebook_delete_sweep_seconds: int = Field(
+        300, ge=1, validation_alias="NOTEBOOK_DELETE_SWEEP_SECONDS")
+    # 相位 2（quiesce）等在跑 KG 重建停下的总超时——覆盖「一批 LLM 抽取」的最坏
+    # 时长并留裕度。超时后作业置 waiting，交回扫尾按正常节奏重排，绝不强行进
+    # 相位 3。
+    notebook_delete_quiesce_timeout_seconds: int = Field(
+        1800, ge=1, validation_alias="NOTEBOOK_DELETE_QUIESCE_TIMEOUT_SECONDS")
+    # D-4：相位 5（finalize）单事务的可选 statement_timeout 收紧旋钮。默认 0 =
+    # 不设置，沿用池的 postgres_statement_timeout_seconds。它是「收紧」旋钮不是
+    # 「放宽」旋钮——见 validate_notebook_delete_finalize_timeout_ceiling。
+    notebook_delete_finalize_timeout_seconds: int = Field(
+        0, ge=0, validation_alias="NOTEBOOK_DELETE_FINALIZE_TIMEOUT_SECONDS")
     report_section_max_tokens: int = Field(
         65536, ge=1, validation_alias="REPORT_SECTION_MAX_TOKENS")
     # Detailed tiers emit one report-wide, evidence-keyed JSON blueprint before
@@ -1444,6 +1464,30 @@ class Settings(BaseSettings):
             raise ValueError(
                 "POSTGRES_CHUNK_FTS_TIMEOUT_SECONDS 不得大于 "
                 "POSTGRES_STATEMENT_TIMEOUT_SECONDS"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def validate_notebook_delete_finalize_timeout_ceiling(self):
+        """D-4 的三条硬约束之一（批 3·W1 PR-3 设计规格 §D-4）：完全同形沿用
+        ``validate_chunk_fts_timeout_ceiling`` 的既有先例，同一族
+        model_validator，不另起一套写法。
+
+        0（默认，"不设置"）永远合法——绝不默认改动任何事务的超时。非零值必须
+        满足 ``0 < 值 ≤ min(120, postgres_statement_timeout_seconds)``：120 是
+        §T-3.2 时长估算模型的上限帽，超过说明估算模型本身错了，该回来改设计
+        而不是继续调大这个数；不得大于池的 statement_timeout 是因为这个旋钮的
+        语义是「比池更严」，设成比池还大是自相矛盾的配置（事务局部值大于会话
+        值时真正生效的是谁取决于两者的先后顺序，是容易误读的陷阱）。"""
+        value = self.notebook_delete_finalize_timeout_seconds
+        if value == 0:
+            return self
+        ceiling = min(120, self.postgres_statement_timeout_seconds)
+        if value > ceiling:
+            raise ValueError(
+                "NOTEBOOK_DELETE_FINALIZE_TIMEOUT_SECONDS 必须满足 "
+                "0 < 值 ≤ min(120, POSTGRES_STATEMENT_TIMEOUT_SECONDS)"
+                f"（当前上限 {ceiling}）"
             )
         return self
 

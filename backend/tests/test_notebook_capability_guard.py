@@ -490,7 +490,8 @@ def test_group_admin_still_cannot_delete_the_notebook(tmp_path, monkeypatch):
     assert _manage_probe(client, nb, w["deputy"]).status_code == 200
     assert client.delete(f"/api/notebooks/{nb}", headers=w["deputy"]).status_code == 404
     assert client.get(f"/api/notebooks/{nb}", headers=w["deputy"]).status_code == 200
-    assert client.delete(f"/api/notebooks/{nb}", headers=w["owner"]).status_code == 204
+    # 批 3·W1 PR-3:DELETE 现在是 202(tombstone CAS 立即返回,清理异步进行)。
+    assert client.delete(f"/api/notebooks/{nb}", headers=w["owner"]).status_code == 202
 
 
 def test_revoking_the_admin_grant_takes_effect_immediately(tmp_path, monkeypatch):

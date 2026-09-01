@@ -850,6 +850,15 @@ SCALE_BUILD_FAILURE_BACKOFF_SECONDS     # minimum delay before an *automatic* re
 SCALE_BUILD_FAILURE_BACKOFF_MAX_SECONDS # ceiling on that exponential backoff (default 1800), so a persistently failing notebook's retries space out instead of growing without bound while still never retrying back-to-back and burning a concurrency slot on a build that will fail again immediately.
 ```
 
+**Notebook delete jobs** (batch 3·W1 PR-3 Phase A — see the design doc for the full six-phase job: `docs/superpowers/specs/2026-09-01-batch3-w1-delete-jobization-design_zh.md`). `DELETE /api/notebooks/{id}` commits a single-row tombstone (`notebooks.status='deleting'`) and returns 202 immediately; the actual database and disk cleanup runs afterward in this dedicated background pool.
+
+```text
+NOTEBOOK_DELETE_CONCURRENCY               # process-wide cap on concurrently running notebook-delete jobs, in their own pool separate from BACKGROUND_MAINTENANCE_CONCURRENCY (LLM-scale rebuilds) and BACKGROUND_LIGHT_JOB_CONCURRENCY (second-scale single-table work) — a delete is neither: it is long-running, low-CPU, high-I/O, so it gets its own budget rather than starving or being starved by either sibling pool (default 1; 1 or 2)
+NOTEBOOK_DELETE_SWEEP_SECONDS             # interval for the delete-job sweep's two drivers: requeuing a stale active job row (a worker died mid-phase, or a KG-rebuild-quiesce wait timed out) and recreating a missing job row for a notebook still marked 'deleting' (default 300, same order of magnitude as the checkup H4/H5 cache TTL)
+NOTEBOOK_DELETE_QUIESCE_TIMEOUT_SECONDS   # total time a delete job waits for any knowledge-graph build/rebuild/relink already running against that notebook to stop on its own before giving up and handing the job back to the sweep for a later retry — it is NEVER forced through while a rebuild is still writing (default 1800, sized to cover one worst-case LLM extraction batch plus margin)
+NOTEBOOK_DELETE_FINALIZE_TIMEOUT_SECONDS  # PostgreSQL-only, optional per-transaction statement_timeout override for the delete job's single atomic finalize step (fence + archive + drop the four directly-fenced tables + DELETE FROM notebooks). Default 0 = unset, falls back to the pool's own POSTGRES_STATEMENT_TIMEOUT_SECONDS. This is a TIGHTENING knob, not a relaxing one: the finalize transaction normally completes in single-digit seconds, far under the pool's own timeout, so any nonzero value here makes failure surface faster, never slower. Startup validation rejects a nonzero value outside `0 < value <= min(120, POSTGRES_STATEMENT_TIMEOUT_SECONDS)` — same cross-field validator family as POSTGRES_CHUNK_FTS_TIMEOUT_SECONDS above.
+```
+
 With startup preload enabled, `/api/ready` remains false during the
 `preloading_indexes` phase. A corrupt required artifact, more live published indexes
 than `SCALE_IDX_CACHE_MAX`, or more large published indexes than

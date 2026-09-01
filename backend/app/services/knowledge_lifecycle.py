@@ -59,6 +59,7 @@ from app.repositories.ports import (
     KgBuildJobStorePort,
     KgMaintenanceAlreadyRunning,
     KnowledgeStorePort,
+    NotebookDeletingAbortsMaintenanceError,
     UnifiedKgStorePort,
 )
 from app.services.kg_analysis_precompute import (
@@ -393,6 +394,11 @@ class KnowledgeLifecycleService:
         note_model_error: Callable[..., None],
         participant_notebook_ids: Callable[[str], List[str]],
         invalidate_knowledge_counts: Callable[[str], None] = lambda _notebook_id: None,
+        # 批 3·W1 PR-3 §4.2 的三处在途重建检查点(选项 A)共用这一个callable:
+        # 读 notebooks.status 是否为 'deleting'。默认 `lambda _nid: False`
+        # (从不中止)保持每一个直接构造本服务的既有测试字节不变——只有生产
+        # wiring(RepositoryRuntime.wire_knowledge_lifecycle)传真实实现。
+        notebook_deleting: Callable[[str], bool] = lambda _notebook_id: False,
     ) -> None:
         self.settings = settings
         self.event_log = event_log
@@ -401,6 +407,7 @@ class KnowledgeLifecycleService:
         self.unified_kg = unified_kg
         self.governance = governance
         self.kg_build_jobs = kg_build_jobs
+        self._notebook_deleting = notebook_deleting
         # KG build/rebuild 的进行中标志(进程内;重启后天然为空=未构建,无需 reconcile)。
         # 集合本体归 NotebookCatalogService 所有(get_notebook 在那读成员资格);
         # 本服务持同一个 set 对象,build/rebuild 路径照旧 add/discard;facade 的
@@ -1445,6 +1452,13 @@ class KnowledgeLifecycleService:
         written = {"edges": 0}
         try:
             for source_id in self._relink_source_partitions(notebook_id):
+                # 批 3·W1 PR-3 §4.2 选项 A 的检查点(relinkkg-,逐来源边界)。
+                # 相位 2 quiesce 闸的腿 B 依赖这个检查点存在(design doc §T-3.3
+                # 时序步骤 3)——没有它,quiesce 会永远等不到这个 pass 自己停下,
+                # 删除只能靠超时收场(安全但永远删不掉)。一次 notebooks 主键
+                # 点查,噪声级成本。
+                if self._notebook_deleting(notebook_id):
+                    raise NotebookDeletingAbortsMaintenanceError(notebook_id)
                 before, after = self._relink_one_source(
                     notebook_id, source_id, written
                 )
@@ -3217,6 +3231,18 @@ class KnowledgeLifecycleService:
                 target_limit=target_limit,
                 retry_partial=retry_partial,
             ):
+                # 批 3·W1 PR-3 §4.2 选项 A 的检查点(buildkg-/rebuildkg-,批
+                # 边界)——走既有的 abort 通道,不新开一条。相位 2 的 quiesce
+                # 闸腿 A 依赖它存在(design doc §T-3.3):没有它,quiesce 只能
+                # 靠超时收场。一次 notebooks 主键点查,噪声级成本(批 = 多个
+                # 来源,不是逐来源)。
+                if self._notebook_deleting(notebook_id):
+                    deleting_failure = KgBuildFailure(
+                        "notebook_deleting",
+                        "该笔记本正在被删除，本次知识图谱构建已停止。",
+                    )
+                    control.abort(deleting_failure)
+                    raise KgBuildAborted(deleting_failure)
                 if mode == "rebuild" and preserve_existing_rebuild:
                     targets = [(source_id, True) for source_id, _preserve in targets]
                 self._warn_skipped_sources(skipped_no_elements)
@@ -4426,6 +4452,11 @@ class KnowledgeLifecycleService:
             import time as _time
             _t_total = _time.perf_counter()
             def _stage(msg: str) -> None:
+                # 批 3·W1 PR-3 §4.2 选项 A 的检查点(unifiedkg-)——十个阶段
+                # 边界共用这一处改动(design doc 明文点名这是全篇成本最低的
+                # 插入点)。理由与 relink 检查点相同,见那条注释。
+                if self._notebook_deleting(notebook_id):
+                    raise NotebookDeletingAbortsMaintenanceError(notebook_id)
                 self.event_log.logger.info("kg-rebuild[%s] %s", notebook_id, msg)
                 if progress is not None:
                     try:

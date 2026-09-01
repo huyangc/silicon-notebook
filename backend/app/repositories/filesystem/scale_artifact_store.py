@@ -184,6 +184,18 @@ class SwapInterruptGuard:
         return False
 
 
+# P3（PR-3 阶段 B 复查）：这两个字面量与 `services/notebook_delete.py` 的
+# `_artifact_siblings` 共用同一份「什么算是发布产物目录的 scratch/rollback
+# 兄弟」形态——那个函数的 docstring 明确要求两边保持同一形态，否则一边改名
+# 会让另一边静默失配（`indexed_notebook_ids` 漏过一个本该排除的 scratch
+# 目录，或 `_artifact_siblings` 漏过一个本该清理的兄弟）。以前只有注释互相
+# 指名，没有可执行的耦合；现在两处都从这两个常量派生自己的判定，
+# `test_notebook_delete_review_fixes.py` 的一条结构性测试逐一构造边界文件名
+# 断言两边分类结果一致，若谁悄悄改了后缀集合会直接把那条测试改红。
+SCRATCH_SUFFIXES = (".old", ".tmp")
+SCRATCH_INFIX = ".tmp-"
+
+
 class ScaleArtifactStore:
     def __init__(self, settings) -> None:
         self.settings = settings
@@ -222,9 +234,8 @@ class ScaleArtifactStore:
             entry.name
             for entry in root.iterdir()
             if entry.is_dir()
-            and not entry.name.endswith(".old")
-            and not entry.name.endswith(".tmp")
-            and ".tmp-" not in entry.name
+            and not entry.name.endswith(SCRATCH_SUFFIXES)
+            and SCRATCH_INFIX not in entry.name
             and (entry / "manifest.json").is_file()
         )
 

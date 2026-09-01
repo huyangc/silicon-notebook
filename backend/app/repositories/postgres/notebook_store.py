@@ -15,6 +15,7 @@ from app.repositories.postgres._store_utils import (
 )
 from app.repositories.postgres.access_sql import NOTEBOOK_LIVE_SQL
 from app.repositories.postgres.database import PostgresDatabase
+from app.repositories.postgres.notebook_delete_job_store import NotebookDeleteJobStore
 from app.repositories.postgres.mount_sql import (
     MOUNT_GATE_CLOSED_EXPR as _MOUNT_GATE_CLOSED_EXPR,
     MOUNT_JOIN as _MOUNT_JOIN,
@@ -37,11 +38,28 @@ class NotebookStore:
         new_id: Callable[[str], str],
         now: Callable[[], TimestampInput],
         activity_retention_days: int,
+        finalize_timeout_seconds: float = 0,
     ) -> None:
         self.database = database
         self.new_id = new_id
         self.now = normalized_clock(now)
         self.activity_retention_days = int(activity_retention_days)
+        # D-4 (batch 3·W1 PR-3 §T-3.2): a "tighten, never loosen" per-
+        # transaction statement_timeout for the delete job's phase-5 finalize
+        # transaction ONLY -- 0 (the default) means "unset, fall back to the
+        # pool's own statement_timeout", matching every OTHER caller of
+        # delete_row_and_orphan_embeddings (the legacy synchronous
+        # delete_notebook path, every test/eval caller) exactly, byte-for-
+        # byte, since none of them pass job_id and this value is only ever
+        # applied when job_id is given. config.py's
+        # validate_notebook_delete_finalize_timeout_ceiling enforces
+        # 0 < value <= min(120, postgres_statement_timeout_seconds) at
+        # startup, so a nonzero value here is already known-safe.
+        self._finalize_timeout_ms = (
+            int(float(finalize_timeout_seconds) * 1000)
+            if finalize_timeout_seconds and float(finalize_timeout_seconds) > 0
+            else 0
+        )
 
     def tier_map(self, notebook_ids: Sequence[str]) -> dict[str, str]:
         ids = list(dict.fromkeys(value for value in notebook_ids if value))
@@ -361,8 +379,55 @@ class NotebookStore:
             )
         return changed.rowcount == 1
 
-    def delete_row_and_orphan_embeddings(self, notebook_id: str) -> list[str]:
+    def status_of(self, notebook_id: str) -> str | None:
+        """Raw ``notebooks.status`` read -- NO ``NOTEBOOK_LIVE_SQL`` filter,
+        unlike every other read in this store. Batch 3·W1 PR-3 §4.2's three
+        in-flight-rebuild checkpoints need to observe ``'deleting'`` itself
+        (that IS the signal they abort on); running them through the live
+        filter would make a deleting notebook look identical to a missing
+        one and the checkpoint could never tell "abort, a delete is in
+        flight" apart from "this notebook never existed"."""
+        with self.database.connect() as connection:
+            row = connection.execute(
+                "SELECT status FROM notebooks WHERE id=%s", (notebook_id,)
+            ).fetchone()
+        return row["status"] if row is not None else None
+
+    def delete_row_and_orphan_embeddings(
+        self, notebook_id: str, *, job_id: str | None = None
+    ) -> list[str]:
+        """``job_id`` is the batch 3·W1 PR-3 Phase A extension point: when
+        given (the delete job's phase-5 finalize step, see
+        ``notebook_delete_job_store.NotebookDeleteJobStore``'s module
+        docstring), this same transaction ALSO deletes that job's
+        ``notebook_delete_files``/``notebook_delete_jobs`` rows and, if
+        configured, tightens this ONE transaction's ``statement_timeout``
+        (D-4). When ``None`` (every pre-existing caller: the legacy
+        synchronous ``NotebookCatalogService.delete_notebook`` path, every
+        test/eval direct caller), this method's behavior is BYTE-IDENTICAL
+        to before this parameter existed -- no timeout override, no extra
+        DELETEs. This identity is the design's G1 hard gate (design doc §7):
+        phase 5's archive output must equal today's single-transaction
+        path's output field-for-field, and reusing this exact code path
+        (rather than a parallel copy) is what makes that trivially true
+        rather than something a test has to prove by comparison.
+
+        The two extra DELETEs run in BOTH the early-return branch below (the
+        notebook row is already gone -- §T-4's sweep driver-A "job row
+        present, notebooks row absent" special case: an out-of-band
+        notebooks-row delete beat this job to it) and the normal path, so a
+        resumed/duplicate finalize always finishes cleaning up the job's own
+        bookkeeping even when there is no archive work left to do."""
         with self.database.write() as connection:
+            if job_id is not None and self._finalize_timeout_ms:
+                # Third arg True = transaction-local (postgres/database.py's
+                # own set_config precedent, :152-166) -- this override is
+                # gone the moment this transaction commits or rolls back, so
+                # it can never leak onto a pooled connection's next borrower.
+                connection.execute(
+                    "SELECT set_config('statement_timeout', %s, true)",
+                    (f"{self._finalize_timeout_ms}ms",),
+                )
             # Lock the aggregate root before reading any child rows. PostgreSQL
             # FK inserts take FOR KEY SHARE on this row, which conflicts with
             # FOR UPDATE: after this point a concurrent ask/source/report can
@@ -375,6 +440,8 @@ class NotebookStore:
             if notebook_row is None:
                 # A duplicate request that waited behind the winning delete
                 # must not erase the archive the winner just committed.
+                if job_id is not None:
+                    NotebookDeleteJobStore.cleanup_job_on(connection, job_id)
                 return []
             # The parent lock blocks new FK children, but an update that keeps
             # the same notebook_id takes no parent-key lock. Lock every row
@@ -407,6 +474,12 @@ class NotebookStore:
                 "DELETE FROM knowledge_embeddings WHERE notebook_id=%s", (notebook_id,)
             )
             connection.execute("DELETE FROM notebooks WHERE id=%s", (notebook_id,))
+            if job_id is not None:
+                from app.repositories.postgres.notebook_delete_job_store import (
+                    NotebookDeleteJobStore,
+                )
+
+                NotebookDeleteJobStore.cleanup_job_on(connection, job_id)
         return [row["file_path"] for row in rows]
 
     def _retain_user_activity_before_delete(

@@ -373,7 +373,11 @@ def test_http_delete_notebook_route_removes_asset_file_and_dir(tmp_path, monkeyp
 
     resp = client.delete(f"/api/notebooks/{nb}", headers=owner_h)
 
-    assert resp.status_code == 204, resp.text
+    # 批 3·W1 PR-3:DELETE 现在是 202(tombstone CAS 立即返回),资产目录清理由
+    # 后台删除作业的相位 5 完成——drain 等它跑完,再断言磁盘产物真的没了。
+    assert resp.status_code == 202, resp.text
+    from app.services import background_jobs
+    background_jobs._drain_maintenance_executors_for_tests(timeout=10.0)
     assert not asset_file.exists()
     assert not asset_dir.exists()
 

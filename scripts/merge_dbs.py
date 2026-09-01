@@ -209,6 +209,14 @@ SKIP_SECONDARY_TABLES = [
     # 管理员决定(哪个插件被临时关停),导入副库的开关会静默改变 primary 的运行态
     # 行为——副库可能把某个 primary 依赖的插件关掉了。保留 primary、丢副库那份。
     "extension_runtime_toggles",
+    # v69(批 3·W1 PR-3 阶段 A)删除 tombstone 的后台作业载体与来源文件路径暂存
+    # 侧表,与 catalog_jobs/indexing_pipeline_stages 同类:一次运行的进程状态,
+    # 只对**它自己那次删除**有意义。副库里能看到这两张表的行,意味着那本笔记本
+    # 当时正处于 'deleting'——而 'deleting' 的库本就不出现在 NOTEBOOK_LIVE_SQL
+    # 过滤的任何读侧视图里,合并语义上等同于「已经不存在」,导入这份半途而废的
+    # 删除进度对 primary 毫无意义,只会留下指向一本 primary 里根本不存在的笔记本
+    # 的孤儿作业行。
+    "notebook_delete_jobs", "notebook_delete_files",
 ]
 
 # 导入后清空(引用可再生的 kg_index 产物, 逼部署侧干净重建)

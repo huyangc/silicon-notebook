@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from app.api.deps import (
     get_current_user,
     notebook_catalog_repository,
+    notebook_delete_repository,
     notebook_sharing_repository,
     repository,
     require_notebook_capability,
@@ -26,6 +27,7 @@ from app.models.notebooks import (
     IndexingPipelineResponse,
     NotebookAnalytics,
     NotebookCreate,
+    NotebookDeleteResponse,
     NotebookSummary,
     NotebookUpdate,
     SetIndexingPipelineRequest,
@@ -36,7 +38,7 @@ from app.models.notebooks import (
     SharedByMeItem,
     SharedPreview,
 )
-from app.repositories.ports import KgBuildAlreadyRunning
+from app.repositories.ports import KgBuildAlreadyRunning, NotebookAlreadyDeletingError
 
 
 router = APIRouter()
@@ -130,12 +132,27 @@ def update_notebook(
         raise HTTPException(status_code=404, detail="Notebook not found")
 
 
-@router.delete("/notebooks/{notebook_id}", status_code=204, dependencies=[Depends(require_notebook_capability("notebook:delete"))])
-def delete_notebook(notebook_id: str) -> None:
+@router.delete(
+    "/notebooks/{notebook_id}",
+    status_code=202,
+    response_model=NotebookDeleteResponse,
+    dependencies=[Depends(require_notebook_capability("notebook:delete"))],
+)
+def delete_notebook(
+    notebook_id: str, user: UserProfile = Depends(get_current_user)
+) -> NotebookDeleteResponse:
+    """批 3·W1 PR-3 §T-2/§5:CAS tombstone 提交后立即返回 202——实际清理由
+    后台删除作业异步完成(六相位,见 `services/notebook_delete.py`)。前端
+    零改动:`requestVoid` 只看 2xx 就丢弃 body(`frontend/app/api-client.ts`),
+    202 与之前的 204 对它完全透明。"""
     try:
-        notebook_catalog_repository().delete_notebook(notebook_id)
+        return NotebookDeleteResponse(
+            **notebook_delete_repository().request(notebook_id, user.id)
+        )
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
+    except NotebookAlreadyDeletingError:
+        raise user_error(409, "该笔记本正在被拷贝或已经在删除中，请稍后刷新查看。")
 
 
 @router.post("/notebooks/{notebook_id}/tier", response_model=NotebookSummary, dependencies=[Depends(require_notebook_capability("notebook:manage"))])

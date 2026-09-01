@@ -856,9 +856,13 @@ def test_admin_activity_survives_notebook_delete_without_answer_or_trace(client)
             ),
         )
 
+    # 批 3·W1 PR-3:DELETE 现在是 202(tombstone CAS 立即返回),实际归档由
+    # 后台删除作业完成——drain 等它跑完,下面的断言才看得到 retained_user_activity。
     assert client.delete(
         f"/api/notebooks/{notebook_id}", headers=owner
-    ).status_code == 204
+    ).status_code == 202
+    from app.services import background_jobs
+    background_jobs._drain_maintenance_executors_for_tests(timeout=10.0)
 
     # Self-service still follows live notebook authority after deletion.
     for activity_type in (None, "ask", "source", "report"):

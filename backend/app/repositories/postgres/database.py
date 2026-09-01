@@ -58,6 +58,18 @@ _ISOLATION_LEVELS = {
 _CONNECTION_LOG_STATE = threading.local()
 _KNOWHOW_PROJECTION_LOCK_NAMESPACE = 0x534E4B48  # "SNKH"
 _SCALE_BUILD_LOCK_NAMESPACE = 0x53434C42  # "SCLB"
+# 批 3·W1 PR-3 §4.3: this session/``application_name`` is no longer
+# scale-build-only — notebook delete's phase 4 (§T-3b) claims the SAME
+# per-notebook namespace+key before sweeping the notebook's disk artifacts,
+# so a session sitting here in ``pg_locks``/``pg_stat_activity`` may be
+# either a build or a delete. The literal name is kept generic on purpose
+# (``try_scale_build_lock`` the METHOD keeps its name — every call site and
+# test already spells it, and design doc §4.3 only asks for the
+# application_name/docs wording to generalize, not a method rename) so an
+# operator reading `pg_stat_activity` does not go looking for a "build" that
+# does not exist. See ``docs/operations.md``'s `pg_locks` troubleshooting
+# section for the operator-facing side of this.
+_NOTEBOOK_EXCLUSIVE_LOCK_APPLICATION_NAME = "silicon-notebook-notebook-exclusive-lock"
 # A lock session sits idle for the whole build (hours on a 9M-object library).
 # TCP keepalives make a dead peer surface as a broken session -- which releases
 # the advisory lock -- instead of a half-open socket that looks alive forever.
@@ -282,10 +294,28 @@ class PostgresDatabase:
         # Scale-build locks get their own budget rather than sharing the
         # projection lock's: a build holds its session for hours, and a shared
         # semaphore would let concurrent builds starve every knowhow projection
-        # on this process. Sized one above the build ceiling so an admission
-        # probe can always run while every executing build holds a session.
+        # on this process. Sized one above the ceiling so an admission probe
+        # can always run while every executing build/delete holds a session.
+        #
+        # 批 3·W1 PR-3 §4.3: this is the SAME namespace/key notebook delete's
+        # phase 4 claims (design doc §T-3b — one per-notebook independent
+        # lock covers both "scale build" and "notebook delete", not two
+        # separate locks), so a long-running delete now also occupies one of
+        # these dedicated sessions for its whole phase-4 sweep. The "+1"
+        # comment above ("an admission probe can always run") stops being
+        # true if the ceiling only counts builds — a delete's session is
+        # invisible to that headroom and `_admit_scale_op`'s probe starts
+        # seeing `SCALE_BUILD_LOCK_UNAVAILABLE` ("undecidable") instead of a
+        # real answer whenever every build AND every delete slot is full.
+        # Cross-checked against §1.2's connection-budget accounting and
+        # §T-4's `NOTEBOOK_DELETE_CONCURRENCY` (default 1, max 2) — the same
+        # config value all three call sites (here, background_jobs's delete
+        # pool, and this comment) must share.
         self._scale_build_lock_capacity = max(
-            1, int(getattr(settings, "scale_build_concurrency", 2)) + 1
+            1,
+            int(getattr(settings, "scale_build_concurrency", 2))
+            + int(getattr(settings, "notebook_delete_concurrency", 1))
+            + 1,
         )
         self._scale_build_lock_slots = threading.BoundedSemaphore(
             self._scale_build_lock_capacity
@@ -648,7 +678,7 @@ class PostgresDatabase:
                 self._database_url,
                 autocommit=False,
                 row_factory=dict_row,
-                application_name="silicon-notebook-scale-build-lock",
+                application_name=_NOTEBOOK_EXCLUSIVE_LOCK_APPLICATION_NAME,
                 connect_timeout=_LOCK_SESSION_CONNECT_TIMEOUT_SECONDS,
                 tcp_user_timeout=_LOCK_SESSION_TCP_USER_TIMEOUT_MS,
                 **_LOCK_SESSION_KEEPALIVES,
@@ -709,7 +739,7 @@ class PostgresDatabase:
             # Any SET has to follow the RESET ALL inside the call above, or it
             # is wiped before it ever takes effect (see table_projection_lock).
             connection.execute(
-                "SET application_name = 'silicon-notebook-scale-build-lock'"
+                f"SET application_name = '{_NOTEBOOK_EXCLUSIVE_LOCK_APPLICATION_NAME}'"
             )
             connection.commit()
             self._disable_idle_session_timeout(connection)

@@ -1079,6 +1079,42 @@ send/recv）。这两项挡的是验锁查询本身的 `statement_timeout`（5 �
 session 级 advisory lock 的持有者语义就不成立了。这条通道要求 **session pooling
 或直连**；transaction pooling 后面跑它等于没有互斥。
 
+#### 排查独占锁持有者（`pg_locks`）
+
+批 3·W1 PR-3（§4.3）把这把锁变成删除作业相位 4（清扫磁盘产物前）也会取的
+**同一把**每 notebook 独占锁——一个 namespace+key 现在同时覆盖「有人在
+构建/fold/import 这个笔记本的 scale 索引」与「有人正在删这个笔记本」。
+每个持有（或正在尝试持有）这把 claim 的会话都把
+`application_name` 设为 `silicon-notebook-notebook-exclusive-lock`
+（本次改动前是 `-scale-build-lock`——只查旧名字会一无所获）：
+
+```sql
+SELECT pid, state, query_start, wait_event_type, wait_event, query
+FROM pg_stat_activity
+WHERE application_name = 'silicon-notebook-notebook-exclusive-lock';
+```
+
+要查某个 `pid` 具体持有**哪个笔记本**的 claim，需要联查 `pg_locks`
+（`classid`/`objid` 就是 `app/repositories/scale_build_lock.py` 里
+`advisory_lock_key`/`advisory_lock_oid` 算出的 namespace/key——key 是
+notebook id 的 CRC32 哈希，不是 id 本身，没有直接反查 `notebooks` 的
+SQL；就近查该 `pid` 连接时间附近的应用日志里的 notebook id，或者从你已知
+的 `notebook_delete_jobs`/某个在跑的 `build`/`fold`/`import` 缩小范围）：
+
+```sql
+SELECT l.pid, l.classid, l.objid, a.application_name, a.query_start
+FROM pg_locks l
+JOIN pg_stat_activity a ON a.pid = l.pid
+WHERE l.locktype = 'advisory' AND l.classid = 1396919362;  -- 0x53434C42
+```
+
+如果查到的 `pid` 属于某条正 `running` 的 `notebook_delete_jobs` 行，那就是
+那次删除持有着这把 claim——它在相位 3（rows）开始前取一次，贯穿相位
+3/4/5，直到相位 5 提交后才释放（若因拿不到 claim 而落 `queued`，那说明
+它压根没拿到过 claim，见上文「笔记本删除作业」）。如果属于某条
+`kg_build_jobs` 行或某个 W-CLI 进程，那就是一次普通的 scale 构建/fold/
+import 照常持有它。
+
 #### `.old` / `.tmp-<claim_token>` 残留与人工恢复
 
 swap 序列是 `live → .old`、`tmp → live`、`rm .old`。第二步失败会自动把 `.old` 换回去；
@@ -1377,6 +1413,194 @@ API 不获得此保证。批次打开时会冻结完整表快照，但仅为由�
 v21 为 `(column_id, JS-trim(content_md), row_id)` 建立索引；guarded 成员检查以同一归一化表达式做等值查询。因此完整 anchor 分组仍 fail-closed，但在写事务中按分组查找而不再扫描整列。
 
 必须在主 checkout 根目录下运行(需要真实的 `.env`/数据库配置,与上面的 `batch_ingest.py`/`replay_retrieval.py` 一样)。可安全重复执行:再按同一个 plan 应用一次是 no-op(每个已应用的格子当前内容都已不再等于它记录的 `before`)。
+
+## 笔记本删除作业
+
+`DELETE /api/notebooks/{id}`（批 3·W1 PR-3）提交一次单行 tombstone
+——`notebooks.status='deleting'`——后立即返回 202。从这一刻起该笔记本在
+列表/详情/搜索/挂载等一切读侧视图里都不可见（与半拷贝笔记本沿用同一条
+可见性谓词）。真正的清理由此后在独立后台工作池（`NOTEBOOK_DELETE_
+CONCURRENCY`，默认 1，独立于维护池与轻活池——见「部署与配置」）里跑完，
+共六个相位：物化该笔记本的来源文件路径（相位 1）；等待该笔记本上已在跑的
+知识图谱构建/重建/关联自行停下，绝不在重建仍在写入时被强行推进（相位 2，
+「quiesce」）；分批清理除五张归档输入表以外的每一张闭包表/闭包外补删表
+（`ask_jobs`/`sources`/`reports`/`source_paper_meta`，再加
+`answers`——design 文档正文原本漏掉了 `answers`，见 design 文档的
+「实现期勘误」一节）（相位 3，「rows」，见下）；磁盘产物清扫——来源文件、
+贴图资产目录、三根 scale 索引产物及各自的 `.old`/`.tmp`/`.tmp-<token>`
+兄弟目录（相位 4，「files」）；最后一个原子事务：围栏、把被删内容归档进
+`retained_user_activity`、删掉五张归档输入表的行以及 `notebooks` 行本身
+（相位 5，「finalize」——到这一步时其余每张表都已清空，`notebooks` 行自身
+的级联对每张表只是一次零命中探查，不再是大库上曾经的多分钟级联）。
+
+**部署契约：生产跑 `--workers 1`。** quiesce 的腿 B（等一个在跑的
+`relinkkg-`/`unifiedkg-`/`conflictresolve-` pass 停下）读的是纯进程内
+登记表（`KgMaintenanceJobs.jobs`，这三类作业从不写 `kg_build_jobs`
+行）——它只看得见**同一个进程**里发生的事。这不是本特性新引入的依赖：
+`services/kg/maintenance_jobs.py` 自己的模块 docstring 早就把「生产单
+worker，进程内所有权即部署契约」登记为这三类作业单飞机制本身的前提
+（checkup 的 H4/H5 租约抑制与缓存也建在同一前提上）。删除作业相位 2 的
+quiesce 腿 B、以及相位 3-5 在 SQLite 上的进程内 claim 登记（见下），都只是
+复用这个既有前提，不加强也不削弱。若这套部署将来上多 worker，两套机制会
+同时悄悄失去跨 worker 互斥（一次删除可能在另一个 worker 上的
+`relinkkg-`/`unifiedkg-` pass 仍在写入时就跑过去；两个 worker 也可能对
+同一个 SQLite 笔记本的 scale 构建/删除产生竞态）——正解是把这几类作业的
+claim 提升为持久化行（并入 `kg_build_jobs` 或新建表），而不是给删除单独
+加锁；这已在 design 文档里登记为残余债，本特性不解这道题。
+
+**相位 3（rows）的批大小。** 每一批（keyset 分页的「形一」与 ctid/rowid
+的「形二」批删——design §1.5）统一用 500 行一批,与相位 1 路径物化分页
+同一个起始值。没有单独的 `NOTEBOOK_DELETE_ROWS_BATCH_SIZE` 环境变量：
+设计给出的 2000 是最大 A 类表的未来调优余量,不是必须的第二个旋钮；
+真要调大,调 `app/services/notebook_delete.py` 里的 `_ROWS_PAGE_SIZE`
+常量即可。
+
+**相位 3/4 中断后如何续跑。** 相位 3 的「形一」（keyset 分页）表与每一条
+B 类链都在每一批之后把进度写进作业行的 `cursor_table`/`cursor_key` 列
+——与相位 1 同一套崩溃可续跑写法；一个在某张表（或某条 B 类链，比如一张
+大 `knowhow_tables` 的行/列/单元格中途）崩溃的 worker，会在下一次扫尾时
+从原地续跑，绝不从头重扫已经清空的表。相位 3 的「形二」（ctid/rowid）表
+**不落任何游标**——ctid/rowid 批删本身就是自我续跑的（重跑一次「还剩多少
+行」的同一条查询，剩下的自然更少），两批之间没有需要落盘的东西。相位 4
+的每一步（来源文件/资产目录/产物根目录）本身都是幂等的（删一个已经不在的
+文件或目录是 no-op），所以它中断后总是从头重跑那几步，而不是靠一个持久化
+游标。
+
+每一批之前，runner 还会复核所有权：作业行必须仍是 `'running'`，**并且**
+带着这个 worker 认领作业时铸造的那个 lease token（`mark_running` 每次
+成功认领——包括扫尾偷走一个「状态仍是 running 但已陈旧」的行——都会铸造
+一个全新的 token，见下文）。一个只是变慢、并没有真的死掉的 worker，一旦
+它的作业被第二次 resubmit 偷走所有权，此后即使它仍在继续跑，写操作也全部
+落空——每一次写都匹配不到行。这堵住了单靠「作业行状态」堵不住的那个洞：
+两次 `run()` 调用都看到同一行「running」，正是一个变慢但没死的 worker 撞上
+过于急躁的扫尾重排时会出现的形状。
+
+**相位 3-5 会给在跑的 scale 构建/import 让路（Busy 语义）。** 该笔记本的
+独占锁（与 W-CLI/在线 scale 构建同一把，见上文「排查独占锁持有者」）在
+相位 3（rows）开始前取**一次**，贯穿相位 3、4（files）、5（finalize）
+——不逐相位重新获取，直到相位 5 提交后才释放（残渣收尾模式下则是那条
+路径自己的收尾步骤完成后释放）。`verify_held()` 在相位 3/4 的每一批之前
+都要复验一次，相位 5 事务开始前还要再复验一次。拿不到 claim——被别处
+持有、本进程已无空余锁会话、或探测本身抛出异常——作业就落**`queued`**
+（绝不是 `waiting`，两者为何要分开见下文的状态说明），交扫尾按常规节奏
+重试；绝不在没拿到锁的情况下强行推进相位 3-5。`job.error_message` 会
+点名具体是哪一种。SQLite 上（那里没有跨进程锁——`try_scale_build_lock`
+是个无条件放行的哨兵）这把 claim 还会额外登记进在线 scale 构建/fold 已经
+在查的**同一个**进程内 `building` 集合，让一次进程内构建与一次删除的
+相位 3-5 像两次进程内 scale 构建那样互相排斥。
+
+**查看作业状态。** 没有管理端 UI,直接查这两张新表：
+
+```sql
+-- 当前正在删除中的笔记本，附带其作业的相位/状态
+SELECT n.id, n.status, j.phase, j.status AS job_status, j.error_message,
+       j.updated_at
+FROM notebooks n
+JOIN notebook_delete_jobs j ON j.notebook_id = n.id
+WHERE n.status = 'deleting';
+```
+
+作业的 `status` 取值为 `queued`（即将执行，或在等一个空闲池槽位，**或者**
+因为相位 3-5 的独占 claim 拿不到而被暂停——见下）、`running`、`waiting`
+（**只**因为相位 2 一个在跑的 KG 重建 quiesce 还没停下而被暂停——见下）、
+`failed`（遇到意外错误后落终态；扫尾会按下文的退避/上限规则重排）。没有
+`succeeded` 这个终态：一次成功的收尾会在删除 `notebooks` 行的同一个事务
+里把作业自己那行也删掉，所以「这本笔记本哪儿都找不到了，作业行也没了」
+就是成功的结果，不是异常。
+
+**为什么 `queued` 和 `waiting` 要分开。** 两者都是「暂停,扫尾会重试」,
+但它们点名的是运维需要分辨的两件不同事实：`waiting` 意味着「一个在跑的
+KG 重建还没停」——没出问题,等就是了（或者去查那个重建为什么卡住了）；
+`queued` 涵盖除 quiesce 之外所有能让作业暂停的情形,包括独占 claim 拿不到
+这一种——一个只查 `kg_build_jobs`/`KgMaintenanceJobs` 找 `waiting` 行、
+结果什么也没查到的运维,否则会对「删除为什么卡住了」完全没有线索。
+
+**作业卡在 `waiting`。** 永远是相位 2（quiesce）超时。`job.error_message`
+会点名 quiesce 闸的哪一条腿还在挡：`durable(kg_build_jobs)`（还有一个
+`buildkg-`/`rebuildkg-` 作业在跑；用
+`SELECT * FROM kg_build_jobs WHERE notebook_id='<id>' AND status='running'`
+核实）或 `in-process(kg_maintenance)`（一个 `relinkkg-`/`unifiedkg-`
+pass——只记在承载它的服务进程内存里，不落在任何表；如果它一直不自行
+结束，重启那个进程是清掉一个卡死实例的办法之一；这条腿为什么只看得见
+同一个进程内的工作，见上文「部署契约：生产跑 `--workers 1`」）。
+`NOTEBOOK_DELETE_QUIESCE_TIMEOUT_SECONDS`（默认 1800）界定单次尝试最长
+等多久后落到这一种 `waiting`。
+
+**作业卡在 `queued`,超出了普通重排的范畴。** 是独占 claim 拿不到的情形
+时,`job.error_message` 会点名原因：「被别处持有」（一次 scale 构建/fold/
+import，或另一次删除——见上文「排查独占锁持有者」）或「锁后端不可用」
+（本进程的专用锁会话预算已耗尽，或探测本身抛出异常）。两种都按常规扫尾
+节奏重试，没有单独的超时。
+
+不管是哪一种（`waiting` 还是 `queued`），扫尾
+（`NOTEBOOK_DELETE_SWEEP_SECONDS`，默认 300）都会自动重新拾起它——除非
+挡路的东西本身已经卡死，否则不需要运维介入。
+
+**作业在崩溃后卡在 `running`。** 扫尾的另一条驱动会重排任何 `updated_at`
+超过 `NOTEBOOK_DELETE_SWEEP_SECONDS` 未推进的活跃作业行；一个在某个相位
+中途死掉的 worker 会在下一次扫尾时被重新拾起，从它 `phase`/游标停留的
+地方继续（每个相位按设计都是崩溃安全且幂等的）。重新拾起一行「状态仍是
+`running` 但已陈旧」的行时,会铸造一个**全新**的 lease token（见上文）——
+如果原来的 worker 其实没死、只是慢，它在这一刻起就丢失了所有权，此后的
+写操作全部落空。服务进程重启也会在既有崩溃恢复流程之后重新触发这条驱动。
+
+**作业行在，但它的 `notebooks` 行不在——残渣收尾路径。** 一次带外的
+`notebooks` 行删除（一次遗留的无界删除调用、一次 `sweep_stale_copies`
+误判、或一次人工 DBA `DELETE`）可能抢在删除作业之前把行删掉。runner 在
+每次 `run()` 调用时做一次性检测（一次纯粹的存在性查询），一旦命中就切进
+一条精简流水线：相位 3/4 照常运行（大多数闭包表已经随那次带外删除级联
+清空——因为这套 schema 闭包里的每一条 FK 都是 `ON DELETE CASCADE`——所以
+这一步主要是清理那一小撮完全不带 `notebooks` 外键的闭包外补删表，加上
+相位 4 的磁盘产物，这些从来没有任何数据库级级联会碰）；但相位 5 的围栏
+与归档两步整段跳过——已经没有 `notebooks` 行可供围栏,而且归档投影自己
+的源行也可能已经随级联消失,事后拼一份残缺或空的归档只会比完全不归档更
+糟。最后只删掉这个作业自己的两张台账行
+（`notebook_delete_jobs`/`notebook_delete_files`）。这条路径永远不会写
+或改写任何 `retained_user_activity` 行。
+
+**一直删不掉的笔记本。** 每一次失败都会让作业行的 `attempts` 列加一，
+并在扫尾重试前套一段指数退避（60 秒 × 2^(attempts−1)，封顶 3600 秒）。
+连续失败满 `_MAX_DELETE_ATTEMPTS`（5）次之后，扫尾彻底停止重排，把最近
+一条 `failed` 行留作终态诊断——用 `scripts/diag_pg_hotpaths.py` 的
+`notebook_delete_jobs` 总览小节（PostgreSQL）或 SQLite 上等价的直接查询
+（`SELECT * FROM notebook_delete_jobs WHERE status='failed' AND
+notebook_id='<id>' ORDER BY finished_at DESC LIMIT 1`）找到它，从
+`error_message` 诊断根因，然后二选一：修根因后手工重新
+`DELETE /api/notebooks/{id}`（笔记本仍处于 `'deleting'` 时这个调用会
+409——运维必须先把 `status` 改回去，例如 `'ready'`，才能重试，同时接受
+之前失败尝试已经提交的相位 3/4 成果会保留）；或者手工清掉剩下的行。每一
+次成功的重新尝试都会先清掉该笔记本更早的 `failed` 作业行（以及它们的
+`notebook_delete_files` 残留——一个失败的作业从不会自己清理这些）再重新
+开始——所以一本健康的笔记本不会堆积旧的 failed 行，只有真正卡死的才会。
+
+**回滚本特性（两段式处置——在 revert 代码之前先读这一段）。** 只 revert
+PR-3 的代码并不安全：revert 前代码的 40 处读侧可见性站点只认得
+`'copying'` 这一个隐藏状态，revert 之后任何仍停在 `status='deleting'` 的行
+会重新变得可见——一本删了一半的笔记本会重新出现在列表、搜索和挂载里。
+在 revert 代码之前（或作为 revert 的一部分），运维必须逐行处置每一个
+`deleting` 行：
+
+```sql
+SELECT n.id, j.phase, j.status AS job_status
+FROM notebooks n
+LEFT JOIN notebook_delete_jobs j ON j.notebook_id = n.id
+WHERE n.status = 'deleting';
+```
+
+逐行判断：**`phase` 列本身从来不会真的写着字面值 `'finalize'`**——相位
+5 会在完成收尾的同一个事务里把作业行本身也删掉，所以这一列能被读到的最
+大值只会是 `'files'`（相位 4 已完成，即将进入相位 5），下一刻这一行就
+干脆不存在了。所以：如果作业行已经彻底不在了（在 revert 之前就跑完了，
+不论是正常收尾还是走的残渣收尾路径），这本笔记本在数据库侧已经彻底清理
+完毕——不用管它。否则这次删除确实没跑完，而且代码一旦 revert 就没有办法
+续跑（分批清理/磁盘清扫相位与收尾事务都随代码一起没了）。运维必须逐本
+二选一：如果笔记本主人原本的删除请求应该兑现，就物理删掉它（跑
+revert 前的无界 `delete_notebook` 代码路径，或者在核实每一张被部分清理过
+的子表之后手工 `DELETE FROM notebooks WHERE id=...`）；或者把 `status`
+改回删除前的值（正常情形下是 `'ready'`）来恢复它，同时接受一个事实——
+如果分批清理相位在 revert 之前已经删掉了一部分子表行，这些行回不来了，
+恢复出来的是一本不完整、不干净的库。没有第三种选项能既保持代码已经
+revert、又续跑这次删除。
 
 ## 解析问题自动归档
 

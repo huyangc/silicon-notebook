@@ -22,6 +22,7 @@ from app.repositories.postgres.group_store import GroupStore
 from app.repositories.postgres.identity_store import IdentityStore
 from app.repositories.postgres.index_projection_store import IndexProjectionStore
 from app.repositories.postgres.kg_build_job_store import KgBuildJobStore
+from app.repositories.postgres.notebook_delete_job_store import NotebookDeleteJobStore
 from app.repositories.postgres.knowhow_history_store import KnowhowHistoryStore
 from app.repositories.postgres.knowhow_store import KnowhowStore
 from app.repositories.postgres.knowhow_transfer_store import KnowhowTransferStore
@@ -166,6 +167,7 @@ class PostgresPersistenceBundle(PersistenceBundle):
     governance: GovernanceStore
     index_projection: IndexProjectionStore
     kg_build_jobs: KgBuildJobStore
+    notebook_delete_jobs: NotebookDeleteJobStore
     catalog: CatalogStore
     knowhow: KnowhowStore
     knowhow_history: KnowhowHistoryStore
@@ -222,6 +224,7 @@ class PostgresPersistenceBundleFactory:
                 new_id=seams.new_id,
                 now=seams.now,
                 activity_retention_days=settings.user_activity_retention_days,
+                finalize_timeout_seconds=settings.notebook_delete_finalize_timeout_seconds,
             )
             sharing = SharingStore(
                 database,
@@ -247,6 +250,9 @@ class PostgresPersistenceBundleFactory:
                 vector_matrix=_not_wired,
             )
             kg_build_jobs = KgBuildJobStore(
+                database, new_id=seams.new_id, now=seams.now
+            )
+            notebook_delete_jobs = NotebookDeleteJobStore(
                 database, new_id=seams.new_id, now=seams.now
             )
             catalog = CatalogStore(database, new_id=seams.new_id, now=seams.now)
@@ -293,6 +299,7 @@ class PostgresPersistenceBundleFactory:
                 governance=governance,
                 index_projection=index_projection,
                 kg_build_jobs=kg_build_jobs,
+                notebook_delete_jobs=notebook_delete_jobs,
                 catalog=catalog,
                 knowhow=knowhow,
                 knowhow_history=knowhow_history,

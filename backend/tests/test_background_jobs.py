@@ -348,21 +348,25 @@ LIGHT_JOB_NAMES = (
     "knowhow-legacy-reproject-t1",
     "knowhow-asset-sweep:nb-a",
 )
+# 批 3·W1 PR-3(D-2):第三个独立池——量级既非 LLM 扇出型重活,也非秒级轻活。
+DELETE_JOB_NAMES = ("deletenb-nb-a",)
 UNGATED_JOB_NAMES = ("ask-chunk", "ask-reasoning", "ask-graph",
                      "report-plan-r1", "report-gen-r1")
 
 
 @pytest.fixture
 def gate_capacity(monkeypatch):
-    """把两个池的容量固定成 1(可调),并保证闸按当前配置重建。"""
+    """把三个池的容量固定成 1(可调),并保证闸按当前配置重建。"""
     from app.core import config as config_module
 
-    def _configure(heavy: int = 1, light: int = 1) -> None:
+    def _configure(heavy: int = 1, light: int = 1, delete: int = 1) -> None:
         settings = config_module.get_settings()
         monkeypatch.setattr(
             settings, "background_maintenance_concurrency", heavy, raising=False)
         monkeypatch.setattr(
             settings, "background_light_job_concurrency", light, raising=False)
+        monkeypatch.setattr(
+            settings, "notebook_delete_concurrency", delete, raising=False)
         background_jobs._reset_maintenance_gate_for_tests()
 
     _configure()
@@ -388,18 +392,21 @@ def test_gated_categories_are_a_subset_of_the_safe_prefix_table(gate_capacity):
     闸看着配好了却一个 job 都拦不住(纯拼写错误就能让整个特性静默失效)。"""
     known = {operation for _, operation in background_jobs._SAFE_JOB_PREFIXES}
     assert background_jobs._MAINTENANCE_OPERATIONS <= known
-    # 两个池互斥,且并起来正好是进闸集合(没有孤儿类别)。
+    # 三个池两两互斥,且并起来正好是进闸集合(没有孤儿类别)。
     heavy = background_jobs._HEAVY_MAINTENANCE_OPERATIONS
     light = background_jobs._LIGHT_MAINTENANCE_OPERATIONS
+    delete = background_jobs._DELETE_OPERATIONS
     assert not (heavy & light)
-    assert heavy | light == background_jobs._MAINTENANCE_OPERATIONS
+    assert not (heavy & delete)
+    assert not (light & delete)
+    assert heavy | light | delete == background_jobs._MAINTENANCE_OPERATIONS
     # 交互路径与报告刻意在闸外。
     assert not ({"report-plan", "report-gen"} & background_jobs._MAINTENANCE_OPERATIONS)
     assert not (background_jobs._SAFE_ASK_JOB_NAMES
                 & background_jobs._MAINTENANCE_OPERATIONS)
 
 
-@pytest.mark.parametrize("name", HEAVY_JOB_NAMES + LIGHT_JOB_NAMES)
+@pytest.mark.parametrize("name", HEAVY_JOB_NAMES + LIGHT_JOB_NAMES + DELETE_JOB_NAMES)
 def test_each_gated_category_serializes_at_capacity_one(gate_capacity, name):
     """容量=1 时同池两个 job 串行:第二个必须等第一个结束才开始。
 
@@ -464,6 +471,32 @@ def test_heavy_jobs_are_not_blocked_by_a_saturated_light_pool(
 
     release.set()
     light.join(timeout=5)
+    heavy.join(timeout=5)
+
+
+def test_delete_jobs_are_not_starved_by_a_saturated_heavy_pool(gate_capacity):
+    """删除池独立于重活池:重活池占满时删除作业仍立即执行。变异钉:把
+    `deletenb` 判成重活类别(合进 `_HEAVY_MAINTENANCE_OPERATIONS`)会让本用例
+    变红——第二个 job 会被挡在同一把重活闸后面而不是立即跑。"""
+    heavy, release = _occupy_one_slot("buildkg-nb-a")
+    ran = threading.Event()
+    delete_job = background_jobs.submit(ran.set, name="deletenb-nb-a")
+    assert ran.wait(timeout=5)
+
+    release.set()
+    heavy.join(timeout=5)
+    delete_job.join(timeout=5)
+
+
+def test_heavy_jobs_are_not_blocked_by_a_saturated_delete_pool(gate_capacity):
+    """反方向同理:删除池占满不得挡住重活(证明删除闸不是重活闸的别名)。"""
+    delete_job, release = _occupy_one_slot("deletenb-nb-a")
+    ran = threading.Event()
+    heavy = background_jobs.submit(ran.set, name="buildkg-nb-a")
+    assert ran.wait(timeout=5)
+
+    release.set()
+    delete_job.join(timeout=5)
     heavy.join(timeout=5)
 
 

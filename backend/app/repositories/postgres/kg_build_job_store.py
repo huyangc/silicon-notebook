@@ -102,6 +102,22 @@ class KgBuildJobStore:
             raise KeyError(job_id)
         return self._row(row)
 
+    def has_running(self, notebook_id: str) -> bool:
+        """Quiesce leg A (batch 3·W1 PR-3 §T-3.3): a plain index point-query
+        against ``idx_kg_build_jobs_one_running``
+        (0002_integrity_indexes.sql:22) -- the SAME partial unique index
+        ``create_job``'s single-flight guard relies on, so "does this
+        notebook have a running durable KG build" is answerable without a
+        table scan regardless of how many historical (non-running) job rows
+        that notebook has accumulated."""
+        with self.database.connect() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM kg_build_jobs WHERE notebook_id=%s "
+                "AND status='running'",
+                (notebook_id,),
+            ).fetchone()
+        return row is not None
+
     def latest(self, notebook_id: str) -> dict | None:
         with self.database.connect() as connection:
             return self.latest_on(connection, notebook_id)
