@@ -32,7 +32,8 @@ function isVotableWish(item: WishItem): item is VotableWishItem {
 export function WaitingWishCarousel() {
   const [state, setState] = useState<WishState>({ kind: "loading" });
   const [index, setIndex] = useState(0);
-  const [paused, setPaused] = useState(false);
+  const [hovered, setHovered] = useState(false);
+  const [focusWithin, setFocusWithin] = useState(false);
   const [votingId, setVotingId] = useState("");
   const [notice, setNotice] = useState<{ wishId: string; text: string; tone: "ok" | "error" } | null>(null);
   const loadGeneration = useRef(0);
@@ -79,6 +80,7 @@ export function WaitingWishCarousel() {
   const items = state.kind === "ready" ? state.items : [];
   const activeIndex = items.length > 0 ? index % items.length : 0;
   const item = items[activeIndex];
+  const paused = hovered || focusWithin;
 
   useEffect(() => {
     if (items.length < 2 || paused || votingId) return;
@@ -108,14 +110,15 @@ export function WaitingWishCarousel() {
     try {
       const result = await toggleWishVote(current.id);
       if (!mounted.current) return;
-      setState((previous) => previous.kind === "ready" ? {
-        kind: "ready",
-        items: previous.items.map((row) => row.id === current.id ? {
+      if (state.kind === "ready") {
+        const nextItems = state.items.map((row) => row.id === current.id ? {
           ...row,
           vote_count: result.vote_count,
           voted_by_me: result.voted,
-        } : row),
-      } : previous);
+        } : row).sort(compareWaitingWishes);
+        setState({ kind: "ready", items: nextItems });
+        setIndex(Math.max(0, nextItems.findIndex((row) => row.id === current.id)));
+      }
       setNotice({
         wishId: current.id,
         text: result.voted ? "已赞同" : "已取消赞同",
@@ -143,11 +146,11 @@ export function WaitingWishCarousel() {
       className="waiting-wish-carousel"
       aria-label="等待时浏览许愿墙"
       aria-busy={state.kind === "loading"}
-      onMouseEnter={() => setPaused(true)}
-      onMouseLeave={() => setPaused(false)}
-      onFocusCapture={() => setPaused(true)}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      onFocusCapture={() => setFocusWithin(true)}
       onBlurCapture={(event) => {
-        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setPaused(false);
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setFocusWithin(false);
       }}
     >
       <header className="waiting-wish-head">
@@ -170,7 +173,7 @@ export function WaitingWishCarousel() {
         const pending = votingId === item.id;
         const itemNotice = notice?.wishId === item.id ? notice : null;
         return (
-          <article className="waiting-wish-card" key={item.id}>
+          <article className="waiting-wish-card">
             <div className="waiting-wish-copy">
               <span className={`waiting-wish-kind ${item.kind}`}>
                 <Icon size={13} />{WISH_KIND_LABELS[item.kind]}

@@ -64,7 +64,7 @@ test("等待轮播分别读取可投票类型并按优先级展示", async () =>
   expect(screen.queryByText(feature.content)).not.toBeInTheDocument();
 });
 
-test("轮播自动切换，悬停时暂停且支持手动切换", async () => {
+test("轮播自动切换，悬停与焦点重叠时持续暂停且支持手动切换", async () => {
   vi.useFakeTimers();
   render(<WaitingWishCarousel />);
   await act(async () => {});
@@ -78,8 +78,18 @@ test("轮播自动切换，悬停时暂停且支持手动切换", async () => {
   act(() => { vi.advanceTimersByTime(WAITING_WISH_ROTATION_MS); });
   expect(screen.getByText(bug.title)).toBeInTheDocument();
 
-  fireEvent.click(screen.getByRole("button", { name: "上一个愿望" }));
+  const previous = screen.getByRole("button", { name: "上一个愿望" });
+  fireEvent.focus(previous);
+  fireEvent.mouseLeave(carousel);
+  act(() => { vi.advanceTimersByTime(WAITING_WISH_ROTATION_MS); });
+  expect(screen.getByText(bug.title)).toBeInTheDocument();
+
+  fireEvent.click(previous);
   expect(screen.getByText(feature.title)).toBeInTheDocument();
+
+  fireEvent.blur(previous);
+  act(() => { vi.advanceTimersByTime(WAITING_WISH_ROTATION_MS); });
+  expect(screen.getByText(bug.title)).toBeInTheDocument();
 });
 
 test("等待卡投票会调用真实许愿接口并在控件旁显示结果", async () => {
@@ -97,6 +107,26 @@ test("等待卡投票会调用真实许愿接口并在控件旁显示结果", as
   await waitFor(() => expect(mocks.toggleWishVote).toHaveBeenCalledWith(feature.id));
   expect(screen.getByRole("button", { name: /取消赞同.*当前 8 人赞同/ })).toHaveAttribute("aria-pressed", "true");
   expect(screen.getByRole("status")).toHaveTextContent("已赞同");
+});
+
+test("投票改变优先级后重新排序并保持当前愿望可见", async () => {
+  mocks.toggleWishVote.mockResolvedValue({
+    wish_id: bug.id,
+    voted: true,
+    vote_count: 9,
+  });
+  const user = userEvent.setup();
+  render(<WaitingWishCarousel />);
+  await screen.findByText(feature.title);
+
+  await user.click(screen.getByRole("button", { name: "下一个愿望" }));
+  await user.click(screen.getByRole("button", { name: /赞同.*当前 3 人赞同/ }));
+
+  expect(await screen.findByRole("button", { name: /取消赞同.*当前 9 人赞同/ })).toBeInTheDocument();
+  expect(screen.getByText(bug.title)).toBeInTheDocument();
+  expect(screen.getByText("1 / 2")).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "下一个愿望" }));
+  expect(screen.getByText(feature.title)).toBeInTheDocument();
 });
 
 test("轮播加载失败可就地重试且不冒充生成任务失败", async () => {
