@@ -28,6 +28,7 @@ ownership: every write matches zero rows and the caller's own liveness check
 """
 from __future__ import annotations
 
+import logging
 import secrets
 from datetime import timedelta
 from typing import Callable
@@ -41,6 +42,8 @@ from app.repositories.postgres._store_utils import (
 from app.repositories.postgres.access_sql import NOTEBOOK_LIVE_SQL
 from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.ports import NotebookAlreadyDeletingError
+
+_log = logging.getLogger(__name__)
 
 # Sec T-3/T-4: the job's own defense-in-depth single-flight states. 'queued'
 # just after request()/a sweep requeue, 'running' while a background worker
@@ -291,7 +294,8 @@ class NotebookDeleteJobStore:
         return cursor.rowcount == 1
 
     def finish(
-        self, job_id: str, status: str, *, error_code: str = "", error_message: str = ""
+        self, job_id: str, status: str, *, lease_token: str,
+        error_code: str = "", error_message: str = "",
     ) -> bool:
         """Terminal-failure settle only -- a SUCCESSFUL finalize deletes this
         row itself (see this module's docstring), so ``status`` here is only
@@ -301,20 +305,37 @@ class NotebookDeleteJobStore:
         since that is the only value any caller ever actually passes; kept
         general to mirror ``KgBuildJobStore.finish``'s shape.
 
-        No ``lease_token`` fencing here (deliberately, unlike every other
-        write above): ``run()``'s top-level ``except Exception`` handler
-        calls this from OUTSIDE the ownership check it just failed, exactly
-        when a worker needs to settle a job it is no longer sure it owns --
-        fencing this call would let a genuinely-failed job wedge forever
-        whenever the failure itself was an ownership loss."""
+        P2-b (codex PR#659 round 1): **lease-fenced**, reversing the
+        original "deliberately unfenced" design. That original rationale
+        ("a worker settling a job it is no longer sure it owns must not be
+        blocked, or a genuinely-failed job wedges forever") does not survive
+        scrutiny: a lease is lost ONLY when ``mark_running``'s CAS actually
+        succeeds for a different worker, and CAS success means that new
+        worker is NECESSARILY alive and already progressing the same
+        job_id. So a fenced-out ``finish`` from the OLD worker is not a job
+        wedging with no one left to settle it -- it is exactly the case
+        where the row is not this caller's to settle at all; the new owner
+        will settle it (via its own success or its own eventual failure).
+        Without this fence, a slow-but-not-dead worker's late exception
+        could stamp 'failed' + increment ``attempts`` on the NEW owner's
+        still-live row out from under it. ``rowcount==0`` is therefore a
+        normal, expected outcome -- logged, not raised (the caller is
+        already inside ``run()``'s top-level except handler; there is
+        nothing above it to usefully re-raise into)."""
         now = self.now()
         with self.database.write() as connection:
             cursor = connection.execute(
                 "UPDATE notebook_delete_jobs SET status=%s,error_code=%s,"
                 "error_message=%s,attempts=attempts+1,updated_at=%s,"
-                "finished_at=%s WHERE id=%s "
+                "finished_at=%s WHERE id=%s AND lease_token=%s "
                 "AND status IN ('queued','running','waiting')",
-                (status, error_code, error_message, now, now, job_id),
+                (status, error_code, error_message, now, now, job_id, lease_token),
+            )
+        if cursor.rowcount != 1:
+            _log.info(
+                "notebook delete job %s: finish(%s) fenced out (lease no "
+                "longer held) — a new owner is settling this job instead",
+                job_id, status,
             )
         return cursor.rowcount == 1
 
@@ -392,7 +413,7 @@ class NotebookDeleteJobStore:
             "notebook_status": row["notebook_status"],
         }
 
-    def finish_residual(self, job_id: str) -> None:
+    def finish_residual(self, job_id: str, *, lease_token: str) -> bool:
         """§T-4 driver-A's out-of-band-delete special case (P1-A): NO
         notebooks row is left to fence, and the archive projections' source
         tables may already be gone via cascade, so this NEVER attempts
@@ -400,9 +421,37 @@ class NotebookDeleteJobStore:
         side-table footprints, in its own transaction (unlike a SUCCESSFUL
         finalize, which piggybacks the exact same cleanup onto
         ``delete_row_and_orphan_embeddings``'s transaction because that one
-        also owns the ``notebooks`` row this one does not have)."""
+        also owns the ``notebooks`` row this one does not have).
+
+        P2-b: **lease-fenced**, same argument as ``finish`` above -- only
+        the worker that currently holds this job_id's lease may execute the
+        terminal residual cleanup; a fenced-out caller has already lost
+        ownership to a new worker that is (or will) settle it instead.
+        Deliberately does NOT delegate to ``cleanup_job_on`` (shared with
+        the successful-finalize path, which has no lease token to fence
+        with -- it is instead gated by the in-process claim's
+        ``verify_held()`` immediately before it runs): this fences the
+        ``notebook_delete_jobs`` DELETE itself first and only cascades to
+        the ``notebook_delete_files`` side table when that row was actually
+        this worker's to delete, so a fenced-out call leaves BOTH tables
+        untouched rather than half-deleted."""
         with self.database.write() as connection:
-            self.cleanup_job_on(connection, job_id)
+            cursor = connection.execute(
+                "DELETE FROM notebook_delete_jobs WHERE id=%s AND lease_token=%s",
+                (job_id, lease_token),
+            )
+            if cursor.rowcount == 1:
+                connection.execute(
+                    "DELETE FROM notebook_delete_files WHERE job_id=%s", (job_id,)
+                )
+        if cursor.rowcount != 1:
+            _log.info(
+                "notebook delete job %s: finish_residual() fenced out "
+                "(lease no longer held) — a new owner is settling this job "
+                "instead",
+                job_id,
+            )
+        return cursor.rowcount == 1
 
     def list_stale(self, older_than_seconds: float) -> list[dict]:
         """Sweep driver A (§T-4): active job rows whose ``updated_at`` has
