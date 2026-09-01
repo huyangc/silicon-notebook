@@ -34,6 +34,7 @@ export function WaitingWishCarousel() {
   const [index, setIndex] = useState(0);
   const [hovered, setHovered] = useState(false);
   const [focusWithin, setFocusWithin] = useState(false);
+  const [reducedMotion, setReducedMotion] = useState(false);
   const [votingId, setVotingId] = useState("");
   const [notice, setNotice] = useState<{ wishId: string; text: string; tone: "ok" | "error" } | null>(null);
   const loadGeneration = useRef(0);
@@ -77,20 +78,27 @@ export function WaitingWishCarousel() {
     };
   }, [load]);
 
+  useEffect(() => {
+    if (typeof window.matchMedia !== "function") return;
+    const media = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const updatePreference = () => setReducedMotion(media.matches);
+    updatePreference();
+    media.addEventListener("change", updatePreference);
+    return () => media.removeEventListener("change", updatePreference);
+  }, []);
+
   const items = state.kind === "ready" ? state.items : [];
   const activeIndex = items.length > 0 ? index % items.length : 0;
   const item = items[activeIndex];
   const paused = hovered || focusWithin;
 
   useEffect(() => {
-    if (items.length < 2 || paused || votingId) return;
-    if (typeof window.matchMedia === "function"
-      && window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    if (items.length < 2 || paused || votingId || reducedMotion) return;
     const timer = window.setInterval(() => {
       setIndex((current) => (current + 1) % items.length);
     }, WAITING_WISH_ROTATION_MS);
     return () => window.clearInterval(timer);
-  }, [items.length, paused, votingId]);
+  }, [items.length, paused, reducedMotion, votingId]);
 
   const positionLabel = useMemo(
     () => items.length > 0 ? `${activeIndex + 1} / ${items.length}` : "",
