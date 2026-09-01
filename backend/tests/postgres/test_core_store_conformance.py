@@ -37,6 +37,11 @@ from app.services.notebook_catalog import NotebookSummaryQuery
 from app.services.notebook_sharing import NotebookCopyService
 from app.services.repository_runtime import RepositoryCompatibilitySeams
 from app.services import repository_facade
+from tests.kg_extracted_parity_cases import (
+    KG_EXTRACTED_CASES,
+    kg_case_run_id,
+    kg_case_source_id,
+)
 
 
 NOW = "2026-07-22T10:00:00+00:00"
@@ -4157,6 +4162,90 @@ def test_latest_extraction_run_uses_ordinal_tie_break(
             (run_id, notebook_id, "src-runs", "kg", status, error, NOW, NOW),
         )
     assert core_stores.sources.list_sources(notebook_id)[0].extraction_warning is None
+
+
+def _seed_kg_extracted_matrix(core_stores: CoreStores, notebook_id: str) -> None:
+    """Seed the SHARED kg_extracted decision matrix (``tests/
+    kg_extracted_parity_cases.py``) — one source per case, all in ONE notebook
+    so the batched hydration really runs its "a page of many ids" shape."""
+    base = datetime.fromisoformat(NOW)
+    for index, (_label, has_object, runs, _expected) in enumerate(KG_EXTRACTED_CASES):
+        source_id = kg_case_source_id(index)
+        core_stores.sources.insert_source(
+            source_id=source_id,
+            notebook_id=notebook_id,
+            title=source_id,
+            source_type="markdown",
+            status="extracted",
+            parse_status="extracted",
+            file_name=f"{source_id}.md",
+            file_path=f"uploads/{source_id}.md",
+            file_size=1,
+            file_hash=f"hash-{index}",
+            summary="",
+            doc_type="",
+        )
+        if has_object:
+            _write_sql(
+                core_stores,
+                "INSERT INTO knowledge_objects"
+                "(id,notebook_id,object_type,status,owner,payload,evidence,source_id,"
+                "created_at,updated_at) VALUES "
+                "(%s,%s,'concept','approved','','{}'::jsonb,'[]'::jsonb,%s,%s,%s)",
+                (f"ko-kgx-{index:02d}", notebook_id, source_id, NOW, NOW),
+            )
+        for rank, status, error in runs:
+            _write_sql(
+                core_stores,
+                "INSERT INTO extraction_runs"
+                "(id,notebook_id,source_id,run_type,status,error_message,"
+                "created_at,updated_at) VALUES (%s,%s,%s,'kg',%s,%s,%s,%s)",
+                (
+                    kg_case_run_id(index, rank),
+                    notebook_id,
+                    source_id,
+                    status,
+                    error,
+                    (base + timedelta(hours=rank)).isoformat(),
+                    NOW,
+                ),
+            )
+
+
+def test_kg_extracted_matrix_matches_the_shared_parity_table(core_stores: CoreStores):
+    """``kg_extracted`` 的每一条判定分支,与 SQLite 侧吃同一张表。
+
+    SQLite twin: ``tests/test_sources_page_batched.py`` 的
+    ``test_batched_kg_extracted_matches_the_parity_matrix`` /
+    ``test_single_row_kg_extracted_matches_the_parity_matrix``。两端的判据是各自
+    手抄的方言 SQL(PG 正则 + ``strpos`` + ``ordinal`` tie-break,SQLite ``GLOB`` +
+    ``instr`` + ``rowid``),共用同一张用例表才能让任一端漏掉某个分支时变红。
+
+    批量路径(list_sources / list_sources_page)与单条路径(get_source)分别断言:
+    这两处各有一份取数 SQL,漂了会让同一份来源在列表和详情里显示成两种状态。"""
+    owner = core_stores.identity.create_user("k00123502", "password-17")
+    notebook_id = core_stores.notebooks.create_row(
+        NotebookCreate(name="KG matrix"), owner.id
+    )
+    _seed_kg_extracted_matrix(core_stores, notebook_id)
+
+    expected = {label: value for label, _obj, _runs, value in KG_EXTRACTED_CASES}
+    by_id = {item.id: item for item in core_stores.sources.list_sources(notebook_id)}
+    assert {
+        label: by_id[kg_case_source_id(index)].kg_extracted
+        for index, (label, _obj, _runs, _value) in enumerate(KG_EXTRACTED_CASES)
+    } == expected
+
+    page = core_stores.sources.list_sources_page(notebook_id, offset=0, limit=50)
+    assert {item.id: item.kg_extracted for item in page.items} == {
+        kg_case_source_id(index): value
+        for index, (_label, _obj, _runs, value) in enumerate(KG_EXTRACTED_CASES)
+    }
+
+    assert {
+        label: core_stores.sources.get_source(kg_case_source_id(index)).kg_extracted
+        for index, (label, _obj, _runs, _value) in enumerate(KG_EXTRACTED_CASES)
+    } == expected
 
 
 def test_paper_metadata_json_and_author_search_roundtrip(core_stores: CoreStores):

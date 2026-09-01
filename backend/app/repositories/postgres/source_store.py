@@ -1354,23 +1354,29 @@ class SourceStore:
                 (source_id,),
             ).fetchone()["count"]
         )
+        # 三个 run 子查询原本相关到 ``o.source_id``,写在 EXISTS 内部,于是每扫到一行
+        # knowledge_objects 就重算一遍;而它们只依赖 source_id,对这次调用是**常量**。
+        # 提到 EXISTS 外面直接绑定 %s 之后:KO 存在性是一次半连接(idx_knowledge_objects_source
+        # 首行即停),run 判定是 ≤3 次索引探针(idx_extraction_runs_source_created)。
+        # ``o.source_id<>''`` 保留在 EXISTS 内:等值连接把它传递到绑定参数上,与原查询
+        # 逐字等价(绑定的 id 为空串时两版都判 false)。批量兄弟见 sources_from_rows。
         kg_extracted = bool(
             connection.execute(
                 "SELECT EXISTS(SELECT 1 FROM knowledge_objects o "
-                "WHERE o.source_id=%s AND o.source_id<>'' AND COALESCE(("
+                "WHERE o.source_id=%s AND o.source_id<>'') AND COALESCE(("
                 "SELECT r.status FROM extraction_runs r "
-                "WHERE r.source_id=o.source_id AND r.run_type='kg' "
+                "WHERE r.source_id=%s AND r.run_type='kg' "
                 "ORDER BY r.created_at DESC,r.ordinal DESC LIMIT 1"
                 "),'completed')='completed' AND NOT ("
                 "COALESCE((SELECT r.error_message FROM extraction_runs r "
-                " WHERE r.source_id=o.source_id AND r.run_type='kg' "
+                " WHERE r.source_id=%s AND r.run_type='kg' "
                 " ORDER BY r.created_at DESC,r.ordinal DESC LIMIT 1),'') "
                 " ~ 'windows_failed=[1-9][0-9]*/[0-9]+' OR "
                 "strpos(COALESCE((SELECT r.error_message FROM extraction_runs r "
-                " WHERE r.source_id=o.source_id AND r.run_type='kg' "
+                " WHERE r.source_id=%s AND r.run_type='kg' "
                 " ORDER BY r.created_at DESC,r.ordinal DESC LIMIT 1),''),"
-                " 'retry_incomplete=1')>0)) AS ok",
-                (source_id,),
+                " 'retry_incomplete=1')>0) AS ok",
+                (source_id, source_id, source_id, source_id),
             ).fetchone()["ok"]
         )
         meta = (
@@ -1435,18 +1441,41 @@ class SourceStore:
                 batch,
             ).fetchall():
                 element_counts[row["source_id"]] = int(row["c"])
+            # kg_extracted 的驱动集是**页内的 source id**,不是 knowledge_objects 行。
+            #
+            # 原查询 ``SELECT DISTINCT o.source_id FROM knowledge_objects o WHERE ...``
+            # 把三个 run 子查询挂在每一行 KO 上;它们只依赖 ``o.source_id``,对固定
+            # source 是常量,而 DISTINCT 又把结果折回 source 粒度——所以「每行算一次」
+            # 的开销纯属浪费。现场数据:4.9 万 source 的 notebook 取一页 50 条,页内
+            # 共 33.9 万 KO 行,这一条查询 3650ms、101 万次子查询执行、508 万 shared
+            # buffers,是来源页签 3.3s 墙钟的大头。
+            #
+            # 改写后每个 source 至多 3 次 run 索引探针(idx_extraction_runs_source_created)
+            # 加 1 次 KO 半连接(idx_knowledge_objects_source,首行即停),一页 50 个 id
+            # 约 200 次探测取代百万次。``o.source_id<>''`` 留在 EXISTS 内:等值连接把它
+            # 传递到 page_sources.source_id 上,与原查询逐字等价。
+            #
+            # 这不依赖「每个 source 只有一条 run」这一生产观测:latest-run 的取法
+            # (同一条 ORDER BY + LIMIT 1)一字未动,多条 run 时语义与原查询一致。
+            #
+            # CTE 用 ``WITH x(col) AS (VALUES ...)`` 而不是 LATERAL 或 ``AS t(col)``
+            # 表别名列名:前者两端都支持,后两者 SQLite 没有,而这条查询与 SQLite 侧
+            # 同名方法是同构的一对(见那边同一处注释)。
+            page_values = ",".join("(%s)" for _ in batch)
             for row in connection.execute(
-                "SELECT DISTINCT o.source_id FROM knowledge_objects o "
-                f"WHERE o.source_id IN ({marker}) AND o.source_id<>'' "
+                f"WITH page_sources(source_id) AS (VALUES {page_values}) "
+                "SELECT source_id FROM page_sources "
+                "WHERE EXISTS(SELECT 1 FROM knowledge_objects o "
+                " WHERE o.source_id=page_sources.source_id AND o.source_id<>'') "
                 "AND COALESCE((SELECT r.status FROM extraction_runs r "
-                "WHERE r.source_id=o.source_id AND r.run_type='kg' "
+                "WHERE r.source_id=page_sources.source_id AND r.run_type='kg' "
                 "ORDER BY r.created_at DESC,r.ordinal DESC LIMIT 1),'completed')='completed' "
                 "AND NOT (COALESCE((SELECT r.error_message FROM extraction_runs r "
-                " WHERE r.source_id=o.source_id AND r.run_type='kg' "
+                " WHERE r.source_id=page_sources.source_id AND r.run_type='kg' "
                 " ORDER BY r.created_at DESC,r.ordinal DESC LIMIT 1),'') "
                 " ~ 'windows_failed=[1-9][0-9]*/[0-9]+' OR "
                 "strpos(COALESCE((SELECT r.error_message FROM extraction_runs r "
-                " WHERE r.source_id=o.source_id AND r.run_type='kg' "
+                " WHERE r.source_id=page_sources.source_id AND r.run_type='kg' "
                 " ORDER BY r.created_at DESC,r.ordinal DESC LIMIT 1),''),"
                 " 'retry_incomplete=1')>0)",
                 batch,
