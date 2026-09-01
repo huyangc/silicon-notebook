@@ -485,7 +485,10 @@ python3 scripts/diag_retrieval_latency.py --since 24
 耗时事件分桶，输出 chunk FTS/ANN/KNN/索引加载和 KG 候选分段的 P50/P95/max，并把 retrieval-run
 的 FTS timeout/熔断跳过按 Ask、报告 planning、报告 generation 分开计数。scale 工件不在
 `.local/storage/kg_index` 时显式传 `--index-root`。manifest 规模不含水位后的 delta；没有可读
-manifest 的事件进入明确的 `unknown` 桶，不能误判为小库。
+manifest 的事件进入明确的 `unknown` 桶，不能误判为小库。时间窗口扫描会先读最新文件；默认完整
+解码所有可能与窗口相交的按日文件，并在解码前跳过更早的按日归档。若现场更看重诊断耗时而非完整
+窗口覆盖，可用 `--max-input-mb N` 设置解码字节上限；若 `log_scan` 显示 matched 大于 retained，
+应调高 `--max-events`。命中字节或记录上限都会明确报告 `truncated:true`。
 
 ### 超大库的 KNN 早停（`POSTGRES_LEXICAL_KNN_ENABLED`）
 

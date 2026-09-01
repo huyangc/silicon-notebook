@@ -72,6 +72,76 @@ def test_window_and_limit_keep_only_matching_newest_records(tmp_path):
     assert [row["id"] for row in result.records] == ["8", "9"]
     assert result.stats.matched == 4
     assert result.stats.retained == 2
+    assert result.stats.truncated is True
+
+
+def test_window_reads_newest_file_before_old_gzip_exhausts_decoded_budget(tmp_path):
+    old = line("old", "2026-07-20T09:00:00") * 100
+    with gzip.open(tmp_path / "events-2026-07-20.jsonl.gz", "wt", encoding="utf-8") as handle:
+        handle.write(old)
+    (tmp_path / "events-2026-07-21.jsonl").write_text(
+        line("new", "2026-07-21T09:00:00")
+    )
+
+    common = load_common()
+    result = common.read_channel(
+        tmp_path,
+        "events",
+        since_hours=24,
+        now=datetime.fromisoformat("2026-07-21T12:00:00"),
+        max_input_bytes=512,
+    )
+
+    assert [row["id"] for row in result.records] == ["new"]
+    assert result.stats.matched == 1
+    assert result.stats.truncated is True
+
+
+def test_window_can_read_complete_compressed_input_without_a_byte_cap(tmp_path):
+    old = line("old", "2026-07-20T13:00:00") * 100
+    with gzip.open(tmp_path / "events-2026-07-20.jsonl.gz", "wt", encoding="utf-8") as handle:
+        handle.write(old)
+    (tmp_path / "events-2026-07-21.jsonl").write_text(
+        line("new", "2026-07-21T09:00:00")
+    )
+
+    common = load_common()
+    result = common.read_channel(
+        tmp_path,
+        "events",
+        since_hours=24,
+        now=datetime.fromisoformat("2026-07-21T12:00:00"),
+        max_input_bytes=None,
+    )
+
+    assert [row["id"] for row in result.records] == ["old", "new"]
+    assert result.stats.parsed == 101
+    assert result.stats.truncated is False
+
+
+def test_window_reverse_scan_limit_does_not_evict_newer_files(tmp_path):
+    (tmp_path / "events-2026-07-20.jsonl").write_text(
+        line("old-1", "2026-07-20T09:00:00")
+        + line("old-2", "2026-07-20T10:00:00")
+    )
+    (tmp_path / "events-2026-07-21.jsonl").write_text(
+        line("new-1", "2026-07-21T09:00:00")
+        + line("new-2", "2026-07-21T10:00:00")
+    )
+
+    common = load_common()
+    result = common.read_channel(
+        tmp_path,
+        "events",
+        since_hours=48,
+        limit=2,
+        now=datetime.fromisoformat("2026-07-21T12:00:00"),
+    )
+
+    assert [row["id"] for row in result.records] == ["new-1", "new-2"]
+    assert result.stats.matched == 4
+    assert result.stats.retained == 2
+    assert result.stats.truncated is True
 
 
 def test_http_path_normalization_does_not_return_identifiers():

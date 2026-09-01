@@ -381,37 +381,52 @@ def _record_key(channel: str, record: Dict[str, Any]) -> str:
 def read_channel(log_dir: Path, channel: str, *, since_hours: Optional[float] = None,
                  limit: int = 50000, now: Optional[datetime] = None,
                  explicit: Optional[Path] = None,
-                 max_input_bytes: int = _DEFAULT_MAX_INPUT_BYTES,
+                 max_input_bytes: Optional[int] = _DEFAULT_MAX_INPUT_BYTES,
                  deadline: Optional[float] = None) -> ChannelRecords:
     discovered = discover_channel_files(Path(log_dir), channel, explicit)
+    cutoff = None if since_hours is None else (now or datetime.now()).timestamp() - since_hours * 3600
+    cutoff_day = None if cutoff is None else datetime.fromtimestamp(cutoff).strftime("%Y-%m-%d")
+    candidates = tuple(
+        path for path in discovered
+        if cutoff_day is None
+        or not (match := _DATED.match(path.name))
+        or match.group("day") >= cutoff_day
+    )
+    byte_limit = None if max_input_bytes is None else max(1, int(max_input_bytes))
     selected = []
     selected_bytes = 0
     oversized = False
-    for path in reversed(discovered):
-        try:
-            size = path.stat().st_size
-        except OSError:
-            size = 0
-        if selected and selected_bytes + size > max(1, int(max_input_bytes)):
-            break
-        selected.append(path)
-        oversized = oversized or size > max(1, int(max_input_bytes))
-        selected_bytes += min(size, max(1, int(max_input_bytes)))
-        if selected_bytes >= max(1, int(max_input_bytes)):
-            break
-    paths = tuple(sorted(selected, key=lambda path: discovered.index(path)))
+    if byte_limit is None:
+        selected.extend(candidates)
+    else:
+        for path in reversed(candidates):
+            try:
+                size = path.stat().st_size
+            except OSError:
+                size = 0
+            if selected and selected_bytes + size > byte_limit:
+                break
+            selected.append(path)
+            oversized = oversized or size > byte_limit
+            selected_bytes += min(size, byte_limit)
+            if selected_bytes >= byte_limit:
+                break
+    paths = tuple(sorted(selected, key=lambda path: candidates.index(path)))
+    newest_files_first = since_hours is not None
+    if newest_files_first:
+        paths = tuple(reversed(paths))
     retained = deque(maxlen=max(1, int(limit)))
     seen = set()
     parsed = matched = malformed = duplicates = 0
-    truncated = len(paths) < len(discovered) or oversized
+    truncated = len(paths) < len(candidates) or oversized
     decoded_bytes = 0
     stop = False
-    cutoff = None if since_hours is None else (now or datetime.now()).timestamp() - since_hours * 3600
     for path in paths:
+        path_retained = deque(maxlen=retained.maxlen) if newest_files_first else retained
         for record, bad, raw_bytes in iter_jsonl_file(
             path,
-            tail_bytes=None if str(path).endswith(".gz") else max_input_bytes,
-            max_input_bytes=max(1, int(max_input_bytes)) - decoded_bytes,
+            tail_bytes=None if str(path).endswith(".gz") else byte_limit,
+            max_input_bytes=None if byte_limit is None else byte_limit - decoded_bytes,
             deadline=deadline,
         ):
             if raw_bytes < 0:
@@ -440,11 +455,17 @@ def read_channel(log_dir: Path, channel: str, *, since_hours: Optional[float] = 
                 duplicates += 1
                 continue
             seen.add(key)
+            path_retained.append(record)
             if len(seen) > max(2 * int(limit), 1000):
                 seen = {_record_key(channel, row) for row in retained}
-            retained.append(record)
+                seen.update(_record_key(channel, row) for row in path_retained)
+        if newest_files_first:
+            room = retained.maxlen - len(retained)
+            for record in reversed(tuple(path_retained)[-room:] if room else ()):
+                retained.appendleft(record)
         if stop:
             break
+    truncated = truncated or matched - duplicates > len(retained)
     return ChannelRecords(
         tuple(retained),
         ScanStats(len(paths), parsed, matched, malformed, duplicates, len(retained), truncated),

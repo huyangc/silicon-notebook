@@ -106,3 +106,9 @@ def test_streaming_manifest_scan_handles_key_split_across_read_chunks(tmp_path):
     )
 
     assert diag.load_indexed_chunk_counts(tmp_path) == {"nb-split": 42}
+
+
+def test_cli_reads_the_complete_dated_window_by_default():
+    args = diag._parser().parse_args([])
+
+    assert args.max_input_mb == 0

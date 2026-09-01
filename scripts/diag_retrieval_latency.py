@@ -296,6 +296,12 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--since", type=float, default=24.0, help="lookback hours")
     parser.add_argument("--max-events", type=int, default=50_000)
+    parser.add_argument(
+        "--max-input-mb",
+        type=int,
+        default=0,
+        help="decoded log input cap in MiB (default: 0, read the complete dated window)",
+    )
     parser.add_argument("--medium-chunks", type=int, default=100_000)
     parser.add_argument("--large-chunks", type=int, default=500_000)
     return parser
@@ -306,10 +312,14 @@ def main(argv: list[str] | None = None) -> int:
     if (
         args.since <= 0
         or args.max_events <= 0
+        or args.max_input_mb < 0
         or args.medium_chunks <= 0
         or args.large_chunks <= args.medium_chunks
     ):
-        print("error: require since/max-events/medium-chunks > 0 and large > medium")
+        print(
+            "error: require since/max-events/medium-chunks > 0, "
+            "max-input-mb >= 0, and large > medium"
+        )
         return 2
     index_root = args.index_root or args.local / "storage" / "kg_index"
     channel = diag_common.read_channel(
@@ -317,6 +327,9 @@ def main(argv: list[str] | None = None) -> int:
         "events",
         since_hours=float(args.since),
         limit=int(args.max_events),
+        max_input_bytes=(
+            None if args.max_input_mb == 0 else int(args.max_input_mb) * 1024 * 1024
+        ),
     )
     print(
         build_report(
