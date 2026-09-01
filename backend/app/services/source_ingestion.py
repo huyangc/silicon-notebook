@@ -1435,6 +1435,19 @@ class SourceIngestionService:
         long it has been running.
         """
         source = self.sources.get_source(source_id)
+        with model_artifact_scope(
+            notebook_id=source.notebook_id,
+            parent_id=source.id,
+        ):
+            return self._process_source_scoped(source, hooks)
+
+    def _process_source_scoped(
+        self,
+        source,
+        hooks: SourcePipelineHooks,
+    ) -> SourceSummary:
+        """Run the source pipeline under its entry-time artifact generation."""
+        source_id = source.id
         notebook_id = source.notebook_id
         # 注册+准入+冻结在 helper 内配对完成;成功即已计入笔记本级在飞集,
         # 由下面 finally 配对递减(codex #602 R13/R14 P1)。

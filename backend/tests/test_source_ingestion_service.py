@@ -47,6 +47,40 @@ def _repository(settings: Settings) -> SQLiteRepository:
     )
 
 
+def test_process_source_freezes_artifact_generation_before_pipeline_content(
+    monkeypatch,
+):
+    from app.services import model_work as model_work_module
+    from app.services.model_work import ModelPriority, make_model_work_context
+
+    epoch = {"value": 4}
+    monkeypatch.setattr(
+        model_work_module,
+        "current_model_artifact_lifecycle_epoch",
+        lambda _notebook_id: epoch["value"],
+    )
+    service = object.__new__(SourceIngestionService)
+    source = types.SimpleNamespace(id="src-scope", notebook_id="nb-scope")
+    service.sources = types.SimpleNamespace(get_source=lambda _source_id: source)
+    contexts = []
+
+    def run_pipeline(_self, scoped_source, _hooks):
+        assert scoped_source is source
+        epoch["value"] = 5
+        contexts.append(make_model_work_context(
+            workload_id="source_summary",
+            priority=ModelPriority.BACKGROUND,
+        ))
+        return "done"
+
+    service._process_source_scoped = types.MethodType(run_pipeline, service)
+
+    assert service.process_source("src-scope", object()) == "done"
+    assert contexts[0].notebook_id == "nb-scope"
+    assert contexts[0].parent_id == "src-scope"
+    assert contexts[0].artifact_lifecycle_epoch == 4
+
+
 @pytest.fixture
 def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
