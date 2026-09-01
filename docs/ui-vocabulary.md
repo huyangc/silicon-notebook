@@ -41,6 +41,8 @@
 | 能力档（capability scope，`ask:execute` 这类协议串同样不上屏） | 按动作说人话（提问 / 查资料 / 添加资料…） |
 | 回答风格偏好（search profile, user_profiles.search_profile_json） | 我的回答偏好 |
 | consult_memory（模型主动拉取检索经验的 reflect 动作／trace 步） | 回想 |
+| spreadsheet analysis / workbook analysis（用户界面） | Excel 专业分析 |
+| analysis issue / parse failure（管理员界面） | 解析问题 |
 
 ## 解释与例外
 

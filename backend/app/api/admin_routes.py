@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from app.api.deps import (
     _bearer_token,
     admin_query_repository,
+    analysis_issue_repository,
     extension_toggle_repository,
     get_current_user,
     model_status_service,
@@ -22,6 +23,8 @@ from app.models.admin import (
     ActivityReport,
     ActivityResponse,
     ActivitySource,
+    AnalysisIssue,
+    AnalysisIssueResponse,
     AdminExtension,
     AdminExtensionContribution,
     AdminExtensionRuntimeResult,
@@ -468,6 +471,27 @@ def get_admin_user_activity(
     )
 
 
+@router.get("/admin/analysis-issues", response_model=AnalysisIssueResponse)
+def list_admin_analysis_issues(
+    owner_id: str = Query(""),
+    status: Literal["", "open", "resolved"] = Query(""),
+    category: Literal["", "source_parse", "spreadsheet_analysis"] = Query(""),
+    limit: int = Query(200, ge=1, le=500),
+    user: UserProfile = Depends(get_current_user),
+    issue_store: Any = Depends(analysis_issue_repository),
+) -> AnalysisIssueResponse:
+    """Automatic parse/analysis failures. Admin-only and strictly read-only."""
+    if user.role != "admin":
+        raise user_error(403, "仅管理员可查看解析问题")
+    items = issue_store.list_issues(
+        owner_id=owner_id,
+        status=status,
+        category=category,
+        limit=limit,
+    )
+    return AnalysisIssueResponse(items=[AnalysisIssue(**item) for item in items])
+
+
 def _notebook_owned_by_user(user_id: str, notebook_id: str) -> bool:
     """口径:notebooks.created_by = user_id AND status != 'copying'。
 
@@ -499,6 +523,36 @@ def get_admin_user_notebook_sources(
     if not _notebook_owned_by_user(user_id, notebook_id):
         raise HTTPException(status_code=404, detail="notebook not found")
     return repository().list_sources_page(notebook_id, offset, limit)
+
+
+@router.get(
+    "/admin/users/{user_id}/notebooks/{notebook_id}/sources/{source_id}",
+    response_model=ActivitySource,
+)
+def get_admin_user_notebook_source(
+    user_id: str,
+    notebook_id: str,
+    source_id: str,
+    user: UserProfile = Depends(get_current_user),
+) -> ActivitySource:
+    """Exact read-only source projection for admin analysis deep links."""
+    _require_activity_enabled()
+    _require_self_or_admin(user, user_id)
+    if not _notebook_owned_by_user(user_id, notebook_id):
+        raise HTTPException(status_code=404, detail="notebook not found")
+    repo = repository()
+    if source_id not in set(repo.all_visible_source_ids(notebook_id)):
+        raise HTTPException(status_code=404, detail="source not found")
+    try:
+        detail = repo.get_source(source_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="source not found") from None
+    if detail.notebook_id != notebook_id:
+        raise HTTPException(status_code=404, detail="source not found")
+    raw = detail.model_dump()
+    raw["source_type"] = raw.pop("type", "")
+    raw["parse_failed"] = detail.parse_status == "failed"
+    return _activity_source_item(raw)
 
 
 @router.get("/admin/users/{user_id}/asks/{job_id}", response_model=AskDetail)

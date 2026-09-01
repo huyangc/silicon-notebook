@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 import weakref
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping
 
@@ -50,6 +51,7 @@ from app.services.notebook_templates import NOTEBOOK_TEMPLATES
 # cannot evict every source/element/KG match from that total.
 _MEMORY_SEARCH_HIT_CAP = 8
 _SEARCH_HIT_EXCERPT_CHARS = 400
+_log = logging.getLogger("silicon_notebook.notebook_catalog")
 
 
 def _created_label(value: str) -> str:
@@ -617,6 +619,7 @@ class NotebookCatalogService:
         queries: QueryStorePort,
         identity: IdentityStorePort,
         storage_dir: Callable[[], Path],
+        analysis_artifacts: Any = None,
     ) -> None:
         """``storage_dir`` is a zero-arg callable resolving the LIVE storage
         root (knowhow-tables PR-2+3 Task 14) — a callable rather than a Path
@@ -633,6 +636,7 @@ class NotebookCatalogService:
         self._queries = queries
         self._identity = identity
         self._storage_dir = storage_dir
+        self._analysis_artifacts = analysis_artifacts
         self.kg_building: set = set()
         # Injected post-construction by RepositoryRuntime.wire_source_ingestion()
         # once SourceIngestionService exists (mirrors memory_retriever below —
@@ -712,6 +716,16 @@ class NotebookCatalogService:
         # route — which reaches this service directly, not via the facade —
         # gets the cleanup too).
         with diagnostics.diagnostic_phase("notebook_delete.files"):
+            analysis_artifacts = getattr(self, "_analysis_artifacts", None)
+            if analysis_artifacts is not None:
+                try:
+                    analysis_artifacts.redact_notebook(
+                        notebook_id, occurred_at=datetime.now(timezone.utc).isoformat()
+                    )
+                except Exception as exc:  # noqa: BLE001 - database deletion committed
+                    _log.warning(
+                        "analysis artifact redaction failed (%s)", type(exc).__name__
+                    )
             for file_path in file_paths:
                 _delete_source_file(file_path)
             _delete_notebook_asset_dir(self._storage_dir(), notebook_id)

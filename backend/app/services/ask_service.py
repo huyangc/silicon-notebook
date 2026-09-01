@@ -496,6 +496,7 @@ class AskService:
         notebooks,
         schemas,
         source_titles: Callable[[List[str]], Dict[str, str]],
+        spreadsheet_analysis=None,
         knowhow_store=None,
         memory_retriever=None,
         current_user_id: Callable[[], str] = lambda: "",
@@ -540,6 +541,7 @@ class AskService:
         self.notebooks = notebooks
         self.schemas = schemas
         self.source_titles = source_titles
+        self.spreadsheet_analysis = spreadsheet_analysis
         self.knowhow_store = knowhow_store
         self.memory_retriever = memory_retriever
         self.current_user_id = current_user_id
@@ -3284,6 +3286,64 @@ class AskService:
             on_step(step)
         return suggestions
 
+    def _spreadsheet_reasoning_results(
+        self,
+        prepared,
+        runtime,
+        trace: list,
+    ) -> list:
+        """Run the optional workbook lane against the already-frozen scope."""
+        if self.spreadsheet_analysis is None:
+            return []
+        try:
+            notebook_id = prepared.notebook_id
+            hidden_source_ids = set(
+                self.ask_engine_hidden_sources(notebook_id, prepared.user_id)
+            )
+            participant_notebook_ids = tuple(dict.fromkeys((
+                notebook_id,
+                *self.ask_engine_participant_notebooks(notebook_id),
+            )))
+            source_refs = tuple(
+                (participant_notebook_id, source_id)
+                for participant_notebook_id in participant_notebook_ids
+                for source_id in self.ask_engine_visible_sources(
+                    participant_notebook_id
+                )
+                if (
+                    runtime.scope is None
+                    or runtime.scope.allows(participant_notebook_id, source_id)
+                )
+                and not (
+                    participant_notebook_id == notebook_id
+                    and source_id in hidden_source_ids
+                )
+            )
+            results, step = self.spreadsheet_analysis.analyze(
+                notebook_id=notebook_id,
+                source_ids=tuple(
+                    source_id
+                    for source_notebook_id, source_id in source_refs
+                    if source_notebook_id == notebook_id
+                ),
+                source_refs=source_refs,
+                question=prepared.research_question,
+                planner_client=self.model_clients.chat("reasoning_agent"),
+                cancel_event=runtime.cancellation,
+            )
+            if step is not None:
+                trace.append(step)
+                if runtime.trace_sink:
+                    runtime.trace_sink(step)
+            return results
+        except AskCancelled:
+            raise
+        except Exception as exc:  # noqa: BLE001 - optional analysis lane
+            self.event_log.logger.warning(
+                "spreadsheet reasoning lane failed (%s)", type(exc).__name__
+            )
+            return []
+
     def _run_reasoning_stage(self, prepared, runtime):
         """Orchestrate one prepared reasoning Ask across the typed stages.
 
@@ -3320,8 +3380,7 @@ class AskService:
         notebook_id = prepared.notebook_id
         question = prepared.question
         conversation_id = prepared.conversation_id
-        history = prepared.history
-        reasoning_history = prepared.history
+        history = reasoning_history = prepared.history
         style_block = prepared.style_block
         from app.models.ask import QueryIntentContract
 
@@ -3338,11 +3397,9 @@ class AskService:
             duration_ms=prepared.intent_trace_duration_ms,
         )
         user_id = prepared.user_id
-        job_id = prepared.job_id
-        asked_at = prepared.asked_at
+        job_id, asked_at = prepared.job_id, prepared.asked_at
         retrieval_effort = prepared.retrieval_effort
-        on_trace = runtime.trace_sink
-        cancel_event = runtime.cancellation
+        on_trace, cancel_event = runtime.trace_sink, runtime.cancellation
         pre_trace: list[TraceStep] = [intent_step]
         intent_streamed = False
 
@@ -3747,6 +3804,8 @@ class AskService:
                 reasoning_outline = []
                 reasoning_outline_evidence = []
 
+            spreadsheet_results = self._spreadsheet_reasoning_results(prepared, runtime, trace)
+
             # 检索之后、合成之前的取消检查。草稿阶段做的第一件事是按笔记本
             # 读 schema 覆盖层(一次真实 I/O);历史检查排在那次读取**之后**,
             # 于是被取消的一轮会先白付一次立刻丢弃的读。提到边界之前结局仍是
@@ -3790,6 +3849,7 @@ class AskService:
                     # getattr 语义,只是把它算在编排侧、不让整个检索结果对象
                     # 跨过边界。
                     candidate_manifest=getattr(result, "baseline_manifest", None),
+                    spreadsheet_results=tuple(spreadsheet_results),
                 ),
                 runtime,
             )
@@ -3835,6 +3895,61 @@ class AskService:
         # 持久化边界仍由 core 独占:最后一次取消检查与原子 save 都在
         # ``_commit_reasoning_draft`` 里,任何 stage 实现都够不到它们。
         return self._commit_reasoning_draft(draft, runtime, prepared)
+
+    def _add_sheet_prompt(
+        self,
+        structured_block: str,
+        structured_map: dict,
+        spreadsheet_results: list,
+        answer_client,
+    ) -> str:
+        """Append a bounded workbook preview without endangering result cards."""
+        if not spreadsheet_results or not answer_client.configured:
+            return structured_block
+        try:
+            from app.services.spreadsheet_analysis import spreadsheet_prompt_block
+
+            spreadsheet_block, spreadsheet_map = spreadsheet_prompt_block(
+                spreadsheet_results,
+                preview_rows=self.settings.spreadsheet_analysis_prompt_rows,
+                max_bytes=self.settings.spreadsheet_analysis_prompt_bytes,
+            )
+            if spreadsheet_block:
+                structured_map.update(spreadsheet_map)
+                return (
+                    f"{structured_block}\n\n{spreadsheet_block}"
+                    if structured_block else spreadsheet_block
+                )
+        except Exception as exc:  # noqa: BLE001 - cards survive prompt degradation
+            self.event_log.logger.warning(
+                "spreadsheet prompt rendering failed (%s)", type(exc).__name__
+            )
+        return structured_block
+
+    @staticmethod
+    def _append_spreadsheet_citations(citations: list, results: list) -> None:
+        """Attach at most one stable row locator per workbook result."""
+        seen: set[tuple[str, str]] = set()
+        for result_set in results:
+            citation = next(
+                (row.citation for row in result_set.rows if row.citation), None
+            )
+            if citation is None:
+                continue
+            identity = (citation.source_id, citation.element_id)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            citations.append(citation)
+
+    @staticmethod
+    def _reasoning_result_sets(structured_batch, collections: list, sheets: list) -> list:
+        """Keep the response union ordering explicit outside the draft monolith."""
+        return (
+            (structured_batch.result_sets if structured_batch else [])
+            + collections
+            + sheets
+        )
 
     def _draft_reasoning_response(self, stage, runtime):
         """The shipped ``ResponseDraftStage`` body: evidence -> response draft.
@@ -3892,6 +4007,7 @@ class AskService:
         chunks = list(stage.chunks)
         chains = list(stage.chains)
         enumerations = list(stage.enumerations)
+        spreadsheet_results = list(stage.spreadsheet_results)
         collection_map_text = stage.collection_map_text
         reasoning_outline = list(stage.outline)
         reasoning_outline_evidence = list(stage.outline_evidence)
@@ -4056,6 +4172,8 @@ class AskService:
             except Exception:
                 typed_collection_result_sets = []
                 enumeration_block_dropped = False
+        structured_block = self._add_sheet_prompt(
+            structured_block, structured_map, spreadsheet_results, answer_client)
         def _synth_reasoning():
             # counts_sink 在模型调用前就被 _answer_reasoning 填充:合成模型
             # 抛错/吐畸形 JSON 时,synthesis 步仍能报出真实装配计数而非全零。
@@ -4339,6 +4457,8 @@ class AskService:
         if enumerations and synthesis_ran and not anchors:
             citations = []
 
+        self._append_spreadsheet_citations(citations, spreadsheet_results)
+
         # 本段附图: 统一挂在**锚点最终确定之后**——按节合成(sectioned)会整体
         # 换掉 anchors,在它之前富化等于富化一批被丢弃的对象;citations 也要等
         # 到上面那条枚举清零判完,否则会给一批马上要被扔掉的引用白发一次读取。
@@ -4543,13 +4663,8 @@ class AskService:
             reasoning_trace=trace or None,
             intent=intent_contract,
             retrieval_effort=retrieval_effort,
-            # Knowhow 的整表批(kind="knowhow")在前,本轮类型化集合清单
-            # (kind="collection")在后——顺序与 result_sets 判别 union 的
-            # 追加顺序一致(见 app.models.ask.AskResponse.result_sets),T6
-            # 按 kind 分派渲染,不依赖顺序本身携带语义。
-            result_sets=(
-                (structured_batch.result_sets if structured_batch else [])
-                + typed_collection_result_sets
+            result_sets=self._reasoning_result_sets(
+                structured_batch, typed_collection_result_sets, spreadsheet_results
             ),
             result_coverage=(
                 structured_batch.coverage() if structured_batch else None
@@ -4580,4 +4695,3 @@ class AskService:
             asked_at=prepared.asked_at,
             baseline_manifest=final_baseline_manifest,
         )
-

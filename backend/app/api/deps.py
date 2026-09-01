@@ -35,6 +35,10 @@ def wish_repository() -> WishStorePort:
 def admin_query_repository() -> AdminQueryRepository:
     return repository()._runtime.queries  # type: ignore[attr-defined]
 
+def analysis_issue_repository():
+    """Filesystem issue projection; deliberately not a facade mutation seat."""
+    return repository()._runtime.analysis_artifacts  # type: ignore[attr-defined]
+
 def notebook_catalog_repository() -> NotebookCatalogRepository:
     return repository()._runtime.catalog  # type: ignore[attr-defined]
 

@@ -24,7 +24,7 @@ test("formatLastActive 处理空值与格式", () => {
 test("logsDrillHref 编码 owner", () => {
   assert.equal(
     logsDrillHref("user-abc123"),
-    "/dev/logs?owner=user-abc123&view=activity&activity_type=ask",
+    "/admin/usage?sheet=questions&owner=user-abc123",
   );
 });
 

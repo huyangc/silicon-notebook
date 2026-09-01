@@ -1358,6 +1358,131 @@
           "title": "AgentTokenSummary",
           "type": "object"
         },
+        "AnalysisIssue": {
+          "description": "Content-minimal read-only projection of one automatic failure record.",
+          "properties": {
+            "artifact_available": {
+              "default": false,
+              "title": "Artifact Available",
+              "type": "boolean"
+            },
+            "category": {
+              "enum": [
+                "source_parse",
+                "spreadsheet_analysis"
+              ],
+              "title": "Category",
+              "type": "string"
+            },
+            "code": {
+              "default": "",
+              "title": "Code",
+              "type": "string"
+            },
+            "created_at": {
+              "default": "",
+              "title": "Created At",
+              "type": "string"
+            },
+            "expires_at": {
+              "default": "",
+              "title": "Expires At",
+              "type": "string"
+            },
+            "file_name": {
+              "default": "",
+              "title": "File Name",
+              "type": "string"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "notebook_deleted": {
+              "default": false,
+              "title": "Notebook Deleted",
+              "type": "boolean"
+            },
+            "notebook_id": {
+              "default": "",
+              "title": "Notebook Id",
+              "type": "string"
+            },
+            "notebook_name": {
+              "default": "",
+              "title": "Notebook Name",
+              "type": "string"
+            },
+            "owner_id": {
+              "default": "",
+              "title": "Owner Id",
+              "type": "string"
+            },
+            "resolved_at": {
+              "default": "",
+              "title": "Resolved At",
+              "type": "string"
+            },
+            "source_deleted": {
+              "default": false,
+              "title": "Source Deleted",
+              "type": "boolean"
+            },
+            "source_id": {
+              "default": "",
+              "title": "Source Id",
+              "type": "string"
+            },
+            "source_title": {
+              "default": "",
+              "title": "Source Title",
+              "type": "string"
+            },
+            "source_type": {
+              "default": "",
+              "title": "Source Type",
+              "type": "string"
+            },
+            "status": {
+              "enum": [
+                "open",
+                "resolved"
+              ],
+              "title": "Status",
+              "type": "string"
+            },
+            "summary": {
+              "default": "",
+              "title": "Summary",
+              "type": "string"
+            },
+            "updated_at": {
+              "default": "",
+              "title": "Updated At",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "category",
+            "status"
+          ],
+          "title": "AnalysisIssue",
+          "type": "object"
+        },
+        "AnalysisIssueResponse": {
+          "properties": {
+            "items": {
+              "items": {
+                "$ref": "#/components/schemas/AnalysisIssue"
+              },
+              "title": "Items",
+              "type": "array"
+            }
+          },
+          "title": "AnalysisIssueResponse",
+          "type": "object"
+        },
         "AnswerAnchor": {
           "properties": {
             "definition": {
@@ -1991,7 +2116,8 @@
                 "discriminator": {
                   "mapping": {
                     "collection": "#/components/schemas/TypedCollectionResult",
-                    "knowhow": "#/components/schemas/StructuredKnowhowResult"
+                    "knowhow": "#/components/schemas/StructuredKnowhowResult",
+                    "spreadsheet": "#/components/schemas/SpreadsheetAnalysisResult"
                   },
                   "propertyName": "kind"
                 },
@@ -2001,6 +2127,9 @@
                   },
                   {
                     "$ref": "#/components/schemas/TypedCollectionResult"
+                  },
+                  {
+                    "$ref": "#/components/schemas/SpreadsheetAnalysisResult"
                   }
                 ]
               },
@@ -10514,6 +10643,121 @@
           "title": "SourceSummary",
           "type": "object"
         },
+        "SpreadsheetAnalysisResult": {
+          "description": "A calculation receipt and its bounded tabular result.\n\nThis is neither ranked evidence nor a Knowhow table. ``coverage`` states\nhow much of the selected worksheet region the deterministic executor read;\n``rows`` is only the bounded wire preview of the calculated output.",
+          "properties": {
+            "columns": {
+              "items": {
+                "$ref": "#/components/schemas/StructuredResultColumn"
+              },
+              "title": "Columns",
+              "type": "array"
+            },
+            "coverage": {
+              "$ref": "#/components/schemas/StructuredResultCoverage"
+            },
+            "formula_cells": {
+              "default": 0,
+              "minimum": 0.0,
+              "title": "Formula Cells",
+              "type": "integer"
+            },
+            "kind": {
+              "const": "spreadsheet",
+              "default": "spreadsheet",
+              "title": "Kind",
+              "type": "string"
+            },
+            "operation": {
+              "title": "Operation",
+              "type": "string"
+            },
+            "range": {
+              "title": "Range",
+              "type": "string"
+            },
+            "rows": {
+              "items": {
+                "$ref": "#/components/schemas/SpreadsheetResultRow"
+              },
+              "title": "Rows",
+              "type": "array"
+            },
+            "sheet": {
+              "title": "Sheet",
+              "type": "string"
+            },
+            "source_file_name": {
+              "default": "",
+              "title": "Source File Name",
+              "type": "string"
+            },
+            "source_id": {
+              "title": "Source Id",
+              "type": "string"
+            },
+            "source_title": {
+              "default": "",
+              "title": "Source Title",
+              "type": "string"
+            },
+            "unresolved_formula_cells": {
+              "default": 0,
+              "minimum": 0.0,
+              "title": "Unresolved Formula Cells",
+              "type": "integer"
+            },
+            "warnings": {
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 20,
+              "title": "Warnings",
+              "type": "array"
+            }
+          },
+          "required": [
+            "source_id",
+            "sheet",
+            "range",
+            "operation",
+            "coverage"
+          ],
+          "title": "SpreadsheetAnalysisResult",
+          "type": "object"
+        },
+        "SpreadsheetResultRow": {
+          "description": "One bounded deterministic row produced by spreadsheet execution.",
+          "properties": {
+            "cells": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "title": "Cells",
+              "type": "object"
+            },
+            "citation": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/Citation"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "position": {
+              "minimum": 1.0,
+              "title": "Position",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "position"
+          ],
+          "title": "SpreadsheetResultRow",
+          "type": "object"
+        },
         "StructuredBatchCoverage": {
           "description": "Collection-level coverage, distinct from each selected table's status.",
           "properties": {
@@ -11861,6 +12105,89 @@
           "summary": "Root"
         }
       },
+      "/api/admin/analysis-issues": {
+        "get": {
+          "description": "Automatic parse/analysis failures. Admin-only and strictly read-only.",
+          "operationId": "list_admin_analysis_issues_api_admin_analysis_issues_get",
+          "parameters": [
+            {
+              "in": "query",
+              "name": "owner_id",
+              "required": false,
+              "schema": {
+                "default": "",
+                "title": "Owner Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "query",
+              "name": "status",
+              "required": false,
+              "schema": {
+                "default": "",
+                "enum": [
+                  "",
+                  "open",
+                  "resolved"
+                ],
+                "title": "Status",
+                "type": "string"
+              }
+            },
+            {
+              "in": "query",
+              "name": "category",
+              "required": false,
+              "schema": {
+                "default": "",
+                "enum": [
+                  "",
+                  "source_parse",
+                  "spreadsheet_analysis"
+                ],
+                "title": "Category",
+                "type": "string"
+              }
+            },
+            {
+              "in": "query",
+              "name": "limit",
+              "required": false,
+              "schema": {
+                "default": 200,
+                "maximum": 500,
+                "minimum": 1,
+                "title": "Limit",
+                "type": "integer"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/AnalysisIssueResponse"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "List Admin Analysis Issues"
+        }
+      },
       "/api/admin/cache": {
         "get": {
           "description": "响应缓存现状：总量、命中率、按模型分布。仅 admin，纯读。\n\nby_tag 按模型名分组——决定「换了哪个模型服务、该清哪一份」时看的就是它。\n命中/未命中是**进程内**计数（重启归零）：缓存实例按路径记忆化，所以这是全进程\n的口径，而不是某一个 LLM client 自己的那一份。",
@@ -12562,6 +12889,64 @@
             }
           },
           "summary": "Get Admin User Notebook Sources"
+        }
+      },
+      "/api/admin/users/{user_id}/notebooks/{notebook_id}/sources/{source_id}": {
+        "get": {
+          "description": "Exact read-only source projection for admin analysis deep links.",
+          "operationId": "get_admin_user_notebook_source_api_admin_users__user_id__notebooks__notebook_id__sources__source_id__get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "user_id",
+              "required": true,
+              "schema": {
+                "title": "User Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "source_id",
+              "required": true,
+              "schema": {
+                "title": "Source Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/ActivitySource"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Get Admin User Notebook Source"
         }
       },
       "/api/admin/users/{user_id}/reset-password": {

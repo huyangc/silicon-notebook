@@ -103,6 +103,18 @@ ASCII_TERMS = {
     "Memory": re.compile(r"(?<![A-Za-z])memory(?![A-Za-z])", re.IGNORECASE),
     "schema": re.compile(r"(?<![A-Za-z])schemas?(?![A-Za-z])", re.IGNORECASE),
     "deprecated": re.compile(r"(?<![A-Za-z])deprecated(?![A-Za-z])", re.IGNORECASE),
+    "spreadsheet analysis": re.compile(
+        r"(?<![A-Za-z])spreadsheet analysis(?![A-Za-z])", re.IGNORECASE
+    ),
+    "workbook analysis": re.compile(
+        r"(?<![A-Za-z])workbook analysis(?![A-Za-z])", re.IGNORECASE
+    ),
+    "analysis issue": re.compile(
+        r"(?<![A-Za-z])analysis issues?(?![A-Za-z])", re.IGNORECASE
+    ),
+    "parse failure": re.compile(
+        r"(?<![A-Za-z])parse failures?(?![A-Za-z])", re.IGNORECASE
+    ),
     # —— 图谱质量分析视图（批 1）新增。这些挡的是**中文文案里夹带英文黑话**;裸标识符
     # (`const canonicalId`) 不在扫描面内——本守卫只在含中文的单元里匹配,且先剥注释/
     # 标识符/插值。

@@ -1,7 +1,29 @@
-.usage-page { max-width: 1180px; margin: 0 auto; padding: 24px; }
+.usage-page { max-width: 1440px; margin: 0 auto; padding: 24px; }
 .usage-page h1 { font-size: 20px; margin-bottom: 16px; }
 .usage-empty { color: var(--muted, #666); }
 .usage-description { margin: 4px 0 14px; color: var(--muted, #666); font-size: 14px; }
+.usage-sheet-tabs { display: flex; gap: 4px; margin: 0 0 16px; border-bottom: 1px solid var(--border, #e5e7eb); }
+.usage-sheet-tabs button {
+  padding: 8px 14px; border: 0; border-bottom: 2px solid transparent;
+  background: transparent; color: var(--muted, #666); cursor: pointer; font: inherit;
+}
+.usage-sheet-tabs button[aria-current="page"] { border-bottom-color: var(--accent, #2563eb); color: var(--accent, #2563eb); font-weight: 600; }
+.usage-analysis-sheet { min-width: 0; }
+.usage-analysis-toolbar {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 10px 16px;
+  margin-bottom: 12px; padding: 10px 12px; border: 1px solid var(--border, #e5e7eb);
+  border-radius: 8px; background: var(--hover, #f9fafb); font-size: 13px;
+}
+.usage-analysis-toolbar label { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; }
+.usage-analysis-toolbar select { padding: 5px 26px 5px 8px; border: 1px solid var(--border, #d1d5db); border-radius: 6px; background: var(--surface, #fff); color: inherit; }
+.usage-analysis-toolbar span, .usage-analysis-note { color: var(--muted, #666); font-size: 13px; }
+.usage-analysis-note { margin: 0 0 12px; }
+.usage-analysis-empty { padding: 24px !important; text-align: center !important; color: var(--muted, #666); }
+.usage-issues-table td { white-space: normal; vertical-align: top; line-height: 1.45; }
+.usage-issues-table td:nth-child(4) { min-width: 260px; }
+.usage-issue-status { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; }
+.usage-issue-status-open { background: #fff4e5; color: #8a5a10; }
+.usage-issue-status-resolved { background: #edf9f2; color: #177a55; }
 .usage-table-wrap { overflow-x: auto; }
 .usage-table { width: 100%; border-collapse: collapse; font-size: 14px; }
 .usage-table th, .usage-table td {

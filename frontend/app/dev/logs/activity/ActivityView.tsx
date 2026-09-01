@@ -9,6 +9,7 @@ import {
   FORBIDDEN_SENTINEL,
   fetchUserActivity,
   fetchUserAskDetail,
+  fetchUserNotebookSource,
   fetchUserNotebookSources,
 } from "./api.ts";
 import { mergeActivityPages } from "./format.ts";
@@ -30,6 +31,22 @@ function initialActivityType(): ActivityTypeFilter {
   if (typeof window === "undefined") return "";
   const value = new URLSearchParams(window.location.search).get("activity_type");
   return value === "ask" || value === "source" || value === "report" ? value : "";
+}
+
+function initialSourceTarget(): {
+  ownerId: string;
+  notebookId: string;
+  sourceId: string;
+} {
+  if (typeof window === "undefined") {
+    return { ownerId: "", notebookId: "", sourceId: "" };
+  }
+  const params = new URLSearchParams(window.location.search);
+  return {
+    ownerId: params.get("owner") || "",
+    notebookId: params.get("notebook_id") || "",
+    sourceId: params.get("source_id") || "",
+  };
 }
 
 /**
@@ -55,6 +72,7 @@ export function ActivityView({
   since,
   until,
   now,
+  fixedActivityType,
 }: {
   /** 已解析成具体 id 的被查看用户（顶部范围条选「我自己」时是当前用户自己的 id）。 */
   userId: string;
@@ -70,6 +88,8 @@ export function ActivityView({
   until?: string;
   /** 只为测试注入确定的“现在”；生产不传，时间格式化件各自用 new Date()。 */
   now?: Date;
+  /** 嵌入专用分析页时固定类型，并隐藏会把用户带离该页用途的类型切换。 */
+  fixedActivityType?: Exclude<ActivityTypeFilter, "">;
 }) {
   const [notebooks, setNotebooks] = useState<AdminUserNotebook[]>([]);
   const [notebooksLoading, setNotebooksLoading] = useState(false);
@@ -79,7 +99,15 @@ export function ActivityView({
   const [notebooksFailure, setNotebooksFailure] = useState("");
   const [forbidden, setForbidden] = useState(false);
   const [notebookId, setNotebookId] = useState(ALL_NOTEBOOKS);
-  const [activityType, setActivityType] = useState<ActivityTypeFilter>(initialActivityType);
+  const [activityType, setActivityType] = useState<ActivityTypeFilter>(
+    fixedActivityType ?? initialActivityType,
+  );
+  const sourceTarget = useMemo(initialSourceTarget, []);
+  const sourceTargetKeyRef = useRef("");
+  const sourceTargetAttemptRef = useRef(-1);
+  const sourceTargetFailedRef = useRef(false);
+  const sourceTargetGenerationRef = useRef(0);
+  const [sourceTargetAttempt, setSourceTargetAttempt] = useState(0);
   const [expanded, setExpanded] = useState<string[]>([]);
   const [sources, setSources] = useState<Record<string, SourceListState>>({});
 
@@ -130,6 +158,10 @@ export function ActivityView({
     setForbidden(false);
     sourcesGenerationRef.current = {};
   }, [userId]);
+
+  useEffect(() => {
+    if (fixedActivityType) setActivityType(fixedActivityType);
+  }, [fixedActivityType]);
 
   const loadNotebooks = useCallback(() => {
     if (!userId) {
@@ -336,6 +368,73 @@ export function ActivityView({
   }, []);
 
   useEffect(() => {
+    const targetKey = [
+      userId,
+      sourceTarget.ownerId,
+      sourceTarget.notebookId,
+      sourceTarget.sourceId,
+    ].join("\u0000");
+    if (
+      !userId
+      || sourceTarget.ownerId !== userId
+      || !sourceTarget.notebookId
+      || !sourceTarget.sourceId
+    ) {
+      sourceTargetGenerationRef.current += 1;
+      sourceTargetKeyRef.current = "";
+      sourceTargetAttemptRef.current = -1;
+      sourceTargetFailedRef.current = false;
+      return;
+    }
+    const alreadyAttempted = sourceTargetKeyRef.current === targetKey
+      && sourceTargetAttemptRef.current === sourceTargetAttempt;
+    if (alreadyAttempted) {
+      if (notebookId !== sourceTarget.notebookId) {
+        sourceTargetGenerationRef.current += 1;
+      }
+      return;
+    }
+    if (notebookId !== sourceTarget.notebookId) {
+      // A deep link that already started is consumed. Switching notebooks must
+      // invalidate its late response, not pull the operator back to the old scope.
+      if (sourceTargetKeyRef.current === targetKey) {
+        sourceTargetGenerationRef.current += 1;
+        return;
+      }
+      setNotebookId(sourceTarget.notebookId);
+      return;
+    }
+    const generation = ++sourceTargetGenerationRef.current;
+    sourceTargetKeyRef.current = targetKey;
+    sourceTargetAttemptRef.current = sourceTargetAttempt;
+    sourceTargetFailedRef.current = false;
+    const fresh = () => sourceTargetGenerationRef.current === generation
+      && sourceTargetKeyRef.current === targetKey
+      && sourceTargetAttemptRef.current === sourceTargetAttempt;
+    fetchUserNotebookSource(
+      userId, sourceTarget.notebookId, sourceTarget.sourceId,
+    )
+      .then((source) => {
+        if (!fresh()) return;
+        sourceTargetFailedRef.current = false;
+        setSelected(source);
+      })
+      .catch((cause) => {
+        if (!fresh()) return;
+        sourceTargetFailedRef.current = true;
+        if (isForbidden(cause)) setForbidden(true);
+        else setError(toUserMessage(cause, "来源详情加载失败，请重试"));
+      });
+  }, [notebookId, sourceTarget, sourceTargetAttempt, userId]);
+
+  const retryActivity = useCallback(() => {
+    if (sourceTargetFailedRef.current) {
+      setSourceTargetAttempt((previous) => previous + 1);
+    }
+    void reload();
+  }, [reload]);
+
+  useEffect(() => {
     if (!selected || selected.type !== "ask" || !userId) {
       setAskDetail(null);
       setAskDetailLoading(false);
@@ -412,10 +511,11 @@ export function ActivityView({
           loading={pending || loading}
           now={now}
           onLoadMore={() => void loadMore()}
-          onRetryActivity={() => void reload()}
+          onRetryActivity={retryActivity}
           onActivityTypeChange={selectActivityType}
           onSelect={selectItem}
           selectedKey={selectedKey}
+          showTypeFilter={!fixedActivityType}
         />
         <ActivityDetail
           askDetail={askDetail}

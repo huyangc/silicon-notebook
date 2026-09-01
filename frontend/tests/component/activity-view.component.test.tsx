@@ -5,6 +5,7 @@ import { expect, test, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   fetchUserActivity: vi.fn(),
   fetchUserAskDetail: vi.fn(),
+  fetchUserNotebookSource: vi.fn(),
   fetchUserNotebookSources: vi.fn(),
   fetchUserNotebooks: vi.fn(),
 }));
@@ -13,6 +14,7 @@ vi.mock("../../app/dev/logs/activity/api.ts", () => ({
   FORBIDDEN_SENTINEL: "forbidden",
   fetchUserActivity: mocks.fetchUserActivity,
   fetchUserAskDetail: mocks.fetchUserAskDetail,
+  fetchUserNotebookSource: mocks.fetchUserNotebookSource,
   fetchUserNotebookSources: mocks.fetchUserNotebookSources,
 }));
 vi.mock("../../app/admin/usage/notebooks.ts", () => ({
@@ -138,6 +140,82 @@ function view() {
 }
 
 
+test("解析问题深链通过管理员只读端点精确打开来源详情", async () => {
+  window.history.replaceState(
+    {},
+    "",
+    "/dev/logs?view=activity&owner=user-1&activity_type=source&notebook_id=nb-1&source_id=src-1",
+  );
+  mocks.fetchUserNotebooks.mockResolvedValue(NOTEBOOKS);
+  mocks.fetchUserActivity.mockResolvedValue(page([]));
+  mocks.fetchUserNotebookSource.mockResolvedValue(streamSource());
+
+  view();
+
+  expect(await screen.findByRole("heading", { name: "季度报告" })).toBeInTheDocument();
+  expect(mocks.fetchUserNotebookSource).toHaveBeenCalledWith(
+    "user-1", "nb-1", "src-1",
+  );
+  expect(mocks.fetchUserActivity).toHaveBeenLastCalledWith(
+    "user-1",
+    expect.objectContaining({ activityType: "source", notebookId: "nb-1" }),
+  );
+  window.history.replaceState({}, "", "/dev/logs");
+});
+
+
+test("解析问题深链的迟到详情不会跨到另一个笔记本范围", async () => {
+  const user = userEvent.setup();
+  const stale = deferred<ActivitySource>();
+  window.history.replaceState(
+    {},
+    "",
+    "/dev/logs?view=activity&owner=user-1&activity_type=source&notebook_id=nb-1&source_id=src-1",
+  );
+  mocks.fetchUserNotebooks.mockResolvedValue(NOTEBOOKS);
+  mocks.fetchUserActivity.mockResolvedValue(page([]));
+  mocks.fetchUserNotebookSource.mockReturnValue(stale.promise);
+
+  view();
+
+  await waitFor(() => expect(mocks.fetchUserNotebookSource).toHaveBeenCalledTimes(1));
+  await user.click(await screen.findByRole("button", { name: /^笔记本二/ }));
+  stale.resolve(streamSource());
+
+  await waitFor(() => {
+    expect(mocks.fetchUserActivity).toHaveBeenLastCalledWith(
+      "user-1", expect.objectContaining({ notebookId: "nb-2" }),
+    );
+  });
+  expect(screen.queryByRole("heading", { name: "季度报告" })).not.toBeInTheDocument();
+  window.history.replaceState({}, "", "/dev/logs");
+});
+
+
+test("解析问题深链详情失败后可就地重试", async () => {
+  const user = userEvent.setup();
+  window.history.replaceState(
+    {},
+    "",
+    "/dev/logs?view=activity&owner=user-1&activity_type=source&notebook_id=nb-1&source_id=src-1",
+  );
+  mocks.fetchUserNotebooks.mockResolvedValue(NOTEBOOKS);
+  mocks.fetchUserActivity.mockResolvedValue(page([]));
+  mocks.fetchUserNotebookSource
+    .mockRejectedValueOnce(new Error("boom"))
+    .mockResolvedValueOnce(streamSource());
+
+  view();
+
+  expect(await screen.findByText("来源详情加载失败，请重试")).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "重试" }));
+
+  expect(await screen.findByRole("heading", { name: "季度报告" })).toBeInTheDocument();
+  expect(mocks.fetchUserNotebookSource).toHaveBeenCalledTimes(2);
+  window.history.replaceState({}, "", "/dev/logs");
+});
+
+
 test("左栏列出该用户的笔记本与界面词计数（提问用 questions，不是会话容器数）", async () => {
   mocks.fetchUserNotebooks.mockResolvedValue(NOTEBOOKS);
   mocks.fetchUserActivity.mockResolvedValue(page([]));
@@ -147,6 +225,25 @@ test("左栏列出该用户的笔记本与界面词计数（提问用 questions�
   expect(row.textContent).toContain("来源 2");
   expect(row.textContent).toContain("提问 3"); // questions=3，不是 conversations=1
   expect(row.textContent).toContain("报告 0");
+});
+
+test("嵌入提问分析页时固定为提问且隐藏活动类型切换", async () => {
+  mocks.fetchUserNotebooks.mockResolvedValue(NOTEBOOKS);
+  mocks.fetchUserActivity.mockResolvedValue(page([ask("ask-1", "分析问题")]))
+  render(
+    <ActivityView
+      fixedActivityType="ask"
+      now={NOW}
+      scopeKey='["admin-usage-questions","user-1"]'
+      userId="user-1"
+    />,
+  );
+
+  expect(await screen.findByText("分析问题")).toBeInTheDocument();
+  expect(mocks.fetchUserActivity).toHaveBeenCalledWith(
+    "user-1", expect.objectContaining({ activityType: "ask" }),
+  );
+  expect(screen.queryByRole("group", { name: "按活动类型筛选" })).not.toBeInTheDocument();
 });
 
 

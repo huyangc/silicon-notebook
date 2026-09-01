@@ -163,6 +163,48 @@ def test_activity_allowed_for_admin_any_user(client):
     assert resp.status_code == 200
 
 
+def test_analysis_issue_log_is_admin_only_read_only_and_content_minimal(
+    client, tmp_path
+):
+    regular = _auth(client, 66)
+    user_id = _me(client, regular)
+    admin = _auth_admin(client)
+    repo = _repo()
+    repo.storage_dir = tmp_path / "analysis-storage"
+    source_file = tmp_path / "broken.xlsx"
+    source_file.write_bytes(b"private workbook bytes")
+    repo._runtime.analysis_artifacts.record_issue(
+        notebook_id="nb-analysis",
+        notebook_name="Private Notebook",
+        owner_id=user_id,
+        source_id="src-analysis",
+        source_title="Private Workbook",
+        file_name="private.xlsx",
+        source_type="xlsx",
+        category="spreadsheet_analysis",
+        code="SPREADSHEET_INVALID_OOXML",
+        summary="无法读取工作簿。",
+        occurred_at="2026-08-31T01:00:00+00:00",
+        source_path=str(source_file),
+    )
+
+    forbidden = client.get("/api/admin/analysis-issues", headers=regular)
+    assert forbidden.status_code == 403
+
+    response = client.get(
+        "/api/admin/analysis-issues",
+        params={"owner_id": user_id, "status": "open"},
+        headers=admin,
+    )
+    assert response.status_code == 200
+    [item] = response.json()["items"]
+    assert item["owner_id"] == user_id
+    assert item["artifact_available"] is True
+    assert item["code"] == "SPREADSHEET_INVALID_OOXML"
+    assert "source_path" not in item
+    assert "source_hash" not in item
+
+
 def test_activity_type_query_returns_only_questions(client):
     a = _auth(client, 33)
     uid_a = _me(client, a)
@@ -428,6 +470,35 @@ def test_notebook_sources_allowed_for_admin(client):
     nb_id = _create_notebook(client, a, "NB-a2")
     resp = client.get(f"/api/admin/users/{uid_a}/notebooks/{nb_id}/sources", headers=admin)
     assert resp.status_code == 200
+
+
+def test_exact_source_detail_is_read_only_and_admin_accessible(client):
+    admin = _auth_admin(client)
+    owner = _auth(client, 33)
+    owner_id = _me(client, owner)
+    notebook_id = _create_notebook(client, owner, "Private notebook")
+    with _repo()._write() as db:
+        _insert_source(
+            db,
+            "src-private",
+            notebook_id,
+            "2026-08-01T10:00:00",
+            title="Private source",
+            file_name="private.xlsx",
+        )
+
+    response = client.get(
+        f"/api/admin/users/{owner_id}/notebooks/{notebook_id}/sources/src-private",
+        headers=admin,
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["id"] == "src-private"
+    assert body["notebook_id"] == notebook_id
+    assert body["display_title"] == "Private source"
+    assert "file_path" not in body
+    assert "error_message" not in body
 
 
 def test_notebook_sources_not_owned_by_target_user_404(client):

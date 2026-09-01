@@ -911,6 +911,16 @@ SILICON_NOTEBOOK_CORS_ORIGINS
 后端启动时读取，只影响本进程启动后删除的笔记本；已经生成的摘要继续使用行上已写定的
 `expires_at`。
 
+Excel 专业分析由部署项 `SPREADSHEET_ANALYSIS_ENABLED` 总控；摄取护栏是
+`SPREADSHEET_ANALYSIS_MAX_CELLS`、`SPREADSHEET_ANALYSIS_MAX_SHEETS`、
+`SPREADSHEET_ANALYSIS_MAX_CELL_CHARS`，问答输出/prompt 护栏是
+`SPREADSHEET_ANALYSIS_RESULT_ROWS`、`SPREADSHEET_ANALYSIS_RESULT_CELLS`、
+`SPREADSHEET_ANALYSIS_RESULT_BYTES`、`SPREADSHEET_ANALYSIS_PROMPT_ROWS`、
+`SPREADSHEET_ANALYSIS_PROMPT_BYTES`、`SPREADSHEET_ANALYSIS_PLANNER_CATALOG_BYTES` 与
+`SPREADSHEET_ANALYSIS_PLANNER_TIMEOUT_SECONDS`。它复用既有 `reasoning_agent` workload，
+不新增模型绑定。`ANALYSIS_FAILURE_RETENTION_DAYS` 同时控制问题记录强读闸和隔离副本寿命。
+精确默认值与校验范围见[产品与 API 参考](./product-and-api_zh.md#excel-专业分析与解析问题自动归档)。
+
 `MODEL_JSON_REPAIR_MODE` 只作用于 `reasoning_agent` 与 `ask_answer`。`off` 保持严格拒绝，
 `shadow` 记录响应是否可安全修复但仍拒绝，`on` 接受保守修复（默认）。它不会补全被截断的
 输出，也不会放松 schema、类型或正文安全校验；修复事件不含业务内容，并用模型调用的安全

@@ -26,6 +26,9 @@ import {
   type SortDirection,
 } from "./format.ts";
 import { fetchUserNotebooks, notebookStatusLabel, type AdminUserNotebook } from "./notebooks.ts";
+import { QuestionAnalysisSheet } from "./QuestionAnalysisSheet.tsx";
+import { AnalysisIssuesSheet } from "./AnalysisIssuesSheet.tsx";
+import "../../dev/logs/logs.css";
 import "./usage.css";
 
 type State =
@@ -37,6 +40,13 @@ type State =
 type NotebookCacheEntry = AdminUserNotebook[] | "loading" | "error";
 
 const PAGE_SIZE_OPTIONS = [20, 50, 100] as const;
+type UsageSheet = "users" | "questions" | "issues";
+
+function initialSheet(): UsageSheet {
+  if (typeof window === "undefined") return "users";
+  const value = new URLSearchParams(window.location.search).get("sheet");
+  return value === "questions" || value === "issues" ? value : "users";
+}
 
 type SortableHeaderProps = {
   label: string;
@@ -265,6 +275,7 @@ export default function AdminUsagePage() {
   const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState<number>(PAGE_SIZE_OPTIONS[0]);
+  const [sheet, setSheet] = useState<UsageSheet>(initialSheet);
 
   useEffect(() => {
     (async () => {
@@ -492,10 +503,31 @@ export default function AdminUsagePage() {
     resetRowInteractions();
   }
 
+  function changeSheet(next: UsageSheet) {
+    setSheet(next);
+    resetRowInteractions();
+    const params = new URLSearchParams(window.location.search);
+    if (next === "users") params.delete("sheet");
+    else params.set("sheet", next);
+    if (next === "users") params.delete("owner");
+    const query = params.toString();
+    window.history.replaceState(null, "", query ? `?${query}` : window.location.pathname);
+  }
+
   return (
     <main className="usage-page">
       <PageHeader title="用户使用总览" />
-      <p className="usage-description">查看用户用量，配置文档数量上限，并授予或撤销管理员权限。</p>
+      <p className="usage-description">查看用户用量、提问记录与系统自动归档的解析问题。</p>
+      <nav className="usage-sheet-tabs" aria-label="用户总览页签">
+        <button type="button" aria-current={sheet === "users" ? "page" : undefined} onClick={() => changeSheet("users")}>用户列表</button>
+        <button type="button" aria-current={sheet === "questions" ? "page" : undefined} onClick={() => changeSheet("questions")}>提问分析</button>
+        <button type="button" aria-current={sheet === "issues" ? "page" : undefined} onClick={() => changeSheet("issues")}>解析问题</button>
+      </nav>
+      {sheet === "questions" ? (
+        <QuestionAnalysisSheet users={state.rows} currentUserId={currentUserId} />
+      ) : sheet === "issues" ? (
+        <AnalysisIssuesSheet users={state.rows} />
+      ) : (<>
       <div className="usage-settings-bar">
         <label className="usage-settings-label" htmlFor="upload-limit-default">普通用户默认文档上限</label>
         <input
@@ -757,6 +789,7 @@ export default function AdminUsagePage() {
           <button type="button" disabled={currentPage === pageCount} onClick={() => changePage(pageCount)}>末页</button>
         </div>
       </nav>
+      </>)}
     </main>
   );
 }

@@ -55,7 +55,7 @@ Retrieval 的 point-specific proposal source 与通用 admission reader 是两�
 - **SQLite 持久化**：`backend/app/repositories/sqlite/` 下是 identity / notebook / sharing / source / chunk / embedding / knowledge / governance / unified-KG / ask-state / report / memory / wish / query / index-projection 等领域 store。这些 store 独占 product SQL 与 raw row selection；既定 application/query component 可组装 domain/application projection，例如 `NotebookSummaryQuery.from_row`。全局许愿墙由独立 `WishStorePort` 持有写入、列表和单用户点赞切换；跨问答与深度报告的管理员提问汇总仍归只读 `QueryStorePort`，不会把分析查询塞进按用户活动页面的前端拼接逻辑。它们共享唯一的 `SqliteDatabase`（connection factory、WAL/busy_timeout PRAGMA、实例级写锁）。application service 不拼装主业务库 SQL，只保留业务顺序、策略与 transaction seat。`SqliteMigrator` 持有 `SCHEMA_VERSION` 与版本化迁移注册表；启动顺序固定为 migrate → 恢复中断的 merge-review/Ask job → seed 与 admin 原地升级，后两步不进版本闸、每次启动照跑。
 - **删除后的活动分析边界**：SQLite/PostgreSQL notebook store 在删除 notebook 聚合的同一事务、且级联发生前，把可见来源/提问/报告投影到无 notebook 外键的 `retained_user_activity`。该表只承载用户分析所需的归属、问题/提示、显示元数据、状态与删除/到期时间；答案、引用、轨迹、来源元素/正文、报告章节/参考文献继续由原聚合拥有并立即删除。query store 只合并未到期行，self-service 权限仍要求实时 notebook 可读，管理员才可查看删除后摘要。Ask 管理详情把 notebook 生命周期、self-service 的有效读授权链、job/trace 与单条 answer 投影放在同一 adapter 事务，并把锁持有到 API 响应对象组装完，避免删除或撤权提交后仍从先前无锁读取返回正文。启动恢复与下一次删除负责物理清理，`expires_at` 读闸负责精确的逻辑到期；两种 adapter 同形。
 - **来源活动归因边界**：`sources.uploaded_by` 表示真实的可见来源提交者，只用于用户最近活跃；notebook owner 仍拥有文档用量与 owner-only 活动流。Memory/Knowhow 合成来源和深拷贝行不产生上传活动；删除留存同时保存 actor 与 owner，不能拿其中一方代替另一方。
-- **文件系统工件**：`backend/app/repositories/source_files.py`（原始上传文件）与 `backend/app/repositories/filesystem/`（scale/viz 索引工件）。
+- **文件系统工件**：`backend/app/repositories/source_files.py`（原始上传文件）、`backend/app/repositories/filesystem/`（scale/viz 索引工件）与 `backend/app/repositories/analysis_artifacts.py`（Excel 分析快照、解析问题最小元数据和隔离副本）。`AnalysisArtifactStore` 是后两类分析工件的唯一 writer；根目录固定在当前 storage 下的 `analysis-artifacts/`，不进入用户来源目录或业务数据库。管理员只经内容最小化的只读 projection 访问，永远拿不到物理路径或哈希。
 - **业务编排**：application services（摄取、检索、evidence context、Ask、报告、KG lifecycle/governance、分享/深拷贝、scale runtime）由 runtime 组装；service 不直接拼 SQL。SQLite 专用的运维能力（批量 backfill、raw build/fold、诊断投影）归 maintenance adapter，不进入可移植 ports。
 - **消费者契约**：`backend/app/repositories/ports.py` 按消费者划分可执行的小型 Protocol；最小 Protocol-only fake 可运行其声明支持的 Ask chunk/reasoning/stream、report 与 evaluation 路径，不需要 facade 或 private runtime。`app/services/repository.py` 保留为兼容 import 入口。SQLite 与 PostgreSQL adapter 均在同一 ports 后提供实现，application code 不做 dialect 分支。
 - **运行态与启动补偿**：`RepositoryRuntime` 持有或引用组合后的运行态；`REPORT_CANCELLATIONS` 刻意保持 process-global canonical owner，runtime、report coordinator 与 module compatibility function 共享同一 identity reference。其他可变运行态（storage root、embedder、语言 cache、构建集合、Ask cancellation registry 与工件 cache）由 runtime 持有，组合完成后的受支持替换会同步到全部既有消费者。Ask/report 同步提交失败会把已经创建的持久化 job/report 标记为 failed、注销 cancellation entry，再重新抛出提交异常；成功 worker 的顺序及 Ask begin/save/finish/cleanup transaction checkpoint 不变。组合按领域拆分：`RepositoryRuntime.__init__` 只按顺序调用模块级 `_build_*` 领域构造函数（外加它自己的两把 `threading.Lock()`），再把每个返回的 frozen bundle 的字段逐条显式挂到自己身上，一个座位一行。调用顺序即依赖拓扑——构造函数只接收更早的 bundle，绝不接收 runtime 本身，因此写不出回指组合根的环；唯一允许的runtime 绑定输入是窄的迟绑定 callable（当前用户访问器、`ask_service` 访问器与 `_note_ask_completed`）。进程级副作用（scheduler 校验、event logger、`kg_scheduler.initialize`）与那唯一一次持久化 bundle 构造保持原有顺序；`backend/tests/test_repository_runtime_composition.py` 冻结已挂载属性集合并钉住这两条规则。
@@ -112,6 +112,7 @@ created_at, id)` 索引，供有界、按类型的集合枚举（公式/表格/�
 - `report_engine.py` 保留两阶段深度报告的公共编排入口；`services/reports/policy.py` 和 `observability.py` 分别拥有规则与无内容分段事件；`background_jobs.py`、`cancellation.py` 和 repository 中的 job 状态共同管理后台任务与显式取消。
 - `memory_service.py` 与 `memory_retrieval.py` 负责 owner/notebook 隔离的生命周期、revision/provenance、两个检索平面、Agent token policy 与 confirmed-only 正式投影；Memory 不写入 source/chunk/KG 表。
 - `parsers.py`、`structural_markdown.py` 与 `mineru_client.py` 负责 PDF、Markdown、DOCX、PPTX、CSV、XLSX 等来源的结构化解析；FastAPI 进程不直接加载 torch 或 MinerU 模型。
+- `spreadsheet_analysis.py` 是普通 parser 旁边的可选专业编译/执行 lane：摄取阶段用 openpyxl/xlrd 建有界类型化快照，逐步推理阶段最多用既有 `reasoning_agent` 做一次白名单计划，再在本地执行；它不 import Agent SDK、不执行工作簿代码，也不拥有来源状态。编译失败由 `AnalysisArtifactStore` 自动记录，普通解析仍由 `SourceIngestionService` 独立决定成败。
 
 ### 2.4 前端边界
 
@@ -119,6 +120,7 @@ created_at, id)` 索引，供有界、按类型的集合枚举（公式/表格/�
 
 - `workspace-model.ts` 保存共享 API/视图类型与常量。
 - `answer-panel.tsx` 保存答案、引用与 reasoning trace UI。
+- `frontend/app/admin/usage/` 拥有用户总览及其只读「提问分析」「解析问题」页签；它只消费管理员 GET projection，不拥有解析、重试或隔离文件 mutation。`page.tsx` 的 workspace hash 可带一个来源 id，只负责打开仍获授权的笔记本和来源详情。
 - `kg-type-model.ts` 保存内置知识类型文案/样式；`kg-type-mark.tsx` 消费并 re-export 该模型，保存答案与图谱共用的类型标记渲染。
 - `ask-stream.ts`、`ask-reconnect.ts` 等 helper 保存流式问答和恢复行为。
 - `frontend/app/api-client.ts` is the shared transport，负责 base URL、认证 header、JSON/empty/Blob、trusted error、网络失败与 AbortSignal mechanics；七个 domain API module 仍拥有 endpoint path、body、response type 与产品策略。
@@ -210,13 +212,14 @@ Ask/Memory/Knowhow 内容、prompt/model message、SQL 文本/参数、authoriza
 创建 Untitled notebook 并立即打开
   → multipart 或受约束的公开 URL 导入 source
   → parse 为 SourceElement
+  → Excel 来源在同一来源代次锁内编译专业分析快照（失败仅归档问题）
   → chunk / element embedding 后台写入
   → 按 notebook 的 KG opt-in 状态执行或跳过 KG 抽取
   → 抽取时写入 knowledge_objects / knowledge_relations 与证据
   → 标记 unified KG / index 维护状态，由独立维护路径处理
 ```
 
-source 状态沿 `queued → parsing → parsed → extracting → extracted` 推进，失败进入 `failed`。重新解析保留 source 行与原始文件；它替换旧 source element / chunk 及其 embedding，并在重建前删除 extraction run 与 source-derived knowledge。删除复用同一 source-derived cleanup，随后删除 source 行（外键级联 source-owned records）与本地文件。当前代码没有额外的文章产物清理步骤。`extracted` 的 UI 状态不等待后台 element embedding 全部结束。
+source 状态沿 `queued → parsing → parsed → extracting → extracted` 推进，失败进入 `failed`。重新解析保留 source 行与原始文件；它替换旧 source element / chunk 及其 embedding，并在重建前删除 extraction run 与 source-derived knowledge。Excel 快照在 authoritative elements 已提交、来源 parse lock 仍由本代持有时生成，所以快照中的行锚点与本代 elements 一致；专业编译失败不回滚 elements 或改 source 状态。来源 pipeline 终态失败自动归档 `source_parse`，之后用户侧重新解析成功会自动 resolve 并删隔离副本。删除 source/notebook 复用生命周期清理，立即删除快照/隔离副本，并把留存问题迁移到新生成的中性案例 ID 和不含原标识的归档路径后脱敏；管理员没有写入口。`extracted` 的 UI 状态不等待后台 element embedding 全部结束。
 
 ### 3.2 Ask 与 detached job
 
@@ -264,6 +267,8 @@ transport disconnect / navigation / refresh
 base 的权威性另在答案合成 prompt 中表达：如果 personal 与 base 证据矛盾，答案服从 base，并明确披露差异。这是 synthesis policy，不是 retrieval score policy，也不参与 grounding 阈值。
 
 当前 Ask mode registry 的默认路径是 `chunk`；`reasoning` 为严格 KG 路径，迭代执行计划、检索、反思并流式产出 trace。自动界面的请求级 `mode="auto"` 刻意不进入 registry：API 在持久会话/job 创建前调用既有 corpus-blind 问题理解 seam，把结构化意图按封闭规则解析成 `chunk`/`reasoning`，深入分析直接复用该合同作为自动确认；歧义、模型未配置或理解失败保守落 `chunk`。因此持久化 mode、retrieval-run kind 与引擎真源仍只有稳定 registry id，高级界面的具名选择不经过自动路由。退役 mode id 只保留兼容映射，不能改回默认模式。
+
+Excel 专业分析插在 reasoning retrieval 结束与 response-draft seam 之前。它遍历冻结参与集中的当前笔记本及获准挂载库，只读取各自通过 `ActiveSourceScope.allows(owner_notebook_id, source_id)` 的可见来源 ceiling（显式选择，或当次全选快照，再减当前库隐藏合成来源），并按来源所属笔记本读取快照；仅在命中分析意图与已有快照时付 planner 成本。结果作为 `ResponseDraftInput.spreadsheet_results` 进入合成，并同时追加 `AskResponse.result_sets(kind="spreadsheet")` 与可点击来源引用。lane 内任何异常都只记录稳定异常类型并 fail-open，不能放宽 scope、阻塞原回答或修改用户来源。
 
 ### 3.3.1 逐步推理预算与结构化完整枚举
 

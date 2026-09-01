@@ -243,6 +243,7 @@ class ResponseDraftInput:
     completeness_unavailable: bool
     kg_required: bool
     candidate_manifest: object | None
+    spreadsheet_results: tuple[object, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

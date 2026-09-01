@@ -477,6 +477,39 @@ class StructuredKnowhowResult(BaseModel):
     coverage: StructuredResultCoverage
 
 
+class SpreadsheetResultRow(BaseModel):
+    """One bounded deterministic row produced by spreadsheet execution."""
+
+    position: int = Field(ge=1)
+    cells: Dict[str, str] = Field(default_factory=dict)
+    citation: Optional[Citation] = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+
+
+class SpreadsheetAnalysisResult(BaseModel):
+    """A calculation receipt and its bounded tabular result.
+
+    This is neither ranked evidence nor a Knowhow table. ``coverage`` states
+    how much of the selected worksheet region the deterministic executor read;
+    ``rows`` is only the bounded wire preview of the calculated output.
+    """
+
+    kind: Literal["spreadsheet"] = "spreadsheet"
+    source_id: str
+    source_title: str = ""
+    source_file_name: str = Field(default="", exclude_if=lambda value: not value)
+    sheet: str
+    range: str
+    operation: str
+    columns: List[StructuredResultColumn] = Field(default_factory=list)
+    rows: List[SpreadsheetResultRow] = Field(default_factory=list)
+    coverage: StructuredResultCoverage
+    formula_cells: int = Field(default=0, ge=0)
+    unresolved_formula_cells: int = Field(default=0, ge=0)
+    warnings: List[str] = Field(default_factory=list, max_length=20)
+
+
 # Deliberately NOT a reuse of ``StructuredResultCoverage``: that model's
 # ``total_rows`` defaults to ``0``, which cannot express "denominator
 # unknown" (see ``EnumerationCoverage.total`` in
@@ -655,7 +688,11 @@ class AskResponse(BaseModel):
     # that one has ever been observed.
     result_sets: List[
         Annotated[
-            Union[StructuredKnowhowResult, TypedCollectionResult],
+            Union[
+                StructuredKnowhowResult,
+                TypedCollectionResult,
+                SpreadsheetAnalysisResult,
+            ],
             Field(discriminator="kind"),
         ]
     ] = Field(default_factory=list, exclude_if=lambda value: not value)

@@ -1,6 +1,6 @@
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { expect, test, vi } from "vitest";
+import { beforeEach, expect, test, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   fetchMe: vi.fn(),
@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   updateUploadLimitDefault: vi.fn(),
   resetAdminUserPassword: vi.fn(),
   fetchUserNotebooks: vi.fn(),
+  fetchAnalysisIssues: vi.fn(),
 }));
 
 vi.mock("../../app/auth.ts", () => ({ fetchMe: mocks.fetchMe }));
@@ -24,13 +25,24 @@ vi.mock("../../app/admin/usage/api.ts", () => ({
   fetchUploadLimitDefault: mocks.fetchUploadLimitDefault,
   updateUploadLimitDefault: mocks.updateUploadLimitDefault,
   resetAdminUserPassword: mocks.resetAdminUserPassword,
+  fetchAnalysisIssues: mocks.fetchAnalysisIssues,
 }));
 vi.mock("../../app/admin/usage/notebooks.ts", () => ({
   fetchUserNotebooks: mocks.fetchUserNotebooks,
   notebookStatusLabel: (value: string) => value,
 }));
+vi.mock("../../app/admin/usage/QuestionAnalysisSheet.tsx", () => ({
+  QuestionAnalysisSheet: () => <div>提问分析内容</div>,
+}));
+vi.mock("../../app/admin/usage/AnalysisIssuesSheet.tsx", () => ({
+  AnalysisIssuesSheet: () => <div>解析问题内容</div>,
+}));
 
 import AdminUsagePage from "../../app/admin/usage/page";
+
+beforeEach(() => {
+  window.history.replaceState({}, "", "/admin/usage");
+});
 
 const rows = [
   {
@@ -95,6 +107,8 @@ test("管理员可在用户总览中二次确认并授予管理员权限", async
   const target = await targetRow();
   expect(screen.getByRole("columnheader", { name: /提问/ })).toBeInTheDocument();
   expect(screen.queryByRole("columnheader", { name: /对话/ })).not.toBeInTheDocument();
+  expect(screen.queryByRole("columnheader", { name: "Excel 分析次数" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("columnheader", { name: "未解决解析问题数量" })).not.toBeInTheDocument();
 
   await user.click(target.getByRole("button", { name: "设为管理员" }));
   expect(mocks.updateAdminUserRole).not.toHaveBeenCalled();
@@ -105,6 +119,21 @@ test("管理员可在用户总览中二次确认并授予管理员权限", async
   expect(target.getByRole("button", { name: "撤销管理员" })).toBeInTheDocument();
   const builtinRow = screen.getByText("admin").closest("tr");
   expect(within(builtinRow as HTMLTableRowElement).getByText("当前账户")).toBeInTheDocument();
+});
+
+test("用户总览用两个新页签承载只读分析，不给用户列表增加列", async () => {
+  primeCommonMocks();
+  const user = userEvent.setup();
+  render(<AdminUsagePage />);
+  await targetRow();
+
+  await user.click(screen.getByRole("button", { name: "提问分析" }));
+  expect(screen.getByText("提问分析内容")).toBeInTheDocument();
+  expect(window.location.search).toContain("sheet=questions");
+
+  await user.click(screen.getByRole("button", { name: "解析问题" }));
+  expect(screen.getByText("解析问题内容")).toBeInTheDocument();
+  expect(window.location.search).toContain("sheet=issues");
 });
 
 test("管理员可保存普通用户默认文档上限", async () => {

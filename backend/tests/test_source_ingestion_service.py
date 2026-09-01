@@ -194,6 +194,36 @@ def test_upload_without_scheduler_processes_inline(repo, monkeypatch):
     assert calls == [out[0].id]
 
 
+def test_uploaded_xlsx_builds_professional_analysis_snapshot(repo):
+    from openpyxl import Workbook
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Sales"
+    sheet.append(["Region", "Amount"])
+    sheet.append(["East", 10])
+    payload = io.BytesIO()
+    workbook.save(payload)
+
+    nb = repo.create_notebook(NotebookCreate(name="spreadsheet"))
+    [source] = repo.upload_sources(
+        nb.id,
+        [UploadedSourceFile(
+            file_name="sales.xlsx",
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            content=payload.getvalue(),
+        )],
+    )
+
+    manifest = repo._runtime.analysis_artifacts.load_spreadsheet_manifest(
+        nb.id, source.id
+    )
+    assert manifest is not None
+    assert manifest["sheets"][0]["name"] == "Sales"
+    assert manifest["sheets"][0]["headers"] == ["Region", "Amount"]
+    assert manifest["sheets"][0]["rows"][0]["element_id"]
+
+
 def test_parsed_source_and_elements_commit_before_chunk_build(repo, monkeypatch):
     import app.services.parser_chain_execution as parser_execution
     monkeypatch.setattr(
@@ -1007,6 +1037,29 @@ def test_source_deletion_bumps_the_seq_even_if_the_image_cleanup_raises(
     # own invalidate call); the seq gate alone must catch it.
     assert memo.cached_seq(nb.id) == warm_seq
     assert {item["rel_id"] for item in repo.review_queue(nb.id)} == set()
+
+
+def test_source_artifact_redaction_precedes_fallible_file_cleanup(repo, monkeypatch):
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    sid = _seed_source_for_reset(repo, nb.id)
+    service = repo._runtime.source_ingestion
+    redacted: list[tuple[str, str]] = []
+
+    def _redact(notebook_id: str, source_id: str, *, occurred_at: str) -> None:
+        redacted.append((notebook_id, source_id))
+
+    def _fail_file_cleanup(file_path: str) -> None:
+        raise OSError("source cleanup failed")
+
+    monkeypatch.setattr(service.analysis_artifacts, "redact_source", _redact)
+    monkeypatch.setattr(service.source_files, "delete", _fail_file_cleanup)
+
+    with pytest.raises(OSError, match="source cleanup failed"):
+        repo.delete_source(sid)
+
+    assert redacted == [(nb.id, sid)]
+    with pytest.raises(KeyError):
+        repo.get_source(sid)
 
 
 def test_pipeline_status_and_event_order_equals_transaction_phases(repo, monkeypatch):

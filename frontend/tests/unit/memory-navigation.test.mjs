@@ -36,7 +36,7 @@ test("memory count deep-link targets the notebook memory tab", () => {
 
 test("workspace hash round-trips a bare notebook deep-link", () => {
   assert.equal(notebookHash("nb-1"), "#notebook=nb-1");
-  assert.deepEqual(parseWorkspaceHash("#notebook=nb-1"), { notebookId: "nb-1" });
+  assert.deepEqual(parseWorkspaceHash("#notebook=nb-1"), { notebookId: "nb-1", sourceId: "" });
 });
 
 
@@ -44,7 +44,15 @@ test("workspace hash encodes ids that need escaping", () => {
   assert.equal(notebookHash("nb//1?x"), "#notebook=nb%2F%2F1%3Fx");
   assert.deepEqual(
     parseWorkspaceHash(notebookHash("nb//1?x")),
-    { notebookId: "nb//1?x" },
+    { notebookId: "nb//1?x", sourceId: "" },
+  );
+});
+
+test("工作区 hash 可携带只读来源定位", () => {
+  assert.equal(notebookHash("nb-1", "src-2"), "#notebook=nb-1&source=src-2");
+  assert.deepEqual(
+    parseWorkspaceHash("#notebook=nb-1&source=src-2"),
+    { notebookId: "nb-1", sourceId: "src-2" },
   );
 });
 

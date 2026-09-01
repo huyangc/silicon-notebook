@@ -114,6 +114,7 @@ export function ActivityStream({
   loading,
   identityErrored,
   now,
+  showTypeFilter = true,
 }: {
   items: ActivityItem[];
   activityType?: ActivityTypeFilter;
@@ -129,6 +130,7 @@ export function ActivityStream({
    *  不能断言这个范围里没有活动记录，错误已经在页面顶部显示。 */
   identityErrored?: boolean;
   now?: Date;
+  showTypeFilter?: boolean;
 }) {
   return (
     <div className={`activity-stream${activityType === "ask" ? " activity-stream-question-overview" : ""}`}>
@@ -136,7 +138,7 @@ export function ActivityStream({
         <div className="activity-col-head">
           {activityType === "ask" ? "提问概览" : "活动"}
         </div>
-        <div className="activity-type-filter" aria-label="按活动类型筛选" role="group">
+        {showTypeFilter && <div className="activity-type-filter" aria-label="按活动类型筛选" role="group">
           {ACTIVITY_TYPE_OPTIONS.map((option) => (
             <button
               aria-pressed={activityType === option.value}
@@ -149,7 +151,7 @@ export function ActivityStream({
               {option.label}
             </button>
           ))}
-        </div>
+        </div>}
         {activityFailure ? (
           <div className="activity-type-feedback" role="alert">
             <span>{activityFailure}</span>

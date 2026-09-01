@@ -1,6 +1,6 @@
 # silicon-notebook 方案已完成情况
 
-更新日期：2026-08-04
+更新日期：2026-08-31
 
 对照依据：`silicon_notebook_fangan.md`（产品方案）。
 
@@ -10,7 +10,7 @@
 
 ```text
 创建 notebook
--> 上传 PDF / Markdown / DOCX / PPTX source（异步处理）
+-> 上传 PDF / Markdown / DOCX / PPTX / XLSX / XLSM / XLS source（异步处理）
 -> 保存原始文件
 -> 解析为 source elements（元素级 + location_label）
 -> 生成 source summary
@@ -76,6 +76,7 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 - **来源反查索引部署回填可续跑（§6.5 / §11，2026-08-05）**：SQLite v42 / PostgreSQL v20 增加 notebook 级 `source_index_backfills` 执行账本；`backfill-source-index` 每个有界 keyset 页面在同一个短事务里提交索引行、游标和计数，异常重启从最后已提交页面继续，完成代次直接跳过。`kg_mutation_seq` 漂移先以稳定码失败关闭，保持在线快速路径未发布，并在下次运行按新代次重新构建；账本不保存证据正文或异常文本。SQLite 中断/续跑/代次漂移、旧库 v41→v42 快照迁移与 PostgreSQL 对等契约均有回归测试。
 - **所选来源 Shadow 一键部署准备（§6.5 / §11，2026-08-05）**：`scripts/prepare_selected_source_graph.py` 在明确停服、持有中央维护锁的前提下覆盖全部 notebook；指定的既有 env 是权威维护目标，不受 shell 同名变量重定向。脚本顺序续跑来源反查索引和 source-fact 账本，按当前 KG 版本/可见来源数/精确工件格式复验并按需重建 scale/partition 工件，再独立审计来源事实。重复运行会跳过当前有效代次与工件；无正文 receipt 只记录计数、阶段和稳定失败码。任一阶段失败都不改 env；全部数据库/工件检查成功且 repository 关闭后，脚本才在保留原文件 owner/mode/group 的前提下原子启用三个来源图 producer/artifact 开关及不可见 `shadow`，不增加任何 UI 或公开响应字段。
 - source card 可打开 source detail，查看元素级文本，支持手动重解析。
+- **Excel 专业分析与解析问题只读中心（§6.5.1，2026-08-31）**：用户直接上传的 `.xlsx`、`.xlsm`、`.xls` 在普通文档解析之外，于摄取期生成有界、无公式执行的分析快照；reasoning Ask 仅在问题具有分析意图且冻结范围内存在可用快照时，复用 `reasoning_agent` 做一次 8 秒内的受限计划选择，再由本地白名单执行器完成概览、聚合、排序或筛选并返回带来源定位、覆盖行数和公式缓存提示的结果卡。多数据区、超长单元格、损坏/加密文件、工作表/单元格超限等挑战结构不会静默截断或猜测，而是保留普通文本检索并自动记录独立问题、复制隔离副本；成功重解析自动标记解决并删除副本，来源/笔记本删除立即删除副本并只留脱敏摘要，保留期到期自动彻底清除。管理员用户总览保持原用户表列不变，新增「提问分析」「解析问题」两个页签；「查看提问」进入前者，后者可按用户/状态/类型筛选并在来源仍存在时跳转定位。管理员端严格只读，没有重新解析、批量重试、关闭、删除或清除接口，不会对用户笔记本执行动作。标准后端、前端、契约与生产构建验证均已通过。
 - **大型来源详情有界加载（§6.2 / §6.5，2026-08-04）**：浏览器不再一次请求、持有并渲染整篇 `source_elements`；详情首屏按 40 个元素分页，单请求上限 100，可按需加载前后页。Ask/Memory 引用带目标 element 时，后端确定性返回包含它的页并保持高亮定位；本库与挂载参考库共用 active-notebook 参与集授权。旧全量 elements 端点仅保留内部与向后兼容用途。SQLite/PostgreSQL 两个适配器实现同一顺序与窗口语义，并通过分页/anchor/越权回归测试和完整 `scripts/check.sh`。
 - **来源状态轮询**：上传后对非终态 source 每 ~1.5s 轮询 `GET /sources/{id}`（~3min 上限），实时展示 queued→parsing→parsed→extracting→extracted/failed；到达 extracted 自动刷新候选数与 counts。
 - **主栏当前 tab**：问答 (Ask) / 知识库 (Knowledge) / 记忆 (Memory) / 深度报告 (Deep Report)；Scenario / Case / Checklist 已退役。

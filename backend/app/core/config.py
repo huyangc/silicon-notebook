@@ -1217,6 +1217,79 @@ class Settings(BaseSettings):
         validation_alias="USER_ACTIVITY_RETENTION_DAYS",
     )
 
+    # Reasoning-mode professional spreadsheet analysis. Upload-time compilation
+    # is deterministic and cached; Ask pays the planner cost only when both a
+    # selected spreadsheet and an analytical question are present.
+    spreadsheet_analysis_enabled: bool = Field(
+        True, validation_alias="SPREADSHEET_ANALYSIS_ENABLED"
+    )
+    spreadsheet_analysis_max_cells: int = Field(
+        200_000,
+        ge=1_000,
+        le=2_000_000,
+        validation_alias="SPREADSHEET_ANALYSIS_MAX_CELLS",
+    )
+    spreadsheet_analysis_max_sheets: int = Field(
+        32,
+        ge=1,
+        le=256,
+        validation_alias="SPREADSHEET_ANALYSIS_MAX_SHEETS",
+    )
+    spreadsheet_analysis_max_cell_chars: int = Field(
+        20_000,
+        ge=256,
+        le=1_000_000,
+        validation_alias="SPREADSHEET_ANALYSIS_MAX_CELL_CHARS",
+    )
+    spreadsheet_analysis_result_rows: int = Field(
+        100,
+        ge=1,
+        le=1_000,
+        validation_alias="SPREADSHEET_ANALYSIS_RESULT_ROWS",
+    )
+    spreadsheet_analysis_result_cells: int = Field(
+        2_000,
+        ge=10,
+        le=20_000,
+        validation_alias="SPREADSHEET_ANALYSIS_RESULT_CELLS",
+    )
+    spreadsheet_analysis_result_bytes: int = Field(
+        262_144,
+        ge=1_024,
+        le=2_097_152,
+        validation_alias="SPREADSHEET_ANALYSIS_RESULT_BYTES",
+    )
+    spreadsheet_analysis_prompt_rows: int = Field(
+        20,
+        ge=1,
+        le=100,
+        validation_alias="SPREADSHEET_ANALYSIS_PROMPT_ROWS",
+    )
+    spreadsheet_analysis_prompt_bytes: int = Field(
+        65_536,
+        ge=1_024,
+        le=524_288,
+        validation_alias="SPREADSHEET_ANALYSIS_PROMPT_BYTES",
+    )
+    spreadsheet_analysis_planner_catalog_bytes: int = Field(
+        32_768,
+        ge=1_024,
+        le=262_144,
+        validation_alias="SPREADSHEET_ANALYSIS_PLANNER_CATALOG_BYTES",
+    )
+    spreadsheet_analysis_planner_timeout_seconds: float = Field(
+        8.0,
+        ge=1.0,
+        le=60.0,
+        validation_alias="SPREADSHEET_ANALYSIS_PLANNER_TIMEOUT_SECONDS",
+    )
+    analysis_failure_retention_days: int = Field(
+        30,
+        ge=1,
+        le=3650,
+        validation_alias="ANALYSIS_FAILURE_RETENTION_DAYS",
+    )
+
     # PDF parsing via MinerU (decoupled from GPU). Modes:
     #   "off"  -> use local PyMuPDF4LLM (pypdf last resort; no GPU, offline)
     #   "http" -> call a remote MinerU service (mineru-api) at mineru_api_url

@@ -33,6 +33,7 @@ from app.repositories.ports import (
     SharingStorePort,
 )
 from app.repositories.source_files import SourceFileStore
+from app.repositories.analysis_artifacts import AnalysisArtifactStore
 from app.services.agent_profile_job import AgentProfileConsolidationService
 from app.services.retrieval_experience_job import (
     RetrievalExperienceDistillationService,
@@ -76,6 +77,7 @@ from app.services.source_chunking import SourceChunkingService
 from app.services.indexing_pipeline import IndexingPipelineService
 from app.services.source_embedding import SourceEmbeddingService
 from app.services.source_ingestion import SourceIngestionService
+from app.services.spreadsheet_analysis import SpreadsheetAnalysisService
 from app.services.chunk_question_index import ChunkQuestionIndexService
 from app.services.source_graph_primitives import SourceGraphPrimitives
 from app.services.source_subgraph import SourceSubgraphService
@@ -402,6 +404,8 @@ class _NotebookDomain:
 
     notebook_summaries: NotebookSummaryQuery
     source_files: SourceFileStore
+    analysis_artifacts: AnalysisArtifactStore
+    spreadsheet_analysis: SpreadsheetAnalysisService
     catalog: NotebookCatalogService
     # Finished by wire_sharing(): its collaborators (facade _insert_row seat,
     # notebook_copy_stats memo, storage_dir) are facade-bound seams that only
@@ -432,9 +436,21 @@ def _build_notebook_domain(
         seats.database.resolve_path(foundation.settings.storage_dir),
         resolve_path=seats.database.resolve_path,
     )
+    analysis_artifacts = AnalysisArtifactStore(
+        source_files.storage_dir,
+        retention_days=foundation.settings.analysis_failure_retention_days,
+    )
+    spreadsheet_analysis = SpreadsheetAnalysisService(
+        artifacts=analysis_artifacts,
+        settings=foundation.settings,
+        event_log=foundation.event_log,
+        now=foundation.seams.now,
+    )
     return _NotebookDomain(
         notebook_summaries=summaries,
         source_files=source_files,
+        analysis_artifacts=analysis_artifacts,
+        spreadsheet_analysis=spreadsheet_analysis,
         catalog=NotebookCatalogService(
             store=seats.notebook_store,
             summaries=summaries,
@@ -454,6 +470,7 @@ def _build_notebook_domain(
             # observes every post-construction swap (same Callable[[], Path]
             # convention as wire_sharing's NotebookCopyService).
             storage_dir=lambda source_files=source_files: source_files.storage_dir,
+            analysis_artifacts=analysis_artifacts,
         ),
         notebook_copies=None,
         sharing=None,
@@ -950,8 +967,7 @@ def _build_agent_jobs(
 
 
 class RepositoryRuntime:
-    def __init__(
-        self,
+    def __init__(self,
         settings: Settings,
         root_dir: Path,
         seams: RepositoryCompatibilitySeams,
@@ -989,7 +1005,6 @@ class RepositoryRuntime:
         self.gap_consult = foundation.gap_consult
         self.parser_provider_chain = foundation.parser_provider_chain
         self.models = foundation.models
-        # Runtime-private state: no domain owns it; the locks guard wire_*.
         self._closed = False
         self._embedder: Any = None
         self._notebook_languages: dict[str, list[str]] = {}
@@ -1027,6 +1042,8 @@ class RepositoryRuntime:
         notebook = _build_notebook_domain(foundation, seats)
         self.notebook_summaries = notebook.notebook_summaries
         self.source_files = notebook.source_files
+        self.analysis_artifacts = notebook.analysis_artifacts
+        self.spreadsheet_analysis = notebook.spreadsheet_analysis
         self.catalog = notebook.catalog
         self.notebook_copies = notebook.notebook_copies
         self.sharing = notebook.sharing
@@ -1082,9 +1099,8 @@ class RepositoryRuntime:
         self.search_profile_jobs = agents.search_profile_jobs
         # 体检 H4/H5 事件失效插槽(facade 构造期挂转发器;详见 _notify_source_vectors_written)。
         self.on_source_vectors_written: "Callable[[str], None] | None" = None
-        # P2·T2 体检聚合(CheckupService)刻意**不**在这里构造:它依赖 maintenance 的 COUNT +
-        # sqlite QueryStore,而 repository_runtime 是**后端中性**模块(neutrality 守卫禁止它 import
-        # 任何 app.repositories.sqlite/postgres)。故 checkup 由**后端相关的** SQLiteRepository facade
+        # P2·T2 体检聚合(CheckupService)刻意不在这里构造:它依赖 maintenance 的 COUNT +
+        # sqlite QueryStore,而这里是后端中性模块。故 checkup 由 SQLiteRepository facade
         # 懒构造(见 sqlite_repository.py 的 ``checkup`` 属性),复用 facade 的 ``maintenance`` adapter。
         # 本 runtime 只提供两个窄 seam 给它:``_active_source_ids_snapshot``,加上上面的插槽。
         # SQLite maintenance face(CLI/batch 组合根)同理不在 runtime 里——它由 facade 的
@@ -1212,7 +1228,9 @@ class RepositoryRuntime:
         self.set_storage_dir(value)
 
     def set_storage_dir(self, value: Path) -> None:
-        self.source_files.storage_dir = value if isinstance(value, Path) else Path(value)
+        resolved = value if isinstance(value, Path) else Path(value)
+        self.source_files.storage_dir = resolved
+        self.analysis_artifacts.set_storage_dir(resolved)
 
     @property
     def embedder(self) -> Any:
@@ -1477,6 +1495,8 @@ class RepositoryRuntime:
             notebooks=self.notebook_store,
             sources=self.source_store,
             source_files=self.source_files,
+            analysis_artifacts=self.analysis_artifacts,
+            spreadsheet_analysis=self.spreadsheet_analysis,
             chunking=self.source_chunking,
             embedding=self.source_embedding,
             event_log=self.event_log,
@@ -2165,6 +2185,7 @@ class RepositoryRuntime:
                 notebooks=self.catalog,
                 schemas=self.schema_registry,
                 source_titles=self.source_store.source_titles,
+                spreadsheet_analysis=self.spreadsheet_analysis,
                 knowhow_store=self.knowhow_store,
                 memory_retriever=self.memory_retriever,
                 current_user_id=self._current_user_id,

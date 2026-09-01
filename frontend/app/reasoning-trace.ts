@@ -8,6 +8,7 @@ export const TRACE_STEP_LABELS: Record<string, string> = {
   plan: "规划",
   retrieve: "检索",
   enumerate: "枚举",
+  spreadsheet: "表格分析",
   reflect: "反思",
   expand: "扩展",
   ppr: "漫游",

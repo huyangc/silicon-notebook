@@ -31,6 +31,28 @@ export type AdminUserUsage = {
   upload_limit_overridden: boolean;
 };
 
+export type AnalysisIssue = {
+  id: string;
+  category: "source_parse" | "spreadsheet_analysis";
+  status: "open" | "resolved";
+  code: string;
+  summary: string;
+  owner_id: string;
+  notebook_id: string;
+  notebook_name: string;
+  source_id: string;
+  source_title: string;
+  file_name: string;
+  source_type: string;
+  created_at: string;
+  updated_at: string;
+  resolved_at: string;
+  expires_at: string;
+  artifact_available: boolean;
+  source_deleted: boolean;
+  notebook_deleted: boolean;
+};
+
 export type AdminUserRole = "admin" | "user";
 
 export type AdminUserRoleResult = {
@@ -51,6 +73,26 @@ export async function fetchAdminUsers(): Promise<AdminUserUsage[]> {
   if (res.status === 403) await throwForbiddenSentinel(res);
   if (!res.ok) await throwHumanizedHttpError(res, "admin");
   return res.json();
+}
+
+export async function fetchAnalysisIssues(filters: {
+  ownerId?: string;
+  status?: "open" | "resolved" | "";
+  category?: "source_parse" | "spreadsheet_analysis" | "";
+} = {}): Promise<AnalysisIssue[]> {
+  const params = new URLSearchParams();
+  if (filters.ownerId) params.set("owner_id", filters.ownerId);
+  if (filters.status) params.set("status", filters.status);
+  if (filters.category) params.set("category", filters.category);
+  const query = params.toString();
+  const res = await performApiRequest(
+    `/admin/analysis-issues${query ? `?${query}` : ""}`,
+    { tag: "admin" },
+  );
+  if (res.status === 403) await throwForbiddenSentinel(res);
+  if (!res.ok) await throwHumanizedHttpError(res, "admin");
+  const data = (await res.json()) as { items: AnalysisIssue[] };
+  return data.items;
 }
 
 export async function fetchOnlineIds(): Promise<string[]> {
