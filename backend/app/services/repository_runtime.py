@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from app.core.config import Settings
+from app.domain.model_artifacts import set_model_artifact_lifecycle_epoch_reader
 from app.domain.repository import RepositoryCompatibilitySeams
 from app.domain.extensions import (
     AskCompletedObserverCallContext,
@@ -440,6 +441,9 @@ def _build_notebook_domain(
     analysis_artifacts = AnalysisArtifactStore(
         source_files.storage_dir,
         retention_days=foundation.settings.analysis_failure_retention_days,
+    )
+    set_model_artifact_lifecycle_epoch_reader(
+        analysis_artifacts.current_model_artifact_lifecycle_epoch
     )
     set_malformed_response_sink = getattr(
         foundation.models, "set_malformed_response_sink", None

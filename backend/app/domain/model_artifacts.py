@@ -1,45 +1,38 @@
 """Content-private evidence for one model response contract failure."""
 from __future__ import annotations
 
-from contextlib import contextmanager
 from dataclasses import dataclass
 import threading
-from typing import Iterator
+from typing import Callable
 
 
-_LIFECYCLE_LOCK = threading.RLock()
-_LIFECYCLE_EPOCHS: dict[str, int] = {}
+_LIFECYCLE_READER_LOCK = threading.RLock()
+_LIFECYCLE_EPOCH_READER: Callable[[str], int] | None = None
+
+
+def set_model_artifact_lifecycle_epoch_reader(
+    reader: Callable[[str], int] | None,
+) -> None:
+    """Install the storage-owned generation reader during runtime composition."""
+    global _LIFECYCLE_EPOCH_READER
+    with _LIFECYCLE_READER_LOCK:
+        _LIFECYCLE_EPOCH_READER = reader
 
 
 def current_model_artifact_lifecycle_epoch(notebook_id: str) -> int:
-    """Snapshot the notebook generation shared by publication and redaction."""
+    """Snapshot the persisted notebook generation without affecting model work."""
     if not notebook_id:
         return 0
-    with _LIFECYCLE_LOCK:
-        return _LIFECYCLE_EPOCHS.get(notebook_id, 0)
-
-
-@contextmanager
-def model_artifact_publication_scope(notebook_id: str) -> Iterator[int]:
-    """Serialize one case publication with notebook lifecycle cleanup."""
-    with _LIFECYCLE_LOCK:
-        yield _LIFECYCLE_EPOCHS.get(notebook_id, 0)
-
-
-@contextmanager
-def model_artifact_read_scope() -> Iterator[None]:
-    """Keep a complete artifact read on the publication/redaction timeline."""
-    with _LIFECYCLE_LOCK:
-        yield
-
-
-@contextmanager
-def model_artifact_redaction_scope(notebook_id: str) -> Iterator[int]:
-    """Invalidate in-flight generations before deleting retained content."""
-    with _LIFECYCLE_LOCK:
-        next_epoch = _LIFECYCLE_EPOCHS.get(notebook_id, 0) + 1
-        _LIFECYCLE_EPOCHS[notebook_id] = next_epoch
-        yield next_epoch
+    with _LIFECYCLE_READER_LOCK:
+        reader = _LIFECYCLE_EPOCH_READER
+    if reader is None:
+        return 0
+    try:
+        return int(reader(notebook_id))
+    except Exception:
+        # Diagnostics are optional. A failed snapshot uses a value no valid
+        # persisted generation can equal, so publication later fails closed.
+        return -1
 
 
 @dataclass(frozen=True)

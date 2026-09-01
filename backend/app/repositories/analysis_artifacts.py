@@ -7,20 +7,19 @@ never physical paths, and expose no mutation endpoint.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
+import fcntl
+import hashlib
 import json
 import os
 import secrets
 import shutil
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
-from app.domain.model_artifacts import (
-    MalformedModelInteraction,
-    model_artifact_publication_scope,
-    model_artifact_read_scope,
-    model_artifact_redaction_scope,
-)
+from app.domain.model_artifacts import MalformedModelInteraction
 
 
 ISSUE_CATEGORIES = frozenset({
@@ -64,6 +63,7 @@ class AnalysisArtifactStore:
     def __init__(self, storage_dir: Path, *, retention_days: int) -> None:
         self.storage_dir = Path(storage_dir)
         self.retention_days = max(1, int(retention_days))
+        self._lifecycle_thread_lock = threading.RLock()
 
     @property
     def root(self) -> Path:
@@ -71,6 +71,96 @@ class AnalysisArtifactStore:
 
     def set_storage_dir(self, value: Path) -> None:
         self.storage_dir = Path(value)
+
+    @property
+    def _lifecycle_root(self) -> Path:
+        return self.root / ".lifecycle"
+
+    def _lifecycle_epoch_path(self, notebook_id: str) -> Path:
+        digest = hashlib.sha256(notebook_id.encode("utf-8")).hexdigest()
+        return self._lifecycle_root / f"{digest}.epoch"
+
+    @contextmanager
+    def _lifecycle_scope(self, *, exclusive: bool) -> Iterator[None]:
+        """Coordinate artifact access across threads and sibling processes."""
+        with self._lifecycle_thread_lock:
+            lifecycle_root = self._lifecycle_root
+            lifecycle_root.mkdir(parents=True, exist_ok=True)
+            try:
+                lifecycle_root.chmod(0o700)
+            except OSError:
+                pass
+            lock_path = lifecycle_root / "lifecycle.lock"
+            with lock_path.open("a+b") as lock_file:
+                try:
+                    lock_path.chmod(0o600)
+                except OSError:
+                    pass
+                operation = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+                fcntl.flock(lock_file.fileno(), operation)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+    def _read_lifecycle_epoch_unlocked(self, notebook_id: str) -> int:
+        if not notebook_id:
+            return 0
+        path = self._lifecycle_epoch_path(notebook_id)
+        try:
+            raw = path.read_text(encoding="ascii").strip()
+        except FileNotFoundError:
+            return 0
+        value = int(raw)
+        if value < 0:
+            raise ValueError("invalid model artifact lifecycle generation")
+        return value
+
+    def _write_lifecycle_epoch_unlocked(
+        self, notebook_id: str, value: int
+    ) -> None:
+        path = self._lifecycle_epoch_path(notebook_id)
+        temporary = path.with_name(
+            f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
+        )
+        temporary.write_text(str(value), encoding="ascii")
+        try:
+            temporary.chmod(0o600)
+        except OSError:
+            pass
+        os.replace(temporary, path)
+
+    def current_model_artifact_lifecycle_epoch(self, notebook_id: str) -> int:
+        """Read the persisted generation used by newly entering model scopes."""
+        if not notebook_id or not self._lifecycle_root.exists():
+            return 0
+        with self._lifecycle_scope(exclusive=False):
+            return self._read_lifecycle_epoch_unlocked(notebook_id)
+
+    @contextmanager
+    def _model_artifact_publication_scope(
+        self, notebook_id: str
+    ) -> Iterator[int]:
+        with self._lifecycle_scope(exclusive=False):
+            yield self._read_lifecycle_epoch_unlocked(notebook_id)
+
+    @contextmanager
+    def _model_artifact_read_scope(self) -> Iterator[None]:
+        with self._lifecycle_scope(exclusive=False):
+            yield
+
+    @contextmanager
+    def _model_artifact_redaction_scope(
+        self, notebook_id: str
+    ) -> Iterator[int]:
+        with self._lifecycle_scope(exclusive=True):
+            try:
+                current = self._read_lifecycle_epoch_unlocked(notebook_id)
+            except (OSError, ValueError):
+                current = secrets.randbits(62)
+            next_epoch = current + 1
+            self._write_lifecycle_epoch_unlocked(notebook_id, next_epoch)
+            yield next_epoch
 
     def _manifest_path(self, notebook_id: str, source_id: str) -> Path:
         return self.root / "spreadsheets" / notebook_id / f"{source_id}.json"
@@ -237,7 +327,7 @@ class AnalysisArtifactStore:
             "source_deleted": False,
             "notebook_deleted": False,
         }
-        with model_artifact_publication_scope(
+        with self._model_artifact_publication_scope(
             interaction.notebook_id
         ) as current_epoch:
             if (
@@ -266,7 +356,7 @@ class AnalysisArtifactStore:
         now: datetime | None = None,
     ) -> dict[str, Any] | None:
         """Read one unexpired model artifact by opaque issue id."""
-        with model_artifact_read_scope():
+        with self._model_artifact_read_scope():
             current = now or datetime.now(timezone.utc)
             issue_root = self.root / "issues"
             if not issue_root.is_dir():
@@ -329,7 +419,7 @@ class AnalysisArtifactStore:
     def redact_source(
         self, notebook_id: str, source_id: str, *, occurred_at: str
     ) -> None:
-        with model_artifact_redaction_scope(notebook_id):
+        with self._model_artifact_redaction_scope(notebook_id):
             failure: BaseException | None = None
             try:
                 self.delete_spreadsheet_manifest(notebook_id, source_id)
@@ -391,7 +481,7 @@ class AnalysisArtifactStore:
             raise failure
 
     def redact_notebook(self, notebook_id: str, *, occurred_at: str) -> None:
-        with model_artifact_redaction_scope(notebook_id):
+        with self._model_artifact_redaction_scope(notebook_id):
             spreadsheet_root = self.root / "spreadsheets" / notebook_id
             if spreadsheet_root.exists():
                 shutil.rmtree(spreadsheet_root, ignore_errors=True)
