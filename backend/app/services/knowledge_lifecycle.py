@@ -36,6 +36,7 @@ Red lines preserved verbatim from the facade:
 """
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import json
 import re
@@ -79,6 +80,7 @@ from app.services.kg_analysis_precompute import (
     reusable_artifact_payloads,
     stamp_cluster_seq,
 )
+from app.services.model_work import notebook_model_artifact_scope
 from app.services.knowledge_governance import KnowledgeGovernanceService
 from app.services.kg.run_control import (
     KgBuildAborted,
@@ -4282,6 +4284,7 @@ class KnowledgeLifecycleService:
             # a real content change from whatever was there before).
             self._bump_cluster_mutation_seq(wdb, notebook_id)
 
+    @notebook_model_artifact_scope
     def rebuild_unified_kg(self, notebook_id: str,
                            progress: Optional[Callable[[str, int, int], None]] = None,
                            force: bool = False, fresh: bool = False) -> int:
@@ -4621,7 +4624,7 @@ class KnowledgeLifecycleService:
                     done_n = 0
                     with _cf.ThreadPoolExecutor(max_workers=workers, thread_name_prefix="kg-desc") as pool:
                         _ck_buf: List[Tuple[str, dict]] = []
-                        for fut in _cf.as_completed([pool.submit(_gen, it) for it in work]):
+                        for fut in _cf.as_completed([pool.submit(contextvars.copy_context().run, _gen, it) for it in work]):
                             cid, desc, sig = fut.result()
                             done_n += 1
                             if desc:
@@ -5667,6 +5670,7 @@ class KnowledgeLifecycleService:
         with self._connect() as db:
             return self.unified_kg.community_member_ids(db, notebook_id, level)
 
+    @notebook_model_artifact_scope
     def summarize_communities(self, notebook_id: str, level: int = 0) -> int:
         """For each detected community, generate an LLM report (title/summary/
         findings) from its members + internal relations; persist on the community

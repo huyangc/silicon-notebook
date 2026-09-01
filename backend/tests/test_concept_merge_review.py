@@ -178,6 +178,38 @@ def test_max_workers_matches_serial():
     assert {d["candidate_id"] for d in serial} == {f"mc-{i}" for i in range(7)}
 
 
+def test_parallel_review_propagates_model_artifact_scope():
+    from app.services.model_work import (
+        ModelPriority,
+        make_model_work_context,
+        model_artifact_scope,
+    )
+
+    class _ScopeCapturingLLM(_CountingLLM):
+        def __init__(self):
+            super().__init__()
+            self.notebook_ids = []
+
+        def chat_json(self, messages, response_schema_hint):
+            context = make_model_work_context(
+                workload_id="kg_merge_review",
+                priority=ModelPriority.BACKGROUND,
+            )
+            self.notebook_ids.append(context.notebook_id)
+            return super().chat_json(messages, response_schema_hint)
+
+    llm = _ScopeCapturingLLM()
+    with model_artifact_scope(notebook_id="nb-parallel-review"):
+        review_merge_candidates(
+            llm,
+            _cands(4),
+            batch_size=1,
+            max_workers=4,
+        )
+
+    assert llm.notebook_ids == ["nb-parallel-review"] * 4
+
+
 def test_unconfigured_or_empty_returns_empty():
     class _Off:
         configured = False

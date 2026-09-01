@@ -6,6 +6,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import StrEnum
+from functools import wraps
 from typing import Callable, Iterator, Literal, Protocol
 
 from app.core.request_context import request_user_id
@@ -135,6 +136,16 @@ def model_work_scope(
         yield
     finally:
         _CURRENT_SCOPE.reset(token)
+
+
+def notebook_model_artifact_scope(function: Callable) -> Callable:
+    """Bind a notebook-aware service method before it materializes model input."""
+    @wraps(function)
+    def scoped(self, notebook_id: str, *args, **kwargs):
+        with model_artifact_scope(notebook_id=str(notebook_id)):
+            return function(self, notebook_id, *args, **kwargs)
+
+    return scoped
 
 
 def make_model_work_context(

@@ -52,6 +52,7 @@ from app.repositories.ports import (
     RepositoryRow,
 )
 from app.services.retrieval import cosine, keyword_score
+from app.services.model_work import notebook_model_artifact_scope
 from app.services.review_queue_memo import (
     REVIEW_QUEUE_MEMO_ITEMS,
     ReviewQueueMemo,
@@ -1322,6 +1323,7 @@ class KnowledgeGovernanceService:
     # Merge review (LLM adjudication) + background drain job
     # ------------------------------------------------------------------
 
+    @notebook_model_artifact_scope
     def review_pending_merges(
         self,
         notebook_id: str,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import contextvars
 import json
 import logging
 from typing import Any, Callable, List, Optional
@@ -138,7 +139,15 @@ def review_merge_candidates(
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=min(max_workers, len(chunks)), thread_name_prefix="kg-review"
         ) as pool:
-            futures = [pool.submit(_review_chunk, llm_client, chunk) for chunk in chunks]
+            futures = [
+                pool.submit(
+                    contextvars.copy_context().run,
+                    _review_chunk,
+                    llm_client,
+                    chunk,
+                )
+                for chunk in chunks
+            ]
             for fut in concurrent.futures.as_completed(futures):
                 # _review_chunk is already total, but guard the future boundary too:
                 # a worker exception must never re-raise out of this function.

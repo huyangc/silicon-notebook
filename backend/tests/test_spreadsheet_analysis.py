@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import threading
 from datetime import datetime, timedelta, timezone
@@ -1096,11 +1097,9 @@ def test_model_output_issue_removes_payload_when_metadata_publish_fails(
 
 
 def test_model_output_started_before_redaction_cannot_publish_afterward(tmp_path):
-    from app.domain.model_artifacts import current_model_artifact_lifecycle_epoch
-
     store = AnalysisArtifactStore(tmp_path, retention_days=2)
     notebook_id = "nb-stale-model"
-    stale_epoch = current_model_artifact_lifecycle_epoch(notebook_id)
+    stale_epoch = store.current_model_artifact_lifecycle_epoch(notebook_id)
     store.redact_source(
         notebook_id,
         "src-deleted",
@@ -1133,7 +1132,6 @@ def test_redaction_waits_for_publication_then_removes_the_case(
     tmp_path,
     monkeypatch,
 ):
-    from app.domain.model_artifacts import current_model_artifact_lifecycle_epoch
     from app.repositories import analysis_artifacts as artifacts_module
 
     store = AnalysisArtifactStore(tmp_path, retention_days=2)
@@ -1153,7 +1151,7 @@ def test_redaction_waits_for_publication_then_removes_the_case(
         response="not-json",
         reason="invalid_json",
         occurred_at="2026-08-30T01:00:00+00:00",
-        lifecycle_epoch=current_model_artifact_lifecycle_epoch(notebook_id),
+        lifecycle_epoch=store.current_model_artifact_lifecycle_epoch(notebook_id),
     )
     artifact_write_started = threading.Event()
     allow_artifact_write = threading.Event()
@@ -1184,6 +1182,57 @@ def test_redaction_waits_for_publication_then_removes_the_case(
 
     assert not publisher.is_alive()
     assert not redactor.is_alive()
+    assert list(store.root.glob("**/artifact.json")) == []
+
+
+def test_lifecycle_generation_rejects_stale_publication_across_processes(
+    tmp_path,
+):
+    store = AnalysisArtifactStore(tmp_path, retention_days=2)
+    notebook_id = "nb-process-race"
+    stale_epoch = store.current_model_artifact_lifecycle_epoch(notebook_id)
+    child = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "from pathlib import Path; "
+                "from app.repositories.analysis_artifacts import "
+                "AnalysisArtifactStore; "
+                "s=AnalysisArtifactStore(Path(__import__('sys').argv[1]), "
+                "retention_days=2); "
+                "s.redact_notebook(__import__('sys').argv[2], "
+                "occurred_at='2026-08-30T01:00:01+00:00')"
+            ),
+            str(tmp_path),
+            notebook_id,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert child.returncode == 0, child.stderr
+
+    issue = store.record_model_output_issue(MalformedModelInteraction(
+        workload_id="ask_answer",
+        workload_label="问答回答",
+        model_area="ask",
+        failure_kind="invalid_json",
+        support_id="mdl-process-race",
+        actor_id="user-1",
+        parent_id="ask-process-race",
+        notebook_id=notebook_id,
+        question="private question",
+        messages=({"role": "user", "content": "deleted content"},),
+        schema_hint='{"answer":""}',
+        response="not-json",
+        reason="invalid_json",
+        occurred_at="2026-08-30T01:00:02+00:00",
+        lifecycle_epoch=stale_epoch,
+    ))
+
+    assert issue == {}
+    assert store.current_model_artifact_lifecycle_epoch(notebook_id) != stale_epoch
     assert list(store.root.glob("**/artifact.json")) == []
 
 

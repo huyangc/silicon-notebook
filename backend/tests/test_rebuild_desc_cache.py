@@ -130,6 +130,35 @@ def test_all_multimember_canonicals_get_descriptions(repo):
     assert all(sig for (d, sig) in descs.values() if d)
 
 
+def test_parallel_concept_descriptions_propagate_model_artifact_scope(repo):
+    from app.services.model_work import (
+        ModelPriority,
+        make_model_work_context,
+    )
+
+    class _ScopeCapturingDescLLM(_DescLLM):
+        def __init__(self):
+            super().__init__()
+            self.notebook_ids = []
+
+        def chat_json(self, messages, schema):
+            context = make_model_work_context(
+                workload_id="kg_concept_description",
+                priority=ModelPriority.BACKGROUND,
+            )
+            with self._lock:
+                self.notebook_ids.append(context.notebook_id)
+            return super().chat_json(messages, schema)
+
+    llm = _ScopeCapturingDescLLM()
+    bind_chat_client(repo, "kg_concept_description", llm)
+    nb = _make_merged_notebook(repo)
+
+    repo.rebuild_unified_kg(nb.id)
+
+    assert llm.notebook_ids == [nb.id]
+
+
 # --- 2. cache reuse ---------------------------------------------------------
 
 def test_rebuild_reuses_cached_descriptions(repo):
