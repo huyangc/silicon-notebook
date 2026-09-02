@@ -104,6 +104,24 @@ test("review entries need a well-formed contract; malformed entries are dropped 
   assert.equal(isQueryIntentContractShape(contract({ ambiguities: [{ id: 1 }] })), false);
   assert.equal(isQueryIntentContractShape(contract({ entities: [1] })), false);
   assert.equal(isQueryIntentContractShape(contract({ mandatory_topics: [{ id: "t" }] })), false);
+  assert.equal(isQueryIntentContractShape(contract({ mandatory_topics: [{ id: "t", title: "T", question: "q?" }] })), false);
+  assert.equal(isQueryIntentContractShape(contract({
+    mandatory_topics: [{ id: "t", title: "T", question: "q?", retrieval_queries: ["a"] }],
+  })), true);
+  // Every required scalar/enum field is checked — a stale same-version entry
+  // missing one of them must not reach the review card or the backend.
+  for (const key of ["intent_type", "result_scope", "completeness_required", "expected_output", "confirmed"]) {
+    const incomplete = contract();
+    delete incomplete[key];
+    assert.equal(isQueryIntentContractShape(incomplete), false, `missing ${key} must be rejected`);
+  }
+  assert.equal(isQueryIntentContractShape(contract({ result_scope: "everything" })), false);
+  assert.equal(isQueryIntentContractShape(contract({ confidence: Number.NaN })), false);
+  assert.equal(isQueryIntentContractShape(contract({ ambiguities: [{ id: "a", question: "q", options: [1] }] })), false);
+  assert.equal(isQueryIntentContractShape(contract({ clarification_answers: [{ id: "a" }] })), false);
+  assert.equal(isQueryIntentContractShape(contract({
+    clarification_answers: [{ id: "a", question: "q", answer: "x" }],
+  })), true);
 
   assert.equal(isPersistedIntentRun(run({ phase: "review", contract: contract() })), true);
   assert.equal(isPersistedIntentRun(run({ phase: "review", contract: null })), false);

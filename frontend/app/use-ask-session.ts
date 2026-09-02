@@ -250,6 +250,10 @@ type AskIntentRunRecord = DetachableRecord & {
   // Identity of this submission in the per-tab persistence mirror and the
   // cross-tab ownership lock (ask-intent-persist.ts).
   persistId: string;
+  // Set when this hook instance retires the run without the user having
+  // decided anything (in-app unmount): the continuation is aborted, but the
+  // storage mirror is kept for the next instance in this tab to resume.
+  keepMirror: boolean;
 };
 
 function sameNotebookOwner(
@@ -637,6 +641,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       understandingMs: persisted.understandingMs,
       failure: null,
       persistId: persisted.id,
+      keepMirror: false,
     };
     intentRunsRef.current.push(run);
     return run;
@@ -1314,8 +1319,17 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
   useEffect(() => () => {
     // This hook instance is going away (a reload releases the locks with the
     // page; an in-app unmount must not keep owning records it can no longer
-    // resume — a later mount in this tab re-claims them from storage).
-    for (const run of intentRunsRef.current) releaseIntentRun(run.persistId);
+    // resume — a later mount in this tab re-claims them from storage). Retire
+    // the continuation FIRST: a pending preview must not keep running and hand
+    // off a durable job next to the one the replacement instance will start
+    // from the same stored record. The mirror itself is kept for that instance.
+    for (const run of intentRunsRef.current) {
+      run.keepMirror = true;
+      run.cancelRequested = true;
+      run.controller.abort();
+      releaseIntentRun(run.persistId);
+    }
+    intentRunsRef.current = [];
   }, []);
 
   useEffect(() => {
@@ -1625,6 +1639,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       understandingMs: 0,
       failure: null,
       persistId: newIntentRunId(),
+      keepMirror: false,
     };
     intentRunsRef.current.push(run);
     persistIntentRun(run);
@@ -1743,7 +1758,10 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       }
       dropRecord(intentRunsRef.current, run);
       // Aborted or failed on-screen: the question goes back to the input (or was
-      // stopped on purpose) — nothing for a reload to resume.
+      // stopped on purpose) — nothing for a reload to resume. The one exception
+      // is an in-app unmount, which retires this continuation but leaves the
+      // stored record for the next hook instance in this tab.
+      if (run.keepMirror) return;
       forgetPersistedIntent(run);
       if (!isAbortError(error) && attached()) effectsRef.current.reportError(error);
       const draft = askIntentDraftRef.current;
