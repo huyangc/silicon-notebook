@@ -581,10 +581,16 @@ def test_phase5_deletes_job_and_side_table_rows_in_the_same_transaction(repo):
     _seed_user_and_notebook(repo)
     _seed_source(repo, "nb1", "s1", "/tmp/s1.pdf")
     job = repo._runtime.notebook_delete_jobs.request("nb1", "u1")
-    repo._runtime.notebook_delete_jobs.materialize_paths_page(job["id"], "nb1", "", 500)
+    lease_token = repo._runtime.notebook_delete_jobs.mark_running(
+        job["id"], stale_cutoff_seconds=300,
+    )
+    result = repo._runtime.notebook_delete_jobs.materialize_paths_page(
+        job["id"], "nb1", "", 500, lease_token=lease_token,
+    )
+    assert result is not None and result[0] == 1, "前置不成立:路径页没物化"
 
     repo._runtime.notebook_store.delete_row_and_orphan_embeddings(
-        "nb1", job_id=job["id"]
+        "nb1", job_id=job["id"], lease_token=lease_token,
     )
     with repo._runtime.database.connect() as conn:
         jobs = conn.execute("SELECT COUNT(*) AS c FROM notebook_delete_jobs").fetchone()

@@ -291,9 +291,25 @@ class NotebookDeleteJobStore:
         return cursor.rowcount == 1
 
     def materialize_paths_page(
-        self, job_id: str, notebook_id: str, after_id: str, limit: int
-    ) -> tuple[int, str | None]:
+        self, job_id: str, notebook_id: str, after_id: str, limit: int,
+        *, lease_token: str,
+    ) -> "tuple[int, str | None] | None":
         with self.database.write(operation="notebook_delete.materialize_paths") as db:
+            # codex #659 R19 P2: in-transaction lease fence, atomic with the
+            # inserts below (single-writer lock here; row lock on the PG
+            # twin) — a sweeper that stole the lease mid-page can no longer
+            # interleave with this write and race the MAX(ordinal) read into
+            # a primary-key collision. The CAS doubles as a per-page
+            # heartbeat on updated_at, so a page that outlasts
+            # NOTEBOOK_DELETE_SWEEP_SECONDS stops looking dead in the first
+            # place. rowcount==0 -> fenced out -> None, nothing written.
+            fence = db.execute(
+                "UPDATE notebook_delete_jobs SET updated_at=? "
+                "WHERE id=? AND status='running' AND lease_token=?",
+                (self.now(), job_id, lease_token),
+            )
+            if fence.rowcount != 1:
+                return None
             start = db.execute(
                 "SELECT COALESCE(MAX(ordinal),-1)+1 AS next_ordinal "
                 "FROM notebook_delete_files WHERE job_id=?",

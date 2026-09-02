@@ -2189,3 +2189,64 @@ def test_residual_cleanup_redacts_analysis_artifacts(repo, monkeypatch):
         assert db.execute(
             "SELECT COUNT(*) c FROM notebook_delete_jobs"
         ).fetchone()["c"] == 0, "前置不成立:残渣收尾没有 settle 作业行"
+
+
+# ---------------------------------------------------------------------------
+# codex #659 R19 P2：相位 1 路径物化也要租约围栏——一页拷贝超过 sweep 窗口时
+# 租约可能被偷走,旧 worker 继续写 notebook_delete_files 会与新主人读到同一个
+# MAX(ordinal),主键相撞把新主人的删除打成 failed。
+# ---------------------------------------------------------------------------
+
+
+def test_paths_materialization_is_lease_fenced(repo):
+    """变异钉:把 materialize_paths_page 开头的事务内 lease CAS 拆掉 →
+    被偷走租约的旧 worker 照样写入路径行,报红。同时钉住:_phase_paths 对
+    围栏未命中返回 False(调用方就地停手,不推进相位)。"""
+    _seed_user_and_notebook(repo)
+    with repo._runtime.database.write() as db:
+        db.execute(
+            "INSERT INTO sources (id,notebook_id,title,file_path,source_type,"
+            "status,parse_status,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            ("s1", "nb1", "s1", "/tmp/a.pdf", "pdf", "ready", "parsed", NOW, NOW),
+        )
+    store = repo._runtime.notebook_delete_jobs
+    job = store.request("nb1", "u1")
+    stale_lease = store.mark_running(job["id"], stale_cutoff_seconds=300)
+    # 模拟 sweep 判旧 worker 死亡后偷走租约:把心跳倒拨一小时(等价于一页
+    # 拷贝卡了很久),再按正常 cutoff 偷。
+    from datetime import datetime, timedelta
+
+    past = (datetime.now().astimezone() - timedelta(hours=1)).isoformat()
+    with repo._runtime.database.write() as db:
+        db.execute(
+            "UPDATE notebook_delete_jobs SET updated_at=? WHERE id=?",
+            (past, job["id"]),
+        )
+    fresh_lease = store.mark_running(job["id"], stale_cutoff_seconds=300)
+    assert fresh_lease is not None and fresh_lease != stale_lease, (
+        "前置不成立:租约没有被偷走"
+    )
+
+    # 旧租约的写必须被围栏挡下:返回 None,一行都不落
+    assert store.materialize_paths_page(
+        job["id"], "nb1", "", 500, lease_token=stale_lease,
+    ) is None
+    with repo._runtime.database.connect() as db:
+        assert db.execute(
+            "SELECT COUNT(*) c FROM notebook_delete_files"
+        ).fetchone()["c"] == 0, "围栏未命中时不得写入任何路径行"
+
+    # 服务层对围栏未命中就地停手,不把相位推进到 'paths'
+    runner = repo._runtime.notebook_delete
+    assert runner._phase_paths(job["id"], "nb1", stale_lease, "") is False
+    with repo._runtime.database.connect() as db:
+        assert db.execute(
+            "SELECT phase FROM notebook_delete_jobs WHERE id=?", (job["id"],)
+        ).fetchone()["phase"] == "mark"
+
+    # 新主人照常干活,且围栏 CAS 顺带刷了心跳
+    result = store.materialize_paths_page(
+        job["id"], "nb1", "", 500, lease_token=fresh_lease,
+    )
+    assert result == (1, "s1")
