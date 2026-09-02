@@ -176,12 +176,15 @@ def test_every_chain_method_issues_an_explicit_delete_for_its_full_child_set():
     捎带」没有区分度。这里直接检查每个 chain 方法的源码，确保这五条显式
     DELETE 语句都还在——结构性测试，不依赖最终状态。
 
-    codex #659 round 9 P2：``delete_knowhow_tables_page`` 不再自己拼字面量
-    ``DELETE FROM knowhow_milestones``——三张子表的删除都委托给通用的
-    ``_drain_children_by_parent_ids(child_table, ...)``，表名以字符串字面量
-    的身份出现在传给它的 tuple 里，不是 ``f"FROM {table}"`` 这个具体形状。
-    这个方法改查字面量表名本身（同样能钉住「有人把 knowhow_milestones 从
-    tuple 里删掉」这个回归），其余仍走原来那套 ``FROM {table}`` 形状的检查。"""
+    codex #659 round 9 P2 / round 10 P1：``delete_knowhow_tables_page``、
+    ``delete_indexing_pipeline_stages_page``、``delete_knowhow_rows_page``
+    都不再自己拼字面量 ``DELETE FROM knowhow_milestones``/``DELETE FROM
+    indexing_pipeline_stage_sources``/``DELETE FROM knowhow_cell_code``——
+    子表的删除都委托给通用的 ``_drain_children_by_parent_ids(child_table,
+    ...)``，表名以字符串字面量的身份出现在传给它的实参里，不是
+    ``f"FROM {table}"`` 这个具体形状。这几个方法改查字面量表名本身（同样
+    能钉住「有人把某张子表从调用里删掉」这个回归），其余仍走原来那套
+    ``FROM {table}`` 形状的检查。"""
     import inspect
 
     from app.repositories.postgres.notebook_delete_job_store import (
@@ -192,11 +195,15 @@ def test_every_chain_method_issues_an_explicit_delete_for_its_full_child_set():
     )
 
     expectations = {
-        "delete_knowhow_rows_page": ("knowhow_cell_code",),
         "delete_memory_items_page": ("memory_revisions",),
+        "delete_indexing_pipeline_stages_page": ("indexing_pipeline_stages",),
+    }
+    delegated_to_drain_helper = {
+        "delete_knowhow_tables_page": ("knowhow_milestones",),
         "delete_indexing_pipeline_stages_page": (
-            "indexing_pipeline_stages", "indexing_pipeline_stage_sources",
+            "indexing_pipeline_stage_sources",
         ),
+        "delete_knowhow_rows_page": ("knowhow_cell_code",),
     }
     for store_cls in (PgStore, SqliteStore):
         for method_name, required_tables in expectations.items():
@@ -206,11 +213,13 @@ def test_every_chain_method_issues_an_explicit_delete_for_its_full_child_set():
                     f"{store_cls.__name__}.{method_name} no longer issues an "
                     f"explicit DELETE FROM {table} (P2-d)"
                 )
-        tables_page_source = inspect.getsource(store_cls.delete_knowhow_tables_page)
-        assert '"knowhow_milestones"' in tables_page_source, (
-            f"{store_cls.__name__}.delete_knowhow_tables_page no longer "
-            "drains knowhow_milestones (P2-d / round 9 P2)"
-        )
+        for method_name, required_tables in delegated_to_drain_helper.items():
+            source = inspect.getsource(getattr(store_cls, method_name))
+            for table in required_tables:
+                assert f'"{table}"' in source, (
+                    f"{store_cls.__name__}.{method_name} no longer drains "
+                    f"{table} (P2-d / round 9-10)"
+                )
 
 
 def test_phase3_alone_clears_knowhow_rows_and_cells_before_phase5_ever_runs(repo):
@@ -1436,4 +1445,380 @@ def test_run_chain_does_not_delete_the_knowhow_table_when_the_sub_batch_gate_fai
     with repo._runtime.database.connect() as db:
         assert db.execute(
             "SELECT COUNT(*) AS c FROM knowhow_tables WHERE notebook_id='nb1'"
+        ).fetchone()["c"] == 1
+
+
+# ---------------------------------------------------------------------------
+# codex #659 R10 P1: delete_indexing_pipeline_stages_page's ctid/rowid-
+# bounded drain of indexing_pipeline_stage_sources ran entirely INSIDE the
+# one transaction the page method opened -- each DELETE statement was
+# bounded, but the transaction's total row count across however many loop
+# iterations it took was not. Same fix as R8/R9: drain via
+# _drain_children_by_parent_ids (batch_ok-gated), only deleting the parent
+# indexing_pipeline_stages rows once fully drained.
+# ---------------------------------------------------------------------------
+
+
+def _seed_indexing_pipeline_job_with_many_sources(repo, notebook_id, job_id, n_sources):
+    with repo._runtime.database.write() as db:
+        db.execute(
+            "INSERT INTO kg_build_jobs (id,notebook_id,created_by,mode,"
+            "status,stage,total_sources,completed_sources,failed_sources,"
+            "error_code,error_message,created_at,updated_at,finished_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (job_id, notebook_id, "u1", "incremental", "succeeded", "done",
+             n_sources, n_sources, 0, "", "", NOW, NOW, NOW),
+        )
+        db.execute(
+            "INSERT INTO indexing_pipeline_stages (job_id,notebook_id,"
+            "pipeline_id,pipeline_version,pipeline_generation,"
+            "source_snapshot,created_at,updated_at) VALUES "
+            "(?,?,?,?,?,?,?,?)",
+            (job_id, notebook_id, "builtin", "1", "g1", "[]", NOW, NOW),
+        )
+        for index in range(n_sources):
+            source_id = f"{job_id}-src{index}"
+            db.execute(
+                "INSERT INTO sources (id,notebook_id,title,file_path,"
+                "source_type,status,parse_status,uploaded_by,created_at,"
+                "updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (source_id, notebook_id, "S", "", "pdf", "ready", "parsed",
+                 "u1", NOW, NOW),
+            )
+            db.execute(
+                "INSERT INTO indexing_pipeline_stage_sources (job_id,"
+                "source_id,status,payload,created_at,updated_at) VALUES "
+                "(?,?,?,?,?,?)",
+                (job_id, source_id, "completed", "{}", NOW, NOW),
+            )
+
+
+def test_delete_indexing_pipeline_stages_page_drains_stage_sources_in_bounded_sub_batches(
+    repo,
+):
+    """计数桩断言:1 个 job、7 条 stage_sources、批大小 3(3+3+1)→ gate 恰好
+    3 次（同 R8/R9 的「探测式空批不问 gate」判据）。变异钉：把
+    stage_sources 的删除折回父页单事务(去掉 batch_ok 门参调用) → calls 变成
+    []，本条报红。"""
+    _seed_user_and_notebook(repo)
+    _seed_indexing_pipeline_job_with_many_sources(repo, "nb1", "kgj1", 7)
+    store = repo._runtime.notebook_delete_jobs
+    store._CHILD_BATCH_SIZE = 3
+
+    calls = []
+
+    def counting_gate():
+        calls.append(len(calls))
+        return True
+
+    count, last = store.delete_indexing_pipeline_stages_page(
+        "nb1", "", 500, batch_ok=counting_gate,
+    )
+    assert count == 1
+    assert last == "kgj1"
+    assert len(calls) == 3
+
+    with repo._runtime.database.connect() as db:
+        assert db.execute(
+            "SELECT COUNT(*) AS c FROM indexing_pipeline_stages "
+            "WHERE notebook_id='nb1'"
+        ).fetchone()["c"] == 0
+        assert db.execute(
+            "SELECT COUNT(*) AS c FROM indexing_pipeline_stage_sources "
+            "WHERE job_id='kgj1'"
+        ).fetchone()["c"] == 0
+
+
+def test_delete_indexing_pipeline_stages_page_gates_none_when_never_given_one(repo):
+    """``batch_ok=None``(既有调用方/测试的默认值)必须继续一次不问地把整页
+    删完——本参数存在之前的行为逐字不变。"""
+    _seed_user_and_notebook(repo)
+    _seed_indexing_pipeline_job_with_many_sources(repo, "nb1", "kgj1", 7)
+    store = repo._runtime.notebook_delete_jobs
+    store._CHILD_BATCH_SIZE = 3
+
+    count, last = store.delete_indexing_pipeline_stages_page("nb1", "", 500)
+    assert count == 1
+    assert last == "kgj1"
+    with repo._runtime.database.connect() as db:
+        assert db.execute(
+            "SELECT COUNT(*) AS c FROM indexing_pipeline_stages "
+            "WHERE notebook_id='nb1'"
+        ).fetchone()["c"] == 0
+
+
+def test_delete_indexing_pipeline_stages_page_stops_mid_drain_and_keeps_the_parent_row(
+    repo,
+):
+    """gate 中途返回 False → 排水停手,父行 ``indexing_pipeline_stages`` 不删；
+    之后换恒真 gate 重跑收敛——不依赖任何持久化的子批游标。"""
+    _seed_user_and_notebook(repo)
+    _seed_indexing_pipeline_job_with_many_sources(repo, "nb1", "kgj1", 7)
+    store = repo._runtime.notebook_delete_jobs
+    store._CHILD_BATCH_SIZE = 3
+
+    calls = []
+
+    def fails_on_second_call():
+        calls.append(len(calls))
+        return len(calls) < 2
+
+    count, last = store.delete_indexing_pipeline_stages_page(
+        "nb1", "", 500, batch_ok=fails_on_second_call,
+    )
+    assert count == 1  # page size (nonzero), NOT "chain drained"
+    assert last is None  # caller's cursor = last or cursor is a no-op
+
+    with repo._runtime.database.connect() as db:
+        assert db.execute(
+            "SELECT COUNT(*) AS c FROM indexing_pipeline_stages "
+            "WHERE notebook_id='nb1'"
+        ).fetchone()["c"] == 1  # parent row untouched
+        remaining = db.execute(
+            "SELECT COUNT(*) AS c FROM indexing_pipeline_stage_sources "
+            "WHERE job_id='kgj1'"
+        ).fetchone()["c"]
+    assert remaining == 1  # 7 - 3 - 3 (first two sub-batches already committed)
+
+    count_again, last_again = store.delete_indexing_pipeline_stages_page(
+        "nb1", "", 500, batch_ok=lambda: True,
+    )
+    assert count_again == 1
+    assert last_again == "kgj1"
+    with repo._runtime.database.connect() as db:
+        assert db.execute(
+            "SELECT COUNT(*) AS c FROM indexing_pipeline_stages "
+            "WHERE notebook_id='nb1'"
+        ).fetchone()["c"] == 0
+        assert db.execute(
+            "SELECT COUNT(*) AS c FROM indexing_pipeline_stage_sources "
+            "WHERE job_id='kgj1'"
+        ).fetchone()["c"] == 0
+
+
+def test_run_chain_does_not_delete_the_indexing_pipeline_stage_when_the_sub_batch_gate_fails(
+    repo,
+):
+    """端到端接线:``_run_chain`` 对 ``indexing_pipeline_stages`` 链同样构造
+    ``sub_batch_ok``(复用 ``_batch_ok``)。claim 在第 2 个子批提交后失效 →
+    排水中途停手、父行未删、``_run_chain`` 返回 False。"""
+    _seed_user_and_notebook(repo)
+    _seed_indexing_pipeline_job_with_many_sources(repo, "nb1", "kgj1", 7)
+    store = repo._runtime.notebook_delete_jobs
+    store._CHILD_BATCH_SIZE = 3
+
+    job = repo._runtime.notebook_delete_jobs.request("nb1", "u1")
+    lease_token = repo._runtime.notebook_delete_jobs.mark_running(
+        job["id"], stale_cutoff_seconds=300,
+    )
+    runner = repo._runtime.notebook_delete
+
+    class _ClaimThatFailsAfterTwoChecks:
+        def __init__(self):
+            self.checks = 0
+
+        def verify_held(self):
+            self.checks += 1
+            return self.checks <= 2
+
+        def release(self):
+            pass
+
+    claim = _ClaimThatFailsAfterTwoChecks()
+    finished = runner._run_chain(
+        job["id"], "nb1", lease_token, claim, "cursor_indexing_pipeline_stages",
+        "indexing_pipeline_stages", "", residual=False,
+    )
+    assert finished is False
+
+    row = repo._runtime.notebook_delete_jobs.get(job["id"])
+    assert row["cursor_key"] == ""
+    with repo._runtime.database.connect() as db:
+        assert db.execute(
+            "SELECT COUNT(*) AS c FROM indexing_pipeline_stages "
+            "WHERE notebook_id='nb1'"
+        ).fetchone()["c"] == 1
+
+
+# ---------------------------------------------------------------------------
+# codex #659 R10 P1: delete_knowhow_rows_page's "N rows x that table's own
+# column count" bound was never actually enforced by the app (no cap on a
+# knowhow table's column count) -- a page's knowhow_cells/knowhow_cell_code
+# DELETEs (single unbounded row_id = ANY(row_ids) statements) could still be
+# unbounded, all inside the one transaction the page method used to open.
+# Same fix: drain via _drain_children_by_parent_ids (batch_ok-gated), only
+# deleting the parent knowhow_rows rows once fully drained.
+# ---------------------------------------------------------------------------
+
+
+def _seed_knowhow_row_with_many_cells(repo, notebook_id, table_id, row_id, n_columns):
+    with repo._runtime.database.write() as db:
+        db.execute(
+            "INSERT INTO knowhow_tables (id,notebook_id,title,description,"
+            "mutation_seq,created_by,created_at,updated_at) VALUES "
+            "(?,?,?,?,?,?,?,?)",
+            (table_id, notebook_id, "KT", "", 0, "u1", NOW, NOW),
+        )
+        db.execute(
+            "INSERT INTO knowhow_rows (id,table_id,position,"
+            "projection_status,created_at,updated_at) VALUES (?,?,?,?,?,?)",
+            (row_id, table_id, 0, "none", NOW, NOW),
+        )
+        for index in range(n_columns):
+            column_id = f"{table_id}-col{index}"
+            db.execute(
+                "INSERT INTO knowhow_columns (id,table_id,name,role,position) "
+                "VALUES (?,?,?,?,?)",
+                (column_id, table_id, f"Col{index}", "value", index),
+            )
+            db.execute(
+                "INSERT INTO knowhow_cells (id,row_id,column_id,content_md,"
+                "updated_at) VALUES (?,?,?,?,?)",
+                (f"{row_id}-cell{index}", row_id, column_id, "v", NOW),
+            )
+            db.execute(
+                "INSERT INTO knowhow_cell_code (id,row_id,column_id,code_text,"
+                "language,updated_by,cell_content_hash,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (f"{row_id}-code{index}", row_id, column_id, "print(1)",
+                 "python", "u1", f"hash{index}", NOW, NOW),
+            )
+
+
+def test_delete_knowhow_rows_page_drains_cells_in_bounded_sub_batches(repo):
+    """计数桩断言:1 行、7 列(→7 个 cells + 7 个 cell_code)、批大小 3
+    (3+3+1)→ 两张子表各 3 次,合计 6 次（同 R8/R9/R10 的「探测式空批不问
+    gate」判据）。变异钉：把 cells/cell_code 的删除折回父页单事务(去掉
+    batch_ok 门参调用) → calls 变成 []，本条报红。"""
+    _seed_user_and_notebook(repo)
+    _seed_knowhow_row_with_many_cells(repo, "nb1", "kt1", "kr1", 7)
+    store = repo._runtime.notebook_delete_jobs
+    store._CHILD_BATCH_SIZE = 3
+
+    calls = []
+
+    def counting_gate():
+        calls.append(len(calls))
+        return True
+
+    count, last = store.delete_knowhow_rows_page(
+        "nb1", "", 500, batch_ok=counting_gate,
+    )
+    assert count == 1
+    assert last == "kr1"
+    assert len(calls) == 6
+
+    with repo._runtime.database.connect() as db:
+        assert db.execute(
+            "SELECT COUNT(*) AS c FROM knowhow_rows WHERE table_id='kt1'"
+        ).fetchone()["c"] == 0
+        assert db.execute(
+            "SELECT COUNT(*) AS c FROM knowhow_cells WHERE row_id='kr1'"
+        ).fetchone()["c"] == 0
+        assert db.execute(
+            "SELECT COUNT(*) AS c FROM knowhow_cell_code WHERE row_id='kr1'"
+        ).fetchone()["c"] == 0
+
+
+def test_delete_knowhow_rows_page_gates_none_when_never_given_one(repo):
+    """``batch_ok=None``(既有调用方/测试的默认值)必须继续一次不问地把整页
+    删完——本参数存在之前的行为逐字不变。"""
+    _seed_user_and_notebook(repo)
+    _seed_knowhow_row_with_many_cells(repo, "nb1", "kt1", "kr1", 7)
+    store = repo._runtime.notebook_delete_jobs
+    store._CHILD_BATCH_SIZE = 3
+
+    count, last = store.delete_knowhow_rows_page("nb1", "", 500)
+    assert count == 1
+    assert last == "kr1"
+    with repo._runtime.database.connect() as db:
+        assert db.execute(
+            "SELECT COUNT(*) AS c FROM knowhow_rows WHERE table_id='kt1'"
+        ).fetchone()["c"] == 0
+
+
+def test_delete_knowhow_rows_page_stops_mid_drain_and_keeps_the_parent_row(repo):
+    """gate 中途返回 False → 排水停手,父行 ``knowhow_rows`` 不删;之后换
+    恒真 gate 重跑收敛——不依赖任何持久化的子批游标。"""
+    _seed_user_and_notebook(repo)
+    _seed_knowhow_row_with_many_cells(repo, "nb1", "kt1", "kr1", 7)
+    store = repo._runtime.notebook_delete_jobs
+    store._CHILD_BATCH_SIZE = 3
+
+    calls = []
+
+    def fails_on_second_call():
+        calls.append(len(calls))
+        return len(calls) < 2
+
+    count, last = store.delete_knowhow_rows_page(
+        "nb1", "", 500, batch_ok=fails_on_second_call,
+    )
+    assert count == 1  # page size (nonzero), NOT "chain drained"
+    assert last is None  # caller's cursor = last or cursor is a no-op
+
+    with repo._runtime.database.connect() as db:
+        assert db.execute(
+            "SELECT COUNT(*) AS c FROM knowhow_rows WHERE table_id='kt1'"
+        ).fetchone()["c"] == 1  # parent row untouched
+        remaining = db.execute(
+            "SELECT COUNT(*) AS c FROM knowhow_cells WHERE row_id='kr1'"
+        ).fetchone()["c"]
+    assert remaining == 1  # 7 - 3 - 3 (first two sub-batches already committed)
+
+    count_again, last_again = store.delete_knowhow_rows_page(
+        "nb1", "", 500, batch_ok=lambda: True,
+    )
+    assert count_again == 1
+    assert last_again == "kr1"
+    with repo._runtime.database.connect() as db:
+        assert db.execute(
+            "SELECT COUNT(*) AS c FROM knowhow_rows WHERE table_id='kt1'"
+        ).fetchone()["c"] == 0
+        assert db.execute(
+            "SELECT COUNT(*) AS c FROM knowhow_cells WHERE row_id='kr1'"
+        ).fetchone()["c"] == 0
+        assert db.execute(
+            "SELECT COUNT(*) AS c FROM knowhow_cell_code WHERE row_id='kr1'"
+        ).fetchone()["c"] == 0
+
+
+def test_run_chain_does_not_delete_the_knowhow_row_when_the_sub_batch_gate_fails(repo):
+    """端到端接线:``_run_chain`` 对 ``knowhow_rows`` 链同样构造
+    ``sub_batch_ok``(复用 ``_batch_ok``)。claim 在第 2 个子批提交后失效 →
+    排水中途停手、父行未删、``_run_chain`` 返回 False。"""
+    _seed_user_and_notebook(repo)
+    _seed_knowhow_row_with_many_cells(repo, "nb1", "kt1", "kr1", 7)
+    store = repo._runtime.notebook_delete_jobs
+    store._CHILD_BATCH_SIZE = 3
+
+    job = repo._runtime.notebook_delete_jobs.request("nb1", "u1")
+    lease_token = repo._runtime.notebook_delete_jobs.mark_running(
+        job["id"], stale_cutoff_seconds=300,
+    )
+    runner = repo._runtime.notebook_delete
+
+    class _ClaimThatFailsAfterTwoChecks:
+        def __init__(self):
+            self.checks = 0
+
+        def verify_held(self):
+            self.checks += 1
+            return self.checks <= 2
+
+        def release(self):
+            pass
+
+    claim = _ClaimThatFailsAfterTwoChecks()
+    finished = runner._run_chain(
+        job["id"], "nb1", lease_token, claim, "cursor_knowhow_rows",
+        "knowhow_rows", "", residual=False,
+    )
+    assert finished is False
+
+    row = repo._runtime.notebook_delete_jobs.get(job["id"])
+    assert row["cursor_key"] == ""
+    with repo._runtime.database.connect() as db:
+        assert db.execute(
+            "SELECT COUNT(*) AS c FROM knowhow_rows WHERE table_id='kt1'"
         ).fetchone()["c"] == 1

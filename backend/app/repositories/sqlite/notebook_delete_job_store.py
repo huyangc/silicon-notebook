@@ -493,12 +493,15 @@ class NotebookDeleteJobStore:
 
     def delete_knowhow_rows_page(
         self, notebook_id: str, cursor: str, limit: int,
+        *, batch_ok: Callable[[], bool] | None = None,
     ) -> tuple[int, str | None]:
-        """P1-D: see the PostgreSQL twin's docstring for the fanout-bound
-        rationale."""
-        with self.database.write(
-            operation="notebook_delete.rows.knowhow_rows"
-        ) as db:
+        """codex #659 round 10 P1: see the PostgreSQL twin's docstring for
+        the full fanout-bound / ``batch_ok`` rationale (mirrored here
+        verbatim) -- read-only parent-page SELECT, drain ``knowhow_cells``/
+        ``knowhow_cell_code`` via ``_drain_children_by_parent_ids``
+        (``batch_ok``-gated), then a separate final transaction for the
+        parent ``knowhow_rows`` rows."""
+        with self.database.connect() as db:
             page = db.execute(
                 "SELECT kr.id AS id FROM knowhow_rows kr "
                 "JOIN knowhow_tables kt ON kt.id=kr.table_id "
@@ -506,16 +509,19 @@ class NotebookDeleteJobStore:
                 "ORDER BY kr.id LIMIT ?",
                 (notebook_id, cursor, limit),
             ).fetchall()
-            if not page:
-                return 0, None
-            row_ids = [row["id"] for row in page]
-            rph = ",".join("?" for _ in row_ids)
-            db.execute(
-                f"DELETE FROM knowhow_cells WHERE row_id IN ({rph})", row_ids,
+        if not page:
+            return 0, None
+        row_ids = [row["id"] for row in page]
+        for child_table in ("knowhow_cells", "knowhow_cell_code"):
+            drained = self._drain_children_by_parent_ids(
+                child_table, "row_id", row_ids, batch_ok=batch_ok,
             )
-            db.execute(
-                f"DELETE FROM knowhow_cell_code WHERE row_id IN ({rph})", row_ids,
-            )
+            if not drained:
+                return len(row_ids), None
+        rph = ",".join("?" for _ in row_ids)
+        with self.database.write(
+            operation="notebook_delete.rows.knowhow_rows"
+        ) as db:
             db.execute(
                 f"DELETE FROM knowhow_rows WHERE id IN ({rph})", row_ids,
             )
@@ -564,30 +570,33 @@ class NotebookDeleteJobStore:
 
     def delete_indexing_pipeline_stages_page(
         self, notebook_id: str, cursor: str, limit: int,
+        *, batch_ok: Callable[[], bool] | None = None,
     ) -> tuple[int, str | None]:
-        with self.database.write(
-            operation="notebook_delete.rows.indexing_pipeline_stages"
-        ) as db:
+        """codex #659 round 10 P1: see the PostgreSQL twin's docstring for
+        the full rationale (mirrored here verbatim) -- read-only parent-page
+        SELECT, drain ``indexing_pipeline_stage_sources`` via
+        ``_drain_children_by_parent_ids`` (``batch_ok``-gated), then a
+        separate final transaction for the parent ``indexing_pipeline_
+        stages`` rows."""
+        with self.database.connect() as db:
             page = db.execute(
                 "SELECT job_id FROM indexing_pipeline_stages "
                 "WHERE notebook_id=? AND job_id>? ORDER BY job_id LIMIT ?",
                 (notebook_id, cursor, limit),
             ).fetchall()
-            if not page:
-                return 0, None
-            job_ids = [row["job_id"] for row in page]
-            jph = ",".join("?" for _ in job_ids)
-            # P1-D: drain via rowid-bounded sub-batches, same rationale as
-            # the PostgreSQL twin's ctid loop.
-            while True:
-                deleted = db.execute(
-                    "DELETE FROM indexing_pipeline_stage_sources WHERE rowid IN ("
-                    "SELECT rowid FROM indexing_pipeline_stage_sources "
-                    f"WHERE job_id IN ({jph}) LIMIT ?)",
-                    (*job_ids, self._CHILD_BATCH_SIZE),
-                )
-                if deleted.rowcount == 0:
-                    break
+        if not page:
+            return 0, None
+        job_ids = [row["job_id"] for row in page]
+        drained = self._drain_children_by_parent_ids(
+            "indexing_pipeline_stage_sources", "job_id", job_ids,
+            batch_ok=batch_ok,
+        )
+        if not drained:
+            return len(job_ids), None
+        jph = ",".join("?" for _ in job_ids)
+        with self.database.write(
+            operation="notebook_delete.rows.indexing_pipeline_stages"
+        ) as db:
             db.execute(
                 f"DELETE FROM indexing_pipeline_stages WHERE job_id IN ({jph}) "
                 "AND notebook_id=?",
