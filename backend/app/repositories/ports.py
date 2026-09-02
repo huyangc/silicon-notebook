@@ -1157,17 +1157,25 @@ class NotebookDeleteJobStorePort(Protocol):
         ...
     def delete_knowhow_rows_page(
         self, notebook_id: str, cursor: str, limit: int,
+        *, batch_ok: Callable[[], bool] | None = None,
     ) -> tuple[int, str | None]:
         """B 类 knowhow 链，行/单元格维度一页（P1-D 修复后拆出，跑在
-        ``delete_knowhow_tables_page`` 之前）：同事务内取一页
+        ``delete_knowhow_tables_page`` 之前）：只读连接取一页
         ``knowhow_rows.id``（经 ``knowhow_tables`` 关联过滤 notebook_id）→
-        按该页 row_id 删 ``knowhow_cells``/``knowhow_cell_code`` → 删本页
-        ``knowhow_rows``。一页的 fanout 上界是「本页行数 × 各自表的列数」
-        （远小于「本页表数 × 各自的行数」），这正是把行/单元格维度从原来的
-        「按表分页」拆出来单独按「按行分页」的原因——原形一页 500 张表可能
-        牵出无界的行/单元格总量（撞 SQLite 变量数上限、PG 单事务时长），按
-        行分页把每一页的上界收紧到「500 行 × 该表列数」。返回 ``(本页行数,
-        最后一个 row id 或 None)``。"""
+        用 ``_drain_children_by_parent_ids``（``batch_ok`` 门控，每个子批各自
+        独立提交、≤ ``_CHILD_BATCH_SIZE`` 行）限界排水 ``knowhow_cells``/
+        ``knowhow_cell_code`` → 全部排空后单独开一个事务删本页
+        ``knowhow_rows``。
+
+        codex #659 round 10 P1：「本页行数 × 各自表的列数」这条上界推导本身
+        没错，但列数在应用层**没有任何上限**（``add_knowhow_column`` 只校验
+        非空/去重，不校验计数）——一页 500 行落在列数异常大的表上，原先单
+        事务的 ``row_id = ANY(row_ids)`` 无界 DELETE 仍可能撞 PG
+        statement_timeout / 长占 SQLite 写锁，是本轮补的第二处。若排水
+        中途被 ``batch_ok`` 叫停，返回 ``(len(row_ids), None)``——count 非零
+        （不让调用方误判「链已排空」），``last=None`` 让调用方游标不前进，
+        父行不删。``None``（既有调用方/测试）保持本方法在本参数存在之前的
+        行为逐字不变。返回 ``(本页行数, 最后一个 row id 或 None)``。"""
         ...
     def delete_knowhow_tables_page(
         self, notebook_id: str, cursor: str, limit: int,
@@ -1193,14 +1201,20 @@ class NotebookDeleteJobStorePort(Protocol):
         ...
     def delete_indexing_pipeline_stages_page(
         self, notebook_id: str, cursor: str, limit: int,
+        *, batch_ok: Callable[[], bool] | None = None,
     ) -> tuple[int, str | None]:
-        """B 类 indexing_pipeline_stages 链一页：取一页
-        ``indexing_pipeline_stages.job_id`` → 先删
-        ``indexing_pipeline_stage_sources``（按 job_id ∈ 本页，P1-D：以
-        ctid/rowid 有界子批循环删除，绝不用一条无界 ``= ANY(job_ids)``
-        语句——一页 500 个 job 合计牵出的 source 数可能远超一批的量级）→
-        再删本页 ``indexing_pipeline_stages``。返回 ``(本页 job 数, 最后一个
-        job_id 或 None)``。"""
+        """B 类 indexing_pipeline_stages 链一页：只读连接取一页
+        ``indexing_pipeline_stages.job_id`` → 用 ``_drain_children_by_parent_
+        ids``（``batch_ok`` 门控，每个子批各自独立提交、≤
+        ``_CHILD_BATCH_SIZE`` 行）限界排水 ``indexing_pipeline_stage_
+        sources``（按 job_id ∈ 本页——codex #659 round 10 P1：一页 500 个
+        job 合计牵出的 source 数可能远超一批的量级，此前虽然每条 DELETE
+        语句有界，但整个循环仍挤在同一个事务里，事务总行量无界）→ 全部
+        排空后单独开一个事务删本页 ``indexing_pipeline_stages``。若排水
+        中途被 ``batch_ok`` 叫停，返回 ``(len(job_ids), None)``——count 非零
+        （不让调用方误判「链已排空」），``last=None`` 让调用方游标不前进，
+        父行不删。``None``（既有调用方/测试）保持本方法在本参数存在之前的
+        行为逐字不变。返回 ``(本页 job 数, 最后一个 job_id 或 None)``。"""
         ...
     def delete_memory_items_page(
         self, notebook_id: str, cursor: str, limit: int,

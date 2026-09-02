@@ -131,25 +131,39 @@ _FILES_PAGE_SIZE = 500
 # where a row still demonstrably exists is treated as a loud failure, not a
 # silent short-circuit onto the next table.
 _FORM_TWO_MAX_STALLED_ROUNDS = 3
-# codex #659 round 8 P1 (+ round 9 P2): the `delete_<chain>_page` store
-# methods whose OWN body commits more than one sub-batch per call:
+# codex #659 round 8 P1 (+ round 9 P2, + round 10 P1): the `delete_<chain>_
+# page` store methods whose OWN body commits more than one sub-batch per
+# call:
 #   - the two read-only-parent chains' shared `_drain_children_by_parent_ids`
 #     helper (ctid/rowid-bounded, each iteration its own transaction — see
 #     that helper's docstring on both backends);
 #   - `knowhow_tables` (round 9 P2): a page of up to 500 tables' combined
 #     `knowhow_columns`/`knowhow_changes`/`knowhow_milestones` rows is itself
 #     unbounded even though each individual table's own count is small — the
-#     same fix, reusing the same helper per child table.
-# Every OTHER chain method (`memory_items`/`knowhow_rows`/
-# `indexing_pipeline_stages`) is a single transaction start to finish, so a
-# lease/claim lost mid-call either never lands a write at all (rolled back
-# with the rest of that one transaction) or has already committed everything
-# atomically — neither needs a `batch_ok` gate. Only the three named here get
-# the extra keyword forwarded; every other chain name is called exactly as
-# before this fix.
-_CHAINS_WITH_INTERNAL_SUB_BATCHES = frozenset(
-    {"source_elements", "ask_trace_steps", "knowhow_tables"}
-)
+#     same fix, reusing the same helper per child table;
+#   - `indexing_pipeline_stages` (round 10 P1): its own ctid/rowid-bounded
+#     drain of `indexing_pipeline_stage_sources` used to run entirely INSIDE
+#     the one transaction the page method opened — each DELETE statement was
+#     bounded, but the transaction's total row count across however many
+#     loop iterations it took was not. Same fix, same helper.
+#   - `knowhow_rows` (round 10 P1, found by the full per-transaction audit
+#     this round ran across every chain — see notebook_delete_tables.py's
+#     module docstring): its "N rows x that table's own column count" bound
+#     is not actually a bound at all — the app enforces no ceiling on a
+#     knowhow table's column count, so a page's `knowhow_cells`/`knowhow_
+#     cell_code` DELETEs could still be unbounded. Same fix, same helper.
+# `memory_items` is the one chain the same audit confirmed stays single-
+# transaction (its three child tables are ~constant-per-item; see the module
+# docstring table for the one caveat worth knowing), so a lease/claim lost
+# mid-call there either never lands a write at all (rolled back with the
+# rest of that one transaction) or has already committed everything
+# atomically — no gate needed. Only the chains named here get the extra
+# keyword forwarded; every other chain name is called exactly as before
+# this fix.
+_CHAINS_WITH_INTERNAL_SUB_BATCHES = frozenset({
+    "source_elements", "ask_trace_steps", "knowhow_tables",
+    "indexing_pipeline_stages", "knowhow_rows",
+})
 # §T-3.3: initial 5s backoff, doubling to a 60s cap.
 _QUIESCE_BACKOFF_INITIAL_SECONDS = 5.0
 _QUIESCE_BACKOFF_MAX_SECONDS = 60.0

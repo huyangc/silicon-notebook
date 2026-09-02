@@ -577,12 +577,29 @@ class NotebookDeleteJobStore:
 
     def delete_knowhow_rows_page(
         self, notebook_id: str, cursor: str, limit: int,
+        *, batch_ok: Callable[[], bool] | None = None,
     ) -> tuple[int, str | None]:
         """P1-D: the row/cell dimension, split out of the table-paged chain
         so one page's fanout is bounded by "N rows × that table's own column
         count" rather than "N tables × however many rows each happens to
-        have"."""
-        with self.database.write() as connection:
+        have".
+
+        codex #659 round 10 P1 (module docstring's per-transaction row-bound
+        audit): "that table's own column count" is NOT actually capped
+        anywhere in the app (``add_knowhow_column`` validates only
+        non-empty/unique names, no count ceiling) -- a page of up to 500
+        rows on a table with a pathologically large column count could still
+        make this page's ``knowhow_cells``/``knowhow_cell_code`` DELETEs
+        (each a single unbounded ``row_id = ANY(row_ids)`` statement) match
+        far more rows than one batch's worth, all inside the ONE transaction
+        this method used to open. Same fix as the other unbounded chains:
+        read the parent page (read-only, own connection), drain each child
+        table via ``_drain_children_by_parent_ids`` (``batch_ok``-gated,
+        each sub-batch its own transaction), and only once both are fully
+        drained does a SEPARATE final transaction delete the parent
+        ``knowhow_rows`` rows themselves. Same ``(len(row_ids), None)``-on-
+        gate-stop contract as every other round 8/9/10 method."""
+        with self.database.connect() as connection:
             page = connection.execute(
                 "SELECT kr.id AS id FROM knowhow_rows kr "
                 "JOIN knowhow_tables kt ON kt.id=kr.table_id "
@@ -590,20 +607,19 @@ class NotebookDeleteJobStore:
                 "ORDER BY kr.id LIMIT %s",
                 (notebook_id, cursor, limit),
             ).fetchall()
-            if not page:
-                return 0, None
-            row_ids = [row["id"] for row in page]
-            # A cell's row_id uniquely ties it to one table, so filtering by
-            # row_id alone already captures every cell/cell-code row for
-            # this page -- no column_id join needed.
-            connection.execute(
-                "DELETE FROM knowhow_cells WHERE row_id = ANY(%s)",
-                (row_ids,),
+        if not page:
+            return 0, None
+        row_ids = [row["id"] for row in page]
+        # A cell's row_id uniquely ties it to one table, so filtering by
+        # row_id alone already captures every cell/cell-code row for this
+        # page -- no column_id join needed.
+        for child_table in ("knowhow_cells", "knowhow_cell_code"):
+            drained = self._drain_children_by_parent_ids(
+                child_table, "row_id", row_ids, batch_ok=batch_ok,
             )
-            connection.execute(
-                "DELETE FROM knowhow_cell_code WHERE row_id = ANY(%s)",
-                (row_ids,),
-            )
+            if not drained:
+                return len(row_ids), None
+        with self.database.write() as connection:
             connection.execute(
                 "DELETE FROM knowhow_rows WHERE id = ANY(%s)",
                 (row_ids,),
@@ -685,37 +701,44 @@ class NotebookDeleteJobStore:
 
     def delete_indexing_pipeline_stages_page(
         self, notebook_id: str, cursor: str, limit: int,
+        *, batch_ok: Callable[[], bool] | None = None,
     ) -> tuple[int, str | None]:
-        with self.database.write() as connection:
+        """§1.3: ``indexing_pipeline_stage_sources`` also has a ``source_id``
+        parent, so it MUST be cleared before ``sources`` is ever deleted
+        (phase 5) -- clearing it here, driven by the job_id page, satisfies
+        that regardless of when phase 5 runs relative to this chain.
+
+        codex #659 round 10 P1: the original in-transaction ctid/rowid loop
+        bounded each individual DELETE statement to
+        ``_CHILD_BATCH_SIZE`` rows, but never the TRANSACTION's total --
+        a page of up to 500 job_ids whose combined stage-source fanout is
+        large could still run many loop iterations, all inside the ONE
+        transaction this method opened, risking PostgreSQL's
+        statement_timeout and holding SQLite's single write lock for the
+        whole page (the exact hazard rounds 8/9 already fixed for the two
+        read-only-parent chains and ``knowhow_tables``). Mirrors that same
+        fix: read the parent page (read-only, own connection), drain
+        ``indexing_pipeline_stage_sources`` via ``_drain_children_by_parent_
+        ids`` (``batch_ok``-gated, each sub-batch its own transaction), and
+        only once fully drained does a SEPARATE final transaction delete the
+        parent ``indexing_pipeline_stages`` rows. Same ``(len(job_ids),
+        None)``-on-gate-stop contract as the round 8/9 methods."""
+        with self.database.connect() as connection:
             page = connection.execute(
                 "SELECT job_id FROM indexing_pipeline_stages "
                 "WHERE notebook_id=%s AND job_id>%s ORDER BY job_id LIMIT %s",
                 (notebook_id, cursor, limit),
             ).fetchall()
-            if not page:
-                return 0, None
-            job_ids = [row["job_id"] for row in page]
-            # §1.3: this child also has a source_id parent, so it MUST be
-            # cleared before `sources` is ever deleted (phase 5) -- clearing
-            # it here, driven by the job_id page, satisfies that regardless
-            # of when phase 5 runs relative to this chain.
-            #
-            # P1-D: a single unbounded `job_id = ANY(job_ids)` DELETE could
-            # match far more rows than one page's worth if a handful of
-            # jobs each touched many sources -- drain it via the SAME
-            # ctid-bounded loop form-two uses, still inside this one
-            # transaction (the per-job_id fanout here is modest enough that
-            # keeping it in-transaction, unlike the read-only-parent chains
-            # below, does not risk the same unbounded-total-work shape).
-            while True:
-                deleted = connection.execute(
-                    "DELETE FROM indexing_pipeline_stage_sources WHERE ctid = ANY(ARRAY("
-                    "SELECT ctid FROM indexing_pipeline_stage_sources "
-                    "WHERE job_id = ANY(%s) LIMIT %s))",
-                    (job_ids, self._CHILD_BATCH_SIZE),
-                )
-                if deleted.rowcount == 0:
-                    break
+        if not page:
+            return 0, None
+        job_ids = [row["job_id"] for row in page]
+        drained = self._drain_children_by_parent_ids(
+            "indexing_pipeline_stage_sources", "job_id", job_ids,
+            batch_ok=batch_ok,
+        )
+        if not drained:
+            return len(job_ids), None
+        with self.database.write() as connection:
             connection.execute(
                 "DELETE FROM indexing_pipeline_stages "
                 "WHERE job_id = ANY(%s) AND notebook_id=%s",

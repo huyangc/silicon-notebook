@@ -110,6 +110,37 @@ archive-input tables that stay live until phase 5, so these two cannot be
 **read-only parent scans** (page ``sources.id``/``ask_jobs.id`` by
 ``notebook_id`` without deleting those rows) whose sole purpose is producing
 the parent-id set that drives the child delete.
+
+## 每事务行量上界（codex #659 round 10 P1 全链审计）
+
+此前每一轮 codex 评审只点名一条链（round 8：两条只读父链；round 9：
+``knowhow_tables``），本轮做一次性终审——对 ``_CHAINS``/``_READ_ONLY_
+PARENT_CHAINS`` 里**每一条** Chain 逐条推导「一页父 id（≤500）× 每个父的
+子行数上界」，不再逐轮补漏。``DirectTable``（形一/形二）天然不在审计范围
+内：两种形态都是单条 DELETE 语句、单个事务、``LIMIT`` 直接命中行数，没有
+第二维扇出，上界恒为 500（§1.5）。
+
+| 链 | 子表 | 每父上界推导 | 一页（≤500 父）总上界 | 裁决 |
+| --- | --- | --- | --- | --- |
+| ``memory_items`` | ``memory_embeddings`` | ``memory_id`` 是该表 **PRIMARY KEY**——每个 memory_id 恰好 0 或 1 行，schema 强制 | ≤500 | 有界，单事务，不用改 |
+| ``memory_items`` | ``memory_provenance`` | ``memory_id`` 是该表 **UNIQUE** 列——每个 memory_id 至多 1 行，schema 强制 | ≤500 | 有界，单事务，不用改 |
+| ``memory_items`` | ``memory_revisions`` | 每次编辑追加一条修订行，``memory_id`` 上**没有**唯一/计数约束——理论上无界；"~2k/事务"是三张子表合计的实践量级估算，不是 schema 证明 | 实践上 ≪ 一批（前两张子表已经贡献 1000，第三张通常个位数×500），理论上无界 | **裁决：本轮不改**——codex 明确批准"可留"；登记为已知、影响面很小的残余债，不在本轮范围内处理 |
+| ``knowhow_rows`` | ``knowhow_cells`` | ``UNIQUE(row_id, column_id)``——每行的 cell 数 = 该表列数；列数在应用层**没有任何上限**（``add_knowhow_column`` 只校验非空/去重，不校验计数） | 500 × 列数，列数无界 | **不有界 → 本轮（round 10 P1）已修**：改用 ``_drain_children_by_parent_ids``（``batch_ok`` 门控多事务） |
+| ``knowhow_rows`` | ``knowhow_cell_code`` | 同上，``UNIQUE(row_id, column_id)`` | 500 × 列数，列数无界 | **不有界 → 本轮（round 10 P1）已修**，同上 |
+| ``knowhow_tables`` | ``knowhow_columns``/``knowhow_changes``/``knowhow_milestones`` | 单表自身通常是小量级，但一页最多 500 张表**合计**才是真正的维度——三张子表此前全部挤在同一个事务里删完，无上界 | 500 表 × 各表列/变更/里程碑数，合计无界 | **不有界 → round 9 P2 已修**：``_drain_children_by_parent_ids`` 逐子表门控多事务 |
+| ``indexing_pipeline_stages`` | ``indexing_pipeline_stage_sources`` | 每个 job 触达的 source 数没有应用层上限（一次索引管线可覆盖任意多来源） | 500 job × 每 job 来源数，合计无界；此前单条 DELETE 语句虽有界（``_CHILD_BATCH_SIZE``），但循环全部挤在同一个事务里，事务总行量无界 | **不有界 → 本轮（round 10 P1）已修**：``_drain_children_by_parent_ids`` 门控多事务 |
+| ``source_elements``（只读父链） | ``source_elements`` | 一个 source 的元素数没有应用层上限（长文档可有成千上万个元素） | 500 source × 每 source 元素数，合计无界 | **不有界 → round 8 P1 已修**：``_drain_children_by_parent_ids`` 门控多事务 |
+| ``ask_trace_steps``（只读父链） | ``ask_trace_steps`` | 一个 ask job 的 trace 步骤数没有硬上限 | 500 job × 每 job trace 步骤数，合计无界 | **不有界 → round 8 P1 已修**：``_drain_children_by_parent_ids`` 门控多事务 |
+
+结论：全部 6 条 Chain 逐一过审。5 条（``knowhow_rows``/``knowhow_tables``/
+``indexing_pipeline_stages``/两条只读父链）已用统一配方（只读父页 SELECT +
+``_drain_children_by_parent_ids`` 的 ``batch_ok`` 门控多事务排水 + 独立最终
+事务删父行）收口；``memory_items`` 的前两张子表 schema 级有界，第三张
+（``memory_revisions``）理论无界但裁决保留（登记为残余债，不在本轮范围）；
+全部 ``DirectTable``（形一/形二）本身单语句单事务、天然 ≤500，未纳入逐链
+表格。``_CHAINS_WITH_INTERNAL_SUB_BATCHES``（``notebook_delete.py``）是这张
+表"已修"裁决的可执行落点——每新增一条需要门控的链，都必须同步进那个
+frozenset，否则 ``_run_chain`` 不会给它构造 ``sub_batch_ok``。
 """
 from __future__ import annotations
 
