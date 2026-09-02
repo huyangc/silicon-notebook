@@ -506,15 +506,25 @@ class KnowledgeStore:
                 counts["knowledge_source_facts"] += cur.rowcount
             return {name: n for name, n in counts.items() if n}
         if table == "knowledge_objects":
-            # codex #663 R15 P2b: FOR UPDATE — a concurrent store_kg
-            # replacing one of these objects must WAIT until this page
-            # commits, or its re-inserted embedding/provenance rows could
-            # land between our dependent DELETE and the parent DELETE and
-            # come out the other side as committed orphans.
+            # codex #663 R20 P1 (supersedes R15 P2b's FOR UPDATE): the
+            # object page acquires locks in the SAME order as the existing
+            # deletion path (`_delete_object_id_batch`: embeddings →
+            # clusters → provenance → object). An up-front object-row
+            # FOR UPDATE inverted that order against a concurrent
+            # `store_kg(replace_source=True)` (which holds embedding row
+            # locks before touching the object) and could deadlock (40P01,
+            # aborting either side). Plain SELECT here; the dependent
+            # DELETEs below take the dependent-row locks first and the
+            # object DELETE last — a replace-writer serializes on those
+            # dependent locks exactly like it does against
+            # `_delete_object_id_batch`. Residue from pure INSERT-only
+            # embedding writers (no lock conflict by construction) falls to
+            # the registry's later object-missing steps / the final pass,
+            # the same accepted class as the fts interruption residue.
             ids = [
                 row["id"] for row in db.execute(
                     f"SELECT id FROM knowledge_objects WHERE {predicate} "
-                    f"LIMIT {int(limit)} FOR UPDATE",
+                    f"LIMIT {int(limit)}",
                     (notebook_id,) * params,
                 ).fetchall()
             ]

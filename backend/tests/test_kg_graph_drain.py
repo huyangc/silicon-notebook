@@ -763,9 +763,13 @@ def test_final_reset_pins_isolation_as_the_first_statement(repo, monkeypatch):
     import inspect
 
     page_src = inspect.getsource(PgStore.drain_notebook_graph_rows_page)
-    assert page_src.count("FOR UPDATE\"") == 2, (
-        "ko/ksf 两个选页 SQL 都必须以 FOR UPDATE 结尾"
+    # codex #663 R20 P1:ko 页刻意**不再** FOR UPDATE(与既定删除路径同序
+    # 取锁,防 40P01 环);ksf 页保留(父→子与级联同序,无反转)。
+    assert page_src.count("FOR UPDATE\"") == 1, (
+        "只有 ksf 选页保留 FOR UPDATE;ko 页按写者同序取锁不上前置行锁"
     )
+    ksf_at = page_src.index("knowledge_source_facts WHERE {predicate}")
+    assert "FOR UPDATE" in page_src[ksf_at:ksf_at + 120]
 
 
 def _certificate(repo, notebook_id):
