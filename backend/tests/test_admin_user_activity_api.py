@@ -173,6 +173,16 @@ def test_analysis_issue_log_is_admin_only_read_only_and_content_minimal(
     repo.storage_dir = tmp_path / "analysis-storage"
     source_file = tmp_path / "broken.xlsx"
     source_file.write_bytes(b"private workbook bytes")
+    # codex #659 R20: record_issue 现在带生命周期闸——不存在的笔记本会被拒
+    # 绝发布（正是删除收尾后迟到发布要兜的形状），所以这里先落一行真实的
+    # 活笔记本。
+    with repo._runtime.database.write() as db:
+        db.execute(
+            "INSERT INTO notebooks (id,name,created_by,status,created_at,"
+            "updated_at) VALUES (?,?,?,?,?,?)",
+            ("nb-analysis", "Private Notebook", user_id, "ready",
+             "2026-08-31T00:00:00", "2026-08-31T00:00:00"),
+        )
     repo._runtime.analysis_artifacts.record_issue(
         notebook_id="nb-analysis",
         notebook_name="Private Notebook",

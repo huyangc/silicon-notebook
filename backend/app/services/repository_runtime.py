@@ -444,6 +444,15 @@ def _build_notebook_domain(
         source_files.storage_dir,
         retention_days=foundation.settings.analysis_failure_retention_days,
     )
+    # codex #659 R20 P1: lifecycle-only liveness gate for the two
+    # non-model publication paths (spreadsheet manifest / quarantine
+    # payload) — a parse/compile admitted before the delete tombstone must
+    # not republish retained source content after phase 5's one-shot
+    # redaction. Bare status read, no actor (same seam as AssetService).
+    analysis_artifacts.set_notebook_alive_probe(
+        lambda nid, _store=seats.notebook_store: _store.status_of(nid)
+        not in ("deleting", None)
+    )
     set_model_artifact_lifecycle_epoch_reader(
         analysis_artifacts.current_model_artifact_lifecycle_epoch
     )
