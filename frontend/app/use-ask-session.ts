@@ -146,6 +146,58 @@ type AskModeRequest = {
   promise: Promise<unknown>;
 };
 
+/**
+ * One in-flight durable Ask stream, tracked for the whole life of its transport.
+ *
+ * Navigation only *detaches* a run from the visible view (`detachVisibleRun`);
+ * the stream keeps reading. Before the server's `started` event nothing about
+ * the question is durable — in auto mode the engine is still being selected —
+ * so a notebook restore cannot find it in history. This record is what lets
+ * `restoreNotebook` re-attach that run to the returning view instead of
+ * silently dropping the question. `owner` is rebound on re-attach; everything
+ * else is written once (`conversationId`/`jobId` on `started`, `trace` as
+ * progress arrives) so the returning view can repaint the pending turn.
+ */
+type AskRunRecord = {
+  owner: AskSessionOwner;
+  notebookId: string;
+  question: string;
+  askedAt: string;
+  mode: string;
+  trace: ReasoningTraceStep[];
+  conversationIdAtStart: string | null;
+  conversationId: string | null;
+  jobId: string | null;
+  controller: AbortController;
+  cancelRequested: boolean;
+};
+
+/**
+ * One reasoning-mode intent preview (and, once the model asks for it, the
+ * clarification review) that precedes the durable Ask. Nothing about it exists
+ * server-side, so navigation cannot rely on history to bring it back: the run
+ * keeps reading its preview stream while detached, records the outcome here,
+ * and a notebook restore re-attaches it — resuming the "理解中" turn, re-opening
+ * the review, or (if it completed meanwhile) finding the durable run it started.
+ */
+type AskIntentRunRecord = {
+  owner: AskSessionOwner;
+  notebookId: string;
+  question: string;
+  askedAt: string;
+  conversationIdAtStart: string | null;
+  retrievalEffort: AskRetrievalEffortId;
+  scopeSnapshot: { sourceScope: SourceScopePayload; baseScope: BaseScopePayload };
+  controller: AbortController;
+  draftToken: object;
+  flowGeneration: number;
+  trace: ReasoningTraceStep[];
+  phase: "preview" | "review";
+  contract: QueryIntentContract | null;
+  understandingMs: number;
+  cancelRequested: boolean;
+};
+
 function sameNotebookOwner(
   current: AskSessionOwner | null,
   expected: Pick<AskSessionOwner, "actorId" | "notebookId" | "notebookGeneration">,
@@ -274,6 +326,13 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
   const deletedConversationIdsRef = useRef<Map<string, Set<string>>>(new Map());
   const askModeCacheRef = useRef<AskModeCache | null>(null);
   const askModeRequestRef = useRef<AskModeRequest | null>(null);
+  // Keyed by actor/notebook identity: at most one durable run can be in flight
+  // per notebook view (`asking` blocks a second submit), and a detached run is
+  // only ever re-attached to a view of the same identity.
+  const inFlightRunsRef = useRef<Map<string, AskRunRecord>>(new Map());
+  // Same keying for the client-driven intent preview/review that precedes a
+  // reasoning Ask; `submit` refuses a second one while either phase is visible.
+  const intentRunsRef = useRef<Map<string, AskIntentRunRecord>>(new Map());
 
   if (pendingActorIdRef.current === actorId) pendingActorIdRef.current = null;
   if (propActorIdRef.current !== actorId) {
@@ -335,7 +394,14 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
         if (modeChoiceVersionRef.current !== choiceVersion) {
           return modeFromTurn({ response: { mode: current } }, modes);
         }
-        return modeFromTurn(turnsRef.current[turnsRef.current.length - 1], modes);
+        // A re-attached intent preview/review is reasoning-mode context in its
+        // own right; projecting the last turn's mode over it would cancel it.
+        return modeFromTurn(
+          visibleIntentRun()
+            ? { response: { mode: "reasoning" } }
+            : turnsRef.current[turnsRef.current.length - 1],
+          modes,
+        );
       });
       if (pendingModeSourceRef.current) {
         setPendingMode(modeFromTurn(
@@ -385,6 +451,14 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
   function abortIntentPreview() {
     const wasIntentPhase = askIntentFlowRef.current === "preview"
       || askIntentFlowRef.current === "review";
+    const run = visibleIntentRun();
+    if (run) {
+      run.cancelRequested = true;
+      run.controller.abort();
+      if (intentRunsRef.current.get(ownerKey(run.owner)) === run) {
+        intentRunsRef.current.delete(ownerKey(run.owner));
+      }
+    }
     askIntentAbortRef.current?.abort();
     askIntentAbortRef.current = null;
     askIntentFlowGenerationRef.current += 1;
@@ -404,9 +478,109 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     return true;
   }
 
+  function visibleIntentRun(): AskIntentRunRecord | null {
+    const owner = ownerRef.current;
+    if (!owner) return null;
+    const run = intentRunsRef.current.get(ownerKey(owner));
+    return run && !run.cancelRequested && sameViewOwner(owner, run.owner) ? run : null;
+  }
+
+  function detachedIntentRunFor(owner: AskSessionOwner): AskIntentRunRecord | null {
+    const run = intentRunsRef.current.get(ownerKey(owner));
+    if (!run || run.cancelRequested || sameViewOwner(ownerRef.current, run.owner)) return null;
+    return run;
+  }
+
+  function detachIntentPreview() {
+    // Navigation keeps a pending preview/review alive for a later restore and
+    // clears only its visible projection; every other phase keeps the abort path
+    // (a confirmed hand-off is already owned by the durable run).
+    const flow = askIntentFlowRef.current;
+    if (flow !== "preview" && flow !== "review") {
+      abortIntentPreview();
+      return;
+    }
+    askIntentAbortRef.current = null;
+    askIntentFlowGenerationRef.current += 1;
+    askIntentFlowRef.current = "idle";
+    askIntentTraceRef.current = [];
+    askIntentDraftRef.current = "";
+    askIntentDraftOwnerRef.current = null;
+    setIntentChecking(false);
+    setIntentReview(null);
+    clearPendingTurn();
+  }
+
+  function presentIntentReview(run: AskIntentRunRecord, contract: QueryIntentContract) {
+    askIntentTraceRef.current = run.trace;
+    setPendingTrace(run.trace);
+    askIntentFlowRef.current = "review";
+    setIntentReview({
+      flowGeneration: run.flowGeneration,
+      notebookId: run.notebookId,
+      conversationId: run.conversationIdAtStart,
+      question: run.question,
+      contract,
+      understandingMs: run.understandingMs,
+      askedAt: run.askedAt,
+      sourceScope: run.scopeSnapshot.sourceScope,
+      baseScope: run.scopeSnapshot.baseScope,
+    });
+    effectsRef.current.notify("问题存在会改变检索方向的歧义，请先补充确认");
+  }
+
+  function attachIntentRun(run: AskIntentRunRecord, owner: AskSessionOwner) {
+    run.owner = owner;
+    run.flowGeneration = ++askIntentFlowGenerationRef.current;
+    askIntentFlowRef.current = run.phase;
+    askIntentAbortRef.current = run.phase === "preview" ? run.controller : null;
+    askIntentTraceRef.current = run.trace;
+    askIntentDraftRef.current = run.question;
+    askIntentDraftOwnerRef.current = run.draftToken;
+    // The reasoning engine is part of this run's context: the mode projection
+    // and the context-change effect both honour a visible intent run.
+    modeRef.current = "reasoning";
+    setMode("reasoning");
+    setQuestion("");
+    setConversationId(run.conversationIdAtStart);
+    setPendingQuestion(run.question);
+    setPendingAskedAt(run.askedAt);
+    pendingModeSourceRef.current = "reasoning";
+    setPendingMode("reasoning");
+    setPendingTrace(run.trace);
+    if (run.phase === "review" && run.contract) presentIntentReview(run, run.contract);
+    else setIntentChecking(true);
+    effectsRef.current.ensureAskVisible();
+  }
+
+  function detachedRunFor(owner: AskSessionOwner): AskRunRecord | null {
+    const run = inFlightRunsRef.current.get(ownerKey(owner));
+    if (!run || run.cancelRequested || sameViewOwner(ownerRef.current, run.owner)) return null;
+    return run;
+  }
+
+  function attachDetachedRun(run: AskRunRecord, owner: AskSessionOwner) {
+    // Rebind the still-reading stream to the returning view: from here on
+    // `ownsRun()` inside executeAsk is true again, so `started` publishes the
+    // durable id into this view and the final answer lands as a turn.
+    run.owner = owner;
+    askAbortRef.current = run.controller;
+    askJobIdRef.current = run.jobId;
+    askNotebookIdRef.current = run.notebookId;
+    setReconnectJob(null);
+    pendingModeSourceRef.current = run.mode;
+    setPendingQuestion(run.question);
+    setPendingAskedAt(run.askedAt);
+    setPendingMode(run.mode);
+    setPendingTrace([...run.trace]);
+    setAsking(true);
+    setConversationId(run.conversationId ?? run.conversationIdAtStart);
+    effectsRef.current.ensureAskVisible();
+  }
+
   function detachVisibleRun() {
     viewGenerationRef.current += 1;
-    abortIntentPreview();
+    detachIntentPreview();
     askAbortRef.current = null;
     askJobIdRef.current = null;
     askNotebookIdRef.current = null;
@@ -498,6 +672,15 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
   function abortForLogout() {
     askIntentAbortRef.current?.abort();
     askAbortRef.current?.abort();
+    // Detached runs belong to the actor who is leaving; drop their transports
+    // too (the durable jobs themselves keep running server-side).
+    for (const run of inFlightRunsRef.current.values()) run.controller.abort();
+    inFlightRunsRef.current.clear();
+    for (const run of intentRunsRef.current.values()) {
+      run.cancelRequested = true;
+      run.controller.abort();
+    }
+    intentRunsRef.current.clear();
     leaveWorkspace();
     actorGenerationRef.current += 1;
     askModeCacheRef.current = null;
@@ -632,10 +815,34 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     try {
       const list = await loadSessionsFor(owner);
       if (!sameViewOwner(ownerRef.current, owner)) return false;
+      // Work detached by navigation outranks "latest in history": an intent
+      // preview leaves no server-side trace at all, and a durable run may not
+      // have reached `started` yet, so opening the previous latest session over
+      // either would hide the question.
+      const intentRun = detachedIntentRunFor(owner);
+      const run = detachedRunFor(owner);
+      const latestId = intentRun
+        ? intentRun.conversationIdAtStart
+        : run ? run.conversationId ?? run.conversationIdAtStart : list?.[0]?.id;
       await restoreLatestConversation(
-        list ?? [],
+        latestId ? [{ id: latestId }] : [],
         (id) => applySessionDetail(id, owner),
       );
+      if (!sameViewOwner(ownerRef.current, owner)) return false;
+      // Re-read both: a detached preview may have completed and handed off to
+      // a durable run while the detail was loading. A job the detail restore
+      // projected as active (reconnect polling) is left alone unless it is this
+      // very run, whose live transport then outranks polling.
+      const intentNow = detachedIntentRunFor(owner);
+      const runNow = detachedRunFor(owner);
+      if (intentNow && askJobIdRef.current === null) {
+        attachIntentRun(intentNow, owner);
+      } else if (
+        runNow
+        && (askJobIdRef.current === null || askJobIdRef.current === runNow.jobId)
+      ) {
+        attachDetachedRun(runNow, owner);
+      }
     } catch (error) {
       if (sameViewOwner(ownerRef.current, owner)) throw error;
       return false;
@@ -698,6 +905,10 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
   }
 
   useEffect(() => {
+    // Changing conversation or engine mid-preview abandons the preview — unless
+    // the view is being set up to match a re-attached intent run.
+    const run = visibleIntentRun();
+    if (run && conversationId === run.conversationIdAtStart && mode === "reasoning") return;
     abortIntentPreview();
   }, [conversationId, mode]);
 
@@ -720,6 +931,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       sourceScope: copySourceScope(policyRef.current.sourceScope),
       baseScope: copyBaseScope(policyRef.current.baseScope),
     },
+    effort?: AskRetrievalEffortId,
   ): Promise<boolean> {
     const owner = currentNotebookOwner();
     if (!owner || asking || sessionLoading) return false;
@@ -736,31 +948,76 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       effectsRef.current.notify(`${groupLabel(groupOf(selectedMode, askModesRef.current))}需要知识图谱 — 可在「设置 → 编辑当前笔记本」里挂一个参考库，或先整理该笔记本的知识图谱`);
       return false;
     }
-    const runOwner = owner;
-    const conversationIdAtStart = conversationIdRef.current;
+    return startAskRun(
+      owner,
+      q,
+      selectedMode,
+      intent,
+      traceSeed,
+      askedAt,
+      scopeSnapshot,
+      effort ?? (currentPolicy.advanced ? retrievalEffort : DEFAULT_ASK_RETRIEVAL_EFFORT),
+      conversationIdRef.current,
+    );
+  }
+
+  /**
+   * Start the durable Ask stream for `runOwner`. Visible-state writes happen
+   * only while that owner is the current view (`ownsRun()`), so a detached
+   * intent preview that completes off-screen can start its job here without
+   * touching whatever the user is looking at; the run record then lets the
+   * next notebook restore re-attach the still-reading stream.
+   */
+  async function startAskRun(
+    runOwner: AskSessionOwner,
+    q: string,
+    selectedMode: string,
+    intent: AskIntentConfirmation | undefined,
+    traceSeed: ReasoningTraceStep[],
+    askedAt: string,
+    scopeSnapshot: { sourceScope: SourceScopePayload; baseScope: BaseScopePayload },
+    effort: AskRetrievalEffortId,
+    conversationIdAtStart: string | null,
+  ): Promise<boolean> {
     let startedConversationId = conversationIdAtStart;
-    const ownsRun = () => sameViewOwner(ownerRef.current, runOwner);
-    effectsRef.current.ensureAskVisible();
-    setQuestion("");
-    setPendingQuestion(q);
-    setPendingAskedAt(askedAt);
-    pendingModeSourceRef.current = selectedMode;
-    setPendingMode(selectedMode);
-    setPendingTrace(traceSeed);
-    setAsking(true);
     const controller = new AbortController();
-    askJobIdRef.current = null;
-    askAbortRef.current = controller;
-    askNotebookIdRef.current = runOwner.notebookId;
+    const run: AskRunRecord = {
+      owner: runOwner,
+      notebookId: runOwner.notebookId,
+      question: q,
+      askedAt,
+      mode: selectedMode,
+      trace: [...traceSeed],
+      conversationIdAtStart,
+      conversationId: null,
+      jobId: null,
+      controller,
+      cancelRequested: false,
+    };
+    const runKey = ownerKey(runOwner);
+    inFlightRunsRef.current.set(runKey, run);
+    // `run.owner` is rebound when a notebook restore re-attaches this run.
+    const ownsRun = () => sameViewOwner(ownerRef.current, run.owner);
+    if (ownsRun()) {
+      effectsRef.current.ensureAskVisible();
+      setQuestion("");
+      setPendingQuestion(q);
+      setPendingAskedAt(askedAt);
+      pendingModeSourceRef.current = selectedMode;
+      setPendingMode(selectedMode);
+      setPendingTrace(traceSeed);
+      setAsking(true);
+      askJobIdRef.current = null;
+      askAbortRef.current = controller;
+      askNotebookIdRef.current = runOwner.notebookId;
+    }
     try {
       const payload = {
         question: q,
         asked_at: askedAt,
         conversation_id: conversationIdAtStart ?? undefined,
         mode: selectedMode,
-        retrieval_effort: currentPolicy.advanced
-          ? retrievalEffort
-          : DEFAULT_ASK_RETRIEVAL_EFFORT,
+        retrieval_effort: effort,
         source_scope: scopeSnapshot.sourceScope,
         base_scope: scopeSnapshot.baseScope,
         ...(intent ? { intent } : {}),
@@ -769,11 +1026,14 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
         runOwner.notebookId,
         payload,
         (step) => {
+          run.trace.push(step);
           if (ownsRun()) setPendingTrace((previous) => [...previous, step]);
         },
         controller.signal,
         async (jobId, durableConversationId) => {
           startedConversationId = durableConversationId;
+          run.jobId = jobId;
+          run.conversationId = durableConversationId;
           if (cancelRequestedControllersRef.current.delete(controller)) {
             const cancelKey = `${runOwner.notebookId}\u0000${jobId}`;
             // A detached pre-start Stop and a restored active-job Stop share the
@@ -850,6 +1110,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       }
       effectsRef.current.reportError(error);
     } finally {
+      if (inFlightRunsRef.current.get(runKey) === run) inFlightRunsRef.current.delete(runKey);
       if (ownsRun()) {
         if (askAbortRef.current === controller) askAbortRef.current = null;
         askJobIdRef.current = null;
@@ -860,7 +1121,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       }
       cancelRequestedControllersRef.current.delete(controller);
     }
-    if (ownsRun()) await loadSessionsFor(runOwner).catch(() => {});
+    if (ownsRun()) await loadSessionsFor(run.owner).catch(() => {});
     return true;
   }
 
@@ -893,113 +1154,134 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       await executeAsk(q, submitMode, undefined, [], askedAt, scopeSnapshot);
       return;
     }
-    const conversationIdAtStart = conversationIdRef.current;
-    const previewOwner = owner;
-    const controller = new AbortController();
-    const flowGeneration = ++askIntentFlowGenerationRef.current;
+    const run: AskIntentRunRecord = {
+      owner,
+      notebookId: owner.notebookId,
+      question: q,
+      askedAt,
+      conversationIdAtStart: conversationIdRef.current,
+      retrievalEffort: currentPolicy.advanced ? retrievalEffort : DEFAULT_ASK_RETRIEVAL_EFFORT,
+      scopeSnapshot,
+      controller: new AbortController(),
+      draftToken: {},
+      flowGeneration: ++askIntentFlowGenerationRef.current,
+      trace: [intentUnderstandingStep()],
+      phase: "preview",
+      contract: null,
+      understandingMs: 0,
+      cancelRequested: false,
+    };
+    intentRunsRef.current.set(ownerKey(owner), run);
     askIntentFlowRef.current = "preview";
-    askIntentAbortRef.current = controller;
-    const draftToken = {};
+    askIntentAbortRef.current = run.controller;
     askIntentDraftRef.current = q;
-    askIntentDraftOwnerRef.current = draftToken;
-    askIntentTraceRef.current = [intentUnderstandingStep()];
+    askIntentDraftOwnerRef.current = run.draftToken;
+    askIntentTraceRef.current = run.trace;
     setQuestion("");
     setPendingQuestion(q);
     setPendingAskedAt(askedAt);
     pendingModeSourceRef.current = "reasoning";
     setPendingMode("reasoning");
-    setPendingTrace(askIntentTraceRef.current);
+    setPendingTrace(run.trace);
     setIntentChecking(true);
+    await runIntentPreview(run);
+  }
+
+  /**
+   * Drive one intent preview to its outcome. Navigation may detach the run from
+   * the visible view while this awaits, and a notebook restore may re-attach it,
+   * so every visible write is gated on `attached()` and the record carries the
+   * trace/contract the returning view repaints. A clear intent starts the
+   * durable Ask either way: on-screen through `executeAsk`, off-screen through
+   * `startAskRun`, so the question is never dropped for having been left.
+   */
+  async function runIntentPreview(run: AskIntentRunRecord) {
+    const runKey = ownerKey(run.owner);
+    const attached = () => !run.cancelRequested && sameViewOwner(ownerRef.current, run.owner);
     const understandingStartedAt = Date.now();
     try {
       const contract = await previewAskIntent(
-        previewOwner.notebookId,
-        q,
-        conversationIdAtStart,
-        controller.signal,
-        scopeSnapshot.sourceScope,
-        scopeSnapshot.baseScope,
+        run.notebookId,
+        run.question,
+        run.conversationIdAtStart,
+        run.controller.signal,
+        run.scopeSnapshot.sourceScope,
+        run.scopeSnapshot.baseScope,
         (elapsed) => {
-          if (
-            controller.signal.aborted
-            || askIntentFlowGenerationRef.current !== flowGeneration
-            || !sameViewOwner(ownerRef.current, previewOwner)
-          ) return;
-          askIntentTraceRef.current = replaceLastIntentStep(
-            askIntentTraceRef.current,
-            intentUnderstandingStep(elapsed),
-          );
-          setPendingTrace(askIntentTraceRef.current);
+          if (run.cancelRequested) return;
+          run.trace = replaceLastIntentStep(run.trace, intentUnderstandingStep(elapsed));
+          if (attached()) {
+            askIntentTraceRef.current = run.trace;
+            setPendingTrace(run.trace);
+          }
         },
       );
-      if (
-        controller.signal.aborted
-        || askIntentFlowGenerationRef.current !== flowGeneration
-        || !sameViewOwner(ownerRef.current, previewOwner)
-        || conversationIdRef.current !== conversationIdAtStart
-        || modeRef.current !== "reasoning"
-      ) return;
+      if (run.cancelRequested) return;
       const understandingMs = elapsedMs(understandingStartedAt, Date.now());
+      run.understandingMs = understandingMs;
       if (contract.needs_clarification) {
-        askIntentTraceRef.current = replaceLastIntentStep(
-          askIntentTraceRef.current,
-          intentClarifyStep(contract, understandingMs),
-        );
-        setPendingTrace(askIntentTraceRef.current);
-        askIntentFlowRef.current = "review";
-        setIntentReview({
-          flowGeneration,
-          notebookId: previewOwner.notebookId,
-          conversationId: conversationIdAtStart,
-          question: q,
-          contract,
-          understandingMs,
-          askedAt,
-          sourceScope: scopeSnapshot.sourceScope,
-          baseScope: scopeSnapshot.baseScope,
-        });
-        effectsRef.current.notify("问题存在会改变检索方向的歧义，请先补充确认");
+        run.trace = replaceLastIntentStep(run.trace, intentClarifyStep(contract, understandingMs));
+        run.phase = "review";
+        run.contract = contract;
+        if (attached()) presentIntentReview(run, contract);
         return;
       }
-      askIntentTraceRef.current = replaceLastIntentStep(
-        askIntentTraceRef.current,
-        intentUnderstoodStep(contract, understandingMs),
+      run.trace = replaceLastIntentStep(run.trace, intentUnderstoodStep(contract, understandingMs));
+      if (intentRunsRef.current.get(runKey) === run) intentRunsRef.current.delete(runKey);
+      const confirmation = buildAskIntentConfirmation(
+        contract,
+        contract.resolved_question,
+        {},
+        understandingMs,
       );
+      if (!attached()) {
+        await startAskRun(
+          run.owner,
+          run.question,
+          "reasoning",
+          confirmation,
+          handOffIntentTrace(run.trace),
+          run.askedAt,
+          run.scopeSnapshot,
+          run.retrievalEffort,
+          run.conversationIdAtStart,
+        );
+        return;
+      }
+      askIntentTraceRef.current = run.trace;
       askIntentAbortRef.current = null;
       setIntentChecking(false);
       askIntentFlowRef.current = "submitting";
       const started = await executeAsk(
-        q,
+        run.question,
         "reasoning",
-        buildAskIntentConfirmation(contract, contract.resolved_question, {}, understandingMs),
-        handOffIntentTrace(askIntentTraceRef.current),
-        askedAt,
-        scopeSnapshot,
+        confirmation,
+        handOffIntentTrace(run.trace),
+        run.askedAt,
+        run.scopeSnapshot,
+        run.retrievalEffort,
       );
-      if (releaseIntentDraft(draftToken) && !started) {
-        setQuestion(q);
+      if (releaseIntentDraft(run.draftToken) && !started) {
+        setQuestion(run.question);
         askIntentTraceRef.current = [];
         clearPendingTurn();
       }
     } catch (error) {
-      if (
-        !isAbortError(error)
-        && askIntentFlowGenerationRef.current === flowGeneration
-        && sameViewOwner(ownerRef.current, previewOwner)
-      ) effectsRef.current.reportError(error);
+      if (intentRunsRef.current.get(runKey) === run) intentRunsRef.current.delete(runKey);
+      if (!isAbortError(error) && attached()) effectsRef.current.reportError(error);
       const draft = askIntentDraftRef.current;
-      if (askIntentAbortRef.current === controller && releaseIntentDraft(draftToken)) {
-        setQuestion(draft || q);
+      if (askIntentAbortRef.current === run.controller && releaseIntentDraft(run.draftToken)) {
+        setQuestion(draft || run.question);
         askIntentTraceRef.current = [];
         clearPendingTurn();
       }
     } finally {
-      if (askIntentAbortRef.current === controller) {
+      if (askIntentAbortRef.current === run.controller) {
         askIntentAbortRef.current = null;
         setIntentChecking(false);
       }
       if (
-        askIntentFlowGenerationRef.current === flowGeneration
+        askIntentFlowGenerationRef.current === run.flowGeneration
         && askIntentFlowRef.current !== "review"
       ) askIntentFlowRef.current = "idle";
     }
@@ -1015,11 +1297,19 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     const flowGeneration = review.flowGeneration;
     const draftToken = askIntentDraftOwnerRef.current ?? {};
     askIntentDraftOwnerRef.current = draftToken;
+    const run = visibleIntentRun();
+    const retireRun = () => {
+      if (run && intentRunsRef.current.get(ownerKey(run.owner)) === run) {
+        intentRunsRef.current.delete(ownerKey(run.owner));
+      }
+    };
     if (
       review.notebookId !== owner.notebookId
       || review.conversationId !== conversationIdRef.current
       || modeRef.current !== "reasoning"
     ) {
+      if (run) run.cancelRequested = true;
+      retireRun();
       setIntentReview(null);
       askIntentTraceRef.current = [];
       releaseIntentDraft(draftToken);
@@ -1027,6 +1317,9 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       effectsRef.current.notify("问题上下文已经变化，请重新提交");
       return;
     }
+    // Confirmation hands the question to the durable run; the preview record
+    // has nothing left to re-attach.
+    retireRun();
     askIntentFlowRef.current = "submitting";
     setIntentReview(null);
     const traceSeed = [
@@ -1046,6 +1339,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
         handOffIntentTrace(traceSeed),
         review.askedAt,
         scopeSnapshot,
+        run?.retrievalEffort,
       );
       if (releaseIntentDraft(draftToken) && !started) {
         setQuestion(review.question);
@@ -1060,6 +1354,14 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
   }
 
   function cancelIntent() {
+    const run = visibleIntentRun();
+    if (run) {
+      run.cancelRequested = true;
+      run.controller.abort();
+      if (intentRunsRef.current.get(ownerKey(run.owner)) === run) {
+        intentRunsRef.current.delete(ownerKey(run.owner));
+      }
+    }
     askIntentFlowGenerationRef.current += 1;
     askIntentFlowRef.current = "idle";
     setIntentReview(null);
@@ -1083,6 +1385,11 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     const jobId = askJobIdRef.current;
     const activeNotebook = askNotebookIdRef.current;
     const controller = askAbortRef.current;
+    // A run the user asked to stop must never be re-attached by a later restore,
+    // whichever way the cancellation below settles.
+    for (const run of inFlightRunsRef.current.values()) {
+      if (run.controller === controller) run.cancelRequested = true;
+    }
     if (jobId && activeNotebook) {
       const owner = currentNotebookOwner();
       const cancelKey = `${activeNotebook}\u0000${jobId}`;

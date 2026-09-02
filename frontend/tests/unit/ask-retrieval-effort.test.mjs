@@ -51,8 +51,11 @@ test("historical effort restores safely", () => {
 
 test("reasoning submit carries effort and opening a conversation restores it", async () => {
   const askSession = await parseModule("use-ask-session.ts");
+  // executeAsk 做可见态的守卫，再把冻结好的 effort 交给 startAskRun 发流。
   const execute = callsIn(findFunction(askSession, "executeAsk"));
+  const start = callsIn(findFunction(askSession, "startAskRun"));
   const applyDetail = callsIn(findFunction(askSession, "applySessionDetail"));
-  assert.ok(execute.includes("runAskStream"));
+  assert.ok(execute.includes("startAskRun"));
+  assert.ok(start.includes("runAskStream"));
   assert.ok(applyDetail.includes("retrievalEffortFromTurn"));
 });

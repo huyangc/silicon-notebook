@@ -3,6 +3,7 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import type { AskIntentConfirmation, QueryIntentContract } from "../../app/ask-intent-model";
 import type { AskJobDetail } from "../../app/ask-reconnect";
+import type { ReasoningTraceStep } from "../../app/ask-stream";
 import type {
   AskResponse,
   ConversationDetail,
@@ -143,6 +144,27 @@ function doneJob(jobId = "job-a"): AskJobDetail {
     ...runningJob(jobId),
     status: "done",
     answer_id: `answer-${jobId}`,
+  };
+}
+
+function contractFor(question: string, needsClarification: boolean): QueryIntentContract {
+  return {
+    objective: question,
+    resolved_question: question,
+    intent_type: "other",
+    result_scope: "ranked",
+    completeness_required: false,
+    entities: [],
+    mandatory_topics: [],
+    comparison_axes: [],
+    constraints: [],
+    excluded_topics: [],
+    expected_output: "answer",
+    assumptions: [],
+    ambiguities: needsClarification ? [{ id: "which", question: "Which one?", required: true }] : [],
+    confidence: needsClarification ? 0.5 : 0.9,
+    needs_clarification: needsClarification,
+    confirmed: false,
   };
 }
 
@@ -1683,7 +1705,7 @@ test("actor replacement drops delayed restore work and disables commands from th
   expect(effects.ensureAskVisible).toHaveBeenCalledTimes(visibleEffects);
 });
 
-test("durable A/G1 stream publishes only history after notebook A -> B -> A/G3", async () => {
+test("durable A/G1 stream re-attaches to the returning A/G3 view after notebook A -> B -> A", async () => {
   const stream = deferred<AskResponse>();
   let signal: AbortSignal | undefined;
   let onStart: ((jobId: string, conversationId: string) => void | Promise<void>) | undefined;
@@ -1748,8 +1770,13 @@ test("durable A/G1 stream publishes only history after notebook A -> B -> A/G3",
     await value!.restoreNotebook(ownerA3!);
     value!.finishNotebookTransition(ownerA3!);
   });
-  expect(value!.conversationId).toBe("conversation-g3");
-  expect(value!.turns[0]?.response.answer_id).toBe("answer-conversation-g3");
+  // The G1 run has no durable conversation yet, so the G3 restore neither opens
+  // the previous latest session over it nor drops it: the pending turn comes back.
+  expect(api.getConversation).not.toHaveBeenCalled();
+  expect(value!.conversationId).toBeNull();
+  expect(value!.turns).toEqual([]);
+  expect(value!.asking).toBe(true);
+  expect(value!.pendingQuestion).toBe("durable G1 question");
 
   await act(async () => {
     await onStart!("job-durable", "conversation-durable");
@@ -1760,8 +1787,7 @@ test("durable A/G1 stream publishes only history after notebook A -> B -> A/G3",
     "conversation-durable",
     "conversation-g3",
   ]);
-  expect(value!.conversationId).toBe("conversation-g3");
-  expect(value!.turns[0]?.response.answer_id).toBe("answer-conversation-g3");
+  expect(value!.conversationId).toBe("conversation-durable");
 
   stream.resolve(answer("conversation-durable"));
   await act(async () => submitting);
@@ -1777,9 +1803,439 @@ test("durable A/G1 stream publishes only history after notebook A -> B -> A/G3",
     "conversation-durable",
     "conversation-g3",
   ]);
-  expect(value!.conversationId).toBe("conversation-g3");
+  expect(value!.asking).toBe(false);
+  expect(value!.conversationId).toBe("conversation-durable");
+  expect(value!.turns.map((turn) => turn.question)).toEqual(["durable G1 question"]);
+  expect(value!.turns[0]?.response.answer_id).toBe("answer-conversation-durable");
+});
+
+test("a new-session run detached before started is re-attached on notebook return", async () => {
+  const stream = deferred<AskResponse>();
+  let signal: AbortSignal | undefined;
+  let onProgress: ((step: ReasoningTraceStep) => void | Promise<void>) | undefined;
+  let onStart: ((jobId: string, conversationId: string) => void | Promise<void>) | undefined;
+  api.runAskStream.mockImplementation((
+    _notebookId: string,
+    _payload: unknown,
+    nextOnProgress: (step: ReasoningTraceStep) => void | Promise<void>,
+    nextSignal?: AbortSignal,
+    nextOnStart?: (jobId: string, conversationId: string) => void | Promise<void>,
+  ) => {
+    onProgress = nextOnProgress;
+    signal = nextSignal;
+    onStart = nextOnStart;
+    return stream.promise;
+  });
+  api.listConversations.mockResolvedValue([summary("conversation-older")]);
+  api.getConversation.mockResolvedValue(detail("conversation-older"));
+  render(<Harness />);
+  beginOwnedNotebook();
+
+  let submitting!: Promise<void>;
+  act(() => {
+    submitting = value!.submit("detached question");
+  });
+  await act(async () => {
+    await onProgress!({ step_type: "intent", summary: "selecting engine", detail: {} });
+  });
+  act(() => value!.leaveWorkspace());
+  expect(signal?.aborted).toBe(false);
+
+  const owner = beginOwnedNotebook(2);
+  await act(async () => {
+    await value!.restoreNotebook(owner);
+    value!.finishNotebookTransition(owner);
+  });
+  // The previous latest session is not opened over the unfinished question.
+  expect(api.getConversation).not.toHaveBeenCalled();
+  expect(value!.conversationId).toBeNull();
+  expect(value!.turns).toEqual([]);
+  expect(value!.asking).toBe(true);
+  expect(value!.pendingQuestion).toBe("detached question");
+  expect(value!.pendingTrace.map((step) => step.summary)).toEqual(["selecting engine"]);
+
+  api.listConversations.mockResolvedValue([
+    summary("conversation-detached"),
+    summary("conversation-older"),
+  ]);
+  await act(async () => {
+    await onStart!("job-detached", "conversation-detached");
+  });
+  expect(value!.conversationId).toBe("conversation-detached");
+  expect(value!.sessions[0]?.id).toBe("conversation-detached");
+
+  stream.resolve(answer("conversation-detached"));
+  await act(async () => submitting);
+  expect(signal?.aborted).toBe(false);
+  expect(api.cancelAskJob).not.toHaveBeenCalled();
+  expect(value!.asking).toBe(false);
+  expect(value!.pendingQuestion).toBe("");
+  expect(value!.conversationId).toBe("conversation-detached");
+  expect(value!.turns.map((turn) => turn.question)).toEqual(["detached question"]);
+  expect(value!.turns[0]?.response.answer_id).toBe("answer-conversation-detached");
+});
+
+test("a follow-up detached before started reopens its own conversation, not the newest one", async () => {
+  const stream = deferred<AskResponse>();
+  let onStart: ((jobId: string, conversationId: string) => void | Promise<void>) | undefined;
+  api.runAskStream.mockImplementation((
+    _notebookId: string,
+    _payload: unknown,
+    _onProgress: unknown,
+    _signal?: AbortSignal,
+    nextOnStart?: (jobId: string, conversationId: string) => void | Promise<void>,
+  ) => {
+    onStart = nextOnStart;
+    return stream.promise;
+  });
+  api.listConversations.mockResolvedValue([summary("conversation-x"), summary("conversation-y")]);
+  api.getConversation.mockResolvedValue(detail("conversation-x"));
+  render(<Harness />);
+  const first = beginOwnedNotebook();
+  await act(async () => {
+    await value!.restoreNotebook(first);
+  });
+  expect(value!.conversationId).toBe("conversation-x");
+
+  let submitting!: Promise<void>;
+  act(() => {
+    submitting = value!.submit("follow-up question");
+  });
+  act(() => value!.leaveWorkspace());
+
+  // Another session became the newest while the follow-up was still routing.
+  api.listConversations.mockResolvedValue([summary("conversation-y"), summary("conversation-x")]);
+  const owner = beginOwnedNotebook(2);
+  await act(async () => {
+    await value!.restoreNotebook(owner);
+    value!.finishNotebookTransition(owner);
+  });
+  expect(api.getConversation).toHaveBeenCalledTimes(2);
+  expect(api.getConversation).toHaveBeenLastCalledWith("conversation-x");
+  expect(value!.conversationId).toBe("conversation-x");
   expect(value!.turns).toHaveLength(1);
-  expect(value!.turns[0]?.response.answer_id).toBe("answer-conversation-g3");
+  expect(value!.asking).toBe(true);
+  expect(value!.pendingQuestion).toBe("follow-up question");
+
+  await act(async () => {
+    await onStart!("job-follow-up", "conversation-x");
+  });
+  stream.resolve(answer("conversation-x", "answer-follow-up"));
+  await act(async () => submitting);
+  expect(value!.asking).toBe(false);
+  expect(value!.conversationId).toBe("conversation-x");
+  expect(value!.turns.map((turn) => turn.question)).toEqual([
+    "question-conversation-x",
+    "follow-up question",
+  ]);
+  expect(value!.turns[1]?.response.answer_id).toBe("answer-follow-up");
+});
+
+test("a run detached after started re-attaches its live stream instead of polling the job", async () => {
+  vi.useFakeTimers();
+  const stream = deferred<AskResponse>();
+  let onStart: ((jobId: string, conversationId: string) => void | Promise<void>) | undefined;
+  api.runAskStream.mockImplementation((
+    _notebookId: string,
+    _payload: unknown,
+    _onProgress: unknown,
+    _signal?: AbortSignal,
+    nextOnStart?: (jobId: string, conversationId: string) => void | Promise<void>,
+  ) => {
+    onStart = nextOnStart;
+    return stream.promise;
+  });
+  api.listConversations.mockResolvedValue([summary("conversation-durable")]);
+  api.getConversation.mockResolvedValue({
+    ...detail("conversation-durable"),
+    turn_count: 0,
+    turns: [],
+    active_job: {
+      job_id: "job-durable",
+      question: "durable question",
+      asked_at: "2026-08-22T00:00:00Z",
+      mode: "chunk",
+      trace: [],
+    },
+  });
+  render(<Harness />);
+  beginOwnedNotebook();
+
+  let submitting!: Promise<void>;
+  act(() => {
+    submitting = value!.submit("durable question");
+  });
+  await act(async () => {
+    await onStart!("job-durable", "conversation-durable");
+  });
+  act(() => value!.leaveWorkspace());
+
+  const owner = beginOwnedNotebook(2);
+  await act(async () => {
+    await value!.restoreNotebook(owner);
+    value!.finishNotebookTransition(owner);
+  });
+  expect(api.getConversation).toHaveBeenCalledWith("conversation-durable");
+  expect(value!.conversationId).toBe("conversation-durable");
+  expect(value!.asking).toBe(true);
+  expect(value!.pendingQuestion).toBe("durable question");
+
+  act(() => vi.advanceTimersByTime(1500));
+  expect(api.getAskJob).not.toHaveBeenCalled();
+
+  stream.resolve(answer("conversation-durable"));
+  await act(async () => submitting);
+  expect(api.getAskJob).not.toHaveBeenCalled();
+  expect(value!.asking).toBe(false);
+  expect(value!.turns.map((turn) => turn.question)).toEqual(["durable question"]);
+});
+
+test("a run stopped before started is never re-attached by a later restore", async () => {
+  const stream = deferred<AskResponse>();
+  let signal: AbortSignal | undefined;
+  let onStart: ((jobId: string, conversationId: string) => void | Promise<void>) | undefined;
+  api.runAskStream.mockImplementation((
+    _notebookId: string,
+    _payload: unknown,
+    _onProgress: unknown,
+    nextSignal?: AbortSignal,
+    nextOnStart?: (jobId: string, conversationId: string) => void | Promise<void>,
+  ) => {
+    signal = nextSignal;
+    onStart = nextOnStart;
+    return stream.promise;
+  });
+  api.listConversations.mockResolvedValue([summary("conversation-older")]);
+  api.getConversation.mockResolvedValue(detail("conversation-older"));
+  render(<Harness />);
+  beginOwnedNotebook();
+
+  let submitting!: Promise<void>;
+  act(() => {
+    submitting = value!.submit("stopped question");
+  });
+  act(() => value!.abort());
+  expect(value!.asking).toBe(false);
+  act(() => value!.leaveWorkspace());
+
+  const owner = beginOwnedNotebook(2);
+  await act(async () => {
+    await value!.restoreNotebook(owner);
+    value!.finishNotebookTransition(owner);
+  });
+  expect(value!.asking).toBe(false);
+  expect(value!.pendingQuestion).toBe("");
+  expect(value!.conversationId).toBe("conversation-older");
+
+  await act(async () => {
+    await onStart!("job-stopped", "conversation-stopped");
+  });
+  expect(api.cancelAskJob).toHaveBeenCalledTimes(1);
+  expect(signal?.aborted).toBe(true);
+  stream.reject(new DOMException("aborted", "AbortError"));
+  await act(async () => submitting);
+  expect(value!.asking).toBe(false);
+  expect(value!.conversationId).toBe("conversation-older");
+  expect(value!.turns.map((turn) => turn.question)).toEqual(["question-conversation-older"]);
+});
+
+test("leaving during a reasoning intent preview keeps it running and re-attaches it on return", async () => {
+  const preview = deferred<QueryIntentContract>();
+  api.previewAskIntent.mockReturnValue(preview.promise);
+  api.runAskStream.mockResolvedValue(answer("conversation-intent"));
+  api.listConversations.mockResolvedValue([summary("conversation-older")]);
+  api.getConversation.mockResolvedValue(detail("conversation-older"));
+  render(<Harness />);
+  beginOwnedNotebook();
+  act(() => value!.selectMode("reasoning"));
+
+  let submitting!: Promise<void>;
+  act(() => {
+    submitting = value!.submit("clear question");
+  });
+  expect(value!.intentChecking).toBe(true);
+  act(() => value!.leaveWorkspace());
+  const signal = api.previewAskIntent.mock.calls[0]?.[3] as AbortSignal;
+  expect(signal.aborted).toBe(false);
+
+  const owner = beginOwnedNotebook(2);
+  await act(async () => {
+    await value!.restoreNotebook(owner);
+    value!.finishNotebookTransition(owner);
+  });
+  // The preview is reasoning context in its own right: no older session is
+  // opened over it, and the mode projection does not cancel it.
+  expect(api.getConversation).not.toHaveBeenCalled();
+  expect(value!.intentChecking).toBe(true);
+  expect(value!.pendingQuestion).toBe("clear question");
+  expect(value!.mode).toBe("reasoning");
+  expect(value!.conversationId).toBeNull();
+  expect(signal.aborted).toBe(false);
+
+  preview.resolve(contractFor("clear question", false));
+  await act(async () => submitting);
+  expect(api.runAskStream).toHaveBeenCalledTimes(1);
+  expect(api.runAskStream.mock.calls[0]?.[1]).toMatchObject({
+    question: "clear question",
+    mode: "reasoning",
+  });
+  expect(value!.intentChecking).toBe(false);
+  expect(value!.asking).toBe(false);
+  expect(value!.conversationId).toBe("conversation-intent");
+  expect(value!.turns.map((turn) => turn.question)).toEqual(["clear question"]);
+});
+
+test("an intent preview that completes while away starts the durable Ask and re-attaches it on return", async () => {
+  const preview = deferred<QueryIntentContract>();
+  const stream = deferred<AskResponse>();
+  let onStart: ((jobId: string, conversationId: string) => void | Promise<void>) | undefined;
+  api.previewAskIntent.mockReturnValue(preview.promise);
+  api.runAskStream.mockImplementation((
+    _notebookId: string,
+    _payload: unknown,
+    _onProgress: unknown,
+    _signal?: AbortSignal,
+    nextOnStart?: (jobId: string, conversationId: string) => void | Promise<void>,
+  ) => {
+    onStart = nextOnStart;
+    return stream.promise;
+  });
+  api.listConversations.mockResolvedValue([summary("conversation-older")]);
+  api.getConversation.mockResolvedValue(detail("conversation-older"));
+  render(<Harness />);
+  beginOwnedNotebook();
+  act(() => value!.selectMode("reasoning"));
+
+  let submitting!: Promise<void>;
+  act(() => {
+    submitting = value!.submit("away question");
+  });
+  act(() => value!.leaveWorkspace());
+
+  preview.resolve(contractFor("away question", false));
+  await act(async () => {
+    await preview.promise;
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  // Off-screen completion still starts the durable job with the frozen intent.
+  expect(api.runAskStream).toHaveBeenCalledTimes(1);
+  expect(api.runAskStream.mock.calls[0]?.[1]).toMatchObject({
+    question: "away question",
+    mode: "reasoning",
+    intent: expect.objectContaining({ resolved_question: "away question" }),
+  });
+
+  const owner = beginOwnedNotebook(2);
+  await act(async () => {
+    await value!.restoreNotebook(owner);
+    value!.finishNotebookTransition(owner);
+  });
+  expect(api.getConversation).not.toHaveBeenCalled();
+  expect(value!.intentChecking).toBe(false);
+  expect(value!.asking).toBe(true);
+  expect(value!.pendingQuestion).toBe("away question");
+
+  await act(async () => {
+    await onStart!("job-away", "conversation-away");
+  });
+  expect(value!.conversationId).toBe("conversation-away");
+  stream.resolve(answer("conversation-away"));
+  await act(async () => submitting);
+  expect(value!.asking).toBe(false);
+  expect(value!.turns.map((turn) => turn.question)).toEqual(["away question"]);
+});
+
+test("a clarification requested while away re-opens on return and confirms with the frozen scope", async () => {
+  const preview = deferred<QueryIntentContract>();
+  api.previewAskIntent.mockReturnValue(preview.promise);
+  api.runAskStream.mockResolvedValue(answer("conversation-review"));
+  const scopedPolicy: AskPolicy = {
+    ...DEFAULT_POLICY,
+    sourceScope: { mode: "include", source_ids: ["source-old"] },
+    baseScope: { mode: "include", notebook_ids: ["base-old"] },
+  };
+  const view = render(<Harness policy={scopedPolicy} />);
+  beginOwnedNotebook();
+  act(() => value!.selectMode("reasoning"));
+
+  let submitting!: Promise<void>;
+  act(() => {
+    submitting = value!.submit("ambiguous away");
+  });
+  act(() => value!.leaveWorkspace());
+  const contract = contractFor("ambiguous away", true);
+  preview.resolve(contract);
+  await act(async () => submitting);
+  expect(api.runAskStream).not.toHaveBeenCalled();
+  expect(effects.notify).not.toHaveBeenCalledWith("问题存在会改变检索方向的歧义，请先补充确认");
+
+  view.rerender(<Harness policy={DEFAULT_POLICY} />);
+  const owner = beginOwnedNotebook(2);
+  await act(async () => {
+    await value!.restoreNotebook(owner);
+    value!.finishNotebookTransition(owner);
+  });
+  expect(value!.intentReview?.contract).toBe(contract);
+  expect(value!.intentReview?.question).toBe("ambiguous away");
+  expect(value!.pendingQuestion).toBe("ambiguous away");
+  expect(value!.intentChecking).toBe(false);
+  expect(value!.mode).toBe("reasoning");
+  expect(effects.notify).toHaveBeenCalledWith("问题存在会改变检索方向的歧义，请先补充确认");
+
+  await act(async () => {
+    await value!.confirmIntent({
+      contract,
+      resolved_question: "ambiguous away resolved",
+      answers: [{ id: "which", answer: "that one" }],
+    });
+  });
+  expect(api.runAskStream).toHaveBeenCalledTimes(1);
+  expect(api.runAskStream.mock.calls[0]?.[1]).toMatchObject({
+    question: "ambiguous away",
+    mode: "reasoning",
+    source_scope: scopedPolicy.sourceScope,
+    base_scope: scopedPolicy.baseScope,
+  });
+  expect(value!.intentReview).toBeNull();
+  expect(value!.turns.map((turn) => turn.question)).toEqual(["ambiguous away"]);
+});
+
+test("leaving with a clarification open re-opens it on return and cancel still restores the draft", async () => {
+  const contract = contractFor("ambiguous open", true);
+  api.previewAskIntent.mockResolvedValue(contract);
+  render(<Harness />);
+  beginOwnedNotebook();
+  act(() => value!.selectMode("reasoning"));
+  await act(async () => {
+    await value!.submit("ambiguous open");
+  });
+  expect(value!.intentReview?.contract).toBe(contract);
+
+  act(() => value!.leaveWorkspace());
+  const owner = beginOwnedNotebook(2);
+  await act(async () => {
+    await value!.restoreNotebook(owner);
+    value!.finishNotebookTransition(owner);
+  });
+  expect(value!.intentReview?.contract).toBe(contract);
+  expect(value!.pendingQuestion).toBe("ambiguous open");
+
+  act(() => value!.cancelIntent());
+  expect(value!.intentReview).toBeNull();
+  expect(value!.pendingQuestion).toBe("");
+  expect(value!.question).toBe("ambiguous open");
+  expect(api.runAskStream).not.toHaveBeenCalled();
+
+  // The cancelled review is gone for good: a further restore has nothing to re-attach.
+  act(() => value!.leaveWorkspace());
+  const again = beginOwnedNotebook(3);
+  await act(async () => {
+    await value!.restoreNotebook(again);
+    value!.finishNotebookTransition(again);
+  });
+  expect(value!.intentReview).toBeNull();
+  expect(value!.pendingQuestion).toBe("");
 });
 
 // PR #557 regression: `turns`/`sessions`/`pendingTrace`/`feedbackSent` used to

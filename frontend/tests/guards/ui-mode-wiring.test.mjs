@@ -14,7 +14,7 @@ import assert from "node:assert/strict";
 
 import ts from "typescript";
 
-import { parseModule } from "../../test-support/semantic-source.mjs";
+import { findFunction, parseModule } from "../../test-support/semantic-source.mjs";
 
 
 const page = await parseModule("page.tsx");
@@ -232,14 +232,47 @@ test("问答请求体的 retrieval_effort 必须沿 page→policy→payload 强�
     ts.isPropertyAssignment(prop) && prop.name.getText(askSession) === "retrieval_effort"
   ));
   assert.ok(property, "payload 顶层必须有 retrieval_effort 字段");
-  const text = property.initializer.getText(askSession);
-  assert.match(
-    text,
-    /currentPolicy\.advanced/,
-    "retrieval_effort 必须读取 page 交来的 policy.advanced 分叉——自动模式下控件不渲染，"
-      + `state 却可能残留高级模式下选过的档位，发请求必须强制回默认档：${text}`,
-  );
-  assert.match(text, /DEFAULT_ASK_RETRIEVAL_EFFORT/);
+  // payload 现在只发 startAskRun 收到的冻结值 `effort`；分叉必须发生在每一个
+  // 产出这个值的地方：executeAsk 交给 startAskRun 的实参，以及 reasoning 提交时
+  // 冻结进意图 run 记录的 retrievalEffort（离开期间预检完成后直接用它发流）。
+  assert.equal(property.initializer.getText(askSession), "effort");
+  const sources = [];
+  function visitEffortSources(node) {
+    if (
+      ts.isCallExpression(node)
+      && ts.isIdentifier(node.expression)
+      && node.expression.text === "startAskRun"
+      && node.arguments.length >= 8
+    ) {
+      sources.push(node.arguments[7].getText(askSession));
+    }
+    ts.forEachChild(node, visitEffortSources);
+  }
+  visitEffortSources(askSession);
+  function visitIntentRunEffort(node) {
+    if (
+      ts.isPropertyAssignment(node)
+      && node.name.getText(askSession) === "retrievalEffort"
+    ) {
+      sources.push(node.initializer.getText(askSession));
+    }
+    ts.forEachChild(node, visitIntentRunEffort);
+  }
+  visitIntentRunEffort(findFunction(askSession, "submit"));
+  const forked = sources.filter((text) => /currentPolicy\.advanced/.test(text));
+  assert.ok(forked.length >= 2, `executeAsk 与 reasoning 提交都必须按 policy.advanced 分叉 effort：${sources.join(" | ")}`);
+  for (const text of forked) {
+    assert.match(
+      text,
+      /DEFAULT_ASK_RETRIEVAL_EFFORT/,
+      "retrieval_effort 必须读取 page 交来的 policy.advanced 分叉——自动模式下控件不渲染，"
+        + `state 却可能残留高级模式下选过的档位，发请求必须强制回默认档：${text}`,
+    );
+  }
+  // 其余产出点只能原样透传冻结值（run.retrievalEffort / run?.retrievalEffort）。
+  for (const text of sources.filter((item) => !forked.includes(item))) {
+    assert.match(text, /^run\??\.retrievalEffort$/, `effort 只能来自分叉或冻结值：${text}`);
+  }
 });
 
 
