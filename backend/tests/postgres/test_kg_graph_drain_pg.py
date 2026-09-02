@@ -65,10 +65,11 @@ def test_drain_primitives_page_and_probe_on_postgres(postgres_repository):
     store = runtime.knowledge
 
     with runtime.database.connect() as db:
-        assert store.graph_drain_backlog(db, notebook_id, 3) == ("knowledge_objects", 2)
+        assert store.graph_drain_backlog(db, notebook_id, 3) == ("knowledge_objects", 3)
         assert store.graph_drain_backlog(db, notebook_id, 7) is None
-        # start 游标(评审 F4):从 knowledge_objects 之后起扫,看不到它的积压。
-        assert store.graph_drain_backlog(db, notebook_id, 0, 3) is None
+        # start 游标(评审 F4):从 knowledge_objects(改序后下标 3)之后起扫,
+        # 看不到它的积压。
+        assert store.graph_drain_backlog(db, notebook_id, 0, 4) is None
 
     with runtime.database.write() as db:
         assert store.drain_notebook_graph_rows_page(
@@ -79,7 +80,7 @@ def test_drain_primitives_page_and_probe_on_postgres(postgres_repository):
             db, notebook_id, "knowledge_objects", 3
         )["knowledge_objects"] == 3
     with runtime.database.connect() as db:
-        assert store.graph_drain_backlog(db, notebook_id, 0) == ("knowledge_objects", 2)
+        assert store.graph_drain_backlog(db, notebook_id, 0) == ("knowledge_objects", 3)
     with runtime.database.write() as db:
         assert store.drain_notebook_graph_rows_page(
             db, notebook_id, "knowledge_objects", 3
