@@ -1016,6 +1016,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
   function applyDetachedWork(
     owner: AskSessionOwner,
     selection: DetachedSelection,
+    detailLoaded: boolean,
     conversationId?: string,
   ) {
     const { run, selected, runStartedBeforeDetail } = selection;
@@ -1048,8 +1049,12 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       && (intentNow.phase === "failed" || askJobIdRef.current === null)
     ) {
       attachIntentRun(intentNow, owner);
-    } else if (runNow && canAttachRun(runNow, runNow === run && runStartedBeforeDetail)) {
-      attachDetachedRun(runNow, owner);
+    } else if (runNow) {
+      // Only a detail that actually loaded can vouch that an already-running
+      // job is terminal; a failed detail read says nothing, and the still-live
+      // local transport is then the best state this view has.
+      const detailVouches = runNow === run && runStartedBeforeDetail && detailLoaded;
+      if (canAttachRun(runNow, detailVouches)) attachDetachedRun(runNow, owner);
     }
   }
 
@@ -1067,12 +1072,12 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       const latestId = newerIntent(intentRun, run)
         ? intentRun.conversationIdAtStart
         : run ? run.conversationId ?? run.conversationIdAtStart : list?.[0]?.id;
-      await restoreLatestConversation(
+      const loaded = await restoreLatestConversation(
         latestId ? [{ id: latestId }] : [],
         (id) => applySessionDetail(id, owner),
       );
       if (!sameViewOwner(ownerRef.current, owner)) return false;
-      applyDetachedWork(owner, selection);
+      applyDetachedWork(owner, selection, loaded === true);
     } catch (error) {
       if (sameViewOwner(ownerRef.current, owner)) throw error;
       return false;
@@ -1105,7 +1110,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       const selection = selectDetachedWork(owner, id);
       const applied = await applySessionDetail(id, owner);
       if (applied && sameViewOwner(ownerRef.current, owner)) {
-        applyDetachedWork(owner, selection, id);
+        applyDetachedWork(owner, selection, true, id);
       }
       return applied;
     } catch (error) {
