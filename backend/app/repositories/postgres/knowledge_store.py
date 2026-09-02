@@ -299,6 +299,25 @@ _GRAPH_DRAIN_STEPS: tuple[tuple[str, str, int, bool], ...] = (
         2,
         True,
     ),
+    # codex #663 R5 P1: knowledge_source_fact_elements cascades off its
+    # parent fact (fk_ksfe_fact ON DELETE CASCADE, both backends) with
+    # unbounded elements-per-fact fan-out — without its own pre-drain, a
+    # fact page (or the final transaction, when facts sit under the
+    # threshold) cascade-deletes arbitrarily many child rows and the row
+    # budget stops bounding anything. Non-mirrored for the same reason as
+    # the doomed-object pre-steps below: the final pass covers these rows
+    # via the cascade, no counterpart statement exists to mirror. The
+    # predicate rides ksfe's OWN source_id (stamped from the same
+    # extraction run as its fact's), so it marks exactly the children the
+    # cascade would remove.
+    (
+        "knowledge_source_fact_elements",
+        "notebook_id=%s AND NOT EXISTS (SELECT 1 FROM sources s "
+        "WHERE s.id=knowledge_source_fact_elements.source_id "
+        "AND s.notebook_id=%s AND s.source_type IN ('memory','knowhow'))",
+        2,
+        False,
+    ),
     (
         "knowledge_source_facts",
         "notebook_id=%s AND NOT EXISTS (SELECT 1 FROM sources s "
