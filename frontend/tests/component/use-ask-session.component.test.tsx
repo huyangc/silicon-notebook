@@ -3035,6 +3035,84 @@ test("a clarification detached in a deleted conversation is dropped instead of r
   expect(api.runAskStream).not.toHaveBeenCalled();
 });
 
+// codex #661 r8 P2: a preview selected by a restore may complete, hand off to a
+// durable run and have that run finish, all while the detail is loading; the
+// successor's answer must still be projected (by serial) over the stale detail.
+test("a preview whose durable successor settles during restoration still shows its answer", async () => {
+  const preview = deferred<QueryIntentContract>();
+  const stream = deferred<AskResponse>();
+  let onStart: ((jobId: string, conversationId: string) => void | Promise<void>) | undefined;
+  api.previewAskIntent.mockReturnValue(preview.promise);
+  api.runAskStream.mockImplementation((
+    _notebookId: string,
+    _payload: unknown,
+    _onProgress: unknown,
+    _signal?: AbortSignal,
+    nextOnStart?: (jobId: string, conversationId: string) => void | Promise<void>,
+  ) => {
+    onStart = nextOnStart;
+    return stream.promise;
+  });
+  api.listConversations.mockResolvedValue([summary("conversation-x")]);
+  const staleDetail = detail("conversation-x");
+  staleDetail.turns[0].response.mode = "reasoning";
+  const lateDetail = deferred<ConversationDetail>();
+  api.getConversation
+    .mockResolvedValueOnce(staleDetail)
+    .mockReturnValueOnce(lateDetail.promise);
+  render(<Harness />);
+  const first = beginOwnedNotebook();
+  await act(async () => {
+    await value!.restoreNotebook(first);
+  });
+  expect(value!.mode).toBe("reasoning");
+
+  let submitting!: Promise<void>;
+  act(() => {
+    submitting = value!.submit("clear follow-up");
+  });
+  act(() => value!.leaveWorkspace());
+
+  const owner = beginOwnedNotebook(2);
+  let restoring!: Promise<boolean>;
+  act(() => {
+    restoring = value!.restoreNotebook(owner);
+  });
+  await act(async () => {
+    for (let i = 0; i < 20 && api.getConversation.mock.calls.length < 2; i += 1) {
+      await Promise.resolve();
+    }
+  });
+  expect(api.getConversation).toHaveBeenCalledTimes(2);
+
+  // Preview completes, its successor starts and finishes — all before the
+  // stale detail comes back.
+  preview.resolve(contractFor("clear follow-up", false));
+  await act(async () => {
+    await preview.promise;
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  expect(api.runAskStream).toHaveBeenCalledTimes(1);
+  await act(async () => {
+    await onStart!("job-follow-up", "conversation-x");
+  });
+  stream.resolve(answer("conversation-x", "answer-follow-up"));
+  await act(async () => submitting);
+
+  lateDetail.resolve(staleDetail);
+  await act(async () => {
+    await restoring;
+    value!.finishNotebookTransition(owner);
+  });
+  expect(api.getConversation).toHaveBeenCalledTimes(2);
+  expect(value!.asking).toBe(false);
+  expect(value!.intentChecking).toBe(false);
+  expect(value!.conversationId).toBe("conversation-x");
+  expect(value!.turns.map((turn) => turn.question)).toEqual(["question-conversation-x", "clear follow-up"]);
+  expect(value!.turns[1]?.response.answer_id).toBe("answer-follow-up");
+});
+
 // PR #557 regression: `turns`/`sessions`/`pendingTrace`/`feedbackSent` used to
 // fall back to a bare `[]`/`{}` literal whenever the owner is not visible
 // (actorId is null, e.g. logged out / collection page). A bare literal is a

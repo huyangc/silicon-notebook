@@ -65,6 +65,8 @@ import {
 
 const RECONNECT_POLL_MS = 1500;
 const RECONNECT_CAP_MS = 20 * 60 * 1000;
+// How many detached-but-settled runs are remembered for a racing restore.
+const SETTLED_RUN_MEMORY = 16;
 
 // Hidden-state (owner not visible) fallback values must be **stable references**.
 // The returned view is read by page.tsx effects/useMemo that depend on these
@@ -374,6 +376,10 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
   // detached); a restore re-attaches the newest detached one of that identity.
   const inFlightRunsRef = useRef<AskRunRecord[]>([]);
   const intentRunsRef = useRef<AskIntentRunRecord[]>([]);
+  // Runs that settled successfully while detached, kept (bounded) so a restore
+  // that raced with them can project the answer by serial — including the
+  // durable successor of an intent preview that finished during the restore.
+  const settledRunsRef = useRef<AskRunRecord[]>([]);
   const runSerialRef = useRef(0);
 
   if (pendingActorIdRef.current === actorId) pendingActorIdRef.current = null;
@@ -803,6 +809,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       run.controller.abort();
     }
     intentRunsRef.current = [];
+    settledRunsRef.current = [];
     leaveWorkspace();
     actorGenerationRef.current += 1;
     askModeCacheRef.current = null;
@@ -1024,10 +1031,16 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     const selectedStillDetached = selected !== null
       && (intentNow === selected || runNow === selected);
     if (selected && !selectedStillDetached && !successor) {
-      // It settled while the detail was loading. Its own final response is the
-      // authoritative turn: project it locally (no extra list/detail read —
-      // restore stays within one list read and at most one detail read).
-      if (run === selected && run.result) projectSettledRun(run, run.result);
+      // It settled while the detail was loading — either the run itself or the
+      // durable successor of a preview, both carrying the selected serial. Its
+      // own final response is the authoritative turn: project it locally (no
+      // extra list/detail read — restore stays within one list read and at most
+      // one detail read).
+      const settled = settledRunsRef.current.find((item) => item.serial === selected.serial);
+      if (settled?.result) {
+        dropRecord(settledRunsRef.current, settled);
+        projectSettledRun(settled, settled.result);
+      }
     } else if (successor) {
       if (canAttachRun(successor, false)) attachDetachedRun(successor, owner);
     } else if (
@@ -1327,6 +1340,8 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       );
       if (!ownsRun()) {
         run.result = response;
+        settledRunsRef.current.push(run);
+        if (settledRunsRef.current.length > SETTLED_RUN_MEMORY) settledRunsRef.current.shift();
         const currentOwner = ownerRef.current;
         if (sameNotebookIdentity(currentOwner, runOwner) && currentOwner) {
           await loadSessionsFor(currentOwner).catch(() => {});
