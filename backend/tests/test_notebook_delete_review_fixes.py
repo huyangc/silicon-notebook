@@ -2250,3 +2250,49 @@ def test_paths_materialization_is_lease_fenced(repo):
         job["id"], "nb1", "", 500, lease_token=fresh_lease,
     )
     assert result == (1, "s1")
+
+
+# ---------------------------------------------------------------------------
+# codex #659 R20 P1：分析产物的两条非模型发布路径（表格清单/隔离副本）也要
+# 生命周期闸——墓碑前放行的解析/编译在相位 5 一次性涂抹之后收尾时,不得把
+# 已删笔记本的内容重新发布回磁盘（作业已经没了,永远没人再来清）。
+# ---------------------------------------------------------------------------
+
+
+def test_analysis_artifact_publication_refuses_deleting_notebook(repo, tmp_path):
+    """变异钉:把 save_spreadsheet_manifest / record_issue 里的
+    _publication_admitted 闸拆掉 → deleting 笔记本的清单/隔离副本照样落盘,
+    报红。同钉:活笔记本两条路径照常发布(闸不是一刀切拒绝)。"""
+    _seed_user_and_notebook(repo)
+    _seed_user_and_notebook(repo, notebook_id="nb-dying", owner="u2", status="deleting")
+    artifacts = repo._runtime.analysis_artifacts
+
+    quarantine = tmp_path / "quarantine.csv"
+    quarantine.write_text("secret,data\n1,2\n", encoding="utf-8")
+
+    # deleting 笔记本:两条路径都拒绝,磁盘零痕迹
+    artifacts.save_spreadsheet_manifest("nb-dying", "s1", {"sheets": []})
+    assert artifacts.load_spreadsheet_manifest("nb-dying", "s1") is None, (
+        "deleting 笔记本的清单不得落盘"
+    )
+    refused = artifacts.record_issue(
+        notebook_id="nb-dying", notebook_name="NB", owner_id="u2",
+        source_id="s1", source_title="T", file_name="a.csv",
+        source_type="csv", category="source_parse", code="X",
+        summary="s", occurred_at=NOW, source_path=str(quarantine),
+    )
+    assert refused == {}, "拒绝时应返回 {} (与 record_model_output_issue 同形)"
+    issue_dir = artifacts.root / "issues" / "nb-dying"
+    assert not issue_dir.exists(), "deleting 笔记本的隔离副本不得落盘"
+
+    # 活笔记本:两条路径照常发布
+    artifacts.save_spreadsheet_manifest("nb1", "s1", {"sheets": ["ok"]})
+    assert artifacts.load_spreadsheet_manifest("nb1", "s1") == {"sheets": ["ok"]}
+    issue = artifacts.record_issue(
+        notebook_id="nb1", notebook_name="NB", owner_id="u1",
+        source_id="s1", source_title="T", file_name="a.csv",
+        source_type="csv", category="source_parse", code="X",
+        summary="s", occurred_at=NOW, source_path=str(quarantine),
+    )
+    assert issue and issue["notebook_id"] == "nb1"
+    assert (artifacts.root / "issues" / "nb1" / "s1" / "source_parse" / "payload").is_file()

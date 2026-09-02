@@ -114,6 +114,36 @@ class AnalysisArtifactStore:
         self.storage_dir = Path(storage_dir)
         self.retention_days = max(1, int(retention_days))
         self._lifecycle_thread_lock = threading.RLock()
+        self._notebook_alive: "Any | None" = None
+
+    def set_notebook_alive_probe(self, probe: "Any") -> None:
+        """codex #659 R20 P1: inject a LIFECYCLE-only liveness probe (the
+        runtime wires ``notebook_store.status_of(nid) not in ('deleting',
+        None)`` — no actor, no auth predicate, same seam as
+        ``AssetService``). ``save_spreadsheet_manifest``/``record_issue``
+        consult it under the shared lifecycle lock before publishing; with
+        no probe injected (unit tests, offline tools) publication is
+        admitted unchanged."""
+        self._notebook_alive = probe
+
+    def _publication_admitted(self, notebook_id: str) -> bool:
+        """codex #659 R20 P1: called INSIDE ``_model_artifact_publication_
+        scope``'s shared lock. Probe passing means the delete tombstone had
+        not landed at probe time, so the job's phase-5 ``redact_notebook``
+        (which takes this same lock exclusively, AFTER the tombstone) is
+        still ahead of us and will sweep whatever we publish; probe failing
+        means the notebook is deleting/gone and publishing would retain
+        deleted user content with no cleanup path left — refuse. A probe
+        error admits (refusing would destroy a LIVE notebook's manifest on
+        a transient DB hiccup; the doubly-rare retained leftover is the
+        lesser harm and PR-4's存量清扫 backstops it)."""
+        probe = self._notebook_alive
+        if probe is None or not notebook_id:
+            return True
+        try:
+            return bool(probe(notebook_id))
+        except Exception:  # noqa: BLE001 — 不确定时保守放行
+            return True
 
     @property
     def root(self) -> Path:
@@ -224,7 +254,19 @@ class AnalysisArtifactStore:
     def save_spreadsheet_manifest(
         self, notebook_id: str, source_id: str, manifest: dict[str, Any]
     ) -> None:
-        _atomic_json(self._manifest_path(notebook_id, source_id), manifest)
+        # codex #659 R20 P1: publish under the SHARED lifecycle lock with a
+        # liveness gate. The lock closes the rmtree interleave (a write
+        # landing inside a directory ``redact_notebook``'s exclusive-lock
+        # sweep is mid-removing survives the rmtree); the gate closes the
+        # ordering where redaction already ran (see
+        # ``_publication_admitted``'s docstring for the full both-orderings
+        # argument). Refusal is silent-drop by design — the parse/compile
+        # that got here was admitted before the tombstone and its notebook
+        # is being deleted; there is nobody left to surface a failure to.
+        with self._model_artifact_publication_scope(notebook_id):
+            if not self._publication_admitted(notebook_id):
+                return
+            _atomic_json(self._manifest_path(notebook_id, source_id), manifest)
 
     def load_spreadsheet_manifest(
         self, notebook_id: str, source_id: str
@@ -263,6 +305,43 @@ class AnalysisArtifactStore:
         archive_file: bool = True,
     ) -> dict[str, Any]:
         issue_dir = self._issue_dir(notebook_id, source_id, category)
+        # codex #659 R20 P1: same shared-lock + liveness gate as
+        # ``save_spreadsheet_manifest`` (the quarantine payload copied below
+        # IS retained source content) — refusal returns ``{}``, mirroring
+        # ``record_model_output_issue``'s epoch-refusal shape; both callers
+        # ignore the return value.
+        with self._model_artifact_publication_scope(notebook_id):
+            if not self._publication_admitted(notebook_id):
+                return {}
+            return self._record_issue_locked(
+                notebook_id=notebook_id, notebook_name=notebook_name,
+                owner_id=owner_id, source_id=source_id,
+                source_title=source_title, file_name=file_name,
+                source_type=source_type, category=category, code=code,
+                summary=summary, occurred_at=occurred_at,
+                source_path=source_path, source_hash=source_hash,
+                archive_file=archive_file, issue_dir=issue_dir,
+            )
+
+    def _record_issue_locked(
+        self,
+        *,
+        notebook_id: str,
+        notebook_name: str,
+        owner_id: str,
+        source_id: str,
+        source_title: str,
+        file_name: str,
+        source_type: str,
+        category: str,
+        code: str,
+        summary: str,
+        occurred_at: str,
+        source_path: str,
+        source_hash: str,
+        archive_file: bool,
+        issue_dir: Path,
+    ) -> dict[str, Any]:
         metadata_path = issue_dir / "issue.json"
         previous: dict[str, Any] = {}
         try:
