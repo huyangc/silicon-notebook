@@ -484,21 +484,21 @@ class KnowledgeStore:
                 return {}
             counts = {"knowledge_source_facts": 0,
                       "knowledge_source_fact_elements": 0}
+            # codex #663 R16 P1b + R18 P2 — SQLite twin's comment: ONE
+            # budgeted child sweep per page transaction; budget filled →
+            # parents stay, the backlog probe re-selects this step.
+            cur = db.execute(
+                "DELETE FROM knowledge_source_fact_elements "
+                "WHERE ctid IN (SELECT ctid "
+                "FROM knowledge_source_fact_elements "
+                f"WHERE fact_id = ANY(%s) LIMIT {int(limit)})",
+                (ids,),
+            )
+            counts["knowledge_source_fact_elements"] = cur.rowcount
+            if cur.rowcount >= int(limit):
+                return {name: n for name, n in counts.items() if n}
             for offset in range(0, len(ids), _DELETE_OBJECT_BATCH_SIZE):
                 batch = ids[offset : offset + _DELETE_OBJECT_BATCH_SIZE]
-                # codex #663 R16 P1b — SQLite twin's comment: fresh
-                # high-fanout facts get row-budgeted child deletes.
-                while True:
-                    cur = db.execute(
-                        "DELETE FROM knowledge_source_fact_elements "
-                        "WHERE ctid IN (SELECT ctid "
-                        "FROM knowledge_source_fact_elements "
-                        f"WHERE fact_id = ANY(%s) LIMIT {int(limit)})",
-                        (batch,),
-                    )
-                    counts["knowledge_source_fact_elements"] += cur.rowcount
-                    if cur.rowcount == 0:
-                        break
                 cur = db.execute(
                     "DELETE FROM knowledge_source_facts WHERE id = ANY(%s)",
                     (batch,),
