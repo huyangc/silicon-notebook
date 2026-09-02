@@ -163,11 +163,15 @@ type AskRunRecord = DetachableRecord & {
   question: string;
   askedAt: string;
   mode: string;
+  retrievalEffort: AskRetrievalEffortId;
   trace: ReasoningTraceStep[];
   conversationIdAtStart: string | null;
   conversationId: string | null;
   jobId: string | null;
   controller: AbortController;
+  // The final answer when the run settled while nobody was looking: a restore
+  // that raced with it projects this turn locally instead of re-reading history.
+  result: AskResponse | null;
   // A failure that happened while nobody was looking. The record is kept so
   // the returning view can report it and hand the question back as a draft.
   failure: unknown | null;
@@ -431,10 +435,12 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
           return modeFromTurn({ response: { mode: current } }, modes);
         }
         // A re-attached intent preview/review is reasoning-mode context in its
-        // own right; projecting the last turn's mode over it would cancel it.
+        // own right (projecting the last turn's mode over it would cancel it),
+        // and a re-attached durable run keeps the engine it was submitted with.
+        const pendingMode = visibleIntentRun() ? "reasoning" : visibleRun()?.mode;
         return modeFromTurn(
-          visibleIntentRun()
-            ? { response: { mode: "reasoning" } }
+          pendingMode
+            ? { response: { mode: pendingMode } }
             : turnsRef.current[turnsRef.current.length - 1],
           modes,
         );
@@ -582,6 +588,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     // and the context-change effect both honour a visible intent run.
     modeRef.current = "reasoning";
     setMode("reasoning");
+    setRetrievalEffort(run.retrievalEffort);
     setQuestion("");
     setConversationId(run.conversationIdAtStart);
     setPendingQuestion(run.question);
@@ -598,6 +605,14 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     return latestDetachedRecord(inFlightRunsRef.current, owner, ownerRef.current);
   }
 
+  function visibleRun(): AskRunRecord | null {
+    const owner = ownerRef.current;
+    if (!owner) return null;
+    return inFlightRunsRef.current.find((run) => (
+      !run.cancelRequested && !run.failure && sameViewOwner(owner, run.owner)
+    )) ?? null;
+  }
+
   /**
    * Whether a detached durable run may be re-attached to a view whose detail
    * restore has just settled. Before `started` there is nothing server-side to
@@ -610,6 +625,27 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     if (run.failure) return true;
     if (run.jobId === null) return askJobIdRef.current === null;
     return askJobIdRef.current === run.jobId;
+  }
+
+  function projectSettledRun(run: AskRunRecord, response: AskResponse) {
+    const turn: ChatTurn = { question: run.question, response, askedAt: run.askedAt };
+    // A follow-up lands behind the turns the restore just loaded for its
+    // conversation (turnsRef is written synchronously by applySessionDetail);
+    // a first question is the whole conversation.
+    const sameConversation = run.conversationIdAtStart !== null
+      && run.conversationIdAtStart === response.conversation_id;
+    const alreadyShown = sameConversation && turnsRef.current.some((item) => (
+      item.response.answer_id === response.answer_id
+    ));
+    const next = !sameConversation
+      ? [turn]
+      : alreadyShown ? turnsRef.current : [...turnsRef.current, turn];
+    turnsRef.current = next;
+    setTurns(next);
+    setConversationId(response.conversation_id);
+    clearPendingTurn();
+    setAsking(false);
+    effectsRef.current.ensureAskVisible();
   }
 
   function attachDetachedRun(run: AskRunRecord, owner: AskSessionOwner) {
@@ -627,6 +663,13 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     askJobIdRef.current = run.jobId;
     askNotebookIdRef.current = run.notebookId;
     setReconnectJob(null);
+    // The notebook transition reset the engine/effort controls; the run carries
+    // the selection it was submitted with, so follow-ups keep using it.
+    modeChoiceVersionRef.current += 1;
+    const restoredMode = modeFromTurn({ response: { mode: run.mode } }, askModesRef.current);
+    modeRef.current = restoredMode;
+    setMode(restoredMode);
+    setRetrievalEffort(run.retrievalEffort);
     pendingModeSourceRef.current = run.mode;
     setPendingQuestion(run.question);
     setPendingAskedAt(run.askedAt);
@@ -913,9 +956,10 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       const selectedStillDetached = selected !== null
         && (intentNow === selected || runNow === selected);
       if (selected && !selectedStillDetached && !successor) {
-        const settled = await loadSessionsFor(owner);
-        if (!sameViewOwner(ownerRef.current, owner)) return false;
-        await restoreLatestConversation(settled ?? [], (id) => applySessionDetail(id, owner));
+        // It settled while the detail was loading. Its own final response is the
+        // authoritative turn: project it locally (no extra list/detail read —
+        // restore stays within one list read and at most one detail read).
+        if (run === selected && run.result) projectSettledRun(run, run.result);
       } else if (successor) {
         if (canAttachRun(successor)) attachDetachedRun(successor, owner);
       } else if (
@@ -1088,11 +1132,13 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       question: q,
       askedAt,
       mode: selectedMode,
+      retrievalEffort: effort,
       trace: [...traceSeed],
       conversationIdAtStart,
       conversationId: null,
       jobId: null,
       controller,
+      result: null,
       failure: null,
     };
     inFlightRunsRef.current.push(run);
@@ -1182,6 +1228,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
         },
       );
       if (!ownsRun()) {
+        run.result = response;
         const currentOwner = ownerRef.current;
         if (sameNotebookIdentity(currentOwner, runOwner) && currentOwner) {
           await loadSessionsFor(currentOwner).catch(() => {});
