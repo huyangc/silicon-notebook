@@ -2057,6 +2057,7 @@ test("leaving during a reasoning intent preview keeps it running and re-attaches
     submitting = value!.submit("clear question");
   });
   expect(value!.intentChecking).toBe(true);
+  await settleSubmit();
   act(() => value!.leaveWorkspace());
   const signal = api.previewAskIntent.mock.calls[0]?.[3] as AbortSignal;
   expect(signal.aborted).toBe(false);
@@ -2701,6 +2702,7 @@ test("switching to automatic mode cancels a detached intent preview and returns 
   act(() => {
     submitting = value!.submit("detached reasoning question");
   });
+  await settleSubmit();
   act(() => value!.leaveWorkspace());
   const signal = api.previewAskIntent.mock.calls[0]?.[3] as AbortSignal;
   expect(signal.aborted).toBe(false);
@@ -3355,6 +3357,17 @@ test("a run that settles during the restore's list read is still projected", asy
 
 // Reload resume: the preview/review phase lives only in the browser, so the hook
 // mirrors it into this tab's sessionStorage and a fresh mount resumes it.
+// A reasoning submit takes the record's cross-tab lock (async) before it writes
+// the mirror and issues the preview; tests that assert either right after
+// submitting let those microtasks settle first.
+async function settleSubmit() {
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+}
+
 function pendingIntentStore(): unknown[] {
   const raw = window.sessionStorage.getItem("silicon_notebook_pending_intent");
   return raw ? (JSON.parse(raw) as unknown[]) : [];
@@ -3373,6 +3386,7 @@ test("a reasoning preview interrupted by a reload is re-issued and resumed on th
     void value!.submit("question before reload");
   });
   expect(value!.intentChecking).toBe(true);
+  await settleSubmit();
   expect(pendingIntentStore()).toHaveLength(1);
 
   // Reload: React state is gone, the tab's sessionStorage is not.
@@ -3461,6 +3475,7 @@ test("cancelling, stopping or switching to automatic mode forgets the persisted 
   act(() => {
     void value!.submit("to be stopped");
   });
+  await settleSubmit();
   expect(pendingIntentStore()).toHaveLength(1);
   act(() => value!.abort());
   expect(pendingIntentStore()).toEqual([]);
@@ -3479,6 +3494,7 @@ test("cancelling, stopping or switching to automatic mode forgets the persisted 
   act(() => {
     void value!.submit("to be downgraded");
   });
+  await settleSubmit();
   act(() => value!.leaveWorkspace());
   expect(pendingIntentStore()).toHaveLength(1);
   view.rerender(<Harness policy={{ ...DEFAULT_POLICY, advanced: false }} />);
@@ -3651,6 +3667,7 @@ test("an in-app remount resumes the stored preview exactly once — the retired 
   act(() => {
     oldSubmitting = value!.submit("asked once");
   });
+  await settleSubmit();
   const oldSignal = api.previewAskIntent.mock.calls[0]?.[3] as AbortSignal;
   expect(pendingIntentStore()).toHaveLength(1);
 
@@ -3685,6 +3702,84 @@ test("an in-app remount resumes the stored preview exactly once — the retired 
   expect(api.runAskStream).toHaveBeenCalledTimes(1);
   expect(value!.turns.map((turn) => turn.question)).toEqual(["asked once"]);
   expect(pendingIntentStore()).toEqual([]);
+});
+
+// codex #664 r3 P1: a tab reloaded after the actor switched to automatic mode
+// (in another tab) must not resume reasoning work — the mirrors are cleared.
+test("automatic mode on reload drops persisted reasoning work instead of resuming it", async () => {
+  const contract = contractFor("ambiguous before mode switch", true);
+  api.previewAskIntent.mockResolvedValue(contract);
+  api.listConversations.mockResolvedValue([summary("conversation-x")]);
+  api.getConversation.mockImplementation(async (id: string) => detail(id));
+  const view = render(<Harness />);
+  const first = beginOwnedNotebook();
+  await act(async () => {
+    await value!.restoreNotebook(first);
+  });
+  act(() => value!.selectMode("reasoning"));
+  await act(async () => {
+    await value!.submit("ambiguous before mode switch");
+  });
+  expect(value!.intentReview?.contract).toBe(contract);
+  expect(pendingIntentStore()).toHaveLength(1);
+
+  view.unmount();
+  api.previewAskIntent.mockReset();
+  render(<Harness policy={{ ...DEFAULT_POLICY, advanced: false }} />);
+  const owner = beginOwnedNotebook(2);
+  await act(async () => {
+    await value!.restoreNotebook(owner);
+    value!.finishNotebookTransition(owner);
+  });
+  expect(value!.intentReview).toBeNull();
+  expect(value!.intentChecking).toBe(false);
+  expect(value!.pendingQuestion).toBe("");
+  expect(value!.conversationId).toBe("conversation-x");
+  expect(api.previewAskIntent).not.toHaveBeenCalled();
+  expect(api.runAskStream).not.toHaveBeenCalled();
+  expect(pendingIntentStore()).toEqual([]);
+});
+
+// codex #664 r3 P2: the mirror is written only after the originating tab owns
+// the record's lock, so a copied tab can never claim the record first.
+test("the persisted mirror appears only after the submitting tab owns the lock", async () => {
+  const gate = deferred<void>();
+  const locks = {
+    request: async (_name: string, _options: unknown, callback: (lock: unknown) => unknown) => {
+      await gate.promise;
+      return callback({ name: _name });
+    },
+  };
+  Object.defineProperty(navigator, "locks", { value: locks, configurable: true });
+  try {
+    api.previewAskIntent.mockReturnValue(deferred<QueryIntentContract>().promise);
+    render(<Harness />);
+    beginOwnedNotebook();
+    act(() => value!.selectMode("reasoning"));
+    act(() => {
+      void value!.submit("locked first");
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(value!.intentChecking).toBe(true);
+    // Lock not granted yet → nothing in storage and no preview request yet.
+    expect(pendingIntentStore()).toEqual([]);
+    expect(api.previewAskIntent).not.toHaveBeenCalled();
+
+    gate.resolve();
+    await act(async () => {
+      await gate.promise;
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(pendingIntentStore()).toHaveLength(1);
+    expect(api.previewAskIntent).toHaveBeenCalledTimes(1);
+  } finally {
+    Reflect.deleteProperty(navigator, "locks");
+  }
 });
 
 // PR #557 regression: `turns`/`sessions`/`pendingTrace`/`feedbackSent` used to

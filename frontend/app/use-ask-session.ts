@@ -254,6 +254,9 @@ type AskIntentRunRecord = DetachableRecord & {
   // decided anything (in-app unmount): the continuation is aborted, but the
   // storage mirror is kept for the next instance in this tab to resume.
   keepMirror: boolean;
+  // True once this tab owns the record's cross-tab lock; the storage mirror is
+  // written only then, so a copied tab can never race the originating one.
+  mirrored: boolean;
 };
 
 function sameNotebookOwner(
@@ -557,7 +560,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
   // (see ask-intent-persist.ts). Mirrored on submit and on "needs
   // clarification"; forgotten on hand-off, cancel, mode switch and tombstone.
   function persistIntentRun(run: AskIntentRunRecord) {
-    if (run.phase === "failed") return;
+    if (run.phase === "failed" || !run.mirrored) return;
     savePersistedIntentRun({
       version: 1,
       id: run.persistId,
@@ -595,6 +598,14 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     list: readonly { id: string }[] | null,
     conversationId?: string,
   ): Promise<AskIntentRunRecord | null> {
+    if (!policyRef.current.advanced) {
+      // The UI mode is per actor and may have been switched to automatic in
+      // another tab since these were stored: automatic mode must never resume
+      // a reasoning preview or re-open a review. Same outcome as the switch
+      // effect, one step later.
+      clearPersistedIntentRuns(owner.actorId);
+      return null;
+    }
     let persisted = null;
     for (const candidate of findPersistedIntentRuns(owner.actorId, owner.notebookId)) {
       if (conversationId !== undefined && candidate.conversationIdAtStart !== conversationId) continue;
@@ -642,6 +653,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       failure: null,
       persistId: persisted.id,
       keepMirror: false,
+      mirrored: true,
     };
     intentRunsRef.current.push(run);
     return run;
@@ -1640,12 +1652,9 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       failure: null,
       persistId: newIntentRunId(),
       keepMirror: false,
+      mirrored: false,
     };
     intentRunsRef.current.push(run);
-    persistIntentRun(run);
-    // Own this submission across tabs from the start, so a tab duplicated from
-    // this one cannot resume the same question on its next restore.
-    void claimIntentRun(run.persistId);
     askIntentFlowRef.current = "preview";
     askIntentAbortRef.current = run.controller;
     askIntentDraftRef.current = q;
@@ -1658,6 +1667,14 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     setPendingMode("reasoning");
     setPendingTrace(run.trace);
     setIntentChecking(true);
+    // Own this submission across tabs BEFORE exposing its mirror: a tab copied
+    // from this one must find the lock already taken, never a record it can
+    // claim first. The id is fresh, so the claim only fails without Web Locks
+    // support (then it is granted) — but the order is what makes it airtight.
+    const owned = await claimIntentRun(run.persistId);
+    if (run.cancelRequested || run.phase === "failed") return;
+    run.mirrored = owned;
+    persistIntentRun(run);
     await runIntentPreview(run);
   }
 
