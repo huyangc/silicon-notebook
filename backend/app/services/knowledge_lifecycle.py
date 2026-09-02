@@ -677,14 +677,16 @@ class KnowledgeLifecycleService:
                                 db, notebook_id
                             )
             except Exception as exc:
-                # codex #663 R12 P1: under REPEATABLE READ a write-write
-                # conflict (the unified_kg_state upsert racing a concurrent
-                # mark_dirty) surfaces as SQLSTATE 40001 — the transaction
-                # rolled back cleanly, so treat it exactly like a failed
-                # bound probe: another attempt. Anything else re-raises
+                # codex #663 R12 P1 / R20 P1: under REPEATABLE READ a
+                # write-write conflict surfaces as SQLSTATE 40001, and a
+                # deadlock loss (should any lock-order interleaving with a
+                # concurrent writer slip past the writer-order discipline)
+                # as 40P01 — either way the transaction rolled back cleanly,
+                # so treat it exactly like a failed bound probe: another
+                # attempt. Anything else re-raises
                 # untouched. sqlite3 exceptions carry no sqlstate attribute,
                 # so this branch is PostgreSQL-only by construction.
-                if getattr(exc, "sqlstate", None) != "40001":
+                if getattr(exc, "sqlstate", None) not in ("40001", "40P01"):
                     raise
                 counts = None
             if counts is not None:
