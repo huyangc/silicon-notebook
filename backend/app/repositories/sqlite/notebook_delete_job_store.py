@@ -523,33 +523,38 @@ class NotebookDeleteJobStore:
 
     def delete_knowhow_tables_page(
         self, notebook_id: str, cursor: str, limit: int,
+        *, batch_ok: Callable[[], bool] | None = None,
     ) -> tuple[int, str | None]:
         """Runs after ``delete_knowhow_rows_page`` -- see the PostgreSQL
-        twin's docstring."""
-        with self.database.write(
-            operation="notebook_delete.rows.knowhow_tables"
-        ) as db:
+        twin's docstring for the full codex #659 round 9 P2 rationale
+        (mirrored here verbatim): read-only parent-page SELECT, then drain
+        each of the three child tables via ``_drain_children_by_parent_ids``
+        (``batch_ok``-gated, each sub-batch its own transaction), and only
+        once all three are fully drained does a separate final transaction
+        delete the parent ``knowhow_tables`` rows. Same structural
+        precondition on ``knowhow_rows`` running first (see the PostgreSQL
+        twin and ``notebook_delete_tables.py``'s ``_CHAINS`` comment)."""
+        with self.database.connect() as db:
             page = db.execute(
                 "SELECT id FROM knowhow_tables WHERE notebook_id=? AND id>? "
                 "ORDER BY id LIMIT ?",
                 (notebook_id, cursor, limit),
             ).fetchall()
-            if not page:
-                return 0, None
-            table_ids = [row["id"] for row in page]
-            tph = ",".join("?" for _ in table_ids)
-            db.execute(
-                f"DELETE FROM knowhow_columns WHERE table_id IN ({tph})",
-                table_ids,
+        if not page:
+            return 0, None
+        table_ids = [row["id"] for row in page]
+        for child_table in (
+            "knowhow_columns", "knowhow_changes", "knowhow_milestones",
+        ):
+            drained = self._drain_children_by_parent_ids(
+                child_table, "table_id", table_ids, batch_ok=batch_ok,
             )
-            db.execute(
-                f"DELETE FROM knowhow_changes WHERE table_id IN ({tph})",
-                table_ids,
-            )
-            db.execute(
-                f"DELETE FROM knowhow_milestones WHERE table_id IN ({tph})",
-                table_ids,
-            )
+            if not drained:
+                return len(table_ids), None
+        tph = ",".join("?" for _ in table_ids)
+        with self.database.write(
+            operation="notebook_delete.rows.knowhow_tables"
+        ) as db:
             db.execute(
                 f"DELETE FROM knowhow_tables WHERE id IN ({tph}) "
                 "AND notebook_id=?",

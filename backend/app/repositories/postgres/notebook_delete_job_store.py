@@ -612,32 +612,71 @@ class NotebookDeleteJobStore:
 
     def delete_knowhow_tables_page(
         self, notebook_id: str, cursor: str, limit: int,
+        *, batch_ok: Callable[[], bool] | None = None,
     ) -> tuple[int, str | None]:
         """Runs after ``delete_knowhow_rows_page`` has drained rows/cells for
         this notebook -- this page's fanout is now bounded by "N tables ×
         each one's own column/change/milestone count", the ordinary small
-        scale the original (pre-P1-D) design already assumed."""
-        with self.database.write() as connection:
+        scale the original (pre-P1-D) design already assumed.
+
+        codex #659 round 9 P2: that "ordinary small scale" assumption still
+        broke -- a page of up to 500 tables' full ``knowhow_columns``/
+        ``knowhow_changes``/``knowhow_milestones`` rows, all three deleted in
+        ONE transaction, is itself unbounded per PAGE even though each
+        individual table's own count is small: 500 tables x a few hundred
+        columns/changes each is still tens of thousands of rows in one
+        statement/transaction, risking PostgreSQL's statement_timeout and
+        holding SQLite's single write lock for the whole page -- the exact
+        P1-D-class hazard the ``knowhow_rows``/``knowhow_tables`` split was
+        supposed to close (only the ROW/CELL dimension got bounded; this
+        page's own three child tables never did). Mirrors round 8's fix for
+        the two read-only-parent chains: read the parent page (read-only,
+        own connection), then drain each of the three child tables via
+        ``_drain_children_by_parent_ids`` (``batch_ok``-gated, each sub-batch
+        its own <= ``_CHILD_BATCH_SIZE``-row transaction, idempotent on
+        resume), and only once ALL THREE are fully drained does a SEPARATE
+        final transaction delete the parent ``knowhow_tables`` rows
+        themselves.
+
+        If ``batch_ok`` stops a child table's drain mid-way, this returns
+        ``(len(table_ids), None)`` -- same "count nonzero (not drained), but
+        `last=None` so the caller's `cursor = last or cursor` is a no-op"
+        contract as ``delete_source_elements_page``. The parent
+        ``knowhow_tables`` rows for this page are NOT deleted until every
+        child table has confirmed fully drained.
+
+        STRUCTURAL PRECONDITION (not re-verified here at runtime -- see
+        ``notebook_delete_tables.py``'s own extensive comment on ``_CHAINS``
+        for the full rationale and the ordering guarantee): the
+        ``knowhow_rows`` chain MUST already have cleared this notebook's
+        ``knowhow_cells``/``knowhow_cell_code`` rows (both FK'd to
+        ``knowhow_columns.id`` as well as ``knowhow_rows.id``) before this
+        chain ever runs -- ``_CHAINS``'s fixed tuple order
+        (``knowhow_rows`` immediately before ``knowhow_tables``) enforces
+        this. ``knowhow_columns``' own fanout drained here is therefore
+        bounded to "column count per table", never "column count x every
+        row's cell for that column" -- if that chain ordering were ever
+        reversed, this page's ``knowhow_columns`` drain would silently
+        reintroduce the unbounded row/cell fanout P1-D split the two chains
+        apart specifically to avoid."""
+        with self.database.connect() as connection:
             page = connection.execute(
                 "SELECT id FROM knowhow_tables WHERE notebook_id=%s AND id>%s "
                 "ORDER BY id LIMIT %s",
                 (notebook_id, cursor, limit),
             ).fetchall()
-            if not page:
-                return 0, None
-            table_ids = [row["id"] for row in page]
-            connection.execute(
-                "DELETE FROM knowhow_columns WHERE table_id = ANY(%s)",
-                (table_ids,),
+        if not page:
+            return 0, None
+        table_ids = [row["id"] for row in page]
+        for child_table in (
+            "knowhow_columns", "knowhow_changes", "knowhow_milestones",
+        ):
+            drained = self._drain_children_by_parent_ids(
+                child_table, "table_id", table_ids, batch_ok=batch_ok,
             )
-            connection.execute(
-                "DELETE FROM knowhow_changes WHERE table_id = ANY(%s)",
-                (table_ids,),
-            )
-            connection.execute(
-                "DELETE FROM knowhow_milestones WHERE table_id = ANY(%s)",
-                (table_ids,),
-            )
+            if not drained:
+                return len(table_ids), None
+        with self.database.write() as connection:
             connection.execute(
                 "DELETE FROM knowhow_tables WHERE id = ANY(%s) AND notebook_id=%s",
                 (table_ids, notebook_id),
