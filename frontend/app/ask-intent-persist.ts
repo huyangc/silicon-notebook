@@ -85,24 +85,50 @@ function isScope(value: unknown, listKey: "source_ids" | "notebook_ids"): boolea
  * 直接炸掉 `intentClarifyStep`（读 `ambiguities.length`），并且每次恢复都炸、直到
  * 用户手清 storage —— 所以宁可整条丢弃。
  */
+const RESULT_SCOPES = new Set(["ranked", "complete", "aggregate", "hybrid"]);
+
+function isOptional(value: unknown, check: (item: unknown) => boolean): boolean {
+  return value === undefined || check(value);
+}
+
+/**
+ * Every field of `QueryIntentContract` (ask-intent-model.ts), required and
+ * optional alike, so a stale or hand-edited entry can neither break the review
+ * card nor be sent back to the backend as a confirmed intent (422).
+ */
 export function isQueryIntentContractShape(value: unknown): value is QueryIntentContract {
   if (!isRecord(value)) return false;
   if (typeof value.objective !== "string" || typeof value.resolved_question !== "string") return false;
-  if (typeof value.needs_clarification !== "boolean") return false;
-  if (typeof value.confidence !== "number") return false;
+  if (typeof value.intent_type !== "string" || typeof value.expected_output !== "string") return false;
+  if (typeof value.result_scope !== "string" || !RESULT_SCOPES.has(value.result_scope)) return false;
+  if (typeof value.completeness_required !== "boolean") return false;
+  if (typeof value.needs_clarification !== "boolean" || typeof value.confirmed !== "boolean") return false;
+  if (typeof value.confidence !== "number" || !Number.isFinite(value.confidence)) return false;
   if (!Array.isArray(value.ambiguities)) return false;
   for (const item of value.ambiguities) {
     if (!isRecord(item)) return false;
     if (typeof item.id !== "string" || typeof item.question !== "string") return false;
-    if (typeof item.required !== "boolean") return false;
+    if (!isOptional(item.reason, (v) => typeof v === "string")) return false;
+    if (!isOptional(item.required, (v) => typeof v === "boolean")) return false;
+    if (!isOptional(item.options, isStringArray)) return false;
   }
   if (!Array.isArray(value.mandatory_topics)) return false;
   for (const item of value.mandatory_topics) {
-    if (!isRecord(item) || typeof item.id !== "string" || typeof item.title !== "string") return false;
+    if (!isRecord(item)) return false;
+    if (typeof item.id !== "string" || typeof item.title !== "string") return false;
+    if (typeof item.question !== "string" || !isStringArray(item.retrieval_queries)) return false;
   }
   for (const key of ["entities", "comparison_axes", "constraints", "excluded_topics", "assumptions"]) {
     if (!isStringArray(value[key])) return false;
   }
+  if (!isOptional(value.clarification_answers, (answers) => (
+    Array.isArray(answers) && answers.every((item) => (
+      isRecord(item)
+      && typeof item.id === "string"
+      && typeof item.question === "string"
+      && typeof item.answer === "string"
+    ))
+  ))) return false;
   return true;
 }
 

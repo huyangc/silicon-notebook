@@ -3633,6 +3633,60 @@ test("a record another tab owns is not resumed twice", async () => {
   }
 });
 
+// codex #664 r2 P1: an in-app unmount must retire the old preview continuation
+// before the replacement instance resumes the stored record, or both could
+// hand off a durable job for the same question.
+test("an in-app remount resumes the stored preview exactly once — the retired continuation cannot hand off", async () => {
+  const oldPreview = deferred<QueryIntentContract>();
+  const newPreview = deferred<QueryIntentContract>();
+  api.previewAskIntent
+    .mockReturnValueOnce(oldPreview.promise)
+    .mockReturnValueOnce(newPreview.promise);
+  api.runAskStream.mockResolvedValue({ ...answer("conversation-once"), mode: "reasoning" });
+  api.listConversations.mockResolvedValue([]);
+  const view = render(<Harness />);
+  beginOwnedNotebook();
+  act(() => value!.selectMode("reasoning"));
+  let oldSubmitting!: Promise<void>;
+  act(() => {
+    oldSubmitting = value!.submit("asked once");
+  });
+  const oldSignal = api.previewAskIntent.mock.calls[0]?.[3] as AbortSignal;
+  expect(pendingIntentStore()).toHaveLength(1);
+
+  view.unmount();
+  expect(oldSignal.aborted).toBe(true);
+  // The stored record survives the unmount for the next instance in this tab.
+  expect(pendingIntentStore()).toHaveLength(1);
+
+  render(<Harness />);
+  const owner = beginOwnedNotebook(2);
+  await act(async () => {
+    await value!.restoreNotebook(owner);
+    value!.finishNotebookTransition(owner);
+  });
+  expect(api.previewAskIntent).toHaveBeenCalledTimes(2);
+  expect(value!.intentChecking).toBe(true);
+
+  // The retired continuation resolving late must not start a job…
+  oldPreview.resolve(contractFor("asked once", false));
+  await act(async () => oldSubmitting);
+  expect(api.runAskStream).not.toHaveBeenCalled();
+  expect(pendingIntentStore()).toHaveLength(1);
+
+  // …only the replacement does, exactly once.
+  newPreview.resolve(contractFor("asked once", false));
+  await act(async () => {
+    await newPreview.promise;
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  expect(api.runAskStream).toHaveBeenCalledTimes(1);
+  expect(value!.turns.map((turn) => turn.question)).toEqual(["asked once"]);
+  expect(pendingIntentStore()).toEqual([]);
+});
+
 // PR #557 regression: `turns`/`sessions`/`pendingTrace`/`feedbackSent` used to
 // fall back to a bare `[]`/`{}` literal whenever the owner is not visible
 // (actorId is null, e.g. logged out / collection page). A bare literal is a
