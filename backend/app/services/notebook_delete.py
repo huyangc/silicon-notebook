@@ -194,11 +194,20 @@ def _parse_timestamp(value: Any) -> datetime | None:
     ``repository_facade.py``'s module-level ``_now``). Both parse into an
     AWARE ``datetime`` that compares correctly against
     ``datetime.now(timezone.utc)`` regardless of which offset it was
-    expressed in — no lexicographic string comparison, unlike
-    ``list_stale``'s cutoff (that one is fine because both sides of ITS
-    comparison are produced on the same machine at nearly the same moment;
-    this one compares a stored past instant against "now" arbitrarily later,
-    where that shortcut would not hold)."""
+    expressed in — no lexicographic string comparison.
+
+    codex #659 R13 P2 correction: an earlier version of this docstring
+    claimed SQLite's ``list_stale`` cutoff was fine to compare as a plain
+    string "because both sides of ITS comparison are produced on the same
+    machine at nearly the same moment" — that reasoning only covers the
+    CUTOFF's own computation; it says nothing about the offset baked into
+    the STORED ``updated_at`` row being compared against, which can have
+    been written arbitrarily long ago under a DIFFERENT host UTC offset
+    (a DST transition, a timezone reconfiguration). ``list_stale`` and
+    ``mark_running`` (``notebook_delete_job_store.py``, SQLite) no longer
+    take that shortcut — see ``_stale_cutoff_iso``'s docstring there for
+    the fix (an offset-aware cutoff plus a SQL-side ``datetime(...)``
+    normalization on both operands)."""
     if value is None:
         return None
     if isinstance(value, datetime):
