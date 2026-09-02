@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import pytest
 
+from pathlib import Path
+
 from app.core.config import Settings
 from app.repositories.ports import StaleLeaseFinalizeError
 from app.services import notebook_delete as nd
@@ -2017,3 +2019,92 @@ def test_parent_delete_is_gated_after_the_child_drain_finishes(repo):
         assert db.execute(
             "SELECT COUNT(*) AS c FROM knowhow_cells WHERE row_id='kr1'"
         ).fetchone()["c"] == 0
+
+
+# ---------------------------------------------------------------------------
+# codex #659 R17 P2-a：资产写后复核必须是「生命周期探针」，不是授权目录视图
+# ---------------------------------------------------------------------------
+
+
+def test_asset_recheck_survives_actor_access_loss(repo, monkeypatch):
+    """变异钉：把 ``_default_notebook_exists`` 退回「先问 get_notebook」→
+    本用例模拟请求方在插行与复核之间失去读权限(分享被撤)——get_notebook
+    抛 KeyError,但笔记本本体活得好好的;旧探针会把刚写的合法文件补偿删掉,
+    留下一条指向缺失内容的 notebook_assets 行,报红。"""
+    from app.services.knowhow.assets import AssetService
+
+    _seed_user_and_notebook(repo)
+
+    def _actor_lost_access(notebook_id, *args, **kwargs):
+        raise KeyError(notebook_id)
+
+    monkeypatch.setattr(repo, "get_notebook", _actor_lost_access, raising=False)
+
+    service = AssetService(repo)
+    asset = service.save("nb1", "cell.png", "image/png", b"\x89PNG fake", "u1")
+    path = service.path_for(asset)
+    assert path.is_file(), "笔记本仍在,权限位波动不得触发补偿删除"
+    with repo._runtime.database.connect() as db:
+        assert db.execute(
+            "SELECT COUNT(*) AS c FROM notebook_assets WHERE id=?",
+            (asset["id"],),
+        ).fetchone()["c"] == 1
+
+
+def test_asset_recheck_still_compensates_when_notebook_is_deleting(repo):
+    """R17 改探针后另一腿不得松动：status='deleting'（墓碑已落）时写后复核
+    必须补偿删除刚写的文件并抛 KeyError——与 R6 的补偿契约逐字一致。"""
+    from app.services.knowhow.assets import AssetService
+
+    _seed_user_and_notebook(repo, status="deleting")
+
+    service = AssetService(repo)
+    with pytest.raises(KeyError):
+        service.save("nb1", "cell.png", "image/png", b"\x89PNG fake", "u1")
+    nb_asset_dir = Path(repo.storage_dir) / "assets" / "nb1"
+    leftovers = list(nb_asset_dir.glob("*")) if nb_asset_dir.exists() else []
+    assert leftovers == [], f"deleting 状态下写后复核应补偿删除,残留：{leftovers}"
+
+
+# ---------------------------------------------------------------------------
+# codex #659 R17 P2-b：歧义提交失败(COMMIT 已生效、确认丢失)不得删已提交行的文件
+# ---------------------------------------------------------------------------
+
+
+def test_upload_keeps_file_when_commit_succeeded_but_ack_was_lost(
+    repo, monkeypatch,
+):
+    """变异钉：把 except 分支的 ``source_exists`` 核对拆掉、退回无条件删文件 →
+    本用例模拟 PG 上 COMMIT 已在服务端生效、确认包丢失(客户端拿到异常)的
+    歧义失败:行在库里、文件却被删,产生一条指向缺失内容的 sources 行,报红。"""
+    _seed_user_and_notebook(repo)
+    ingestion = repo._runtime.source_ingestion
+    from app.services.source_ingestion import UploadedSourceFile
+
+    real_insert = ingestion._insert_uploaded_source
+
+    def _commit_then_lose_ack(*args, **kwargs):
+        real_insert(*args, **kwargs)  # 行真实提交
+        raise RuntimeError("connection dropped after commit (simulated)")
+
+    monkeypatch.setattr(ingestion, "_insert_uploaded_source", _commit_then_lose_ack)
+
+    with pytest.raises(RuntimeError):
+        ingestion.upload_sources(
+            "nb1",
+            [UploadedSourceFile(
+                file_name="doc.pdf", content_type="application/pdf",
+                content=b"hello ambiguous commit",
+            )],
+            None, ingestion.pipeline_hooks(),
+        )
+
+    with repo._runtime.database.connect() as db:
+        row = db.execute(
+            "SELECT id FROM sources WHERE notebook_id='nb1'"
+        ).fetchone()
+    assert row is not None, "前置不成立:模拟的提交没落库"
+    storage_dir = repo._runtime.notebook_delete._storage_dir()
+    source_dir = storage_dir / "notebooks" / "nb1"
+    leftover = list(source_dir.iterdir()) if source_dir.exists() else []
+    assert leftover != [], "行已提交(歧义失败实为成功)时不得删它的文件"

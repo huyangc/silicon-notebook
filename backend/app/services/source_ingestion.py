@@ -1111,7 +1111,19 @@ class SourceIngestionService:
                 # 赶上的更晚窗口——见 notebook_delete.py 的 ``_sweep_ingestion_
                 # stragglers``）。原样上抛，不吞异常——调用方的错误处理/HTTP
                 # 状态码不变，只是不再留下磁盘孤儿。
-                self.source_files.delete(str(stored_path))
+                #
+                # codex #659 R17: PostgreSQL 上事务退出时抛错并不证明回滚——
+                # COMMIT 已在服务端生效、确认包在路上丢失(连接断)时,客户端
+                # 也会在这里拿到异常;那种情况下删文件会留下一条已提交却指向
+                # 缺失内容的 sources 行。补偿前用**新连接**核对该行是否真的
+                # 不在:在(歧义提交实为成功)→保留文件原样上抛;不在(真回滚)→
+                # 删孤儿文件再上抛。核对本身失败按「不确定」处理,保守不删。
+                try:
+                    row_committed = self.sources.source_exists(source_id)
+                except Exception:  # noqa: BLE001 — 不确定时保守不删
+                    row_committed = True
+                if not row_committed:
+                    self.source_files.delete(str(stored_path))
                 raise
             if reused_id is not None:
                 # 输给了并发的另一次首传（它先插入并提交）→ 复用那一行，清掉孤儿文件。
