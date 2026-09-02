@@ -1073,3 +1073,169 @@ def test_residual_cleanup_sweeps_a_conversations_straggler_too(repo):
             "SELECT COUNT(*) AS c FROM conversations WHERE notebook_id='nb1'"
         ).fetchone()
     assert remaining["c"] == 0
+
+
+# ---------------------------------------------------------------------------
+# codex #659 R8 P1: _drain_children_by_parent_ids commits several
+# independent sub-batches per call (each its own transaction) — the runner
+# only checked ownership/claim ONCE, before the whole call, never between
+# those sub-batches. A page whose total fanout outlasts the sweep's stale
+# cutoff could have its lease stolen mid-drain while still issuing real,
+# separately-committed DELETEs under a lease it no longer holds.
+# ---------------------------------------------------------------------------
+
+
+def _seed_source_with_elements(repo, notebook_id, source_id, count):
+    with repo._runtime.database.write() as db:
+        db.execute(
+            "INSERT INTO sources (id,notebook_id,title,file_path,source_type,"
+            "status,parse_status,uploaded_by,created_at,updated_at) VALUES "
+            "(?,?,?,?,?,?,?,?,?,?)",
+            (source_id, notebook_id, "S", "", "pdf", "ready", "parsed", "u1", NOW, NOW),
+        )
+        for index in range(count):
+            db.execute(
+                "INSERT INTO source_elements (id,source_id,element_type,"
+                "location_label,text,metadata,created_at) VALUES (?,?,?,?,?,?,?)",
+                (f"{source_id}-el{index}", source_id, "paragraph", "p", "x", "{}", NOW),
+            )
+
+
+def test_drain_children_by_parent_ids_gates_every_sub_batch_but_not_the_final_empty_probe(
+    repo,
+):
+    """计数桩断言:7 个子行、批大小 3(3+3+1)→ gate 恰好被调用 3 次——一次
+    在第 1/2 批提交之后、一次在第 2/3 批提交之后、一次在第 3 批提交之后
+    （发现「没有更多了」的第 4 次探测式 DELETE 命中 rowcount==0，不需要再
+    问 gate，因为那一轮什么都没删,不构成一次有所有权含义的破坏性子批）。
+    变异钉：去掉 gate 调用 → calls 变成 []，本条报红。"""
+    _seed_user_and_notebook(repo)
+    _seed_source_with_elements(repo, "nb1", "src-1", 7)
+    store = repo._runtime.notebook_delete_jobs
+    store._CHILD_BATCH_SIZE = 3
+
+    calls = []
+
+    def counting_gate():
+        calls.append(len(calls))
+        return True
+
+    drained = store._drain_children_by_parent_ids(
+        "source_elements", "source_id", ["src-1"], batch_ok=counting_gate,
+    )
+    assert drained is True
+    assert len(calls) == 3
+
+    with repo._runtime.database.connect() as db:
+        remaining = db.execute(
+            "SELECT COUNT(*) AS c FROM source_elements WHERE source_id='src-1'"
+        ).fetchone()
+    assert remaining["c"] == 0
+
+
+def test_drain_children_by_parent_ids_gates_none_when_never_given_one(repo):
+    """变异钉的另一半：``batch_ok=None``(既有调用方/测试的默认值)必须继续
+    一次不问地把 7 行全部删完——本参数存在之前的行为逐字不变。"""
+    _seed_user_and_notebook(repo)
+    _seed_source_with_elements(repo, "nb1", "src-1", 7)
+    store = repo._runtime.notebook_delete_jobs
+    store._CHILD_BATCH_SIZE = 3
+
+    drained = store._drain_children_by_parent_ids(
+        "source_elements", "source_id", ["src-1"],
+    )
+    assert drained is True
+    with repo._runtime.database.connect() as db:
+        remaining = db.execute(
+            "SELECT COUNT(*) AS c FROM source_elements WHERE source_id='src-1'"
+        ).fetchone()
+    assert remaining["c"] == 0
+
+
+def test_drain_children_by_parent_ids_stops_mid_drain_when_the_gate_fails_then_converges(
+    repo,
+):
+    """gate 第二次返回 False → 排水停在中途(第 1、2 批的 6 行已经各自独立
+    提交,gate 在第 2 批提交之后才报 False,第 3 批还没来得及提交就被拦下)、
+    剩余 1 行仍在;之后换一个恒真的 gate 重跑，从"还剩多少"的同一条查询
+    自然收敛到 0——不依赖任何持久化的子批游标。"""
+    _seed_user_and_notebook(repo)
+    _seed_source_with_elements(repo, "nb1", "src-1", 7)
+    store = repo._runtime.notebook_delete_jobs
+    store._CHILD_BATCH_SIZE = 3
+
+    calls = []
+
+    def fails_on_second_call():
+        calls.append(len(calls))
+        return len(calls) < 2
+
+    drained = store._drain_children_by_parent_ids(
+        "source_elements", "source_id", ["src-1"], batch_ok=fails_on_second_call,
+    )
+    assert drained is False
+    assert len(calls) == 2
+
+    with repo._runtime.database.connect() as db:
+        remaining = db.execute(
+            "SELECT COUNT(*) AS c FROM source_elements WHERE source_id='src-1'"
+        ).fetchone()
+    assert remaining["c"] == 1  # 7 - 3 - 3 (first two sub-batches already committed)
+
+    # A later resume with an always-true gate converges to zero — no
+    # persisted sub-batch cursor needed, just "any rows left" re-queried.
+    drained_again = store._drain_children_by_parent_ids(
+        "source_elements", "source_id", ["src-1"], batch_ok=lambda: True,
+    )
+    assert drained_again is True
+    with repo._runtime.database.connect() as db:
+        remaining = db.execute(
+            "SELECT COUNT(*) AS c FROM source_elements WHERE source_id='src-1'"
+        ).fetchone()
+    assert remaining["c"] == 0
+
+
+def test_run_chain_does_not_advance_the_cursor_when_the_sub_batch_gate_fails(repo):
+    """端到端接线:``_run_chain`` 传给 ``delete_source_elements_page`` 的
+    ``batch_ok`` 复用 ``_batch_ok``(同一份租/claim 复验)。claim 在第 2 个
+    子批提交后失效 → 排水中途停手、父页游标不前进、``_run_chain`` 的下一轮
+    自身的 ``_batch_ok`` 立即也失败(同一份丢失的所有权),整条链返回
+    False,而不是带着丢失的所有权继续推进到下一页父 id。"""
+    _seed_user_and_notebook(repo)
+    _seed_source_with_elements(repo, "nb1", "src-1", 7)
+    store = repo._runtime.notebook_delete_jobs
+    store._CHILD_BATCH_SIZE = 3
+
+    job = repo._runtime.notebook_delete_jobs.request("nb1", "u1")
+    lease_token = repo._runtime.notebook_delete_jobs.mark_running(
+        job["id"], stale_cutoff_seconds=300,
+    )
+    runner = repo._runtime.notebook_delete
+
+    class _ClaimThatFailsAfterTwoChecks:
+        def __init__(self):
+            self.checks = 0
+
+        def verify_held(self):
+            self.checks += 1
+            return self.checks <= 2
+
+        def release(self):
+            pass
+
+    claim = _ClaimThatFailsAfterTwoChecks()
+    finished = runner._run_chain(
+        job["id"], "nb1", lease_token, claim, "cursor_source_elements",
+        "source_elements", "", residual=False,
+    )
+    assert finished is False
+
+    row = repo._runtime.notebook_delete_jobs.get(job["id"])
+    # The cursor never advanced past the (single) parent page whose children
+    # are still incomplete.
+    assert row["cursor_key"] == ""
+    with repo._runtime.database.connect() as db:
+        remaining = db.execute(
+            "SELECT COUNT(*) AS c FROM source_elements WHERE source_id='src-1'"
+        ).fetchone()
+    assert 0 < remaining["c"] < 7  # partially drained, not zero, not untouched
