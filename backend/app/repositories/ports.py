@@ -1029,9 +1029,10 @@ class NotebookDeleteJobStorePort(Protocol):
         self, notebook_id: str, *, attempts: int = 0
     ) -> dict:
         """§T-4 驱动 B + P1-E 的退避/上限修订：``attempts`` 是这个笔记本此前
-        失败次数的延续（不是这一次新行自己的次数——新行从这个值起继续累加），
-        调用前必须已经清掉这个笔记本的历史 failed 作业行与其 side-table 残留
-        （见 ``purge_failed_jobs``）。"""
+        失败次数的延续（不是这一次新行自己的次数——新行从这个值起继续累加）。
+        历史 failed 作业行与其 side-table 残留在**本方法自己的事务里**先清后
+        插（codex #659 R4：分开两个事务会在崩溃窗里丢掉唯一携带 attempts/
+        finished_at 的行，把重试上限重置回第一次）。"""
         ...
     def get(self, job_id: str) -> dict: ...
     def latest_for_notebook(self, notebook_id: str) -> dict | None: ...
@@ -1111,13 +1112,7 @@ class NotebookDeleteJobStorePort(Protocol):
         rowcount 判断围栏是否命中，命中了才接着删 ``notebook_delete_files``
         侧表；没命中则两张表都不碰，不留半删状态）。返回围栏是否命中。"""
         ...
-    def purge_failed_jobs(self, notebook_id: str) -> None:
-        """P1-E：在 ``recreate_for_deleting_notebook`` 新建一行之前，清掉这个
-        笔记本此前所有 ``status='failed'`` 的旧作业行，**以及它们各自的**
-        ``notebook_delete_files`` 侧表残留——否则每次失败重试都会在
-        ``notebook_delete_files`` 里累积一份永远没人读的旧路径快照（旧作业
-        行的 job_id 早已不在活跃集里，没有任何代码路径会再回去清理它们）。"""
-        ...
+
     def list_stale(self, older_than_seconds: float) -> list[dict]: ...
     def list_notebooks_missing_job(self) -> list[dict]:
         """P1-E 修订：每一项除 ``notebook_id`` 外，还带这个笔记本**最近一条

@@ -1026,8 +1026,10 @@ class NotebookDeleteJobRunner:
                     elapsed = (now - finished).total_seconds()
                     if elapsed < _backoff_seconds(attempts):
                         continue  # still inside this attempt's backoff window
-            if attempts > 0:
-                self.delete_jobs.purge_failed_jobs(notebook_id)
+            # codex #659 R4: the purge of older failed rows lives INSIDE
+            # recreate's transaction now — a separate purge could commit and
+            # then crash before the replacement insert, erasing the only row
+            # carrying attempts/finished_at and resetting the retry ceiling.
             job = self.delete_jobs.recreate_for_deleting_notebook(
                 notebook_id, attempts=attempts,
             )

@@ -101,29 +101,6 @@ class NotebookDeleteJobStore:
             )
         return self.get(job_id)
 
-    def purge_failed_jobs(self, notebook_id: str) -> None:
-        """P1-E. PostgreSQL twin's docstring has the full rationale."""
-        with self.database.write(
-            operation="notebook_delete.purge_failed_jobs"
-        ) as db:
-            old_ids = [
-                row["id"] for row in db.execute(
-                    "SELECT id FROM notebook_delete_jobs "
-                    "WHERE notebook_id=? AND status='failed'",
-                    (notebook_id,),
-                ).fetchall()
-            ]
-            if not old_ids:
-                return
-            ph = ",".join("?" for _ in old_ids)
-            db.execute(
-                f"DELETE FROM notebook_delete_files WHERE job_id IN ({ph})",
-                old_ids,
-            )
-            db.execute(
-                f"DELETE FROM notebook_delete_jobs WHERE id IN ({ph})",
-                old_ids,
-            )
 
     def recreate_for_deleting_notebook(
         self, notebook_id: str, *, attempts: int = 0
@@ -136,6 +113,27 @@ class NotebookDeleteJobStore:
             with self.database.write(
                 operation="notebook_delete.recreate_missing_job"
             ) as db:
+                # codex #659 R4: purge older 'failed' rows in the SAME
+                # transaction as the replacement insert — PostgreSQL twin's
+                # comment has the crash-window rationale.
+                old_ids = [
+                    row["id"] for row in db.execute(
+                        "SELECT id FROM notebook_delete_jobs "
+                        "WHERE notebook_id=? AND status='failed'",
+                        (notebook_id,),
+                    ).fetchall()
+                ]
+                if old_ids:
+                    ph = ",".join("?" for _ in old_ids)
+                    db.execute(
+                        f"DELETE FROM notebook_delete_files "
+                        f"WHERE job_id IN ({ph})",
+                        old_ids,
+                    )
+                    db.execute(
+                        f"DELETE FROM notebook_delete_jobs WHERE id IN ({ph})",
+                        old_ids,
+                    )
                 db.execute(
                     "INSERT INTO notebook_delete_jobs"
                     "(id,notebook_id,status,phase,cursor_table,cursor_key,"

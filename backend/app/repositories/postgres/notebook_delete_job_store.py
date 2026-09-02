@@ -132,33 +132,6 @@ class NotebookDeleteJobStore:
             )
         return self.get(job_id)
 
-    def purge_failed_jobs(self, notebook_id: str) -> None:
-        """P1-E: delete every 'failed' job row this notebook has accumulated,
-        plus their ``notebook_delete_files`` side-table leftovers -- a failed
-        job's ``finish()`` never touches that side table (see this module's
-        docstring: only a successful finalize or ``finish_residual`` do), so
-        without this, every retry after a failure leaks one more forgotten
-        ``notebook_delete_files`` snapshot with no code path that will ever
-        revisit it. Called by ``recreate_for_deleting_notebook`` BEFORE it
-        inserts the fresh row, one transaction."""
-        with self.database.write() as connection:
-            old_ids = [
-                row["id"] for row in connection.execute(
-                    "SELECT id FROM notebook_delete_jobs "
-                    "WHERE notebook_id=%s AND status='failed'",
-                    (notebook_id,),
-                ).fetchall()
-            ]
-            if not old_ids:
-                return
-            connection.execute(
-                "DELETE FROM notebook_delete_files WHERE job_id = ANY(%s)",
-                (old_ids,),
-            )
-            connection.execute(
-                "DELETE FROM notebook_delete_jobs WHERE id = ANY(%s)",
-                (old_ids,),
-            )
 
     def recreate_for_deleting_notebook(
         self, notebook_id: str, *, attempts: int = 0
@@ -193,6 +166,29 @@ class NotebookDeleteJobStore:
         job_id = self.new_id("ndj")
         try:
             with self.database.write() as connection:
+                # P1-E + codex #659 R4: purge this notebook's accumulated
+                # 'failed' rows (and their notebook_delete_files leftovers)
+                # in the SAME transaction that inserts the replacement — a
+                # crash between a separate purge and this insert would erase
+                # the only row carrying attempts/finished_at, resetting the
+                # bounded-retry policy to attempt one forever.
+                old_ids = [
+                    row["id"] for row in connection.execute(
+                        "SELECT id FROM notebook_delete_jobs "
+                        "WHERE notebook_id=%s AND status='failed'",
+                        (notebook_id,),
+                    ).fetchall()
+                ]
+                if old_ids:
+                    connection.execute(
+                        "DELETE FROM notebook_delete_files "
+                        "WHERE job_id = ANY(%s)",
+                        (old_ids,),
+                    )
+                    connection.execute(
+                        "DELETE FROM notebook_delete_jobs WHERE id = ANY(%s)",
+                        (old_ids,),
+                    )
                 connection.execute(
                     "INSERT INTO notebook_delete_jobs"
                     "(id,notebook_id,status,phase,cursor_table,cursor_key,"
