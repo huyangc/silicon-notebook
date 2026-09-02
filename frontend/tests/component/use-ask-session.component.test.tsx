@@ -184,6 +184,9 @@ function beginOwnedNotebook(workspaceEpoch = 1) {
 
 beforeEach(() => {
   value = null;
+  // The hook mirrors a pending reasoning preview into this tab's sessionStorage;
+  // jsdom keeps that store across tests, so start each one from a clean tab.
+  window.sessionStorage.clear();
   for (const mock of Object.values(api)) mock.mockReset();
   vi.clearAllMocks();
   api.listConversations.mockResolvedValue([]);
@@ -3348,6 +3351,172 @@ test("a run that settles during the restore's list read is still projected", asy
   expect(value!.asking).toBe(false);
   expect(value!.conversationId).toBe("conversation-new");
   expect(value!.turns.map((turn) => turn.question)).toEqual(["new question"]);
+});
+
+// Reload resume: the preview/review phase lives only in the browser, so the hook
+// mirrors it into this tab's sessionStorage and a fresh mount resumes it.
+function pendingIntentStore(): unknown[] {
+  const raw = window.sessionStorage.getItem("silicon_notebook_pending_intent");
+  return raw ? (JSON.parse(raw) as unknown[]) : [];
+}
+
+test("a reasoning preview interrupted by a reload is re-issued and resumed on the next mount", async () => {
+  const firstPreview = deferred<QueryIntentContract>();
+  api.previewAskIntent.mockReturnValueOnce(firstPreview.promise);
+  api.listConversations.mockResolvedValue([summary("conversation-older")]);
+  api.getConversation.mockResolvedValue(detail("conversation-older"));
+  const view = render(<Harness />);
+  beginOwnedNotebook();
+  act(() => value!.selectMode("reasoning"));
+  act(() => value!.selectRetrievalEffort("exhaustive"));
+  act(() => {
+    void value!.submit("question before reload");
+  });
+  expect(value!.intentChecking).toBe(true);
+  expect(pendingIntentStore()).toHaveLength(1);
+
+  // Reload: React state is gone, the tab's sessionStorage is not.
+  view.unmount();
+  api.previewAskIntent.mockResolvedValueOnce(contractFor("question before reload", false));
+  api.runAskStream.mockResolvedValue({ ...answer("conversation-resumed"), mode: "reasoning" });
+  render(<Harness />);
+  const owner = beginOwnedNotebook(2);
+  await act(async () => {
+    await value!.restoreNotebook(owner);
+    value!.finishNotebookTransition(owner);
+  });
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  // The older session is not opened over the resumed question; the preview was
+  // issued a second time with the same frozen question and effort.
+  expect(api.getConversation).not.toHaveBeenCalled();
+  expect(api.previewAskIntent).toHaveBeenCalledTimes(2);
+  expect(api.previewAskIntent.mock.calls[1]?.[1]).toBe("question before reload");
+  expect(api.runAskStream).toHaveBeenCalledTimes(1);
+  expect((api.runAskStream.mock.calls[0]?.[1] as { retrieval_effort: string }).retrieval_effort).toBe("exhaustive");
+  expect(value!.turns.map((turn) => turn.question)).toEqual(["question before reload"]);
+  expect(value!.mode).toBe("reasoning");
+  // Handed off to the durable job: nothing left to resume from this tab.
+  expect(pendingIntentStore()).toEqual([]);
+});
+
+test("a clarification interrupted by a reload re-opens on the next mount without another model call", async () => {
+  const contract = contractFor("ambiguous before reload", true);
+  api.previewAskIntent.mockResolvedValue(contract);
+  api.listConversations.mockResolvedValue([summary("conversation-x")]);
+  api.getConversation.mockImplementation(async (id: string) => detail(id));
+  const view = render(<Harness />);
+  const first = beginOwnedNotebook();
+  await act(async () => {
+    await value!.restoreNotebook(first);
+  });
+  act(() => value!.selectMode("reasoning"));
+  await act(async () => {
+    await value!.submit("ambiguous before reload");
+  });
+  expect(value!.intentReview?.contract).toBe(contract);
+  expect(pendingIntentStore()).toHaveLength(1);
+
+  view.unmount();
+  api.previewAskIntent.mockReset();
+  api.runAskStream.mockResolvedValue(answer("conversation-x", "answer-after-reload"));
+  render(<Harness />);
+  const owner = beginOwnedNotebook(2);
+  await act(async () => {
+    await value!.restoreNotebook(owner);
+    value!.finishNotebookTransition(owner);
+  });
+  expect(api.previewAskIntent).not.toHaveBeenCalled();
+  expect(value!.conversationId).toBe("conversation-x");
+  expect(value!.turns).toHaveLength(1);
+  expect(value!.intentReview?.contract).toEqual(contract);
+  expect(value!.intentReview?.question).toBe("ambiguous before reload");
+  expect(value!.pendingQuestion).toBe("ambiguous before reload");
+
+  await act(async () => {
+    await value!.confirmIntent({
+      contract,
+      resolved_question: "ambiguous before reload, resolved",
+      answers: [{ id: "which", answer: "that one" }],
+    });
+  });
+  expect(api.runAskStream).toHaveBeenCalledTimes(1);
+  expect(api.runAskStream.mock.calls[0]?.[1]).toMatchObject({
+    question: "ambiguous before reload",
+    conversation_id: "conversation-x",
+  });
+  expect(value!.turns.map((turn) => turn.question)).toEqual(["question-conversation-x", "ambiguous before reload"]);
+  expect(pendingIntentStore()).toEqual([]);
+});
+
+test("cancelling, stopping or switching to automatic mode forgets the persisted preview", async () => {
+  const preview = deferred<QueryIntentContract>();
+  api.previewAskIntent.mockReturnValue(preview.promise);
+  const view = render(<Harness />);
+  beginOwnedNotebook();
+  act(() => value!.selectMode("reasoning"));
+
+  act(() => {
+    void value!.submit("to be stopped");
+  });
+  expect(pendingIntentStore()).toHaveLength(1);
+  act(() => value!.abort());
+  expect(pendingIntentStore()).toEqual([]);
+  expect(value!.question).toBe("to be stopped");
+
+  const contract = contractFor("to be cancelled", true);
+  api.previewAskIntent.mockResolvedValue(contract);
+  await act(async () => {
+    await value!.submit("to be cancelled");
+  });
+  expect(pendingIntentStore()).toHaveLength(1);
+  act(() => value!.cancelIntent());
+  expect(pendingIntentStore()).toEqual([]);
+
+  api.previewAskIntent.mockReturnValue(deferred<QueryIntentContract>().promise);
+  act(() => {
+    void value!.submit("to be downgraded");
+  });
+  act(() => value!.leaveWorkspace());
+  expect(pendingIntentStore()).toHaveLength(1);
+  view.rerender(<Harness policy={{ ...DEFAULT_POLICY, advanced: false }} />);
+  expect(pendingIntentStore()).toEqual([]);
+});
+
+test("a persisted preview whose conversation no longer exists is dropped on restore", async () => {
+  const contract = contractFor("orphaned", true);
+  api.previewAskIntent.mockResolvedValue(contract);
+  api.listConversations.mockResolvedValue([summary("conversation-gone")]);
+  api.getConversation.mockImplementation(async (id: string) => detail(id));
+  const view = render(<Harness />);
+  const first = beginOwnedNotebook();
+  await act(async () => {
+    await value!.restoreNotebook(first);
+  });
+  act(() => value!.selectMode("reasoning"));
+  await act(async () => {
+    await value!.submit("orphaned");
+  });
+  expect(pendingIntentStore()).toHaveLength(1);
+
+  view.unmount();
+  api.previewAskIntent.mockReset();
+  api.getConversation.mockReset();
+  api.listConversations.mockResolvedValue([summary("conversation-other")]);
+  api.getConversation.mockResolvedValue(detail("conversation-other"));
+  render(<Harness />);
+  const owner = beginOwnedNotebook(2);
+  await act(async () => {
+    await value!.restoreNotebook(owner);
+    value!.finishNotebookTransition(owner);
+  });
+  expect(value!.intentReview).toBeNull();
+  expect(value!.pendingQuestion).toBe("");
+  expect(value!.conversationId).toBe("conversation-other");
+  expect(api.previewAskIntent).not.toHaveBeenCalled();
+  expect(pendingIntentStore()).toEqual([]);
 });
 
 // PR #557 regression: `turns`/`sessions`/`pendingTrace`/`feedbackSent` used to
