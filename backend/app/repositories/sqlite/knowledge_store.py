@@ -330,12 +330,21 @@ class KnowledgeStore:
             for offset in range(0, len(ids), _DELETE_OBJECT_BATCH_SIZE):
                 batch = ids[offset : offset + _DELETE_OBJECT_BATCH_SIZE]
                 placeholders = ",".join("?" for _ in batch)
-                cur = db.execute(
-                    f"DELETE FROM knowledge_source_fact_elements "
-                    f"WHERE fact_id IN ({placeholders})",
-                    batch,
-                )
-                counts["knowledge_source_fact_elements"] += cur.rowcount
+                # codex #663 R16 P1b: a FRESH high-fanout fact (committed
+                # after the ksfe drain step passed) can carry unbounded
+                # children — delete them in row-budgeted statements, not one
+                # unbounded IN-list sweep.
+                while True:
+                    cur = db.execute(
+                        f"DELETE FROM knowledge_source_fact_elements "
+                        f"WHERE rowid IN (SELECT rowid "
+                        f"FROM knowledge_source_fact_elements "
+                        f"WHERE fact_id IN ({placeholders}) LIMIT {int(limit)})",
+                        batch,
+                    )
+                    counts["knowledge_source_fact_elements"] += cur.rowcount
+                    if cur.rowcount == 0:
+                        break
                 cur = db.execute(
                     f"DELETE FROM knowledge_source_facts WHERE id IN ({placeholders})",
                     batch,
@@ -2551,6 +2560,28 @@ class KnowledgeStore:
             (notebook_id,),
         ).fetchone()
         return bool(row and row["source_index_backfilled"])
+
+    @staticmethod
+    def clear_source_index_backfilled(
+        db: sqlite3.Connection, notebook_id: str
+    ) -> None:
+        """batch-3-W1 T-5a (codex #663 R16 P1): revoke the reverse-index
+        completeness certificate — called in the SAME transaction as the
+        drain's first page, because the doomed-object pre-steps delete
+        ``knowledge_object_sources`` rows of still-ALIVE objects: an
+        interrupted drain would otherwise leave a certified-but-incomplete
+        reverse index, and ``_stale_object_ids_for_source_batch`` would
+        trust it and permanently strand those objects instead of taking the
+        evidence-scan fallback. ``delete_notebook_kg`` re-asserts the
+        certificate after a successful final reset (from the pre-drain
+        snapshot of its value), so the happy path keeps the pre-T-5a
+        preserve-the-certificate behaviour. Plain UPDATE (no upsert): an
+        absent state row already means "uncertified"."""
+        db.execute(
+            "UPDATE unified_kg_state SET source_index_backfilled=0 "
+            "WHERE notebook_id=?",
+            (notebook_id,),
+        )
 
     def mark_source_index_backfilled(
         self, db: sqlite3.Connection, notebook_id: str

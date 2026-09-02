@@ -57,6 +57,7 @@ LIFECYCLE_STORE_CALLS = {
         # reset)。seq bump 不在此列:它走 mark_unified_kg_dirty_in_tx 闸口,
         # 不是裸 store 调用(kg_mutation.py 单一闸口红线)。
         "begin_graph_reset_isolation",
+        "clear_source_index_backfilled",
         "drain_notebook_graph_rows_page",
         "graph_drain_backlog",
         "embedding_rows_for_objects",

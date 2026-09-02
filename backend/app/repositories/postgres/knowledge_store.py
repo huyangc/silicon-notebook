@@ -486,12 +486,19 @@ class KnowledgeStore:
                       "knowledge_source_fact_elements": 0}
             for offset in range(0, len(ids), _DELETE_OBJECT_BATCH_SIZE):
                 batch = ids[offset : offset + _DELETE_OBJECT_BATCH_SIZE]
-                cur = db.execute(
-                    "DELETE FROM knowledge_source_fact_elements "
-                    "WHERE fact_id = ANY(%s)",
-                    (batch,),
-                )
-                counts["knowledge_source_fact_elements"] += cur.rowcount
+                # codex #663 R16 P1b — SQLite twin's comment: fresh
+                # high-fanout facts get row-budgeted child deletes.
+                while True:
+                    cur = db.execute(
+                        "DELETE FROM knowledge_source_fact_elements "
+                        "WHERE ctid IN (SELECT ctid "
+                        "FROM knowledge_source_fact_elements "
+                        f"WHERE fact_id = ANY(%s) LIMIT {int(limit)})",
+                        (batch,),
+                    )
+                    counts["knowledge_source_fact_elements"] += cur.rowcount
+                    if cur.rowcount == 0:
+                        break
                 cur = db.execute(
                     "DELETE FROM knowledge_source_facts WHERE id = ANY(%s)",
                     (batch,),
@@ -2690,6 +2697,17 @@ class KnowledgeStore:
             (notebook_id,),
         ).fetchone()
         return bool(row and row["source_index_backfilled"])
+
+    @staticmethod
+    def clear_source_index_backfilled(db: Any, notebook_id: str) -> None:
+        """batch-3-W1 T-5a (codex #663 R16 P1) — SQLite twin's docstring
+        has the full rationale (revoked with the drain's first page,
+        re-asserted after a successful final reset)."""
+        db.execute(
+            "UPDATE unified_kg_state SET source_index_backfilled=0 "
+            "WHERE notebook_id=%s",
+            (notebook_id,),
+        )
 
     def mark_source_index_backfilled(
         self, db: Any, notebook_id: str

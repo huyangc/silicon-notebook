@@ -1948,6 +1948,12 @@ class KnowledgeStorePort(Protocol):
     @staticmethod
     def delete_notebook_graph_rows(db: object, notebook_id: str, now: str) -> dict[str, int]: ...
     @staticmethod
+    def clear_source_index_backfilled(db: object, notebook_id: str) -> None:
+        """T-5a(codex #663 R16 P1):撤销反向索引完备性证书——排水首页同
+        事务调用;成功终局后按排水前快照回授。中断的排水不再留下
+        「已认证却不完整」的反向索引。"""
+        ...
+    @staticmethod
     def begin_graph_reset_isolation(db: object) -> None:
         """batch-3-W1 T-5a(codex #663 R12 P1):终局事务的第一条语句——
         PG 上钉 REPEATABLE READ 快照(事务内探针从此原子界定其后所有
