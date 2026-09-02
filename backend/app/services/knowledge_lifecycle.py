@@ -592,6 +592,14 @@ class KnowledgeLifecycleService:
         """``delete_notebook_kg``'s body, run under the kg_building fence
         (its docstring carries the full contract)."""
         drained = self._drain_graph_rows_before_reset(notebook_id)
+        # codex #663 R11 P2: the per-batch §4.2 checkpoint lives inside the
+        # drain loop — a graph already under the threshold never enters it,
+        # so a notebook tombstoned before this phase would sail into the
+        # final reset (and a source-less rebuild could even finish "clean")
+        # while the delete job's quiesce waits for exactly this abort.
+        # Recheck the tombstone at the final-reset boundary too.
+        if self._notebook_deleting(notebook_id):
+            raise NotebookDeletingAbortsMaintenanceError(notebook_id)
         for attempt in range(3):
             with self._write() as db:
                 # codex #663 R6 P1: the drain's termination probe runs on a
