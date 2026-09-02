@@ -499,7 +499,9 @@ class KnowledgeLifecycleService:
     # KG deletion / store / relink / cluster writes / incremental fusion
     # ------------------------------------------------------------------
 
-    def delete_notebook_kg(self, notebook_id: str) -> dict:
+    def delete_notebook_kg(
+        self, notebook_id: str, *, held_by_kg_job: bool = False
+    ) -> dict:
         """Delete all KG artifacts for a notebook (objects, relations, clusters,
         merge candidates, embeddings, extraction runs) and RESET unified state
         (batch-3-W1 PR-2, design doc Sec 3.3 option C) while KEEPING sources
@@ -567,16 +569,24 @@ class KnowledgeLifecycleService:
         # PRE-EXISTING PostgreSQL READ COMMITTED semantics of that pass —
         # T-5a changed none of its statements — and are converged by the
         # rebuild re-extraction that follows every production delete.
+        # codex #663 R9 P1b: ownership is explicit, never inferred from set
+        # emptiness. The rebuild job's nested call passes
+        # ``held_by_kg_job=True`` (it reserved the marker at preparation);
+        # every other caller must CLAIM the marker atomically here — and a
+        # marker already held by someone else is a refusal
+        # (KgBuildAlreadyRunning), not a licence to drain alongside the
+        # actual owner.
+        if held_by_kg_job:
+            return self._delete_notebook_kg_fenced(notebook_id)
         with self.kg_building_lock:
-            fence_owner = notebook_id not in self.kg_building
-            if fence_owner:
-                self.kg_building.add(notebook_id)
+            if notebook_id in self.kg_building:
+                raise KgBuildAlreadyRunning(notebook_id)
+            self.kg_building.add(notebook_id)
         try:
             return self._delete_notebook_kg_fenced(notebook_id)
         finally:
-            if fence_owner:
-                with self.kg_building_lock:
-                    self.kg_building.discard(notebook_id)
+            with self.kg_building_lock:
+                self.kg_building.discard(notebook_id)
 
     def _delete_notebook_kg_fenced(self, notebook_id: str) -> dict:
         """``delete_notebook_kg``'s body, run under the kg_building fence
@@ -2823,23 +2833,48 @@ class KnowledgeLifecycleService:
         if mode not in {"incremental", "rebuild"}:
             raise ValueError("unsupported KG build mode")
         self.get_notebook(notebook_id)
-        # codex #663 R8 P1: make the in-process ``kg_building`` registration
-        # a REAL admission gate for build jobs, not only a status surface —
-        # the durable single-flight is ``kg_build_jobs``'s unique-active row,
-        # which a STANDALONE ``delete_notebook_kg`` (maintenance facade /
-        # offline script) deliberately does not create, so without this
-        # check a new buildkg-/rebuildkg- job could start extracting while
-        # that delete drains. Same single-worker deployment contract as
-        # quiesce leg B (design doc §T-3.3 / 残余债 #10): in-process is the
-        # deployment's authority for these registrations.
-        with self.kg_building_lock:
-            if notebook_id in self.kg_building:
-                raise KgBuildAlreadyRunning(notebook_id)
         if (
             not allow_without_model
             and not self.model_clients.configured("kg_extract")
         ):
             raise RuntimeError("LLM not configured; cannot build KG")
+        # codex #663 R8/R9 P1: ``kg_building`` is a REAL admission gate for
+        # build jobs (the durable single-flight is ``kg_build_jobs``'s
+        # unique-active row, which a STANDALONE ``delete_notebook_kg``
+        # deliberately does not create), and the reservation is ATOMIC —
+        # check-and-add under one lock hold, so a standalone delete can no
+        # longer slip in between an emptiness check here and the marker
+        # landing after ``create_job``. Every failure path below releases
+        # the reservation; on success the marker stays and the job run's
+        # own finally releases it (``_run_notebook_kg_job``'s re-add is an
+        # idempotent set.add covering runs resumed after a process
+        # restart). Same single-worker deployment contract as quiesce leg B
+        # (design doc §T-3.3 / 残余债 #10).
+        with self.kg_building_lock:
+            if notebook_id in self.kg_building:
+                raise KgBuildAlreadyRunning(notebook_id)
+            self.kg_building.add(notebook_id)
+        try:
+            return self._prepare_notebook_kg_job_reserved(
+                notebook_id, mode,
+                target_limit=target_limit, retry_partial=retry_partial,
+            )
+        except BaseException:
+            with self.kg_building_lock:
+                self.kg_building.discard(notebook_id)
+            raise
+
+    def _prepare_notebook_kg_job_reserved(
+        self,
+        notebook_id: str,
+        mode: str,
+        *,
+        target_limit: int | None,
+        retry_partial: bool,
+    ) -> dict:
+        """``prepare_notebook_kg_job``'s body, run with the ``kg_building``
+        reservation already held (its docstring/comment carries the
+        contract)."""
         target_count = self._kg_target_count(
             notebook_id,
             mode,
@@ -2873,8 +2908,6 @@ class KnowledgeLifecycleService:
         # 文件、推送待办)。信号落在这里会直接逃出本方法,连调用方的兜底都进不去,行就
         # 永久留在 running。守卫必须从「行已存在」这一刻起生效。
         try:
-            with self.kg_building_lock:
-                self.kg_building.add(notebook_id)
             self._emit_kg_build_event("kg_build_started", job)
             self._publish_pending_started()
         except (KeyboardInterrupt, SystemExit):
@@ -3415,7 +3448,9 @@ class KnowledgeLifecycleService:
                 probe_kg_model(controlled_client)
                 if not preserve_existing_rebuild:
                     try:
-                        self.delete_notebook_kg(notebook_id)
+                        self.delete_notebook_kg(
+                            notebook_id, held_by_kg_job=True
+                        )
                     except NotebookDeletingAbortsMaintenanceError:
                         # T-5a review P2: the pre-reset drain's §4.2
                         # checkpoint fires on THIS job path too. Translate to
