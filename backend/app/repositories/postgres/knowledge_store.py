@@ -471,10 +471,12 @@ class KnowledgeStore:
             # codex #663 R14 P2 — SQLite twin's comment has the rationale
             # (explicit counted child delete before the parent page; the FK
             # cascade then finds nothing).
+            # codex #663 R15 P2b(同 ko 页):FOR UPDATE 让并发替换等到本页
+            # 提交,子行不会在「删子」与「删父」之间落地成孤儿。
             ids = [
                 row["id"] for row in db.execute(
                     f"SELECT id FROM knowledge_source_facts WHERE {predicate} "
-                    f"LIMIT {int(limit)}",
+                    f"LIMIT {int(limit)} FOR UPDATE",
                     (notebook_id,) * params,
                 ).fetchall()
             ]
@@ -497,10 +499,15 @@ class KnowledgeStore:
                 counts["knowledge_source_facts"] += cur.rowcount
             return {name: n for name, n in counts.items() if n}
         if table == "knowledge_objects":
+            # codex #663 R15 P2b: FOR UPDATE — a concurrent store_kg
+            # replacing one of these objects must WAIT until this page
+            # commits, or its re-inserted embedding/provenance rows could
+            # land between our dependent DELETE and the parent DELETE and
+            # come out the other side as committed orphans.
             ids = [
                 row["id"] for row in db.execute(
                     f"SELECT id FROM knowledge_objects WHERE {predicate} "
-                    f"LIMIT {int(limit)}",
+                    f"LIMIT {int(limit)} FOR UPDATE",
                     (notebook_id,) * params,
                 ).fetchall()
             ]
