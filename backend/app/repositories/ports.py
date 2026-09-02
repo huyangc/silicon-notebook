@@ -1948,20 +1948,27 @@ class KnowledgeStorePort(Protocol):
     @staticmethod
     def delete_notebook_graph_rows(db: object, notebook_id: str, now: str) -> dict[str, int]: ...
     @staticmethod
-    def graph_drain_backlog(db: object, notebook_id: str, threshold: int) -> "str | None":
-        """batch-3-W1 T-5a：``delete_notebook_kg`` 预排水的探针——按登记顺序
-        返回第一张匹配行数仍超过 ``threshold`` 的表名,全部 ≤threshold 时返回
-        ``None``(= 终局单事务已经有界,可以停止排水)。只读点探
-        (LIMIT 1 OFFSET threshold),小图路径零写事务。"""
+    def graph_drain_backlog(
+        db: object, notebook_id: str, threshold: int, start: int = 0
+    ) -> "tuple[str, int] | None":
+        """batch-3-W1 T-5a：``delete_notebook_kg`` 预排水的探针——从登记表
+        下标 ``start`` 起,返回第一张匹配行数仍超过 ``threshold`` 的
+        ``(表名, 下标)``,余下全部 ≤threshold 时返回 ``None``(= 终局单事务
+        已经有界,可以停止排水)。只读点探(LIMIT 1 OFFSET threshold),小图
+        路径零写事务;``start`` 游标依托登记表严格向前的收敛性(评审 F4)。"""
         ...
     @staticmethod
     def drain_notebook_graph_rows_page(
         db: object, notebook_id: str, table: str, limit: int
-    ) -> int:
+    ) -> dict[str, int]:
         """batch-3-W1 T-5a：按该表在排水登记表里的谓词删除一页(§1.5 形一
         rowid / 形二 ctid),事务归调用方所有——每页一个 ``write()``,且同事务
-        必须 bump ``kg_mutation_seq``(census 纪律,由调用方经 ``mark_dirty``
-        完成)。返回本页删除行数。"""
+        必须经 ``mark_unified_kg_dirty_in_tx`` 闸口 bump
+        ``kg_mutation_seq``(census 纪律与单一闸口红线)。返回本页按表计的
+        删除行数(空 dict = 本表已无匹配)。``knowledge_objects`` 页按
+        ``_delete_object_id_batch`` 同形连带同事务清掉本页对象的
+        embeddings/簇成员/kos 行(评审 F3:任何提交都不暴露对象已消失的
+        簇行)。"""
         ...
     @staticmethod
     def embedding_rows_for_objects(db: object, notebook_id: str, object_ids: object) -> list[Any]: ...
@@ -3682,12 +3689,18 @@ class NotebookDeletingAbortsMaintenanceError(RuntimeError):
     退出通道是既有的 ``except Exception: settle(..., "failed")``
     （`services/kg/maintenance_jobs.py` 的 `run_notebook_relink_job` /
     `run_unified_kg_rebuild_job`），不新开一条通道——这正是选项 A（检查点）
-    相对选项 B（主动 abort 需要新建注册表）更便宜的地方。落点两处：
+    相对选项 B（主动 abort 需要新建注册表）更便宜的地方。落点三处：
     `knowledge_lifecycle.py` 的 `relink_notebook_kg` 逐源循环、
-    `rebuild_unified_kg` 的 `_stage`（10 个阶段边界共用一处改动）。
+    `rebuild_unified_kg` 的 `_stage`（10 个阶段边界共用一处改动）、
+    T-5a 的 `_drain_graph_rows_before_reset` 逐批检查点。
 
     第三个检查点（`buildkg-`/`rebuildkg-` 的批循环）不用这个类——那条路径走
-    既有的 `KgExtractionRunControl.abort()` / `KgBuildAborted`。"""
+    既有的 `KgExtractionRunControl.abort()` / `KgBuildAborted`。T-5a 的排水
+    落点位于 `delete_notebook_kg` 内,而 rebuildkg- 恰好经它进入删除相位:
+    `_run_notebook_kg_job` 在调用点就地把本异常翻译成与批循环检查点同形的
+    `KgBuildFailure("notebook_deleting", …)` / `KgBuildAborted`,保证同一个
+    用户动作在删除相位与批循环相位拿到同一份文案;其余调用方
+    (maintenance facade / 离线脚本)沿用本类原有的 settle("failed") 通道。"""
 
 
 class NotebookAlreadyDeletingError(RuntimeError):

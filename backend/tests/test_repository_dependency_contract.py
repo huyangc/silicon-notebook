@@ -52,6 +52,12 @@ LIFECYCLE_STORE_CALLS = {
         # 两条同款登记。
         "concept_embedding_rows",
         "delete_notebook_graph_rows",
+        # batch-3-W1 T-5a: delete_notebook_kg 预排水的两个新 seam——只读探针 +
+        # 每批一事务的分页删除(knowledge_lifecycle._drain_graph_rows_before_
+        # reset)。seq bump 不在此列:它走 mark_unified_kg_dirty_in_tx 闸口,
+        # 不是裸 store 调用(kg_mutation.py 单一闸口红线)。
+        "drain_notebook_graph_rows_page",
+        "graph_drain_backlog",
         "embedding_rows_for_objects",
         "fts_search",
         "incremental_object_rows",

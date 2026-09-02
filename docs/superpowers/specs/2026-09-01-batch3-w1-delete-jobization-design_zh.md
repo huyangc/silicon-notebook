@@ -1483,5 +1483,12 @@ P0-1 钉测试无需任何修改。要点：
 - **可见性代价（接受）**：排水期读者看到渐缩的图——与终局提交后
   「空图直到 rebuild 填回」的既有退化窗口同质，只是把窗口向前延长了
   排水时长；rebuild 流程本来就处于 dirty 态。
-- **counts 契约**：排水行并回 `delete_notebook_kg` 返回的 counts，
-  调用方看到的仍是全量。
+- **中断残余（接受，双评审 #5）**：排水中途中断（墓碑中止/停摆响亮失败/
+  超时/进程死亡）留下一个**形状一致的半清图**——knowledge_objects 页按
+  `_delete_object_id_batch` 同形连带同事务清 embeddings/簇成员/kos，
+  所以不产生孤儿簇行或悬空 embedding；SQLite 的 `kg_objects_fts` 影子刻意
+  不逐页清（与 `_delete_object_id_batch` 同款排除），中断后其悬空行留到
+  下一次完整 delete/rebuild 收口；`unified_kg_state` 此时 dirty=1、epoch
+  未推进、计数为删前旧值。重试 rebuild 会从头幂等重排。
+- **counts 契约**：排水行并回 `delete_notebook_kg` 返回的 counts（含
+  knowledge_objects 页连带删除的从属表行数），调用方看到的仍是全量。

@@ -179,17 +179,23 @@ Graph-row writers, all now in-transaction (✓ = already was):
       (delete_notebook_kg's pre-reset              pre-reset page of the same
       drain, _drain_graph_rows_before_             tables/predicates the final
       reset)                                       pass clears. Its caller
-                                                  bumps kg_mutation_seq via
-                                                  mark_dirty in the SAME
-                                                  write() as each page — the
-                                                  in-transaction discipline
-                                                  above, applied per batch, so
-                                                  two mid-drain reads can
-                                                  never cache different
-                                                  partial graphs under one
-                                                  (epoch, seq) key. It never
-                                                  touches kg_reset_epoch; the
-                                                  final pass's reset (seq→0,
+                                                  bumps kg_mutation_seq
+                                                  through mark_unified_kg_
+                                                  dirty_in_tx — the ONE
+                                                  online choke point below,
+                                                  NOT a second dirty entry —
+                                                  in the SAME write() as each
+                                                  page, so two mid-drain
+                                                  reads can never cache
+                                                  different partial graphs
+                                                  under one (epoch, seq) key,
+                                                  and the choke point's memo
+                                                  work (auto_index_checked
+                                                  re-arm, corpus-language
+                                                  drop) runs per batch. It
+                                                  never touches
+                                                  kg_reset_epoch; the final
+                                                  pass's reset (seq→0,
                                                   epoch+1) still supersedes
                                                   every drain-era key.
 

@@ -955,7 +955,9 @@ def test_insert_clusters_batches_member_probe(repo, monkeypatch):
 #   ① 来源删除/重解析/replace_source → `_delete_object_id_batch` 同事务按
 #      (notebook_id, member_object_id) 清簇行;
 #   ② knowhow 重投影/删表 → `prune_cluster_rows_for_source` 同事务只清**差集**;
-#   ③ 整库重建 → `delete_notebook_graph_rows` 整表清空。
+#   ③ 整库重建 → `delete_notebook_graph_rows` 整表清空;
+#   ④ T-5a 预排水 → `drain_notebook_graph_rows_page` 的 knowledge_objects 页
+#      按 ① 同形在同一事务里连带清本页对象的簇行(排水中断也不产孤儿)。
 # 于是这里剩下的唯一职责是清历史残渣:每进程每 notebook 一次。
 
 # 清扫的第一条语句(每批必发的 keyset 页读)。数「跑了几批清扫」要数它而不是数
@@ -1554,15 +1556,19 @@ def test_orphan_producing_paths_are_exhaustively_registered():
 
     backend = Path(__file__).resolve().parents[1]
 
-    # ① 两个后端各恰好四条 DELETE FROM knowledge_objects,且每条所在的函数都必须
+    # ① 两个后端各恰好五条 DELETE FROM knowledge_objects,且每条所在的函数都必须
     #    同时删 concept_clusters —— 除了 knowhow 那两条:它们的清理由服务层在同一
-    #    写事务里经 prune_cluster_rows_for_source 完成(见 ② ③)。
+    #    写事务里经 prune_cluster_rows_for_source 完成(见 ② ③)。第五条是
+    #    batch-3-W1 T-5a 的 drain_notebook_graph_rows_page(delete_notebook_kg
+    #    预排水的 knowledge_objects 页):它按 _delete_object_id_batch 同形在同一
+    #    事务里删本页对象的簇成员行,由下面的 AST 扫描(函数体须含
+    #    concept_clusters)自动覆盖——排水不是新的孤儿生产者。
     KNOWHOW_DELETES = {"delete_objects_by_source", "delete_objects_by_source_and_row"}
     WHOLE_TABLE_WIPES = {"delete_notebook_graph_rows"}
     for adapter in ("sqlite", "postgres"):
         path = backend / "app" / "repositories" / adapter / "knowledge_store.py"
         source = path.read_text(encoding="utf-8")
-        assert source.count("DELETE FROM knowledge_objects") == 4, adapter
+        assert source.count("DELETE FROM knowledge_objects") == 5, adapter
         tree = ast.parse(source, filename=str(path))
         unguarded = []
         for node in ast.walk(tree):
