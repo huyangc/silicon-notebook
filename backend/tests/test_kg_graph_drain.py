@@ -410,6 +410,94 @@ def test_final_reset_revalidates_the_bound_inside_its_own_transaction(
     ) == 0
 
 
+def test_standalone_delete_holds_the_kg_building_fence(repo, monkeypatch):
+    """变异钉(codex #663 R7 P1b):把 delete_notebook_kg 的 kg_building 全程
+    登记拆掉 → 排水期集合里查无此库,报红。文档图写者(buildkg-/rebuildkg-)
+    在提交口被 kg_building 单飞挡住——rebuild 路径本就先登记再进删除相位,
+    独立调用方也必须自持同一把 fence,终局的 in-tx 复验才有「写者被挡」的
+    前提。收尾后必须释放(不是 rebuild 持有的那份)。"""
+    service = repo._runtime.knowledge_lifecycle
+    monkeypatch.setattr(service, "_graph_drain_budget_rows", 3)
+    notebook = repo.create_notebook(NotebookCreate(name="fence"))
+    _seed_graph(repo, notebook.id, doc_objects=10)
+
+    seen = []
+    store = repo._runtime.knowledge
+    original = store.drain_notebook_graph_rows_page
+
+    def _spy(db, nb, step, limit):
+        seen.append(nb in service.kg_building)
+        return original(db, nb, step, limit)
+
+    monkeypatch.setattr(store, "drain_notebook_graph_rows_page", _spy)
+    repo.delete_notebook_kg(notebook.id)
+
+    assert seen and all(seen), "排水全程必须持有 kg_building fence"
+    assert notebook.id not in service.kg_building, "收尾后必须释放 fence"
+
+
+def test_small_path_still_validates_inside_the_final_transaction(
+    repo, monkeypatch,
+):
+    """变异钉(codex #663 R7 P1a):把终局复验加回 ``drained and`` 门(小图
+    路径跳过复验)→ 首扫「全表低于阈值」的过期结论直通终局,重排水轮数为
+    0,报红。做法同 R6 钉:首个 start=0 的 None 瞬间注入 5 行、仍返过期
+    None——无条件复验必须逮住。"""
+    service = repo._runtime.knowledge_lifecycle
+    monkeypatch.setattr(service, "_graph_drain_budget_rows", 3)
+    notebook = repo.create_notebook(NotebookCreate(name="small-reval"))
+    _seed_graph(repo, notebook.id, doc_objects=2)  # 低于阈值:不触发首轮排水
+
+    from app.repositories.sqlite.database import SqliteDatabase
+
+    primary = repo._runtime.database
+    independent = SqliteDatabase(primary.settings, primary.root_dir)
+    store = repo._runtime.knowledge
+    original_backlog = store.graph_drain_backlog
+    injected = {"done": False}
+
+    def _stale_none_backlog(db, nb, threshold, start=0):
+        result = original_backlog(db, nb, threshold, start)
+        if result is None and start == 0 and not injected["done"]:
+            injected["done"] = True
+            now = _now()
+            with independent.write() as w:
+                for i in range(5):
+                    w.execute(
+                        "INSERT INTO knowledge_objects (id,notebook_id,"
+                        "object_type,status,owner,payload,evidence,source_id,"
+                        "created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                        (f"ko-late-{i}", nb, "concept", "approved", "", "{}",
+                         "[]", "src-doc", now, now),
+                    )
+            return None
+        return result
+
+    monkeypatch.setattr(store, "graph_drain_backlog", _stale_none_backlog)
+
+    drain_rounds = []
+    original_drain = service._drain_graph_rows_before_reset
+
+    def _drain_spy(nb):
+        result = original_drain(nb)
+        drain_rounds.append(dict(result))
+        return result
+
+    monkeypatch.setattr(service, "_drain_graph_rows_before_reset", _drain_spy)
+    counts = repo.delete_notebook_kg(notebook.id)
+
+    assert injected["done"], "前置不成立:没有触发注入"
+    assert len(drain_rounds) >= 2, (
+        f"小图路径的过期结论也必须被终局复验逮住:{len(drain_rounds)}"
+    )
+    assert counts["knowledge_objects"] == 7
+    assert _count(
+        repo,
+        "SELECT COUNT(*) FROM knowledge_objects WHERE notebook_id=?",
+        (notebook.id,),
+    ) == 0
+
+
 def test_high_fanout_dependents_are_predrained_in_bounded_pages(repo, monkeypatch):
     """变异钉(codex #663 R3 P1):把 ko 之前的两个非镜像预排水步从登记表删掉
     → 高扇出从属行(合并对象的 provenance 行/簇成员行)全部落进 ko 页的事务内

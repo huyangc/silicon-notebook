@@ -546,6 +546,32 @@ class KnowledgeLifecycleService:
         delete_notebook_kg for the full seq-vs-epoch writeup.
         """
         self.get_notebook(notebook_id)
+        # codex #663 R7 P1: the doc-graph WRITERS (buildkg-/rebuildkg-
+        # extraction jobs) are gated at submission by the ``kg_building``
+        # single-flight — the production rebuild path registers this
+        # notebook there BEFORE entering its delete phase (see
+        # ``_run_notebook_kg_job``), which is exactly the "fence honored by
+        # graph writers" the final validation needs. Standalone callers
+        # (maintenance facade, offline scripts) did not hold it — register
+        # for the span of this call when nobody has, so the fence covers
+        # every path. Hidden-source writers (memory confirm / knowhow
+        # projector) never match a drain predicate, and leg-B maintenance
+        # (relink/unified) writes bounded batches the in-transaction
+        # revalidation loop absorbs.
+        with self.kg_building_lock:
+            fence_owner = notebook_id not in self.kg_building
+            if fence_owner:
+                self.kg_building.add(notebook_id)
+        try:
+            return self._delete_notebook_kg_fenced(notebook_id)
+        finally:
+            if fence_owner:
+                with self.kg_building_lock:
+                    self.kg_building.discard(notebook_id)
+
+    def _delete_notebook_kg_fenced(self, notebook_id: str) -> dict:
+        """``delete_notebook_kg``'s body, run under the kg_building fence
+        (its docstring carries the full contract)."""
         drained = self._drain_graph_rows_before_reset(notebook_id)
         for attempt in range(3):
             with self._write() as db:
@@ -567,7 +593,12 @@ class KnowledgeLifecycleService:
                 # The small-graph fast path (drained == {}) skips this probe
                 # so the legacy single-transaction shape stays byte-
                 # identical (the P0-1 pin's event sequence included).
-                if drained and self.knowledge.graph_drain_backlog(
+                # codex #663 R7 P1a: validation is UNCONDITIONAL — the
+                # initially-small path's read probe is just as stale-able as
+                # the drain's, so it gets the same in-transaction recheck
+                # (one bounded read inside the final tx; the write-event
+                # shape the P0-1 pin traces is untouched).
+                if self.knowledge.graph_drain_backlog(
                     db, notebook_id, self._graph_drain_budget_rows, 0
                 ) is not None:
                     counts = None
