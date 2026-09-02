@@ -849,3 +849,58 @@ def test_upload_sources_unlinks_the_just_written_file_when_the_row_insert_fails(
     source_dir = storage_dir / "notebooks" / "nb1"
     leftover = list(source_dir.iterdir()) if source_dir.exists() else []
     assert leftover == [], f"补偿删除应当清空刚落盘的孤儿文件,残留：{leftover}"
+
+
+def test_a_failed_recreate_keeps_the_attempts_history_intact(repo, monkeypatch):
+    """codex #659 R4：purge 与替换插入必须同事务——插入失败(此处注入
+    IntegrityError:new_id 撞既有主键)时旧 failed 行连同 attempts/finished_at
+    必须原样回滚保留,否则下一次 sweep 把这本库当第一次尝试,退避与五次上限
+    双双失效。变异钉:把 purge 拆回 recreate 事务之外→本条红(旧行已被单独
+    提交的 purge 删掉)。"""
+    _seed_user_and_notebook(repo, status="deleting")
+    with repo._runtime.database.write() as db:
+        db.execute(
+            "INSERT INTO notebook_delete_jobs (id,notebook_id,status,phase,"
+            "cursor_table,cursor_key,deleted_rows,lease_token,attempts,"
+            "error_code,error_message,created_at,updated_at,finished_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "ndj-old", "nb1", "failed", "mark", "", "", 0, "", 3,
+                "notebook_delete_failed", "boom", NOW, NOW, NOW,
+            ),
+        )
+
+    store = repo._runtime.notebook_delete_jobs
+    # 让替换行的 INSERT 撞上旧行的主键——事务里 purge 已把 ndj-old 删掉,
+    # 但 INSERT 用同一个 id 仍然……不行,purge 删了它就不冲突了;改成撞一个
+    # 独立的活跃行的唯一索引:再造一本库占用同 id 更绕。最直接:new_id 返回
+    # 一个已存在于**另一本库**的作业行主键。
+    _seed_user_and_notebook(repo, notebook_id="nb2", owner="u2", status="deleting")
+    with repo._runtime.database.write() as db:
+        db.execute(
+            "INSERT INTO notebook_delete_jobs (id,notebook_id,status,phase,"
+            "cursor_table,cursor_key,deleted_rows,lease_token,attempts,"
+            "error_code,error_message,created_at,updated_at,finished_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "ndj-clash", "nb2", "failed", "mark", "", "", 0, "", 1,
+                "notebook_delete_failed", "x", NOW, NOW, NOW,
+            ),
+        )
+    monkeypatch.setattr(store, "new_id", lambda _prefix: "ndj-clash")
+
+    import sqlite3
+
+    with pytest.raises(sqlite3.IntegrityError):
+        store.recreate_for_deleting_notebook("nb1", attempts=3)
+
+    with repo._runtime.database.connect() as db:
+        row = db.execute(
+            "SELECT attempts, finished_at FROM notebook_delete_jobs "
+            "WHERE id='ndj-old'"
+        ).fetchone()
+        assert row is not None, (
+            "the only row carrying the retry history must survive a failed "
+            "replacement insert"
+        )
+        assert row["attempts"] == 3

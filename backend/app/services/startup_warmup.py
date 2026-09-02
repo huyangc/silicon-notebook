@@ -511,14 +511,19 @@ def _pool_budget_warning(settings: object) -> str | None:
         # 为安全。部署文档把这两个旋钮明确绑到池容量上,预算口径必须一致。
         search = int(settings.search_concurrency_limit)
         scale = int(settings.scale_build_concurrency)
-        budget = heavy + light + kg + search + scale
+        # 批 3·W1 的删除池同理(codex #659 R4):独立执行池,每个并发位跑的
+        # 六相位作业全程吃数据库连接,漏算会让「其余各池刚好贴着池容量」的
+        # 配置在删除启动时被打穿而无预警。
+        delete = int(getattr(settings, "notebook_delete_concurrency", 1))
+        budget = heavy + light + kg + search + scale + delete
         pool_max = int(settings.postgres_pool_max_size)
         if pool_max > budget:
             return None
         return (
             f"pool-budget: POSTGRES_POOL_MAX_SIZE={pool_max} <= "
             f"重活维护池({heavy})+轻活维护池({light})+KG 分析并发({kg})"
-            f"+搜索并发({search})+scale 构建并发({scale})={budget}；"
+            f"+搜索并发({search})+scale 构建并发({scale})"
+            f"+删除作业并发({delete})={budget}；"
             "高峰期后台 job、搜索与索引构建可能耗尽连接池并让前台请求排队甚至超时。"
             f"建议把 POSTGRES_POOL_MAX_SIZE 调到至少 {budget + 1}。"
         )
