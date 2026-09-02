@@ -65,6 +65,7 @@ function run(overrides = {}) {
     phase: "preview",
     contract: null,
     understandingMs: 0,
+    confirmation: null,
     ...overrides,
   };
 }
@@ -124,6 +125,14 @@ test("review entries need a well-formed contract; malformed entries are dropped 
   })), true);
 
   assert.equal(isPersistedIntentRun(run({ phase: "review", contract: contract() })), true);
+  // hand-off entries carry the confirmed intent; anything less cannot be re-submitted.
+  const confirmation = { contract: contract(), resolved_question: "q", answers: [{ id: "which", answer: "x" }], understanding_ms: 12 };
+  assert.equal(isPersistedIntentRun(run({ phase: "handoff", contract: contract(), confirmation })), true);
+  assert.equal(isPersistedIntentRun(run({ phase: "handoff", contract: contract(), confirmation: null })), false);
+  assert.equal(isPersistedIntentRun(run({ phase: "handoff", contract: contract(), confirmation: { ...confirmation, answers: [{ id: 1 }] } })), false);
+  assert.equal(isPersistedIntentRun(run({ phase: "handoff", contract: contract(), confirmation: { ...confirmation, contract: { objective: "q" } } })), false);
+  // A preview/review entry must not smuggle a confirmation in.
+  assert.equal(isPersistedIntentRun(run({ phase: "preview", confirmation })), false);
   assert.equal(isPersistedIntentRun(run({ phase: "review", contract: null })), false);
   assert.equal(isPersistedIntentRun(run({ phase: "review", contract: { objective: "q" } })), false);
   assert.equal(isPersistedIntentRun(run({ question: "   " })), false);

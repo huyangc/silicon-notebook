@@ -3782,6 +3782,123 @@ test("the persisted mirror appears only after the submitting tab owns the lock",
   }
 });
 
+// codex #664 r4 P1: between hand-off and `started` the mirror is still the only
+// copy of the question; a reload in that window re-submits the confirmed
+// intent, and the mirror is retired only once the server acknowledges `started`.
+test("a reload between hand-off and started re-submits the confirmed intent once", async () => {
+  const stream = deferred<AskResponse>();
+  let onStart: ((jobId: string, conversationId: string) => void | Promise<void>) | undefined;
+  api.runAskStream.mockImplementation((
+    _notebookId: string,
+    _payload: unknown,
+    _onProgress: unknown,
+    _signal?: AbortSignal,
+    nextOnStart?: (jobId: string, conversationId: string) => void | Promise<void>,
+  ) => {
+    onStart = nextOnStart;
+    return stream.promise;
+  });
+  api.previewAskIntent.mockResolvedValue(contractFor("handed off", false));
+  api.listConversations.mockResolvedValue([summary("conversation-older")]);
+  api.getConversation.mockResolvedValue(detail("conversation-older"));
+  const view = render(<Harness />);
+  beginOwnedNotebook();
+  act(() => value!.selectMode("reasoning"));
+  await act(async () => {
+    void value!.submit("handed off");
+    await Promise.resolve();
+  });
+  await settleSubmit();
+  // The POST is in flight, `started` has not arrived: mirror kept as hand-off.
+  expect(api.runAskStream).toHaveBeenCalledTimes(1);
+  const [mirror] = pendingIntentStore() as Array<{ phase: string; confirmation: unknown }>;
+  expect(mirror.phase).toBe("handoff");
+  expect(mirror.confirmation).toMatchObject({ resolved_question: "handed off" });
+
+  view.unmount();
+  api.previewAskIntent.mockReset();
+  render(<Harness />);
+  const owner = beginOwnedNotebook(2);
+  await act(async () => {
+    await value!.restoreNotebook(owner);
+    value!.finishNotebookTransition(owner);
+  });
+  await settleSubmit();
+  // History (the older session) does not hold the question: re-submitted with
+  // the confirmed intent, no second understanding pass, as a fresh session.
+  expect(api.previewAskIntent).not.toHaveBeenCalled();
+  expect(api.runAskStream).toHaveBeenCalledTimes(2);
+  expect(api.runAskStream.mock.calls[1]?.[1]).toMatchObject({
+    question: "handed off",
+    mode: "reasoning",
+    intent: expect.objectContaining({ resolved_question: "handed off" }),
+  });
+  expect(value!.asking).toBe(true);
+  expect(value!.pendingQuestion).toBe("handed off");
+  expect(value!.conversationId).toBeNull();
+  expect(pendingIntentStore()).toHaveLength(1);
+
+  await act(async () => {
+    await onStart!("job-handed", "conversation-handed");
+  });
+  expect(pendingIntentStore()).toEqual([]);
+  stream.resolve({ ...answer("conversation-handed"), mode: "reasoning" });
+  await act(async () => {
+    await stream.promise;
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  expect(value!.turns.map((turn) => turn.question)).toEqual(["handed off"]);
+});
+
+test("a handed-off question the server already holds is not submitted twice on reload", async () => {
+  const stream = deferred<AskResponse>();
+  api.runAskStream.mockReturnValue(stream.promise);
+  api.previewAskIntent.mockResolvedValue(contractFor("held by server", false));
+  api.listConversations.mockResolvedValue([summary("conversation-x")]);
+  api.getConversation.mockImplementation(async (id: string) => detail(id));
+  const view = render(<Harness />);
+  const first = beginOwnedNotebook();
+  await act(async () => {
+    await value!.restoreNotebook(first);
+  });
+  act(() => value!.selectMode("reasoning"));
+  await act(async () => {
+    void value!.submit("held by server");
+    await Promise.resolve();
+  });
+  await settleSubmit();
+  const [mirror] = pendingIntentStore() as Array<{ phase: string; askedAt: string }>;
+  expect(mirror.phase).toBe("handoff");
+
+  // Reload: the server had in fact created the job — the detail now reports it.
+  view.unmount();
+  api.previewAskIntent.mockReset();
+  api.getConversation.mockImplementation(async (id: string) => ({
+    ...detail(id),
+    active_job: {
+      job_id: "job-held",
+      question: "held by server",
+      asked_at: mirror.askedAt,
+      mode: "reasoning",
+      trace: [],
+    },
+  }));
+  render(<Harness />);
+  const owner = beginOwnedNotebook(2);
+  await act(async () => {
+    await value!.restoreNotebook(owner);
+    value!.finishNotebookTransition(owner);
+  });
+  await settleSubmit();
+  expect(api.runAskStream).toHaveBeenCalledTimes(1);
+  expect(api.previewAskIntent).not.toHaveBeenCalled();
+  // The active job is what the view shows (reconnect), and the mirror is gone.
+  expect(value!.asking).toBe(true);
+  expect(value!.pendingQuestion).toBe("held by server");
+  expect(pendingIntentStore()).toEqual([]);
+});
+
 // PR #557 regression: `turns`/`sessions`/`pendingTrace`/`feedbackSent` used to
 // fall back to a bare `[]`/`{}` literal whenever the owner is not visible
 // (actorId is null, e.g. logged out / collection page). A bare literal is a

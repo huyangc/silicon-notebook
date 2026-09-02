@@ -54,6 +54,7 @@ import {
   releaseIntentRun,
   removePersistedIntentRun,
   savePersistedIntentRun,
+  type PersistedIntentRun,
 } from "./ask-intent-persist.ts";
 import { jobPollDone, newTraceSteps } from "./ask-reconnect.ts";
 import { humanizedError, toUserMessage } from "./errors.ts";
@@ -576,7 +577,92 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       phase: run.phase,
       contract: run.contract,
       understandingMs: run.understandingMs,
+      confirmation: null,
     });
+  }
+
+  // Hand-off: the intent is settled and the durable POST is about to go out,
+  // but until the server acknowledges `started` this record is still the only
+  // copy of the question. Keep it (with the confirmed intent, so a reload can
+  // re-submit without another understanding pass) until `started`.
+  function persistHandoff(run: AskIntentRunRecord, confirmation: AskIntentConfirmation) {
+    if (!run.mirrored) return;
+    savePersistedIntentRun({
+      version: 1,
+      id: run.persistId,
+      savedAt: Date.now(),
+      actorId: run.owner.actorId,
+      notebookId: run.notebookId,
+      conversationIdAtStart: run.conversationIdAtStart,
+      question: run.question,
+      askedAt: run.askedAt,
+      retrievalEffort: run.retrievalEffort,
+      sourceScope: run.scopeSnapshot.sourceScope,
+      baseScope: run.scopeSnapshot.baseScope,
+      phase: "handoff",
+      contract: run.contract,
+      understandingMs: run.understandingMs,
+      confirmation,
+    });
+  }
+
+  // The active job the last applied detail reported (if any): a handed-off
+  // question that reloads before `started` is reconciled against it and the
+  // loaded turns, so a job the server did create is never submitted twice.
+  const lastAppliedActiveJobRef = useRef<{ asked_at: string; question: string } | null>(null);
+
+  function durableAlreadyHolds(record: PersistedIntentRun): boolean {
+    const active = lastAppliedActiveJobRef.current;
+    if (active && active.asked_at === record.askedAt && active.question === record.question) return true;
+    return turnsRef.current.some((turn) => (
+      turn.askedAt === record.askedAt && turn.question === record.question
+    ));
+  }
+
+  /**
+   * A reload landed between hand-off and `started`. If history (the detail
+   * just loaded) already shows the job or its answer, the server owns the
+   * question and the mirror is retired; otherwise the durable Ask is submitted
+   * again with the confirmed intent — no second understanding pass.
+   */
+  function resumeHandoff(record: PersistedIntentRun, owner: AskSessionOwner) {
+    if (durableAlreadyHolds(record) || !record.confirmation) {
+      removePersistedIntentRun(record.id);
+      releaseIntentRun(record.id);
+      return;
+    }
+    if (record.conversationIdAtStart === null) {
+      // A first question: the view currently shows whatever the restore opened
+      // to check history; the resubmitted run is a fresh conversation.
+      turnsRef.current = [];
+      setTurns([]);
+      setConversationId(null);
+    }
+    const contract = record.confirmation.contract;
+    const traceSeed = contract.needs_clarification
+      ? [
+        intentClarifyStep(contract, record.understandingMs),
+        intentConfirmedStep(record.confirmation.resolved_question, record.confirmation.answers.length),
+      ]
+      : [intentUnderstoodStep(contract, record.understandingMs)];
+    modeRef.current = "reasoning";
+    setMode("reasoning");
+    void startAskRun(
+      owner,
+      record.question,
+      "reasoning",
+      record.confirmation,
+      handOffIntentTrace(traceSeed),
+      record.askedAt,
+      {
+        sourceScope: copySourceScope(record.sourceScope),
+        baseScope: copyBaseScope(record.baseScope),
+      },
+      retrievalEffortFromTurn({ response: { retrieval_effort: record.retrievalEffort } }),
+      record.conversationIdAtStart,
+      undefined,
+      record.id,
+    );
   }
 
   function forgetPersistedIntent(run: Pick<AskIntentRunRecord, "persistId">) {
@@ -593,11 +679,15 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
    * pushed as the view's own (not detached): the caller attaches it and, for the
    * preview phase, re-issues the understanding request the reload aborted.
    */
+  type ResumedIntent =
+    | { kind: "intent"; run: AskIntentRunRecord }
+    | { kind: "handoff"; record: PersistedIntentRun };
+
   async function resumePersistedIntent(
     owner: AskSessionOwner,
     list: readonly { id: string }[] | null,
     conversationId?: string,
-  ): Promise<AskIntentRunRecord | null> {
+  ): Promise<ResumedIntent | null> {
     if (!policyRef.current.advanced) {
       // The UI mode is per actor and may have been switched to automatic in
       // another tab since these were stored: automatic mode must never resume
@@ -624,6 +714,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       break;
     }
     if (!persisted || !sameViewOwner(ownerRef.current, owner)) return null;
+    if (persisted.phase === "handoff") return { kind: "handoff", record: persisted };
     const contract = persisted.phase === "review" ? persisted.contract : null;
     const run: AskIntentRunRecord = {
       key: ownerKey(owner),
@@ -656,7 +747,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       mirrored: true,
     };
     intentRunsRef.current.push(run);
-    return run;
+    return { kind: "intent", run };
   }
 
   function detachedIntentRunFor(
@@ -1044,6 +1135,9 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     setRenamingSessionId(null);
     askAbortRef.current = null;
     const active = detail.active_job;
+    lastAppliedActiveJobRef.current = active
+      ? { asked_at: active.asked_at, question: active.question }
+      : null;
     if (active) {
       pendingModeSourceRef.current = active.mode;
       setPendingQuestion(active.question);
@@ -1209,26 +1303,32 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
         ? await resumePersistedIntent(owner, list)
         : null;
       if (!sameViewOwner(ownerRef.current, owner)) return false;
-      const latestId = resumed
-        ? resumed.conversationIdAtStart
-        : newerIntent(intentRun, run)
-          ? intentRun.conversationIdAtStart
-          : run ? run.conversationId ?? run.conversationIdAtStart : list?.[0]?.id;
+      // A handed-off question opens its conversation — or, for a first question,
+      // the latest session — so history can say whether the job already exists.
+      const latestId = resumed?.kind === "handoff"
+        ? resumed.record.conversationIdAtStart ?? list?.[0]?.id
+        : resumed
+          ? resumed.run.conversationIdAtStart
+          : newerIntent(intentRun, run)
+            ? intentRun.conversationIdAtStart
+            : run ? run.conversationId ?? run.conversationIdAtStart : list?.[0]?.id;
       const loaded = await restoreLatestConversation(
         latestId ? [{ id: latestId }] : [],
         (id) => applySessionDetail(id, owner),
       );
       if (!sameViewOwner(ownerRef.current, owner)) return false;
-      if (resumed) {
+      if (resumed?.kind === "handoff") {
+        resumeHandoff(resumed.record, owner);
+      } else if (resumed) {
         if (askJobIdRef.current === null) {
-          attachIntentRun(resumed, owner);
+          attachIntentRun(resumed.run, owner);
           // The reload aborted the understanding request; issue it again.
-          if (resumed.phase === "preview") void runIntentPreview(resumed);
+          if (resumed.run.phase === "preview") void runIntentPreview(resumed.run);
         } else {
           // A job is already active in that conversation: the stored preview is
           // stale relative to what the server knows. Drop it rather than stack.
-          dropRecord(intentRunsRef.current, resumed);
-          forgetPersistedIntent(resumed);
+          dropRecord(intentRunsRef.current, resumed.run);
+          forgetPersistedIntent(resumed.run);
         }
       } else {
         applyDetachedWork(owner, selection, loaded === true);
@@ -1276,13 +1376,15 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
         // persisted preview/review from before a reload.
         const resumed = await resumePersistedIntent(owner, [{ id }], id);
         if (!sameViewOwner(ownerRef.current, owner)) return false;
-        if (resumed) {
+        if (resumed?.kind === "handoff") {
+          resumeHandoff(resumed.record, owner);
+        } else if (resumed) {
           if (askJobIdRef.current === null) {
-            attachIntentRun(resumed, owner);
-            if (resumed.phase === "preview") void runIntentPreview(resumed);
+            attachIntentRun(resumed.run, owner);
+            if (resumed.run.phase === "preview") void runIntentPreview(resumed.run);
           } else {
-            dropRecord(intentRunsRef.current, resumed);
-            forgetPersistedIntent(resumed);
+            dropRecord(intentRunsRef.current, resumed.run);
+            forgetPersistedIntent(resumed.run);
           }
         }
       } else if (applied) {
@@ -1384,6 +1486,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     },
     effort?: AskRetrievalEffortId,
     serial?: number,
+    mirrorId?: string,
   ): Promise<boolean> {
     const owner = currentNotebookOwner();
     if (!owner || asking || sessionLoading) return false;
@@ -1411,6 +1514,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       effort ?? (currentPolicy.advanced ? retrievalEffort : DEFAULT_ASK_RETRIEVAL_EFFORT),
       conversationIdRef.current,
       serial,
+      mirrorId,
     );
   }
 
@@ -1434,8 +1538,17 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     // A run handed over from an intent preview keeps that preview's submission
     // order, so an older question finishing late never outranks a newer one.
     serial: number = ++runSerialRef.current,
+    // The preview's storage mirror (ask-intent-persist.ts). It outlives the
+    // hand-off until `started` proves the server owns the question, and is
+    // retired if the stream ends without ever starting.
+    mirrorId?: string,
   ): Promise<boolean> {
     let startedConversationId = conversationIdAtStart;
+    const retireMirror = () => {
+      if (!mirrorId) return;
+      removePersistedIntentRun(mirrorId);
+      releaseIntentRun(mirrorId);
+    };
     const controller = new AbortController();
     const run: AskRunRecord = {
       key: ownerKey(runOwner),
@@ -1524,6 +1637,8 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
             controller.abort();
             return;
           }
+          // The server now owns the question durably: the tab's mirror is done.
+          retireMirror();
           const ownsVisibleRun = ownsRun();
           if (ownsVisibleRun) {
             askJobIdRef.current = jobId;
@@ -1587,6 +1702,9 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       }
       effectsRef.current.reportError(error);
     } finally {
+      // Ended without `started` (failed, stopped, or a transport that never
+      // reached the server): the question is back with the user, not pending.
+      if (run.jobId === null) retireMirror();
       if (!run.failure) dropRecord(inFlightRunsRef.current, run);
       if (ownsRun()) {
         if (askAbortRef.current === controller) askAbortRef.current = null;
@@ -1719,15 +1837,16 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       }
       run.trace = replaceLastIntentStep(run.trace, intentUnderstoodStep(contract, understandingMs));
       dropRecord(intentRunsRef.current, run);
-      // From here the durable job (created before any model call) owns the
-      // question; a reload recovers it from history, not from this tab.
-      forgetPersistedIntent(run);
       const confirmation = buildAskIntentConfirmation(
         contract,
         contract.resolved_question,
         {},
         understandingMs,
       );
+      // The durable job takes over from here, but only `started` proves the
+      // server has it: keep the mirror (now carrying the confirmed intent) so a
+      // reload in that window can re-submit instead of losing the question.
+      persistHandoff(run, confirmation);
       if (!attached()) {
         await startAskRun(
           run.owner,
@@ -1740,6 +1859,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
           run.retrievalEffort,
           run.conversationIdAtStart,
           run.serial,
+          run.persistId,
         );
         return;
       }
@@ -1756,7 +1876,9 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
         run.scopeSnapshot,
         run.retrievalEffort,
         run.serial,
+        run.persistId,
       );
+      if (!started) forgetPersistedIntent(run);
       if (releaseIntentDraft(run.draftToken) && !started) {
         setQuestion(run.question);
         askIntentTraceRef.current = [];
@@ -1810,18 +1932,16 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     const draftToken = askIntentDraftOwnerRef.current ?? {};
     askIntentDraftOwnerRef.current = draftToken;
     const run = visibleIntentRun();
-    const retireRun = () => {
-      if (!run) return;
-      dropRecord(intentRunsRef.current, run);
-      forgetPersistedIntent(run);
-    };
     if (
       review.notebookId !== owner.notebookId
       || review.conversationId !== conversationIdRef.current
       || modeRef.current !== "reasoning"
     ) {
-      if (run) run.cancelRequested = true;
-      retireRun();
+      if (run) {
+        run.cancelRequested = true;
+        dropRecord(intentRunsRef.current, run);
+        forgetPersistedIntent(run);
+      }
       setIntentReview(null);
       askIntentTraceRef.current = [];
       releaseIntentDraft(draftToken);
@@ -1829,9 +1949,13 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       effectsRef.current.notify("问题上下文已经变化，请重新提交");
       return;
     }
-    // Confirmation hands the question to the durable run; the preview record
-    // has nothing left to re-attach.
-    retireRun();
+    // Confirmation hands the question to the durable run; the in-memory preview
+    // record has nothing left to re-attach, but its mirror (now carrying the
+    // confirmation) stays until `started` proves the server owns the question.
+    if (run) {
+      dropRecord(intentRunsRef.current, run);
+      persistHandoff(run, confirmation);
+    }
     askIntentFlowRef.current = "submitting";
     setIntentReview(null);
     const traceSeed = [
@@ -1853,7 +1977,9 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
         scopeSnapshot,
         run?.retrievalEffort,
         run?.serial,
+        run?.persistId,
       );
+      if (!started && run) forgetPersistedIntent(run);
       if (releaseIntentDraft(draftToken) && !started) {
         setQuestion(review.question);
         askIntentTraceRef.current = [];
