@@ -46,6 +46,12 @@ import {
   intentUnderstoodStep,
   replaceLastIntentStep,
 } from "./ask-intent-trace.ts";
+import {
+  clearPersistedIntentRuns,
+  findPersistedIntentRun,
+  removePersistedIntentRun,
+  savePersistedIntentRun,
+} from "./ask-intent-persist.ts";
 import { jobPollDone, newTraceSteps } from "./ask-reconnect.ts";
 import { humanizedError, toUserMessage } from "./errors.ts";
 import { mergeSessionListFallback, recordStartedConversation } from "./ask-session-state.ts";
@@ -507,6 +513,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       run.cancelRequested = true;
       run.controller.abort();
       dropRecord(intentRunsRef.current, run);
+      forgetPersistedIntent(run);
     }
     askIntentAbortRef.current?.abort();
     askIntentAbortRef.current = null;
@@ -533,6 +540,83 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     return intentRunsRef.current.find((run) => (
       !run.cancelRequested && run.phase !== "failed" && sameViewOwner(owner, run.owner)
     )) ?? null;
+  }
+
+  // The preview/review phase has no server-side trace, so the in-memory record
+  // is mirrored to per-tab session storage: a reload of this tab resumes it
+  // (see ask-intent-persist.ts). Mirrored on submit and on "needs
+  // clarification"; forgotten on hand-off, cancel, mode switch and tombstone.
+  function persistIntentRun(run: AskIntentRunRecord) {
+    if (run.phase === "failed") return;
+    savePersistedIntentRun({
+      version: 1,
+      actorId: run.owner.actorId,
+      notebookId: run.notebookId,
+      conversationIdAtStart: run.conversationIdAtStart,
+      question: run.question,
+      askedAt: run.askedAt,
+      retrievalEffort: run.retrievalEffort,
+      sourceScope: run.scopeSnapshot.sourceScope,
+      baseScope: run.scopeSnapshot.baseScope,
+      phase: run.phase,
+      contract: run.contract,
+      understandingMs: run.understandingMs,
+    });
+  }
+
+  function forgetPersistedIntent(run: Pick<AskIntentRunRecord, "owner" | "notebookId">) {
+    removePersistedIntentRun(run.owner.actorId, run.notebookId);
+  }
+
+  /**
+   * Rebuild the intent run a reload interrupted, if this tab has one for the
+   * notebook and its conversation still exists. The record is pushed as the
+   * view's own (not detached): the caller attaches it and, for the preview
+   * phase, re-issues the understanding request the reload aborted.
+   */
+  function resumePersistedIntent(
+    owner: AskSessionOwner,
+    list: readonly ConversationSummary[] | null,
+  ): AskIntentRunRecord | null {
+    const persisted = findPersistedIntentRun(owner.actorId, owner.notebookId);
+    if (!persisted) return null;
+    if (
+      persisted.conversationIdAtStart !== null
+      && !(list ?? []).some((session) => session.id === persisted.conversationIdAtStart)
+    ) {
+      removePersistedIntentRun(owner.actorId, owner.notebookId);
+      return null;
+    }
+    const contract = persisted.phase === "review" ? persisted.contract : null;
+    const run: AskIntentRunRecord = {
+      key: ownerKey(owner),
+      serial: ++runSerialRef.current,
+      owner,
+      cancelRequested: false,
+      notebookId: owner.notebookId,
+      question: persisted.question,
+      askedAt: persisted.askedAt,
+      conversationIdAtStart: persisted.conversationIdAtStart,
+      retrievalEffort: retrievalEffortFromTurn({
+        response: { retrieval_effort: persisted.retrievalEffort },
+      }),
+      scopeSnapshot: {
+        sourceScope: copySourceScope(persisted.sourceScope),
+        baseScope: copyBaseScope(persisted.baseScope),
+      },
+      controller: new AbortController(),
+      draftToken: {},
+      flowGeneration: askIntentFlowGenerationRef.current,
+      trace: contract
+        ? [intentClarifyStep(contract, persisted.understandingMs)]
+        : [intentUnderstandingStep()],
+      phase: contract ? "review" : "preview",
+      contract,
+      understandingMs: persisted.understandingMs,
+      failure: null,
+    };
+    intentRunsRef.current.push(run);
+    return run;
   }
 
   function detachedIntentRunFor(
@@ -588,8 +672,10 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
   function attachIntentRun(run: AskIntentRunRecord, owner: AskSessionOwner) {
     if (run.phase === "failed") {
       // The preview failed while the user was away: say so now and give the
-      // question back instead of pretending nothing was asked.
+      // question back instead of pretending nothing was asked. Back in the input
+      // it is the user's draft again, so this tab has nothing left to resume.
       dropRecord(intentRunsRef.current, run);
+      forgetPersistedIntent(run);
       setQuestion(run.question);
       effectsRef.current.reportError(run.failure);
       return;
@@ -811,6 +897,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     }
     intentRunsRef.current = [];
     settledRunsRef.current = [];
+    if (actorIdRef.current) clearPersistedIntentRuns(actorIdRef.current);
     leaveWorkspace();
     actorGenerationRef.current += 1;
     askModeCacheRef.current = null;
@@ -984,6 +1071,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
         run.cancelRequested = true;
         run.controller.abort();
         dropRecord(intentRunsRef.current, run);
+        forgetPersistedIntent(run);
       }
     }
   }
@@ -1075,15 +1163,35 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       const list = await loadSessionsFor(owner);
       if (!sameViewOwner(ownerRef.current, owner)) return false;
       const { intentRun, run } = selection;
-      const latestId = newerIntent(intentRun, run)
-        ? intentRun.conversationIdAtStart
-        : run ? run.conversationId ?? run.conversationIdAtStart : list?.[0]?.id;
+      // Nothing in memory (a fresh tab after a reload): this tab's persisted
+      // preview/review, if any, is the work to bring back.
+      const resumed = intentRun === null && run === null
+        ? resumePersistedIntent(owner, list)
+        : null;
+      const latestId = resumed
+        ? resumed.conversationIdAtStart
+        : newerIntent(intentRun, run)
+          ? intentRun.conversationIdAtStart
+          : run ? run.conversationId ?? run.conversationIdAtStart : list?.[0]?.id;
       const loaded = await restoreLatestConversation(
         latestId ? [{ id: latestId }] : [],
         (id) => applySessionDetail(id, owner),
       );
       if (!sameViewOwner(ownerRef.current, owner)) return false;
-      applyDetachedWork(owner, selection, loaded === true);
+      if (resumed) {
+        if (askJobIdRef.current === null) {
+          attachIntentRun(resumed, owner);
+          // The reload aborted the understanding request; issue it again.
+          if (resumed.phase === "preview") void runIntentPreview(resumed);
+        } else {
+          // A job is already active in that conversation: the stored preview is
+          // stale relative to what the server knows. Drop it rather than stack.
+          dropRecord(intentRunsRef.current, resumed);
+          forgetPersistedIntent(resumed);
+        }
+      } else {
+        applyDetachedWork(owner, selection, loaded === true);
+      }
     } catch (error) {
       if (sameViewOwner(ownerRef.current, owner)) throw error;
       return false;
@@ -1189,6 +1297,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       run.controller.abort();
       run.phase = "failed";
       run.failure = humanizedError("已切换到自动模式，未完成的问题理解已取消，问题已退回输入框");
+      forgetPersistedIntent(run);
     }
   }, [policy.advanced]);
 
@@ -1472,6 +1581,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       failure: null,
     };
     intentRunsRef.current.push(run);
+    persistIntentRun(run);
     askIntentFlowRef.current = "preview";
     askIntentAbortRef.current = run.controller;
     askIntentDraftRef.current = q;
@@ -1522,11 +1632,15 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
         run.trace = replaceLastIntentStep(run.trace, intentClarifyStep(contract, understandingMs));
         run.phase = "review";
         run.contract = contract;
+        persistIntentRun(run);
         if (attached()) presentIntentReview(run, contract);
         return;
       }
       run.trace = replaceLastIntentStep(run.trace, intentUnderstoodStep(contract, understandingMs));
       dropRecord(intentRunsRef.current, run);
+      // From here the durable job (created before any model call) owns the
+      // question; a reload recovers it from history, not from this tab.
+      forgetPersistedIntent(run);
       const confirmation = buildAskIntentConfirmation(
         contract,
         contract.resolved_question,
@@ -1610,7 +1724,9 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     askIntentDraftOwnerRef.current = draftToken;
     const run = visibleIntentRun();
     const retireRun = () => {
-      if (run) dropRecord(intentRunsRef.current, run);
+      if (!run) return;
+      dropRecord(intentRunsRef.current, run);
+      forgetPersistedIntent(run);
     };
     if (
       review.notebookId !== owner.notebookId
@@ -1669,6 +1785,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       run.cancelRequested = true;
       run.controller.abort();
       dropRecord(intentRunsRef.current, run);
+      forgetPersistedIntent(run);
     }
     askIntentFlowGenerationRef.current += 1;
     askIntentFlowRef.current = "idle";

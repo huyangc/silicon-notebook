@@ -51,6 +51,7 @@ test("Ask-session hook has a narrow dependency boundary", () => {
     "react",
     "./ask-api.ts",
     "./ask-intent-model.ts",
+    "./ask-intent-persist.ts",
     "./ask-intent-trace.ts",
     "./ask-modes.ts",
     "./ask-reconnect.ts",
