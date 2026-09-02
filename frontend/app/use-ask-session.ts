@@ -196,11 +196,13 @@ function latestDetachedRecord<T extends DetachableRecord>(
   records: readonly T[],
   owner: AskSessionOwner,
   current: AskSessionOwner | null,
+  accept: (record: T) => boolean = () => true,
 ): T | null {
   const key = ownerKey(owner);
   let latest: T | null = null;
   for (const record of records) {
     if (record.key !== key || record.cancelRequested || sameViewOwner(current, record.owner)) continue;
+    if (!accept(record)) continue;
     if (!latest || record.serial > latest.serial) latest = record;
   }
   return latest;
@@ -526,8 +528,16 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     )) ?? null;
   }
 
-  function detachedIntentRunFor(owner: AskSessionOwner): AskIntentRunRecord | null {
-    return latestDetachedRecord(intentRunsRef.current, owner, ownerRef.current);
+  function detachedIntentRunFor(
+    owner: AskSessionOwner,
+    conversationId?: string,
+  ): AskIntentRunRecord | null {
+    return latestDetachedRecord(
+      intentRunsRef.current,
+      owner,
+      ownerRef.current,
+      (run) => conversationId === undefined || run.conversationIdAtStart === conversationId,
+    );
   }
 
   function detachIntentPreview() {
@@ -601,8 +611,13 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     effectsRef.current.ensureAskVisible();
   }
 
-  function detachedRunFor(owner: AskSessionOwner): AskRunRecord | null {
-    return latestDetachedRecord(inFlightRunsRef.current, owner, ownerRef.current);
+  function detachedRunFor(owner: AskSessionOwner, conversationId?: string): AskRunRecord | null {
+    return latestDetachedRecord(
+      inFlightRunsRef.current,
+      owner,
+      ownerRef.current,
+      (run) => conversationId === undefined || runConversation(run) === conversationId,
+    );
   }
 
   function visibleRun(): AskRunRecord | null {
@@ -917,6 +932,114 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     return true;
   }
 
+  type DetachedSelection = {
+    intentRun: AskIntentRunRecord | null;
+    run: AskRunRecord | null;
+    selected: DetachableRecord | null;
+    runStartedBeforeDetail: boolean;
+  };
+
+  // Across both kinds the most recently submitted question comes back first.
+  function newerIntent(
+    intent: AskIntentRunRecord | null,
+    durable: AskRunRecord | null,
+  ): intent is AskIntentRunRecord {
+    return Boolean(intent && (!durable || intent.serial > durable.serial));
+  }
+
+  function runConversation(run: AskRunRecord): string | null {
+    return run.conversationId ?? run.conversationIdAtStart;
+  }
+
+  /**
+   * Drop detached records whose conversation this actor has since deleted in
+   * this notebook: a tombstoned conversation must never be resurrected as the
+   * target of a re-attached run or review.
+   */
+  function pruneTombstonedRecords(owner: AskSessionOwner) {
+    const deleted = deletedConversationIdsRef.current.get(ownerKey(owner));
+    if (!deleted?.size) return;
+    const isDetached = (record: DetachableRecord) => (
+      record.key === ownerKey(owner) && !sameViewOwner(ownerRef.current, record.owner)
+    );
+    for (const run of [...inFlightRunsRef.current]) {
+      const target = runConversation(run);
+      if (isDetached(run) && target !== null && deleted.has(target)) {
+        run.cancelRequested = true;
+        run.controller.abort();
+        dropRecord(inFlightRunsRef.current, run);
+      }
+    }
+    for (const run of [...intentRunsRef.current]) {
+      const target = run.conversationIdAtStart;
+      if (isDetached(run) && target !== null && deleted.has(target)) {
+        run.cancelRequested = true;
+        run.controller.abort();
+        dropRecord(intentRunsRef.current, run);
+      }
+    }
+  }
+
+  /**
+   * Pick the detached work a view restore should bring back — the newest record
+   * of this identity, optionally only records bound to one conversation (a
+   * same-notebook session open). Captured BEFORE the detail request so the
+   * post-request step can tell "settled meanwhile" from "still detached".
+   */
+  function selectDetachedWork(owner: AskSessionOwner, conversationId?: string): DetachedSelection {
+    pruneTombstonedRecords(owner);
+    const intentRun = detachedIntentRunFor(owner, conversationId);
+    const run = detachedRunFor(owner, conversationId);
+    return {
+      intentRun,
+      run,
+      selected: newerIntent(intentRun, run) ? intentRun : run,
+      runStartedBeforeDetail: run !== null && run.jobId !== null,
+    };
+  }
+
+  /**
+   * After the detail request settled, re-attach (or locally project) the work
+   * chosen by `selectDetachedWork`. Re-reads both kinds: a detached preview may
+   * have completed and handed off to a durable run while the detail was
+   * loading, or the tracked run may have finished outright. A job the detail
+   * restore projected as active (reconnect polling) is left alone unless it is
+   * this very run, whose live transport then outranks polling.
+   */
+  function applyDetachedWork(
+    owner: AskSessionOwner,
+    selection: DetachedSelection,
+    conversationId?: string,
+  ) {
+    const { run, selected, runStartedBeforeDetail } = selection;
+    const intentNow = detachedIntentRunFor(owner, conversationId);
+    const runNow = detachedRunFor(owner, conversationId);
+    // The record this restore was built around must still be the one that
+    // comes back. A preview that completed meanwhile lives on as the durable
+    // run carrying its serial; anything else that settled is durable history
+    // now, and an older detached record must not be attached over it.
+    const successor = selected && runNow && runNow !== selected && runNow.serial === selected.serial
+      ? runNow
+      : null;
+    const selectedStillDetached = selected !== null
+      && (intentNow === selected || runNow === selected);
+    if (selected && !selectedStillDetached && !successor) {
+      // It settled while the detail was loading. Its own final response is the
+      // authoritative turn: project it locally (no extra list/detail read —
+      // restore stays within one list read and at most one detail read).
+      if (run === selected && run.result) projectSettledRun(run, run.result);
+    } else if (successor) {
+      if (canAttachRun(successor, false)) attachDetachedRun(successor, owner);
+    } else if (
+      newerIntent(intentNow, runNow)
+      && (intentNow.phase === "failed" || askJobIdRef.current === null)
+    ) {
+      attachIntentRun(intentNow, owner);
+    } else if (runNow && canAttachRun(runNow, runNow === run && runStartedBeforeDetail)) {
+      attachDetachedRun(runNow, owner);
+    }
+  }
+
   async function restoreNotebook(owner: AskNotebookTransition): Promise<boolean> {
     if (!sameViewOwner(ownerRef.current, owner)) return false;
     try {
@@ -926,17 +1049,8 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       // preview leaves no server-side trace at all, and a durable run may not
       // have reached `started` yet, so opening the previous latest session over
       // either would hide the question.
-      const intentRun = detachedIntentRunFor(owner);
-      const run = detachedRunFor(owner);
-      // Across both kinds the most recently submitted question comes back first.
-      const newerIntent = (
-        intent: AskIntentRunRecord | null,
-        durable: AskRunRecord | null,
-      ): intent is AskIntentRunRecord => Boolean(
-        intent && (!durable || intent.serial > durable.serial),
-      );
-      const selected: DetachableRecord | null = newerIntent(intentRun, run) ? intentRun : run;
-      const runStartedBeforeDetail = run !== null && run.jobId !== null;
+      const selection = selectDetachedWork(owner);
+      const { intentRun, run } = selection;
       const latestId = newerIntent(intentRun, run)
         ? intentRun.conversationIdAtStart
         : run ? run.conversationId ?? run.conversationIdAtStart : list?.[0]?.id;
@@ -945,37 +1059,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
         (id) => applySessionDetail(id, owner),
       );
       if (!sameViewOwner(ownerRef.current, owner)) return false;
-      // Re-read both: a detached preview may have completed and handed off to
-      // a durable run while the detail was loading, or the tracked run may have
-      // finished outright. A job the detail restore projected as active
-      // (reconnect polling) is left alone unless it is this very run, whose
-      // live transport then outranks polling.
-      const intentNow = detachedIntentRunFor(owner);
-      const runNow = detachedRunFor(owner);
-      // The record this restore was built around must still be the one that
-      // comes back. A preview that completed meanwhile lives on as the durable
-      // run carrying its serial; anything else that settled is durable history
-      // now, and an older detached record must not be attached over it.
-      const successor = selected && runNow && runNow !== selected && runNow.serial === selected.serial
-        ? runNow
-        : null;
-      const selectedStillDetached = selected !== null
-        && (intentNow === selected || runNow === selected);
-      if (selected && !selectedStillDetached && !successor) {
-        // It settled while the detail was loading. Its own final response is the
-        // authoritative turn: project it locally (no extra list/detail read —
-        // restore stays within one list read and at most one detail read).
-        if (run === selected && run.result) projectSettledRun(run, run.result);
-      } else if (successor) {
-        if (canAttachRun(successor, false)) attachDetachedRun(successor, owner);
-      } else if (
-        newerIntent(intentNow, runNow)
-        && (intentNow.phase === "failed" || askJobIdRef.current === null)
-      ) {
-        attachIntentRun(intentNow, owner);
-      } else if (runNow && canAttachRun(runNow, runNow === run && runStartedBeforeDetail)) {
-        attachDetachedRun(runNow, owner);
-      }
+      applyDetachedWork(owner, selection);
     } catch (error) {
       if (sameViewOwner(ownerRef.current, owner)) throw error;
       return false;
@@ -1002,7 +1086,15 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     if (!owner) return false;
     setSessionLoading(true);
     try {
-      return await applySessionDetail(id, owner);
+      // Work detached in THIS conversation (a follow-up not yet `started`, a
+      // pending clarification, even the run this very click just detached)
+      // comes back with the session — the detail alone cannot show it.
+      const selection = selectDetachedWork(owner, id);
+      const applied = await applySessionDetail(id, owner);
+      if (applied && sameViewOwner(ownerRef.current, owner)) {
+        applyDetachedWork(owner, selection, id);
+      }
+      return applied;
     } catch (error) {
       if (sameViewOwner(ownerRef.current, owner)) throw error;
       return false;
@@ -1789,6 +1881,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     const deleted = deletedConversationIdsRef.current.get(key) ?? new Set<string>();
     deleted.add(id);
     deletedConversationIdsRef.current.set(key, deleted);
+    pruneTombstonedRecords(owner);
     const currentOwner = ownerRef.current;
     if (!sameNotebookIdentity(currentOwner, owner)) return;
     setSessions((current) => current.filter((session) => session.id !== id));
@@ -1815,6 +1908,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     const deleted = deletedConversationIdsRef.current.get(key) ?? new Set<string>();
     for (const id of result.deleted_ids) deleted.add(id);
     deletedConversationIdsRef.current.set(key, deleted);
+    pruneTombstonedRecords(owner);
     const currentOwner = ownerRef.current;
     if (!sameNotebookIdentity(currentOwner, owner)) return;
     setSessions((currentSessions) => reconcileConversationCleanup(
