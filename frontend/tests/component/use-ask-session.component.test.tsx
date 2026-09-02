@@ -2678,6 +2678,43 @@ test("a post-started transport failure while away defers to the restored durable
   expect(value!.conversationId).toBe("conversation-durable");
 });
 
+// codex #661 r3 P2: the UI mode is per actor, so switching to automatic mode must
+// also cancel a reasoning preview detached in a notebook the user has left.
+test("switching to automatic mode cancels a detached intent preview and returns it as a draft on restore", async () => {
+  const preview = deferred<QueryIntentContract>();
+  api.previewAskIntent.mockReturnValue(preview.promise);
+  api.listConversations.mockResolvedValue([]);
+  const view = render(<Harness />);
+  beginOwnedNotebook();
+  act(() => value!.selectMode("reasoning"));
+
+  let submitting!: Promise<void>;
+  act(() => {
+    submitting = value!.submit("detached reasoning question");
+  });
+  act(() => value!.leaveWorkspace());
+  const signal = api.previewAskIntent.mock.calls[0]?.[3] as AbortSignal;
+  expect(signal.aborted).toBe(false);
+
+  view.rerender(<Harness policy={{ ...DEFAULT_POLICY, advanced: false }} />);
+  expect(signal.aborted).toBe(true);
+  preview.resolve(contractFor("detached reasoning question", false));
+  await act(async () => submitting);
+  expect(api.runAskStream).not.toHaveBeenCalled();
+
+  view.rerender(<Harness />);
+  const owner = beginOwnedNotebook(2);
+  await act(async () => {
+    await value!.restoreNotebook(owner);
+    value!.finishNotebookTransition(owner);
+  });
+  expect(value!.question).toBe("detached reasoning question");
+  expect(value!.intentChecking).toBe(false);
+  expect(value!.intentReview).toBeNull();
+  expect(effects.reportError).toHaveBeenCalledTimes(1);
+  expect(api.runAskStream).not.toHaveBeenCalled();
+});
+
 // PR #557 regression: `turns`/`sessions`/`pendingTrace`/`feedbackSent` used to
 // fall back to a bare `[]`/`{}` literal whenever the owner is not visible
 // (actorId is null, e.g. logged out / collection page). A bare literal is a
