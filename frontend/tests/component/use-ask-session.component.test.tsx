@@ -2238,6 +2238,328 @@ test("leaving with a clarification open re-opens it on return and cancel still r
   expect(value!.pendingQuestion).toBe("");
 });
 
+// codex #661 r1 P1: records were keyed by actor/notebook only, so asking again
+// in a new session overwrote the earlier detached record.
+test("two detached runs of one notebook both survive and restore newest-first", async () => {
+  const streamA = deferred<AskResponse>();
+  const streamB = deferred<AskResponse>();
+  const onStarts: Array<(jobId: string, conversationId: string) => void | Promise<void>> = [];
+  api.runAskStream.mockImplementation((
+    _notebookId: string,
+    _payload: unknown,
+    _onProgress: unknown,
+    _signal?: AbortSignal,
+    nextOnStart?: (jobId: string, conversationId: string) => void | Promise<void>,
+  ) => {
+    onStarts.push(nextOnStart!);
+    return onStarts.length === 1 ? streamA.promise : streamB.promise;
+  });
+  api.listConversations.mockResolvedValue([]);
+  render(<Harness />);
+  beginOwnedNotebook();
+
+  let submittingA!: Promise<void>;
+  act(() => {
+    submittingA = value!.submit("question A");
+  });
+  act(() => value!.startNewSession(2));
+  let submittingB!: Promise<void>;
+  act(() => {
+    submittingB = value!.submit("question B");
+  });
+  expect(api.runAskStream).toHaveBeenCalledTimes(2);
+  act(() => value!.leaveWorkspace());
+
+  const owner = beginOwnedNotebook(3);
+  await act(async () => {
+    await value!.restoreNotebook(owner);
+    value!.finishNotebookTransition(owner);
+  });
+  expect(value!.asking).toBe(true);
+  expect(value!.pendingQuestion).toBe("question B");
+
+  // The older run still lands in history without disturbing the view.
+  api.listConversations.mockResolvedValue([summary("conversation-a")]);
+  await act(async () => {
+    await onStarts[0]!("job-a", "conversation-a");
+  });
+  streamA.resolve(answer("conversation-a"));
+  await act(async () => submittingA);
+  expect(value!.pendingQuestion).toBe("question B");
+  expect(value!.turns).toEqual([]);
+  expect(value!.sessions.map((item) => item.id)).toContain("conversation-a");
+
+  await act(async () => {
+    await onStarts[1]!("job-b", "conversation-b");
+  });
+  streamB.resolve(answer("conversation-b"));
+  await act(async () => submittingB);
+  expect(value!.conversationId).toBe("conversation-b");
+  expect(value!.turns.map((turn) => turn.question)).toEqual(["question B"]);
+});
+
+test("a detached clarification outlives a newer run in the same notebook and re-opens after it settles", async () => {
+  const preview = deferred<QueryIntentContract>();
+  const stream = deferred<AskResponse>();
+  let onStart: ((jobId: string, conversationId: string) => void | Promise<void>) | undefined;
+  api.previewAskIntent.mockReturnValue(preview.promise);
+  api.runAskStream.mockImplementation((
+    _notebookId: string,
+    _payload: unknown,
+    _onProgress: unknown,
+    _signal?: AbortSignal,
+    nextOnStart?: (jobId: string, conversationId: string) => void | Promise<void>,
+  ) => {
+    onStart = nextOnStart;
+    return stream.promise;
+  });
+  api.listConversations.mockResolvedValue([]);
+  render(<Harness />);
+  beginOwnedNotebook();
+  act(() => value!.selectMode("reasoning"));
+
+  let submittingA!: Promise<void>;
+  act(() => {
+    submittingA = value!.submit("ambiguous A");
+  });
+  act(() => value!.startNewSession(2));
+  let submittingB!: Promise<void>;
+  act(() => {
+    submittingB = value!.submit("question B");
+  });
+  expect(api.runAskStream).toHaveBeenCalledTimes(1);
+  act(() => value!.leaveWorkspace());
+
+  const contract = contractFor("ambiguous A", true);
+  preview.resolve(contract);
+  await act(async () => submittingA);
+
+  const owner = beginOwnedNotebook(3);
+  await act(async () => {
+    await value!.restoreNotebook(owner);
+    value!.finishNotebookTransition(owner);
+  });
+  expect(value!.pendingQuestion).toBe("question B");
+  expect(value!.intentReview).toBeNull();
+
+  api.listConversations.mockResolvedValue([summary("conversation-b")]);
+  await act(async () => {
+    await onStart!("job-b", "conversation-b");
+  });
+  stream.resolve(answer("conversation-b"));
+  await act(async () => submittingB);
+  expect(value!.turns.map((turn) => turn.question)).toEqual(["question B"]);
+
+  act(() => value!.leaveWorkspace());
+  const again = beginOwnedNotebook(4);
+  await act(async () => {
+    await value!.restoreNotebook(again);
+    value!.finishNotebookTransition(again);
+  });
+  expect(api.getConversation).not.toHaveBeenCalled();
+  expect(value!.intentReview?.contract).toBe(contract);
+  expect(value!.pendingQuestion).toBe("ambiguous A");
+  expect(value!.conversationId).toBeNull();
+});
+
+// codex #661 r1 P1: a preview that failed while detached used to delete its only
+// record silently — the question was gone and nothing reported the failure.
+test("an intent preview that fails while away reports on return and hands the question back", async () => {
+  const preview = deferred<QueryIntentContract>();
+  api.previewAskIntent.mockReturnValue(preview.promise);
+  api.listConversations.mockResolvedValue([summary("conversation-older")]);
+  api.getConversation.mockResolvedValue(detail("conversation-older"));
+  render(<Harness />);
+  beginOwnedNotebook();
+  act(() => value!.selectMode("reasoning"));
+
+  let submitting!: Promise<void>;
+  act(() => {
+    submitting = value!.submit("failing question");
+  });
+  act(() => value!.leaveWorkspace());
+  const failure = new Error("intent service down");
+  preview.reject(failure);
+  await act(async () => submitting);
+  expect(effects.reportError).not.toHaveBeenCalled();
+
+  const owner = beginOwnedNotebook(2);
+  await act(async () => {
+    await value!.restoreNotebook(owner);
+    value!.finishNotebookTransition(owner);
+  });
+  expect(effects.reportError).toHaveBeenCalledWith(failure);
+  expect(value!.question).toBe("failing question");
+  expect(value!.intentChecking).toBe(false);
+  expect(value!.pendingQuestion).toBe("");
+  expect(api.runAskStream).not.toHaveBeenCalled();
+
+  // Consumed once: a further restore falls back to plain history.
+  act(() => value!.leaveWorkspace());
+  const again = beginOwnedNotebook(3);
+  await act(async () => {
+    await value!.restoreNotebook(again);
+    value!.finishNotebookTransition(again);
+  });
+  expect(effects.reportError).toHaveBeenCalledTimes(1);
+  expect(value!.conversationId).toBe("conversation-older");
+});
+
+test("a durable run that fails while away reports on return and hands the question back", async () => {
+  const stream = deferred<AskResponse>();
+  api.runAskStream.mockReturnValue(stream.promise);
+  api.listConversations.mockResolvedValue([summary("conversation-older")]);
+  api.getConversation.mockResolvedValue(detail("conversation-older"));
+  render(<Harness />);
+  beginOwnedNotebook();
+
+  let submitting!: Promise<void>;
+  act(() => {
+    submitting = value!.submit("failing durable question");
+  });
+  act(() => value!.leaveWorkspace());
+  const failure = new Error("ask service down");
+  stream.reject(failure);
+  await act(async () => submitting);
+  expect(effects.reportError).not.toHaveBeenCalled();
+
+  const owner = beginOwnedNotebook(2);
+  await act(async () => {
+    await value!.restoreNotebook(owner);
+    value!.finishNotebookTransition(owner);
+  });
+  expect(effects.reportError).toHaveBeenCalledWith(failure);
+  expect(value!.question).toBe("failing durable question");
+  expect(value!.asking).toBe(false);
+  expect(value!.pendingQuestion).toBe("");
+});
+
+// codex #661 r1 P2: a post-`started` run whose job finished server-side while the
+// returning view loaded its (now terminal) detail must not be re-attached — its
+// final event would append the already restored turn a second time.
+test("a run whose restored detail is already terminal is not re-attached and does not duplicate its turn", async () => {
+  const stream = deferred<AskResponse>();
+  let onStart: ((jobId: string, conversationId: string) => void | Promise<void>) | undefined;
+  api.runAskStream.mockImplementation((
+    _notebookId: string,
+    _payload: unknown,
+    _onProgress: unknown,
+    _signal?: AbortSignal,
+    nextOnStart?: (jobId: string, conversationId: string) => void | Promise<void>,
+  ) => {
+    onStart = nextOnStart;
+    return stream.promise;
+  });
+  api.listConversations.mockResolvedValue([summary("conversation-durable")]);
+  api.getConversation.mockResolvedValue(
+    detail("conversation-durable", "notebook-a", { question: "durable question" }),
+  );
+  render(<Harness />);
+  beginOwnedNotebook();
+
+  let submitting!: Promise<void>;
+  act(() => {
+    submitting = value!.submit("durable question");
+  });
+  await act(async () => {
+    await onStart!("job-durable", "conversation-durable");
+  });
+  act(() => value!.leaveWorkspace());
+
+  const owner = beginOwnedNotebook(2);
+  await act(async () => {
+    await value!.restoreNotebook(owner);
+    value!.finishNotebookTransition(owner);
+  });
+  expect(value!.conversationId).toBe("conversation-durable");
+  expect(value!.asking).toBe(false);
+  expect(value!.turns.map((turn) => turn.question)).toEqual(["durable question"]);
+
+  stream.resolve(answer("conversation-durable"));
+  await act(async () => submitting);
+  expect(value!.turns.map((turn) => turn.question)).toEqual(["durable question"]);
+  expect(value!.asking).toBe(false);
+});
+
+// codex #661 r1 P2: a pre-`started` run that started and finished while the
+// restore was still loading detail vanished from the records, so the restore
+// neither attached it nor showed its answer.
+test("a run that completes during restoration is re-resolved from history instead of leaving the view blank", async () => {
+  const stream = deferred<AskResponse>();
+  let onStart: ((jobId: string, conversationId: string) => void | Promise<void>) | undefined;
+  api.runAskStream.mockImplementation((
+    _notebookId: string,
+    _payload: unknown,
+    _onProgress: unknown,
+    _signal?: AbortSignal,
+    nextOnStart?: (jobId: string, conversationId: string) => void | Promise<void>,
+  ) => {
+    onStart = nextOnStart;
+    return stream.promise;
+  });
+  api.listConversations.mockResolvedValue([summary("conversation-x")]);
+  const staleDetail = detail("conversation-x");
+  const settledDetail: ConversationDetail = {
+    ...detail("conversation-x"),
+    turn_count: 2,
+    turns: [
+      ...staleDetail.turns,
+      {
+        answer_id: "answer-follow-up",
+        question: "follow-up",
+        response: answer("conversation-x", "answer-follow-up"),
+        asked_at: "2026-08-22T00:01:00Z",
+        created_at: "2026-08-22T00:01:00Z",
+      },
+    ],
+  };
+  const lateDetail = deferred<ConversationDetail>();
+  api.getConversation
+    .mockResolvedValueOnce(staleDetail)
+    .mockReturnValueOnce(lateDetail.promise)
+    .mockResolvedValueOnce(settledDetail);
+  render(<Harness />);
+  const first = beginOwnedNotebook();
+  await act(async () => {
+    await value!.restoreNotebook(first);
+  });
+  expect(value!.conversationId).toBe("conversation-x");
+
+  let submitting!: Promise<void>;
+  act(() => {
+    submitting = value!.submit("follow-up");
+  });
+  act(() => value!.leaveWorkspace());
+
+  const owner = beginOwnedNotebook(2);
+  let restoring!: Promise<boolean>;
+  act(() => {
+    restoring = value!.restoreNotebook(owner);
+  });
+  await act(async () => {
+    for (let i = 0; i < 20 && api.getConversation.mock.calls.length < 2; i += 1) {
+      await Promise.resolve();
+    }
+  });
+  expect(api.getConversation).toHaveBeenCalledTimes(2);
+
+  // The tracked run starts and finishes while that detail is still loading.
+  await act(async () => {
+    await onStart!("job-follow-up", "conversation-x");
+  });
+  stream.resolve(answer("conversation-x", "answer-follow-up"));
+  await act(async () => submitting);
+
+  lateDetail.resolve(staleDetail);
+  await act(async () => {
+    await restoring;
+    value!.finishNotebookTransition(owner);
+  });
+  expect(api.getConversation).toHaveBeenCalledTimes(3);
+  expect(value!.asking).toBe(false);
+  expect(value!.turns.map((turn) => turn.question)).toEqual(["question-conversation-x", "follow-up"]);
+});
+
 // PR #557 regression: `turns`/`sessions`/`pendingTrace`/`feedbackSent` used to
 // fall back to a bare `[]`/`{}` literal whenever the owner is not visible
 // (actorId is null, e.g. logged out / collection page). A bare literal is a
