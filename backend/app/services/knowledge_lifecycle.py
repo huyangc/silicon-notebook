@@ -106,6 +106,19 @@ INTERRUPTED_KG_BUILD_ERROR_MESSAGE = (
 
 _SOURCE_BUILD_PAGE_SIZE = 500
 
+# batch-3-W1 T-5a: delete_notebook_kg's pre-reset drain (see
+# _drain_graph_rows_before_reset). PAGE is one bounded DELETE per write
+# transaction; THRESHOLD is the per-table residue deliberately LEFT for the
+# final single-transaction pass — the two are the same value on purpose: a
+# table under one page's worth of rows costs the final pass no more than one
+# drained page would have, so draining it buys nothing and the small-graph
+# path stays write-free (the P0-1 pin depends on that). 2000 keeps a
+# production form-two page comfortably under the 180s statement timeout
+# (design doc §1.5's sizing argument for the delete job's pages applies
+# unchanged here — same tables, same predicates).
+_GRAPH_DRAIN_PAGE_ROWS = 2000
+_GRAPH_DRAIN_THRESHOLD_ROWS = _GRAPH_DRAIN_PAGE_ROWS
+
 # relink 的两个有界化常数。页大小只影响「一次问数据库要多少个来源 id」,与
 # `_SOURCE_BUILD_PAGE_SIZE` 取同一个值:两者是同一张表、同一条 `(created_at, id)`
 # keyset、同一条 `idx_sources_notebook_created`。刻意不取更小值——SQLite 把行值
@@ -533,6 +546,7 @@ class KnowledgeLifecycleService:
         delete_notebook_kg for the full seq-vs-epoch writeup.
         """
         self.get_notebook(notebook_id)
+        drained = self._drain_graph_rows_before_reset(notebook_id)
         with self._write() as db:
             source_index_was_certified = self.knowledge.source_index_backfilled(
                 db, notebook_id
@@ -556,7 +570,82 @@ class KnowledgeLifecycleService:
         # own — invalidate_kg is its only eviction path, not a redundant
         # seq-aliasing patch. See this method's own docstring.
         self._invalidate_unified_cache(notebook_id)
+        # T-5a: rows removed by the pre-reset drain belong to this call's
+        # deletion just as much as the final pass's — merge them so callers
+        # reading counts (rebuild logs, tests) keep seeing the total.
+        for table, deleted in drained.items():
+            counts[table] = counts.get(table, 0) + deleted
         return counts
+
+    def _drain_graph_rows_before_reset(self, notebook_id: str) -> dict[str, int]:
+        """batch-3-W1 T-5a: bound ``delete_notebook_kg``'s final single
+        transaction by PRE-draining the bulk of the graph in small
+        per-transaction pages, without touching the P0-1 invariant the final
+        pass carries ("all 13 DELETEs + the unified_kg_state reset commit in
+        ONE ``write()``, cache invalidation strictly after that commit" —
+        pinned by ``test_kg_mutation_phase_matrix.py::test_delete_delegates_
+        in_write_then_commits_before_cache_invalidation``). The invariant
+        survives verbatim because the final DELETEs are idempotent
+        set-clears: after draining they match only the ≤threshold remainder
+        (plus whatever landed between drain end and the final transaction),
+        so the committed END state — and its atomic flip to readers — is
+        byte-identical to the undrained shape.
+
+        Small-graph fast path: the FIRST probe runs on a read connection; a
+        graph already at or under the threshold performs ZERO extra write
+        transactions, keeping the legacy path (and the pinned test's exact
+        write-event sequence) untouched.
+
+        Per batch, in the SAME transaction as the page delete, ``mark_dirty``
+        bumps ``kg_mutation_seq`` — kg_mutation.py's FULL CENSUS discipline
+        (a graph-row mutation on a live notebook never commits without its
+        seq bump; without it two mid-drain reads could cache DIFFERENT
+        partial graphs under the SAME (epoch, seq) memo key). The final
+        pass's upsert then resets seq to 0 under epoch+1, so drain-era keys
+        can never alias post-reset content.
+
+        Mid-drain visibility: readers see a shrinking graph before the final
+        atomic flip — the same degraded window that already exists AFTER the
+        flip (empty graph until the rebuild refills it), extended backwards
+        by the drain duration. ``rebuildkg-``'s dirty flag is set from the
+        first batch on.
+
+        §4.2 checkpoint: a delete-job tombstone landing mid-drain aborts the
+        pass exactly like the relink/rebuild checkpoints do — the delete
+        job's own phase 3 owns those rows now; keeping on draining would
+        only contend with it.
+
+        Loud stall guard: a page that deletes 0 rows while the backlog probe
+        still names its table means the predicate and the pager disagree —
+        after 3 consecutive stalls this raises instead of spinning."""
+        drained: dict[str, int] = {}
+        stalls = 0
+        while True:
+            with self._connect() as db:
+                table = self.knowledge.graph_drain_backlog(
+                    db, notebook_id, _GRAPH_DRAIN_THRESHOLD_ROWS
+                )
+            if table is None:
+                return drained
+            if self._notebook_deleting(notebook_id):
+                raise NotebookDeletingAbortsMaintenanceError(notebook_id)
+            with self._write() as db:
+                deleted = self.knowledge.drain_notebook_graph_rows_page(
+                    db, notebook_id, table, _GRAPH_DRAIN_PAGE_ROWS
+                )
+                if deleted:
+                    self.unified_kg.mark_dirty(db, notebook_id, self._now())
+            if deleted:
+                drained[table] = drained.get(table, 0) + deleted
+                stalls = 0
+                continue
+            stalls += 1
+            if stalls >= 3:
+                raise RuntimeError(
+                    f"graph drain stalled on {table} for notebook "
+                    f"{notebook_id}: backlog probe keeps naming it but the "
+                    "page delete removes 0 rows (predicate drift?)"
+                )
 
     def prepare_indexing_pipeline_kg(
         self,

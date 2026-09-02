@@ -282,6 +282,71 @@ def _completion_generation_is_current(
     return bool(row and row["id"] == run_id)
 
 
+# batch-3-W1 T-5a: the ordered (table, WHERE-predicate) registry the pre-reset
+# DRAIN pages over — SQLite twin's ``_GRAPH_DRAIN_STEPS`` comment has the full
+# ordering/convergence rationale. Entries mirror ``delete_notebook_graph_
+# rows``'s statements in its EFFECTIVE order: the five predicate deletes, then
+# ``sorted(_GRAPH_RESET_TABLES - {knowledge_embeddings, extraction_runs})``
+# (spelled out literally here — the mirror test pins agreement), then the two
+# trailing predicate deletes. PostgreSQL has no kg_objects_fts shadow, so no
+# 14th entry.
+_GRAPH_DRAIN_STEPS: tuple[tuple[str, str, int], ...] = (
+    (
+        "knowledge_source_fact_backfills",
+        "notebook_id=%s AND NOT EXISTS (SELECT 1 FROM sources s "
+        "WHERE s.id=knowledge_source_fact_backfills.source_id AND s.notebook_id=%s "
+        "AND s.source_type IN ('memory','knowhow'))",
+        2,
+    ),
+    (
+        "knowledge_source_facts",
+        "notebook_id=%s AND NOT EXISTS (SELECT 1 FROM sources s "
+        "WHERE s.id=knowledge_source_facts.source_id AND s.notebook_id=%s "
+        "AND s.source_type IN ('memory','knowhow'))",
+        2,
+    ),
+    (
+        "knowledge_objects",
+        "notebook_id = %s AND NOT EXISTS (SELECT 1 FROM sources s "
+        "WHERE s.id=knowledge_objects.source_id "
+        "AND s.notebook_id=%s AND s.source_type IN ('memory','knowhow'))",
+        2,
+    ),
+    (
+        "knowledge_object_sources",
+        "notebook_id=%s AND NOT EXISTS (SELECT 1 FROM knowledge_objects ko "
+        "WHERE ko.notebook_id=%s AND ko.id=knowledge_object_sources.object_id)",
+        2,
+    ),
+    (
+        "knowledge_relations",
+        "notebook_id = %s AND NOT EXISTS (SELECT 1 FROM sources s "
+        "WHERE s.id=knowledge_relations.source_id "
+        "AND s.notebook_id=%s AND s.source_type IN ('memory','knowhow'))",
+        2,
+    ),
+    ("concept_clusters", "notebook_id = %s", 1),
+    ("concept_merge_candidates", "notebook_id = %s", 1),
+    ("kg_analysis_artifacts", "notebook_id = %s", 1),
+    ("kg_community_edges", "notebook_id = %s", 1),
+    ("kg_relation_completion_state", "notebook_id = %s", 1),
+    ("kg_source_profiles", "notebook_id = %s", 1),
+    (
+        "knowledge_embeddings",
+        "notebook_id=%s AND NOT EXISTS (SELECT 1 FROM knowledge_objects ko "
+        "WHERE ko.notebook_id=%s AND ko.id=knowledge_embeddings.object_id)",
+        2,
+    ),
+    (
+        "extraction_runs",
+        "notebook_id=%s AND NOT EXISTS (SELECT 1 FROM sources s "
+        "WHERE s.id=extraction_runs.source_id "
+        "AND s.notebook_id=%s AND s.source_type IN ('memory','knowhow'))",
+        2,
+    ),
+)
+
+
 class KnowledgeStore:
     # 能力声明(镜像 SQLite 侧的 False):这个适配器的 fts_search 能兑现 KNN
     # 访问路径提示,所以服务层的规模判定值得跑。
@@ -295,6 +360,42 @@ class KnowledgeStore:
         return self.database.connect()
 
     # ------------------------------------------------ lifecycle projections
+    @staticmethod
+    def graph_drain_backlog(db: Any, notebook_id: str, threshold: int) -> "str | None":
+        """batch-3-W1 T-5a — SQLite twin's docstring has the full rationale
+        (exists-at-offset point probe, read-only, keeps the small-graph
+        ``delete_notebook_kg`` path free of extra write transactions)."""
+        for table, predicate, params in _GRAPH_DRAIN_STEPS:
+            row = db.execute(
+                f"SELECT 1 FROM {table} WHERE {predicate} "
+                f"LIMIT 1 OFFSET {int(threshold)}",
+                (notebook_id,) * params,
+            ).fetchone()
+            if row is not None:
+                return table
+        return None
+
+    @staticmethod
+    def drain_notebook_graph_rows_page(
+        db: Any, notebook_id: str, table: str, limit: int
+    ) -> int:
+        """batch-3-W1 T-5a — one bounded page of ``table``'s matching rows,
+        §1.5 form-two (``ctid IN (SELECT ctid … LIMIT n)``; ctid is the only
+        universal row address here — several of these tables have composite
+        or no single-column PKs). SQLite twin's docstring carries the
+        caller-owns-the-transaction + same-tx ``mark_dirty`` census
+        discipline."""
+        predicates = {t: (p, n) for t, p, n in _GRAPH_DRAIN_STEPS}
+        if table not in predicates:
+            raise ValueError(f"unknown graph drain table: {table}")
+        predicate, params = predicates[table]
+        cur = db.execute(
+            f"DELETE FROM {table} WHERE ctid IN ("
+            f"SELECT ctid FROM {table} WHERE {predicate} LIMIT {int(limit)})",
+            (notebook_id,) * params,
+        )
+        return cur.rowcount
+
     @staticmethod
     def delete_notebook_graph_rows(db: Any, notebook_id: str, now: str) -> dict[str, int]:
         """Wipe user-document KG while preserving hidden projection lifecycles.

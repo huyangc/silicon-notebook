@@ -175,6 +175,23 @@ Graph-row writers, all now in-transaction (✓ = already was):
                                                   mark_unified_kg_dirty_in_tx's
                                                   single-choke-point red line
                                                   below.
+    drain_notebook_graph_rows_page       T-5a     knowledge_store: ONE bounded
+      (delete_notebook_kg's pre-reset              pre-reset page of the same
+      drain, _drain_graph_rows_before_             tables/predicates the final
+      reset)                                       pass clears. Its caller
+                                                  bumps kg_mutation_seq via
+                                                  mark_dirty in the SAME
+                                                  write() as each page — the
+                                                  in-transaction discipline
+                                                  above, applied per batch, so
+                                                  two mid-drain reads can
+                                                  never cache different
+                                                  partial graphs under one
+                                                  (epoch, seq) key. It never
+                                                  touches kg_reset_epoch; the
+                                                  final pass's reset (seq→0,
+                                                  epoch+1) still supersedes
+                                                  every drain-era key.
 
 VECTOR-REPLACE CENSUS — codex #638 R6 P1
 -----------------------------------------
