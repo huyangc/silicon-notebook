@@ -383,8 +383,11 @@ class Settings(BaseSettings):
     # 同时作每批页大小与「留给终局单事务」的每表残余阈值。按部署的
     # statement_timeout 定尺——2000 行/页在 D-1 的 180s 预算下余量充足;低配
     # 部署可调小以缩短单批写锁/语句时长(代价是更多批次、更长的排水期)。
+    # 上限 20000(codex #663 R19 P2):sqlite 页把选中 id 逐个绑定占位符,
+    # 上游默认 SQLITE_MAX_VARIABLE_NUMBER=32766——上限必须留在其下,否则
+    # 大预算配置在排水中途 OperationalError: too many SQL variables。
     kg_graph_drain_page_rows: int = Field(
-        2000, ge=50, le=100_000, validation_alias="KG_GRAPH_DRAIN_PAGE_ROWS")
+        2000, ge=50, le=20_000, validation_alias="KG_GRAPH_DRAIN_PAGE_ROWS")
     # 删除作业扫尾的轮询间隔（双驱动：孤儿作业行重排 + 无作业行的 deleting 库
     # 补建）。与 checkup.py 的 _H45_CACHE_TTL 同量级（300s）。
     notebook_delete_sweep_seconds: int = Field(
