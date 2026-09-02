@@ -2108,3 +2108,84 @@ def test_upload_keeps_file_when_commit_succeeded_but_ack_was_lost(
     source_dir = storage_dir / "notebooks" / "nb1"
     leftover = list(source_dir.iterdir()) if source_dir.exists() else []
     assert leftover != [], "行已提交(歧义失败实为成功)时不得删它的文件"
+
+
+# ---------------------------------------------------------------------------
+# codex #659 R18 P1：作业化 finalize 也要无条件清 FTS5 影子——墓碑前放行的
+# 解析/重解析不受任何 quiesce 腿约束,可以在相位 3 的 FTS 清扫之后、finalize
+# 之前提交 chunks/KG 行;级联删得掉真身,影子表却是手工维护的。
+# ---------------------------------------------------------------------------
+
+
+def test_jobized_finalize_resweeps_late_committed_fts_shadows(repo):
+    """变异钉:把 finalize 里的两条 FTS 影子 DELETE 加回 ``if job_id is
+    None:`` 守卫 → 本用例模拟相位 3 之后才提交的迟到影子行,作业化收尾后
+    全文永久残留,报红。同时钉住别的库的影子行原样。"""
+    _seed_user_and_notebook(repo)
+    job = repo._runtime.notebook_delete_jobs.request("nb1", "u1")
+    lease_token = repo._runtime.notebook_delete_jobs.mark_running(
+        job["id"], stale_cutoff_seconds=300,
+    )
+    # 相位 3 已经跑完(这里没跑,等价于清扫过后表为空),然后一个墓碑前放行的
+    # 重解析迟到提交了影子行:
+    with repo._runtime.database.write() as db:
+        db.execute(
+            "INSERT INTO chunks_fts (chunk_id,notebook_id,text) "
+            "VALUES ('late-ch','nb1','late committed chunk text')",
+        )
+        db.execute(
+            "INSERT INTO kg_objects_fts (object_id,notebook_id,name) "
+            "VALUES ('late-kg','nb1','late committed object')",
+        )
+        db.execute(
+            "INSERT INTO chunks_fts (chunk_id,notebook_id,text) "
+            "VALUES ('other-ch','nb2','keep me')",
+        )
+
+    repo._runtime.notebook_store.delete_row_and_orphan_embeddings(
+        "nb1", job_id=job["id"], lease_token=lease_token,
+    )
+
+    with repo._runtime.database.connect() as db:
+        assert db.execute(
+            "SELECT COUNT(*) c FROM chunks_fts WHERE notebook_id='nb1'"
+        ).fetchone()["c"] == 0, "迟到提交的 chunks_fts 影子必须被 finalize 清掉"
+        assert db.execute(
+            "SELECT COUNT(*) c FROM kg_objects_fts WHERE notebook_id='nb1'"
+        ).fetchone()["c"] == 0, "迟到提交的 kg_objects_fts 影子必须被 finalize 清掉"
+        assert db.execute(
+            "SELECT COUNT(*) c FROM chunks_fts WHERE notebook_id='nb2'"
+        ).fetchone()["c"] == 1, "别的库的影子行不许连坐"
+
+
+# ---------------------------------------------------------------------------
+# codex #659 R18 P2：残渣收尾路径 settle 之后也要涂抹分析产物——它们不在
+# notebooks 级联里,settle 掉作业却不涂抹意味着永远没人再来清。
+# ---------------------------------------------------------------------------
+
+
+def test_residual_cleanup_redacts_analysis_artifacts(repo, monkeypatch):
+    """变异钉:把 ``_finish_residual`` 里的 ``_redact_analysis_artifacts``
+    调用删掉 → 带外删除场景下 redact_notebook 一次都不会被叫到,报红。"""
+    _seed_user_and_notebook(repo)
+    job = repo._runtime.notebook_delete_jobs.request("nb1", "u1")
+    with repo._runtime.database.write() as db:
+        db.execute("DELETE FROM notebooks WHERE id='nb1'")  # out-of-band delete
+
+    runner = repo._runtime.notebook_delete
+    redacted: list[str] = []
+
+    class _RecordingArtifacts:
+        def redact_notebook(self, notebook_id, *, occurred_at):
+            redacted.append(notebook_id)
+
+    monkeypatch.setattr(runner, "_analysis_artifacts", _RecordingArtifacts())
+    runner.run(job["id"])
+
+    assert redacted == ["nb1"], (
+        "残渣收尾 settle 后必须涂抹分析产物,实际调用记录:" f"{redacted}"
+    )
+    with repo._runtime.database.connect() as db:
+        assert db.execute(
+            "SELECT COUNT(*) c FROM notebook_delete_jobs"
+        ).fetchone()["c"] == 0, "前置不成立:残渣收尾没有 settle 作业行"
