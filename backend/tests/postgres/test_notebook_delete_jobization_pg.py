@@ -8,7 +8,7 @@ CAS behavior, real EXPLAIN plans for the three new indexes, PG SQL dialect
 correctness).
 
 Covers:
-  1. Migration 0048 is idempotent and a true no-op once already applied.
+  1. Migration 0049 is idempotent and a true no-op once already applied.
   2. The three new indexes' EXPLAIN plans (Index Scan, not Seq Scan) —
      G3's "三条新索引各自的 EXPLAIN 验收" requirement.
   3. Tombstone CAS + quiesce dual leg + phase 5 finalize end to end on a
@@ -61,7 +61,7 @@ def _insert_notebook(db, nid: str, owner: str, status: str = "ready") -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_migration_0048_applied_and_idempotent(postgres_repository):
+def test_migration_0049_applied_and_idempotent(postgres_repository):
     repo = postgres_repository
     with repo._connect() as db:
         tables = {
@@ -81,7 +81,7 @@ def test_migration_0048_applied_and_idempotent(postgres_repository):
 
     migrator = PostgresMigrator(repo._runtime.database)
     final_version = migrator.migrate()
-    assert final_version == 48
+    assert final_version == 49
 
 
 # ---------------------------------------------------------------------------
