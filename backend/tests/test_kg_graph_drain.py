@@ -92,9 +92,9 @@ def test_small_graph_path_performs_zero_drain_writes(repo, monkeypatch):
     store = repo._runtime.knowledge
     original = store.drain_notebook_graph_rows_page
 
-    def _spy(db, nb, table, limit):
-        pages.append(table)
-        return original(db, nb, table, limit)
+    def _spy(db, nb, step, limit):
+        pages.append(step)
+        return original(db, nb, step, limit)
 
     monkeypatch.setattr(store, "drain_notebook_graph_rows_page", _spy)
     counts = repo.delete_notebook_kg(notebook.id)
@@ -108,8 +108,9 @@ def test_drain_bounds_the_final_pass_and_counts_stay_total(repo, monkeypatch):
     里删掉 → 排水页计数为 0,报红。同钉:排水后 counts 仍报全量(排水行并回),
     终局清空效果不变,隐藏投影(memory 来源的对象)原样保留,epoch+1;探针
     游标只前进不后退(评审 F4)。"""
-    monkeypatch.setattr(kl, "_GRAPH_DRAIN_PAGE_ROWS", 3)
-    monkeypatch.setattr(kl, "_GRAPH_DRAIN_THRESHOLD_ROWS", 3)
+    monkeypatch.setattr(
+        repo._runtime.knowledge_lifecycle, "_graph_drain_budget_rows", 3
+    )
     notebook = repo.create_notebook(NotebookCreate(name="big"))
     _seed_graph(repo, notebook.id, doc_objects=11, memory_objects=2)
 
@@ -119,9 +120,9 @@ def test_drain_bounds_the_final_pass_and_counts_stay_total(repo, monkeypatch):
     original = store.drain_notebook_graph_rows_page
     original_backlog = store.graph_drain_backlog
 
-    def _spy(db, nb, table, limit):
-        deleted = original(db, nb, table, limit)
-        pages.append((table, deleted))
+    def _spy(db, nb, step, limit):
+        deleted = original(db, nb, step, limit)
+        pages.append((step, deleted))
         return deleted
 
     def _backlog_spy(db, nb, threshold, start=0):
@@ -137,7 +138,7 @@ def test_drain_bounds_the_final_pass_and_counts_stay_total(repo, monkeypatch):
 
     assert pages, "超阈值的图必须走排水"
     assert all(
-        deleted.get("knowledge_objects", 0) <= 3 for _t, deleted in pages
+        deleted.get("knowledge_objects", 0) <= 3 for _s, deleted in pages
     ), "每页必须有界"
     assert any(p > 0 for p in probes[1:]), (
         f"游标从未离开下标 0——每批都从登记表头重扫(评审 F4):{probes}"
@@ -178,8 +179,9 @@ def test_each_drain_batch_bumps_seq_through_the_choke_point_in_tx(
     (epoch, seq) 键)。
     ② 把 bump 挪出页删除事务(独立 write())→ 逐批的连接身份配对断言红——
     删除变异和移动变异都逮得住(评审 #3)。"""
-    monkeypatch.setattr(kl, "_GRAPH_DRAIN_PAGE_ROWS", 3)
-    monkeypatch.setattr(kl, "_GRAPH_DRAIN_THRESHOLD_ROWS", 3)
+    monkeypatch.setattr(
+        repo._runtime.knowledge_lifecycle, "_graph_drain_budget_rows", 3
+    )
     notebook = repo.create_notebook(NotebookCreate(name="bump"))
     _seed_graph(repo, notebook.id, doc_objects=10)
 
@@ -197,8 +199,8 @@ def test_each_drain_batch_bumps_seq_through_the_choke_point_in_tx(
     store = repo._runtime.knowledge
     original_page = store.drain_notebook_graph_rows_page
 
-    def _page_spy(db, nb, table, limit):
-        deleted = original_page(db, nb, table, limit)
+    def _page_spy(db, nb, step, limit):
+        deleted = original_page(db, nb, step, limit)
         if deleted:
             pages.append(id(db))
         return deleted
@@ -219,8 +221,9 @@ def test_drain_commits_never_expose_orphan_cluster_rows(repo, monkeypatch):
     连带删除拆掉 → 某个已提交的批边界上出现「member_object_id 已不存在」的
     簇行,报红。孤儿簇行会被 incremental_fuse 的 canonical 折叠误吞新
     concept,而孤儿清扫每进程只跑一次——排水不许当第四个孤儿生产者。"""
-    monkeypatch.setattr(kl, "_GRAPH_DRAIN_PAGE_ROWS", 3)
-    monkeypatch.setattr(kl, "_GRAPH_DRAIN_THRESHOLD_ROWS", 3)
+    monkeypatch.setattr(
+        repo._runtime.knowledge_lifecycle, "_graph_drain_budget_rows", 3
+    )
     notebook = repo.create_notebook(NotebookCreate(name="orphan"))
     _seed_graph(repo, notebook.id, doc_objects=9, clusters=True)
 
@@ -228,7 +231,7 @@ def test_drain_commits_never_expose_orphan_cluster_rows(repo, monkeypatch):
     store = repo._runtime.knowledge
     original = store.drain_notebook_graph_rows_page
 
-    def _spy(db, nb, table, limit):
+    def _spy(db, nb, step, limit):
         # 进入本批之前,读上一批**已提交**的状态(独立连接,看不见本批未提交
         # 的写)——每个批边界都不得有孤儿簇行。
         orphan_snapshots.append(_count(
@@ -238,7 +241,7 @@ def test_drain_commits_never_expose_orphan_cluster_rows(repo, monkeypatch):
             "WHERE ko.id=c.member_object_id)",
             (nb,),
         ))
-        return original(db, nb, table, limit)
+        return original(db, nb, step, limit)
 
     monkeypatch.setattr(store, "drain_notebook_graph_rows_page", _spy)
     repo.delete_notebook_kg(notebook.id)
@@ -259,8 +262,9 @@ def test_each_drain_commit_evicts_the_unified_graph_cache(repo, monkeypatch):
     删掉 → 每个非空批之后的驱逐计数缺失,报红。unified_cache 无任何版本键,
     invalidate_kg 是唯一驱逐路径——不逐批驱逐,温缓存整个排水期(中止则无限期)
     端着删前的图。"""
-    monkeypatch.setattr(kl, "_GRAPH_DRAIN_PAGE_ROWS", 3)
-    monkeypatch.setattr(kl, "_GRAPH_DRAIN_THRESHOLD_ROWS", 3)
+    monkeypatch.setattr(
+        repo._runtime.knowledge_lifecycle, "_graph_drain_budget_rows", 3
+    )
     notebook = repo.create_notebook(NotebookCreate(name="evict"))
     _seed_graph(repo, notebook.id, doc_objects=10)
 
@@ -278,10 +282,10 @@ def test_each_drain_commit_evicts_the_unified_graph_cache(repo, monkeypatch):
     store = repo._runtime.knowledge
     original_page = store.drain_notebook_graph_rows_page
 
-    def _page_spy(db, nb, table, limit):
-        deleted = original_page(db, nb, table, limit)
+    def _page_spy(db, nb, step, limit):
+        deleted = original_page(db, nb, step, limit)
         if deleted:
-            pages.append(table)
+            pages.append(step)
         return deleted
 
     monkeypatch.setattr(store, "drain_notebook_graph_rows_page", _page_spy)
@@ -298,8 +302,9 @@ def test_drain_commits_never_expose_doc_edges_to_missing_nodes(repo, monkeypatch
     """变异钉(codex #663 R1 P2):把「krel 先于 ko」的登记序连同终局语句序
     一起换回旧序(点先于边)→ 某个已提交的批边界上出现「端点对象已消失」的
     文档源关系边,报红。边先于点是排水提交边界结构一致性的承载序。"""
-    monkeypatch.setattr(kl, "_GRAPH_DRAIN_PAGE_ROWS", 3)
-    monkeypatch.setattr(kl, "_GRAPH_DRAIN_THRESHOLD_ROWS", 3)
+    monkeypatch.setattr(
+        repo._runtime.knowledge_lifecycle, "_graph_drain_budget_rows", 3
+    )
     notebook = repo.create_notebook(NotebookCreate(name="edges"))
     _seed_graph(repo, notebook.id, doc_objects=9)
     now = _now()
@@ -317,7 +322,7 @@ def test_drain_commits_never_expose_doc_edges_to_missing_nodes(repo, monkeypatch
     store = repo._runtime.knowledge
     original = store.drain_notebook_graph_rows_page
 
-    def _spy(db, nb, table, limit):
+    def _spy(db, nb, step, limit):
         dangling_snapshots.append(_count(
             repo,
             "SELECT COUNT(*) FROM knowledge_relations r WHERE r.notebook_id=? "
@@ -328,7 +333,7 @@ def test_drain_commits_never_expose_doc_edges_to_missing_nodes(repo, monkeypatch
             "(SELECT 1 FROM knowledge_objects ko WHERE ko.id=r.target_object_id))",
             (nb, nb),
         ))
-        return original(db, nb, table, limit)
+        return original(db, nb, step, limit)
 
     monkeypatch.setattr(store, "drain_notebook_graph_rows_page", _spy)
     repo.delete_notebook_kg(notebook.id)
@@ -339,11 +344,68 @@ def test_drain_commits_never_expose_doc_edges_to_missing_nodes(repo, monkeypatch
     )
 
 
+def test_high_fanout_dependents_are_predrained_in_bounded_pages(repo, monkeypatch):
+    """变异钉(codex #663 R3 P1):把 ko 之前的两个非镜像预排水步从登记表删掉
+    → 高扇出从属行(合并对象的 provenance 行/簇成员行)全部落进 ko 页的事务内
+    级联,单页删除远超行预算,报红。预排水步存在时:从属行先按自己的行预算
+    逐页排掉,ko 页的级联只剩残余。"""
+    from app.repositories.sqlite.knowledge_store import _GRAPH_DRAIN_STEPS
+
+    service = repo._runtime.knowledge_lifecycle
+    monkeypatch.setattr(service, "_graph_drain_budget_rows", 3)
+    notebook = repo.create_notebook(NotebookCreate(name="fanout"))
+    _seed_graph(repo, notebook.id, doc_objects=4)
+    now = _now()
+    with repo._runtime.database.write() as db:
+        # 每个对象 5 条 provenance 行(合并对象形状):20 行 >> 预算 3。
+        for i in range(4):
+            for j in range(5):
+                db.execute(
+                    "INSERT INTO knowledge_object_sources "
+                    "(object_id,source_id,notebook_id) VALUES (?,?,?)",
+                    (f"ko-doc-{i}", f"src-extra-{j}", notebook.id),
+                )
+
+    pages = []
+    store = repo._runtime.knowledge
+    original = store.drain_notebook_graph_rows_page
+
+    def _spy(db, nb, step, limit):
+        deleted = original(db, nb, step, limit)
+        if deleted:
+            pages.append((step, deleted))
+        return deleted
+
+    monkeypatch.setattr(store, "drain_notebook_graph_rows_page", _spy)
+    repo.delete_notebook_kg(notebook.id)
+
+    pre_kos_steps = [
+        i for i, (t, _p, _n, m) in enumerate(_GRAPH_DRAIN_STEPS)
+        if t == "knowledge_object_sources" and not m
+    ]
+    assert len(pre_kos_steps) == 1
+    pre_pages = [d for s_, d in pages if s_ == pre_kos_steps[0]]
+    assert pre_pages, "高扇出 provenance 行必须由预排水步先行分页排掉"
+    assert all(d.get("knowledge_object_sources", 0) <= 3 for d in pre_pages), (
+        "预排水页必须守自己的行预算"
+    )
+    # ko 页的事务内级联只剩残余(预排水已把 20 行吃到 ≤阈值)。
+    ko_pages = [
+        d for s_, d in pages
+        if _GRAPH_DRAIN_STEPS[s_][0] == "knowledge_objects" and _GRAPH_DRAIN_STEPS[s_][3]
+    ]
+    assert ko_pages, "前置不成立:没有 ko 页"
+    assert all(d.get("knowledge_object_sources", 0) <= 3 for d in ko_pages), (
+        f"ko 页的级联不得吞下超预算的从属行:{ko_pages}"
+    )
+
+
 def test_tombstone_mid_drain_aborts_like_the_other_checkpoints(repo, monkeypatch):
     """变异钉:把排水循环里的 `_notebook_deleting` 检查点删掉 → 墓碑落地后
     排水照跑到底,报红。删除作业的相位 3 拥有这些行,维护路径应当就地停手。"""
-    monkeypatch.setattr(kl, "_GRAPH_DRAIN_PAGE_ROWS", 3)
-    monkeypatch.setattr(kl, "_GRAPH_DRAIN_THRESHOLD_ROWS", 3)
+    monkeypatch.setattr(
+        repo._runtime.knowledge_lifecycle, "_graph_drain_budget_rows", 3
+    )
     notebook = repo.create_notebook(NotebookCreate(name="abort"))
     _seed_graph(repo, notebook.id, doc_objects=10)
 
@@ -369,15 +431,16 @@ def test_drain_stall_raises_loudly(repo, monkeypatch):
     """变异钉:把「3 次连续零删响亮失败」改成静默继续 → 排水循环失去终止
     条件(本用例以 RuntimeError 类型断言判红;仓库没有 pytest-timeout,
     真跑死循环只会挂到 CI 任务级超时,所以辨别信号是这里的异常断言本身)。"""
-    monkeypatch.setattr(kl, "_GRAPH_DRAIN_PAGE_ROWS", 3)
-    monkeypatch.setattr(kl, "_GRAPH_DRAIN_THRESHOLD_ROWS", 3)
+    monkeypatch.setattr(
+        repo._runtime.knowledge_lifecycle, "_graph_drain_budget_rows", 3
+    )
     notebook = repo.create_notebook(NotebookCreate(name="stall"))
     _seed_graph(repo, notebook.id, doc_objects=10)
 
     store = repo._runtime.knowledge
     monkeypatch.setattr(
         store, "drain_notebook_graph_rows_page",
-        lambda db, nb, table, limit: {},
+        lambda db, nb, step, limit: {},
     )
     with pytest.raises(RuntimeError, match="stalled"):
         repo.delete_notebook_kg(notebook.id)
@@ -405,10 +468,11 @@ class _RecordingDb:
 def _mirror_check(steps, deletes):
     import re
 
-    assert len(deletes) == len(steps), (
-        f"终局 DELETE 语句数({len(deletes)})与排水登记表条数({len(steps)})不一致"
+    mirrored = [(t, p) for t, p, _n, m in steps if m]
+    assert len(deletes) == len(mirrored), (
+        f"终局 DELETE 语句数({len(deletes)})与登记表镜像条数({len(mirrored)})不一致"
     )
-    for (table, predicate, _params), statement in zip(steps, deletes):
+    for (table, predicate), statement in zip(mirrored, deletes):
         match = re.fullmatch(r'DELETE FROM "?([\w]+)"? WHERE (.+)', statement)
         assert match, statement
         assert match.group(1) == table, (
@@ -447,7 +511,7 @@ def test_drain_registry_mirrors_the_final_statements_postgres():
     KnowledgeStore.delete_notebook_graph_rows(fake, "nb-x", "2026-01-01")
     deletes = [s for s in fake.executed if s.startswith("DELETE FROM ")]
     _mirror_check(_GRAPH_DRAIN_STEPS, deletes)
-    registry_tables = {t for t, _p, _n in _GRAPH_DRAIN_STEPS}
+    registry_tables = {t for t, _p, _n, m in _GRAPH_DRAIN_STEPS if m}
     assert registry_tables >= _GRAPH_RESET_TABLES, (
         "排水登记表漏掉了 _GRAPH_RESET_TABLES 的成员:"
         f"{sorted(_GRAPH_RESET_TABLES - registry_tables)}"

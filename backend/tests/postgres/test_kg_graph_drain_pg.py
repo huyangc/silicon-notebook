@@ -8,7 +8,6 @@ import pytest
 
 from app.models.notebooks import NotebookCreate
 from app.repositories.postgres._store_utils import jsonb, normalize_timestamp
-from app.services import knowledge_lifecycle as kl
 
 pytestmark = pytest.mark.xdist_group(name="postgres_kg_graph_drain")
 
@@ -65,25 +64,25 @@ def test_drain_primitives_page_and_probe_on_postgres(postgres_repository):
     store = runtime.knowledge
 
     with runtime.database.connect() as db:
-        assert store.graph_drain_backlog(db, notebook_id, 3) == ("knowledge_objects", 3)
+        assert store.graph_drain_backlog(db, notebook_id, 3) == ("knowledge_objects", 5)
         assert store.graph_drain_backlog(db, notebook_id, 7) is None
-        # start 游标(评审 F4):从 knowledge_objects(改序后下标 3)之后起扫,
-        # 看不到它的积压。
-        assert store.graph_drain_backlog(db, notebook_id, 0, 4) is None
+        # start 游标(评审 F4):从 knowledge_objects(预排水步加入后下标 5)
+        # 之后起扫,看不到它的积压。
+        assert store.graph_drain_backlog(db, notebook_id, 0, 6) is None
 
     with runtime.database.write() as db:
         assert store.drain_notebook_graph_rows_page(
-            db, notebook_id, "knowledge_objects", 3
+            db, notebook_id, 5, 3
         )["knowledge_objects"] == 3
     with runtime.database.write() as db:
         assert store.drain_notebook_graph_rows_page(
-            db, notebook_id, "knowledge_objects", 3
+            db, notebook_id, 5, 3
         )["knowledge_objects"] == 3
     with runtime.database.connect() as db:
-        assert store.graph_drain_backlog(db, notebook_id, 0) == ("knowledge_objects", 3)
+        assert store.graph_drain_backlog(db, notebook_id, 0) == ("knowledge_objects", 5)
     with runtime.database.write() as db:
         assert store.drain_notebook_graph_rows_page(
-            db, notebook_id, "knowledge_objects", 3
+            db, notebook_id, 5, 3
         )["knowledge_objects"] == 1
     with runtime.database.connect() as db:
         assert store.graph_drain_backlog(db, notebook_id, 0) is None
@@ -92,9 +91,9 @@ def test_drain_primitives_page_and_probe_on_postgres(postgres_repository):
             (notebook_id,),
         ).fetchone()["c"] == 0
 
-    with pytest.raises(ValueError, match="unknown graph drain table"):
+    with pytest.raises(ValueError, match="unknown graph drain step"):
         with runtime.database.write() as db:
-            store.drain_notebook_graph_rows_page(db, notebook_id, "users", 1)
+            store.drain_notebook_graph_rows_page(db, notebook_id, 99, 1)
 
 
 @pytest.mark.postgres_integration
@@ -103,8 +102,10 @@ def test_delete_notebook_kg_drains_then_resets_on_postgres(
 ):
     """端到端等价:超阈值图走排水后,终局效果与未排水逐字节同契约——用户文档
     对象清空、memory 投影保留、counts 报全量、epoch+1 seq 0。"""
-    monkeypatch.setattr(kl, "_GRAPH_DRAIN_PAGE_ROWS", 3)
-    monkeypatch.setattr(kl, "_GRAPH_DRAIN_THRESHOLD_ROWS", 3)
+    monkeypatch.setattr(
+        postgres_repository._runtime.knowledge_lifecycle,
+        "_graph_drain_budget_rows", 3,
+    )
     notebook_id = postgres_repository.create_notebook(
         NotebookCreate(name="drain-e2e")
     ).id
@@ -115,16 +116,16 @@ def test_delete_notebook_kg_drains_then_resets_on_postgres(
     store = runtime.knowledge
     original = store.drain_notebook_graph_rows_page
 
-    def _spy(db, nb, table, limit):
-        deleted = original(db, nb, table, limit)
-        pages.append((table, deleted))
+    def _spy(db, nb, step, limit):
+        deleted = original(db, nb, step, limit)
+        pages.append((step, deleted))
         return deleted
 
     monkeypatch.setattr(store, "drain_notebook_graph_rows_page", _spy)
     counts = postgres_repository.delete_notebook_kg(notebook_id)
 
     assert pages, "超阈值的图必须走排水"
-    assert all(d.get("knowledge_objects", 0) <= 3 for _t, d in pages)
+    assert all(d.get("knowledge_objects", 0) <= 3 for _s, d in pages)
     assert counts["knowledge_objects"] == 10
     with runtime.database.connect() as db:
         assert db.execute(

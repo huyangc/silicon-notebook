@@ -1959,13 +1959,14 @@ class KnowledgeStorePort(Protocol):
         ...
     @staticmethod
     def drain_notebook_graph_rows_page(
-        db: object, notebook_id: str, table: str, limit: int
+        db: object, notebook_id: str, step: int, limit: int
     ) -> dict[str, int]:
         """batch-3-W1 T-5a：按该表在排水登记表里的谓词删除一页(§1.5 形一
         rowid / 形二 ctid),事务归调用方所有——每页一个 ``write()``,且同事务
         必须经 ``mark_unified_kg_dirty_in_tx`` 闸口 bump
         ``kg_mutation_seq``(census 纪律与单一闸口红线)。返回本页按表计的
-        删除行数(空 dict = 本表已无匹配)。``knowledge_objects`` 页按
+        删除行数(空 dict = 本步已无匹配)。``step`` 是排水登记表下标(表名
+        会在预排水步与镜像步之间重复,名字不再唯一)。``knowledge_objects`` 页按
         ``_delete_object_id_batch`` 同形连带同事务清掉本页对象的
         embeddings/簇成员/kos 行(评审 F3:任何提交都不暴露对象已消失的
         簇行)。"""
