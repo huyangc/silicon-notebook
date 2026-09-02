@@ -1773,6 +1773,28 @@ def verify_snapshot(database: Path, storage_dir: Path) -> VerificationResult:
             # these rows, i.e. a rosier picture than production. Driven
             # explicitly here, against the disposable BACKUP copy.
             repo._recover_interrupted_jobs()
+            # codex #659 R24 P2: production startup ALSO runs the delete-job
+            # sweep before mark_ready (startup_warmup.py::
+            # _sweep_notebook_delete_jobs_on_start) — a backup captured with
+            # a stale active delete job, or a status='deleting' notebook
+            # whose job row is gone, WILL have that deletion resumed and
+            # completed at next boot. Without modelling it here the verifier
+            # reports a rosier picture than production (a "nothing changes"
+            # PASS for a snapshot boot would mutate heavily). ``_submit`` is
+            # patched to run the job INLINE so the sweep is deterministic —
+            # no thread pool to drain, and the post-startup snapshot below
+            # observes the fully settled state. A resulting non-ok report
+            # for a mid-delete backup is deliberate truth-telling, not a
+            # regression: normalizing a whole notebook's disappearance would
+            # be indistinguishable from silent data loss.
+            delete_runner = getattr(repo._runtime, "notebook_delete", None)
+            if delete_runner is not None:
+                def _inline_submit(job_id: str, notebook_id: str) -> bool:
+                    delete_runner.run(job_id)
+                    return True
+
+                with mock.patch.object(delete_runner, "_submit", _inline_submit):
+                    delete_runner.sweep_once()
             reads = exercise_reads(repo, backup_path)
 
         column_plan = {

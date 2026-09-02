@@ -2114,6 +2114,34 @@ def test_row_mutation_or_deletion_after_open_fails_verification(
     assert result.changed_tables
 
 
+def test_startup_delete_job_sweep_is_modelled_not_skipped(tmp_path):
+    """codex #659 R24 P2 变异钉:把 verify 里的 delete-job sweep 建模删掉 →
+    「status='deleting' 却没有作业行」的快照(生产下一次启动会由 sweep 驱动 B
+    重造作业并把整本库删完)被报成 ok=True 的「启动什么都不改」假 PASS,报红。
+    建模后必须如实报非 ok,且 notebooks 行在启动后快照里已被删除作业清掉。"""
+    module = _load_verifier()
+    database, storage = _copy_fixture(tmp_path)
+
+    # 升级到最新 schema(带 notebook_delete_jobs 表),再伪造一个「删除中、
+    # 作业行丢失」的中断态——正是 §T-4 驱动 B 在启动时要接手的形状。
+    upgraded = module.SQLiteRepository(
+        module.offline_settings(database, tmp_path / "upgrade-storage")
+    )
+    upgraded.close_local()
+    with sqlite3.connect(database) as db:
+        db.execute("UPDATE notebooks SET status='deleting' WHERE id='nb-fixture'")
+    db.close()
+
+    result = module.verify_snapshot(database, storage)
+
+    assert not result.ok, (
+        "中断删除的快照在启动后会被大改,verify 不得报「什么都不变」的假 PASS"
+    )
+    assert any("notebook" in table for table in result.changed_tables), (
+        f"启动后快照应体现删除作业的效果,changed_tables={result.changed_tables}"
+    )
+
+
 def test_only_recovery_seed_and_admin_upgrade_fields_are_normalized(tmp_path):
     module = _load_verifier()
     database, storage = _copy_fixture(tmp_path)
