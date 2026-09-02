@@ -547,25 +547,71 @@ class KnowledgeLifecycleService:
         """
         self.get_notebook(notebook_id)
         drained = self._drain_graph_rows_before_reset(notebook_id)
-        with self._write() as db:
-            source_index_was_certified = self.knowledge.source_index_backfilled(
-                db, notebook_id
+        for attempt in range(3):
+            with self._write() as db:
+                # codex #663 R6 P1: the drain's termination probe runs on a
+                # read connection and is NOT atomic with concurrent
+                # ingestion — a store_kg batch committing into an
+                # already-probed table while the from-0 scan walks later
+                # entries escapes detection entirely. So when a drain
+                # actually ran, the bound is re-validated HERE, inside the
+                # final write transaction itself: on SQLite the write lock
+                # is global, making this probe perfectly atomic with the
+                # deletes below; on PostgreSQL rows committing after this
+                # in-transaction probe are bounded by the final
+                # transaction's own (short, ≤threshold-sized) duration —
+                # the race window shrinks from "whole probe scan" to "one
+                # fast transaction", self-limiting rather than unbounded.
+                # Over the threshold -> commit nothing, drain again; three
+                # failed attempts fail loudly instead of looping forever.
+                # The small-graph fast path (drained == {}) skips this probe
+                # so the legacy single-transaction shape stays byte-
+                # identical (the P0-1 pin's event sequence included).
+                if drained and self.knowledge.graph_drain_backlog(
+                    db, notebook_id, self._graph_drain_budget_rows, 0
+                ) is not None:
+                    counts = None
+                else:
+                    source_index_was_certified = (
+                        self.knowledge.source_index_backfilled(db, notebook_id)
+                    )
+                    counts = self.knowledge.delete_notebook_graph_rows(
+                        db, notebook_id, self._now()
+                    )
+                    # delete_notebook_graph_rows RESETS unified_kg_state in
+                    # place (PR-2) while keeping Memory/Knowhow objects and
+                    # their forward-maintained provenance. Preserve an
+                    # existing completeness certificate, but never promote a
+                    # legacy/unknown notebook merely because its
+                    # user-document graph was cleared: historical hidden
+                    # projections may also predate forward maintenance. The
+                    # reset UPDATE deliberately does not touch
+                    # source_index_backfilled itself (see its own comment),
+                    # so this re-assertion is belt-and-suspenders now rather
+                    # than the repair it was when the row used to be dropped
+                    # and re-inserted bare.
+                    if source_index_was_certified:
+                        self.knowledge.mark_source_index_backfilled(
+                            db, notebook_id
+                        )
+            if counts is not None:
+                break
+            # In-transaction bound validation failed: a concurrent writer
+            # refilled some table past the threshold while the drain's own
+            # probe was elsewhere. Nothing was committed above (the write
+            # closed empty) — drain the new backlog and try the final pass
+            # again.
+            for table, deleted in self._drain_graph_rows_before_reset(
+                notebook_id
+            ).items():
+                drained[table] = drained.get(table, 0) + deleted
+        else:
+            raise RuntimeError(
+                f"delete_notebook_kg for notebook {notebook_id}: the final "
+                "reset's in-transaction bound validation kept failing after "
+                "3 drain rounds — a concurrent writer is refilling the graph "
+                "faster than the drain empties it"
             )
-            counts = self.knowledge.delete_notebook_graph_rows(
-                db, notebook_id, self._now()
-            )
-            # delete_notebook_graph_rows RESETS unified_kg_state in place
-            # (PR-2) while keeping Memory/Knowhow objects and their
-            # forward-maintained provenance. Preserve an existing
-            # completeness certificate, but never promote a legacy/unknown
-            # notebook merely because its user-document graph was cleared:
-            # historical hidden projections may also predate forward
-            # maintenance. The reset UPDATE deliberately does not touch
-            # source_index_backfilled itself (see its own comment), so this
-            # re-assertion is belt-and-suspenders now rather than the repair
-            # it was when the row used to be dropped and re-inserted bare.
-            if source_index_was_certified:
-                self.knowledge.mark_source_index_backfilled(db, notebook_id)
         # P0-1 (post-review): unified_cache has NO version component of its
         # own — invalidate_kg is its only eviction path, not a redundant
         # seq-aliasing patch. See this method's own docstring.
