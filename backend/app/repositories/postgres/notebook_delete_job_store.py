@@ -521,13 +521,17 @@ class NotebookDeleteJobStore:
     # (``sqlite/chunk_store.py``'s ``CHUNK_ELEMENT_LOOKUP_BATCH``).
     _CHILD_BATCH_SIZE = 500
 
-    def delete_fts_shadow(self, table: str, notebook_id: str) -> None:
-        """§4.4/P2-g: no-op on PostgreSQL -- this backend has no FTS5 shadow
-        tables (full-text search rides GIN trgm indexes on the real
-        columns). SQLite twin actually deletes from ``kg_objects_fts``/
-        ``chunks_fts``. Present here so the backend-neutral runner can call
-        it unconditionally without asking which backend it is on."""
-        return None
+    def delete_fts_shadow_page(
+        self, table: str, notebook_id: str, cursor_rowid: int, limit: int,
+    ) -> tuple[int, int]:
+        """§4.4/P2-g + codex #659 R5: no-op on PostgreSQL -- this backend has
+        no FTS5 shadow tables (full-text search rides GIN trgm indexes on the
+        real columns). SQLite twin deletes ONE bounded rowid-keyset page from
+        ``kg_objects_fts``/``chunks_fts`` per call. Present here so the
+        backend-neutral runner can loop it unconditionally without asking
+        which backend it is on."""
+        del table, notebook_id, limit
+        return 0, cursor_rowid
 
     def delete_direct_page_form_one(
         self, table: str, id_column: str, filter_column: str,

@@ -695,10 +695,27 @@ class NotebookDeleteJobRunner:
             key = CURSOR_KEYS[index]
             after = resume_cursor if index == start_index else ""
             if isinstance(step, DirectTable):
-                # §4.4/P2-g: FTS5 shadow cleanup rides alongside its real
-                # table's own unit -- a no-op on PostgreSQL, idempotent on
-                # every resume.
-                self.delete_jobs.delete_fts_shadow(step.table, notebook_id)
+                # §4.4/P2-g + codex #659 R5: FTS5 shadow cleanup rides
+                # alongside its real table's own unit — paged (one bounded
+                # write transaction per page, rowid-keyset so the page
+                # sequence is a single forward scan), a structural no-op on
+                # PostgreSQL, idempotent on every resume. Same per-batch
+                # ownership/claim re-check discipline as every other
+                # destructive phase-3 batch.
+                shadow_cursor = 0
+                while True:
+                    if not self._batch_ok(
+                        job_id, lease_token, claim, residual=residual,
+                    ):
+                        return False
+                    deleted, shadow_cursor = (
+                        self.delete_jobs.delete_fts_shadow_page(
+                            step.table, notebook_id, shadow_cursor,
+                            _ROWS_PAGE_SIZE,
+                        )
+                    )
+                    if deleted == 0:
+                        break
                 if not self._run_direct_table(
                     job_id, notebook_id, lease_token, claim, key, step, after,
                     residual=residual,

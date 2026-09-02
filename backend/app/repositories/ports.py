@@ -1207,12 +1207,17 @@ class NotebookDeleteJobStorePort(Protocol):
         ``rowcount==0`` 之后用它分辨「表已清空」（正常终止）与「行仍在但
         连续几轮都不命中」（响亮失败信号）。"""
         ...
-    def delete_fts_shadow(self, table: str, notebook_id: str) -> None:
-        """§4.4/P2-g：SQLite 的两张 FTS5 影子表（``kg_objects_fts``/
-        ``chunks_fts``）本没有到 ``notebooks`` 的 FK（虚表从不带级联），
-        过去挂在相位 5 的尾巴上无条件删——挪到这里，让它们跟着各自真身表的
-        相位 3 批次一起清。PostgreSQL 上是空操作（没有 FTS5 影子表）。
-        runner 对每一个 DirectTable 单元都无条件调用它，不判断后端。"""
+    def delete_fts_shadow_page(
+        self, table: str, notebook_id: str, cursor_rowid: int, limit: int,
+    ) -> "tuple[int, int]":
+        """§4.4/P2-g + codex #659 R5：SQLite 的两张 FTS5 影子表
+        （``kg_objects_fts``/``chunks_fts``）本没有到 ``notebooks`` 的 FK
+        （虚表从不带级联），过去挂在相位 5 的尾巴上一条无界 DELETE——大库
+        会占着 SQLite 单写者锁跑一个巨事务。现按 **rowid keyset** 每次删一
+        页（返回 ``(deleted, next_cursor)``，序列整体只做一次前向扫描），
+        跟着各自真身表的相位 3 单元循环到归零。PostgreSQL 上是结构性空操作
+        （没有 FTS5 影子表）。runner 对每个 DirectTable 单元无条件循环它，
+        不判断后端。"""
         ...
 
     # ---- 相位 4（files，design §T-3b）：读相位 1 物化的路径侧表 ----

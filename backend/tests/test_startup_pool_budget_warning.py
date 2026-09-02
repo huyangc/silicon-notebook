@@ -18,6 +18,7 @@ def _settings(**overrides) -> SimpleNamespace:
         kg_job_concurrency=8,
         search_concurrency_limit=4,
         scale_build_concurrency=2,
+        notebook_delete_concurrency=1,
         postgres_pool_max_size=10,
     )
     base.update(overrides)
@@ -25,17 +26,18 @@ def _settings(**overrides) -> SimpleNamespace:
 
 
 def test_production_defaults_trigger_the_warning():
-    """生产默认 4+4+8+4+2=22 > postgres_pool_max_size 默认 10——必须触发。
-    搜索闸与 scale 构建并发也计入(codex #627 R4 P2):它们各占连接且与维护池独立。"""
+    """生产默认 4+4+8+4+2+1=23 > postgres_pool_max_size 默认 10——必须触发。
+    搜索闸与 scale 构建并发计入(codex #627 R4 P2),批 3·W1 的删除池并发同理
+    计入(codex #659 R4):它们各占连接且与维护池独立。"""
     warning = _pool_budget_warning(_settings())
     assert warning is not None
     assert "POSTGRES_POOL_MAX_SIZE=10" in warning
-    assert "22" in warning
-    assert "23" in warning  # 建议值 = budget + 1
+    assert "23" in warning
+    assert "24" in warning  # 建议值 = budget + 1
 
 
 def test_pool_max_strictly_above_budget_is_silent():
-    warning = _pool_budget_warning(_settings(postgres_pool_max_size=23))
+    warning = _pool_budget_warning(_settings(postgres_pool_max_size=24))
     assert warning is None
 
 
