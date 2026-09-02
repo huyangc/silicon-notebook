@@ -96,6 +96,21 @@ class AssetService:
         self._notebook_exists = notebook_exists or self._default_notebook_exists
 
     def _default_notebook_exists(self, notebook_id: str) -> bool:
+        # codex #659 R17: this must be a LIFECYCLE-only probe, never an
+        # authorization-filtered catalog view — ``get_notebook`` also raises
+        # ``KeyError`` when the *request actor* lost read access mid-request
+        # (a share revoked between the asset-row insert and this recheck),
+        # and compensating on that would unlink a perfectly valid file while
+        # its committed ``notebook_assets`` row stays behind: a permanently
+        # broken asset for the owner. ``status_of`` is a bare status read
+        # with no actor, no auth predicate; only "row gone or deleting"
+        # compensates. ``get_notebook`` remains the last-resort fallback for
+        # repos that expose no store seam.
+        runtime = getattr(self._repo, "_runtime", None)
+        store = getattr(runtime, "notebook_store", None)
+        status_of = getattr(store, "status_of", None)
+        if callable(status_of):
+            return status_of(notebook_id) not in ("deleting", None)
         probe = getattr(self._repo, "get_notebook", None)
         if probe is None:
             return True
