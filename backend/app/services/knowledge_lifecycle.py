@@ -107,6 +107,15 @@ INTERRUPTED_KG_BUILD_ERROR_MESSAGE = (
 
 _SOURCE_BUILD_PAGE_SIZE = 500
 
+# batch-3-W1 T-5a (codex #663 R13 P2): the drain's two safety limits, NAMED so
+# the loop conditions and their diagnostic messages cannot silently drift.
+# _GRAPH_RESET_ATTEMPTS bounds final-reset retries (each retry only fires
+# after an in-transaction bound-probe failure or a 40001 serialization
+# abort); _GRAPH_DRAIN_STALL_LIMIT bounds consecutive zero-delete pages
+# before the drain declares predicate drift. Both fail LOUDLY at the limit.
+_GRAPH_RESET_ATTEMPTS = 3
+_GRAPH_DRAIN_STALL_LIMIT = 3
+
 # relink 的两个有界化常数。页大小只影响「一次问数据库要多少个来源 id」,与
 # `_SOURCE_BUILD_PAGE_SIZE` 取同一个值:两者是同一张表、同一条 `(created_at, id)`
 # keyset、同一条 `idx_sources_notebook_created`。刻意不取更小值——SQLite 把行值
@@ -592,7 +601,7 @@ class KnowledgeLifecycleService:
         """``delete_notebook_kg``'s body, run under the kg_building fence
         (its docstring carries the full contract)."""
         drained = self._drain_graph_rows_before_reset(notebook_id)
-        for attempt in range(3):
+        for attempt in range(_GRAPH_RESET_ATTEMPTS):
             # codex #663 R11/R12 P2: the tombstone checkpoint guards EVERY
             # final-reset attempt — a small graph never enters the drain
             # loop's per-batch checkpoint, and a tombstone can land during a
@@ -666,7 +675,12 @@ class KnowledgeLifecycleService:
             # In-transaction bound validation failed (or the transaction was
             # serialization-aborted): a concurrent writer moved the graph
             # under us. Nothing was committed above — drain the new backlog
-            # and try the final pass again.
+            # and try the final pass again. codex #663 R13 P2: SKIP the
+            # re-drain when no reset attempt remains — the loop would exit
+            # straight into the loud failure, and a full destructive drain
+            # nobody will follow up on is pure wasted latency.
+            if attempt + 1 >= _GRAPH_RESET_ATTEMPTS:
+                continue
             for table, deleted in self._drain_graph_rows_before_reset(
                 notebook_id
             ).items():
@@ -674,9 +688,10 @@ class KnowledgeLifecycleService:
         else:
             raise RuntimeError(
                 f"delete_notebook_kg for notebook {notebook_id}: the final "
-                "reset's in-transaction bound validation kept failing after "
-                "3 drain rounds — a concurrent writer is refilling the graph "
-                "faster than the drain empties it"
+                "reset's in-transaction bound validation kept failing "
+                f"after {_GRAPH_RESET_ATTEMPTS} attempts — a concurrent "
+                "writer is refilling the graph faster than the drain "
+                "empties it"
             )
         # P0-1 (post-review): unified_cache has NO version component of its
         # own — invalidate_kg is its only eviction path, not a redundant
@@ -782,11 +797,12 @@ class KnowledgeLifecycleService:
                 stalls = 0
                 continue
             stalls += 1
-            if stalls >= 3:
+            if stalls >= _GRAPH_DRAIN_STALL_LIMIT:
                 raise RuntimeError(
                     f"graph drain stalled on {table} for notebook "
-                    f"{notebook_id}: backlog probe keeps naming it but the "
-                    "page delete removes 0 rows (predicate drift?)"
+                    f"{notebook_id}: backlog probe keeps naming it but "
+                    f"{_GRAPH_DRAIN_STALL_LIMIT} consecutive page deletes "
+                    "removed 0 rows (predicate drift?)"
                 )
 
     def prepare_indexing_pipeline_kg(
