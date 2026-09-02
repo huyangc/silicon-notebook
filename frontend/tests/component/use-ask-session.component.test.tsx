@@ -2560,6 +2560,124 @@ test("a run that completes during restoration is re-resolved from history instea
   expect(value!.turns.map((turn) => turn.question)).toEqual(["question-conversation-x", "follow-up"]);
 });
 
+// codex #661 r2 P2: a durable run handed over from an older intent preview must
+// keep that preview's submission order, or it would outrank a newer question.
+test("an older preview finishing late hands its serial to the durable run and stays behind the newer question", async () => {
+  const preview = deferred<QueryIntentContract>();
+  const streamA = deferred<AskResponse>();
+  const streamB = deferred<AskResponse>();
+  const streams: Array<{ question: string; onStart: (jobId: string, conversationId: string) => void | Promise<void> }> = [];
+  api.previewAskIntent.mockReturnValue(preview.promise);
+  api.runAskStream.mockImplementation((
+    _notebookId: string,
+    payload: unknown,
+    _onProgress: unknown,
+    _signal?: AbortSignal,
+    nextOnStart?: (jobId: string, conversationId: string) => void | Promise<void>,
+  ) => {
+    const question = (payload as { question: string }).question;
+    streams.push({ question, onStart: nextOnStart! });
+    return question === "question B" ? streamB.promise : streamA.promise;
+  });
+  api.listConversations.mockResolvedValue([]);
+  render(<Harness />);
+  beginOwnedNotebook();
+  act(() => value!.selectMode("reasoning"));
+
+  let submittingA!: Promise<void>;
+  act(() => {
+    submittingA = value!.submit("clear A");
+  });
+  act(() => value!.startNewSession(2));
+  let submittingB!: Promise<void>;
+  act(() => {
+    submittingB = value!.submit("question B");
+  });
+  act(() => value!.leaveWorkspace());
+
+  // The older preview completes while away and starts its durable run late.
+  preview.resolve(contractFor("clear A", false));
+  await act(async () => {
+    await preview.promise;
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  expect(streams.map((item) => item.question)).toEqual(["question B", "clear A"]);
+
+  const owner = beginOwnedNotebook(3);
+  await act(async () => {
+    await value!.restoreNotebook(owner);
+    value!.finishNotebookTransition(owner);
+  });
+  expect(value!.pendingQuestion).toBe("question B");
+
+  streamA.resolve(answer("conversation-a"));
+  streamB.resolve(answer("conversation-b"));
+  await act(async () => {
+    await streams[1]!.onStart("job-a", "conversation-a");
+    await streams[0]!.onStart("job-b", "conversation-b");
+    await submittingA;
+    await submittingB;
+  });
+  expect(value!.turns.map((turn) => turn.question)).toEqual(["question B"]);
+});
+
+// codex #661 r2 P2: after `started` the durable job outlives the transport, so a
+// detached transport failure must defer to history/reconnect instead of
+// re-offering the question as a failed draft.
+test("a post-started transport failure while away defers to the restored durable state", async () => {
+  const stream = deferred<AskResponse>();
+  let onStart: ((jobId: string, conversationId: string) => void | Promise<void>) | undefined;
+  api.runAskStream.mockImplementation((
+    _notebookId: string,
+    _payload: unknown,
+    _onProgress: unknown,
+    _signal?: AbortSignal,
+    nextOnStart?: (jobId: string, conversationId: string) => void | Promise<void>,
+  ) => {
+    onStart = nextOnStart;
+    return stream.promise;
+  });
+  api.listConversations.mockResolvedValue([summary("conversation-durable")]);
+  api.getConversation.mockResolvedValue({
+    ...detail("conversation-durable"),
+    turn_count: 0,
+    turns: [],
+    active_job: {
+      job_id: "job-durable",
+      question: "durable question",
+      asked_at: "2026-08-22T00:00:00Z",
+      mode: "chunk",
+      trace: [],
+    },
+  });
+  render(<Harness />);
+  beginOwnedNotebook();
+
+  let submitting!: Promise<void>;
+  act(() => {
+    submitting = value!.submit("durable question");
+  });
+  await act(async () => {
+    await onStart!("job-durable", "conversation-durable");
+  });
+  act(() => value!.leaveWorkspace());
+  stream.reject(new Error("transport reset"));
+  await act(async () => submitting);
+
+  const owner = beginOwnedNotebook(2);
+  await act(async () => {
+    await value!.restoreNotebook(owner);
+    value!.finishNotebookTransition(owner);
+  });
+  expect(effects.reportError).not.toHaveBeenCalled();
+  expect(value!.question).toBe("");
+  // The server still owns the job: reconnect polling projects it as pending.
+  expect(value!.asking).toBe(true);
+  expect(value!.pendingQuestion).toBe("durable question");
+  expect(value!.conversationId).toBe("conversation-durable");
+});
+
 // PR #557 regression: `turns`/`sessions`/`pendingTrace`/`feedbackSent` used to
 // fall back to a bare `[]`/`{}` literal whenever the owner is not visible
 // (actorId is null, e.g. logged out / collection page). A bare literal is a
