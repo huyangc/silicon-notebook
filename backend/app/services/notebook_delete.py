@@ -996,7 +996,9 @@ class NotebookDeleteJobRunner:
         ``_sweep_ingestion_stragglers``——``notebooks`` 行在这条路径里更是
         老早（带外删除）就已经不在了，摄取 straggler 的风险与正常收尾路径
         一样存在，理由见该方法自己的 docstring。"""
-        settled = self.delete_jobs.finish_residual(job_id, lease_token=lease_token)
+        settled = self.delete_jobs.finish_residual(
+            job_id, notebook_id, lease_token=lease_token
+        )
         if settled:
             self._sweep_ingestion_stragglers(notebook_id)
             _log.info(

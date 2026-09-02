@@ -981,6 +981,11 @@ async def upload_notebook_asset(notebook_id: str, file: UploadFile = File(...)) 
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    except KeyError:
+        # codex #659 R6 P1: the notebook was deleted/deleting by the time the
+        # write-after-write recheck ran — AssetService already compensated
+        # (unlinked the file, cleaned the now-empty directory).
+        raise HTTPException(status_code=404, detail="Notebook not found")
     return {"id": asset["id"], "url": f"/api/notebooks/{notebook_id}/assets/{asset['id']}"}
 
 

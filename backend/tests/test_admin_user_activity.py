@@ -940,6 +940,13 @@ def test_deleted_notebook_keeps_only_expiring_activity_metadata(repo):
         assert db.execute(
             "SELECT 1 FROM ask_trace_steps WHERE job_id='ask-1'"
         ).fetchone() is None
+        # codex #659 R6 P2: conversations has no FK and used to survive a
+        # notebook delete entirely (a pre-existing gap this fix closes) — it
+        # is CONTENT, not admin-analysis metadata, so it must not survive
+        # either.
+        assert db.execute(
+            "SELECT 1 FROM conversations WHERE id='conv-1'"
+        ).fetchone() is None
         retained = db.execute(
             "SELECT activity_type,record_id,notebook_name,deleted_at,expires_at "
             "FROM retained_user_activity ORDER BY activity_type"
@@ -987,7 +994,12 @@ def test_deleted_notebook_keeps_only_expiring_activity_metadata(repo):
     usage = next(row for row in repo.list_user_usage() if row["id"] == "u1")
     assert usage["notebooks"] == 0
     assert usage["sources"] == 1
-    assert usage["conversations"] == 1
+    # codex #659 R6 P2: conversations is a legacy/deprecated usage counter
+    # with no retained_user_activity fallback (unlike sources/questions/
+    # reports below) — it counts the LIVE table only, so once the notebook
+    # delete pipeline actually cleans up conversations (this fix), a
+    # genuinely deleted notebook's conversation drops out of this count too.
+    assert usage["conversations"] == 0
     assert usage["questions"] == 1
     assert usage["reports"] == 1
     assert usage["last_active"] == created_at
@@ -1002,9 +1014,10 @@ def test_deleted_notebook_keeps_only_expiring_activity_metadata(repo):
     )["items"] == []
     expired_usage = next(row for row in repo.list_user_usage() if row["id"] == "u1")
     assert expired_usage["sources"] == 0
-    # Conversations have an existing notebook-independent lifecycle and are
-    # therefore unaffected by this retention window.
-    assert expired_usage["conversations"] == 1
+    # codex #659 R6 P2: the conversation row is genuinely gone (deleted along
+    # with the notebook, see above) — nothing left for this retention window
+    # to have any opinion about either way.
+    assert expired_usage["conversations"] == 0
     assert expired_usage["questions"] == 0
     assert expired_usage["reports"] == 0
     assert expired_usage["last_active"] is None

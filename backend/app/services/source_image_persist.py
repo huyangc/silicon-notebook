@@ -33,7 +33,13 @@ def make_persist_image_factory(
                 asset = asset_service_provider().save_source_image(
                     notebook_id, source_id, img_name, mime, img_bytes, created_by,
                     max_bytes=settings.mineru_max_image_bytes)
-            except (AssetValidationError, RuntimeError, OSError):
+            except (AssetValidationError, RuntimeError, OSError, KeyError):
+                # KeyError (codex #659 R6 P1): the notebook was deleted/
+                # deleting by the time the write-after-write recheck ran —
+                # AssetService already compensated (unlinked the file,
+                # cleaned the now-empty directory). Same "never block text
+                # parsing over an image problem" degrade as every other
+                # failure mode here.
                 return None
             state["n"] += 1
             return asset["id"]

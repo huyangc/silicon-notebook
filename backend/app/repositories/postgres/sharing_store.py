@@ -25,6 +25,7 @@ from app.repositories.postgres._store_utils import (
 from app.repositories.postgres.access_sql import (
     MEMBER_PROBE_SQL,
     NOTEBOOK_ADMIN_SQL,
+    NOTEBOOK_DELETE_OWNER_SQL,
     NOTEBOOK_READ_SQL,
     NOTEBOOK_WRITE_SQL,
     admin_access_params,
@@ -347,6 +348,19 @@ class SharingStore:
         with self.database.connect() as connection:
             row = connection.execute(
                 NOTEBOOK_WRITE_SQL, (notebook_id, user_id)
+            ).fetchone()
+        return row is not None
+
+    def user_owns_notebook_regardless_of_lifecycle(
+        self, notebook_id: str, user_id: str
+    ) -> bool:
+        """`DELETE /api/notebooks/{id}` 依赖专属（codex #659 R6 P2）:仅 owner,
+        但**不**要求 notebook 处于 live 状态。谓词见
+        `access_sql.NOTEBOOK_DELETE_OWNER_SQL` 的完整理由——唯一消费点是
+        `require_notebook_delete`,任何其它写端点都不得复用这个方法。"""
+        with self.database.connect() as connection:
+            row = connection.execute(
+                NOTEBOOK_DELETE_OWNER_SQL, (notebook_id, user_id)
             ).fetchone()
         return row is not None
 

@@ -503,7 +503,7 @@ def test_finish_residual_is_a_noop_when_the_lease_no_longer_matches(repo):
     assert fresh_lease is not None and fresh_lease != stale_lease
 
     settled = repo._runtime.notebook_delete_jobs.finish_residual(
-        job["id"], lease_token=stale_lease,
+        job["id"], "nb1", lease_token=stale_lease,
     )
     assert settled is False
 
@@ -518,7 +518,7 @@ def test_finish_residual_is_a_noop_when_the_lease_no_longer_matches(repo):
 
     # B, holding the real lease, settles it normally.
     settled = repo._runtime.notebook_delete_jobs.finish_residual(
-        job["id"], lease_token=fresh_lease,
+        job["id"], "nb1", lease_token=fresh_lease,
     )
     assert settled is True
     with pytest.raises(KeyError):
@@ -954,3 +954,122 @@ def test_fts_shadow_cleanup_is_paged_and_scoped(repo):
         ).fetchone()["c"] == 1
     # A table with no shadow is a structural no-op.
     assert store.delete_fts_shadow_page("sources", "nb1", 0, 3) == (0, 0)
+
+
+# ---------------------------------------------------------------------------
+# codex #659 R6 P2: conversations has no FK to notebooks and is swept only
+# ONCE by phase 3 — a row inserted after that sweep but before phase 5's
+# finalize survives forever. Two layers: ensure_conversation now rejects
+# inserting for a non-live notebook; finalize/residual-cleanup sweep any
+# straggler that slipped in anyway.
+# ---------------------------------------------------------------------------
+
+
+def test_ensure_conversation_refuses_to_insert_once_the_tombstone_has_landed(repo):
+    """变异钉：把 INSERT...SELECT...WHERE EXISTS 形回退成普通 INSERT →
+    本条不再抛 KeyError，报红。"""
+    _seed_user_and_notebook(repo)
+    with repo._runtime.database.write() as db:
+        db.execute("UPDATE notebooks SET status='deleting' WHERE id='nb1'")
+
+    with pytest.raises(KeyError):
+        with repo._runtime.database.write() as db:
+            repo._runtime.ask_state.ensure_conversation(
+                db, "nb1", None, "问题", "u1",
+            )
+
+    with repo._runtime.database.connect() as db:
+        remaining = db.execute(
+            "SELECT COUNT(*) AS c FROM conversations WHERE notebook_id='nb1'"
+        ).fetchone()
+    assert remaining["c"] == 0  # 没有半途插入的行
+
+
+def test_ensure_conversation_still_inserts_for_a_live_notebook(repo):
+    """守卫不能连正常路径也一起挡了。"""
+    _seed_user_and_notebook(repo)
+    with repo._runtime.database.write() as db:
+        conversation_id = repo._runtime.ask_state.ensure_conversation(
+            db, "nb1", None, "问题", "u1",
+        )
+    assert conversation_id
+    with repo._runtime.database.connect() as db:
+        row = db.execute(
+            "SELECT id FROM conversations WHERE id=?", (conversation_id,)
+        ).fetchone()
+    assert row is not None
+
+
+class _AlwaysHeldClaim:
+    def verify_held(self):
+        return True
+
+    def release(self):
+        pass
+
+
+def test_finalize_sweeps_a_conversations_straggler_that_slipped_past_phase_3(repo):
+    """精确模拟"相位 3 扫完 conversations 之后、相位 5 之前又插进来一行"这道
+    时间窗:先真正跑完相位 3(此时 conversations 干净),再直接落一行带外
+    straggler(模拟一次在两者之间落地的写),再直接调 ``_phase_finalize``。
+    变异钉:去掉 delete_row_and_orphan_embeddings 里那条 DELETE FROM
+    conversations → 这一行留到最后,报红。"""
+    _seed_user_and_notebook(repo)
+    job = repo._runtime.notebook_delete_jobs.request("nb1", "u1")
+    lease_token = repo._runtime.notebook_delete_jobs.mark_running(
+        job["id"], stale_cutoff_seconds=300,
+    )
+    runner = repo._runtime.notebook_delete
+    finished = runner._phase_rows(
+        job["id"], "nb1", lease_token, _AlwaysHeldClaim(), residual=False,
+    )
+    assert finished is True
+
+    with repo._runtime.database.write() as db:
+        db.execute(
+            "INSERT INTO conversations (id,notebook_id,title,created_by,"
+            "created_at,updated_at) VALUES (?,?,?,?,?,?)",
+            ("conv-straggler", "nb1", "T", "u1", NOW, NOW),
+        )
+
+    runner._phase_finalize(job["id"], "nb1")
+
+    with repo._runtime.database.connect() as db:
+        remaining = db.execute(
+            "SELECT COUNT(*) AS c FROM conversations WHERE notebook_id='nb1'"
+        ).fetchone()
+    assert remaining["c"] == 0
+
+
+def test_residual_cleanup_sweeps_a_conversations_straggler_too(repo):
+    """残渣收尾路径同样要清 conversations——notebooks 行在这条路径里更早
+    就已经不在了。同样先跑完相位 3、再落带外 straggler、再直接调
+    ``_finish_residual``。"""
+    _seed_user_and_notebook(repo)
+    job = repo._runtime.notebook_delete_jobs.request("nb1", "u1")
+    lease_token = repo._runtime.notebook_delete_jobs.mark_running(
+        job["id"], stale_cutoff_seconds=300,
+    )
+    runner = repo._runtime.notebook_delete
+    finished = runner._phase_rows(
+        job["id"], "nb1", lease_token, _AlwaysHeldClaim(), residual=False,
+    )
+    assert finished is True
+
+    with repo._runtime.database.write() as db:
+        db.execute("DELETE FROM notebooks WHERE id='nb1'")  # out-of-band delete
+        db.execute(
+            "INSERT INTO conversations (id,notebook_id,title,created_by,"
+            "created_at,updated_at) VALUES (?,?,?,?,?,?)",
+            ("conv-straggler", "nb1", "T", "u1", NOW, NOW),
+        )
+
+    runner._finish_residual(job["id"], "nb1", lease_token)
+
+    with pytest.raises(KeyError):
+        repo._runtime.notebook_delete_jobs.get(job["id"])
+    with repo._runtime.database.connect() as db:
+        remaining = db.execute(
+            "SELECT COUNT(*) AS c FROM conversations WHERE notebook_id='nb1'"
+        ).fetchone()
+    assert remaining["c"] == 0

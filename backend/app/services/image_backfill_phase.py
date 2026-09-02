@@ -427,6 +427,15 @@ def apply_plan(
         except (AssetValidationError, RuntimeError, OSError):
             plan.skip("asset_write_failed")
             return ""
+        except KeyError:
+            # codex #659 R6 P1: the notebook was deleted/deleting by the
+            # time the write-after-write recheck ran — AssetService already
+            # compensated (unlinked the file, cleaned the now-empty
+            # directory). Distinct reason code from asset_write_failed since
+            # the disk write itself succeeded; only the notebook's lifecycle
+            # made it invalid.
+            plan.skip("notebook_deleted")
+            return ""
         return asset["id"]
 
     try:

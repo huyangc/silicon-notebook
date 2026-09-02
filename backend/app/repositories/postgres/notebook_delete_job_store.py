@@ -409,7 +409,9 @@ class NotebookDeleteJobStore:
             "notebook_status": row["notebook_status"],
         }
 
-    def finish_residual(self, job_id: str, *, lease_token: str) -> bool:
+    def finish_residual(
+        self, job_id: str, notebook_id: str, *, lease_token: str
+    ) -> bool:
         """§T-4 driver-A's out-of-band-delete special case (P1-A): NO
         notebooks row is left to fence, and the archive projections' source
         tables may already be gone via cascade, so this NEVER attempts
@@ -430,7 +432,12 @@ class NotebookDeleteJobStore:
         ``notebook_delete_jobs`` DELETE itself first and only cascades to
         the ``notebook_delete_files`` side table when that row was actually
         this worker's to delete, so a fenced-out call leaves BOTH tables
-        untouched rather than half-deleted."""
+        untouched rather than half-deleted.
+
+        codex #659 R6 P2: also clears any ``conversations`` row for this
+        notebook once the fence is confirmed held -- same defense-in-depth
+        rationale as ``NotebookStore.delete_row_and_orphan_embeddings``'s
+        identical delete."""
         with self.database.write() as connection:
             cursor = connection.execute(
                 "DELETE FROM notebook_delete_jobs WHERE id=%s AND lease_token=%s",
@@ -439,6 +446,9 @@ class NotebookDeleteJobStore:
             if cursor.rowcount == 1:
                 connection.execute(
                     "DELETE FROM notebook_delete_files WHERE job_id=%s", (job_id,)
+                )
+                connection.execute(
+                    "DELETE FROM conversations WHERE notebook_id=%s", (notebook_id,)
                 )
         if cursor.rowcount != 1:
             _log.info(

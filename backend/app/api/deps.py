@@ -125,6 +125,31 @@ async def require_notebook_write(
     return notebook_id
 
 
+async def require_notebook_delete(
+    notebook_id: str, user: UserProfile = Depends(get_current_user)
+) -> str:
+    """`DELETE /api/notebooks/{id}` 专属守卫（codex #659 R6 P2）:owner-only,
+    但**不**要求 notebook 处于 live 状态——`require_notebook_write` 的
+    NOTEBOOK_WRITE_SQL 会把一次重复/重试的 DELETE 挡成 404（这一行已经是
+    `status='deleting'`，对生命周期过滤而言"不存在"），而路由体内
+    `notebook_delete_repository().request(...)` 本该把它分流成 409
+    （`NotebookAlreadyDeletingError`，已在路由体内正确映射）——只是依赖层
+    先一步挡下了请求，那个分支从未被走到。
+
+    非 owner（或 notebook 从未存在过/已经被相位 5 彻底物理删除）仍然 404，
+    与其它三道守卫同一条"不泄露存在性"口径——放宽的**唯一**一点是 owner 对
+    自己正在删除中（或拷贝中）的库仍然"看得见"这一行。**不要**把这道守卫
+    挂到除 DELETE 端点以外的任何路由上；其它写端点必须继续用
+    `require_notebook_write`/`require_notebook_capability`。"""
+    allowed = await run_in_threadpool(
+        notebook_access_repository().user_owns_notebook_regardless_of_lifecycle,
+        notebook_id, user.id,
+    )
+    if not allowed:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+    return notebook_id
+
+
 async def require_notebook_admin(
     notebook_id: str, user: UserProfile = Depends(get_current_user)
 ) -> str:

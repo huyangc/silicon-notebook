@@ -308,7 +308,9 @@ class NotebookDeleteJobStore:
             "notebook_status": row["notebook_status"],
         }
 
-    def finish_residual(self, job_id: str, *, lease_token: str) -> bool:
+    def finish_residual(
+        self, job_id: str, notebook_id: str, *, lease_token: str
+    ) -> bool:
         """§T-4 driver-A's out-of-band-delete special case (P1-A).
         PostgreSQL twin's docstring has the full P2-b lease-fencing
         rationale. Deliberately does NOT delegate to ``cleanup_job_on``
@@ -318,7 +320,14 @@ class NotebookDeleteJobStore:
         ``notebook_delete_jobs`` DELETE first and only cascades to the
         ``notebook_delete_files`` side table if that row was actually this
         worker's to delete, so a fenced-out call leaves BOTH tables
-        untouched rather than half-deleted."""
+        untouched rather than half-deleted.
+
+        codex #659 R6 P2: also clears any ``conversations`` row for this
+        notebook once the fence is confirmed held — same defense-in-depth
+        rationale as ``NotebookStore.delete_row_and_orphan_embeddings``'s
+        identical delete (phase 3 sweeps ``conversations`` ONCE; a row
+        inserted after that sweep but before this terminal cleanup has no
+        other path back to zero)."""
         with self.database.write(
             operation="notebook_delete.finish_residual"
         ) as db:
@@ -329,6 +338,9 @@ class NotebookDeleteJobStore:
             if cursor.rowcount == 1:
                 db.execute(
                     "DELETE FROM notebook_delete_files WHERE job_id=?", (job_id,)
+                )
+                db.execute(
+                    "DELETE FROM conversations WHERE notebook_id=?", (notebook_id,)
                 )
         if cursor.rowcount != 1:
             _log.info(

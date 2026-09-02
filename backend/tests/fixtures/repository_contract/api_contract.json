@@ -16388,7 +16388,7 @@
       },
       "/api/notebooks/{notebook_id}": {
         "delete": {
-          "description": "批 3·W1 PR-3 §T-2/§5:CAS tombstone 提交后立即返回 202——实际清理由\n后台删除作业异步完成(六相位,见 `services/notebook_delete.py`)。前端\n零改动:`requestVoid` 只看 2xx 就丢弃 body(`frontend/app/api-client.ts`),\n202 与之前的 204 对它完全透明。",
+          "description": "批 3·W1 PR-3 §T-2/§5:CAS tombstone 提交后立即返回 202——实际清理由\n后台删除作业异步完成(六相位,见 `services/notebook_delete.py`)。前端\n零改动:`requestVoid` 只看 2xx 就丢弃 body(`frontend/app/api-client.ts`),\n202 与之前的 204 对它完全透明。\n\n守卫改用 `require_notebook_delete`（codex #659 R6 P2）而不是\n`require_notebook_capability(\"notebook:delete\")`：后者的\nNOTEBOOK_WRITE_SQL 带生命周期过滤，会把重复/重试的 DELETE 挡成假 404；\n这道守卫仍是 owner-only，只是放行 owner 自己正在删除/拷贝中的库，让下面\n这段 `except NotebookAlreadyDeletingError` 真正有机会跑到。",
           "operationId": "delete_notebook_api_notebooks__notebook_id__delete",
           "parameters": [
             {

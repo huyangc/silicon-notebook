@@ -64,7 +64,11 @@ from app.repositories.ports import (
     project_report_row,
     project_run_row,
 )
-from app.repositories.sqlite.access_sql import NOTEBOOK_READ_SQL, read_access_params
+from app.repositories.sqlite.access_sql import (
+    NOTEBOOK_LIVE_SQL,
+    NOTEBOOK_READ_SQL,
+    read_access_params,
+)
 from app.repositories.sqlite.database import SqliteDatabase
 # Agentic Memory P3 (B-Profile, T7): the ONE place the question text coming
 # back from ``recent_user_ask_languages`` is turned into a closed language
@@ -118,7 +122,25 @@ class AskStateStore:
     ) -> str:
         """Return the conversation id for this turn: append to an existing
         conversation in this notebook (touching `updated_at`), or create a new
-        one (id `conv-<hex>`, title from the first question)."""
+        one (id `conv-<hex>`, title from the first question).
+
+        Raises ``KeyError(notebook_id)`` when the notebook is not live
+        (``status IN ('copying','deleting')``) or has already been deleted —
+        codex #659 R6 P2: ``conversations`` has no FK to ``notebooks`` (a
+        deliberate closure-external table, see ``notebook_delete_tables.py``)
+        and this write transaction never re-checked the notebook's lifecycle
+        before this fix. Phase 3's one-time closure-external sweep only
+        passes through ``conversations`` ONCE; a NEW row inserted after that
+        sweep ran (Ask having already passed its route's capability guard
+        before a delete job's tombstone landed) would survive phase 3 AND
+        phase 5's finalize (which cascades only FK-having tables) — a
+        permanent orphan with no future cleanup path. The INSERT below is
+        therefore an ``INSERT ... SELECT ... WHERE EXISTS`` guarded by the
+        SAME ``NOTEBOOK_LIVE_SQL`` every other lifecycle check in this
+        codebase uses (single point of definition, both backends) — 0 rows
+        inserted when the notebook is not live, detected via
+        ``cursor.rowcount`` and mapped to the same ``KeyError`` shape every
+        other "notebook not found" call site in this repo raises."""
         now = self.seams.now()
         if conversation_id:
             # 只接续**调用者自己**的对话:共享库里成员传入 owner/他人的 conv-id 不命中,
@@ -134,11 +156,14 @@ class AskStateStore:
                 )
                 return conversation_id
         new_id = self.seams.new_id("conv")
-        db.execute(
+        cursor = db.execute(
             "INSERT INTO conversations (id, notebook_id, title, created_by, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (new_id, notebook_id, question[:60], user_id, now, now),
+            "SELECT ?, ?, ?, ?, ?, ? WHERE EXISTS ("
+            f"SELECT 1 FROM notebooks WHERE id = ? AND {NOTEBOOK_LIVE_SQL})",
+            (new_id, notebook_id, question[:60], user_id, now, now, notebook_id),
         )
+        if cursor.rowcount != 1:
+            raise KeyError(notebook_id)
         return new_id
 
     def conversation_history(

@@ -495,6 +495,13 @@ NOTEBOOK_WRITE_SQL = (
     f"SELECT 1 FROM notebooks WHERE id=%s AND created_by=%s AND {NOTEBOOK_LIVE_SQL}"
 )
 
+# 删除端点专属的 owner 判定（codex #659 R6 P2）：裸 owner 比对，**刻意不带**
+# NOTEBOOK_LIVE_SQL。不是第四条通用授权谓词——唯一消费点是 `DELETE
+# /api/notebooks/{id}` 的 FastAPI 依赖，其余任何写端点都必须继续走
+# NOTEBOOK_WRITE_SQL（连同它的生命周期过滤）。理由见 SQLite 版同名常量的完整注释
+# （access_sql.py 两侧逐字同义，唯一定义点分裂成两份是本模块既有惯例）。
+NOTEBOOK_DELETE_OWNER_SQL = "SELECT 1 FROM notebooks WHERE id=%s AND created_by=%s"
+
 # 管理权(owner ∪ 管理级有效授权边)的完整查询:有行即有管理权。
 NOTEBOOK_ADMIN_SQL = (
     "SELECT 1 FROM notebooks nb WHERE nb.id=%s AND " + admin_access_clause()
