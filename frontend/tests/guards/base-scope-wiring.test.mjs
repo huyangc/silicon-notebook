@@ -21,6 +21,7 @@ import ts from "typescript";
 
 import {
   callSitesIn,
+  findFunction,
   jsxElements,
   parseModule,
   variableInitializersIn,
@@ -341,10 +342,16 @@ test("base_scope 送达问答预检、问答流式与深度报告创建三处", 
   assert.equal(policy.get("baseScope"), "currentBaseScope");
 
   // 再钉 hook→API：预检读取本次 submit 冻结的同一份 snapshot，而不是重新读 policy。
+  // snapshot 现在冻结在意图 run 记录上（离开笔记本期间预检照常完成、回来再接回，
+  // 记录跟着 run 走），预检读的仍是 submit 那一刻冻结的那份，而不是重新读 policy。
   const preview = callSitesIn(askSession).filter((call) => call.target === "previewAskIntent");
   assert.equal(preview.length, 1, "Ask owner 应恰好调用一次 previewAskIntent");
-  assert.ok(preview[0].arguments.includes("scopeSnapshot.sourceScope"));
-  assert.ok(preview[0].arguments.includes("scopeSnapshot.baseScope"));
+  assert.ok(preview[0].arguments.includes("run.scopeSnapshot.sourceScope"));
+  assert.ok(preview[0].arguments.includes("run.scopeSnapshot.baseScope"));
+  const intentRunScope = variableInitializersIn(findFunction(askSession, "submit"))
+    .find((item) => item.name === "run");
+  assert.ok(intentRunScope, "submit 应把意图 run 记录声明为 run");
+  assert.match(intentRunScope.initializer, /scopeSnapshot,/, "意图 run 记录必须带上 submit 冻结的 scopeSnapshot");
 
   // ⚠ 这里必须解析出 runAskStream **自己那个** payload 对象、只看它的**顶层**属性。
   // 全文件数一遍名为 base_scope 的属性对**移动**变异全绿:把它挪进

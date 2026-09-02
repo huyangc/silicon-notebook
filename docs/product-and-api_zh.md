@@ -1831,7 +1831,7 @@ frame、blueprint 或 claims 账本缺失/畸形时会丢弃新增结构，回�
 - `GET /api/notebooks/{id}/search?q=`
 - `POST /api/notebooks/{id}/ask/intent/stream` —— 官方网页端使用的、带心跳的 `reasoning` 无语料意图预检；接收 `{question, conversation_id?}`，最多读取当前会话最近五个用户问题，不创建 conversation/job，在 `final` 返回可编辑问题合同和阻断性歧义；客户端断开时向模型调用传递取消事件。`POST .../ask/intent` 保留为 JSON 兼容端点。
 - `POST /api/notebooks/{id}/ask` — 接地问答（逐句 `[k_i]` 引用；`mode`：默认 `chunk` | `reasoning`，另接受请求级 `auto` 并在持久任务创建前由后端问题理解模型收敛为 `chunk`/`reasoning`；`auto` 不是可展示或持久化的 Ask 引擎；`reasoning` 可传 `retrieval_effort`，默认 `standard`；官方网页端以带时区的 `asked_at` 传入只用于显示的提交时间；响应以 `answered_at` 返回权威持久化完成时间；集合型回答可带结构化 `result_sets` 与精确覆盖率；逐步推理回答还可能带 `gap_suggestions`——笔记本之外的非证据线索，见[缺口外扩检索](#缺口外扩检索)——没有该插件的部署此字段为空且不出现在 JSON payload 里；联合范围遵循上文各 mode 的边界）
-- `POST /api/notebooks/{id}/ask/stream` — Ask 进度的 NDJSON stream（同样接受可选的带时区 `asked_at` 请求字段；先发带持久化 `job_id` 和 `conversation_id` 的 `started` 事件，再发进度/最终事件）；前端用该会话 id 在答案生成前立即入历史并支持重新打开。transport 断开连接只会停止当前客户端继续接收，后台 job 仍继续并可保存回答
+- `POST /api/notebooks/{id}/ask/stream` — Ask 进度的 NDJSON stream（同样接受可选的带时区 `asked_at` 请求字段；先发带持久化 `job_id` 和 `conversation_id` 的 `started` 事件，再发进度/最终事件）；前端用该会话 id 在答案生成前立即入历史并支持重新打开。auto 模式下 `started` 在后端选定引擎之后才发出；在此之前离开工作区再回到同一笔记本，前端从本地在途记录接回该提问并继续读同一条流，`started` 到达后再落到 durable 会话。推理模式提交前的意图理解与澄清确认同样不因离开而中止：理解在离开期间继续，清晰则直接启动 Ask job，需要澄清则在重开笔记本时重新弹出确认。transport 断开连接只会停止当前客户端继续接收，后台 job 仍继续并可保存回答
 - `GET /api/notebooks/{id}/ask/jobs/{job_id}` — 供重连/恢复流程读取 detached Ask job 的 `status`、`trace` 与 `answer_id`；job 必须属于路径中的 notebook 和当前用户；状态为 `done` 后，前端重新加载 conversation 取得最终 `AskResponse`
 - `POST /api/notebooks/{id}/ask/jobs/{job_id}/cancel` — 用户显式中断端点；job 必须属于路径中的 notebook 和当前用户；设置取消事件并在保存被取消的最终回答前停止 worker
 - `GET /api/notebooks/{id}/conversations`、`GET|PATCH|DELETE /api/conversations/{id}`

@@ -63,13 +63,22 @@ function objectBinding(module, alias) {
 }
 
 
+// submit 只登记意图 run 记录并交给 runIntentPreview；预检本体在那里跑，这样离开
+// 笔记本（detach）之后它还能继续到底，回来再按阶段接回。durable 流同理拆成
+// executeAsk（可见态守卫）→ startAskRun（发流）。
 test("reasoning Ask previews intent before starting its durable stream", () => {
-  const previewCalls = callsIn(findFunction(askSession, "submit"));
+  const submitCalls = callsIn(findFunction(askSession, "submit"));
+  const previewCalls = callsIn(findFunction(askSession, "runIntentPreview"));
   const executeCalls = callsIn(findFunction(askSession, "executeAsk"));
+  const startCalls = callsIn(findFunction(askSession, "startAskRun"));
 
+  assert.ok(submitCalls.includes("runIntentPreview"));
   assert.ok(previewCalls.includes("previewAskIntent"));
   assert.ok(previewCalls.includes("buildAskIntentConfirmation"));
-  assert.ok(executeCalls.includes("runAskStream"));
+  assert.ok(executeCalls.includes("startAskRun"));
+  assert.ok(startCalls.includes("runAskStream"));
+  // 离开期间预检完成：意图清晰时也必须启动 durable run（走 startAskRun，不碰可见态）。
+  assert.ok(previewCalls.includes("startAskRun"), "detached 预检完成后没有启动 durable run");
 });
 
 
@@ -82,13 +91,16 @@ test("blocking reasoning ambiguity is visibly confirmed before retrieval", () =>
 
 
 test("阻断性歧义打开确认卡后不再继续提交 durable ask", () => {
-  const branches = ifBranchesIn(findFunction(askSession, "submit"));
+  const branches = ifBranchesIn(findFunction(askSession, "runIntentPreview"));
   const reviewGate = branches.find(
     (branch) => branch.condition.includes("needs_clarification"),
   );
-  assert.ok(reviewGate, "submit 的问题理解确认门不见了");
-  assert.ok(reviewGate.thenCalls.includes("setIntentReview"));
+  assert.ok(reviewGate, "runIntentPreview 的问题理解确认门不见了");
+  assert.ok(reviewGate.thenCalls.includes("presentIntentReview"));
+  assert.ok(callsIn(findFunction(askSession, "presentIntentReview")).includes("setIntentReview"));
   assert.ok(reviewGate.thenReturns, "确认卡打开后仍继续提交了 durable ask");
+  // 离开期间收到「需要澄清」：契约记在 run 记录上，回到笔记本时由 attachIntentRun 重新弹卡。
+  assert.ok(callsIn(findFunction(askSession, "attachIntentRun")).includes("presentIntentReview"));
 });
 
 
@@ -96,18 +108,19 @@ test("阻断性歧义打开确认卡后不再继续提交 durable ask", () => {
 // 后端流下来的步骤之前,用户看到的才是一条从「理解问题」直达「作答」的连续轨迹,
 // 而不是先盯一条与轨迹无关的提示、再看轨迹从中途冒出来。
 test("问题理解阶段进入同一条轨迹,而不是另起一条提示", () => {
-  const runAskCalls = callsIn(findFunction(askSession, "submit"));
-  assert.ok(runAskCalls.includes("intentUnderstandingStep"), "理解在途没有落成轨迹的一步");
-  assert.ok(runAskCalls.includes("intentUnderstoodStep"));
-  assert.ok(runAskCalls.includes("intentClarifyStep"));
+  const submitCalls = callsIn(findFunction(askSession, "submit"));
+  const previewCalls = callsIn(findFunction(askSession, "runIntentPreview"));
+  assert.ok(submitCalls.includes("intentUnderstandingStep"), "理解在途没有落成轨迹的一步");
+  assert.ok(previewCalls.includes("intentUnderstoodStep"));
+  assert.ok(previewCalls.includes("intentClarifyStep"));
   // 在途 turn 从提交那一刻就要出现,否则那几步没有地方渲染。
-  assert.ok(runAskCalls.includes("setPendingQuestion"));
-  assert.ok(runAskCalls.includes("setPendingTrace"));
+  assert.ok(submitCalls.includes("setPendingQuestion"));
+  assert.ok(submitCalls.includes("setPendingTrace"));
   // 用户定稿也记一步。
   assert.ok(callsIn(findFunction(askSession, "confirmIntent")).includes("intentConfirmedStep"));
   // 前缀必须经 handOffIntentTrace 摘掉耗时再交给 executeAsk,否则后端 intent 步
   // 会把同一段理解时间再算一遍(codex 第 2 轮 P2)。
-  for (const fn of ["submit", "confirmIntent"]) {
+  for (const fn of ["runIntentPreview", "confirmIntent"]) {
     assert.ok(
       callsIn(findFunction(askSession, fn)).includes("handOffIntentTrace"),
       `${fn} 直接把带耗时的前缀交给了 executeAsk`,
@@ -195,7 +208,7 @@ test("理解阶段被打断时草稿退回输入框", () => {
   for (const fn of ["cancelIntent", "abort"]) {
     assert.ok(callsIn(findFunction(askSession, fn)).includes("setQuestion"), `${fn} 未退回草稿`);
   }
-  assert.ok(callsIn(findFunction(askSession, "submit")).includes("clearPendingTurn"));
+  assert.ok(callsIn(findFunction(askSession, "runIntentPreview")).includes("clearPendingTurn"));
 });
 
 
@@ -205,8 +218,8 @@ test("理解阶段被打断时草稿退回输入框", () => {
 test("提交被可用性守卫拦下时草稿退回,而不是无声丢弃", () => {
   const guarded = variableInitializersIn(askSession)
     .filter((item) => item.name === "started" && item.initializer.includes("executeAsk"));
-  assert.equal(guarded.length, 2, "submit / confirmIntent 应各据返回值判断是否退回");
-  for (const fn of ["submit", "confirmIntent"]) {
+  assert.equal(guarded.length, 2, "runIntentPreview / confirmIntent 应各据返回值判断是否退回");
+  for (const fn of ["runIntentPreview", "confirmIntent"]) {
     const body = findFunction(askSession, fn);
     assert.ok(callsIn(body).includes("setQuestion"), `${fn} 未退回草稿`);
     assert.ok(callsIn(body).includes("clearPendingTurn"), `${fn} 未收起在途 turn`);
@@ -220,7 +233,7 @@ test("提交被可用性守卫拦下时草稿退回,而不是无声丢弃", () =
   // 「有没有漏认令牌」退化成「有没有裸赋值」,machine-checkable。
   // ⚠ assignmentsIn 保留字面量引号(与 comparisonsIn 的 right 不同,后者给去引号的
   //   .text)——按 `""` 比对会永远匹配不到,守卫就成了摆设。
-  for (const fn of ["submit", "confirmIntent"]) {
+  for (const fn of ["runIntentPreview", "confirmIntent"]) {
     const body = findFunction(askSession, fn);
     assert.deepEqual(
       assignmentsIn(body).filter(
