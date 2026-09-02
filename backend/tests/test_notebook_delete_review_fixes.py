@@ -904,3 +904,53 @@ def test_a_failed_recreate_keeps_the_attempts_history_intact(repo, monkeypatch):
             "replacement insert"
         )
         assert row["attempts"] == 3
+
+
+# ---------------------------------------------------------------------------
+# codex #659 R5: the SQLite FTS5 shadow cleanup is paged (rowid keyset), not
+# one unbounded DELETE holding the single-writer lock for a giant tx.
+# ---------------------------------------------------------------------------
+
+
+def test_fts_shadow_cleanup_is_paged_and_scoped(repo):
+    """变异钉:把 delete_fts_shadow_page 改回单条无界 DELETE(或忽略 limit)
+    →「每页 deleted<=limit」断言红。同时钉住:只删本库行、循环收敛到零、
+    其它库的影子行原样。"""
+    store = repo._runtime.notebook_delete_jobs
+    with repo._runtime.database.write() as db:
+        for i in range(7):
+            db.execute(
+                "INSERT INTO chunks_fts (chunk_id,notebook_id,text) "
+                "VALUES (?,?,?)",
+                (f"ch-{i}", "nb1", f"text {i}"),
+            )
+        db.execute(
+            "INSERT INTO chunks_fts (chunk_id,notebook_id,text) "
+            "VALUES ('ch-other','nb2','keep me')",
+        )
+
+    cursor = 0
+    total = 0
+    rounds = 0
+    while True:
+        deleted, cursor = store.delete_fts_shadow_page(
+            "chunks", "nb1", cursor, 3
+        )
+        assert deleted <= 3, "one page must never exceed its limit"
+        if deleted == 0:
+            break
+        total += deleted
+        rounds += 1
+        assert rounds <= 10, "the paged loop must converge"
+
+    assert total == 7
+    assert rounds == 3  # 3+3+1: bounded pages, not one giant delete
+    with repo._runtime.database.connect() as db:
+        assert db.execute(
+            "SELECT COUNT(*) c FROM chunks_fts WHERE notebook_id='nb1'"
+        ).fetchone()["c"] == 0
+        assert db.execute(
+            "SELECT COUNT(*) c FROM chunks_fts WHERE notebook_id='nb2'"
+        ).fetchone()["c"] == 1
+    # A table with no shadow is a structural no-op.
+    assert store.delete_fts_shadow_page("sources", "nb1", 0, 3) == (0, 0)

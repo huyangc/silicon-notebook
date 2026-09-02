@@ -28,7 +28,7 @@ _log = logging.getLogger(__name__)
 # alongside their real table's OWN phase-3 unit instead (§4.4's "两条 FTS
 # 显式删除进相位 3 各自的批"). PostgreSQL has no FTS5 shadow tables for these
 # (its full-text search rides GIN trgm indexes on the real columns), so the
-# PostgreSQL twin's ``delete_fts_shadow`` is a no-op -- this map is the only
+# PostgreSQL twin's ``delete_fts_shadow_page`` is a no-op -- this map is the only
 # backend-specific difference the runner ever has to be unaware of.
 _FTS_SHADOW_TABLE = {
     "knowledge_objects": "kg_objects_fts",
@@ -399,23 +399,48 @@ class NotebookDeleteJobStore:
     # can exceed outright, not just run long.
     _CHILD_BATCH_SIZE = 500
 
-    def delete_fts_shadow(self, table: str, notebook_id: str) -> None:
-        """§4.4/P2-g: delete this notebook's rows from ``table``'s FTS5
-        shadow, if it has one (``knowledge_objects``/``chunks`` only) --
-        moved here from phase 5's tail so it clears alongside its real
-        table's own phase-3 unit. A single unbatched ``DELETE ... WHERE
-        notebook_id=?`` (same shape phase 5 always used) -- these are
-        virtual tables with no FK/cascade of their own, but no evidence this
-        notebook-scoped delete is ever large enough to need batching either
-        (unlike the real table it shadows, whose OWN batched delete is what
-        actually bounds this phase's per-transaction cost)."""
+    def delete_fts_shadow_page(
+        self, table: str, notebook_id: str, cursor_rowid: int, limit: int,
+    ) -> tuple[int, int]:
+        """§4.4/P2-g + codex #659 R5: delete ONE bounded page of this
+        notebook's rows from ``table``'s FTS5 shadow, if it has one
+        (``knowledge_objects``/``chunks`` only). Returns
+        ``(deleted, next_cursor_rowid)``.
+
+        These shadows hold roughly one row per chunk/object, so a single
+        unbatched ``DELETE ... WHERE notebook_id=?`` on a multi-million-row
+        notebook holds the SQLite writer lock for one giant transaction —
+        exactly the pathology the batched phase-3 units exist to remove.
+
+        The page is a **rowid keyset**: ``notebook_id`` is UNINDEXED in both
+        FTS5 tables, so a plain ``LIMIT`` subquery would re-scan the shadow's
+        non-matching prefix on every page (O(pages × table size) on a big
+        shared table). Selecting ``rowid > cursor ... ORDER BY rowid`` makes
+        the sequence of pages ONE forward scan overall, and the ``DELETE ...
+        WHERE rowid IN (...)`` half is by-docid — the one access path FTS5
+        indexes natively. A no-shadow table returns ``(0, cursor)``
+        unchanged; PostgreSQL's twin is a structural no-op."""
         shadow = _FTS_SHADOW_TABLE.get(table)
         if shadow is None:
-            return
+            return 0, cursor_rowid
         with self.database.write(
             operation=f"notebook_delete.rows.{shadow}"
         ) as db:
-            db.execute(f"DELETE FROM {shadow} WHERE notebook_id=?", (notebook_id,))
+            rowids = [
+                row["rowid"] for row in db.execute(
+                    f"SELECT rowid FROM {shadow} "
+                    "WHERE rowid > ? AND notebook_id=? "
+                    "ORDER BY rowid LIMIT ?",
+                    (cursor_rowid, notebook_id, limit),
+                ).fetchall()
+            ]
+            if not rowids:
+                return 0, cursor_rowid
+            ph = ",".join("?" for _ in rowids)
+            cur = db.execute(
+                f"DELETE FROM {shadow} WHERE rowid IN ({ph})", rowids
+            )
+            return int(cur.rowcount), int(rowids[-1])
 
     def delete_direct_page_form_one(
         self, table: str, id_column: str, filter_column: str,
