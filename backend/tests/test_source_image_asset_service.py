@@ -101,3 +101,85 @@ def test_save_source_image_rejects_bad_mime(tmp_path):
     svc = AssetService(_FakeRepo(tmp_path))
     with pytest.raises(AssetValidationError):
         svc.save_source_image("nb-1", "src-1", "fig.svg", "image/svg+xml", b"x", "u")
+
+
+# ---------------------------------------------------------------------------
+# codex #659 R6 P1: the notebook's finalize sweep can run BETWEEN the
+# capability guard and the actual disk write — save()/save_source_image()
+# must recheck liveness after writing and self-compensate.
+# ---------------------------------------------------------------------------
+
+
+def test_save_unlinks_the_file_when_the_notebook_is_gone_by_the_time_it_writes(
+    tmp_path,
+):
+    """变异钉:去掉写后复核 → 文件和目录都原样留着,本条报红。"""
+    repo = _FakeRepo(tmp_path)
+    svc = AssetService(repo, notebook_exists=lambda nb: False)
+    with pytest.raises(KeyError):
+        svc.save("nb-1", "pic.png", "image/png", b"\x89PNG..", "u")
+
+    notebook_dir = tmp_path / "assets" / "nb-1"
+    assert not notebook_dir.exists(), "补偿删除应当连带清空空目录"
+
+
+def test_save_source_image_unlinks_the_file_when_the_notebook_is_gone(tmp_path):
+    """同上,save_source_image 那条路径。"""
+    repo = _FakeRepo(tmp_path)
+    svc = AssetService(repo, notebook_exists=lambda nb: False)
+    with pytest.raises(KeyError):
+        svc.save_source_image("nb-1", "src-1", "fig.png", "image/png", b"x", "u")
+
+    notebook_dir = tmp_path / "assets" / "nb-1"
+    assert not notebook_dir.exists()
+
+
+def test_save_keeps_the_file_when_the_notebook_recheck_passes(tmp_path):
+    """复核过 = finalize 还没跑,文件正常留着(后续相位 4/终局清扫或用户下次
+    正常访问都还会看到它)——这次修复不能把一次健康的上传也删了。"""
+    repo = _FakeRepo(tmp_path)
+    svc = AssetService(repo, notebook_exists=lambda nb: True)
+    asset = svc.save("nb-1", "pic.png", "image/png", b"\x89PNG..", "u")
+    assert svc.path_for(asset).is_file()
+
+
+def test_save_defaults_to_probing_repo_get_notebook(tmp_path):
+    """无显式注入时,默认探测 repo.get_notebook——真实 facade 的既有 seam,不
+    需要调用方每次手动接线。"""
+
+    class _RepoWithGetNotebook(_FakeRepo):
+        def __init__(self, tmp_path, *, exists: bool):
+            super().__init__(tmp_path)
+            self._exists = exists
+
+        def get_notebook(self, notebook_id):
+            if not self._exists:
+                raise KeyError(notebook_id)
+            return {"id": notebook_id}
+
+    gone = _RepoWithGetNotebook(tmp_path, exists=False)
+    svc = AssetService(gone)
+    with pytest.raises(KeyError):
+        svc.save("nb-1", "pic.png", "image/png", b"x", "u")
+    assert not (tmp_path / "assets" / "nb-1").exists()
+
+    alive = _RepoWithGetNotebook(tmp_path, exists=True)
+    svc = AssetService(alive)
+    asset = svc.save("nb-2", "pic.png", "image/png", b"x", "u")
+    assert svc.path_for(asset).is_file()
+
+
+def test_persist_image_factory_degrades_instead_of_raising_on_keyerror():
+    """persist_image 闭包(MinerU 抽图管线)必须把这个 KeyError 当成"这张图没存上"
+    优雅降级,不能让整个来源解析被一张图片的笔记本生命周期问题打断。"""
+    from app.core.config import Settings
+    from app.services.source_image_persist import make_persist_image_factory
+
+    class _Svc:
+        def save_source_image(self, *a, **k):
+            raise KeyError("nb-1")
+
+    settings = Settings(mineru_max_image_bytes=20 * 1024 * 1024)
+    factory = make_persist_image_factory(settings, lambda: _Svc())
+    persist = factory("nb-1", "src-1", "u")
+    assert persist(b"\x89PNG..", "fig.png") is None

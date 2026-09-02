@@ -73,13 +73,56 @@ class AssetService:
     """Validates, persists to disk, and records ``notebook_assets`` metadata
     for pasted knowhow-table-cell images."""
 
-    def __init__(self, repo) -> None:
+    def __init__(self, repo, *, notebook_exists: Callable[[str], bool] | None = None) -> None:
         """``repo`` is the SQLiteRepository facade (or anything duck-typed
         the same way): needs its public ``storage_dir`` attribute plus the
         ``insert_notebook_asset``/``get_notebook_asset`` one-hop delegates
-        Task 2 already exposes."""
+        Task 2 already exposes.
+
+        ``notebook_exists`` (codex #659 R6 P1) — optional injection point for
+        the write-after-race recheck ``save``/``save_source_image`` do after
+        writing bytes to disk (see those methods' docstrings for the race).
+        Defaults to probing ``repo.get_notebook`` (the real facade's existing
+        seam — raises ``KeyError`` for a missing/copying/deleting notebook,
+        same as every other "notebook not found" call site in this
+        codebase); when ``repo`` has no such seam (this module's own narrow
+        unit tests' ``_FakeRepo``-shaped stand-ins), the recheck is skipped
+        (always "still exists") rather than raising — those tests exercise
+        disk I/O in isolation and were never wired to a real notebook
+        lifecycle, so failing them closed here would be a false regression,
+        not a caught bug."""
         self._repo = repo
         self._assets_root = Path(repo.storage_dir) / "assets"
+        self._notebook_exists = notebook_exists or self._default_notebook_exists
+
+    def _default_notebook_exists(self, notebook_id: str) -> bool:
+        probe = getattr(self._repo, "get_notebook", None)
+        if probe is None:
+            return True
+        try:
+            probe(notebook_id)
+        except KeyError:
+            return False
+        return True
+
+    @staticmethod
+    def _compensate_orphaned_write(path: Path) -> None:
+        """codex #659 R6 P1: unlink a just-written file whose post-write
+        liveness recheck found the notebook already gone/deleting, then
+        remove the per-notebook asset directory if that was its last file
+        (mirrors ``_delete_notebook_asset_dir``'s tolerance — best-effort,
+        never raises on its own)."""
+        try:
+            if path.is_file():
+                path.unlink()
+        except OSError:
+            pass
+        parent = path.parent
+        try:
+            if parent.exists() and not any(parent.iterdir()):
+                parent.rmdir()
+        except OSError:
+            pass
 
     def path_for(self, asset: dict) -> Path:
         """The on-disk path for a stored asset row (does not check existence)."""
@@ -95,7 +138,25 @@ class AssetService:
         written. After the write, independently re-stats the file and raises
         ``RuntimeError`` if it didn't land correctly — a silent storage
         failure must never look like a successful upload.
-        """
+
+        codex #659 R6 P1: after that, re-checks the notebook is still
+        live. The race this closes: an upload that already passed its
+        route's ``require_notebook_capability`` guard, then inserted the
+        ``notebook_assets`` row, can still be mid-flight when a delete job's
+        phase 4/finalize sweep runs its one-time asset-directory ``rmtree``
+        (see ``notebook_delete.py``'s ``_sweep_ingestion_stragglers``) — this
+        write's own ``mkdir(parents=True, exist_ok=True)`` a few lines up
+        then silently RECREATES the directory that sweep just removed,
+        landing a file with no cleanup path left (its row is either already
+        cascaded away, or about to be with no further disk sweep coming).
+        Covers both orderings: if this recheck passes, the delete job's
+        tombstone has not landed yet, so the eventual phase-4/finalize sweep
+        will still find and remove this file normally; if it fails (notebook
+        gone or ``status='deleting'``), THIS call compensates immediately —
+        unlinking the file it just wrote (and the now-empty per-notebook
+        asset directory) before raising ``KeyError`` — the same "notebook
+        not found" shape every other call site in this codebase raises,
+        which ``routes.py`` already maps to a 404."""
         validate_asset(mime, len(data))
         asset_id = self._repo.insert_notebook_asset(
             notebook_id, safe_filename(filename or "asset"), mime, len(data), created_by
@@ -113,6 +174,9 @@ class AssetService:
                 f"asset {asset_id} did not persist correctly to disk at {path} "
                 "(post-write existence check failed)"
             )
+        if not self._notebook_exists(notebook_id):
+            self._compensate_orphaned_write(path)
+            raise KeyError(notebook_id)
         return asset
 
     def save_source_image(
@@ -134,7 +198,13 @@ class AssetService:
         ``source_id`` 的行，于是它成为一条谁也够不着的孤儿。在线路径不传它（行为逐字
         不变）；离线的 `backfill-images` 用它把 id 记进自己的回滚名单，从而只删自己
         铸出来的资产——按"这一趟新出现的行"之类的差集去猜，会连并发的在线重解析刚建
-        的合法资产一起删掉（那条路径的文件名同样是 ``<sha>.jpg``，形状上区分不开）。"""
+        的合法资产一起删掉（那条路径的文件名同样是 ``<sha>.jpg``，形状上区分不开）。
+
+        codex #659 R6 P1：写盘之后同样复核笔记本仍在——理由与 ``save()`` 的
+        docstring 一字不差（同一个 ``mkdir(parents=True, exist_ok=True)`` +
+        写后复核的形状），只是这次是来源解析产的内嵌图片而不是用户手动粘贴的
+        单元格图片。复核不过时补偿删除刚写的文件（目录空则收尾）再抛
+        ``KeyError``。"""
         validate_asset(mime, len(data), max_bytes=max_bytes)
         asset_id = self._repo.insert_notebook_asset(
             notebook_id, safe_filename(filename or "image"), mime, len(data),
@@ -150,6 +220,9 @@ class AssetService:
         path.write_bytes(data)
         if not path.is_file() or path.stat().st_size != len(data):
             raise RuntimeError(f"source image asset {asset_id} did not persist to {path}")
+        if not self._notebook_exists(notebook_id):
+            self._compensate_orphaned_write(path)
+            raise KeyError(notebook_id)
         return asset
 
     def delete_source_images(self, source_id: str) -> None:

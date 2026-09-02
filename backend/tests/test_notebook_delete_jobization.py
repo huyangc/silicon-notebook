@@ -151,20 +151,21 @@ def test_deleting_notebook_is_immediately_invisible_via_the_api(tmp_path, monkey
     _drain()
 
 
-def test_second_sequential_delete_request_gets_404_via_the_live_filter(tmp_path, monkeypatch):
-    """一次 CAS 提交后,第二次(串行)DELETE 在 HTTP 层其实拿到的是 404,
-    不是 409:`require_notebook_capability("notebook:delete")`(owner 档 →
-    `require_notebook_write`)本身就走 `NOTEBOOK_WRITE_SQL`(T-1.1 追加了
-    `AND NOTEBOOK_LIVE_SQL`),第一次 CAS 一旦把 notebooks.status 翻成
-    'deleting',这个笔记本对**任何**后续请求(包括第二次 DELETE 本身)在
-    能力守卫这一层就已经不可见——请求根本到不了本路由处理函数里的 CAS
-    冲突分支。409 只在两种情形下才会真的被客户端观察到:① 直接调用
-    store 层(绕过 HTTP 授权,见 `test_request_cas_already_deleting_raises_
-    conflict`/`test_request_cas_already_copying_raises_conflict`);② 两个
-    请求真正并发地在能力守卫读到「仍可见」之后才各自跑 CAS 的競态窗口——
-    这不是一个可确定性复现的 HTTP 测试形态。本用例钉的是**串行**情形下
-    真实会发生的东西:第二次拿到 404,笔记本仍然只排了一个删除作业
-    (没有悄悄产生第二个)。"""
+def test_second_sequential_delete_request_gets_409_from_the_owner_scoped_guard(
+    tmp_path, monkeypatch,
+):
+    """codex #659 R6 P2:一次 CAS 提交后,同一个 owner 串行发第二次 DELETE 必须
+    拿到文档承诺的 409,不是 404。
+
+    在这条修复之前,`require_notebook_capability("notebook:delete")`(owner
+    档 → `require_notebook_write`)走的是带生命周期过滤的 `NOTEBOOK_WRITE_SQL`
+    (`AND NOTEBOOK_LIVE_SQL`)——第一次 CAS 一旦把 notebooks.status 翻成
+    'deleting',这个笔记本对**任何**后续请求(包括第二次 DELETE 本身)在能力
+    守卫这一层就已经"不存在",请求根本到不了路由处理函数里的
+    `NotebookAlreadyDeletingError` → 409 分支。现在 DELETE 端点改用
+    `require_notebook_delete`(裸 owner 判定,不带生命周期过滤),owner 对
+    自己正在删除中的库仍然"看得见"这一行,请求能真正走到路由体内的 409
+    分支。"""
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
     monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
@@ -196,7 +197,7 @@ def test_second_sequential_delete_request_gets_404_via_the_live_filter(tmp_path,
     first = client.delete(f"/api/notebooks/{nb}", headers=headers)
     assert first.status_code == 202
     second = client.delete(f"/api/notebooks/{nb}", headers=headers)
-    assert second.status_code == 404
+    assert second.status_code == 409
 
     with rt.database.connect() as conn:
         job_count = conn.execute(
@@ -207,6 +208,75 @@ def test_second_sequential_delete_request_gets_404_via_the_live_filter(tmp_path,
 
     with rt.database.write() as db:
         db.execute("UPDATE kg_build_jobs SET status='succeeded' WHERE id='kgj-block'")
+    _drain()
+
+
+def test_delete_by_a_non_owner_still_gets_404(tmp_path, monkeypatch):
+    """codex #659 R6 P2 锚点:`require_notebook_delete` 放宽的**仅仅**是
+    「owner 对自己正在删除/拷贝中的库仍然可见」——非 owner 对一本活着的库
+    发 DELETE 必须仍是 404(不泄露存在性),与放宽前逐字相同。"""
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
+    monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    from app.main import app
+
+    client = TestClient(app)
+    client.post("/api/auth/register", json={"username": "d00000003", "password": "pw123456"})
+    owner_headers = {
+        "Authorization": "Bearer "
+        + client.post(
+            "/api/auth/login", json={"username": "d00000003", "password": "pw123456"}
+        ).json()["token"]
+    }
+    client.post("/api/auth/register", json={"username": "d00000004", "password": "pw123456"})
+    other_headers = {
+        "Authorization": "Bearer "
+        + client.post(
+            "/api/auth/login", json={"username": "d00000004", "password": "pw123456"}
+        ).json()["token"]
+    }
+    nb = client.post(
+        "/api/notebooks", json={"name": "D3"}, headers=owner_headers
+    ).json()["id"]
+
+    resp = client.delete(f"/api/notebooks/{nb}", headers=other_headers)
+    assert resp.status_code == 404
+
+    # owner 自己仍然能正常删——非 owner 的探测没有意外把库本身弄坏。
+    own = client.delete(f"/api/notebooks/{nb}", headers=owner_headers)
+    assert own.status_code == 202
+    _drain()
+
+
+def test_non_delete_write_endpoint_still_404s_a_deleting_notebook(tmp_path, monkeypatch):
+    """codex #659 R6 P2 锚点(其它端点的守卫零变化):`require_notebook_delete`
+    只挂在 DELETE 端点上;同一个 owner 对一本已经在 'deleting' 的库发别的写
+    请求(这里用 PATCH 改名)必须仍是 404——不能因为这次修复顺带放宽了别的
+    端点。"""
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
+    monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    from app.main import app
+
+    client = TestClient(app)
+    client.post("/api/auth/register", json={"username": "d00000005", "password": "pw123456"})
+    headers = {
+        "Authorization": "Bearer "
+        + client.post(
+            "/api/auth/login", json={"username": "d00000005", "password": "pw123456"}
+        ).json()["token"]
+    }
+    nb = client.post("/api/notebooks", json={"name": "D4"}, headers=headers).json()["id"]
+
+    first = client.delete(f"/api/notebooks/{nb}", headers=headers)
+    assert first.status_code == 202
+
+    patch = client.patch(
+        f"/api/notebooks/{nb}", json={"name": "renamed"}, headers=headers
+    )
+    assert patch.status_code == 404
     _drain()
 
 

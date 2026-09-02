@@ -35,6 +35,7 @@ from app.repositories.postgres._store_utils import (
 )
 from app.repositories.postgres.access_sql import (
     MEMBER_PROBE_FOR_SHARE_SQL,
+    NOTEBOOK_LIVE_SQL,
     READ_GRANT_DIRECT_FOR_SHARE_SQL,
     READ_GRANT_GROUP_CHAIN_FOR_SHARE_SQL,
     read_grant_direct_params,
@@ -89,7 +90,12 @@ class AskStateStore:
     ) -> str:
         """Return the conversation id for this turn: append to an existing
         conversation in this notebook (touching `updated_at`), or create a new
-        one (id `conv-<hex>`, title from the first question)."""
+        one (id `conv-<hex>`, title from the first question).
+
+        Raises ``KeyError(notebook_id)`` when the notebook is not live — see
+        the SQLite twin's docstring for the full codex #659 R6 P2 rationale
+        (identical here: ``INSERT ... SELECT ... WHERE EXISTS`` guarded by
+        the same ``NOTEBOOK_LIVE_SQL``, both backends)."""
         now = normalize_timestamp(self.seams.now())
         if conversation_id:
             # 只接续**调用者自己**的对话:共享库里成员传入 owner/他人的 conv-id 不命中,
@@ -106,11 +112,14 @@ class AskStateStore:
                 )
                 return conversation_id
         new_id = self.seams.new_id("conv")
-        db.execute(
+        cursor = db.execute(
             "INSERT INTO conversations (id, notebook_id, title, created_by, created_at, updated_at) "
-            "VALUES (%s, %s, %s, %s, %s, %s)",
-            (new_id, notebook_id, question[:60], user_id, now, now),
+            "SELECT %s, %s, %s, %s, %s, %s WHERE EXISTS ("
+            f"SELECT 1 FROM notebooks WHERE id = %s AND {NOTEBOOK_LIVE_SQL})",
+            (new_id, notebook_id, question[:60], user_id, now, now, notebook_id),
         )
+        if cursor.rowcount != 1:
+            raise KeyError(notebook_id)
         return new_id
 
     def conversation_history(

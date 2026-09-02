@@ -472,6 +472,14 @@ class IdentityStorePort(IdentityRepository, Protocol):
 
 class NotebookAccessRepository(Protocol):
     def user_can_access_notebook(self, notebook_id: str, user_id: str) -> bool: ...
+    # `DELETE /api/notebooks/{id}` 依赖专属（codex #659 R6 P2）:owner 判定
+    # 不带生命周期过滤,好让 owner 对自己正在删除/拷贝中的库仍然"看得见"这一行,
+    # 使路由体内的 request() 走到它自己的 409 分支而不是被依赖层挡成假 404。
+    # 唯一消费点是 `deps.require_notebook_delete`;其它任何写端点都必须继续用
+    # `user_can_access_notebook`(连同它的生命周期过滤)。
+    def user_owns_notebook_regardless_of_lifecycle(
+        self, notebook_id: str, user_id: str
+    ) -> bool: ...
     def is_member(self, notebook_id: str, user_id: str) -> bool: ...
     # 管理权(P2 能力翻转):owner ∪ role='admin' 的有效授权边。与写权**并列**而不是
     # 取代它——notebook:delete 与 Agent/MCP 面仍恒 owner,两条谓词各有引用者。
@@ -1095,7 +1103,9 @@ class NotebookDeleteJobStorePort(Protocol):
         表）的写法。返回 ``{"status", "lease_token", "notebook_status"}``；
         作业行本身已经不在则返回 ``None``。"""
         ...
-    def finish_residual(self, job_id: str, *, lease_token: str) -> bool:
+    def finish_residual(
+        self, job_id: str, notebook_id: str, *, lease_token: str
+    ) -> bool:
         """§T-4 驱动 A 的「作业行在、notebooks 行不在」残渣收尾终局
         （P1-A）：只删这个作业自己的两张 side table 行（``notebook_delete_
         files``/``notebook_delete_jobs``），**绝不**触碰归档投影或
@@ -1110,7 +1120,13 @@ class NotebookDeleteJobStorePort(Protocol):
         真正在场的新 worker，让它自己去收尾）。围栏落在
         ``notebook_delete_jobs`` 这一行本身的 DELETE 上（先删这行、按
         rowcount 判断围栏是否命中，命中了才接着删 ``notebook_delete_files``
-        侧表；没命中则两张表都不碰，不留半删状态）。返回围栏是否命中。"""
+        侧表；没命中则两张表都不碰，不留半删状态）。返回围栏是否命中。
+
+        codex #659 R6 P2：围栏命中时顺带 ``DELETE FROM conversations WHERE
+        notebook_id=?``——这条路径里 ``notebooks`` 行更早（带外删除）就已经
+        不在了，phase 3 那一次性 conversations 清扫与本次残渣收尾之间同样
+        存在时间窗；理由与 ``delete_row_and_orphan_embeddings`` 的同名注释
+        一致。"""
         ...
 
     def list_stale(self, older_than_seconds: float) -> list[dict]: ...

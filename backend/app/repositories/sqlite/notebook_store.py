@@ -463,6 +463,31 @@ class NotebookStore:
                 "DELETE FROM knowledge_embeddings WHERE notebook_id = ?",
                 (notebook_id,),
             )
+            # conversations likewise has no FK (closure-external, phase 3's
+            # DirectTable list) — this finalize-time delete is defense in
+            # depth against codex #659 R6 P2's race: phase 3 sweeps
+            # conversations ONCE; ensure_conversation's INSERT is now
+            # lifecycle-guarded (won't insert a row for a non-live notebook,
+            # see ask_state_store.py), but a turn that started its write
+            # transaction a moment before that guard would have rejected it
+            # could still land a row between phase 3's sweep and this
+            # transaction. Also closes a PRE-EXISTING gap in the legacy
+            # synchronous path (job_id is None), which never ran phase 3 at
+            # all and had no other conversations cleanup anywhere.
+            # conversations likewise has no FK (closure-external, phase 3's
+            # DirectTable list) — this finalize-time delete is defense in
+            # depth against codex #659 R6 P2's race: phase 3 sweeps
+            # conversations ONCE; ensure_conversation's INSERT is now
+            # lifecycle-guarded (won't insert a row for a non-live notebook,
+            # see ask_state_store.py), but a turn that started its write
+            # transaction a moment before that guard would have rejected it
+            # could still land a row between phase 3's sweep and this
+            # transaction. Also closes a PRE-EXISTING gap in the legacy
+            # synchronous path (job_id is None), which never ran phase 3 at
+            # all and had no other conversations cleanup anywhere.
+            db.execute(
+                "DELETE FROM conversations WHERE notebook_id = ?", (notebook_id,),
+            )
             if job_id is None:
                 # §4.4/P2-g: the JOBIZED path (job_id given) already cleared
                 # both FTS5 shadows in phase 3, alongside knowledge_objects/

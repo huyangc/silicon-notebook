@@ -473,6 +473,19 @@ class NotebookStore:
             connection.execute(
                 "DELETE FROM knowledge_embeddings WHERE notebook_id=%s", (notebook_id,)
             )
+            # conversations likewise has no FK (closure-external, phase 3's
+            # DirectTable list) — this finalize-time delete is defense in
+            # depth against codex #659 R6 P2's race: phase 3 sweeps
+            # conversations ONCE; ensure_conversation's INSERT is now
+            # lifecycle-guarded (won't insert a row for a non-live notebook,
+            # see ask_state_store.py), which already closes the window from
+            # the moment the tombstone CAS commits onward — this backstop
+            # only matters for a turn whose own snapshot predates that CAS.
+            # Also closes a PRE-EXISTING gap in the legacy synchronous path
+            # (job_id is None), which never ran phase 3 at all.
+            connection.execute(
+                "DELETE FROM conversations WHERE notebook_id=%s", (notebook_id,)
+            )
             connection.execute("DELETE FROM notebooks WHERE id=%s", (notebook_id,))
             if job_id is not None:
                 # Module-level import only (codex #659 R2): a function-local

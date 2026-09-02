@@ -9,6 +9,7 @@ from app.api.deps import (
     notebook_sharing_repository,
     repository,
     require_notebook_capability,
+    require_notebook_delete,
     require_notebook_read,
     user_error,
 )
@@ -136,7 +137,7 @@ def update_notebook(
     "/notebooks/{notebook_id}",
     status_code=202,
     response_model=NotebookDeleteResponse,
-    dependencies=[Depends(require_notebook_capability("notebook:delete"))],
+    dependencies=[Depends(require_notebook_delete)],
 )
 def delete_notebook(
     notebook_id: str, user: UserProfile = Depends(get_current_user)
@@ -144,7 +145,13 @@ def delete_notebook(
     """批 3·W1 PR-3 §T-2/§5:CAS tombstone 提交后立即返回 202——实际清理由
     后台删除作业异步完成(六相位,见 `services/notebook_delete.py`)。前端
     零改动:`requestVoid` 只看 2xx 就丢弃 body(`frontend/app/api-client.ts`),
-    202 与之前的 204 对它完全透明。"""
+    202 与之前的 204 对它完全透明。
+
+    守卫改用 `require_notebook_delete`（codex #659 R6 P2）而不是
+    `require_notebook_capability("notebook:delete")`：后者的
+    NOTEBOOK_WRITE_SQL 带生命周期过滤，会把重复/重试的 DELETE 挡成假 404；
+    这道守卫仍是 owner-only，只是放行 owner 自己正在删除/拷贝中的库，让下面
+    这段 `except NotebookAlreadyDeletingError` 真正有机会跑到。"""
     try:
         return NotebookDeleteResponse(
             **notebook_delete_repository().request(notebook_id, user.id)

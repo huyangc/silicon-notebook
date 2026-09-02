@@ -466,6 +466,22 @@ NOTEBOOK_WRITE_SQL = (
     f"SELECT 1 FROM notebooks WHERE id=? AND created_by=? AND {NOTEBOOK_LIVE_SQL}"
 )
 
+# 删除端点专属的 owner 判定（codex #659 R6 P2）：裸 owner 比对，**刻意不带**
+# NOTEBOOK_LIVE_SQL。不是第四条通用授权谓词——唯一消费点是 `DELETE
+# /api/notebooks/{id}` 的 FastAPI 依赖，其余任何写端点都必须继续走
+# NOTEBOOK_WRITE_SQL（连同它的生命周期过滤）。
+#
+# 理由：首次 DELETE 把 notebooks 行 CAS 成 `status='deleting'` 后，若用户重试同一
+# 请求（网络抖动/前端重放），NOTEBOOK_WRITE_SQL 的生命周期过滤会让这一行对依赖层
+# 变得"不存在"，产生 404——但 `notebook_delete.request()`（真正处理重复请求的地方）
+# 期望的是 409（`NotebookAlreadyDeletingError`，已在路由体内正确映射，只是这次
+# 请求从未走到那一步）。这条谓词只解决"依赖层过早挡下"，不改变最终判定：调用方
+# 仍必须是 `created_by`，非 owner（或 notebook 从未存在过/已经被相位 5 彻底删除）
+# 一律 404，与另外三条谓词同一条"不泄露存在性"口径——唯一的差别是 owner 对自己
+# 正在删除中（或拷贝中）的库仍然"看得见"这一行，好让路由体内的 `request()` 走到
+# 它自己的 409 分支，而不是在依赖层就被拦截成假 404。
+NOTEBOOK_DELETE_OWNER_SQL = "SELECT 1 FROM notebooks WHERE id=? AND created_by=?"
+
 # 管理权(owner ∪ 管理级有效授权边)的完整查询:有行即有管理权。notebook 不存在 →
 # 无行 → 无管理权,与另外两条同口径。
 NOTEBOOK_ADMIN_SQL = (

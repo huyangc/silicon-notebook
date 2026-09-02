@@ -977,6 +977,16 @@ class NotebookSharingService:
         """写权:仅 owner(安全边界,勿放宽)。"""
         return self._store.user_can_access_notebook(notebook_id, user_id)
 
+    def user_owns_notebook_regardless_of_lifecycle(
+        self, notebook_id: str, user_id: str
+    ) -> bool:
+        """`DELETE /api/notebooks/{id}` 依赖专属（codex #659 R6 P2）——见
+        store 层同名方法的完整理由。唯一消费点是 `deps.require_notebook_
+        delete`,其它任何调用点都不得复用它。"""
+        return self._store.user_owns_notebook_regardless_of_lifecycle(
+            notebook_id, user_id
+        )
+
     def is_member(self, notebook_id: str, user_id: str) -> bool:
         return self._store.is_member(notebook_id, user_id)
 
