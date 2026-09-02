@@ -40,6 +40,36 @@ def _new_lease_token() -> str:
     return secrets.token_hex(16)
 
 
+def _stale_cutoff_iso(seconds: float) -> str:
+    """codex #659 R13 P2: this store's clock seam (``self.now()``, injected
+    as ``repository_facade.py``'s module-level ``_now``) writes
+    ``datetime.now().astimezone().isoformat(...)`` — an OFFSET-AWARE string
+    carrying whatever the host's UTC offset was AT WRITE TIME. The cutoff
+    used to be built from a bare ``datetime.now()`` (naive, no offset) and
+    compared against that column via plain SQL ``<`` — a byte-wise string
+    compare. That happens to track real elapsed time only while the host's
+    UTC offset stays constant between a row's write and the cutoff's own
+    computation; a DST transition or a timezone reconfiguration in between
+    breaks it silently (a job can be judged stale after far less real time
+    than the configured window, or parked stale for a whole offset's worth
+    of extra wait) — see this module's ``mark_running``/``list_stale``
+    docstrings for the two call sites this cutoff feeds. Building the
+    cutoff with the SAME ``.astimezone()`` shape ``self.now()`` uses, and
+    comparing through SQLite's own ``datetime(...)`` function (which
+    normalizes any offset-carrying operand to true UTC before comparing —
+    verified: ``datetime('...+08:00')`` and the equivalent ``'...+00:00'``
+    instant compare equal), makes the comparison track real elapsed time
+    regardless of which offset either side was expressed in. A legacy
+    naive (offset-less) value — none exist for this table today; every
+    write goes through this same clock — would still compare sanely:
+    ``datetime()`` treats an offset-less operand as already being in its
+    own UTC-equivalent terms, the same graceful fallback SQLite applies to
+    any of this schema's other naive timestamp columns."""
+    return (
+        datetime.now().astimezone() - timedelta(seconds=max(1, seconds))
+    ).isoformat()
+
+
 class NotebookDeleteJobStore:
     def __init__(
         self,
@@ -161,10 +191,14 @@ class NotebookDeleteJobStore:
         return self._row(row)
 
     def latest_for_notebook(self, notebook_id: str) -> dict | None:
+        # codex #659 R13 P2: same offset-vs-naive string-sort class of bug
+        # as list_notebooks_missing_job's finished_at ordering (see that
+        # method's docstring) — datetime(created_at) normalizes to a true
+        # UTC instant before ranking "latest" across this notebook's rows.
         with self.database.connect() as db:
             row = db.execute(
                 "SELECT * FROM notebook_delete_jobs WHERE notebook_id=? "
-                "ORDER BY created_at DESC LIMIT 1",
+                "ORDER BY datetime(created_at) DESC LIMIT 1",
                 (notebook_id,),
             ).fetchone()
         return self._row(row) if row is not None else None
@@ -172,17 +206,18 @@ class NotebookDeleteJobStore:
     def mark_running(self, job_id: str, *, stale_cutoff_seconds: float) -> str | None:
         """P2-a owner/lease CAS. PostgreSQL twin's docstring has the full
         rationale; SQLite's cutoff mirrors ``list_stale``'s own
-        ``datetime.now() - timedelta(...)`` idiom."""
+        ``_stale_cutoff_iso(...)`` + ``datetime(...)``-normalized compare —
+        see that helper's docstring for why a plain string ``<`` would not
+        track real elapsed time across a host UTC-offset change (codex #659
+        R13 P2)."""
         token = _new_lease_token()
-        cutoff = (
-            datetime.now() - timedelta(seconds=max(1, stale_cutoff_seconds))
-        ).replace(microsecond=0).isoformat()
+        cutoff = _stale_cutoff_iso(stale_cutoff_seconds)
         with self.database.write(operation="notebook_delete.mark_running") as db:
             cursor = db.execute(
                 "UPDATE notebook_delete_jobs SET status='running',"
                 "lease_token=?,updated_at=? WHERE id=? AND "
                 "(status IN ('queued','waiting') "
-                "OR (status='running' AND updated_at<?))",
+                "OR (status='running' AND datetime(updated_at)<datetime(?)))",
                 (token, self.now(), job_id, cutoff),
             )
         return token if cursor.rowcount == 1 else None
@@ -352,33 +387,49 @@ class NotebookDeleteJobStore:
 
     def list_stale(self, older_than_seconds: float) -> list[dict]:
         """Sweep driver A (§T-4). PostgreSQL twin's docstring has the full
-        rationale; SQLite's cutoff mirrors ``sharing_store.sweep_stale_
-        copies``'s own ``datetime.now() - timedelta(...)`` idiom (a plain
-        ISO string compared lexicographically, same as every other SQLite
-        timestamp column in this schema)."""
-        cutoff = (
-            datetime.now() - timedelta(seconds=max(1, older_than_seconds))
-        ).replace(microsecond=0).isoformat()
+        rationale (``timestamptz`` there is a true instant already, no
+        string comparison involved). SQLite's cutoff uses
+        ``_stale_cutoff_iso(...)`` + a ``datetime(...)``-normalized compare
+        — codex #659 R13 P2: this used to be a bare ``datetime.now()``
+        cutoff compared against ``updated_at`` via a plain string ``<``,
+        which only tracked real elapsed time while the host's UTC offset
+        stayed constant between a row's write and this call — see that
+        helper's docstring for the DST/timezone-change failure mode this
+        closes."""
+        cutoff = _stale_cutoff_iso(older_than_seconds)
         with self.database.connect() as db:
             rows = db.execute(
                 "SELECT * FROM notebook_delete_jobs "
                 "WHERE status IN ('queued','running','waiting') "
-                "AND updated_at<?",
+                "AND datetime(updated_at)<datetime(?)",
                 (cutoff,),
             ).fetchall()
         return [self._row(row) for row in rows]
 
     def list_notebooks_missing_job(self) -> list[dict]:
-        """P1-E. PostgreSQL twin's docstring has the full rationale."""
+        """P1-E. PostgreSQL twin's docstring has the full rationale.
+
+        codex #659 R13 P2: the "most recent failed attempt" sub-selects
+        used to ``ORDER BY j2.finished_at DESC`` as a plain string sort —
+        the same offset-vs-naive string-comparison class of bug as
+        ``list_stale``'s old cutoff (see ``_stale_cutoff_iso``'s
+        docstring), just applied to ordering two STORED rows against each
+        other instead of a row against a freshly-computed cutoff: if the
+        host's UTC offset changed between two 'failed' attempts for the
+        same notebook, a raw string sort could pick the wrong row as "most
+        recent", corrupting the ``attempts``/backoff carried into
+        ``list_notebooks_missing_job``'s caller. ``ORDER BY
+        datetime(j2.finished_at) DESC`` normalizes both operands to true
+        UTC instants first."""
         with self.database.connect() as db:
             rows = db.execute(
                 "SELECT n.id AS notebook_id, "
                 "(SELECT j2.attempts FROM notebook_delete_jobs j2 "
                 "  WHERE j2.notebook_id=n.id AND j2.status='failed' "
-                "  ORDER BY j2.finished_at DESC LIMIT 1) AS last_attempts, "
+                "  ORDER BY datetime(j2.finished_at) DESC LIMIT 1) AS last_attempts, "
                 "(SELECT j2.finished_at FROM notebook_delete_jobs j2 "
                 "  WHERE j2.notebook_id=n.id AND j2.status='failed' "
-                "  ORDER BY j2.finished_at DESC LIMIT 1) AS last_finished_at "
+                "  ORDER BY datetime(j2.finished_at) DESC LIMIT 1) AS last_finished_at "
                 "FROM notebooks n LEFT JOIN notebook_delete_jobs j "
                 "ON j.notebook_id=n.id AND j.status IN ('queued','running','waiting') "
                 "WHERE n.status='deleting' AND j.id IS NULL"
