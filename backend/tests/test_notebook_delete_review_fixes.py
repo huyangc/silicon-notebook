@@ -648,3 +648,37 @@ def test_artifact_siblings_and_indexed_notebook_ids_share_the_same_scratch_shape
 
     published = ScaleArtifactStore(_Settings()).indexed_notebook_ids()
     assert published == sorted([notebook_id, other_id])
+
+
+# ---------------------------------------------------------------------------
+# codex #659 R2: in-process submission dedupe — a job parked in the delete
+# pool's local queue must not be re-submitted by every sweep tick while one
+# long delete occupies the only slot.
+# ---------------------------------------------------------------------------
+
+
+def test_submit_dedupes_jobs_already_queued_in_this_process(repo, monkeypatch):
+    """变异钉：去掉 ``_submit`` 的 ``_inflight`` 去重集合 → 第二次提交也进
+    池,captured 变成 2,本条报红。完成(``_run_submitted`` 的 finally)之后
+    重新提交必须再次可行——去重只覆盖「仍在队里或在跑」的窗口。"""
+    from app.services import background_jobs
+
+    runner = repo._runtime.notebook_delete
+    captured = []
+    monkeypatch.setattr(
+        background_jobs, "submit",
+        lambda fn, *args, **kwargs: captured.append((fn, args)),
+    )
+
+    assert runner._submit("job-1", "nb-x") is True
+    assert runner._submit("job-1", "nb-x") is False, (
+        "a job already handed to this process's pool must not be re-submitted"
+    )
+    assert len(captured) == 1
+
+    # Simulate the pooled execution finishing: run() is a no-op for an
+    # unknown job id, and the finally block must clear the in-flight mark.
+    fn, args = captured[0]
+    fn(*args)
+    assert runner._submit("job-1", "nb-x") is True
+    assert len(captured) == 2

@@ -475,10 +475,11 @@ class NotebookStore:
             )
             connection.execute("DELETE FROM notebooks WHERE id=%s", (notebook_id,))
             if job_id is not None:
-                from app.repositories.postgres.notebook_delete_job_store import (
-                    NotebookDeleteJobStore,
-                )
-
+                # Module-level import only (codex #659 R2): a function-local
+                # ``import`` here would make the name local to the WHOLE
+                # function, so the duplicate-request early-return above would
+                # hit UnboundLocalError, roll back, and strand the job row
+                # where neither sweep driver can see it.
                 NotebookDeleteJobStore.cleanup_job_on(connection, job_id)
         return [row["file_path"] for row in rows]
 
