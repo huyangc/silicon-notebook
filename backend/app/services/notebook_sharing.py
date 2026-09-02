@@ -1172,8 +1172,24 @@ class NotebookSharingService:
             # as a fabricated success: a summary handed back for a user who
             # was never actually added to notebook_members. Disambiguate with
             # a same-connection membership probe — no extra connection taken.
-            if inserted == 0 and not self._store.is_member_on(db, notebook_id, user_id):
-                raise KeyError(notebook_id)
+            #
+            # codex #659 R16 P2: an existing membership is NOT proof the
+            # notebook is still live — for a user already in
+            # notebook_members the guarded insert also returns 0, so the
+            # probe alone would fabricate a success for a notebook whose
+            # tombstone committed between the read above and the INSERT.
+            # Re-read the LIVE row (same connection) and hydrate from that
+            # fresh read: gone → 404 regardless of membership; live + not a
+            # member → the guard could only have blocked on liveness that
+            # has since returned... which cannot happen for a monotonic
+            # tombstone, so that combination also reads as not-joinable.
+            if inserted == 0:
+                fresh = self._store.notebook_row_on(db, notebook_id)
+                if fresh is None or not self._store.is_member_on(
+                    db, notebook_id, user_id
+                ):
+                    raise KeyError(notebook_id)
+                row = fresh
             notebook = self._summaries.from_row(db, row)
         notebook.access = "reader"
         return notebook

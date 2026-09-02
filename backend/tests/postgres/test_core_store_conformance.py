@@ -2578,9 +2578,25 @@ def test_copy_snapshot_excludes_backend_ordinals_and_serializes_json(
     core_stores.sharing.insert_copy_rows(
         "notebooks", [destination], chunk_size=100
     )
-    assert core_stores.sharing.notebook_row("nb-copy-destination")["status"] == "copying"
-    core_stores.sharing.compensate_copy("nb-copy-destination")
+    # codex #659 R16: ``notebook_row`` is now the liveness-filtered lookup
+    # behind ``share_state`` — it deliberately cannot see a 'copying' row any
+    # more, so probe the raw table directly for this pipeline-internal
+    # assertion (and note the second assert below doubles as a pin that the
+    # filtered lookup hides the mid-copy destination).
+    with core_stores.database.connect() as connection:
+        probed = connection.execute(
+            "SELECT status FROM notebooks WHERE id=%s",
+            ("nb-copy-destination",),
+        ).fetchone()
+    assert probed is not None and probed["status"] == "copying"
     assert core_stores.sharing.notebook_row("nb-copy-destination") is None
+    core_stores.sharing.compensate_copy("nb-copy-destination")
+    with core_stores.database.connect() as connection:
+        gone = connection.execute(
+            "SELECT status FROM notebooks WHERE id=%s",
+            ("nb-copy-destination",),
+        ).fetchone()
+    assert gone is None
 
 
 def test_snapshot_copy_rows_rejects_a_non_live_notebook(core_stores: CoreStores):

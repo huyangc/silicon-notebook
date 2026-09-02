@@ -384,17 +384,17 @@ class SharingStore:
             ).fetchall()
 
     def notebook_row(self, notebook_id: str) -> "sqlite3.Row | None":
-        """codex #659 R11 P1 audit: bare read, deliberately NOT liveness-
-        filtered — its one caller (``NotebookSharingService.share_state``)
-        is reached only through ``GET /notebooks/{id}/share``, which already
-        carries ``require_notebook_capability("notebook:configure")`` (owner
-        -only, ``NOTEBOOK_WRITE_SQL`` — includes ``NOTEBOOK_LIVE_SQL``) as a
-        route dependency; the liveness check already happened before this
-        method ever runs. Do not reuse this method for any NEW caller that
-        is not equally protected by an upstream live-only guard."""
+        """codex #659 R16 (reverses the R11 exemption): the route-level
+        ``notebook:configure`` guard alone leaves a TOCTOU — a delete
+        tombstone can commit between the guard's check and this read, and an
+        unfiltered read would hand ``share_state`` a tombstoned row (200
+        with a share token on a deleting notebook). Filter here too; the
+        guard stays as the authorization layer, this is the liveness
+        layer."""
         with self.database.connect() as db:
             return db.execute(
-                "SELECT * FROM notebooks WHERE id = ?", (notebook_id,)
+                f"SELECT * FROM notebooks WHERE id = ? AND {NOTEBOOK_LIVE_SQL}",
+                (notebook_id,),
             ).fetchone()
 
     @staticmethod

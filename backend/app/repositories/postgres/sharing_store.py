@@ -329,12 +329,16 @@ class SharingStore:
             ).fetchall()
 
     def notebook_row(self, notebook_id: str) -> dict | None:
-        """codex #659 R11 P1 audit: 见 SQLite 孪生的完整理由（逐字同义）——
-        唯一消费点 ``share_state`` 已经被路由层 ``notebook:configure``
-        （owner-only，含 ``NOTEBOOK_LIVE_SQL``）守卫过，此处刻意不重复过滤。"""
+        """codex #659 R16: the route-level ``notebook:configure`` guard is
+        NOT enough on its own — under READ COMMITTED a delete tombstone can
+        commit between the guard's check and this query, and an unfiltered
+        read would then hand ``share_state`` a tombstoned row (200 with a
+        share token on a deleting notebook). Filter here too; the guard
+        stays as the authorization layer, this is the liveness layer."""
         with self.database.connect() as connection:
             row = connection.execute(
-                "SELECT * FROM notebooks WHERE id=%s", (notebook_id,)
+                f"SELECT * FROM notebooks WHERE id=%s AND {NOTEBOOK_LIVE_SQL}",
+                (notebook_id,),
             ).fetchone()
         return sqlite_compatible_notebook_row(row)
 
