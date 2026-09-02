@@ -264,7 +264,7 @@ def test_packaged_migration_refuses_non_utf_database_before_any_ddl(
 def test_packaged_migrations_apply_in_order(postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert len(PostgresMigrator(postgres_database).migrations) == 48
+    assert len(PostgresMigrator(postgres_database).migrations) == 49
     migrator = PostgresMigrator(postgres_database)
     assert migrator.migrate(target_version=2) == 2
     with postgres_database.connect() as conn:
