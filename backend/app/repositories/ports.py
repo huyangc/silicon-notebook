@@ -1948,6 +1948,22 @@ class KnowledgeStorePort(Protocol):
     @staticmethod
     def delete_notebook_graph_rows(db: object, notebook_id: str, now: str) -> dict[str, int]: ...
     @staticmethod
+    def graph_drain_backlog(db: object, notebook_id: str, threshold: int) -> "str | None":
+        """batch-3-W1 T-5a：``delete_notebook_kg`` 预排水的探针——按登记顺序
+        返回第一张匹配行数仍超过 ``threshold`` 的表名,全部 ≤threshold 时返回
+        ``None``(= 终局单事务已经有界,可以停止排水)。只读点探
+        (LIMIT 1 OFFSET threshold),小图路径零写事务。"""
+        ...
+    @staticmethod
+    def drain_notebook_graph_rows_page(
+        db: object, notebook_id: str, table: str, limit: int
+    ) -> int:
+        """batch-3-W1 T-5a：按该表在排水登记表里的谓词删除一页(§1.5 形一
+        rowid / 形二 ctid),事务归调用方所有——每页一个 ``write()``,且同事务
+        必须 bump ``kg_mutation_seq``(census 纪律,由调用方经 ``mark_dirty``
+        完成)。返回本页删除行数。"""
+        ...
+    @staticmethod
     def embedding_rows_for_objects(db: object, notebook_id: str, object_ids: object) -> list[Any]: ...
     @staticmethod
     def fts_search(db: object, notebook_id: str, q: str, k: int = 30) -> list[dict]: ...

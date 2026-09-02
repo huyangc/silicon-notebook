@@ -1457,3 +1457,31 @@ P0-1 的单事务不变量（连带更新
 与 `test_kg_mutation_phase_matrix.py` 里的相关连接身份断言），要么把
 T-5a 的范围重新界定为不影响这条不变量的形态（例如只分页那些不参与
 "commit 后立即失效缓存"时序契约的表）。
+
+### 勘误 2 裁决（T-5a 独立 PR，2026-09-02）
+
+**取第二条路：范围重界定为「预排水 + 原子终局」，P0-1 不变量原样保留。**
+
+`delete_notebook_kg` 在既有单事务终局**之前**加一段分页预排水
+（`knowledge_lifecycle._drain_graph_rows_before_reset`）：按与终局 DELETE
+逐字节相同的 (表, 谓词) 登记表（两后端各自的 `_GRAPH_DRAIN_STEPS`，
+反漂移镜像测试钉住一一对应），每批一个独立 `write()` 事务删一页
+（SQLite rowid 形一 / PG ctid 形二，页 2000 行），把每张表的匹配行压到
+≤阈值（=页大小）后停手；终局事务里的 13 条 DELETE 因此只处理有界残余，
+其原子提交语义、连接身份、「提交后才失效缓存」时序**逐字节不变**——
+P0-1 钉测试无需任何修改。要点：
+
+- **小图快路径**：首个探针只读（`graph_drain_backlog`，LIMIT 1 OFFSET
+  threshold 点探），全表 ≤阈值时零排水写事务，与 T-5a 之前逐字节同形。
+- **census 纪律**：每个非空排水批同事务 `mark_dirty` bump
+  `kg_mutation_seq`（否则两次 mid-drain 读会把不同的半清图缓存进同一个
+  (epoch, seq) 键）；终局 upsert 照旧 seq→0、epoch+1，排水期键永不别名
+  重置后内容。kg_mutation.py FULL CENSUS 已登记新站点。
+- **§4.2 检查点**：每批之前查 `_notebook_deleting`，墓碑落地就地
+  `NotebookDeletingAbortsMaintenanceError`（相位 3 拥有这些行）。
+- **响亮失败**：探针命名某表而分页删 0 行、连续 3 次 → RuntimeError。
+- **可见性代价（接受）**：排水期读者看到渐缩的图——与终局提交后
+  「空图直到 rebuild 填回」的既有退化窗口同质，只是把窗口向前延长了
+  排水时长；rebuild 流程本来就处于 dirty 态。
+- **counts 契约**：排水行并回 `delete_notebook_kg` 返回的 counts，
+  调用方看到的仍是全量。

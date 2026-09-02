@@ -65,6 +65,80 @@ def _completion_generation_is_current(
     return bool(row and row["id"] == run_id)
 
 
+# batch-3-W1 T-5a: the ordered (table, WHERE-predicate) registry the pre-reset
+# DRAIN pages over — each entry mirrors, byte-for-byte on the predicate, one of
+# ``delete_notebook_graph_rows``'s DELETE statements in the SAME order (the
+# order is semantic: knowledge_object_sources / knowledge_embeddings /
+# kg_objects_fts match rows whose OBJECT is already gone, so their sets only
+# stabilize after knowledge_objects has drained; processing "first table with
+# a backlog" therefore converges exactly like the final pass would).
+# ``params`` counts how many times the notebook_id binds into the predicate.
+# ``test_kg_graph_drain.py`` pins registry↔final-statement agreement by
+# tracing the final function's SQL, so a predicate edited on one side without
+# the other fails loudly instead of drifting.
+_GRAPH_DRAIN_STEPS: tuple[tuple[str, str, int], ...] = (
+    (
+        "knowledge_source_fact_backfills",
+        "notebook_id=? AND NOT EXISTS (SELECT 1 FROM sources s "
+        "WHERE s.id=knowledge_source_fact_backfills.source_id AND s.notebook_id=? "
+        "AND s.source_type IN ('memory','knowhow'))",
+        2,
+    ),
+    (
+        "knowledge_source_facts",
+        "notebook_id=? AND NOT EXISTS (SELECT 1 FROM sources s "
+        "WHERE s.id=knowledge_source_facts.source_id AND s.notebook_id=? "
+        "AND s.source_type IN ('memory','knowhow'))",
+        2,
+    ),
+    (
+        "knowledge_objects",
+        "notebook_id = ? AND NOT EXISTS (SELECT 1 FROM sources s "
+        "WHERE s.id=knowledge_objects.source_id "
+        "AND s.notebook_id=? AND s.source_type IN ('memory','knowhow'))",
+        2,
+    ),
+    (
+        "knowledge_object_sources",
+        "notebook_id=? AND NOT EXISTS (SELECT 1 FROM knowledge_objects ko "
+        "WHERE ko.notebook_id=? AND ko.id=knowledge_object_sources.object_id)",
+        2,
+    ),
+    (
+        "knowledge_relations",
+        "notebook_id = ? AND NOT EXISTS (SELECT 1 FROM sources s "
+        "WHERE s.id=knowledge_relations.source_id "
+        "AND s.notebook_id=? AND s.source_type IN ('memory','knowhow'))",
+        2,
+    ),
+    ("concept_clusters", "notebook_id = ?", 1),
+    ("concept_merge_candidates", "notebook_id = ?", 1),
+    ("kg_relation_completion_state", "notebook_id = ?", 1),
+    ("kg_analysis_artifacts", "notebook_id = ?", 1),
+    ("kg_community_edges", "notebook_id = ?", 1),
+    ("kg_source_profiles", "notebook_id = ?", 1),
+    (
+        "knowledge_embeddings",
+        "notebook_id=? AND NOT EXISTS (SELECT 1 FROM knowledge_objects ko "
+        "WHERE ko.notebook_id=? AND ko.id=knowledge_embeddings.object_id)",
+        2,
+    ),
+    (
+        "extraction_runs",
+        "notebook_id=? AND NOT EXISTS (SELECT 1 FROM sources s "
+        "WHERE s.id=extraction_runs.source_id "
+        "AND s.notebook_id=? AND s.source_type IN ('memory','knowhow'))",
+        2,
+    ),
+    (
+        "kg_objects_fts",
+        "notebook_id=? AND NOT EXISTS (SELECT 1 FROM knowledge_objects ko "
+        "WHERE ko.notebook_id=? AND ko.id=kg_objects_fts.object_id)",
+        2,
+    ),
+)
+
+
 class KnowledgeStore:
     # KNN 访问路径提示在 FTS5 上永远无事可做:声明不具备,让服务层的
     # `_lexical_knn_allowed` 在读取任何规模统计之前零成本短路——发行默认后端
@@ -81,6 +155,55 @@ class KnowledgeStore:
         return self.database.connect()
 
     # ------------------------------------------------ lifecycle projections
+    @staticmethod
+    def graph_drain_backlog(
+        db: sqlite3.Connection, notebook_id: str, threshold: int
+    ) -> "str | None":
+        """batch-3-W1 T-5a: the first ``_GRAPH_DRAIN_STEPS`` table whose
+        matching-row count still exceeds ``threshold``, or ``None`` when
+        every table is at or under it (= the final single-transaction pass
+        in ``delete_notebook_graph_rows`` is now bounded and the caller may
+        stop draining). Read-only point probe per table (``LIMIT 1 OFFSET
+        threshold`` — exists-at-offset, never a full COUNT), so calling it
+        on an empty/small graph costs a handful of index probes and NO
+        write transaction — that is what keeps the small-graph path of
+        ``delete_notebook_kg`` byte-identical to the pre-T-5a shape
+        (see ``test_kg_mutation_phase_matrix``'s P0-1 pin)."""
+        for table, predicate, params in _GRAPH_DRAIN_STEPS:
+            row = db.execute(
+                f"SELECT 1 FROM {table} WHERE {predicate} LIMIT 1 OFFSET {int(threshold)}",
+                (notebook_id,) * params,
+            ).fetchone()
+            if row is not None:
+                return table
+        return None
+
+    @staticmethod
+    def drain_notebook_graph_rows_page(
+        db: sqlite3.Connection, notebook_id: str, table: str, limit: int
+    ) -> int:
+        """batch-3-W1 T-5a: delete ONE bounded page of ``table``'s rows that
+        match its ``_GRAPH_DRAIN_STEPS`` predicate (the byte-identical
+        predicate ``delete_notebook_graph_rows`` will re-run unboundedly in
+        the final transaction — after draining it matches only the ≤threshold
+        remainder). ``rowid IN (SELECT rowid … LIMIT n)`` is §1.5's form-one
+        shape for SQLite (works on the FTS5 virtual table too — FTS5 exposes
+        rowid). Caller owns the transaction: one page per ``write()``, and
+        the same transaction must also bump ``kg_mutation_seq`` (the caller
+        does, via ``mark_dirty`` — kg_mutation.py's FULL CENSUS discipline:
+        graph-row mutations on a live notebook never commit without their
+        seq bump)."""
+        predicates = {t: (p, n) for t, p, n in _GRAPH_DRAIN_STEPS}
+        if table not in predicates:
+            raise ValueError(f"unknown graph drain table: {table}")
+        predicate, params = predicates[table]
+        cur = db.execute(
+            f"DELETE FROM {table} WHERE rowid IN ("
+            f"SELECT rowid FROM {table} WHERE {predicate} LIMIT {int(limit)})",
+            (notebook_id,) * params,
+        )
+        return cur.rowcount
+
     @staticmethod
     def delete_notebook_graph_rows(
         db: sqlite3.Connection, notebook_id: str, now: str
