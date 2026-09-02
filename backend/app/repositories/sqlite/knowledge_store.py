@@ -209,6 +209,27 @@ class KnowledgeStore:
 
     # ------------------------------------------------ lifecycle projections
     @staticmethod
+    def begin_graph_reset_isolation(db) -> None:
+        """batch-3-W1 T-5a (codex #663 R12 P1): SQLite no-op — the single-writer lock IS the isolation.
+
+        Runs as the FIRST statement of ``delete_notebook_kg``'s final
+        transaction. On PostgreSQL, REPEATABLE READ freezes the
+        snapshot at that first statement, so the in-transaction bound
+        probe and every subsequent DELETE see the SAME row set — a
+        concurrent ``store_kg`` committing mid-transaction can no
+        longer inflate a DELETE past what the probe admitted. Rows
+        committed after the snapshot survive the reset (the final
+        pass's pre-existing READ COMMITTED semantics already allowed
+        that; the production rebuild's re-extraction converges them),
+        and a write-write serialization conflict (SQLSTATE 40001,
+        e.g. the unified_kg_state upsert racing a concurrent
+        ``mark_dirty``) aborts the attempt cleanly — the caller's
+        retry loop treats it exactly like a failed bound probe."""
+        # SQLite: the global write lock already makes the whole final
+        # transaction atomic against every writer — nothing to pin.
+        return None
+
+    @staticmethod
     def graph_drain_backlog(
         db: sqlite3.Connection, notebook_id: str, threshold: int, start: int = 0
     ) -> "tuple[str, int] | None":

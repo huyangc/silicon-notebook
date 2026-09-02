@@ -666,6 +666,56 @@ def test_small_graph_tombstone_still_aborts_before_the_final_reset(
     ) == 2, "墓碑已落时终局 reset 不得执行"
 
 
+def test_final_reset_pins_isolation_as_the_first_statement(repo, monkeypatch):
+    """变异钉(codex #663 R12 P1):把终局事务里的 begin_graph_reset_isolation
+    调用删掉(或挪到探针之后)→ 首语句不再是隔离钉,报红。PG 侧语句形由
+    同名 static 的 fake-db 断言钉住:REPEATABLE READ 快照钉在第一条语句,
+    事务内探针才原子界定其后所有 DELETE。"""
+    service = repo._runtime.knowledge_lifecycle
+    notebook = repo.create_notebook(NotebookCreate(name="iso"))
+    _seed_graph(repo, notebook.id, doc_objects=2)
+
+    order = []
+    store = repo._runtime.knowledge
+    original_iso = store.begin_graph_reset_isolation
+    original_backlog = store.graph_drain_backlog
+
+    def _iso_spy(db):
+        order.append("isolation")
+        return original_iso(db)
+
+    def _backlog_spy(db, nb, threshold, start=0):
+        order.append(("probe", start))
+        return original_backlog(db, nb, threshold, start)
+
+    monkeypatch.setattr(store, "begin_graph_reset_isolation", _iso_spy)
+    monkeypatch.setattr(store, "graph_drain_backlog", _backlog_spy)
+    repo.delete_notebook_kg(notebook.id)
+
+    # 排水前的只读探针(connect 连接)合法地先行;终局事务内的序必须是
+    # isolation 紧跟 start=0 复验探针。
+    assert "isolation" in order, f"终局必须钉隔离级:{order}"
+    iso_at = order.index("isolation")
+    assert iso_at + 1 < len(order) and order[iso_at + 1] == ("probe", 0), (
+        f"隔离钉必须先于终局事务内的复验探针:{order}"
+    )
+
+    # PG 侧的语句形(fake db,无需真库):
+    from app.repositories.postgres.knowledge_store import (
+        KnowledgeStore as PgStore,
+    )
+
+    executed = []
+
+    class _FakeDb:
+        def execute(self, sql, params=()):
+            executed.append(" ".join(str(sql).split()))
+            return None
+
+    PgStore.begin_graph_reset_isolation(_FakeDb())
+    assert executed == ["SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"]
+
+
 def test_drain_stall_raises_loudly(repo, monkeypatch):
     """变异钉:把「3 次连续零删响亮失败」改成静默继续 → 排水循环失去终止
     条件(本用例以 RuntimeError 类型断言判红;仓库没有 pytest-timeout,

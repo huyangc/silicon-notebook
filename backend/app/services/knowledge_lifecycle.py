@@ -592,73 +592,81 @@ class KnowledgeLifecycleService:
         """``delete_notebook_kg``'s body, run under the kg_building fence
         (its docstring carries the full contract)."""
         drained = self._drain_graph_rows_before_reset(notebook_id)
-        # codex #663 R11 P2: the per-batch §4.2 checkpoint lives inside the
-        # drain loop — a graph already under the threshold never enters it,
-        # so a notebook tombstoned before this phase would sail into the
-        # final reset (and a source-less rebuild could even finish "clean")
-        # while the delete job's quiesce waits for exactly this abort.
-        # Recheck the tombstone at the final-reset boundary too.
-        if self._notebook_deleting(notebook_id):
-            raise NotebookDeletingAbortsMaintenanceError(notebook_id)
         for attempt in range(3):
-            with self._write() as db:
-                # codex #663 R6 P1: the drain's termination probe runs on a
-                # read connection and is NOT atomic with concurrent
-                # ingestion — a store_kg batch committing into an
-                # already-probed table while the from-0 scan walks later
-                # entries escapes detection entirely. So when a drain
-                # actually ran, the bound is re-validated HERE, inside the
-                # final write transaction itself: on SQLite the write lock
-                # is global, making this probe perfectly atomic with the
-                # deletes below; on PostgreSQL rows committing after this
-                # in-transaction probe are bounded by the final
-                # transaction's own (short, ≤threshold-sized) duration —
-                # the race window shrinks from "whole probe scan" to "one
-                # fast transaction", self-limiting rather than unbounded.
-                # Over the threshold -> commit nothing, drain again; three
-                # failed attempts fail loudly instead of looping forever.
-                # The small-graph fast path (drained == {}) skips this probe
-                # so the legacy single-transaction shape stays byte-
-                # identical (the P0-1 pin's event sequence included).
-                # codex #663 R7 P1a: validation is UNCONDITIONAL — the
-                # initially-small path's read probe is just as stale-able as
-                # the drain's, so it gets the same in-transaction recheck
-                # (one bounded read inside the final tx; the write-event
-                # shape the P0-1 pin traces is untouched).
-                if self.knowledge.graph_drain_backlog(
-                    db, notebook_id, self._graph_drain_budget_rows, 0
-                ) is not None:
-                    counts = None
-                else:
-                    source_index_was_certified = (
-                        self.knowledge.source_index_backfilled(db, notebook_id)
-                    )
-                    counts = self.knowledge.delete_notebook_graph_rows(
-                        db, notebook_id, self._now()
-                    )
-                    # delete_notebook_graph_rows RESETS unified_kg_state in
-                    # place (PR-2) while keeping Memory/Knowhow objects and
-                    # their forward-maintained provenance. Preserve an
-                    # existing completeness certificate, but never promote a
-                    # legacy/unknown notebook merely because its
-                    # user-document graph was cleared: historical hidden
-                    # projections may also predate forward maintenance. The
-                    # reset UPDATE deliberately does not touch
-                    # source_index_backfilled itself (see its own comment),
-                    # so this re-assertion is belt-and-suspenders now rather
-                    # than the repair it was when the row used to be dropped
-                    # and re-inserted bare.
-                    if source_index_was_certified:
-                        self.knowledge.mark_source_index_backfilled(
-                            db, notebook_id
+            # codex #663 R11/R12 P2: the tombstone checkpoint guards EVERY
+            # final-reset attempt — a small graph never enters the drain
+            # loop's per-batch checkpoint, and a tombstone can land during a
+            # retry round's re-drain just as well.
+            if self._notebook_deleting(notebook_id):
+                raise NotebookDeletingAbortsMaintenanceError(notebook_id)
+            try:
+                with self._write() as db:
+                    # codex #663 R12 P1: FIRST statement — pin the
+                    # transaction snapshot (PostgreSQL REPEATABLE READ;
+                    # SQLite no-op, its global write lock is already
+                    # atomic). The bound probe below and every DELETE in
+                    # delete_notebook_graph_rows then see the SAME row set,
+                    # so the probe atomically bounds the whole final pass on
+                    # BOTH backends — a concurrent store_kg committing
+                    # mid-transaction can no longer inflate a DELETE past
+                    # what the probe admitted (its rows survive the reset,
+                    # the final pass's pre-existing semantics, converged by
+                    # the rebuild's re-extraction).
+                    self.knowledge.begin_graph_reset_isolation(db)
+                    # codex #663 R6/R7: UNCONDITIONAL in-transaction bound
+                    # validation — read probes outside this transaction are
+                    # stale-able regardless of whether a drain ran. Over the
+                    # threshold -> commit nothing, drain again; three failed
+                    # attempts fail loudly instead of looping forever. One
+                    # bounded read inside the final tx; the write-event
+                    # shape the P0-1 pin traces is untouched.
+                    if self.knowledge.graph_drain_backlog(
+                        db, notebook_id, self._graph_drain_budget_rows, 0
+                    ) is not None:
+                        counts = None
+                    else:
+                        source_index_was_certified = (
+                            self.knowledge.source_index_backfilled(
+                                db, notebook_id
+                            )
                         )
+                        counts = self.knowledge.delete_notebook_graph_rows(
+                            db, notebook_id, self._now()
+                        )
+                        # delete_notebook_graph_rows RESETS unified_kg_state
+                        # in place (PR-2) while keeping Memory/Knowhow
+                        # objects and their forward-maintained provenance.
+                        # Preserve an existing completeness certificate, but
+                        # never promote a legacy/unknown notebook merely
+                        # because its user-document graph was cleared:
+                        # historical hidden projections may also predate
+                        # forward maintenance. The reset UPDATE deliberately
+                        # does not touch source_index_backfilled itself (see
+                        # its own comment), so this re-assertion is
+                        # belt-and-suspenders now rather than the repair it
+                        # was when the row used to be dropped and
+                        # re-inserted bare.
+                        if source_index_was_certified:
+                            self.knowledge.mark_source_index_backfilled(
+                                db, notebook_id
+                            )
+            except Exception as exc:
+                # codex #663 R12 P1: under REPEATABLE READ a write-write
+                # conflict (the unified_kg_state upsert racing a concurrent
+                # mark_dirty) surfaces as SQLSTATE 40001 — the transaction
+                # rolled back cleanly, so treat it exactly like a failed
+                # bound probe: another attempt. Anything else re-raises
+                # untouched. sqlite3 exceptions carry no sqlstate attribute,
+                # so this branch is PostgreSQL-only by construction.
+                if getattr(exc, "sqlstate", None) != "40001":
+                    raise
+                counts = None
             if counts is not None:
                 break
-            # In-transaction bound validation failed: a concurrent writer
-            # refilled some table past the threshold while the drain's own
-            # probe was elsewhere. Nothing was committed above (the write
-            # closed empty) — drain the new backlog and try the final pass
-            # again.
+            # In-transaction bound validation failed (or the transaction was
+            # serialization-aborted): a concurrent writer moved the graph
+            # under us. Nothing was committed above — drain the new backlog
+            # and try the final pass again.
             for table, deleted in self._drain_graph_rows_before_reset(
                 notebook_id
             ).items():
