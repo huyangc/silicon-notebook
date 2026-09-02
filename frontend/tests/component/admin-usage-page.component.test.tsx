@@ -136,6 +136,21 @@ test("用户总览用两个新页签承载只读分析，不给用户列表增�
   expect(window.location.search).toContain("sheet=issues");
 });
 
+test("用户列表同时保留提问分析与该用户的 LLM 日志入口", async () => {
+  primeCommonMocks();
+  render(<AdminUsagePage />);
+  const target = await targetRow();
+
+  expect(target.getByRole("link", { name: "查看提问" })).toHaveAttribute(
+    "href",
+    "/admin/usage?sheet=questions&owner=user-target",
+  );
+  expect(target.getByRole("link", { name: "LLM 日志" })).toHaveAttribute(
+    "href",
+    "/dev/logs?owner=user-target&view=llm",
+  );
+});
+
 test("管理员可保存普通用户默认文档上限", async () => {
   primeCommonMocks();
   mocks.updateUploadLimitDefault.mockResolvedValue(35);

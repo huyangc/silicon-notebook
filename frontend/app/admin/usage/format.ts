@@ -10,6 +10,10 @@ export function formatLastActive(iso: string | null | undefined): string {
 }
 
 export function logsDrillHref(userId: string): string {
+  return `/dev/logs?owner=${encodeURIComponent(userId)}&view=llm`;
+}
+
+export function questionsDrillHref(userId: string): string {
   return `/admin/usage?sheet=questions&owner=${encodeURIComponent(userId)}`;
 }
 

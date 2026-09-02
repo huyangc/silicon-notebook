@@ -9,6 +9,7 @@
 }
 .usage-sheet-tabs button[aria-current="page"] { border-bottom-color: var(--accent, #2563eb); color: var(--accent, #2563eb); font-weight: 600; }
 .usage-analysis-sheet { min-width: 0; }
+.usage-analysis-links { display: inline-flex; align-items: center; gap: 10px; white-space: nowrap; }
 .usage-analysis-toolbar {
   display: flex; align-items: center; flex-wrap: wrap; gap: 10px 16px;
   margin-bottom: 12px; padding: 10px 12px; border: 1px solid var(--border, #e5e7eb);
