@@ -3158,6 +3158,82 @@ test("a started run is re-attached when the restore's detail read fails", async 
   expect(value!.turns.map((turn) => turn.question)).toEqual(["durable question"]);
 });
 
+// codex #661 r10 P2: a detached final that lands while the restore's detail is
+// pending must retire its record at once — even while its own history refresh is
+// still awaiting — so the restore projects the answer instead of re-attaching.
+test("a final that lands during restoration is projected even while its history refresh is still pending", async () => {
+  const stream = deferred<AskResponse>();
+  let onStart: ((jobId: string, conversationId: string) => void | Promise<void>) | undefined;
+  api.runAskStream.mockImplementation((
+    _notebookId: string,
+    _payload: unknown,
+    _onProgress: unknown,
+    _signal?: AbortSignal,
+    nextOnStart?: (jobId: string, conversationId: string) => void | Promise<void>,
+  ) => {
+    onStart = nextOnStart;
+    return stream.promise;
+  });
+  const slowRefresh = deferred<ConversationSummary[]>();
+  let listCalls = 0;
+  api.listConversations.mockImplementation(async () => {
+    listCalls += 1;
+    // 1: initial restore, 2: second restore, 3: started refresh, 4: final refresh (slow)
+    if (listCalls === 4) return slowRefresh.promise;
+    return [summary("conversation-x")];
+  });
+  const staleDetail = detail("conversation-x");
+  const lateDetail = deferred<ConversationDetail>();
+  api.getConversation
+    .mockResolvedValueOnce(staleDetail)
+    .mockReturnValueOnce(lateDetail.promise);
+  render(<Harness />);
+  const first = beginOwnedNotebook();
+  await act(async () => {
+    await value!.restoreNotebook(first);
+  });
+
+  let submitting!: Promise<void>;
+  act(() => {
+    submitting = value!.submit("follow-up");
+  });
+  act(() => value!.leaveWorkspace());
+
+  const owner = beginOwnedNotebook(2);
+  let restoring!: Promise<boolean>;
+  act(() => {
+    restoring = value!.restoreNotebook(owner);
+  });
+  await act(async () => {
+    for (let i = 0; i < 20 && api.getConversation.mock.calls.length < 2; i += 1) {
+      await Promise.resolve();
+    }
+  });
+  await act(async () => {
+    await onStart!("job-follow-up", "conversation-x");
+  });
+  stream.resolve(answer("conversation-x", "answer-follow-up"));
+  await act(async () => {
+    await stream.promise;
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  expect(listCalls).toBe(4);
+
+  // The stale detail comes back while the final's history refresh is still pending.
+  lateDetail.resolve(staleDetail);
+  await act(async () => {
+    await restoring;
+    value!.finishNotebookTransition(owner);
+  });
+  expect(value!.asking).toBe(false);
+  expect(value!.turns.map((turn) => turn.question)).toEqual(["question-conversation-x", "follow-up"]);
+
+  slowRefresh.resolve([summary("conversation-x")]);
+  await act(async () => submitting);
+  expect(value!.turns).toHaveLength(2);
+});
+
 // PR #557 regression: `turns`/`sessions`/`pendingTrace`/`feedbackSent` used to
 // fall back to a bare `[]`/`{}` literal whenever the owner is not visible
 // (actorId is null, e.g. logged out / collection page). A bare literal is a
