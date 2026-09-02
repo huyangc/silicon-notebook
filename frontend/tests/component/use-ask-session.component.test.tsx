@@ -2715,6 +2715,104 @@ test("switching to automatic mode cancels a detached intent preview and returns 
   expect(api.runAskStream).not.toHaveBeenCalled();
 });
 
+// codex #661 r4 P2: when the newest detached run settles while the restore's
+// detail is loading, an older detached run must not be attached over the
+// restored conversation — history is reloaded for the newest question instead.
+test("an older detached run is not attached when the newest one settles during restoration", async () => {
+  const streamA = deferred<AskResponse>();
+  const streamB = deferred<AskResponse>();
+  const streams: Array<{ question: string; onStart: (jobId: string, conversationId: string) => void | Promise<void> }> = [];
+  api.runAskStream.mockImplementation((
+    _notebookId: string,
+    payload: unknown,
+    _onProgress: unknown,
+    _signal?: AbortSignal,
+    nextOnStart?: (jobId: string, conversationId: string) => void | Promise<void>,
+  ) => {
+    const question = (payload as { question: string }).question;
+    streams.push({ question, onStart: nextOnStart! });
+    return question === "question B" ? streamB.promise : streamA.promise;
+  });
+  api.listConversations.mockResolvedValue([summary("conversation-x")]);
+  const staleDetail = detail("conversation-x");
+  const settledDetail: ConversationDetail = {
+    ...detail("conversation-x"),
+    turn_count: 2,
+    turns: [
+      ...staleDetail.turns,
+      {
+        answer_id: "answer-b",
+        question: "question B",
+        response: answer("conversation-x", "answer-b"),
+        asked_at: "2026-08-22T00:01:00Z",
+        created_at: "2026-08-22T00:01:00Z",
+      },
+    ],
+  };
+  const lateDetail = deferred<ConversationDetail>();
+  api.getConversation
+    .mockResolvedValueOnce(staleDetail)
+    .mockReturnValueOnce(lateDetail.promise)
+    .mockResolvedValueOnce(settledDetail);
+  render(<Harness />);
+  beginOwnedNotebook();
+
+  // Older run A in a fresh session, then B as a follow-up in conversation X.
+  let submittingA!: Promise<void>;
+  act(() => {
+    submittingA = value!.submit("question A");
+  });
+  await act(async () => {
+    await value!.openSession("conversation-x", 2);
+  });
+  let submittingB!: Promise<void>;
+  act(() => {
+    submittingB = value!.submit("question B");
+  });
+  act(() => value!.leaveWorkspace());
+
+  const owner = beginOwnedNotebook(3);
+  let restoring!: Promise<boolean>;
+  act(() => {
+    restoring = value!.restoreNotebook(owner);
+  });
+  await act(async () => {
+    for (let i = 0; i < 20 && api.getConversation.mock.calls.length < 2; i += 1) {
+      await Promise.resolve();
+    }
+  });
+  expect(api.getConversation).toHaveBeenCalledTimes(2);
+
+  // B settles while its detail is still loading; A stays detached.
+  const b = streams.find((item) => item.question === "question B")!;
+  await act(async () => {
+    await b.onStart("job-b", "conversation-x");
+  });
+  streamB.resolve(answer("conversation-x", "answer-b"));
+  await act(async () => submittingB);
+
+  lateDetail.resolve(staleDetail);
+  await act(async () => {
+    await restoring;
+    value!.finishNotebookTransition(owner);
+  });
+  expect(api.getConversation).toHaveBeenCalledTimes(3);
+  expect(value!.conversationId).toBe("conversation-x");
+  expect(value!.turns.map((turn) => turn.question)).toEqual(["question-conversation-x", "question B"]);
+  expect(value!.asking).toBe(false);
+  expect(value!.pendingQuestion).toBe("");
+
+  // A remains a detached record and only refreshes history when it lands.
+  const a = streams.find((item) => item.question === "question A")!;
+  await act(async () => {
+    await a.onStart("job-a", "conversation-a");
+  });
+  streamA.resolve(answer("conversation-a"));
+  await act(async () => submittingA);
+  expect(value!.conversationId).toBe("conversation-x");
+  expect(value!.turns).toHaveLength(2);
+});
+
 // PR #557 regression: `turns`/`sessions`/`pendingTrace`/`feedbackSent` used to
 // fall back to a bare `[]`/`{}` literal whenever the owner is not visible
 // (actorId is null, e.g. logged out / collection page). A bare literal is a
