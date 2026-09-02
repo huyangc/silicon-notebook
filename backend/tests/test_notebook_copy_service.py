@@ -247,6 +247,44 @@ def test_t4deleg_notebook_row_on_delegate(repo, monkeypatch):
     assert len(summary_dbs) == 1
     assert store_dbs[0] is summary_dbs[0]  # MUT
     assert result.id == notebook_id
+
+
+# ---------------------------------------------------------------------------
+# codex #659 R12 P1: R11's join_shared wrapped a database.write() (inside
+# add_member) INSIDE an outer database.connect() — under
+# POSTGRES_POOL_MAX_SIZE=1 that nested acquisition can never get a second
+# connection from a pool the outer connect() is still holding, so every join
+# deadlocks. The fix folds the liveness read, the member insert, and the
+# summary hydration into a single database.write() — exactly one connection
+# acquisition for the whole call. Primary assertion tagged `# MUT`.
+# ---------------------------------------------------------------------------
+
+
+def test_join_shared_acquires_exactly_one_connection(repo, monkeypatch):
+    from contextlib import contextmanager
+
+    notebook_id = _seed_plain_nb(repo, owner="user-local", name="join-count")
+    _seed_user(repo, "user-joiner-count")
+    database = repo._runtime.database
+    original_connect = database.connect
+    original_write = database.write
+    calls = []
+
+    def counting_connect():
+        calls.append("connect")
+        return original_connect()
+
+    @contextmanager
+    def counting_write(**kwargs):
+        calls.append("write")
+        with original_write(**kwargs) as db:
+            yield db
+
+    monkeypatch.setattr(database, "connect", counting_connect)
+    monkeypatch.setattr(database, "write", counting_write)
+    result = repo._runtime.sharing.join_shared(notebook_id, "user-joiner-count")
+    assert calls == ["write"]  # MUT: exactly one acquisition, and it's a write()
+    assert result.id == notebook_id
     assert result.access == "reader"
 
 

@@ -1137,24 +1137,28 @@ class NotebookSharingService:
         return self._store.list_members(notebook_id)
 
     def join_shared(self, notebook_id: str, user_id: str) -> NotebookSummary:
-        # codex #659 R11 P1: fetch (now liveness-filtered — see
-        # notebook_row_on's docstring) BEFORE writing the membership row,
-        # not after. The route's own find_notebook_by_share_token already
-        # filters a non-live notebook out (NOTEBOOK_LIVE_SQL), but that only
-        # closes the DOMINANT case (tombstone already landed when the
-        # request starts); reordering this read ahead of add_member closes
-        # the narrower TOCTOU window between that resolution and this call
-        # too — add_member itself gets no liveness check of its own (write-
-        # side sentinel discipline stays untouched; this is a READ-side
-        # precondition in front of it). The SAME row/connection is reused
-        # for the returned summary below — still exactly one
-        # notebook_row_on call and one from_row call, unchanged from before
-        # this fix.
-        with self._database.connect() as db:
+        # codex #659 R12 P1: R11 wrapped a database.write() (inside
+        # add_member) INSIDE an outer database.connect() — under
+        # POSTGRES_POOL_MAX_SIZE=1 that nested acquisition can never get a
+        # second connection from a pool the outer connect() is still
+        # holding, so every join deadlocks until the pool wait times out.
+        # It also left the liveness read and the membership write as two
+        # separate transactions, leaving a residual tombstone-race window
+        # between them. Fix: fold both into ONE database.write() — exactly
+        # one connection acquired for the whole call — and do the member
+        # insert via insert_member_if_live's INSERT...SELECT...WHERE
+        # EXISTS(NOTEBOOK_LIVE_SQL) (same idiom as ensure_conversation's
+        # R6 fix: a read-side visibility technique, not a change to
+        # write-side tombstone-sentinel discipline). add_member itself is
+        # untouched — it has independent callers (repository_facade, the
+        # service's own public add_member) and keeps its own contract.
+        # notebook_row_on/from_row are still called exactly once each, on
+        # the SAME connection, matching the pre-existing delegate test.
+        with self._database.write() as db:
             row = self._store.notebook_row_on(db, notebook_id)
             if row is None:
                 raise KeyError(notebook_id)
-            self.add_member(notebook_id, user_id)
+            self._store.insert_member_if_live(db, notebook_id, user_id, self._store.now())
             notebook = self._summaries.from_row(db, row)
         notebook.access = "reader"
         return notebook
