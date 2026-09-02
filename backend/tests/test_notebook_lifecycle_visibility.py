@@ -415,3 +415,41 @@ def test_mount_gate_participant_resolution(repo, lifecycle):
     with repo._connect() as db:
         ids = set(store.participant_ids(db, lifecycle["viewer_id"]))
     assert ids == {lifecycle["viewer_id"], lifecycle["active_id"]}
+
+
+
+def test_share_state_lookup_is_liveness_filtered_at_the_query(repo, lifecycle):
+    """codex #659 R16:路由守卫与查询之间存在 TOCTOU——tombstone 可在守卫
+    通过后提交。notebook_row 必须自带活性谓词,不依赖上游守卫。变异钉:
+    去掉该查询的 NOTEBOOK_LIVE_SQL→本条红。"""
+    store = repo._runtime.sharing_store
+    assert store.notebook_row(lifecycle["active_id"]) is not None
+    assert store.notebook_row(lifecycle["deleting_id"]) is None
+    assert store.notebook_row(lifecycle["copying_id"]) is None
+
+
+def test_rejoin_by_an_existing_member_is_refused_once_the_tombstone_lands(
+    repo, lifecycle, monkeypatch
+):
+    """codex #659 R16:已是成员不等于库还活着——tombstone 在同事务的活性读
+    与 INSERT 之间提交时,守卫插入返回 0 而成员探测为真,旧逻辑会捏造成功
+    摘要。现在 0 行分支重读活行:没了→404,无视既有成员身份。用注入把
+    tombstone 精确落在读与插之间复现。变异钉:0 行分支只查成员不重读活行
+    →本条红。"""
+    sharing = repo._runtime.sharing
+    store = repo._runtime.sharing_store
+    nb = lifecycle["active_id"]
+    member = lifecycle["member_id"]  # 已是三本库的既有成员
+
+    real_insert = store.insert_member_if_live
+
+    def tombstone_then_insert(db, notebook_id, user_id, now):
+        db.execute(
+            "UPDATE notebooks SET status='deleting' WHERE id=?",
+            (notebook_id,),
+        )
+        return real_insert(db, notebook_id, user_id, now)
+
+    monkeypatch.setattr(store, "insert_member_if_live", tombstone_then_insert)
+    with pytest.raises(KeyError):
+        sharing.join_shared(nb, member)
