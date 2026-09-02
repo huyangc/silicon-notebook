@@ -65,8 +65,6 @@ import {
 
 const RECONNECT_POLL_MS = 1500;
 const RECONNECT_CAP_MS = 20 * 60 * 1000;
-// How many detached-but-settled runs are remembered for a racing restore.
-const SETTLED_RUN_MEMORY = 16;
 
 // Hidden-state (owner not visible) fallback values must be **stable references**.
 // The returned view is read by page.tsx effects/useMemo that depend on these
@@ -376,9 +374,12 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
   // detached); a restore re-attaches the newest detached one of that identity.
   const inFlightRunsRef = useRef<AskRunRecord[]>([]);
   const intentRunsRef = useRef<AskIntentRunRecord[]>([]);
-  // Runs that settled successfully while detached, kept (bounded) so a restore
-  // that raced with them can project the answer by serial — including the
-  // durable successor of an intent preview that finished during the restore.
+  // Runs that settled successfully while detached, kept so a restore that raced
+  // with them can project the answer by serial — including the durable successor
+  // of an intent preview that finished during the restore. Entries of an identity
+  // are released once that identity's next restore/session open has applied
+  // (history is authoritative from then on) and on logout; no numeric cap, so a
+  // result an in-progress restore selected can never be evicted underneath it.
   const settledRunsRef = useRef<AskRunRecord[]>([]);
   const runSerialRef = useRef(0);
 
@@ -1056,6 +1057,9 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       const detailVouches = runNow === run && runStartedBeforeDetail && detailLoaded;
       if (canAttachRun(runNow, detailVouches)) attachDetachedRun(runNow, owner);
     }
+    // Whatever settled for this identity is now either projected or part of the
+    // history this view just loaded; release it.
+    settledRunsRef.current = settledRunsRef.current.filter((item) => item.key !== ownerKey(owner));
   }
 
   async function restoreNotebook(owner: AskNotebookTransition): Promise<boolean> {
@@ -1344,9 +1348,12 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
         },
       );
       if (!ownsRun()) {
+        // Retire the in-flight record BEFORE the history refresh below awaits:
+        // a restore that resolves its detail in that window must see this run
+        // as settled (and project its result), not as still running.
         run.result = response;
+        dropRecord(inFlightRunsRef.current, run);
         settledRunsRef.current.push(run);
-        if (settledRunsRef.current.length > SETTLED_RUN_MEMORY) settledRunsRef.current.shift();
         const currentOwner = ownerRef.current;
         if (sameNotebookIdentity(currentOwner, runOwner) && currentOwner) {
           await loadSessionsFor(currentOwner).catch(() => {});
@@ -1367,6 +1374,10 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
         // failure says nothing about the durable job — history/reconnect own it.
         if (!isAbortError(error) && !run.cancelRequested && run.jobId === null) {
           run.failure = error;
+        } else {
+          // Nothing left to re-attach: retire before the refresh below awaits so
+          // a racing restore does not bind a dead transport to its view.
+          dropRecord(inFlightRunsRef.current, run);
         }
         const currentOwner = ownerRef.current;
         if (sameNotebookIdentity(currentOwner, runOwner) && currentOwner) {
