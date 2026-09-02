@@ -115,7 +115,18 @@ _KNOWHOW_SOURCE_IDS = "SELECT id FROM sources WHERE source_type = 'knowhow'"
 # search rather than anything belonging to a notebook, so a copy inherits them
 # by simply existing in the same deployment.
 _COPY_SNAPSHOT_QUERIES: tuple[tuple[str, str], ...] = (
-    ("notebooks", "SELECT * FROM notebooks WHERE id = ?"),
+    # codex #659 R14 P1: liveness-filtered — a tombstone landing between the
+    # route's token resolution and this snapshot must stop the copy here,
+    # not materialise a deleting/half-cleared notebook. Every OTHER query in
+    # this tuple is anchored off the root's own id/joins and reads inside
+    # the SAME pinned snapshot transaction as this one (BEGIN above pins the
+    # view at the first read, i.e. `_copy_limit_violation`'s own first
+    # query) — a concurrent delete job's phase-3 commits are invisible to
+    # this transaction regardless, so re-adding the predicate to every
+    # child-table query below would be redundant, not merely optional: this
+    # one row's liveness (checked in the SAME snapshot) is definitionally
+    # what every other row in this dict is consistent with.
+    ("notebooks", f"SELECT * FROM notebooks WHERE id = ? AND {NOTEBOOK_LIVE_SQL}"),
     ("sources", "SELECT * FROM sources WHERE notebook_id = ?"),
     (
         # 1:1 with sources (PK = source_id) — joined the same way as the
@@ -491,7 +502,7 @@ class SharingStore:
     @staticmethod
     def insert_member_if_live(
         db: sqlite3.Connection, notebook_id: str, user_id: str, now: str,
-    ) -> None:
+    ) -> int:
         """codex #659 R12 P1：``join_shared`` 专属的原子插入——**不自己开
         事务**（与 ``notebook_row_on`` 同款静态方法形状），调用方必须已经
         持有一个 ``database.write()`` 连接贯穿"读活性行 + 插入成员 + 水合
@@ -503,13 +514,28 @@ class SharingStore:
         no-op（同 ``add_member`` 的 upsert 语义），但笔记本不在场/非活时
         整条 SELECT 空集，一行都不插；这与 ``ensure_conversation``
         （round 6 P2）同一款「读侧可见性并入写语句」用法，不碰写侧
-        ``copying``/``deleting`` 哨兵纪律本身。"""
-        db.execute(
+        ``copying``/``deleting`` 哨兵纪律本身。
+
+        codex #659 R14 P2：返回受影响行数（0 或 1）——rowcount==0 本身有
+        歧义（「已是成员」的幂等 no-op 与「活性谓词挡下」都会是 0），调用方
+        （``join_shared``）必须在同一事务内用 ``is_member_on`` 再判一次区分
+        这两种情况，见那边的完整理由。"""
+        cursor = db.execute(
             "INSERT OR IGNORE INTO notebook_members (notebook_id, user_id, role, added_at) "
             "SELECT ?, ?, 'reader', ? WHERE EXISTS ("
             f"SELECT 1 FROM notebooks WHERE id = ? AND {NOTEBOOK_LIVE_SQL})",
             (notebook_id, user_id, now, notebook_id),
         )
+        return cursor.rowcount
+
+    @staticmethod
+    def is_member_on(db: sqlite3.Connection, notebook_id: str, user_id: str) -> bool:
+        """codex #659 R14 P2：``is_member`` 的同连接变体——供
+        ``join_shared`` 在 ``insert_member_if_live`` 返回 0 行后，在**同一个**
+        写事务/连接内再判一次「是否已是成员」，不为此额外取第二个连接
+        （R12 P1 刚收口的池耗尽风险）。"""
+        row = db.execute(MEMBER_PROBE_SQL, (notebook_id, user_id)).fetchone()
+        return row is not None
 
     def remove_member(self, notebook_id: str, user_id: str) -> None:
         with self.database.write() as db:
@@ -598,7 +624,16 @@ class SharingStore:
         caps the SUM of every snapshot table's rows — counted, not fetched, in the
         SAME snapshot transaction — and raises before any fetchall, so peak copy
         memory is decoupled from pathological fan-out (codex PR#353 r5 P2). The
-        enclosing ``with`` commits (read-only no-op) or, on a raise, rolls back."""
+        enclosing ``with`` commits (read-only no-op) or, on a raise, rolls back.
+
+        codex #659 R14 P1: the root ``notebooks`` row is read liveness-filtered
+        (see ``_COPY_SNAPSHOT_QUERIES``'s comment) — an empty result means
+        either the id never existed or a tombstone landed before this snapshot
+        pinned, in either case indistinguishable from "not found" to the
+        caller. Raising ``KeyError`` HERE (rather than letting the caller's
+        ``snapshot["notebooks"][0]`` bare-index) gives the route's existing
+        ``except KeyError: 404`` something to catch, matching every other
+        share-surface TOCTOU guard from R11."""
         snapshot: dict[str, list[dict]] = {}
         with self.database.connect() as db:
             db.execute("BEGIN")
@@ -609,6 +644,8 @@ class SharingStore:
                 snapshot[table] = [
                     dict(row) for row in db.execute(sql, (notebook_id,)).fetchall()
                 ]
+                if table == "notebooks" and not snapshot[table]:
+                    raise KeyError(notebook_id)
         return snapshot
 
     def _copy_limit_violation(self, db, notebook_id: str) -> "str | None":

@@ -534,19 +534,32 @@ class NotebookDeleteJobRunner:
                             cursor_table="", cursor_key="",
                         )
                     if phase == "files":
-                        # §4.3: verify_held once more immediately before
-                        # phase 5's transaction — the last chance to catch a
-                        # lost claim before an irreversible step.
-                        if not claim.verify_held():
-                            self.delete_jobs.mark_queued(
-                                job_id, lease_token=lease_token,
-                                note="相位 5 事务前复验丢锁，就地停手，交扫尾重试。",
-                            )
+                        # §4.3 / codex #659 R14 P2: a shared "still own the
+                        # job row AND the claim is still held" recheck
+                        # immediately before phase 5's irreversible
+                        # transaction — the last chance to catch EITHER a
+                        # lost claim OR a stolen lease before this step runs.
+                        # A bare claim.verify_held() alone (the old check
+                        # here) can still report True for an old worker
+                        # whose OWN advisory claim is genuinely intact even
+                        # though ownership of the JOB ROW has already moved
+                        # to a new worker — this happens when phase 4's long
+                        # rmtree walk runs past stale_cutoff_seconds with no
+                        # intervening heartbeat, so sweep driver A's
+                        # mark_running steals the (stale-looking) lease.
+                        # _batch_ok's ownership_snapshot half closes that
+                        # gap. This is defense-in-depth ahead of the
+                        # TRANSACTION-level fence inside cleanup_job_on
+                        # (see that method's docstring) — a worker that
+                        # races past this check anyway (the window between
+                        # this call and the transaction's own commit) is
+                        # still caught there, atomically.
+                        if not self._batch_ok(job_id, lease_token, claim, residual=residual):
                             return
                         if residual:
                             self._finish_residual(job_id, notebook_id, lease_token)
                         else:
-                            self._phase_finalize(job_id, notebook_id)
+                            self._phase_finalize(job_id, notebook_id, lease_token)
                 finally:
                     claim.release()
         except Exception:  # noqa: BLE001 — must settle the job row, never leave it 'running'
@@ -1009,7 +1022,9 @@ class NotebookDeleteJobRunner:
         _delete_notebook_source_files_dir(storage_dir, notebook_id)
         _delete_notebook_asset_dir(storage_dir, notebook_id)
 
-    def _phase_finalize(self, job_id: str, notebook_id: str) -> None:
+    def _phase_finalize(
+        self, job_id: str, notebook_id: str, lease_token: str,
+    ) -> None:
         """Single transaction (§T-3.2): fence + archive + delete four tables
         (cascading ``answers`` away for free, §1.3's fifth archive
         dependency) + ``DELETE FROM notebooks`` (cascading through the FK
@@ -1027,9 +1042,17 @@ class NotebookDeleteJobRunner:
 
         P1（codex PR#659 round 3，修正上一轮的错误论证）：事务提交之后调用
         ``_sweep_ingestion_stragglers`` 补一次目录级整删——独占 claim 不斥
-        摄取，相位 4 完成之后仍可能有新文件落盘，见该方法自己的 docstring。"""
+        摄取，相位 4 完成之后仍可能有新文件落盘，见该方法自己的 docstring。
+
+        codex #659 R14 P2：新增 ``lease_token`` 参数，透传进
+        ``delete_row_and_orphan_embeddings`` -> ``cleanup_job_on`` 的事务内
+        栅（该方法自己的 docstring 有完整理由）——调用方（``run()``）在此之前
+        的 ``_batch_ok`` 复验只是防御性的第一层，真正兜底的是这条事务内
+        CAS：即便一个租已经被偷的旧 worker 仍然跑到了这里，``cleanup_job_on``
+        的 ``DELETE ... WHERE id=? AND lease_token=?`` 若 rowcount=0 就抛异常，
+        把这整个 finalize 事务（含 ``DELETE FROM notebooks`` 等）原子回滚。"""
         self.notebook_store.delete_row_and_orphan_embeddings(
-            notebook_id, job_id=job_id
+            notebook_id, job_id=job_id, lease_token=lease_token,
         )
         self._sweep_ingestion_stragglers(notebook_id)
         analysis_artifacts = self._analysis_artifacts

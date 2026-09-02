@@ -420,7 +420,11 @@ class NotebookStore:
         return row["status"] if row is not None else None
 
     def delete_row_and_orphan_embeddings(
-        self, notebook_id: str, *, job_id: str | None = None
+        self,
+        notebook_id: str,
+        *,
+        job_id: str | None = None,
+        lease_token: str | None = None,
     ) -> list[str]:
         """Delete the notebooks row in ONE committed transaction and return the
         source file paths for the caller to remove AFTER the commit (DB first,
@@ -432,7 +436,12 @@ class NotebookStore:
         before this parameter existed; SQLite has no per-transaction
         statement_timeout knob to tighten (D-4 is PostgreSQL-only), so the
         only added work when ``job_id`` is given is the two extra DELETEs at
-        the end, run in both the early-return branch and the normal path."""
+        the end, run in both the early-return branch and the normal path.
+
+        ``lease_token`` (codex #659 R14 P2): forwarded verbatim to
+        ``cleanup_job_on`` — see that method's docstring for the
+        transaction-level fence it enforces. Meaningless without ``job_id``
+        and simply passed through as ``None`` in that case."""
         with self.database.write(operation="notebook.delete") as db:
             # The process-local write lock does not coordinate a second
             # SqliteDatabase instance. Acquire SQLite's cross-instance writer
@@ -447,7 +456,7 @@ class NotebookStore:
                 # precheck before the first delete acquired the write lock.
                 # Preserve the archive committed by that winner.
                 if job_id is not None:
-                    NotebookDeleteJobStore.cleanup_job_on(db, job_id)
+                    NotebookDeleteJobStore.cleanup_job_on(db, job_id, lease_token)
                 return []
             source_rows = db.execute(
                 "SELECT file_path FROM sources WHERE notebook_id = ?",
@@ -509,7 +518,7 @@ class NotebookStore:
                 )
             db.execute("DELETE FROM notebooks WHERE id = ?", (notebook_id,))
             if job_id is not None:
-                NotebookDeleteJobStore.cleanup_job_on(db, job_id)
+                NotebookDeleteJobStore.cleanup_job_on(db, job_id, lease_token)
         return [row["file_path"] for row in source_rows]
 
     def _retain_user_activity_before_delete(

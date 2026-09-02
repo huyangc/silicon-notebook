@@ -17,7 +17,7 @@ from typing import Callable
 
 from app.repositories.sqlite.access_sql import NOTEBOOK_LIVE_SQL
 from app.repositories.sqlite.database import SqliteDatabase
-from app.repositories.ports import NotebookAlreadyDeletingError
+from app.repositories.ports import NotebookAlreadyDeletingError, StaleLeaseFinalizeError
 
 _log = logging.getLogger(__name__)
 
@@ -348,14 +348,19 @@ class NotebookDeleteJobStore:
     ) -> bool:
         """§T-4 driver-A's out-of-band-delete special case (P1-A).
         PostgreSQL twin's docstring has the full P2-b lease-fencing
-        rationale. Deliberately does NOT delegate to ``cleanup_job_on``
-        (shared with the successful-finalize path, which has no lease token
-        to fence with and is instead gated by the in-process claim's
-        ``verify_held()`` immediately before it runs) — this fences its own
-        ``notebook_delete_jobs`` DELETE first and only cascades to the
-        ``notebook_delete_files`` side table if that row was actually this
-        worker's to delete, so a fenced-out call leaves BOTH tables
-        untouched rather than half-deleted.
+        rationale. Deliberately does NOT delegate to ``cleanup_job_on`` —
+        this path has no ``notebooks`` row DELETE to roll back alongside a
+        fence failure (there is no archive/finalize transaction here at
+        all, §T-4's whole point), so raising ``StaleLeaseFinalizeError`` and
+        unwinding a transaction would be the wrong shape for it; it fences
+        its own ``notebook_delete_jobs`` DELETE first and only cascades to
+        the ``notebook_delete_files`` side table if that row was actually
+        this worker's to delete, so a fenced-out call leaves BOTH tables
+        untouched rather than half-deleted (codex #659 R14 P2:
+        ``cleanup_job_on`` NOW also takes a ``lease_token`` for the
+        finalize path's own transaction-level fence — this method's
+        independent, pre-existing fence here predates that and is
+        unaffected by it).
 
         codex #659 R6 P2: also clears any ``conversations`` row for this
         notebook once the fence is confirmed held — same defense-in-depth
@@ -776,11 +781,46 @@ class NotebookDeleteJobStore:
         ]
 
     @staticmethod
-    def cleanup_job_on(db: sqlite3.Connection, job_id: str) -> None:
+    def cleanup_job_on(
+        db: sqlite3.Connection, job_id: str, lease_token: "str | None" = None,
+    ) -> None:
         """Delete this job's side-table rows and its own row -- called from
         WITHIN ``NotebookStore.delete_row_and_orphan_embeddings``'s finalize
         transaction OR ``finish_residual``'s own transaction above, never as
         an independent third transaction of its own (see the PostgreSQL
-        twin's docstring)."""
+        twin's docstring).
+
+        codex #659 R14 P2: ``lease_token`` is the TRANSACTION-level fence
+        the pre-finalize ``_batch_ok`` recheck (``notebook_delete.py``'s
+        ``run()``) is only defense-in-depth ahead of — phase 4's rmtree can
+        run long enough past ``stale_cutoff_seconds`` with no intervening
+        heartbeat that sweep driver A's ``mark_running`` steals the lease
+        AFTER that recheck passes but BEFORE this transaction commits. The
+        job row's own DELETE now carries ``AND lease_token=?``: rowcount=0
+        with the row STILL THERE means a newer worker already holds a
+        different lease on it — raise ``StaleLeaseFinalizeError`` so the
+        caller's ``with self.database.write(...) as db:`` rolls the WHOLE
+        finalize transaction back (the ``DELETE FROM notebooks`` etc.
+        staged earlier in the SAME transaction is atomically undone with
+        it). rowcount=0 with the row ALREADY GONE is the pre-existing
+        benign case (a winning worker's own commit already deleted both the
+        notebook and this job's bookkeeping together) — a no-op, not an
+        error. ``lease_token=None`` preserves the pre-R14 unconditional
+        DELETE for any caller that genuinely has no lease to check (none
+        exist in this codebase after this round; kept as an explicit,
+        documented opt-out rather than a silent behavior change for a
+        hypothetical future non-lease-fenced caller)."""
         db.execute("DELETE FROM notebook_delete_files WHERE job_id=?", (job_id,))
-        db.execute("DELETE FROM notebook_delete_jobs WHERE id=?", (job_id,))
+        if lease_token is None:
+            db.execute("DELETE FROM notebook_delete_jobs WHERE id=?", (job_id,))
+            return
+        cursor = db.execute(
+            "DELETE FROM notebook_delete_jobs WHERE id=? AND lease_token=?",
+            (job_id, lease_token),
+        )
+        if cursor.rowcount == 0:
+            still_there = db.execute(
+                "SELECT 1 FROM notebook_delete_jobs WHERE id=?", (job_id,)
+            ).fetchone()
+            if still_there is not None:
+                raise StaleLeaseFinalizeError(job_id)

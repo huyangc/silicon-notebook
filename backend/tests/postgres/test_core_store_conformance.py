@@ -2583,6 +2583,22 @@ def test_copy_snapshot_excludes_backend_ordinals_and_serializes_json(
     assert core_stores.sharing.notebook_row("nb-copy-destination") is None
 
 
+def test_snapshot_copy_rows_rejects_a_non_live_notebook(core_stores: CoreStores):
+    """codex #659 R14 P1 PG spot-check: both backends share the literal
+    ``NOTEBOOK_LIVE_SQL`` string (see the SQLite lane's full mutation-tested
+    coverage in ``test_notebook_share_copy.py``); this only needs to prove
+    the PG dialect's own query composition applies it correctly."""
+    owner = core_stores.identity.create_user("n00123457", "password-13")
+    notebook_id = core_stores.notebooks.create_row(NotebookCreate(name="Dying"), owner.id)
+    assert core_stores.sharing.snapshot_copy_rows(notebook_id)["notebooks"]
+    with core_stores.database.write() as connection:
+        connection.execute(
+            "UPDATE notebooks SET status='deleting' WHERE id=%s", (notebook_id,)
+        )
+    with pytest.raises(KeyError):
+        core_stores.sharing.snapshot_copy_rows(notebook_id)
+
+
 def test_full_notebook_copy_preserves_source_fact_jsonb(
     core_stores: CoreStores, tmp_path,
 ):

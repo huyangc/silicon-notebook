@@ -99,7 +99,13 @@ _KNOWHOW_SOURCE_IDS = "SELECT id FROM sources WHERE source_type='knowhow'"
 # rather than anything belonging to a notebook, so a copy inherits them by
 # simply living in the same deployment.
 _COPY_SNAPSHOT_QUERIES: tuple[tuple[str, str], ...] = (
-    ("notebooks", "SELECT * FROM notebooks WHERE id=%s"),
+    # codex #659 R14 P1: liveness-filtered — see the SQLite twin's comment
+    # for the full rationale (a tombstone landing between the route's token
+    # resolution and this snapshot must stop the copy here; every other
+    # query below reads inside the SAME REPEATABLE READ transaction this
+    # one pins, so re-adding the predicate to each child-table query would
+    # be redundant, not merely optional).
+    ("notebooks", f"SELECT * FROM notebooks WHERE id=%s AND {NOTEBOOK_LIVE_SQL}"),
     ("sources", "SELECT * FROM sources WHERE notebook_id=%s"),
     (
         "source_paper_meta",
@@ -415,21 +421,40 @@ class SharingStore:
             )
 
     @staticmethod
-    def insert_member_if_live(connection, notebook_id: str, user_id: str, now) -> None:
+    def insert_member_if_live(connection, notebook_id: str, user_id: str, now) -> int:
         """codex #659 R12 P1：``join_shared`` 专属的原子插入——**不自己开
         事务**（与 ``notebook_row_on`` 同款静态方法形状；见 SQLite 孪生的
         docstring）。``PostgresDatabase.write()`` 不允许嵌套（会抛
         ``NestedPostgresWriteError``），所以调用方必须已经持有一个
         ``database.write()`` 连接贯穿"读活性行 + 插入成员 + 水合摘要"整条
         链路，全程只取一次连接——这正是 R11 引入、R12 要修的
-        ``POSTGRES_POOL_MAX_SIZE=1`` 死等的根因。"""
-        connection.execute(
+        ``POSTGRES_POOL_MAX_SIZE=1`` 死等的根因。
+
+        codex #659 R14 P2：返回受影响行数——同一事务内、活性读之后、这条
+        INSERT 之前，若并发的删除作业在此刻提交了 tombstone（PG 默认 READ
+        COMMITTED：同一事务里后一条语句仍能看见新提交），``WHERE EXISTS``
+        会让这条 INSERT 插 0 行；但「已是成员」的 ``ON CONFLICT DO
+        NOTHING`` 幂等 no-op 同样是 0 行——两种 0 行的含义完全不同，旧代码
+        忽略 rowcount 会把前者也当成功放行。调用方须在 rowcount==0 时用
+        ``is_member_on`` 再判一次区分。"""
+        cursor = connection.execute(
             "INSERT INTO notebook_members(notebook_id,user_id,role,added_at) "
             "SELECT %s,%s,'reader',%s WHERE EXISTS ("
             f"SELECT 1 FROM notebooks WHERE id=%s AND {NOTEBOOK_LIVE_SQL}) "
             "ON CONFLICT(notebook_id,user_id) DO NOTHING",
             (notebook_id, user_id, now, notebook_id),
         )
+        return cursor.rowcount
+
+    @staticmethod
+    def is_member_on(connection, notebook_id: str, user_id: str) -> bool:
+        """codex #659 R14 P2：``is_member`` 的同连接变体——供 ``join_shared``
+        在 ``insert_member_if_live`` 返回 0 行后，在同一个写事务/连接内再判
+        一次「是否已是成员」，不为此额外取第二个连接。"""
+        row = connection.execute(
+            MEMBER_PROBE_SQL, (notebook_id, user_id)
+        ).fetchone()
+        return row is not None
 
     def remove_member(self, notebook_id: str, user_id: str) -> None:
         with self.database.write() as connection:
@@ -517,7 +542,14 @@ class SharingStore:
         embedding fan-out dwarfs its chunk+node count passes it yet would
         materialise gigabytes here. The second bound caps the SUM of every
         snapshot table's rows — counted, not fetched, in the SAME REPEATABLE READ
-        snapshot — and raises before any fetchall (codex PR#353 r5 P2)."""
+        snapshot — and raises before any fetchall (codex PR#353 r5 P2).
+
+        codex #659 R14 P1: the root ``notebooks`` row is read liveness-
+        filtered (see ``_COPY_SNAPSHOT_QUERIES``'s comment) — an empty result
+        (never existed, or a tombstone landed before this snapshot pinned)
+        raises ``KeyError`` HERE rather than letting the caller's
+        ``snapshot["notebooks"][0]`` bare-index, giving the route's existing
+        ``except KeyError: 404`` something to catch."""
         snapshot: dict[str, list[dict]] = {}
         with self.database.connect() as connection:
             connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
@@ -529,6 +561,8 @@ class SharingStore:
                     _snapshot_compat_row(table, row)
                     for row in connection.execute(query, (notebook_id,)).fetchall()
                 ]
+                if table == "notebooks" and not snapshot[table]:
+                    raise KeyError(notebook_id)
         return snapshot
 
     def _copy_limit_violation(self, connection, notebook_id: str) -> "str | None":

@@ -142,6 +142,81 @@ def test_snapshot_copy_rows_bounds_every_table_not_just_chunks_nodes(tmp_path, m
         store.snapshot_copy_rows(nb)
 
 
+# ---------------------------------------------------------------------------
+# codex #659 R14 P1: snapshot_copy_rows' root ``notebooks`` read used to carry
+# no liveness predicate — a tombstone landing between the share route's token
+# resolution and this snapshot could either (a) copy a deleting/half-cleared
+# notebook whole, or (b) once finalize's DELETE has actually run, leave
+# ``snapshot["notebooks"]`` empty, which the caller indexed with a bare
+# ``[0]`` — an uncaught ``IndexError`` (500), not the documented 404. Both are
+# now the SAME outcome: the root read is liveness-filtered, and an empty
+# result raises ``KeyError`` inside the store method itself.
+# ---------------------------------------------------------------------------
+
+
+def test_snapshot_copy_rows_rejects_a_non_live_notebook(tmp_path, monkeypatch):
+    """Status flipped to 'deleting' (tombstone already landed) but the row
+    still physically exists — must be refused, not silently copied whole."""
+    _env(monkeypatch, tmp_path)
+    repo = SQLiteRepository(Settings())
+    nb = _mk_nb(repo)
+    store = repo._runtime.sharing_store
+    assert store.snapshot_copy_rows(nb)["notebooks"]  # live → snapshot returned
+    with repo._write() as db:
+        db.execute("UPDATE notebooks SET status='deleting' WHERE id=?", (nb,))
+    with pytest.raises(KeyError):
+        store.snapshot_copy_rows(nb)
+
+
+def test_snapshot_copy_rows_raises_key_error_not_index_error_when_the_row_is_gone(
+    tmp_path, monkeypatch,
+):
+    """finalize's own DELETE already ran (the row is physically gone, not
+    merely non-live) — the caller's ``snapshot["notebooks"][0]`` used to
+    bare-index an empty list here. Must surface as KeyError (the route's
+    existing ``except KeyError: 404``), never an IndexError (uncaught → 500)."""
+    _env(monkeypatch, tmp_path)
+    repo = SQLiteRepository(Settings())
+    nb = _mk_nb(repo)
+    store = repo._runtime.sharing_store
+    with repo._write() as db:
+        db.execute("DELETE FROM notebooks WHERE id=?", (nb,))
+    with pytest.raises(KeyError):
+        store.snapshot_copy_rows(nb)
+
+
+def test_copy_notebook_propagates_key_error_for_a_tombstoned_source(tmp_path, monkeypatch):
+    """The KeyError raised inside snapshot_copy_rows must survive
+    copy_notebook's own except/compensate/raise wrapping unchanged — this is
+    what gives the share route's existing ``except KeyError: 404`` something
+    to catch.
+
+    ``NotebookCopyService.copy_notebook`` ALREADY calls ``self._catalog.
+    get_notebook(source_notebook_id)`` (liveness-filtered since well before
+    R14 — the "目录寻址已经把 deleting/copying 挡在入口" gate R11's own
+    docstring names) before it ever reaches ``snapshot_copy_rows`` — so
+    simply flipping the DB status and calling copy_notebook would only
+    re-prove THAT pre-existing gate, not the new one. ``get_notebook`` is
+    monkeypatched to let a stale/faked summary through regardless of real
+    DB status, isolating the race R14 actually targets: the tombstone
+    landing strictly AFTER that check passed but before snapshot_copy_rows
+    reads the root row for itself."""
+    from types import SimpleNamespace
+    from app.services.notebook_catalog import NotebookCatalogService
+
+    _env(monkeypatch, tmp_path)
+    repo = SQLiteRepository(Settings())
+    src = _seed_full_notebook(repo, owner="user-local")
+    monkeypatch.setattr(
+        NotebookCatalogService, "get_notebook",
+        lambda self, nb_id: SimpleNamespace(name="stale-summary", status="ready"),
+    )
+    with repo._write() as db:
+        db.execute("UPDATE notebooks SET status='deleting' WHERE id=?", (src,))
+    with pytest.raises(KeyError):
+        repo._runtime.sharing.copy_notebook(src, new_owner_id="user-local")
+
+
 def test_copy_stats_reports_snapshot_exceeding_notebook_non_copyable(tmp_path, monkeypatch):
     """codex PR#354 r1 P2: a notebook under the byte + chunk+node limits but over
     the total-materialisation limit must read NON-copyable (share-routing), so the
@@ -512,6 +587,46 @@ def test_copy_route_maps_race_size_guard_to_409_not_500(repo, client, monkeypatc
 
     monkeypatch.setattr(ns.NotebookSharingService, "copy_notebook", _raise)
     assert client.post(f"/api/shared/{token}/copy").status_code == 409
+
+
+def test_copy_route_maps_a_tombstone_after_token_resolution_to_404_not_500(
+    repo, client, monkeypatch,
+):
+    """codex #659 R14 P1: find_notebook_by_share_token (R11) already filters
+    a non-live notebook, closing the DOMINANT race (tombstone already landed
+    when the request starts). This pins the NARROWER window: the tombstone
+    lands strictly AFTER token resolution succeeds AND after copy_notebook's
+    own pre-existing ``get_notebook`` liveness gate passes, but before
+    snapshot_copy_rows reaches the root row itself — both earlier gates are
+    monkeypatched through so only the NEW one is under test. Must 404 — the
+    route's existing ``except KeyError`` catching snapshot_copy_rows' new
+    raise, not an uncaught IndexError surfacing as 500."""
+    from types import SimpleNamespace
+    from app.services import notebook_sharing as ns
+    from app.services.notebook_catalog import NotebookCatalogService
+
+    src = _seed_full_notebook(repo, owner="user-local")
+    token = client.post(f"/api/notebooks/{src}/share").json()["share_token"]
+    monkeypatch.setattr(
+        ns.NotebookSharingService, "find_notebook_by_share_token",
+        lambda self, tok: src,
+    )
+    # Bypass the pre-existing gate ONLY for the source id — a successful
+    # copy (possible if the NEW gate is the one under mutation) still needs
+    # a REAL get_notebook(new_id) for the route's response body, so a
+    # blanket bypass would misreport a different failure (response
+    # serialization) as this test's signal instead of "not 404".
+    original_get_notebook = NotebookCatalogService.get_notebook
+
+    def _bypass_for_source_only(self, nb_id):
+        if nb_id == src:
+            return SimpleNamespace(name="stale-summary", status="ready")
+        return original_get_notebook(self, nb_id)
+
+    monkeypatch.setattr(NotebookCatalogService, "get_notebook", _bypass_for_source_only)
+    with repo._write() as db:
+        db.execute("UPDATE notebooks SET status='deleting' WHERE id=?", (src,))
+    assert client.post(f"/api/shared/{token}/copy").status_code == 404
 
 
 def test_share_preview_count_is_visible_while_copy_size_stays_physical(repo):

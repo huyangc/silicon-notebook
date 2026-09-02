@@ -41,7 +41,7 @@ from app.repositories.postgres._store_utils import (
 )
 from app.repositories.postgres.access_sql import NOTEBOOK_LIVE_SQL
 from app.repositories.postgres.database import PostgresDatabase
-from app.repositories.ports import NotebookAlreadyDeletingError
+from app.repositories.ports import NotebookAlreadyDeletingError, StaleLeaseFinalizeError
 
 _log = logging.getLogger(__name__)
 
@@ -425,14 +425,19 @@ class NotebookDeleteJobStore:
         the worker that currently holds this job_id's lease may execute the
         terminal residual cleanup; a fenced-out caller has already lost
         ownership to a new worker that is (or will) settle it instead.
-        Deliberately does NOT delegate to ``cleanup_job_on`` (shared with
-        the successful-finalize path, which has no lease token to fence
-        with -- it is instead gated by the in-process claim's
-        ``verify_held()`` immediately before it runs): this fences the
-        ``notebook_delete_jobs`` DELETE itself first and only cascades to
-        the ``notebook_delete_files`` side table when that row was actually
-        this worker's to delete, so a fenced-out call leaves BOTH tables
-        untouched rather than half-deleted.
+        Deliberately does NOT delegate to ``cleanup_job_on`` -- this path
+        has no ``notebooks`` row DELETE to roll back alongside a fence
+        failure (there is no archive/finalize transaction here at all,
+        §T-4's whole point), so raising ``StaleLeaseFinalizeError`` and
+        unwinding a transaction would be the wrong shape for it; it fences
+        the ``notebook_delete_jobs`` DELETE itself first and only cascades
+        to the ``notebook_delete_files`` side table when that row was
+        actually this worker's to delete, so a fenced-out call leaves BOTH
+        tables untouched rather than half-deleted (codex #659 R14 P2:
+        ``cleanup_job_on`` NOW also takes a ``lease_token`` for the
+        finalize path's own transaction-level fence -- this method's
+        independent, pre-existing fence here predates that and is
+        unaffected by it).
 
         codex #659 R6 P2: also clears any ``conversations`` row for this
         notebook once the fence is confirmed held -- same defense-in-depth
@@ -895,15 +900,43 @@ class NotebookDeleteJobStore:
         ]
 
     @staticmethod
-    def cleanup_job_on(connection, job_id: str) -> None:
+    def cleanup_job_on(
+        connection, job_id: str, lease_token: "str | None" = None,
+    ) -> None:
         """Delete this job's side-table rows and its own row -- called from
         WITHIN ``NotebookStore.delete_row_and_orphan_embeddings``'s finalize
         transaction (Sec T-3.2 step 7) OR ``finish_residual``'s own
         transaction above (Sec T-4 driver-A special case), never as an
-        independent third transaction of its own."""
+        independent third transaction of its own.
+
+        codex #659 R14 P2：``lease_token`` 是事务内栅——见 SQLite 孪生的
+        完整理由（相位 4 的 rmtree 跑得比 stale_cutoff_seconds 还久、期间无
+        心跳，sweep driver A 会偷走这个已经显得陈旧的租，且可能发生在
+        run() 自己的 ``_batch_ok`` 预检之后、这个事务真正提交之前）。作业行
+        自己的 DELETE 现在带 ``AND lease_token=%s``：rowcount=0 且行仍在，
+        说明新主已经换了租——抛 ``StaleLeaseFinalizeError``，让调用方的
+        ``with self.database.write() as connection:`` 把整个 finalize 事务
+        （含更早暂存的 ``DELETE FROM notebooks`` 等）原子回滚。行已经彻底
+        不在了则是既有良性 no-op（某个更早的胜出者已经把 notebooks 行与这
+        份记账一起提交掉），不是错误。``lease_token=None`` 保留 R14 之前的
+        无条件 DELETE，供任何真的没有租可查的调用方（本轮之后代码库里已
+        不存在这样的调用点；保留为显式记录的退出口，而不是给一个假设中的
+        未来非租栅调用方悄悄换行为）。"""
         connection.execute(
             "DELETE FROM notebook_delete_files WHERE job_id=%s", (job_id,)
         )
-        connection.execute(
-            "DELETE FROM notebook_delete_jobs WHERE id=%s", (job_id,)
+        if lease_token is None:
+            connection.execute(
+                "DELETE FROM notebook_delete_jobs WHERE id=%s", (job_id,)
+            )
+            return
+        cursor = connection.execute(
+            "DELETE FROM notebook_delete_jobs WHERE id=%s AND lease_token=%s",
+            (job_id, lease_token),
         )
+        if cursor.rowcount == 0:
+            still_there = connection.execute(
+                "SELECT 1 FROM notebook_delete_jobs WHERE id=%s", (job_id,)
+            ).fetchone()
+            if still_there is not None:
+                raise StaleLeaseFinalizeError(job_id)

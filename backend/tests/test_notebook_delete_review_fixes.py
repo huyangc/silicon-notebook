@@ -10,6 +10,7 @@ from __future__ import annotations
 import pytest
 
 from app.core.config import Settings
+from app.repositories.ports import StaleLeaseFinalizeError
 from app.services import notebook_delete as nd
 from app.services import notebook_delete_tables as ndt
 from app.services.sqlite_repository import SQLiteRepository
@@ -1052,13 +1053,172 @@ def test_finalize_sweeps_a_conversations_straggler_that_slipped_past_phase_3(rep
             ("conv-straggler", "nb1", "T", "u1", NOW, NOW),
         )
 
-    runner._phase_finalize(job["id"], "nb1")
+    runner._phase_finalize(job["id"], "nb1", lease_token)
 
     with repo._runtime.database.connect() as db:
         remaining = db.execute(
             "SELECT COUNT(*) AS c FROM conversations WHERE notebook_id='nb1'"
         ).fetchone()
     assert remaining["c"] == 0
+
+
+# ---------------------------------------------------------------------------
+# codex #659 R14 P2: phase 4's rmtree can run long enough past
+# stale_cutoff_seconds with no intervening heartbeat that sweep driver A's
+# mark_running steals the lease AFTER the pre-finalize _batch_ok recheck
+# passes but BEFORE finalize's own transaction commits. cleanup_job_on's
+# job-row DELETE now carries AND lease_token=? — rowcount=0 with the row
+# still there raises StaleLeaseFinalizeError, rolling the WHOLE finalize
+# transaction back atomically (the notebooks row DELETE staged earlier in
+# the SAME transaction is undone with it), so the new owner can later
+# finish the SAME job cleanly instead of racing a half-committed delete.
+# ---------------------------------------------------------------------------
+
+
+def test_pre_finalize_recheck_catches_a_stolen_lease_the_claim_alone_cannot_see(repo):
+    """codex #659 R14 P2 layer 1: a bare ``claim.verify_held()`` (the OLD
+    pre-finalize gate) only proves the old worker's OWN advisory claim is
+    genuinely still intact — it says nothing about whether ownership of the
+    JOB ROW itself has moved to a new worker (sweep driver A stealing a
+    stale-looking lease during a long phase-4 rmtree). ``_batch_ok``'s
+    ``ownership_snapshot`` half must catch this even when
+    ``claim.verify_held()`` alone would report True."""
+    _seed_user_and_notebook(repo)
+    job = repo._runtime.notebook_delete_jobs.request("nb1", "u1")
+    old_lease = repo._runtime.notebook_delete_jobs.mark_running(
+        job["id"], stale_cutoff_seconds=300,
+    )
+    with repo._runtime.database.write() as db:
+        db.execute(
+            "UPDATE notebook_delete_jobs SET updated_at='2000-01-01T00:00:00' "
+            "WHERE id=?", (job["id"],),
+        )
+    new_lease = repo._runtime.notebook_delete_jobs.mark_running(
+        job["id"], stale_cutoff_seconds=1,
+    )
+    assert new_lease is not None and new_lease != old_lease
+
+    runner = repo._runtime.notebook_delete
+    claim = _AlwaysHeldClaim()
+    assert claim.verify_held() is True  # sanity: the claim alone sees nothing wrong
+    assert runner._batch_ok(job["id"], old_lease, claim, residual=False) is False  # MUT
+
+
+def test_run_stops_before_finalize_when_a_concurrent_worker_steals_the_lease(
+    repo, monkeypatch,
+):
+    """Same gap as above, exercised through the REAL ``run()`` orchestration
+    (not a direct ``_batch_ok`` call) with the REAL claim wiring (the SQLite
+    scale-build-lock advisory claim, not a stub) — proving the wiring change
+    at the phase == 'files' call site, not just _batch_ok's own contract.
+    Reproducing "a concurrent worker steals the lease mid-run()" with real
+    concurrency would need threads; instead, ``advance_phase`` (the call
+    that lands the 'rows' -> 'files' transition) is wrapped to inject the
+    steal at that exact interleaving point, once, immediately after it does
+    its own real work. ``claim.verify_held()`` alone stays True throughout
+    (nothing touches the SEPARATE scale-build-lock this claim guards) — only
+    _batch_ok's ownership half can stop this run() before finalize.
+
+    ``_phase_finalize`` is spied on (not just "did the notebook survive")
+    because layer 2's transaction-level fence (cleanup_job_on) ALSO
+    guarantees the notebook survives even if layer 1 here is bypassed — a
+    pure survival assertion cannot tell the two layers apart. This test
+    must fail specifically when LAYER 1 is removed, i.e. _phase_finalize
+    must never even be ENTERED, not merely "entered but safely rolled
+    back" (that half is covered by
+    ``test_finalize_transaction_rolls_back_atomically_when_the_lease_was_
+    stolen`` below). "新主接手收敛" is also covered there (a second
+    ``run()`` here would just re-attempt ``mark_running`` against the
+    brand-new, still-fresh lease this test just minted and correctly
+    no-op — reaching an actually-independent second owner needs a real
+    second process/thread, not a re-entrant call in this one)."""
+    _seed_user_and_notebook(repo)
+    job = repo._runtime.notebook_delete_jobs.request("nb1", "u1")
+    runner = repo._runtime.notebook_delete
+    store = repo._runtime.notebook_delete_jobs
+    original_advance_phase = store.advance_phase
+    stolen = {}
+
+    def advance_phase_then_maybe_steal(job_id, phase, **kwargs):
+        result = original_advance_phase(job_id, phase, **kwargs)
+        if phase == "files" and not stolen:
+            with repo._runtime.database.write() as db:
+                db.execute(
+                    "UPDATE notebook_delete_jobs SET updated_at='2000-01-01T00:00:00' "
+                    "WHERE id=?", (job_id,),
+                )
+            stolen["lease"] = store.mark_running(job_id, stale_cutoff_seconds=1)
+            assert stolen["lease"] is not None
+        return result
+
+    monkeypatch.setattr(store, "advance_phase", advance_phase_then_maybe_steal)
+    finalize_calls = []
+    original_phase_finalize = type(runner)._phase_finalize
+    monkeypatch.setattr(
+        type(runner), "_phase_finalize",
+        lambda self, *a, **k: finalize_calls.append((a, k)) or original_phase_finalize(self, *a, **k),
+    )
+    runner.run(job["id"])  # MUT
+    assert finalize_calls == []  # never even entered — not "entered, then rolled back"
+
+    with repo._runtime.database.connect() as db:
+        notebook_row = db.execute("SELECT 1 FROM notebooks WHERE id='nb1'").fetchone()
+        job_row = db.execute(
+            "SELECT lease_token FROM notebook_delete_jobs WHERE id=?", (job["id"],)
+        ).fetchone()
+    assert notebook_row is not None  # finalize never ran
+    assert job_row is not None and job_row["lease_token"] == stolen["lease"]
+
+
+def test_finalize_transaction_rolls_back_atomically_when_the_lease_was_stolen(repo):
+    _seed_user_and_notebook(repo)
+    job = repo._runtime.notebook_delete_jobs.request("nb1", "u1")
+    old_lease = repo._runtime.notebook_delete_jobs.mark_running(
+        job["id"], stale_cutoff_seconds=300,
+    )
+    runner = repo._runtime.notebook_delete
+    finished = runner._phase_rows(
+        job["id"], "nb1", old_lease, _AlwaysHeldClaim(), residual=False,
+    )
+    assert finished is True
+    # Simulate phase 4's rmtree running long enough that updated_at went
+    # stale with no heartbeat, and sweep driver A's mark_running stealing
+    # the lease out from under the old worker.
+    with repo._runtime.database.write() as db:
+        db.execute(
+            "UPDATE notebook_delete_jobs SET updated_at='2000-01-01T00:00:00' "
+            "WHERE id=?", (job["id"],),
+        )
+    new_lease = repo._runtime.notebook_delete_jobs.mark_running(
+        job["id"], stale_cutoff_seconds=1,
+    )
+    assert new_lease is not None
+    assert new_lease != old_lease
+
+    # The old worker, unaware its lease was stolen, still tries to finalize
+    # with its now-stale lease_token.
+    with pytest.raises(StaleLeaseFinalizeError):
+        runner._phase_finalize(job["id"], "nb1", old_lease)  # MUT
+
+    with repo._runtime.database.connect() as db:
+        notebook_row = db.execute(
+            "SELECT status FROM notebooks WHERE id='nb1'"
+        ).fetchone()
+        job_row = db.execute(
+            "SELECT lease_token FROM notebook_delete_jobs WHERE id=?", (job["id"],)
+        ).fetchone()
+    assert notebook_row is not None  # DELETE FROM notebooks was rolled back
+    assert job_row is not None and job_row["lease_token"] == new_lease  # untouched
+
+    # The new owner independently converges the SAME job with its own lease.
+    runner._phase_finalize(job["id"], "nb1", new_lease)
+    with repo._runtime.database.connect() as db:
+        gone = db.execute("SELECT 1 FROM notebooks WHERE id='nb1'").fetchone()
+        job_gone = db.execute(
+            "SELECT 1 FROM notebook_delete_jobs WHERE id=?", (job["id"],)
+        ).fetchone()
+    assert gone is None
+    assert job_gone is None
 
 
 def test_residual_cleanup_sweeps_a_conversations_straggler_too(repo):
