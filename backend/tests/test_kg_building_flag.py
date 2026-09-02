@@ -62,9 +62,9 @@ def test_kg_building_set_during_rebuild_delete_phase(repo, monkeypatch):
     bind_chat_client(repo, "kg_extract", _ProbeLLM())  # 无 sources，仅执行入口探测
     seen = {}
     orig_delete = repo._runtime.knowledge_lifecycle.delete_notebook_kg
-    def spy_delete(nid):
+    def spy_delete(nid, **kwargs):
         seen["during_delete"] = nid in repo._kg_building
-        return orig_delete(nid)
+        return orig_delete(nid, **kwargs)
     monkeypatch.setattr(repo._runtime.knowledge_lifecycle, "delete_notebook_kg", spy_delete)
     repo.rebuild_notebook_kg(nb.id)
     assert seen["during_delete"] is True          # delete 阶段标志已置位
