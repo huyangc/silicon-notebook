@@ -467,6 +467,35 @@ class KnowledgeStore:
         if not 0 <= int(step) < len(_GRAPH_DRAIN_STEPS):
             raise ValueError(f"unknown graph drain step: {step}")
         table, predicate, params, _mirrored = _GRAPH_DRAIN_STEPS[int(step)]
+        if table == "knowledge_source_facts":
+            # codex #663 R14 P2 — SQLite twin's comment has the rationale
+            # (explicit counted child delete before the parent page; the FK
+            # cascade then finds nothing).
+            ids = [
+                row["id"] for row in db.execute(
+                    f"SELECT id FROM knowledge_source_facts WHERE {predicate} "
+                    f"LIMIT {int(limit)}",
+                    (notebook_id,) * params,
+                ).fetchall()
+            ]
+            if not ids:
+                return {}
+            counts = {"knowledge_source_facts": 0,
+                      "knowledge_source_fact_elements": 0}
+            for offset in range(0, len(ids), _DELETE_OBJECT_BATCH_SIZE):
+                batch = ids[offset : offset + _DELETE_OBJECT_BATCH_SIZE]
+                cur = db.execute(
+                    "DELETE FROM knowledge_source_fact_elements "
+                    "WHERE fact_id = ANY(%s)",
+                    (batch,),
+                )
+                counts["knowledge_source_fact_elements"] += cur.rowcount
+                cur = db.execute(
+                    "DELETE FROM knowledge_source_facts WHERE id = ANY(%s)",
+                    (batch,),
+                )
+                counts["knowledge_source_facts"] += cur.rowcount
+            return {name: n for name, n in counts.items() if n}
         if table == "knowledge_objects":
             ids = [
                 row["id"] for row in db.execute(
