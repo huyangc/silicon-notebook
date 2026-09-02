@@ -414,6 +414,23 @@ class SharingStore:
                 (notebook_id, user_id, self.now()),
             )
 
+    @staticmethod
+    def insert_member_if_live(connection, notebook_id: str, user_id: str, now) -> None:
+        """codex #659 R12 P1：``join_shared`` 专属的原子插入——**不自己开
+        事务**（与 ``notebook_row_on`` 同款静态方法形状；见 SQLite 孪生的
+        docstring）。``PostgresDatabase.write()`` 不允许嵌套（会抛
+        ``NestedPostgresWriteError``），所以调用方必须已经持有一个
+        ``database.write()`` 连接贯穿"读活性行 + 插入成员 + 水合摘要"整条
+        链路，全程只取一次连接——这正是 R11 引入、R12 要修的
+        ``POSTGRES_POOL_MAX_SIZE=1`` 死等的根因。"""
+        connection.execute(
+            "INSERT INTO notebook_members(notebook_id,user_id,role,added_at) "
+            "SELECT %s,%s,'reader',%s WHERE EXISTS ("
+            f"SELECT 1 FROM notebooks WHERE id=%s AND {NOTEBOOK_LIVE_SQL}) "
+            "ON CONFLICT(notebook_id,user_id) DO NOTHING",
+            (notebook_id, user_id, now, notebook_id),
+        )
+
     def remove_member(self, notebook_id: str, user_id: str) -> None:
         with self.database.write() as connection:
             connection.execute(

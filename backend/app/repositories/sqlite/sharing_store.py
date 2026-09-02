@@ -488,6 +488,29 @@ class SharingStore:
                 (notebook_id, user_id, self.now()),
             )
 
+    @staticmethod
+    def insert_member_if_live(
+        db: sqlite3.Connection, notebook_id: str, user_id: str, now: str,
+    ) -> None:
+        """codex #659 R12 P1：``join_shared`` 专属的原子插入——**不自己开
+        事务**（与 ``notebook_row_on`` 同款静态方法形状），调用方必须已经
+        持有一个 ``database.write()`` 连接贯穿"读活性行 + 插入成员 + 水合
+        摘要"整条链路，全程只取一次连接。
+
+        与 ``add_member``（独立公开方法，`repository_facade`/群组等其它
+        调用方仍在用，不能改它的签名或语义）刻意分开：这里是 ``INSERT OR
+        IGNORE ... SELECT ... WHERE EXISTS(...)`` 形——已是成员时仍幂等
+        no-op（同 ``add_member`` 的 upsert 语义），但笔记本不在场/非活时
+        整条 SELECT 空集，一行都不插；这与 ``ensure_conversation``
+        （round 6 P2）同一款「读侧可见性并入写语句」用法，不碰写侧
+        ``copying``/``deleting`` 哨兵纪律本身。"""
+        db.execute(
+            "INSERT OR IGNORE INTO notebook_members (notebook_id, user_id, role, added_at) "
+            "SELECT ?, ?, 'reader', ? WHERE EXISTS ("
+            f"SELECT 1 FROM notebooks WHERE id = ? AND {NOTEBOOK_LIVE_SQL})",
+            (notebook_id, user_id, now, notebook_id),
+        )
+
     def remove_member(self, notebook_id: str, user_id: str) -> None:
         with self.database.write() as db:
             db.execute(
