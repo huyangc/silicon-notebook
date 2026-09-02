@@ -329,6 +329,16 @@ class NotebookDeleteJobRunner:
         self._sweep_seconds = float(
             getattr(settings, "notebook_delete_sweep_seconds", 300)
         )
+        # In-process submission dedupe (codex #659 R2): a job legitimately
+        # parked in the delete pool's local queue keeps its old ``queued``
+        # timestamp, so every sweep would otherwise submit ANOTHER copy into
+        # the unbounded in-memory queue for as long as one big delete runs.
+        # The set holds job ids handed to ``background_jobs.submit`` whose
+        # ``run()`` has not finished yet; membership is process-local on
+        # purpose — a second process's sweeper may still submit, and the
+        # ``mark_running`` lease CAS decides ownership there as everywhere.
+        self._inflight: set[str] = set()
+        self._inflight_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # §T-2: tombstone request — the API-facing entry point
@@ -343,10 +353,29 @@ class NotebookDeleteJobRunner:
         self._submit(job["id"], notebook_id)
         return {"status": "deleting"}
 
-    def _submit(self, job_id: str, notebook_id: str) -> None:
-        background_jobs.submit(
-            self.run, job_id, name=f"deletenb-{notebook_id}"
-        )
+    def _submit(self, job_id: str, notebook_id: str) -> bool:
+        """Hand the job to the delete pool once; ``False`` = already in this
+        process's queue or running (codex #659 R2 dedupe), nothing submitted."""
+        with self._inflight_lock:
+            if job_id in self._inflight:
+                return False
+            self._inflight.add(job_id)
+        try:
+            background_jobs.submit(
+                self._run_submitted, job_id, name=f"deletenb-{notebook_id}"
+            )
+        except BaseException:
+            with self._inflight_lock:
+                self._inflight.discard(job_id)
+            raise
+        return True
+
+    def _run_submitted(self, job_id: str) -> None:
+        try:
+            self.run(job_id)
+        finally:
+            with self._inflight_lock:
+                self._inflight.discard(job_id)
 
     # ------------------------------------------------------------------
     # §T-3: the six-phase job, resumed from wherever ``phase`` left off
@@ -913,8 +942,8 @@ class NotebookDeleteJobRunner:
             # resubmitting still routes through the SAME phase dispatch, it
             # just takes the residual-cleanup branch instead of the
             # ordinary one.
-            self._submit(job["id"], job["notebook_id"])
-            submitted += 1
+            if self._submit(job["id"], job["notebook_id"]):
+                submitted += 1
         now = datetime.now(timezone.utc)
         for candidate in self.delete_jobs.list_notebooks_missing_job():
             notebook_id = candidate["notebook_id"]
@@ -934,8 +963,8 @@ class NotebookDeleteJobRunner:
             job = self.delete_jobs.recreate_for_deleting_notebook(
                 notebook_id, attempts=attempts,
             )
-            self._submit(job["id"], notebook_id)
-            submitted += 1
+            if self._submit(job["id"], notebook_id):
+                submitted += 1
         return submitted
 
 
