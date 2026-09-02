@@ -1065,13 +1065,15 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
   async function restoreNotebook(owner: AskNotebookTransition): Promise<boolean> {
     if (!sameViewOwner(ownerRef.current, owner)) return false;
     try {
-      const list = await loadSessionsFor(owner);
-      if (!sameViewOwner(ownerRef.current, owner)) return false;
       // Work detached by navigation outranks "latest in history": an intent
       // preview leaves no server-side trace at all, and a durable run may not
       // have reached `started` yet, so opening the previous latest session over
-      // either would hide the question.
+      // either would hide the question. Selected BEFORE the list read: a run
+      // that settles during that read must still be recognised (and its result
+      // projected) rather than vanish between the two reads.
       const selection = selectDetachedWork(owner);
+      const list = await loadSessionsFor(owner);
+      if (!sameViewOwner(ownerRef.current, owner)) return false;
       const { intentRun, run } = selection;
       const latestId = newerIntent(intentRun, run)
         ? intentRun.conversationIdAtStart

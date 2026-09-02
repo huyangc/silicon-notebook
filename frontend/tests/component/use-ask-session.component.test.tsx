@@ -3286,6 +3286,70 @@ test("opening a session re-attaches its detached run even when the detail read f
   expect(value!.turns.map((turn) => turn.question)).toEqual(["follow-up in x"]);
 });
 
+// codex #661 r12 P2: a run that settles while the restore's LIST read is pending
+// (and whose own refresh then fails) must still be recognised and projected.
+test("a run that settles during the restore's list read is still projected", async () => {
+  const stream = deferred<AskResponse>();
+  let onStart: ((jobId: string, conversationId: string) => void | Promise<void>) | undefined;
+  api.runAskStream.mockImplementation((
+    _notebookId: string,
+    _payload: unknown,
+    _onProgress: unknown,
+    _signal?: AbortSignal,
+    nextOnStart?: (jobId: string, conversationId: string) => void | Promise<void>,
+  ) => {
+    onStart = nextOnStart;
+    return stream.promise;
+  });
+  const restoreList = deferred<ConversationSummary[]>();
+  let listCalls = 0;
+  api.listConversations.mockImplementation(async () => {
+    listCalls += 1;
+    // 1: initial restore, 2: second restore (slow), 3: started refresh, 4: final refresh (fails)
+    if (listCalls === 2) return restoreList.promise;
+    if (listCalls === 4) throw new Error("refresh failed");
+    return listCalls === 1 ? [] : [summary("conversation-new")];
+  });
+  api.getConversation.mockResolvedValue({ ...detail("conversation-new"), turn_count: 0, turns: [] });
+  render(<Harness />);
+  const first = beginOwnedNotebook();
+  await act(async () => {
+    await value!.restoreNotebook(first);
+  });
+
+  let submitting!: Promise<void>;
+  act(() => {
+    submitting = value!.submit("new question");
+  });
+  act(() => value!.leaveWorkspace());
+
+  const owner = beginOwnedNotebook(2);
+  let restoring!: Promise<boolean>;
+  act(() => {
+    restoring = value!.restoreNotebook(owner);
+  });
+  await act(async () => {
+    for (let i = 0; i < 20 && listCalls < 2; i += 1) await Promise.resolve();
+  });
+  expect(listCalls).toBe(2);
+
+  // The run starts and finishes while the restore's list read is still pending.
+  await act(async () => {
+    await onStart!("job-new", "conversation-new");
+  });
+  stream.resolve(answer("conversation-new"));
+  await act(async () => submitting);
+
+  restoreList.resolve([]);
+  await act(async () => {
+    await restoring;
+    value!.finishNotebookTransition(owner);
+  });
+  expect(value!.asking).toBe(false);
+  expect(value!.conversationId).toBe("conversation-new");
+  expect(value!.turns.map((turn) => turn.question)).toEqual(["new question"]);
+});
+
 // PR #557 regression: `turns`/`sessions`/`pendingTrace`/`feedbackSent` used to
 // fall back to a bare `[]`/`{}` literal whenever the owner is not visible
 // (actorId is null, e.g. logged out / collection page). A bare literal is a
