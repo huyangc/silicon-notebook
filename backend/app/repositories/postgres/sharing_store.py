@@ -553,20 +553,37 @@ class SharingStore:
         (never existed, or a tombstone landed before this snapshot pinned)
         raises ``KeyError`` HERE rather than letting the caller's
         ``snapshot["notebooks"][0]`` bare-index, giving the route's existing
-        ``except KeyError: 404`` something to catch."""
+        ``except KeyError: 404`` something to catch.
+
+        codex #659 R23 P1: that liveness-filtered root read is the FIRST
+        query of the transaction — it is what pins the REPEATABLE READ
+        snapshot. The old order (size counts first, root read later) pinned
+        the snapshot at the COUNT, so a tombstone committing between the
+        pin and the root read was invisible (the pinned snapshot still said
+        'live') and a full copy could persist mid-delete. With the root
+        read first, either the tombstone committed before the pin (empty →
+        KeyError → 404) or the ENTIRE snapshot precedes the tombstone —
+        serializable as copy-completed-before-delete, which the delete job
+        then proceeds over normally (it only removes the source)."""
         snapshot: dict[str, list[dict]] = {}
         with self.database.connect() as connection:
             connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            root_table, root_query = _COPY_SNAPSHOT_QUERIES[0]
+            assert root_table == "notebooks"
+            snapshot[root_table] = [
+                _snapshot_compat_row(root_table, row)
+                for row in connection.execute(root_query, (notebook_id,)).fetchall()
+            ]
+            if not snapshot[root_table]:
+                raise KeyError(notebook_id)
             violation = self._copy_limit_violation(connection, notebook_id)
             if violation is not None:
                 raise NotebookTooLargeToCopyError(violation)
-            for table, query in _COPY_SNAPSHOT_QUERIES:
+            for table, query in _COPY_SNAPSHOT_QUERIES[1:]:
                 snapshot[table] = [
                     _snapshot_compat_row(table, row)
                     for row in connection.execute(query, (notebook_id,)).fetchall()
                 ]
-                if table == "notebooks" and not snapshot[table]:
-                    raise KeyError(notebook_id)
         return snapshot
 
     def _copy_limit_violation(self, connection, notebook_id: str) -> "str | None":

@@ -1187,3 +1187,91 @@ def test_copy_notebook_remaps_generated_questions_to_original_chunk(repo):
     assert copied_question["chunk_id"] == copied_chunk["id"]
     assert copied_question["source_id"] == copied_source["id"]
     assert copied_chunk["question_indexed_at"]
+
+
+# ---------------------------------------------------------------------------
+# codex #659 R23 P1：快照事务必须钉在「活性过滤的根行读取」上,不是体积计数上
+# ---------------------------------------------------------------------------
+
+
+def test_snapshot_pin_is_the_liveness_root_read(tmp_path, monkeypatch):
+    """变异钉:把根行读取挪回体积计数之后(旧顺序) → 本用例在计数阶段经独立
+    连接提交墓碑;旧顺序的快照钉在计数上(墓碑之后),根行读取看到 deleting
+    抛 KeyError,报红。新顺序快照钉在根行读取上(墓碑之前),整份快照先于
+    删除——等价于「拷贝完成在删除开始之前」,必须整份返回。"""
+    from app.repositories.sqlite.database import SqliteDatabase
+
+    _env(monkeypatch, tmp_path)
+    repo = SQLiteRepository(Settings())
+    nb = _mk_nb(repo)
+    store = repo._runtime.sharing_store
+    primary = repo._runtime.database
+    independent = SqliteDatabase(primary.settings, primary.root_dir)
+    original = store._copy_limit_violation
+
+    def tombstone_then_count(db, notebook_id):
+        with independent.write() as w:
+            w.execute(
+                "UPDATE notebooks SET status='deleting' WHERE id=?", (notebook_id,)
+            )
+        return original(db, notebook_id)
+
+    monkeypatch.setattr(store, "_copy_limit_violation", tombstone_then_count)
+    snapshot = store.snapshot_copy_rows(nb)
+    assert snapshot["notebooks"], (
+        "快照钉在根行读取上之后,钉之后才提交的墓碑不得阻断整份预删快照"
+    )
+    # 而钉之前就落的墓碑必须挡下:此刻行已是 deleting,再来一次直接 KeyError。
+    monkeypatch.setattr(store, "_copy_limit_violation", original)
+    with pytest.raises(KeyError):
+        store.snapshot_copy_rows(nb)
+
+
+# ---------------------------------------------------------------------------
+# codex #659 R23 P2：缓存 copyable 判定不得让 deleting 笔记本以 409/400 现形
+# ---------------------------------------------------------------------------
+
+
+def test_copy_route_rechecks_liveness_before_the_cached_409(
+    repo, client, monkeypatch,
+):
+    """变异钉:把 copy 路由 409 之前的活性复核删掉 → 墓碑在令牌解析之后落地、
+    copyable 判定又来自 KG 版本缓存(全程不碰任何活性过滤查询)时,deleting
+    笔记本以 409 现形而非规约要求的 404,报红。"""
+    from app.services import notebook_sharing as ns
+
+    src = _seed_full_notebook(repo, owner="user-local")
+    token = client.post(f"/api/notebooks/{src}/share").json()["share_token"]
+
+    def _tombstone_then_cached_false(self, nb):
+        with repo._write() as db:
+            db.execute("UPDATE notebooks SET status='deleting' WHERE id=?", (src,))
+        return {"copyable": False}
+
+    monkeypatch.setattr(
+        ns.NotebookSharingService, "notebook_copy_stats",
+        _tombstone_then_cached_false,
+    )
+    assert client.post(f"/api/shared/{token}/copy").status_code == 404
+
+
+def test_join_route_rechecks_liveness_before_the_cached_400(
+    repo, client, monkeypatch,
+):
+    """变异钉:join 路由 400 之前的活性复核——同上,缓存 copyable=True 时
+    deleting 笔记本必须 404,不是「小库请走 copy」的 400。"""
+    from app.services import notebook_sharing as ns
+
+    src = _seed_full_notebook(repo, owner="user-local")
+    token = client.post(f"/api/notebooks/{src}/share").json()["share_token"]
+
+    def _tombstone_then_cached_true(self, nb):
+        with repo._write() as db:
+            db.execute("UPDATE notebooks SET status='deleting' WHERE id=?", (src,))
+        return {"copyable": True}
+
+    monkeypatch.setattr(
+        ns.NotebookSharingService, "notebook_copy_stats",
+        _tombstone_then_cached_true,
+    )
+    assert client.post(f"/api/shared/{token}/join").status_code == 404

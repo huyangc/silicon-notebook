@@ -119,9 +119,9 @@ _COPY_SNAPSHOT_QUERIES: tuple[tuple[str, str], ...] = (
     # route's token resolution and this snapshot must stop the copy here,
     # not materialise a deleting/half-cleared notebook. Every OTHER query in
     # this tuple is anchored off the root's own id/joins and reads inside
-    # the SAME pinned snapshot transaction as this one (BEGIN above pins the
-    # view at the first read, i.e. `_copy_limit_violation`'s own first
-    # query) — a concurrent delete job's phase-3 commits are invisible to
+    # the SAME pinned snapshot transaction as this one (codex #659 R23 P1:
+    # THIS root read is now the transaction's first read and thus the very
+    # pin) — a concurrent delete job's phase-3 commits are invisible to
     # this transaction regardless, so re-adding the predicate to every
     # child-table query below would be redundant, not merely optional: this
     # one row's liveness (checked in the SAME snapshot) is definitionally
@@ -633,19 +633,34 @@ class SharingStore:
         caller. Raising ``KeyError`` HERE (rather than letting the caller's
         ``snapshot["notebooks"][0]`` bare-index) gives the route's existing
         ``except KeyError: 404`` something to catch, matching every other
-        share-surface TOCTOU guard from R11."""
+        share-surface TOCTOU guard from R11.
+
+        codex #659 R23 P1: that liveness-filtered root read is the FIRST
+        read after ``BEGIN`` — it is what pins the WAL read snapshot. The
+        old order (size counts first, root read later) pinned the snapshot
+        at the COUNT, so a tombstone committing between the pin and the
+        root read was invisible and a full copy could persist mid-delete.
+        Root-read-first means either the tombstone preceded the pin (empty
+        → KeyError → 404) or the ENTIRE snapshot precedes the tombstone —
+        serializable as copy-completed-before-delete (the delete job only
+        removes the source)."""
         snapshot: dict[str, list[dict]] = {}
         with self.database.connect() as db:
             db.execute("BEGIN")
+            root_table, root_sql = _COPY_SNAPSHOT_QUERIES[0]
+            assert root_table == "notebooks"
+            snapshot[root_table] = [
+                dict(row) for row in db.execute(root_sql, (notebook_id,)).fetchall()
+            ]
+            if not snapshot[root_table]:
+                raise KeyError(notebook_id)
             violation = self._copy_limit_violation(db, notebook_id)
             if violation is not None:
                 raise NotebookTooLargeToCopyError(violation)
-            for table, sql in _COPY_SNAPSHOT_QUERIES:
+            for table, sql in _COPY_SNAPSHOT_QUERIES[1:]:
                 snapshot[table] = [
                     dict(row) for row in db.execute(sql, (notebook_id,)).fetchall()
                 ]
-                if table == "notebooks" and not snapshot[table]:
-                    raise KeyError(notebook_id)
         return snapshot
 
     def _copy_limit_violation(self, db, notebook_id: str) -> "str | None":

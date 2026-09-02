@@ -338,6 +338,15 @@ def copy_shared_route(token: str, user: UserProfile = Depends(get_current_user))
     # this call runs; map it to 404 instead of a bare 500.
     try:
         if not sharing.notebook_copy_stats(nb_id)["copyable"]:
+            # codex #659 R23 P2: the verdict above can come from the
+            # KG-version-cached copy_stats without touching a single
+            # live-filtered query, so a tombstone that landed after token
+            # resolution would surface as this 409 — a deleting notebook
+            # staying observable through the share endpoint. Re-resolve the
+            # token (live-filtered, R11) immediately before the size-based
+            # early response; gone → the documented 404.
+            if sharing.find_notebook_by_share_token(token) is None:
+                raise HTTPException(status_code=404, detail="Shared notebook not found")
             raise HTTPException(status_code=409, detail="notebook too large to copy")
         from app.services.notebook_sharing import NotebookTooLargeToCopyError
         try:
@@ -367,6 +376,11 @@ def join_shared_route(token: str, user: UserProfile = Depends(get_current_user))
     # race-induced KeyError to 404 instead of a bare 500.
     try:
         if sharing.notebook_copy_stats(nb_id)["copyable"]:
+            # codex #659 R23 P2: same cached-verdict TOCTOU as
+            # copy_shared_route — recheck liveness before the size-based
+            # early response so a deleting notebook 404s instead of 400.
+            if sharing.find_notebook_by_share_token(token) is None:
+                raise HTTPException(status_code=404, detail="Shared notebook not found")
             raise HTTPException(status_code=400, detail="small notebook — use copy, not join")
         return sharing.join_shared(nb_id, user.id)
     except KeyError:
