@@ -1093,8 +1093,15 @@ class NotebookDeleteJobStorePort(Protocol):
         异常处理路径上，没有再抛一层的意义。"""
         ...
     def materialize_paths_page(
-        self, job_id: str, notebook_id: str, after_id: str, limit: int
-    ) -> tuple[int, str | None]: ...
+        self, job_id: str, notebook_id: str, after_id: str, limit: int,
+        *, lease_token: str,
+    ) -> "tuple[int, str | None] | None":
+        """codex #659 R19 P2：写入 ``notebook_delete_files`` 前在同一事务里
+        对作业行做 ``lease_token`` CAS（顺带刷新 ``updated_at`` 心跳——一页
+        拷贝超过 sweep 窗口时不再被误判死亡）。围栏未命中返回 ``None``
+        （调用方立即停手，不推进游标）；命中则照旧返回
+        ``(rows_copied, last_source_id_or_None)``。"""
+        ...
     def notebook_exists(self, notebook_id: str) -> bool: ...
     def ownership_snapshot(self, job_id: str) -> dict | None:
         """P1-A/P2-a：一条查询同时给出「这个作业行自己的 status/lease_token」

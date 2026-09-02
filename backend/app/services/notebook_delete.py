@@ -488,13 +488,15 @@ class NotebookDeleteJobRunner:
         residual = not self.delete_jobs.notebook_exists(notebook_id)
         try:
             if phase == "mark":
-                self._phase_paths(
+                if not self._phase_paths(
                     job_id, notebook_id, lease_token, job.get("cursor_key") or "",
-                )
+                ):
+                    return  # codex #659 R19 P2: lease lost mid-materialize
                 phase = "paths"
-                self.delete_jobs.advance_phase(
+                if not self.delete_jobs.advance_phase(
                     job_id, phase, lease_token=lease_token, cursor_key="",
-                )
+                ):
+                    return
             if phase == "paths":
                 if not self._phase_quiesce(job_id, notebook_id, lease_token):
                     return  # timed out; mark_waiting already called, sweep resumes
@@ -644,7 +646,7 @@ class NotebookDeleteJobRunner:
 
     def _phase_paths(
         self, job_id: str, notebook_id: str, lease_token: str, start_after: str,
-    ) -> None:
+    ) -> bool:
         """Materialize the full ``sources.file_path`` set (§T-3.1) before any
         source row can be deleted. Crash-resumable: each page's cursor is
         persisted (as the job's ``cursor_key`` while ``phase`` is still
@@ -653,18 +655,31 @@ class NotebookDeleteJobRunner:
         notebook row is already gone via an out-of-band delete, ``sources``
         has almost certainly already cascaded away too (its FK to
         ``notebooks`` is ``ON DELETE CASCADE``), so this is a harmless
-        immediate no-op there — not worth a special case to skip."""
+        immediate no-op there — not worth a special case to skip.
+
+        codex #659 R19 P2: returns False the moment ownership is lost —
+        either the page's own in-transaction lease fence missed
+        (``materialize_paths_page`` returned ``None``) or the cursor-persist
+        ``advance_phase`` CAS missed. The caller must stop the run outright
+        (never advance to 'paths'): the new owner resumes from the persisted
+        cursor, and continuing here would race its pages into primary-key
+        collisions on ``notebook_delete_files``."""
         after_id = start_after
         while True:
-            copied, last_id = self.delete_jobs.materialize_paths_page(
-                job_id, notebook_id, after_id, _PATHS_PAGE_SIZE
+            result = self.delete_jobs.materialize_paths_page(
+                job_id, notebook_id, after_id, _PATHS_PAGE_SIZE,
+                lease_token=lease_token,
             )
+            if result is None:
+                return False
+            copied, last_id = result
             if copied == 0:
-                return
+                return True
             after_id = last_id or after_id
-            self.delete_jobs.advance_phase(
+            if not self.delete_jobs.advance_phase(
                 job_id, "mark", lease_token=lease_token, cursor_key=after_id,
-            )
+            ):
+                return False
 
     # ---- phase 2: quiesce ----
 

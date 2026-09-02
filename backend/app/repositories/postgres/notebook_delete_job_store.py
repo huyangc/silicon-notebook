@@ -336,8 +336,9 @@ class NotebookDeleteJobStore:
         return cursor.rowcount == 1
 
     def materialize_paths_page(
-        self, job_id: str, notebook_id: str, after_id: str, limit: int
-    ) -> tuple[int, str | None]:
+        self, job_id: str, notebook_id: str, after_id: str, limit: int,
+        *, lease_token: str,
+    ) -> "tuple[int, str | None] | None":
         """Phase 1 ('paths'): copy one keyset page of ``sources.file_path``
         into ``notebook_delete_files``, ordinal-numbered by resuming from
         this job's current ``MAX(ordinal)`` so a crash-and-resume never
@@ -346,8 +347,25 @@ class NotebookDeleteJobStore:
         Returns ``(rows_copied, last_source_id_or_None)`` -- the caller loops
         until ``rows_copied == 0``, storing ``last_source_id`` as the next
         page's ``after_id`` (and as the job's ``cursor_key``) between calls.
+
+        codex #659 R19 P2: the write opens with an in-transaction lease CAS
+        (``UPDATE ... WHERE id AND status='running' AND lease_token``). The
+        row lock it takes serializes this page against ``mark_running``'s
+        steal CAS: either this page commits first (and the thief's next
+        read sees its ordinals), or the steal commits first and this fence
+        misses -> ``None``, nothing written -- no more two workers reading
+        the same ``MAX(ordinal)`` into a primary-key collision. The CAS also
+        refreshes ``updated_at``, so a single page that outlasts
+        ``NOTEBOOK_DELETE_SWEEP_SECONDS`` no longer looks dead to driver A.
         """
         with self.database.write() as connection:
+            fence = connection.execute(
+                "UPDATE notebook_delete_jobs SET updated_at=%s "
+                "WHERE id=%s AND status='running' AND lease_token=%s",
+                (self.now(), job_id, lease_token),
+            )
+            if fence.rowcount != 1:
+                return None
             start = connection.execute(
                 "SELECT COALESCE(MAX(ordinal),-1)+1 AS next_ordinal "
                 "FROM notebook_delete_files WHERE job_id=%s",
