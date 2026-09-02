@@ -600,7 +600,21 @@ class KnowledgeLifecycleService:
     def _delete_notebook_kg_fenced(self, notebook_id: str) -> dict:
         """``delete_notebook_kg``'s body, run under the kg_building fence
         (its docstring carries the full contract)."""
+        # codex #663 R16 P1a: snapshot the reverse-index completeness
+        # certificate BEFORE the drain. The drain's first page revokes it
+        # (in that page's own transaction — see
+        # ``clear_source_index_backfilled``'s docstring for the
+        # interrupted-drain hazard it closes), and a successful final reset
+        # re-asserts it from THIS pre-drain value; an interrupted drain
+        # leaves the certificate revoked, so reparse/delete falls back to
+        # the evidence scan instead of trusting a half-drained reverse
+        # index.
+        with self._connect() as db:
+            certified_before = self.knowledge.source_index_backfilled(
+                db, notebook_id
+            )
         drained = self._drain_graph_rows_before_reset(notebook_id)
+        totals: dict[str, int] = {}
         for attempt in range(_GRAPH_RESET_ATTEMPTS):
             # codex #663 R11/R12 P2: the tombstone checkpoint guards EVERY
             # final-reset attempt — a small graph never enters the drain
@@ -634,11 +648,6 @@ class KnowledgeLifecycleService:
                     ) is not None:
                         counts = None
                     else:
-                        source_index_was_certified = (
-                            self.knowledge.source_index_backfilled(
-                                db, notebook_id
-                            )
-                        )
                         counts = self.knowledge.delete_notebook_graph_rows(
                             db, notebook_id, self._now()
                         )
@@ -651,11 +660,13 @@ class KnowledgeLifecycleService:
                         # historical hidden projections may also predate
                         # forward maintenance. The reset UPDATE deliberately
                         # does not touch source_index_backfilled itself (see
-                        # its own comment), so this re-assertion is
-                        # belt-and-suspenders now rather than the repair it
-                        # was when the row used to be dropped and
-                        # re-inserted bare.
-                        if source_index_was_certified:
+                        # its own comment). codex #663 R16 P1a: the value
+                        # re-asserted is the PRE-DRAIN snapshot — the drain
+                        # revoked the certificate on its first page, so an
+                        # in-transaction read here would always be False
+                        # after a drain and the certificate would be lost on
+                        # every big-graph delete.
+                        if certified_before:
                             self.knowledge.mark_source_index_backfilled(
                                 db, notebook_id
                             )
@@ -671,14 +682,32 @@ class KnowledgeLifecycleService:
                     raise
                 counts = None
             if counts is not None:
-                break
+                for table, deleted in counts.items():
+                    totals[table] = totals.get(table, 0) + deleted
+                # codex #663 R16 P2: the REPEATABLE READ snapshot makes
+                # commits that land DURING the final transaction invisible
+                # to its DELETEs — under the old READ COMMITTED they might
+                # have been swept. The rebuild path re-extracts and
+                # converges those survivors, but standalone maintenance/
+                # offline callers have no such follow-up — so validate
+                # AFTER the commit on a fresh read connection (which sees
+                # every later commit) and, when doc-graph rows survived,
+                # spend a remaining attempt on another drain+reset round.
+                with self._connect() as db:
+                    survivors = self.knowledge.graph_drain_backlog(
+                        db, notebook_id, 0, 0
+                    )
+                if survivors is None:
+                    break
+                counts = None
             # In-transaction bound validation failed (or the transaction was
-            # serialization-aborted): a concurrent writer moved the graph
-            # under us. Nothing was committed above — drain the new backlog
-            # and try the final pass again. codex #663 R13 P2: SKIP the
-            # re-drain when no reset attempt remains — the loop would exit
-            # straight into the loud failure, and a full destructive drain
-            # nobody will follow up on is pure wasted latency.
+            # serialization-aborted, or post-reset validation found
+            # survivors): a concurrent writer moved the graph under us —
+            # drain the new backlog and try the final pass again. codex
+            # #663 R13 P2: SKIP the re-drain when no reset attempt remains —
+            # the loop would exit straight into the loud failure, and a
+            # full destructive drain nobody will follow up on is pure
+            # wasted latency.
             if attempt + 1 >= _GRAPH_RESET_ATTEMPTS:
                 continue
             for table, deleted in self._drain_graph_rows_before_reset(
@@ -698,11 +727,12 @@ class KnowledgeLifecycleService:
         # seq-aliasing patch. See this method's own docstring.
         self._invalidate_unified_cache(notebook_id)
         # T-5a: rows removed by the pre-reset drain belong to this call's
-        # deletion just as much as the final pass's — merge them so callers
+        # deletion just as much as the final pass's (R16 P2: `totals` may
+        # aggregate more than one final round) — merge them so callers
         # reading counts (rebuild logs, tests) keep seeing the total.
         for table, deleted in drained.items():
-            counts[table] = counts.get(table, 0) + deleted
-        return counts
+            totals[table] = totals.get(table, 0) + deleted
+        return totals
 
     def _drain_graph_rows_before_reset(self, notebook_id: str) -> dict[str, int]:
         """batch-3-W1 T-5a: bound ``delete_notebook_kg``'s final single
@@ -748,6 +778,7 @@ class KnowledgeLifecycleService:
         drained: dict[str, int] = {}
         stalls = 0
         cursor = 0
+        certificate_revoked = False
         while True:
             with self._connect() as db:
                 backlog = self.knowledge.graph_drain_backlog(
@@ -776,6 +807,17 @@ class KnowledgeLifecycleService:
                     db, notebook_id, cursor, self._graph_drain_budget_rows
                 )
                 if deleted:
+                    # codex #663 R16 P1a: the FIRST destructive page also
+                    # revokes the reverse-index completeness certificate in
+                    # its own transaction — an interrupted drain must never
+                    # leave a certified-but-incomplete reverse index behind
+                    # (the successful final reset re-asserts it from the
+                    # pre-drain snapshot).
+                    if not certificate_revoked:
+                        self.knowledge.clear_source_index_backfilled(
+                            db, notebook_id
+                        )
+                        certificate_revoked = True
                     # T-5a review P0: the seq bump goes through the ONE
                     # online choke point (mark_unified_kg_dirty_in_tx), never
                     # a bare store ``mark_dirty`` — the choke point also

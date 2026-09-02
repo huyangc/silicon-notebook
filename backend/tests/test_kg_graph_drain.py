@@ -768,6 +768,102 @@ def test_final_reset_pins_isolation_as_the_first_statement(repo, monkeypatch):
     )
 
 
+def _certificate(repo, notebook_id):
+    with repo._runtime.database.connect() as db:
+        return repo._runtime.knowledge.source_index_backfilled(db, notebook_id)
+
+
+def test_certificate_revoked_on_interrupt_and_restored_on_success(
+    repo, monkeypatch,
+):
+    """变异钉两问(codex #663 R16 P1a):
+    ① 把排水首页的 clear_source_index_backfilled 删掉 → 中断的排水留下
+    「已认证却不完整」的反向索引(kos 行没了、证书还在),报红;
+    ② 把终局回授改回事务内读(或删掉)→ 成功路径丢证书,报红。"""
+    service = repo._runtime.knowledge_lifecycle
+    monkeypatch.setattr(service, "_graph_drain_budget_rows", 3)
+    notebook = repo.create_notebook(NotebookCreate(name="cert"))
+    _seed_graph(repo, notebook.id, doc_objects=10)
+    with repo._runtime.database.write() as db:
+        repo._runtime.knowledge.mark_source_index_backfilled(db, notebook.id)
+    assert _certificate(repo, notebook.id) is True
+
+    # ① 中断:第二批起墓碑落地 → 排水停手,证书必须已吊销。
+    calls = {"n": 0}
+
+    def _deleting_after_first(_nb):
+        calls["n"] += 1
+        return calls["n"] > 1
+
+    monkeypatch.setattr(service, "_notebook_deleting", _deleting_after_first)
+    with pytest.raises(NotebookDeletingAbortsMaintenanceError):
+        repo.delete_notebook_kg(notebook.id)
+    assert _certificate(repo, notebook.id) is False, (
+        "中断的排水必须留下已吊销的证书(反向索引已不完整)"
+    )
+
+    # ② 成功路径:重放证书后完整删除 → 终局按排水前快照回授。
+    with repo._runtime.database.write() as db:
+        repo._runtime.knowledge.mark_source_index_backfilled(db, notebook.id)
+    monkeypatch.setattr(service, "_notebook_deleting", lambda _nb: False)
+    repo.delete_notebook_kg(notebook.id)
+    assert _certificate(repo, notebook.id) is True, (
+        "成功终局必须按排水前快照回授证书"
+    )
+
+
+def test_post_reset_validation_catches_snapshot_invisible_commits(
+    repo, monkeypatch,
+):
+    """变异钉(codex #663 R16 P2):把终局提交后的幸存者复验删掉 → RR 快照
+    看不见的事中提交行在 delete 返回后仍留在库里、totals 短计,报红。注入:
+    包住 delete_notebook_graph_rows,原始终局跑完后经独立连接插 4 行,模拟
+    「快照之后、提交之前」落地的并发写。"""
+    service = repo._runtime.knowledge_lifecycle
+    monkeypatch.setattr(service, "_graph_drain_budget_rows", 3)
+    notebook = repo.create_notebook(NotebookCreate(name="survivors"))
+    _seed_graph(repo, notebook.id, doc_objects=10)
+
+    from app.repositories.sqlite.database import SqliteDatabase
+
+    primary = repo._runtime.database
+    independent = SqliteDatabase(primary.settings, primary.root_dir)
+    store = repo._runtime.knowledge
+    original_backlog = store.graph_drain_backlog
+    injected = {"done": False}
+
+    def _inject_before_survivor_probe(db, nb, threshold, start=0):
+        # threshold==0 只出现在终局提交后的幸存者复验——首调之前注入 4 行,
+        # 模拟「终局快照之后落地、DELETE 看不见」的并发提交(此刻终局已提交,
+        # 独立连接不会撞写锁)。
+        if threshold == 0 and not injected["done"]:
+            injected["done"] = True
+            now2 = _now()
+            with independent.write() as w:
+                for i in range(4):
+                    w.execute(
+                        "INSERT INTO knowledge_objects (id,notebook_id,"
+                        "object_type,status,owner,payload,evidence,source_id,"
+                        "created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                        (f"ko-surv-{i}", nb, "concept", "approved", "", "{}",
+                         "[]", "src-doc", now2, now2),
+                    )
+        return original_backlog(db, nb, threshold, start)
+
+    monkeypatch.setattr(store, "graph_drain_backlog", _inject_before_survivor_probe)
+    counts = repo.delete_notebook_kg(notebook.id)
+
+    assert injected["done"], "前置不成立:没有触发注入"
+    assert counts["knowledge_objects"] == 14, (
+        f"totals 必须覆盖复验轮清掉的幸存者:{counts['knowledge_objects']}"
+    )
+    assert _count(
+        repo,
+        "SELECT COUNT(*) FROM knowledge_objects WHERE notebook_id=?",
+        (notebook.id,),
+    ) == 0, "终局后复验必须清掉快照不可见的提交行"
+
+
 def test_drain_stall_raises_loudly(repo, monkeypatch):
     """变异钉:把「3 次连续零删响亮失败」改成静默继续 → 排水循环失去终止
     条件(本用例以 RuntimeError 类型断言判红;仓库没有 pytest-timeout,
