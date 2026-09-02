@@ -1137,9 +1137,24 @@ class NotebookSharingService:
         return self._store.list_members(notebook_id)
 
     def join_shared(self, notebook_id: str, user_id: str) -> NotebookSummary:
-        self.add_member(notebook_id, user_id)
+        # codex #659 R11 P1: fetch (now liveness-filtered — see
+        # notebook_row_on's docstring) BEFORE writing the membership row,
+        # not after. The route's own find_notebook_by_share_token already
+        # filters a non-live notebook out (NOTEBOOK_LIVE_SQL), but that only
+        # closes the DOMINANT case (tombstone already landed when the
+        # request starts); reordering this read ahead of add_member closes
+        # the narrower TOCTOU window between that resolution and this call
+        # too — add_member itself gets no liveness check of its own (write-
+        # side sentinel discipline stays untouched; this is a READ-side
+        # precondition in front of it). The SAME row/connection is reused
+        # for the returned summary below — still exactly one
+        # notebook_row_on call and one from_row call, unchanged from before
+        # this fix.
         with self._database.connect() as db:
             row = self._store.notebook_row_on(db, notebook_id)
+            if row is None:
+                raise KeyError(notebook_id)
+            self.add_member(notebook_id, user_id)
             notebook = self._summaries.from_row(db, row)
         notebook.access = "reader"
         return notebook

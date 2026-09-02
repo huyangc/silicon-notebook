@@ -14,6 +14,7 @@ from app.repositories.sqlite.access_sql import (
     MEMBER_PROBE_SQL,
     NOTEBOOK_ADMIN_SQL,
     NOTEBOOK_DELETE_OWNER_SQL,
+    NOTEBOOK_LIVE_SQL,
     NOTEBOOK_READ_SQL,
     NOTEBOOK_WRITE_SQL,
     admin_access_params,
@@ -331,9 +332,19 @@ class SharingStore:
             db.execute("DELETE FROM notebook_members WHERE notebook_id = ?", (notebook_id,))
 
     def find_by_token(self, token: str) -> "str | None":
+        """codex #659 R11 P1：并入 ``NOTEBOOK_LIVE_SQL``——tombstone 落地
+        （``status='deleting'``）之后这一行仍然真实存在（相位 5 之前），
+        不带这条谓词就会让 ``/shared/{token}``、``/shared/{token}/copy``、
+        ``/shared/{token}/join`` 这三条路由（全部只经这一个解析点找
+        notebook_id）在一本正在删除的库上继续放行——直接违反
+        product-and-api.md:2334 的「立即不可见」契约。只动读侧：写侧的
+        ``set_share_token``/``clear_share`` 沿用既有的 ``copying`` 哨兵纪律，
+        不在这次改动范围内。"""
         with self.database.connect() as db:
             row = db.execute(
-                "SELECT id FROM notebooks WHERE share_token = ? AND is_shared = 1", (token,)
+                "SELECT id FROM notebooks WHERE share_token = ? AND is_shared = 1 "
+                f"AND {NOTEBOOK_LIVE_SQL}",
+                (token,),
             ).fetchone()
         return row["id"] if row else None
 
@@ -345,6 +356,10 @@ class SharingStore:
         「尚未分享任何笔记本」,而群组共享恰恰是 owner 最需要在这里看到的一条。
         群组那半没有分享链接(`share_token` 为 NULL),由 `group_count` 自我标注,
         消费方据此渲染成「已共享给 N 个群组」而不是一个空链接框。
+
+        codex #659 R11 P1：并入 ``NOTEBOOK_LIVE_SQL``——owner 自己的「已分享」
+        总览页不应该继续挂着一本正在删除中的库；tombstone 落地后这一行必须
+        立刻从这个列表里消失，与其它任何读侧列表同一口径。
         """
         with self.database.connect() as db:
             return db.execute(
@@ -352,11 +367,20 @@ class SharingStore:
                 + GROUP_GRANT_COUNT_SQL + " AS group_count "
                 "FROM notebooks WHERE created_by = ? "
                 "AND (is_shared = 1 OR " + GROUP_GRANT_EXISTS_SQL + ") "
+                f"AND {NOTEBOOK_LIVE_SQL} "
                 "ORDER BY updated_at DESC",
                 (user_id,),
             ).fetchall()
 
     def notebook_row(self, notebook_id: str) -> "sqlite3.Row | None":
+        """codex #659 R11 P1 audit: bare read, deliberately NOT liveness-
+        filtered — its one caller (``NotebookSharingService.share_state``)
+        is reached only through ``GET /notebooks/{id}/share``, which already
+        carries ``require_notebook_capability("notebook:configure")`` (owner
+        -only, ``NOTEBOOK_WRITE_SQL`` — includes ``NOTEBOOK_LIVE_SQL``) as a
+        route dependency; the liveness check already happened before this
+        method ever runs. Do not reuse this method for any NEW caller that
+        is not equally protected by an upstream live-only guard."""
         with self.database.connect() as db:
             return db.execute(
                 "SELECT * FROM notebooks WHERE id = ?", (notebook_id,)
@@ -366,9 +390,16 @@ class SharingStore:
     def notebook_row_on(
         db: sqlite3.Connection, notebook_id: str
     ) -> "sqlite3.Row | None":
-        """Read a notebook on the caller's summary-hydration snapshot."""
+        """Read a notebook on the caller's summary-hydration snapshot.
+
+        codex #659 R11 P1：并入 ``NOTEBOOK_LIVE_SQL``——唯一消费点是
+        ``NotebookSharingService.join_shared``，经 ``POST /shared/{token}/
+        join`` 到达，这条路由**没有**任何 notebook 能力守卫（凭 token 而非
+        notebook_id 路径参数鉴权），不像 ``notebook_row`` 那样已经被上游
+        路由守卫保护过——必须自己带这条谓词。"""
         return db.execute(
-            "SELECT * FROM notebooks WHERE id = ?", (notebook_id,)
+            f"SELECT * FROM notebooks WHERE id = ? AND {NOTEBOOK_LIVE_SQL}",
+            (notebook_id,),
         ).fetchone()
 
     def shared_preview_rows(self, notebook_id: str) -> "tuple[str, list[str]]":

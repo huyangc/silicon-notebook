@@ -313,7 +313,17 @@ def shared_preview_route(token: str, user: UserProfile = Depends(get_current_use
     nb_id = sharing.find_notebook_by_share_token(token)
     if nb_id is None:
         raise HTTPException(status_code=404, detail="Shared notebook not found")
-    return SharedPreview(**sharing.shared_preview(nb_id))
+    # codex #659 R11 P1: find_notebook_by_share_token now filters out a
+    # non-live notebook (NOTEBOOK_LIVE_SQL), but a narrower TOCTOU race
+    # remains — the delete job's tombstone could land in the instant between
+    # that resolution and this call. shared_preview() reaches
+    # NotebookCatalogService.get_notebook() internally, which raises
+    # KeyError for exactly that case; map it to the same 404 rather than
+    # letting it surface as a bare 500.
+    try:
+        return SharedPreview(**sharing.shared_preview(nb_id))
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Shared notebook not found")
 
 
 @router.post("/shared/{token}/copy", response_model=NotebookSummary)
@@ -322,21 +332,28 @@ def copy_shared_route(token: str, user: UserProfile = Depends(get_current_user))
     nb_id = sharing.find_notebook_by_share_token(token)
     if nb_id is None:
         raise HTTPException(status_code=404, detail="Shared notebook not found")
-    if not sharing.notebook_copy_stats(nb_id)["copyable"]:
-        raise HTTPException(status_code=409, detail="notebook too large to copy")
-    from app.services.notebook_sharing import NotebookTooLargeToCopyError
+    # codex #659 R11 P1: same TOCTOU race as shared_preview_route above —
+    # notebook_copy_stats()/copy_notebook() can raise KeyError if the
+    # tombstone lands after find_notebook_by_share_token resolved but before
+    # this call runs; map it to 404 instead of a bare 500.
     try:
-        principal = session_audit_principal(user)
-        return sharing.copy_notebook(
-            nb_id, new_owner_id=principal.identity_id,
-            actor_label=principal.audit_label,
-        )
-    except NotebookTooLargeToCopyError:
-        # If ingestion pushed the notebook past the limit after the pre-check
-        # above, copy_notebook's atomic within_copy_row_limit() bound (checked on
-        # the snapshot's own connection) refuses the copy — map that to the
-        # documented 409, not a 500.
-        raise HTTPException(status_code=409, detail="notebook too large to copy")
+        if not sharing.notebook_copy_stats(nb_id)["copyable"]:
+            raise HTTPException(status_code=409, detail="notebook too large to copy")
+        from app.services.notebook_sharing import NotebookTooLargeToCopyError
+        try:
+            principal = session_audit_principal(user)
+            return sharing.copy_notebook(
+                nb_id, new_owner_id=principal.identity_id,
+                actor_label=principal.audit_label,
+            )
+        except NotebookTooLargeToCopyError:
+            # If ingestion pushed the notebook past the limit after the pre-check
+            # above, copy_notebook's atomic within_copy_row_limit() bound (checked on
+            # the snapshot's own connection) refuses the copy — map that to the
+            # documented 409, not a 500.
+            raise HTTPException(status_code=409, detail="notebook too large to copy")
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Shared notebook not found")
 
 
 @router.post("/shared/{token}/join", response_model=NotebookSummary)
@@ -346,9 +363,14 @@ def join_shared_route(token: str, user: UserProfile = Depends(get_current_user))
     nb_id = sharing.find_notebook_by_share_token(token)
     if nb_id is None:
         raise HTTPException(status_code=404, detail="Shared notebook not found")
-    if sharing.notebook_copy_stats(nb_id)["copyable"]:
-        raise HTTPException(status_code=400, detail="small notebook — use copy, not join")
-    return sharing.join_shared(nb_id, user.id)
+    # codex #659 R11 P1: same TOCTOU race as the two routes above — map a
+    # race-induced KeyError to 404 instead of a bare 500.
+    try:
+        if sharing.notebook_copy_stats(nb_id)["copyable"]:
+            raise HTTPException(status_code=400, detail="small notebook — use copy, not join")
+        return sharing.join_shared(nb_id, user.id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Shared notebook not found")
 
 
 @router.delete("/notebooks/{notebook_id}/membership", status_code=204)
