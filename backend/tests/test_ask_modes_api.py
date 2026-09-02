@@ -86,7 +86,7 @@ def test_chunk_mode_streams_start_then_final(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("selected", ["chunk", "reasoning"])
-def test_auto_mode_is_resolved_by_backend_before_durable_job(
+def test_auto_mode_is_routed_by_backend_and_freezes_the_default_effort(
     tmp_path, monkeypatch, selected
 ):
     import json
@@ -141,27 +141,99 @@ def test_auto_mode_is_resolved_by_backend_before_durable_job(
     assert events[-1]["response"]["mode"] == selected
 
 
-def test_auto_mode_stream_close_cancels_inflight_classifier(monkeypatch):
+def test_auto_mode_job_is_durable_before_the_classifier_runs(tmp_path, monkeypatch):
+    """auto 模式的会话 + job 必须在引擎选择之前就持久化。
+
+    以前 `_stream_auto_ask_events` 先在路由层跑分类模型、再 begin_durable_job:
+    这几秒里刷新/关标签/导航断连,问题就整个丢了。现在选择引擎在 detached worker
+    内进行——分类器被调用时,该 notebook 已经有了这次提问的会话,`started` 已经
+    排在交付队列最前面。
+    """
+    import json
+    from app.api.ask_routes import repository
+    from app.models.ask import QueryIntentContract
+    from app.models.schemas import AskResponse
+
+    client = _client(tmp_path, monkeypatch)
+    nb = client.post("/api/notebooks", json={"name": "nb"}).json()["id"]
+    repo = repository()
+    seed_ask_evidence(repo, nb)
+    observed = {}
+
+    def preview_auto_intent(
+        notebook_id, question, history="", cancel_event=None
+    ):
+        # 分类器跑的时候会话已经存在、job 行已在跑(mode 暂为 auto)。
+        conversations = repo.list_conversations(notebook_id)
+        observed["conversations"] = [c.id for c in conversations]
+        observed["cancel_event"] = cancel_event
+        return QueryIntentContract(
+            objective=question, resolved_question=question, intent_type="explain",
+        )
+
+    monkeypatch.setattr(repo, "preview_reasoning_intent", preview_auto_intent)
+    service = repo._runtime.ask_service()
+    seen = {}
+
+    def fake_ask(notebook_id, payload, **kwargs):
+        seen["mode"] = payload.mode
+        seen["job_id"] = kwargs["job_id"]
+        seen["job_mode"] = repo._runtime.ask_state.ask_job_status(kwargs["job_id"])["mode"]
+        # The routed payload must carry the durable conversation id that
+        # begin_durable_job wrote onto the original payload — otherwise the
+        # answer would land in a second, freshly created conversation.
+        seen["conversation_id"] = payload.conversation_id
+        return AskResponse(
+            conclusion="routed",
+            conversation_id=payload.conversation_id or "",
+            mode=payload.mode,
+        )
+
+    monkeypatch.setattr(service, "ask", fake_ask, raising=False)
+    response = client.post(
+        f"/api/notebooks/{nb}/ask/stream",
+        json={"question": "解释一下建立时间", "mode": "auto"},
+    )
+
+    assert response.status_code == 200
+    events = [json.loads(line) for line in response.text.splitlines() if line.strip()]
+    assert events[0]["event"] == "started"
+    assert observed["conversations"] == [events[0]["conversation_id"]]
+    assert observed["cancel_event"] is not None
+    # 合成 start 步报告的是选定后的引擎,job 行的 mode 也已经改写。
+    assert events[1]["step"]["detail"]["mode"] == "chunk"
+    assert seen["mode"] == "chunk"
+    assert seen["job_mode"] == "chunk"
+    assert seen["conversation_id"] == events[0]["conversation_id"]
+    assert events[-1]["response"]["mode"] == "chunk"
+    # update_job_mode only ever touches a still-running row: the finished job
+    # keeps the engine that answered even if a late call tried to rewrite it.
+    ask_state = repo._runtime.ask_state
+    ask_state.update_job_mode(seen["job_id"], "reasoning")
+    assert ask_state.ask_job_status(seen["job_id"])["mode"] == "chunk"
+
+
+def test_auto_mode_stream_close_does_not_cancel_the_classifier(monkeypatch):
+    """断连不等于取消:选择引擎已在 detached worker 内,客户端关流只停止交付。"""
     import asyncio
-    import threading
+    import queue
 
     from app.api import ask_routes
     from app.models.ask import AskRequest
-    from app.services.cancellation import AskCancelled
 
-    started = threading.Event()
-    stopped = threading.Event()
     seen = {}
 
     class _Repo:
-        def preview_reasoning_intent(
-            self, notebook_id, question, history="", cancel_event=None
-        ):
-            seen["cancel_event"] = cancel_event
-            started.set()
-            cancel_event.wait(timeout=1)
-            stopped.set()
-            raise AskCancelled()
+        def current_user(self):
+            from types import SimpleNamespace
+            return SimpleNamespace(id="user-1")
+
+        def start_ask_stream(self, notebook_id, payload, mode, *, user_id, resolve=None):
+            seen["mode"] = mode
+            seen["resolve"] = resolve
+            events = queue.Queue()
+            events.put({"event": "started", "job_id": "job-1", "conversation_id": "conv-1"})
+            return events
 
     class _Request:
         async def is_disconnected(self):
@@ -178,13 +250,15 @@ def test_auto_mode_stream_close_cancels_inflight_classifier(monkeypatch):
             _Request(),
             scope_receipt=None,
         )
-        await anext(stream)
-        assert started.is_set()
+        first = await anext(stream)
+        assert '"started"' in first
         await stream.aclose()
 
     asyncio.run(run())
-    assert seen["cancel_event"].is_set()
-    assert stopped.wait(timeout=1)
+    # 路由层不再自己跑分类器:mode 未定(None),选择逻辑作为 resolve 交给编排器;
+    # 关流只是停止消费队列,不碰任何 cancel event。
+    assert seen["mode"] is None
+    assert callable(seen["resolve"])
 
 
 def test_ask_stream_runs_through_the_runtime_ask_service(tmp_path, monkeypatch):

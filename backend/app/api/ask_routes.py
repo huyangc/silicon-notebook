@@ -824,7 +824,11 @@ async def _stream_ask_events(
     request: Request,
     *,
     scope_receipt: RetrievalScopeReceipt | None = None,
+    resolve=None,
 ):
+    # ``resolve`` (auto mode): engine selection runs inside the detached worker
+    # AFTER the durable job exists and ``started`` is queued, so leaving the page
+    # during selection can no longer lose the question (see the coordinator).
     # Task 23: 执行编排(begin→register→started→合成 start→copy_context worker→
     # trace 持久化 fail-open→finish→unregister→空会话清理→终态事件→哨兵)整体在
     # runtime-owned AskExecutionCoordinator;本函数保留冻结签名,只剩启动编排、
@@ -849,9 +853,12 @@ async def _stream_ask_events(
         # 调用面扫描(按字面 ``repo.start_ask_stream(...)`` 调用形态识别)仍能
         # 认出这个调用点——纯按引用传参会让它从「被调用」变成「被引用」。
         def _start_ask_stream():
+            # ``resolve`` only travels on the auto-mode path, so resolved-mode
+            # callers (and their narrow test doubles) keep the frozen call shape.
             return repo.start_ask_stream(
                 notebook_id, payload, spec,
                 user_id=repo.current_user().id,
+                **({"resolve": resolve} if resolve is not None else {}),
             )
 
         events = await asyncio.to_thread(_start_ask_stream)
@@ -889,51 +896,34 @@ async def _stream_auto_ask_events(
     *,
     scope_receipt: RetrievalScopeReceipt,
 ):
-    """Keep the transport alive while the backend selects the Ask engine."""
-    cancel_event = threading.Event()
-    task = asyncio.create_task(asyncio.to_thread(
-        _resolve_auto_ask_request,
-        repo,
-        notebook_id,
-        payload,
-        history,
-        cancel_event,
-    ))
-    last_delivery = monotonic()
-    task_observed = False
-    try:
-        while not task.done():
-            await asyncio.wait({task}, timeout=0.05)
-            if task.done():
-                break
-            if await request.is_disconnected():
-                return
-            now = monotonic()
-            if now - last_delivery >= ASK_STREAM_HEARTBEAT_SECONDS:
-                yield "\n"
-                last_delivery = now
-        task_observed = True
-        routed_payload, spec = task.result()
-    except asyncio.CancelledError:
-        raise
-    except AskCancelled:
-        return
-    finally:
-        if not task.done():
-            cancel_event.set()
-        if not task_observed:
-            task.add_done_callback(
-                lambda done: None if done.cancelled() else done.exception()
-            )
+    """Automatic mode: the durable job comes FIRST, engine selection second.
 
-    _validate_confirmed_reasoning_intent(routed_payload, spec)
+    Engine selection is a model call that can take seconds. It used to run
+    here, before any durable state existed, so a refresh, a closed tab or a
+    navigation-triggered disconnect during that window lost the question
+    entirely. Now the coordinator begins the job under the request-only
+    ``auto`` id and queues ``started`` immediately; ``resolve`` runs inside the
+    detached worker (same copied request context), then the resolved engine is
+    recorded on the job row and executed. A transport disconnect therefore
+    behaves exactly like every other detached Ask — the job runs to completion
+    — and only the explicit cancel endpoint (via the cancel event ``resolve``
+    is handed) aborts selection.
+    """
+    def resolve(cancel_event: threading.Event):
+        routed_payload, spec = _resolve_auto_ask_request(
+            repo, notebook_id, payload, history, cancel_event,
+        )
+        _validate_confirmed_reasoning_intent(routed_payload, spec)
+        return routed_payload, spec
+
     async for line in _stream_ask_events(
         repo,
         notebook_id,
-        routed_payload,
-        spec,
+        payload,
+        None,
         request,
         scope_receipt=scope_receipt,
+        resolve=resolve,
     ):
         yield line
 

@@ -272,6 +272,18 @@ class AskStateStore:
                  question, payload.asked_at, now, now))
         return job_id, conversation_id
 
+    def update_job_mode(self, job_id: str, mode: str) -> None:
+        """Record the engine an automatic-mode job resolved to. The job row is
+        begun under the request-only ``auto`` id so ``started`` can be delivered
+        before engine selection; once selected, the resolved id replaces it so
+        per-mode consumers (e.g. the reasoning-run experience sample) see the
+        engine that actually answered. Only a still-running row is touched."""
+        with self.database.write() as db:
+            db.execute(
+                "UPDATE ask_jobs SET mode=?, updated_at=? WHERE id=? AND status='running'",
+                (mode, self.seams.now(), job_id),
+            )
+
     def finish_job(
         self,
         job_id: str,

@@ -227,8 +227,8 @@ source 状态沿 `queued → parsing → parsed → extracting → extracted` �
 
 ```text
 stream start
-  → started {job_id}
-  → detached worker 执行 chunk / reasoning
+  → started {job_id}            （auto 模式亦然：job 先以 auto 建立）
+  → detached worker（auto：先选引擎、写回 ask_jobs.mode）执行 chunk / reasoning
   → progress / trace 事件尽力推送给当前客户端
   → worker 正常完成并保存 answer，job=done
 

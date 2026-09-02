@@ -220,6 +220,7 @@ def test_submit_keeps_job_active_until_pending_notification_finishes(
         ("knowhow-asset-sweep:nb-private123", "knowhow-asset-sweep"),
         ("index-pipeline-nb-private123", "index-pipeline"),
         ("ask-reasoning", "ask-reasoning"),
+        ("ask-auto", "ask-auto"),
     ],
 )
 def test_submit_separates_thread_name_from_safe_diagnostic_operation(

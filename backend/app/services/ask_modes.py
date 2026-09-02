@@ -28,8 +28,12 @@ ASK_MODES: dict[str, AskMode] = {
 
 DEFAULT_MODE = "chunk"
 # Request-only selector used by the simplified UI.  It is intentionally not a
-# registry entry or user-facing engine: the backend resolves it to one of the
-# two stable built-ins before a durable Ask job is created.
+# registry entry or user-facing engine, so ``resolve_mode("auto")`` raises.  The
+# backend resolves it to one of the two stable built-ins: the synchronous /ask
+# path before its durable job exists, the streaming path INSIDE the detached
+# worker — there the ``ask_jobs.mode`` row temporarily carries "auto" until
+# selection finishes (and keeps it if the job fails/cancels before that), so
+# never feed a job row's mode straight into ``resolve_mode``.
 AUTO_MODE = "auto"
 
 # 退役但曾合法的 mode id → 映射 chunk(保旧会话/书签持久化的 mode 不 422)。

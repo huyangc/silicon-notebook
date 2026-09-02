@@ -858,7 +858,12 @@ def _call_line(func, callee: str) -> int:
 
 
 def test_reasoning_submission_is_validated_before_a_durable_job_exists():
-    """两条 Ask 路径都必须在发布持久 job 之前校验提交。
+    """两条 resolved-mode Ask 路径都必须在发布持久 job 之前校验提交。
+
+    auto 模式的流式路径是刻意的例外:job 先以 ``auto`` 建立、``started`` 先发,
+    引擎选择与校验在 detached worker 内进行,校验失败走 failed + 空会话清理
+    (test_ask_execution_coordinator.py 钉那条);这里 ``_call_line`` 取首个
+    ``validate`` 调用,钉的是顶层 resolved-mode 分支的次序。
 
     以前包着它的路由预检(_validate_reasoning_scope_preflight)随模型判断来源
     一起删了——那道预检唯一的工作就是把模型选中的来源集与勾选上限取交集。

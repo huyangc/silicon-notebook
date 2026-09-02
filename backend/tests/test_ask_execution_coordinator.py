@@ -7,7 +7,9 @@ Frozen baseline sequence (routes._stream_ask_events before the move):
   begin durable job in ONE transaction (payload.conversation_id mutated in
   that transaction body — the coordinator observes the returned value and
   never mutates a second time) → register cancel event → emit started →
-  emit the synthetic start step WITHOUT persistence → submit the worker
+  emit the synthetic start step WITHOUT persistence (auto mode: job begun as
+  ``auto``, the step moves inside the worker after ``resolve`` selects the
+  engine — see the auto-mode section below) → submit the worker
   through the copied-context job helper → per real trace: persist first,
   fail-open (log and still deliver) → the engine saves the answer → finish job
   transaction → unregister cancel event → (failed/cancelled) empty-
@@ -68,6 +70,9 @@ class RecordingAskState:
     def save_answer(self, notebook_id, conversation_id, question, response, user_id):
         self.calls.append(("answer", conversation_id))
         return "ans-t23"
+
+    def update_job_mode(self, job_id, mode):
+        self.calls.append(("mode", job_id, mode))
 
     def finish_job(self, job_id, status, *, answer_id="", error=""):
         self.calls.append(("finish", status, answer_id, error))
@@ -215,6 +220,135 @@ def test_synthetic_start_is_emitted_but_never_persisted():
     assert any(e["event"] == "progress" and e["step"]["step_type"] == "start"
                for e in delivered)
     assert not any(c[0] == "trace" for c in calls)   # 合成 start 绝不进 ask_trace_steps
+
+
+# ---------------------------------------------------------------------------
+# auto mode: durable job + started FIRST, engine selection inside the worker
+# ---------------------------------------------------------------------------
+
+def test_auto_mode_begins_the_job_and_queues_started_before_resolving_the_engine():
+    calls = []
+    order = []
+
+    def resolve(cancel_event):
+        order.append(("resolve", list(calls)))
+        assert isinstance(cancel_event, threading.Event)
+        return AskRequest(question="Q?", mode="chunk", conversation_id="conv-t23"), ASK_MODES["chunk"]
+
+    def runner(notebook_id, payload, cancel_event=None):
+        assert payload.mode == "chunk"
+        return _response()
+
+    coordinator = _coordinator(RecordingAskState(calls), runner=runner)
+    events = coordinator.start(
+        "nb-1", AskRequest(question="Q?", mode="auto"), None,
+        user_id="user-t23", resolve=resolve)
+    delivered = _drain(events)
+
+    # The job row exists (under the request-only auto id) before resolve runs.
+    assert order[0][1][0] == ("begin", "nb-1", "auto", "user-t23")
+    assert ("mode", "askjob-t23", "chunk") in calls
+    assert calls.index(("mode", "askjob-t23", "chunk")) < calls.index(("finish", "done", "ans-t23", ""))
+    # started is first; the synthetic start step reports the RESOLVED engine.
+    assert delivered[0]["event"] == "started"
+    assert delivered[1]["step"]["step_type"] == "start"
+    assert delivered[1]["step"]["detail"] == {"mode": "chunk"}
+    assert delivered[-1]["event"] == "final"
+    # The synthetic start step is delivery-only in auto mode as well: persisting
+    # it would make a reconnect replay one step longer than the live stream.
+    assert not any(c[0] == "trace" for c in calls)
+
+
+def test_auto_mode_validates_the_resolved_submission_inside_the_worker():
+    calls = []
+    seen = []
+
+    class ValidatingService(FakeAskService):
+        def validate_reasoning_submission(self, notebook_id, payload):
+            seen.append(payload.mode)
+
+    def resolve(cancel_event):
+        return AskRequest(question="Q?", mode="reasoning", conversation_id="conv-t23"), ASK_MODES["reasoning"]
+
+    service = ValidatingService(lambda *a, **k: _response())
+    coordinator = AskExecutionCoordinator(
+        ask_state=RecordingAskState(calls),
+        cancellations=AskCancellationRegistry(),
+        job_submitter=InlineSubmitter(),
+        event_log=_event_log(),
+        ask=lambda: service,
+    )
+    _drain(coordinator.start(
+        "nb-1", AskRequest(question="Q?", mode="auto"), None,
+        user_id="user-t23", resolve=resolve))
+    # Not validated as "auto" before begin (payload unknown yet); validated once
+    # with the routed payload inside the worker.
+    assert seen == ["reasoning"]
+
+
+def test_explicit_cancel_during_engine_selection_cancels_the_job():
+    calls = []
+    registry = AskCancellationRegistry()
+
+    def resolve(cancel_event):
+        # The explicit cancel endpoint sets the registered event while the
+        # classifier is still running; selection must observe it.
+        assert registry.cancel("askjob-t23")
+        raise_if_cancelled(cancel_event)
+        raise AssertionError("cancellation was not observed")
+
+    coordinator = _coordinator(
+        RecordingAskState(calls), registry=registry,
+        runner=lambda *a, **k: _response())
+    delivered = _drain(coordinator.start(
+        "nb-1", AskRequest(question="Q?", mode="auto"), None,
+        user_id="user-t23", resolve=resolve))
+    assert delivered[0]["event"] == "started"
+    assert delivered[-1] == {"event": "cancelled"}
+    assert ("finish", "cancelled", "", "") in calls
+    assert ("cleanup", "conv-t23") in calls
+    assert registry.get("askjob-t23") is None
+
+
+def test_engine_selection_failure_fails_the_durable_job():
+    calls = []
+
+    def resolve(cancel_event):
+        raise RuntimeError("classifier down")
+
+    coordinator = _coordinator(RecordingAskState(calls), runner=lambda *a, **k: _response())
+    delivered = _drain(coordinator.start(
+        "nb-1", AskRequest(question="Q?", mode="auto"), None,
+        user_id="user-t23", resolve=resolve))
+    assert delivered[0]["event"] == "started"
+    assert delivered[-1] == {"event": "error", "error": "RuntimeError: classifier down"}
+    assert ("finish", "failed", "", "RuntimeError: classifier down") in calls
+    assert ("cleanup", "conv-t23") in calls
+
+
+def test_job_mode_update_failure_is_fail_open():
+    calls = []
+    logger = _RecordingLogger()
+
+    class FlakyModeState(RecordingAskState):
+        def update_job_mode(self, job_id, mode):
+            raise RuntimeError("mode column locked")
+
+    def resolve(cancel_event):
+        return AskRequest(question="Q?", mode="chunk", conversation_id="conv-t23"), ASK_MODES["chunk"]
+
+    coordinator = _coordinator(FlakyModeState(calls), logger=logger, runner=lambda *a, **k: _response())
+    delivered = _drain(coordinator.start(
+        "nb-1", AskRequest(question="Q?", mode="auto"), None,
+        user_id="user-t23", resolve=resolve))
+    assert delivered[-1]["event"] == "final"
+    assert any("update_job_mode failed" in m for m in logger.exceptions)
+
+
+def test_start_requires_a_mode_or_a_resolver():
+    coordinator = _coordinator(RecordingAskState([]), runner=lambda *a, **k: _response())
+    with pytest.raises(ValueError):
+        coordinator.start("nb-1", AskRequest(question="Q?", mode="auto"), None, user_id="u")
 
 
 def test_begin_mutates_payload_in_place_and_coordinator_never_mutates_again():

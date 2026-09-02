@@ -225,6 +225,15 @@ class AskStateStore:
                  question, payload.asked_at, jsonb([]), now, now))
         return job_id, conversation_id
 
+    def update_job_mode(self, job_id: str, mode: str) -> None:
+        """Record the engine an automatic-mode job resolved to (see the SQLite
+        store for the contract). Only a still-running row is touched."""
+        with self.database.write() as db:
+            db.execute(
+                "UPDATE ask_jobs SET mode=%s, updated_at=%s WHERE id=%s AND status='running'",
+                (mode, normalize_timestamp(self.seams.now()), job_id),
+            )
+
     def finish_job(
         self,
         job_id: str,
