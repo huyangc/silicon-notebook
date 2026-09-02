@@ -1006,6 +1006,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       baseScope: copyBaseScope(policyRef.current.baseScope),
     },
     effort?: AskRetrievalEffortId,
+    serial?: number,
   ): Promise<boolean> {
     const owner = currentNotebookOwner();
     if (!owner || asking || sessionLoading) return false;
@@ -1032,6 +1033,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       scopeSnapshot,
       effort ?? (currentPolicy.advanced ? retrievalEffort : DEFAULT_ASK_RETRIEVAL_EFFORT),
       conversationIdRef.current,
+      serial,
     );
   }
 
@@ -1052,12 +1054,15 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     scopeSnapshot: { sourceScope: SourceScopePayload; baseScope: BaseScopePayload },
     effort: AskRetrievalEffortId,
     conversationIdAtStart: string | null,
+    // A run handed over from an intent preview keeps that preview's submission
+    // order, so an older question finishing late never outranks a newer one.
+    serial: number = ++runSerialRef.current,
   ): Promise<boolean> {
     let startedConversationId = conversationIdAtStart;
     const controller = new AbortController();
     const run: AskRunRecord = {
       key: ownerKey(runOwner),
-      serial: ++runSerialRef.current,
+      serial,
       owner: runOwner,
       cancelRequested: false,
       notebookId: runOwner.notebookId,
@@ -1172,9 +1177,13 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       setConversationId(response.conversation_id);
     } catch (error) {
       if (!ownsRun()) {
-        // Failed while nobody was looking (not a Stop): keep the record so the
-        // next restore of this notebook reports it and returns the question.
-        if (!isAbortError(error) && !run.cancelRequested) run.failure = error;
+        // Failed before `started` while nobody was looking (not a Stop): the
+        // question exists nowhere else, so keep the record for the next restore
+        // to report it and hand the question back. After `started` a transport
+        // failure says nothing about the durable job — history/reconnect own it.
+        if (!isAbortError(error) && !run.cancelRequested && run.jobId === null) {
+          run.failure = error;
+        }
         const currentOwner = ownerRef.current;
         if (sameNotebookIdentity(currentOwner, runOwner) && currentOwner) {
           await loadSessionsFor(currentOwner).catch(() => {});
@@ -1326,6 +1335,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
           run.scopeSnapshot,
           run.retrievalEffort,
           run.conversationIdAtStart,
+          run.serial,
         );
         return;
       }
@@ -1341,6 +1351,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
         run.askedAt,
         run.scopeSnapshot,
         run.retrievalEffort,
+        run.serial,
       );
       if (releaseIntentDraft(run.draftToken) && !started) {
         setQuestion(run.question);
@@ -1426,6 +1437,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
         review.askedAt,
         scopeSnapshot,
         run?.retrievalEffort,
+        run?.serial,
       );
       if (releaseIntentDraft(draftToken) && !started) {
         setQuestion(review.question);
