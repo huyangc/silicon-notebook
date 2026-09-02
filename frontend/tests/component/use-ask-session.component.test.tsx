@@ -2484,7 +2484,7 @@ test("a run whose restored detail is already terminal is not re-attached and doe
 // codex #661 r1 P2: a pre-`started` run that started and finished while the
 // restore was still loading detail vanished from the records, so the restore
 // neither attached it nor showed its answer.
-test("a run that completes during restoration is re-resolved from history instead of leaving the view blank", async () => {
+test("a run that completes during restoration is projected from its final response instead of leaving the view blank", async () => {
   const stream = deferred<AskResponse>();
   let onStart: ((jobId: string, conversationId: string) => void | Promise<void>) | undefined;
   api.runAskStream.mockImplementation((
@@ -2555,9 +2555,15 @@ test("a run that completes during restoration is re-resolved from history instea
     await restoring;
     value!.finishNotebookTransition(owner);
   });
-  expect(api.getConversation).toHaveBeenCalledTimes(3);
+  // The settled run's own final response is projected — the restore itself adds
+  // no further detail read (the two extra list reads are the run's own
+  // started/final history refreshes, not the restore's).
+  expect(api.getConversation).toHaveBeenCalledTimes(2);
+  expect(api.listConversations).toHaveBeenCalledTimes(4);
   expect(value!.asking).toBe(false);
+  expect(value!.conversationId).toBe("conversation-x");
   expect(value!.turns.map((turn) => turn.question)).toEqual(["question-conversation-x", "follow-up"]);
+  expect(value!.turns[1]?.response.answer_id).toBe("answer-follow-up");
 });
 
 // codex #661 r2 P2: a durable run handed over from an older intent preview must
@@ -2796,7 +2802,7 @@ test("an older detached run is not attached when the newest one settles during r
     await restoring;
     value!.finishNotebookTransition(owner);
   });
-  expect(api.getConversation).toHaveBeenCalledTimes(3);
+  expect(api.getConversation).toHaveBeenCalledTimes(2);
   expect(value!.conversationId).toBe("conversation-x");
   expect(value!.turns.map((turn) => turn.question)).toEqual(["question-conversation-x", "question B"]);
   expect(value!.asking).toBe(false);
@@ -2811,6 +2817,41 @@ test("an older detached run is not attached when the newest one settles during r
   await act(async () => submittingA);
   expect(value!.conversationId).toBe("conversation-x");
   expect(value!.turns).toHaveLength(2);
+});
+
+// codex #661 r5 P2: the notebook transition resets the engine/effort controls;
+// re-attaching a run must restore the selection it was submitted with.
+test("re-attaching a run restores its engine and retrieval effort for follow-ups", async () => {
+  const stream = deferred<AskResponse>();
+  api.runAskStream.mockReturnValue(stream.promise);
+  api.listConversations.mockResolvedValue([]);
+  render(<Harness />);
+  const first = beginOwnedNotebook();
+  await act(async () => {
+    await value!.restoreNotebook(first);
+  });
+  act(() => value!.selectRetrievalEffort("exhaustive"));
+
+  let submitting!: Promise<void>;
+  act(() => {
+    submitting = value!.submit("budgeted question");
+  });
+  expect((api.runAskStream.mock.calls[0]?.[1] as { retrieval_effort: string }).retrieval_effort).toBe("exhaustive");
+  act(() => value!.leaveWorkspace());
+
+  const owner = beginOwnedNotebook(2);
+  await act(async () => {
+    await value!.restoreNotebook(owner);
+    value!.finishNotebookTransition(owner);
+  });
+  expect(value!.asking).toBe(true);
+  expect(value!.mode).toBe("chunk");
+  expect(value!.retrievalEffort).toBe("exhaustive");
+
+  stream.resolve(answer("conversation-budgeted"));
+  await act(async () => submitting);
+  expect(value!.retrievalEffort).toBe("exhaustive");
+  expect(value!.turns.map((turn) => turn.question)).toEqual(["budgeted question"]);
 });
 
 // PR #557 regression: `turns`/`sessions`/`pendingTrace`/`feedbackSent` used to
