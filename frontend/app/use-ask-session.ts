@@ -1112,14 +1112,26 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       // pending clarification, even the run this very click just detached)
       // comes back with the session — the detail alone cannot show it.
       const selection = selectDetachedWork(owner, id);
-      const applied = await applySessionDetail(id, owner);
-      if (applied && sameViewOwner(ownerRef.current, owner)) {
-        applyDetachedWork(owner, selection, true, id);
+      let applied = false;
+      let failure: unknown = null;
+      try {
+        applied = await applySessionDetail(id, owner);
+      } catch (error) {
+        failure = error;
       }
+      if (!sameViewOwner(ownerRef.current, owner)) return false;
+      if (applied) {
+        applyDetachedWork(owner, selection, true, id);
+      } else if (failure !== null && selection.selected) {
+        // The detail read failed but this view already owns the session: the
+        // live local run is the best state it has. Its transcript is unknown,
+        // so the pending turn stands alone rather than over another session's.
+        turnsRef.current = [];
+        setTurns([]);
+        applyDetachedWork(owner, selection, false, id);
+      }
+      if (failure !== null) throw failure;
       return applied;
-    } catch (error) {
-      if (sameViewOwner(ownerRef.current, owner)) throw error;
-      return false;
     } finally {
       if (sameViewOwner(ownerRef.current, owner)) setSessionLoading(false);
     }
