@@ -131,18 +131,25 @@ _FILES_PAGE_SIZE = 500
 # where a row still demonstrably exists is treated as a loud failure, not a
 # silent short-circuit onto the next table.
 _FORM_TWO_MAX_STALLED_ROUNDS = 3
-# codex #659 round 8 P1: the only two `delete_<chain>_page` store methods
-# whose OWN body commits more than one sub-batch per call (each read-only-
-# parent chain's `_drain_children_by_parent_ids` helper, ctid/rowid-bounded,
-# each iteration its own transaction — see that helper's docstring on both
-# backends). Every OTHER chain method (`memory_items`/`knowhow_rows`/
-# `knowhow_tables`/`indexing_pipeline_stages`) is a single transaction start
-# to finish, so a lease/claim lost mid-call either never lands a write at
-# all (rolled back with the rest of that one transaction) or has already
-# committed everything atomically — neither needs a `batch_ok` gate. Only
-# these two get the extra keyword forwarded; every other chain name is
-# called exactly as before this fix.
-_CHAINS_WITH_INTERNAL_SUB_BATCHES = frozenset({"source_elements", "ask_trace_steps"})
+# codex #659 round 8 P1 (+ round 9 P2): the `delete_<chain>_page` store
+# methods whose OWN body commits more than one sub-batch per call:
+#   - the two read-only-parent chains' shared `_drain_children_by_parent_ids`
+#     helper (ctid/rowid-bounded, each iteration its own transaction — see
+#     that helper's docstring on both backends);
+#   - `knowhow_tables` (round 9 P2): a page of up to 500 tables' combined
+#     `knowhow_columns`/`knowhow_changes`/`knowhow_milestones` rows is itself
+#     unbounded even though each individual table's own count is small — the
+#     same fix, reusing the same helper per child table.
+# Every OTHER chain method (`memory_items`/`knowhow_rows`/
+# `indexing_pipeline_stages`) is a single transaction start to finish, so a
+# lease/claim lost mid-call either never lands a write at all (rolled back
+# with the rest of that one transaction) or has already committed everything
+# atomically — neither needs a `batch_ok` gate. Only the three named here get
+# the extra keyword forwarded; every other chain name is called exactly as
+# before this fix.
+_CHAINS_WITH_INTERNAL_SUB_BATCHES = frozenset(
+    {"source_elements", "ask_trace_steps", "knowhow_tables"}
+)
 # §T-3.3: initial 5s backoff, doubling to a 60s cap.
 _QUIESCE_BACKOFF_INITIAL_SECONDS = 5.0
 _QUIESCE_BACKOFF_MAX_SECONDS = 60.0
@@ -828,11 +835,13 @@ class NotebookDeleteJobRunner:
         since a parent with zero children is a legitimate, non-terminal
         state — see those methods' own docstrings on the port).
 
-        codex #659 round 8 P1: the two read-only-parent chains' page methods
-        can themselves commit many independent sub-batches for one page
-        (``_drain_children_by_parent_ids``) — this loop's own ``_batch_ok``
-        check above only covers the instant right before ``method(...)`` is
-        called, never what happens INSIDE it. For those two chains only
+        codex #659 round 8 P1 (+ round 9 P2): some chains' page methods can
+        themselves commit many independent sub-batches for one page (the two
+        read-only-parent chains' shared ``_drain_children_by_parent_ids``
+        helper; ``knowhow_tables``' own three child tables reusing the same
+        helper per child) — this loop's own ``_batch_ok`` check above only
+        covers the instant right before ``method(...)`` is called, never
+        what happens INSIDE it. For exactly those chains
         (``_CHAINS_WITH_INTERNAL_SUB_BATCHES``), a ``batch_ok`` gate closure
         is threaded down so every sub-batch commit gets the SAME per-batch
         ownership check every other destructive step already gets, plus a

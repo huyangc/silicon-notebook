@@ -1171,14 +1171,25 @@ class NotebookDeleteJobStorePort(Protocol):
         ...
     def delete_knowhow_tables_page(
         self, notebook_id: str, cursor: str, limit: int,
+        *, batch_ok: Callable[[], bool] | None = None,
     ) -> tuple[int, str | None]:
         """B 类 knowhow 链，表维度一页——跑在 ``delete_knowhow_rows_page``
-        清空之后（此时 rows/cells 早已不剩，本方法不再触碰它们）：同事务内
-        取一页 ``knowhow_tables.id`` → 删 ``knowhow_columns``/
-        ``knowhow_changes``/``knowhow_milestones``（按 table_id ∈ 本页，
-        fanout 上界是「本页表数 × 每表的列/变更/里程碑数」，同量级的小表，
-        不需要再拆）→ 最后删本页 ``knowhow_tables``。返回 ``(本页 table 数,
-        最后一个 table id 或 None)``。"""
+        清空之后（此时 rows/cells 早已不剩，本方法不再触碰它们；**结构性
+        前提**：这个先后次序由 ``notebook_delete_tables.py`` 的 ``_CHAINS``
+        元组固定顺序保证，未在本方法运行时复核，见该文件对 ``_CHAINS`` 的
+        完整注释）：只读取一页 ``knowhow_tables.id``（独立只读连接）→ 逐张
+        子表用 ``_drain_children_by_parent_ids``（``batch_ok`` 门控，每个
+        子批各自独立提交、≤ ``_CHILD_BATCH_SIZE`` 行）限界排水
+        ``knowhow_columns``/``knowhow_changes``/``knowhow_milestones``——
+        codex #659 round 9 P2：一页最多 500 张表的三张子表**合计**行数才是
+        真正无界的维度（单表虽小，500 张表乘起来仍可能撞 PG
+        statement_timeout / 长占 SQLite 写锁），不能再当"同量级小表"一次性
+        单事务删完 → 三张子表全部排空之后，才单独开一个事务删本页
+        ``knowhow_tables`` 行本身。若某张子表排水中途被 ``batch_ok`` 叫停，
+        返回 ``(len(table_ids), None)``——count 非零（不让调用方误判「链已
+        排空」），``last=None`` 让调用方的游标不前进，父表行本身不删。
+        ``None``（既有调用方/测试）保持本方法在本参数存在之前的行为逐字
+        不变。返回 ``(本页 table 数, 最后一个 table id 或 None)``。"""
         ...
     def delete_indexing_pipeline_stages_page(
         self, notebook_id: str, cursor: str, limit: int,

@@ -174,7 +174,14 @@ def test_every_chain_method_issues_an_explicit_delete_for_its_full_child_set():
     仍然全绿——因为这五张表全部有到其父表的 ``ON DELETE CASCADE`` FK，父表
     被删时会把它们一并级联清空，行为级测试对「显式删了」和「反正会被级联
     捎带」没有区分度。这里直接检查每个 chain 方法的源码，确保这五条显式
-    DELETE 语句都还在——结构性测试，不依赖最终状态。"""
+    DELETE 语句都还在——结构性测试，不依赖最终状态。
+
+    codex #659 round 9 P2：``delete_knowhow_tables_page`` 不再自己拼字面量
+    ``DELETE FROM knowhow_milestones``——三张子表的删除都委托给通用的
+    ``_drain_children_by_parent_ids(child_table, ...)``，表名以字符串字面量
+    的身份出现在传给它的 tuple 里，不是 ``f"FROM {table}"`` 这个具体形状。
+    这个方法改查字面量表名本身（同样能钉住「有人把 knowhow_milestones 从
+    tuple 里删掉」这个回归），其余仍走原来那套 ``FROM {table}`` 形状的检查。"""
     import inspect
 
     from app.repositories.postgres.notebook_delete_job_store import (
@@ -186,7 +193,6 @@ def test_every_chain_method_issues_an_explicit_delete_for_its_full_child_set():
 
     expectations = {
         "delete_knowhow_rows_page": ("knowhow_cell_code",),
-        "delete_knowhow_tables_page": ("knowhow_milestones",),
         "delete_memory_items_page": ("memory_revisions",),
         "delete_indexing_pipeline_stages_page": (
             "indexing_pipeline_stages", "indexing_pipeline_stage_sources",
@@ -200,6 +206,11 @@ def test_every_chain_method_issues_an_explicit_delete_for_its_full_child_set():
                     f"{store_cls.__name__}.{method_name} no longer issues an "
                     f"explicit DELETE FROM {table} (P2-d)"
                 )
+        tables_page_source = inspect.getsource(store_cls.delete_knowhow_tables_page)
+        assert '"knowhow_milestones"' in tables_page_source, (
+            f"{store_cls.__name__}.delete_knowhow_tables_page no longer "
+            "drains knowhow_milestones (P2-d / round 9 P2)"
+        )
 
 
 def test_phase3_alone_clears_knowhow_rows_and_cells_before_phase5_ever_runs(repo):
@@ -1239,3 +1250,190 @@ def test_run_chain_does_not_advance_the_cursor_when_the_sub_batch_gate_fails(rep
             "SELECT COUNT(*) AS c FROM source_elements WHERE source_id='src-1'"
         ).fetchone()
     assert 0 < remaining["c"] < 7  # partially drained, not zero, not untouched
+
+
+# ---------------------------------------------------------------------------
+# codex #659 R9 P2: delete_knowhow_tables_page deleted a page's full
+# knowhow_columns/knowhow_changes/knowhow_milestones in ONE transaction — a
+# page of up to 500 tables' COMBINED child rows is itself unbounded even
+# though each individual table's own count is small, risking PostgreSQL's
+# statement_timeout / holding SQLite's write lock for the whole page. Same
+# fix as R8: drain each child table via _drain_children_by_parent_ids
+# (batch_ok-gated), only deleting the parent knowhow_tables rows once all
+# three child tables are confirmed fully drained.
+# ---------------------------------------------------------------------------
+
+
+def _seed_knowhow_table_with_columns_and_changes(
+    repo, notebook_id, table_id, n_columns, n_changes,
+):
+    with repo._runtime.database.write() as db:
+        db.execute(
+            "INSERT INTO knowhow_tables (id,notebook_id,title,description,"
+            "mutation_seq,created_by,created_at,updated_at) VALUES "
+            "(?,?,?,?,?,?,?,?)",
+            (table_id, notebook_id, "KT", "", 0, "u1", NOW, NOW),
+        )
+        for index in range(n_columns):
+            db.execute(
+                "INSERT INTO knowhow_columns (id,table_id,name,role,position) "
+                "VALUES (?,?,?,?,?)",
+                (f"{table_id}-col{index}", table_id, f"Col{index}", "value", index),
+            )
+        for index in range(n_changes):
+            db.execute(
+                "INSERT INTO knowhow_changes (id,table_id,seq,kind,actor,origin,"
+                "payload_json,fingerprint,note,created_at) VALUES "
+                "(?,?,?,?,?,?,?,?,?,?)",
+                (
+                    f"{table_id}-chg{index}", table_id, index, "cell_edit", "u1",
+                    "user", "{}", f"fp{index}", "", NOW,
+                ),
+            )
+
+
+def test_delete_knowhow_tables_page_drains_each_child_table_in_bounded_sub_batches(
+    repo,
+):
+    """计数桩断言:1 张表、7 列、7 条 changes、批大小 3——两张子表各自
+    3+3+1=3 次 gate 调用（同 R8 的「探测式空批不问 gate」判据），
+    knowhow_milestones 空,第一次探测就命中 rowcount==0,贡献 0 次；合计
+    6 次。变异钉：把三张子表的删除折回父页单事务(去掉 gate 调用) →
+    calls 变成 []，本条报红。"""
+    _seed_user_and_notebook(repo)
+    _seed_knowhow_table_with_columns_and_changes(repo, "nb1", "kt1", 7, 7)
+    store = repo._runtime.notebook_delete_jobs
+    store._CHILD_BATCH_SIZE = 3
+
+    calls = []
+
+    def counting_gate():
+        calls.append(len(calls))
+        return True
+
+    count, last = store.delete_knowhow_tables_page(
+        "nb1", "", 500, batch_ok=counting_gate,
+    )
+    assert count == 1
+    assert last == "kt1"
+    assert len(calls) == 6
+
+    with repo._runtime.database.connect() as db:
+        assert db.execute(
+            "SELECT COUNT(*) AS c FROM knowhow_tables WHERE notebook_id='nb1'"
+        ).fetchone()["c"] == 0
+        assert db.execute(
+            "SELECT COUNT(*) AS c FROM knowhow_columns WHERE table_id='kt1'"
+        ).fetchone()["c"] == 0
+        assert db.execute(
+            "SELECT COUNT(*) AS c FROM knowhow_changes WHERE table_id='kt1'"
+        ).fetchone()["c"] == 0
+
+
+def test_delete_knowhow_tables_page_gates_none_when_never_given_one(repo):
+    """``batch_ok=None``(既有调用方/测试的默认值)必须继续一次不问地把整页
+    删完——本参数存在之前的行为逐字不变。"""
+    _seed_user_and_notebook(repo)
+    _seed_knowhow_table_with_columns_and_changes(repo, "nb1", "kt1", 7, 7)
+    store = repo._runtime.notebook_delete_jobs
+    store._CHILD_BATCH_SIZE = 3
+
+    count, last = store.delete_knowhow_tables_page("nb1", "", 500)
+    assert count == 1
+    assert last == "kt1"
+    with repo._runtime.database.connect() as db:
+        assert db.execute(
+            "SELECT COUNT(*) AS c FROM knowhow_tables WHERE notebook_id='nb1'"
+        ).fetchone()["c"] == 0
+
+
+def test_delete_knowhow_tables_page_stops_mid_drain_and_keeps_the_parent_row(
+    repo,
+):
+    """gate 中途返回 False → 排水停手,父表 ``knowhow_tables`` 行**不删**
+    （即便某张子表已经排空,只要还有别的子表没排完就不动父表行）;之后换
+    恒真 gate 重跑收敛——不依赖任何持久化的子批游标。"""
+    _seed_user_and_notebook(repo)
+    _seed_knowhow_table_with_columns_and_changes(repo, "nb1", "kt1", 7, 7)
+    store = repo._runtime.notebook_delete_jobs
+    store._CHILD_BATCH_SIZE = 3
+
+    calls = []
+
+    def fails_on_second_call():
+        calls.append(len(calls))
+        return len(calls) < 2
+
+    count, last = store.delete_knowhow_tables_page(
+        "nb1", "", 500, batch_ok=fails_on_second_call,
+    )
+    assert count == 1  # page size (nonzero), NOT "chain drained"
+    assert last is None  # caller's cursor = last or cursor is a no-op
+
+    with repo._runtime.database.connect() as db:
+        assert db.execute(
+            "SELECT COUNT(*) AS c FROM knowhow_tables WHERE notebook_id='nb1'"
+        ).fetchone()["c"] == 1  # parent row untouched
+        remaining_columns = db.execute(
+            "SELECT COUNT(*) AS c FROM knowhow_columns WHERE table_id='kt1'"
+        ).fetchone()["c"]
+    assert remaining_columns == 1  # 7 - 3 - 3 (columns' own drain stopped here)
+
+    count_again, last_again = store.delete_knowhow_tables_page(
+        "nb1", "", 500, batch_ok=lambda: True,
+    )
+    assert count_again == 1
+    assert last_again == "kt1"
+    with repo._runtime.database.connect() as db:
+        assert db.execute(
+            "SELECT COUNT(*) AS c FROM knowhow_tables WHERE notebook_id='nb1'"
+        ).fetchone()["c"] == 0
+        assert db.execute(
+            "SELECT COUNT(*) AS c FROM knowhow_columns WHERE table_id='kt1'"
+        ).fetchone()["c"] == 0
+        assert db.execute(
+            "SELECT COUNT(*) AS c FROM knowhow_changes WHERE table_id='kt1'"
+        ).fetchone()["c"] == 0
+
+
+def test_run_chain_does_not_delete_the_knowhow_table_when_the_sub_batch_gate_fails(
+    repo,
+):
+    """端到端接线:``_run_chain`` 对 ``knowhow_tables`` 链同样构造
+    ``sub_batch_ok``(复用 ``_batch_ok``)。claim 在第 2 个子批提交后失效 →
+    排水中途停手、父表行未删、``_run_chain`` 返回 False。"""
+    _seed_user_and_notebook(repo)
+    _seed_knowhow_table_with_columns_and_changes(repo, "nb1", "kt1", 7, 7)
+    store = repo._runtime.notebook_delete_jobs
+    store._CHILD_BATCH_SIZE = 3
+
+    job = repo._runtime.notebook_delete_jobs.request("nb1", "u1")
+    lease_token = repo._runtime.notebook_delete_jobs.mark_running(
+        job["id"], stale_cutoff_seconds=300,
+    )
+    runner = repo._runtime.notebook_delete
+
+    class _ClaimThatFailsAfterTwoChecks:
+        def __init__(self):
+            self.checks = 0
+
+        def verify_held(self):
+            self.checks += 1
+            return self.checks <= 2
+
+        def release(self):
+            pass
+
+    claim = _ClaimThatFailsAfterTwoChecks()
+    finished = runner._run_chain(
+        job["id"], "nb1", lease_token, claim, "cursor_knowhow_tables",
+        "knowhow_tables", "", residual=False,
+    )
+    assert finished is False
+
+    row = repo._runtime.notebook_delete_jobs.get(job["id"])
+    assert row["cursor_key"] == ""
+    with repo._runtime.database.connect() as db:
+        assert db.execute(
+            "SELECT COUNT(*) AS c FROM knowhow_tables WHERE notebook_id='nb1'"
+        ).fetchone()["c"] == 1
