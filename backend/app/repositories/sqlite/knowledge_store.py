@@ -300,6 +300,41 @@ class KnowledgeStore:
         if not 0 <= int(step) < len(_GRAPH_DRAIN_STEPS):
             raise ValueError(f"unknown graph drain step: {step}")
         table, predicate, params, _mirrored = _GRAPH_DRAIN_STEPS[int(step)]
+        if table == "knowledge_source_facts":
+            # codex #663 R14 P2: fresh ksfe children can land AFTER the
+            # drain cursor passed their own step but BEFORE this parent
+            # page — the FK cascade would then delete them unbounded and
+            # uncounted. Same shape as the knowledge_objects page below:
+            # select the page's fact ids, delete their children explicitly
+            # (sub-batched, per-statement bounded like the established
+            # _delete_object_id_batch path), then the parents; the cascade
+            # finds nothing and every row lands in counts.
+            ids = [
+                row["id"] for row in db.execute(
+                    f"SELECT id FROM knowledge_source_facts WHERE {predicate} "
+                    f"LIMIT {int(limit)}",
+                    (notebook_id,) * params,
+                ).fetchall()
+            ]
+            if not ids:
+                return {}
+            counts = {"knowledge_source_facts": 0,
+                      "knowledge_source_fact_elements": 0}
+            for offset in range(0, len(ids), _DELETE_OBJECT_BATCH_SIZE):
+                batch = ids[offset : offset + _DELETE_OBJECT_BATCH_SIZE]
+                placeholders = ",".join("?" for _ in batch)
+                cur = db.execute(
+                    f"DELETE FROM knowledge_source_fact_elements "
+                    f"WHERE fact_id IN ({placeholders})",
+                    batch,
+                )
+                counts["knowledge_source_fact_elements"] += cur.rowcount
+                cur = db.execute(
+                    f"DELETE FROM knowledge_source_facts WHERE id IN ({placeholders})",
+                    batch,
+                )
+                counts["knowledge_source_facts"] += cur.rowcount
+            return {name: n for name, n in counts.items() if n}
         if table == "knowledge_objects":
             ids = [
                 row["id"] for row in db.execute(

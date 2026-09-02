@@ -576,8 +576,42 @@ def test_high_fanout_dependents_are_predrained_in_bounded_pages(repo, monkeypatc
             pages.append((step, deleted))
         return deleted
 
-    monkeypatch.setattr(store, "drain_notebook_graph_rows_page", _spy)
-    repo.delete_notebook_kg(notebook.id)
+    from app.repositories.sqlite.database import SqliteDatabase
+
+    primary = repo._runtime.database
+    independent = SqliteDatabase(primary.settings, primary.root_dir)
+    injected = {"done": False}
+    ksf_index = next(
+        i for i, (t, _p, _n, m) in enumerate(_GRAPH_DRAIN_STEPS)
+        if t == "knowledge_source_facts" and m
+    )
+    original_spy = _spy
+
+    def _inject_then_spy(db, nb, step, limit):
+        # codex #663 R14 P2 注入:游标已越过 ksfe 步、事实页即将跑——此刻经
+        # 独立连接灌 4 条新子行,模拟排水期放行的摄取写。变异钉:把事实页里
+        # 的显式子行删除拆掉 → 这 4 条被 FK 级联无声吞掉,counts 短 4,报红。
+        if step == ksf_index and not injected["done"]:
+            injected["done"] = True
+            now3 = _now()
+            with independent.write() as w:
+                for j in range(4):
+                    w.execute(
+                        "INSERT INTO knowledge_source_fact_elements (fact_id,"
+                        "notebook_id,source_id,source_generation,element_id,"
+                        "created_at) VALUES (?,?,?,?,?,?)",
+                        ("fact-0", nb, "src-doc", "g1", f"el-late-{j}", now3),
+                    )
+        return original_spy(db, nb, step, limit)
+
+    monkeypatch.setattr(store, "drain_notebook_graph_rows_page", _inject_then_spy)
+    counts = repo.delete_notebook_kg(notebook.id)
+
+    assert injected["done"], "前置不成立:没有触发注入"
+    assert counts.get("knowledge_source_fact_elements", 0) == 24, (
+        "事实页必须显式计数删除迟到子行(20 播种 + 4 注入),级联不得无声吞掉:"
+        f"{counts.get('knowledge_source_fact_elements')}"
+    )
 
     pre_kos_steps = [
         i for i, (t, _p, _n, m) in enumerate(_GRAPH_DRAIN_STEPS)
