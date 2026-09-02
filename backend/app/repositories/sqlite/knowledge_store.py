@@ -237,30 +237,49 @@ class KnowledgeStore:
             ]
             if not ids:
                 return {}
-            placeholders = ",".join("?" for _ in ids)
-            counts = {"knowledge_objects": len(ids)}
-            cur = db.execute(
-                f"DELETE FROM knowledge_embeddings "
-                f"WHERE object_id IN ({placeholders})",
-                ids,
-            )
-            counts["knowledge_embeddings"] = cur.rowcount
-            cur = db.execute(
-                f"DELETE FROM concept_clusters "
-                f"WHERE notebook_id=? AND member_object_id IN ({placeholders})",
-                (notebook_id, *ids),
-            )
-            counts["concept_clusters"] = cur.rowcount
-            cur = db.execute(
-                f"DELETE FROM knowledge_object_sources "
-                f"WHERE object_id IN ({placeholders})",
-                ids,
-            )
-            counts["knowledge_object_sources"] = cur.rowcount
-            db.execute(
-                f"DELETE FROM knowledge_objects WHERE id IN ({placeholders})",
-                ids,
-            )
+            # codex #663 R2 P2: dependent fan-out (cluster memberships /
+            # source-index rows per object) is unbounded per object, so the
+            # page is issued as _DELETE_OBJECT_BATCH_SIZE sub-batches —
+            # every individual statement carries the SAME per-statement
+            # bound as the established ``_delete_object_id_batch`` deletion
+            # path; the page transaction still commits atomically. Counts
+            # use the object DELETE's actual rowcount (not len(ids)): a
+            # concurrent worker may have removed selected objects between
+            # the SELECT and the DELETE, and reporting those as deleted
+            # here would both inflate the documented aggregate-count
+            # contract and let a no-op page masquerade as progress.
+            counts = {
+                "knowledge_objects": 0,
+                "knowledge_embeddings": 0,
+                "concept_clusters": 0,
+                "knowledge_object_sources": 0,
+            }
+            for offset in range(0, len(ids), _DELETE_OBJECT_BATCH_SIZE):
+                batch = ids[offset : offset + _DELETE_OBJECT_BATCH_SIZE]
+                placeholders = ",".join("?" for _ in batch)
+                cur = db.execute(
+                    f"DELETE FROM knowledge_embeddings "
+                    f"WHERE object_id IN ({placeholders})",
+                    batch,
+                )
+                counts["knowledge_embeddings"] += cur.rowcount
+                cur = db.execute(
+                    f"DELETE FROM concept_clusters "
+                    f"WHERE notebook_id=? AND member_object_id IN ({placeholders})",
+                    (notebook_id, *batch),
+                )
+                counts["concept_clusters"] += cur.rowcount
+                cur = db.execute(
+                    f"DELETE FROM knowledge_object_sources "
+                    f"WHERE object_id IN ({placeholders})",
+                    batch,
+                )
+                counts["knowledge_object_sources"] += cur.rowcount
+                cur = db.execute(
+                    f"DELETE FROM knowledge_objects WHERE id IN ({placeholders})",
+                    batch,
+                )
+                counts["knowledge_objects"] += cur.rowcount
             return {name: n for name, n in counts.items() if n}
         cur = db.execute(
             f"DELETE FROM {table} WHERE rowid IN ("

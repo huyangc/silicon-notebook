@@ -628,7 +628,20 @@ class KnowledgeLifecycleService:
                     db, notebook_id, _GRAPH_DRAIN_THRESHOLD_ROWS, cursor
                 )
             if backlog is None:
-                return drained
+                if cursor == 0:
+                    return drained
+                # codex #663 R2 P1: the cursor is a fast-forward, not a
+                # promise — concurrent ingestion can refill a table the
+                # cursor already passed, and returning here would hand that
+                # unbounded backlog straight to the "bounded" final
+                # transaction. Only a CLEAN full pass from index 0 may end
+                # the drain; anything that reappeared re-drains from its own
+                # index. Convergence: each verification round only fires
+                # after a complete forward pass, drain throughput dwarfs
+                # ingestion throughput, and the per-batch deleting
+                # checkpoint still exits on a tombstone.
+                cursor = 0
+                continue
             table, cursor = backlog
             if self._notebook_deleting(notebook_id):
                 raise NotebookDeletingAbortsMaintenanceError(notebook_id)

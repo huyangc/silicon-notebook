@@ -139,9 +139,12 @@ def test_drain_bounds_the_final_pass_and_counts_stay_total(repo, monkeypatch):
     assert all(
         deleted.get("knowledge_objects", 0) <= 3 for _t, deleted in pages
     ), "每页必须有界"
-    assert probes == sorted(probes), f"探针游标必须单调前进:{probes}"
     assert any(p > 0 for p in probes[1:]), (
         f"游标从未离开下标 0——每批都从登记表头重扫(评审 F4):{probes}"
+    )
+    assert probes[-1] == 0, (
+        "终局前必须有一轮从下标 0 起的干净复扫(codex #663 R2 P1:游标只是"
+        f"快进,不是承诺——并发摄取可以回填已越过的表):{probes}"
     )
     # counts 并回排水行:11 条用户文档对象一条不少(memory 的 2 条不算——
     # 它们本来就不删)。
