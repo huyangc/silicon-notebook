@@ -645,6 +645,27 @@ def test_tombstone_mid_drain_aborts_like_the_other_checkpoints(repo, monkeypatch
     ) > 3
 
 
+def test_small_graph_tombstone_still_aborts_before_the_final_reset(
+    repo, monkeypatch,
+):
+    """变异钉(codex #663 R11 P2):把终局前的墓碑检查点删掉 → 低于阈值的图
+    (排水循环从未进入,批内检查点够不着)在笔记本已 tombstone 时照样跑终局
+    reset,报红。删除作业的 quiesce 正等着这个 abort。"""
+    service = repo._runtime.knowledge_lifecycle
+    monkeypatch.setattr(service, "_graph_drain_budget_rows", 3)
+    notebook = repo.create_notebook(NotebookCreate(name="small-tomb"))
+    _seed_graph(repo, notebook.id, doc_objects=2)  # 低于阈值:零排水批
+
+    monkeypatch.setattr(service, "_notebook_deleting", lambda _nb: True)
+    with pytest.raises(NotebookDeletingAbortsMaintenanceError):
+        repo.delete_notebook_kg(notebook.id)
+    assert _count(
+        repo,
+        "SELECT COUNT(*) FROM knowledge_objects WHERE notebook_id=?",
+        (notebook.id,),
+    ) == 2, "墓碑已落时终局 reset 不得执行"
+
+
 def test_drain_stall_raises_loudly(repo, monkeypatch):
     """变异钉:把「3 次连续零删响亮失败」改成静默继续 → 排水循环失去终止
     条件(本用例以 RuntimeError 类型断言判红;仓库没有 pytest-timeout,
