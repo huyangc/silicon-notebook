@@ -199,8 +199,9 @@ _MENTION_MAX_CANONS_PER_CLAIM = 16
 # `incremental_fuse_source`):本进程已经为哪些 notebook 扫过一次历史残渣。
 #
 # 语义刻意是「每进程每 notebook 至多一次」而不是任何跨进程的变更信号 —— 全仓已无
-# orphan 生产者(三条删除路径都在自己的写事务里清簇行),所以这里要发现的只有改造
-# 之前留下的静态残渣,扫一次即净。多 worker 部署下每个 worker 各扫一次,不存在
+# orphan 生产者(四条删除路径都在自己的写事务里清簇行:三条既有路径 + T-5a 预排水
+# 的 knowledge_objects 页,见 drain_notebook_graph_rows_page),所以这里要发现的
+# 只有改造之前留下的静态残渣,扫一次即净。多 worker 部署下每个 worker 各扫一次,不存在
 # 「A 产生、B 收不到信号因而被永久压制」的路径(那正是 tick 版本被 codex 判 P1 的
 # 原因)。进程重启后集合为空 → 再扫一次,兜底不失效。
 _ORPHAN_SWEEP_DONE: Set[str] = set()
@@ -620,13 +621,15 @@ class KnowledgeLifecycleService:
         after 3 consecutive stalls this raises instead of spinning."""
         drained: dict[str, int] = {}
         stalls = 0
+        cursor = 0
         while True:
             with self._connect() as db:
-                table = self.knowledge.graph_drain_backlog(
-                    db, notebook_id, _GRAPH_DRAIN_THRESHOLD_ROWS
+                backlog = self.knowledge.graph_drain_backlog(
+                    db, notebook_id, _GRAPH_DRAIN_THRESHOLD_ROWS, cursor
                 )
-            if table is None:
+            if backlog is None:
                 return drained
+            table, cursor = backlog
             if self._notebook_deleting(notebook_id):
                 raise NotebookDeletingAbortsMaintenanceError(notebook_id)
             with self._write() as db:
@@ -634,9 +637,16 @@ class KnowledgeLifecycleService:
                     db, notebook_id, table, _GRAPH_DRAIN_PAGE_ROWS
                 )
                 if deleted:
-                    self.unified_kg.mark_dirty(db, notebook_id, self._now())
+                    # T-5a review P0: the seq bump goes through the ONE
+                    # online choke point (mark_unified_kg_dirty_in_tx), never
+                    # a bare store ``mark_dirty`` — the choke point also
+                    # re-arms maybe_auto_index's once-set and drops the
+                    # corpus-language memo, both of which must not keep
+                    # serving pre-drain answers (kg_mutation.py's red line).
+                    self._mark_unified_kg_dirty_in_tx(db, notebook_id)
             if deleted:
-                drained[table] = drained.get(table, 0) + deleted
+                for name, n in deleted.items():
+                    drained[name] = drained.get(name, 0) + n
                 stalls = 0
                 continue
             stalls += 1
@@ -3286,7 +3296,24 @@ class KnowledgeLifecycleService:
             if mode == "rebuild":
                 probe_kg_model(controlled_client)
                 if not preserve_existing_rebuild:
-                    self.delete_notebook_kg(notebook_id)
+                    try:
+                        self.delete_notebook_kg(notebook_id)
+                    except NotebookDeletingAbortsMaintenanceError:
+                        # T-5a review P2: the pre-reset drain's §4.2
+                        # checkpoint fires on THIS job path too. Translate to
+                        # the same abort shape the batch-loop checkpoint
+                        # below uses — otherwise the maintenance-flavored
+                        # exception falls through to ``except Exception`` and
+                        # the user sees internal_error ("已完成内容已保留,
+                        # 可继续分析") for a notebook that is being DELETED,
+                        # while the identical action a few seconds later gets
+                        # the truthful notebook_deleting copy.
+                        deleting_failure = KgBuildFailure(
+                            "notebook_deleting",
+                            "该笔记本正在被删除，本次知识图谱构建已停止。",
+                        )
+                        control.abort(deleting_failure)
+                        raise KgBuildAborted(deleting_failure)
             total_targets = int(job["total_sources"])
             if mode != "rebuild" and total_targets:
                 # 起始探测**刻意不受跳过模式影响**(codex 第 1 轮 P2,驳回)。它是"服务

@@ -157,31 +157,42 @@ class KnowledgeStore:
     # ------------------------------------------------ lifecycle projections
     @staticmethod
     def graph_drain_backlog(
-        db: sqlite3.Connection, notebook_id: str, threshold: int
-    ) -> "str | None":
-        """batch-3-W1 T-5a: the first ``_GRAPH_DRAIN_STEPS`` table whose
-        matching-row count still exceeds ``threshold``, or ``None`` when
-        every table is at or under it (= the final single-transaction pass
-        in ``delete_notebook_graph_rows`` is now bounded and the caller may
-        stop draining). Read-only point probe per table (``LIMIT 1 OFFSET
-        threshold`` — exists-at-offset, never a full COUNT), so calling it
-        on an empty/small graph costs a handful of index probes and NO
-        write transaction — that is what keeps the small-graph path of
-        ``delete_notebook_kg`` byte-identical to the pre-T-5a shape
-        (see ``test_kg_mutation_phase_matrix``'s P0-1 pin)."""
-        for table, predicate, params in _GRAPH_DRAIN_STEPS:
+        db: sqlite3.Connection, notebook_id: str, threshold: int, start: int = 0
+    ) -> "tuple[str, int] | None":
+        """batch-3-W1 T-5a: the first ``_GRAPH_DRAIN_STEPS`` table at or
+        after index ``start`` whose matching-row count still exceeds
+        ``threshold`` — returned as ``(table, index)`` so the caller can
+        resume the scan from the same table on the next round — or ``None``
+        when every remaining table is at or under it (= the final
+        single-transaction pass in ``delete_notebook_graph_rows`` is now
+        bounded and the caller may stop draining). Read-only point probe per
+        table (``LIMIT 1 OFFSET threshold`` — exists-at-offset, never a full
+        COUNT), so calling it on an empty/small graph costs a handful of
+        index probes and NO write transaction — that is what keeps the
+        small-graph path of ``delete_notebook_kg`` byte-identical to the
+        pre-T-5a shape (see ``test_kg_mutation_phase_matrix``'s P0-1 pin).
+
+        The ``start`` cursor (T-5a review F4) is safe because convergence is
+        strictly forward: a table's matching set only shrinks as the drain
+        proceeds (later tables' sets GROW as their dependency drains — they
+        sit after it in the registry), so a table probed clean never needs
+        re-probing; rows a concurrent ingestion lands in an already-passed
+        table are the final transaction's bounded residue, the same bucket
+        as the ≤threshold remainder."""
+        for index in range(max(0, int(start)), len(_GRAPH_DRAIN_STEPS)):
+            table, predicate, params = _GRAPH_DRAIN_STEPS[index]
             row = db.execute(
                 f"SELECT 1 FROM {table} WHERE {predicate} LIMIT 1 OFFSET {int(threshold)}",
                 (notebook_id,) * params,
             ).fetchone()
             if row is not None:
-                return table
+                return table, index
         return None
 
     @staticmethod
     def drain_notebook_graph_rows_page(
         db: sqlite3.Connection, notebook_id: str, table: str, limit: int
-    ) -> int:
+    ) -> dict[str, int]:
         """batch-3-W1 T-5a: delete ONE bounded page of ``table``'s rows that
         match its ``_GRAPH_DRAIN_STEPS`` predicate (the byte-identical
         predicate ``delete_notebook_graph_rows`` will re-run unboundedly in
@@ -190,19 +201,73 @@ class KnowledgeStore:
         shape for SQLite (works on the FTS5 virtual table too — FTS5 exposes
         rowid). Caller owns the transaction: one page per ``write()``, and
         the same transaction must also bump ``kg_mutation_seq`` (the caller
-        does, via ``mark_dirty`` — kg_mutation.py's FULL CENSUS discipline:
-        graph-row mutations on a live notebook never commit without their
-        seq bump)."""
+        does, via the ``mark_unified_kg_dirty_in_tx`` choke point —
+        kg_mutation.py's FULL CENSUS discipline: graph-row mutations on a
+        live notebook never commit without their seq bump).
+
+        Returns per-table deleted-row counts (empty dict = nothing left for
+        this table). A ``knowledge_objects`` page is special (T-5a review
+        F3): it deletes the page's objects TOGETHER WITH their
+        ``knowledge_embeddings`` / ``concept_clusters`` (by
+        ``member_object_id``) / ``knowledge_object_sources`` rows in this
+        same transaction — the exact ``_delete_object_id_batch`` shape every
+        other online object-deletion path uses — so no commit ever exposes
+        a cluster/membership row whose object is gone. Without this, each
+        committed object page would leave orphan cluster rows visible until
+        the ``concept_clusters`` drain step ran, and an interrupted drain
+        would leave them PERMANENTLY (``incremental_fuse_source``'s orphan
+        sweep is once-per-process — a poisoned canonical cluster would then
+        swallow newly extracted concepts). ``kg_objects_fts`` is deliberately
+        NOT cleaned per page, matching ``_delete_object_id_batch``'s own
+        exclusion — its rows fall to the registry's own fts step / the final
+        pass; an interrupted drain can leave dangling fts rows until the
+        next delete/rebuild completes (registered in the design doc's
+        acceptance-cost list)."""
         predicates = {t: (p, n) for t, p, n in _GRAPH_DRAIN_STEPS}
         if table not in predicates:
             raise ValueError(f"unknown graph drain table: {table}")
         predicate, params = predicates[table]
+        if table == "knowledge_objects":
+            ids = [
+                row["id"] for row in db.execute(
+                    f"SELECT id FROM knowledge_objects WHERE {predicate} "
+                    f"LIMIT {int(limit)}",
+                    (notebook_id,) * params,
+                ).fetchall()
+            ]
+            if not ids:
+                return {}
+            placeholders = ",".join("?" for _ in ids)
+            counts = {"knowledge_objects": len(ids)}
+            cur = db.execute(
+                f"DELETE FROM knowledge_embeddings "
+                f"WHERE object_id IN ({placeholders})",
+                ids,
+            )
+            counts["knowledge_embeddings"] = cur.rowcount
+            cur = db.execute(
+                f"DELETE FROM concept_clusters "
+                f"WHERE notebook_id=? AND member_object_id IN ({placeholders})",
+                (notebook_id, *ids),
+            )
+            counts["concept_clusters"] = cur.rowcount
+            cur = db.execute(
+                f"DELETE FROM knowledge_object_sources "
+                f"WHERE object_id IN ({placeholders})",
+                ids,
+            )
+            counts["knowledge_object_sources"] = cur.rowcount
+            db.execute(
+                f"DELETE FROM knowledge_objects WHERE id IN ({placeholders})",
+                ids,
+            )
+            return {name: n for name, n in counts.items() if n}
         cur = db.execute(
             f"DELETE FROM {table} WHERE rowid IN ("
             f"SELECT rowid FROM {table} WHERE {predicate} LIMIT {int(limit)})",
             (notebook_id,) * params,
         )
-        return cur.rowcount
+        return {table: cur.rowcount} if cur.rowcount else {}
 
     @staticmethod
     def delete_notebook_graph_rows(

@@ -361,40 +361,79 @@ class KnowledgeStore:
 
     # ------------------------------------------------ lifecycle projections
     @staticmethod
-    def graph_drain_backlog(db: Any, notebook_id: str, threshold: int) -> "str | None":
+    def graph_drain_backlog(
+        db: Any, notebook_id: str, threshold: int, start: int = 0
+    ) -> "tuple[str, int] | None":
         """batch-3-W1 T-5a — SQLite twin's docstring has the full rationale
         (exists-at-offset point probe, read-only, keeps the small-graph
-        ``delete_notebook_kg`` path free of extra write transactions)."""
-        for table, predicate, params in _GRAPH_DRAIN_STEPS:
+        ``delete_notebook_kg`` path free of extra write transactions; the
+        ``start`` cursor rides the registry's strictly-forward convergence,
+        T-5a review F4)."""
+        for index in range(max(0, int(start)), len(_GRAPH_DRAIN_STEPS)):
+            table, predicate, params = _GRAPH_DRAIN_STEPS[index]
             row = db.execute(
                 f"SELECT 1 FROM {table} WHERE {predicate} "
                 f"LIMIT 1 OFFSET {int(threshold)}",
                 (notebook_id,) * params,
             ).fetchone()
             if row is not None:
-                return table
+                return table, index
         return None
 
     @staticmethod
     def drain_notebook_graph_rows_page(
         db: Any, notebook_id: str, table: str, limit: int
-    ) -> int:
+    ) -> dict[str, int]:
         """batch-3-W1 T-5a — one bounded page of ``table``'s matching rows,
         §1.5 form-two (``ctid IN (SELECT ctid … LIMIT n)``; ctid is the only
         universal row address here — several of these tables have composite
         or no single-column PKs). SQLite twin's docstring carries the
-        caller-owns-the-transaction + same-tx ``mark_dirty`` census
-        discipline."""
+        caller-owns-the-transaction + same-tx choke-point-bump census
+        discipline AND the F3 rationale for the ``knowledge_objects``
+        special page below (same-transaction dependent cleanup, the
+        ``_delete_object_id_batch`` shape — ``= ANY(%s)`` here, mirroring
+        that method's own PostgreSQL spelling)."""
         predicates = {t: (p, n) for t, p, n in _GRAPH_DRAIN_STEPS}
         if table not in predicates:
             raise ValueError(f"unknown graph drain table: {table}")
         predicate, params = predicates[table]
+        if table == "knowledge_objects":
+            ids = [
+                row["id"] for row in db.execute(
+                    f"SELECT id FROM knowledge_objects WHERE {predicate} "
+                    f"LIMIT {int(limit)}",
+                    (notebook_id,) * params,
+                ).fetchall()
+            ]
+            if not ids:
+                return {}
+            counts = {"knowledge_objects": len(ids)}
+            cur = db.execute(
+                "DELETE FROM knowledge_embeddings WHERE object_id = ANY(%s)",
+                (ids,),
+            )
+            counts["knowledge_embeddings"] = cur.rowcount
+            cur = db.execute(
+                "DELETE FROM concept_clusters "
+                "WHERE notebook_id = %s AND member_object_id = ANY(%s)",
+                (notebook_id, ids),
+            )
+            counts["concept_clusters"] = cur.rowcount
+            cur = db.execute(
+                "DELETE FROM knowledge_object_sources WHERE object_id = ANY(%s)",
+                (ids,),
+            )
+            counts["knowledge_object_sources"] = cur.rowcount
+            db.execute(
+                "DELETE FROM knowledge_objects WHERE id = ANY(%s)", (ids,)
+            )
+            return {name: n for name, n in counts.items() if n}
         cur = db.execute(
             f"DELETE FROM {table} WHERE ctid IN ("
             f"SELECT ctid FROM {table} WHERE {predicate} LIMIT {int(limit)})",
             (notebook_id,) * params,
         )
-        return cur.rowcount
+        return {table: cur.rowcount} if cur.rowcount else {}
 
     @staticmethod
     def delete_notebook_graph_rows(db: Any, notebook_id: str, now: str) -> dict[str, int]:

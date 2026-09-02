@@ -65,23 +65,25 @@ def test_drain_primitives_page_and_probe_on_postgres(postgres_repository):
     store = runtime.knowledge
 
     with runtime.database.connect() as db:
-        assert store.graph_drain_backlog(db, notebook_id, 3) == "knowledge_objects"
+        assert store.graph_drain_backlog(db, notebook_id, 3) == ("knowledge_objects", 2)
         assert store.graph_drain_backlog(db, notebook_id, 7) is None
+        # start 游标(评审 F4):从 knowledge_objects 之后起扫,看不到它的积压。
+        assert store.graph_drain_backlog(db, notebook_id, 0, 3) is None
 
     with runtime.database.write() as db:
         assert store.drain_notebook_graph_rows_page(
             db, notebook_id, "knowledge_objects", 3
-        ) == 3
+        )["knowledge_objects"] == 3
     with runtime.database.write() as db:
         assert store.drain_notebook_graph_rows_page(
             db, notebook_id, "knowledge_objects", 3
-        ) == 3
+        )["knowledge_objects"] == 3
     with runtime.database.connect() as db:
-        assert store.graph_drain_backlog(db, notebook_id, 0) == "knowledge_objects"
+        assert store.graph_drain_backlog(db, notebook_id, 0) == ("knowledge_objects", 2)
     with runtime.database.write() as db:
         assert store.drain_notebook_graph_rows_page(
             db, notebook_id, "knowledge_objects", 3
-        ) == 1
+        )["knowledge_objects"] == 1
     with runtime.database.connect() as db:
         assert store.graph_drain_backlog(db, notebook_id, 0) is None
         assert db.execute(
@@ -121,7 +123,7 @@ def test_delete_notebook_kg_drains_then_resets_on_postgres(
     counts = postgres_repository.delete_notebook_kg(notebook_id)
 
     assert pages, "超阈值的图必须走排水"
-    assert all(deleted <= 3 for _t, deleted in pages)
+    assert all(d.get("knowledge_objects", 0) <= 3 for _t, d in pages)
     assert counts["knowledge_objects"] == 10
     with runtime.database.connect() as db:
         assert db.execute(
