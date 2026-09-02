@@ -225,9 +225,16 @@ class KnowledgeStore:
         e.g. the unified_kg_state upsert racing a concurrent
         ``mark_dirty``) aborts the attempt cleanly — the caller's
         retry loop treats it exactly like a failed bound probe."""
-        # SQLite: the global write lock already makes the whole final
-        # transaction atomic against every writer — nothing to pin.
-        return None
+        # codex #663 R15 P2a: the process write lock is PROCESS-local, and
+        # write()'s implicit transaction only begins at the first DML — a
+        # sibling process (offline CLI / maintenance) could commit graph
+        # rows between the bound probe and the first DELETE. BEGIN
+        # IMMEDIATE takes the database-level RESERVED lock up front (the
+        # exact begin_guarded_write seam this adapter already documents for
+        # "check inside a write block must be atomic against cross-process
+        # writers"), making the probe atomic with the deletes across
+        # processes too.
+        db.execute("BEGIN IMMEDIATE")
 
     @staticmethod
     def graph_drain_backlog(

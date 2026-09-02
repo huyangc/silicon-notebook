@@ -749,6 +749,24 @@ def test_final_reset_pins_isolation_as_the_first_statement(repo, monkeypatch):
     PgStore.begin_graph_reset_isolation(_FakeDb())
     assert executed == ["SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"]
 
+    # sqlite 侧(codex #663 R15 P2a):跨进程原子性靠 BEGIN IMMEDIATE,
+    # 不是进程内写锁。
+    from app.repositories.sqlite.knowledge_store import (
+        KnowledgeStore as SqStore,
+    )
+
+    executed.clear()
+    SqStore.begin_graph_reset_isolation(_FakeDb())
+    assert executed == ["BEGIN IMMEDIATE"]
+
+    # PG 特例页(codex #663 R15 P2b):选页必须 FOR UPDATE,并发替换等页提交。
+    import inspect
+
+    page_src = inspect.getsource(PgStore.drain_notebook_graph_rows_page)
+    assert page_src.count("FOR UPDATE\"") == 2, (
+        "ko/ksf 两个选页 SQL 都必须以 FOR UPDATE 结尾"
+    )
+
 
 def test_drain_stall_raises_loudly(repo, monkeypatch):
     """变异钉:把「3 次连续零删响亮失败」改成静默继续 → 排水循环失去终止
