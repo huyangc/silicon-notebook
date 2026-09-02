@@ -887,6 +887,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       ): intent is AskIntentRunRecord => Boolean(
         intent && (!durable || intent.serial > durable.serial),
       );
+      const selected: DetachableRecord | null = newerIntent(intentRun, run) ? intentRun : run;
       const latestId = newerIntent(intentRun, run)
         ? intentRun.conversationIdAtStart
         : run ? run.conversationId ?? run.conversationIdAtStart : list?.[0]?.id;
@@ -902,13 +903,21 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       // live transport then outranks polling.
       const intentNow = detachedIntentRunFor(owner);
       const runNow = detachedRunFor(owner);
-      if ((intentRun || run) && !intentNow && !runNow) {
-        // The work this restore was built around settled while the detail was
-        // loading; its conversation is now durable history, so resolve the
-        // latest session once more instead of leaving the answer area blank.
+      // The record this restore was built around must still be the one that
+      // comes back. A preview that completed meanwhile lives on as the durable
+      // run carrying its serial; anything else that settled is durable history
+      // now, and an older detached record must not be attached over it.
+      const successor = selected && runNow && runNow !== selected && runNow.serial === selected.serial
+        ? runNow
+        : null;
+      const selectedStillDetached = selected !== null
+        && (intentNow === selected || runNow === selected);
+      if (selected && !selectedStillDetached && !successor) {
         const settled = await loadSessionsFor(owner);
         if (!sameViewOwner(ownerRef.current, owner)) return false;
         await restoreLatestConversation(settled ?? [], (id) => applySessionDetail(id, owner));
+      } else if (successor) {
+        if (canAttachRun(successor)) attachDetachedRun(successor, owner);
       } else if (
         newerIntent(intentNow, runNow)
         && (intentNow.phase === "failed" || askJobIdRef.current === null)
