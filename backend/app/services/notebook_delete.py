@@ -101,7 +101,10 @@ from app.repositories.scale_build_lock import (
 )
 from app.repositories.source_files import delete_source_file
 from app.services import background_jobs
-from app.services.notebook_catalog import _delete_notebook_asset_dir
+from app.services.notebook_catalog import (
+    _delete_notebook_asset_dir,
+    _delete_notebook_source_files_dir,
+)
 from app.services.notebook_delete_tables import (
     PHASE_3_PLAN,
     CURSOR_KEYS,
@@ -355,7 +358,26 @@ class NotebookDeleteJobRunner:
 
     def _submit(self, job_id: str, notebook_id: str) -> bool:
         """Hand the job to the delete pool once; ``False`` = already in this
-        process's queue or running (codex #659 R2 dedupe), nothing submitted."""
+        process's queue or running (codex #659 R2 dedupe), or the pool
+        rejected it outright (codex #659 R3 P2, below) — either way, nothing
+        (more) submitted this call.
+
+        P2（codex PR#659 round 3）：``background_jobs.submit`` raising
+        （池饱和、解释器关停等 ``Exception``）must NOT propagate out of
+        ``request()``. By the time this runs, the tombstone CAS + job row
+        insert have ALREADY committed (``request()``'s own transaction, one
+        line up its call chain) — re-raising here would turn an already-
+        durable 202 into a 500, and a client's retry of the same DELETE then
+        hits ``NotebookAlreadyDeletingError``/an invisible-notebook 404
+        instead of ever seeing the request that actually succeeded. The job
+        row is real and ``queued``/untouched either way, so swallowing here
+        loses nothing: the sweep picks it up on its own regular cadence —
+        driver A once ``updated_at`` looks stale (it never got a chance to
+        even start), or, failing that, it is simply still ``queued`` and any
+        later successful ``_submit``/sweep resubmission runs it normally.
+        ``BaseException`` (``SystemExit``/``KeyboardInterrupt``) is
+        deliberately NOT swallowed here — only ``Exception`` — so process
+        shutdown signals still propagate exactly as before this fix."""
         with self._inflight_lock:
             if job_id in self._inflight:
                 return False
@@ -364,6 +386,18 @@ class NotebookDeleteJobRunner:
             background_jobs.submit(
                 self._run_submitted, job_id, name=f"deletenb-{notebook_id}"
             )
+        except Exception:
+            with self._inflight_lock:
+                self._inflight.discard(job_id)
+            _log.warning(
+                "notebook delete job %s (notebook %s): background_jobs."
+                "submit() raised — the tombstone and job row are already "
+                "committed, so this is swallowed (not re-raised) to keep "
+                "the DELETE endpoint's 202 contract; the sweep will pick "
+                "this job up on its normal cadence.",
+                job_id, notebook_id, exc_info=True,
+            )
+            return False
         except BaseException:
             with self._inflight_lock:
                 self._inflight.discard(job_id)
@@ -858,6 +892,36 @@ class NotebookDeleteJobRunner:
 
     # ---- phase 5: finalize ----
 
+    def _sweep_ingestion_stragglers(self, notebook_id: str) -> None:
+        """P1（codex PR#659 round 3）：相位 5 提交（或残渣收尾终局）之后**再**
+        做一次两目录的整目录 ``rmtree``——不是相位 4 那种按 DB 行/游标逐个
+        ``delete_source_file`` 的形态，是直接对 ``{storage_dir}/notebooks/
+        <notebook_id>/``（``SourceFileStore.write_upload`` 的目录公式）与
+        ``{storage_dir}/assets/<notebook_id>/`` 两棵目录整删，不关心里面还剩
+        什么、是否有对应的行。
+
+        补的是这道口子：上一轮（PR-3 阶段 B 复查 P3）曾经以为「相位 3-5 全程
+        持同一把独占 claim（§4.3），所以相位 4 之后不会再冒出新文件」，这个
+        论证是错的——那把 claim 只斥 scale build，从不斥摄取（上传/重解析）。
+        一次在 tombstone 落之前就已经过了 ``get_notebook`` 检查的上传/重解析，
+        完全可能在相位 4 的两个磁盘清扫步骤都跑完**之后**才真正落盘（源文件
+        或 MinerU 抽出的内嵌图片资产）；它对应的 ``sources``/``notebook_
+        assets`` 行要么被相位 3 提前删掉、要么这次写事务本身会在相位 5 之后
+        因为 ``notebooks`` 行不存在而 FK 失败（见
+        ``SourceIngestionService.upload_sources`` 的补偿式 unlink）——不管
+        哪一种，这个 straggler 在磁盘上都不再挂着任何数据库行，未来也不会
+        有任何游标/清理任务再路过它。这次调用发生在 ``notebooks`` 行已经
+        彻底消失之后：从这一刻起，任何依赖 ``get_notebook``/FK 校验的后续
+        摄取写入注定失败，所以这一次整目录清扫兜住的是"相位 4 完成之前就已
+        经真正落盘完成"的全部 straggler；写入本身与这次清扫**同时**发生的
+        更窄间隙，由 ``upload_sources`` 的补偿式 unlink 兜底（自愈：那次写
+        本身会失败并被同一次调用清理）。``ignore_errors=True``、幂等——一本
+        从未有过 straggler 的笔记本，这里就是两次快速的「目录不存在」
+        no-op。"""
+        storage_dir = self._storage_dir()
+        _delete_notebook_source_files_dir(storage_dir, notebook_id)
+        _delete_notebook_asset_dir(storage_dir, notebook_id)
+
     def _phase_finalize(self, job_id: str, notebook_id: str) -> None:
         """Single transaction (§T-3.2): fence + archive + delete four tables
         (cascading ``answers`` away for free, §1.3's fifth archive
@@ -869,20 +933,18 @@ class NotebookDeleteJobRunner:
         P3（PR-3 阶段 B 复查）：``delete_row_and_orphan_embeddings`` 仍会返回
         它删掉的 ``sources`` 行各自的 ``file_path``（旧的同步无界删除路径
         ``job_id is None`` 靠这份返回值内联删磁盘文件——那条路径从不跑相位
-        4，是它唯一的删文件时机）。**这条 jobized 路径不再需要它**：相位 4
-        的 ``_delete_source_files`` 已经在这之前，按 ``notebook_delete_files``
-        （相位 1 物化的路径清单）逐页删过同样这些文件、``_delete_asset_dir``
-        也已经清过贴图资产目录；相位 3-5 全程持同一把独占 claim（§4.3），
-        所以这里不可能出现相位 4 之后又冒出新文件的竞态。以前这里还留着一份
-        同样的 ``for file_path in file_paths: delete_source_file(file_path)``
-        + ``_delete_notebook_asset_dir(...)`` ——虽然 ``delete_source_file``/
-        ``_delete_notebook_asset_dir`` 本身对已经不存在的路径是幂等 no-op，
-        不会造成错误，但这是相位 4 引入之前的遗留代码，纯属重复劳动，误导
-        读者以为相位 5 还担着磁盘清理的职责——已删除；这里唯一还用得到
-        ``delete_row_and_orphan_embeddings`` 返回值的地方就是丢弃它。"""
+        4，是它唯一的删文件时机）。这里唯一还用得到
+        ``delete_row_and_orphan_embeddings`` 返回值的地方就是丢弃它——相位 4
+        的 ``_delete_source_files``/``_delete_asset_dir`` 已经按 DB 行清过
+        绝大多数文件。
+
+        P1（codex PR#659 round 3，修正上一轮的错误论证）：事务提交之后调用
+        ``_sweep_ingestion_stragglers`` 补一次目录级整删——独占 claim 不斥
+        摄取，相位 4 完成之后仍可能有新文件落盘，见该方法自己的 docstring。"""
         self.notebook_store.delete_row_and_orphan_embeddings(
             notebook_id, job_id=job_id
         )
+        self._sweep_ingestion_stragglers(notebook_id)
         analysis_artifacts = self._analysis_artifacts
         if analysis_artifacts is not None:
             try:
@@ -911,9 +973,15 @@ class NotebookDeleteJobRunner:
         NEVER attempts phase 5's fence+archive steps. It only deletes this
         job's own two side-table footprints — lease-fenced (P2-b): a
         fenced-out call (this worker already lost the job to a new owner)
-        logs and returns rather than settling a row it no longer owns."""
+        logs and returns rather than settling a row it no longer owns.
+
+        P1（codex PR#659 round 3）：settle 成功后同样跑
+        ``_sweep_ingestion_stragglers``——``notebooks`` 行在这条路径里更是
+        老早（带外删除）就已经不在了，摄取 straggler 的风险与正常收尾路径
+        一样存在，理由见该方法自己的 docstring。"""
         settled = self.delete_jobs.finish_residual(job_id, lease_token=lease_token)
         if settled:
+            self._sweep_ingestion_stragglers(notebook_id)
             _log.info(
                 "notebook delete job %s (notebook %s): residual cleanup "
                 "complete (driver-A out-of-band-delete special case, §T-4) "

@@ -1098,9 +1098,19 @@ class SourceIngestionService:
                     source_id, notebook_id, digest, file, file_name,
                     str(stored_path), agent_profile_id, capacity_limit,
                 )
-            except DocumentCapacityExceeded:
-                # 事务内容量闸拒绝(并发抢走了最后的名额):行没插,把刚落盘的
-                # 孤儿文件清掉再上抛——与下面「输给并发首传」分支同一条清理逻辑。
+            except Exception:
+                # 行插入失败——不管是 DocumentCapacityExceeded(容量闸拒绝、
+                # 并发抢走了最后的名额)、还是笔记本在 get_row 检查之后、这条
+                # 写事务开始之前被删除作业 finalize 掉导致的 FK 违例
+                # （sources.notebook_id REFERENCES notebooks(id)，PostgreSQL
+                # 抛 IntegrityError/SQLite 抛 sqlite3.IntegrityError）、还是任何
+                # 其它异常：行没插,把刚落盘的孤儿文件清掉再上抛——与下面「输给
+                # 并发首传」分支同一条清理逻辑（P1 之 2/2，codex PR#659 round
+                # 3：兜住相位 4 磁盘清扫完成之后才落盘完成的长上传尾巴；相位 5
+                # 提交后的目录级 rmtree 补扫兜住这条尾巴自己的补偿删除也来不及
+                # 赶上的更晚窗口——见 notebook_delete.py 的 ``_sweep_ingestion_
+                # stragglers``）。原样上抛，不吞异常——调用方的错误处理/HTTP
+                # 状态码不变，只是不再留下磁盘孤儿。
                 self.source_files.delete(str(stored_path))
                 raise
             if reused_id is not None:

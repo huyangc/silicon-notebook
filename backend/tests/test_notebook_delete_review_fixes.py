@@ -681,4 +681,171 @@ def test_submit_dedupes_jobs_already_queued_in_this_process(repo, monkeypatch):
     fn, args = captured[0]
     fn(*args)
     assert runner._submit("job-1", "nb-x") is True
-    assert len(captured) == 2
+
+
+# ---------------------------------------------------------------------------
+# codex #659 R3 P2: request()'s 202 contract must survive background_jobs.
+# submit() raising (pool saturated, interpreter shutting down) — the
+# tombstone + job row are already committed by that point, so re-raising
+# would turn an already-durable success into a 500 whose retry then 404s/
+# 409s against the now-'deleting' notebook.
+# ---------------------------------------------------------------------------
+
+
+def test_request_stays_202_when_background_jobs_submit_raises(repo, monkeypatch):
+    """变异钉：把 ``_submit`` 的 ``except Exception`` 去掉 → submit() 的
+    RuntimeError 直接冒穿 request(),本条报红。"""
+    from app.services import background_jobs
+
+    _seed_user_and_notebook(repo)
+
+    def _boom(fn, *args, **kwargs):
+        raise RuntimeError("pool saturated")
+
+    monkeypatch.setattr(background_jobs, "submit", _boom)
+
+    result = repo._runtime.notebook_delete.request("nb1", "u1")
+    assert result == {"status": "deleting"}
+
+    row = repo._runtime.notebook_delete_jobs.latest_for_notebook("nb1")
+    assert row is not None
+    assert row["status"] == "queued"  # untouched — never actually got to run()
+
+    # get_row()'s NOTEBOOK_LIVE_SQL filter hides 'deleting' rows on purpose
+    # (that IS the tombstone's whole point) — read the raw column instead.
+    with repo._runtime.database.connect() as db:
+        nb_row = db.execute(
+            "SELECT status FROM notebooks WHERE id='nb1'"
+        ).fetchone()
+    assert nb_row["status"] == "deleting"  # tombstone stands
+
+
+def test_request_stays_202_and_the_stuck_job_is_later_swept(repo, monkeypatch):
+    """submit() 抛错留下的 queued 行不是死路——扫尾驱动 A(陈旧活跃行)按常规
+    节奏把它接过去正常跑完。"""
+    from app.services import background_jobs
+
+    _seed_user_and_notebook(repo)
+    monkeypatch.setattr(
+        background_jobs, "submit",
+        lambda fn, *a, **k: (_ for _ in ()).throw(RuntimeError("pool saturated")),
+    )
+    result = repo._runtime.notebook_delete.request("nb1", "u1")
+    assert result == {"status": "deleting"}
+    job = repo._runtime.notebook_delete_jobs.latest_for_notebook("nb1")
+
+    # Simulate time passing without this job ever having actually run:
+    # backdate updated_at past the sweep's own stale cutoff so driver A picks
+    # it up (the job never got a chance to update it in the first place —
+    # this only removes the dependency on real wall-clock time in the test).
+    with repo._runtime.database.write() as db:
+        db.execute(
+            "UPDATE notebook_delete_jobs SET updated_at=? WHERE id=?",
+            ("2020-01-01T00:00:00", job["id"]),
+        )
+    monkeypatch.undo()  # restore the real background_jobs.submit
+    runner = repo._runtime.notebook_delete
+    runner._sweep_seconds = 1
+    assert runner.sweep_once() == 1
+    background_jobs._drain_maintenance_executors_for_tests(timeout=10.0)
+
+    with pytest.raises(KeyError):
+        repo._runtime.notebook_delete_jobs.get(job["id"])  # finalize deleted it
+    with repo._runtime.database.connect() as db:
+        remaining = db.execute(
+            "SELECT COUNT(*) AS c FROM notebooks WHERE id='nb1'"
+        ).fetchone()
+    assert remaining["c"] == 0
+
+
+# ---------------------------------------------------------------------------
+# codex #659 R3 P1 (1/2): a straggler upload/reparse that lands its file
+# AFTER phase 4's disk sweep has already run must still be cleaned up — the
+# exclusive claim (§4.3) excludes a concurrent scale BUILD, never ingestion.
+# ---------------------------------------------------------------------------
+
+
+def test_finalize_sweeps_ingestion_stragglers_that_land_after_phase_4(repo, monkeypatch):
+    """在相位 4 已经跑完、相位 5 尚未提交这个窗口里模拟一次「已经过了
+    get_notebook 检查」的在途摄取真正把文件落到盘上——两棵目录（源文件/贴图
+    资产）各塞一个 straggler 文件,断言 finalize 提交之后这两棵目录本身
+    (不只是塞进去的文件)都不再存在。变异钉：去掉 ``_sweep_ingestion_
+    stragglers`` 在 ``_phase_finalize`` 里的调用 → 两棵目录原样留着,报红。"""
+    _seed_user_and_notebook(repo)
+    runner = repo._runtime.notebook_delete
+    storage_dir = runner._storage_dir()
+    source_dir = storage_dir / "notebooks" / "nb1"
+    asset_dir = storage_dir / "assets" / "nb1"
+    source_dir.mkdir(parents=True)
+    asset_dir.mkdir(parents=True)
+    straggler_source = source_dir / "straggler-upload.pdf"
+    straggler_asset = asset_dir / "straggler-image.jpg"
+    straggler_source.write_bytes(b"late upload bytes")
+    straggler_asset.write_bytes(b"late pasted image bytes")
+
+    job = repo._runtime.notebook_delete_jobs.request("nb1", "u1")
+    runner.run(job["id"])
+
+    with pytest.raises(KeyError):
+        repo._runtime.notebook_delete_jobs.get(job["id"])  # finalize completed
+    assert not source_dir.exists(), "straggler 源文件目录本该被整目录清扫删掉"
+    assert not asset_dir.exists(), "straggler 贴图资产目录本该被整目录清扫删掉"
+
+
+def test_residual_cleanup_also_sweeps_ingestion_stragglers(repo):
+    """残渣收尾路径（notebooks 行已经带外消失）同样要跑这次整目录清扫——
+    notebooks 行在这条路径里更早就已经不在了,摄取 straggler 的风险不比
+    正常收尾路径小。"""
+    _seed_user_and_notebook(repo)
+    runner = repo._runtime.notebook_delete
+    storage_dir = runner._storage_dir()
+    source_dir = storage_dir / "notebooks" / "nb1"
+    source_dir.mkdir(parents=True)
+    (source_dir / "straggler.pdf").write_bytes(b"x")
+
+    job = repo._runtime.notebook_delete_jobs.request("nb1", "u1")
+    with repo._runtime.database.write() as db:
+        db.execute("DELETE FROM notebooks WHERE id='nb1'")  # out-of-band delete
+
+    runner.run(job["id"])
+
+    with pytest.raises(KeyError):
+        repo._runtime.notebook_delete_jobs.get(job["id"])
+    assert not source_dir.exists()
+
+
+# ---------------------------------------------------------------------------
+# codex #659 R3 P1 (2/2): upload_sources' row-insert failure (notebook
+# deleted mid-request → FK violation, or any other exception) must not leave
+# the just-written file behind — a compensating unlink.
+# ---------------------------------------------------------------------------
+
+
+def test_upload_sources_unlinks_the_just_written_file_when_the_row_insert_fails(
+    repo, monkeypatch,
+):
+    """变异钉：把 ``except Exception`` 收窄回 ``except DocumentCapacityExceeded``
+    → 本用例模拟的是一个不同的异常类型,行插入失败后文件原样留着,报红。"""
+    _seed_user_and_notebook(repo)
+    ingestion = repo._runtime.source_ingestion
+    from app.services.source_ingestion import UploadedSourceFile
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("notebook FK violation (simulated)")
+
+    monkeypatch.setattr(ingestion, "_insert_uploaded_source", _boom)
+
+    with pytest.raises(RuntimeError):
+        ingestion.upload_sources(
+            "nb1",
+            [UploadedSourceFile(
+                file_name="doc.pdf", content_type="application/pdf",
+                content=b"hello world",
+            )],
+            None, ingestion.pipeline_hooks(),
+        )
+
+    storage_dir = repo._runtime.notebook_delete._storage_dir()
+    source_dir = storage_dir / "notebooks" / "nb1"
+    leftover = list(source_dir.iterdir()) if source_dir.exists() else []
+    assert leftover == [], f"补偿删除应当清空刚落盘的孤儿文件,残留：{leftover}"

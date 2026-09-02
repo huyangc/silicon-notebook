@@ -85,6 +85,43 @@ def _delete_notebook_asset_dir(storage_dir: Path, notebook_id: str) -> None:
         shutil.rmtree(asset_dir, ignore_errors=True)
 
 
+def _delete_notebook_source_files_dir(storage_dir: Path, notebook_id: str) -> None:
+    """Remove the WHOLE per-notebook uploaded-source-files directory
+    (``storage_dir/notebooks/<notebook_id>/`` — the exact same formula
+    ``SourceFileStore.write_upload`` uses to compute ``source_dir``).
+
+    P1（codex PR#659 round 3）: a directory-level ``rmtree``, not a per-file
+    loop over DB-tracked paths (``delete_source_file`` on each
+    ``notebook_delete_files``/``sources.file_path`` row — that is phase 4's
+    job, and what this function's caller runs AFTER that already-complete
+    sweep). The gap this closes: the notebook's exclusive claim (§4.3) only
+    excludes an in-flight scale BUILD, never an in-flight upload/reparse — an
+    upload that already passed ``get_notebook``'s existence check before the
+    tombstone landed can still call ``SourceFileStore.write_upload`` (write
+    the file) AFTER phase 4's sweep has already run and finished, landing a
+    straggler file with a ``sources`` row that phase 3 already deleted (or
+    that never got a chance to insert at all, if the row-insert itself later
+    fails against the now-gone ``notebooks`` row — see
+    ``SourceIngestionService.upload_sources``'s compensating-unlink fix for
+    that half). Neither case leaves ANY row anywhere for a future cleanup
+    pass to key off of, so this sweep is deliberately blind to rows — it
+    just removes every file under this notebook's directory, tracked or not.
+    Called once, AFTER phase 5's finalize transaction (or the residual path's
+    terminal cleanup) commits — at that point ``notebooks`` (and every
+    request-time ``get_row``/FK check gating a future write against it) is
+    unconditionally gone, so no write racing this sweep can land AFTER it and
+    still succeed; the only residual gap is a write whose file-write half
+    completes concurrently with (or a few instructions before) this sweep's
+    own ``rmtree`` — see the compensating-unlink fix in ``source_ingestion.py``
+    for that narrower, self-healing tail. ``ignore_errors=True`` and an
+    exists-before-touch guard: idempotent, safe to call unconditionally
+    (a notebook whose directory was never created, or a residual-cleanup
+    path where phase 4 already emptied everything, both no-op cleanly)."""
+    source_dir = Path(storage_dir) / "notebooks" / notebook_id
+    if source_dir.exists():
+        shutil.rmtree(source_dir, ignore_errors=True)
+
+
 def kg_build_status(row) -> KgBuildJobStatus | None:
     if row is None:
         return None
