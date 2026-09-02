@@ -366,6 +366,28 @@ def test_high_fanout_dependents_are_predrained_in_bounded_pages(repo, monkeypatc
                     (f"ko-doc-{i}", f"src-extra-{j}", notebook.id),
                 )
 
+    now2 = _now()
+    with repo._runtime.database.write() as db:
+        # ksfe 级联扇出(codex #663 R5 P1):4 条事实 × 5 个 element 行,
+        # fk_ksfe_fact ON DELETE CASCADE——没有预排水步,一页事实(或终局)
+        # 会级联删掉 20 行,行预算失效。
+        for i in range(4):
+            db.execute(
+                "INSERT INTO knowledge_source_facts (id,notebook_id,source_id,"
+                "source_generation,local_object_id,object_type,created_at,"
+                "updated_at) VALUES (?,?,?,?,?,?,?,?)",
+                (f"fact-{i}", notebook.id, "src-doc", "g1", f"lo-{i}",
+                 "concept", now2, now2),
+            )
+            for j in range(5):
+                db.execute(
+                    "INSERT INTO knowledge_source_fact_elements (fact_id,"
+                    "notebook_id,source_id,source_generation,element_id,"
+                    "created_at) VALUES (?,?,?,?,?,?)",
+                    (f"fact-{i}", notebook.id, "src-doc", "g1",
+                     f"el-{i}-{j}", now2),
+                )
+
     pages = []
     store = repo._runtime.knowledge
     original = store.drain_notebook_graph_rows_page
@@ -389,6 +411,22 @@ def test_high_fanout_dependents_are_predrained_in_bounded_pages(repo, monkeypatc
     assert all(d.get("knowledge_object_sources", 0) <= 3 for d in pre_pages), (
         "预排水页必须守自己的行预算"
     )
+    pre_ksfe_steps = [
+        i for i, (t, _p, _n, m) in enumerate(_GRAPH_DRAIN_STEPS)
+        if t == "knowledge_source_fact_elements" and not m
+    ]
+    assert len(pre_ksfe_steps) == 1
+    ksfe_pages = [d for s_, d in pages if s_ == pre_ksfe_steps[0]]
+    assert ksfe_pages, "级联子表 ksfe 必须由自己的预排水步先行分页排掉"
+    assert all(
+        d.get("knowledge_source_fact_elements", 0) <= 3 for d in ksfe_pages
+    ), "ksfe 预排水页必须守自己的行预算"
+    # 事实页/终局不再有超预算的级联余地:预排水后 ksfe 残余 ≤阈值。
+    assert _count(
+        repo,
+        "SELECT COUNT(*) FROM knowledge_source_fact_elements WHERE notebook_id=?",
+        (notebook.id,),
+    ) == 0
     # ko 页的事务内级联只剩残余(预排水已把 20 行吃到 ≤阈值)。
     ko_pages = [
         d for s_, d in pages
