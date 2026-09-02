@@ -601,7 +601,13 @@ class KnowledgeLifecycleService:
         """``delete_notebook_kg``'s body, run under the kg_building fence
         (its docstring carries the full contract)."""
         # codex #663 R16 P1a: snapshot the reverse-index completeness
-        # certificate BEFORE the drain. The drain's first page revokes it
+        # certificate BEFORE the drain. (R17 P1a, registered rebuttal: a
+        # FORCED source-index backfill cannot race this snapshot in a
+        # supported deployment — its only caller is the offline
+        # ``batch_ingest backfill-source-facts`` CLI, documented to run
+        # with application/background writers STOPPED and serialized by the
+        # offline maintenance lock; no online path reaches
+        # ``begin_source_index_backfill``.) The drain's first page revokes it
         # (in that page's own transaction — see
         # ``clear_source_index_backfilled``'s docstring for the
         # interrupted-drain hazard it closes), and a successful final reset
@@ -699,6 +705,13 @@ class KnowledgeLifecycleService:
                     )
                 if survivors is None:
                     break
+                # codex #663 R17 P1b: this reset COMMITTED and another
+                # round is coming — evict the unversioned unified cache
+                # BEFORE the (potentially long) retry drain, or readers sit
+                # on the pre-reset graph between rounds. The happy path
+                # keeps its single post-loop eviction, preserving the P0-1
+                # pin's exact commit-then-invalidate event sequence.
+                self._invalidate_unified_cache(notebook_id)
                 counts = None
             # In-transaction bound validation failed (or the transaction was
             # serialization-aborted, or post-reset validation found
@@ -715,6 +728,10 @@ class KnowledgeLifecycleService:
             ).items():
                 drained[table] = drained.get(table, 0) + deleted
         else:
+            # codex #663 R17 P1b: committed drain pages / earlier reset
+            # rounds already changed the graph — never leave a warm cache
+            # serving pre-delete answers behind a loud failure.
+            self._invalidate_unified_cache(notebook_id)
             raise RuntimeError(
                 f"delete_notebook_kg for notebook {notebook_id}: the final "
                 "reset's in-transaction bound validation kept failing "

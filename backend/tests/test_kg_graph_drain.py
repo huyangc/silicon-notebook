@@ -839,8 +839,10 @@ def test_post_reset_validation_catches_snapshot_invisible_commits(
         if threshold == 0 and not injected["done"]:
             injected["done"] = True
             now2 = _now()
+            # 只注 2 行(< 预算 3):重试轮的排水零页,轮间驱逐只能来自
+            # 幸存者分支的显式驱逐——变异(删它)才真正无 evict 可补位。
             with independent.write() as w:
-                for i in range(4):
+                for i in range(2):
                     w.execute(
                         "INSERT INTO knowledge_objects (id,notebook_id,"
                         "object_type,status,owner,payload,evidence,source_id,"
@@ -851,10 +853,35 @@ def test_post_reset_validation_catches_snapshot_invisible_commits(
         return original_backlog(db, nb, threshold, start)
 
     monkeypatch.setattr(store, "graph_drain_backlog", _inject_before_survivor_probe)
+
+    events = []
+    service2 = repo._runtime.knowledge_lifecycle
+    original_evict = service2._invalidate_unified_cache
+    original_final2 = store.delete_notebook_graph_rows
+
+    def _evict_spy(nb):
+        events.append("evict")
+        return original_evict(nb)
+
+    def _final_spy(db, nb, now):
+        events.append("final")
+        return original_final2(db, nb, now)
+
+    monkeypatch.setattr(service2, "_invalidate_unified_cache", _evict_spy)
+    monkeypatch.setattr(store, "delete_notebook_graph_rows", _final_spy)
     counts = repo.delete_notebook_kg(notebook.id)
 
+    # codex #663 R17 P1b:两轮终局之间必须有一次驱逐(已提交的 reset 不许把
+    # 温缓存留到重试排水期)。变异钉:把幸存者分支的驱逐删掉 → 两个 final
+    # 之间没有 evict,报红。
+    finals = [i for i, e in enumerate(events) if e == "final"]
+    assert len(finals) >= 2, f"前置不成立:应有两轮终局:{events}"
+    assert any(
+        events[i] == "evict" for i in range(finals[0] + 1, finals[1])
+    ), f"两轮终局之间必须驱逐温缓存:{events}"
+
     assert injected["done"], "前置不成立:没有触发注入"
-    assert counts["knowledge_objects"] == 14, (
+    assert counts["knowledge_objects"] == 12, (
         f"totals 必须覆盖复验轮清掉的幸存者:{counts['knowledge_objects']}"
     )
     assert _count(
