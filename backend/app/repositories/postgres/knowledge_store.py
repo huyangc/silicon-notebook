@@ -306,6 +306,13 @@ _GRAPH_DRAIN_STEPS: tuple[tuple[str, str, int], ...] = (
         2,
     ),
     (
+        "knowledge_relations",
+        "notebook_id = %s AND NOT EXISTS (SELECT 1 FROM sources s "
+        "WHERE s.id=knowledge_relations.source_id "
+        "AND s.notebook_id=%s AND s.source_type IN ('memory','knowhow'))",
+        2,
+    ),
+    (
         "knowledge_objects",
         "notebook_id = %s AND NOT EXISTS (SELECT 1 FROM sources s "
         "WHERE s.id=knowledge_objects.source_id "
@@ -316,13 +323,6 @@ _GRAPH_DRAIN_STEPS: tuple[tuple[str, str, int], ...] = (
         "knowledge_object_sources",
         "notebook_id=%s AND NOT EXISTS (SELECT 1 FROM knowledge_objects ko "
         "WHERE ko.notebook_id=%s AND ko.id=knowledge_object_sources.object_id)",
-        2,
-    ),
-    (
-        "knowledge_relations",
-        "notebook_id = %s AND NOT EXISTS (SELECT 1 FROM sources s "
-        "WHERE s.id=knowledge_relations.source_id "
-        "AND s.notebook_id=%s AND s.source_type IN ('memory','knowhow'))",
         2,
     ),
     ("concept_clusters", "notebook_id = %s", 1),
@@ -468,6 +468,15 @@ class KnowledgeStore:
             (notebook_id, notebook_id),
         )
         counts["knowledge_source_facts"] = cur.rowcount
+        # T-5a codex #663 R1 P2: relations BEFORE objects — SQLite twin's
+        # comment at the same spot has the full edges-before-nodes rationale.
+        cur = db.execute(
+            "DELETE FROM knowledge_relations WHERE notebook_id = %s "
+            "AND NOT EXISTS (SELECT 1 FROM sources s WHERE s.id=knowledge_relations.source_id "
+            "AND s.notebook_id=%s AND s.source_type IN ('memory','knowhow'))",
+            (notebook_id, notebook_id),
+        )
+        counts["knowledge_relations"] = cur.rowcount
         cur = db.execute(
             "DELETE FROM knowledge_objects WHERE notebook_id = %s "
             "AND NOT EXISTS (SELECT 1 FROM sources s WHERE s.id=knowledge_objects.source_id "
@@ -482,13 +491,6 @@ class KnowledgeStore:
             (notebook_id, notebook_id),
         )
         counts["knowledge_object_sources"] = cur.rowcount
-        cur = db.execute(
-            "DELETE FROM knowledge_relations WHERE notebook_id = %s "
-            "AND NOT EXISTS (SELECT 1 FROM sources s WHERE s.id=knowledge_relations.source_id "
-            "AND s.notebook_id=%s AND s.source_type IN ('memory','knowhow'))",
-            (notebook_id, notebook_id),
-        )
-        counts["knowledge_relations"] = cur.rowcount
         for table in sorted(
             _GRAPH_RESET_TABLES - {"knowledge_embeddings", "extraction_runs"}
         ):

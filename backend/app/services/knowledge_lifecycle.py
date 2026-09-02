@@ -645,6 +645,14 @@ class KnowledgeLifecycleService:
                     # serving pre-drain answers (kg_mutation.py's red line).
                     self._mark_unified_kg_dirty_in_tx(db, notebook_id)
             if deleted:
+                # codex #663 R1 P1: evict the warm ``/unified-kg`` graph
+                # cache AFTER each page's commit (same commit-then-evict
+                # ordering as the final pass). ``unified_cache`` carries NO
+                # version component — invalidate_kg is its only eviction
+                # path — so without this a warm entry keeps serving the
+                # pre-drain graph for the whole drain, and indefinitely if
+                # the drain aborts before the final pass's own eviction.
+                self._invalidate_unified_cache(notebook_id)
                 for name, n in deleted.items():
                     drained[name] = drained.get(name, 0) + n
                 stalls = 0

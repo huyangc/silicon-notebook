@@ -251,6 +251,91 @@ def test_drain_commits_never_expose_orphan_cluster_rows(repo, monkeypatch):
     ) == 0
 
 
+def test_each_drain_commit_evicts_the_unified_graph_cache(repo, monkeypatch):
+    """变异钉(codex #663 R1 P1):把排水批提交后的 `_invalidate_unified_cache`
+    删掉 → 每个非空批之后的驱逐计数缺失,报红。unified_cache 无任何版本键,
+    invalidate_kg 是唯一驱逐路径——不逐批驱逐,温缓存整个排水期(中止则无限期)
+    端着删前的图。"""
+    monkeypatch.setattr(kl, "_GRAPH_DRAIN_PAGE_ROWS", 3)
+    monkeypatch.setattr(kl, "_GRAPH_DRAIN_THRESHOLD_ROWS", 3)
+    notebook = repo.create_notebook(NotebookCreate(name="evict"))
+    _seed_graph(repo, notebook.id, doc_objects=10)
+
+    service = repo._runtime.knowledge_lifecycle
+    evictions = []
+    original_evict = service._invalidate_unified_cache
+
+    def _evict_spy(nb):
+        evictions.append(nb)
+        return original_evict(nb)
+
+    monkeypatch.setattr(service, "_invalidate_unified_cache", _evict_spy)
+
+    pages = []
+    store = repo._runtime.knowledge
+    original_page = store.drain_notebook_graph_rows_page
+
+    def _page_spy(db, nb, table, limit):
+        deleted = original_page(db, nb, table, limit)
+        if deleted:
+            pages.append(table)
+        return deleted
+
+    monkeypatch.setattr(store, "drain_notebook_graph_rows_page", _page_spy)
+    repo.delete_notebook_kg(notebook.id)
+
+    assert pages, "前置不成立:没有发生排水"
+    assert len(evictions) == len(pages) + 1, (
+        "每个非空排水批提交后 + 终局提交后各一次驱逐:"
+        f"pages={len(pages)} evictions={len(evictions)}"
+    )
+
+
+def test_drain_commits_never_expose_doc_edges_to_missing_nodes(repo, monkeypatch):
+    """变异钉(codex #663 R1 P2):把「krel 先于 ko」的登记序连同终局语句序
+    一起换回旧序(点先于边)→ 某个已提交的批边界上出现「端点对象已消失」的
+    文档源关系边,报红。边先于点是排水提交边界结构一致性的承载序。"""
+    monkeypatch.setattr(kl, "_GRAPH_DRAIN_PAGE_ROWS", 3)
+    monkeypatch.setattr(kl, "_GRAPH_DRAIN_THRESHOLD_ROWS", 3)
+    notebook = repo.create_notebook(NotebookCreate(name="edges"))
+    _seed_graph(repo, notebook.id, doc_objects=9)
+    now = _now()
+    with repo._runtime.database.write() as db:
+        for i in range(8):
+            db.execute(
+                "INSERT INTO knowledge_relations (id,notebook_id,source_id,"
+                "source_object_id,target_object_id,edge_type,evidence,created_at) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (f"rel-{i}", notebook.id, "src-doc", f"ko-doc-{i}",
+                 f"ko-doc-{i + 1}", "supports", "[]", now),
+            )
+
+    dangling_snapshots = []
+    store = repo._runtime.knowledge
+    original = store.drain_notebook_graph_rows_page
+
+    def _spy(db, nb, table, limit):
+        dangling_snapshots.append(_count(
+            repo,
+            "SELECT COUNT(*) FROM knowledge_relations r WHERE r.notebook_id=? "
+            "AND NOT EXISTS (SELECT 1 FROM sources s WHERE s.id=r.source_id "
+            "AND s.notebook_id=? AND s.source_type IN ('memory','knowhow')) "
+            "AND (NOT EXISTS (SELECT 1 FROM knowledge_objects ko "
+            "WHERE ko.id=r.source_object_id) OR NOT EXISTS "
+            "(SELECT 1 FROM knowledge_objects ko WHERE ko.id=r.target_object_id))",
+            (nb, nb),
+        ))
+        return original(db, nb, table, limit)
+
+    monkeypatch.setattr(store, "drain_notebook_graph_rows_page", _spy)
+    repo.delete_notebook_kg(notebook.id)
+
+    assert dangling_snapshots, "前置不成立:没有发生排水"
+    assert all(n == 0 for n in dangling_snapshots), (
+        f"排水的提交边界暴露了指向已删对象的文档源边:{dangling_snapshots}"
+    )
+
+
 def test_tombstone_mid_drain_aborts_like_the_other_checkpoints(repo, monkeypatch):
     """变异钉:把排水循环里的 `_notebook_deleting` 检查点删掉 → 墓碑落地后
     排水照跑到底,报红。删除作业的相位 3 拥有这些行,维护路径应当就地停手。"""
