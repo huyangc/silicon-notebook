@@ -1055,6 +1055,17 @@ class NotebookDeleteJobRunner:
             notebook_id, job_id=job_id, lease_token=lease_token,
         )
         self._sweep_ingestion_stragglers(notebook_id)
+        self._redact_analysis_artifacts(notebook_id)
+
+    def _redact_analysis_artifacts(self, notebook_id: str) -> None:
+        """codex #659 R18 P2: shared by ``_phase_finalize`` AND
+        ``_finish_residual`` — analysis artifacts (stored prompts/responses)
+        live outside the notebooks cascade, so an out-of-band ``DELETE FROM
+        notebooks`` leaves them behind exactly like a normal delete would;
+        the residual path settling the job without this call meant no job
+        remained to ever retry their cleanup. Best-effort by design: the
+        database deletion has already committed, so failure logs and moves
+        on rather than resurrecting the job."""
         analysis_artifacts = self._analysis_artifacts
         if analysis_artifacts is not None:
             try:
@@ -1088,12 +1099,18 @@ class NotebookDeleteJobRunner:
         P1（codex PR#659 round 3）：settle 成功后同样跑
         ``_sweep_ingestion_stragglers``——``notebooks`` 行在这条路径里更是
         老早（带外删除）就已经不在了，摄取 straggler 的风险与正常收尾路径
-        一样存在，理由见该方法自己的 docstring。"""
+        一样存在，理由见该方法自己的 docstring。
+
+        codex #659 R18 P2：settle 成功后同样跑 ``_redact_analysis_artifacts``
+        ——分析产物（prompt/响应存档）不在 notebooks 级联里，带外删除留下它们
+        的方式与正常删除一模一样；此前这条路径把作业 settle 掉却不做涂抹，
+        意味着永远没有任何作业会再来清它们。"""
         settled = self.delete_jobs.finish_residual(
             job_id, notebook_id, lease_token=lease_token
         )
         if settled:
             self._sweep_ingestion_stragglers(notebook_id)
+            self._redact_analysis_artifacts(notebook_id)
             _log.info(
                 "notebook delete job %s (notebook %s): residual cleanup "
                 "complete (driver-A out-of-band-delete special case, §T-4) "

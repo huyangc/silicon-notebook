@@ -497,25 +497,26 @@ class NotebookStore:
             db.execute(
                 "DELETE FROM conversations WHERE notebook_id = ?", (notebook_id,),
             )
-            if job_id is None:
-                # §4.4/P2-g: the JOBIZED path (job_id given) already cleared
-                # both FTS5 shadows in phase 3, alongside knowledge_objects/
-                # chunks' own batched delete (see NotebookDeleteJobStore.
-                # delete_fts_shadow) -- redoing it here would just be a
-                # harmless no-op WHERE match, but skipping it keeps this
-                # tail doing exactly what phase 3 already did, not a
-                # parallel implementation of the same fact. The LEGACY
-                # synchronous path (job_id is None -- every test/eval direct
-                # caller) never runs phase 3 at all, so this is its ONLY
-                # chance to clear them; deleting it here unconditionally
-                # would violate the G1 byte-identity contract this
-                # parameter's whole docstring is built on.
-                db.execute(
-                    "DELETE FROM kg_objects_fts WHERE notebook_id = ?", (notebook_id,)
-                )
-                db.execute(
-                    "DELETE FROM chunks_fts WHERE notebook_id = ?", (notebook_id,)
-                )
+            # codex #659 R18 P1: run both FTS5 shadow deletes UNCONDITIONALLY,
+            # jobized path included. Phase 3 already paged them out
+            # (NotebookDeleteJobStore.delete_fts_shadow_page), but a source
+            # parse/reparse admitted BEFORE the tombstone is covered by
+            # neither quiesce leg (those watch kg_build_jobs and the
+            # in-process KgMaintenanceJobs registry, not ingestion) and can
+            # commit replace_source_chunks / KG rows between phase 3's FTS
+            # pass and this transaction. The cascade below removes the real
+            # chunks/knowledge_objects rows, but chunks_fts/kg_objects_fts
+            # are maintained manually and would keep that full text forever
+            # with no job left to clean them. After a clean phase 3 these
+            # are ~0-row WHERE matches, so the finalize transaction stays
+            # small; for the LEGACY synchronous path (job_id is None) they
+            # remain its only clearing point, byte-identical to before (G1).
+            db.execute(
+                "DELETE FROM kg_objects_fts WHERE notebook_id = ?", (notebook_id,)
+            )
+            db.execute(
+                "DELETE FROM chunks_fts WHERE notebook_id = ?", (notebook_id,)
+            )
             db.execute("DELETE FROM notebooks WHERE id = ?", (notebook_id,))
             if job_id is not None:
                 NotebookDeleteJobStore.cleanup_job_on(db, job_id, lease_token)
