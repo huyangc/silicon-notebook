@@ -249,9 +249,9 @@ def test_failed_rebuild_continues_incrementally_without_second_delete(
     real_delete = lifecycle.delete_notebook_kg
     delete_calls = []
 
-    def tracked_delete(notebook_id):
+    def tracked_delete(notebook_id, **kwargs):
         delete_calls.append(notebook_id)
-        return real_delete(notebook_id)
+        return real_delete(notebook_id, **kwargs)
 
     monkeypatch.setattr(lifecycle, "delete_notebook_kg", tracked_delete)
     bind_chat_client(
