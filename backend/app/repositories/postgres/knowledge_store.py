@@ -407,26 +407,38 @@ class KnowledgeStore:
             ]
             if not ids:
                 return {}
-            counts = {"knowledge_objects": len(ids)}
-            cur = db.execute(
-                "DELETE FROM knowledge_embeddings WHERE object_id = ANY(%s)",
-                (ids,),
-            )
-            counts["knowledge_embeddings"] = cur.rowcount
-            cur = db.execute(
-                "DELETE FROM concept_clusters "
-                "WHERE notebook_id = %s AND member_object_id = ANY(%s)",
-                (notebook_id, ids),
-            )
-            counts["concept_clusters"] = cur.rowcount
-            cur = db.execute(
-                "DELETE FROM knowledge_object_sources WHERE object_id = ANY(%s)",
-                (ids,),
-            )
-            counts["knowledge_object_sources"] = cur.rowcount
-            db.execute(
-                "DELETE FROM knowledge_objects WHERE id = ANY(%s)", (ids,)
-            )
+            # codex #663 R2 P2 ×2 — SQLite twin's comment has the full
+            # rationale (per-statement bound via _DELETE_OBJECT_BATCH_SIZE
+            # sub-batches inside the one page transaction; counts from the
+            # object DELETE's actual rowcount, never len(ids)).
+            counts = {
+                "knowledge_objects": 0,
+                "knowledge_embeddings": 0,
+                "concept_clusters": 0,
+                "knowledge_object_sources": 0,
+            }
+            for offset in range(0, len(ids), _DELETE_OBJECT_BATCH_SIZE):
+                batch = ids[offset : offset + _DELETE_OBJECT_BATCH_SIZE]
+                cur = db.execute(
+                    "DELETE FROM knowledge_embeddings WHERE object_id = ANY(%s)",
+                    (batch,),
+                )
+                counts["knowledge_embeddings"] += cur.rowcount
+                cur = db.execute(
+                    "DELETE FROM concept_clusters "
+                    "WHERE notebook_id = %s AND member_object_id = ANY(%s)",
+                    (notebook_id, batch),
+                )
+                counts["concept_clusters"] += cur.rowcount
+                cur = db.execute(
+                    "DELETE FROM knowledge_object_sources WHERE object_id = ANY(%s)",
+                    (batch,),
+                )
+                counts["knowledge_object_sources"] += cur.rowcount
+                cur = db.execute(
+                    "DELETE FROM knowledge_objects WHERE id = ANY(%s)", (batch,)
+                )
+                counts["knowledge_objects"] += cur.rowcount
             return {name: n for name, n in counts.items() if n}
         cur = db.execute(
             f"DELETE FROM {table} WHERE ctid IN ("
