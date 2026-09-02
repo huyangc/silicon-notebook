@@ -1948,6 +1948,13 @@ class KnowledgeStorePort(Protocol):
     @staticmethod
     def delete_notebook_graph_rows(db: object, notebook_id: str, now: str) -> dict[str, int]: ...
     @staticmethod
+    def begin_graph_reset_isolation(db: object) -> None:
+        """batch-3-W1 T-5a(codex #663 R12 P1):终局事务的第一条语句——
+        PG 上钉 REPEATABLE READ 快照(事务内探针从此原子界定其后所有
+        DELETE 的可见集;40001 冲突由调用方按重试轮处理),SQLite 空操作
+        (全局写锁本就原子)。"""
+        ...
+    @staticmethod
     def graph_drain_backlog(
         db: object, notebook_id: str, threshold: int, start: int = 0
     ) -> "tuple[str, int] | None":
