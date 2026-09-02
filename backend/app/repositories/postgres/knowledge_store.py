@@ -290,13 +290,14 @@ def _completion_generation_is_current(
 # (spelled out literally here — the mirror test pins agreement), then the two
 # trailing predicate deletes. PostgreSQL has no kg_objects_fts shadow, so no
 # 14th entry.
-_GRAPH_DRAIN_STEPS: tuple[tuple[str, str, int], ...] = (
+_GRAPH_DRAIN_STEPS: tuple[tuple[str, str, int, bool], ...] = (
     (
         "knowledge_source_fact_backfills",
         "notebook_id=%s AND NOT EXISTS (SELECT 1 FROM sources s "
         "WHERE s.id=knowledge_source_fact_backfills.source_id AND s.notebook_id=%s "
         "AND s.source_type IN ('memory','knowhow'))",
         2,
+        True,
     ),
     (
         "knowledge_source_facts",
@@ -304,6 +305,7 @@ _GRAPH_DRAIN_STEPS: tuple[tuple[str, str, int], ...] = (
         "WHERE s.id=knowledge_source_facts.source_id AND s.notebook_id=%s "
         "AND s.source_type IN ('memory','knowhow'))",
         2,
+        True,
     ),
     (
         "knowledge_relations",
@@ -311,6 +313,32 @@ _GRAPH_DRAIN_STEPS: tuple[tuple[str, str, int], ...] = (
         "WHERE s.id=knowledge_relations.source_id "
         "AND s.notebook_id=%s AND s.source_type IN ('memory','knowhow'))",
         2,
+        True,
+    ),
+    # codex #663 R3 P1: the two dependent tables with UNBOUNDED per-object
+    # fan-out (cluster memberships; provenance rows of merged objects) get
+    # their own ROW-budgeted pre-drain BEFORE any parent object dies —
+    # each page is one bounded statement in its own transaction, so the
+    # knowledge_objects page's in-transaction cascade (kept for the F3
+    # no-orphan-commit invariant) only ever sweeps the residue that landed
+    # after these steps exhausted. mirrored=False: the final pass needs no
+    # counterpart (its atomic DELETEs cover these rows via their own
+    # object-missing/blanket statements), so the mirror test skips them.
+    # Deleting a LIVE object's membership/provenance row early is safe —
+    # it is a sparser reverse index, never a dangling reference.
+    (
+        "concept_clusters",
+        "notebook_id=%s AND member_object_id IN "
+        "(SELECT ko.id FROM knowledge_objects ko WHERE ko.notebook_id=%s AND NOT EXISTS (SELECT 1 FROM sources s WHERE s.id=ko.source_id AND s.notebook_id=%s AND s.source_type IN ('memory','knowhow')))",
+        3,
+        False,
+    ),
+    (
+        "knowledge_object_sources",
+        "notebook_id=%s AND object_id IN "
+        "(SELECT ko.id FROM knowledge_objects ko WHERE ko.notebook_id=%s AND NOT EXISTS (SELECT 1 FROM sources s WHERE s.id=ko.source_id AND s.notebook_id=%s AND s.source_type IN ('memory','knowhow')))",
+        3,
+        False,
     ),
     (
         "knowledge_objects",
@@ -318,24 +346,27 @@ _GRAPH_DRAIN_STEPS: tuple[tuple[str, str, int], ...] = (
         "WHERE s.id=knowledge_objects.source_id "
         "AND s.notebook_id=%s AND s.source_type IN ('memory','knowhow'))",
         2,
+        True,
     ),
     (
         "knowledge_object_sources",
         "notebook_id=%s AND NOT EXISTS (SELECT 1 FROM knowledge_objects ko "
         "WHERE ko.notebook_id=%s AND ko.id=knowledge_object_sources.object_id)",
         2,
+        True,
     ),
-    ("concept_clusters", "notebook_id = %s", 1),
-    ("concept_merge_candidates", "notebook_id = %s", 1),
-    ("kg_analysis_artifacts", "notebook_id = %s", 1),
-    ("kg_community_edges", "notebook_id = %s", 1),
-    ("kg_relation_completion_state", "notebook_id = %s", 1),
-    ("kg_source_profiles", "notebook_id = %s", 1),
+    ("concept_clusters", "notebook_id = %s", 1, True),
+    ("concept_merge_candidates", "notebook_id = %s", 1, True),
+    ("kg_analysis_artifacts", "notebook_id = %s", 1, True),
+    ("kg_community_edges", "notebook_id = %s", 1, True),
+    ("kg_relation_completion_state", "notebook_id = %s", 1, True),
+    ("kg_source_profiles", "notebook_id = %s", 1, True),
     (
         "knowledge_embeddings",
         "notebook_id=%s AND NOT EXISTS (SELECT 1 FROM knowledge_objects ko "
         "WHERE ko.notebook_id=%s AND ko.id=knowledge_embeddings.object_id)",
         2,
+        True,
     ),
     (
         "extraction_runs",
@@ -343,6 +374,7 @@ _GRAPH_DRAIN_STEPS: tuple[tuple[str, str, int], ...] = (
         "WHERE s.id=extraction_runs.source_id "
         "AND s.notebook_id=%s AND s.source_type IN ('memory','knowhow'))",
         2,
+        True,
     ),
 )
 
@@ -370,7 +402,7 @@ class KnowledgeStore:
         ``start`` cursor rides the registry's strictly-forward convergence,
         T-5a review F4)."""
         for index in range(max(0, int(start)), len(_GRAPH_DRAIN_STEPS)):
-            table, predicate, params = _GRAPH_DRAIN_STEPS[index]
+            table, predicate, params, _mirrored = _GRAPH_DRAIN_STEPS[index]
             row = db.execute(
                 f"SELECT 1 FROM {table} WHERE {predicate} "
                 f"LIMIT 1 OFFSET {int(threshold)}",
@@ -382,7 +414,7 @@ class KnowledgeStore:
 
     @staticmethod
     def drain_notebook_graph_rows_page(
-        db: Any, notebook_id: str, table: str, limit: int
+        db: Any, notebook_id: str, step: int, limit: int
     ) -> dict[str, int]:
         """batch-3-W1 T-5a — one bounded page of ``table``'s matching rows,
         §1.5 form-two (``ctid IN (SELECT ctid … LIMIT n)``; ctid is the only
@@ -393,10 +425,9 @@ class KnowledgeStore:
         special page below (same-transaction dependent cleanup, the
         ``_delete_object_id_batch`` shape — ``= ANY(%s)`` here, mirroring
         that method's own PostgreSQL spelling)."""
-        predicates = {t: (p, n) for t, p, n in _GRAPH_DRAIN_STEPS}
-        if table not in predicates:
-            raise ValueError(f"unknown graph drain table: {table}")
-        predicate, params = predicates[table]
+        if not 0 <= int(step) < len(_GRAPH_DRAIN_STEPS):
+            raise ValueError(f"unknown graph drain step: {step}")
+        table, predicate, params, _mirrored = _GRAPH_DRAIN_STEPS[int(step)]
         if table == "knowledge_objects":
             ids = [
                 row["id"] for row in db.execute(

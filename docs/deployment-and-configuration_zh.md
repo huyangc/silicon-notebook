@@ -693,6 +693,7 @@ NOTEBOOK_DELETE_CONCURRENCY               # 进程内同时执行的删除作业
 NOTEBOOK_DELETE_SWEEP_SECONDS             # 删除作业扫尾双驱动的轮询间隔：重排孤儿活跃作业行（worker 在某相位中途死掉，或 KG 重建 quiesce 等待超时）与为仍处 'deleting' 却没有作业行的笔记本补建作业行（默认 300，与 checkup H4/H5 缓存 TTL 同量级）
 NOTEBOOK_DELETE_QUIESCE_TIMEOUT_SECONDS   # 删除作业等待该笔记本上已在跑的知识图谱构建/重建/关联自行停下的总超时——绝不会在重建仍在写入时被强行推进；超时后交回扫尾按正常节奏重排（默认 1800，覆盖一批最坏情形的 LLM 抽取耗时并留裕度）
 NOTEBOOK_DELETE_FINALIZE_TIMEOUT_SECONDS  # 仅 PostgreSQL：删除作业单事务收尾步骤（围栏 + 归档 + 删四张直接围栏的表 + DELETE FROM notebooks）的可选事务级 statement_timeout 覆盖值。默认 0 = 不设置，沿用池自身的 POSTGRES_STATEMENT_TIMEOUT_SECONDS。这是一个「收紧」旋钮而非「放宽」旋钮：收尾事务正常在个位数秒内完成，远低于池自身超时，所以任何非零值都只会让失败更快暴露、绝不会更慢。启动校验拒绝任何超出 `0 < 值 ≤ min(120, POSTGRES_STATEMENT_TIMEOUT_SECONDS)` 的非零值——与上面 POSTGRES_CHUNK_FTS_TIMEOUT_SECONDS 同一族交叉校验器。
+KG_GRAPH_DRAIN_PAGE_ROWS                  # delete_notebook_kg 预排水的行预算（批 3·W1 T-5a）：一个值同时作每批页大小（每批一条有界 DELETE、一个写事务）与「留给终局原子重置」的每表残余阈值。按部署的 statement timeout 定尺——默认 2000 在 180s 的 POSTGRES_STATEMENT_TIMEOUT_SECONDS 下余量充足；低配部署可调小以缩短单批写锁/语句时长，代价是批次更多、半清窗口更长（默认 2000；50-100000）
 ```
 
 开启启动预加载后，`/api/ready` 会在 `preloading_indexes` 阶段持续返回 false。任一必需

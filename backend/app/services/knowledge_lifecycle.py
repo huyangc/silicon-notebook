@@ -106,19 +106,6 @@ INTERRUPTED_KG_BUILD_ERROR_MESSAGE = (
 
 _SOURCE_BUILD_PAGE_SIZE = 500
 
-# batch-3-W1 T-5a: delete_notebook_kg's pre-reset drain (see
-# _drain_graph_rows_before_reset). PAGE is one bounded DELETE per write
-# transaction; THRESHOLD is the per-table residue deliberately LEFT for the
-# final single-transaction pass — the two are the same value on purpose: a
-# table under one page's worth of rows costs the final pass no more than one
-# drained page would have, so draining it buys nothing and the small-graph
-# path stays write-free (the P0-1 pin depends on that). 2000 keeps a
-# production form-two page comfortably under the 180s statement timeout
-# (design doc §1.5's sizing argument for the delete job's pages applies
-# unchanged here — same tables, same predicates).
-_GRAPH_DRAIN_PAGE_ROWS = 2000
-_GRAPH_DRAIN_THRESHOLD_ROWS = _GRAPH_DRAIN_PAGE_ROWS
-
 # relink 的两个有界化常数。页大小只影响「一次问数据库要多少个来源 id」,与
 # `_SOURCE_BUILD_PAGE_SIZE` 取同一个值:两者是同一张表、同一条 `(created_at, id)`
 # keyset、同一条 `idx_sources_notebook_created`。刻意不取更小值——SQLite 把行值
@@ -415,6 +402,18 @@ class KnowledgeLifecycleService:
         notebook_deleting: Callable[[str], bool] = lambda _notebook_id: False,
     ) -> None:
         self.settings = settings
+        # batch-3-W1 T-5a (codex #663 R3 P2): the drain's row budget — one
+        # value serves as both the per-batch page size and the per-table
+        # residue threshold deliberately LEFT for the final single
+        # transaction (a table already under one page's worth costs the
+        # final pass no more than one drained page would have, so draining
+        # it buys nothing and the small-graph path stays write-free; the
+        # P0-1 pin depends on that). Deployment-configurable via
+        # KG_GRAPH_DRAIN_PAGE_ROWS, sized against statement_timeout — see
+        # the Settings field's comment.
+        self._graph_drain_budget_rows = int(
+            getattr(settings, "kg_graph_drain_page_rows", 2000)
+        )
         self.event_log = event_log
         self.knowledge = knowledge
         self.governance_store = governance_store
@@ -625,7 +624,7 @@ class KnowledgeLifecycleService:
         while True:
             with self._connect() as db:
                 backlog = self.knowledge.graph_drain_backlog(
-                    db, notebook_id, _GRAPH_DRAIN_THRESHOLD_ROWS, cursor
+                    db, notebook_id, self._graph_drain_budget_rows, cursor
                 )
             if backlog is None:
                 if cursor == 0:
@@ -647,7 +646,7 @@ class KnowledgeLifecycleService:
                 raise NotebookDeletingAbortsMaintenanceError(notebook_id)
             with self._write() as db:
                 deleted = self.knowledge.drain_notebook_graph_rows_page(
-                    db, notebook_id, table, _GRAPH_DRAIN_PAGE_ROWS
+                    db, notebook_id, cursor, self._graph_drain_budget_rows
                 )
                 if deleted:
                     # T-5a review P0: the seq bump goes through the ONE

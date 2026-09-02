@@ -379,6 +379,12 @@ class Settings(BaseSettings):
     # 同轴（background_jobs.py:61-73）。
     notebook_delete_concurrency: int = Field(
         1, ge=1, le=2, validation_alias="NOTEBOOK_DELETE_CONCURRENCY")
+    # batch-3-W1 T-5a (codex #663 R3 P2): delete_notebook_kg 预排水的行预算,
+    # 同时作每批页大小与「留给终局单事务」的每表残余阈值。按部署的
+    # statement_timeout 定尺——2000 行/页在 D-1 的 180s 预算下余量充足;低配
+    # 部署可调小以缩短单批写锁/语句时长(代价是更多批次、更长的排水期)。
+    kg_graph_drain_page_rows: int = Field(
+        2000, ge=50, le=100_000, validation_alias="KG_GRAPH_DRAIN_PAGE_ROWS")
     # 删除作业扫尾的轮询间隔（双驱动：孤儿作业行重排 + 无作业行的 deleting 库
     # 补建）。与 checkup.py 的 _H45_CACHE_TTL 同量级（300s）。
     notebook_delete_sweep_seconds: int = Field(
