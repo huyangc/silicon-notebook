@@ -56,6 +56,7 @@ from app.domain.indexing_pipeline import (
 from app.models.sources import kg_analyzed_without_objects
 from app.repositories.ports import (
     GovernanceStorePort,
+    KgBuildAlreadyRunning,
     KgBuildJobStorePort,
     KgMaintenanceAlreadyRunning,
     KnowledgeStorePort,
@@ -546,18 +547,26 @@ class KnowledgeLifecycleService:
         delete_notebook_kg for the full seq-vs-epoch writeup.
         """
         self.get_notebook(notebook_id)
-        # codex #663 R7 P1: the doc-graph WRITERS (buildkg-/rebuildkg-
-        # extraction jobs) are gated at submission by the ``kg_building``
-        # single-flight — the production rebuild path registers this
-        # notebook there BEFORE entering its delete phase (see
-        # ``_run_notebook_kg_job``), which is exactly the "fence honored by
-        # graph writers" the final validation needs. Standalone callers
-        # (maintenance facade, offline scripts) did not hold it — register
-        # for the span of this call when nobody has, so the fence covers
-        # every path. Hidden-source writers (memory confirm / knowhow
-        # projector) never match a drain predicate, and leg-B maintenance
-        # (relink/unified) writes bounded batches the in-transaction
-        # revalidation loop absorbs.
+        # codex #663 R7/R8 P1 — the fence, stated precisely:
+        # ``kg_building`` gates NEW buildkg-/rebuildkg- job admission
+        # (``prepare_notebook_kg_job`` refuses while this notebook is
+        # registered — R8 made that check real), and the production rebuild
+        # path registers here BEFORE entering its delete phase. Standalone
+        # callers (maintenance facade, offline scripts) register for the
+        # span of this call when nobody has. What the fence deliberately
+        # does NOT cover, with the boundedness argument for each:
+        # per-source upload extraction (``process_source`` → ``store_kg``)
+        # commits ONE bounded batch per source and is converged by the
+        # rebuild's own subsequent re-extraction — its residue is exactly
+        # what the final transaction's in-tx revalidation loop absorbs (over
+        # threshold → re-drain, three failed rounds → loud failure);
+        # hidden-source writers (memory confirm / knowhow projector) never
+        # match a drain predicate; leg-B maintenance (relink/unified) writes
+        # bounded batches, same revalidation argument. Rows a concurrent
+        # writer commits after a table's DELETE inside the final pass are
+        # PRE-EXISTING PostgreSQL READ COMMITTED semantics of that pass —
+        # T-5a changed none of its statements — and are converged by the
+        # rebuild re-extraction that follows every production delete.
         with self.kg_building_lock:
             fence_owner = notebook_id not in self.kg_building
             if fence_owner:
@@ -2814,6 +2823,18 @@ class KnowledgeLifecycleService:
         if mode not in {"incremental", "rebuild"}:
             raise ValueError("unsupported KG build mode")
         self.get_notebook(notebook_id)
+        # codex #663 R8 P1: make the in-process ``kg_building`` registration
+        # a REAL admission gate for build jobs, not only a status surface —
+        # the durable single-flight is ``kg_build_jobs``'s unique-active row,
+        # which a STANDALONE ``delete_notebook_kg`` (maintenance facade /
+        # offline script) deliberately does not create, so without this
+        # check a new buildkg-/rebuildkg- job could start extracting while
+        # that delete drains. Same single-worker deployment contract as
+        # quiesce leg B (design doc §T-3.3 / 残余债 #10): in-process is the
+        # deployment's authority for these registrations.
+        with self.kg_building_lock:
+            if notebook_id in self.kg_building:
+                raise KgBuildAlreadyRunning(notebook_id)
         if (
             not allow_without_model
             and not self.model_clients.configured("kg_extract")

@@ -429,10 +429,34 @@ def test_standalone_delete_holds_the_kg_building_fence(repo, monkeypatch):
         seen.append(nb in service.kg_building)
         return original(db, nb, step, limit)
 
-    monkeypatch.setattr(store, "drain_notebook_graph_rows_page", _spy)
+    build_refusals = []
+
+    def _probe_admission_mid_drain(db, nb, step, limit):
+        # codex #663 R8:fence 必须是 build 作业的**真准入闸**——排水进行中
+        # prepare_notebook_kg_job 必须拒绝(变异钉:把 prepare 里的
+        # kg_building 检查删掉 → 这里能成功建出新构建作业,报红)。
+        from app.repositories.ports import KgBuildAlreadyRunning
+
+        seen.append(nb in service.kg_building)
+        if len(seen) == 1:
+            try:
+                service.prepare_notebook_kg_job(
+                    nb, "incremental", allow_without_model=True
+                )
+            except KgBuildAlreadyRunning:
+                build_refusals.append(nb)
+        return original(db, nb, step, limit)
+
+    monkeypatch.setattr(
+        store, "drain_notebook_graph_rows_page", _probe_admission_mid_drain
+    )
+    del _spy
     repo.delete_notebook_kg(notebook.id)
 
     assert seen and all(seen), "排水全程必须持有 kg_building fence"
+    assert build_refusals == [notebook.id], (
+        "排水期间的新构建作业准入必须被 kg_building 闸拒绝"
+    )
     assert notebook.id not in service.kg_building, "收尾后必须释放 fence"
 
 
