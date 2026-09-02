@@ -621,9 +621,14 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
    * a terminal detail already shows the answer, and re-attaching the transport
    * would append the same turn a second time when its final event lands.
    */
-  function canAttachRun(run: AskRunRecord): boolean {
+  function canAttachRun(run: AskRunRecord, startedBeforeDetail: boolean): boolean {
     if (run.failure) return true;
-    if (run.jobId === null) return askJobIdRef.current === null;
+    // A job that only started while the detail was loading cannot be known to
+    // that snapshot; an idle view takes the live stream. Only a job that was
+    // already running when the detail was requested must be advertised by it.
+    if (!startedBeforeDetail) {
+      return askJobIdRef.current === null || askJobIdRef.current === run.jobId;
+    }
     return askJobIdRef.current === run.jobId;
   }
 
@@ -931,6 +936,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
         intent && (!durable || intent.serial > durable.serial),
       );
       const selected: DetachableRecord | null = newerIntent(intentRun, run) ? intentRun : run;
+      const runStartedBeforeDetail = run !== null && run.jobId !== null;
       const latestId = newerIntent(intentRun, run)
         ? intentRun.conversationIdAtStart
         : run ? run.conversationId ?? run.conversationIdAtStart : list?.[0]?.id;
@@ -961,13 +967,13 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
         // restore stays within one list read and at most one detail read).
         if (run === selected && run.result) projectSettledRun(run, run.result);
       } else if (successor) {
-        if (canAttachRun(successor)) attachDetachedRun(successor, owner);
+        if (canAttachRun(successor, false)) attachDetachedRun(successor, owner);
       } else if (
         newerIntent(intentNow, runNow)
         && (intentNow.phase === "failed" || askJobIdRef.current === null)
       ) {
         attachIntentRun(intentNow, owner);
-      } else if (runNow && canAttachRun(runNow)) {
+      } else if (runNow && canAttachRun(runNow, runNow === run && runStartedBeforeDetail)) {
         attachDetachedRun(runNow, owner);
       }
     } catch (error) {

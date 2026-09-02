@@ -2854,6 +2854,68 @@ test("re-attaching a run restores its engine and retrieval effort for follow-ups
   expect(value!.turns.map((turn) => turn.question)).toEqual(["budgeted question"]);
 });
 
+// codex #661 r6 P2: a run whose `started` arrives while the restore's detail is
+// loading is unknown to that (stale) snapshot; the idle view must still take it.
+test("a run that starts during restoration is still re-attached to the returning view", async () => {
+  const stream = deferred<AskResponse>();
+  let onStart: ((jobId: string, conversationId: string) => void | Promise<void>) | undefined;
+  api.runAskStream.mockImplementation((
+    _notebookId: string,
+    _payload: unknown,
+    _onProgress: unknown,
+    _signal?: AbortSignal,
+    nextOnStart?: (jobId: string, conversationId: string) => void | Promise<void>,
+  ) => {
+    onStart = nextOnStart;
+    return stream.promise;
+  });
+  api.listConversations.mockResolvedValue([summary("conversation-x")]);
+  const staleDetail = detail("conversation-x");
+  const lateDetail = deferred<ConversationDetail>();
+  api.getConversation
+    .mockResolvedValueOnce(staleDetail)
+    .mockReturnValueOnce(lateDetail.promise);
+  render(<Harness />);
+  const first = beginOwnedNotebook();
+  await act(async () => {
+    await value!.restoreNotebook(first);
+  });
+
+  let submitting!: Promise<void>;
+  act(() => {
+    submitting = value!.submit("follow-up");
+  });
+  act(() => value!.leaveWorkspace());
+
+  const owner = beginOwnedNotebook(2);
+  let restoring!: Promise<boolean>;
+  act(() => {
+    restoring = value!.restoreNotebook(owner);
+  });
+  await act(async () => {
+    for (let i = 0; i < 20 && api.getConversation.mock.calls.length < 2; i += 1) {
+      await Promise.resolve();
+    }
+  });
+  // `started` lands while the stale detail is still loading.
+  await act(async () => {
+    await onStart!("job-follow-up", "conversation-x");
+  });
+  lateDetail.resolve(staleDetail);
+  await act(async () => {
+    await restoring;
+    value!.finishNotebookTransition(owner);
+  });
+  expect(value!.asking).toBe(true);
+  expect(value!.pendingQuestion).toBe("follow-up");
+  expect(value!.conversationId).toBe("conversation-x");
+
+  stream.resolve(answer("conversation-x", "answer-follow-up"));
+  await act(async () => submitting);
+  expect(value!.asking).toBe(false);
+  expect(value!.turns.map((turn) => turn.question)).toEqual(["question-conversation-x", "follow-up"]);
+});
+
 // PR #557 regression: `turns`/`sessions`/`pendingTrace`/`feedbackSent` used to
 // fall back to a bare `[]`/`{}` literal whenever the owner is not visible
 // (actorId is null, e.g. logged out / collection page). A bare literal is a
