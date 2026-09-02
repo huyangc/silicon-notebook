@@ -327,24 +327,30 @@ class KnowledgeStore:
                 return {}
             counts = {"knowledge_source_facts": 0,
                       "knowledge_source_fact_elements": 0}
+            # codex #663 R16 P1b + R18 P2: fresh high-fanout facts can carry
+            # unbounded children, and even row-budgeted statements must not
+            # LOOP to exhaustion inside one page transaction (that holds the
+            # write lock for arbitrarily long, defeating the deployment
+            # knob's bounded-batch guarantee). ONE budgeted child sweep per
+            # page transaction; if it filled the budget, children may
+            # remain — leave the parents standing and return, and the drain
+            # loop's backlog probe re-selects this step until the children
+            # are gone. Total per-transaction work: ≤ limit child rows +
+            # ≤ limit parent rows.
+            page_placeholders = ",".join("?" for _ in ids)
+            cur = db.execute(
+                f"DELETE FROM knowledge_source_fact_elements "
+                f"WHERE rowid IN (SELECT rowid "
+                f"FROM knowledge_source_fact_elements "
+                f"WHERE fact_id IN ({page_placeholders}) LIMIT {int(limit)})",
+                ids,
+            )
+            counts["knowledge_source_fact_elements"] = cur.rowcount
+            if cur.rowcount >= int(limit):
+                return {name: n for name, n in counts.items() if n}
             for offset in range(0, len(ids), _DELETE_OBJECT_BATCH_SIZE):
                 batch = ids[offset : offset + _DELETE_OBJECT_BATCH_SIZE]
                 placeholders = ",".join("?" for _ in batch)
-                # codex #663 R16 P1b: a FRESH high-fanout fact (committed
-                # after the ksfe drain step passed) can carry unbounded
-                # children — delete them in row-budgeted statements, not one
-                # unbounded IN-list sweep.
-                while True:
-                    cur = db.execute(
-                        f"DELETE FROM knowledge_source_fact_elements "
-                        f"WHERE rowid IN (SELECT rowid "
-                        f"FROM knowledge_source_fact_elements "
-                        f"WHERE fact_id IN ({placeholders}) LIMIT {int(limit)})",
-                        batch,
-                    )
-                    counts["knowledge_source_fact_elements"] += cur.rowcount
-                    if cur.rowcount == 0:
-                        break
                 cur = db.execute(
                     f"DELETE FROM knowledge_source_facts WHERE id IN ({placeholders})",
                     batch,
