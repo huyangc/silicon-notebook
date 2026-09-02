@@ -2916,6 +2916,125 @@ test("a run that starts during restoration is still re-attached to the returning
   expect(value!.turns.map((turn) => turn.question)).toEqual(["question-conversation-x", "follow-up"]);
 });
 
+// codex #661 r7 P2: opening a session inside the same notebook must bring back
+// the work detached in that conversation, not only a notebook reopen.
+test("opening a session re-attaches the follow-up detached in that conversation", async () => {
+  const stream = deferred<AskResponse>();
+  let onStart: ((jobId: string, conversationId: string) => void | Promise<void>) | undefined;
+  api.runAskStream.mockImplementation((
+    _notebookId: string,
+    _payload: unknown,
+    _onProgress: unknown,
+    _signal?: AbortSignal,
+    nextOnStart?: (jobId: string, conversationId: string) => void | Promise<void>,
+  ) => {
+    onStart = nextOnStart;
+    return stream.promise;
+  });
+  api.listConversations.mockResolvedValue([summary("conversation-x"), summary("conversation-y")]);
+  api.getConversation.mockImplementation(async (id: string) => detail(id));
+  render(<Harness />);
+  const first = beginOwnedNotebook();
+  await act(async () => {
+    await value!.restoreNotebook(first);
+  });
+  expect(value!.conversationId).toBe("conversation-x");
+
+  let submitting!: Promise<void>;
+  act(() => {
+    submitting = value!.submit("follow-up in x");
+  });
+  await act(async () => {
+    await value!.openSession("conversation-y", 2);
+  });
+  expect(value!.conversationId).toBe("conversation-y");
+  expect(value!.asking).toBe(false);
+
+  await act(async () => {
+    await value!.openSession("conversation-x", 3);
+  });
+  expect(value!.conversationId).toBe("conversation-x");
+  expect(value!.asking).toBe(true);
+  expect(value!.pendingQuestion).toBe("follow-up in x");
+
+  await act(async () => {
+    await onStart!("job-x", "conversation-x");
+  });
+  stream.resolve(answer("conversation-x", "answer-follow-up"));
+  await act(async () => submitting);
+  expect(value!.turns.map((turn) => turn.question)).toEqual(["question-conversation-x", "follow-up in x"]);
+});
+
+test("opening a session re-attaches a clarification detached in it, even when it is the current one", async () => {
+  const contract = contractFor("ambiguous in x", true);
+  api.previewAskIntent.mockResolvedValue(contract);
+  api.listConversations.mockResolvedValue([summary("conversation-x")]);
+  api.getConversation.mockImplementation(async (id: string) => {
+    const conversation = detail(id);
+    conversation.turns[0].response.mode = "reasoning";
+    return conversation;
+  });
+  render(<Harness />);
+  const first = beginOwnedNotebook();
+  await act(async () => {
+    await value!.restoreNotebook(first);
+  });
+  await act(async () => {
+    await value!.submit("ambiguous in x");
+  });
+  expect(value!.intentReview?.contract).toBe(contract);
+
+  // Clicking the very session that is open detaches and immediately re-attaches.
+  await act(async () => {
+    await value!.openSession("conversation-x", 2);
+  });
+  expect(value!.intentReview?.contract).toBe(contract);
+  expect(value!.pendingQuestion).toBe("ambiguous in x");
+  expect(value!.conversationId).toBe("conversation-x");
+});
+
+// codex #661 r7 P2: a detached record bound to a conversation the user has since
+// deleted must be dropped, never re-attached against the tombstone.
+test("a clarification detached in a deleted conversation is dropped instead of re-attached", async () => {
+  const contract = contractFor("ambiguous in c1", true);
+  api.previewAskIntent.mockResolvedValue(contract);
+  api.listConversations.mockResolvedValue([summary("conversation-c1"), summary("conversation-c2")]);
+  api.getConversation.mockImplementation(async (id: string) => {
+    const conversation = detail(id);
+    conversation.turns[0].response.mode = "reasoning";
+    return conversation;
+  });
+  render(<Harness />);
+  const first = beginOwnedNotebook();
+  await act(async () => {
+    await value!.restoreNotebook(first);
+  });
+  expect(value!.conversationId).toBe("conversation-c1");
+  await act(async () => {
+    await value!.submit("ambiguous in c1");
+  });
+  expect(value!.intentReview?.contract).toBe(contract);
+
+  await act(async () => {
+    await value!.openSession("conversation-c2", 2);
+  });
+  await act(async () => {
+    await value!.deleteSession("conversation-c1");
+  });
+  act(() => value!.leaveWorkspace());
+
+  api.listConversations.mockResolvedValue([summary("conversation-c2")]);
+  const owner = beginOwnedNotebook(3);
+  await act(async () => {
+    await value!.restoreNotebook(owner);
+    value!.finishNotebookTransition(owner);
+  });
+  expect(value!.intentReview).toBeNull();
+  expect(value!.pendingQuestion).toBe("");
+  expect(value!.conversationId).toBe("conversation-c2");
+  expect(api.runAskStream).not.toHaveBeenCalled();
+});
+
 // PR #557 regression: `turns`/`sessions`/`pendingTrace`/`feedbackSent` used to
 // fall back to a bare `[]`/`{}` literal whenever the owner is not visible
 // (actorId is null, e.g. logged out / collection page). A bare literal is a
