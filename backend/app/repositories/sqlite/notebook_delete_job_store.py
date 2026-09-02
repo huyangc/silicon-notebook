@@ -625,9 +625,11 @@ class NotebookDeleteJobStore:
 
     def _drain_children_by_parent_ids(
         self, table: str, parent_column: str, parent_ids: list[str],
-    ) -> None:
+        *, batch_ok: Callable[[], bool] | None = None,
+    ) -> bool:
         """P1-D shared helper. PostgreSQL twin's docstring has the full
-        rationale."""
+        rationale, including the codex #659 round 8 P1 ``batch_ok``
+        gate/return-value contract mirrored here verbatim."""
         ph = ",".join("?" for _ in parent_ids)
         while True:
             with self.database.write(
@@ -640,11 +642,16 @@ class NotebookDeleteJobStore:
                     (*parent_ids, self._CHILD_BATCH_SIZE),
                 )
             if deleted.rowcount == 0:
-                return
+                return True
+            if batch_ok is not None and not batch_ok():
+                return False
 
     def delete_source_elements_page(
         self, notebook_id: str, cursor: str, limit: int,
+        *, batch_ok: Callable[[], bool] | None = None,
     ) -> tuple[int, str | None]:
+        """codex #659 round 8 P1: see the PostgreSQL twin's docstring for the
+        full ``batch_ok``/``last=None``-on-gate-stop rationale."""
         with self.database.connect() as db:
             page = db.execute(
                 "SELECT id FROM sources WHERE notebook_id=? AND id>? "
@@ -654,14 +661,17 @@ class NotebookDeleteJobStore:
         if not page:
             return 0, None
         source_ids = [row["id"] for row in page]
-        self._drain_children_by_parent_ids(
-            "source_elements", "source_id", source_ids,
+        drained = self._drain_children_by_parent_ids(
+            "source_elements", "source_id", source_ids, batch_ok=batch_ok,
         )
-        return len(source_ids), source_ids[-1]
+        return len(source_ids), (source_ids[-1] if drained else None)
 
     def delete_ask_trace_steps_page(
         self, notebook_id: str, cursor: str, limit: int,
+        *, batch_ok: Callable[[], bool] | None = None,
     ) -> tuple[int, str | None]:
+        """codex #659 round 8 P1: same propagation as
+        ``delete_source_elements_page``."""
         with self.database.connect() as db:
             page = db.execute(
                 "SELECT id FROM ask_jobs WHERE notebook_id=? AND id>? "
@@ -671,10 +681,10 @@ class NotebookDeleteJobStore:
         if not page:
             return 0, None
         job_ids = [row["id"] for row in page]
-        self._drain_children_by_parent_ids(
-            "ask_trace_steps", "job_id", job_ids,
+        drained = self._drain_children_by_parent_ids(
+            "ask_trace_steps", "job_id", job_ids, batch_ok=batch_ok,
         )
-        return len(job_ids), job_ids[-1]
+        return len(job_ids), (job_ids[-1] if drained else None)
 
     def table_has_rows(
         self, table: str, filter_column: str, filter_value: str,

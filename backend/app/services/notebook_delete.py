@@ -131,6 +131,18 @@ _FILES_PAGE_SIZE = 500
 # where a row still demonstrably exists is treated as a loud failure, not a
 # silent short-circuit onto the next table.
 _FORM_TWO_MAX_STALLED_ROUNDS = 3
+# codex #659 round 8 P1: the only two `delete_<chain>_page` store methods
+# whose OWN body commits more than one sub-batch per call (each read-only-
+# parent chain's `_drain_children_by_parent_ids` helper, ctid/rowid-bounded,
+# each iteration its own transaction — see that helper's docstring on both
+# backends). Every OTHER chain method (`memory_items`/`knowhow_rows`/
+# `knowhow_tables`/`indexing_pipeline_stages`) is a single transaction start
+# to finish, so a lease/claim lost mid-call either never lands a write at
+# all (rolled back with the rest of that one transaction) or has already
+# committed everything atomically — neither needs a `batch_ok` gate. Only
+# these two get the extra keyword forwarded; every other chain name is
+# called exactly as before this fix.
+_CHAINS_WITH_INTERNAL_SUB_BATCHES = frozenset({"source_elements", "ask_trace_steps"})
 # §T-3.3: initial 5s backoff, doubling to a 60s cap.
 _QUIESCE_BACKOFF_INITIAL_SECONDS = 5.0
 _QUIESCE_BACKOFF_MAX_SECONDS = 60.0
@@ -814,13 +826,39 @@ class NotebookDeleteJobRunner:
         None)`` — ``0`` means the chain is drained (for the read-only-parent
         chains this is "no more parent rows", not "no more child rows",
         since a parent with zero children is a legitimate, non-terminal
-        state — see those methods' own docstrings on the port)."""
+        state — see those methods' own docstrings on the port).
+
+        codex #659 round 8 P1: the two read-only-parent chains' page methods
+        can themselves commit many independent sub-batches for one page
+        (``_drain_children_by_parent_ids``) — this loop's own ``_batch_ok``
+        check above only covers the instant right before ``method(...)`` is
+        called, never what happens INSIDE it. For those two chains only
+        (``_CHAINS_WITH_INTERNAL_SUB_BATCHES``), a ``batch_ok`` gate closure
+        is threaded down so every sub-batch commit gets the SAME per-batch
+        ownership check every other destructive step already gets, plus a
+        heartbeat (``_batch_ok`` alone never touches ``updated_at`` — a
+        large page's drain that outlasts the sweep's stale cutoff needs one,
+        the same rhythm the cursor-advancing ``advance_phase`` call below
+        already gives every fully-completed page)."""
         method = getattr(self.delete_jobs, f"delete_{chain_name}_page")
         cursor = resume_cursor
         while True:
             if not self._batch_ok(job_id, lease_token, claim, residual=residual):
                 return False
-            count, last = method(notebook_id, cursor, _ROWS_PAGE_SIZE)
+            if chain_name in _CHAINS_WITH_INTERNAL_SUB_BATCHES:
+                def sub_batch_ok(cursor_table: str = cursor_key_name, cursor_key: str = cursor) -> bool:
+                    if not self._batch_ok(job_id, lease_token, claim, residual=residual):
+                        return False
+                    self.delete_jobs.advance_phase(
+                        job_id, "quiesce", lease_token=lease_token,
+                        cursor_table=cursor_table, cursor_key=cursor_key,
+                    )
+                    return True
+                count, last = method(
+                    notebook_id, cursor, _ROWS_PAGE_SIZE, batch_ok=sub_batch_ok,
+                )
+            else:
+                count, last = method(notebook_id, cursor, _ROWS_PAGE_SIZE)
             if count == 0:
                 return True
             cursor = last or cursor

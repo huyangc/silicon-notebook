@@ -716,13 +716,29 @@ class NotebookDeleteJobStore:
 
     def _drain_children_by_parent_ids(
         self, table: str, parent_column: str, parent_ids: list[str],
-    ) -> None:
+        *, batch_ok: Callable[[], bool] | None = None,
+    ) -> bool:
         """P1-D shared helper: drain every ``table`` row referencing any of
         ``parent_ids``, via ctid-bounded batches EACH IN ITS OWN
         transaction (never one unbounded statement, never one long
         transaction) -- used by the two read-only-parent chains, where a
         page of 500 parents can plausibly carry far more total children than
-        one batch's worth."""
+        one batch's worth.
+
+        ``batch_ok`` (codex #659 round 8 P1): called BETWEEN sub-batch
+        commits (never before the first -- the caller's own ``_batch_ok``
+        check immediately before invoking this whole page method already
+        covers that instant). Without this, a page whose total fanout takes
+        longer than the sweep's stale-cutoff to drain could have its lease
+        stolen mid-drain while still issuing real, independently-committed
+        DELETEs under a lease it no longer holds -- exactly the per-batch
+        ownership contract every other destructive phase-3/4 step already
+        enforces (operations.md). ``None`` (every pre-existing caller/test)
+        keeps this method's behavior byte-identical to before this
+        parameter existed. Returns ``True`` once every matching row is
+        gone, ``False`` if ``batch_ok`` returned False first -- the caller
+        must NOT treat this as "drained" (see ``delete_source_elements_
+        page``'s docstring for how the two page methods propagate this)."""
         while True:
             with self.database.write() as connection:
                 deleted = connection.execute(
@@ -732,11 +748,28 @@ class NotebookDeleteJobStore:
                     (parent_ids, self._CHILD_BATCH_SIZE),
                 )
             if deleted.rowcount == 0:
-                return
+                return True
+            if batch_ok is not None and not batch_ok():
+                return False
 
     def delete_source_elements_page(
         self, notebook_id: str, cursor: str, limit: int,
+        *, batch_ok: Callable[[], bool] | None = None,
     ) -> tuple[int, str | None]:
+        """Returns ``(len(source_ids), source_ids[-1])`` once this page's
+        parents' children are FULLY drained. codex #659 round 8 P1: if
+        ``batch_ok`` stops ``_drain_children_by_parent_ids`` mid-drain, this
+        returns ``(len(source_ids), None)`` instead -- a nonzero count so
+        the runner's loop does not mistake this for "chain drained", but
+        ``last=None`` so its ``cursor = last or cursor`` is a no-op: the
+        cursor does NOT advance past parents whose children are still
+        incomplete. The runner's very next loop iteration re-checks
+        ``_batch_ok`` before calling this method again, which will itself
+        now fail (the SAME lease/claim loss that stopped the drain), so it
+        parks the job instead of retrying immediately; a resumed run
+        re-selects the SAME parent page and ``_drain_children_by_parent_
+        ids`` picks up wherever it left off (it only ever asks "any rows
+        left", so it is naturally idempotent)."""
         with self.database.connect() as connection:
             # Read-only: `sources` is an archive-input table (§T-3.2 step 4
             # owns its rows in phase 5), so this page is NEVER deleted here.
@@ -748,14 +781,17 @@ class NotebookDeleteJobStore:
         if not page:
             return 0, None
         source_ids = [row["id"] for row in page]
-        self._drain_children_by_parent_ids(
-            "source_elements", "source_id", source_ids,
+        drained = self._drain_children_by_parent_ids(
+            "source_elements", "source_id", source_ids, batch_ok=batch_ok,
         )
-        return len(source_ids), source_ids[-1]
+        return len(source_ids), (source_ids[-1] if drained else None)
 
     def delete_ask_trace_steps_page(
         self, notebook_id: str, cursor: str, limit: int,
+        *, batch_ok: Callable[[], bool] | None = None,
     ) -> tuple[int, str | None]:
+        """codex #659 round 8 P1: same ``batch_ok``/``last=None`` propagation
+        as ``delete_source_elements_page`` -- see that method's docstring."""
         with self.database.connect() as connection:
             # Read-only: `ask_jobs` is an archive-input table, same rationale
             # as delete_source_elements_page above.
@@ -767,10 +803,10 @@ class NotebookDeleteJobStore:
         if not page:
             return 0, None
         job_ids = [row["id"] for row in page]
-        self._drain_children_by_parent_ids(
-            "ask_trace_steps", "job_id", job_ids,
+        drained = self._drain_children_by_parent_ids(
+            "ask_trace_steps", "job_id", job_ids, batch_ok=batch_ok,
         )
-        return len(job_ids), job_ids[-1]
+        return len(job_ids), (job_ids[-1] if drained else None)
 
     def table_has_rows(
         self, table: str, filter_column: str, filter_value: str,

@@ -1202,6 +1202,7 @@ class NotebookDeleteJobStorePort(Protocol):
         ...
     def delete_source_elements_page(
         self, notebook_id: str, cursor: str, limit: int,
+        *, batch_ok: Callable[[], bool] | None = None,
     ) -> tuple[int, str | None]:
         """只读父链：``sources`` 是归档输入表，相位 3 不删它的行，只分页
         读它的 ``id``（不删，独立一个只读事务）来驱动 ``source_elements``
@@ -1210,13 +1211,25 @@ class NotebookDeleteJobStorePort(Protocol):
         个父 source 合计可能牵出远超一批量级的子元素，绝不用一条无界
         ``= ANY(source_ids)`` 语句删完。返回 ``(本页 source 数, 最后一个
         source id 或 None)`` —— 终止判据是**父页为空**，不是子表删除数为 0
-        （某个 source 本就没有 element 是合法状态，不应提前终止分页）。"""
+        （某个 source 本就没有 element 是合法状态，不应提前终止分页）。
+
+        ``batch_ok``（codex #659 round 8 P1）：在子批循环**每次提交之间**
+        调用（不含第一次——调用方自己的 ``_batch_ok`` 已经在调用这整个方法
+        之前查过一次）；返回 False 时子批循环就地停手，本方法返回
+        ``(len(source_ids), None)``——count 非零（不让调用方的循环把它误判成
+        「链已排空」），但 ``last=None`` 让调用方 ``cursor = last or cursor``
+        变成 no-op，游标不前进；调用方下一轮自己的 ``_batch_ok`` 会用同一份
+        失效状态立即失败，把作业交还扫尾，不会带着丢失的所有权硬闯。
+        ``None``（每一个既有调用方/测试）保持这个方法的行为与本参数存在之前
+        逐字相同。"""
         ...
     def delete_ask_trace_steps_page(
         self, notebook_id: str, cursor: str, limit: int,
+        *, batch_ok: Callable[[], bool] | None = None,
     ) -> tuple[int, str | None]:
-        """只读父链，同 ``delete_source_elements_page``（含 P1-D 的子批拆分），
-        父表换成 ``ask_jobs``，子表换成 ``ask_trace_steps``（按 job_id）。"""
+        """只读父链，同 ``delete_source_elements_page``（含 P1-D 的子批拆分、
+        codex #659 round 8 P1 的 ``batch_ok``/``last=None`` 语义），父表换成
+        ``ask_jobs``，子表换成 ``ask_trace_steps``（按 job_id）。"""
         ...
     def table_has_rows(self, table: str, filter_column: str, filter_value: str) -> bool:
         """形二终止条件的兜底存在性探针（design §1.5「定稿后处理」#1）：
