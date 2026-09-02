@@ -21,6 +21,7 @@ import {
   formatLastActive,
   logsDrillHref,
   parseUploadLimit,
+  questionsDrillHref,
   sortAdminUsers,
   type AdminUserSortKey,
   type SortDirection,
@@ -619,7 +620,12 @@ export default function AdminUsagePage() {
                   <td>{u.questions}</td>
                   <td>{u.reports}</td>
                   <td>{formatLastActive(u.last_active)}</td>
-                  <td><a href={logsDrillHref(u.id)}>查看提问</a></td>
+                  <td>
+                    <span className="usage-analysis-links">
+                      <a href={questionsDrillHref(u.id)}>查看提问</a>
+                      <a href={logsDrillHref(u.id)}>LLM 日志</a>
+                    </span>
+                  </td>
                   <td className="usage-limit-cell">
                     {u.role === "admin" ? (
                       // 管理员的笔记本豁免(写路径 owner-only ⇒ owner 即当前 admin),显示「不限」不可编辑。

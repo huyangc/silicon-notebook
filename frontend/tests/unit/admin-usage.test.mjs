@@ -6,6 +6,7 @@ import {
   formatLastActive,
   logsDrillHref,
   parseUploadLimit,
+  questionsDrillHref,
   sortAdminUsers,
 } from "../../app/admin/usage/format.ts";
 
@@ -21,9 +22,13 @@ test("formatLastActive 处理空值与格式", () => {
   assert.equal(formatLastActive("2026-07-06T12:34:56"), "2026-07-06 12:34");
 });
 
-test("logsDrillHref 编码 owner", () => {
+test("用户分析下钻链接编码 owner 并分别进入提问与 LLM 日志", () => {
   assert.equal(
     logsDrillHref("user-abc123"),
+    "/dev/logs?owner=user-abc123&view=llm",
+  );
+  assert.equal(
+    questionsDrillHref("user-abc123"),
     "/admin/usage?sheet=questions&owner=user-abc123",
   );
 });

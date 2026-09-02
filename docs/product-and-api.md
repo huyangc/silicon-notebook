@@ -2583,8 +2583,9 @@ trustworthy per-source identity ledger. Deleting any source therefore conservati
 **all** retained model content for that notebook instead of guessing which cases cited it.
 
 The administrator's **User usage overview** keeps its existing user-table columns and adds
-two sheets next to it: **Question analysis** (the existing “View questions” link now opens
-this fixed-Ask activity view) and **Parsing issues**. Both are read-only. Parsing issues can
+two sheets next to it: **Question analysis** and **Parsing issues**. Each user row keeps separate
+**View questions** and **LLM logs** links: the former opens the fixed-Ask analysis view, while the
+latter opens the Model calls log view filtered to that user. Both sheets are read-only. Parsing issues can
 be filtered by user, status, category, and the seven model areas. A model-output case loads its
 full prompt and response only when that row is explicitly opened; list loading never bulk-reads
 the content. A live source links to the original notebook and
