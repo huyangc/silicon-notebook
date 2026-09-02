@@ -14,7 +14,10 @@ Owns the streaming-ask EXECUTION orchestration that previously lived inline in
   observes the returned value and never mutates a second time) → register the
   cancel event → emit ``started`` with the durable job/conversation ids →
   emit the synthetic ``start`` step WITHOUT
-  persistence → submit the worker through the copied-context job helper
+  persistence (auto mode: the job is begun under the request-only ``auto`` id
+  and this step moves INSIDE the worker, after ``resolve`` has selected the
+  engine and written it back to the job row) → submit the worker through the
+  copied-context job helper
   (contextvars propagation is the per-user model lifeline) → per real trace:
   persist first, fail-open (log and still deliver — error_policies.json:
   append_ask_trace) → the engine saves the answer → finish-job transaction →
@@ -38,6 +41,7 @@ import queue
 import threading
 from typing import TYPE_CHECKING, Any, Callable, Protocol
 
+from app.services.ask_modes import AUTO_MODE
 from app.services.cancellation import AskCancelled
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -149,9 +153,10 @@ class AskExecutionCoordinator:
         self,
         notebook_id: str,
         payload: "AskRequest",
-        mode: "AskMode",
+        mode: "AskMode | None",
         *,
         user_id: str,
+        resolve: "Callable[[threading.Event], tuple[AskRequest, AskMode]] | None" = None,
     ) -> "queue.Queue[dict[str, Any] | None]":
         """启动一次脱离连接的流式 ask,返回交付队列(None 哨兵收尾)。
 
@@ -161,25 +166,36 @@ class AskExecutionCoordinator:
         cancel 端点)。传输断连只由调用方停止消费本队列,worker 照跑到完。
         执行体 = runtime-owned AskService(Task 24;on_trace 只达 streaming
         引擎——注册表派发在服务内,与基线 route-runner 的分派逐字等价)。
+
+        ``resolve``(auto 模式):引擎尚未选定。job 先以 request-only 的 ``auto``
+        id 建立、``started`` 先入队;worker 内再跑 ``resolve(cancel_event)``(引擎
+        选择 + 已确认意图校验),把选定引擎写回 job 行(fail-open),再发该引擎的
+        合成 start 步并执行。于是选择引擎期间的断连不再丢问题;显式 cancel 仍经
+        cancel_event 中止选择。``mode`` 与 ``resolve`` 至少给一个。
         """
+        if mode is None and resolve is None:
+            raise ValueError("start() needs a resolved mode or a resolve callable")
         events: "queue.Queue[dict[str, Any] | None]" = queue.Queue()
         cancel_event = threading.Event()
         service = self.ask()
         # This is the ONLY validate_reasoning_submission call on the streaming
-        # path — do not delete it as a duplicate of the route.  The route ran
-        # its own copy until the model-inferred source scope was removed; what
-        # it keeps is ``_validate_confirmed_reasoning_intent``, which today
-        # happens to cover the same conditions but is a separate check that
-        # either side may extend.  It must stay above begin_durable_job so an
-        # invalid submission fails before a durable job exists
-        # (test_source_scope.py pins that ordering for both Ask paths).  The
-        # getattr is fail-open only for the narrow unit-test doubles that
-        # intentionally omit the method.
+        # path for a resolved mode — do not delete it as a duplicate of the
+        # route.  The route ran its own copy until the model-inferred source
+        # scope was removed; what it keeps is
+        # ``_validate_confirmed_reasoning_intent``, which today happens to cover
+        # the same conditions but is a separate check that either side may
+        # extend.  It must stay above begin_durable_job so an invalid submission
+        # fails before a durable job exists (test_source_scope.py pins that
+        # ordering for both Ask paths).  With ``resolve`` the payload is only
+        # known inside the worker, which validates it there.  The getattr is
+        # fail-open only for the narrow unit-test doubles that intentionally
+        # omit the method.
         validate = getattr(service, "validate_reasoning_submission", None)
-        if validate is not None:
+        if resolve is None and validate is not None:
             validate(notebook_id, payload)
+        mode_id = mode.id if mode is not None else AUTO_MODE
         job_id, conversation_id = self.ask_state.begin_durable_job(
-            notebook_id, payload, mode.id, user_id)
+            notebook_id, payload, mode_id, user_id)
         self.cancellations.register(job_id, cancel_event)
         # conversation_id is durable before this event is delivered.  The UI
         # can therefore publish/reopen a first-turn session immediately,
@@ -189,9 +205,16 @@ class AskExecutionCoordinator:
             "job_id": job_id,
             "conversation_id": conversation_id,
         })
-        # 合成 start 步:只上流、不落 ask_trace_steps(基线语义)。
-        events.put({"event": "progress", "step": {
-            "step_type": "start", "summary": "启动检索", "detail": {"mode": mode.id}}})
+
+        def emit_start_step(engine_id: str) -> None:
+            # 合成 start 步:只上流、不落 ask_trace_steps(基线语义)。auto 模式
+            # 推迟到引擎选定之后,让它报告真正执行的引擎。
+            events.put({"event": "progress", "step": {
+                "step_type": "start", "summary": "启动检索",
+                "detail": {"mode": engine_id}}})
+
+        if resolve is None:
+            emit_start_step(mode_id)
 
         def on_trace(step) -> None:
             if not cancel_event.is_set():
@@ -207,9 +230,22 @@ class AskExecutionCoordinator:
                 events.put({"event": "progress", "step": payload_step})
 
         def worker() -> None:
+            run_payload = payload
+            engine_id = mode_id
             try:
+                if resolve is not None:
+                    run_payload, engine = resolve(cancel_event)
+                    engine_id = engine.id
+                    if validate is not None:
+                        validate(notebook_id, run_payload)
+                    try:
+                        self.ask_state.update_job_mode(job_id, engine_id)
+                    except Exception:  # noqa: BLE001 — informational column; the run goes on
+                        self.event_log.logger.exception(
+                            "update_job_mode failed for %s", job_id)
+                    emit_start_step(engine_id)
                 response = service.ask(
-                    notebook_id, payload, user_id=user_id,
+                    notebook_id, run_payload, user_id=user_id,
                     job_id=job_id, on_trace=on_trace, cancel_event=cancel_event,
                 )
                 self._finish(job_id, "done", answer_id=response.answer_id)
@@ -225,7 +261,7 @@ class AskExecutionCoordinator:
                 # event. Only the ``done`` path signals: a cancelled or
                 # failed ask says nothing about how this person searches, and
                 # counting it would let a broken provider drive the threshold.
-                self._note_ask_completed(notebook_id, user_id, mode.id)
+                self._note_ask_completed(notebook_id, user_id, engine_id)
             except AskCancelled:
                 self._finish(job_id, "cancelled")
                 events.put({"event": "cancelled"})
@@ -236,7 +272,7 @@ class AskExecutionCoordinator:
                 events.put(None)
 
         try:
-            self.job_submitter.submit(worker, name=f"ask-{mode.id}")
+            self.job_submitter.submit(worker, name=f"ask-{mode_id}")
         except BaseException as exc:
             self._finish(job_id, "failed", error=f"{type(exc).__name__}: {exc}")
             raise
