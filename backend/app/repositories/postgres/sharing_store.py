@@ -26,6 +26,7 @@ from app.repositories.postgres.access_sql import (
     MEMBER_PROBE_SQL,
     NOTEBOOK_ADMIN_SQL,
     NOTEBOOK_DELETE_OWNER_SQL,
+    NOTEBOOK_LIVE_SQL,
     NOTEBOOK_READ_SQL,
     NOTEBOOK_WRITE_SQL,
     admin_access_params,
@@ -296,25 +297,35 @@ class SharingStore:
             )
 
     def find_by_token(self, token: str) -> str | None:
+        """codex #659 R11 P1：见 SQLite 孪生的完整理由（逐字同义）——并入
+        ``NOTEBOOK_LIVE_SQL``，只动读侧。"""
         with self.database.connect() as connection:
             row = connection.execute(
-                "SELECT id FROM notebooks WHERE share_token=%s AND is_shared=1", (token,)
+                "SELECT id FROM notebooks WHERE share_token=%s AND is_shared=1 "
+                f"AND {NOTEBOOK_LIVE_SQL}",
+                (token,),
             ).fetchone()
         return row["id"] if row else None
 
     def list_shared_by_owner(self, user_id: str) -> list[dict]:
-        """`sqlite/sharing_store.py::list_shared_by_owner` 的镜像(P1-T4 起含群组共享)。"""
+        """`sqlite/sharing_store.py::list_shared_by_owner` 的镜像(P1-T4 起含
+        群组共享)。codex #659 R11 P1：并入 ``NOTEBOOK_LIVE_SQL``，理由同
+        SQLite 孪生。"""
         with self.database.connect() as connection:
             return connection.execute(
                 "SELECT id,name,share_token,"
                 + GROUP_GRANT_COUNT_SQL + " AS group_count "
                 "FROM notebooks WHERE created_by=%s "
                 "AND (is_shared=1 OR " + GROUP_GRANT_EXISTS_SQL + ") "
+                f"AND {NOTEBOOK_LIVE_SQL} "
                 "ORDER BY updated_at DESC,id COLLATE \"C\"",
                 (user_id,),
             ).fetchall()
 
     def notebook_row(self, notebook_id: str) -> dict | None:
+        """codex #659 R11 P1 audit: 见 SQLite 孪生的完整理由（逐字同义）——
+        唯一消费点 ``share_state`` 已经被路由层 ``notebook:configure``
+        （owner-only，含 ``NOTEBOOK_LIVE_SQL``）守卫过，此处刻意不重复过滤。"""
         with self.database.connect() as connection:
             row = connection.execute(
                 "SELECT * FROM notebooks WHERE id=%s", (notebook_id,)
@@ -323,8 +334,12 @@ class SharingStore:
 
     @staticmethod
     def notebook_row_on(connection, notebook_id: str) -> dict | None:
+        """codex #659 R11 P1：并入 ``NOTEBOOK_LIVE_SQL``——见 SQLite 孪生的
+        完整理由（唯一消费点 ``join_shared`` 经 ``POST /shared/{token}/
+        join`` 到达，没有任何路由层能力守卫保护）。"""
         row = connection.execute(
-            "SELECT * FROM notebooks WHERE id=%s", (notebook_id,)
+            f"SELECT * FROM notebooks WHERE id=%s AND {NOTEBOOK_LIVE_SQL}",
+            (notebook_id,),
         ).fetchone()
         return sqlite_compatible_notebook_row(row)
 

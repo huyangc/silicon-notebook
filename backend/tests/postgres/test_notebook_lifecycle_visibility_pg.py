@@ -25,6 +25,11 @@ test_diag_db_notebook_live_predicate_matches_access_sql`` 钉住)。两侧唯一
 变异验证见 SQLite 侧文件与 PR 报告——两侧共享常量,变异只需在其中一侧做一次
 即可覆盖两侧(改坏常量本身两侧同时遭殃);这里额外做的是"PG 拼接没抄错"的
 确定性检验,不是谓词语义的第二次证明。
+
+**codex #659 R11 P1 新增**:``sharing_store.find_by_token``——裸列名 +
+``AND NOTEBOOK_LIVE_SQL``，与 ``notebook_exists_for_owner`` 同一拼接形状，
+按上面的取舍只抽查这一个代表（``list_shared_by_owner``/``notebook_row_on``
+的 PG 拼接同样是这个形状，语义已在 SQLite 侧钉死，不重复抽查）。
 """
 from __future__ import annotations
 
@@ -120,6 +125,19 @@ def lifecycle(postgres_repository):
                 (f"ask-pg-{i}", nid, owner_id, "chunk", "q?", "completed", NOW, NOW),
             )
 
+        # codex #659 R11 P1：分享面覆盖（find_by_token 是唯一新出现的 SQL
+        # 拼接形态——裸列名 + AND NOTEBOOK_LIVE_SQL，与 notebook_exists_for_
+        # owner 同一形状，理由见下方测试。
+        share_tokens = {
+            active_id: "tok-active-pg", copying_id: "tok-copying-pg",
+            deleting_id: "tok-deleting-pg",
+        }
+        for nid, token in share_tokens.items():
+            db.execute(
+                "UPDATE notebooks SET is_shared=1,share_token=%s WHERE id=%s",
+                (token, nid),
+            )
+
         db.execute("UPDATE notebooks SET status='copying' WHERE id=%s", (copying_id,))
         db.execute("UPDATE notebooks SET status='deleting' WHERE id=%s", (deleting_id,))
 
@@ -131,6 +149,7 @@ def lifecycle(postgres_repository):
         "deleting_id": deleting_id,
         "viewer_id": viewer_id,
         "group_id": group_id,
+        "share_tokens": share_tokens,
     }
 
 
@@ -219,3 +238,15 @@ def test_direct_resource_authorization(postgres_repository, lifecycle):
     assert repo.user_can_read_notebook(active_id, member_id) is True
     for hidden_id in hidden_ids:
         assert repo.user_can_read_notebook(hidden_id, member_id) is False
+
+
+def test_find_by_token(postgres_repository, lifecycle):
+    """codex #659 R11 P1：``sharing_store.find_by_token`` 的 PG 拼接抽查——
+    裸列名 + ``AND NOTEBOOK_LIVE_SQL``，与 ``notebook_exists_for_owner``
+    同一拼接形状（模块 docstring 的取舍：语义已在 SQLite 侧钉死，这里只验证
+    PG 方言拼接没抄错）。"""
+    store = postgres_repository._runtime.sharing_store
+    tokens = lifecycle["share_tokens"]
+    assert store.find_by_token(tokens[lifecycle["active_id"]]) == lifecycle["active_id"]
+    assert store.find_by_token(tokens[lifecycle["copying_id"]]) is None
+    assert store.find_by_token(tokens[lifecycle["deleting_id"]]) is None

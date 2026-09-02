@@ -30,6 +30,14 @@ codex #653 第 2 轮发现的真规格缺口:目录寻址(``get_notebook``)已�
 copying 挡在入口,但 ``/sources/{id}``、``/elements`` 等直连资源端点不经过那道闸,
 必须在这三条授权谓词自己里挡住,详见规格 T-1「授权谓词并入」小节)。
 
+**codex #659 R11 P1 新增覆盖**:分享面三个读方法——``sharing_store.find_by_token``
+（``/shared/{token}``、``/shared/{token}/copy``、``/shared/{token}/join`` 唯一的
+token→notebook_id 解析点）、``sharing_store.list_shared_by_owner``（owner「已分享」
+总览）、``notebook_sharing.join_shared``（``notebook_row_on`` 并入活性谓词后的端到
+端行为，tombstone 落地后必须拒绝新成员）。此前这三个方法不带 ``NOTEBOOK_LIVE_SQL``，
+一本正在删除中的库仍可被分享链接找到、预览、拷贝、加入——违反
+product-and-api.md:2334 的「立即不可见」契约。
+
 **PG 侧的取舍**:两个后端共享同一份 ``NOTEBOOK_LIVE_SQL`` 常量字符串(逐字相等已由
 ``test_notebook_live_status_literal_guard.py::
 test_diag_db_notebook_live_predicate_matches_access_sql`` 钉住),行为差异只可能
@@ -156,6 +164,17 @@ def lifecycle(repo):
                  NOW, NOW, owner_id),
             )
 
+        # 分享链接(codex #659 R11 P1:find_by_token / list_shared_by_owner /
+        # join_shared 的覆盖数据)——三本笔记本全部铸出分享链接与只读成员。
+        share_tokens = {
+            active_id: "tok-active", copying_id: "tok-copying", deleting_id: "tok-deleting",
+        }
+        for nid, token in share_tokens.items():
+            db.execute(
+                "UPDATE notebooks SET is_shared=1,share_token=? WHERE id=?",
+                (token, nid),
+            )
+
         # 全部辅助数据挂完之后,才把两本翻转成半拷贝/删除中——真实的时序。
         db.execute("UPDATE notebooks SET status='copying' WHERE id=?", (copying_id,))
         db.execute("UPDATE notebooks SET status='deleting' WHERE id=?", (deleting_id,))
@@ -168,6 +187,7 @@ def lifecycle(repo):
         "deleting_id": deleting_id,
         "viewer_id": viewer_id,
         "group_id": group_id,
+        "share_tokens": share_tokens,
     }
 
 
@@ -320,6 +340,52 @@ def test_direct_resource_authorization(repo, lifecycle):
 def test_list_group_shared_notebooks(repo, lifecycle):
     rows = repo._runtime.groups.list_group_shared_notebooks(lifecycle["group_id"])
     assert {r["notebook_id"] for r in rows} == {lifecycle["active_id"]}
+
+
+def test_find_by_token(repo, lifecycle):
+    """codex #659 R11 P1：``/shared/{token}``、``/shared/{token}/copy``、
+    ``/shared/{token}/join`` 唯一的 token→notebook_id 解析点——deleting/
+    copying 都必须解析成 ``None``（等价于路由层的 404），不能只挡
+    deleting 漏 copying，也不能反过来。"""
+    store = repo._runtime.sharing_store
+    tokens = lifecycle["share_tokens"]
+    assert store.find_by_token(tokens[lifecycle["active_id"]]) == lifecycle["active_id"]
+    assert store.find_by_token(tokens[lifecycle["copying_id"]]) is None
+    assert store.find_by_token(tokens[lifecycle["deleting_id"]]) is None
+
+
+def test_list_shared_by_owner(repo, lifecycle):
+    """codex #659 R11 P1：owner 自己的「已分享」总览——tombstone 落地后必须
+    立刻从这张列表里消失，不能继续挂着一本正在删除中的库。"""
+    rows = repo._runtime.sharing_store.list_shared_by_owner(lifecycle["owner_id"])
+    assert {row["id"] for row in rows} == {lifecycle["active_id"]}
+
+
+def test_join_shared_rejects_a_non_live_notebook(repo, lifecycle):
+    """codex #659 R11 P1：``join_shared``（``POST /shared/{token}/join`` 的
+    落点）对 copying/deleting 都必须整体拒绝（``notebook_row_on`` 并入活性
+    谓词），且**不得**留下一条 ``notebook_members`` 行——拒绝必须发生在
+    ``add_member`` 写入之前，不是写完之后再回滚。用一个全新的用户（不是
+    ``lifecycle["member_id"]``——那位已经是三本笔记本的既有成员，无法
+    区分「拒绝生效」与「本来就已经是成员」）。"""
+    sharing = repo._runtime.sharing
+    joiner_id = "u-fresh-joiner"
+    with repo._runtime.database.write() as db:
+        _insert_user(db, joiner_id)
+
+    for hidden_id in (lifecycle["copying_id"], lifecycle["deleting_id"]):
+        with pytest.raises(KeyError):
+            sharing.join_shared(hidden_id, joiner_id)
+        with repo._runtime.database.connect() as db:
+            assert db.execute(
+                "SELECT 1 FROM notebook_members WHERE notebook_id=? AND user_id=?",
+                (hidden_id, joiner_id),
+            ).fetchone() is None
+
+    # 对照组:active 上 join 正常成功。
+    result = sharing.join_shared(lifecycle["active_id"], joiner_id)
+    assert result.id == lifecycle["active_id"]
+    assert result.access == "reader"
 
 
 def test_warm_all_selection_face(repo, lifecycle, monkeypatch):
