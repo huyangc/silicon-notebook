@@ -47,7 +47,7 @@ import {
   replaceLastIntentStep,
 } from "./ask-intent-trace.ts";
 import { jobPollDone, newTraceSteps } from "./ask-reconnect.ts";
-import { toUserMessage } from "./errors.ts";
+import { humanizedError, toUserMessage } from "./errors.ts";
 import { mergeSessionListFallback, recordStartedConversation } from "./ask-session-state.ts";
 import {
   conversationCleanupToast,
@@ -993,6 +993,16 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     const draft = askIntentDraftRef.current;
     abortIntentPreview();
     if (draft) setQuestion(draft);
+    // The UI mode is per actor: a reasoning preview/review detached in any
+    // notebook must not start a reasoning job or re-open its review after the
+    // switch. Cancel it and let the next restore of that notebook hand the
+    // question back with a reason, exactly like the visible one above.
+    for (const run of intentRunsRef.current) {
+      if (run.cancelRequested || run.phase === "failed") continue;
+      run.controller.abort();
+      run.phase = "failed";
+      run.failure = humanizedError("已切换到自动模式，未完成的问题理解已取消，问题已退回输入框");
+    }
   }, [policy.advanced]);
 
   async function executeAsk(
@@ -1306,7 +1316,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
           }
         },
       );
-      if (run.cancelRequested) return;
+      if (run.cancelRequested || run.phase === "failed") return;
       const understandingMs = elapsedMs(understandingStartedAt, Date.now());
       run.understandingMs = understandingMs;
       if (contract.needs_clarification) {
@@ -1359,6 +1369,9 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
         clearPendingTurn();
       }
     } catch (error) {
+      // Already retired as failed (e.g. the UI mode switched while detached):
+      // the record is waiting for a restore to hand the question back.
+      if (run.phase === "failed") return;
       if (!isAbortError(error) && !run.cancelRequested && !attached()) {
         // Failed while detached: nothing visible to report to, and the record
         // is the only place the question still exists. Keep it for the restore.
