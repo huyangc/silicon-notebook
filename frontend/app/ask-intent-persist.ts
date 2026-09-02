@@ -18,7 +18,7 @@
 // 交接给 durable run、用户取消/中断、切到自动模式、会话被删除、预检失败退回草稿时
 // 清除；detach 不清除。
 
-import type { QueryIntentContract } from "./ask-intent-model.ts";
+import type { AskIntentConfirmation, QueryIntentContract } from "./ask-intent-model.ts";
 import type { AskRetrievalEffortId } from "./ask-retrieval-effort.ts";
 import type { BaseScopePayload, SourceScopePayload } from "./source-scope.ts";
 
@@ -37,9 +37,14 @@ export type PersistedIntentRun = {
   retrievalEffort: AskRetrievalEffortId;
   sourceScope: SourceScopePayload;
   baseScope: BaseScopePayload;
-  phase: "preview" | "review";
+  // "handoff": the intent is settled and the durable /ask/stream POST is in
+  // flight but the server has not acknowledged `started` yet — the only copy of
+  // the question is still this record, so it stays until `started` (then the
+  // job/conversation own it) or until the POST ends without ever starting.
+  phase: "preview" | "review" | "handoff";
   contract: QueryIntentContract | null;
   understandingMs: number;
+  confirmation: AskIntentConfirmation | null;
 };
 
 export type IntentRunStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
@@ -132,6 +137,17 @@ export function isQueryIntentContractShape(value: unknown): value is QueryIntent
   return true;
 }
 
+export function isAskIntentConfirmationShape(value: unknown): value is AskIntentConfirmation {
+  if (!isRecord(value)) return false;
+  if (!isQueryIntentContractShape(value.contract)) return false;
+  if (typeof value.resolved_question !== "string") return false;
+  if (!Array.isArray(value.answers)) return false;
+  for (const item of value.answers) {
+    if (!isRecord(item) || typeof item.id !== "string" || typeof item.answer !== "string") return false;
+  }
+  return isOptional(value.understanding_ms, (v) => typeof v === "number" && Number.isFinite(v));
+}
+
 /** 只接受形状完整的条目；坏条目整条丢弃，绝不把半截状态续回界面。 */
 export function isPersistedIntentRun(value: unknown): value is PersistedIntentRun {
   if (!isRecord(value) || value.version !== 1) return false;
@@ -144,8 +160,10 @@ export function isPersistedIntentRun(value: unknown): value is PersistedIntentRu
   if (typeof value.askedAt !== "string") return false;
   if (typeof value.retrievalEffort !== "string") return false;
   if (!isScope(value.sourceScope, "source_ids") || !isScope(value.baseScope, "notebook_ids")) return false;
-  if (value.phase !== "preview" && value.phase !== "review") return false;
+  if (value.phase !== "preview" && value.phase !== "review" && value.phase !== "handoff") return false;
   if (typeof value.understandingMs !== "number") return false;
+  if (value.phase === "handoff") return isAskIntentConfirmationShape(value.confirmation);
+  if (value.confirmation !== null && value.confirmation !== undefined) return false;
   if (value.phase === "review") return isQueryIntentContractShape(value.contract);
   return value.contract === null || isQueryIntentContractShape(value.contract);
 }

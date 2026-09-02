@@ -269,9 +269,13 @@ test("问答请求体的 retrieval_effort 必须沿 page→policy→payload 强�
         + `state 却可能残留高级模式下选过的档位，发请求必须强制回默认档：${text}`,
     );
   }
-  // 其余产出点只能原样透传冻结值（run.retrievalEffort / run?.retrievalEffort）。
+  // 其余产出点只能原样透传冻结值：内存里的 run.retrievalEffort / run?.retrievalEffort，
+  // 或从本标签页 sessionStorage 续上的记录里那份提交时冻结的值（经
+  // retrievalEffortFromTurn 归一，防坏数据）。两者都是提交那一刻按 policy.advanced
+  // 分叉过的结果，不是重新读控件。
+  const frozen = /^(run\??\.retrievalEffort|retrievalEffortFromTurn\(\{ response: \{ retrieval_effort: record\.retrievalEffort \} \}\))$/;
   for (const text of sources.filter((item) => !forked.includes(item))) {
-    assert.match(text, /^run\??\.retrievalEffort$/, `effort 只能来自分叉或冻结值：${text}`);
+    assert.match(text, frozen, `effort 只能来自分叉或冻结值：${text}`);
   }
 });
 
