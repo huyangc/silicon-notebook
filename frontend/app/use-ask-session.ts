@@ -158,8 +158,7 @@ type AskModeRequest = {
  * else is written once (`conversationId`/`jobId` on `started`, `trace` as
  * progress arrives) so the returning view can repaint the pending turn.
  */
-type AskRunRecord = {
-  owner: AskSessionOwner;
+type AskRunRecord = DetachableRecord & {
   notebookId: string;
   question: string;
   askedAt: string;
@@ -169,8 +168,44 @@ type AskRunRecord = {
   conversationId: string | null;
   jobId: string | null;
   controller: AbortController;
+  // A failure that happened while nobody was looking. The record is kept so
+  // the returning view can report it and hand the question back as a draft.
+  failure: unknown | null;
+};
+
+/**
+ * Shared shape of every record navigation can leave behind. `key` is the
+ * actor/notebook identity a restore matches on; `serial` orders records of the
+ * same identity (a user may start another session and ask again while an
+ * earlier run is still detached — both must survive, and the newest one is the
+ * one a restore brings back first). `owner` is the view the record is bound to;
+ * a record is *detached* while no current view owns it.
+ */
+type DetachableRecord = {
+  key: string;
+  serial: number;
+  owner: AskSessionOwner;
   cancelRequested: boolean;
 };
+
+function latestDetachedRecord<T extends DetachableRecord>(
+  records: readonly T[],
+  owner: AskSessionOwner,
+  current: AskSessionOwner | null,
+): T | null {
+  const key = ownerKey(owner);
+  let latest: T | null = null;
+  for (const record of records) {
+    if (record.key !== key || record.cancelRequested || sameViewOwner(current, record.owner)) continue;
+    if (!latest || record.serial > latest.serial) latest = record;
+  }
+  return latest;
+}
+
+function dropRecord<T>(records: T[], record: T): void {
+  const index = records.indexOf(record);
+  if (index >= 0) records.splice(index, 1);
+}
 
 /**
  * One reasoning-mode intent preview (and, once the model asks for it, the
@@ -180,8 +215,7 @@ type AskRunRecord = {
  * and a notebook restore re-attaches it — resuming the "理解中" turn, re-opening
  * the review, or (if it completed meanwhile) finding the durable run it started.
  */
-type AskIntentRunRecord = {
-  owner: AskSessionOwner;
+type AskIntentRunRecord = DetachableRecord & {
   notebookId: string;
   question: string;
   askedAt: string;
@@ -192,10 +226,12 @@ type AskIntentRunRecord = {
   draftToken: object;
   flowGeneration: number;
   trace: ReasoningTraceStep[];
-  phase: "preview" | "review";
+  // "failed" = the preview request failed while detached; the record waits for
+  // the next restore to report it and return the question as a draft.
+  phase: "preview" | "review" | "failed";
   contract: QueryIntentContract | null;
   understandingMs: number;
-  cancelRequested: boolean;
+  failure: unknown | null;
 };
 
 function sameNotebookOwner(
@@ -326,13 +362,13 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
   const deletedConversationIdsRef = useRef<Map<string, Set<string>>>(new Map());
   const askModeCacheRef = useRef<AskModeCache | null>(null);
   const askModeRequestRef = useRef<AskModeRequest | null>(null);
-  // Keyed by actor/notebook identity: at most one durable run can be in flight
-  // per notebook view (`asking` blocks a second submit), and a detached run is
-  // only ever re-attached to a view of the same identity.
-  const inFlightRunsRef = useRef<Map<string, AskRunRecord>>(new Map());
-  // Same keying for the client-driven intent preview/review that precedes a
-  // reasoning Ask; `submit` refuses a second one while either phase is visible.
-  const intentRunsRef = useRef<Map<string, AskIntentRunRecord>>(new Map());
+  // Every durable run and every intent preview/review that is in flight or
+  // failed while detached. Several records may share one actor/notebook key
+  // (another session can be opened and asked in while an earlier run is still
+  // detached); a restore re-attaches the newest detached one of that identity.
+  const inFlightRunsRef = useRef<AskRunRecord[]>([]);
+  const intentRunsRef = useRef<AskIntentRunRecord[]>([]);
+  const runSerialRef = useRef(0);
 
   if (pendingActorIdRef.current === actorId) pendingActorIdRef.current = null;
   if (propActorIdRef.current !== actorId) {
@@ -455,9 +491,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     if (run) {
       run.cancelRequested = true;
       run.controller.abort();
-      if (intentRunsRef.current.get(ownerKey(run.owner)) === run) {
-        intentRunsRef.current.delete(ownerKey(run.owner));
-      }
+      dropRecord(intentRunsRef.current, run);
     }
     askIntentAbortRef.current?.abort();
     askIntentAbortRef.current = null;
@@ -481,14 +515,13 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
   function visibleIntentRun(): AskIntentRunRecord | null {
     const owner = ownerRef.current;
     if (!owner) return null;
-    const run = intentRunsRef.current.get(ownerKey(owner));
-    return run && !run.cancelRequested && sameViewOwner(owner, run.owner) ? run : null;
+    return intentRunsRef.current.find((run) => (
+      !run.cancelRequested && run.phase !== "failed" && sameViewOwner(owner, run.owner)
+    )) ?? null;
   }
 
   function detachedIntentRunFor(owner: AskSessionOwner): AskIntentRunRecord | null {
-    const run = intentRunsRef.current.get(ownerKey(owner));
-    if (!run || run.cancelRequested || sameViewOwner(ownerRef.current, run.owner)) return null;
-    return run;
+    return latestDetachedRecord(intentRunsRef.current, owner, ownerRef.current);
   }
 
   function detachIntentPreview() {
@@ -530,6 +563,14 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
   }
 
   function attachIntentRun(run: AskIntentRunRecord, owner: AskSessionOwner) {
+    if (run.phase === "failed") {
+      // The preview failed while the user was away: say so now and give the
+      // question back instead of pretending nothing was asked.
+      dropRecord(intentRunsRef.current, run);
+      setQuestion(run.question);
+      effectsRef.current.reportError(run.failure);
+      return;
+    }
     run.owner = owner;
     run.flowGeneration = ++askIntentFlowGenerationRef.current;
     askIntentFlowRef.current = run.phase;
@@ -554,12 +595,30 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
   }
 
   function detachedRunFor(owner: AskSessionOwner): AskRunRecord | null {
-    const run = inFlightRunsRef.current.get(ownerKey(owner));
-    if (!run || run.cancelRequested || sameViewOwner(ownerRef.current, run.owner)) return null;
-    return run;
+    return latestDetachedRecord(inFlightRunsRef.current, owner, ownerRef.current);
+  }
+
+  /**
+   * Whether a detached durable run may be re-attached to a view whose detail
+   * restore has just settled. Before `started` there is nothing server-side to
+   * compare against, so an idle view takes it. After `started` the restored
+   * detail is authoritative: it must advertise this very job as active —
+   * a terminal detail already shows the answer, and re-attaching the transport
+   * would append the same turn a second time when its final event lands.
+   */
+  function canAttachRun(run: AskRunRecord): boolean {
+    if (run.failure) return true;
+    if (run.jobId === null) return askJobIdRef.current === null;
+    return askJobIdRef.current === run.jobId;
   }
 
   function attachDetachedRun(run: AskRunRecord, owner: AskSessionOwner) {
+    if (run.failure) {
+      dropRecord(inFlightRunsRef.current, run);
+      setQuestion(run.question);
+      effectsRef.current.reportError(run.failure);
+      return;
+    }
     // Rebind the still-reading stream to the returning view: from here on
     // `ownsRun()` inside executeAsk is true again, so `started` publishes the
     // durable id into this view and the final answer lands as a turn.
@@ -674,13 +733,13 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     askAbortRef.current?.abort();
     // Detached runs belong to the actor who is leaving; drop their transports
     // too (the durable jobs themselves keep running server-side).
-    for (const run of inFlightRunsRef.current.values()) run.controller.abort();
-    inFlightRunsRef.current.clear();
-    for (const run of intentRunsRef.current.values()) {
+    for (const run of inFlightRunsRef.current) run.controller.abort();
+    inFlightRunsRef.current = [];
+    for (const run of intentRunsRef.current) {
       run.cancelRequested = true;
       run.controller.abort();
     }
-    intentRunsRef.current.clear();
+    intentRunsRef.current = [];
     leaveWorkspace();
     actorGenerationRef.current += 1;
     askModeCacheRef.current = null;
@@ -821,7 +880,14 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       // either would hide the question.
       const intentRun = detachedIntentRunFor(owner);
       const run = detachedRunFor(owner);
-      const latestId = intentRun
+      // Across both kinds the most recently submitted question comes back first.
+      const newerIntent = (
+        intent: AskIntentRunRecord | null,
+        durable: AskRunRecord | null,
+      ): intent is AskIntentRunRecord => Boolean(
+        intent && (!durable || intent.serial > durable.serial),
+      );
+      const latestId = newerIntent(intentRun, run)
         ? intentRun.conversationIdAtStart
         : run ? run.conversationId ?? run.conversationIdAtStart : list?.[0]?.id;
       await restoreLatestConversation(
@@ -830,17 +896,25 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       );
       if (!sameViewOwner(ownerRef.current, owner)) return false;
       // Re-read both: a detached preview may have completed and handed off to
-      // a durable run while the detail was loading. A job the detail restore
-      // projected as active (reconnect polling) is left alone unless it is this
-      // very run, whose live transport then outranks polling.
+      // a durable run while the detail was loading, or the tracked run may have
+      // finished outright. A job the detail restore projected as active
+      // (reconnect polling) is left alone unless it is this very run, whose
+      // live transport then outranks polling.
       const intentNow = detachedIntentRunFor(owner);
       const runNow = detachedRunFor(owner);
-      if (intentNow && askJobIdRef.current === null) {
-        attachIntentRun(intentNow, owner);
+      if ((intentRun || run) && !intentNow && !runNow) {
+        // The work this restore was built around settled while the detail was
+        // loading; its conversation is now durable history, so resolve the
+        // latest session once more instead of leaving the answer area blank.
+        const settled = await loadSessionsFor(owner);
+        if (!sameViewOwner(ownerRef.current, owner)) return false;
+        await restoreLatestConversation(settled ?? [], (id) => applySessionDetail(id, owner));
       } else if (
-        runNow
-        && (askJobIdRef.current === null || askJobIdRef.current === runNow.jobId)
+        newerIntent(intentNow, runNow)
+        && (intentNow.phase === "failed" || askJobIdRef.current === null)
       ) {
+        attachIntentRun(intentNow, owner);
+      } else if (runNow && canAttachRun(runNow)) {
         attachDetachedRun(runNow, owner);
       }
     } catch (error) {
@@ -982,7 +1056,10 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     let startedConversationId = conversationIdAtStart;
     const controller = new AbortController();
     const run: AskRunRecord = {
+      key: ownerKey(runOwner),
+      serial: ++runSerialRef.current,
       owner: runOwner,
+      cancelRequested: false,
       notebookId: runOwner.notebookId,
       question: q,
       askedAt,
@@ -992,10 +1069,9 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       conversationId: null,
       jobId: null,
       controller,
-      cancelRequested: false,
+      failure: null,
     };
-    const runKey = ownerKey(runOwner);
-    inFlightRunsRef.current.set(runKey, run);
+    inFlightRunsRef.current.push(run);
     // `run.owner` is rebound when a notebook restore re-attaches this run.
     const ownsRun = () => sameViewOwner(ownerRef.current, run.owner);
     if (ownsRun()) {
@@ -1096,6 +1172,9 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       setConversationId(response.conversation_id);
     } catch (error) {
       if (!ownsRun()) {
+        // Failed while nobody was looking (not a Stop): keep the record so the
+        // next restore of this notebook reports it and returns the question.
+        if (!isAbortError(error) && !run.cancelRequested) run.failure = error;
         const currentOwner = ownerRef.current;
         if (sameNotebookIdentity(currentOwner, runOwner) && currentOwner) {
           await loadSessionsFor(currentOwner).catch(() => {});
@@ -1110,7 +1189,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       }
       effectsRef.current.reportError(error);
     } finally {
-      if (inFlightRunsRef.current.get(runKey) === run) inFlightRunsRef.current.delete(runKey);
+      if (!run.failure) dropRecord(inFlightRunsRef.current, run);
       if (ownsRun()) {
         if (askAbortRef.current === controller) askAbortRef.current = null;
         askJobIdRef.current = null;
@@ -1155,7 +1234,10 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       return;
     }
     const run: AskIntentRunRecord = {
+      key: ownerKey(owner),
+      serial: ++runSerialRef.current,
       owner,
+      cancelRequested: false,
       notebookId: owner.notebookId,
       question: q,
       askedAt,
@@ -1169,9 +1251,9 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       phase: "preview",
       contract: null,
       understandingMs: 0,
-      cancelRequested: false,
+      failure: null,
     };
-    intentRunsRef.current.set(ownerKey(owner), run);
+    intentRunsRef.current.push(run);
     askIntentFlowRef.current = "preview";
     askIntentAbortRef.current = run.controller;
     askIntentDraftRef.current = q;
@@ -1196,7 +1278,6 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
    * `startAskRun`, so the question is never dropped for having been left.
    */
   async function runIntentPreview(run: AskIntentRunRecord) {
-    const runKey = ownerKey(run.owner);
     const attached = () => !run.cancelRequested && sameViewOwner(ownerRef.current, run.owner);
     const understandingStartedAt = Date.now();
     try {
@@ -1227,7 +1308,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
         return;
       }
       run.trace = replaceLastIntentStep(run.trace, intentUnderstoodStep(contract, understandingMs));
-      if (intentRunsRef.current.get(runKey) === run) intentRunsRef.current.delete(runKey);
+      dropRecord(intentRunsRef.current, run);
       const confirmation = buildAskIntentConfirmation(
         contract,
         contract.resolved_question,
@@ -1267,7 +1348,14 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
         clearPendingTurn();
       }
     } catch (error) {
-      if (intentRunsRef.current.get(runKey) === run) intentRunsRef.current.delete(runKey);
+      if (!isAbortError(error) && !run.cancelRequested && !attached()) {
+        // Failed while detached: nothing visible to report to, and the record
+        // is the only place the question still exists. Keep it for the restore.
+        run.phase = "failed";
+        run.failure = error;
+        return;
+      }
+      dropRecord(intentRunsRef.current, run);
       if (!isAbortError(error) && attached()) effectsRef.current.reportError(error);
       const draft = askIntentDraftRef.current;
       if (askIntentAbortRef.current === run.controller && releaseIntentDraft(run.draftToken)) {
@@ -1299,9 +1387,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     askIntentDraftOwnerRef.current = draftToken;
     const run = visibleIntentRun();
     const retireRun = () => {
-      if (run && intentRunsRef.current.get(ownerKey(run.owner)) === run) {
-        intentRunsRef.current.delete(ownerKey(run.owner));
-      }
+      if (run) dropRecord(intentRunsRef.current, run);
     };
     if (
       review.notebookId !== owner.notebookId
@@ -1358,9 +1444,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     if (run) {
       run.cancelRequested = true;
       run.controller.abort();
-      if (intentRunsRef.current.get(ownerKey(run.owner)) === run) {
-        intentRunsRef.current.delete(ownerKey(run.owner));
-      }
+      dropRecord(intentRunsRef.current, run);
     }
     askIntentFlowGenerationRef.current += 1;
     askIntentFlowRef.current = "idle";
