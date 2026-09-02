@@ -589,17 +589,19 @@ def test_high_fanout_dependents_are_predrained_in_bounded_pages(repo, monkeypatc
     assert all(d.get("knowledge_object_sources", 0) <= 3 for d in pre_pages), (
         "预排水页必须守自己的行预算"
     )
-    pre_ksfe_steps = [
-        i for i, (t, _p, _n, m) in enumerate(_GRAPH_DRAIN_STEPS)
-        if t == "knowledge_source_fact_elements" and not m
+    ksfe_steps = [
+        i for i, (t, _p, _n, _m) in enumerate(_GRAPH_DRAIN_STEPS)
+        if t == "knowledge_source_fact_elements"
     ]
-    assert len(pre_ksfe_steps) == 1
-    ksfe_pages = [d for s_, d in pages if s_ == pre_ksfe_steps[0]]
-    assert ksfe_pages, "级联子表 ksfe 必须由自己的预排水步先行分页排掉"
+    assert len(ksfe_steps) == 1
+    ksfe_pages = [d for s_, d in pages if s_ == ksfe_steps[0]]
+    assert ksfe_pages, "级联子表 ksfe 必须由自己的排水步先行分页排掉"
     assert all(
         d.get("knowledge_source_fact_elements", 0) <= 3 for d in ksfe_pages
-    ), "ksfe 预排水页必须守自己的行预算"
-    # 事实页/终局不再有超预算的级联余地:预排水后 ksfe 残余 ≤阈值。
+    ), "ksfe 排水页必须守自己的行预算"
+    # 事实页/终局不再有超预算的级联余地:排水后 ksfe 残余 ≤阈值,且
+    # counts 契约覆盖级联残余(codex #663 R9 P2:终局显式计数 DELETE,
+    # 级联找不到东西删)。
     assert _count(
         repo,
         "SELECT COUNT(*) FROM knowledge_source_fact_elements WHERE notebook_id=?",

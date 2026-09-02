@@ -299,24 +299,25 @@ _GRAPH_DRAIN_STEPS: tuple[tuple[str, str, int, bool], ...] = (
         2,
         True,
     ),
-    # codex #663 R5 P1: knowledge_source_fact_elements cascades off its
-    # parent fact (fk_ksfe_fact ON DELETE CASCADE, both backends) with
-    # unbounded elements-per-fact fan-out — without its own pre-drain, a
-    # fact page (or the final transaction, when facts sit under the
-    # threshold) cascade-deletes arbitrarily many child rows and the row
-    # budget stops bounding anything. Non-mirrored for the same reason as
-    # the doomed-object pre-steps below: the final pass covers these rows
-    # via the cascade, no counterpart statement exists to mirror. The
-    # predicate rides ksfe's OWN source_id (stamped from the same
-    # extraction run as its fact's), so it marks exactly the children the
-    # cascade would remove.
+    # codex #663 R5 P1 + R9 P2: knowledge_source_fact_elements cascades
+    # off its parent fact (fk_ksfe_fact ON DELETE CASCADE, both backends)
+    # with unbounded elements-per-fact fan-out — without its own drain
+    # step, a fact page (or the final transaction, when facts sit under
+    # the threshold) cascade-deletes arbitrarily many child rows and the
+    # row budget stops bounding anything. MIRRORED (R9 P2): the final
+    # pass now runs the byte-identical DELETE explicitly before the
+    # facts' own — the FK cascade then finds nothing, and the deleted
+    # child rows show up in counts instead of vanishing into the
+    # cascade. The predicate rides ksfe's OWN source_id (stamped from
+    # the same extraction run as its fact's), so it marks exactly the
+    # children the cascade would have removed.
     (
         "knowledge_source_fact_elements",
         "notebook_id=%s AND NOT EXISTS (SELECT 1 FROM sources s "
         "WHERE s.id=knowledge_source_fact_elements.source_id "
         "AND s.notebook_id=%s AND s.source_type IN ('memory','knowhow'))",
         2,
-        False,
+        True,
     ),
     (
         "knowledge_source_facts",
@@ -522,6 +523,18 @@ class KnowledgeStore:
             (notebook_id, notebook_id),
         )
         counts["knowledge_source_fact_backfills"] = cur.rowcount
+        # codex #663 R9 P2: explicit, COUNTED child delete before the
+        # parent facts — the FK cascade (fk_ksfe_fact) then finds
+        # nothing, so the aggregate counts contract covers these rows
+        # and the drain registry keeps a 1:1 mirrored statement.
+        cur = db.execute(
+            "DELETE FROM knowledge_source_fact_elements WHERE notebook_id=%s "
+            "AND NOT EXISTS (SELECT 1 FROM sources s "
+            "WHERE s.id=knowledge_source_fact_elements.source_id "
+            "AND s.notebook_id=%s AND s.source_type IN ('memory','knowhow'))",
+            (notebook_id, notebook_id),
+        )
+        counts["knowledge_source_fact_elements"] = cur.rowcount
         cur = db.execute(
             "DELETE FROM knowledge_source_facts WHERE notebook_id=%s "
             "AND NOT EXISTS (SELECT 1 FROM sources s "
