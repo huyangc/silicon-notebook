@@ -2296,3 +2296,31 @@ def test_analysis_artifact_publication_refuses_deleting_notebook(repo, tmp_path)
     )
     assert issue and issue["notebook_id"] == "nb1"
     assert (artifacts.root / "issues" / "nb1" / "s1" / "source_parse" / "payload").is_file()
+
+
+def test_analysis_artifact_publication_fails_closed_on_probe_error(repo, tmp_path):
+    """变异钉(codex #659 R21 P1)：把 _publication_admitted 的 except 改回
+    「探针出错放行」→ 最终涂抹之后探针瞬断的场景把已删内容重新发布回磁盘,
+    且永远没人再清——本用例注入必炸探针,两条路径都必须拒绝,报红。"""
+    _seed_user_and_notebook(repo)
+    artifacts = repo._runtime.analysis_artifacts
+
+    def _broken_probe(notebook_id):
+        raise RuntimeError("db unreachable (simulated)")
+
+    artifacts.set_notebook_alive_probe(_broken_probe)
+
+    artifacts.save_spreadsheet_manifest("nb1", "s1", {"sheets": []})
+    assert artifacts.load_spreadsheet_manifest("nb1", "s1") is None, (
+        "探针出错必须 fail closed:清单不得落盘"
+    )
+    quarantine = tmp_path / "q.csv"
+    quarantine.write_text("x\n", encoding="utf-8")
+    refused = artifacts.record_issue(
+        notebook_id="nb1", notebook_name="NB", owner_id="u1",
+        source_id="s1", source_title="T", file_name="a.csv",
+        source_type="csv", category="source_parse", code="X",
+        summary="s", occurred_at=NOW, source_path=str(quarantine),
+    )
+    assert refused == {}
+    assert not (artifacts.root / "issues" / "nb1").exists()
