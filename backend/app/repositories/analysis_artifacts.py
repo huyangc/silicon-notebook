@@ -134,16 +134,21 @@ class AnalysisArtifactStore:
         still ahead of us and will sweep whatever we publish; probe failing
         means the notebook is deleting/gone and publishing would retain
         deleted user content with no cleanup path left — refuse. A probe
-        error admits (refusing would destroy a LIVE notebook's manifest on
-        a transient DB hiccup; the doubly-rare retained leftover is the
-        lesser harm and PR-4's存量清扫 backstops it)."""
+        ERROR refuses too (codex #659 R21 P1, fail closed): after the final
+        redaction there is no retrying cleanup left, so admitting on a
+        transient DB failure can permanently retain deleted user content —
+        a documented-privacy-contract violation; whereas a falsely refused
+        LIVE notebook's manifest is exactly what operations.md's own
+        recovery path (user-side reparse rebuilds the snapshot) already
+        covers, and a refused quarantine payload only loses a diagnostic
+        copy."""
         probe = self._notebook_alive
         if probe is None or not notebook_id:
             return True
         try:
             return bool(probe(notebook_id))
-        except Exception:  # noqa: BLE001 — 不确定时保守放行
-            return True
+        except Exception:  # noqa: BLE001 — 不确定时保守拒绝（fail closed）
+            return False
 
     @property
     def root(self) -> Path:
