@@ -727,3 +727,24 @@ def test_run_startup_wires_and_stops_the_notebook_delete_sweeper(monkeypatch):
     finally:
         startup_warmup.close_repository(lease, repo)
     assert nd_module._active is None
+
+
+def test_checkpoint_predicate_treats_a_missing_notebook_as_deleting(repo):
+    """codex #659 R7:检查点谓词必须把「库已物理删除(status_of→None)」与
+    「deleting」同判为中止——quiesce 之前溜过闸的维护作业可能活过整个删除,
+    继续跑会给已不存在的库写闭包外行/产物。这里直测 runtime 接线的真谓词
+    (不是注入替身)。变异钉:谓词退回 == \"deleting\"→本条对 None 的断言红。"""
+    _seed_user_and_notebook(repo)
+    predicate = repo._runtime.knowledge_lifecycle._notebook_deleting
+    assert predicate("nb1") is False  # ready 库不误伤
+
+    with repo._runtime.database.write() as db:
+        db.execute("UPDATE notebooks SET status='deleting' WHERE id='nb1'")
+    assert predicate("nb1") is True
+
+    with repo._runtime.database.write() as db:
+        db.execute("DELETE FROM notebooks WHERE id='nb1'")
+    assert predicate("nb1") is True, (
+        "a physically deleted notebook must read as 'abort maintenance', "
+        "not 'safe to continue'"
+    )

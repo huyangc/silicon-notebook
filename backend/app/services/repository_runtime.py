@@ -1992,9 +1992,15 @@ class RepositoryRuntime:
             note_model_error=note_model_error,
             participant_notebook_ids=self.notebook_store.participant_notebook_ids,
             invalidate_knowledge_counts=self.queries.invalidate_knowledge_counts,
+            # codex #659 R7: a checkpoint must abort BOTH while the delete is
+            # in flight ('deleting') AND after it finished (row gone,
+            # ``status_of`` -> None) — maintenance that slipped past quiesce
+            # can outlive the whole delete, and continuing would write
+            # closure-external rows/artifacts for a notebook that no longer
+            # exists.
             notebook_deleting=(
                 lambda notebook_id: self.notebook_store.status_of(notebook_id)
-                == "deleting"
+                in ("deleting", None)
             ),
         )
         self.scale_artifacts.lifecycle = self.knowledge_lifecycle
