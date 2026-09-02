@@ -1485,7 +1485,7 @@ def test_delete_knowhow_tables_page_drains_each_child_table_in_bounded_sub_batch
     )
     assert count == 1
     assert last == "kt1"
-    assert len(calls) == 6
+    assert len(calls) == 7  # 6 次排水子批 + 父删前一问(R15)
 
     with repo._runtime.database.connect() as db:
         assert db.execute(
@@ -1676,7 +1676,7 @@ def test_delete_indexing_pipeline_stages_page_drains_stage_sources_in_bounded_su
     )
     assert count == 1
     assert last == "kgj1"
-    assert len(calls) == 3
+    assert len(calls) == 4  # 3 次排水子批 + 父删前一问(R15)
 
     with repo._runtime.database.connect() as db:
         assert db.execute(
@@ -1866,7 +1866,7 @@ def test_delete_knowhow_rows_page_drains_cells_in_bounded_sub_batches(repo):
     )
     assert count == 1
     assert last == "kr1"
-    assert len(calls) == 6
+    assert len(calls) == 7  # 6 次排水子批 + 父删前一问(R15)
 
     with repo._runtime.database.connect() as db:
         assert db.execute(
@@ -1982,3 +1982,38 @@ def test_run_chain_does_not_delete_the_knowhow_row_when_the_sub_batch_gate_fails
         assert db.execute(
             "SELECT COUNT(*) AS c FROM knowhow_rows WHERE table_id='kt1'"
         ).fetchone()["c"] == 1
+
+
+def test_parent_delete_is_gated_after_the_child_drain_finishes(repo):
+    """codex #659 R15：子表排水完成之后、父行删除事务之前必须再问一次
+    gate——排水可能长到租/claim 被偷,父删是独立的毁灭性写事务。构造:gate
+    在全部排水子批放行,排水结束后的下一问返回 False→父行(knowhow_rows)
+    必须原样保留,cells 已排空(排水本身合法),返回 (count,None) 游标不前
+    进。变异钉:去掉父删前的 gate 调用→本条红(父行被删)。"""
+    _seed_user_and_notebook(repo)
+    _seed_knowhow_row_with_many_cells(repo, "nb1", "kt1", "kr1", 7)
+    store = repo._runtime.notebook_delete_jobs
+    store._CHILD_BATCH_SIZE = 3
+
+    calls = []
+
+    def gate():
+        calls.append(len(calls))
+        return len(calls) <= 6  # 6 次排水子批放行,第 7 问(父删前)拒绝
+
+    count, last = store.delete_knowhow_rows_page(
+        "nb1", "", 500, batch_ok=gate,
+    )
+    assert count == 1
+    assert last is None, "gate 拦下父删时游标不得前进"
+    assert len(calls) == 7
+
+    with repo._runtime.database.connect() as db:
+        assert db.execute(
+            "SELECT COUNT(*) AS c FROM knowhow_rows WHERE id='kr1'"
+        ).fetchone()["c"] == 1, (
+            "the parent row must survive when ownership is lost after the drain"
+        )
+        assert db.execute(
+            "SELECT COUNT(*) AS c FROM knowhow_cells WHERE row_id='kr1'"
+        ).fetchone()["c"] == 0

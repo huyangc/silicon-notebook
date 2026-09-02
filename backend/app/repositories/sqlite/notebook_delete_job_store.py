@@ -575,6 +575,12 @@ class NotebookDeleteJobStore:
             if not drained:
                 return len(row_ids), None
         rph = ",".join("?" for _ in row_ids)
+        # codex #659 R15: the child drain above may have taken long enough
+        # for the lease/claim to be stolen; the final parent delete is its
+        # own destructive write transaction and must re-check ownership
+        # immediately before it, same contract as every drained sub-batch.
+        if batch_ok is not None and not batch_ok():
+            return len(row_ids), None
         with self.database.write(
             operation="notebook_delete.rows.knowhow_rows"
         ) as db:
@@ -614,6 +620,12 @@ class NotebookDeleteJobStore:
             if not drained:
                 return len(table_ids), None
         tph = ",".join("?" for _ in table_ids)
+        # codex #659 R15: the child drain above may have taken long enough
+        # for the lease/claim to be stolen; the final parent delete is its
+        # own destructive write transaction and must re-check ownership
+        # immediately before it, same contract as every drained sub-batch.
+        if batch_ok is not None and not batch_ok():
+            return len(table_ids), None
         with self.database.write(
             operation="notebook_delete.rows.knowhow_tables"
         ) as db:
@@ -648,6 +660,12 @@ class NotebookDeleteJobStore:
             batch_ok=batch_ok,
         )
         if not drained:
+            return len(job_ids), None
+        # codex #659 R15: the child drain above may have taken long enough
+        # for the lease/claim to be stolen; the final parent delete is its
+        # own destructive write transaction and must re-check ownership
+        # immediately before it, same contract as every drained sub-batch.
+        if batch_ok is not None and not batch_ok():
             return len(job_ids), None
         jph = ",".join("?" for _ in job_ids)
         with self.database.write(
