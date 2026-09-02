@@ -3519,6 +3519,120 @@ test("a persisted preview whose conversation no longer exists is dropped on rest
   expect(pendingIntentStore()).toEqual([]);
 });
 
+// codex #664 r1: several detached previews per notebook survive a reload — the
+// newest comes back with the notebook, the other with its own session.
+test("two clarifications left in different sessions both survive a reload", async () => {
+  api.previewAskIntent.mockImplementation(async (_nb: string, question: string) => contractFor(question, true));
+  api.listConversations.mockResolvedValue([summary("conversation-a"), summary("conversation-b")]);
+  api.getConversation.mockImplementation(async (id: string) => detail(id));
+  const view = render(<Harness />);
+  const first = beginOwnedNotebook();
+  await act(async () => {
+    await value!.restoreNotebook(first);
+  });
+  act(() => value!.selectMode("reasoning"));
+  await act(async () => {
+    await value!.submit("ambiguous in a");
+  });
+  expect(value!.intentReview?.question).toBe("ambiguous in a");
+  await act(async () => {
+    await value!.openSession("conversation-b", 2);
+  });
+  act(() => value!.selectMode("reasoning"));
+  await act(async () => {
+    await value!.submit("ambiguous in b");
+  });
+  expect(value!.intentReview?.question).toBe("ambiguous in b");
+  expect(pendingIntentStore()).toHaveLength(2);
+
+  view.unmount();
+  api.previewAskIntent.mockReset();
+  render(<Harness />);
+  const owner = beginOwnedNotebook(3);
+  await act(async () => {
+    await value!.restoreNotebook(owner);
+    value!.finishNotebookTransition(owner);
+  });
+  // Newest first: B comes back with the notebook…
+  expect(value!.conversationId).toBe("conversation-b");
+  expect(value!.intentReview?.question).toBe("ambiguous in b");
+  // …and A is still there when its own session is opened.
+  await act(async () => {
+    await value!.openSession("conversation-a", 4);
+  });
+  expect(value!.conversationId).toBe("conversation-a");
+  expect(value!.intentReview?.question).toBe("ambiguous in a");
+  expect(api.previewAskIntent).not.toHaveBeenCalled();
+  expect(pendingIntentStore()).toHaveLength(2);
+});
+
+test("a preview that fails on screen forgets its persisted mirror", async () => {
+  api.previewAskIntent.mockRejectedValue(new Error("intent service down"));
+  render(<Harness />);
+  beginOwnedNotebook();
+  act(() => value!.selectMode("reasoning"));
+  await act(async () => {
+    await value!.submit("failing on screen");
+  });
+  expect(effects.reportError).toHaveBeenCalledTimes(1);
+  expect(value!.question).toBe("failing on screen");
+  expect(pendingIntentStore()).toEqual([]);
+});
+
+test("a record another tab owns is not resumed twice", async () => {
+  const held = new Set<string>();
+  const locks = {
+    request: async (name: string, _options: unknown, callback: (lock: unknown) => unknown) => {
+      if (held.has(name)) return callback(null);
+      held.add(name);
+      try {
+        return await callback({ name });
+      } finally {
+        held.delete(name);
+      }
+    },
+  };
+  Object.defineProperty(navigator, "locks", { value: locks, configurable: true });
+  try {
+    const preview = deferred<QueryIntentContract>();
+    api.previewAskIntent.mockReturnValue(preview.promise);
+    api.listConversations.mockResolvedValue([]);
+    const view = render(<Harness />);
+    beginOwnedNotebook();
+    act(() => value!.selectMode("reasoning"));
+    act(() => {
+      void value!.submit("owned elsewhere");
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(held.size).toBe(1);
+    expect(pendingIntentStore()).toHaveLength(1);
+
+    // "Duplicate tab": same session storage copy, but the original tab still
+    // holds the lock. Unmounting releases this instance's lock, so stand in for
+    // the other tab by holding the record's lock name in the fake manager.
+    view.unmount();
+    await act(async () => {
+      await Promise.resolve();
+    });
+    const [stored] = pendingIntentStore() as Array<{ id: string }>;
+    held.add(`silicon_notebook_pending_intent:${stored.id}`);
+    render(<Harness />);
+    const owner = beginOwnedNotebook(2);
+    await act(async () => {
+      await value!.restoreNotebook(owner);
+      value!.finishNotebookTransition(owner);
+    });
+    expect(value!.intentChecking).toBe(false);
+    expect(value!.pendingQuestion).toBe("");
+    expect(api.previewAskIntent).toHaveBeenCalledTimes(1);
+    expect(pendingIntentStore()).toEqual([]);
+  } finally {
+    Reflect.deleteProperty(navigator, "locks");
+  }
+});
+
 // PR #557 regression: `turns`/`sessions`/`pendingTrace`/`feedbackSent` used to
 // fall back to a bare `[]`/`{}` literal whenever the owner is not visible
 // (actorId is null, e.g. logged out / collection page). A bare literal is a
