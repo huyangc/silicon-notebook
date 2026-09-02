@@ -394,9 +394,18 @@ class NotebookStore:
         return row["status"] if row is not None else None
 
     def delete_row_and_orphan_embeddings(
-        self, notebook_id: str, *, job_id: str | None = None
+        self,
+        notebook_id: str,
+        *,
+        job_id: str | None = None,
+        lease_token: str | None = None,
     ) -> list[str]:
-        """``job_id`` is the batch 3·W1 PR-3 Phase A extension point: when
+        """``lease_token`` (codex #659 R14 P2): forwarded verbatim to
+        ``cleanup_job_on`` — see that method's docstring for the
+        transaction-level fence it enforces. Meaningless without ``job_id``
+        and simply passed through as ``None`` in that case.
+
+        ``job_id`` is the batch 3·W1 PR-3 Phase A extension point: when
         given (the delete job's phase-5 finalize step, see
         ``notebook_delete_job_store.NotebookDeleteJobStore``'s module
         docstring), this same transaction ALSO deletes that job's
@@ -441,7 +450,7 @@ class NotebookStore:
                 # A duplicate request that waited behind the winning delete
                 # must not erase the archive the winner just committed.
                 if job_id is not None:
-                    NotebookDeleteJobStore.cleanup_job_on(connection, job_id)
+                    NotebookDeleteJobStore.cleanup_job_on(connection, job_id, lease_token)
                 return []
             # The parent lock blocks new FK children, but an update that keeps
             # the same notebook_id takes no parent-key lock. Lock every row
@@ -493,7 +502,7 @@ class NotebookStore:
                 # function, so the duplicate-request early-return above would
                 # hit UnboundLocalError, roll back, and strand the job row
                 # where neither sweep driver can see it.
-                NotebookDeleteJobStore.cleanup_job_on(connection, job_id)
+                NotebookDeleteJobStore.cleanup_job_on(connection, job_id, lease_token)
         return [row["file_path"] for row in rows]
 
     def _retain_user_activity_before_delete(

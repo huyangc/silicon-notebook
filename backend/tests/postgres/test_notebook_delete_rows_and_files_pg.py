@@ -259,10 +259,10 @@ def test_medium_library_covers_a_class_b_class_and_closure_external_on_postgres(
     original_finalize = rt.notebook_delete._phase_finalize
     phase5_duration_seconds: list[float] = []
 
-    def _timed_finalize(job_id: str, notebook_id: str) -> None:
+    def _timed_finalize(job_id: str, notebook_id: str, lease_token: str) -> None:
         started = time.perf_counter()
         try:
-            original_finalize(job_id, notebook_id)
+            original_finalize(job_id, notebook_id, lease_token)
         finally:
             phase5_duration_seconds.append(time.perf_counter() - started)
 

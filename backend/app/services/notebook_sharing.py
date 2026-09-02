@@ -1158,7 +1158,22 @@ class NotebookSharingService:
             row = self._store.notebook_row_on(db, notebook_id)
             if row is None:
                 raise KeyError(notebook_id)
-            self._store.insert_member_if_live(db, notebook_id, user_id, self._store.now())
+            inserted = self._store.insert_member_if_live(
+                db, notebook_id, user_id, self._store.now()
+            )
+            # codex #659 R14 P2: rowcount==0 is ambiguous between "already a
+            # member" (insert_member_if_live's OR IGNORE/DO NOTHING idempotent
+            # no-op — a legitimate repeat join) and "the liveness guard
+            # blocked the insert" (a concurrent delete job's tombstone
+            # committed between notebook_row_on's read above and this INSERT,
+            # same transaction — PostgreSQL's default READ COMMITTED lets a
+            # LATER statement in the same transaction see an intervening
+            # commit). Ignoring rowcount used to let the second case through
+            # as a fabricated success: a summary handed back for a user who
+            # was never actually added to notebook_members. Disambiguate with
+            # a same-connection membership probe — no extra connection taken.
+            if inserted == 0 and not self._store.is_member_on(db, notebook_id, user_id):
+                raise KeyError(notebook_id)
             notebook = self._summaries.from_row(db, row)
         notebook.access = "reader"
         return notebook

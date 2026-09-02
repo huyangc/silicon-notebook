@@ -3681,6 +3681,29 @@ class NotebookAlreadyDeletingError(RuntimeError):
         self.notebook_id = notebook_id
 
 
+class StaleLeaseFinalizeError(RuntimeError):
+    """codex #659 R14 P2：phase 5 finalize 事务内的租栅撞见 rowcount=0 且作业
+    行仍在——``cleanup_job_on`` 的 ``DELETE FROM notebook_delete_jobs WHERE
+    id=? AND lease_token=?`` 没删到任何行，但那一行本身并未消失（另一个更
+    晚的 worker 已经拿到新租、正在或已经接手这份作业），说明本次调用持有的
+    是一个已经被偷走的旧租。
+
+    这不是「作业行已经不存在」（那种情况是良性 no-op：某个更早的胜出者已经
+    把 notebooks 行和这份作业的全部记账一起提交掉了，见 ``cleanup_job_on``
+    自己的判别逻辑），而是「行还在、但已经换了主人」——finalize 绝不能在
+    这种状态下继续提交。抛出本异常，让调用方 ``with self.database.
+    write(...) as db:`` 的事务块整体回滚：本次 finalize 事务里已经暂存的
+    ``DELETE FROM notebooks`` 等全部撤销，真正的持有者稍后会用自己的租重新
+    走一遍完整的 finalize。"""
+
+    def __init__(self, job_id: str) -> None:
+        super().__init__(
+            f"notebook delete job {job_id}: finalize fenced out — a new "
+            f"owner already holds this job's lease"
+        )
+        self.job_id = job_id
+
+
 class GroupAdminRequiredError(RuntimeError):
     """写事务在落库前复核时发现请求者已不是目标群组的组管理员。
 

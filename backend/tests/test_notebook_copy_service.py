@@ -288,6 +288,66 @@ def test_join_shared_acquires_exactly_one_connection(repo, monkeypatch):
     assert result.access == "reader"
 
 
+# ---------------------------------------------------------------------------
+# codex #659 R14 P2: insert_member_if_live's rowcount used to be ignored.
+# rowcount==0 is ambiguous between "already a member" (the INSERT OR IGNORE /
+# ON CONFLICT DO NOTHING idempotent no-op) and "the liveness guard blocked
+# the insert" (a tombstone committed between notebook_row_on's read and this
+# INSERT, inside the SAME transaction — READ COMMITTED lets a later
+# statement see an intervening commit). Ignoring rowcount let the second
+# case through as a fabricated success. Primary assertions tagged `# MUT`.
+# ---------------------------------------------------------------------------
+
+
+def test_join_shared_is_idempotent_for_an_existing_member(repo):
+    """A user who is ALREADY a member re-joining must still succeed — the
+    rowcount==0 disambiguation must not turn the ordinary idempotent OR
+    IGNORE/DO NOTHING no-op into a spurious 404."""
+    notebook_id = _seed_plain_nb(repo, owner="user-local", name="join-idempotent")
+    _seed_user(repo, "user-repeat-joiner")
+    sharing = repo._runtime.sharing
+    first = sharing.join_shared(notebook_id, "user-repeat-joiner")
+    assert first.id == notebook_id
+    second = sharing.join_shared(notebook_id, "user-repeat-joiner")  # MUT
+    assert second.id == notebook_id
+    assert second.access == "reader"
+    with repo._runtime.database.connect() as db:
+        rows = db.execute(
+            "SELECT COUNT(*) c FROM notebook_members WHERE notebook_id=? AND user_id=?",
+            (notebook_id, "user-repeat-joiner"),
+        ).fetchone()
+    assert rows["c"] == 1  # still exactly one membership row, not duplicated
+
+
+def test_join_shared_rejects_an_insert_blocked_by_the_liveness_guard(repo, monkeypatch):
+    """Same-transaction race: notebook_row_on's read is stubbed to return a
+    (stale) live-looking row, while the REAL underlying notebook is already
+    'deleting' — insert_member_if_live's own WHERE EXISTS(NOTEBOOK_LIVE_SQL)
+    genuinely blocks the INSERT (rowcount 0), and the user was never a
+    member before, so is_member_on also reports False. Must 404 (KeyError),
+    not silently hand back a summary for a user who was never added."""
+    notebook_id = _seed_plain_nb(repo, owner="user-local", name="join-race")
+    _seed_user(repo, "user-raced-joiner")
+    store = repo._runtime.sharing_store
+    with repo._runtime.database.connect() as db:
+        stale_row = dict(store.notebook_row_on(db, notebook_id))  # captured WHILE still live
+    with repo._runtime.database.write() as db:
+        db.execute("UPDATE notebooks SET status='deleting' WHERE id=?", (notebook_id,))
+    # notebook_row_on would itself now return None for this id (it is
+    # liveness-filtered) — stub it to hand back the row it read BEFORE the
+    # tombstone landed, isolating the race at insert_member_if_live's own
+    # independent liveness check rather than re-proving notebook_row_on's.
+    monkeypatch.setattr(store, "notebook_row_on", lambda db, nb_id: dict(stale_row))
+    with pytest.raises(KeyError):
+        repo._runtime.sharing.join_shared(notebook_id, "user-raced-joiner")  # MUT
+    with repo._runtime.database.connect() as db:
+        rows = db.execute(
+            "SELECT COUNT(*) c FROM notebook_members WHERE notebook_id=? AND user_id=?",
+            (notebook_id, "user-raced-joiner"),
+        ).fetchone()
+    assert rows["c"] == 0  # no stray membership row left behind
+
+
 def test_copy_resets_indexing_pipeline_columns_to_builtin(repo):
     """深拷贝复位索引管线四列(desired/version/generation/job authority)。
 
