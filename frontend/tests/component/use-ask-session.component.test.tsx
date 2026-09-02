@@ -3234,6 +3234,58 @@ test("a final that lands during restoration is projected even while its history 
   expect(value!.turns).toHaveLength(2);
 });
 
+// codex #661 r11 P2: opening a session whose detail read fails still re-attaches
+// the run detached in it (the failure is still surfaced to the shell).
+test("opening a session re-attaches its detached run even when the detail read fails", async () => {
+  const stream = deferred<AskResponse>();
+  let onStart: ((jobId: string, conversationId: string) => void | Promise<void>) | undefined;
+  api.runAskStream.mockImplementation((
+    _notebookId: string,
+    _payload: unknown,
+    _onProgress: unknown,
+    _signal?: AbortSignal,
+    nextOnStart?: (jobId: string, conversationId: string) => void | Promise<void>,
+  ) => {
+    onStart = nextOnStart;
+    return stream.promise;
+  });
+  api.listConversations.mockResolvedValue([summary("conversation-x"), summary("conversation-y")]);
+  api.getConversation
+    .mockResolvedValueOnce(detail("conversation-x"))
+    .mockResolvedValueOnce(detail("conversation-y"))
+    .mockRejectedValueOnce(new Error("detail unavailable"));
+  render(<Harness />);
+  const first = beginOwnedNotebook();
+  await act(async () => {
+    await value!.restoreNotebook(first);
+  });
+
+  let submitting!: Promise<void>;
+  act(() => {
+    submitting = value!.submit("follow-up in x");
+  });
+  await act(async () => {
+    await value!.openSession("conversation-y", 2);
+  });
+  expect(value!.asking).toBe(false);
+
+  await act(async () => {
+    await expect(value!.openSession("conversation-x", 3)).rejects.toThrow("detail unavailable");
+  });
+  expect(value!.asking).toBe(true);
+  expect(value!.pendingQuestion).toBe("follow-up in x");
+  expect(value!.conversationId).toBe("conversation-x");
+  expect(value!.turns).toEqual([]);
+
+  await act(async () => {
+    await onStart!("job-x", "conversation-x");
+  });
+  stream.resolve(answer("conversation-x", "answer-follow-up"));
+  await act(async () => submitting);
+  expect(value!.asking).toBe(false);
+  expect(value!.turns.map((turn) => turn.question)).toEqual(["follow-up in x"]);
+});
+
 // PR #557 regression: `turns`/`sessions`/`pendingTrace`/`feedbackSent` used to
 // fall back to a bare `[]`/`{}` literal whenever the owner is not visible
 // (actorId is null, e.g. logged out / collection page). A bare literal is a
