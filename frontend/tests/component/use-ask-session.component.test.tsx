@@ -3113,6 +3113,51 @@ test("a preview whose durable successor settles during restoration still shows i
   expect(value!.turns[1]?.response.answer_id).toBe("answer-follow-up");
 });
 
+// codex #661 r9 P2: a detail read that FAILED cannot vouch that a started job is
+// terminal; the still-live local transport is re-attached instead.
+test("a started run is re-attached when the restore's detail read fails", async () => {
+  const stream = deferred<AskResponse>();
+  let onStart: ((jobId: string, conversationId: string) => void | Promise<void>) | undefined;
+  api.runAskStream.mockImplementation((
+    _notebookId: string,
+    _payload: unknown,
+    _onProgress: unknown,
+    _signal?: AbortSignal,
+    nextOnStart?: (jobId: string, conversationId: string) => void | Promise<void>,
+  ) => {
+    onStart = nextOnStart;
+    return stream.promise;
+  });
+  api.listConversations.mockResolvedValue([summary("conversation-durable")]);
+  api.getConversation.mockRejectedValue(new Error("detail unavailable"));
+  render(<Harness />);
+  beginOwnedNotebook();
+
+  let submitting!: Promise<void>;
+  act(() => {
+    submitting = value!.submit("durable question");
+  });
+  await act(async () => {
+    await onStart!("job-durable", "conversation-durable");
+  });
+  act(() => value!.leaveWorkspace());
+
+  const owner = beginOwnedNotebook(2);
+  await act(async () => {
+    await value!.restoreNotebook(owner);
+    value!.finishNotebookTransition(owner);
+  });
+  expect(api.getConversation).toHaveBeenCalledWith("conversation-durable");
+  expect(value!.asking).toBe(true);
+  expect(value!.pendingQuestion).toBe("durable question");
+  expect(value!.conversationId).toBe("conversation-durable");
+
+  stream.resolve(answer("conversation-durable"));
+  await act(async () => submitting);
+  expect(value!.asking).toBe(false);
+  expect(value!.turns.map((turn) => turn.question)).toEqual(["durable question"]);
+});
+
 // PR #557 regression: `turns`/`sessions`/`pendingTrace`/`feedbackSent` used to
 // fall back to a bare `[]`/`{}` literal whenever the owner is not visible
 // (actorId is null, e.g. logged out / collection page). A bare literal is a
