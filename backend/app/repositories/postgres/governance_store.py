@@ -587,12 +587,20 @@ class GovernanceStore:
         for r in rows:
             if r["member_object_id"] in existing:
                 continue
+            # created_at 用 DB 语句时钟(codex #671 R5 P1):催收窗口的锚点是
+            # 取号事务的 DB 时钟,append 行若沿用应用时钟,跨机偏斜超过
+            # KG_CATCHUP_SKEW_SECONDS 时窗口内落地的行会被判「太旧」而漏搬
+            # ——链 a 的成员静默丢到下一次全量重建。clock_timestamp()(语句
+            # 时刻,advisory lock 之后)而非 now()(事务起点):行的时间戳
+            # ≥ 任何先于它提交的取号锚点,单时钟域闭合,skew 只剩兜 sqlite
+            # 侧同机双时钟的形式余量。`now` 形参保留给别的列消费方(此处
+            # 不再使用)。
             connection.execute(
                 "INSERT INTO concept_clusters (id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,canonical_description,created_at,generation) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,clock_timestamp(),%s)",
                 (self.seams.new_id("cc"), notebook_id, r["canonical_id"],
                  r["member_object_id"], r["canonical_name"], object_type,
-                 r.get("canonical_description", ""), normalize_timestamp(now),
+                 r.get("canonical_description", ""),
                  generation))
             existing.add(r["member_object_id"])
             added += 1
