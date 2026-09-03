@@ -1353,7 +1353,13 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       );
       if (!sameViewOwner(ownerRef.current, owner)) return false;
       if (resumed?.kind === "handoff") {
-        resumeHandoff(resumed.record, owner);
+        // Reconciliation needs history that actually loaded: a failed list or
+        // detail read proves nothing about whether the original POST committed,
+        // and offering the question for re-submission on that basis could
+        // create a duplicate job. Keep the mirror for the next attempt instead.
+        const reconciled = latestId ? loaded === true : list !== null;
+        if (reconciled) resumeHandoff(resumed.record, owner);
+        else releaseIntentRun(resumed.record.id);
       } else if (resumed) {
         attachResumedIntent(resumed.record, owner, latestId ? loaded === true : null);
       } else {
@@ -1472,6 +1478,13 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     // instance does with the stored hand-off.
     for (const run of inFlightRunsRef.current) {
       if (run.mirrorId === null || run.jobId !== null) continue;
+      if (run.cancelRequested) {
+        // Stop was already pressed: a stopped question must never come back as
+        // a resendable draft (its job may still start after the disconnect).
+        removePersistedIntentRun(run.mirrorId);
+        releaseIntentRun(run.mirrorId);
+        continue;
+      }
       run.keepMirror = true;
       run.cancelRequested = true;
       run.controller.abort();

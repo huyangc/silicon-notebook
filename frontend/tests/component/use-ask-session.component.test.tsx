@@ -4074,6 +4074,90 @@ test("a persisted review survives a failed detail read and resumes on the next r
   expect(api.previewAskIntent).not.toHaveBeenCalled();
 });
 
+// codex #664 r7 P1: a hand-off can only be reconciled against history that
+// actually loaded; a failed detail read keeps the mirror for the next attempt
+// rather than offering the question for a possibly duplicate re-submission.
+test("a hand-off is kept, not offered as a draft, when the reconciling detail read fails", async () => {
+  const stream = deferred<AskResponse>();
+  api.runAskStream.mockReturnValue(stream.promise);
+  api.previewAskIntent.mockResolvedValue(contractFor("held until history loads", false));
+  api.listConversations.mockResolvedValue([summary("conversation-x")]);
+  api.getConversation.mockImplementation(async (id: string) => detail(id));
+  const view = render(<Harness />);
+  const first = beginOwnedNotebook();
+  await act(async () => {
+    await value!.restoreNotebook(first);
+  });
+  act(() => value!.selectMode("reasoning"));
+  await act(async () => {
+    void value!.submit("held until history loads");
+    await Promise.resolve();
+  });
+  await settleSubmit();
+  expect((pendingIntentStore()[0] as { phase: string }).phase).toBe("handoff");
+
+  view.unmount();
+  api.previewAskIntent.mockReset();
+  api.getConversation.mockReset();
+  api.getConversation.mockRejectedValueOnce(new Error("detail unavailable"));
+  render(<Harness />);
+  const failing = beginOwnedNotebook(2);
+  await act(async () => {
+    await value!.restoreNotebook(failing);
+    value!.finishNotebookTransition(failing);
+  });
+  await settleSubmit();
+  // Not reconciled: no draft, no notice, mirror still there.
+  expect(value!.question).toBe("");
+  expect(effects.notify).not.toHaveBeenCalledWith("上次提交尚未收到服务端确认，问题已退回输入框，请确认后重新发送");
+  expect(pendingIntentStore()).toHaveLength(1);
+
+  // Next attempt: history loads and shows no job → draft + notice.
+  api.getConversation.mockImplementation(async (id: string) => detail(id));
+  const retry = beginOwnedNotebook(3);
+  await act(async () => {
+    await value!.restoreNotebook(retry);
+    value!.finishNotebookTransition(retry);
+  });
+  await settleSubmit();
+  expect(value!.question).toBe("held until history loads");
+  expect(effects.notify).toHaveBeenCalledWith("上次提交尚未收到服务端确认，问题已退回输入框，请确认后重新发送");
+  expect(pendingIntentStore()).toEqual([]);
+  expect(api.runAskStream).toHaveBeenCalledTimes(1);
+});
+
+// codex #664 r7 P1: a hand-off the user already stopped before `started` must
+// not survive an unmount as a resendable draft.
+test("a hand-off stopped before started does not keep its mirror across an unmount", async () => {
+  const stream = deferred<AskResponse>();
+  api.runAskStream.mockReturnValue(stream.promise);
+  api.previewAskIntent.mockResolvedValue(contractFor("stopped then unmounted", false));
+  api.listConversations.mockResolvedValue([]);
+  const view = render(<Harness />);
+  beginOwnedNotebook();
+  act(() => value!.selectMode("reasoning"));
+  await act(async () => {
+    void value!.submit("stopped then unmounted");
+    await Promise.resolve();
+  });
+  await settleSubmit();
+  expect((pendingIntentStore()[0] as { phase: string }).phase).toBe("handoff");
+  act(() => value!.abort());
+  expect(value!.question).toBe("stopped then unmounted");
+
+  view.unmount();
+  expect(pendingIntentStore()).toEqual([]);
+  render(<Harness />);
+  const owner = beginOwnedNotebook(2);
+  await act(async () => {
+    await value!.restoreNotebook(owner);
+    value!.finishNotebookTransition(owner);
+  });
+  await settleSubmit();
+  expect(value!.question).toBe("");
+  expect(api.runAskStream).toHaveBeenCalledTimes(1);
+});
+
 // PR #557 regression: `turns`/`sessions`/`pendingTrace`/`feedbackSent` used to
 // fall back to a bare `[]`/`{}` literal whenever the owner is not visible
 // (actorId is null, e.g. logged out / collection page). A bare literal is a
