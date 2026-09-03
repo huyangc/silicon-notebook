@@ -81,7 +81,7 @@ def test_migration_0049_applied_and_idempotent(postgres_repository):
 
     migrator = PostgresMigrator(repo._runtime.database)
     final_version = migrator.migrate()
-    assert final_version == 50
+    assert final_version == 51
 
 
 # ---------------------------------------------------------------------------

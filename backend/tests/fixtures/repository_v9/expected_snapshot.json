@@ -1026,9 +1026,15 @@
         "canonical_rel_seq": -1,
         "chunk_elements_indexed": 0,
         "cluster_count": 0,
+        "cluster_generation": 0,
         "cluster_input_version": "fixture-cluster-v1",
         "cluster_mutation_seq": 1,
+        "community_generation": 0,
         "community_seq": -1,
+        "derived_building_claimed_at": null,
+        "derived_building_generation": 0,
+        "derived_catchup_from": null,
+        "derived_generation_counter": 0,
         "dirty": 0,
         "indexing_pipeline_id": "",
         "indexing_pipeline_version": "builtin.chunk.v1",
@@ -1287,8 +1293,8 @@
         "type": "index"
       },
       {
-        "name": "idx_clusters_nb_canonical_member",
-        "sql_sha256": "87ec18477aa4112c371908cd729e0757c3e082f37a9943aafface1d30493af3b",
+        "name": "idx_clusters_nb_canonical_member_gen",
+        "sql_sha256": "f0fef5781128b0deeb7292b42031905dde7f1120f471fcba35923db1bd4588c9",
         "type": "index"
       },
       {
@@ -1297,8 +1303,8 @@
         "type": "index"
       },
       {
-        "name": "idx_clusters_nb_created",
-        "sql_sha256": "62c104f28fe311793fec590a3bbc61fc9418f5f13d531de517f1723a860db089",
+        "name": "idx_clusters_nb_created_gen",
+        "sql_sha256": "c5334cfba0df3bc4ad98d3a5ad68b8aa3689d803cfc1a9159ae2eb2f4c9216cf",
         "type": "index"
       },
       {
@@ -1837,8 +1843,8 @@
         "type": "index"
       },
       {
-        "name": "uq_clusters_notebook_type_member",
-        "sql_sha256": "8ac332952599b7949d12d9591820d427879fda5ccf6b4083857a0db9ace288b0",
+        "name": "uq_clusters_nb_type_member_generation",
+        "sql_sha256": "990451e7100ff78519e17a56b285a7b961fb3860cc2423cdf957877e0bccc0ee",
         "type": "index"
       },
       {
@@ -1978,17 +1984,17 @@
       },
       {
         "name": "communities",
-        "sql_sha256": "91eb710475e4a57de419ec0d2263d7341292b9f326dd35dfdca23a814437e70e",
+        "sql_sha256": "a05b3ea1257fa96a6c4ff99393539a9300356e0f4ae8c633d4c571cc12ea70bd",
         "type": "table"
       },
       {
         "name": "community_members",
-        "sql_sha256": "50ee31d6d76ed64c2216cab94a30f784119d34471735818622a7da0113467dfe",
+        "sql_sha256": "cfac104ab67c5c1d81ec66b1f91db792342e5c3f0b92cabdfa8446a68d52a0d8",
         "type": "table"
       },
       {
         "name": "concept_clusters",
-        "sql_sha256": "18e605e99ada25c02ba36cee4fcdc3490e9131d9b861e07da8788db3074e36ee",
+        "sql_sha256": "5a6ef08d4e706e74d99b204d92df9541a7b6072355a47c5fe14d630ddeb0e6c2",
         "type": "table"
       },
       {
@@ -2373,7 +2379,7 @@
       },
       {
         "name": "unified_kg_state",
-        "sql_sha256": "2956049f4568c4a600beb84e8646def94ed5adffd60126eaaabb6eb96b70fea0",
+        "sql_sha256": "a73577dd5f81ae15082bcdad63b25004c6e39175808366a1b74681d6b11cdc9a",
         "type": "table"
       },
       {
@@ -2412,6 +2418,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 70
+    "user_version": 71
   }
 }
