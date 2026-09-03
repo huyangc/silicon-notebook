@@ -262,6 +262,10 @@ class _RecordingDatabase:
     def write(self) -> "_RecordingDatabase":
         return self
 
+    def connect(self) -> "_RecordingDatabase":
+        # PR-4:sweep 的候选选取挪到只读连接上;同一记录型连接照收其 SQL。
+        return self
+
     def __enter__(self) -> _RecordingConnection:
         return self.connection
 
@@ -318,12 +322,13 @@ def test_write_side_sentinel_actually_executed_never_folds_deleting():
     leaked = [(sql, params) for sql, params in executed if "'deleting'" in sql]
     assert not leaked, f"写侧哨兵语句混入了 'deleting':\n{leaked}"
 
-    # 覆盖度 sanity check:compensate_copy 1 处 DELETE + sweep_stale_copies 每次
-    # 调用各 1 处选取 SELECT(created_by=None 与有值两个分支各调用一次)=
-    # 每后端 3 处、两后端合计 6 处——确认上面那条断言真的看过全部该看的语句,
-    # 不是因为调用没打到目标分支才侥幸通过。
+    # 覆盖度 sanity check(PR-4 逐本事务化后):compensate_copy 1 处 DELETE +
+    # sweep_stale_copies 每次调用 1 处选取 SELECT + 1 处写事务内重验 SELECT
+    # (假连接 fetchall 恒回一行、fetchone 恒回 None → 每次 sweep 恰好各走一遍)
+    # = 每后端 1+2×2=5 处、两后端合计 10 处——确认上面那条断言真的看过全部
+    # 该看的语句,不是因为调用没打到目标分支才侥幸通过。
     sentinel_hits = [sql for sql, _params in executed if _WRITE_SIDE_SENTINEL.search(sql)]
-    assert len(sentinel_hits) == 6, (sentinel_hits, executed)
+    assert len(sentinel_hits) == 10, (sentinel_hits, executed)
 
 
 def _load_module(path: pathlib.Path, name: str):
