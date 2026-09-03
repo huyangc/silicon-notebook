@@ -72,6 +72,33 @@ test("列表语法后的制表符也算进入正文(CommonMark 接受),且原有
   );
 });
 
+test("围栏直接开在列表项那一行时同样受保护,闭合后恢复处理", () => {
+  // codex #670 R2 P2:`- ```text` / `1. ```text` 也是围栏开启。
+  const input = [
+    "- ```text",
+    "  （推断）1. example",
+    "  ```",
+    "（推断）2. after",
+    "1. ~~~",
+    "   （推断）3. inside",
+    "   ~~~",
+    "（推断）4. tail",
+  ].join("\n");
+  assert.equal(
+    normalizeInferenceListMarkers(input),
+    [
+      "- ```text",
+      "  （推断）1. example",
+      "  ```",
+      "2. （推断）after",
+      "1. ~~~",
+      "   （推断）3. inside",
+      "   ~~~",
+      "4. （推断）tail",
+    ].join("\n"),
+  );
+});
+
 test("反引号围栏的 info string 里再出现反引号时不是围栏(CommonMark),后续行照常处理", () => {
   assert.equal(
     normalizeInferenceListMarkers("````foo`bar\n（推断）1. x"),
