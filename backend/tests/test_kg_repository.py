@@ -703,11 +703,21 @@ def test_delete_notebook_kg_matches_a_freshly_created_birth_row_byte_for_byte(re
             "SELECT * FROM unified_kg_state WHERE notebook_id=?", (deleted.id,)
         ).fetchone())
 
-    for column in (
-        "dirty", "kg_mutation_seq", "cluster_mutation_seq", "cluster_input_version",
-        "last_rebuild_at", "object_count", "relation_count", "cluster_count",
-        "community_seq", "canonical_rel_seq", "mention_seq",
-    ):
+    # 批 3·W2(T-5a 收尾):从「枚举包含列」翻转成**全列比对 + 显式豁免清单**
+    # ——新加一列 unified_kg_state 而没决定它的终局重置语义,这里当场红,
+    # 而不是靠人记得回来补枚举。豁免逐条带理由:
+    excluded = {
+        # 身份列,两行天然不同。
+        "notebook_id",
+        # 单调防混叠列:终局恰恰**必须**让它们偏离出生行(重置计数前进、
+        # 代号发生器绝不回卷),各自的行为有专属断言(下面 + 下一条测试)。
+        "kg_reset_epoch",
+        "derived_generation_counter",
+        # 时钟列。
+        "updated_at",
+    }
+    assert set(reset_row) == set(born_row)
+    for column in sorted(set(born_row) - excluded):
         assert reset_row[column] == born_row[column], (
             f"{column} diverged from a fresh birth row: "
             f"{reset_row[column]!r} != {born_row[column]!r}"
@@ -715,6 +725,110 @@ def test_delete_notebook_kg_matches_a_freshly_created_birth_row_byte_for_byte(re
     # kg_reset_epoch is deliberately NOT part of the birth-row contract.
     assert int(born_row["kg_reset_epoch"]) == 0
     assert int(reset_row["kg_reset_epoch"]) == 1
+    assert int(reset_row["derived_generation_counter"]) >= int(
+        born_row["derived_generation_counter"]
+    )
+
+
+def test_delete_notebook_kg_resets_generation_pointers_but_never_the_counter(repo):
+    """批 3·W2 终局契约:两个 published 指针/在飞认领/催收标记随终局归零
+    (并发在飞 rebuild 的翻转双 CAS 因此当场作废),而
+    ``derived_generation_counter`` 是版本键防混叠的单调源——**绝不**回卷,
+    与 kg_reset_epoch 同一条红线。"""
+    nb = repo.create_notebook(NotebookCreate(name="generation reset"))
+    repo.store_kg(
+        nb.id, None,
+        [{"local_id": "C1", "object_type": "concept", "payload": {"name": "x"}, "evidence": []}],
+        [],
+    )
+    store = repo._runtime.unified_kg
+    with repo._write() as db:
+        claim = store.claim_derived_generation(db, nb.id, ttl_seconds=3600)
+        assert claim is not None and claim["generation"] >= 1
+        assert store.flip_cluster_generation(
+            db, nb.id, published_from=claim["cluster_generation"],
+            generation=claim["generation"], catchup_from_ts=claim["ts"],
+            now=claim["ts"],
+        )
+    # 在飞认领占位的场景:再取一个号并保持在飞,终局必须把它清掉。
+    with repo._write() as db:
+        holding = store.claim_derived_generation(db, nb.id, ttl_seconds=3600)
+        assert holding is not None
+
+    repo.delete_notebook_kg(nb.id)
+
+    with repo._connect() as db:
+        row = dict(db.execute(
+            "SELECT cluster_generation, community_generation, "
+            "derived_building_generation, derived_building_claimed_at, "
+            "derived_catchup_from, derived_generation_counter "
+            "FROM unified_kg_state WHERE notebook_id=?", (nb.id,)
+        ).fetchone())
+    assert row["cluster_generation"] == 0
+    assert row["community_generation"] == 0
+    assert row["derived_building_generation"] == 0
+    assert row["derived_building_claimed_at"] is None
+    assert row["derived_catchup_from"] is None
+    assert int(row["derived_generation_counter"]) == int(holding["generation"])
+    # 在飞者(holding)此刻若翻转:published 已被重置 + 认领已被清——双 CAS
+    # 两个方向都作废,standalone delete → flip aborts。
+    with repo._write() as db:
+        assert not store.flip_cluster_generation(
+            db, nb.id, published_from=claim["generation"],
+            generation=holding["generation"], catchup_from_ts=holding["ts"],
+            now=holding["ts"],
+        )
+
+
+def test_startup_recovery_reaps_stale_generations_with_the_two_guards(repo):
+    """批 3·W2 启动恢复:残代行(generation ∉ {published, 在飞})被有界回收;
+    两条保留规则缺一即漏——在飞代行保留(可能是共库离线 CLI 的活认领,真尸体
+    归 TTL 抢占 + 下轮预回收),催收标记在的 notebook 整库跳过(退休代行是
+    欠账的数据源,此刻删它就是重新撕开链 a 的洞)。"""
+    nb = repo.create_notebook(NotebookCreate(name="reap me"))
+    debtor = repo.create_notebook(NotebookCreate(name="debtor"))
+    now = _now()
+
+    def _cluster_row(db, notebook_id, suffix, generation):
+        db.execute(
+            "INSERT INTO concept_clusters (id,notebook_id,canonical_id,"
+            "member_object_id,canonical_name,object_type,created_at,generation) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (f"cc-{notebook_id}-{suffix}", notebook_id, "can", f"ko-{suffix}",
+             "N", "concept", now, generation),
+        )
+
+    with repo._write() as db:
+        db.execute(
+            "UPDATE unified_kg_state SET derived_generation_counter=5, "
+            "cluster_generation=3, derived_building_generation=4, "
+            "derived_building_claimed_at=? WHERE notebook_id=?",
+            (now, nb.id),
+        )
+        for suffix, gen in (("stale", 1), ("published", 3), ("inflight", 4)):
+            _cluster_row(db, nb.id, suffix, gen)
+        db.execute(
+            "UPDATE unified_kg_state SET derived_generation_counter=2, "
+            "cluster_generation=2, derived_catchup_from=? WHERE notebook_id=?",
+            (now, debtor.id),
+        )
+        _cluster_row(db, debtor.id, "retired-debt", 1)
+
+    repo._recover_interrupted_jobs()
+
+    with repo._connect() as db:
+        left = {
+            r["id"]
+            for r in db.execute(
+                "SELECT id FROM concept_clusters WHERE notebook_id IN (?,?)",
+                (nb.id, debtor.id),
+            )
+        }
+    assert left == {
+        f"cc-{nb.id}-published",       # published 代:保留
+        f"cc-{nb.id}-inflight",        # 在飞代:保留(活认领假设)
+        f"cc-{debtor.id}-retired-debt",  # 催收标记在:整库跳过
+    }, left
 
 
 def test_delete_notebook_kg_removes_this_notebooks_kg_analysis_artifacts_ledger(repo):

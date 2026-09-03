@@ -13,6 +13,12 @@ from app.domain.extraction_profiles import LIST_FIELDS, OBJECT_SCHEMAS, OBJECT_T
 
 logger = logging.getLogger("silicon_notebook.sqlite.maintenance")
 
+# 批 3·W2 启动恢复的残代回收预算(镜像 PG 侧 maintenance.py 的两个常数):
+# 每页行数 × 全局页数 = 启动路径愿意为回收付的硬上界,余量由下一轮 rebuild
+# 的预回收接手。
+_RECOVERY_REAP_PAGE_ROWS = 5000
+_RECOVERY_REAP_PAGES_BUDGET = 40
+
 # Both sides originally allocated migration 24 independently.  Version 29 is
 # the merge migration that makes either already-deployed lineage converge.
 # v30 adds idx_sources_notebook_file_hash for content-hash upload dedup /
@@ -3826,6 +3832,42 @@ class SqliteMigrator:
                 """
             )
 
+    def _reap_stale_derived_generations(self) -> None:
+        """批 3·W2 启动恢复:残代回收(sqlite 化身)——语义与保留规则逐条
+        对应 PG 孪生 ``PostgresMaintenanceAdapter._reap_stale_derived_
+        generations`` 的 docstring:state 行入口、催收标记在则整库跳过、
+        在飞代保留(单进程部署下启动时不可能有本进程 rebuild 在飞,但共库的
+        离线 CLI 可能持认领——同一条 TTL 纪律)、全局页预算硬上界。"""
+        from app.repositories.sqlite.unified_kg_store import UnifiedKgStore
+
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT notebook_id, cluster_generation, community_generation, "
+                "derived_building_generation, derived_catchup_from "
+                "FROM unified_kg_state WHERE derived_generation_counter > 0"
+            ).fetchall()
+        budget = _RECOVERY_REAP_PAGES_BUDGET
+        for row in rows:
+            if budget <= 0:
+                return
+            if row["derived_catchup_from"] is not None:
+                continue
+            keep = {int(row["cluster_generation"]),
+                    int(row["community_generation"])}
+            if int(row["derived_building_generation"]):
+                keep.add(int(row["derived_building_generation"]))
+            keep_t = tuple(sorted(keep))
+            for table in ("concept_clusters", "communities",
+                          "community_members"):
+                while budget > 0:
+                    with self._connect() as db:
+                        n = UnifiedKgStore.reap_derived_generations_page(
+                            db, row["notebook_id"], table, keep_t,
+                            _RECOVERY_REAP_PAGE_ROWS)
+                    budget -= 1
+                    if n < _RECOVERY_REAP_PAGE_ROWS:
+                        break
+
     def _recover_interrupted_jobs(self) -> None:
         """服务端启动的崩溃兜底（与版本化 schema 迁移解耦，无条件运行）：后端单进程，
         merge-review / ask 等 daemon 线程任务无法跨进程重启存活，故启动时仍是 'running'
@@ -3943,6 +3985,7 @@ class SqliteMigrator:
         _settle(
             "kg_canonical_scratch", lambda: _write("DELETE FROM kg_canonical_scratch")
         )
+        _settle("derived_generations", self._reap_stale_derived_generations)
 
         if failed_steps:
             logger.error(

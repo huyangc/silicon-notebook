@@ -4,8 +4,9 @@
 形态,无需真 PostgreSQL 服务器——故放在主测试根,不进 ``backend/tests/postgres/``(那目录
 整体在无服务器时 skip)。
 
-验证 ``PostgresMaintenanceAdapter.recover_interrupted_jobs`` 改造后的核心不变量:12 条
-结算步骤各自独立事务、任一条失败只记账并跳过,绝不阻断其余步骤,也绝不向上抛出。
+验证 ``PostgresMaintenanceAdapter.recover_interrupted_jobs`` 改造后的核心不变量:13 条
+结算步骤(批 3·W2 追加 derived_generations 残代回收)各自独立事务、任一条失败只记账并
+跳过,绝不阻断其余步骤,也绝不向上抛出。
 """
 from __future__ import annotations
 
@@ -20,6 +21,14 @@ from app.repositories.postgres.maintenance import PostgresMaintenanceAdapter
 class _FakeCursor:
     def __init__(self, rowcount: int = 0):
         self.rowcount = rowcount
+
+    @staticmethod
+    def fetchall() -> list:
+        return []
+
+    @staticmethod
+    def fetchone() -> None:
+        return None
 
 
 class _FakeWriteConnection:
@@ -45,6 +54,12 @@ class _FakeDatabase:
 
     @contextmanager
     def write(self):
+        yield _FakeWriteConnection(self._executed, self._fail_marker)
+
+    @contextmanager
+    def connect(self):
+        # derived_generations 的入口是一条只读 SELECT(state 行扫描);空结果
+        # ⇒ 零回收写。与 write() 同一套记录/注入规则。
         yield _FakeWriteConnection(self._executed, self._fail_marker)
 
 
@@ -74,11 +89,12 @@ _ALL_STEP_LABELS = (
     "catalog_jobs",
     "kg_cluster_scratch",
     "kg_canonical_scratch",
+    "derived_generations",
 )
 
 
-def test_first_statement_failure_does_not_block_the_remaining_eleven(caplog):
-    """第一条(retained_user_activity 的 DELETE)抛错:其余 11 条仍必须全部执行、函数
+def test_first_statement_failure_does_not_block_the_remaining_twelve(caplog):
+    """第一条(retained_user_activity 的 DELETE)抛错:其余 12 条仍必须全部执行、函数
     本身不向上抛、失败标签进最终汇总日志。"""
     executed: list[str] = []
     runtime = _FakeRuntime(executed, fail_marker="retained_user_activity")
@@ -87,15 +103,16 @@ def test_first_statement_failure_does_not_block_the_remaining_eleven(caplog):
     with caplog.at_level(logging.ERROR, logger="silicon_notebook.postgres.maintenance"):
         adapter.recover_interrupted_jobs()  # ① 必须不向上抛(否则本调用本身就会让测试出错)
 
-    # ② 其余 11 条步骤仍全部执行:除了被注入失败的那条(retained_user_activity 的 SQL
+    # ② 其余 12 条步骤仍全部执行:除了被注入失败的那条(retained_user_activity 的 SQL
     # 从未进 executed),其余每条语句的 SQL 都真的跑到了 fake 连接上。
-    assert len(executed) == 11
+    assert len(executed) == 12
     assert not any("retained_user_activity" in sql for sql in executed)
     assert any("merge_review_jobs" in sql for sql in executed)
     assert any("ask_jobs" in sql for sql in executed)
     assert any("kg_build_jobs" in sql for sql in executed)
     assert any("TRUNCATE kg_cluster_scratch" in sql for sql in executed)
-    assert any("TRUNCATE kg_canonical_scratch" in sql for sql in executed)  # 排在最后,证明真跑到底
+    assert any("TRUNCATE kg_canonical_scratch" in sql for sql in executed)
+    assert any("derived_generation_counter" in sql for sql in executed)  # 排在最后,证明真跑到底
 
     # ③ failed_steps 里出现该标签(通过收尾 logger.error 汇总的消息内容间接验证——
     # failed_steps 是函数局部变量,不对外暴露,消息文本就是它唯一的可观察出口)。
@@ -118,8 +135,8 @@ def test_first_statement_failure_does_not_block_the_remaining_eleven(caplog):
 
 
 def test_last_statement_failure_still_reports_only_that_one_label(caplog):
-    """再钉一次最后一条(kg_canonical_scratch 的 TRUNCATE)失败的对称场景:前面
-    11 条必须已经执行完,不能因为最后一条失败而被追溯性影响。"""
+    """再钉一次尾部步骤(kg_canonical_scratch 的 TRUNCATE)失败的对称场景:之前的
+    步骤必须已经执行完、其后的 derived_generations 照常执行,不能被追溯/连带影响。"""
     executed: list[str] = []
     runtime = _FakeRuntime(executed, fail_marker="kg_canonical_scratch")
     adapter = PostgresMaintenanceAdapter(runtime)
@@ -127,10 +144,11 @@ def test_last_statement_failure_still_reports_only_that_one_label(caplog):
     with caplog.at_level(logging.ERROR, logger="silicon_notebook.postgres.maintenance"):
         adapter.recover_interrupted_jobs()
 
-    assert len(executed) == 11
+    assert len(executed) == 12
     assert any("merge_review_jobs" in sql for sql in executed)
     assert any("TRUNCATE kg_cluster_scratch" in sql for sql in executed)
     assert not any("TRUNCATE kg_canonical_scratch" in sql for sql in executed)
+    assert any("derived_generation_counter" in sql for sql in executed)
 
     summary_records = [
         r for r in caplog.records
@@ -178,6 +196,10 @@ class _FakeDatabaseByIndex:
     def write(self):
         yield _FakeWriteConnectionByIndex(self._counter, self._executed, self._fail_index)
 
+    @contextmanager
+    def connect(self):
+        yield _FakeWriteConnectionByIndex(self._counter, self._executed, self._fail_index)
+
 
 class _FakeRuntimeByIndex:
     def __init__(self, counter: list[int], executed: list[str], fail_index: int):
@@ -190,9 +212,8 @@ class _FakeRuntimeByIndex:
 )
 def test_each_step_failure_in_call_order_is_isolated(caplog, step_index, expected_label):
     """把 ``_ALL_STEP_LABELS`` 用起来(此前定义了却从未被任何用例引用的死代码):按
-    ``recover_interrupted_jobs`` 里 ``_settle(...)`` 的调用顺序,把全部 12 条逐一钉一遍
-    ——不只是 Z2 补测已经手工挑的头(``merge_review_jobs``)尾
-    (``kg_canonical_scratch``)两条。用**第 N 次 execute() 调用**注入失败(而不是按 SQL
+    ``recover_interrupted_jobs`` 里 ``_settle(...)`` 的调用顺序,把全部 13 条逐一钉一遍
+    ——不只是 Z2 补测已经手工挑的头尾两条。用**第 N 次 execute() 调用**注入失败(而不是按 SQL
     文本里能不能找到标签字符串——见 ``_FakeWriteConnectionByIndex`` 的 docstring:两个
     ``sources(...)`` 标签按文本匹配会完全触发不了,静默漏测)。同时这份参数化本身核对了
     ``_ALL_STEP_LABELS`` 的顺序与源码 ``_settle()`` 调用顺序逐字一致——顺序一旦漂移,
@@ -205,7 +226,7 @@ def test_each_step_failure_in_call_order_is_isolated(caplog, step_index, expecte
     with caplog.at_level(logging.ERROR, logger="silicon_notebook.postgres.maintenance"):
         adapter.recover_interrupted_jobs()  # 必须不向上抛
 
-    assert len(executed) == 11  # 其余 11 条仍全部执行
+    assert len(executed) == 12  # 其余 12 条仍全部执行
     summary_records = [
         r for r in caplog.records
         if r.levelno == logging.ERROR and r.getMessage().startswith(
@@ -216,8 +237,8 @@ def test_each_step_failure_in_call_order_is_isolated(caplog, step_index, expecte
     assert expected_label in summary_records[0].getMessage()
 
 
-def test_no_failure_means_no_summary_log_and_all_twelve_run(caplog):
-    """健康路径的对照组:零失败时不发汇总 error 日志,12 条全部执行。"""
+def test_no_failure_means_no_summary_log_and_all_thirteen_run(caplog):
+    """健康路径的对照组:零失败时不发汇总 error 日志,13 条全部执行。"""
     executed: list[str] = []
     runtime = _FakeRuntime(executed, fail_marker="__never_matches__")
     adapter = PostgresMaintenanceAdapter(runtime)
@@ -225,7 +246,7 @@ def test_no_failure_means_no_summary_log_and_all_twelve_run(caplog):
     with caplog.at_level(logging.ERROR, logger="silicon_notebook.postgres.maintenance"):
         adapter.recover_interrupted_jobs()
 
-    assert len(executed) == 12
+    assert len(executed) == 13
     assert not any(
         r.levelno == logging.ERROR for r in caplog.records
     )

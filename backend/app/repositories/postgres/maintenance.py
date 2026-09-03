@@ -57,6 +57,11 @@ _ASSET_SCAN_FETCH_ROWS = 200
 # startup-readiness time budget even if many jobs were interrupted at once.
 _RECOVERY_DELETE_BATCH_ROWS = 5000
 
+# 批 3·W2 启动恢复的全局页预算:残代回收最多做这么多页(每页
+# _RECOVERY_DELETE_BATCH_ROWS 行、独立事务)就收手——启动路径只做「尽力
+# 一截」,余量由下一轮 rebuild 的预回收接手,启动时间预算因此有硬上界。
+_RECOVERY_REAP_PAGES_BUDGET = 40
+
 # 热路径修复批 2(R6)的「非空元素资格判定」谓词——单一定义点,供
 # count_missing_element_vectors 及其配套 discovery/page 站点(见各方法自己的调用)
 # 共用。用 ``psycopg.sql.Literal`` 把 PY_WHITESPACE 安全渲染成同值字面量后直接拼进 SQL
@@ -578,6 +583,48 @@ class PostgresMaintenanceAdapter:
             if deleted < _RECOVERY_DELETE_BATCH_ROWS:
                 return total
 
+    def _reap_stale_derived_generations(self) -> None:
+        """批 3·W2 启动恢复:清掉崩溃遗留的残代行(三张派生表里 generation
+        不在 {cluster published, community published, 在飞} 的行)。
+
+        入口按 state 行走(`derived_generation_counter > 0` 才可能存在非零
+        代次;state 表一 notebook 一行,全扫有界)。两条保留规则:
+          · 催收欠账标记在的 notebook 整库跳过——退休代行是欠账的数据源,
+            此时删它就是把链 a 的洞重新撕开(设计 §1.5 崩溃恢复);
+          · 在飞代(building≠0)保留——它可能是**另一进程**(离线 CLI)的
+            活认领,不是尸体;真尸体由 TTL 抢占 + 下一轮预回收收拾。
+        全局页预算(_RECOVERY_REAP_PAGES_BUDGET)界住启动成本;预算烧完直接
+        收手,余量由下一轮 rebuild 的预回收接手。"""
+        from app.repositories.postgres.unified_kg_store import UnifiedKgStore
+
+        with self._runtime.database.connect() as db:
+            rows = db.execute(
+                "SELECT notebook_id, cluster_generation, community_generation, "
+                "derived_building_generation, derived_catchup_from "
+                "FROM unified_kg_state WHERE derived_generation_counter > 0"
+            ).fetchall()
+        budget = _RECOVERY_REAP_PAGES_BUDGET
+        for row in rows:
+            if budget <= 0:
+                return
+            if row["derived_catchup_from"] is not None:
+                continue
+            keep = {int(row["cluster_generation"]),
+                    int(row["community_generation"])}
+            if int(row["derived_building_generation"]):
+                keep.add(int(row["derived_building_generation"]))
+            keep_t = tuple(sorted(keep))
+            for table in ("concept_clusters", "communities",
+                          "community_members"):
+                while budget > 0:
+                    with self._runtime.database.write() as db:
+                        n = UnifiedKgStore.reap_derived_generations_page(
+                            db, row["notebook_id"], table, keep_t,
+                            _RECOVERY_DELETE_BATCH_ROWS)
+                    budget -= 1
+                    if n < _RECOVERY_DELETE_BATCH_ROWS:
+                        break
+
     def recover_interrupted_jobs(self) -> None:
         """Settle process-owned work abandoned by a previous backend process.
 
@@ -691,6 +738,7 @@ class PostgresMaintenanceAdapter:
         _settle(
             "kg_canonical_scratch", lambda: _write("TRUNCATE kg_canonical_scratch")
         )
+        _settle("derived_generations", self._reap_stale_derived_generations)
 
         if failed_steps:
             logger.error(
