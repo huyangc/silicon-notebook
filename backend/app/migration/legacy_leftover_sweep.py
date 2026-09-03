@@ -17,21 +17,22 @@ distinct 孤儿 ``notebook_id``（一次扫描），再逐 id 走该表的 ``not
 
 **盘半**：5 棵存储根的直接子目录，名字（scale 根还要先剥
 ``SCRATCH_SUFFIXES``/``SCRATCH_INFIX`` 得到基 id）不在 ``notebooks`` 表里的
-即孤儿。``notebooks/``、``assets/`` 两根直删，但设**年龄闸**（内评 P1）：
-``copy_notebook`` 是仓库里唯一「目录先落盘、``notebooks`` 行后提交」的合法
-在线路径（先 ``copytree`` 目的目录、快照物化后才插 copying 哨兵行），窗口
-可达分钟级——闸值内（目录 mtime 距今 < ``min_age_seconds``，CLI 默认取
-``notebook_copy_stale_seconds``）的候选跳过留声，绝不与在途拷贝抢目录；
-过闸的目录与删除作业相位 5 ``_sweep_ingestion_stragglers`` 同款语义（行
-没了/从未提交且早已过窗的目录不会再被任何在线路径认领）。默认闸值与
-拷贝子系统**自己的失活窗口是同一个常量**：目录时间戳超过
-``notebook_copy_stale_seconds`` 仍没有行的拷贝，``sweep_stale_copies``
-按同一 cutoff 也已把它判死——闸的残余假设恰好就是拷贝子系统自身的活性
-契约，不是本清扫另立的时间猜测。把闸调**低**于该窗口（含 0）会掏空这层
-保护，CLI 要求搭配 ``--confirm-service-stopped`` 停服确认才放行
-（codex #666 R3 P1）；调高恒安全。三棵 scale 根
-（``kg_index``/``kg_viz``/``kg_index_partitions``）先取该 id 的跨进程排它
-claim（``database.try_scale_build_lock``）再删同名 + scratch 兄弟：
+即孤儿。核心契约（codex #666 R1/R3/R5 三轮收敛的结论——**时间信号不是
+同步机制**）：``notebooks/``、``assets/`` 两根的删除**只在停服模式**
+（``--confirm-service-stopped``）执行。``copy_notebook`` 是仓库里唯一
+「目录先落盘、``notebooks`` 行后提交」的合法在线路径（先 ``copytree``
+目的目录、快照物化后才插 copying 哨兵行），这个窗口没有上界（慢存储、
+低 ``notebook_copy_stale_seconds``），顶层目录的 ctime 在文件流进子目录
+期间也不动，快照与 rmtree 之间还可能有行刚提交——任何基于时钟的闸都
+堵不严。所以在线模式下这两根的孤儿只**报告**（``requires_service_
+stopped`` 跳过、退出码 1），删除交给停服窗口；在线模式真正动手的只有
+孤儿行（有界写事务）与三棵 scale 根（真排它 claim 互斥）。停服模式下
+年龄闸（``max(mtime, ctime)``，mtime 会被 copytree 从源继承、ctime 用户
+态无法回拨；默认 ``notebook_copy_stale_seconds``）降级为最后一道皮带：
+防「操作者以为停了其实没停干净」，可调低到 0（停服声明已经给过）。
+三棵 scale 根（``kg_index``/``kg_viz``/``kg_index_partitions``）先取该
+id 的跨进程排它 claim（``database.try_scale_build_lock``）再删同名 +
+scratch 兄弟：
 
 * PostgreSQL：真 advisory lock。``None``（别人持有）与
   ``SCALE_BUILD_LOCK_UNAVAILABLE``（无法评估）都**跳过并留声**，绝不硬删；
@@ -296,21 +297,21 @@ def sweep_orphan_disk(
     storage_dir: Path,
     *,
     min_age_seconds: float,
+    service_stopped: bool,
     now: "float | None" = None,
 ) -> DiskSweepReport:
-    """--apply 的盘半:notebooks/assets 过年龄闸后直删,scale 三根持 claim 删。
+    """--apply 的盘半:scale 三根持 claim 删;notebooks/assets 两根只在
+    ``service_stopped=True`` 时删(codex #666 R5 P1:在线模式下没有任何
+    时钟信号能同步「目录先落盘、行后提交」的拷贝窗口——顶层 ctime 在文件
+    流进子目录期间不动、快照与 rmtree 之间行可能刚提交;时间不是锁)。
+    在线模式的直删根孤儿逐本记 ``requires_service_stopped`` 跳过留声。
 
-    年龄闸只管两棵直删根(见模块 docstring 的 ``copy_notebook`` 窗口论证;
-    scale 根的在途写者全部持 claim,由锁互斥兜住,不需要闸)。
-
-    闸的时间信号取 ``max(st_mtime, st_ctime)``(codex #666 R1 P1):
-    ``copy_notebook`` 用 ``shutil.copytree`` 落目的目录,copytree 会把**源
-    目录的旧 mtime** 原样复制过来(``copystat``)——只看 mtime,刚落盘的
-    在途拷贝会被判「старый」而误删。ctime(inode 变更时间)用户态无法回拨、
-    copystat 设 mtime 反而会把它顶到当下,天然不可继承;取二者较新者,
-    继承来的旧 mtime 拦不过新 ctime,真正的存量残渣两者都旧、照常过闸。
-    ``now`` 仅供测试注入模拟时间流逝(ctime 无法人为做旧),生产恒为当前
-    时刻。"""
+    停服模式下年龄闸是最后一道皮带(防「以为停了其实没停」),时间信号取
+    ``max(st_mtime, st_ctime)``(codex #666 R1 P1):copytree 会把**源目录
+    的旧 mtime** 经 ``copystat`` 原样复制过来,只看 mtime 会把刚落盘的目录
+    判旧;ctime 用户态无法回拨、copystat 设 mtime 反而把它顶到当下,天然
+    不可继承——取二者较新者。``now`` 仅供测试注入模拟时间流逝(ctime 无法
+    人为做旧),生产恒为当前时刻。"""
     storage = Path(storage_dir)
     orphans = find_orphan_disk(database, dialect, storage)
     report = DiskSweepReport(removed={root: [] for root in orphans})
@@ -318,6 +319,11 @@ def sweep_orphan_disk(
         now = time.time()
     for root in DIRECT_DISK_ROOTS:
         for notebook_id in orphans[root]:
+            if not service_stopped:
+                report.skipped.append(
+                    (notebook_id, f"requires_service_stopped:{root}")
+                )
+                continue
             target = storage / root / notebook_id
             try:
                 stat = target.lstat()
@@ -388,15 +394,15 @@ def main(argv: "list[str] | None" = None) -> int:
     parser.add_argument("--disk-only", action="store_true", help="只清孤儿目录")
     parser.add_argument(
         "--min-age-seconds", type=int, default=None,
-        help="直删根(notebooks/assets)的年龄闸;inode 时间戳距今更近的跳过。"
-        "默认取 NOTEBOOK_COPY_STALE_SECONDS;低于该窗口(含 0)须搭配 "
-        "--confirm-service-stopped",
+        help="停服模式直删根(notebooks/assets)的年龄闸皮带;inode 时间戳距今"
+        "更近的跳过。默认取 NOTEBOOK_COPY_STALE_SECONDS;只在 "
+        "--confirm-service-stopped 下有意义",
     )
     parser.add_argument(
         "--confirm-service-stopped", action="store_true",
-        help="确认在役服务已停止(batch_ingest 同款停服契约)。年龄闸低于 "
-        "NOTEBOOK_COPY_STALE_SECONDS 时,「不与在途拷贝抢目录」只有停服才成立"
-        "(codex #666 R3 P1),必须显式确认",
+        help="确认在役服务已停止(batch_ingest 同款停服契约)。notebooks/assets"
+        " 两根的删除只在停服模式执行——在线模式没有任何时钟信号能同步拷贝的"
+        "「目录先落盘、行后提交」窗口(codex #666 R5 P1),在线只报告不删",
     )
     parser.add_argument(
         "--statement-timeout-seconds", type=int, default=3600,
@@ -418,18 +424,16 @@ def main(argv: "list[str] | None" = None) -> int:
                 "postgres_statement_timeout_seconds": args.statement_timeout_seconds
             }
         )
-    copy_stale_floor = max(1, settings.notebook_copy_stale_seconds)
+    if args.min_age_seconds is not None and not args.confirm_service_stopped:
+        parser.error(
+            "--min-age-seconds 只在停服清扫直删根时有意义,"
+            "须搭配 --confirm-service-stopped"
+        )
     min_age = (
         args.min_age_seconds
         if args.min_age_seconds is not None
-        else copy_stale_floor
+        else max(1, settings.notebook_copy_stale_seconds)
     )
-    if min_age < copy_stale_floor and not args.confirm_service_stopped:
-        parser.error(
-            "--min-age-seconds 低于 NOTEBOOK_COPY_STALE_SECONDS"
-            f"({copy_stale_floor}s)会让在途拷贝失去年龄闸保护;"
-            "只有停服时才允许,须搭配 --confirm-service-stopped"
-        )
     database = _open_database(settings, dialect)
     storage = Path(str(settings.storage_dir))
     do_rows = not args.disk_only
@@ -447,7 +451,9 @@ def main(argv: "list[str] | None" = None) -> int:
                 )
             if do_disk:
                 disk_report = sweep_orphan_disk(
-                    database, dialect, storage, min_age_seconds=min_age
+                    database, dialect, storage,
+                    min_age_seconds=min_age,
+                    service_stopped=args.confirm_service_stopped,
                 )
                 _print_disk_report(disk_report)
                 disk_residual = find_orphan_disk(database, dialect, storage)

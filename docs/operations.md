@@ -1945,24 +1945,25 @@ needs a one-off offline sweep:
   (`{storage}/notebooks`, `assets`, `kg_index`, `kg_viz`,
   `kg_index_partitions`) whose name — for the three scale roots, after
   stripping `.old`/`.tmp`/`.tmp-<token>` down to the base id — is not in
-  `notebooks`. The `notebooks`/`assets` roots sit behind an **age gate**
-  (`--min-age-seconds`, defaulting to `NOTEBOOK_COPY_STALE_SECONDS`): the
-  copy path writes the destination directory BEFORE committing its
-  `notebooks` row, so any directory younger than the gate is skipped
-  loudly — the sweep never races an in-flight copy. The gate reads
-  `max(mtime, ctime)`: copytree copies the SOURCE directory's old mtime
-  onto the destination, while ctime (inode change time) cannot be set
-  from userspace and is never inherited (codex #666 R1 P1), so a
-  freshly-written in-flight copy is always caught. The default gate is
-  the copy subsystem's OWN staleness window (the same constant
-  `sweep_stale_copies` uses to declare a sentinel dead), so the gate's
-  residual assumption is exactly that subsystem's liveness contract.
-  Lowering the gate below that window (including 0) requires
-  `--confirm-service-stopped` (codex #666 R3 P1) and is refused
-  otherwise; raising it is always safe and needs no confirmation. The three scale roots
-  are swept per notebook under the cross-process exclusive claim shared
-  with scale builds and delete jobs; a held or unevaluable claim skips
-  that notebook loudly, never force-deletes. Symlinks are left alone.
+  `notebooks`. **The `notebooks`/`assets` roots are only deleted in
+  stopped-service mode** (`--confirm-service-stopped`, the same contract
+  as `batch_ingest`; the conclusion three codex rounds converged on —
+  #666 R1/R3/R5 — is that clock signals are not a synchronization
+  mechanism): the copy path writes the destination directory BEFORE
+  committing its `notebooks` row, that window has no upper bound, and
+  the top-level directory's timestamps do not move while files stream
+  into subdirectories. In live mode orphans under these two roots are
+  only REPORTED (skipped as `requires_service_stopped`, exit 1) and
+  their deletion is left to a stopped window. In stopped mode the age
+  gate (`--min-age-seconds`, defaulting to
+  `NOTEBOOK_COPY_STALE_SECONDS`, reading `max(mtime, ctime)` — mtime is
+  inherited from the source by copytree, ctime cannot be set from
+  userspace) is demoted to a final belt against "thought it was
+  stopped, wasn't", and may be lowered to 0 explicitly. The three scale
+  roots are swept per notebook under the cross-process exclusive claim
+  shared with scale builds and delete jobs and are safe in live mode; a
+  held or unevaluable claim skips that notebook loudly, never
+  force-deletes. Symlinks are left alone.
 
 ```bash
 # Read-only inventory (default): per-table orphan row counts + per-root orphan ids
@@ -1977,15 +1978,18 @@ printed. Both the inspect counts and the post-apply residual check are
 full anti-join table scans over the five tables — minutes of I/O-heavy
 reading at production scale, so prefer off-peak hours (the PostgreSQL
 statement timeout can be overridden with `--statement-timeout-seconds`,
-default 3600). Exit codes: `0` done; `1` the apply had skips (age gate or
-busy claims), undeletable paths, or residual orphan rows — re-running
-converges, and anything that remains is investigated per printed id; `2`
-argument refusal. A SQLite deployment has no cross-process claim and the
-script sweeps de-registered ids directly (a single-process service cannot
-start a legitimate concurrent writer for an id that is no longer in
-`notebooks`; the module docstring carries the argument); against
-PostgreSQL it can run beside the live service (in-flight copies are
-protected by the age gate, in-flight builds/delete jobs by the claim).
+default 3600). Exit codes: `0` done; `1` the apply had skips (live-mode
+direct roots, the age gate, or busy claims), undeletable paths, or
+residual orphan rows — re-running (or a stopped window for the direct
+roots) converges, and anything that remains is investigated per printed
+id; `2` argument refusal. In live mode (no stopped-service confirmation)
+the sweep only touches orphan rows (bounded write transactions) and the
+three scale roots (claim-mutexed) — safe beside the live service on both
+backends; deleting under `notebooks`/`assets` requires a stopped window.
+The SQLite scale roots have no cross-process claim and the script sweeps
+de-registered ids directly (a single-process service cannot start a
+legitimate concurrent writer for an id that is no longer in `notebooks`;
+the module docstring carries the argument).
 
 ## Automatic analysis-failure archive
 

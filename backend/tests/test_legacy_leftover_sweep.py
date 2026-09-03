@@ -168,7 +168,10 @@ def test_disk_sweep_removes_orphans_and_scratch_keeps_live_and_symlinks(repo):
     # inspect 只读:全部目录原样还在
     assert (storage / "kg_index" / f"{ghost}.tmp-tok1").is_dir()
 
-    report = sweep_orphan_disk(_database(repo), "sqlite", storage, min_age_seconds=0)
+    report = sweep_orphan_disk(
+        _database(repo), "sqlite", storage,
+        min_age_seconds=0, service_stopped=True,
+    )
     assert isinstance(report, DiskSweepReport) and report.clean
     assert report.removed == {
         root: [ghost] for root in DIRECT_DISK_ROOTS + SCALE_DISK_ROOTS
@@ -197,7 +200,10 @@ def test_disk_sweep_skips_scale_roots_when_claim_not_held(repo, attempt, reason)
     database = _database(repo)
     database.try_scale_build_lock = lambda notebook_id: attempt
 
-    report = sweep_orphan_disk(database, "sqlite", storage, min_age_seconds=0)
+    report = sweep_orphan_disk(
+        database, "sqlite", storage,
+        min_age_seconds=0, service_stopped=True,
+    )
     assert report.skipped == [(ghost, reason)]
     assert not report.clean
     for root in DIRECT_DISK_ROOTS:
@@ -217,7 +223,8 @@ def test_disk_sweep_age_gate_protects_recent_direct_dirs(repo):
     _seed_disk(storage, ghost, live)
 
     report = sweep_orphan_disk(
-        _database(repo), "sqlite", storage, min_age_seconds=3600
+        _database(repo), "sqlite", storage,
+        min_age_seconds=3600, service_stopped=True,
     )
     assert sorted(report.skipped) == [
         (ghost, "recent_dir:assets"), (ghost, "recent_dir:notebooks"),
@@ -230,7 +237,7 @@ def test_disk_sweep_age_gate_protects_recent_direct_dirs(repo):
 
     report = sweep_orphan_disk(
         _database(repo), "sqlite", storage,
-        min_age_seconds=3600, now=time.time() + 7200,
+        min_age_seconds=3600, service_stopped=True, now=time.time() + 7200,
     )
     assert report.clean
     for root in DIRECT_DISK_ROOTS:
@@ -251,7 +258,8 @@ def test_disk_sweep_age_gate_ignores_inherited_old_mtime(repo):
         os.utime(storage / root / ghost, (stale, stale))  # 继承来的旧 mtime
 
     report = sweep_orphan_disk(
-        _database(repo), "sqlite", storage, min_age_seconds=3600
+        _database(repo), "sqlite", storage,
+        min_age_seconds=3600, service_stopped=True,
     )
     assert sorted(report.skipped) == [
         (ghost, "recent_dir:assets"), (ghost, "recent_dir:notebooks"),
@@ -286,7 +294,10 @@ def test_disk_sweep_stops_scale_sweep_when_claim_lost_midway(repo):
 
     database = _database(repo)
     database.try_scale_build_lock = lambda notebook_id: _LossyLock()
-    report = sweep_orphan_disk(database, "sqlite", storage, min_age_seconds=0)
+    report = sweep_orphan_disk(
+        database, "sqlite", storage,
+        min_age_seconds=0, service_stopped=True,
+    )
     assert (ghost, "lock_lost_mid_sweep") in report.skipped
     # 第一次复验通过删掉 kg_index 下排序最前的 .tmp-tok1,第二次复验失败停手
     assert not (storage / "kg_index" / f"{ghost}.tmp-tok1").exists()
@@ -306,7 +317,10 @@ def test_disk_sweep_lock_probe_error_skips_that_id_only(repo):
         raise RuntimeError("pool down")
 
     database.try_scale_build_lock = exploding_probe
-    report = sweep_orphan_disk(database, "sqlite", storage, min_age_seconds=0)
+    report = sweep_orphan_disk(
+        database, "sqlite", storage,
+        min_age_seconds=0, service_stopped=True,
+    )
     assert report.skipped == [(ghost, "lock_probe_error")]
     for root in DIRECT_DISK_ROOTS:
         assert not (storage / root / ghost).exists()
@@ -328,7 +342,10 @@ def test_failed_paths_are_storage_relative(repo):
     _shutil.rmtree(bad)
     bad.symlink_to(storage / "kg_viz" / live)
 
-    report = sweep_orphan_disk(_database(repo), "sqlite", storage, min_age_seconds=0)
+    report = sweep_orphan_disk(
+        _database(repo), "sqlite", storage,
+        min_age_seconds=0, service_stopped=True,
+    )
     assert report.failed_paths == [f"kg_viz/{ghost}.old"]
     assert not any(str(storage) in p for p in report.failed_paths)
     assert bad.is_symlink()
@@ -382,18 +399,44 @@ def test_cli_inspect_is_readonly_and_apply_sweeps(repo, tmp_path, capsys):
     assert "community_members: 0" in out
 
 
-def test_cli_apply_exits_1_when_age_gate_skips(repo, capsys):
-    """对外契约 pin:退出码 1 = apply 有跳过。默认年龄闸
-    (NOTEBOOK_COPY_STALE_SECONDS)拦下刚落盘的直删根候选 → 1,目录保留。"""
+def test_disk_sweep_live_mode_never_deletes_direct_roots(repo):
+    """codex #666 R5 P1 pin:在线模式(service_stopped=False)下 notebooks/
+    assets 两根**只报告不删**——没有任何时钟信号能同步拷贝的「目录先落盘、
+    行后提交」窗口;scale 三根仍持 claim 照清。"""
+    live = _mk_nb(repo)
+    storage = repo._runtime.source_files.storage_dir
+    ghost = "nb-ghost011"
+    _seed_disk(storage, ghost, live)
+
+    report = sweep_orphan_disk(
+        _database(repo), "sqlite", storage,
+        min_age_seconds=0, service_stopped=False,
+    )
+    assert sorted(report.skipped) == [
+        (ghost, "requires_service_stopped:assets"),
+        (ghost, "requires_service_stopped:notebooks"),
+    ]
+    assert not report.clean
+    for root in DIRECT_DISK_ROOTS:
+        assert (storage / root / ghost / "f.bin").is_file(), (
+            "在线模式绝不许碰直删根——时间不是锁"
+        )
+    for root in SCALE_DISK_ROOTS:
+        assert not (storage / root / ghost).exists()
+
+
+def test_cli_apply_exits_1_when_live_mode_reports_direct_orphans(repo, capsys):
+    """对外契约 pin:退出码 1 = apply 有跳过。在线模式(无停服确认)下直删
+    根孤儿被记 requires_service_stopped → 1,目录保留,scale 根照清。"""
     live = _mk_nb(repo)
     storage = repo._runtime.source_files.storage_dir
     _seed_disk(storage, "nb-ghost004", live)
 
     assert main(["--apply", "--disk-only"]) == 1
     out = capsys.readouterr().out
-    assert "recent_dir:notebooks" in out
+    assert "requires_service_stopped:notebooks" in out
     assert (storage / "notebooks" / "nb-ghost004").is_dir()
-    # scale 根不受闸管,已在同一轮清掉
+    # scale 根由 claim 互斥兜住,在线模式照清
     assert not (storage / "kg_index" / "nb-ghost004").exists()
 
 
@@ -434,15 +477,20 @@ def test_cli_rejects_contradictory_flags(repo):
     assert excinfo.value.code == 2
 
 
-def test_cli_low_age_gate_requires_service_stopped_confirmation(repo):
-    """codex #666 R3 P1 pin:年龄闸低于 NOTEBOOK_COPY_STALE_SECONDS(含 0)
-    会掏空「不与在途拷贝抢目录」的承诺——没有停服确认必须拒绝(退出 2),
-    带 --confirm-service-stopped 才放行;调高闸值不需要确认。"""
+def test_cli_min_age_requires_service_stopped_and_belt_still_guards(repo, capsys):
+    """codex #666 R3/R5 P1 pin:--min-age-seconds 只在停服模式有意义,单独
+    出现拒绝(退出 2);停服模式下年龄闸是防「没停干净」的皮带——刚落盘的
+    目录仍被拦下(退出 1)。"""
     with pytest.raises(SystemExit) as excinfo:
         main(["--apply", "--disk-only", "--min-age-seconds", "0"])
     assert excinfo.value.code == 2
-    # 高于窗口的闸恒安全,无须确认(fresh 目录会被闸拦下 → 退出 1)
+
     storage = repo._runtime.source_files.storage_dir
     _seed_disk(storage, "nb-ghost009", _mk_nb(repo))
-    assert main(["--apply", "--disk-only", "--min-age-seconds", "999999"]) == 1
+    assert main([
+        "--apply", "--disk-only", "--confirm-service-stopped",
+        "--min-age-seconds", "999999",
+    ]) == 1
+    out = capsys.readouterr().out
+    assert "recent_dir:notebooks" in out
     assert (storage / "notebooks" / "nb-ghost009").is_dir()
