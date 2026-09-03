@@ -673,8 +673,10 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
    * pushed as the view's own (not detached): the caller attaches it and, for the
    * preview phase, re-issues the understanding request the reload aborted.
    */
+  // A claimed record, not yet an in-memory run: the caller materializes it only
+  // once the conversation detail it belongs to has actually loaded.
   type ResumedIntent =
-    | { kind: "intent"; run: AskIntentRunRecord }
+    | { kind: "intent"; record: PersistedIntentRun }
     | { kind: "handoff"; record: PersistedIntentRun };
 
   async function resumePersistedIntent(
@@ -709,6 +711,16 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     }
     if (!persisted || !sameViewOwner(ownerRef.current, owner)) return null;
     if (persisted.phase === "handoff") return { kind: "handoff", record: persisted };
+    return { kind: "intent", record: persisted };
+  }
+
+  /**
+   * Turn a claimed preview/review record into this view's in-memory run. Only
+   * called after the conversation detail it belongs to has loaded: a run that
+   * existed before a failed detail read would be detached by the retry's
+   * transition and its mirror deleted with it.
+   */
+  function materializeIntentRun(persisted: PersistedIntentRun, owner: AskSessionOwner): AskIntentRunRecord {
     const contract = persisted.phase === "review" ? persisted.contract : null;
     const run: AskIntentRunRecord = {
       key: ownerKey(owner),
@@ -741,7 +753,35 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       mirrored: true,
     };
     intentRunsRef.current.push(run);
-    return { kind: "intent", run };
+    return run;
+  }
+
+  /**
+   * Bring a claimed preview/review back into `owner`'s view once its detail
+   * step is over. `detailLoaded` is null when there was no detail to load (a
+   * first question), true when it loaded, false when it failed or was refused:
+   * then the record is left in storage (lock released) for the next attempt.
+   */
+  function attachResumedIntent(
+    persisted: PersistedIntentRun,
+    owner: AskSessionOwner,
+    detailLoaded: boolean | null,
+  ) {
+    if (detailLoaded === false) {
+      releaseIntentRun(persisted.id);
+      return;
+    }
+    if (askJobIdRef.current !== null) {
+      // A job is already active in that conversation: the stored preview is
+      // stale relative to what the server knows. Drop it rather than stack.
+      removePersistedIntentRun(persisted.id);
+      releaseIntentRun(persisted.id);
+      return;
+    }
+    const run = materializeIntentRun(persisted, owner);
+    attachIntentRun(run, owner);
+    // The reload aborted the understanding request; issue it again.
+    if (run.phase === "preview") void runIntentPreview(run);
   }
 
   function detachedIntentRunFor(
@@ -1303,7 +1343,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       const latestId = resumed?.kind === "handoff"
         ? resumed.record.conversationIdAtStart ?? list?.[0]?.id
         : resumed
-          ? resumed.run.conversationIdAtStart
+          ? resumed.record.conversationIdAtStart
           : newerIntent(intentRun, run)
             ? intentRun.conversationIdAtStart
             : run ? run.conversationId ?? run.conversationIdAtStart : list?.[0]?.id;
@@ -1315,16 +1355,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       if (resumed?.kind === "handoff") {
         resumeHandoff(resumed.record, owner);
       } else if (resumed) {
-        if (askJobIdRef.current === null) {
-          attachIntentRun(resumed.run, owner);
-          // The reload aborted the understanding request; issue it again.
-          if (resumed.run.phase === "preview") void runIntentPreview(resumed.run);
-        } else {
-          // A job is already active in that conversation: the stored preview is
-          // stale relative to what the server knows. Drop it rather than stack.
-          dropRecord(intentRunsRef.current, resumed.run);
-          forgetPersistedIntent(resumed.run);
-        }
+        attachResumedIntent(resumed.record, owner, latestId ? loaded === true : null);
       } else {
         applyDetachedWork(owner, selection, loaded === true);
       }
@@ -1375,13 +1406,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
         if (resumed?.kind === "handoff") {
           resumeHandoff(resumed.record, owner);
         } else if (resumed) {
-          if (askJobIdRef.current === null) {
-            attachIntentRun(resumed.run, owner);
-            if (resumed.run.phase === "preview") void runIntentPreview(resumed.run);
-          } else {
-            dropRecord(intentRunsRef.current, resumed.run);
-            forgetPersistedIntent(resumed.run);
-          }
+          attachResumedIntent(resumed.record, owner, true);
         }
       } else if (applied) {
         applyDetachedWork(owner, selection, true, id);
@@ -1617,6 +1642,9 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
           startedConversationId = durableConversationId;
           run.jobId = jobId;
           run.conversationId = durableConversationId;
+          // The server now owns the question durably — whatever happens next
+          // (including the pre-start Stop below), the tab's mirror is done.
+          retireMirror();
           if (cancelRequestedControllersRef.current.delete(controller)) {
             const cancelKey = `${runOwner.notebookId}\u0000${jobId}`;
             // A detached pre-start Stop and a restored active-job Stop share the
@@ -1647,8 +1675,6 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
             controller.abort();
             return;
           }
-          // The server now owns the question durably: the tab's mirror is done.
-          retireMirror();
           const ownsVisibleRun = ownsRun();
           if (ownsVisibleRun) {
             askJobIdRef.current = jobId;
@@ -1803,7 +1829,19 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     // claim first. The id is fresh, so the claim only fails without Web Locks
     // support (then it is granted) — but the order is what makes it airtight.
     const owned = await claimIntentRun(run.persistId);
-    if (run.cancelRequested || run.phase === "failed") return;
+    if (run.keepMirror) {
+      // Unmounted while the claim was pending: the continuation is retired,
+      // but the question must still reach the mirror for the next instance —
+      // and the lock just granted must not stay held by a dead instance.
+      run.mirrored = owned;
+      persistIntentRun(run);
+      releaseIntentRun(run.persistId);
+      return;
+    }
+    if (run.cancelRequested || run.phase === "failed") {
+      releaseIntentRun(run.persistId);
+      return;
+    }
     run.mirrored = owned;
     persistIntentRun(run);
     await runIntentPreview(run);
