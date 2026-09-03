@@ -64,6 +64,15 @@ def test_claim_lifecycle_and_ttl_preemption(postgres_database):
         # 被抢占者迟到的 finally 释放:CAS 不匹配,no-op,不误清抢占者。
         UnifiedKgStore.release_derived_claim(db, "nb-claim", 1)
         assert UnifiedKgStore.derived_claim_still_held(db, "nb-claim", 2)
+        # 心跳续租 CAS(R13):只续自己的——抢占者(gen 2)续得动,被抢占者
+        # (gen 1)的迟到心跳 no-op;续租后 claimed_at 前进(TTL 重新起算)。
+        assert UnifiedKgStore.refresh_derived_claim(db, "nb-claim", 2)
+        assert not UnifiedKgStore.refresh_derived_claim(db, "nb-claim", 1)
+        refreshed = db.execute(
+            "SELECT derived_building_claimed_at >= now() - interval '5 seconds' AS fresh "
+            "FROM unified_kg_state WHERE notebook_id='nb-claim'"
+        ).fetchone()
+        assert refreshed["fresh"]
         # 自己的释放正常生效。
         UnifiedKgStore.release_derived_claim(db, "nb-claim", 2)
         assert not UnifiedKgStore.derived_claim_still_held(db, "nb-claim", 2)

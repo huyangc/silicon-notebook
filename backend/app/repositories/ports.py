@@ -2473,6 +2473,10 @@ class UnifiedKgStorePort(Protocol):
         db: object, notebook_id: str, generation: int
     ) -> None: ...
     @staticmethod
+    def refresh_derived_claim(
+        db: object, notebook_id: str, generation: int
+    ) -> bool: ...
+    @staticmethod
     def derived_claim_still_held(
         db: object, notebook_id: str, generation: int
     ) -> bool: ...

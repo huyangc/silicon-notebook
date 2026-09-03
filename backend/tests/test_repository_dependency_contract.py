@@ -176,6 +176,8 @@ LIFECYCLE_STORE_CALLS = {
         "claim_derived_generation",
         "release_derived_claim",
         "derived_claim_still_held",
+        # R13:长 LLM 阶段的认领心跳续租(stage 边界 + 分块回调处调用)。
+        "refresh_derived_claim",
         "write_cluster_map_generation",
         "flip_cluster_generation",
         "clear_catchup_marker",

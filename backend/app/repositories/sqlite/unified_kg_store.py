@@ -477,6 +477,19 @@ class UnifiedKgStore:
         )
 
     @staticmethod
+    def refresh_derived_claim(
+        db: sqlite3.Connection, notebook_id: str, generation: int
+    ) -> bool:
+        # 认领心跳续租——理由见 PG 孪生 docstring。
+        cur = db.execute(
+            "UPDATE unified_kg_state SET "
+            "derived_building_claimed_at=datetime('now') "
+            "WHERE notebook_id=? AND derived_building_generation=?",
+            (notebook_id, generation),
+        )
+        return cur.rowcount > 0
+
+    @staticmethod
     def derived_claim_still_held(
         db: sqlite3.Connection, notebook_id: str, generation: int
     ) -> bool:
