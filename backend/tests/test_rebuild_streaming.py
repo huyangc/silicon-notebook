@@ -220,8 +220,9 @@ def test_scratch_seed_and_cluster_swap_keep_store_seams(repo, monkeypatch):
     no callers left once this test stopped exercising them). It now stages
     the seed->canonical mapping into kg_canonical_scratch (a batched
     preparation segment, mirroring insert_scratch_rows below) and then
-    swaps concept_clusters in one pure-SQL DELETE+INSERT...SELECT
-    (swap_cluster_map_from_scratch) that joins the two scratch tables —
+    writes the in-flight generation's concept_clusters rows in one pure-SQL
+    INSERT...SELECT (write_cluster_map_generation — 批 3·W2:无 DELETE、无
+    advisory lock,四列唯一按代隔离) that joins the two scratch tables —
     this test's job is to keep pinning THAT sequence instead.
     """
     import sqlite3
@@ -273,7 +274,7 @@ def test_scratch_seed_and_cluster_swap_keep_store_seams(repo, monkeypatch):
         ("scratch_vector_rows", True),
         ("clear_canonical_scratch_run", False),
         ("insert_canonical_scratch_rows", False),
-        ("swap_cluster_map_from_scratch", False),
+        ("write_cluster_map_generation", False),
     ):
         spy(name, cursor=cursor)
     progress = []
@@ -290,12 +291,12 @@ def test_scratch_seed_and_cluster_swap_keep_store_seams(repo, monkeypatch):
     assert names.index("insert_scratch_rows") < names.index("scratch_vector_rows")
     assert names.index("scratch_vector_rows") < names.index("clear_canonical_scratch_run")
     assert names.index("clear_canonical_scratch_run") < names.index("insert_canonical_scratch_rows")
-    assert names.index("insert_canonical_scratch_rows") < names.index("swap_cluster_map_from_scratch")
+    assert names.index("insert_canonical_scratch_rows") < names.index("write_cluster_map_generation")
     for name, db_id, *_ in events:
         if name in {
             "clear_scratch_run", "insert_scratch_rows",
             "clear_canonical_scratch_run", "insert_canonical_scratch_rows",
-            "swap_cluster_map_from_scratch",
+            "write_cluster_map_generation",
         }:
             assert db_id in opened_writes
         elif name not in {"write.begin", "write.commit"}:

@@ -58,6 +58,7 @@ from app.repositories.ports import (
     GovernanceStorePort,
     KgBuildAlreadyRunning,
     KgBuildJobStorePort,
+    KgDerivedGenerationPreempted,
     KgMaintenanceAlreadyRunning,
     KnowledgeStorePort,
     NotebookDeletingAbortsMaintenanceError,
@@ -4636,14 +4637,13 @@ class KnowledgeLifecycleService:
                                     canonical_names: Dict[str, str],
                                     desc_by_cid: Optional[Dict[str, str]] = None,
                                     desc_sig_by_cid: Optional[Dict[str, str]] = None,
-                                    run_id: str = "") -> None:
-        """Persist concept_clusters rows for one type: matches write_clusters'
-        columns and DELETE scope EXACTLY (clear-by-(notebook_id, object_type),
-        then insert one row per member object). Rows whose seed has no
-        canonical are skipped. Only reads scratch rows matching run_id so
-        concurrent rebuilds don't cross.
+                                    run_id: str = "", *,
+                                    generation: int = 0) -> None:
+        """Persist concept_clusters rows for one type into the in-flight
+        generation. Rows whose seed has no canonical are skipped. Only reads
+        scratch rows matching run_id so concurrent rebuilds don't cross.
 
-        写锁瘦身改造点 2(design doc §5.5):拆成【预备段 + 切换段】,不再是单个
+        写锁瘦身改造点 2(design doc §5.5):拆成【预备段 + 写代段】,不再是单个
         write() 块里"边持锁边流式构造 N 个成员行"(647-1240ms@300-500k,曾是
         全部持锁时间的 73%)。
 
@@ -4654,15 +4654,19 @@ class KnowledgeLifecycleService:
         kg_canonical_scratch,每批独立提交、批间完整释放写锁(同
         _stream_seed_reps Pass A2 的模式)。写入前先清空本 run 的行:
         _write_cluster_map_streamed 每个 object_type 各调一次,不清会让上一个
-        type 的行经 swap 的 (notebook_id, run_id, seed) 连接谓词泄漏进这个
+        type 的行经写代段的 (notebook_id, run_id, seed) 连接谓词泄漏进这个
         type(两种类型的 seed 字符串恰好相同时)——镜像 _stream_seed_reps 对
         kg_cluster_scratch 的 clear-at-start。
 
-        切换段(本函数的后半段):一个 write() 块,纯 SQL DELETE+INSERT...
-        SELECT(swap_cluster_map_from_scratch)连接 kg_cluster_scratch 与
-        kg_canonical_scratch,不出现任何 Python 逐行构造或跨连接游标步进。
-        cluster_mutation_seq 的 bump 必须落在同一个 write() 块(wdb)里,与
-        DELETE+INSERT 同一次提交——见下面调用处的注释。
+        写代段(批 3·W2 §1.2,取代旧的 DELETE+INSERT swap):一个 write()
+        块,先复读在飞认领(≠generation 即被 TTL 抢占,响亮作废早停——抢占者
+        预回收扫过的键区不会被本轮再填残行),再纯 SQL INSERT...SELECT 把两张
+        scratch 表连接进 generation 代。**不 DELETE、不持 advisory lock**:
+        新代行与 published 代/并发 append 无行冲突,四列唯一按代隔离,锁窗口
+        整个收进翻转微事务。**不 bump cluster_mutation_seq**(两段式红线:
+        未发布代的写入对读者不可见,bump 反而制造假失效——版本身份在翻转
+        微事务里与指针同语句推进)。空 scratch → 该类型在新代零行,翻转后
+        读者看到空,与旧 swap 的 empty-clears 语义等价。
 
         两张 scratch 表在 rebuild 末尾的 finally 里统一清理(run_id 隔离并发
         rebuild),镜像 clear_scratch_run 已有的处理方式。"""
@@ -4695,23 +4699,118 @@ class KnowledgeLifecycleService:
             lambda wdb, rows: self.unified_kg.insert_canonical_scratch_rows(wdb, rows),
         )
 
-        # --- Swap segment ---------------------------------------------------
-        # ONE short write transaction, pure SQL: DELETE the type's old rows,
-        # INSERT...SELECT the new ones by joining the two scratch tables (see
-        # swap_cluster_map_from_scratch's docstring for the exact invariants
-        # it preserves — inner join / no object_type column needed / ORDER BY
-        # rowid / empty-clears / SQL-minted id).
+        # --- Write-generation segment ---------------------------------------
+        # ONE short write transaction: recheck the in-flight claim (same tx as
+        # the write — sqlite 侧 derived_claim_still_held 自带 begin_guarded_write
+        # 接缝,对跨进程抢占者原子),then pure SQL INSERT...SELECT into the
+        # in-flight generation. 刻意没有 DELETE、没有锁、没有 cseq bump——
+        # 三条理由都在 docstring 的「写代段」一节。
         with self._write() as wdb:
-            self.unified_kg.swap_cluster_map_from_scratch(
-                wdb, notebook_id, object_type, run_id, now
+            if not self.unified_kg.derived_claim_still_held(
+                    wdb, notebook_id, generation):
+                self.event_log.emit({
+                    "kind": "kg_generation_preempted", "notebook_id": notebook_id,
+                    "generation": generation, "stage": f"write:{object_type}",
+                })
+                raise KgDerivedGenerationPreempted(notebook_id, generation)
+            self.unified_kg.write_cluster_map_generation(
+                wdb, notebook_id, object_type, run_id, now, generation
             )
-            # P0-A: same commit as the DELETE+INSERT above (wdb, not rdb) —
-            # every rebuild pass through this streamed writer rewrites
-            # concept_clusters for `object_type`, so it must bump every time
-            # (unconditional, unlike append_clusters' added>0 guard: a
-            # rebuild that clusters down to zero rows for this type is still
-            # a real content change from whatever was there before).
-            self._bump_cluster_mutation_seq(wdb, notebook_id)
+
+    # 批 3·W2:催收单遍读取上限。窗口本身由 created_at >= 锚点-偏斜 界住
+    # (量级=一轮 rebuild 期间的增量 append),这个常数只是结构性保险丝——
+    # 截断时发结构化事件如实报告,残余靠 cluster_input_version 失配等下一次
+    # 用户触发的 rebuild 收敛(设计 §1.5 的措辞:dirty 无自动消费者,不虚构
+    # 自动收敛)。不分页重查:安置不删源行,重查会原集合复读、永不推进。
+    _CATCHUP_WINDOW_MAX_ROWS = 200_000
+    # 残代回收单页行数:T-5a 排水同款量级,每页独立写事务、页间释放写锁。
+    _GENERATION_REAP_PAGE_ROWS = 5000
+
+    def _settle_generation_catchup(self, notebook_id: str, *,
+                                   published_generation: int,
+                                   since_ts: str) -> None:
+        """催收(设计 §1.5,单遍有界搬运):把「锚点 - 偏斜余量」窗口内落在
+        **非 published 代**的融合成员,经既有安置原语重放进当前 published 代,
+        完成后 CAS 清欠账标记。两个调用场景共用:本轮翻转后(锚点=取号 TS),
+        与下轮取号发现上轮崩溃留下的落库标记(欠账)。
+
+        安置 = place_new_concepts(四类换 seed_fn,纯 Python 无 LLM)+
+        append_clusters:后者锁内读 published 指针写行、探针按代收窄使重复
+        安置幂等,且 added>0 才 bump cluster_mutation_seq——「催收是 published
+        代写入,必须推进版本身份」(复评 P1-2)与「无新增不制造假信号」两条
+        红线同时满足。期间被删的对象在窗口查询里 join 不到,天然跳过。"""
+        from app.services.kg_merge import (place_new_concepts, _norm,
+                                           seed_claim, seed_formula,
+                                           seed_procedure)
+        with self._connect() as db:
+            rows = self.unified_kg.catchup_window_members(
+                db, notebook_id, published_generation, since_ts,
+                self.settings.kg_catchup_skew_seconds,
+                self._CATCHUP_WINDOW_MAX_ROWS)
+        if len(rows) >= self._CATCHUP_WINDOW_MAX_ROWS:
+            self.event_log.emit({
+                "kind": "kg_generation_catchup_truncated",
+                "notebook_id": notebook_id, "since_ts": since_ts,
+                "limit": self._CATCHUP_WINDOW_MAX_ROWS,
+            })
+        by_type: Dict[str, list] = {}
+        for r in rows:
+            payload = json.loads(r["payload"] or "{}")
+            by_type.setdefault(str(r["object_type"]), []).append({
+                "object_id": r["member_object_id"],
+                "name": payload.get("name", ""),
+                "payload": payload,
+            })
+        del rows
+        _SEEDS = {"concept": (lambda o: _norm(o["name"]), "K-"),
+                  "claim": (seed_claim, "KL-"),
+                  "formula": (seed_formula, "KF-"),
+                  "procedure": (seed_procedure, "KP-")}
+        moved = 0
+        for t, objs in by_type.items():
+            picked = _SEEDS.get(t)
+            if picked is None:
+                continue
+            sfn, prefix = picked
+            with self._connect() as db:
+                cn = self.governance_store.incremental_cluster_rows(
+                    db, notebook_id, t)
+            canon = {r["canonical_id"]: r["canonical_name"] for r in cn}
+            placed = place_new_concepts(objs, canon, seed_fn=sfn,
+                                        id_prefix=prefix)
+            moved += self.append_clusters(notebook_id, placed, object_type=t)
+        with self._write() as db:
+            self.unified_kg.clear_catchup_marker(db, notebook_id, since_ts)
+        if by_type:
+            self.event_log.emit({
+                "kind": "kg_generation_catchup_settled",
+                "notebook_id": notebook_id, "since_ts": since_ts,
+                "replayed": sum(len(v) for v in by_type.values()),
+                "appended": moved,
+            })
+
+    def _reap_stale_cluster_generations(self, notebook_id: str,
+                                        keep: "Tuple[int, int]") -> int:
+        """预回收:有界分页删 concept_clusters 里 generation ∉ keep 的残代行
+        (被抢占/翻转作废的在飞代、已退休且欠账结清的旧 published 代)。调用
+        顺序由 rebuild 保证欠账已先结清——催收标记在时不得回收(退休代是
+        欠账的数据源)。每页独立写事务,页间完整释放写锁。"""
+        total = 0
+        while True:
+            with self._write() as db:
+                n = self.unified_kg.reap_derived_generations_page(
+                    db, notebook_id, "concept_clusters", keep,
+                    self._GENERATION_REAP_PAGE_ROWS)
+            total += n
+            if n < self._GENERATION_REAP_PAGE_ROWS:
+                break
+        if total:
+            self.event_log.emit({
+                "kind": "kg_generation_reaped", "notebook_id": notebook_id,
+                "table": "concept_clusters", "rows": total,
+                "keep": list(keep),
+            })
+        return total
 
     @notebook_model_artifact_scope
     def rebuild_unified_kg(self, notebook_id: str,
@@ -4783,6 +4882,21 @@ class KnowledgeLifecycleService:
                     self.event_log.emit({"kind": "communities_rebuild_failed",
                                          "notebook_id": notebook_id, "error": str(exc)[:200]})
                 return cached
+        # ---- 取号(批 3·W2 §1.2:数据级跨进程单飞) --------------------------
+        # skip-gate 在前、取号在后:无副作用的刷新不烧号、不占认领。取号微事务
+        # 是 counter+1 并登记在飞代;被占且未过 TTL → KgMaintenanceAlreadyRunning
+        # 同款拒绝——连 recluster_kg 离线直连也被这道数据级闸挡住(摸底 3-7)。
+        # 释放三通道:翻转成功清零(主)/finally CAS(覆盖一切失败出口)/TTL
+        # 崩溃兜底(数小时级,Settings 数值围栏)。
+        with self._write() as _cdb:
+            _claim = self.unified_kg.claim_derived_generation(
+                _cdb, notebook_id,
+                ttl_seconds=self.settings.kg_derived_build_ttl_seconds)
+        if _claim is None:
+            raise KgMaintenanceAlreadyRunning(notebook_id, "rebuild")
+        generation = int(_claim["generation"])
+        _published_from = int(_claim["cluster_generation"])
+        _anchor_ts = _claim["ts"]
         # 断点续跑:进到这里=已确定真正要重算(force=True,或 force=False 因版本
         # 失配落空)——checkpoint GC/clear 移到这里(而非版本闸之前)才对:早前放在
         # 闸前时,force=False 且判定跳过的路径也会顺带做一次 GC 写,破坏了「跳过=零
@@ -4791,15 +4905,9 @@ class KnowledgeLifecycleService:
         # --rebuild-only 续跑不会因 emb_c 变了就把 merge_review/concept_desc
         # checkpoint 当作「输入变了」GC 掉、被迫重新走一遍可能数小时的 LLM 裁决;
         # item_key 已经提供细粒度正确性。fresh 仍清全部 checkpoint(强制两个 LLM
-        # 阶段重跑)。fail-open。
-        _ck_ver = self._cluster_input_version(notebook_id, exclude_emb_count=True)
-        try:
-            if fresh:
-                self.unified_kg.checkpoint_clear(notebook_id)
-            else:
-                self.unified_kg.checkpoint_gc(notebook_id, _ck_ver)
-        except Exception:  # noqa: BLE001 — checkpoint 维护失败不能打断 rebuild
-            self.event_log.logger.warning("rebuild checkpoint GC/clear 失败 for %s", notebook_id, exc_info=True)
+        # 阶段重跑)。fail-open。checkpoint GC 与 _ck_ver 的 DB 读都在下面的
+        # try 里——取号之后任何可失败的一步都必须被 finally 的释放通道覆盖,
+        # 否则一次连接抖动就把认领留到 TTL(数小时)。
         from uuid import uuid4 as _uuid4
         from app.services.kg_merge import (cluster_seeds, filter_pending_seeds_by_decisions,
                                            _norm, _discriminative_conflict,
@@ -4813,6 +4921,26 @@ class KnowledgeLifecycleService:
         # of _stream_seed_reps) still clears this run's kg_cluster_scratch
         # rows — see the finally at the bottom of this function.
         try:
+            _ck_ver = self._cluster_input_version(notebook_id, exclude_emb_count=True)
+            try:
+                if fresh:
+                    self.unified_kg.checkpoint_clear(notebook_id)
+                else:
+                    self.unified_kg.checkpoint_gc(notebook_id, _ck_ver)
+            except Exception:  # noqa: BLE001 — checkpoint 维护失败不能打断 rebuild
+                self.event_log.logger.warning(
+                    "rebuild checkpoint GC/clear 失败 for %s", notebook_id, exc_info=True)
+            # [催收欠账] 上轮翻转后崩溃留下的落库标记:先补欠账再谈本轮
+            # (设计 §1.5——标记在,退休代行就还没被回收,窗口集合冻结)。
+            if _claim["catchup_from"]:
+                self._settle_generation_catchup(
+                    notebook_id, published_generation=_published_from,
+                    since_ts=_claim["catchup_from"])
+            # [预回收] 残代有界分页回收——唯一的回收通道是这里+启动恢复,刻意
+            # 没有 finally 回收:跨翻转的在飞读者拿整整一轮 rebuild 的宽限
+            # (设计 D-W2-7)。keep = (published, 本轮在飞 G)。
+            self._reap_stale_cluster_generations(
+                notebook_id, keep=(_published_from, generation))
             # Sub-stage instrumentation: log each stage's name+counts+elapsed on two
             # channels (event_log INFO + progress banner). Pure logging — no effect on
             # clustering results or the progress=None data path.
@@ -5093,7 +5221,8 @@ class KnowledgeLifecycleService:
             _t = _time.perf_counter()
             self._write_cluster_map_streamed(notebook_id, "concept", seed_to_canonical,
                                              sd["canonical_names"], desc_by_cid,
-                                             desc_sig_by_cid, run_id=run_id)
+                                             desc_sig_by_cid, run_id=run_id,
+                                             generation=generation)
             _stage(f"concept: wrote clusters ({_time.perf_counter() - _t:.1f}s)")
             # Cross-doc exact-normalized merge for non-concept types (v1: seed-based;
             # vector near-dup remains concept-only). Each type isolated by id prefix.
@@ -5116,7 +5245,8 @@ class KnowledgeLifecycleService:
                                      rep_ann_max=self.settings.kg_cluster_rep_ann_max,
                                      ann_threads=self.settings.kg_cluster_ann_threads)
                 self._write_cluster_map_streamed(notebook_id, t, sd_t["seed_to_canonical"],
-                                                 sd_t["canonical_names"], run_id=run_id)
+                                                 sd_t["canonical_names"], run_id=run_id,
+                                                 generation=generation)
                 _stage(f"{t}: streamed+clustered+wrote ({_time.perf_counter() - _t:.1f}s)")
             # Refresh pending candidates in ONE transaction (per-candidate inserts
             # were the rebuild hotspot at scale). confirmed/rejected rows untouched.
@@ -5147,10 +5277,36 @@ class KnowledgeLifecycleService:
                     [(self._new_id("mc"), notebook_id, ca, cb, sa, sb, score, now, now)
                      for sa, sb, ca, cb, score in pending_seeds])
             _stage(f"pending refresh ({_time.perf_counter() - _t:.1f}s)")
-            self._invalidate_unified_cache(notebook_id)
             # #distinct concept canonicals (== set of cluster_map values in the legacy
             # path: every canonical has ≥1 seed and every concept seed has a canonical).
             cluster_count = len(set(seed_to_canonical.values()))
+            # ---- 翻指针(批 3·W2 §1.2 微事务) ------------------------------
+            # store 侧先按 key 字节序取齐全 4 类 advisory lock(append 与翻转
+            # 互相串行,两者皆毫秒级),同事务双 CAS:published 指针未被动过 且
+            # 在飞认领仍是自己;cluster_mutation_seq 在同一语句 bump(版本身份
+            # 与指针行变化同提交);催收锚点同事务落库(崩溃后下轮先补欠账)。
+            # 零行更新 = 被 TTL 抢占或被 delete_notebook_kg 重置——本轮作废
+            # 不发布,响亮失败(写好的 G 代行留给下一轮预回收清理)。
+            with self._write() as db:
+                _flipped = self.unified_kg.flip_cluster_generation(
+                    db, notebook_id, published_from=_published_from,
+                    generation=generation, catchup_from_ts=_anchor_ts, now=now)
+            if not _flipped:
+                self.event_log.emit({
+                    "kind": "kg_generation_preempted", "notebook_id": notebook_id,
+                    "generation": generation, "stage": "flip",
+                })
+                raise KgDerivedGenerationPreempted(notebook_id, generation)
+            self._invalidate_unified_cache(notebook_id)
+            _stage("flipped cluster generation "
+                   f"{_published_from} → {generation}")
+            # ---- 催收(设计 §1.5:单遍搬运) --------------------------------
+            # 翻转后 append 全落新 published 代;此前窗口内的融合行完整躺在
+            # 退休代且集合冻结——重放安置进新代(幂等,append_clusters 的
+            # added>0 判据推进版本身份),完成后 CAS 清锚点标记。
+            self._settle_generation_catchup(
+                notebook_id, published_generation=generation,
+                since_ts=_anchor_ts)
             with self._write() as db:
                 # CRITICAL: the store's finish_rebuild_state UPSERT stores
                 # cluster_input_version=_ver (captured at ENTRY, reflecting the seq
@@ -5196,6 +5352,19 @@ class KnowledgeLifecycleService:
                 self.event_log.logger.warning(
                     "rebuild scratch cleanup 失败 for %s run_id=%s",
                     notebook_id, run_id, exc_info=True)
+            # 释放通道 b(finally CAS,设计 §1.2/复评 P0-2):覆盖异常、翻转
+            # CAS 作废、抢占后迟到释放(CAS 只清自己 → 天然 no-op)全部出口;
+            # 翻转成功时 building 已在翻转事务清零,这里同样 no-op。少了这条,
+            # 一次普通失败就把整库按 TTL(数小时)锁在 409。swallow+log:释放
+            # 失败不得掩盖 try 里正在冒泡的真异常(最坏 TTL 兜底)。
+            try:
+                with self._write() as db:
+                    self.unified_kg.release_derived_claim(
+                        db, notebook_id, generation)
+            except Exception:  # noqa: BLE001
+                self.event_log.logger.warning(
+                    "rebuild 代际认领释放失败 for %s generation=%s(TTL 兜底)",
+                    notebook_id, generation, exc_info=True)
         _stage(f"DONE {cluster_count} canonicals, total {_time.perf_counter() - _t_total:.1f}s")
         # canonical 关系层(派生):聚类刚重算 → force=True(闸可能误跳)。fail-open。
         try:

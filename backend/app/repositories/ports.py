@@ -185,6 +185,18 @@ class KgBuildAlreadyRunning(RuntimeError):
     """One notebook already has a durable running KG build job."""
 
 
+class KgDerivedGenerationPreempted(RuntimeError):
+    """批 3·W2:本轮代际重建的在飞认领已不属于自己——被 TTL 抢占,或
+    delete_notebook_kg 把 state 行重置。写段的 building 复读与翻转双 CAS
+    都以本异常响亮作废(本轮不发布、不留半态);调用方发结构化事件后照常
+    走 finally 释放(对抢占者是 no-op)。"""
+
+    def __init__(self, notebook_id: str, generation: int) -> None:
+        super().__init__(f"{notebook_id} generation {generation}")
+        self.notebook_id = notebook_id
+        self.generation = generation
+
+
 class KgMaintenanceAlreadyRunning(RuntimeError):
     """One notebook already has an in-flight KG maintenance pass.
 
@@ -2455,14 +2467,67 @@ class UnifiedKgStorePort(Protocol):
     def state_row(db: object, notebook_id: str) -> Any: ...
     @staticmethod
     def stream_seed_rows(db: object, notebook_id: str, object_type: str) -> object: ...
+    # ---- 批 3·W2 代际原语(取代旧 swap_cluster_map_from_scratch 的
+    # DELETE+INSERT 同事务换表:写新代与发布指针解耦,读者永不见半态)。
     @staticmethod
-    def swap_cluster_map_from_scratch(
+    def claim_derived_generation(
+        db: object, notebook_id: str, *, ttl_seconds: int
+    ) -> Any: ...
+    @staticmethod
+    def release_derived_claim(
+        db: object, notebook_id: str, generation: int
+    ) -> None: ...
+    @staticmethod
+    def derived_claim_still_held(
+        db: object, notebook_id: str, generation: int
+    ) -> bool: ...
+    @staticmethod
+    def write_cluster_map_generation(
         db: object,
         notebook_id: str,
         object_type: str,
         run_id: str,
         created_at: str,
+        generation: int,
     ) -> None: ...
+    @staticmethod
+    def flip_cluster_generation(
+        db: object,
+        notebook_id: str,
+        *,
+        published_from: int,
+        generation: int,
+        catchup_from_ts: str,
+        now: str,
+    ) -> bool: ...
+    @staticmethod
+    def flip_community_generation(
+        db: object,
+        notebook_id: str,
+        *,
+        published_from: int,
+        generation: int,
+        now: str,
+    ) -> bool: ...
+    @staticmethod
+    def clear_catchup_marker(db: object, notebook_id: str, ts: str) -> None: ...
+    @staticmethod
+    def catchup_window_members(
+        db: object,
+        notebook_id: str,
+        published_generation: int,
+        since_ts: str,
+        skew_seconds: int,
+        limit: int,
+    ) -> list: ...
+    @staticmethod
+    def reap_derived_generations_page(
+        db: object,
+        notebook_id: str,
+        table: str,
+        keep: tuple,
+        limit: int,
+    ) -> int: ...
     @staticmethod
     def weak_support_relation_rows(
         db: object,

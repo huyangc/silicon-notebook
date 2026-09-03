@@ -777,35 +777,6 @@ class UnifiedKgStore:
             rows,
         )
 
-    @staticmethod
-    def swap_cluster_map_from_scratch(
-        db: Any,
-        notebook_id: str,
-        object_type: str,
-        run_id: str,
-        created_at: str,
-    ) -> None:
-        """Atomically replace one cluster artifact from its two scratch maps."""
-        lock_cluster_artifact_type(db, notebook_id, object_type)
-        db.execute(
-            "DELETE FROM concept_clusters WHERE notebook_id=%s AND object_type=%s",
-            (notebook_id, object_type),
-        )
-        db.execute(
-            "INSERT INTO concept_clusters "
-            "(id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,"
-            "canonical_description,canonical_desc_sig,created_at) "
-            "SELECT 'cc-' || md5(random()::text || clock_timestamp()::text || s.object_id), "
-            "s.notebook_id,c.canonical_id,s.object_id,c.canonical_name,%s,"
-            "c.canonical_description,c.canonical_desc_sig,%s::timestamptz "
-            "FROM kg_cluster_scratch s "
-            "JOIN kg_canonical_scratch c "
-            "ON c.notebook_id=s.notebook_id AND c.run_id=s.run_id AND c.seed=s.seed "
-            "JOIN knowledge_objects k ON k.id=s.object_id "
-            "WHERE s.notebook_id=%s AND s.run_id=%s ORDER BY k.ordinal",
-            (object_type, created_at, notebook_id, run_id),
-        )
-
     # -------------------------------------------------- rebuild checkpoints
     # kg_rebuild_checkpoint 行级读写(master v10 可续跑轨道)。自己开连接/事务:
     # 每个 helper 历来就是独立的小事务(rebuild 的 LLM 阶段从 worker 线程写入),

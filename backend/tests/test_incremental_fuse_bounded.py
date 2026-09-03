@@ -179,7 +179,9 @@ def _legacy_seams(repo, monkeypatch):
                         lambda notebook_id, new_objs: {})
 
     # ③ append 幂等去重:读整个 (notebook, object_type) 切片(master 的 insert_clusters)。
-    def legacy_existing_members(connection, notebook_id, object_type, rows):
+    #    generation 在 legacy 臂上被刻意忽略——master 的探针跨代整切片读。
+    def legacy_existing_members(connection, notebook_id, object_type, rows,
+                                generation):
         return {r["member_object_id"] for r in connection.execute(
             "SELECT member_object_id FROM concept_clusters "
             "WHERE notebook_id=? AND object_type=?",
@@ -755,8 +757,8 @@ def test_insert_clusters_reads_no_more_rows_than_it_inserts(repo, monkeypatch):
     store = repo._runtime.governance
     original = store._existing_cluster_members
 
-    def spy(connection, notebook_id, object_type, rows):
-        found = original(connection, notebook_id, object_type, rows)
+    def spy(connection, notebook_id, object_type, rows, generation):
+        found = original(connection, notebook_id, object_type, rows, generation)
         observed.append((len(rows), len(found)))
         return found
 
@@ -942,7 +944,7 @@ def test_insert_clusters_batches_member_probe(repo, monkeypatch):
         assert store.insert_clusters(db, notebook.id, "concept", rows, NOW) == 12
     probes = [sql for sql in log
               if sql.startswith("SELECT member_object_id FROM concept_clusters")]
-    assert [sql.count("?") for sql in probes] == [7, 7, 4]   # 5+5+2 ids, +2 fixed
+    assert [sql.count("?") for sql in probes] == [8, 8, 5]   # 5+5+2 ids, +3 fixed(批 3·W2 探针加 generation)
 
 
 # ── P1 轮批 D:orphan 簇的**生产者清零** + 纯遗留残渣兜底 ────────────────────
