@@ -138,6 +138,20 @@ class ConversationBusyError(RuntimeError):
         super().__init__("conversation has a running Ask job")
 
 
+class AskRequestKeyConflict(RuntimeError):
+    """An Ask ``client_request_id`` this user already spent on a job in ANOTHER
+    notebook. The key identifies one submission, so a repeat under a different
+    notebook is a client defect (or a forged key), never something to attach
+    to: attaching would stream one notebook's job through another notebook's
+    endpoint."""
+
+    def __init__(self, client_request_id: str) -> None:
+        super().__init__(
+            f"client_request_id {client_request_id!r} belongs to a job in another notebook"
+        )
+        self.client_request_id = client_request_id
+
+
 class ConversationShareWatermarkStale(RuntimeError):
     """``share_conversation`` was handed an ``expected_through_id`` that is no
     longer a resolvable answer of this conversation (codex #522 R2 P1).
@@ -3218,6 +3232,13 @@ class AskStateStorePort(Protocol):
         mode: str,
         user_id: str,
     ) -> tuple[str, str]: ...
+    def begin_or_attach_durable_job(
+        self,
+        notebook_id: str,
+        payload: AskRequest,
+        mode: str,
+        user_id: str,
+    ) -> tuple[str, str, bool]: ...
     def append_trace(
         self,
         notebook_id: str,

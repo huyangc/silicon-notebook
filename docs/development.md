@@ -45,8 +45,8 @@ Schema changes remain version-gated behind `SqliteMigrator`: append a new
 Startup recovery, stable seeds, and administrator upgrades run every boot
 outside that version gate.
 
-The current schema version is 69. This is the SQLite schema version. The committed v9 compatibility fixture
-upgrades through migrations v10–v69 and remains readable. Those migrations
+The current schema version is 70. This is the SQLite schema version. The committed v9 compatibility fixture
+upgrades through migrations v10–v70 and remains readable. Those migrations
 cover compatibility and SQLite hot-path indexes (v10–v12), Memory/Agent and
 Memory-derived source links/indexes (v13–v15), knowhow tables and cell code
 (v16/v18), paper metadata (v17), source-linked assets (v19), and multi-domain
@@ -621,6 +621,28 @@ pair is SQLite 69 / PostgreSQL 49 / epoch 1 with 90 business tables, 120
 replicated unique surfaces, and the unchanged 12-row-slot closure bound (both
 new tables are leaves with no incoming FK, so the deepest closure chain is
 unaffected).
+
+SQLite v70 / PostgreSQL v50 add the Ask submission idempotency key: a nullable
+`ask_jobs.client_request_id` column plus the partial unique index
+`idx_ask_jobs_client_request` over `(created_by, client_request_id) WHERE
+client_request_id IS NOT NULL`. The official browser mints one key per
+submission (the reasoning preflight's per-tab mirror id) and sends it on every
+`/ask/stream` POST; `AskStateStorePort.begin_or_attach_durable_job` returns the
+existing job for a repeated key instead of inserting a second row, and the
+coordinator then streams that job from the store (`started` with its ids, the
+persisted trace, then the saved answer as `final` or the row's
+`cancelled`/`error`) rather than running a second engine. The column is
+deliberately nullable with no sentinel default and the index deliberately
+partial — the same NULL-park shape as `agent_observations.client_request_id`
+(v55/0033) — so a keyless row (every pre-migration row, MCP, scripts, the
+synchronous `/ask`) simply does not participate in the surface; nothing is
+backfilled. `created_by` leads the index so another account's key can never
+attach to this user's job, and a key the same user already spent in another
+notebook is refused (`AskRequestKeyConflict`, an `error` event) rather than
+attached. No table or foreign key is added; the forward-shadow invariants become
+90 business tables, 121 replicated unique surfaces, and the unchanged
+12-row-slot closure bound. The current pair is SQLite 70 / PostgreSQL 50 /
+epoch 1.
 
 Run it only while application/background writers are stopped:
 

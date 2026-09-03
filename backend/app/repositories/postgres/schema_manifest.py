@@ -274,7 +274,13 @@ POSTGRES_EMPTY_TIME_SENTINELS = frozenset(
 # idx_conversations_notebook) plus the notebook_delete_jobs /
 # notebook_delete_files delete-job carrier tables -- additive only, no
 # existing column/index/FK shape changes.
+# PostgreSQL v50 / SQLite v70 add ask_jobs.client_request_id (nullable) plus
+# the partial unique index idx_ask_jobs_client_request ON (created_by,
+# client_request_id) WHERE client_request_id IS NOT NULL -- the browser
+# submission's idempotency key. One new replicated unique surface (NULL park on
+# client_request_id, same shape as idx_agent_observations_request); no table,
+# FK or existing-shape change.
 POSTGRES_SCHEMA_MANIFEST = PostgresSchemaManifest(
-    sqlite_version=69,
-    postgres_version=49,
+    sqlite_version=70,
+    postgres_version=50,
 )

@@ -618,3 +618,228 @@ def test_coordinator_module_never_imports_the_facade():
     assert not any(m.startswith("app.services.repository_runtime") for m in modules)
     # identity 显式:coordinator 不读请求 ContextVar,user_id 由调用方传入
     assert "current_user" not in source and "_REQUEST_USER" not in source
+
+
+# ---------------------------------------------------------------------------
+# idempotent re-submission: client_request_id → attach to the existing job and
+# follow it from the store instead of running a second engine
+# ---------------------------------------------------------------------------
+
+class AttachingAskState(RecordingAskState):
+    """RecordingAskState plus the idempotency-key surface. ``existing`` is the
+    job the key already created (``None`` → the key is fresh and the normal
+    begin path runs); ``details`` is the sequence of ``ask_job_detail`` reads
+    the follower will observe, the last one repeated forever."""
+
+    def __init__(self, calls, existing=None, details=(), answers=None, conflict=None):
+        super().__init__(calls)
+        self.existing = existing
+        self.details = list(details)
+        self.answers = answers or {}
+        self.conflict = conflict
+        self.detail_reads = 0
+
+    def begin_or_attach_durable_job(self, notebook_id, payload, mode, user_id):
+        self.calls.append(("begin_or_attach", notebook_id, mode, user_id,
+                           payload.client_request_id))
+        if self.conflict is not None:
+            raise self.conflict
+        if self.existing is not None:
+            payload.conversation_id = self.existing[1]
+            return self.existing[0], self.existing[1], True
+        payload.conversation_id = "conv-t23"
+        return "askjob-t23", "conv-t23", False
+
+    def ask_job_detail(self, job_id):
+        self.detail_reads += 1
+        index = min(self.detail_reads, len(self.details)) - 1
+        detail = dict(self.details[index])
+        detail.setdefault("job_id", job_id)
+        return detail
+
+    def ask_answer_detail(self, answer_id):
+        self.calls.append(("answer_detail", answer_id))
+        return self.answers.get(answer_id)
+
+
+def _attach_coordinator(state, submitter=None):
+    service = FakeAskService(lambda *_args, **_kwargs: pytest.fail("engine must not run"))
+    return AskExecutionCoordinator(
+        ask_state=state,
+        cancellations=AskCancellationRegistry(),
+        job_submitter=submitter if submitter is not None else InlineSubmitter(),
+        event_log=_event_log(),
+        ask=lambda: service,
+        follow_poll_seconds=0,
+    )
+
+
+_STEP_A = {"step_type": "retrieve", "summary": "a", "detail": {}}
+_STEP_B = {"step_type": "reflect", "summary": "b", "detail": {}}
+
+
+def test_repeated_client_request_id_attaches_and_replays_the_finished_job():
+    calls = []
+    state = AttachingAskState(
+        calls,
+        existing=("askjob-old", "conv-old"),
+        details=[{"status": "done", "trace": [_STEP_A, _STEP_B], "answer_id": "ans-old",
+                  "error": ""}],
+        answers={"ans-old": {"answer_id": "ans-old", "question": "Q?",
+                             "payload": {"answer_id": "ans-old", "answer": "saved",
+                                         "conversation_id": "conv-old"},
+                             "created_at": "t"}},
+    )
+    coordinator = _attach_coordinator(state)
+    payload = AskRequest(question="Q?", mode="reasoning", client_request_id="key-1")
+    submitter = coordinator.job_submitter
+
+    delivered = _drain(coordinator.start(
+        "nb-1", payload, ASK_MODES["reasoning"], user_id="user-t23"))
+
+    assert delivered == [
+        {"event": "started", "job_id": "askjob-old", "conversation_id": "conv-old"},
+        {"event": "progress", "step": _STEP_A},
+        {"event": "progress", "step": _STEP_B},
+        {"event": "final", "response": {"answer_id": "ans-old", "answer": "saved",
+                                        "conversation_id": "conv-old"}},
+    ]
+    # The existing job's ids are written back exactly as a fresh begin would.
+    assert payload.conversation_id == "conv-old"
+    assert ("begin_or_attach", "nb-1", "reasoning", "user-t23", "key-1") in calls
+    # Nothing was begun, traced, finished or cleaned up: the job's own worker
+    # owns its row. Only the store was read.
+    assert not any(c[0] in {"begin", "trace", "finish", "cleanup", "mode"} for c in calls)
+    assert coordinator.cancellations.get("askjob-old") is None
+    assert submitter.submitted == ["ask-follow"]
+
+
+def test_attach_follows_a_running_job_until_its_row_settles_without_repeating_steps():
+    calls = []
+    state = AttachingAskState(
+        calls,
+        existing=("askjob-old", "conv-old"),
+        details=[
+            {"status": "running", "trace": [_STEP_A], "answer_id": "", "error": ""},
+            {"status": "running", "trace": [_STEP_A, _STEP_B], "answer_id": "", "error": ""},
+            {"status": "done", "trace": [_STEP_A, _STEP_B], "answer_id": "ans-old",
+             "error": ""},
+        ],
+        answers={"ans-old": {"answer_id": "ans-old", "question": "Q?",
+                             "payload": {"answer_id": "ans-old"}, "created_at": "t"}},
+    )
+    coordinator = _attach_coordinator(state)
+
+    delivered = _drain(coordinator.start(
+        "nb-1", AskRequest(question="Q?", mode="chunk", client_request_id="key-1"),
+        ASK_MODES["chunk"], user_id="user-t23"))
+
+    assert [e["event"] for e in delivered] == ["started", "progress", "progress", "final"]
+    assert [e["step"] for e in delivered if e["event"] == "progress"] == [_STEP_A, _STEP_B]
+    assert state.detail_reads == 3
+
+
+@pytest.mark.parametrize("status,error,expected", [
+    ("cancelled", "", {"event": "cancelled"}),
+    ("failed", "RuntimeError: boom", {"event": "error", "error": "RuntimeError: boom"}),
+    ("interrupted", "", {"event": "error", "error": "ask job interrupted"}),
+])
+def test_attach_reports_the_existing_jobs_terminal_row(status, error, expected):
+    state = AttachingAskState(
+        [], existing=("askjob-old", "conv-old"),
+        details=[{"status": status, "trace": [], "answer_id": "", "error": error}],
+    )
+    delivered = _drain(_attach_coordinator(state).start(
+        "nb-1", AskRequest(question="Q?", mode="chunk", client_request_id="key-1"),
+        ASK_MODES["chunk"], user_id="user-t23"))
+    assert delivered[-1] == expected
+    assert len(delivered) == 2
+
+
+def test_attach_with_a_missing_answer_row_ends_with_an_error_not_a_hang():
+    state = AttachingAskState(
+        [], existing=("askjob-old", "conv-old"),
+        details=[{"status": "done", "trace": [], "answer_id": "ans-gone", "error": ""}],
+    )
+    delivered = _drain(_attach_coordinator(state).start(
+        "nb-1", AskRequest(question="Q?", mode="chunk", client_request_id="key-1"),
+        ASK_MODES["chunk"], user_id="user-t23"))
+    assert delivered[-1]["event"] == "error"
+    assert "ans-gone" not in delivered[-1]["error"] or "missing" in delivered[-1]["error"]
+
+
+def test_attach_store_failure_still_closes_the_stream_with_an_error():
+    class Broken(AttachingAskState):
+        def ask_job_detail(self, job_id):
+            raise KeyError(job_id)
+
+    state = Broken([], existing=("askjob-old", "conv-old"))
+    delivered = _drain(_attach_coordinator(state).start(
+        "nb-1", AskRequest(question="Q?", mode="chunk", client_request_id="key-1"),
+        ASK_MODES["chunk"], user_id="user-t23"))
+    assert delivered[0]["event"] == "started"
+    assert delivered[-1]["event"] == "error"
+
+
+def test_client_request_key_conflict_ends_the_stream_with_an_error_and_no_job():
+    from app.repositories.ports import AskRequestKeyConflict
+
+    calls = []
+    state = AttachingAskState(calls, conflict=AskRequestKeyConflict("key-1"))
+    coordinator = _attach_coordinator(state)
+    delivered = _drain(coordinator.start(
+        "nb-1", AskRequest(question="Q?", mode="chunk", client_request_id="key-1"),
+        ASK_MODES["chunk"], user_id="user-t23"))
+    assert [e["event"] for e in delivered] == ["error"]
+    assert "key-1" in delivered[0]["error"]
+    assert coordinator.job_submitter.submitted == []
+    assert not any(c[0] in {"begin", "finish", "cleanup"} for c in calls)
+
+
+def test_fresh_client_request_id_begins_the_job_and_runs_the_engine_normally():
+    calls = []
+    state = AttachingAskState(calls)  # key unknown → attached=False
+    service = FakeAskService(lambda *_a, **_k: _response())
+    coordinator = AskExecutionCoordinator(
+        ask_state=state, cancellations=AskCancellationRegistry(),
+        job_submitter=InlineSubmitter(), event_log=_event_log(), ask=lambda: service,
+    )
+    delivered = _drain(coordinator.start(
+        "nb-1", AskRequest(question="Q?", mode="chunk", client_request_id="key-1"),
+        ASK_MODES["chunk"], user_id="user-t23"))
+    assert [e["event"] for e in delivered] == ["started", "progress", "final"]
+    assert ("begin_or_attach", "nb-1", "chunk", "user-t23", "key-1") in calls
+    assert ("begin", "nb-1", "chunk", "user-t23") not in calls
+    assert ("finish", "done", "ans-t23", "") in calls
+    assert coordinator.job_submitter.submitted == ["ask-chunk"]
+
+
+def test_payload_without_a_key_keeps_the_plain_begin_path():
+    calls = []
+    state = AttachingAskState(calls)
+    service = FakeAskService(lambda *_a, **_k: _response())
+    coordinator = AskExecutionCoordinator(
+        ask_state=state, cancellations=AskCancellationRegistry(),
+        job_submitter=InlineSubmitter(), event_log=_event_log(), ask=lambda: service,
+    )
+    _drain(coordinator.start(
+        "nb-1", AskRequest(question="Q?", mode="chunk"),
+        ASK_MODES["chunk"], user_id="user-t23"))
+    assert ("begin", "nb-1", "chunk", "user-t23") in calls
+    assert not any(c[0] == "begin_or_attach" for c in calls)
+
+
+def test_auto_mode_attach_never_selects_an_engine():
+    state = AttachingAskState(
+        [], existing=("askjob-old", "conv-old"),
+        details=[{"status": "cancelled", "trace": [], "answer_id": "", "error": ""}],
+    )
+    coordinator = _attach_coordinator(state)
+
+    def resolve(_cancel_event):
+        pytest.fail("engine selection must not run for an attached submission")
+
+    delivered = _drain(coordinator.start(
+        "nb-1", AskRequest(question="Q?", mode="auto", client_request_id="key-1"),
+        None, user_id="user-t23", resolve=resolve))
+    assert [e["event"] for e in delivered] == ["started", "cancelled"]

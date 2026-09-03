@@ -308,3 +308,22 @@ def test_agent_observations_park_strategies_are_the_pinned_shape():
     assert idx_surface.strategy is _ParkStrategy.NULL
     assert idx_surface.park_column == "client_request_id"
     assert idx_surface.predicate == "client_request_id IS NOT NULL"
+
+
+def test_ask_jobs_client_request_surface_parks_on_the_nullable_key():
+    """v70/0050: ``idx_ask_jobs_client_request`` is the Ask submission
+    idempotency index. ``created_by`` is NOT NULL, so the only column the
+    resolver can park on is the nullable ``client_request_id`` -- the same
+    NULL-park shape as ``idx_agent_observations_request`` above. Reverting the
+    column to ``NOT NULL DEFAULT ''`` or dropping the ``WHERE`` clause would
+    flip this to a sentinel strategy and break the whole schema version's
+    replicator construction (see the two tests above)."""
+    from app.migration.shadow.manifest import MANIFEST
+    from app.migration.shadow.replicator import _ParkStrategy, _build_unique_surfaces
+
+    surface = _build_unique_surfaces(MANIFEST)["idx_ask_jobs_client_request"]
+    assert surface.table == "ask_jobs"
+    assert surface.columns == ("created_by", "client_request_id")
+    assert surface.strategy is _ParkStrategy.NULL
+    assert surface.park_column == "client_request_id"
+    assert surface.predicate == "client_request_id IS NOT NULL"

@@ -134,7 +134,17 @@ logger = logging.getLogger("silicon_notebook.sqlite.maintenance")
 # carries no FK to notebooks (see the migration's own header comment for why:
 # the sweep's "job row present, notebooks row absent" special case needs that
 # state to stay representable).
-SCHEMA_VERSION = 69
+# v70 adds ask_jobs.client_request_id (nullable) plus the partial unique index
+# idx_ask_jobs_client_request ON (created_by, client_request_id) WHERE
+# client_request_id IS NOT NULL — the browser submission's idempotency key,
+# parity with PostgreSQL 0050_ask_jobs_client_request_id.sql. A repeat POST
+# carrying the same key attaches to the job it already created instead of
+# creating a second one (the reload-between-hand-off-and-`started` window of
+# the reasoning preflight). NULL-park shape identical to
+# agent_observations.client_request_id (v55): rows without a key simply do not
+# participate in the unique surface. Existing rows stay NULL — nothing is
+# backfilled, and a NULL key never attaches to anything.
+SCHEMA_VERSION = 70
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -3694,6 +3704,35 @@ class SqliteMigrator:
                   PRIMARY KEY (job_id, ordinal)
                 );
                 """
+            )
+
+    def _migration_70(self) -> None:
+        """Ask submission idempotency key, parity with PostgreSQL
+        0050_ask_jobs_client_request_id.sql. See SCHEMA_VERSION's docstring.
+
+        ``client_request_id`` stays NULLABLE (no sentinel default) and is
+        paired with a PARTIAL unique index over ``(created_by,
+        client_request_id) WHERE client_request_id IS NOT NULL`` — the same
+        nullable-column-plus-partial-index shape ``_migration_55`` chose for
+        ``agent_observations.client_request_id``, and for the same reason: it
+        is the forward-shadow park strategy itself (a row without a key parks
+        for free by not participating in the surface). Do NOT change the
+        column to ``NOT NULL DEFAULT ''`` and do NOT make the index
+        non-partial; both would break that park strategy. ``created_by`` is
+        the first key column because the key is minted per browser
+        submission by one user — scoping by user means a forged or colliding
+        key from another account can never attach to this user's job.
+
+        ``add_column_if_missing`` keeps the migration re-runnable on a
+        database that already carries the column (the same guard every other
+        additive column migration in this file uses).
+        """
+        with self._connect() as db:
+            self.add_column_if_missing(db, "ask_jobs", "client_request_id", "TEXT")
+            db.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_ask_jobs_client_request "
+                "ON ask_jobs(created_by, client_request_id) "
+                "WHERE client_request_id IS NOT NULL"
             )
 
     def _recover_interrupted_jobs(self) -> None:

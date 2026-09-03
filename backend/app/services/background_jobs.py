@@ -60,7 +60,12 @@ _SAFE_JOB_PREFIXES = (
 # "ask-auto": the simplified UI's Ask is submitted before its engine is chosen
 # (selection runs inside the worker), so the diagnostic name must exist for it
 # too — otherwise the default UX's whole Ask load shows up as anonymous jobs.
-_SAFE_ASK_JOB_NAMES = frozenset({"ask-chunk", "ask-reasoning", "ask-graph", "ask-auto"})
+# "ask-follow": a re-submitted Ask (same client_request_id) that attached to an
+# existing job streams that job's progress from the store instead of running
+# an engine; it is an Ask-path job all the same and must not show up anonymous.
+_SAFE_ASK_JOB_NAMES = frozenset(
+    {"ask-chunk", "ask-reasoning", "ask-graph", "ask-auto", "ask-follow"}
+)
 _CALLABLE_OPERATION = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,79}$")
 # 进闸的后台 job 类别(取 `_SAFE_JOB_PREFIXES` 的 operation 名)。每一类各自已有
 # 单飞/去重闸,但它们**互相之间**此前没有闸:同一时刻若干笔记本各排一个活,数据库

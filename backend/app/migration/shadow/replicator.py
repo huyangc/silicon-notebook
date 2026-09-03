@@ -159,6 +159,13 @@ _UNIQUE_PREDICATES = {
         "status IN ('queued', 'running', 'waiting')",
         ("status", "in", "'queued'", "'running'", "'waiting'"),
     ),
+    # ask_jobs (v50): the browser submission's idempotency index. Same
+    # NULL-park shape as idx_agent_observations_request above — a job row
+    # that carries no client_request_id does not participate in this surface.
+    "idx_ask_jobs_client_request": (
+        "client_request_id IS NOT NULL",
+        ("client_request_id", "is", "not", "null"),
+    ),
 }
 
 

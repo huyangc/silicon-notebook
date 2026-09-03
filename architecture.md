@@ -237,6 +237,13 @@ transport disconnect / navigation / refresh
   → 不设置 cancellation event
   → detached worker 继续并可保存结果
 
+同一用户带同一个 client_request_id 重发（v70：ask_jobs.client_request_id + 部分唯一索引）
+  → begin_or_attach_durable_job 命中既有 job（不插第二行、不建第二个会话）
+  → started {既有 job_id, conversation_id}
+  → ask-follow 后台任务从存储回放：已持久化 trace → final（已存答案）/ cancelled / error
+  → 不跑第二个引擎；running 的 job 轮询到落定。前端在推理预检交接后、started 前刷新时
+    就用镜像 id 作键重发同一次提交，从而自动续上
+
 用户点击显式中断
   → POST /api/notebooks/{id}/ask/jobs/{job_id}/cancel
   → 设置 cancellation event
