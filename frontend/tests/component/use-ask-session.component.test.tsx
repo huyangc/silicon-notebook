@@ -4621,3 +4621,55 @@ test("a hand-off waits when another job is active in its conversation", async ()
   expect(value!.pendingQuestion).toBe("asked from another tab");
   expect(pendingIntentStore()).toHaveLength(1);
 });
+
+// Proven in a real browser: a reload terminates the in-flight fetch, whose
+// rejection reaches the hand-off's cleanup AFTER `beforeunload` and BEFORE
+// `pagehide`. Without the unload flag that cleanup retired the mirror as if the
+// user had stopped, and the reloaded tab found nothing to resume.
+test("a page unload during the hand-off window keeps the mirror for the reloaded tab", async () => {
+  const { streams } = keyedStreams();
+  api.previewAskIntent.mockResolvedValue(contractFor("unloaded mid hand-off", false));
+  api.listConversations.mockResolvedValue([]);
+  render(<Harness />);
+  beginOwnedNotebook();
+  act(() => value!.selectMode("reasoning"));
+  await act(async () => {
+    void value!.submit("unloaded mid hand-off");
+    await Promise.resolve();
+  });
+  await settleSubmit();
+  expect((pendingIntentStore()[0] as { phase: string }).phase).toBe("handoff");
+
+  act(() => { window.dispatchEvent(new Event("beforeunload")); });
+  await act(async () => {
+    streams[0]!.reject(new DOMException("The user aborted a request.", "AbortError"));
+    await Promise.resolve();
+  });
+  await settleSubmit();
+  expect(pendingIntentStore()).toHaveLength(1);
+  expect((pendingIntentStore()[0] as { phase: string }).phase).toBe("handoff");
+});
+
+test("a page unload during understanding keeps the preview mirror for the reloaded tab", async () => {
+  const preview = deferred<QueryIntentContract>();
+  api.previewAskIntent.mockReturnValue(preview.promise);
+  api.listConversations.mockResolvedValue([]);
+  render(<Harness />);
+  beginOwnedNotebook();
+  act(() => value!.selectMode("reasoning"));
+  await act(async () => {
+    void value!.submit("unloaded mid understanding");
+    await Promise.resolve();
+  });
+  await settleSubmit();
+  expect((pendingIntentStore()[0] as { phase: string }).phase).toBe("preview");
+
+  act(() => { window.dispatchEvent(new Event("pagehide")); });
+  await act(async () => {
+    preview.reject(new DOMException("The user aborted a request.", "AbortError"));
+    await Promise.resolve();
+  });
+  await settleSubmit();
+  expect(pendingIntentStore()).toHaveLength(1);
+  expect((pendingIntentStore()[0] as { phase: string }).phase).toBe("preview");
+});
