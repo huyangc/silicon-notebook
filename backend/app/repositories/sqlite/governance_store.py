@@ -513,6 +513,12 @@ class GovernanceStore:
         for r in rows:
             if r["member_object_id"] in existing:
                 continue
+            # created_at 刻意保留应用时钟(与 PG 孪生的 clock_timestamp()
+            # 不对称,codex #671 R5 P1 的裁决记录):SQLite 与应用同机同钟,
+            # 不存在跨机偏斜;催收比较两侧都过 datetime() 归一(#659 R13),
+            # KG_CATCHUP_SKEW_SECONDS 兜的正是这台机器上取时刻与落库之间的
+            # 形式余量。改成 datetime('now') 反而会让本表 created_at 出现两种
+            # 存储形态,拖累按字符串序消费它的既有读者。
             connection.execute(
                 "INSERT INTO concept_clusters (id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,canonical_description,created_at,generation) "
                 "VALUES (?,?,?,?,?,?,?,?,?)",

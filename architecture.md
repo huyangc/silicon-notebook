@@ -375,6 +375,43 @@ fail closed。`get_source_status`/`get_build_status`/`get_cited_element` 是只�
 - vector cache 按数据版本失效；大库 scale index 由维护任务构建/刷新，并通过状态与 manifest 观察。即使 `SCALE_INDEX_AUTO_ENABLED` 开启，调度也发生在后台维护路径，而不是把全库 backfill 塞进 Ask。
 - Ask 不同步补齐整库 embedding、不同步重建 unified KG，也不为 citation validation 扫描全部 source element。
 
+**簇图代际发布协议（批 3·W2）。** 三张派生表（`concept_clusters`/`communities`/
+`community_members`）带 `generation` 列；一切读者按 `unified_kg_state` 上的
+published 指针（`cluster_generation`/`community_generation`，无 state 行 ⇒ 代 0）
+取行，重建从「DELETE+INSERT 同事务换表」改为写不可见新代再翻指针，读者因此
+永不见半态、重建期间检索不降级。写者协议按序：
+
+1. **取号**：`derived_generation_counter` 单调 +1 并登记在飞代
+   （`derived_building_generation`+DB 时钟 `claimed_at`），UPSERT+CAS 构成
+   数据级跨进程单飞——离线 CLI 直连同样被闸。释放三通道：翻转清零（主）、
+   finally CAS（只清自己，覆盖一切失败出口）、TTL 崩溃兜底
+   （`KG_DERIVED_BUILD_TTL_SECONDS`，仅救 kill -9/掉电）。counter 绝不回卷
+   （版本键防混叠，与 `kg_reset_epoch` 同一条红线）；`delete_notebook_kg`
+   终局把两个指针/在飞/催收标记归零但不动 counter。
+2. **预回收**：残代行（∉ {published, 在飞}）按扫描键分页删（各表沿
+   notebook 前导索引 keyset，LIMIT 界住扫描行数而非命中数），是唯一回收
+   通道（加启动恢复）；退休代刻意保留一整轮给跨翻转在飞读者，稳态容量按
+   2× 规划。催收欠账标记在时整库跳过回收。
+3. **写新代**：INSERT 进在飞代，不持 advisory lock、不 DELETE、不推进任何
+   版本序（两段式红线：未发布代写入对读者不可见，bump=假失效）；每个写段
+   先复读在飞认领，被 TTL 抢占/终局重置即响亮作废早停。
+4. **翻指针**：毫秒级微事务——cluster 侧按 key 字节序取齐全 4 类 advisory
+   lock 后双 CAS（published 未被动过 ∧ 认领仍是自己），
+   `cluster_mutation_seq` 在同一条 UPDATE 里推进（版本身份与可见性同提交）；
+   communities 侧翻转骑在既有发布事务里（copy-forward 未重建 level 的行、
+   板块 id 重铸+成员重映射、账本作废与 `community_seq` 同事务）。零行更新
+   =本轮作废不发布。
+5. **催收**：翻转锚点（取号时的 DB 时钟）之前窗口内落进退休代的并发
+   append（append 走锁后读指针写行，PG 侧行时间戳用 DB 语句时钟保持单
+   时钟域），按 keyset 分页重放安置进新 published 代（幂等，探针按代收窄；
+   `added>0` 才推进版本身份），当前在飞代整体排除；完成后 CAS 清欠账标记。
+   翻转后崩溃 → 标记落库，下一轮取号（或输入未变时的 skip 短路）先补欠账。
+
+收尾写回（`finish_rebuild_state`）带 published 指针守卫：指针已被更新的
+发布者动过时整条 no-op。启动恢复先全局释放滞留认领（双 CAS 保证误清活认领
+只会让受害者响亮作废），再按预算逐本回收残代。数值围栏
+（TTL/偏斜/回收页宽）见部署文档。
+
 ### 3.6 深度报告
 
 深度报告由 `report_engine.py` 作为可取消后台 job 执行。阶段 1a 先做完全不读取语料的问题理解，停在 `intent_ready`；确认端点通过 store 级 compare-and-set 原子认领 `intent_ready → planning`，把用户已审阅的合同和澄清答案确定性冻结，不再做隐藏的二次 LLM 理解。阶段 1b 才做语料侦察与多视角大纲，停在 `outline_ready` 供用户编辑；覆盖/充分性探针先按逻辑组保留各自 first-N，再把跨主题/章节重复的 query 合并为一次检索，并在 report-wide leaf fanout 内并行 KG/element 叶子；聚合仍按原输入顺序。不可复制的大库不扫描整表 element，而从有界 chunk ANN 命中的 `element_ids` 恢复精确元素；ANN 不可用时才走有界 FTS 回退，精确短语/标识符仍是独立通道。阶段二在确认大纲后按 section 并行运行 reasoning 深挖并写成带证据纪律的 Markdown，内部检索问题可含澄清答案，但可见标题只使用确认后的研究问题。状态、逐节进度、下载、批量导出、取消与删除都通过 report API 暴露，不能在请求线程内同步跑完整报告。已认证的后端批量导出先由 repository SQL 完成 notebook/creator/done/nonempty 收窄并释放连接，再把不可变最小视图交给启动冻结的 single `report.exporter` Provider；默认内建 Markdown provider 是唯一默认实现，文件名/重复后缀和 ZIP 外壳继续归 core，不存在 fallback renderer。浏览器单篇 Markdown Blob 仍是已授权详情的本地呈现，不进入 backend Provider。
