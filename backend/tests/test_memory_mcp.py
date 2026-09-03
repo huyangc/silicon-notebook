@@ -723,6 +723,114 @@ async def test_ask_notebook_rejects_a_question_over_max_length(mcp_env):
         assert "来源" in at_cap.content[0].text
 
 
+def _ask_jobs_row_count(mcp_env) -> int:
+    with repository()._write() as db:
+        return db.execute("SELECT COUNT(*) AS n FROM ask_jobs").fetchone()["n"]
+
+
+@pytest.mark.anyio
+async def test_ask_notebook_reasoning_rejects_an_unresolved_generic_question(
+    mcp_env, monkeypatch
+):
+    """T3: reasoning 模式的确定性歧义闸在建 ask_job 之前挡下模糊问题。
+
+    错误文案带上具体的歧义问题(不是裸的「问题仍有关键歧义」),并且不留下一条
+    failed 的 ask_jobs 行 —— 回归摸底结论第4条:MCP 之前没有自己的闸,直接撞
+    引擎内 `begin_job_current` 之后的那条,会留下 failed job。
+
+    问题用「分析一下」而非规格草稿举例的「分析一下这个」:后者含「这个」,会先
+    撞 `_UNRESOLVED_REFERENCE`(产出「你提到的对象具体是什么？」),不撞
+    `_GENERIC_REQUEST`——两条路径都在 T3 范围之外、T3 之前就有,这里选择真正
+    触发「你希望分析的具体对象和最关心的问题是什么」这条文案的问句。
+
+    笔记本必须可问答(patch `get_notebook`):否则空库检查在 `repo.ask` 之前就把
+    调用挡下,行数断言在有闸/无闸两种形态下都是 0 == 0,守不住「不留 failed job」。
+    可问答且删掉前置闸时,引擎内那条后备闸在 `begin_job_current` 之后才抛,行数
+    会从 0 变 1——这才是本用例要红的形态。`service.ask` 保持真身,正是为了让这条
+    对照成立。
+    """
+    service = mcp_env["service"]
+    monkeypatch.setattr(
+        service, "get_notebook", lambda _id: _fake_notebook_summary(mcp_env)
+    )
+    before = _ask_jobs_row_count(mcp_env)
+    async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
+        _payload(await client.call(
+            "select_notebook", {"notebook_id": mcp_env["notebook"].id}
+        ))
+        rejected = await client.call(
+            "ask_notebook", {"question": "分析一下", "mode": "reasoning"},
+        )
+    assert rejected.isError
+    text = rejected.content[0].text
+    assert "你希望分析的具体对象和最关心的问题是什么" in text
+    assert "把对象名写进问题后重试" in text
+    after = _ask_jobs_row_count(mcp_env)
+    assert after == before
+
+
+@pytest.mark.anyio
+async def test_ask_notebook_chunk_mode_is_not_blocked_by_the_reasoning_gate(
+    mcp_env, monkeypatch
+):
+    """同一句模糊问题在 chunk 模式下不撞 T3 新增的这道闸(闸只对 reasoning 生效)。"""
+    service = mcp_env["service"]
+    monkeypatch.setattr(
+        service, "get_notebook", lambda _id: _fake_notebook_summary(mcp_env)
+    )
+    monkeypatch.setattr(
+        service,
+        "ask",
+        lambda *a, **k: SimpleNamespace(
+            answer_id="ans-chunk-gate", answer="ok", conclusion="ok",
+            grounded=True, evidence_level="grounded", mode="chunk",
+            conversation_id="conv-chunk-gate", anchors=[], citations=[],
+        ),
+    )
+    async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
+        _payload(await client.call(
+            "select_notebook", {"notebook_id": mcp_env["notebook"].id}
+        ))
+        result = await client.call(
+            "ask_notebook", {"question": "分析一下", "mode": "chunk"},
+        )
+    # 若在这套夹具下因别的原因失败,失败原因也必须不是这道闸的文案。
+    if result.isError:
+        assert "问题仍有关键歧义" not in result.content[0].text
+    else:
+        payload = _payload(result)
+        assert payload["answer_id"] == "ans-chunk-gate"
+
+
+@pytest.mark.anyio
+async def test_ask_notebook_reasoning_accepts_a_clear_question(mcp_env, monkeypatch):
+    """清晰问题在 reasoning 模式下不触发这道闸,行为与今天逐键相同。"""
+    service = mcp_env["service"]
+    monkeypatch.setattr(
+        service, "get_notebook", lambda _id: _fake_notebook_summary(mcp_env)
+    )
+    monkeypatch.setattr(
+        service,
+        "ask",
+        lambda *a, **k: SimpleNamespace(
+            answer_id="ans-reasoning-clear", answer="ok", conclusion="ok",
+            grounded=True, evidence_level="grounded", mode="reasoning",
+            conversation_id="conv-reasoning-clear", anchors=[], citations=[],
+        ),
+    )
+    async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
+        _payload(await client.call(
+            "select_notebook", {"notebook_id": mcp_env["notebook"].id}
+        ))
+        result = await client.call(
+            "ask_notebook",
+            {"question": "CMOS 反相器的阈值电压由什么决定", "mode": "reasoning"},
+        )
+    assert not result.isError, result
+    payload = _payload(result)
+    assert payload["answer_id"] == "ans-reasoning-clear"
+
+
 class _FakeAskEngineHost:
     """Stand-in for extensions.ask_engine.AskEngineHost's read surface only --
     the three methods _validate_ask_mode actually calls."""

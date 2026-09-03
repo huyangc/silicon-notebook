@@ -16,6 +16,7 @@ from app.models.ask import (
 )
 from app.services.query_intent import (
     auto_ask_mode_from_intent,
+    clarification_gate_message,
     confirmed_intent_queries,
     confirmed_research_question,
     finalize_query_intent,
@@ -545,3 +546,72 @@ def test_deterministic_ambiguity_row_cannot_exceed_the_contract_ceiling():
     ]
     # 真正的验收:契约构造得出来,不抛 ValidationError。
     assert QueryIntentContract(**contract).needs_clarification is True
+
+
+def _seed_with_ambiguities(questions: list[str]) -> dict:
+    return {
+        "objective": "这不该出现在文案里的用户原文",
+        "ambiguities": [
+            {
+                "id": f"a{index}",
+                "question": question,
+                "reason": "这条 reason 也不该出现在文案里",
+                "required": True,
+                "options": [],
+            }
+            for index, question in enumerate(questions)
+        ],
+    }
+
+
+def test_clarification_gate_message_with_zero_ambiguities():
+    assert clarification_gate_message(_seed_with_ambiguities([])) == (
+        "问题仍有关键歧义，请先确认问题理解"
+    )
+
+
+def test_clarification_gate_message_with_one_ambiguity():
+    message = clarification_gate_message(
+        _seed_with_ambiguities(["你提到的对象具体是什么？请给出名称或简要背景。"])
+    )
+    assert message == (
+        "问题仍有关键歧义，请先确认问题理解："
+        "① 你提到的对象具体是什么？请给出名称或简要背景。"
+    )
+    assert "reason" not in message
+    assert "这不该出现在文案里的用户原文" not in message
+    assert "这条 reason 也不该出现在文案里" not in message
+
+
+def test_clarification_gate_message_with_eight_ambiguities_uses_all_circled_digits():
+    questions = [f"第{i}个澄清问题？" for i in range(1, 9)]
+    message = clarification_gate_message(_seed_with_ambiguities(questions))
+    for digit, question in zip("①②③④⑤⑥⑦⑧", questions):
+        assert f"{digit} {question}" in message
+    assert message.count("；") == 7
+
+
+def test_clarification_gate_message_drops_the_ninth_ambiguity():
+    questions = [f"第{i}个澄清问题？" for i in range(1, 10)]
+    message = clarification_gate_message(_seed_with_ambiguities(questions))
+    assert "第9个澄清问题？" not in message
+    assert "第8个澄清问题？" in message
+    assert message.count("；") == 7
+
+
+def test_clarification_gate_message_skips_blank_question_rows():
+    seed = _seed_with_ambiguities(["", "  ", "唯一有效的澄清问题？"])
+    message = clarification_gate_message(seed)
+    assert message == (
+        "问题仍有关键歧义，请先确认问题理解：① 唯一有效的澄清问题？"
+    )
+
+
+def test_clarification_gate_message_truncates_a_single_overlong_question():
+    long_question = "问" * 600
+    message = clarification_gate_message(_seed_with_ambiguities([long_question]))
+    expected_body = "问" * 500
+    assert message == (
+        f"问题仍有关键歧义，请先确认问题理解：① {expected_body}"
+    )
+    assert len(long_question) > 500

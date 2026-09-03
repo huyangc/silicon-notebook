@@ -63,6 +63,7 @@ from app.services.ask_modes import (
 from app.services.cancellation import AskCancelled
 from app.services.query_intent import (
     auto_ask_mode_from_intent,
+    clarification_gate_message,
     finalize_query_intent,
     plan_query_intent,
 )
@@ -691,7 +692,7 @@ def _validate_confirmed_reasoning_intent(payload: AskRequest, spec) -> None:
             None, payload.question.strip(), "", max_topics=1
         )
         if seed.get("needs_clarification"):
-            raise user_error(422, "问题仍有关键歧义，请先确认问题理解")
+            raise user_error(422, clarification_gate_message(seed))
         return
     seed = payload.intent.contract.model_dump()
     if str(seed.get("objective") or "").strip() != payload.question.strip():

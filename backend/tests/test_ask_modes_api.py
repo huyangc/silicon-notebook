@@ -332,3 +332,46 @@ def test_ask_refuses_an_over_length_question(tmp_path, monkeypatch):
     for path in (f"/api/notebooks/{nb}/ask", f"/api/notebooks/{nb}/ask/stream"):
         ok = client.post(path, json={"question": at_cap, "mode": "chunk"})
         assert ok.status_code == 409, (path, ok.status_code, ok.text)
+
+
+def test_ask_reasoning_without_intent_gives_422_with_the_ambiguity_question(
+    tmp_path, monkeypatch
+):
+    """直连 `/ask`(不带 `intent`,兼容旧客户端)遇确定性歧义时,422 的 `detail`
+    带上具体的歧义问题,而不是裸的「问题仍有关键歧义，请先确认问题理解」。
+
+    T3:`ask_routes._validate_confirmed_reasoning_intent` 的 `payload.intent is
+    None` 分支改走 `clarification_gate_message(seed)`。用「分析一下」而非「分析
+    一下这个」——后者含「这个」,会先撞 `_UNRESOLVED_REFERENCE` 而非
+    `_GENERIC_REQUEST`,产出不同措辞的确定性行;这里选择真正触发「你希望分析的
+    具体对象和最关心的问题是什么」这条文案的问句。
+    """
+    client = _client(tmp_path, monkeypatch)
+    nb = client.post("/api/notebooks", json={"name": "nb"}).json()["id"]
+
+    r = client.post(
+        f"/api/notebooks/{nb}/ask",
+        json={"question": "分析一下", "mode": "reasoning"},
+    )
+    assert r.status_code == 422
+    assert "你希望分析的具体对象" in r.json()["detail"]
+
+
+def test_engine_side_reasoning_gate_shares_the_clarification_copy():
+    """引擎内的兼容后备闸(`AskService._confirmed_reasoning_intent`,`intent is None`
+    分支)与路由层 422、MCP 前置闸共用同一份 `clarification_gate_message`。
+
+    这条分支在 HTTP 与 MCP 两条正式入口上已被前置闸挡住、正常不可达,只对绕过入口
+    直接调 `repo.ask` 的调用方生效——正因为没有端到端路径覆盖它,单独钉住文案,
+    否则这一处漂回裸字面量「问题仍有关键歧义，请先确认问题理解」时全量测试仍然绿,
+    三处文案就分家了。
+    """
+    from app.models.ask import AskRequest
+    from app.services.ask_service import AskService
+
+    payload = AskRequest(question="分析一下", mode="reasoning")
+    with pytest.raises(ValueError) as excinfo:
+        AskService._confirmed_reasoning_intent(payload, "")
+    text = str(excinfo.value)
+    assert text.startswith("问题仍有关键歧义，请先确认问题理解：")
+    assert "你希望分析的具体对象和最关心的问题是什么" in text

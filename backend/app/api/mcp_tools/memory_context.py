@@ -20,6 +20,7 @@ from app.core.memory_inputs import (
 )
 from app.models.ask import ASK_QUESTION_MAX_CHARS, AskRequest
 from app.services.agent_profile_block import resolve_agent_profile_names
+from app.services.query_intent import clarification_gate_message, plan_query_intent
 from app.services.search_concurrency import run_under_search_gate
 
 from ._shared import (
@@ -389,7 +390,12 @@ def register_memory_context_tools(
             "mode id of any deployment-installed ask.engine plugin that is "
             "currently registered and available. Plugin engines can run for a "
             "long time -- configure the MCP client's read timeout generously; "
-            "the server never gives up on a call it is still executing."
+            "the server never gives up on a call it is still executing. In "
+            "reasoning mode, a question whose referent cannot be resolved "
+            "from the question itself (e.g. \"this flow\", \"the one above\") "
+            "or that is a bare generic request is rejected; the error text "
+            "lists what to add -- put the concrete object name into the "
+            "question and retry."
         )
     )
     async def ask_notebook(
@@ -418,6 +424,20 @@ def register_memory_context_tools(
             )
         if len(conversation_id) > CONVERSATION_ID_MAX_LENGTH:
             raise ValueError("conversation_id too long")
+        # Same deterministic fail-closed gate the HTTP direct entry point
+        # applies in `_validate_confirmed_reasoning_intent` (ask_routes.py),
+        # checked HERE -- before any durable ask_job is created -- rather than
+        # left to the engine's own compatibility branch further down the call
+        # chain, which only runs after `begin_job_current` has already
+        # published a job row. History is passed as "" to match the HTTP
+        # gate: the deterministic checks only look at the question's own
+        # wording, not at structured conversation history.
+        if mode == "reasoning":
+            seed = plan_query_intent(None, question.strip(), "", max_topics=1)
+            if seed.get("needs_clarification"):
+                raise ValueError(
+                    clarification_gate_message(seed) + " 把对象名写进问题后重试。"
+                )
         repo = repository_provider()
         principal, notebook_id = await anyio.to_thread.run_sync(
             _selected_notebook, ctx, repo, "ask:execute"

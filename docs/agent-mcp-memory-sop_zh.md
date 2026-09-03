@@ -394,6 +394,7 @@ auth | curl -K - -s -o /dev/null -w '%{http_code}\n' -X DELETE "$MCP_URL" \
 | 配置客户端时 `404` 或连接被拒 | 先照签发回执的接入说明**逐字**重试它印出的那个地址。补结尾斜杠、或回落到 `<host>:8000/mcp/`，都只适用于确认是直连后端的地址：有代理时它可能只路由公布的那条路径，后端端口可能是私有的，硬去够那个端口还可能把 token 降级成明文（第 4 节）。 |
 | `POST /mcp` 回 `307 Temporary Redirect` | 预期行为——MCP 应用挂在 `/mcp`，自身路由是 `/`。直接把 `/mcp/` 写进配置，不要指望客户端一定跟随重定向。 |
 | `reasoning` 档的 `ask_notebook` 跑了几十秒就被客户端以传输错误中断，而服务端继续把答案生成完 | 是客户端自己的 MCP 超时，不是服务端的。按第 4 节「长任务调用与客户端超时」调高。服务端每 5 秒发一次心跳，遵守 progress 通知的客户端本不该撞上；若仍出现，怀疑反向代理缓冲了响应流或有自己的读超时。 |
+| `reasoning` 档的 `ask_notebook` 返回「问题仍有关键歧义，请先确认问题理解：① …」 | 这是服务端确定性闸，不是模型故障；把文案里点名的具体对象名写进问题后重试，或改用 `chunk` 档（不加此闸）。 |
 | `POST /mcp/` 返回 `406 Not Acceptable` | 该请求只接受了 `application/json`。传输以 SSE 应答，长任务的 progress 通知才到得了客户端；请发 `accept: application/json, text/event-stream`——这是 Streamable HTTP 规范的要求，所有真实客户端本来就这么发。 |
 | `400 Bad Request: Missing session ID` | 工具调用发生在 `initialize` + `notifications/initialized` 之前，或 `MCP-Session-Id` 头丢了。正式客户端会自动处理；手写 `curl` 不能跳过（第 8 节）。 |
 | Claude Code 把 `${...}` 当成 token 原样发出 | 变量没有在启动 `claude` 的 shell 里导出，或变量名拼错——未定义的变量会被原样透传。导出后新开会话。 |
