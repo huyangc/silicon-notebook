@@ -42,10 +42,12 @@ const INFERENCE_LIST_MARKER_LINE = new RegExp(
   `^( {0,3})(${INFERENCE_MARKER_LITERALS.map(escapeRegExp).join("|")})([ \\t]*)(\\d{1,9}[.)]|[-*+])([ \\t]+)(.*)$`,
 );
 
-// 围栏:至多 3 空格缩进后 3 个及以上的 ` 或 ~。反引号围栏的 info string 里不得再出现
-// 反引号(CommonMark:那不是围栏),否则会把后面的整段都当成代码块跳过;波浪线围栏无此限制。
-// 闭合须同字符、长度不短于开启、其后只有空白。
-const FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})(.*)$/;
+// 围栏:至多 3 空格缩进后 3 个及以上的 ` 或 ~;围栏也可以直接开在列表项那一行
+// (`- ```text` / `1. ```text`,codex #670 R2 P2),所以允许一个可选的列表语法前缀,
+// 否则围栏内缩进的「（推断）1. …」会被改写、闭合围栏还会被当成新的开启。
+// 反引号围栏的 info string 里不得再出现反引号(CommonMark:那不是围栏),否则会把后面的
+// 整段都当成代码块跳过;波浪线围栏无此限制。闭合须同字符、长度不短于开启、其后只有空白。
+const FENCE_OPEN = /^ {0,3}(?:(?:\d{1,9}[.)]|[-*+])[ \t]+ {0,3})?(`{3,}|~{3,})(.*)$/;
 
 function opensFence(line: string): string | null {
   const match = line.match(FENCE_OPEN);
