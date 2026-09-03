@@ -860,6 +860,58 @@ def test_copy_sweeper_only_removes_expired_copy_jobs(repo):
         assert db.execute("SELECT 1 FROM notebooks WHERE id=?", (expired_id,)).fetchone() is None
 
 
+def test_copy_sweeper_reaps_per_notebook_and_cleans_disk(repo, monkeypatch):
+    """批 3·W1 PR-4 双钉：
+    ① 变异钉:把服务层收割后的两目录 rmtree 删掉 → 崩溃半拷贝的行被收割、
+    磁盘目录永久残留(PR-4 之前的静默泄漏),报红;
+    ② 逐本事务:store 每收割一本恰好一个 write() 事务(不再 N 本叠一个)。"""
+    owner = "user-local"
+    stale_a = _mk_nb(repo, "stale-a", owner)
+    stale_b = _mk_nb(repo, "stale-b", owner)
+    fresh = _mk_nb(repo, "fresh-copy", owner)
+    with repo._write() as db:
+        for nb in (stale_a, stale_b):
+            db.execute(
+                "UPDATE notebooks SET status='copying', "
+                "created_at='2000-01-01T00:00:00' WHERE id=?", (nb,),
+            )
+        db.execute(
+            "UPDATE notebooks SET status='copying', created_at=? WHERE id=?",
+            (_now(), fresh),
+        )
+    storage = repo._runtime.source_files.storage_dir
+    for nb in (stale_a, stale_b, fresh):
+        for root in ("notebooks", "assets"):
+            d = storage / root / nb
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "leftover.bin").write_bytes(b"x")
+
+    writes = {"n": 0}
+    database = repo._runtime.database
+    original_write = database.write
+
+    def _write_spy(*args, **kwargs):
+        writes["n"] += 1
+        return original_write(*args, **kwargs)
+
+    monkeypatch.setattr(database, "write", _write_spy)
+    assert repo._sweep_stuck_copies(created_by=owner) == 2
+    monkeypatch.setattr(database, "write", original_write)
+
+    assert writes["n"] == 2, (
+        f"每本一个写事务,不许 N 本叠一个:{writes['n']}"
+    )
+    for nb in (stale_a, stale_b):
+        for root in ("notebooks", "assets"):
+            assert not (storage / root / nb).exists(), (
+                f"收割后的磁盘目录必须清掉:{root}/{nb}"
+            )
+    for root in ("notebooks", "assets"):
+        assert (storage / root / fresh / "leftover.bin").exists(), (
+            "未过期的在途拷贝目录不许连坐"
+        )
+
+
 def test_public_notebook_update_rejects_internal_status():
     """The copy sentinel is an internal lifecycle state, never API input."""
     from pydantic import ValidationError

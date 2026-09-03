@@ -848,13 +848,23 @@ class SharingStore:
                 "DELETE FROM notebooks WHERE id = ? AND status = 'copying'", (notebook_id,)
             )
 
-    def sweep_stale_copies(self, *, created_by: "str | None" = None) -> int:
-        """Delete expired copy sentinels without touching concurrent copies."""
+    def sweep_stale_copies(self, *, created_by: "str | None" = None) -> list[str]:
+        """Delete expired copy sentinels without touching concurrent copies.
+
+        批 3·W1 PR-4（残余债 #7 收编）：从「一个事务整删全部过期拷贝」改为
+        **每本一个事务**——单本的级联删除量被拷贝上限（notebook_copy_max_
+        rows / notebook_copy_max_snapshot_rows）界住，是有界事务；N 本过期
+        拷贝不再叠成一个 N 倍大的事务。候选先在只读连接上选出，每本进写
+        事务时按 ``status='copying' AND created_at<cutoff`` **重验**再删——
+        选取与删除之间该行被 publish/compensate/删除作业动过就跳过，语义
+        与旧版单事务的行级判定一致。返回**实际收割的 id 列表**（不再是
+        计数）：服务层要用它清掉对应的磁盘目录（崩溃在进程内补偿之前的
+        半拷贝,行删了文件还躺着——PR-4 之前的静默泄漏）。"""
         cutoff = (
             datetime.now()
             - timedelta(seconds=max(1, self.settings.notebook_copy_stale_seconds))
         ).replace(microsecond=0).isoformat()
-        with self.database.write() as db:
+        with self.database.connect() as db:
             if created_by is not None:
                 rows = db.execute(
                     "SELECT id FROM notebooks WHERE status = 'copying' AND created_by = ? "
@@ -866,22 +876,30 @@ class SharingStore:
                     "SELECT id FROM notebooks WHERE status = 'copying' AND created_at < ?",
                     (cutoff,),
                 ).fetchall()
-            stuck_ids = [row["id"] for row in rows]
-            if not stuck_ids:
-                return 0
-            placeholders = ",".join("?" for _ in stuck_ids)
-            db.execute(
-                f"DELETE FROM kg_objects_fts WHERE notebook_id IN ({placeholders})", stuck_ids
-            )
-            db.execute(
-                f"DELETE FROM chunks_fts WHERE notebook_id IN ({placeholders})", stuck_ids
-            )
-            db.execute(
-                f"DELETE FROM knowledge_embeddings WHERE notebook_id IN ({placeholders})",
-                stuck_ids,
-            )
-            db.execute(f"DELETE FROM notebooks WHERE id IN ({placeholders})", stuck_ids)
-        return len(stuck_ids)
+        reaped: list[str] = []
+        for row in rows:
+            nb_id = row["id"]
+            with self.database.write() as db:
+                still = db.execute(
+                    "SELECT 1 FROM notebooks WHERE id = ? AND status = 'copying' "
+                    "AND created_at < ?",
+                    (nb_id, cutoff),
+                ).fetchone()
+                if still is None:
+                    continue
+                db.execute(
+                    "DELETE FROM kg_objects_fts WHERE notebook_id = ?", (nb_id,)
+                )
+                db.execute(
+                    "DELETE FROM chunks_fts WHERE notebook_id = ?", (nb_id,)
+                )
+                db.execute(
+                    "DELETE FROM knowledge_embeddings WHERE notebook_id = ?",
+                    (nb_id,),
+                )
+                db.execute("DELETE FROM notebooks WHERE id = ?", (nb_id,))
+            reaped.append(nb_id)
+        return reaped
 
     @staticmethod
     def insert_row_values(db: sqlite3.Connection, table: str, data: dict) -> None:

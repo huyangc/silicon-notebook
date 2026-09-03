@@ -747,30 +747,46 @@ class SharingStore:
                 "DELETE FROM notebooks WHERE id=%s AND status='copying'", (notebook_id,)
             )
 
-    def sweep_stale_copies(self, *, created_by: str | None = None) -> int:
+    def sweep_stale_copies(self, *, created_by: str | None = None) -> list[str]:
+        """批 3·W1 PR-4（残余债 #7 收编）——SQLite 孪生的 docstring 载有完整
+        理由：每本一个事务（单本级联量被拷贝上限界住）、写事务内按哨兵
+        谓词重验（``FOR UPDATE`` 行锁使 publish/compensate 并发方等到本本
+        落定）、返回实际收割的 id 列表供服务层清盘。"""
         cutoff = utc_now() - timedelta(
             seconds=max(1, self.settings.notebook_copy_stale_seconds)
         )
-        with self.database.write() as connection:
+        with self.database.connect() as connection:
             if created_by is None:
                 rows = connection.execute(
-                    "SELECT id FROM notebooks WHERE status='copying' AND created_at<%s FOR UPDATE",
+                    "SELECT id FROM notebooks WHERE status='copying' AND created_at<%s",
                     (cutoff,),
                 ).fetchall()
             else:
                 rows = connection.execute(
                     "SELECT id FROM notebooks WHERE status='copying' AND created_by=%s "
-                    "AND created_at<%s FOR UPDATE",
+                    "AND created_at<%s",
                     (created_by, cutoff),
                 ).fetchall()
-            ids = [row["id"] for row in rows]
-            if not ids:
-                return 0
-            connection.execute(
-                "DELETE FROM knowledge_embeddings WHERE notebook_id=ANY(%s)", (ids,)
-            )
-            connection.execute("DELETE FROM notebooks WHERE id=ANY(%s)", (ids,))
-        return len(ids)
+        reaped: list[str] = []
+        for row in rows:
+            nb_id = row["id"]
+            with self.database.write() as connection:
+                still = connection.execute(
+                    "SELECT 1 FROM notebooks WHERE id=%s AND status='copying' "
+                    "AND created_at<%s FOR UPDATE",
+                    (nb_id, cutoff),
+                ).fetchone()
+                if still is None:
+                    continue
+                connection.execute(
+                    "DELETE FROM knowledge_embeddings WHERE notebook_id=%s",
+                    (nb_id,),
+                )
+                connection.execute(
+                    "DELETE FROM notebooks WHERE id=%s", (nb_id,)
+                )
+            reaped.append(nb_id)
+        return reaped
 
     @staticmethod
     def insert_row_values(connection, table: str, data: dict) -> None:

@@ -129,7 +129,24 @@ class NotebookCopyService:
         self._schedule_projection = schedule_projection
 
     def sweep_stuck_copies(self, created_by: "str | None" = None) -> int:
-        return self._store.sweep_stale_copies(created_by=created_by)
+        """批 3·W1 PR-4：收割过期拷贝哨兵行,并连带清掉每本的两棵磁盘目录。
+
+        进程内的拷贝失败补偿（``copy_notebook`` 的 except 分支）本来就
+        rmtree 目的地的 ``notebooks/<id>`` 与 ``assets/<id>``——但进程死在
+        补偿之前的半拷贝只有本清扫收割其行,文件在 PR-4 之前无人清、按崩溃
+        次数静默泄漏。store 现在返回实际收割的 id 列表,逐本 best-effort
+        整目录删除（幂等,目录不存在即 no-op),对外仍返回计数。"""
+        reaped = self._store.sweep_stale_copies(created_by=created_by)
+        for notebook_id in reaped:
+            shutil.rmtree(
+                self._storage_dir() / "notebooks" / notebook_id,
+                ignore_errors=True,
+            )
+            shutil.rmtree(
+                self._storage_dir() / "assets" / notebook_id,
+                ignore_errors=True,
+            )
+        return len(reaped)
 
     def copy_notebook(
         self,
