@@ -7017,6 +7017,36 @@ button.tag:hover {
   color: #111827;
 }
 
+/* 推断/通识行内标记（T2-a）：与 .cite-chip 同一视觉家族（细边框圆角小标签）,但这两个
+   标记不可点——不带 hover/active 态、cursor 是 default，避免用户误以为能点开详情。
+   两个 class 各用一种弱化色相区分：推断偏琥珀色,通识偏青色。不动 evidence_level 顶栏
+   标签样式(那是整篇证据等级,这里是逐句标记,两回事)。 */
+.answer-inference,
+.answer-general-knowledge {
+  display: inline;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  padding: 0 5px;
+  margin: 0 2px;
+  font-size: 0.74em;
+  font-weight: 750;
+  line-height: 1.45;
+  cursor: default;
+  vertical-align: baseline;
+}
+
+.answer-inference {
+  border-color: #e0c78a;
+  color: #8a6512;
+  background: #fbf3df;
+}
+
+.answer-general-knowledge {
+  border-color: #a9d0c4;
+  color: #1f6b52;
+  background: #e6f4ee;
+}
+
 /* 引用浮层:点引用徽章后在点击处弹出的悬浮容器(定位由 JS 内联 top/left 决定)。
    内含 .cite-detail-card;这里只管悬浮外观 + 限高滚动 + 层级。 */
 .cite-popover {

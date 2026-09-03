@@ -58,6 +58,16 @@
   「整理当时的实时口径」、`community_snapshot` → 「上次主题板块划分」、
   `unified_rebuild_snapshot` → 「上次整理时的规模」。
 
+## 答案正文内的标记
+
+问答与深度报告正文里句首/段首出现的「（推断）」「(推断)」「Likely,」与「【通识】」是模型输出
+内容的一部分，不是本文件登记的界面文案（JSX 文本、`label`、`title`、`placeholder`、
+`aria-label`、toast、错误、表头）；它们各自的界面呈现名是「推断」与「通识」。前端渲染层只把
+这几种句首/段首前缀包成不可点的行内标签样式，不改写、不新增文本内容，复制结果不变。
+`scripts/check_ui_vocabulary.py` 的黑名单扫描面是渲染进前端源码的固定文案与后端
+`user_error()` 消息字面量，不覆盖模型生成的答案正文，因此这两个标记不登记进「界面词汇表」，
+也不需要 `NOT_LINTABLE` 豁免理由。
+
 ## 自动守卫边界
 
 `scripts/check_ui_vocabulary.py` 由 `scripts/check.sh` 执行。守卫作用域跟着信任边界走，

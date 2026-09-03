@@ -90,21 +90,47 @@ substitute a related object.
 
 **验证门**：`backend/tests/test_prompts.py` 新增断言（规则 12 在规则 11 之后、在 `history_section` 之前；`style_block` 仍落在规则与问题之间——沿用 `test_style_block_lands_between_the_rules_and_the_question_in_answer_prompt` 的定位方式）。仓库没有问答质量离线评测台（`scripts/` 只有 `kg_quality_audit.py` / `replay_retrieval.py`），因此 PR 须附一次真机 A/B：用样例 1–3 的**句式**各构造一问（点名子部件 / 周期性限定 / 方向限定），同一语料、同一引擎，贴规则 12 前后的回答摘要与是否出现「证据只覆盖…」的显式句。这是人工门，不是自动门，PR 说明里如实标注。
 
-### T2 推断标记核查与呈现
+### T2 推断标记：传递规则 + 行内呈现（诊断结果：第三种，2026-09-03 用户在生产核实）
 
-**先诊断，后二选一。** 诊断由用户在生产库完成（本文不再派 agent）：取样例 4 的 T1 `answers.payload.answer`，看「s28 需要 DAC 校准」那句是否带 `（推断）` 前缀。
+**诊断结果。** 原设计只列了「有前缀 / 无前缀」两种；生产回答的实际形态是第三种：支线（分层机理）里的句子带 `（推断）`，**结论段不带**。推断状态没有从前提传递到结论，结论读起来像已证事实。
 
-| 诊断结果 | 结论 | 整改 |
-| --- | --- | --- |
-| 有前缀 | 模型守了规则 2，用户没看见 | T2-a：前端给 `（推断）` 做可见样式 |
-| 无前缀 | 模型违反规则 2，把推断写成事实 | T2-b：不改 prompt 文本（规则 2 已够明确），改为在 `test_prompts` 之外加一条真机回归样例进 PR 门，并把该问题句式收进 T1 的 A/B 集 |
+**根因（按 `0836efdb` 复核）。** 所有推断规则都是逐句规则，没有一条要求「依赖推断的结论继承推断」：
+- Ask `answer_prompt` L0 规则 2（`prompts.py:332-336`）只约束「当一句话是你自己的推断时」；规则 8 鼓励分层写机理、层间用 `（推断）` 桥接，模型最后写的「结论」段是对各层的归纳，按字面不是「一句推断」，于是既不挂 `[k]` 也不标 `（推断）`。
+- 分节合成没这个问题：每节被明令禁止「为整篇答案写结论」（`prompts.py:283`），整篇没有结论段。所以出问题的是单次合成（chunk / mix / 未分节的 reasoning）与深度报告。
+- 深度报告是 prompt 明文造成的：`report_summary_prompt`（`prompts.py:1163-1171`）要求执行摘要「direct answer first」「只用章节里已有的事实」「no citation markers」——章节里标了 `（推断）` 的发现被提炼进摘要时，标记随「no citation markers」一起丢，摘要把推断当直接答案写在最前面。章节侧 claim ledger 有 `type: inference`（`prompts.py:1107`），但摘要 prompt 只吃章节正文 `sections_block`，不吃 ledger。
+- `conclusion` 字段不是原因：`MARKER_RE`（`citation_markers.py:13`）只剥 `[k]` 组，保留 `（推断）`。前端把 `（推断）` 当裸文本渲染（`rg 推断 frontend/app/` 只命中 `evidence_level` 顶栏标签），不放大也不缩小问题，只是让它更难被看见。
 
-**T2-a 设计**（只在诊断为「有前缀」时实施；D-2）：
+**T2-c 传递规则（三处 prompt 文本，全部 L0，不做 L1 片段）。**
 
-- 在 `frontend/app/answer-citations.ts` 旁新增 `answer-inference.ts` remark 插件：文本节点里的 `（推断）` / `(推断)` / 行首 `Likely,` 前缀（与 L0 规则 2 的三种拼写一致）包成 `<span class="answer-inference">`，样式为弱化色 + 细边框小标签，不改文本内容、不改复制结果（`copyAnswer` 走 `renderTextWithReferenceNumbers`，与渲染树无关）。
-- 不动 `evidence_level` 顶栏标签；两者语义不同（顶栏说整篇的证据等级，行内标记说这一句是推断）。
-- 公开分享视图（`conversation_public_view`）复用同一渲染组件即同样生效；不新增字段。
-- `docs/ui-vocabulary.md` 若已有「推断」词条则复用，没有则补一条。
+1. `answer_prompt` 追加规则 13（规则 12 之后、`history_section` 之前，追加在末尾的理由同规则 12）：
+
+```text
+13. Inference status propagates. A conclusion, summary, 'therefore'/'so' sentence, or final recommendation that rests on any （推断） sentence is itself an inference: prefix it with （推断） and attach NO [k]. Only a conclusion whose every premise is a [k]-cited sentence may be stated without the marker. Never let a closing section state as established fact what the body only inferred.
+```
+
+2. `report_section_prompt` 规则 2（`prompts.py:1063-1064`）扩成：
+
+```text
+2. When a sentence is your own inference bridging the items, prefix it with （推断） and attach NO [k]. A conclusion or in-section summary that rests on any （推断） or 【通识】 sentence is itself an inference: prefix it with （推断） and attach NO [k]; only a conclusion whose every premise is [k]-cited may omit it.
+```
+
+   规则 3/4 的编号与 `report_section.domain_conventions` 片段的「起始序号 3.」契约不动。`allow_parametric=False`（通识关闭）时前提列表只写 `（推断）`——既有契约 `test_report_prompts_contract` 要求关闭态 prompt 里不得出现 `【通识】`。
+
+3. `report_summary_prompt`（`prompts.py:1163-1171`）在「no citation markers」之后补一段：
+
+```text
+（推断） and 【通识】 are NOT citation markers: keep them. A summary sentence distilled from a section finding that carries （推断） or 【通识】 keeps that marker at its start, and if the direct answer itself rests on such findings it opens with （推断）. Never promote an inferred or general-knowledge finding into an unmarked fact.
+```
+
+- 三处都不授权任何新的 `[k]` 绑定；`grounded` 判定（Ask 规则 3、报告规则 7）不变。
+- **第二步（本轮不做）**：让 `report_summary_prompt` 同时吃 claim ledger 里 `type=inference` 的条目清单，让「哪些是推断」变成结构化输入而不是靠模型从正文里认。改动比 prompt 文本大，待本轮真机观察后决定。
+
+**T2-a 行内呈现（既然前缀确实存在，样式就有意义了；D-2 已由诊断结果落定为「做」）。**
+
+- 在 `frontend/app/answer-citations.ts` 旁新增 `answer-inference.ts` remark 插件：文本节点里**句首或段首**的 `（推断）` / `(推断)` / `Likely,`（与 L0 规则 2 的三种拼写一致）包成 `<span class="answer-inference">`，`【通识】`（报告规则 4）包成 `<span class="answer-general-knowledge">`；用 mdast `data.hName/hProperties` 产出 span，不改文本内容、不改复制结果（`copyAnswer` 走 `renderTextWithReferenceNumbers`，与渲染树无关）。只认句首/段首：标记前面（可隔空格/制表符）是文本起点、换行，或 `。；！？.;!?` 之一；本 text 节点起点不等于段首——`[k1]（推断）`、`**重点**（推断）` 这类被前一个兄弟节点切开的句中位置要回看兄弟节点判定。句中出现的普通词「推断」不动。
+- **四个渲染面都接**：`AnswerMarkdown`（`answer-markdown.tsx`）、`ReportMarkdown`（`report-view.tsx`）、以及公开分享页 `c/[token]/page.tsx`、`r/[token]/page.tsx` 各自的 `ReactMarkdown` 实例（分享页**不**复用前两个组件，是独立实例）。新增守卫测试钉住「渲染模型产出文本的每个面都带 `remarkAnswerInference`」，与既有 `markdown-single-tilde-guard` 同一口径。不新增任何后端字段。
+- 样式：弱化色 + 细边框小标签，与 `.cite-chip` 同一视觉家族但不可点；两个 class 各自一套，`【通识】` 用另一种色相区分「推断」与「通识」。不动 `evidence_level` 顶栏标签（顶栏说整篇的证据等级，行内标记说这一句是推断）。
+- `docs/ui-vocabulary.md` **不**把这两个标记登进「界面词汇表」（那张表是 JSX 文案黑名单，登进去等于禁止标记出现在界面上），而是新增独立小节「答案正文内的标记」：说明它们是模型输出内容、界面呈现名为「推断」「通识」、渲染层只加样式；守卫 `test_ui_vocabulary_guard` 的扫描面不覆盖模型正文，无需豁免。
 
 ### T3 歧义错误文案携带歧义问题，并前移到建 job 之前
 

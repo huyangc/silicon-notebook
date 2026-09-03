@@ -22,6 +22,7 @@ import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
 
 import { remarkCitations } from "../../answer-citations";
+import { remarkAnswerInference } from "../../answer-inference";
 import { remarkGfmPlugin } from "../../markdown-gfm";
 import { normalizeMathMarkdown } from "../../math-markdown";
 import { ImagePreviewModal } from "../../image-preview-modal";
@@ -364,6 +365,7 @@ function PublicTurnView({
         remarkGfmPlugin,
         remarkMath,
         [remarkCitations, markdownCitationRefs] as [typeof remarkCitations, typeof markdownCitationRefs],
+        remarkAnswerInference,
       ]}
       rehypePlugins={[
         rehypeKatex,

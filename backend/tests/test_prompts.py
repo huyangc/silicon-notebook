@@ -63,6 +63,38 @@ def test_answer_prompt_rule_12_preserves_question_qualifiers():
     assert rule_12_idx_h < history_idx
 
 
+def test_answer_prompt_rule_13_propagates_inference_to_conclusions():
+    """T2-c:规则 13(推断状态传递)存在,落在规则 12 之后、Question 行之前;
+    有 history 时同样落在 history 段之前。"""
+    from app.services.prompts import answer_prompt
+
+    p = answer_prompt("q?", "k1: [concept] X")
+    assert "13. Inference status propagates" in p
+    # 承重句:只有每条前提都挂 [k] 的结论才可以不标（推断）。
+    assert (
+        "Only a conclusion whose every premise is a [k]-cited sentence may be "
+        "stated without the marker" in p
+    )
+    assert (
+        "Never let a closing section state as established fact what the body "
+        "only inferred." in p
+    )
+
+    rule_12_idx = p.index("substitute a related object.")
+    rule_13_idx = p.index("13. Inference status propagates")
+    question_idx = p.index("Question: q?")
+    assert rule_12_idx < rule_13_idx < question_idx
+
+    p_with_history = answer_prompt(
+        "follow up?",
+        "k1: [concept] X",
+        history_block="User: prev q\nAssistant: prev a",
+    )
+    rule_13_idx_h = p_with_history.index("13. Inference status propagates")
+    history_idx = p_with_history.index("Prior conversation")
+    assert rule_13_idx_h < history_idx
+
+
 def test_query_intent_prompt_cross_tool_mapping_guidance():
     from app.services.prompts import query_intent_prompt
     p = query_intent_prompt("how do I do Innovus's place_opt_design in ICC2?")

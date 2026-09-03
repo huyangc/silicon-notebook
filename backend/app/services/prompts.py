@@ -246,9 +246,9 @@ def _answer_section_directive(
 ) -> str:
     """按节合成(设计文档 §3.1)时追加的节级指令;单次合成下恒为空串。
 
-    刻意与规则集共用一份 `answer_prompt`,而不是复制一份「章节版」出来:规则 1–12
-    (引用标记、LaTeX、推断标注、枚举完整性披露、限定词保真……)对每一节同样成立,复制一份的
-    唯一确定结局是两份逐渐分叉。
+    刻意与规则集共用一份 `answer_prompt`,而不是复制一份「章节版」出来:规则 1–13
+    (引用标记、LaTeX、推断标注、枚举完整性披露、限定词保真、推断传递……)对每一节同样成立,
+    复制一份的唯一确定结局是两份逐渐分叉。
 
     三句话各有理由:
       * 「只写这一节」—— 不说的话,每节都会写成一篇独立的完整答案,拼出来通篇重复;
@@ -385,7 +385,13 @@ def answer_prompt(
         "knowledge items cover only the unqualified case or an adjacent "
         "object, say so in one explicit sentence, keep any extrapolation to "
         "the asked case marked （推断）, and never silently generalize the "
-        "question or substitute a related object.\n\n"
+        "question or substitute a related object.\n"
+        "13. Inference status propagates. A conclusion, summary, 'therefore'/"
+        "'so' sentence, or final recommendation that rests on any （推断） "
+        "sentence is itself an inference: prefix it with （推断） and attach NO "
+        "[k]. Only a conclusion whose every premise is a [k]-cited sentence "
+        "may be stated without the marker. Never let a closing section state "
+        "as established fact what the body only inferred.\n\n"
         f"{history_section}"
         f"{section_section}"
         f"{style_section}"
@@ -1004,6 +1010,10 @@ def report_section_prompt(section_title: str, section_scope: str, question: str,
     章节合同。缺席(空串,即非穷尽档或本节没整理出大纲)时返回值逐字回到接入前
     —— 那是这个可选参数唯一可接受的关闭态。
     """
+    # 规则 2 的传递前提只在通识开着时才提【通识】:关掉通识的 prompt 里不得出现该标记
+    # (test_report_prompts_contract 钉住的既有契约),否则模型会从规则 2 学到一个本节
+    # 根本不允许使用的标记。
+    inference_premises = "（推断） or 【通识】" if allow_parametric else "（推断）"
     parametric_rule = (
         "4. You MAY use domain general knowledge beyond the items when the "
         "items do not cover a needed link — but EVERY such sentence must start "
@@ -1061,7 +1071,10 @@ def report_section_prompt(section_title: str, section_scope: str, question: str,
         "[k1] at the end of that sentence. A [k] marker may ONLY be attached "
         "to a sentence whose content comes DIRECTLY from that item.\n"
         "2. When a sentence is your own inference bridging the items, prefix "
-        "it with （推断） and attach NO [k].\n"
+        "it with （推断） and attach NO [k]. A conclusion or in-section summary "
+        f"that rests on any {inference_premises} sentence is itself an inference: "
+        "prefix it with （推断） and attach NO [k]; only a conclusion whose every "
+        "premise is [k]-cited may omit it.\n"
         f"{fragment_text('report_section.domain_conventions')}"
         f"{parametric_rule}"
         "5. Answer in the question's language. Typeset ALL math as LaTeX "
@@ -1168,6 +1181,11 @@ def report_summary_prompt(question: str, sections_block: str,
         "sections: no new facts, no citation markers, no headings, and do not rewrite "
         "or silently repair a missing topic. Coverage notes and contradictions must "
         "also be grounded only in the supplied sections.\n\n"
+        "（推断） and 【通识】 are NOT citation markers: keep them. A summary "
+        "sentence distilled from a section finding that carries （推断） or "
+        "【通识】 keeps that marker at its start, and if the direct answer "
+        "itself rests on such findings it opens with （推断）. Never promote an "
+        "inferred or general-knowledge finding into an unmarked fact.\n\n"
         "Any intent assumptions only delimit scope; they are not evidence and may "
         "not be promoted into conclusions.\n\n"
         f"Question: {question}\n\n{intent_section}Report sections:\n{sections_block}\n\n"
