@@ -909,11 +909,20 @@ class UnifiedKgStore:
         cluster_input_version: str,
         cluster_count: int,
         now: str,
+        published_generation: int,
     ) -> None:
         """The rebuild end-write: store the input version this rebuild consumed
         and clear dirty. CRITICAL: MUST NOT touch kg_mutation_seq — omitted
         from both the column list and the SET so an existing row's counter is
-        PRESERVED."""
+        PRESERVED.
+
+        批 3·W2(codex #671 R3 P2):UPDATE 分支带
+        ``WHERE cluster_generation = published_generation`` 守卫——翻转已清
+        认领,催收期间另一进程可以取号并发布更新的代;无主写回会拿旧代的
+        version/count/dirty 盖掉新发布者刚写的收尾。指针已被动过时本写
+        no-op,新发布者的收尾原样保留(它的 catchup/finish 自己负责)。
+        INSERT 分支刻意不带守卫:行缺失只可能来自离线合库中途删行,重造
+        一行 gen-0 指针的出生态行无害(读者按代 0 = 无行)。"""
         object_count = db.execute(
             "SELECT COUNT(*) AS c FROM knowledge_objects WHERE notebook_id=%s AND status!='deprecated'",
             (notebook_id,),
@@ -935,6 +944,7 @@ class UnifiedKgStore:
               relation_count=excluded.relation_count,
               cluster_count=excluded.cluster_count,
               updated_at=excluded.updated_at
+            WHERE unified_kg_state.cluster_generation = %s
             """,
             (
                 notebook_id,
@@ -944,6 +954,7 @@ class UnifiedKgStore:
                 relation_count,
                 cluster_count,
                 normalize_timestamp(now),
+                published_generation,
             ),
         )
 

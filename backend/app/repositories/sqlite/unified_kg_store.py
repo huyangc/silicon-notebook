@@ -798,11 +798,13 @@ class UnifiedKgStore:
         cluster_input_version: str,
         cluster_count: int,
         now: str,
+        published_generation: int,
     ) -> None:
         """The rebuild end-write: store the input version this rebuild consumed
         and clear dirty. CRITICAL: MUST NOT touch kg_mutation_seq — omitted
         from both the column list and the SET so an existing row's counter is
-        PRESERVED."""
+        PRESERVED. UPDATE 分支带指针守卫(codex #671 R3 P2)——理由见 PG
+        孪生 docstring。"""
         object_count = db.execute(
             "SELECT COUNT(*) AS c FROM knowledge_objects WHERE notebook_id=? AND status!='deprecated'",
             (notebook_id,),
@@ -824,8 +826,10 @@ class UnifiedKgStore:
               relation_count=excluded.relation_count,
               cluster_count=excluded.cluster_count,
               updated_at=excluded.updated_at
+            WHERE unified_kg_state.cluster_generation = ?
             """,
-            (notebook_id, cluster_input_version, now, object_count, relation_count, cluster_count, now),
+            (notebook_id, cluster_input_version, now, object_count,
+             relation_count, cluster_count, now, published_generation),
         )
 
     # ---------------------------------------------------- canonical relations
