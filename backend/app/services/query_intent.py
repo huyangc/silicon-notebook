@@ -10,7 +10,11 @@ import json
 import re
 from typing import Any, Iterable
 
-from app.core.ask_retrieval_policy import RESULT_SCOPES
+from app.core.ask_retrieval_policy import (
+    AMBIGUITY_QUESTION_MAX_CHARS,
+    AMBIGUITY_ROWS_MAX,
+    RESULT_SCOPES,
+)
 from app.services.cancellation import AskCancelled, CancelEvent
 
 
@@ -288,10 +292,12 @@ def plan_query_intent(
     ambiguities: list[dict] = []
     raw_ambiguities = data.get("ambiguities")
     if isinstance(raw_ambiguities, list):
-        for index, item in enumerate(raw_ambiguities[:8], 1):
+        for index, item in enumerate(raw_ambiguities[:AMBIGUITY_ROWS_MAX], 1):
             if not isinstance(item, dict):
                 continue
-            prompt = str(item.get("question") or "").strip()[:500]
+            prompt = (
+                str(item.get("question") or "").strip()[:AMBIGUITY_QUESTION_MAX_CHARS]
+            )
             if not prompt:
                 continue
             ambiguities.append({
@@ -341,7 +347,7 @@ def plan_query_intent(
         # this whole area is supposed to avoid.  Drop the model's least
         # important row instead: the server's own finding is inserted first and
         # must survive.
-        del ambiguities[8:]
+        del ambiguities[AMBIGUITY_ROWS_MAX:]
     if data.get("needs_clarification") is True and not ambiguities:
         ambiguities.append({
             "id": "ambiguity-1",
@@ -387,6 +393,9 @@ def plan_query_intent(
 
 _CLARIFICATION_GATE_PREFIX = "问题仍有关键歧义，请先确认问题理解"
 _CIRCLED_DIGITS = "①②③④⑤⑥⑦⑧"
+assert len(_CIRCLED_DIGITS) == AMBIGUITY_ROWS_MAX, (
+    "one circled digit per admissible ambiguity row; raise both together"
+)
 
 
 def clarification_gate_message(seed: dict) -> str:
@@ -394,9 +403,10 @@ def clarification_gate_message(seed: dict) -> str:
 
     Every fail-closed clarification gate (HTTP direct ``/ask``, the engine's
     compatibility branch, MCP ``ask_notebook``) shares this one construction
-    so the wording and rules -- at most eight rows, each capped at 500 chars
-    to match ``QueryIntentAmbiguity.question``'s own ceiling (see
-    ``app/models/ask.py``), numbered with circled digits, blank rows skipped
+    so the wording and rules -- at most ``AMBIGUITY_ROWS_MAX`` rows, each
+    capped at ``AMBIGUITY_QUESTION_MAX_CHARS`` (the same named ceilings
+    ``QueryIntentAmbiguity`` enforces), numbered with circled digits, blank
+    rows skipped
     -- cannot drift apart across the three call sites. Only
     ``seed["ambiguities"][*]["question"]`` is used; ``reason`` and the
     caller's original wording (``seed["objective"]``) are deliberately never
@@ -411,8 +421,8 @@ def clarification_gate_message(seed: dict) -> str:
             question = str(row.get("question") or "").strip()
             if not question:
                 continue
-            questions.append(question[:500])
-            if len(questions) == len(_CIRCLED_DIGITS):
+            questions.append(question[:AMBIGUITY_QUESTION_MAX_CHARS])
+            if len(questions) == AMBIGUITY_ROWS_MAX:
                 break
     if not questions:
         return _CLARIFICATION_GATE_PREFIX

@@ -28,6 +28,15 @@ RETRIEVAL_EFFORTS: tuple[RetrievalEffort, ...] = (
     "thorough",
     "exhaustive",
 )
+# Ambiguity rows on a query-intent contract: the pydantic ceilings on
+# ``QueryIntentContract.ambiguities`` / ``QueryIntentAmbiguity.question``, the
+# trimming in ``plan_query_intent`` and the rendering in
+# ``clarification_gate_message`` all read these two names, so the model, the
+# planner and the error copy cannot disagree about how many rows or how long
+# a question can be.
+AMBIGUITY_ROWS_MAX = 8
+AMBIGUITY_QUESTION_MAX_CHARS = 500
+
 RESULT_SCOPES: tuple[ResultScope, ...] = (
     "ranked",
     "complete",
