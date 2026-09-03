@@ -43,7 +43,10 @@ from app.repositories.postgres._store_utils import (
     jsonb,
     normalize_timestamp,
 )
-from app.repositories.postgres.cluster_lock import lock_cluster_artifact_type
+from app.repositories.postgres.cluster_lock import (
+    lock_cluster_artifact_type,
+    lock_cluster_artifact_types,
+)
 from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.postgres.mount_sql import MOUNT_JOIN, MOUNT_ORDER, MOUNT_VALID
 from app.repositories.postgres.search import (
@@ -58,6 +61,7 @@ from app.domain.kg_analysis_contracts import (
     check_artifact_payloads,
 )
 from app.domain.knowledge_contracts import (
+    CLUSTER_OBJECT_TYPES,
     COMMUNITY_OVERVIEW_MAX,
     COMMUNITY_TOP_MEMBERS_MAX,
     KG_COMMUNITY_EDGES_MAX,
@@ -457,6 +461,212 @@ class UnifiedKgStore:
             """,
             (notebook_id, normalize_timestamp(now)),
         )
+
+    # ---------------------------------------------- derived generations (W2)
+    # 批 3·W2 PR-2:代次化写者的四个数据级原语。取号/释放/翻转构成跨进程
+    # 单飞(连离线 recluster CLI 也被闸住——进程内维护槽只覆盖本进程);
+    # 时钟一律取 DB 服务端 now()(设计 §1.5:催收锚点不得依赖应用时钟)。
+
+    @staticmethod
+    def claim_derived_generation(
+        db: Any, notebook_id: str, *, ttl_seconds: int
+    ) -> "dict | None":
+        """取号微事务:counter+1 并登记在飞代。三种结局:抢到(返回
+        generation/双指针/催收欠账标记/DB 时钟 ts);被占且未过 TTL(返回
+        None——KgMaintenanceAlreadyRunning 同款拒绝);上一位崩溃且过 TTL
+        (抢占——被抢占者的写段重读 building 早停,其翻转双 CAS 必然作废)。
+        TTL 只是崩溃兜底:正常失败路径由 release_derived_claim 的 finally
+        CAS 即时释放(设计 D-W2-5 v3)。"""
+        row = db.execute(
+            """
+            INSERT INTO unified_kg_state
+              (notebook_id, derived_generation_counter,
+               derived_building_generation, derived_building_claimed_at,
+               updated_at)
+            VALUES (%s, 1, 1, now(), now())
+            ON CONFLICT(notebook_id) DO UPDATE SET
+              derived_generation_counter=unified_kg_state.derived_generation_counter+1,
+              derived_building_generation=unified_kg_state.derived_generation_counter+1,
+              derived_building_claimed_at=now(),
+              updated_at=now()
+            WHERE unified_kg_state.derived_building_generation = 0
+               OR unified_kg_state.derived_building_claimed_at
+                  < now() - make_interval(secs => %s)
+            RETURNING derived_generation_counter AS generation,
+                      cluster_generation, community_generation,
+                      derived_catchup_from, now() AS ts
+            """,
+            (notebook_id, ttl_seconds),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "generation": int(row["generation"]),
+            "cluster_generation": int(row["cluster_generation"]),
+            "community_generation": int(row["community_generation"]),
+            "catchup_from": iso_timestamp(row["derived_catchup_from"])
+            if row["derived_catchup_from"] is not None else None,
+            "ts": iso_timestamp(row["ts"]),
+        }
+
+    @staticmethod
+    def release_derived_claim(db: Any, notebook_id: str, generation: int) -> None:
+        """finally 释放通道:CAS 只清自己那次认领——被 TTL 抢占后迟到的释放
+        天然 no-op,绝不误清抢占者。"""
+        db.execute(
+            "UPDATE unified_kg_state SET derived_building_generation=0, "
+            "derived_building_claimed_at=NULL, updated_at=now() "
+            "WHERE notebook_id=%s AND derived_building_generation=%s",
+            (notebook_id, generation),
+        )
+
+    @staticmethod
+    def derived_claim_still_held(db: Any, notebook_id: str, generation: int) -> bool:
+        """写段前复读(设计 §1.2/复评 P2-4):≠自己的 G 即被抢占,当场作废
+        早停——抢占者预回收扫过的键区不会被再填残行。"""
+        row = db.execute(
+            "SELECT 1 FROM unified_kg_state "
+            "WHERE notebook_id=%s AND derived_building_generation=%s",
+            (notebook_id, generation),
+        ).fetchone()
+        return row is not None
+
+    @staticmethod
+    def write_cluster_map_generation(
+        db: Any,
+        notebook_id: str,
+        object_type: str,
+        run_id: str,
+        created_at: str,
+        generation: int,
+    ) -> None:
+        """写新代:swap 的 INSERT 半部 + generation 列。**不持 advisory
+        lock、不 DELETE**(设计 §1.2:新代行与 published 代/并发 append 无
+        行冲突,四列唯一按代隔离;锁窗口整个收进翻转微事务)。"""
+        db.execute(
+            "INSERT INTO concept_clusters "
+            "(id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,"
+            "canonical_description,canonical_desc_sig,created_at,generation) "
+            "SELECT 'cc-' || md5(random()::text || clock_timestamp()::text || s.object_id), "
+            "s.notebook_id,c.canonical_id,s.object_id,c.canonical_name,%s,"
+            "c.canonical_description,c.canonical_desc_sig,%s::timestamptz,%s "
+            "FROM kg_cluster_scratch s "
+            "JOIN kg_canonical_scratch c "
+            "ON c.notebook_id=s.notebook_id AND c.run_id=s.run_id AND c.seed=s.seed "
+            "JOIN knowledge_objects k ON k.id=s.object_id "
+            "WHERE s.notebook_id=%s AND s.run_id=%s ORDER BY k.ordinal",
+            (object_type, created_at, generation, notebook_id, run_id),
+        )
+
+    @staticmethod
+    def flip_cluster_generation(
+        db: Any,
+        notebook_id: str,
+        *,
+        published_from: int,
+        generation: int,
+        catchup_from_ts: str,
+        now: str,
+    ) -> bool:
+        """四类一把翻的微事务(设计 §1.2):先按 key 字节序取齐四把
+        advisory lock(append 与翻转互相串行,两者皆毫秒级——链 c 的 5s
+        超时结构性消失),同事务内双 CAS 改指针:``cluster_generation`` 未被
+        别人动过 且 在飞认领仍是自己。零行更新 = 被 TTL 抢占或被
+        delete_notebook_kg 重置——本轮作废不发布,调用方响亮失败。
+        ``cluster_mutation_seq`` 在同一语句 bump(版本身份与指针行变化同
+        提交,kg_mutation.py 两段式红线);``derived_catchup_from`` 同事务
+        落库(崩溃后下轮先补欠账,设计 §1.5)。"""
+        lock_cluster_artifact_types(db, notebook_id, CLUSTER_OBJECT_TYPES)
+        row = db.execute(
+            """
+            UPDATE unified_kg_state SET
+              cluster_generation=%s,
+              cluster_mutation_seq=cluster_mutation_seq+1,
+              derived_building_generation=0,
+              derived_building_claimed_at=NULL,
+              derived_catchup_from=%s::timestamptz,
+              updated_at=%s
+            WHERE notebook_id=%s AND cluster_generation=%s
+              AND derived_building_generation=%s
+            RETURNING notebook_id
+            """,
+            (
+                generation, normalize_timestamp(catchup_from_ts),
+                normalize_timestamp(now), notebook_id, published_from,
+                generation,
+            ),
+        ).fetchone()
+        return row is not None
+
+    @staticmethod
+    def flip_community_generation(
+        db: Any, notebook_id: str, *, published_from: int, generation: int,
+        now: str,
+    ) -> bool:
+        """communities 族指针翻转——**在既有发布事务内**调用(设计 D-W2-6:
+        该族无并发融合写者,原子性优先于锁窗口;kg_analysis 板块账本作废与
+        set_community_seq 的同事务不变量原样保住)。双 CAS 同 cluster 侧。"""
+        row = db.execute(
+            "UPDATE unified_kg_state SET community_generation=%s, updated_at=%s "
+            "WHERE notebook_id=%s AND community_generation=%s "
+            "AND derived_building_generation=%s RETURNING notebook_id",
+            (
+                generation, normalize_timestamp(now), notebook_id,
+                published_from, generation,
+            ),
+        ).fetchone()
+        return row is not None
+
+    @staticmethod
+    def clear_catchup_marker(db: Any, notebook_id: str, ts: str) -> None:
+        """催收完成:CAS 清欠账标记(只清自己那次翻转落的 ts)。"""
+        db.execute(
+            "UPDATE unified_kg_state SET derived_catchup_from=NULL, updated_at=now() "
+            "WHERE notebook_id=%s AND derived_catchup_from=%s::timestamptz",
+            (notebook_id, normalize_timestamp(ts)),
+        )
+
+    @staticmethod
+    def catchup_window_members(
+        db: Any, notebook_id: str, published_generation: int, since_ts: str,
+        skew_seconds: int, limit: int,
+    ) -> list:
+        """催收输入(设计 §1.5):非 published 代里落在「翻转锚点 - 偏斜余量」
+        之后的融合行——翻转后 append 全走新 published 代,这个集合冻结。
+        谓词是 ``generation != published`` 而非 ``= 旧P``:欠账轮(上轮翻转后
+        崩溃)只有锚点落库、退休代号无处可查,而窗口内可能混入的僵尸在飞代行
+        幂等安置无害且被 created_at 窗口自然限量——「搬多了幂等无害,漏搬才是
+        洞」的余量方向。join objects 取安置所需的 payload(期间被删的对象
+        join 不到,天然跳过)。有界性凭据:idx_clusters_nb_created_gen 的
+        (notebook_id, created_at) 范围 seek。"""
+        return db.execute(
+            "SELECT DISTINCT c.member_object_id, c.object_type, o.payload "
+            "FROM concept_clusters c "
+            "JOIN knowledge_objects o ON o.id = c.member_object_id "
+            "WHERE c.notebook_id=%s AND c.generation != %s "
+            "AND c.created_at >= %s::timestamptz - make_interval(secs => %s) "
+            "LIMIT %s",
+            (notebook_id, published_generation, normalize_timestamp(since_ts),
+             skew_seconds, limit),
+        ).fetchall()
+
+    @staticmethod
+    def reap_derived_generations_page(
+        db: Any, notebook_id: str, table: str, keep: "tuple[int, ...]",
+        limit: int,
+    ) -> int:
+        """残代回收单页(T-5a 排水同款 ctid 分页;唯一回收通道=下轮预回收+
+        启动恢复,无 finally 回收——跨翻转在飞读者整轮宽限,设计 D-W2-7)。
+        keep = (published, 在飞 G);catchup 标记在时调用方跳过整库。"""
+        assert table in ("concept_clusters", "communities", "community_members")
+        marks = ",".join(["%s"] * len(keep))
+        cur = db.execute(
+            f"DELETE FROM {table} WHERE ctid IN ("
+            f"SELECT ctid FROM {table} WHERE notebook_id=%s "
+            f"AND generation NOT IN ({marks}) LIMIT %s)",
+            (notebook_id, *keep, limit),
+        )
+        return cur.rowcount
 
     @staticmethod
     def cluster_input_facts(

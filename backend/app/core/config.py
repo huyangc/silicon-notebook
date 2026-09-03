@@ -388,6 +388,19 @@ class Settings(BaseSettings):
     # 大预算配置在排水中途 OperationalError: too many SQL variables。
     kg_graph_drain_page_rows: int = Field(
         2000, ge=50, le=20_000, validation_alias="KG_GRAPH_DRAIN_PAGE_ROWS")
+    # 代际重建在飞认领的崩溃兜底 TTL(小时级)。这不是正常释放通道——失败
+    # 路径由 finally CAS 即时释放,TTL 只救「进程连 finally 都没跑到」的
+    # 崩溃。下限护栏:必须显著大于大库一轮重聚簇的最坏墙钟(生产 484GB 库
+    # 全量在 30–60 分钟量级),过小会把仍在跑的重建当尸体抢占,双方整轮
+    # 互相作废空转。
+    kg_derived_build_ttl_seconds: int = Field(
+        4 * 3600, ge=1800, validation_alias="KG_DERIVED_BUILD_TTL_SECONDS")
+    # 翻转后单遍催收的时钟偏斜余量:重放退休代里 created_at >= 翻转锚点 -
+    # 该余量的融合行。锚点与行时间戳同取 DB 服务器时钟,余量只需覆盖事务
+    # 可见性偏差(长事务里 now() 冻结在事务起点),默认 300s 足够;调大只
+    # 多重放几行(幂等安置无害),调小才有漏行风险。
+    kg_catchup_skew_seconds: int = Field(
+        300, ge=0, validation_alias="KG_CATCHUP_SKEW_SECONDS")
     # 删除作业扫尾的轮询间隔（双驱动：孤儿作业行重排 + 无作业行的 deleting 库
     # 补建）。与 checkup.py 的 _H45_CACHE_TTL 同量级（300s）。
     notebook_delete_sweep_seconds: int = Field(
