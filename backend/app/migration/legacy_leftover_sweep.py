@@ -225,7 +225,9 @@ def find_orphan_disk(database, dialect: str, storage_dir: Path) -> dict[str, lis
 @dataclass
 class DiskSweepReport:
     """--apply 的盘半结果:逐根实删 id、跳过的 id(带原因:年龄闸/锁)、
-    删不掉的路径(权限/竞态;留声不中止)。"""
+    删不掉的路径(权限/竞态;留声不中止)。``failed_paths`` 只存**存储根
+    相对**路径(codex #666 R4 P2:AGENTS.md 隐私规则,绝对路径可能把
+    用户名/挂载点带进运维日志)。"""
 
     removed: dict[str, list[str]] = field(default_factory=dict)
     skipped: list[tuple[str, str]] = field(default_factory=list)
@@ -236,10 +238,14 @@ class DiskSweepReport:
         return not self.skipped and not self.failed_paths
 
 
-def _rmtree_logged(path: Path, report: DiskSweepReport) -> bool:
+def _rmtree_logged(path: Path, storage: Path, report: DiskSweepReport) -> bool:
     shutil.rmtree(path, ignore_errors=True)
     if path.exists():
-        report.failed_paths.append(str(path))
+        try:
+            relative = path.relative_to(storage)
+        except ValueError:  # 防御:不在存储根下的路径只报末两段
+            relative = Path(*path.parts[-2:])
+        report.failed_paths.append(str(relative))
         return False
     return True
 
@@ -275,7 +281,7 @@ def _sweep_scale_roots_for_id(
                 if not attempt.verify_held():
                     report.skipped.append((notebook_id, "lock_lost_mid_sweep"))
                     return removed_roots
-                if _rmtree_logged(entry, report):
+                if _rmtree_logged(entry, storage, report):
                     removed_any = True
             if removed_any:
                 removed_roots.append(root)
@@ -321,7 +327,7 @@ def sweep_orphan_disk(
             if age < min_age_seconds:
                 report.skipped.append((notebook_id, f"recent_dir:{root}"))
                 continue
-            if _rmtree_logged(target, report):
+            if _rmtree_logged(target, storage, report):
                 report.removed[root].append(notebook_id)
     scale_ids = sorted(set().union(*(orphans[root] for root in SCALE_DISK_ROOTS)))
     for notebook_id in scale_ids:

@@ -314,6 +314,26 @@ def test_disk_sweep_lock_probe_error_skips_that_id_only(repo):
         assert (storage / root / ghost).is_dir()
 
 
+def test_failed_paths_are_storage_relative(repo):
+    """codex #666 R4 P2 pin:删不掉的路径只报存储根相对路径,不把绝对路径
+    (用户名/挂载点)带进运维日志。scale 根下 symlink 形态的 scratch 兄弟被
+    rmtree 拒绝、留在原地,恰是确定性的失败样本。"""
+    live = _mk_nb(repo)
+    storage = repo._runtime.source_files.storage_dir
+    ghost = "nb-ghost010"
+    _seed_disk(storage, ghost, live)
+    bad = storage / "kg_viz" / f"{ghost}.old"
+    import shutil as _shutil
+
+    _shutil.rmtree(bad)
+    bad.symlink_to(storage / "kg_viz" / live)
+
+    report = sweep_orphan_disk(_database(repo), "sqlite", storage, min_age_seconds=0)
+    assert report.failed_paths == [f"kg_viz/{ghost}.old"]
+    assert not any(str(storage) in p for p in report.failed_paths)
+    assert bad.is_symlink()
+
+
 def test_scale_disk_roots_match_artifact_store_layout(repo):
     """SCALE_DISK_ROOTS 与 scale_artifact_store 目录公式各存一份字面量——
     钉住两边不失配(同款先例:_artifact_siblings 与 indexed_notebook_ids
