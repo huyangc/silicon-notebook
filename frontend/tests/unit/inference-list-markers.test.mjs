@@ -99,6 +99,42 @@ test("围栏直接开在列表项那一行时同样受保护,闭合后恢复处�
   );
 });
 
+test("宽列表项里开的围栏,闭合缩进随前缀宽度走(`10. ` 的闭合缩进 4 空格),闭合后恢复处理", () => {
+  // codex #670 R3 P2:闭合行只许 3 空格会让围栏状态永不清除,后文全部漏修。
+  const input = [
+    "10. ```text",
+    "    （推断）1. inside",
+    "    ```",
+    "（推断）2. after",
+  ].join("\n");
+  assert.equal(
+    normalizeInferenceListMarkers(input),
+    [
+      "10. ```text",
+      "    （推断）1. inside",
+      "    ```",
+      "2. （推断）after",
+    ].join("\n"),
+  );
+});
+
+test("ATX 标题语法同样归一:标记挡在 ## 前面会让整行退化成段落", () => {
+  // codex #670 R3 P2。
+  assert.equal(
+    normalizeInferenceListMarkers("（推断）## 可能的演进方向"),
+    "## （推断）可能的演进方向",
+  );
+  assert.equal(
+    normalizeInferenceListMarkers("【通识】# 标题"),
+    "# 【通识】标题",
+  );
+  // `#` 后没有空格不是标题(CommonMark),原样放过;7 个 # 也不是。
+  const notHeading = "（推断）#1 方案";
+  assert.equal(normalizeInferenceListMarkers(notHeading), notHeading);
+  const sevenHashes = "（推断）####### 不是标题";
+  assert.equal(normalizeInferenceListMarkers(sevenHashes), sevenHashes);
+});
+
 test("反引号围栏的 info string 里再出现反引号时不是围栏(CommonMark),后续行照常处理", () => {
   assert.equal(
     normalizeInferenceListMarkers("````foo`bar\n（推断）1. x"),

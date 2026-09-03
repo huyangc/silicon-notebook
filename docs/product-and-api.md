@@ -1739,9 +1739,10 @@ non-clickable inline label from the same visual family as a citation chip; the r
 styling and never changes the text content or the copied result. The marker opens the sentence but
 goes after any list number, bullet, or heading syntax (write `1. （推断）…`, never `（推断）1. …`),
 otherwise Markdown stops treating the line as a list item; before rendering, the four model-text
-surfaces apply one deterministic normalization that swaps a reversed "marker + list syntax" into
-"list syntax + marker" — a pure reordering that changes no characters and also repairs historical
-answers; the copied text remains the model's original.
+surfaces apply one deterministic normalization that swaps a reversed "marker + list or heading
+syntax" into "list or heading syntax + marker" — a pure swap of the two tokens that changes no
+characters (original whitespace is kept, fenced code blocks are left alone) and also repairs
+historical answers; the copied text remains the model's original.
 
 ### Optional generated-question recall supplement
 

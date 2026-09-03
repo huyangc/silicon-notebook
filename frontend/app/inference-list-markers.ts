@@ -34,32 +34,47 @@ function escapeRegExp(value: string): string {
 }
 
 // 行首(允许至多 3 个空格缩进)紧跟四种标记字面量之一,标记后可有若干空格/制表符,
-// 再紧接列表语法(`\d{1,9}[.)]` 或 `-`/`*`/`+`),列表语法之后须有至少一个空格或制表符
-// 才算进入正文(CommonMark 两者都接受)——不满足这条时说明标记后面根本不是列表项
-// (例如「（推断）1个方案」),原样放过,交给渲染前串联的 `remarkAnswerInference` 按句首
-// 标记处理。
+// 再紧接列表语法(`\d{1,9}[.)]` 或 `-`/`*`/`+`)或 ATX 标题语法(`#`×1–6),其后须有至少
+// 一个空格或制表符才算进入正文(CommonMark 两者都接受)——不满足这条时说明标记后面根本
+// 不是列表项/标题(例如「（推断）1个方案」「（推断）#1 方案」),原样放过,交给渲染前串联的
+// `remarkAnswerInference` 按句首标记处理。标记挡在 `##` 前面时整行退化成普通段落,与
+// 列表是同一类缺陷(codex #670 R3 P2)。
 const INFERENCE_LIST_MARKER_LINE = new RegExp(
-  `^( {0,3})(${INFERENCE_MARKER_LITERALS.map(escapeRegExp).join("|")})([ \\t]*)(\\d{1,9}[.)]|[-*+])([ \\t]+)(.*)$`,
+  `^( {0,3})(${INFERENCE_MARKER_LITERALS.map(escapeRegExp).join("|")})([ \\t]*)(\\d{1,9}[.)]|[-*+]|#{1,6})([ \\t]+)(.*)$`,
 );
 
 // 围栏:至多 3 空格缩进后 3 个及以上的 ` 或 ~;围栏也可以直接开在列表项那一行
 // (`- ```text` / `1. ```text`,codex #670 R2 P2),所以允许一个可选的列表语法前缀,
 // 否则围栏内缩进的「（推断）1. …」会被改写、闭合围栏还会被当成新的开启。
 // 反引号围栏的 info string 里不得再出现反引号(CommonMark:那不是围栏),否则会把后面的
-// 整段都当成代码块跳过;波浪线围栏无此限制。闭合须同字符、长度不短于开启、其后只有空白。
-const FENCE_OPEN = /^ {0,3}(?:(?:\d{1,9}[.)]|[-*+])[ \t]+ {0,3})?(`{3,}|~{3,})(.*)$/;
+// 整段都当成代码块跳过;波浪线围栏无此限制。闭合须同字符、长度不短于开启、其后只有空白;
+// 闭合行允许的缩进随开启行的列表前缀宽度走(`10. ```text` 的闭合缩进 4 空格,
+// codex #670 R3 P2),否则围栏状态永不清除、后文全部漏修。
+const FENCE_OPEN = /^( {0,3}(?:(?:\d{1,9}[.)]|[-*+])[ \t]+ {0,3})?)(`{3,}|~{3,})(.*)$/;
 
-function opensFence(line: string): string | null {
-  const match = line.match(FENCE_OPEN);
-  if (!match) return null;
-  const [, run, info] = match;
-  if (run[0] === "`" && info.includes("`")) return null;
-  return run;
+interface FenceState {
+  run: string;
+  /** 开启行 run 之前的字符数(缩进 + 列表前缀),闭合行的缩进上限是它加 3。 */
+  prefixWidth: number;
 }
 
-function closesFence(line: string, fence: string): boolean {
-  const match = line.match(/^ {0,3}(`{3,}|~{3,})[ \t]*$/);
-  return !!match && match[1][0] === fence[0] && match[1].length >= fence.length;
+function opensFence(line: string): FenceState | null {
+  const match = line.match(FENCE_OPEN);
+  if (!match) return null;
+  const [, prefix, run, info] = match;
+  if (run[0] === "`" && info.includes("`")) return null;
+  return { run, prefixWidth: prefix.length };
+}
+
+function closesFence(line: string, fence: FenceState): boolean {
+  const match = line.match(/^( *)(`{3,}|~{3,})[ \t]*$/);
+  if (!match) return false;
+  const [, indent, run] = match;
+  return (
+    indent.length <= fence.prefixWidth + 3
+    && run[0] === fence.run[0]
+    && run.length >= fence.run.length
+  );
 }
 
 /**
@@ -71,7 +86,7 @@ function closesFence(line: string, fence: string): boolean {
  */
 export function normalizeInferenceListMarkers(markdown: string): string {
   if (!markdown) return markdown;
-  let fence: string | null = null;
+  let fence: FenceState | null = null;
   return markdown
     .split("\n")
     .map((line) => {
