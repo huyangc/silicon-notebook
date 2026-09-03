@@ -28,7 +28,7 @@ from app.repositories.ports import (  # noqa: E402
     RETRIEVAL_EXPERIENCE_MAX_ENTRIES,
 )
 
-# --- 表分类(SCHEMA_VERSION=67) --------------------------------------------
+# --- 表分类(SCHEMA_VERSION=71) --------------------------------------------
 NOTEBOOKS_TABLE = "notebooks"  # 按 id 筛(自身即 notebook 行)
 
 # object_schemas 是部署级全局基线；notebook_object_schemas 才随 notebook 合并。
@@ -528,6 +528,17 @@ def merge_core(out_db: Path, primary_db: Path, secondary_db: Path,
                 if _table_exists(conn, t, "main"):
                     conn.execute(
                         f"DELETE FROM main.{t} WHERE notebook_id IN ({ph})", tuple(sec_nb))
+            # 批 3·W2 §1.6:上面刚清掉导入 notebook 的 unified_kg_state 行
+            # (代次指针随之消失),而三张簇图派生表的行带着副库的 generation
+            # 原样拷入——读者按 COALESCE(指针,0) 取代次,不归一到 0 代整份
+            # 簇图会静默不可见。副库残代/在飞代行也一并归 0:合并库下次
+            # rebuild 会整体重算,多几行旧代成员无害且可见性正确。
+            for t in ("concept_clusters", "communities", "community_members"):
+                if _table_exists(conn, t, "main") and "generation" in table_columns(conn, t):
+                    conn.execute(
+                        f"UPDATE main.{t} SET generation = 0 "
+                        f"WHERE notebook_id IN ({ph}) AND generation != 0",
+                        tuple(sec_nb))
 
         # 孤儿群组授权边清扫。必须在 GLOBAL_UNION 合并**之后**(那一步才决定
         # `groups` 的最终并集)、`foreign_key_check` **之前**(它看不见这类行 ——

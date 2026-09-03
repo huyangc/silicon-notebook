@@ -993,6 +993,41 @@ def test_copy_notebook_entrypoint_reaps_stale_disk_too(repo):
         )
 
 
+def test_copy_normalizes_cluster_generation_and_copy_stays_readable(repo):
+    """批 3·W2 §1.6 pin:源库指针在非零代时,拷贝只取 published 代、跳过残代;
+    副本行归一 generation=0——副本刻意无 unified_kg_state 行,读者按
+    COALESCE(指针,0) 取代次,不归一整份簇图会静默不可见。"""
+    src_nb = _mk_nb(repo, "gen-src")
+    now = _now()
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO knowledge_objects "
+            "(id,notebook_id,object_type,status,owner,payload,evidence,source_id,created_at,updated_at) "
+            "VALUES ('ko-g1',?,'concept','approved','','{\"name\":\"G\"}','[]','',?,?)",
+            (src_nb, now, now))
+        db.execute(
+            "INSERT INTO unified_kg_state (notebook_id, cluster_generation, updated_at) "
+            "VALUES (?, 3, ?)", (src_nb, now))
+        for gen, cid in ((3, "cc-pub"), (2, "cc-stale")):
+            db.execute(
+                "INSERT INTO concept_clusters "
+                "(id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,created_at,generation) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (cid, src_nb, "ko-g1", "ko-g1", "G", "concept", now, gen))
+
+    new = repo.copy_notebook(src_nb, new_owner_id="user-local")
+
+    with repo._connect() as db:
+        rows = db.execute(
+            "SELECT generation, canonical_name FROM concept_clusters WHERE notebook_id=?",
+            (new.id,)).fetchall()
+    assert len(rows) == 1, "残代行(gen=2)不许被拷进副本"
+    assert rows[0]["generation"] == 0, "副本行必须归一到 0 代"
+    # 真读者可见性:副本无 state 行 → COALESCE→0 → 归一行可读
+    cmap = repo.cluster_map(new.id)
+    assert cmap, "副本簇图对读者不可见 = §1.6 的 P0 场景复现"
+
+
 def test_public_notebook_update_rejects_internal_status():
     """The copy sentinel is an internal lifecycle state, never API input."""
     from pydantic import ValidationError

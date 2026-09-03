@@ -69,6 +69,19 @@ from app.domain.knowledge_contracts import (
 )
 
 
+# 批 3·W2 §1.4:published 代次谓词。子查询必须用绑定参数(而非相关列引用),
+# PG 才会规划成一次求值的 InitPlan;COALESCE 兜「无 unified_kg_state 行 ⇒
+# 代次 0」的显式契约(副本/合并库,见设计 §1.6)。{alias} 由站点填表别名。
+_PUBLISHED_CLUSTER_GEN = (
+    "COALESCE((SELECT cluster_generation FROM unified_kg_state "
+    "WHERE notebook_id = %s), 0)"
+)
+_PUBLISHED_COMMUNITY_GEN = (
+    "COALESCE((SELECT community_generation FROM unified_kg_state "
+    "WHERE notebook_id = %s), 0)"
+)
+
+
 def _json_document(value: Any, *, expected: type, field: str):
     if isinstance(value, str):
         value = json.loads(value)
@@ -170,9 +183,10 @@ class UnifiedKgStore:
     @staticmethod
     def cluster_description_rows(db: Any, notebook_id: str):
         return db.execute(
-            "SELECT DISTINCT canonical_id, canonical_description, canonical_desc_sig "
-            "FROM concept_clusters WHERE notebook_id=%s AND object_type='concept'",
-            (notebook_id,),
+            f"SELECT DISTINCT canonical_id, canonical_description, canonical_desc_sig "
+            f"FROM concept_clusters WHERE notebook_id=%s AND object_type='concept' "
+            f"AND generation = {_PUBLISHED_CLUSTER_GEN}",
+            (notebook_id, notebook_id),
         ).fetchall()
 
     @staticmethod
@@ -202,18 +216,21 @@ class UnifiedKgStore:
     @staticmethod
     def canonical_relation_seed_rows(db: Any, notebook_id: str):
         return db.execute(
-            "SELECT kr.id AS rid, kr.source_id AS src_doc, kr.edge_type AS et, "
-            "       COALESCE(cs.canonical_id, kr.source_object_id) AS s, "
-            "       COALESCE(ct.canonical_id, kr.target_object_id) AS t, "
-            "       so.object_type AS st, tp.object_type AS tt "
-            "FROM knowledge_relations kr "
-            "JOIN knowledge_objects so ON so.id=kr.source_object_id "
-            "JOIN knowledge_objects tp ON tp.id=kr.target_object_id "
-            "LEFT JOIN concept_clusters cs ON cs.notebook_id=kr.notebook_id "
-            "  AND cs.member_object_id=kr.source_object_id "
-            "LEFT JOIN concept_clusters ct ON ct.notebook_id=kr.notebook_id "
-            "  AND ct.member_object_id=kr.target_object_id "
-            "WHERE kr.notebook_id=%s AND kr.review_status!='rejected'", (notebook_id,),
+            f"SELECT kr.id AS rid, kr.source_id AS src_doc, kr.edge_type AS et, "
+            f"       COALESCE(cs.canonical_id, kr.source_object_id) AS s, "
+            f"       COALESCE(ct.canonical_id, kr.target_object_id) AS t, "
+            f"       so.object_type AS st, tp.object_type AS tt "
+            f"FROM knowledge_relations kr "
+            f"JOIN knowledge_objects so ON so.id=kr.source_object_id "
+            f"JOIN knowledge_objects tp ON tp.id=kr.target_object_id "
+            f"LEFT JOIN concept_clusters cs ON cs.notebook_id=kr.notebook_id "
+            f"  AND cs.member_object_id=kr.source_object_id "
+            f"  AND cs.generation = {_PUBLISHED_CLUSTER_GEN} "
+            f"LEFT JOIN concept_clusters ct ON ct.notebook_id=kr.notebook_id "
+            f"  AND ct.member_object_id=kr.target_object_id "
+            f"  AND ct.generation = {_PUBLISHED_CLUSTER_GEN} "
+            f"WHERE kr.notebook_id=%s AND kr.review_status!='rejected'",
+            (notebook_id, notebook_id, notebook_id),
         )
 
     @staticmethod
@@ -269,38 +286,44 @@ class UnifiedKgStore:
         names = {
             row["canonical_id"]: row["canonical_name"]
             for row in db.execute(
-                "SELECT DISTINCT canonical_id, canonical_name FROM concept_clusters "
-                "WHERE notebook_id=%s", (notebook_id,),
+                f"SELECT DISTINCT canonical_id, canonical_name FROM concept_clusters "
+                f"WHERE notebook_id=%s AND generation = {_PUBLISHED_CLUSTER_GEN}",
+                (notebook_id, notebook_id),
             )
         }
         relations = db.execute(
-            "SELECT COALESCE(cs.canonical_id, kr.source_object_id) AS s, "
-            "       COALESCE(ct.canonical_id, kr.target_object_id) AS t "
-            "FROM knowledge_relations kr "
-            "LEFT JOIN concept_clusters cs ON cs.notebook_id=kr.notebook_id "
-            "AND cs.member_object_id=kr.source_object_id "
-            "LEFT JOIN concept_clusters ct ON ct.notebook_id=kr.notebook_id "
-            "AND ct.member_object_id=kr.target_object_id "
-            "WHERE kr.notebook_id=%s AND kr.review_status!='rejected' "
-            "ORDER BY kr.id COLLATE \"C\"", (notebook_id,),
+            f"SELECT COALESCE(cs.canonical_id, kr.source_object_id) AS s, "
+            f"       COALESCE(ct.canonical_id, kr.target_object_id) AS t "
+            f"FROM knowledge_relations kr "
+            f"LEFT JOIN concept_clusters cs ON cs.notebook_id=kr.notebook_id "
+            f"AND cs.member_object_id=kr.source_object_id "
+            f"AND cs.generation = {_PUBLISHED_CLUSTER_GEN} "
+            f"LEFT JOIN concept_clusters ct ON ct.notebook_id=kr.notebook_id "
+            f"AND ct.member_object_id=kr.target_object_id "
+            f"AND ct.generation = {_PUBLISHED_CLUSTER_GEN} "
+            f"WHERE kr.notebook_id=%s AND kr.review_status!='rejected' "
+            f"ORDER BY kr.id COLLATE \"C\"",
+            (notebook_id, notebook_id, notebook_id),
         )
         return names, relations
 
     @staticmethod
     def cluster_version_row(db: Any, notebook_id: str):
         row = db.execute(
-            "SELECT COUNT(*) AS c,MAX(created_at) AS ts "
-            "FROM concept_clusters WHERE notebook_id = %s", (notebook_id,),
+            f"SELECT COUNT(*) AS c,MAX(created_at) AS ts "
+            f"FROM concept_clusters WHERE notebook_id = %s "
+            f"AND generation = {_PUBLISHED_CLUSTER_GEN}",
+            (notebook_id, notebook_id),
         ).fetchone()
         return {**dict(row), "ts": iso_timestamp(row["ts"])}
 
     @staticmethod
     def cluster_member_rows(db: Any, notebook_id: str):
         return db.execute(
-            "SELECT canonical_id, member_object_id FROM concept_clusters "
-            "WHERE notebook_id = %s "
-            "ORDER BY canonical_id COLLATE \"C\", member_object_id COLLATE \"C\"",
-            (notebook_id,),
+            f"SELECT canonical_id, member_object_id FROM concept_clusters "
+            f"WHERE notebook_id = %s AND generation = {_PUBLISHED_CLUSTER_GEN} "
+            f"ORDER BY canonical_id COLLATE \"C\", member_object_id COLLATE \"C\"",
+            (notebook_id, notebook_id),
         ).fetchall()
 
     @staticmethod
@@ -319,8 +342,10 @@ class UnifiedKgStore:
             "FROM chunks WHERE notebook_id=%s", (notebook_id,),
         ).fetchone()
         cluster = db.execute(
-            "SELECT COUNT(*) AS c,MAX(created_at) AS ts "
-            "FROM concept_clusters WHERE notebook_id=%s", (notebook_id,),
+            f"SELECT COUNT(*) AS c,MAX(created_at) AS ts "
+            f"FROM concept_clusters WHERE notebook_id=%s "
+            f"AND generation = {_PUBLISHED_CLUSTER_GEN}",
+            (notebook_id, notebook_id),
         ).fetchone()
         mention = db.execute(
             "SELECT COALESCE(mention_seq,-1) AS ms FROM unified_kg_state "
@@ -465,8 +490,9 @@ class UnifiedKgStore:
     @staticmethod
     def cluster_map_rows(db: Any, notebook_id: str) -> Dict[str, str]:
         rows = db.execute(
-            "SELECT member_object_id, canonical_id FROM concept_clusters WHERE notebook_id=%s",
-            (notebook_id,),
+            f"SELECT member_object_id, canonical_id FROM concept_clusters "
+            f"WHERE notebook_id=%s AND generation = {_PUBLISHED_CLUSTER_GEN}",
+            (notebook_id, notebook_id),
         ).fetchall()
         return {r["member_object_id"]: r["canonical_id"] for r in rows}
 
@@ -475,28 +501,34 @@ class UnifiedKgStore:
         db: Any, notebook_id: str, ids: List[str]
     ) -> List[dict]:
         """BOUNDED canonical fold lookup (only the given hit ids) — never the
-        full cluster_map, which can be 5M entries at scale."""
+        full cluster_map, which can be 5M entries at scale.
+
+        ⚠ PR-2 复核:rebuild 折叠路径若需读 building 代,这里的 published
+        代次谓词要再参数化(接收调用方要读哪一代,而不是永远钉 published)。"""
         if not ids:
             return []
         placeholders = ",".join("%s" for _ in ids)
         return db.execute(
             f"SELECT member_object_id, canonical_id, canonical_name "
             f"FROM concept_clusters "
-            f"WHERE notebook_id=%s AND member_object_id IN ({placeholders})",
-            [notebook_id] + ids,
+            f"WHERE notebook_id=%s AND member_object_id IN ({placeholders}) "
+            f"AND generation = {_PUBLISHED_CLUSTER_GEN}",
+            [notebook_id] + ids + [notebook_id],
         ).fetchall()
 
     @staticmethod
     def concept_clusters_count(db: Any, notebook_id: str) -> int:
         return int(db.execute(
-            "SELECT COUNT(*) AS c FROM concept_clusters WHERE notebook_id=%s",
-            (notebook_id,)).fetchone()["c"])
+            f"SELECT COUNT(*) AS c FROM concept_clusters WHERE notebook_id=%s "
+            f"AND generation = {_PUBLISHED_CLUSTER_GEN}",
+            (notebook_id, notebook_id)).fetchone()["c"])
 
     @staticmethod
     def distinct_cluster_count(db: Any, notebook_id: str) -> int:
         return int(db.execute(
-            "SELECT COUNT(DISTINCT canonical_id) AS c FROM concept_clusters WHERE notebook_id=%s",
-            (notebook_id,),
+            f"SELECT COUNT(DISTINCT canonical_id) AS c FROM concept_clusters "
+            f"WHERE notebook_id=%s AND generation = {_PUBLISHED_CLUSTER_GEN}",
+            (notebook_id, notebook_id),
         ).fetchone()["c"])
 
     # ------------------------------------------------------------- scratch
@@ -780,10 +812,12 @@ class UnifiedKgStore:
             f"JOIN knowledge_objects tp ON tp.id=kr.target_object_id "
             f"LEFT JOIN concept_clusters cs ON cs.notebook_id=kr.notebook_id "
             f"  AND cs.member_object_id=kr.source_object_id "
+            f"  AND cs.generation = {_PUBLISHED_CLUSTER_GEN} "
             f"LEFT JOIN concept_clusters ct ON ct.notebook_id=kr.notebook_id "
             f"  AND ct.member_object_id=kr.target_object_id "
+            f"  AND ct.generation = {_PUBLISHED_CLUSTER_GEN} "
             f"WHERE kr.notebook_id=%s AND kr.id IN ({placeholders})",
-            [notebook_id, *relation_ids],
+            [notebook_id, notebook_id, notebook_id, *relation_ids],
         ).fetchall()
 
     @staticmethod
@@ -857,8 +891,9 @@ class UnifiedKgStore:
         db: Any, notebook_id: str, level: int
     ) -> "dict | None":
         return db.execute(
-            "SELECT COUNT(*) AS c FROM communities WHERE notebook_id=%s AND level=%s",
-            (notebook_id, level)).fetchone()
+            f"SELECT COUNT(*) AS c FROM communities WHERE notebook_id=%s AND level=%s "
+            f"AND generation = {_PUBLISHED_COMMUNITY_GEN}",
+            (notebook_id, level, notebook_id)).fetchone()
 
     @staticmethod
     def replace_communities(
@@ -925,8 +960,10 @@ class UnifiedKgStore:
         db: Any, notebook_id: str, level: int
     ) -> List[List[str]]:
         rows = db.execute(
-            "SELECT member_ids FROM communities WHERE notebook_id=%s AND level=%s ORDER BY size DESC, id ASC",
-            (notebook_id, level)).fetchall()
+            f"SELECT member_ids FROM communities WHERE notebook_id=%s AND level=%s "
+            f"AND generation = {_PUBLISHED_COMMUNITY_GEN} "
+            f"ORDER BY size DESC, id ASC",
+            (notebook_id, level, notebook_id)).fetchall()
         return [json_value(r["member_ids"], []) for r in rows]
 
     @staticmethod
@@ -934,9 +971,9 @@ class UnifiedKgStore:
         db: Any, notebook_id: str, level: int
     ) -> List[dict]:
         rows = db.execute(
-            "SELECT id,member_ids::text AS member_ids FROM communities "
-            "WHERE notebook_id=%s AND level=%s",
-            (notebook_id, level)).fetchall()
+            f"SELECT id,member_ids::text AS member_ids FROM communities "
+            f"WHERE notebook_id=%s AND level=%s AND generation = {_PUBLISHED_COMMUNITY_GEN}",
+            (notebook_id, level, notebook_id)).fetchall()
         return rows
 
     @staticmethod
@@ -992,9 +1029,11 @@ class UnifiedKgStore:
         db: Any, notebook_id: str, level: int
     ) -> List[dict]:
         rows = db.execute(
-            "SELECT member_ids, title, summary, findings FROM communities "
-            "WHERE notebook_id=%s AND level=%s AND summary!='' ORDER BY size DESC, id ASC",
-            (notebook_id, level)).fetchall()
+            f"SELECT member_ids, title, summary, findings FROM communities "
+            f"WHERE notebook_id=%s AND level=%s AND summary!='' "
+            f"AND generation = {_PUBLISHED_COMMUNITY_GEN} "
+            f"ORDER BY size DESC, id ASC",
+            (notebook_id, level, notebook_id)).fetchall()
         return [{"member_ids": json_value(r["member_ids"], []), "title": r["title"],
                  "summary": r["summary"], "findings": json_value(r["findings"], [])} for r in rows]
 
@@ -1014,18 +1053,20 @@ class UnifiedKgStore:
         """focal 归一键 → canonical_id(lower(canonical_name)==key,多簇取成员最多者)。"""
         with self.database.connect() as db:
             row = db.execute(
-                "SELECT canonical_id FROM concept_clusters WHERE notebook_id=%s AND lower(canonical_name)=%s "
-                "GROUP BY canonical_id ORDER BY COUNT(*) DESC, "
-                "canonical_id COLLATE \"C\" ASC LIMIT 1",
-                (notebook_id, focal_key)).fetchone()
+                f"SELECT canonical_id FROM concept_clusters WHERE notebook_id=%s "
+                f"AND lower(canonical_name)=%s AND generation = {_PUBLISHED_CLUSTER_GEN} "
+                f"GROUP BY canonical_id ORDER BY COUNT(*) DESC, "
+                f"canonical_id COLLATE \"C\" ASC LIMIT 1",
+                (notebook_id, focal_key, notebook_id)).fetchone()
         return row["canonical_id"] if row else None
 
     def top_community_for(self, notebook_id: str, canonical_id: str) -> Optional[str]:
         with self.database.connect() as db:
             row = db.execute(
-                "SELECT community_id FROM community_members WHERE notebook_id=%s AND canonical_id=%s "
-                "ORDER BY level DESC, community_id COLLATE \"C\" ASC LIMIT 1",
-                (notebook_id, canonical_id)).fetchone()
+                f"SELECT community_id FROM community_members WHERE notebook_id=%s "
+                f"AND canonical_id=%s AND generation = {_PUBLISHED_COMMUNITY_GEN} "
+                f"ORDER BY level DESC, community_id COLLATE \"C\" ASC LIMIT 1",
+                (notebook_id, canonical_id, notebook_id)).fetchone()
         return row["community_id"] if row else None
 
     def community_member_peers(
@@ -1033,10 +1074,11 @@ class UnifiedKgStore:
     ) -> List[dict]:
         with self.database.connect() as db:
             return db.execute(
-                "SELECT canonical_name, centrality FROM community_members "
-                "WHERE notebook_id=%s AND community_id=%s AND canonical_id!=%s "
-                "ORDER BY centrality DESC, canonical_id COLLATE \"C\" ASC LIMIT %s",
-                (notebook_id, community_id, exclude_canonical_id, limit)
+                f"SELECT canonical_name, centrality FROM community_members "
+                f"WHERE notebook_id=%s AND community_id=%s AND canonical_id!=%s "
+                f"AND generation = {_PUBLISHED_COMMUNITY_GEN} "
+                f"ORDER BY centrality DESC, canonical_id COLLATE \"C\" ASC LIMIT %s",
+                (notebook_id, community_id, exclude_canonical_id, notebook_id, limit)
             ).fetchall()
 
     def comention_peers(
@@ -1055,8 +1097,9 @@ class UnifiedKgStore:
             for r in rows:
                 other = r["canonical_b"] if r["canonical_a"] == canonical_id else r["canonical_a"]
                 nm = db.execute(
-                    "SELECT canonical_name FROM concept_clusters WHERE notebook_id=%s "
-                    "AND canonical_id=%s LIMIT 1", (notebook_id, other)).fetchone()
+                    f"SELECT canonical_name FROM concept_clusters WHERE notebook_id=%s "
+                    f"AND canonical_id=%s AND generation = {_PUBLISHED_CLUSTER_GEN} LIMIT 1",
+                    (notebook_id, other, notebook_id)).fetchone()
                 if nm and nm["canonical_name"]:
                     out.append((nm["canonical_name"], int(r["bridge_claims"])))
             return out
@@ -1192,12 +1235,13 @@ class UnifiedKgStore:
                           AND o.notebook_id = c.notebook_id
                           AND o.status IN ({placeholders})
                     WHERE c.notebook_id = %s
+                      AND c.generation = {_PUBLISHED_CLUSTER_GEN}
                     GROUP BY c.object_type, c.canonical_id
                   ) g
                 ) b
                 GROUP BY object_type, bucket
                 """,
-                (*USABLE_STATUSES, notebook_id),
+                (*USABLE_STATUSES, notebook_id, notebook_id),
             ).fetchall()
         return _cluster_histogram_payload(
             {
@@ -1239,9 +1283,10 @@ class UnifiedKgStore:
                 f"     AND o.notebook_id = c.notebook_id "
                 f"     AND o.status IN ({placeholders}) "
                 f"WHERE c.notebook_id = %s AND c.object_type = 'concept' "
+                f"AND c.generation = {_PUBLISHED_CLUSTER_GEN} "
                 f"GROUP BY c.canonical_id "
                 f"ORDER BY members DESC, c.canonical_id COLLATE \"C\" ASC LIMIT %s",
-                (*USABLE_STATUSES, notebook_id, limit + 1),
+                (*USABLE_STATUSES, notebook_id, notebook_id, limit + 1),
             ).fetchall()
         return _largest_clusters_payload(
             [
@@ -1319,13 +1364,15 @@ class UnifiedKgStore:
         limit = _clamp(limit, COMMUNITY_OVERVIEW_MAX)
         top_k = _clamp(top_k, COMMUNITY_TOP_MEMBERS_MAX)
         total = int(db.execute(
-            "SELECT COUNT(*) AS c FROM communities WHERE notebook_id=%s AND level=%s",
-            (notebook_id, level)).fetchone()["c"])
+            f"SELECT COUNT(*) AS c FROM communities WHERE notebook_id=%s AND level=%s "
+            f"AND generation = {_PUBLISHED_COMMUNITY_GEN}",
+            (notebook_id, level, notebook_id)).fetchone()["c"])
         rows = db.execute(
-            """
+            f"""
             WITH picked AS (
               SELECT id, size FROM communities
               WHERE notebook_id=%s AND level=%s
+                AND generation = {_PUBLISHED_COMMUNITY_GEN}
               ORDER BY size DESC, id COLLATE "C" ASC LIMIT %s
             ), ranked AS (
               SELECT m.community_id AS community_id,
@@ -1336,6 +1383,7 @@ class UnifiedKgStore:
                      ) AS rn
               FROM community_members m
               WHERE m.notebook_id=%s AND m.level=%s
+                AND m.generation = {_PUBLISHED_COMMUNITY_GEN}
                 AND m.community_id IN (SELECT id FROM picked)
             )
             SELECT p.id AS id, p.size AS size,
@@ -1344,7 +1392,8 @@ class UnifiedKgStore:
             LEFT JOIN ranked r ON r.community_id = p.id AND r.rn <= %s
             ORDER BY p.size DESC, p.id COLLATE "C" ASC, r.rn ASC
             """,
-            (notebook_id, level, limit, notebook_id, level, top_k),
+            (notebook_id, level, notebook_id, limit,
+             notebook_id, level, notebook_id, top_k),
         ).fetchall()
         communities: List[Tuple[str, int, List[str]]] = []
         for row in rows:
@@ -1654,6 +1703,7 @@ class UnifiedKgStore:
             LEFT JOIN concept_clusters c
                    ON c.notebook_id = o.notebook_id
                   AND c.member_object_id = o.id
+                  AND c.generation = {_PUBLISHED_CLUSTER_GEN}
             WHERE o.notebook_id = %s
               AND o.status IN ({placeholders})
               AND o.source_id != ''
@@ -1661,7 +1711,7 @@ class UnifiedKgStore:
                               AND s.notebook_id = o.notebook_id
                               AND s.source_type IN ('memory','knowhow'))
             """,
-            (notebook_id, *USABLE_STATUSES),
+            (notebook_id, notebook_id, *USABLE_STATUSES),
         )
 
     @staticmethod

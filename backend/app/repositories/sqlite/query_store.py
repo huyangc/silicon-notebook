@@ -115,6 +115,8 @@ _NO_MEMORY_MEMBER_CLUSTER_SQL = (
     "JOIN sources ms ON ms.id = mo.source_id "
     "WHERE mc.notebook_id = c.notebook_id "
     "AND mc.canonical_id = c.canonical_id "
+    # 批 3·W2 §1.4:内层引用与外层行同代(PG 孪生同注释)。
+    "AND mc.generation = c.generation "
     f"AND {MEMORY_SOURCE_TYPE_PREDICATE})"
 )
 
@@ -295,11 +297,13 @@ class QueryStore:
             f"     AND o.status IN ({status_marks}) "
             f"     AND {_NOT_MEMORY_OWNED_SQL} "
             "WHERE c.notebook_id = ? AND c.object_type = 'concept' "
+            "AND c.generation = COALESCE((SELECT cluster_generation "
+            "FROM unified_kg_state WHERE notebook_id = ?), 0) "
             f"AND {_NO_MEMORY_MEMBER_CLUSTER_SQL} "
             "GROUP BY c.canonical_id "
             "HAVING name <> '' "
             "ORDER BY members DESC, name ASC LIMIT ?",
-            (*allowed, notebook_id, int(limit)),
+            (*allowed, notebook_id, notebook_id, int(limit)),
         ).fetchall()
         return [(str(row["name"]), int(row["members"])) for row in rows]
 

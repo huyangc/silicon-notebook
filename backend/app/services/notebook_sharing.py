@@ -741,6 +741,10 @@ class NotebookCopyService:
             for data in snapshot["concept_clusters"]:
                 data["id"] = remapped_id(data["id"])
                 data["notebook_id"] = new_id
+                # 批 3·W2 §1.6:副本无 unified_kg_state 行,读者按
+                # COALESCE(指针,0) 取代次——拷贝行必须归一到 0 代,否则副本
+                # 簇图整体不可见(快照侧只拷 published 代,见 sharing_store)。
+                data["generation"] = 0
                 data["canonical_id"] = object_map.get(data["canonical_id"], data["canonical_id"])
                 data["member_object_id"] = object_map.get(
                     data["member_object_id"], data["member_object_id"]

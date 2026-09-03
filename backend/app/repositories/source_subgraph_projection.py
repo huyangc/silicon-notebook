@@ -370,12 +370,18 @@ def source_subgraph_rows_on(
         ),
         "relations",
     )
+    # 批 3·W2 §1.4:published 代次谓词(绑定参数,COALESCE 兜无 state 行)。
+    published_gen = (
+        "cc.generation = COALESCE((SELECT cluster_generation "
+        f"FROM unified_kg_state WHERE notebook_id = {placeholder}), 0)"
+    )
     if postgres:
         cluster_sql = (
             "SELECT cc.canonical_id,cc.member_object_id "
             "FROM concept_clusters cc JOIN knowledge_objects ko "
             "ON ko.id=cc.member_object_id AND ko.notebook_id=cc.notebook_id "
             f"WHERE cc.notebook_id={placeholder} "
+            f"AND {published_gen} "
             f"AND ko.status IN ({status_ph}) "
             "AND EXISTS (SELECT 1 FROM knowledge_object_sources kos "
             " WHERE kos.notebook_id=cc.notebook_id "
@@ -384,7 +390,7 @@ def source_subgraph_rows_on(
             f"ORDER BY cc.canonical_id{id_order},cc.member_object_id{id_order} "
             f"LIMIT {placeholder}"
         )
-        cluster_params = (notebook_id, *USABLE_STATUSES, *source_ids)
+        cluster_params = (notebook_id, notebook_id, *USABLE_STATUSES, *source_ids)
     else:
         # CROSS JOIN fixes the SQLite loop order: selected source memberships
         # are the outer relation, so rows owned only by unselected sources are
@@ -398,10 +404,11 @@ def source_subgraph_rows_on(
             "ON cc.member_object_id=ko.id AND cc.notebook_id=ko.notebook_id "
             f"WHERE kos.notebook_id={placeholder} AND kos.source_id IN ({ph}) "
             f"AND ko.status IN ({status_ph}) "
+            f"AND {published_gen} "
             "ORDER BY cc.canonical_id,cc.member_object_id "
             f"LIMIT {placeholder}"
         )
-        cluster_params = (notebook_id, *source_ids, *USABLE_STATUSES)
+        cluster_params = (notebook_id, *source_ids, *USABLE_STATUSES, notebook_id)
     result["clusters"] = bounded(
         "cluster",
         cluster_sql,
@@ -544,6 +551,11 @@ def source_graph_partition_rows_on(
         (notebook_id, source_id, *USABLE_STATUSES, *USABLE_STATUSES),
         "relations",
     )
+    # 批 3·W2 §1.4:published 代次谓词(同上一站点)。
+    published_gen = (
+        "cc.generation = COALESCE((SELECT cluster_generation "
+        f"FROM unified_kg_state WHERE notebook_id = {placeholder}), 0)"
+    )
     if postgres:
         cluster_sql = (
             "SELECT cc.canonical_id,cc.member_object_id "
@@ -551,6 +563,7 @@ def source_graph_partition_rows_on(
             "ON kos.notebook_id=cc.notebook_id "
             "AND kos.object_id=cc.member_object_id "
             f"WHERE cc.notebook_id={placeholder} AND kos.source_id={placeholder} "
+            f"AND {published_gen} "
             f"ORDER BY cc.canonical_id{order},cc.member_object_id{order}"
         )
     else:
@@ -561,12 +574,13 @@ def source_graph_partition_rows_on(
             "ON cc.notebook_id=kos.notebook_id "
             "AND cc.member_object_id=kos.object_id "
             f"WHERE kos.notebook_id={placeholder} AND kos.source_id={placeholder} "
+            f"AND {published_gen} "
             "ORDER BY cc.canonical_id,cc.member_object_id"
         )
     result["clusters"] = bounded(
         "cluster",
         cluster_sql,
-        (notebook_id, source_id),
+        (notebook_id, source_id, notebook_id),
         "cluster_memberships",
     )
     return result

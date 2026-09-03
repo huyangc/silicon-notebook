@@ -192,7 +192,14 @@ _COPY_SNAPSHOT_QUERIES: tuple[tuple[str, str], ...] = (
     # knowhow rows (the projector writes none), so they need no knowhow filter.
     ("knowledge_embeddings", "SELECT * FROM knowledge_embeddings WHERE notebook_id = ?"),
     ("relation_embeddings", "SELECT * FROM relation_embeddings WHERE notebook_id = ?"),
-    ("concept_clusters", "SELECT * FROM concept_clusters WHERE notebook_id = ?"),
+    (
+        "concept_clusters",
+        # 批 3·W2 §1.6:只拷 published 代(PG 孪生同注释;副本行随后在服务层
+        # 归一 generation=0——副本刻意无 unified_kg_state 行)。
+        "SELECT * FROM concept_clusters WHERE notebook_id = ? "
+        "AND generation = COALESCE((SELECT cluster_generation "
+        "FROM unified_kg_state u WHERE u.notebook_id = concept_clusters.notebook_id), 0)",
+    ),
     (
         "notebook_object_schemas",
         "SELECT * FROM notebook_object_schemas WHERE notebook_id = ?",
@@ -247,7 +254,12 @@ _COPY_VALIDATED_TABLES: tuple[tuple[str, str], ...] = (
     ("knowledge_source_fact_backfills", f"AND status IN ('complete','incomplete') "
      f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS})"),
     ("knowledge_relations", f"AND (source_id IS NULL OR source_id NOT IN ({_KNOWHOW_SOURCE_IDS}))"),
-    ("concept_clusters", ""),
+    (
+        "concept_clusters",
+        # §1.6:两侧同谓词校验口径(PG 孪生同注释)。
+        "AND generation = COALESCE((SELECT cluster_generation "
+        "FROM unified_kg_state u WHERE u.notebook_id = concept_clusters.notebook_id), 0)",
+    ),
     ("notebook_object_schemas", ""),
     ("knowhow_tables", ""),
     ("notebook_assets", ""),
