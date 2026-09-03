@@ -5407,9 +5407,15 @@ class KnowledgeLifecycleService:
                 # 既有 DISTINCT 切片重算(与 incremental fuse 的簇名读同一条
                 # 已登记不可收窄的读,只在真有新增时付一次)。
                 with self._connect() as db:
-                    cluster_count = len(
-                        self.governance_store.incremental_cluster_rows(
-                            db, notebook_id, "concept"))
+                    # 按 canonical_id 去重(codex #671 R10 P2):该读返回
+                    # DISTINCT (canonical_id, canonical_name) 对,一个 canonical
+                    # 合法拥有多个名字时按行数计会虚高;口径必须与
+                    # len(set(seed_to_canonical.values()))(distinct concept
+                    # canonicals)一致。
+                    cluster_count = len({
+                        r["canonical_id"]
+                        for r in self.governance_store.incremental_cluster_rows(
+                            db, notebook_id, "concept")})
             with self._write() as db:
                 # CRITICAL: the store's finish_rebuild_state UPSERT stores
                 # cluster_input_version=_ver (captured at ENTRY, reflecting the seq
