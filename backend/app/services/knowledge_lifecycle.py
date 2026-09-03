@@ -4724,7 +4724,7 @@ class KnowledgeLifecycleService:
 
     def _settle_generation_catchup(self, notebook_id: str, *,
                                    published_generation: int,
-                                   since_ts: str) -> None:
+                                   since_ts: str) -> int:
         """催收(设计 §1.5):把「锚点 - 偏斜余量」窗口内落在**非 published
         代**的融合成员,按 (object_type, member_object_id) keyset 分页重放进
         当前 published 代,整趟走完后才 CAS 清欠账标记——中途崩溃标记还在,
@@ -4746,6 +4746,8 @@ class KnowledgeLifecycleService:
         skew = self.settings.kg_catchup_skew_seconds
         after_type, after_member = "", ""
         replayed = moved = 0
+        # 返回值 = 实际 append 进 published 代的行数(codex #671 R1 P2 的
+        # 消费方:催收有新增时,rebuild 收尾要重算 cluster_count 再持久化)。
         unknown_types: set = set()
         while True:
             with self._connect() as db:
@@ -4801,6 +4803,7 @@ class KnowledgeLifecycleService:
                 "notebook_id": notebook_id, "since_ts": since_ts,
                 "replayed": replayed, "appended": moved,
             })
+        return moved
 
     def _reap_stale_community_generations(self, notebook_id: str,
                                           keep: "Tuple[int, int]") -> int:
@@ -5350,9 +5353,20 @@ class KnowledgeLifecycleService:
             # 翻转后 append 全落新 published 代;此前窗口内的融合行完整躺在
             # 退休代且集合冻结——重放安置进新代(幂等,append_clusters 的
             # added>0 判据推进版本身份),完成后 CAS 清锚点标记。
-            self._settle_generation_catchup(
+            _caught_up = self._settle_generation_catchup(
                 notebook_id, published_generation=generation,
                 since_ts=_anchor_ts)
+            if _caught_up:
+                # codex #671 R1 P2:催收把窗口 append 安置进了新 published 代,
+                # 其中可能有本轮聚类没见过的新 canonical——cluster_count 是
+                # 催收前从 seed_to_canonical 算的,原样持久化会让
+                # unified_kg_status 低报到下一次 rebuild。按 published 代的
+                # 既有 DISTINCT 切片重算(与 incremental fuse 的簇名读同一条
+                # 已登记不可收窄的读,只在真有新增时付一次)。
+                with self._connect() as db:
+                    cluster_count = len(
+                        self.governance_store.incremental_cluster_rows(
+                            db, notebook_id, "concept"))
             with self._write() as db:
                 # CRITICAL: the store's finish_rebuild_state UPSERT stores
                 # cluster_input_version=_ver (captured at ENTRY, reflecting the seq

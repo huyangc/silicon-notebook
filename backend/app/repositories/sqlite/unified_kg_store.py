@@ -196,10 +196,13 @@ class UnifiedKgStore:
 
     @staticmethod
     def mention_seed_rows(db: sqlite3.Connection, notebook_id: str):
+        # 批 3·W2 A 类(codex #671 R1 P1):published 谓词,理由见 PG 孪生。
         clusters = db.execute(
             "SELECT cc.canonical_id AS cid, cc.canonical_name AS cname, ko.source_id AS src "
             "FROM concept_clusters cc JOIN knowledge_objects ko ON ko.id=cc.member_object_id "
-            "WHERE cc.notebook_id=? AND cc.object_type='concept'", (notebook_id,),
+            "WHERE cc.notebook_id=? AND cc.object_type='concept' "
+            f"AND cc.generation = {_PUBLISHED_CLUSTER_GEN}",
+            (notebook_id, notebook_id),
         ).fetchall()
         claims = db.execute(
             "SELECT id, json_extract(payload,'$.name') AS nm FROM knowledge_objects "

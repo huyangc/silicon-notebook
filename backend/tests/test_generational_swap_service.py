@@ -143,6 +143,16 @@ def test_chain_a_append_during_the_build_window_survives_the_flip(repo, monkeypa
     # 非空洞证明:退休代里也有它(append 真的落在了退休代,而不是被写代段
     # 顺手带进新代)。
     assert retired_gen in gens, gens
+    # codex #671 R1 P2:催收新增了本轮聚类没见过的 canonical,持久化的
+    # cluster_count 必须重算——按 published 代的 DISTINCT concept canonical
+    # 口径与库里实际值逐字相等,不许低报。
+    with repo._connect() as db:
+        live = db.execute(
+            "SELECT COUNT(DISTINCT canonical_id) AS c FROM concept_clusters "
+            "WHERE notebook_id=? AND object_type='concept' AND generation=?",
+            (nb.id, state["cluster_generation"])).fetchone()["c"]
+    assert int(state["cluster_count"]) == int(live), (
+        f"催收后 cluster_count 没重算:{state['cluster_count']} != {live}")
 
 
 def test_crash_after_flip_settles_the_debt_on_the_next_round(repo, monkeypatch):
@@ -178,6 +188,31 @@ def test_crash_after_flip_settles_the_debt_on_the_next_round(repo, monkeypatch):
     assert calls[1]["published_generation"] == flipped_to
     assert calls[1]["since_ts"] == crashed["derived_catchup_from"]
     assert calls[2]["published_generation"] == settled["cluster_generation"]
+
+
+def test_mention_seed_rows_read_only_the_published_generation(repo):
+    """codex #671 R1 P1:翻转后退休代行留一轮宽限,mention_seed_rows(共提
+    桥接的 canonical 名录)不配 published 谓词就会把新旧两代混在一起,发布
+    指向已退休 canonical 的 mention 边。"""
+    nb = _seed(repo)
+    repo.rebuild_unified_kg(nb.id, force=True)
+    published = _state(repo, nb.id)["cluster_generation"]
+    with repo._connect() as db:
+        member = db.execute(
+            "SELECT member_object_id FROM concept_clusters WHERE notebook_id=? "
+            "AND generation=? LIMIT 1", (nb.id, published)).fetchone()[0]
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO concept_clusters (id,notebook_id,canonical_id,"
+            "member_object_id,canonical_name,object_type,created_at,generation) "
+            "VALUES ('cc-retired-seed',?,?,?,?,?,?,?)",
+            (nb.id, "K-retired", member, "Retired", "concept",
+             "2026-01-01T00:00:00", published + 9))
+    with repo._connect() as db:
+        clusters, _claims = repo._runtime.unified_kg.mention_seed_rows(db, nb.id)
+    cids = {r["cid"] for r in clusters}
+    assert "K-retired" not in cids, cids
+    assert cids, "published 代的种子必须还在"
 
 
 def test_a_crash_before_the_flip_releases_the_claim_via_finally(repo, monkeypatch):
