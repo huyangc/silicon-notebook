@@ -23,6 +23,7 @@ import "katex/dist/katex.min.css";
 
 import { remarkCitations } from "../../answer-citations";
 import { remarkAnswerInference } from "../../answer-inference";
+import { normalizeInferenceListMarkers } from "../../inference-list-markers";
 import { remarkGfmPlugin } from "../../markdown-gfm";
 import { normalizeMathMarkdown } from "../../math-markdown";
 import { ImagePreviewModal } from "../../image-preview-modal";
@@ -378,7 +379,7 @@ function PublicTurnView({
       urlTransform={(url) => (url.startsWith("cite:") ? url : defaultUrlTransform(url))}
       components={PUBLIC_MARKDOWN_COMPONENTS}
     >
-      {normalizeMathMarkdown(turn.answer_md)}
+      {normalizeInferenceListMarkers(normalizeMathMarkdown(turn.answer_md))}
     </ReactMarkdown>
   ), [turn.answer_md, markdownCitationRefs, imageIdsByCitationKey, citationImageOrder]);
 

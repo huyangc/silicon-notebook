@@ -95,6 +95,28 @@ def test_answer_prompt_rule_13_propagates_inference_to_conclusions():
     assert rule_13_idx_h < history_idx
 
 
+def test_answer_prompt_rule_2_places_marker_after_list_syntax():
+    """T2-d:规则 2 补一句位置要求——（推断）/Likely, 标记开句但要排在列表序号/
+    项目符号/标题语法之后,不能挡在它们前面(会破坏 Markdown 列表识别)。"""
+    from app.services.prompts import answer_prompt
+
+    p = answer_prompt("q?", "k1: [concept] X")
+    placement_sentence = (
+        "The marker opens the sentence but goes AFTER any list number, bullet, "
+        "or heading syntax (write `1. （推断）…`, never `（推断）1. …`, so "
+        "Markdown lists stay intact)."
+    )
+    assert placement_sentence in p
+    # 下界锚在规格点名的那半句:句子紧跟「(prefix with '（推断）' / 'Likely,')」。
+    # 锚在更早的「NEVER attach [k]」会放过把这句挪到 `[k]` 规则后面的变异——那时
+    # 「The marker」的最近先行词变成 [k],读起来像在要求 [k] 开句(评审 P2-1)。
+    prefix_idx = p.index("(prefix with '（推断）' / 'Likely,')")
+    rule_3_idx = p.index("3. If the items don't cover")
+    placement_idx = p.index(placement_sentence)
+    assert prefix_idx < placement_idx < rule_3_idx
+    assert placement_idx - prefix_idx < 60, "位置句必须紧跟 prefix 那半句"
+
+
 def test_query_intent_prompt_cross_tool_mapping_guidance():
     from app.services.prompts import query_intent_prompt
     p = query_intent_prompt("how do I do Innovus's place_opt_design in ICC2?")

@@ -229,6 +229,28 @@ def test_report_prompts_propagate_inference_to_conclusions():
     assert su.index(keep) < su.index("Any intent assumptions") < su.index("Report sections:")
 
 
+def test_report_prompts_rule_2_and_4_place_marker_after_list_syntax():
+    """T2-d:报告章节规则 2(推断句)与规则 4(通识句)各补一句位置要求——标记开句
+    但要排在列表序号/项目符号/标题语法之后。通识关闭时规则 4 不出现,该句只在
+    规则 2 落一次。"""
+    from app.services.prompts import report_section_prompt
+
+    placement_sentence = (
+        "The marker opens the sentence but goes AFTER any list number, bullet, "
+        "or heading syntax (write `1. （推断）…`, never `（推断）1. …`, so "
+        "Markdown lists stay intact)."
+    )
+
+    sp_on = report_section_prompt("失效机理", "应力如何改变 VBE", "总问题", "CTX",
+                                  allow_parametric=True)
+    assert sp_on.count(placement_sentence) == 2
+    first_idx = sp_on.index(placement_sentence)
+    assert first_idx < sp_on.index("3. Keep the derivation chain")
+
+    sp_off = report_section_prompt("t", "s", "q", "CTX", allow_parametric=False)
+    assert sp_off.count(placement_sentence) == 1
+
+
 # ---------------------------------------------------------------------------
 # Task 5: report_engine——大纲 + 逐节并行深挖 + 撰写
 # ---------------------------------------------------------------------------

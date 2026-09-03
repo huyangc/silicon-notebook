@@ -23,6 +23,7 @@ import "katex/dist/katex.min.css";
 
 import { remarkCitations } from "../../answer-citations";
 import { remarkAnswerInference } from "../../answer-inference";
+import { normalizeInferenceListMarkers } from "../../inference-list-markers";
 import { remarkGfmPlugin } from "../../markdown-gfm";
 import { normalizeMathMarkdown } from "../../math-markdown";
 import {
@@ -166,7 +167,7 @@ export default function PublicReportPage() {
           {/* 与已认证的报告视图同一套归一化：单行 $$…$$ 要当块级公式处理，
               网关返回的转义 Markdown 层也要剥掉。少了它，同一份报告在分享页
               和站内页会渲染成两个样子（长公式被当行内并裁掉）。 */}
-          {normalizeMathMarkdown(report.content_md)}
+          {normalizeInferenceListMarkers(normalizeMathMarkdown(report.content_md))}
         </ReactMarkdown>
       </article>
 

@@ -14,6 +14,7 @@ import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
 import { remarkGfmPlugin } from "./markdown-gfm";
 import { normalizeMathMarkdown } from "./math-markdown";
+import { normalizeInferenceListMarkers } from "./inference-list-markers";
 import { remarkCitations } from "./answer-citations";
 import { remarkAnswerInference } from "./answer-inference";
 import {
@@ -253,7 +254,7 @@ export function ReportMarkdown({
         urlTransform={(url) => (url.startsWith("cite:") ? url : defaultUrlTransform(url))}
         components={components}
       >
-        {normalizeMathMarkdown(markdown)}
+        {normalizeInferenceListMarkers(normalizeMathMarkdown(markdown))}
       </ReactMarkdown>
       {selectedReference && (
         <aside className="report-reference-detail" aria-label="引用原文">

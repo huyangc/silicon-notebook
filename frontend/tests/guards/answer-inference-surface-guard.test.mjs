@@ -23,6 +23,10 @@ const MODEL_TEXT_SURFACES = [
   "c/[token]/page.tsx",
 ];
 const PLUGIN_IDENTIFIER = "remarkAnswerInference";
+/** T2-d 前端归一函数的模块——四个面都要 import 它,knowhow 格子编辑器刻意不接。 */
+const NORMALIZER_MODULE_SUFFIX = "inference-list-markers";
+const KNOWHOW_CELL_EDITOR = "knowhow-cell-editor.tsx";
+const NORMALIZER_IDENTIFIER = "normalizeInferenceListMarkers";
 
 /** `remarkPlugins={...}` 的表达式节点(每个 `<ReactMarkdown>` 一个)。 */
 function remarkPluginsExpressions(sourceFile) {
@@ -60,6 +64,15 @@ function hasBarePluginEntry(expression) {
   });
 }
 
+function moduleSpecifiers(sourceFile) {
+  return sourceFile.statements
+    .filter((statement) => (
+      ts.isImportDeclaration(statement)
+      && ts.isStringLiteral(statement.moduleSpecifier)
+    ))
+    .map((statement) => statement.moduleSpecifier.text);
+}
+
 test("渲染模型文本的每个 ReactMarkdown 都接了 remarkAnswerInference", async () => {
   const scanned = [];
   const violations = [];
@@ -84,4 +97,77 @@ test("渲染模型文本的每个 ReactMarkdown 都接了 remarkAnswerInference"
     assert.ok(scanned.includes(surface), `没扫到渲染面 ${surface}: ${scanned.join(", ")}`);
   }
   assert.deepEqual(violations, []);
+});
+
+/** 非自闭合的 `<ReactMarkdown>…</ReactMarkdown>` 元素(children 里放的是要渲染的 markdown 表达式)。 */
+function reactMarkdownElements(sourceFile) {
+  const found = [];
+  function visit(node) {
+    if (ts.isJsxElement(node) && node.openingElement.tagName.getText(sourceFile) === "ReactMarkdown") {
+      found.push(node);
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(sourceFile);
+  return found;
+}
+
+/** 元素的子节点里是否真的有 `name(...)` 调用(任意深度;只认裸标识符调用,不认文本匹配)。 */
+function childrenCall(element, name) {
+  let hit = false;
+  function visit(node) {
+    if (hit) return;
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === name) {
+      hit = true;
+      return;
+    }
+    ts.forEachChild(node, visit);
+  }
+  for (const child of element.children) visit(child);
+  return hit;
+}
+
+test("T2-d:四个面都 import 并在 <ReactMarkdown> 子表达式里调用了 normalizeInferenceListMarkers,knowhow 格子编辑器没有", async () => {
+  const scanned = [];
+  const violations = [];
+  let knowhowCellEditorScanned = false;
+  let knowhowCellEditorImportsNormalizer = false;
+
+  for (const { path, module } of await appSourceModules()) {
+    const specifiers = moduleSpecifiers(module);
+    const importsNormalizer = specifiers.some((specifier) => specifier.endsWith(NORMALIZER_MODULE_SUFFIX));
+    if (MODEL_TEXT_SURFACES.includes(path)) {
+      scanned.push(path);
+      if (!importsNormalizer) {
+        violations.push(`${path}: 没有 import 以 ${NORMALIZER_MODULE_SUFFIX} 结尾的模块`);
+      }
+      // 只查 import 不够:tsconfig 没开 noUnusedLocals,「留着 import、把调用改回单层」
+      // 对守卫和 tsc 都是绿的(评审 P2-2)。每个 <ReactMarkdown> 的子表达式里都必须
+      // 真的有 normalizeInferenceListMarkers(...) 这个调用。
+      const elements = reactMarkdownElements(module);
+      if (elements.length === 0) {
+        violations.push(`${path}: 没有任何 <ReactMarkdown> 元素`);
+      }
+      for (const element of elements) {
+        if (!childrenCall(element, NORMALIZER_IDENTIFIER)) {
+          violations.push(`${path}: <ReactMarkdown> 的子表达式里没有 ${NORMALIZER_IDENTIFIER}(...) 调用`);
+        }
+      }
+    }
+    if (path === KNOWHOW_CELL_EDITOR) {
+      knowhowCellEditorScanned = true;
+      knowhowCellEditorImportsNormalizer = importsNormalizer;
+    }
+  }
+
+  for (const surface of MODEL_TEXT_SURFACES) {
+    assert.ok(scanned.includes(surface), `没扫到渲染面 ${surface}: ${scanned.join(", ")}`);
+  }
+  assert.deepEqual(violations, []);
+  assert.ok(knowhowCellEditorScanned, `没扫到 ${KNOWHOW_CELL_EDITOR}`);
+  assert.equal(
+    knowhowCellEditorImportsNormalizer,
+    false,
+    `${KNOWHOW_CELL_EDITOR} 不该 import ${NORMALIZER_MODULE_SUFFIX}(用户内容,不做推断标记归一)`,
+  );
 });
