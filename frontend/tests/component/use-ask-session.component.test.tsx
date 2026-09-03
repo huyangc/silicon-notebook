@@ -4170,6 +4170,57 @@ test("a hand-off stopped before started does not keep its mirror across an unmou
   expect(api.runAskStream).toHaveBeenCalledTimes(1);
 });
 
+// codex #664 r9 P2: switching to automatic mode drops EVERY persisted record of
+// the actor, including older sessions' reviews that were never materialized
+// after a reload — returning to advanced must not resume them.
+test("switching to automatic mode clears persisted reviews of other sessions too", async () => {
+  api.previewAskIntent.mockImplementation(async (_nb: string, question: string) => contractFor(question, true));
+  api.listConversations.mockResolvedValue([summary("conversation-a"), summary("conversation-b")]);
+  api.getConversation.mockImplementation(async (id: string) => detail(id));
+  const first = render(<Harness />);
+  const owner1 = beginOwnedNotebook();
+  await act(async () => {
+    await value!.restoreNotebook(owner1);
+  });
+  act(() => value!.selectMode("reasoning"));
+  await act(async () => {
+    await value!.submit("ambiguous in a");
+  });
+  await act(async () => {
+    await value!.openSession("conversation-b", 2);
+  });
+  act(() => value!.selectMode("reasoning"));
+  await act(async () => {
+    await value!.submit("ambiguous in b");
+  });
+  expect(pendingIntentStore()).toHaveLength(2);
+
+  // Reload: only the newest (B) is materialized; A stays storage-only.
+  first.unmount();
+  api.previewAskIntent.mockReset();
+  const view = render(<Harness />);
+  const owner2 = beginOwnedNotebook(3);
+  await act(async () => {
+    await value!.restoreNotebook(owner2);
+    value!.finishNotebookTransition(owner2);
+  });
+  expect(value!.intentReview?.question).toBe("ambiguous in b");
+
+  view.rerender(<Harness policy={{ ...DEFAULT_POLICY, advanced: false }} />);
+  expect(value!.intentReview).toBeNull();
+  expect(pendingIntentStore()).toEqual([]);
+
+  // Back to advanced and into A's session: nothing to resume.
+  view.rerender(<Harness />);
+  await act(async () => {
+    await value!.openSession("conversation-a", 4);
+  });
+  expect(value!.conversationId).toBe("conversation-a");
+  expect(value!.intentReview).toBeNull();
+  expect(value!.intentChecking).toBe(false);
+  expect(api.previewAskIntent).not.toHaveBeenCalled();
+});
+
 // PR #557 regression: `turns`/`sessions`/`pendingTrace`/`feedbackSent` used to
 // fall back to a bare `[]`/`{}` literal whenever the owner is not visible
 // (actorId is null, e.g. logged out / collection page). A bare literal is a
