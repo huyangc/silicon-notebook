@@ -691,8 +691,9 @@ class UnifiedKgStore:
         谓词是 ``generation != published`` 而非 ``= 旧P``:欠账轮(上轮翻转后
         崩溃)只有锚点落库、退休代号无处可查,而窗口内可能混入的僵尸在飞代行
         幂等安置无害且被 created_at 窗口自然限量——「搬多了幂等无害,漏搬才是
-        洞」的余量方向。join objects 取安置所需的 payload(期间被删的对象
-        join 不到,天然跳过);``payload::text`` 与 knowledge_store 的
+        洞」的余量方向。join objects 取安置所需的 payload——期间被删的对象
+        join 不到天然跳过,被**弃置**的按 status 排除(codex #671 R16 P2:
+        重建输入本就不含 deprecated,催收复读会把已弃置成员重新发布);``payload::text`` 与 knowledge_store 的
         ``_compat_rows(payload=True)`` 同一条跨后端契约——psycopg 会把裸
         jsonb 解成 dict,服务层的 ``json.loads`` 会当场 TypeError(内评 P0)。
         keyset 分页按 (object_type, member_object_id) 全序推进(质量评 P2:
@@ -712,6 +713,7 @@ class UnifiedKgStore:
             "MIN(o.payload::text) AS payload "
             "FROM concept_clusters c "
             "JOIN knowledge_objects o ON o.id = c.member_object_id "
+            "AND o.status != 'deprecated' "
             "WHERE c.notebook_id=%s AND c.generation != %s "
             "AND c.generation NOT IN ("
             "  SELECT derived_building_generation FROM unified_kg_state u "
