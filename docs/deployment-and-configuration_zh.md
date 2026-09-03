@@ -711,6 +711,8 @@ NOTEBOOK_DELETE_SWEEP_SECONDS             # 删除作业扫尾双驱动的轮询
 NOTEBOOK_DELETE_QUIESCE_TIMEOUT_SECONDS   # 删除作业等待该笔记本上已在跑的知识图谱构建/重建/关联自行停下的总超时——绝不会在重建仍在写入时被强行推进；超时后交回扫尾按正常节奏重排（默认 1800，覆盖一批最坏情形的 LLM 抽取耗时并留裕度）
 NOTEBOOK_DELETE_FINALIZE_TIMEOUT_SECONDS  # 仅 PostgreSQL：删除作业单事务收尾步骤（围栏 + 归档 + 删四张直接围栏的表 + DELETE FROM notebooks）的可选事务级 statement_timeout 覆盖值。默认 0 = 不设置，沿用池自身的 POSTGRES_STATEMENT_TIMEOUT_SECONDS。这是一个「收紧」旋钮而非「放宽」旋钮：收尾事务正常在个位数秒内完成，远低于池自身超时，所以任何非零值都只会让失败更快暴露、绝不会更慢。启动校验拒绝任何超出 `0 < 值 ≤ min(120, POSTGRES_STATEMENT_TIMEOUT_SECONDS)` 的非零值——与上面 POSTGRES_CHUNK_FTS_TIMEOUT_SECONDS 同一族交叉校验器。
 KG_GRAPH_DRAIN_PAGE_ROWS                  # delete_notebook_kg 预排水的行预算（批 3·W1 T-5a）：一个值同时作每批页大小（每批一条有界 DELETE、一个写事务）与「留给终局原子重置」的每表残余阈值。按部署的 statement timeout 定尺——默认 2000 在 180s 的 POSTGRES_STATEMENT_TIMEOUT_SECONDS 下余量充足；低配部署可调小以缩短单批写锁/语句时长，代价是批次更多、半清窗口更长（默认 2000；50-20000,上限压在 SQLite 默认 SQLITE_MAX_VARIABLE_NUMBER 之下——排水页把选中 id 作为 SQL 参数逐个绑定）
+KG_DERIVED_BUILD_TTL_SECONDS              # 代际重建（批 3·W2）在飞认领的崩溃兜底 TTL。⚠ 这不是正常释放通道：失败路径由 rebuild 的 finally CAS 即时释放，TTL 只救「进程连 finally 都没跑到」的 kill -9/掉电。数值围栏（下限 1800 由启动校验强制）：必须显著大于该部署一轮全量重聚簇的最坏墙钟——生产 484GB 库在 30-60 分钟量级，默认 4 小时留了余量；设得过小会把仍在跑的重建当尸体抢占，双方翻转双 CAS 互相作废、整库空转。除非有实测的更快重建墙钟，不要调小（默认 14400；≥1800）
+KG_CATCHUP_SKEW_SECONDS                   # 代际翻转后单遍催收的时钟偏斜余量：重放退休代里 created_at ≥「翻转锚点 − 该余量」的融合行。锚点取 DB 服务端时钟，余量兜的是行时间戳的应用时钟偏斜与长事务可见性偏差。方向性围栏：调大只是多重放几行（幂等安置无害），调小才有漏行风险——除非确证全部写进程与 DB 时钟偏差远小于默认值，不要调小（默认 300；≥0）
 ```
 
 开启启动预加载后，`/api/ready` 会在 `preloading_indexes` 阶段持续返回 false。任一必需
