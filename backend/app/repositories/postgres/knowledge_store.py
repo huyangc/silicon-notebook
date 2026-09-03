@@ -721,6 +721,14 @@ class KnowledgeStore:
         # maintenance gets, deliberately NOT create_notebook's own
         # source_index_backfilled=1 (this row is being synthesized mid-
         # lifecycle for a notebook that already had content, not born empty).
+        # 批 3·W2:两个 published 指针/在飞认领/催收标记随终局一并归零——本
+        # 事务的 blanket DELETE 已清空三张派生表,指针必须跟着回到「代 0」的
+        # 出生态,否则副本语义(无行⇒代 0)与读侧 COALESCE 契约就对不上;
+        # building/claimed 清零使任何并发在飞 rebuild 的翻转双 CAS 当场作废
+        # (standalone delete → flip aborts,响亮失败不发布)。
+        # ``derived_generation_counter`` 刻意 NOT 重置(UPDATE 分支不出现):
+        # 它是版本键防混叠的单调源,与 kg_reset_epoch 同一条红线——回卷它,
+        # 删除+重建就会重爬同一段代号,跨翻转在飞读者的宽限论证全部失效。
         cur = db.execute(
             "INSERT INTO unified_kg_state ("
             "notebook_id, dirty, kg_mutation_seq, cluster_mutation_seq, "
@@ -734,6 +742,9 @@ class KnowledgeStore:
             "object_count=0, relation_count=0, cluster_count=0, "
             "community_seq=-1, canonical_rel_seq=-1, mention_seq=-1, "
             "kg_reset_epoch=unified_kg_state.kg_reset_epoch+1, "
+            "cluster_generation=0, community_generation=0, "
+            "derived_building_generation=0, derived_building_claimed_at=NULL, "
+            "derived_catchup_from=NULL, "
             "updated_at=excluded.updated_at",
             (notebook_id, normalize_timestamp(now)),
         )
