@@ -208,8 +208,9 @@ def test_disk_sweep_skips_scale_roots_when_claim_not_held(repo, attempt, reason)
 
 
 def test_disk_sweep_age_gate_protects_recent_direct_dirs(repo):
-    """内评 P1 pin:copy_notebook 先 copytree 后插行——闸值内(mtime 新)的
-    直删根候选必须跳过留声,scale 根不受闸管;把目录做旧后重跑即清。"""
+    """内评 P1 pin:copy_notebook 先 copytree 后插行——闸值内的直删根候选
+    必须跳过留声,scale 根不受闸管;时间流逝(now 注入,ctime 无法做旧)后
+    重跑即清。"""
     live = _mk_nb(repo)
     storage = repo._runtime.source_files.storage_dir
     ghost = "nb-ghost005"
@@ -227,15 +228,38 @@ def test_disk_sweep_age_gate_protects_recent_direct_dirs(repo):
     for root in SCALE_DISK_ROOTS:
         assert not (storage / root / ghost).exists()
 
-    stale = time.time() - 7200
-    for root in DIRECT_DISK_ROOTS:
-        os.utime(storage / root / ghost, (stale, stale))
     report = sweep_orphan_disk(
-        _database(repo), "sqlite", storage, min_age_seconds=3600
+        _database(repo), "sqlite", storage,
+        min_age_seconds=3600, now=time.time() + 7200,
     )
     assert report.clean
     for root in DIRECT_DISK_ROOTS:
         assert not (storage / root / ghost).exists()
+
+
+def test_disk_sweep_age_gate_ignores_inherited_old_mtime(repo):
+    """codex #666 R1 P1 pin:copy_notebook 的 copytree 会把**源目录的旧
+    mtime** 原样复制到目的目录(copystat)——闸只看 mtime 时,刚落盘的在途
+    拷贝会被判旧而误删。闸取 max(mtime, ctime):把候选的 mtime 人为做旧
+    (等价于 copytree 继承),ctime 仍是刚才 → 必须仍被闸拦下。"""
+    live = _mk_nb(repo)
+    storage = repo._runtime.source_files.storage_dir
+    ghost = "nb-ghost008"
+    _seed_disk(storage, ghost, live)
+    stale = time.time() - 7200
+    for root in DIRECT_DISK_ROOTS:
+        os.utime(storage / root / ghost, (stale, stale))  # 继承来的旧 mtime
+
+    report = sweep_orphan_disk(
+        _database(repo), "sqlite", storage, min_age_seconds=3600
+    )
+    assert sorted(report.skipped) == [
+        (ghost, "recent_dir:assets"), (ghost, "recent_dir:notebooks"),
+    ]
+    for root in DIRECT_DISK_ROOTS:
+        assert (storage / root / ghost / "f.bin").is_file(), (
+            "旧 mtime 是 copytree 从源继承来的假信号,不许据此删在途拷贝"
+        )
 
 
 def test_disk_sweep_stops_scale_sweep_when_claim_lost_midway(repo):
