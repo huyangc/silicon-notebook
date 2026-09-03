@@ -190,6 +190,100 @@ def test_crash_after_flip_settles_the_debt_on_the_next_round(repo, monkeypatch):
     assert calls[2]["published_generation"] == settled["cluster_generation"]
 
 
+def test_the_skip_gate_settles_stranded_catchup_debt(repo, monkeypatch):
+    """codex #671 R3 P1:force 重建翻转后崩溃、输入又没变时,后续 force=False
+    刷新走 skip 短路——欠账若不在短路前补掉,启动恢复与预回收都按标记跳过,
+    退休代永不回收、窗口成员永不发布。skip 分支必须先取号补欠账再返回。"""
+    nb = _seed(repo)
+    repo.rebuild_unified_kg(nb.id, force=True)          # 完整一轮,存下 _ver
+    service = repo._runtime.knowledge_lifecycle
+    calls: list[int] = []
+    original_settle = service._settle_generation_catchup
+
+    def crashing_settle(notebook_id, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("simulated crash after flip")
+        return original_settle(notebook_id, **kwargs)
+
+    monkeypatch.setattr(service, "_settle_generation_catchup", crashing_settle)
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        repo.rebuild_unified_kg(nb.id, force=True)      # 输入未变的 force 重建
+    assert _state(repo, nb.id)["derived_catchup_from"] is not None
+
+    cached = repo.rebuild_unified_kg(nb.id)             # force=False → skip 短路
+    assert cached >= 1
+    state = _state(repo, nb.id)
+    assert state["derived_catchup_from"] is None, (
+        "skip 短路吞掉了欠账——退休代从此永不回收")
+    assert state["derived_building_generation"] == 0, "补欠账的认领必须已释放"
+
+
+def test_a_preempted_community_writer_aborts_before_writing(repo, monkeypatch):
+    """codex #671 R3 P2:Louvain/预计算超 TTL 被抢占(或 standalone delete
+    重置认领)后,communities 写代段必须先复读认领再写——不复读就把整代
+    不可见行留给下一轮回收(生产量级百万行)。"""
+    from app.repositories.ports import KgDerivedGenerationPreempted
+
+    nb = _seed(repo)
+    repo.rebuild_unified_kg(nb.id, force=True)
+    service = repo._runtime.knowledge_lifecycle
+    original_reap = service._reap_stale_community_generations
+
+    def usurp_after_reap(notebook_id, **kwargs):
+        result = original_reap(notebook_id, **kwargs)
+        with repo._write() as db:
+            db.execute(
+                "UPDATE unified_kg_state SET "
+                "derived_building_generation=derived_building_generation+7 "
+                "WHERE notebook_id=?", (notebook_id,))
+        return result
+
+    monkeypatch.setattr(service, "_reap_stale_community_generations",
+                        usurp_after_reap)
+    events: list[dict] = []
+    monkeypatch.setattr(repo._runtime.event_log, "emit",
+                        lambda e: events.append(e))
+    with repo._connect() as db:
+        rows_before = db.execute(
+            "SELECT COUNT(*) AS c FROM communities WHERE notebook_id=?",
+            (nb.id,)).fetchone()["c"]
+    with pytest.raises(KgDerivedGenerationPreempted):
+        repo.rebuild_communities(nb.id, force=True)
+    stages = [e["stage"] for e in events
+              if e.get("kind") == "kg_generation_preempted"]
+    assert stages == ["community_write"], stages
+    with repo._connect() as db:
+        rows_after = db.execute(
+            "SELECT COUNT(*) AS c FROM communities WHERE notebook_id=?",
+            (nb.id,)).fetchone()["c"]
+    assert rows_after == rows_before, "被抢占后一行新代行都不许落"
+
+
+def test_finish_rebuild_state_is_a_noop_once_the_pointer_moved_on(repo):
+    """codex #671 R3 P2(收尾无主写回):翻转清认领后催收期间,另一进程可
+    发布更新的代并收尾——旧 worker 的 finish 必须按「指针还是自己那代」
+    条件化,失配即 no-op,不许拿旧代 metadata 盖掉新发布者的收尾。"""
+    nb = _seed(repo)
+    repo.rebuild_unified_kg(nb.id, force=True)
+    before = _state(repo, nb.id)
+    store = repo._runtime.unified_kg
+    with repo._write() as db:
+        store.finish_rebuild_state(
+            db, nb.id, "stale-version", 999, "2026-02-02T00:00:00",
+            published_generation=int(before["cluster_generation"]) + 5)
+    unchanged = _state(repo, nb.id)
+    assert unchanged["cluster_input_version"] == before["cluster_input_version"]
+    assert unchanged["cluster_count"] == before["cluster_count"]
+    with repo._write() as db:
+        store.finish_rebuild_state(
+            db, nb.id, "fresh-version", 7, "2026-02-02T00:00:00",
+            published_generation=int(before["cluster_generation"]))
+    applied = _state(repo, nb.id)
+    assert applied["cluster_input_version"] == "fresh-version"
+    assert applied["cluster_count"] == 7
+
+
 def test_mention_seed_rows_read_only_the_published_generation(repo):
     """codex #671 R1 P1:翻转后退休代行留一轮宽限,mention_seed_rows(共提
     桥接的 canonical 名录)不配 published 谓词就会把新旧两代混在一起,发布

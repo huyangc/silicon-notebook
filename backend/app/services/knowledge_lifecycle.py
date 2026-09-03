@@ -4902,6 +4902,31 @@ class KnowledgeLifecycleService:
                 cc = self.unified_kg.concept_clusters_count(db, notebook_id)
             if row and row["cluster_input_version"] and row["cluster_input_version"] == _ver and cc > 0:
                 cached = int(row["cluster_count"] or 0)
+                if row["derived_catchup_from"] is not None:
+                    # codex #671 R3 P1:上一轮 force 重建翻转后崩溃、输入又
+                    # 恰好没变时,skip 短路会把欠账永远搁浅——启动恢复与
+                    # 预回收都按标记跳过,退休代只涨不缩、窗口成员永不发布。
+                    # 先取号补欠账再走跳过语义;被闸(别处在飞)则原样跳过,
+                    # 在飞的那一轮取号后自己会先补欠账。cached 刻意不随催收
+                    # 的 append 重算:skip 路径从来不更新持久化计数,催收的
+                    # added>0 bump 已作废键控缓存,下一次真重建会补齐。
+                    with self._write() as _db:
+                        _dclaim = self.unified_kg.claim_derived_generation(
+                            _db, notebook_id,
+                            ttl_seconds=self.settings.kg_derived_build_ttl_seconds)
+                    if _dclaim is not None:
+                        try:
+                            if _dclaim["catchup_from"] is not None:
+                                self._settle_generation_catchup(
+                                    notebook_id,
+                                    published_generation=int(
+                                        _dclaim["cluster_generation"]),
+                                    since_ts=_dclaim["catchup_from"])
+                        finally:
+                            with self._write() as _db:
+                                self.unified_kg.release_derived_claim(
+                                    _db, notebook_id,
+                                    int(_dclaim["generation"]))
                 self.event_log.logger.info(
                     "kg-rebuild[%s] skipped — inputs unchanged since last rebuild (%s clusters)",
                     notebook_id, cached)
@@ -5377,7 +5402,8 @@ class KnowledgeLifecycleService:
                 # never skips); resetting it would lose mutations that arrived
                 # mid-rebuild.
                 self.unified_kg.finish_rebuild_state(
-                    db, notebook_id, _ver, cluster_count, now
+                    db, notebook_id, _ver, cluster_count, now,
+                    published_generation=generation,
                 )
         finally:
             # Final cleanup: drop only THIS run's scratch rows (run_id-scoped
@@ -6062,6 +6088,22 @@ class KnowledgeLifecycleService:
             # 下一轮预回收清理。
             if not graph_fresh:
                 with self._write() as db:
+                    # 写段前复读认领,与 cluster 侧写代段同一条纪律
+                    # (codex #671 R3 P2):Louvain/预计算超过 TTL 被抢占、或
+                    # standalone delete 重置认领后,继任者的预回收已扫过这个
+                    # 键区——不复读就会把整代不可见行留到下一轮回收。sqlite
+                    # 侧 derived_claim_still_held 自带 begin_guarded_write
+                    # 接缝,复读与写入对跨进程抢占者原子。
+                    if not self.unified_kg.derived_claim_still_held(
+                            db, notebook_id, _generation):
+                        self.event_log.emit({
+                            "kind": "kg_generation_preempted",
+                            "notebook_id": notebook_id,
+                            "generation": _generation,
+                            "stage": "community_write",
+                        })
+                        raise KgDerivedGenerationPreempted(
+                            notebook_id, _generation)
                     self.unified_kg.write_communities_generation(
                         db, notebook_id, level, kept_rows, names, deg,
                         self._now(), _generation
