@@ -563,7 +563,9 @@ class UnifiedKgStore:
         generation: int, now: str,
     ) -> bool:
         cur = db.execute(
-            "UPDATE unified_kg_state SET community_generation=?, updated_at=? "
+            "UPDATE unified_kg_state SET community_generation=?, "
+            "derived_building_generation=0, derived_building_claimed_at=NULL, "
+            "updated_at=? "
             "WHERE notebook_id=? AND community_generation=? "
             "AND derived_building_generation=?",
             (generation, now, notebook_id, published_from, generation),

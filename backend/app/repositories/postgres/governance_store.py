@@ -548,9 +548,18 @@ class GovernanceStore:
         connection: Any, notebook_id: str, object_type: str
     ) -> None:
         lock_cluster_artifact_type(connection, notebook_id, object_type)
+        # 在飞代豁免(codex #671 R9 P1):全量重写与 rebuild 重叠时,跨代
+        # DELETE 会把已写好的在飞代行一并抹掉,而 rebuild 的认领与双 CAS
+        # 都还有效——随后翻转就发布一个该类型为空的代。子查询单语句快照:
+        # claimant 的行只在其取号提交后出现,「看得见行 ⇒ 看得见认领」。
+        # 本次重写自己的行落 published 代、时间戳新——若被并发翻转退休,
+        # 催收窗口会把成员重放进新代(last-publisher-wins,无结构性丢失)。
         connection.execute(
-            "DELETE FROM concept_clusters WHERE notebook_id=%s AND object_type=%s",
-            (notebook_id, object_type))
+            "DELETE FROM concept_clusters WHERE notebook_id=%s AND object_type=%s "
+            "AND generation NOT IN ("
+            "  SELECT derived_building_generation FROM unified_kg_state u "
+            "  WHERE u.notebook_id = %s AND derived_building_generation != 0)",
+            (notebook_id, object_type, notebook_id))
 
     def insert_clusters(
         self,
