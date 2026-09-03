@@ -5356,6 +5356,18 @@ class KnowledgeLifecycleService:
             now = self._now()
             _t = _time.perf_counter()
             with self._write() as db:
+                # 写段前复读认领(codex #671 R12 P2):pending 队列是**共享**
+                # 状态(不代次化)——被 TTL 抢占的败者在这里整表删写,会把
+                # 继任者的候选抹掉、把败者代次的候选留给人审,哪怕它随后的
+                # 翻转必然作废。与写代段同一条纪律,响亮早停。
+                if not self.unified_kg.derived_claim_still_held(
+                        db, notebook_id, generation):
+                    self.event_log.emit({
+                        "kind": "kg_generation_preempted",
+                        "notebook_id": notebook_id,
+                        "generation": generation, "stage": "pending_refresh",
+                    })
+                    raise KgDerivedGenerationPreempted(notebook_id, generation)
                 self.governance_store.delete_pending_merges(db, notebook_id)
                 # Decisions may land after the earlier cluster_seeds snapshot.
                 # DELETE first so PostgreSQL serializes against updates of the
@@ -5746,7 +5758,24 @@ class KnowledgeLifecycleService:
                 "notebook_id": notebook_id, "level": level,
             })
             return None
-        return int(claim["generation"]), int(claim["community_generation"])
+        generation = int(claim["generation"])
+        if claim["catchup_from"] is not None:
+            # 继承的欠账先补(codex #671 R12 P2):上一轮 cluster 翻转后崩溃
+            # 留下的标记不能被社区轮搁浅——协议要求「下一轮取号先补欠账」,
+            # 不分取号者是谁(启动恢复与预回收都按标记跳过,搁浅=退休代
+            # 只涨不缩+窗口成员永不发布)。失败时当场释放认领再冒泡:本
+            # 方法在调用方的 try/finally 之外,不释放就锁到 TTL。
+            try:
+                self._settle_generation_catchup(
+                    notebook_id,
+                    published_generation=int(claim["cluster_generation"]),
+                    since_ts=claim["catchup_from"])
+            except BaseException:
+                with self._write() as db:
+                    self.unified_kg.release_derived_claim(
+                        db, notebook_id, generation)
+                raise
+        return generation, int(claim["community_generation"])
 
     def _publish_communities_generation(
         self, notebook_id: str, level: int, *,
