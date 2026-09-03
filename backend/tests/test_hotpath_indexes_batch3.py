@@ -107,14 +107,13 @@ def test_batch3_spec_is_present_and_batch1_batch2_are_untouched():
     # 是 idx_clusters_nb_canonical_member_gen(INCLUDE (generation))。
     assert _BATCH3_NAME not in names
     assert "idx_clusters_nb_canonical_member_gen" in names
-    assert len(HOTPATH_INDEX_SPECS) == 19, (
-        "expected eight batch-1 plus two batch-2 plus zero batch-3 (superseded by batch 6) plus three "
+    assert len(HOTPATH_INDEX_SPECS) == 18, (
+        "expected seven batch-1 (idx_clusters_nb_canonical superseded by batch 6) plus two batch-2 plus zero batch-3 (superseded by batch 6) plus three "
         f"batch-4 plus three batch-5 plus three batch-6 entries in HOTPATH_INDEX_SPECS, found "
         f"{len(HOTPATH_INDEX_SPECS)}: {sorted(names)}"
     )
     # Batch 1/2 names untouched by this addition.
     batch1_names = {
-        "idx_clusters_nb_canonical",
         "idx_clusters_nb_canonical_name_lower",
         "idx_extraction_runs_notebook",
         "idx_knowledge_source_fact_elements_notebook",

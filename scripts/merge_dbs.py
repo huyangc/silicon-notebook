@@ -531,14 +531,30 @@ def merge_core(out_db: Path, primary_db: Path, secondary_db: Path,
             # 批 3·W2 §1.6:上面刚清掉导入 notebook 的 unified_kg_state 行
             # (代次指针随之消失),而三张簇图派生表的行带着副库的 generation
             # 原样拷入——读者按 COALESCE(指针,0) 取代次,不归一到 0 代整份
-            # 簇图会静默不可见。副库残代/在飞代行也一并归 0:合并库下次
-            # rebuild 会整体重算,多几行旧代成员无害且可见性正确。
-            for t in ("concept_clusters", "communities", "community_members"):
-                if _table_exists(conn, t, "main") and "generation" in table_columns(conn, t):
-                    conn.execute(
-                        f"UPDATE main.{t} SET generation = 0 "
-                        f"WHERE notebook_id IN ({ph}) AND generation != 0",
-                        tuple(sec_nb))
+            # 簇图会静默不可见。**先按副库自己的指针只留 published 代**
+            # (内评 P1:残代/在飞代与 published 代常含同一 (nb,type,member)
+            # 成员,一起塌到 0 代必撞四列唯一索引,且同 member 双 canonical
+            # 的映射语义也是坏的),幸存行再归 0。指针从 sec 侧 state 行读
+            # (main 侧刚被清空,sec 侧原样保留)。
+            gen_pointer = {
+                "concept_clusters": "cluster_generation",
+                "communities": "community_generation",
+                "community_members": "community_generation",
+            }
+            for t, pointer in gen_pointer.items():
+                if not (_table_exists(conn, t, "main")
+                        and "generation" in table_columns(conn, t)):
+                    continue
+                conn.execute(
+                    f"DELETE FROM main.{t} WHERE notebook_id IN ({ph}) "
+                    f"AND generation != COALESCE((SELECT {pointer} "
+                    f"FROM sec.unified_kg_state u "
+                    f"WHERE u.notebook_id = main.{t}.notebook_id), 0)",
+                    tuple(sec_nb))
+                conn.execute(
+                    f"UPDATE main.{t} SET generation = 0 "
+                    f"WHERE notebook_id IN ({ph}) AND generation != 0",
+                    tuple(sec_nb))
 
         # 孤儿群组授权边清扫。必须在 GLOBAL_UNION 合并**之后**(那一步才决定
         # `groups` 的最终并集)、`foreign_key_check` **之前**(它看不见这类行 ——

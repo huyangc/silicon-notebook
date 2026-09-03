@@ -52,8 +52,14 @@ W2 对 WR-4 只记核销，不改代码。
   `prune_cluster_rows_for_source`/孤儿清扫分页删）。`write_clusters`/
   `replace_cluster_rows_streamed` 为 test-only（`test_incremental_fuse_perf.py:24`
   登记），无生产调用者。
-- `rebuild_canonical_relations`/`rebuild_mention_bridge` 写形态 PR-1 摸底确认
-  （同构则并入，否则登记）。
+- `rebuild_canonical_relations`/`rebuild_mention_bridge` **PR-1 摸底结论**：
+  确为整 notebook DELETE+INSERT 单事务切换（`replace_canonical_relations`/
+  `replace_mention_bridge`，无 advisory lock），但无 `append_clusters` 型
+  增量并发写者——链 a 不适用，登记 W2 尾款（残余债 #3），不并入 PR-2。
+  `replace_communities` 调用方**不持任何 advisory lock**（仅发布事务隐式
+  行锁 + `board_partition_still_holds` 的一次性 FOR SHARE 探测 + 进程内
+  维护槽；离线 `recluster_kg --force` 绕过维护槽的缝隙由 PR-2 的数据级
+  取号 CAS 闭合）。
 
 ### 摸底 3：关键 schema 约束（v1 漏查，两路内评实测补上）
 
@@ -146,8 +152,13 @@ ALTER TABLE unified_kg_state
    同一条索引也是催收查询有界性的唯一凭据——三用一改）。
 
 三条都走 0043 先例：`scripts/build_hotpath_indexes.py` 式离线 CONCURRENTLY
-建新→迁移落账→旧索引登记退役债；生产 9.65M 行在线建，不停读写。
-其余索引不动。列加法（`ADD COLUMN … DEFAULT 0`）PG11+ 元数据操作、不重写堆
+建新（builder 自带幂等 ADD COLUMN 前置——先行顺序需要尚未迁移的列，实现期
+补充）→操作员 DROP CONCURRENTLY 旧名→迁移校验落账；生产 9.65M 行在线建，
+不停读写。**实现期勘误（PR-1 内评+实测）**：旧索引不是登记退役债而是**随
+迁移直接 DROP，且共五条**——三条被接替者严格覆盖（唯一/两条覆盖），外加
+两条严格前缀（0004 的 `idx_clusters_nb`、0039 的 `idx_clusters_nb_canonical`，
+后者本就是 0043 登记的退役债）：实测更窄前缀会把带谓词读者劫成
+Index Scan+回表过滤，恰是 INCLUDE 要防的回归。其余索引不动。列加法（`ADD COLUMN … DEFAULT 0`）PG11+ 元数据操作、不重写堆
 （内评实测 relfilenode 不变）；SQLite ADD COLUMN 同为 O(1)。
 
 - 存量行 generation=0、指针=0。**PR-1 行为等值口径**：行为字节级不变指
@@ -437,6 +448,11 @@ derived_building_claimed_at=NULL, derived_catchup_from=NULL`；
    INSERT…SELECT/DELETE 大语句入锁）替代墙钟断言（v1 引用的 647-1240ms
    基线属已拆除的旧预备段，作废）；写新代段与现状 DELETE+INSERT 的对照
    计时在 PR-2 落地时实测记录于 PR（非 CI 门）。
+8b. **指针翻转驱动缓存失效**（PR-1 内评新增验收项）：`SourceSubgraph
+   Snapshot.cluster_generation` 与新指针列**同名不同义**（前者实为
+   cluster_mutation_seq，互指注释已加）——翻转微事务 bump cluster_
+   mutation_seq 即驱动该签名与 PPR/version_signal 失效，PR-2 须有 pin
+   断言翻转后 partition signature 失配。
 9. 互斥/认领 pin：并发取号 CAS 拒绝、**三通道释放各一例**（跳过路径/
    异常路径/翻转作废路径后认领立即可再取，缺 finally 释放的变异 → 红）、
    TTL 崩溃兜底抢占 + 被抢占者写段早停、buildkg-×unifiedkg- 409、

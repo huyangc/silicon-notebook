@@ -966,7 +966,8 @@ def test_insert_clusters_batches_member_probe(repo, monkeypatch):
 # DELETE:P1 修复后 DELETE 只在页非空**且**页内真有孤儿要删时才发,而清扫是否
 # 开跑与库里有没有孤儿无关(零孤儿的库照样要扫一遍才知道它是零)。
 _SWEEP_PAGE_SQL_FRAGMENT = (
-    "SELECT object_type, member_object_id, id FROM concept_clusters WHERE notebook_id = ?"
+    # 批 3·W2:游标带 generation 分量(四列唯一后 (type,member) 不再唯一)。
+    "SELECT object_type, member_object_id, generation, id FROM concept_clusters WHERE notebook_id = ?"
 )
 _SWEEP_DELETE_SQL_FRAGMENT = (
     "WHERE k.id = c.member_object_id AND k.notebook_id = c.notebook_id"
@@ -1117,7 +1118,8 @@ def test_orphan_sweep_mark_is_recorded_even_when_the_sweep_raises(
     store = repo._runtime.governance
     original = store.sweep_orphan_clusters_page
 
-    def exploding_sweep(db, notebook_id, after_object_type, after_member_object_id, limit):
+    def exploding_sweep(db, notebook_id, after_object_type,
+                        after_member_object_id, after_generation, limit):
         raise RuntimeError("sweep transaction failed")
 
     monkeypatch.setattr(store, "sweep_orphan_clusters_page", exploding_sweep)
@@ -1313,13 +1315,15 @@ def _record_sweep_cursors(repo, monkeypatch, *, max_calls):
     original = store.sweep_orphan_clusters_page
     seen: list[tuple[tuple[str, str], int]] = []
 
-    def recording(db, notebook_id, after_object_type, after_member_object_id, limit):
-        cursor = (after_object_type, after_member_object_id)
+    def recording(db, notebook_id, after_object_type, after_member_object_id,
+                  after_generation, limit):
+        cursor = (after_object_type, after_member_object_id, after_generation)
         assert len(seen) < max_calls, (
             f"清扫批数超过 {max_calls} —— 游标没有按扫描页推进(退化成按被删行推进"
             f"就会在零孤儿页上原地打转);已见游标={seen}")
         page, deleted = original(
-            db, notebook_id, after_object_type, after_member_object_id, limit)
+            db, notebook_id, after_object_type, after_member_object_id,
+            after_generation, limit)
         # 单批扫描行数 ≤ 页大小 —— 批大小界住的是**扫描**,不是被删。
         assert len(page) <= limit, (len(page), limit)
         seen.append((cursor, len(page)))
@@ -1363,11 +1367,12 @@ def test_orphan_sweep_batches_progress_by_scanned_pages(
     assert _sweeps(log) == 4
     assert [page_length for _cursor, page_length in cursors] == [3, 3, 3, 1]
     # 游标严格按**扫到的页尾**推进,与那一页删没删无关(第 3 页零孤儿)。
+    # 批 3·W2:游标带 generation 尾分量(起始 -1;种子行全 0 代)。
     assert [cursor for cursor, _length in cursors] == [
-        ("", ""),
-        ("concept", "ko-row-2"),
-        ("concept", "ko-row-5"),
-        ("concept", "ko-row-8"),
+        ("", "", -1),
+        ("concept", "ko-row-2", 0),
+        ("concept", "ko-row-5", 0),
+        ("concept", "ko-row-8", 0),
     ]
     # 每个非空页一条 DELETE(4 页全非空);但只有真删到行的 3 页推进 cseq ——
     # 第 3 页零孤儿:DELETE 发了、删到 0 行、不 bump,游标照样推进(上一条断言)。

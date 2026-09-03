@@ -268,7 +268,7 @@ PYTHONPATH=backend python scripts/build_postgres_retrieval_indexes.py --apply
 全库 trgm 命中再按 notebook 过滤，最终撞 statement timeout。监控、上线和回退步骤见
 [运维文档](./operations_zh.md#postgresql-notebook-aware-词法索引)。
 
-已有数据的 PostgreSQL 库还应在线建好热路径修复索引（批 1 六组共八条 + 批 2 两条：payload 搜索 GIN 与体检 H5 部分索引 + 批 3 一条 keyset 覆盖索引 + 批 4 三条来源检索 trgm 索引，共十四条；批 2 的 GIN 体积按合成低熵语料基准外推约为 knowledge_objects 表段的 1.5×（真实语料 trigram 更杂,可能更大,建后以实际为准），属登记过的写放大债，劣化超阈值可 DROP INDEX CONCURRENTLY 无损回退）
+已有数据的 PostgreSQL 库还应在线建好热路径修复索引（批 1 六组共八条 + 批 2 两条：payload 搜索 GIN 与体检 H5 部分索引 + 批 3 一条 keyset 覆盖索引 + 批 4 三条来源检索 trgm 索引 + 批 5 三条删除作业化 FK/keyset 索引 + 批 6 三条代次化簇索引接替者(批 3 W2 PR-1)，注册表共二十条；批 2 的 GIN 体积按合成低熵语料基准外推约为 knowledge_objects 表段的 1.5×（真实语料 trigram 更杂,可能更大,建后以实际为准），属登记过的写放大债，劣化超阈值可 DROP INDEX CONCURRENTLY 无损回退）
 （`concept_clusters(notebook_id, canonical_id)`、其 `lower(canonical_name)` 搭档、三条
 反向 FK 覆盖——`extraction_runs`/`knowledge_source_fact_elements`/`memory_items`、
 `knowledge_relations(notebook_id, source_object_id, target_object_id, edge_type)`、
@@ -319,9 +319,26 @@ payload GIN 的双位数 GB），构建是分钟级而非数十分钟。三条�
 `knowledge_relations` 另有三条同前缀（`source_object_id` 一侧）的既有索引——
 `idx_knowledge_relations_nb_source`、`idx_knowledge_relations_nb_source_id`，加上本批新增的
 `idx_knowledge_relations_nb_source_target_edge`——这是本批之前就存在的重叠，不是本批引入、
-也不在本批处理。批 3 另登记一条：既有的 `idx_clusters_nb_canonical`（0039 迁移）现在已被
-新增的 `idx_clusters_nb_canonical_member` 完全覆盖，生产验证新索引稳定后可用
-`DROP INDEX CONCURRENTLY idx_clusters_nb_canonical` 下线。
+也不在本批处理。批 3 曾登记:既有的 `idx_clusters_nb_canonical`（0039）被
+`idx_clusters_nb_canonical_member` 完全覆盖——该退役债已由批 6 直接收账(见下)。
+
+**批 6(W2 簇图代次化,迁移 0051)给操作流程带来两点变化。**其一,
+`scripts/build_hotpath_indexes.py --apply` 现在会在建三条新索引前执行幂等前置
+`ALTER TABLE concept_clusters ADD COLUMN IF NOT EXISTS generation ...`(列由迁移
+0051 落账,但 builder 先行的生产顺序需要它提前存在;PG11+ 元数据级、schema 限定)。
+其二,builder 报三条新索引就绪后、迁移前,在线退役**五条**被取代索引:
+
+```bash
+psql "$DATABASE_URL" -c 'DROP INDEX CONCURRENTLY uq_clusters_notebook_type_member;' \
+  -c 'DROP INDEX CONCURRENTLY idx_clusters_nb_canonical_member;' \
+  -c 'DROP INDEX CONCURRENTLY idx_clusters_nb_created;' \
+  -c 'DROP INDEX CONCURRENTLY idx_clusters_nb;' \
+  -c 'DROP INDEX CONCURRENTLY idx_clusters_nb_canonical;'
+```
+
+(两条裸前缀索引随整改一并退役:实测更窄的前缀会把带 generation 谓词的读者劫成
+Index Scan + 回表过滤——恰是 INCLUDE 列要防的回归。)随后迁移 0051 校验形态并
+纯落账。不走 builder 先行也能完成,但迁移窗口要付事务内建/删索引的锁代价。
 
 若打算用离线 / 异机通道构建 scale 索引（`scripts/build_scale_index.py`，一个与在役服务
 **并存**的独立进程），PostgreSQL 侧有两条前提。其一，它的 per-notebook 互斥是

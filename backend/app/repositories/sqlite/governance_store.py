@@ -176,6 +176,7 @@ class GovernanceStore:
         notebook_id: str,
         after_object_type: str,
         after_member_object_id: str,
+        after_generation: int,
         limit: int,
     ) -> "tuple[list, int]":
         """Z6: SQLite twin of the PostgreSQL keyset batch — see that adapter's
@@ -200,12 +201,13 @@ class GovernanceStore:
         over the SCANNED page and stops on a short page, so a batch that
         deletes nothing (the common case) still makes progress."""
         page = db.execute(
-            "SELECT object_type, member_object_id, id FROM concept_clusters"
+            "SELECT object_type, member_object_id, generation, id FROM concept_clusters"
             " WHERE notebook_id = ?"
-            "   AND (object_type, member_object_id) > (?, ?)"
-            " ORDER BY object_type, member_object_id"
+            "   AND (object_type, member_object_id, generation) > (?, ?, ?)"
+            " ORDER BY object_type, member_object_id, generation"
             " LIMIT ?",
-            (notebook_id, after_object_type, after_member_object_id, limit),
+            (notebook_id, after_object_type, after_member_object_id,
+             after_generation, limit),
         ).fetchall()
         if not page:
             return [], 0
@@ -488,7 +490,7 @@ class GovernanceStore:
         扫描。逐位一致的理由是纯集合论:下面的循环只问 ``r["member_object_id"]
         in existing``,而被问到的 id 恰好就是 ``rows`` 里的那些,故把 ``existing``
         限制到 ``rows`` 的 id 集合不改变任何一次判定,``added`` 与写入的行也逐位
-        不变。分批走 ``uq_clusters_notebook_type_member(notebook_id,
+        不变。分批走 ``uq_clusters_nb_type_member_generation(notebook_id,
         object_type, member_object_id)`` 这条唯一索引 —— 前两列等值 + 第三列
         IN,是精确 seek 而不是残余过滤。"""
         if not connection.in_transaction:

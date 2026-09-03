@@ -71,6 +71,10 @@ def _rollback_v71(db: sqlite3.Connection) -> None:
         "ON concept_clusters(notebook_id, created_at)"
     )
     db.execute("CREATE INDEX idx_clusters_nb ON concept_clusters(notebook_id)")
+    db.execute(
+        "CREATE INDEX idx_clusters_nb_canonical "
+        "ON concept_clusters(notebook_id, canonical_id)"
+    )
     db.execute("ALTER TABLE concept_clusters DROP COLUMN generation")
     db.execute("ALTER TABLE communities DROP COLUMN generation")
     db.execute("ALTER TABLE community_members DROP COLUMN generation")

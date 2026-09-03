@@ -44,17 +44,26 @@
 --    skip-gate's second leg), and doubles as the boundedness evidence for
 --    the catch-up scan (design Sec 1.5: generation=P AND created_at >= TS).
 --
--- The three superseded indexes (uq_clusters_notebook_type_member,
--- idx_clusters_nb_canonical_member, idx_clusters_nb_created) are DROPPED
--- here (IF EXISTS): each is strictly covered by its replacement, and the
--- old unique MUST be gone before PR-2's dual-generation writes can ever
--- run. Production operators run scripts/build_hotpath_indexes.py --apply
--- FIRST (online CREATE INDEX CONCURRENTLY for the three new entries, same
--- advisory-locked builder as batches 1-5), then
--- `DROP INDEX CONCURRENTLY` the three old names, then migrate -- this
--- migration's IF NOT EXISTS / IF EXISTS clauses make it a pure ledger
--- no-op in that flow. On a fresh deploy the tables are empty and the
--- in-transaction create/drop below is instantaneous.
+-- FIVE superseded indexes are DROPPED here (IF EXISTS):
+-- uq_clusters_notebook_type_member / idx_clusters_nb_canonical_member /
+-- idx_clusters_nb_created are strictly covered by their replacements (and
+-- the old unique MUST be gone before PR-2's dual-generation writes can
+-- ever run); idx_clusters_nb (0004) and idx_clusters_nb_canonical (0039,
+-- already a registered retirement debt as a strict prefix of 0043's index)
+-- are strict prefixes of the two covering replacements and MUST go with
+-- the rework rather than linger: measured on live plan probes, a narrower
+-- prefix index HIJACKS the generation-predicated readers into a plain
+-- Index Scan + heap Filter -- exactly the regression the INCLUDE columns
+-- exist to prevent. Every bare-prefix scan they served is equally served
+-- by the replacements' leading columns.
+-- Production operators run scripts/build_hotpath_indexes.py --apply FIRST
+-- (online CREATE INDEX CONCURRENTLY for the three new entries -- including
+-- their idempotent ADD COLUMN prerequisite, same advisory-locked builder
+-- as batches 1-5), then `DROP INDEX CONCURRENTLY` the FIVE old names, then
+-- migrate -- this migration's IF NOT EXISTS / IF EXISTS clauses make it a
+-- pure ledger no-op in that flow. Runbook: docs/deployment-and-
+-- configuration.md's hotpath-index section. On a fresh deploy the tables
+-- are empty and the in-transaction create/drop below is instantaneous.
 --
 -- Pre-existing same-named index validation (same DO-block pattern as 0042/
 -- 0043 -- see 0043's header for the full rationale) extended with the two
@@ -180,12 +189,5 @@ CREATE INDEX IF NOT EXISTS idx_clusters_nb_created_gen
 DROP INDEX IF EXISTS uq_clusters_notebook_type_member;
 DROP INDEX IF EXISTS idx_clusters_nb_canonical_member;
 DROP INDEX IF EXISTS idx_clusters_nb_created;
--- idx_clusters_nb (0004) is a strict prefix of idx_clusters_nb_created_gen
--- and must go WITH the rework, not linger as retirement debt: measured on a
--- live plan probe, the narrower prefix index HIJACKS the aggregate readers
--- (version_facts' cluster component, concept_clusters_count) into a plain
--- Index Scan + heap Filter on generation -- exactly the regression the
--- INCLUDE column exists to prevent. With the prefix gone the planner takes
--- the covering index's Index Only Scan; every bare notebook_id scan the
--- prefix served is equally served by the two-key index's leading column.
 DROP INDEX IF EXISTS idx_clusters_nb;
+DROP INDEX IF EXISTS idx_clusters_nb_canonical;
