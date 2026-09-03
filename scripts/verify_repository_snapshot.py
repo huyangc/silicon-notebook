@@ -4031,5 +4031,46 @@ MIGRATION_MANIFEST[(68, 69)] = {
 }
 
 
+# v70 (Ask submission idempotency key, parity with PostgreSQL 0050): the
+# nullable ``ask_jobs.client_request_id`` column plus the partial unique index
+# ``idx_ask_jobs_client_request`` over (created_by, client_request_id) WHERE
+# client_request_id IS NOT NULL. Same nullable-column + partial-index shape as
+# v55's ``agent_observations.client_request_id``; no new table, trigger or
+# view, and no backfill (existing rows stay NULL).
+ASK_CLIENT_REQUEST_COLUMNS = {
+    "ask_jobs": {
+        "client_request_id": ("client_request_id", "TEXT", 0, None, 0),
+    },
+}
+ASK_CLIENT_REQUEST_INDEXES = {
+    "idx_ask_jobs_client_request": (
+        "CREATE UNIQUE INDEX idx_ask_jobs_client_request "
+        "ON ask_jobs(created_by, client_request_id) "
+        "WHERE client_request_id IS NOT NULL"
+    ),
+}
+MIGRATION_MANIFEST = {
+    (key[0], 70, *key[2:]): {
+        **manifest,
+        "columns": {
+            **manifest["columns"],
+            "ask_jobs": {
+                **manifest["columns"].get("ask_jobs", {}),
+                **ASK_CLIENT_REQUEST_COLUMNS["ask_jobs"],
+            },
+        },
+        "indexes": {**manifest["indexes"], **ASK_CLIENT_REQUEST_INDEXES},
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(69, 70)] = {
+    "tables": {},
+    "columns": ASK_CLIENT_REQUEST_COLUMNS,
+    "indexes": ASK_CLIENT_REQUEST_INDEXES,
+    "triggers": {},
+    "views": {},
+}
+
+
 if __name__ == "__main__":
     raise SystemExit(main())

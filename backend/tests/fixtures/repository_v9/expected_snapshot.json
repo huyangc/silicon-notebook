@@ -69,6 +69,7 @@
       {
         "answer_id": "<ans-id-1>",
         "asked_at": "",
+        "client_request_id": null,
         "conversation_id": "<conv-id-1>",
         "created_at": "<timestamp>",
         "created_by": "<user-id-1>",
@@ -629,6 +630,7 @@
       {
         "answer_id": "<ans-id-1>",
         "asked_at": "",
+        "client_request_id": null,
         "conversation_id": "<conv-id-1>",
         "created_at": "<timestamp>",
         "created_by": "<user-id-1>",
@@ -1167,6 +1169,11 @@
       {
         "name": "idx_answers_nb",
         "sql_sha256": "4dd3b821c5d7e5f8d3f580307fc007c3126a9fd18d9b415e494ab26c0cd127f1",
+        "type": "index"
+      },
+      {
+        "name": "idx_ask_jobs_client_request",
+        "sql_sha256": "85ca042de464578d30160e16fa59837c70a6deb8b7b64aef3664c3ef888816f0",
         "type": "index"
       },
       {
@@ -1886,7 +1893,7 @@
       },
       {
         "name": "ask_jobs",
-        "sql_sha256": "24c5ac5665fff6d13ba3c9a02dcdff620b80c1d5aba1ad4db8992aed4a7b3003",
+        "sql_sha256": "0ba3c3ddb787e0e721404cc43c8eff50c16856b12a4e930c1489b34d2f884536",
         "type": "table"
       },
       {
@@ -2405,6 +2412,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 69
+    "user_version": 70
   }
 }

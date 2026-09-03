@@ -140,8 +140,9 @@ def test_expected_snapshot_has_rows_reads_context_and_ask_metadata():
     # PR-2）unified_kg_state.kg_reset_epoch 持久化清图代次列，以及 v69（批 3·W1
     # PR-3 阶段 A）agent_access_tokens/knowhow_cell_code/conversations 三条
     # 反查索引 + notebook_delete_jobs/notebook_delete_files 两张删除作业载体
-    # 表，合法升级到当前版本。
-    assert snapshot["schema"]["user_version"] == 69
+    # 表，以及 v70 提问提交幂等键 ask_jobs.client_request_id 与其部分唯一索引
+    # idx_ask_jobs_client_request，合法升级到当前版本。
+    assert snapshot["schema"]["user_version"] == 70
     assert snapshot["rows"]["notebooks"]
     assert snapshot["reads"]["notebook"]
     assert snapshot["context"]["source_files"]

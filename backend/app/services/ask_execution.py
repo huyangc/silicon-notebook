@@ -39,8 +39,10 @@ from __future__ import annotations
 
 import queue
 import threading
+import time
 from typing import TYPE_CHECKING, Any, Callable, Protocol
 
+from app.repositories.ports import AskRequestKeyConflict
 from app.services.ask_modes import AUTO_MODE
 from app.services.cancellation import AskCancelled
 
@@ -134,12 +136,19 @@ class AskExecutionCoordinator:
         event_log: "EventLogger",
         ask: "Callable[[], AskServicePort]",
         note_ask_completed: "Callable[[str, str, str], None] | None" = None,
+        follow_poll_seconds: float = 0.5,
     ) -> None:
         self.ask_state = ask_state
         self.cancellations = cancellations
         self.job_submitter = job_submitter
         self.event_log = event_log
         self.ask = ask
+        # Attach/follow mode (a re-submitted client_request_id): how often the
+        # follower re-reads the existing job's row + trace while it runs. The
+        # job may execute in another process, so the store is the only shared
+        # channel; a half-second poll is well under the engine's own step
+        # cadence. Tests shorten it.
+        self.follow_poll_seconds = follow_poll_seconds
         # Agentic Memory P1 (T5): "this member finished an ask in this
         # notebook", the overlay chain's threshold signal. A late-bound
         # callable rather than the service object because this coordinator is
@@ -172,6 +181,11 @@ class AskExecutionCoordinator:
         选择 + 已确认意图校验),把选定引擎写回 job 行(fail-open),再发该引擎的
         合成 start 步并执行。于是选择引擎期间的断连不再丢问题;显式 cancel 仍经
         cancel_event 中止选择。``mode`` 与 ``resolve`` 至少给一个。
+
+        ``payload.client_request_id``(幂等键):走 ``begin_or_attach_durable_job``。
+        该用户已用过这个键时不建第二个 job、不跑第二个引擎——``started`` 带既有 id
+        入队后,由 :meth:`_follow` 从存储把该 job 的轨迹与终态回放给本客户端
+        (``resolve`` 也不再调用)。键在另一笔记本已用过 → 流只含一个 ``error``。
         """
         if mode is None and resolve is None:
             raise ValueError("start() needs a resolved mode or a resolve callable")
@@ -194,8 +208,26 @@ class AskExecutionCoordinator:
         if resolve is None and validate is not None:
             validate(notebook_id, payload)
         mode_id = mode.id if mode is not None else AUTO_MODE
-        job_id, conversation_id = self.ask_state.begin_durable_job(
-            notebook_id, payload, mode_id, user_id)
+        if payload.client_request_id:
+            # Idempotent submission: the key names ONE browser submission. If
+            # this user already spent it, the job exists (possibly finished,
+            # possibly running in another process) — attach to it and stream
+            # its recorded progress instead of running a second engine.
+            try:
+                job_id, conversation_id, attached = (
+                    self.ask_state.begin_or_attach_durable_job(
+                        notebook_id, payload, mode_id, user_id))
+            except AskRequestKeyConflict as exc:
+                # A well-formed transport (no job, no `started`): the client
+                # reused a key across notebooks, which is its own defect.
+                events.put({"event": "error", "error": f"{type(exc).__name__}: {exc}"})
+                events.put(None)
+                return events
+            if attached:
+                return self._follow(events, job_id, conversation_id)
+        else:
+            job_id, conversation_id = self.ask_state.begin_durable_job(
+                notebook_id, payload, mode_id, user_id)
         self.cancellations.register(job_id, cancel_event)
         # conversation_id is durable before this event is delivered.  The UI
         # can therefore publish/reopen a first-turn session immediately,
@@ -276,6 +308,72 @@ class AskExecutionCoordinator:
         except BaseException as exc:
             self._finish(job_id, "failed", error=f"{type(exc).__name__}: {exc}")
             raise
+        return events
+
+    def _follow(
+        self,
+        events: "queue.Queue[dict[str, Any] | None]",
+        job_id: str,
+        conversation_id: str,
+    ) -> "queue.Queue[dict[str, Any] | None]":
+        """Attach mode: stream an EXISTING job to this client.
+
+        The same event vocabulary as a fresh run — ``started`` with the job's
+        durable ids, then every persisted trace step (``progress``), then the
+        terminal event the job row reports: ``final`` carrying the saved answer
+        (``ask_answer_detail``), ``cancelled``, or ``error`` — so the browser
+        cannot tell an attached stream from the original one. Nothing here
+        executes, persists or finishes anything: the job's own worker owns its
+        row, its trace, its answer and its cancel event (the explicit cancel
+        endpoint still reaches that worker through the registry; this follower
+        merely observes the resulting ``cancelled`` status). The synthetic
+        ``start`` step is not replayed — it was never persisted, exactly as the
+        reopen-a-running-job replay (``/ask/jobs/{id}``) never has it.
+
+        A finished job replays in one pass; a running one is polled every
+        ``follow_poll_seconds`` until its row leaves ``running``. The follower
+        runs on the same copied-context job helper as a worker so a transport
+        disconnect (the caller stops draining the queue) never blocks it.
+        """
+        events.put({
+            "event": "started",
+            "job_id": job_id,
+            "conversation_id": conversation_id,
+        })
+
+        def follower() -> None:
+            delivered = 0
+            try:
+                while True:
+                    detail = self.ask_state.ask_job_detail(job_id)
+                    trace = detail.get("trace") or []
+                    for step in trace[delivered:]:
+                        events.put({"event": "progress", "step": step})
+                    delivered = len(trace)
+                    status = detail.get("status")
+                    if status == "running":
+                        time.sleep(self.follow_poll_seconds)
+                        continue
+                    if status == "done":
+                        answer = self.ask_state.ask_answer_detail(
+                            str(detail.get("answer_id") or ""))
+                        if answer is None:
+                            events.put({"event": "error",
+                                        "error": f"answer of ask job {job_id} is missing"})
+                        else:
+                            events.put({"event": "final", "response": answer["payload"]})
+                    elif status == "cancelled":
+                        events.put({"event": "cancelled"})
+                    else:
+                        events.put({"event": "error",
+                                    "error": str(detail.get("error") or f"ask job {status}")})
+                    return
+            except Exception as exc:  # noqa: BLE001 — the transport must end well-formed
+                events.put({"event": "error", "error": f"{type(exc).__name__}: {exc}"})
+            finally:
+                events.put(None)
+
+        self.job_submitter.submit(follower, name="ask-follow")
         return events
 
     def _note_ask_completed(

@@ -55,6 +55,7 @@ from app.models.ask import (
     FeedbackResponse,
 )
 from app.repositories.ports import (
+    AskRequestKeyConflict,
     ConversationBusyError,
     ConversationHasNoShareableAnswer,
     ConversationShareWatermarkStale,
@@ -264,13 +265,91 @@ class AskStateStore:
             conversation_id = self.ensure_conversation(
                 db, notebook_id, payload.conversation_id, question, user_id)
             payload.conversation_id = conversation_id
-            db.execute(
-                "INSERT INTO ask_jobs (id,notebook_id,conversation_id,created_by,mode,question,"
-                "asked_at,status,trace_json,answer_id,error,created_at,updated_at) "
-                "VALUES (?,?,?,?,?,?,?, 'running','','','',?,?)",
-                (job_id, notebook_id, conversation_id, user_id, mode,
-                 question, payload.asked_at, now, now))
+            self._insert_job_row(
+                db, job_id, notebook_id, conversation_id, user_id, mode, payload, now)
         return job_id, conversation_id
+
+    @staticmethod
+    def _insert_job_row(
+        db: sqlite3.Connection,
+        job_id: str,
+        notebook_id: str,
+        conversation_id: str,
+        user_id: str,
+        mode: str,
+        payload: AskRequest,
+        now: str,
+    ) -> None:
+        db.execute(
+            "INSERT INTO ask_jobs (id,notebook_id,conversation_id,created_by,mode,question,"
+            "asked_at,client_request_id,status,trace_json,answer_id,error,created_at,"
+            "updated_at) VALUES (?,?,?,?,?,?,?,?, 'running','','','',?,?)",
+            (job_id, notebook_id, conversation_id, user_id, mode,
+             payload.question.strip(), payload.asked_at, payload.client_request_id,
+             now, now))
+
+    def begin_or_attach_durable_job(
+        self,
+        notebook_id: str,
+        payload: AskRequest,
+        mode: str,
+        user_id: str,
+    ) -> tuple[str, str, bool]:
+        """``begin_durable_job`` with the submission's idempotency key honoured.
+
+        ``payload.client_request_id`` names ONE browser submission. If this user
+        already has a job under that key, no second job (and no second
+        conversation) is created: the existing job's ids are returned with
+        ``attached=True`` and ``payload.conversation_id`` is rewritten to its
+        conversation, exactly as a fresh begin would. The lookup and the insert
+        share one guarded write transaction: ``begin_guarded_write`` takes
+        ``BEGIN IMMEDIATE`` (the cross-process writer fence) BEFORE the lookup,
+        so no other process can land the same key between the two statements
+        — unlike PostgreSQL, whose store needs a ``UniqueViolation`` fallback.
+        The partial unique index ``idx_ask_jobs_client_request`` is parity with
+        that backend and defense in depth, not the mechanism.
+
+        A key already spent in ANOTHER notebook raises
+        :class:`AskRequestKeyConflict` — see that class. Without a key this is
+        ``begin_durable_job`` verbatim (``attached=False``)."""
+        key = payload.client_request_id
+        if not key:
+            job_id, conversation_id = self.begin_durable_job(
+                notebook_id, payload, mode, user_id)
+            return job_id, conversation_id, False
+        question = payload.question.strip()
+        now = self.seams.now()
+        job_id = self.seams.new_id("askjob")
+        with self.database.write() as db:
+            self.database.begin_guarded_write(db)
+            existing = self._job_for_client_request(db, user_id, key)
+            if existing is not None:
+                return self._attach_existing(existing, notebook_id, payload, key)
+            conversation_id = self.ensure_conversation(
+                db, notebook_id, payload.conversation_id, question, user_id)
+            payload.conversation_id = conversation_id
+            self._insert_job_row(
+                db, job_id, notebook_id, conversation_id, user_id, mode, payload, now)
+        return job_id, conversation_id, False
+
+    @staticmethod
+    def _job_for_client_request(
+        db: sqlite3.Connection, user_id: str, client_request_id: str,
+    ) -> "sqlite3.Row | None":
+        return db.execute(
+            "SELECT id, notebook_id, conversation_id FROM ask_jobs "
+            "WHERE created_by=? AND client_request_id=?",
+            (user_id, client_request_id),
+        ).fetchone()
+
+    @staticmethod
+    def _attach_existing(
+        existing, notebook_id: str, payload: AskRequest, client_request_id: str,
+    ) -> tuple[str, str, bool]:
+        if existing["notebook_id"] != notebook_id:
+            raise AskRequestKeyConflict(client_request_id)
+        payload.conversation_id = existing["conversation_id"]
+        return existing["id"], existing["conversation_id"], True
 
     def update_job_mode(self, job_id: str, mode: str) -> None:
         """Record the engine an automatic-mode job resolved to. The job row is

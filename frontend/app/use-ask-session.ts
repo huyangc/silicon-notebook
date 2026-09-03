@@ -622,7 +622,8 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
 
   // The active job the last applied detail reported (if any): a handed-off
   // question that reloads before `started` is reconciled against it and the
-  // loaded turns, so a job the server did create is never submitted twice.
+  // loaded turns, so a job history already shows is not re-sent at all (a
+  // re-send would only attach to it anyway — the key makes it idempotent).
   const lastAppliedActiveJobRef = useRef<{ asked_at: string; question: string } | null>(null);
   // The engine a handed-back draft was asked with, honoured by every mode
   // projection (which would otherwise reset it to the last turn's) until the
@@ -641,30 +642,80 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
    * A reload landed between hand-off and `started`. If history (the detail
    * just loaded) already shows the job or its answer, the server owns the
    * question and the mirror is simply retired. Otherwise the outcome of the
-   * original POST is unknowable from here — it may still commit — and the
-   * backend has no idempotency key that would make a client retry safe, so the
-   * question is NOT re-submitted automatically: it goes back to the input as a
-   * draft, in reasoning mode, with a notice, and the user decides.
+   * original POST is unknowable from here — it may still have committed — so
+   * the submission is sent AGAIN under the same idempotency key (the mirror
+   * id travels as `client_request_id`): the backend attaches to the job that
+   * key already created and replays it, or creates the job if the first POST
+   * never landed. Either way the question is pending in the view, not a
+   * draft. The mirror stays until this stream's `started`, exactly as it did
+   * for the original hand-off.
    */
   function resumeHandoff(record: PersistedIntentRun, owner: AskSessionOwner) {
-    removePersistedIntentRun(record.id);
-    releaseIntentRun(record.id);
-    if (durableAlreadyHolds(record) || !sameViewOwner(ownerRef.current, owner)) return;
+    if (!sameViewOwner(ownerRef.current, owner)) {
+      releaseIntentRun(record.id);
+      return;
+    }
+    if (durableAlreadyHolds(record)) {
+      removePersistedIntentRun(record.id);
+      releaseIntentRun(record.id);
+      return;
+    }
+    if (askJobIdRef.current !== null) {
+      // Another job is active in this conversation (asked elsewhere): the view
+      // reconnects to that one. The mirror waits for a later restore rather
+      // than re-sending over it — the key keeps that re-send safe whenever it
+      // happens.
+      releaseIntentRun(record.id);
+      return;
+    }
     if (record.conversationIdAtStart === null) {
       // A first question: the view currently shows whatever the restore opened
-      // to check history; the draft belongs to a fresh conversation.
+      // to check history; the pending question belongs to a fresh conversation.
       turnsRef.current = [];
       setTurns([]);
       setConversationId(null);
     }
     modeRef.current = "reasoning";
     setMode("reasoning");
-    draftModeRef.current = "reasoning";
-    setRetrievalEffort(retrievalEffortFromTurn({
-      response: { retrieval_effort: record.retrievalEffort },
-    }));
-    setQuestion(record.question);
-    effectsRef.current.notify("上次提交尚未收到服务端确认，问题已退回输入框，请确认后重新发送");
+    // The effort frozen at submission (normalised against bad storage), the
+    // same expression the wiring guard pins for every re-sent frozen value.
+    setRetrievalEffort(retrievalEffortFromTurn({ response: { retrieval_effort: record.retrievalEffort } }));
+    // Its submission time is its place in line, as for a resumed preview.
+    nextRunSerial(record.savedAt);
+    void startAskRun(
+      owner,
+      record.question,
+      "reasoning",
+      record.confirmation ?? undefined,
+      resumedHandoffTrace(record),
+      record.askedAt,
+      {
+        sourceScope: copySourceScope(record.sourceScope),
+        baseScope: copyBaseScope(record.baseScope),
+      },
+      retrievalEffortFromTurn({ response: { retrieval_effort: record.retrievalEffort } }),
+      record.conversationIdAtStart,
+      record.savedAt,
+      record.id,
+    );
+  }
+
+  // The understanding steps the original hand-off seeded its trace with,
+  // rebuilt from the mirror: understood (auto-confirmed) or clarified then
+  // confirmed (reviewed). Same shape as `handOffIntentTrace` produced then.
+  function resumedHandoffTrace(record: PersistedIntentRun): ReasoningTraceStep[] {
+    const { confirmation } = record;
+    if (!confirmation) return [];
+    // The confirmation carries the frozen contract; the record's own
+    // `contract` is only set for a review (clarification) phase.
+    const { contract } = confirmation;
+    const steps = contract.needs_clarification
+      ? [
+        intentClarifyStep(contract, record.understandingMs),
+        intentConfirmedStep(confirmation.resolved_question, confirmation.answers.length),
+      ]
+      : [intentUnderstoodStep(contract, record.understandingMs)];
+    return handOffIntentTrace(steps);
   }
 
   function forgetPersistedIntent(run: Pick<AskIntentRunRecord, "persistId">) {
@@ -1373,9 +1424,9 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       if (!sameViewOwner(ownerRef.current, owner)) return false;
       if (resumed?.kind === "handoff") {
         // Reconciliation needs history that actually loaded: a failed list or
-        // detail read proves nothing about whether the original POST committed,
-        // and offering the question for re-submission on that basis could
-        // create a duplicate job. Keep the mirror for the next attempt instead.
+        // detail read leaves the view without the conversation the question
+        // belongs to, so the re-submission waits for the next restore (the
+        // mirror is kept, the lock released) rather than pending over nothing.
         const reconciled = latestId ? loaded === true : list !== null;
         if (reconciled) resumeHandoff(resumed.record, owner);
         else releaseIntentRun(resumed.record.id);
@@ -1609,10 +1660,15 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     serial: number = nextRunSerial(),
     // The preview's storage mirror (ask-intent-persist.ts). It outlives the
     // hand-off until `started` proves the server owns the question, and is
-    // retired if the stream ends without ever starting.
+    // retired if the stream ends without ever starting. Its id is also the
+    // submission's idempotency key, so a reload in that window can re-send
+    // the same submission and attach to the job instead of duplicating it.
     mirrorId?: string,
   ): Promise<boolean> {
     let startedConversationId = conversationIdAtStart;
+    // Every browser submission carries a key; only a mirrored one is ever
+    // re-sent, but the server contract is per submission, not per mode.
+    const clientRequestId = mirrorId ?? newIntentRunId();
     const retireMirror = () => {
       if (!mirrorId) return;
       removePersistedIntentRun(mirrorId);
@@ -1664,6 +1720,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
         retrieval_effort: effort,
         source_scope: scopeSnapshot.sourceScope,
         base_scope: scopeSnapshot.baseScope,
+        client_request_id: clientRequestId,
         ...(intent ? { intent } : {}),
       };
       const response = await runAskStream<AskResponse>(

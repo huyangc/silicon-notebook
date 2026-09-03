@@ -329,3 +329,122 @@ def test_begin_and_finish_delegate_persistence_to_runtime_ask_state(repo, monkey
     assert seen == [("begin", repo.current_user().id), ("finish", "cancelled")]
     with pytest.raises(KeyError):
         repo.get_conversation(conv_id)                    # 空壳清理仍生效
+
+
+# ---- 提交幂等键(client_request_id):同键重发接回既有 job,不建第二个 ----
+
+def test_begin_or_attach_reuses_the_job_for_a_repeated_client_request_id(repo):
+    nb = _nb(repo)
+    store = repo._runtime.ask_state
+    uid = repo.current_user().id
+    first = AskRequest(question="Q?", mode="reasoning", client_request_id="key-1")
+    job_id, conv_id, attached = store.begin_or_attach_durable_job(nb.id, first, "reasoning", uid)
+    assert not attached and first.conversation_id == conv_id
+
+    again = AskRequest(question="Q?", mode="reasoning", client_request_id="key-1")
+    assert store.begin_or_attach_durable_job(nb.id, again, "reasoning", uid) == (
+        job_id, conv_id, True)
+    assert again.conversation_id == conv_id          # 与新建同样就地写回
+    with repo._connect() as db:
+        rows = db.execute(
+            "SELECT id, client_request_id FROM ask_jobs WHERE notebook_id=?", (nb.id,)
+        ).fetchall()
+    assert [(r["id"], r["client_request_id"]) for r in rows] == [(job_id, "key-1")]
+    assert len(repo.list_conversations(nb.id)) == 1
+
+
+def test_begin_or_attach_without_a_key_always_creates(repo):
+    nb = _nb(repo)
+    store = repo._runtime.ask_state
+    uid = repo.current_user().id
+    a = store.begin_or_attach_durable_job(
+        nb.id, AskRequest(question="Q?", mode="chunk"), "chunk", uid)
+    b = store.begin_or_attach_durable_job(
+        nb.id, AskRequest(question="Q?", mode="chunk"), "chunk", uid)
+    assert a[2] is False and b[2] is False and a[0] != b[0]
+    with repo._connect() as db:
+        assert db.execute(
+            "SELECT COUNT(*) AS n FROM ask_jobs WHERE client_request_id IS NULL"
+        ).fetchone()["n"] == 2
+
+
+def test_begin_or_attach_rejects_a_key_spent_in_another_notebook(repo):
+    from app.repositories.ports import AskRequestKeyConflict
+
+    nb, other = _nb(repo), _nb(repo)
+    store = repo._runtime.ask_state
+    uid = repo.current_user().id
+    store.begin_or_attach_durable_job(
+        nb.id, AskRequest(question="Q?", mode="chunk", client_request_id="key-x"), "chunk", uid)
+    with pytest.raises(AskRequestKeyConflict):
+        store.begin_or_attach_durable_job(
+            other.id, AskRequest(question="Q?", mode="chunk", client_request_id="key-x"),
+            "chunk", uid)
+    with repo._connect() as db:
+        assert db.execute("SELECT COUNT(*) AS n FROM ask_jobs").fetchone()["n"] == 1
+    assert repo.list_conversations(other.id) == []
+
+
+def test_ask_request_validates_client_request_id():
+    from pydantic import ValidationError
+
+    assert AskRequest(question="q", client_request_id="  ").client_request_id is None
+    assert AskRequest(question="q").client_request_id is None
+    ok = AskRequest(question="q", client_request_id=" 0f1a-2b3c_4d:5e.6f ")
+    assert ok.client_request_id == "0f1a-2b3c_4d:5e.6f"
+    with pytest.raises(ValidationError):
+        AskRequest(question="q", client_request_id="bad key!")
+    with pytest.raises(ValidationError):
+        AskRequest(question="q", client_request_id="x" * 129)
+
+
+def test_stream_resubmission_with_the_same_client_request_id_attaches_to_the_job(
+    tmp_path, monkeypatch,
+):
+    """浏览器在交接后、`started` 之前刷新,带同一个键重发:服务端不建第二个 job,
+    而是以同一 job/会话 id 发 `started`,再把已存的结果作为 `final` 回放。"""
+    client = _api_client(tmp_path, monkeypatch)
+    from app.api.ask_routes import repository
+    repo = repository()
+    nb = client.post("/api/notebooks", json={"name": "nb"}).json()["id"]
+    seed_ask_evidence(repo, nb)
+    body = {"question": "same submission", "mode": "chunk", "client_request_id": "sub-1"}
+
+    first = client.post(f"/api/notebooks/{nb}/ask/stream", json=body)
+    assert first.status_code == 200
+    first_events = [json.loads(l) for l in first.text.splitlines() if l.strip()]
+    assert first_events[0]["event"] == "started"
+    assert first_events[-1]["event"] == "final"
+
+    again = client.post(f"/api/notebooks/{nb}/ask/stream", json=body)
+    assert again.status_code == 200
+    again_events = [json.loads(l) for l in again.text.splitlines() if l.strip()]
+    assert again_events[0] == first_events[0]
+    assert again_events[-1]["event"] == "final"
+    assert again_events[-1]["response"]["answer_id"] == first_events[-1]["response"]["answer_id"]
+    assert again_events[-1]["response"]["answer"] == first_events[-1]["response"]["answer"]
+    with repo._connect() as db:
+        assert db.execute(
+            "SELECT COUNT(*) AS n FROM ask_jobs WHERE notebook_id=?", (nb,)
+        ).fetchone()["n"] == 1
+        assert db.execute(
+            "SELECT COUNT(*) AS n FROM answers WHERE notebook_id=?", (nb,)
+        ).fetchone()["n"] == 1
+    assert len(repo.list_conversations(nb)) == 1
+
+    # The same key under another notebook is a client defect: a well-formed
+    # stream that carries only an error, and no job in that notebook.
+    other = client.post("/api/notebooks", json={"name": "other"}).json()["id"]
+    seed_ask_evidence(repo, other)
+    cross = client.post(f"/api/notebooks/{other}/ask/stream", json=body)
+    assert cross.status_code == 200
+    cross_events = [json.loads(l) for l in cross.text.splitlines() if l.strip()]
+    assert [e["event"] for e in cross_events] == ["error"]
+    with repo._connect() as db:
+        assert db.execute(
+            "SELECT COUNT(*) AS n FROM ask_jobs WHERE notebook_id=?", (other,)
+        ).fetchone()["n"] == 0
+
+    malformed = client.post(f"/api/notebooks/{nb}/ask/stream",
+                            json={**body, "client_request_id": "no spaces allowed"})
+    assert malformed.status_code == 422

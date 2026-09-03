@@ -3794,14 +3794,16 @@ test("the persisted mirror appears only after the submitting tab owns the lock",
   }
 });
 
-// codex #664 r4/r5 P1: between hand-off and `started` the mirror is still the
-// only copy of the question. A reload in that window cannot know whether the
-// POST committed (no backend idempotency key), so it is never re-submitted on
-// its own: the question comes back as a draft, in reasoning mode, with a
-// notice. The mirror is retired once the server acknowledges `started`.
-test("a reload between hand-off and started hands the question back as a draft instead of re-submitting", async () => {
-  const stream = deferred<AskResponse>();
-  let onStart: ((jobId: string, conversationId: string) => void | Promise<void>) | undefined;
+// codex #664 r4/r5 P1, then the idempotency-key follow-up: between hand-off
+// and `started` the mirror is still the only copy of the question. A reload in
+// that window cannot know whether the POST committed, so the SAME submission is
+// sent again under the same `client_request_id` (the mirror id): the backend
+// attaches to the job it already created or creates it now — never two jobs.
+// The question is pending in the view, not a draft, and the mirror is retired
+// once this stream's `started` arrives.
+test("a reload between hand-off and started re-sends the submission under its own key and attaches", async () => {
+  const streams: Array<ReturnType<typeof deferred<AskResponse>>> = [];
+  const starts: Array<(jobId: string, conversationId: string) => void | Promise<void>> = [];
   api.runAskStream.mockImplementation((
     _notebookId: string,
     _payload: unknown,
@@ -3809,7 +3811,9 @@ test("a reload between hand-off and started hands the question back as a draft i
     _signal?: AbortSignal,
     nextOnStart?: (jobId: string, conversationId: string) => void | Promise<void>,
   ) => {
-    onStart = nextOnStart;
+    const stream = deferred<AskResponse>();
+    streams.push(stream);
+    if (nextOnStart) starts.push(nextOnStart);
     return stream.promise;
   });
   api.previewAskIntent.mockResolvedValue(contractFor("handed off", false));
@@ -3826,9 +3830,12 @@ test("a reload between hand-off and started hands the question back as a draft i
   await settleSubmit();
   // The POST is in flight, `started` has not arrived: mirror kept as hand-off.
   expect(api.runAskStream).toHaveBeenCalledTimes(1);
-  const [mirror] = pendingIntentStore() as Array<{ phase: string; confirmation: unknown }>;
+  const [mirror] = pendingIntentStore() as Array<{ id: string; phase: string; confirmation: unknown }>;
   expect(mirror.phase).toBe("handoff");
   expect(mirror.confirmation).toMatchObject({ resolved_question: "handed off" });
+  const firstPayload = api.runAskStream.mock.calls[0]?.[1] as { client_request_id: string };
+  // The key of the original submission IS the mirror id.
+  expect(firstPayload.client_request_id).toBe(mirror.id);
   const signal = api.runAskStream.mock.calls[0]?.[3] as AbortSignal;
 
   // In-app unmount: the pre-start stream is retired, the mirror is kept.
@@ -3843,20 +3850,47 @@ test("a reload between hand-off and started hands the question back as a draft i
     value!.finishNotebookTransition(owner);
   });
   await settleSubmit();
-  // History (the older session) does not hold the question and the POST's
-  // fate is unknown: no automatic retry — draft + notice, as a fresh session.
+  // History (the older session) does not hold the question: the submission is
+  // re-sent as-is — same key, same confirmed intent, same engine and effort —
+  // with no second understanding pass, pending in a fresh session.
   expect(api.previewAskIntent).not.toHaveBeenCalled();
-  expect(api.runAskStream).toHaveBeenCalledTimes(1);
-  expect(value!.asking).toBe(false);
-  expect(value!.pendingQuestion).toBe("");
-  expect(value!.question).toBe("handed off");
+  expect(api.runAskStream).toHaveBeenCalledTimes(2);
+  const resent = api.runAskStream.mock.calls[1]?.[1] as Record<string, unknown>;
+  expect(resent).toMatchObject({
+    question: "handed off",
+    mode: "reasoning",
+    retrieval_effort: "exhaustive",
+    client_request_id: mirror.id,
+    intent: mirror.confirmation,
+  });
+  expect(resent.conversation_id).toBeUndefined();
+  expect(value!.asking).toBe(true);
+  expect(value!.pendingQuestion).toBe("handed off");
+  expect(value!.question).toBe("");
   expect(value!.mode).toBe("reasoning");
   expect(value!.retrievalEffort).toBe("exhaustive");
   expect(value!.conversationId).toBeNull();
   expect(value!.turns).toEqual([]);
-  expect(effects.notify).toHaveBeenCalledWith("上次提交尚未收到服务端确认，问题已退回输入框，请确认后重新发送");
+  expect(effects.notify).not.toHaveBeenCalledWith("上次提交尚未收到服务端确认，问题已退回输入框，请确认后重新发送");
+  // The re-sent trace carries the understanding step the hand-off seeded.
+  expect(value!.pendingTrace.map((step) => step.step_type)).toEqual(["intent"]);
+  // Still the only copy until the server acknowledges the re-sent stream.
+  expect(pendingIntentStore()).toHaveLength(1);
+  expect(starts).toHaveLength(2);
+
+  // `started` (the attach): the mirror is done; the session is published.
+  await act(async () => {
+    await starts[1]!("job-attached", "conversation-attached");
+  });
   expect(pendingIntentStore()).toEqual([]);
-  expect(onStart).toBeDefined();
+  expect(value!.conversationId).toBe("conversation-attached");
+  await act(async () => {
+    streams[1]!.resolve(answer("conversation-attached"));
+    await Promise.resolve();
+  });
+  await settleSubmit();
+  expect(value!.asking).toBe(false);
+  expect(value!.turns.map((turn) => turn.question)).toEqual(["handed off"]);
 });
 
 test("the hand-off mirror is retired once the server acknowledges started", async () => {
@@ -4088,8 +4122,8 @@ test("a persisted review survives a failed detail read and resumes on the next r
 
 // codex #664 r7 P1: a hand-off can only be reconciled against history that
 // actually loaded; a failed detail read keeps the mirror for the next attempt
-// rather than offering the question for a possibly duplicate re-submission.
-test("a hand-off is kept, not offered as a draft, when the reconciling detail read fails", async () => {
+// rather than re-sending the question over a view that has no conversation.
+test("a hand-off is kept, not re-sent, when the reconciling detail read fails", async () => {
   const stream = deferred<AskResponse>();
   api.runAskStream.mockReturnValue(stream.promise);
   api.previewAskIntent.mockResolvedValue(contractFor("held until history loads", false));
@@ -4119,12 +4153,14 @@ test("a hand-off is kept, not offered as a draft, when the reconciling detail re
     value!.finishNotebookTransition(failing);
   });
   await settleSubmit();
-  // Not reconciled: no draft, no notice, mirror still there.
+  // Not reconciled: nothing re-sent, nothing pending, mirror still there.
   expect(value!.question).toBe("");
-  expect(effects.notify).not.toHaveBeenCalledWith("上次提交尚未收到服务端确认，问题已退回输入框，请确认后重新发送");
+  expect(value!.asking).toBe(false);
+  expect(api.runAskStream).toHaveBeenCalledTimes(1);
   expect(pendingIntentStore()).toHaveLength(1);
+  const [mirror] = pendingIntentStore() as Array<{ id: string }>;
 
-  // Next attempt: history loads and shows no job → draft + notice.
+  // Next attempt: history loads and shows no job → re-sent under the same key.
   api.getConversation.mockImplementation(async (id: string) => detail(id));
   const retry = beginOwnedNotebook(3);
   await act(async () => {
@@ -4132,10 +4168,16 @@ test("a hand-off is kept, not offered as a draft, when the reconciling detail re
     value!.finishNotebookTransition(retry);
   });
   await settleSubmit();
-  expect(value!.question).toBe("held until history loads");
-  expect(effects.notify).toHaveBeenCalledWith("上次提交尚未收到服务端确认，问题已退回输入框，请确认后重新发送");
-  expect(pendingIntentStore()).toEqual([]);
-  expect(api.runAskStream).toHaveBeenCalledTimes(1);
+  expect(api.runAskStream).toHaveBeenCalledTimes(2);
+  expect(api.runAskStream.mock.calls[1]?.[1]).toMatchObject({
+    question: "held until history loads",
+    client_request_id: mirror.id,
+  });
+  expect(value!.question).toBe("");
+  expect(value!.pendingQuestion).toBe("held until history loads");
+  expect(value!.asking).toBe(true);
+  // Kept until the re-sent stream's `started`.
+  expect(pendingIntentStore()).toHaveLength(1);
 });
 
 // codex #664 r7 P1: a hand-off the user already stopped before `started` must
@@ -4326,4 +4368,256 @@ test("owner-hidden view fields stay referentially stable across re-renders", () 
     expect(later.pendingTrace).toBe(first.pendingTrace);
     expect(later.feedbackSent).toBe(first.feedbackSent);
   }
+});
+
+function keyedStreams() {
+  const streams: Array<ReturnType<typeof deferred<AskResponse>>> = [];
+  const starts: Array<(jobId: string, conversationId: string) => void | Promise<void>> = [];
+  api.runAskStream.mockImplementation((
+    _notebookId: string,
+    _payload: unknown,
+    _onProgress: unknown,
+    _signal?: AbortSignal,
+    nextOnStart?: (jobId: string, conversationId: string) => void | Promise<void>,
+  ) => {
+    const stream = deferred<AskResponse>();
+    streams.push(stream);
+    if (nextOnStart) starts.push(nextOnStart);
+    return stream.promise;
+  });
+  return { streams, starts };
+}
+
+function payloadOf(call: number): Record<string, unknown> {
+  return api.runAskStream.mock.calls[call]?.[1] as Record<string, unknown>;
+}
+
+// The idempotency key is a per-submission contract, not a reasoning-only one:
+// every durable submit carries a fresh one, so the server can dedupe any
+// repeat of that exact submission.
+test("every submission carries its own client_request_id", async () => {
+  const { streams } = keyedStreams();
+  api.listConversations.mockResolvedValue([]);
+  render(<Harness />);
+  beginOwnedNotebook();
+  await act(async () => {
+    void value!.submit("first keyed");
+    await Promise.resolve();
+  });
+  await settleSubmit();
+  const first = payloadOf(0).client_request_id;
+  expect(typeof first).toBe("string");
+  expect((first as string).length).toBeGreaterThan(0);
+  await act(async () => {
+    streams[0]!.resolve(answer("conversation-keyed"));
+    await Promise.resolve();
+  });
+  await settleSubmit();
+  await act(async () => {
+    void value!.submit("second keyed");
+    await Promise.resolve();
+  });
+  await settleSubmit();
+  expect(api.runAskStream).toHaveBeenCalledTimes(2);
+  const second = payloadOf(1).client_request_id;
+  expect(typeof second).toBe("string");
+  expect(second).not.toBe(first);
+});
+
+async function handOffThenReload(question: string) {
+  api.previewAskIntent.mockResolvedValue(contractFor(question, false));
+  api.listConversations.mockResolvedValue([]);
+  const view = render(<Harness />);
+  beginOwnedNotebook();
+  act(() => value!.selectMode("reasoning"));
+  await act(async () => {
+    void value!.submit(question);
+    await Promise.resolve();
+  });
+  await settleSubmit();
+  const [mirror] = pendingIntentStore() as Array<{ id: string; phase: string }>;
+  expect(mirror.phase).toBe("handoff");
+  view.unmount();
+  api.previewAskIntent.mockReset();
+  return mirror;
+}
+
+// A re-sent submission that fails before `started` is exactly a failed
+// submission: the question goes back to the input, the failure is reported,
+// and the mirror (nothing left to attach to) is retired.
+test("a re-sent hand-off the server rejects hands the question back and retires the mirror", async () => {
+  const { streams } = keyedStreams();
+  const mirror = await handOffThenReload("rejected on resend");
+  render(<Harness />);
+  const owner = beginOwnedNotebook(2);
+  await act(async () => {
+    await value!.restoreNotebook(owner);
+    value!.finishNotebookTransition(owner);
+  });
+  await settleSubmit();
+  expect(api.runAskStream).toHaveBeenCalledTimes(2);
+  expect(payloadOf(1).client_request_id).toBe(mirror.id);
+  expect(value!.asking).toBe(true);
+  await act(async () => {
+    streams[1]!.reject(new Error("server down"));
+    await Promise.resolve();
+  });
+  await settleSubmit();
+  expect(value!.asking).toBe(false);
+  expect(value!.pendingQuestion).toBe("");
+  expect(value!.question).toBe("rejected on resend");
+  expect(value!.mode).toBe("reasoning");
+  expect(effects.reportError).toHaveBeenCalledTimes(1);
+  expect(pendingIntentStore()).toEqual([]);
+});
+
+// The re-sent window is the same window as the original hand-off: another
+// reload before `started` keeps the mirror and re-sends once more, always
+// under the same key, so the server still sees one submission.
+test("a re-sent hand-off survives another reload and is re-sent under the same key again", async () => {
+  const { streams, starts } = keyedStreams();
+  const mirror = await handOffThenReload("reloaded twice");
+  let view = render(<Harness />);
+  const second = beginOwnedNotebook(2);
+  await act(async () => {
+    await value!.restoreNotebook(second);
+    value!.finishNotebookTransition(second);
+  });
+  await settleSubmit();
+  expect(api.runAskStream).toHaveBeenCalledTimes(2);
+  const resentSignal = api.runAskStream.mock.calls[1]?.[3] as AbortSignal;
+  view.unmount();
+  expect(resentSignal.aborted).toBe(true);
+  expect(pendingIntentStore()).toHaveLength(1);
+
+  view = render(<Harness />);
+  const third = beginOwnedNotebook(3);
+  await act(async () => {
+    await value!.restoreNotebook(third);
+    value!.finishNotebookTransition(third);
+  });
+  await settleSubmit();
+  expect(api.runAskStream).toHaveBeenCalledTimes(3);
+  expect(payloadOf(2).client_request_id).toBe(mirror.id);
+  expect(payloadOf(2)).toMatchObject({ question: "reloaded twice", mode: "reasoning" });
+  expect(value!.pendingQuestion).toBe("reloaded twice");
+  expect(pendingIntentStore()).toHaveLength(1);
+  await act(async () => {
+    await starts[2]!("job-third", "conversation-third");
+  });
+  expect(pendingIntentStore()).toEqual([]);
+  await act(async () => {
+    streams[2]!.resolve(answer("conversation-third"));
+    await Promise.resolve();
+  });
+  await settleSubmit();
+  expect(value!.turns.map((turn) => turn.question)).toEqual(["reloaded twice"]);
+  view.unmount();
+});
+
+// A follow-up (an existing conversation) resumed by opening that session is
+// re-sent into the same conversation, over the transcript the detail loaded.
+test("a follow-up hand-off resumed by opening its session is re-sent with its conversation id", async () => {
+  const { streams, starts } = keyedStreams();
+  api.previewAskIntent.mockResolvedValue(contractFor("follow-up resend", false));
+  api.listConversations.mockResolvedValue([summary("conversation-x")]);
+  api.getConversation.mockImplementation(async (id: string) => detail(id));
+  const view = render(<Harness />);
+  const first = beginOwnedNotebook();
+  await act(async () => {
+    await value!.restoreNotebook(first);
+  });
+  expect(value!.conversationId).toBe("conversation-x");
+  act(() => value!.selectMode("reasoning"));
+  await act(async () => {
+    void value!.submit("follow-up resend");
+    await Promise.resolve();
+  });
+  await settleSubmit();
+  const [mirror] = pendingIntentStore() as Array<{ id: string; phase: string; conversationIdAtStart: string | null }>;
+  expect(mirror.phase).toBe("handoff");
+  expect(mirror.conversationIdAtStart).toBe("conversation-x");
+  expect(payloadOf(0).conversation_id).toBe("conversation-x");
+
+  view.unmount();
+  api.previewAskIntent.mockReset();
+  render(<Harness />);
+  beginOwnedNotebook(2);
+  await act(async () => {
+    await value!.openSession("conversation-x", 3);
+  });
+  await settleSubmit();
+  expect(api.runAskStream).toHaveBeenCalledTimes(2);
+  expect(payloadOf(1)).toMatchObject({
+    question: "follow-up resend",
+    conversation_id: "conversation-x",
+    client_request_id: mirror.id,
+  });
+  expect(value!.conversationId).toBe("conversation-x");
+  expect(value!.turns.map((turn) => turn.question)).toEqual(
+    detail("conversation-x").turns.map((turn) => turn.question),
+  );
+  expect(value!.pendingQuestion).toBe("follow-up resend");
+  expect(pendingIntentStore()).toHaveLength(1);
+  await act(async () => {
+    await starts[1]!("job-follow", "conversation-x");
+  });
+  expect(pendingIntentStore()).toEqual([]);
+  await act(async () => {
+    streams[1]!.resolve(answer("conversation-x"));
+    await Promise.resolve();
+  });
+  await settleSubmit();
+  expect(value!.turns.map((turn) => turn.question)).toEqual([
+    ...detail("conversation-x").turns.map((turn) => turn.question),
+    "follow-up resend",
+  ]);
+});
+
+// A different job already active in that conversation (asked from another
+// tab) wins the view; the mirror waits for a later restore instead of being
+// re-sent over it.
+test("a hand-off waits when another job is active in its conversation", async () => {
+  const stream = deferred<AskResponse>();
+  api.runAskStream.mockReturnValue(stream.promise);
+  api.previewAskIntent.mockResolvedValue(contractFor("waits its turn", false));
+  api.listConversations.mockResolvedValue([summary("conversation-x")]);
+  api.getConversation.mockImplementation(async (id: string) => detail(id));
+  const view = render(<Harness />);
+  const first = beginOwnedNotebook();
+  await act(async () => {
+    await value!.restoreNotebook(first);
+  });
+  act(() => value!.selectMode("reasoning"));
+  await act(async () => {
+    void value!.submit("waits its turn");
+    await Promise.resolve();
+  });
+  await settleSubmit();
+  expect((pendingIntentStore()[0] as { phase: string }).phase).toBe("handoff");
+
+  view.unmount();
+  api.previewAskIntent.mockReset();
+  api.getConversation.mockImplementation(async (id: string) => ({
+    ...detail(id),
+    active_job: {
+      job_id: "job-other",
+      question: "asked from another tab",
+      asked_at: "2026-09-03T00:00:00Z",
+      mode: "reasoning",
+      trace: [],
+    },
+  }));
+  api.getAskJob.mockResolvedValue(runningJob("job-other"));
+  render(<Harness />);
+  const owner = beginOwnedNotebook(2);
+  await act(async () => {
+    await value!.restoreNotebook(owner);
+    value!.finishNotebookTransition(owner);
+  });
+  await settleSubmit();
+  expect(api.runAskStream).toHaveBeenCalledTimes(1);
+  expect(value!.asking).toBe(true);
+  expect(value!.pendingQuestion).toBe("asked from another tab");
+  expect(pendingIntentStore()).toHaveLength(1);
 });

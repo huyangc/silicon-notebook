@@ -1,3 +1,4 @@
+import re
 from datetime import datetime
 from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
@@ -271,6 +272,12 @@ class QueryIntentContract(BaseModel):
 # deliverable, not something to slip in silently here.
 ASK_QUESTION_MAX_CHARS = 4000
 
+# Upper bound of ``AskRequest.client_request_id``. A UUID is 36 characters; the
+# bound leaves room for a prefixed client scheme without letting a caller store
+# arbitrary text in a unique-indexed column.
+ASK_CLIENT_REQUEST_ID_MAX_CHARS = 128
+_CLIENT_REQUEST_ID_CHARS = re.compile(r"^[A-Za-z0-9._:-]+$")
+
 
 class AskIntentPreviewRequest(BaseModel):
     question: str = Field(min_length=1, max_length=ASK_QUESTION_MAX_CHARS)
@@ -322,6 +329,28 @@ class AskRequest(BaseModel):
     # reasoning only: returned by /ask/intent and confirmed by the user (or
     # auto-confirmed by the UI when no blocking ambiguity exists).
     intent: Optional[AskIntentConfirmation] = None
+    # Browser-minted idempotency key for ONE submission (the official UI reuses
+    # the per-tab mirror id of the reasoning preflight — see
+    # frontend/app/ask-intent-persist.ts). Optional. A repeat POST carrying the
+    # same key by the same user does not create a second job: the streaming
+    # path attaches to the job that key already created and replays its
+    # progress and final answer. Persisted on ``ask_jobs.client_request_id``;
+    # never part of ordering, authorization or retrieval.
+    client_request_id: Optional[str] = Field(default=None, max_length=ASK_CLIENT_REQUEST_ID_MAX_CHARS)
+
+    @field_validator("client_request_id")
+    @classmethod
+    def validate_client_request_id(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            return None
+        if not _CLIENT_REQUEST_ID_CHARS.fullmatch(value):
+            raise ValueError(
+                "client_request_id may only contain letters, digits, '.', '_', ':' and '-'"
+            )
+        return value
 
     @field_validator("asked_at")
     @classmethod
