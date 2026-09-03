@@ -1529,6 +1529,10 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       run.failure = humanizedError("已切换到自动模式，未完成的问题理解已取消，问题已退回输入框");
       forgetPersistedIntent(run);
     }
+    // Records that were never materialized in this instance (older sessions'
+    // previews/reviews after a reload) live only in storage: they belong to
+    // the same actor and must not resume once the user returns to advanced.
+    if (actorIdRef.current) clearPersistedIntentRuns(actorIdRef.current);
   }, [policy.advanced]);
 
   async function executeAsk(
