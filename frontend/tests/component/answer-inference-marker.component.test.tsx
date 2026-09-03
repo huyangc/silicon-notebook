@@ -119,6 +119,35 @@ test("被强调/引用节点切开的句中标记不算段首", () => {
   expect(afterStrongSentence.container.querySelector("span.answer-inference")).not.toBeNull();
 });
 
+test("标记嵌在强调/链接里时按容器外的前文判定(codex #669 R1 P2)", () => {
+  // `参见 **（推断）这一节**`:标记是 strong 里的第一个节点,但 strong 本身在句中。
+  const insideStrongMidSentence = render(
+    <AnswerMarkdown answer="参见 **（推断）这一节** 的讨论。" onReferenceClick={() => undefined} />,
+  );
+  expect(insideStrongMidSentence.container.querySelector("span.answer-inference")).toBeNull();
+  expect(insideStrongMidSentence.container.textContent).toContain("参见 （推断）这一节 的讨论。");
+
+  // `**结论。**（推断）下一句`:句号在 strong 里面,标记仍是句首。
+  const boundaryInsideStrong = render(
+    <AnswerMarkdown answer="**结论。**（推断）下一句是推断。" onReferenceClick={() => undefined} />,
+  );
+  const marker = boundaryInsideStrong.container.querySelector("span.answer-inference");
+  expect(marker).not.toBeNull();
+  expect(marker?.textContent).toBe("（推断）");
+
+  // 段首的加粗标记:块级容器起点就是段首。
+  const strongAtParagraphStart = render(
+    <AnswerMarkdown answer="**（推断）整句加粗。**" onReferenceClick={() => undefined} />,
+  );
+  expect(strongAtParagraphStart.container.querySelector("strong span.answer-inference")).not.toBeNull();
+
+  // 链接文字里的句中标记同样不算段首。
+  const insideLink = render(
+    <AnswerMarkdown answer="详见 [（推断）附录](https://example.com)。" onReferenceClick={() => undefined} />,
+  );
+  expect(insideLink.container.querySelector("span.answer-inference")).toBeNull();
+});
+
 test("深度报告正文同样识别推断标记", () => {
   const { container } = render(
     <ReportMarkdown markdown="（推断）该模块在高负载下可能过热。" references={[]} />,
