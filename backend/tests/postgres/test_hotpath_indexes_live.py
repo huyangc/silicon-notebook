@@ -88,9 +88,10 @@ def test_install_builds_all_eight_concurrently_and_is_idempotent(postgres_databa
 @pytest.mark.parametrize(
     "unexpected_ddl",
     [
-        # Same name, same table, columns in the wrong order.
-        "CREATE INDEX idx_clusters_nb_canonical "
-        "ON concept_clusters(canonical_id, notebook_id)",
+        # Same name, same table, columns in the wrong order.(批 6 起注册表
+        # 条目换成带 INCLUDE 的接替者;用它的名字保持「同名异形拒绝」覆盖。)
+        "CREATE INDEX idx_clusters_nb_canonical_member_gen "
+        "ON concept_clusters(canonical_id, notebook_id, member_object_id)",
         # Same name, same table and leading columns, but a narrower partial
         # predicate than the one this module expects.
         "CREATE INDEX idx_sources_nb_hidden_type "
