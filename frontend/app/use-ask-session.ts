@@ -406,7 +406,15 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
   // (history is authoritative from then on) and on logout; no numeric cap, so a
   // result an in-progress restore selected can never be evicted underneath it.
   const settledRunsRef = useRef<AskRunRecord[]>([]);
+  // Submission order across durable runs, intent previews AND records restored
+  // from the per-tab mirror: serials are monotonic wall-clock values, the same
+  // scheme as the mirror's `savedAt`, so a run materialized after a reload keeps
+  // its original place instead of the order it happened to be restored in.
   const runSerialRef = useRef(0);
+  function nextRunSerial(atLeast = 0): number {
+    runSerialRef.current = Math.max(Date.now(), runSerialRef.current + 1, atLeast);
+    return runSerialRef.current;
+  }
 
   if (pendingActorIdRef.current === actorId) pendingActorIdRef.current = null;
   if (propActorIdRef.current !== actorId) {
@@ -722,9 +730,12 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
    */
   function materializeIntentRun(persisted: PersistedIntentRun, owner: AskSessionOwner): AskIntentRunRecord {
     const contract = persisted.phase === "review" ? persisted.contract : null;
+    // Its submission time is its place in line; later submissions must still
+    // sort after it, so the serial base moves past it.
+    nextRunSerial(persisted.savedAt);
     const run: AskIntentRunRecord = {
       key: ownerKey(owner),
-      serial: ++runSerialRef.current,
+      serial: persisted.savedAt,
       owner,
       cancelRequested: false,
       notebookId: owner.notebookId,
@@ -1583,7 +1594,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     conversationIdAtStart: string | null,
     // A run handed over from an intent preview keeps that preview's submission
     // order, so an older question finishing late never outranks a newer one.
-    serial: number = ++runSerialRef.current,
+    serial: number = nextRunSerial(),
     // The preview's storage mirror (ask-intent-persist.ts). It outlives the
     // hand-off until `started` proves the server owns the question, and is
     // retired if the stream ends without ever starting.
@@ -1803,7 +1814,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     }
     const run: AskIntentRunRecord = {
       key: ownerKey(owner),
-      serial: ++runSerialRef.current,
+      serial: nextRunSerial(),
       owner,
       cancelRequested: false,
       notebookId: owner.notebookId,

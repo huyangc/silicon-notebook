@@ -3580,6 +3580,18 @@ test("two clarifications left in different sessions both survive a reload", asyn
   expect(value!.intentReview?.question).toBe("ambiguous in a");
   expect(api.previewAskIntent).not.toHaveBeenCalled();
   expect(pendingIntentStore()).toHaveLength(2);
+
+  // codex #664 r8: restoration order must not become submission order — after
+  // leaving and reopening, the newest SUBMISSION (B) still comes back first,
+  // even though A was materialized more recently.
+  act(() => value!.leaveWorkspace());
+  const again = beginOwnedNotebook(5);
+  await act(async () => {
+    await value!.restoreNotebook(again);
+    value!.finishNotebookTransition(again);
+  });
+  expect(value!.conversationId).toBe("conversation-b");
+  expect(value!.intentReview?.question).toBe("ambiguous in b");
 });
 
 test("a preview that fails on screen forgets its persisted mirror", async () => {
