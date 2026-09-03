@@ -526,6 +526,21 @@ class UnifiedKgStore:
         )
 
     @staticmethod
+    def refresh_derived_claim(db: Any, notebook_id: str, generation: int) -> bool:
+        """认领心跳续租(codex #671 R13 P1):带 LLM 阶段的 rebuild 合法地
+        跑到分钟-小时级,claimed_at 只在取号时写一次的话,活认领会在
+        KG_DERIVED_BUILD_TTL_SECONDS 后被并发取号当尸体抢占——几小时的活
+        在翻转时整轮作废。CAS 只续自己的(被抢占后迟到的心跳天然 no-op);
+        返回 False = 已被抢占,调用方可早停(写段复读仍是权威闸,心跳
+        best-effort)。"""
+        cur = db.execute(
+            "UPDATE unified_kg_state SET derived_building_claimed_at=now() "
+            "WHERE notebook_id=%s AND derived_building_generation=%s",
+            (notebook_id, generation),
+        )
+        return cur.rowcount > 0
+
+    @staticmethod
     def derived_claim_still_held(db: Any, notebook_id: str, generation: int) -> bool:
         """写段前复读(设计 §1.2/复评 P2-4):≠自己的 G 即被抢占,当场作废
         早停。PG 侧这条 SELECT 不加行锁(READ COMMITTED):复读与随后 INSERT

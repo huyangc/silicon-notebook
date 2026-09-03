@@ -4817,6 +4817,23 @@ class KnowledgeLifecycleService:
             })
         return moved
 
+    def _refresh_generation_lease(self, notebook_id: str,
+                                  generation: int) -> None:
+        """认领心跳(codex #671 R13 P1,best-effort):stage 边界与两个 LLM
+        阶段的分块回调处调用,让活认领的 claimed_at 持续前进——TTL 只抢
+        真尸体。失败吞掉(心跳挂了最坏退回固定 TTL 语义;写段复读与翻转
+        双 CAS 仍是权威闸)。"""
+        if not generation:
+            return
+        try:
+            with self._write() as db:
+                self.unified_kg.refresh_derived_claim(
+                    db, notebook_id, generation)
+        except Exception:  # noqa: BLE001 — 心跳绝不打断 rebuild
+            self.event_log.logger.warning(
+                "代际认领心跳失败 for %s generation=%s",
+                notebook_id, generation, exc_info=True)
+
     def _reap_stale_community_generations(self, notebook_id: str,
                                           keep: "Tuple[int, int]") -> int:
         """communities 族残代预回收(设计 P1-8,发布路径前):两张表同款有界
@@ -4877,7 +4894,7 @@ class KnowledgeLifecycleService:
 
     def _concept_description_stage(
         self, notebook_id: str, sd, seed_to_canonical, members_count,
-        run_id: str, _ck_ver: str, progress, _stage, _time,
+        run_id: str, _ck_ver: str, progress, _stage, _time, generation: int,
     ) -> "Tuple[Dict[str, str], Dict[str, str]]":
         """概念描述阶段(checkpoint 复用 + 批量证据取数 + 并行 LLM),从
         rebuild_unified_kg 原地抽出(零余量热函数天花板逼出的切分,行为
@@ -5024,6 +5041,10 @@ class KnowledgeLifecycleService:
                             desc_sig_by_cid[cid] = sig
                             _ck_buf.append((cid, {"description": desc, "sig": sig}))
                             if len(_ck_buf) >= _DESC_CKPT_FLUSH:
+                                # LLM 阶段的周期性落盘点兼认领心跳(R13):
+                                # 描述阶段可单阶段跑数小时。
+                                self._refresh_generation_lease(
+                                    notebook_id, generation)
                                 try:
                                     self.unified_kg.checkpoint_put(
                                         notebook_id, _ck_ver, "concept_desc", _ck_buf, self._now())
@@ -5218,6 +5239,8 @@ class KnowledgeLifecycleService:
                 # 插入点)。理由与 relink 检查点相同,见那条注释。
                 if self._notebook_deleting(notebook_id):
                     raise NotebookDeletingAbortsMaintenanceError(notebook_id)
+                # 同一处顺带认领心跳(R13):阶段边界即续租点。
+                self._refresh_generation_lease(notebook_id, generation)
                 self.event_log.logger.info("kg-rebuild[%s] %s", notebook_id, msg)
                 if progress is not None:
                     try:
@@ -5265,6 +5288,9 @@ class KnowledgeLifecycleService:
                     todo = [c for c in cand_dicts if id_to_key[c["id"]] not in cached]
 
                     def _persist(chunk_decisions):
+                        # LLM 阶段的分块回调兼认领心跳(R13):merge review
+                        # 可以单阶段跑数小时,只靠 stage 边界续租不够。
+                        self._refresh_generation_lease(notebook_id, generation)
                         rows = [(id_to_key[d["candidate_id"]],
                                  {"decision": d["decision"], "confidence": d["confidence"],
                                   "canonical_name": d.get("canonical_name", "")})
@@ -5320,7 +5346,7 @@ class KnowledgeLifecycleService:
             seed_to_canonical = sd["seed_to_canonical"]
             desc_by_cid, desc_sig_by_cid = self._concept_description_stage(
                 notebook_id, sd, seed_to_canonical, members_count, run_id,
-                _ck_ver, progress, _stage, _time)
+                _ck_ver, progress, _stage, _time, generation)
             _t = _time.perf_counter()
             self._write_cluster_map_streamed(notebook_id, "concept", seed_to_canonical,
                                              sd["canonical_names"], desc_by_cid,
@@ -6293,6 +6319,8 @@ class KnowledgeLifecycleService:
                 del edge_table
                 can2idx.clear()
             else:
+                # 预计算前续租(R13):生产上这段是分钟级,别让它吃掉 TTL 余量。
+                self._refresh_generation_lease(notebook_id, _generation)
                 try:
                     analysis = self._compute_kg_analysis(
                         notebook_id, level, _cseq, kept_rows, edge_table, can2idx,
