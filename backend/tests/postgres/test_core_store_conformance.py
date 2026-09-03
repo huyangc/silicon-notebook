@@ -2301,13 +2301,15 @@ def test_pg_copy_sentinel_sweep_respects_naive_local_creation_time(
             sharing.insert_copy_rows("notebooks", [row], chunk_size=1)
 
         insert_sentinel("nb-copy-fresh-local", clock_value)
-        assert sharing.sweep_stale_copies(created_by=owner.id) == 0
+        assert sharing.sweep_stale_copies(created_by=owner.id) == []
 
         stale_local = (
             reference_utc - timedelta(seconds=120)
         ).astimezone(local_zone).replace(tzinfo=None).isoformat()
         insert_sentinel("nb-copy-stale-local", stale_local)
-        assert sharing.sweep_stale_copies(created_by=owner.id) == 1
+        assert sharing.sweep_stale_copies(created_by=owner.id) == [
+            "nb-copy-stale-local"
+        ]
 
         with postgres_database.connect() as connection:
             rows = connection.execute(
@@ -2387,7 +2389,9 @@ def test_pg_copy_sentinel_sweep_preserves_production_clock_dst_fold(
         assert datetime.fromisoformat(stale).utcoffset() == timedelta(hours=-8)
         insert_sentinel("nb-copy-fold-stale", stale)
 
-        assert sharing.sweep_stale_copies(created_by=owner.id) == 1
+        assert sharing.sweep_stale_copies(created_by=owner.id) == [
+            "nb-copy-fold-stale"
+        ]
         with postgres_database.connect() as connection:
             rows = connection.execute(
                 "SELECT id FROM notebooks WHERE status='copying' ORDER BY id COLLATE \"C\""
