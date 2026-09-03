@@ -135,7 +135,12 @@ class NotebookCopyService:
         rmtree 目的地的 ``notebooks/<id>`` 与 ``assets/<id>``——但进程死在
         补偿之前的半拷贝只有本清扫收割其行,文件在 PR-4 之前无人清、按崩溃
         次数静默泄漏。store 现在返回实际收割的 id 列表,逐本 best-effort
-        整目录删除（幂等,目录不存在即 no-op),对外仍返回计数。"""
+        整目录删除（幂等,目录不存在即 no-op),对外仍返回计数。
+
+        内评 P1(PR-4):``copy_notebook`` 开场的收割**必须**走本方法而不是
+        直调 store——那是收割的唯一生产触发点,直调会把回传 ids 丢掉、只删
+        行不清盘,恰好复刻上面说的泄漏。接线由 ``test_copy_notebook_
+        entrypoint_reaps_stale_disk_too`` 钉住。"""
         reaped = self._store.sweep_stale_copies(created_by=created_by)
         for notebook_id in reaped:
             shutil.rmtree(
@@ -163,9 +168,6 @@ class NotebookCopyService:
         chunks → validate counts and references → publish original status.
         Failure compensates ONLY the destination rows/files.
         """
-        # 内评 P1(PR-4):必须走服务层 sweep_stuck_copies 而不是直调 store——
-        # 这里是收割的唯一生产触发点,直调会把回传的 ids 丢掉,行删了目录
-        # 还躺着,恰好复刻本 PR 要修的静默泄漏。
         self.sweep_stuck_copies(new_owner_id)
         source_notebook = self._catalog.get_notebook(source_notebook_id)
         new_id = self._seams.new_id("nb")
