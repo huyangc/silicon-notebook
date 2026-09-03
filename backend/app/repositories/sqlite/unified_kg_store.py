@@ -572,13 +572,17 @@ class UnifiedKgStore:
 
     @staticmethod
     def clear_catchup_marker(
-        db: sqlite3.Connection, notebook_id: str, ts: str
+        db: sqlite3.Connection, notebook_id: str, ts: str,
+        published_generation: int,
     ) -> None:
+        # ts + 代次双分量 CAS(codex #671 R8 P1):datetime('now') 秒级分辨率
+        # 下同秒两轮的 ts 字符串相同——完整论证见 PG 孪生 docstring。
         db.execute(
             "UPDATE unified_kg_state SET derived_catchup_from=NULL, "
             "updated_at=datetime('now') "
-            "WHERE notebook_id=? AND derived_catchup_from=?",
-            (notebook_id, ts),
+            "WHERE notebook_id=? AND derived_catchup_from=? "
+            "AND cluster_generation=?",
+            (notebook_id, ts, published_generation),
         )
 
     @staticmethod

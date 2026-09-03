@@ -4796,7 +4796,8 @@ class KnowledgeLifecycleService:
                 "types": sorted(unknown_types),
             })
         with self._write() as db:
-            self.unified_kg.clear_catchup_marker(db, notebook_id, since_ts)
+            self.unified_kg.clear_catchup_marker(
+                db, notebook_id, since_ts, published_generation)
         if replayed:
             self.event_log.emit({
                 "kind": "kg_generation_catchup_settled",

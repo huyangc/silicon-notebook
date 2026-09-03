@@ -645,12 +645,20 @@ class UnifiedKgStore:
         return row is not None
 
     @staticmethod
-    def clear_catchup_marker(db: Any, notebook_id: str, ts: str) -> None:
-        """催收完成:CAS 清欠账标记(只清自己那次翻转落的 ts)。"""
+    def clear_catchup_marker(
+        db: Any, notebook_id: str, ts: str, published_generation: int
+    ) -> None:
+        """催收完成:CAS 清欠账标记——ts **加代次**双分量(codex #671 R8
+        P1):sqlite 侧 datetime('now') 只有秒级分辨率,同秒两轮取号的 ts
+        字符串相同,只按 ts 的 CAS 会让先一轮迟到的清除误清后一轮刚落的
+        欠账标记(其退休代随后被回收 = 静默丢成员)。published 指针随每次
+        翻转前进,把它并进谓词后「清的只能是自己那次翻转落的账」重新成立。
+        PG 微秒级撞车概率趋零,仍统一加(parity + 防御纵深)。"""
         db.execute(
             "UPDATE unified_kg_state SET derived_catchup_from=NULL, updated_at=now() "
-            "WHERE notebook_id=%s AND derived_catchup_from=%s::timestamptz",
-            (notebook_id, normalize_timestamp(ts)),
+            "WHERE notebook_id=%s AND derived_catchup_from=%s::timestamptz "
+            "AND cluster_generation=%s",
+            (notebook_id, normalize_timestamp(ts), published_generation),
         )
 
     @staticmethod
