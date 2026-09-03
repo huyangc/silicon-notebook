@@ -924,7 +924,9 @@ def test_fold_read_is_batched_within_the_parameter_ceiling(repo, monkeypatch):
         assert service._fold_canonical_ids(db, notebook.id, wanted) == {}
     emitted = [sql for sql in log
                if "FROM concept_clusters WHERE notebook_id=? AND member_object_id IN" in sql]
-    assert [sql.count("?") for sql in emitted] == [_FUSE_FOLD_BATCH_SIZE + 1, 6]
+    # 批 3·W2 §1.4:cluster_fold_rows 加 published 代次谓词(自带一个 ? 的
+    # COALESCE 子查询)→ 每条语句恰好 +1 参数。
+    assert [sql.count("?") for sql in emitted] == [_FUSE_FOLD_BATCH_SIZE + 2, 7]
     assert max(sql.count("?") for sql in emitted) <= _SQLITE_PARAM_CEILING
 
 

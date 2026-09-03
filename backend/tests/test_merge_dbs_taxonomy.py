@@ -271,3 +271,64 @@ def test_the_offline_eviction_cap_matches_the_runtime_protocol_constant():
 
     offline_default = merge_dbs._evict_experiences_to_limit.__defaults__[0]
     assert offline_default == RETRIEVAL_EXPERIENCE_MAX_ENTRIES
+
+
+def test_merge_normalizes_cluster_generation_for_imported_notebooks(tmp_path):
+    """批 3·W2 §1.6 pin:合库把副库簇行的 generation 原样拷入,而 KG_STATE
+    清空让代次指针消失——三张派生表的导入行必须归一到 0 代,否则合并库的
+    簇图对 COALESCE(指针,0) 读者整体不可见。"""
+    now = "2026-01-01T00:00:00"
+
+    def _mk(path, nb, gen):
+        merge_dbs.migrate_to_current(path)
+        conn = sqlite3.connect(str(path))
+        with conn:
+            conn.execute(
+                "INSERT INTO users (id,email,display_name,role,created_at,"
+                "updated_at) VALUES ('u','u@x','u','member',?,?)", (now, now))
+            conn.execute(
+                "INSERT INTO notebooks (id,name,purpose,primary_domain,status,"
+                "created_by,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
+                (nb, nb, "", "Semiconductor", "active", "u", now, now))
+            conn.execute(
+                "INSERT INTO unified_kg_state (notebook_id, cluster_generation, "
+                "community_generation, updated_at) VALUES (?,?,?,?)",
+                (nb, gen, gen, now))
+            conn.execute(
+                "INSERT INTO concept_clusters (id,notebook_id,canonical_id,"
+                "member_object_id,canonical_name,object_type,created_at,generation) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (f"cc-{nb}", nb, "can", "mem", "N", "concept", now, gen))
+            conn.execute(
+                "INSERT INTO communities (id,notebook_id,member_ids,size,"
+                "created_at,generation) VALUES (?,?,?,?,?,?)",
+                (f"cm-{nb}", nb, '["mem"]', 1, now, gen))
+            conn.execute(
+                "INSERT INTO community_members (canonical_id,notebook_id,"
+                "community_id,generation) VALUES (?,?,?,?)",
+                ("can", nb, f"cm-{nb}", gen))
+        conn.close()
+
+    primary, secondary, out = tmp_path / "a.db", tmp_path / "b.db", tmp_path / "out.db"
+    _mk(primary, "nb-main", 0)
+    _mk(secondary, "nb-sec", 7)  # 副库指针/行都在第 7 代
+
+    merge_dbs.merge_core(out, primary, secondary, shared_base="nb-none")
+
+    conn = sqlite3.connect(str(out))
+    try:
+        for table in ("concept_clusters", "communities", "community_members"):
+            rows = conn.execute(
+                f"SELECT generation FROM {table} WHERE notebook_id='nb-sec'"
+            ).fetchall()
+            assert rows and all(r[0] == 0 for r in rows), (
+                f"{table} 导入行必须归一到 0 代: {rows}")
+        # 指针行已被 KG_STATE 清空 → COALESCE→0 → 归一行可见
+        visible = conn.execute(
+            "SELECT COUNT(*) FROM concept_clusters WHERE notebook_id='nb-sec' "
+            "AND generation = COALESCE((SELECT cluster_generation FROM "
+            "unified_kg_state u WHERE u.notebook_id='nb-sec'), 0)"
+        ).fetchone()[0]
+        assert visible == 1
+    finally:
+        conn.close()

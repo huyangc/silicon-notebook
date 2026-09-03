@@ -159,9 +159,15 @@ class IndexProjectionStore:
             chunk_ver = db.execute(
                 "SELECT COUNT(*) AS c, MAX(created_at) AS ts "
                 "FROM chunks WHERE notebook_id=%s", (notebook_id,)).fetchone()
+            # 批 3·W2 §1.4 红线「版本身份不得被未发布代污染」:这条 COUNT/MAX
+            # 是 on-disk manifest.version 向量的簇分量,双代窗口不加谓词即全库
+            # manifest 判不等(W1 §3.4 的重建风暴)。走 idx_clusters_nb_created_gen。
             clu_ver = db.execute(
                 "SELECT COUNT(*) AS c, MAX(created_at) AS ts "
-                "FROM concept_clusters WHERE notebook_id=%s", (notebook_id,)).fetchone()
+                "FROM concept_clusters WHERE notebook_id=%s "
+                "AND generation = COALESCE((SELECT cluster_generation "
+                "FROM unified_kg_state WHERE notebook_id = %s), 0)",
+                (notebook_id, notebook_id)).fetchone()
             emb_ver = db.execute(
                 "SELECT COUNT(*) AS c, MAX(created_at) AS ts "
                 "FROM knowledge_embeddings WHERE notebook_id=%s", (notebook_id,)).fetchone()
@@ -510,8 +516,10 @@ class IndexProjectionStore:
             for r in db.execute(
                     "SELECT canonical_id, member_object_id FROM concept_clusters "
                     "WHERE notebook_id=%s "
+                    "AND generation = COALESCE((SELECT cluster_generation "
+                    "FROM unified_kg_state WHERE notebook_id = %s), 0) "
                     "ORDER BY canonical_id COLLATE \"C\", member_object_id COLLATE \"C\"",
-                    (notebook_id,)).fetchall():
+                    (notebook_id, notebook_id)).fetchall():
                 cluster_groups.setdefault(r["canonical_id"], []).append(r["member_object_id"])
 
         # Memberships: entity ↔ chunk (scoped → limit to gathered objects)

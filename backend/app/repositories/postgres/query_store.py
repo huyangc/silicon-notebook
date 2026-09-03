@@ -108,6 +108,10 @@ _NO_MEMORY_MEMBER_CLUSTER_SQL = (
     "JOIN sources ms ON ms.id = mo.source_id "
     "WHERE mc.notebook_id = c.notebook_id "
     "AND mc.canonical_id = c.canonical_id "
+    # 批 3·W2 §1.4:内层引用与外层行同代(外层 c 已按 published 谓词过滤,
+    # 相关引用零新参数)——「按整簇排除 memory」只在同一代内判定,双代窗口
+    # 不跨代误判。
+    "AND mc.generation = c.generation "
     f"AND {MEMORY_SOURCE_TYPE_PREDICATE})"
 )
 
@@ -236,7 +240,7 @@ class QueryStore:
         allowed = list(statuses)
         if not allowed or limit <= 0:
             return []
-        params: "list[Any]" = [allowed, notebook_id, int(limit)]
+        params: "list[Any]" = [allowed, notebook_id, notebook_id, int(limit)]
         rows = db.execute(
             "SELECT COALESCE(MIN(NULLIF(c.canonical_name, '')), '') AS name, "
             "       COUNT(o.id) AS members "
@@ -246,6 +250,8 @@ class QueryStore:
             "     AND o.status = ANY(%s) "
             f"     AND {_NOT_MEMORY_OWNED_SQL} "
             "WHERE c.notebook_id = %s AND c.object_type = 'concept' "
+            "AND c.generation = COALESCE((SELECT cluster_generation "
+            "FROM unified_kg_state WHERE notebook_id = %s), 0) "
             f"AND {_NO_MEMORY_MEMBER_CLUSTER_SQL} "
             "GROUP BY c.canonical_id "
             "HAVING COALESCE(MIN(NULLIF(c.canonical_name, '')), '') <> '' "

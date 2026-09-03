@@ -165,9 +165,13 @@ class IndexProjectionStore:
             chunk_ver = db.execute(
                 "SELECT COUNT(*) AS c, COALESCE(MAX(created_at),'') AS ts "
                 "FROM chunks WHERE notebook_id=?", (notebook_id,)).fetchone()
+            # 批 3·W2 §1.4 红线「版本身份不得被未发布代污染」(PG 孪生同注释)。
             clu_ver = db.execute(
                 "SELECT COUNT(*) AS c, COALESCE(MAX(created_at),'') AS ts "
-                "FROM concept_clusters WHERE notebook_id=?", (notebook_id,)).fetchone()
+                "FROM concept_clusters WHERE notebook_id=? "
+                "AND generation = COALESCE((SELECT cluster_generation "
+                "FROM unified_kg_state WHERE notebook_id = ?), 0)",
+                (notebook_id, notebook_id)).fetchone()
             emb_ver = db.execute(
                 "SELECT COUNT(*) AS c, COALESCE(MAX(created_at),'') AS ts "
                 "FROM knowledge_embeddings WHERE notebook_id=?", (notebook_id,)).fetchone()
@@ -507,8 +511,11 @@ class IndexProjectionStore:
                     chunk_ids.append(r["id"])
             for r in db.execute(
                     "SELECT canonical_id, member_object_id FROM concept_clusters "
-                    "WHERE notebook_id=? ORDER BY canonical_id, member_object_id",
-                    (notebook_id,)).fetchall():
+                    "WHERE notebook_id=? "
+                    "AND generation = COALESCE((SELECT cluster_generation "
+                    "FROM unified_kg_state WHERE notebook_id = ?), 0) "
+                    "ORDER BY canonical_id, member_object_id",
+                    (notebook_id, notebook_id)).fetchall():
                 cluster_groups.setdefault(r["canonical_id"], []).append(r["member_object_id"])
 
         # Memberships: entity ↔ chunk (scoped → limit to gathered objects)

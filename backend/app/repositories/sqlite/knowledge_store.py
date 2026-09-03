@@ -26,6 +26,13 @@ from app.repositories.sqlite.mount_sql import (
 )
 
 
+# 批 3·W2 §1.4:published 代次谓词(PG 孪生常量;? 绑定参数保证子查询一次
+# 求值;COALESCE 兜「无 unified_kg_state 行 ⇒ 代次 0」——副本/合并库契约)。
+_PUBLISHED_CLUSTER_GEN = (
+    "COALESCE((SELECT cluster_generation FROM unified_kg_state "
+    "WHERE notebook_id = ?), 0)"
+)
+
 _DELETE_OBJECT_BATCH_SIZE = 500
 
 
@@ -1637,8 +1644,9 @@ class KnowledgeStore:
                 # prefer the unified cluster's fused description when present
                 crow = db.execute(
                     "SELECT canonical_description FROM concept_clusters "
-                    "WHERE notebook_id=? AND member_object_id=? AND canonical_description!='' LIMIT 1",
-                    (notebook_id, object_id)).fetchone()
+                    "WHERE notebook_id=? AND member_object_id=? AND canonical_description!='' "
+                    f"AND generation = {_PUBLISHED_CLUSTER_GEN} LIMIT 1",
+                    (notebook_id, object_id, notebook_id)).fetchone()
                 if crow and crow["canonical_description"]:
                     result["definition"] = crow["canonical_description"]
                 else:
@@ -3394,9 +3402,10 @@ class KnowledgeStore:
             "SELECT cc.member_object_id, cc.canonical_name, ko.object_type, ko.payload, ko.evidence "
             "FROM concept_clusters cc "
             "JOIN knowledge_objects ko ON ko.id=cc.member_object_id "
-            "WHERE cc.notebook_id=? AND cc.canonical_id=? AND ko.status!='deprecated'"
+            "WHERE cc.notebook_id=? AND cc.canonical_id=? AND ko.status!='deprecated' "
+            f"AND cc.generation = {_PUBLISHED_CLUSTER_GEN}"
         )
-        params: list = [notebook_id, canonical_id]
+        params: list = [notebook_id, canonical_id, notebook_id]
         if after:
             query += " AND cc.member_object_id > ? AND ko.id > ?"
             params.append(after)
@@ -3407,8 +3416,9 @@ class KnowledgeStore:
             params.append(limit)
         cluster_rows = db.execute(query, tuple(params)).fetchall()
         name_row = db.execute(
-            "SELECT canonical_name FROM concept_clusters WHERE notebook_id=? AND canonical_id=? LIMIT 1",
-            (notebook_id, canonical_id),
+            "SELECT canonical_name FROM concept_clusters WHERE notebook_id=? AND canonical_id=? "
+            f"AND generation = {_PUBLISHED_CLUSTER_GEN} LIMIT 1",
+            (notebook_id, canonical_id, notebook_id),
         ).fetchone()
         return cluster_rows, (name_row["canonical_name"] if name_row else "")
 
@@ -3422,8 +3432,9 @@ class KnowledgeStore:
         row = db.execute(
             "SELECT COUNT(*) AS c FROM concept_clusters cc "
             "JOIN knowledge_objects ko ON ko.id=cc.member_object_id "
-            "WHERE cc.notebook_id=? AND cc.canonical_id=? AND ko.status!='deprecated'",
-            (notebook_id, canonical_id),
+            "WHERE cc.notebook_id=? AND cc.canonical_id=? AND ko.status!='deprecated' "
+            f"AND cc.generation = {_PUBLISHED_CLUSTER_GEN}",
+            (notebook_id, canonical_id, notebook_id),
         ).fetchone()
         return int(row["c"]) if row else 0
 
@@ -3516,8 +3527,9 @@ class KnowledgeStore:
                     row["member_object_id"] for row in db.execute(
                         f"SELECT member_object_id FROM concept_clusters "
                         f"WHERE notebook_id=? AND canonical_id=? "
+                        f"AND generation = {_PUBLISHED_CLUSTER_GEN} "
                         f"AND member_object_id IN ({batch_placeholders})",
-                        [notebook_id, canonical_id, *batch],
+                        [notebook_id, canonical_id, notebook_id, *batch],
                     ).fetchall()
                 )
             attached_ids -= same_cluster_ids
