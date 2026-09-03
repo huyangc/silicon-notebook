@@ -188,6 +188,19 @@ PYTHONPATH=backend python scripts/build_scale_index.py import  --notebook nb-xxx
 异机三步、两机 pin 清单、连接预算、PgBouncer 前提、`.old` 恢复与 allow_pickle 来源约束
 见 `docs/operations_zh.md` 的「离线 / 异机 scale 构建」。
 
+### `sweep_legacy_delete_leftovers.py` —— 存量删除残渣一次性清扫
+
+删除作业化(批 3·W1)之前的同步删除路径崩溃留下的孤儿行(5 张无外键表)与
+孤儿目录(5 棵存储根,含 scale 产物的 scratch 兄弟)。默认只读盘点,`--apply`
+才动手;scale 三根删前逐本取跨进程排它 claim,被占跳过留声。两后端都支持。
+
+```bash
+PYTHONPATH=backend python scripts/sweep_legacy_delete_leftovers.py            # 盘点
+PYTHONPATH=backend python scripts/sweep_legacy_delete_leftovers.py --apply    # 清扫
+```
+
+退出码 0/1/2 与细节见 `docs/operations_zh.md` 的「存量删除残渣清扫」。
+
 ---
 
 ## 二、检索 / chunk 运维

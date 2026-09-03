@@ -1925,6 +1925,46 @@ removed before the revert are gone for good — a partial, not a clean,
 restoration. There is no third option that both keeps the code reverted and
 resumes the job.
 
+### Legacy delete-leftover sweep (`scripts/sweep_legacy_delete_leftovers.py`)
+
+Delete jobization only guarantees that deletions from now on leave no
+leftovers; garbage stranded by the pre-jobization synchronous delete path
+(crashed or killed mid-delete) is never revisited by any online path and
+needs a one-off offline sweep:
+
+- **Orphan rows**: rows whose `notebook_id` no longer exists in `notebooks`,
+  in the five tables that carry no foreign key to it — `community_members`,
+  `conversations`, `knowledge_object_sources`, `kg_cluster_scratch`,
+  `kg_canonical_scratch`. Deleted via a paged `NOT EXISTS(notebooks)`
+  anti-join (SQLite `rowid` / PostgreSQL `ctid`), one bounded write
+  transaction per batch, `--batch-size` defaulting to 2000.
+- **Orphan directories**: children of the five storage roots
+  (`{storage}/notebooks`, `assets`, `kg_index`, `kg_viz`,
+  `kg_index_partitions`) whose name — for the three scale roots, after
+  stripping `.old`/`.tmp`/`.tmp-<token>` down to the base id — is not in
+  `notebooks`. The three scale roots are swept per notebook under the
+  cross-process exclusive claim shared with scale builds and delete jobs;
+  a held or unevaluable claim skips that notebook loudly, never force-
+  deletes. Symlinks are left alone.
+
+```bash
+# Read-only inventory (default): per-table orphan row counts + per-root orphan ids
+PYTHONPATH=backend python scripts/sweep_legacy_delete_leftovers.py
+# Actually sweep; --rows-only / --disk-only split the halves
+PYTHONPATH=backend python scripts/sweep_legacy_delete_leftovers.py --apply
+```
+
+Run it with the serving deployment's production `.env` (the storage root
+must match); the database URL is read from the environment and never
+printed. Exit codes: `0` done; `1` the apply had skips (busy claims),
+undeletable paths, or residual orphan rows — re-running converges, and
+anything that remains is investigated per printed id; `2` argument
+refusal. A SQLite deployment has no cross-process claim and the script
+sweeps de-registered ids directly (a single-process service cannot start a
+legitimate concurrent writer for an id that is no longer in `notebooks`;
+the module docstring carries the argument); against PostgreSQL it can run
+beside the live service.
+
 ## Automatic analysis-failure archive
 
 Spreadsheet compiler failures, terminal source-parser failures, and responses from every
