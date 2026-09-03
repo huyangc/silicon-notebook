@@ -1602,6 +1602,36 @@ revert 前的无界 `delete_notebook` 代码路径，或者在核实每一张被
 恢复出来的是一本不完整、不干净的库。没有第三种选项能既保持代码已经
 revert、又续跑这次删除。
 
+### 存量删除残渣清扫(`scripts/sweep_legacy_delete_leftovers.py`)
+
+删除作业化只保证**今后**的删除不留残渣；作业化之前的同步删除路径半途
+崩溃/被 kill 留下的存量垃圾没有任何在线路径会再清，需要一次性离线清扫：
+
+- **孤儿行**：`community_members`、`conversations`、
+  `knowledge_object_sources`、`kg_cluster_scratch`、`kg_canonical_scratch`
+  五张对 `notebooks` 无外键的表里 `notebook_id` 已离册的行。按
+  `NOT EXISTS(notebooks)` anti-join 分页删除（SQLite `rowid`/PostgreSQL
+  `ctid`），每批一个独立写事务，`--batch-size` 默认 2000。
+- **孤儿目录**：`{storage}/notebooks`、`assets`、`kg_index`、`kg_viz`、
+  `kg_index_partitions` 五棵根下、目录名（scale 三根先剥
+  `.old`/`.tmp`/`.tmp-<token>` 得基 id）不在 `notebooks` 表里的子目录。
+  scale 三根删前逐本取跨进程排它 claim（与 scale 构建/删除作业同一把
+  advisory lock）；被占或无法评估一律跳过留声，绝不硬删。symlink 不清。
+
+```bash
+# 只读盘点(默认):逐表孤儿行数 + 逐根孤儿目录 id
+PYTHONPATH=backend python scripts/sweep_legacy_delete_leftovers.py
+# 动手清扫;也可 --rows-only / --disk-only 分半跑
+PYTHONPATH=backend python scripts/sweep_legacy_delete_leftovers.py --apply
+```
+
+与在役服务同一份生产 `.env` 运行（存储根必须一致）；数据库 URL 从环境
+读取且绝不打印。退出码：`0` 完成；`1` apply 有跳过（锁被占）、删不掉的
+路径或残余孤儿行——重跑即可收敛，仍剩则按输出的 id 逐本排查；`2` 参数
+拒绝。SQLite 部署无跨进程锁，脚本对离册 id 直接清扫（单进程服务发不起
+对离册 id 的合法并发写，论证见模块 docstring）；PostgreSQL 可与在役服务
+并存运行。
+
 ## 解析问题自动归档
 
 Excel 专业编译失败、来源解析终态失败，以及全部结构化 chat workload 未通过统一 JSON
