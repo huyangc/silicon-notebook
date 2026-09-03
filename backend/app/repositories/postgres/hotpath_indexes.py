@@ -19,7 +19,14 @@ predicate. Batch 5 (delete jobization, batch 3 · W1 · PR-3) added a fifth
 migration,
 ``backend/app/repositories/postgres/migrations/0049_notebook_delete_jobs.sql``,
 contributing three FK/keyset-covering btree indexes alongside the delete-job
-carrier tables.
+carrier tables. Batch 6 (generational cluster swap, batch 3 · W2 · PR-1)
+added a sixth migration,
+``backend/app/repositories/postgres/migrations/0051_derived_generation.sql``,
+contributing this module's first UNIQUE entry and first two INCLUDE-carrying
+entries (the ``unique``/``include`` spec fields below exist for them); the
+three superseded cluster indexes are dropped by that migration, with the
+production order being builder --apply first, then DROP INDEX CONCURRENTLY
+of the old names, then migrate.
 Every migration and this module's ``HOTPATH_INDEX_SPECS`` are independent
 hand-authored copies of the same index shapes on purpose (a migration file
 cannot import Python at apply time): ``backend/tests/test_hotpath_indexes.py``
@@ -114,16 +121,32 @@ class HotpathIndexSpec:
     # 「少写 COLLATE \"C\" 的手建 GIN 三层全报就绪而 planner 拒用」)必须声明。
     opclasses: tuple[str, ...] = ()
     collations: tuple[str, ...] = ()
+    # 批 6(W2 代次化)新增的两维形态。unique=True → DDL 变 CREATE UNIQUE
+    # INDEX,目录校验期望 indisunique;include 非空 → DDL 尾接 INCLUDE(...),
+    # 目录校验期望 indnatts = 键数 + include 数且非键后缀逐列比对。两者的
+    # 默认值让批 1-5 的既有条目在 _matches_shape 里维持逐字节相同的判定
+    # (非 unique、无 INCLUDE 附加列仍然照旧拒绝,见该函数注释)。
+    unique: bool = False
+    include: tuple[str, ...] = ()
+    # 幂等前置 DDL(批 6):形如 ALTER TABLE … ADD COLUMN IF NOT EXISTS 的
+    # 元数据级语句,建索引前执行(去重后逐条,autocommit,在线安全——PG11+
+    # 带常量 DEFAULT 的加列不重写堆)。存在理由:批 6 索引引用的 generation
+    # 列由迁移 0051 引入,而生产顺序是 builder 先行 CONCURRENTLY、迁移收尾
+    # 落账——没有前置列,builder 在未迁移的库上必然 42703。守卫测试钉住
+    # 「前置只许 ADD COLUMN IF NOT EXISTS 形态」,防这里演化成第二个迁移器。
+    prerequisites: tuple[str, ...] = ()
 
     def column_list_sql(self) -> str:
         return self.ddl_columns or ", ".join(self.columns)
 
     def ddl(self, schema: str, *, concurrently: bool) -> sql.Composed:
         concurrently_kw = sql.SQL("CONCURRENTLY ") if concurrently else sql.SQL("")
+        unique_kw = sql.SQL("UNIQUE ") if self.unique else sql.SQL("")
         using_kw = sql.SQL(f" USING {self.using} ") if self.using else sql.SQL("")
         stmt = sql.SQL(
-            "CREATE INDEX {concurrently}IF NOT EXISTS {index} ON {schema}.{table}{using}({columns})"
+            "CREATE {unique}INDEX {concurrently}IF NOT EXISTS {index} ON {schema}.{table}{using}({columns})"
         ).format(
+            unique=unique_kw,
             concurrently=concurrently_kw,
             index=sql.Identifier(self.name),
             schema=sql.Identifier(schema),
@@ -131,6 +154,10 @@ class HotpathIndexSpec:
             using=using_kw,
             columns=sql.SQL(self.column_list_sql()),
         )
+        if self.include:
+            stmt = sql.SQL("{stmt} INCLUDE ({cols})").format(
+                stmt=stmt, cols=sql.SQL(", ".join(self.include))
+            )
         if self.predicate:
             stmt = sql.SQL("{stmt} WHERE {predicate}").format(
                 stmt=stmt, predicate=sql.SQL(self.predicate)
@@ -308,23 +335,6 @@ HOTPATH_INDEX_SPECS: tuple[HotpathIndexSpec, ...] = (
     # migrations/0043_concept_cluster_keyset_index.sql for the full
     # production evidence and backend/tests/test_hotpath_indexes_batch3.py
     # for this module's own migration<->spec reconciliation test.
-    HotpathIndexSpec(
-        name="idx_clusters_nb_canonical_member",
-        table="concept_clusters",
-        columns=("notebook_id", "canonical_id", "member_object_id"),
-        predicate="",
-        predicate_shape="",
-        # 三列建表即 COLLATE "C"(0001_initial.sql:144-155),普通 btree 继承列
-        # collation,与 knowledge_store.py:concept_cluster_detail_rows 自己的
-        # `COLLATE "C"` 比较/排序键逐字匹配——声明出来让同名错 collation 的
-        # 手建索引同样被拒。opclass 为 pg_catalog 默认 text_ops。
-        opclasses=("pg_catalog:text_ops", "pg_catalog:text_ops", "pg_catalog:text_ops"),
-        collations=("pg_catalog:C", "pg_catalog:C", "pg_catalog:C"),
-        serves=(
-            "knowledge_store.py:concept_cluster_detail_rows / "
-            "concept_cluster_member_total (concept-detail hub-cluster keyset pagination)"
-        ),
-    ),
     # -- Batch 4: the source-tab search predicate -- see
     # migrations/0048_source_search_trgm_indexes.sql for the full production
     # evidence (49k-source notebook, 363ms COUNT, source_authors 210k-row
@@ -467,6 +477,61 @@ HOTPATH_INDEX_SPECS: tuple[HotpathIndexSpec, ...] = (
         collations=("pg_catalog:C", "pg_catalog:C"),
         serves="form-two (ctid) batch-delete loop's notebook_id-leading prefix on the closure-external conversations table (Phase B)",
     ),
+    # ── 批 6(批 3·W2 PR-1,迁移 0051):簇图代次化的三条索引整改。批 3 的
+    # idx_clusters_nb_canonical_member 条目已从本注册表移除——注册表语义是
+    # 「现在应当存在的索引」,0051 把它删了,留着会让 builder 把刚删掉的索引
+    # 重建回来(历史迁移 0043 原样保留,fresh 部署链上建了又被 0051 收走)。
+    # 取代的
+    # 三条旧索引(uq_clusters_notebook_type_member / idx_clusters_nb_
+    # canonical_member / idx_clusters_nb_created)由迁移 DROP IF EXISTS 收走;
+    # 生产顺序 = 本脚本 --apply 在线建三条新的 → 操作员 DROP INDEX
+    # CONCURRENTLY 三条旧的 → 迁移落账(届时全部 no-op)。完整理由见
+    # 0051_derived_generation.sql 头注释与 W2 设计 §1.1。
+    HotpathIndexSpec(
+        name="uq_clusters_nb_type_member_generation",
+        table="concept_clusters",
+        columns=("notebook_id", "object_type", "member_object_id", "generation"),
+        predicate="",
+        predicate_shape="",
+        opclasses=(
+            "pg_catalog:text_ops", "pg_catalog:text_ops",
+            "pg_catalog:text_ops", "pg_catalog:int8_ops",
+        ),
+        collations=("pg_catalog:C", "pg_catalog:C", "pg_catalog:C", ""),
+        unique=True,
+        prerequisites=(
+            "ALTER TABLE concept_clusters ADD COLUMN IF NOT EXISTS generation bigint NOT NULL DEFAULT 0",
+        ),
+        serves="per-generation membership uniqueness (replaces the 3-col unique that physically forbids dual generations -- W2 design Sec 1.1)",
+    ),
+    HotpathIndexSpec(
+        name="idx_clusters_nb_canonical_member_gen",
+        table="concept_clusters",
+        columns=("notebook_id", "canonical_id", "member_object_id"),
+        predicate="",
+        predicate_shape="",
+        opclasses=("pg_catalog:text_ops", "pg_catalog:text_ops", "pg_catalog:text_ops"),
+        collations=("pg_catalog:C", "pg_catalog:C", "pg_catalog:C"),
+        include=("generation",),
+        prerequisites=(
+            "ALTER TABLE concept_clusters ADD COLUMN IF NOT EXISTS generation bigint NOT NULL DEFAULT 0",
+        ),
+        serves="cluster_member_rows / hub keyset pagination Index Only Scan with the generation reader predicate (measured: without INCLUDE the predicate costs 8.8x buffers)",
+    ),
+    HotpathIndexSpec(
+        name="idx_clusters_nb_created_gen",
+        table="concept_clusters",
+        columns=("notebook_id", "created_at"),
+        predicate="",
+        predicate_shape="",
+        opclasses=("pg_catalog:text_ops", "pg_catalog:timestamptz_ops"),
+        collations=("pg_catalog:C", ""),
+        include=("generation",),
+        prerequisites=(
+            "ALTER TABLE concept_clusters ADD COLUMN IF NOT EXISTS generation bigint NOT NULL DEFAULT 0",
+        ),
+        serves="version_facts cluster COUNT/MAX + concept_clusters_count skip-gate leg behind the published-generation predicate; boundedness evidence for the PR-2 catch-up scan",
+    ),
 )
 
 
@@ -509,6 +574,8 @@ def _index_row(connection, schema: str, name: str):
         "ORDER BY co.ord) AS collations, "
         "ARRAY(SELECT pg_get_indexdef(i.indexrelid,n,true) "
         "FROM generate_series(1,i.indnkeyatts) AS n ORDER BY n) AS keys, "
+        "ARRAY(SELECT pg_get_indexdef(i.indexrelid,n,true) "
+        "FROM generate_series(i.indnkeyatts+1,i.indnatts) AS n ORDER BY n) AS include_keys, "
         "pg_get_expr(i.indpred,i.indrelid,true) AS predicate "
         "FROM pg_index i "
         "JOIN pg_class idx ON idx.oid=i.indexrelid "
@@ -535,12 +602,19 @@ def _matches_shape(row, spec: HotpathIndexSpec) -> bool:
     """
     # 唯一性与总列数也是形态(codex #636 R2 P2):同名但声明 UNIQUE、或带
     # INCLUDE 附加列的索引,keys(只含 1..indnkeyatts)与谓词都可能全同,但
-    # inspect 报就绪而迁移 0042 的 DO 块按这两维拒绝——两个校验器必须同结论。
-    if bool(row["indisunique"]):
+    # inspect 报就绪而迁移的 DO 块按这两维拒绝——两个校验器必须同结论。
+    # 批 6 起两维由 spec 声明(默认 False/空,批 1-5 条目判定不变);INCLUDE
+    # 后缀逐列比对目录在非键位置的 pg_get_indexdef 回显。
+    if bool(row["indisunique"]) != spec.unique:
         return False
     if int(row["indnkeyatts"]) != len(spec.columns) or int(row["indnatts"]) != len(
         spec.columns
-    ):
+    ) + len(spec.include):
+        return False
+    include_keys = tuple(
+        _normalized_expr(str(value)) for value in row.get("include_keys") or ()
+    )
+    if include_keys != tuple(_normalized_expr(value) for value in spec.include):
         return False
     keys = tuple(_normalized_expr(str(value)) for value in row["keys"] or ())
     expected_keys = tuple(_normalized_expr(value) for value in spec.columns)
@@ -663,6 +737,7 @@ def install_hotpath_indexes(
             # (质量评审 P1 实证)。
             invalid_names: list[str] = []
             current_spec_name: str | None = None
+            executed_prerequisites: set[str] = set()
             _require_extensions(connection)
             for spec in HOTPATH_INDEX_SPECS:
                 current_spec_name = spec.name
@@ -684,6 +759,12 @@ def install_hotpath_indexes(
                         "then rerun --apply"
                     )
                     continue
+                for prerequisite in spec.prerequisites:
+                    if prerequisite in executed_prerequisites:
+                        continue
+                    emit(f"{spec.name}: prerequisite -- {prerequisite}")
+                    connection.execute(prerequisite)
+                    executed_prerequisites.add(prerequisite)
                 emit(f"{spec.name}: building concurrently")
                 started = time.monotonic()
                 connection.execute(spec.ddl(schema, concurrently=True))

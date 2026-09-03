@@ -146,7 +146,8 @@ def test_every_spec_ddl_is_a_single_create_index_statement():
         for concurrently in (False, True):
             text = spec.ddl("public", concurrently=concurrently).as_string(None)
             upper = text.strip().upper()
-            assert upper.startswith("CREATE INDEX"), (spec.name, text)
+            expected_prefix = "CREATE UNIQUE INDEX" if spec.unique else "CREATE INDEX"
+            assert upper.startswith(expected_prefix), (spec.name, text)
             assert "IF NOT EXISTS" in upper, (spec.name, text)
             assert text.strip().count(";") == 0
             if concurrently:
@@ -214,6 +215,11 @@ class _FakeConnection:
             return _FakeResult({"schema_name": "public"})
         if upper.startswith("CREATE EXTENSION"):
             return _FakeResult(None)
+        if upper.startswith("ALTER TABLE") and "ADD COLUMN IF NOT EXISTS" in upper:
+            # 批 6 的幂等前置列(spec.prerequisites)——真库上是元数据级
+            # no-op/加列,假连接照单全收;任何其它 ALTER 形态仍走末尾的
+            # AssertionError,守住「前置不许演化成第二个迁移器」。
+            return _FakeResult(None)
         if "FROM PG_INDEX" in upper:
             schema, name = params
             row = self.catalog.get(name)
@@ -226,6 +232,9 @@ class _FakeConnection:
             default_keys = list(spec.columns) if spec else []
             default_predicate = spec.predicate_shape if spec else ""
             keys = row.get("keys", default_keys)
+            include_keys = row.get(
+                "include_keys", list(spec.include) if spec else []
+            )
             return _FakeResult(
                 {
                     "index_name": name,
@@ -233,10 +242,13 @@ class _FakeConnection:
                     "table_schema": row.get("schema", "public"),
                     "indisvalid": row.get("indisvalid", True),
                     "indisready": row.get("indisready", True),
-                    "indisunique": row.get("indisunique", False),
+                    "indisunique": row.get(
+                        "indisunique", bool(spec.unique) if spec else False
+                    ),
                     "indnkeyatts": row.get("indnkeyatts", len(keys)),
-                    "indnatts": row.get("indnatts", len(keys)),
+                    "indnatts": row.get("indnatts", len(keys) + len(include_keys)),
                     "keys": keys,
+                    "include_keys": include_keys,
                     "predicate": row.get("predicate", default_predicate),
                     "access_method": row.get(
                         "access_method", (spec.using or "btree") if spec else "btree"
@@ -249,7 +261,7 @@ class _FakeConnection:
                     ),
                 }
             )
-        if upper.startswith("CREATE INDEX"):
+        if upper.startswith("CREATE INDEX") or upper.startswith("CREATE UNIQUE INDEX"):
             match = re.search(r'"([A-Za-z0-9_]+)"\s+ON\s+"[^"]+"\."([A-Za-z0-9_]+)"', text)
             assert match, f"could not parse DDL: {text}"
             name, table = match.group(1), match.group(2)
@@ -258,10 +270,11 @@ class _FakeConnection:
                 "table": table,
                 "indisvalid": True,
                 "indisready": True,
-                "indisunique": False,
+                "indisunique": bool(spec.unique) if spec else False,
                 "indnkeyatts": len(spec.columns) if spec else 0,
-                "indnatts": len(spec.columns) if spec else 0,
+                "indnatts": (len(spec.columns) + len(spec.include)) if spec else 0,
                 "keys": list(spec.columns) if spec else [],
+                "include_keys": list(spec.include) if spec else [],
                 "predicate": spec.predicate_shape if spec else "",
                 "access_method": (spec.using or "btree") if spec else "btree",
                 "opclasses": list(spec.opclasses) if spec else [],
@@ -323,7 +336,7 @@ def test_install_builds_only_missing_indexes_and_skips_ready_ones(fake_connect):
     connections = fake_connect(catalog)
     state = install_hotpath_indexes("postgresql://fake/db")
     assert all(row["state"] == "存在" for row in state["indexes"])
-    create_calls = [c for c in connections[0].calls if c.upper().startswith("CREATE INDEX")]
+    create_calls = [c for c in connections[0].calls if c.upper().startswith(("CREATE INDEX", "CREATE UNIQUE INDEX"))]
     assert len(create_calls) == len(HOTPATH_INDEX_SPECS) - 1
     for call in create_calls:
         assert "CONCURRENTLY" in call.upper()
@@ -339,7 +352,7 @@ def test_install_raises_and_does_not_auto_drop_an_invalid_index(fake_connect):
     calls = connections[0].calls
     assert not any("DROP INDEX" in call.upper() for call in calls)
     # The other seven (still-missing) indexes still get built in the same run.
-    create_calls = [c for c in calls if c.upper().startswith("CREATE INDEX")]
+    create_calls = [c for c in calls if c.upper().startswith(("CREATE INDEX", "CREATE UNIQUE INDEX"))]
     assert len(create_calls) == len(HOTPATH_INDEX_SPECS) - 1
 
 
@@ -388,7 +401,7 @@ def test_install_rejects_a_differently_shaped_owned_index_before_building_others
         install_hotpath_indexes("postgresql://fake/db")
     # Fail-closed, not skip-and-continue: nothing else gets built this run.
     create_calls = [
-        c for c in connections[0].calls if c.upper().startswith("CREATE INDEX")
+        c for c in connections[0].calls if c.upper().startswith(("CREATE INDEX", "CREATE UNIQUE INDEX"))
     ]
     assert create_calls == []
 
@@ -433,7 +446,7 @@ def test_install_failure_message_names_the_index_and_sqlstate_not_raw_text(
 
     def _boom(self, statement, params=None):
         text = statement.as_string(None) if hasattr(statement, "as_string") else str(statement)
-        if text.upper().startswith("CREATE INDEX") and f'"{target.name}"' in text:
+        if text.upper().startswith(("CREATE INDEX", "CREATE UNIQUE INDEX")) and f'"{target.name}"' in text:
             raise _SqlStateError("super secret query text leak", "42P01")
         return original_execute(self, statement, params)
 

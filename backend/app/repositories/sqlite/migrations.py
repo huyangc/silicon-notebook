@@ -144,7 +144,27 @@ logger = logging.getLogger("silicon_notebook.sqlite.maintenance")
 # agent_observations.client_request_id (v55): rows without a key simply do not
 # participate in the unique surface. Existing rows stay NULL — nothing is
 # backfilled, and a NULL key never attaches to anything.
-SCHEMA_VERSION = 70
+# v71 is batch 3 W2 PR-1 (generational cluster/community swap — schema half),
+# parity with PostgreSQL 0051_derived_generation.sql: row-level `generation`
+# columns (INTEGER NOT NULL DEFAULT 0) on concept_clusters / communities /
+# community_members, the generational control block on unified_kg_state
+# (cluster_generation / community_generation published pointers,
+# derived_generation_counter monotonic claim counter — never reset, not even
+# by delete_notebook_kg — derived_building_generation +
+# derived_building_claimed_at in-flight claim pair, derived_catchup_from
+# durable catch-up marker), and the three-index rework: the four-column
+# unique uq_clusters_nb_type_member_generation REPLACES v29's
+# uq_clusters_notebook_type_member (the three-column unique physically
+# forbids two generations coexisting — PR-2's whole mechanism), and the two
+# covering indexes gain generation as a TRAILING KEY column (SQLite has no
+# INCLUDE; a trailing key serves the same covering purpose), replacing
+# idx_clusters_nb_canonical_member (v64) / idx_clusters_nb_created. All
+# defaults keep pre-existing rows and reader results byte-identical:
+# generation=0 rows + pointer 0 (or COALESCE(...,0) on a notebook with no
+# unified_kg_state row) select exactly what they selected before. Design doc
+# docs/superpowers/specs/2026-09-03-batch3-w2-generational-cluster-swap-
+# design_zh.md Sec 1.1.
+SCHEMA_VERSION = 71
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -3733,6 +3753,71 @@ class SqliteMigrator:
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_ask_jobs_client_request "
                 "ON ask_jobs(created_by, client_request_id) "
                 "WHERE client_request_id IS NOT NULL"
+            )
+
+    def _migration_71(self) -> None:
+        """Batch 3 W2 PR-1: generational cluster/community swap — schema
+        half, parity with PostgreSQL 0051_derived_generation.sql. See
+        SCHEMA_VERSION's docstring for the full rationale and the design
+        doc reference.
+
+        Index rework notes (SQLite specifics): SQLite has no ``INCLUDE``
+        clause, so the two covering replacements carry ``generation`` as a
+        TRAILING KEY column — same covering effect for the reader
+        predicates, and the equality/order prefix columns are unchanged so
+        every existing query plan shape is preserved. The old three-column
+        unique MUST be dropped here (not merely superseded): it physically
+        forbids two generations of the same member coexisting, which is
+        PR-2's entire mechanism. While every writer still writes
+        generation=0 (all of PR-1), the four-column unique enforces exactly
+        the same per-generation uniqueness the old one did. SQLite runs the
+        whole migration in-process inside ``migrate()``'s transaction — no
+        CONCURRENTLY dance, no DO-block shape validation (same convention
+        as ``_migration_69``'s note)."""
+        with self._connect() as db:
+            self.add_column_if_missing(
+                db, "concept_clusters", "generation", "INTEGER NOT NULL DEFAULT 0"
+            )
+            self.add_column_if_missing(
+                db, "communities", "generation", "INTEGER NOT NULL DEFAULT 0"
+            )
+            self.add_column_if_missing(
+                db, "community_members", "generation", "INTEGER NOT NULL DEFAULT 0"
+            )
+            self.add_column_if_missing(
+                db, "unified_kg_state", "cluster_generation",
+                "INTEGER NOT NULL DEFAULT 0",
+            )
+            self.add_column_if_missing(
+                db, "unified_kg_state", "community_generation",
+                "INTEGER NOT NULL DEFAULT 0",
+            )
+            self.add_column_if_missing(
+                db, "unified_kg_state", "derived_generation_counter",
+                "INTEGER NOT NULL DEFAULT 0",
+            )
+            self.add_column_if_missing(
+                db, "unified_kg_state", "derived_building_generation",
+                "INTEGER NOT NULL DEFAULT 0",
+            )
+            self.add_column_if_missing(
+                db, "unified_kg_state", "derived_building_claimed_at", "TEXT"
+            )
+            self.add_column_if_missing(
+                db, "unified_kg_state", "derived_catchup_from", "TEXT"
+            )
+            db.executescript(
+                """
+                DROP INDEX IF EXISTS uq_clusters_notebook_type_member;
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_clusters_nb_type_member_generation
+                  ON concept_clusters(notebook_id, object_type, member_object_id, generation);
+                DROP INDEX IF EXISTS idx_clusters_nb_canonical_member;
+                CREATE INDEX IF NOT EXISTS idx_clusters_nb_canonical_member_gen
+                  ON concept_clusters(notebook_id, canonical_id, member_object_id, generation);
+                DROP INDEX IF EXISTS idx_clusters_nb_created;
+                CREATE INDEX IF NOT EXISTS idx_clusters_nb_created_gen
+                  ON concept_clusters(notebook_id, created_at, generation);
+                """
             )
 
     def _recover_interrupted_jobs(self) -> None:
