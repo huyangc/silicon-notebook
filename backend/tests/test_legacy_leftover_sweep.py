@@ -399,10 +399,11 @@ def test_cli_inspect_is_readonly_and_apply_sweeps(repo, tmp_path, capsys):
     assert "community_members: 0" in out
 
 
-def test_disk_sweep_live_mode_never_deletes_direct_roots(repo):
-    """codex #666 R5 P1 pin:在线模式(service_stopped=False)下 notebooks/
-    assets 两根**只报告不删**——没有任何时钟信号能同步拷贝的「目录先落盘、
-    行后提交」窗口;scale 三根仍持 claim 照清。"""
+def test_disk_sweep_live_mode_on_sqlite_reports_everything_deletes_nothing(repo):
+    """codex #666 R5+R6 P1 pin:SQLite 在线模式(service_stopped=False)下
+    盘半**只报告、什么都不删**——直删根没有任何时钟信号能同步拷贝的「目录
+    先落盘、行后提交」窗口(R5),scale 根的 UNSUPPORTED 哨兵不是锁、挡不
+    住「行删了构建还在跑」的带外删除场景(R6)。"""
     live = _mk_nb(repo)
     storage = repo._runtime.source_files.storage_dir
     ghost = "nb-ghost011"
@@ -415,19 +416,25 @@ def test_disk_sweep_live_mode_never_deletes_direct_roots(repo):
     assert sorted(report.skipped) == [
         (ghost, "requires_service_stopped:assets"),
         (ghost, "requires_service_stopped:notebooks"),
+        (ghost, "requires_service_stopped:scale"),
     ]
     assert not report.clean
+    assert report.removed == {
+        root: [] for root in DIRECT_DISK_ROOTS + SCALE_DISK_ROOTS
+    }
     for root in DIRECT_DISK_ROOTS:
         assert (storage / root / ghost / "f.bin").is_file(), (
             "在线模式绝不许碰直删根——时间不是锁"
         )
     for root in SCALE_DISK_ROOTS:
-        assert not (storage / root / ghost).exists()
+        assert (storage / root / ghost).is_dir()
+        assert (storage / root / f"{ghost}.tmp-tok1").is_dir()
 
 
-def test_cli_apply_exits_1_when_live_mode_reports_direct_orphans(repo, capsys):
-    """对外契约 pin:退出码 1 = apply 有跳过。在线模式(无停服确认)下直删
-    根孤儿被记 requires_service_stopped → 1,目录保留,scale 根照清。"""
+def test_cli_apply_exits_1_when_live_mode_reports_orphans(repo, capsys):
+    """对外契约 pin:退出码 1 = apply 有跳过。SQLite 在线模式(无停服确认)
+    下直删根与 scale 根的孤儿都被记 requires_service_stopped → 1,目录全部
+    保留;带停服确认后同一条命令清空。"""
     live = _mk_nb(repo)
     storage = repo._runtime.source_files.storage_dir
     _seed_disk(storage, "nb-ghost004", live)
@@ -435,8 +442,15 @@ def test_cli_apply_exits_1_when_live_mode_reports_direct_orphans(repo, capsys):
     assert main(["--apply", "--disk-only"]) == 1
     out = capsys.readouterr().out
     assert "requires_service_stopped:notebooks" in out
+    assert "requires_service_stopped:scale" in out
     assert (storage / "notebooks" / "nb-ghost004").is_dir()
-    # scale 根由 claim 互斥兜住,在线模式照清
+    assert (storage / "kg_index" / "nb-ghost004").is_dir()
+
+    assert main([
+        "--apply", "--disk-only",
+        "--confirm-service-stopped", "--min-age-seconds", "0",
+    ]) == 0
+    assert not (storage / "notebooks" / "nb-ghost004").exists()
     assert not (storage / "kg_index" / "nb-ghost004").exists()
 
 

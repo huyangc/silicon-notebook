@@ -1627,8 +1627,10 @@ revert、又续跑这次删除。
   copytree 从源继承、ctime 用户态无法回拨）降级为防「以为停了其实没停干净」
   的最后一道皮带，可显式调低到 0。
   scale 三根删前逐本取跨进程排它 claim（与 scale 构建/删除作业同一把
-  advisory lock），在线模式即可安全清扫；被占或无法评估一律跳过留声，
-  绝不硬删。symlink 不清。
+  advisory lock）——**在线清扫仅限 PostgreSQL**（真 advisory lock）；
+  SQLite 没有跨进程锁（codex #666 R6 P1：带外行删除挡不住已准入的构建），
+  scale 根同样只在停服模式删。被占或无法评估一律跳过留声，绝不硬删。
+  symlink 不清。
 
 ```bash
 # 只读盘点(默认):逐表孤儿行数 + 逐根孤儿目录 id
@@ -1643,11 +1645,10 @@ PYTHONPATH=backend python scripts/sweep_legacy_delete_leftovers.py --apply
 语句超时可用 `--statement-timeout-seconds` 覆写，默认 3600）。退出码：
 `0` 完成；`1` apply 有跳过（在线模式的直删根/年龄闸/锁被占）、删不掉的
 路径或残余孤儿行——重跑或换停服窗口即可收敛，仍剩则按输出的 id 逐本排
-查；`2` 参数拒绝。在线模式（不带停服确认）动手的只有孤儿行与 scale 三根
-——行删是有界写事务、scale 根由 claim 互斥，两后端都可与在役服务并存；
-`notebooks`/`assets` 两根的删除必须停服窗口执行。SQLite 的 scale 根无跨
-进程锁，脚本对离册 id 直接清扫（单进程服务发不起对离册 id 的合法并发写，
-论证见模块 docstring）。
+查；`2` 参数拒绝。在线模式（不带停服确认）：孤儿行两后端都可清（有界写
+事务）；scale 三根仅 PostgreSQL 可清（真 advisory claim 互斥），SQLite
+的 scale 根与两棵直删根一样只报告；`notebooks`/`assets` 两根在两个后端
+都必须停服窗口执行。
 
 ## 解析问题自动归档
 

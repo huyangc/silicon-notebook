@@ -1961,9 +1961,12 @@ needs a one-off offline sweep:
   userspace) is demoted to a final belt against "thought it was
   stopped, wasn't", and may be lowered to 0 explicitly. The three scale
   roots are swept per notebook under the cross-process exclusive claim
-  shared with scale builds and delete jobs and are safe in live mode; a
-  held or unevaluable claim skips that notebook loudly, never
-  force-deletes. Symlinks are left alone.
+  shared with scale builds and delete jobs — **live-mode scale sweeping
+  is PostgreSQL-only** (a real advisory lock); SQLite has no
+  cross-process claim (codex #666 R6 P1: an out-of-band row deletion
+  cannot stop an already-admitted builder), so its scale roots are also
+  stopped-mode only. A held or unevaluable claim skips that notebook
+  loudly, never force-deletes. Symlinks are left alone.
 
 ```bash
 # Read-only inventory (default): per-table orphan row counts + per-root orphan ids
@@ -1983,13 +1986,10 @@ direct roots, the age gate, or busy claims), undeletable paths, or
 residual orphan rows — re-running (or a stopped window for the direct
 roots) converges, and anything that remains is investigated per printed
 id; `2` argument refusal. In live mode (no stopped-service confirmation)
-the sweep only touches orphan rows (bounded write transactions) and the
-three scale roots (claim-mutexed) — safe beside the live service on both
-backends; deleting under `notebooks`/`assets` requires a stopped window.
-The SQLite scale roots have no cross-process claim and the script sweeps
-de-registered ids directly (a single-process service cannot start a
-legitimate concurrent writer for an id that is no longer in `notebooks`;
-the module docstring carries the argument).
+orphan rows are swept on both backends (bounded write transactions); the
+three scale roots are swept live on PostgreSQL only (real advisory
+claim), while on SQLite they are reported like the direct roots; deleting
+under `notebooks`/`assets` requires a stopped window on both backends.
 
 ## Automatic analysis-failure archive
 

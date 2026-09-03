@@ -91,8 +91,10 @@ def test_orphan_row_sweep_ctid_paging_keeps_live(postgres_repository):
 def test_disk_sweep_under_real_advisory_lock_and_busy_skip(
     postgres_repository, tmp_path
 ):
-    """盘半在真 advisory lock 下:可取锁的孤儿全清(含 scratch 兄弟);同库
-    另一把已持有的 claim 让该本 scale 根整体跳过,notebooks/assets 照清。"""
+    """盘半在真 advisory lock 下(在线模式,service_stopped=False):PG 的
+    scale 根凭真排它 claim 在线即可清(含 scratch 兄弟),同库另一把已持有
+    的 claim 让该本 scale 根整体跳过;直删根在线只报告不删(codex #666
+    R5/R6 P1——PG 与 SQLite 的差异恰在 scale 根有没有真锁)。"""
     runtime = postgres_repository._runtime
     live = postgres_repository.create_notebook(NotebookCreate(name="sweep-disk")).id
     storage = tmp_path / "s"
@@ -109,16 +111,19 @@ def test_disk_sweep_under_real_advisory_lock_and_busy_skip(
     try:
         report = sweep_orphan_disk(
             runtime.database, "postgresql", storage,
-            min_age_seconds=0, service_stopped=True,
+            min_age_seconds=0, service_stopped=False,
         )
     finally:
         held.release()
 
     assert (busy, "lock_held_elsewhere") in report.skipped
+    for nb in (ghost, busy):
+        assert (nb, "requires_service_stopped:notebooks") in report.skipped
+        assert (nb, "requires_service_stopped:assets") in report.skipped
     assert not report.failed_paths
     for root in DIRECT_DISK_ROOTS:
-        assert not (storage / root / ghost).exists()
-        assert not (storage / root / busy).exists()
+        assert (storage / root / ghost).is_dir()
+        assert (storage / root / busy).is_dir()
         assert (storage / root / live).is_dir()
     for root in SCALE_DISK_ROOTS:
         assert not (storage / root / ghost).exists()

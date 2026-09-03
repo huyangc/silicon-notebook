@@ -192,11 +192,11 @@ PYTHONPATH=backend python scripts/build_scale_index.py import  --notebook nb-xxx
 
 删除作业化(批 3·W1)之前的同步删除路径崩溃留下的孤儿行(5 张无外键表)与
 孤儿目录(5 棵存储根,含 scale 产物的 scratch 兄弟)。默认只读盘点,`--apply`
-才动手;在线模式只清孤儿行(有界事务)与 scale 三根(逐本取跨进程排它
-claim,被占跳过留声),`notebooks`/`assets` 两根的删除必须
-`--confirm-service-stopped` 停服窗口执行(在线只报告不删;时间不是锁),
-停服下年龄闸 `--min-age-seconds` 是防「没停干净」的皮带。两后端都支持;
-盘点/复核是全表扫,建议低峰执行。
+才动手;在线模式只清孤儿行(有界事务),scale 三根仅 PostgreSQL 可在线清
+(真排它 claim,被占跳过留声;SQLite 无跨进程锁,同样只报告),
+`notebooks`/`assets` 两根在两后端都必须 `--confirm-service-stopped` 停服
+窗口执行(在线只报告不删;时间不是锁),停服下年龄闸 `--min-age-seconds`
+是防「没停干净」的皮带。盘点/复核是全表扫,建议低峰执行。
 
 ```bash
 PYTHONPATH=backend python scripts/sweep_legacy_delete_leftovers.py            # 盘点

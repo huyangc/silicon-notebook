@@ -34,15 +34,16 @@ stopped`` 跳过、退出码 1），删除交给停服窗口；在线模式真�
 id 的跨进程排它 claim（``database.try_scale_build_lock``）再删同名 +
 scratch 兄弟：
 
-* PostgreSQL：真 advisory lock。``None``（别人持有）与
-  ``SCALE_BUILD_LOCK_UNAVAILABLE``（无法评估）都**跳过并留声**，绝不硬删；
-  探测自身抛错也只记账跳过该 id，不中止整轮。
-* SQLite：拿到的是 ``UNSUPPORTED_SCALE_BUILD_LOCK``（``verify_held`` 恒真）。
-  离线构建 CLI 对 SQLite 是硬拒绝的，这里**不**拒绝，理由是目标不同：那边
-  rmtree 的是**在册** notebook 的活产物 ``.tmp``，竞态是双构建者双写同一棵
-  staging；这边的目标 id 已不在 ``notebooks`` 表——单进程部署的服务对离册
-  id 发不起任何合法 scale build（入口都过 ``get_notebook``），唯一可能的
-  并发写者是删除作业自己的相位 4/5，而那也是同一组幂等 rmtree，良性。
+* PostgreSQL：真 advisory lock，在线模式即可安全清扫。``None``（别人持有）
+  与 ``SCALE_BUILD_LOCK_UNAVAILABLE``（无法评估）都**跳过并留声**，绝不
+  硬删；探测自身抛错也只记账跳过该 id，不中止整轮。
+* SQLite：拿到的是 ``UNSUPPORTED_SCALE_BUILD_LOCK``——它不是锁
+  （``verify_held`` 恒真），在线模式下 scale 根同样**只报告不删**
+  （codex #666 R6 P1）：孤儿判定挡不住「行删了、构建还在跑」——一个在行
+  尚存时被准入的 build 只持进程内 claim，跨进程不可见；而本工具要清的
+  恰是旧同步删除/带外 ``DELETE FROM notebooks``（运维手册对 revert 场景
+  就是这么教的）留下的孤儿，那些删除从来没走过 claim 纪律。停服模式下
+  UNSUPPORTED 按持有走（服务停了就没有构建者）。
 
 symlink 一律不清：候选扫描跳过 symlink 子项（该形态**静默保留**，不报
 孤儿也不记 failure——symlink 指向哪里不归本清扫判断）；``_artifact_
@@ -252,13 +253,16 @@ def _rmtree_logged(path: Path, storage: Path, report: DiskSweepReport) -> bool:
 
 
 def _sweep_scale_roots_for_id(
-    database, storage: Path, notebook_id: str, report: DiskSweepReport
+    database, storage: Path, notebook_id: str, report: DiskSweepReport,
+    *, service_stopped: bool,
 ) -> list[str]:
     """一个孤儿基 id 在三棵 scale 根下的全部同名+scratch 兄弟,持 claim 删。
 
     ``_artifact_siblings`` 是删除作业相位 4 的同一把分类器(含删除顺序:
     ``.tmp-<token>`` 先、live 最后);#643 不变量①同款——每次破坏性 rmtree
-    前复验持锁,丢锁就地停手。锁探测抛错只记账跳过该 id(记账不中止)。"""
+    前复验持锁,丢锁就地停手。锁探测抛错只记账跳过该 id(记账不中止)。
+    UNSUPPORTED 哨兵(SQLite)不是锁:在线模式跳过留声,只有停服模式放行
+    (codex #666 R6 P1,论证见模块 docstring)。"""
     from app.services.notebook_delete import _artifact_siblings
 
     try:
@@ -273,6 +277,10 @@ def _sweep_scale_roots_for_id(
         report.skipped.append((notebook_id, "lock_held_elsewhere"))
         return []
     assert isinstance(attempt, ScaleBuildLock)
+    if not attempt.supported and not service_stopped:
+        attempt.release()
+        report.skipped.append((notebook_id, "requires_service_stopped:scale"))
+        return []
     removed_roots: list[str] = []
     try:
         for root in SCALE_DISK_ROOTS:
@@ -337,7 +345,10 @@ def sweep_orphan_disk(
                 report.removed[root].append(notebook_id)
     scale_ids = sorted(set().union(*(orphans[root] for root in SCALE_DISK_ROOTS)))
     for notebook_id in scale_ids:
-        for root in _sweep_scale_roots_for_id(database, storage, notebook_id, report):
+        for root in _sweep_scale_roots_for_id(
+            database, storage, notebook_id, report,
+            service_stopped=service_stopped,
+        ):
             report.removed[root].append(notebook_id)
     return report
 
