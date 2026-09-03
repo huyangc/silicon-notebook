@@ -584,42 +584,55 @@ class PostgresMaintenanceAdapter:
                 return total
 
     def _reap_stale_derived_generations(self) -> None:
-        """批 3·W2 启动恢复:清掉崩溃遗留的残代行(三张派生表里 generation
-        不在 {cluster published, community published, 在飞} 的行)。
+        """批 3·W2 启动恢复:释放滞留的在飞认领,再清崩溃遗留的残代行。
 
-        入口按 state 行走(`derived_generation_counter > 0` 才可能存在非零
-        代次;state 表一 notebook 一行,全扫有界)。两条保留规则:
-          · 催收欠账标记在的 notebook 整库跳过——退休代行是欠账的数据源,
-            此时删它就是把链 a 的洞重新撕开(设计 §1.5 崩溃恢复);
-          · 在飞代(building≠0)保留——它可能是**另一进程**(离线 CLI)的
-            活认领,不是尸体;真尸体由 TTL 抢占 + 下一轮预回收收拾。
-        全局页预算(_RECOVERY_REAP_PAGES_BUDGET)界住启动成本;预算烧完直接
+        第一步全局清认领(building→0):启动这一刻不可能有**本进程** rebuild
+        在飞(与上面两张 scratch 表 TRUNCATE 同一条依据),共库离线 CLI 按
+        部署契约与后端停机串行;即便契约被违反,清掉一个活认领也安全——
+        受害者的写段复读与翻转双 CAS 当场响亮作废,不产生半态(双 CAS 的
+        全部意义)。不清,则一次 OOM/kill -9 就把「重新合并」按 TTL(默认
+        4 小时)锁死,违背维护槽「重启即诚实 idle」的既有契约(质量评 P1)。
+
+        第二步逐 notebook 回收:入口按 state 行(counter > 0 才可能有非零
+        代),每本**现读**自己的 state 行取 keep(质量评 P2:全局快照的
+        keep 会落后于快照后新取的号);催收欠账标记在的 notebook 整库跳过
+        ——退休代行是欠账的数据源,删它就是把链 a 的洞重新撕开(§1.5)。
+        全局页预算(_RECOVERY_REAP_PAGES_BUDGET)界住启动成本;预算烧完
         收手,余量由下一轮 rebuild 的预回收接手。"""
         from app.repositories.postgres.unified_kg_store import UnifiedKgStore
 
+        with self._runtime.database.write() as db:
+            db.execute(
+                "UPDATE unified_kg_state SET derived_building_generation=0, "
+                "derived_building_claimed_at=NULL "
+                "WHERE derived_building_generation != 0"
+            )
         with self._runtime.database.connect() as db:
-            rows = db.execute(
-                "SELECT notebook_id, cluster_generation, community_generation, "
-                "derived_building_generation, derived_catchup_from "
-                "FROM unified_kg_state WHERE derived_generation_counter > 0"
-            ).fetchall()
+            ids = [r["notebook_id"] for r in db.execute(
+                "SELECT notebook_id FROM unified_kg_state "
+                "WHERE derived_generation_counter > 0"
+            ).fetchall()]
         budget = _RECOVERY_REAP_PAGES_BUDGET
-        for row in rows:
+        for notebook_id in ids:
             if budget <= 0:
                 return
-            if row["derived_catchup_from"] is not None:
+            with self._runtime.database.connect() as db:
+                row = db.execute(
+                    "SELECT cluster_generation, community_generation, "
+                    "derived_catchup_from FROM unified_kg_state "
+                    "WHERE notebook_id=%s",
+                    (notebook_id,),
+                ).fetchone()
+            if row is None or row["derived_catchup_from"] is not None:
                 continue
-            keep = {int(row["cluster_generation"]),
-                    int(row["community_generation"])}
-            if int(row["derived_building_generation"]):
-                keep.add(int(row["derived_building_generation"]))
-            keep_t = tuple(sorted(keep))
+            keep_t = tuple(sorted({int(row["cluster_generation"]),
+                                   int(row["community_generation"])}))
             for table in ("concept_clusters", "communities",
                           "community_members"):
                 while budget > 0:
                     with self._runtime.database.write() as db:
                         n = UnifiedKgStore.reap_derived_generations_page(
-                            db, row["notebook_id"], table, keep_t,
+                            db, notebook_id, table, keep_t,
                             _RECOVERY_DELETE_BATCH_ROWS)
                     budget -= 1
                     if n < _RECOVERY_DELETE_BATCH_ROWS:

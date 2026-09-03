@@ -151,6 +151,51 @@ def test_community_flip_shares_the_same_double_cas(postgres_database):
         UnifiedKgStore.release_derived_claim(db, "nb-cflip", claim["generation"])
 
 
+def test_catchup_window_payload_is_text_and_pages_by_keyset(postgres_database):
+    """内评 P0 的回归 pin:``knowledge_objects.payload`` 是 jsonb,psycopg 会
+    把裸投影解成 dict——服务层催收的 ``json.loads(r["payload"] or "{}")``
+    当场 TypeError,链 a 闭合在 PG 上整个失效且欠账轮每次复崩。原语必须按
+    ``_compat_rows(payload=True)`` 同款契约吐**文本**;本测试逐字执行服务层
+    那行解析。顺带钉 keyset 分页:(object_type, member_object_id) 全序推进,
+    两页拼起来恰好等于窗口全集(分页丢行=催收丢行)。"""
+    assert PostgresMigrator(postgres_database).migrate() == 51
+    _seed_notebook(postgres_database, "nb-window")
+    with postgres_database.write() as db:
+        db.execute(
+            "INSERT INTO knowledge_objects "
+            "(id, notebook_id, object_type, payload, created_at, updated_at) "
+            "SELECT 'ko-'||g, 'nb-window', 'concept', "
+            "jsonb_build_object('name', 'N'||g), %s::timestamptz, %s::timestamptz "
+            "FROM generate_series(0, 4) g",
+            (_NOW, _NOW),
+        )
+        db.execute(
+            "INSERT INTO concept_clusters "
+            "(id,notebook_id,canonical_id,member_object_id,canonical_name,"
+            "object_type,created_at,generation) "
+            "SELECT 'cc-'||g, 'nb-window', 'can', 'ko-'||g, 'N', 'concept', "
+            "%s::timestamptz, 1 FROM generate_series(0, 4) g",
+            (_NOW,),
+        )
+    import json as _json
+
+    with postgres_database.connect() as db:
+        first = UnifiedKgStore.catchup_window_members(
+            db, "nb-window", 2, _NOW, 300, 3)
+        assert len(first) == 3
+        for r in first:
+            assert isinstance(r["payload"], str), type(r["payload"])
+            payload = _json.loads(r["payload"] or "{}")   # 服务层原句
+            assert payload["name"].startswith("N")
+        rest = UnifiedKgStore.catchup_window_members(
+            db, "nb-window", 2, _NOW, 300, 3,
+            after_object_type=str(first[-1]["object_type"]),
+            after_member_object_id=str(first[-1]["member_object_id"]))
+        members = {r["member_object_id"] for r in first} | {
+            r["member_object_id"] for r in rest}
+    assert members == {f"ko-{g}" for g in range(5)}
+
+
 def test_reap_page_deletes_only_generations_outside_keep(postgres_database):
     assert PostgresMigrator(postgres_database).migrate() == 51
     _seed_notebook(postgres_database, "nb-reap")
@@ -173,8 +218,9 @@ def test_reap_page_deletes_only_generations_outside_keep(postgres_database):
             "WHERE notebook_id='nb-reap' ORDER BY generation"
         ).fetchall()
         assert [r["generation"] for r in left] == [2, 3]
-        # 表名白名单:非派生表响亮拒绝。
-        with pytest.raises(AssertionError):
+        # 表名白名单:非派生表响亮拒绝(ValueError,python -O 下 assert 会
+        # 被剥掉,质量评 P3)。
+        with pytest.raises(ValueError):
             UnifiedKgStore.reap_derived_generations_page(
                 db, "nb-reap", "knowledge_objects", (0,), 10
             )

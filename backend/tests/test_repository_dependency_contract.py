@@ -159,6 +159,8 @@ LIFECYCLE_STORE_CALLS = {
         "write_communities_generation",
         "copy_forward_communities",
         "flip_community_generation",
+        # 补账本发布复核的带锁读(PG FOR SHARE;质量评 P1)——只此一处消费。
+        "community_generation_for_publish",
         "replace_kg_analysis_artifacts",
         "replace_mention_bridge",
         "source_canonical_rows",

@@ -781,10 +781,10 @@ def test_delete_notebook_kg_resets_generation_pointers_but_never_the_counter(rep
 
 
 def test_startup_recovery_reaps_stale_generations_with_the_two_guards(repo):
-    """批 3·W2 启动恢复:残代行(generation ∉ {published, 在飞})被有界回收;
-    两条保留规则缺一即漏——在飞代行保留(可能是共库离线 CLI 的活认领,真尸体
-    归 TTL 抢占 + 下轮预回收),催收标记在的 notebook 整库跳过(退休代行是
-    欠账的数据源,此刻删它就是重新撕开链 a 的洞)。"""
+    """批 3·W2 启动恢复:滞留在飞认领被全局释放(质量评 P1:不清则一次
+    kill -9 就把「重新合并」按 TTL 4h 锁死;活认领被误清也安全——双 CAS 让
+    受害者响亮作废),其在飞代行随之按残代回收;催收标记在的 notebook 整库
+    跳过(退休代行是欠账的数据源,此刻删它就是重新撕开链 a 的洞)。"""
     nb = repo.create_notebook(NotebookCreate(name="reap me"))
     debtor = repo.create_notebook(NotebookCreate(name="debtor"))
     now = _now()
@@ -824,9 +824,16 @@ def test_startup_recovery_reaps_stale_generations_with_the_two_guards(repo):
                 (nb.id, debtor.id),
             )
         }
+        released = db.execute(
+            "SELECT derived_building_generation, derived_building_claimed_at "
+            "FROM unified_kg_state WHERE notebook_id=?", (nb.id,)
+        ).fetchone()
+    assert released["derived_building_generation"] == 0
+    assert released["derived_building_claimed_at"] is None
     assert left == {
         f"cc-{nb.id}-published",       # published 代:保留
-        f"cc-{nb.id}-inflight",        # 在飞代:保留(活认领假设)
+        # 在飞代(gen 4)随认领释放一并按残代回收——启动这一刻它定义上是
+        # 尸体;stale(gen 1)同样回收。
         f"cc-{debtor.id}-retired-debt",  # 催收标记在:整库跳过
     }, left
 

@@ -541,6 +541,20 @@ class UnifiedKgStore:
         return cur.rowcount == 1
 
     @staticmethod
+    def community_generation_for_publish(
+        db: sqlite3.Connection, notebook_id: str
+    ) -> int:
+        """补账本发布复核专用——PG 孪生带 FOR SHARE;SQLite 进程写锁 +
+        BEGIN IMMEDIATE 已把发布事务与任何并发翻转串行,平读即等价
+        (parity 是语义等价,不是语法照抄)。"""
+        row = db.execute(
+            "SELECT community_generation FROM unified_kg_state "
+            "WHERE notebook_id=?",
+            (notebook_id,),
+        ).fetchone()
+        return int(row["community_generation"]) if row else 0
+
+    @staticmethod
     def flip_community_generation(
         db: sqlite3.Connection, notebook_id: str, *, published_from: int,
         generation: int, now: str,
@@ -567,20 +581,26 @@ class UnifiedKgStore:
     @staticmethod
     def catchup_window_members(
         db: sqlite3.Connection, notebook_id: str, published_generation: int,
-        since_ts: str, skew_seconds: int, limit: int,
+        since_ts: str, skew_seconds: int, limit: int, *,
+        after_object_type: str = "", after_member_object_id: str = "",
     ) -> list:
-        # 谓词 != published 而非 = 旧P:欠账轮退休代号无处可查(见 PG 侧
-        # docstring)。datetime() 双侧归一(#659 R13 教训:存储行的 offset
-        # 可能异源)。
+        # 谓词 != published 而非 = 旧P、keyset 分页、payload 文本契约:理由
+        # 见 PG 孪生 docstring(sqlite 的 payload 本就是 TEXT,契约天然满足)。
+        # datetime() 双侧归一(#659 R13 教训:存储行的 offset 可能异源)。
         return db.execute(
-            "SELECT DISTINCT c.member_object_id, c.object_type, o.payload "
+            "SELECT c.member_object_id, c.object_type, "
+            "MIN(o.payload) AS payload "
             "FROM concept_clusters c "
             "JOIN knowledge_objects o ON o.id = c.member_object_id "
             "WHERE c.notebook_id=? AND c.generation != ? "
             "AND datetime(c.created_at) >= "
             "datetime(?, '-' || CAST(? AS TEXT) || ' seconds') "
+            "AND (c.object_type, c.member_object_id) > (?, ?) "
+            "GROUP BY c.object_type, c.member_object_id "
+            "ORDER BY c.object_type, c.member_object_id "
             "LIMIT ?",
-            (notebook_id, published_generation, since_ts, int(skew_seconds), limit),
+            (notebook_id, published_generation, since_ts, int(skew_seconds),
+             after_object_type, after_member_object_id, limit),
         ).fetchall()
 
     @staticmethod
@@ -588,7 +608,8 @@ class UnifiedKgStore:
         db: sqlite3.Connection, notebook_id: str, table: str,
         keep: "tuple[int, ...]", limit: int,
     ) -> int:
-        assert table in ("concept_clusters", "communities", "community_members")
+        if table not in ("concept_clusters", "communities", "community_members"):
+            raise ValueError(f"reap_derived_generations_page: 非派生表 {table!r}")
         marks = ",".join("?" * len(keep))
         cur = db.execute(
             f"DELETE FROM {table} WHERE rowid IN ("

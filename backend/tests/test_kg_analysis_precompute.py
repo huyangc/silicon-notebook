@@ -2550,47 +2550,60 @@ def test_building_another_level_does_not_mark_the_default_level_built(repo, monk
     assert set(_artifacts(repo, notebook_id)) == set(ARTIFACT_KINDS)
 
 
-def test_building_another_level_leaves_the_default_levels_ledger_alone(repo):
-    """同一族的另一半:非默认层的构建也不得改写/作废那份不分 level 的账本与产物表。
-
-    `kg_analysis_artifacts` / `kg_community_edges` / `kg_source_profiles` 与
-    `community_seq` 是**同一份**共享账目,只是分了四张表。让非默认层去写它,后果比
-    seq 那一半更重:
-      · `discard_board_dependent_kg_analysis_artifacts` 会连坐作废默认层**有效**的
-        两份产物(level-1 的 `replace_communities` 只删 level-1 的板块行,默认层的
-        板块 id 一个都没变,那两份根本没悬空);
-      · 随后写回的两份产物指向的是 **level-1** 的板块 id,而默认层的读侧照旧按
-        `community_seq` 对齐判「与当前一致」—— 报告会把 level-1 的跨板块连线画在
-        level-0 的板块上。
-    """
+def test_building_another_level_copy_forwards_boards_and_discards_dangling_products(repo):
+    """批 3·W2 改契约:非默认层的构建把默认层行 copy-forward 进新代并**重铸
+    板块 id**(communities.id 单列 PK,同 id 双代必撞)——旧断言「账本/产物
+    一字不动」因此不再成立:两份板块依赖产物此刻指向已退休代的 id,是**真
+    悬空**,必须与发布同事务作废(质量评 P1:留着它们=盖着「与当前一致」
+    戳的悬空引用,比缺失更糟)。共享 seq 那半不变:非默认层仍不推进
+    `community_seq`、不写回产物——「seq 对齐 ⟹ 默认层建过」的蕴含关系原样
+    保住,三条与板块无关的统计快照也原样留着(它们没悬空)。"""
     notebook_id = _seed(repo)
     assert repo.rebuild_communities(notebook_id) == 2
-    before_ledger = _artifacts(repo, notebook_id)
-    before_edges = _edges(repo, notebook_id)
-    before_profiles = _profiles(repo, notebook_id)
     before_boards = _boards_at(repo, notebook_id, 0)
-    assert set(before_ledger) == set(ARTIFACT_KINDS)
-    assert before_edges and before_profiles and before_boards
+    before_seq = None
+    with repo._connect() as db:
+        row = db.execute(
+            "SELECT community_seq FROM unified_kg_state WHERE notebook_id=?",
+            (notebook_id,)).fetchone()
+        before_seq = row["community_seq"]
+    assert set(_artifacts(repo, notebook_id)) == set(ARTIFACT_KINDS)
+    assert _edges(repo, notebook_id) and before_boards
 
     assert repo.rebuild_communities(notebook_id, level=1) == 2
 
-    assert _edges(repo, notebook_id) == before_edges, (
-        "跨板块边被换成了另一层的板块 id"
-    )
-    assert _artifacts(repo, notebook_id) == before_ledger, (
-        "非默认层的构建改写了那份不分 level 的账本 —— 默认层的读侧照旧信它"
-    )
-    assert _profiles(repo, notebook_id) == before_profiles
-    # 批 3·W2:非默认层的发布把默认层的行 copy-forward 进新代,板块 **id 重铸**
-    # (communities.id 单列 PK,同 id 双代必撞)——所以这里比对的是「行还在、
-    # 划分没变」(个数 + 大小多重集),不再是 id 逐字相同。id 重铸带来的
-    # 已知残留(两份板块依赖产物此时指向旧 id)登记在发布段注释里:今天
-    # 没有任何调用点传非默认层,复制集恒空,残留不落地。
+    # 悬空产物已作废(而不是留着指向旧 id):跨板块边/来源画像清空,账本
+    # 只剩三条与板块无关的统计快照 → 读侧判「缺失」,下一次补账本自愈。
+    assert _edges(repo, notebook_id) == []
+    assert _profiles(repo, notebook_id) == {}
+    assert set(_artifacts(repo, notebook_id)) == {
+        ARTIFACT_CLUSTER_HISTOGRAM, ARTIFACT_LARGEST_CLUSTERS,
+        ARTIFACT_RELATION_PROVENANCE,
+    }
+    # 共享 seq 不被非默认层推进(方向五那半不变)。
+    with repo._connect() as db:
+        row = db.execute(
+            "SELECT community_seq FROM unified_kg_state WHERE notebook_id=?",
+            (notebook_id,)).fetchone()
+    assert row["community_seq"] == before_seq
+    # 划分本体原样带进新代:个数与大小不变,id 全部重铸(9c 的前半)。
     after_boards = _boards_at(repo, notebook_id, 0)
-    assert sorted(after_boards.values()) == sorted(before_boards.values()), (
-        "默认层的板块划分被连坐改掉了 —— copy-forward 必须原样带行"
-    )
+    assert sorted(after_boards.values()) == sorted(before_boards.values())
     assert len(after_boards) == len(before_boards)
+    assert not (set(after_boards) & set(before_boards)), "板块 id 必须全部重铸"
+    # 成员行同步重映射(9c 的后半,内评 P2):published 代 level-0 的每条
+    # 成员行都指向重铸后的板块 id——把 copy_forward_communities 的成员重映射
+    # 段删掉,这里当场空集报红。
+    with repo._connect() as db:
+        member_cids = {
+            r["community_id"] for r in db.execute(
+                "SELECT community_id FROM community_members "
+                "WHERE notebook_id=? AND level=0 AND generation = COALESCE("
+                "(SELECT community_generation FROM unified_kg_state "
+                "WHERE notebook_id=?),0)",
+                (notebook_id, notebook_id)).fetchall()
+        }
+    assert member_cids == set(after_boards), member_cids
 
 
 def test_another_level_never_short_circuits_on_the_default_levels_seq(repo, monkeypatch):

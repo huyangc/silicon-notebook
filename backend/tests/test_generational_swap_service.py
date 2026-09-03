@@ -180,6 +180,64 @@ def test_crash_after_flip_settles_the_debt_on_the_next_round(repo, monkeypatch):
     assert calls[2]["published_generation"] == settled["cluster_generation"]
 
 
+def test_a_crash_before_the_flip_releases_the_claim_via_finally(repo, monkeypatch):
+    """释放通道 b 的专属 pin(复评 P0-2:缺一即整库 409 数小时)。崩溃注入
+    在**翻转之前**——翻转成功自己会清认领(通道 a),把注入放在翻转之后的
+    用例证明不了 finally 的存在;这里删掉 rebuild 的 finally 释放块必红。"""
+    nb = _seed(repo)
+    service = repo._runtime.knowledge_lifecycle
+
+    def exploding_write(*args, **kwargs):
+        raise RuntimeError("simulated crash before flip")
+
+    monkeypatch.setattr(service, "_write_cluster_map_streamed", exploding_write)
+    with pytest.raises(RuntimeError, match="before flip"):
+        repo.rebuild_unified_kg(nb.id, force=True)
+    state = _state(repo, nb.id)
+    assert state["derived_building_generation"] == 0, (
+        "finally CAS 释放没生效——认领要按 TTL(数小时)才解锁")
+    assert state["derived_building_claimed_at"] is None
+    assert state["derived_catchup_from"] is None, "没翻转就不该有欠账标记"
+    # 认领立即可再取(而不是被拒到 TTL)。
+    store = repo._runtime.unified_kg
+    with repo._write() as db:
+        again = store.claim_derived_generation(db, nb.id, ttl_seconds=3600)
+        assert again is not None
+        store.release_derived_claim(db, nb.id, again["generation"])
+
+
+def test_a_preempted_writer_stops_at_the_next_type_boundary(repo, monkeypatch):
+    """写段前复读的 service 级 pin(复评 P2-4):认领被抢走(TTL 抢占/
+    delete 重置的化身)后,下一个 type 的写段必须当场作废早停——把
+    `_write_cluster_map_streamed` 里的复读删掉,本轮会一路写到翻转才失败,
+    这里断言的 `stage` 前缀当场对不上。"""
+    nb = _seed(repo)
+    service = repo._runtime.knowledge_lifecycle
+    original_write_map = service._write_cluster_map_streamed
+    events: list[dict] = []
+    monkeypatch.setattr(repo._runtime.event_log, "emit",
+                        lambda e: events.append(e))
+    fired = []
+
+    def usurp_then_write(notebook_id, object_type, *args, **kwargs):
+        if not fired:
+            fired.append(True)
+            with repo._write() as db:
+                # 模拟抢占者:把在飞认领改成别人的号。
+                db.execute(
+                    "UPDATE unified_kg_state SET "
+                    "derived_building_generation=derived_building_generation+7 "
+                    "WHERE notebook_id=?", (notebook_id,))
+        return original_write_map(notebook_id, object_type, *args, **kwargs)
+
+    monkeypatch.setattr(service, "_write_cluster_map_streamed", usurp_then_write)
+    from app.repositories.ports import KgDerivedGenerationPreempted
+    with pytest.raises(KgDerivedGenerationPreempted):
+        repo.rebuild_unified_kg(nb.id, force=True)
+    preempts = [e for e in events if e.get("kind") == "kg_generation_preempted"]
+    assert preempts and preempts[0]["stage"].startswith("write:"), preempts
+
+
 def test_a_flip_moves_the_source_partition_signature(repo):
     """验收 8b:SourceSubgraphSnapshot 的 ``cluster_generation``(实为
     cluster_mutation_seq 的同名异义投影,见 source_subgraph_projection 的
@@ -205,9 +263,12 @@ def test_a_flip_moves_the_source_partition_signature(repo):
 
 
 def test_flip_transactions_carry_no_row_migration_statements():
-    """语句形状守卫(设计 §1.2):翻转微事务持全 4 类 advisory lock,窗口
-    必须是毫秒级——两端 flip 原语的源码里不许出现 INSERT...SELECT / DELETE
-    这类行级搬运(它们属于写代段/回收段,都在锁窗口之外)。"""
+    """语句形状守卫(设计 §1.2):flip 原语的源码里不许出现 INSERT...SELECT /
+    DELETE 这类行级搬运——cluster 侧翻转微事务持全 4 类 advisory lock,窗口
+    必须毫秒级;community 侧虽不持 advisory lock、且骑在更大的发布事务里
+    (D-W2-6 原子性优先),指针语句本身同样必须纯 CAS。登记的盲区:把搬运
+    挪进被 flip 调用的 helper 能绕过本守卫(移动变异),那一侧由发布形态
+    pin(test_kg_analysis_precompute 的事务分工断言)兜。"""
     import inspect
 
     from app.repositories.postgres.unified_kg_store import (

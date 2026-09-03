@@ -401,6 +401,11 @@ class Settings(BaseSettings):
     # 多重放几行(幂等安置无害),调小才有漏行风险。
     kg_catchup_skew_seconds: int = Field(
         300, ge=0, validation_alias="KG_CATCHUP_SKEW_SECONDS")
+    # 残代回收每页行数(rebuild 预回收 / communities 发布前回收共用)。
+    # 与 KG_GRAPH_DRAIN_PAGE_ROWS 同族同界:每页一条有界 DELETE、一个写
+    # 事务,页间释放写锁;上限同样压在 SQLITE_MAX_VARIABLE_NUMBER 之下。
+    kg_generation_reap_page_rows: int = Field(
+        5000, ge=50, le=20_000, validation_alias="KG_GENERATION_REAP_PAGE_ROWS")
     # 删除作业扫尾的轮询间隔（双驱动：孤儿作业行重排 + 无作业行的 deleting 库
     # 补建）。与 checkup.py 的 _H45_CACHE_TTL 同量级（300s）。
     notebook_delete_sweep_seconds: int = Field(

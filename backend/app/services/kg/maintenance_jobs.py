@@ -175,6 +175,22 @@ class KgMaintenanceJobs:
         """Run the version-gated rebuild and settle on every exit."""
         try:
             clusters = int(self._rebuild_unified_kg(notebook_id))
+        except KgMaintenanceAlreadyRunning:
+            # 批 3·W2(质量评 P2):数据级代际闸的拒绝在这里冒出来时,进程内
+            # 槽已被本作业占下、202 已返回——占号的是**另一进程**(离线 CLI
+            # 直连)的在飞认领。这是「被闸」不是「真失败」:作业仍落 failed
+            # 终态(没有别的诚实终态),但事件与日志用被闸语义,不发
+            # unified_kg_rebuild_failed 误导运维去查故障。
+            self.settle(notebook_id, job_id, "failed")
+            self.event_log.logger.info(
+                "rebuild_unified_kg gated by an in-flight derived-generation "
+                "claim for %s (cross-process single-flight)", notebook_id
+            )
+            self.event_log.emit({
+                "kind": "unified_kg_rebuild_gated",
+                "notebook_id": notebook_id,
+            })
+            raise
         except Exception:
             self.settle(notebook_id, job_id, "failed")
             self.event_log.logger.exception(
