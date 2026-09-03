@@ -1587,9 +1587,9 @@ def test_overview_refuses_to_cache_when_a_board_recast_would_not_move_it(
     又失败。此时签名逐字段相同,已预热的缓存会**无限期**继续吐上一套板块 id,直到 LRU
     淘汰或进程重启,而端点自称读的是 live 快照。
 
-    走真 store 的 `replace_communities` + `discard_board_dependent_kg_analysis_artifacts`
-    而不是手写 SQL:要复现的正是「作废在这一档是 no-op」,手写 DELETE 会把这个前提
-    绕过去。
+    走真 store 的发布协议(取号 → 写新代 → 指针翻转,批 3·W2)+
+    `discard_board_dependent_kg_analysis_artifacts` 而不是手写 SQL:要复现的正是
+    「作废在这一档是 no-op」,手写 DELETE 会把这个前提绕过去。
     """
     with repo._write() as db:
         _state(db)
@@ -1606,11 +1606,18 @@ def test_overview_refuses_to_cache_when_a_board_recast_would_not_move_it(
 
     unified = repo._runtime.unified_kg
     with repo._write() as db:
-        unified.replace_communities(
+        claim = unified.claim_derived_generation(db, NB, ttl_seconds=3600)
+        assert claim is not None
+        unified.write_communities_generation(
             db, NB, 0, [("cm-new", ["K1"])], {"K1": "name of K1"}, {"K1": 1.0},
-            "2026-01-02T09:00:00",
+            "2026-01-02T09:00:00", claim["generation"],
+        )
+        assert unified.flip_community_generation(
+            db, NB, published_from=claim["community_generation"],
+            generation=claim["generation"], now="2026-01-02T09:00:00",
         )
         unified.discard_board_dependent_kg_analysis_artifacts(db, NB)
+        unified.release_derived_claim(db, NB, claim["generation"])
 
     second = service.overview(NB)
 

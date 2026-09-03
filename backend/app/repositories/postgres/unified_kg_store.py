@@ -1077,7 +1077,7 @@ class UnifiedKgStore:
             (notebook_id, level, notebook_id)).fetchone()
 
     @staticmethod
-    def replace_communities(
+    def write_communities_generation(
         db: Any,
         notebook_id: str,
         level: int,
@@ -1085,15 +1085,16 @@ class UnifiedKgStore:
         names: Dict[str, str],
         deg: Dict[str, float],
         now: str,
+        generation: int,
     ) -> None:
-        """Full rewrite for one level: (cid, sorted members) pairs prepared by
-        the caller (min-size policy stays with the orchestration)."""
-        db.execute("DELETE FROM communities WHERE notebook_id=%s AND level=%s", (notebook_id, level))
-        db.execute("DELETE FROM community_members WHERE notebook_id=%s AND level=%s", (notebook_id, level))
+        """写新代(批 3·W2 §1.3,取代旧 replace_communities 的整表重写):
+        (cid, sorted members) 对写进 generation 代,**不 DELETE**——旧代行由
+        发布路径前的预回收清理,指针翻转在既有发布事务里(D-W2-6)。min-size
+        策略仍归 orchestration。"""
         for cid, members in kept:
             db.execute(
-                "INSERT INTO communities (id, notebook_id, level, member_ids, size, created_at) "
-                "VALUES (%s,%s,%s,%s,%s,%s)",
+                "INSERT INTO communities (id, notebook_id, level, member_ids, size, created_at, generation) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s)",
                 (
                     cid,
                     notebook_id,
@@ -1101,13 +1102,64 @@ class UnifiedKgStore:
                     jsonb(_json_document(members, expected=list, field="community members")),
                     len(members),
                     normalize_timestamp(now),
+                    generation,
                 ))
             execute_many(
                 db,
                 "INSERT INTO community_members "
-                "(canonical_id, notebook_id, level, community_id, canonical_name, centrality) "
-                "VALUES (%s,%s,%s,%s,%s,%s)",
-                [(m, notebook_id, level, cid, names.get(m, m), deg.get(m, 0.0)) for m in members])
+                "(canonical_id, notebook_id, level, community_id, canonical_name, centrality, generation) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s)",
+                [(m, notebook_id, level, cid, names.get(m, m), deg.get(m, 0.0),
+                  generation) for m in members])
+
+    @staticmethod
+    def copy_forward_communities(
+        db: Any,
+        notebook_id: str,
+        exclude_level: int,
+        from_generation: int,
+        to_generation: int,
+        mint_id,
+    ) -> int:
+        """翻转事务内把 published 代中**未被本轮重建的 level** 行复制进新代
+        (设计 §1.3)。板块 id 重铸(communities.id 单列 PK,同 id 双代必撞;
+        账本作废与版本记录只在默认层做,非默认层板块 id 随代变不影响任何签名
+        论证),community_members.community_id 随行同步重映射。今天所有调用点
+        level=0 → 复制集为空;返回复制的板块数。Python 逐行(非纯 SQL):
+        复制集按设计恒小,换取两端一致的 id 铸造接缝。"""
+        rows = db.execute(
+            "SELECT id, level, member_ids::text AS member_ids, size, title, "
+            "summary, findings::text AS findings, created_at "
+            "FROM communities WHERE notebook_id=%s AND level != %s AND generation=%s",
+            (notebook_id, exclude_level, from_generation)).fetchall()
+        remap: Dict[str, str] = {}
+        for r in rows:
+            new_id = mint_id()
+            remap[str(r["id"])] = new_id
+            db.execute(
+                "INSERT INTO communities "
+                "(id, notebook_id, level, member_ids, size, title, summary, "
+                "findings, created_at, generation) "
+                "VALUES (%s,%s,%s,%s::jsonb,%s,%s,%s,%s::jsonb,%s,%s)",
+                (new_id, notebook_id, r["level"], r["member_ids"], r["size"],
+                 r["title"], r["summary"], r["findings"], r["created_at"],
+                 to_generation))
+        if remap:
+            mrows = db.execute(
+                "SELECT canonical_id, level, community_id, canonical_name, centrality "
+                "FROM community_members "
+                "WHERE notebook_id=%s AND level != %s AND generation=%s",
+                (notebook_id, exclude_level, from_generation)).fetchall()
+            execute_many(
+                db,
+                "INSERT INTO community_members "
+                "(canonical_id, notebook_id, level, community_id, canonical_name, centrality, generation) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s)",
+                [(m["canonical_id"], notebook_id, m["level"],
+                  remap[str(m["community_id"])], m["canonical_name"],
+                  m["centrality"], to_generation)
+                 for m in mrows if str(m["community_id"]) in remap])
+        return len(remap)
 
     @staticmethod
     def discard_board_dependent_kg_analysis_artifacts(
@@ -1156,34 +1208,6 @@ class UnifiedKgStore:
             f"WHERE notebook_id=%s AND level=%s AND generation = {_PUBLISHED_COMMUNITY_GEN}",
             (notebook_id, level, notebook_id)).fetchall()
         return rows
-
-    @staticmethod
-    def board_partition_still_holds(
-        db: Any, notebook_id: str, level: int, board_id: str
-    ) -> bool:
-        """复核「产物所依据的那套板块划分」是否还在库里 —— 与 SQLite 侧逐条对应
-        (完整用途与「查一行就够」的判据见那边的 docstring)。
-
-        ⚠ **`FOR SHARE` 是这一侧的载重件,不是装饰。** `PostgresDatabase.write()` 是
-        READ COMMITTED、**没有**进程级锁,裸 SELECT 只是一次瞬时读:并发的
-        `replace_communities` 完全可以在我们「查完」与「插完」之间提交,复核照样放行,
-        写出去的仍是悬空产物。带上行锁之后两个方向都对:
-          · 并发写者的 `DELETE FROM communities …` 会**阻塞**到我们提交为止;
-          · 它若已经提交,`FOR SHARE` 根本读不到这一行 → 我们正确地判失效。
-        SQLite 那侧没有也不需要这个语法(进程级写锁 + 文件写锁已经串行),parity 红线
-        要的是语义等价而不是 SQL 等价。
-
-        ⚠ **不改锁对象(死锁)。** 锁 `unified_kg_state` 那一行看着更"权威",但它会与
-        并发写者的 `discard_board_dependent_… → set_community_seq` 顺序**反向**,PG 上
-        可以真死锁。锁 `communities` 的行不会:并发写者的第一个动作就是
-        `DELETE FROM communities`,它在**碰任何产物表之前**就被挡住,因此不可能持有
-        我们想要的东西 —— 两边的加锁顺序共享同一个前缀。
-        """
-        return db.execute(
-            "SELECT 1 FROM communities "
-            "WHERE notebook_id=%s AND level=%s AND id=%s FOR SHARE",
-            (notebook_id, level, board_id),
-        ).fetchone() is not None
 
     @staticmethod
     def set_community_summary(

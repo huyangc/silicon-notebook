@@ -797,8 +797,10 @@ def _boards(repo, notebook_id: str) -> dict:
         return {
             row["id"]: int(row["size"])
             for row in db.execute(
-                "SELECT id, size FROM communities WHERE notebook_id=? AND level=0",
-                (notebook_id,),
+                "SELECT id, size FROM communities WHERE notebook_id=? AND level=0 "
+                "AND generation = COALESCE((SELECT community_generation "
+                "FROM unified_kg_state WHERE notebook_id=?),0)",
+                (notebook_id, notebook_id),
             )
         }
 
@@ -1452,17 +1454,21 @@ def test_boards_and_all_three_product_tables_publish_in_one_transaction(
     assert len(touching) == 1, (
         f"产物被 {len(touching)} 个写事务碰过 —— 发布必须是**一个**事务:{touching}"
     )
-    assert touching[0] == products | {BOARD_TABLE, STATE_TABLE}, (
-        "发布事务没有把板块、版本戳与三张产物表一起写出去 —— "
+    # 批 3·W2:板块行先写进**不可见的新代**(独立写事务),发布 = 指针翻转。
+    # 判据随之从「发布事务碰 communities」换成「发布事务碰 unified_kg_state
+    # (翻转 + 版本戳同事务)且不碰 communities」——可见性语义与旧形态等价:
+    # 读者要么「旧代板块 + 旧账本」要么「新代板块 + 新账本」,中间态不存在。
+    # (copy-forward 在今天的 level=0 调用面上复制集恒空,发布事务因此不写
+    # communities;它一旦开始复制,这条断言会红,把新的形态摆到台面上再定。)
+    assert touching[0] == products | {STATE_TABLE}, (
+        "发布事务没有把指针翻转、版本戳与三张产物表一起写出去 —— "
         "中间态就是「新板块 + 旧账本」或「新板块 + 旧 seq」"
     )
     boarding = [touched for touched in per_transaction if BOARD_TABLE in touched]
-    assert len(boarding) == 1 and boarding[0] is touching[0], (
-        f"板块被另一个写事务单独写了:{per_transaction}"
-    )
-    stamping = [touched for touched in per_transaction if STATE_TABLE in touched]
-    assert len(stamping) == 1 and stamping[0] is touching[0], (
-        f"版本戳被另一个写事务单独提交了:{per_transaction}"
+    assert boarding, f"没有任何写事务写过新代板块行:{per_transaction}"
+    assert all(not (touched & products) for touched in boarding), (
+        f"写新代/回收板块行的事务携带了产物写 —— 发布必须整体骑在指针翻转"
+        f"事务上:{per_transaction}"
     )
 
 
@@ -1568,10 +1574,16 @@ def test_reminting_boards_discards_the_board_dependent_products_in_the_same_tran
     )
     repo.rebuild_communities(notebook_id)
 
-    minting = [t for t in per_transaction if BOARD_TABLE in t]
-    assert len(minting) == 1, f"板块重铸不在恰好一个写事务里:{per_transaction}"
-    assert minting[0] == set(PRODUCT_TABLES) | {BOARD_TABLE, STATE_TABLE}, (
-        "板块重铸事务没有同时作废依赖板块的产物"
+    # 批 3·W2:重铸的**发布**是指针翻转事务(新代行早已写在不可见处),
+    # 作废必须骑在同一个翻转事务上——判据从「碰 communities 的事务」换成
+    # 「碰 unified_kg_state 且碰产物表的事务」(claim/release 只碰 state,
+    # 写新代/回收只碰 communities,都不会混进来)。
+    publishing = [t for t in per_transaction
+                  if STATE_TABLE in t and (t & set(PRODUCT_TABLES))]
+    assert len(publishing) == 1, (
+        f"发布(翻转)不在恰好一个写事务里:{per_transaction}")
+    assert publishing[0] == set(PRODUCT_TABLES) | {STATE_TABLE}, (
+        "发布(指针翻转)事务没有同时作废依赖板块的产物"
     )
     # 落库失败了,所以库里剩下的必须是「作废已生效」的状态。
     assert _edges(repo, notebook_id) == []
@@ -2028,7 +2040,7 @@ def test_backfill_does_not_rerun_louvain_or_rewrite_the_membership_tables(repo, 
 
     store = repo._runtime.unified_kg
     calls: list[str] = []
-    for name in ("replace_communities", "set_community_seq"):
+    for name in ("write_communities_generation", "set_community_seq"):
         monkeypatch.setattr(
             store, name,
             (lambda n: lambda *a, **k: calls.append(n))(name),
@@ -2094,13 +2106,15 @@ def _usurp_the_board_partition(repo, notebook_id: str) -> list[str]:
     """模拟**另一个重建**(`force=True`)当场提交:整套板块换成新铸的 id。
 
     刻意**不**递归调 `rebuild_communities` —— 那会把闸、事件、返回值全搅进来,断言就分不
-    清哪条事件是谁发的。这里直接开一个写事务调 `replace_communities`:抢占者在库里留下的
-    痕迹与真正的 force 重建**逐字相同**(同一个「整表删再插 + 重铸 id」),而窗口精确落在
-    「划分已经读回来、产物还没落库」那一刻。
+    清哪条事件是谁发的。这里直接按发布协议走一遍 store 原语(取号 → 写新代 →
+    指针翻转 → 释放):抢占者在库里留下的痕迹与真正的 force 重建**逐字相同**
+    (新代行 + community_generation 前进),而窗口精确落在「划分已经读回来、
+    产物还没落库」那一刻。
 
     ⚠ 成员列表原样保留,所以板块**个数**不变。这是刻意的:把复核写成
-    `COUNT(*) > 0` 这类计数判据的实现在这条夹具上完全看不出区别 —— 并发 replace 在没变
-    的图上产出**同样多**的板块。守卫必须靠 **id** 判,不是靠数量。
+    `COUNT(*) > 0` 这类计数判据的实现在这条夹具上完全看不出区别 —— 并发发布在
+    没变的图上产出**同样多**的板块。守卫必须靠**代次**判(批 3·W2 起:每次
+    发布都翻指针,代次没变 ⟺ 期间没有任何发布提交过),不是靠数量。
     """
     store = repo._runtime.unified_kg
     with repo._connect() as db:
@@ -2110,10 +2124,17 @@ def _usurp_the_board_partition(repo, notebook_id: str) -> list[str]:
         ]
     fresh_ids = [f"cm-usurper-{index}" for index in range(len(members))]
     with repo._write() as db:
-        store.replace_communities(
+        claim = store.claim_derived_generation(db, notebook_id, ttl_seconds=3600)
+        assert claim is not None, "夹具前提:没有别的在飞认领"
+        store.write_communities_generation(
             db, notebook_id, 0, list(zip(fresh_ids, members)), {}, {},
-            "2026-01-01T00:00:00",
+            "2026-01-01T00:00:00", claim["generation"],
         )
+        assert store.flip_community_generation(
+            db, notebook_id, published_from=claim["community_generation"],
+            generation=claim["generation"], now="2026-01-01T00:00:00",
+        )
+        store.release_derived_claim(db, notebook_id, claim["generation"])
     return fresh_ids
 
 
@@ -2411,8 +2432,10 @@ def _boards_at(repo, notebook_id: str, level: int) -> dict:
         return {
             row["id"]: int(row["size"])
             for row in db.execute(
-                "SELECT id, size FROM communities WHERE notebook_id=? AND level=?",
-                (notebook_id, level),
+                "SELECT id, size FROM communities WHERE notebook_id=? AND level=? "
+                "AND generation = COALESCE((SELECT community_generation "
+                "FROM unified_kg_state WHERE notebook_id=?),0)",
+                (notebook_id, level, notebook_id),
             )
         }
 
@@ -2558,9 +2581,16 @@ def test_building_another_level_leaves_the_default_levels_ledger_alone(repo):
         "非默认层的构建改写了那份不分 level 的账本 —— 默认层的读侧照旧信它"
     )
     assert _profiles(repo, notebook_id) == before_profiles
-    assert _boards_at(repo, notebook_id, 0) == before_boards, (
-        "默认层的板块行被连坐了 —— `replace_communities` 是按 level 删的"
+    # 批 3·W2:非默认层的发布把默认层的行 copy-forward 进新代,板块 **id 重铸**
+    # (communities.id 单列 PK,同 id 双代必撞)——所以这里比对的是「行还在、
+    # 划分没变」(个数 + 大小多重集),不再是 id 逐字相同。id 重铸带来的
+    # 已知残留(两份板块依赖产物此时指向旧 id)登记在发布段注释里:今天
+    # 没有任何调用点传非默认层,复制集恒空,残留不落地。
+    after_boards = _boards_at(repo, notebook_id, 0)
+    assert sorted(after_boards.values()) == sorted(before_boards.values()), (
+        "默认层的板块划分被连坐改掉了 —— copy-forward 必须原样带行"
     )
+    assert len(after_boards) == len(before_boards)
 
 
 def test_another_level_never_short_circuits_on_the_default_levels_seq(repo, monkeypatch):
