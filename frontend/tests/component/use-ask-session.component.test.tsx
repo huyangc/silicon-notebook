@@ -4221,6 +4221,71 @@ test("switching to automatic mode clears persisted reviews of other sessions too
   expect(api.previewAskIntent).not.toHaveBeenCalled();
 });
 
+// codex #664 r10 P2: a switch to automatic mode while the resume's lock claim is
+// still pending must win — the claimed record is released, not attached.
+test("a switch to automatic mode during the pending resume claim prevents the resume", async () => {
+  const contract = contractFor("claimed during switch", true);
+  api.previewAskIntent.mockResolvedValue(contract);
+  api.listConversations.mockResolvedValue([summary("conversation-x")]);
+  api.getConversation.mockImplementation(async (id: string) => detail(id));
+  const first = render(<Harness />);
+  const owner1 = beginOwnedNotebook();
+  await act(async () => {
+    await value!.restoreNotebook(owner1);
+  });
+  act(() => value!.selectMode("reasoning"));
+  await act(async () => {
+    await value!.submit("claimed during switch");
+  });
+  expect(pendingIntentStore()).toHaveLength(1);
+  first.unmount();
+
+  const gate = deferred<void>();
+  const held = new Set<string>();
+  const locks = {
+    request: async (name: string, _options: unknown, callback: (lock: unknown) => unknown) => {
+      await gate.promise;
+      if (held.has(name)) return callback(null);
+      held.add(name);
+      try {
+        return await callback({ name });
+      } finally {
+        held.delete(name);
+      }
+    },
+  };
+  Object.defineProperty(navigator, "locks", { value: locks, configurable: true });
+  try {
+    api.previewAskIntent.mockReset();
+    const view = render(<Harness />);
+    const owner2 = beginOwnedNotebook(2);
+    let restoring!: Promise<boolean>;
+    act(() => {
+      restoring = value!.restoreNotebook(owner2);
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    // The claim is pending; the user switches to automatic mode meanwhile.
+    view.rerender(<Harness policy={{ ...DEFAULT_POLICY, advanced: false }} />);
+    gate.resolve();
+    await act(async () => {
+      await restoring;
+      value!.finishNotebookTransition(owner2);
+    });
+    expect(value!.intentReview).toBeNull();
+    expect(value!.intentChecking).toBe(false);
+    expect(value!.pendingQuestion).toBe("");
+    expect(held.size).toBe(0);
+    expect(pendingIntentStore()).toEqual([]);
+    expect(api.previewAskIntent).not.toHaveBeenCalled();
+    expect(api.runAskStream).not.toHaveBeenCalled();
+  } finally {
+    Reflect.deleteProperty(navigator, "locks");
+  }
+});
+
 // PR #557 regression: `turns`/`sessions`/`pendingTrace`/`feedbackSent` used to
 // fall back to a bare `[]`/`{}` literal whenever the owner is not visible
 // (actorId is null, e.g. logged out / collection page). A bare literal is a

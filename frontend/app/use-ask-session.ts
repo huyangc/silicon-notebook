@@ -714,6 +714,14 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
         removePersistedIntentRun(candidate.id);
         continue;
       }
+      if (!policyRef.current.advanced) {
+        // The mode switched to automatic while the claim was pending: the
+        // switch effect already cleared storage; this claimed candidate must
+        // not be attached either. Same outcome as the check above, one await later.
+        releaseIntentRun(candidate.id);
+        clearPersistedIntentRuns(owner.actorId);
+        return null;
+      }
       persisted = candidate;
       break;
     }
