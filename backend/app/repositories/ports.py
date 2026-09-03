@@ -2527,7 +2527,9 @@ class UnifiedKgStorePort(Protocol):
         table: str,
         keep: tuple,
         limit: int,
-    ) -> int: ...
+        *,
+        after: "tuple | None" = None,
+    ) -> "tuple[int, tuple | None]": ...
     @staticmethod
     def weak_support_relation_rows(
         db: object,

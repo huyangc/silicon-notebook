@@ -614,18 +614,45 @@ class UnifiedKgStore:
     @staticmethod
     def reap_derived_generations_page(
         db: sqlite3.Connection, notebook_id: str, table: str,
-        keep: "tuple[int, ...]", limit: int,
-    ) -> int:
-        if table not in ("concept_clusters", "communities", "community_members"):
+        keep: "tuple[int, ...]", limit: int, *,
+        after: "tuple | None" = None,
+    ) -> "tuple[int, tuple | None]":
+        """按**扫描行数**分页的残代回收(codex #671 R4 P1)——语义、键序与
+        空证明成本论证逐条对应 PG 孪生 docstring。"""
+        page_keys = {
+            "concept_clusters": ("object_type", "member_object_id", "generation"),
+            "communities": ("level", "id"),
+            "community_members": ("community_id", "canonical_id"),
+        }
+        if table not in page_keys:
             raise ValueError(f"reap_derived_generations_page: 非派生表 {table!r}")
-        marks = ",".join("?" * len(keep))
-        cur = db.execute(
-            f"DELETE FROM {table} WHERE rowid IN ("
-            f"SELECT rowid FROM {table} WHERE notebook_id=? "
-            f"AND generation NOT IN ({marks}) LIMIT ?)",
-            (notebook_id, *keep, limit),
-        )
-        return cur.rowcount
+        keys = page_keys[table]
+        keycols = ", ".join(keys)
+        select_cols = keycols if "generation" in keys else keycols + ", generation"
+        params: list = [notebook_id]
+        where_after = ""
+        if after is not None:
+            where_after = (f" AND ({keycols}) > ("
+                           + ",".join(["?"] * len(keys)) + ")")
+            params.extend(after)
+        rows = db.execute(
+            f"SELECT {select_cols} FROM {table} WHERE notebook_id=?"
+            f"{where_after} ORDER BY {keycols} LIMIT ?",
+            (*params, limit),
+        ).fetchall()
+        if not rows:
+            return 0, None
+        keep_set = {int(k) for k in keep}
+        stale = [r for r in rows if int(r["generation"]) not in keep_set]
+        if stale:
+            eq = " AND ".join(f"{c}=?" for c in keys)
+            db.executemany(
+                f"DELETE FROM {table} WHERE notebook_id=? AND {eq}",
+                [(notebook_id, *[r[c] for c in keys]) for r in stale],
+            )
+        next_after = (tuple(rows[-1][c] for c in keys)
+                      if len(rows) == limit else None)
+        return len(stale), next_after
 
     @staticmethod
     def cluster_input_facts(
