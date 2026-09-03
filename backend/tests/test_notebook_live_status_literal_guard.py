@@ -23,16 +23,18 @@ CI 里比行为测试更快、更精确地指出出事的那一行——但角�
    (``postgres/`` 20 + ``sqlite/`` 20,本次逐行枚举见规格 §T-1/摸底 5)。
    任何非常量站点再出现裸的 ``status != 'copying'`` / ``status <> 'copying'``
    (不论空格、``!=``/``<>``)都是回归——常量之外不该再有第二份拼写。
-2. **写侧 6 处 copying 哨兵**——``postgres/sharing_store.py`` 与
+2. **写侧 8 处 copying 哨兵**——``postgres/sharing_store.py`` 与
    ``sqlite/sharing_store.py`` 的 ``compensate_copy``(各 1 处
-   ``DELETE ... WHERE status='copying'``)与 ``sweep_stale_copies``(各 2 处
-   ``SELECT ... WHERE status='copying' ... FOR UPDATE``)。语义是「专指半拷贝,
-   去物理删掉它」,与①的「还不算存在」不同义,**绝不折入** ``NOTEBOOK_LIVE_SQL``。
-   ``status='copying'`` 等值形只许出现在这 6 处;白名单内出现 ``'deleting'``
+   ``DELETE ... WHERE status='copying'``)与 ``sweep_stale_copies``(各 3 处:
+   2 处只读连接上的候选选取 ``SELECT``——PR-4 逐本事务化后**不再带
+   ``FOR UPDATE``**——加 1 处写事务内重验 ``SELECT``,PG 侧重验带
+   ``FOR UPDATE``)。语义是「专指半拷贝,去物理删掉它」,与①的「还不算存在」
+   不同义,**绝不折入** ``NOTEBOOK_LIVE_SQL``。
+   ``status='copying'`` 等值形只许出现在这 8 处;白名单内出现 ``'deleting'``
    (哪怕只是把两值都塞进同一个 ``IN (...)``)同样失败——``sweep_stale_copies``
-   一旦把 ``deleting`` 当半拷贝,会经它自己那条无界的
-   ``DELETE FROM notebooks WHERE id=ANY(%s)`` 把正在后台清理的库整个吞掉,
-   绕过分批清理器与归档(摸底 5)。
+   一旦把 ``deleting`` 当半拷贝,会在逐本写事务里把正在后台清理的库整删,
+   绕过分批清理器与归档(摸底 5;PR-4 之前这还是一条 ``id=ANY(%s)`` 的
+   无界整删,风险同源)。
    ⚠ **纯源码字面量扫描本身有个可绕过的洞**(codex 评审必修 2):把哨兵谓词提成
    模块级常量、再用 f-string 在函数体里引用,该常量的 ``ast.Constant`` 就落在
    模块作用域(``enclosing_function_name is None``),per-function 扫描直接跳过
@@ -234,9 +236,10 @@ def test_deleting_never_folds_into_the_copying_write_side_sentinel():
 
 
 class _RecordingConnection:
-    """记录每一次 ``execute(sql, params)`` 调用,``fetchall`` 固定返回一行假数据
-    (非空)以推进 ``sweep_stale_copies`` 走到它的 DELETE 分支,而不是在
-    ``if not ids: return 0`` 处提前退出。"""
+    """记录每一次 ``execute(sql, params)`` 调用。``fetchall`` 固定返回一行假
+    候选(非空)让 ``sweep_stale_copies`` 进入逐本循环;``fetchone`` 固定返回
+    非 None 让逐本写事务的重验通过——两者合力推进到每本的 DELETE 分支,
+    而不是在「无候选」或「重验不过就 continue」处提前退出。"""
 
     def __init__(self) -> None:
         self.executed: list[tuple[str, tuple]] = []
@@ -249,7 +252,7 @@ class _RecordingConnection:
         return [{"id": "nb-fake-stale-copy"}]
 
     def fetchone(self):
-        return None
+        return {"1": 1}
 
 
 class _RecordingDatabase:
@@ -324,11 +327,21 @@ def test_write_side_sentinel_actually_executed_never_folds_deleting():
 
     # 覆盖度 sanity check(PR-4 逐本事务化后):compensate_copy 1 处 DELETE +
     # sweep_stale_copies 每次调用 1 处选取 SELECT + 1 处写事务内重验 SELECT
-    # (假连接 fetchall 恒回一行、fetchone 恒回 None → 每次 sweep 恰好各走一遍)
-    # = 每后端 1+2×2=5 处、两后端合计 10 处——确认上面那条断言真的看过全部
-    # 该看的语句,不是因为调用没打到目标分支才侥幸通过。
+    # (假连接 fetchall 恒回一行、fetchone 恒回非 None → 每次 sweep 都推进到
+    # 重验与逐本 DELETE)= 每后端 1+2×2=5 处、两后端合计 10 处——确认上面那条
+    # 断言真的看过全部该看的语句,不是因为调用没打到目标分支才侥幸通过。
     sentinel_hits = [sql for sql, _params in executed if _WRITE_SIDE_SENTINEL.search(sql)]
     assert len(sentinel_hits) == 10, (sentinel_hits, executed)
+
+    # DELETE 分支真的被推进了(内评 P2:fetchone 恒 None 的旧假连接让重验
+    # 永远不过,逐本 DELETE 成了不可达代码,'deleting' 断言对它形同虚设):
+    # 每次 sweep 调用对假候选执行 1 条 `DELETE FROM notebooks WHERE id=...`,
+    # 2 后端×2 次调用 + 2 处 compensate_copy 的哨兵 DELETE = 6 条 notebooks DELETE。
+    notebook_deletes = [
+        sql for sql, _params in executed
+        if "DELETE FROM notebooks" in sql
+    ]
+    assert len(notebook_deletes) == 6, (notebook_deletes, executed)
 
 
 def _load_module(path: pathlib.Path, name: str):

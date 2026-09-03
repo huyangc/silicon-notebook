@@ -116,7 +116,7 @@ search 三处,各自手写「owner ∨ 只读成员」的 EXISTS 子查询。副
 # 「这行还不算存在」的可见性谓词单点(批 3·W1 T-1,摸底 5)。折的是 40 处读侧站点
 # (`postgres/` 20 + `sqlite/` 20,逐行枚举见守卫测试),供裸列名或带别名前缀
 # (如 `"nb." + NOTEBOOK_LIVE_SQL`)两种引用形式拼接。
-# ⚠ 写侧 6 处 copying 哨兵(sharing_store.py 的 compensate_copy/sweep_stale_copies)
+# ⚠ 写侧 8 处 copying 哨兵(sharing_store.py 的 compensate_copy/sweep_stale_copies)
 # 与生产者 1 处(notebook_sharing.py 的 `status="copying"` kwarg)绝不折进这里——
 # 语义是「专指半拷贝去物理删掉它」/「置位」,和这条「还不算存在」的读侧谓词不同义。
 # `deleting` 目前没有任何行会命中(批 3·W1 T-2 之前没有代码会写这个值),

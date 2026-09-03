@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""存量删除残渣离线清扫 CLI(薄包装)。逻辑见 app.services.legacy_leftover_sweep。
+"""存量删除残渣离线清扫 CLI(薄包装)。逻辑见 app.migration.legacy_leftover_sweep。
 
 删除作业化(PR #659)之前的同步删除路径崩溃留下的两类存量垃圾,没有任何在线
 路径会再清:5 张无外键表的孤儿行、5 棵存储根下的孤儿目录(含 scale 产物的
@@ -21,7 +21,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
-from app.services.legacy_leftover_sweep import main  # noqa: E402
+from app.migration.legacy_leftover_sweep import main  # noqa: E402
 
 if __name__ == "__main__":
     raise SystemExit(main())

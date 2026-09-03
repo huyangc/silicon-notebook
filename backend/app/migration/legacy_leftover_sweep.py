@@ -6,22 +6,30 @@
 ``scripts/sweep_legacy_delete_leftovers.py`` 提供可测的清扫原语：
 
 **行半**（``ORPHAN_ROW_TABLES``）：5 张对 ``notebooks`` 无外键、且旧同步删除
-路径证实漏删过的表，按 ``NOT EXISTS(notebooks)`` anti-join 分页删除——
-SQLite 走 ``rowid IN (…LIMIT n)``、PostgreSQL 走 ``ctid IN (…LIMIT n)``，
-每批一个独立写事务（有界，绝不把 N 本残渣叠进一个事务）。终止条件是
-``rowcount==0``，不是 ``rowcount<batch``（同 ``notebook_delete`` 形二的教训：
-并发写者可以让一批变小而行仍然存在）。
+路径证实漏删过的表。两阶段（内评 P2：单阶段 ``NOT EXISTS + LIMIT`` 分页在
+大表上每批都从堆首重扫，O(批数×全表扫)）——先每表一次 anti-join 物化
+distinct 孤儿 ``notebook_id``（一次扫描），再逐 id 走该表的 ``notebook_id``
+前导索引分页删（SQLite ``rowid IN (…LIMIT n)``、PostgreSQL ``ctid IN
+(…LIMIT n)``，谓词同时保留 anti-join 兜双保险），每批一个独立写事务。
+终止条件是 ``rowcount==0``，不是 ``rowcount<batch``（同 ``notebook_delete``
+形二的教训：并发写者可以让一批变小而行仍然存在）。阶段一快照之后才变成
+孤儿的 id 本轮不清，由 ``--apply`` 收尾的残余复核报出、重跑收敛。
 
 **盘半**：5 棵存储根的直接子目录，名字（scale 根还要先剥
 ``SCRATCH_SUFFIXES``/``SCRATCH_INFIX`` 得到基 id）不在 ``notebooks`` 表里的
-即孤儿。``notebooks/``、``assets/`` 两根直接整删（与删除作业相位 5 的
-``_sweep_ingestion_stragglers`` 同款语义：行没了的目录不会再被任何在线路径
-认领；正在进行的摄取自己会补偿式 unlink）。三棵 scale 根
+即孤儿。``notebooks/``、``assets/`` 两根直删，但设**年龄闸**（内评 P1）：
+``copy_notebook`` 是仓库里唯一「目录先落盘、``notebooks`` 行后提交」的合法
+在线路径（先 ``copytree`` 目的目录、快照物化后才插 copying 哨兵行），窗口
+可达分钟级——闸值内（目录 mtime 距今 < ``min_age_seconds``，CLI 默认取
+``notebook_copy_stale_seconds``）的候选跳过留声，绝不与在途拷贝抢目录；
+过闸的目录与删除作业相位 5 ``_sweep_ingestion_stragglers`` 同款语义（行
+没了/从未提交且早已过窗的目录不会再被任何在线路径认领）。三棵 scale 根
 （``kg_index``/``kg_viz``/``kg_index_partitions``）先取该 id 的跨进程排它
 claim（``database.try_scale_build_lock``）再删同名 + scratch 兄弟：
 
 * PostgreSQL：真 advisory lock。``None``（别人持有）与
-  ``SCALE_BUILD_LOCK_UNAVAILABLE``（无法评估）都**跳过并留声**，绝不硬删。
+  ``SCALE_BUILD_LOCK_UNAVAILABLE``（无法评估）都**跳过并留声**，绝不硬删；
+  探测自身抛错也只记账跳过该 id，不中止整轮。
 * SQLite：拿到的是 ``UNSUPPORTED_SCALE_BUILD_LOCK``（``verify_held`` 恒真）。
   离线构建 CLI 对 SQLite 是硬拒绝的，这里**不**拒绝，理由是目标不同：那边
   rmtree 的是**在册** notebook 的活产物 ``.tmp``，竞态是双构建者双写同一棵
@@ -29,15 +37,19 @@ claim（``database.try_scale_build_lock``）再删同名 + scratch 兄弟：
   id 发不起任何合法 scale build（入口都过 ``get_notebook``），唯一可能的
   并发写者是删除作业自己的相位 4/5，而那也是同一组幂等 rmtree，良性。
 
-symlink 一律不清：候选扫描跳过 symlink 子项；``shutil.rmtree`` 自身拒绝
-symlink，``ignore_errors=True`` 下留在原地并被记为 failure（响亮不中止，
-同删除作业相位 4 的「记账不中止」）。本模块绝不打印数据库 URL。
+symlink 一律不清：候选扫描跳过 symlink 子项（该形态**静默保留**，不报
+孤儿也不记 failure——symlink 指向哪里不归本清扫判断）；``_artifact_
+siblings`` 捡到的 symlink 兄弟会被 ``shutil.rmtree`` 拒绝，留在原地并记为
+failure（响亮不中止，同删除作业相位 4 的「记账不中止」）。本模块绝不打印
+数据库 URL。
 """
 from __future__ import annotations
 
 import shutil
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 from app.repositories.filesystem.scale_artifact_store import (
     SCRATCH_INFIX,
@@ -48,8 +60,9 @@ from app.repositories.scale_build_lock import (
     ScaleBuildLock,
 )
 
-# 旧同步删除路径漏删过的 5 张无外键表(两后端同名同列;见模块 docstring)。
-# 表名只允许来自这份白名单——SQL 里的表名是 f-string 拼接,绝不接受外部输入。
+# 旧同步删除路径漏删过的 5 张无外键表(两后端同名同列,且都有 notebook_id
+# 前导索引;见模块 docstring)。表名只允许来自这份白名单——SQL 里的表名是
+# f-string 拼接,绝不接受外部输入。
 ORPHAN_ROW_TABLES: tuple[str, ...] = (
     "community_members",
     "conversations",
@@ -60,6 +73,8 @@ ORPHAN_ROW_TABLES: tuple[str, ...] = (
 # 子目录名即 notebook id 的两棵根(摄取/贴图产物)。
 DIRECT_DISK_ROOTS: tuple[str, ...] = ("notebooks", "assets")
 # 子目录名可能带 scratch 后缀/中缀的三棵 scale 产物根,删前须持排它 claim。
+# 根名与 scale_artifact_store 的目录公式各存一份字面量,由
+# test_scale_disk_roots_match_artifact_store_layout 钉住不失配。
 SCALE_DISK_ROOTS: tuple[str, ...] = ("kg_index", "kg_viz", "kg_index_partitions")
 
 DEFAULT_BATCH_SIZE = 2000
@@ -82,8 +97,9 @@ def _orphan_predicate(table: str) -> str:
     )
 
 
-def count_orphan_rows(database, dialect: str) -> dict[str, int]:
-    """只读:逐表数孤儿行。inspect 模式的输出,也是 --apply 后的残余复核。"""
+def count_orphan_rows(database) -> dict[str, int]:
+    """只读:逐表数孤儿行(anti-join 全表扫,大库上分钟级——见 runbook 的
+    低峰提示)。inspect 模式的输出,也是 --apply 后的残余复核。"""
     counts: dict[str, int] = {}
     with database.connect() as db:
         for table in ORPHAN_ROW_TABLES:
@@ -94,10 +110,27 @@ def count_orphan_rows(database, dialect: str) -> dict[str, int]:
     return counts
 
 
+def _orphan_notebook_ids_in_table(database, table: str) -> list[str]:
+    """阶段一:一次 anti-join 扫描物化该表的 distinct 孤儿 notebook_id。"""
+    with database.connect() as db:
+        rows = db.execute(
+            f"SELECT DISTINCT notebook_id FROM {table} "
+            f"WHERE {_orphan_predicate(table)}"
+        ).fetchall()
+    return sorted(str(row["notebook_id"]) for row in rows)
+
+
 def sweep_orphan_rows(
-    database, dialect: str, *, batch_size: int = DEFAULT_BATCH_SIZE
+    database,
+    dialect: str,
+    *,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    on_table_done: "Callable[[str, int], None] | None" = None,
 ) -> dict[str, int]:
-    """逐表分页删孤儿行;每批独立写事务;返回逐表实删行数。"""
+    """两阶段逐表删孤儿行;每批独立写事务;返回逐表实删行数。
+
+    ``on_table_done(table, deleted)`` 每张表收尾时回调——CLI 用它即时落
+    进度账,单批语句超时冒出时已完成的表不失账。"""
     if batch_size < 1:
         raise ValueError("batch_size must be >= 1")
     handle = _row_handle(dialect)
@@ -105,25 +138,29 @@ def sweep_orphan_rows(
     deleted: dict[str, int] = {}
     for table in ORPHAN_ROW_TABLES:
         total = 0
-        while True:
-            with database.write() as db:
-                cursor = db.execute(
-                    f"DELETE FROM {table} WHERE {handle} IN ("
-                    f"SELECT {handle} FROM {table} "
-                    f"WHERE {_orphan_predicate(table)} LIMIT {ph})",
-                    (batch_size,),
-                )
-                count = cursor.rowcount
-            if count <= 0:
-                break
-            total += count
+        for notebook_id in _orphan_notebook_ids_in_table(database, table):
+            while True:
+                with database.write() as db:
+                    cursor = db.execute(
+                        f"DELETE FROM {table} WHERE {handle} IN ("
+                        f"SELECT {handle} FROM {table} "
+                        f"WHERE notebook_id = {ph} "
+                        f"AND {_orphan_predicate(table)} LIMIT {ph})",
+                        (notebook_id, batch_size),
+                    )
+                    count = cursor.rowcount
+                if count <= 0:
+                    break
+                total += count
         deleted[table] = total
+        if on_table_done is not None:
+            on_table_done(table, total)
     return deleted
 
 
 def _scratch_base_id(name: str) -> str:
     """scale 根子目录名 → 基 notebook id(与 ``_artifact_siblings`` 的分类
-    形态同一对常量;中缀判定在前,``x.tmp-token`` 不落进 ``.tmp`` 后缀分支)。"""
+    形态共享同一对 ``SCRATCH_SUFFIXES``/``SCRATCH_INFIX`` 常量)。"""
     if SCRATCH_INFIX in name:
         return name.split(SCRATCH_INFIX, 1)[0]
     for suffix in SCRATCH_SUFFIXES:
@@ -133,7 +170,8 @@ def _scratch_base_id(name: str) -> str:
 
 
 def _scan_candidate_ids(parent: Path, *, scratch: bool) -> set[str]:
-    """一棵根下的候选 notebook id 集合;跳过文件与 symlink。"""
+    """一棵根下的候选 notebook id 集合;文件与 symlink 子项静默跳过
+    (symlink 不进候选,也就永远不会成为本清扫的删除目标)。"""
     if not parent.is_dir():
         return set()
     candidates: set[str] = set()
@@ -163,7 +201,8 @@ def _existing_notebook_ids(database, dialect: str, ids: set[str]) -> set[str]:
 
 
 def find_orphan_disk(database, dialect: str, storage_dir: Path) -> dict[str, list[str]]:
-    """只读:逐根列出孤儿 notebook id(scale 根按基 id 归并)。"""
+    """只读:逐根列出孤儿 notebook id(scale 根按基 id 归并)。不设年龄闸——
+    如实盘点;闸在 ``sweep_orphan_disk`` 的删除侧。"""
     storage = Path(storage_dir)
     per_root_candidates = {
         root: _scan_candidate_ids(storage / root, scratch=root in SCALE_DISK_ROOTS)
@@ -179,7 +218,7 @@ def find_orphan_disk(database, dialect: str, storage_dir: Path) -> dict[str, lis
 
 @dataclass
 class DiskSweepReport:
-    """--apply 的盘半结果:逐根实删 id、跳过的 scale id(带原因)、
+    """--apply 的盘半结果:逐根实删 id、跳过的 id(带原因:年龄闸/锁)、
     删不掉的路径(权限/竞态;留声不中止)。"""
 
     removed: dict[str, list[str]] = field(default_factory=dict)
@@ -191,10 +230,12 @@ class DiskSweepReport:
         return not self.skipped and not self.failed_paths
 
 
-def _rmtree_logged(path: Path, report: DiskSweepReport) -> None:
+def _rmtree_logged(path: Path, report: DiskSweepReport) -> bool:
     shutil.rmtree(path, ignore_errors=True)
     if path.exists():
         report.failed_paths.append(str(path))
+        return False
+    return True
 
 
 def _sweep_scale_roots_for_id(
@@ -204,10 +245,14 @@ def _sweep_scale_roots_for_id(
 
     ``_artifact_siblings`` 是删除作业相位 4 的同一把分类器(含删除顺序:
     ``.tmp-<token>`` 先、live 最后);#643 不变量①同款——每次破坏性 rmtree
-    前复验持锁,丢锁就地停手。"""
+    前复验持锁,丢锁就地停手。锁探测抛错只记账跳过该 id(记账不中止)。"""
     from app.services.notebook_delete import _artifact_siblings
 
-    attempt = database.try_scale_build_lock(notebook_id)
+    try:
+        attempt = database.try_scale_build_lock(notebook_id)
+    except Exception:  # noqa: BLE001 - 每本记账跳过,绝不让一本中止整轮
+        report.skipped.append((notebook_id, "lock_probe_error"))
+        return []
     if attempt is SCALE_BUILD_LOCK_UNAVAILABLE:
         report.skipped.append((notebook_id, "lock_unavailable"))
         return []
@@ -219,29 +264,47 @@ def _sweep_scale_roots_for_id(
     try:
         for root in SCALE_DISK_ROOTS:
             parent = storage / root
-            swept_any = False
+            removed_any = False
             for entry in _artifact_siblings(parent, notebook_id):
                 if not attempt.verify_held():
                     report.skipped.append((notebook_id, "lock_lost_mid_sweep"))
                     return removed_roots
-                _rmtree_logged(entry, report)
-                swept_any = True
-            if swept_any:
+                if _rmtree_logged(entry, report):
+                    removed_any = True
+            if removed_any:
                 removed_roots.append(root)
     finally:
         attempt.release()
     return removed_roots
 
 
-def sweep_orphan_disk(database, dialect: str, storage_dir: Path) -> DiskSweepReport:
-    """--apply 的盘半:notebooks/assets 直删,scale 三根持 claim 删。"""
+def sweep_orphan_disk(
+    database,
+    dialect: str,
+    storage_dir: Path,
+    *,
+    min_age_seconds: float,
+) -> DiskSweepReport:
+    """--apply 的盘半:notebooks/assets 过年龄闸后直删,scale 三根持 claim 删。
+
+    年龄闸只管两棵直删根(见模块 docstring 的 ``copy_notebook`` 窗口论证;
+    scale 根的在途写者全部持 claim,由锁互斥兜住,不需要闸)。"""
     storage = Path(storage_dir)
     orphans = find_orphan_disk(database, dialect, storage)
     report = DiskSweepReport(removed={root: [] for root in orphans})
+    now = time.time()
     for root in DIRECT_DISK_ROOTS:
         for notebook_id in orphans[root]:
-            _rmtree_logged(storage / root / notebook_id, report)
-            report.removed[root].append(notebook_id)
+            target = storage / root / notebook_id
+            try:
+                age = now - target.lstat().st_mtime
+            except OSError:
+                continue  # 竞态里刚消失的目录:无事可做
+            if age < min_age_seconds:
+                report.skipped.append((notebook_id, f"recent_dir:{root}"))
+                continue
+            if _rmtree_logged(target, report):
+                report.removed[root].append(notebook_id)
     scale_ids = sorted(set().union(*(orphans[root] for root in SCALE_DISK_ROOTS)))
     for notebook_id in scale_ids:
         for root in _sweep_scale_roots_for_id(database, storage, notebook_id, report):
@@ -266,27 +329,21 @@ def _open_database(settings, dialect: str):
     return SqliteDatabase(settings, root_dir)
 
 
-def _print_report(
-    row_counts: dict[str, int],
-    disk_orphans: dict[str, list[str]],
-    *,
-    applied: bool,
-    disk_report: "DiskSweepReport | None",
-) -> None:
-    verb = "已删孤儿行" if applied else "孤儿行"
-    for table, count in row_counts.items():
-        print(f"{verb} {table}: {count}")
+def _print_disk_findings(disk_orphans: dict[str, list[str]], *, applied: bool) -> None:
+    label_prefix = "残余孤儿目录" if applied else "孤儿目录"
     for root, ids in disk_orphans.items():
-        label = f"孤儿目录 {root}: {len(ids)}"
+        label = f"{label_prefix} {root}: {len(ids)}"
         print(label if not ids else f"{label}  {' '.join(ids)}")
-    if disk_report is not None:
-        for root, ids in disk_report.removed.items():
-            if ids:
-                print(f"已清目录 {root}: {' '.join(sorted(ids))}")
-        for notebook_id, reason in disk_report.skipped:
-            print(f"跳过 scale 清扫 {notebook_id}: {reason}")
-        for path in disk_report.failed_paths:
-            print(f"删除失败(留在原地): {path}")
+
+
+def _print_disk_report(disk_report: DiskSweepReport) -> None:
+    for root, ids in disk_report.removed.items():
+        if ids:
+            print(f"已清目录 {root}: {' '.join(sorted(ids))}")
+    for notebook_id, reason in disk_report.skipped:
+        print(f"跳过 {notebook_id}: {reason}")
+    for path in disk_report.failed_paths:
+        print(f"删除失败(留在原地): {path}")
 
 
 def main(argv: "list[str] | None" = None) -> int:
@@ -306,12 +363,19 @@ def main(argv: "list[str] | None" = None) -> int:
     parser.add_argument("--rows-only", action="store_true", help="只清孤儿行")
     parser.add_argument("--disk-only", action="store_true", help="只清孤儿目录")
     parser.add_argument(
+        "--min-age-seconds", type=int, default=None,
+        help="直删根(notebooks/assets)的年龄闸;目录 mtime 距今更近的跳过。"
+        "默认取 NOTEBOOK_COPY_STALE_SECONDS——绝不与在途拷贝抢目录",
+    )
+    parser.add_argument(
         "--statement-timeout-seconds", type=int, default=3600,
         help="PostgreSQL 语句超时覆写(离线大扫描;默认 3600)",
     )
     args = parser.parse_args(argv)
     if args.batch_size < 1 or args.statement_timeout_seconds < 1:
         parser.error("--batch-size/--statement-timeout-seconds 必须为正")
+    if args.min_age_seconds is not None and args.min_age_seconds < 0:
+        parser.error("--min-age-seconds 不得为负")
     if args.rows_only and args.disk_only:
         parser.error("--rows-only 与 --disk-only 互斥")
 
@@ -323,31 +387,46 @@ def main(argv: "list[str] | None" = None) -> int:
                 "postgres_statement_timeout_seconds": args.statement_timeout_seconds
             }
         )
+    min_age = (
+        args.min_age_seconds
+        if args.min_age_seconds is not None
+        else max(1, settings.notebook_copy_stale_seconds)
+    )
     database = _open_database(settings, dialect)
     storage = Path(str(settings.storage_dir))
     do_rows = not args.disk_only
     do_disk = not args.rows_only
     try:
-        disk_report: DiskSweepReport | None = None
         if args.apply:
-            deleted = (
-                sweep_orphan_rows(database, dialect, batch_size=args.batch_size)
-                if do_rows
-                else {}
-            )
+            disk_report: DiskSweepReport | None = None
+            if do_rows:
+                sweep_orphan_rows(
+                    database,
+                    dialect,
+                    batch_size=args.batch_size,
+                    on_table_done=lambda table, n: print(f"已删孤儿行 {table}: {n}"),
+                )
             if do_disk:
-                disk_report = sweep_orphan_disk(database, dialect, storage)
-            residual = count_orphan_rows(database, dialect) if do_rows else {}
-            disk_orphans = find_orphan_disk(database, dialect, storage) if do_disk else {}
-            _print_report(deleted, disk_orphans, applied=True, disk_report=disk_report)
+                disk_report = sweep_orphan_disk(
+                    database, dialect, storage, min_age_seconds=min_age
+                )
+                _print_disk_report(disk_report)
+                _print_disk_findings(
+                    find_orphan_disk(database, dialect, storage), applied=True
+                )
+            residual = count_orphan_rows(database) if do_rows else {}
             leftover_rows = sum(residual.values())
             if leftover_rows:
                 print(f"残余孤儿行(并发新增或删除失败): {residual}")
             clean = leftover_rows == 0 and (disk_report is None or disk_report.clean)
             return 0 if clean else 1
-        row_counts = count_orphan_rows(database, dialect) if do_rows else {}
-        disk_orphans = find_orphan_disk(database, dialect, storage) if do_disk else {}
-        _print_report(row_counts, disk_orphans, applied=False, disk_report=None)
+        if do_rows:
+            for table, count in count_orphan_rows(database).items():
+                print(f"孤儿行 {table}: {count}")
+        if do_disk:
+            _print_disk_findings(
+                find_orphan_disk(database, dialect, storage), applied=False
+            )
         return 0
     finally:
         close = getattr(database, "close", None) or getattr(
