@@ -1729,8 +1729,9 @@ any extrapolation to the asked case as 「（推断）」. This rule grants no n
 authorization, and the `grounded` determination is unchanged.
 
 The same rule set's rule 13 requires inference status to propagate: a conclusion, summary,
-"therefore"/"so" sentence, or final recommendation that rests on any 「（推断）」-marked premise is
-itself marked 「（推断）」 and carries no `[k]`; only a conclusion whose every premise is `[k]`-cited
+"therefore"/"so" sentence, or final recommendation that rests on any 「（推断）」-marked (or, in an
+English answer, "Likely,"-marked) premise itself carries the same-language inference prefix and no
+`[k]`; only a conclusion whose every premise is `[k]`-cited
 may omit the marker. This rule likewise grants no new `[k]` citation-binding authorization, and the
 `grounded` determination is unchanged. A 「（推断）」/「(推断)」/「Likely,」 or 「【通识】」 marker at
 the start of a sentence or paragraph in an answer or report body renders in the interface as a

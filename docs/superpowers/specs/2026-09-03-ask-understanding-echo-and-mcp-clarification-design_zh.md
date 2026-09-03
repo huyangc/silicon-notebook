@@ -105,7 +105,7 @@ substitute a related object.
 1. `answer_prompt` 追加规则 13（规则 12 之后、`history_section` 之前，追加在末尾的理由同规则 12）：
 
 ```text
-13. Inference status propagates. A conclusion, summary, 'therefore'/'so' sentence, or final recommendation that rests on any （推断） sentence is itself an inference: prefix it with （推断） and attach NO [k]. Only a conclusion whose every premise is a [k]-cited sentence may be stated without the marker. Never let a closing section state as established fact what the body only inferred.
+13. Inference status propagates. A conclusion, summary, 'therefore'/'so' sentence, or final recommendation that rests on any （推断） or 'Likely,' sentence is itself an inference: prefix it with （推断） (or 'Likely,' in an English answer) and attach NO [k]. Only a conclusion whose every premise is a [k]-cited sentence may be stated without the marker. Never let a closing section state as established fact what the body only inferred.
 ```
 
 2. `report_section_prompt` 规则 2（`prompts.py:1063-1064`）扩成：
