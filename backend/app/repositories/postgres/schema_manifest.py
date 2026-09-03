@@ -280,7 +280,21 @@ POSTGRES_EMPTY_TIME_SENTINELS = frozenset(
 # submission's idempotency key. One new replicated unique surface (NULL park on
 # client_request_id, same shape as idx_agent_observations_request); no table,
 # FK or existing-shape change.
+# PostgreSQL v51 / SQLite v71 (batch 3 W2 PR-1) add the generational
+# cluster/community swap schema half: row-level `generation` (DEFAULT 0) on
+# concept_clusters / communities / community_members, the generational
+# control block on unified_kg_state (two published pointers, the monotonic
+# derived_generation_counter -- never reset, see the migration header -- the
+# in-flight claim pair, and the durable catch-up marker), plus the
+# three-index rework on concept_clusters (four-column unique REPLACES the
+# three-column uq_clusters_notebook_type_member; the two covering indexes
+# gain generation via INCLUDE on PostgreSQL / a trailing key on SQLite).
+# Row values and reader results stay byte-identical (all rows generation=0,
+# pointers 0); the replaced unique surface is intentionally weakened from
+# per-(nb,type,member) to per-(nb,type,member,generation) -- PR-2's dual
+# generation mechanism requires it, and with every writer still at
+# generation=0 the enforcement is unchanged in practice.
 POSTGRES_SCHEMA_MANIFEST = PostgresSchemaManifest(
-    sqlite_version=70,
-    postgres_version=50,
+    sqlite_version=71,
+    postgres_version=51,
 )

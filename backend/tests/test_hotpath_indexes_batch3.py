@@ -101,10 +101,15 @@ def test_migration_file_exists_and_declares_exactly_one_statement():
 
 def test_batch3_spec_is_present_and_batch1_batch2_are_untouched():
     names = {spec.name for spec in HOTPATH_INDEX_SPECS}
-    assert _BATCH3_NAME in names
-    assert len(HOTPATH_INDEX_SPECS) == 17, (
-        "expected eight batch-1 plus two batch-2 plus one batch-3 plus three "
-        f"batch-4 plus three batch-5 entries in HOTPATH_INDEX_SPECS, found "
+    # 批 6(迁移 0051,W2 代次化)取代并 DROP 了批 3 的索引:注册表语义是
+    # 「现在应当存在的索引」,旧条目留着会让 builder 把刚删掉的索引重建
+    # 回来。历史迁移 0043 原样保留(fresh 链上建了又被 0051 收走),接替者
+    # 是 idx_clusters_nb_canonical_member_gen(INCLUDE (generation))。
+    assert _BATCH3_NAME not in names
+    assert "idx_clusters_nb_canonical_member_gen" in names
+    assert len(HOTPATH_INDEX_SPECS) == 19, (
+        "expected eight batch-1 plus two batch-2 plus zero batch-3 (superseded by batch 6) plus three "
+        f"batch-4 plus three batch-5 plus three batch-6 entries in HOTPATH_INDEX_SPECS, found "
         f"{len(HOTPATH_INDEX_SPECS)}: {sorted(names)}"
     )
     # Batch 1/2 names untouched by this addition.
@@ -123,16 +128,20 @@ def test_batch3_spec_is_present_and_batch1_batch2_are_untouched():
     assert batch2_names <= names
 
 
-def test_migration_statement_matches_its_spec_verbatim():
+def test_migration_statement_matches_the_superseding_specs_key_prefix():
+    """历史迁移 0043 的语句原文不动;它声明的键序如今由批 6 的接替 spec
+    (同键 + INCLUDE (generation))延续——两边键列表仍须逐字节一致,防止
+    接替者悄悄改键序而让 0043 的历史论证失效。"""
     parsed = {entry["name"]: entry for entry in _parse_migration_statements()}
     by_name = {spec.name: spec for spec in HOTPATH_INDEX_SPECS}
 
     entry = parsed[_BATCH3_NAME]
-    spec = by_name[_BATCH3_NAME]
+    spec = by_name["idx_clusters_nb_canonical_member_gen"]
     assert entry["table"] == spec.table == "concept_clusters"
     assert entry["using"] == spec.using == ""
     assert entry["columns"] == spec.column_list_sql() == "notebook_id, canonical_id, member_object_id"
     assert entry["predicate"] == spec.predicate == ""
+    assert spec.include == ("generation",)
 
 
 def test_spec_key_columns_match_concept_cluster_detail_rows_query_text():
@@ -143,7 +152,10 @@ def test_spec_key_columns_match_concept_cluster_detail_rows_query_text():
     from app.repositories.postgres import knowledge_store as pg_knowledge_store
     from app.repositories.sqlite import knowledge_store as sqlite_knowledge_store
 
-    spec = next(spec for spec in HOTPATH_INDEX_SPECS if spec.name == _BATCH3_NAME)
+    spec = next(
+        spec for spec in HOTPATH_INDEX_SPECS
+        if spec.name == "idx_clusters_nb_canonical_member_gen"
+    )
     assert spec.columns == ("notebook_id", "canonical_id", "member_object_id")
 
     pg_source = Path(pg_knowledge_store.__file__).read_text(encoding="utf-8")
