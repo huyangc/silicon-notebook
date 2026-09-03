@@ -284,22 +284,34 @@ def sweep_orphan_disk(
     storage_dir: Path,
     *,
     min_age_seconds: float,
+    now: "float | None" = None,
 ) -> DiskSweepReport:
     """--apply 的盘半:notebooks/assets 过年龄闸后直删,scale 三根持 claim 删。
 
     年龄闸只管两棵直删根(见模块 docstring 的 ``copy_notebook`` 窗口论证;
-    scale 根的在途写者全部持 claim,由锁互斥兜住,不需要闸)。"""
+    scale 根的在途写者全部持 claim,由锁互斥兜住,不需要闸)。
+
+    闸的时间信号取 ``max(st_mtime, st_ctime)``(codex #666 R1 P1):
+    ``copy_notebook`` 用 ``shutil.copytree`` 落目的目录,copytree 会把**源
+    目录的旧 mtime** 原样复制过来(``copystat``)——只看 mtime,刚落盘的
+    在途拷贝会被判「старый」而误删。ctime(inode 变更时间)用户态无法回拨、
+    copystat 设 mtime 反而会把它顶到当下,天然不可继承;取二者较新者,
+    继承来的旧 mtime 拦不过新 ctime,真正的存量残渣两者都旧、照常过闸。
+    ``now`` 仅供测试注入模拟时间流逝(ctime 无法人为做旧),生产恒为当前
+    时刻。"""
     storage = Path(storage_dir)
     orphans = find_orphan_disk(database, dialect, storage)
     report = DiskSweepReport(removed={root: [] for root in orphans})
-    now = time.time()
+    if now is None:
+        now = time.time()
     for root in DIRECT_DISK_ROOTS:
         for notebook_id in orphans[root]:
             target = storage / root / notebook_id
             try:
-                age = now - target.lstat().st_mtime
+                stat = target.lstat()
             except OSError:
                 continue  # 竞态里刚消失的目录:无事可做
+            age = now - max(stat.st_mtime, stat.st_ctime)
             if age < min_age_seconds:
                 report.skipped.append((notebook_id, f"recent_dir:{root}"))
                 continue

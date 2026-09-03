@@ -1949,7 +1949,11 @@ needs a one-off offline sweep:
   (`--min-age-seconds`, defaulting to `NOTEBOOK_COPY_STALE_SECONDS`): the
   copy path writes the destination directory BEFORE committing its
   `notebooks` row, so any directory younger than the gate is skipped
-  loudly — the sweep never races an in-flight copy. The three scale roots
+  loudly — the sweep never races an in-flight copy. The gate reads
+  `max(mtime, ctime)`: copytree copies the SOURCE directory's old mtime
+  onto the destination, while ctime (inode change time) cannot be set
+  from userspace and is never inherited (codex #666 R1 P1), so a
+  freshly-written in-flight copy is always caught. The three scale roots
   are swept per notebook under the cross-process exclusive claim shared
   with scale builds and delete jobs; a held or unevaluable claim skips
   that notebook loudly, never force-deletes. Symlinks are left alone.

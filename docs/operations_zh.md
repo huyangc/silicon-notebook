@@ -1620,6 +1620,9 @@ revert、又续跑这次删除。
   `notebooks`/`assets` 两根设**年龄闸**（`--min-age-seconds`，默认取
   `NOTEBOOK_COPY_STALE_SECONDS`）：拷贝路径先 copytree 目的目录、后插
   `notebooks` 行，闸值内的新目录一律跳过留声，绝不与在途拷贝抢目录。
+  闸看的是 `max(mtime, ctime)`——copytree 会把源目录的旧 mtime 复制到目
+  的目录，而 ctime（inode 变更时间）用户态无法回拨、不可继承（codex
+  #666 R1 P1），刚落盘的在途拷贝一定被拦下。
   scale 三根删前逐本取跨进程排它 claim（与 scale 构建/删除作业同一把
   advisory lock）；被占或无法评估一律跳过留声，绝不硬删。symlink 不清。
 
