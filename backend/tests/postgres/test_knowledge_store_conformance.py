@@ -2057,7 +2057,10 @@ def test_postgres_concept_neighbor_rows_excludes_cross_page_cluster_members(
     assert probes, "same-cluster membership probe must run"
     assert "member_object_id = ANY(" in probes[0][0]
     assert probes[0][1][0] == "nb-personal" and probes[0][1][1] == "canon-probe-pg"
-    assert "member-pg-2" in probes[0][1][2]
+    # 批 3·W2 §1.4:published 代次谓词的 COALESCE 子查询在 ANY(batch) 之前
+    # 多带一个 notebook_id 参数 → batch 从 [2] 挪到 [3]。
+    assert probes[0][1][2] == "nb-personal"
+    assert "member-pg-2" in probes[0][1][3]
 
     assert "member-pg-2" not in by_other  # same-cluster cross-page member never hydrated
     assert "ext-pg-1" in by_other          # genuine external neighbor still hydrated
@@ -2149,8 +2152,10 @@ def test_postgres_concept_neighbor_rows_batches_over_900_candidates(knowledge_ha
     # Exclusion probe: 1810 total candidates (905 same-cluster + 905
     # external), each `ANY(%s)` call carrying one batch of <= 900 -> three
     # calls of [900, 900, 10].
-    assert [len(p[2]) for p in probes] == [900, 900, 10]
-    probed_ids = {value for p in probes for value in p[2]}
+    # 批 3·W2 §1.4:published 代次谓词的 COALESCE 子查询在 ANY(batch) 之前
+    # 多带一个 notebook_id 参数 → batch 从 p[2] 挪到 p[3]。
+    assert [len(p[3]) for p in probes] == [900, 900, 10]
+    probed_ids = {value for p in probes for value in p[3]}
     assert probed_ids == {f"sc-pg-{i}" for i in range(same_cluster_count)} | {
         f"ext-pg-{i}" for i in range(external_count)
     }
