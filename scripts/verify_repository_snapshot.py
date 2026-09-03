@@ -1400,6 +1400,13 @@ def compare_snapshots(
         for name in sorted(set(before) - set(after)):
             if kind == "table":
                 note(name, "table-dropped")
+            elif kind == "index" and name in migration_manifest.get(
+                "dropped_indexes", frozenset()
+            ):
+                # v71 首次引入「被取代索引的显式退役」:代次化把三条簇索引换成
+                # 带 generation 的接替者并 DROP 旧名(0051/_migration_71)。退役
+                # 与新增同样走 manifest 白名单,名单之外的 drop 照旧硬失败。
+                continue
             else:
                 discrepancies.append(f"schema={kind} name={name} reason=dropped")
         for name in sorted(set(before) & set(after)):
@@ -4067,6 +4074,101 @@ MIGRATION_MANIFEST[(69, 70)] = {
     "tables": {},
     "columns": ASK_CLIENT_REQUEST_COLUMNS,
     "indexes": ASK_CLIENT_REQUEST_INDEXES,
+    "triggers": {},
+    "views": {},
+}
+
+
+# v71 (batch-3-W2 PR-1): generational cluster/community swap schema half,
+# parity with PostgreSQL 0051_derived_generation.sql. Row-level `generation`
+# on the three derived-graph tables, the generational control block on
+# unified_kg_state, and the three-index rework: the four-column unique
+# REPLACES v29's uq_clusters_notebook_type_member (the three-column unique
+# physically forbids two generations coexisting), and the two covering
+# replacements carry generation as a trailing key (SQLite has no INCLUDE).
+# Index SQL text matches sqlite_master storage verbatim (SQLite strips
+# "IF NOT EXISTS" and keeps the source indentation). The three superseded
+# indexes are the FIRST manifested index retirements -- carried in the new
+# "dropped_indexes" allowlist the schema-diff loop honours; any drop outside
+# the allowlist still fails closed.
+DERIVED_GENERATION_COLUMNS = {
+    "concept_clusters": {
+        "generation": ("generation", "INTEGER", 1, "0", 0),
+    },
+    "communities": {
+        "generation": ("generation", "INTEGER", 1, "0", 0),
+    },
+    "community_members": {
+        "generation": ("generation", "INTEGER", 1, "0", 0),
+    },
+    "unified_kg_state": {
+        "cluster_generation": ("cluster_generation", "INTEGER", 1, "0", 0),
+        "community_generation": ("community_generation", "INTEGER", 1, "0", 0),
+        "derived_generation_counter": (
+            "derived_generation_counter", "INTEGER", 1, "0", 0),
+        "derived_building_generation": (
+            "derived_building_generation", "INTEGER", 1, "0", 0),
+        "derived_building_claimed_at": (
+            "derived_building_claimed_at", "TEXT", 0, None, 0),
+        "derived_catchup_from": ("derived_catchup_from", "TEXT", 0, None, 0),
+    },
+}
+DERIVED_GENERATION_INDEXES = {
+    "uq_clusters_nb_type_member_generation": (
+        "CREATE UNIQUE INDEX uq_clusters_nb_type_member_generation\n"
+        "                  ON concept_clusters(notebook_id, object_type, member_object_id, generation)"
+    ),
+    "idx_clusters_nb_canonical_member_gen": (
+        "CREATE INDEX idx_clusters_nb_canonical_member_gen\n"
+        "                  ON concept_clusters(notebook_id, canonical_id, member_object_id, generation)"
+    ),
+    "idx_clusters_nb_created_gen": (
+        "CREATE INDEX idx_clusters_nb_created_gen\n"
+        "                  ON concept_clusters(notebook_id, created_at, generation)"
+    ),
+}
+DERIVED_GENERATION_DROPPED_INDEXES = frozenset(
+    {
+        "uq_clusters_notebook_type_member",
+        "idx_clusters_nb_canonical_member",
+        "idx_clusters_nb_created",
+    }
+)
+MIGRATION_MANIFEST = {
+    (key[0], 71, *key[2:]): {
+        **manifest,
+        "columns": {
+            **manifest["columns"],
+            **{
+                table: {
+                    **manifest["columns"].get(table, {}),
+                    **columns,
+                }
+                for table, columns in DERIVED_GENERATION_COLUMNS.items()
+            },
+        },
+        # 旧跳里被 v71 退役的索引(v29 的唯一索引、v64 的覆盖索引)在链上是
+        # 「建了又删」——终态不存在,必须同时从「期望新增」里剔除,否则
+        # manifest-addition-missing 反向失败。
+        "indexes": {
+            name: sql
+            for name, sql in {
+                **manifest["indexes"], **DERIVED_GENERATION_INDEXES
+            }.items()
+            if name not in DERIVED_GENERATION_DROPPED_INDEXES
+        },
+        "dropped_indexes": (
+            frozenset(manifest.get("dropped_indexes", frozenset()))
+            | DERIVED_GENERATION_DROPPED_INDEXES
+        ),
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(70, 71)] = {
+    "tables": {},
+    "columns": DERIVED_GENERATION_COLUMNS,
+    "indexes": DERIVED_GENERATION_INDEXES,
+    "dropped_indexes": DERIVED_GENERATION_DROPPED_INDEXES,
     "triggers": {},
     "views": {},
 }

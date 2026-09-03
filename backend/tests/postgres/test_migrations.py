@@ -264,7 +264,7 @@ def test_packaged_migration_refuses_non_utf_database_before_any_ddl(
 def test_packaged_migrations_apply_in_order(postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert len(PostgresMigrator(postgres_database).migrations) == 50
+    assert len(PostgresMigrator(postgres_database).migrations) == 51
     migrator = PostgresMigrator(postgres_database)
     assert migrator.migrate(target_version=2) == 2
     with postgres_database.connect() as conn:
@@ -308,7 +308,7 @@ def test_packaged_migrations_apply_in_order(postgres_database):
     assert "idx_chunks_text_trgm" not in indexes
     for version in (3, 4, 5, 6, 7, 8, 9, 10, 11):
         assert migrator.migrate(target_version=version) == version
-    assert migrator.migrate() == 50
+    assert migrator.migrate() == 51
     with postgres_database.connect() as conn:
         final_indexes = {
             row["indexname"]
@@ -326,7 +326,15 @@ def test_packaged_migrations_apply_in_order(postgres_database):
     assert "idx_chunks_text_trgm" in final_indexes
     assert "idx_knowledge_relations_nb_source_id" in final_indexes
     assert "idx_knowledge_relations_nb_target_id" in final_indexes
-    assert "uq_clusters_notebook_type_member" in final_indexes
+    # v51(批 3·W2 PR-1)把三列唯一 uq_clusters_notebook_type_member 换成
+    # 四列唯一(generation 入键——旧唯一物理禁止双代共存),并 DROP 旧名与
+    # 两条被 *_gen 覆盖接替的簇索引;终态断言换成接替者 + 旧名不存在。
+    assert "uq_clusters_nb_type_member_generation" in final_indexes
+    assert "idx_clusters_nb_canonical_member_gen" in final_indexes
+    assert "idx_clusters_nb_created_gen" in final_indexes
+    assert "uq_clusters_notebook_type_member" not in final_indexes
+    assert "idx_clusters_nb_canonical_member" not in final_indexes
+    assert "idx_clusters_nb_created" not in final_indexes
     assert "idx_source_elements_source_type" in final_indexes
     assert "idx_notebook_object_schemas_status" in final_indexes
     assert "idx_groups_invite_token" in final_indexes
@@ -347,7 +355,7 @@ def test_packaged_migrations_apply_in_order(postgres_database):
     assert "idx_source_elements_nonblank" in final_indexes
     # v43 (hot-path fix batch 3) — see
     # migrations/0043_concept_cluster_keyset_index.sql.
-    assert "idx_clusters_nb_canonical_member" in final_indexes
+    # v43 的索引已被 v51 的 *_gen 接替者取代并 DROP(断言见上方 v51 段)。
     assert "idx_retained_activity_actor_type_created" in final_indexes
     assert "idx_retained_activity_owner_created" in final_indexes
     assert "idx_retained_activity_expires" in final_indexes
@@ -373,7 +381,7 @@ def test_packaged_migrations_apply_in_order(postgres_database):
     assert ledger_versions == [
         1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
         22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
-        41, 42, 43, 44, 45, 46, 47, 48, 49, 50,
+        41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51,
     ]
 
 
@@ -443,7 +451,7 @@ def test_notebook_object_schema_migration_relocates_legacy_rows(postgres_databas
             ),
         )
 
-    assert migrator.migrate() == 50
+    assert migrator.migrate() == 51
     with postgres_database.connect() as connection:
         relocated = connection.execute(
             "SELECT notebook_id,object_type,status,created_by "
@@ -506,7 +514,7 @@ def test_source_agent_provenance_column_is_nullable_and_unconstrained(
             "AND column_name='agent_profile_id'"
         ).fetchone() is None
 
-    assert migrator.migrate() == 50
+    assert migrator.migrate() == 51
     with postgres_database.connect() as connection:
         column = connection.execute(
             "SELECT data_type,is_nullable,column_default,collation_name "
@@ -581,7 +589,7 @@ def test_cluster_membership_migration_dedupes_before_unique_guard(postgres_datab
                 ],
             )
 
-    assert migrator.migrate() == 50
+    assert migrator.migrate() == 51
     with postgres_database.connect() as connection:
         rows = connection.execute(
             "SELECT id,canonical_id FROM concept_clusters "
