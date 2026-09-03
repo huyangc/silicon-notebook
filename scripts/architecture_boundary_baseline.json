@@ -341,7 +341,7 @@
   "core_models_service_imports": {
     "allowed": []
   },
-  "ports_protocol_method_count": 943,
+  "ports_protocol_method_count": 944,
   "function_length_ceiling": {
     "backend/app/api/mcp_tools/memory_context.py::register_memory_context_tools.ask_notebook": 137,
     "backend/app/extensions/ask.py::AskCompletedObserverHost.observe_application": 160,
@@ -351,7 +351,7 @@
     "backend/app/services/ask_service.py::AskService._run_reasoning_stage": 551,
     "backend/app/services/ask_service.py::AskService.ask_chunk": 399,
     "backend/app/services/knowledge_lifecycle.py::KnowledgeLifecycleService.complete_relations_for_source": 425,
-    "backend/app/services/knowledge_lifecycle.py::KnowledgeLifecycleService.rebuild_communities": 559,
+    "backend/app/services/knowledge_lifecycle.py::KnowledgeLifecycleService.rebuild_communities": 568,
     "backend/app/services/knowledge_lifecycle.py::KnowledgeLifecycleService.rebuild_unified_kg": 610,
     "backend/app/services/memory_service.py::MemoryService.transfer": 389,
     "backend/app/services/notebook_sharing.py::NotebookCopyService.copy_notebook": 656,
