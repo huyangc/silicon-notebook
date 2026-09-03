@@ -1736,7 +1736,12 @@ may omit the marker. This rule likewise grants no new `[k]` citation-binding aut
 `grounded` determination is unchanged. A 「（推断）」/「(推断)」/「Likely,」 or 「【通识】」 marker at
 the start of a sentence or paragraph in an answer or report body renders in the interface as a
 non-clickable inline label from the same visual family as a citation chip; the rendering only adds
-styling and never changes the text content or the copied result.
+styling and never changes the text content or the copied result. The marker opens the sentence but
+goes after any list number, bullet, or heading syntax (write `1. （推断）…`, never `（推断）1. …`),
+otherwise Markdown stops treating the line as a list item; before rendering, the four model-text
+surfaces apply one deterministic normalization that swaps a reversed "marker + list syntax" into
+"list syntax + marker" — a pure reordering that changes no characters and also repairs historical
+answers; the copied text remains the model's original.
 
 ### Optional generated-question recall supplement
 

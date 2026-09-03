@@ -132,6 +132,16 @@ substitute a related object.
 - 样式：弱化色 + 细边框小标签，与 `.cite-chip` 同一视觉家族但不可点；两个 class 各自一套，`【通识】` 用另一种色相区分「推断」与「通识」。不动 `evidence_level` 顶栏标签（顶栏说整篇的证据等级，行内标记说这一句是推断）。
 - `docs/ui-vocabulary.md` **不**把这两个标记登进「界面词汇表」（那张表是 JSX 文案黑名单，登进去等于禁止标记出现在界面上），而是新增独立小节「答案正文内的标记」：说明它们是模型输出内容、界面呈现名为「推断」「通识」、渲染层只加样式；守卫 `test_ui_vocabulary_guard` 的扫描面不覆盖模型正文，无需豁免。
 
+**T2-d 标记与列表语法的位置（2026-09-03 本地真机发现，PR #669 之后）。**
+
+真机回答把推断标记写在列表序号**前面**：「（推断）1. 世界模型…」「（推断）2. …」，行间只有单换行。Markdown 不认「（推断）1.」是列表项，`.answer-markdown p` 也没有 `pre-wrap`，七条内容渲染成一整段连在一起的文字；标签本身能切出来（换行算句界），可读性没了。两层修：
+
+1. **prompt（治源头）**：Ask 规则 2 的「(prefix with '（推断）' / 'Likely,')」之后、报告章节规则 2 的「prefix it with （推断） and attach NO [k]」之后、报告规则 4 的「must start with the marker 【通识】」之后，各补同一句位置要求：the marker opens the sentence but goes AFTER any list number, bullet, or heading syntax (write `1. （推断）…`, never `（推断）1. …`, so Markdown lists stay intact)。措辞三处逐字一致。不动规则 12/13。
+2. **前端归一（兜底，含历史回答）**：新增 `frontend/app/inference-list-markers.ts` 导出纯函数 `normalizeInferenceListMarkers(markdown)`：逐行处理，行首（允许至多 3 个空格缩进）若是四种标记之一（`（推断）`/`(推断)`/`Likely,`/`【通识】`），紧跟列表语法（`\d{1,9}[.)]` 或 `-`/`*`/`+`）与至少一个空格或制表符，则把标记与列表语法对调为「列表语法 空格 标记 空格 正文」；其它行逐字不动。围栏代码块（``` / ~~~）内的行不处理（模型在代码块里逐字引用反例时不能被改成正例），围栏状态函数内自维护；4 空格及以上缩进（顶层是缩进代码块）与 `> ` 引用块前缀不处理，代价是列表项内部 4 空格缩进的子列表不归一，登记为已知覆盖缺口，不为它维护容器栈。守卫除 import 外还要求每个 `<ReactMarkdown>` 子表达式里真的存在该函数的调用（`tsconfig` 未开 `noUnusedLocals`，只查 import 会放过「留 import、改回单层调用」）。**只**接进四个模型文本渲染面（`AnswerMarkdown`、`ReportMarkdown`、`c/[token]`、`r/[token]`），与 `normalizeMathMarkdown` 串联；不接 knowhow 格子编辑器（那是用户内容）。守卫 `answer-inference-surface-guard` 增加一条：四个面都必须 import 该函数。CommonMark 允许以 `1.` 开头的有序列表打断段落，所以「（推断）以下为…：」下一行紧跟「1. （推断）…」也能成列表。
+3. **不做**：让插件把「（推断）1.」自己解析成列表（插件跑在解析之后，只能切文本节点）；后端落库前归一（会碰合成收尾与报告章节两条热路径且修不了历史数据，等 MCP/导出侧有需求再加，登记为遗留）。
+
+测试：单元（node test）覆盖「标记在序号前 / 已在序号后 / 段首无序号 / 无序列表 `-` / 缩进 3 空格 / 句中标记不动 / 四种标记」；组件用例：`AnswerMarkdown` 渲染「（推断）以下为：\n（推断）1. a\n（推断）2. b」得到 `ol` 两个 `li`、每个 `li` 里一个 `span.answer-inference`，段首那行仍是一个 span；`ReportMarkdown` 同样。后端 `test_prompts` / `test_report_engine` 钉三处位置句。文档：`product-and-api` 中英在规则 12/13 段补一句标记位置与渲染前归一。
+
 ### T3 歧义错误文案携带歧义问题，并前移到建 job 之前
 
 **一份文案构造器**，三处闸共用：

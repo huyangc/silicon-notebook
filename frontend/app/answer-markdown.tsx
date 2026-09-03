@@ -20,6 +20,7 @@ import {
 } from "./answer-formatting";
 import { remarkCitations } from "./answer-citations";
 import { remarkAnswerInference } from "./answer-inference";
+import { normalizeInferenceListMarkers } from "./inference-list-markers";
 import { remarkGfmPlugin } from "./markdown-gfm";
 import { normalizeMathMarkdown } from "./math-markdown";
 import {
@@ -188,7 +189,7 @@ export function AnswerMarkdown({
       urlTransform={(url) => (url.startsWith("cite:") ? url : defaultUrlTransform(url))}
       components={ANSWER_MARKDOWN_COMPONENTS}
     >
-      {normalizeMathMarkdown(answer)}
+      {normalizeInferenceListMarkers(normalizeMathMarkdown(answer))}
     </ReactMarkdown>
   ), [answer, refsByCitationKey, imageIdsByCitationKey, citationImageOrder]);
 
