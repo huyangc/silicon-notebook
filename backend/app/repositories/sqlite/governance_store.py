@@ -473,9 +473,13 @@ class GovernanceStore:
     def delete_clusters(
         connection: sqlite3.Connection, notebook_id: str, object_type: str
     ) -> None:
+        # 在飞代豁免(codex #671 R9 P1)——完整论证见 PG 孪生。
         connection.execute(
-            "DELETE FROM concept_clusters WHERE notebook_id=? AND object_type=?",
-            (notebook_id, object_type))
+            "DELETE FROM concept_clusters WHERE notebook_id=? AND object_type=? "
+            "AND generation NOT IN ("
+            "  SELECT derived_building_generation FROM unified_kg_state u "
+            "  WHERE u.notebook_id = ? AND derived_building_generation != 0)",
+            (notebook_id, object_type, notebook_id))
 
     def insert_clusters(
         self,

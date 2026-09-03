@@ -632,9 +632,13 @@ class UnifiedKgStore:
     ) -> bool:
         """communities 族指针翻转——**在既有发布事务内**调用(设计 D-W2-6:
         该族无并发融合写者,原子性优先于锁窗口;kg_analysis 板块账本作废与
-        set_community_seq 的同事务不变量原样保住)。双 CAS 同 cluster 侧。"""
+        set_community_seq 的同事务不变量原样保住)。双 CAS 同 cluster 侧;
+        认领也在同一条 UPDATE 里清零(codex #671 R9 P2:只靠 finally 时,
+        发布事务提交后、finally 执行前被 kill 会把后续维护锁到 TTL)。"""
         row = db.execute(
-            "UPDATE unified_kg_state SET community_generation=%s, updated_at=%s "
+            "UPDATE unified_kg_state SET community_generation=%s, "
+            "derived_building_generation=0, derived_building_claimed_at=NULL, "
+            "updated_at=%s "
             "WHERE notebook_id=%s AND community_generation=%s "
             "AND derived_building_generation=%s RETURNING notebook_id",
             (

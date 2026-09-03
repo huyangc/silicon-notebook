@@ -152,11 +152,16 @@ def test_community_flip_shares_the_same_double_cas(postgres_database):
             db, "nb-cflip", published_from=0, generation=claim["generation"],
             now=_NOW,
         )
-        assert db.execute(
-            "SELECT community_generation FROM unified_kg_state "
+        state = db.execute(
+            "SELECT community_generation, derived_building_generation, "
+            "derived_building_claimed_at FROM unified_kg_state "
             "WHERE notebook_id='nb-cflip'"
-        ).fetchone()["community_generation"] == claim["generation"]
-        UnifiedKgStore.release_derived_claim(db, "nb-cflip", claim["generation"])
+        ).fetchone()
+        assert state["community_generation"] == claim["generation"]
+        # R9:认领在翻转同一条 UPDATE 里清零——发布事务提交后被 kill 也
+        # 不会把后续维护锁到 TTL;finally 释放降级为 no-op 兜底。
+        assert state["derived_building_generation"] == 0
+        assert state["derived_building_claimed_at"] is None
 
 
 def test_catchup_window_payload_is_text_and_pages_by_keyset(postgres_database):
