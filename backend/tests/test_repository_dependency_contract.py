@@ -137,9 +137,6 @@ LIFECYCLE_STORE_CALLS = {
         "community_member_ids",
         "community_reports",
         "community_rows_for_summary",
-        # 与上一条配对:补账本路径在**事务外**读回板块划分,发布事务里复核它还在
-        # (codex 第 16 轮 P2),不在就整份放弃发布。
-        "board_partition_still_holds",
         "concept_clusters_count",
         "distinct_cluster_count",
         "finish_rebuild_state",
@@ -155,7 +152,13 @@ LIFECYCLE_STORE_CALLS = {
         "largest_clusters",
         "relation_provenance_counts",
         "replace_canonical_relations",
-        "replace_communities",
+        # 批 3·W2 §1.3:写新代(事务外)+ copy-forward/指针翻转(发布事务内)。
+        # 旧 replace_communities 整表重写、board_partition_still_holds 复核
+        # (代次化后恒真)一并退役——「板块被别人换掉」改由发布事务内重读
+        # state 行比对 community_generation。
+        "write_communities_generation",
+        "copy_forward_communities",
+        "flip_community_generation",
         "replace_kg_analysis_artifacts",
         "replace_mention_bridge",
         "source_canonical_rows",

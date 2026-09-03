@@ -1030,7 +1030,7 @@ class UnifiedKgStore:
             (notebook_id, level, notebook_id)).fetchone()
 
     @staticmethod
-    def replace_communities(
+    def write_communities_generation(
         db: sqlite3.Connection,
         notebook_id: str,
         level: int,
@@ -1038,21 +1038,66 @@ class UnifiedKgStore:
         names: Dict[str, str],
         deg: Dict[str, float],
         now: str,
+        generation: int,
     ) -> None:
-        """Full rewrite for one level: (cid, sorted members) pairs prepared by
-        the caller (min-size policy stays with the orchestration)."""
-        db.execute("DELETE FROM communities WHERE notebook_id=? AND level=?", (notebook_id, level))
-        db.execute("DELETE FROM community_members WHERE notebook_id=? AND level=?", (notebook_id, level))
+        """写新代(批 3·W2 §1.3,取代旧 replace_communities 的整表重写):
+        不 DELETE,旧代行由发布路径前的预回收清理;理由见 PG 孪生。"""
         for cid, members in kept:
             db.execute(
-                "INSERT INTO communities (id, notebook_id, level, member_ids, size, created_at) "
-                "VALUES (?,?,?,?,?,?)",
-                (cid, notebook_id, level, json.dumps(members), len(members), now))
+                "INSERT INTO communities (id, notebook_id, level, member_ids, size, created_at, generation) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (cid, notebook_id, level, json.dumps(members), len(members), now,
+                 generation))
             db.executemany(
                 "INSERT INTO community_members "
-                "(canonical_id, notebook_id, level, community_id, canonical_name, centrality) "
-                "VALUES (?,?,?,?,?,?)",
-                [(m, notebook_id, level, cid, names.get(m, m), deg.get(m, 0.0)) for m in members])
+                "(canonical_id, notebook_id, level, community_id, canonical_name, centrality, generation) "
+                "VALUES (?,?,?,?,?,?,?)",
+                [(m, notebook_id, level, cid, names.get(m, m), deg.get(m, 0.0),
+                  generation) for m in members])
+
+    @staticmethod
+    def copy_forward_communities(
+        db: sqlite3.Connection,
+        notebook_id: str,
+        exclude_level: int,
+        from_generation: int,
+        to_generation: int,
+        mint_id,
+    ) -> int:
+        """翻转事务内复制未被本轮重建的 level 进新代,板块 id 重铸 + 成员行
+        同步重映射——语义与 PG 孪生逐条对应(那边有完整理由)。"""
+        rows = db.execute(
+            "SELECT id, level, member_ids, size, title, summary, findings, "
+            "created_at FROM communities "
+            "WHERE notebook_id=? AND level != ? AND generation=?",
+            (notebook_id, exclude_level, from_generation)).fetchall()
+        remap: Dict[str, str] = {}
+        for r in rows:
+            new_id = mint_id()
+            remap[str(r["id"])] = new_id
+            db.execute(
+                "INSERT INTO communities "
+                "(id, notebook_id, level, member_ids, size, title, summary, "
+                "findings, created_at, generation) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (new_id, notebook_id, r["level"], r["member_ids"], r["size"],
+                 r["title"], r["summary"], r["findings"], r["created_at"],
+                 to_generation))
+        if remap:
+            mrows = db.execute(
+                "SELECT canonical_id, level, community_id, canonical_name, centrality "
+                "FROM community_members "
+                "WHERE notebook_id=? AND level != ? AND generation=?",
+                (notebook_id, exclude_level, from_generation)).fetchall()
+            db.executemany(
+                "INSERT INTO community_members "
+                "(canonical_id, notebook_id, level, community_id, canonical_name, centrality, generation) "
+                "VALUES (?,?,?,?,?,?,?)",
+                [(m["canonical_id"], notebook_id, m["level"],
+                  remap[str(m["community_id"])], m["canonical_name"],
+                  m["centrality"], to_generation)
+                 for m in mrows if str(m["community_id"]) in remap])
+        return len(remap)
 
     @staticmethod
     def discard_board_dependent_kg_analysis_artifacts(
@@ -1106,39 +1151,6 @@ class UnifiedKgStore:
             "SELECT id, member_ids FROM communities WHERE notebook_id=? AND level=? "
             f"AND generation = {_PUBLISHED_COMMUNITY_GEN}",
             (notebook_id, level, notebook_id)).fetchall()
-
-    @staticmethod
-    def board_partition_still_holds(
-        db: sqlite3.Connection, notebook_id: str, level: int, board_id: str
-    ) -> bool:
-        """复核「产物所依据的那套板块划分」是否还在库里 —— **必须在发布事务内调**。
-
-        用途只有一处:「只补账本」那条路径在**写事务之外**跑分钟级的
-        `_compute_kg_analysis`(那条约束见 `rebuild_communities`),期间另一次
-        `force=True` 的重建完全可能把整套板块换掉。发布前在事务里问一句「我算的那套
-        还在吗」,不在就整趟放弃 —— 否则写出去的是指向已不存在板块 id 的悬空产物,
-        而它的账本却盖着「与当前一致」的戳。
-
-        ⚠ **查一行就够,不需要比对整套 id。** `replace_communities` 对
-        `(notebook_id, level)` 是**整表删再插**,新 id 由 `_new_id("cm")` 铸出
-        (128 bit)。所以「`kept_rows` 里任意一个板块 id 还在」⟺「期间没有任何一次
-        replace 提交过」。
-
-        ⚠ **两个后端的原子性来源不同,这是刻意的不对称(parity 要的是语义等价,不是
-        SQL 等价)。** PostgreSQL 侧同一条查询带 `FOR SHARE` 行锁,因为
-        `PostgresDatabase.write()` 是 READ COMMITTED、**没有**进程级锁,裸 SELECT 挡不住
-        并发写者在「查完」与「插完」之间提交。SQLite 这边不需要、也**没有** `FOR SHARE`
-        这个语法:`SqliteDatabase.write()` 拿的是**进程级 `threading.Lock`**,同进程两个
-        写事务根本不可能交错;跨进程由 SQLite 自己的文件写锁串行。
-
-        ⚠ **刻意没有 `_reject_inside_write_transaction`。** 那道守卫是给全表级只读聚合
-        用的(它们自开连接,在写事务里跑会读到提交前的旧数据、还会按住写锁),语义与
-        本方法**正相反** —— 本方法**要求**骑调用方的写连接,在事务外调它没有任何意义。
-        """
-        return db.execute(
-            "SELECT 1 FROM communities WHERE notebook_id=? AND level=? AND id=?",
-            (notebook_id, level, board_id),
-        ).fetchone() is not None
 
     @staticmethod
     def set_community_summary(

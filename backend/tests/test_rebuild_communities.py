@@ -256,7 +256,7 @@ def test_community_graph_stream_and_rewrite_use_store_connections(repo, monkeypa
     events = []
     write_ids = set()
     original_graph = store.community_graph_rows
-    original_replace = store.replace_communities
+    original_write_gen = store.write_communities_generation
     original_write = runtime.database.write
 
     def graph_spy(db, notebook_id):
@@ -274,21 +274,24 @@ def test_community_graph_stream_and_rewrite_use_store_connections(repo, monkeypa
             yield db
         events.append(("write.commit", id(db), nb.id))
 
-    def replace_spy(db, *args, **kwargs):
+    def write_gen_spy(db, *args, **kwargs):
         assert isinstance(db, sqlite3.Connection)
-        events.append(("replace_communities", id(db), args[0]))
-        return original_replace(db, *args, **kwargs)
+        events.append(("write_communities_generation", id(db), args[0]))
+        return original_write_gen(db, *args, **kwargs)
 
     monkeypatch.setattr(store, "community_graph_rows", graph_spy)
     monkeypatch.setattr(runtime.database, "write", traced_write)
-    monkeypatch.setattr(store, "replace_communities", replace_spy)
+    monkeypatch.setattr(store, "write_communities_generation", write_gen_spy)
 
     count = getattr(repo, "rebuild_communities")(nb.id, level=0, force=True)
 
+    # 批 3·W2:取号/预回收各自的写事务在图流之前,写代段在图流之后的独立
+    # 写事务里(前 begin 后 commit 同一条写连接)——发布(翻转)另开事务。
     names = [event[0] for event in events]
-    assert names[:4] == [
-        "community_graph_rows", "write.begin", "replace_communities", "write.commit",
-    ]
-    assert events[1][1] == events[2][1] == events[3][1]
-    assert events[2][1] in write_ids
+    gi = names.index("community_graph_rows")
+    wi = names.index("write_communities_generation")
+    assert gi < wi
+    assert names[wi - 1] == "write.begin" and names[wi + 1] == "write.commit"
+    assert events[wi - 1][1] == events[wi][1] == events[wi + 1][1]
+    assert events[wi][1] in write_ids
     assert count >= 1

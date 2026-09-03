@@ -90,13 +90,15 @@ _CENSUS: dict[str, tuple[int, int, int, int, int, str]] = {
         "C→§1.6:拷贝快照只取 published 代 + 校验两侧同谓词口径"),
     "backend/app/repositories/sqlite/sharing_store.py": (1, 0, 0, 2, 0,
         "PG 孪生同注记"),
-    "backend/app/repositories/postgres/unified_kg_store.py": (26, 12, 5, 22, 11,
-        "A 大头(29 站点已配谓词,LEFT JOIN 入 ON);B:swap/replace/append 供体"
-        "(PR-2)+test-only replace_cluster_rows_streamed;board_partition_"
-        "still_holds 为 PR-2 判据替换豁免"),
-    "backend/app/repositories/sqlite/unified_kg_store.py": (26, 10, 6, 22, 11,
-        "PG 孪生同注记(两侧 communities/members 出现数差异来自 SQLite 无"
-        "窗口函数的 community_overview_on 分岔)"),
+    "backend/app/repositories/postgres/unified_kg_store.py": (26, 10, 6, 22, 11,
+        "A 大头(29 站点已配谓词,LEFT JOIN 入 ON);B 已参数化:写新代三原语"
+        "(write_cluster_map_generation/write_communities_generation/"
+        "copy_forward_communities)+催收窗口读+回收分页(动态表名不进正则)"
+        "+test-only replace_cluster_rows_streamed;旧 swap/replace_communities/"
+        "board_partition_still_holds 退役(发布=指针翻转,复核=代次比对)"),
+    "backend/app/repositories/sqlite/unified_kg_store.py": (26, 10, 7, 22, 11,
+        "PG 孪生同注记(两侧 members 出现数差异来自 SQLite 无窗口函数的"
+        "community_overview_on 分岔)"),
     "backend/app/repositories/source_subgraph_projection.py": (4, 0, 0, 2, 0,
         "A×4(两函数各 PG/SQLite 分支),共享 published_gen 局部模板"),
     "backend/app/repositories/sqlite/migrations.py": (3, 0, 0, 0, 0,

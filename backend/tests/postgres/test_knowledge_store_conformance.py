@@ -1889,14 +1889,16 @@ def test_cluster_append_member_probe_is_bounded_and_batched(knowledge_harness):
     assert added == total
     assert probes, "the dedup probe must still run"
     for sql, params in probes:
-        # 有界:必须带 IN,且参数只有 notebook/type + 本次的 member id。
+        # 有界:必须带 IN,且参数只有 notebook/type/published 代 + 本次的
+        # member id(批 3·W2:探针按代收窄,第三个固定参数是 generation)。
         assert " IN (" in sql
         assert params[0] == "nb-personal" and params[1] == "concept"
-        assert set(params[2:]) <= {row["member_object_id"] for row in rows}
-    probed = [value for _sql, params in probes for value in params[2:]]
+        assert params[2] == 0
+        assert set(params[3:]) <= {row["member_object_id"] for row in rows}
+    probed = [value for _sql, params in probes for value in params[3:]]
     assert sorted(probed) == sorted(row["member_object_id"] for row in rows)
     # 分批:每条语句的 id 数不超过上限,且确实拆成了三条(100/100/7)。
-    assert [len(params) - 2 for _sql, params in probes] == [chunk, chunk, 7]
+    assert [len(params) - 3 for _sql, params in probes] == [chunk, chunk, 7]
 
 
 def test_merge_candidate_pairs_for_canonicals_is_bounded_by_either_endpoint(
@@ -4050,7 +4052,7 @@ def _seed_analysis_fixture(harness) -> None:
             connection, ANALYSIS_NB, CUSTOM_TYPE_B,
             [_analysis_cluster(1, "KX-b", "ko-an-x2", object_type=CUSTOM_TYPE_B)],
         )
-        unified.replace_communities(
+        unified.write_communities_generation(
             connection,
             ANALYSIS_NB,
             0,
@@ -4065,9 +4067,10 @@ def _seed_analysis_fixture(harness) -> None:
             },
             {"canonical-quad": 0.2, "canonical-solo": 0.9, "canonical-blank": 0.5},
             NOW,
+            0,
         )
         # level > 0:板块查询按 level 归属,没有这条记录那个谓词从未被执行到。
-        unified.replace_communities(
+        unified.write_communities_generation(
             connection,
             ANALYSIS_NB,
             1,
@@ -4075,9 +4078,10 @@ def _seed_analysis_fixture(harness) -> None:
             {"canonical-quad": "Level one board"},
             {"canonical-quad": 1.0},
             NOW,
+            0,
         )
         # 别的 notebook 也有板块:板块查询的 notebook 归属谓词的证人。
-        unified.replace_communities(
+        unified.write_communities_generation(
             connection,
             FOREIGN_NB,
             0,
@@ -4085,6 +4089,7 @@ def _seed_analysis_fixture(harness) -> None:
             {"canonical-elsewhere": "Elsewhere board"},
             {"canonical-elsewhere": 1.0},
             NOW,
+            0,
         )
         placeholder = "%s"
         # 一个**没有任何成员行**的板块(损坏/半写数据)。PG 侧的窗口函数写法用
@@ -4431,12 +4436,12 @@ def test_community_overview_reads_one_repeatable_read_snapshot(postgres_database
     _seed_catalog(postgres_database)
     store = PostgresUnifiedKgStore(postgres_database, now=lambda: NOW)
     with postgres_database.write() as connection:
-        store.replace_communities(
+        store.write_communities_generation(
             connection, ANALYSIS_NB, 0,
             [("cm-a", ["k-a", "k-b"]), ("cm-b", ["k-c"])],
             {"k-a": "Alpha", "k-b": "Beta", "k-c": "Gamma"},
             {"k-a": 0.9, "k-b": 0.5, "k-c": 0.7},
-            NOW,
+            NOW, 0,
         )
 
     fired: list[str] = []
@@ -4497,10 +4502,10 @@ def test_board_list_and_board_edges_share_the_caller_snapshot(postgres_database)
     _seed_catalog(postgres_database)
     store = PostgresUnifiedKgStore(postgres_database, now=lambda: NOW)
     with postgres_database.write() as connection:
-        store.replace_communities(
+        store.write_communities_generation(
             connection, ANALYSIS_NB, 0,
             [("cm-a", ["k-a"]), ("cm-b", ["k-b"])],
-            {"k-a": "Alpha", "k-b": "Beta"}, {"k-a": 0.9, "k-b": 0.5}, NOW,
+            {"k-a": "Alpha", "k-b": "Beta"}, {"k-a": 0.9, "k-b": 0.5}, NOW, 0,
         )
         store.replace_kg_analysis_artifacts(
             connection, ANALYSIS_NB, 12, [("cm-a", "cm-b", 30)], [],
@@ -4534,10 +4539,20 @@ def test_board_list_and_board_edges_share_the_caller_snapshot(postgres_database)
 def _recast_boards_and_edges(database) -> None:
     store = PostgresUnifiedKgStore(database, now=lambda: NOW)
     with database.write() as connection:
-        store.replace_communities(
+        # 批 3·W2:重铸 = 发布协议(取号 → 写新代 → 指针翻转)。
+        claim = store.claim_derived_generation(connection, ANALYSIS_NB,
+                                               ttl_seconds=3600)
+        assert claim is not None
+        store.write_communities_generation(
             connection, ANALYSIS_NB, 0, [("cm-x", ["k-a"])],
-            {"k-a": "Alpha"}, {"k-a": 0.9}, NOW,
+            {"k-a": "Alpha"}, {"k-a": 0.9}, NOW, claim["generation"],
         )
+        assert store.flip_community_generation(
+            connection, ANALYSIS_NB,
+            published_from=claim["community_generation"],
+            generation=claim["generation"], now=NOW,
+        )
+        store.release_derived_claim(connection, ANALYSIS_NB, claim["generation"])
         store.replace_kg_analysis_artifacts(
             connection, ANALYSIS_NB, 13, [("cm-x", "cm-y", 99)], [],
             _analysis_payloads(), NOW,
@@ -4585,7 +4600,7 @@ def test_source_canonical_rows_match_on_postgres(knowledge_harness):
     # 夹具里 ANALYSIS_NB 的 14 个可用对象都挂 source-golden,合计必须**恰好 14 行**
     # —— 不多不少。旧形态(join `community_members` 再分组)在这份合成夹具上会数出 15:
     # `canonical-solo` 同时挂在两个板块下,ko-an-solo 因此被两条成员行各计一次。生产
-    # 不会出现(Louvain 的 membership 是一个划分,`replace_communities` 照它整表重写),
+    # 不会出现(Louvain 的 membership 是一个划分,发布按它整代重写),
     # 而新形态**结构上**不可能重复计数 —— 每个对象只出一行,板块由内存里的划分决定。
     counts = _analysis_source_counts(knowledge_harness)
     assert counts == {
@@ -5189,86 +5204,47 @@ def test_kg_source_profile_page_is_clamped_and_stable_on_ties_on_postgres(
     assert seen == ids, "并列组内翻页必须既不重复也不漏行,且顺序两个后端一致"
 
 
-def test_board_partition_still_holds_tracks_the_committed_partition_on_both_backends(
+def test_copy_forward_communities_remints_ids_and_remaps_members_on_both_backends(
     knowledge_harness,
 ):
-    """发布前那道复核的**后端中性行为**(codex 第 16 轮 P2)。
-
-    判据是「`kept_rows` 里任意一个板块 id 还在吗」:`replace_communities` 对
-    `(notebook_id, level)` 是整表删再插、新 id 128 bit 新铸,所以「还在」⟺「期间没有
-    任何一次 replace 提交过」。这条把那句蕴含关系的两端都钉住,并且顺带钉住两个归属
-    谓词 —— 少了 `notebook_id` 或 `level`,别的库/别的层的板块会替当前这一套背书,
-    复核当场变成永远放行。
-
-    刻意在 `write()` 里调:这就是它**唯一**的调用契约(发布事务内),PG 侧的
-    `FOR SHARE` 也只有在事务里才有意义。
-    """
+    """批 3·W2 §1.3 copy-forward 的后端中性行为:重建某一层时,published 代里
+    **其它层**的板块被复制进新代——板块 id 重铸(communities.id 单列 PK,
+    同 id 双代必撞)、成员行的 community_id 同步重映射、被重建的那层与别的
+    notebook 一行都不复制。板块内容(level/member_ids/size)原样保留。
+    (旧 `board_partition_still_holds` 复核已随代次化退役:「行还在」不再
+    蕴含「没被换过」,替代判据是发布事务内的 community_generation 比对,
+    行为由 test_kg_analysis_precompute 的补账本竞态套件钉。)"""
     _seed_analysis_fixture(knowledge_harness)
     unified = _analysis_unified_store(knowledge_harness)
 
-    with knowledge_harness.database.write() as connection:
-        assert unified.board_partition_still_holds(
-            connection, ANALYSIS_NB, 0, "cm-big") is True
-        # 归属谓词的两个证人:别的 notebook 的板块、别的 level 的板块都不算数。
-        assert unified.board_partition_still_holds(
-            connection, ANALYSIS_NB, 0, "cm-foreign") is False
-        assert unified.board_partition_still_holds(
-            connection, ANALYSIS_NB, 0, "cm-l1") is False
+    minted: list[str] = []
 
-    # 一次已提交的整表重铸(= 抢占者干的事)。
+    def mint() -> str:
+        minted.append(f"cm-fwd-{len(minted)}")
+        return minted[-1]
+
     with knowledge_harness.database.write() as connection:
-        unified.replace_communities(
-            connection, ANALYSIS_NB, 0, [("cm-recast", ["canonical-quad"])],
-            {"canonical-quad": "Recast board"}, {"canonical-quad": 1.0}, NOW,
+        copied = unified.copy_forward_communities(
+            connection, ANALYSIS_NB, 0, 0, 7, mint
         )
-
-    with knowledge_harness.database.write() as connection:
-        assert unified.board_partition_still_holds(
-            connection, ANALYSIS_NB, 0, "cm-big") is False
-        assert unified.board_partition_still_holds(
-            connection, ANALYSIS_NB, 0, "cm-recast") is True
-
-
-def test_the_board_revalidation_blocks_a_concurrent_board_replacement(
-    knowledge_harness,
-):
-    """PG 侧 `FOR SHARE` 的**行为**守卫 —— 不是「SQL 里有那几个字」。
-
-    `PostgresDatabase.write()` 是 READ COMMITTED、**没有**进程级锁(SQLite 那侧有一把
-    `threading.Lock`,同进程两个写事务根本不可能交错)。所以这一侧裸 SELECT 只是一次
-    瞬时读:并发的 `replace_communities` 完全可以在我们「查完」与「插完」之间提交,
-    复核照样放行,写出去的仍是悬空产物。行锁把这个窗口关掉。
-
-    ⚠ 判据用 `lock_timeout` 而**不是** sleep:锁真的被持有时超时是**确定性**的
-    (250 ms 到点必抛 `LockNotAvailable`),不是靠两个线程赛跑。
-    ⚠ **对照组是这条测试自带的变异证明**:同一条 DELETE 在读事务结束之后必须立刻成功。
-    没有它,「DELETE 因为别的原因失败」也能让上半段全绿;把 `FOR SHARE` 删掉则上半段
-    当场报红(M3 变异实测)。
-    ⚠ 两条连接各自从 harness 取:`write()` 有 `NestedPostgresWriteError` 的单飞守卫
-    (ContextVar),套在同一个 `write()` 里会先撞那个守卫,根本测不到锁。
-    """
-    import psycopg
-
-    _seed_analysis_fixture(knowledge_harness)
-    unified = _analysis_unified_store(knowledge_harness)
-
-    def delete_the_boards() -> str:
-        with knowledge_harness.database.write() as connection:
-            connection.execute("SET LOCAL lock_timeout = '250ms'")
-            connection.execute(
-                "DELETE FROM communities WHERE notebook_id=%s AND level=%s",
-                (ANALYSIS_NB, 0),
-            )
-        return "deleted"
-
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        with knowledge_harness.database.write() as connection:
-            assert unified.board_partition_still_holds(
-                connection, ANALYSIS_NB, 0, "cm-big") is True
-            with pytest.raises(psycopg.errors.LockNotAvailable):
-                executor.submit(delete_the_boards).result(timeout=30)
-        # 对照组:share 锁随复核所在的那个事务结束而释放,同一条 DELETE 立刻成功。
-        assert executor.submit(delete_the_boards).result(timeout=30) == "deleted"
+        assert copied == 1 and minted == ["cm-fwd-0"], (
+            "复制集必须恰好是本 notebook 里未被重建的那一层(level 1 的 cm-l1)"
+        )
+        row = connection.execute(
+            "SELECT id, level, size FROM communities "
+            "WHERE notebook_id=%s AND generation=7",
+            (ANALYSIS_NB,),
+        ).fetchall()
+        assert [(r["id"], int(r["level"]), int(r["size"])) for r in row] == [
+            ("cm-fwd-0", 1, 1)
+        ]
+        members = connection.execute(
+            "SELECT canonical_id, community_id, level FROM community_members "
+            "WHERE notebook_id=%s AND generation=7",
+            (ANALYSIS_NB,),
+        ).fetchall()
+        assert [(m["canonical_id"], m["community_id"], int(m["level"]))
+                for m in members] == [("canonical-quad", "cm-fwd-0", 1)]
 
 
 # ---------------------------------------------------------------------------

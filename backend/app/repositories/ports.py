@@ -2372,22 +2372,11 @@ class UnifiedKgStorePort(Protocol):
     def community_reports(db: object, notebook_id: str, level: int) -> list[Any]: ...
     @staticmethod
     def community_rows_for_summary(db: object, notebook_id: str, level: int) -> list[Any]: ...
-    # ⚠ 与上面那条配对,而且**必须在发布事务内**调:`community_rows_for_summary` 是
-    # 「只补账本」路径在**写事务之外**读回来的板块划分,而随后的预计算在生产上是分钟级
-    # 的 —— 期间另一次 `force=True` 的重建可以把整套板块换掉。所以写产物之前要在**那个
-    # 写事务里**问一句「我算的那套还在吗」,不在就整趟放弃(见
-    # `KnowledgeLifecycleService.rebuild_communities` 的发布段)。
-    # 查一行就够:`replace_communities` 对 (notebook_id, level) 是整表删再插、id 是 128
-    # bit 新铸的,所以「任意一个旧 id 还在」⟺「期间没有任何一次 replace 提交过」。
-    # 两侧的原子性来源刻意不同(parity 要的是语义等价):PostgreSQL 侧靠 `FOR SHARE` 行锁
-    # (READ COMMITTED、无进程级锁,裸 SELECT 挡不住并发写者在查完与插完之间提交),
-    # SQLite 侧靠 `SqliteDatabase.write()` 的进程级 `threading.Lock` + 文件写锁,既不需要
-    # 也没有 `FOR SHARE` 这个语法。
-    # 它与下面 `discard_board_dependent_kg_analysis_artifacts` 是同一条不变式的两半:
-    # 那条守的是**本次自己重铸板块**时不留悬空产物(全量路径,同事务、构造上自洽),
-    # 这条守的是**别人重铸了板块**时不写悬空产物(补账本路径,划分读自事务之外)。
-    @staticmethod
-    def board_partition_still_holds(db: object, notebook_id: str, level: int, board_id: str) -> bool: ...
+    # (批 3·W2:旧 `board_partition_still_holds` 已退役——代次化后「行还在」
+    # 不再蕴含「没被换过」(退休代行活过翻转)、`FOR SHARE` 无 DELETE 可阻塞,
+    # 守卫恒真化。替代判据:补账本路径读板块时连带记下当时的
+    # `community_generation`,发布事务内经 `state_row` 重读比对,变了即放弃
+    # ——见 `KnowledgeLifecycleService.rebuild_communities` 的发布段。)
     @staticmethod
     def concept_clusters_count(db: object, notebook_id: str) -> int: ...
     @staticmethod
@@ -2441,16 +2430,22 @@ class UnifiedKgStorePort(Protocol):
         ...
     @staticmethod
     def replace_canonical_relations(db: object, notebook_id: str, rows: object, seq: int) -> None: ...
+    # 批 3·W2 §1.3:旧 replace_communities(整表删再插)拆成两半——写新代在
+    # 发布事务**外**先行(write_communities_generation,无 DELETE),发布事务
+    # 内 copy-forward 未重建的 level(板块 id 重铸+成员行重映射)再翻
+    # community_generation 指针(flip_community_generation,双 CAS)。
     @staticmethod
-    def replace_communities(db: object, notebook_id: str, level: int, kept: object, names: object, deg: object, now: str) -> None: ...
-    # ⚠ 必须与 `replace_communities` 在**同一个写事务**里调:板块 id 被重铸的那一刻,
+    def write_communities_generation(db: object, notebook_id: str, level: int, kept: object, names: object, deg: object, now: str, generation: int) -> None: ...
+    @staticmethod
+    def copy_forward_communities(db: object, notebook_id: str, exclude_level: int, from_generation: int, to_generation: int, mint_id: object) -> int: ...
+    # ⚠ 必须与社区发布(copy-forward + 指针翻转)在**同一个写事务**里调:板块 id 被重铸(发布)的那一刻,
     # `kg_community_edges` / `kg_source_profiles` 的每一行都成了悬空引用,而 T3 的
     # 记忆化签名(state 的 seq + 账本行的 seq/created_at)在 `force=True` 的同 seq
     # 重铸上一个字段都不会变。理由与「为什么只作废这两份」见
     # `app.domain.kg_analysis_contracts.BOARD_DEPENDENT_ARTIFACT_KINDS`。
-    # ⚠ 它只覆盖**本次自己重铸板块**那一档(全量路径:重铸与作废同事务,构造上自洽)。
-    # 「板块被**别人**换掉」那一档由上面的 `board_partition_still_holds` 守 —— 补账本
-    # 路径根本不调本方法(它不重铸板块),所以两条都要,少一条就漏一半。
+    # ⚠ 它只覆盖**本次自己重铸板块**那一档(全量路径:发布与作废同事务,构造上自洽)。
+    # 「板块被**别人**换掉」那一档由发布事务内的 community_generation 比对守
+    # (见上面退役注记)—— 补账本路径根本不调本方法(它不重铸板块),两条都要。
     @staticmethod
     def discard_board_dependent_kg_analysis_artifacts(db: object, notebook_id: str) -> None: ...
     @staticmethod

@@ -4789,6 +4789,29 @@ class KnowledgeLifecycleService:
                 "appended": moved,
             })
 
+    def _reap_stale_community_generations(self, notebook_id: str,
+                                          keep: "Tuple[int, int]") -> int:
+        """communities 族残代预回收(设计 P1-8,发布路径前):两张表同款有界
+        分页——发布事务放弃/回滚留下的新代行、已退休旧代行都走这条唯一通道
+        (加启动恢复);无 finally 回收,跨翻转在飞读者拿一整轮宽限。"""
+        total = 0
+        for table in ("communities", "community_members"):
+            while True:
+                with self._write() as db:
+                    n = self.unified_kg.reap_derived_generations_page(
+                        db, notebook_id, table, keep,
+                        self._GENERATION_REAP_PAGE_ROWS)
+                total += n
+                if n < self._GENERATION_REAP_PAGE_ROWS:
+                    break
+        if total:
+            self.event_log.emit({
+                "kind": "kg_generation_reaped", "notebook_id": notebook_id,
+                "table": "communities+members", "rows": total,
+                "keep": list(keep),
+            })
+        return total
+
     def _reap_stale_cluster_generations(self, notebook_id: str,
                                         keep: "Tuple[int, int]") -> int:
         """预回收:有界分页删 concept_clusters 里 generation ∉ keep 的残代行
@@ -5626,7 +5649,7 @@ class KnowledgeLifecycleService:
 
         只有**两个闸都过**才是真正的 no-op。图新鲜而账本不新鲜时走「只补账本」路径:
         重建 canonical 边图并沿用库里**已有**的板块划分,跳过 Louvain、跳过
-        `replace_communities`(那是 171 万成员行的整表重写)、也不重新铸板块 id。
+        社区两表的新代写入(那是 171 万成员行量级)、也不重新铸板块 id。
 
         为什么必须这样(评审 B1):生产 base 库在本特性上线**之前**就已经建好社区且
         `community_seq == kg_mutation_seq`。如果分析产物跟着社区图闸走,那么部署之后
@@ -5641,7 +5664,7 @@ class KnowledgeLifecycleService:
         建成标记会让这类库的两个闸都永远过不去:每一次「刷新图谱」都要重跑 canonical
         边图 + 三条全表统计快照(生产量级见 `_compute_kg_analysis`),而结果永远是
         同一个零。`community_seq` 默认 -1、`kg_mutation_seq` 恒 >= 0,所以「从没建过」
-        照样判得出来;而 `communities` 只被 `replace_communities` 删改、它又与
+        照样判得出来;而 `communities` 的发布只走指针翻转事务、它又与
         `set_community_seq` **同事务**提交,所以 seq 对齐 ⟺ 板块确实按那个 seq 写过。
 
         ⚠ **那份不分 level 的账目整体归默认层独有**(codex 第 11/15 轮 P2)。
@@ -5656,11 +5679,11 @@ class KnowledgeLifecycleService:
 
         补法不加列,把那句蕴含关系变成写侧的不变式:**只有默认层的构建碰共享账目**。
           · `set_community_seq` 只在 `level == DEFAULT_COMMUNITY_LEVEL` 时调 → 「seq 对齐
-            ⟺ 默认层的板块按那个 seq 写过」重新成立(它与 `replace_communities(level=0)`
+            ⟺ 默认层的板块按那个 seq 写过」重新成立(它与默认层的发布(指针翻转)
             同事务,别处没有第二个写点);
           · 预计算与 `discard_board_dependent_...` 同样只在默认层跑 → 非默认层的构建
-            既不会连坐作废默认层**有效**的两份产物(它的 `replace_communities` 按 level
-            删,默认层的板块 id 一个都没变、根本没悬空),也不会把指向另一层板块 id 的
+            既不会连坐作废默认层**有效**的两份产物(它写的是自己那一层的新代行,
+            默认层经 copy-forward 原样带进新代),也不会把指向另一层板块 id 的
             产物写进默认层的读侧;
           · 闸本身也收进默认层:非默认层没有任何账本,所以它**永不短路**。保留「其它层
             退回 `communities_count(level) > 0`」那一支会把陈旧的划分当成新鲜的 —— 共享
@@ -5705,8 +5728,8 @@ class KnowledgeLifecycleService:
         `backend/app/scripts/recluster_kg.py`(`force=True`)不经过那个槽,直接调
         `rebuild_unified_kg` → `rebuild_communities`,任何跨进程/跨部署运维触发的重跑
         同样绕得开。所以发布事务里、写产物之前要问一句「我算的那套划分还在吗」
-        (`board_partition_still_holds`,查一行足矣 —— `replace_communities` 是整表
-        删再插、id 128 bit 新铸),不在就**整份放弃发布**、发
+        (批 3·W2 起判据 = 读板块时记下的 community_generation 与发布事务内重读
+        的比对——每次发布都翻指针,代次没变 ⟺ 期间没有任何发布提交过),不在就**整份放弃发布**、发
         `kg_analysis_backfill_discarded`,靠既有的账本闸下一次重来。
         全量路径不需要这道复核(板块与产物同事务,构造上自洽);零板块那一档刻意不查,
         理由写在发布段的注释里(没有东西会悬空 + 计数检查挡不住 phantom insert)。
@@ -5765,314 +5788,404 @@ class KnowledgeLifecycleService:
             self.event_log.emit({"kind": "community_build_refused",
                                  "notebook_id": notebook_id, "reason": "no_scale_index"})
             return _boards if graph_fresh else 0
-        # canonical 整数边图:SQL-join 把关系两端映射到 canonical(未聚类→自身 object_id),
-        # 整数索引累加边权。避开 networkx dict-of-dicts 与全量 cluster_map dict → 10^7 边
-        # 内存有界(concept_clusters.member_object_id 有索引,join 走索引)。
-        #
-        # ⚠ 边表是**列式 int32 数组**而不是 `dict[(int, int), int]`(设计 §3.32,
-        # codex 第 2/7/9 轮那三个 P1 的共同根源就是那个 dict 形态)。dict 每条边要一个
-        # 新分配的 int 二元组 + 哈希槽,生产 836 万边约 1.4 GB;而且**折叠它**必然要么
-        # 造第二份同量级 dict、要么依赖不缩哈希表的 `popitem`。三个数组把同一份数据压到
-        # 约 100 MB,折叠是纯向量化。
-        can2idx: "Dict[str, int]" = {}
-        edge_builder = CanonicalEdgeTableBuilder()
-        with self._connect() as db:
-            names, graph_rows = self.unified_kg.community_graph_rows(db, notebook_id)
-            for r in graph_rows:
-                s, t = r["s"], r["t"]
-                if not s or not t or s == t:
-                    continue
-                si = can2idx.setdefault(s, len(can2idx))
-                ti = can2idx.setdefault(t, len(can2idx))
-                edge_builder.add(si, ti)
-        idx2can = [""] * len(can2idx)
-        for _c, _i in can2idx.items():
-            idx2can[_i] = _c
-        n_nodes = len(can2idx)
-        # 行序 = 每对 canonical 的**首次出现序**,与被它取代的那张 dict 的插入序逐字
-        # 一致 —— Louvain 对边序敏感,漂了就是已部署库的板块划分全漂(设计 §3.32
-        # 不变量 1)。`build` 里那段说明写了为什么必须是稳定排序。
-        edge_table = edge_builder.build(n_nodes)
-        del edge_builder
-        if graph_fresh:
-            # 只补账本:板块划分从库里读回来(`communities.member_ids` 就是 Louvain 那次
-            # 写下的 canonical 列表),Louvain / centrality / 两表重写全部跳过。
-            with self._connect() as db:
-                kept_rows = [
-                    (row["id"], json.loads(row["member_ids"] or "[]"))
-                    for row in self.unified_kg.community_rows_for_summary(
-                        db, notebook_id, level
-                    )
-                ]
-            kept = len(kept_rows)
-        else:
-            # 社区检测 + 度中心度(deg: canonical -> degree)。comms: list[list[canonical]]。
-            comms: "List[List[str]]" = []
-            deg: "Dict[str, float]" = {}
-            if n_nodes:
-                if _ig is not None:
-                    import random as _random
-                    _random.seed(42)
-                    try:
-                        _ig.set_random_number_generator(_random)   # 确定性(seed=42)
-                    except Exception:
-                        pass
-                    # igraph 直接吃 numpy 边数组。`igraph_edges()` 返回的 (M, 2) 数组
-                    # 是**独立缓冲区**(column_stack 是拷贝,不是视图),所以第 7 轮
-                    # 评审抓到的那个别名 —— `list(ew.keys())` 与 `ew` 共享同一批 key
-                    # 元组、一个活着另一个一个字节都放不掉 —— 在数组模型下不存在。
-                    # 仍然写成临时值:igraph 拷进 C 结构后这一句就结束、拷贝当场回收。
-                    G = _ig.Graph(n=n_nodes, edges=edge_table.igraph_edges())
-                    G.es["weight"] = edge_table.weight.tolist()
-                    membership = G.community_multilevel(weights="weight").membership
-                    degs = G.degree()
-                    buckets: "Dict[int, List[str]]" = {}
-                    for _i, _m in enumerate(membership):
-                        buckets.setdefault(_m, []).append(idx2can[_i])
-                        deg[idx2can[_i]] = float(degs[_i])
-                    comms = list(buckets.values())
-                    # ⚠ Louvain 的图到此为止,当场放掉。igraph 把整张边表拷进了自己的
-                    # C 结构(生产 836 万边),而它的全部产出(membership / degree)
-                    # 已经抄进 `comms` / `deg`。留着它就会一路跨过下面预计算里的四次
-                    # 全表扫 —— 与折叠结果不释放(codex 第 9 轮 P1-2)是同一类缺陷,
-                    # 只是换了一个持有者。
-                    del G, membership, degs, buckets
-                else:
-                    import networkx as nx
-                    from networkx.algorithms.community import louvain_communities
-                    g = nx.Graph()
-                    for _a, _b, _w in zip(
-                        edge_table.src.tolist(),
-                        edge_table.dst.tolist(),
-                        edge_table.weight.tolist(),
-                    ):
-                        g.add_edge(_a, _b, weight=_w)
-                    comms = [[idx2can[_i] for _i in c]
-                             for c in louvain_communities(g, weight="weight", seed=42)]
-                    for _i, _d in g.degree():
-                        deg[idx2can[_i]] = float(_d)
-                    # 与 igraph 分支那句 `del G, …` 同一条不变式:图的全部产出已经抄进
-                    # `comms` / `deg`,而 networkx 的 dict-of-dicts 比 igraph 的 C 结构
-                    # 更占地方。不放掉它就会一路跨过下面预计算的四趟全表扫。
-                    del g
-            min_size = self.settings.community_min_size
-            # Policy (min-size filter + id minting + member ordering) stays here;
-            # the store owns the two-table full rewrite.
-            kept_rows = [(self._new_id("cm"), sorted(comm))
-                         for comm in comms if len(comm) >= min_size]
-            kept = len(kept_rows)
-            del comms
-        # ⚠ 社区检测的中间结果到此为止(codex 第 14 轮 P2)。`kept_rows` 已经把要发布的
-        # 内容全抄走了,而 `comms` / `idx2can` 装的是**同一批 canonical 字符串的另一份
-        # 引用**、`g`(networkx 兜底)是整张图。它们此前一直活到函数返回,也就是活着跨过
-        # 下面**新增的**那四趟全表扫(来源画像 + 三条统计快照),把两个内存峰值叠在一起;
-        # 生产 171 万 canonical 的量级下这不是可忽略的常数。
-        # 这与 `_compute_kg_analysis` 内部「`can2idx` / `community_of_index` 用完即放」
-        # 是同一条不变式的两半 —— 那半由「membership 不得活着跨过三条统计快照」守着。
-        # `can2idx` 本身**不能**在这里清:`SourceBoardCounter` 还要用它做 canonical→下标。
-        idx2can.clear()
-        # KG 质量分析的预计算产物(设计 §3.2/§3.3):挂在这一次图构建上顺带**算出来**,
-        # 与板块划分一起在下面那**一个**写事务里发布(codex 第 13 轮 P1)。
-        #
-        # ⚠ **计算全部在写事务之外**,这条是硬约束不是风格:五份产物里有四份是全表级
-        # 重活(生产 878 万对象 / 836 万边),而 `SqliteDatabase.write()` 拿的是**进程级
-        # 写锁**——把它们挪进写事务就等于把全库写入按住一整趟全表扫(同形状数据点:
-        # 835 万边冷扫 39 分钟)。两侧 store 的只读方法自己会检查线程写深度并当场硬失败
-        # (`_reject_inside_write_transaction`),`tests/test_kg_analysis_precompute.py`
-        # 另有按调用时刻记 `write_depth` 的语义守卫。
-        #
-        # 为什么**不**让计算的失败冒泡:这三张表是只读报告的派生产物,而 rebuild_communities
-        # 是 rebuild_unified_kg 与「刷新图谱」的核心路径。让一份辅助报告的失败去掀翻
-        # 437GB 生产库的图重建,爆炸半径不成比例。而**吞掉它是安全的**,因为产物自带
-        # `kg_mutation_seq` 戳:失败时上一轮的产物留在原地、戳还是它自己那个旧值,T3
-        # 会如实报「落后 N 次变更」并给出整理入口 —— 不是静默降级,是显式陈旧 + 事件。
-        # 反过来若让它冒泡,板块本来该照常发布,异常只会让调用方以为整个重建失败。
-        #
-        # ⚠ 这条豁免只覆盖**计算**。下面那个发布事务本身失败照旧冒泡 —— 它就是板块自己
-        # 的写事务(`replace_communities` 的失败一向冒泡),而且原子之后「事务失败」的
-        # 含义是**这一趟什么都没发生**:吞掉它再返回 `kept` 就是谎报一次并不存在的重建。
-        #
-        # ⚠ 「留在原地」只对**与板块无关**的三条统计快照成立。图真的被重建过时,依赖
-        # 板块的那两份在同一个发布事务里作废(见下面 `discard_...` 旁的说明)——
-        # 它们**必须**走,留着就是指向不存在板块 id 的悬空产物。此时 T3 报的是「缺失」
-        # 而不是「陈旧」,那是更诚实的一档,不是退化。
-        #
-        # 失败**会自愈**:上面的分析账本闸只看账本齐不齐、戳对不对,所以下一次
-        # `rebuild_communities`(哪怕 KG 一动没动、哪怕不带 force)会走「只补账本」
-        # 路径重试。这正是把两个闸分开的第二个理由。
-        #
-        # ⚠ 取消**不算**失败,必须放行:`KgBuildAborted` 是用户要停,吞掉它会让中止
-        # 看起来成功了。KeyboardInterrupt / SystemExit 属 BaseException,天然不被
-        # `except Exception` 捕获。
-        # ⚠ 失败**不冒泡,但也绝不谎报成功**(codex 第 8 轮 P2)。这两件事此前被混成
-        # 一件:异常被记进 `kg_analysis_precompute_failed`,紧接着照样 emit
-        # `kg_analysis_backfilled` —— 同一次执行里失败事件与成功事件并存,而账本其实
-        # 仍然不完整。运维监控与任何事件消费方都会被误导(「补过了」与「补失败了」是
-        # 相反的运维动作)。变的只是那条成功事件的前提。
-        #
-        # ⚠ 只有默认层跑它(方向五):账本与两张产物表都不分 level,让非默认层去写就是
-        # 把指向**另一层**板块 id 的产物塞进默认层的读侧,而读侧照旧按 `community_seq`
-        # 对齐判「与当前一致」。非默认层因此只发布它自己的板块行,一个字都不占共享账目。
-        analysis: "Optional[Tuple[list, list, Dict[str, dict]]]" = None
-        if not _ledger_speaks_for_level:
-            # 边表在这里就到头了 —— 它平时是交给 `_compute_kg_analysis` 边消化边释放的
-            # (生产 836 万边约 100 MB),这条路径没有接手方,得自己放掉,不能让它一路
-            # 活到函数返回。`can2idx` 同理(生产 171 万 canonical)。
-            del edge_table
-            can2idx.clear()
-        else:
-            try:
-                analysis = self._compute_kg_analysis(
-                    notebook_id, level, _cseq, kept_rows, edge_table, can2idx,
-                    # `force` 是「用户明确要求重算」——它上面不省钱,见
-                    # `reusable_artifact_payloads` 的最后一段。
-                    reusable=({} if force
-                              else reusable_artifact_payloads(_ledger, _seq, _cseq)),
-                    # 板块划分是这一轮**刚跑出来**的,还是库里现成的?依赖板块的两份产物
-                    # 据此决定盖不盖簇世代的戳(见 `stamp_cluster_seq`):补账本那条路径
-                    # 拿的是现成的划分,它建在哪一代合并结果上没有地方记,盖上当前世代就是
-                    # 把一份混合世代的东西说成「与当前一致」(codex 第 7 轮 P2)。
-                    partition_rebuilt=not graph_fresh,
-                )
-            except KgBuildAborted:
-                raise
-            except Exception as exc:
+        # ---- 取号(批 3·W2 §1.3:与 cluster 族同一取号器、同一在飞列) ----
+        # 只有真的要重建图(写新代 + 翻 community_generation 指针)才取号;
+        # 只补账本路径不碰 communities 两表,免认领。被拒 → 发结构化事件区分
+        # 「被闸」与「真失败」,如实返回当前板块数(库里的板块还在)。
+        # rebuild_unified_kg 的收尾/跳过分支与门面直调各自独立取号——cluster
+        # 侧的认领在其 finally 已释放,这里的新认领不会互相卡死。
+        _generation = 0
+        _published_from = 0
+        if not graph_fresh:
+            with self._write() as _cdb:
+                _claim = self.unified_kg.claim_derived_generation(
+                    _cdb, notebook_id,
+                    ttl_seconds=self.settings.kg_derived_build_ttl_seconds)
+            if _claim is None:
                 self.event_log.emit({
-                    "kind": "kg_analysis_precompute_failed",
-                    "notebook_id": notebook_id, "level": level, "seq": _seq,
-                    "error": f"{type(exc).__name__}: {exc}",
+                    "kind": "communities_rebuild_gated",
+                    "notebook_id": notebook_id, "level": level,
                 })
-        # ⚠ 「真的发布了」与「算出来了」是两件事(下面那道复核会让它们分岔),而事件必须
-        # 跟着前者走 —— 放弃发布还发「补齐了」就是谎报,与第 8 轮 P2 修的是同一个病。
-        analysis_published = False
-        partition_replaced_under_us = False
-        # ---- 发布:板块划分 + 版本戳 + 全部分析产物,**一个**写事务(codex 第 13 轮 P1)
-        #
-        # 修复前这里是三个事务(板块 → 版本戳 → 产物),中间隔着分钟级的预计算。生产
-        # (878 万对象 / 836 万边)上并发的 `/kg-analysis` 因此会读到「新板块 + 旧账本」:
-        # 板块 id 已经换了一整套,而三条统计快照还停在上一个 seq、依赖板块的两份已被作废
-        # 但还没写回。报告同屏混着两代库,而本视图存在的全部理由就是「每个数字都能说出
-        # 自己建于何时」。把重活挪进事务不是选项(见上面那段写锁的说明),所以改成
-        # **先在事务外把全部产物算完,再一次性发布**。
-        #
-        # 这个事务只做便宜的写:两表整表重写(成员行数级)+ 一次 UPDATE + 三张产物表的
-        # 整批重写。它一个 SELECT 重活都不发。
-        #
-        # ⚠ 没东西可写就**不开事务**:图新鲜 + 预计算失败那一档,这一趟确实什么都没发生,
-        # 而 `_write()` 拿的是进程级写锁 —— 为一个空事务去抢它是纯浪费。
-        if not graph_fresh or analysis is not None:
-            now = self._now()
-            with self._write() as db:
-                if not graph_fresh:
-                    self.unified_kg.replace_communities(
-                        db, notebook_id, level, kept_rows, names, deg, now
-                    )
-                    # ⚠ 上一行**重铸了板块 id**,依赖板块划分的两份分析产物(跨板块边 /
-                    # 来源画像)此刻整表变成悬空引用 —— 必须与重铸**同事务**作废。预计算
-                    # 失败时下面那次整批重写不会发生,而板块照旧发布:少了这一句,库里就
-                    # 会留下指向已不存在板块 id 的悬空产物,而 T3 的记忆化签名对「同 seq
-                    # 的 force 重铸」是瞎的 —— 已预热的缓存会**无限期**吐上一套板块 id,
-                    # 直到 LRU 淘汰或进程重启。作废账本行同时也就动了签名。
-                    # (⚠ 账本里一行都没有时这次作废是 no-op,签名照样不动;那一档由读侧
-                    #  的 `kg_analysis._signature_tracks_board_recasts` 拦成「不写缓存」。)
-                    # 只作废这两份(三条统计快照与板块无关,留着仍是可读的陈旧快照),
-                    # 理由见 `app.domain.kg_analysis_contracts.BOARD_DEPENDENT_ARTIFACT_KINDS`。
-                    # 预计算成功时它是冗余的(下面那次重写整表删),留着是因为它守的是
-                    # **失败**那一档,而那一档没有别的东西替它守。
-                    #
-                    # ⚠ 作废与记版本都**只在默认层**做(方向五,codex 第 15 轮 P2-1)。
-                    # 上面那次 `replace_communities` 是按 level 删/写的,非默认层重铸的
-                    # 是它自己那一层的板块 id —— 默认层的板块 id 一个都没变,那两份产物
-                    # 根本没悬空,作废它们是**连坐**;而推进那份不分 level 的 seq 更糟:
-                    # 「seq 对齐 ⟹ 默认层建过」是闸里默认层那一支**无条件**信的蕴含关系,
-                    # 让别的层去推它,默认层就会在一行板块都没有时被判成「建过」。
-                    if _ledger_speaks_for_level:
-                        self.unified_kg.discard_board_dependent_kg_analysis_artifacts(
-                            db, notebook_id
-                        )
-                        # 记版本:社区已按 _seq 建好(无 unified_kg_state 行则 UPDATE
-                        # no-op,下次仍重建)。⚠ 它必须与 `replace_communities`
-                        # **同事务**:分开提交会留下「板块已换、seq 还是旧的」的窗口,
-                        # 而闸正是拿 seq 判「建过没有」。
-                        self.unified_kg.set_community_seq(db, notebook_id, _seq)
-                if analysis is not None:
-                    # ⚠ **发布前复核板块划分还在**(codex 第 16 轮 P2)。只有「只补账本」
-                    # 那一档需要:它的 `kept_rows` 是**写事务之外**从库里读回来的,而随后
-                    # 的 `_compute_kg_analysis` 在生产(878 万对象 / 836 万边)上是分钟级
-                    # 的,窗口很宽。期间另一次 `force=True` 的重建完全可以把整套板块换掉
-                    # —— 本方法自己没有单飞守卫;`POST /notebooks/{id}/unified-kg/rebuild`
-                    # 如今经共享的 per-notebook KG 维护槽串行化,但离线
-                    # `backend/app/scripts/recluster_kg.py`(`force=True`)不经过那个槽,
-                    # 跨进程/跨部署运维触发的重跑同样能撞上同一条路径。不复核就会写出
-                    # 指向已不存在板块 id 的 `kg_community_edges` /
-                    # `kg_source_profiles`,而它们的账本盖着「与当前一致」的戳 —— 比缺失
-                    # 更糟,缺失至少是诚实的。
-                    #
-                    # 全量路径**不需要**这道复核:那一档的板块是上面同一个事务里刚写的,
-                    # 板块与产物构造上自洽,没有任何窗口可钻。
-                    #
-                    # ⚠ **查一行就够。** `replace_communities` 对 (notebook_id, level) 是
-                    # 整表删再插、新 id 由 `_new_id("cm")` 铸出(128 bit),所以「`kept_rows`
-                    # 里任意一个 id 还在」⟺「期间没有任何一次 replace 提交过」。原子性由
-                    # store 那侧兑现(PG 的 `FOR SHARE` 行锁 / SQLite 的进程级写锁),
-                    # 两侧的不对称写在它的 docstring 里。
-                    #
-                    # ⚠ **零板块那一档刻意不查,而且刻意不退化成 `COUNT(*) == 0`。** 两个
-                    # 理由,后一个更硬:
-                    #   1. 零板块时**没有任何东西会悬空** —— 来源画像整份跳过
-                    #      (`_compute_kg_analysis` 里的 `if total_members:`),跨板块边是
-                    #      空的。最坏结果只是一份 `communities: 0` 的陈旧载荷,而
-                    #      `analysis_ledger_is_current(..., has_boards=_boards > 0)` 在下一次
-                    #      调用(那时 `_boards > 0`)会因为缺 `source_profiles` 判不齐全 →
-                    #      自动重补。一次调用内自愈,不需要人工介入。
-                    #   2. 没有行可锁 ⟹ 计数检查挡不住 phantom insert。加一个**看起来严密、
-                    #      实际有洞**的守卫,正是本 PR 已经吃过十几次亏的那个形态 ——
-                    #      守卫不得夸大自己的强度。
-                    if (graph_fresh and kept_rows
-                            and not self.unified_kg.board_partition_still_holds(
-                                db, notebook_id, level, kept_rows[0][0])):
-                        # 放弃整份发布,**不重试**:重试要重跑那趟分钟级的全表重活,而且
-                        # 可能反复被同一个抢占者打断。既有的自愈路径就是为这一档设计的 ——
-                        # 账本不齐 ⟹ 下一次 `rebuild_communities`(哪怕不带 force)照样走
-                        # 补账本重来,那时它读到的是抢占者留下的那套划分。
-                        partition_replaced_under_us = True
-                    else:
-                        _edges, _profiles, _payloads = analysis
-                        self.unified_kg.replace_kg_analysis_artifacts(
-                            db, notebook_id, _seq, _edges, _profiles, _payloads, now
-                        )
-                        analysis_published = True
-        if graph_fresh:
-            # 图没有被重建,只补了账本。用一个**不同**的事件名如实说这件事 ——
-            # 复用 communities_rebuilt 会让运维在事件流里看到一次并不存在的图重建。
+                return _boards
+            _generation = int(_claim["generation"])
+            _published_from = int(_claim["community_generation"])
+        try:
+            if _generation:
+                # [预回收] communities 族残代(发布事务放弃/回滚留下的新代行、
+                # 已退休旧代)在发布路径前有界分页清理(设计 P1-8)。
+                self._reap_stale_community_generations(
+                    notebook_id, keep=(_published_from, _generation))
+            # canonical 整数边图:SQL-join 把关系两端映射到 canonical(未聚类→自身 object_id),
+            # 整数索引累加边权。避开 networkx dict-of-dicts 与全量 cluster_map dict → 10^7 边
+            # 内存有界(concept_clusters.member_object_id 有索引,join 走索引)。
             #
-            # ⚠ 只在产物**真的落库**时发:这条路径除了补账本什么都没做,一旦预计算失败
-            # (`kg_analysis_precompute_failed`)或发布前的板块复核判失效
-            # (`kg_analysis_backfill_discarded`),这一趟就等于什么都没发生,发一条
-            # 「补齐了」是纯粹的谎报。两档各有自己的事件,都不是静默。
-            # 判据因此是 `analysis_published` 而不是「算出来了」—— 后者在复核放弃那一档
-            # 仍然为真(codex 第 16 轮 P2)。
-            # 返回值不受影响:社区还在库里,如实返回它的数量 —— 一份辅助报告没补上,
-            # 不能表现成「一个板块都没有」。这里的 `kept` 是读到那一刻的板块数,刻意不为
-            # 复核失败再发一次查询:那些板块确实在库里存在过,而抢占者写的是它自己的一套。
-            if partition_replaced_under_us:
-                # 与 `kg_analysis_precompute_failed` 并列的**另一条**事件,刻意不复用它:
-                # 「算不出来」与「算出来了但期间板块被换掉」的运维动作不同,前者要查模型/
-                # 数据,后者说明有两个重建在抢同一个库。
-                self.event_log.emit({
-                    "kind": "kg_analysis_backfill_discarded",
-                    "notebook_id": notebook_id, "level": level, "seq": _seq,
-                    "reason": "board_partition_replaced",
-                })
-            if analysis_published:
-                self.event_log.emit({
-                    "kind": "kg_analysis_backfilled", "notebook_id": notebook_id,
-                    "level": level, "seq": _seq, "communities": kept,
-                })
+            # ⚠ 边表是**列式 int32 数组**而不是 `dict[(int, int), int]`(设计 §3.32,
+            # codex 第 2/7/9 轮那三个 P1 的共同根源就是那个 dict 形态)。dict 每条边要一个
+            # 新分配的 int 二元组 + 哈希槽,生产 836 万边约 1.4 GB;而且**折叠它**必然要么
+            # 造第二份同量级 dict、要么依赖不缩哈希表的 `popitem`。三个数组把同一份数据压到
+            # 约 100 MB,折叠是纯向量化。
+            can2idx: "Dict[str, int]" = {}
+            edge_builder = CanonicalEdgeTableBuilder()
+            with self._connect() as db:
+                names, graph_rows = self.unified_kg.community_graph_rows(db, notebook_id)
+                for r in graph_rows:
+                    s, t = r["s"], r["t"]
+                    if not s or not t or s == t:
+                        continue
+                    si = can2idx.setdefault(s, len(can2idx))
+                    ti = can2idx.setdefault(t, len(can2idx))
+                    edge_builder.add(si, ti)
+            idx2can = [""] * len(can2idx)
+            for _c, _i in can2idx.items():
+                idx2can[_i] = _c
+            n_nodes = len(can2idx)
+            # 行序 = 每对 canonical 的**首次出现序**,与被它取代的那张 dict 的插入序逐字
+            # 一致 —— Louvain 对边序敏感,漂了就是已部署库的板块划分全漂(设计 §3.32
+            # 不变量 1)。`build` 里那段说明写了为什么必须是稳定排序。
+            edge_table = edge_builder.build(n_nodes)
+            del edge_builder
+            _partition_generation = 0
+            if graph_fresh:
+                # 只补账本:板块划分从库里读回来(`communities.member_ids` 就是 Louvain 那次
+                # 写下的 canonical 列表),Louvain / centrality / 两表重写全部跳过。
+                # 批 3·W2(复评 P1-6):连带记下读取时的 community_generation——
+                # 发布事务内重读比对,变了即整份放弃。先读 state 后读行:若一次
+                # 翻转恰好插在两读之间,行读到的是新代、记下的是旧代,发布时
+                # 比对必失配 → 误放弃一次(自愈重来),方向保守正确。
+                with self._connect() as db:
+                    _prow = self.unified_kg.state_row(db, notebook_id)
+                    _partition_generation = (
+                        int(_prow["community_generation"]) if _prow else 0)
+                    kept_rows = [
+                        (row["id"], json.loads(row["member_ids"] or "[]"))
+                        for row in self.unified_kg.community_rows_for_summary(
+                            db, notebook_id, level
+                        )
+                    ]
+                kept = len(kept_rows)
+            else:
+                # 社区检测 + 度中心度(deg: canonical -> degree)。comms: list[list[canonical]]。
+                comms: "List[List[str]]" = []
+                deg: "Dict[str, float]" = {}
+                if n_nodes:
+                    if _ig is not None:
+                        import random as _random
+                        _random.seed(42)
+                        try:
+                            _ig.set_random_number_generator(_random)   # 确定性(seed=42)
+                        except Exception:
+                            pass
+                        # igraph 直接吃 numpy 边数组。`igraph_edges()` 返回的 (M, 2) 数组
+                        # 是**独立缓冲区**(column_stack 是拷贝,不是视图),所以第 7 轮
+                        # 评审抓到的那个别名 —— `list(ew.keys())` 与 `ew` 共享同一批 key
+                        # 元组、一个活着另一个一个字节都放不掉 —— 在数组模型下不存在。
+                        # 仍然写成临时值:igraph 拷进 C 结构后这一句就结束、拷贝当场回收。
+                        G = _ig.Graph(n=n_nodes, edges=edge_table.igraph_edges())
+                        G.es["weight"] = edge_table.weight.tolist()
+                        membership = G.community_multilevel(weights="weight").membership
+                        degs = G.degree()
+                        buckets: "Dict[int, List[str]]" = {}
+                        for _i, _m in enumerate(membership):
+                            buckets.setdefault(_m, []).append(idx2can[_i])
+                            deg[idx2can[_i]] = float(degs[_i])
+                        comms = list(buckets.values())
+                        # ⚠ Louvain 的图到此为止,当场放掉。igraph 把整张边表拷进了自己的
+                        # C 结构(生产 836 万边),而它的全部产出(membership / degree)
+                        # 已经抄进 `comms` / `deg`。留着它就会一路跨过下面预计算里的四次
+                        # 全表扫 —— 与折叠结果不释放(codex 第 9 轮 P1-2)是同一类缺陷,
+                        # 只是换了一个持有者。
+                        del G, membership, degs, buckets
+                    else:
+                        import networkx as nx
+                        from networkx.algorithms.community import louvain_communities
+                        g = nx.Graph()
+                        for _a, _b, _w in zip(
+                            edge_table.src.tolist(),
+                            edge_table.dst.tolist(),
+                            edge_table.weight.tolist(),
+                        ):
+                            g.add_edge(_a, _b, weight=_w)
+                        comms = [[idx2can[_i] for _i in c]
+                                 for c in louvain_communities(g, weight="weight", seed=42)]
+                        for _i, _d in g.degree():
+                            deg[idx2can[_i]] = float(_d)
+                        # 与 igraph 分支那句 `del G, …` 同一条不变式:图的全部产出已经抄进
+                        # `comms` / `deg`,而 networkx 的 dict-of-dicts 比 igraph 的 C 结构
+                        # 更占地方。不放掉它就会一路跨过下面预计算的四趟全表扫。
+                        del g
+                min_size = self.settings.community_min_size
+                # Policy (min-size filter + id minting + member ordering) stays here;
+                # the store owns the two-table full rewrite.
+                kept_rows = [(self._new_id("cm"), sorted(comm))
+                             for comm in comms if len(comm) >= min_size]
+                kept = len(kept_rows)
+                del comms
+            # ⚠ 社区检测的中间结果到此为止(codex 第 14 轮 P2)。`kept_rows` 已经把要发布的
+            # 内容全抄走了,而 `comms` / `idx2can` 装的是**同一批 canonical 字符串的另一份
+            # 引用**、`g`(networkx 兜底)是整张图。它们此前一直活到函数返回,也就是活着跨过
+            # 下面**新增的**那四趟全表扫(来源画像 + 三条统计快照),把两个内存峰值叠在一起;
+            # 生产 171 万 canonical 的量级下这不是可忽略的常数。
+            # 这与 `_compute_kg_analysis` 内部「`can2idx` / `community_of_index` 用完即放」
+            # 是同一条不变式的两半 —— 那半由「membership 不得活着跨过三条统计快照」守着。
+            # `can2idx` 本身**不能**在这里清:`SourceBoardCounter` 还要用它做 canonical→下标。
+            idx2can.clear()
+            # KG 质量分析的预计算产物(设计 §3.2/§3.3):挂在这一次图构建上顺带**算出来**,
+            # 与板块划分一起在下面那**一个**写事务里发布(codex 第 13 轮 P1)。
+            #
+            # ⚠ **计算全部在写事务之外**,这条是硬约束不是风格:五份产物里有四份是全表级
+            # 重活(生产 878 万对象 / 836 万边),而 `SqliteDatabase.write()` 拿的是**进程级
+            # 写锁**——把它们挪进写事务就等于把全库写入按住一整趟全表扫(同形状数据点:
+            # 835 万边冷扫 39 分钟)。两侧 store 的只读方法自己会检查线程写深度并当场硬失败
+            # (`_reject_inside_write_transaction`),`tests/test_kg_analysis_precompute.py`
+            # 另有按调用时刻记 `write_depth` 的语义守卫。
+            #
+            # 为什么**不**让计算的失败冒泡:这三张表是只读报告的派生产物,而 rebuild_communities
+            # 是 rebuild_unified_kg 与「刷新图谱」的核心路径。让一份辅助报告的失败去掀翻
+            # 437GB 生产库的图重建,爆炸半径不成比例。而**吞掉它是安全的**,因为产物自带
+            # `kg_mutation_seq` 戳:失败时上一轮的产物留在原地、戳还是它自己那个旧值,T3
+            # 会如实报「落后 N 次变更」并给出整理入口 —— 不是静默降级,是显式陈旧 + 事件。
+            # 反过来若让它冒泡,板块本来该照常发布,异常只会让调用方以为整个重建失败。
+            #
+            # ⚠ 这条豁免只覆盖**计算**。下面那个发布事务本身失败照旧冒泡 —— 它就是板块自己
+            # 的写事务(社区发布(翻转事务)的失败一向冒泡),而且原子之后「事务失败」的
+            # 含义是**这一趟什么都没发生**:吞掉它再返回 `kept` 就是谎报一次并不存在的重建。
+            #
+            # ⚠ 「留在原地」只对**与板块无关**的三条统计快照成立。图真的被重建过时,依赖
+            # 板块的那两份在同一个发布事务里作废(见下面 `discard_...` 旁的说明)——
+            # 它们**必须**走,留着就是指向不存在板块 id 的悬空产物。此时 T3 报的是「缺失」
+            # 而不是「陈旧」,那是更诚实的一档,不是退化。
+            #
+            # 失败**会自愈**:上面的分析账本闸只看账本齐不齐、戳对不对,所以下一次
+            # `rebuild_communities`(哪怕 KG 一动没动、哪怕不带 force)会走「只补账本」
+            # 路径重试。这正是把两个闸分开的第二个理由。
+            #
+            # ⚠ 取消**不算**失败,必须放行:`KgBuildAborted` 是用户要停,吞掉它会让中止
+            # 看起来成功了。KeyboardInterrupt / SystemExit 属 BaseException,天然不被
+            # `except Exception` 捕获。
+            # ⚠ 失败**不冒泡,但也绝不谎报成功**(codex 第 8 轮 P2)。这两件事此前被混成
+            # 一件:异常被记进 `kg_analysis_precompute_failed`,紧接着照样 emit
+            # `kg_analysis_backfilled` —— 同一次执行里失败事件与成功事件并存,而账本其实
+            # 仍然不完整。运维监控与任何事件消费方都会被误导(「补过了」与「补失败了」是
+            # 相反的运维动作)。变的只是那条成功事件的前提。
+            #
+            # ⚠ 只有默认层跑它(方向五):账本与两张产物表都不分 level,让非默认层去写就是
+            # 把指向**另一层**板块 id 的产物塞进默认层的读侧,而读侧照旧按 `community_seq`
+            # 对齐判「与当前一致」。非默认层因此只发布它自己的板块行,一个字都不占共享账目。
+            analysis: "Optional[Tuple[list, list, Dict[str, dict]]]" = None
+            if not _ledger_speaks_for_level:
+                # 边表在这里就到头了 —— 它平时是交给 `_compute_kg_analysis` 边消化边释放的
+                # (生产 836 万边约 100 MB),这条路径没有接手方,得自己放掉,不能让它一路
+                # 活到函数返回。`can2idx` 同理(生产 171 万 canonical)。
+                del edge_table
+                can2idx.clear()
+            else:
+                try:
+                    analysis = self._compute_kg_analysis(
+                        notebook_id, level, _cseq, kept_rows, edge_table, can2idx,
+                        # `force` 是「用户明确要求重算」——它上面不省钱,见
+                        # `reusable_artifact_payloads` 的最后一段。
+                        reusable=({} if force
+                                  else reusable_artifact_payloads(_ledger, _seq, _cseq)),
+                        # 板块划分是这一轮**刚跑出来**的,还是库里现成的?依赖板块的两份产物
+                        # 据此决定盖不盖簇世代的戳(见 `stamp_cluster_seq`):补账本那条路径
+                        # 拿的是现成的划分,它建在哪一代合并结果上没有地方记,盖上当前世代就是
+                        # 把一份混合世代的东西说成「与当前一致」(codex 第 7 轮 P2)。
+                        partition_rebuilt=not graph_fresh,
+                    )
+                except KgBuildAborted:
+                    raise
+                except Exception as exc:
+                    self.event_log.emit({
+                        "kind": "kg_analysis_precompute_failed",
+                        "notebook_id": notebook_id, "level": level, "seq": _seq,
+                        "error": f"{type(exc).__name__}: {exc}",
+                    })
+            # ⚠ 「真的发布了」与「算出来了」是两件事(下面那道复核会让它们分岔),而事件必须
+            # 跟着前者走 —— 放弃发布还发「补齐了」就是谎报,与第 8 轮 P2 修的是同一个病。
+            analysis_published = False
+            partition_replaced_under_us = False
+            # ---- 发布:板块划分 + 版本戳 + 全部分析产物,**一个**写事务(codex 第 13 轮 P1)
+            #
+            # 修复前这里是三个事务(板块 → 版本戳 → 产物),中间隔着分钟级的预计算。生产
+            # (878 万对象 / 836 万边)上并发的 `/kg-analysis` 因此会读到「新板块 + 旧账本」:
+            # 板块 id 已经换了一整套,而三条统计快照还停在上一个 seq、依赖板块的两份已被作废
+            # 但还没写回。报告同屏混着两代库,而本视图存在的全部理由就是「每个数字都能说出
+            # 自己建于何时」。把重活挪进事务不是选项(见上面那段写锁的说明),所以改成
+            # **先在事务外把全部产物算完,再一次性发布**。
+            #
+            # 这个事务只做便宜的写:两表整表重写(成员行数级)+ 一次 UPDATE + 三张产物表的
+            # 整批重写。它一个 SELECT 重活都不发。
+            #
+            # ⚠ 没东西可写就**不开事务**:图新鲜 + 预计算失败那一档,这一趟确实什么都没发生,
+            # 而 `_write()` 拿的是进程级写锁 —— 为一个空事务去抢它是纯浪费。
+            # ---- 写新代(批 3·W2 §1.3,发布事务**外**先行) --------------------
+            # 新代行对读者不可见(communities 读者全部带 published 代谓词),
+            # 写多久都不影响任何并发读;发布事务因此只剩 copy-forward + 指针
+            # 翻转 + 账本作废 + 产物重写这些便宜写。失败/放弃留下的新代行由
+            # 下一轮预回收清理。
+            if not graph_fresh:
+                with self._write() as db:
+                    self.unified_kg.write_communities_generation(
+                        db, notebook_id, level, kept_rows, names, deg,
+                        self._now(), _generation
+                    )
+            if not graph_fresh or analysis is not None:
+                now = self._now()
+                with self._write() as db:
+                    if not graph_fresh:
+                        # 发布 = copy-forward + 指针翻转(D-W2-6:该族无并发
+                        # 融合写者,原子性优先于锁窗口)。copy-forward 把
+                        # published 代中未被本轮重建的 level 复制进新代——板块
+                        # id 重铸(communities.id 单列 PK,同 id 双代必撞;
+                        # 非默认层账本不背书,重铸零代价),成员行同步重映射。
+                        # 今天所有调用点 level=0 → 复制集为空。
+                        self.unified_kg.copy_forward_communities(
+                            db, notebook_id, level, _published_from,
+                            _generation, lambda: self._new_id("cm")
+                        )
+                        if not self.unified_kg.flip_community_generation(
+                                db, notebook_id, published_from=_published_from,
+                                generation=_generation, now=now):
+                            # 双 CAS 作废:published 指针被动过(standalone
+                            # delete 重置)或在飞认领被 TTL 抢占。响亮失败——
+                            # 发布事务整体回滚(copy-forward/账本作废/seq/产物
+                            # 一个都不落),新代行留给下一轮预回收。
+                            self.event_log.emit({
+                                "kind": "kg_generation_preempted",
+                                "notebook_id": notebook_id,
+                                "generation": _generation,
+                                "stage": "community_flip",
+                            })
+                            raise KgDerivedGenerationPreempted(
+                                notebook_id, _generation)
+                        # ⚠ 翻转已**发布了重铸的板块 id**,依赖板块划分的两份分析产物(跨板块边 /
+                        # 来源画像)此刻整表变成悬空引用 —— 必须与发布**同事务**作废。预计算
+                        # 失败时下面那次整批重写不会发生,而板块照旧发布:少了这一句,库里就
+                        # 会留下指向已不存在板块 id 的悬空产物,而 T3 的记忆化签名对「同 seq
+                        # 的 force 重铸」是瞎的 —— 已预热的缓存会**无限期**吐上一套板块 id,
+                        # 直到 LRU 淘汰或进程重启。作废账本行同时也就动了签名。
+                        # (⚠ 账本里一行都没有时这次作废是 no-op,签名照样不动;那一档由读侧
+                        #  的 `kg_analysis._signature_tracks_board_recasts` 拦成「不写缓存」。)
+                        # 只作废这两份(三条统计快照与板块无关,留着仍是可读的陈旧快照),
+                        # 理由见 `app.domain.kg_analysis_contracts.BOARD_DEPENDENT_ARTIFACT_KINDS`。
+                        # 预计算成功时它是冗余的(下面那次重写整表删),留着是因为它守的是
+                        # **失败**那一档,而那一档没有别的东西替它守。
+                        #
+                        # ⚠ 作废与记版本都**只在默认层**做(方向五,codex 第 15 轮 P2-1)。
+                        # 本轮写的新代只有本 level 的行,非默认层发布的是它自己
+                        # 那一层的板块 id(默认层的行被 copy-forward 原样带进新
+                        # 代,id 虽重铸但账本作废与版本记录仍只归默认层的构建碰
+                        # ——非默认层构建作废默认层产物是**连坐**;而推进那份不
+                        # 分 level 的 seq 更糟:「seq 对齐 ⟹ 默认层建过」是闸里
+                        # 默认层那一支**无条件**信的蕴含关系)。
+                        # ⚠ 已知残留(非默认层重建时默认层板块 id 因 copy-forward
+                        # 重铸而变,两份板块依赖产物未同步作废):今天没有任何
+                        # 调用点传非默认层(复制集恒空),该档行为与设计 §1.3 的
+                        # 裁决一致——「重铸零代价」以此为前提,新增非默认层调用
+                        # 点时须一并补作废。
+                        if _ledger_speaks_for_level:
+                            self.unified_kg.discard_board_dependent_kg_analysis_artifacts(
+                                db, notebook_id
+                            )
+                            # 记版本:社区已按 _seq 建好(无 unified_kg_state 行则 UPDATE
+                            # no-op,下次仍重建)。⚠ 它必须与指针翻转(发布)
+                            # **同事务**:分开提交会留下「板块已换、seq 还是旧的」的窗口,
+                            # 而闸正是拿 seq 判「建过没有」。
+                            self.unified_kg.set_community_seq(db, notebook_id, _seq)
+                    if analysis is not None:
+                        # ⚠ **发布前复核板块划分还在**(codex 第 16 轮 P2)。只有「只补账本」
+                        # 那一档需要:它的 `kept_rows` 是**写事务之外**从库里读回来的,而随后
+                        # 的 `_compute_kg_analysis` 在生产(878 万对象 / 836 万边)上是分钟级
+                        # 的,窗口很宽。期间另一次 `force=True` 的重建完全可以把整套板块换掉
+                        # —— 本方法自己没有单飞守卫;`POST /notebooks/{id}/unified-kg/rebuild`
+                        # 如今经共享的 per-notebook KG 维护槽串行化,但离线
+                        # `backend/app/scripts/recluster_kg.py`(`force=True`)不经过那个槽,
+                        # 跨进程/跨部署运维触发的重跑同样能撞上同一条路径。不复核就会写出
+                        # 指向已不存在板块 id 的 `kg_community_edges` /
+                        # `kg_source_profiles`,而它们的账本盖着「与当前一致」的戳 —— 比缺失
+                        # 更糟,缺失至少是诚实的。
+                        #
+                        # 全量路径**不需要**这道复核:那一档的板块是本事务里刚翻转发布的,
+                        # 板块与产物构造上自洽(在飞认领单飞),没有任何窗口可钻。
+                        #
+                        # 批 3·W2 判据替换(复评 P1-6):旧 `board_partition_still_holds`
+                        # 查「kept_rows[0] 的 id 还在」——代次化后「行还在」不再蕴含
+                        # 「没被换过」(退休代行活过翻转,要等预回收),`FOR SHARE`
+                        # 也无 DELETE 可阻塞,守卫恒真化。替代:读板块时记下的
+                        # `community_generation` 与发布事务内重读的比对——每次发布
+                        # 都翻指针,「代次没变」⟺「期间没有任何一次发布提交过」。
+                        # 读侧只 SELECT state 行不加锁(设计裁决:与 discard →
+                        # set_community_seq 的既有锁序无交叉,死锁论证不被触碰)。
+                        #
+                        # ⚠ **零板块那一档刻意不查。** 零板块时没有任何东西会悬空
+                        # —— 来源画像整份跳过(`_compute_kg_analysis` 里的
+                        # `if total_members:`),跨板块边是空的。最坏结果只是一份
+                        # `communities: 0` 的陈旧载荷,而 `analysis_ledger_is_current
+                        # (..., has_boards=_boards > 0)` 在下一次调用(那时
+                        # `_boards > 0`)会因为缺 `source_profiles` 判不齐全 →
+                        # 自动重补;旧判据的第二条理由「无行可锁 ⟹ 守卫不得夸大
+                        # 强度」在新判据下改述为「无代次可记,比对恒等」。
+                        _partition_moved = False
+                        if graph_fresh and kept_rows:
+                            _st_pub = self.unified_kg.state_row(db, notebook_id)
+                            _gen_now = (int(_st_pub["community_generation"])
+                                        if _st_pub else 0)
+                            _partition_moved = _gen_now != _partition_generation
+                        if _partition_moved:
+                            # 放弃整份发布,**不重试**:重试要重跑那趟分钟级的全表重活,而且
+                            # 可能反复被同一个抢占者打断。既有的自愈路径就是为这一档设计的 ——
+                            # 账本不齐 ⟹ 下一次 `rebuild_communities`(哪怕不带 force)照样走
+                            # 补账本重来,那时它读到的是抢占者留下的那套划分。
+                            partition_replaced_under_us = True
+                        else:
+                            _edges, _profiles, _payloads = analysis
+                            self.unified_kg.replace_kg_analysis_artifacts(
+                                db, notebook_id, _seq, _edges, _profiles, _payloads, now
+                            )
+                            analysis_published = True
+            if graph_fresh:
+                # 图没有被重建,只补了账本。用一个**不同**的事件名如实说这件事 ——
+                # 复用 communities_rebuilt 会让运维在事件流里看到一次并不存在的图重建。
+                #
+                # ⚠ 只在产物**真的落库**时发:这条路径除了补账本什么都没做,一旦预计算失败
+                # (`kg_analysis_precompute_failed`)或发布前的板块复核判失效
+                # (`kg_analysis_backfill_discarded`),这一趟就等于什么都没发生,发一条
+                # 「补齐了」是纯粹的谎报。两档各有自己的事件,都不是静默。
+                # 判据因此是 `analysis_published` 而不是「算出来了」—— 后者在复核放弃那一档
+                # 仍然为真(codex 第 16 轮 P2)。
+                # 返回值不受影响:社区还在库里,如实返回它的数量 —— 一份辅助报告没补上,
+                # 不能表现成「一个板块都没有」。这里的 `kept` 是读到那一刻的板块数,刻意不为
+                # 复核失败再发一次查询:那些板块确实在库里存在过,而抢占者写的是它自己的一套。
+                if partition_replaced_under_us:
+                    # 与 `kg_analysis_precompute_failed` 并列的**另一条**事件,刻意不复用它:
+                    # 「算不出来」与「算出来了但期间板块被换掉」的运维动作不同,前者要查模型/
+                    # 数据,后者说明有两个重建在抢同一个库。
+                    self.event_log.emit({
+                        "kind": "kg_analysis_backfill_discarded",
+                        "notebook_id": notebook_id, "level": level, "seq": _seq,
+                        "reason": "board_partition_replaced",
+                    })
+                if analysis_published:
+                    self.event_log.emit({
+                        "kind": "kg_analysis_backfilled", "notebook_id": notebook_id,
+                        "level": level, "seq": _seq, "communities": kept,
+                    })
+                return kept
+            self.event_log.emit({"kind": "communities_rebuilt", "notebook_id": notebook_id,
+                                 "level": level, "communities": kept, "nodes": n_nodes})
             return kept
-        self.event_log.emit({"kind": "communities_rebuilt", "notebook_id": notebook_id,
-                             "level": level, "communities": kept, "nodes": n_nodes})
-        return kept
+        finally:
+            # 释放通道 b(finally CAS):翻转成功时 building 已清零 → no-op;
+            # 失败/放弃/抢占出口都在这里即时释放,不占小时级 TTL。
+            if _generation:
+                try:
+                    with self._write() as _rdb:
+                        self.unified_kg.release_derived_claim(
+                            _rdb, notebook_id, _generation)
+                except Exception:  # noqa: BLE001
+                    self.event_log.logger.warning(
+                        "communities 代际认领释放失败 for %s generation=%s(TTL 兜底)",
+                        notebook_id, _generation, exc_info=True)
 
     def _compute_kg_analysis(
         self,
