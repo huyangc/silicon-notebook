@@ -1283,11 +1283,6 @@
         "type": "index"
       },
       {
-        "name": "idx_clusters_nb",
-        "sql_sha256": "a94ac4a97bc95e845d67003f9af6d4c37fbed08909d667306f54e1503b0635b5",
-        "type": "index"
-      },
-      {
         "name": "idx_clusters_nb_canonical",
         "sql_sha256": "678b9a6c1fcbf822379f6d7264192e08cf215cc4b97c442fd61b695c1f1148bc",
         "type": "index"
