@@ -68,12 +68,16 @@ def _spy_stream(repo, monkeypatch):
 
 
 def _cluster_rows(repo, nb_id):
+    # 批 3·W2:按 published 代读(镜像读者契约)。翻转后的退休代行刻意留
+    # 一轮宽限(D-W2-7,由下一轮预回收清),裸读全代会把它们数进来。
     with repo._connect() as db:
         return db.execute(
             "SELECT object_type, member_object_id, canonical_id, canonical_name "
             "FROM concept_clusters WHERE notebook_id=? "
+            "AND generation = COALESCE((SELECT cluster_generation "
+            "FROM unified_kg_state WHERE notebook_id=?),0) "
             "ORDER BY object_type, member_object_id, canonical_id",
-            (nb_id,)).fetchall()
+            (nb_id, nb_id)).fetchall()
 
 
 # --- 1. version sensitivity -------------------------------------------------
