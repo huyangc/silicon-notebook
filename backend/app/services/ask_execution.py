@@ -53,6 +53,11 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from app.services.ask_modes import AskMode
 
 
+# The stream's terminal wording when a submission key was already spent in a
+# different notebook. User-facing (it is what the ``error`` event carries).
+KEY_CONFLICT_MESSAGE = "这次提交的标识已在另一个笔记本使用过，请重新提问"
+
+
 class BackgroundJobSubmitter(Protocol):
     """The copied-context daemon-thread job helper contract — satisfied by the
     ``app.services.background_jobs`` module itself (copy_context() snapshots
@@ -204,24 +209,28 @@ class AskExecutionCoordinator:
         # known inside the worker, which validates it there.  The getattr is
         # fail-open only for the narrow unit-test doubles that intentionally
         # omit the method.
+        # Idempotent re-submission first: a job this key already created is
+        # attached to BEFORE any request-dependent validation — the original
+        # submission passed it, and a retry must replay that job even if the
+        # notebook's availability or mode registry changed since (the route
+        # applies the same ordering ahead of its own preflight).
+        attached_events = self.attach_existing(notebook_id, payload, user_id, events)
+        if attached_events is not None:
+            return attached_events
         validate = getattr(service, "validate_reasoning_submission", None)
         if resolve is None and validate is not None:
             validate(notebook_id, payload)
         mode_id = mode.id if mode is not None else AUTO_MODE
         if payload.client_request_id:
-            # Idempotent submission: the key names ONE browser submission. If
-            # this user already spent it, the job exists (possibly finished,
-            # possibly running in another process) — attach to it and stream
-            # its recorded progress instead of running a second engine.
+            # The key names ONE browser submission. The probe above found no
+            # job, but a concurrent retry may land one between the probe and
+            # this insert: the store's lookup+insert is atomic and reports it.
             try:
                 job_id, conversation_id, attached = (
                     self.ask_state.begin_or_attach_durable_job(
                         notebook_id, payload, mode_id, user_id))
-            except AskRequestKeyConflict as exc:
-                # A well-formed transport (no job, no `started`): the client
-                # reused a key across notebooks, which is its own defect.
-                events.put({"event": "error", "error": f"{type(exc).__name__}: {exc}"})
-                events.put(None)
+            except AskRequestKeyConflict:
+                self._put_key_conflict(events)
                 return events
             if attached:
                 return self._follow(events, job_id, conversation_id)
@@ -309,6 +318,44 @@ class AskExecutionCoordinator:
             self._finish(job_id, "failed", error=f"{type(exc).__name__}: {exc}")
             raise
         return events
+
+    def attach_existing(
+        self,
+        notebook_id: str,
+        payload: "AskRequest",
+        user_id: str,
+        events: "queue.Queue[dict[str, Any] | None] | None" = None,
+    ) -> "queue.Queue[dict[str, Any] | None] | None":
+        """Attach to the job ``payload.client_request_id`` already created for
+        this user, if any: the delivery queue of :meth:`_follow`, or — for a
+        key spent in ANOTHER notebook — a well-formed queue holding only an
+        ``error`` (nothing is created). ``None`` when the payload has no key or
+        the key is unknown, so the caller runs the normal submission path.
+
+        Read-only apart from the queue; no validation, no availability check —
+        those judged the ORIGINAL submission. Notebook authorization is the
+        caller's (the route dependency), and the store scopes the key by user."""
+        key = payload.client_request_id
+        if not key:
+            return None
+        existing = self.ask_state.find_job_for_client_request(user_id, key)
+        if existing is None:
+            return None
+        if events is None:
+            events = queue.Queue()
+        if existing["notebook_id"] != notebook_id:
+            self._put_key_conflict(events)
+            return events
+        payload.conversation_id = existing["conversation_id"]
+        return self._follow(events, existing["job_id"], existing["conversation_id"])
+
+    @staticmethod
+    def _put_key_conflict(events: "queue.Queue[dict[str, Any] | None]") -> None:
+        # A well-formed transport (no job, no `started`): the client reused a
+        # key across notebooks, which is its own defect. Displayable wording,
+        # not an exception dump (AGENTS.md error policy).
+        events.put({"event": "error", "error": KEY_CONFLICT_MESSAGE})
+        events.put(None)
 
     def _follow(
         self,

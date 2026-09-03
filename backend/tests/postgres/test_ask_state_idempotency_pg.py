@@ -77,6 +77,18 @@ def test_repeated_key_attaches_and_other_notebook_conflicts(postgres_repository)
         nb, AskRequest(question="Q?", mode="chunk"), "chunk", uid)
     assert plain[2] is False and plain[0] != job_id
 
+    # The read-only probe the route uses ahead of its preflight.
+    assert store.find_job_for_client_request(uid, "pg-key-1") == {
+        "job_id": job_id, "notebook_id": nb, "conversation_id": conv_id}
+    assert store.find_job_for_client_request(uid, "pg-key-none") is None
+    assert store.find_job_for_client_request("someone-else", "pg-key-1") is None
+
+    # The non-idempotent begin never stores the key (always-create semantics).
+    sync = AskRequest(question="Q?", mode="chunk", client_request_id="pg-sync")
+    store.begin_durable_job(nb, sync, "chunk", uid)
+    store.begin_durable_job(nb, sync, "chunk", uid)
+    assert store.find_job_for_client_request(uid, "pg-sync") is None
+
 
 def test_partial_unique_index_guards_duplicates_but_not_null_keys(postgres_repository):
     repo = postgres_repository
@@ -114,13 +126,19 @@ def test_lookup_insert_race_attaches_to_the_committed_winner(postgres_repository
 
     def lookup_then_lose(db, user_id, key):
         row = real_lookup(db, user_id, key)
-        if row is None and "winner" not in state:
+        if row is None and not state.get("racing"):
+            state["racing"] = True
             # The "other process" commits the same key on its OWN connection
             # (a separate thread, so it cannot share this transaction) inside
-            # our lookup→insert window.
+            # our lookup→insert window. It goes through the keyed begin (the
+            # synchronous begin never stores a key); its own lookup sees the
+            # flag above and behaves normally.
             def other_process():
                 winner = AskRequest(question="Q?", mode="chunk", client_request_id=key)
-                state["winner"] = store.begin_durable_job(nb, winner, "chunk", user_id)
+                job_id, conv_id, attached = store.begin_or_attach_durable_job(
+                    nb, winner, "chunk", user_id)
+                assert not attached
+                state["winner"] = (job_id, conv_id)
 
             thread = threading.Thread(target=other_process)
             thread.start()

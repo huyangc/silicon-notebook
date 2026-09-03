@@ -631,20 +631,33 @@ class AttachingAskState(RecordingAskState):
     begin path runs); ``details`` is the sequence of ``ask_job_detail`` reads
     the follower will observe, the last one repeated forever."""
 
-    def __init__(self, calls, existing=None, details=(), answers=None, conflict=None):
+    def __init__(self, calls, existing=None, details=(), answers=None,
+                 existing_notebook="nb-1", probe_visible=True):
         super().__init__(calls)
         self.existing = existing
+        self.existing_notebook = existing_notebook
+        # False: the read-only probe misses the job (a concurrent retry landed
+        # it after the probe) and only the atomic lookup+insert reports it.
+        self.probe_visible = probe_visible
         self.details = list(details)
         self.answers = answers or {}
-        self.conflict = conflict
         self.detail_reads = 0
 
+    def find_job_for_client_request(self, user_id, client_request_id):
+        self.calls.append(("probe", user_id, client_request_id))
+        if self.existing is None or not self.probe_visible:
+            return None
+        return {"job_id": self.existing[0], "notebook_id": self.existing_notebook,
+                "conversation_id": self.existing[1]}
+
     def begin_or_attach_durable_job(self, notebook_id, payload, mode, user_id):
+        from app.repositories.ports import AskRequestKeyConflict
+
         self.calls.append(("begin_or_attach", notebook_id, mode, user_id,
                            payload.client_request_id))
-        if self.conflict is not None:
-            raise self.conflict
         if self.existing is not None:
+            if self.existing_notebook != notebook_id:
+                raise AskRequestKeyConflict(payload.client_request_id)
             payload.conversation_id = self.existing[1]
             return self.existing[0], self.existing[1], True
         payload.conversation_id = "conv-t23"
@@ -706,10 +719,11 @@ def test_repeated_client_request_id_attaches_and_replays_the_finished_job():
     ]
     # The existing job's ids are written back exactly as a fresh begin would.
     assert payload.conversation_id == "conv-old"
-    assert ("begin_or_attach", "nb-1", "reasoning", "user-t23", "key-1") in calls
+    assert ("probe", "user-t23", "key-1") in calls
     # Nothing was begun, traced, finished or cleaned up: the job's own worker
     # owns its row. Only the store was read.
-    assert not any(c[0] in {"begin", "trace", "finish", "cleanup", "mode"} for c in calls)
+    assert not any(c[0] in {"begin", "begin_or_attach", "trace", "finish", "cleanup", "mode"}
+                   for c in calls)
     assert coordinator.cancellations.get("askjob-old") is None
     assert submitter.submitted == ["ask-follow"]
 
@@ -781,19 +795,71 @@ def test_attach_store_failure_still_closes_the_stream_with_an_error():
     assert delivered[-1]["event"] == "error"
 
 
-def test_client_request_key_conflict_ends_the_stream_with_an_error_and_no_job():
-    from app.repositories.ports import AskRequestKeyConflict
+@pytest.mark.parametrize("probe_visible", [True, False])
+def test_client_request_key_conflict_ends_the_stream_with_an_error_and_no_job(probe_visible):
+    from app.services.ask_execution import KEY_CONFLICT_MESSAGE
 
     calls = []
-    state = AttachingAskState(calls, conflict=AskRequestKeyConflict("key-1"))
+    state = AttachingAskState(
+        calls, existing=("askjob-elsewhere", "conv-elsewhere"),
+        existing_notebook="nb-other", probe_visible=probe_visible)
     coordinator = _attach_coordinator(state)
     delivered = _drain(coordinator.start(
         "nb-1", AskRequest(question="Q?", mode="chunk", client_request_id="key-1"),
         ASK_MODES["chunk"], user_id="user-t23"))
-    assert [e["event"] for e in delivered] == ["error"]
-    assert "key-1" in delivered[0]["error"]
+    # Displayable wording, not an exception dump; no job, no follower.
+    assert delivered == [{"event": "error", "error": KEY_CONFLICT_MESSAGE}]
     assert coordinator.job_submitter.submitted == []
     assert not any(c[0] in {"begin", "finish", "cleanup"} for c in calls)
+
+
+def test_keyed_retry_attaches_before_any_request_validation():
+    """codex #665 r1 P2: the original submission passed validation; a retry
+    must replay its job even if the notebook/mode state would now fail it."""
+    class Rejecting(FakeAskService):
+        def validate_reasoning_submission(self, notebook_id, payload):
+            pytest.fail("validation must not run for a keyed retry that attaches")
+
+    state = AttachingAskState(
+        [], existing=("askjob-old", "conv-old"),
+        details=[{"status": "cancelled", "trace": [], "answer_id": "", "error": ""}],
+    )
+    service = Rejecting(lambda *_a, **_k: pytest.fail("engine must not run"))
+    coordinator = AskExecutionCoordinator(
+        ask_state=state, cancellations=AskCancellationRegistry(),
+        job_submitter=InlineSubmitter(), event_log=_event_log(), ask=lambda: service,
+        follow_poll_seconds=0,
+    )
+    payload = AskRequest(question="Q?", mode="reasoning", client_request_id="key-1")
+    delivered = _drain(coordinator.start(
+        "nb-1", payload, ASK_MODES["reasoning"], user_id="user-t23"))
+    assert [e["event"] for e in delivered] == ["started", "cancelled"]
+    assert payload.conversation_id == "conv-old"
+
+
+def test_attach_existing_alone_returns_none_for_a_fresh_or_missing_key():
+    state = AttachingAskState([])
+    coordinator = _attach_coordinator(state)
+    assert coordinator.attach_existing(
+        "nb-1", AskRequest(question="Q?", mode="chunk"), "user-t23") is None
+    assert coordinator.attach_existing(
+        "nb-1", AskRequest(question="Q?", mode="chunk", client_request_id="key-1"),
+        "user-t23") is None
+
+
+def test_probe_miss_still_attaches_when_the_atomic_begin_reports_the_winner():
+    """The read-only probe raced a concurrent retry: begin_or_attach reports
+    the job that landed in between, and the stream follows it."""
+    state = AttachingAskState(
+        [], existing=("askjob-raced", "conv-raced"), probe_visible=False,
+        details=[{"status": "cancelled", "trace": [], "answer_id": "", "error": ""}],
+    )
+    delivered = _drain(_attach_coordinator(state).start(
+        "nb-1", AskRequest(question="Q?", mode="chunk", client_request_id="key-1"),
+        ASK_MODES["chunk"], user_id="user-t23"))
+    assert delivered[0] == {"event": "started", "job_id": "askjob-raced",
+                            "conversation_id": "conv-raced"}
+    assert delivered[-1] == {"event": "cancelled"}
 
 
 def test_fresh_client_request_id_begins_the_job_and_runs_the_engine_normally():

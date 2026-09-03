@@ -439,7 +439,8 @@ def test_stream_resubmission_with_the_same_client_request_id_attaches_to_the_job
     cross = client.post(f"/api/notebooks/{other}/ask/stream", json=body)
     assert cross.status_code == 200
     cross_events = [json.loads(l) for l in cross.text.splitlines() if l.strip()]
-    assert [e["event"] for e in cross_events] == ["error"]
+    from app.services.ask_execution import KEY_CONFLICT_MESSAGE
+    assert cross_events == [{"event": "error", "error": KEY_CONFLICT_MESSAGE}]
     with repo._connect() as db:
         assert db.execute(
             "SELECT COUNT(*) AS n FROM ask_jobs WHERE notebook_id=?", (other,)
@@ -448,3 +449,68 @@ def test_stream_resubmission_with_the_same_client_request_id_attaches_to_the_job
     malformed = client.post(f"/api/notebooks/{nb}/ask/stream",
                             json={**body, "client_request_id": "no spaces allowed"})
     assert malformed.status_code == 422
+
+
+def test_sync_begin_never_stores_the_key_and_always_creates(repo):
+    """codex #665 r1 P2: the synchronous path keeps its always-create
+    semantics — a repeated keyed call must not trip the unique index."""
+    nb = _nb(repo)
+    store = repo._runtime.ask_state
+    uid = repo.current_user().id
+    first = AskRequest(question="Q?", mode="chunk", client_request_id="sync-key")
+    second = AskRequest(question="Q?", mode="chunk", client_request_id="sync-key")
+    a = store.begin_durable_job(nb.id, first, "chunk", uid)
+    b = store.begin_durable_job(nb.id, second, "chunk", uid)
+    assert a[0] != b[0]
+    with repo._connect() as db:
+        rows = db.execute(
+            "SELECT client_request_id FROM ask_jobs WHERE notebook_id=?", (nb.id,)
+        ).fetchall()
+    assert [r["client_request_id"] for r in rows] == [None, None]
+    assert store.find_job_for_client_request(uid, "sync-key") is None
+
+
+def test_sync_ask_endpoint_accepts_a_repeated_key_and_always_answers(tmp_path, monkeypatch):
+    client = _api_client(tmp_path, monkeypatch)
+    from app.api.ask_routes import repository
+    repo = repository()
+    nb = client.post("/api/notebooks", json={"name": "nb"}).json()["id"]
+    seed_ask_evidence(repo, nb)
+    body = {"question": "sync twice", "mode": "chunk", "client_request_id": "sync-1"}
+    first = client.post(f"/api/notebooks/{nb}/ask", json=body)
+    second = client.post(f"/api/notebooks/{nb}/ask", json=body)
+    assert first.status_code == 200 and second.status_code == 200
+    assert first.json()["answer_id"] != second.json()["answer_id"]
+    with repo._connect() as db:
+        assert db.execute(
+            "SELECT COUNT(*) AS n FROM ask_jobs WHERE notebook_id=?", (nb,)
+        ).fetchone()["n"] == 2
+
+
+def test_keyed_retry_attaches_even_when_the_preflight_would_now_reject(tmp_path, monkeypatch):
+    """codex #665 r1 P2: the original submission passed the route's preflight;
+    a retry under the same key replays its job even after the notebook lost
+    its retrievable evidence (the preflight would answer 409 to a NEW ask)."""
+    client = _api_client(tmp_path, monkeypatch)
+    from app.api.ask_routes import repository
+    repo = repository()
+    nb = client.post("/api/notebooks", json={"name": "nb"}).json()["id"]
+    seed_ask_evidence(repo, nb)
+    body = {"question": "retry after change", "mode": "chunk", "client_request_id": "pre-1"}
+    first = client.post(f"/api/notebooks/{nb}/ask/stream", json=body)
+    first_events = [json.loads(l) for l in first.text.splitlines() if l.strip()]
+    assert first_events[-1]["event"] == "final"
+
+    # The notebook is now empty: a fresh ask is refused by the preflight...
+    with repo._write() as db:
+        db.execute("DELETE FROM chunks WHERE notebook_id=?", (nb,))
+        db.execute("DELETE FROM sources WHERE notebook_id=?", (nb,))
+    fresh = client.post(f"/api/notebooks/{nb}/ask/stream",
+                        json={**body, "client_request_id": "pre-2"})
+    assert fresh.status_code == 409
+    # ...but the keyed retry attaches to the job the original created.
+    retry = client.post(f"/api/notebooks/{nb}/ask/stream", json=body)
+    assert retry.status_code == 200
+    retry_events = [json.loads(l) for l in retry.text.splitlines() if l.strip()]
+    assert retry_events[0] == first_events[0]
+    assert retry_events[-1]["response"]["answer_id"] == first_events[-1]["response"]["answer_id"]
