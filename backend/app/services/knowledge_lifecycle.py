@@ -142,7 +142,8 @@ def _in_relink_batches(ids: List[str]) -> Iterator[List[str]]:
 #   与 knowledge_context 有界化(PR#476)同一条保守惯例。
 # · canonical 折叠走既有的 `cluster_fold_rows`,单列 IN,沿用仓库既有的 900
 #   (`_IN_CHUNK` / `_candidate_cluster_map` 已按这个值发同一条语句)。在这条查询上
-#   **批越大越好**:SQLite 不 ANALYZE 时 planner 选 `idx_clusters_nb` 而不是
+#   **批越大越好**:SQLite 不 ANALYZE 时 planner 选 nb 前导索引(现为
+#   `idx_clusters_nb_created_gen`,0051 起顶替被退役的 `idx_clusters_nb`)而不是
 #   `idx_clusters_member`,每条语句都要扫一遍该 notebook 的索引段(实测 40 万行库
 #   42.7ms/条,加 `INDEXED BY idx_clusters_member` 则 0.52ms/条),所以分得越碎越亏;
 #   PG 侧两种批量都走 idx_clusters_member 的 bitmap 扫(实测 0.44ms/300 id)。
@@ -2146,12 +2147,14 @@ class KnowledgeLifecycleService:
         The batch bound is on **scanned** rows, not deleted ones. Each
         iteration asks the store for one keyset page of ``≤
         _ORPHAN_SWEEP_BATCH_SIZE`` cluster rows ordered by ``(object_type,
-        member_object_id)`` — exactly the column order of the existing
-        ``uq_clusters_notebook_type_member`` unique index, so both backends
-        drive the scan off it without an extra sort and ties are impossible
-        (that triple is UNIQUE with ``notebook_id`` fixed by the WHERE
-        clause) — and the store deletes whichever rows of THAT page are
-        orphans. Cost per batch is O(page) for both statements; a full sweep of
+        member_object_id, generation)`` — exactly the column order of the
+        four-column ``uq_clusters_nb_type_member_generation`` unique index
+        (batch 3·W2: ``(type, member)`` alone is no longer unique across
+        generations, so the cursor carries generation as its tie-break; the
+        sweep itself stays cross-generation — a dead member is dead in
+        every generation) — so both backends drive the scan off it without
+        an extra sort and ties are impossible, and the store deletes
+        whichever rows of THAT page are orphans. Cost per batch is O(page) for both statements; a full sweep of
         a notebook holding N cluster rows is ``ceil(N / page)`` batches, O(N)
         overall, and its FREQUENCY is what the once-per-process-per-notebook
         accounting in ``incremental_fuse_source`` bounds — not the size of any
@@ -2172,11 +2175,12 @@ class KnowledgeLifecycleService:
         total = 0
         after_object_type = ""
         after_member_object_id = ""
+        after_generation = -1
         while True:
             with self._write() as db:
                 page, deleted = self.governance_store.sweep_orphan_clusters_page(
                     db, notebook_id, after_object_type, after_member_object_id,
-                    _ORPHAN_SWEEP_BATCH_SIZE,
+                    after_generation, _ORPHAN_SWEEP_BATCH_SIZE,
                 )
                 # P0-A: only bump when this batch actually deleted rows — the
                 # later append_clusters calls in incremental_fuse_source
@@ -2191,6 +2195,7 @@ class KnowledgeLifecycleService:
             last = page[-1]
             after_object_type = str(last["object_type"])
             after_member_object_id = str(last["member_object_id"])
+            after_generation = int(last["generation"])
             if len(page) < _ORPHAN_SWEEP_BATCH_SIZE:
                 break
         return total
@@ -2389,7 +2394,7 @@ class KnowledgeLifecycleService:
                     # 「有界化」唯一一处被实测否掉的消费方,数字登记在这里,别处只引用:
                     # 本分支的准入闸 `kg_incremental_tier2_max_entities`(默认 5 万)
                     # 已经把 existing_items 的规模界住,而 SQLite 无 ANALYZE 时
-                    # `member_object_id IN (…)` 退化成 idx_clusters_nb 上的残余过滤
+                    # `member_object_id IN (…)` 退化成 nb 前导索引(现 idx_clusters_nb_created_gen)上的残余过滤
                     # (登记在 _fold_canonical_ids),于是 5 万 id 拆 900/批 = 56 次
                     # 索引段扫描。两次独立实测同向:评审树 301.5ms vs 一次范围读
                     # 14.8ms(20.4×);本机 35 万行 concept_clusters 上 266ms vs
@@ -2509,7 +2514,7 @@ class KnowledgeLifecycleService:
 
         ⚠已登记的残余代价(不在本 PR 修):``cluster_fold_rows`` 的
         ``WHERE notebook_id=? AND member_object_id IN (…)`` 在**没有 ANALYZE 的
-        SQLite** 上被 planner 选进 ``idx_clusters_nb``,member 谓词退化成残余过滤,
+        SQLite** 上被 planner 选进 nb 前导索引(现 ``idx_clusters_nb_created_gen``),member 谓词退化成残余过滤,
         于是每条语句仍要扫一遍该 notebook 的索引段(实测 40 万行单库:42.7ms/条;
         改用 ``INDEXED BY idx_clusters_member`` 是 0.52ms/条,82×)。PostgreSQL 有
         统计信息,同一条语句走 ``idx_clusters_member`` 的 bitmap 扫(实测

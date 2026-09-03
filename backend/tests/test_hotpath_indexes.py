@@ -124,9 +124,16 @@ def test_all_eight_migration_statements_match_a_spec_verbatim():
         "migration 0039 must declare exactly the eight batch-1 names, no more, "
         f"no less: parsed {[entry['name'] for entry in parsed]}"
     )
-    seen = set()
+    # 批 6(0051)取代并 DROP 了 idx_clusters_nb_canonical(接替覆盖索引的
+    # 严格前缀,实测劫计划)——历史迁移 0039 原文不动,但注册表(=现在应当
+    # 存在的索引)不再登记它;其余七条照旧逐字对账。
+    superseded = {"idx_clusters_nb_canonical"}
+    assert superseded <= _BATCH1_NAMES and not superseded & set(by_name)
+    seen = set(superseded)
     for entry in parsed:
         name = entry["name"]
+        if name in superseded:
+            continue
         assert name in by_name, f"{name} is in the migration but not in HOTPATH_INDEX_SPECS"
         spec = by_name[name]
         seen.add(name)

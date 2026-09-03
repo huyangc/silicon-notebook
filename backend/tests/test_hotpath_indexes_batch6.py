@@ -11,10 +11,10 @@ migration file and the spec tuple are two independent hand-authored copies):
 
   1. the migration declares exactly the three batch-6 statements, with
      UNIQUE / INCLUDE shapes matching each spec byte-for-byte;
-  2. the migration DROPs exactly the three superseded indexes
+  2. the migration DROPs exactly the five superseded indexes
      (``uq_clusters_notebook_type_member`` — the three-column unique that
-     physically forbids dual generations, PR-2's whole mechanism —
-     ``idx_clusters_nb_canonical_member`` and ``idx_clusters_nb_created``);
+     physically forbids dual generations, PR-2's whole mechanism — the two
+     covering predecessors, and the two strict-prefix plan hijackers);
   3. spec ``unique``/``include`` fields render the intended DDL and default
      to inert values on every earlier batch's entry.
 """
@@ -40,9 +40,11 @@ _DROPPED_NAMES = (
     "uq_clusters_notebook_type_member",
     "idx_clusters_nb_canonical_member",
     "idx_clusters_nb_created",
-    # 0004 的裸 notebook_id 前缀索引:留着会劫走聚合读者的计划(窄索引 +
-    # 回表过滤 generation),裸前缀扫描由 _created_gen 前导列等价服务。
+    # 两条严格前缀索引(0004 的裸 notebook_id、0039 的 nb_canonical):留着
+    # 会劫走带 generation 谓词读者的计划(窄索引 + 回表过滤),裸前缀扫描由
+    # 接替者前导列等价服务;后者本就是 0043 登记的退役债。
     "idx_clusters_nb",
+    "idx_clusters_nb_canonical",
 )
 
 _STATEMENT_PATTERN = re.compile(
@@ -84,7 +86,7 @@ def test_migration_declares_exactly_the_three_batch6_statements():
         assert include == spec.include, name
 
 
-def test_migration_drops_exactly_the_three_superseded_indexes():
+def test_migration_drops_exactly_the_superseded_indexes():
     dropped = [m.group("name") for m in _DROP_PATTERN.finditer(_ddl_only())]
     assert sorted(dropped) == sorted(_DROPPED_NAMES), dropped
 
@@ -104,14 +106,20 @@ def test_unique_and_include_fields_render_ddl_and_stay_inert_elsewhere():
 
 
 def test_prerequisites_are_limited_to_idempotent_add_column_form():
-    """守卫:spec.prerequisites 只许 ALTER TABLE … ADD COLUMN IF NOT EXISTS
-    形态(元数据级、幂等、在线安全)——builder 不许经此演化成第二个迁移器。"""
-    pattern = re.compile(
-        r"^ALTER TABLE \w+ ADD COLUMN IF NOT EXISTS \w+ "
-        r"(bigint|integer|text|timestamp with time zone)( NOT NULL DEFAULT \S+)?$"
+    """守卫:spec.prerequisites 是 (table, column, coldef) 结构化声明,由
+    builder 渲染成 schema 限定的 ADD COLUMN IF NOT EXISTS(元数据级、幂等、
+    在线安全);coldef 只许「简单类型 [NOT NULL DEFAULT 常量]」——builder
+    不许经此演化成第二个迁移器,表/列名必须是简单标识符(schema 限定由
+    渲染层负责,声明里不许自带)。"""
+    ident = re.compile(r"^[a-z_][a-z0-9_]*$")
+    coldef_pattern = re.compile(
+        r"^(bigint|integer|text|timestamp with time zone)"
+        r"( NOT NULL DEFAULT \S+)?$"
     )
     for spec in HOTPATH_INDEX_SPECS:
-        for prerequisite in spec.prerequisites:
-            assert pattern.fullmatch(prerequisite), (spec.name, prerequisite)
+        for table, column, coldef in spec.prerequisites:
+            assert ident.fullmatch(table) and ident.fullmatch(column), (
+                spec.name, table, column)
+            assert coldef_pattern.fullmatch(coldef), (spec.name, coldef)
         if spec.name not in _BATCH6_NAMES:
             assert spec.prerequisites == (), spec.name

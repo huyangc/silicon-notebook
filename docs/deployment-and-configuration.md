@@ -318,7 +318,7 @@ common lexical terms may scan global trigram matches before filtering by noteboo
 hit the statement timeout. See the monitored rollout and rollback procedure in
 [Operations](./operations.md#postgresql-notebook-aware-lexical-indexes).
 
-An already-populated PostgreSQL database should also get the accumulated hot-path fix indexes (batch 1's six groups / eight indexes, plus batch 2's payload-search GIN and checkup-H5 partial index, plus batch 3's one keyset-covering index, plus batch 4's three source-search GIN trigram indexes — fourteen in total; batch 2's GIN ran about 1.5x the knowledge_objects table segment on a synthetic low-entropy benchmark (real payloads have richer trigrams and may run larger; measure after building) and is a registered write-amplification debt, reversible via DROP INDEX CONCURRENTLY)
+An already-populated PostgreSQL database should also get the accumulated hot-path fix indexes (batch 1's six groups / eight indexes, plus batch 2's payload-search GIN and checkup-H5 partial index, plus batch 3's one keyset-covering index, plus batch 4's three source-search GIN trigram indexes, plus batch 5's three delete-jobization FK/keyset indexes, plus batch 6's three generation-aware cluster replacements (batch 3 W2 PR-1) — twenty in total across the builder's registry; batch 2's GIN ran about 1.5x the knowledge_objects table segment on a synthetic low-entropy benchmark (real payloads have richer trigrams and may run larger; measure after building) and is a registered write-amplification debt, reversible via DROP INDEX CONCURRENTLY)
 across six query-family groups (`concept_clusters(notebook_id, canonical_id)`, its
 `lower(canonical_name)` companion, three reverse-FK covers on
 `extraction_runs`/`knowledge_source_fact_elements`/`memory_items`,
@@ -385,10 +385,32 @@ index is stable. `knowledge_relations` separately already carries three same-lea
 indexes on the `source_object_id` side (`idx_knowledge_relations_nb_source`,
 `idx_knowledge_relations_nb_source_id`, and now `idx_knowledge_relations_nb_source_target_edge`)
 — a pre-existing overlap this batch does not introduce and does not change. Batch 3 registers
-a second case: the pre-existing `idx_clusters_nb_canonical` (migration 0039) is now a strict
-prefix of the new `idx_clusters_nb_canonical_member` and can be retired with
-`DROP INDEX CONCURRENTLY idx_clusters_nb_canonical` once production has verified the new
-index is stable.
+a second case: the pre-existing `idx_clusters_nb_canonical` (migration 0039) became a strict
+prefix of `idx_clusters_nb_canonical_member` — that debt is now COLLECTED by batch 6 (below),
+which drops it outright.
+
+**Batch 6 (W2 generational cluster swap, migration 0051) changes the operator flow in two
+ways.** First, `scripts/build_hotpath_indexes.py --apply` now executes an idempotent
+prerequisite `ALTER TABLE concept_clusters ADD COLUMN IF NOT EXISTS generation ...` before
+building its three entries (the columns land with migration 0051, but the builder-first
+production order needs them earlier; the ALTER is metadata-only on PG 11+ and schema-
+qualified). Second, after the builder reports the three new indexes ready
+(`uq_clusters_nb_type_member_generation`, `idx_clusters_nb_canonical_member_gen`,
+`idx_clusters_nb_created_gen`), retire the FIVE superseded indexes online BEFORE migrating:
+
+```bash
+psql "$DATABASE_URL" -c 'DROP INDEX CONCURRENTLY uq_clusters_notebook_type_member;' \
+  -c 'DROP INDEX CONCURRENTLY idx_clusters_nb_canonical_member;' \
+  -c 'DROP INDEX CONCURRENTLY idx_clusters_nb_created;' \
+  -c 'DROP INDEX CONCURRENTLY idx_clusters_nb;' \
+  -c 'DROP INDEX CONCURRENTLY idx_clusters_nb_canonical;'
+```
+
+(The two bare-prefix indexes are retired with the rework because, measured on live plan
+probes, a narrower prefix hijacks the generation-predicated readers into Index Scan + heap
+Filter — the regression the INCLUDE columns exist to prevent.) Migration 0051 then validates
+shapes and is a pure ledger no-op. Skipping the builder-first flow still works but pays the
+in-transaction index builds/drops on `concept_clusters` during the migration window.
 
 If you intend to build scale indexes offline or off-host
 (`scripts/build_scale_index.py`, an independent process that runs *beside* the live

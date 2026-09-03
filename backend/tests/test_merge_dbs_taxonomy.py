@@ -312,6 +312,16 @@ def test_merge_normalizes_cluster_generation_for_imported_notebooks(tmp_path):
     primary, secondary, out = tmp_path / "a.db", tmp_path / "b.db", tmp_path / "out.db"
     _mk(primary, "nb-main", 0)
     _mk(secondary, "nb-sec", 7)  # 副库指针/行都在第 7 代
+    # 内评 P1 场景:副库还躺着同一 member 的残代行(gen=6)——published-only
+    # 筛选必须把它删掉;不筛选则塌 0 时撞四列唯一索引整体回滚。
+    sec_conn = sqlite3.connect(str(secondary))
+    with sec_conn:
+        sec_conn.execute(
+            "INSERT INTO concept_clusters (id,notebook_id,canonical_id,"
+            "member_object_id,canonical_name,object_type,created_at,generation) "
+            "VALUES ('cc-stale','nb-sec','can-old','mem','N','concept',"
+            "'2026-01-01T00:00:00',6)")
+    sec_conn.close()
 
     merge_dbs.merge_core(out, primary, secondary, shared_base="nb-none")
 
@@ -323,6 +333,10 @@ def test_merge_normalizes_cluster_generation_for_imported_notebooks(tmp_path):
             ).fetchall()
             assert rows and all(r[0] == 0 for r in rows), (
                 f"{table} 导入行必须归一到 0 代: {rows}")
+        stale = conn.execute(
+            "SELECT COUNT(*) FROM concept_clusters WHERE notebook_id='nb-sec'"
+        ).fetchone()[0]
+        assert stale == 1, "残代行(gen=6)必须被 published-only 筛选删掉"
         # 指针行已被 KG_STATE 清空 → COALESCE→0 → 归一行可见
         visible = conn.execute(
             "SELECT COUNT(*) FROM concept_clusters WHERE notebook_id='nb-sec' "

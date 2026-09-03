@@ -46,7 +46,7 @@ Startup recovery, stable seeds, and administrator upgrades run every boot
 outside that version gate.
 
 The current schema version is 71. This is the SQLite schema version. The committed v9 compatibility fixture
-upgrades through migrations v10–v70 and remains readable. Those migrations
+upgrades through migrations v10–v71 and remains readable. Those migrations
 cover compatibility and SQLite hot-path indexes (v10–v12), Memory/Agent and
 Memory-derived source links/indexes (v13–v15), knowhow tables and cell code
 (v16/v18), paper metadata (v17), source-linked assets (v19), and multi-domain
@@ -641,8 +641,20 @@ attach to this user's job, and a key the same user already spent in another
 notebook is refused (`AskRequestKeyConflict`, an `error` event) rather than
 attached. No table or foreign key is added; the forward-shadow invariants become
 90 business tables, 121 replicated unique surfaces, and the unchanged
-12-row-slot closure bound. The current pair is SQLite 70 / PostgreSQL 50 /
-epoch 1.
+12-row-slot closure bound.
+
+Batch 3 W2 PR-1 (SQLite v71 / PostgreSQL 0051) adds the generational
+cluster/community swap schema half: row-level `generation` columns on the
+three derived-graph tables, the `unified_kg_state` generational control
+block (two published pointers, the monotonic claim counter, the in-flight
+claim pair, the durable catch-up marker), and the cluster index rework
+(three generation-aware replacements created, five superseded indexes
+dropped — the four-column unique replaces the three-column one, and two
+strict-prefix indexes that would hijack the predicated readers' plans are
+retired with it). Reader results are byte-identical while every row is at
+generation 0 and both pointers are 0. The replicated unique surface count
+is unchanged (one four-column unique replaces one three-column unique).
+The current pair is SQLite 71 / PostgreSQL 51 / epoch 1.
 
 Run it only while application/background writers are stopped:
 

@@ -249,6 +249,7 @@ class GovernanceStore:
         notebook_id: str,
         after_object_type: str,
         after_member_object_id: str,
+        after_generation: int,
         limit: int,
     ) -> "tuple[list, int]":
         """Z6: one keyset batch of the orphan-cluster sweep — scan ``≤ limit``
@@ -257,14 +258,18 @@ class GovernanceStore:
         Cost model (this is the whole point of the two-statement shape):
 
         * ① page read — ``notebook_id = %s`` equality plus a row-wise
-          ``(object_type, member_object_id) > (cursor)`` range on the existing
-          ``uq_clusters_notebook_type_member(notebook_id, object_type,
-          member_object_id)`` UNIQUE index, ``ORDER BY`` the same key,
-          ``LIMIT %s``. Pure keyset paging with NO orphan predicate: the scan
-          stops after ``limit`` index entries, so the statement is **strictly
-          O(page)** no matter how many cluster rows the notebook has, and no
-          matter how many of them are orphans. No tie-break on ``id`` is needed
-          (that triple is unique). The explicit ``COLLATE "C"`` matches the
+          ``(object_type, member_object_id, generation) > (cursor)`` range on
+          the FOUR-column ``uq_clusters_nb_type_member_generation(notebook_id,
+          object_type, member_object_id, generation)`` UNIQUE index (batch
+          3·W2: the old three-column unique is gone — ``(type, member)`` is no
+          longer unique across generations, so the cursor carries the
+          generation as its tie-break; the four-column index serves the range
+          AND the ORDER BY directly), ``LIMIT %s``. Pure keyset paging with NO
+          orphan predicate: the scan stops after ``limit`` index entries, so
+          the statement is **strictly O(page)** no matter how many cluster
+          rows the notebook has, and no matter how many of them are orphans.
+          The sweep is deliberately CROSS-generation (census C class): a dead
+          member is dead in every generation. The explicit ``COLLATE "C"`` matches the
           column-level ``text COLLATE "C"`` of ``0001_initial.sql``, so it IS
           the index's own collation — the index stays usable and the ordering
           stays byte-wise, the same total order the SQLite twin gets for free.
@@ -321,12 +326,14 @@ class GovernanceStore:
         page is short. ``deleted_count`` is how many of them were orphans — 0
         is the common case and must NOT stop the loop."""
         page = db.execute(
-            "SELECT object_type, member_object_id, id FROM concept_clusters"
+            "SELECT object_type, member_object_id, generation, id FROM concept_clusters"
             " WHERE notebook_id = %s"
-            "   AND (object_type COLLATE \"C\", member_object_id COLLATE \"C\") > (%s, %s)"
-            " ORDER BY object_type COLLATE \"C\", member_object_id COLLATE \"C\""
+            "   AND (object_type COLLATE \"C\", member_object_id COLLATE \"C\", generation)"
+            "       > (%s, %s, %s)"
+            " ORDER BY object_type COLLATE \"C\", member_object_id COLLATE \"C\", generation"
             " LIMIT %s",
-            (notebook_id, after_object_type, after_member_object_id, limit),
+            (notebook_id, after_object_type, after_member_object_id,
+             after_generation, limit),
         ).fetchall()
         if not page:
             return [], 0
@@ -557,7 +564,7 @@ class GovernanceStore:
         下面的循环只问 ``r["member_object_id"] in existing``,而被问到的 id 恰好
         就是 ``rows`` 里的那些,故把 ``existing`` 限制到 ``rows`` 的 id 集合不改变
         任何一次判定,``added`` 与写入的行也逐位不变。分批走
-        ``uq_clusters_notebook_type_member(notebook_id, object_type,
+        ``uq_clusters_nb_type_member_generation(notebook_id, object_type,
         member_object_id)`` 这条唯一索引(前两列等值 + 第三列 IN = 精确 seek)。
         ``lock_cluster_artifact_type`` 仍在最前,写序不变。"""
         lock_cluster_artifact_type(connection, notebook_id, object_type)

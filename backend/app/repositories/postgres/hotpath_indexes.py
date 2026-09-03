@@ -128,13 +128,15 @@ class HotpathIndexSpec:
     # (非 unique、无 INCLUDE 附加列仍然照旧拒绝,见该函数注释)。
     unique: bool = False
     include: tuple[str, ...] = ()
-    # 幂等前置 DDL(批 6):形如 ALTER TABLE … ADD COLUMN IF NOT EXISTS 的
-    # 元数据级语句,建索引前执行(去重后逐条,autocommit,在线安全——PG11+
-    # 带常量 DEFAULT 的加列不重写堆)。存在理由:批 6 索引引用的 generation
-    # 列由迁移 0051 引入,而生产顺序是 builder 先行 CONCURRENTLY、迁移收尾
-    # 落账——没有前置列,builder 在未迁移的库上必然 42703。守卫测试钉住
-    # 「前置只许 ADD COLUMN IF NOT EXISTS 形态」,防这里演化成第二个迁移器。
-    prerequisites: tuple[str, ...] = ()
+    # 幂等前置列(批 6):(table, column, coldef) 结构化声明,建索引前渲染成
+    # schema 限定的 ALTER TABLE {schema}.{table} ADD COLUMN IF NOT EXISTS
+    # (去重后逐条,autocommit,在线安全——PG11+ 带常量 DEFAULT 的加列不重写
+    # 堆)。存在理由:批 6 索引引用的 generation 列由迁移 0051 引入,而生产
+    # 顺序是 builder 先行 CONCURRENTLY、迁移收尾落账——没有前置列,builder
+    # 在未迁移的库上必然 42703。结构化而非裸 SQL(内评 P2):裸串靠
+    # search_path 解析,--schema 非 public 时会把列加错表;守卫钉住 coldef
+    # 只许简单「类型 [NOT NULL DEFAULT 常量]」形态,防演化成第二个迁移器。
+    prerequisites: tuple[tuple[str, str, str], ...] = ()
 
     def column_list_sql(self) -> str:
         return self.ddl_columns or ", ".join(self.columns)
@@ -170,14 +172,6 @@ class HotpathIndexSpec:
 # migrations/0039_hotpath_batch1_indexes.sql -- see this module's docstring
 # and backend/tests/test_hotpath_indexes.py.
 HOTPATH_INDEX_SPECS: tuple[HotpathIndexSpec, ...] = (
-    HotpathIndexSpec(
-        name="idx_clusters_nb_canonical",
-        table="concept_clusters",
-        columns=("notebook_id", "canonical_id"),
-        predicate="",
-        predicate_shape="",
-        serves="concept-detail / co-mention peer-name / relation-endpoint-name lookups",
-    ),
     HotpathIndexSpec(
         name="idx_clusters_nb_canonical_name_lower",
         table="concept_clusters",
@@ -477,7 +471,8 @@ HOTPATH_INDEX_SPECS: tuple[HotpathIndexSpec, ...] = (
         collations=("pg_catalog:C", "pg_catalog:C"),
         serves="form-two (ctid) batch-delete loop's notebook_id-leading prefix on the closure-external conversations table (Phase B)",
     ),
-    # ── 批 6(批 3·W2 PR-1,迁移 0051):簇图代次化的三条索引整改。批 3 的
+    # ── 批 6(批 3·W2 PR-1,迁移 0051):簇图代次化的三条索引整改。批 1 的
+    # idx_clusters_nb_canonical(接替者严格前缀,劫计划)与批 3 的
     # idx_clusters_nb_canonical_member 条目已从本注册表移除——注册表语义是
     # 「现在应当存在的索引」,0051 把它删了,留着会让 builder 把刚删掉的索引
     # 重建回来(历史迁移 0043 原样保留,fresh 部署链上建了又被 0051 收走)。
@@ -500,7 +495,7 @@ HOTPATH_INDEX_SPECS: tuple[HotpathIndexSpec, ...] = (
         collations=("pg_catalog:C", "pg_catalog:C", "pg_catalog:C", ""),
         unique=True,
         prerequisites=(
-            "ALTER TABLE concept_clusters ADD COLUMN IF NOT EXISTS generation bigint NOT NULL DEFAULT 0",
+            ("concept_clusters", "generation", "bigint NOT NULL DEFAULT 0"),
         ),
         serves="per-generation membership uniqueness (replaces the 3-col unique that physically forbids dual generations -- W2 design Sec 1.1)",
     ),
@@ -514,7 +509,7 @@ HOTPATH_INDEX_SPECS: tuple[HotpathIndexSpec, ...] = (
         collations=("pg_catalog:C", "pg_catalog:C", "pg_catalog:C"),
         include=("generation",),
         prerequisites=(
-            "ALTER TABLE concept_clusters ADD COLUMN IF NOT EXISTS generation bigint NOT NULL DEFAULT 0",
+            ("concept_clusters", "generation", "bigint NOT NULL DEFAULT 0"),
         ),
         serves="cluster_member_rows / hub keyset pagination Index Only Scan with the generation reader predicate (measured: without INCLUDE the predicate costs 8.8x buffers)",
     ),
@@ -528,7 +523,7 @@ HOTPATH_INDEX_SPECS: tuple[HotpathIndexSpec, ...] = (
         collations=("pg_catalog:C", ""),
         include=("generation",),
         prerequisites=(
-            "ALTER TABLE concept_clusters ADD COLUMN IF NOT EXISTS generation bigint NOT NULL DEFAULT 0",
+            ("concept_clusters", "generation", "bigint NOT NULL DEFAULT 0"),
         ),
         serves="version_facts cluster COUNT/MAX + concept_clusters_count skip-gate leg behind the published-generation predicate; boundedness evidence for the PR-2 catch-up scan",
     ),
@@ -759,12 +754,22 @@ def install_hotpath_indexes(
                         "then rerun --apply"
                     )
                     continue
-                for prerequisite in spec.prerequisites:
-                    if prerequisite in executed_prerequisites:
+                for table, column, coldef in spec.prerequisites:
+                    key = f"{table}.{column}"
+                    if key in executed_prerequisites:
                         continue
-                    emit(f"{spec.name}: prerequisite -- {prerequisite}")
-                    connection.execute(prerequisite)
-                    executed_prerequisites.add(prerequisite)
+                    emit(f"{spec.name}: prerequisite -- add column {key}")
+                    connection.execute(
+                        sql.SQL(
+                            "ALTER TABLE {schema}.{table} "
+                            "ADD COLUMN IF NOT EXISTS {column} " + coldef
+                        ).format(
+                            schema=sql.Identifier(schema),
+                            table=sql.Identifier(table),
+                            column=sql.Identifier(column),
+                        )
+                    )
+                    executed_prerequisites.add(key)
                 emit(f"{spec.name}: building concurrently")
                 started = time.monotonic()
                 connection.execute(spec.ddl(schema, concurrently=True))

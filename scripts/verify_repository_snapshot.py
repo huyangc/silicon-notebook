@@ -4133,6 +4133,7 @@ DERIVED_GENERATION_DROPPED_INDEXES = frozenset(
         "idx_clusters_nb_canonical_member",
         "idx_clusters_nb_created",
         "idx_clusters_nb",
+        "idx_clusters_nb_canonical",
     }
 )
 MIGRATION_MANIFEST = {

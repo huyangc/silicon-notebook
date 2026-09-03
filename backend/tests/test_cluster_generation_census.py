@@ -15,6 +15,14 @@ B·目标代写者(PR-2 参数化)/C·跨代维护(显式豁免+理由)。本守
 语义判定;每条登记的 note 承载分类语义与豁免理由。C 类豁免清单非空是
 设计的硬要求(per-source 清理必须跨代删,否则在飞代留死成员行,破
 「零 orphan 生产者」不变量)。
+
+**声明的盲区**(内评登记,由其它网兜):①动态表名清单(notebook_delete_
+tables/KG_STATE_TABLES/_COPY_TABLES/kg_build_job_store 的表名字符串常量)
+不进正则——它们全是 C 类整表维护,行为由各自套件钉;②同文件内把谓词从
+LEFT JOIN 的 ON 挪进 WHERE 计数不变——由本文件的 ON 结构守卫单列检查;
+③query_store 内层 `mc.generation = c.generation` 相关对齐无可计数 token
+——由其行为测试(memory 排除语义)兜;④source_subgraph_projection 的局部
+模板被两分支复用,删一个分支的引用计数不变——由该模块行为测试兜。
 """
 from __future__ import annotations
 
@@ -145,3 +153,87 @@ def test_exemption_notes_are_non_empty_and_carry_reasons():
     assert len(c_class) >= 6, c_class
     for note in _CENSUS.values():
         assert len(note[5]) >= 8, note
+
+
+_LEFT_JOIN_ON_SITES = {
+    # 设计 §1.4 红线:LEFT JOIN 三表的代次谓词必须落在 ON 子句——落 WHERE
+    # 会把 LEFT JOIN 退化成 INNER JOIN,端点无簇行的关系整体消失(质量级)。
+    # (文件, 函数名, 期望 ON 段内 generation 谓词出现次数)
+    "backend/app/repositories/postgres/unified_kg_store.py": (
+        ("canonical_relation_seed_rows", 2),
+        ("community_graph_rows", 2),
+        ("relation_endpoint_name_rows", 2),
+        ("source_canonical_rows", 1),
+    ),
+    "backend/app/repositories/sqlite/unified_kg_store.py": (
+        ("canonical_relation_seed_rows", 2),
+        ("community_graph_rows", 2),
+        ("relation_endpoint_name_rows", 2),
+        ("source_canonical_rows", 1),
+    ),
+}
+
+
+def test_left_join_generation_predicates_live_in_on_clauses():
+    """每处 `LEFT JOIN concept_clusters <alias> ON …` 的 ON 段(至下一个
+    JOIN/WHERE/GROUP/ORDER 关键字前)必须含该别名的 generation 谓词。"""
+    import ast
+
+    joiner = re.compile(
+        r"LEFT JOIN concept_clusters (\w+)\s+ON\s+(.*?)(?=LEFT JOIN|JOIN |WHERE |GROUP BY|ORDER BY|$)",
+        re.S,
+    )
+    for rel_path, sites in _LEFT_JOIN_ON_SITES.items():
+        source = (_REPO / rel_path).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        by_name = {
+            node.name: ast.get_source_segment(source, node)
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        for function, expected in sites:
+            body = by_name.get(function)
+            assert body, (rel_path, function)
+            flat = " ".join(
+                part.strip().strip('"').strip("'") for part in body.split("\n")
+            )
+            matches = joiner.findall(flat)
+            hits = sum(
+                1
+                for alias, on_clause in matches
+                if f"{alias}.generation" in on_clause
+            )
+            assert hits == expected, (
+                rel_path, function, expected, hits,
+                [m[0] for m in matches],
+            )
+
+
+def test_sqlite_published_predicate_subquery_is_evaluated_once(tmp_path, monkeypatch):
+    """SQLite 侧的一次求值 pin(PG 侧由 EXPLAIN InitPlan 断言兜):绑定参数
+    形式的 COALESCE 指针子查询在 EXPLAIN QUERY PLAN 里是非相关的
+    SCALAR SUBQUERY——写成相关引用(u.notebook_id = t.notebook_id)会变
+    CORRELATED SCALAR SUBQUERY,逐行求值,恰是复评否掉的形态。"""
+    import sqlite3
+
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
+    monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    from app.core.config import Settings
+    from app.services.sqlite_repository import SQLiteRepository
+    from app.repositories.sqlite.unified_kg_store import _PUBLISHED_CLUSTER_GEN
+
+    SQLiteRepository(Settings())
+    db = sqlite3.connect(tmp_path / "t.db")
+    plan = "\n".join(
+        str(row[3]) for row in db.execute(
+            "EXPLAIN QUERY PLAN SELECT canonical_id, member_object_id "
+            "FROM concept_clusters WHERE notebook_id = ? "
+            f"AND generation = {_PUBLISHED_CLUSTER_GEN} "
+            "ORDER BY canonical_id, member_object_id",
+            ("nb",) * 2,
+        ).fetchall()
+    )
+    assert "SCALAR SUBQUERY" in plan, plan
+    assert "CORRELATED" not in plan, plan

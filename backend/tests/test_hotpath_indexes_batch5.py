@@ -103,13 +103,12 @@ def test_migration_file_exists_and_declares_exactly_the_three_batch5_statements(
 def test_batch5_specs_are_present_and_batches_1_to_3_are_untouched():
     names = {spec.name for spec in HOTPATH_INDEX_SPECS}
     assert _BATCH5_NAMES <= names
-    assert len(HOTPATH_INDEX_SPECS) == 19, (
-        "expected eight batch-1 plus two batch-2 plus zero batch-3 (superseded by batch 6) plus three "
+    assert len(HOTPATH_INDEX_SPECS) == 18, (
+        "expected seven batch-1 (idx_clusters_nb_canonical superseded by batch 6) plus two batch-2 plus zero batch-3 (superseded by batch 6) plus three "
         f"batch-5 entries in HOTPATH_INDEX_SPECS, found "
         f"{len(HOTPATH_INDEX_SPECS)}: {sorted(names)}"
     )
     batch1_names = {
-        "idx_clusters_nb_canonical",
         "idx_clusters_nb_canonical_name_lower",
         "idx_extraction_runs_notebook",
         "idx_knowledge_source_fact_elements_notebook",
