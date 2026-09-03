@@ -1023,7 +1023,7 @@ def report_section_prompt(section_title: str, section_scope: str, question: str,
         "with the marker 【通识】, carry NO [k] marker, and numeric values must "
         "be given as typical ranges, not point values. The marker opens the "
         "sentence but goes AFTER any list number, bullet, or heading syntax "
-        "(write `1. （推断）…`, never `（推断）1. …`, so Markdown lists stay "
+        "(write `1. 【通识】…`, never `【通识】1. …`, so Markdown lists stay "
         "intact).\n"
         if allow_parametric else
         "4. Do NOT introduce facts beyond the knowledge items; where evidence "

@@ -10,7 +10,7 @@ import { normalizeInferenceListMarkers } from "../../app/inference-list-markers.
 test("标记在序号前 -> 序号在前、标记在后", () => {
   assert.equal(
     normalizeInferenceListMarkers("（推断）1. 世界模型闭环。"),
-    "1. （推断） 世界模型闭环。",
+    "1. （推断）世界模型闭环。",
   );
 });
 
@@ -39,11 +39,11 @@ test("围栏代码块内的行不处理(``` 与 ~~~ 都算,闭合后恢复处理
   assert.equal(
     normalizeInferenceListMarkers(input),
     [
-      "1. （推断） 围栏外,要改",
+      "1. （推断）围栏外,要改",
       "```text",
       "（推断）1. 围栏内,不改",
       "```",
-      "2. （推断） 围栏后,要改",
+      "2. （推断）围栏后,要改",
       "~~~",
       "（推断）3. 波浪围栏内,不改",
       "~~~",
@@ -56,14 +56,31 @@ test("围栏代码块内的行不处理(``` 与 ~~~ 都算,闭合后恢复处理
   );
 });
 
-test("列表语法后的制表符也算进入正文(CommonMark 接受)", () => {
+test("列表语法后的制表符也算进入正文(CommonMark 接受),且原有空白逐字保留", () => {
+  // codex #670 R1 P2:只交换两个 token,不合成空格——两段空白各自跟着后面的内容走。
   assert.equal(
     normalizeInferenceListMarkers("（推断）1.\t内容"),
-    "1. （推断） 内容",
+    "1.\t（推断）内容",
   );
   assert.equal(
     normalizeInferenceListMarkers("（推断）\t- 内容"),
-    "- （推断） 内容",
+    "- （推断）\t内容",
+  );
+  assert.equal(
+    normalizeInferenceListMarkers("（推断）  1.   内容"),
+    "1.   （推断）  内容",
+  );
+});
+
+test("反引号围栏的 info string 里再出现反引号时不是围栏(CommonMark),后续行照常处理", () => {
+  assert.equal(
+    normalizeInferenceListMarkers("````foo`bar\n（推断）1. x"),
+    "````foo`bar\n1. （推断）x",
+  );
+  // 波浪线围栏没有这条限制。
+  assert.equal(
+    normalizeInferenceListMarkers("~~~foo`bar\n（推断）1. x"),
+    "~~~foo`bar\n（推断）1. x",
   );
 });
 
@@ -77,21 +94,21 @@ test("已知覆盖缺口:4 空格缩进的子列表与引用块前缀保持现�
 test("无序列表 - 前缀的标记也被调换", () => {
   assert.equal(
     normalizeInferenceListMarkers("（推断）- 这是分点说明"),
-    "- （推断） 这是分点说明",
+    "- （推断）这是分点说明",
   );
 });
 
 test("1) 形态的列表语法也被识别", () => {
   assert.equal(
     normalizeInferenceListMarkers("（推断）1) 世界模型闭环。"),
-    "1) （推断） 世界模型闭环。",
+    "1) （推断）世界模型闭环。",
   );
 });
 
 test("缩进 3 个空格时保留缩进", () => {
   assert.equal(
     normalizeInferenceListMarkers("   （推断）1. 世界模型闭环。"),
-    "   1. （推断） 世界模型闭环。",
+    "   1. （推断）世界模型闭环。",
   );
 });
 
@@ -108,14 +125,14 @@ test("句中出现的标记字面量不动", () => {
 test("四种标记字面量各一：全角括号", () => {
   assert.equal(
     normalizeInferenceListMarkers("（推断）1. 内容"),
-    "1. （推断） 内容",
+    "1. （推断）内容",
   );
 });
 
 test("四种标记字面量各一：半角括号", () => {
   assert.equal(
     normalizeInferenceListMarkers("(推断)1. 内容"),
-    "1. (推断) 内容",
+    "1. (推断)内容",
   );
 });
 
@@ -129,7 +146,7 @@ test("四种标记字面量各一：Likely,", () => {
 test("四种标记字面量各一：【通识】", () => {
   assert.equal(
     normalizeInferenceListMarkers("【通识】1. 内容"),
-    "1. 【通识】 内容",
+    "1. 【通识】内容",
   );
 });
 
@@ -142,8 +159,8 @@ test("多行混合时只改命中的那一行", () => {
   ].join("\n");
   const expected = [
     "（推断）以下为论文未描述的方向：",
-    "1. （推断） 世界模型闭环。",
-    "2. （推断） 长时程一致。",
+    "1. （推断）世界模型闭环。",
+    "2. （推断）长时程一致。",
     "1. （推断）已经写对的行不动。",
   ].join("\n");
   assert.equal(normalizeInferenceListMarkers(input), expected);
