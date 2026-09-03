@@ -115,13 +115,21 @@ def test_flip_double_cas_rejects_both_stale_directions(postgres_database):
         UnifiedKgStore.release_derived_claim(db, "nb-flip", stale["generation"])
         # 催收标记 CAS:别人的 ts 清不动,自己的 ts 清得掉。
         UnifiedKgStore.clear_catchup_marker(
-            db, "nb-flip", "2001-01-01T00:00:00+00:00"
+            db, "nb-flip", "2001-01-01T00:00:00+00:00", claim["generation"]
         )
         assert db.execute(
             "SELECT derived_catchup_from FROM unified_kg_state "
             "WHERE notebook_id='nb-flip'"
         ).fetchone()["derived_catchup_from"] is not None
-        UnifiedKgStore.clear_catchup_marker(db, "nb-flip", claim["ts"])
+        # 代次分量 CAS(R8):ts 对但代次不对(同秒撞车的化身)清不动。
+        UnifiedKgStore.clear_catchup_marker(
+            db, "nb-flip", claim["ts"], claim["generation"] + 5)
+        assert db.execute(
+            "SELECT derived_catchup_from FROM unified_kg_state "
+            "WHERE notebook_id='nb-flip'"
+        ).fetchone()["derived_catchup_from"] is not None
+        UnifiedKgStore.clear_catchup_marker(
+            db, "nb-flip", claim["ts"], claim["generation"])
         assert db.execute(
             "SELECT derived_catchup_from FROM unified_kg_state "
             "WHERE notebook_id='nb-flip'"
