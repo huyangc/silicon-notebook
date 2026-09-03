@@ -233,9 +233,14 @@ class GovernanceStore:
 
     @staticmethod
     def incremental_cluster_rows(db: sqlite3.Connection, notebook_id: str, object_type: str):
+        # 批 3·W2 A 类:published 代谓词,理由见 PG 孪生。标量子查询用绑定
+        # 参数(非相关引用)——SQLite 侧同样一次求值。
         return db.execute(
             "SELECT DISTINCT canonical_id, canonical_name FROM concept_clusters "
-            "WHERE notebook_id=? AND object_type=?", (notebook_id, object_type),
+            "WHERE notebook_id=? AND object_type=? "
+            "AND generation = COALESCE((SELECT cluster_generation "
+            "FROM unified_kg_state WHERE notebook_id = ?), 0)",
+            (notebook_id, object_type, notebook_id),
         ).fetchall()
 
     @staticmethod

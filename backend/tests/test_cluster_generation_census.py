@@ -60,10 +60,12 @@ def _predicate_counts(text: str) -> tuple[int, int]:
 _CENSUS: dict[str, tuple[int, int, int, int, int, str]] = {
     "backend/app/domain/kg_analysis_contracts.py": (3, 0, 0, 0, 0,
         "非站点:注释描述别处 SQL 的 JOIN 形状"),
-    "backend/app/repositories/postgres/governance_store.py": (6, 0, 0, 0, 0,
-        "B(insert_clusters/_existing_cluster_members/incremental_cluster_rows,"
-        "PR-2 参数化)+C(孤儿清扫分页删,跨代豁免:死成员行在每一代都要清)"),
-    "backend/app/repositories/sqlite/governance_store.py": (6, 0, 0, 0, 0,
+    "backend/app/repositories/postgres/governance_store.py": (6, 0, 0, 2, 0,
+        "B 已参数化:insert_clusters 锁后读指针写 published 代(谓词计数来自"
+        "_published_cluster_generation 的指针读),_existing_cluster_members 探针"
+        "按代收窄;A:incremental_cluster_rows 已配谓词;C(孤儿清扫"
+        "分页删,跨代豁免:死成员行在每一代都要清)"),
+    "backend/app/repositories/sqlite/governance_store.py": (6, 0, 0, 2, 0,
         "PG 孪生同注记"),
     "backend/app/repositories/postgres/index_projection_store.py": (2, 0, 0, 2, 0,
         "A×2:version_facts 簇分量(版本身份红线)+scale-graph 读,均已配谓词"),

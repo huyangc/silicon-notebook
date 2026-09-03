@@ -353,9 +353,15 @@ class GovernanceStore:
 
     @staticmethod
     def incremental_cluster_rows(db: Any, notebook_id: str, object_type: str):
+        # 批 3·W2 A 类:安置(place_new_concepts)的既有簇名切片只看 published
+        # 代——在飞代/残代的簇名混进来会把新对象安进读者看不见的簇。绑定参数
+        # 标量子查询 = 一次求值 InitPlan;COALESCE 兜「无 state 行 ⇒ 代 0」。
         return db.execute(
             "SELECT DISTINCT canonical_id, canonical_name FROM concept_clusters "
-            "WHERE notebook_id=%s AND object_type=%s", (notebook_id, object_type),
+            "WHERE notebook_id=%s AND object_type=%s "
+            "AND generation = COALESCE((SELECT cluster_generation "
+            "FROM unified_kg_state WHERE notebook_id = %s), 0)",
+            (notebook_id, object_type, notebook_id),
         ).fetchall()
 
     @staticmethod

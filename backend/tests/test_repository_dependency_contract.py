@@ -165,7 +165,17 @@ LIFECYCLE_STORE_CALLS = {
         "set_community_summary",
         "state_row",
         "stream_seed_rows",
-        "swap_cluster_map_from_scratch",
+        # 批 3·W2 代际原语:取号/释放/在飞复读/写新代/翻转/催收/回收。
+        # 旧 swap_cluster_map_from_scratch(DELETE+INSERT 同事务换表)已退役
+        # ——写新代与发布指针解耦后不存在「换表」这个动作。
+        "claim_derived_generation",
+        "release_derived_claim",
+        "derived_claim_still_held",
+        "write_cluster_map_generation",
+        "flip_cluster_generation",
+        "clear_catchup_marker",
+        "catchup_window_members",
+        "reap_derived_generations_page",
     },
 }
 

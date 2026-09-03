@@ -836,14 +836,22 @@ def test_unified_rebuild_rewrites_clusters_without_kg_mutation_seq_bump(
     repo, monkeypatch
 ):
     """The cluster-rebuild exemption: rebuild_unified_kg rewrites clusters and
-    bumps cluster_mutation_seq (through the coordinator's in-transaction
-    primitive) but must NEVER bump kg_mutation_seq — its idempotency gate
-    (_cluster_input_version) depends on the seq being rebuild-stable."""
+    bumps cluster_mutation_seq but must NEVER bump kg_mutation_seq — its
+    idempotency gate (_cluster_input_version) depends on the seq being
+    rebuild-stable.
+
+    批 3·W2 两段式红线的化身:写新代段(未发布代,读者不可见)**不得**
+    bump——bump 恰好一次,骑在翻转微事务的指针 UPDATE 语句上(版本身份与
+    指针行变化同提交)。coordinator 的 `_bump_cluster_mutation_seq` 原语在
+    rebuild 全程一次都不该被调(催收窗口为空 → append added=0 不 bump);
+    出现即说明有人把写新代段退回了旧 swap 的逐类型 bump。"""
     notebook_id, _objects, _relations = _seed_kg(repo, "rebuild exemption")
     monkeypatch.setattr(
         cmr, "review_merge_candidates", lambda client, pending, **kwargs: []
     )
-    seq_before = int(_state_row(repo, notebook_id)["kg_mutation_seq"])
+    before = _state_row(repo, notebook_id)
+    seq_before = int(before["kg_mutation_seq"])
+    cseq_before = int(before["cluster_mutation_seq"])
     events = []
     _spy_coordinator(repo, monkeypatch, events)
     _spy_cluster_seq(repo, monkeypatch, events)
@@ -851,10 +859,10 @@ def test_unified_rebuild_rewrites_clusters_without_kg_mutation_seq_bump(
     repo.rebuild_unified_kg(notebook_id)
 
     assert "dirty" not in events
-    assert "cluster_seq" in events
+    assert "cluster_seq" not in events
     state = _state_row(repo, notebook_id)
     assert int(state["kg_mutation_seq"]) == seq_before
-    assert int(state["cluster_mutation_seq"]) >= 1
+    assert int(state["cluster_mutation_seq"]) == cseq_before + 1
 
 
 def test_deep_copy_never_calls_the_mutation_coordinator(repo, monkeypatch):
