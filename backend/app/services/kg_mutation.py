@@ -101,7 +101,11 @@ mutation_phases.json, replayed by test_kg_mutation_phase_matrix) is unchanged:
                            atomic bump already happened inside the nested
                            set_edge_review / update_knowledge call)
     confirm_conflict       mutation commits before the candidate-status transaction
-    unified rebuild        cluster rewrite + cluster seq; NO kg_mutation_seq bump
+    unified rebuild        writes an UNPUBLISHED cluster generation (no seq
+                           of any kind), then the flip statement advances
+                           cluster_mutation_seq WITH the pointer; NO
+                           kg_mutation_seq bump ever (batch-3-W2 two-tier
+                           rule — see FULL CENSUS)
     deep copy / migration / fixture writes   never call this coordinator
 
 FULL CENSUS — "every bump is atomic with the data it announces"
@@ -128,6 +132,28 @@ identity" were the same sentence; ``delete_notebook_kg`` is what forced them
 apart — see its entry below for why bumping ``kg_mutation_seq`` itself
 (rather than resetting it) was never the available move for that writer.
 
+batch-3-W2's amendment (代际化,two-tier rewrite of the cluster half): the
+derived tables (``concept_clusters`` / ``communities`` / ``community_members``)
+now carry a ``generation`` column and every reader filters to the PUBLISHED
+generation pointer, so "commits rows" splits into two tiers with OPPOSITE
+obligations:
+
+    · PUBLISHED-generation row changes must advance version identity in the
+      same transaction (unchanged rule — append_clusters' pointer-under-lock
+      write, the orphan sweep's cross-generation delete, the catch-up
+      replay's appends);
+    · UNPUBLISHED-generation writes (generation is neither the published
+      pointer nor legacy 0 stock) MUST NOT advance version identity — the
+      rows are invisible to every reader, and a bump would manufacture a
+      fake invalidation signal (cache churn with zero observable content
+      change). The rebuild's write-generation segment and the communities
+      write/copy-forward are compliant BY not bumping, not in violation.
+      Their one sanctioned bump rides the flip statement itself:
+      ``flip_cluster_generation`` advances ``cluster_mutation_seq`` in the
+      SAME UPDATE that moves the pointer, so version identity and pointer
+      change are one commit (the pinned shape:
+      test_unified_rebuild_rewrites_clusters_without_kg_mutation_seq_bump).
+
 Graph-row writers, all now in-transaction (✓ = already was):
 
     store_kg                              R5      knowledge_lifecycle
@@ -142,12 +168,37 @@ Graph-row writers, all now in-transaction (✓ = already was):
     knowhow _project_table_locked         R5      knowhow/projection
     knowhow delete_table_projection       R5      knowhow/projection
     write_clusters / append_clusters /
-      _sweep_orphan_clusters_page_loop /
-      _write_cluster_map_streamed         ✓       cluster-seq bump in-tx;
+      _sweep_orphan_clusters_page_loop    ✓       PUBLISHED-tier writers:
+                                                  cluster-seq bump in-tx
+                                                  (append on added>0, sweep
+                                                  on deleted>0);
                                                   kg_mutation_seq deliberately
                                                   NOT bumped (rebuild
                                                   idempotency — see
                                                   bump_cluster_mutation_seq)
+    _write_cluster_map_streamed /
+      write_communities_generation /
+      copy_forward_communities            W2      UNPUBLISHED-tier writers:
+                                                  NO bump of any kind (rows
+                                                  invisible until the flip;
+                                                  bumping here is the fake-
+                                                  invalidation defect the
+                                                  two-tier rule forbids)
+    flip_cluster_generation               W2      the rebuild's ONE cluster-
+                                                  seq advance: rides the same
+                                                  UPDATE statement as the
+                                                  published-pointer move —
+                                                  version identity and
+                                                  visibility change are one
+                                                  commit by construction
+    _settle_generation_catchup            W2      replays retired-generation
+                                                  window rows into the NEW
+                                                  published generation via
+                                                  append_clusters — inherits
+                                                  its added>0 in-tx bump (a
+                                                  published-tier write, so it
+                                                  MUST move version identity;
+                                                  design 复评 P1-2)
     publish_indexing_pipeline_success     ✓       store-owned: the graph rows
                                                   AND the unified_kg_state
                                                   upsert are one transaction
@@ -457,8 +508,11 @@ class KgMutationCoordinator:
     def bump_cluster_mutation_seq(
         self, connection: object, notebook_id: str
     ) -> None:
-        """concept_clusters 写路径的单调计数器 bump。与 mark_unified_kg_dirty 不同,
-        本原语在调用方已持有的写事务 connection 内执行(写簇+bump 同 commit,原子——
-        不存在"簇写了、seq 没 bump"的窗口)。kg_mutation_seq 不在此处动:rebuild
-        刻意保持它稳定(幂等,见 _cluster_input_version),clusters 的变化信号独立成列。"""
+        """concept_clusters **published 代**写路径的单调计数器 bump。与
+        mark_unified_kg_dirty 不同,本原语在调用方已持有的写事务 connection 内
+        执行(写簇+bump 同 commit,原子——不存在"簇写了、seq 没 bump"的窗口)。
+        kg_mutation_seq 不在此处动:rebuild 刻意保持它稳定(幂等,见
+        _cluster_input_version),clusters 的变化信号独立成列。批 3·W2 两段式
+        红线:未发布代的写入**不得**调本原语(见模块 docstring 的 FULL CENSUS
+        两段式条目)——rebuild 的那一次 bump 骑在翻转语句里,不经过这里。"""
         self.unified_store.bump_cluster_seq(connection, notebook_id, self._now())
