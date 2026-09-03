@@ -53,6 +53,8 @@ def _swept(page_rows=_PAGE, deleted_rows=(), **kwargs):
         kwargs.get("notebook_id", "nb-1"),
         kwargs.get("after_object_type", ""),
         kwargs.get("after_member_object_id", ""),
+        # 批 3·W2:游标带 generation 尾分量(四列唯一后三元组不再唯一)。
+        kwargs.get("after_generation", -1),
         kwargs.get("limit", 5000),
     )
     return db, result
@@ -68,7 +70,7 @@ def test_page_read_is_a_pure_keyset_page_not_an_orphan_filtered_one():
     db, _result = _swept()
 
     sql, _params = db.calls[0]
-    assert sql.startswith("SELECT object_type, member_object_id, id FROM concept_clusters")
+    assert sql.startswith("SELECT object_type, member_object_id, generation, id FROM concept_clusters")
     assert "LIMIT %s" in sql
     assert "ORDER BY" in sql
     assert "NOT EXISTS" not in sql        # 页读不带孤儿过滤
@@ -80,11 +82,12 @@ def test_page_read_threads_the_keyset_cursor_and_limit_by_position():
     """notebook_id / after_object_type / after_member_object_id / limit 必须按
     这个顺序绑定给占位符 —— 顺序错了游标就推进不到位,分批会死循环或漏批。"""
     db, _result = _swept(
-        after_object_type="claim", after_member_object_id="ko-cursor", limit=4096
+        after_object_type="claim", after_member_object_id="ko-cursor",
+        after_generation=3, limit=4096,
     )
 
     _sql, params = db.calls[0]
-    assert params == ("nb-1", "claim", "ko-cursor", 4096)
+    assert params == ("nb-1", "claim", "ko-cursor", 3, 4096)
 
 
 def test_delete_is_driven_by_the_pages_primary_keys():
