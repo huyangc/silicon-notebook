@@ -103,8 +103,8 @@ def test_migration_file_exists_and_declares_exactly_the_three_batch5_statements(
 def test_batch5_specs_are_present_and_batches_1_to_3_are_untouched():
     names = {spec.name for spec in HOTPATH_INDEX_SPECS}
     assert _BATCH5_NAMES <= names
-    assert len(HOTPATH_INDEX_SPECS) == 17, (
-        "expected eight batch-1 plus two batch-2 plus one batch-3 plus three "
+    assert len(HOTPATH_INDEX_SPECS) == 19, (
+        "expected eight batch-1 plus two batch-2 plus zero batch-3 (superseded by batch 6) plus three "
         f"batch-5 entries in HOTPATH_INDEX_SPECS, found "
         f"{len(HOTPATH_INDEX_SPECS)}: {sorted(names)}"
     )
@@ -119,7 +119,8 @@ def test_batch5_specs_are_present_and_batches_1_to_3_are_untouched():
         "idx_sources_nb_hidden_type",
     }
     batch2_names = {"idx_knowledge_objects_nb_payload_trgm", "idx_source_elements_nonblank"}
-    batch3_names = {"idx_clusters_nb_canonical_member"}
+    # 批 3 条目已被批 6 取代并从注册表移除(见 test_hotpath_indexes_batch3.py)
+    batch3_names = {"idx_clusters_nb_canonical_member_gen"}
     assert batch1_names <= names
     assert batch2_names <= names
     assert batch3_names <= names

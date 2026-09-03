@@ -78,10 +78,16 @@ W2 对 WR-4 只记核销，不改代码。
    无 `unified_kg_state` 行**（`notebook_sharing.py:63-79`/`494-505` 的既有
    红线）；`scripts/merge_dbs.py` 三表整表导入 + `KG_STATE_TABLES` 清空
    state 行。两条实产路径都会制造「行有代次、库无指针」。
-5. **读者普查量级**：三表 SQL 字面量 146 处/22 文件（app/ + scripts/，
-   不含测试），含 LEFT JOIN 倍增站点（`canonical_relation_seed_rows:212-215`、
-   `community_graph_rows:280-283`、`mention_seed_rows:223`）与同语句双引用
-   （`query_store.py:106/113` 的 NOT EXISTS 相关子查询）。
+5. **读者普查量级**（PR-1 实测勘误）：三表 SQL 站点约 150 处/29 文件
+   （含声明驱动的动态 SQL 表名清单）。**LEFT JOIN 红线清单修正为 4 函数
+   7 站点/侧**：`canonical_relation_seed_rows`(2)、`community_graph_rows`
+   (2)、`relation_endpoint_name_rows`(2)、`source_canonical_rows`(1)——
+   v2 点名的 `mention_seed_rows` 实为 inner join（B 类 rebuild 流内部读，
+   移出红线清单）；`relation_endpoint_name_rows`/`source_canonical_rows`
+   为普查新增收录。同语句双引用先例：`query_store` 的 NOT EXISTS 内层用
+   `mc.generation = c.generation` 相关对齐（零新参数，同代整簇排除）。
+   普查守卫落地为 `tests/test_cluster_generation_census.py`（逐文件表出现
+   数+谓词数登记，三分类注记，C 类豁免非空）。
 6. **SQLite 事务语义**：`with conn:` 是 deferred；首条 DML 前的 SELECT 不在
    写事务里，仓库已有 `begin_immediate` seam（`sqlite/database.py:676-687`）
    与离线共库写者实例（`recluster_kg.py`、batch_ingest）。

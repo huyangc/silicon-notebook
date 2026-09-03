@@ -3817,6 +3817,10 @@ class SqliteMigrator:
                 DROP INDEX IF EXISTS idx_clusters_nb_created;
                 CREATE INDEX IF NOT EXISTS idx_clusters_nb_created_gen
                   ON concept_clusters(notebook_id, created_at, generation);
+                -- idx_clusters_nb 是 _created_gen 的严格前缀,留着会让
+                -- planner 选窄索引回表过滤 generation(PG 侧实测劫计划);
+                -- 裸 notebook_id 扫描由 _created_gen 前导列等价服务。
+                DROP INDEX IF EXISTS idx_clusters_nb;
                 """
             )
 

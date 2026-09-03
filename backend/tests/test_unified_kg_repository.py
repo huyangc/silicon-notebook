@@ -567,8 +567,10 @@ def test_concept_neighbor_rows_batches_over_900_candidates(repo):
 
     # Exclusion probe: 1810 total candidates (905 same-cluster + 905
     # external) batched at 900 -> [900, 900, 10].
-    assert [len(p) - 2 for p in probes] == [900, 900, 10]
-    probed_ids = {value for params in probes for value in params[2:]}
+    # 批 3·W2 §1.4:探针加 published 代次谓词,COALESCE 子查询多带一个
+    # notebook_id 参数(-3 = notebook_id + canonical_id + 谓词参数)。
+    assert [len(p) - 3 for p in probes] == [900, 900, 10]
+    probed_ids = {value for params in probes for value in params[3:]}
     assert probed_ids == {f"sc-{i}" for i in range(same_cluster_count)} | {
         f"ext-{i}" for i in range(external_count)
     }

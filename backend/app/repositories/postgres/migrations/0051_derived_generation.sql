@@ -180,3 +180,12 @@ CREATE INDEX IF NOT EXISTS idx_clusters_nb_created_gen
 DROP INDEX IF EXISTS uq_clusters_notebook_type_member;
 DROP INDEX IF EXISTS idx_clusters_nb_canonical_member;
 DROP INDEX IF EXISTS idx_clusters_nb_created;
+-- idx_clusters_nb (0004) is a strict prefix of idx_clusters_nb_created_gen
+-- and must go WITH the rework, not linger as retirement debt: measured on a
+-- live plan probe, the narrower prefix index HIJACKS the aggregate readers
+-- (version_facts' cluster component, concept_clusters_count) into a plain
+-- Index Scan + heap Filter on generation -- exactly the regression the
+-- INCLUDE column exists to prevent. With the prefix gone the planner takes
+-- the covering index's Index Only Scan; every bare notebook_id scan the
+-- prefix served is equally served by the two-key index's leading column.
+DROP INDEX IF EXISTS idx_clusters_nb;
