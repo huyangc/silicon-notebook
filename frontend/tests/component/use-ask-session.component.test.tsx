@@ -3932,6 +3932,148 @@ test("a handed-off question the server already holds is not submitted twice on r
   expect(pendingIntentStore()).toEqual([]);
 });
 
+// codex #664 r6 P2: Stop before `started` still retires the hand-off mirror the
+// moment the server acknowledges the job; a cancelled question must not
+// resurface as a draft after a reload.
+test("a hand-off stopped before started retires its mirror when started arrives", async () => {
+  const stream = deferred<AskResponse>();
+  let onStart: ((jobId: string, conversationId: string) => void | Promise<void>) | undefined;
+  api.runAskStream.mockImplementation((
+    _notebookId: string,
+    _payload: unknown,
+    _onProgress: unknown,
+    _signal?: AbortSignal,
+    nextOnStart?: (jobId: string, conversationId: string) => void | Promise<void>,
+  ) => {
+    onStart = nextOnStart;
+    return stream.promise;
+  });
+  api.previewAskIntent.mockResolvedValue(contractFor("stopped early", false));
+  api.listConversations.mockResolvedValue([]);
+  render(<Harness />);
+  beginOwnedNotebook();
+  act(() => value!.selectMode("reasoning"));
+  await act(async () => {
+    void value!.submit("stopped early");
+    await Promise.resolve();
+  });
+  await settleSubmit();
+  expect((pendingIntentStore()[0] as { phase: string }).phase).toBe("handoff");
+  act(() => value!.abort());
+  await act(async () => {
+    await onStart!("job-stopped", "conversation-stopped");
+  });
+  expect(api.cancelAskJob).toHaveBeenCalledTimes(1);
+  expect(pendingIntentStore()).toEqual([]);
+  stream.reject(new DOMException("aborted", "AbortError"));
+  await settleSubmit();
+  expect(pendingIntentStore()).toEqual([]);
+});
+
+// codex #664 r6 P2: an unmount while the lock claim is still pending must still
+// leave the question in the mirror (and release the lock) for the next instance.
+test("an unmount during the pending lock claim still mirrors the question for the next mount", async () => {
+  const gate = deferred<void>();
+  const held = new Set<string>();
+  const locks = {
+    request: async (name: string, _options: unknown, callback: (lock: unknown) => unknown) => {
+      await gate.promise;
+      if (held.has(name)) return callback(null);
+      held.add(name);
+      try {
+        return await callback({ name });
+      } finally {
+        held.delete(name);
+      }
+    },
+  };
+  Object.defineProperty(navigator, "locks", { value: locks, configurable: true });
+  try {
+    api.previewAskIntent.mockReturnValue(deferred<QueryIntentContract>().promise);
+    api.listConversations.mockResolvedValue([]);
+    const view = render(<Harness />);
+    beginOwnedNotebook();
+    act(() => value!.selectMode("reasoning"));
+    act(() => {
+      void value!.submit("claimed late");
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(pendingIntentStore()).toEqual([]);
+
+    view.unmount();
+    gate.resolve();
+    await act(async () => {
+      await gate.promise;
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    // Mirrored after all, and the granted lock is not kept by the dead instance.
+    expect(pendingIntentStore()).toHaveLength(1);
+    expect(held.size).toBe(0);
+    expect(api.previewAskIntent).not.toHaveBeenCalled();
+
+    render(<Harness />);
+    const owner = beginOwnedNotebook(2);
+    await act(async () => {
+      await value!.restoreNotebook(owner);
+      value!.finishNotebookTransition(owner);
+    });
+    await settleSubmit();
+    expect(value!.intentChecking).toBe(true);
+    expect(value!.pendingQuestion).toBe("claimed late");
+    expect(api.previewAskIntent).toHaveBeenCalledTimes(1);
+  } finally {
+    Reflect.deleteProperty(navigator, "locks");
+  }
+});
+
+// codex #664 r6 P2: a persisted review whose conversation detail fails to load
+// is not materialized (nor deleted); the next attempt resumes it.
+test("a persisted review survives a failed detail read and resumes on the next restore", async () => {
+  const contract = contractFor("survives detail failure", true);
+  api.previewAskIntent.mockResolvedValue(contract);
+  api.listConversations.mockResolvedValue([summary("conversation-x")]);
+  api.getConversation.mockImplementation(async (id: string) => detail(id));
+  const view = render(<Harness />);
+  const first = beginOwnedNotebook();
+  await act(async () => {
+    await value!.restoreNotebook(first);
+  });
+  act(() => value!.selectMode("reasoning"));
+  await act(async () => {
+    await value!.submit("survives detail failure");
+  });
+  expect(value!.intentReview?.contract).toBe(contract);
+
+  view.unmount();
+  api.previewAskIntent.mockReset();
+  api.getConversation.mockReset();
+  api.getConversation.mockRejectedValueOnce(new Error("detail unavailable"));
+  render(<Harness />);
+  const failing = beginOwnedNotebook(2);
+  await act(async () => {
+    await value!.restoreNotebook(failing);
+    value!.finishNotebookTransition(failing);
+  });
+  expect(value!.intentReview).toBeNull();
+  expect(pendingIntentStore()).toHaveLength(1);
+
+  // The retry's transition must not abort a run that never existed.
+  api.getConversation.mockImplementation(async (id: string) => detail(id));
+  const retry = beginOwnedNotebook(3);
+  await act(async () => {
+    await value!.restoreNotebook(retry);
+    value!.finishNotebookTransition(retry);
+  });
+  expect(value!.conversationId).toBe("conversation-x");
+  expect(value!.intentReview?.contract).toEqual(contract);
+  expect(value!.pendingQuestion).toBe("survives detail failure");
+  expect(api.previewAskIntent).not.toHaveBeenCalled();
+});
+
 // PR #557 regression: `turns`/`sessions`/`pendingTrace`/`feedbackSent` used to
 // fall back to a bare `[]`/`{}` literal whenever the owner is not visible
 // (actorId is null, e.g. logged out / collection page). A bare literal is a
