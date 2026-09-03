@@ -256,7 +256,14 @@ class AskStateStore:
         就地把解析出的 conversation_id 写回 payload(与基线同一时点——在事务内、
         插 job 行之前,故即便 job 插入失败回滚,payload 仍保留生成的 id),
         使随后的 handler(_ensure_conversation)接续同一会话、不另建。
-        返回 (job_id, conversation_id)。cancel-event 注册留在 facade 编排。"""
+        返回 (job_id, conversation_id)。cancel-event 注册留在 facade 编排。
+
+        ALWAYS creates. ``payload.client_request_id`` is deliberately NOT
+        persisted here (the row's key stays NULL): this is the non-idempotent
+        begin the synchronous ``/ask`` route and compatibility callers use, and
+        writing the key would make a repeated keyed call trip the unique index
+        instead of keeping its always-create semantics. Only
+        ``begin_or_attach_durable_job`` honours (and stores) the key."""
         question = payload.question.strip()
         now = self.seams.now()
         job_id = self.seams.new_id("askjob")
@@ -266,7 +273,8 @@ class AskStateStore:
                 db, notebook_id, payload.conversation_id, question, user_id)
             payload.conversation_id = conversation_id
             self._insert_job_row(
-                db, job_id, notebook_id, conversation_id, user_id, mode, payload, now)
+                db, job_id, notebook_id, conversation_id, user_id, mode, payload, now,
+                client_request_id=None)
         return job_id, conversation_id
 
     @staticmethod
@@ -279,14 +287,30 @@ class AskStateStore:
         mode: str,
         payload: AskRequest,
         now: str,
+        *,
+        client_request_id: "str | None",
     ) -> None:
         db.execute(
             "INSERT INTO ask_jobs (id,notebook_id,conversation_id,created_by,mode,question,"
             "asked_at,client_request_id,status,trace_json,answer_id,error,created_at,"
             "updated_at) VALUES (?,?,?,?,?,?,?,?, 'running','','','',?,?)",
             (job_id, notebook_id, conversation_id, user_id, mode,
-             payload.question.strip(), payload.asked_at, payload.client_request_id,
+             payload.question.strip(), payload.asked_at, client_request_id,
              now, now))
+
+    def find_job_for_client_request(
+        self, user_id: str, client_request_id: str,
+    ) -> "dict | None":
+        """The job this user already created under ``client_request_id`` (any
+        notebook), or ``None``. A read-only probe for the streaming route so a
+        keyed retry can attach BEFORE any request-dependent validation runs;
+        the authoritative lookup+insert stays in ``begin_or_attach_durable_job``."""
+        with self.database.connect() as db:
+            row = self._job_for_client_request(db, user_id, client_request_id)
+        if row is None:
+            return None
+        return {"job_id": row["id"], "notebook_id": row["notebook_id"],
+                "conversation_id": row["conversation_id"]}
 
     def begin_or_attach_durable_job(
         self,
@@ -329,7 +353,8 @@ class AskStateStore:
                 db, notebook_id, payload.conversation_id, question, user_id)
             payload.conversation_id = conversation_id
             self._insert_job_row(
-                db, job_id, notebook_id, conversation_id, user_id, mode, payload, now)
+                db, job_id, notebook_id, conversation_id, user_id, mode, payload, now,
+                client_request_id=key)
         return job_id, conversation_id, False
 
     @staticmethod

@@ -4186,11 +4186,18 @@ class RepositoryFacade:
         self._runtime.notebook_languages = value
 
     def start_ask_stream(self, notebook_id: str, payload: AskRequest, mode,
-                         *, user_id: str, resolve=None):
+                         *, user_id: str, resolve=None, attach_only=False):
         """Start detached Ask execution through the runtime-owned coordinator.
 
         ``resolve`` (automatic mode) defers engine selection into the detached
-        worker so the durable job and ``started`` exist before it runs."""
+        worker so the durable job and ``started`` exist before it runs.
+        ``attach_only`` (a keyed re-submission probe): only attach to the job
+        ``payload.client_request_id`` already created, returning ``None`` when
+        there is none — the route then runs its normal preflight and start."""
+        if attach_only:
+            return self._runtime.ask_execution.attach_existing(
+                notebook_id, payload, user_id
+            )
         return self._runtime.ask_execution.start(
             notebook_id, payload, mode, user_id=user_id, resolve=resolve
         )

@@ -2895,7 +2895,8 @@ class AskStreamPort(Protocol):
         *,
         user_id: str,
         resolve: "Callable[[threading.Event], tuple[AskRequest, AskMode]] | None" = None,
-    ) -> "queue.Queue[dict[str, object] | None]": ...
+        attach_only: bool = False,
+    ) -> "queue.Queue[dict[str, object] | None] | None": ...
 
 
 class NotebookRepository(IdentityRepository, NotebookAccessRepository, NotebookCatalogRepository, NotebookSharingRepository, SourceRepository, KnowledgeReadRepository, SchemaRegistryRepository, KnowledgeGovernanceRepository, KnowledgeLifecycleRepository, IndexLifecycleRepository, AskStateRepository, ReportRepository, AdminQueryRepository, AskExecutionPort, FacadePropertyContract, Protocol):
@@ -3239,6 +3240,9 @@ class AskStateStorePort(Protocol):
         mode: str,
         user_id: str,
     ) -> tuple[str, str, bool]: ...
+    def find_job_for_client_request(
+        self, user_id: str, client_request_id: str,
+    ) -> dict | None: ...
     def append_trace(
         self,
         notebook_id: str,

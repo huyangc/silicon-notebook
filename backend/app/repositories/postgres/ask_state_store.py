@@ -220,22 +220,36 @@ class AskStateStore:
             conversation_id = self.ensure_conversation(
                 db, notebook_id, payload.conversation_id, question, user_id)
             payload.conversation_id = conversation_id
+            # Always creates; the key is deliberately NOT stored (see the
+            # SQLite store): only begin_or_attach_durable_job honours it.
             self._insert_job_row(
-                db, job_id, notebook_id, conversation_id, user_id, mode, payload, now)
+                db, job_id, notebook_id, conversation_id, user_id, mode, payload, now,
+                client_request_id=None)
         return job_id, conversation_id
 
     @staticmethod
     def _insert_job_row(
         db, job_id: str, notebook_id: str, conversation_id: str, user_id: str,
-        mode: str, payload: AskRequest, now: str,
+        mode: str, payload: AskRequest, now: str, *, client_request_id: "str | None",
     ) -> None:
         db.execute(
             "INSERT INTO ask_jobs (id,notebook_id,conversation_id,created_by,mode,question,"
             "asked_at,client_request_id,status,trace_json,answer_id,error,created_at,"
             "updated_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s, 'running',%s,'','',%s,%s)",
             (job_id, notebook_id, conversation_id, user_id, mode,
-             payload.question.strip(), payload.asked_at, payload.client_request_id,
+             payload.question.strip(), payload.asked_at, client_request_id,
              jsonb([]), now, now))
+
+    def find_job_for_client_request(
+        self, user_id: str, client_request_id: str,
+    ) -> "dict | None":
+        """See the SQLite store."""
+        with self.database.connect() as db:
+            row = self._job_for_client_request(db, user_id, client_request_id)
+        if row is None:
+            return None
+        return {"job_id": row["id"], "notebook_id": row["notebook_id"],
+                "conversation_id": row["conversation_id"]}
 
     def begin_or_attach_durable_job(
         self,
@@ -266,7 +280,8 @@ class AskStateStore:
                     db, notebook_id, payload.conversation_id, question, user_id)
                 payload.conversation_id = conversation_id
                 self._insert_job_row(
-                    db, job_id, notebook_id, conversation_id, user_id, mode, payload, now)
+                    db, job_id, notebook_id, conversation_id, user_id, mode, payload, now,
+                    client_request_id=key)
         except errors.UniqueViolation:
             with self.database.connect() as db:
                 existing = self._job_for_client_request(db, user_id, key)

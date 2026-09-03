@@ -625,15 +625,22 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
   // user Stop — but the mirror must survive: it is the copy the reloaded tab
   // resumes from. Proven in a real browser: `beforeunload` fires before the
   // terminated stream's rejection is delivered, `pagehide` right after it.
+  // The flag means "an unload is in progress" only: a page restored from the
+  // back-forward cache (`pageshow`) is live again, and so is one whose
+  // navigation another handler cancelled — the next user action on it
+  // (submit, Stop) clears the flag before acting.
   const pageUnloadingRef = useRef(false);
   useEffect(() => {
     if (typeof window === "undefined") return;
     const markUnloading = () => { pageUnloadingRef.current = true; };
+    const markLive = () => { pageUnloadingRef.current = false; };
     window.addEventListener("beforeunload", markUnloading);
     window.addEventListener("pagehide", markUnloading);
+    window.addEventListener("pageshow", markLive);
     return () => {
       window.removeEventListener("beforeunload", markUnloading);
       window.removeEventListener("pagehide", markUnloading);
+      window.removeEventListener("pageshow", markLive);
     };
   }, []);
 
@@ -1870,6 +1877,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
   }
 
   async function submit(nextQuestion = question) {
+    pageUnloadingRef.current = false;
     const owner = currentNotebookOwner();
     if (
       !owner || asking || intentChecking || sessionLoading || intentReview
@@ -2176,6 +2184,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
   }
 
   function abort() {
+    pageUnloadingRef.current = false;
     if (!currentNotebookOwner()) return;
     if (intentChecking) {
       const draft = askIntentDraftRef.current;

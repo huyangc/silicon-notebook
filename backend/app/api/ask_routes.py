@@ -862,6 +862,13 @@ async def _stream_ask_events(
             )
 
         events = await asyncio.to_thread(_start_ask_stream)
+    async for line in _deliver_ask_events(events, request):
+        yield line
+
+
+async def _deliver_ask_events(events, request: Request):
+    """Drain one Ask delivery queue to NDJSON — shared by a fresh start and a
+    keyed re-submission that attached to an existing job."""
     last_delivery = monotonic()
     # 客户端断连只停止本次流(break),**不** set cancel_event —— worker 脱离连接
     # 跑到完、答案照存。唯一取消入口是 POST …/ask/jobs/{job_id}/cancel。
@@ -971,6 +978,26 @@ async def ask_stream(notebook_id: str, request: Request, payload: AskRequest) ->
             notebook, spec, updated_payload,
             resolved_source_scope, resolved_base_scope, history,
         )
+
+    if payload.client_request_id:
+        # A keyed re-submission attaches to the job that key already created
+        # BEFORE the preflight below: the original submission already passed
+        # it, and the retry must replay that job even if notebook availability
+        # or the mode registry changed since. Only the route dependency's
+        # notebook authorization stands in front of it.
+        def _attach_ask_stream():
+            return repo.start_ask_stream(
+                notebook_id, payload, None,
+                user_id=repo.current_user().id, attach_only=True,
+            )
+
+        attached = await asyncio.to_thread(_attach_ask_stream)
+        if attached is not None:
+            return StreamingResponse(
+                _deliver_ask_events(attached, request),
+                media_type="application/x-ndjson",
+                headers=NDJSON_STREAM_HEADERS,
+            )
 
     (
         notebook, spec, payload,

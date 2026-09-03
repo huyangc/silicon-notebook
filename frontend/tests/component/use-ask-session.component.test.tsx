@@ -4673,3 +4673,53 @@ test("a page unload during understanding keeps the preview mirror for the reload
   expect(pendingIntentStore()).toHaveLength(1);
   expect((pendingIntentStore()[0] as { phase: string }).phase).toBe("preview");
 });
+
+// codex #665 r1 P2: the unload flag must mean "an unload is in progress" only.
+// A page restored from the back-forward cache (`pageshow`) is live again, and
+// a later Stop or failure on it is a real Stop or failure.
+test("a page restored from the back-forward cache retires mirrors normally again", async () => {
+  const preview = deferred<QueryIntentContract>();
+  api.previewAskIntent.mockReturnValue(preview.promise);
+  api.listConversations.mockResolvedValue([]);
+  render(<Harness />);
+  beginOwnedNotebook();
+  act(() => value!.selectMode("reasoning"));
+  await act(async () => {
+    void value!.submit("bfcache round trip");
+    await Promise.resolve();
+  });
+  await settleSubmit();
+  expect(pendingIntentStore()).toHaveLength(1);
+
+  act(() => { window.dispatchEvent(new Event("pagehide")); });
+  act(() => { window.dispatchEvent(new Event("pageshow")); });
+  await act(async () => {
+    preview.reject(new DOMException("The user aborted a request.", "AbortError"));
+    await Promise.resolve();
+  });
+  await settleSubmit();
+  expect(pendingIntentStore()).toEqual([]);
+});
+
+test("a cancelled navigation is forgotten by the next Stop", async () => {
+  const preview = deferred<QueryIntentContract>();
+  api.previewAskIntent.mockReturnValue(preview.promise);
+  api.listConversations.mockResolvedValue([]);
+  render(<Harness />);
+  beginOwnedNotebook();
+  act(() => value!.selectMode("reasoning"));
+  await act(async () => {
+    void value!.submit("navigation cancelled");
+    await Promise.resolve();
+  });
+  await settleSubmit();
+  expect(pendingIntentStore()).toHaveLength(1);
+
+  // `beforeunload` fired, but another handler cancelled the navigation: the
+  // page lives on and the user stops the understanding.
+  act(() => { window.dispatchEvent(new Event("beforeunload")); });
+  act(() => value!.abort());
+  await settleSubmit();
+  expect(pendingIntentStore()).toEqual([]);
+  expect(value!.question).toBe("navigation cancelled");
+});
