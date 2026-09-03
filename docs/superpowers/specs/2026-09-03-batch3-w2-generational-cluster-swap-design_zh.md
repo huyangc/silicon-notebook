@@ -1,0 +1,449 @@
+# 批 3·W2：簇图切换代次化 + rebuild 并发写不丢（设计规格 v2·内评一轮后修订）
+
+> 对应审计 WR-5（及 WR-4 的残余核销）、修复计划「W2 重抽与簇切换代次化」。
+> 三条红线不变：不降检索性能、不降 KG 抽取性能、不改问答结果质量。
+> 行号基于 `origin/master`（PR #666 合入后）复核。
+> v1→v2：两路 opus 内评（并发/恢复 + 红线/契约）合计 7×P0、10×P1、9×P2/P3，
+> 全部裁决并吸收；处置表见文末「内评裁决记录」。
+
+## 目标与非目标
+
+**目标**（对齐修复计划对 W2 的原始要求）：
+
+1. 簇图派生表（`concept_clusters`、`communities`/`community_members`）的重算
+   切换从「DELETE+重插」改「写新代次 + 翻指针」；
+2. `concept_clusters` 上的 advisory lock 收窄到指针翻转微事务——增量融合的
+   `append_clusters` 不再撞分钟级持锁切换（链 c 结构性消失）；
+3. 修掉「rebuild 期间的并发写被静默丢弃」：链 a（融合行被切换吞掉）与
+   链 b（抽取循环漏源）都闭合；
+4. 读侧任何时刻只见完整代次，四 object_type 一把翻（修跨类型半态）。
+
+**非目标**：
+
+- 不动 `delete_notebook_kg`（T-5a #663 定形；本设计对其唯一触碰是终局
+  UPSERT 重置段的受控扩列，见 §2.3）；
+- 不给主表（objects/relations/embeddings）加行级代次（WR-4 已由 T-5a 核销）；
+- 不做多 worker durable claim（W1 残余债 #10 原样保留；但见 §2.1——本设计的
+  **数据级取号 CAS** 顺带给「离线 recluster CLI 绕过进程内单飞」补了跨进程闸）；
+- `communities` 的板块报告（`update_community_report` 的 LLM title/summary）
+  随代次退休——**现状即如此**（DELETE+INSERT 同样丢），本设计不承诺保住，
+  登记残余债。
+
+## 摸底结论（v2，内评复核后修正）
+
+### 摸底 1：WR-4 已核销
+
+`delete_notebook_kg` 已是「N 个有界排水事务 + 单终局事务」（T-5a #663）。
+W2 对 WR-4 只记核销，不改代码。
+
+### 摸底 2：WR-5 现行站点与写者普查（生产口径）
+
+- `swap_cluster_map_from_scratch`（`postgres/unified_kg_store.py:539-565`）：
+  per object_type 一事务，xact advisory lock 包住 DELETE+INSERT…SELECT；
+  调用方 `_write_cluster_map_streamed`（`knowledge_lifecycle.py:4629-4710`）×4。
+- `replace_communities`（`postgres/unified_kg_store.py:864-894`）：按
+  `(notebook_id, level)` DELETE+INSERT；**其调用处是一个被 codex 钉过的
+  合并发布事务**（`knowledge_lifecycle.py:5786-5850`：replace + 依赖板块
+  账本作废 + `set_community_seq` + 三张分析产物表重写，同一 `_write()`），
+  不可拆散。
+- `concept_clusters` 的生产写者共三类：rebuild 切换、`append_clusters`
+  （增量融合）、per-source 清理删除（`clear_source_graph_state`/
+  `prune_cluster_rows_for_source`/孤儿清扫分页删）。`write_clusters`/
+  `replace_cluster_rows_streamed` 为 test-only（`test_incremental_fuse_perf.py:24`
+  登记），无生产调用者。
+- `rebuild_canonical_relations`/`rebuild_mention_bridge` 写形态 PR-1 摸底确认
+  （同构则并入，否则登记）。
+
+### 摸底 3：关键 schema 约束（v1 漏查，两路内评实测补上）
+
+1. **`uq_clusters_notebook_type_member`**（`0007_cluster_membership_unique.sql`，
+   SQLite 孪生 `migrations.py:1827`）：`(notebook_id, object_type,
+   member_object_id)` 唯一——**双代共存在物理上被禁止**，今天合法全靠
+   同事务先 DELETE。代次化必须给这条唯一索引扩列。
+2. **`idx_clusters_nb_canonical_member`**（0043 覆盖索引）：
+   `cluster_member_rows`（`unified_kg_store.py:298-304`，graph_retrieval 的
+   `_ppr_graph`/`_fed_rxgraph` 消费）是教科书 Index Only Scan。内评在
+   50 万行复制品上实测：只加 generation 残余谓词（全 0 稳态）就退化成
+   Incremental Sort + Index Scan、buffers 8.8×；双代窗口 68× buffers；
+   generation 做 INCLUDE 列后恢复 IOS，稳态 ≈1×、双代 ≈2.4×。
+3. **`version_facts` 的簇分量已在 manifest 版本向量里**
+   （`postgres/index_projection_store.py:162-164`：
+   `SELECT COUNT(*), MAX(created_at) FROM concept_clusters WHERE notebook_id=?`，
+   docstring 明言 on-disk manifest.version 兼容性）。双代窗口 COUNT 翻倍 =
+   W1 §3.4 的重建风暴。同族：`concept_clusters_count`（跳过闸第二腿，
+   `knowledge_lifecycle.py:4749`）、`distinct_cluster_count`（`:3975`）。
+4. **拷贝与合库**：深拷贝快照 `SELECT * FROM concept_clusters`
+   （`postgres/sharing_store.py:161`）会原样带走 generation，而副本**刻意
+   无 `unified_kg_state` 行**（`notebook_sharing.py:63-79`/`494-505` 的既有
+   红线）；`scripts/merge_dbs.py` 三表整表导入 + `KG_STATE_TABLES` 清空
+   state 行。两条实产路径都会制造「行有代次、库无指针」。
+5. **读者普查量级**：三表 SQL 字面量 146 处/22 文件（app/ + scripts/，
+   不含测试），含 LEFT JOIN 倍增站点（`canonical_relation_seed_rows:212-215`、
+   `community_graph_rows:280-283`、`mention_seed_rows:223`）与同语句双引用
+   （`query_store.py:106/113` 的 NOT EXISTS 相关子查询）。
+6. **SQLite 事务语义**：`with conn:` 是 deferred；首条 DML 前的 SELECT 不在
+   写事务里，仓库已有 `begin_immediate` seam（`sqlite/database.py:676-687`）
+   与离线共库写者实例（`recluster_kg.py`、batch_ingest）。
+7. **`recluster_kg.py:25` 直连 `rebuild_unified_kg(force=True)`**，不经
+   `KgMaintenanceJobs`、不登记 `kg_building`——「同库并发 rebuild」是实存
+   受支持路径（scratch 表 run_id 隔离的注释即为其服务）。
+
+### 摸底 4：三条丢失/竞态链（v2 修正链 b 机制）
+
+- **链 a**（结构性）：融合的 `append_clusters` 行落在「种子快照~切换提交」
+  窗口内即被 DELETE 吞掉。关键补充事实：`append_clusters` bump 的是
+  `cluster_mutation_seq`，**不动 `kg_mutation_seq`**（`kg_mutation.py:104`）；
+  丢失行在退休代里**完整存在**（本设计催收机制的基石，见 §1.5）。
+- **链 b**（时序）：漏源机制是「rebuild 开始前已上传、`has_elements` 在
+  rebuild 期间才变真（解析完成）」的来源——keyset 游标已越过其
+  `(created_at,id)` 位置，本轮永不再访。~~新上传落在游标身后~~（v1 描述
+  有误：新上传 created_at 在游标前方，会被扫到）。
+- **链 c**：融合撞切换持锁 → 5s lock timeout（`postgres_lock_timeout_seconds`
+  默认 5）→ 异常在 `source_ingestion.py` fail-open 吞掉。
+
+### 摸底 5：先例与红线（同 v1）
+
+行级世代列（`source_generation`）、desired/published CAS
+（`indexing_pipeline_generation`）、工件侧 `.tmp`+rename、
+`kg_reset_epoch` 的「epoch>0 才进版本向量」双规则（W1 §3.4）。
+
+## §1 目标形
+
+### 1.1 schema 与索引整改（D-W2-1 v2 重裁）
+
+```sql
+-- 迁移 00XX（编号按合入时 master 取号；SQLite 孪生同批）
+ALTER TABLE concept_clusters   ADD COLUMN generation BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE communities        ADD COLUMN generation BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE community_members  ADD COLUMN generation BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE unified_kg_state
+  ADD COLUMN cluster_generation          BIGINT NOT NULL DEFAULT 0,  -- published
+  ADD COLUMN community_generation        BIGINT NOT NULL DEFAULT 0,  -- published
+  ADD COLUMN derived_generation_counter  BIGINT NOT NULL DEFAULT 0,  -- 只增取号器
+  ADD COLUMN derived_building_generation BIGINT NOT NULL DEFAULT 0,  -- 在飞代(0=无)
+  ADD COLUMN derived_building_claimed_at TEXT,                       -- 在飞认领墙钟
+  ADD COLUMN derived_catchup_from        TEXT;                       -- 催收落库标记
+```
+
+**索引整改（一次付清，代次化的必要代价）**：
+
+1. `uq_clusters_notebook_type_member` → 重建为
+   `(notebook_id, object_type, member_object_id, generation)` UNIQUE
+   （摸底 3-1：否则第一条新代 INSERT 即撞约束）；
+2. `idx_clusters_nb_canonical_member` → PG 重建为同键 +
+   `INCLUDE (generation)`；SQLite 无 INCLUDE，generation 做尾键
+   （摸底 3-2：否则稳态就丢 Index Only Scan）。
+
+两条都走 0043 先例：`scripts/build_hotpath_indexes.py` 式离线 CONCURRENTLY
+建新→迁移落账→旧索引登记退役债；生产 9.65M 行在线建，不停读写。
+其余索引不动。列加法（`ADD COLUMN … DEFAULT 0`）PG11+ 元数据操作、不重写堆
+（内评实测 relfilenode 不变）；SQLite ADD COLUMN 同为 O(1)。
+
+- 存量行 generation=0、指针=0。**PR-1 行为等值口径**：行为字节级不变指
+  **查询结果**；执行计划因新谓词与索引改型而变，PR-1 的 EXPLAIN pin 钉的是
+  「整改后形态 = Index Only Scan 恢复 + 无 Seq Scan 回退」，不是「与整改前
+  逐字节同计划」（v1 表述作废）。
+- 命名：`generation`（与 `source_generation`/`indexing_pipeline_generation`
+  词汇一致）；不叫 epoch。
+
+### 1.2 concept_clusters 写者改造
+
+```
+[取号]   UPSERT 微事务（mark_dirty 的 ON CONFLICT 形状,无行则造行）:
+           SET derived_generation_counter = counter + 1,
+               derived_building_generation = counter + 1,
+               derived_building_claimed_at = now()
+           WHERE derived_building_generation = 0
+              OR derived_building_claimed_at < now() - KG_DERIVED_BUILD_TTL
+           RETURNING counter AS G, cluster_generation AS P
+         失败(在飞未过期) → KgMaintenanceAlreadyRunning 同款拒绝
+         —— 这是数据级跨进程单飞:连 recluster_kg 离线直连也被闸住(摸底 3-7)
+[催收欠账] derived_catchup_from 非空 → 先跑 §1.5 的搬运段(上轮翻转后崩溃
+           留下的欠账),清标记
+[预回收] 有界分页删 generation NOT IN (P, G) 的行(T-5a 排水同款分页;
+         唯一回收通道,无 finally 回收——给跨翻转在飞读者一整轮宽限,见 §3)
+[写新代] per type INSERT…SELECT …, G AS generation ×4
+         —— 不持 advisory lock(与 published 代/并发 append 无行冲突)
+         SQLite: 每写块首 begin_immediate
+[翻指针] 微事务:
+           lock_cluster_artifact_types(nb, 全 4 类)   -- 既有 helper,按 key 字节
+                                                       -- 排序取锁(40P01 纪律)
+           读 state 行(锁后同事务读,见 §2.2 顺序红线)
+           UPDATE unified_kg_state SET
+             cluster_generation = G,
+             cluster_mutation_seq = cluster_mutation_seq + 1,
+             derived_building_generation = 0,
+             derived_catchup_from = <种子快照时刻>
+           WHERE notebook_id=? AND cluster_generation = P
+                 AND derived_building_generation = G     -- 双 CAS:指针未动+认领仍在
+           零行更新 → 响亮失败(被 TTL 抢占/被 delete 重置),本轮作废不发布
+[催收]   §1.5 单遍搬运 → 清 derived_catchup_from
+[收尾]   finish_rebuild_state 照旧
+```
+
+- 四类一把翻：跨类型半态消失。
+- 取号 CAS + 翻转双 CAS + TTL 抢占（`KG_DERIVED_BUILD_TTL`，Settings 项，
+  默认按「最长 rebuild + 余量」定，实施期定数并走 deployment 文档数值围栏）
+  ——崩溃在飞代既不阻塞后续 rebuild（TTL 后可抢），也不会被并发回收误删
+  （回收谓词认 building 列，见上）；抢占留结构化事件。
+- `cluster_mutation_seq` bump 在翻转事务（版本身份与指针行变化同提交）。
+  **kg_mutation.py FULL CENSUS 红线措辞随之两段式重写**：
+  「published 代行变化须同事务推进版本身份；未发布代（generation 既非
+  published 亦非 0 存量）的写入**不得**推进版本身份——它对读者不可见，
+  bump 反而制造假失效」。写新代段不 bump 即为合规而非违例。
+
+### 1.3 communities 族写者改造
+
+- 同一取号器取 G（同一在飞列——两族共享一次 rebuild 的认领）。
+- **翻转事务 = 既有发布事务**（摸底 2）：写新代（communities/
+  community_members INSERT，G 代）在事务外先行；发布事务内保持既有内容
+  （依赖板块账本作废 + `set_community_seq` + 分析产物重写）并加
+  `community_generation = G` 的指针更新。**不追求毫秒级**——该族无并发
+  融合写者，锁窗口无收窄需求；原子性优先（kg_analysis 板块缓存签名的
+  「replace 与账本作废同事务」不变量原样保住）。
+- level 维度（`replace_communities` 按 `(notebook_id, level)` 写）：翻转
+  事务内把 published 代中**未被本轮重建的 level** 行复制进 G 代
+  （copy-forward；今天所有调用点 level=0，复制集为空、零成本；非默认层
+  出现时语义正确）。
+- `board_partition_still_holds` 的「查一行就够」论证随代次化重写（PR-2
+  变更点）；`communities_count` 等闸腿按 published 代计数（普查 A 类）。
+
+### 1.4 读者改造与普查（三分类）
+
+**默认读者形态**（方式 2）：谓词内嵌标量子查询
+
+```sql
+AND generation = COALESCE(
+  (SELECT cluster_generation FROM unified_kg_state u WHERE u.notebook_id = t.notebook_id), 0)
+```
+
+单语句单快照（READ COMMITTED 下指针与行同快照读取，不存在「先读指针后读行
+跨翻转」的撕裂）；COALESCE 兜「无 state 行 ⇒ 代次 0」的显式契约（配合
+§1.6 拷贝/合库归一，副本/合并库可读）。方式 1（从已读 state 行传入）仅允许
+「同一条 SQL 已 JOIN state 行」的站点。
+
+**普查三分类**（PR-1 硬交付，形如 kg_mutation.py FULL CENSUS）：
+
+| 类 | 语义 | 处置 |
+| --- | --- | --- |
+| A·published 读者 | 检索/计数/版本源/闸腿 | 加指针谓词；**每次表出现各配一个**（同语句双引用如 `query_store.py:106/113` 两处都配） |
+| B·目标代写者 | rebuild 写新代、append、催收 | 写显式代次参数 |
+| C·跨代维护 | per-source 清理删除三站点、孤儿清扫、`delete_notebook_kg` blanket、诊断脚本只读 | **显式豁免清单 + 逐条理由**（如：删源必须跨代删,否则在飞代留死成员行,破「零 orphan 生产者」不变量） |
+
+守卫测试按**表出现次数**配对判定（非按语句），豁免清单非空、逐条带理由；
+新站点未登记即红。必点名站点：`version_facts` 簇分量、
+`concept_clusters_count`（跳过闸腿——副本/合库指针缺失时若不加谓词会
+永远误判「已建过」）、`distinct_cluster_count`、三处 LEFT JOIN 倍增站点、
+孤儿清扫游标（见下）。
+
+**孤儿清扫 keyset 修正**：四列唯一索引后 `(object_type, member_object_id)`
+不再唯一，游标加 generation 分量（`(generation, object_type,
+member_object_id)`），清扫保持跨代（C 类豁免）。
+
+**新增红线**：「版本身份不得被未发布代污染」——一切进 manifest/版本向量/
+memo 键的簇计数与时间戳只数 published 代（这是 W1 §3.4 重建风暴红线在
+本设计的化身；两指针本身不进 `version()` 元素）。
+
+### 1.5 催收（链 a 闭合，v2 全面简化）
+
+关键事实（摸底 4）：翻转后 append 落 G 代（§2.2 锁序保证），此前窗口内的
+融合行**完整躺在 P 代**且集合冻结。催收因此是**单遍有界搬运**，无水位账本、
+无收敛轮：
+
+```
+翻转事务已落 derived_catchup_from = 种子快照时刻 TS(同源时钟:_now() seam,
+  与 concept_clusters.created_at 同一 seam,无跨时钟偏斜;边界取 >=,重跑幂等)
+催收段(翻转后 / 或下轮取号后发现欠账时):
+  SELECT DISTINCT member_object_id, object_type FROM concept_clusters
+   WHERE notebook_id=? AND generation = 旧P AND created_at >= TS   -- 有界:窗口内融合行
+  逐 object_type 调既有安置原语(place_new_concepts 同族,对 G 代 cluster map
+   重新安置;Tier1 无 LLM,有界)→ append 进 G 代(B 类写,幂等探针按 G 代收窄)
+  完成 → 清 derived_catchup_from
+```
+
+- 幂等探针按代收窄（四列唯一索引后自然成立）——v1 的「探针跨代失明成
+  静默 no-op」结构性消失，且催收正确性**不再依赖回收先后**。
+- 崩溃恢复：`derived_catchup_from` 落库；翻转后崩溃 → 下轮取号先补欠账再
+  预回收（回收谓词之外再加「catchup 标记在时不回收其旧 P 代」的保护）。
+- Tier2 候选（`concept_merge_candidates`）不代次化，merge/LLM 成本天然幸存。
+- 催收后仍可能有极窄窗口新对象未入簇 → `cluster_input_version` 失配 +
+  结构化事件；**措辞如实**：等待下一次用户触发的 rebuild 收敛（`dirty` 无
+  自动消费者，不虚构自动收敛）。
+
+### 1.6 拷贝与合库（新节，内评 P0）
+
+- `copy_notebook`：三表快照查询加 published 代谓词（只拷发布代，顺带免拷
+  残代/在飞代的翻倍量）；行重映射循环里 `generation = 0` 归一（与
+  `source_generation` 重映射同形）；`_COPY_VALIDATED_TABLES` 的 COUNT 校验
+  两侧口径同步（源侧带谓词）。副本无 state 行 + 行全 0 + 读者 COALESCE
+  兜 0 ⇒ 副本簇图照常可读。
+- `scripts/merge_dbs.py`：三表导入时 generation 归一 0（沿用其 table_columns
+  按列处理骨架）；顺带修头注释陈旧的 `SCHEMA_VERSION=67`（现 69）。
+- 守卫：拷贝/合库后「簇行可读性」pin（无 state 行 + 归一行 → 读者非空）。
+
+### 1.7 链 b 闭合（抽取补漏轮，v2 修正谓词与机制）
+
+抽取循环收尾后追加有界补漏轮：**按 incremental 分支谓词**
+（`has_elements and not has_kg` 现查——rebuild 分支是无条件全量，照 v1
+字面实现会三轮全库重抽）重新枚举，非空则抽取，至多 3 轮；耗尽仍非空 →
+结构化事件 + job 记 partial。测试注入形态（v1 有误）：**created_at 早于
+当前游标、元素在循环中途才落齐**的来源（新上传天然会被活键集扫到，
+不构成变异杀伤）。补漏轮产生的新对象由其后的融合正常入簇（G 代已发布，
+append 直写 G）。
+
+## §2 并发与互斥
+
+### 2.1 互斥矩阵（v2）
+
+| 交叉 | 闸 |
+| --- | --- |
+| unifiedkg- × unifiedkg-（含离线 CLI） | **数据级取号 CAS**（§1.2，跨进程）+ 既有 KgMaintenanceJobs（进程内先挡） |
+| buildkg- × unifiedkg-/relinkkg- | 进程内交叉检查：`KgMaintenanceJobs.claim` 查 `kg_building`，`prepare_notebook_kg_job` 查实例 A 的 `jobs`；409 文案泛化 |
+| standalone `delete_notebook_kg` × unifiedkg- | delete 的认领同样查实例 A `jobs`（进程内）；跨进程兜底 = 翻转双 CAS（delete 终局把 building/指针重置 → 在跑 rebuild 的翻转零行更新响亮作废） |
+| 多 worker | 进程内检查失效——同 W1 残余债 #10，登记不做；数据级 CAS 项（取号/翻转）天然跨进程有效 |
+
+### 2.2 锁与顺序红线
+
+- **顺序**：先取 advisory lock（多把按 key 字节排序——`lock_cluster_artifact_
+  types` 既有实现；#663 R20 的 40P01 纪律），再在**同一事务**内读指针，
+  再写行。append 侧与翻转侧同规。违序即 P0（源码结构守卫钉住）。
+- SQLite：append 写块、翻转、每个回收/催收批次块首 `begin_immediate`
+  （deferred 事务的「读判据~首写」窗口，`sqlite/database.py:676-687` 的
+  既有 seam；离线共库写者实存）。
+- `lock_cluster_artifact_type` 语义收窄仅限 concept_clusters 族；
+  communities 族翻转 = 发布事务（§1.3），不承诺毫秒级。
+
+### 2.3 与 delete_notebook_kg
+
+终局 UPSERT 重置扩列（受控变更，T-5a 出生行等值测试同步）：
+`cluster_generation=0, community_generation=0, derived_building_generation=0,
+derived_building_claimed_at=NULL, derived_catchup_from=NULL`；
+**`derived_generation_counter` 不归零**（与 `kg_reset_epoch` 同款只增——
+归零会让计数器重爬撞上终局快照后幸存的并发写行代号，D-W2-3 即被打穿）。
+等值测试从显式列白名单改为**全列比对 + 显式排除表**（防新列静默漏钉）。
+
+## §3 红线论证（v2）
+
+1. **检索**：索引整改后稳态计划 = 现状同形（IOS 恢复，实测 ≈1×）；双代
+   窗口 ≈2.4×（实测，INCLUDE 后）且窗口 = 单次 rebuild 时长、单飞不叠加；
+   无 finally 回收 ⇒ 跨翻转在飞请求整轮宽限内读完整 P 代。版本身份只数
+   published 代 ⇒ 无 manifest 漂移/重建风暴。EXPLAIN pin 双侧（PG twin +
+   SQLite `INDEXED BY` 站点回归）。
+2. **抽取**：append 事务新增成本 = 锁内一次 state 行 PK 读；切换不再持锁
+   写 9M 行，融合 5s 超时结构性消失；催收单遍有界、补漏轮走增量谓词
+   （全量重抽的反转风险已在 §1.7 排除）。
+3. **质量**：完整代次可见 + 两条丢失链闭合 + 拷贝/合库代次归一。跳过闸
+   判据不变（其簇计数腿按 published 代后，副本/合库场景从「误判已建」
+   变为正确的全量首建）。
+
+## §4 崩溃与恢复矩阵（v2 扩格）
+
+| 崩溃点 | 状态 | 恢复 |
+| --- | --- | --- |
+| 取号微事务内 | 事务原子，无副作用 | 无 |
+| 取号后（号已烧）写新代前/中 | G 残行、building=G、指针 P | 读者无感；TTL 后新 rebuild 抢占并预回收残代 |
+| 翻转微事务内 | 原子，要么 P 要么 G+标记 | 无残 |
+| 翻转后催收前/中 | 指针=G，`derived_catchup_from` 在 | 下轮取号先补欠账（落库标记，进程重启不失账） |
+| 翻转后 finish 前 | 内容已发布，`cluster_input_version`/counts 陈旧 | 下次非 force rebuild 全量重算（正确但贵）+ 状态接口计数陈旧——登记为已知格 |
+| 回收批次中 | 残代部分存留 | 幂等重删（预回收/启动恢复） |
+| 启动恢复 | 全库扫残代 | **硬预算**（行数/轮数上限，剩余留给各库下轮预回收）；跑在 scratch TRUNCATE 之后、`mark_ready` 前；谓词认 building 列与 catchup 标记（不删在飞/欠账代） |
+
+## §5 测试与验收门（v2）
+
+1. 读侧永不见半态：并发读者跨翻转断言「完整 P ∨ 完整 G」且四类同代；
+   含「同请求先读指针后翻转」形态（方式 2 单语句单快照的正确性）；双侧。
+2. 链 a pin：快照后注入 append（落 P 代）→ 翻转 → 催收后 G 代含其安置
+   结果；删催收段 → 红。崩溃恢复：翻转后 kill → 下轮补欠账 → 绿。
+3. 链 b pin：注入 created_at 早于游标、元素中途落齐的来源 → 补漏轮抽到；
+   删补漏轮 → 红（v1 的注入形态杀不死变异，作废）。
+4. 锁序/结构守卫：advisory lock 只出现在翻转微事务与 append 事务；
+   写新代段无锁；锁后读指针的顺序；SQLite 块首 begin_immediate。
+5. 回收 pin：谓词认 building/catchup（注入在飞代+欠账标记 → 不删）；
+   TTL 抢占 + 事件；启动恢复预算；T-5a 等值测试全列比对+排除表。
+6. 普查守卫：按表出现次数配对 + 三分类 + 非空豁免清单。
+7. EXPLAIN pin：`cluster_member_rows` IOS 恢复、热查询无 Seq Scan 回退
+   （PG twin）；SQLite `INDEXED BY` 站点行为回归。
+8. 性能门（v2 改口径）：翻转/append 持锁段**语句形态守卫**（无
+   INSERT…SELECT/DELETE 大语句入锁）替代墙钟断言（v1 引用的 647-1240ms
+   基线属已拆除的旧预备段，作废）；写新代段与现状 DELETE+INSERT 的对照
+   计时在 PR-2 落地时实测记录于 PR（非 CI 门）。
+9. 互斥 pin：并发取号 CAS 拒绝、TTL 抢占、buildkg-×unifiedkg- 409、
+   standalone delete 后翻转作废。
+10. 拷贝/合库 pin：副本/合并库簇行可读、COUNT 校验口径、generation 归一。
+11. 每 PR：双内评 + check.sh + PG 泳道 + codex 闭环 + CI 按 head SHA。
+
+## §6 PR 切法与回滚（v2）
+
+- **PR-1（基建，非零测试改动）**：列迁移 + **两条索引整改**（CONCURRENTLY
+  builder 脚本 + 迁移落账 + 旧索引退役债登记）+ 读者普查三分类清单与全站点
+  谓词 + 普查守卫 + 拷贝/合库归一（§1.6）+ EXPLAIN pin + 迁移计数断言更新
+  （`test_hotpath_indexes_batch3_live.py:182/:244` 硬编码 `migrate()==49`）。
+  指针恒 0、行恒 0 ⇒ 查询结果不变；计划变化按 §1.1 口径钉。回滚 = revert
+  （列与索引可留，无写者）。摸底交付：canonical_relations/mention_bridge
+  写形态、communities 写锁形态。
+- **PR-2（写者切换）**：取号/在飞/TTL/预回收/写新代/双 CAS 翻转/催收/
+  communities 发布事务翻转与 copy-forward/delete 终局扩列（counter 不归零）/
+  锁窗口收窄/FULL CENSUS 红线两段式重写/启动恢复预算回收。回滚 = revert +
+  附「指针归零 + 残代清扫」一次性 SQL。
+- **PR-3（并发写不丢收尾）**：抽取补漏轮 + §2.1 进程内交叉检查 + 融合
+  except 补结构化事件。独立可回滚。
+- 每 PR：ports 棘轮基线同 diff 更新（R21 语义）；迁移编号按合入时 master
+  现状取（0050 起，警惕批内撞号——#659 已发生过一次改号）。
+
+## 明确不做（v2）
+
+1. 主表行级代次化（同 v1）。
+2. 两指针进 `version()` 元素（W1 §3.4）；代之以「版本身份只数 published 代」
+   红线（§1.4）。
+3. 多 worker durable claim（W1 #10 原样）。
+4. scratch 机制改造（run_id 隔离 + TRUNCATE 恢复现状良好）。
+5. 板块报告（`update_community_report`）随代退休的保全——现状即丢，
+   登记不改。
+6. 融合 fail-open 重试机制——只补结构化事件。
+
+## 残余债（登记）
+
+1. 多 worker 进程内互斥失效（W1 #10 同源）。
+2. 双代窗口时长无硬上界告警（单飞 + TTL 兜底；可选后续加窗口时长事件）。
+3. `rebuild_canonical_relations`/`mention_bridge` 若摸底确认 DELETE+INSERT
+   而未并入，登记 W2 尾款。
+4. 旧索引退役债（0043 原形覆盖索引、0007 原形唯一索引）。
+5. 「翻转后 finish 前崩溃 ⇒ 下次全量重算 + 状态计数陈旧」已知格。
+6. 板块报告随代退休（明确不做 5）。
+
+## 决策点（v2）
+
+| # | 决策 | 取舍 |
+| --- | --- | --- |
+| D-W2-1(v2) | 代次化必付一次索引整改：唯一索引扩列 + 覆盖索引 INCLUDE/尾键；其余索引不动 | 稳态计划保形（实测）；双代 ≈2.4× 有界；在线 CONCURRENTLY 免锁 |
+| D-W2-2 | 四类一把翻（单指针） | 修跨类半态；任一类失败整轮作废（单飞+重试可接受） |
+| D-W2-3(v2) | counter 独立取号且**永不归零**（delete 终局保留） | 崩溃/并发幸存行永不撞号 |
+| D-W2-4(v2) | 催收 = 落库标记 + 翻转后单遍搬运（P 代窗口行冻结集合） | 无水位账本、无收敛轮、崩溃不失账；比 v1 的时间窗+有界轮强且简 |
+| D-W2-5(v2) | 在飞代用 state 列 + 墙钟 TTL 抢占（数据级跨进程） | 兼收「离线 CLI 绕单飞」缺口；TTL 值走部署文档数值围栏 |
+| D-W2-6 | concept_clusters 毫秒翻转；communities 翻转=发布事务 | 前者有并发融合写者需窄锁；后者原子性优先、无写者竞争 |
+| D-W2-7 | 无 finally 回收，P 代活到下轮预回收 | 跨翻转在飞读者整轮宽限；代价是稳态多存一代行（≈1× 额外空间，rebuild 间隔期） |
+
+## 内评裁决记录（v1→v2，两路 opus，2026-09-03）
+
+| Finding | 裁决 |
+| --- | --- |
+| 双 P0：唯一索引禁双代 | 采纳，索引整改进 PR-1，D-W2-1 重裁 |
+| P0：催收幂等探针跨代失明 | 采纳，探针按代收窄 + 催收改单遍搬运（D-W2-4） |
+| P0：回收删并发在飞代 | 采纳，在飞列 + TTL + 双 CAS（D-W2-5） |
+| 双 P0：拷贝/合库无 state 行簇图归零 | 采纳，§1.6 新节 + COALESCE 契约 |
+| P1：稳态丢 IOS（实测） | 采纳，INCLUDE/尾键进整改 |
+| P1：version_facts 簇分量重建风暴 | 采纳，「版本身份只数 published 代」红线 |
+| P1：补漏轮 rebuild 谓词全量重抽 | 采纳，走 incremental 谓词；链 b 机制/注入形态改正 |
+| P1：催收水位不可实现（kg_seq 失明/无 seq→source 账本/created_at 是启动非完成） | 采纳，机制整体替换（D-W2-4 后水位概念消失） |
+| P1：翻转后即回收 vs 在飞读者 | 采纳，取消 finally 回收（D-W2-7） |
+| P1：communities 发布事务不可拆/level 维度 | 采纳，翻转=发布事务 + copy-forward（D-W2-6） |
+| P1：锁序未定义/SQLite deferred | 采纳，§2.2 顺序红线 + begin_immediate |
+| P1：write_clusters 第三写者 | 部分采纳：复核为 test-only（第二路证据），普查登记不改生产语义 |
+| P2：取号无行返回空 | 采纳，UPSERT 取号 |
+| P2：counter 归零自相矛盾 | 采纳，永不归零（D-W2-3 v2） |
+| P2：四锁取序 40P01 | 采纳，按 key 字节排序（既有 helper） |
+| P2：等值测试白名单静默漏列 | 采纳，全列比对+排除表 |
+| P2：启动恢复 O(表) 无预算 | 采纳，硬预算 + 次序 + 在飞/欠账保护 |
+| P2：普查守卫按语句太粗 | 采纳，按表出现次数配对 |
+| P2：跳过闸簇计数腿 | 采纳，A 类普查点名 |
+| P3：FULL CENSUS 措辞/ports 棘轮/计时基线作废/迁移撞号/INDEXED BY 双侧/板块报告/dirty 措辞 | 全部采纳，落入对应节 |
