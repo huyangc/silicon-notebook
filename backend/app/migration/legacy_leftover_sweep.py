@@ -411,6 +411,7 @@ def main(argv: "list[str] | None" = None) -> int:
     try:
         if args.apply:
             disk_report: DiskSweepReport | None = None
+            disk_residual: dict[str, list[str]] = {}
             if do_rows:
                 sweep_orphan_rows(
                     database,
@@ -423,14 +424,21 @@ def main(argv: "list[str] | None" = None) -> int:
                     database, dialect, storage, min_age_seconds=min_age
                 )
                 _print_disk_report(disk_report)
-                _print_disk_findings(
-                    find_orphan_disk(database, dialect, storage), applied=True
-                )
+                disk_residual = find_orphan_disk(database, dialect, storage)
+                _print_disk_findings(disk_residual, applied=True)
             residual = count_orphan_rows(database) if do_rows else {}
             leftover_rows = sum(residual.values())
             if leftover_rows:
                 print(f"残余孤儿行(并发新增或删除失败): {residual}")
-            clean = leftover_rows == 0 and (disk_report is None or disk_report.clean)
+            # codex #666 R2 P2:盘面残余复核不只打印——快照之后才冒出来的
+            # 孤儿目录(如清扫期间崩溃的在途拷贝)同样计入退出码,自动化
+            # 不得把没扫干净当成功。
+            leftover_dirs = sum(len(ids) for ids in disk_residual.values())
+            clean = (
+                leftover_rows == 0
+                and leftover_dirs == 0
+                and (disk_report is None or disk_report.clean)
+            )
             return 0 if clean else 1
         if do_rows:
             for table, count in count_orphan_rows(database).items():

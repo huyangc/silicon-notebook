@@ -374,6 +374,28 @@ def test_cli_apply_exits_1_when_age_gate_skips(repo, capsys):
     assert not (storage / "kg_index" / "nb-ghost004").exists()
 
 
+def test_cli_apply_exits_1_on_post_sweep_disk_residual(repo, monkeypatch):
+    """codex #666 R2 P2 pin:快照之后才冒出来的孤儿目录(清扫期间崩溃的
+    在途拷贝)在收尾复核里不只打印——必须计入退出码,不许把没扫干净当成功。"""
+    import app.migration.legacy_leftover_sweep as sweep_mod
+
+    _mk_nb(repo)
+    storage = repo._runtime.source_files.storage_dir
+    real_find = sweep_mod.find_orphan_disk
+    calls = {"n": 0}
+
+    def find_with_late_orphan(database, dialect, storage_dir):
+        calls["n"] += 1
+        if calls["n"] == 2:  # apply 收尾的残余复核那一次
+            late = Path(storage_dir) / "notebooks" / "nb-late-ghost"
+            late.mkdir(parents=True, exist_ok=True)
+        return real_find(database, dialect, storage_dir)
+
+    monkeypatch.setattr(sweep_mod, "find_orphan_disk", find_with_late_orphan)
+    assert main(["--apply", "--disk-only", "--min-age-seconds", "0"]) == 1
+    assert (storage / "notebooks" / "nb-late-ghost").is_dir()
+
+
 def test_cli_rejects_contradictory_flags(repo):
     with pytest.raises(SystemExit) as excinfo:
         main(["--rows-only", "--disk-only"])
