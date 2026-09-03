@@ -15,6 +15,7 @@ import "katex/dist/katex.min.css";
 import { remarkGfmPlugin } from "./markdown-gfm";
 import { normalizeMathMarkdown } from "./math-markdown";
 import { remarkCitations } from "./answer-citations";
+import { remarkAnswerInference } from "./answer-inference";
 import {
   computeSourceTierCounts, referenceByAnchorKey, type AnswerReference,
 } from "./answer-formatting";
@@ -244,6 +245,7 @@ export function ReportMarkdown({
           remarkGfmPlugin,
           remarkMath,
           [remarkCitations, refsByKey] as [typeof remarkCitations, Record<string, AnswerReference>],
+          remarkAnswerInference,
         ]}
         rehypePlugins={[rehypeKatex]}
         // 默认 urlTransform 会清掉 cite: 协议 → 徽章 href 丢失;放行 cite:,

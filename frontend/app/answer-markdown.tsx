@@ -19,6 +19,7 @@ import {
   type AnswerReference,
 } from "./answer-formatting";
 import { remarkCitations } from "./answer-citations";
+import { remarkAnswerInference } from "./answer-inference";
 import { remarkGfmPlugin } from "./markdown-gfm";
 import { normalizeMathMarkdown } from "./math-markdown";
 import {
@@ -174,6 +175,7 @@ export function AnswerMarkdown({
         remarkGfmPlugin,
         remarkMath,
         [remarkCitations, refsByCitationKey] as [typeof remarkCitations, Record<string, AnswerReference>],
+        remarkAnswerInference,
       ]}
       rehypePlugins={[
         rehypeKatex,

@@ -22,6 +22,7 @@ import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
 
 import { remarkCitations } from "../../answer-citations";
+import { remarkAnswerInference } from "../../answer-inference";
 import { remarkGfmPlugin } from "../../markdown-gfm";
 import { normalizeMathMarkdown } from "../../math-markdown";
 import {
@@ -154,6 +155,7 @@ export default function PublicReportPage() {
             remarkGfmPlugin,
             remarkMath,
             [remarkCitations, citationRefs] as [typeof remarkCitations, typeof citationRefs],
+            remarkAnswerInference,
           ]}
           rehypePlugins={[rehypeKatex]}
           // 默认 urlTransform 会清掉 cite: 协议 → 引用编号丢失;放行 cite:,

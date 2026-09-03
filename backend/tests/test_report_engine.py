@@ -195,6 +195,40 @@ def test_report_prompts_contract():
     assert "authoritative" in confirmed and "needs_clarification=false" in confirmed
 
 
+def test_report_prompts_propagate_inference_to_conclusions():
+    """T2-c:推断状态传递规则同时落在节撰写与执行摘要两处 prompt。"""
+    from app.services.prompts import report_section_prompt, report_summary_prompt
+
+    sp = report_section_prompt("失效机理", "应力如何改变 VBE", "总问题", "CTX",
+                               allow_parametric=True)
+    extension = (
+        "A conclusion or in-section summary that rests on any （推断） or "
+        "【通识】 sentence is itself an inference"
+    )
+    assert extension in sp
+    # 例外句是承重的:删掉它模型会给所有结论句无差别加（推断）。
+    assert "only a conclusion whose every premise is [k]-cited may omit it" in sp
+    # 落位:扩展句留在规则 2 内、规则 3(report_section.domain_conventions 片段,
+    # 起始序号契约)之前——挪到规则 10/11 去测试要红。
+    assert sp.index(extension) < sp.index("3. Keep the derivation chain")
+    # 通识关闭时前提列表不提【通识】(test_report_prompts_contract 钉的既有契约),
+    # 但传递规则本身仍在。
+    sp_off = report_section_prompt("t", "s", "q", "CTX", allow_parametric=False)
+    assert "rests on any （推断） sentence is itself an inference" in sp_off
+    assert "【通识】" not in sp_off
+
+    su = report_summary_prompt("总问题", "## 节1\nmd")
+    keep = "are NOT citation markers: keep them"
+    assert keep in su
+    assert "opens with （推断）" in su
+    assert (
+        "Never promote an inferred or general-knowledge finding into an "
+        "unmarked fact." in su
+    )
+    # 落位:在指令区(assumptions 那句之前),绝不落到 sections_block 之后。
+    assert su.index(keep) < su.index("Any intent assumptions") < su.index("Report sections:")
+
+
 # ---------------------------------------------------------------------------
 # Task 5: report_engine——大纲 + 逐节并行深挖 + 撰写
 # ---------------------------------------------------------------------------
