@@ -1622,7 +1622,11 @@ revert、又续跑这次删除。
   `notebooks` 行，闸值内的新目录一律跳过留声，绝不与在途拷贝抢目录。
   闸看的是 `max(mtime, ctime)`——copytree 会把源目录的旧 mtime 复制到目
   的目录，而 ctime（inode 变更时间）用户态无法回拨、不可继承（codex
-  #666 R1 P1），刚落盘的在途拷贝一定被拦下。
+  #666 R1 P1），刚落盘的在途拷贝一定被拦下。默认闸值与拷贝子系统自己的
+  失活窗口是同一个常量：目录超窗仍无行的拷贝，`sweep_stale_copies` 按同
+  一 cutoff 也已判死。把闸调**低**于该窗口（含 0）须搭配
+  `--confirm-service-stopped` 停服确认（codex #666 R3 P1），否则拒绝；
+  调高恒安全、无须确认。
   scale 三根删前逐本取跨进程排它 claim（与 scale 构建/删除作业同一把
   advisory lock）；被占或无法评估一律跳过留声，绝不硬删。symlink 不清。
 

@@ -345,7 +345,10 @@ def test_cli_inspect_is_readonly_and_apply_sweeps(repo, tmp_path, capsys):
     assert (storage / "notebooks" / "nb-ghost003").is_dir()
     assert count_orphan_rows(_database(repo))["conversations"] == 3
 
-    assert main(["--apply", "--batch-size", "2", "--min-age-seconds", "0"]) == 0
+    assert main([
+        "--apply", "--batch-size", "2",
+        "--min-age-seconds", "0", "--confirm-service-stopped",
+    ]) == 0
     assert count_orphan_rows(_database(repo)) == {
         table: 0 for table in ORPHAN_ROW_TABLES
     }
@@ -392,7 +395,10 @@ def test_cli_apply_exits_1_on_post_sweep_disk_residual(repo, monkeypatch):
         return real_find(database, dialect, storage_dir)
 
     monkeypatch.setattr(sweep_mod, "find_orphan_disk", find_with_late_orphan)
-    assert main(["--apply", "--disk-only", "--min-age-seconds", "0"]) == 1
+    assert main([
+        "--apply", "--disk-only",
+        "--min-age-seconds", "0", "--confirm-service-stopped",
+    ]) == 1
     assert (storage / "notebooks" / "nb-late-ghost").is_dir()
 
 
@@ -406,3 +412,17 @@ def test_cli_rejects_contradictory_flags(repo):
     with pytest.raises(SystemExit) as excinfo:
         main(["--min-age-seconds", "-1"])
     assert excinfo.value.code == 2
+
+
+def test_cli_low_age_gate_requires_service_stopped_confirmation(repo):
+    """codex #666 R3 P1 pin:年龄闸低于 NOTEBOOK_COPY_STALE_SECONDS(含 0)
+    会掏空「不与在途拷贝抢目录」的承诺——没有停服确认必须拒绝(退出 2),
+    带 --confirm-service-stopped 才放行;调高闸值不需要确认。"""
+    with pytest.raises(SystemExit) as excinfo:
+        main(["--apply", "--disk-only", "--min-age-seconds", "0"])
+    assert excinfo.value.code == 2
+    # 高于窗口的闸恒安全,无须确认(fresh 目录会被闸拦下 → 退出 1)
+    storage = repo._runtime.source_files.storage_dir
+    _seed_disk(storage, "nb-ghost009", _mk_nb(repo))
+    assert main(["--apply", "--disk-only", "--min-age-seconds", "999999"]) == 1
+    assert (storage / "notebooks" / "nb-ghost009").is_dir()

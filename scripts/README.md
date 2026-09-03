@@ -193,7 +193,8 @@ PYTHONPATH=backend python scripts/build_scale_index.py import  --notebook nb-xxx
 删除作业化(批 3·W1)之前的同步删除路径崩溃留下的孤儿行(5 张无外键表)与
 孤儿目录(5 棵存储根,含 scale 产物的 scratch 兄弟)。默认只读盘点,`--apply`
 才动手;`notebooks`/`assets` 两根有年龄闸(`--min-age-seconds`,默认取
-`NOTEBOOK_COPY_STALE_SECONDS`)保护在途拷贝,scale 三根删前逐本取跨进程排它
+`NOTEBOOK_COPY_STALE_SECONDS`)保护在途拷贝——调低(含 0)须搭配
+`--confirm-service-stopped` 停服确认;scale 三根删前逐本取跨进程排它
 claim,被占跳过留声。两后端都支持;盘点/复核是全表扫,建议低峰执行。
 
 ```bash

@@ -23,7 +23,13 @@ distinct 孤儿 ``notebook_id``（一次扫描），再逐 id 走该表的 ``not
 可达分钟级——闸值内（目录 mtime 距今 < ``min_age_seconds``，CLI 默认取
 ``notebook_copy_stale_seconds``）的候选跳过留声，绝不与在途拷贝抢目录；
 过闸的目录与删除作业相位 5 ``_sweep_ingestion_stragglers`` 同款语义（行
-没了/从未提交且早已过窗的目录不会再被任何在线路径认领）。三棵 scale 根
+没了/从未提交且早已过窗的目录不会再被任何在线路径认领）。默认闸值与
+拷贝子系统**自己的失活窗口是同一个常量**：目录时间戳超过
+``notebook_copy_stale_seconds`` 仍没有行的拷贝，``sweep_stale_copies``
+按同一 cutoff 也已把它判死——闸的残余假设恰好就是拷贝子系统自身的活性
+契约，不是本清扫另立的时间猜测。把闸调**低**于该窗口（含 0）会掏空这层
+保护，CLI 要求搭配 ``--confirm-service-stopped`` 停服确认才放行
+（codex #666 R3 P1）；调高恒安全。三棵 scale 根
 （``kg_index``/``kg_viz``/``kg_index_partitions``）先取该 id 的跨进程排它
 claim（``database.try_scale_build_lock``）再删同名 + scratch 兄弟：
 
@@ -376,8 +382,15 @@ def main(argv: "list[str] | None" = None) -> int:
     parser.add_argument("--disk-only", action="store_true", help="只清孤儿目录")
     parser.add_argument(
         "--min-age-seconds", type=int, default=None,
-        help="直删根(notebooks/assets)的年龄闸;目录 mtime 距今更近的跳过。"
-        "默认取 NOTEBOOK_COPY_STALE_SECONDS——绝不与在途拷贝抢目录",
+        help="直删根(notebooks/assets)的年龄闸;inode 时间戳距今更近的跳过。"
+        "默认取 NOTEBOOK_COPY_STALE_SECONDS;低于该窗口(含 0)须搭配 "
+        "--confirm-service-stopped",
+    )
+    parser.add_argument(
+        "--confirm-service-stopped", action="store_true",
+        help="确认在役服务已停止(batch_ingest 同款停服契约)。年龄闸低于 "
+        "NOTEBOOK_COPY_STALE_SECONDS 时,「不与在途拷贝抢目录」只有停服才成立"
+        "(codex #666 R3 P1),必须显式确认",
     )
     parser.add_argument(
         "--statement-timeout-seconds", type=int, default=3600,
@@ -399,11 +412,18 @@ def main(argv: "list[str] | None" = None) -> int:
                 "postgres_statement_timeout_seconds": args.statement_timeout_seconds
             }
         )
+    copy_stale_floor = max(1, settings.notebook_copy_stale_seconds)
     min_age = (
         args.min_age_seconds
         if args.min_age_seconds is not None
-        else max(1, settings.notebook_copy_stale_seconds)
+        else copy_stale_floor
     )
+    if min_age < copy_stale_floor and not args.confirm_service_stopped:
+        parser.error(
+            "--min-age-seconds 低于 NOTEBOOK_COPY_STALE_SECONDS"
+            f"({copy_stale_floor}s)会让在途拷贝失去年龄闸保护;"
+            "只有停服时才允许,须搭配 --confirm-service-stopped"
+        )
     database = _open_database(settings, dialect)
     storage = Path(str(settings.storage_dir))
     do_rows = not args.disk_only

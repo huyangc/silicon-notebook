@@ -1953,7 +1953,13 @@ needs a one-off offline sweep:
   `max(mtime, ctime)`: copytree copies the SOURCE directory's old mtime
   onto the destination, while ctime (inode change time) cannot be set
   from userspace and is never inherited (codex #666 R1 P1), so a
-  freshly-written in-flight copy is always caught. The three scale roots
+  freshly-written in-flight copy is always caught. The default gate is
+  the copy subsystem's OWN staleness window (the same constant
+  `sweep_stale_copies` uses to declare a sentinel dead), so the gate's
+  residual assumption is exactly that subsystem's liveness contract.
+  Lowering the gate below that window (including 0) requires
+  `--confirm-service-stopped` (codex #666 R3 P1) and is refused
+  otherwise; raising it is always safe and needs no confirmation. The three scale roots
   are swept per notebook under the cross-process exclusive claim shared
   with scale builds and delete jobs; a held or unevaluable claim skips
   that notebook loudly, never force-deletes. Symlinks are left alone.
