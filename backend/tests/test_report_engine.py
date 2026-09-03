@@ -235,20 +235,25 @@ def test_report_prompts_rule_2_and_4_place_marker_after_list_syntax():
     规则 2 落一次。"""
     from app.services.prompts import report_section_prompt
 
-    placement_sentence = (
+    placement_prefix = (
         "The marker opens the sentence but goes AFTER any list number, bullet, "
-        "or heading syntax (write `1. （推断）…`, never `（推断）1. …`, so "
-        "Markdown lists stay intact)."
+        "or heading syntax (write `1. "
     )
+    # 例句用各自规则的标记:规则 2 是（推断）,规则 4 是【通识】——同一句例子在通识
+    # 规则里写（推断)会让模型把通识条目错标成推断(codex #670 R1 P2)。
+    inference_example = placement_prefix + "（推断）…`, never `（推断）1. …`"
+    knowledge_example = placement_prefix + "【通识】…`, never `【通识】1. …`"
 
     sp_on = report_section_prompt("失效机理", "应力如何改变 VBE", "总问题", "CTX",
                                   allow_parametric=True)
-    assert sp_on.count(placement_sentence) == 2
-    first_idx = sp_on.index(placement_sentence)
-    assert first_idx < sp_on.index("3. Keep the derivation chain")
+    assert sp_on.count(placement_prefix) == 2
+    assert inference_example in sp_on and knowledge_example in sp_on
+    assert sp_on.index(inference_example) < sp_on.index("3. Keep the derivation chain")
+    assert sp_on.index("4. You MAY use domain general knowledge") < sp_on.index(knowledge_example)
 
     sp_off = report_section_prompt("t", "s", "q", "CTX", allow_parametric=False)
-    assert sp_off.count(placement_sentence) == 1
+    assert sp_off.count(placement_prefix) == 1
+    assert inference_example in sp_off and knowledge_example not in sp_off
 
 
 # ---------------------------------------------------------------------------

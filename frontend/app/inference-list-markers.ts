@@ -9,10 +9,9 @@
 // 的 T2-d 把这个整成两层修:① prompt 侧治源头(要求模型把标记写在序号之后);
 // ② 本文件是前端兜底,覆盖历史回答与 prompt 侧未生效的个例。
 //
-// 承诺:本函数只**调换标记与列表语法的相对位置**,不新增、不删除、不改写任何标记或
-// 正文字符本身——命中行的正文部分逐字保留(只有紧邻标记/列表语法之间的空白被归一成
-// 单个空格,这是重写格式本身要求的,不是对内容的加工);未命中的行原样返回,一个字符
-// 都不经过本函数。
+// 承诺:本函数只**交换标记与列表语法两个 token 的位置**,不新增、不删除、不改写任何
+// 字符——正文、原有的空白(含制表符)全部原样保留,各自跟着自己后面的内容走;未命中的行
+// 原样返回,一个字符都不经过本函数。
 //
 // 不碰的区域(与同管线邻居 `math-markdown.ts` 的围栏口径一致):
 //   * 围栏代码块(``` / ~~~)内的行——模型在代码块里逐字引用「（推断）1. …」当反例时,
@@ -40,11 +39,21 @@ function escapeRegExp(value: string): string {
 // (例如「（推断）1个方案」),原样放过,交给渲染前串联的 `remarkAnswerInference` 按句首
 // 标记处理。
 const INFERENCE_LIST_MARKER_LINE = new RegExp(
-  `^( {0,3})(${INFERENCE_MARKER_LITERALS.map(escapeRegExp).join("|")})[ \\t]*(\\d{1,9}[.)]|[-*+])([ \\t]+)(.*)$`,
+  `^( {0,3})(${INFERENCE_MARKER_LITERALS.map(escapeRegExp).join("|")})([ \\t]*)(\\d{1,9}[.)]|[-*+])([ \\t]+)(.*)$`,
 );
 
-// 围栏:至多 3 空格缩进后 3 个及以上的 ` 或 ~;闭合须同字符、长度不短于开启、其后只有空白。
-const FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})/;
+// 围栏:至多 3 空格缩进后 3 个及以上的 ` 或 ~。反引号围栏的 info string 里不得再出现
+// 反引号(CommonMark:那不是围栏),否则会把后面的整段都当成代码块跳过;波浪线围栏无此限制。
+// 闭合须同字符、长度不短于开启、其后只有空白。
+const FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})(.*)$/;
+
+function opensFence(line: string): string | null {
+  const match = line.match(FENCE_OPEN);
+  if (!match) return null;
+  const [, run, info] = match;
+  if (run[0] === "`" && info.includes("`")) return null;
+  return run;
+}
 
 function closesFence(line: string, fence: string): boolean {
   const match = line.match(/^ {0,3}(`{3,}|~{3,})[ \t]*$/);
@@ -68,15 +77,18 @@ export function normalizeInferenceListMarkers(markdown: string): string {
         if (closesFence(line, fence)) fence = null;
         return line;
       }
-      const opening = line.match(FENCE_OPEN);
-      if (opening) {
-        fence = opening[1];
+      const opening = opensFence(line);
+      if (opening !== null) {
+        fence = opening;
         return line;
       }
       const match = line.match(INFERENCE_LIST_MARKER_LINE);
       if (!match) return line;
-      const [, indent, marker, listSyntax, , content] = match;
-      return `${indent}${listSyntax} ${marker} ${content}`;
+      // 只交换标记与列表语法两个 token,两段原有空白各自跟着自己后面的内容走:
+      // 「（推断）1. 内容」→「1. （推断）内容」,与模型写对时的形态逐字相同;
+      // 「（推断）1.\t内容」→「1.\t（推断）内容」,制表符原样保留。不合成任何字符。
+      const [, indent, marker, gapAfterMarker, listSyntax, gapAfterList, content] = match;
+      return `${indent}${listSyntax}${gapAfterList}${marker}${gapAfterMarker}${content}`;
     })
     .join("\n");
 }
