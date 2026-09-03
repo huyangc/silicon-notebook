@@ -56,6 +56,25 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 # The stream's terminal wording when a submission key was already spent in a
 # different notebook. User-facing (it is what the ``error`` event carries).
 KEY_CONFLICT_MESSAGE = "这次提交的标识已在另一个笔记本使用过，请重新提问"
+# Stable wording for a failure of the follower ITSELF (a store read that
+# raised, an answer row that is missing). The detail is logged, never streamed.
+FOLLOW_FAILURE_MESSAGE = "接回这次回答时出错，请稍后重新打开该会话查看"
+
+
+def new_delivery_queue() -> "queue.Queue[dict[str, Any] | None]":
+    """The per-request delivery queue, with the consumer's "nobody is reading
+    any more" signal attached: ``events.close()`` sets ``events.closed`` (client
+    disconnect, stream finished) and a follower polling an existing job on
+    this request's behalf stops at its next check. A fresh run's worker ignores
+    it — its job runs to completion regardless of the transport, by contract.
+
+    A plain ``queue.Queue`` looked up at call time (not a subclass frozen at
+    import) so tests that pin ``queue.Queue.put`` ordering keep seeing it."""
+    events: "queue.Queue[dict[str, Any] | None]" = queue.Queue()
+    closed = threading.Event()
+    events.closed = closed  # type: ignore[attr-defined]
+    events.close = closed.set  # type: ignore[attr-defined]
+    return events
 
 
 class BackgroundJobSubmitter(Protocol):
@@ -194,7 +213,7 @@ class AskExecutionCoordinator:
         """
         if mode is None and resolve is None:
             raise ValueError("start() needs a resolved mode or a resolve callable")
-        events: "queue.Queue[dict[str, Any] | None]" = queue.Queue()
+        events = new_delivery_queue()
         cancel_event = threading.Event()
         service = self.ask()
         # This is the ONLY validate_reasoning_submission call on the streaming
@@ -342,7 +361,7 @@ class AskExecutionCoordinator:
         if existing is None:
             return None
         if events is None:
-            events = queue.Queue()
+            events = new_delivery_queue()
         if existing["notebook_id"] != notebook_id:
             self._put_key_conflict(events)
             return events
@@ -378,9 +397,16 @@ class AskExecutionCoordinator:
         reopen-a-running-job replay (``/ask/jobs/{id}``) never has it.
 
         A finished job replays in one pass; a running one is polled every
-        ``follow_poll_seconds`` until its row leaves ``running``. The follower
-        runs on the same copied-context job helper as a worker so a transport
-        disconnect (the caller stops draining the queue) never blocks it.
+        ``follow_poll_seconds`` until its row leaves ``running`` — or until the
+        queue is closed. The follower is REQUEST-LOCAL: it exists only for the
+        connection that asked, so when that connection goes away (the route
+        closes the queue on disconnect or completion) the poll stops at its
+        next check. Concurrent followers are therefore bounded by concurrent
+        connections, never by how many times a key was replayed. Its own
+        failures (a store read that raised, a missing answer row) are logged
+        and streamed as stable wording; a FAILED job's persisted error is
+        replayed verbatim because it is exactly the ``error`` the original
+        stream delivered (parity with the first delivery, no new exposure).
         """
         events.put({
             "event": "started",
@@ -388,10 +414,12 @@ class AskExecutionCoordinator:
             "conversation_id": conversation_id,
         })
 
+        closed = getattr(events, "closed", None)
+
         def follower() -> None:
             delivered = 0
             try:
-                while True:
+                while not (closed is not None and closed.is_set()):
                     detail = self.ask_state.ask_job_detail(job_id)
                     trace = detail.get("trace") or []
                     for step in trace[delivered:]:
@@ -399,24 +427,35 @@ class AskExecutionCoordinator:
                     delivered = len(trace)
                     status = detail.get("status")
                     if status == "running":
-                        time.sleep(self.follow_poll_seconds)
+                        if closed is not None:
+                            closed.wait(self.follow_poll_seconds)
+                        else:
+                            time.sleep(self.follow_poll_seconds)
                         continue
                     if status == "done":
                         answer = self.ask_state.ask_answer_detail(
                             str(detail.get("answer_id") or ""))
                         if answer is None:
-                            events.put({"event": "error",
-                                        "error": f"answer of ask job {job_id} is missing"})
+                            self.event_log.logger.error(
+                                "ask-follow: answer %r of job %s is missing",
+                                detail.get("answer_id"), job_id)
+                            events.put({"event": "error", "error": FOLLOW_FAILURE_MESSAGE})
                         else:
                             events.put({"event": "final", "response": answer["payload"]})
                     elif status == "cancelled":
                         events.put({"event": "cancelled"})
-                    else:
+                    elif status == "failed":
+                        # The same ``error`` the original stream delivered.
                         events.put({"event": "error",
-                                    "error": str(detail.get("error") or f"ask job {status}")})
+                                    "error": str(detail.get("error") or FOLLOW_FAILURE_MESSAGE)})
+                    else:
+                        self.event_log.logger.error(
+                            "ask-follow: job %s in unexpected status %r", job_id, status)
+                        events.put({"event": "error", "error": FOLLOW_FAILURE_MESSAGE})
                     return
-            except Exception as exc:  # noqa: BLE001 — the transport must end well-formed
-                events.put({"event": "error", "error": f"{type(exc).__name__}: {exc}"})
+            except Exception:  # noqa: BLE001 — the transport must end well-formed
+                self.event_log.logger.exception("ask-follow failed for %s", job_id)
+                events.put({"event": "error", "error": FOLLOW_FAILURE_MESSAGE})
             finally:
                 events.put(None)
 

@@ -29,6 +29,7 @@ from __future__ import annotations
 import ast
 import queue
 import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -756,7 +757,9 @@ def test_attach_follows_a_running_job_until_its_row_settles_without_repeating_st
 @pytest.mark.parametrize("status,error,expected", [
     ("cancelled", "", {"event": "cancelled"}),
     ("failed", "RuntimeError: boom", {"event": "error", "error": "RuntimeError: boom"}),
-    ("interrupted", "", {"event": "error", "error": "ask job interrupted"}),
+    # An unexpected row status is a follower-side surprise: redacted wording.
+    ("interrupted", "", {"event": "error",
+                         "error": "接回这次回答时出错，请稍后重新打开该会话查看"}),
 ])
 def test_attach_reports_the_existing_jobs_terminal_row(status, error, expected):
     state = AttachingAskState(
@@ -768,18 +771,6 @@ def test_attach_reports_the_existing_jobs_terminal_row(status, error, expected):
         ASK_MODES["chunk"], user_id="user-t23"))
     assert delivered[-1] == expected
     assert len(delivered) == 2
-
-
-def test_attach_with_a_missing_answer_row_ends_with_an_error_not_a_hang():
-    state = AttachingAskState(
-        [], existing=("askjob-old", "conv-old"),
-        details=[{"status": "done", "trace": [], "answer_id": "ans-gone", "error": ""}],
-    )
-    delivered = _drain(_attach_coordinator(state).start(
-        "nb-1", AskRequest(question="Q?", mode="chunk", client_request_id="key-1"),
-        ASK_MODES["chunk"], user_id="user-t23"))
-    assert delivered[-1]["event"] == "error"
-    assert "ans-gone" not in delivered[-1]["error"] or "missing" in delivered[-1]["error"]
 
 
 def test_attach_store_failure_still_closes_the_stream_with_an_error():
@@ -909,3 +900,117 @@ def test_auto_mode_attach_never_selects_an_engine():
         "nb-1", AskRequest(question="Q?", mode="auto", client_request_id="key-1"),
         None, user_id="user-t23", resolve=resolve))
     assert [e["event"] for e in delivered] == ["started", "cancelled"]
+
+
+# codex #665 r2: the follower is request-local — closing the delivery queue
+# (the route does it on disconnect/completion) stops the poll — and its own
+# failures are logged and redacted to stable wording.
+
+class ThreadSubmitter:
+    def __init__(self):
+        self.submitted = []
+        self.threads = []
+
+    def submit(self, fn, *args, name=None, notify_pending=False, **kwargs):
+        self.submitted.append(name)
+        thread = threading.Thread(target=fn, args=args, kwargs=kwargs, daemon=True)
+        thread.start()
+        self.threads.append(thread)
+        return thread
+
+
+def test_closing_the_delivery_queue_stops_a_running_follower():
+    state = AttachingAskState(
+        [], existing=("askjob-old", "conv-old"),
+        details=[{"status": "running", "trace": [], "answer_id": "", "error": ""}],
+    )
+    submitter = ThreadSubmitter()
+    coordinator = AskExecutionCoordinator(
+        ask_state=state, cancellations=AskCancellationRegistry(), job_submitter=submitter,
+        event_log=_event_log(), ask=lambda: None, follow_poll_seconds=0.01,
+    )
+    events = coordinator.start(
+        "nb-1", AskRequest(question="Q?", mode="chunk", client_request_id="key-1"),
+        ASK_MODES["chunk"], user_id="user-t23")
+    assert events.get(timeout=2)["event"] == "started"
+    deadline = time.monotonic() + 2
+    while state.detail_reads < 3 and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert state.detail_reads >= 3          # it was polling
+    # The client went away: the route closes the queue; the poll stops.
+    events.close()
+    submitter.threads[0].join(timeout=2)
+    assert not submitter.threads[0].is_alive()
+    reads_at_stop = state.detail_reads
+    time.sleep(0.05)
+    assert state.detail_reads == reads_at_stop
+    # No terminal event was invented: only the sentinel closes the stream.
+    tail = []
+    while True:
+        item = events.get(timeout=1)
+        if item is None:
+            break
+        tail.append(item)
+    assert tail == []
+
+
+def test_follower_failures_are_logged_and_redacted():
+    from app.services.ask_execution import FOLLOW_FAILURE_MESSAGE
+
+    class Broken(AttachingAskState):
+        def ask_job_detail(self, job_id):
+            raise RuntimeError("sqlite3.OperationalError: /secret/path.db is locked")
+
+    logger = _RecordingLogger()
+    state = Broken([], existing=("askjob-old", "conv-old"))
+    coordinator = AskExecutionCoordinator(
+        ask_state=state, cancellations=AskCancellationRegistry(),
+        job_submitter=InlineSubmitter(), event_log=_event_log(logger), ask=lambda: None,
+        follow_poll_seconds=0,
+    )
+    delivered = _drain(coordinator.start(
+        "nb-1", AskRequest(question="Q?", mode="chunk", client_request_id="key-1"),
+        ASK_MODES["chunk"], user_id="user-t23"))
+    assert delivered[-1] == {"event": "error", "error": FOLLOW_FAILURE_MESSAGE}
+    assert "secret" not in delivered[-1]["error"]
+    assert any("ask-follow failed" in m for m in logger.exceptions)
+
+
+def test_missing_answer_row_is_redacted_too():
+    from app.services.ask_execution import FOLLOW_FAILURE_MESSAGE
+
+    class Logger(_RecordingLogger):
+        def __init__(self):
+            super().__init__()
+            self.errors = []
+
+        def error(self, msg, *args):
+            self.errors.append(msg % args if args else msg)
+
+    logger = Logger()
+    state = AttachingAskState(
+        [], existing=("askjob-old", "conv-old"),
+        details=[{"status": "done", "trace": [], "answer_id": "ans-gone", "error": ""}],
+    )
+    coordinator = AskExecutionCoordinator(
+        ask_state=state, cancellations=AskCancellationRegistry(),
+        job_submitter=InlineSubmitter(), event_log=_event_log(logger), ask=lambda: None,
+        follow_poll_seconds=0,
+    )
+    delivered = _drain(coordinator.start(
+        "nb-1", AskRequest(question="Q?", mode="chunk", client_request_id="key-1"),
+        ASK_MODES["chunk"], user_id="user-t23"))
+    assert delivered[-1] == {"event": "error", "error": FOLLOW_FAILURE_MESSAGE}
+    assert any("ans-gone" in m for m in logger.errors)
+
+
+def test_failed_job_replays_the_error_the_original_stream_delivered():
+    state = AttachingAskState(
+        [], existing=("askjob-old", "conv-old"),
+        details=[{"status": "failed", "trace": [], "answer_id": "",
+                  "error": "AskPluginEngineError: plugin down"}],
+    )
+    delivered = _drain(_attach_coordinator(state).start(
+        "nb-1", AskRequest(question="Q?", mode="chunk", client_request_id="key-1"),
+        ASK_MODES["chunk"], user_id="user-t23"))
+    assert delivered[-1] == {"event": "error", "error": "AskPluginEngineError: plugin down"}

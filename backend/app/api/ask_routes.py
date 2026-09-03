@@ -872,26 +872,33 @@ async def _deliver_ask_events(events, request: Request):
     last_delivery = monotonic()
     # 客户端断连只停止本次流(break),**不** set cancel_event —— worker 脱离连接
     # 跑到完、答案照存。唯一取消入口是 POST …/ask/jobs/{job_id}/cancel。
-    while True:
-        try:
-            event = events.get_nowait()
-        except queue.Empty:
-            if await request.is_disconnected():
-                break
+    # 队列的 close() 只通知**为本次连接服务的**跟随者(键重发接回既有 job 的轮询)
+    # 停下;真正执行的 worker 不读它。
+    try:
+        while True:
             try:
-                event = await asyncio.to_thread(events.get, True, 0.1)
+                event = events.get_nowait()
             except queue.Empty:
-                now = monotonic()
-                if now - last_delivery >= ASK_STREAM_HEARTBEAT_SECONDS:
-                    # An empty NDJSON line is transport-only: it carries no
-                    # notebook content and existing clients already ignore it.
-                    yield "\n"
-                    last_delivery = now
-                continue
-        if event is None:
-            break
-        yield ndjson_line(event)
-        last_delivery = monotonic()
+                if await request.is_disconnected():
+                    break
+                try:
+                    event = await asyncio.to_thread(events.get, True, 0.1)
+                except queue.Empty:
+                    now = monotonic()
+                    if now - last_delivery >= ASK_STREAM_HEARTBEAT_SECONDS:
+                        # An empty NDJSON line is transport-only: it carries no
+                        # notebook content and existing clients already ignore it.
+                        yield "\n"
+                        last_delivery = now
+                    continue
+            if event is None:
+                break
+            yield ndjson_line(event)
+            last_delivery = monotonic()
+    finally:
+        close = getattr(events, "close", None)
+        if close is not None:
+            close()
 
 
 async def _stream_auto_ask_events(

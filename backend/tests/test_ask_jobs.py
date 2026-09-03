@@ -514,3 +514,38 @@ def test_keyed_retry_attaches_even_when_the_preflight_would_now_reject(tmp_path,
     retry_events = [json.loads(l) for l in retry.text.splitlines() if l.strip()]
     assert retry_events[0] == first_events[0]
     assert retry_events[-1]["response"]["answer_id"] == first_events[-1]["response"]["answer_id"]
+
+
+def test_delivery_loop_closes_the_queue_when_the_client_disconnects():
+    """codex #665 r2 P2: the follower serving a keyed re-submission is
+    request-local — the route's delivery loop closes its queue when the client
+    is gone (and when the stream ends), so the poll stops."""
+    import asyncio
+    from app.api.ask_routes import _deliver_ask_events
+    from app.services.ask_execution import new_delivery_queue
+
+    class Gone:
+        async def is_disconnected(self):
+            return True
+
+    events = new_delivery_queue()
+
+    async def drain():
+        return [line async for line in _deliver_ask_events(events, Gone())]
+
+    assert asyncio.run(drain()) == []
+    assert events.closed.is_set()
+
+    finished = new_delivery_queue()
+    finished.put({"event": "cancelled"})
+    finished.put(None)
+
+    class Connected:
+        async def is_disconnected(self):
+            return False
+
+    async def drain_finished():
+        return [line async for line in _deliver_ask_events(finished, Connected())]
+
+    assert len(asyncio.run(drain_finished())) == 1
+    assert finished.closed.is_set()
