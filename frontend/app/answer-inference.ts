@@ -196,6 +196,9 @@ function transformChildren(parent: NodeWithChildren, chain: ChainLink[]): void {
     }
     // 已切出的标记节点不再深入（否则它体内的「（推断）」会被再切一层）。
     if ((node.type as string) === MARKER_NODE_TYPE) continue;
+    // 链接文字里不切：切出的 span 会落在 <a> 里面,点标签就是点链接,违反「标签不可点」
+    // 的契约(codex #669 R2 P2)。`[（推断）详情](url)` 里的标记原样留作链接文字。
+    if (node.type === "link" || node.type === "linkReference") continue;
     if (hasChildren(node)) transformChildren(node, [...chain, link]);
   }
 }

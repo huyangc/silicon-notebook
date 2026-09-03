@@ -141,11 +141,17 @@ test("标记嵌在强调/链接里时按容器外的前文判定(codex #669 R1 P
   );
   expect(strongAtParagraphStart.container.querySelector("strong span.answer-inference")).not.toBeNull();
 
-  // 链接文字里的句中标记同样不算段首。
+  // 链接文字里不切——即使链接在段首:切出的 span 会落在 <a> 里,点标签就是点链接。
   const insideLink = render(
     <AnswerMarkdown answer="详见 [（推断）附录](https://example.com)。" onReferenceClick={() => undefined} />,
   );
   expect(insideLink.container.querySelector("span.answer-inference")).toBeNull();
+  const linkAtStart = render(
+    <AnswerMarkdown answer="[（推断）详情](https://example.com) 见附录。" onReferenceClick={() => undefined} />,
+  );
+  expect(linkAtStart.container.querySelector("a span.answer-inference")).toBeNull();
+  expect(linkAtStart.container.querySelector("span.answer-inference")).toBeNull();
+  expect(linkAtStart.container.querySelector("a")?.textContent).toBe("（推断）详情");
 });
 
 test("深度报告正文同样识别推断标记", () => {
