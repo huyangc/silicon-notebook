@@ -263,10 +263,10 @@ def test_reap_page_deletes_only_generations_outside_keep(postgres_database):
                 "%s, %s FROM generate_series(0, 4) g",
                 (gen, "nb-reap", _NOW, gen),
             )
-        deleted = UnifiedKgStore.reap_derived_generations_page(
+        deleted, cursor = UnifiedKgStore.reap_derived_generations_page(
             db, "nb-reap", "concept_clusters", (2, 3), 100
         )
-        assert deleted == 10
+        assert deleted == 10 and cursor is None   # 20 键 < 页宽,一页扫完
         left = db.execute(
             "SELECT DISTINCT generation FROM concept_clusters "
             "WHERE notebook_id='nb-reap' ORDER BY generation"
@@ -278,3 +278,14 @@ def test_reap_page_deletes_only_generations_outside_keep(postgres_database):
             UnifiedKgStore.reap_derived_generations_page(
                 db, "nb-reap", "knowledge_objects", (0,), 10
             )
+        # 按扫描行数分页(codex #671 R4):页宽 3 时每页恰扫 3 个键,游标
+        # 推进到扫完为止——空证明不再是一条整片扫描的语句。
+        after = None
+        pages = 0
+        while True:
+            _n, after = UnifiedKgStore.reap_derived_generations_page(
+                db, "nb-reap", "concept_clusters", (2, 3), 3, after=after)
+            pages += 1
+            if after is None:
+                break
+        assert pages == 4   # 剩 10 键 → 3+3+3+1

@@ -3868,13 +3868,14 @@ class SqliteMigrator:
                                    int(row["community_generation"])}))
             for table in ("concept_clusters", "communities",
                           "community_members"):
+                after = None
                 while budget > 0:
                     with self._connect() as db:
-                        n = UnifiedKgStore.reap_derived_generations_page(
+                        _n, after = UnifiedKgStore.reap_derived_generations_page(
                             db, notebook_id, table, keep_t,
-                            _RECOVERY_REAP_PAGE_ROWS)
+                            _RECOVERY_REAP_PAGE_ROWS, after=after)
                     budget -= 1
-                    if n < _RECOVERY_REAP_PAGE_ROWS:
+                    if after is None:
                         break
 
     def _recover_interrupted_jobs(self) -> None:

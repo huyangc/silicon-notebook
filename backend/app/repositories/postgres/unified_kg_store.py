@@ -702,23 +702,57 @@ class UnifiedKgStore:
     @staticmethod
     def reap_derived_generations_page(
         db: Any, notebook_id: str, table: str, keep: "tuple[int, ...]",
-        limit: int,
-    ) -> int:
-        """残代回收单页(T-5a 排水同款 ctid 分页;唯一回收通道=下轮预回收+
-        启动恢复,无 finally 回收——跨翻转在飞读者整轮宽限,设计 D-W2-7)。
-        keep = (published, 在飞 G);catchup 标记在时调用方跳过整库。
-        表名白名单走响亮 raise 而非 assert(python -O 会剥掉 assert,而这是
-        拼进 SQL 前唯一的门,质量评 P3)。"""
-        if table not in ("concept_clusters", "communities", "community_members"):
+        limit: int, *, after: "tuple | None" = None,
+    ) -> "tuple[int, tuple | None]":
+        """残代回收单页——**按扫描行数**分页,不是按命中行数(codex #671
+        R4 P1:`generation NOT IN` 没有任何 (notebook_id, generation) 前导
+        索引可走,按命中分页时「无残行」的空证明——首轮 rebuild、每次回收
+        的收尾页、干净启动——都是一次整片扫描,9M 行库上直接撞
+        statement_timeout)。改为沿各表的 nb 前导索引 keyset 取一页键
+        (concept_clusters 走 uq_clusters_nb_type_member_generation 的
+        (type, member, generation) 全序;communities 走 (nb, level) 索引 +
+        id 增量排序;community_members 走 (nb, community_id) 索引 +
+        canonical_id 增量排序,排序余量以单板块尺寸为界),页内按 keep 过滤
+        后逐键精确删。返回 (本页删除数, 下一页游标|None=扫完)。唯一回收
+        通道=下轮预回收+启动恢复,无 finally 回收——跨翻转在飞读者整轮
+        宽限(D-W2-7);keep=(published, 在飞 G);催收标记在时调用方跳过
+        整库。表名白名单响亮 raise(python -O 剥 assert,这是拼进 SQL 前
+        唯一的门)。"""
+        page_keys = {
+            "concept_clusters": ("object_type", "member_object_id", "generation"),
+            "communities": ("level", "id"),
+            "community_members": ("community_id", "canonical_id"),
+        }
+        if table not in page_keys:
             raise ValueError(f"reap_derived_generations_page: 非派生表 {table!r}")
-        marks = ",".join(["%s"] * len(keep))
-        cur = db.execute(
-            f"DELETE FROM {table} WHERE ctid IN ("
-            f"SELECT ctid FROM {table} WHERE notebook_id=%s "
-            f"AND generation NOT IN ({marks}) LIMIT %s)",
-            (notebook_id, *keep, limit),
-        )
-        return cur.rowcount
+        keys = page_keys[table]
+        keycols = ", ".join(keys)
+        select_cols = keycols if "generation" in keys else keycols + ", generation"
+        params: list = [notebook_id]
+        where_after = ""
+        if after is not None:
+            where_after = (f" AND ({keycols}) > ("
+                           + ",".join(["%s"] * len(keys)) + ")")
+            params.extend(after)
+        rows = db.execute(
+            f"SELECT {select_cols} FROM {table} WHERE notebook_id=%s"
+            f"{where_after} ORDER BY {keycols} LIMIT %s",
+            (*params, limit),
+        ).fetchall()
+        if not rows:
+            return 0, None
+        keep_set = {int(k) for k in keep}
+        stale = [r for r in rows if int(r["generation"]) not in keep_set]
+        if stale:
+            eq = " AND ".join(f"{c}=%s" for c in keys)
+            execute_many(
+                db,
+                f"DELETE FROM {table} WHERE notebook_id=%s AND {eq}",
+                [(notebook_id, *[r[c] for c in keys]) for r in stale],
+            )
+        next_after = (tuple(rows[-1][c] for c in keys)
+                      if len(rows) == limit else None)
+        return len(stale), next_after
 
     @staticmethod
     def cluster_input_facts(

@@ -4813,12 +4813,13 @@ class KnowledgeLifecycleService:
         page = self.settings.kg_generation_reap_page_rows
         total = 0
         for table in ("communities", "community_members"):
+            after = None
             while True:
                 with self._write() as db:
-                    n = self.unified_kg.reap_derived_generations_page(
-                        db, notebook_id, table, keep, page)
+                    n, after = self.unified_kg.reap_derived_generations_page(
+                        db, notebook_id, table, keep, page, after=after)
                 total += n
-                if n < page:
+                if after is None:
                     break
         if total:
             self.event_log.emit({
@@ -4846,12 +4847,13 @@ class KnowledgeLifecycleService:
             return 0
         page = self.settings.kg_generation_reap_page_rows
         total = 0
+        after = None
         while True:
             with self._write() as db:
-                n = self.unified_kg.reap_derived_generations_page(
-                    db, notebook_id, "concept_clusters", keep, page)
+                n, after = self.unified_kg.reap_derived_generations_page(
+                    db, notebook_id, "concept_clusters", keep, page, after=after)
             total += n
-            if n < page:
+            if after is None:
                 break
         if total:
             self.event_log.emit({
@@ -5012,9 +5014,12 @@ class KnowledgeLifecycleService:
                     since_ts=_claim["catchup_from"])
             # [预回收] 残代有界分页回收——唯一的回收通道是这里+启动恢复,刻意
             # 没有 finally 回收:跨翻转的在飞读者拿整整一轮 rebuild 的宽限
-            # (设计 D-W2-7)。keep = (published, 本轮在飞 G)。
-            self._reap_stale_cluster_generations(
-                notebook_id, keep=(_published_from, generation))
+            # (设计 D-W2-7)。keep = (published, 本轮在飞 G)。首号短路:
+            # G==1 ⇒ 本库从未有人取过号,表里只可能有 0 代存量(∈keep),
+            # 整趟键区走查纯属空证明,跳过(codex #671 R4 成本口径)。
+            if generation > 1:
+                self._reap_stale_cluster_generations(
+                    notebook_id, keep=(_published_from, generation))
             # Sub-stage instrumentation: log each stage's name+counts+elapsed on two
             # channels (event_log INFO + progress banner). Pure logging — no effect on
             # clustering results or the progress=None data path.
@@ -5873,9 +5878,10 @@ class KnowledgeLifecycleService:
             _generation = int(_claim["generation"])
             _published_from = int(_claim["community_generation"])
         try:
-            if _generation:
+            if _generation > 1:
                 # [预回收] communities 族残代(发布事务放弃/回滚留下的新代行、
-                # 已退休旧代)在发布路径前有界分页清理(设计 P1-8)。
+                # 已退休旧代)在发布路径前有界分页清理(设计 P1-8)。首号
+                # 短路同 cluster 侧:G==1 ⇒ 只可能有 0 代存量。
                 self._reap_stale_community_generations(
                     notebook_id, keep=(_published_from, _generation))
             # canonical 整数边图:SQL-join 把关系两端映射到 canonical(未聚类→自身 object_id),
