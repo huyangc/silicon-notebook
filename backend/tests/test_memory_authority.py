@@ -182,4 +182,7 @@ def test_answer_prompt_rule_numbers_are_unique_and_sequential():
     numbers = [int(value) for value in re.findall(r"(?m)^(\d+)\. ", prompt)]
 
     # PR-1 止血追加规则 11(枚举/列举类问题必须逐条列出全部匹配项)。
-    assert numbers == list(range(1, 12))
+    # 2026-09-03 纠偏根因整改追加规则 12(问题限定词保真:不得把点名的子部件/
+    # 条件/方向/周期性静默泛化;证据只覆盖邻近情形时明说)。新规则一律追加在末尾,
+    # 中间插号会连带改 L1 片段(4/8/9/10)的起始序号契约。
+    assert numbers == list(range(1, 13))

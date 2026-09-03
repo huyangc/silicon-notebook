@@ -32,6 +32,37 @@ def test_answer_prompt_forbids_fabricated_citation():
     assert "推断" in p
 
 
+def test_answer_prompt_rule_12_preserves_question_qualifiers():
+    """T1:规则 12(合成限定词保真)存在,且落在规则 11 之后、Question 行之前;
+    有 history 时同样落在 history 段之前(镜像 test_answer_prompt_includes_history_when_present
+    与 test_style_block_lands_between_the_rules_and_the_question_in_answer_prompt 的定位写法)。"""
+    from app.services.prompts import answer_prompt
+
+    p = answer_prompt("q?", "k1: [concept] X")
+    assert "12. Preserve every qualifier" in p
+    # 承重的是后半句:证据只覆盖邻近情形时必须明说、外推标（推断）。只留第一句的
+    # 规则 12 在功能上已不满足规格,所以单独钉住它。
+    assert (
+        "If the knowledge items cover only the unqualified case or an adjacent "
+        "object, say so in one explicit sentence, keep any extrapolation to the "
+        "asked case marked （推断）" in p
+    )
+
+    rule_11_idx = p.index("collection on its own.")
+    rule_12_idx = p.index("12. Preserve every qualifier")
+    question_idx = p.index("Question: q?")
+    assert rule_11_idx < rule_12_idx < question_idx
+
+    p_with_history = answer_prompt(
+        "follow up?",
+        "k1: [concept] X",
+        history_block="User: prev q\nAssistant: prev a",
+    )
+    rule_12_idx_h = p_with_history.index("12. Preserve every qualifier")
+    history_idx = p_with_history.index("Prior conversation")
+    assert rule_12_idx_h < history_idx
+
+
 def test_query_intent_prompt_cross_tool_mapping_guidance():
     from app.services.prompts import query_intent_prompt
     p = query_intent_prompt("how do I do Innovus's place_opt_design in ICC2?")

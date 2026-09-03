@@ -246,8 +246,8 @@ def _answer_section_directive(
 ) -> str:
     """按节合成(设计文档 §3.1)时追加的节级指令;单次合成下恒为空串。
 
-    刻意与规则集共用一份 `answer_prompt`,而不是复制一份「章节版」出来:规则 1–11
-    (引用标记、LaTeX、推断标注、枚举完整性披露……)对每一节同样成立,复制一份的
+    刻意与规则集共用一份 `answer_prompt`,而不是复制一份「章节版」出来:规则 1–12
+    (引用标记、LaTeX、推断标注、枚举完整性披露、限定词保真……)对每一节同样成立,复制一份的
     唯一确定结局是两份逐渐分叉。
 
     三句话各有理由:
@@ -377,7 +377,15 @@ def answer_prompt(
         "explicitly states this collection was completely/exhaustively "
         "enumerated, you MUST state that the list may be incomplete — "
         "relevance-based retrieval cannot prove it covers the entire "
-        "collection on its own.\n\n"
+        "collection on its own.\n"
+        "12. Preserve every qualifier the question states — scope, operating "
+        "condition, direction (e.g. TX vs RX), periodicity, 'only'/'except', a "
+        "named sub-component — exactly as asked, and answer the qualified "
+        "question rather than its broader or neighbouring form. If the "
+        "knowledge items cover only the unqualified case or an adjacent "
+        "object, say so in one explicit sentence, keep any extrapolation to "
+        "the asked case marked （推断）, and never silently generalize the "
+        "question or substitute a related object.\n\n"
         f"{history_section}"
         f"{section_section}"
         f"{style_section}"

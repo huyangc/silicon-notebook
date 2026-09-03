@@ -385,6 +385,44 @@ def plan_query_intent(
     return contract
 
 
+_CLARIFICATION_GATE_PREFIX = "问题仍有关键歧义，请先确认问题理解"
+_CIRCLED_DIGITS = "①②③④⑤⑥⑦⑧"
+
+
+def clarification_gate_message(seed: dict) -> str:
+    """Render a deterministic-ambiguity gate's error text with the questions.
+
+    Every fail-closed clarification gate (HTTP direct ``/ask``, the engine's
+    compatibility branch, MCP ``ask_notebook``) shares this one construction
+    so the wording and rules -- at most eight rows, each capped at 500 chars
+    to match ``QueryIntentAmbiguity.question``'s own ceiling (see
+    ``app/models/ask.py``), numbered with circled digits, blank rows skipped
+    -- cannot drift apart across the three call sites. Only
+    ``seed["ambiguities"][*]["question"]`` is used; ``reason`` and the
+    caller's original wording (``seed["objective"]``) are deliberately never
+    echoed back into an error string.
+    """
+    raw_ambiguities = seed.get("ambiguities") if isinstance(seed, dict) else None
+    questions: list[str] = []
+    if isinstance(raw_ambiguities, list):
+        for row in raw_ambiguities:
+            if not isinstance(row, dict):
+                continue
+            question = str(row.get("question") or "").strip()
+            if not question:
+                continue
+            questions.append(question[:500])
+            if len(questions) == len(_CIRCLED_DIGITS):
+                break
+    if not questions:
+        return _CLARIFICATION_GATE_PREFIX
+    numbered = "；".join(
+        f"{_CIRCLED_DIGITS[index]} {question}"
+        for index, question in enumerate(questions)
+    )
+    return f"{_CLARIFICATION_GATE_PREFIX}：{numbered}"
+
+
 def finalize_query_intent(
     seed: dict,
     *,

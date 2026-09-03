@@ -183,6 +183,16 @@ ALLOWED_DYNAMIC_USER_ERROR = {
         "不外泄。与 auth_routes::register 同一形状;真实响应由 "
         "tests/test_ask_engine_plugin.py 的引用准入用例覆盖。"
     ),
+    "app/api/ask_routes.py::_validate_confirmed_reasoning_intent": (
+        "detail 是 clarification_gate_message(seed) 的返回值——固定中文前缀「问题仍有"
+        "关键歧义，请先确认问题理解」加至多 8 条 seed['ambiguities'][*].question。"
+        "该闸恒以 client=None 调 plan_query_intent,所以 question 只可能是 "
+        "query_intent.py 里两条硬编码的确定性澄清句(指代不清 / 纯泛化请求),不含"
+        "用户原文、不含异常原文。若将来给这个闸传真实模型 client,模型自报的歧义句会"
+        "进入 detail,本条登记理由即失效,须重新评估。真实响应由 "
+        "tests/test_ask_modes_api.py::"
+        "test_ask_reasoning_without_intent_gives_422_with_the_ambiguity_question 覆盖。"
+    ),
     "app/api/auth_routes.py::register": (
         "detail 是同函数内两个中文字面量的三元选择（「用户名已被占用」/"
         "「用户名不合法」），异常原文只用于分类、不外泄。真实响应由 "

@@ -1049,6 +1049,7 @@ class AskService:
     ) -> QueryIntentContract:
         """Freeze submitted intent; direct legacy callers get deterministic guard."""
         from app.services.query_intent import (
+            clarification_gate_message,
             finalize_query_intent,
             plan_query_intent,
         )
@@ -1071,7 +1072,7 @@ class AskService:
         # referents/generic requests instead of retrieving against guesswork.
         seed = plan_query_intent(None, original, history, max_topics=4)
         if seed.get("needs_clarification"):
-            raise ValueError("问题仍有关键歧义，请先确认问题理解")
+            raise ValueError(clarification_gate_message(seed))
         # A caller that bypasses preview has not reviewed decomposition
         # metadata. Keep its compatibility query byte-for-byte equal to the
         # original instead of silently promoting fallback topics to authority.
