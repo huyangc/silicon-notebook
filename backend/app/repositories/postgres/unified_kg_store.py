@@ -239,10 +239,15 @@ class UnifiedKgStore:
 
     @staticmethod
     def mention_seed_rows(db: Any, notebook_id: str):
+        # 批 3·W2 A 类(codex #671 R1 P1):翻转后退休代行留一轮宽限,不配
+        # published 谓词时紧随聚类重建的共提桥接会把新旧两代 canonical 混在
+        # 一起,发布指向已退休 canonical 的 mention 边。
         clusters = db.execute(
             "SELECT cc.canonical_id AS cid, cc.canonical_name AS cname, ko.source_id AS src "
             "FROM concept_clusters cc JOIN knowledge_objects ko ON ko.id=cc.member_object_id "
-            "WHERE cc.notebook_id=%s AND cc.object_type='concept'", (notebook_id,),
+            "WHERE cc.notebook_id=%s AND cc.object_type='concept' "
+            f"AND cc.generation = {_PUBLISHED_CLUSTER_GEN}",
+            (notebook_id, notebook_id),
         ).fetchall()
         claims = mention_claim_rows(db, notebook_id)
         return clusters, claims
