@@ -5,12 +5,14 @@ PostgreSQL twin(ctid 分页 + 真 advisory lock)在
 ``backend/tests/postgres/test_legacy_leftover_sweep_pg.py``。"""
 import math
 import os
+import time
 import uuid
+from pathlib import Path
 
 import pytest
 
 from app.core.config import Settings
-from app.services.legacy_leftover_sweep import (
+from app.migration.legacy_leftover_sweep import (
     DIRECT_DISK_ROOTS,
     ORPHAN_ROW_TABLES,
     SCALE_DISK_ROOTS,
@@ -95,19 +97,21 @@ def _database(repo):
 
 
 def test_row_sweep_removes_orphans_keeps_live_bounded_batches(repo):
-    """行半三合一 pin:计数准确;只删孤儿、活本毫发无损;每批一个独立写事务,
-    事务数 = 每表 ceil(n/batch)+1(终止条件是 rowcount==0,不是不足一批)。"""
+    """行半三合一 pin:计数准确;只删孤儿、活本毫发无损;两阶段逐 id 分页,
+    每批一个独立写事务,事务数 = Σ_id ceil(n_id/batch)+1(终止条件是
+    rowcount==0,不是不足一批);on_table_done 逐表回调落进度账。"""
     live = _mk_nb(repo)
     _seed_rows(repo, live, 2)
     _seed_rows(repo, "ghost-a", 3)
     _seed_rows(repo, "ghost-b", 2)
 
-    counts = count_orphan_rows(_database(repo), "sqlite")
+    counts = count_orphan_rows(_database(repo))
     assert counts == {table: 5 for table in ORPHAN_ROW_TABLES}
 
     database = _database(repo)
     real_write = database.write
     tx = {"n": 0}
+    progress: list[tuple[str, int]] = []
 
     def counting_write(*args, **kwargs):
         tx["n"] += 1
@@ -115,14 +119,19 @@ def test_row_sweep_removes_orphans_keeps_live_bounded_batches(repo):
 
     database.write = counting_write
     try:
-        deleted = sweep_orphan_rows(database, "sqlite", batch_size=2)
+        deleted = sweep_orphan_rows(
+            database, "sqlite", batch_size=2,
+            on_table_done=lambda t, n: progress.append((t, n)),
+        )
     finally:
         database.write = real_write
 
     assert deleted == {table: 5 for table in ORPHAN_ROW_TABLES}
-    expected_tx = len(ORPHAN_ROW_TABLES) * (math.ceil(5 / 2) + 1)
-    assert tx["n"] == expected_tx
-    assert count_orphan_rows(_database(repo), "sqlite") == {
+    assert progress == [(table, 5) for table in ORPHAN_ROW_TABLES]
+    # 逐孤儿 id 分页:ghost-a 3 行→ceil(3/2)+1=3 事务,ghost-b 2 行→2 事务
+    per_table = (math.ceil(3 / 2) + 1) + (math.ceil(2 / 2) + 1)
+    assert tx["n"] == len(ORPHAN_ROW_TABLES) * per_table
+    assert count_orphan_rows(_database(repo)) == {
         table: 0 for table in ORPHAN_ROW_TABLES
     }
     for table in ORPHAN_ROW_TABLES:
@@ -159,7 +168,7 @@ def test_disk_sweep_removes_orphans_and_scratch_keeps_live_and_symlinks(repo):
     # inspect 只读:全部目录原样还在
     assert (storage / "kg_index" / f"{ghost}.tmp-tok1").is_dir()
 
-    report = sweep_orphan_disk(_database(repo), "sqlite", storage)
+    report = sweep_orphan_disk(_database(repo), "sqlite", storage, min_age_seconds=0)
     assert isinstance(report, DiskSweepReport) and report.clean
     assert report.removed == {
         root: [ghost] for root in DIRECT_DISK_ROOTS + SCALE_DISK_ROOTS
@@ -188,7 +197,7 @@ def test_disk_sweep_skips_scale_roots_when_claim_not_held(repo, attempt, reason)
     database = _database(repo)
     database.try_scale_build_lock = lambda notebook_id: attempt
 
-    report = sweep_orphan_disk(database, "sqlite", storage)
+    report = sweep_orphan_disk(database, "sqlite", storage, min_age_seconds=0)
     assert report.skipped == [(ghost, reason)]
     assert not report.clean
     for root in DIRECT_DISK_ROOTS:
@@ -196,6 +205,104 @@ def test_disk_sweep_skips_scale_roots_when_claim_not_held(repo, attempt, reason)
     for root in SCALE_DISK_ROOTS:
         assert (storage / root / ghost).is_dir()
         assert (storage / root / f"{ghost}.tmp-tok1").is_dir()
+
+
+def test_disk_sweep_age_gate_protects_recent_direct_dirs(repo):
+    """内评 P1 pin:copy_notebook 先 copytree 后插行——闸值内(mtime 新)的
+    直删根候选必须跳过留声,scale 根不受闸管;把目录做旧后重跑即清。"""
+    live = _mk_nb(repo)
+    storage = repo._runtime.source_files.storage_dir
+    ghost = "nb-ghost005"
+    _seed_disk(storage, ghost, live)
+
+    report = sweep_orphan_disk(
+        _database(repo), "sqlite", storage, min_age_seconds=3600
+    )
+    assert sorted(report.skipped) == [
+        (ghost, "recent_dir:assets"), (ghost, "recent_dir:notebooks"),
+    ]
+    assert not report.clean
+    for root in DIRECT_DISK_ROOTS:
+        assert (storage / root / ghost / "f.bin").is_file()
+    for root in SCALE_DISK_ROOTS:
+        assert not (storage / root / ghost).exists()
+
+    stale = time.time() - 7200
+    for root in DIRECT_DISK_ROOTS:
+        os.utime(storage / root / ghost, (stale, stale))
+    report = sweep_orphan_disk(
+        _database(repo), "sqlite", storage, min_age_seconds=3600
+    )
+    assert report.clean
+    for root in DIRECT_DISK_ROOTS:
+        assert not (storage / root / ghost).exists()
+
+
+def test_disk_sweep_stops_scale_sweep_when_claim_lost_midway(repo):
+    """#643 不变量① pin:每次破坏性 rmtree 前复验持锁;复验失败就地停手、
+    记 lock_lost_mid_sweep,剩余 scratch 兄弟原样保留。"""
+    live = _mk_nb(repo)
+    storage = repo._runtime.source_files.storage_dir
+    ghost = "nb-ghost006"
+    _seed_disk(storage, ghost, live)
+
+    class _LossyLock:
+        supported = True
+        claim_token = "tok"
+
+        def __init__(self):
+            self.checks = 0
+
+        def verify_held(self):
+            self.checks += 1
+            return self.checks <= 1
+
+        def release(self):
+            return None
+
+    database = _database(repo)
+    database.try_scale_build_lock = lambda notebook_id: _LossyLock()
+    report = sweep_orphan_disk(database, "sqlite", storage, min_age_seconds=0)
+    assert (ghost, "lock_lost_mid_sweep") in report.skipped
+    # 第一次复验通过删掉 kg_index 下排序最前的 .tmp-tok1,第二次复验失败停手
+    assert not (storage / "kg_index" / f"{ghost}.tmp-tok1").exists()
+    assert (storage / "kg_index" / ghost).is_dir()
+    assert (storage / "kg_viz" / ghost).is_dir()
+
+
+def test_disk_sweep_lock_probe_error_skips_that_id_only(repo):
+    """锁探测抛错:该 id 记账跳过,不中止整轮,直删根照清。"""
+    live = _mk_nb(repo)
+    storage = repo._runtime.source_files.storage_dir
+    ghost = "nb-ghost007"
+    _seed_disk(storage, ghost, live)
+    database = _database(repo)
+
+    def exploding_probe(notebook_id):
+        raise RuntimeError("pool down")
+
+    database.try_scale_build_lock = exploding_probe
+    report = sweep_orphan_disk(database, "sqlite", storage, min_age_seconds=0)
+    assert report.skipped == [(ghost, "lock_probe_error")]
+    for root in DIRECT_DISK_ROOTS:
+        assert not (storage / root / ghost).exists()
+    for root in SCALE_DISK_ROOTS:
+        assert (storage / root / ghost).is_dir()
+
+
+def test_scale_disk_roots_match_artifact_store_layout(repo):
+    """SCALE_DISK_ROOTS 与 scale_artifact_store 目录公式各存一份字面量——
+    钉住两边不失配(同款先例:_artifact_siblings 与 indexed_notebook_ids
+    共享 scratch 常量的交叉 pin)。"""
+    from app.repositories.filesystem.scale_artifact_store import ScaleArtifactStore
+
+    store = ScaleArtifactStore(repo.settings)
+    derived = {
+        Path(store.scale_dir("x")).parent.name,
+        Path(store.viz_dir("x")).parent.name,
+        Path(store.source_partition_dir("x")).parent.name,
+    }
+    assert derived == set(SCALE_DISK_ROOTS)
 
 
 def test_cli_inspect_is_readonly_and_apply_sweeps(repo, tmp_path, capsys):
@@ -212,10 +319,10 @@ def test_cli_inspect_is_readonly_and_apply_sweeps(repo, tmp_path, capsys):
     assert "community_members: 3" in out and "nb-ghost003" in out
     assert str(os.environ["DATABASE_URL"]) not in out
     assert (storage / "notebooks" / "nb-ghost003").is_dir()
-    assert count_orphan_rows(_database(repo), "sqlite")["conversations"] == 3
+    assert count_orphan_rows(_database(repo))["conversations"] == 3
 
-    assert main(["--apply", "--batch-size", "2"]) == 0
-    assert count_orphan_rows(_database(repo), "sqlite") == {
+    assert main(["--apply", "--batch-size", "2", "--min-age-seconds", "0"]) == 0
+    assert count_orphan_rows(_database(repo)) == {
         table: 0 for table in ORPHAN_ROW_TABLES
     }
     assert not (storage / "notebooks" / "nb-ghost003").exists()
@@ -228,10 +335,28 @@ def test_cli_inspect_is_readonly_and_apply_sweeps(repo, tmp_path, capsys):
     assert "community_members: 0" in out
 
 
+def test_cli_apply_exits_1_when_age_gate_skips(repo, capsys):
+    """对外契约 pin:退出码 1 = apply 有跳过。默认年龄闸
+    (NOTEBOOK_COPY_STALE_SECONDS)拦下刚落盘的直删根候选 → 1,目录保留。"""
+    live = _mk_nb(repo)
+    storage = repo._runtime.source_files.storage_dir
+    _seed_disk(storage, "nb-ghost004", live)
+
+    assert main(["--apply", "--disk-only"]) == 1
+    out = capsys.readouterr().out
+    assert "recent_dir:notebooks" in out
+    assert (storage / "notebooks" / "nb-ghost004").is_dir()
+    # scale 根不受闸管,已在同一轮清掉
+    assert not (storage / "kg_index" / "nb-ghost004").exists()
+
+
 def test_cli_rejects_contradictory_flags(repo):
     with pytest.raises(SystemExit) as excinfo:
         main(["--rows-only", "--disk-only"])
     assert excinfo.value.code == 2
     with pytest.raises(SystemExit) as excinfo:
         main(["--batch-size", "0"])
+    assert excinfo.value.code == 2
+    with pytest.raises(SystemExit) as excinfo:
+        main(["--min-age-seconds", "-1"])
     assert excinfo.value.code == 2

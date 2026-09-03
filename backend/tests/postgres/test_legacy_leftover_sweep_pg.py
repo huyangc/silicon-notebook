@@ -8,7 +8,7 @@ import pytest
 from app.models.notebooks import NotebookCreate
 from app.repositories.postgres._store_utils import normalize_timestamp
 from app.repositories.scale_build_lock import SCALE_BUILD_LOCK_UNAVAILABLE
-from app.services.legacy_leftover_sweep import (
+from app.migration.legacy_leftover_sweep import (
     DIRECT_DISK_ROOTS,
     ORPHAN_ROW_TABLES,
     SCALE_DISK_ROOTS,
@@ -71,12 +71,12 @@ def test_orphan_row_sweep_ctid_paging_keeps_live(postgres_repository):
     _seed_rows(runtime, live, 2)
     _seed_rows(runtime, "ghost-pg-a", 3)
 
-    assert count_orphan_rows(runtime.database, "postgresql") == {
+    assert count_orphan_rows(runtime.database) == {
         table: 3 for table in ORPHAN_ROW_TABLES
     }
     deleted = sweep_orphan_rows(runtime.database, "postgresql", batch_size=2)
     assert deleted == {table: 3 for table in ORPHAN_ROW_TABLES}
-    assert count_orphan_rows(runtime.database, "postgresql") == {
+    assert count_orphan_rows(runtime.database) == {
         table: 0 for table in ORPHAN_ROW_TABLES
     }
     with runtime.database.connect() as db:
@@ -107,7 +107,9 @@ def test_disk_sweep_under_real_advisory_lock_and_busy_skip(
     held = runtime.database.try_scale_build_lock(busy)
     assert held is not None and held is not SCALE_BUILD_LOCK_UNAVAILABLE
     try:
-        report = sweep_orphan_disk(runtime.database, "postgresql", storage)
+        report = sweep_orphan_disk(
+            runtime.database, "postgresql", storage, min_age_seconds=0
+        )
     finally:
         held.release()
 

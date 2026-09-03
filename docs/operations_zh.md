@@ -1609,12 +1609,17 @@ revert、又续跑这次删除。
 
 - **孤儿行**：`community_members`、`conversations`、
   `knowledge_object_sources`、`kg_cluster_scratch`、`kg_canonical_scratch`
-  五张对 `notebooks` 无外键的表里 `notebook_id` 已离册的行。按
-  `NOT EXISTS(notebooks)` anti-join 分页删除（SQLite `rowid`/PostgreSQL
-  `ctid`），每批一个独立写事务，`--batch-size` 默认 2000。
+  五张对 `notebooks` 无外键的表里 `notebook_id` 已离册的行。两阶段删除：
+  先每表一次 `NOT EXISTS(notebooks)` anti-join 物化孤儿 id（一次扫描），
+  再逐 id 走该表的 `notebook_id` 前导索引分页删（SQLite `rowid`/PostgreSQL
+  `ctid`），每批一个独立写事务，`--batch-size` 默认 2000；每张表收尾即打
+  进度，单批超时中断也不失账。
 - **孤儿目录**：`{storage}/notebooks`、`assets`、`kg_index`、`kg_viz`、
   `kg_index_partitions` 五棵根下、目录名（scale 三根先剥
   `.old`/`.tmp`/`.tmp-<token>` 得基 id）不在 `notebooks` 表里的子目录。
+  `notebooks`/`assets` 两根设**年龄闸**（`--min-age-seconds`，默认取
+  `NOTEBOOK_COPY_STALE_SECONDS`）：拷贝路径先 copytree 目的目录、后插
+  `notebooks` 行，闸值内的新目录一律跳过留声，绝不与在途拷贝抢目录。
   scale 三根删前逐本取跨进程排它 claim（与 scale 构建/删除作业同一把
   advisory lock）；被占或无法评估一律跳过留声，绝不硬删。symlink 不清。
 
@@ -1626,11 +1631,14 @@ PYTHONPATH=backend python scripts/sweep_legacy_delete_leftovers.py --apply
 ```
 
 与在役服务同一份生产 `.env` 运行（存储根必须一致）；数据库 URL 从环境
-读取且绝不打印。退出码：`0` 完成；`1` apply 有跳过（锁被占）、删不掉的
-路径或残余孤儿行——重跑即可收敛，仍剩则按输出的 id 逐本排查；`2` 参数
-拒绝。SQLite 部署无跨进程锁，脚本对离册 id 直接清扫（单进程服务发不起
-对离册 id 的合法并发写，论证见模块 docstring）；PostgreSQL 可与在役服务
-并存运行。
+读取且绝不打印。inspect 与 apply 收尾的残余复核都是 5 张表的 anti-join
+全表扫——按生产量级可能是分钟级 I/O 密集读，建议低峰执行（PostgreSQL
+语句超时可用 `--statement-timeout-seconds` 覆写，默认 3600）。退出码：
+`0` 完成；`1` apply 有跳过（年龄闸/锁被占）、删不掉的路径或残余孤儿行
+——重跑即可收敛，仍剩则按输出的 id 逐本排查；`2` 参数拒绝。SQLite 部署
+无跨进程锁，脚本对离册 id 直接清扫（单进程服务发不起对离册 id 的合法并
+发写，论证见模块 docstring）；PostgreSQL 可与在役服务并存运行（在途拷贝
+由年龄闸保护、在途构建/删除作业由 claim 互斥）。
 
 ## 解析问题自动归档
 

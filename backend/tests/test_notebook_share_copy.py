@@ -912,6 +912,36 @@ def test_copy_sweeper_reaps_per_notebook_and_cleans_disk(repo, monkeypatch):
         )
 
 
+def test_copy_notebook_entrypoint_reaps_stale_disk_too(repo):
+    """内评 P1(PR-4)接线钉:copy_notebook 是收割的唯一生产触发点,必须走
+    服务层 sweep_stuck_copies(行+盘),不许直调 store 把回传 ids 丢掉——
+    否则崩溃半拷贝的目录在生产里一次都不会被清。"""
+    owner = "user-local"
+    stale = _mk_nb(repo, "stale-prod", owner)
+    with repo._write() as db:
+        db.execute(
+            "UPDATE notebooks SET status='copying', "
+            "created_at='2000-01-01T00:00:00' WHERE id=?", (stale,),
+        )
+    storage = repo._runtime.source_files.storage_dir
+    for root in ("notebooks", "assets"):
+        d = storage / root / stale
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "leftover.bin").write_bytes(b"x")
+
+    src = _mk_nb(repo, "copy-src", owner)
+    repo.copy_notebook(src, new_owner_id=owner)
+
+    with repo._connect() as db:
+        assert db.execute(
+            "SELECT 1 FROM notebooks WHERE id=?", (stale,)
+        ).fetchone() is None
+    for root in ("notebooks", "assets"):
+        assert not (storage / root / stale).exists(), (
+            f"copy_notebook 触发的收割必须连盘一起清:{root}/{stale}"
+        )
+
+
 def test_public_notebook_update_rejects_internal_status():
     """The copy sentinel is an internal lifecycle state, never API input."""
     from pydantic import ValidationError

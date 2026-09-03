@@ -1935,17 +1935,24 @@ needs a one-off offline sweep:
 - **Orphan rows**: rows whose `notebook_id` no longer exists in `notebooks`,
   in the five tables that carry no foreign key to it — `community_members`,
   `conversations`, `knowledge_object_sources`, `kg_cluster_scratch`,
-  `kg_canonical_scratch`. Deleted via a paged `NOT EXISTS(notebooks)`
-  anti-join (SQLite `rowid` / PostgreSQL `ctid`), one bounded write
-  transaction per batch, `--batch-size` defaulting to 2000.
+  `kg_canonical_scratch`. Two-phase deletion: one `NOT EXISTS(notebooks)`
+  anti-join scan per table materialises the orphan ids, then each id is
+  paged through that table's `notebook_id`-leading index (SQLite `rowid` /
+  PostgreSQL `ctid`), one bounded write transaction per batch,
+  `--batch-size` defaulting to 2000; per-table progress is printed as each
+  table finishes, so a mid-run statement timeout loses no accounting.
 - **Orphan directories**: children of the five storage roots
   (`{storage}/notebooks`, `assets`, `kg_index`, `kg_viz`,
   `kg_index_partitions`) whose name — for the three scale roots, after
   stripping `.old`/`.tmp`/`.tmp-<token>` down to the base id — is not in
-  `notebooks`. The three scale roots are swept per notebook under the
-  cross-process exclusive claim shared with scale builds and delete jobs;
-  a held or unevaluable claim skips that notebook loudly, never force-
-  deletes. Symlinks are left alone.
+  `notebooks`. The `notebooks`/`assets` roots sit behind an **age gate**
+  (`--min-age-seconds`, defaulting to `NOTEBOOK_COPY_STALE_SECONDS`): the
+  copy path writes the destination directory BEFORE committing its
+  `notebooks` row, so any directory younger than the gate is skipped
+  loudly — the sweep never races an in-flight copy. The three scale roots
+  are swept per notebook under the cross-process exclusive claim shared
+  with scale builds and delete jobs; a held or unevaluable claim skips
+  that notebook loudly, never force-deletes. Symlinks are left alone.
 
 ```bash
 # Read-only inventory (default): per-table orphan row counts + per-root orphan ids
@@ -1956,14 +1963,19 @@ PYTHONPATH=backend python scripts/sweep_legacy_delete_leftovers.py --apply
 
 Run it with the serving deployment's production `.env` (the storage root
 must match); the database URL is read from the environment and never
-printed. Exit codes: `0` done; `1` the apply had skips (busy claims),
-undeletable paths, or residual orphan rows — re-running converges, and
-anything that remains is investigated per printed id; `2` argument
-refusal. A SQLite deployment has no cross-process claim and the script
-sweeps de-registered ids directly (a single-process service cannot start a
-legitimate concurrent writer for an id that is no longer in `notebooks`;
-the module docstring carries the argument); against PostgreSQL it can run
-beside the live service.
+printed. Both the inspect counts and the post-apply residual check are
+full anti-join table scans over the five tables — minutes of I/O-heavy
+reading at production scale, so prefer off-peak hours (the PostgreSQL
+statement timeout can be overridden with `--statement-timeout-seconds`,
+default 3600). Exit codes: `0` done; `1` the apply had skips (age gate or
+busy claims), undeletable paths, or residual orphan rows — re-running
+converges, and anything that remains is investigated per printed id; `2`
+argument refusal. A SQLite deployment has no cross-process claim and the
+script sweeps de-registered ids directly (a single-process service cannot
+start a legitimate concurrent writer for an id that is no longer in
+`notebooks`; the module docstring carries the argument); against
+PostgreSQL it can run beside the live service (in-flight copies are
+protected by the age gate, in-flight builds/delete jobs by the claim).
 
 ## Automatic analysis-failure archive
 

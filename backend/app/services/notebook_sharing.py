@@ -163,7 +163,10 @@ class NotebookCopyService:
         chunks → validate counts and references → publish original status.
         Failure compensates ONLY the destination rows/files.
         """
-        self._store.sweep_stale_copies(created_by=new_owner_id)
+        # 内评 P1(PR-4):必须走服务层 sweep_stuck_copies 而不是直调 store——
+        # 这里是收割的唯一生产触发点,直调会把回传的 ids 丢掉,行删了目录
+        # 还躺着,恰好复刻本 PR 要修的静默泄漏。
+        self.sweep_stuck_copies(new_owner_id)
         source_notebook = self._catalog.get_notebook(source_notebook_id)
         new_id = self._seams.new_id("nb")
         now = self._seams.now()
