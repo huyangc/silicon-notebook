@@ -4749,6 +4749,11 @@ class KnowledgeLifecycleService:
         # 返回值 = 实际 append 进 published 代的行数(codex #671 R1 P2 的
         # 消费方:催收有新增时,rebuild 收尾要重算 cluster_count 再持久化)。
         unknown_types: set = set()
+        # 逐类型 canonical 名录跨页缓存(codex #671 R11 P1):该读物化整个
+        # published 代簇名切片(已登记不可收窄),逐页重读会把一次多百万行
+        # 扫描乘上页数。整趟读一次 + 安置后把新簇增量并入缓存——与分页前
+        # 「单遍搬运」的语义逐位一致(别名表本就建在窗口前的存量上)。
+        canon_by_type: Dict[str, Dict[str, str]] = {}
         while True:
             with self._connect() as db:
                 rows = self.unified_kg.catchup_window_members(
@@ -4779,14 +4784,20 @@ class KnowledgeLifecycleService:
                     continue
                 sfn, prefix = picked
                 replayed += len(objs)
-                with self._connect() as db:
-                    cn = self.governance_store.incremental_cluster_rows(
-                        db, notebook_id, t)
-                canon = {r["canonical_id"]: r["canonical_name"] for r in cn}
+                canon = canon_by_type.get(t)
+                if canon is None:
+                    with self._connect() as db:
+                        cn = self.governance_store.incremental_cluster_rows(
+                            db, notebook_id, t)
+                    canon = {r["canonical_id"]: r["canonical_name"]
+                             for r in cn}
+                    canon_by_type[t] = canon
                 placed = place_new_concepts(objs, canon, seed_fn=sfn,
                                             id_prefix=prefix)
                 moved += self.append_clusters(notebook_id, placed,
                                               object_type=t)
+                for r in placed:
+                    canon.setdefault(r["canonical_id"], r["canonical_name"])
             if short_page:
                 break
         if unknown_types:
