@@ -484,6 +484,177 @@ class UnifiedKgStore:
             (notebook_id, now),
         )
 
+    # ---------------------------------------------- derived generations (W2)
+    # 批 3·W2 PR-2(PG 孪生同注释):代次化写者的数据级原语。SQLite 差异:
+    # 时钟用 datetime('now')(UTC 文本,与 PG 的 DB now() 同为服务端时钟);
+    # claim 走「INSERT OR IGNORE 造行 + UPDATE CAS」两步——write() 的进程级
+    # 写锁 + 首写即锁升级保证原子;flip 无 advisory lock(单进程写事务天然
+    # 串行,append 与翻转走同一把全局写锁)。
+
+    @staticmethod
+    def claim_derived_generation(
+        db: sqlite3.Connection, notebook_id: str, *, ttl_seconds: int
+    ) -> "dict | None":
+        db.execute(
+            "INSERT OR IGNORE INTO unified_kg_state (notebook_id, updated_at) "
+            "VALUES (?, datetime('now'))",
+            (notebook_id,),
+        )
+        cur = db.execute(
+            "UPDATE unified_kg_state SET "
+            "derived_generation_counter = derived_generation_counter + 1, "
+            "derived_building_generation = derived_generation_counter + 1, "
+            "derived_building_claimed_at = datetime('now'), "
+            "updated_at = datetime('now') "
+            "WHERE notebook_id = ? AND (derived_building_generation = 0 "
+            "OR datetime(COALESCE(derived_building_claimed_at, '1970-01-01')) "
+            "< datetime('now', '-' || CAST(? AS TEXT) || ' seconds'))",
+            (notebook_id, int(ttl_seconds)),
+        )
+        if cur.rowcount != 1:
+            return None
+        row = db.execute(
+            "SELECT derived_generation_counter AS generation, "
+            "cluster_generation, community_generation, derived_catchup_from, "
+            "datetime('now') AS ts FROM unified_kg_state WHERE notebook_id = ?",
+            (notebook_id,),
+        ).fetchone()
+        return {
+            "generation": int(row["generation"]),
+            "cluster_generation": int(row["cluster_generation"]),
+            "community_generation": int(row["community_generation"]),
+            "catchup_from": row["derived_catchup_from"],
+            "ts": str(row["ts"]),
+        }
+
+    @staticmethod
+    def release_derived_claim(
+        db: sqlite3.Connection, notebook_id: str, generation: int
+    ) -> None:
+        db.execute(
+            "UPDATE unified_kg_state SET derived_building_generation=0, "
+            "derived_building_claimed_at=NULL, updated_at=datetime('now') "
+            "WHERE notebook_id=? AND derived_building_generation=?",
+            (notebook_id, generation),
+        )
+
+    @staticmethod
+    def derived_claim_still_held(
+        db: sqlite3.Connection, notebook_id: str, generation: int
+    ) -> bool:
+        row = db.execute(
+            "SELECT 1 FROM unified_kg_state "
+            "WHERE notebook_id=? AND derived_building_generation=?",
+            (notebook_id, generation),
+        ).fetchone()
+        return row is not None
+
+    @staticmethod
+    def write_cluster_map_generation(
+        db: sqlite3.Connection,
+        notebook_id: str,
+        object_type: str,
+        run_id: str,
+        created_at: str,
+        generation: int,
+    ) -> None:
+        db.execute(
+            "INSERT INTO concept_clusters "
+            "(id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,"
+            "canonical_description,canonical_desc_sig,created_at,generation) "
+            "SELECT 'cc-' || lower(hex(randomblob(16))), "
+            "s.notebook_id,c.canonical_id,s.object_id,c.canonical_name,?,"
+            "c.canonical_description,c.canonical_desc_sig,?,? "
+            "FROM kg_cluster_scratch s "
+            "JOIN kg_canonical_scratch c "
+            "ON c.notebook_id=s.notebook_id AND c.run_id=s.run_id AND c.seed=s.seed "
+            "JOIN knowledge_objects k ON k.id=s.object_id "
+            "WHERE s.notebook_id=? AND s.run_id=? ORDER BY k.ordinal",
+            (object_type, created_at, generation, notebook_id, run_id),
+        )
+
+    @staticmethod
+    def flip_cluster_generation(
+        db: sqlite3.Connection,
+        notebook_id: str,
+        *,
+        published_from: int,
+        generation: int,
+        catchup_from_ts: str,
+        now: str,
+    ) -> bool:
+        cur = db.execute(
+            "UPDATE unified_kg_state SET "
+            "cluster_generation=?, cluster_mutation_seq=cluster_mutation_seq+1, "
+            "derived_building_generation=0, derived_building_claimed_at=NULL, "
+            "derived_catchup_from=?, updated_at=? "
+            "WHERE notebook_id=? AND cluster_generation=? "
+            "AND derived_building_generation=?",
+            (
+                generation, catchup_from_ts, now, notebook_id, published_from,
+                generation,
+            ),
+        )
+        return cur.rowcount == 1
+
+    @staticmethod
+    def flip_community_generation(
+        db: sqlite3.Connection, notebook_id: str, *, published_from: int,
+        generation: int, now: str,
+    ) -> bool:
+        cur = db.execute(
+            "UPDATE unified_kg_state SET community_generation=?, updated_at=? "
+            "WHERE notebook_id=? AND community_generation=? "
+            "AND derived_building_generation=?",
+            (generation, now, notebook_id, published_from, generation),
+        )
+        return cur.rowcount == 1
+
+    @staticmethod
+    def clear_catchup_marker(
+        db: sqlite3.Connection, notebook_id: str, ts: str
+    ) -> None:
+        db.execute(
+            "UPDATE unified_kg_state SET derived_catchup_from=NULL, "
+            "updated_at=datetime('now') "
+            "WHERE notebook_id=? AND derived_catchup_from=?",
+            (notebook_id, ts),
+        )
+
+    @staticmethod
+    def catchup_window_members(
+        db: sqlite3.Connection, notebook_id: str, published_generation: int,
+        since_ts: str, skew_seconds: int, limit: int,
+    ) -> list:
+        # 谓词 != published 而非 = 旧P:欠账轮退休代号无处可查(见 PG 侧
+        # docstring)。datetime() 双侧归一(#659 R13 教训:存储行的 offset
+        # 可能异源)。
+        return db.execute(
+            "SELECT DISTINCT c.member_object_id, c.object_type, o.payload "
+            "FROM concept_clusters c "
+            "JOIN knowledge_objects o ON o.id = c.member_object_id "
+            "WHERE c.notebook_id=? AND c.generation != ? "
+            "AND datetime(c.created_at) >= "
+            "datetime(?, '-' || CAST(? AS TEXT) || ' seconds') "
+            "LIMIT ?",
+            (notebook_id, published_generation, since_ts, int(skew_seconds), limit),
+        ).fetchall()
+
+    @staticmethod
+    def reap_derived_generations_page(
+        db: sqlite3.Connection, notebook_id: str, table: str,
+        keep: "tuple[int, ...]", limit: int,
+    ) -> int:
+        assert table in ("concept_clusters", "communities", "community_members")
+        marks = ",".join("?" * len(keep))
+        cur = db.execute(
+            f"DELETE FROM {table} WHERE rowid IN ("
+            f"SELECT rowid FROM {table} WHERE notebook_id=? "
+            f"AND generation NOT IN ({marks}) LIMIT ?)",
+            (notebook_id, *keep, limit),
+        )
+        return cur.rowcount
+
     @staticmethod
     def cluster_input_facts(
         db: sqlite3.Connection, notebook_id: str, *, exclude_emb_count: bool = False

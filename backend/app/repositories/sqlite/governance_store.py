@@ -492,25 +492,44 @@ class GovernanceStore:
         限制到 ``rows`` 的 id 集合不改变任何一次判定,``added`` 与写入的行也逐位
         不变。分批走 ``uq_clusters_nb_type_member_generation(notebook_id,
         object_type, member_object_id)`` 这条唯一索引 —— 前两列等值 + 第三列
-        IN,是精确 seek 而不是残余过滤。"""
+        IN,是精确 seek 而不是残余过滤。
+
+        批 3·W2 §2.2 锁序红线(sqlite 化身):published 代指针在
+        ``BEGIN IMMEDIATE`` **之后**读——进程写锁把 append 与翻转串行,
+        锁后读的指针在本事务内不会再被翻转改走(PG 侧靠 advisory lock,
+        论证见那边 docstring)。"""
         if not connection.in_transaction:
             connection.execute("BEGIN IMMEDIATE")
+        generation = self._published_cluster_generation(connection, notebook_id)
         existing = self._existing_cluster_members(
-            connection, notebook_id, object_type, rows
+            connection, notebook_id, object_type, rows, generation
         )
         added = 0
         for r in rows:
             if r["member_object_id"] in existing:
                 continue
             connection.execute(
-                "INSERT INTO concept_clusters (id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,canonical_description,created_at) "
-                "VALUES (?,?,?,?,?,?,?,?)",
+                "INSERT INTO concept_clusters (id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,canonical_description,created_at,generation) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
                 (self.seams.new_id("cc"), notebook_id, r["canonical_id"],
                  r["member_object_id"], r["canonical_name"], object_type,
-                 r.get("canonical_description", ""), now))
+                 r.get("canonical_description", ""), now, generation))
             existing.add(r["member_object_id"])
             added += 1
         return added
+
+    @staticmethod
+    def _published_cluster_generation(
+        connection: sqlite3.Connection, notebook_id: str
+    ) -> int:
+        """append 写入的目标代 = 当下 published 指针(无 state 行 ⇒ 0,与读侧
+        COALESCE 契约同构)。调用方必须已进写事务(见 insert_clusters 的锁序
+        红线)。"""
+        row = connection.execute(
+            "SELECT cluster_generation FROM unified_kg_state WHERE notebook_id=?",
+            (notebook_id,),
+        ).fetchone()
+        return int(row["cluster_generation"]) if row else 0
 
     def _existing_cluster_members(
         self,
@@ -518,8 +537,10 @@ class GovernanceStore:
         notebook_id: str,
         object_type: str,
         rows: List[dict],
+        generation: int,
     ) -> set:
-        """本次 ``rows`` 的 member id 中,已经在该切片里的那些(有界 IN,分批)。"""
+        """本次 ``rows`` 的 member id 中,已经在该切片 published 代里的那些
+        (有界 IN,分批)。探针按代收窄——理由见 PG 侧同名方法。"""
         member_ids = list(dict.fromkeys(r["member_object_id"] for r in rows))
         size = max(1, int(self.seams.in_chunk_size()))
         found = set()
@@ -528,9 +549,9 @@ class GovernanceStore:
             placeholders = ",".join("?" for _ in batch)
             found.update(r["member_object_id"] for r in connection.execute(
                 f"SELECT member_object_id FROM concept_clusters "
-                f"WHERE notebook_id=? AND object_type=? "
+                f"WHERE notebook_id=? AND object_type=? AND generation=? "
                 f"AND member_object_id IN ({placeholders})",
-                [notebook_id, object_type, *batch]).fetchall())
+                [notebook_id, object_type, generation, *batch]).fetchall())
         return found
 
     # --------------------------------------------------------------- merge
