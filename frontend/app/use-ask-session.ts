@@ -620,6 +620,23 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     });
   }
 
+  // The page is being unloaded (reload, close, navigation away). The browser
+  // then terminates every in-flight fetch, which surfaces here exactly like a
+  // user Stop — but the mirror must survive: it is the copy the reloaded tab
+  // resumes from. Proven in a real browser: `beforeunload` fires before the
+  // terminated stream's rejection is delivered, `pagehide` right after it.
+  const pageUnloadingRef = useRef(false);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const markUnloading = () => { pageUnloadingRef.current = true; };
+    window.addEventListener("beforeunload", markUnloading);
+    window.addEventListener("pagehide", markUnloading);
+    return () => {
+      window.removeEventListener("beforeunload", markUnloading);
+      window.removeEventListener("pagehide", markUnloading);
+    };
+  }, []);
+
   // The active job the last applied detail reported (if any): a handed-off
   // question that reloads before `started` is reconciled against it and the
   // loaded turns, so a job history already shows is not re-sent at all (a
@@ -1834,8 +1851,9 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       // Ended without `started` (failed, stopped, or a transport that never
       // reached the server): the question is back with the user, not pending —
       // unless an in-app unmount retired this stream and left the mirror for
-      // the next hook instance to reconcile.
-      if (run.jobId === null && !run.keepMirror) retireMirror();
+      // the next hook instance to reconcile, or the page itself is unloading
+      // (the browser terminated the fetch; the reloaded tab re-sends it).
+      if (run.jobId === null && !run.keepMirror && !pageUnloadingRef.current) retireMirror();
       if (!run.failure) dropRecord(inFlightRunsRef.current, run);
       if (ownsRun()) {
         if (askAbortRef.current === controller) askAbortRef.current = null;
@@ -2041,10 +2059,12 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       }
       dropRecord(intentRunsRef.current, run);
       // Aborted or failed on-screen: the question goes back to the input (or was
-      // stopped on purpose) — nothing for a reload to resume. The one exception
-      // is an in-app unmount, which retires this continuation but leaves the
-      // stored record for the next hook instance in this tab.
-      if (run.keepMirror) return;
+      // stopped on purpose) — nothing for a reload to resume. The exceptions
+      // are an in-app unmount, which retires this continuation but leaves the
+      // stored record for the next hook instance in this tab, and the page
+      // unloading (the browser terminated the understanding request; the
+      // reloaded tab re-issues it from the stored record).
+      if (run.keepMirror || pageUnloadingRef.current) return;
       forgetPersistedIntent(run);
       if (!isAbortError(error) && attached()) effectsRef.current.reportError(error);
       const draft = askIntentDraftRef.current;
