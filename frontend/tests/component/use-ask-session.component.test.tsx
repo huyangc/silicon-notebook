@@ -3782,10 +3782,12 @@ test("the persisted mirror appears only after the submitting tab owns the lock",
   }
 });
 
-// codex #664 r4 P1: between hand-off and `started` the mirror is still the only
-// copy of the question; a reload in that window re-submits the confirmed
-// intent, and the mirror is retired only once the server acknowledges `started`.
-test("a reload between hand-off and started re-submits the confirmed intent once", async () => {
+// codex #664 r4/r5 P1: between hand-off and `started` the mirror is still the
+// only copy of the question. A reload in that window cannot know whether the
+// POST committed (no backend idempotency key), so it is never re-submitted on
+// its own: the question comes back as a draft, in reasoning mode, with a
+// notice. The mirror is retired once the server acknowledges `started`.
+test("a reload between hand-off and started hands the question back as a draft instead of re-submitting", async () => {
   const stream = deferred<AskResponse>();
   let onStart: ((jobId: string, conversationId: string) => void | Promise<void>) | undefined;
   api.runAskStream.mockImplementation((
@@ -3804,6 +3806,7 @@ test("a reload between hand-off and started re-submits the confirmed intent once
   const view = render(<Harness />);
   beginOwnedNotebook();
   act(() => value!.selectMode("reasoning"));
+  act(() => value!.selectRetrievalEffort("exhaustive"));
   await act(async () => {
     void value!.submit("handed off");
     await Promise.resolve();
@@ -3814,8 +3817,12 @@ test("a reload between hand-off and started re-submits the confirmed intent once
   const [mirror] = pendingIntentStore() as Array<{ phase: string; confirmation: unknown }>;
   expect(mirror.phase).toBe("handoff");
   expect(mirror.confirmation).toMatchObject({ resolved_question: "handed off" });
+  const signal = api.runAskStream.mock.calls[0]?.[3] as AbortSignal;
 
+  // In-app unmount: the pre-start stream is retired, the mirror is kept.
   view.unmount();
+  expect(signal.aborted).toBe(true);
+  expect(pendingIntentStore()).toHaveLength(1);
   api.previewAskIntent.mockReset();
   render(<Harness />);
   const owner = beginOwnedNotebook(2);
@@ -3824,31 +3831,57 @@ test("a reload between hand-off and started re-submits the confirmed intent once
     value!.finishNotebookTransition(owner);
   });
   await settleSubmit();
-  // History (the older session) does not hold the question: re-submitted with
-  // the confirmed intent, no second understanding pass, as a fresh session.
+  // History (the older session) does not hold the question and the POST's
+  // fate is unknown: no automatic retry — draft + notice, as a fresh session.
   expect(api.previewAskIntent).not.toHaveBeenCalled();
-  expect(api.runAskStream).toHaveBeenCalledTimes(2);
-  expect(api.runAskStream.mock.calls[1]?.[1]).toMatchObject({
-    question: "handed off",
-    mode: "reasoning",
-    intent: expect.objectContaining({ resolved_question: "handed off" }),
-  });
-  expect(value!.asking).toBe(true);
-  expect(value!.pendingQuestion).toBe("handed off");
+  expect(api.runAskStream).toHaveBeenCalledTimes(1);
+  expect(value!.asking).toBe(false);
+  expect(value!.pendingQuestion).toBe("");
+  expect(value!.question).toBe("handed off");
+  expect(value!.mode).toBe("reasoning");
+  expect(value!.retrievalEffort).toBe("exhaustive");
   expect(value!.conversationId).toBeNull();
-  expect(pendingIntentStore()).toHaveLength(1);
+  expect(value!.turns).toEqual([]);
+  expect(effects.notify).toHaveBeenCalledWith("上次提交尚未收到服务端确认，问题已退回输入框，请确认后重新发送");
+  expect(pendingIntentStore()).toEqual([]);
+  expect(onStart).toBeDefined();
+});
 
+test("the hand-off mirror is retired once the server acknowledges started", async () => {
+  const stream = deferred<AskResponse>();
+  let onStart: ((jobId: string, conversationId: string) => void | Promise<void>) | undefined;
+  api.runAskStream.mockImplementation((
+    _notebookId: string,
+    _payload: unknown,
+    _onProgress: unknown,
+    _signal?: AbortSignal,
+    nextOnStart?: (jobId: string, conversationId: string) => void | Promise<void>,
+  ) => {
+    onStart = nextOnStart;
+    return stream.promise;
+  });
+  api.previewAskIntent.mockResolvedValue(contractFor("acknowledged", false));
+  api.listConversations.mockResolvedValue([]);
+  render(<Harness />);
+  beginOwnedNotebook();
+  act(() => value!.selectMode("reasoning"));
   await act(async () => {
-    await onStart!("job-handed", "conversation-handed");
+    void value!.submit("acknowledged");
+    await Promise.resolve();
+  });
+  await settleSubmit();
+  expect((pendingIntentStore()[0] as { phase: string }).phase).toBe("handoff");
+  await act(async () => {
+    await onStart!("job-ack", "conversation-ack");
   });
   expect(pendingIntentStore()).toEqual([]);
-  stream.resolve({ ...answer("conversation-handed"), mode: "reasoning" });
+  stream.resolve({ ...answer("conversation-ack"), mode: "reasoning" });
   await act(async () => {
     await stream.promise;
     await Promise.resolve();
     await Promise.resolve();
   });
-  expect(value!.turns.map((turn) => turn.question)).toEqual(["handed off"]);
+  expect(value!.turns.map((turn) => turn.question)).toEqual(["acknowledged"]);
 });
 
 test("a handed-off question the server already holds is not submitted twice on reload", async () => {

@@ -185,6 +185,11 @@ type AskRunRecord = DetachableRecord & {
   // A failure that happened while nobody was looking. The record is kept so
   // the returning view can report it and hand the question back as a draft.
   failure: unknown | null;
+  // The preview mirror this run took over (ask-intent-persist.ts), retired on
+  // `started`; `keepMirror` marks an in-app unmount that aborted the stream
+  // before `started` and left the mirror for the next hook instance.
+  mirrorId: string | null;
+  keepMirror: boolean;
 };
 
 /**
@@ -465,8 +470,9 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
         }
         // A re-attached intent preview/review is reasoning-mode context in its
         // own right (projecting the last turn's mode over it would cancel it),
-        // and a re-attached durable run keeps the engine it was submitted with.
-        const pendingMode = visibleIntentRun() ? "reasoning" : visibleRun()?.mode;
+        // a re-attached durable run keeps the engine it was submitted with, and
+        // a question handed back as a draft keeps the engine it was asked with.
+        const pendingMode = visibleIntentRun() ? "reasoning" : visibleRun()?.mode ?? draftModeRef.current;
         return modeFromTurn(
           pendingMode
             ? { response: { mode: pendingMode } }
@@ -610,6 +616,10 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
   // question that reloads before `started` is reconciled against it and the
   // loaded turns, so a job the server did create is never submitted twice.
   const lastAppliedActiveJobRef = useRef<{ asked_at: string; question: string } | null>(null);
+  // The engine a handed-back draft was asked with, honoured by every mode
+  // projection (which would otherwise reset it to the last turn's) until the
+  // next notebook transition, session switch, explicit engine choice or submit.
+  const draftModeRef = useRef<string | null>(null);
 
   function durableAlreadyHolds(record: PersistedIntentRun): boolean {
     const active = lastAppliedActiveJobRef.current;
@@ -622,47 +632,31 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
   /**
    * A reload landed between hand-off and `started`. If history (the detail
    * just loaded) already shows the job or its answer, the server owns the
-   * question and the mirror is retired; otherwise the durable Ask is submitted
-   * again with the confirmed intent — no second understanding pass.
+   * question and the mirror is simply retired. Otherwise the outcome of the
+   * original POST is unknowable from here — it may still commit — and the
+   * backend has no idempotency key that would make a client retry safe, so the
+   * question is NOT re-submitted automatically: it goes back to the input as a
+   * draft, in reasoning mode, with a notice, and the user decides.
    */
   function resumeHandoff(record: PersistedIntentRun, owner: AskSessionOwner) {
-    if (durableAlreadyHolds(record) || !record.confirmation) {
-      removePersistedIntentRun(record.id);
-      releaseIntentRun(record.id);
-      return;
-    }
+    removePersistedIntentRun(record.id);
+    releaseIntentRun(record.id);
+    if (durableAlreadyHolds(record) || !sameViewOwner(ownerRef.current, owner)) return;
     if (record.conversationIdAtStart === null) {
       // A first question: the view currently shows whatever the restore opened
-      // to check history; the resubmitted run is a fresh conversation.
+      // to check history; the draft belongs to a fresh conversation.
       turnsRef.current = [];
       setTurns([]);
       setConversationId(null);
     }
-    const contract = record.confirmation.contract;
-    const traceSeed = contract.needs_clarification
-      ? [
-        intentClarifyStep(contract, record.understandingMs),
-        intentConfirmedStep(record.confirmation.resolved_question, record.confirmation.answers.length),
-      ]
-      : [intentUnderstoodStep(contract, record.understandingMs)];
     modeRef.current = "reasoning";
     setMode("reasoning");
-    void startAskRun(
-      owner,
-      record.question,
-      "reasoning",
-      record.confirmation,
-      handOffIntentTrace(traceSeed),
-      record.askedAt,
-      {
-        sourceScope: copySourceScope(record.sourceScope),
-        baseScope: copyBaseScope(record.baseScope),
-      },
-      retrievalEffortFromTurn({ response: { retrieval_effort: record.retrievalEffort } }),
-      record.conversationIdAtStart,
-      undefined,
-      record.id,
-    );
+    draftModeRef.current = "reasoning";
+    setRetrievalEffort(retrievalEffortFromTurn({
+      response: { retrieval_effort: record.retrievalEffort },
+    }));
+    setQuestion(record.question);
+    effectsRef.current.notify("上次提交尚未收到服务端确认，问题已退回输入框，请确认后重新发送");
   }
 
   function forgetPersistedIntent(run: Pick<AskIntentRunRecord, "persistId">) {
@@ -973,6 +967,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     workspaceEpoch: number;
   }): AskNotebookTransition | null {
     if (!input.actorId || actorIdRef.current !== input.actorId) return null;
+    draftModeRef.current = null;
     detachVisibleRun();
     notebookGenerationRef.current += 1;
     optimisticConversationIdsRef.current.clear();
@@ -1343,6 +1338,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
   function nextSessionOwner(workspaceEpoch: number): AskSessionOwner | null {
     const current = currentNotebookOwner();
     if (!current) return null;
+    draftModeRef.current = null;
     detachVisibleRun();
     const owner = {
       ...current,
@@ -1420,6 +1416,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
   function selectMode(next: string) {
     if (!currentNotebookOwner()) return;
     if (!askModesRef.current.some((candidate) => candidate.id === next)) return;
+    draftModeRef.current = null;
     modeChoiceVersionRef.current += 1;
     modeRef.current = next;
     setMode(next);
@@ -1444,6 +1441,17 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       releaseIntentRun(run.persistId);
     }
     intentRunsRef.current = [];
+    // Same for a hand-off whose durable POST has not been acknowledged yet:
+    // once `started` arrived the server owns it (history restores it); before
+    // that the old stream must not keep running next to whatever the next
+    // instance does with the stored hand-off.
+    for (const run of inFlightRunsRef.current) {
+      if (run.mirrorId === null || run.jobId !== null) continue;
+      run.keepMirror = true;
+      run.cancelRequested = true;
+      run.controller.abort();
+      releaseIntentRun(run.mirrorId);
+    }
   }, []);
 
   useEffect(() => {
@@ -1567,6 +1575,8 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       controller,
       result: null,
       failure: null,
+      mirrorId: mirrorId ?? null,
+      keepMirror: false,
     };
     inFlightRunsRef.current.push(run);
     // `run.owner` is rebound when a notebook restore re-attaches this run.
@@ -1703,8 +1713,10 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       effectsRef.current.reportError(error);
     } finally {
       // Ended without `started` (failed, stopped, or a transport that never
-      // reached the server): the question is back with the user, not pending.
-      if (run.jobId === null) retireMirror();
+      // reached the server): the question is back with the user, not pending —
+      // unless an in-app unmount retired this stream and left the mirror for
+      // the next hook instance to reconcile.
+      if (run.jobId === null && !run.keepMirror) retireMirror();
       if (!run.failure) dropRecord(inFlightRunsRef.current, run);
       if (ownsRun()) {
         if (askAbortRef.current === controller) askAbortRef.current = null;
@@ -1745,6 +1757,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       sourceScope: copySourceScope(currentPolicy.sourceScope),
       baseScope: copyBaseScope(currentPolicy.baseScope),
     };
+    draftModeRef.current = null;
     if (submitMode !== "reasoning") {
       await executeAsk(q, submitMode, undefined, [], askedAt, scopeSnapshot);
       return;
