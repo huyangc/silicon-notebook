@@ -747,7 +747,12 @@ class SharingStore:
                 "DELETE FROM notebooks WHERE id=%s AND status='copying'", (notebook_id,)
             )
 
-    def sweep_stale_copies(self, *, created_by: str | None = None) -> list[str]:
+    def sweep_stale_copies(
+        self,
+        *,
+        created_by: str | None = None,
+        on_reaped: "Callable[[str], None] | None" = None,
+    ) -> list[str]:
         """批 3·W1 PR-4（残余债 #7 收编）——SQLite 孪生的 docstring 载有完整
         理由：每本一个事务（单本级联量被拷贝上限界住）、写事务内按哨兵
         谓词重验（``FOR UPDATE`` 行锁使 publish/compensate 并发方等到本本
@@ -786,6 +791,10 @@ class SharingStore:
                     "DELETE FROM notebooks WHERE id=%s", (nb_id,)
                 )
             reaped.append(nb_id)
+            # codex #666 R7 P2:每本提交后**立即**回调——后面某本的事务
+            # 抛错时,已提交的行没了、目录若等整表收尾就永远轮不到清。
+            if on_reaped is not None:
+                on_reaped(nb_id)
         return reaped
 
     @staticmethod

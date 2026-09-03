@@ -140,9 +140,16 @@ class NotebookCopyService:
         内评 P1(PR-4):``copy_notebook`` 开场的收割**必须**走本方法而不是
         直调 store——那是收割的唯一生产触发点,直调会把回传 ids 丢掉、只删
         行不清盘,恰好复刻上面说的泄漏。接线由 ``test_copy_notebook_
-        entrypoint_reaps_stale_disk_too`` 钉住。"""
-        reaped = self._store.sweep_stale_copies(created_by=created_by)
-        for notebook_id in reaped:
+        entrypoint_reaps_stale_disk_too`` 钉住。
+
+        codex #666 R7 P2:清盘走 ``on_reaped`` 逐本回调而不是等整表收尾的
+        返回列表——后面某本的事务抛错时,已提交的行没了,目录若还没清就
+        再也没有清扫路径轮得到它(行级清扫按行找目录)。回调在每本事务提交
+        后立即执行,异常照旧上抛,但已提交的本决不漏盘。"""
+        cleaned = {"n": 0}
+
+        def _clean_disk(notebook_id: str) -> None:
+            cleaned["n"] += 1
             shutil.rmtree(
                 self._storage_dir() / "notebooks" / notebook_id,
                 ignore_errors=True,
@@ -151,7 +158,9 @@ class NotebookCopyService:
                 self._storage_dir() / "assets" / notebook_id,
                 ignore_errors=True,
             )
-        return len(reaped)
+
+        self._store.sweep_stale_copies(created_by=created_by, on_reaped=_clean_disk)
+        return cleaned["n"]
 
     def copy_notebook(
         self,

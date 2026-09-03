@@ -912,6 +912,57 @@ def test_copy_sweeper_reaps_per_notebook_and_cleans_disk(repo, monkeypatch):
         )
 
 
+def test_copy_sweeper_cleans_disk_per_commit_even_when_later_tx_fails(repo, monkeypatch):
+    """codex #666 R7 P2 pin:清盘逐本提交后立即执行——第 2 本的写事务抛错
+    时异常照旧上抛,但第 1 本(行已提交、再无清扫路径轮得到)的两棵目录
+    必须已经清掉,不许等整表收尾的返回列表。"""
+    owner = "user-local"
+    stale_a = _mk_nb(repo, "stale-x", owner)
+    stale_b = _mk_nb(repo, "stale-y", owner)
+    with repo._write() as db:
+        for nb in (stale_a, stale_b):
+            db.execute(
+                "UPDATE notebooks SET status='copying', "
+                "created_at='2000-01-01T00:00:00' WHERE id=?", (nb,),
+            )
+    storage = repo._runtime.source_files.storage_dir
+    for nb in (stale_a, stale_b):
+        for root in ("notebooks", "assets"):
+            d = storage / root / nb
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "leftover.bin").write_bytes(b"x")
+
+    database = repo._runtime.database
+    original_write = database.write
+    calls = {"n": 0}
+
+    def failing_second_write(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("simulated crash between per-notebook txs")
+        return original_write(*args, **kwargs)
+
+    monkeypatch.setattr(database, "write", failing_second_write)
+    with pytest.raises(RuntimeError):
+        repo._sweep_stuck_copies(created_by=owner)
+    monkeypatch.setattr(database, "write", original_write)
+
+    with repo._connect() as db:
+        remaining = {
+            row["id"] for row in db.execute(
+                "SELECT id FROM notebooks WHERE status='copying'"
+            ).fetchall()
+        }
+    reaped = {stale_a, stale_b} - remaining
+    assert len(reaped) == 1 and len(remaining) == 1
+    reaped_id, survivor = reaped.pop(), remaining.pop()
+    for root in ("notebooks", "assets"):
+        assert not (storage / root / reaped_id).exists(), (
+            "行已提交的本必须当场清盘,不许随后续异常一起丢"
+        )
+        assert (storage / root / survivor / "leftover.bin").exists()
+
+
 def test_copy_notebook_entrypoint_reaps_stale_disk_too(repo):
     """内评 P1(PR-4)接线钉:copy_notebook 是收割的唯一生产触发点,必须走
     服务层 sweep_stuck_copies(行+盘),不许直调 store 把回传 ids 丢掉——

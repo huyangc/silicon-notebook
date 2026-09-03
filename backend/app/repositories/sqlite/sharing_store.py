@@ -848,7 +848,12 @@ class SharingStore:
                 "DELETE FROM notebooks WHERE id = ? AND status = 'copying'", (notebook_id,)
             )
 
-    def sweep_stale_copies(self, *, created_by: "str | None" = None) -> list[str]:
+    def sweep_stale_copies(
+        self,
+        *,
+        created_by: "str | None" = None,
+        on_reaped: "Callable[[str], None] | None" = None,
+    ) -> list[str]:
         """Delete expired copy sentinels without touching concurrent copies.
 
         批 3·W1 PR-4（残余债 #7 收编）：从「一个事务整删全部过期拷贝」改为
@@ -899,6 +904,10 @@ class SharingStore:
                 )
                 db.execute("DELETE FROM notebooks WHERE id = ?", (nb_id,))
             reaped.append(nb_id)
+            # codex #666 R7 P2:每本提交后**立即**回调——后面某本的事务
+            # 抛错时,已提交的行没了、目录若等整表收尾就永远轮不到清。
+            if on_reaped is not None:
+                on_reaped(nb_id)
         return reaped
 
     @staticmethod
