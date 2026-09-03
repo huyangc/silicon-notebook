@@ -671,6 +671,13 @@ class UnifiedKgStore:
         keyset 分页按 (object_type, member_object_id) 全序推进(质量评 P2:
         背靠背 rebuild 时窗口宽度退化为整代,单次 fetchall 是无界内存;分页
         后每页有界、逐页安置逐页释放,也不再需要会丢余量的截断保险丝)。
+        **当前在飞代整体排除**(codex #671 R2 P1):翻转清认领后催收还在跑
+        时,下一轮 rebuild 已可取号写它的未发布代——不排除就会把半成品行
+        扫进 published 代。顺序论证:claimant 的行只可能在其取号事务提交
+        之后落库,单语句快照里「看得见行 ⇒ 必看得见认领」,排除无缝;
+        building=0 时子查询为空集,遗留 0 代存量照常入窗(链 a 常态是首次
+        翻转退休 0 代,不许误伤)。TTL 抢占后僵尸代的窗口行仍会被扫——
+        既有裁决:有界且幂等安置无害。
         范围 seek 凭据:idx_clusters_nb_created_gen 的 (notebook_id,
         created_at) 前缀。"""
         return db.execute(
@@ -679,12 +686,16 @@ class UnifiedKgStore:
             "FROM concept_clusters c "
             "JOIN knowledge_objects o ON o.id = c.member_object_id "
             "WHERE c.notebook_id=%s AND c.generation != %s "
+            "AND c.generation NOT IN ("
+            "  SELECT derived_building_generation FROM unified_kg_state u "
+            "  WHERE u.notebook_id = %s AND derived_building_generation != 0) "
             "AND c.created_at >= %s::timestamptz - make_interval(secs => %s) "
             "AND (c.object_type, c.member_object_id) > (%s, %s) "
             "GROUP BY c.object_type, c.member_object_id "
             "ORDER BY c.object_type, c.member_object_id "
             "LIMIT %s",
-            (notebook_id, published_generation, normalize_timestamp(since_ts),
+            (notebook_id, published_generation, notebook_id,
+             normalize_timestamp(since_ts),
              skew_seconds, after_object_type, after_member_object_id, limit),
         ).fetchall()
 

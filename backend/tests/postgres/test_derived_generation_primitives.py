@@ -196,6 +196,60 @@ def test_catchup_window_payload_is_text_and_pages_by_keyset(postgres_database):
     assert members == {f"ko-{g}" for g in range(5)}
 
 
+def test_catchup_window_excludes_the_currently_claimed_generation(postgres_database):
+    """codex #671 R2 P1 的回归 pin:翻转清认领后催收还在跑时,下一轮已可
+    取号写它的未发布代——催收谓词必须整体排除**当前在飞代**,否则半成品行
+    被扫进 published 代。building=0 时排除子查询为空集:遗留 0 代存量照常
+    入窗(链 a 常态是首次翻转退休 0 代,不许误伤)。"""
+    assert PostgresMigrator(postgres_database).migrate() == 51
+    _seed_notebook(postgres_database, "nb-excl")
+    with postgres_database.write() as db:
+        db.execute(
+            "INSERT INTO knowledge_objects "
+            "(id, notebook_id, object_type, payload, created_at, updated_at) "
+            "SELECT 'ko-'||g, 'nb-excl', 'concept', "
+            "jsonb_build_object('name', 'N'||g), %s::timestamptz, %s::timestamptz "
+            "FROM generate_series(0, 2) g",
+            (_NOW, _NOW),
+        )
+        # 退休 0 代(ko-0)、退休 1 代(ko-1)、在飞 5 代(ko-2,claimed)。
+        for suffix, gen in (("0", 0), ("1", 1), ("2", 5)):
+            db.execute(
+                "INSERT INTO concept_clusters "
+                "(id,notebook_id,canonical_id,member_object_id,canonical_name,"
+                "object_type,created_at,generation) "
+                "VALUES ('cc-'||%s, 'nb-excl', 'can', 'ko-'||%s, 'N', 'concept', "
+                "%s::timestamptz, %s)",
+                (suffix, suffix, _NOW, gen),
+            )
+        db.execute(
+            "INSERT INTO unified_kg_state (notebook_id, cluster_generation, "
+            "derived_building_generation, derived_building_claimed_at, "
+            "derived_generation_counter, updated_at) "
+            "VALUES ('nb-excl', 2, 5, now(), 5, now()) "
+            "ON CONFLICT (notebook_id) DO UPDATE SET "
+            "cluster_generation=2, derived_building_generation=5, "
+            "derived_building_claimed_at=now(), derived_generation_counter=5",
+        )
+    with postgres_database.connect() as db:
+        members = {r["member_object_id"]
+                   for r in UnifiedKgStore.catchup_window_members(
+                       db, "nb-excl", 2, _NOW, 300, 100)}
+    assert members == {"ko-0", "ko-1"}, members
+    # 认领释放(building=0)后同一查询把原在飞代当普通残代扫进来——排除的
+    # 是「在飞」这个状态,不是某个代号。
+    with postgres_database.write() as db:
+        db.execute(
+            "UPDATE unified_kg_state SET derived_building_generation=0, "
+            "derived_building_claimed_at=NULL WHERE notebook_id='nb-excl'",
+        )
+    with postgres_database.connect() as db:
+        members = {r["member_object_id"]
+                   for r in UnifiedKgStore.catchup_window_members(
+                       db, "nb-excl", 2, _NOW, 300, 100)}
+    assert members == {"ko-0", "ko-1", "ko-2"}, members
+
+
 def test_reap_page_deletes_only_generations_outside_keep(postgres_database):
     assert PostgresMigrator(postgres_database).migrate() == 51
     _seed_notebook(postgres_database, "nb-reap")

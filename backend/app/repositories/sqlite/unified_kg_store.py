@@ -587,8 +587,9 @@ class UnifiedKgStore:
         since_ts: str, skew_seconds: int, limit: int, *,
         after_object_type: str = "", after_member_object_id: str = "",
     ) -> list:
-        # 谓词 != published 而非 = 旧P、keyset 分页、payload 文本契约:理由
-        # 见 PG 孪生 docstring(sqlite 的 payload 本就是 TEXT,契约天然满足)。
+        # 谓词 != published 而非 = 旧P、keyset 分页、payload 文本契约、当前
+        # 在飞代整体排除(codex #671 R2 P1):理由见 PG 孪生 docstring
+        # (sqlite 的 payload 本就是 TEXT,契约天然满足)。
         # datetime() 双侧归一(#659 R13 教训:存储行的 offset 可能异源)。
         return db.execute(
             "SELECT c.member_object_id, c.object_type, "
@@ -596,13 +597,17 @@ class UnifiedKgStore:
             "FROM concept_clusters c "
             "JOIN knowledge_objects o ON o.id = c.member_object_id "
             "WHERE c.notebook_id=? AND c.generation != ? "
+            "AND c.generation NOT IN ("
+            "  SELECT derived_building_generation FROM unified_kg_state u "
+            "  WHERE u.notebook_id = ? AND derived_building_generation != 0) "
             "AND datetime(c.created_at) >= "
             "datetime(?, '-' || CAST(? AS TEXT) || ' seconds') "
             "AND (c.object_type, c.member_object_id) > (?, ?) "
             "GROUP BY c.object_type, c.member_object_id "
             "ORDER BY c.object_type, c.member_object_id "
             "LIMIT ?",
-            (notebook_id, published_generation, since_ts, int(skew_seconds),
+            (notebook_id, published_generation, notebook_id, since_ts,
+             int(skew_seconds),
              after_object_type, after_member_object_id, limit),
         ).fetchall()
 
