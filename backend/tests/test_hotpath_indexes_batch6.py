@@ -40,6 +40,9 @@ _DROPPED_NAMES = (
     "uq_clusters_notebook_type_member",
     "idx_clusters_nb_canonical_member",
     "idx_clusters_nb_created",
+    # 0004 的裸 notebook_id 前缀索引:留着会劫走聚合读者的计划(窄索引 +
+    # 回表过滤 generation),裸前缀扫描由 _created_gen 前导列等价服务。
+    "idx_clusters_nb",
 )
 
 _STATEMENT_PATTERN = re.compile(

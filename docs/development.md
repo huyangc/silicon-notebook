@@ -45,7 +45,7 @@ Schema changes remain version-gated behind `SqliteMigrator`: append a new
 Startup recovery, stable seeds, and administrator upgrades run every boot
 outside that version gate.
 
-The current schema version is 70. This is the SQLite schema version. The committed v9 compatibility fixture
+The current schema version is 71. This is the SQLite schema version. The committed v9 compatibility fixture
 upgrades through migrations v10–v70 and remains readable. Those migrations
 cover compatibility and SQLite hot-path indexes (v10–v12), Memory/Agent and
 Memory-derived source links/indexes (v13–v15), knowhow tables and cell code
