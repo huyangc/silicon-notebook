@@ -523,7 +523,9 @@ class UnifiedKgStore:
     @staticmethod
     def derived_claim_still_held(db: Any, notebook_id: str, generation: int) -> bool:
         """写段前复读(设计 §1.2/复评 P2-4):≠自己的 G 即被抢占,当场作废
-        早停——抢占者预回收扫过的键区不会被再填残行。"""
+        早停。PG 侧这条 SELECT 不加行锁(READ COMMITTED):复读与随后 INSERT
+        之间抢占者仍可能插进来,所以它挡住的是「整段继续写下去」而不是最后
+        一批残行——残行无害(下轮回收),响亮早停才是这道复读的全部承诺。"""
         row = db.execute(
             "SELECT 1 FROM unified_kg_state "
             "WHERE notebook_id=%s AND derived_building_generation=%s",
@@ -599,6 +601,26 @@ class UnifiedKgStore:
         return row is not None
 
     @staticmethod
+    def community_generation_for_publish(db: Any, notebook_id: str) -> int:
+        """补账本发布复核专用:带 FOR SHARE 读 community_generation。
+
+        质量评 P1(接被退役的 board_partition_still_holds 的班):
+        PostgresDatabase.write() 是 READ COMMITTED、无进程锁,裸 SELECT 只是
+        瞬时读——并发翻转(一条 UPDATE unified_kg_state)可以在「比对通过」
+        与「产物落库提交」之间插进来,悬空产物照样盖上「与当前一致」的戳。
+        FOR SHARE 行锁把两个方向都关上:并发翻转的 UPDATE 阻塞到本事务提交;
+        它若已提交,这里读到的就是新代次 → 比对失配、整份放弃。锁序:两侧
+        发布路径都是「先 state 行、后 kg_* 产物表」,同向无环;与
+        discard → set_community_seq 的既有锁序也不交叉。**只**给补账本发布
+        复核用,别的读者用 state_row(无锁)。无 state 行 ⇒ 代 0 契约同读侧。"""
+        row = db.execute(
+            "SELECT community_generation FROM unified_kg_state "
+            "WHERE notebook_id=%s FOR SHARE",
+            (notebook_id,),
+        ).fetchone()
+        return int(row["community_generation"]) if row else 0
+
+    @staticmethod
     def flip_community_generation(
         db: Any, notebook_id: str, *, published_from: int, generation: int,
         now: str,
@@ -629,25 +651,36 @@ class UnifiedKgStore:
     @staticmethod
     def catchup_window_members(
         db: Any, notebook_id: str, published_generation: int, since_ts: str,
-        skew_seconds: int, limit: int,
+        skew_seconds: int, limit: int, *,
+        after_object_type: str = "", after_member_object_id: str = "",
     ) -> list:
-        """催收输入(设计 §1.5):非 published 代里落在「翻转锚点 - 偏斜余量」
-        之后的融合行——翻转后 append 全走新 published 代,这个集合冻结。
+        """催收输入一页(设计 §1.5):非 published 代里落在「翻转锚点 - 偏斜
+        余量」之后的融合行——翻转后 append 全走新 published 代,这个集合冻结。
         谓词是 ``generation != published`` 而非 ``= 旧P``:欠账轮(上轮翻转后
         崩溃)只有锚点落库、退休代号无处可查,而窗口内可能混入的僵尸在飞代行
         幂等安置无害且被 created_at 窗口自然限量——「搬多了幂等无害,漏搬才是
         洞」的余量方向。join objects 取安置所需的 payload(期间被删的对象
-        join 不到,天然跳过)。有界性凭据:idx_clusters_nb_created_gen 的
-        (notebook_id, created_at) 范围 seek。"""
+        join 不到,天然跳过);``payload::text`` 与 knowledge_store 的
+        ``_compat_rows(payload=True)`` 同一条跨后端契约——psycopg 会把裸
+        jsonb 解成 dict,服务层的 ``json.loads`` 会当场 TypeError(内评 P0)。
+        keyset 分页按 (object_type, member_object_id) 全序推进(质量评 P2:
+        背靠背 rebuild 时窗口宽度退化为整代,单次 fetchall 是无界内存;分页
+        后每页有界、逐页安置逐页释放,也不再需要会丢余量的截断保险丝)。
+        范围 seek 凭据:idx_clusters_nb_created_gen 的 (notebook_id,
+        created_at) 前缀。"""
         return db.execute(
-            "SELECT DISTINCT c.member_object_id, c.object_type, o.payload "
+            "SELECT c.member_object_id, c.object_type, "
+            "MIN(o.payload::text) AS payload "
             "FROM concept_clusters c "
             "JOIN knowledge_objects o ON o.id = c.member_object_id "
             "WHERE c.notebook_id=%s AND c.generation != %s "
             "AND c.created_at >= %s::timestamptz - make_interval(secs => %s) "
+            "AND (c.object_type, c.member_object_id) > (%s, %s) "
+            "GROUP BY c.object_type, c.member_object_id "
+            "ORDER BY c.object_type, c.member_object_id "
             "LIMIT %s",
             (notebook_id, published_generation, normalize_timestamp(since_ts),
-             skew_seconds, limit),
+             skew_seconds, after_object_type, after_member_object_id, limit),
         ).fetchall()
 
     @staticmethod
@@ -657,8 +690,11 @@ class UnifiedKgStore:
     ) -> int:
         """残代回收单页(T-5a 排水同款 ctid 分页;唯一回收通道=下轮预回收+
         启动恢复,无 finally 回收——跨翻转在飞读者整轮宽限,设计 D-W2-7)。
-        keep = (published, 在飞 G);catchup 标记在时调用方跳过整库。"""
-        assert table in ("concept_clusters", "communities", "community_members")
+        keep = (published, 在飞 G);catchup 标记在时调用方跳过整库。
+        表名白名单走响亮 raise 而非 assert(python -O 会剥掉 assert,而这是
+        拼进 SQL 前唯一的门,质量评 P3)。"""
+        if table not in ("concept_clusters", "communities", "community_members"):
+            raise ValueError(f"reap_derived_generations_page: 非派生表 {table!r}")
         marks = ",".join(["%s"] * len(keep))
         cur = db.execute(
             f"DELETE FROM {table} WHERE ctid IN ("

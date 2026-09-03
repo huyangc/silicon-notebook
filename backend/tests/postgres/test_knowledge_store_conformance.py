@@ -5247,6 +5247,51 @@ def test_copy_forward_communities_remints_ids_and_remaps_members_on_both_backend
                 for m in members] == [("canonical-quad", "cm-fwd-0", 1)]
 
 
+def test_the_publish_generation_read_blocks_a_concurrent_flip(knowledge_harness):
+    """PG 侧 `FOR SHARE` 的**行为**守卫(质量评 P1,接被退役的
+    `board_partition_still_holds` 行为测的班——不是「SQL 里有那几个字」)。
+
+    `PostgresDatabase.write()` 是 READ COMMITTED、无进程锁,补账本发布事务里
+    的代次读若是裸 SELECT,并发翻转(一条 `UPDATE unified_kg_state`)可以在
+    「比对通过」与「产物提交」之间落地,悬空产物照样盖「与当前一致」的戳。
+    `community_generation_for_publish` 的 FOR SHARE 把这个窗口关掉:
+    ⚠ 判据用 `lock_timeout` 而**不是** sleep(锁真的被持有时超时是确定性的);
+    ⚠ **对照组是自带的变异证明**:同一条 UPDATE 在读事务结束之后必须立刻
+    成功——没有它,「UPDATE 因别的原因失败」也能让上半段全绿;把 FOR SHARE
+    删掉则上半段当场报红。
+    ⚠ 两条连接各自从 harness 取:`write()` 有嵌套单飞守卫,套同一个里测不到锁。"""
+    import psycopg
+
+    _seed_analysis_fixture(knowledge_harness)
+    unified = _analysis_unified_store(knowledge_harness)
+    with knowledge_harness.database.write() as connection:
+        connection.execute(
+            "INSERT INTO unified_kg_state (notebook_id, updated_at) "
+            "VALUES (%s, now()) ON CONFLICT (notebook_id) DO NOTHING",
+            (ANALYSIS_NB,),
+        )
+
+    def flip_the_pointer() -> str:
+        with knowledge_harness.database.write() as connection:
+            connection.execute("SET LOCAL lock_timeout = '250ms'")
+            connection.execute(
+                "UPDATE unified_kg_state "
+                "SET community_generation=community_generation+1 "
+                "WHERE notebook_id=%s",
+                (ANALYSIS_NB,),
+            )
+        return "flipped"
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with knowledge_harness.database.write() as connection:
+            assert unified.community_generation_for_publish(
+                connection, ANALYSIS_NB) == 0
+            with pytest.raises(psycopg.errors.LockNotAvailable):
+                executor.submit(flip_the_pointer).result(timeout=30)
+        # 对照组:share 锁随读事务结束释放,同一条 UPDATE 立刻成功。
+        assert executor.submit(flip_the_pointer).result(timeout=30) == "flipped"
+
+
 # ---------------------------------------------------------------------------
 # PR-B: the per-source relink readers (paged replacement for `relink_rows`)
 # ---------------------------------------------------------------------------

@@ -2514,7 +2514,12 @@ class UnifiedKgStorePort(Protocol):
         since_ts: str,
         skew_seconds: int,
         limit: int,
+        *,
+        after_object_type: str = "",
+        after_member_object_id: str = "",
     ) -> list: ...
+    @staticmethod
+    def community_generation_for_publish(db: object, notebook_id: str) -> int: ...
     @staticmethod
     def reap_derived_generations_page(
         db: object,

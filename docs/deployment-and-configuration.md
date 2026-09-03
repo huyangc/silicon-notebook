@@ -882,7 +882,16 @@ NOTEBOOK_DELETE_FINALIZE_TIMEOUT_SECONDS  # PostgreSQL-only, optional per-transa
 KG_GRAPH_DRAIN_PAGE_ROWS                  # row budget for delete_notebook_kg's pre-reset drain (batch-3-W1 T-5a): one value serves as both the per-batch page size (one bounded DELETE per write transaction) and the per-table residue threshold deliberately left for the final single atomic reset. Sized against the deployment's statement timeout — the default 2000 sits comfortably under a 180s POSTGRES_STATEMENT_TIMEOUT_SECONDS; lower-resource installations can shrink it to shorten each batch's write lock / statement at the cost of more batches and a longer partially-drained window (default 2000; 50-20000, the ceiling stays under SQLite's default SQLITE_MAX_VARIABLE_NUMBER because drain pages bind selected ids as SQL parameters)
 KG_DERIVED_BUILD_TTL_SECONDS              # crash-fallback TTL for the generational rebuild's in-flight claim (batch-3-W2). NOT the normal release channel: failure paths release instantly via the rebuild's finally-CAS; the TTL only covers kill -9/power loss where even finally never ran. Numeric guardrail (floor 1800 enforced at startup): must sit well above this deployment's worst-case full recluster wall clock — the production 484GB library runs 30-60 minutes, the 4h default leaves headroom; setting it too low preempts a still-running rebuild as a corpse and both writers' flip double-CAS void each other, spinning the notebook. Do not lower without a measured faster rebuild wall clock (default 14400; >=1800)
 KG_CATCHUP_SKEW_SECONDS                   # clock-skew allowance for the single-pass catch-up after a generation flip: replays retired-generation fusion rows with created_at >= (flip anchor - this allowance). The anchor uses the DB server clock; the allowance covers application-clock skew on row timestamps and long-transaction visibility drift. Directional guardrail: raising it only replays a few more rows (idempotent placement is harmless); lowering it is what risks dropped rows — do not lower unless every writer's clock is proven far tighter than the default (default 300; >=0)
+KG_GENERATION_REAP_PAGE_ROWS              # rows per stale-generation reap page (shared by the rebuild pre-reclaim and the communities pre-publish reap; startup recovery uses its own constant plus a global page budget). Same family and bounds as KG_GRAPH_DRAIN_PAGE_ROWS: one bounded DELETE per page, one write transaction each, write lock released between pages (default 5000; 50-20000)
 ```
+
+Capacity expectation (batch-3-W2 generational swap): the steady-state footprint of
+the three derived tables (concept_clusters/communities/community_members) is about
+**2x** the pre-generational size — the retired generation is deliberately kept for
+one full round after a flip (the in-flight readers' grace period), and the only
+reclamation channels are the next rebuild's pre-reclaim and startup recovery. The
+longer the gap between rebuilds, the longer both generations coexist; plan disk
+and autovacuum for 2x the row and index volume.
 
 With startup preload enabled, `/api/ready` remains false during the
 `preloading_indexes` phase. A corrupt required artifact, more live published indexes

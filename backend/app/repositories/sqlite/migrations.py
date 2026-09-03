@@ -3833,36 +3833,45 @@ class SqliteMigrator:
             )
 
     def _reap_stale_derived_generations(self) -> None:
-        """批 3·W2 启动恢复:残代回收(sqlite 化身)——语义与保留规则逐条
-        对应 PG 孪生 ``PostgresMaintenanceAdapter._reap_stale_derived_
-        generations`` 的 docstring:state 行入口、催收标记在则整库跳过、
-        在飞代保留(单进程部署下启动时不可能有本进程 rebuild 在飞,但共库的
-        离线 CLI 可能持认领——同一条 TTL 纪律)、全局页预算硬上界。"""
+        """批 3·W2 启动恢复(sqlite 化身):先全局释放滞留在飞认领(启动这
+        一刻不可能有本进程 rebuild 在飞;活认领被误清也安全——双 CAS 让
+        受害者响亮作废,理由全文见 PG 孪生 ``PostgresMaintenanceAdapter.
+        _reap_stale_derived_generations``),再逐 notebook **现读** state 行
+        取 keep 做预算化残代回收;催收标记在则整库跳过。"""
         from app.repositories.sqlite.unified_kg_store import UnifiedKgStore
 
         with self._connect() as db:
-            rows = db.execute(
-                "SELECT notebook_id, cluster_generation, community_generation, "
-                "derived_building_generation, derived_catchup_from "
-                "FROM unified_kg_state WHERE derived_generation_counter > 0"
-            ).fetchall()
+            db.execute(
+                "UPDATE unified_kg_state SET derived_building_generation=0, "
+                "derived_building_claimed_at=NULL "
+                "WHERE derived_building_generation != 0"
+            )
+        with self._connect() as db:
+            ids = [r["notebook_id"] for r in db.execute(
+                "SELECT notebook_id FROM unified_kg_state "
+                "WHERE derived_generation_counter > 0"
+            ).fetchall()]
         budget = _RECOVERY_REAP_PAGES_BUDGET
-        for row in rows:
+        for notebook_id in ids:
             if budget <= 0:
                 return
-            if row["derived_catchup_from"] is not None:
+            with self._connect() as db:
+                row = db.execute(
+                    "SELECT cluster_generation, community_generation, "
+                    "derived_catchup_from FROM unified_kg_state "
+                    "WHERE notebook_id=?",
+                    (notebook_id,),
+                ).fetchone()
+            if row is None or row["derived_catchup_from"] is not None:
                 continue
-            keep = {int(row["cluster_generation"]),
-                    int(row["community_generation"])}
-            if int(row["derived_building_generation"]):
-                keep.add(int(row["derived_building_generation"]))
-            keep_t = tuple(sorted(keep))
+            keep_t = tuple(sorted({int(row["cluster_generation"]),
+                                   int(row["community_generation"])}))
             for table in ("concept_clusters", "communities",
                           "community_members"):
                 while budget > 0:
                     with self._connect() as db:
                         n = UnifiedKgStore.reap_derived_generations_page(
-                            db, row["notebook_id"], table, keep_t,
+                            db, notebook_id, table, keep_t,
                             _RECOVERY_REAP_PAGE_ROWS)
                     budget -= 1
                     if n < _RECOVERY_REAP_PAGE_ROWS:

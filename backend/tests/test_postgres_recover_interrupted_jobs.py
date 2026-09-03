@@ -58,8 +58,9 @@ class _FakeDatabase:
 
     @contextmanager
     def connect(self):
-        # derived_generations 的入口是一条只读 SELECT(state 行扫描);空结果
-        # ⇒ 零回收写。与 write() 同一套记录/注入规则。
+        # derived_generations 先发一条全局 UPDATE 释放滞留认领(write),再
+        # SELECT state 行入口(connect);空结果 ⇒ 零回收写。与 write() 同一
+        # 套记录/注入规则。
         yield _FakeWriteConnection(self._executed, self._fail_marker)
 
 
@@ -103,15 +104,17 @@ def test_first_statement_failure_does_not_block_the_remaining_twelve(caplog):
     with caplog.at_level(logging.ERROR, logger="silicon_notebook.postgres.maintenance"):
         adapter.recover_interrupted_jobs()  # ① 必须不向上抛(否则本调用本身就会让测试出错)
 
-    # ② 其余 12 条步骤仍全部执行:除了被注入失败的那条(retained_user_activity 的 SQL
-    # 从未进 executed),其余每条语句的 SQL 都真的跑到了 fake 连接上。
-    assert len(executed) == 12
+    # ② 其余 12 条步骤仍全部执行(derived_generations 一步发两条语句:全局
+    # 释放 UPDATE + state 入口 SELECT):除了被注入失败的那条,其余语句都
+    # 真的跑到了 fake 连接上。
+    assert len(executed) == 13
     assert not any("retained_user_activity" in sql for sql in executed)
     assert any("merge_review_jobs" in sql for sql in executed)
     assert any("ask_jobs" in sql for sql in executed)
     assert any("kg_build_jobs" in sql for sql in executed)
     assert any("TRUNCATE kg_cluster_scratch" in sql for sql in executed)
     assert any("TRUNCATE kg_canonical_scratch" in sql for sql in executed)
+    assert any("derived_building_generation=0" in sql for sql in executed)
     assert any("derived_generation_counter" in sql for sql in executed)  # 排在最后,证明真跑到底
 
     # ③ failed_steps 里出现该标签(通过收尾 logger.error 汇总的消息内容间接验证——
@@ -144,7 +147,7 @@ def test_last_statement_failure_still_reports_only_that_one_label(caplog):
     with caplog.at_level(logging.ERROR, logger="silicon_notebook.postgres.maintenance"):
         adapter.recover_interrupted_jobs()
 
-    assert len(executed) == 12
+    assert len(executed) == 13
     assert any("merge_review_jobs" in sql for sql in executed)
     assert any("TRUNCATE kg_cluster_scratch" in sql for sql in executed)
     assert not any("TRUNCATE kg_canonical_scratch" in sql for sql in executed)
@@ -226,7 +229,10 @@ def test_each_step_failure_in_call_order_is_isolated(caplog, step_index, expecte
     with caplog.at_level(logging.ERROR, logger="silicon_notebook.postgres.maintenance"):
         adapter.recover_interrupted_jobs()  # 必须不向上抛
 
-    assert len(executed) == 12  # 其余 12 条仍全部执行
+    # 其余步骤仍全部执行。derived_generations(第 13 步)自己发两条语句:
+    # 在它之前注入失败时两条都在(12-1+2=13);恰好打中它的第一条(全局
+    # 释放 UPDATE,call #13)时,该步整体跳过,只剩前 12 条。
+    assert len(executed) == (13 if step_index <= 12 else 12)
     summary_records = [
         r for r in caplog.records
         if r.levelno == logging.ERROR and r.getMessage().startswith(
@@ -246,7 +252,7 @@ def test_no_failure_means_no_summary_log_and_all_thirteen_run(caplog):
     with caplog.at_level(logging.ERROR, logger="silicon_notebook.postgres.maintenance"):
         adapter.recover_interrupted_jobs()
 
-    assert len(executed) == 13
+    assert len(executed) == 14
     assert not any(
         r.levelno == logging.ERROR for r in caplog.records
     )

@@ -4638,7 +4638,7 @@ class KnowledgeLifecycleService:
                                     desc_by_cid: Optional[Dict[str, str]] = None,
                                     desc_sig_by_cid: Optional[Dict[str, str]] = None,
                                     run_id: str = "", *,
-                                    generation: int = 0) -> None:
+                                    generation: int) -> None:
         """Persist concept_clusters rows for one type into the in-flight
         generation. Rows whose seed has no canonical are skipped. Only reads
         scratch rows matching run_id so concurrent rebuilds don't cross.
@@ -4717,22 +4717,19 @@ class KnowledgeLifecycleService:
                 wdb, notebook_id, object_type, run_id, now, generation
             )
 
-    # 批 3·W2:催收单遍读取上限。窗口本身由 created_at >= 锚点-偏斜 界住
-    # (量级=一轮 rebuild 期间的增量 append),这个常数只是结构性保险丝——
-    # 截断时发结构化事件如实报告,残余靠 cluster_input_version 失配等下一次
-    # 用户触发的 rebuild 收敛(设计 §1.5 的措辞:dirty 无自动消费者,不虚构
-    # 自动收敛)。不分页重查:安置不删源行,重查会原集合复读、永不推进。
-    _CATCHUP_WINDOW_MAX_ROWS = 200_000
-    # 残代回收单页行数:T-5a 排水同款量级,每页独立写事务、页间释放写锁。
-    _GENERATION_REAP_PAGE_ROWS = 5000
+    # 批 3·W2:催收每页行数。窗口本身由 created_at >= 锚点-偏斜 界住,但
+    # 背靠背 rebuild 时窗口可能装下上一整代(质量评 P2)——分页把内存峰值
+    # 钉在每页,逐页安置、逐页释放;keyset 全序推进,不存在截断丢余量。
+    _CATCHUP_PAGE_ROWS = 20_000
 
     def _settle_generation_catchup(self, notebook_id: str, *,
                                    published_generation: int,
                                    since_ts: str) -> None:
-        """催收(设计 §1.5,单遍有界搬运):把「锚点 - 偏斜余量」窗口内落在
-        **非 published 代**的融合成员,经既有安置原语重放进当前 published 代,
-        完成后 CAS 清欠账标记。两个调用场景共用:本轮翻转后(锚点=取号 TS),
-        与下轮取号发现上轮崩溃留下的落库标记(欠账)。
+        """催收(设计 §1.5):把「锚点 - 偏斜余量」窗口内落在**非 published
+        代**的融合成员,按 (object_type, member_object_id) keyset 分页重放进
+        当前 published 代,整趟走完后才 CAS 清欠账标记——中途崩溃标记还在,
+        下一轮从头重放(幂等,探针按代收窄)。两个调用场景共用:本轮翻转后
+        (锚点=取号 TS),与下轮取号发现上轮崩溃留下的落库标记(欠账)。
 
         安置 = place_new_concepts(四类换 seed_fn,纯 Python 无 LLM)+
         append_clusters:后者锁内读 published 指针写行、探针按代收窄使重复
@@ -4742,51 +4739,67 @@ class KnowledgeLifecycleService:
         from app.services.kg_merge import (place_new_concepts, _norm,
                                            seed_claim, seed_formula,
                                            seed_procedure)
-        with self._connect() as db:
-            rows = self.unified_kg.catchup_window_members(
-                db, notebook_id, published_generation, since_ts,
-                self.settings.kg_catchup_skew_seconds,
-                self._CATCHUP_WINDOW_MAX_ROWS)
-        if len(rows) >= self._CATCHUP_WINDOW_MAX_ROWS:
-            self.event_log.emit({
-                "kind": "kg_generation_catchup_truncated",
-                "notebook_id": notebook_id, "since_ts": since_ts,
-                "limit": self._CATCHUP_WINDOW_MAX_ROWS,
-            })
-        by_type: Dict[str, list] = {}
-        for r in rows:
-            payload = json.loads(r["payload"] or "{}")
-            by_type.setdefault(str(r["object_type"]), []).append({
-                "object_id": r["member_object_id"],
-                "name": payload.get("name", ""),
-                "payload": payload,
-            })
-        del rows
         _SEEDS = {"concept": (lambda o: _norm(o["name"]), "K-"),
                   "claim": (seed_claim, "KL-"),
                   "formula": (seed_formula, "KF-"),
                   "procedure": (seed_procedure, "KP-")}
-        moved = 0
-        for t, objs in by_type.items():
-            picked = _SEEDS.get(t)
-            if picked is None:
-                continue
-            sfn, prefix = picked
+        skew = self.settings.kg_catchup_skew_seconds
+        after_type, after_member = "", ""
+        replayed = moved = 0
+        unknown_types: set = set()
+        while True:
             with self._connect() as db:
-                cn = self.governance_store.incremental_cluster_rows(
-                    db, notebook_id, t)
-            canon = {r["canonical_id"]: r["canonical_name"] for r in cn}
-            placed = place_new_concepts(objs, canon, seed_fn=sfn,
-                                        id_prefix=prefix)
-            moved += self.append_clusters(notebook_id, placed, object_type=t)
+                rows = self.unified_kg.catchup_window_members(
+                    db, notebook_id, published_generation, since_ts,
+                    skew, self._CATCHUP_PAGE_ROWS,
+                    after_object_type=after_type,
+                    after_member_object_id=after_member)
+            if not rows:
+                break
+            after_type = str(rows[-1]["object_type"])
+            after_member = str(rows[-1]["member_object_id"])
+            by_type: Dict[str, list] = {}
+            for r in rows:
+                payload = json.loads(r["payload"] or "{}")
+                by_type.setdefault(str(r["object_type"]), []).append({
+                    "object_id": r["member_object_id"],
+                    "name": payload.get("name", ""),
+                    "payload": payload,
+                })
+            short_page = len(rows) < self._CATCHUP_PAGE_ROWS
+            del rows
+            for t, objs in by_type.items():
+                picked = _SEEDS.get(t)
+                if picked is None:
+                    # 四类之外的窗口行今天不存在;真出现时如实上报再跳过,
+                    # 不静默(质量评 P3)。
+                    unknown_types.add(t)
+                    continue
+                sfn, prefix = picked
+                replayed += len(objs)
+                with self._connect() as db:
+                    cn = self.governance_store.incremental_cluster_rows(
+                        db, notebook_id, t)
+                canon = {r["canonical_id"]: r["canonical_name"] for r in cn}
+                placed = place_new_concepts(objs, canon, seed_fn=sfn,
+                                            id_prefix=prefix)
+                moved += self.append_clusters(notebook_id, placed,
+                                              object_type=t)
+            if short_page:
+                break
+        if unknown_types:
+            self.event_log.emit({
+                "kind": "kg_generation_catchup_unknown_types",
+                "notebook_id": notebook_id,
+                "types": sorted(unknown_types),
+            })
         with self._write() as db:
             self.unified_kg.clear_catchup_marker(db, notebook_id, since_ts)
-        if by_type:
+        if replayed:
             self.event_log.emit({
                 "kind": "kg_generation_catchup_settled",
                 "notebook_id": notebook_id, "since_ts": since_ts,
-                "replayed": sum(len(v) for v in by_type.values()),
-                "appended": moved,
+                "replayed": replayed, "appended": moved,
             })
 
     def _reap_stale_community_generations(self, notebook_id: str,
@@ -4794,15 +4807,15 @@ class KnowledgeLifecycleService:
         """communities 族残代预回收(设计 P1-8,发布路径前):两张表同款有界
         分页——发布事务放弃/回滚留下的新代行、已退休旧代行都走这条唯一通道
         (加启动恢复);无 finally 回收,跨翻转在飞读者拿一整轮宽限。"""
+        page = self.settings.kg_generation_reap_page_rows
         total = 0
         for table in ("communities", "community_members"):
             while True:
                 with self._write() as db:
                     n = self.unified_kg.reap_derived_generations_page(
-                        db, notebook_id, table, keep,
-                        self._GENERATION_REAP_PAGE_ROWS)
+                        db, notebook_id, table, keep, page)
                 total += n
-                if n < self._GENERATION_REAP_PAGE_ROWS:
+                if n < page:
                     break
         if total:
             self.event_log.emit({
@@ -4816,16 +4829,26 @@ class KnowledgeLifecycleService:
                                         keep: "Tuple[int, int]") -> int:
         """预回收:有界分页删 concept_clusters 里 generation ∉ keep 的残代行
         (被抢占/翻转作废的在飞代、已退休且欠账结清的旧 published 代)。调用
-        顺序由 rebuild 保证欠账已先结清——催收标记在时不得回收(退休代是
-        欠账的数据源)。每页独立写事务,页间完整释放写锁。"""
+        顺序由 rebuild 保证欠账已先结清,但谓词本身也再兜一层(内评 P2:
+        clear_catchup_marker 的 CAS 若因时间戳形状漂移静默 no-op,时序论证
+        单独扛不住——标记在时退休代是欠账的数据源,删它就是把链 a 的洞重新
+        撕开;与启动恢复侧的同款保护对称)。每页独立写事务,页间释放写锁。"""
+        with self._connect() as db:
+            st = self.unified_kg.state_row(db, notebook_id)
+        if st is not None and st["derived_catchup_from"] is not None:
+            self.event_log.emit({
+                "kind": "kg_generation_reap_skipped", "notebook_id": notebook_id,
+                "reason": "catchup_marker_present",
+            })
+            return 0
+        page = self.settings.kg_generation_reap_page_rows
         total = 0
         while True:
             with self._write() as db:
                 n = self.unified_kg.reap_derived_generations_page(
-                    db, notebook_id, "concept_clusters", keep,
-                    self._GENERATION_REAP_PAGE_ROWS)
+                    db, notebook_id, "concept_clusters", keep, page)
             total += n
-            if n < self._GENERATION_REAP_PAGE_ROWS:
+            if n < page:
                 break
         if total:
             self.event_log.emit({
@@ -5402,8 +5425,8 @@ class KnowledgeLifecycleService:
             self.event_log.emit({"kind": "mention_bridge_rebuild_failed",
                                  "notebook_id": notebook_id, "error": str(exc)[:200]})
         # Proactively refresh the viz-only index so the next KG-view open doesn't
-        # pay a lazy build. This bumped cluster_mutation_seq (in the cluster write
-        # above), and build_viz now stamps its artifact with that cseq while
+        # pay a lazy build. The flip statement above bumped cluster_mutation_seq
+        # (批 3·W2:与指针同语句,不再逐类型 bump), and build_viz now stamps its artifact with that cseq while
         # viz_index()/viz_probe() compare it — so a cluster-only rebuild reliably
         # marks the persisted viz STALE and the lazy path refreshes it on the next
         # open (serving the old folding meanwhile). That is why this proactive
@@ -6039,7 +6062,7 @@ class KnowledgeLifecycleService:
                         # id 重铸(communities.id 单列 PK,同 id 双代必撞;
                         # 非默认层账本不背书,重铸零代价),成员行同步重映射。
                         # 今天所有调用点 level=0 → 复制集为空。
-                        self.unified_kg.copy_forward_communities(
+                        _copied_forward = self.unified_kg.copy_forward_communities(
                             db, notebook_id, level, _published_from,
                             _generation, lambda: self._new_id("cm")
                         )
@@ -6078,11 +6101,16 @@ class KnowledgeLifecycleService:
                         # ——非默认层构建作废默认层产物是**连坐**;而推进那份不
                         # 分 level 的 seq 更糟:「seq 对齐 ⟹ 默认层建过」是闸里
                         # 默认层那一支**无条件**信的蕴含关系)。
-                        # ⚠ 已知残留(非默认层重建时默认层板块 id 因 copy-forward
-                        # 重铸而变,两份板块依赖产物未同步作废):今天没有任何
-                        # 调用点传非默认层(复制集恒空),该档行为与设计 §1.3 的
-                        # 裁决一致——「重铸零代价」以此为前提,新增非默认层调用
-                        # 点时须一并补作废。
+                        # ⚠ 复制集非空(=非默认层构建把默认层行 copy-forward
+                        # 重铸了 id)时,两份板块依赖产物此刻真悬空——必须同
+                        # 事务作废(质量评 P1:改造前按 level 删写不动默认层
+                        # 行,没有这个洞;代际化 + id 重铸把它引了进来,作废
+                        # 不再是「连坐」而是对悬空的如实回应)。共享 seq 仍
+                        # 只归默认层推进(方向五那半不变)。
+                        if _copied_forward and not _ledger_speaks_for_level:
+                            self.unified_kg.discard_board_dependent_kg_analysis_artifacts(
+                                db, notebook_id
+                            )
                         if _ledger_speaks_for_level:
                             self.unified_kg.discard_board_dependent_kg_analysis_artifacts(
                                 db, notebook_id
@@ -6127,9 +6155,13 @@ class KnowledgeLifecycleService:
                         # 强度」在新判据下改述为「无代次可记,比对恒等」。
                         _partition_moved = False
                         if graph_fresh and kept_rows:
-                            _st_pub = self.unified_kg.state_row(db, notebook_id)
-                            _gen_now = (int(_st_pub["community_generation"])
-                                        if _st_pub else 0)
+                            # 质量评 P1:PG 侧带 FOR SHARE 的专用原语——裸读
+                            # 挡不住并发翻转在「比对通过」与「本事务提交」
+                            # 之间落地(READ COMMITTED、无进程锁);行锁把
+                            # 并发翻转的 UPDATE 阻塞到本事务提交,两个方向
+                            # 都闭合。锁序论证见原语 docstring。
+                            _gen_now = self.unified_kg.community_generation_for_publish(
+                                db, notebook_id)
                             _partition_moved = _gen_now != _partition_generation
                         if _partition_moved:
                             # 放弃整份发布,**不重试**:重试要重跑那趟分钟级的全表重活,而且
