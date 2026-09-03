@@ -1617,18 +1617,18 @@ revert、又续跑这次删除。
 - **孤儿目录**：`{storage}/notebooks`、`assets`、`kg_index`、`kg_viz`、
   `kg_index_partitions` 五棵根下、目录名（scale 三根先剥
   `.old`/`.tmp`/`.tmp-<token>` 得基 id）不在 `notebooks` 表里的子目录。
-  `notebooks`/`assets` 两根设**年龄闸**（`--min-age-seconds`，默认取
-  `NOTEBOOK_COPY_STALE_SECONDS`）：拷贝路径先 copytree 目的目录、后插
-  `notebooks` 行，闸值内的新目录一律跳过留声，绝不与在途拷贝抢目录。
-  闸看的是 `max(mtime, ctime)`——copytree 会把源目录的旧 mtime 复制到目
-  的目录，而 ctime（inode 变更时间）用户态无法回拨、不可继承（codex
-  #666 R1 P1），刚落盘的在途拷贝一定被拦下。默认闸值与拷贝子系统自己的
-  失活窗口是同一个常量：目录超窗仍无行的拷贝，`sweep_stale_copies` 按同
-  一 cutoff 也已判死。把闸调**低**于该窗口（含 0）须搭配
-  `--confirm-service-stopped` 停服确认（codex #666 R3 P1），否则拒绝；
-  调高恒安全、无须确认。
+  **`notebooks`/`assets` 两根只在停服模式删**（`--confirm-service-stopped`，
+  `batch_ingest` 同款契约；codex #666 R1/R3/R5 三轮收敛的结论——时间信号
+  不是同步机制）：拷贝路径先 copytree 目的目录、后插 `notebooks` 行，这个
+  窗口没有上界，顶层目录时间戳在文件流进子目录期间也不动——在线模式下这
+  两根的孤儿只报告（`requires_service_stopped` 跳过、退出 1），删除留给停
+  服窗口。停服模式下年龄闸（`--min-age-seconds`，默认
+  `NOTEBOOK_COPY_STALE_SECONDS`，看 `max(mtime, ctime)`——mtime 会被
+  copytree 从源继承、ctime 用户态无法回拨）降级为防「以为停了其实没停干净」
+  的最后一道皮带，可显式调低到 0。
   scale 三根删前逐本取跨进程排它 claim（与 scale 构建/删除作业同一把
-  advisory lock）；被占或无法评估一律跳过留声，绝不硬删。symlink 不清。
+  advisory lock），在线模式即可安全清扫；被占或无法评估一律跳过留声，
+  绝不硬删。symlink 不清。
 
 ```bash
 # 只读盘点(默认):逐表孤儿行数 + 逐根孤儿目录 id
@@ -1641,11 +1641,13 @@ PYTHONPATH=backend python scripts/sweep_legacy_delete_leftovers.py --apply
 读取且绝不打印。inspect 与 apply 收尾的残余复核都是 5 张表的 anti-join
 全表扫——按生产量级可能是分钟级 I/O 密集读，建议低峰执行（PostgreSQL
 语句超时可用 `--statement-timeout-seconds` 覆写，默认 3600）。退出码：
-`0` 完成；`1` apply 有跳过（年龄闸/锁被占）、删不掉的路径或残余孤儿行
-——重跑即可收敛，仍剩则按输出的 id 逐本排查；`2` 参数拒绝。SQLite 部署
-无跨进程锁，脚本对离册 id 直接清扫（单进程服务发不起对离册 id 的合法并
-发写，论证见模块 docstring）；PostgreSQL 可与在役服务并存运行（在途拷贝
-由年龄闸保护、在途构建/删除作业由 claim 互斥）。
+`0` 完成；`1` apply 有跳过（在线模式的直删根/年龄闸/锁被占）、删不掉的
+路径或残余孤儿行——重跑或换停服窗口即可收敛，仍剩则按输出的 id 逐本排
+查；`2` 参数拒绝。在线模式（不带停服确认）动手的只有孤儿行与 scale 三根
+——行删是有界写事务、scale 根由 claim 互斥，两后端都可与在役服务并存；
+`notebooks`/`assets` 两根的删除必须停服窗口执行。SQLite 的 scale 根无跨
+进程锁，脚本对离册 id 直接清扫（单进程服务发不起对离册 id 的合法并发写，
+论证见模块 docstring）。
 
 ## 解析问题自动归档
 

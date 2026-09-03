@@ -108,7 +108,8 @@ def test_disk_sweep_under_real_advisory_lock_and_busy_skip(
     assert held is not None and held is not SCALE_BUILD_LOCK_UNAVAILABLE
     try:
         report = sweep_orphan_disk(
-            runtime.database, "postgresql", storage, min_age_seconds=0
+            runtime.database, "postgresql", storage,
+            min_age_seconds=0, service_stopped=True,
         )
     finally:
         held.release()
