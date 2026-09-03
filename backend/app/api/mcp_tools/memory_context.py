@@ -169,6 +169,55 @@ def _ask_actionable(repo: Any, notebook_id: str, payload: AskRequest) -> Any:
         raise ValueError(f"{message}（reason: {exc.code}）") from None
 
 
+def _validate_ask_notebook_inputs(
+    question: str, conversation_id: str, mode: str
+) -> None:
+    """Every ``ask_notebook`` input rail that must fail BEFORE any durable state.
+
+    All three live here, outside the tool body, rather than inline: the tool
+    is a hot function under the zero-slack length ratchet, and a rail that
+    fails before ``repository_provider()`` is exactly the kind of statement
+    that should not grow it.
+
+    * ``question`` length -- the same rail the HTTP entry points enforce,
+      checked HERE rather than left to ``AskRequest``'s validator, for the
+      reason ``conversation_id`` already has its own check: a pydantic
+      ValidationError raised deep in ``run_ask`` surfaces to an Agent as an
+      opaque model dump, while this says what to do about it. This is a real
+      behaviour change for long-lived Agent tokens, which could previously
+      submit a question of any length -- deliberate, and registered in docs.
+      The projection that serves a shared conversation's question verbatim
+      to anonymous readers cannot be bounded by anything except the write
+      side, and an MCP client is a write side like any other. 4,000
+      characters is a question no Agent should need to exceed; past it the
+      material belongs in an uploaded source, not in the prompt.
+    * ``conversation_id`` length.
+    * The ``reasoning`` deterministic clarification gate -- the same
+      fail-closed gate the HTTP direct entry point applies in
+      ``_validate_confirmed_reasoning_intent`` (ask_routes.py), run here,
+      before any durable ask_job is created, rather than left to the
+      engine's own compatibility branch further down the call chain, which
+      only runs after ``begin_job_current`` has already published a job
+      row. History is passed as "" to match the HTTP gate: the deterministic
+      checks only look at the question's own wording, not at structured
+      conversation history.
+    """
+    if len(question) > ASK_QUESTION_MAX_CHARS:
+        raise ValueError(
+            f"question too long: {len(question)} characters, the maximum is "
+            f"{ASK_QUESTION_MAX_CHARS}. Shorten the question, or add the "
+            f"long material to the notebook as a source and ask about it."
+        )
+    if len(conversation_id) > CONVERSATION_ID_MAX_LENGTH:
+        raise ValueError("conversation_id too long")
+    if mode == "reasoning":
+        seed = plan_query_intent(None, question.strip(), "", max_topics=1)
+        if seed.get("needs_clarification"):
+            raise ValueError(
+                clarification_gate_message(seed) + " 把对象名写进问题后重试。"
+            )
+
+
 def register_memory_context_tools(
     server: FastMCP, repository_provider: Callable[[], Any]
 ) -> None:
@@ -403,41 +452,7 @@ def register_memory_context_tools(
         conversation_id: str = "",
     ) -> dict[str, Any]:
         _validate_ask_mode(mode)
-        # Same rail the HTTP entry points enforce, checked HERE rather than left
-        # to `AskRequest`'s validator below, for the reason `conversation_id`
-        # already has its own check: a pydantic ValidationError raised deep in
-        # `run_ask` surfaces to an Agent as an opaque model dump, while this
-        # says what to do about it.
-        #
-        # This is a real behaviour change for long-lived Agent tokens, which
-        # could previously submit a question of any length -- deliberate, and
-        # registered in docs. The projection that serves a shared conversation's
-        # question verbatim to anonymous readers cannot be bounded by anything
-        # except the write side, and an MCP client is a write side like any
-        # other. 4,000 characters is a question no Agent should need to exceed;
-        # past it the material belongs in an uploaded source, not in the prompt.
-        if len(question) > ASK_QUESTION_MAX_CHARS:
-            raise ValueError(
-                f"question too long: {len(question)} characters, the maximum is "
-                f"{ASK_QUESTION_MAX_CHARS}. Shorten the question, or add the "
-                f"long material to the notebook as a source and ask about it."
-            )
-        if len(conversation_id) > CONVERSATION_ID_MAX_LENGTH:
-            raise ValueError("conversation_id too long")
-        # Same deterministic fail-closed gate the HTTP direct entry point
-        # applies in `_validate_confirmed_reasoning_intent` (ask_routes.py),
-        # checked HERE -- before any durable ask_job is created -- rather than
-        # left to the engine's own compatibility branch further down the call
-        # chain, which only runs after `begin_job_current` has already
-        # published a job row. History is passed as "" to match the HTTP
-        # gate: the deterministic checks only look at the question's own
-        # wording, not at structured conversation history.
-        if mode == "reasoning":
-            seed = plan_query_intent(None, question.strip(), "", max_topics=1)
-            if seed.get("needs_clarification"):
-                raise ValueError(
-                    clarification_gate_message(seed) + " 把对象名写进问题后重试。"
-                )
+        _validate_ask_notebook_inputs(question, conversation_id, mode)
         repo = repository_provider()
         principal, notebook_id = await anyio.to_thread.run_sync(
             _selected_notebook, ctx, repo, "ask:execute"

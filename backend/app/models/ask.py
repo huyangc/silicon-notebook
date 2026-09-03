@@ -11,6 +11,8 @@ from app.models.source_scope import (
 )
 
 from app.core.ask_retrieval_policy import (
+    AMBIGUITY_QUESTION_MAX_CHARS,
+    AMBIGUITY_ROWS_MAX,
     DEFAULT_RETRIEVAL_EFFORT,
     ResultScope,
     RetrievalEffort,
@@ -188,7 +190,7 @@ class QueryIntentTopic(BaseModel):
 
 class QueryIntentAmbiguity(BaseModel):
     id: str = Field(min_length=1, max_length=100)
-    question: str = Field(min_length=1, max_length=500)
+    question: str = Field(min_length=1, max_length=AMBIGUITY_QUESTION_MAX_CHARS)
     reason: str = Field(default="", max_length=300)
     required: bool = True
     options: List[str] = Field(default_factory=list, max_length=4)
@@ -220,7 +222,9 @@ class QueryIntentContract(BaseModel):
     excluded_topics: List[str] = Field(default_factory=list, max_length=8)
     expected_output: str = Field(default="", max_length=1000)
     assumptions: List[str] = Field(default_factory=list, max_length=8)
-    ambiguities: List[QueryIntentAmbiguity] = Field(default_factory=list, max_length=8)
+    ambiguities: List[QueryIntentAmbiguity] = Field(
+        default_factory=list, max_length=AMBIGUITY_ROWS_MAX
+    )
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     needs_clarification: bool = False
     confirmed: bool = False
