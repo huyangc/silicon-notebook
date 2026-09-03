@@ -4863,6 +4863,181 @@ class KnowledgeLifecycleService:
             })
         return total
 
+    def _concept_description_stage(
+        self, notebook_id: str, sd, seed_to_canonical, members_count,
+        run_id: str, _ck_ver: str, progress, _stage, _time,
+    ) -> "Tuple[Dict[str, str], Dict[str, str]]":
+        """概念描述阶段(checkpoint 复用 + 批量证据取数 + 并行 LLM),从
+        rebuild_unified_kg 原地抽出(零余量热函数天花板逼出的切分,行为
+        逐字保留)。返回 (desc_by_cid, desc_sig_by_cid)。"""
+        desc_by_cid: Dict[str, str] = {}
+        desc_sig_by_cid: Dict[str, str] = {}
+        _t_desc = _time.perf_counter()
+        _desc_ran = (
+            self.settings.kg_concept_desc_enabled
+            and self.model_clients.configured("kg_concept_description")
+        )
+        if _desc_ran:
+            from app.services.prompts import concept_description_prompt, CONCEPT_DESC_SCHEMA_HINT
+            # Previous descriptions + their input sigs, keyed by canonical id. DISTINCT
+            # so this is bounded by #canonicals (not #members). Reuse fires only on an
+            # exact sig match with a non-empty stored description → fail-safe: any
+            # miss/mismatch just regenerates (worst case = old behavior).
+            old_desc: Dict[str, tuple] = {}
+            with self._connect() as db:
+                for r in self.unified_kg.cluster_description_rows(db, notebook_id):
+                    old_desc[r["canonical_id"]] = (r["canonical_description"] or "", r["canonical_desc_sig"] or "")
+            # 同 input_version 的 checkpoint(写簇前被杀留下的已完成描述)作第一优先复用源。
+            try:
+                desc_ckpt = self.unified_kg.checkpoint_load(
+                    notebook_id, _ck_ver, "concept_desc")
+            except Exception:  # noqa: BLE001 — checkpoint 读失败退化为全量重跑,绝不打断 rebuild
+                self.event_log.logger.warning(
+                    "concept_desc checkpoint load 失败 for %s;本轮全量重跑描述", notebook_id, exc_info=True)
+                desc_ckpt = {}
+            # Total members per canonical = Σ members_count over its seeds. Keep
+            # only multi-member (cross-doc merged) canonicals — same cost bound as
+            # the legacy `len(mids) < 2` gate, but computed from seed aggregates so
+            # no 5M-row member list is materialized.
+            total_by_cid: Dict[str, int] = {}
+            seeds_by_cid: Dict[str, List[str]] = {}
+            for s, cid in seed_to_canonical.items():
+                total_by_cid[cid] = total_by_cid.get(cid, 0) + members_count.get(s, 0)
+                seeds_by_cid.setdefault(cid, []).append(s)
+            # PHASE 1 (serial, cheap DB): fetch quotes per multi-member canonical,
+            # compute its input sig, and either reuse the cached description or
+            # queue an LLM job. DB access stays in the main thread.
+            work: List[tuple] = []
+            # 只保留多成员(跨文档合并)的 canonical——与逐条时代的 `total < 2`
+            # 门同一个成本界,顺序沿 total_by_cid 的迭代序原样保留。
+            eligible = [
+                cid for cid, total in total_by_cid.items() if total >= 2
+            ]
+            # ⚠ 证据取数**按批**(审计批4):逐条时代是「每个多成员 canonical 一次
+            # cluster_evidence_rows 往返」,10⁵–10⁶ 次串行 DB 往返全部堵在 LLM 阶段
+            # 之前。现在一次 IN 查回一整批 canonical 的 seed 证据行,按行上的 seed
+            # 分组回内存。
+            #
+            # 产物逐位不变的论证(两条):
+            #  ① 每个 canonical 的 quotes 经 `sorted(set(...))[:8]` 归一,与行的
+            #     返回顺序无关——批量查询把多个 canonical 的行混在一起返回也无所谓,
+            #     分组后各自排序去重的结果与逐条查询逐字相同。seed→canonical 是
+            #     函数关系(seeds_by_cid 由 seed_to_canonical 反转而来,一个 seed
+            #     只属于一个 canonical),故分组无歧义。
+            #  ② `work`(LLM 阶段的输入)的顺序沿 eligible 逐位保持:批按序切、
+            #     批内按序遍历,checkpoint / 跨 rebuild 复用的判定与写入顺序也因此
+            #     与逐条时代一字不差。LLM 调用本身一次没动。
+            #
+            # 内存仍有界:一次只驻留**一批**的证据行,不是全库。三条上限里
+            # ≤300 canonical / ≤900 seed 管的是**参数个数**(往返数与绑定变量上限),
+            # 真正管住**载荷**的是第三条 ≤``_DESC_EVIDENCE_ROW_BATCH`` 行——
+            # cluster_evidence_rows 每个成员返一行整份 evidence JSON,300 个 hub
+            # canonical 各带上千成员照样能拉回几十万行。见 _desc_evidence_batches。
+            for cid_batch in _desc_evidence_batches(
+                eligible, seeds_by_cid, total_by_cid
+            ):
+                seed_owner: Dict[str, str] = {}
+                batch_seeds: List[str] = []
+                for cid in cid_batch:
+                    for s in seeds_by_cid[cid]:
+                        seed_owner[s] = cid
+                        batch_seeds.append(s)
+                quotes_by_cid: Dict[str, List[str]] = {c: [] for c in cid_batch}
+                with self._connect() as db:
+                    erows = self.unified_kg.cluster_evidence_rows(
+                        db, notebook_id, run_id, batch_seeds
+                    )
+                for er in erows:
+                    owner = seed_owner.get(er["seed"])
+                    if owner is None:
+                        continue   # 本批没问过的 seed(理论上不会出现),不静默串组
+                    bucket = quotes_by_cid[owner]
+                    for ev in json.loads(er["evidence"] or "[]"):
+                        q = (ev.get("quoted_span") or "").strip()
+                        if q:
+                            bucket.append(q)
+                del erows
+                for cid in cid_batch:
+                    # DETERMINISTIC dedup+order so the sig (and prompt) is stable across
+                    # rebuilds — scratch row order is otherwise unsorted.
+                    quotes = sorted(set(quotes_by_cid[cid]))[:8]
+                    if not quotes:
+                        continue
+                    name = sd["canonical_names"].get(cid, "")
+                    sig = _concept_desc_sig(name, quotes)
+                    ck = desc_ckpt.get(cid)
+                    if ck and ck.get("sig") == sig and ck.get("description"):
+                        desc_by_cid[cid] = ck["description"]     # checkpoint 命中:复用,跳过 LLM
+                        desc_sig_by_cid[cid] = sig
+                        continue
+                    prev = old_desc.get(cid)
+                    if prev and prev[0] and prev[1] == sig:
+                        desc_by_cid[cid] = prev[0]               # 跨 rebuild 缓存命中:复用
+                        desc_sig_by_cid[cid] = sig
+                        continue
+                    work.append((cid, name, quotes, sig))
+                del quotes_by_cid
+            # PHASE 2 (parallel LLM): resolve the workload-bound scheduled
+            # client once before the raw worker pool. The pool width mirrors
+            # the physical service cap and the scheduler remains authoritative.
+            import concurrent.futures as _cf
+            desc_client = self.model_clients.chat("kg_concept_description")
+            def _gen(item):
+                cid, name, quotes, sig = item
+                block = "\n".join(f"- {q}" for q in quotes)
+                try:
+                    raw = desc_client.chat_json(
+                        [{"role": "user", "content": concept_description_prompt(name, block)}],
+                        CONCEPT_DESC_SCHEMA_HINT)
+                    desc = (json.loads(raw).get("description") or "").strip()
+                except Exception:
+                    desc = ""
+                return cid, desc, sig
+            if work:
+                workers = max(
+                    1,
+                    min(
+                        self.model_clients.parallelism("kg_concept_description"),
+                        len(work),
+                    ),
+                )
+                done_n = 0
+                with _cf.ThreadPoolExecutor(max_workers=workers, thread_name_prefix="kg-desc") as pool:
+                    _ck_buf: List[Tuple[str, dict]] = []
+                    for fut in _cf.as_completed([pool.submit(contextvars.copy_context().run, _gen, it) for it in work]):
+                        cid, desc, sig = fut.result()
+                        done_n += 1
+                        if desc:
+                            desc_by_cid[cid] = desc
+                            desc_sig_by_cid[cid] = sig
+                            _ck_buf.append((cid, {"description": desc, "sig": sig}))
+                            if len(_ck_buf) >= _DESC_CKPT_FLUSH:
+                                try:
+                                    self.unified_kg.checkpoint_put(
+                                        notebook_id, _ck_ver, "concept_desc", _ck_buf, self._now())
+                                except Exception:  # noqa: BLE001 — checkpoint 写失败不打断 rebuild
+                                    self.event_log.logger.warning(
+                                        "concept_desc checkpoint put 失败 for %s", notebook_id, exc_info=True)
+                                _ck_buf = []
+                        if progress is not None:
+                            try:
+                                progress("concept_desc", done_n, len(work))
+                            except Exception:
+                                pass
+                    if _ck_buf:
+                        try:
+                            self.unified_kg.checkpoint_put(
+                                notebook_id, _ck_ver, "concept_desc", _ck_buf, self._now())
+                        except Exception:  # noqa: BLE001 — checkpoint 写失败不打断 rebuild
+                            self.event_log.logger.warning(
+                                "concept_desc checkpoint put 失败 for %s", notebook_id, exc_info=True)
+        if _desc_ran:
+            _stage(f"concept: descriptions {len(desc_by_cid)} "
+                   f"({_time.perf_counter() - _t_desc:.1f}s)")
+        else:
+            _stage("concept: descriptions skipped")
+        return desc_by_cid, desc_sig_by_cid
+
     @notebook_model_artifact_scope
     def rebuild_unified_kg(self, notebook_id: str,
                            progress: Optional[Callable[[str, int, int], None]] = None,
@@ -5131,172 +5306,9 @@ class KnowledgeLifecycleService:
             # numpy arrays → freed immediately by refcount, no gc needed.
             del reps
             seed_to_canonical = sd["seed_to_canonical"]
-            desc_by_cid: Dict[str, str] = {}
-            desc_sig_by_cid: Dict[str, str] = {}
-            _t_desc = _time.perf_counter()
-            _desc_ran = (
-                self.settings.kg_concept_desc_enabled
-                and self.model_clients.configured("kg_concept_description")
-            )
-            if _desc_ran:
-                from app.services.prompts import concept_description_prompt, CONCEPT_DESC_SCHEMA_HINT
-                # Previous descriptions + their input sigs, keyed by canonical id. DISTINCT
-                # so this is bounded by #canonicals (not #members). Reuse fires only on an
-                # exact sig match with a non-empty stored description → fail-safe: any
-                # miss/mismatch just regenerates (worst case = old behavior).
-                old_desc: Dict[str, tuple] = {}
-                with self._connect() as db:
-                    for r in self.unified_kg.cluster_description_rows(db, notebook_id):
-                        old_desc[r["canonical_id"]] = (r["canonical_description"] or "", r["canonical_desc_sig"] or "")
-                # 同 input_version 的 checkpoint(写簇前被杀留下的已完成描述)作第一优先复用源。
-                try:
-                    desc_ckpt = self.unified_kg.checkpoint_load(
-                        notebook_id, _ck_ver, "concept_desc")
-                except Exception:  # noqa: BLE001 — checkpoint 读失败退化为全量重跑,绝不打断 rebuild
-                    self.event_log.logger.warning(
-                        "concept_desc checkpoint load 失败 for %s;本轮全量重跑描述", notebook_id, exc_info=True)
-                    desc_ckpt = {}
-                # Total members per canonical = Σ members_count over its seeds. Keep
-                # only multi-member (cross-doc merged) canonicals — same cost bound as
-                # the legacy `len(mids) < 2` gate, but computed from seed aggregates so
-                # no 5M-row member list is materialized.
-                total_by_cid: Dict[str, int] = {}
-                seeds_by_cid: Dict[str, List[str]] = {}
-                for s, cid in seed_to_canonical.items():
-                    total_by_cid[cid] = total_by_cid.get(cid, 0) + members_count.get(s, 0)
-                    seeds_by_cid.setdefault(cid, []).append(s)
-                # PHASE 1 (serial, cheap DB): fetch quotes per multi-member canonical,
-                # compute its input sig, and either reuse the cached description or
-                # queue an LLM job. DB access stays in the main thread.
-                work: List[tuple] = []
-                # 只保留多成员(跨文档合并)的 canonical——与逐条时代的 `total < 2`
-                # 门同一个成本界,顺序沿 total_by_cid 的迭代序原样保留。
-                eligible = [
-                    cid for cid, total in total_by_cid.items() if total >= 2
-                ]
-                # ⚠ 证据取数**按批**(审计批4):逐条时代是「每个多成员 canonical 一次
-                # cluster_evidence_rows 往返」,10⁵–10⁶ 次串行 DB 往返全部堵在 LLM 阶段
-                # 之前。现在一次 IN 查回一整批 canonical 的 seed 证据行,按行上的 seed
-                # 分组回内存。
-                #
-                # 产物逐位不变的论证(两条):
-                #  ① 每个 canonical 的 quotes 经 `sorted(set(...))[:8]` 归一,与行的
-                #     返回顺序无关——批量查询把多个 canonical 的行混在一起返回也无所谓,
-                #     分组后各自排序去重的结果与逐条查询逐字相同。seed→canonical 是
-                #     函数关系(seeds_by_cid 由 seed_to_canonical 反转而来,一个 seed
-                #     只属于一个 canonical),故分组无歧义。
-                #  ② `work`(LLM 阶段的输入)的顺序沿 eligible 逐位保持:批按序切、
-                #     批内按序遍历,checkpoint / 跨 rebuild 复用的判定与写入顺序也因此
-                #     与逐条时代一字不差。LLM 调用本身一次没动。
-                #
-                # 内存仍有界:一次只驻留**一批**的证据行,不是全库。三条上限里
-                # ≤300 canonical / ≤900 seed 管的是**参数个数**(往返数与绑定变量上限),
-                # 真正管住**载荷**的是第三条 ≤``_DESC_EVIDENCE_ROW_BATCH`` 行——
-                # cluster_evidence_rows 每个成员返一行整份 evidence JSON,300 个 hub
-                # canonical 各带上千成员照样能拉回几十万行。见 _desc_evidence_batches。
-                for cid_batch in _desc_evidence_batches(
-                    eligible, seeds_by_cid, total_by_cid
-                ):
-                    seed_owner: Dict[str, str] = {}
-                    batch_seeds: List[str] = []
-                    for cid in cid_batch:
-                        for s in seeds_by_cid[cid]:
-                            seed_owner[s] = cid
-                            batch_seeds.append(s)
-                    quotes_by_cid: Dict[str, List[str]] = {c: [] for c in cid_batch}
-                    with self._connect() as db:
-                        erows = self.unified_kg.cluster_evidence_rows(
-                            db, notebook_id, run_id, batch_seeds
-                        )
-                    for er in erows:
-                        owner = seed_owner.get(er["seed"])
-                        if owner is None:
-                            continue   # 本批没问过的 seed(理论上不会出现),不静默串组
-                        bucket = quotes_by_cid[owner]
-                        for ev in json.loads(er["evidence"] or "[]"):
-                            q = (ev.get("quoted_span") or "").strip()
-                            if q:
-                                bucket.append(q)
-                    del erows
-                    for cid in cid_batch:
-                        # DETERMINISTIC dedup+order so the sig (and prompt) is stable across
-                        # rebuilds — scratch row order is otherwise unsorted.
-                        quotes = sorted(set(quotes_by_cid[cid]))[:8]
-                        if not quotes:
-                            continue
-                        name = sd["canonical_names"].get(cid, "")
-                        sig = _concept_desc_sig(name, quotes)
-                        ck = desc_ckpt.get(cid)
-                        if ck and ck.get("sig") == sig and ck.get("description"):
-                            desc_by_cid[cid] = ck["description"]     # checkpoint 命中:复用,跳过 LLM
-                            desc_sig_by_cid[cid] = sig
-                            continue
-                        prev = old_desc.get(cid)
-                        if prev and prev[0] and prev[1] == sig:
-                            desc_by_cid[cid] = prev[0]               # 跨 rebuild 缓存命中:复用
-                            desc_sig_by_cid[cid] = sig
-                            continue
-                        work.append((cid, name, quotes, sig))
-                    del quotes_by_cid
-                # PHASE 2 (parallel LLM): resolve the workload-bound scheduled
-                # client once before the raw worker pool. The pool width mirrors
-                # the physical service cap and the scheduler remains authoritative.
-                import concurrent.futures as _cf
-                desc_client = self.model_clients.chat("kg_concept_description")
-                def _gen(item):
-                    cid, name, quotes, sig = item
-                    block = "\n".join(f"- {q}" for q in quotes)
-                    try:
-                        raw = desc_client.chat_json(
-                            [{"role": "user", "content": concept_description_prompt(name, block)}],
-                            CONCEPT_DESC_SCHEMA_HINT)
-                        desc = (json.loads(raw).get("description") or "").strip()
-                    except Exception:
-                        desc = ""
-                    return cid, desc, sig
-                if work:
-                    workers = max(
-                        1,
-                        min(
-                            self.model_clients.parallelism("kg_concept_description"),
-                            len(work),
-                        ),
-                    )
-                    done_n = 0
-                    with _cf.ThreadPoolExecutor(max_workers=workers, thread_name_prefix="kg-desc") as pool:
-                        _ck_buf: List[Tuple[str, dict]] = []
-                        for fut in _cf.as_completed([pool.submit(contextvars.copy_context().run, _gen, it) for it in work]):
-                            cid, desc, sig = fut.result()
-                            done_n += 1
-                            if desc:
-                                desc_by_cid[cid] = desc
-                                desc_sig_by_cid[cid] = sig
-                                _ck_buf.append((cid, {"description": desc, "sig": sig}))
-                                if len(_ck_buf) >= _DESC_CKPT_FLUSH:
-                                    try:
-                                        self.unified_kg.checkpoint_put(
-                                            notebook_id, _ck_ver, "concept_desc", _ck_buf, self._now())
-                                    except Exception:  # noqa: BLE001 — checkpoint 写失败不打断 rebuild
-                                        self.event_log.logger.warning(
-                                            "concept_desc checkpoint put 失败 for %s", notebook_id, exc_info=True)
-                                    _ck_buf = []
-                            if progress is not None:
-                                try:
-                                    progress("concept_desc", done_n, len(work))
-                                except Exception:
-                                    pass
-                        if _ck_buf:
-                            try:
-                                self.unified_kg.checkpoint_put(
-                                    notebook_id, _ck_ver, "concept_desc", _ck_buf, self._now())
-                            except Exception:  # noqa: BLE001 — checkpoint 写失败不打断 rebuild
-                                self.event_log.logger.warning(
-                                    "concept_desc checkpoint put 失败 for %s", notebook_id, exc_info=True)
-            if _desc_ran:
-                _stage(f"concept: descriptions {len(desc_by_cid)} "
-                       f"({_time.perf_counter() - _t_desc:.1f}s)")
-            else:
-                _stage("concept: descriptions skipped")
+            desc_by_cid, desc_sig_by_cid = self._concept_description_stage(
+                notebook_id, sd, seed_to_canonical, members_count, run_id,
+                _ck_ver, progress, _stage, _time)
             _t = _time.perf_counter()
             self._write_cluster_map_streamed(notebook_id, "concept", seed_to_canonical,
                                              sd["canonical_names"], desc_by_cid,
@@ -5695,6 +5707,208 @@ class KnowledgeLifecycleService:
             )
         return len(edges)
 
+    def _claim_generation_for_communities(
+        self, notebook_id: str, level: int, graph_fresh: bool
+    ) -> "Tuple[int, int] | None":
+        """communities 族取号(批 3·W2 §1.3):只有真的要重建图(写新代 +
+        翻 community_generation 指针)才取号;只补账本路径不碰 communities
+        两表,免认领(返回 (0, 0))。被拒 → 发结构化事件区分「被闸」与
+        「真失败」并返回 None(调用方如实返回当前板块数——库里的板块还在)。
+        rebuild_unified_kg 的收尾/跳过分支与门面直调各自独立取号——cluster
+        侧的认领在其 finally 已释放,这里的新认领不会互相卡死。"""
+        if graph_fresh:
+            return 0, 0
+        with self._write() as db:
+            claim = self.unified_kg.claim_derived_generation(
+                db, notebook_id,
+                ttl_seconds=self.settings.kg_derived_build_ttl_seconds)
+        if claim is None:
+            self.event_log.emit({
+                "kind": "communities_rebuild_gated",
+                "notebook_id": notebook_id, "level": level,
+            })
+            return None
+        return int(claim["generation"]), int(claim["community_generation"])
+
+    def _publish_communities_generation(
+        self, notebook_id: str, level: int, *,
+        graph_fresh: bool, kept_rows, names, deg, analysis,
+        ledger_speaks: bool, seq: int, generation: int, published_from: int,
+        partition_generation: int,
+    ) -> "Tuple[bool, bool]":
+        """communities 族的写新代 + 发布(批 3·W2 §1.3,从 rebuild_communities
+        原地抽出——零余量热函数天花板逼出的切分,行为逐字保留):写段先复读
+        认领再 INSERT 新代(事务外);发布事务 copy-forward + 双 CAS 翻指针 +
+        账本作废 + seq + 产物,一个事务。返回 (analysis_published,
+        partition_replaced_under_us)。"""
+        analysis_published = False
+        partition_replaced_under_us = False
+        # ---- 发布:板块划分 + 版本戳 + 全部分析产物,**一个**写事务(codex 第 13 轮 P1)
+        #
+        # 修复前这里是三个事务(板块 → 版本戳 → 产物),中间隔着分钟级的预计算。生产
+        # (878 万对象 / 836 万边)上并发的 `/kg-analysis` 因此会读到「新板块 + 旧账本」:
+        # 板块 id 已经换了一整套,而三条统计快照还停在上一个 seq、依赖板块的两份已被作废
+        # 但还没写回。报告同屏混着两代库,而本视图存在的全部理由就是「每个数字都能说出
+        # 自己建于何时」。把重活挪进事务不是选项(见上面那段写锁的说明),所以改成
+        # **先在事务外把全部产物算完,再一次性发布**。
+        #
+        # 这个事务只做便宜的写:两表整表重写(成员行数级)+ 一次 UPDATE + 三张产物表的
+        # 整批重写。它一个 SELECT 重活都不发。
+        #
+        # ⚠ 没东西可写就**不开事务**:图新鲜 + 预计算失败那一档,这一趟确实什么都没发生,
+        # 而 `_write()` 拿的是进程级写锁 —— 为一个空事务去抢它是纯浪费。
+        # ---- 写新代(批 3·W2 §1.3,发布事务**外**先行) --------------------
+        # 新代行对读者不可见(communities 读者全部带 published 代谓词),
+        # 写多久都不影响任何并发读;发布事务因此只剩 copy-forward + 指针
+        # 翻转 + 账本作废 + 产物重写这些便宜写。失败/放弃留下的新代行由
+        # 下一轮预回收清理。
+        if not graph_fresh:
+            with self._write() as db:
+                # 写段前复读认领,与 cluster 侧写代段同一条纪律
+                # (codex #671 R3 P2):Louvain/预计算超过 TTL 被抢占、或
+                # standalone delete 重置认领后,继任者的预回收已扫过这个
+                # 键区——不复读就会把整代不可见行留到下一轮回收。sqlite
+                # 侧 derived_claim_still_held 自带 begin_guarded_write
+                # 接缝,复读与写入对跨进程抢占者原子。
+                if not self.unified_kg.derived_claim_still_held(
+                        db, notebook_id, generation):
+                    self.event_log.emit({
+                        "kind": "kg_generation_preempted",
+                        "notebook_id": notebook_id,
+                        "generation": generation,
+                        "stage": "community_write",
+                    })
+                    raise KgDerivedGenerationPreempted(
+                        notebook_id, generation)
+                self.unified_kg.write_communities_generation(
+                    db, notebook_id, level, kept_rows, names, deg,
+                    self._now(), generation
+                )
+        if not graph_fresh or analysis is not None:
+            now = self._now()
+            with self._write() as db:
+                if not graph_fresh:
+                    # 发布 = copy-forward + 指针翻转(D-W2-6:该族无并发
+                    # 融合写者,原子性优先于锁窗口)。copy-forward 把
+                    # published 代中未被本轮重建的 level 复制进新代——板块
+                    # id 重铸(communities.id 单列 PK,同 id 双代必撞;
+                    # 非默认层账本不背书,重铸零代价),成员行同步重映射。
+                    # 今天所有调用点 level=0 → 复制集为空。
+                    _copied_forward = self.unified_kg.copy_forward_communities(
+                        db, notebook_id, level, published_from,
+                        generation, lambda: self._new_id("cm")
+                    )
+                    if not self.unified_kg.flip_community_generation(
+                            db, notebook_id, published_from=published_from,
+                            generation=generation, now=now):
+                        # 双 CAS 作废:published 指针被动过(standalone
+                        # delete 重置)或在飞认领被 TTL 抢占。响亮失败——
+                        # 发布事务整体回滚(copy-forward/账本作废/seq/产物
+                        # 一个都不落),新代行留给下一轮预回收。
+                        self.event_log.emit({
+                            "kind": "kg_generation_preempted",
+                            "notebook_id": notebook_id,
+                            "generation": generation,
+                            "stage": "community_flip",
+                        })
+                        raise KgDerivedGenerationPreempted(
+                            notebook_id, generation)
+                    # ⚠ 翻转已**发布了重铸的板块 id**,依赖板块划分的两份分析产物(跨板块边 /
+                    # 来源画像)此刻整表变成悬空引用 —— 必须与发布**同事务**作废。预计算
+                    # 失败时下面那次整批重写不会发生,而板块照旧发布:少了这一句,库里就
+                    # 会留下指向已不存在板块 id 的悬空产物,而 T3 的记忆化签名对「同 seq
+                    # 的 force 重铸」是瞎的 —— 已预热的缓存会**无限期**吐上一套板块 id,
+                    # 直到 LRU 淘汰或进程重启。作废账本行同时也就动了签名。
+                    # (⚠ 账本里一行都没有时这次作废是 no-op,签名照样不动;那一档由读侧
+                    #  的 `kg_analysis._signature_tracks_board_recasts` 拦成「不写缓存」。)
+                    # 只作废这两份(三条统计快照与板块无关,留着仍是可读的陈旧快照),
+                    # 理由见 `app.domain.kg_analysis_contracts.BOARD_DEPENDENT_ARTIFACT_KINDS`。
+                    # 预计算成功时它是冗余的(下面那次重写整表删),留着是因为它守的是
+                    # **失败**那一档,而那一档没有别的东西替它守。
+                    #
+                    # ⚠ 作废与记版本都**只在默认层**做(方向五,codex 第 15 轮 P2-1)。
+                    # 本轮写的新代只有本 level 的行,非默认层发布的是它自己
+                    # 那一层的板块 id(默认层的行被 copy-forward 原样带进新
+                    # 代,id 虽重铸但账本作废与版本记录仍只归默认层的构建碰
+                    # ——非默认层构建作废默认层产物是**连坐**;而推进那份不
+                    # 分 level 的 seq 更糟:「seq 对齐 ⟹ 默认层建过」是闸里
+                    # 默认层那一支**无条件**信的蕴含关系)。
+                    # ⚠ 复制集非空(=非默认层构建把默认层行 copy-forward
+                    # 重铸了 id)时,两份板块依赖产物此刻真悬空——必须同
+                    # 事务作废(质量评 P1:改造前按 level 删写不动默认层
+                    # 行,没有这个洞;代际化 + id 重铸把它引了进来,作废
+                    # 不再是「连坐」而是对悬空的如实回应)。共享 seq 仍
+                    # 只归默认层推进(方向五那半不变)。
+                    if _copied_forward and not ledger_speaks:
+                        self.unified_kg.discard_board_dependent_kg_analysis_artifacts(
+                            db, notebook_id
+                        )
+                    if ledger_speaks:
+                        self.unified_kg.discard_board_dependent_kg_analysis_artifacts(
+                            db, notebook_id
+                        )
+                        # 记版本:社区已按 _seq 建好(无 unified_kg_state 行则 UPDATE
+                        # no-op,下次仍重建)。⚠ 它必须与指针翻转(发布)
+                        # **同事务**:分开提交会留下「板块已换、seq 还是旧的」的窗口,
+                        # 而闸正是拿 seq 判「建过没有」。
+                        self.unified_kg.set_community_seq(db, notebook_id, seq)
+                if analysis is not None:
+                    # ⚠ **发布前复核板块划分还在**(codex 第 16 轮 P2)。只有「只补账本」
+                    # 那一档需要:它的 `kept_rows` 是**写事务之外**从库里读回来的,而随后
+                    # 的 `_compute_kg_analysis` 在生产(878 万对象 / 836 万边)上是分钟级
+                    # 的,窗口很宽。期间另一次 `force=True` 的重建完全可以把整套板块换掉
+                    # —— 本方法自己没有单飞守卫;`POST /notebooks/{id}/unified-kg/rebuild`
+                    # 如今经共享的 per-notebook KG 维护槽串行化,但离线
+                    # `backend/app/scripts/recluster_kg.py`(`force=True`)不经过那个槽,
+                    # 跨进程/跨部署运维触发的重跑同样能撞上同一条路径。不复核就会写出
+                    # 指向已不存在板块 id 的 `kg_community_edges` /
+                    # `kg_source_profiles`,而它们的账本盖着「与当前一致」的戳 —— 比缺失
+                    # 更糟,缺失至少是诚实的。
+                    #
+                    # 全量路径**不需要**这道复核:那一档的板块是本事务里刚翻转发布的,
+                    # 板块与产物构造上自洽(在飞认领单飞),没有任何窗口可钻。
+                    #
+                    # 批 3·W2 判据替换(复评 P1-6):旧 `board_partition_still_holds`
+                    # 查「kept_rows[0] 的 id 还在」——代次化后「行还在」不再蕴含
+                    # 「没被换过」(退休代行活过翻转,要等预回收),`FOR SHARE`
+                    # 也无 DELETE 可阻塞,守卫恒真化。替代:读板块时记下的
+                    # `community_generation` 与发布事务内重读的比对——每次发布
+                    # 都翻指针,「代次没变」⟺「期间没有任何一次发布提交过」。
+                    # 读侧只 SELECT state 行不加锁(设计裁决:与 discard →
+                    # set_community_seq 的既有锁序无交叉,死锁论证不被触碰)。
+                    #
+                    # ⚠ **零板块那一档刻意不查。** 零板块时没有任何东西会悬空
+                    # —— 来源画像整份跳过(`_compute_kg_analysis` 里的
+                    # `if total_members:`),跨板块边是空的。最坏结果只是一份
+                    # `communities: 0` 的陈旧载荷,而 `analysis_ledger_is_current
+                    # (..., has_boards=_boards > 0)` 在下一次调用(那时
+                    # `_boards > 0`)会因为缺 `source_profiles` 判不齐全 →
+                    # 自动重补;旧判据的第二条理由「无行可锁 ⟹ 守卫不得夸大
+                    # 强度」在新判据下改述为「无代次可记,比对恒等」。
+                    _partition_moved = False
+                    if graph_fresh and kept_rows:
+                        # 质量评 P1:PG 侧带 FOR SHARE 的专用原语——裸读
+                        # 挡不住并发翻转在「比对通过」与「本事务提交」
+                        # 之间落地(READ COMMITTED、无进程锁);行锁把
+                        # 并发翻转的 UPDATE 阻塞到本事务提交,两个方向
+                        # 都闭合。锁序论证见原语 docstring。
+                        _gen_now = self.unified_kg.community_generation_for_publish(
+                            db, notebook_id)
+                        _partition_moved = _gen_now != partition_generation
+                    if _partition_moved:
+                        # 放弃整份发布,**不重试**:重试要重跑那趟分钟级的全表重活,而且
+                        # 可能反复被同一个抢占者打断。既有的自愈路径就是为这一档设计的 ——
+                        # 账本不齐 ⟹ 下一次 `rebuild_communities`(哪怕不带 force)照样走
+                        # 补账本重来,那时它读到的是抢占者留下的那套划分。
+                        partition_replaced_under_us = True
+                    else:
+                        _edges, _profiles, _payloads = analysis
+                        self.unified_kg.replace_kg_analysis_artifacts(
+                            db, notebook_id, seq, _edges, _profiles, _payloads, now
+                        )
+                        analysis_published = True
+        return analysis_published, partition_replaced_under_us
+
     def rebuild_communities(self, notebook_id: str, level: int = 0, force: bool = False) -> int:
         """在 canonical 实体图(关系两端经 cluster_map 映射)上跑 Louvain 社区检测,
         持久化到 communities + community_members(反向索引,存 canonical_name/centrality)。
@@ -5856,27 +6070,11 @@ class KnowledgeLifecycleService:
             self.event_log.emit({"kind": "community_build_refused",
                                  "notebook_id": notebook_id, "reason": "no_scale_index"})
             return _boards if graph_fresh else 0
-        # ---- 取号(批 3·W2 §1.3:与 cluster 族同一取号器、同一在飞列) ----
-        # 只有真的要重建图(写新代 + 翻 community_generation 指针)才取号;
-        # 只补账本路径不碰 communities 两表,免认领。被拒 → 发结构化事件区分
-        # 「被闸」与「真失败」,如实返回当前板块数(库里的板块还在)。
-        # rebuild_unified_kg 的收尾/跳过分支与门面直调各自独立取号——cluster
-        # 侧的认领在其 finally 已释放,这里的新认领不会互相卡死。
-        _generation = 0
-        _published_from = 0
-        if not graph_fresh:
-            with self._write() as _cdb:
-                _claim = self.unified_kg.claim_derived_generation(
-                    _cdb, notebook_id,
-                    ttl_seconds=self.settings.kg_derived_build_ttl_seconds)
-            if _claim is None:
-                self.event_log.emit({
-                    "kind": "communities_rebuild_gated",
-                    "notebook_id": notebook_id, "level": level,
-                })
-                return _boards
-            _generation = int(_claim["generation"])
-            _published_from = int(_claim["community_generation"])
+        claimed = self._claim_generation_for_communities(
+            notebook_id, level, graph_fresh)
+        if claimed is None:
+            return _boards
+        _generation, _published_from = claimed
         try:
             if _generation > 1:
                 # [预回收] communities 族残代(发布事务放弃/回滚留下的新代行、
@@ -5914,6 +6112,7 @@ class KnowledgeLifecycleService:
             edge_table = edge_builder.build(n_nodes)
             del edge_builder
             _partition_generation = 0
+            deg: "Dict[str, float]" = {}
             if graph_fresh:
                 # 只补账本:板块划分从库里读回来(`communities.member_ids` 就是 Louvain 那次
                 # 写下的 canonical 列表),Louvain / centrality / 两表重写全部跳过。
@@ -5935,7 +6134,6 @@ class KnowledgeLifecycleService:
             else:
                 # 社区检测 + 度中心度(deg: canonical -> degree)。comms: list[list[canonical]]。
                 comms: "List[List[str]]" = []
-                deg: "Dict[str, float]" = {}
                 if n_nodes:
                     if _ig is not None:
                         import random as _random
@@ -6071,172 +6269,14 @@ class KnowledgeLifecycleService:
                     })
             # ⚠ 「真的发布了」与「算出来了」是两件事(下面那道复核会让它们分岔),而事件必须
             # 跟着前者走 —— 放弃发布还发「补齐了」就是谎报,与第 8 轮 P2 修的是同一个病。
-            analysis_published = False
-            partition_replaced_under_us = False
-            # ---- 发布:板块划分 + 版本戳 + 全部分析产物,**一个**写事务(codex 第 13 轮 P1)
-            #
-            # 修复前这里是三个事务(板块 → 版本戳 → 产物),中间隔着分钟级的预计算。生产
-            # (878 万对象 / 836 万边)上并发的 `/kg-analysis` 因此会读到「新板块 + 旧账本」:
-            # 板块 id 已经换了一整套,而三条统计快照还停在上一个 seq、依赖板块的两份已被作废
-            # 但还没写回。报告同屏混着两代库,而本视图存在的全部理由就是「每个数字都能说出
-            # 自己建于何时」。把重活挪进事务不是选项(见上面那段写锁的说明),所以改成
-            # **先在事务外把全部产物算完,再一次性发布**。
-            #
-            # 这个事务只做便宜的写:两表整表重写(成员行数级)+ 一次 UPDATE + 三张产物表的
-            # 整批重写。它一个 SELECT 重活都不发。
-            #
-            # ⚠ 没东西可写就**不开事务**:图新鲜 + 预计算失败那一档,这一趟确实什么都没发生,
-            # 而 `_write()` 拿的是进程级写锁 —— 为一个空事务去抢它是纯浪费。
-            # ---- 写新代(批 3·W2 §1.3,发布事务**外**先行) --------------------
-            # 新代行对读者不可见(communities 读者全部带 published 代谓词),
-            # 写多久都不影响任何并发读;发布事务因此只剩 copy-forward + 指针
-            # 翻转 + 账本作废 + 产物重写这些便宜写。失败/放弃留下的新代行由
-            # 下一轮预回收清理。
-            if not graph_fresh:
-                with self._write() as db:
-                    # 写段前复读认领,与 cluster 侧写代段同一条纪律
-                    # (codex #671 R3 P2):Louvain/预计算超过 TTL 被抢占、或
-                    # standalone delete 重置认领后,继任者的预回收已扫过这个
-                    # 键区——不复读就会把整代不可见行留到下一轮回收。sqlite
-                    # 侧 derived_claim_still_held 自带 begin_guarded_write
-                    # 接缝,复读与写入对跨进程抢占者原子。
-                    if not self.unified_kg.derived_claim_still_held(
-                            db, notebook_id, _generation):
-                        self.event_log.emit({
-                            "kind": "kg_generation_preempted",
-                            "notebook_id": notebook_id,
-                            "generation": _generation,
-                            "stage": "community_write",
-                        })
-                        raise KgDerivedGenerationPreempted(
-                            notebook_id, _generation)
-                    self.unified_kg.write_communities_generation(
-                        db, notebook_id, level, kept_rows, names, deg,
-                        self._now(), _generation
-                    )
-            if not graph_fresh or analysis is not None:
-                now = self._now()
-                with self._write() as db:
-                    if not graph_fresh:
-                        # 发布 = copy-forward + 指针翻转(D-W2-6:该族无并发
-                        # 融合写者,原子性优先于锁窗口)。copy-forward 把
-                        # published 代中未被本轮重建的 level 复制进新代——板块
-                        # id 重铸(communities.id 单列 PK,同 id 双代必撞;
-                        # 非默认层账本不背书,重铸零代价),成员行同步重映射。
-                        # 今天所有调用点 level=0 → 复制集为空。
-                        _copied_forward = self.unified_kg.copy_forward_communities(
-                            db, notebook_id, level, _published_from,
-                            _generation, lambda: self._new_id("cm")
-                        )
-                        if not self.unified_kg.flip_community_generation(
-                                db, notebook_id, published_from=_published_from,
-                                generation=_generation, now=now):
-                            # 双 CAS 作废:published 指针被动过(standalone
-                            # delete 重置)或在飞认领被 TTL 抢占。响亮失败——
-                            # 发布事务整体回滚(copy-forward/账本作废/seq/产物
-                            # 一个都不落),新代行留给下一轮预回收。
-                            self.event_log.emit({
-                                "kind": "kg_generation_preempted",
-                                "notebook_id": notebook_id,
-                                "generation": _generation,
-                                "stage": "community_flip",
-                            })
-                            raise KgDerivedGenerationPreempted(
-                                notebook_id, _generation)
-                        # ⚠ 翻转已**发布了重铸的板块 id**,依赖板块划分的两份分析产物(跨板块边 /
-                        # 来源画像)此刻整表变成悬空引用 —— 必须与发布**同事务**作废。预计算
-                        # 失败时下面那次整批重写不会发生,而板块照旧发布:少了这一句,库里就
-                        # 会留下指向已不存在板块 id 的悬空产物,而 T3 的记忆化签名对「同 seq
-                        # 的 force 重铸」是瞎的 —— 已预热的缓存会**无限期**吐上一套板块 id,
-                        # 直到 LRU 淘汰或进程重启。作废账本行同时也就动了签名。
-                        # (⚠ 账本里一行都没有时这次作废是 no-op,签名照样不动;那一档由读侧
-                        #  的 `kg_analysis._signature_tracks_board_recasts` 拦成「不写缓存」。)
-                        # 只作废这两份(三条统计快照与板块无关,留着仍是可读的陈旧快照),
-                        # 理由见 `app.domain.kg_analysis_contracts.BOARD_DEPENDENT_ARTIFACT_KINDS`。
-                        # 预计算成功时它是冗余的(下面那次重写整表删),留着是因为它守的是
-                        # **失败**那一档,而那一档没有别的东西替它守。
-                        #
-                        # ⚠ 作废与记版本都**只在默认层**做(方向五,codex 第 15 轮 P2-1)。
-                        # 本轮写的新代只有本 level 的行,非默认层发布的是它自己
-                        # 那一层的板块 id(默认层的行被 copy-forward 原样带进新
-                        # 代,id 虽重铸但账本作废与版本记录仍只归默认层的构建碰
-                        # ——非默认层构建作废默认层产物是**连坐**;而推进那份不
-                        # 分 level 的 seq 更糟:「seq 对齐 ⟹ 默认层建过」是闸里
-                        # 默认层那一支**无条件**信的蕴含关系)。
-                        # ⚠ 复制集非空(=非默认层构建把默认层行 copy-forward
-                        # 重铸了 id)时,两份板块依赖产物此刻真悬空——必须同
-                        # 事务作废(质量评 P1:改造前按 level 删写不动默认层
-                        # 行,没有这个洞;代际化 + id 重铸把它引了进来,作废
-                        # 不再是「连坐」而是对悬空的如实回应)。共享 seq 仍
-                        # 只归默认层推进(方向五那半不变)。
-                        if _copied_forward and not _ledger_speaks_for_level:
-                            self.unified_kg.discard_board_dependent_kg_analysis_artifacts(
-                                db, notebook_id
-                            )
-                        if _ledger_speaks_for_level:
-                            self.unified_kg.discard_board_dependent_kg_analysis_artifacts(
-                                db, notebook_id
-                            )
-                            # 记版本:社区已按 _seq 建好(无 unified_kg_state 行则 UPDATE
-                            # no-op,下次仍重建)。⚠ 它必须与指针翻转(发布)
-                            # **同事务**:分开提交会留下「板块已换、seq 还是旧的」的窗口,
-                            # 而闸正是拿 seq 判「建过没有」。
-                            self.unified_kg.set_community_seq(db, notebook_id, _seq)
-                    if analysis is not None:
-                        # ⚠ **发布前复核板块划分还在**(codex 第 16 轮 P2)。只有「只补账本」
-                        # 那一档需要:它的 `kept_rows` 是**写事务之外**从库里读回来的,而随后
-                        # 的 `_compute_kg_analysis` 在生产(878 万对象 / 836 万边)上是分钟级
-                        # 的,窗口很宽。期间另一次 `force=True` 的重建完全可以把整套板块换掉
-                        # —— 本方法自己没有单飞守卫;`POST /notebooks/{id}/unified-kg/rebuild`
-                        # 如今经共享的 per-notebook KG 维护槽串行化,但离线
-                        # `backend/app/scripts/recluster_kg.py`(`force=True`)不经过那个槽,
-                        # 跨进程/跨部署运维触发的重跑同样能撞上同一条路径。不复核就会写出
-                        # 指向已不存在板块 id 的 `kg_community_edges` /
-                        # `kg_source_profiles`,而它们的账本盖着「与当前一致」的戳 —— 比缺失
-                        # 更糟,缺失至少是诚实的。
-                        #
-                        # 全量路径**不需要**这道复核:那一档的板块是本事务里刚翻转发布的,
-                        # 板块与产物构造上自洽(在飞认领单飞),没有任何窗口可钻。
-                        #
-                        # 批 3·W2 判据替换(复评 P1-6):旧 `board_partition_still_holds`
-                        # 查「kept_rows[0] 的 id 还在」——代次化后「行还在」不再蕴含
-                        # 「没被换过」(退休代行活过翻转,要等预回收),`FOR SHARE`
-                        # 也无 DELETE 可阻塞,守卫恒真化。替代:读板块时记下的
-                        # `community_generation` 与发布事务内重读的比对——每次发布
-                        # 都翻指针,「代次没变」⟺「期间没有任何一次发布提交过」。
-                        # 读侧只 SELECT state 行不加锁(设计裁决:与 discard →
-                        # set_community_seq 的既有锁序无交叉,死锁论证不被触碰)。
-                        #
-                        # ⚠ **零板块那一档刻意不查。** 零板块时没有任何东西会悬空
-                        # —— 来源画像整份跳过(`_compute_kg_analysis` 里的
-                        # `if total_members:`),跨板块边是空的。最坏结果只是一份
-                        # `communities: 0` 的陈旧载荷,而 `analysis_ledger_is_current
-                        # (..., has_boards=_boards > 0)` 在下一次调用(那时
-                        # `_boards > 0`)会因为缺 `source_profiles` 判不齐全 →
-                        # 自动重补;旧判据的第二条理由「无行可锁 ⟹ 守卫不得夸大
-                        # 强度」在新判据下改述为「无代次可记,比对恒等」。
-                        _partition_moved = False
-                        if graph_fresh and kept_rows:
-                            # 质量评 P1:PG 侧带 FOR SHARE 的专用原语——裸读
-                            # 挡不住并发翻转在「比对通过」与「本事务提交」
-                            # 之间落地(READ COMMITTED、无进程锁);行锁把
-                            # 并发翻转的 UPDATE 阻塞到本事务提交,两个方向
-                            # 都闭合。锁序论证见原语 docstring。
-                            _gen_now = self.unified_kg.community_generation_for_publish(
-                                db, notebook_id)
-                            _partition_moved = _gen_now != _partition_generation
-                        if _partition_moved:
-                            # 放弃整份发布,**不重试**:重试要重跑那趟分钟级的全表重活,而且
-                            # 可能反复被同一个抢占者打断。既有的自愈路径就是为这一档设计的 ——
-                            # 账本不齐 ⟹ 下一次 `rebuild_communities`(哪怕不带 force)照样走
-                            # 补账本重来,那时它读到的是抢占者留下的那套划分。
-                            partition_replaced_under_us = True
-                        else:
-                            _edges, _profiles, _payloads = analysis
-                            self.unified_kg.replace_kg_analysis_artifacts(
-                                db, notebook_id, _seq, _edges, _profiles, _payloads, now
-                            )
-                            analysis_published = True
+            analysis_published, partition_replaced_under_us = (
+                self._publish_communities_generation(
+                    notebook_id, level,
+                    graph_fresh=graph_fresh, kept_rows=kept_rows, names=names,
+                    deg=deg, analysis=analysis,
+                    ledger_speaks=_ledger_speaks_for_level, seq=_seq,
+                    generation=_generation, published_from=_published_from,
+                    partition_generation=_partition_generation))
             if graph_fresh:
                 # 图没有被重建,只补了账本。用一个**不同**的事件名如实说这件事 ——
                 # 复用 communities_rebuilt 会让运维在事件流里看到一次并不存在的图重建。
