@@ -339,7 +339,10 @@ def test_packaged_migrations_apply_in_order(postgres_database):
     assert "idx_notebook_object_schemas_status" in final_indexes
     assert "idx_groups_invite_token" in final_indexes
     # v39 (hot-path fix batch 1) — see migrations/0039_hotpath_batch1_indexes.sql.
-    assert "idx_clusters_nb_canonical" in final_indexes
+    # v39 的 idx_clusters_nb_canonical 与 0004 的 idx_clusters_nb 均被 v51
+    # 退役(接替者严格前缀,劫计划)——终态断言不存在。
+    assert "idx_clusters_nb_canonical" not in final_indexes
+    assert "idx_clusters_nb" not in final_indexes
     assert "idx_clusters_nb_canonical_name_lower" in final_indexes
     assert "idx_extraction_runs_notebook" in final_indexes
     assert "idx_knowledge_source_fact_elements_notebook" in final_indexes
