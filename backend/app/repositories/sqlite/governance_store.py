@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import datetime
 from typing import Dict, List, Optional
 
 from app.core.text_whitespace import PY_STRIP_WHITESPACE
@@ -505,6 +506,14 @@ class GovernanceStore:
         论证见那边 docstring)。"""
         if not connection.in_transaction:
             connection.execute("BEGIN IMMEDIATE")
+        # 锁后重取时刻(codex #671 R7 P1):`now` 形参在 append_clusters 进
+        # 写锁**之前**铸造——锁等待超过 KG_CATCHUP_SKEW_SECONDS 时,行会带着
+        # 早于催收下界的时间戳落进退休代,翻转后永久漏搬。锁后取时刻使
+        # 「行落库晚于取号 ⇒ 时间戳晚于锚点」重新成立(容许同机 skew 余量),
+        # 存储形态与服务层 _now() 逐字同款(本地 ISO 带 offset,微秒);
+        # PG 孪生的对应修法是 clock_timestamp()。`now` 形参保留签名兼容,
+        # 此处刻意不用。
+        now = datetime.now().astimezone().isoformat(timespec="microseconds")
         generation = self._published_cluster_generation(connection, notebook_id)
         existing = self._existing_cluster_members(
             connection, notebook_id, object_type, rows, generation
