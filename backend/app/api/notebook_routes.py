@@ -39,7 +39,11 @@ from app.models.notebooks import (
     SharedByMeItem,
     SharedPreview,
 )
-from app.repositories.ports import KgBuildAlreadyRunning, NotebookAlreadyDeletingError
+from app.repositories.ports import (
+    KgBuildAlreadyRunning,
+    KgMaintenanceAlreadyRunning,
+    NotebookAlreadyDeletingError,
+)
 
 
 router = APIRouter()
@@ -119,6 +123,10 @@ def set_indexing_pipeline(
     except IndexingPipelineRebuildFailedError:
         raise user_error(409, "索引管线已保存但重建未完成；旧索引仍可读取，请重试或切回内建管线。")
     except KgBuildAlreadyRunning:
+        raise user_error(409, "索引管线已保存，但另一项知识图谱任务正在运行；请稍后在设置中点「重试重建」。")
+    except KgMaintenanceAlreadyRunning:
+        # 批 3·W2 §2.1:同上一支的语义——desired 已落库、重建作业没起来,
+        # 占槽的是维护动作(重新合并/补上关联)。文案同款,不落 500。
         raise user_error(409, "索引管线已保存，但另一项知识图谱任务正在运行；请稍后在设置中点「重试重建」。")
 
 

@@ -94,6 +94,10 @@ def build_kg(notebook_id: str) -> dict:
         )
     except KgBuildAlreadyRunning:
         raise user_error(409, "当前笔记本已有知识图谱分析任务正在运行")
+    except KgMaintenanceAlreadyRunning as exc:
+        # 批 3·W2 §2.1 的另一向:build 被在飞的维护动作(重新合并/补上
+        # 关联)闸住——按 holder 点名,不落 500(评审 P1)。
+        raise _kg_maintenance_busy(exc)
     try:
         background_jobs.submit(
             repo.execute_notebook_kg_job,
@@ -130,6 +134,8 @@ def rebuild_kg(notebook_id: str) -> dict:
         job = repo.prepare_notebook_kg_job(notebook_id, "rebuild")
     except KgBuildAlreadyRunning:
         raise user_error(409, "当前笔记本已有知识图谱分析任务正在运行")
+    except KgMaintenanceAlreadyRunning as exc:
+        raise _kg_maintenance_busy(exc)
     try:
         background_jobs.submit(
             repo.execute_notebook_kg_job,
