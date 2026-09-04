@@ -31,6 +31,16 @@ test("批 3·W3:大库 failed 态收敛 canRetry、保留 canRevert(恢复出口
   });
   assert.equal(unlocked.canRetry, true);
   assert.equal(unlocked.canRevert, true);
+
+  // codex #674 R1:内建恢复重建失败态(pipeline_id 空)——重试即内建目标,
+  // 服务端放行,锁定库上也必须保持可重试,且不误导去「切回内建」。
+  const builtinFailed = describeIndexingPipelineState({
+    ...base,
+    pipeline_id: null,
+    large_library_locked: true,
+  });
+  assert.equal(builtinFailed.canRetry, true);
+  assert.doesNotMatch(builtinFailed.detail, /暂不支持重试自定义管线/);
 });
 
 test("批 3·W3:锁定只作用于非内建目标——内建 radio 保持可点", () => {

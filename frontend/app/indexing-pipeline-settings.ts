@@ -50,10 +50,14 @@ export function describeIndexingPipelineState(
     };
   }
   if (projection.rebuild_status === "failed") {
-    // 批 3·W3(D3):大库上「重试当前管线」= 非内建目标,服务端恒 409;
-    // 「切回内建」是被豁免的唯一自助出口,保留。按钮与文案出自同一真值,
-    // 不给必然失败的点击。
-    if (projection.large_library_locked === true) {
+    // 批 3·W3(D3):大库上「重试当前**自定义**管线」= 非内建目标,服务端
+    // 恒 409;「切回内建」是被豁免的唯一自助出口,保留。只在当前选择是
+    // 自定义管线时收敛——内建恢复重建失败态(pipeline_id 为空)的重试
+    // 本身就是内建目标,服务端放行,必须保持可重试(codex #674 R1 P2)。
+    if (
+      projection.large_library_locked === true
+      && normalizeIndexingPipelineId(projection.pipeline_id) !== ""
+    ) {
       return {
         tone: "warning",
         detail:
