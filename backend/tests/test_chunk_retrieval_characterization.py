@@ -1342,10 +1342,13 @@ def test_retrieve_chunks_ann_failopen_falls_through_to_bruteforce(repo, monkeypa
     # 关暴力阈值(0)+小库(copyable=True,种子数据本就小)→ 走全表暴力而非 FTS 降级
     monkeypatch.setattr(repo.settings, "chunk_bruteforce_max_chunks", 0)
 
-    ann_calls = {"n": 0}
+    ann_calls = []
 
-    def _ann_none(notebook_id, query, query_vector, idx_, recall):
-        ann_calls["n"] += 1
+    def _ann_none(
+        notebook_id, query, query_vector, idx_, recall, *,
+        allowed_source_ids=None, source_restricted=False,
+    ):
+        ann_calls.append((notebook_id, allowed_source_ids, source_restricted))
         return None                                   # fail-open
 
     monkeypatch.setattr(repo.retrieval.candidates, "_retrieve_chunks_ann", _ann_none)
@@ -1361,7 +1364,7 @@ def test_retrieve_chunks_ann_failopen_falls_through_to_bruteforce(repo, monkeypa
 
     scored, ids, mat = repo.retrieval.candidates._retrieve_chunks(nb.id, "deepseek moe routing")
 
-    assert ann_calls["n"] == 1, "前置:ANN 分支确实被走到并返回 None(fail-open)"
+    assert ann_calls == [(nb.id, None, False)], "ANN 须按未收窄的来源范围调用一次并 fail-open"
     assert gather_calls["n"] == 1, "ANN None 后须 fallthrough 到全表暴力 _gather_chunks"
     assert len(scored) >= 1, "fallthrough 暴力路径应返回非空 scored(而非空)"
 

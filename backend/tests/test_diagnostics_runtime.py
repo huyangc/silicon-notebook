@@ -733,12 +733,31 @@ def test_snapshot_writer_recovers_after_one_replace_failure(tmp_path, monkeypatc
 
     def fail_once(source, destination, *args, **kwargs):
         nonlocal attempts
-        attempts += 1
-        if attempts == 1:
-            raise OSError("synthetic replace failure")
+        # os is process-global: unrelated background writers must not consume
+        # the failure intended for this runtime's first snapshot publication.
+        if (
+            runtime._directory_fd is not None
+            and destination == "runtime.json"
+            and kwargs.get("dst_dir_fd") == runtime._directory_fd
+        ):
+            attempts += 1
+            if attempts == 1:
+                raise OSError("synthetic replace failure")
         return original_replace(source, destination, *args, **kwargs)
 
     monkeypatch.setattr(diagnostics.os, "replace", fail_once)
+    other_directory = tmp_path / "other"
+    other_directory.mkdir(mode=0o700)
+    # A second runtime uses the same filename but a different directory fd.
+    # Publish it first to make the cross-runtime interference deterministic.
+    other_runtime = _runtime(other_directory)
+    other_runtime.start()
+    try:
+        assert _wait_for_json(other_directory / "runtime.json")["snapshot_failures"] == 0
+        assert attempts == 0
+    finally:
+        other_runtime.stop()
+
     runtime.start()
     try:
         snapshot = _wait_for_json(tmp_path / "runtime.json")
