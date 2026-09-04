@@ -54,7 +54,7 @@ MATRIX_FETCH_BATCH = 10_000
 
 
 def _stream_vector_rows(db, notebook_id: str, table: str, id_column: str,
-                        connect=None):
+                        connect=None, batch: int = MATRIX_FETCH_BATCH):
     """Keyset pagination by rowid, de-duplicated. Each page is an INDEPENDENT,
     fully-exhausted statement, so the WAL read snapshot is released between
     pages — a single long-lived cursor would pin ONE snapshot for the whole
@@ -96,7 +96,7 @@ def _stream_vector_rows(db, notebook_id: str, table: str, id_column: str,
                 f"SELECT rowid AS rid, {id_column} AS vid, vector "
                 f"FROM {table} WHERE notebook_id=? AND rowid > ? "
                 f"ORDER BY rowid LIMIT ?",
-                (notebook_id, last_rowid, MATRIX_FETCH_BATCH),
+                (notebook_id, last_rowid, batch),
             ).fetchall()
         if not page:
             break
@@ -107,7 +107,7 @@ def _stream_vector_rows(db, notebook_id: str, table: str, id_column: str,
             seen.add(vid)
             yield vid, row["vector"]
         last_rowid = page[-1]["rid"]
-        if len(page) < MATRIX_FETCH_BATCH:
+        if len(page) < batch:
             break
 
 
@@ -872,7 +872,10 @@ class IndexProjectionStore:
         runtime_dim = resolve_runtime_dim(self.settings)
         yield from matrix_pages(
             _stream_vector_rows(
-                None, notebook_id, table, id_column, connect=self.connect
+                # batch=page_rows (codex #676 R10 P2): bound the raw rowid
+                # scan too, not only the decoded output pages.
+                None, notebook_id, table, id_column, connect=self.connect,
+                batch=page_rows,
             ),
             page_rows,
             runtime_dim=runtime_dim,

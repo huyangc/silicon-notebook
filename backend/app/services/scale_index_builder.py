@@ -448,6 +448,9 @@ class ScaleIndexBuilder:
                 kg_ann_index,
                 self.settings.ppr_emb_synonym_threshold,
                 self.settings.ppr_emb_synonym_topk,
+                # codex #676 R10 P2: the configured budget bounds this
+                # stage's get_items/knn_query pages too.
+                page_rows=int(self.settings.graph_fetch_page_rows),
                 on_hnsw_error=lambda exc: self.event_log.emit(
                     {
                         "kind": "scale_index_synonym_degraded",

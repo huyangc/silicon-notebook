@@ -969,7 +969,11 @@ class IndexProjectionStore:
         runtime_dim = resolve_runtime_dim(self.settings)
         yield from matrix_pages(
             EmbeddingStore.vector_pages(
-                None, notebook_id, table, id_column, connect=self.connect
+                # batch=page_rows (codex #676 R10 P2): the configured budget
+                # must bound the RAW db fetch too, not only the decoded
+                # output pages matrix_pages cuts afterwards.
+                None, notebook_id, table, id_column, batch=page_rows,
+                connect=self.connect,
             ),
             page_rows,
             runtime_dim=runtime_dim,
