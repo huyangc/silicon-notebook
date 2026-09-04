@@ -4248,6 +4248,21 @@ class KnowledgeLifecycleService:
                 notebook_id in self.scale_artifacts.viz_building
                 or scale_build_running
             )
+            if not building:
+                # Publication race (codex #676 R5 P2): a build can publish
+                # its artifact and clear its marker BETWEEN the viz_index()
+                # probe above and the membership reads — reporting the
+                # terminal unavailable then would strand an open canvas (the
+                # frontend only polls while viz_building is true). With no
+                # builder observed, re-probe once: probe-after-clear is the
+                # safe order (publish happens before the marker clears, so a
+                # successful build cannot slip between this probe and the
+                # terminal answer). The re-probe only runs on the rare
+                # no-artifact-no-builder leg and is a cache/stat-level read.
+                idx = self.scale_artifacts.viz_index(notebook_id)
+                if idx is not None and getattr(idx, "viz_ids", None) is not None:
+                    return self._unified_graph_bounded(
+                        notebook_id, idx, effective_limit)
             return {"nodes": [], "edges": [], "total_nodes": 0,
                     "total_edges": 0, "truncated": False,
                     "viz_building": building, "viz_unavailable": not building}

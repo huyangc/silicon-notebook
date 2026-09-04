@@ -122,6 +122,38 @@ def test_unified_graph_counts_an_inflight_scale_build_as_building(repo, monkeypa
     assert result["viz_unavailable"] is False
 
 
+def test_unified_graph_re_probes_the_artifact_when_no_builder_is_observed(repo, monkeypatch):
+    """codex #676 R5 P2:构建可能在 viz_index 探针之后、成员检查之前发布并清
+    标记——此时报终态 unavailable 会让已打开的画布卡死(前端只在
+    viz_building 时轮询)。无在建者时必须重探一次产物;重探命中就按可用
+    served,不返回 unavailable。"""
+    nb = _star(repo)
+    _clear_viz(repo, nb.id)
+    monkeypatch.setattr(repo.settings, "viz_sync_build_max_objects", 0)
+    lifecycle = repo._runtime.knowledge_lifecycle
+
+    class _PublishedIdx:
+        viz_ids = ["ko-1"]
+
+    probes = []
+
+    def _flappy_viz_index(_nb):
+        probes.append(1)
+        # 第一探 None(构建尚未发布),第二探已发布——模拟发布落在两读之间。
+        return None if len(probes) == 1 else _PublishedIdx()
+
+    monkeypatch.setattr(lifecycle.scale_artifacts, "viz_index", _flappy_viz_index)
+    monkeypatch.setattr(
+        lifecycle, "_unified_graph_bounded",
+        lambda _nb, idx, _limit: {"served": True, "idx": idx})
+
+    result = repo.unified_graph(nb.id, level="object", limit=10)
+
+    assert len(probes) == 2
+    assert result.get("served") is True
+    assert "viz_unavailable" not in result
+
+
 def test_kg_neighbors_large_nb_without_viz_never_materializes_cluster_map(repo, monkeypatch):
     """Citation focus during a large viz build must stay bounded and report that
     location is temporarily unavailable instead of loading every cluster member."""
