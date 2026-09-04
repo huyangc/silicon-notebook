@@ -50,6 +50,18 @@ export function describeIndexingPipelineState(
     };
   }
   if (projection.rebuild_status === "failed") {
+    // 批 3·W3(D3):大库上「重试当前管线」= 非内建目标,服务端恒 409;
+    // 「切回内建」是被豁免的唯一自助出口,保留。按钮与文案出自同一真值,
+    // 不给必然失败的点击。
+    if (projection.large_library_locked === true) {
+      return {
+        tone: "warning",
+        detail:
+          "索引管线重建失败；旧索引仍可读取，新写入会暂时被阻止。这本笔记本规模较大，暂不支持重试自定义管线；可切回内建管线恢复写入。",
+        canRevert: true,
+        canRetry: false,
+      };
+    }
     return {
       tone: "warning",
       detail:
@@ -68,6 +80,19 @@ export function describeIndexingPipelineState(
     };
   }
   return null;
+}
+
+export function indexingPipelineOptionLocked(
+  projection: IndexingPipelineResponse | null,
+  optionId: string | null | undefined,
+): boolean {
+  // 批 3·W3(D3):大库只锁**非内建**目标——切回内建是服务端豁免的恢复
+  // 出口,radio 必须保持可点;内建选项在锁定库上照常可选(变更为内建 →
+  // 放行;无变化 → 前端本就不发 PATCH)。
+  return (
+    projection?.large_library_locked === true
+    && normalizeIndexingPipelineId(optionId) !== ""
+  );
 }
 
 export function indexingPipelineConfirmMessage(

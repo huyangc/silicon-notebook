@@ -115,6 +115,7 @@ import {
   describeIndexingPipelineState,
   indexingPipelineConfirmMessage,
   indexingPipelineIdsEqual,
+  indexingPipelineOptionLocked,
   indexingPipelineReadOnlySummary,
   notebookIndexingPipelineReadOnlySummary,
   selectedIndexingPipelineOption,
@@ -6864,7 +6865,7 @@ export default function Home() {
                 )}
                 {notebookCollection.editor?.indexingPipeline?.large_library_locked === true && (
                   <p className="indexing-pipeline-note" role="note">
-                    这本笔记本规模较大，暂不支持切换索引管线；当前索引不受影响。
+                    这本笔记本规模较大，暂不支持切换到自定义索引管线；当前索引不受影响，切回内建仍可用于恢复。
                   </p>
                 )}
                 <div className="indexing-pipeline-list" role="radiogroup" aria-label="索引管线">
@@ -6886,9 +6887,13 @@ export default function Home() {
                             notebookCollection.editor?.busy
                             || option.available === false
                             || notebookCollection.editor?.indexingPipeline?.rebuild_status === "pending"
-                            // 批 3·W3(D3):大库锁定——服务端 begin() 恒 409,
-                            // 界面不给一条必然失败的路;说明文案在组下方。
-                            || notebookCollection.editor?.indexingPipeline?.large_library_locked === true
+                            // 批 3·W3(D3):大库锁定非内建目标——服务端对
+                            // 它们恒 409;内建(恢复出口)保持可点。判据出自
+                            // indexingPipelineOptionLocked 单一真值。
+                            || indexingPipelineOptionLocked(
+                              notebookCollection.editor?.indexingPipeline ?? null,
+                              option.pipeline_id,
+                            )
                           }
                           onChange={() => notebookCollection.selectIndexingPipeline(option.pipeline_id ?? null)}
                         />

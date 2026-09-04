@@ -406,6 +406,13 @@ class Settings(BaseSettings):
     # 事务,页间释放写锁;上限同样压在 SQLITE_MAX_VARIABLE_NUMBER 之下。
     kg_generation_reap_page_rows: int = Field(
         5000, ge=50, le=20_000, validation_alias="KG_GENERATION_REAP_PAGE_ROWS")
+    # 批 3·W3(D3):大库锁定「切换索引管线」的对象数阈值。判据必须按
+    # WR-2 的病灶规模定(整库重建的发布事务在百万级对象上不可完成),
+    # 不能复用拷贝阈值(5000 行)——那会把普通笔记本误锁。计数走
+    # count_active_objects 的 seq-gated memo。
+    indexing_pipeline_switch_max_objects: int = Field(
+        200_000, ge=1000,
+        validation_alias="INDEXING_PIPELINE_SWITCH_MAX_OBJECTS")
     # 删除作业扫尾的轮询间隔（双驱动：孤儿作业行重排 + 无作业行的 deleting 库
     # 补建）。与 checkup.py 的 _H45_CACHE_TTL 同量级（300s）。
     notebook_delete_sweep_seconds: int = Field(

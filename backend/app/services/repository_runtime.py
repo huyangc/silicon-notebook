@@ -1466,14 +1466,22 @@ class RepositoryRuntime:
             self.notebook_store,
             self.source_chunking,
             self.indexing_pipelines,
-            # 批 3·W3(D3):大库禁用切换——判据与社区构建大库守卫同源
-            # (copy_stats.copyable,seq-gated memo)。晚绑定经 self,
-            # scale_artifacts 在别处构造也不受装配顺序影响。
-            large_library=lambda notebook_id: not bool(
-                self.scale_artifacts.notebook_copy_stats(notebook_id)["copyable"]
-            ),
+            # 批 3·W3(D3):大库禁用切换——判据按 WR-2 病灶规模走活跃对象数
+            # (count_active_objects 的 seq-gated memo,Z3 同款),阈值
+            # INDEXING_PIPELINE_SWITCH_MAX_OBJECTS;刻意不用拷贝阈值
+            # (5000 行,低三个数量级会误锁普通库,内评 P2)。晚绑定经
+            # self,装配顺序无关。
+            large_library=lambda notebook_id: self._pipeline_switch_locked(
+                notebook_id),
         )
         return self.source_embedding, self.source_chunking
+
+    def _pipeline_switch_locked(self, notebook_id: str) -> bool:
+        """批 3·W3(D3):活跃对象数超过阈值即锁定切换索引管线。"""
+        with self.database.connect() as db:
+            count = self.knowledge.count_active_objects(db, notebook_id)
+        return int(count) > int(
+            self.settings.indexing_pipeline_switch_max_objects)
 
     def wire_source_ingestion(
         self,

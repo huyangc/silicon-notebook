@@ -11292,6 +11292,8 @@ button.tag:hover {
    .settings-section-head 承载),此处不再保留其死规则。 */
 .base-picker-empty,
 .base-picker-hint { font-size: 12px; opacity: .7; margin: 0; }
+/* 批 3·W3:索引管线大库锁定的就地说明——与同面板 hint 同一视觉档。 */
+.indexing-pipeline-note { font-size: 12px; opacity: .8; margin: 0 0 6px; color: var(--warning, #b8860b); }
 .base-picker-hint { color: var(--warning, #b8860b); }
 .base-picker-group { display: flex; flex-direction: column; gap: 2px; margin-top: 16px; }
 .base-picker-group:first-child { margin-top: 2px; }
