@@ -751,6 +751,9 @@ class KgMutationPort(Protocol):
 
 
 class KnowledgeLifecycleRepository(Protocol):
+    # ``target_limit``/``retry_partial`` 只被 worker 侧(execute)消费;
+    # prepare 自批 3·W4 T-W4-1 起不再读它们(受理不计数)。调用方必须把同
+    # 一对参数传给 execute,只传给 prepare 的参数会静默蒸发。
     def prepare_notebook_kg_job(
         self,
         notebook_id: str,

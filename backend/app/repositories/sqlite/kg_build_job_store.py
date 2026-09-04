@@ -150,9 +150,11 @@ class KgBuildJobStore:
         return cursor.rowcount == 1
 
     def extend_total_sources(self, job_id: str, extra: int) -> bool:
-        """补漏轮把新发现的源并进持久 total(codex #673 R3 P2):completed/
-        failed 随 record_source_result 前进而 total 停在 prepare 快照,会给
-        index_status/前端/事件暴露 2/1 这种不可能进度。只在 running 时抬。"""
+        """把新发现的源并进持久 total,只在 running 时抬、单调不减。两个
+        消费者:worker 起跑回填(批 3·W4 T-W4-1,从 create_job 落的 0 起
+        extend ≡ set)与补漏轮(codex #673 R3 P2)——completed/failed 随
+        record_source_result 前进而 total 落后,会给 index_status/前端/事件
+        暴露 2/1 这种不可能进度。"""
         if extra <= 0:
             return False
         with self.database.write() as db:
