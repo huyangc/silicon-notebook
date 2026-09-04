@@ -37,8 +37,9 @@ class IndexingPipelineLargeLibraryError(RuntimeError):
     在 9M 对象量级上事实不可完成——每次点击白付 30s 连接 + 整轮回滚。按
     D3 的裁决,先用一天级的显式禁用替代一周级的重构:``begin()`` 在铸新
     generation **之前**拒绝(什么都没保存,内建管线继续生效),重构排到有
-    真实需求时。判据与社区构建的大库守卫同源(copy_stats 的 copyable,
-    memo 化)。"""
+    真实需求时。判据 = 活跃对象数 > INDEXING_PIPELINE_SWITCH_MAX_OBJECTS
+    (count_active_objects 的 seq-gated memo);**切回内建豁免**——那是卡死
+    大库唯一的自助恢复出口(内评双 P1)。"""
 
     def __init__(self, notebook_id: str = "") -> None:
         super().__init__("indexing pipeline switch is disabled on large libraries")

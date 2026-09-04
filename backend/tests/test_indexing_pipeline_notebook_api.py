@@ -165,14 +165,13 @@ def test_switch_is_refused_while_a_rebuild_worker_is_active(client):
 
 
 def _mark_large(monkeypatch) -> None:
-    """把当前 repo 判成大库(批 3·W3 D3 判据的测试化身):copy_stats 的
-    copyable=False 即 scale-tier,与社区构建大库守卫同源。"""
+    """把当前 repo 判成大库(批 3·W3 D3 判据的测试化身):活跃对象数超过
+    INDEXING_PIPELINE_SWITCH_MAX_OBJECTS——runtime 侧单一判定点。"""
     from app.api import deps
 
     runtime = deps.repository()._runtime
     monkeypatch.setattr(
-        runtime.scale_artifacts, "notebook_copy_stats",
-        lambda notebook_id: {"copyable": False},
+        runtime, "_pipeline_switch_locked", lambda notebook_id: True,
     )
 
 
@@ -229,6 +228,38 @@ def test_large_library_locks_the_pipeline_switch(client, monkeypatch):
     assert after["pipeline_id"] is None
     assert after["pending"] is False
     assert after["rebuild_status"] == "idle"
+
+
+def test_large_library_still_allows_builtin_recovery(client, monkeypatch):
+    """内评双 P1:卡在缺席/失败自定义管线上的大库,require_write_admission
+    让全部写入 fail-closed——「切回内建」是唯一自助出口,必须豁免大库闸,
+    否则笔记本永久写锁死。"""
+    notebook_id = _notebook(client)
+    from app.api import deps
+
+    runtime = deps.repository()._runtime
+    # 先造出「desired 停在自定义管线」的卡死态(begin 落 desired 后 worker
+    # 炸掉留下的形态),再判成大库。
+    runtime.notebook_store.set_indexing_pipeline_desired(
+        notebook_id, "deploy.custom", "v1")
+    _mark_large(monkeypatch)
+    stuck = client.get(
+        f"/api/notebooks/{notebook_id}/indexing-pipeline"
+    ).json()
+    assert stuck["large_library_locked"] is True
+    assert stuck["pending"] is True
+
+    recovered = client.patch(
+        f"/api/notebooks/{notebook_id}/indexing-pipeline",
+        json={"pipeline_id": None},
+    )
+    assert recovered.status_code == 200, recovered.text
+    # 重试同一条自定义管线(非内建目标)仍被闸。
+    retried = client.patch(
+        f"/api/notebooks/{notebook_id}/indexing-pipeline",
+        json={"pipeline_id": "deploy.custom"},
+    )
+    assert retried.status_code in (409,), retried.text
 
 
 def test_small_library_projection_is_not_locked(client):

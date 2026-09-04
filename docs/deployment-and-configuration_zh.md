@@ -713,6 +713,7 @@ NOTEBOOK_DELETE_FINALIZE_TIMEOUT_SECONDS  # 仅 PostgreSQL：删除作业单事�
 KG_GRAPH_DRAIN_PAGE_ROWS                  # delete_notebook_kg 预排水的行预算（批 3·W1 T-5a）：一个值同时作每批页大小（每批一条有界 DELETE、一个写事务）与「留给终局原子重置」的每表残余阈值。按部署的 statement timeout 定尺——默认 2000 在 180s 的 POSTGRES_STATEMENT_TIMEOUT_SECONDS 下余量充足；低配部署可调小以缩短单批写锁/语句时长，代价是批次更多、半清窗口更长（默认 2000；50-20000,上限压在 SQLite 默认 SQLITE_MAX_VARIABLE_NUMBER 之下——排水页把选中 id 作为 SQL 参数逐个绑定）
 KG_DERIVED_BUILD_TTL_SECONDS              # 代际重建（批 3·W2）在飞认领的崩溃兜底 TTL。⚠ 这不是正常释放通道：失败路径由 rebuild 的 finally CAS 即时释放，TTL 只救「进程连 finally 都没跑到」的 kill -9/掉电。数值围栏（下限 1800 由启动校验强制）：必须显著大于该部署一轮全量重聚簇的最坏墙钟——生产 484GB 库在 30-60 分钟量级，默认 4 小时留了余量；设得过小会把仍在跑的重建当尸体抢占，双方翻转双 CAS 互相作废、整库空转。活认领在阶段边界与 LLM 阶段的分块回调处有心跳续租（codex #671 R13），claimed_at 持续前进——TTL 抢的只会是真尸体；心跳失败最坏退回固定 TTL 语义。除非有实测的更快重建墙钟，不要调小（默认 14400；≥1800）
 KG_CATCHUP_SKEW_SECONDS                   # 代际翻转后单遍催收的时钟偏斜余量：重放退休代里 created_at ≥「翻转锚点 − 该余量」的融合行。锚点取 DB 服务端时钟，余量兜的是行时间戳的应用时钟偏斜与长事务可见性偏差。方向性围栏：调大只是多重放几行（幂等安置无害），调小才有漏行风险——除非确证全部写进程与 DB 时钟偏差远小于默认值，不要调小（默认 300；≥0）
+INDEXING_PIPELINE_SWITCH_MAX_OBJECTS      # 批 3·W3(决策 D3):活跃对象数超过该值的笔记本锁定「切换到自定义索引管线」(切回内建豁免)。数值围栏:按 WR-2 病灶规模(整库重建发布事务在百万级对象上不可完成)定,默认 20 万;刻意不用拷贝阈值(NOTEBOOK_COPY_MAX_ROWS=5000,低三个数量级会误锁普通库)。计数走 count_active_objects 的 seq-gated memo(默认 200000;≥1000)
 KG_GENERATION_REAP_PAGE_ROWS              # 残代回收每页行数（rebuild 预回收 / communities 发布前回收共用；启动恢复用自己的常数与全局页预算）。与 KG_GRAPH_DRAIN_PAGE_ROWS 同族同界：每页一条有界 DELETE、一个写事务，页间释放写锁（默认 5000；50-20000）
 ```
 ⚠ 容量预期（批 3·W2 代际化）：三张派生表（concept_clusters/communities/

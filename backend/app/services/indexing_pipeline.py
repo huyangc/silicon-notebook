@@ -29,9 +29,10 @@ class IndexingPipelineService:
         self.notebooks = notebooks
         self.chunks = chunks
         self.host = host
-        # 批 3·W3(D3):大库判据探针(None=不设限,测试/轻组合根沿用旧行为)。
-        # 判据与社区构建大库守卫同源:copy_stats 的 copyable(seq-gated memo,
-        # 冷一次热毫秒)。
+        # 批 3·W3(D3):大库判据探针(None=不设限——只覆盖直接构造的
+        # 测试;runtime 装配总是接线)。判据=活跃对象数阈值
+        # (count_active_objects 的 seq-gated memo;摄取期 seq 常变时会
+        # 冷载,但两个消费入口都是用户手动低频动作)。
         self._large_library = large_library
 
     def _option(self, pipeline_id: str) -> IndexingPipelineOption | None:
@@ -155,18 +156,21 @@ class IndexingPipelineService:
             and not before["pending"]
         ):
             return {**before, "changed": False, "warning_count": 0}
-        # 批 3·W3(D3):大库直接拒绝在改 desired 之前——什么都没保存,内建
-        # 管线继续生效。放在「无变化早退」之后:纯读取/幂等保存不受影响;
-        # 放在铸 generation 之前:不留「已保存但注定重建不动」的悬置意图。
-        # 刻意连「切回内建」也拦:不可行的是整库重建机器本身(WR-2),与
-        # 目标管线无关——大库上任何切换都要付那笔付不起的钱。
-        if self._large_library is not None and self._large_library(notebook_id):
-            raise IndexingPipelineLargeLibraryError(notebook_id)
         # 活跃 rebuild 期间拒绝在改 desired 之前：铸新 generation 会让正在跑的
         # worker 在花完整库模型/embedding 开销之后输掉 publish CAS(整轮作废),
         # 而提交者只读到一句无害的 409。失败态(retryable)不拦——那正是重试入口。
         if before["rebuild_status"] == "pending":
             raise IndexingPipelineRebuildActiveError(notebook_id)
+        # 批 3·W3(D3):大库拒绝**非内建目标**的变更,在改 desired 之前——
+        # 什么都没保存。放在 rebuild-active 之后:worker 在跑时给出更准的
+        # 「重建进行中」文案而不是「规模较大」(内评 P2)。**切回内建
+        # (desired == "")豁免**(内评双 P1):卡在缺席/失败自定义管线上的
+        # 大库,require_write_admission 让全部写入 fail-closed,切回内建是
+        # 唯一自助出口——闸死它=笔记本永久写锁死;恢复重建即便再失败也只
+        # 回到 retryable,不会更糟。判定复用 before 里刚算过的锁定位
+        # (拒绝与投影告诉前端的状态结构上必然一致,也省两次探针)。
+        if desired and before.get("large_library_locked"):
+            raise IndexingPipelineLargeLibraryError(notebook_id)
         generation = self.notebooks.set_indexing_pipeline_desired(
             notebook_id, desired, option.version
         )
