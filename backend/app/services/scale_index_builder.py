@@ -770,7 +770,10 @@ class ScaleIndexBuilder:
                         "kind": "incremental_fuse_failed",
                         "notebook_id": notebook_id,
                         "source_id": source_id,
-                        "error": f"{type(exc).__name__}: {exc}"[:200],
+                        # 只记异常类名(codex #673 R1 P2/AGENTS 红线:异常原文可能带
+                        # 私有路径/凭据/来源摘录,截断不等于脱敏;定位靠同一
+                        # logger.exception 的服务端日志)。
+                        "error": type(exc).__name__,
                     })
 
             (
