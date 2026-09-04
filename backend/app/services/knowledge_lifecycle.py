@@ -480,6 +480,9 @@ class KnowledgeLifecycleService:
         # Keep algorithm callbacks late-bound through ``self`` so established
         # lifecycle monkeypatch seams and the caller's ContextVar context remain
         # authoritative when a background worker enters the collaborator.
+        # 跨准入仲裁锁(codex #673 R2 P2):维护槽 claim 与 build/delete 的
+        # kg_building 预占共用,消掉对开双退让。进程内纯内存临界区,毫秒级。
+        self.kg_cross_admission_lock = threading.Lock()
         self.kg_maintenance = KgMaintenanceJobs(
             event_log=event_log,
             get_notebook=get_notebook,
@@ -495,6 +498,7 @@ class KnowledgeLifecycleService:
             # prepare_notebook_kg_job / standalone delete 侧。
             kg_build_active=lambda notebook_id: self._kg_build_active(
                 notebook_id),
+            cross_admission_lock=self.kg_cross_admission_lock,
         )
         # Private aliases remain for compatibility with characterization and
         # operational probes that inspect the shared registry by identity.
@@ -596,19 +600,20 @@ class KnowledgeLifecycleService:
         # actual owner.
         if held_by_kg_job:
             return self._delete_notebook_kg_fenced(notebook_id)
-        with self.kg_building_lock:
-            if notebook_id in self.kg_building:
-                raise KgBuildAlreadyRunning(notebook_id)
-            self.kg_building.add(notebook_id)
         # 批 3·W2 §2.1:standalone delete 的认领同样查实例 A 的维护槽
-        # (进程内);跨进程兜底本就有——delete 终局把指针/在飞重置,在跑
-        # rebuild 的翻转双 CAS 零行更新响亮作废。write-then-check 序同
-        # prepare 侧。
-        maintenance_kind = self.kg_maintenance.active_kind(notebook_id)
-        if maintenance_kind is not None:
+        # (进程内),「占位 + 查」在跨准入仲裁锁里原子完成(同 prepare 侧,
+        # codex #673 R2 P2);跨进程兜底本就有——delete 终局把指针/在飞
+        # 重置,在跑 rebuild 的翻转双 CAS 零行更新响亮作废。
+        with self.kg_cross_admission_lock:
             with self.kg_building_lock:
-                self.kg_building.discard(notebook_id)
-            raise KgMaintenanceAlreadyRunning(notebook_id, maintenance_kind)
+                if notebook_id in self.kg_building:
+                    raise KgBuildAlreadyRunning(notebook_id)
+                self.kg_building.add(notebook_id)
+            maintenance_kind = self.kg_maintenance.active_kind(notebook_id)
+            if maintenance_kind is not None:
+                with self.kg_building_lock:
+                    self.kg_building.discard(notebook_id)
+                raise KgMaintenanceAlreadyRunning(notebook_id, maintenance_kind)
         try:
             return self._delete_notebook_kg_fenced(notebook_id)
         finally:
@@ -2973,19 +2978,21 @@ class KnowledgeLifecycleService:
         # idempotent set.add covering runs resumed after a process
         # restart). Same single-worker deployment contract as quiesce leg B
         # (design doc §T-3.3 / 残余债 #10).
-        with self.kg_building_lock:
-            if notebook_id in self.kg_building:
-                raise KgBuildAlreadyRunning(notebook_id)
-            self.kg_building.add(notebook_id)
-        # 批 3·W2 §2.1(buildkg- × unifiedkg-/relinkkg-):登记后查对方——
-        # 两侧同为 write-then-check(维护槽 claim 先登记槽再查 kg_building),
-        # Dekker 序保证并发对开时至少一方看见另一方。维护在飞即撤销刚占的
-        # 闸并按其种类 409(文案点名「重新合并/补上关联」)。
-        maintenance_kind = self.kg_maintenance.active_kind(notebook_id)
-        if maintenance_kind is not None:
+        # 批 3·W2 §2.1(buildkg- × unifiedkg-/relinkkg-):「占 kg_building +
+        # 查维护槽」整段在跨准入仲裁锁里原子完成——维护槽 claim 的
+        # 「登记槽 + 查 kg_building」持同一把锁,先进临界区者完整胜出,
+        # 对开不再双双退让(codex #673 R2 P2)。维护在飞即撤销刚占的闸并按
+        # 其种类 409(文案点名「重新合并/补上关联」)。
+        with self.kg_cross_admission_lock:
             with self.kg_building_lock:
-                self.kg_building.discard(notebook_id)
-            raise KgMaintenanceAlreadyRunning(notebook_id, maintenance_kind)
+                if notebook_id in self.kg_building:
+                    raise KgBuildAlreadyRunning(notebook_id)
+                self.kg_building.add(notebook_id)
+            maintenance_kind = self.kg_maintenance.active_kind(notebook_id)
+            if maintenance_kind is not None:
+                with self.kg_building_lock:
+                    self.kg_building.discard(notebook_id)
+                raise KgMaintenanceAlreadyRunning(notebook_id, maintenance_kind)
         try:
             return self._prepare_notebook_kg_job_reserved(
                 notebook_id, mode,
