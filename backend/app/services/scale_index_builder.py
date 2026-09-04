@@ -200,28 +200,8 @@ class ScaleIndexBuilder:
             if self.invalidate_source_partition_cache is not None:
                 self.invalidate_source_partition_cache(notebook_id)
 
-    def _build_ann(self, vectors):
-        """Build an hnsw index from a (n, dim) float32 matrix — same frozen
-        params as the KG ANN (cosine / M=16 / ef=hnsw_ef_construction /
-        random_seed=42). build() pre-builds the chunk/relation ANN inline so
-        each matrix is freed BEFORE persist instead of riding resident for
-        save_scale_index to rebuild (relation matrix alone is ~33GB at 8M rows).
-        Returns None for an empty/absent matrix."""
-        if vectors is None or getattr(vectors, "shape", (0,))[0] == 0:
-            return None
-        import hnswlib
-
-        idx = hnswlib.Index(space="cosine", dim=int(vectors.shape[1]))
-        idx.init_index(
-            max_elements=vectors.shape[0],
-            ef_construction=self.settings.hnsw_ef_construction,
-            M=16,
-            random_seed=42,
-        )
-        idx.add_items(vectors, np.arange(vectors.shape[0]))
-        return idx
-
-    def _paged_ann(self, notebook_id: str, table: str, id_column: str):
+    def _paged_ann(self, notebook_id: str, table: str, id_column: str,
+                   on_load_ms=None):
         """Build one hnsw index straight from bounded embedding pages.
 
         Replaces "load one whole-notebook matrix, then add_items it" for all
@@ -238,7 +218,26 @@ class ScaleIndexBuilder:
         and the capacity from a COUNT upper bound, since how many rows survive
         decoding is unknown until the scan ends. Rows inserted below the
         cursor after that COUNT are absorbed by ``resize_index`` rather than
-        raising — the same drift the keyset scan already tolerates.
+        raising — the same drift the keyset scan already tolerates. That
+        growth is GEOMETRIC (``max(needed, capacity * 2)``), not
+        page-at-a-time: ``hnswlib.resize_index`` reallocates the whole element
+        store and copies every element already inserted, so growing by one
+        page per page turns the overflow tail into a quadratic re-copy (and
+        transiently needs 2x the index's memory each time). Doubling caps it
+        at O(log) reallocations for any amount of drift; the wasted capacity
+        is bounded by one doubling of whatever the COUNT under-estimated by.
+
+        ``on_load_ms`` is invoked ONCE, with the accumulated read+decode
+        milliseconds, at the instant the page stream is exhausted — i.e. from
+        inside this method, which is the only place that knows loading has
+        finished. The caller uses it to emit the load stage before it emits
+        the insert stage. Registered residual: with a paged feed the two costs
+        genuinely INTERLEAVE (read a page, insert it, repeat), so the two
+        stage events still land close together in wall-clock time, unlike the
+        pre-paging shape where minutes of loading preceded minutes of
+        inserting. A leg therefore stays silent on the CLI for its whole
+        duration — see ``batch_ingest._index_stage_progress``, which is the
+        only liveness signal an operator has on a tens-of-minutes build.
 
         Returns ``(labels, index, load_ms, add_ms)``: labels row-aligned with
         the index in scan order (byte-identical to the old whole-matrix path,
@@ -276,12 +275,14 @@ class ScaleIndexBuilder:
                 )
             offset = len(labels)
             if offset + len(page_ids) > capacity:
-                capacity = offset + len(page_ids)
+                capacity = max(offset + len(page_ids), capacity * 2)
                 index.resize_index(capacity)
             index.add_items(page_matrix, np.arange(offset, offset + len(page_ids)))
             labels.extend(page_ids)
             add_ms += (time.perf_counter() - started) * 1000
             started = time.perf_counter()
+        if on_load_ms is not None:
+            on_load_ms(round(load_ms))
         return labels, index, round(load_ms), round(add_ms)
 
     def _chunk_ann_source_codes(
@@ -406,11 +407,16 @@ class ScaleIndexBuilder:
         # matrix never exists as one object. The two frozen stage names are
         # kept and now carry the honest split of the same total — `kg_matrix`
         # is the paged read+decode, `ann_build` the hnsw insertions — instead
-        # of the old load-everything-then-insert pair.
+        # of the old load-everything-then-insert pair. `kg_matrix` is emitted
+        # from INSIDE _paged_ann, the moment the page stream is exhausted, so
+        # the load stage still precedes the insert stage in emission order
+        # rather than both being synthesized afterwards. Registered residual:
+        # the two costs interleave per page now, so the two events land close
+        # together in wall-clock time (details in _paged_ann's docstring).
         ann_labels, kg_ann_index, _kg_load_ms, _kg_add_ms = self._paged_ann(
-            notebook_id, "knowledge_embeddings", "object_id"
+            notebook_id, "knowledge_embeddings", "object_id",
+            on_load_ms=lambda ms: record("kg_matrix", ms),
         )
-        record("kg_matrix", _kg_load_ms)
         record("ann_build", _kg_add_ms)
         # The built dim now comes off the index itself (the matrix that used to
         # answer this is gone by construction, not merely freed early).
@@ -441,6 +447,13 @@ class ScaleIndexBuilder:
                 ),
                 self.settings.ppr_emb_synonym_threshold,
                 self.settings.ppr_emb_synonym_topk,
+                on_hnsw_error=lambda exc: self.event_log.emit(
+                    {
+                        "kind": "scale_index_synonym_degraded",
+                        "notebook_id": notebook_id,
+                        "error": type(exc).__name__,
+                    }
+                ),
             )
 
         synonyms = timed("synonym", synonym_edges)

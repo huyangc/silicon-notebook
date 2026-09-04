@@ -1656,7 +1656,7 @@ class RepositoryRuntime:
         *,
         connect: Callable[[], Any],
         in_batches: Callable[..., Any],
-        ent_chunk_map: Callable[[str], dict],
+        ent_chunk_map: Callable[..., dict],
         mention_extra_edges: Callable[[str], list],
         vector_matrix: Callable[..., Any],
         version: Callable[[str], list],
@@ -1672,7 +1672,14 @@ class RepositoryRuntime:
         every projection query); ``in_batches`` resolves the facade helper so
         the frozen ``_IN_CHUNK`` class patch keeps flowing; the ent-chunk /
         mention-edge / vector-matrix providers are retrieval-owned caches
-        that stay facade-late until their domain moves (Gate 7).  The catalog
+        that stay facade-late until their domain moves (Gate 7).
+        ``ent_chunk_map`` additionally carries a ``paged`` keyword: the
+        offline build's gather passes True to reach the bounded evidence read
+        (``notebook_object_evidence_rows_paged``), while every online PPR
+        caller keeps the unordered whole-table statement whose plan that
+        read's ``ORDER BY id`` would cost +31% (batch-3 W4 T-W4-3.1
+        double-review fix A). Both fill the SAME version-cache entry — the
+        two statements return the same rows and the map is order-insensitive.  The catalog
         applies the exact/allow_stale semantics and the lazy ANN open over
         the eager ScaleArtifactStore; it holds NO builder — reading can never
         schedule a rebuild.  ``version`` resolves the facade's memoized

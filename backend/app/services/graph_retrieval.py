@@ -1470,28 +1470,45 @@ class GraphRetrievalService(_RetrievalState):
                 element_ids=json.loads(cr["element_ids"] or "[]"), relevance=0.3,
                 retrieval_supports=supports))
         return out
-    def _ent_chunk_map(self, notebook_id: str) -> Dict[str, set]:
+    def _ent_chunk_map(
+        self, notebook_id: str, *, paged: bool = False
+    ) -> Dict[str, set]:
         """{object_id: set(chunk_id)} — KG 实体出现在哪些 chunk 里。
         口径同 _kg_source_chunks:evidence[].element_id ∈ chunks.element_ids[]。
         用于 PPR 的 membership 边 + (P2) specificity 权重分母。
 
         P0-5: version-cached like _vector_matrix — this used to full-scan ALL
         knowledge_objects.evidence + ALL chunks.element_ids (with per-row
-        json.loads) on every call, uncached, on the PPR-fallback query path."""
+        json.loads) on every call, uncached, on the PPR-fallback query path.
+
+        ``paged`` picks WHICH evidence read backs a cache miss, and only the
+        OFFLINE build (``graph_rows``' gather, batch-3 W4 T-W4-3.1) passes
+        True. The two reads return the same rows and therefore the same dict,
+        so they share this one cache entry — but the paged one carries an
+        ``ORDER BY id`` that costs the online read +31% (see
+        ``notebook_object_evidence_rows``), which is why the default stays the
+        unordered whole-table read that this method has always issued."""
         version = tuple(self._scale_index_version(notebook_id))
 
         def _load():
-            # Resolved BEFORE the connection opens: the evidence rows below are
-            # consumed inside the ``with`` (they arrive as keyset pages,
+            # Resolved BEFORE the connection opens: the evidence rows below may
+            # be consumed inside the ``with`` (paged mode yields keyset pages,
             # batch-3 W4 T-W4-3.1), and ``_elem_chunk_map`` takes a connection
             # of its own — computing it first keeps the two scans sequential
             # instead of nesting one inside the other's connection.
             elem_to_chunks = self._elem_chunk_map(notebook_id)
             out: Dict[str, set] = {}
             with self._connect() as db:
-                for orow in self.knowledge.notebook_object_evidence_rows(
-                    db, notebook_id
-                ):
+                rows = (
+                    self.knowledge.notebook_object_evidence_rows_paged(
+                        db, notebook_id
+                    )
+                    if paged
+                    else self.knowledge.notebook_object_evidence_rows(
+                        db, notebook_id
+                    )
+                )
+                for orow in rows:
                     chunks: set = set()
                     for e in json.loads(orow["evidence"] or "[]"):
                         if isinstance(e, dict) and e.get("element_id"):

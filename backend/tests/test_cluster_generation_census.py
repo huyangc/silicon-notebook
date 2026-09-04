@@ -68,7 +68,11 @@ _CENSUS: dict[str, tuple[int, int, int, int, int, str]] = {
     "backend/app/repositories/sqlite/governance_store.py": (6, 0, 0, 2, 0,
         "PG 孪生同注记"),
     "backend/app/repositories/postgres/index_projection_store.py": (2, 0, 0, 2, 0,
-        "A×2:version_facts 簇分量(版本身份红线)+scale-graph 读,均已配谓词"),
+        "A×2:version_facts 簇分量(版本身份红线)+scale-graph 读,均已配谓词。"
+        "后者(graph_rows 的 clusters 腿)自批 3·W4 T-W4-3.1 起改 keyset 分页,"
+        "指针读因此从谓词内的标量子查询上提为循环前的一次求值 + 逐页绑定"
+        "参数——谓词仍在每一页上,谓词计数不变,变的只是求值次数"
+        "(逐页重求值会让翻代提交撕裂一次扫描)"),
     "backend/app/repositories/sqlite/index_projection_store.py": (2, 0, 0, 2, 0,
         "PG 孪生同注记"),
     "backend/app/repositories/postgres/kg_build_job_store.py": (1, 0, 0, 0, 0,
@@ -110,6 +114,10 @@ _CENSUS: dict[str, tuple[int, int, int, int, int, str]] = {
     "scripts/diag_open_latency.py": (3, 0, 0, 0, 0,
         "C:只读诊断镜像(version_facts/counts),不在生产读写路径"),
     "scripts/diag_pg_hotpaths.py": (3, 0, 0, 0, 0, "C:只读诊断探针"),
+    "scripts/bench_scale_build_paging.py": (2, 0, 0, 0, 0,
+        "C:离线测量台(不进 CI,专用 _test 库),两处都是只读——EXPLAIN 用例"
+        "镜像 graph_rows clusters 腿的分页读、以及取一个游标样本;代次以"
+        "绑定参数出现(与生产同形),不走指针子查询,故谓词计数 0"),
     "scripts/diag_slow.py": (1, 1, 0, 0, 0, "C:只读诊断对照组"),
     "scripts/verify_repository_snapshot.py": (1, 0, 0, 0, 0,
         "C:离线迁移一致性校验(v24 去重投影),只读"),

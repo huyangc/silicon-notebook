@@ -22,14 +22,14 @@ _EMBEDDING_ID_COLUMNS = {
 
 # Page size for vector_pages' whole-notebook keyset scan (consumed by
 # index_projection_store.embedding_matrix, object_ids=None). Deliberate parity
-# with the SQLite side's own `_MATRIX_FETCH_BATCH`
+# with the SQLite side's own `MATRIX_FETCH_BATCH`
 # (app/repositories/sqlite/index_projection_store.py) — same offline
 # build/fold memory diet, same page-bounds-transient-BLOBs argument — but NOT
 # imported from there: adapters do not cross-import each other, so the two
 # constants are independently defined and must be kept numerically equal by
 # hand if either changes. See vector_pages' docstring for the three ways the
 # PostgreSQL pagination shape differs from SQLite's.
-_MATRIX_FETCH_BATCH = 10_000
+MATRIX_FETCH_BATCH = 10_000
 
 
 def _validated_vector(value: object, *, dimension: int | None) -> tuple[bytes, int]:
@@ -215,7 +215,7 @@ class EmbeddingStore:
 
     @staticmethod
     def vector_pages(db, notebook_id: str, table: str, id_col: str,
-                      batch: int = _MATRIX_FETCH_BATCH):
+                      batch: int = MATRIX_FETCH_BATCH, connect=None):
         """Keyset-paginated whole-notebook vector read, generator of (vid,
         vector) pairs — the bounded replacement for the offline build/fold
         pipeline's whole-notebook load (index_projection_store.embedding_matrix,
@@ -278,10 +278,27 @@ class EmbeddingStore:
             reclaiming dead tuples under concurrent writes — the PostgreSQL
             analogue of the SQLite side's WAL-checkpoint-blocking argument.
         `batch` rows below the page size ends the scan (matches SQLite's
-        `len(page) < _MATRIX_FETCH_BATCH: break`); an id row's `vector`
+        `len(page) < MATRIX_FETCH_BATCH: break`); an id row's `vector`
         column is unwrapped from bytea/memoryview to bytes by
         `_compat_vector_rows` before it is yielded, same as every other
-        reader in this module."""
+        reader in this module.
+
+        `connect` (batch-3 W4 T-W4-3.3 double-review fix C) chooses WHO owns
+        the connection. Default (None): every page runs on the single `db`
+        the caller passed and that connection stays checked out for the whole
+        scan — right for a consumer that does nothing but decode rows between
+        pages. Passing a connection factory instead acquires and RELEASES a
+        pooled connection around each page (`db` is then unused), which is
+        what the ANN feed needs: it interleaves minutes of hnswlib index
+        construction between pages, and holding a pool slot (plus an
+        ACCESS SHARE lock) across that starves every other request — at
+        `POSTGRES_POOL_MAX_SIZE=1`, the minimum the settings validator
+        accepts and the value the sqlite→postgres migrator itself runs with,
+        it takes the whole pool. Safe because each page already is an
+        independent statement
+        whose only cross-page state (`last_vid`) lives in Python; the
+        cross-page drift ledger above is unchanged by which connection ran a
+        page, since it already assumes concurrent writers."""
         table_id, column_id = EmbeddingStore._table_identifiers(table, id_col)
         last_vid = None
         while True:
@@ -297,7 +314,13 @@ class EmbeddingStore:
                     "ORDER BY {} LIMIT %s"
                 ).format(column_id, table_id, column_id, column_id)
                 params = (notebook_id, last_vid, batch)
-            page = _compat_vector_rows(db.execute(statement, params).fetchall())
+            if connect is None:
+                page = _compat_vector_rows(
+                    db.execute(statement, params).fetchall())
+            else:
+                with connect() as page_db:
+                    page = _compat_vector_rows(
+                        page_db.execute(statement, params).fetchall())
             if not page:
                 break
             for row in page:

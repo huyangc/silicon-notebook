@@ -1385,6 +1385,17 @@ class KnowledgeStore:
         ).fetchall()
 
     @staticmethod
+    def notebook_object_evidence_rows_paged(
+        db: sqlite3.Connection, notebook_id: str, page_rows: "int | None" = None
+    ):
+        """SQLite has ONE shape for this read; the offline build's paged entry
+        point resolves to it unchanged (batch-3 W4 T-W4-3.1 paged the
+        PostgreSQL adapter only — the ledger is in the sibling adapter's
+        ``graph_rows``). ``page_rows`` is accepted so the two adapters satisfy
+        one port signature and ignored so this backend keeps one statement."""
+        return KnowledgeStore.notebook_object_evidence_rows(db, notebook_id)
+
+    @staticmethod
     def follow_start_row(db: sqlite3.Connection, object_id: str,
                          active_notebook_id: str, statuses):
         """起点授权门:只有 active 自己的对象、或 active 挂载的参考库里的对象,

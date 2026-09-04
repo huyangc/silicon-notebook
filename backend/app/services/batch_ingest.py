@@ -252,9 +252,17 @@ def _index_stage_progress(stage: str, latency_ms: int) -> None:
     happens — the
     events logger doesn't print to the terminal, and a scale-index build on
     the 490k-object library can take tens of minutes, so real-time per-stage
-    output is the only way to tell it isn't stuck. Generic over stage name/
-    order, so pipeline reorders (e.g. Task 1's hnsw-build-once restructure)
-    never require a change here."""
+    output is the ONLY liveness signal an operator has: this printer is what
+    distinguishes "still working" from "hung", and there is no finer-grained
+    channel behind it. Generic over stage name/order, so pipeline reorders
+    (e.g. Task 1's hnsw-build-once restructure) never require a change here.
+
+    Registered coarseness (batch-3 W4 T-W4-3.3): the three ANN legs now read
+    embeddings and insert them into hnswlib page by page, so their read and
+    insert costs interleave instead of forming two long consecutive phases.
+    A leg therefore prints nothing for its whole duration and then prints its
+    stage line(s) at the end — on a very large library that silence is
+    expected, not a hang."""
     print(f"  [index] {stage}: {latency_ms}ms", flush=True)
 
 

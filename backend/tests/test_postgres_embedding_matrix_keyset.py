@@ -25,7 +25,7 @@ import types
 import numpy as np
 
 from app.repositories.postgres.embedding_store import (
-    _MATRIX_FETCH_BATCH,
+    MATRIX_FETCH_BATCH,
     EmbeddingStore,
 )
 from app.repositories.postgres.index_projection_store import IndexProjectionStore
@@ -168,14 +168,14 @@ def test_vector_pages_empty_notebook_issues_one_page():
 
 
 def test_matrix_fetch_batch_constant_matches_sqlite_side():
-    """Parity pin: the two `_MATRIX_FETCH_BATCH` constants are independently
+    """Parity pin: the two `MATRIX_FETCH_BATCH` constants are independently
     defined (adapters do not cross-import; a TEST may import both sides) and
     this assertion is what keeps them numerically equal — pinning only one
     side's literal would let the other drift silently."""
     from app.repositories.sqlite.index_projection_store import (
-        _MATRIX_FETCH_BATCH as sqlite_batch,
+        MATRIX_FETCH_BATCH as sqlite_batch,
     )
-    assert _MATRIX_FETCH_BATCH == sqlite_batch == 10_000
+    assert MATRIX_FETCH_BATCH == sqlite_batch == 10_000
 
 
 # ───────────────────────────────── IndexProjectionStore.embedding_matrix ──
@@ -195,7 +195,7 @@ def test_embedding_matrix_object_ids_none_paginates_and_uses_n_hint():
     """Whole-notebook load (object_ids=None) must go through
     `EmbeddingStore.vector_pages` at its production default batch size (this
     call site passes no explicit `batch`, so `embedding_matrix` must be
-    wired to `_MATRIX_FETCH_BATCH`) plus the pre-existing COUNT(*) n_hint —
+    wired to `MATRIX_FETCH_BATCH`) plus the pre-existing COUNT(*) n_hint —
     25 rows all fit in one page at that batch size: 1 COUNT(*) + 1 page."""
     dataset = _make_dataset(25)
     conn = _FakeConnection(dataset, max_calls=6)
@@ -205,7 +205,7 @@ def test_embedding_matrix_object_ids_none_paginates_and_uses_n_hint():
 
     assert len(conn.calls) == 2  # 1 COUNT(*) n_hint + 1 keyset page (25 < default batch)
     page_call = conn.calls[1]
-    assert page_call[1] == ("nb-1", _MATRIX_FETCH_BATCH)
+    assert page_call[1] == ("nb-1", MATRIX_FETCH_BATCH)
     assert ids == [vid for vid, _ in dataset]
     assert matrix.shape[0] == 25
 

@@ -3028,7 +3028,7 @@ def test_postgres_graph_build_order_and_equal_confidence_fanout_are_physical_ord
         postgres_settings,
         connect=postgres_database.connect,
         in_batches=lambda values: [list(values)],
-        ent_chunk_map=lambda _notebook_id: {},
+        ent_chunk_map=lambda _notebook_id, **_kw: {},
         mention_extra_edges=lambda _notebook_id: [],
         vector_matrix=lambda *_args, **_kwargs: ([], []),
     )
@@ -3144,7 +3144,7 @@ def test_postgres_graph_rows_follow_persisted_ordinals_for_degree_ties(
         postgres_settings,
         connect=postgres_database.connect,
         in_batches=lambda values: [list(values)],
-        ent_chunk_map=lambda _notebook_id: {},
+        ent_chunk_map=lambda _notebook_id, **_kw: {},
         mention_extra_edges=lambda _notebook_id: [],
         vector_matrix=lambda *_args, **_kwargs: ([], []),
     )
@@ -3260,7 +3260,9 @@ def test_postgres_selected_source_subgraph_projection_executes_all_bounded_legs(
         postgres_settings,
         connect=database.connect,
         in_batches=lambda values: [list(values)],
-        ent_chunk_map=lambda _notebook_id: pytest.fail("whole graph map opened"),
+        ent_chunk_map=lambda _notebook_id, **_kw: pytest.fail(
+            "whole graph map opened"
+        ),
         mention_extra_edges=lambda _notebook_id: pytest.fail("mention graph opened"),
         vector_matrix=lambda *_args, **_kwargs: pytest.fail("embedding matrix opened"),
     )
@@ -3323,6 +3325,9 @@ class _ProjectionCursor:
     def fetchall(self):
         return self._rows
 
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
+
 
 class _ProjectionConnection:
     def execute(self, statement, _params):
@@ -3348,6 +3353,11 @@ class _ProjectionConnection:
             return _ProjectionCursor([{"id": "chunk-a"}, {"id": "chunk-z"}])
         if "FROM concept_clusters" in statement:
             return _ProjectionCursor([])
+        if "FROM unified_kg_state" in statement:
+            # The clusters leg resolves the published generation ONCE before
+            # its page loop and binds it into every page (batch-3 W4 T-W4-3.1
+            # double-review fix B), so this fake must answer that pointer read.
+            return _ProjectionCursor([{"cluster_generation": 0}])
         raise AssertionError(statement)
 
 
@@ -3359,7 +3369,7 @@ def test_projection_membership_artifact_order_ignores_map_and_set_iteration():
             SimpleNamespace(ppr_variant_edge_weight=0.35),
             connect=lambda: nullcontext(connection),
             in_batches=lambda values: [list(values)],
-            ent_chunk_map=lambda _notebook_id: ent_chunk_map,
+            ent_chunk_map=lambda _notebook_id, **_kw: ent_chunk_map,
             mention_extra_edges=lambda _notebook_id: [],
             vector_matrix=lambda *_args, **_kwargs: ([], []),
         )

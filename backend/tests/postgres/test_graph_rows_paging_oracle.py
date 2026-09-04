@@ -13,6 +13,7 @@ notebook fits in one page and obvious when it does not.
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 
 import pytest
 
@@ -154,7 +155,16 @@ def _paged_graph_reads(repo, db, notebook_id: str) -> dict:
             (r["id"], r["object_type"], r["name"])
             for r in projections.active_object_graph_rows(db, notebook_id)
         ],
+        # The evidence read is DUAL-MODE: the online entry point keeps the
+        # pre-paging unordered whole-table statement, and only the offline
+        # build's `_paged` one is keyset-paged. Both must return the same rows.
         "evidence": sorted(
+            r["id"] for r in
+            repo._runtime.knowledge.notebook_object_evidence_rows_paged(
+                db, notebook_id
+            )
+        ),
+        "evidence_online": sorted(
             r["id"] for r in
             repo._runtime.knowledge.notebook_object_evidence_rows(db, notebook_id)
         ),
@@ -177,7 +187,150 @@ def test_paged_reads_return_the_same_rows_in_the_same_order(repo, small_page):
     assert len(want["active"]) == 11
     assert got["active"] == want["active"]
     assert got["evidence"] == want["evidence"]
+    assert got["evidence_online"] == want["evidence"]
     assert got["elements"] == want["elements"]
+
+
+class _StatementSpy:
+    """Transparent connection proxy that records the SQL text of every
+    statement, so a test can pin HOW MANY reads a call issues and what shape
+    they have — the only observable difference between the evidence read's two
+    modes."""
+
+    def __init__(self, db, on_execute=None):
+        self._db = db
+        self._on_execute = on_execute
+        self.statements: list[str] = []
+
+    def execute(self, statement, params=None):
+        text = str(statement)
+        self.statements.append(text)
+        result = (
+            self._db.execute(statement)
+            if params is None
+            else self._db.execute(statement, params)
+        )
+        if self._on_execute is not None:
+            self._on_execute(self._db, text, len(self.statements))
+        return result
+
+    def __getattr__(self, name):
+        return getattr(self._db, name)
+
+
+@pytest.mark.parametrize("small_page", [3], indirect=True)
+def test_the_online_evidence_read_stays_one_unordered_statement(repo, small_page):
+    """Double-review fix A. ``_ent_chunk_map`` runs this read on the first
+    graph-mode PPR question after every KG version bump; the ``ORDER BY id``
+    keyset paging needs costs +31% there (and spills an external merge sort on
+    a notebook that fits in one page), so the online entry point must keep the
+    pre-paging statement and only the build's ``_paged`` one may page.
+
+    Mutation anchors, both behavioral: route the online entry point through
+    the paged one and the single-statement/no-ORDER-BY assertions go red;
+    make the paged entry point issue one whole-table read and the page-count
+    assertion goes red. The two must also return the same rows, which is what
+    lets them share one version-cache entry."""
+    notebook_id = _seed(repo)
+    knowledge = repo._runtime.knowledge
+
+    with repo._connect() as db:
+        online = _StatementSpy(db)
+        online_rows = knowledge.notebook_object_evidence_rows(online, notebook_id)
+        paged = _StatementSpy(db)
+        paged_rows = list(
+            knowledge.notebook_object_evidence_rows_paged(paged, notebook_id)
+        )
+
+    assert sorted(r["id"] for r in online_rows) == sorted(
+        r["id"] for r in paged_rows
+    )
+    assert len(online_rows) == 11
+
+    assert len(online.statements) == 1
+    assert "ORDER BY" not in online.statements[0].upper()
+    assert "LIMIT" not in online.statements[0].upper()
+
+    # 11 rows at a page size of 3 → 3 + 3 + 3 + 2, the short page ending it.
+    assert len(paged.statements) == 4
+    assert all("ORDER BY id" in text for text in paged.statements)
+    assert all("LIMIT" in text.upper() for text in paged.statements)
+
+
+@pytest.mark.parametrize("small_page", [3], indirect=True)
+def test_a_generation_flip_between_cluster_pages_cannot_tear_the_graph(
+    repo, small_page, monkeypatch
+):
+    """Double-review fix B. The published generation is resolved ONCE and
+    bound into every page. With the old inline
+    ``COALESCE((SELECT cluster_generation ...), 0)`` scalar subquery the
+    predicate was re-evaluated per page, so a generation published between two
+    pages (READ COMMITTED sees it immediately) split one scan across two
+    generations — the same member arriving under two canonical ids, a state
+    ``uq_clusters_nb_type_member_generation`` makes impossible within one
+    generation and which nothing downstream defends against.
+
+    This test commits that flip from inside the scan, right after the first
+    cluster page. Mutation anchor: put the scalar subquery back in place of
+    the bound parameter and the next generation's hub appears in node_ids."""
+    notebook_id = _seed(repo)
+    with repo._connect() as db:
+        published = int(db.execute(
+            "SELECT cluster_generation FROM unified_kg_state WHERE notebook_id=%s",
+            (notebook_id,),
+        ).fetchone()["cluster_generation"])
+        members = [
+            row["id"] for row in db.execute(
+                "SELECT id FROM knowledge_objects WHERE notebook_id=%s "
+                "ORDER BY ordinal", (notebook_id,)
+            ).fetchall()
+        ]
+    assert len(members) > small_page, "the flip must land between two pages"
+
+    state = {"cluster_pages": 0}
+
+    def flip_after_first_cluster_page(db, text, _index):
+        if "concept_clusters" not in text or not text.lstrip().upper().startswith(
+            "SELECT"
+        ):
+            return
+        state["cluster_pages"] += 1
+        if state["cluster_pages"] != 1:
+            return
+        # A newer generation becomes the published one, mid-scan.
+        db.execute(
+            "UPDATE unified_kg_state SET cluster_generation=%s WHERE notebook_id=%s",
+            (published + 1, notebook_id),
+        )
+        for index, member in enumerate(members):
+            db.execute(
+                "INSERT INTO concept_clusters (id,notebook_id,canonical_id,"
+                "member_object_id,canonical_name,object_type,"
+                "canonical_description,created_at,generation) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                (
+                    f"cc-next-{index}", notebook_id, "next-generation-canonical",
+                    member, "next generation", "concept", "", NOW,
+                    published + 1,
+                ),
+            )
+
+    projections = repo._runtime.index_projections
+    real_connect = projections.connect
+
+    @contextmanager
+    def flipping_connect():
+        with real_connect() as db:
+            yield _StatementSpy(db, on_execute=flip_after_first_cluster_page)
+
+    monkeypatch.setattr(projections, "connect", flipping_connect)
+    rows = projections.graph_rows(notebook_id, None, synonym_edges=[])
+
+    assert state["cluster_pages"] > 1, "the cluster leg must span several pages"
+    assert "cluster:next-generation-canonical" not in rows.node_ids
+    assert not any(
+        "next-generation-canonical" in str(node) for node in rows.node_ids
+    )
 
 
 def _graph_rows_at(monkeypatch, repo, notebook_id: str, page: int):

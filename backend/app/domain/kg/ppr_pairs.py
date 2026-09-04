@@ -149,7 +149,8 @@ def _synonym_edges_from_knn(ids, row_idx, col_idx, sims, threshold: float):
 
 
 def emb_synonym_edges_paged(ids, prebuilt_index, query_pages,
-                            threshold: float = 0.8, top_k: int = 20):
+                            threshold: float = 0.8, top_k: int = 20,
+                            on_hnsw_error=None):
     """``emb_synonym_edges`` for a caller that no longer holds the matrix.
 
     Once the offline build feeds hnsw from bounded pages, the KG matrix is
@@ -181,7 +182,16 @@ def emb_synonym_edges_paged(ids, prebuilt_index, query_pages,
     same keyset in the same direction), so with no drift this returns exactly
     what ``emb_synonym_edges`` would have returned from one whole matrix.
 
-    fail-open: hnswlib 异常返 []，同 ``emb_synonym_edges``。
+    fail-open, and ONLY around hnswlib: ``set_ef`` / ``knn_query`` failures
+    return [] (a missing soft bridging edge, same posture as
+    ``emb_synonym_edges``) and are reported through ``on_hnsw_error`` so the
+    caller can emit a structured event carrying the exception CLASS NAME only.
+    Iterating ``query_pages`` is deliberately OUTSIDE that guard: those are
+    live database reads, and a QueryCanceled / pool-acquire / connection
+    failure swallowed here would silently produce an edge-less graph that the
+    build then persists as a healthy-looking manifest — a wrong artifact
+    served for the whole life of that index. Database failures must abort the
+    build loudly instead.
     """
     import numpy as np
 
@@ -195,24 +205,31 @@ def emb_synonym_edges_paged(ids, prebuilt_index, query_pages,
     sim_parts: list = []
     try:
         prebuilt_index.set_ef(max(top_k + 1, 64))
-        for page_ids, page_matrix in query_pages:
-            keep = [i for i, object_id in enumerate(page_ids) if object_id in label_of]
-            if not keep:
-                continue
-            rows = np.asarray(
-                [label_of[page_ids[i]] for i in keep], dtype=np.int64)
-            block = (
-                page_matrix if len(keep) == len(page_ids)
-                else np.asarray(page_matrix)[keep]
-            )
+    except Exception as exc:                    # noqa: BLE001 — hnswlib only
+        if on_hnsw_error is not None:
+            on_hnsw_error(exc)
+        return []
+    for page_ids, page_matrix in query_pages:   # DB errors propagate: see above
+        keep = [i for i, object_id in enumerate(page_ids) if object_id in label_of]
+        if not keep:
+            continue
+        rows = np.asarray(
+            [label_of[page_ids[i]] for i in keep], dtype=np.int64)
+        block = (
+            page_matrix if len(keep) == len(page_ids)
+            else np.asarray(page_matrix)[keep]
+        )
+        try:
             labels, distances = prebuilt_index.knn_query(block, k=k)
-            labels_arr = np.asarray(labels)
-            row_parts.append(np.repeat(rows, labels_arr.shape[1]))
-            col_parts.append(labels_arr.reshape(-1).astype(np.int64))
-            sim_parts.append(
-                1.0 - np.asarray(distances).reshape(-1).astype(np.float64))
-    except Exception:
-        return []                               # fail-open:同义边为空,不崩 build
+        except Exception as exc:                # noqa: BLE001 — hnswlib only
+            if on_hnsw_error is not None:
+                on_hnsw_error(exc)
+            return []
+        labels_arr = np.asarray(labels)
+        row_parts.append(np.repeat(rows, labels_arr.shape[1]))
+        col_parts.append(labels_arr.reshape(-1).astype(np.int64))
+        sim_parts.append(
+            1.0 - np.asarray(distances).reshape(-1).astype(np.float64))
     if not row_parts:
         return []
     return _synonym_edges_from_knn(

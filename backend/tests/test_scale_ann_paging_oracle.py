@@ -101,8 +101,10 @@ def _seed(repo, *, objects: int = 40, chunks_per_object: int = 2):
 
 def _reference_leg(builder, notebook_id: str, table: str, id_column: str):
     """``build``'s old per-leg shape: one whole-notebook matrix, one
-    ``add_items`` over ``np.arange(n)``. Copied from scale_index_builder.build
-    /_build_ann as they stood before batch-3 W4 T-W4-3.3."""
+    ``add_items`` over ``np.arange(n)``. Copied from
+    ``scale_index_builder.build`` and its ``_build_ann`` helper as they stood
+    before batch-3 W4 T-W4-3.3 (that helper has since been deleted — the paged
+    feed left it with no call site — so this copy is now its only record)."""
     ids_raw, matrix_raw = builder.projections.embedding_matrix(
         notebook_id, table, id_column
     )
@@ -252,3 +254,131 @@ def test_a_query_row_the_index_never_labelled_is_dropped_not_relabelled(repo):
     known = set(labels)
     assert edges
     assert all(a in known and b in known for a, b, _ in edges)
+
+
+class _ExplodingQueryPages:
+    """A query-page iterable that raises while the DATABASE is being read —
+    i.e. from inside the generator, not from hnswlib."""
+
+    def __init__(self, first_page, error):
+        self._first_page = first_page
+        self._error = error
+
+    def __iter__(self):
+        yield self._first_page
+        raise self._error
+
+
+def test_a_database_failure_in_the_second_pass_aborts_instead_of_failing_open(repo):
+    """Double-review fix (P3-5). The fail-open guard covers hnswlib ONLY. A
+    QueryCanceled / pool failure while re-reading the query set must propagate:
+    swallowing it yields an edge-less graph that the build then persists as a
+    healthy-looking manifest, and that wrong artifact is served for the whole
+    life of the index. Mutation anchor: widen the guard back around the page
+    loop and this stops raising."""
+    from app.domain.kg.ppr_pairs import emb_synonym_edges_paged
+
+    notebook = _seed(repo, objects=6, chunks_per_object=1)
+    builder = repo._runtime.scale_builder
+    labels, index, _vectors = _reference_leg(
+        builder, notebook.id, "knowledge_embeddings", "object_id"
+    )
+    assert index is not None and len(labels) > 2
+    first_page = next(iter(
+        builder.projections.embedding_pages(
+            notebook.id, "knowledge_embeddings", "object_id", 2
+        )
+    ))
+
+    class _PoolFailure(RuntimeError):
+        pass
+
+    with pytest.raises(_PoolFailure):
+        emb_synonym_edges_paged(
+            labels,
+            index,
+            _ExplodingQueryPages(first_page, _PoolFailure("pool exhausted")),
+            0.0,
+            builder.settings.ppr_emb_synonym_topk,
+        )
+
+
+def test_an_hnswlib_failure_fails_open_and_reports_only_the_exception_class(repo):
+    """The other half of the same fix: hnswlib failures still cost only the
+    soft synonym edges, and they are reported through ``on_hnsw_error`` so the
+    builder can emit a structured event carrying the CLASS NAME and nothing
+    else (no message, no ids)."""
+    from app.domain.kg.ppr_pairs import emb_synonym_edges_paged
+
+    notebook = _seed(repo, objects=6, chunks_per_object=1)
+    builder = repo._runtime.scale_builder
+    labels, index, _vectors = _reference_leg(
+        builder, notebook.id, "knowledge_embeddings", "object_id"
+    )
+    assert index is not None
+
+    class _HnswFailure(RuntimeError):
+        pass
+
+    class _BrokenIndex:
+        def set_ef(self, _ef):
+            return None
+
+        def knn_query(self, _data, k=1):
+            raise _HnswFailure("index corrupted: /var/lib/secret/path")
+
+    seen: list = []
+    edges = emb_synonym_edges_paged(
+        labels,
+        _BrokenIndex(),
+        builder.projections.embedding_pages(
+            notebook.id, "knowledge_embeddings", "object_id", 2
+        ),
+        0.0,
+        builder.settings.ppr_emb_synonym_topk,
+        on_hnsw_error=lambda exc: seen.append(type(exc).__name__),
+    )
+
+    assert edges == []
+    assert seen == ["_HnswFailure"]
+
+
+def test_capacity_grows_geometrically_when_the_count_under_estimates(repo, monkeypatch):
+    """Double-review fix D. ``hnswlib.resize_index`` reallocates the element
+    store and copies everything already inserted, so growing by one page per
+    page makes the overflow tail quadratic. Capacity must at least DOUBLE.
+    Mutation anchor: restore ``capacity = offset + len(page_ids)`` and the
+    resize count goes up with the number of overflowing pages."""
+    notebook = _seed(repo, objects=12, chunks_per_object=1)
+    builder = repo._runtime.scale_builder
+    # A COUNT that under-estimates by a lot forces every page past the first
+    # into the resize branch.
+    monkeypatch.setattr(
+        builder.projections, "embedding_row_count",
+        lambda _notebook_id, _table: 1,
+    )
+    real_pages = builder.projections.embedding_pages
+    monkeypatch.setattr(
+        builder.projections, "embedding_pages",
+        lambda notebook_id, table, id_column, *args, **kw: real_pages(
+            notebook_id, table, id_column, 1
+        ),
+    )
+    sizes: list[int] = []
+    real_index = hnswlib.Index
+
+    class _ResizeSpy(real_index):
+        def resize_index(self, size):
+            sizes.append(int(size))
+            return super().resize_index(size)
+
+    monkeypatch.setattr(hnswlib, "Index", _ResizeSpy)
+
+    labels, index, _load_ms, _add_ms = builder._paged_ann(
+        notebook.id, "knowledge_embeddings", "object_id"
+    )
+
+    assert index is not None and len(labels) == 12
+    # 12 one-row pages from a capacity of 1: 1 → 2 → 4 → 8 → 16 is FOUR
+    # reallocations; a page-at-a-time policy would need eleven.
+    assert sizes == [2, 4, 8, 16]

@@ -154,7 +154,7 @@ def execute_many(connection: Any, statement: str, rows: Sequence[Sequence[Any]])
 
 # Page size for the offline build's whole-notebook keyset scans (batch-3 W4
 # T-W4-3.1). Same order of magnitude as the embedding scans'
-# ``_MATRIX_FETCH_BATCH``: the bound that matters is "one page of rows in the
+# ``MATRIX_FETCH_BATCH``: the bound that matters is "one page of rows in the
 # driver's result buffer", not the exact number.
 GRAPH_FETCH_BATCH = 10_000
 
@@ -164,24 +164,50 @@ def keyset_pages(db: Any, page_size: int, statement_for, cursor_of):
 
     ``statement_for(cursor)`` returns ``(statement, params)`` for the page
     starting strictly after ``cursor`` (``None`` = first page); ``cursor_of``
-    extracts the next cursor from a page's LAST row. Each page is an
-    independent, fully-exhausted statement, so what this bounds is (a) the
-    rows psycopg materializes per ``fetchall`` and (b) the lifetime of any
-    single statement's MVCC snapshot across a build that can run for hours —
-    NOT whatever the caller then accumulates in Python. A short page ends the
-    scan, exactly like ``EmbeddingStore.vector_pages``.
+    extracts the next cursor from a page's LAST row. THIS helper appends the
+    ``LIMIT`` clause and its parameter, so ``page_size`` exists once: a call
+    site that spelled its own ``LIMIT %s`` would carry a second copy of the
+    page size that a monkeypatched/overridden ``page_size`` could silently
+    disagree with. Each page is an independent, fully-exhausted statement, so
+    what this bounds is (a) the rows psycopg materializes per ``fetchall`` and
+    (b) the lifetime of any single statement's MVCC snapshot across a build
+    that can run for hours — NOT whatever the caller then accumulates in
+    Python. A short page ends the scan, exactly like
+    ``EmbeddingStore.vector_pages``.
+
+    Connection boundary: the pages are yielded against the SINGLE ``db`` the
+    caller passed, so the caller's connection stays checked out for as long as
+    it keeps iterating. That is deliberate and bounded for the graph-side
+    reads, whose consumers do nothing between pages but fold rows into a dict
+    (milliseconds per page) — unlike the ANN feed, which interleaves hnswlib
+    index construction between pages and therefore acquires and releases a
+    connection PER page instead (see ``embedding_pages``).
 
     Every call site must pass a key that is a TOTAL order over the rows its
     predicate admits, or a strict ``>`` cursor silently drops ties that
     straddle a page boundary; each site names its uniqueness argument inline.
+    The cursor is asserted to advance STRICTLY on every page: a key that is
+    not a total order (or a predicate whose ``>`` was written as ``>=``) would
+    otherwise re-read the same rows forever, which is an unbounded-memory hang
+    in the consumer rather than a loud failure — measured on the objects leg,
+    a ``>=`` cursor grows to 1.5GB RSS and never terminates.
     """
     cursor = None
     while True:
         statement, params = statement_for(cursor)
-        page = db.execute(statement, params).fetchall()
+        page = db.execute(
+            statement + " LIMIT %s", (*params, page_size)
+        ).fetchall()
         if not page:
             return
         yield page
         if len(page) < page_size:
             return
-        cursor = cursor_of(page[-1])
+        advanced = cursor_of(page[-1])
+        if cursor is not None and not advanced > cursor:
+            raise RuntimeError(
+                "keyset_pages cursor did not advance "
+                f"({cursor!r} -> {advanced!r}); the page key is not a total "
+                "order over the rows this statement admits"
+            )
+        cursor = advanced
