@@ -4,6 +4,7 @@ from __future__ import annotations
 from app.domain.indexing_pipeline import (
     BUILTIN_INDEXING_PIPELINE_VERSION,
     IndexingPipelineHostPort,
+    IndexingPipelineLargeLibraryError,
     IndexingPipelineOption,
     IndexingPipelineRebuildActiveError,
     IndexingPipelineRebuildFailedError,
@@ -23,10 +24,15 @@ _BUILTIN = IndexingPipelineOption(
 
 
 class IndexingPipelineService:
-    def __init__(self, notebooks, chunks, host: IndexingPipelineHostPort | None):
+    def __init__(self, notebooks, chunks, host: IndexingPipelineHostPort | None,
+                 large_library=None):
         self.notebooks = notebooks
         self.chunks = chunks
         self.host = host
+        # 批 3·W3(D3):大库判据探针(None=不设限,测试/轻组合根沿用旧行为)。
+        # 判据与社区构建大库守卫同源:copy_stats 的 copyable(seq-gated memo,
+        # 冷一次热毫秒)。
+        self._large_library = large_library
 
     def _option(self, pipeline_id: str) -> IndexingPipelineOption | None:
         if not pipeline_id:
@@ -107,6 +113,12 @@ class IndexingPipelineService:
             "available": bool(selected and selected.available),
             "missing": missing,
             "pending": pending,
+            # 批 3·W3(D3):服务端真值——大库锁定切换,前端据此禁用控件而
+            # 不是等 409。判据 memo 化,冷一次热毫秒。
+            "large_library_locked": bool(
+                self._large_library is not None
+                and self._large_library(notebook_id)
+            ),
             "rebuild_status": (
                 "pending" if active else "failed" if failed or retryable else "idle"
             ),
@@ -143,6 +155,13 @@ class IndexingPipelineService:
             and not before["pending"]
         ):
             return {**before, "changed": False, "warning_count": 0}
+        # 批 3·W3(D3):大库直接拒绝在改 desired 之前——什么都没保存,内建
+        # 管线继续生效。放在「无变化早退」之后:纯读取/幂等保存不受影响;
+        # 放在铸 generation 之前:不留「已保存但注定重建不动」的悬置意图。
+        # 刻意连「切回内建」也拦:不可行的是整库重建机器本身(WR-2),与
+        # 目标管线无关——大库上任何切换都要付那笔付不起的钱。
+        if self._large_library is not None and self._large_library(notebook_id):
+            raise IndexingPipelineLargeLibraryError(notebook_id)
         # 活跃 rebuild 期间拒绝在改 desired 之前：铸新 generation 会让正在跑的
         # worker 在花完整库模型/embedding 开销之后输掉 publish CAS(整轮作废),
         # 而提交者只读到一句无害的 409。失败态(retryable)不拦——那正是重试入口。

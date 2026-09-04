@@ -24,6 +24,7 @@ export type IndexingPipelineResponse = Readonly<{
   available: boolean;
   missing: boolean;
   pending: boolean;
+  large_library_locked?: boolean;
   options: IndexingPipelineOption[];
   changed?: boolean;
   warning_count?: number;

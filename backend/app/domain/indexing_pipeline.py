@@ -30,6 +30,21 @@ class IndexingPipelineRebuildActiveError(RuntimeError):
     """
 
 
+class IndexingPipelineLargeLibraryError(RuntimeError):
+    """批 3·W3(审计 WR-2 / 计划决策点 D3):大库暂不支持切换索引管线。
+
+    切换的发布事务(48k 次 N+1 聚合 + 整库 staging 进内存 + 单事务重写整库)
+    在 9M 对象量级上事实不可完成——每次点击白付 30s 连接 + 整轮回滚。按
+    D3 的裁决,先用一天级的显式禁用替代一周级的重构:``begin()`` 在铸新
+    generation **之前**拒绝(什么都没保存,内建管线继续生效),重构排到有
+    真实需求时。判据与社区构建的大库守卫同源(copy_stats 的 copyable,
+    memo 化)。"""
+
+    def __init__(self, notebook_id: str = "") -> None:
+        super().__init__("indexing pipeline switch is disabled on large libraries")
+        self.notebook_id = notebook_id
+
+
 class IndexingPipelineRebuildFailedError(RuntimeError):
     """A bounded desired generation remains pending after rebuild rejection."""
 

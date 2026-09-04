@@ -15,6 +15,7 @@ from app.api.deps import (
 )
 from app.core.audit_actor import session_audit_principal
 from app.domain.indexing_pipeline import (
+    IndexingPipelineLargeLibraryError,
     IndexingPipelineRebuildActiveError,
     IndexingPipelineStalePlanError,
     IndexingPipelineRebuildFailedError,
@@ -118,6 +119,10 @@ def set_indexing_pipeline(
     except IndexingPipelineRebuildActiveError:
         # begin() 在改 desired 之前就拒绝了——什么都没保存,正在跑的重建不受影响。
         raise user_error(409, "索引重建正在进行；等它完成后再调整索引管线。")
+    except IndexingPipelineLargeLibraryError:
+        # 批 3·W3(D3):同样在改 desired 之前拒绝——什么都没保存,内建管线
+        # 继续生效。切换的整库重建在此规模上事实不可完成,先显式禁用。
+        raise user_error(409, "这本笔记本规模较大，暂不支持切换索引管线；当前索引不受影响。")
     except IndexingPipelineStalePlanError:
         raise user_error(409, "索引内容在重建期间发生变化，请重试切换。")
     except IndexingPipelineRebuildFailedError:

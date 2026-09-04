@@ -52,6 +52,8 @@ class IndexingPipelineResponse(BaseModel):
     available: bool
     missing: bool
     pending: bool
+    # 批 3·W3(D3):大库锁定切换的服务端真值(前端禁用控件的依据)。
+    large_library_locked: bool = False
     options: List[IndexingPipelineOptionResponse] = Field(default_factory=list)
     changed: bool = False
     warning_count: int = 0
