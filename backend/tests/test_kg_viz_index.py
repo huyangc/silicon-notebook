@@ -122,6 +122,27 @@ def test_unified_graph_counts_an_inflight_scale_build_as_building(repo, monkeypa
     assert result["viz_unavailable"] is False
 
 
+def test_unified_graph_sees_a_cross_process_scale_build_as_building(repo, monkeypatch):
+    """codex #676 R6 P2:离线 CLI 在另一进程持有 scale-build 认领时,本进程的
+    building/viz_building 集合都是空的——只有只读认领探针看得见。此时必须报
+    viz_building=True(前端继续轮询,发布后自愈),不许落终态 unavailable。"""
+    nb = _star(repo)
+    _clear_viz(repo, nb.id)
+    monkeypatch.setattr(repo.settings, "viz_sync_build_max_objects", 0)
+    lifecycle = repo._runtime.knowledge_lifecycle
+    monkeypatch.setattr(lifecycle.scale_artifacts, "viz_index", lambda _nb: None)
+    monkeypatch.setattr(
+        lifecycle.scale_artifacts,
+        "scale_build_claim_held_anywhere",
+        lambda _nb: True,
+    )
+
+    result = repo.unified_graph(nb.id, level="object", limit=10)
+
+    assert result["viz_building"] is True
+    assert result["viz_unavailable"] is False
+
+
 def test_unified_graph_re_probes_the_artifact_when_no_builder_is_observed(repo, monkeypatch):
     """codex #676 R5 P2:构建可能在 viz_index 探针之后、成员检查之前发布并清
     标记——此时报终态 unavailable 会让已打开的画布卡死(前端只在

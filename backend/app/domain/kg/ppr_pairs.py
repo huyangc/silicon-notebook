@@ -208,10 +208,24 @@ def emb_synonym_edges_paged(ids, prebuilt_index, threshold: float = 0.8,
                 on_hnsw_error(exc)
             return []
         labels_arr = np.asarray(labels)
-        row_parts.append(np.repeat(rows, labels_arr.shape[1]))
-        col_parts.append(labels_arr.reshape(-1).astype(np.int64))
-        sim_parts.append(
-            1.0 - np.asarray(distances).reshape(-1).astype(np.float64))
+        page_rows_rep = np.repeat(rows, labels_arr.shape[1])
+        page_cols = labels_arr.reshape(-1).astype(np.int64)
+        page_sims = 1.0 - np.asarray(distances).reshape(-1).astype(np.float64)
+        # Filter BEFORE accumulating (codex #676 R6 P2): retaining every raw
+        # (row, col, sim) triple across all pages is n×(top_k+1) entries —
+        # multi-GB at the 8M-node scale this paging exists to bound — and
+        # np.concatenate would then allocate a second full copy. The mask is
+        # the exact one ``_synonym_edges_from_knn`` applies (self-loop +
+        # threshold); a boolean mask preserves relative order and commutes
+        # with concatenation, so masking per page and concatenating the
+        # survivors is byte-equivalent to masking the whole concatenation.
+        # The shared function re-applies it idempotently on the (now sparse,
+        # threshold-bounded) survivor set.
+        page_mask = (page_cols != page_rows_rep) & (page_sims >= threshold)
+        if np.any(page_mask):
+            row_parts.append(page_rows_rep[page_mask])
+            col_parts.append(page_cols[page_mask])
+            sim_parts.append(page_sims[page_mask])
     if not row_parts:
         return []
     return _synonym_edges_from_knn(

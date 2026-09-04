@@ -4247,6 +4247,13 @@ class KnowledgeLifecycleService:
             building = (
                 notebook_id in self.scale_artifacts.viz_building
                 or scale_build_running
+                # Cross-process leg (codex #676 R6 P2): the offline scale
+                # build CLI beside the live service is a supported topology
+                # and invisible to this process's sets — only the read-only
+                # claim probe sees it. Probed LAST (rare leg, one pg_locks
+                # read) and fail-open False inside the runtime method.
+                or self.scale_artifacts.scale_build_claim_held_anywhere(
+                    notebook_id)
             )
             if not building:
                 # Publication race (codex #676 R5 P2): a build can publish

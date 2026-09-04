@@ -700,6 +700,14 @@ class SqliteDatabase:
         del table_id
         yield
 
+    def scale_build_claim_held_anywhere(self, notebook_id: str) -> bool:
+        """SQLite has no cross-process scale-build claim to probe — the
+        serving process's in-memory ``building`` set is the only mutex this
+        backend ever had, and the caller consults that set first (codex #676
+        R6 P2 is a PostgreSQL-topology finding)."""
+        del notebook_id
+        return False
+
     def try_scale_build_lock(self, notebook_id: str):
         """SQLite has no cross-process scale-build lock — say so explicitly.
 
