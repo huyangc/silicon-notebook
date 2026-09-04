@@ -775,6 +775,42 @@ class ScaleArtifactRuntime:
                 self.viz_building.discard(notebook_id)
             raise
 
+    def _emit_viz_lazy_build_refused(
+        self, notebook_id: str, objects: int, trigger: str
+    ) -> None:
+        """Structured record of a lazy viz build this process declined to run.
+
+        Dimensions only (notebook id, which call site, the two counts that
+        decided it) — the same shape the other refusal events in this family
+        use (``scale_fold_refused``, ``ppr_fallback_refused``). No graph
+        content crosses this boundary. ``emit`` swallows its own IO failures,
+        so an interactive graph-view read cannot fail on the bookkeeping.
+        """
+        self.event_log.emit({
+            "kind": "viz_lazy_build_refused",
+            "notebook_id": notebook_id,
+            "reason": "large_notebook",
+            "trigger": trigger,
+            "objects": int(objects),
+            "max_objects": int(self.settings.viz_sync_build_max_objects),
+        })
+
+    def _viz_lazy_build_refused(self, notebook_id: str, trigger: str) -> bool:
+        """True when this notebook is too large for an in-process viz build.
+
+        ``build_viz`` — whether it runs on the request thread or on the daemon
+        ``_spawn_viz_build`` starts — materialises EVERY object, every relation
+        and the full cluster map into one graph dict inside the API process
+        (the ~12-20GB shape the rebuild tail already refuses for the same
+        reason). ``effective_object_count`` is the seq-gated counts memo, so
+        asking it here is a cache hit on the paths that already asked.
+        """
+        count = int(self.projections.effective_object_count(notebook_id))
+        if count <= self.settings.viz_sync_build_max_objects:
+            return False
+        self._emit_viz_lazy_build_refused(notebook_id, count, trigger)
+        return True
+
     def viz_index(self, notebook_id: str):
         scale = self.load(notebook_id)
         if scale is not None and getattr(scale, "viz_ids", None) is not None:
@@ -830,13 +866,41 @@ class ScaleArtifactRuntime:
                     index, self._recordable_viz_signature(disk_signature)
                 )
                 return index
-            self._spawn_viz_build(notebook_id)
+            # STALE standalone viz. The refresh is a FULL rebuild — build_viz
+            # re-derives the whole object graph, it does not patch the artifact
+            # — so on a large notebook the background daemon costs exactly what
+            # the first build costs, inside a request-serving process. Same
+            # size gate as the absent branch below (批 3·W4 T-W4-3): over the
+            # budget, leave the stale artifact serving and let the scale index
+            # build — the designated large-notebook viz producer — publish the
+            # next generation.
+            #
+            # REGISTERED COST: a large notebook whose clusters were just
+            # rebuilt keeps serving the STALE folded graph until the next
+            # scale build. That build is either manual, or the
+            # ``maybe_auto_index`` queued at the rebuild tail — which is
+            # itself conditional (auto_enabled AND copyable), not an
+            # unconditional follow-up. Serving a stale folding is benign
+            # (it is what this branch already returns); the point of the gate
+            # is that it must not be refreshed HERE.
+            if not self._viz_lazy_build_refused(notebook_id, "stale_refresh"):
+                self._spawn_viz_build(notebook_id)
             return index
-        count = self.projections.effective_object_count(notebook_id)
-        if int(count) <= self.settings.viz_sync_build_max_objects:
+        count = int(self.projections.effective_object_count(notebook_id))
+        if count <= self.settings.viz_sync_build_max_objects:
             self.build_viz(notebook_id)
             return self._viz_cache_entry(self.viz_cache.get(notebook_id))[0]
-        self._spawn_viz_build(notebook_id)
+        # No artifact at all AND over the budget. The ``<=`` above already
+        # routed every within-budget notebook into the synchronous build, so
+        # `count` here is CONSTRUCTIVELY always over the limit: adding this
+        # branch deletes the API process's lazy large-notebook viz producer
+        # outright rather than narrowing it. That is the intent — the scale
+        # index build is the designated producer, and the daemon this used to
+        # start ran the same multi-GB materialisation inside the serving
+        # process. Callers already handle ``None`` (unified_graph's
+        # large-notebook branch reports it as "no preview yet" instead of
+        # falling through to the unbounded full derive).
+        self._emit_viz_lazy_build_refused(notebook_id, count, "absent")
         return None
 
     @staticmethod

@@ -132,7 +132,7 @@ import {
   type RootModalOwner,
   type RootModalSlot,
 } from "./use-root-modal-coordinator.ts";
-import { KG_RANGE_DEFAULT, KG_RANGE_STEPS } from "./kg-workspace-model.ts";
+import { KG_RANGE_DEFAULT, KG_RANGE_STEPS, kgCanvasState } from "./kg-workspace-model.ts";
 import { API_BASE } from "./api-config";
 import { clearToken, getToken } from "./auth-session";
 import { copyTextSafely } from "./copy-text";
@@ -2352,6 +2352,10 @@ export default function Home() {
       .map((e) => ({ source: e.source_object_id, target: e.target_object_id, label: e.edge_type, sourceCount: e.source_count }));
     return { nodes, links, searchHitCount: 0 };
   }, [kgGraph.merged, kgGraph.search, kgGraph.searchHits, kgGraph.selectedTypes]);
+
+  // 画布该渲染哪一态（四态判定是 kg-workspace-model 里的纯函数，单测在
+  // tests/unit/kg-canvas-state.test.mjs）。在这里算一次，JSX 只做分支。
+  const kgCanvas = kgCanvasState(kgGraph.graph, kgGraph.vizBuilding, fgData.nodes.length);
 
   const kgSearching = kgGraph.search.trim().length > 0;
   const kgDenseView = kgGraph.selectedTypes.length === 0 && !kgGraph.search.trim() && fgData.nodes.length > 36;
@@ -8048,12 +8052,19 @@ export default function Home() {
               </div>
             </aside>
             <div className="kg-canvas" ref={kgCanvasRef}>
-              {kgGraph.graph === null ? <p className="tool-hint kg-canvas-empty">加载中…</p> : kgGraph.vizBuilding ? (
+              {kgCanvas === "loading" ? (
+                <p className="tool-hint kg-canvas-empty">加载中…</p>
+              ) : kgCanvas === "building" ? (
                 <div className="tool-hint kg-canvas-empty">
                   <strong>图谱索引构建中，首次构建大库可能需要几分钟…</strong>
                   <p style={{ marginTop: 6 }}>建成后会自动刷新为完整图谱</p>
                 </div>
-              ) : fgData.nodes.length === 0 ? (
+              ) : kgCanvas === "unavailable" ? (
+                <div className="tool-hint kg-canvas-empty">
+                  <strong>库规模较大，图谱预览将在下一次索引构建后可用</strong>
+                  <p style={{ marginTop: 6 }}>这一次打开不会在后台生成预览；其余功能不受影响</p>
+                </div>
+              ) : kgCanvas === "empty" ? (
                 <p className="tool-hint kg-canvas-empty">没有匹配的节点。清空搜索后可查看完整图谱。</p>
               ) : (
                 <ForceGraph2D

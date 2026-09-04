@@ -4219,12 +4219,25 @@ class KnowledgeLifecycleService:
             idx = self.scale_artifacts.viz_index(notebook_id)
             if idx is not None and getattr(idx, "viz_ids", None) is not None:
                 return self._unified_graph_bounded(notebook_id, idx, effective_limit)
-            # No index available yet: either a background build was just
-            # spawned inside _viz_index, or (rare race) it isn't tracked as
-            # building anymore. Either way, large notebooks never fall
-            # through to _unified_graph_full below.
+            # No index available. `viz_building` used to be hardcoded True
+            # here, which held only while viz_index still spawned a lazy build
+            # for large notebooks. Since 批 3·W4 T-W4-3 it refuses that spawn
+            # (the multi-GB fold must not run inside a request-serving
+            # process), so the honest answer is whatever the marker set says:
+            # normally False — nothing is being built, and the next scale
+            # index build is what will publish a preview — and True only while
+            # some other site (an explicit facade call; a build started before
+            # the notebook crossed the size threshold) genuinely has a daemon
+            # running for this notebook. `viz_unavailable` is the positive
+            # signal for the state the frontend must now render on its own:
+            # "large notebook, no preview, and nobody is building one" is NOT
+            # "no matching nodes". The two are mutually exclusive by
+            # construction so the client never has to rank them. Large
+            # notebooks never fall through to _unified_graph_full either way.
+            building = notebook_id in self.scale_artifacts.viz_building
             return {"nodes": [], "edges": [], "total_nodes": 0,
-                    "total_edges": 0, "truncated": False, "viz_building": True}
+                    "total_edges": 0, "truncated": False,
+                    "viz_building": building, "viz_unavailable": not building}
 
         # Bounded fast-path (small notebooks only, from here down): when a
         # limit is requested AND a valid scale index with a persisted folded
@@ -4521,8 +4534,12 @@ class KnowledgeLifecycleService:
                 "focus_object_id": object_id,
             }
         # The legacy DB fallback materialises the complete concept-cluster map.
-        # It remains acceptable for a small notebook, but must never run while a
-        # large notebook's compact viz artifact is being built or repaired.
+        # It remains acceptable for a small notebook, but must never run for a
+        # large one that has no compact viz artifact to answer from. Since 批 3·W4
+        # T-W4-3 that is no longer a transient "being built" window: this process
+        # refuses to build the artifact lazily, so `locating_unavailable` holds
+        # until the next scale index build publishes one. The client copy says
+        # exactly that instead of promising a retry.
         with self._connect() as db:
             object_count = self.knowledge.count_active_objects(db, notebook_id)
         if int(object_count) > self.settings.viz_sync_build_max_objects:
@@ -5739,9 +5756,9 @@ class KnowledgeLifecycleService:
         # pay a lazy build. The flip statement above bumped cluster_mutation_seq
         # (批 3·W2:与指针同语句,不再逐类型 bump), and build_viz now stamps its artifact with that cseq while
         # viz_index()/viz_probe() compare it — so a cluster-only rebuild reliably
-        # marks the persisted viz STALE and the lazy path refreshes it on the next
-        # open (serving the old folding meanwhile). That is why this proactive
-        # build is no longer needed for large notebooks and MUST NOT run for them:
+        # marks the persisted viz STALE and the old folding keeps serving meanwhile.
+        # That staleness is why this proactive build is not NEEDED for large
+        # notebooks; the memory cost is why it MUST NOT run for them:
         #
         # build_viz's _derive_object_graph_lite materialises EVERY object + all
         # relations + the full cluster_map into one ~12-20GB graph dict. Doing that
@@ -5749,9 +5766,15 @@ class KnowledgeLifecycleService:
         # daemon that starts before this frame frees seed_to_canonical/sd/… — is a
         # reliable OOM at multi-million-object scale that kills the whole rebuild
         # (audit P0-2 / codex PR#356 r1 P1b). So large notebooks skip the tail build
-        # entirely; their viz is refreshed lazily off the rebuild thread (via the
-        # cseq-driven staleness above) and, off-peak, by the scale index build that
-        # maybe_auto_index queues below. Small notebooks build synchronously — cheap.
+        # entirely. Their viz is NOT "refreshed lazily off the rebuild thread" any
+        # more (批 3·W4 T-W4-3): viz_index used to spawn that lazy refresh and now
+        # REFUSES it above the same size budget, for the same multi-GB reason, this
+        # time inside a request-serving process. The scale index build is the sole
+        # remaining producer — the off-peak one maybe_auto_index queues below
+        # (itself conditional on auto_enabled AND copyable, not an unconditional
+        # follow-up), or a manual one; until it publishes, the KG view serves the
+        # cseq-stale folding, or reports "no preview yet" when there is no artifact
+        # at all. Small notebooks build synchronously — cheap.
         #
         # The WHOLE block (size probe included) is fail-open (codex PR#356 r1 P2):
         # an auxiliary viz decision must never turn an already-committed KG rebuild
@@ -5761,8 +5784,9 @@ class KnowledgeLifecycleService:
                 viz_obj_count = self.knowledge.active_object_count(db, notebook_id)
             if int(viz_obj_count) <= self.settings.viz_sync_build_max_objects:
                 self.scale_artifacts.build_viz(notebook_id)          # small: sync, cheap
-            # large: skip — the cseq-marked stale viz is refreshed lazily/off-peak,
-            # never materialised on or alongside the rebuild frame.
+            # large: skip — the cseq-marked stale viz keeps serving until the next
+            # scale index build republishes it, never materialised on or alongside
+            # the rebuild frame (and no longer lazily on a request thread either).
         except Exception:
             self.event_log.logger.warning(
                 "viz refresh after rebuild failed for %s", notebook_id, exc_info=True)
