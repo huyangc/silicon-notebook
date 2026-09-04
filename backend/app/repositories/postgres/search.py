@@ -965,76 +965,14 @@ def notebook_source_rows(connection, notebook_id: str, needle: str, limit: int):
 
 
 def notebook_element_rows(connection, notebook_id: str, needle: str, limit: int):
-    """搜索框元素腿 —— 两腿等价 UNION，不是一个跨表 OR。
-
-    旧谓词是 `se.text ILIKE ? OR se.location_label ILIKE ? OR s.title ILIKE ?`：
-    前两个 arm 长在 `source_elements` 上、第三个长在 `sources` 上，OR 底下没有
-    任何一个 arm 能收窄另一张表，planner 只能先把 join 结果整个铺开再逐行过滤
-    ——`s.title` 这条腿把整条查询钉死成「join 后全 element 扫」。生产上
-    `source_elements` 是 5.77M 行的表（migration 0042 头部记的实测规模），这不是
-    一个可以靠索引救回来的形状：**没有任何索引能服务一个跨表 OR**（migration
-    0048 对来源页签搜索的同一形状给出了完整论证与实测）。
-
-    改法与 `source_store.list_sources_page` 的三腿 UNION 同构：拆成两条各自
-    独立、各自可规划的腿，各自取自己的前 cap 条，再对并集去重排序取前 cap 条。
-
-    * 腿 A（`se.text` / `se.location_label`）== 旧谓词去掉 title arm，仍然是
-      join 后扫——`source_elements` 没有 notebook_id 列，`se.text` 上也没有
-      trgm 索引，这条腿的代价不变。
-    * 腿 B（`LOWER(s.title) LIKE ?`）先在 `sources` 上收 id 再取 elements。
-      写成 `LOWER(title) LIKE` 而不是 `title ILIKE` 是因为 migration 0048 的
-      `idx_sources_nb_title_file_trgm` 是 **lower(title) 表达式** GIN，裸列
-      ILIKE 用不上它；`needle` 在调用方（`search_notebook`）已经 `.lower()`，
-      所以这是零语义代价的同义改写（与 `list_sources_page` 同款先例）。
-      本腿内联 `notebook_id=%s` 与可见性谓词是**吃到那条 partial 索引的前提**：
-      partial 谓词的蕴含要在 generic（参数值盲）计划下成立，靠的是谓词在 SQL
-      文本里是字面量而不是绑定参数（migration 0048 的「WHY PARTIAL」一段与
-      0042 Group 2 记的是同一套机制）。
-
-    等价论证。设 A、B 为两个 arm 各自的命中集（都已限定在本 notebook 的可见源
-    内），旧查询返回 `A ∪ B` 中 ordinal 最小的 cap 条。新查询返回
-    `topcap(A) ∪ topcap(B)` 中 ordinal 最小的 cap 条。取 x 属于 `A ∪ B` 的前
-    cap 条，不妨设 x ∈ A：若 x ∉ topcap(A)，则 A 里有 ≥cap 条 ordinal 更小的
-    行，它们同样属于 `A ∪ B`，x 就排在 `A ∪ B` 的第 cap 名之后——矛盾。B 侧
-    同理。故两侧结果逐行相同（含顺序）。这一步依赖 ordinal 是**全局唯一**的：
-    `uq_source_elements_ordinal`（0001_initial.sql）保证「前 cap 条」无歧义，
-    否则并列 ordinal 的取舍会让两个形状各自随意断并。
-
-    收益边界，如实登记：真实收益只覆盖「仅 title 命中」（旧形态整表扫、新形态
-    走 trgm 位图）与「title 腿早停解放整体计划」两类；腿 A 本身没有变快。
-    **明确不做**：给 `se.text` 加 trgm 索引——5.77M 行表上的写放大换一个窄
-    场景（元素正文的子串搜索）不划算。相应地登记一处可能的退化：旧形态在
-    title 命中极密集时可以沿 `uq_source_elements_ordinal` 的有序走边扫边停，
-    新形态的腿 A 少了 title arm 就得多走一段才凑满 cap；这正是腿 B 现在用
-    位图便宜地兜住的那一类，净效应仍是正的。
-    """
     pattern = f"%{needle}%"
     return connection.execute(
         "SELECT se.*,s.title AS source_title FROM source_elements se "
         "JOIN sources s ON s.id=se.source_id "
         "WHERE s.notebook_id=%s AND s.source_type NOT IN ('memory','knowhow') "
-        "AND se.id IN ("
-        # 腿 A：元素自身的正文/位置标签。
-        "(SELECT ea.id FROM source_elements ea "
-        "JOIN sources sa ON sa.id=ea.source_id "
-        "WHERE sa.notebook_id=%s AND sa.source_type NOT IN ('memory','knowhow') "
-        "AND (ea.text ILIKE %s OR ea.location_label ILIKE %s) "
-        "ORDER BY ea.ordinal LIMIT %s)"
-        " UNION "
-        # 腿 B：先在 sources 上收命中标题的 id（内联字面量谓词是走 0048 那条
-        # partial GIN 的前提），再取这些源的元素。
-        "(SELECT eb.id FROM source_elements eb WHERE eb.source_id IN ("
-        "SELECT id FROM sources WHERE notebook_id=%s "
-        "AND source_type NOT IN ('memory','knowhow') AND LOWER(title) LIKE %s) "
-        "ORDER BY eb.ordinal LIMIT %s)"
-        ") "
+        "AND (se.text ILIKE %s OR se.location_label ILIKE %s OR s.title ILIKE %s) "
         "ORDER BY se.ordinal LIMIT %s",
-        (
-            notebook_id,
-            notebook_id, pattern, pattern, limit,
-            notebook_id, pattern, limit,
-            limit,
-        ),
+        (notebook_id, pattern, pattern, pattern, limit),
     ).fetchall()
 
 
