@@ -296,6 +296,16 @@ def test_build_own_tail_relink_is_exempt_from_the_cross_check(repo):
             service.kg_building.discard(notebook.id)
 
 
+def test_admission_paths_share_one_arbitration_lock(repo):
+    """codex #673 R2 P2 的钉:维护槽 claim 与 build/delete 预占的
+    「登记自己 + 查对方」必须持同一把仲裁锁——对象同一性即契约,断了
+    (各自建锁/传 None)对开就会退化回双双退让。"""
+    service = repo._runtime.knowledge_lifecycle
+    assert (service.kg_maintenance._cross_admission_lock
+            is service.kg_cross_admission_lock)
+    assert service.kg_cross_admission_lock is not None
+
+
 def test_maintenance_in_flight_gates_build_and_standalone_delete(repo):
     """§2.1 交叉的另一向:维护槽在飞时 prepare_notebook_kg_job 与
     standalone delete_notebook_kg 都按维护种类 409,且 kg_building 预占

@@ -48,6 +48,7 @@ class KgMaintenanceJobs:
         rebuild_unified_kg: Callable[[str], int] | None = None,
         resolve_notebook_conflicts: Callable[[str], dict] | None = None,
         kg_build_active: Callable[[str], bool] | None = None,
+        cross_admission_lock: "threading.Lock | None" = None,
     ) -> None:
         # The algorithm callables are per-instance and optional: an instance is
         # wired only with the kinds that must share its slot, and calling a job
@@ -63,6 +64,11 @@ class KgMaintenanceJobs:
         # relink/rebuild 共用槽的实例——冲突检测不碰派生簇/板块产物,与
         # build 无互斥关系。
         self._kg_build_active = kg_build_active
+        # 仲裁锁(codex #673 R2 P2):把「登记自己 + 查对方」整段对 build
+        # 准入侧原子化——纯 write-then-check 的对开会双双退让,两个调用方
+        # 都拿 409 而没有任何作业在跑。同一把锁也包住 prepare/standalone
+        # delete 的「占 kg_building + 查维护槽」,先进临界区者完整胜出。
+        self._cross_admission_lock = cross_admission_lock
 
         # Terminal entries remain available for the browser's next bounded poll.
         # Both kinds intentionally share this registry and lock. This stays
@@ -85,6 +91,17 @@ class KgMaintenanceJobs:
         **自己的**,交叉检查不该把自己的收尾闸死(§2.1 防的是独立维护动作
         撞上在飞 build)。只有 build 收尾传 True;外部入口一律 False。"""
         self.get_notebook(notebook_id)
+        from contextlib import nullcontext
+        arbitration = self._cross_admission_lock or nullcontext()
+        with arbitration:
+            return self._claim_arbitrated(
+                notebook_id, kind, id_prefix, counters,
+                exempt_build_marker=exempt_build_marker)
+
+    def _claim_arbitrated(
+        self, notebook_id: str, kind: str, id_prefix: str,
+        counters: Dict[str, int], *, exempt_build_marker: bool,
+    ) -> dict:
         with self.lock:
             current = self.jobs.get(notebook_id)
             if current is not None and current["status"] == "running":
