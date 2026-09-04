@@ -149,6 +149,20 @@ class KgBuildJobStore:
             )
         return cursor.rowcount == 1
 
+    def extend_total_sources(self, job_id: str, extra: int) -> bool:
+        """补漏轮把新发现的源并进持久 total(codex #673 R3 P2):completed/
+        failed 随 record_source_result 前进而 total 停在 prepare 快照,会给
+        index_status/前端/事件暴露 2/1 这种不可能进度。只在 running 时抬。"""
+        if extra <= 0:
+            return False
+        with self.database.write() as db:
+            cursor = db.execute(
+                "UPDATE kg_build_jobs SET total_sources=total_sources+?, "
+                "updated_at=? WHERE id=? AND status='running'",
+                (int(extra), self.now(), job_id),
+            )
+        return cursor.rowcount == 1
+
     def record_source_result(
         self,
         job_id: str,

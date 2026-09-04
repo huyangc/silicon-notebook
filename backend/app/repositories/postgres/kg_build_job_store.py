@@ -146,6 +146,18 @@ class KgBuildJobStore:
             )
         return cursor.rowcount == 1
 
+    def extend_total_sources(self, job_id: str, extra: int) -> bool:
+        """补漏轮抬持久 total——理由见 SQLite 孪生 docstring。"""
+        if extra <= 0:
+            return False
+        with self.database.write() as connection:
+            cursor = connection.execute(
+                "UPDATE kg_build_jobs SET total_sources=total_sources+%s, "
+                "updated_at=%s WHERE id=%s AND status='running'",
+                (int(extra), self.now(), job_id),
+            )
+        return cursor.rowcount == 1
+
     def record_source_result(self, job_id: str, *, succeeded: bool) -> bool:
         column = "completed_sources" if succeeded else "failed_sources"
         with self.database.write() as connection:
