@@ -352,7 +352,7 @@
     "backend/app/services/ask_service.py::AskService.ask_chunk": 399,
     "backend/app/services/knowledge_lifecycle.py::KnowledgeLifecycleService.complete_relations_for_source": 425,
     "backend/app/services/knowledge_lifecycle.py::KnowledgeLifecycleService.rebuild_communities": 413,
-    "backend/app/services/knowledge_lifecycle.py::KnowledgeLifecycleService.rebuild_unified_kg": 510,
+    "backend/app/services/knowledge_lifecycle.py::KnowledgeLifecycleService.rebuild_unified_kg": 517,
     "backend/app/services/memory_service.py::MemoryService.transfer": 389,
     "backend/app/services/notebook_sharing.py::NotebookCopyService.copy_notebook": 656,
     "backend/app/services/reasoning_retrieval.py::ReasoningRetriever._new_run_state": 201,

@@ -799,6 +799,10 @@ export type UnifiedGraphResp = {
   total_edges?: number;
   truncated?: boolean;
   viz_building?: boolean;
+  // 大库没有折叠图产物、且没有任何进程在构建它（批 3·W4 T-W4-3：在线懒构建已被
+  // 规模闸删除，产物只由索引构建发布）。与 `viz_building` 由后端造成互斥，因此
+  // 「空图」与「大库暂无预览」在界面上是两件事，不再共用一句误导文案。
+  viz_unavailable?: boolean;
 };
 export type EvidenceItem = {
   source_id: string;

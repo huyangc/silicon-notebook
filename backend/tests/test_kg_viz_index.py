@@ -50,26 +50,52 @@ def _wait_until_not_building(repo, nb_id, cap_seconds=10):
         time.sleep(0.05)
 
 
-def test_unified_graph_large_nb_returns_building_placeholder(repo, monkeypatch):
+def test_unified_graph_large_nb_reports_unavailable_and_builds_nothing(repo, monkeypatch):
+    """批 3·W4 T-W4-3:大库没有 viz 产物时,API 进程既不同步建也不后台建。
+
+    此前这里会 spawn 一个后台 daemon 并回 ``viz_building: True``。那个 daemon 跑的
+    是 build_viz —— 整库对象 + 全部关系 + 完整 cluster_map 物化成一份图字典,发生在
+    服务请求的进程里。现在它被规模闸删掉了(上游 ``<=`` 已把未超限的库分流到同步
+    建,所以走到这一支 count 构造性恒超限),因此:什么都没建、没有后台标记、返回的
+    是诚实的 ``viz_unavailable``,而不是一句永远不会兑现的「构建中」。
+    """
     nb = _star(repo)
     _clear_viz(repo, nb.id)
     monkeypatch.setattr(repo.settings, "viz_sync_build_max_objects", 0)
     manifest_path = os.path.join(repo._viz_index_dir(nb.id), "manifest.json")
     assert not os.path.exists(manifest_path)
     result = repo.unified_graph(nb.id, level="object", limit=10)
-    # No synchronous build happened as part of this call: either the manifest
-    # still doesn't exist yet, or a background thread raced ahead of us — but
-    # the RETURN itself must be the placeholder, not a real graph.
-    assert result["viz_building"] is True
+    assert result["viz_building"] is False
+    assert result["viz_unavailable"] is True
     assert result["nodes"] == []
     assert result["edges"] == []
     assert result["total_nodes"] == 0
     assert result["total_edges"] == 0
     assert result["truncated"] is False
-    assert (
-        nb.id in repo._viz_building or os.path.exists(manifest_path)
-    )  # background thread was spawned or already finished
-    _wait_until_not_building(repo, nb.id)
+    # 闸的实物证据:没有产物被写出,也没有任何后台构建在飞。
+    assert not os.path.exists(manifest_path)
+    assert nb.id not in repo._viz_building
+
+
+def test_unified_graph_reports_viz_building_truthfully_when_one_is_running(repo, monkeypatch):
+    """`viz_building` 不再写死:标记集合里真有这本库时才是 True。
+
+    复评 P1-1 的另一半——闸上以后大库这一支通常是 False,但「有人正在建」并非不可
+    达(facade 的显式 _spawn_viz_build、越过阈值前就已起飞的构建),那时候必须仍然
+    如实说在建,并且**不**同时声称 unavailable(两者由后端造成互斥)。
+    """
+    nb = _star(repo)
+    _clear_viz(repo, nb.id)
+    monkeypatch.setattr(repo.settings, "viz_sync_build_max_objects", 0)
+    lifecycle = repo._runtime.knowledge_lifecycle
+    monkeypatch.setattr(lifecycle.scale_artifacts, "viz_index", lambda _nb: None)
+    lifecycle.scale_artifacts.viz_building.add(nb.id)
+    try:
+        result = repo.unified_graph(nb.id, level="object", limit=10)
+    finally:
+        lifecycle.scale_artifacts.viz_building.discard(nb.id)
+    assert result["viz_building"] is True
+    assert result["viz_unavailable"] is False
 
 
 def test_kg_neighbors_large_nb_without_viz_never_materializes_cluster_map(repo, monkeypatch):
@@ -92,16 +118,25 @@ def test_kg_neighbors_large_nb_without_viz_never_materializes_cluster_map(repo, 
     assert result["edges"] == []
 
 
-def test_unified_graph_building_then_ready(repo, monkeypatch):
+def test_unified_graph_unavailable_until_the_index_build_publishes(repo, monkeypatch):
+    """大库的降级是持久态,只有指定生产者(索引构建)能把它解除。
+
+    重复打开不会自己变好——闸掉的正是「打开就顺手建一份」。走一次 build_viz(scale
+    索引构建在离线/后台做的同一件事)之后,同一次打开才回到真实图谱。
+    """
     nb = _star(repo)
     _clear_viz(repo, nb.id)
     monkeypatch.setattr(repo.settings, "viz_sync_build_max_objects", 0)
-    result = repo.unified_graph(nb.id, level="object", limit=10)
-    assert result.get("viz_building") is True
-    _wait_until_not_building(repo, nb.id)
-    result2 = repo.unified_graph(nb.id, level="object", limit=10)
-    assert not result2.get("viz_building")
-    assert len(result2["nodes"]) > 0
+    first = repo.unified_graph(nb.id, level="object", limit=10)
+    assert first["viz_unavailable"] is True
+    again = repo.unified_graph(nb.id, level="object", limit=10)
+    assert again["viz_unavailable"] is True      # 再打开一次仍然什么都不会发生
+    assert nb.id not in repo._viz_building
+    repo.build_viz_index(nb.id)                  # 指定生产者发布产物
+    ready = repo.unified_graph(nb.id, level="object", limit=10)
+    assert not ready.get("viz_building")
+    assert not ready.get("viz_unavailable")
+    assert len(ready["nodes"]) > 0
 
 
 def test_unified_graph_small_nb_unchanged(repo):
@@ -132,17 +167,113 @@ def test_viz_stale_served_while_rebuilding(repo, monkeypatch):
     _wait_until_not_building(repo, nb.id)
 
 
-def test_unified_kg_status_reports_viz_building(repo, monkeypatch):
+def _record_events(monkeypatch, scale):
+    """Capture emitted events regardless of EVENT_LOG_ENABLED (emit early-returns
+    when the log is off, so patching the method is the only reliable probe)."""
+    seen: list[dict] = []
+    monkeypatch.setattr(scale.event_log, "emit", lambda event, **_kw: seen.append(event))
+    return seen
+
+
+def test_stale_viz_refresh_is_refused_for_a_large_notebook(repo, monkeypatch):
+    """批 3·W4 T-W4-3 的第一个调用点:stale 刷新分支同样受规模闸。
+
+    build_viz 不是增量修补而是整图重建,所以「刷新一份 stale 产物」在大库上跟第一次
+    构建一样贵,而且同样发生在服务请求的进程里。闸上之后:陈旧折叠图继续供图(那本就
+    是这一支的返回值),但**不**在这里刷新;发一条只带维度的结构化事件。
+
+    变异钉:把 ``if not self._viz_lazy_build_refused(...)`` 删掉(恢复无条件 spawn)
+    或把判据反向,这条会红——viz_building 里会出现这本库。
+    """
+    nb = _star(repo)
+    manifest_path = os.path.join(repo._viz_index_dir(nb.id), "manifest.json")
+    assert os.path.exists(manifest_path)
+    # 让磁盘产物相对当前版本变陈旧(与 test_viz_stale_served_while_rebuilding 同法)。
+    repo.store_kg(nb.id, None, [
+        {"local_id": "d", "object_type": "concept", "payload": {"name": "leakage", "section_path": ""}, "evidence": []},
+    ], [])
+    repo._viz_idx_cache.pop(nb.id, None)
+    scale = repo._runtime.scale_artifacts
+    monkeypatch.setattr(repo.settings, "viz_sync_build_max_objects", 0)
+    spawned: list[str] = []
+    monkeypatch.setattr(scale, "_spawn_viz_build", lambda nbid: spawned.append(nbid))
+    events = _record_events(monkeypatch, scale)
+
+    served = scale.viz_index(nb.id)
+
+    assert served is not None            # 陈旧折叠图照旧供图
+    assert spawned == []                 # 但没有在这里刷新
+    refusals = [e for e in events if e.get("kind") == "viz_lazy_build_refused"]
+    assert len(refusals) == 1
+    assert refusals[0]["trigger"] == "stale_refresh"
+    assert refusals[0]["reason"] == "large_notebook"
+    assert refusals[0]["notebook_id"] == nb.id
+    assert refusals[0]["objects"] > refusals[0]["max_objects"]
+
+
+def test_stale_viz_refresh_still_spawns_for_a_small_notebook(repo, monkeypatch):
+    """对照:未超限的库,stale 刷新行为一个字节都没变(仍然后台刷新)。"""
+    nb = _star(repo)
+    repo.store_kg(nb.id, None, [
+        {"local_id": "d", "object_type": "concept", "payload": {"name": "leakage", "section_path": ""}, "evidence": []},
+    ], [])
+    repo._viz_idx_cache.pop(nb.id, None)
+    scale = repo._runtime.scale_artifacts
+    # default viz_sync_build_max_objects (20000) → 4 objects is small
+    spawned: list[str] = []
+    monkeypatch.setattr(scale, "_spawn_viz_build", lambda nbid: spawned.append(nbid))
+    events = _record_events(monkeypatch, scale)
+
+    assert scale.viz_index(nb.id) is not None
+    assert spawned == [nb.id]
+    assert [e for e in events if e.get("kind") == "viz_lazy_build_refused"] == []
+
+
+def test_absent_viz_build_is_refused_for_a_large_notebook(repo, monkeypatch):
+    """第二个调用点:没有产物 + 超限 → 什么都不建,发同一族事件。
+
+    这一支的 count 是**构造性**超限的:上游 ``<=`` 已经把每一本未超限的库分流去同步
+    建了。所以加这道判据等于把「API 进程内的大库懒 viz 生产者」整个删掉,而不是收窄
+    它——注释与本用例都按这个事实写。
+
+    变异钉:把末尾换回 ``self._spawn_viz_build(notebook_id)``,``spawned`` 非空即红。
+    """
     nb = _star(repo)
     _clear_viz(repo, nb.id)
+    scale = repo._runtime.scale_artifacts
     monkeypatch.setattr(repo.settings, "viz_sync_build_max_objects", 0)
+    spawned: list[str] = []
+    monkeypatch.setattr(scale, "_spawn_viz_build", lambda nbid: spawned.append(nbid))
+    monkeypatch.setattr(
+        scale, "build_viz",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("sync build attempted")),
+    )
+    events = _record_events(monkeypatch, scale)
+
+    assert scale.viz_index(nb.id) is None
+    assert spawned == []
+    refusals = [e for e in events if e.get("kind") == "viz_lazy_build_refused"]
+    assert len(refusals) == 1
+    assert refusals[0]["trigger"] == "absent"
+    assert refusals[0]["objects"] > refusals[0]["max_objects"]
+
+
+def test_unified_kg_status_reports_viz_building(repo, monkeypatch):
+    """状态投影仍如实反映后台构建标记。
+
+    驱动方式从「打开大库图谱顺带 spawn」改成直接调用 _spawn_viz_build:大库那条
+    自动 spawn 已被规模闸删除(见上面的 refuse 用例),但标记本身与状态投影的关系
+    没有变,这条守的是后者。
+    """
+    nb = _star(repo)
+    _clear_viz(repo, nb.id)
     pending = {}
     monkeypatch.setattr(
         repo._runtime.scale_artifacts,
         "_start_daemon",
         lambda _name, target: pending.setdefault("target", target),
     )
-    repo.unified_graph(nb.id, level="object", limit=10)  # spawns background build
+    repo._runtime.scale_artifacts._spawn_viz_build(nb.id)
     status = repo.unified_kg_status(nb.id)
     assert status["viz_building"] is True
     pending["target"]()
@@ -160,10 +291,9 @@ def test_unified_graph_no_limit_large_nb_never_full_derives(repo, monkeypatch):
     _clear_viz(repo, nb.id)
     monkeypatch.setattr(repo.settings, "viz_sync_build_max_objects", 0)
     result = repo.unified_graph(nb.id, level="object")
-    assert result.get("viz_building") is True or "nodes" in result
+    assert result["viz_unavailable"] is True
     assert (nb.id, "object") not in repo._unified_cache
     assert (nb.id, "concept") not in repo._unified_cache
-    _wait_until_not_building(repo, nb.id)
 
 
 def test_unified_graph_concept_level_large_nb_guarded(repo, monkeypatch):
@@ -174,10 +304,9 @@ def test_unified_graph_concept_level_large_nb_guarded(repo, monkeypatch):
     _clear_viz(repo, nb.id)
     monkeypatch.setattr(repo.settings, "viz_sync_build_max_objects", 0)
     result = repo.unified_graph(nb.id, level="concept")
-    assert result.get("viz_building") is True or "nodes" in result
+    assert result["viz_unavailable"] is True
     assert (nb.id, "object") not in repo._unified_cache
     assert (nb.id, "concept") not in repo._unified_cache
-    _wait_until_not_building(repo, nb.id)
 
 
 def test_unified_graph_no_limit_small_nb_unchanged(repo):
@@ -357,7 +486,7 @@ def test_large_nb_guard_uses_cached_active_object_count(repo, monkeypatch):
     monkeypatch.setattr(_DiagnosticCursor, "execute", spy_execute)
 
     result1 = repo.unified_graph(nb.id, level="object", limit=10)
-    assert result1["viz_building"] is True   # 确认真的走了大库闸分支
+    assert result1["viz_unavailable"] is True   # 确认真的走了大库闸分支
     total_calls = len(cached_cold_calls) + len(uncached_raw_calls)
     assert total_calls == 1                  # 第一次:冷查询(且必须是缓存形态①)
     assert len(cached_cold_calls) == 1
