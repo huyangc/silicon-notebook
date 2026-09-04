@@ -150,3 +150,38 @@ def execute_many(connection: Any, statement: str, rows: Sequence[Sequence[Any]])
         return
     with connection.cursor() as cursor:
         cursor.executemany(statement, rows)
+
+
+# Page size for the offline build's whole-notebook keyset scans (batch-3 W4
+# T-W4-3.1). Same order of magnitude as the embedding scans'
+# ``_MATRIX_FETCH_BATCH``: the bound that matters is "one page of rows in the
+# driver's result buffer", not the exact number.
+GRAPH_FETCH_BATCH = 10_000
+
+
+def keyset_pages(db: Any, page_size: int, statement_for, cursor_of):
+    """Yield successive keyset pages of one whole-notebook read.
+
+    ``statement_for(cursor)`` returns ``(statement, params)`` for the page
+    starting strictly after ``cursor`` (``None`` = first page); ``cursor_of``
+    extracts the next cursor from a page's LAST row. Each page is an
+    independent, fully-exhausted statement, so what this bounds is (a) the
+    rows psycopg materializes per ``fetchall`` and (b) the lifetime of any
+    single statement's MVCC snapshot across a build that can run for hours —
+    NOT whatever the caller then accumulates in Python. A short page ends the
+    scan, exactly like ``EmbeddingStore.vector_pages``.
+
+    Every call site must pass a key that is a TOTAL order over the rows its
+    predicate admits, or a strict ``>`` cursor silently drops ties that
+    straddle a page boundary; each site names its uniqueness argument inline.
+    """
+    cursor = None
+    while True:
+        statement, params = statement_for(cursor)
+        page = db.execute(statement, params).fetchall()
+        if not page:
+            return
+        yield page
+        if len(page) < page_size:
+            return
+        cursor = cursor_of(page[-1])

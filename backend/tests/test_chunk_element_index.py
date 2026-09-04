@@ -392,12 +392,13 @@ def test_mark_failed_records_only_a_stable_code(repo):
 
 def _legacy_map(repo, notebook_id: str, element_ids):
     """The pre-batch-5 whole-notebook scan, as the equivalence baseline."""
-    with repo._connect() as db:
-        rows = repo._runtime.chunk_store.id_element_rows(db, notebook_id)
     out: dict[str, list] = {}
-    for row in rows:
-        for element_id in json.loads(row["element_ids"] or "[]"):
-            out.setdefault(element_id, []).append(row["id"])
+    # Drained inside the connection scope: id_element_rows streams keyset
+    # pages on PostgreSQL (batch-3 W4 T-W4-3.1).
+    with repo._connect() as db:
+        for row in repo._runtime.chunk_store.id_element_rows(db, notebook_id):
+            for element_id in json.loads(row["element_ids"] or "[]"):
+                out.setdefault(element_id, []).append(row["id"])
     return {e: out.get(e, []) for e in element_ids}
 
 

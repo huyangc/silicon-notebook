@@ -3150,7 +3150,9 @@ def test_postgres_graph_rows_follow_persisted_ordinals_for_degree_ties(
     )
     with postgres_database.connect() as connection:
         unified = knowledge.unified_graph_rows(connection, "nb-personal")
-        active = projection.active_object_graph_rows(connection, "nb-personal")
+        # active_object_graph_rows streams keyset pages (batch-3 W4 T-W4-3.1),
+        # so it must be drained inside the connection scope.
+        active = list(projection.active_object_graph_rows(connection, "nb-personal"))
     graph = projection.graph_rows("nb-personal", None, synonym_edges=[])
 
     assert [row["id"] for row in unified] == object_ids

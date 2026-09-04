@@ -1348,12 +1348,15 @@ class GraphRetrievalService(_RetrievalState):
         version = tuple(self._scale_index_version(notebook_id))
 
         def _load():
-            with self._connect() as db:
-                chunk_rows = self.chunks.id_element_rows(db, notebook_id)
             out: Dict[str, list] = {}
-            for cr in chunk_rows:
-                for el in json.loads(cr["element_ids"] or "[]"):
-                    out.setdefault(el, []).append(cr["id"])
+            # Consumed INSIDE the connection scope: ``id_element_rows`` streams
+            # keyset pages (batch-3 W4 T-W4-3.1), so each row's element_ids
+            # JSON is folded into ``out`` and dropped instead of the whole
+            # notebook's rows being materialized first.
+            with self._connect() as db:
+                for cr in self.chunks.id_element_rows(db, notebook_id):
+                    for el in json.loads(cr["element_ids"] or "[]"):
+                        out.setdefault(el, []).append(cr["id"])
             return out
 
         return self._vector_cache.get(f"{notebook_id}:elemchunk", version, _load)
@@ -1478,17 +1481,23 @@ class GraphRetrievalService(_RetrievalState):
         version = tuple(self._scale_index_version(notebook_id))
 
         def _load():
-            with self._connect() as db:
-                obj_rows = self.knowledge.notebook_object_evidence_rows(db, notebook_id)
+            # Resolved BEFORE the connection opens: the evidence rows below are
+            # consumed inside the ``with`` (they arrive as keyset pages,
+            # batch-3 W4 T-W4-3.1), and ``_elem_chunk_map`` takes a connection
+            # of its own — computing it first keeps the two scans sequential
+            # instead of nesting one inside the other's connection.
             elem_to_chunks = self._elem_chunk_map(notebook_id)
             out: Dict[str, set] = {}
-            for orow in obj_rows:
-                chunks: set = set()
-                for e in json.loads(orow["evidence"] or "[]"):
-                    if isinstance(e, dict) and e.get("element_id"):
-                        chunks |= set(elem_to_chunks.get(e["element_id"], ()))
-                if chunks:
-                    out[orow["id"]] = chunks
+            with self._connect() as db:
+                for orow in self.knowledge.notebook_object_evidence_rows(
+                    db, notebook_id
+                ):
+                    chunks: set = set()
+                    for e in json.loads(orow["evidence"] or "[]"):
+                        if isinstance(e, dict) and e.get("element_id"):
+                            chunks |= set(elem_to_chunks.get(e["element_id"], ()))
+                    if chunks:
+                        out[orow["id"]] = chunks
             return out
 
         return self._vector_cache.get(f"{notebook_id}:entchunk", version, _load)

@@ -33,10 +33,12 @@ _PUBLISHED_CLUSTER_GEN = (
 )
 from app.repositories.ports import ChunkLexicalSearchTimeout
 from app.repositories.postgres._store_utils import (
+    GRAPH_FETCH_BATCH,
     execute_many,
     iso_timestamp,
     json_value,
     jsonb,
+    keyset_pages,
     normalize_timestamp,
 )
 from app.repositories.postgres.database import PostgresDatabase
@@ -1543,10 +1545,42 @@ class KnowledgeStore:
 
     @staticmethod
     def notebook_object_evidence_rows(db: Any, notebook_id: str):
-        return _compat_rows(db.execute(
-            "SELECT id, evidence FROM knowledge_objects WHERE notebook_id=%s",
-            (notebook_id,),
-        ).fetchall(), evidence=True)
+        """Whole-notebook ``(id, evidence)`` rows, streamed in ``id`` keyset
+        pages instead of one whole-table ``fetchall`` (batch-3 W4 T-W4-3.1).
+
+        This is the heaviest of the graph-side reads: ``evidence`` is the
+        FULL per-object evidence JSON, and the only consumer
+        (``GraphRetrievalService._ent_chunk_map``) parses each row into a chunk
+        id set and drops it. Paging turns "every object's evidence JSON
+        resident at once" into "one page's worth", which is a real reduction
+        here rather than only a driver-buffer bound.
+
+        Key: ``id``, the table's primary key (declared ``COLLATE "C"`` like
+        every text column in this schema), so the ``>`` cursor is a total
+        order. This read had NO ``ORDER BY`` before, so paging INTRODUCES an
+        order — that is safe by argument, not by luck: the consumer folds the
+        rows into a ``{object_id: set(chunk_id)}`` dict keyed by ``id``, and
+        the one downstream user of that dict (``graph_rows``' membership leg)
+        re-sorts its keys through ``sorted(..., key=_binary_text_key)`` before
+        using them, so no output of this read depends on the row order it
+        arrives in.
+
+        A GENERATOR: it must be consumed inside the caller's connection scope.
+        A caller that iterates after closing ``db`` gets a loud driver error,
+        never a silently short result.
+        """
+        for page in keyset_pages(
+            db, GRAPH_FETCH_BATCH,
+            lambda cursor: (
+                "SELECT id, evidence FROM knowledge_objects WHERE notebook_id=%s"
+                + ("" if cursor is None else " AND id>%s")
+                + " ORDER BY id LIMIT %s",
+                (notebook_id, GRAPH_FETCH_BATCH) if cursor is None
+                else (notebook_id, cursor, GRAPH_FETCH_BATCH),
+            ),
+            lambda row: row["id"],
+        ):
+            yield from _compat_rows(page, evidence=True)
 
     @staticmethod
     def follow_start_row(db: Any, object_id: str,

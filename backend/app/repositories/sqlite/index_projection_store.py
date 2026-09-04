@@ -53,6 +53,50 @@ ScaleGraphEdges = (
 _MATRIX_FETCH_BATCH = 10_000
 
 
+def _stream_vector_rows(db, notebook_id: str, table: str, id_column: str):
+    """Keyset pagination by rowid, de-duplicated. Each page is an INDEPENDENT,
+    fully-exhausted statement, so the WAL read snapshot is released between
+    pages — a single long-lived cursor would pin ONE snapshot for the whole
+    multi-million-row build and block WAL checkpoints under concurrent writes
+    → unbounded `-wal` growth. But rowid is NOT stable across the scan: the
+    embedding writers use INSERT OR REPLACE (embedding_store.py), which
+    deletes+reinserts a refreshed row at a LARGER rowid. A row refreshed after
+    the scan passed its old rowid would re-surface in a later page, and
+    build_matrix would then hold BOTH the stale and the current vector under
+    one id. `seen` keeps the FIRST occurrence (the value at the id's original
+    scan position — snapshot-consistent; the refreshed vector is picked up by
+    the next fold/rebuild) and drops any re-surfacing, so every id enters the
+    matrix exactly once. `rowid > ?` walks idx_{table}_nb in rowid order.
+    n_hint (a COUNT at start) is an estimate; build_matrix tolerates the drift
+    dedup and concurrent writes introduce.
+
+    Shared verbatim by ``embedding_matrix``'s whole-notebook load and
+    ``embedding_pages``' paged ANN feed, so the two can never drift apart on
+    the de-dup rule (a second copy of this scan is exactly how one of them
+    would quietly lose it).
+    """
+    seen: set = set()
+    last_rowid = 0
+    while True:
+        page = db.execute(
+            f"SELECT rowid AS rid, {id_column} AS vid, vector "
+            f"FROM {table} WHERE notebook_id=? AND rowid > ? "
+            f"ORDER BY rowid LIMIT ?",
+            (notebook_id, last_rowid, _MATRIX_FETCH_BATCH),
+        ).fetchall()
+        if not page:
+            break
+        for row in page:
+            vid = row["vid"]
+            if vid in seen:
+                continue
+            seen.add(vid)
+            yield vid, row["vector"]
+        last_rowid = page[-1]["rid"]
+        if len(page) < _MATRIX_FETCH_BATCH:
+            break
+
+
 @dataclass(frozen=True)
 class ScaleGraphRows:
     node_ids: list
@@ -742,49 +786,9 @@ class IndexProjectionStore:
                 n_hint = db.execute(
                     f"SELECT COUNT(*) AS c FROM {table} WHERE notebook_id=?",
                     (notebook_id,)).fetchone()["c"]
-                def _stream_rows():
-                    # Keyset pagination by rowid, de-duplicated. Each page is an
-                    # INDEPENDENT, fully-exhausted statement, so the WAL read
-                    # snapshot is released between pages — a single long-lived
-                    # cursor would pin ONE snapshot for the whole
-                    # multi-million-row build and block WAL checkpoints under
-                    # concurrent writes → unbounded `-wal` growth. But rowid is
-                    # NOT stable across the scan: the embedding writers use
-                    # INSERT OR REPLACE (embedding_store.py), which
-                    # deletes+reinserts a refreshed row at a LARGER rowid. A row
-                    # refreshed after the scan passed its old rowid would
-                    # re-surface in a later page, and build_matrix would then
-                    # hold BOTH the stale and the current vector under one id.
-                    # `seen` keeps the FIRST occurrence (the value at the id's
-                    # original scan position — snapshot-consistent; the refreshed
-                    # vector is picked up by the next fold/rebuild) and drops any
-                    # re-surfacing, so every id enters the matrix exactly once.
-                    # `rowid > ?` walks idx_{table}_nb in rowid order. n_hint
-                    # (COUNT at start) is an estimate; build_matrix tolerates the
-                    # drift dedup and concurrent writes introduce.
-                    seen: set = set()
-                    last_rowid = 0
-                    while True:
-                        page = db.execute(
-                            f"SELECT rowid AS rid, {id_column} AS vid, vector "
-                            f"FROM {table} WHERE notebook_id=? AND rowid > ? "
-                            f"ORDER BY rowid LIMIT ?",
-                            (notebook_id, last_rowid, _MATRIX_FETCH_BATCH),
-                        ).fetchall()
-                        if not page:
-                            break
-                        for row in page:
-                            vid = row["vid"]
-                            if vid in seen:
-                                continue
-                            seen.add(vid)
-                            yield vid, row["vector"]
-                        last_rowid = page[-1]["rid"]
-                        if len(page) < _MATRIX_FETCH_BATCH:
-                            break
-
                 return build_matrix(
-                    _stream_rows(), n_hint=n_hint, runtime_dim=runtime_dim)
+                    _stream_vector_rows(db, notebook_id, table, id_column),
+                    n_hint=n_hint, runtime_dim=runtime_dim)
         if not object_ids:
             return [], []
 
@@ -798,3 +802,39 @@ class IndexProjectionStore:
                             (notebook_id, *batch)).fetchall():
                         yield r["vid"], r["vector"]
         return build_matrix(_rows(), runtime_dim=runtime_dim)
+
+    def embedding_row_count(self, notebook_id: str, table: str) -> int:
+        """Row count for the whole-notebook embedding scan — the UPPER BOUND
+        the paged ANN build sizes ``init_index(max_elements=...)`` with before
+        it knows how many rows will actually survive decoding (and, on this
+        backend, the rowid de-dup). Same aggregate ``embedding_matrix``
+        already uses for ``build_matrix``'s ``n_hint``."""
+        with self.connect() as db:
+            return int(db.execute(
+                f"SELECT COUNT(*) AS c FROM {table} WHERE notebook_id=?",
+                (notebook_id,)).fetchone()["c"])
+
+    def embedding_pages(self, notebook_id: str, table: str, id_column: str,
+                        page_rows: int = _MATRIX_FETCH_BATCH):
+        """Whole-notebook vectors as bounded ``(ids, matrix)`` pages.
+
+        The load-side half of ``embedding_matrix(object_ids=None)`` without
+        its one whole-notebook matrix: the DB read is the SAME
+        ``_stream_vector_rows`` rowid scan (same de-dup, same WAL ledger), and
+        ``matrix_pages`` applies ``build_matrix``'s five semantics across the
+        whole stream, so concatenating the pages is element-identical to
+        ``embedding_matrix``. hnswlib copies each page into its own graph, so
+        the caller drops the page right after ``add_items`` instead of holding
+        the whole matrix alongside the index.
+
+        A GENERATOR holding the connection open across its own consumption
+        (the ``with`` encloses the yields), same shape as the delta path above.
+        """
+        from app.domain.vector_index import matrix_pages, resolve_runtime_dim
+        runtime_dim = resolve_runtime_dim(self.settings)
+        with self.connect() as db:
+            yield from matrix_pages(
+                _stream_vector_rows(db, notebook_id, table, id_column),
+                page_rows,
+                runtime_dim=runtime_dim,
+            )

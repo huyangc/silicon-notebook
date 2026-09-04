@@ -4292,6 +4292,26 @@ class IndexProjectionStorePort(Protocol):
         id_column: str,
         object_ids: Sequence[str] | None = None,
     ) -> Any: ...
+    def embedding_row_count(self, notebook_id: str, table: str) -> int:
+        """Whole-notebook embedding row count — the upper bound the offline
+        build's paged ANN feed sizes ``init_index(max_elements=...)`` with
+        before it knows how many rows survive decoding."""
+        ...
+    def embedding_pages(
+        self,
+        notebook_id: str,
+        table: str,
+        id_column: str,
+        page_rows: int = ...,
+    ) -> Any:
+        """Whole-notebook vectors as bounded ``(ids, matrix)`` pages —
+        ``embedding_matrix(object_ids=None)`` without its one whole-notebook
+        matrix. Concatenating the pages is element-identical to that call
+        (same keyset scan, same ``build_matrix`` semantics carried across
+        pages); the offline build consumes it so a page can be dropped the
+        instant hnswlib has copied it. A generator that holds its connection
+        open across its own consumption."""
+        ...
     def chunk_sources_for_ids(
         self, notebook_id: str, chunk_ids: Sequence[str]
     ) -> dict[str, str]: ...

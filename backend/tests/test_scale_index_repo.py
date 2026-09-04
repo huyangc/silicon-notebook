@@ -79,35 +79,45 @@ def test_build_frees_matrices_and_hands_persist_prebuilt_anns(repo, monkeypatch)
     assert nb.id in invalidated
 
 
-def test_kg_matrix_is_released_before_persist(repo, monkeypatch):
-    """OOM (codex PR#347 round 1): ann_vectors = np.asarray(ann_matrix_raw,
-    float32) ALIASES the already-float32 matrix, so freeing only ann_vectors
-    leaves the ~33GB KG matrix pinned via ann_matrix_raw (and the
-    build_kg_ann/synonym_edges closure cells) through chunk/relation load and
-    persist — defeating the headline win. Weakref the KG matrix; at persist it
-    MUST be dead. Reverting to `del ann_vectors` alone fails here."""
+def test_build_never_materializes_a_whole_embedding_matrix(repo, monkeypatch):
+    """OOM (codex PR#347 round 1, then batch-3 W4 T-W4-3.3): the build used to
+    load ONE whole-notebook matrix per ANN leg and merely free it early — a
+    shape that only worked because every alias got dropped in the right order
+    (``ann_vectors`` ALIASES ``ann_matrix_raw``, so ``del ann_vectors`` alone
+    left ~33GB pinned). The paged feed removes the object instead of freeing
+    it: hnswlib copies each page, so no leg ever holds more than one page.
+
+    Two halves, and both fail on a revert to the whole-matrix load: the
+    whole-notebook loader must not be called for ANY of the three build tables
+    at all, and every page matrix handed to hnswlib must be dead by persist."""
     import weakref
     import gc as _gc
 
     builder = repo._runtime.scale_builder
-    ref_holder: dict = {}
+    whole_matrix_tables: list = []
+    page_refs: list = []
     real_em = builder.projections.embedding_matrix
+    real_pages = builder.projections.embedding_pages
 
-    def spy_em(notebook_id, table, id_column, **kw):
-        ids, mat = real_em(notebook_id, table, id_column, **kw)
-        if table == "knowledge_embeddings" and getattr(mat, "size", 0):
-            ref_holder["kg"] = weakref.ref(mat)
-        return ids, mat
+    def spy_em(notebook_id, table, id_column, object_ids=None, **kw):
+        if object_ids is None:
+            whole_matrix_tables.append(table)
+        return real_em(notebook_id, table, id_column, object_ids, **kw)
+
+    def spy_pages(notebook_id, table, id_column, *args, **kw):
+        for ids, matrix in real_pages(notebook_id, table, id_column, *args, **kw):
+            page_refs.append(weakref.ref(matrix))
+            yield ids, matrix
 
     monkeypatch.setattr(builder.projections, "embedding_matrix", spy_em)
+    monkeypatch.setattr(builder.projections, "embedding_pages", spy_pages)
 
     persist_state: dict = {}
     real_save = builder.artifacts.save_full
 
     def spy_save(notebook_id, artifacts, **kwargs):
         _gc.collect()
-        ref = ref_holder.get("kg")
-        persist_state["alive"] = ref is not None and ref() is not None
+        persist_state["alive"] = [ref for ref in page_refs if ref() is not None]
         return real_save(notebook_id, artifacts, **kwargs)
 
     monkeypatch.setattr(builder.artifacts, "save_full", spy_save)
@@ -120,8 +130,9 @@ def test_kg_matrix_is_released_before_persist(repo, monkeypatch):
     repo.rebuild_unified_kg(nb.id)
     builder.build(nb.id)
 
-    assert ref_holder.get("kg") is not None       # KG matrix was captured (has embeddings)
-    assert persist_state.get("alive") is False     # ...and released before persist
+    assert page_refs, "the KG leg must have been fed at least one page"
+    assert whole_matrix_tables == []
+    assert persist_state.get("alive") == []
 
 
 def test_rebuild_releases_concept_reps_before_derivation_tail(repo, monkeypatch):

@@ -221,6 +221,69 @@ class ScaleIndexBuilder:
         idx.add_items(vectors, np.arange(vectors.shape[0]))
         return idx
 
+    def _paged_ann(self, notebook_id: str, table: str, id_column: str):
+        """Build one hnsw index straight from bounded embedding pages.
+
+        Replaces "load one whole-notebook matrix, then add_items it" for all
+        three build-time ANN legs (WR-9). hnswlib copies each page into its own
+        graph, so a page can be dropped the instant ``add_items`` returns and
+        the load-side matrix never exists — the ~33GB relation matrix and the
+        ~7GB chunk one stop coexisting with the index they feed. hnswlib's own
+        internal copy is a second, unavoidable one; ``np.asarray`` on the old
+        whole matrix was only an ALIAS, so it is the load-side copy that is
+        actually removed here.
+
+        ``init_index`` needs both a width and a capacity up front: the width
+        comes from the first page (nothing else knows the post-truncation dim),
+        and the capacity from a COUNT upper bound, since how many rows survive
+        decoding is unknown until the scan ends. Rows inserted below the
+        cursor after that COUNT are absorbed by ``resize_index`` rather than
+        raising — the same drift the keyset scan already tolerates.
+
+        Returns ``(labels, index, load_ms, add_ms)``: labels row-aligned with
+        the index in scan order (byte-identical to the old whole-matrix path,
+        which used the same scan), and the two costs split so the build's
+        frozen ``*_matrix`` / ``ann_build`` stage timings keep meaning what
+        they used to. ``index`` is None when the notebook has no usable
+        vectors."""
+        import hnswlib
+
+        labels: list[str] = []
+        index = None
+        load_ms = 0.0
+        add_ms = 0.0
+        capacity = 0
+        started = time.perf_counter()
+        upper_bound = self.projections.embedding_row_count(notebook_id, table)
+        pages = self.projections.embedding_pages(notebook_id, table, id_column)
+        while True:
+            page = next(pages, None)
+            load_ms += (time.perf_counter() - started) * 1000
+            if page is None:
+                break
+            page_ids, page_matrix = page
+            started = time.perf_counter()
+            if index is None:
+                capacity = max(1, upper_bound, len(page_ids))
+                index = hnswlib.Index(
+                    space="cosine", dim=int(page_matrix.shape[1])
+                )
+                index.init_index(
+                    max_elements=capacity,
+                    ef_construction=self.settings.hnsw_ef_construction,
+                    M=16,
+                    random_seed=42,
+                )
+            offset = len(labels)
+            if offset + len(page_ids) > capacity:
+                capacity = offset + len(page_ids)
+                index.resize_index(capacity)
+            index.add_items(page_matrix, np.arange(offset, offset + len(page_ids)))
+            labels.extend(page_ids)
+            add_ms += (time.perf_counter() - started) * 1000
+            started = time.perf_counter()
+        return labels, index, round(load_ms), round(add_ms)
+
     def _chunk_ann_source_codes(
         self,
         notebook_id: str,
@@ -320,10 +383,7 @@ class ScaleIndexBuilder:
         build_started = time.perf_counter()
         timings: dict[str, int] = {}
 
-        def timed(stage_name: str, fn: Callable[[], Any]):
-            started = time.perf_counter()
-            result = fn()
-            latency_ms = round((time.perf_counter() - started) * 1000)
+        def record(stage_name: str, latency_ms: int) -> None:
             timings[stage_name] = latency_ms
             self.event_log.emit(
                 {
@@ -335,51 +395,29 @@ class ScaleIndexBuilder:
                 }
             )
             self._notify_stage(notebook_id, on_stage, stage_name, latency_ms)
+
+        def timed(stage_name: str, fn: Callable[[], Any]):
+            started = time.perf_counter()
+            result = fn()
+            record(stage_name, round((time.perf_counter() - started) * 1000))
             return result
 
-        ann_ids_raw, ann_matrix_raw = timed(
-            "kg_matrix",
-            lambda: self.projections.embedding_matrix(
-                notebook_id, "knowledge_embeddings", "object_id"
-            ),
+        # KG leg: hnsw fed straight from bounded embedding pages, so the KG
+        # matrix never exists as one object. The two frozen stage names are
+        # kept and now carry the honest split of the same total — `kg_matrix`
+        # is the paged read+decode, `ann_build` the hnsw insertions — instead
+        # of the old load-everything-then-insert pair.
+        ann_labels, kg_ann_index, _kg_load_ms, _kg_add_ms = self._paged_ann(
+            notebook_id, "knowledge_embeddings", "object_id"
         )
-        ann_ids = list(ann_ids_raw) if ann_ids_raw else []
-        if ann_ids and ann_matrix_raw is not None:
-            ann_labels = ann_ids
-            ann_vectors = np.asarray(ann_matrix_raw, dtype=np.float32)
-        else:
-            ann_labels = []
-            ann_vectors = np.empty(
-                (0, max(1, self.settings.embed_dim)), dtype=np.float32
-            )
-
-        def build_kg_ann():
-            if ann_vectors.shape[0] == 0:
-                return None
-            import hnswlib
-
-            index = hnswlib.Index(
-                space="cosine", dim=int(ann_vectors.shape[1])
-            )
-            index.init_index(
-                max_elements=ann_vectors.shape[0],
-                ef_construction=self.settings.hnsw_ef_construction,
-                M=16,
-                random_seed=42,
-            )
-            index.add_items(ann_vectors, np.arange(ann_vectors.shape[0]))
-            return index
-
-        kg_ann_index = timed("ann_build", build_kg_ann)
-        # Capture the built dim NOW, before ann_vectors is freed post-synonym.
-        # ann_vectors is never persisted (it only fed the KG hnsw + the synonym
-        # KNN), so it must not ride ~33GB resident through chunk/relation load
-        # and persist — kg_ann_index already holds the vectors.
+        record("kg_matrix", _kg_load_ms)
+        record("ann_build", _kg_add_ms)
+        # The built dim now comes off the index itself (the matrix that used to
+        # answer this is gone by construction, not merely freed early).
         from app.services.vector_index import resolve_runtime_dim as _resolve_dim
 
         built_dim = (
-            int(ann_vectors.shape[1])
-            if getattr(ann_vectors, "size", 0)
+            int(kg_ann_index.dim) if kg_ann_index is not None
             else (_resolve_dim(self.settings) or self.settings.embed_dim)
         )
         gc.collect()
@@ -387,26 +425,25 @@ class ScaleIndexBuilder:
         def synonym_edges():
             if kg_ann_index is None or not self.settings.ppr_emb_synonym_enabled:
                 return []
-            from app.services.kg.ppr import emb_synonym_edges
+            from app.domain.kg.ppr_pairs import emb_synonym_edges_paged
 
-            return emb_synonym_edges(
+            # SECOND pass over the query set: the index is complete, but its
+            # input matrix is not resident any more, so the query rows are
+            # re-read from the database in the same keyset order pass one used.
+            # emb_synonym_edges_paged maps every page row back to its pass-one
+            # hnsw label by id and drops rows the first pass never labelled —
+            # see its docstring for why both are required.
+            return emb_synonym_edges_paged(
                 ann_labels,
-                ann_vectors,
+                kg_ann_index,
+                self.projections.embedding_pages(
+                    notebook_id, "knowledge_embeddings", "object_id"
+                ),
                 self.settings.ppr_emb_synonym_threshold,
                 self.settings.ppr_emb_synonym_topk,
-                self.settings.ppr_emb_synonym_max_entities,
-                prebuilt_index=kg_ann_index,
-                ef_construction=self.settings.hnsw_ef_construction,
             )
 
         synonyms = timed("synonym", synonym_edges)
-        # Free the KG matrix for real: ann_vectors is np.asarray(ann_matrix_raw,
-        # float32) which ALIASES the (already-float32) matrix, so dropping only
-        # ann_vectors leaves ~33GB pinned via ann_matrix_raw through
-        # chunk/relation load + persist. Drop the load-side aliases too; the
-        # build_kg_ann/synonym_edges closure cells for ann_vectors are cleared
-        # by this `del` (shared cell), and kg_ann_index keeps its own hnsw copy.
-        del ann_vectors, ann_matrix_raw, ann_ids_raw
         gc.collect()
         (
             node_ids,
@@ -448,21 +485,13 @@ class ScaleIndexBuilder:
         gc.collect()
 
         def _load_build_chunk_ann():
-            ids_raw, matrix_raw = self.projections.embedding_matrix(
+            # Paged feed (batch-3 W4 T-W4-3.3): the chunk matrix (~7GB at 8M
+            # rows) is never assembled at all now — each page is inserted and
+            # dropped. The "chunk_matrix" stage still times load+build as one
+            # stage, so build_ms keeps the ANN-build cost attributable.
+            labels, ann, _load_ms, _add_ms = self._paged_ann(
                 notebook_id, "chunk_embeddings", "chunk_id"
             )
-            labels = list(ids_raw) if ids_raw else []
-            vecs = (
-                np.asarray(matrix_raw, dtype=np.float32)
-                if labels and matrix_raw is not None
-                else None
-            )
-            # Build the ANN and drop the matrix INSIDE the stage: persist never
-            # rebuilds it, and the matrix (~7GB chunks at 8M) must not survive
-            # past here. `vecs`/`matrix_raw` are locals, freed on return. The
-            # "chunk_matrix" stage now times load+build (still one stage), so
-            # build_ms keeps the ANN-build cost attributable.
-            ann = self._build_ann(vecs)
             names, codes, counts = self._chunk_ann_source_codes(
                 notebook_id, labels
             )
@@ -480,19 +509,13 @@ class ScaleIndexBuilder:
         gc.collect()
 
         def _load_build_relation_ann():
-            ids_raw, matrix_raw = self.projections.embedding_matrix(
+            # Same paged feed as chunk. The relation matrix (~33GB at 8M rows)
+            # was the single biggest slice the pipeline ever held resident;
+            # with the paged feed it is never allocated.
+            labels, ann, _load_ms, _add_ms = self._paged_ann(
                 notebook_id, "relation_embeddings", "relation_id"
             )
-            labels = list(ids_raw) if ids_raw else []
-            vecs = (
-                np.asarray(matrix_raw, dtype=np.float32)
-                if labels and matrix_raw is not None
-                else None
-            )
-            # Same as chunk: build + drop the matrix inside the stage. The
-            # relation matrix (~33GB at 8M rows) is the single biggest slice the
-            # old persist held resident.
-            return labels, self._build_ann(vecs)
+            return labels, ann
 
         relation_ann_labels, relation_ann_index = timed(
             "relation_matrix", _load_build_relation_ann
@@ -1044,16 +1067,20 @@ class ScaleIndexBuilder:
         self.get_notebook(notebook_id)
         from app.services.kg_merge import derive_unified_graph
 
+        # Consumed INSIDE the connection scope: active_object_graph_rows
+        # streams keyset pages (batch-3 W4 T-W4-3.1) rather than one
+        # whole-table fetchall.
         with self.projections.connect() as db:
-            rows = self.projections.active_object_graph_rows(db, notebook_id)
-        nodes = [
-            {
-                "id": row["id"],
-                "object_type": row["object_type"],
-                "payload": {"name": row["name"] or ""},
-            }
-            for row in rows
-        ]
+            nodes = [
+                {
+                    "id": row["id"],
+                    "object_type": row["object_type"],
+                    "payload": {"name": row["name"] or ""},
+                }
+                for row in self.projections.active_object_graph_rows(
+                    db, notebook_id
+                )
+            ]
         edges = [
             {
                 "source_object_id": relation["source_object_id"],
