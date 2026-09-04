@@ -4234,7 +4234,20 @@ class KnowledgeLifecycleService:
             # "no matching nodes". The two are mutually exclusive by
             # construction so the client never has to rank them. Large
             # notebooks never fall through to _unified_graph_full either way.
-            building = notebook_id in self.scale_artifacts.viz_building
+            # An in-flight SCALE INDEX build counts as "building" too (codex
+            # #676 R4 P2): its publish step is now the sole producer of the
+            # large-notebook viz, and the frontend only starts its refresh
+            # polling on viz_building — reporting unavailable while that
+            # build runs would leave the canvas stuck on the terminal copy
+            # after the preview actually published. Set-membership reads
+            # mirror the standalone check (same lock discipline as the
+            # existing unlocked viz_building read above).
+            with self.scale_artifacts.building_lock:
+                scale_build_running = notebook_id in self.scale_artifacts.building
+            building = (
+                notebook_id in self.scale_artifacts.viz_building
+                or scale_build_running
+            )
             return {"nodes": [], "edges": [], "total_nodes": 0,
                     "total_edges": 0, "truncated": False,
                     "viz_building": building, "viz_unavailable": not building}
