@@ -153,7 +153,44 @@ teardown 骑在上面;锁的既有 docstring 承诺「毫秒级事务」。
    (knowledge_store 的 QueryCanceled 识别站点)不在范围、不被全局
    handler 取代。
 
-## T-W4-5(SR-1 遗留)element 搜索腿 OR→跨表等价 UNION
+## T-W4-5(SR-1 遗留)element 搜索腿 OR→跨表等价 UNION——已实施后被测量证伪,撤销
+
+**终局(2026-09-04):实现已按本节落地(commit 539826aea,oracle 四场景
+逐字等价 + EXPLAIN 钉计划全绿),随后质量评审用真机差分测量证伪了本节的
+设计前提,实现整体 revert。SR-1 遗留项按「测量后不做」结案。**
+
+证伪证据(PG 16.15 本机,30k sources/600k elements,索引按 0003/0016/
+0039/0042/0048 复刻,VACUUM ANALYZE 后 7 次取中位;SQLite 用仓库自己的
+SQLiteRepository 迁移建库,20k/400k):
+
+| 场景 | 旧 OR | 新 UNION | 倍数 |
+| --- | --- | --- | --- |
+| PG:命中 5% 源标题、正文无 | 0.3 ms | 48.6 ms | **179x 退化** |
+| PG:命中 95% 源标题、正文无 | 0.1 ms | 45.2 ms | **870x 退化** |
+| PG:仅正文命中 20 行 | 56.5 ms | 71.9 ms | 1.27x 退化 |
+| PG:零命中/稀疏 title/尾部 title | ~50-61 ms | ~44-53 ms | 0.86-0.90x(边际) |
+| SQLite:命中源标题、正文无 | 0.06-0.08 ms | 114-117 ms | **1409-1997x 退化** |
+| SQLite:仅正文命中 | 0.10 ms | 120 ms | **1173x 退化** |
+
+机制(修正本节原前提):旧形态在 `ORDER BY se.ordinal LIMIT cap` 下走
+`uq_source_elements_ordinal` 的 Index Scan、三臂 OR 压成 Join Filter,
+**凑满 cap 即早停**——title 臂不是「钉死计划的元凶」,恰是喂早停最密的
+那一臂。拆腿后,腿 A 在「title 命中、正文不命中」的常见词上必须走完该
+notebook 的全部 element 自证为空;`source_elements` 无 notebook_id 列、
+`se.text` 无 trgm,腿 A **没有任何索引退路**——任何「两腿各取前 cap」的
+形状都要付这笔自证为空的钱,微调救不了。0048 迁移头的 REGISTERED
+TRADE-OFF 早写过同一机制(IN 半连接必须物化整个命中集,在那里代价是
+23.62→33.13ms;这里因无索引可退放大成三个数量级)。SQLite 侧连仅正文
+命中都退化(丢 LIMIT 早停 + `USE TEMP B-TREE FOR ORDER BY` 两遍扫)。
+
+留给未来的口径:若要重试,前置是 T-0 生产只读测量(关键变量是每源
+element 数与命中在 ordinal 序中的位置,不是源总数),且方案必须保住
+「单次有序走查 + 多臂 filter 早停」的形态,而不是拆腿。评审过程中的
+有效副产物(与撤销无关、仍然成立):`LOWER(title) LIKE` ≡ `title ILIKE`
+在 COLLATE "C" 下零语义分歧(160×120 随机 Unicode 差分为 0);needle
+上游 `.lower()` 属实。
+
+以下为撤销前的原设计,仅存档:
 
 现状(核实属实):`notebook_element_rows` 谓词
 `se.text ILIKE OR se.location_label ILIKE OR s.title ILIKE`,s.title 腿把
