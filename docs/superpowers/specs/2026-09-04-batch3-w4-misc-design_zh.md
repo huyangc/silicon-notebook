@@ -1,6 +1,6 @@
 # 批 3·W4:写路径杂项收尾(WR-3/WR-7/WR-9/QueryCanceled/SR-1-UNION)设计
 
-状态:v2(2026-09-04,设计评审 4×P1 + 15×P2 全部采纳整改;v1 归档于 git 历史)。
+状态:v3(2026-09-04,复评 3×P1[均为文档层]+6×P2 采纳;v1/v2 归档于 git 历史)。
 对应审计 WR-3/WR-7/WR-9、结构性事实③,及批 2 遗留登记项「element 搜索腿 OR
 跨表等价 UNION 改写」。三条红线照旧;实施切 2 个 PR(PR-A=T1+T2+T4+T5;
 PR-B=T3,单独隔离因为带构建基线门)。
@@ -24,7 +24,12 @@ worker 起跑后回填。**四条实施约束(评审 P2-1..P2-5)**:
 3. **如实声明收益口径**:本项只把整库枚举从 202 请求路径搬进 worker 线程
    ——DB 总负载不变(仍两遍枚举)。按批 extend(边枚举边抬 total)是
    显式不做:total 递增会让前端进度分母跳动,换来的只是同一笔钱换个付法。
-4. **可观测面登记**:`kg_build_started` 事件的 `total_sources` 恒为 0
+4. **`total_targets` 改读 worker 自算值**(复评 P2-4 找回的 v1 约束):
+   `_run_notebook_kg_job` 入口的 `int(job["total_sources"])` 读的是快照,
+   total 落 0 后不改这处会让 `if mode != "rebuild" and total_targets:` 恒假
+   ——增量构建的起始探测被静默跳过(反向护栏在 circuit-breaker 套件,会红
+   不会静默,但约束必须写明)。
+5. **可观测面登记**:`kg_build_started` 事件的 `total_sources` 恒为 0
    (计数已后移),product-and-api 双语的事件族段落同步;
    `GET /kg/build-status` 的 total 语义从「受理即准」变「起跑即准」。
    `extend_total_sources` 顺手补进 `KgBuildJobStorePort` 与 ownership
@@ -71,34 +76,53 @@ teardown 骑在上面;锁的既有 docstring 承诺「毫秒级事务」。
 1. **图侧取数 keyset 分页**——病灶名单按实际代码(评审 P2 补全):
    `graph_rows` 的 4 条 fetchall + `active_object_graph_rows` +
    `ent_chunk_map` 链上的 `notebook_object_evidence_rows`(全量 evidence
-   JSON)与 `id_element_rows`。分页键与索引依据逐条点名:objects/chunks 用
-   `ordinal`(全局 UNIQUE,单列 keyset 安全;登记:无 (notebook_id,
-   ordinal) 复合索引,keyset 在全局唯一索引上带 notebook 过滤——单租户
-   生产可接受,多库共存时的残余成本如实登记);clusters 用
-   `idx_clusters_nb_canonical_member` 的 (canonical_id, member) 键。
+   JSON)与 `id_element_rows`。分页键逐条点名(复评 P2-1/P2-2):
+   - objects/chunks:`ordinal`(全局 UNIQUE,单列 keyset 安全;登记:无
+     (notebook_id, ordinal) 复合索引,keyset 在全局唯一索引上带 notebook
+     过滤——单租户生产可接受,多库共存残余成本如实登记);
+   - relations 腿:`id COLLATE "C"` keyset(既有 ORDER BY 同键);
+   - clusters:现存索引是 `idx_clusters_nb_canonical_member_gen`(0051 已
+     DROP 旧名并 INCLUDE(generation)),键 (canonical_id, member);**每一页
+     都必须带 published 代次谓词**——掉谓词既丢 IOS 又踩「版本身份只数
+     published 代」红线;
+   - `notebook_object_evidence_rows` 现无 ORDER BY,分页要新引入 id 序:
+     消费侧 `membership_object_ids` 经 sorted() 后使用,行序无依赖(这是
+     论证,不是巧合——写进实现注释);`id_element_rows` 同理按 id keyset。
    **如实声明**:分页界住的是 fetchall 缓冲与快照时长,Python 侧图结构的
    峰值驻留不变(那是 WR-9 矩阵/图派生的固有形态,本项不动)。
    oracle:小库两实现产出逐位对比(排序后)。
 2. **在线 standalone viz 生成补大库闸**(取代 v1 的「scale build viz 阶段
    加闸」——那是方向反了:scale build 的 viz 阶段是大库 viz 的**指定
-   生产者**(rebuild 尾部明文委托,off-peak),闸它=把 12-20GB 物化逼回
-   API 进程的 `_spawn_viz_build`,OOM 从离线搬到线上)。真正的在线洞:
-   大库**尚无** scale-embedded viz 时,开图触发 `_spawn_viz_build` 在服务
-   进程 daemon 线程里物化整图(audit P0-2 形态,且每次开图重触发)。
-   改法:`_spawn_viz_build` 前加 `viz_sync_build_max_objects` 同款判据
-   (rebuild 尾部已用),超限不 spawn、发结构化事件,`unified_graph` 返回
-   诚实降级(viz_building=false + 既有「产物缺失」态;该库的 viz 由下一次
-   scale build 生产——`maybe_auto_index` 本就会排队)。产品可见变化:
-   超大库在 scale index 建成前图谱视图无折叠 viz,显示既有的缺失文案,
-   不再冒 OOM 风险;product-and-api 双语登记。
-3. **ANN 构建分页喂入**(按评审 P1-B 修正机制):`np.asarray` 是别名不是
-   拷贝,收益必须来自**加载**分页——chunk/relation 腿复用
-   `embedding_store.vector_pages` 的 keyset 页直喂 `add_items`(hnswlib
-   内部副本 1× 不可免,免掉的是加载侧整矩阵第二份);KG 腿因
-   `emb_synonym_edges` 的 `knn_query` 要整矩阵作查询集,同步改**分页
-   query**(逐页 knn_query,合并候选——上限/去重语义与整矩阵一致,
-   oracle 钉 top-k 集合相等)。验收改 recall/top-k 断言 + 测试
-   `num_threads=1`(hnswlib 多线程插入不保证逐位可复现,评审 P2-9);
+   生产者**,闸它=把物化逼回 API 进程)。`_spawn_viz_build` 有**两个**
+   调用点(复评 P1-2),裁决:超过 `viz_sync_build_max_objects` 时**两处
+   都闸**——
+   - 无产物分支:该分支因上游 `<=` 分流,count 构造性恒超限——加判据
+     等于**删掉 API 进程内的大库懒 viz 生产者**,如实这么写;
+   - stale 刷新分支:同一条 `build_viz` → 整图物化,不闸等于洞没堵。
+     代价如实登记:超限库聚类重建后**继续供 stale 折叠图**直到下一次
+     scale build(手动或 maybe_auto_index——后者带 auto_enabled+copyable
+     两道前置,不是无条件);`knowledge_lifecycle.py` rebuild 尾部那段
+     「lazily off the rebuild thread」委托注释**同 diff 改写**。
+   降级路径必须诚实且有前端任务(复评 P1-1,「既有缺失文案」不存在):
+   - `unified_graph` 大库分支写死的 `"viz_building": True` 同 diff 改为
+     按「是否真的 spawn 了」返回;
+   - 图谱画布补第四态:大库无 viz 且未在构建 → 新文案「库规模较大,
+     图谱预览将在下一次索引构建后可用」(替代误导的「没有匹配的节点」);
+   - `use-kg-graph` 的 locating_unavailable 文案去掉「完成后请重试」的
+     无限期承诺,改为指向索引构建;
+   - product-and-api 双语登记该产品可见变化。
+3. **ANN 构建分页喂入**(机制按复评 P2-3 精确化):`np.asarray` 是别名,
+   免掉的是**加载侧**那一份整矩阵(hnswlib 内部副本是第二份、不可免)。
+   chunk/relation 腿:`vector_pages` keyset 页直喂 `add_items`,分页要保住
+   `build_matrix` 的五条语义(runtime_dim 截断/首个有效行定维/异维行
+   丢弃/逐行 L2 归一/ids 与行序对齐),`init_index(max_elements)` 在总数
+   未知时先 COUNT 取上界。KG 腿:索引建全后矩阵已不在内存,查询集须
+   **第二遍分页读 DB**——页切的是查询集不是索引,每行的 top-k 在其页内
+   已完整,「合并」只是按行主序拼接喂给既有 np.unique 首见去重;第二遍的
+   行号与第一遍的 hnsw label 是两个空间,**必须按 id 映射回第一遍 label**
+   (自环排除与无向对键 a*n+b 都建立在同一空间上),vector_pages 容忍的
+   跨页漂移导致两遍不一致时按 id 交集裁决(漂移行丢弃,fail-safe 方向=
+   少几条同义边)。验收:top-k 集合断言 + 测试 num_threads=1;
    `total_build_ms` 基线劣化 ≤10% 硬门,超门回退分页粒度或整项回退。
 
 ## T-W4-4 QueryCanceled 统一出口(目标按评审 P1-C 降级)
@@ -113,10 +137,13 @@ teardown 骑在上面;锁的既有 docstring 承诺「毫秒级事务」。
    (机器可读 code=query_timeout + 结构化事件含路由/notebook 维度);
    前端显示既有通用「服务暂时不可用」——如实接受,不发明 4xx 语义
    (408/413 都不是这个错的真语义)。
-2. 维护站点超时放宽按**站点分类**(评审 P2-11):事务内站点用
-   `SET LOCAL statement_timeout`;非事务站点(CONCURRENTLY 类)沿用既有
-   session 级 `set_config` 先例。本项交付=普查现存裸奔维护站点清单 +
-   逐个按类补,清单进 PR 描述。
+2. 维护站点超时放宽按**站点分类**:事务内站点用既有
+   `set_config('statement_timeout', …, true)` 先例;非事务站点
+   (CONCURRENTLY 类)用 session 级 `set_config(…, false)` 先例。**本项的
+   实物交付就是普查清单本身**(复评 P2-6):列出仍按默认 30s 跑的维护
+   站点,逐个按类补,清单进 PR 描述;既有 savepoint 先例
+   (knowledge_store 的 QueryCanceled 识别站点)不在范围、不被全局
+   handler 取代。
 
 ## T-W4-5(SR-1 遗留)element 搜索腿 OR→跨表等价 UNION
 
@@ -139,10 +166,16 @@ teardown 骑在上面;锁的既有 docstring 承诺「毫秒级事务」。
   se.text 无 trgm——腿 A 仍是 join 后扫,真实收益只覆盖「仅 title 命中」
   与「title 腿早停解放整体计划」两类;「给 se.text 加 trgm」按写放大
   登记为显式不做(表 5.77M 行,收益场景窄)。
-- **SQLite 侧**(评审 P2-13):现状无 ORDER BY(与 PG 已有分歧)。裁决:
-  sqlite 采用同款两腿+ORDER BY ordinal LIMIT 形态——行为变化方向是
-  确定性化(修分歧,非引入分歧),登记为刻意对齐;oracle 逐字对比只在
-  PG 侧跑,sqlite 侧跑集合等价 + 有序断言。
+- 腿 B 要吃到 0048 的 partial 索引,除 `LOWER(s.title) LIKE %s` 外还必须
+  在本腿内联 `s.notebook_id=%s` 与可见性谓词字面量(partial 蕴含在通用
+  计划下成立靠内联字面量,0048 迁移头有整段论证;复评 P2-5)。
+- **SQLite 侧**(复评 P1-3 修正):`source_elements` 在 SQLite **没有
+  ordinal 列**——PG 的 ordinal 对应隐式 rowid(migrations.py 3394-3406 的
+  既有成文裁决,含「rowid 尾列索引消不掉 ORDER BY」的实测)。裁决:
+  sqlite 两腿 + `ORDER BY se.rowid` LIMIT;代价如实登记——今天 sqlite 侧
+  无序、撞 LIMIT 即停,改后每次搜索对命中集排一次序(确定性化不是零
+  成本)。oracle 逐字对比只在 PG 侧跑,sqlite 侧跑集合等价 + rowid 有序
+  断言。
 
 ## 跨项(评审 P2-14/15)
 
