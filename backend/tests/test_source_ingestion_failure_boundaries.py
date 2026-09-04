@@ -211,6 +211,46 @@ def test_delete_locks_source_before_projection_cleanup(repo, monkeypatch):
     assert events[:2] == ["lock", "clear"]
 
 
+def test_delete_source_does_not_pass_notebook_id_to_the_lock_probe(repo, monkeypatch):
+    """W4-2 (WR-7): delete_source's teardown transaction must call
+    ``source_exists_for_update_tx`` with ``notebook_id=None`` — passing the
+    notebook id back in would make PostgreSQL also take the notebooks-row
+    ``FOR NO KEY UPDATE`` capacity lock, putting the whole per-source teardown
+    back on top of it (the exact regression this task removes). This is a
+    call-shape pin (SQLite discards the argument either way, so it cannot
+    observe the behavioral difference itself — see the PostgreSQL lane's
+    ``test_delete_source_does_not_wait_on_notebook_capacity_lock`` for the
+    real cross-connection lock behavior).
+
+    The other two call sites of the same primitive
+    (``_clear_state_of_present_source_tx`` and ``ingest_memory_source``'s
+    reparse branch) are deliberately UNCHANGED and keep passing
+    ``notebook_id`` — this test only pins the ``delete_source`` call site.
+    """
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    out = repo.upload_sources(
+        nb.id,
+        [UploadedSourceFile(
+            file_name="a.md", content_type="text/markdown", content=b"# T\n\nbody",
+        )],
+        scheduler=lambda sid: None,
+    )
+    sid = out[0].id
+    store = repo._runtime.source_store
+    original_lock = store.source_exists_for_update_tx
+    calls: list[tuple] = []
+
+    def observe_lock(db, source_id, notebook_id=None):
+        calls.append((source_id, notebook_id))
+        return original_lock(db, source_id, notebook_id)
+
+    monkeypatch.setattr(store, "source_exists_for_update_tx", observe_lock)
+
+    repo.delete_source(sid)
+
+    assert calls == [(sid, None)]
+
+
 def test_metadata_augmentation_model_failure_falls_back_deterministically(repo):
     nb = repo.create_notebook(NotebookCreate(name="未命名笔记本"))
     sid = f"src-{uuid4().hex[:10]}"
