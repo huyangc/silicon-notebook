@@ -308,8 +308,16 @@ def create_app() -> FastAPI:
         # verification before a connection is reused (PostgresDatabase), so a
         # handler-level rollback would be redundant, not a safety net for a
         # "poisoned" connection.
+        # Boundary (T4 质量评 P2-1): once a StreamingResponse has sent its
+        # response-start frame, Starlette refuses handled exceptions
+        # ("response already started") and this handler is unreachable — that
+        # leg is accounted for by ``_QueryTimeoutStreamObserver`` below
+        # instead, so the ``query_timeout`` event is emitted on both legs.
         event: dict[str, object] = {
             "kind": "query_timeout",
+            # Same ``id`` as the paired ``kind=http`` row (set by
+            # ``log_requests`` before dispatch) so the two lines correlate.
+            "id": getattr(request.state, "request_id", ""),
             "method": request.method,
             "path": request.url.path,
         }
@@ -321,10 +329,14 @@ def create_app() -> FastAPI:
         if notebook_id:
             event["notebook_id"] = notebook_id
         request_log.emit(event)
+        # The detail wording does not assert the cause: psycopg raises
+        # QueryCanceled (SQLSTATE 57014) for statement_timeout AND for
+        # administrative cancels (pg_cancel_backend) alike.
         return JSONResponse(
             status_code=503,
             content={
-                "detail": "query cancelled: statement timeout exceeded",
+                "detail": "query cancelled by the database "
+                          "(statement timeout or administrative cancel)",
                 "code": "query_timeout",
             },
         )
@@ -332,6 +344,10 @@ def create_app() -> FastAPI:
     @app.middleware("http")
     async def log_requests(request: Request, call_next):
         request_id = new_id("req")
+        # Exposed on request.state so the QueryCanceled handler above can
+        # stamp the same id onto its ``query_timeout`` event (correlation
+        # with this middleware's ``kind=http`` row).
+        request.state.request_id = request_id
         start = time.perf_counter()
         client = request.client.host if request.client else ""
         with diagnostics.request_scope(
@@ -401,6 +417,55 @@ def create_app() -> FastAPI:
             },
             headers={"Retry-After": "2"},
         )
+
+    class _QueryTimeoutStreamObserver:
+        """T-W4-4 streaming leg, pure-ASGI on purpose: once a streaming
+        response has sent its start frame, Starlette refuses handled
+        exceptions ("response already started" → re-raised as RuntimeError
+        with the original QueryCanceled as ``__cause__``), and the
+        exception funnels through BaseHTTPMiddleware's app_exc re-raise at
+        body-consumption time — OUTSIDE both the QueryCanceled exception
+        handler and ``log_requests``'s except branch. Only a raw ASGI layer
+        outside the BaseHTTPMiddleware stack still sees it, so the
+        ``query_timeout`` accounting for this leg lives here. The
+        non-streaming leg never raises this far (the handler returns a 503
+        response), so the two emits are disjoint. No notebook dimension:
+        path params are not resolved at this layer — 拿不到不硬凑. The
+        request id set by ``log_requests`` is read back off the shared
+        scope state for correlation with that middleware's ``kind=http``
+        row (which, for this leg, recorded the already-sent status).
+        """
+
+        def __init__(self, inner) -> None:
+            self.inner = inner
+
+        async def __call__(self, scope, receive, send) -> None:
+            if scope["type"] != "http":
+                await self.inner(scope, receive, send)
+                return
+            try:
+                await self.inner(scope, receive, send)
+            except Exception as exc:
+                cancelled = (
+                    exc if isinstance(exc, QueryCanceled) else exc.__cause__
+                )
+                if isinstance(cancelled, QueryCanceled):
+                    request_log.emit(
+                        {
+                            "id": scope.get("state", {}).get(
+                                "request_id", ""
+                            ),
+                            "kind": "query_timeout",
+                            "method": scope.get("method", ""),
+                            "path": scope.get("path", ""),
+                            "streaming": True,
+                        }
+                    )
+                raise
+
+    # Registered AFTER the @app.middleware("http") decorators above so it
+    # wraps them (last added = outermost).
+    app.add_middleware(_QueryTimeoutStreamObserver)
 
     app.add_middleware(
         CORSMiddleware,

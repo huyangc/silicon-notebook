@@ -975,3 +975,43 @@ def test_source_target_pages_use_c_keysets_and_preserve_retry_semantics(
         {"source_id": "src-B", "is_partial": False},
         {"source_id": "src-a", "is_partial": True},
     ]
+
+
+def test_statement_timeout_floor_raises_but_never_lowers(postgres_repository):
+    """T-W4-4:维护整表 DELETE 的事务内放宽是「取底」——默认 30s 抬到 600s、
+    运维已调更高的值保持、0(禁用)保持;且事务结束即复原(不泄漏)。"""
+    from app.repositories.postgres.maintenance import (
+        _raise_statement_timeout_floor,
+    )
+
+    runtime = postgres_repository._runtime
+
+    def current_ms(db) -> int:
+        return int(
+            db.execute(
+                "SELECT setting::bigint AS c FROM pg_settings "
+                "WHERE name='statement_timeout'"
+            ).fetchone()["c"]
+        )
+
+    # Case 1: a value below the floor (the pool default) is raised to 600s.
+    with runtime.database.write() as db:
+        before = current_ms(db)
+        assert 0 < before < 600_000  # pool default (30s) — precondition
+        _raise_statement_timeout_floor(db)
+        assert current_ms(db) == 600_000
+    # Transaction-local: gone after the block (no leak to the next borrower).
+    with runtime.database.connect() as db:
+        assert current_ms(db) == before
+
+    # Case 2: an operator-raised value above the floor is kept, not lowered.
+    with runtime.database.write() as db:
+        db.execute("SELECT set_config('statement_timeout','1800000',true)")
+        _raise_statement_timeout_floor(db)
+        assert current_ms(db) == 1_800_000
+
+    # Case 3: 0 (= timeout disabled) stays disabled.
+    with runtime.database.write() as db:
+        db.execute("SELECT set_config('statement_timeout','0',true)")
+        _raise_statement_timeout_floor(db)
+        assert current_ms(db) == 0
