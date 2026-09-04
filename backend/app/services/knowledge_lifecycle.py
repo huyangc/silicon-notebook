@@ -5752,6 +5752,28 @@ class KnowledgeLifecycleService:
         except Exception as exc:  # noqa: BLE001
             self.event_log.emit({"kind": "mention_bridge_rebuild_failed",
                                  "notebook_id": notebook_id, "error": str(exc)[:200]})
+        # viz 刷新尾块抽出为 helper(codex #676 R2 P1:热函数天花板只降不升,
+        # 与 #671 同型正解是抽取而不是上调基线);语义逐字未动,见其 docstring。
+        self._refresh_viz_after_rebuild(notebook_id)
+        # rebuild 后检索索引必然 stale(clusters/objects 已变)—— 大库自动重建/入队。
+        # maybe_auto_index 自身 fail-open,这里再包一层只是双保险。
+        try:
+            self.scale_artifacts.maybe_auto_index(notebook_id)
+        except Exception:
+            self.event_log.logger.exception("maybe_auto_index failed after rebuild for %s", notebook_id)
+        # 社区层:聚类刚重算 → force=True 强制重建社区(clustering 未必 bump
+        # kg_mutation_seq,版本闸可能误跳)。纯图、无 LLM、fail-open——绝不拖垮 KG 重建。
+        try:
+            self.rebuild_communities(notebook_id, level=0, force=True)
+        except Exception as exc:  # noqa: BLE001
+            self.event_log.emit({"kind": "communities_rebuild_failed",
+                                 "notebook_id": notebook_id, "error": str(exc)[:200]})
+        return cluster_count
+
+
+    def _refresh_viz_after_rebuild(self, notebook_id: str) -> None:
+        """``rebuild_unified_kg`` 的 viz 刷新尾块,整段原样抽出(codex #676
+        R2 P1 热函数天花板整改;调用方紧随其后跑 maybe_auto_index)。"""
         # Proactively refresh the viz-only index so the next KG-view open doesn't
         # pay a lazy build. The flip statement above bumped cluster_mutation_seq
         # (批 3·W2:与指针同语句,不再逐类型 bump), and build_viz now stamps its artifact with that cseq while
@@ -5823,20 +5845,6 @@ class KnowledgeLifecycleService:
         except Exception:
             self.event_log.logger.warning(
                 "viz refresh after rebuild failed for %s", notebook_id, exc_info=True)
-        # rebuild 后检索索引必然 stale(clusters/objects 已变)—— 大库自动重建/入队。
-        # maybe_auto_index 自身 fail-open,这里再包一层只是双保险。
-        try:
-            self.scale_artifacts.maybe_auto_index(notebook_id)
-        except Exception:
-            self.event_log.logger.exception("maybe_auto_index failed after rebuild for %s", notebook_id)
-        # 社区层:聚类刚重算 → force=True 强制重建社区(clustering 未必 bump
-        # kg_mutation_seq,版本闸可能误跳)。纯图、无 LLM、fail-open——绝不拖垮 KG 重建。
-        try:
-            self.rebuild_communities(notebook_id, level=0, force=True)
-        except Exception as exc:  # noqa: BLE001
-            self.event_log.emit({"kind": "communities_rebuild_failed",
-                                 "notebook_id": notebook_id, "error": str(exc)[:200]})
-        return cluster_count
 
     # ------------------------------------------------------------------
     # Derived layers: canonical relations / mention bridge / communities
