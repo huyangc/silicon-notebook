@@ -107,6 +107,8 @@ INTERRUPTED_KG_BUILD_ERROR_MESSAGE = (
 )
 
 _SOURCE_BUILD_PAGE_SIZE = 500
+# 批 3·W2 §1.7:链 b 补漏轮上限——有界收敛,耗尽仍非空走结构化事件+partial。
+_KG_BACKFILL_MAX_ROUNDS = 3
 
 # batch-3-W1 T-5a (codex #663 R13 P2): the drain's two safety limits, NAMED so
 # the loop conditions and their diagnostic messages cannot silently drift.
@@ -488,6 +490,10 @@ class KnowledgeLifecycleService:
             rebuild_unified_kg=lambda notebook_id: self.rebuild_unified_kg(
                 notebook_id, force=False
             ),
+            # 批 3·W2 §2.1:buildkg- 在飞探测(kg_building 是 build 作业的
+            # 真准入闸,T-5a 起)。锁下读,write-then-check 的另一半在
+            # prepare_notebook_kg_job / standalone delete 侧。
+            kg_build_active=self._kg_build_active,
         )
         # Private aliases remain for compatibility with characterization and
         # operational probes that inspect the shared registry by identity.
@@ -593,6 +599,15 @@ class KnowledgeLifecycleService:
             if notebook_id in self.kg_building:
                 raise KgBuildAlreadyRunning(notebook_id)
             self.kg_building.add(notebook_id)
+        # 批 3·W2 §2.1:standalone delete 的认领同样查实例 A 的维护槽
+        # (进程内);跨进程兜底本就有——delete 终局把指针/在飞重置,在跑
+        # rebuild 的翻转双 CAS 零行更新响亮作废。write-then-check 序同
+        # prepare 侧。
+        maintenance_kind = self.kg_maintenance.active_kind(notebook_id)
+        if maintenance_kind is not None:
+            with self.kg_building_lock:
+                self.kg_building.discard(notebook_id)
+            raise KgMaintenanceAlreadyRunning(notebook_id, maintenance_kind)
         try:
             return self._delete_notebook_kg_fenced(notebook_id)
         finally:
@@ -2817,6 +2832,11 @@ class KnowledgeLifecycleService:
         match = re.search(r"windows_failed=(\d+)/(\d+)", error_message)
         return bool(match and int(match.group(1)) > 0)
 
+    def _kg_build_active(self, notebook_id: str) -> bool:
+        """buildkg-/rebuildkg- 是否在飞(§2.1 交叉检查探测,锁下读)。"""
+        with self.kg_building_lock:
+            return notebook_id in self.kg_building
+
     def _kg_target_batches(
         self,
         notebook_id: str,
@@ -2953,6 +2973,15 @@ class KnowledgeLifecycleService:
             if notebook_id in self.kg_building:
                 raise KgBuildAlreadyRunning(notebook_id)
             self.kg_building.add(notebook_id)
+        # 批 3·W2 §2.1(buildkg- × unifiedkg-/relinkkg-):登记后查对方——
+        # 两侧同为 write-then-check(维护槽 claim 先登记槽再查 kg_building),
+        # Dekker 序保证并发对开时至少一方看见另一方。维护在飞即撤销刚占的
+        # 闸并按其种类 409(文案点名「重新合并/补上关联」)。
+        maintenance_kind = self.kg_maintenance.active_kind(notebook_id)
+        if maintenance_kind is not None:
+            with self.kg_building_lock:
+                self.kg_building.discard(notebook_id)
+            raise KgMaintenanceAlreadyRunning(notebook_id, maintenance_kind)
         try:
             return self._prepare_notebook_kg_job_reserved(
                 notebook_id, mode,
@@ -3588,6 +3617,11 @@ class KnowledgeLifecycleService:
                 "model_skipped": [],
             }
             processed = 0
+            # 本轮已尝试过的源(链 b 补漏轮的身份过滤——补漏接的是「游标
+            # 错过的源」,不是「本轮试过但失败/被跳过的源」:后者重试只会
+            # 每轮重付 (重试+1)×超时,与 §1.7 排除 analyzed_empty 的理由
+            # 同族。谓词仍共用 _kg_target_batches,这里只按 id 去重)。
+            attempted_source_ids: set = set()
             target_mode = (
                 "rebuild"
                 if mode == "rebuild" and preserve_existing_rebuild
@@ -3613,6 +3647,8 @@ class KnowledgeLifecycleService:
                     raise KgBuildAborted(deleting_failure)
                 if mode == "rebuild" and preserve_existing_rebuild:
                     targets = [(source_id, True) for source_id, _preserve in targets]
+                attempted_source_ids.update(
+                    source_id for source_id, _preserve in targets)
                 self._warn_skipped_sources(skipped_no_elements)
                 if indexing_pipeline_identity is not None:
                     empty_kg = {
@@ -3663,6 +3699,78 @@ class KnowledgeLifecycleService:
                 for key in result:
                     result[key].extend(page_result[key])
                 processed += len(targets)
+            # ---- 链 b 补漏轮(批 3·W2 §1.7) --------------------------------
+            # 主循环的 keyset 按 created_at 前进:一个 created_at 早于游标、
+            # 元素在循环中途才落齐的来源会被整轮错过(新上传天然会被活键集
+            # 扫到,不构成这个洞)。收尾追加至多 _KG_BACKFILL_MAX_ROUNDS 轮
+            # 有界补漏,**直接调 _kg_target_batches(nb, "incremental")、不
+            # 复述谓词**(复评 P1-5:谓词已两次被复述写错——真实 incremental
+            # 分支还排除 is_partial/analyzed_empty,漏掉后者会让零对象来源
+            # 每轮重付模型钱;共用谓词由结构守卫钉住)。刻意只在普通全量
+            # 增量跑上开:target_limit 是用户显式限定的范围(补漏会越权),
+            # retry_partial 的谓词族不同,staged pipeline 的计划快照不容
+            # 中途扩容。耗尽仍非空 → 结构化事件 + job 记 partial(如实,
+            # 下一次「分析新增」收敛)。
+            backfill_exhausted = False
+            if (indexing_pipeline_identity is None and target_limit is None
+                    and not retry_partial):
+                for _backfill_round in range(_KG_BACKFILL_MAX_ROUNDS):
+                    round_found = False
+                    for targets, skipped, skipped_no_elements in (
+                            self._kg_target_batches(notebook_id, "incremental")):
+                        if self._notebook_deleting(notebook_id):
+                            deleting_failure = KgBuildFailure(
+                                "notebook_deleting",
+                                "该笔记本正在被删除，本次知识图谱构建已停止。",
+                            )
+                            control.abort(deleting_failure)
+                            raise KgBuildAborted(deleting_failure)
+                        targets = [
+                            (source_id, preserve)
+                            for source_id, preserve in targets
+                            if source_id not in attempted_source_ids
+                        ]
+                        if not targets:
+                            continue
+                        round_found = True
+                        attempted_source_ids.update(
+                            source_id for source_id, _preserve in targets)
+                        total_targets += len(targets)
+                        self._warn_skipped_sources(skipped_no_elements)
+                        page_result = self._extract_targets(
+                            notebook_id,
+                            targets,
+                            skipped,
+                            skipped_no_elements,
+                            job_id,
+                            control,
+                            controlled_clients,
+                            None,
+                            _mark_stopping,
+                            skip_policy=skip_policy,
+                            indexing_pipeline_identity=None,
+                        )
+                        for key in result:
+                            result[key].extend(page_result[key])
+                        processed += len(targets)
+                    if not round_found:
+                        break
+                else:
+                    # 3 轮每轮都有活:再探一次,仍有**未尝试过的**目标就如实
+                    # 上报——不虚构「总会收敛」。口径必须是未尝试:本轮试过
+                    # 但失败/被跳过的源已在 result 里如实记账,不算补漏欠账。
+                    if any(
+                        source_id not in attempted_source_ids
+                        for targets, _skipped, _missing in
+                        self._kg_target_batches(notebook_id, "incremental")
+                        for source_id, _preserve in targets
+                    ):
+                        backfill_exhausted = True
+                        self.event_log.emit({
+                            "kind": "kg_backfill_exhausted",
+                            "notebook_id": notebook_id, "job_id": job_id,
+                            "rounds": _KG_BACKFILL_MAX_ROUNDS,
+                        })
             if indexing_pipeline_identity is not None and result["failed"]:
                 raise IndexingPipelineKgExtractionFailedError()
             if indexing_pipeline_identity is None:
@@ -3674,7 +3782,16 @@ class KnowledgeLifecycleService:
                 if finalized:
                     result.update(finalized)
             if indexing_pipeline_identity is None:
-                self.kg_build_jobs.finish(job_id, "succeeded")
+                if backfill_exhausted:
+                    self.kg_build_jobs.finish(
+                        job_id, "succeeded",
+                        error_code="kg_backfill_partial",
+                        error_message=(
+                            "补漏轮耗尽后仍有待分析来源;下一次「分析新增」会继续"
+                        ),
+                    )
+                else:
+                    self.kg_build_jobs.finish(job_id, "succeeded")
             else:
                 pipeline_id, pipeline_version, pipeline_generation = (
                     indexing_pipeline_identity

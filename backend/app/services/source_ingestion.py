@@ -2532,10 +2532,20 @@ class SourceIngestionService:
                 self.knowledge_lifecycle.incremental_fuse_source(
                     source.notebook_id, source.id
                 )
-            except Exception:
+            except Exception as exc:
+                # 批 3·W2 §2(PR-3):吞掉的融合失败=该源对象没入簇,只进
+                # 日志的话事件流里完全隐形——补结构化事件,运维与「分析
+                # 新增」的收敛判断都以它为据。仍然 fail-open:融合是抽取
+                # 后的派生步,不该掀翻已提交的抽取。
                 self.event_log.logger.exception(
                     "incremental_fuse_source failed for %s", source_id
                 )
+                self.event_log.emit({
+                    "kind": "incremental_fuse_failed",
+                    "notebook_id": source.notebook_id,
+                    "source_id": source.id,
+                    "error": f"{type(exc).__name__}: {exc}"[:200],
+                })
             completion_stats = {"mode": "off", "inserted": 0}
             try:
                 with model_artifact_scope(
