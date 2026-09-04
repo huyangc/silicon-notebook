@@ -187,6 +187,27 @@ def test_build_in_flight_gates_maintenance_claim(repo):
             service.kg_building.discard(notebook.id)
 
 
+def test_build_own_tail_relink_is_exempt_from_the_cross_check(repo):
+    """§2.1 的边界:build 作业自己的收尾 relink 在 build 仍持 kg_building
+    时顺序调进来——标记是自己的,不该被交叉检查闸死(回归自
+    test_kg_relink_repository 的 skips_relink_when_disabled)。外部入口
+    (不带豁免)仍被拒。"""
+    notebook = repo.create_notebook(NotebookCreate(name="cross-tail"))
+    service = repo._runtime.knowledge_lifecycle
+    with service.kg_building_lock:
+        service.kg_building.add(notebook.id)
+    try:
+        job = service.kg_maintenance.start_notebook_relink(
+            notebook.id, exempt_build_marker=True)
+        assert job["kind"] == "relink"
+        service.kg_maintenance.settle(notebook.id, job["job_id"], "succeeded")
+        with pytest.raises(KgMaintenanceAlreadyRunning):
+            service.kg_maintenance.start_notebook_relink(notebook.id)
+    finally:
+        with service.kg_building_lock:
+            service.kg_building.discard(notebook.id)
+
+
 def test_maintenance_in_flight_gates_build_and_standalone_delete(repo):
     """§2.1 交叉的另一向:维护槽在飞时 prepare_notebook_kg_job 与
     standalone delete_notebook_kg 都按维护种类 409,且 kg_building 预占
