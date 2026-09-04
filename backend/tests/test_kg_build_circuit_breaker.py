@@ -1235,3 +1235,181 @@ def test_skip_mode_still_fails_fast_when_the_startup_probe_fails(repo):
     # 一个来源都没被动过:探测在抽取开始之前就把任务停住了。
     assert set(_source_statuses(repo, source_ids).values()) == {"parsed"}
     assert _kg_source_ids(repo, notebook.id) == set()
+
+
+# ---------------------------------------------------------------------------
+# 批 3·W4 T-W4-1(WR-3):「全部重新分析」同步半程瘦身。
+# 准入半程不再枚举整库(create_job 落 total_sources=0 + stage='probing'),
+# worker 起跑后用同一套谓词自算并回填,且必须落在 set_stage("extracting")
+# 之前——否则大库用户会盯着「正在分析 0/0 项内容」几十秒。
+# ---------------------------------------------------------------------------
+
+
+def _record_target_enumerations(lifecycle, monkeypatch, sink):
+    """把 ``_kg_target_batches`` 的每次调用(含 ``_kg_target_count`` 那次)记进
+    ``sink``,并保持真实行为。"""
+    real_batches = lifecycle._kg_target_batches
+
+    def spy(notebook_id, mode, **kwargs):
+        sink.append(("batches", mode))
+        return real_batches(notebook_id, mode, **kwargs)
+
+    monkeypatch.setattr(lifecycle, "_kg_target_batches", spy)
+
+
+def _record_job_writes(jobs, monkeypatch, sink):
+    """记录 ``extend_total_sources`` / ``set_stage`` 的调用**顺序**。"""
+    real_extend = jobs.extend_total_sources
+    real_stage = jobs.set_stage
+
+    def extend(job_id, extra):
+        sink.append(("extend", extra))
+        return real_extend(job_id, extra)
+
+    def set_stage(job_id, stage, **kwargs):
+        sink.append(("stage", stage))
+        return real_stage(job_id, stage, **kwargs)
+
+    monkeypatch.setattr(jobs, "extend_total_sources", extend)
+    monkeypatch.setattr(jobs, "set_stage", set_stage)
+
+
+def test_prepare_does_not_enumerate_targets_and_starts_at_zero_total(
+    repo, monkeypatch
+):
+    """准入半程(202 请求路径)一次目标枚举都不做:create_job 收到 0,
+    kg_build_started 的 total_sources 也是 0,分母由 worker 起跑后回填。
+    整库枚举每行带 5 个相关子查询,压在同步半程上就是大库「全部重新分析」
+    按下去之后几十秒没有响应。"""
+    notebook, source_ids = _seed_three_parsed_sources(repo)
+    bind_chat_client(repo, "kg_extract", _ControlledKgClient())
+    lifecycle = repo._runtime.knowledge_lifecycle
+    enumerations = []
+    _record_target_enumerations(lifecycle, monkeypatch, enumerations)
+    events = []
+    monkeypatch.setattr(repo.event_log, "emit", events.append)
+
+    job = repo.prepare_notebook_kg_job(
+        notebook.id, "incremental", retry_partial=True
+    )
+
+    assert enumerations == []
+    assert job["total_sources"] == 0
+    assert job["stage"] == "probing"
+    started = [
+        event for event in events if event.get("kind") == "kg_build_started"
+    ]
+    assert [event["total_sources"] for event in started] == [0]
+
+    repo.execute_notebook_kg_job(
+        notebook.id, job["id"], "incremental", retry_partial=True
+    )
+
+    # worker 侧才枚举:一次计数 + 主循环,加上链 b 补漏轮。
+    assert [mode for _label, mode in enumerations] == ["incremental"] * 3
+    saved = repo._runtime.kg_build_jobs.get(job["id"])
+    assert saved["total_sources"] == len(source_ids)
+    assert saved["completed_sources"] == len(source_ids)
+
+
+def test_worker_counts_after_delete_and_backfills_before_extracting_stage(
+    repo, monkeypatch
+):
+    """回填的位置有三条硬约束,这条用例把它们钉成调用序:
+    delete_notebook_kg → 目标计数 → extend_total_sources → set_stage
+    ("extracting")。计数放在 delete 之前会与主循环看到两个不同的世界;
+    放在 set_stage 之后,前端就从「正在连接模型服务…」直接跳到
+    「正在分析 0/0 项内容」。"""
+    notebook, source_ids = _seed_three_parsed_sources(repo)
+    bind_chat_client(repo, "kg_extract", _ControlledKgClient())
+    lifecycle = repo._runtime.knowledge_lifecycle
+    jobs = repo._runtime.kg_build_jobs
+    calls = []
+    real_delete = lifecycle.delete_notebook_kg
+
+    def tracked_delete(notebook_id, **kwargs):
+        calls.append(("delete", notebook_id))
+        return real_delete(notebook_id, **kwargs)
+
+    monkeypatch.setattr(lifecycle, "delete_notebook_kg", tracked_delete)
+    _record_target_enumerations(lifecycle, monkeypatch, calls)
+    _record_job_writes(jobs, monkeypatch, calls)
+
+    job = repo.prepare_notebook_kg_job(notebook.id, "rebuild")
+    repo.execute_notebook_kg_job(notebook.id, job["id"], "rebuild")
+
+    prefix = [entry for entry in calls if entry[0] != "batches"][:2]
+    assert calls[0] == ("delete", notebook.id)
+    # 非 preserve 的 rebuild 删完再数,谓词降级成 incremental(与主循环同款)。
+    assert calls[1] == ("batches", "incremental")
+    assert prefix == [
+        ("delete", notebook.id),
+        ("extend", len(source_ids)),
+    ]
+    extend_at = calls.index(("extend", len(source_ids)))
+    extracting_at = calls.index(("stage", "extracting"))
+    assert extend_at < extracting_at
+    assert calls.index(("batches", "incremental")) < extend_at
+
+
+@pytest.mark.parametrize(
+    "shape", ["incremental", "rebuild_preserve", "rebuild_replace"]
+)
+def test_worker_total_matches_the_main_loop_for_every_target_shape(repo, shape):
+    """三形态的分母都必须等于主循环真正跑掉的那批来源。
+    incremental 只数未分析的;rebuild+preserve 用 rebuild 谓词数全部有元素的;
+    rebuild 非 preserve 删完之后按 incremental 数,同样是全部。"""
+    notebook, source_ids = _seed_three_parsed_sources(repo)
+    bind_chat_client(repo, "kg_extract", _ControlledKgClient())
+    # 先分析掉一个来源,让 incremental 与 rebuild 的目标集真的不同。
+    seed = repo.prepare_notebook_kg_job(notebook.id, "incremental")
+    seeded = repo.build_notebook_kg(
+        notebook.id, job_id=seed["id"], target_limit=1
+    )
+    assert len(seeded["built"]) == 1
+
+    if shape == "incremental":
+        job = repo.prepare_notebook_kg_job(notebook.id, "incremental")
+        result = repo.execute_notebook_kg_job(
+            notebook.id, job["id"], "incremental"
+        )
+        expected = len(source_ids) - 1
+    else:
+        # preserve_existing_rebuild 不在 facade 签名上(索引管线专用),
+        # 走 lifecycle service 本身。
+        job = repo.prepare_notebook_kg_job(notebook.id, "rebuild")
+        result = repo._runtime.knowledge_lifecycle.execute_notebook_kg_job(
+            notebook.id,
+            job["id"],
+            "rebuild",
+            preserve_existing_rebuild=(shape == "rebuild_preserve"),
+        )
+        expected = len(source_ids)
+
+    saved = repo._runtime.kg_build_jobs.get(job["id"])
+    assert len(result["built"]) == expected
+    assert saved["total_sources"] == expected
+    assert saved["completed_sources"] == expected
+
+
+def test_startup_probe_still_runs_on_a_nonempty_incremental_build(repo):
+    """反向护栏(设计稿约束 4):``total_targets`` 若还读 ``job["total_sources"]``
+    的快照,落 0 之后 ``mode != "rebuild" and total_targets`` 恒假,增量构建的
+    起始探测会被**静默**跳过。分母改读 worker 自算值后,有目标就照常探测,
+    没目标就照常不探测。"""
+    notebook, source_ids = _seed_three_parsed_sources(repo)
+    client = _ControlledKgClient()
+    bind_chat_client(repo, "kg_extract", client)
+
+    job = repo.prepare_notebook_kg_job(notebook.id, "incremental")
+    repo.execute_notebook_kg_job(notebook.id, job["id"], "incremental")
+    assert client.probes == 1
+    assert client.source_calls >= len(source_ids)
+
+    idle_client = _ControlledKgClient()
+    bind_chat_client(repo, "kg_extract", idle_client)
+    idle = repo.prepare_notebook_kg_job(notebook.id, "incremental")
+    repo.execute_notebook_kg_job(notebook.id, idle["id"], "incremental")
+
+    assert idle_client.probes == 0
+    assert repo._runtime.kg_build_jobs.get(idle["id"])["total_sources"] == 0

@@ -1004,6 +1004,16 @@ class KgBuildJobStorePort(Protocol):
         error_code: str = "",
         error_message: str = "",
     ) -> bool: ...
+    def extend_total_sources(self, job_id: str, extra: int) -> bool:
+        """把 ``extra`` 个新目标并进持久 ``total_sources``,只在
+        ``status='running'`` 时生效(终态行返回 False、什么也不改)。
+
+        两个消费者都在 ``_run_notebook_kg_job``:起跑时把 worker 自算的目标数
+        从 0 抬到真值(批 3·W4 T-W4-1——``create_job`` 一律落 0,计数不再压在
+        202 请求路径上;从 0 起 extend ≡ set),以及链 b 补漏轮把中途新发现的
+        源并进分母(codex #673 R3)。两处都是「只增不减」,因为 completed/
+        failed 随抽取单调前进,分母倒退会暴露 2/1 这种不可能进度。"""
+        ...
     def record_source_result(
         self, job_id: str, *, succeeded: bool
     ) -> bool: ...

@@ -2994,10 +2994,11 @@ class KnowledgeLifecycleService:
                     self.kg_building.discard(notebook_id)
                 raise KgMaintenanceAlreadyRunning(notebook_id, maintenance_kind)
         try:
-            return self._prepare_notebook_kg_job_reserved(
-                notebook_id, mode,
-                target_limit=target_limit, retry_partial=retry_partial,
-            )
+            # target_limit/retry_partial 刻意不再下传(批 3·W4 T-W4-1):准入
+            # 半程已不枚举目标,这两个参数只影响 worker 自己的计数与主循环,
+            # 由 ``execute_notebook_kg_job``/``build_notebook_kg`` 一路带到
+            # ``_run_notebook_kg_job``。公开签名保持不变(端口与既有调用方)。
+            return self._prepare_notebook_kg_job_reserved(notebook_id, mode)
         except BaseException:
             with self.kg_building_lock:
                 self.kg_building.discard(notebook_id)
@@ -3007,19 +3008,23 @@ class KnowledgeLifecycleService:
         self,
         notebook_id: str,
         mode: str,
-        *,
-        target_limit: int | None,
-        retry_partial: bool,
     ) -> dict:
         """``prepare_notebook_kg_job``'s body, run with the ``kg_building``
         reservation already held (its docstring/comment carries the
-        contract)."""
-        target_count = self._kg_target_count(
-            notebook_id,
-            mode,
-            target_limit=target_limit,
-            retry_partial=retry_partial,
-        )
+        contract).
+
+        批 3·W4 T-W4-1(WR-3):同步半程**不再**枚举整库。这里曾先跑一遍
+        ``_kg_target_count``(整库 keyset 枚举,每行 5 个相关子查询)再把结果
+        交给 ``create_job``——大库上「全部重新分析」按下去后那几十秒没响应的
+        202 就是它。现在 ``create_job`` 一律落 ``total_sources=0``(它同时落
+        ``stage='probing'``,前端对 probing 只显示「正在连接模型服务…」、不带
+        数字),worker 起跑后用**同一套谓词与参数**自算并回填(见
+        ``_run_notebook_kg_job``)。``target_limit``/``retry_partial`` 因此只
+        剩 worker 侧一个消费者,不再进入本方法。
+
+        收益口径如实:DB 总负载**不变**——枚举仍然是两遍,只是把其中一遍从
+        202 请求路径搬进了 worker 线程。
+        """
         # create_job 先 INSERT 再 get(job_id) 返回。信号落在「已提交、尚未返回」之间时
         # job 根本没被赋值,连下面那层守卫都进不去,行就永久留在 running。这里按
         # notebook 找回它——但只在**新出现**且仍 running 的行上动手:调用前后比对最新行
@@ -3032,7 +3037,7 @@ class KnowledgeLifecycleService:
                 notebook_id,
                 self._current_user_id(),
                 mode,
-                target_count,
+                0,
             )
         except (KeyboardInterrupt, SystemExit):
             stranded = self.kg_build_jobs.latest(notebook_id)
@@ -3610,7 +3615,35 @@ class KnowledgeLifecycleService:
                         )
                         control.abort(deleting_failure)
                         raise KgBuildAborted(deleting_failure)
-            total_targets = int(job["total_sources"])
+            # 批 3·W4 T-W4-1(WR-3):目标计数从准入半程搬到这里。
+            # 位置有三条硬约束,顺序不可换:
+            #  1) 在 rebuild 的 delete_notebook_kg **之后**——非 preserve 的
+            #     rebuild 删完全库 KG 后,"还有多少要抽"只有按 incremental
+            #     谓词数才与主循环看到同一个世界(target_mode 就是这个降级);
+            #  2) 用与主循环**同一个** target_mode + target_limit +
+            #     retry_partial,否则分母与实际跑的批不是一件事;
+            #  3) 在 set_stage(job_id, "extracting") **之前**——create_job 落
+            #     的是 stage='probing',前端对 probing 显示「正在连接模型
+            #     服务…」(不带数字);先翻 extracting 再数,大库用户会盯着
+            #     「正在分析 0/0 项内容」几十秒。
+            target_mode = (
+                "rebuild"
+                if mode == "rebuild" and preserve_existing_rebuild
+                else "incremental"
+            )
+            total_targets = self._kg_target_count(
+                notebook_id,
+                target_mode,
+                target_limit=target_limit,
+                retry_partial=retry_partial,
+            )
+            if total_targets:
+                # 持久 total 回填。从 0 起 extend ≡ set,且原语只在
+                # status='running' 时生效——job 若已被结算(启动恢复/中断兜底)
+                # 就是 0 行、什么也不做,不会复活一个终态行的分母。
+                # 按批 extend(边枚举边抬)是**显式不做**:total 递增只会让
+                # 前端进度分母跳动,换来的是同一笔钱换个付法。
+                self.kg_build_jobs.extend_total_sources(job_id, total_targets)
             if mode != "rebuild" and total_targets:
                 # 起始探测**刻意不受跳过模式影响**(codex 第 1 轮 P2,驳回)。它是"服务
                 # 现在活着吗"这一个问题的答案:探测失败即此刻服务不可用,而此时用户
@@ -3637,11 +3670,6 @@ class KnowledgeLifecycleService:
             # 每轮重付 (重试+1)×超时,与 §1.7 排除 analyzed_empty 的理由
             # 同族。谓词仍共用 _kg_target_batches,这里只按 id 去重)。
             attempted_source_ids: set = set()
-            target_mode = (
-                "rebuild"
-                if mode == "rebuild" and preserve_existing_rebuild
-                else "incremental"
-            )
             for targets, skipped, skipped_no_elements in self._kg_target_batches(
                 notebook_id,
                 target_mode,
@@ -3759,8 +3787,9 @@ class KnowledgeLifecycleService:
                             source_id for source_id, _preserve in targets)
                         total_targets += len(targets)
                         # 持久 total 同步抬升(codex #673 R3 P2):completed/
-                        # failed 计数随抽取前进,total 停在 prepare 快照会
-                        # 暴露 2/1 这种不可能进度给 index_status/前端/事件。
+                        # failed 计数随抽取前进,total 停在**起跑计数**
+                        # (批 3·W4 T-W4-1 之前是 prepare 快照)会暴露 2/1
+                        # 这种不可能进度给 index_status/前端/事件。
                         self.kg_build_jobs.extend_total_sources(
                             job_id, len(targets))
 
@@ -3774,10 +3803,12 @@ class KnowledgeLifecycleService:
                         ) -> None:
                             # 补漏轮同样如实报进度(质量评 P3:batch_ingest
                             # 的 [kg i/N] 不该在补漏期间看起来卡死)。
-                            # total_targets 已随批抬高;job 的 total_sources
-                            # 仍是 prepare 快照,completed 可略超它——既有
-                            # 现象(prepare 与主循环之间落地的源同样如此),
-                            # 前端按「未完成余量」渲染不受影响。
+                            # total_targets 与持久 total_sources 都已随批
+                            # 抬高(上面那次 extend);两者仍可能被 completed
+                            # 略超——起跑计数与主循环枚举之间落地的源不在
+                            # 分母里(批 3·W4 T-W4-1 把这个窗口从「准入到
+                            # 主循环」收窄到「起跑计数到主循环」,没有消灭
+                            # 它),前端按「未完成余量」渲染不受影响。
                             if progress is not None:
                                 progress(_offset + index, total_targets,
                                          source_id, succeeded)

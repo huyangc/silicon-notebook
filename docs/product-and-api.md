@@ -1083,6 +1083,19 @@ status APIs expose `probing → extracting → stopping → finished`, source co
 and a safe user-facing failure message; the frontend shows the same state after
 refresh and offers **继续分析未完成内容** after a failure.
 
+The build **total is accurate at start, not at acceptance**. Accepting a build no
+longer enumerates the whole library on the request path, so the row is created
+with `total_sources = 0` and the `kg_build_started` event always carries `0`. The
+worker counts its own targets with exactly the predicate and limits it will then
+iterate — for a rebuild that clears existing data, *after* the delete phase, so
+the count and the extraction loop see one world — and backfills the durable total
+before it switches the stage to `extracting`. A `total` of `0` on
+`get_build_status` is therefore only ever visible while the stage is still
+`probing`, which the browser renders as 「正在连接模型服务…」 without any numbers.
+The total may still rise once more mid-run: the late-arrival backfill rounds add
+sources that landed after the count, and the same monotonic rule applies (a
+denominator never moves backwards).
+
 An interrupted task settles into that same failed state: a Ctrl-C or termination
 signal on an offline batch run stops in-flight windows cooperatively, drains them
 before the task settles (the guard is released with that row), and records
