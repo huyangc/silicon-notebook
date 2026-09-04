@@ -66,9 +66,24 @@ def test_unified_graph_large_nb_reports_unavailable_and_builds_nothing(repo, mon
     monkeypatch.setattr(repo.settings, "viz_sync_build_max_objects", 0)
     manifest_path = os.path.join(repo._viz_index_dir(nb.id), "manifest.json")
     assert not os.path.exists(manifest_path)
+    refusals: list = []
+    real_emit = repo._runtime.scale_artifacts._emit_viz_lazy_build_refused
+
+    def _spy_emit(notebook_id, count, trigger):
+        refusals.append(trigger)
+        return real_emit(notebook_id, count, trigger)
+
+    monkeypatch.setattr(
+        repo._runtime.scale_artifacts,
+        "_emit_viz_lazy_build_refused",
+        _spy_emit,
+    )
     result = repo.unified_graph(nb.id, level="object", limit=10)
     assert result["viz_building"] is False
     assert result["viz_unavailable"] is True
+    # 一次请求恰好一条拒绝遥测(codex #676 R11 P2):发布竞态重探走的是
+    # emit_refusal=False 的免发射变体,不许把同一次打开记成两次拒绝。
+    assert refusals == ["absent"]
     assert result["nodes"] == []
     assert result["edges"] == []
     assert result["total_nodes"] == 0
@@ -90,7 +105,7 @@ def test_unified_graph_reports_viz_building_truthfully_when_one_is_running(repo,
     _clear_viz(repo, nb.id)
     monkeypatch.setattr(repo.settings, "viz_sync_build_max_objects", 0)
     lifecycle = repo._runtime.knowledge_lifecycle
-    monkeypatch.setattr(lifecycle.scale_artifacts, "viz_index", lambda _nb: None)
+    monkeypatch.setattr(lifecycle.scale_artifacts, "viz_index", lambda _nb, **_kw: None)
     lifecycle.scale_artifacts.viz_building.add(nb.id)
     try:
         result = repo.unified_graph(nb.id, level="object", limit=10)
@@ -109,7 +124,7 @@ def test_unified_graph_counts_an_inflight_scale_build_as_building(repo, monkeypa
     _clear_viz(repo, nb.id)
     monkeypatch.setattr(repo.settings, "viz_sync_build_max_objects", 0)
     lifecycle = repo._runtime.knowledge_lifecycle
-    monkeypatch.setattr(lifecycle.scale_artifacts, "viz_index", lambda _nb: None)
+    monkeypatch.setattr(lifecycle.scale_artifacts, "viz_index", lambda _nb, **_kw: None)
     assert nb.id not in lifecycle.scale_artifacts.viz_building
     with lifecycle.scale_artifacts.building_lock:
         lifecycle.scale_artifacts.building.add(nb.id)
@@ -130,7 +145,7 @@ def test_unified_graph_sees_a_cross_process_scale_build_as_building(repo, monkey
     _clear_viz(repo, nb.id)
     monkeypatch.setattr(repo.settings, "viz_sync_build_max_objects", 0)
     lifecycle = repo._runtime.knowledge_lifecycle
-    monkeypatch.setattr(lifecycle.scale_artifacts, "viz_index", lambda _nb: None)
+    monkeypatch.setattr(lifecycle.scale_artifacts, "viz_index", lambda _nb, **_kw: None)
     monkeypatch.setattr(
         lifecycle.scale_artifacts,
         "scale_build_claim_held_anywhere",
@@ -158,7 +173,7 @@ def test_unified_graph_re_probes_the_artifact_when_no_builder_is_observed(repo, 
 
     probes = []
 
-    def _flappy_viz_index(_nb):
+    def _flappy_viz_index(_nb, **_kw):
         probes.append(1)
         # 第一探 None(构建尚未发布),第二探已发布——模拟发布落在两读之间。
         return None if len(probes) == 1 else _PublishedIdx()
@@ -181,7 +196,7 @@ def test_kg_neighbors_large_nb_without_viz_never_materializes_cluster_map(repo, 
     nb = _star(repo)
     monkeypatch.setattr(repo.settings, "viz_sync_build_max_objects", 0)
     lifecycle = repo._runtime.knowledge_lifecycle
-    monkeypatch.setattr(lifecycle.scale_artifacts, "viz_index", lambda _nb: None)
+    monkeypatch.setattr(lifecycle.scale_artifacts, "viz_index", lambda _nb, **_kw: None)
     monkeypatch.setattr(
         lifecycle,
         "cluster_map",
@@ -709,7 +724,7 @@ def test_large_nb_guard_uses_cached_active_object_count(repo, monkeypatch):
     lifecycle = repo._runtime.knowledge_lifecycle
     # kg_neighbors 的大库闸只在「没有 viz 索引」的 DB-fallback 分支里出现;
     # _star() 对这个小图会顺带同步建好 viz,所以显式挡掉它,强制走 fallback。
-    monkeypatch.setattr(lifecycle.scale_artifacts, "viz_index", lambda _nb: None)
+    monkeypatch.setattr(lifecycle.scale_artifacts, "viz_index", lambda _nb, **_kw: None)
 
     from app.repositories.sqlite import knowledge_counts_cache as kcc
     from app.repositories.sqlite.database import _DiagnosticCursor

@@ -4265,8 +4265,12 @@ class KnowledgeLifecycleService:
                 # safe order (publish happens before the marker clears, so a
                 # successful build cannot slip between this probe and the
                 # terminal answer). The re-probe only runs on the rare
-                # no-artifact-no-builder leg and is a cache/stat-level read.
-                idx = self.scale_artifacts.viz_index(notebook_id)
+                # no-artifact-no-builder leg and is a cache/stat-level read
+                # — and side-effect-free (emit_refusal=False), so the one
+                # refusal event the first probe wrote stays the only one
+                # (codex #676 R11 P2).
+                idx = self.scale_artifacts.viz_index(
+                    notebook_id, emit_refusal=False)
                 if idx is not None and getattr(idx, "viz_ids", None) is not None:
                     return self._unified_graph_bounded(
                         notebook_id, idx, effective_limit)
