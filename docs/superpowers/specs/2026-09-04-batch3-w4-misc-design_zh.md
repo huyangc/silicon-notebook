@@ -51,10 +51,18 @@ teardown 骑在上面;锁的既有 docstring 承诺「毫秒级事务」。
 
 - **容量方向安全**:READ COMMITTED 下并发容量创建者的 COUNT 只可能**多**数
   到待删行 → 保守拒绝;不存在少数的路径。
-- **死锁**:删除者的持锁集合是改前的真子集,去锁不可能新增等待环。
-  (事实修正:DELETE 引用行对父行不取锁——取 KEY SHARE 的是 INSERT;
-  本事务尾部的 `mark_unified_kg_dirty_in_tx` 写的是 unified_kg_state 行,
-  与 notebooks 行无关。)
+- **死锁**(T2 质量评 P2 修正为**有条件**表述):尾部
+  `mark_unified_kg_dirty_in_tx` 不取 notebooks FK 父行锁,依赖的不变量是
+  「每个 notebook 出生即种 `unified_kg_state` 行 → upsert 恒走 DO UPDATE
+  分支(FK 不复检)」;该前提一旦失效,本事务变成「持 sources FOR UPDATE
+  再等 notebooks KEY SHARE」,与删库 finalize(先 notebooks FOR UPDATE 再
+  sources FOR UPDATE)方向相反,是真死锁形。生产路径上前提成立
+  (create_notebook 出生种行、0047 后 delete_notebook_kg 不再删该行)。
+- **同库 delete×delete 并发**(备查,评审证伪未果):容量锁曾把同库两个
+  delete_source 完全串行化,改后在共享 knowledge_objects/embeddings/
+  clusters 行上并行相撞;1200 共享对象双线程实测无死锁。残余风险点是
+  `_delete_object_id_batch` 的 `= ANY(%s)` 双事务计划不一致时加锁顺序
+  反转(同文件历史上咬过一次)——不加锁回去,后续动这块时明写这一对。
 - **notebook→source 写序不变量**(`replace_elements` 明写的 phantom-source/
   element-swap 竞态闭合依据):删除退出该序后两条竞态仍闭合——双方互斥的
   载重件是 `sources` 行 FOR UPDATE(删除者与 element 替换者都取),notebook
