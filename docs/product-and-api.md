@@ -1089,9 +1089,13 @@ with `total_sources = 0` and the `kg_build_started` event always carries `0`. Th
 worker counts its own targets with exactly the predicate and limits it will then
 iterate — for a rebuild that clears existing data, *after* the delete phase, so
 the count and the extraction loop see one world — and backfills the durable total
-before it switches the stage to `extracting`. A `total` of `0` on
-`get_build_status` is therefore only ever visible while the stage is still
-`probing`, which the browser renders as 「正在连接模型服务…」 without any numbers.
+before it switches the stage to `extracting`. While the run is
+**running**, a `total` of `0` on `get_build_status` is only visible during the
+`probing` stage, which the browser renders as 「正在连接模型服务…」 without any
+numbers. A **terminal** row can also carry `total = 0`: either the run truly had
+no targets, or it failed/was interrupted before ever reaching the counting point
+(a failed startup probe on a rebuild, a crash settled by startup recovery) — an
+interrupted card can therefore read 0/0 where it used to show 0/N.
 The total may still rise once more mid-run: the late-arrival backfill rounds add
 sources that landed after the count, and the same monotonic rule applies (a
 denominator never moves backwards).

@@ -3808,7 +3808,8 @@ class KnowledgeLifecycleService:
                             # 略超——起跑计数与主循环枚举之间落地的源不在
                             # 分母里(批 3·W4 T-W4-1 把这个窗口从「准入到
                             # 主循环」收窄到「起跑计数到主循环」,没有消灭
-                            # 它),前端按「未完成余量」渲染不受影响。
+                            # 它)。running 卡片是裸插值,轮询期间可短暂显示
+                            # 4/3;按「未完成余量」渲染的只有终态分支。
                             if progress is not None:
                                 progress(_offset + index, total_targets,
                                          source_id, succeeded)

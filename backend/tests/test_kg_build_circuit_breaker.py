@@ -1413,3 +1413,42 @@ def test_startup_probe_still_runs_on_a_nonempty_incremental_build(repo):
 
     assert idle_client.probes == 0
     assert repo._runtime.kg_build_jobs.get(idle["id"])["total_sources"] == 0
+
+
+def test_repair_run_counts_partial_sources_and_still_probes(repo):
+    """``retry_partial`` 直传计数的反向钉子(T1 双内评 P2):全-partial 笔记本
+    上「分析新增」恒传 ``retry_partial=True``——计数若丢掉这个直传,会数出
+    0:起始探测被**静默**跳过(约束 4 的失败形态)、持久 total 停在 0 而
+    completed 走到 1,前端渲染「已完成 1/0 项内容」的不可能进度。"""
+    notebook, source_ids = _seed_three_parsed_sources(repo)
+    bind_chat_client(repo, "kg_extract", _ControlledKgClient())
+    seed = repo.prepare_notebook_kg_job(notebook.id, "incremental")
+    seeded = repo.execute_notebook_kg_job(
+        notebook.id, seed["id"], "incremental"
+    )
+    assert len(seeded["built"]) == len(source_ids)
+
+    # 把一个已分析源改判成 partial(status 仍 completed):普通 incremental
+    # 谓词跳过它,repair 谓词(retry_partial=True)选中它。
+    with repo._write() as db:
+        db.execute(
+            "UPDATE extraction_runs SET error_message='windows_failed=1/3' "
+            "WHERE source_id=?",
+            (source_ids[0],),
+        )
+    from app.repositories.sqlite import knowledge_counts_cache
+    knowledge_counts_cache.invalidate(notebook.id)
+
+    repair_client = _ControlledKgClient()
+    bind_chat_client(repo, "kg_extract", repair_client)
+    job = repo.prepare_notebook_kg_job(
+        notebook.id, "incremental", retry_partial=True
+    )
+    repo.execute_notebook_kg_job(
+        notebook.id, job["id"], "incremental", retry_partial=True
+    )
+
+    saved = repo._runtime.kg_build_jobs.get(job["id"])
+    assert repair_client.probes == 1
+    assert saved["total_sources"] == 1
+    assert saved["completed_sources"] == 1
