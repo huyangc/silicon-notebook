@@ -47,6 +47,7 @@ class KgMaintenanceJobs:
         relink_notebook_kg: Callable[[str], dict] | None = None,
         rebuild_unified_kg: Callable[[str], int] | None = None,
         resolve_notebook_conflicts: Callable[[str], dict] | None = None,
+        kg_build_active: Callable[[str], bool] | None = None,
     ) -> None:
         # The algorithm callables are per-instance and optional: an instance is
         # wired only with the kinds that must share its slot, and calling a job
@@ -57,6 +58,11 @@ class KgMaintenanceJobs:
         self._relink_notebook_kg = relink_notebook_kg
         self._rebuild_unified_kg = rebuild_unified_kg
         self._resolve_notebook_conflicts = resolve_notebook_conflicts
+        # 批 3·W2 §2.1(buildkg- × unifiedkg-/relinkkg- 交叉检查):探测
+        # 「该笔记本是否有 buildkg-/rebuildkg- 作业在飞」。只接给
+        # relink/rebuild 共用槽的实例——冲突检测不碰派生簇/板块产物,与
+        # build 无互斥关系。
+        self._kg_build_active = kg_build_active
 
         # Terminal entries remain available for the browser's next bounded poll.
         # Both kinds intentionally share this registry and lock. This stays
@@ -85,7 +91,25 @@ class KgMaintenanceJobs:
                 **counters,
             }
             self.jobs[notebook_id] = job
-            return dict(job)
+        # 批 3·W2 §2.1:先登记后查对方(两侧同为 write-then-check,Dekker
+        # 序保证至少一方看见另一方——先查后登记会留下双双放行的窗口)。
+        # build 在飞即撤销刚登记的槽并按 holder="buildkg" 拒绝,409 文案
+        # 点名真正占着的动作。
+        if self._kg_build_active is not None and self._kg_build_active(notebook_id):
+            with self.lock:
+                current = self.jobs.get(notebook_id)
+                if current is not None and current["job_id"] == job["job_id"]:
+                    del self.jobs[notebook_id]
+            raise KgMaintenanceAlreadyRunning(notebook_id, "buildkg")
+        return dict(job)
+
+    def active_kind(self, notebook_id: str) -> "str | None":
+        """正在跑的维护种类(无则 None)——build 侧交叉检查用(§2.1)。"""
+        with self.lock:
+            current = self.jobs.get(notebook_id)
+            if current is not None and current["status"] == "running":
+                return str(current["kind"])
+            return None
 
     def status(
         self, notebook_id: str, kind: str, counters: Dict[str, int]

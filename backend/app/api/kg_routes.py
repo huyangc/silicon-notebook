@@ -49,6 +49,10 @@ def _kg_maintenance_busy(exc: KgMaintenanceAlreadyRunning) -> HTTPException:
         return user_error(409, "当前笔记本正在重新合并，请等它完成")
     if exc.holder == "relink":
         return user_error(409, "当前笔记本正在补上关联，请等它完成")
+    if exc.holder == "buildkg":
+        # 批 3·W2 §2.1:维护动作被在飞的分析作业闸住——文案与 build 侧
+        # 409 逐字同款,用户等的是同一件事。
+        return user_error(409, "当前笔记本已有知识图谱分析任务正在运行")
     return user_error(409, "当前笔记本正在整理知识图谱，请等它完成")
 
 

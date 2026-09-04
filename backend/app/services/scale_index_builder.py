@@ -760,10 +760,18 @@ class ScaleIndexBuilder:
             for source_id in delta["delta_sources"]:
                 try:
                     self.incremental_fuse_source(notebook_id, source_id)
-                except Exception:  # noqa: BLE001 - fold continues without hubs
+                except Exception as exc:  # noqa: BLE001 - fold continues without hubs
+                    # 结构化事件同 source_ingestion 侧(批 3·W2 PR-3):
+                    # 只进日志的融合失败在事件流里隐形。
                     self.event_log.logger.exception(
                         "fold incremental_fuse failed for %s", source_id
                     )
+                    self.event_log.emit({
+                        "kind": "incremental_fuse_failed",
+                        "notebook_id": notebook_id,
+                        "source_id": source_id,
+                        "error": f"{type(exc).__name__}: {exc}"[:200],
+                    })
 
             (
                 delta_nodes,
