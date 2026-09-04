@@ -23,7 +23,6 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from app.domain.knowledge_contracts import USABLE_STATUSES
 from app.repositories.postgres._store_utils import (
-    GRAPH_FETCH_BATCH as _GRAPH_FETCH_BATCH,
     iso_timestamp,
     json_value,
     keyset_pages as _keyset_pages,
@@ -371,7 +370,7 @@ class IndexProjectionStore:
         """
         for page in _keyset_pages(
             db,
-            _GRAPH_FETCH_BATCH,
+            int(self.settings.graph_fetch_page_rows),
             lambda cursor: (
                 f"SELECT id,object_type,{PAYLOAD_NAME_EXPRESSION} AS name,ordinal "
                 "FROM knowledge_objects "
@@ -564,7 +563,7 @@ class IndexProjectionStore:
                 # `active_object_graph_rows` (no (notebook_id, ordinal)
                 # composite; dominant-share notebooks pay nothing).
                 for page in _keyset_pages(
-                    db, _GRAPH_FETCH_BATCH,
+                    db, int(self.settings.graph_fetch_page_rows),
                     lambda cursor, _c=src_clause, _p=src_params: (
                         f"SELECT id, object_type, payload, ordinal FROM knowledge_objects "
                         f"WHERE notebook_id=%s AND status IN ({ph}){_c}"
@@ -590,7 +589,7 @@ class IndexProjectionStore:
                 # accumulated dict keeps the same three keys as before, so the
                 # resident `relations` list is byte-for-byte the old one.
                 for page in _keyset_pages(
-                    db, _GRAPH_FETCH_BATCH,
+                    db, int(self.settings.graph_fetch_page_rows),
                     lambda cursor, _c=src_clause, _p=src_params: (
                         "SELECT id, source_object_id, target_object_id, edge_type "
                         f"FROM knowledge_relations "
@@ -618,7 +617,7 @@ class IndexProjectionStore:
                 # Key: `ordinal` (`uq_chunks_ordinal`, globally unique) — same
                 # argument as the objects leg above.
                 for page in _keyset_pages(
-                    db, _GRAPH_FETCH_BATCH,
+                    db, int(self.settings.graph_fetch_page_rows),
                     lambda cursor, _c=src_clause, _p=src_params: (
                         f"SELECT id, ordinal FROM chunks WHERE notebook_id=%s{_c}"
                         + ("" if cursor is None else " AND ordinal>%s")
@@ -669,7 +668,7 @@ class IndexProjectionStore:
                 else published_row["cluster_generation"]
             )
             for page in _keyset_pages(
-                db, _GRAPH_FETCH_BATCH,
+                db, int(self.settings.graph_fetch_page_rows),
                 lambda cursor: (
                     "SELECT canonical_id, member_object_id FROM concept_clusters "
                     "WHERE notebook_id=%s AND generation = %s"

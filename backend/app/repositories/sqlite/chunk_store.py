@@ -464,7 +464,14 @@ class ChunkStore:
         ).fetchall()
 
     @staticmethod
-    def id_element_rows(db: sqlite3.Connection, notebook_id: str):
+    def id_element_rows(
+        db: sqlite3.Connection, notebook_id: str, page_rows: int | None = None
+    ):
+        """``page_rows`` (batch-3 W4, codex #676) mirrors the PostgreSQL
+        keyset-paged sibling's parameter so callers can pass
+        ``settings.graph_fetch_page_rows`` uniformly across backends; SQLite
+        accepts and ignores it — this read has never been paged here (see
+        the port docstring)."""
         return db.execute(
             "SELECT id, element_ids FROM chunks WHERE notebook_id=?",
             (notebook_id,),

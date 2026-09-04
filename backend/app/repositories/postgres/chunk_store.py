@@ -460,7 +460,7 @@ class ChunkStore:
         return [_compat_element_ids(row) for row in rows]
 
     @staticmethod
-    def id_element_rows(connection, notebook_id: str):
+    def id_element_rows(connection, notebook_id: str, page_rows: int | None = None):
         """Whole-notebook ``(id, element_ids)`` rows, streamed in ``ordinal``
         keyset pages instead of one whole-table ``fetchall`` (batch-3 W4
         T-W4-3.1). The consumer (``_elem_chunk_map``) folds every row's
@@ -486,9 +486,15 @@ class ChunkStore:
 
         A GENERATOR: consume it inside the caller's connection scope, exactly
         once, by iteration — no ``len()``, no indexing, no second pass.
+
+        ``page_rows=None`` resolves ``GRAPH_FETCH_BATCH`` at CALL time (not as
+        a default-argument snapshot), so the paging oracle can shrink it —
+        same pattern as ``KnowledgeStore.notebook_object_evidence_rows_paged``.
+        The production caller (``GraphRetrievalService._elem_chunk_map``)
+        passes ``settings.graph_fetch_page_rows`` explicitly.
         """
         for page in keyset_pages(
-            connection, GRAPH_FETCH_BATCH,
+            connection, GRAPH_FETCH_BATCH if page_rows is None else page_rows,
             lambda cursor: (
                 "SELECT id,element_ids,ordinal FROM chunks WHERE notebook_id=%s"
                 + ("" if cursor is None else " AND ordinal>%s")

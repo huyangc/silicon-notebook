@@ -3366,7 +3366,9 @@ def test_projection_membership_artifact_order_ignores_map_and_set_iteration():
 
     def build(ent_chunk_map):
         projection = PostgresIndexProjectionStore(
-            SimpleNamespace(ppr_variant_edge_weight=0.35),
+            SimpleNamespace(
+                ppr_variant_edge_weight=0.35, graph_fetch_page_rows=10_000,
+            ),
             connect=lambda: nullcontext(connection),
             in_batches=lambda values: [list(values)],
             ent_chunk_map=lambda _notebook_id, **_kw: ent_chunk_map,

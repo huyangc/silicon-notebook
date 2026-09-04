@@ -20,7 +20,6 @@ import pytest
 from app.core.config import Settings
 from app.models.schemas import NotebookCreate
 from app.repositories.postgres import chunk_store as chunk_store_module
-from app.repositories.postgres import index_projection_store as projection_module
 from app.repositories.postgres import knowledge_store as knowledge_store_module
 from app.repositories.postgres.repository import PostgresRepository
 from app.repositories.postgres.search import PAYLOAD_NAME_EXPRESSION
@@ -48,10 +47,22 @@ def repo(postgres_settings: Settings):
 
 
 @pytest.fixture
-def small_page(monkeypatch, request):
-    """Force every paged read onto a tiny page so the cursors are exercised."""
+def small_page(monkeypatch, request, postgres_settings: Settings):
+    """Force every paged read onto a tiny page so the cursors are exercised.
+
+    ``IndexProjectionStore.active_object_graph_rows``/``graph_rows`` read
+    ``self.settings.graph_fetch_page_rows`` directly (batch-3 W4, codex
+    #676) — no bare-module-constant fallback — so their page size is forced
+    through the SAME ``Settings`` instance the ``repo`` fixture binds
+    (``self.settings`` is that object by reference, never copied). The two
+    remaining static-method legs (``id_element_rows``,
+    ``notebook_object_evidence_rows_paged``) keep the older
+    ``page_rows=None`` resolves-the-module-constant-at-call-time pattern for
+    callers with no settings in hand, so they still need the module-level
+    patch below.
+    """
     size = request.param
-    monkeypatch.setattr(projection_module, "_GRAPH_FETCH_BATCH", size)
+    monkeypatch.setattr(postgres_settings, "graph_fetch_page_rows", size)
     monkeypatch.setattr(knowledge_store_module, "GRAPH_FETCH_BATCH", size)
     monkeypatch.setattr(chunk_store_module, "GRAPH_FETCH_BATCH", size)
     return size
@@ -257,6 +268,49 @@ def test_the_online_evidence_read_stays_one_unordered_statement(repo, small_page
     assert all("LIMIT" in text.upper() for text in paged.statements)
 
 
+def test_elem_chunk_map_page_size_follows_the_configured_setting(
+    repo, monkeypatch, postgres_settings: Settings
+):
+    """codex #676 (batch-3 W4): ``GraphRetrievalService._elem_chunk_map`` is
+    the production caller of ``ChunkStore.id_element_rows`` and now resolves
+    its page size from ``settings.graph_fetch_page_rows`` at call time
+    (``page_rows=int(self.settings.graph_fetch_page_rows)``) instead of the
+    bare ``page_rows=None`` module-constant fallback. Force the setting down
+    to 2 and pin the resulting PAGE COUNT (the only externally-observable
+    trace of the LIMIT bound into each statement) against the seeded row
+    count — end to end through the real service call, not a direct store
+    call with a hand-picked ``page_rows=``.
+
+    Mutation anchor: hardcode the call site back to ``page_rows=None`` (or
+    any value other than the settings one) and the page count stops tracking
+    the configured setting — 11 rows always fit in one page at the module
+    default (10_000), so this goes red."""
+    notebook_id = _seed(repo, objects=11)
+    monkeypatch.setattr(postgres_settings, "graph_fetch_page_rows", 2)
+
+    graph = repo._runtime.retrieval.graph
+    real_connect = graph._connect
+    spies: list[_StatementSpy] = []
+
+    @contextmanager
+    def spying_connect():
+        with real_connect() as db:
+            spy = _StatementSpy(db)
+            spies.append(spy)
+            yield spy
+
+    monkeypatch.setattr(graph, "_connect", spying_connect)
+    elem_to_chunks = graph._elem_chunk_map(notebook_id)
+
+    assert elem_to_chunks, "the seeded corpus must produce element->chunk rows"
+    assert len(spies) == 1
+    chunk_statements = spies[0].statements
+    # 11 rows at a page size of 2 -> 2+2+2+2+2+1, the short page ending it.
+    assert len(chunk_statements) == 6
+    assert all("FROM chunks" in text for text in chunk_statements)
+    assert all("LIMIT" in text.upper() for text in chunk_statements)
+
+
 @pytest.mark.parametrize("small_page", [3], indirect=True)
 def test_a_generation_flip_between_cluster_pages_cannot_tear_the_graph(
     repo, small_page, monkeypatch
@@ -335,7 +389,7 @@ def test_a_generation_flip_between_cluster_pages_cannot_tear_the_graph(
 
 def _graph_rows_at(monkeypatch, repo, notebook_id: str, page: int):
     with monkeypatch.context() as patch:
-        patch.setattr(projection_module, "_GRAPH_FETCH_BATCH", page)
+        patch.setattr(repo.settings, "graph_fetch_page_rows", page)
         projections = repo._runtime.index_projections
         rows = projections.graph_rows(notebook_id, None, synonym_edges=[])
         arrays = projections.graph_rows(

@@ -715,6 +715,7 @@ KG_DERIVED_BUILD_TTL_SECONDS              # 代际重建（批 3·W2）在飞认
 KG_CATCHUP_SKEW_SECONDS                   # 代际翻转后单遍催收的时钟偏斜余量：重放退休代里 created_at ≥「翻转锚点 − 该余量」的融合行。锚点取 DB 服务端时钟，余量兜的是行时间戳的应用时钟偏斜与长事务可见性偏差。方向性围栏：调大只是多重放几行（幂等安置无害），调小才有漏行风险——除非确证全部写进程与 DB 时钟偏差远小于默认值，不要调小（默认 300；≥0）
 INDEXING_PIPELINE_SWITCH_MAX_OBJECTS      # 批 3·W3(决策 D3):活跃对象数超过该值的笔记本锁定「切换到自定义索引管线」(切回内建豁免)。数值围栏:按 WR-2 病灶规模(整库重建发布事务在百万级对象上不可完成)定,默认 20 万;刻意不用拷贝阈值(NOTEBOOK_COPY_MAX_ROWS=5000,低三个数量级会误锁普通库)。计数走 count_active_objects 的 seq-gated memo(默认 200000;≥1000)
 KG_GENERATION_REAP_PAGE_ROWS              # 残代回收每页行数（rebuild 预回收 / communities 发布前回收共用；启动恢复用自己的常数与全局页预算）。与 KG_GRAPH_DRAIN_PAGE_ROWS 同族同界：每页一条有界 DELETE、一个写事务，页间释放写锁（默认 5000；50-20000）
+GRAPH_FETCH_PAGE_ROWS                     # 离线 scale build 读侧分页的每页行数预算（批 3·W4，codex #676）：图侧 keyset 分页（graph_rows 的对象/关系/块/簇四腿、active_object_graph_rows、id_element_rows、notebook_object_evidence_rows_paged）与 embedding 向量分页（embedding_pages）共用同一个值——此前是生产代码里的 10_000 字面量。界住的是驱动的单语句结果缓冲：行宽大的表（如 evidence 是大 JSON 的库）每行 ~4KB 时，10k 行/页 ≈ 40MB，受限部署可调低以缩小单页瞬时占用，代价是分页往返更多；调高只是用更大的瞬时缓冲换更少往返。上限防误配成事实上的整表扫描（默认 10000；100-200000）
 ```
 ⚠ 容量预期（批 3·W2 代际化）：三张派生表（concept_clusters/communities/
 community_members）的稳态占用约为改造前的 **2×**——翻转后退休代刻意保留一整轮
