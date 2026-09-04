@@ -270,14 +270,20 @@ def test_lifecycle_public_maintenance_surface_is_one_hop(repo, monkeypatch):
         ("fail_unified_kg_rebuild_submission", ("nb", "ukj-1"), None),
     )
     for name, args, expected in cases:
-        def _delegate(*actual, _name=name, _expected=expected):
-            calls.append((_name, actual))
+        def _delegate(*actual, _name=name, _expected=expected, **kw):
+            # 批 3·W2 PR-3:start_notebook_relink 多了 exempt_build_marker
+            # 关键字直传(默认 False)——单跳委托语义不变,记账带上它。
+            calls.append((_name, actual, tuple(sorted(kw.items()))))
             return _expected
 
         monkeypatch.setattr(collaborator, name, _delegate)
         assert getattr(lifecycle, name)(*args) == expected
 
-    assert calls == [(name, args) for name, args, _expected in cases]
+    expected_kw = {"start_notebook_relink": (("exempt_build_marker", False),)}
+    assert calls == [
+        (name, args, expected_kw.get(name, ()))
+        for name, args, _expected in cases
+    ]
 
 
 def test_lifecycle_private_registry_aliases_keep_identity(repo):
