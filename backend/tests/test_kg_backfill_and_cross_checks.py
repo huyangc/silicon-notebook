@@ -7,9 +7,7 @@ v1 的注入形态杀不死变异,设计 §5.3 明文作废)。
 """
 from __future__ import annotations
 
-import inspect
 import json
-import re
 
 import pytest
 
@@ -150,9 +148,10 @@ def test_backfill_exhaustion_reports_partial_honestly(repo, monkeypatch):
     job = repo.prepare_notebook_kg_job(notebook.id, "incremental")
     repo.execute_notebook_kg_job(notebook.id, job["id"], "incremental")
 
-    # 主循环 1 次 + 补漏 3 轮;身份过滤保证每轮只抽新落齐的源,已试过的
-    # (失败/被跳过)不被重付模型钱。
-    assert calls == [["src-0"], ["src-1"], ["src-2"], ["src-3"]]
+    # 身份过滤的可观察面:四个源各被尝试恰一次(已试过的不重付模型钱),
+    # 不钉批次切分形状。
+    flattened = [source_id for page in calls for source_id in page]
+    assert sorted(flattened) == ["src-0", "src-1", "src-2", "src-3"]
     exhausted = [e for e in events if e.get("kind") == "kg_backfill_exhausted"]
     assert exhausted and exhausted[0]["rounds"] == 3
     saved = repo._runtime.kg_build_jobs.get(job["id"])
@@ -241,21 +240,47 @@ def test_build_endpoint_returns_409_when_maintenance_holds_the_slot(repo):
         service.kg_maintenance.settle(notebook.id, claimed["job_id"], "succeeded")
 
 
-def test_backfill_shares_the_loop_predicate_function():
-    """结构守卫(复评 P1-5):谓词已两次被复述写错(漏 is_partial/
-    analyzed_empty)。钉「主循环、补漏轮、耗尽探针共用 _kg_target_batches」
-    ——运行函数里恰好三处调用、零处内联谓词(kg_analyzed_without_objects
-    只许出现在谓词函数自己里),且补漏轮/探针的 mode 实参钉死
-    "incremental"(把它改成 "rebuild" 就是全量重抽的反转,§1.7 排除)。"""
-    run_src = inspect.getsource(KnowledgeLifecycleService._run_notebook_kg_job)
-    assert run_src.count("self._kg_target_batches(") == 3, (
-        "主循环/补漏轮/耗尽探针之外多/少了目标枚举站点——谓词有被复述的风险")
-    assert run_src.count('"incremental")') >= 2, (
-        "补漏轮与耗尽探针的 mode 实参必须是字面量 incremental")
-    assert "kg_analyzed_without_objects" not in run_src
-    assert "has_kg" not in run_src
-    predicate_src = inspect.getsource(KnowledgeLifecycleService._kg_target_batches)
-    assert "kg_analyzed_without_objects" in predicate_src
+def test_backfill_respects_the_shared_eligibility_predicate(repo, monkeypatch):
+    """行为版结构守卫(复评 P1-5 + codex #673 R3 P2:不测源码文本)。谓词
+    已两次被复述写错——真实 incremental 分支排除 analyzed_empty(零对象
+    来源不重付模型钱)。注入两个游标身后的源:正常的必须被补漏抽到,已判
+    「分析过且为空」的必须被跳过——谓词若被复述漏掉该排除、或 mode 被改成
+    rebuild(全量重抽的反转),这里当场红。"""
+    from app.models.sources import KG_EMPTY_RUN_MESSAGE_PREFIX
+
+    notebook = repo.create_notebook(NotebookCreate(name="predicate"))
+    _seed_source(repo, notebook.id, "src-main", "2026-07-20T10:00:00")
+    bind_chat_client(repo, "kg_extract", _AlwaysExtractClient())
+    service = repo._runtime.knowledge_lifecycle
+    original_extract = service._extract_targets
+    injected = []
+
+    def inject_then_extract(notebook_id, targets, *args, **kwargs):
+        if not injected:
+            injected.append(True)
+            _seed_source(repo, notebook_id, "src-late", "2026-07-20T09:00:00")
+            _seed_source(repo, notebook_id, "src-empty", "2026-07-20T08:00:00")
+            with repo._write() as db:
+                db.execute(
+                    "INSERT INTO extraction_runs "
+                    "(id,notebook_id,source_id,run_type,status,error_message,"
+                    "created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
+                    ("run-empty", notebook_id, "src-empty", "kg", "completed",
+                     f"{KG_EMPTY_RUN_MESSAGE_PREFIX}windows=1/1",
+                     "2026-07-20T08:30:00", "2026-07-20T08:30:00"),
+                )
+        return original_extract(notebook_id, targets, *args, **kwargs)
+
+    monkeypatch.setattr(service, "_extract_targets", inject_then_extract)
+    job = repo.prepare_notebook_kg_job(
+        notebook.id, "incremental", retry_partial=True)
+    repo.execute_notebook_kg_job(
+        notebook.id, job["id"], "incremental", retry_partial=True)
+
+    assert _kg_source_ids(repo, notebook.id) == {"src-main", "src-late"}, (
+        "analyzed-empty 的源被补漏轮重抽了——谓词被复述/换成了 rebuild 口径")
+    saved = repo._runtime.kg_build_jobs.get(job["id"])
+    assert saved["status"] == "succeeded" and saved["error_code"] == ""
 
 
 def test_build_in_flight_gates_maintenance_claim(repo):
@@ -339,41 +364,27 @@ def test_buildkg_holder_gets_the_build_vocabulary_409():
     assert detail == "当前笔记本已有知识图谱分析任务正在运行"
 
 
-def test_fuse_swallow_sites_emit_the_structured_event():
-    """融合 except 结构化事件(PR-3 第三件):AST 级守卫——每个 try 体里
-    调 incremental_fuse_source 且带 except 处理器的站点,处理器体内必须有
-    字面量 "incremental_fuse_failed" 的 emit(质量评 P3:字符窗口版会被
-    「把 emit 移出 except」的移动变异穿过,也会被邻近无关 except 假红)。"""
-    import ast
-    from pathlib import Path
+def test_fuse_failure_emits_the_structured_event_and_stays_fail_open(
+        repo, monkeypatch):
+    """融合 except 结构化事件(PR-3 第三件,行为版):真实抽取路径上融合
+    抛异常 → 抽取照常成功(fail-open),事件流里有 incremental_fuse_failed
+    且只带异常**类名**(AGENTS 遥测红线:不带异常原文)。"""
+    notebook = repo.create_notebook(NotebookCreate(name="fuse-event"))
+    _seed_source(repo, notebook.id, "src-main", "2026-07-20T10:00:00")
+    bind_chat_client(repo, "kg_extract", _AlwaysExtractClient())
 
-    backend = Path(__file__).resolve().parents[1]
-    swallow_sites = 0
-    for rel in ("app/services/source_ingestion.py",
-                "app/services/scale_index_builder.py"):
-        tree = ast.parse((backend / rel).read_text(encoding="utf-8"))
-        parents: dict = {}
-        for node in ast.walk(tree):
-            for child in ast.iter_child_nodes(node):
-                parents[child] = node
-        for node in ast.walk(tree):
-            if not (isinstance(node, ast.Call)
-                    and isinstance(node.func, ast.Attribute)
-                    and node.func.attr == "incremental_fuse_source"):
-                continue
-            # 最近包围的 Try 才是吞点(外层大 try 不算)。
-            cursor = node
-            enclosing = None
-            while cursor in parents:
-                cursor = parents[cursor]
-                if isinstance(cursor, ast.Try):
-                    enclosing = cursor
-                    break
-            assert enclosing is not None, f"{rel}: 融合调用不在 try 里了"
-            swallow_sites += 1
-            handlers_src = ast.dump(ast.Module(
-                body=[stmt for handler in enclosing.handlers
-                      for stmt in handler.body], type_ignores=[]))
-            assert "incremental_fuse_failed" in handlers_src, (
-                f"{rel}: 吞融合异常的站点缺结构化事件")
-    assert swallow_sites == 2, swallow_sites
+    def exploding_fuse(notebook_id, source_id):
+        raise RuntimeError("secret /private/path leaked?")
+
+    monkeypatch.setattr(repo._runtime.knowledge_lifecycle,
+                        "incremental_fuse_source", exploding_fuse)
+    events = []
+    monkeypatch.setattr(repo._runtime.event_log, "emit",
+                        lambda event: events.append(event))
+    job = repo.prepare_notebook_kg_job(notebook.id, "incremental")
+    repo.execute_notebook_kg_job(notebook.id, job["id"], "incremental")
+
+    assert _kg_source_ids(repo, notebook.id) == {"src-main"}, "融合失败不得掀翻抽取"
+    fused = [e for e in events if e.get("kind") == "incremental_fuse_failed"]
+    assert fused and fused[0]["source_id"] == "src-main"
+    assert fused[0]["error"] == "RuntimeError", "只许异常类名,不许原文"

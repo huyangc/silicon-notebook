@@ -3758,6 +3758,11 @@ class KnowledgeLifecycleService:
                         attempted_source_ids.update(
                             source_id for source_id, _preserve in targets)
                         total_targets += len(targets)
+                        # 持久 total 同步抬升(codex #673 R3 P2):completed/
+                        # failed 计数随抽取前进,total 停在 prepare 快照会
+                        # 暴露 2/1 这种不可能进度给 index_status/前端/事件。
+                        self.kg_build_jobs.extend_total_sources(
+                            job_id, len(targets))
 
                         def _backfill_progress(
                             index: int,
