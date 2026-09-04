@@ -168,13 +168,16 @@ teardown 骑在上面;锁的既有 docstring 承诺「毫秒级事务」。
    chunk/relation 腿:`vector_pages` keyset 页直喂 `add_items`,分页要保住
    `build_matrix` 的五条语义(runtime_dim 截断/首个有效行定维/异维行
    丢弃/逐行 L2 归一/ids 与行序对齐),`init_index(max_elements)` 在总数
-   未知时先 COUNT 取上界。KG 腿:索引建全后矩阵已不在内存,查询集须
-   **第二遍分页读 DB**——页切的是查询集不是索引,每行的 top-k 在其页内
-   已完整,「合并」只是按行主序拼接喂给既有 np.unique 首见去重;第二遍的
-   行号与第一遍的 hnsw label 是两个空间,**必须按 id 映射回第一遍 label**
-   (自环排除与无向对键 a*n+b 都建立在同一空间上),vector_pages 容忍的
-   跨页漂移导致两遍不一致时按 id 交集裁决(漂移行丢弃,fail-safe 方向=
-   少几条同义边)。验收:top-k 集合断言 + 测试 num_threads=1;
+   未知时先 COUNT 取上界。KG 腿:索引建全后矩阵已不在内存,查询集
+   **从索引自身按 label 页取回(`get_items`)**,不做第二遍 DB 读——
+   codex #676 R1(P2)指出 DB 二读形有整类不一致:两遍之间被**更新**的
+   embedding 保留同一 id,新向量会去查存着旧向量的索引,铸出任何一致
+   快照都不支持的同义边;查询集与索引按构造同源后,id→label 映射与漂移
+   裁决随第二遍读一起消失(matrix_pages 预归一 + hnswlib cosine 存储重
+   归一幂等,get_items 取回的就是第一遍建索引的行,至 float32 舍入——
+   oracle 对 sim 按容差、对键与顺序逐字断言)。页切的是查询集不是索引,
+   每行 top-k 在其页内已完整,「合并」只是按行主序拼接喂既有 np.unique
+   首见去重。验收:top-k 集合断言 + 测试 num_threads=1;
    `total_build_ms` 基线劣化 ≤10% 硬门,超门回退分页粒度或整项回退。
 
 ## T-W4-4 QueryCanceled 统一出口(目标按评审 P1-C 降级)
