@@ -62,15 +62,37 @@ _RECOVERY_DELETE_BATCH_ROWS = 5000
 # 一截」,余量由下一轮 rebuild 的预回收接手,启动时间预算因此有硬上界。
 _RECOVERY_REAP_PAGES_BUDGET = 40
 
-# T-W4-4:``purge_kg_embeddings`` 的两条 DELETE 按 notebook_id 整表清空,唯一
-# 调用点是离线 CLI(``app.scripts.reembed_kg``,要求 ``--confirm-service-
-# stopped``),对单个 notebook 全量重嵌前的清场——不像本文件其余 backfill_*
-# 那样按 keyset 分页,一次删光该 notebook 的 knowledge_embeddings/
-# relation_embeddings。大库上这两条 DELETE 本身就可能超过默认 30s
-# statement_timeout;既然离线维护本就不共享请求路径的时间预算,这里给足
-# 十分钟事务内放宽(``true`` = 随事务提交/回滚自动复原,不会泄漏给同连接
-# 之后的任何借用者——见 notebook_store.py:437/migrator.py:191 同款先例)。
-_PURGE_KG_EMBEDDINGS_TIMEOUT_MS = 600_000
+# T-W4-4 维护站点普查:本文件里「按 notebook_id 整表 DELETE、不分页、只被
+# 离线 CLI 触发」的站点共五处——``purge_kg_embeddings``(reembed_kg,要求
+# ``--confirm-service-stopped``)、source-index 与 chunk-element 两族 backfill
+# 的起手清场(含 ``clear_source_index``/``clear_chunk_element_index``)。大库
+# 上这些 DELETE 可能超过默认 30s statement_timeout;离线维护不共享请求路径
+# 的时间预算,统一经 ``_raise_statement_timeout_floor`` 做事务内放宽。
+# 普查的负结果(查过、判断不补)登记在 PR 与 fangan_done:本文件其余
+# backfill_*/reap_*/recover_* 均已按 keyset/批量预算显式设计;CONCURRENTLY
+# 类与迁移工具各有 session 级放宽或独立超时配置;其余 store 的 DELETE 均为
+# 单行/小表量级。
+#
+# 取「底」不取「值」(T4 规格评 P2-1):运维把部署超时调得比 600s 更高时
+# (POSTGRES_STATEMENT_TIMEOUT_SECONDS,pool 在连接建立时按它设 session
+# 值),这里绝不能反向压低;0 = 已禁用超时,同样保持。
+_MAINTENANCE_STATEMENT_TIMEOUT_FLOOR_MS = 600_000
+
+
+def _raise_statement_timeout_floor(db) -> None:
+    """事务内把 statement_timeout 抬到维护底线(只抬不压,0/禁用保持)。
+
+    ``pg_settings.setting`` 对 statement_timeout 以毫秒计;第三参 ``true`` =
+    事务本地(SET LOCAL 等价),随提交/回滚自动复原,不泄漏给池化连接的
+    下一个借用者——notebook_store.py:437/migrator.py:191 同款先例。必须在
+    ``database.write()`` 打开的同一事务里、先于受保护语句调用。"""
+    db.execute(
+        "SELECT set_config('statement_timeout',"
+        " CASE WHEN cur = 0 THEN '0' ELSE GREATEST(cur, %s)::text END, true)"
+        " FROM (SELECT setting::bigint AS cur FROM pg_settings"
+        "       WHERE name='statement_timeout') AS s",
+        (_MAINTENANCE_STATEMENT_TIMEOUT_FLOOR_MS,),
+    )
 
 # 热路径修复批 2(R6)的「非空元素资格判定」谓词——单一定义点,供
 # count_missing_element_vectors 及其配套 discovery/page 站点(见各方法自己的调用)
@@ -1450,14 +1472,11 @@ class PostgresMaintenanceAdapter:
 
     def purge_kg_embeddings(self, notebook_id: str) -> None:
         with self._runtime.database.write() as db:
-            # T-W4-4: transaction-local statement_timeout raise (see the
-            # module constant's docstring) — gone the moment this
+            # T-W4-4: transaction-local statement_timeout floor-raise (see
+            # ``_raise_statement_timeout_floor``) — gone the moment this
             # transaction commits or rolls back, so it never leaks onto a
             # pooled connection's next borrower.
-            db.execute(
-                "SELECT set_config('statement_timeout', %s, true)",
-                (f"{_PURGE_KG_EMBEDDINGS_TIMEOUT_MS}ms",),
-            )
+            _raise_statement_timeout_floor(db)
             db.execute(
                 "DELETE FROM knowledge_embeddings WHERE notebook_id=%s",
                 (notebook_id,),
@@ -1641,6 +1660,9 @@ class PostgresMaintenanceAdapter:
                     "already_complete": False,
                 }
 
+            # T-W4-4: same whole-notebook DELETE shape as
+            # ``purge_kg_embeddings`` — floor-raise inside the same tx.
+            _raise_statement_timeout_floor(db)
             db.execute(
                 "DELETE FROM knowledge_object_sources WHERE notebook_id=%s",
                 (notebook_id,),
@@ -1882,6 +1904,9 @@ class PostgresMaintenanceAdapter:
                     "already_complete": False,
                 }
 
+            # T-W4-4: same whole-notebook DELETE shape as
+            # ``purge_kg_embeddings`` — floor-raise inside the same tx.
+            _raise_statement_timeout_floor(db)
             db.execute(
                 "DELETE FROM chunk_elements WHERE notebook_id=%s", (notebook_id,)
             )
@@ -2029,6 +2054,8 @@ class PostgresMaintenanceAdapter:
         """Reset chunk_elements for one notebook; returns the chunks total the
         backfill loop must cover."""
         with self._runtime.database.write() as db:
+            # T-W4-4: whole-notebook DELETE — floor-raise inside the same tx.
+            _raise_statement_timeout_floor(db)
             db.execute(
                 "DELETE FROM chunk_elements WHERE notebook_id=%s", (notebook_id,)
             )
@@ -2236,6 +2263,8 @@ class PostgresMaintenanceAdapter:
 
     def clear_source_index(self, notebook_id: str) -> int:
         with self._runtime.database.write() as db:
+            # T-W4-4: whole-notebook DELETE — floor-raise inside the same tx.
+            _raise_statement_timeout_floor(db)
             db.execute(
                 "DELETE FROM knowledge_object_sources WHERE notebook_id=%s",
                 (notebook_id,),
