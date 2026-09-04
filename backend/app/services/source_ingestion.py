@@ -1907,27 +1907,37 @@ class SourceIngestionService:
             # Take the conflicting aggregate lock before scanning/deleting any
             # projections so extraction cannot publish KG after our cursor.
             #
-            # notebook_id is deliberately OMITTED here (unlike the other two
-            # call sites of this same primitive, which keep it — see below):
-            # skipping it means this transaction never also takes the
-            # notebooks-row FOR NO KEY UPDATE capacity lock, so per-source
-            # teardown no longer rides on top of that lock for its whole
-            # duration (W4-2/WR-7). Four-point closure argument (batch 3·W4
-            # design §T-W4-2), condensed:
+            # notebook_id is deliberately OMITTED here (unlike this module's
+            # other two call sites of the same primitive, which keep it — see
+            # below; knowhow's ``delete_table_projection`` teardown already
+            # omits it, the closest precedent): skipping it means this
+            # transaction never also takes the notebooks-row FOR NO KEY
+            # UPDATE capacity lock, so per-source teardown no longer rides on
+            # top of that lock for its whole duration (W4-2/WR-7).
+            # Four-point closure argument (batch 3·W4 design §T-W4-2),
+            # condensed:
             #   1. Capacity direction is safe: under READ COMMITTED a
             #      concurrent capacity COUNT can only see MORE rows than
             #      before (never fewer) while this delete is in flight, so
             #      the worst case is an over-cautious rejection, never an
             #      admitted overshoot.
-            #   2. No new deadlock: the locks this transaction now holds are
-            #      a strict subset of what it held before, so removing one
-            #      cannot introduce a new wait cycle.
+            #   2. No new deadlock — conditional on one invariant: the tail
+            #      ``mark_unified_kg_dirty_in_tx`` only avoids taking the FK
+            #      parent lock (notebooks KEY SHARE, AFTER the sources row)
+            #      because every notebook is born with its
+            #      ``unified_kg_state`` row, so the upsert always takes the
+            #      DO UPDATE branch (no FK re-check). If that seeding ever
+            #      stops holding, this transaction becomes "hold sources FOR
+            #      UPDATE, then wait on notebooks" — the opposite order to
+            #      notebook deletion's finalize (notebooks FOR UPDATE, then
+            #      sources FOR UPDATE) and a real deadlock shape.
             #   3. The notebook->source write-order invariant that closes the
-            #      phantom-source/element-swap race (see
-            #      ``replace_elements``'s docstring) does not depend on this
-            #      lock — the shared load-bearing lock both sides already
-            #      take is the ``sources`` row ``FOR UPDATE`` right below;
-            #      the notebook-row lock was only ever riding along on the
+            #      phantom-source/element-swap race (see the fixed-writer-
+            #      order comment in the postgres source store's
+            #      ``replace_elements``) does not depend on this lock — the
+            #      shared load-bearing lock both sides already take is the
+            #      ``sources`` row ``FOR UPDATE`` right below; the
+            #      notebook-row lock was only ever riding along on the
             #      delete side, never part of that argument.
             #   4. "Single-source teardown does not scan the whole notebook"
             #      holds only when ``source_index_backfilled=1`` — an
@@ -1936,8 +1946,14 @@ class SourceIngestionService:
             #      an unindexed ``evidence @>`` scan; that pre-existing cost
             #      is unrelated to this lock and is not addressed here (see
             #      the design doc for the backfill runbook).
-            # The other two callers of ``source_exists_for_update_tx`` keep
-            # passing ``notebook_id`` unchanged:
+            # One semantic delta this drops (PG-only): with notebook_id the
+            # probe also raised KeyError->404 when the notebook itself had
+            # vanished between get_source and this write; now such a race
+            # (FK cascade already took the rows) deletes 0 rows and returns
+            # 204 — strictly more lenient, and the 404 was never contractual.
+            # This module's other two callers of
+            # ``source_exists_for_update_tx`` keep passing ``notebook_id``
+            # unchanged:
             # ``_clear_state_of_present_source_tx`` (mid-pipeline reparse) and
             # ``ingest_memory_source``'s reparse branch (memory sources are
             # tiny and this teardown is microsecond-scale there) — this

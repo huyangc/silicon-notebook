@@ -812,13 +812,17 @@ def test_delete_source_does_not_wait_on_notebook_capacity_lock(
         assert not holder_errors, holder_errors
 
         # The removed notebook-row lock means delete_source never waits on
-        # connection A's still-open transaction. If the lock were retaken,
-        # delete_source would block until `release_lock` fires at
-        # `release_delay` seconds — so a generous ceiling well under that
-        # still catches the regression without being timing-flaky.
+        # connection A's still-open transaction. Under this fixture's 1s
+        # lock_timeout a retaken lock actually surfaces FIRST as
+        # LockNotAvailable out of delete_source above; this wall-clock
+        # ceiling is the backstop for deployments without a lock timeout.
+        # Measured headroom is ~250x (0.006s), so a trip here can also just
+        # mean a stalled pool or CI host — read it as "delete_source waited
+        # on something", not proof of the notebooks-row lock specifically.
         assert elapsed < release_delay / 2, (
-            f"delete_source took {elapsed:.2f}s — looks like it queued "
-            "behind the held notebooks-row capacity lock"
+            f"delete_source took {elapsed:.2f}s — it waited on something "
+            "(the held notebooks-row capacity lock, a stalled pool, or a "
+            "stalled CI host); the removed lock is the prime suspect"
         )
 
         with repository._runtime.database.connect() as connection:
