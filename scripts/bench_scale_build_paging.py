@@ -57,8 +57,21 @@ def _url() -> str:
         raise SystemExit(
             "set BENCH_POSTGRES_URL (or TEST_POSTGRES_URL) to a DEDICATED test database"
         )
-    if "_test" not in url:
-        raise SystemExit("refusing to run against a database whose name lacks '_test'")
+    # Validate the DATABASE COMPONENT, not the whole URL (codex #676 R3 P1):
+    # a substring check over the full URL passes when '_test' appears in the
+    # username / password / host / query string while the path still names a
+    # production database — and this tool seeds, drops and VACUUMs. Same
+    # posture as the PostgreSQL test lane: the parsed database name itself
+    # must end in '_test'.
+    from urllib.parse import urlsplit
+
+    database = urlsplit(url).path.lstrip("/").split("/", 1)[0]
+    if not database.endswith("_test"):
+        raise SystemExit(
+            "refusing to run: the parsed database name "
+            f"{database!r} does not end in '_test' (a dedicated bench/test "
+            "database is required; '_test' elsewhere in the URL does not count)"
+        )
     return url
 
 
