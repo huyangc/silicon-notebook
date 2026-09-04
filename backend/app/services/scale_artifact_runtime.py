@@ -876,7 +876,12 @@ class ScaleArtifactRuntime:
             self._spawn_viz_build(notebook_id)
         return index
 
-    def viz_index(self, notebook_id: str):
+    def viz_index(self, notebook_id: str, *, emit_refusal: bool = True):
+        # ``emit_refusal=False`` is the side-effect-free re-probe variant
+        # (codex #676 R11 P2): unified_graph re-probes once after observing
+        # no builder (the R5 publication-race close), and that second walk
+        # through the absent branch must not double the per-request
+        # ``viz_lazy_build_refused`` telemetry the first walk already wrote.
         scale = self.load(notebook_id)
         if scale is not None and getattr(scale, "viz_ids", None) is not None:
             # Scale-embedded viz: freshness rides on the scale index's own version
@@ -991,7 +996,8 @@ class ScaleArtifactRuntime:
         # process. Callers already handle ``None`` (unified_graph's
         # large-notebook branch reports it as "no preview yet" instead of
         # falling through to the unbounded full derive).
-        self._emit_viz_lazy_build_refused(notebook_id, count, "absent")
+        if emit_refusal:
+            self._emit_viz_lazy_build_refused(notebook_id, count, "absent")
         return None
 
     @staticmethod
