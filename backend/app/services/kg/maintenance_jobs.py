@@ -75,9 +75,15 @@ class KgMaintenanceJobs:
         self.lock = threading.Lock()
 
     def claim(
-        self, notebook_id: str, kind: str, id_prefix: str, counters: Dict[str, int]
+        self, notebook_id: str, kind: str, id_prefix: str, counters: Dict[str, int],
+        *, exempt_build_marker: bool = False,
     ) -> dict:
-        """Claim before submission so racing clicks cannot enqueue two writers."""
+        """Claim before submission so racing clicks cannot enqueue two writers.
+
+        ``exempt_build_marker``:build 作业自己的收尾(``_relink_after_build``)
+        在 build 仍持 ``kg_building`` 标记时顺序调进来——它看见的标记就是
+        **自己的**,交叉检查不该把自己的收尾闸死(§2.1 防的是独立维护动作
+        撞上在飞 build)。只有 build 收尾传 True;外部入口一律 False。"""
         self.get_notebook(notebook_id)
         with self.lock:
             current = self.jobs.get(notebook_id)
@@ -95,7 +101,9 @@ class KgMaintenanceJobs:
         # 序保证至少一方看见另一方——先查后登记会留下双双放行的窗口)。
         # build 在飞即撤销刚登记的槽并按 holder="buildkg" 拒绝,409 文案
         # 点名真正占着的动作。
-        if self._kg_build_active is not None and self._kg_build_active(notebook_id):
+        if (not exempt_build_marker
+                and self._kg_build_active is not None
+                and self._kg_build_active(notebook_id)):
             with self.lock:
                 current = self.jobs.get(notebook_id)
                 if current is not None and current["job_id"] == job["job_id"]:
@@ -154,9 +162,12 @@ class KgMaintenanceJobs:
                     if name in stats:
                         job[name] = int(stats[name])
 
-    def start_notebook_relink(self, notebook_id: str) -> dict:
+    def start_notebook_relink(
+        self, notebook_id: str, *, exempt_build_marker: bool = False
+    ) -> dict:
         return self.claim(
-            notebook_id, "relink", "rlj", dict(self.RELINK_COUNTERS)
+            notebook_id, "relink", "rlj", dict(self.RELINK_COUNTERS),
+            exempt_build_marker=exempt_build_marker,
         )
 
     def notebook_relink_status(self, notebook_id: str) -> dict:

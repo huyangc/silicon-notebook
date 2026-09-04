@@ -1979,8 +1979,11 @@ class KnowledgeLifecycleService:
             notebook_id, job_id, status, stats
         )
 
-    def start_notebook_relink(self, notebook_id: str) -> dict:
-        return self.kg_maintenance.start_notebook_relink(notebook_id)
+    def start_notebook_relink(
+        self, notebook_id: str, *, exempt_build_marker: bool = False
+    ) -> dict:
+        return self.kg_maintenance.start_notebook_relink(
+            notebook_id, exempt_build_marker=exempt_build_marker)
 
     def notebook_relink_status(self, notebook_id: str) -> dict:
         return self.kg_maintenance.notebook_relink_status(notebook_id)
@@ -3460,7 +3463,11 @@ class KnowledgeLifecycleService:
         tail only coordinate within one worker.
         """
         try:
-            job = self.start_notebook_relink(notebook_id)
+            # exempt_build_marker:本收尾在 build 仍持 kg_building 时顺序
+            # 调进来,标记是自己的——§2.1 交叉检查不闸自己(见 claim 的
+            # docstring)。对并发 relink/rebuild 的单飞语义原样保留。
+            job = self.start_notebook_relink(
+                notebook_id, exempt_build_marker=True)
         except KgMaintenanceAlreadyRunning as exc:
             # `exc.holder` is "relink" or "rebuild" — see the two cases in the
             # docstring above. Surfaced on the event so an operator (or a future
