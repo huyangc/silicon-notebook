@@ -625,6 +625,18 @@ def test_plugin_kg_success_atomically_publishes_graph_facts_and_identity(
             "VALUES (?,?,?,?,?)",
             (notebook.id, "source_profiles", 0, "{}", _now()),
         )
+        # 批 3·W2(codex #671 R18):预置一份代际状态——published 指针、在飞
+        # 认领与催收欠账都非零。staged 发布刚跨代清空三张派生表,必须同事务
+        # 把这些归零(counter 除外),否则并发代际 rebuild 的翻转双 CAS 仍然
+        # 匹配,会把行已被删光的代发布出去。
+        db.execute(
+            "UPDATE unified_kg_state SET cluster_generation=7, "
+            "community_generation=3, derived_building_generation=9, "
+            "derived_building_claimed_at=datetime('now'), "
+            "derived_catchup_from=datetime('now'), "
+            "derived_generation_counter=9 WHERE notebook_id=?",
+            (notebook.id,),
+        )
     submitted = {}
 
     def capture(function, *args, **kwargs):
@@ -677,6 +689,28 @@ def test_plugin_kg_success_atomically_publishes_graph_facts_and_identity(
             ).fetchone()["c"])
             for table in ("canonical_relations", "kg_analysis_artifacts")
         }
+        generational = dict(db.execute(
+            "SELECT cluster_generation, community_generation, "
+            "derived_building_generation, derived_building_claimed_at, "
+            "derived_catchup_from, derived_generation_counter "
+            "FROM unified_kg_state WHERE notebook_id=?",
+            (notebook.id,),
+        ).fetchone())
+    # R18:发布同事务的代际重置——指针/在飞/催收归零,counter 不回卷;
+    # 拿着发布前快照(P=7, G=9)的翻转在两个方向的 CAS 上都作废。
+    assert generational == {
+        "cluster_generation": 0, "community_generation": 0,
+        "derived_building_generation": 0,
+        "derived_building_claimed_at": None, "derived_catchup_from": None,
+        "derived_generation_counter": 9,
+    }, generational
+    from app.repositories.sqlite.unified_kg_store import (
+        UnifiedKgStore as _UKS,
+    )
+    with repo._write() as db:
+        assert not _UKS.flip_cluster_generation(
+            db, notebook.id, published_from=7, generation=9,
+            catchup_from_ts=_now(), now=_now())
     assert names == ["Pipeline Strategy", "The strategy is core-admitted."]
     assert facts == 2
     assert extraction == {
