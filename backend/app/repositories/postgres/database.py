@@ -705,6 +705,40 @@ class PostgresDatabase:
             except Exception:  # noqa: BLE001 - reported by the next statement
                 pass
 
+    def scale_build_claim_held_anywhere(self, notebook_id: str) -> bool:
+        """READ-ONLY probe: is this notebook's exclusive claim granted to ANY
+        session (this process, another service process, the offline CLI — or
+        notebook delete's phase 4, which shares the namespace)?
+
+        codex #676 R6 P2: the serving process's in-memory ``building`` set
+        cannot see the supported "offline CLI beside the live service"
+        topology, and reporting a terminal ``viz_unavailable`` while that
+        build runs strands an open canvas (the frontend only polls on
+        ``viz_building``). Unlike ``try_scale_build_lock`` this NEVER takes
+        the lock — a try-acquire probe would momentarily hold the claim and
+        could spuriously refuse a real claimer racing it. A plain ``pg_locks``
+        read on a pooled connection cannot race anything. Fail-open False:
+        an unanswerable probe must not invent a builder that would keep a
+        canvas polling forever.
+        """
+        lock_key = advisory_lock_key(notebook_id)
+        try:
+            with self.connect() as db:
+                row = db.execute(
+                    "SELECT EXISTS ("
+                    "SELECT 1 FROM pg_locks "
+                    "WHERE locktype = 'advisory' AND granted "
+                    "AND classid = %s::oid AND objid = %s::oid"
+                    ") AS held",
+                    (
+                        advisory_lock_oid(_SCALE_BUILD_LOCK_NAMESPACE),
+                        advisory_lock_oid(lock_key),
+                    ),
+                ).fetchone()
+            return bool(row is not None and row["held"])
+        except Exception:  # noqa: BLE001 - unanswerable == no builder observed
+            return False
+
     def try_scale_build_lock(self, notebook_id: str) -> ScaleBuildLockAttempt:
         """Claim one notebook's scale-index build across processes, or fail fast.
 

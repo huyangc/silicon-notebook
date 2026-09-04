@@ -159,6 +159,7 @@ class ScaleArtifactRuntime:
         copy_stats_memo,
         require_indexing_write: Callable[[str], None] = lambda _notebook_id: None,
         scale_build_lock: Callable[[str], ScaleBuildLockAttempt] | None = None,
+        scale_build_claim_probe: "Callable[[str], bool] | None" = None,
     ) -> None:
         self.settings = settings
         self.event_log = event_log
@@ -236,6 +237,7 @@ class ScaleArtifactRuntime:
         # without one hand back the UNSUPPORTED sentinel, so this seam is never
         # a bare None at the call sites below.
         self._scale_build_lock = scale_build_lock
+        self._scale_build_claim_probe = scale_build_claim_probe
         # Claims held by in-flight builds in THIS process, so the swap step can
         # re-verify the very handle its build was admitted on. Deliberately not
         # guarded by ``building_lock``: the fold path re-verifies from inside a
@@ -1115,6 +1117,22 @@ class ScaleArtifactRuntime:
         with self._scale_lock_handles_lock:
             handle = self._scale_build_lock_handles.pop(notebook_id, None)
         self._release_scale_build_handle(handle)
+
+    def scale_build_claim_held_anywhere(self, notebook_id: str) -> bool:
+        """Cross-process view of "is someone building this notebook" (codex
+        #676 R6 P2): delegates to the injected read-only claim probe (pg_locks
+        on PostgreSQL; constant False on SQLite, whose only mutex is this
+        process's ``building`` set). Fail-open False — an unanswerable probe
+        must not keep a canvas polling forever. The shared claim namespace
+        means notebook delete's phase 4 also answers True; reporting
+        "building" for a moment on a notebook that is being deleted is
+        harmless (the view 404s right after)."""
+        if self._scale_build_claim_probe is None:
+            return False
+        try:
+            return bool(self._scale_build_claim_probe(notebook_id))
+        except Exception:  # noqa: BLE001 - unanswerable == no builder observed
+            return False
 
     def verify_scale_build_lock(self, notebook_id: str) -> bool:
         """Whether this notebook's registered claim is still provably held.

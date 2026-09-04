@@ -1828,6 +1828,7 @@ class RepositoryRuntime:
             # facade surface — the adapter decides whether the backend can
             # provide one, and the service never inspects the URL scheme.
             scale_build_lock=self.database.try_scale_build_lock,
+            scale_build_claim_probe=self.database.scale_build_claim_held_anywhere,
         )
         return self.scale_artifacts
 
