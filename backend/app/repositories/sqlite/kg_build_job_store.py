@@ -991,6 +991,10 @@ class KgBuildJobStore:
                 "cluster_mutation_seq=unified_kg_state.cluster_mutation_seq+1,"
                 "cluster_input_version='',community_seq=-1,canonical_rel_seq=-1,"
                 "mention_seq=-1,"
+                # 代际重置——理由见 PG 孪生(codex #671 R18 P1)。
+                "cluster_generation=0,community_generation=0,"
+                "derived_building_generation=0,"
+                "derived_building_claimed_at=NULL,derived_catchup_from=NULL,"
                 "updated_at=excluded.updated_at,"
                 "indexing_pipeline_id=excluded.indexing_pipeline_id,"
                 "indexing_pipeline_version=excluded.indexing_pipeline_version",

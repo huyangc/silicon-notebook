@@ -957,6 +957,15 @@ class KgBuildJobStore:
                 "cluster_mutation_seq=unified_kg_state.cluster_mutation_seq+1,"
                 "cluster_input_version='',community_seq=-1,canonical_rel_seq=-1,"
                 "mention_seq=-1,"
+                # 代际重置(codex #671 R18 P1):本次发布刚整表清空三张
+                # 派生表(跨代 blanket),不归零指针/在飞/催收的话,并发
+                # 代际 rebuild 的翻转双 CAS 仍然匹配——它会把一个行已被
+                # 删光的代发布出去再清 dirty。归零后其翻转两个方向都作废
+                # (响亮 KgDerivedGenerationPreempted,与 standalone delete
+                # 同款契约);counter 刻意不回卷(版本键防混叠红线)。
+                "cluster_generation=0,community_generation=0,"
+                "derived_building_generation=0,"
+                "derived_building_claimed_at=NULL,derived_catchup_from=NULL,"
                 "updated_at=EXCLUDED.updated_at,"
                 "indexing_pipeline_id=EXCLUDED.indexing_pipeline_id,"
                 "indexing_pipeline_version=EXCLUDED.indexing_pipeline_version",
