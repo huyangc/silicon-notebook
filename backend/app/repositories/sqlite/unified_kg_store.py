@@ -615,6 +615,7 @@ class UnifiedKgStore:
             "MIN(o.payload) AS payload "
             "FROM concept_clusters c "
             "JOIN knowledge_objects o ON o.id = c.member_object_id "
+            "AND o.status != 'deprecated' "
             "WHERE c.notebook_id=? AND c.generation != ? "
             "AND c.generation NOT IN ("
             "  SELECT derived_building_generation FROM unified_kg_state u "
