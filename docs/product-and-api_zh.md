@@ -2107,3 +2107,4 @@ workload 做有界规划，不引入 Anthropic SDK 一类通用 Agent。模型�
 - SQLite 与 PostgreSQL 都可由唯一 repository factory 原子选择，发行默认仍是 SQLite。只改 `DATABASE_URL` 不会同步既有行；存量切换/回滚必须停写、验证备份，必要时执行外部数据迁移，并在启动后做一致性检查。PostgreSQL 向量存 `bytea`，不要求 pgvector。
 - `off` 模式 PDF 回退用 PyMuPDF4LLM 的分页 Markdown，保留标题、多栏阅读顺序和重建表格；只有该解析器缺失或报错时才最后回退 pypdf。公式、图片和复杂扫描件的权威高保真路径仍是 MinerU。URL/上传文件的云解析在重试后仍失败时也走同一本地回退，并以 `extracted` + `parse_quality_warning=true` 返回；来源详情会说明风险并提供重新解析/删除入口，后续 MinerU 重解析成功会清掉警告。见[用 MinerU 解析 PDF](./operations_zh.md#用-mineru-解析-pdf)。
 - 用户记忆保持手动 opt-in，当前没有自动记忆行为。
+- PostgreSQL 语句超时取消（`psycopg.errors.QueryCanceled`）一旦冒泡到请求栈顶层，会返回结构化 `503`（`detail` 加机器可读的 `code: "query_timeout"`），并发出一条 `query_timeout` 事件（带请求 method/path，路由带 notebook 维度时一并携带）——而不再是裸的、不可观测的 `500`。前端仍显示既有通用 5xx「服务暂时不可用」文案（不新增用户可见文案；`frontend/app/errors.ts` 对所有 5xx 都刻意泛化）。既有的 savepoint 有界探测（例如 `knowledge_store.py` 的 chunk 词法召回预算）不受影响——它们在自己的调用点就已捕获并转换为领域异常，QueryCanceled 到不了这个 handler。

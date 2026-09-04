@@ -62,6 +62,16 @@ _RECOVERY_DELETE_BATCH_ROWS = 5000
 # 一截」,余量由下一轮 rebuild 的预回收接手,启动时间预算因此有硬上界。
 _RECOVERY_REAP_PAGES_BUDGET = 40
 
+# T-W4-4:``purge_kg_embeddings`` 的两条 DELETE 按 notebook_id 整表清空,唯一
+# 调用点是离线 CLI(``app.scripts.reembed_kg``,要求 ``--confirm-service-
+# stopped``),对单个 notebook 全量重嵌前的清场——不像本文件其余 backfill_*
+# 那样按 keyset 分页,一次删光该 notebook 的 knowledge_embeddings/
+# relation_embeddings。大库上这两条 DELETE 本身就可能超过默认 30s
+# statement_timeout;既然离线维护本就不共享请求路径的时间预算,这里给足
+# 十分钟事务内放宽(``true`` = 随事务提交/回滚自动复原,不会泄漏给同连接
+# 之后的任何借用者——见 notebook_store.py:437/migrator.py:191 同款先例)。
+_PURGE_KG_EMBEDDINGS_TIMEOUT_MS = 600_000
+
 # 热路径修复批 2(R6)的「非空元素资格判定」谓词——单一定义点,供
 # count_missing_element_vectors 及其配套 discovery/page 站点(见各方法自己的调用)
 # 共用。用 ``psycopg.sql.Literal`` 把 PY_WHITESPACE 安全渲染成同值字面量后直接拼进 SQL
@@ -1440,6 +1450,14 @@ class PostgresMaintenanceAdapter:
 
     def purge_kg_embeddings(self, notebook_id: str) -> None:
         with self._runtime.database.write() as db:
+            # T-W4-4: transaction-local statement_timeout raise (see the
+            # module constant's docstring) — gone the moment this
+            # transaction commits or rolls back, so it never leaks onto a
+            # pooled connection's next borrower.
+            db.execute(
+                "SELECT set_config('statement_timeout', %s, true)",
+                (f"{_PURGE_KG_EMBEDDINGS_TIMEOUT_MS}ms",),
+            )
             db.execute(
                 "DELETE FROM knowledge_embeddings WHERE notebook_id=%s",
                 (notebook_id,),
