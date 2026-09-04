@@ -194,9 +194,9 @@ def test_paged_ann_reproduces_the_whole_matrix_index(repo, monkeypatch, page_row
 def test_second_pass_synonym_edges_match_the_one_matrix_call(
     repo, monkeypatch, page_rows
 ):
-    """The second pass reads the query set again and maps every row back to its
-    first-pass hnsw label. Getting that mapping wrong is invisible in a
-    one-page run and catastrophic in a many-page one — hence page_rows=1."""
+    """The paged query walks the index's OWN stored vectors label-page by
+    label-page. A wrong page/label offset is invisible in a one-page run and
+    catastrophic in a many-page one — hence page_rows=1."""
     from app.domain.kg.ppr_pairs import emb_synonym_edges_paged
 
     notebook = _seed(repo)
@@ -213,22 +213,31 @@ def test_second_pass_synonym_edges_match_the_one_matrix_call(
     got = emb_synonym_edges_paged(
         labels,
         index,
-        builder.projections.embedding_pages(
-            notebook.id, "knowledge_embeddings", "object_id", page_rows
-        ),
         builder.settings.ppr_emb_synonym_threshold,
         builder.settings.ppr_emb_synonym_topk,
+        page_rows=page_rows,
     )
 
-    assert {(a, b) for a, b, _ in got} == {(a, b) for a, b, _ in want}
-    assert got == want, "row-major first-seen order, hence the sim, must match"
+    # Pairs AND their row-major first-seen order must match exactly. The
+    # similarities carry a ~1e-7 wobble: hnswlib's cosine space re-normalizes
+    # stored vectors in float32, so ``get_items`` hands back rows that differ
+    # from the pre-normalized originals by one rounding step — semantically
+    # the same edge set, compared under a tolerance instead of bit equality.
+    assert [(a, b) for a, b, _ in got] == [(a, b) for a, b, _ in want]
+    assert all(
+        abs(g - w) < 1e-5
+        for (_, _, g), (_, _, w) in zip(got, want)
+    ), "similarities drifted beyond float32 re-normalization rounding"
 
 
-def test_a_query_row_the_index_never_labelled_is_dropped_not_relabelled(repo):
-    """Drift adjudication: pass two can see an id pass one never labelled. It
-    must be DROPPED — appending it under a fresh label would push an index out
-    of the ``a * n + b`` pair-key space and corrupt every pair. Mutation
-    anchor: drop the ``label_of`` filter and this goes red."""
+def test_synonym_edges_ignore_database_state_after_the_index_is_built(repo):
+    """codex #676 R1 (P2) closure pin: the second pass must NOT read the
+    database — an embedding updated (or deleted) between the passes would
+    otherwise query a NEW vector against the OLD one stored in the index,
+    minting edges no consistent snapshot supports. The query set comes from
+    ``get_items`` on the index itself, so wiping every embedding row after
+    the build must change nothing. Mutation anchor: reintroduce a DB read
+    into ``emb_synonym_edges_paged`` and this goes red."""
     from app.domain.kg.ppr_pairs import emb_synonym_edges_paged
 
     notebook = _seed(repo, objects=6, chunks_per_object=1)
@@ -238,69 +247,23 @@ def test_a_query_row_the_index_never_labelled_is_dropped_not_relabelled(repo):
     )
     assert index is not None and len(labels) > 2
 
-    pages = list(
-        builder.projections.embedding_pages(
-            notebook.id, "knowledge_embeddings", "object_id", 10_000
-        )
+    before = emb_synonym_edges_paged(
+        labels, index, 0.0, builder.settings.ppr_emb_synonym_topk,
+        page_rows=2,
     )
-    page_ids, page_matrix = pages[0]
-    drifted = ([*page_ids, "object-that-arrived-after-pass-one"],
-               np.vstack([page_matrix, page_matrix[:1]]))
+    assert before, "the seeded corpus must produce synonym edges at all"
 
-    edges = emb_synonym_edges_paged(
-        labels, index, [drifted], 0.0, builder.settings.ppr_emb_synonym_topk
-    )
-
-    known = set(labels)
-    assert edges
-    assert all(a in known and b in known for a, b, _ in edges)
-
-
-class _ExplodingQueryPages:
-    """A query-page iterable that raises while the DATABASE is being read —
-    i.e. from inside the generator, not from hnswlib."""
-
-    def __init__(self, first_page, error):
-        self._first_page = first_page
-        self._error = error
-
-    def __iter__(self):
-        yield self._first_page
-        raise self._error
-
-
-def test_a_database_failure_in_the_second_pass_aborts_instead_of_failing_open(repo):
-    """Double-review fix (P3-5). The fail-open guard covers hnswlib ONLY. A
-    QueryCanceled / pool failure while re-reading the query set must propagate:
-    swallowing it yields an edge-less graph that the build then persists as a
-    healthy-looking manifest, and that wrong artifact is served for the whole
-    life of the index. Mutation anchor: widen the guard back around the page
-    loop and this stops raising."""
-    from app.domain.kg.ppr_pairs import emb_synonym_edges_paged
-
-    notebook = _seed(repo, objects=6, chunks_per_object=1)
-    builder = repo._runtime.scale_builder
-    labels, index, _vectors = _reference_leg(
-        builder, notebook.id, "knowledge_embeddings", "object_id"
-    )
-    assert index is not None and len(labels) > 2
-    first_page = next(iter(
-        builder.projections.embedding_pages(
-            notebook.id, "knowledge_embeddings", "object_id", 2
+    with repo._write() as db:
+        db.execute(
+            "DELETE FROM knowledge_embeddings WHERE notebook_id=?",
+            (notebook.id,),
         )
-    ))
 
-    class _PoolFailure(RuntimeError):
-        pass
-
-    with pytest.raises(_PoolFailure):
-        emb_synonym_edges_paged(
-            labels,
-            index,
-            _ExplodingQueryPages(first_page, _PoolFailure("pool exhausted")),
-            0.0,
-            builder.settings.ppr_emb_synonym_topk,
-        )
+    after = emb_synonym_edges_paged(
+        labels, index, 0.0, builder.settings.ppr_emb_synonym_topk,
+        page_rows=2,
+    )
+    assert after == before
 
 
 def test_an_hnswlib_failure_fails_open_and_reports_only_the_exception_class(repo):
@@ -324,6 +287,9 @@ def test_an_hnswlib_failure_fails_open_and_reports_only_the_exception_class(repo
         def set_ef(self, _ef):
             return None
 
+        def get_items(self, labels):
+            return np.zeros((len(labels), 4), dtype=np.float32)
+
         def knn_query(self, _data, k=1):
             raise _HnswFailure("index corrupted: /var/lib/secret/path")
 
@@ -331,9 +297,6 @@ def test_an_hnswlib_failure_fails_open_and_reports_only_the_exception_class(repo
     edges = emb_synonym_edges_paged(
         labels,
         _BrokenIndex(),
-        builder.projections.embedding_pages(
-            notebook.id, "knowledge_embeddings", "object_id", 2
-        ),
         0.0,
         builder.settings.ppr_emb_synonym_topk,
         on_hnsw_error=lambda exc: seen.append(type(exc).__name__),

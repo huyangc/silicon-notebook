@@ -433,18 +433,16 @@ class ScaleIndexBuilder:
                 return []
             from app.domain.kg.ppr_pairs import emb_synonym_edges_paged
 
-            # SECOND pass over the query set: the index is complete, but its
-            # input matrix is not resident any more, so the query rows are
-            # re-read from the database in the same keyset order pass one used.
-            # emb_synonym_edges_paged maps every page row back to its pass-one
-            # hnsw label by id and drops rows the first pass never labelled —
-            # see its docstring for why both are required.
+            # The query set comes from the INDEX ITSELF (get_items, bounded
+            # label pages) — deliberately NOT a second database pass: an
+            # embedding updated between the passes would keep its id yet
+            # query its NEW vector against the OLD one stored in the index,
+            # minting edges no consistent snapshot supports (codex #676 R1
+            # P2). Querying the index's own stored vectors closes that class
+            # by construction; see emb_synonym_edges_paged's docstring.
             return emb_synonym_edges_paged(
                 ann_labels,
                 kg_ann_index,
-                self.projections.embedding_pages(
-                    notebook_id, "knowledge_embeddings", "object_id"
-                ),
                 self.settings.ppr_emb_synonym_threshold,
                 self.settings.ppr_emb_synonym_topk,
                 on_hnsw_error=lambda exc: self.event_log.emit(
