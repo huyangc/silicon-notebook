@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 
 import pytest
 
@@ -10,6 +11,7 @@ from app.models.ask import AskRequest
 from app.models.notebooks import NotebookCreate
 from app.models.sources import SourceImportFile, SourceImportRequest
 from app.repositories.bundle import PersistenceBundle
+from app.repositories.ports import UploadedSourceFile
 
 
 pytestmark = pytest.mark.postgres_integration
@@ -720,6 +722,109 @@ def test_postgres_last_knowhow_table_delete_sweeps_asset_row_and_file(
         assert knowhow_api.maybe_sweep_orphan_assets(
             repository, notebook.id, min_interval=0, background=False
         )
+    finally:
+        reset_request_user(token)
+        repository.close()
+
+
+def test_delete_source_does_not_wait_on_notebook_capacity_lock(
+    postgres_settings, tmp_path
+):
+    """W4-2 (WR-7): ``delete_source``'s teardown transaction no longer calls
+    ``source_exists_for_update_tx`` with a ``notebook_id`` (see
+    ``source_ingestion.delete_source``), so it must never take the
+    ``notebooks`` row's ``FOR NO KEY UPDATE`` capacity lock. Pin this
+    BEHAVIORALLY, not just by call shape (the SQLite-backed
+    ``test_delete_source_does_not_pass_notebook_id_to_the_lock_probe`` pins
+    the call shape but SQLite discards the argument either way and cannot
+    observe a real lock wait):
+
+    hold that lock open on a separate connection while deleting a source in
+    the SAME notebook on the repository's own pool — the delete must
+    complete promptly instead of queueing behind the held lock.
+
+    Mutation check (performed manually while implementing this task): passing
+    ``source.notebook_id`` back into the ``source_exists_for_update_tx`` call
+    at the ``delete_source`` call site makes this test fail — on this
+    fixture's ``postgres_lock_timeout_seconds=1``, ``delete_source`` raises
+    ``psycopg.errors.LockNotAvailable`` while waiting on the held lock rather
+    than merely running slow; a deployment with a longer/no lock timeout
+    would instead observe the ``elapsed < release_delay / 2`` assertion
+    below fail once the held lock is released.
+    """
+    from app.repositories.postgres.repository import PostgresRepository
+
+    postgres_settings.storage_dir = str(tmp_path / "pg-delete-lock")
+    postgres_settings.event_log_enabled = False
+    postgres_settings.llm_log_enabled = False
+    postgres_settings.kg_auto_extract = False
+    repository = PostgresRepository(postgres_settings)
+    owner = repository.create_user("f00123456", "pw123456")
+    token = set_request_user(owner)
+    try:
+        notebook = repository.create_notebook(NotebookCreate(name="Lock race"))
+        uploaded = repository.upload_sources(
+            notebook.id,
+            [
+                UploadedSourceFile(
+                    file_name="a.md",
+                    content_type="text/markdown",
+                    content=b"# T\n\nbody",
+                )
+            ],
+            scheduler=lambda source_id: None,
+        )
+        source_id = uploaded[0].id
+
+        lock_acquired = threading.Event()
+        release_lock = threading.Event()
+        release_delay = 3.0
+        holder_errors: list[BaseException] = []
+
+        def hold_notebook_capacity_lock() -> None:
+            try:
+                with repository._runtime.database.write() as connection:
+                    connection.execute(
+                        "SELECT 1 FROM notebooks WHERE id=%s FOR NO KEY UPDATE",
+                        (notebook.id,),
+                    )
+                    lock_acquired.set()
+                    # Either the test releases us early (fix is behaving) or
+                    # we time out and release on our own so the test cannot
+                    # hang forever if something goes wrong.
+                    release_lock.wait(timeout=release_delay)
+            except BaseException as exc:  # pragma: no cover - surfaced below
+                holder_errors.append(exc)
+                lock_acquired.set()
+
+        holder = threading.Thread(target=hold_notebook_capacity_lock)
+        holder.start()
+        try:
+            assert lock_acquired.wait(timeout=10), "lock holder never started"
+            assert not holder_errors, holder_errors
+
+            started = time.monotonic()
+            repository.delete_source(source_id)
+            elapsed = time.monotonic() - started
+        finally:
+            release_lock.set()
+            holder.join(timeout=10)
+        assert not holder_errors, holder_errors
+
+        # The removed notebook-row lock means delete_source never waits on
+        # connection A's still-open transaction. If the lock were retaken,
+        # delete_source would block until `release_lock` fires at
+        # `release_delay` seconds — so a generous ceiling well under that
+        # still catches the regression without being timing-flaky.
+        assert elapsed < release_delay / 2, (
+            f"delete_source took {elapsed:.2f}s — looks like it queued "
+            "behind the held notebooks-row capacity lock"
+        )
+
+        with repository._runtime.database.connect() as connection:
+            assert connection.execute(
+                "SELECT 1 FROM sources WHERE id=%s", (source_id,)
+            ).fetchone() is None
     finally:
         reset_request_user(token)
         repository.close()
