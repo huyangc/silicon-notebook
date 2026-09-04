@@ -406,6 +406,14 @@ class Settings(BaseSettings):
     # 事务,页间释放写锁;上限同样压在 SQLITE_MAX_VARIABLE_NUMBER 之下。
     kg_generation_reap_page_rows: int = Field(
         5000, ge=50, le=20_000, validation_alias="KG_GENERATION_REAP_PAGE_ROWS")
+    # 批 3·W4(codex #676):scale build 图侧 keyset 分页(graph_rows 的对象/关系/
+    # 块/簇四腿、id_element_rows)与 embedding 向量分页(embedding_pages)共用的
+    # 每页行数预算——此前是生产代码里的字面量 10_000。界住的是驱动缓冲:行宽大的
+    # 库(如 evidence 字段是大 JSON 的库)每行 ~4KB 时,10k 行/页 ≈ 40MB,受限部署
+    # (容器内存小、或本就跑在小规格实例上)可调低以缩短单页驻留;调高只多攒几页
+    # 才落盘,换来更少的分页往返。上限防误配成整表扫描(失去分页存在的意义)。
+    graph_fetch_page_rows: int = Field(
+        10_000, ge=100, le=200_000, validation_alias="GRAPH_FETCH_PAGE_ROWS")
     # 批 3·W3(D3):大库锁定「切换索引管线」的对象数阈值。判据必须按
     # WR-2 的病灶规模定(整库重建的发布事务在百万级对象上不可完成),
     # 不能复用拷贝阈值(5000 行)——那会把普通笔记本误锁。计数走

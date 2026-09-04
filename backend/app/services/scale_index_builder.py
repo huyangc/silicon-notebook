@@ -254,7 +254,10 @@ class ScaleIndexBuilder:
         capacity = 0
         started = time.perf_counter()
         upper_bound = self.projections.embedding_row_count(notebook_id, table)
-        pages = self.projections.embedding_pages(notebook_id, table, id_column)
+        pages = self.projections.embedding_pages(
+            notebook_id, table, id_column,
+            page_rows=int(self.settings.graph_fetch_page_rows),
+        )
         while True:
             page = next(pages, None)
             load_ms += (time.perf_counter() - started) * 1000

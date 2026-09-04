@@ -1354,7 +1354,10 @@ class GraphRetrievalService(_RetrievalState):
             # JSON is folded into ``out`` and dropped instead of the whole
             # notebook's rows being materialized first.
             with self._connect() as db:
-                for cr in self.chunks.id_element_rows(db, notebook_id):
+                for cr in self.chunks.id_element_rows(
+                    db, notebook_id,
+                    page_rows=int(self.settings.graph_fetch_page_rows),
+                ):
                     for el in json.loads(cr["element_ids"] or "[]"):
                         out.setdefault(el, []).append(cr["id"])
             return out
@@ -1501,7 +1504,8 @@ class GraphRetrievalService(_RetrievalState):
             with self._connect() as db:
                 rows = (
                     self.knowledge.notebook_object_evidence_rows_paged(
-                        db, notebook_id
+                        db, notebook_id,
+                        page_rows=int(self.settings.graph_fetch_page_rows),
                     )
                     if paged
                     else self.knowledge.notebook_object_evidence_rows(

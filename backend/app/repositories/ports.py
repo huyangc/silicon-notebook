@@ -1903,14 +1903,21 @@ class ChunkStorePort(Protocol):
         source_ids: Sequence[str],
     ) -> list[Any]: ...
     @staticmethod
-    def id_element_rows(db: object, notebook_id: str) -> Iterable[Any]:
+    def id_element_rows(
+        db: object, notebook_id: str, page_rows: int | None = None
+    ) -> Iterable[Any]:
         """Whole-notebook ``(id, element_ids)`` rows in chunk insertion order.
 
         LAZY on PostgreSQL (a keyset-paged generator), a materialized list on
         SQLite. Consume it exactly once, by iteration, INSIDE the connection
         scope that produced it: ``len()``, indexing, a second pass, or any use
         after ``db`` is closed is a backend-dependent bug that the SQLite
-        suites cannot catch."""
+        suites cannot catch.
+
+        ``page_rows`` (batch-3 W4, codex #676) is the PostgreSQL keyset page
+        size (``settings.graph_fetch_page_rows``, ``None`` resolves the
+        module default at call time); SQLite accepts and ignores it, since
+        that backend never paged this read."""
         ...
     @staticmethod
     def chunks_for_element_ids(
