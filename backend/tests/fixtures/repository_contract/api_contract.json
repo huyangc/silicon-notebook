@@ -4397,6 +4397,11 @@
               ],
               "title": "Job Id"
             },
+            "large_library_locked": {
+              "default": false,
+              "title": "Large Library Locked",
+              "type": "boolean"
+            },
             "missing": {
               "title": "Missing",
               "type": "boolean"
