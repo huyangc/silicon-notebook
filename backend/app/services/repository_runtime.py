@@ -1466,6 +1466,12 @@ class RepositoryRuntime:
             self.notebook_store,
             self.source_chunking,
             self.indexing_pipelines,
+            # 批 3·W3(D3):大库禁用切换——判据与社区构建大库守卫同源
+            # (copy_stats.copyable,seq-gated memo)。晚绑定经 self,
+            # scale_artifacts 在别处构造也不受装配顺序影响。
+            large_library=lambda notebook_id: not bool(
+                self.scale_artifacts.notebook_copy_stats(notebook_id)["copyable"]
+            ),
         )
         return self.source_embedding, self.source_chunking
 

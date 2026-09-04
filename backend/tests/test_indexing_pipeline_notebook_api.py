@@ -41,6 +41,7 @@ def test_reader_projection_is_sanitized_and_builtin_is_selected(client):
         "available",
         "missing",
         "pending",
+        "large_library_locked",
         "options",
         "changed",
         "warning_count",
@@ -161,3 +162,78 @@ def test_switch_is_refused_while_a_rebuild_worker_is_active(client):
         "indexing_pipeline_generation": "g-active",
         "indexing_pipeline_job_id": job["id"],
     }
+
+
+def _mark_large(monkeypatch) -> None:
+    """把当前 repo 判成大库(批 3·W3 D3 判据的测试化身):copy_stats 的
+    copyable=False 即 scale-tier,与社区构建大库守卫同源。"""
+    from app.api import deps
+
+    runtime = deps.repository()._runtime
+    monkeypatch.setattr(
+        runtime.scale_artifacts, "notebook_copy_stats",
+        lambda notebook_id: {"copyable": False},
+    )
+
+
+def test_large_library_locks_the_pipeline_switch(client, monkeypatch):
+    """批 3·W3(审计 WR-2/决策 D3):大库上任何**变更**都被 begin() 在改
+    desired 之前拒绝(409 + 明确文案,什么都没保存);GET 投影带
+    large_library_locked=True 供前端禁用控件;无变化的幂等保存仍是 200
+    no-op(打开设置直接点保存不该报错)。"""
+    notebook_id = _notebook(client)
+    _mark_large(monkeypatch)
+    # 本 harness 未加载部署插件——注入一个可用的假 option,让请求越过
+    # 「所选管线不可用」的前置校验、真正走到大库闸(校验序刻意如此:
+    # 无效 id 该报不可用,而不是大库文案)。
+    from app.api import deps
+    from app.domain.indexing_pipeline import IndexingPipelineOption
+
+    service = deps.repository()._runtime.indexing_pipeline
+    original_option = service._option
+    fake = IndexingPipelineOption(
+        pipeline_id="deploy.custom", label="x", description="",
+        version="v1", overrides_chunking=True,
+        overrides_kg_extraction=False, available=True,
+    )
+    monkeypatch.setattr(
+        service, "_option",
+        lambda pid: fake if pid == "deploy.custom" else original_option(pid),
+    )
+
+    projection = client.get(
+        f"/api/notebooks/{notebook_id}/indexing-pipeline"
+    ).json()
+    assert projection["large_library_locked"] is True
+
+    # 幂等保存(仍是内建、无变化)走「无变化早退」,先于大库闸——200。
+    unchanged = client.patch(
+        f"/api/notebooks/{notebook_id}/indexing-pipeline",
+        json={"pipeline_id": None},
+    )
+    assert unchanged.status_code == 200
+    assert unchanged.json()["rebuild_status"] == "idle"
+
+    # 真变更被拒:409 + 文案;desired 未落库(投影回读仍是内建/idle)。
+    refused = client.patch(
+        f"/api/notebooks/{notebook_id}/indexing-pipeline",
+        json={"pipeline_id": "deploy.custom"},
+    )
+    assert refused.status_code == 409
+    assert refused.json()["detail"] == (
+        "这本笔记本规模较大，暂不支持切换索引管线；当前索引不受影响。"
+    )
+    after = client.get(
+        f"/api/notebooks/{notebook_id}/indexing-pipeline"
+    ).json()
+    assert after["pipeline_id"] is None
+    assert after["pending"] is False
+    assert after["rebuild_status"] == "idle"
+
+
+def test_small_library_projection_is_not_locked(client):
+    notebook_id = _notebook(client)
+    projection = client.get(
+        f"/api/notebooks/{notebook_id}/indexing-pipeline"
+    ).json()
+    assert projection["large_library_locked"] is False
