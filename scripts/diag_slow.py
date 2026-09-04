@@ -42,7 +42,8 @@ INTEREST_KINDS = (
     "scale_ppr_bailout", "ppr_fallback_refused", "graph_walk_refused",
     "relation_scoring_skipped", "tier2_skipped", "chunk_bruteforce_skipped",
     "kg_bruteforce_refused", "element_scoring_skipped", "dim_mismatch",
-    "scale_fold_refused", "scale_index_build", "scale_ppr_stage",
+    "scale_fold_refused", "viz_lazy_build_refused",
+    "scale_index_build", "scale_ppr_stage",
     "model_error", "ask_stage", "pipeline",
 )
 # 「大库」画像阈值:对象+chunk 超过它才打印逐项诊断旗标
@@ -409,7 +410,7 @@ def report_events(local_dir, since):
                        "relation_scoring_skipped", "tier2_skipped",
                        "chunk_bruteforce_skipped", "kg_bruteforce_refused",
                        "element_scoring_skipped", "dim_mismatch",
-                       "scale_fold_refused"):
+                       "scale_fold_refused", "viz_lazy_build_refused"):
                 refuse_sites[k] += 1
             elif k == "model_error":
                 key = f"{_safe_stage(e.get('stage'))}/{_safe_presence(e.get('error', e.get('message')))}"

@@ -2,6 +2,8 @@
 import os
 import shutil
 import time
+from pathlib import Path
+
 import pytest
 from app.core.config import Settings
 from app.services.sqlite_repository import SQLiteRepository
@@ -229,6 +231,87 @@ def test_stale_viz_refresh_still_spawns_for_a_small_notebook(repo, monkeypatch):
     assert [e for e in events if e.get("kind") == "viz_lazy_build_refused"] == []
 
 
+def _republish_viz_root_out_of_band(repo, nb_id):
+    """同一代内容、新 inode —— 离线 CLI ``import`` 重放同一版本时磁盘上的样子。
+
+    两个 DB 判据(version / cluster_seq)都不会动,所以只有磁盘签名能看见它。
+    """
+    live = Path(str(repo._viz_index_dir(nb_id)))
+    staged = live.parent / f"{live.name}.newgen"
+    shutil.copytree(live, staged)
+    shutil.rmtree(live)
+    staged.rename(live)
+
+
+def test_a_refused_stale_viz_is_served_warm_instead_of_reloaded(repo, monkeypatch):
+    """批 3·W4 T-W4-3b 必修 A:被闸掉刷新的 stale 产物必须进热缓存。
+
+    闸掉之前,stale 是几分钟内自己收敛的过渡态(后台 daemon 正在刷新它);闸掉之后
+    它是**无限期**态。而 ``_viz_manifest_fresh`` 只认新鲜产物,于是超限库每一次
+    ``viz_index`` 读都要重跑一遍 ``load_viz`` —— viz_ids/types/names 三个百万级
+    list 加 CSR 邻接,在服务请求的进程里。无限期 × 每请求重载才是真正的回归。
+
+    槽位的键是**磁盘签名**,不是那两个 DB 判据:后者说「这一代落后于数据库」(正因
+    如此它才在这里,而且会一直为真),签名说「这还是我上次载入并判过 stale 的那一
+    代」。所以下面第二段:同代内容换个 inode(离线 import 的形状)必须自然 miss。
+
+    变异钉:把 stale 分支的缓存写回删掉(或把命中分支改回只服务 fresh 条目),
+    ``loads`` 会变成两次,第一个断言即红。
+    """
+    nb = _star(repo)
+    repo.store_kg(nb.id, None, [
+        {"local_id": "d", "object_type": "concept", "payload": {"name": "leakage", "section_path": ""}, "evidence": []},
+    ], [])
+    repo._viz_idx_cache.pop(nb.id, None)
+    scale = repo._runtime.scale_artifacts
+    monkeypatch.setattr(repo.settings, "viz_sync_build_max_objects", 0)
+    spawned: list[str] = []
+    monkeypatch.setattr(scale, "_spawn_viz_build", lambda nbid: spawned.append(nbid))
+    loads: list[str] = []
+    real_load = scale.artifacts.load_viz
+    monkeypatch.setattr(
+        scale.artifacts, "load_viz",
+        lambda nbid: loads.append(nbid) or real_load(nbid),
+    )
+
+    first = scale.viz_index(nb.id)
+    second = scale.viz_index(nb.id)
+
+    assert first is not None                 # 陈旧折叠图照旧供图
+    assert second is first                   # ...而且是同一个对象,没有重新载入
+    assert loads == [nb.id]                  # 两次读只付一次 load_viz
+    assert spawned == []                     # 闸仍然生效(缓存不是绕过闸的后门)
+
+    _republish_viz_root_out_of_band(repo, nb.id)
+    third = scale.viz_index(nb.id)
+
+    assert third is not None
+    assert third is not first, "换代(新 inode)必须让签名槽位失效并重载"
+    assert loads == [nb.id, nb.id]
+
+
+def test_the_stale_viz_slot_is_replaced_when_the_index_build_publishes(repo, monkeypatch):
+    """另一半失效路径:指定生产者发布新产物后,热槽位里不能再是那份 stale 图。"""
+    nb = _star(repo)
+    repo.store_kg(nb.id, None, [
+        {"local_id": "d", "object_type": "concept", "payload": {"name": "leakage", "section_path": ""}, "evidence": []},
+    ], [])
+    repo._viz_idx_cache.pop(nb.id, None)
+    scale = repo._runtime.scale_artifacts
+    monkeypatch.setattr(repo.settings, "viz_sync_build_max_objects", 0)
+    monkeypatch.setattr(scale, "_spawn_viz_build", lambda nbid: None)
+
+    stale = scale.viz_index(nb.id)
+    assert stale is not None
+    assert scale.viz_probe(nb.id)["viz_stale"] is True
+
+    repo.build_viz_index(nb.id)              # 指定生产者发布新一代
+    fresh = scale.viz_index(nb.id)
+
+    assert fresh is not stale
+    assert scale.viz_probe(nb.id)["viz_stale"] is False
+
+
 def test_absent_viz_build_is_refused_for_a_large_notebook(repo, monkeypatch):
     """第二个调用点:没有产物 + 超限 → 什么都不建,发同一族事件。
 
@@ -356,10 +439,14 @@ def test_rebuild_skips_viz_build_for_large_notebook(repo, monkeypatch):
     must NOT build viz at all — neither synchronously (build_viz materialises EVERY
     object + all relations + the full cluster_map into one ~12-20GB graph, stacked on
     the rebuild's peak) nor via _spawn_viz_build (a daemon that overlaps the still-live
-    rebuild frame — codex r2 P1b). Its viz is refreshed lazily OFF the rebuild thread:
-    the cluster rebuild bumped cluster_mutation_seq, build_viz stamps it, and
-    viz_index/viz_probe compare it, so the persisted viz reads stale and the next
-    KG-view open rebuilds it. Re-adding either build call for large fails here."""
+    rebuild frame — codex r2 P1b). Re-adding either build call for large fails here.
+
+    批 3·W4 T-W4-3b: this docstring used to end "its viz is refreshed lazily OFF the
+    rebuild thread ... the next KG-view open rebuilds it". That stopped being true in
+    T-W4-3, which refuses the lazy refresh inside a request-serving process for the
+    same multi-GB reason. The cluster rebuild still bumps cluster_mutation_seq so the
+    persisted viz reads STALE and keeps serving; republishing it is the scale index
+    build's job (queued right below this branch — see the two rebuilds test)."""
     nb = repo.create_notebook(NotebookCreate(name="big"))
     _seed_star_kg(repo, nb.id)
     monkeypatch.setattr(repo.settings, "viz_sync_build_max_objects", 0)  # 3 objects → large
@@ -388,6 +475,87 @@ def test_rebuild_proactively_builds_viz_sync_for_small_notebook(repo, monkeypatc
     repo.rebuild_unified_kg(nb.id)
     assert sync_calls == [nb.id]    # small: sync proactive build
     assert async_calls == []
+
+
+def _spy_scale_trigger(repo, monkeypatch):
+    calls: list[tuple] = []
+    monkeypatch.setattr(
+        repo._runtime.scale_artifacts, "trigger",
+        lambda nbid, when="now", mode="auto": calls.append((nbid, when, mode)),
+    )
+    return calls
+
+
+def test_a_consumed_once_set_no_longer_silences_the_large_rebuild_tail(repo, monkeypatch):
+    """批 3·W4 T-W4-3b 必修 B:大库跳过分支登记的「离峰恢复」必须在常态下也成立。
+
+    事实链:``maybe_auto_index`` 的 ``auto_index_checked`` 是每进程每库一次的 set,
+    finally 无条件 add;唯一的 re-arm 点是 kg_mutation 的 dirty choke point,而
+    rebuild 刻意不走它(``finish_rebuild_state`` 必须不动 ``kg_mutation_seq``)。
+    每次入库和每次走全量回退的检索都会调 ``maybe_auto_index``,所以到 rebuild 尾部
+    时那个 set 通常**已经被消费掉了**——而重建恰恰是让上一次判定作废的那件事(上
+    一次可能正是判的「索引是新鲜的,不用建」,重建之后它已经 stale)。于是尾部这次
+    调用直接 return,而 T-W4-3 之后它是大库 viz 唯一的自动生产者:viz 停在 stale
+    直到进程重启。
+
+    整改:大库跳过分支在调 ``maybe_auto_index`` 之前 ``rearm_auto_index``。它只允许
+    **重新评估**,四道前置(auto_enabled / 未在建在队 / NOT copyable / 状态闸)一道
+    不减。``trigger`` 打桩成不入队的 spy,好让第二轮不被「已排队」早退掩盖。
+
+    变异钉:删掉那一行 ``rearm_auto_index``,``calls`` 只剩一条,末尾断言即红。
+    """
+    monkeypatch.setattr(repo.settings, "notebook_copy_max_rows", 0)      # copyable=False → 「大」
+    monkeypatch.setattr(repo.settings, "viz_sync_build_max_objects", 0)  # viz 尺子上也「大」
+    nb = repo.create_notebook(NotebookCreate(name="big"))
+    _seed_star_kg(repo, nb.id)
+    calls = _spy_scale_trigger(repo, monkeypatch)
+
+    repo.maybe_auto_index(nb.id)     # 入库/检索回退先消费掉 once-set(生产上的常态)
+    assert len(calls) == 1
+    assert nb.id in repo._auto_index_checked
+    repo.rebuild_unified_kg(nb.id)   # 重建让那次判定作废——尾部必须重新评估
+
+    assert [c[0] for c in calls] == [nb.id, nb.id]
+
+
+def test_a_forced_second_rebuild_still_reaches_the_auto_index_evaluation(repo, monkeypatch):
+    """同一条恢复路径的另一种到达方式:同进程里的第二次**强制**重建。
+
+    普通第二次重建会被 ``cluster_input_version`` 的 skip 门挡在尾部之前(输入没变),
+    所以「同进程两次重建」只有在 ``force=True`` 时才真正走到尾部——那是 recluster
+    脚本 / ``rebuild_only`` / ``--fresh`` 这些运维入口的形状。这条钉住:那次重建的
+    尾部同样会重新评估,而不是被上一次重建自己留下的 once-set 吃掉。
+    """
+    monkeypatch.setattr(repo.settings, "notebook_copy_max_rows", 0)
+    monkeypatch.setattr(repo.settings, "viz_sync_build_max_objects", 0)
+    nb = repo.create_notebook(NotebookCreate(name="big"))
+    _seed_star_kg(repo, nb.id)
+    calls = _spy_scale_trigger(repo, monkeypatch)
+
+    repo.rebuild_unified_kg(nb.id)
+    repo.rebuild_unified_kg(nb.id, force=True)
+
+    assert [c[0] for c in calls] == [nb.id, nb.id]
+
+
+def test_a_small_notebook_rebuild_does_not_rearm_the_auto_index_once_set(repo, monkeypatch):
+    """对照 + 定位钉:re-arm 只挂在**大库跳过分支**上。
+
+    小库在上一行刚同步建完 viz,没有可恢复的东西,不该每次重建都付
+    ``notebook_copy_stats`` 的 5 个 COUNT + 一次 ``status()``。把 re-arm 从 else
+    分支挪到无条件位置,这条会红(``calls`` 变成两条)。
+    """
+    monkeypatch.setattr(repo.settings, "notebook_copy_max_rows", 0)      # 仍然 copyable=False
+    # viz_sync_build_max_objects 保持默认(高)→ 这本库走同步 build_viz 那一支
+    nb = repo.create_notebook(NotebookCreate(name="small"))
+    _seed_star_kg(repo, nb.id)
+    calls = _spy_scale_trigger(repo, monkeypatch)
+
+    repo.maybe_auto_index(nb.id)
+    assert len(calls) == 1
+    repo.rebuild_unified_kg(nb.id)
+
+    assert [c[0] for c in calls] == [nb.id]
 
 
 def test_rebuild_viz_refresh_fail_open_on_size_probe_error(repo, monkeypatch):

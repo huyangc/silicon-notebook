@@ -128,9 +128,33 @@ teardown 骑在上面;锁的既有 docstring 承诺「毫秒级事务」。
      等于**删掉 API 进程内的大库懒 viz 生产者**,如实这么写;
    - stale 刷新分支:同一条 `build_viz` → 整图物化,不闸等于洞没堵。
      代价如实登记:超限库聚类重建后**继续供 stale 折叠图**直到下一次
-     scale build(手动或 maybe_auto_index——后者带 auto_enabled+copyable
-     两道前置,不是无条件);`knowledge_lifecycle.py` rebuild 尾部那段
-     「lazily off the rebuild thread」委托注释**同 diff 改写**。
+     scale build(手动或 maybe_auto_index——后者不是无条件);
+     `knowledge_lifecycle.py` rebuild 尾部那段「lazily off the rebuild
+     thread」委托注释**同 diff 改写**。
+
+   **实施偏离(PR-B 双内评整改后,以代码为准)**——两处:
+   - `maybe_auto_index` 的前置是**四道**,不是原文写的
+     「auto_enabled+copyable 两道」,而且 copyable 那道是**反的**:
+     `scale_index_auto_enabled` + 未在建/未排队/未 pending + **NOT**
+     `copyable`(该函数在库**是** copyable 即「小」时早退)+ 状态 ∈
+     {unindexed, suggested, stale},外加**每进程每库一次**的 once-set。
+     那道 once-set 让登记的恢复路径在常态下是空的:唯一的 re-arm 点是
+     kg_mutation 的 dirty choke point,而 rebuild 刻意不走它
+     (`finish_rebuild_state` 必须不动 `kg_mutation_seq`)。两种普通形状因此
+     在尾部直接 return:①**常态**——每次入库、每次走全量回退的检索都会调
+     `maybe_auto_index`,等到让那次判定作废的 rebuild 跑起来时 set 早已合上;
+     ②同进程的第二次**强制**重建(recluster / `rebuild_only` / `--fresh`;
+     非强制的那次根本到不了尾部,`cluster_input_version` 的 skip 门先短路)。
+     整改:rebuild 尾部**大库跳过分支**在调 `maybe_auto_index`
+     之前调 `rearm_auto_index`——它只允许**重新评估**,四道前置一道不减。
+     只挂在大库分支上:小库刚在上一行同步建完 viz,没有可恢复的东西,不该
+     每次重建都付 `notebook_copy_stats` 的 5 个 COUNT。
+   - stale 产物**进热缓存**,键是 `disk_signature`。闸掉刷新之前,stale 是
+     几分钟内收敛的过渡态;闸掉之后它是无限期态,而 `_viz_manifest_fresh`
+     只认新鲜产物,于是超限库每次请求都重跑一遍 `load_viz`(三个百万级
+     list + CSR 邻接)。签名键让两种「换代」都自然失效:scale build 走
+     `.tmp`+rename(新 inode),同代替换(离线 CLI `import`)也改
+     mtime/size/inode。无签名(适配器没探针/这一次 stat 失败)不写槽位。
    降级路径必须诚实且有前端任务(复评 P1-1,「既有缺失文案」不存在):
    - `unified_graph` 大库分支写死的 `"viz_building": True` 同 diff 改为
      按「是否真的 spawn 了」返回;

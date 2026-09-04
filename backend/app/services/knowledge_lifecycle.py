@@ -5770,11 +5770,18 @@ class KnowledgeLifecycleService:
         # more (批 3·W4 T-W4-3): viz_index used to spawn that lazy refresh and now
         # REFUSES it above the same size budget, for the same multi-GB reason, this
         # time inside a request-serving process. The scale index build is the sole
-        # remaining producer — the off-peak one maybe_auto_index queues below
-        # (itself conditional on auto_enabled AND copyable, not an unconditional
-        # follow-up), or a manual one; until it publishes, the KG view serves the
-        # cseq-stale folding, or reports "no preview yet" when there is no artifact
-        # at all. Small notebooks build synchronously — cheap.
+        # remaining producer — the off-peak one maybe_auto_index queues below, or a
+        # manual one; until it publishes, the KG view serves the cseq-stale folding,
+        # or reports "no preview yet" when there is no artifact at all. Small
+        # notebooks build synchronously — cheap.
+        #
+        # That queued build is CONDITIONAL, and 批 3·W4 T-W4-3b restates its gates
+        # correctly (the previous wording, "auto_enabled AND copyable", had one of
+        # them backwards and omitted two): scale_index_auto_enabled; not already
+        # building/queued/pending; NOT copyable (maybe_auto_index returns early
+        # when the notebook IS copyable — i.e. small); state in {unindexed,
+        # suggested, stale}; and a once-per-process-per-notebook set. That last
+        # gate is why the large branch below re-arms first — see there.
         #
         # The WHOLE block (size probe included) is fail-open (codex PR#356 r1 P2):
         # an auxiliary viz decision must never turn an already-committed KG rebuild
@@ -5784,9 +5791,35 @@ class KnowledgeLifecycleService:
                 viz_obj_count = self.knowledge.active_object_count(db, notebook_id)
             if int(viz_obj_count) <= self.settings.viz_sync_build_max_objects:
                 self.scale_artifacts.build_viz(notebook_id)          # small: sync, cheap
-            # large: skip — the cseq-marked stale viz keeps serving until the next
-            # scale index build republishes it, never materialised on or alongside
-            # the rebuild frame (and no longer lazily on a request thread either).
+            else:
+                # large: skip — the cseq-marked stale viz keeps serving until the
+                # next scale index build republishes it, never materialised on or
+                # alongside the rebuild frame (and no longer lazily on a request
+                # thread either).
+                #
+                # 批 3·W4 T-W4-3b finding B: that makes the maybe_auto_index below
+                # this notebook's ONLY automatic route back to a fresh preview, and
+                # that call is gated by a once-per-process set which nothing on this
+                # path re-arms — rebuild deliberately bypasses the kg_mutation dirty
+                # choke point that owns the only other discard (finish_rebuild_state
+                # must leave kg_mutation_seq alone; see the CRITICAL note above). Two
+                # ordinary shapes therefore reached this tail and did nothing at all,
+                # leaving the viz stale until the process restarted: (a) the common
+                # one — every ingest and every full-fallback retrieval calls
+                # maybe_auto_index, so by the time the rebuild that INVALIDATES that
+                # verdict runs, the set is already closed; and (b) a forced second
+                # rebuild in one process (recluster / rebuild_only / --fresh; an
+                # unforced one never gets here, the cluster_input_version skip gate
+                # short-circuits first). Re-arming here is safe: it grants nothing —
+                # permits one more EVALUATION, and all four gates listed above still
+                # run inside maybe_auto_index (which closes the set again in its own
+                # finally). The premise is honest at this exact point — the clusters
+                # were just re-derived, so any remembered "already checked" verdict
+                # was formed against a KG that no longer exists. It is scoped to the
+                # large branch on purpose: a small notebook just got its synchronous
+                # build_viz above and has nothing to recover, so it must not pay
+                # notebook_copy_stats' five COUNTs on every rebuild.
+                self.scale_artifacts.rearm_auto_index(notebook_id)
         except Exception:
             self.event_log.logger.warning(
                 "viz refresh after rebuild failed for %s", notebook_id, exc_info=True)

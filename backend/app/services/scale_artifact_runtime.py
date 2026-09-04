@@ -785,6 +785,19 @@ class ScaleArtifactRuntime:
         use (``scale_fold_refused``, ``ppr_fallback_refused``). No graph
         content crosses this boundary. ``emit`` swallows its own IO failures,
         so an interactive graph-view read cannot fail on the bookkeeping.
+
+        NOT DEDUPLICATED, as an informed choice (T-W4-3b review item 5). The
+        family's existing dedup keys are per-ask / per-fold — a bounded unit of
+        work with a natural scope object to hang the key on. This one records a
+        PERSISTENT state ("this notebook is over the budget"), re-evaluated on
+        every read, so any dedup key would have to be a new process-wide set
+        and would then have to answer "when does it re-arm" — the exact
+        once-set trap ``maybe_auto_index`` is being dug out of in the same
+        change. The volume is bounded by user interaction instead: the canvas's
+        repeat poll runs only while ``viz_building`` is true, and this refusal
+        answers ``viz_building: false`` + ``viz_unavailable: true``, so an
+        unavailable canvas polls ZERO times. What remains is one row per graph
+        open / range change / citation click on an over-budget notebook.
         """
         self.event_log.emit({
             "kind": "viz_lazy_build_refused",
@@ -802,14 +815,64 @@ class ScaleArtifactRuntime:
         ``_spawn_viz_build`` starts — materialises EVERY object, every relation
         and the full cluster map into one graph dict inside the API process
         (the ~12-20GB shape the rebuild tail already refuses for the same
-        reason). ``effective_object_count`` is the seq-gated counts memo, so
-        asking it here is a cache hit on the paths that already asked.
+        reason).
+
+        COST OF ASKING (T-W4-3b quality review): ``effective_object_count`` is
+        the seq-gated counts memo — literally
+        ``knowledge_counts_cache.active_object_count``, keyed on
+        ``(notebook_id, kg_reset_epoch, kg_mutation_seq)``. On ``unified_graph``
+        that IS a memo hit, because its own large-notebook guard asked the same
+        memo one frame earlier. It is not free everywhere, and the honest
+        statement is per call site:
+
+        - STALE branch: this count is NEW work. That branch previously decided
+          "refresh it" without asking any count at all.
+        - ``kg_neighbors``: it reaches ``viz_index`` BEFORE its own count gate,
+          so the first citation click into a notebook whose memo is cold pays
+          one covering-index ``GROUP BY`` here that did not happen before. The
+          case that actually shows up is a MOUNTED BASE library: the read is
+          proxied to the base notebook, and no ``unified_graph`` of the active
+          notebook ever warms the base's memo.
+
+        Bounded either way: one GROUP BY per (notebook, seq), not one per read,
+        and the same scan every notebook open already pays.
         """
         count = int(self.projections.effective_object_count(notebook_id))
         if count <= self.settings.viz_sync_build_max_objects:
             return False
         self._emit_viz_lazy_build_refused(notebook_id, count, trigger)
         return True
+
+    def _serve_stale_viz(self, notebook_id: str, index: Any):
+        """Return a STALE standalone viz, refreshing it only within budget.
+
+        The refresh is a FULL rebuild — ``build_viz`` re-derives the whole
+        object graph, it does not patch the artifact — so on a large notebook
+        the background daemon costs exactly what the first build costs, inside
+        a request-serving process. Same size gate as the "no artifact at all"
+        branch (批 3·W4 T-W4-3): over the budget, leave the stale artifact
+        serving and let the scale index build — the designated large-notebook
+        viz producer — publish the next generation.
+
+        REGISTERED COST: a large notebook whose clusters were just rebuilt
+        keeps serving the STALE folded graph until the next scale build. That
+        build is either manual, or the ``maybe_auto_index`` queued at the
+        rebuild tail. That call is CONDITIONAL — four gates, stated exactly
+        because the previous wording here got two of them wrong:
+        ``scale_index_auto_enabled``, NOT ``notebook_copy_stats()["copyable"]``
+        (it returns early when the notebook IS copyable, i.e. small), a state
+        gate (``unindexed`` / ``suggested`` / ``stale`` only), and a
+        once-per-process-per-notebook set. The rebuild tail now calls
+        ``rearm_auto_index`` before it, so that last gate no longer silently
+        swallows a rebuild whose once-set an earlier ingest or retrieval
+        fallback had already closed (T-W4-3b finding B — that is the common
+        case, not the corner). Serving a stale folding is benign — it is what
+        this path already returns; the point of the gate is that it must not be
+        refreshed HERE.
+        """
+        if not self._viz_lazy_build_refused(notebook_id, "stale_refresh"):
+            self._spawn_viz_build(notebook_id)
+        return index
 
     def viz_index(self, notebook_id: str):
         scale = self.load(notebook_id)
@@ -850,15 +913,44 @@ class ScaleArtifactRuntime:
             cached, cached_signature = self._viz_cache_entry(
                 self.viz_cache.get(notebook_id)
             )
-            if cached is not None and self._viz_manifest_fresh(
-                cached.manifest, cur, cur_cseq
-            ):
-                if not _viz_signature_superseded(cached_signature, disk_signature):
-                    return cached
-                # A newer generation is on disk under the same version/cseq:
-                # drop it now so a concurrent reader cannot be handed the stale
-                # object while this call reloads.
-                self.viz_cache.pop(notebook_id, None)
+            if cached is not None:
+                superseded = _viz_signature_superseded(
+                    cached_signature, disk_signature
+                )
+                if self._viz_manifest_fresh(cached.manifest, cur, cur_cseq):
+                    if not superseded:
+                        return cached
+                    # A newer generation is on disk under the same version/
+                    # cseq: drop it now so a concurrent reader cannot be handed
+                    # the stale object while this call reloads.
+                    self.viz_cache.pop(notebook_id, None)
+                elif not superseded and cached_signature is not None:
+                    # STALE-SLOT HIT (批 3·W4 T-W4-3b finding A). Warm entries
+                    # used to be served only while ``_viz_manifest_fresh``
+                    # agreed, so a stale artifact re-ran ``load_viz`` — three
+                    # million-element lists plus the CSR adjacency — on EVERY
+                    # read. That was survivable while the state converged in
+                    # minutes (a background build was refreshing it); T-W4-3
+                    # refuses that refresh for a large notebook, which turns a
+                    # transient window into an open-ended one, and open-ended
+                    # times per-read reload is the actual regression.
+                    #
+                    # The slot is keyed on the DISK SIGNATURE, not on the two
+                    # DB-derived gates: those say "this generation is behind
+                    # the database" (which is exactly why it is here and will
+                    # keep being true), while the signature says "this is still
+                    # the same generation I loaded and already judged stale".
+                    # Both ways it stops being that are natural misses, not
+                    # bookkeeping we have to remember to run: the scale index
+                    # build publishes through ``.tmp`` + rename, so the next
+                    # generation arrives on a new inode; and a same-generation
+                    # replacement (the offline CLI's ``import``) changes
+                    # mtime/size/inode too — the identity ``_viz_signature``
+                    # was built for on the fresh path. ``cached_signature is
+                    # not None`` keeps the R5 corner conservative: an entry
+                    # with no recorded identity has no invalidation basis, so
+                    # it reloads rather than being served indefinitely.
+                    return self._serve_stale_viz(notebook_id, cached)
         index = self.artifacts.load_viz(notebook_id)
         if index is not None:
             if self._viz_manifest_fresh(index.manifest, cur, cur_cseq):
@@ -866,26 +958,23 @@ class ScaleArtifactRuntime:
                     index, self._recordable_viz_signature(disk_signature)
                 )
                 return index
-            # STALE standalone viz. The refresh is a FULL rebuild — build_viz
-            # re-derives the whole object graph, it does not patch the artifact
-            # — so on a large notebook the background daemon costs exactly what
-            # the first build costs, inside a request-serving process. Same
-            # size gate as the absent branch below (批 3·W4 T-W4-3): over the
-            # budget, leave the stale artifact serving and let the scale index
-            # build — the designated large-notebook viz producer — publish the
-            # next generation.
-            #
-            # REGISTERED COST: a large notebook whose clusters were just
-            # rebuilt keeps serving the STALE folded graph until the next
-            # scale build. That build is either manual, or the
-            # ``maybe_auto_index`` queued at the rebuild tail — which is
-            # itself conditional (auto_enabled AND copyable), not an
-            # unconditional follow-up. Serving a stale folding is benign
-            # (it is what this branch already returns); the point of the gate
-            # is that it must not be refreshed HERE.
-            if not self._viz_lazy_build_refused(notebook_id, "stale_refresh"):
-                self._spawn_viz_build(notebook_id)
-            return index
+            # STALE standalone viz (rationale and registered cost: see
+            # ``_serve_stale_viz``). Record it in the warm cache under the
+            # generation it was loaded from, so the next read answers from the
+            # slot above instead of re-materialising the same lists. Writing
+            # the entry is deliberately the SAME shape as the fresh write one
+            # branch up — a bare assignment into the same bounded LRU, so a
+            # stale artifact competes for the same residency budget as a fresh
+            # one, and two concurrent readers that both loaded simply overwrite
+            # each other with equivalent generations. ``_recordable_viz_``
+            # ``signature`` is what keeps the entry honest: a probe-less
+            # adapter or a stat that could not be completed degrades to None,
+            # and an entry with no identity has nothing to invalidate it, so it
+            # is not written at all.
+            stale_signature = self._recordable_viz_signature(disk_signature)
+            if stale_signature is not None:
+                self.viz_cache[notebook_id] = (index, stale_signature)
+            return self._serve_stale_viz(notebook_id, index)
         count = int(self.projections.effective_object_count(notebook_id))
         if count <= self.settings.viz_sync_build_max_objects:
             self.build_viz(notebook_id)
@@ -2401,4 +2490,23 @@ class ScaleArtifactRuntime:
             self.auto_index_checked.add(notebook_id)
 
     def rearm_auto_index(self, notebook_id: str) -> None:
+        """Let ``maybe_auto_index`` EVALUATE this notebook once more.
+
+        It grants nothing: the four gates above (``scale_index_auto_enabled``,
+        the building/queued/pending short-circuit, NOT ``copyable``, and the
+        ``unindexed``/``suggested``/``stale`` state gate) all still run, and
+        the ``finally`` closes the once-set again immediately. Dropping the
+        entry only says "the verdict this set is remembering was formed against
+        a KG that no longer exists".
+
+        Two callers may say that. ``kg_mutation``'s dirty choke point does it
+        inline for every online KG write. ``rebuild_unified_kg``'s large-
+        notebook tail calls this method (批 3·W4 T-W4-3b finding B) because it
+        deliberately does NOT go through that choke point —
+        ``finish_rebuild_state`` must leave ``kg_mutation_seq`` untouched. The
+        set is normally already closed by then (every ingest and every
+        full-fallback retrieval calls ``maybe_auto_index``), so without this the
+        tail was a no-op precisely when its verdict had just been invalidated,
+        and the large notebook's viz stayed stale until the process restarted.
+        """
         self.auto_index_checked.discard(notebook_id)
