@@ -109,8 +109,12 @@ def test_backfill_round_catches_a_source_behind_the_cursor(repo, monkeypatch):
         return original_extract(notebook_id, targets, *args, **kwargs)
 
     monkeypatch.setattr(service, "_extract_targets", inject_then_extract)
-    job = repo.prepare_notebook_kg_job(notebook.id, "incremental")
-    repo.execute_notebook_kg_job(notebook.id, job["id"], "incremental")
+    # 生产形状(评审 P1):「分析新增」按钮与 MCP build_kg 恒传
+    # retry_partial=True——pin 必须钉这条真实路径,省掉它的绿灯与生产无关。
+    job = repo.prepare_notebook_kg_job(
+        notebook.id, "incremental", retry_partial=True)
+    repo.execute_notebook_kg_job(
+        notebook.id, job["id"], "incremental", retry_partial=True)
 
     assert _kg_source_ids(repo, notebook.id) == {"src-main", "src-late"}, (
         "补漏轮没接住游标身后落齐的源——链 b 重新开洞")
@@ -156,14 +160,98 @@ def test_backfill_exhaustion_reports_partial_honestly(repo, monkeypatch):
     assert saved["error_code"] == "kg_backfill_partial"
 
 
+def test_target_limit_run_never_enters_the_backfill(repo, monkeypatch):
+    """变异钉(质量评 P2):target_limit 是用户显式限定的范围——删掉
+    `target_limit is None` 闸,batch_ingest --limit 会在主循环之后把整库
+    剩余来源全抽一遍,越过用户设的模型花费上限。"""
+    notebook = repo.create_notebook(NotebookCreate(name="limit"))
+    _seed_source(repo, notebook.id, "src-a", "2026-07-20T10:00:00")
+    _seed_source(repo, notebook.id, "src-b", "2026-07-20T11:00:00")
+    bind_chat_client(repo, "kg_extract", _AlwaysExtractClient())
+    job = repo.prepare_notebook_kg_job(
+        notebook.id, "incremental", target_limit=1)
+    repo.execute_notebook_kg_job(
+        notebook.id, job["id"], "incremental", target_limit=1)
+    assert _kg_source_ids(repo, notebook.id) == {"src-a"}, (
+        "limit 之外的源被抽了——补漏轮越权")
+
+
+def test_backfill_batch_honours_the_deleting_checkpoint(repo, monkeypatch):
+    """变异钉(质量评 P2):补漏轮的批边界与主循环同一条 deleting 检查点
+    ——删掉它,删除笔记本的 quiesce 只能等完整 3 轮补漏抽取超时收场。
+    注入:主循环批检查全部放行,补漏轮第一批才置 deleting。"""
+    from app.services.kg.run_control import KgBuildAborted
+
+    notebook = repo.create_notebook(NotebookCreate(name="del-checkpoint"))
+    _seed_source(repo, notebook.id, "src-main", "2026-07-20T10:00:00")
+    bind_chat_client(repo, "kg_extract", _AlwaysExtractClient())
+    service = repo._runtime.knowledge_lifecycle
+    original_extract = service._extract_targets
+    state = {"main_done": False}
+
+    def inject_then_extract(notebook_id, targets, *args, **kwargs):
+        if not state["main_done"]:
+            state["main_done"] = True
+            # 让补漏轮有活干(否则空轮直接 break,走不到检查点)。
+            _seed_source(repo, notebook_id, "src-late", "2026-07-20T09:00:00")
+        return original_extract(notebook_id, targets, *args, **kwargs)
+
+    monkeypatch.setattr(service, "_extract_targets", inject_then_extract)
+    monkeypatch.setattr(
+        service, "_notebook_deleting",
+        lambda notebook_id: state["main_done"])
+    job = repo.prepare_notebook_kg_job(notebook.id, "incremental")
+    with pytest.raises(KgBuildAborted):
+        repo.execute_notebook_kg_job(notebook.id, job["id"], "incremental")
+    assert _kg_source_ids(repo, notebook.id) == {"src-main"}, (
+        "deleting 置位后补漏轮不得再抽")
+
+
+def test_build_endpoint_returns_409_when_maintenance_holds_the_slot(repo):
+    """端点级 pin(评审 P1):prepare 抛 KgMaintenanceAlreadyRunning 时
+    /kg/build 与 /kg/rebuild 必须落 409 + holder 点名文案,不是 500。
+    直接调路由函数(免起 app):user_error 抛 HTTPException。"""
+    from fastapi import HTTPException
+
+    from app.api import kg_routes
+
+    notebook = repo.create_notebook(NotebookCreate(name="endpoint-409"))
+    bind_chat_client(repo, "kg_extract", _AlwaysExtractClient())
+    service = repo._runtime.knowledge_lifecycle
+    claimed = service.kg_maintenance.claim(
+        notebook.id, "rebuild", "ukj",
+        dict(service.kg_maintenance.REBUILD_COUNTERS))
+    try:
+        import app.api.deps as deps
+        original = deps.repository
+        deps.repository = lambda: repo
+        kg_routes.repository = lambda: repo
+        try:
+            with pytest.raises(HTTPException) as exc:
+                kg_routes.build_kg(notebook.id)
+            assert exc.value.status_code == 409
+            assert exc.value.detail == "当前笔记本正在重新合并，请等它完成"
+            with pytest.raises(HTTPException) as exc:
+                kg_routes.rebuild_kg(notebook.id)
+            assert exc.value.status_code == 409
+        finally:
+            deps.repository = original
+            kg_routes.repository = original
+    finally:
+        service.kg_maintenance.settle(notebook.id, claimed["job_id"], "succeeded")
+
+
 def test_backfill_shares_the_loop_predicate_function():
     """结构守卫(复评 P1-5):谓词已两次被复述写错(漏 is_partial/
-    analyzed_empty)。钉「主循环与补漏轮共用 _kg_target_batches」——运行函数
-    里恰好两处调用、零处内联谓词(kg_analyzed_without_objects 只许出现在
-    谓词函数自己里)。"""
+    analyzed_empty)。钉「主循环、补漏轮、耗尽探针共用 _kg_target_batches」
+    ——运行函数里恰好三处调用、零处内联谓词(kg_analyzed_without_objects
+    只许出现在谓词函数自己里),且补漏轮/探针的 mode 实参钉死
+    "incremental"(把它改成 "rebuild" 就是全量重抽的反转,§1.7 排除)。"""
     run_src = inspect.getsource(KnowledgeLifecycleService._run_notebook_kg_job)
     assert run_src.count("self._kg_target_batches(") == 3, (
-        "主循环与补漏轮之外多/少了目标枚举站点——谓词有被复述的风险")
+        "主循环/补漏轮/耗尽探针之外多/少了目标枚举站点——谓词有被复述的风险")
+    assert run_src.count('"incremental")') >= 2, (
+        "补漏轮与耗尽探针的 mode 实参必须是字面量 incremental")
     assert "kg_analyzed_without_objects" not in run_src
     assert "has_kg" not in run_src
     predicate_src = inspect.getsource(KnowledgeLifecycleService._kg_target_batches)
@@ -242,18 +330,40 @@ def test_buildkg_holder_gets_the_build_vocabulary_409():
 
 
 def test_fuse_swallow_sites_emit_the_structured_event():
-    """融合 except 结构化事件(PR-3 第三件):两处吞融合异常的站点必须在
-    except 里 emit incremental_fuse_failed——只进日志的失败在事件流里
-    隐形。文本级形状守卫(行为是一行 emit,站点已逐个手验)。"""
+    """融合 except 结构化事件(PR-3 第三件):AST 级守卫——每个 try 体里
+    调 incremental_fuse_source 且带 except 处理器的站点,处理器体内必须有
+    字面量 "incremental_fuse_failed" 的 emit(质量评 P3:字符窗口版会被
+    「把 emit 移出 except」的移动变异穿过,也会被邻近无关 except 假红)。"""
+    import ast
     from pathlib import Path
 
     backend = Path(__file__).resolve().parents[1]
+    swallow_sites = 0
     for rel in ("app/services/source_ingestion.py",
                 "app/services/scale_index_builder.py"):
-        text = (backend / rel).read_text(encoding="utf-8")
-        for match in re.finditer(r"incremental_fuse_source\(", text):
-            window = text[match.start():match.start() + 1200]
-            if "except Exception" not in window:
-                continue   # 定义处/注释引用,不是吞异常站点
-            assert '"incremental_fuse_failed"' in window, (
+        tree = ast.parse((backend / rel).read_text(encoding="utf-8"))
+        parents: dict = {}
+        for node in ast.walk(tree):
+            for child in ast.iter_child_nodes(node):
+                parents[child] = node
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "incremental_fuse_source"):
+                continue
+            # 最近包围的 Try 才是吞点(外层大 try 不算)。
+            cursor = node
+            enclosing = None
+            while cursor in parents:
+                cursor = parents[cursor]
+                if isinstance(cursor, ast.Try):
+                    enclosing = cursor
+                    break
+            assert enclosing is not None, f"{rel}: 融合调用不在 try 里了"
+            swallow_sites += 1
+            handlers_src = ast.dump(ast.Module(
+                body=[stmt for handler in enclosing.handlers
+                      for stmt in handler.body], type_ignores=[]))
+            assert "incremental_fuse_failed" in handlers_src, (
                 f"{rel}: 吞融合异常的站点缺结构化事件")
+    assert swallow_sites == 2, swallow_sites

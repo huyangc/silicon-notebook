@@ -89,6 +89,7 @@ class KgMaintenanceJobs:
             current = self.jobs.get(notebook_id)
             if current is not None and current["status"] == "running":
                 raise KgMaintenanceAlreadyRunning(notebook_id, current["kind"])
+            displaced = current   # 终态槽条目——被拒时要放回去,不是删掉
             job = {
                 "job_id": self._new_id(id_prefix),
                 "notebook_id": notebook_id,
@@ -107,7 +108,13 @@ class KgMaintenanceJobs:
             with self.lock:
                 current = self.jobs.get(notebook_id)
                 if current is not None and current["job_id"] == job["job_id"]:
-                    del self.jobs[notebook_id]
+                    # 恢复被顶掉的终态条目而不是 del(质量评 P3:浏览器的
+                    # 最后一次 bounded poll 不该因为一次被拒的 claim 把刚
+                    # 完成的统计读成 idle/0)。
+                    if displaced is not None:
+                        self.jobs[notebook_id] = displaced
+                    else:
+                        del self.jobs[notebook_id]
             raise KgMaintenanceAlreadyRunning(notebook_id, "buildkg")
         return dict(job)
 

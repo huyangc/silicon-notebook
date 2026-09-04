@@ -6,7 +6,11 @@ import anyio
 from mcp.server.fastmcp import Context, FastMCP
 
 from app.services import background_jobs
-from app.repositories.ports import KgBuildAlreadyRunning
+from app.api.kg_routes import _kg_maintenance_busy
+from app.repositories.ports import (
+    KgBuildAlreadyRunning,
+    KgMaintenanceAlreadyRunning,
+)
 
 from ._shared import (
     _budget_response,
@@ -64,6 +68,10 @@ def register_maintenance_tools(
                     # 409 语义是单飞,不是错误——路由同款中文句子,轮询
                     # get_build_status 即可,不必改写成英文重新措辞一遍。
                     raise ValueError("当前笔记本已有知识图谱分析任务正在运行")
+                except KgMaintenanceAlreadyRunning as exc:
+                    # 批 3·W2 §2.1:被维护动作闸住同样是单飞语义——复用
+                    # 路由侧按 holder 点名的同款句子,不抛裸 RuntimeError。
+                    raise ValueError(_kg_maintenance_busy(exc).detail)
                 # submit() 的参数形状逐字照抄 kg_routes.build_kg,包括提交失败时
                 # 回滚成 failed(否则该行会永久卡在 running,拖死后续每次构建的
                 # 单飞闸)。

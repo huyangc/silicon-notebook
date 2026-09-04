@@ -493,7 +493,8 @@ class KnowledgeLifecycleService:
             # 批 3·W2 §2.1:buildkg- 在飞探测(kg_building 是 build 作业的
             # 真准入闸,T-5a 起)。锁下读,write-then-check 的另一半在
             # prepare_notebook_kg_job / standalone delete 侧。
-            kg_build_active=self._kg_build_active,
+            kg_build_active=lambda notebook_id: self._kg_build_active(
+                notebook_id),
         )
         # Private aliases remain for compatibility with characterization and
         # operational probes that inspect the shared registry by identity.
@@ -3719,8 +3720,15 @@ class KnowledgeLifecycleService:
             # 中途扩容。耗尽仍非空 → 结构化事件 + job 记 partial(如实,
             # 下一次「分析新增」收敛)。
             backfill_exhausted = False
+            # 门槛三件套:staged pipeline 的计划快照不容中途扩容;
+            # target_limit 是用户显式限定的范围(补漏会越权);processed==0
+            # 时不存在「抽取期间」这个时间窗,整趟键区走查纯属空证明
+            # (质量评 P2:空跑构建别多付一遍全库枚举)。retry_partial **不
+            # 排除**(评审 P1:生产「分析新增」恒传 retry_partial=True,
+            # 排除它=链 b 在唯一的用户入口上没闭合;补漏轮固定走
+            # incremental 谓词,与 retry_partial 主循环正交)。
             if (indexing_pipeline_identity is None and target_limit is None
-                    and not retry_partial):
+                    and processed):
                 for _backfill_round in range(_KG_BACKFILL_MAX_ROUNDS):
                     round_found = False
                     for targets, skipped, skipped_no_elements in (
@@ -3743,16 +3751,38 @@ class KnowledgeLifecycleService:
                         attempted_source_ids.update(
                             source_id for source_id, _preserve in targets)
                         total_targets += len(targets)
-                        self._warn_skipped_sources(skipped_no_elements)
+
+                        def _backfill_progress(
+                            index: int,
+                            _page_total: int,
+                            source_id: str,
+                            succeeded: bool,
+                            *,
+                            _offset: int = processed,
+                        ) -> None:
+                            # 补漏轮同样如实报进度(质量评 P3:batch_ingest
+                            # 的 [kg i/N] 不该在补漏期间看起来卡死)。
+                            # total_targets 已随批抬高;job 的 total_sources
+                            # 仍是 prepare 快照,completed 可略超它——既有
+                            # 现象(prepare 与主循环之间落地的源同样如此),
+                            # 前端按「未完成余量」渲染不受影响。
+                            if progress is not None:
+                                progress(_offset + index, total_targets,
+                                         source_id, succeeded)
+
+                        # skipped/skipped_no_elements 传空(评审 P2:补漏轮
+                        # 重新枚举整库,回填这两份会把主循环已记过的源再记
+                        # 一遍——纯噪声;真正新落齐的无元素源留给下一次
+                        # 「分析新增」如实处理)。
                         page_result = self._extract_targets(
                             notebook_id,
                             targets,
-                            skipped,
-                            skipped_no_elements,
+                            [],
+                            [],
                             job_id,
                             control,
                             controlled_clients,
-                            None,
+                            _backfill_progress if progress is not None else None,
                             _mark_stopping,
                             skip_policy=skip_policy,
                             indexing_pipeline_identity=None,
