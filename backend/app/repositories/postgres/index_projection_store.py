@@ -22,8 +22,16 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, TYPE_CHECKING
 
 from app.domain.knowledge_contracts import USABLE_STATUSES
-from app.repositories.postgres._store_utils import iso_timestamp, json_value
-from app.repositories.postgres.embedding_store import EmbeddingStore
+from app.repositories.postgres._store_utils import (
+    GRAPH_FETCH_BATCH as _GRAPH_FETCH_BATCH,
+    iso_timestamp,
+    json_value,
+    keyset_pages as _keyset_pages,
+)
+from app.repositories.postgres.embedding_store import (
+    _MATRIX_FETCH_BATCH,
+    EmbeddingStore,
+)
 from app.repositories.postgres.search import PAYLOAD_NAME_EXPRESSION
 from app.repositories.source_subgraph_projection import (
     source_graph_partition_rows_on,
@@ -38,6 +46,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 def _binary_text_key(value: str) -> bytes:
     """Match PostgreSQL C collation for identifier ordering."""
     return value.encode("utf-8", "surrogatepass")
+
 
 # The two frozen edge encodings the gathered graph produces: the default
 # string path and the build-only int-indexed array fast path.
@@ -323,13 +332,44 @@ class IndexProjectionStore:
             ).fetchall()
         ]
 
-    def active_object_graph_rows(self, db, notebook_id: str) -> list:
-        return db.execute(
-            f"SELECT id,object_type,{PAYLOAD_NAME_EXPRESSION} AS name "
-            "FROM knowledge_objects "
-            "WHERE notebook_id=%s AND status!='deprecated' ORDER BY ordinal",
-            (notebook_id,),
-        ).fetchall()
+    def active_object_graph_rows(self, db, notebook_id: str):
+        """Whole-notebook active object rows for the standalone viz derive,
+        streamed in ``ordinal`` keyset pages instead of one whole-table
+        ``fetchall`` (batch-3 W4 T-W4-3.1).
+
+        Key: ``ordinal`` alone — ``uq_knowledge_objects_ordinal`` makes it
+        GLOBALLY unique, so a single-column ``>`` cursor is a total order and
+        cannot drop a tie. The ORDER BY is byte-identical to the pre-paging
+        one, so the consumer sees the same rows in the same order.
+
+        Registered cost: there is no ``(notebook_id, ordinal)`` composite, so
+        each page is an ``uq_knowledge_objects_ordinal`` range scan with
+        ``notebook_id``/``status`` as residual filters. For the dominant-share
+        notebook an offline build targets that is near-free; below roughly
+        sqrt(total_rows x page) of share the planner instead re-reads the
+        notebook per page — total work still bounded by about one index
+        traversal. Same ledger, same accepted trade-off, as
+        ``EmbeddingStore.vector_pages``.
+
+        This is a GENERATOR: it must be consumed inside the caller's
+        connection scope. A caller that iterates after closing ``db`` gets a
+        loud driver error, never a silently short result.
+        """
+        for page in _keyset_pages(
+            db,
+            _GRAPH_FETCH_BATCH,
+            lambda cursor: (
+                f"SELECT id,object_type,{PAYLOAD_NAME_EXPRESSION} AS name,ordinal "
+                "FROM knowledge_objects "
+                "WHERE notebook_id=%s AND status!='deprecated'"
+                + ("" if cursor is None else " AND ordinal>%s")
+                + " ORDER BY ordinal LIMIT %s",
+                (notebook_id, _GRAPH_FETCH_BATCH) if cursor is None
+                else (notebook_id, cursor, _GRAPH_FETCH_BATCH),
+            ),
+            lambda row: row["ordinal"],
+        ):
+            yield from page
 
     def source_subgraph_signature(
         self, notebook_id: str, source_ids: Sequence[str]
@@ -483,44 +523,130 @@ class IndexProjectionStore:
         chunk_ids: list = []
         cluster_groups: Dict[str, list] = {}
 
+        # All four gathers below read in keyset pages (batch-3 W4 T-W4-3.1)
+        # instead of one whole-table `.fetchall()`. What that bounds is the
+        # driver's per-statement result buffer (the objects leg's `payload`
+        # JSON and the relations leg's rows are the two big ones) and the
+        # lifetime of any single statement's MVCC snapshot across a build that
+        # can run for hours. It does NOT bound the Python structures being
+        # accumulated here — `kg_nodes`/`relations`/`chunk_ids`/
+        # `cluster_groups` still hold the whole notebook, which is the
+        # inherent shape of the gathered graph and explicitly out of scope for
+        # this change. Every page's ORDER BY is byte-identical to the
+        # pre-paging one, so row order (and therefore node_ids order, the
+        # first-seen edge-weight winner, and the persisted artifact) is
+        # unchanged.
         with self.connect() as db:
             for src_clause, src_params in clauses:
-                for r in db.execute(
-                        f"SELECT id, object_type, payload FROM knowledge_objects "
-                        f"WHERE notebook_id=%s AND status IN ({ph}){src_clause} "
-                        f"ORDER BY ordinal, id COLLATE \"C\"",
-                        (notebook_id, *USABLE_STATUSES, *src_params)).fetchall():
-                    kg_nodes[r["id"]] = {
-                        "type": r["object_type"],
-                        "name": json_value(r["payload"], {}).get("name", ""),
-                    }
+                # Key: `ordinal` alone. `uq_knowledge_objects_ordinal` is
+                # GLOBALLY unique, so the trailing `id COLLATE "C"` in the
+                # ORDER BY can never break a tie — a single-column `>` cursor
+                # is already a total order. Planner/index ledger as in
+                # `active_object_graph_rows` (no (notebook_id, ordinal)
+                # composite; dominant-share notebooks pay nothing).
+                for page in _keyset_pages(
+                    db, _GRAPH_FETCH_BATCH,
+                    lambda cursor, _c=src_clause, _p=src_params: (
+                        f"SELECT id, object_type, payload, ordinal FROM knowledge_objects "
+                        f"WHERE notebook_id=%s AND status IN ({ph}){_c}"
+                        + ("" if cursor is None else " AND ordinal>%s")
+                        + " ORDER BY ordinal, id COLLATE \"C\" LIMIT %s",
+                        (notebook_id, *USABLE_STATUSES, *_p, _GRAPH_FETCH_BATCH)
+                        if cursor is None else
+                        (notebook_id, *USABLE_STATUSES, *_p, cursor, _GRAPH_FETCH_BATCH),
+                    ),
+                    lambda row: row["ordinal"],
+                ):
+                    for r in page:
+                        kg_nodes[r["id"]] = {
+                            "type": r["object_type"],
+                            "name": json_value(r["payload"], {}).get("name", ""),
+                        }
             for src_clause, src_params in clauses:
-                for r in db.execute(
-                        f"SELECT source_object_id, target_object_id, edge_type FROM knowledge_relations "
-                        f"WHERE notebook_id=%s AND review_status!='rejected'{src_clause} "
-                        f"ORDER BY id COLLATE \"C\"",
-                        (notebook_id, *src_params)).fetchall():
-                    relation = dict(r)
-                    source = kg_nodes.get(relation["source_object_id"])
-                    target = kg_nodes.get(relation["target_object_id"])
-                    if source and target and is_queryable_edge_pair(
-                        relation["edge_type"], source["type"], target["type"]
-                    ):
-                        relations.append(relation)
+                # Key: `id COLLATE "C"` — the relations leg's existing ORDER
+                # BY key, and the table's primary key, so it is unique by
+                # construction. Every text column in this schema is declared
+                # `COLLATE "C"`, so the explicit COLLATE is a no-op that keeps
+                # the SQL text honest about which ordering the cursor assumes.
+                # `id` joins the select list purely to carry that cursor; the
+                # accumulated dict keeps the same three keys as before, so the
+                # resident `relations` list is byte-for-byte the old one.
+                for page in _keyset_pages(
+                    db, _GRAPH_FETCH_BATCH,
+                    lambda cursor, _c=src_clause, _p=src_params: (
+                        "SELECT id, source_object_id, target_object_id, edge_type "
+                        f"FROM knowledge_relations "
+                        f"WHERE notebook_id=%s AND review_status!='rejected'{_c}"
+                        + ("" if cursor is None else " AND id COLLATE \"C\">%s")
+                        + " ORDER BY id COLLATE \"C\" LIMIT %s",
+                        (notebook_id, *_p, _GRAPH_FETCH_BATCH) if cursor is None
+                        else (notebook_id, *_p, cursor, _GRAPH_FETCH_BATCH),
+                    ),
+                    lambda row: row["id"],
+                ):
+                    for r in page:
+                        relation = {
+                            "source_object_id": r["source_object_id"],
+                            "target_object_id": r["target_object_id"],
+                            "edge_type": r["edge_type"],
+                        }
+                        source = kg_nodes.get(relation["source_object_id"])
+                        target = kg_nodes.get(relation["target_object_id"])
+                        if source and target and is_queryable_edge_pair(
+                            relation["edge_type"], source["type"], target["type"]
+                        ):
+                            relations.append(relation)
             for src_clause, src_params in clauses:
-                for r in db.execute(
-                        f"SELECT id FROM chunks WHERE notebook_id=%s{src_clause} "
-                        f"ORDER BY ordinal, id COLLATE \"C\"",
-                        (notebook_id, *src_params)).fetchall():
-                    chunk_ids.append(r["id"])
-            for r in db.execute(
+                # Key: `ordinal` (`uq_chunks_ordinal`, globally unique) — same
+                # argument as the objects leg above.
+                for page in _keyset_pages(
+                    db, _GRAPH_FETCH_BATCH,
+                    lambda cursor, _c=src_clause, _p=src_params: (
+                        f"SELECT id, ordinal FROM chunks WHERE notebook_id=%s{_c}"
+                        + ("" if cursor is None else " AND ordinal>%s")
+                        + " ORDER BY ordinal, id COLLATE \"C\" LIMIT %s",
+                        (notebook_id, *_p, _GRAPH_FETCH_BATCH) if cursor is None
+                        else (notebook_id, *_p, cursor, _GRAPH_FETCH_BATCH),
+                    ),
+                    lambda row: row["ordinal"],
+                ):
+                    for r in page:
+                        chunk_ids.append(r["id"])
+            # Key: (canonical_id, member_object_id), matching
+            # `idx_clusters_nb_canonical_member_gen` (notebook_id,
+            # canonical_id, member_object_id) INCLUDE (generation) — 0051's
+            # index, whose INCLUDE exists precisely so the published-generation
+            # predicate stays Index-Only. Total order: a cluster row's
+            # `object_type` IS the type of its objects, and
+            # `uq_clusters_nb_type_member_generation` makes `member_object_id`
+            # unique per (notebook, type, generation) — an object id has
+            # exactly one type, so `member_object_id` (hence the pair) is
+            # unique per (notebook, generation) and `>` drops nothing.
+            # The published-generation predicate is repeated on EVERY page,
+            # never hoisted to a first-page-only filter: dropping it on later
+            # pages would both lose the Index-Only Scan and let an unpublished
+            # generation's members into the graph, which is the W2 red line
+            # "version identity only ever counts the published generation".
+            for page in _keyset_pages(
+                db, _GRAPH_FETCH_BATCH,
+                lambda cursor: (
                     "SELECT canonical_id, member_object_id FROM concept_clusters "
                     "WHERE notebook_id=%s "
                     "AND generation = COALESCE((SELECT cluster_generation "
-                    "FROM unified_kg_state WHERE notebook_id = %s), 0) "
-                    "ORDER BY canonical_id COLLATE \"C\", member_object_id COLLATE \"C\"",
-                    (notebook_id, notebook_id)).fetchall():
-                cluster_groups.setdefault(r["canonical_id"], []).append(r["member_object_id"])
+                    "FROM unified_kg_state WHERE notebook_id = %s), 0)"
+                    + ("" if cursor is None else
+                       " AND (canonical_id COLLATE \"C\", member_object_id COLLATE \"C\")"
+                       " > (%s, %s)")
+                    + " ORDER BY canonical_id COLLATE \"C\", "
+                    "member_object_id COLLATE \"C\" LIMIT %s",
+                    (notebook_id, notebook_id, _GRAPH_FETCH_BATCH) if cursor is None
+                    else (notebook_id, notebook_id, *cursor, _GRAPH_FETCH_BATCH),
+                ),
+                lambda row: (row["canonical_id"], row["member_object_id"]),
+            ):
+                for r in page:
+                    cluster_groups.setdefault(
+                        r["canonical_id"], []).append(r["member_object_id"])
 
         # Memberships: entity ↔ chunk (scoped → limit to gathered objects)
         ent_chunk_map = self.ent_chunk_map(notebook_id)
@@ -756,3 +882,40 @@ class IndexProjectionStore:
                     ):
                         yield r["vid"], r["vector"]
         return build_matrix(_rows(), runtime_dim=runtime_dim)
+
+    def embedding_row_count(self, notebook_id: str, table: str) -> int:
+        """Row count for the whole-notebook embedding scan — the UPPER BOUND
+        the paged ANN build sizes ``init_index(max_elements=...)`` with before
+        it knows how many rows will actually survive decoding. Same aggregate
+        ``embedding_matrix`` already uses for ``build_matrix``'s ``n_hint``."""
+        with self.connect() as db:
+            return int(EmbeddingStore.version_row(db, notebook_id, table)["c"])
+
+    def embedding_pages(self, notebook_id: str, table: str, id_column: str,
+                        page_rows: int = _MATRIX_FETCH_BATCH):
+        """Whole-notebook vectors as bounded ``(ids, matrix)`` pages.
+
+        The load-side half of ``embedding_matrix(object_ids=None)`` without
+        its one whole-notebook matrix: the DB read is the SAME
+        ``EmbeddingStore.vector_pages`` keyset scan (same ordering, same
+        snapshot-release and drift ledger — see its docstring), and
+        ``matrix_pages`` applies ``build_matrix``'s five semantics across the
+        whole stream, so concatenating the pages is element-identical to
+        ``embedding_matrix``. hnswlib copies each page into its own graph, so
+        the caller drops the page right after ``add_items`` and never holds
+        the ~33GB relation matrix (WR-9). ``np.asarray`` on the old whole
+        matrix was only an ALIAS — the memory this removes is the load-side
+        copy, not hnswlib's own (which is unavoidable).
+
+        A GENERATOR holding the connection open across its own consumption
+        (the ``with`` encloses the yields), same shape as ``embedding_matrix``
+        's delta path.
+        """
+        from app.domain.vector_index import matrix_pages, resolve_runtime_dim
+        runtime_dim = resolve_runtime_dim(self.settings)
+        with self.connect() as db:
+            yield from matrix_pages(
+                EmbeddingStore.vector_pages(db, notebook_id, table, id_column),
+                page_rows,
+                runtime_dim=runtime_dim,
+            )

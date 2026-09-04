@@ -101,10 +101,29 @@ def emb_synonym_edges(ids, matrix, threshold: float = 0.8, top_k: int = 20,
     # 数组返回的是"该值第一次出现的位置"，只要保证输入按行主序排列即可复现。
     labels_arr = np.asarray(labels)
     dist_arr = np.asarray(distances)
-    row_idx = np.repeat(np.arange(n), labels_arr.shape[1])
-    col_idx = labels_arr.reshape(-1).astype(np.int64)
-    sims = 1.0 - dist_arr.reshape(-1).astype(np.float64)
+    return _synonym_edges_from_knn(
+        ids,
+        np.repeat(np.arange(n), labels_arr.shape[1]),
+        labels_arr.reshape(-1).astype(np.int64),
+        1.0 - dist_arr.reshape(-1).astype(np.float64),
+        threshold,
+    )
 
+
+def _synonym_edges_from_knn(ids, row_idx, col_idx, sims, threshold: float):
+    """Shared post-processing of a flattened KNN result → synonym edges.
+
+    ``row_idx``/``col_idx`` are label indices into ``ids`` (hnsw label space)
+    and ``sims`` the matching cosine similarities, all flattened in ROW-MAJOR
+    encounter order. Order is the contract: the ``np.unique`` dedup below
+    keeps the first occurrence of each unordered pair, which is what
+    reproduces the original per-row loop's "first seen wins the sim, not the
+    max" rule. Both the single-shot and the paged query-set callers hand rows
+    over in ascending label order, so both reproduce it identically.
+    """
+    import numpy as np
+
+    n = len(ids)
     mask = (col_idx != row_idx) & (sims >= threshold)
     if not np.any(mask):
         return []
@@ -127,3 +146,79 @@ def emb_synonym_edges(ids, matrix, threshold: float = 0.8, top_k: int = 20,
 
     out = [(ids[int(a[i])], ids[int(b[i])], float(sims[i])) for i in first_idx]
     return out
+
+
+def emb_synonym_edges_paged(ids, prebuilt_index, query_pages,
+                            threshold: float = 0.8, top_k: int = 20):
+    """``emb_synonym_edges`` for a caller that no longer holds the matrix.
+
+    Once the offline build feeds hnsw from bounded pages, the KG matrix is
+    gone by the time the synonym KNN runs — so the QUERY SET is re-read from
+    the database in a SECOND pass and handed here as ``query_pages``, an
+    iterable of ``(page_ids, page_matrix)``. What is paged is the query set,
+    never the index: ``prebuilt_index`` is complete before the first query, so
+    every row's top-k is already complete within its own page and "merging"
+    is nothing but concatenating the pages in row-major order.
+
+    The two passes live in DIFFERENT index spaces and that is the whole
+    subtlety: a page's row number means nothing to hnsw, whose labels were
+    assigned by the FIRST pass. Every query row is therefore mapped back
+    through ``{id: label}`` built from ``ids`` before it is used, because both
+    the self-loop exclusion (``col != row``) and the unordered-pair key
+    (``a * n + b``) are only meaningful inside one space.
+
+    Cross-pass drift is adjudicated by ID INTERSECTION: the keyset scan the
+    two passes share tolerates concurrent writes (see ``vector_pages``), so a
+    row can appear in pass two that pass one never labelled. Such rows are
+    DROPPED rather than appended under a fresh label — appending would put an
+    unlabelled node into ``a * n + b`` and corrupt the pair keys. An id that
+    pass one labelled but pass two no longer returns simply contributes no
+    query row of its own (it can still be found as another row's neighbour).
+    Both directions of drift can only cost synonym edges, never invent them,
+    which is the fail-safe direction for a soft bridging edge.
+
+    Row order across pages is the pass-one label order (both passes walk the
+    same keyset in the same direction), so with no drift this returns exactly
+    what ``emb_synonym_edges`` would have returned from one whole matrix.
+
+    fail-open: hnswlib 异常返 []，同 ``emb_synonym_edges``。
+    """
+    import numpy as np
+
+    n = len(ids)
+    if n < 2 or prebuilt_index is None:
+        return []
+    label_of = {object_id: label for label, object_id in enumerate(ids)}
+    k = min(top_k + 1, n)                       # +1 因含自身
+    row_parts: list = []
+    col_parts: list = []
+    sim_parts: list = []
+    try:
+        prebuilt_index.set_ef(max(top_k + 1, 64))
+        for page_ids, page_matrix in query_pages:
+            keep = [i for i, object_id in enumerate(page_ids) if object_id in label_of]
+            if not keep:
+                continue
+            rows = np.asarray(
+                [label_of[page_ids[i]] for i in keep], dtype=np.int64)
+            block = (
+                page_matrix if len(keep) == len(page_ids)
+                else np.asarray(page_matrix)[keep]
+            )
+            labels, distances = prebuilt_index.knn_query(block, k=k)
+            labels_arr = np.asarray(labels)
+            row_parts.append(np.repeat(rows, labels_arr.shape[1]))
+            col_parts.append(labels_arr.reshape(-1).astype(np.int64))
+            sim_parts.append(
+                1.0 - np.asarray(distances).reshape(-1).astype(np.float64))
+    except Exception:
+        return []                               # fail-open:同义边为空,不崩 build
+    if not row_parts:
+        return []
+    return _synonym_edges_from_knn(
+        ids,
+        np.concatenate(row_parts),
+        np.concatenate(col_parts),
+        np.concatenate(sim_parts),
+        threshold,
+    )

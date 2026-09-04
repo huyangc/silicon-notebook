@@ -144,6 +144,68 @@ def build_matrix(rows: Iterable[Tuple[str, str]], n_hint: int = 0,
     return ids, np.vstack(vecs)
 
 
+def matrix_pages(rows: Iterable[Tuple[str, str]], page_rows: int,
+                 runtime_dim: "Optional[int]" = None):
+    """``build_matrix``, yielded one bounded page at a time.
+
+    Generator of ``(ids, matrix)`` pairs holding at most ``page_rows`` VALID
+    rows each (invalid/skipped rows never occupy a page slot), for the offline
+    build's ANN legs: hnswlib copies each page into its own graph, so the
+    caller can drop a page the moment ``add_items`` returns instead of keeping
+    one whole-notebook matrix resident (the 8M-row relation leg is ~33GB).
+
+    All five ``build_matrix`` semantics are carried ACROSS pages, not
+    re-derived per page — a per-page ``build_matrix`` call would break the
+    middle two:
+      1. ``runtime_dim`` truncation happens per row, before the dim decision;
+      2. the FIRST valid row of the FIRST non-empty page fixes ``dim`` for the
+         whole scan (per-page re-derivation would let a page whose first row
+         is a wrong-dim outlier redefine the width mid-stream);
+      3. rows whose (post-truncation) width differs from that ``dim`` are
+         skipped, wherever they fall;
+      4. each retained row is L2-normalized;
+      5. ``ids`` stay row-aligned with the matrix, in scan order.
+    Concatenating every page therefore reproduces ``build_matrix(rows)``
+    element for element — the property the oracle test pins.
+
+    ``page_rows`` must be >= 1. An input yielding no valid row yields no page
+    at all (the caller's "no vectors" branch), mirroring ``build_matrix``'s
+    empty return rather than emitting a zero-row matrix.
+    """
+    rd = resolve_runtime_dim() if runtime_dim is None else int(runtime_dim)
+    cap = max(1, int(page_rows))
+    dim = None
+    ids: List[str] = []
+    vecs: List[np.ndarray] = []
+    for vid, raw in rows:
+        if not raw:
+            continue
+        try:
+            arr = decode_vector(raw)
+        except Exception:  # noqa: BLE001 — skip unparseable rows (build_matrix parity)
+            continue
+        if arr is None:
+            continue
+        if arr.ndim != 1 or arr.size == 0:
+            continue
+        if rd > 0:
+            arr = truncate_vec(arr, rd)     # 必须先于定维判定(见 build_matrix)
+        if dim is None:
+            dim = int(arr.size)
+        elif arr.size != dim:
+            continue
+        norm = float(np.linalg.norm(arr))
+        if norm > 0:
+            arr = arr / norm
+        ids.append(vid)
+        vecs.append(arr)
+        if len(ids) >= cap:
+            yield ids, np.vstack(vecs)
+            ids, vecs = [], []
+    if ids:
+        yield ids, np.vstack(vecs)
+
+
 def query_sims(query_vector, ids: List[str], matrix: np.ndarray) -> Dict[str, float]:
     """Cosine similarity of a query against the pre-normalized matrix. {id: sim}."""
     if not query_vector or not ids or matrix.size == 0:

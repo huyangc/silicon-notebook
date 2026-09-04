@@ -6,11 +6,13 @@ from typing import Sequence
 from app.repositories.chunk_elements import reverse_rows_for_writes
 from app.repositories.ports import ChunkWrite
 from app.repositories.postgres._store_utils import (
+    GRAPH_FETCH_BATCH,
     TimestampInput,
     execute_many,
     iso_timestamp,
     json_value,
     jsonb,
+    keyset_pages,
     normalize_timestamp,
     placeholders,
 )
@@ -459,11 +461,41 @@ class ChunkStore:
 
     @staticmethod
     def id_element_rows(connection, notebook_id: str):
-        rows = connection.execute(
-            "SELECT id,element_ids FROM chunks WHERE notebook_id=%s ORDER BY ordinal",
-            (notebook_id,),
-        ).fetchall()
-        return [_compat_element_ids(row) for row in rows]
+        """Whole-notebook ``(id, element_ids)`` rows, streamed in ``ordinal``
+        keyset pages instead of one whole-table ``fetchall`` (batch-3 W4
+        T-W4-3.1). The consumer (``_elem_chunk_map``) folds every row's
+        ``element_ids`` JSON into an ``{element_id: [chunk_id]}`` map and drops
+        the row, so paging genuinely bounds the resident JSON rather than only
+        the driver buffer.
+
+        Key: ``ordinal``, NOT ``id``. ``uq_chunks_ordinal`` makes it globally
+        unique, so it is a valid single-column cursor — and it is the key this
+        read ALREADY ordered by, which here is load-bearing rather than
+        cosmetic: ``_elem_chunk_map`` builds each element's chunk list in row
+        order, and ``_elem_chunks_scoped`` pins that the legacy whole-scan and
+        the ``chunk_elements`` reverse-index path both return "per-element
+        chunk lists in chunk insertion order". Paging by ``id`` instead would
+        have reordered those lists and moved the first-seen chunk a KG-source
+        lookup returns on unbackfilled notebooks — a retrieval-result change,
+        which this project is explicitly not allowed to make. Same planner
+        ledger as the other ordinal keysets (no ``(notebook_id, ordinal)``
+        composite; dominant-share notebooks pay nothing).
+
+        A GENERATOR: it must be consumed inside the caller's connection scope.
+        """
+        for page in keyset_pages(
+            connection, GRAPH_FETCH_BATCH,
+            lambda cursor: (
+                "SELECT id,element_ids,ordinal FROM chunks WHERE notebook_id=%s"
+                + ("" if cursor is None else " AND ordinal>%s")
+                + " ORDER BY ordinal LIMIT %s",
+                (notebook_id, GRAPH_FETCH_BATCH) if cursor is None
+                else (notebook_id, cursor, GRAPH_FETCH_BATCH),
+            ),
+            lambda row: row["ordinal"],
+        ):
+            for row in page:
+                yield _compat_element_ids(row)
 
     @staticmethod
     def knowhow_chunk_rows(connection, notebook_id: str):
