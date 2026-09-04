@@ -1766,13 +1766,53 @@ class QueryStore:
             # scope="Element" hit either (a knowhow cell's own element would
             # otherwise show up here with the same dead-end-navigation issue
             # as the "Source" leg above).
+            #
+            # 两腿等价 UNION，不是一个跨表 OR —— 与 PostgreSQL 侧
+            # ``postgres/search.py:notebook_element_rows`` 同构，完整的病灶描述、
+            # 等价论证与收益边界写在那一份 docstring 里（那边才是有索引可吃的
+            # 一侧：migration 0048 的 lower(title) partial GIN）。这里只记 SQLite
+            # 侧自己的两处差异：
+            #
+            # 1. **排序键是 rowid，不是 ordinal。** SQLite 的 source_elements 没有
+            #    ordinal 列（PG 侧是 0001_initial.sql 里的 GENERATED IDENTITY +
+            #    uq_source_elements_ordinal），对应物是隐式 rowid —— 与
+            #    ``chunks_by_section`` 在两侧的分歧同一条既有裁决
+            #    (sqlite/migrations.py 的「不适用」条目，含「rowid 尾列索引消不掉
+            #    ORDER BY」的实测)。等价论证只需要「排序键在表内唯一」——rowid
+            #    是 rowid 表的主键，这一条无条件成立，所以「前 cap 条」无歧义。
+            #    （不依赖 rowid 单调：非 AUTOINCREMENT 的 rowid 在删除后可被复用，
+            #    它给出的是一个确定的全序，不是插入时间序。）
+            # 2. **代价如实登记：这里多付了一次排序。** 改写前本腿连 ORDER BY 都
+            #    没有——撞上 LIMIT 就停，返回哪 cap 条由 planner 决定；改写后每条
+            #    腿各自按 rowid 取前 cap 条、外层再排一次。确定性化不是零成本，
+            #    这一笔是明知故犯：没有确定的序，两腿并集就不可能与旧形态逐条
+            #    等价，而 SQLite 侧本就没有索引能让这条谓词更快（LIKE '%…%' 用不
+            #    上 B 树前缀），所以这一侧的改写是为了两个后端 SQL 不分叉。
             element_rows = db.execute(
                 "SELECT se.*, s.title AS source_title FROM source_elements se "
                 "JOIN sources s ON s.id = se.source_id "
-                "WHERE s.notebook_id = ? AND s.source_type NOT IN ('memory', 'knowhow') AND "
-                "(LOWER(se.text) LIKE ? OR LOWER(se.location_label) LIKE ? OR LOWER(s.title) LIKE ?) "
-                "LIMIT ?",
-                (notebook_id, like, like, like, cap),
+                "WHERE s.notebook_id = ? AND s.source_type NOT IN ('memory', 'knowhow') "
+                "AND se.rowid IN ("
+                # 腿 A：元素自身的正文/位置标签。
+                "SELECT rid FROM (SELECT ea.rowid AS rid FROM source_elements ea "
+                "JOIN sources sa ON sa.id = ea.source_id "
+                "WHERE sa.notebook_id = ? AND sa.source_type NOT IN ('memory', 'knowhow') "
+                "AND (LOWER(ea.text) LIKE ? OR LOWER(ea.location_label) LIKE ?) "
+                "ORDER BY ea.rowid LIMIT ?)"
+                " UNION "
+                # 腿 B：先在 sources 上收命中标题的 id，再取这些源的元素。
+                "SELECT rid FROM (SELECT eb.rowid AS rid FROM source_elements eb "
+                "WHERE eb.source_id IN (SELECT id FROM sources WHERE notebook_id = ? "
+                "AND source_type NOT IN ('memory', 'knowhow') AND LOWER(title) LIKE ?) "
+                "ORDER BY eb.rowid LIMIT ?)"
+                ") "
+                "ORDER BY se.rowid LIMIT ?",
+                (
+                    notebook_id,
+                    notebook_id, like, like, cap,
+                    notebook_id, like, cap,
+                    cap,
+                ),
             ).fetchall() if len(hits) < cap else ()
             for row in element_rows:
                 label = f"{row['source_title']} · {row['location_label']}"
