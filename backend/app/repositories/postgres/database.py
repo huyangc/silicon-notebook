@@ -724,10 +724,18 @@ class PostgresDatabase:
         lock_key = advisory_lock_key(notebook_id)
         try:
             with self.connect() as db:
+                # Advisory locks are DATABASE-scoped, and pg_locks lists the
+                # whole cluster (codex #676 R7 P2): without the database
+                # filter a cloned staging database holding the same notebook
+                # id would read as "building" here. objsubid = 2 pins the
+                # two-key int4 lock form this claim uses.
                 row = db.execute(
                     "SELECT EXISTS ("
                     "SELECT 1 FROM pg_locks "
                     "WHERE locktype = 'advisory' AND granted "
+                    "AND database = (SELECT oid FROM pg_database "
+                    "                WHERE datname = current_database()) "
+                    "AND objsubid = 2 "
                     "AND classid = %s::oid AND objid = %s::oid"
                     ") AS held",
                     (

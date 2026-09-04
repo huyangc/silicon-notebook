@@ -57,18 +57,25 @@ def _url() -> str:
         raise SystemExit(
             "set BENCH_POSTGRES_URL (or TEST_POSTGRES_URL) to a DEDICATED test database"
         )
-    # Validate the DATABASE COMPONENT, not the whole URL (codex #676 R3 P1):
-    # a substring check over the full URL passes when '_test' appears in the
-    # username / password / host / query string while the path still names a
-    # production database — and this tool seeds, drops and VACUUMs. Same
-    # posture as the PostgreSQL test lane: the parsed database name itself
-    # must end in '_test'.
-    from urllib.parse import urlsplit
+    # Validate the EFFECTIVE database name, not the whole URL and not just
+    # the URL path (codex #676 R3 P1 + R7 P1): a substring check over the
+    # full URL passes when '_test' appears in the username / host, and a
+    # path-only parse is bypassed by legal libpq semantics — in
+    # ``postgresql:///safe_test?dbname=production`` the ``dbname`` query
+    # parameter WINS and psycopg connects to ``production`` while the path
+    # says ``safe_test``. psycopg's own conninfo parser resolves those
+    # semantics, so validate what it says the connection will actually use.
+    # This tool seeds, drops and VACUUMs; the resolved name must end in
+    # '_test'.
+    from psycopg import conninfo
 
-    database = urlsplit(url).path.lstrip("/").split("/", 1)[0]
+    try:
+        database = str(conninfo.conninfo_to_dict(url).get("dbname") or "")
+    except Exception as exc:  # noqa: BLE001 - unparseable == refuse
+        raise SystemExit(f"refusing to run: unparseable connection URL ({exc})")
     if not database.endswith("_test"):
         raise SystemExit(
-            "refusing to run: the parsed database name "
+            "refusing to run: the effective database name "
             f"{database!r} does not end in '_test' (a dedicated bench/test "
             "database is required; '_test' elsewhere in the URL does not count)"
         )
