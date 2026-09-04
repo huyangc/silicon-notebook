@@ -9,6 +9,7 @@ from pathlib import Path
 from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from psycopg.errors import QueryCanceled
 
 from app.api.auth_routes import auth_router
 from app.api.agent_mcp_onboarding import (
@@ -285,6 +286,48 @@ def create_app() -> FastAPI:
         )
 
     request_log = EventLogger(settings, channel="requests")
+
+    @app.exception_handler(QueryCanceled)
+    async def query_canceled_handler(
+        request: Request, _exc: QueryCanceled
+    ) -> JSONResponse:
+        # T-W4-4: a PostgreSQL statement-timeout cancellation that reaches this
+        # top-level handler previously fell through to a bare, unobservable
+        # 500. The existing savepoint-bounded probes (e.g. knowledge_store.py's
+        # chunk lexical-recall budget) catch and convert their own
+        # QueryCanceled into a domain-specific exception before it ever
+        # propagates this far, so this handler never sees those. No 4xx
+        # semantics apply here (this is not a client error, and 408/413 are
+        # not this error's real meaning), so this stays a 503 with a
+        # machine-readable `code` — the frontend already generalizes every
+        # 5xx into one "service unavailable" copy (deliberate anti-spoofing
+        # design in frontend/app/errors.ts), so no Chinese user copy is
+        # minted here and X-User-Message is deliberately not set.
+        # Rollback is deliberately NOT done here: the connection pool's
+        # return-to-pool path already does ROLLBACK + RESET + an IDLE
+        # verification before a connection is reused (PostgresDatabase), so a
+        # handler-level rollback would be redundant, not a safety net for a
+        # "poisoned" connection.
+        event: dict[str, object] = {
+            "kind": "query_timeout",
+            "method": request.method,
+            "path": request.url.path,
+        }
+        # Only the dominant `{notebook_id}` path-param spelling is read here —
+        # "拿不到不硬凑": guessing at other id spellings (`{id}`, `{nb}`, ...)
+        # risks attributing the event to the wrong resource, which is worse
+        # than omitting the dimension.
+        notebook_id = request.path_params.get("notebook_id")
+        if notebook_id:
+            event["notebook_id"] = notebook_id
+        request_log.emit(event)
+        return JSONResponse(
+            status_code=503,
+            content={
+                "detail": "query cancelled: statement timeout exceeded",
+                "code": "query_timeout",
+            },
+        )
 
     @app.middleware("http")
     async def log_requests(request: Request, call_next):
