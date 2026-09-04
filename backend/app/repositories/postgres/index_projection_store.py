@@ -29,7 +29,7 @@ from app.repositories.postgres._store_utils import (
     keyset_pages as _keyset_pages,
 )
 from app.repositories.postgres.embedding_store import (
-    _MATRIX_FETCH_BATCH,
+    MATRIX_FETCH_BATCH,
     EmbeddingStore,
 )
 from app.repositories.postgres.search import PAYLOAD_NAME_EXPRESSION
@@ -342,18 +342,32 @@ class IndexProjectionStore:
         cannot drop a tie. The ORDER BY is byte-identical to the pre-paging
         one, so the consumer sees the same rows in the same order.
 
-        Registered cost: there is no ``(notebook_id, ordinal)`` composite, so
-        each page is an ``uq_knowledge_objects_ordinal`` range scan with
-        ``notebook_id``/``status`` as residual filters. For the dominant-share
-        notebook an offline build targets that is near-free; below roughly
-        sqrt(total_rows x page) of share the planner instead re-reads the
-        notebook per page — total work still bounded by about one index
-        traversal. Same ledger, same accepted trade-off, as
-        ``EmbeddingStore.vector_pages``.
+        Registered cost — TWO planner regimes, measured, not assumed (the
+        EXPLAIN harness is ``scripts/bench_scale_build_paging.py explain``).
+        There is no ``(notebook_id, ordinal)`` composite, so:
+
+        - page << the notebook's remaining rows (the regime a real build runs
+          in): ``Index Scan using uq_knowledge_objects_ordinal`` with
+          ``ordinal > cursor`` as the Index Cond and ``notebook_id``/``status``
+          as residual filters. The cursor advances monotonically, so
+          successive pages CONTINUE the range rather than restarting it, and
+          the whole scan costs about ONE traversal of the global ordinal
+          index. The minority-share cost is that the traversal covers the
+          whole TABLE's index (other notebooks' interleaved rows are filtered
+          out as they are passed), not that this notebook is re-read per page.
+        - page >= the notebook's remaining rows: the planner flips to the
+          notebook index plus a top-N Sort, which does read and sort all
+          remaining rows — but in that regime a single page covers the rest of
+          the notebook, so it happens once, not per page.
+
+        These two are only contradictory if stated as one continuous claim (an
+        earlier version of this ledger did exactly that). Same trade-off, same
+        acceptance, as ``EmbeddingStore.vector_pages``.
 
         This is a GENERATOR: it must be consumed inside the caller's
-        connection scope. A caller that iterates after closing ``db`` gets a
-        loud driver error, never a silently short result.
+        connection scope, exactly once, by iteration — no ``len()``, no
+        indexing, no second pass. A caller that iterates after closing ``db``
+        gets a loud driver error, never a silently short result.
         """
         for page in _keyset_pages(
             db,
@@ -363,9 +377,8 @@ class IndexProjectionStore:
                 "FROM knowledge_objects "
                 "WHERE notebook_id=%s AND status!='deprecated'"
                 + ("" if cursor is None else " AND ordinal>%s")
-                + " ORDER BY ordinal LIMIT %s",
-                (notebook_id, _GRAPH_FETCH_BATCH) if cursor is None
-                else (notebook_id, cursor, _GRAPH_FETCH_BATCH),
+                + " ORDER BY ordinal",
+                (notebook_id,) if cursor is None else (notebook_id, cursor),
             ),
             lambda row: row["ordinal"],
         ):
@@ -536,6 +549,12 @@ class IndexProjectionStore:
         # pre-paging one, so row order (and therefore node_ids order, the
         # first-seen edge-weight winner, and the persisted artifact) is
         # unchanged.
+        # Connection boundary, registered: ONE connection stays checked out
+        # across all four paged gathers, because between pages this loop does
+        # nothing but fold rows into dicts (milliseconds). That is why these
+        # keep `keyset_pages`' shared-connection shape while the ANN feed —
+        # which runs an hnsw build between pages — acquires and releases a
+        # connection per page instead (`embedding_pages`).
         with self.connect() as db:
             for src_clause, src_params in clauses:
                 # Key: `ordinal` alone. `uq_knowledge_objects_ordinal` is
@@ -550,10 +569,9 @@ class IndexProjectionStore:
                         f"SELECT id, object_type, payload, ordinal FROM knowledge_objects "
                         f"WHERE notebook_id=%s AND status IN ({ph}){_c}"
                         + ("" if cursor is None else " AND ordinal>%s")
-                        + " ORDER BY ordinal, id COLLATE \"C\" LIMIT %s",
-                        (notebook_id, *USABLE_STATUSES, *_p, _GRAPH_FETCH_BATCH)
-                        if cursor is None else
-                        (notebook_id, *USABLE_STATUSES, *_p, cursor, _GRAPH_FETCH_BATCH),
+                        + " ORDER BY ordinal, id COLLATE \"C\"",
+                        (notebook_id, *USABLE_STATUSES, *_p) if cursor is None
+                        else (notebook_id, *USABLE_STATUSES, *_p, cursor),
                     ),
                     lambda row: row["ordinal"],
                 ):
@@ -578,9 +596,9 @@ class IndexProjectionStore:
                         f"FROM knowledge_relations "
                         f"WHERE notebook_id=%s AND review_status!='rejected'{_c}"
                         + ("" if cursor is None else " AND id COLLATE \"C\">%s")
-                        + " ORDER BY id COLLATE \"C\" LIMIT %s",
-                        (notebook_id, *_p, _GRAPH_FETCH_BATCH) if cursor is None
-                        else (notebook_id, *_p, cursor, _GRAPH_FETCH_BATCH),
+                        + " ORDER BY id COLLATE \"C\"",
+                        (notebook_id, *_p) if cursor is None
+                        else (notebook_id, *_p, cursor),
                     ),
                     lambda row: row["id"],
                 ):
@@ -604,9 +622,9 @@ class IndexProjectionStore:
                     lambda cursor, _c=src_clause, _p=src_params: (
                         f"SELECT id, ordinal FROM chunks WHERE notebook_id=%s{_c}"
                         + ("" if cursor is None else " AND ordinal>%s")
-                        + " ORDER BY ordinal, id COLLATE \"C\" LIMIT %s",
-                        (notebook_id, *_p, _GRAPH_FETCH_BATCH) if cursor is None
-                        else (notebook_id, *_p, cursor, _GRAPH_FETCH_BATCH),
+                        + " ORDER BY ordinal, id COLLATE \"C\"",
+                        (notebook_id, *_p) if cursor is None
+                        else (notebook_id, *_p, cursor),
                     ),
                     lambda row: row["ordinal"],
                 ):
@@ -622,25 +640,46 @@ class IndexProjectionStore:
             # unique per (notebook, type, generation) — an object id has
             # exactly one type, so `member_object_id` (hence the pair) is
             # unique per (notebook, generation) and `>` drops nothing.
-            # The published-generation predicate is repeated on EVERY page,
-            # never hoisted to a first-page-only filter: dropping it on later
-            # pages would both lose the Index-Only Scan and let an unpublished
-            # generation's members into the graph, which is the W2 red line
-            # "version identity only ever counts the published generation".
+            #
+            # SINGLE-GENERATION SEMANTICS = one evaluation + a per-page bind.
+            # The published generation is resolved ONCE, right here, and the
+            # resulting integer is bound into EVERY page's predicate. Leaving
+            # the old inline `COALESCE((<published-generation pointer read>),
+            # 0)` scalar subquery in the predicate (spelled out one statement
+            # below) would have re-evaluated it per page, and under
+            # READ COMMITTED a generation flip committed between two pages
+            # then splits the scan across two generations: the same
+            # member_object_id can arrive under two different canonical_ids
+            # (a state `uq_clusters_nb_type_member_generation` makes
+            # impossible WITHIN one generation, so nothing downstream defends
+            # against it), and the torn graph would be persisted under the new
+            # generation's version identity. The predicate itself still rides
+            # every page — never hoisted to a first-page-only filter, which
+            # would both lose the Index-Only Scan and let a non-published
+            # generation's members in from page two onward (the W2 red line
+            # "version identity only ever counts the published generation").
+            published_row = db.execute(
+                "SELECT cluster_generation FROM unified_kg_state "
+                "WHERE notebook_id=%s",
+                (notebook_id,),
+            ).fetchone()
+            published_generation = int(
+                0 if published_row is None
+                or published_row["cluster_generation"] is None
+                else published_row["cluster_generation"]
+            )
             for page in _keyset_pages(
                 db, _GRAPH_FETCH_BATCH,
                 lambda cursor: (
                     "SELECT canonical_id, member_object_id FROM concept_clusters "
-                    "WHERE notebook_id=%s "
-                    "AND generation = COALESCE((SELECT cluster_generation "
-                    "FROM unified_kg_state WHERE notebook_id = %s), 0)"
+                    "WHERE notebook_id=%s AND generation = %s"
                     + ("" if cursor is None else
                        " AND (canonical_id COLLATE \"C\", member_object_id COLLATE \"C\")"
                        " > (%s, %s)")
                     + " ORDER BY canonical_id COLLATE \"C\", "
-                    "member_object_id COLLATE \"C\" LIMIT %s",
-                    (notebook_id, notebook_id, _GRAPH_FETCH_BATCH) if cursor is None
-                    else (notebook_id, notebook_id, *cursor, _GRAPH_FETCH_BATCH),
+                    "member_object_id COLLATE \"C\"",
+                    (notebook_id, published_generation) if cursor is None
+                    else (notebook_id, published_generation, *cursor),
                 ),
                 lambda row: (row["canonical_id"], row["member_object_id"]),
             ):
@@ -648,8 +687,14 @@ class IndexProjectionStore:
                     cluster_groups.setdefault(
                         r["canonical_id"], []).append(r["member_object_id"])
 
-        # Memberships: entity ↔ chunk (scoped → limit to gathered objects)
-        ent_chunk_map = self.ent_chunk_map(notebook_id)
+        # Memberships: entity ↔ chunk (scoped → limit to gathered objects).
+        # `paged=True` is the ONLY route to the bounded evidence read
+        # (`notebook_object_evidence_rows_paged`); the online PPR callers of
+        # the same cache keep the unordered whole-table read, whose plan this
+        # gather's `ORDER BY id` would otherwise have cost +31% (batch-3 W4
+        # T-W4-3.1 double-review fix A). Same rows, same dict, same cache
+        # entry — only the statement differs.
+        ent_chunk_map = self.ent_chunk_map(notebook_id, paged=True)
         _kg_keys = set(kg_nodes.keys())
         membership_object_ids = sorted(
             (
@@ -830,7 +875,7 @@ class IndexProjectionStore:
         deliberately BYPASSES the query-time vector cache: a build's multi-GB
         matrices must never become LRU entries. Rows are read through
         `EmbeddingStore.vector_pages` in bounded keyset pages (`{id} > last
-        LIMIT _MATRIX_FETCH_BATCH`, embedding_store.py), each page an
+        LIMIT MATRIX_FETCH_BATCH`, embedding_store.py), each page an
         independent fully-exhausted statement — the whole-table result set
         is never `.fetchall()`'d in one call and no single statement holds a
         streaming cursor across the whole scan. This mirrors the SQLite
@@ -892,7 +937,7 @@ class IndexProjectionStore:
             return int(EmbeddingStore.version_row(db, notebook_id, table)["c"])
 
     def embedding_pages(self, notebook_id: str, table: str, id_column: str,
-                        page_rows: int = _MATRIX_FETCH_BATCH):
+                        page_rows: int = MATRIX_FETCH_BATCH):
         """Whole-notebook vectors as bounded ``(ids, matrix)`` pages.
 
         The load-side half of ``embedding_matrix(object_ids=None)`` without
@@ -907,15 +952,26 @@ class IndexProjectionStore:
         matrix was only an ALIAS — the memory this removes is the load-side
         copy, not hnswlib's own (which is unavoidable).
 
-        A GENERATOR holding the connection open across its own consumption
-        (the ``with`` encloses the yields), same shape as ``embedding_matrix``
-        's delta path.
+        A GENERATOR that acquires and RELEASES a pooled connection per DB
+        page (``vector_pages(connect=...)``) rather than holding ONE open
+        across its whole consumption. That distinction is the point of this
+        entry point existing separately from ``embedding_matrix``: its
+        consumer builds an hnsw index between pages, so a held connection
+        would keep a pool slot (and an ACCESS SHARE lock on the embedding
+        table) checked out for the entire multi-minute index build — at
+        ``POSTGRES_POOL_MAX_SIZE=1``, the minimum the settings validator
+        accepts, that is the whole pool and every other request blocks behind
+        it. Each keyset page is already an
+        independent statement whose only cross-page state is a Python-side
+        cursor, so nothing about the scan's ordering or its drift ledger
+        depends on the pages sharing one connection.
         """
         from app.domain.vector_index import matrix_pages, resolve_runtime_dim
         runtime_dim = resolve_runtime_dim(self.settings)
-        with self.connect() as db:
-            yield from matrix_pages(
-                EmbeddingStore.vector_pages(db, notebook_id, table, id_column),
-                page_rows,
-                runtime_dim=runtime_dim,
-            )
+        yield from matrix_pages(
+            EmbeddingStore.vector_pages(
+                None, notebook_id, table, id_column, connect=self.connect
+            ),
+            page_rows,
+            runtime_dim=runtime_dim,
+        )

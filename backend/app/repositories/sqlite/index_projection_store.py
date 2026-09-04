@@ -50,10 +50,11 @@ ScaleGraphEdges = (
 # matrix (the OOM fix), avoids per-row _DiagnosticCursor.__next__
 # instrumentation, and releases the WAL read snapshot between pages so a long
 # online build never blocks checkpoints. See embedding_matrix's docstring.
-_MATRIX_FETCH_BATCH = 10_000
+MATRIX_FETCH_BATCH = 10_000
 
 
-def _stream_vector_rows(db, notebook_id: str, table: str, id_column: str):
+def _stream_vector_rows(db, notebook_id: str, table: str, id_column: str,
+                        connect=None):
     """Keyset pagination by rowid, de-duplicated. Each page is an INDEPENDENT,
     fully-exhausted statement, so the WAL read snapshot is released between
     pages — a single long-lived cursor would pin ONE snapshot for the whole
@@ -74,16 +75,29 @@ def _stream_vector_rows(db, notebook_id: str, table: str, id_column: str):
     ``embedding_pages``' paged ANN feed, so the two can never drift apart on
     the de-dup rule (a second copy of this scan is exactly how one of them
     would quietly lose it).
+
+    ``connect`` (batch-3 W4 T-W4-3.3 double-review fix C) says who owns the
+    connection. Default (None): every page runs on the caller's ``db``, which
+    therefore stays open for the whole scan. Passing a connection factory
+    opens and closes one PER page instead (``db`` unused) — what the ANN feed
+    needs, because it interleaves hnswlib index construction between pages and
+    must not hold a connection (on the PostgreSQL sibling, a pool slot) across
+    that. Safe because the only cross-page state — ``seen`` and
+    ``last_rowid`` — already lives in Python, and each page was already an
+    independent statement.
     """
+    from contextlib import nullcontext
+
     seen: set = set()
     last_rowid = 0
     while True:
-        page = db.execute(
-            f"SELECT rowid AS rid, {id_column} AS vid, vector "
-            f"FROM {table} WHERE notebook_id=? AND rowid > ? "
-            f"ORDER BY rowid LIMIT ?",
-            (notebook_id, last_rowid, _MATRIX_FETCH_BATCH),
-        ).fetchall()
+        with (nullcontext(db) if connect is None else connect()) as page_db:
+            page = page_db.execute(
+                f"SELECT rowid AS rid, {id_column} AS vid, vector "
+                f"FROM {table} WHERE notebook_id=? AND rowid > ? "
+                f"ORDER BY rowid LIMIT ?",
+                (notebook_id, last_rowid, MATRIX_FETCH_BATCH),
+            ).fetchall()
         if not page:
             break
         for row in page:
@@ -93,7 +107,7 @@ def _stream_vector_rows(db, notebook_id: str, table: str, id_column: str):
             seen.add(vid)
             yield vid, row["vector"]
         last_rowid = page[-1]["rid"]
-        if len(page) < _MATRIX_FETCH_BATCH:
+        if len(page) < MATRIX_FETCH_BATCH:
             break
 
 
@@ -524,6 +538,22 @@ class IndexProjectionStore:
         chunk_ids: list = []
         cluster_groups: Dict[str, list] = {}
 
+        # These four gathers stay WHOLE-TABLE `.fetchall()`s while the
+        # PostgreSQL adapter's equivalents read in keyset pages (batch-3 W4
+        # T-W4-3.1). The reason is scope, not a SQLite hazard: WR-9's 8M-row
+        # target is a PostgreSQL deployment, and every key the paging design
+        # leans on — `uq_knowledge_objects_ordinal` / `uq_chunks_ordinal` as
+        # globally-unique single-column cursors, `idx_clusters_nb_canonical_
+        # member_gen`'s INCLUDE(generation) Index-Only Scan — is a PostgreSQL
+        # fact. Paging here would have to be designed against SQLite's own
+        # indexes and measured on SQLite, for a backend that is not the one
+        # running at that scale, so it is deliberately out of scope.
+        # NOT the reason (an earlier draft of this ledger said so and was
+        # wrong): rowid instability under `INSERT OR REPLACE`. That hazard is
+        # real for the EMBEDDING tables — hence `_stream_vector_rows`' `seen`
+        # set — but `knowledge_objects` / `chunks` / `knowledge_relations` are
+        # written with plain `INSERT` and carry TEXT primary keys, so a rowid
+        # (or id) cursor over them would be perfectly stable.
         with self.connect() as db:
             for src_clause, src_params in clauses:
                 for r in db.execute(
@@ -562,8 +592,11 @@ class IndexProjectionStore:
                     (notebook_id, notebook_id)).fetchall():
                 cluster_groups.setdefault(r["canonical_id"], []).append(r["member_object_id"])
 
-        # Memberships: entity ↔ chunk (scoped → limit to gathered objects)
-        ent_chunk_map = self.ent_chunk_map(notebook_id)
+        # Memberships: entity ↔ chunk (scoped → limit to gathered objects).
+        # `paged=True` mirrors the PostgreSQL adapter's gather so one seam
+        # serves both; on this backend the paged evidence entry point resolves
+        # to the same single statement (see the ledger above).
+        ent_chunk_map = self.ent_chunk_map(notebook_id, paged=True)
         _kg_keys = set(kg_nodes.keys())
         membership_object_ids = sorted(
             (
@@ -743,7 +776,7 @@ class IndexProjectionStore:
         build_matrix preallocates (the frozen build-scale memory diet) —
         deliberately BYPASSES the query-time vector cache: a build's multi-GB
         matrices must never become LRU entries. Rows are read in bounded keyset
-        pages (rowid > last LIMIT _MATRIX_FETCH_BATCH), each an independent
+        pages (rowid > last LIMIT MATRIX_FETCH_BATCH), each an independent
         fully-exhausted statement — never .fetchall()'d whole, never iterated
         row-by-row, never a single long-lived streaming cursor. Four properties
         are load-bearing at 8M-row scale:
@@ -752,7 +785,7 @@ class IndexProjectionStore:
             truncated) matrix is exactly what OOM-killed the offline `index`
             build (relation load: ~130GB transient on top of the ~78GB KG/chunk
             residents → ~208GB). A page bounds the raw BLOBs held on top of the
-            output matrix to _MATRIX_FETCH_BATCH rows.
+            output matrix to MATRIX_FETCH_BATCH rows.
           • CPU/lock: _DiagnosticCursor.__next__ is instrumented, so row-by-row
             iteration would enter sql_scope for EVERY embedding — on the online
             build path (diagnostics runtime installed) that is normalize-SQL +
@@ -815,7 +848,7 @@ class IndexProjectionStore:
                 (notebook_id,)).fetchone()["c"])
 
     def embedding_pages(self, notebook_id: str, table: str, id_column: str,
-                        page_rows: int = _MATRIX_FETCH_BATCH):
+                        page_rows: int = MATRIX_FETCH_BATCH):
         """Whole-notebook vectors as bounded ``(ids, matrix)`` pages.
 
         The load-side half of ``embedding_matrix(object_ids=None)`` without
@@ -827,14 +860,20 @@ class IndexProjectionStore:
         the caller drops the page right after ``add_items`` instead of holding
         the whole matrix alongside the index.
 
-        A GENERATOR holding the connection open across its own consumption
-        (the ``with`` encloses the yields), same shape as the delta path above.
+        A GENERATOR that opens and closes a connection PER DB page
+        (``_stream_vector_rows(connect=...)``) rather than holding one across
+        its whole consumption: the consumer builds an hnsw index between
+        pages, and a connection held across that is a pool slot (PostgreSQL
+        sibling) or a pinned read snapshot (here) for the entire build. The
+        page loop's only cross-page state is Python-side, so the de-dup and
+        WAL ledgers above are unaffected.
         """
         from app.domain.vector_index import matrix_pages, resolve_runtime_dim
         runtime_dim = resolve_runtime_dim(self.settings)
-        with self.connect() as db:
-            yield from matrix_pages(
-                _stream_vector_rows(db, notebook_id, table, id_column),
-                page_rows,
-                runtime_dim=runtime_dim,
-            )
+        yield from matrix_pages(
+            _stream_vector_rows(
+                None, notebook_id, table, id_column, connect=self.connect
+            ),
+            page_rows,
+            runtime_dim=runtime_dim,
+        )

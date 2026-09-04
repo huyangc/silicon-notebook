@@ -99,6 +99,26 @@ teardown 骑在上面;锁的既有 docstring 承诺「毫秒级事务」。
    **如实声明**:分页界住的是 fetchall 缓冲与快照时长,Python 侧图结构的
    峰值驻留不变(那是 WR-9 矩阵/图派生的固有形态,本项不动)。
    oracle:小库两实现产出逐位对比(排序后)。
+
+   **实施偏离(PR-B 双内评整改后,以代码为准)**——三处与本节原文不同:
+   - `id_element_rows` 按 **`ordinal`** 分页,不是原文写的 id。该 ORDER BY
+     是被消费的(`_elem_chunks_scoped` 明写两条路径同为 chunk 插入序),
+     换 id 会改动未回填库上 KG 溯源的首见 chunk,属检索结果变化,踩红线。
+   - `notebook_object_evidence_rows` **双模**,不是整条改分页。该函数在
+     `_ent_chunk_map` 上,是每次 KG 版本变动后首次 graph 模式提问的在线
+     读;真机实测新引入的 `ORDER BY id` 让它 +31%(102k objects 多库
+     136.6ms→178.3ms),单页库还落盘 external merge sort。因此在线入口
+     逐字保留旧无序 fetchall,分页只走独立入口
+     `notebook_object_evidence_rows_paged`,由 `graph_rows` 的 gather 经
+     `ent_chunk_map(paged=True)` 这条链取用;两个入口产出同一 dict,共用
+     同一条 version-cache 记录。
+   - clusters 的 published 代次**循环前求值一次**,再作为绑定参数施加在
+     每一页,而不是把 `COALESCE((SELECT cluster_generation ...), 0)` 标量
+     子查询留在谓词里逐页重求值。后者在 READ COMMITTED 下,若翻代提交
+     落在两页之间,同一 member 会跨页挂上两个 hub(单代内被
+     `uq_clusters_nb_type_member_generation` 构造性排除的状态),撕裂图还会
+     带上新代的版本身份。「每页都带谓词」的要求不变,变的只是谓词的值
+     来自一次求值。
 2. **在线 standalone viz 生成补大库闸**(取代 v1 的「scale build viz 阶段
    加闸」——那是方向反了:scale build 的 viz 阶段是大库 viz 的**指定
    生产者**,闸它=把物化逼回 API 进程)。`_spawn_viz_build` 有**两个**

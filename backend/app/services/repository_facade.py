@@ -473,9 +473,9 @@ class RepositoryFacade:
             in_batches=lambda ids: _repository_from_weakref(
                 repository_ref
             )._in_batches(ids),
-            ent_chunk_map=lambda notebook_id: _repository_from_weakref(
-                repository_ref
-            )._ent_chunk_map(notebook_id),
+            ent_chunk_map=lambda notebook_id, paged=False: (
+                _repository_from_weakref(repository_ref)
+            )._ent_chunk_map(notebook_id, paged=paged),
             mention_extra_edges=lambda notebook_id: (
                 _repository_from_weakref(repository_ref)._mention_extra_edges(
                     notebook_id
@@ -3725,8 +3725,10 @@ class RepositoryFacade:
             notebook_id, object_ids, support_by_object=support_by_object
         )
 
-    def _ent_chunk_map(self, notebook_id: str) -> Dict[str, set]:
-        return self.retrieval.graph._ent_chunk_map(notebook_id)
+    def _ent_chunk_map(
+        self, notebook_id: str, *, paged: bool = False
+    ) -> Dict[str, set]:
+        return self.retrieval.graph._ent_chunk_map(notebook_id, paged=paged)
 
     # ── chunk×graph mix ──────────────────────────────────────────────────────
 

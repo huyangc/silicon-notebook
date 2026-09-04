@@ -350,6 +350,7 @@ timeout 与熔断跳过次数。它只读日志和 manifest，不打开数据库
 | `reextract_notebook.py` | 重抽一个 notebook 的所有 source |
 | `compare_kg_dbs.py` | 对比去噪前后的 KG,评估成效 |
 | `bench_sqlite_writes.py` | 离线 SQLite 写吞吐**基准**(无 LLM/嵌入);非慢因诊断 |
+| `bench_scale_build_paging.py` | scale build 图侧 keyset 分页 / 分页 ANN 喂入的**测量台**(批 3·W4 T-W4-3):`seed`(合成多库语料)/ `explain`(六条改动读的 EXPLAIN ANALYZE,判定 range 续扫 vs 每页重扫+Sort)/ `evidence`(在线无参形 vs 构建分页形的双模 A/B,「不降检索性能」红线证据)/ `build`(分阶段耗时,≤10% 门)/ `rss`(每臂独立子进程测 ru_maxrss 与最大存活数组字节)/ `drop`。**绝不进 CI**:需要专用 `BENCH_POSTGRES_URL`(库名必须含 `_test`)、会写库,只用于复现结论 |
 | `replay_retrieval.py` | 检索**回归/A-B 对照**：固定问题集跑检索管线出 JSON，`--compare` 逐问题 diff；`--report-run` 才会进入报告 retrieval-run 并真实触发 `CHUNK_FTS_WITH_ANN_ENABLED`，`--summary-only` 输出可回帖的无问题/命中 id 汇总；非慢因诊断。 |
 | `kg_goldgen.py` / `kg_goldgen_all.py` | 为测试章节生成 gold KG 草稿 |
 | `kg_product_smoke.py` | 用真实产品抽取链路对样例 source 冒烟 |

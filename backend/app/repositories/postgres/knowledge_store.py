@@ -1545,38 +1545,87 @@ class KnowledgeStore:
 
     @staticmethod
     def notebook_object_evidence_rows(db: Any, notebook_id: str):
-        """Whole-notebook ``(id, evidence)`` rows, streamed in ``id`` keyset
-        pages instead of one whole-table ``fetchall`` (batch-3 W4 T-W4-3.1).
+        """Whole-notebook ``(id, evidence)`` rows for the ONLINE retrieval
+        path — one unordered ``SELECT`` + ``fetchall``, returning a LIST.
 
-        This is the heaviest of the graph-side reads: ``evidence`` is the
-        FULL per-object evidence JSON, and the only consumer
-        (``GraphRetrievalService._ent_chunk_map``) parses each row into a chunk
-        id set and drops it. Paging turns "every object's evidence JSON
-        resident at once" into "one page's worth", which is a real reduction
-        here rather than only a driver-buffer bound.
+        This statement is byte-identical to the pre-batch-3-W4 one and must
+        stay that way. ``GraphRetrievalService._ent_chunk_map`` runs it on the
+        first graph-mode PPR question after every KG version bump, where the
+        planner picks a bitmap scan on the notebook index. Adding an
+        ``ORDER BY id`` (which keyset paging requires) measured +31% on a
+        102k-object multi-notebook database — 136.6ms → 178.3ms — and made a
+        single-page notebook spill an external merge sort to disk, because an
+        ``id``-ordered read walks the PK with ``notebook_id`` demoted to a
+        residual filter. The offline build's bounded variant is a SEPARATE
+        entry point, ``notebook_object_evidence_rows_paged``; keeping the two
+        SQL shapes under two names is what stops the build's memory diet from
+        leaking back onto a hot retrieval read."""
+        return _compat_rows(db.execute(
+            "SELECT id, evidence FROM knowledge_objects WHERE notebook_id=%s",
+            (notebook_id,),
+        ).fetchall(), evidence=True)
 
-        Key: ``id``, the table's primary key (declared ``COLLATE "C"`` like
-        every text column in this schema), so the ``>`` cursor is a total
-        order. This read had NO ``ORDER BY`` before, so paging INTRODUCES an
-        order — that is safe by argument, not by luck: the consumer folds the
-        rows into a ``{object_id: set(chunk_id)}`` dict keyed by ``id``, and
-        the one downstream user of that dict (``graph_rows``' membership leg)
-        re-sorts its keys through ``sorted(..., key=_binary_text_key)`` before
-        using them, so no output of this read depends on the row order it
-        arrives in.
+    @staticmethod
+    def notebook_object_evidence_rows_paged(
+        db: Any, notebook_id: str, page_rows: "int | None" = None
+    ):
+        """The same rows in bounded ``id`` keyset pages, for the OFFLINE build
+        only (batch-3 W4 T-W4-3.1) — reached solely through ``graph_rows``'
+        gather, never from a query.
+
+        ``evidence`` is the heaviest column of the graph-side reads (the FULL
+        per-object evidence JSON) and the consumer parses each row into a chunk
+        id set and drops it, so paging turns "every object's evidence JSON
+        resident at once" into "one page's worth" — a real reduction, not only
+        a driver-buffer bound, and worth its planner cost inside a build that
+        already runs for minutes.
+
+        Registered cost — measured, not assumed (EXPLAIN harness:
+        ``scripts/bench_scale_build_paging.py explain``). The key is ``id``,
+        the table's primary key, and the plan has two regimes:
+
+        - page << the notebook's remaining rows: ``Index Scan using
+          pk_knowledge_objects`` with ``id > cursor`` as the Index Cond and
+          ``notebook_id`` as a residual filter. Pages CONTINUE the range, so
+          the whole scan is about one traversal of the PK index — the
+          minority-share cost is that the traversal walks past other
+          notebooks' interleaved rows (measured: 2 rows filtered per row kept
+          on a 3-notebook database), not that this notebook is re-read per
+          page.
+        - page >= the notebook's remaining rows: the planner flips to a
+          bitmap scan on the notebook index plus a Sort, which at 6k
+          evidence-heavy rows already spills to an ``external merge Disk``.
+          That is exactly why the ONLINE read must never carry this ORDER BY.
+
+        Either way the paged read is slower than the unordered one — measured
+        1.13x (page 500) and 1.17x (page 10000) on a 3-notebook, 6k-object
+        corpus, and +31% on the reviewer's 102k-object database. Acceptable
+        inside a minutes-long build, never on a query — hence two entry
+        points.
 
         A GENERATOR: it must be consumed inside the caller's connection scope.
         A caller that iterates after closing ``db`` gets a loud driver error,
         never a silently short result.
-        """
+
+        Row ORDER differs from the unpaged read (``id`` ascending vs
+        unordered) and that is safe by argument, not by luck: both feed the
+        same ``{object_id: set(chunk_id)}`` dict, and all three consumers of
+        that dict are order-insensitive — ``graph_rows``' membership leg sorts
+        its keys through ``sorted(..., key=_binary_text_key)``, the federated
+        PPR membership leg sorts the flattened pairs the same way, and
+        ``_ppr_reset_vector`` only reads ``len()`` of one value. Nothing
+        downstream observes arrival order, so the two modes are
+        interchangeable for the version-cached map.
+
+        ``page_rows=None`` resolves ``GRAPH_FETCH_BATCH`` at CALL time (not as
+        a default-argument snapshot), so the paging oracle can shrink it."""
         for page in keyset_pages(
-            db, GRAPH_FETCH_BATCH,
+            db, GRAPH_FETCH_BATCH if page_rows is None else page_rows,
             lambda cursor: (
                 "SELECT id, evidence FROM knowledge_objects WHERE notebook_id=%s"
                 + ("" if cursor is None else " AND id>%s")
-                + " ORDER BY id LIMIT %s",
-                (notebook_id, GRAPH_FETCH_BATCH) if cursor is None
-                else (notebook_id, cursor, GRAPH_FETCH_BATCH),
+                + " ORDER BY id",
+                (notebook_id,) if cursor is None else (notebook_id, cursor),
             ),
             lambda row: row["id"],
         ):

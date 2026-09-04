@@ -1903,7 +1903,15 @@ class ChunkStorePort(Protocol):
         source_ids: Sequence[str],
     ) -> list[Any]: ...
     @staticmethod
-    def id_element_rows(db: object, notebook_id: str) -> list[Any]: ...
+    def id_element_rows(db: object, notebook_id: str) -> Iterable[Any]:
+        """Whole-notebook ``(id, element_ids)`` rows in chunk insertion order.
+
+        LAZY on PostgreSQL (a keyset-paged generator), a materialized list on
+        SQLite. Consume it exactly once, by iteration, INSIDE the connection
+        scope that produced it: ``len()``, indexing, a second pass, or any use
+        after ``db`` is closed is a backend-dependent bug that the SQLite
+        suites cannot catch."""
+        ...
     @staticmethod
     def chunks_for_element_ids(
         db: object, notebook_id: str, element_ids: Sequence[str]
@@ -2344,7 +2352,24 @@ class RetrievalKnowledgeStorePort(KnowledgeStorePort, Protocol):
     def graph_object_rows(self, db: object, notebook_id: str, statuses: Sequence[str]) -> list[Any]: ...
     def graph_relation_rows(self, db: object, notebook_id: str, *, include_id_evidence: bool = True) -> list[Any]: ...
     def object_evidence_rows(self, db: object, object_ids: Sequence[str]) -> list[Any]: ...
-    def notebook_object_evidence_rows(self, db: object, notebook_id: str) -> list[Any]: ...
+    def notebook_object_evidence_rows(self, db: object, notebook_id: str) -> list[Any]:
+        """Whole-notebook ``(id, evidence)`` rows for the ONLINE retrieval
+        path — one unordered whole-table read, returning a LIST on both
+        backends. Kept separate from the paged entry point below so the
+        offline build's memory diet can never add an ``ORDER BY`` to this hot
+        read (measured +31% when it did)."""
+        ...
+    def notebook_object_evidence_rows_paged(self, db: object, notebook_id: str, page_rows: int | None = None) -> Iterable[Any]:
+        """The same rows, bounded, for the OFFLINE build's gather only.
+
+        LAZY on PostgreSQL (an ``id``-keyset paged generator), the same
+        materialized list as above on SQLite. Consume it exactly once, by
+        iteration, INSIDE the connection scope that produced it: ``len()``,
+        indexing, a second pass, or any use after ``db`` is closed is a
+        backend-dependent bug the SQLite suites cannot catch. Row ORDER is
+        backend- and mode-dependent; both feed the same order-insensitive
+        ``{object_id: set(chunk_id)}`` map."""
+        ...
     def follow_start_row(self, db: object, object_id: str, active_notebook_id: str, statuses: Sequence[str]) -> Any: ...
     def follow_endpoint_rows(self, db: object, notebook_id: str, object_id: str, endpoint: str, limit: int) -> list[Any]: ...
     def follow_relation_evidence_rows(self, db: object, relation_ids: Sequence[str]) -> list[Any]: ...
@@ -4303,14 +4328,19 @@ class IndexProjectionStorePort(Protocol):
         table: str,
         id_column: str,
         page_rows: int = ...,
-    ) -> Any:
+    ) -> Iterable[Any]:
         """Whole-notebook vectors as bounded ``(ids, matrix)`` pages —
         ``embedding_matrix(object_ids=None)`` without its one whole-notebook
         matrix. Concatenating the pages is element-identical to that call
         (same keyset scan, same ``build_matrix`` semantics carried across
         pages); the offline build consumes it so a page can be dropped the
-        instant hnswlib has copied it. A generator that holds its connection
-        open across its own consumption."""
+        instant hnswlib has copied it.
+
+        A LAZY generator on both backends. Consume it exactly once, by
+        iteration — ``len()``, indexing or a second pass is a bug. It acquires
+        and RELEASES a connection per page rather than holding one across its
+        whole consumption, because its consumer builds an hnsw index between
+        pages."""
         ...
     def chunk_sources_for_ids(
         self, notebook_id: str, chunk_ids: Sequence[str]

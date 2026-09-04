@@ -64,8 +64,12 @@ def test_a_wrong_dim_row_at_a_page_head_is_still_skipped(page_rows):
     ``build_matrix`` would let each page's own first row redefine it."""
     good = np.ones((9, 4), dtype=np.float32)
     rows = _rows(good)
-    # Insert a 6-wide row at several positions so at least one lands on a page
-    # head for each page size under test.
+    # A 6-wide row is inserted at several positions. MEASURED coverage, not
+    # assumed: the per-page-``build_matrix`` mutation only dies at page_rows 1
+    # and 2 — at 3, 5 and 8 the wrong-dim rows never land on a page head that
+    # would let a per-page call redefine the width. Those larger sizes are
+    # regression coverage for the page-boundary arithmetic, not anchors for
+    # this particular mutation.
     for position in (1, 2, 3, 5, 8):
         rows.insert(position, (f"odd{position}", encode_vector(np.ones(6, dtype=np.float32))))
 

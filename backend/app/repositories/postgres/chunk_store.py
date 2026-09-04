@@ -477,20 +477,23 @@ class ChunkStore:
         chunk lists in chunk insertion order". Paging by ``id`` instead would
         have reordered those lists and moved the first-seen chunk a KG-source
         lookup returns on unbackfilled notebooks — a retrieval-result change,
-        which this project is explicitly not allowed to make. Same planner
-        ledger as the other ordinal keysets (no ``(notebook_id, ordinal)``
-        composite; dominant-share notebooks pay nothing).
+        which this project is explicitly not allowed to make. Planner ledger
+        (both regimes, measured) is the one written out in
+        ``IndexProjectionStore.active_object_graph_rows``; this leg is the
+        cleanest of them — at a page well below the notebook size it plans as
+        a bare ``Index Scan using uq_chunks_ordinal`` range continuation with
+        no Sort node at all, because the ORDER BY is exactly the index order.
 
-        A GENERATOR: it must be consumed inside the caller's connection scope.
+        A GENERATOR: consume it inside the caller's connection scope, exactly
+        once, by iteration — no ``len()``, no indexing, no second pass.
         """
         for page in keyset_pages(
             connection, GRAPH_FETCH_BATCH,
             lambda cursor: (
                 "SELECT id,element_ids,ordinal FROM chunks WHERE notebook_id=%s"
                 + ("" if cursor is None else " AND ordinal>%s")
-                + " ORDER BY ordinal LIMIT %s",
-                (notebook_id, GRAPH_FETCH_BATCH) if cursor is None
-                else (notebook_id, cursor, GRAPH_FETCH_BATCH),
+                + " ORDER BY ordinal",
+                (notebook_id,) if cursor is None else (notebook_id, cursor),
             ),
             lambda row: row["ordinal"],
         ):
