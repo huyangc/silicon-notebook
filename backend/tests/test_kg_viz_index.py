@@ -100,6 +100,28 @@ def test_unified_graph_reports_viz_building_truthfully_when_one_is_running(repo,
     assert result["viz_unavailable"] is False
 
 
+def test_unified_graph_counts_an_inflight_scale_build_as_building(repo, monkeypatch):
+    """codex #676 R4 P2:scale index build 在飞时它就是 viz 的唯一在建生产者
+    ——此时报 unavailable 会让前端不开轮询,构建发布后画布停在终态文案不
+    自愈。standalone viz_building 集合为空、scale build 集合有这本库,必须
+    仍报 viz_building=True(且不与 unavailable 同真)。"""
+    nb = _star(repo)
+    _clear_viz(repo, nb.id)
+    monkeypatch.setattr(repo.settings, "viz_sync_build_max_objects", 0)
+    lifecycle = repo._runtime.knowledge_lifecycle
+    monkeypatch.setattr(lifecycle.scale_artifacts, "viz_index", lambda _nb: None)
+    assert nb.id not in lifecycle.scale_artifacts.viz_building
+    with lifecycle.scale_artifacts.building_lock:
+        lifecycle.scale_artifacts.building.add(nb.id)
+    try:
+        result = repo.unified_graph(nb.id, level="object", limit=10)
+    finally:
+        with lifecycle.scale_artifacts.building_lock:
+            lifecycle.scale_artifacts.building.discard(nb.id)
+    assert result["viz_building"] is True
+    assert result["viz_unavailable"] is False
+
+
 def test_kg_neighbors_large_nb_without_viz_never_materializes_cluster_map(repo, monkeypatch):
     """Citation focus during a large viz build must stay bounded and report that
     location is temporarily unavailable instead of loading every cluster member."""
