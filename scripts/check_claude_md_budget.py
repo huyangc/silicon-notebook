@@ -51,7 +51,9 @@ TARGET = ROOT / "CLAUDE.md"
 # 反馈恰恰是 UI 改动最容易漏、又最难在评审里凭 diff 看出来的一项。细节(基线选择器、
 # 为什么是元素级、结果态与按下态的分工)留在 AGENTS.md 的 Interactive feedback,
 # 这里只留一句加去处。
-BASELINE_CHARS = 3_499
+# 3,499 → 3,571：明确共享开发规则的权威文档与载体边界，适用于后续所有任务；
+# 执行、验证停止条件及交付细则仍由 docs/development.md / _zh.md 拥有。
+BASELINE_CHARS = 3_571
 BASELINE_LINE_CHARS = 79
 
 _GREW_ADVICE = """

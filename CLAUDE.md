@@ -2,7 +2,8 @@
 
 本文件由 Claude Code 会话自动加载，只保留载体专属的常驻规则。仓库通用工作规则与
 权威文档路由先读 `AGENTS.md`；产品、架构、部署、运维和开发合同分别以它列出的
-canonical documents 为准。本文件不是第二份产品或架构手册。
+canonical documents 为准。共享开发、验证与交付规则以 `docs/development.md` 及中文
+配对文档为准；入口有冲突时按权威文档修正。本文件的载体专属规则仅适用于 Claude Code。
 
 ## 会话与工作区
 
