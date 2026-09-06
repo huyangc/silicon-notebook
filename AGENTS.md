@@ -23,6 +23,22 @@ history belong in the owning documents below, not here.
    through the shared dependency tree; copy it or install in the correct checkout when an
    independent dependency tree is required.
 
+## Task Scope and Execution
+
+- Identify the requested outcome and authorized scope. Review and design tasks deliver
+  findings or proposals; implementation tasks deliver verified changes. Do not turn a
+  review request into code changes or remote delivery.
+- Within the authorized scope, make routine implementation decisions and continue until
+  the requested outcome is complete. State material assumptions.
+- Ask only when missing information materially changes correctness, scope, compatibility,
+  or authorization and cannot be resolved from available evidence. Continue independent
+  work while awaiting the answer.
+- Existing authorization remains valid within its stated scope. Do not request the same
+  approval again.
+- Follow the delegation workflow in `docs/development.md`. Small tasks and read-only
+  reviews do not require subagents; delegated work must have bounded scope, clear
+  ownership, and explicit verification responsibility.
+
 ## Current Sources of Truth
 
 | Change area | Read before editing | Authority |
@@ -39,12 +55,11 @@ history belong in the owning documents below, not here.
 | Script usage | `scripts/README.md` | Command reference |
 
 The root `README.md` / `README_zh.md` are concise entry points, not detailed contracts.
-`CLAUDE.md` contains Claude Code-specific resident instructions; it is not a second product
-or architecture source of truth. For agent-workflow constraints stated in both files,
-`AGENTS.md` follows `CLAUDE.md`: if their wording or required behavior differs, `CLAUDE.md`
-controls and `AGENTS.md` must be corrected. Carrier-specific commands apply only to the
-carrier they name; shared product, architecture, and development contracts remain owned by
-the canonical documents below.
+Shared development, verification, and delivery rules are owned by `docs/development.md`
+and its Chinese pair. `AGENTS.md` is the general agent entry point; `CLAUDE.md` supplements
+it with Claude Code-specific resident rules. Resolve conflicting shared rules against the
+canonical owner and correct the entry points. Carrier-specific rules apply only to the
+carrier they name; neither entry point is a second product or architecture source of truth.
 
 ## Repository-Wide Working Rules
 
@@ -144,7 +159,13 @@ Use `scripts/check_extended.sh` for the documented extended lane and
 `scripts/check_postgres.sh` only with the explicit PostgreSQL test environment described in
 `docs/development*.md`. Missing frontend dependencies are a failure, not permission to skip the
 frontend lane. A read-only review inspects the diff and the submitter's verification evidence;
-it does not mutate the tree or rerun the full gate unless explicitly requested. In the handoff,
-report what changed, which checks ran, and any check that could
-not run. Follow the PR/review/merge policy in `docs/development*.md` when the user has asked for
-remote delivery.
+it does not mutate the tree or rerun the full gate unless explicitly requested. Once focused
+checks and the required standard gate pass, stop verification unless subsequent edits,
+failures, or a specific unresolved risk justify another run. Do not add tests that merely
+mirror implementation details.
+
+Keep handoffs concise and outcome-first: report what changed, which checks ran, and any
+remaining limitations without repeating the execution history. For reviews, state the
+reviewed revision and scope; tie findings to a concrete trigger, impact, and code location,
+and distinguish verified behavior, static reasoning, and architectural debt. Follow the
+PR/review/merge policy in `docs/development*.md` when the user has asked for remote delivery.
