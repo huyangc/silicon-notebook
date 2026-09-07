@@ -29,6 +29,28 @@ export type AdminUserUsage = {
   // 有效文档上限(有覆盖用覆盖、否则全局默认)与「是否为该用户单独设置过」标记。
   upload_limit: number;
   upload_limit_overridden: boolean;
+  // 最近上线:users.last_seen_at,随会话 touch 同事务写入,300s 节流;登出后保留
+  // (与 last_active 不同源,不受来源/提问/报告更新驱动)。详见规格 §3 B1。
+  last_seen: string | null;
+  // 存储占用(字节):与 sources 同归因(COALESCE(uploaded_by, notebook.created_by))、
+  // 同过滤(live 笔记本 + 可见来源),已删笔记本的文件不计。详见规格 §3 B2。
+  storage_bytes: number;
+  // 近 30 天提问数:窗口固定 30 天、服务端计算,含 ask_jobs 与 retained 分支。详见规格 §3 B3。
+  questions_30d: number;
+  // 提问失败数(status='failed',cancelled 不算),与 questions 并列展示。详见规格 §3 B5。
+  questions_failed: number;
+  // 报告失败数(status='failed'),与 reports 并列展示。详见规格 §3 B5。
+  reports_failed: number;
+  // 图谱构建次数:kg_build_jobs 按 created_by,所有状态都计(与 questions 含失败/取消同口径)。详见规格 §3 B4。
+  kg_builds: number;
+  // Memory 条目数:memory_items 按 created_by,status <> 'rejected'。详见规格 §3 Phase C。
+  memory_count: number;
+  // Knowhow 表数:knowhow_tables 按 created_by。详见规格 §3 Phase C。
+  knowhow_tables: number;
+  // 加入的共享库数:notebook_members 按 user_id(他人库的成员身份)。详见规格 §3 Phase C。
+  joined_notebooks: number;
+  // 群组数:group_members 按 user_id。详见规格 §3 Phase C。
+  groups: number;
 };
 
 export type AnalysisIssue = {

@@ -19,6 +19,22 @@ vi.mock("../../app/admin/usage/api.ts", async (importOriginal) => {
 import { AnalysisIssuesSheet } from "../../app/admin/usage/AnalysisIssuesSheet.tsx";
 import type { AdminUserUsage } from "../../app/admin/usage/api.ts";
 
+// 展开区「用户摘要」用的默认口径值(规格 §3 B1–B5/Phase C)。本文件两处 fixture
+// 用户共用,避免重复维护同一组新增字段(镜像 admin-usage-page.component.test.tsx
+// 的 usageSummaryDefaults)。
+const USAGE_SUMMARY_DEFAULTS = {
+  last_seen: null as string | null,
+  storage_bytes: 0,
+  questions_30d: 0,
+  questions_failed: 0,
+  reports_failed: 0,
+  kg_builds: 0,
+  memory_count: 0,
+  knowhow_tables: 0,
+  joined_notebooks: 0,
+  groups: 0,
+};
+
 test("模型格式问题按需显示完整提问和原始回答", async () => {
   window.history.replaceState({}, "", "/admin/usage?sheet=issues");
   mocks.fetchAnalysisIssues.mockResolvedValue([{
@@ -69,6 +85,7 @@ test("模型格式问题按需显示完整提问和原始回答", async () => {
     conversations: 0, questions: 0, reports: 0, last_active: null,
     is_online: false, role_mutable: true, upload_limit: 20,
     upload_limit_overridden: false,
+    ...USAGE_SUMMARY_DEFAULTS,
   }];
 
   render(<AnalysisIssuesSheet users={users} />);
@@ -130,6 +147,7 @@ test("存活解析问题链接到管理员只读来源详情而非普通用户�
     role_mutable: true,
     upload_limit: 20,
     upload_limit_overridden: false,
+    ...USAGE_SUMMARY_DEFAULTS,
   }];
 
   render(<AnalysisIssuesSheet users={users} />);

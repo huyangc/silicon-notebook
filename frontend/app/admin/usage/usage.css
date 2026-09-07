@@ -77,6 +77,21 @@
 .usage-subtable-status { padding: 10px 4px; color: var(--muted, #666); font-size: 13px; }
 .usage-subtable-error { color: var(--danger, #dc2626); }
 
+/* 展开区「用户摘要」:两行,字号与 .usage-subtable 一致(13px),行间 4px。
+   分隔符「·」用 ::after 伪元素实现,不拼进 dt/dd 的文本内容(不进 DOM 文本/
+   textContent,例如测试里按 textContent 取值不会读到它)。这里无害是因为容器
+   已有显式 aria-label="用户摘要",伪元素 content 按可访问名计算规范本身仍会参与
+   accessible name 拼接。 */
+.usage-summary {
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 10px 4px 6px; font-size: 13px; color: inherit;
+}
+.usage-summary-row { display: flex; flex-wrap: wrap; align-items: baseline; margin: 0; }
+.usage-summary-item { display: inline-flex; align-items: baseline; margin: 0; }
+.usage-summary-item dt { margin: 0; color: var(--muted, #666); }
+.usage-summary-item dd { margin: 0 0 0 4px; font-variant-numeric: tabular-nums; }
+.usage-summary-item:not(:last-child)::after { content: "·"; margin: 0 8px; color: var(--muted, #9ca3af); }
+
 .usage-subtable {
   width: 100%; border-collapse: collapse; font-size: 13px;
   background: var(--surface, #fff); border: 1px solid var(--border, #e5e7eb); border-radius: 6px;
