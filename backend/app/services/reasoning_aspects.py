@@ -481,21 +481,29 @@ def _terminal_marker(trace: Sequence[object]) -> Optional[Tuple[str, bool, bool]
     return None
 
 
-def _retrieval_degraded(observations: Sequence[object]) -> bool:
-    """最后一次**真的执行过**的检索是不是炸了(§7.2)。
+#: 「这一次真的执行到底了」的三档。零 I/O 的那几档(duplicate / unavailable /
+#: invalid)连试都没试,不能算作一次通道恢复的证明。
+_EXECUTED_STATUSES = (STATUS_SUCCESS, STATUS_EMPTY, STATUS_PARTIAL)
 
-    只看最后一次:「单个可恢复工具失败若随后继续完成检索,只作为 observation
-    留存」——后面任何一次真的执行到底的动作(success/empty/partial,包括"查了
-    但库里没有")都证明通道恢复了。零 I/O 的那几档(duplicate/unavailable/
-    invalid)不算恢复:它们连试都没试。
+
+def _retrieval_degraded(observations: Sequence[object]) -> bool:
+    """有没有哪条通道**最后一次执行是炸的**(§7.2)。
+
+    判据按**通道**(action_id)而不是整条时间线:「单个可恢复工具失败若随后继续
+    完成检索,只作为 observation 留存」说的是**那个工具**又跑通了,不是别的通道
+    跑通了。按时间线取最后一条会让"原文库整个读不出来、于是一段正文都没有"被
+    紧随其后的一次空手元素检索(执行成功、返回 0 条)盖掉——而那两件事该导致的
+    披露正好相反。
+
+    `empty` 算恢复:通道是通的、这个问法在库里真的没有内容,与"没查成"严格
+    区分(这也是 `note_failed` 侧信道存在的全部理由)。
     """
-    for row in reversed(list(observations)):
+    last: dict = {}
+    for row in observations:
         status = str(getattr(row, "status", "") or "")
-        if status == STATUS_FAILED:
-            return True
-        if status in (STATUS_SUCCESS, STATUS_EMPTY, STATUS_PARTIAL):
-            return False
-    return False
+        if status == STATUS_FAILED or status in _EXECUTED_STATUSES:
+            last[str(getattr(row, "action_id", "") or "")] = status
+    return any(status == STATUS_FAILED for status in last.values())
 
 
 def classify_termination(

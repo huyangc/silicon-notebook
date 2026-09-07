@@ -600,3 +600,101 @@ def test_root_level_assessment_key_survives_repair_on_the_legacy_hint():
         f"{payload[:-1]},}}", hint, allow_repair=True)
     assert parsed.repaired is True
     validate_model_json_shape(parsed.content, hint)
+
+
+# --- T4:`assessment` 进 schema 之后,两条路径必须给出同一个答案 -------------
+# T2 的教训是「schema hint 与形状闸语义不符」:hint 上写得通、真闸拒。所以这里的
+# 每一条都跑**真实**的 `parse_model_json_object` + `validate_model_json_shape`,
+# 而且严格与修复两条路径各跑一遍。
+
+_V2_ASSESSMENT_SHAPES = (
+    ("both-lists", {
+        "supported": [{"aspect_id": "a1", "evidence_keys": ["ko-1", "c-2"]}],
+        "unresolved": [{"aspect_id": "a2", "status": "partial",
+                        "evidence_keys": ["e-3"], "gap": "尚缺适用条件"}]}),
+    ("supported-only", {
+        "supported": [{"aspect_id": "a1", "evidence_keys": ["ko-1"]}]}),
+    ("unresolved-only", {
+        "unresolved": [{"aspect_id": "a1", "status": "unknown"}]}),
+    ("no-keys", {"supported": [{"aspect_id": "a1"}]}),
+    ("empty-lists", {"supported": [], "unresolved": []}),
+    # 「这一轮我没什么新判断」:整个对象为空也是合法载荷,不能只在严格路径上活着。
+    ("empty-object", {}),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "assessment"), _V2_ASSESSMENT_SHAPES,
+    ids=[shape[0] for shape in _V2_ASSESSMENT_SHAPES])
+def test_reflect_v2_assessment_shapes_pass_both_gate_paths(label, assessment):
+    hint = prompts.reflect_v2_schema_hint(_v2_capabilities())
+    payload = json.dumps({
+        "next_action": "search_chunks", "sufficient": False,
+        "arguments": {"query": "set_db 的默认值"},
+        "assessment": assessment, "reason": "补一个方面",
+    }, ensure_ascii=False)
+
+    parsed = parse_model_json_object(payload, hint, allow_repair=True)
+    validate_model_json_shape(parsed.content, hint)
+    assert parsed.repaired is False
+
+    repaired = parse_model_json_object(
+        f"{payload[:-1]},}}", hint, allow_repair=True)
+    assert repaired.repaired is True
+    validate_model_json_shape(repaired.content, hint)
+    assert json.loads(repaired.content)["assessment"] == assessment
+
+
+def test_reflect_v2_assessment_status_is_a_closed_set_on_both_paths():
+    """`status` 是 `a|b` 枚举:填了就必须在集合里,而 `supported` 组不带它。"""
+    hint = prompts.reflect_v2_schema_hint(_v2_capabilities())
+    bogus = json.dumps({
+        "next_action": "answer", "sufficient": False, "arguments": {},
+        "assessment": {"unresolved": [
+            {"aspect_id": "a1", "status": "definitely-not"}]},
+        "reason": "done",
+    }, ensure_ascii=False)
+
+    with pytest.raises(ModelJsonRepairError) as strict:
+        validate_model_json_shape(bogus, hint)
+    assert strict.value.reason == "invalid_enum"
+    with pytest.raises(ModelJsonRepairError) as repaired:
+        parse_model_json_object(f"{bogus[:-1]},}}", hint, allow_repair=True)
+    assert repaired.value.reason == "invalid_enum"
+
+
+def test_reflect_v2_assessment_items_must_be_objects_with_known_fields():
+    """列表元素是**对象**、`evidence_keys` 是**字符串列表**——两条形状都由闸守。"""
+    hint = prompts.reflect_v2_schema_hint(_v2_capabilities())
+    for assessment, reason in (
+        ({"supported": ["a1"]}, "invalid_type"),
+        ({"supported": [{"aspect_id": "a1", "evidence_keys": "ko-1"}]},
+         "invalid_type"),
+        ({"supported": [{"aspect_id": "a1", "evidence_keys": [{"k": 1}]}]},
+         "invalid_type"),
+        ({"supported": "a1"}, "invalid_type"),
+    ):
+        payload = json.dumps({
+            "next_action": "answer", "sufficient": False, "arguments": {},
+            "assessment": assessment, "reason": "done",
+        }, ensure_ascii=False)
+        with pytest.raises(ModelJsonRepairError) as caught:
+            validate_model_json_shape(payload, hint)
+        assert caught.value.reason == reason, assessment
+
+
+def test_reflect_v2_assessment_is_advertised_and_legacy_is_untouched():
+    """v2 广告它;legacy hint 一个字节都没变(关闭态等价)。"""
+    v2 = json.loads(prompts.reflect_v2_schema_hint(_v2_capabilities()))
+    assert set(v2["assessment"]) == {"supported", "unresolved"}
+    assert set(v2["assessment"]["supported"][0]) == {
+        "aspect_id", "evidence_keys"}
+    assert set(v2["assessment"]["unresolved"][0]) == {
+        "aspect_id", "status", "evidence_keys", "gap"}
+    for kinds, types, outline, memory, chunks, kg in itertools.product(
+        ((), ENUMERABLE_ELEMENT_KINDS), ((), ENUMERABLE_KG_OBJECT_TYPES),
+        (False, True), (False, True), (False, True), (False, True),
+    ):
+        legacy = prompts.reflect_schema_hint(
+            kinds, types, outline, memory, chunks, kg)
+        assert "assessment" not in json.loads(legacy)
