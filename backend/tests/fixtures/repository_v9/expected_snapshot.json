@@ -1099,6 +1099,7 @@
         "display_name": "Fixture Owner",
         "email": "a00123456@users.silicon-notebook.local",
         "id": "<user-id-1>",
+        "last_seen_at": null,
         "password_hash": "<password_hash>",
         "password_iterations": 200000,
         "password_salt": "<password_salt>",
@@ -1112,6 +1113,7 @@
         "display_name": "Local Curator",
         "email": "local-user@silicon-notebook.dev",
         "id": "<user-id-2>",
+        "last_seen_at": null,
         "password_hash": "<password_hash>",
         "password_iterations": 200000,
         "password_salt": "<password_salt>",
@@ -1125,6 +1127,7 @@
         "display_name": "Fixture Reader",
         "email": "b00654321@users.silicon-notebook.local",
         "id": "<user-id-3>",
+        "last_seen_at": null,
         "password_hash": "<password_hash>",
         "password_iterations": 200000,
         "password_salt": "<password_salt>",
@@ -2379,7 +2382,7 @@
       },
       {
         "name": "users",
-        "sql_sha256": "8dd2fcd0cc994fbf94b64f764a8ca8903441ff1ea70cc8eeea9ce236bf79d265",
+        "sql_sha256": "1c9565b7873fb0ad206c26ce122e5109a58f3e675ae0ea294da839b21816caca",
         "type": "table"
       },
       {
@@ -2408,6 +2411,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 71
+    "user_version": 72
   }
 }

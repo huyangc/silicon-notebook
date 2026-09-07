@@ -294,7 +294,13 @@ POSTGRES_EMPTY_TIME_SENTINELS = frozenset(
 # per-(nb,type,member) to per-(nb,type,member,generation) -- PR-2's dual
 # generation mechanism requires it, and with every writer still at
 # generation=0 the enforcement is unchanged in practice.
+# PostgreSQL v52 / SQLite v72 add users.last_seen_at (nullable) -- design doc
+# docs/superpowers/specs/2026-09-07-admin-usage-overview-usage-signals-
+# design_zh.md Sec 3 B1, Sec 7 decision 1. Written in the same write
+# transaction as the existing 300s-throttled auth_sessions touch and on
+# login, monotonically, and survives logout. No table, index, FK or
+# unique-surface change.
 POSTGRES_SCHEMA_MANIFEST = PostgresSchemaManifest(
-    sqlite_version=71,
-    postgres_version=51,
+    sqlite_version=72,
+    postgres_version=52,
 )

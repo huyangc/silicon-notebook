@@ -904,6 +904,17 @@
               ],
               "title": "Last Active"
             },
+            "last_seen": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Last Seen"
+            },
             "memory_count": {
               "default": 0,
               "title": "Memory Count",

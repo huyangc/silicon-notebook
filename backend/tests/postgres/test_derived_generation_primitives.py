@@ -30,7 +30,7 @@ def _seed_notebook(postgres_database, notebook_id: str) -> None:
 
 
 def test_claim_lifecycle_and_ttl_preemption(postgres_database):
-    assert PostgresMigrator(postgres_database).migrate() == 51
+    assert PostgresMigrator(postgres_database).migrate() == 52
     _seed_notebook(postgres_database, "nb-claim")
     with postgres_database.write() as db:
         first = UnifiedKgStore.claim_derived_generation(
@@ -79,7 +79,7 @@ def test_claim_lifecycle_and_ttl_preemption(postgres_database):
 
 
 def test_flip_double_cas_rejects_both_stale_directions(postgres_database):
-    assert PostgresMigrator(postgres_database).migrate() == 51
+    assert PostgresMigrator(postgres_database).migrate() == 52
     _seed_notebook(postgres_database, "nb-flip")
     with postgres_database.write() as db:
         claim = UnifiedKgStore.claim_derived_generation(
@@ -146,7 +146,7 @@ def test_flip_double_cas_rejects_both_stale_directions(postgres_database):
 
 
 def test_community_flip_shares_the_same_double_cas(postgres_database):
-    assert PostgresMigrator(postgres_database).migrate() == 51
+    assert PostgresMigrator(postgres_database).migrate() == 52
     _seed_notebook(postgres_database, "nb-cflip")
     with postgres_database.write() as db:
         claim = UnifiedKgStore.claim_derived_generation(
@@ -180,7 +180,7 @@ def test_catchup_window_payload_is_text_and_pages_by_keyset(postgres_database):
     ``_compat_rows(payload=True)`` 同款契约吐**文本**;本测试逐字执行服务层
     那行解析。顺带钉 keyset 分页:(object_type, member_object_id) 全序推进,
     两页拼起来恰好等于窗口全集(分页丢行=催收丢行)。"""
-    assert PostgresMigrator(postgres_database).migrate() == 51
+    assert PostgresMigrator(postgres_database).migrate() == 52
     _seed_notebook(postgres_database, "nb-window")
     with postgres_database.write() as db:
         db.execute(
@@ -223,7 +223,7 @@ def test_catchup_window_excludes_the_currently_claimed_generation(postgres_datab
     取号写它的未发布代——催收谓词必须整体排除**当前在飞代**,否则半成品行
     被扫进 published 代。building=0 时排除子查询为空集:遗留 0 代存量照常
     入窗(链 a 常态是首次翻转退休 0 代,不许误伤)。"""
-    assert PostgresMigrator(postgres_database).migrate() == 51
+    assert PostgresMigrator(postgres_database).migrate() == 52
     _seed_notebook(postgres_database, "nb-excl")
     with postgres_database.write() as db:
         db.execute(
@@ -273,7 +273,7 @@ def test_catchup_window_excludes_the_currently_claimed_generation(postgres_datab
 
 
 def test_reap_page_deletes_only_generations_outside_keep(postgres_database):
-    assert PostgresMigrator(postgres_database).migrate() == 51
+    assert PostgresMigrator(postgres_database).migrate() == 52
     _seed_notebook(postgres_database, "nb-reap")
     with postgres_database.write() as db:
         for gen in (0, 1, 2, 3):

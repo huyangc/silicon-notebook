@@ -1,0 +1,23 @@
+-- Add users.last_seen_at (design doc docs/superpowers/specs/
+-- 2026-09-07-admin-usage-overview-usage-signals-design_zh.md §3 B1, §7
+-- decision 1). Mirrors SQLite v72 (_migration_72).
+--
+-- The column stays NULLABLE with NO backfill, same shape as 0045's
+-- uploaded_by for pre-existing rows: NULL is a load-bearing value here,
+-- meaning "has not signed in since this migration ran" -- distinct from
+-- "signed in a long time ago". Backfilling from auth_sessions would
+-- misrepresent users whose sessions were later revoked/expired (those rows
+-- are deleted, see B1's rejected auth_sessions-aggregate alternative) as
+-- never having signed in, which is not the same claim.
+--
+-- Write path (identity_store, both backends): updated in the same write
+-- transaction as the existing 300s-throttled auth_sessions touch
+-- (AUTH_SESSION_TOUCH_INTERVAL_SECONDS), monotonically (never regresses),
+-- and also set on login. The column survives logout (auth_sessions rows are
+-- deleted on logout/revocation; this column is not).
+--
+-- No table, index, FK or unique-surface change -- QueryStore.list_user_usage
+-- reads this column in one whole-table aggregate SELECT alongside the other
+-- admin/usage columns, so no index is added (matches 0045's admin-only
+-- lookups doing the same).
+ALTER TABLE users ADD COLUMN IF NOT EXISTS last_seen_at timestamp with time zone;

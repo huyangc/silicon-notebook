@@ -139,6 +139,13 @@ class IdentityStore:
             "VALUES (%s,%s,%s,%s,%s)",
             (token, user_id, now, now + timedelta(days=30), now),
         )
+        # 最近上线(规格 docs/superpowers/specs/
+        # 2026-09-07-admin-usage-overview-usage-signals-design_zh.md §3
+        # B1、§7 决策 1):登录/注册/新建会话与 auth_sessions 同一写事务里
+        # 一并写 users.last_seen_at——这里总是刚登录,不需要节流或单调判断。
+        connection.execute(
+            "UPDATE users SET last_seen_at=%s WHERE id=%s", (now, user_id)
+        )
         return token
 
     def create_user(self, username: str, password: str) -> UserProfile:
@@ -255,7 +262,7 @@ class IdentityStore:
         )
         if row["last_seen_at"] <= touch_before:
             with self.database.write() as connection:
-                connection.execute(
+                cursor = connection.execute(
                     "UPDATE auth_sessions SET last_seen_at=%s,expires_at=%s "
                     "WHERE token=%s AND last_seen_at=%s AND expires_at>%s",
                     (
@@ -266,6 +273,17 @@ class IdentityStore:
                         now,
                     ),
                 )
+                # 最近上线(规格 §3 B1、§7 决策 1):只在赢得上面的 CAS 时才
+                # 写 users.last_seen_at——同一节流窗口内的并发请求只应有
+                # 一个赢家推进这两处状态。单调不回退(AND last_seen_at IS
+                # NULL OR < %s):避免落后的并发写把列往回拨。这一列不随
+                # auth_sessions 行被删除(登出/吊销)而清空,登出后仍保留。
+                if cursor.rowcount == 1:
+                    connection.execute(
+                        "UPDATE users SET last_seen_at=%s "
+                        "WHERE id=%s AND (last_seen_at IS NULL OR last_seen_at<%s)",
+                        (now, user["id"], now),
+                    )
         return self._user_profile(user, profile)
 
     def delete_session(self, token: str) -> None:
