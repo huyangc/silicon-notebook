@@ -7052,6 +7052,42 @@ def test_excerpt_terms_honour_quoted_phrases_and_drop_substring_noise():
     assert "适用条" not in terms
 
 
+def test_excerpt_terms_keep_the_whole_query_when_it_is_the_only_term():
+    """问题整句本身就是唯一的词法项时(纯引号短语/单一术语)不许被丢空
+    (codex #698 R2 P2:`excerpt_terms('"static timing analysis"', '', 80)`
+    此前返回 `[]`——"丢整句词"的判据不看还有没有别的词,把唯一的候选连同整句
+    一起丢光,后面的短语保护救不回一个从没进过候选列表的词)。
+
+    变异:把 `non_sentence or candidates` 改回原来直接 `folded == sentence` 就
+    `continue` 的写法 ⇒ 下面三条全红。
+    """
+    from app.services.reasoning_context import excerpt_terms, select_excerpt
+
+    # 纯引号短语:整条查询就是这一个短语。
+    quoted_terms = excerpt_terms('"static timing analysis"', "", 80)
+    assert quoted_terms == ["static timing analysis"]
+    body = ("开头段落" * 40) + "static timing analysis 的默认阈值是 0。" + (
+        "结尾" * 40)
+    hit, partial = select_excerpt(body, quoted_terms, 80)
+    assert partial and "static timing analysis" in hit
+
+    # 单一英文术语,不带引号。
+    en_terms = excerpt_terms("setdbthreshold", "", 80)
+    assert en_terms == ["setdbthreshold"]
+
+    # 单一中文术语,不带引号(3 字,CJK 分解只产出这一个窗口)。
+    zh_terms = excerpt_terms("光刻胶", "", 80)
+    assert zh_terms == ["光刻胶"]
+
+
+def test_excerpt_terms_still_drop_the_whole_sentence_when_other_terms_exist():
+    """既有多词场景不回归:问题里除了整句还有别的词时,继续丢整句词本身。"""
+    from app.services.reasoning_context import excerpt_terms
+    terms = excerpt_terms("set_db 的默认值", "", 80)
+    assert "set_db" in terms
+    assert "set_db 的默认值" not in {t.casefold() for t in terms}
+
+
 def test_kg_card_is_labelled_as_an_extraction_not_verbatim_source_text():
     """KG 没有原文片段时用 payload 字段,并标明粒度——不冒充逐字证据。"""
     from app.domain.retrieval import RetrievedKnowledge
@@ -7075,6 +7111,76 @@ def test_kg_card_is_labelled_as_an_extraction_not_verbatim_source_text():
     chunk_line = next(line for line in selection.text.splitlines()
                       if line.startswith("- [chunk]"))
     assert ORIGIN_VERBATIM in chunk_line
+
+
+def test_kg_card_renders_dict_shaped_validity_scope():
+    """真实摄取形状(见 `kg/extract.py::_parse_validity_scope` /
+    `kg_ingest.py` 写 payload 那一行)是字典,不是 str/list——`region`/
+    `assumptions` 是列表,`approximation`/`range` 是字符串,任意非空子集。
+    此前的条件循环只认 str/list 两种形态,字典整体被跳过,KG 抽取管线特意
+    结构化出来的适用条件因此从不上卡(codex #698 R2 P2)。
+
+    变异:把 `_kg_card` 里新增的 `isinstance(value, Mapping)` 分支删掉 ⇒
+    这条红(`适用条件:` 整段从卡片上消失)。
+    """
+    from app.domain.retrieval import RetrievedKnowledge
+    from app.services.reasoning_context import _kg_card, render_card
+
+    hit = RetrievedKnowledge(
+        object_id="ko-2", object_type="claim",
+        payload={
+            "name": "亚阈值泄漏模型",
+            "statement": "亚阈值区域漏电流随温度指数增长。",
+            "validity_scope": {
+                "region": ["7nm 以下", "低压\n工艺"],
+                "assumptions": ["稳态"],
+                "approximation": "线性近似",
+                "range": "0-100MHz",
+            },
+        }, relevance=0.9)
+    card = _kg_card(hit, [], 240)
+    line = render_card(card)
+    # 嵌套列表按逗号连接;值经 `_collapse` 折叠(字面换行被折成单空格)。
+    assert "region: 7nm 以下，低压 工艺" in line
+    assert "assumptions: 稳态" in line
+    assert "approximation: 线性近似" in line
+    assert "range: 0-100MHz" in line
+    # 四个键按固定顺序出现,不随字典的迭代顺序摆动。
+    assert (line.index("region:") < line.index("assumptions:")
+            < line.index("approximation:") < line.index("range:"))
+
+
+def test_kg_card_dict_shaped_validity_scope_skips_empty_keys_and_is_bounded():
+    """空值跳过,不渲染成 `assumptions: ` 这种空尾巴;整段仍受
+    `_CONDITION_CHARS` 预算截断——字典形态和既有 str/list 形态受同一条预算
+    规则约束,不是单开一条不设上限的通道。
+
+    变异:把新增分支里的 `_flat(rendered, _CONDITION_CHARS)` 换回不截长的
+    `rendered` ⇒ 这条红(超长条件不再被截断,不再以 `…` 收尾)。
+    """
+    from app.domain.retrieval import RetrievedKnowledge
+    from app.services.reasoning_context import (
+        _CONDITION_CHARS, _kg_card,
+    )
+
+    hit = RetrievedKnowledge(
+        object_id="ko-3", object_type="formula",
+        payload={
+            "name": "长适用条件公式",
+            "syntax": "V = IR",
+            "validity_scope": {
+                "region": ["超长区域描述" * 60],
+                "assumptions": [],  # 空列表:跳过,不渲染 "assumptions: "
+                "approximation": "",  # 空字符串:跳过
+                "range": "0-1GHz",
+            },
+        }, relevance=0.9)
+    card = _kg_card(hit, [], 240)
+    assert "assumptions:" not in card.conditions
+    assert "approximation:" not in card.conditions
+    assert card.conditions.startswith("region:")
+    assert len(card.conditions) <= _CONDITION_CHARS + 1  # +1 是省略号本身
+    assert card.conditions.endswith("…")
 
 
 def test_evidence_budget_is_monotonic_across_every_effort_tier():
