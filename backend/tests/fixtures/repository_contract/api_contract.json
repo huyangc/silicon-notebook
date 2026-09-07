@@ -11467,6 +11467,11 @@
               "title": "Object Type",
               "type": "string"
             },
+            "scope": {
+              "default": "all",
+              "title": "Scope",
+              "type": "string"
+            },
             "source_id": {
               "default": "",
               "title": "Source Id",

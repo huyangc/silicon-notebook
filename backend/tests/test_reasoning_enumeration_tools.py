@@ -2034,6 +2034,43 @@ def test_widening_the_scope_opens_a_second_chain(repo):
         "参考库甲", "论文一"]
 
 
+def test_a_two_scope_run_reaches_synthesis_as_two_distinguishable_listings(repo):
+    """端到端:两条链的**范围**要一路带到合成 prompt 的分区标题上。
+
+    这是范围进链键的下游合同,单独一测,因为断链的地方不在这个模块:run 只把
+    `local_only` 写进 outcome,而分区标题由 `enumeration_prompt_block` 渲染。此前
+    它把范围丢掉了,于是合成模型收到两份逐字同名、completeness 却不同的文档清单
+    ——它没有任何依据判断哪一份排除了参考库(codex #696 R1 P2)。
+    """
+    from app.services.collection_enumeration import LOCAL_ONLY_SCOPE_SUFFIX
+    from app.services.collection_enumeration_answer import (
+        enumeration_prompt_block,
+    )
+
+    notebook = _seed_sources_only(repo, ["论文一"])
+    _mount_reference_library(repo, notebook.id, ["参考库甲"])
+    llm = _ValidatingLLM([
+        _enumerate_sources_action(scope="current_notebook"),
+        _enumerate_sources_action(scope="all"),
+        {"next_action": "answer", "sufficient": True},
+    ])
+    retriever, limits = _retriever(repo, llm)
+
+    result = retriever.run(notebook.id, _CATALOG_QUESTION, "", limits=limits)
+
+    assert [o.local_only for o in result.enumerations] == [True, False]
+    preview = enumeration_prompt_block(result.enumerations, inline_rows=100,
+                                       budget_chars=10_000)
+    headers = [line for line in preview.text.splitlines()
+               if line.startswith("[Enumeration:")]
+    assert len(headers) == 2
+    assert headers[0] != headers[1]
+    assert LOCAL_ONLY_SCOPE_SUFFIX in headers[0]
+    assert LOCAL_ONLY_SCOPE_SUFFIX not in headers[1]
+    # 各自的完整度是各自那片资料的:窄的 1 篇、宽的 2 篇,两个数都真。
+    assert "listed 1/1" in headers[0] and "listed 2/2" in headers[1]
+
+
 def test_narrowing_the_scope_also_opens_a_second_chain(repo):
     """反向同理:先 `all` 后 `current_notebook` 也是新链(判据对称,不是特判)。"""
     notebook = _seed_sources_only(repo, ["论文一"])

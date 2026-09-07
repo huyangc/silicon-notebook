@@ -627,6 +627,29 @@ class TypedCollectionResult(BaseModel):
     # ``sources`` has no sub-type: the library's document list is one whole
     # collection, so both of the fields above stay empty for it.
     source_id: str = ""        # non-empty when scoped to a single source
+    # How wide a slice this listing was counted over: ``"all"`` (the active
+    # notebook plus its checked reference libraries) or ``"current_notebook"``
+    # (the notebook's own documents only).  **Only ``sources`` can narrow it**
+    # — the ``enumerate.scope`` parameter exists on that collection alone — so
+    # every other collection is always ``"all"``.
+    #
+    # It is on the wire because scope is part of a roster's IDENTITY, not a
+    # detail of how it was fetched: one run can enumerate ``sources`` twice
+    # under two scopes (the continuation ledger is keyed by scope), and the two
+    # cards then carry ``returned_total`` figures that legitimately disagree.
+    # Without this field the frontend composes both titles from ``collection``
+    # alone — ``element_kind``/``object_type`` are empty for ``sources`` — so
+    # the reader gets two identically titled "来源清单" cards with different
+    # counts and nothing saying which one excluded the reference libraries.
+    # The trace summary, the reflect ledger and the synthesis section header
+    # already disclose it (``collection_enumeration.LOCAL_ONLY_SCOPE_SUFFIX``);
+    # this is the same fact reaching the fourth surface.
+    #
+    # Typed as ``str`` with a default rather than an enum without one: the
+    # default is what makes the field ADDITIVE, so a stored answer written
+    # before it existed, and any client that never sends it, both read back as
+    # the unnarrowed scope they actually were.
+    scope: str = "all"         # "all" | "current_notebook"
     items: List[TypedCollectionItem] = Field(default_factory=list)
     coverage: TypedCollectionCoverage
     # Rows that actually entered the answer-synthesis prompt preview (bounded
