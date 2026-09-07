@@ -131,6 +131,12 @@ class AskStateStore:
         """Build the prior-turns history block (oldest->newest, last `limit`
         turns) from stored answer payloads. Uses each turn's `conclusion`
         (provenance markers already stripped). Returns "" when no prior turns."""
+        return self._conversation_histories(db, conversation_id, limit)[0]
+
+    def _conversation_histories(
+        self, db: object, conversation_id: str, limit: int = 5
+    ) -> tuple[str, str]:
+        """Project full and user-only histories from the same recent rows."""
         rows = db.execute(
             "SELECT question, payload FROM answers WHERE conversation_id = %s "
             "ORDER BY created_at ASC, ordinal ASC",
@@ -138,11 +144,13 @@ class AskStateStore:
         ).fetchall()
         rows = rows[-limit:]
         lines = []
+        user_lines = []
         for row in rows:
             payload = json_value(row["payload"], {})
             conclusion = str(payload.get("conclusion", "")).strip()
             lines.append(f"User: {row['question']}\nAssistant: {conclusion}")
-        return "\n".join(lines)
+            user_lines.append(f"User: {row['question']}")
+        return "\n".join(lines), "\n".join(user_lines)
 
     def prepare_turn(
         self,
@@ -158,8 +166,8 @@ class AskStateStore:
             conversation_id = self.ensure_conversation(
                 db, notebook_id, requested_conversation_id, question, user_id
             )
-            history = self.conversation_history(db, conversation_id)
-        return PreparedAskTurn(conversation_id=conversation_id, history=history)
+            history, user_history = self._conversation_histories(db, conversation_id)
+        return PreparedAskTurn(conversation_id=conversation_id, history=history, user_history=user_history)
 
     def prepare_turn_for_job(
         self,
@@ -194,8 +202,8 @@ class AskStateStore:
             ).fetchone()
             if running is None:
                 return None
-            history = self.conversation_history(db, conversation_id)
-        return PreparedAskTurn(conversation_id=conversation_id, history=history)
+            history, user_history = self._conversation_histories(db, conversation_id)
+        return PreparedAskTurn(conversation_id=conversation_id, history=history, user_history=user_history)
 
     # ------------------------------------------------------------------
     # durable job state machine (running → done/failed/cancelled)

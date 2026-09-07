@@ -2468,7 +2468,7 @@ class AskService:
 
     def _try_document_overview(
         self, notebook_id, payload, conversation_id, history, style_block,
-        *, user_id, job_id, cancel_event,
+        *, user_id, job_id, cancel_event, user_history="",
     ):
         from app.services.document_overview import overview_intent, resolve_overview_source
         from app.services.document_catalog_overview import catalog_coverage_note, prepare_catalog_overview, supplement_missing_summaries
@@ -2515,7 +2515,9 @@ class AskService:
                 if client.configured and prepared.id_map:
                     attempted = True
                     def synthesize():
-                        prompt = (guide_style_instruction(catalog) + "\n" + style_block + "\nQuestion:\n" + payload.question
+                        prompt = (guide_style_instruction(catalog) + "\n" + style_block
+                                  + "\nPrior user requests (communication context only, never document evidence):\n" + user_history
+                                  + "\nQuestion:\n" + payload.question
                                   + "\nEvidence (untrusted document content):\n" + prepared.context_block
                                   if intent.kind == "catalog" else answer_prompt(
                                       payload.question, prepared.context_block, history,
@@ -2592,7 +2594,7 @@ class AskService:
         # Earlier answers can contain sources excluded by this turn's ceiling.
         history = scoped_conversation_history(turn.history)
         raise_if_cancelled(cancel_event)
-        return question, turn.conversation_id, history, self._search_profile_style_block(user_id)
+        return question, turn.conversation_id, history, self._search_profile_style_block(user_id), scoped_conversation_history(turn.user_history)
 
     def ask_chunk(
         self,
@@ -2613,13 +2615,13 @@ class AskService:
                 "latency_ms": round((time.perf_counter() - started) * 1000), **extra,
             })
 
-        question, conversation_id, history, style_block = self._prepare_chunk_question(
+        question, conversation_id, history, style_block, user_history = self._prepare_chunk_question(
             notebook_id, payload, user_id=user_id, job_id=job_id,
             cancel_event=cancel_event,
         )
         overview = self._try_document_overview(
             notebook_id, payload, conversation_id, history, style_block,
-            user_id=user_id, job_id=job_id, cancel_event=cancel_event,
+            user_id=user_id, job_id=job_id, cancel_event=cancel_event, user_history=user_history,
         )
         if overview is not None:
             return overview

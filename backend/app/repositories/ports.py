@@ -128,6 +128,8 @@ class PreparedAskTurn:
 
     conversation_id: str
     history: str
+    # Original user questions only; never reconstructed from assistant prose.
+    user_history: str = ""
 
 
 class ConversationBusyError(RuntimeError):
