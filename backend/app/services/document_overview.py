@@ -9,15 +9,18 @@ from dataclasses import dataclass
 class OverviewIntent:
     kind: str
     title: str = ""
+    include_reference_libraries: bool = False
 
 
 _QUOTED = re.compile(r"《([^》]+)》|「([^」]+)」|[\"“]([^\"”]+)[\"”]")
 _CN_DOCUMENT = r"(?:文档|文章|论文|资料)"
-_CN_SCOPE = r"(?:(?:这个|当前|本|该)?(?:库|笔记本)(?:中|里|内)?的?)"
+_CN_REFERENCE_LIBRARIES = r"(?:挂载的?)?(?:参考库|参考资料库|公共知识库)"
+_CN_SCOPE = rf"(?:(?:这个|当前|本|该)?(?:库|笔记本|notebook|library)(?:(?:和|及|以及|与){_CN_REFERENCE_LIBRARIES})?(?:中|里|内)?的?)"
 _CN_SOURCE = rf"(?:{_CN_SCOPE})?(?:(?:这|那|该)(?:篇|份){_CN_DOCUMENT}?|该{_CN_DOCUMENT}|{_CN_DOCUMENT}|@title@|{_CN_DOCUMENT}@title@|@title@这篇{_CN_DOCUMENT})"
-_CN_CATALOG = rf"(?:(?:{_CN_SCOPE})(?:(?:所有|全部)的?)?{_CN_DOCUMENT}|(?:每篇|各篇|所有|全部|这些)(?:的)?{_CN_DOCUMENT}|{_CN_DOCUMENT}(?=分别|各自))"
+_CN_CATALOG = rf"(?:(?:{_CN_SCOPE})(?:(?:所有|全部)的?)?{_CN_DOCUMENT}|(?:每篇|各篇|所有|全部|这些|这几篇)(?:的)?{_CN_DOCUMENT}|{_CN_DOCUMENT}(?=分别|各自))"
 _EN_DOCUMENT = r"(?:document|paper|article|file)"
-_EN_SCOPE = r"(?:in (?:this|the|my|our) (?:library|notebook))"
+_EN_REFERENCE_LIBRARIES = r"(?:(?:its|the) )?(?:mounted )?reference libraries"
+_EN_SCOPE = rf"(?:in (?:this|the|my|our) (?:library|notebook)(?: and {_EN_REFERENCE_LIBRARIES})?)"
 _EN_SOURCE = rf"(?:(?:this|that|the) {_EN_DOCUMENT}|(?:the )?{_EN_DOCUMENT} @title@|@title@)"
 _EN_CATALOG = rf"(?:(?:each|every) {_EN_DOCUMENT}|(?:all(?: the)?|the|these) {_EN_DOCUMENT}s|{_EN_DOCUMENT}s)(?: {_EN_SCOPE})?"
 
@@ -34,8 +37,8 @@ def _whole_document_request(question: str, subject: str, *, english: bool) -> bo
         )
     else:
         patterns = (
-            rf"(?:请|请帮我|帮我)?(?:分别|逐篇)?(?:简单|简要)?(?:介绍|概述|概括|总结)(?:一下)?{subject}(?:的(?:主要内容|内容|主题))?",
-            rf"{subject}(?:分别|各自)?(?:主要)?(?:介绍|讲|讲述|讲的|包含)(?:了)?(?:什么|哪些内容|什么内容)",
+            rf"(?:请|请帮我|帮我|请给我|给我)?(?:分别|逐篇)?(?:简单|简要)?(?:介绍|概述|概括|总结)(?:一下|下)?{subject}(?:的(?:主要内容|内容|主题))?",
+            rf"{subject}(?:分别|各自)?(?:都)?(?:主要)?(?:介绍|讲|讲述|讲的|包含)(?:了)?(?:什么|哪些内容|什么内容)",
             rf"{subject}的(?:主要内容|内容|主题)(?:是|有)什么",
         )
     return any(re.fullmatch(pattern, question, re.I) for pattern in patterns)
@@ -59,21 +62,45 @@ def overview_intent(question: str) -> OverviewIntent | None:
         # quotes may denote a topic; only book-title brackets stand alone.
         q = _QUOTED.sub("@title@", q)
     cn = q.replace(" ", "")
+    # Scope clauses are consumed only for complete catalog templates. Topic
+    # exclusions and single-document modifiers must keep their original meaning.
+    cn_local = re.search(rf"[，,]?(?:不包括|不包含|不含|排除){_CN_REFERENCE_LIBRARIES}$", cn)
+    en_local = re.search(rf",? (?:excluding|without) {_EN_REFERENCE_LIBRARIES}$", q, re.I)
+    if cn_local:
+        cn = cn[:cn_local.start()]
+    if en_local:
+        q = q[:en_local.start()]
+    cn, cn_only = re.subn(r"^(请(?:帮我|给我)?|帮我|给我)?(?:仅|只)(?=介绍|概述|概括|总结|列出|逐篇|分别|简单|简要)", r"\1", cn)
+    q, en_only = re.subn(r"^(please )?only (?=summari[sz]e|introduce|list)", r"\1", q, flags=re.I)
+    local_only = bool(cn_local or en_local or cn_only or en_only)
+    cn_references = re.search(rf"[，,]?(?:包括|包含){_CN_REFERENCE_LIBRARIES}$", cn)
+    en_references = re.search(rf",? including {_EN_REFERENCE_LIBRARIES}$", q, re.I)
+    if cn_references:
+        cn = cn[:cn_references.start()]
+    if en_references:
+        q = q[:en_references.start()]
+    references = bool(
+        cn_references or en_references
+        or re.search(rf"(?:和|及|以及|与){_CN_REFERENCE_LIBRARIES}", cn)
+        or re.search(rf" and {_EN_REFERENCE_LIBRARIES}", q, re.I)
+    )
+    if local_only and references:
+        return None
     cn_source = _CN_SOURCE
     en_source = _EN_SOURCE
     if quoted and not quoted[0].startswith("《"):
         cn_source = rf"(?:{_CN_DOCUMENT}@title@|@title@这篇{_CN_DOCUMENT})"
         en_source = rf"(?:the )?{_EN_DOCUMENT} @title@"
     if _whole_document_request(cn, _CN_CATALOG, english=False) or _whole_document_request(q, _EN_CATALOG, english=True):
-        return OverviewIntent("catalog")
-    if _whole_document_request(cn, cn_source, english=False) or _whole_document_request(q, en_source, english=True):
+        return OverviewIntent("catalog", include_reference_libraries=references)
+    if not references and not local_only and (_whole_document_request(cn, cn_source, english=False) or _whole_document_request(q, en_source, english=True)):
         return OverviewIntent("source", title)
     # Enumeration only accepts an unfiltered directory subject, never "papers
     # about X" or "which documents cover X".
-    if re.fullmatch(rf"(?:请)?列出(?:{_CN_CATALOG}|{_CN_DOCUMENT})|(?:{_CN_SCOPE})?有哪些{_CN_DOCUMENT}", cn):
-        return OverviewIntent("catalog")
+    if re.fullmatch(rf"(?:请)?列出(?:{_CN_CATALOG}|{_CN_DOCUMENT})|(?:{_CN_SCOPE})?有哪些{_CN_DOCUMENT}", cn, re.I):
+        return OverviewIntent("catalog", include_reference_libraries=references)
     if re.fullmatch(rf"(?:please )?list {_EN_CATALOG}|(?:what|which) {_EN_DOCUMENT}s are {_EN_SCOPE}", q, re.I):
-        return OverviewIntent("catalog")
+        return OverviewIntent("catalog", include_reference_libraries=references)
     return None
 
 

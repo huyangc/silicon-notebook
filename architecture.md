@@ -282,6 +282,11 @@ Excel 专业分析插在 reasoning retrieval 结束与 response-draft seam 之�
 通用问答的明确文档介绍由 `document_overview.py` 识别，`AskService` 在既有相关性检索前
 组装专用证据并沿原会话持久化；普通事实/专题问题不走此分支。`document_catalog_overview.py`
 复用集合枚举与答案投影，保持授权范围、来源引用、枚举/合成两轨覆盖同源。
+目录介绍默认以 `enumerate_sources(local_only=True)` 在遍历前收窄参与库，结束复检使用
+同一范围；明确包括参考库时保留获准的联邦参与集，不改写请求冻结的授权上下文。
+`document_guide.py` 按目录身份渲染逐篇导读、模型漏项回退与关系/阅读顺序，标题由目录拥有，
+模型输入覆盖与输出回退分别披露。缺摘要来源可在剩余字符预算及共享元素额度内补充原文，
+保留原始元素引用与解析版本校验，不覆盖已存摘要。
 来源目录的共同可见谓词另按 `ActiveSourceScope.allows` 收窄当前库来源，目录分母与行同步；
 这不开放收窄来源下的其他类型枚举工具，原逐步推理接线闸保持不变。
 单篇定位只从完整的有界目录证明唯一性；`document_source_overview.py` 通过 `SourceStorePort`

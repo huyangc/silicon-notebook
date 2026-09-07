@@ -12,6 +12,31 @@ from tests.model_testkit import bind_chat_client
 
 @pytest.mark.parametrize("question,kind", [
     ("这个库中的文档分别介绍了什么内容", "catalog"),
+    ("介绍一下这个notebook中的文章", "catalog"),
+    ("介绍一下这个 Notebook 中的文章。", "catalog"),
+    ("请逐篇介绍当前LIBRARY里的所有论文", "catalog"),
+    ("这个NOTebook里有哪些文章？", "catalog"),
+    ("给我简要介绍下这几篇文章", "catalog"),
+    ("这些论文都主要讲了什么？", "catalog"),
+    ("这个 notebook 中这篇论文介绍了什么内容", "source"),
+    ("请介绍这个notebook中关于机器学习的论文", None),
+    ("介绍一下这个notebook中的文章的实验结论", None),
+    ("介绍一下 Jupyter notebook 的用法", None),
+    ("介绍一下notebook中的文章提到的功耗预测方法", None),
+    ("介绍一下这个notebook中的文章，不包括参考库", "catalog"),
+    ("介绍一下这个notebook中的文章，包括参考库中关于量化的论文", None),
+    ("介绍这篇文档，包括参考库", None),
+    ("Summarize all papers, excluding reference libraries", "catalog"),
+    ("只介绍这个notebook中关于量化的文章", None),
+    ("介绍一下这个notebook中的文章，排除量化相关论文", None),
+    ("介绍一下这个notebook中的文章，不包括参考库中关于量化的论文", None),
+    ("介绍这个notebook和参考库中的文章，不含参考库", None),
+    ("只介绍这个notebook中的文章，包括参考库", None),
+    ("介绍这个notebook中的文章，包括参考库，不含参考库", None),
+    ("介绍这个notebook中的文章，不含参考库，包括参考库", None),
+    ("Summarize papers about quantization, excluding reference libraries", None),
+    ("Summarize papers in this notebook and reference libraries, excluding reference libraries", None),
+    ("Summarize papers about notebooks, including reference libraries", None),
     ("这篇文档介绍了什么内容", "source"),
     ("这个库中这篇文档介绍了什么内容", "source"),
     ("介绍《部署手册》", "source"),
@@ -73,6 +98,33 @@ def test_overview_extracts_only_whole_document_title_subjects(question, title):
     assert result.title == title
 
 
+@pytest.mark.parametrize("question,include_references", [
+    ("介绍一下这个notebook中的文章", False),
+    ("介绍一下这个notebook中的文章，不包括参考库", False),
+    ("介绍一下这个notebook中的文章，不包含挂载的参考库", False),
+    ("介绍一下这个notebook中的文章，不含参考资料库", False),
+    ("介绍一下这个notebook中的文章，排除公共知识库", False),
+    ("仅介绍这个notebook中的文章", False),
+    ("请只逐篇介绍当前NOTEBOOK中的文章", False),
+    ("Summarize all papers, excluding reference libraries", False),
+    ("Please only summarize all papers in this notebook", False),
+    ("Please list all documents in this notebook, without its mounted reference libraries", False),
+    ("Summarize each document in this notebook", False),
+    ("介绍一下这个notebook中的文章，包括挂载的参考库", True),
+    ("介绍一下这个notebook中的文章，包含公共知识库", True),
+    ("请逐篇介绍当前notebook和参考库中的全部论文", True),
+    ("介绍这个笔记本以及挂载参考资料库中的文章", True),
+    ("请列出这个Notebook中的所有文档，包括参考库", True),
+    ("Summarize each document in this notebook, including its mounted reference libraries", True),
+    ("What are the papers in this notebook and its reference libraries about?", True),
+    ("Please list all documents in this notebook, including reference libraries", True),
+])
+def test_catalog_reference_scope_requires_explicit_positive_request(question, include_references):
+    result = overview_intent(question)
+    assert result is not None and result.kind == "catalog"
+    assert result.include_reference_libraries is include_references
+
+
 class AnswerClient:
     configured = True
     model = "test"
@@ -83,6 +135,9 @@ class AnswerClient:
 
     def chat_json(self, messages, *args, **kwargs):
         self.prompts.append(messages[0]["content"])
+        if args and '"documents"' in args[0] and self.answer:
+            return json.dumps({"documents": [{"reference": "k5001", "purpose": self.answer,
+                                              "method": "", "contribution": ""}]})
         return json.dumps({"answer": self.answer, "grounded": True})
 
 
@@ -187,6 +242,7 @@ def test_synthesis_failure_remains_visible_and_keeps_directory(repo):
     assert len(client.prompts) == 2
     assert response.llm_mode == "synthesis_failed" and response.model_errors
     assert "合成未成功" in response.answer
+    assert "手册" in response.answer and "已存摘要摘录" in response.answer
     assert response.result_sets[0].coverage.complete
 
 
@@ -240,3 +296,54 @@ def test_catalog_map_source_count_matches_local_selection(repo):
     seed(repo, nb.id, "b", "其他", "")
     with source_scope_context(nb.id, SourceScope(mode="include", source_ids=["a"])):
         assert repo.collection_catalog.collection_map(nb.id).sources == 1
+
+
+def test_mixed_notebook_introduction_covers_local_papers_without_mounted_noise(repo):
+    nb = repo.create_notebook(NotebookCreate(name="DeepSeek-V4"))
+    base = repo.create_notebook(NotebookCreate(name="LLM Structure & Infra"))
+    repo.mark_notebook_base(base.id)
+    repo.replace_notebook_bases(nb.id, [base.id], repo.current_user().id)
+    titles = ["DeepSeek-V4", "DSpark", "mHC", "EnergAIzer", "DualGraph"]
+    for index, title in enumerate(titles):
+        seed(repo, nb.id, f"local-{index}", title, f"研究{title}的核心方法")
+    seed(repo, base.id, "noise", "DeepSeek-V2", "土拨鼠阅读示例")
+    client = AnswerClient()
+    bind_chat_client(repo, "ask_answer", client)
+    response = ask(repo, nb.id, "介绍一下这个notebook中的文章")
+    assert response.result_sets[0].coverage.total == 5
+    assert response.result_sets[0].coverage.complete
+    assert all(title in response.answer for title in titles)
+    assert "土拨鼠" not in client.prompts[0] and "DeepSeek-V2" not in response.answer
+    assert {c.source_id for c in response.citations} == {f"local-{i}" for i in range(5)}
+    assert all(not c.notebook_id for c in response.citations)
+
+
+def test_explicit_reference_overview_still_intersects_library_selection(repo):
+    nb = repo.create_notebook(NotebookCreate(name="资料"))
+    base = repo.create_notebook(NotebookCreate(name="参考库"))
+    repo.mark_notebook_base(base.id)
+    repo.replace_notebook_bases(nb.id, [base.id], repo.current_user().id)
+    seed(repo, nb.id, "local", "本库文章", "本库摘要")
+    seed(repo, base.id, "borrowed", "参考文章", "参考摘要")
+    client = AnswerClient()
+    bind_chat_client(repo, "ask_answer", client)
+    question = "介绍一下这个notebook中的文章，包括挂载的参考库"
+    response = ask(repo, nb.id, question)
+    assert response.result_sets[0].coverage.total == 2
+    assert any(c.notebook_id == base.id for c in response.citations)
+    response = ask(repo, nb.id, question, base_scope=BaseNotebookScope(mode="include", notebook_ids=[]))
+    assert response.result_sets[0].coverage.total == 1
+    assert "参考摘要" not in client.prompts[-1]
+
+
+def test_catalog_missing_summary_reads_original_without_other_sources(repo):
+    nb = repo.create_notebook(NotebookCreate(name="资料"))
+    seed(repo, nb.id, "a", "原文文章", "", ["研究问题", "核心方法", "最终贡献"])
+    seed(repo, nb.id, "b", "未选文章", "", ["不应读取"])
+    client = AnswerClient("介绍依据")
+    bind_chat_client(repo, "ask_answer", client)
+    response = ask(repo, nb.id, "介绍一下这个notebook中的文章",
+                   source_scope=SourceScope(mode="include", source_ids=["a"]))
+    assert "最终贡献" in client.prompts[0] and "不应读取" not in client.prompts[0]
+    assert any(c.element_id == "a-002" for c in response.citations)
+    assert "全部 3" in response.answer
