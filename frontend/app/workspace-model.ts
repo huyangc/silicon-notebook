@@ -556,6 +556,16 @@ export type TypedCollectionResult = {
   object_type?: string;
   /** 非空时表示这份清单被限定在单个来源范围内。 */
   source_id?: string;
+  /**
+   * 这份清单是从多大的一片资料里数出来的："all"（当前笔记本 + 已勾选参考库）
+   * 或 "current_notebook"（只有本笔记本自己的文档）。**只有 collection ===
+   * "sources" 会收窄**，其余集合恒为 "all"。
+   *
+   * ⚠ 可选：早于本字段的历史回答（已持久化，重开会原样回放）不带这个键，缺席
+   * 一律按 "all" 读——那正是它们当时的范围。所以判据写成 `=== "current_notebook"`
+   * 而不是 `!== "all"`，未知值也落回不加后缀，不会给一份没收窄的清单贴上标签。
+   */
+  scope?: string;
   items: TypedCollectionItem[];
   coverage: TypedCollectionCoverage;
   /** 实际进入本轮答案合成预览的条目数；与 coverage.returned_total（枚举出的总条目数）分开披露。 */

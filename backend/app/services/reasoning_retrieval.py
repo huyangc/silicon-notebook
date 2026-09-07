@@ -40,7 +40,7 @@ from app.services.collection_catalog import (
     ENUMERABLE_ELEMENT_KINDS, ENUMERABLE_KG_OBJECT_TYPES,
 )
 from app.services.collection_enumeration import (
-    TRUNCATED_CONCURRENT_CHANGE, EnumerationBudget,
+    LOCAL_ONLY_SCOPE_SUFFIX, TRUNCATED_CONCURRENT_CHANGE, EnumerationBudget,
 )
 from app.services.prompts import reflect_prompt, reflect_schema_hint
 from app.services.retrieval_experience_block import (
@@ -558,11 +558,12 @@ def _enumeration_step_summary(label: str, coverage, source_id: str, *,
     范围后缀与既有的「(限指定来源)」同形、同位置:两者都在回答同一个问题——
     「这个数是从多大的一片资料里数出来的」。没有它,「已全部列出 2 条」在一个挂了
     参考库的库里读起来就是一句假话。两个后缀互斥(source_id 只有元素清单会给,
-    local_only 只有来源清单会给),所以不会叠出一串括号。
+    local_only 只有来源清单会给),所以不会叠出一串括号。范围字面取自
+    ``LOCAL_ONLY_SCOPE_SUFFIX``——轨迹、账目、合成分区标题与结果卡共用一份。
     """
     scope = (
         "（限指定来源）" if source_id
-        else "（仅当前笔记本）" if local_only
+        else LOCAL_ONLY_SCOPE_SUFFIX if local_only
         else ""
     )
     if coverage.complete:
@@ -671,7 +672,7 @@ def _enumeration_note(chains) -> str:
         # 范围后缀与上屏摘要同形同词。模型看的是这份账目:不写范围的话,「已完整
         # 列出 2 条」会让它以为参考库里也就这些,从而放弃再用 `scope:"all"` 问一次
         # ——而那正是链键含范围之后它**可以**做的事。
-        scope = "（仅当前笔记本）" if chain.outcome.local_only else ""
+        scope = LOCAL_ONLY_SCOPE_SUFFIX if chain.outcome.local_only else ""
         if chain.state == "complete":
             parts.append(f"「{label}」已完整列出 {returned_total} 条{scope}{titles}")
         elif chain.state == "conflict":
@@ -1989,7 +1990,11 @@ class CollectionEnumerationOutcome:
     coverage: object = None
     # 仅 sources:这份清单是否只列了当前笔记本(不含挂载的参考库)。范围是
     # 清单身份的一部分——同一条 "sources" 链换了范围就不是同一份目录了,所以它
-    # 也进续跑键。读者:上屏摘要与回喂账目的「(仅当前笔记本)」后缀,以及结果卡。
+    # 也进续跑键。四个读者:上屏摘要、回喂账目、合成证据块的分区标题,以及结果卡
+    # ——前三处共用 `LOCAL_ONLY_SCOPE_SUFFIX` 那一份「(仅当前笔记本)」字面,结果卡
+    # 走 `TypedCollectionResult.scope`(由 `typed_collection_results` 从这里映射成
+    # "current_notebook"/"all"),前端按同一份字面拼标题后缀。见
+    # docs/product-and-api*.md。
     local_only: bool = False
 
 

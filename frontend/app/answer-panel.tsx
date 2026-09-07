@@ -305,6 +305,17 @@ const SOURCE_LIST_LABELS: Record<string, string> = {
   sources: "来源清单",
 };
 
+// 收窄过的来源清单的标题后缀。逐字镜像后端
+// `collection_enumeration.LOCAL_ONLY_SCOPE_SUFFIX`——同一件事已经在上屏轨迹摘要、
+// 回喂模型的枚举账目、合成证据块的分区标题上用这个词说过三遍,结果卡是第四处。
+// 四处必须同词:同一轮里用户可能同时看到轨迹里的「(仅当前笔记本)」和卡片标题,
+// 换个说法就成了两件事。
+//
+// 它**不进** SOURCE_LIST_LABELS 那张表:那张表是 scripts/check_enumeration_list_labels_contract.py
+// 逐字比对的「后端标签 + 清单」映射(键是 collection),后缀不是标签、也不按
+// collection 取键,塞进去会让那条守卫比一张它读不懂的表。
+const LOCAL_ONLY_SCOPE_SUFFIX = "（仅当前笔记本）";
+
 function collectionResultTitle(resultSet: TypedCollectionResult): string {
   if (resultSet.collection === "elements") {
     return label(ELEMENT_KIND_LIST_LABELS, resultSet.element_kind ?? "", "条目清单");
@@ -312,7 +323,12 @@ function collectionResultTitle(resultSet: TypedCollectionResult): string {
   // sources 必须先判:它的 element_kind/object_type 都是空串,落到下面的知识对象
   // 分支只会拿到兜底词「知识对象清单」——一份文档清单被叫成知识对象清单。
   if (resultSet.collection === "sources") {
-    return label(SOURCE_LIST_LABELS, resultSet.collection, "来源清单");
+    // 范围进标题而不是另起一行:一次 run 可以同时列出两个范围,两张卡的条数本就
+    // 不同,标题若逐字相同,读者只能看到「两份都叫来源清单、数字却对不上」。
+    // 判据是等于 "current_notebook":字段可缺席(旧后端/历史回答)且是开放字符串,
+    // 缺席与未知值都按 "all" 读,绝不给没收窄的清单贴标签。
+    const scopeSuffix = resultSet.scope === "current_notebook" ? LOCAL_ONLY_SCOPE_SUFFIX : "";
+    return `${label(SOURCE_LIST_LABELS, resultSet.collection, "来源清单")}${scopeSuffix}`;
   }
   return label(KG_OBJECT_LIST_LABELS, resultSet.object_type ?? "", "知识对象清单");
 }
@@ -777,8 +793,15 @@ function KnowhowResultSets({
         }
         if (resultSet.kind === "collection") {
           return (
+            // key 必须并入 scope:两条来源清单链(仅当前笔记本 / 全部)是同一轮里
+            // 两张真卡片,而 sources 的 element_kind/object_type/source_id 全是空串
+            // ——不带 scope 时两者的 key 逐字相同(`collection-sources--`)。重复 key
+            // 下 React 无法把每张卡认回它自己,展开/收起这类 useState 会串到另一张
+            // 卡上。scope 进 key 的判据与它进续跑键的判据是同一条:范围是清单身份的
+            // 一部分。缺席时读成 "all",所以带不带这个字段的同一张卡拿到同一个 key
+            // (历史回答重开不会因为少一个键就换成另一张卡)。
             <CollectionResultCard
-              key={`collection-${resultSet.collection}-${resultSet.element_kind || resultSet.object_type}-${resultSet.source_id || ""}`}
+              key={`collection-${resultSet.collection}-${resultSet.element_kind || resultSet.object_type}-${resultSet.source_id || ""}-${resultSet.scope || "all"}`}
               resultSet={resultSet}
               notebookId={notebookId}
               notebookNames={notebookNames}

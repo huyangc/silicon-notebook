@@ -32,6 +32,7 @@ from app.models.ask import (
 )
 from app.models.schemas import AskRequest, NotebookCreate
 from app.services.collection_enumeration import (
+    LOCAL_ONLY_SCOPE_SUFFIX,
     MAX_EVIDENCE_REFS,
     ElementItem,
     EnumerationCoverage,
@@ -196,6 +197,71 @@ def test_source_scoped_outcome_carries_source_id():
     outcome = _outcome(source_id="s1")
     [result] = typed_collection_results([outcome], payload_chars=PAYLOAD_LIMIT)
     assert result.source_id == "s1"
+
+
+def test_two_sources_chains_map_onto_two_different_scopes():
+    """同一批 outcome 的两条来源清单链 ⇒ 两张卡的 `scope` 各不相同。
+
+    卡片是这份范围的第四个读者(轨迹摘要、回喂账目、合成分区标题是前三个)。
+    没有这个字段时,前端只能按 `collection` 查表拼标题——sources 的
+    `element_kind`/`object_type` 恒为空串——于是两张卡逐字同名「来源清单」,
+    条数却不同,读者没有任何依据判断哪一份排除了参考库。
+    """
+    local = _outcome(
+        collection="sources", kind="", local_only=True,
+        items=[_source_item()],
+        coverage=_coverage(returned=1, returned_total=1, scanned=1, total=1,
+                           complete=True))
+    everything = _outcome(
+        collection="sources", kind="",
+        items=[_source_item(), _source_item(source_id="s2",
+                                            source_title="参考库甲的书")],
+        coverage=_coverage(returned=2, returned_total=2, scanned=2, total=2,
+                           complete=True))
+    results = typed_collection_results([local, everything],
+                                       payload_chars=PAYLOAD_LIMIT)
+    assert [r.scope for r in results] == ["current_notebook", "all"]
+    # 顺序与条数照旧:范围是新增的第五个身份维度,不改已有的映射。
+    assert [r.coverage.returned_total for r in results] == [1, 2]
+
+
+def test_scope_defaults_to_all_and_is_never_stamped_on_a_non_sources_listing():
+    """`scope` 的默认值是"没收窄",而且只有 sources 能收窄。
+
+    `enumerate.scope` 是来源清单独有的参数,元素/知识对象清单根本没有这个选择。
+    卡片把这个字段渲染成标题后缀,给一份做不出这个选择的清单贴后缀,等于给用户
+    标注一个他无法理解的区别——所以映射按 collection 逐个判,与 element_kind /
+    object_type 同一条纪律(喂一个防御形状的 outcome 让「无条件透传」变异变红)。
+    """
+    [plain] = typed_collection_results(
+        [_outcome(collection="sources", kind="", items=[_source_item()],
+                  coverage=_coverage(returned_total=1, complete=True))],
+        payload_chars=PAYLOAD_LIMIT)
+    assert plain.scope == "all"
+
+    [elements] = typed_collection_results(
+        [_outcome(local_only=True)], payload_chars=PAYLOAD_LIMIT)
+    assert elements.scope == "all"
+    [kg] = typed_collection_results(
+        [_outcome(collection="kg_objects", kind="concept", local_only=True,
+                  items=[_kg_item()], coverage=_coverage(complete=True))],
+        payload_chars=PAYLOAD_LIMIT)
+    assert kg.scope == "all"
+
+
+def test_scope_is_absent_from_the_default_wire_shape_of_a_legacy_answer():
+    """字段是**加法**:不带 `scope` 的历史载荷仍能读回,并被读成"没收窄"。
+
+    结果卡会被历史回答重开时原样重放,而那些载荷写在这个字段存在之前。默认值
+    必须让它们读成 `"all"`——那正是它们当时的范围;若默认成 `"current_notebook"`
+    或必填,重开的历史回答会凭空多出一个「仅当前笔记本」的断言。
+    """
+    revived = TypedCollectionResult.model_validate({
+        "kind": "collection", "collection": "sources",
+        "items": [],
+        "coverage": {"returned_total": 1, "total": 1, "complete": True},
+    })
+    assert revived.scope == "all"
 
 
 def test_evidence_element_ids_truncated_to_max_evidence_refs_even_if_executor_widens():
@@ -565,6 +631,61 @@ def test_sources_preview_row_survives_a_missing_type_and_title():
     # 与结果卡同一份措辞(前端渲染的是同样这句)。
     from app.services.collection_enumeration_answer import UNNAMED_SOURCE_LABEL
     assert UNNAMED_SOURCE_LABEL == "未命名来源"
+
+
+def test_two_scopes_get_two_distinguishable_section_headers():
+    """同一个 run 的两条来源清单链 ⇒ 合成块里两个**不同**的分区标题。
+
+    范围进链键之后,一次 run 可以同时产出「仅当前笔记本」与「全部(含参考库)」
+    两份文档清单。两份 listed/total 本来就不一样,而块头此前对两者逐字相同——
+    模型拿到的是「两个自称同一件事、数字却对不上的清单」,没有任何字面能告诉它
+    哪一份排除了参考库。后缀取自 `LOCAL_ONLY_SCOPE_SUFFIX`,与上屏轨迹、回喂账目
+    共用一份字面(codex #696 R1 P2)。
+    """
+    local = _outcome(
+        collection="sources", kind="", local_only=True,
+        items=[_source_item()],
+        coverage=_coverage(returned=1, returned_total=1, scanned=1, total=1,
+                           complete=True))
+    everything = _outcome(
+        collection="sources", kind="",
+        items=[_source_item(), _source_item(source_id="s2",
+                                            source_title="参考库甲的书")],
+        coverage=_coverage(returned=2, returned_total=2, scanned=2, total=2,
+                           complete=True))
+    preview = enumeration_prompt_block([local, everything], inline_rows=100,
+                                       budget_chars=10_000)
+    assert (
+        f"[Enumeration: documents{LOCAL_ONLY_SCOPE_SUFFIX}, listed 1/1, "
+        "complete, previewed 1]"
+    ) in preview.text
+    assert (
+        "[Enumeration: documents, listed 2/2, complete, previewed 2]"
+    ) in preview.text
+    # 两个块头必须真的不同(而不是碰巧数字不同);后缀恰好出现一次——只有窄的
+    # 那一份带,宽的那一份绝不能被顺带标成「仅当前笔记本」。
+    assert preview.text.count(LOCAL_ONLY_SCOPE_SUFFIX) == 1
+    assert preview.shown_rows == [1, 2]
+
+
+def test_scope_suffix_is_the_same_literal_the_trace_and_ledger_use():
+    """三个消费者一份字面:改一处必须同时改到三处,不许出现第二份字符串。"""
+    from app.services import reasoning_retrieval as rr
+    assert LOCAL_ONLY_SCOPE_SUFFIX == "（仅当前笔记本）"
+    assert rr.LOCAL_ONLY_SCOPE_SUFFIX is LOCAL_ONLY_SCOPE_SUFFIX
+
+
+def test_a_single_all_scope_listing_carries_no_scope_suffix():
+    """只列一次「全部」时块头形状**逐字不变**——后缀不是无条件追加的。"""
+    outcome = _outcome(
+        collection="sources", kind="",
+        items=[_source_item()],
+        coverage=_coverage(returned=1, returned_total=1, scanned=1, total=1,
+                           complete=True))
+    preview = enumeration_prompt_block([outcome], inline_rows=100,
+                                       budget_chars=10_000)
+    assert "[Enumeration: documents, listed 1/1, complete, previewed 1]" in preview.text
+    assert LOCAL_ONLY_SCOPE_SUFFIX not in preview.text
 
 
 def test_partial_header_reports_budget_reason_and_previewed():

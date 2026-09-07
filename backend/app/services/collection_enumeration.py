@@ -131,6 +131,21 @@ TRUNCATED_BUDGET = "budget"
 TRUNCATED_PAYLOAD = "payload"
 TRUNCATED_CONCURRENT_CHANGE = "concurrent_change"
 
+# 「这个数是从多大的一片资料里数出来的」——``local_only`` 清单的范围后缀,**唯一
+# 定义点**。同一个 run 现在可以同时产出 ``scope:"current_notebook"`` 与
+# ``scope:"all"`` 两条来源清单链(键含范围),于是「已完整列出 N 条」会在同一屏、
+# 同一份账目、同一份合成 prompt 里出现两次而 N 不同。没有这个后缀,读到的人无法
+# 判断哪一个排除了参考库,两个数看起来就只是自相矛盾。
+#
+# 四个消费者共用这一个字面,别写第二份:
+#   * ``reasoning_retrieval._enumeration_step_summary`` —— 上屏轨迹摘要;
+#   * ``reasoning_retrieval._enumeration_note`` —— 回喂 reflect 的枚举账目;
+#   * ``collection_enumeration_answer._coverage_phrase`` —— 合成 prompt 的分区标题;
+#   * 前端 ``answer-panel.tsx`` 的结果卡标题(镜像,见那里的说明)。
+# 它落在执行器模块而不是任一消费者,因为 ``local_only`` 本身是执行器的参数;两个
+# 服务端消费者都已经从这里 import 别的协议常量,不引入新的依赖边。
+LOCAL_ONLY_SCOPE_SUFFIX = "（仅当前笔记本）"
+
 # Per-item excerpt default, mirroring ``AskRetrievalLimits.cell_excerpt_chars``
 # (1 000 across all five efforts today).  It is a *budget field* rather than an
 # import because it is a per-effort field, not a module constant: reading the

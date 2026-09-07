@@ -12,7 +12,7 @@
 //      "枚举完整、分析部分"复合披露、单源限定;
 //   5. image 条目走 AuthedImage(经 fetchInternalAssetBlob 取图), formula 条目走
 //      KaTeX 容器(镜像 math-rendering.component.test.tsx 的断言方式)。
-import { fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeAll, expect, test, vi } from "vitest";
 
@@ -651,4 +651,98 @@ test("跨库文档条目标注来源库名,且跳转仍走 active notebook 代�
   expect(screen.getByText("来自参考库《模拟电路基准库》")).toBeInTheDocument();
   await user.click(screen.getByRole("button", { name: "查看来源" }));
   expect(onOpenSource).toHaveBeenCalledWith("base-src");
+});
+
+
+// ---------------------------------------------------------------------------
+// enumerate.scope:一次 run 可以列出两个范围,两张来源清单卡必须能被区分
+// ---------------------------------------------------------------------------
+
+function sourcesResult(overrides: Partial<TypedCollectionResult> = {}): TypedCollectionResult {
+  return collectionResult({
+    collection: "sources",
+    element_kind: "",
+    object_type: "",
+    items: [{
+      item_id: "src-1", source_id: "src-1", source_title: "论文一",
+      location_label: "学术论文", text: "第一篇的摘要",
+      notebook_id: "nb-1", tier: "personal",
+    }],
+    ...overrides,
+  });
+}
+
+
+test("scope=current_notebook 的来源清单卡在标题上带「（仅当前笔记本）」", () => {
+  const answer = baseAnswer();
+  answer.result_sets = [sourcesResult({ scope: "current_notebook" })];
+  renderAnswer(answer, {}, { openCollections: false });
+
+  // 逐字等于后端 collection_enumeration.LOCAL_ONLY_SCOPE_SUFFIX——同一轮里用户
+  // 可能同时看到轨迹摘要里的同一句话,两处换词就成了两件事。
+  expect(screen.getByText("来源清单（仅当前笔记本）")).toBeInTheDocument();
+  // 卡片的无障碍名与展开按钮也跟着走(标题是它们的唯一来源)。
+  expect(screen.getByRole("region", { name: "清单结果：来源清单（仅当前笔记本）" }))
+    .toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "展开来源清单（仅当前笔记本）" }))
+    .toBeInTheDocument();
+});
+
+
+test("scope=all 与「历史回答缺这个键」都渲染成不带后缀的「来源清单」", () => {
+  // 后缀若无条件出现就不再携带信息:它必须只在真的收窄时说。两种「没收窄」都要
+  // 覆盖——显式 "all",以及早于本字段的持久化回答(重开时整键缺席)。
+  for (const scope of ["all", undefined]) {
+    const answer = baseAnswer();
+    answer.result_sets = [sourcesResult({ scope })];
+    renderAnswer(answer, {}, { openCollections: false });
+
+    expect(screen.getByText("来源清单")).toBeInTheDocument();
+    expect(screen.queryByText(/仅当前笔记本/)).not.toBeInTheDocument();
+    cleanup();
+  }
+});
+
+
+test("两条范围不同的来源清单链渲染成两张各自独立的卡(React key 必须含 scope)", () => {
+  // sources 的 element_kind/object_type/source_id 全是空串,所以 key 里若不并入
+  // scope,两张卡的 key 逐字相同(`collection-sources--`)。重复 key 下 React 无法
+  // 把每张卡认回它自己,展开/收起这类 useState 会串到另一张卡上——这里直接断言
+  // React 自己没有报重复 key,而不是去猜它会以哪种方式串。
+  const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+  const answer = baseAnswer();
+  answer.result_sets = [
+    sourcesResult({
+      scope: "current_notebook",
+      coverage: {
+        returned_total: 1, total: 1, complete: true,
+        truncated_reason: "", overflow_semantics: "",
+      },
+    }),
+    sourcesResult({
+      scope: "all",
+      items: [{
+        item_id: "base-src", source_id: "base-src", source_title: "参考论文",
+        location_label: "学术论文", text: "跨库摘要",
+        notebook_id: "base-1", tier: "base",
+      }],
+      coverage: {
+        returned_total: 2, total: 2, complete: true,
+        truncated_reason: "", overflow_semantics: "",
+      },
+    }),
+  ];
+  renderAnswer(answer, {}, { openCollections: false });
+
+  const duplicateKeyWarnings = errors.mock.calls.filter((args) =>
+    args.some((arg) => typeof arg === "string" && arg.includes("same key")));
+  expect(duplicateKeyWarnings).toEqual([]);
+
+  // 两张卡都在,且标题真的不同——「已全部列出 1 条 / 2 条」两个数都真,读者靠后缀
+  // 才知道哪一份排除了参考库。
+  expect(document.querySelectorAll(".answer-collection-result")).toHaveLength(2);
+  expect(screen.getByText("来源清单（仅当前笔记本）")).toBeInTheDocument();
+  expect(screen.getByText("来源清单")).toBeInTheDocument();
+  expect(screen.getByText("已全部列出 1 条")).toBeInTheDocument();
+  expect(screen.getByText("已全部列出 2 条")).toBeInTheDocument();
 });

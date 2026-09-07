@@ -41,6 +41,7 @@ from app.models.ask import (
 )
 from app.services.collection_catalog import COLLECTION_MAP_MAX_CHARS
 from app.services.collection_enumeration import (
+    LOCAL_ONLY_SCOPE_SUFFIX,
     MAX_EVIDENCE_REFS,
     TRUNCATED_BUDGET,
     TRUNCATED_CONCURRENT_CHANGE,
@@ -233,11 +234,19 @@ def typed_collection_results(
         # sources collection has NO sub-type, and an "everything that is not
         # elements is an object type" shortcut would quietly stamp its empty
         # kind into ``object_type`` — a field the frontend reads to pick a label.
+        # ``scope`` is gated on the collection for the same reason as the two
+        # sub-type fields above: ``enumerate.scope`` is a *sources* parameter,
+        # so a narrowed element or knowledge-object listing is not a thing the
+        # wire should be able to claim.  The card renders this field as a title
+        # suffix, and a suffix that can appear where no scope choice exists
+        # would be a label for a distinction the user cannot make.
+        local_only = outcome.collection == "sources" and bool(outcome.local_only)
         results.append(TypedCollectionResult(
             collection=outcome.collection,
             element_kind=outcome.kind if outcome.collection == "elements" else "",
             object_type=outcome.kind if outcome.collection == "kg_objects" else "",
             source_id=outcome.source_id,
+            scope="current_notebook" if local_only else "all",
             items=[],
             coverage=_typed_coverage(outcome.coverage),
         ))
@@ -503,6 +512,17 @@ def _coverage_phrase(outcome: "CollectionEnumerationOutcome", *, previewed: int)
     ``listed``/``total`` by ``inline_rows``/``budget_chars``), because
     Rule 11 requires the model to base analysis on what it actually saw,
     not on the coverage claim alone.
+
+    The label carries the SCOPE suffix when the listing excluded reference
+    libraries, because one run can now enumerate the same collection twice
+    under two scopes (the chain key includes the scope): the model would
+    otherwise be handed two identically labelled document listings whose
+    ``listed``/``total`` disagree, with nothing in the block saying which one
+    is the narrower read. The literal is
+    ``LOCAL_ONLY_SCOPE_SUFFIX`` — the same one the on-screen trace summary and
+    the reflect ledger already use, so the model reads one wording across the
+    three places the same fact reaches it, and a change to the wording cannot
+    land in one of them only.
     """
     coverage = outcome.coverage
     # The sources collection has no sub-type, so its label is the noun alone —
@@ -510,6 +530,8 @@ def _coverage_phrase(outcome: "CollectionEnumerationOutcome", *, previewed: int)
     # read as a truncated field rather than as "the documents".
     noun = _collection_noun(outcome.collection)
     label = f"{outcome.kind} {noun}" if outcome.kind else noun
+    if outcome.local_only:
+        label = f"{label}{LOCAL_ONLY_SCOPE_SUFFIX}"
     listed = coverage.returned_total
     suffix = f", previewed {previewed}"
     if coverage.truncated_reason == TRUNCATED_CONCURRENT_CHANGE:
