@@ -241,8 +241,13 @@ async def me_pending_stream(
             # 1) 补发离线期间缓冲的瞬时事件(跨会话)
             for ev in pending_bus.flush_buffer(uid):
                 yield json.dumps({"kind": "event", **ev}, ensure_ascii=False) + "\n"
-            # 2) 初始 snapshot —— DB 计算放线程池,勿阻塞 loop
+            # 2) 初始 snapshot —— DB 计算放线程池,勿阻塞 loop。先取号:初始帧与
+            #    推送帧共用 pending_bus 的每 user 单调序号,循环里按序号丢弃比
+            #    已下发帧更旧的快照(两次并发重算完成顺序可能与开始顺序相反——
+            #    先开始的那次读到的世界不会比后开始的新,迟到就该丢,否则一条
+            #    已经结束的提问会一直显示为进行中,直到下一次无关推送)。
             loop = asyncio.get_running_loop()
+            last_seq = pending_bus.allocate_snapshot_seq(uid)
             data = await loop.run_in_executor(None, repository().pending_actions, uid)
             yield json.dumps({"kind": "snapshot", "data": data}, ensure_ascii=False) + "\n"
             # 3) 循环等待推送 + keepalive
@@ -254,6 +259,11 @@ async def me_pending_stream(
                 except asyncio.TimeoutError:
                     yield ": keepalive\n"  # 注释帧,前端忽略(非 JSON 行)
                     continue
+                if msg.get("kind") == "snapshot":
+                    seq = int(msg.pop("seq", 0) or 0)
+                    if seq <= last_seq:
+                        continue  # 被更新的快照取代的旧帧,不下发
+                    last_seq = seq
                 yield json.dumps(msg, ensure_ascii=False) + "\n"
         finally:
             pending_bus.unregister(uid, q)

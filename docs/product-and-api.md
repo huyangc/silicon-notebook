@@ -2298,6 +2298,16 @@ cancellation entry (stopping an ask stays the in-session 「停止」 button).
   per-step rate would turn it into a query storm), and the terminal publish is
   ordered strictly *after* the terminal event is queued for the browser so it can
   never delay answer delivery.
+- **Snapshots are monotonic per user.** Every snapshot recompute takes a per-user
+  sequence number *before* it reads the database, and a connected stream drops any
+  snapshot whose sequence is not newer than the last one it delivered (the initial
+  snapshot of a connection takes a number too). Two asks of the same user finishing
+  concurrently therefore cannot leave the bell showing a finished ask as running:
+  the recompute that started later already saw the earlier finish committed, so the
+  earlier-started, later-arriving snapshot is the stale one and is discarded. The
+  stream also registers its connection *before* computing the initial snapshot, so
+  a terminal publish that lands during that computation is delivered rather than
+  skipped by the no-subscriber gate.
 
 | Bound | Value |
 | --- | --- |

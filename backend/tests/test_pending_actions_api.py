@@ -16,6 +16,7 @@ _stream_ask_events 采用同一手法：直接 await 端点函数拿 StreamingRe
 再对 body_iterator 调 __anext__() 逐帧断言，绕开该 transport 限制。
 """
 import asyncio
+import pytest
 import json as _json
 
 from fastapi.testclient import TestClient
@@ -103,6 +104,68 @@ def test_me_pending_stream_registers_before_the_initial_snapshot(monkeypatch):
             "a publish that lands while the initial snapshot is being computed must "
             "reach the connecting client — registration has to precede the initial frame"
         )
+        await resp.body_iterator.aclose()
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        pending_bus.reset()
+
+
+def test_me_pending_stream_drops_a_snapshot_superseded_by_a_later_recompute(monkeypatch):
+    """两次并发重算完成顺序与开始顺序相反时,先开始、后送达的旧快照必须被丢弃
+    (codex #684 R2 P2)。场景:提问 A 的终态推送读到 B 还在跑并卡住;B 的终态推送
+    开始得晚、完成得早并送达「空」;随后 A 送达带着 B 的旧快照——若不丢弃,B 会一直
+    显示为进行中,直到下一次无关推送。序号在重算开始前分配,连接侧按序号过滤。
+    """
+    import threading
+
+    from app.api import system_routes
+    from app.services.pending_bus import pending_bus
+
+    user = UserProfile(
+        id="user-stream-order-2", email="o2@example.com", display_name="O2", role="admin",
+    )
+    pending_bus.reset()
+    stale = {"count": 1, "items": [{"type": "ask", "id": "job-B"}]}
+    fresh = {"count": 0, "items": []}
+    a_started = threading.Event()
+    release_a = threading.Event()
+    calls: list[str] = []
+
+    def recompute(_uid):
+        calls.append("call")
+        if len(calls) == 1:          # A:先开始,卡住直到 B 送达
+            a_started.set()
+            assert release_a.wait(5)
+            return stale
+        return fresh                 # B:后开始,立刻完成
+
+    pending_bus.set_recompute(recompute)
+
+    class _Repo:
+        def pending_actions(self, uid):
+            return {"count": 0, "items": []}
+
+    monkeypatch.setattr(system_routes, "repository", lambda: _Repo())
+
+    async def scenario():
+        resp = await system_routes.me_pending_stream(_FakeRequest(), user)
+        first = _json.loads((await resp.body_iterator.__anext__()).rstrip("\n"))
+        assert first["kind"] == "snapshot"
+        t_a = threading.Thread(target=pending_bus.mark_dirty, args=(user.id,))
+        t_a.start()
+        assert a_started.wait(5)
+        pending_bus.mark_dirty(user.id)      # B 在 A 之后取号,先送达
+        second = _json.loads(
+            (await asyncio.wait_for(resp.body_iterator.__anext__(), timeout=5)).rstrip("\n")
+        )
+        assert second == {"kind": "snapshot", "data": fresh}
+        release_a.set()
+        t_a.join(5)
+        # A 的旧快照迟到:必须被丢弃——1s 内没有任何新帧(keepalive 要 15s 才会出现)
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(resp.body_iterator.__anext__(), timeout=1)
         await resp.body_iterator.aclose()
 
     try:

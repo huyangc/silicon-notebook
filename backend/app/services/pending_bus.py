@@ -30,10 +30,27 @@ class PendingBus:
         self._ttl = ttl
         # 每 user 上次发布 snapshot 的时刻,供 mark_dirty_throttled 限频(锁保护)。
         self._last_publish: dict[str, float] = {}
+        # 每 user 的快照序号分配器(锁保护)。序号在**重算开始前**分配:一次重算若在
+        # 另一次(序号更大、开始更晚)的重算之后才送达,它读到的世界必然不比后者
+        # 新——后者开始时前者对应的终态早已提交——所以按序号丢弃迟到的旧快照是
+        # 安全的。丢弃在连接侧做(system_routes.me_pending_stream 按 seq 过滤),
+        # 这样初始快照也能参与同一套序号,连接期间排队的旧帧同样被挡掉。
+        self._snapshot_seq: dict[str, int] = {}
 
     # ---- 装配 ----
     def set_recompute(self, fn: Callable[[str], dict]) -> None:
         self._recompute = fn
+
+    def allocate_snapshot_seq(self, user_id: str) -> int:
+        """为一次即将开始的快照计算分配该 user 的单调序号。**任何线程可调**。
+
+        调用方必须在真正读 DB 之前分配——序号表达的是「这次计算不早于此刻开始」,
+        分配晚了就说不出这句话,迟到的旧快照就可能压掉新的(codex #684 R2)。
+        """
+        with self._lock:
+            seq = self._snapshot_seq.get(user_id, 0) + 1
+            self._snapshot_seq[user_id] = seq
+            return seq
 
     def bind_loop(self) -> None:
         """在 async(端点)上下文调用,记录主事件循环。"""
@@ -118,8 +135,9 @@ class PendingBus:
             return  # 没人在看这个 user 的铃铛;重算的结果只会被 fan-out 丢掉
         with self._lock:
             self._last_publish[user_id] = self._now()
+        seq = self.allocate_snapshot_seq(user_id)  # 先取号,再花钱重算
         data = self._recompute(user_id)  # 在调用线程(job 线程)算,不阻塞 loop
-        loop.call_soon_threadsafe(self._fanout_snapshot, user_id, data)
+        loop.call_soon_threadsafe(self._fanout_snapshot, user_id, data, seq)
 
     def mark_dirty_throttled(self, user_id: str, min_interval: float = 2.0) -> bool:
         """高频进度点用的限频版:距上次发布不足 min_interval 就跳过,返回是否真发。
@@ -150,12 +168,13 @@ class PendingBus:
         loop.call_soon_threadsafe(self._fanout_or_buffer_event, user_id, event)
 
     # ---- loop 线程内(串行,无并发) ----
-    def _fanout_snapshot(self, user_id: str, data: dict) -> None:
+    def _fanout_snapshot(self, user_id: str, data: dict, seq: int = 0) -> None:
         conns = self._conns.get(user_id)
         if not conns:
             return
         for q in conns:
-            q.put_nowait({"kind": "snapshot", "data": data})
+            # ``seq`` 只给连接侧排序用,me_pending_stream 在下发前剥掉它。
+            q.put_nowait({"kind": "snapshot", "data": data, "seq": seq})
 
     def _fanout_or_buffer_event(self, user_id: str, event: dict) -> None:
         conns = self._conns.get(user_id)
@@ -194,6 +213,7 @@ class PendingBus:
             self._buffer.clear()
             self._last_publish.clear()
             self._subscribers.clear()   # 与 _conns 成对清空,否则镜像会残留计数
+            self._snapshot_seq.clear()
             self._loop = None
         self._conns.clear()
 
