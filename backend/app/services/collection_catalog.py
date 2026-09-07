@@ -83,7 +83,7 @@ from app.repositories.ports import (
     UnifiedKgStorePort,
 )
 from app.services.knowledge_contracts import USABLE_STATUSES
-from app.services.source_scope import scoped_participants
+from app.services.source_scope import current_source_scope, scoped_participants
 
 
 # Enumerable element kinds.  paragraph / heading / page_text / knowhow_cell and
@@ -433,6 +433,7 @@ class CollectionCatalogService:
     @staticmethod
     def _visible_signal_rows(
         signals: Sequence[Tuple[str, str, str, bool]],
+        notebook_id: str = "",
     ) -> List[Tuple[str, str, str, bool]]:
         """One notebook's user-visible source rows, from signals already read.
 
@@ -467,7 +468,10 @@ class CollectionCatalogService:
         would be work the count never uses.  ``_notebook_visible_sources``
         below adds the order, for the one caller that walks them.
         """
-        return [row for row in signals if row[3]]
+        scope = current_source_scope()
+        return [row for row in signals if row[3] and (
+            not notebook_id or scope is None or scope.allows(notebook_id, row[0])
+        )]
 
     def _notebook_visible_sources(
         self,
@@ -490,7 +494,7 @@ class CollectionCatalogService:
         return tuple(
             ScopeSource(notebook_id=notebook_id, source_id=row[0], count=1)
             for row in sorted(
-                self._visible_signal_rows(signals),
+                self._visible_signal_rows(signals, notebook_id),
                 key=lambda row: (row[2], row[0]),
             )
         )
@@ -608,7 +612,7 @@ class CollectionCatalogService:
             # 计数只要个数,不要顺序:排序留给真的要遍历那份清单的调用方
             # (`scope_source_plan`),否则 5 万源的库会为了一个 len() 排一遍。
             visible_sources += len(
-                self._visible_signal_rows(signals)
+                self._visible_signal_rows(signals, notebook_id)
             )
         elements = tuple(
             ElementKindCount(

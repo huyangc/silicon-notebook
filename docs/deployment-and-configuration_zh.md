@@ -591,6 +591,11 @@ origin 写进此名单后 URL 导入才能触达。每项必须带 `http://` 或
 
 **检索：**
 
+通用问答的文档介绍复用 `CHUNK_ANSWER_BUDGET_CHARS` 限制证据上下文。
+`DOCUMENT_OVERVIEW_MAX_ELEMENTS`（默认 64，最小 2）限制单篇文档读取的原始解析元素数，
+取样包含最后一个位置。这是部署侧成本与覆盖预算，不保证完整章节覆盖。
+库内文档介绍复用请求已有的枚举预算。
+
 ```text
 RETRIEVAL_TOP_N         # 推理/报告合成证据预算下界（默认 20）
 REASONING_PER_QUERY_LIMIT # 不带检索档位的兼容调用每查询取数

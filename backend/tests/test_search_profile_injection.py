@@ -341,8 +341,8 @@ def test_every_answer_prompt_call_site_in_ask_service_passes_style_block():
     断言携带 ``style_block=`` 关键字参数——不依赖行号,源码改动后仍然成立。
 
     这是下面全仓扫描 ``test_every_answer_prompt_call_site_in_app_passes_
-    style_block`` 的一个具体断言(调用点数=3,精确到 ask_service.py 这一个
-    文件——319f7aad 退役 graph 模式删掉了第 4 个调用点,这里同步下修),两者
+    style_block`` 的一个具体断言(调用点数=4,精确到 ask_service.py 这一个
+    文件，包含通用问答的文档介绍合成路径),两者
     不是重复覆盖:这一条钉住「今天这个文件有几个调用点」这个
     具体数字,全仓那一条钉住「以后任何文件新增调用点都逃不掉」这条不依赖
     文件名单的结构性合同。"""
@@ -356,8 +356,8 @@ def test_every_answer_prompt_call_site_in_ask_service_passes_style_block():
         and isinstance(node.func, ast.Name)
         and node.func.id == "answer_prompt"
     ]
-    assert len(calls) == 3, (
-        "expected 3 answer_prompt(...) call sites in ask_service.py, found "
+    assert len(calls) == 4, (
+        "expected 4 answer_prompt(...) call sites in ask_service.py, found "
         f"{len(calls)} — update this test's expected count if that changed "
         "deliberately"
     )

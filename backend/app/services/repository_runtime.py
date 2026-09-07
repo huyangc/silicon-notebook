@@ -844,6 +844,7 @@ class _ContentToolsDomain:
     # 每个 facade 各构一份。单例是必要的而非顺手:取消事件的注册表挂在实例上,
     # 「发起 job 的请求」与「跑 job 的后台线程」必须看到同一份。
     command_catalog: CommandCatalogService
+    source_generation: Callable[[str], str]
     # 逐步推理集合枚举 PR-2 T2:类型化集合的「地图层」计数。只吃窄端口
     # (database/sources/notebooks/queries/unified_kg),零模型调用,构造即
     # 建三个有界进程内缓存,故与几个 store 一样是 eager 且无 seam。
@@ -876,6 +877,7 @@ def _build_content_tools(
         unified_kg=seats.unified_kg,
     )
     return _ContentToolsDomain(
+        source_generation=seats.catalog_store.source_element_generation,
         command_catalog=CommandCatalogService(
             catalog=seats.catalog_store,
             sources=seats.source_store,
@@ -1117,7 +1119,7 @@ class RepositoryRuntime:
         self.ask_cancellations = ask.ask_cancellations
         self.ask = ask.ask
         self.ask_execution = ask.ask_execution
-        tools = _build_content_tools(foundation, seats, self._current_user_id)
+        tools = self.content_tools = _build_content_tools(foundation, seats, self._current_user_id)
         self.command_catalog = tools.command_catalog
         self.collection_catalog = tools.collection_catalog
         self.collection_enumeration = tools.collection_enumeration
@@ -2348,6 +2350,8 @@ class RepositoryRuntime:
                 # 调用方共用同一份 per-source 计数缓存(地图与清单必须同源)。
                 collection_catalog=self.collection_catalog,
                 collection_enumeration=self.collection_enumeration,
+                overview_sources=self.source_store,
+                overview_source_generation=self.content_tools.source_generation,
                 # Agentic Memory P1:Agent 对该库的已有理解 store。交座位本身
                 # (形态同上面两个集合服务),提问者身份由 ask 在构造 retriever
                 # 时显式传入 —— 绝不让下游回退 ContextVar。

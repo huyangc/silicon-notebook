@@ -527,8 +527,12 @@ class AskService:
         ask_engine_hidden_sources: Callable[[str, str], Sequence[str]] = (
             lambda _notebook_id, _actor_id: ()
         ),
+        overview_sources=None,
+        overview_source_generation=None,
     ) -> None:
         self.ask_state = ask_state
+        self.overview_sources = overview_sources
+        self.overview_source_generation = overview_source_generation
         self.retrieval = retrieval
         self.candidates = candidates
         self.evidence_context = evidence_context
@@ -2434,6 +2438,118 @@ class AskService:
     # chunk engine
     # ------------------------------------------------------------------
 
+    def _try_document_overview(
+        self, notebook_id, payload, conversation_id, history, style_block,
+        *, user_id, job_id, cancel_event,
+    ):
+        from app.services.document_overview import overview_intent, resolve_overview_source
+        from app.services.document_catalog_overview import catalog_coverage_note, prepare_catalog_overview
+        from app.services.document_source_overview import prepare_source_overview
+
+        intent = overview_intent(payload.question)
+        if intent is None or self.collection_enumeration is None:
+            return None
+        catalog = prepare_catalog_overview(
+            self.collection_enumeration, self.evidence_context, notebook_id,
+            ask_retrieval_limits(payload.retrieval_effort),
+            self.settings.chunk_answer_budget_chars, cancel_event,
+        )
+        prepared = catalog
+        notice = ""
+        if intent.kind == "source":
+            source, notice = resolve_overview_source(intent, catalog, payload.question)
+            if source is not None and self.overview_sources is not None:
+                prepared = prepare_source_overview(
+                    self.overview_sources, source,
+                    budget_chars=self.settings.chunk_answer_budget_chars,
+                    max_elements=self.settings.document_overview_max_elements,
+                    cancel_event=cancel_event,
+                    generation_reader=self.overview_source_generation,
+                )
+            elif source is not None:
+                notice = "当前无法读取文档正文，请稍后重试。"
+        errors: list = []
+        token = _ASK_MODEL_ERRORS.set(errors)
+        answer, anchors, ok, attempted = "", [], False, False
+        try:
+            if not notice:
+                client = self.model_clients.chat("ask_answer")
+                if client.configured and prepared.id_map:
+                    attempted = True
+                    def synthesize():
+                        raw = client.chat_json(
+                            [{"role": "user", "content": answer_prompt(
+                                payload.question, prepared.context_block, history,
+                                style_block=style_block + "\n" + (
+                                    "For document introductions, explain purpose, main topics and "
+                                    "conclusions only where supported. Preserve section labels. "
+                                    "Never treat sampled passages or stored summaries as a full reading. "
+                                    "Coverage: " + prepared.coverage_note
+                                ),
+                            )}], ANSWER_SCHEMA_HINT, cancel_event=cancel_event,
+                            **cap_kwargs(client, "answer_max_tokens"),
+                        )
+                        data = json.loads(raw)
+                        text = str(data.get("answer", "")).strip()
+                        return text, False, self._parse_answer_anchors(text, prepared.id_map)
+                    answer, _, anchors, ok = self._answer_with_retry(
+                        synthesize, getattr(client, "model", ""),
+                    )
+                elif not client.configured:
+                    self.model_errors.note_model_error(
+                        "answer", ModelNotConfiguredError("系统未配置当前问答所需的模型服务，请联系维护人员"),
+                        workload_id="ask_answer",
+                    )
+        finally:
+            _ASK_MODEL_ERRORS.reset(token)
+        note = notice or prepared.coverage_note
+        if not attempted and intent.kind == "catalog":
+            for result in catalog.result_sets:
+                result.synthesis_rows = 0
+                result.synthesis_complete = None
+            note = catalog_coverage_note(catalog.result_sets[0], attempted=False)
+        if errors and not attempted:
+            note = "模型未配置，尚未生成文档介绍；请联系维护人员配置问答模型。\n\n" + note
+        if attempted and not ok:
+            note = "本次文档介绍合成未成功，请重试。\n\n" + note
+        answer = f"{answer}\n\n{note}" if answer else note
+        citations = prepared.citations
+        if isinstance(citations, dict):
+            citations = list(citations.values())
+        for reference in [*citations, *anchors]:
+            if reference.notebook_id == notebook_id:
+                reference.notebook_id = ""
+        response = AskResponse(
+            answer_id="", answer=answer, conclusion=_MARKER_GROUP_RE.sub("", answer).strip(),
+            grounded=False, evidence_level="overview", anchors=anchors,
+            citations=[] if notice else citations, related_knowledge=[],
+            result_sets=catalog.result_sets if intent.kind == "catalog" else [],
+            mode="chunk", llm_mode=("ungrounded" if ok else "synthesis_failed" if attempted else "deterministic"),
+            conversation_id=conversation_id, retrieval_query=payload.question,
+            model_errors=[ModelError(**error) for error in errors],
+        )
+        raise_if_cancelled(cancel_event)
+        response.answer_id = self._save_answer(
+            notebook_id, payload.question, response, conversation_id,
+            user_id=user_id, job_id=job_id, asked_at=payload.asked_at,
+        )
+        return response
+
+    def _prepare_chunk_question(self, notebook_id, payload, *, user_id, job_id, cancel_event):
+        from app.services.source_scope import scoped_conversation_history
+
+        self.notebooks.get_notebook(notebook_id)
+        question = payload.question.strip()
+        raise_if_cancelled(cancel_event)
+        turn = self._prepare_turn(
+            notebook_id, payload.conversation_id, question,
+            user_id=user_id, job_id=job_id,
+        )
+        # Earlier answers can contain sources excluded by this turn's ceiling.
+        history = scoped_conversation_history(turn.history)
+        raise_if_cancelled(cancel_event)
+        return question, turn.conversation_id, history, self._search_profile_style_block(user_id)
+
     def ask_chunk(
         self,
         notebook_id: str,
@@ -2453,27 +2569,16 @@ class AskService:
                 "latency_ms": round((time.perf_counter() - started) * 1000), **extra,
             })
 
-        self.notebooks.get_notebook(notebook_id)
-        question = payload.question.strip()
-        raise_if_cancelled(cancel_event)
-        turn = self._prepare_turn(
-            notebook_id,
-            payload.conversation_id,
-            question,
-            user_id=user_id,
-            job_id=job_id,
+        question, conversation_id, history, style_block = self._prepare_chunk_question(
+            notebook_id, payload, user_id=user_id, job_id=job_id,
+            cancel_event=cancel_event,
         )
-        conversation_id, history = turn.conversation_id, turn.history
-        from app.services.source_scope import scoped_conversation_history
-
-        # A previous answer may contain evidence from sources that are no
-        # longer selected.  Do not let it influence rewrite, retrieval, or
-        # synthesis under the new source ceiling.
-        history = scoped_conversation_history(history)
-        raise_if_cancelled(cancel_event)
-        # Agentic Memory P3(T8):合成侧的风格提示,一次点读、贯穿本次 ask_chunk
-        # 用到的每个 answer_prompt 调用(见 _search_profile_style_block)。
-        style_block = self._search_profile_style_block(user_id)
+        overview = self._try_document_overview(
+            notebook_id, payload, conversation_id, history, style_block,
+            user_id=user_id, job_id=job_id, cancel_event=cancel_event,
+        )
+        if overview is not None:
+            return overview
         retrieval_query = self._rewrite_followup_query(history, question, cancel_event)
         memory_hits = self._memory_hits(user_id, notebook_id, retrieval_query)
 

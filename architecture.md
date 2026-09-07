@@ -279,6 +279,17 @@ Excel 专业分析插在 reasoning retrieval 结束与 response-draft seam 之�
 
 ### 3.3.1 逐步推理预算与结构化完整枚举
 
+通用问答的明确文档介绍由 `document_overview.py` 识别，`AskService` 在既有相关性检索前
+组装专用证据并沿原会话持久化；普通事实/专题问题不走此分支。`document_catalog_overview.py`
+复用集合枚举与答案投影，保持授权范围、来源引用、枚举/合成两轨覆盖同源。
+来源目录的共同可见谓词另按 `ActiveSourceScope.allows` 收窄当前库来源，目录分母与行同步；
+这不开放收窄来源下的其他类型枚举工具，原逐步推理接线闸保持不变。
+单篇定位只从完整的有界目录证明唯一性；`document_source_overview.py` 通过 `SourceStorePort`
+读取有界、分布的原始元素窗口，由组合根注入现有解析版本读取器做前后校验，不新增 SQL 或
+仓储端口。样本按原始位置分配共享字符预算，短文可覆盖全部解析正文，长文明确披露取样，
+不等同于章节完整读取。目录摘要也不等同于全文证据。该分支不调用嵌入或图谱，模式仍为
+`chunk`；预算与用户可见边界见 paired product/API reference，部署参数见配置文档。
+
 `backend/app/core/ask_retrieval_policy.py` 是逐步推理预算的后端真源，`frontend/app/ask-retrieval-effort.ts` 镜像用户可见合同并由跨栈测试锁定；`answer_element_items` 与 `enum_page_size`/`enum_pages_per_run`/`enum_rows_per_run` 是这条镜像关系的例外——它们都是后端专有字段，前端没有消费者，也不在 `ask-retrieval-effort.ts` 里重复：前者只控制最终合成 prompt 里直接来源元素（公式/表格/图片等）的纳入条数上限，后三者约束 §3.3.1 之外「集合枚举工具」一节所述集合枚举工具（`enumerate_elements`/`enumerate_kg_objects` 两个动作及其 `collection="sources"` 参数值）的每 run 预算。`retrieval_effort` 的五个稳定 id 与上限如下；最终相关性结果数按 `min(cap, max(floor, aspect × 实际执行查询数))` 计算，模型可以提前结束，不能越过上限。
 
 | id | 每查询取数 | 最终 floor/aspect/cap | 最大步骤/首轮子查询 | KG/chunk prompt 字符 | 合成纳入的直接来源元素 | 枚举页大小 | 每 run 额外翻页 | 每 run 累计行数 |

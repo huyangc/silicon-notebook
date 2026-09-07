@@ -732,6 +732,12 @@ trust to that extent.
 
 **Retrieval:**
 
+General-Q&A document introductions reuse `CHUNK_ANSWER_BUDGET_CHARS` for evidence
+context. `DOCUMENT_OVERVIEW_MAX_ELEMENTS` (default 64, minimum 2) bounds the number
+of original parsed elements sampled for one document, including the final position.
+This is a deployment cost/coverage budget, not a guarantee of complete chapter
+coverage. Library introductions reuse the existing request enumeration rails.
+
 ```text
 RETRIEVAL_TOP_N         # reasoning/report synthesis evidence-budget floor (default 20)
 REASONING_PER_QUERY_LIMIT # per-query take for compatibility callers without an effort profile
