@@ -743,18 +743,36 @@ class QueryStore:
                     f"WHERE {access_sql.NOTEBOOK_LIVE_SQL} GROUP BY created_by"
                 ).fetchall()
             }
+            # 「来源」总数与 last_active 的上传候选同一谓词(规格
+            # docs/superpowers/specs/2026-09-07-admin-usage-overview-usage-signals-design_zh.md
+            # §3 Phase A):只算 live 笔记本 + 可见来源,归因
+            # COALESCE(NULLIF(uploaded_by,''), nb.created_by)——深拷贝副本
+            # uploaded_by 为 NULL,记接收方 owner;这是**资产**口径,与
+            # last_active 的**动作**口径刻意不同(规格 §7 决策 2)。
+            # retained 分支同一条资产口径:实际上传者优先,actor_id 为空
+            # (留存时 uploaded_by 为 NULL)回落到当时的 notebook_owner_id——
+            # 否则删除笔记本会让这类来源从所有人的计数里消失;last_active 的
+            # retained 候选仍只看 actor_id(动作口径)。retained_user_activity
+            # 写入时(见 sqlite/notebook_store.py 的 source_rows SELECT)已经
+            # 用 VISIBLE_SOURCE_TYPES_PREDICATE 过滤过,这里不必再排除
+            # memory/knowhow。
             sources = {
                 row["k"]: row["c"]
                 for row in db.execute(
                     "SELECT k,SUM(c) AS c FROM ("
-                    "SELECT nb.created_by AS k,COUNT(*) AS c FROM sources s "
-                    "JOIN notebooks nb ON nb.id=s.notebook_id GROUP BY nb.created_by "
+                    "SELECT COALESCE(NULLIF(s.uploaded_by,''),nb.created_by) AS k,"
+                    "COUNT(*) AS c FROM sources s "
+                    "JOIN notebooks nb ON nb.id=s.notebook_id "
+                    f"WHERE nb.{access_sql.NOTEBOOK_LIVE_SQL} "
+                    f"AND {VISIBLE_SOURCE_TYPES_PREDICATE} "
+                    "GROUP BY 1 "
                     "UNION ALL "
-                    "SELECT a.notebook_owner_id AS k,COUNT(*) AS c "
+                    "SELECT COALESCE(NULLIF(a.actor_id,''),a.notebook_owner_id) AS k,"
+                    "COUNT(*) AS c "
                     "FROM retained_user_activity a WHERE a.activity_type='source' "
                     "AND julianday(a.expires_at)>julianday('now') "
                     "AND NOT EXISTS(SELECT 1 FROM notebooks live "
-                    "WHERE live.id=a.notebook_id) GROUP BY a.notebook_owner_id"
+                    "WHERE live.id=a.notebook_id) GROUP BY 1"
                     ") GROUP BY k"
                 ).fetchall()
             }

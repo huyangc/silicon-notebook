@@ -925,6 +925,11 @@ def test_deleted_notebook_activity_projection_matches_sqlite(
 
     usage = next(row for row in store.list_user_usage() if row["id"] == "u-retained")
     assert usage["notebooks"] == 0
+    # Phase A 来源口径修正(admin-usage-overview-usage-signals-design_zh §3):
+    # retained 分支按 COALESCE(actor_id, notebook_owner_id) 归因。src-retained
+    # 没有显式传 uploaded_by(_insert_source 默认 NULL),留存行 actor_id 为
+    # 空串,于是回落到当时的 owner u-retained——资产口径下删除笔记本不会让
+    # 它从所有人的计数里消失;last_active 仍只看 actor_id。
     assert usage["sources"] == 1
     assert usage["questions"] == 1
     assert usage["reports"] == 1
