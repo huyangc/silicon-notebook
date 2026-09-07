@@ -23,7 +23,11 @@ from app.core.ask_retrieval_policy import (
     DEFAULT_RETRIEVAL_EFFORT, EXHAUSTIVE_RETRIEVAL_EFFORT, AskRetrievalLimits,
     ask_retrieval_limits,
 )
-from app.core.config import DEFAULT_REASONING_PER_QUERY_LIMIT, Settings
+from app.core.config import (
+    DEFAULT_REASONING_PER_QUERY_LIMIT,
+    DEFAULT_REFLECT_EVIDENCE_CHARS_BY_EFFORT,
+    Settings,
+)
 from app.models.ask import TRACE_RESULT_IDS_MAX, TraceStep
 from app.repositories.lexical_query import (
     MAX_EXACT_PHRASE_CHARS, MAX_QUOTED_PHRASES, exact_probe_query,
@@ -51,7 +55,7 @@ from app.services.reasoning_actions import (
     ActionParam, ReflectCapabilities, ReflectCapabilityFacts,
     build_reflect_capabilities,
 )
-from app.services.reasoning_context import ReflectContext
+from app.services.reasoning_context import ReflectContext, build_evidence_block
 from app.services.reasoning_observation import (
     ActionObservationLedger, render_observations,
 )
@@ -3356,30 +3360,64 @@ class ReasoningRetriever:
             return _reflect_fallback(_reflect_fallback_reason(exc))
 
     def _reflect_v2_context(
-        self, state: "_ReasoningRunState", summary: str,
+        self, state: "_ReasoningRunState", summary: str, outline,
     ) -> "ReflectContext":
-        """一轮 v2 reflect 的 user 段材料:服务器状态 + 动作观察账。
+        """一轮 v2 reflect 的 user 段材料:服务器状态 + 证据卡 + 观察账。
 
-        两块各有自己的**具名**预算,谁也不许为了塞进别人的池子被裁尾(设计稿 §4):
+        三块各有自己的**具名**预算,谁也不许为了塞进别人的池子被裁尾(设计稿 §4):
 
         * 服务器状态 = 调用方已经拼好的 `summary`(候选摘要、枚举覆盖、大纲便签、
           集合地图、理解/打法/consult 块…)。它按各自既有的边界保留,这里一个字
           都不动。
+        * 证据卡 ← `reasoning_reflect_evidence_chars_by_effort[本 run 档位]` 与
+          `reasoning_reflect_excerpt_chars`。
         * 观察账 ← `reasoning_reflect_recent_observations` 与
           `reasoning_reflect_state_chars`(只界定这一块可压缩区)。
 
-        `evidence` 这一格由本任务的下一步(证据卡)填,现在恒为空串——`ReflectContext`
-        装配时空块直接不渲染。
+        没用满的证据预算**不换**工具次数:这个方法不碰任何配额,它只决定这一轮
+        的输入长什么样。
 
-        `getattr` 读 settings:窄测试替身与离线工具的 duck-typed 适配器不带这两
+        `outline` 从 `run()` 传进来而不是读 `state.outline`:那个局部名在应用大纲
+        时被重新绑定过(`bind_outline_evidence` 返回新对象),`state` 上的是旧值。
+
+        `getattr` 读 settings:窄测试替身与离线工具的 duck-typed 适配器不带这四
         个字段(镜像 `reflect_v2_active` 的既有写法),缺省一律回到已登记的默认值,
         绝不因为少一个字段就把预算当成 0。
         """
         settings = self.settings
         observer = state.record.observer
+        if observer is None:
+            # 总闸在**一次 run 的中途**被翻开(只可能发生在测试或热更配置里):
+            # 账本从这一轮起开始记,而不是让整次检索崩在一个 None 上。首轮那几条
+            # 观察就此缺席,这是如实的——那时还没有账本。
+            observer = state.record.observer = ActionObservationLedger()
+        effort = str(getattr(state.enum_limits, "effort", "") or "")
+        budgets = getattr(
+            settings, "reasoning_reflect_evidence_chars_by_effort", None) or {}
+        budget = int(
+            budgets.get(effort)
+            or DEFAULT_REFLECT_EVIDENCE_CHARS_BY_EFFORT.get(effort)
+            or DEFAULT_REFLECT_EVIDENCE_CHARS_BY_EFFORT[
+                DEFAULT_RETRIEVAL_EFFORT])
+        selection = build_evidence_block(
+            collected=state.collected, elements=state.elements,
+            chunks=state.chunks, chains=state.chains,
+            # 当前"已绑定证据的代表"= 大纲真正持有的那些键。T4 的必答方面接进来
+            # 时把方面代表键并进这一档即可,选取函数本身不用改(见它的说明)。
+            bound_keys=[key for section in outline
+                        for key in section.evidence_keys],
+            fresh_keys=observer.fresh_result_ids(),
+            question=state.question, action_query=observer.last_request,
+            budget_chars=budget,
+            excerpt_chars=int(getattr(
+                settings, "reasoning_reflect_excerpt_chars", 240)),
+        )
+        # **只登记真的渲染出来的键。**被预算挤出窗口的候选一个都不登记——模型没
+        # 见过它,就不该因为"它在池子里"取得大纲绑定资格(设计稿 §6.2)。
+        state.ever_shown_outline_keys.update(selection.shown_keys)
         return ReflectContext(
             server_state=summary,
-            evidence="",
+            evidence=selection.text,
             observations=render_observations(
                 observer.rows,
                 recent=int(getattr(
@@ -5973,7 +6011,7 @@ class ReasoningRetriever:
                 # `summary` 到这里已经是完整的**服务器状态**块;证据卡与观察账是
                 # 另外两块,由这个 helper 各按自己的预算装配(设计稿 §6.3)。
                 reflect_kwargs["context"] = self._reflect_v2_context(
-                    state, summary)
+                    state, summary, outline)
             decision = self.reflect(question, summary, **reflect_kwargs)
             raise_if_cancelled(self.cancel_event)
             if capabilities is not None:
