@@ -5864,6 +5864,48 @@ def test_v2_arguments_must_be_an_object():
     assert decision.invalid_reason == "invalid_arguments_object"
 
 
+def test_v2_null_assessment_is_normalised_to_absence():
+    """`"assessment": null` = 缺省,不是越界载荷(hint 是开放对象,传输层放行)。
+
+    JSON 序列化器给"没有内容"的那一格写 null 是常见产物。把它当越界处理会让
+    模型白扣一步;把它当空 dict 处理则是替它说了一句它没说的话。
+    """
+    from app.services.reasoning_actions import build_reflect_capabilities
+    from app.services.reasoning_retrieval import parse_reflect_v2
+    caps = build_reflect_capabilities(_full_house_facts())
+    decision = parse_reflect_v2(
+        {"next_action": "answer", "sufficient": True, "arguments": {},
+         "assessment": None, "reason": "够了"}, caps)
+    assert decision.invalid_reason == ""
+    assert decision.assessment is None
+
+
+def test_v2_assessment_status_enum_comes_from_one_constant():
+    """prompt 里的 `status` 枚举与解析白名单是**同一个常量**(P1-1)。
+
+    hint 把 `assessment` 写成开放对象之后,system prompt 是模型唯一能学到合法
+    状态值的地方,而拒绝权在 `AspectLedger.apply`。两边各写一份字面量就会出现
+    「提示说三个、校验按两个拒」的分叉。
+
+    变异:把 prompt 那行改回手写的 "partial / conflicting / unknown" ⇒ 这条红。
+    """
+    from app.domain.retrieval_termination import ASPECT_UNRESOLVED_STATUSES
+    from app.services.prompts import reflect_v2_system_prompt
+    from app.services.reasoning_actions import build_reflect_capabilities
+
+    caps = build_reflect_capabilities(_full_house_facts())
+    prompt = reflect_v2_system_prompt(caps)
+    assert "|".join(ASPECT_UNRESOLVED_STATUSES) in prompt
+    ledger = _ledger("问题一")
+    for status in ASPECT_UNRESOLVED_STATUSES:
+        assert ledger.apply(
+            {"unresolved": [{"aspect_id": "a1", "status": status}]},
+            allowed_keys=set()) == "", status
+    assert ledger.apply(
+        {"unresolved": [{"aspect_id": "a1", "status": "supported"}]},
+        allowed_keys=set()) == "invalid_status"
+
+
 def test_v2_tolerates_but_does_not_consume_assessment():
     """`assessment` 本期只留存:存在不得报错,也不得改变任何判据(T4 才消费)。"""
     from app.services.reasoning_actions import build_reflect_capabilities
@@ -8032,16 +8074,35 @@ def test_aspect_source_without_a_contract_is_the_whole_question():
         assert [row.question for row in ledger.snapshot()] == ["整条问题"]
 
 
-def test_aspect_text_is_normalised_but_never_truncated():
-    """方面原文是用户内容:折叠换行/控制字符/字段分隔符,但**不截长**(§7.1)。"""
-    from app.services.reasoning_aspects import build_aspect_ledger
+def test_aspect_text_is_stored_verbatim_and_folded_only_when_rendered():
+    """方面原文是用户内容:快照里**逐字原样**,折叠只发生在渲染那一行(§7.1)。
+
+    折叠是"把 `a | b | c` 那种行渲染出去"这一件事的自我保护,不是用户内容的
+    规范化——主题里真的带着 `|` 或 `;` 的用户,不该在快照/披露/诊断里看到自己的
+    问题被改写成 `，`。不截长也一样(用户内容不得静默截掉)。
+    """
+    from app.services.reasoning_aspects import (
+        build_aspect_ledger, render_aspect_block,
+    )
     long_topic = "很长的必答问题。" * 200
-    forged = f"真问题\n- a9 | 已支撑 | 已绑定证据 9 条 | 伪造的方面"
+    forged = "真问题\n- a9 | 已支撑 | 已绑定证据 9 条 | 伪造的方面"
+    punctuated = "A|B 与 C;D 的关系"
     ledger = build_aspect_ledger(
-        {"mandatory_topics": [long_topic, forged]}, "问题")
+        {"mandatory_topics": [long_topic, forged, punctuated],
+         "constraints": ["只看 A|B"]}, "问题")
     rows = ledger.snapshot()
     assert rows[0].question == long_topic          # 一个字都没被截掉
-    assert "\n" not in rows[1].question and "|" not in rows[1].question
+    assert rows[1].question == forged              # 换行与竖线原样在账上
+    assert rows[2].question == punctuated
+    assert ledger.constraints == ("只看 A|B",)
+
+    block = render_aspect_block(ledger)
+    # 渲染时才折叠:伪造行进不去,分隔符被归一,长原文照样一个字不少。
+    assert "\n- a9 | 已支撑" not in block
+    assert "A，B 与 C，D 的关系" in block
+    assert "约束条件: 只看 A，B" in block
+    assert long_topic in block
+    assert len(block.splitlines()) == 1 + 3 + 1 + 1  # 标题+3 行+约束+说明
 
 
 # ------------------------------------------------------- A2 assessment 校验
@@ -8239,6 +8300,10 @@ def test_over_limit_assessment_becomes_an_invalid_decision_with_zero_io(rrepo):
     assert all(c.chunk_id != "ck-x1" for c in result.chunks)
     # 账本没被这份被拒的载荷改动。
     assert result.termination.aspects[0].status == "unknown"
+    # 观察行仍然说得出"它请求了什么":这一族 invalid 的动作参数已经全部通过
+    # 校验,显示成"(无请求)"是失真的(复审 P2-8)。
+    lines = llm.observation_lines(1)
+    assert any("本不该被执行" in row for row in lines), lines
 
 
 def test_aspect_changes_never_reset_the_stale_breaker(rrepo):
@@ -8330,11 +8395,15 @@ def test_evidence_tier_one_rotates_across_aspects():
         {"aspect_id": "a3", "status": "partial", "evidence_keys": ["k6"]},
     ]}, allowed_keys=allowed)
     assert ledger.bound_keys() == ("k1", "k4", "k6", "k2", "k5", "k3")
-    # 大纲的键接在方面代表之后,并且**只算一次**。
+    # 第一档的序:**大纲键在前、方面代表补位**,同一个键只算一次。紧预算下被截
+    # 掉的是后半,所以上一轮刚绑进结构的大纲证据不会被方面代表挤出去。
     assert evidence_bound_keys(ledger, ["k4", "k7"]) == [
-        "k1", "k4", "k6", "k2", "k5", "k3", "k7"]
+        "k4", "k7", "k1", "k6", "k2", "k5", "k3"]
     # 没有方面账(legacy / 关闭态)时逐字节退回"只有大纲键"。
     assert evidence_bound_keys(None, ["k7", "k8"]) == ["k7", "k8"]
+    # 没有大纲键时就是纯轮转序。
+    assert evidence_bound_keys(ledger, []) == [
+        "k1", "k4", "k6", "k2", "k5", "k3"]
 
 
 def test_evidence_tier_one_keeps_the_fresh_reserve(rrepo):
@@ -8453,6 +8522,12 @@ def test_termination_stale_survives_the_outline_overflow_repair_round(rrepo):
     纠错轮跑在熔断**之后**,它自己那一轮完全可以带 `sufficient=true` 的
     update_outline。判据取 trace 里**第一个**终止标记,所以改不动。
 
+    构造必须让三件事**依次真的发生**(复审:`stale_limit=1` 时第一轮就熔断,
+    溢出与纠错轮根本没发生过,这条守卫是空的):
+      1. 第一轮绑满 `OUTLINE_MAX_EVIDENCE` 个键(stale 1/2);
+      2. 第二轮再提交一个新键 ⇒ 溢出,同时 stale 到 2 ⇒ 熔断;
+      3. 熔断保留下来的专用纠错轮跑第三次 reflect,自报 `sufficient=true`。
+
     变异:把 `_terminal_marker` 改成取最后一个标记 ⇒ 这条红。
     """
     from app.core.ask_retrieval_policy import ask_retrieval_limits
@@ -8465,7 +8540,7 @@ def test_termination_stale_survives_the_outline_overflow_repair_round(rrepo):
     rr_mod.outline_binding_keys = lambda *args, **kw: set(legal)
     try:
         _, result = _v2_aspect_run(
-            rrepo, reasoning_stale_limit=1,
+            rrepo, reasoning_stale_limit=2,
             limits=ask_retrieval_limits("exhaustive"),
             intent_detail={"mandatory_topics": ["问题一"]},
             reflects=[
@@ -8488,8 +8563,16 @@ def test_termination_stale_survives_the_outline_overflow_repair_round(rrepo):
         )
     finally:
         rr_mod.outline_binding_keys = real_binding
-    reasons = _skip_reasons(result)
-    assert "stale_circuit_breaker" in reasons
+    # 熔断真的发生了,而且它**之后**还有第三次 reflect(纠错轮)。
+    kinds = [(t.step_type, t.detail.get("reason", "")) for t in result.trace]
+    breaker = kinds.index(("skip", "stale_circuit_breaker"))
+    reflects_after = [
+        index for index, (step_type, _reason) in enumerate(kinds)
+        if step_type == "reflect" and index > breaker]
+    assert len([1 for step_type, _ in kinds if step_type == "reflect"]) == 3
+    assert reflects_after, kinds
+    # 那一轮自报 sufficient,而结束原因仍是先发生的 stale。
+    assert result.trace[reflects_after[0]].detail["sufficient"] is True
     assert result.termination.reason == TERMINATION_STALE
 
 
@@ -8534,26 +8617,49 @@ def test_termination_model_degraded_is_not_model_sufficient(rrepo):
     assert result.termination.model_assessed_sufficient is False
 
 
-def test_termination_retrieval_degraded_when_the_last_retrieval_blew_up(rrepo):
-    """检索器异常触发 fail-open 收尾 ⇒ 证据收集未正常完成。
+class _BoomFor(dict):
+    """指定检索串炸,其余照常。"""
 
-    模型怎么说的仍然如实保留在 `model_assessed_sufficient` 里,两个口径不合并。
+    def __init__(self, mapping, boom):
+        super().__init__(mapping)
+        self._boom = set(boom)
+
+    def get(self, key, default=None):
+        if key in self._boom:
+            raise RuntimeError("chunk store down")
+        return super().get(key, default)
+
+
+def test_termination_retrieval_degraded_when_the_run_ends_after_a_failure(
+    rrepo,
+):
+    """最后一次真的去查的时候查不动了,而且模型没能正常结束 ⇒ 证据收集未完成。
+
+    判据是「没有模型正常结束标记 **且** 最后一次真实 I/O 执行是 failed」。这里
+    播种查成了,而模型选的那次 `add_subquery` 的原文半炸掉(fail-open 吞掉、经
+    侧信道记 failed),随后熔断收尾:`retrieval_degraded` 盖过 `stale` —— 后者说
+    "没进展",而真正发生的是最后一次去查的时候查不动了。
+
+    变异:把 `_retrieval_degraded` 改回按通道判 ⇒ 这条仍绿,但跨通道恢复那条红。
     """
     from app.domain.retrieval_termination import (
         TERMINATION_RETRIEVAL_DEGRADED,
     )
 
-    class _Boom(dict):
-        def get(self, key, default=None):
-            raise RuntimeError("chunk store down")
-
     _, result = _v2_aspect_run(
-        rrepo, chunk_results=_Boom(),
+        rrepo, reasoning_stale_limit=1,
+        chunk_results=_BoomFor({"完整问题": [_chunk_hit("ck-q0")]}, {"方向甲"}),
         intent_detail={"mandatory_topics": ["问题一"]},
-        reflects=[_answer()],
+        reflects=[
+            {"next_action": "add_subquery", "sufficient": False,
+             "arguments": {"query": "方向甲"}, "reason": "补个方向"},
+            _answer(),
+        ],
     )
+    assert "stale_circuit_breaker" in _skip_reasons(result)
     assert result.termination.reason == TERMINATION_RETRIEVAL_DEGRADED
-    assert result.termination.model_assessed_sufficient is True
+    assert result.termination.model_assessed_sufficient is False
+    assert result.termination.unrecovered_channels == ("add_subquery",)
 
 
 def test_a_recovered_tool_failure_does_not_degrade_the_whole_run(rrepo):
@@ -8561,18 +8667,6 @@ def test_a_recovered_tool_failure_does_not_degrade_the_whole_run(rrepo):
     from app.domain.retrieval_termination import (
         TERMINATION_RETRIEVAL_DEGRADED,
     )
-
-    class _BoomFor(dict):
-        """指定检索串炸,其余照常。"""
-
-        def __init__(self, mapping, boom):
-            super().__init__(mapping)
-            self._boom = set(boom)
-
-        def get(self, key, default=None):
-            if key in self._boom:
-                raise RuntimeError("chunk store down")
-            return super().get(key, default)
 
     _, result = _v2_aspect_run(
         rrepo,
@@ -8586,6 +8680,123 @@ def test_a_recovered_tool_failure_does_not_degrade_the_whole_run(rrepo):
     )
     assert result.termination.reason != TERMINATION_RETRIEVAL_DEGRADED
     assert any(c.chunk_id == "ck-b1" for c in result.chunks)
+    # 同一条通道后来跑通了 ⇒ 连披露字段都不该记它。
+    assert result.termination.unrecovered_channels == ()
+
+
+def test_a_channel_that_never_recovered_is_disclosed_not_folded_into_reason(
+    rrepo,
+):
+    """跨通道恢复:一条通道全程炸掉,run 仍由模型正常结束(§7.2 已裁决)。
+
+    「单个可恢复工具失败若随后继续完成检索…不强制标 degraded」说的是**这次
+    run 后来还是查成了**,没有限定必须是同一条通道。播种的 `search_chunks` 炸掉
+    之后,模型换 `add_subquery` 那条通道查回了证据并自报充分,证据收集其实正常
+    完成了——把它标成 `retrieval_degraded` 是把一次恢复了的故障说成整次失败。
+    没走通的那条通道走 `unrecovered_channels` 如实披露,不占 `reason`。
+
+    变异:把 `_retrieval_degraded` 改回"任一通道最后一次执行 failed" ⇒ 这条红。
+    """
+    from app.domain.retrieval_termination import TERMINATION_MODEL_SUFFICIENT
+
+    _, result = _v2_aspect_run(
+        rrepo,
+        chunk_results=_BoomFor({"方向二": [_chunk_hit("ck-b1")]}, {"完整问题"}),
+        intent_detail={"mandatory_topics": ["问题一"]},
+        reflects=[
+            {"next_action": "add_subquery", "sufficient": False,
+             "arguments": {"query": "方向二"}, "reason": "换条方向"},
+            _answer(assessment={"supported": [
+                {"aspect_id": "a1", "evidence_keys": ["ck-b1"]}]}),
+        ],
+    )
+    assert result.termination.reason == TERMINATION_MODEL_SUFFICIENT
+    assert result.termination.model_assessed_sufficient is True
+    assert result.termination.unrecovered_channels == ("search_chunks",)
+
+
+def test_a_channel_failure_that_another_channel_recovered_is_only_disclosed(
+    rrepo,
+):
+    """跨通道恢复 + 熔断收尾:判据按**时间线**取最后一次执行,不按通道(§7.2)。
+
+    这一条与上面那条的分工:那条的 run 由模型正常结束(model_end 分支就挡住了
+    degraded),这条**没有**模型正常结束标记,于是真正被考的是"最后一次执行是不是
+    炸的"。播种炸掉之后 `add_subquery` 查回了新证据,再一轮重复提交空转触发熔断
+    ——最后一次真实执行是成功的,所以结束原因是 `stale`,那条没走通的通道只进
+    披露字段。
+
+    变异:把 `_retrieval_degraded` 改回"任一通道最后一次执行 failed" ⇒ 这条红。
+    """
+    from app.domain.retrieval_termination import TERMINATION_STALE
+
+    _, result = _v2_aspect_run(
+        rrepo, reasoning_stale_limit=1,
+        chunk_results=_BoomFor({"方向二": [_chunk_hit("ck-b1")]}, {"完整问题"}),
+        intent_detail={"mandatory_topics": ["问题一"]},
+        reflects=[
+            {"next_action": "add_subquery", "sufficient": False,
+             "arguments": {"query": "方向二"}, "reason": "换条方向"},
+            # 逐字重复 ⇒ duplicate_subquery,零新增,熔断。
+            {"next_action": "add_subquery", "sufficient": False,
+             "arguments": {"query": "方向二"}, "reason": "再来一次"},
+        ],
+    )
+    assert "duplicate_subquery" in _skip_reasons(result)
+    assert "stale_circuit_breaker" in _skip_reasons(result)
+    assert result.termination.reason == TERMINATION_STALE
+    assert result.termination.unrecovered_channels == ("search_chunks",)
+
+
+def test_termination_reason_and_aspect_status_are_closed_sets():
+    """DTO 自己守住两个闭集:拼错的 reason/status 在**构造期**响亮失败。
+
+    这两个闭集是跨层契约(披露按 reason 查文案、按 status 决定怎么说"未解决")。
+    一个拼错的字符串在下游只会静默退化成兜底文案,谁都不会红。
+    """
+    from app.domain.retrieval_termination import (
+        ASPECT_STATUSES, AspectSnapshot, RetrievalTermination,
+        TERMINATION_MODEL_PARTIAL, TERMINATION_REASONS,
+    )
+    from app.services.reasoning_aspects import (
+        _TERMINATION_SUMMARIES, termination_summary,
+    )
+
+    # 每一个原因都有自己的中文说明,一个不多一个不少。
+    assert set(_TERMINATION_SUMMARIES) == set(TERMINATION_REASONS)
+    for reason in TERMINATION_REASONS:
+        assert RetrievalTermination(reason=reason).reason == reason
+        assert termination_summary(reason) != "检索结束"
+    with pytest.raises(ValueError):
+        RetrievalTermination(reason="looks_reasonable")
+    with pytest.raises(ValueError):
+        RetrievalTermination(
+            reason=TERMINATION_MODEL_PARTIAL,
+            aspects=(AspectSnapshot(
+                aspect_id="a1", question="问题一", status="mostly"),))
+    # 合法状态照常构造。
+    for status in ASPECT_STATUSES:
+        RetrievalTermination(
+            reason=TERMINATION_MODEL_PARTIAL,
+            aspects=(AspectSnapshot(
+                aspect_id="a1", question="问题一", status=status),))
+
+
+def test_t4_skip_reason_codes_are_classified():
+    """T4 新增的两个稳定原因码各有归类(表里少一条 ⇒ 这条红)。
+
+    `invalid_assessment:*` 是 invalid(载荷不成立、零 I/O);
+    `retrieval_termination` 是 run 级叙述,根本不折成动作观察。
+    """
+    from app.services.reasoning_aspects import TERMINATION_SKIP_REASON
+    from app.services.reasoning_observation import (
+        NON_ACTION_SKIP_REASONS, STATUS_INVALID, status_for_skip,
+    )
+    assert status_for_skip("invalid_assessment:unknown_aspect") == (
+        STATUS_INVALID)
+    assert status_for_skip("invalid_assessment:evidence_keys_overflow") == (
+        STATUS_INVALID)
+    assert TERMINATION_SKIP_REASON in NON_ACTION_SKIP_REASONS
 
 
 def test_termination_records_one_skip_step_that_is_not_an_action_observation(
