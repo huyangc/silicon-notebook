@@ -3916,6 +3916,379 @@ def test_chunk_search_kill_switch_removes_the_first_round_seed_entirely(rrepo):
 
 
 # --------------------------------------------------------------------------- #
+# 无图首轮的**词法臂**:与 chunk 模式同法的整题关键词 FTS
+# --------------------------------------------------------------------------- #
+#
+# 无图首轮此前只有向量一臂(逐子查询 `search_chunks`)。chunk 模式在向量之外还
+# 并入 `keyword_chunk_candidates(kw_str)` 的词法命中——同一个库、同一个问题,只能
+# 被术语字面命中的段落因此在 reasoning 里拿不到。下面这组钉住:两臂都在、两臂的
+# 命中合成同一批证据、有图 run 与无关键词的 run 一字不动。
+#
+# 向量臂在这里一律打桩(`_stub_search_chunks`),词法臂走**真** FTS:两臂各自独有
+# 的段落才能被区分开——否则同一个 FakeEmbedder 会让向量臂顺手把词法臂那段也捞走,
+# 断言就证明不了词法臂贡献过任何东西。
+
+# 只存在于一篇文档里、向量替身绝不会返回的罕见术语。
+_KEYWORD_ONLY_TERM = "ZKX7734"
+_KEYWORD_ONLY_TEXT = f"沟槽隔离工艺的关键参数由 {_KEYWORD_ONLY_TERM} 规范给出。"
+
+
+def _plan_with_keywords_json(*, high, low, query="布局布线"):
+    """带关键词的 planner 返回。`expand_query` 从同一份 JSON 里读两段:
+    `sub_queries` 喂向量臂,`high_level_keywords`+`low_level_keywords` 喂词法臂。"""
+    return {"sub_queries": [{"query": query}],
+            "high_level_keywords": list(high),
+            "low_level_keywords": list(low)}
+
+
+def _count_keyword_chunk_candidates(rr):
+    """把通道换成计次替身(仍走真实实现)。返回收到的关键词串列表。"""
+    seen = []
+    original = rr.retrieval.keyword_chunk_candidates
+
+    def _spy(notebook_id, keywords):
+        seen.append(keywords)
+        return original(notebook_id, keywords)
+
+    rr.retrieval.keyword_chunk_candidates = _spy
+    return seen
+
+
+def _seed_no_kg_notebook_with_exact_chunks(repo, rows):
+    """无图库,但**逐段可控**:`rows` 的每一项 `(chunk_id, text)` 恰好落成一段。
+
+    `_seed_notebook_without_kg` 走 `_chunk_and_embed_source` 真路径,600 字的切块
+    器会把多个短段落并进同一块,数不出「恰好 N 段」,也钉不住段落 id。词法臂那条
+    「界」要断言的正是**并入了几段**,所以这里直接落 `chunks` + `chunks_fts`
+    (向量臂在这些用例里一律打桩,不需要 embedding;词法通道本身零 embedding)。
+    """
+    import uuid
+
+    from app.services.sqlite_repository import _now
+
+    nb = repo.create_notebook(NotebookCreate(name="nb-no-kg-exact"))
+    sid = f"src-{uuid.uuid4().hex[:8]}"
+    now = _now()
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO sources (id,notebook_id,title,source_type,file_name,"
+            "file_path,file_size,file_hash,summary,doc_type,parse_status,"
+            "created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (sid, nb.id, "Doc", "document", "s.md", "/tmp/s.md", 0, f"h-{sid}",
+             "", "", "extracted", now, now))
+        for index, (chunk_id, text) in enumerate(rows, 1):
+            db.execute(
+                "INSERT INTO chunks (id,notebook_id,source_id,text,section_path,"
+                "element_ids,created_at) VALUES (?,?,?,?,?,?,?)",
+                (chunk_id, nb.id, sid, text, f"章节 {index}",
+                 json.dumps([f"el-{index:04d}"]), now))
+            db.execute(
+                "INSERT INTO chunks_fts(chunk_id,notebook_id,text) VALUES (?,?,?)",
+                (chunk_id, nb.id, text))
+    return nb
+
+
+def _count_reflects(rr):
+    """把 `reflect` 换成计次替身(仍走真实实现)。返回调用计数列表。"""
+    calls = []
+    original = rr.reflect
+
+    def _spy(*args, **kwargs):
+        calls.append(kwargs.get("question", args[0] if args else ""))
+        return original(*args, **kwargs)
+
+    rr.reflect = _spy
+    return calls
+
+
+def test_graphless_seed_merges_the_keyword_arm_with_the_vector_arm(rrepo):
+    """T2 的成本契约:首轮后模型说"够了"就直接收尾——恰好一次 reflect、零动作步,
+    而首轮的原文证据同时来自向量臂与词法臂(两条独有段落都在 `res.chunks` 里)。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    nb = _seed_notebook_without_kg(
+        rrepo, ["布局布线阶段先全局布局再详细布线。", _KEYWORD_ONLY_TEXT])
+    rrepo.settings.graph_ppr_enabled = False
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan=_plan_with_keywords_json(high=["沟槽隔离"], low=[_KEYWORD_ONLY_TERM]),
+        reflects=[{"next_action": "answer", "sufficient": True}]))
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    vector_calls = []
+    _stub_search_chunks(rr, vector_calls, {None: [_chunk_hit("ck-vector-only")]})
+    keyword_calls = _count_keyword_chunk_candidates(rr)
+    reflect_calls = _count_reflects(rr)
+
+    res = rr.run(nb.id, "布局布线和沟槽隔离怎么做", "")
+
+    # 「模型说够就够」的成本形状:一次 reflect、零动作步(动作只可能出现在
+    # reflect 循环里,循环第一轮就 break)。
+    assert len(reflect_calls) == 1
+    # 首个 skip 是无图库的既有披露步(`kg_unavailable`),不是动作。
+    assert [t.step_type for t in res.trace] == [
+        "skip", "plan", "retrieve", "search_chunks", "reflect", "answer"]
+    assert res.trace[0].detail == {"reason": "kg_unavailable"}
+    # 两臂各发一次:向量臂逐子查询(这里 1 条),词法臂整题一次。
+    assert vector_calls == [("布局布线", rrepo.settings.reasoning_per_query_limit)]
+    assert keyword_calls == [f"沟槽隔离 {_KEYWORD_ONLY_TERM}"]   # high + low,空格拼
+    # 证据合成:向量独有的替身段 + 词法独有的真实段(它只含罕见术语,向量替身
+    # 从不返回它)。
+    ids = [c.chunk_id for c in res.chunks]
+    assert "ck-vector-only" in ids
+    lexical = [c for c in res.chunks if _KEYWORD_ONLY_TERM in c.text]
+    assert lexical, f"词法臂独有的段落没有进证据池:{ids}"
+    seed = next(t for t in res.trace if t.step_type == "search_chunks")
+    assert seed.detail["phase"] == "seed"
+    assert seed.detail["keyword_found"] >= 1
+    assert seed.detail["found"] == len(seed.detail["result_ids"])
+    # 成功路径不写故障键(它是稀疏键,只在通道真抛的那一天出现)。
+    assert "keyword_failed" not in seed.detail
+    # 词法臂的段落身份也在 result_ids 里(同一 seed 步的 I/O 产物)。
+    assert set(c.chunk_id for c in lexical) <= set(seed.detail["result_ids"])
+
+
+def test_graphless_seed_records_a_zero_hit_keyword_arm(rrepo):
+    """词法臂零命中也要写 `keyword_found`:读轨迹的人得能区分「跑了没捞到」与
+    「压根没跑」(后者根本不写这把键,见下面两条)。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    nb = _seed_notebook_without_kg(rrepo)
+    rrepo.settings.graph_ppr_enabled = False
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan=_plan_with_keywords_json(high=["QQQ9182"], low=[]),
+        reflects=[{"next_action": "answer", "sufficient": True}]))
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    _stub_search_chunks(rr, [], {None: [_chunk_hit("ck-1")]})
+    keyword_calls = _count_keyword_chunk_candidates(rr)
+    res = rr.run(nb.id, "布局布线怎么做", "")
+
+    assert keyword_calls == ["QQQ9182"]
+    seed = next(t for t in res.trace if t.step_type == "search_chunks")
+    assert seed.detail == {"found": 1, "phase": "seed",
+                           "result_ids": ["ck-1"], "keyword_found": 0}
+
+
+def test_keyword_arm_is_bounded_by_per_query_take_before_it_merges(rrepo):
+    """词法臂并入前要先过**自己的选择步**(codex R3 P1-1)。
+
+    通道 `keyword_chunk_candidates` 交回的是 `chunk_recall` 那个召回窗(200 段
+    量级)、且关键词-only 的融合分被重归一——原样并入的话:①合成侧按 relevance
+    切 `chunk_context_chars` 时,这一大批同分词法段会把向量臂整条挤出预算;
+    ②seed 步的 `result_ids` 恒被截断(上限 20),`result_ids_truncated` 一直亮着,
+    P4 的归因链在这一步永久失效。所以这条臂的宽度必须与向量臂每条子查询一致
+    (档位的 `ranked_per_query_take`),而不是交给下游的字符预算去兜。
+    """
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    take = rrepo.settings.reasoning_per_query_limit
+    # 比界多 5 段:全部能被同一个关键词命中,所以"有没有界"在结果里是可分辨的。
+    rows = [(f"ck-kw-{i:02d}",
+             f"{_KEYWORD_ONLY_TERM} 规范第 {i} 条:沟槽隔离工艺参数 P{i} 的取值与校验。")
+            for i in range(take + 5)]
+    nb = _seed_no_kg_notebook_with_exact_chunks(rrepo, rows)
+    rrepo.settings.graph_ppr_enabled = False
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan=_plan_with_keywords_json(high=[], low=[_KEYWORD_ONLY_TERM]),
+        reflects=[{"next_action": "answer", "sufficient": True}]))
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    _stub_search_chunks(rr, [], {None: [_chunk_hit("ck-vector-only")]})
+    # 前提自检:这批段落**全部**都能被关键词命中,否则下面的"恰好 take 段"是
+    # 通道自己捞不够、而不是界起了作用。
+    assert len(rr.keyword_chunks(nb.id, _KEYWORD_ONLY_TERM)) == take + 5
+
+    res = rr.run(nb.id, "布局布线怎么做", "")
+
+    seed = next(t for t in res.trace if t.step_type == "search_chunks")
+    assert seed.detail["keyword_found"] == take            # 不是 take + 5
+    assert seed.detail["found"] == take + 1                # 向量替身那一段 + 词法
+    lexical = [c for c in res.chunks if _KEYWORD_ONLY_TERM in c.text]
+    assert len(lexical) == take
+    # 有界之后 result_ids 够不着上限,连那把稀疏键都不会出现。
+    assert len(seed.detail["result_ids"]) == take + 1
+    assert "result_ids_truncated" not in seed.detail
+
+
+def test_vector_arm_is_accounted_before_the_keyword_arm_merges(rrepo):
+    """记账顺序守卫(codex R3 P2-1):向量臂全部并完,词法臂才并。
+
+    只有向量臂记 `attempted.new`。于是一段**两臂都能命中**的原文,由谁先领走就
+    决定了它算不算某个方向的「新增」:向量臂先并 → 该方向记 1;把词法臂那块搬到
+    向量循环之前 → 同一段被不记账的词法臂领走,方向记 0,回喂 reflect 的措辞
+    重新把一条真检索到证据的方向指认为「新增为 0,请换明显不同的问法」——正是
+    这一步记账当初要修的那个病。移动变异必须让这条用例变红。
+    """
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    nb = _seed_no_kg_notebook_with_exact_chunks(
+        rrepo, [("ck-shared",
+                 f"{_KEYWORD_ONLY_TERM} 沟槽隔离与布局布线的联合约束。")])
+    rrepo.settings.graph_ppr_enabled = False
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan=_plan_with_keywords_json(high=[], low=[_KEYWORD_ONLY_TERM]),
+        reflects=[{"next_action": "answer", "sufficient": True}]))
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    # 向量替身交出的就是词法臂那一段的身份(`take_distinct_chunk_hits` 按
+    # chunk_id 去重),所以两臂命中的是同一段。
+    _stub_search_chunks(rr, [], {"布局布线": [_chunk_hit("ck-shared")]})
+
+    res = rr.run(nb.id, "布局布线怎么做", "")
+
+    ledger = {row["query"]: row for row in res.attempted}
+    assert ledger["布局布线"]["new"] >= 1
+    seed = next(t for t in res.trace if t.step_type == "search_chunks")
+    # 那一段已被向量臂领走,所以词法臂这次的"真正新增"是 0(与 `found` 同口径)。
+    assert seed.detail["keyword_found"] == 0
+    assert seed.detail["found"] == 1
+
+
+def test_keyword_arm_channel_failure_is_disclosed_not_swallowed(rrepo):
+    """通道故障要在轨迹里看得见(codex R3 P2-2)。
+
+    fail-open 本身是对的(词法臂炸掉不该拖走向量臂),但只 fail-open 的话,
+    「`RetrievalPort` 的实现根本没有 `keyword_chunk_candidates`」这类接线错误会被
+    压成一句 `keyword_found: 0`,与「跑了、真没捞到」在轨迹里长得一模一样——整条
+    臂可以静默地永远不工作。稀疏键 `keyword_failed` 就是这条臂的
+    `failed_search_queries`。
+    """
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    nb = _seed_notebook_without_kg(rrepo, ["布局布线阶段先全局布局再详细布线。",
+                                           _KEYWORD_ONLY_TEXT])
+    rrepo.settings.graph_ppr_enabled = False
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan=_plan_with_keywords_json(high=["沟槽隔离"], low=[_KEYWORD_ONLY_TERM]),
+        reflects=[{"next_action": "answer", "sufficient": True}]))
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    _stub_search_chunks(rr, [], {None: [_chunk_hit("ck-1")]})
+
+    def _missing_channel(notebook_id, keywords):
+        # 实现没有这个方法时,调用点拿到的正是 AttributeError。
+        raise AttributeError("'FakeRetrieval' object has no attribute "
+                             "'keyword_chunk_candidates'")
+
+    rr.retrieval.keyword_chunk_candidates = _missing_channel
+
+    res = rr.run(nb.id, "布局布线怎么做", "")
+
+    seed = next(t for t in res.trace if t.step_type == "search_chunks")
+    assert seed.detail["keyword_failed"] is True
+    assert seed.detail["keyword_found"] == 0        # 仍照写,口径不变
+    # fail-open:向量臂那半原样到手,整轮照常收尾。
+    assert seed.detail["found"] == 1
+    assert [c.chunk_id for c in res.chunks] == ["ck-1"]
+
+
+def test_graph_run_never_reaches_the_keyword_arm(rrepo):
+    """D-1 边界:有图 run 的证据构成一字不动——词法臂零调用、播种步压根不存在。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    nb = _seed_two_nodes(rrepo)
+    rrepo.settings.graph_ppr_enabled = False
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan=_plan_with_keywords_json(high=["沟槽隔离"], low=[_KEYWORD_ONLY_TERM]),
+        reflects=[{"next_action": "answer", "sufficient": True}]))
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    vector_calls = []
+    _stub_search_chunks(rr, vector_calls, {None: [_chunk_hit("ck-1")]})
+    keyword_calls = _count_keyword_chunk_candidates(rr)
+    res = rr.run(nb.id, "布局布线怎么做", "")
+
+    assert keyword_calls == [] and vector_calls == []
+    assert not any(t.step_type == "search_chunks" for t in res.trace)
+
+
+def test_confirmed_intent_run_has_no_plan_keywords_and_no_keyword_arm(rrepo):
+    """已确认意图路径不调 `plan()` ⇒ 没有关键词 ⇒ 词法臂不跑、detail 不加键。
+
+    (chunk 模式在同一条路径上同样没有 expand 关键词,两侧同义。)
+    """
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    nb = _seed_notebook_without_kg(rrepo, ["布局布线阶段先全局布局再详细布线。",
+                                           _KEYWORD_ONLY_TEXT])
+    rrepo.settings.graph_ppr_enabled = False
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan=_plan_with_keywords_json(high=["沟槽隔离"], low=[_KEYWORD_ONLY_TERM]),
+        reflects=[{"next_action": "answer", "sufficient": True}]))
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    _stub_search_chunks(rr, [], {None: [_chunk_hit("ck-1")]})
+    keyword_calls = _count_keyword_chunk_candidates(rr)
+
+    # `plan_keywords` 的直接断言:走真实的首轮规划阶段,不经 run 的解包。
+    state = rr._new_run_state(
+        nb.id, "完整问题", "", None, max_steps=None,
+        intent_queries=["完整问题", "方向一"], limits=None, intent_detail=None)
+    rr._first_round_plan(state)
+    assert state.plan_keywords == ""
+    assert [s.query for s in state.subqueries] == ["完整问题", "方向一"]
+
+    res = rr.run(nb.id, "完整问题", "", intent_queries=["完整问题", "方向一"])
+    assert keyword_calls == []
+    seed = next(t for t in res.trace if t.step_type == "search_chunks")
+    assert "keyword_found" not in seed.detail
+    assert _KEYWORD_ONLY_TERM not in "".join(c.text for c in res.chunks)
+
+
+@pytest.mark.parametrize("gate", ["kill_switch", "allow_search_chunks"])
+def test_keyword_arm_dies_with_the_rest_of_the_channel(rrepo, gate):
+    """词法臂没有自己的闸:部署级 kill switch 与调用方策略位
+    (`allow_search_chunks=False`,knowhow 智能补全)都经既有的
+    `chunk_search_active()` 把整条播种拿掉——关键词在场也不例外。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    nb = _seed_notebook_without_kg(rrepo, ["布局布线阶段先全局布局再详细布线。",
+                                           _KEYWORD_ONLY_TEXT])
+    rrepo.settings.graph_ppr_enabled = False
+    if gate == "kill_switch":
+        rrepo.settings.reasoning_chunk_search_enabled = False
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan=_plan_with_keywords_json(high=["沟槽隔离"], low=[_KEYWORD_ONLY_TERM]),
+        reflects=[{"next_action": "answer", "sufficient": True}]))
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    if gate == "allow_search_chunks":
+        rr.allow_search_chunks = False
+    vector_calls = []
+    _stub_search_chunks(rr, vector_calls, {None: [_chunk_hit("ck-1")]})
+    keyword_calls = _count_keyword_chunk_candidates(rr)
+    res = rr.run(nb.id, "布局布线怎么做", "")
+
+    assert keyword_calls == [] and vector_calls == []
+    assert not any(t.step_type == "search_chunks" for t in res.trace)
+
+
+def test_plan_keeps_its_signature_while_plan_with_keywords_adds_the_string(rrepo):
+    """`plan()` 的签名与返回值逐字不变(报告引擎等调用方不动),关键词只从
+    `plan_with_keywords()` 这个新出参出来。"""
+    import inspect
+
+    from app.services.reasoning_retrieval import (
+        PlanOutcome, ReasoningRetriever, SubQuery,
+    )
+
+    _seed_notebook_without_kg(rrepo)
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan=_plan_with_keywords_json(high=["沟槽隔离"], low=[_KEYWORD_ONLY_TERM]),
+        reflects=[]))
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+
+    assert list(inspect.signature(rr.plan).parameters) == [
+        "question", "history", "max_subqueries", "collection_map",
+        "profile_block", "experience_block", "style_block", "kg_available"]
+    subs = rr.plan("布局布线怎么做", "")
+    assert type(subs) is list and [s.query for s in subs] == ["布局布线"]
+
+    outcome = rr.plan_with_keywords("布局布线怎么做", "")
+    assert isinstance(outcome, PlanOutcome)
+    assert [s.query for s in outcome.subqueries] == ["布局布线"]
+    assert outcome.keywords == f"沟槽隔离 {_KEYWORD_ONLY_TERM}"
+
+    # `plan` 是可替换接缝:替身不产关键词 ⇒ 空串(而不是上一次调用的残留)。
+    rr.plan = lambda question, history="", **kwargs: [SubQuery(query=question)]
+    replaced = rr.plan_with_keywords("另一个问题", "")
+    assert replaced.keywords == ""
+    assert [s.query for s in replaced.subqueries] == ["另一个问题"]
+
+
+# --------------------------------------------------------------------------- #
 # 无图 run 的两条**补检索**路径也必须走原文(codex #690 R1 P2)
 # --------------------------------------------------------------------------- #
 #

@@ -66,11 +66,17 @@
 
 ### Ask / Deep Report
 
-- [ ] **问答方法归一（路线，共四步，第一步已实施）**：① KG 可选的 reasoning——
-      `docs/superpowers/specs/2026-09-07-reasoning-kg-optional-design_zh.md`（T1–T5），
-      原文段落检索一等动作 `search_chunks` + 无图首轮播种、按图存在收缩动作空间、
-      早退收窄为零源、注册表与前端闸放行，已落地；② 直答档位（零反思轮）；
-      ③ 自动模式灰度；④ 退役 chunk 流水线。②–④ 各自待立规格。放量前两条待办：
+- [ ] **问答方法归一（路线，共四步，第一步已实施，第二步 ✅ 本分支实施中）**：① KG 可选的
+      reasoning——`docs/superpowers/specs/2026-09-07-reasoning-kg-optional-design_zh.md`
+      （T1–T5），原文段落检索一等动作 `search_chunks` + 无图首轮播种、按图存在收缩动作
+      空间、早退收窄为零源、注册表与前端闸放行，已落地；② 无图首轮并入关键词臂 + 首轮后
+      模型判定直接作答的成本契约（规格 `docs/superpowers/specs/2026-09-07-reasoning-chunk-parity-keyword-arm-design_zh.md`），
+      ✅ 本分支实施中；③ 自动模式灰度——前提是 reasoning 直接作答的调用数 = chunk + 1 次
+      reflect，自动模式下 4 比 3；④ 退役 chunk 流水线。③–④ 各自待立规格。
+      v1（固定「直答」档位）与 v2（先合成、不足再查）均已撤回：用户裁决不设固定直答选项、
+      问题理解与子问题检索不能省、检索效果优先于省一次调用；v2 的先合成本可把首轮后的
+      reflect 并进合成再省一次调用，但代价是拆 `run()` 的重构与判定质量的不确定，按效果
+      优先撤回。放量前两条待办：
       (a) 无图首轮播种目前逐子查询串行调用 `search_chunks`，改用多查询合并召回
       （`RetrievalService.retrieve_chunk_candidates_multi`）之前，需先在大库上实测
       并发度 N=8 时的耗时；(b) 该规格「验收」一节给出的人工抽问（点名子部件 /
@@ -109,6 +115,15 @@
       放行判据改成说真话（原文那条理由只数当前笔记本的可见来源数
       `collection_map.active_sources`，枚举那条仍按参与集口径），避免拿一个通道
       够不着的库当放行理由。
+- [ ] **逐步推理词法臂的关键词按语料语言双语化（给 `plan()` 传 `corpus_langs`）**：
+      无图首轮的词法臂用的是 `plan()` 里 `expand_query` 产出的高/低层关键词，而
+      `plan()` 调 `expand_query` 时**不传** `corpus_langs`，拿到的是 prompt 的
+      zh/en 默认语言对；chunk 通用问答那条同源的臂是按语料语言给出的。两侧对齐
+      需要把 `corpus_langs` 传进 `plan()`，但 `plan()` 是有图/无图两条 run 共用的
+      同一个规划入口，传参会一并改到**有图 run 的规划 prompt**，越过本次「有图
+      run 一字不动」的边界，故本次只把两侧文案与 docstring 改成说真话，传参登记
+      在此。做的时候要连带决定：语料语言探测（`_lexical_corpus_langs`）在
+      reasoning 侧的取数时机与失败语义，以及有图 run 规划输出漂移的回归证据。
 
 ### 解析
 

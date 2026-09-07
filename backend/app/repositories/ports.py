@@ -2927,6 +2927,12 @@ class RetrievalPort(Protocol):
     # coverage guard reads each one against its own live call sites.
     def retrieve_chunk_candidates(self, notebook_id: str, query: str) -> tuple[list[RetrievedChunk], list[str], np.ndarray | None]: ...
     def select_chunk_candidates(self, scored: list[RetrievedChunk], ids: list[str], matrix: np.ndarray | None, k: int, lambda_: float) -> list[RetrievedChunk]: ...
+    # The lexical (FTS) half of the raw-passage surface, spelled here for the
+    # same reason as the pair above: reasoning's no-graph first round reaches it
+    # through its own ``RetrievalPort`` handle (``ReasoningRetriever.
+    # keyword_chunks``), while ask's chunk mode reaches the identical channel
+    # through ``AskCandidatePort``. Two owners, two declarations.
+    def keyword_chunk_candidates(self, notebook_id: str, keywords: str) -> list[RetrievedChunk]: ...
     # The KG-availability pair, spelled here as well as on ``AskCandidatePort``
     # for the same reason as the raw-passage pair above: reasoning decides
     # whether a graph is in scope through its own ``RetrievalPort`` handle

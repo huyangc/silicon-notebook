@@ -1627,6 +1627,32 @@ def take_distinct_chunk_hits(
     return distinct
 
 
+def top_chunks_by_relevance(found: list, take: int) -> list:
+    """把**一条检索臂**的产出收到它自己该有的宽度:relevance 降序的前 ``take`` 段。
+
+    存在的理由是「召回窗不是选择结果」。走 `retrieve_chunk_candidates` +
+    `select_chunk_candidates` 的向量臂自带选择步(MMR 的 ``k``),而纯词法通道
+    `keyword_chunk_candidates` 交出来的是 ``chunk_recall`` 那个**召回窗**
+    (200 段量级)——chunk 模式随后还有 rerank / quota_fuse / MMR 把它收下去,
+    reasoning 的播种里没有那一步,所以那一步的等价物必须由调用方显式补上。
+
+    排序键与 `rank_source_chunks` 同形(relevance,退回 score),但**不**加
+    chunk_id 次键:通道给回来的顺序本身是确定的,而 Python 的排序是稳定的,
+    于是同分段落保持通道原序——播种批次因此逐次可复现,又不会因为一个字典序
+    次键把同分里靠后的 id 系统性挤掉。
+    """
+    if take <= 0:
+        return []
+    return sorted(
+        found,
+        key=lambda chunk: -float(
+            getattr(chunk, "relevance", 0.0)
+            or getattr(chunk, "score", 0.0)
+            or 0.0
+        ),
+    )[:take]
+
+
 def effective_top_n(
     settings,
     explicit: "Optional[int]",
@@ -1705,6 +1731,25 @@ class SubQuery:
     types: List[str] = field(default_factory=list)   # 空 = 全部 4 类
     prefer: str = "balanced"
     reason: str = ""
+
+
+@dataclass
+class PlanOutcome:
+    """`plan_with_keywords()` 的完整产出:检索方向 + 整题关键词串。
+
+    `plan()` 今天只交出 `subqueries`,`expand_query` 同时产出的
+    `high_level_keywords`/`low_level_keywords` 被丢掉。无图首轮要用它们走
+    chunk 模式同款的词法(FTS)臂,所以需要一个能同时交出两半的出参——但
+    `plan()` 的返回类型是报告引擎等调用方的既有契约,不能改。于是新增这个
+    显式载体,`plan()` 保持签名与返回值逐字不变。
+
+    `keywords` 是空格分隔的一个串(与 `ask_chunk` 的 `kw_str` 同形),不是
+    列表:通道 `keyword_chunk_candidates` 收的就是一个串,拆成列表只会让两侧
+    各写一次拼接。没有关键词(已确认意图路径、`expand_query` 回退)时是空串。
+    """
+
+    subqueries: List["SubQuery"]
+    keywords: str = ""
 
 
 @dataclass
@@ -1974,6 +2019,11 @@ class _ReasoningRunState:
     reviewed_queries: List[str] = field(default_factory=list)
     pending_intent_queries: List[str] = field(default_factory=list)
     subqueries: List["SubQuery"] = field(default_factory=list)
+    # 整题关键词串(`expand_query` 的 high+low level,空格分隔),无图首轮播种的
+    # 词法臂唯一输入。`_first_round_plan` 写、`_first_round_chunk_seed` 读。
+    # 已确认意图路径不调 `plan()`,因此恒为空串 —— 词法臂在那条路径上不跑
+    # (chunk 模式在同样的路径上也没有 expand 关键词)。
+    plan_keywords: str = ""
 
     # `_first_round_search`(初检索与补种共用)写:检索本身抛异常(非「成功但零
     # 命中」)的查询原文集合。并发 add/discard 都是同 GIL 原子操作,且每个 worker
@@ -2110,6 +2160,9 @@ class ReasoningRetriever:
         # P1-B: 留存 search() 调用的全量打分(norm_key → {oid: (relevance, score)}),
         # 供收尾 _quota_rerank 复用而非重跑 federated_retrieve。见 search()/_quota_rerank。
         self._per_query_scored: Dict[str, Dict[str, tuple]] = {}
+        # 最近一次 `plan()` 记下的整题关键词串,唯一读者是 `plan_with_keywords()`
+        # (它每次进来先清空,所以这里的初值只服务「从未调用过 plan」的实例)。
+        self._plan_keywords: str = ""
 
     @classmethod
     def from_repository(
@@ -2304,6 +2357,36 @@ class ReasoningRetriever:
             self.settings.chunk_mmr_lambda)
         return self._filter_candidates("chunk", selected)
 
+    def keyword_chunks(self, notebook_id, keywords):
+        """按**整题关键词**做纯词法(FTS)的原文段落检索。零模型调用、零 embedding。
+
+        与 `search_chunks` 是同一批证据的两条臂,不是它的替代:那条走向量召回 +
+        MMR,这条走 chunk 模式同款的 `keyword_chunk_candidates`。chunk 模式里这
+        条臂是「FTS 携带第二语言」到达原文的路径;**这里的关键词是 zh/en 默认
+        双语,不是按语料语言的双语**——`plan()` 调 `expand_query` 时不传
+        `corpus_langs`,拿到的就是 prompt 的默认语言对。对齐需要给 `plan()` 传
+        `corpus_langs`,那会改到**有图 run 的规划 prompt**(同一个 `plan()`
+        两侧共用),超出「有图 run 一字不动」的边界,已登记为后续(见
+        `fangan_todo.md` 的检索一节)。reasoning 的无图首轮此前只有向量一臂,
+        所以同一个库、同一个问题,chunk 模式能捞到的词法独有段落在 reasoning 里
+        是拿不到的。
+
+        `keywords` 是空格分隔的一个串(`PlanOutcome.keywords`,拼法与 `ask_chunk`
+        的 `kw_str` 逐字同形)。召回窗沿用通道自身的口径(`chunk_recall`),不新增
+        配置——**所以这里交出来的是召回窗,不是选择结果**:`search_chunks` 的
+        `select_chunk_candidates` 那一步在这条通道里不存在,调用方必须自己补上
+        等价的选择步(播种用 `top_chunks_by_relevance`,见
+        `_first_round_chunk_seed`)。
+
+        包装形状与 `search_chunks`/`ppr_retrieve`/`exact_lookup` 逐字一致:
+        `retrieval_fanout_slot()` 圈住发 I/O 的那一步,`_filter_candidates("chunk", …)`
+        走与其余通道同一条策略边界(knowhow 智能补全据它剔除私有 Memory 与当前表
+        自身投影,新通道不得绕过)。
+        """
+        with retrieval_fanout_slot():
+            hits = self.retrieval.keyword_chunk_candidates(notebook_id, keywords)
+        return self._filter_candidates("chunk", hits)
+
     def exact_lookup(self, notebook_id, query):
         """按名称精确定位小节 → 整节 chunk。零模型调用、零 embedding。
 
@@ -2344,6 +2427,26 @@ class ReasoningRetriever:
         return result
 
     # --- LLM 决策点 ---
+    def plan_with_keywords(self, question, history="", **kwargs) -> PlanOutcome:
+        """`plan()` 的完整产出:检索方向 **加上**它同一次调用产出的整题关键词串。
+
+        为什么是包着 `plan()` 而不是反过来(被包在里面):`plan` 这个名字是本类
+        对外的**可替换接缝**——生产里 `_first_round_plan` 经它拿方向,测试与工具
+        侧则整片替换它来固定方向(`retriever.plan = lambda …`,见
+        `tests/test_reasoning_ppr_prefetch.py` / `tests/test_quota_reuse.py` /
+        `tests/test_source_scope.py`)。若把真身搬进 `plan_with_keywords`、让
+        `plan()` 退化成转发,首轮就绕过了那个接缝:替身再也拦不住生产路径,
+        「plan 抛错」这类用例会静默地去调真模型。所以真身留在 `plan()`,这里只
+        把它这一次调用记下的关键词串配对成显式出参交出去。
+
+        关键词由 `plan()` 在拿到 `ExpandedQuery` 的那一刻记下(见其中的赋值)。
+        进来先清空:`plan` 被替换成不产关键词的替身时,拿到的是空串而不是上一次
+        调用的残留——空串意味着词法臂不跑,这正是替身路径该有的行为。
+        """
+        self._plan_keywords = ""
+        subqueries = self.plan(question, history, **kwargs)
+        return PlanOutcome(subqueries=subqueries, keywords=self._plan_keywords)
+
     def plan(self, question, history="", max_subqueries=None, collection_map="",
              profile_block="", experience_block="", style_block="",
              kg_available=True):
@@ -2385,6 +2488,18 @@ class ReasoningRetriever:
                           # 用户的检索/回答风格偏好(Agentic Memory P3,B-Profile,
                           # T8):同样是背景不是证据,只影响组织形态/措辞。
                           style_block=style_block)
+        # 关键词串:与 `ask_chunk` 的 `kw_str` 逐字同形(high+low level 拼成一个
+        # 空格分隔串)。这里只记不用——`plan()` 的返回值是既有契约,不能动;取用
+        # 它的是 `plan_with_keywords()`(见那里为什么由它来包)。`expand_query`
+        # 回退时两个列表都空,自然得到空串,词法臂因此不跑。
+        # **不加 `if ex else ""` 守卫**:`expand_query` 的返回类型是
+        # `ExpandedQuery`,任何失败路径要么抛(`fail_closed`)、要么返回
+        # `fallback`,`None` 不在它的值域里——下面那行 `ex.sub_queries` 本来就是
+        # 无条件的,再在上面写一个可空判据只会让两行对同一个对象给出互相矛盾的
+        # 判断(codex R3 P3-2)。`.strip()` 同理不必:两个列表的元素在
+        # `expand_query` 里已经逐个 strip 过且丢掉了空串。
+        self._plan_keywords = " ".join(
+            ex.high_level_keywords + ex.low_level_keywords)
         out = [SubQuery(query=s.query, types=s.types, prefer=s.prefer, reason=s.reason)
                for s in ex.sub_queries]
         return out or fallback
@@ -3321,11 +3436,16 @@ class ReasoningRetriever:
         # kg_actions 门同源。
         if not state.kg_in_scope:
             plan_kwargs["kg_available"] = False
-        subqueries = (
-            [SubQuery(query=query) for query in reviewed_queries]
-            if reviewed_queries
-            else self.plan(question, history, **plan_kwargs)
-        )
+        # 已确认意图路径不调 `plan()`,因此也没有关键词:`plan_keywords` 留空串,
+        # 无图播种的词法臂在那条路径上不跑(chunk 模式同样只在 expand 过的路径上
+        # 才有关键词)。
+        plan_keywords = ""
+        if reviewed_queries:
+            subqueries = [SubQuery(query=query) for query in reviewed_queries]
+        else:
+            outcome = self.plan_with_keywords(question, history, **plan_kwargs)
+            subqueries = outcome.subqueries
+            plan_keywords = outcome.keywords
         raise_if_cancelled(self.cancel_event)
         record(TraceStep(
             step_type="plan",
@@ -3343,6 +3463,7 @@ class ReasoningRetriever:
         state.reviewed_queries = reviewed_queries
         state.pending_intent_queries = pending_intent_queries
         state.subqueries = subqueries
+        state.plan_keywords = plan_keywords
 
     def _first_round_initial_search(
         self, state: "_ReasoningRunState",
@@ -3500,6 +3621,33 @@ class ReasoningRetriever:
                 raise
             return []
 
+    def _keyword_seed_search(
+        self, notebook_id: str, keywords: str,
+    ) -> Tuple[List, bool]:
+        """播种里的词法臂那一次调用,交出 `(命中, 这次是不是炸了)`。
+
+        失败语义与 `_chunk_seed_search` 逐字一致:fail-open 吞掉、`fail_closed`
+        下照抛、`AskCancelled` 始终上抛——词法臂炸掉不该把已经到手的向量臂命中
+        一起拖走。
+
+        **但吞掉不等于不说**(codex R3 P2-2)。只 fail-open 的话,「`RetrievalPort`
+        的某个实现根本没有 `keyword_chunk_candidates`」这类接线错误会被压成一句
+        `keyword_found: 0`,与「臂跑了、真没捞到」在轨迹里长得一模一样——整条臂
+        可以静默地永远不工作,而每一条轨迹都显示它「跑过」。所以这里多交出一个
+        失败位,调用方据它在 seed 步写稀疏键 `keyword_failed`。思路与
+        `failed_search_queries` 同源:通道故障必须在轨迹里看得见,不能伪装成零
+        命中。成功时不写那把键,所以成功路径的 detail 逐键不变。
+        """
+        raise_if_cancelled(self.cancel_event)
+        try:
+            return self.keyword_chunks(notebook_id, keywords), False
+        except AskCancelled:
+            raise
+        except Exception:
+            if self.fail_closed:
+                raise
+            return [], True
+
     def _first_round_chunk_seed(self, state: "_ReasoningRunState") -> None:
         """无图首轮的原文播种 pass(确定性兜底,镜像 PPR/精确查找 seed pass)。
 
@@ -3538,6 +3686,44 @@ class ReasoningRetriever:
         `detail` 不加按查询的命中分布:这一步的 `found`/`phase`/`result_ids`
         已经定稿,而"哪条子查询领走了哪一段"对读轨迹的人没有新信息(并入顺序就
         是子查询顺序),对归因链也没有——`result_ids` 已经是全部新增段落的身份。
+
+        **向量之外还有一条词法臂(整题关键词)。** 向量臂逐子查询走
+        `search_chunks`,词法臂只发一次 `keyword_chunks(state.plan_keywords)`,
+        两臂的命中按同一个 `seen_chunks` 去重后合成同一批原文证据——这与 chunk
+        模式(`ask_chunk` 把 `kw_str` 的 FTS 命中并进向量命中)是同一套构成,
+        对标的正是它。没有这条臂时,同一个无图库里 chunk 模式能捞到、reasoning
+        捞不到的,就是那些只能被术语字面命中的段落(它也是「FTS 携带第二语言」
+        到达原文的路径;当前关键词是 zh/en 默认双语而非按语料语言双语,原因与
+        后续登记见 `keyword_chunks` 的 docstring)。
+
+        **词法臂并入前先过自己的选择步。** 向量臂那半的宽度由
+        `search_chunks(k=take)` 的 MMR 定死;词法通道没有选择步,交回来的是
+        `chunk_recall` 那个召回窗(200 段量级),而且关键词-only 的融合分被重
+        归一,原样并入会让这 200 段在合成侧按 relevance 切 `chunk_context_chars`
+        时把向量臂整条挤出去,seed 步的 `result_ids` 也会恒被截断、P4 归因失效。
+        所以这里显式补上等价物:`top_chunks_by_relevance(…, take)` —— 与向量臂
+        每条子查询同一个宽度(档位化的 `ranked_per_query_take`:4/8/8/12/16)。
+        这是 chunk 模式里「关键词命中先进选择步」的对应物(那边 `kw_hits` 并进
+        候选池之后还要过 rerank / quota_fuse / MMR 才成为证据)。**不**靠下游的
+        `chunk_context_chars` 兜:那是「最后还剩多少地方」的预算闸,不是「这条臂
+        该拿多宽」的界,让它兜的结果恰恰就是上面那条挤占。
+
+        词法臂**不**记 `attempted.new`:关键词来自整道题,不属于任何一条子查询
+        方向,硬摊给某一条会让「这个方向试出了几段」变成假账(与 chunk 模式同义
+        ——那边的 `kw_hits` 同样不归属任何子查询)。它的产出仍进 `result_ids`:
+        那是本步 I/O 的全部产物身份,归因链要的是这个,不是方向归属。
+
+        **并入顺序是有语义的:向量臂全部并完,词法臂才并。** 因为只有向量臂记
+        `attempted.new`,一段两臂都能命中的原文由谁先领走,决定了它算不算某个
+        方向的「新增」。词法臂先并 → 该方向被记成空手 → 回喂 reflect 的措辞把
+        一条真检索到证据的方向指认为「新增为 0,请换明显不同的问法」,正是这一步
+        记账当初要修的那个病。守卫用例:
+        `test_vector_arm_is_accounted_before_the_keyword_arm_merges`。
+
+        `state.plan_keywords` 空白(已确认意图路径、`expand_query` 回退)时这条臂
+        零 I/O,且 `detail` 一个键都不加——有图 run 与关键词为空的 run,detail
+        形状与本臂接入前逐字一致。判空用 `.strip()`,与 chunk 侧的
+        `kw_str.strip()` 同形。
         """
         if state.kg_in_scope or not self.chunk_search_active():
             return
@@ -3588,10 +3774,32 @@ class ReasoningRetriever:
                               label=(label_of.get(sq.query, "")
                                      if reviewed_queries else "")))
             rec.new += len(new)
+        # 词法臂:整题关键词一次,命中并入同一批证据(见 docstring)。位置在向量
+        # 循环**之后**是记账语义的一部分,不是随手排的(见 docstring 的并入顺序
+        # 一节)。不记 `attempted.new`——它不属于任何一条子查询方向。
+        keyword_new = None
+        keyword_failed = False
+        if state.plan_keywords.strip():
+            keyword_hits, keyword_failed = self._keyword_seed_search(
+                notebook_id, state.plan_keywords)
+            # 通道交回的是召回窗,不是选择结果 —— 先过词法臂自己的选择步,宽度
+            # 与向量臂每条子查询同为 `take`(见 docstring)。
+            keyword_new = take_distinct_chunk_hits(
+                top_chunks_by_relevance(keyword_hits, take), seen_chunks, chunks)
+            chunks.extend(keyword_new)
+            seeded.extend(keyword_new)
         _result_ids, _result_ids_truncated = _capped_result_ids(
             [c.chunk_id for c in seeded])
         _chunk_seed_detail = {"found": len(seeded), "phase": "seed",
                               "result_ids": _result_ids}
+        if keyword_new is not None:
+            # 零命中也写:读轨迹的人要能区分「词法臂跑了但没捞到」与「压根没跑」。
+            _chunk_seed_detail["keyword_found"] = len(keyword_new)
+        if keyword_failed:
+            # 稀疏键,只在通道真的抛了的那一天出现:否则接线错误(实现缺
+            # `keyword_chunk_candidates` 之类)会伪装成一句 `keyword_found: 0`,
+            # 整条臂静默失效而轨迹上看不出来。成功路径的 detail 逐键不变。
+            _chunk_seed_detail["keyword_failed"] = True
         if _result_ids_truncated:
             _chunk_seed_detail["result_ids_truncated"] = True
         record(TraceStep(
