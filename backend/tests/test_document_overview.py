@@ -381,3 +381,17 @@ def test_untitled_single_document_keeps_authorized_mounted_scope(repo, include_l
     else:
         assert "参考库正文" in client.prompts[0]
         assert response.anchors[0].notebook_id == base.id
+
+
+def test_catalog_keeps_prior_user_preferences_without_prior_assistant_evidence(repo):
+    nb = repo.create_notebook(NotebookCreate(name="资料"))
+    seed(repo, nb.id, "a", "文章", "实际摘要")
+    client = AnswerClient("旧回答中的参考库噪声 [k5001]")
+    bind_chat_client(repo, "ask_answer", client)
+    first = ask(repo, nb.id, "介绍一下这个notebook中的文章")
+    with repo._write() as db:
+        db.execute("UPDATE answers SET question=? WHERE id=?",
+                   ("接下来的回答请面向初学者，保留\n多行说明要求", first.answer_id))
+    ask(repo, nb.id, "介绍一下这个notebook中的文章", conversation_id=first.conversation_id)
+    assert "面向初学者" in client.prompts[-1] and "多行说明要求" in client.prompts[-1]
+    assert "旧回答中的参考库噪声" not in client.prompts[-1]

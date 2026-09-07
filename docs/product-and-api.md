@@ -1796,6 +1796,10 @@ the remaining shared character budget and the shared `DOCUMENT_OVERVIEW_MAX_ELEM
 allowance across those documents; source cards continue to show stored summaries.
 The answer separately reports generated introductions and fallbacks; preview
 coverage remains a measure of model input, not proof of semantic completeness.
+Catalog synthesis retains the shared language policy, saved style preferences,
+and scoped recent user questions for conversational preferences. Prior assistant
+answers are excluded from this guide context so mounted-corpus evidence cannot
+re-enter a local-only introduction through conversation history.
 
 Explicit single-document introductions resolve a unique title (use `《full title》`)
 or the only document in the effective scope. An incomplete directory, absent title,

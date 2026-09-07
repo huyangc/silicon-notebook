@@ -287,6 +287,8 @@ Excel 专业分析插在 reasoning retrieval 结束与 response-draft seam 之�
 `document_guide.py` 按目录身份渲染逐篇导读、模型漏项回退与关系/阅读顺序，标题由目录拥有，
 模型输入覆盖与输出回退分别披露。缺摘要来源可在剩余字符预算及共享元素额度内补充原文，
 保留原始元素引用与解析版本校验，不覆盖已存摘要。
+`PreparedAskTurn.user_history` 从同一批历史行投影用户问题，目录导读只消费这一会话视图，
+避免解析格式化对话或把旧助手回答中的库外证据带回；其他问答路径仍使用既有完整历史。
 来源目录的共同可见谓词另按 `ActiveSourceScope.allows` 收窄当前库来源，目录分母与行同步；
 这不开放收窄来源下的其他类型枚举工具，原逐步推理接线闸保持不变。
 单篇定位只从完整的有界目录证明唯一性；`document_source_overview.py` 通过 `SourceStorePort`
