@@ -5707,19 +5707,25 @@ def _capability_combinations():
 
 
 def test_prompt_schema_and_parser_are_one_capability_source():
-    """三处同源:prompt 的动作清单、schema 的 `next_action` 枚举、解析白名单,
-    在**所有**能力组合下必须逐个相等。
+    """三处同源:模型**被告知**什么(prompt 的动作清单)、谁**被放行**(解析
+    白名单),在所有能力组合下必须逐个相等;而 schema 的 `next_action` 枚举始终
+    是全部 13 个可识别 id。
 
     这是本任务最重要的一条守卫。三处各写一份 gate 表达式(legacy `reflect()` 的
     形态)时,任何一处漏改都只会在真实模型上表现为"偶尔白烧一轮反思",测试里完全
     看不出来。这里把它变成一个结构性断言。
+
+    枚举**刻意不随可用性收窄**:通用形状闸把含 `|` 的示例串当闭集,收窄就等于让
+    「配额耗尽但可识别」的动作在传输层被判 `invalid_enum`,重试耗尽后整份反思退成
+    fail-open 的 answer、循环终止——比 legacy 还差。可用性因此只由 prompt 与解析
+    白名单两处承担,它们能说清原因并把这一轮记成可继续的观察。
     """
     import re
     from app.services.prompts import (
         reflect_v2_schema_hint, reflect_v2_system_prompt,
     )
     from app.services.reasoning_actions import (
-        ACTION_DEFINITIONS, build_reflect_capabilities,
+        ACTION_DEFINITIONS, ACTION_ORDER, build_reflect_capabilities,
     )
     from app.services.reasoning_retrieval import parse_reflect_v2
 
@@ -5732,7 +5738,8 @@ def test_prompt_schema_and_parser_are_one_capability_source():
         assert tuple(prompt_ids) == caps.actions, facts
         schema = reflect_v2_schema_hint(caps)
         enum = re.search(r'"next_action":"([^"]*)"', schema).group(1)
-        assert tuple(enum.split("|")) == caps.actions, facts
+        assert tuple(enum.split("|")) == ACTION_ORDER, facts
+        assert len(ACTION_ORDER) == 13
         for action in ACTION_DEFINITIONS:
             payload = {
                 "next_action": action, "sufficient": False,
@@ -5979,7 +5986,12 @@ def test_reflect_v2_invalid_action_costs_a_step_but_no_io(rrepo, monkeypatch):
     skip = next(t for t in result.trace
                 if t.detail.get("reason") == "missing_argument:object_id")
     assert skip.step_type == "skip"
-    assert "参数" in skip.summary
+    # 说人话的那句在 reflect 步上;skip 步只留短文案 + 稳定原因码,同一句话不
+    # 上屏两次。
+    reflect_step = next(t for t in result.trace if t.step_type == "reflect")
+    assert "参数" in reflect_step.summary
+    assert skip.summary != reflect_step.summary
+    assert len(skip.summary) <= 12
     # 被拒的那一轮之后仍然跑到了一次真正的检索,循环没有被终止。
     assert kinds.index("skip") < len(kinds) - 1
     assert any(t.step_type == "retrieve"
@@ -6058,13 +6070,13 @@ def test_reflect_v2_only_answer_ends_without_asking_the_model(
     assert not any(t.step_type == "reflect" for t in result.trace)
 
 
-def test_knowhow_completion_explicitly_stays_on_the_legacy_reflect(rrepo):
-    """Knowhow 补全**显式**关掉 v2,而不是靠"它恰好没传 limits"这种偶然性。"""
-    import inspect
-    from app.services.knowhow import api as knowhow_api
-    source = inspect.getsource(knowhow_api)
-    assert "reasoning_retriever.allow_reflect_v2 = False" in source
+def test_reflect_v2_policy_bit_can_veto_the_deployment_switch(rrepo):
+    """策略位与总闸的合取语义。
 
+    「knowhow 补全确实关掉了它」由 `test_knowhow_completion.py` 的行为用例负责
+    (在真实补全路径上拦住 retriever 工厂,断言进入 `run()` 那一刻这个判据为
+    False)——找一行赋值的源码字面量在赋值搬个位置就能骗过去。
+    """
     from app.services.reasoning_retrieval import ReasoningRetriever
     rrepo.settings.reasoning_reflect_v2_enabled = True
     rr = ReasoningRetriever.from_repository(
@@ -6088,3 +6100,455 @@ def test_v2_ignores_a_parameter_branch_the_projection_removed():
         "arguments": {"query": "版图寄生", "types": "not-even-a-list"}}, caps)
     assert decision.invalid_reason == ""
     assert decision.new_sub_query.types == []
+
+
+# --- v2 载荷必须真的过一遍传输层(评审 P1-3) --------------------------------
+# `_SeqLLM` 直接 `json.dumps` 返回,完全绕过生产里 `reasoning_agent` 必经的两道
+# 闸(`parse_model_json_object` 的修复分支 + `validate_model_json_shape`)。T2 的
+# 两个 P1 缺陷(按配额收窄的 next_action 枚举、被判 unknown_key 的非空 arguments)
+# 正是从这条缝里漏出去的:它们在模型那一侧成立,在测试替身这一侧根本不存在。
+# 下面这个替身把两道闸串回来,闸拒绝就当场失败。
+
+_V2_SYNTAX_FAULTS = ("", "trailing_comma", "unquoted_key")
+
+
+def _through_v2_gate(raw: str, schema_hint: str, syntax_fault: str) -> str:
+    """把一份 v2 载荷按生产口径过闸;可选地先注入一个**可修复**的语法故障。
+
+    `reasoning_agent` 在 `_JSON_REPAIR_WORKLOADS` 里,`model_json_repair_mode`
+    默认 on —— 所以模型一个尾逗号就会把整份载荷推进修复分支。那条分支的形状校验
+    比严格分支更紧,两条路径必须对同一份载荷给出同一个答案。
+    """
+    from app.core.model_json import (
+        ModelJsonRepairError,
+        parse_model_json_object,
+        validate_model_json_shape,
+    )
+
+    # 真实模型直接吐 UTF-8;`_SeqLLM` 的 `json.dumps` 默认转义非 ASCII,而修复
+    # 分支的 `string_changed` 比对用的是未转义形式。这里归一到生产形状,免得替身
+    # 的序列化口味变成被测合同。
+    raw = json.dumps(json.loads(raw), ensure_ascii=False)
+    text = raw
+    if syntax_fault == "trailing_comma":
+        text = f"{raw[:-1]},}}"
+    elif syntax_fault == "unquoted_key":
+        text = raw.replace('"next_action":', "next_action:", 1)
+    try:
+        parsed = parse_model_json_object(text, schema_hint, allow_repair=True)
+        validate_model_json_shape(parsed.content, schema_hint)
+    except ModelJsonRepairError as exc:
+        pytest.fail(
+            f"传输层形状闸拒绝了一份合法的 v2 载荷:{exc.reason}\n{text}")
+    return parsed.content
+
+
+class _GatedV2LLM(_SeqLLM):
+    """v2 反思替身:载荷过真闸,并留存每一轮的 system 段(动作清单在里面)。"""
+
+    def __init__(self, plan, reflects, *, syntax_fault: str = ""):
+        super().__init__(plan, reflects)
+        self._syntax_fault = syntax_fault
+        self.system_prompts: list = []
+
+    def chat_json(self, messages, schema_hint, **kwargs):
+        raw = super().chat_json(messages, schema_hint, **kwargs)
+        if "sub_queries" in schema_hint:
+            return raw
+        self.system_prompts.append(messages[0]["content"])
+        return _through_v2_gate(raw, schema_hint, self._syntax_fault)
+
+    def prompt_actions(self, turn: int) -> list:
+        return re.findall(r"^- ([a-z_]+):", self.system_prompts[turn], re.M)
+
+
+def _v2_repo(rrepo, **settings):
+    rrepo.settings.reasoning_reflect_v2_enabled = True
+    # 熔断是另一条守卫的题目;这些用例要的是"载荷过不过得了闸、动作面对不对",
+    # 空手轮不该把循环提前掐断。
+    rrepo.settings.reasoning_stale_limit = 9
+    for name, value in settings.items():
+        setattr(rrepo.settings, name, value)
+    return rrepo
+
+
+def _skip_reasons(result) -> list:
+    return [t.detail.get("reason", "") for t in result.trace
+            if t.step_type == "skip"]
+
+
+@pytest.mark.parametrize("syntax_fault", _V2_SYNTAX_FAULTS)
+def test_v2_spent_quota_action_is_an_observation_not_a_dead_run(
+    rrepo, syntax_fault
+):
+    """配额耗尽的可识别动作:prompt 里没有它,模型硬选它得到一条可继续的观察。
+
+    这是本轮最重要的一条回归。schema 的 `next_action` 枚举一旦按配额收窄,这份
+    载荷就会在**传输层**被判 `invalid_enum`(闭集规则),重试耗尽后
+    `_reflect_fallback` 把它变成 sufficient=True/answer —— 一次换通道的机会变成整个
+    检索循环终止。上面的替身会在闸拒绝的那一刻失败,所以收窄枚举必然让这条红。
+    """
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    nb = _seed_two_nodes(_v2_repo(rrepo, reasoning_max_element_searches=1))
+    llm = _GatedV2LLM(
+        plan={"sub_queries": [{"query": "RTL到GDSII流程"}]},
+        reflects=[
+            {"next_action": "search_elements", "sufficient": False,
+             "arguments": {"query": "版图元素"}, "reason": "查元素"},
+            {"next_action": "search_elements", "sufficient": False,
+             "arguments": {"query": "再查一次"}, "reason": "还想查"},
+            {"next_action": "add_subquery", "sufficient": False,
+             "arguments": {"query": "布局布线的具体步骤"}, "reason": "换通道"},
+            {"next_action": "answer", "sufficient": True, "arguments": {}},
+        ],
+        syntax_fault=syntax_fault)
+    bind_chat_client(rrepo, "reasoning_agent", llm)
+    result = ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(
+        nb.id, "RTL到GDSII流程", "")
+
+    assert "search_elements" in llm.prompt_actions(0)
+    assert "search_elements" not in llm.prompt_actions(1)
+    reasons = _skip_reasons(result)
+    assert "unavailable_action:element_search_cap" in reasons
+    # 投影在模型面前就把它摘掉了,执行处那条 cap 分支不该被走到。
+    assert "element_search_cap" not in reasons
+    # 循环没有被终止:后一轮的合法检索照跑,收尾是真 answer 而不是兜底。
+    assert any(t.step_type == "retrieve"
+               and t.detail.get("query") == "布局布线的具体步骤"
+               for t in result.trace)
+    assert result.trace[-1].step_type == "answer"
+    reflects = [t for t in result.trace if t.step_type == "reflect"]
+    assert all(not t.detail.get("fallback_reason") for t in reflects)
+
+
+@pytest.mark.parametrize("syntax_fault", _V2_SYNTAX_FAULTS)
+def test_v2_populated_arguments_reach_their_executor_through_the_gate(
+    rrepo, syntax_fault
+):
+    """每一类非空 `arguments` 都要过得了闸并落到既有执行器上。
+
+    `arguments` 在 schema 里是空对象(它的字段合同在 system prompt 里)。修复分支
+    的 `issubset` 曾把这条"开放对象"读成"一个键都不许有",于是**所有**带真实参数
+    的检索动作在模型打一个尾逗号时就失去修复网、掉进 fail-open 的 answer。
+    """
+    from app.core.ask_retrieval_policy import ask_retrieval_limits
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    nb = _seed_two_nodes(_v2_repo(rrepo))
+    claim = next(h for h in rrepo._retrieve_scored(nb.id, "RTL到GDSII流程")
+                 if h.object_type == "claim")
+    llm = _GatedV2LLM(
+        plan={"sub_queries": [{"query": "RTL到GDSII流程"}]},
+        reflects=[
+            # query 类
+            {"next_action": "add_subquery", "sufficient": False,
+             "arguments": {"query": "布局布线的具体步骤", "types": ["claim"],
+                           "prefer": "keyword"}, "reason": "补方向"},
+            # term 类
+            {"next_action": "exact_lookup", "sufficient": False,
+             "arguments": {"term": "set_db"}, "reason": "精确名称"},
+            # object_id 类
+            {"next_action": "expand_graph", "sufficient": False,
+             "arguments": {"object_id": claim.object_id, "direction": "both"},
+             "reason": "看邻居"},
+            {"next_action": "follow_chain", "sufficient": False,
+             "arguments": {"start_object_id": claim.object_id,
+                           "direction": "out"}, "reason": "两跳"},
+            # 枚举组(required_group)
+            {"next_action": "enumerate_elements", "sufficient": False,
+             "arguments": {"collection": "sources"}, "reason": "列目录"},
+            # sections 类
+            {"next_action": "update_outline", "sufficient": False,
+             "arguments": {"sections": [
+                 {"id": "s1", "title": "流程总览", "evidence": []}]},
+             "reason": "搭结构"},
+            {"next_action": "answer", "sufficient": True, "arguments": {}},
+        ],
+        syntax_fault=syntax_fault)
+    bind_chat_client(rrepo, "reasoning_agent", llm)
+    result = ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(
+        nb.id, "RTL到GDSII流程", "",
+        limits=ask_retrieval_limits("exhaustive"))
+
+    # 没有任何一份载荷被投影/解析判成不可执行 —— 六类参数形状全部过闸。
+    bad = [r for r in _skip_reasons(result)
+           if r.startswith(("unavailable_action:", "missing_argument:",
+                            "invalid_argument:"))
+           or r in {"unexpected_arguments", "invalid_arguments_object"}]
+    assert bad == []
+    kinds = {t.step_type for t in result.trace}
+    assert {"retrieve", "expand", "outline"} <= kinds
+    assert result.trace[-1].step_type == "answer"
+
+
+@pytest.mark.parametrize("syntax_fault", _V2_SYNTAX_FAULTS)
+def test_v2_invalid_shapes_are_observations_and_the_loop_keeps_going(
+    rrepo, syntax_fault
+):
+    """缺参数 / 矛盾 / 给收尾动作附参数:三种都记观察,零 I/O,循环继续。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    nb = _seed_two_nodes(_v2_repo(rrepo))
+    llm = _GatedV2LLM(
+        plan={"sub_queries": [{"query": "RTL到GDSII流程"}]},
+        reflects=[
+            {"next_action": "expand_graph", "sufficient": False,
+             "arguments": {}, "reason": "缺 object_id"},
+            {"next_action": "add_subquery", "sufficient": True,
+             "arguments": {"query": "又要查又说够了"}, "reason": "矛盾"},
+            {"next_action": "answer", "sufficient": False,
+             "arguments": {"query": "收尾不该带参数"}, "reason": "多余参数"},
+            {"next_action": "add_subquery", "sufficient": False,
+             "arguments": {"query": "布局布线的具体步骤"}, "reason": "正常一轮"},
+            {"next_action": "answer", "sufficient": True, "arguments": {}},
+        ],
+        syntax_fault=syntax_fault)
+    bind_chat_client(rrepo, "reasoning_agent", llm)
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    rr.neighbors = lambda *_a, **_k: pytest.fail("invalid 决定不得发起图 I/O")
+    result = rr.run(nb.id, "RTL到GDSII流程", "")
+
+    reasons = _skip_reasons(result)
+    assert "missing_argument:object_id" in reasons
+    assert "sufficient_with_retrieval_action" in reasons
+    assert "unexpected_arguments" in reasons
+    # 矛盾轮绝不能先跑那次检索再宣称充分。
+    assert not any(t.step_type == "retrieve"
+                   and t.detail.get("query") == "又要查又说够了"
+                   for t in result.trace)
+    assert any(t.step_type == "retrieve"
+               and t.detail.get("query") == "布局布线的具体步骤"
+               for t in result.trace)
+    assert result.trace[-1].step_type == "answer"
+
+
+@pytest.mark.parametrize("syntax_fault", _V2_SYNTAX_FAULTS)
+def test_v2_assessment_crosses_the_gate_on_both_paths(rrepo, syntax_fault):
+    """`assessment` 本期不进 schema(T4 才消费),但它必须过得了两条路径。
+
+    修复分支的未知键规则曾把它判成 `unknown_key`:同一份载荷,严格路径放行、
+    带一个尾逗号就被拒——一条只由语法运气决定的合同。
+    """
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    nb = _seed_two_nodes(_v2_repo(rrepo))
+    llm = _GatedV2LLM(
+        plan={"sub_queries": [{"query": "RTL到GDSII流程"}]},
+        reflects=[
+            {"next_action": "add_subquery", "sufficient": False,
+             "arguments": {"query": "布局布线的具体步骤"},
+             "assessment": {"unresolved": [
+                 {"aspect_id": "a2", "status": "partial", "gap": "缺适用条件"}]},
+             "reason": "补一个方面"},
+            {"next_action": "answer", "sufficient": True, "arguments": {},
+             "assessment": {"supported": [
+                 {"aspect_id": "a1", "evidence_keys": ["k1"]}]},
+             "reason": "够了"},
+        ],
+        syntax_fault=syntax_fault)
+    bind_chat_client(rrepo, "reasoning_agent", llm)
+    result = ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(
+        nb.id, "RTL到GDSII流程", "")
+
+    assert _skip_reasons(result) == []
+    assert any(t.step_type == "retrieve"
+               and t.detail.get("query") == "布局布线的具体步骤"
+               for t in result.trace)
+    assert result.trace[-1].step_type == "answer"
+
+
+# --- 配额读数 ↔ 执行处判据的守卫(评审 P2-6) --------------------------------
+# 能力投影里每个 `*_left` 都是「上限 − 已用」的一次减法,而真正决定跳不跳的是执行
+# 处的 `used >= max`。两处各写一遍,差一就等于 prompt 摆出一个必然被 skip 的动作
+# (白烧一轮反思),或反过来提前一轮摘掉一条还能用的通道。评审在副本上把这几个读数
+# 各 +1,273 个用例全绿——下面这组把那个变异钉死。
+#
+# 判据用「模型硬选那个已耗尽的动作」而不是「它没被选」:后者在动作根本没被请求时
+# 恒真。配额到 0 之后,prompt 里必须没有它;模型仍然选了,则必须由投影拦下(记
+# `unavailable_action:<cap>`),而不是走到执行处那条 cap 分支。
+
+_V2_QUOTA_CASES = (
+    ("search_elements", {"reasoning_max_element_searches": 1},
+     ({"query": "元素一"}, {"query": "元素二"}), "element_search_cap"),
+    ("search_chunks", {"reasoning_max_chunk_searches": 1},
+     ({"query": "原文一"}, {"query": "原文二"}), "chunk_search_cap"),
+    ("exact_lookup", {"reasoning_max_exact_lookups": 1},
+     ({"term": "set_db"}, {"term": "get_db"}), "exact_lookup_cap"),
+    ("ppr_retrieve", {"reasoning_max_ppr_retrieves": 1},
+     ({"query": "传播一"}, {"query": "传播二"}), "ppr_retrieve_cap"),
+)
+
+
+@pytest.mark.parametrize(
+    "action,settings,arguments,cap_reason", _V2_QUOTA_CASES,
+    ids=[case[0] for case in _V2_QUOTA_CASES])
+def test_v2_spent_quota_leaves_the_action_out_of_the_prompt(
+    rrepo, action, settings, arguments, cap_reason
+):
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    nb = _seed_two_nodes(_v2_repo(rrepo, **settings))
+    llm = _GatedV2LLM(
+        plan={"sub_queries": [{"query": "RTL到GDSII流程"}]},
+        reflects=[
+            {"next_action": action, "sufficient": False,
+             "arguments": arguments[0], "reason": "第一次"},
+            {"next_action": action, "sufficient": False,
+             "arguments": arguments[1], "reason": "配额已尽还想再来"},
+            {"next_action": "answer", "sufficient": True, "arguments": {}},
+        ])
+    bind_chat_client(rrepo, "reasoning_agent", llm)
+    result = ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(
+        nb.id, "RTL到GDSII流程", "")
+
+    assert action in llm.prompt_actions(0)
+    assert action not in llm.prompt_actions(1)
+    reasons = _skip_reasons(result)
+    assert f"unavailable_action:{cap_reason}" in reasons
+    assert cap_reason not in reasons
+
+
+def test_v2_spent_follow_chain_quota_leaves_the_action_out_of_the_prompt(
+    rrepo
+):
+    """follow_chain 单列:它的重复身份是四元组,两次请求必须换一个合法起点/方向,
+    否则第二次会先撞上 `duplicate_follow_chain` 而不是配额判据。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    nb = _seed_two_nodes(
+        _v2_repo(rrepo, reasoning_max_follow_chain_actions=1))
+    claim = next(h for h in rrepo._retrieve_scored(nb.id, "RTL到GDSII流程")
+                 if h.object_type == "claim")
+    llm = _GatedV2LLM(
+        plan={"sub_queries": [{"query": "RTL到GDSII流程"}]},
+        reflects=[
+            {"next_action": "follow_chain", "sufficient": False,
+             "arguments": {"start_object_id": claim.object_id,
+                           "direction": "out"}, "reason": "第一次"},
+            {"next_action": "follow_chain", "sufficient": False,
+             "arguments": {"start_object_id": claim.object_id,
+                           "direction": "in"}, "reason": "配额已尽还想再来"},
+            {"next_action": "answer", "sufficient": True, "arguments": {}},
+        ])
+    bind_chat_client(rrepo, "reasoning_agent", llm)
+    result = ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(
+        nb.id, "RTL到GDSII流程", "")
+
+    assert "follow_chain" in llm.prompt_actions(0)
+    assert "follow_chain" not in llm.prompt_actions(1)
+    reasons = _skip_reasons(result)
+    assert "unavailable_action:follow_chain_cap" in reasons
+    assert "follow_chain_cap" not in reasons
+
+
+def test_v2_answer_and_consult_must_send_an_empty_arguments_object():
+    """`answer`/`consult_memory` 携带非空 arguments 记 invalid(设计稿 §5.2)。
+
+    静默忽略等于把「又想查又想收尾」当成一次干净的收尾:那条检索意图消失且无处
+    可查。stale 熔断已经兜住反复非法请求,所以不存在挂死。
+    """
+    from app.services.reasoning_actions import build_reflect_capabilities
+    from app.services.reasoning_retrieval import (
+        REFLECT_INVALID_ACTION, parse_reflect_v2,
+    )
+    caps = build_reflect_capabilities(_full_house_facts())
+    for action in ("answer", "consult_memory"):
+        decision = parse_reflect_v2(
+            {"next_action": action, "sufficient": False,
+             "arguments": {"query": "顺手再查一下"}}, caps)
+        assert decision.invalid_reason == "unexpected_arguments", action
+        assert decision.next_action == REFLECT_INVALID_ACTION
+        assert decision.sufficient is False
+    # 空对象与缺省照常放行。
+    assert parse_reflect_v2(
+        {"next_action": "answer", "sufficient": True,
+         "arguments": {}}, caps).invalid_reason == ""
+    assert parse_reflect_v2(
+        {"next_action": "consult_memory"}, caps).invalid_reason == ""
+
+
+def test_capabilities_scope_restriction_names_the_enumeration_reason_correctly():
+    """来源范围收窄时枚举的不可用原因必须是执行处那个词。
+
+    执行处的纵深防御分支记的是 `source_scope_unsafe_channel`;投影报
+    `enumeration_disabled` 的话,"prompt 说不可用"与"执行处 skip 了"在排查时对不
+    上同一个词——而本模块承诺复用执行处的 skip reason。
+    """
+    from app.services.reasoning_actions import build_reflect_capabilities
+    caps = build_reflect_capabilities(_full_house_facts(scope_restricted=True))
+    for action in ("enumerate_elements", "enumerate_kg_objects"):
+        assert caps.reason_for(action) == "source_scope_unsafe_channel"
+    # 范围没收窄时仍然按接线/预算报自己的原因。
+    disabled = build_reflect_capabilities(
+        _full_house_facts(enumeration_active=False))
+    assert disabled.reason_for("enumerate_elements") == "enumeration_disabled"
+
+
+def test_scope_probe_runs_only_when_it_can_change_the_action_face(rrepo):
+    """范围探针按契约禁止 memo,「全选」形状下每次两次库读。所以只在**可能改变
+    本轮动作面**时才探。"""
+    from types import SimpleNamespace
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    graphless = SimpleNamespace(kg_in_scope=False)
+    with_graph = SimpleNamespace(kg_in_scope=True)
+
+    rr.allow_enumeration = False
+    assert rr._scope_probe_matters(
+        graphless, exact_lookup_available=False,
+        terminal_overflow_repair=False) is False
+    # 三条"还活着的范围敏感动作"各自都足以要求现探。
+    assert rr._scope_probe_matters(
+        graphless, exact_lookup_available=True,
+        terminal_overflow_repair=False) is True
+    assert rr._scope_probe_matters(
+        with_graph, exact_lookup_available=False,
+        terminal_overflow_repair=False) is True
+    rr.allow_enumeration = True
+    assert rr._scope_probe_matters(
+        graphless, exact_lookup_available=False,
+        terminal_overflow_repair=False) is True
+    # 终态纠错轮只提供 update_outline —— 范围与动作面无关。
+    assert rr._scope_probe_matters(
+        with_graph, exact_lookup_available=True,
+        terminal_overflow_repair=True) is False
+
+
+def _scope_probe_calls_for_turns(rrepo, monkeypatch, extra_turns: int) -> int:
+    """一个无图 run 里 `_unsafe_scope_restricted()` 被调用的总次数。"""
+    from app.models.schemas import NotebookCreate
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    nb = rrepo.create_notebook(NotebookCreate(name="no-graph"))
+    reflects = [
+        {"next_action": "search_elements", "sufficient": False,
+         "arguments": {"query": f"元素{i}"}, "reason": "查元素"}
+        for i in range(extra_turns)
+    ] + [{"next_action": "answer", "sufficient": True, "arguments": {}}]
+    llm = _GatedV2LLM(
+        plan={"sub_queries": [{"query": "布局布线步骤"}]}, reflects=reflects)
+    bind_chat_client(rrepo, "reasoning_agent", llm)
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    monkeypatch.setattr(rr, "_kg_in_scope", lambda _nb: False)
+    rr.allow_enumeration = False
+    rr.allow_exact_lookup = False
+    calls = []
+    real = rr._unsafe_scope_restricted
+
+    def counted():
+        calls.append(1)
+        return real()
+
+    monkeypatch.setattr(rr, "_unsafe_scope_restricted", counted)
+    rr.run(nb.id, "布局布线步骤", "")
+    assert len(llm.system_prompts) == extra_turns + 1
+    return len(calls)
+
+
+def test_reflect_turns_do_not_each_pay_a_second_scope_probe(
+    rrepo, monkeypatch
+):
+    """无图 + 精查/枚举都关着 ⇒ 范围改变不了动作面,能力投影不该再探一次。
+
+    动作分发链头上那次纵深防御探测仍在(每轮一次),所以多两轮 = 多两次;能力投影
+    若无条件跟着探,同样的两轮就要多四次。exhaustive 档 16 轮的差值正是这个系数。
+    """
+    _v2_repo(rrepo)
+    base = _scope_probe_calls_for_turns(rrepo, monkeypatch, 1)
+    more = _scope_probe_calls_for_turns(rrepo, monkeypatch, 3)
+    assert more - base == 2

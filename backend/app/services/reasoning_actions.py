@@ -276,6 +276,22 @@ class ReflectCapabilities:
     #: 每个**可用**动作的参数(枚举参数的 choices 已按本轮白名单收窄)。
     params: Mapping[str, Tuple[ActionParam, ...]]
 
+    @property
+    def recognized_actions(self) -> Tuple[str, ...]:
+        """全部**可识别**的动作 id(与本轮可用性无关)。
+
+        schema 的 `next_action` 枚举读它而不是 `actions`:通用形状闸把含 `|` 的
+        示例串当闭集(strict 与 repair 两条路径都生效),按本轮配额收窄枚举就等于
+        让「配额耗尽但可识别」的动作在到达 `parse_reflect_v2` 之前被判
+        `invalid_enum` —— 重试耗尽后整份反思退成 fail-open 的 answer,一次换通道
+        的机会变成整个循环终止(`9af6a035e` 刚修掉的形态,比 legacy 还差)。
+
+        可用性由 prompt 的动作清单与 `parse_reflect_v2` 读 `actions` 的白名单承担:
+        那两处才能说清「为什么本轮不可用」,并把它记成一条零 I/O、可继续的观察。
+        这是一个恒定值而不是字段——构造处填错就没法与三处消费者不同步。
+        """
+        return ACTION_ORDER
+
     def has(self, action_id: str) -> bool:
         return action_id in self.actions
 
@@ -419,13 +435,19 @@ def build_reflect_capabilities(
         (facts.has_candidates, REASON_CHAIN_NO_CANDIDATES),
         (facts.follow_chain_left >= 1, REASON_CHAIN_CAP),
     )
+    # 范围收窄排在接线之前:调用方的 `enumeration_active` 已经把「范围受限」折进
+    # 去了,只报 `enumeration_disabled` 会与执行处的纵深防御分支对不上——那里记的
+    # 是 `source_scope_unsafe_channel`。本模块承诺复用执行处的 skip reason,所以
+    # 收窄是原因时就报收窄。
     blockers[ENUMERATE_ELEMENTS] = _first_blocker(
+        (scope_ok, REASON_SOURCE_SCOPE),
         (facts.enumeration_active and bool(facts.element_kinds),
          REASON_ENUM_DISABLED),
         (enum_budget_ok, REASON_ENUM_BUDGET),
     )
     blockers[ENUMERATE_KG_OBJECTS] = _first_blocker(
         (graph_ok, REASON_NO_GRAPH),
+        (scope_ok, REASON_SOURCE_SCOPE),
         (facts.enumeration_active and bool(facts.object_types),
          REASON_ENUM_DISABLED),
         (enum_budget_ok, REASON_ENUM_BUDGET),

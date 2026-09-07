@@ -206,6 +206,38 @@ def _validate_repair_surface(raw: str, value: dict[str, Any]) -> None:
         raise ModelJsonRepairError("unsupported_syntax")
 
 
+#: Keys a domain parser may receive without the hint advertising them.
+#
+# The repair branch below otherwise rejects every unadvertised key
+# (``unknown_key``), while the strict branch tolerates extras.  That asymmetry
+# is deliberate for keys a repair could have INVENTED, but it must not decide
+# the fate of a field the product knowingly accepts and merely does not ask the
+# model for yet: reflect v2's ``assessment`` is parsed and stored today and
+# advertised in T4, so with a stray trailing comma the same payload would be
+# rejected while its strict twin passes.  Named, bounded, and — no current hint
+# describes a key by this name — inert for every other workload.
+_TOLERATED_UNADVERTISED_KEYS = frozenset({"assessment"})
+
+
+def _is_open_object(example: Any) -> bool:
+    """Whether an example describes an object whose KEYS it does not describe.
+
+    An empty object example (``"arguments":{}``) is the only way a hint can say
+    "an object goes here, and its fields are specified elsewhere".  Reflect v2
+    uses it because the per-action field contract lives in the system prompt
+    and the typed validation lives in the reasoning layer; advertising a
+    non-empty example instead would make the legal ``"arguments": {}`` that
+    ``answer`` sends fail ``missing_expected_key``.
+
+    Both validation paths share this one rule.  The strict path already behaved
+    this way implicitly (it only ever descends into keys the example names);
+    the repair path did not, so a non-empty ``arguments`` object plus one
+    trailing comma was rejected as ``unknown_key`` — a real retrieval action
+    losing its repair net over a syntax fault the layer exists to absorb.
+    """
+    return isinstance(example, dict) and not example
+
+
 def _validate_against_example(value: Any, example: Any) -> None:
     """Validate repaired JSON against the example-shaped schema hint.
 
@@ -269,10 +301,14 @@ def _validate_against_example(value: Any, example: Any) -> None:
     if isinstance(example, dict):
         if not isinstance(value, dict):
             raise ModelJsonRepairError("invalid_type")
-        if not set(value).issubset(example):
+        if _is_open_object(example):
+            return
+        extra = set(value) - _TOLERATED_UNADVERTISED_KEYS
+        if not extra.issubset(example):
             raise ModelJsonRepairError("unknown_key")
         for key, item in value.items():
-            _validate_against_example(item, example[key])
+            if key in example:
+                _validate_against_example(item, example[key])
         return
     raise ModelJsonRepairError("invalid_type")
 
@@ -307,6 +343,11 @@ def _validate_known_shape(
     if isinstance(example, dict):
         if not isinstance(value, dict):
             raise ModelJsonRepairError("invalid_type")
+        if _is_open_object(example):
+            # Same rule as the repair path (see ``_is_open_object``). Spelled
+            # out rather than left implicit in the ``if example and ...`` below,
+            # so the two paths cannot drift apart again.
+            return
         if field_name == "frame_assignments":
             # The hint's ``facet-id`` is a placeholder. Actual keys come from
             # the report frame and are checked against that frame downstream;

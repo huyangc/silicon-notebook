@@ -286,7 +286,13 @@ _V2_MISSING_ARGUMENT_PREFIX = "missing_argument:"
 _V2_INVALID_ARGUMENT_PREFIX = "invalid_argument:"
 _V2_INVALID_SUFFICIENT = "invalid_sufficient"
 _V2_INVALID_ARGUMENTS_OBJECT = "invalid_arguments_object"
+_V2_UNEXPECTED_ARGUMENTS = "unexpected_arguments"
 _V2_SUFFICIENT_CONTRADICTION = "sufficient_with_retrieval_action"
+
+#: v2 下 invalid 观察在 skip 步上屏的短文案。reflect 步已经用
+#: `reflect_invalid_summary` 说过这一轮为什么不成立,两步再重复同一句只是把同
+#: 一件事上屏两次;稳定原因码在 skip 步的 detail 里,那才是排查读的地方。
+_REFLECT_INVALID_SKIP_SUMMARY = "未执行任何检索"
 
 
 class _V2ArgumentError(Exception):
@@ -362,6 +368,14 @@ def _v2_apply_arguments(
     共用 —— 两条协议在 `run()` 之后走的是同一份代码。这里的每一行都只是把
     「单一 arguments 对象里的某个键」搬到「decision 上那个动作的既有字段」。
     """
+    if not ACTION_DEFINITIONS[action].params:
+        # `answer` / `consult_memory` 的载荷**必须**是空对象(设计稿 §5.2)。带着
+        # 一个 query 的 answer 不是"多余字段",而是模型把两件事混在了一轮里;静默
+        # 忽略等于把它当成一次干净的收尾,那条检索意图就此消失且无处可查。记
+        # invalid 后模型下一轮可以正经选那个检索动作;反复非法照样被 stale 熔断兜住。
+        if arguments:
+            raise _V2ArgumentError(_V2_UNEXPECTED_ARGUMENTS)
+        return
     if action == "add_subquery":
         query = _v2_text(arguments, "query", required=True)
         types: List[str] = []
@@ -512,6 +526,8 @@ def reflect_invalid_summary(decision: "ReflectDecision") -> str:
     reason = decision.invalid_reason
     if reason.startswith(_V2_UNAVAILABLE_PREFIX):
         return "本轮不提供模型选择的这个动作,未执行任何检索"
+    if reason == _V2_UNEXPECTED_ARGUMENTS:
+        return "模型给收尾/回想动作附了检索参数,本轮不予执行"
     if reason.startswith(
         (_V2_MISSING_ARGUMENT_PREFIX, _V2_INVALID_ARGUMENT_PREFIX)
     ):
@@ -2727,6 +2743,39 @@ class ReasoningRetriever:
             and self.allow_reflect_v2
         )
 
+    def _scope_probe_matters(
+        self,
+        state: "_ReasoningRunState",
+        *,
+        exact_lookup_available: bool,
+        terminal_overflow_repair: bool,
+    ) -> bool:
+        """本轮的来源范围探针会不会改变动作面(否则不必付那两次库读)。
+
+        六个范围敏感动作里,只要有**一个**在其它条件下仍然可用,范围就是它可用性
+        的最后一道判据,必须现探:
+        * `expand_graph` 除范围外只差「范围内有图」——所以 `kg_in_scope` 一条就
+          覆盖了 ppr/community/follow_chain/expand_graph 四个;
+        * `exact_lookup` 由调用方传进来的那个合取判据决定;
+        * 两个枚举动作的接线位(总闸 ∧ `allow_enumeration`)——注意这里读的是
+          **未折入范围**的接线,`state.enumeration_active` 已经把范围折进去了,拿它
+          判会自证其成:范围一收窄它就是 False,于是永不探测,于是永远报
+          `enumeration_disabled` 而不是真正的原因 `source_scope_unsafe_channel`。
+
+        不探时投影按「未受限」算。此时这些动作已经因为**别的**条件不可用,报出来
+        的是那一条其它原因——两条同时为真,而少付一次库读。终态大纲纠错轮除
+        `update_outline` 外什么都不提供,范围因此完全无关。
+        """
+        if terminal_overflow_repair:
+            return False
+        return bool(
+            state.kg_in_scope
+            or exact_lookup_available
+            or (self.allow_enumeration and enumeration_wiring_active(
+                self.settings, self.collection_catalog,
+                self.collection_enumeration))
+        )
+
     def _reflect_capabilities(
         self,
         state: "_ReasoningRunState",
@@ -2748,20 +2797,29 @@ class ReasoningRetriever:
         说明)。`ppr_searches`/`chunk_searches`/枚举三池是那条纪律的既有例外,
         它们仍以 `state` 为权威,所以这里直读。
 
-        这个方法只做加减法与布尔合并,零 I/O 例外只有 `_unsafe_scope_restricted`
-        与 `chunk_search_active` 两个既有的请求级判定——它们在同一轮的动作分发
-        里本来就会被问到,这里不新增数据库探测。
+        这个方法只做加减法与布尔合并,唯一的两个请求级判定是
+        `chunk_search_active()`(纯 settings/策略位)与 `_unsafe_scope_restricted()`。
+        后者**不是**零成本:它按契约禁止 memo,「全选」形状下每次要两次库读,而
+        reflect 循环每轮都会走到这里(exhaustive 档 16 轮 ⇒ 约 32 次)。所以它只在
+        **可能改变本轮动作面**时才探——见下面 `scope_probe_matters` 的判据。
         """
         policy = state.action_policy
         enumeration = state.enumeration_active
         limits = state.enum_limits
+        exact_lookup_active = bool(
+            self.settings.exact_lookup_enabled and self.allow_exact_lookup)
+        exact_lookups_left = max(0, policy.max_exact_lookups - exact_lookups)
         facts = ReflectCapabilityFacts(
             kg_in_scope=state.kg_in_scope,
-            scope_restricted=self._unsafe_scope_restricted(),
+            scope_restricted=self._scope_probe_matters(
+                state,
+                exact_lookup_available=(
+                    exact_lookup_active and exact_lookups_left >= 1),
+                terminal_overflow_repair=terminal_overflow_repair,
+            ) and self._unsafe_scope_restricted(),
             has_candidates=bool(state.collected),
             chunk_search_active=self.chunk_search_active(),
-            exact_lookup_active=bool(
-                self.settings.exact_lookup_enabled and self.allow_exact_lookup),
+            exact_lookup_active=exact_lookup_active,
             ppr_active=bool(self.allow_ppr and self.settings.graph_ppr_enabled),
             community_active=bool(self.allow_community_expansion),
             enumeration_active=enumeration,
@@ -2774,8 +2832,7 @@ class ReasoningRetriever:
                 - elements_searches),
             chunk_searches_left=max(
                 0, policy.max_chunk_searches - state.chunk_searches),
-            exact_lookups_left=max(
-                0, policy.max_exact_lookups - exact_lookups),
+            exact_lookups_left=exact_lookups_left,
             ppr_left=max(0, policy.max_ppr_retrieves - state.ppr_searches),
             follow_chain_left=max(
                 0, policy.max_follow_chain_actions - follow_chain_searches),
@@ -3120,6 +3177,10 @@ class ReasoningRetriever:
                 return _reflect_fallback("non_object")
             decision = parse_reflect_v2(data, capabilities)
             if decision.invalid_reason and self.fail_closed:
+                # `fail_closed` 调用方(knowhow 补全)刻意把一条 invalid 观察**升级**
+                # 成异常,而不是走 §5.2 的「记一条观察、继续下一轮」统一记账:那些
+                # 流程只接受服务端签发的证据键,一轮说不清的决定在那里不是可以吸收
+                # 的损失。普通 Ask/Report 仍然走统一记账。
                 raise ValueError(
                     "reasoning model returned an unusable reflection: "
                     f"{decision.invalid_reason}")
@@ -5832,7 +5893,7 @@ class ReasoningRetriever:
                 # 链尾记账,反复提交非法动作就规避了熔断。
                 record(TraceStep(
                     step_type="skip",
-                    summary=reflect_invalid_summary(decision),
+                    summary=_REFLECT_INVALID_SKIP_SUMMARY,
                     detail={"reason": decision.invalid_reason}))
             elif (
                 self._unsafe_scope_restricted()

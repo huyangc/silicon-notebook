@@ -1103,7 +1103,7 @@ _V2_UNAVAILABLE_REASONS = {
     "subquery_channel_unavailable": "this library has no knowledge graph and "
                                     "passage search is not enabled, so a new "
                                     "sub-query has nothing to run against",
-    "source_scope_unsafe_channel":"the user narrowed retrieval to selected "
+    "source_scope_unsafe_channel": "the user narrowed retrieval to selected "
                                    "sources and this channel cannot be "
                                    "restricted to them",
     "no_kg_in_scope": "this library has no knowledge graph",
@@ -1253,18 +1253,31 @@ def reflect_v2_user_prompt(question: str, candidates_summary: str) -> str:
 def reflect_v2_schema_hint(capabilities) -> str:
     """The v2 response schema: one ``arguments`` object, no branch fields.
 
-    ``arguments`` is advertised as an EMPTY object on purpose. The shared shape
-    gate (``app.core.model_json``) treats a hint as an example, and a non-empty
-    object example would require at least one of its keys to be present — which
-    would reject the legal ``"arguments": {}`` that ``answer`` and
-    ``consult_memory`` send. The per-action field contract therefore lives in
-    the system prompt, where it reads as an instruction, and the exact typed
-    validation of the CHOSEN action's fields happens in the reasoning layer.
-    ``assessment`` is deliberately NOT advertised yet (T4 owns it); an
-    unadvertised extra key is tolerated rather than rejected by that same gate.
+    ``next_action`` lists every RECOGNISABLE action, not this turn's available
+    ones. The shared shape gate (``app.core.model_json``) reads a ``a|b`` hint
+    string as a closed set on both its strict and its repair path, so narrowing
+    the enum by quota would make a spent-but-recognisable action fail
+    ``invalid_enum`` in the transport — before ``parse_reflect_v2`` ever sees
+    it. After the retries that costs, the whole reflection falls back to
+    ``answer`` and the loop ENDS: the exact "one disabled channel kills the
+    entire run" shape ``9af6a035e`` had just fixed, and worse than legacy,
+    which at least reached its skip accounting. Availability is carried by the
+    action list in the system prompt (what the model is told) and by
+    ``parse_reflect_v2``'s ``capabilities.actions`` whitelist (who is let
+    through) — the two places that can name a reason and turn the turn into a
+    zero-I/O observation the loop survives.
+
+    ``arguments`` is advertised as an EMPTY object on purpose: the gate reads
+    that as "an object whose fields this hint does not describe", so both a
+    populated retrieval payload and the legal ``{}`` that ``answer`` sends pass
+    on either path. The per-action field contract lives in the system prompt,
+    where it reads as an instruction, and the exact typed validation of the
+    CHOSEN action's fields happens in the reasoning layer. ``assessment`` is
+    deliberately NOT advertised yet (T4 owns it); the gate tolerates it as a
+    named unadvertised key on both paths.
     """
     return (
-        '{"next_action":"' + "|".join(capabilities.actions) + '",'
+        '{"next_action":"' + "|".join(capabilities.recognized_actions) + '",'
         '"sufficient":false,'
         '"arguments":{},'
         '"reason":""}'
