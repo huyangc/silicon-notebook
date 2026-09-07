@@ -993,6 +993,11 @@ def test_deleted_notebook_keeps_only_expiring_activity_metadata(repo):
 
     usage = next(row for row in repo.list_user_usage() if row["id"] == "u1")
     assert usage["notebooks"] == 0
+    # Phase A 来源口径修正(admin-usage-overview-usage-signals-design_zh §3):
+    # retained 分支按 COALESCE(actor_id, notebook_owner_id) 归因。这条来源的
+    # uploaded_by 是 NULL(测试没显式传),留存行 actor_id 为 "",于是回落到
+    # 当时的 owner u1——资产口径下删除笔记本不会让它从所有人的计数里消失;
+    # last_active 仍只看 actor_id,所以下面对 last_active 的断言不受影响。
     assert usage["sources"] == 1
     # codex #659 R6 P2: conversations is a legacy/deprecated usage counter
     # with no retained_user_activity fallback (unlike sources/questions/
@@ -1057,9 +1062,13 @@ def test_deleted_shared_upload_keeps_actor_and_owner_accounting_separate(repo):
     )
 
     usage = {row["id"]: row for row in repo.list_user_usage()}
-    assert usage["alice"]["sources"] == 1
+    # Phase A 来源口径修正:总数现在按实际上传者归因(与 last_active 同一
+    # 谓词),不再是笔记本 owner——这正是这个测试名字里 "actor and owner
+    # accounting separate" 要覆盖的场景:bob 上传到 alice 的共享库,来源数
+    # 应该记在 bob(actor)名下,不是 alice(owner)。
+    assert usage["alice"]["sources"] == 0
     assert usage["alice"]["last_active"] is None
-    assert usage["bob"]["sources"] == 0
+    assert usage["bob"]["sources"] == 1
     assert usage["bob"]["last_active"] == created_at
 
     alice_activity = repo.list_user_activity(

@@ -90,6 +90,67 @@ def test_list_user_usage_counts(repo):
     assert b["last_active"] == "2026-07-07T00:00:00"
 
 
+def test_list_user_usage_sources_matches_last_active_predicate(repo):
+    """Phase A 来源口径修正:用户级「来源」总数与 last_active 的上传候选同一
+    谓词——只算 live 笔记本 + 可见来源,归因
+    COALESCE(NULLIF(uploaded_by,''), nb.created_by)。见规格
+    docs/superpowers/specs/2026-09-07-admin-usage-overview-usage-signals-design_zh.md
+    §3 Phase A。retained 行按 actor_id 计的覆盖见
+    test_admin_user_activity.py 的
+    test_deleted_shared_upload_keeps_actor_and_owner_accounting_separate /
+    test_deleted_notebook_keeps_only_expiring_activity_metadata(那两个测试
+    在本次修正里已经按新口径更新)。
+    """
+    now = "2026-07-07T00:00:00"
+    with repo._write() as db:
+        for uid, uname in (("u1", "a00000001"), ("u2", "b00000002")):
+            db.execute(
+                "INSERT INTO users (id,email,display_name,role,status,username,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (uid, f"{uid}@x", uid.upper(), "user", "active", uname, now, now),
+            )
+        # u1 拥有一本 live 库 n1、一本 copying 库 n-copy(其中的来源不计)。
+        for nid, status in (("n1", "ready"), ("n-copy", "copying")):
+            db.execute(
+                "INSERT INTO notebooks (id,name,created_by,status,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?)", (nid, nid, "u1", status, now, now),
+            )
+        # n1 下 5 个来源:
+        #  s-self   u1 自己上传(uploaded_by='u1')——计入 u1。
+        #  s-shared u2 上传到 u1 的共享库(uploaded_by='u2')——计入 u2,不计
+        #           u1;来源数是**资产**口径,按实际上传者归因,即使库属于
+        #           u1(规格 §7 决策 2,与 last_active 同一谓词)。
+        #  s-null   uploaded_by 为 NULL——深拷贝副本或极早期未回填行,
+        #           COALESCE 落到 nb.created_by=u1。
+        #  s-memory / s-knowhow 合成来源(source_type 落在 memory/knowhow),
+        #           VISIBLE_SOURCE_TYPES_PREDICATE 排除,不计入任何人。
+        for sid, source_type, uploaded_by in (
+            ("s-self", "pdf", "u1"),
+            ("s-shared", "pdf", "u2"),
+            ("s-null", "pdf", None),
+            ("s-memory", "memory", "u1"),
+            ("s-knowhow", "knowhow", "u1"),
+        ):
+            db.execute(
+                "INSERT INTO sources "
+                "(id,notebook_id,title,source_type,created_at,updated_at,uploaded_by) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (sid, "n1", sid, source_type, now, now, uploaded_by),
+            )
+        # copying 库里的来源即使显式给了 uploaded_by 也不计。
+        db.execute(
+            "INSERT INTO sources "
+            "(id,notebook_id,title,source_type,created_at,updated_at,uploaded_by) "
+            "VALUES (?,?,?,?,?,?,?)",
+            ("s-copying", "n-copy", "s-copying", "pdf", now, now, "u1"),
+        )
+    usage = {row["id"]: row for row in repo.list_user_usage()}
+    # u1: s-self + s-null(NULL 归 owner)= 2;s-shared 归 u2;s-copying、
+    # s-memory、s-knowhow 都不计入任何人。
+    assert usage["u1"]["sources"] == 2
+    assert usage["u2"]["sources"] == 1
+
+
 def test_last_active_tracks_user_actions_not_conversation_updates(repo):
     _seed(repo)
 
