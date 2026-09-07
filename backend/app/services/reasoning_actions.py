@@ -130,6 +130,7 @@ _ENUMERATE_SCOPE_NOTE = (
     "只对 collection=\"sources\" 有意义。默认(留空)= 列出检索范围内的**全部**"
     "文档(当前笔记本 + 已勾选的参考库),与 [Collections in scope] 的 sources "
     "计数同口径;只有问题明确在问当前笔记本时才填 \"current_notebook\"。"
+    "换一档是**另一份清单**(续跑账目按范围记键),不算重复请求。"
 )
 
 ACTION_DEFINITIONS: Mapping[str, ActionDefinition] = MappingProxyType({

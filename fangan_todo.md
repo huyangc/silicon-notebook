@@ -90,6 +90,28 @@
 - [ ] **Prompt 三层化后的 per-notebook 定制与 self-evo**：接缝只有 `fragment_text()`；L1 片段分
       两类（A 类离线 GEPA + 人审，B 类只改示例槽位），尚未拍板开放。
 - [ ] **Agentic Memory 注入开闸与 A/B**：P1–P4 已合入，注入默认关闭，开闸是独立决定。
+- [ ] **reflect v2 开闸前待办**（特性 T1–T4 已实施，见 `fangan_done.md` §32；总闸
+      `REASONING_REFLECT_V2_ENABLED` 默认关，设计真源
+      `docs/superpowers/specs/2026-09-07-retrieval-reflect-final-design_zh.md`）：
+      (a) **T0 与真实模型 A/B 未做**——设计稿 §1.1 的离线轨迹统计脚本
+      `scripts/analyze_reasoning_trace.py`（无服务、无正文输出）与 §9.2 的真实模型 A/B 通道，
+      用户决定另行规划。仓库没有问答质量评测台，所以本期只宣称结构性与可观测性交付，
+      **开闸必须在此之后单独决定**；A/B 与 T0 应使用同一题集。
+      (b) 报告侧 admitted 复核的簇折叠表仍是保守口径——同下条独立待办。
+      (c) 灰名单字符串「本笔记本尚未构建知识图谱…」的界面词表违规——同下下条独立待办。
+      (d) **`reasoning_retrieval.py` 的「纳入 N 个同社区实体」上屏文案含界面词表的「社区」**：
+      它是 f-string 而不是字面量，而轨迹摘要守卫（`scripts/check_ui_vocabulary.py` 第三条通道）
+      按设计只扫字面量，所以扫不到它。改文案与放宽守卫是两件事，都要独立立项：守卫改成能读
+      f-string 会把大量拼接文案一起拉进扫描面。
+      (e) **v2 每轮 prompt 的成本尚未计入 A/B**：服务端状态块与证据卡内容有重叠，方面块每轮
+      重新渲染一遍（量级约 20KB）。这不是正确性问题（各块都有自己的具名边界），但放量前的
+      A/B 必须把它算进 token 成本，否则测的是「质量提升」而不是「质量/成本比」。
+      (f) **设计稿 §11 四条延后路线的重新进入条件**（本期明确不做，不得顺手实现）：
+      `read_evidence` 要先由逐题分析证实「找到证据但摘要不足、反复搜索」仍是主要失败类型；
+      多子查询批量要先证实串行模型往返是主要延迟来源，且规格必须按实际动作数扣预算、
+      确定性合并、保留逐动作归因并处理局部失败/取消；跨库原文按既有待办单独解决候选配额、
+      scope、引用与资产解析，不得用移除 notebook-local 过滤冒充联邦化；终态独立 critic
+      必须先用本期数据证明收益，不能因为循环里已有 assessment 就再加一次固定模型评审。
 - [ ] **深度报告一侧的方面送达复核补上簇折叠表**：Ask 侧 `_answer_context` 已经把
       `knowledge_context` 的 `fold_sink`（同 canonical 簇被折叠掉的成员 → 代表）折进
       `admitted_evidence_keys`；报告侧 `_draft_section` 走 `knowledge_context_with_outline`，
