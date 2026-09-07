@@ -5854,6 +5854,94 @@ def test_v2_enumerate_sources_collection_needs_no_subtype():
     assert decision.enumerate_kind == ""
 
 
+def test_v2_enumerate_scope_is_one_whitelist_shared_with_legacy():
+    """T5 对账:`enumerate.scope` 在 v2 下也是模型填的参数,而取值集只有一份。
+
+    上游把目录范围从「服务端正则播种」改成了 LLM 工具参数,但只接到 legacy 的
+    `enumerate` 分支上。v2 的 `arguments` 是开放对象、传输层不校验它,所以这个
+    参数在 v2 下曾经**根本不存在**:模型无论填什么,`enumerate_scope` 恒为默认
+    档,「只列本库」在 v2 下做不到。
+
+    变异:把 `_v2_apply_enumerate` 里那一行 `decision.enumerate_scope = ...`
+    删掉 ⇒ 第二段断言红。
+    """
+    from app.services.prompts import reflect_v2_system_prompt
+    from app.services.reasoning_actions import (
+        ACTION_DEFINITIONS, build_reflect_capabilities,
+    )
+    from app.services.reasoning_retrieval import (
+        ENUMERATE_SCOPES, parse_reflect_v2,
+    )
+    caps = build_reflect_capabilities(_full_house_facts())
+
+    # 取值集一处定义:动作契约、能力投影与 prompt 三处读的是同一个元组。
+    for action in ("enumerate_elements", "enumerate_kg_objects"):
+        declared = {
+            spec.name: spec for spec in ACTION_DEFINITIONS[action].params}
+        assert declared["scope"].choices == ENUMERATE_SCOPES, action
+        assert caps.param(action, "scope").choices == ENUMERATE_SCOPES, action
+        # 身份声明也要带上它:两个范围是两条续跑链,不是同一次请求。
+        assert "scope" in ACTION_DEFINITIONS[action].identity_fields, action
+    prompt = reflect_v2_system_prompt(caps)
+    assert f"- scope (one of: {'|'.join(ENUMERATE_SCOPES)})" in prompt
+
+    narrowed = parse_reflect_v2(
+        {"next_action": "enumerate_elements", "sufficient": False,
+         "arguments": {"collection": "sources",
+                       "scope": "current_notebook"}}, caps)
+    assert narrowed.invalid_reason == ""
+    assert narrowed.enumerate_scope == "current_notebook"
+
+
+@pytest.mark.parametrize("value", [
+    "notebook", "true", "", "  ", None, 1, ["current_notebook"],
+])
+def test_v2_enumerate_scope_falls_back_instead_of_costing_a_step(value):
+    """范围是唯一**不折 invalid** 的枚举参数,与 legacy 解析层同口径。
+
+    kind/direction 一错,执行出来的是**另一件事**;scope 一错,执行出来的是同
+    一件事的超集,而上游 013a62ba4 已经把实际范围写进结果卡——模型下一轮看得
+    见自己拿到的是哪一档。把一个拼错的可选旋钮折成零 I/O 的 invalid,等于让它
+    吃掉模型的一整步,而那一步本来能把目录列出来。
+
+    变异:把 `_v2_enumerate_scope` 换成 `_v2_enum` ⇒ 这条红(invalid_argument)。
+    """
+    from app.services.reasoning_actions import (
+        ENUMERATE_SCOPE_ALL, build_reflect_capabilities,
+    )
+    from app.services.reasoning_retrieval import parse_reflect_v2
+    caps = build_reflect_capabilities(_full_house_facts())
+    decision = parse_reflect_v2(
+        {"next_action": "enumerate_elements", "sufficient": False,
+         "arguments": {"collection": "sources", "scope": value}}, caps)
+    assert decision.invalid_reason == ""
+    assert decision.enumerate_scope == ENUMERATE_SCOPE_ALL
+
+
+def test_v2_two_roster_scopes_are_two_requests_not_a_repeat():
+    """续跑链的键含范围(见 `_EnumChain`)⇒ 观察账的请求身份也必须含范围。
+
+    身份串把默认档省掉的话,同一份目录的两条链在账上长得一模一样,模型读到的是
+    「我刚才已经列过这个了」——与既有覆盖账目正好相反。
+
+    变异:把 `v2_request_identity` 里的 `f"scope={...}"` 删掉 ⇒ 这条红。
+    """
+    from app.services.reasoning_retrieval import (
+        ENUMERATE_ELEMENTS_ACTION, ReflectDecision, v2_request_identity,
+        v2_request_query_text,
+    )
+    everything = ReflectDecision(
+        sufficient=False, next_action=ENUMERATE_ELEMENTS_ACTION,
+        enumerate_collection="sources", enumerate_scope="all")
+    local = ReflectDecision(
+        sufficient=False, next_action=ENUMERATE_ELEMENTS_ACTION,
+        enumerate_collection="sources", enumerate_scope="current_notebook")
+    assert v2_request_identity(everything) != v2_request_identity(local)
+    assert "scope=current_notebook" in v2_request_identity(local)
+    # 范围不是自然语言:它绝不该跑进摘录的检索词里(与 `dir=`/`ko-…` 同理)。
+    assert v2_request_query_text(local) == ""
+
+
 def test_v2_arguments_must_be_an_object():
     from app.services.reasoning_actions import build_reflect_capabilities
     from app.services.reasoning_retrieval import parse_reflect_v2

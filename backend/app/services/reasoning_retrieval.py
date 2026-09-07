@@ -53,7 +53,8 @@ from app.services.prompts import (
     reflect_v2_system_prompt, reflect_v2_user_prompt,
 )
 from app.services.reasoning_actions import (
-    ACTION_DEFINITIONS, REFLECT_INVALID_ACTION, UNAVAILABLE_DISCLOSE_MAX,
+    ACTION_DEFINITIONS, ENUMERATE_SCOPE_ALL, ENUMERATE_SCOPE_CURRENT_NOTEBOOK,
+    ENUMERATE_SCOPES, REFLECT_INVALID_ACTION, UNAVAILABLE_DISCLOSE_MAX,
     ActionParam, ReflectCapabilities, ReflectCapabilityFacts,
     build_reflect_capabilities,
 )
@@ -461,6 +462,31 @@ def _v2_enum(
     return value
 
 
+def _v2_enumerate_scope(
+    arguments: dict, spec: "Optional[ActionParam]",
+) -> str:
+    """``enumerate.scope`` 的适配。**这一个枚举参数不折 invalid**,与 legacy 的
+    解析层同口径。
+
+    它是 `_v2_enum` 那条纪律(非白名单值 ⇒ `invalid_argument:<字段>`)唯一的例
+    外,理由与 legacy 在同一处写下的一样:**范围不是动作合法性问题**。一个
+    `scope="notebook"` 的目录请求仍然是一次成立的目录请求,只是范围按默认走;把
+    它折成零 I/O 的 invalid,等于让一个拼错的可选旋钮吃掉模型的一整步,而那一步
+    本来能把目录列出来。kind/object_type/direction/prefer 折 invalid 是因为它们
+    一错,执行出来的**就是另一件事**(列错了类型、走错了方向);scope 错了执行出
+    来的是同一件事的**超集**,而且上游 013a62ba4 已经把实际范围写进了结果卡与
+    合成分区标题——模型下一轮看得见自己拿到的是哪一档。
+
+    `spec is None` = 这一轮的投影里没有这个参数(与 `_v2_enum` 同形):模型看不
+    到的槽位,它填了什么都不该改变分派。
+    """
+    if spec is None:
+        return ENUMERATE_SCOPE_ALL
+    value = arguments.get(spec.name, "")
+    value = value.strip() if isinstance(value, str) else ""
+    return value if value in ENUMERATE_SCOPES else ENUMERATE_SCOPE_ALL
+
+
 def _v2_apply_arguments(
     action: str,
     arguments: dict,
@@ -563,6 +589,8 @@ def _v2_apply_enumerate(
         raise _V2ArgumentError(
             f"{_V2_MISSING_ARGUMENT_PREFIX}{subtype_name}")
     decision.enumerate_collection = collection
+    decision.enumerate_scope = _v2_enumerate_scope(
+        arguments, capabilities.param(action, "scope"))
     if action == ENUMERATE_ELEMENTS_ACTION:
         decision.enumerate_kind = subtype
         decision.enumerate_source_id = _v2_text(
@@ -577,8 +605,9 @@ def v2_request_identity(decision: "ReflectDecision") -> str:
     """一次动作请求的**规范化身份**,给动作观察账当"请求"那一格用。
 
     构成与 `ACTION_DEFINITIONS[...].identity_fields` 声明的一致:自由检索带
-    types/prefer,图动作带 edge_type/direction,枚举带 collection/子类型/来源。
-    这些参数参与身份,是因为"同一个 query 换一组 types"根本不是同一次请求。
+    types/prefer,图动作带 edge_type/direction,枚举带 collection/子类型/范围/
+    来源。这些参数参与身份,是因为"同一个 query 换一组 types"根本不是同一次
+    请求——枚举的 `scope` 同理,它换一档就是另一条续跑链。
 
     ⚠ **它不是判重的判据。**真正拦下重复请求的仍然是各自的既有权威 ——
     `attempted`(子查询)、`visited`(节点)、`exact_terms_done`(名称)、
@@ -622,9 +651,15 @@ def v2_request_identity(decision: "ReflectDecision") -> str:
             decision.chain_edge_type or "",
             f"dir={decision.chain_direction}") if part)
     if action in (ENUMERATE_ELEMENTS_ACTION, ENUMERATE_KG_OBJECTS_ACTION):
+        # `scope=` 与 `dir=` 同形:**恒渲染**,不做「默认值就省掉」。续跑链的键
+        # 里含范围(见 `_EnumChain`),所以同一份目录的两个范围是**两条链**;
+        # 身份串省掉默认档,观察账上两条链就长得一模一样,模型读到的是"我刚才
+        # 已经列过这个了"——恰恰与既有覆盖账目相反。
         return " ".join(part for part in (
             decision.enumerate_collection, decision.enumerate_kind,
-            decision.enumerate_object_type, decision.enumerate_source_id,
+            decision.enumerate_object_type,
+            f"scope={decision.enumerate_scope}",
+            decision.enumerate_source_id,
             decision.enumerate_source_title) if part)
     return ""
 
@@ -787,19 +822,11 @@ ENUMERATE_KG_OBJECTS_ACTION = "enumerate_kg_objects"
 # kind/object_type 分派(fail-open,与本分支其他非白名单值的处理同形)。
 ENUMERATE_SOURCES_COLLECTION = "sources"
 
-# ``enumerate.scope`` 的两个合法值:来源清单要不要把挂载并勾选的参考库一起列进来。
-#
-# **刻意是字符串枚举而不是布尔**(见 prompts.py 同处的通用纪律注释):
-# ``model_json._validate_against_example`` 对布尔字段是**硬类型**校验——模型吐
-# `"true"` / `"yes"` 会 `invalid_boolean`,整轮 reflect 被打成兜底,与 F1 修的
-# 根因同类;而字符串枚举字段享受 F1 立的空串宽容规则(留空 = 这一轮不用它)。
-# 枚举值本身自描述,模型不必去猜「true 是哪一边」。
-ENUMERATE_SCOPE_ALL = "all"
-ENUMERATE_SCOPE_CURRENT_NOTEBOOK = "current_notebook"
-# 默认 = 旧行为:列出检索范围内的**全部**参与集文档,与集合地图 `sources: N` 的
-# 联邦口径一致。缺省/空串/非法值/非字符串一律落到这里(fail-open,连 fail_closed
-# 也不抛:范围不是动作合法性问题,动作照旧成立,只是范围按默认走)。
-ENUMERATE_SCOPES = (ENUMERATE_SCOPE_ALL, ENUMERATE_SCOPE_CURRENT_NOTEBOOK)
+# ``enumerate.scope`` 的三个名字在 T5 对账时搬到了 ``reasoning_actions``(动作
+# 参数的取值集属于动作契约,legacy schema hint、v2 能力投影与两条协议的解析层读
+# 的必须是同一份);这里**原样 re-export**,历史导入点
+# (`from app.services.reasoning_retrieval import ENUMERATE_SCOPES`)照旧成立。
+# 取值、默认与 fail-open 规则的说明都在那边的定义处。
 
 
 def enumeration_wiring_active(settings, catalog, enumeration) -> bool:

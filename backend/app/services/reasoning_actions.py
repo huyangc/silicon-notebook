@@ -49,6 +49,25 @@ UPDATE_OUTLINE = "update_outline"
 # no_progress/stale 记账(设计稿 §5.2)。
 REFLECT_INVALID_ACTION = "__reflect_invalid__"
 
+# ``enumerate.scope`` 的两个合法值:来源清单要不要把挂载并勾选的参考库一起列进来。
+#
+# **刻意是字符串枚举而不是布尔**(见 prompts.py 同处的通用纪律注释):
+# ``model_json._validate_against_example`` 对布尔字段是**硬类型**校验——模型吐
+# `"true"` / `"yes"` 会 `invalid_boolean`,整轮 reflect 被打成兜底,与 F1 修的
+# 根因同类;而字符串枚举字段享受 F1 立的空串宽容规则(留空 = 这一轮不用它)。
+# 枚举值本身自描述,模型不必去猜「true 是哪一边」。
+#
+# 定义点落在**动作契约模块**而不是执行器:它是一个动作参数的取值集,legacy 的
+# schema hint、v2 的能力投影(下面两条 ``ActionParam``)与两条协议的解析层读的
+# 必须是同一份。``reasoning_retrieval`` 原样 re-export 这三个名字,历史导入点
+# (`from app.services.reasoning_retrieval import ENUMERATE_SCOPES`)照旧成立。
+ENUMERATE_SCOPE_ALL = "all"
+ENUMERATE_SCOPE_CURRENT_NOTEBOOK = "current_notebook"
+# 默认 = 旧行为:列出检索范围内的**全部**参与集文档,与集合地图 `sources: N` 的
+# 联邦口径一致。缺省/空串/非法值/非字符串一律落到这里(fail-open,连 fail_closed
+# 也不抛:范围不是动作合法性问题,动作照旧成立,只是范围按默认走)。
+ENUMERATE_SCOPES = (ENUMERATE_SCOPE_ALL, ENUMERATE_SCOPE_CURRENT_NOTEBOOK)
+
 
 # --- 参数形状 ---------------------------------------------------------------
 #: 参数的取值类型。``text`` = 自由文本;``text_list`` = 字符串列表;
@@ -100,6 +119,17 @@ class ActionDefinition:
 
 _QUERY_PARAM = ActionParam(
     "query", PARAM_TEXT, note="检索串;留空则回退到原问题。"
+)
+
+#: ``scope`` 的参数说明,两个枚举动作共用一份。措辞与 legacy prompt 里那段
+#: (``prompts.py`` 的 "By default the roster lists EVERY document…")同口径:
+#: 默认覆盖整个检索范围、与 `[Collections in scope]` 的 sources 计数一致,只有
+#: 问题明确在问「当前笔记本」时才收窄。它只对 ``collection="sources"`` 有意义,
+#: 另两个集合的执行器根本没有这个参数。
+_ENUMERATE_SCOPE_NOTE = (
+    "只对 collection=\"sources\" 有意义。默认(留空)= 列出检索范围内的**全部**"
+    "文档(当前笔记本 + 已勾选的参考库),与 [Collections in scope] 的 sources "
+    "计数同口径;只有问题明确在问当前笔记本时才填 \"current_notebook\"。"
 )
 
 ACTION_DEFINITIONS: Mapping[str, ActionDefinition] = MappingProxyType({
@@ -182,11 +212,14 @@ ACTION_DEFINITIONS: Mapping[str, ActionDefinition] = MappingProxyType({
                             choices=("sources",),
                             note="只填 \"sources\" 表示列**文档目录本身**;"
                                  "它优先于 kind。"),
+                ActionParam("scope", PARAM_ENUM, choices=ENUMERATE_SCOPES,
+                            note=_ENUMERATE_SCOPE_NOTE),
                 ActionParam("source_id", PARAM_TEXT, note="可选,限定到一篇。"),
                 ActionParam("source_title", PARAM_TEXT,
                             note="可选,候选里**逐字**抄来的来源标题。"),
             ),
-            True, "enumeration", ("kind", "collection", "source_id"),
+            True, "enumeration",
+            ("kind", "collection", "scope", "source_id"),
             ("enumeration_wiring", "enumeration_budget"),
         ),
         ActionDefinition(
@@ -199,8 +232,10 @@ ACTION_DEFINITIONS: Mapping[str, ActionDefinition] = MappingProxyType({
                             choices=("sources",),
                             note="只填 \"sources\" 表示列**文档目录本身**;"
                                  "它优先于 object_type。"),
+                ActionParam("scope", PARAM_ENUM, choices=ENUMERATE_SCOPES,
+                            note=_ENUMERATE_SCOPE_NOTE),
             ),
-            True, "enumeration", ("object_type", "collection"),
+            True, "enumeration", ("object_type", "collection", "scope"),
             ("kg_in_scope", "enumeration_wiring", "enumeration_budget"),
         ),
         ActionDefinition(
