@@ -1,7 +1,7 @@
 "use client";
 
 import { ChangeEvent, DragEvent as ReactDragEvent, FormEvent, Fragment, KeyboardEvent as ReactKeyboardEvent, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, ArrowLeft, BarChart3, Check, ChevronRight, Cpu, Database, Edit3, ExternalLink, FileText, GitMerge, LayoutDashboard, LayoutGrid, Link2, List as ListIcon, Loader2, Network, PanelLeftClose, PanelLeftOpen, Plus, Settings, Share2, Sparkles, Table2, Trash2, Upload, User, Users, X } from "lucide-react";
+import { AlertTriangle, ArrowLeft, BarChart3, Check, ChevronRight, Cpu, Database, Edit3, ExternalLink, GitMerge, LayoutDashboard, LayoutGrid, Link2, List as ListIcon, Loader2, Network, PanelLeftClose, PanelLeftOpen, Plus, Settings, Share2, Sparkles, Table2, Trash2, Upload, User, Users, X } from "lucide-react";
 import "katex/dist/katex.min.css";
 import dynamic from "next/dynamic";
 import { AnswerView, LatexText, ReasoningTracePanel } from "./answer-panel";
@@ -27,7 +27,6 @@ import {
   retrievalScopeSummary,
   selectedBaseIds,
   selectedSourceCount,
-  sourceIsSelected,
   sourceScopePayload,
   toggleBaseSelection,
   type BaseScopeSelection,
@@ -138,7 +137,8 @@ import { httpErrorStatus, logDiagnostic, toUserMessage } from "./errors.ts";
 import { DEFAULT_SUPPORTED_SOURCE_EXTENSIONS, fetchDocumentTypes, fetchHealth, fetchSystemConfiguration, probeReady, type ParserEngineCapability, type ReadySnapshot } from "./system-api";
 import { backfillPaperMetadata, fetchNotebookAnalytics, fetchNotebookContentOverview, fetchNotebookIndexingPipeline, getNotebook, listNotebooks } from "./notebook-api";
 import { detectSourceTypes, importUrlSources, listSources, uploadSources, fetchCheckup, reparseSources, backfillVectors } from "./source-api";
-import { sourceKgBadge } from "./source-kg-badge.ts";
+import { SourceListPanel } from "./source-list-panel";
+import { compactSourceTitle, SUPPORTED_SOURCE_EXT_GROUP } from "./source-title.ts";
 import { classifyStagedFiles, compactStagedFileName, mergeLiveStagedFileWarnings, scanStandaloneMarkdownImageWarnings, summarizeUpload, uploadDocTypeFields, fillAutoDetectedTypes, markTouched, markAllTouched, sourceUploadSizeLabel, splitFilesByUploadSize, type SkippedStagedFile, type StagedFileWarning } from "./source-upload.ts";
 import { emptyStagedList, mergeStagedFiles, stagedFileKey, type StagedList } from "./staged-files.ts";
 import {
@@ -303,9 +303,6 @@ import { label, PARSE_STATUS, ELEMENT_TYPE, KNOWLEDGE_STATUS, SEVERITY, CHECKUP_
 // react-force-graph-2d uses canvas/window; load client-side only.
 const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false });
 
-// 标题清理需要在系统配置返回前可用，因此使用与后端注册表配套的兼容默认值；上传
-// 校验、accept 与可见格式列表则使用 /system/config 下发的权威注册表投影。
-const SUPPORTED_SOURCE_EXT_GROUP = DEFAULT_SUPPORTED_SOURCE_EXTENSIONS.join("|");
 // 旧版二进制 Office 不被 MinerU 支持，给专门提示引导用户另存为 OOXML。.xls 是例外：
 // xlrd 纯 Python 可读，注册表 builtin 引擎已直接放行，这里只剩 doc/ppt 两个仍需
 // 引导另存为的旧格式。
@@ -600,12 +597,6 @@ function formatFileSize(size: number): string {
   if (size < 1024) return `${size} B`;
   if (size < 1024 * 1024) return `${Math.round(size / 1024)} KB`;
   return `${(size / 1024 / 1024).toFixed(1)} MB`;
-}
-
-function compactSourceTitle(source: SourceSummary): string {
-  const rawTitle = (source.title || source.file_name || "Untitled source").trim();
-  const withoutExtension = rawTitle.replace(new RegExp(`\\.(${SUPPORTED_SOURCE_EXT_GROUP})$`, "i"), "");
-  return withoutExtension || rawTitle;
 }
 
 function sourceTypeLabel(source: SourceSummary): string {
@@ -5684,147 +5675,30 @@ export default function Home() {
                     </div>
                   </section>
                 )}
-                {/* 标题 + 搜索框成组，但**不**把 .source-list 包进来：那个列表靠
-                    .sources-body 上的 flex:1 1 auto / min-height:0 / overflow:auto 拿到
-                    剩余高度并自己滚动，套一层就得把这套算术原样复制一遍。列表用
-                    aria-labelledby 挂回标题，分组语义不丢。
-                    搜索框是从整个面板最顶上挪下来的：它过去悬在参考库之上，让人误以为
-                    能一并搜到参考库里的内容，而它只查当前笔记本。 */}
-                <div className="scope-group">
-                  <h3 className="scope-group-title" id="local-source-scope-title">本库来源</h3>
-                  <form className="source-search-form" onSubmit={(event) => {
-                    event.preventDefault();
-                    sourceLibrary.searchSources().catch(reportError);
-                  }}>
-                    <div className="source-search-wrap">
-                      <input
-                        className="source-search"
-                        type="search"
-                        placeholder="搜索来源（标题/作者/文件名）"
-                        value={sourceQuery}
-                        onChange={(e) => sourceLibrary.setSourceQuery(e.target.value)}
-                      />
-                      {sourcesPageLoading && (
-                        <Loader2 size={15} className="busy-spin source-search-spinner" aria-hidden="true" />
-                      )}
-                    </div>
-                    <button type="submit" className="ghost-button" disabled={!currentNotebookId || sourcesPageLoading}>
-                      {sourcesPageLoading ? "搜索中…" : "搜索"}
-                    </button>
-                  </form>
-                </div>
-                {/* role="group" 是 aria-labelledby 的生效条件：挂在无 role 的通用 div
-                    上，辅助技术基本会忽略这条标注，分组语义等于没接。它不影响布局
-                    （这个 div 的滚动算术在 .sources-body 上，见上面那段注释）。 */}
-                <div className="source-list" role="group" aria-labelledby="local-source-scope-title">
-                  {sources.length === 0 ? (
-                    <article className="source-empty">
-                      <div>▧</div>
-                      <strong>已保存的来源将显示在此处</strong>
-                      <p>点击上方的“添加来源”导入 PDF、Markdown、DOCX 或 PPTX。</p>
-                    </article>
-                  ) : (
-                    sources.map((source) => {
-                      const deletingSource = deletingSourceIds.has(source.id);
-                      const kgBadge = sourceKgBadge(source);
-                      return (
-                      <div
-                        key={source.id}
-                        className={`source-row compact-source-row${isAdvanced(uiMode) ? "" : " source-row--no-select"}${deletingSource ? " source-row--deleting" : ""}`}
-                        title={source.title}
-                        aria-busy={deletingSource || undefined}
-                      >
-                        {isAdvanced(uiMode) && (
-                          <label
-                            className="source-scope-check"
-                            title={sourceIsSelected(sourceScopeSelection, source.id)
-                              ? "此来源会参与问答与深度报告检索"
-                              : "此来源不会参与问答与深度报告检索"}
-                          >
-                            <input
-                              type="checkbox"
-                              checked={sourceIsSelected(sourceScopeSelection, source.id)}
-                              disabled={deletingSource || askInFlight}
-                              aria-label={`检索来源：${source.title}`}
-                              onChange={() => sourceLibrary.toggleSource(source.id)}
-                            />
-                          </label>
-                        )}
-                        <button
-                          className="source-row-main"
-                          disabled={deletingSource}
-                          onClick={() => openSourceDetail(source).catch(reportError)}
-                        >
-                          <FileText className="source-file-icon" size={20} />
-                          <span className="source-title-short">{compactSourceTitle(source)}</span>
-                          <span className="source-row-status">
-                            <span className={`source-status-dot status-${source.parse_status || source.status}`} />
-                            {sourceAnomalies(source).filter((a) => a.severity !== "info").map((anomaly, i) => (
-                              <AnomalyBadge key={`${anomaly.severity}-${i}`} anomaly={anomaly} />
-                            ))}
-                          </span>
-                        </button>
-                        <div className="source-row-actions">
-                          {currentNotebook?.kg_ready && (
-                            <span
-                              className={kgBadge.className}
-                              title={kgBadge.title}
-                            >
-                              {kgBadge.label}
-                            </span>
-                          )}
-                          {source.agent_created && (
-                            <span
-                              className="source-agent-badge"
-                              title="由 Agent 通过接入通道添加的来源"
-                            >
-                              Agent 添加
-                            </span>
-                          )}
-                          {source.source_url ? (
-                            <a
-                              className="source-link-button"
-                              href={source.source_url}
-                              target="_blank"
-                              rel="noreferrer"
-                              title={source.source_url}
-                              aria-label="打开原始链接"
-                              aria-disabled={deletingSource || undefined}
-                              tabIndex={deletingSource ? -1 : undefined}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                if (deletingSource) e.preventDefault();
-                              }}
-                            >
-                              <ExternalLink size={13} />
-                            </a>
-                          ) : null}
-                          {!readOnlyWorkspace && (
-                            <button
-                              className="source-delete-button"
-                              disabled={deletingSource}
-                              title="删除来源"
-                              aria-label={deletingSource ? `正在删除来源：${source.title}` : `删除来源：${source.title}`}
-                              onClick={() => confirmDeleteSource(source)}
-                            >
-                              {deletingSource
-                                ? <Loader2 size={15} className="busy-spin" aria-hidden="true" />
-                                : <Trash2 size={15} />}
-                            </button>
-                          )}
-                        </div>
-                      </div>
-                      );
-                    })
-                  )}
-                  <Pagination
-                    page={sourcesPage}
-                    pageSize={SOURCES_PAGE_SIZE}
-                    total={sourcesTotal}
-                    busy={sourcesPageLoading}
-                    onPage={(p) => { if (currentNotebookId) loadSourcesPage(currentNotebookId, { page: p, q: sourceQuery }).catch(reportError); }}
-                  />
-                </div>
+                {/* 「本库来源」标题 + 搜索表单 + 滚动列表 + 分页整体住在
+                    SourceListPanel（PR-5 分片 2）。它返回 Fragment：两个 div 仍是
+                    .sources-body 的直接子节点，滚动算术与扩展点「固定区在列表之前」
+                    那条不变量都靠这层直接父子关系。 */}
+                <SourceListPanel
+                  sources={sources}
+                  uiMode={uiMode}
+                  notebookId={currentNotebookId}
+                  sourceQuery={sourceQuery}
+                  sourcesPage={sourcesPage}
+                  sourcesTotal={sourcesTotal}
+                  sourcesPageLoading={sourcesPageLoading}
+                  sourceScopeSelection={sourceScopeSelection}
+                  deletingSourceIds={deletingSourceIds}
+                  askInFlight={askInFlight}
+                  readOnlyWorkspace={readOnlyWorkspace}
+                  kgReady={Boolean(currentNotebook?.kg_ready)}
+                  onQueryChange={(value) => sourceLibrary.setSourceQuery(value)}
+                  onSubmitSearch={() => { sourceLibrary.searchSources().catch(reportError); }}
+                  onToggleSource={(sourceId) => sourceLibrary.toggleSource(sourceId)}
+                  onOpenSource={(source) => { openSourceDetail(source).catch(reportError); }}
+                  onDeleteSource={(source) => confirmDeleteSource(source)}
+                  onPage={(p) => { if (currentNotebookId) loadSourcesPage(currentNotebookId, { page: p, q: sourceQuery }).catch(reportError); }}
+                />
               </div>
             </aside>
 

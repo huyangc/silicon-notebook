@@ -209,3 +209,57 @@ notebook opener 打开对应会话并复用既有接回逻辑。契约登记进 
 **守卫**：`tests/guards/root-modal-boundary.test.mjs` 有 4 处按「函数住在 page.tsx 的 Home 里」
 认身份，本片只改「去哪找」，判据一条不减，并为两个新 hook 补上「clear 不许释放在飞操作」的
 对称断言（原本只钉 page 的 close sink）。
+
+## PR-5 slice 2 设计定稿（来源栏：搜索 / 列表 / 分页）
+
+**范围**：`frontend/app/page.tsx` 里「本库来源」分组（标题 + 搜索表单）与 `.source-list`
+（空态、来源行、`<Pagination>`）两块**相邻**的 JSX，整体搬进
+`frontend/app/source-list-panel.tsx` 的 `SourceListPanel`，行为零变化。原文档顺序在
+`.sources-body` 里是：扩展点 → `.source-scope-toolbar` → 参考库 `<section>` →
+`.scope-group`(标题+搜索) → `.source-list`，本片只搬最后两块。
+
+**不搬**：`.source-scope-toolbar`（检索范围计数 + 全选/清空）与参考库 `<section>`。它们由
+`baseScopeSelection` 这份**留在 page 的** state 驱动（挂载参考库是另一条领域线），搬走会
+把 page state 的 setter 灌进组件，与 slice 1 的窄面纪律相反；等参考库范围也有自己的 owner
+hook 时再单独一片。上方的「添加来源 / 补全论文信息 / 整理知识图谱 / 检索索引 / 扩展点」同理
+不动——它们分属 upload、paper-meta、kg、scale-index 四条领域线，不是来源列表。
+
+**DOM 逐字不变**：`SourceListPanel` 返回 **Fragment**，两个 `div` 仍是 `.sources-body` 的
+直接子节点。这是硬要求——`.source-list` 的滚动算术（`.sources-body` 上的
+`flex:1 1 auto / min-height:0 / overflow:auto`）与 `extension-ui-boundary` 钉住的
+「扩展点直接父节点 = `.sources-body`、且排在滚动列表之前」都靠这层直接父子关系。
+
+**Props 全部显式**（无 `sourceLibrary` 整体注入、无 page state setter）：
+`sources`、`uiMode`、`sourceQuery`、`sourcesPage`、`sourcesTotal`、`sourcesPageLoading`、
+`sourceScopeSelection`、`deletingSourceIds`、`askInFlight`、`readOnlyWorkspace`、
+`kgReady`、`notebookId`，以及回调 `onQueryChange` / `onSubmitSearch` / `onToggleSource` /
+`onOpenSource` / `onDeleteSource` / `onPage`。
+
+- `uiMode` 传的是 `UiMode` 原值而不是算好的 `advanced` 布尔：来源行 className 模板里的
+  `isAdvanced(uiMode)` 是 `ui-mode-wiring` 的判据文本，换成布尔就等于悄悄弱化守卫。
+- `notebookId` 传原值（不是 `canSearch` 布尔），搜索按钮的 `!notebookId || sourcesPageLoading`
+  与原文一字不差。翻页回调里的 `if (currentNotebookId)` 守卫**留在 page**。
+- 打开详情 / 删除 / 上传入口的编排（`openSourceDetail(...).catch(reportError)`、
+  `confirmDeleteSource`、`openSourceModal`）留在 page.tsx，只以回调下传；`reportError`
+  不进组件。
+- `compactSourceTitle` 与它依赖的 `SUPPORTED_SOURCE_EXT_GROUP` 迁到新模块
+  `frontend/app/source-title.ts`（page.tsx 另有两处调用点：`sourceTopicLabel` 与另一处
+  扩展名清洗），保持**单一定义**，不复制常量。
+
+**状态与 effects 一律不动**：仍在 `use-source-library.ts`（在途请求 / AbortController /
+owner-window 世代守卫、`sourcesPageLoading` 的开合时机、搜索与翻页的单飞纪律）。本片没有
+向 hook 新增任何 view 字段或命令。
+
+**守卫重指向（判据一条不减）**：
+
+| 守卫 | 改动 | 理由 |
+|---|---|---|
+| `base-scope-wiring.test.mjs` 「搜索框归入本库来源分组」 | page 侧断言顺序改为 `source-scope-toolbar → base-scope-list → <SourceListPanel>`，`source-search` 在 `scope-group` 内的祖先链判据移到新模块的树上 | 元素跨模块了，「搜索框排在参考库之后、且装在分组里」两条判据原样保留 |
+| `base-scope-wiring.test.mjs` 「列表没被包进新分组」 | `.source-list` 不在 `.scope-group` 内改在新模块树上判；「必须留在 `.sources-body` 内」改为在 page 侧断言 `<SourceListPanel>` 的直接父节点是 `.sources-body` 那个 div | 直接父子关系正是滚动算术的载荷，判得比原来的祖先链**更紧** |
+| `ui-mode-wiring.test.mjs` 来源行 className 模板 | `visit(page)` → `visit(panel)` | 只换「去哪找」，`isAdvanced(uiMode)` 判据不变 |
+| `source-agent-badge-guard.test.mjs` | 解析目标 page.tsx → source-list-panel.tsx（CSS 那半不动） | 同上 |
+| `source-library-boundary.test.mjs` | 追加：page 不得再直接渲染 `.source-list` / `.source-search` | 防回填 |
+
+**组件测试**：`tests/component/source-list-panel.component.test.tsx`——空态文案；行按注入
+数据渲染；提交搜索调注入命令且按钮变「搜索中…」；`busy` 时分页上下页禁用；KG 徽章 +
+解析状态点 + Agent 徽章一行；删除/打开回调交回 source。
