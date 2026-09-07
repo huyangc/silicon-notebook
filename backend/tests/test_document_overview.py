@@ -361,3 +361,23 @@ def test_catalog_preserves_shared_language_policy_and_saved_style(repo, monkeypa
     assert fragment_text("answer.style_language") in client.prompts[0]
     assert "Prefer English and detailed explanations." in client.prompts[0]
     assert "Write Chinese prose" not in client.prompts[0]
+
+
+@pytest.mark.parametrize("include_local", [False, True])
+def test_untitled_single_document_keeps_authorized_mounted_scope(repo, include_local):
+    nb = repo.create_notebook(NotebookCreate(name="资料"))
+    base = repo.create_notebook(NotebookCreate(name="参考库"))
+    repo.mark_notebook_base(base.id)
+    repo.replace_notebook_bases(nb.id, [base.id], repo.current_user().id)
+    seed(repo, base.id, "reference", "参考文章", "", ["参考库正文"])
+    if include_local:
+        seed(repo, nb.id, "local", "本库文章", "", ["本库正文"])
+    client = AnswerClient("原文介绍 [k1]。")
+    bind_chat_client(repo, "ask_answer", client)
+    response = ask(repo, nb.id, "这篇文档介绍了什么内容")
+    if include_local:
+        assert not client.prompts
+        assert "仅选择要介绍的文档" in response.answer
+    else:
+        assert "参考库正文" in client.prompts[0]
+        assert response.anchors[0].notebook_id == base.id
