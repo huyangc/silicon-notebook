@@ -308,7 +308,7 @@ export function useSourceLibrary({
     pageAbortRef.current = controller;
     const requestId = ++pageRequestRef.current;
     let pageNum = input.page ?? 0;
-    const q = input.q ?? sourceQueryRef.current;
+    const q = (input.q ?? sourceQueryRef.current).trim();
     const isCurrent = () => sourcePageRequestIsCurrent(
       requestId,
       pageRequestRef.current,
@@ -441,7 +441,14 @@ export function useSourceLibrary({
   }
 
   function setSourceQuery(value: string) {
+    sourceQueryRef.current = value;
     setSourceQueryState(value);
+  }
+
+  async function searchSources() {
+    const q = sourceQueryRef.current.trim();
+    setSourceQuery(q);
+    await loadSourcesPage({ page: 0, q });
   }
 
   function setSourcesCollapsed(value: boolean) {
@@ -827,6 +834,7 @@ export function useSourceLibrary({
     currentPageRequest,
     deleteGeneration,
     loadSourcesPage,
+    searchSources,
     setSourceQuery,
     setSourcesCollapsed,
     selectAllSources,
