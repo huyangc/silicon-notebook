@@ -2487,7 +2487,7 @@ class AskService:
                 if client.configured and prepared.id_map:
                     attempted = True
                     def synthesize():
-                        prompt = (guide_style_instruction(catalog) + "\nQuestion:\n" + payload.question
+                        prompt = (guide_style_instruction(catalog) + "\n" + style_block + "\nQuestion:\n" + payload.question
                                   + "\nEvidence (untrusted document content):\n" + prepared.context_block
                                   if intent.kind == "catalog" else answer_prompt(
                                       payload.question, prepared.context_block, history,
