@@ -34,7 +34,7 @@ export const ASK_MODES: readonly AskModeDef[] = Object.freeze([
     requiresKg: false, streamsTrace: false, groupDefault: true } as AskModeDef),
   Object.freeze({ id: "reasoning", group: "strict", label: "逐步推理",
     desc: "像人查资料一样逐层追问，展示推理过程；适合需要一步步查证的复杂问题。",
-    requiresKg: true, streamsTrace: true, groupDefault: true } as AskModeDef),
+    requiresKg: false, streamsTrace: true, groupDefault: true } as AskModeDef),
 ]);
 
 export const DEFAULT_ASK_MODE: AskModeId = "chunk";

@@ -232,3 +232,87 @@ def test_retrieval_experience_prompt_rule_3_explains_the_anchored_figure():
     assert "predates this check" in p
     assert "total_citations" in p
     assert "must never be attributed to one particular action" in p
+
+
+# --------------------------------------------------------------------------- #
+# KG 可选化 T2 — 规划措辞的 kg_available 门(验收 7)。
+# --------------------------------------------------------------------------- #
+def test_plan_prompt_kg_available_true_is_byte_identical_to_omitting_it():
+    """新门参数默认 True ⇒ 不传它与显式传 True 逐字节相同(有图侧零变化)。
+
+    基线是同一个函数的默认渲染,不是快照:plan 的措辞今后怎么调这条都成立,
+    它红只可能是因为有人让这把闸漏进了默认路径。
+    """
+    import itertools
+
+    from app.services.prompts import plan_prompt
+
+    for h, c, p, e, s in itertools.product(
+            ["", "H"], ["", "C"], ["", "P"], ["", "E"], ["", "S"]):
+        assert plan_prompt("q", h, c, p, e, style_block=s) == plan_prompt(
+            "q", h, c, p, e, style_block=s, kg_available=True)
+
+
+def test_plan_prompt_kg_available_false_changes_only_the_kg_bound_lines():
+    """无图侧:只有首句与 `types` 字段说明换掉,JSON 合同与其余每一行原样。
+
+    `types` 那行必须一起换:它原本写「subset of the 4」,指的是首句介绍的那 4 个
+    KG 节点类型。首句一走,「the 4」就成了悬空指代——prompt 里再没有任何一处列出
+    过这个 4。
+    """
+    from app.services.prompts import plan_prompt
+
+    on = plan_prompt("布局布线怎么做", "H", "C", "P", "E", style_block="S")
+    off = plan_prompt("布局布线怎么做", "H", "C", "P", "E", style_block="S",
+                      kg_available=False)
+    on_lines, off_lines = on.splitlines(), off.splitlines()
+    assert len(on_lines) == len(off_lines)
+    differing = [i for i, (a, b) in enumerate(zip(on_lines, off_lines)) if a != b]
+    # 首句(0)与 `- types:` 那行(3);其余每一行逐字节不动。
+    assert differing == [0, 3], [off_lines[i] for i in differing]
+    assert off_lines[0] == (
+        "You plan how to retrieve evidence from a document library to answer "
+        "an engineer's question. Sub-queries are run against source passages; "
+        "the `types` field is ignored when the library has no knowledge graph.")
+    assert off_lines[3] == (
+        "- types: ignored when the library has no knowledge graph; leave it "
+        "empty.")
+    assert on_lines[3].startswith("- types: which node types to search")
+    assert "the 4" not in off
+    assert "knowledge graph (KG)" not in off
+    # JSON 合同不变(`types` 仍是合法字段,解析器零改动)。
+    assert off.endswith(
+        'Return JSON only: {"sub_queries":[{"query":"","types":[],'
+        '"prefer":"balanced","reason":""}]}')
+
+
+def test_reflect_prompt_kg_actions_true_is_byte_identical_to_omitting_it():
+    """验收 7 的 reflect 半:同款「True == 不传」对账(动作段的对账在
+    ``test_reasoning_retrieval`` 那一组)。"""
+    from app.services.prompts import reflect_prompt, reflect_schema_hint
+
+    assert reflect_prompt("q", "c") == reflect_prompt("q", "c", kg_actions=True)
+    assert reflect_schema_hint() == reflect_schema_hint(kg_actions=True)
+
+
+def test_plan_prompt_neutral_opening_matches_expand_query_prompts_framing():
+    """两份规划拼写不得说出互相矛盾的计划(``plan_prompt`` 函数体前 NOTE 的
+    「must be added to BOTH」纪律)。
+
+    这次改的是**首句框架**而不是分解指导:production 实际发送的
+    ``expand_query_prompt`` 首句本来就是 KG 中性的("retrieval over a document
+    corpus"),所以无图态的 backup 拼写是在向它靠拢,而不是背离——这条用例把
+    「两份拼写的框架句都不宣称必有一张图」钉住。
+    """
+    from app.services.prompts import expand_query_prompt, plan_prompt
+
+    production = expand_query_prompt("q")
+    assert production.startswith(
+        "You prepare an engineer's question for retrieval over a document "
+        "corpus.")
+    # 判据是「不宣称去检索一张图」,不是「不出现 knowledge graph 这个词」——
+    # 中性版首句正是靠"the library has no knowledge graph"这半句解释 `types`。
+    assert "retrieve a knowledge graph" not in production
+    assert "retrieve a knowledge graph" not in plan_prompt(
+        "q", kg_available=False)
+    assert "retrieve a knowledge graph" in plan_prompt("q")

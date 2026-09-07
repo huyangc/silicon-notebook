@@ -1263,7 +1263,7 @@ def test_prose_only_library_reaches_the_document_roster(arepo):
     这是来源清单的**主力场景**:一库论文只被纯文本解析器处理过——没有公式/表格/
     图片/代码块,自动 KG 抽取默认关所以也没有知识对象——而用户问的正是
     「库里有哪几篇 / 逐篇分析当前 notebook」。此前放行判定只看元素与知识对象两类,
-    这类库被「请先构建知识图谱」整个挡在门外:用户问文档目录,拿回一句非答案。
+    这类库曾被那句早退整个挡在门外:用户问文档目录,拿回一句非答案。
     来源清单是零 LLM 的,读的就是 `sources` 行,挡住它换不来任何正确性。
 
     三件事一起钉:枚举真的执行了、清单卡真的产出了、`kg_required` 仍如实为 True
@@ -1295,7 +1295,7 @@ def test_prose_only_library_reaches_the_document_roster(arepo):
     # 没有被早退挡住:合成真的跑了,不是那句确定性兜底。
     assert llm.answer_prompts, "纯散文库仍被早退挡住了"
     assert resp.llm_mode != "deterministic"
-    assert "本笔记本尚未构建知识图谱" not in resp.conclusion
+    assert "没有可用来源" not in resp.conclusion
     # 目录真的产出了。
     rows = [row for row in resp.result_sets if row.kind == "collection"]
     assert len(rows) == 1 and rows[0].collection == "sources"
@@ -1336,7 +1336,7 @@ def test_map_build_failure_keeps_the_early_return(arepo, monkeypatch):
     )
 
     assert resp.llm_mode == "deterministic"
-    assert "本笔记本尚未构建知识图谱" in resp.conclusion
+    assert "当前检索范围内没有可用来源" in resp.conclusion
     assert not llm.answer_prompts
     assert resp.kg_required is True
 
@@ -1344,7 +1344,7 @@ def test_map_build_failure_keeps_the_early_return(arepo, monkeypatch):
 def test_notebook_without_a_kg_still_reaches_the_enumeration_tools(arepo):
     """codex 第 1 轮 P1-1:自动 KG 抽取默认关,「解析了来源但没建图」是常态。
 
-    那条「本笔记本尚未构建知识图谱」的早退跑在 ReasoningRetriever 之前,会把
+    那条无图早退跑在 ReasoningRetriever 之前,会把
     这类库整个挡在枚举工具外面——而公式/表格/图片/代码块清单恰恰不需要图。
     放行后必须:枚举动作真的执行、产出 result_sets,而 kg_required 仍然如实
     为 True(前端的建图提示不能因此消失)。
@@ -1367,12 +1367,12 @@ def test_notebook_without_a_kg_still_reaches_the_enumeration_tools(arepo):
     assert resp.llm_mode != "deterministic"
     # 旗标语义不变:无图且无可用参考库仍是 True。
     assert resp.kg_required is True
-    assert "本笔记本尚未构建知识图谱" not in resp.conclusion
+    assert "没有可用来源" not in resp.conclusion
 
 
 def test_notebook_without_a_kg_and_without_collections_keeps_the_early_return(arepo):
     """反向:既没有图、作用域里也没有任何可列出的集合时,早退原样保留——
-    进循环只会让每个工具都返回空,那句明确的「请先构建知识图谱」才是对的。
+    进循环只会让每个工具都返回空,那句明确的「没有可用来源」才是对的。
 
     「什么都列不出来」现在必须是**零源**库:纯散文库(有文档、没有元素)有文档这一个
     集合,放行是对的(见上一条)。
@@ -1389,15 +1389,83 @@ def test_notebook_without_a_kg_and_without_collections_keeps_the_early_return(ar
 
     assert resp.kg_required is True
     assert resp.llm_mode == "deterministic"
-    assert "本笔记本尚未构建知识图谱" in resp.conclusion
+    assert "当前检索范围内没有可用来源" in resp.conclusion
     assert not llm.answer_prompts
 
 
-def test_kill_switch_restores_the_no_kg_early_return(arepo):
-    """接线判据与 run 内的总闸必须是同一个:kill switch 关掉枚举工具后,放行
-    条件也必须随之失效,否则会放一整轮什么工具都没有的空循环进来。"""
+def _seed_searchable_chunk(repo, notebook_id, *, text="版图设计要点:器件必须共质心摆放。"):
+    """给 ``_seed`` 造的 ``s1`` 补一条**能被检索到**的原文段落。
+
+    没有它,「无图有源」的用例只证明了「没早退」——run 里一段原文都拿不到,
+    作答是空手的,证不了原文检索通道真的还在工作。FTS 行与 chunk 行一起写
+    (与 ``test_reasoning_retrieval`` 的手册夹具同法),首轮无图播种因此有命中。
+    """
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO chunks (id,notebook_id,source_id,text,section_path,"
+            "element_ids,created_at) VALUES (?,?,?,?,?,?,?)",
+            ("ck-1", notebook_id, "s1", text, "论文一 > 版图", "[]", NOW),
+        )
+        db.execute(
+            "INSERT INTO chunks_fts(chunk_id,notebook_id,text) VALUES (?,?,?)",
+            ("ck-1", notebook_id, text),
+        )
+
+
+def _chunk_search_steps(resp):
+    return [
+        step for step in (resp.reasoning_trace or [])
+        if step.step_type == "search_chunks"
+    ]
+
+
+def test_enum_kill_switch_does_not_block_a_no_kg_library_with_sources(arepo):
+    """枚举 kill switch 不得把无图库的原文检索一起关掉(T3 的关键用例)。
+
+    `_no_kg_scope_admits_run` 的枚举那条放行与 run 内的枚举总闸共用
+    `enumeration_wiring_active`,所以 kill switch 一关它恒为 False。早退如果只看
+    它,一个「有来源、没有图」的库就会因为一个**与原文检索无关**的运维开关整体
+    回到拒答——而原文段落检索根本不经枚举接线。放行条件因此是两条,来源计数那条
+    只受 `chunk_search_wiring_active` 管。这里钉的就是这个拆分:枚举工具确实
+    关着,**原文检索照样命中、作答照样发生**。
+    """
     arepo.settings.reasoning_enum_tools_enabled = False
     nb = _seed(arepo, formulas=3, with_kg=False)
+    _seed_searchable_chunk(arepo, nb.id)
+    llm = _SeqLLM(
+        plan={"sub_queries": [{"query": "版图设计要点"}]},
+        reflects=[{"next_action": "answer", "sufficient": True}],
+        answer={"answer": "按原文段落作答。", "grounded": True},
+    )
+    _bind_reasoning(arepo, llm)
+
+    resp = arepo.ask(nb.id, AskRequest(question="库里有哪些公式", mode="reasoning"))
+
+    assert llm.answer_prompts, "kill switch 把无图库的原文检索一起挡掉了"
+    assert resp.llm_mode != "deterministic"
+    assert "没有可用来源" not in resp.conclusion
+    # 「没早退」还不够:原文通道必须真的跑过并且拿到了东西。
+    steps = _chunk_search_steps(resp)
+    assert steps, "无图首轮原文播种没有跑"
+    assert any((step.detail or {}).get("found", 0) > 0 for step in steps), \
+        "原文播种跑了但一段都没检索到,作答是空手的"
+    # 旗标语义不变:无图且无可用参考库仍如实为 True,它只是不再阻断。
+    assert resp.kg_required is True
+
+
+def test_both_kill_switches_off_early_exits_a_no_kg_library_with_sources(arepo):
+    """两把闸都关 = 逐字回到接入前:无图 + 有源 + 有原文,仍然确定性早退。
+
+    这是 T1↔T3 接缝的守卫。枚举闸关掉之后放行只剩「原文检索还能跑」这一条理由,
+    而原文检索闸也关着时那个理由整个消失——放行进去只会是一轮没有枚举工具、没有
+    `search_chunks`、也没有播种的空转(plan+reflect+answer 三次模型调用换一个空
+    答案),而接入前是零调用的确定性早退。`config.py` 里「关掉即完全回到接入前」
+    的契约就落在这条上。
+    """
+    arepo.settings.reasoning_enum_tools_enabled = False
+    arepo.settings.reasoning_chunk_search_enabled = False
+    nb = _seed(arepo, formulas=3, with_kg=False)
+    _seed_searchable_chunk(arepo, nb.id)
     llm = _SeqLLM(
         plan={"sub_queries": [{"query": "版图设计要点"}]},
         reflects=[{"next_action": "answer", "sufficient": True}],
@@ -1408,7 +1476,55 @@ def test_kill_switch_restores_the_no_kg_early_return(arepo):
     resp = arepo.ask(nb.id, AskRequest(question="库里有哪些公式", mode="reasoning"))
 
     assert resp.llm_mode == "deterministic"
-    assert "本笔记本尚未构建知识图谱" in resp.conclusion
+    assert "当前检索范围内没有可用来源" in resp.conclusion
+    assert not llm.answer_prompts
+
+
+def test_chunk_search_switch_alone_admits_a_no_kg_library_with_sources(arepo):
+    """反过来:枚举闸关、原文检索闸开、无图有源 → 放行,且原文通道真的跑过。
+
+    与上一条成对:证明上一条的早退是**两把闸都关**才发生的,不是把「无图有源」
+    这条放行整个拆掉了。
+    """
+    arepo.settings.reasoning_enum_tools_enabled = False
+    arepo.settings.reasoning_chunk_search_enabled = True
+    nb = _seed(arepo, formulas=0, with_kg=False)
+    _seed_searchable_chunk(arepo, nb.id)
+    llm = _SeqLLM(
+        plan={"sub_queries": [{"query": "版图设计要点"}]},
+        reflects=[{"next_action": "answer", "sufficient": True}],
+        answer={"answer": "按原文段落作答。", "grounded": True},
+    )
+    _bind_reasoning(arepo, llm)
+
+    resp = arepo.ask(nb.id, AskRequest(question="版图设计要点是什么", mode="reasoning"))
+
+    assert resp.llm_mode != "deterministic"
+    assert "没有可用来源" not in resp.conclusion
+    steps = _chunk_search_steps(resp)
+    assert steps, "枚举闸关、原文闸开时无图首轮播种必须照常跑"
+    assert any((step.detail or {}).get("found", 0) > 0 for step in steps)
+
+
+def test_enum_kill_switch_still_early_exits_a_zero_source_library(arepo):
+    """反向:kill switch 关着、又没有图、范围内**一条来源都没有**时仍然早退。
+
+    拆分之后两条放行条件同时为假,行为回到接入前——不是把闸整个拆了。
+    """
+    arepo.settings.reasoning_enum_tools_enabled = False
+    nb = _seed(arepo, formulas=0, with_kg=False, with_source=False)
+    llm = _SeqLLM(
+        plan={"sub_queries": [{"query": "版图设计要点"}]},
+        reflects=[{"next_action": "answer", "sufficient": True}],
+        answer={"answer": "不该跑到这里。", "grounded": True},
+    )
+    _bind_reasoning(arepo, llm)
+
+    resp = arepo.ask(nb.id, AskRequest(question="库里有哪些公式", mode="reasoning"))
+
+    assert resp.llm_mode == "deterministic"
+    assert "当前检索范围内没有可用来源" in resp.conclusion
+    assert not llm.answer_prompts
 
 
 def _completeness_required_payload(

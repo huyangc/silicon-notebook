@@ -66,6 +66,15 @@
 
 ### Ask / Deep Report
 
+- [ ] **问答方法归一（路线，共四步，第一步已实施）**：① KG 可选的 reasoning——
+      `docs/superpowers/specs/2026-09-07-reasoning-kg-optional-design_zh.md`（T1–T5），
+      原文段落检索一等动作 `search_chunks` + 无图首轮播种、按图存在收缩动作空间、
+      早退收窄为零源、注册表与前端闸放行，已落地；② 直答档位（零反思轮）；
+      ③ 自动模式灰度；④ 退役 chunk 流水线。②–④ 各自待立规格。放量前两条待办：
+      (a) 无图首轮播种目前逐子查询串行调用 `search_chunks`，改用多查询合并召回
+      （`RetrievalService.retrieve_chunk_candidates_multi`）之前，需先在大库上实测
+      并发度 N=8 时的耗时；(b) 该规格「验收」一节给出的人工抽问（点名子部件 /
+      周期性 / 方向三句式 + 一句对比题，无图库与有图库各跑一遍）未做。
 - [ ] **问答纠偏规则 12（限定词保真）人工 A/B**：仓库无问答质量评测台，放量前用「点名子部件 /
       周期性 / 方向」三句式各问一次验证；ledger 喂摘要未做。
 - [ ] **Prompt 三层化后的 per-notebook 定制与 self-evo**：接缝只有 `fragment_text()`；L1 片段分

@@ -991,6 +991,16 @@ class _ScopedRunRetrieval:
     def exact_lookup_chunks(self, *args, **kwargs):
         raise AssertionError("restricted exact lookup must have zero I/O")
 
+    # `RetrievalPort` 上的 KG 可用性对(`reasoning_retrieval.kg_in_scope_for`)。
+    # 这批用例演的是**有图**库,和本文件关心的来源范围维度正交:无图会额外触发
+    # 首轮原文播种,那是另一条通道的行为。此前靠 `_kg_in_scope` 的 getattr 兜底
+    # 默认成「有图」,现在按端口如实实现。
+    def has_kg(self, *args, **kwargs):
+        return True
+
+    def any_base_has_kg(self, *args, **kwargs):
+        return False
+
 
 class _ScopedRunModels:
     def chat(self, workload_id):

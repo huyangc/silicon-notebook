@@ -934,31 +934,38 @@ class AskService:
     def _primary_llm_unconfigured(self) -> bool:
         return self.model_clients.primary_unconfigured()
 
-    def _collections_reachable(self, notebook_id: str) -> bool:
-        """作用域里是否还有集合枚举工具真的能列出来的东西。
+    def _no_kg_scope_admits_run(self, notebook_id: str) -> bool:
+        """无图笔记本还值不值得跑一轮 reasoning(早退的唯一放行判据,见调用处)。
 
-        这是「本笔记本还没有知识图谱」早退的唯一放行条件(见调用处)。判据是
-        **地图上有非零集合**,而不是宽松的「有来源」——注意这两者现在不再等价,
-        因为「有来源」正是三个集合之一(见下面那条订正)。
+        放行有两条互不包含的理由,任何一条成立即可:
 
-        接线判据与 run 内的总闸共用 ``enumeration_wiring_active`` ——各写一份的
-        话,kill switch 一关就会出现「早退放行了、run 里却没有工具」的空转。
+        * **枚举工具能列出东西** —— 地图上有非零集合(元素 / 知识对象 / 来源)。
+          接线判据与 run 内的总闸共用 ``enumeration_wiring_active``;
+        * **原文段落检索有得可检** —— 范围内有用户可见来源。接线判据同样共用
+          ``chunk_search_wiring_active``,因为原文检索根本不经枚举接线,拿枚举那把
+          闸当唯一放行条件会把无图笔记本的主检索通道一起挡掉。
 
-        地图本身随后会在 ``ReasoningRetriever.run`` 里再建一次;计数走的是按源
-        变更信号 keyed 的有界缓存,第二次基本只付参与者与信号查询,而且这条路径
-        原本是直接早退的,增量成本只落在它自己身上。
+        两处接线判据都必须与 run 内的总闸**同源**:各写一份(或干脆不判)就会出现
+        「早退放行了、run 里却什么工具都没有」的空转——两把 kill switch 都关时是
+        plan+reflect+answer 三次模型调用换一个空答案,而接入前是零调用的确定性
+        早退。共用之后「两把闸都关 = 逐字回到接入前」自动成立,而「枚举闸关 +
+        原文检索闸开 + 无图有源」仍照常放行。
+
+        地图只建一次(两条理由共用同一份计数);它随后会在 ``ReasoningRetriever.
+        run`` 里再建一次,计数走的是按源变更信号 keyed 的有界缓存,第二次基本只付
+        参与者与信号查询,而且这条路径原本是直接早退的,增量成本只落在它自己身上。
 
         fail-open 的方向在这里是**反的**:地图建不出来就回到早退(接入前的行为),
         而不是把用户送进一轮什么都拿不到的循环。
 
-        **来源计数计入放行(codex R5 P1 订正)。** PR-2.5 第一版刻意把它排除在外,
-        理由是「非空库恒 ≥1,算进来等于拆掉这道闸,那句明确的『请先构建知识图谱』
+        **来源计数计入枚举那条放行(codex R5 P1 订正)。** PR-2.5 第一版刻意把它
+        排除在外,理由是「非空库恒 ≥1,算进来等于拆掉这道闸,那句明确的早退提示
         会对所有纯文本库消失」。那个理由的**前半段成立、结论是错的**:
 
         * 被挡住的恰好是来源清单的主力场景。一个只被纯文本解析器处理过的论文库
           既没有公式/表格/图片/代码块、也没有知识对象,但它**有文档**——而
           「库里有哪几篇 / 逐篇分析当前 notebook」这类问题问的就是那些文档。
-          用户问文档目录,拿回「请先构建知识图谱」,那不是一句更明确的提示,
+          用户问文档目录,拿回一句早退提示,那不是一句更明确的提示,
           那是没有回答被问的问题;
         * 来源清单不需要图谱:它是零 LLM 的,读的就是 ``sources`` 行。挡住它
           换不来任何正确性;
@@ -966,11 +973,13 @@ class AskService:
           是常态,所以早退才收窄成「无图**且**拿不出任何集合」。加进第三个集合
           之后没跟着更新这个判定函数,是漏跟,不是一个独立的决定。
 
-        保留的语义(两条,都在测试里钉住):零源库仍然早退(计数为 0),地图构建
-        失败仍然早退(上面的 except)。放行之后 ``kg_required`` 仍如实为 True,
-        它是响应契约的一部分,不因为这一轮跑通了就变成假的。
+        保留的语义(都在测试里钉住):零源库仍然早退(计数为 0),地图构建失败仍然
+        早退(下面的 except)。放行之后 ``kg_required`` 仍如实为 True,它是响应契约
+        的一部分,不因为这一轮跑通了就变成假的。
         """
-        from app.services.reasoning_retrieval import enumeration_wiring_active
+        from app.services.reasoning_retrieval import (
+            chunk_search_wiring_active, enumeration_wiring_active,
+        )
         from app.services.source_scope import current_source_scope
 
         source_scope = current_source_scope()
@@ -983,9 +992,11 @@ class AskService:
                 or bool(source_scope.source_ids)
             )
 
-        if not enumeration_wiring_active(
+        enumeration_wired = enumeration_wiring_active(
             self.settings, self.collection_catalog, self.collection_enumeration
-        ):
+        )
+        chunk_search_wired = chunk_search_wiring_active(self.settings)
+        if not enumeration_wired and not chunk_search_wired:
             return False
         try:
             collection_map = self.collection_catalog.collection_map(notebook_id)
@@ -993,12 +1004,14 @@ class AskService:
             raise
         except Exception:       # noqa: BLE001 — 见 docstring:退回早退
             return False
-        return (
+        if enumeration_wired and (
             any(item.count > 0 for item in collection_map.elements)
             or any(count > 0 for _object_type, count in collection_map.kg_objects)
             # 用户可见来源数。零源库因此仍然早退——这不是「有 notebook 就放行」。
             or collection_map.sources > 0
-        )
+        ):
+            return True
+        return chunk_search_wired and collection_map.sources > 0
 
     def _tier_map_for(self, notebook_ids: Iterable[str]) -> Dict[str, str]:
         return self.evidence_context.tier_map(list(notebook_ids))
@@ -2606,7 +2619,7 @@ class AskService:
         cancel_event: CancelEvent = None,
     ) -> AskResponse:
         """chunk-native 通用问答:大召回 → MMR 多样性精选 → 长上下文综合 →
-        引用绑回 chunk。KG 不参与(严格推理走 ask_reasoning)。"""
+        引用绑回 chunk。KG overlay 可选:有图且配了 rerank 走三路 mix,否则 chunk-only。"""
         ask_started = time.perf_counter()
 
         def ask_stage(name: str, started: float, **extra) -> None:
@@ -3526,6 +3539,7 @@ class AskService:
         from app.services.reasoning_retrieval import (
             ReasoningResult,
             ReasoningRetriever,
+            kg_in_scope_for,
         )
 
         if type(prepared) is not PreparedReasoningAsk:
@@ -3795,17 +3809,15 @@ class AskService:
             )
             return commit_response(response)
 
-        # 无图 ≠ 无法作答。元素/知识对象清单工具在「解析了来源但没建图」的库里
-        # 照样能给出精确清单,而自动 KG 抽取默认是关的——那正是常态。所以早退的
-        # 条件收窄成「无图 **且** 枚举工具在这个作用域里也拿不出任何东西」;
-        # 放行后进入正常 reasoning 循环:图是空的,初检索/expand 自然返回空,
-        # 地图、enumerate 与 search_elements 照常工作。
+        # 无图 ≠ 无法作答。原文段落检索与元素/知识对象清单在「解析了来源但没建
+        # 图」的库里照样作答,而自动 KG 抽取默认是关的——那正是常态。所以早退收窄
+        # 成「无图 **且** 枚举工具拿不出东西 **且** 范围内一条可检索来源都没有」;
+        # 放行后进入正常 reasoning 循环:图是空的,图动作自然收缩,原文检索照常。
         # kg_required 的语义原样保留(无图且无可用参考库 = True),它只是不再顺带
         # 阻断执行——旗标是响应契约的一部分,不能因为这一轮跑通了就变成假的。
-        no_usable_kg = not memory_hits and not (
-            self.candidates.has_kg(notebook_id)
-            or self.candidates.any_base_has_kg(notebook_id))
-        if no_usable_kg and not self._collections_reachable(notebook_id):
+        no_usable_kg = not memory_hits and not kg_in_scope_for(
+            self.retrieval, notebook_id)
+        if no_usable_kg and not self._no_kg_scope_admits_run(notebook_id):
             coverage_prefix = ""
             coverage_answer = ""
             if structured_batch is not None:
@@ -3826,9 +3838,8 @@ class AskService:
                         "本次请求不能视为全部结果。\n\n"
                         if completeness_unavailable else ""
                     )
-                    + "本笔记本尚未构建知识图谱,也没有已建图的参考库;"
-                    "请先点『构建知识图谱』,或为本笔记本挂载一个已建图的"
-                    "公共知识库。"
+                    + "当前检索范围内没有可用来源；请先添加来源，或在"
+                    "「设置 → 编辑当前笔记本」里挂载一个参考库。"
                 ),
                 answer=coverage_answer,
                 grounded=bool(structured_batch and structured_batch.complete),

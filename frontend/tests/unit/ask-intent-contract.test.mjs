@@ -281,3 +281,21 @@ test("提交被可用性守卫拦下时草稿退回,而不是无声丢弃", () =
     assert.ok(branch.thenCalls.includes("effectsRef.current.notify"), `${branch.condition} 没有告知用户`);
   }
 });
+
+// T4(reasoning-kg-optional 设计规格):submit() 自己也有一道 requiresKg 判据
+// (在进入 reasoning 的意图预检流程之前),与上面钉住的 executeAsk 那两道是各自
+// 独立的守卫,不是同一处代码的两个入口。行为测试(use-ask-session.component
+// .test.tsx 的两条 T4 用例)钉不住这道:reasoning 本身 requiresKg=false,submit
+// 与 executeAsk 两道对它都不触发;corp.locked 走的是 submit 里 `submitMode !==
+// "reasoning"` 分支,直接调用 executeAsk,命中的是 executeAsk 自己那道同名判据,
+// 不经过 submit 这道。实测把 submit 这道单独删掉,组件测试全绿——必须在源码层面
+// 单独钉住这道分支还在,不能只靠行为测试的析取覆盖。
+test("submit 自己的可用性守卫(与 executeAsk 的两道分开,行为测试钉不住这道)", () => {
+  const rejections = ifBranchesIn(findFunction(askSession, "submit"))
+    .filter((branch) => /askUnavailable|scopeBlocked|requiresKg/.test(branch.condition));
+  assert.equal(rejections.length, 2, "submit 的两道可用性守卫不见了");
+  for (const branch of rejections) {
+    assert.ok(branch.thenReturns, `${branch.condition} 拒收后没有 return`);
+    assert.ok(branch.thenCalls.includes("effectsRef.current.notify"), `${branch.condition} 没有告知用户`);
+  }
+});

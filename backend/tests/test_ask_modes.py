@@ -45,7 +45,10 @@ def test_registry_has_expected_modes_and_flags():
     assert ASK_MODES["chunk"].requires_kg is False
     assert ASK_MODES["reasoning"].handler == "ask_reasoning"
     assert ASK_MODES["reasoning"].streaming is True
-    assert ASK_MODES["reasoning"].requires_kg is True
+    # requires_kg 是「没有图就跑不了」的硬前提,不是「有图更好」的提示。内置
+    # reasoning 无图时改用原文段落检索与集合清单,所以是 False;字段本身保留,
+    # 插件引擎描述符仍可声明 True,前端提交闸对那些继续生效。
+    assert ASK_MODES["reasoning"].requires_kg is False
 
 
 def test_user_facing_subset_is_chunk_and_strict_engines():

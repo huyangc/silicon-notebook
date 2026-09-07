@@ -45,6 +45,15 @@ class _StubRetrieval:
     def exact_lookup_chunks(self, nb, q):
         return []
 
+    # `RetrievalPort` 上的 KG 可用性对(见 `reasoning_retrieval.kg_in_scope_for`)。
+    # 这个 stub 演的是**有图**库:此前它靠 `_kg_in_scope` 里的 getattr 兜底才落到
+    # 「按有图处理」,那层兜底连真正的端口故障也一起吞了,现在按端口如实实现。
+    def has_kg(self, nb):
+        return True
+
+    def any_base_has_kg(self, nb):
+        return False
+
     def ppr_retrieve(self, nb, q):
         self.ppr_threads.append(threading.current_thread().name)
         from app.services.retrieval import RetrievedChunk

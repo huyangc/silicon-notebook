@@ -5328,7 +5328,7 @@ export default function Home() {
                           )
                           : (
                             <p className="tool-hint" style={{ margin: "2px 2px 8px" }}>
-                              {`✓ 知识图谱已就绪 · 可用「${strictLabel}」`}
+                              {`✓ 知识图谱已就绪 · 「${strictLabel}」将同时使用图谱`}
                             </p>
                           )
                         }
@@ -5342,7 +5342,7 @@ export default function Home() {
                           disabled={kgGraph.buildingKg}
                           title={currentNotebook?.base_kg_available
                             ? `本笔记本尚未整理知识图谱，${strictLabel}会借用已挂载的参考库；点击为本笔记本单独整理`
-                            : `本笔记本尚未整理知识图谱，也没挂参考库；「${strictLabel}」需先整理知识图谱或挂一个参考库`}
+                            : `本笔记本尚未整理知识图谱，也没挂参考库；整理知识图谱可增强${strictLabel}效果；也可挂一个已整理的参考库`}
                           onClick={() => { if (currentNotebookId) startKgBuild(currentNotebookId); }}
                         >
                           <Network size={20} strokeWidth={2.7} /> {kgGraph.buildingKg ? "整理中…" : "整理知识图谱"}
@@ -5350,7 +5350,7 @@ export default function Home() {
                         <p className="tool-hint" style={{ margin: "2px 2px 8px" }}>
                           {currentNotebook?.base_kg_available
                             ? `本笔记本尚未整理知识图谱，${strictLabel}将借用已挂载的参考库`
-                            : `本笔记本尚未整理知识图谱，也没挂参考库；「${strictLabel}」需要先整理或挂一个参考库`}
+                            : `本笔记本尚未整理知识图谱，也没挂参考库；整理知识图谱可增强${strictLabel}效果；也可挂一个已整理的参考库`}
                         </p>
                       </>
                     )
@@ -5919,13 +5919,15 @@ export default function Home() {
                     {groupOf(askMode, askModes) === "strict" && !kgAvailable && (
                       kgBlockedByScope ? (
                         // 出路是把勾选点回来,不是花钱整理一次整库图谱 —— 这一支
-                        // 刻意不给「整理知识图谱」按钮。
+                        // 刻意不给「整理知识图谱」按钮。T5:无图不再拒答,只用原文
+                        // 检索,所以措辞从「取不到图谱」(听起来像拒答)改成「将只用
+                        // 原文检索」(如实披露,不是阻断)。
                         <span className="mode-hint">
-                          {`已整理知识图谱的参考库这次都没勾选，${strictLabel}取不到图谱；在来源面板重新勾选即可`}
+                          {`已整理知识图谱的参考库这次都没勾选，${strictLabel}将只用原文检索；在来源面板重新勾选可增强`}
                         </span>
                       ) : (
                         <span className="mode-hint">
-                          {`该笔记本尚无知识图谱，${strictLabel}需先整理`}
+                          {`该笔记本尚无知识图谱，${strictLabel}将只用原文检索；整理知识图谱可增强问答效果`}
                           <button
                             type="button"
                             className="mode-engine"

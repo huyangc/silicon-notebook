@@ -1,4 +1,5 @@
 import json
+import re
 import threading
 
 import pytest
@@ -3341,3 +3342,1088 @@ def test_attempted_marks_search_failures_sparsely(rrepo, monkeypatch):
     # 打上标会让报告兜底把每个空方向都白跑一遍。
     assert "failed" not in rows["完整问题"]
     assert "failed" not in rows["零命中方向"]
+
+
+# --------------------------------------------------------------------------- #
+# search_chunks:原文段落检索一等动作 + 无图首轮播种(设计规格 T1)
+# --------------------------------------------------------------------------- #
+#
+# 这一组的红线是「**有图** 笔记本除多一个动作与它的说明/字段外逐字节不变,
+# kill switch 关掉时连那一处也没有」。证明方式刻意**不是** golden snapshot
+# (AGENTS.md 禁 refactor-only 快照:它只会在下一次正当调 prompt 时红):
+# 每条对账都拿同一个函数的「关」渲染当基线,逐字节推导出「开」渲染,
+# 措辞怎么改都成立,唯独多改一处就红。
+
+#: `reflect_prompt` 里 add_subquery 那条说明的结尾。新动作说明**紧接**它插入,
+#: 所以它同时是插入点的锚。措辞变了这条锚会失配,对账用例会明确报出来。
+_ADD_SUBQUERY_TAIL = "rephrase it substantially or choose a different action.\n"
+
+#: 开启态在「范围词规则」那句里多出来的第五项。红线是「除动作说明**与规则句第
+#: 五项**外逐字节不变」,所以对账时先把这一处归一掉,再要求其余部分只差那一段
+#: 动作说明——两处插入因此各自被单独钉住,谁多改一个字节都红。
+_SCOPE_RULE_WITH_CHUNKS_QUERY = ", chunks_query and exact_term"
+_SCOPE_RULE_WITHOUT_CHUNKS_QUERY = " and exact_term"
+
+
+def _scope_rule_normalised(prompt: str) -> str:
+    """把开启态的规则句还原成关闭态的形状(其余字节一个不动)。"""
+    return prompt.replace(_SCOPE_RULE_WITH_CHUNKS_QUERY,
+                          _SCOPE_RULE_WITHOUT_CHUNKS_QUERY, 1)
+
+
+def _free_text_retrieval_fields(schema_hint: str) -> set:
+    """schema 模板里**实际渲染出来**的自由文本检索字段。
+
+    判据是命名约定而不是一张手写清单:凡是 `*_query` / `*_term` 的键都算(对象
+    包装 `new_sub_query` 折成它的叶子 `new_sub_query.query`,那是 prompt 里点名
+    的写法)。手写清单没有守卫价值——下一个字段照样会被漏掉,而这条按约定推导
+    的判据只要新字段沿用同一后缀就自动进集合。
+    """
+    keys = set(re.findall(r'"([a-z_]+)"\s*:', schema_hint))
+    fields = {key for key in keys if key.endswith(("_query", "_term"))}
+    if "new_sub_query" in fields:
+        fields.discard("new_sub_query")
+        fields.add("new_sub_query.query")
+    return fields
+
+
+def _chunk_hit(chunk_id, *, relevance=0.5, source_id="s-chunk"):
+    """一段命中原文。正文按 chunk_id 生成:`take_distinct_chunk_hits` 的去重是
+    **内容键**优先的,共用一句正文会让不同 id 的替身互相吃掉。"""
+    from app.services.retrieval import RetrievedChunk
+    return RetrievedChunk(
+        chunk_id=chunk_id, source_id=source_id, source_title="Doc",
+        section_path=f"章节 {chunk_id}", text=f"{chunk_id} 的原文段落正文",
+        relevance=relevance, score=relevance)
+
+
+def _seed_notebook_without_kg(repo, texts=("布局布线阶段先全局布局再详细布线。",)):
+    """一个**没有知识图谱**、只有来源原文段落的笔记本。
+
+    `_seed_two_nodes`/`_seed_manual_notebook` 都会 `store_kg`,所以无图路径需要
+    自己的种子。走 `_chunk_and_embed_source` 真路径产出 chunk,`has_kg` 与
+    `any_base_has_kg` 因此都是 False —— 这正是 `kg_in_scope` 要认的那种库。
+    """
+    import uuid
+
+    from app.services.sqlite_repository import _now
+
+    nb = repo.create_notebook(NotebookCreate(name="nb-no-kg"))
+    sid = f"src-{uuid.uuid4().hex[:8]}"
+    now = _now()
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO sources (id,notebook_id,title,source_type,file_name,"
+            "file_path,file_size,file_hash,summary,doc_type,parse_status,"
+            "created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (sid, nb.id, "Doc", "document", "s.md", "/tmp/s.md", 0, f"h-{sid}",
+             "", "", "extracted", now, now))
+        for index, text in enumerate(texts, 1):
+            db.execute(
+                "INSERT INTO source_elements (id,source_id,element_type,"
+                "location_label,text,metadata,created_at) VALUES (?,?,?,?,?,?,?)",
+                (f"el-{sid}-{index:04d}", sid, "paragraph", f"p{index}", text,
+                 "{}", now))
+    repo._chunk_and_embed_source(sid)
+    return nb
+
+
+def _seed_manual_notebook_without_kg(repo):
+    """`_seed_manual_notebook` 的无图孪生:同一份分节手册,但不建 KG。
+
+    用于钉住播种在轨迹里的**位置**——问题点名 `set_db` 时精确查找 seed 会先记
+    一步,播种必须排在它之后。
+    """
+    from app.services.sqlite_repository import _now
+
+    nb = repo.create_notebook(NotebookCreate(name="nb-manual-no-kg"))
+    now = _now()
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO sources (id,notebook_id,title,source_type,file_name,"
+            "file_path,file_size,file_hash,summary,doc_type,parse_status,"
+            "created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("src-manual-nokg", nb.id, "Tool Manual", "document", "m.md",
+             "/tmp/m.md", 0, "h-src-manual-nokg", "", "", "extracted", now, now))
+        for index, (chunk_id, section_path, text) in enumerate(_MANUAL_SECTIONS, 1):
+            db.execute(
+                "INSERT INTO chunks (id,notebook_id,source_id,text,section_path,"
+                "element_ids,created_at) VALUES (?,?,?,?,?,?,?)",
+                (chunk_id, nb.id, "src-manual-nokg", text, section_path,
+                 json.dumps([f"el-{index:04d}"]), now))
+            db.execute(
+                "INSERT INTO chunks_fts(chunk_id,notebook_id,text) VALUES (?,?,?)",
+                (chunk_id, nb.id, text))
+    return nb
+
+
+def _stub_search_chunks(retriever, calls, results):
+    """把 `search_chunks` 换成记账替身。
+
+    `results` 按**检索串**取(播种是并发的,按调用序取会随线程调度漂);缺省键
+    `None` 兜住未列出的串。`calls` 收到 `(query, k)` —— k 是 None 说明走的是
+    动作口径(`chunk_mmr_k`),是数字说明播种显式传了档位的每查询纳入数。
+    """
+    def _stub(notebook_id, query, *, k=None):
+        calls.append((query, k))
+        return list(results.get(query, results.get(None, ())))
+
+    retriever.search_chunks = _stub
+    return retriever
+
+
+def test_search_chunks_settings_and_policy_defaults_and_env(monkeypatch):
+    from app.core.config import Settings
+    from app.services.reports.policy import reasoning_action_policy
+
+    s = Settings(_env_file=None)
+    assert s.reasoning_chunk_search_enabled is True
+    assert s.reasoning_max_chunk_searches == 3      # D-4:与 PPR/精确查找一致
+    assert reasoning_action_policy(s).max_chunk_searches == 3
+
+    monkeypatch.setenv("REASONING_CHUNK_SEARCH_ENABLED", "false")
+    monkeypatch.setenv("REASONING_MAX_CHUNK_SEARCHES", "1")
+    s2 = Settings(_env_file=None)
+    assert s2.reasoning_chunk_search_enabled is False
+    assert reasoning_action_policy(s2).max_chunk_searches == 1
+
+
+def test_reflect_schema_offers_search_chunks_and_chunks_query_only_when_on():
+    """验收 1/10 的 schema 半:关=接入前的形状(连这两个词都没有),开=只多两处
+    插入。"""
+    from app.services.prompts import reflect_schema_hint
+
+    off = reflect_schema_hint()
+    assert "search_chunks" not in off and "chunks_query" not in off
+
+    on = reflect_schema_hint(search_chunks=True)
+    assert "|exact_lookup|search_chunks" in on
+    assert '"exact_term":"","chunks_query":"","reason":""' in on
+    # 逐字节:两处插入之外一个字节都没动(其余三把闸关着时的形状同样成立)。
+    assert on == (
+        off.replace("|exact_lookup", "|exact_lookup|search_chunks", 1)
+           .replace('"exact_term":"","reason":""',
+                    '"exact_term":"","chunks_query":"","reason":""', 1)
+    )
+    # 另外三把闸开着时也只多这两处——闸与闸之间不互相污染。
+    from app.services.collection_catalog import (
+        ENUMERABLE_ELEMENT_KINDS,
+        ENUMERABLE_KG_OBJECT_TYPES,
+    )
+    full_off = reflect_schema_hint(
+        ENUMERABLE_ELEMENT_KINDS, ENUMERABLE_KG_OBJECT_TYPES, True, True)
+    full_on = reflect_schema_hint(
+        ENUMERABLE_ELEMENT_KINDS, ENUMERABLE_KG_OBJECT_TYPES, True, True, True)
+    assert full_on == (
+        full_off.replace("|exact_lookup", "|exact_lookup|search_chunks", 1)
+                .replace('"exact_term":"","reason":""',
+                         '"exact_term":"","chunks_query":"","reason":""', 1)
+    )
+
+
+def test_reflect_prompt_inserts_exactly_one_action_paragraph_when_on():
+    """验收 1/10 的 prompt 半。
+
+    对账不看快照,看**结构**:把规则句的第五项归一掉之后,关闭态的渲染被开启态
+    原样包住,唯一差异是紧跟 add_subquery 之后插入的一整条动作说明(且只有一
+    条)。有图 run 的动作空间因此除这一段与那一项外逐字节不变(D-3 的全部代价就
+    是这几十字节)。
+    """
+    from app.services.prompts import reflect_prompt
+
+    question, summary = "布局布线怎么做", "- [chunk] Doc · 布局: ..."
+    off = reflect_prompt(question, summary)
+    assert "search_chunks" not in off and "chunks_query" not in off
+
+    raw_on = reflect_prompt(question, summary, search_chunks=True)
+    # 第五项确实插进了范围词规则那句(P1-1),且只插了一处。
+    assert _SCOPE_RULE_WITH_CHUNKS_QUERY in raw_on
+    assert raw_on.count(_SCOPE_RULE_WITH_CHUNKS_QUERY) == 1
+    on = _scope_rule_normalised(raw_on)
+    head, sep, tail = off.partition(_ADD_SUBQUERY_TAIL)
+    assert sep, "add_subquery 说明的措辞变了,_ADD_SUBQUERY_TAIL 要跟着改"
+    assert on.startswith(head + sep) and on.endswith(tail)
+    inserted = on[len(head + sep):len(on) - len(tail)]
+    assert inserted.startswith("- search_chunks: ") and inserted.endswith("\n")
+    assert "\n- " not in inserted[:-1]          # 只插了**一条**动作说明
+    assert "chunks_query" in inserted
+    # 它必须把自己与另外两条原文通道讲清楚,否则模型无从选择。
+    assert "search_elements" in inserted and "ppr_retrieve" in inserted
+    # 既有 8 条动作说明一条不少。
+    for action in ("answer", "expand_graph", "add_subquery", "search_elements",
+                   "ppr_retrieve", "expand_community", "follow_chain",
+                   "exact_lookup"):
+        assert f"- {action}:" in on
+
+
+def test_reflect_kill_switch_puts_the_whole_action_back_to_baseline(rrepo):
+    """验收 10:`REASONING_CHUNK_SEARCH_ENABLED=false` ⇒ 模型看到的 prompt 与
+    schema 与接入前逐字节相同,白名单里也没有它(硬吐一个 → fail-open 成
+    answer,`chunks_query` 连读都不读)。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    class _Capture:
+        configured = True
+
+        def __init__(self):
+            self.seen = []
+
+        def chat_json(self, messages, schema_hint, **kwargs):
+            self.seen.append((messages[-1]["content"], schema_hint))
+            return json.dumps({"next_action": "search_chunks",
+                               "chunks_query": "布局"})
+
+    def _reflect_once():
+        capture = _Capture()
+        bind_chat_client(rrepo, "reasoning_agent", capture)
+        decision = ReasoningRetriever.from_repository(
+            rrepo, rrepo.settings).reflect("布局布线怎么做", "候选")
+        return decision, capture.seen[-1]
+
+    rrepo.settings.reasoning_chunk_search_enabled = False
+    off_decision, (off_prompt, off_schema) = _reflect_once()
+    # 关闭态:模型看到的两份文本里连这个词都不存在。
+    assert "search_chunks" not in off_prompt and "chunks_query" not in off_prompt
+    assert "search_chunks" not in off_schema and "chunks_query" not in off_schema
+    # 白名单里也没有它 → 硬吐一个就是畸形输出,fail-open 成 answer;
+    # `chunks_query` 连读都不读。
+    assert off_decision.next_action == "answer"
+    assert off_decision.chunks_query == ""
+
+    rrepo.settings.reasoning_chunk_search_enabled = True
+    on_decision, (raw_on_prompt, on_schema) = _reflect_once()
+    assert on_decision.next_action == "search_chunks"
+    assert on_decision.chunks_query == "布局"
+    # 开与关的差异**只有**那一段动作说明、范围词规则里的第五项与那两处 schema
+    # 插入——其余(包括本 run 实际开着的枚举/大纲/consult 三把闸的产物)逐字节
+    # 相同。
+    on_prompt = _scope_rule_normalised(raw_on_prompt)
+    assert _SCOPE_RULE_WITH_CHUNKS_QUERY in raw_on_prompt
+    head, sep, tail = off_prompt.partition(_ADD_SUBQUERY_TAIL)
+    assert sep and on_prompt.startswith(head + sep) and on_prompt.endswith(tail)
+    assert on_schema == (
+        off_schema.replace("|exact_lookup", "|exact_lookup|search_chunks", 1)
+                  .replace('"exact_term":"","reason":""',
+                           '"exact_term":"","chunks_query":"","reason":""', 1)
+    )
+
+
+def test_search_chunks_wrapper_uses_the_chunk_mode_primitives(rrepo):
+    """包装方法真的走 `retrieve_chunk_candidates` → `select_chunk_candidates`,
+    动作口径的 MMR 参数取 `chunk_mmr_k`/`chunk_mmr_lambda`,播种口径显式传 k。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    nb = _seed_notebook_without_kg(rrepo)
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    seen = {}
+    original = rr.retrieval.select_chunk_candidates
+
+    def _spy(scored, ids, matrix, k, lambda_):
+        seen["k"] = k
+        seen["lambda"] = lambda_
+        return original(scored, ids, matrix, k, lambda_)
+
+    rr.retrieval.select_chunk_candidates = _spy
+    hits = rr.search_chunks(nb.id, "布局布线")
+    assert hits and all(h.chunk_id.startswith("ck-") for h in hits)
+    assert seen == {"k": rrepo.settings.chunk_mmr_k,
+                    "lambda": rrepo.settings.chunk_mmr_lambda}
+    rr.search_chunks(nb.id, "布局布线", k=2)
+    assert seen["k"] == 2
+
+
+def test_search_chunks_action_merges_hits_and_upgrades_duplicates(rrepo):
+    """验收 2:命中并入 `chunks`,同 id 重复不再进池但更强的分数就地升级。
+
+    这里用**有图**笔记本:D-3 拍板有图 run 也提供这个动作。
+    """
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    nb = _seed_two_nodes(rrepo)
+    rrepo.settings.graph_ppr_enabled = False
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "布局布线"}]},
+        reflects=[{"next_action": "search_chunks", "chunks_query": "布局"},
+                  {"next_action": "search_chunks", "chunks_query": "布线"},
+                  {"next_action": "answer", "sufficient": True}]))
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    calls = []
+    _stub_search_chunks(rr, calls, {
+        "布局": [_chunk_hit("ck-1", relevance=0.4), _chunk_hit("ck-2")],
+        "布线": [_chunk_hit("ck-1", relevance=0.9), _chunk_hit("ck-3")],
+    })
+    res = rr.run(nb.id, "布局布线怎么做", "")
+
+    assert [c.chunk_id for c in res.chunks] == ["ck-1", "ck-2", "ck-3"]
+    assert next(c for c in res.chunks if c.chunk_id == "ck-1").relevance == 0.9
+    steps = [t for t in res.trace if t.step_type == "search_chunks"]
+    assert [t.detail["query"] for t in steps] == ["布局", "布线"]
+    assert [t.detail["found"] for t in steps] == [2, 1]   # 第二轮 ck-1 是重复
+    assert [t.summary for t in steps] == ["检索原文段落:布局,新增 2 段",
+                                          "检索原文段落:布线,新增 1 段"]
+    assert calls == [("布局", None), ("布线", None)]
+
+
+def test_search_chunks_action_falls_back_to_the_question(rrepo):
+    """验收 2:`chunks_query` 为空回退到原问题(与 elements_query/ppr_query 同)。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    nb = _seed_two_nodes(rrepo)
+    rrepo.settings.graph_ppr_enabled = False
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "布局布线"}]},
+        reflects=[{"next_action": "search_chunks"},
+                  {"next_action": "answer", "sufficient": True}]))
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    calls = []
+    _stub_search_chunks(rr, calls, {None: [_chunk_hit("ck-1")]})
+    res = rr.run(nb.id, "布局布线怎么做", "")
+    assert calls == [("布局布线怎么做", None)]
+    step = next(t for t in res.trace if t.step_type == "search_chunks")
+    assert step.detail["query"] == "布局布线怎么做"
+
+
+def test_search_chunks_action_stops_at_the_per_run_cap(rrepo):
+    """验收 2:达 `max_chunk_searches` 后记 skip(`chunk_search_cap`),零 I/O。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    nb = _seed_two_nodes(rrepo)
+    rrepo.settings.graph_ppr_enabled = False
+    rrepo.settings.reasoning_max_chunk_searches = 1
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "布局布线"}]},
+        reflects=[{"next_action": "search_chunks", "chunks_query": "布局"},
+                  {"next_action": "search_chunks", "chunks_query": "布线"},
+                  {"next_action": "answer", "sufficient": True}]))
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    calls = []
+    _stub_search_chunks(rr, calls, {None: [_chunk_hit("ck-1")]})
+    res = rr.run(nb.id, "布局布线怎么做", "")
+
+    assert len(calls) == 1                       # 第二次根本没发起
+    skip = next(t for t in res.trace
+                if t.step_type == "skip"
+                and t.detail.get("reason") == "chunk_search_cap")
+    assert "已达次数上限 1" in skip.summary
+    assert "result_ids" not in skip.detail       # skip 步不写这把键(P4 硬规则)
+
+
+def test_first_round_chunk_seed_runs_only_when_the_scope_has_no_kg(rrepo):
+    """验收 3:无图 run 记一条 `phase=seed` 的播种步;有图 run 一步都不记。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    rrepo.settings.graph_ppr_enabled = False
+    plan = {"sub_queries": [{"query": "布局布线"}]}
+    answer = [{"next_action": "answer", "sufficient": True}]
+
+    nb_no_kg = _seed_notebook_without_kg(rrepo)
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(plan=plan, reflects=list(answer)))
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    calls = []
+    _stub_search_chunks(rr, calls, {None: [_chunk_hit("ck-1"), _chunk_hit("ck-2")]})
+    res = rr.run(nb_no_kg.id, "布局布线怎么做", "")
+    seed = next(t for t in res.trace if t.step_type == "search_chunks")
+    assert seed.detail == {"found": 2, "phase": "seed",
+                           "result_ids": ["ck-1", "ck-2"]}
+    assert seed.summary == "检索原文段落:本笔记本无知识图谱,新增 2 段"
+    assert [c.chunk_id for c in res.chunks] == ["ck-1", "ck-2"]
+    # 其余通道全空但播种有命中 ⇒ 空证据兜底**不**触发(P2-4:这条曾经只被
+    # 「兜底的确会补一次 search_elements」那侧覆盖,反向一侧没人钉)。
+    assert not any(t.step_type == "fallback" for t in res.trace)
+    # limits 缺省 ⇒ 每查询纳入数落回 `reasoning_per_query_limit`(同 `_new_run_state`)。
+    assert calls == [("布局布线", rrepo.settings.reasoning_per_query_limit)]
+
+    # 有图 run:D-1,播种一字不动。
+    nb_kg = _seed_two_nodes(rrepo)
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(plan=plan, reflects=list(answer)))
+    rr2 = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    calls2 = []
+    _stub_search_chunks(rr2, calls2, {None: [_chunk_hit("ck-9")]})
+    res2 = rr2.run(nb_kg.id, "布局布线怎么做", "")
+    assert calls2 == []
+    assert not any(t.step_type == "search_chunks" for t in res2.trace)
+
+
+def test_first_round_chunk_seed_takes_the_effort_tier_per_query_allowance(rrepo):
+    """验收 3:每子查询的 MMR k 取档位的 `ranked_per_query_take`(不是
+    `chunk_mmr_k`),并发跑完后按子查询顺序依次并入。"""
+    from app.core.ask_retrieval_policy import ask_retrieval_limits
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    limits = ask_retrieval_limits("deep")
+    assert limits.ranked_per_query_take != rrepo.settings.chunk_mmr_k
+    nb = _seed_notebook_without_kg(rrepo)
+    rrepo.settings.graph_ppr_enabled = False
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "布局布线"}, {"query": "静态时序分析"}]},
+        reflects=[{"next_action": "answer", "sufficient": True}]))
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    calls = []
+    # 第二条子查询重复第一条的一段:并入必须逐条 extend,否则跨子查询的重复
+    # 会漏过去重(`take_distinct_chunk_hits` 只拿 chunks 建索引)。
+    _stub_search_chunks(rr, calls, {
+        "布局布线": [_chunk_hit("ck-a"), _chunk_hit("ck-b")],
+        "静态时序分析": [_chunk_hit("ck-b"), _chunk_hit("ck-c")],
+    })
+    res = rr.run(nb.id, "布局布线怎么做", "", limits=limits)
+
+    assert sorted(calls) == sorted([("布局布线", limits.ranked_per_query_take),
+                                    ("静态时序分析", limits.ranked_per_query_take)])
+    assert [c.chunk_id for c in res.chunks] == ["ck-a", "ck-b", "ck-c"]
+    seed = next(t for t in res.trace if t.step_type == "search_chunks")
+    assert seed.detail["found"] == 3
+
+
+def test_first_round_chunk_seed_sits_between_exact_seed_and_empty_fallback(rrepo):
+    """验收 3:播种排在精确查找 seed **之后**(不改那一步的去重与计数)、空证据
+    兜底**之前**(播种有命中时兜底自然不触发)。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    nb = _seed_manual_notebook_without_kg(rrepo)
+    rrepo.settings.graph_ppr_enabled = False
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "set_db"}]},
+        reflects=[{"next_action": "answer", "sufficient": True}]))
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    _stub_search_chunks(rr, [], {None: [_chunk_hit("ck-seeded")]})
+    res = rr.run(nb.id, "set_db 命令是怎样的", "")
+
+    kinds = [t.step_type for t in res.trace]
+    assert kinds.index("exact_lookup") < kinds.index("search_chunks")
+    assert kinds.index("search_chunks") < kinds.index("reflect")
+    # 精确查找 seed 的账目一字未变(播种只往后追加)。
+    exact = next(t for t in res.trace if t.step_type == "exact_lookup")
+    assert exact.detail["found"] == 2 and exact.detail["phase"] == "seed"
+    # 有证据 ⇒ 空证据兜底不触发。
+    assert not any(t.step_type == "fallback" for t in res.trace)
+    assert [c.chunk_id for c in res.chunks] == ["ck-main", "ck-args", "ck-seeded"]
+
+
+def test_empty_chunk_seed_still_lets_the_empty_evidence_fallback_fire(rrepo):
+    """`_first_round_empty_fallback` 的触发条件不变:播种零命中、三条通道全空
+    时,它照旧补一次 `search_elements`。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    nb = _seed_notebook_without_kg(rrepo)
+    rrepo.settings.graph_ppr_enabled = False
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "毫不相干的方向"}]},
+        reflects=[{"next_action": "answer", "sufficient": True}]))
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    _stub_search_chunks(rr, [], {})
+    res = rr.run(nb.id, "毫不相干的问题", "")
+    seed = next(t for t in res.trace if t.step_type == "search_chunks")
+    assert seed.detail["found"] == 0
+    assert seed.detail["result_ids"] == []       # I/O 发起过 ⇒ 键必须在
+    assert any(t.detail.get("reason") == "initial_evidence_empty"
+               for t in res.trace if t.step_type == "fallback")
+
+
+def test_chunk_search_kill_switch_removes_the_first_round_seed_entirely(rrepo):
+    """验收 10 的播种半:关掉即零 I/O、零轨迹步——逐字节回到接入前。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    nb = _seed_notebook_without_kg(rrepo)
+    rrepo.settings.graph_ppr_enabled = False
+    rrepo.settings.reasoning_chunk_search_enabled = False
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "布局布线"}]},
+        reflects=[{"next_action": "answer", "sufficient": True}]))
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    calls = []
+    _stub_search_chunks(rr, calls, {None: [_chunk_hit("ck-1")]})
+    res = rr.run(nb.id, "布局布线怎么做", "")
+    assert calls == []
+    assert not any(t.step_type == "search_chunks" for t in res.trace)
+
+
+def test_search_chunks_stays_available_under_a_narrowed_source_scope(rrepo):
+    """新通道**不**挂 `_unsafe_scope_restricted` 闸,理由必须站得住:它是
+    source-addressable 的。
+
+    `retrieve_chunk_candidates` 走 `_chunk_source_ceiling` →
+    `scoped_allowed_source_ids`,即用户勾选的那把天花板在召回之前就施加了
+    (与 `search_elements` 同类,与 PPR/社区/枚举那种「无法按来源预过滤」的
+    通道不同)。所以受限 run 里它照常可用,且只可能返回勾选范围内的段落——
+    这条用例把两半都钉住:勾了才有,不勾就没有。
+    """
+    from app.models.source_scope import SourceScope
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    from app.services.source_scope import source_scope_context
+
+    nb = _seed_notebook_without_kg(rrepo, ["布局布线阶段先全局布局再详细布线。"])
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    unscoped = rr.search_chunks(nb.id, "布局布线")
+    assert unscoped
+    source_id = unscoped[0].source_id
+
+    with source_scope_context(
+        nb.id, SourceScope(mode="include", source_ids=[source_id])
+    ):
+        assert rr._unsafe_scope_restricted() is True   # 受限 run,PPR 之类会被关
+        in_scope = rr.search_chunks(nb.id, "布局布线")
+    assert [c.chunk_id for c in in_scope] == [c.chunk_id for c in unscoped]
+
+    with source_scope_context(nb.id, SourceScope(mode="include", source_ids=[])):
+        assert rr.search_chunks(nb.id, "布局布线") == []
+
+
+def test_scope_rule_lists_every_free_text_retrieval_field_it_renders():
+    """P1-1 的守卫:schema 里**渲染出来**的自由文本检索字段,必须全都出现在
+    「范围词规则」那句的列举里。
+
+    这条规则句是 prompt 里唯一一处**枚举**这类字段的地方,模型把它读成穷尽
+    列表:漏一个,那个字段就成了「不受范围词约束」的例外。`chunks_query` 就
+    是这样差点被漏掉的。对账两个方向各跑一次(门开/门关),这样下一个新字段
+    只要沿用 `*_query` / `*_term` 命名就自动被这条守卫接住。
+    """
+    from app.services.prompts import reflect_prompt, reflect_schema_hint
+
+    for search_chunks in (False, True):
+        schema = reflect_schema_hint(search_chunks=search_chunks)
+        prompt = reflect_prompt("q", "c", search_chunks=search_chunks)
+        rendered = _free_text_retrieval_fields(schema)
+        # 门关时是那四个,门开时多一个 —— 提取器本身也被钉住,免得它悄悄退化
+        # 成空集合让整条守卫变成恒真。
+        assert rendered == ({"new_sub_query.query", "elements_query",
+                             "ppr_query", "exact_term"}
+                            | ({"chunks_query"} if search_chunks else set()))
+        start = prompt.index("This applies to every retrieval field you fill: ")
+        listed = prompt[start:prompt.index("exact_term especially", start)]
+        missing = sorted(f for f in rendered if f not in listed)
+        assert not missing, f"规则句漏列了检索字段: {missing}"
+
+
+def test_allow_search_chunks_policy_flag_disables_seed_and_action(rrepo):
+    """P1-2:`allow_search_chunks=False` ⇒ 通道整条消失。
+
+    与 `allow_ppr` / `allow_exact_lookup` 同构,但走的是**同一把闸**
+    (`chunk_search_active`):动作不进 prompt / schema / 白名单(硬吐一个也
+    fail-open 成 answer),首轮播种也不跑、零 I/O。
+    """
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    nb = _seed_notebook_without_kg(rrepo)
+    rrepo.settings.graph_ppr_enabled = False
+
+    class _Capture:
+        configured = True
+
+        def __init__(self):
+            self.seen = []
+
+        def chat_json(self, messages, schema_hint, **kwargs):
+            self.seen.append((messages[-1]["content"], schema_hint))
+            if "sub_queries" in schema_hint:
+                return json.dumps({"sub_queries": [{"query": "布局布线"}]})
+            return json.dumps({"next_action": "search_chunks",
+                               "chunks_query": "布局", "sufficient": True})
+
+    capture = _Capture()
+    bind_chat_client(rrepo, "reasoning_agent", capture)
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    assert rr.allow_search_chunks is True          # Ask/报告引擎的缺省
+    rr.allow_search_chunks = False
+    assert rr.chunk_search_active() is False
+    calls = []
+    _stub_search_chunks(rr, calls, {None: [_chunk_hit("ck-1")]})
+    res = rr.run(nb.id, "布局布线怎么做", "")
+
+    assert calls == []                              # 播种与动作都没发起 I/O
+    assert not any(t.step_type == "search_chunks" for t in res.trace)
+    reflect_prompt, reflect_schema = capture.seen[-1]
+    assert "search_chunks" not in reflect_prompt
+    assert "chunks_query" not in reflect_prompt
+    assert "search_chunks" not in reflect_schema
+    assert "chunks_query" not in reflect_schema
+
+
+def test_kg_in_scope_counts_a_checked_reference_library(rrepo):
+    """P2-3:本库无图,但挂了一个**有图**参考库并且勾选了它 ⇒ 范围内有图。
+
+    这是 `kg_in_scope` 的第二个维度(`any_base_has_kg`),此前只有「本库有图」
+    与「哪儿都没图」两侧被覆盖。有图 ⇒ 首轮不播种(设计 D-1),轨迹里连一步
+    `search_chunks` 都不该有。
+    """
+    from app.models.source_scope import BaseNotebookScope
+    from app.services.reasoning_retrieval import (
+        ReasoningRetriever,
+        kg_in_scope_for,
+    )
+    from app.services.source_scope import source_scope_context
+
+    base = _seed_two_nodes(rrepo)                  # 有图的参考库
+    nb = _seed_notebook_without_kg(rrepo)          # 本库无图
+    rrepo.replace_notebook_bases(nb.id, [base.id], "user-local")
+    rrepo.settings.graph_ppr_enabled = False
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "布局布线"}]},
+        reflects=[{"next_action": "answer", "sufficient": True}]))
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    calls = []
+    _stub_search_chunks(rr, calls, {None: [_chunk_hit("ck-1")]})
+    with source_scope_context(
+        nb.id, None,
+        BaseNotebookScope(mode="include", notebook_ids=[base.id]),
+    ):
+        assert rr.retrieval.has_kg(nb.id) is False
+        assert kg_in_scope_for(rr.retrieval, nb.id) is True
+        res = rr.run(nb.id, "布局布线怎么做", "")
+
+    assert calls == []
+    assert not any(t.step_type == "search_chunks" for t in res.trace)
+
+
+# --------------------------------------------------------------------------- #
+# kg_actions:按「范围内是否有图」收缩动作空间与规划措辞(设计规格 T2)
+# --------------------------------------------------------------------------- #
+#
+# 这一组的红线与上一组同款、方向相反:上一组证明「加一个动作只多那几十字节」,
+# 这一组证明「无图时**只**减掉图那部分,有图 run 一个字节不动」。同样不用 golden
+# snapshot(AGENTS.md 禁 refactor-only 快照)。
+#
+# ⚠ 「有图侧」两条守卫强弱不同,别把弱的那条当成基线对账:
+#   * `test_kg_actions_true_never_leaks_the_gate_into_the_default_path` 比的是
+#     同一个函数「显式传 True」与「不传」两种写法。默认值本来就是 True,所以这
+#     组等式**不是**「与 T2 之前逐字节相等」的证明;它钉住的是「这把闸没漏进默认
+#     路径」——默认被改成 False、或 True 分支被接到无图那半时它才红。
+#   * 真正的「无图侧只减不改」对账在
+#     `test_reflect_prompt_changes_only_the_framing_and_graph_bound_sentences`:
+#     把已知被条件化的措辞逐条还原回有图拼写之后,无图渲染必须是有图渲染的纯删除
+#     结果,没有任何整行豁免。
+
+#: 无图 run 里必须整体消失的五个图动作(设计 T2)。
+_KG_ONLY_ACTIONS = ("expand_graph", "ppr_retrieve", "expand_community",
+                    "follow_chain", "enumerate_kg_objects")
+
+#: 它们在 schema 里对应的参数分支/字段,一并不出现。
+_KG_ONLY_SCHEMA_FIELDS = ('"expand"', '"follow_chain"', '"community_focal"',
+                          '"ppr_query"', '"object_type"')
+
+#: 无图 run 里必须**保留**的动作(枚举的那两条各自独立受闸)。
+_KG_FREE_ACTIONS = ("answer", "add_subquery", "search_elements",
+                    "exact_lookup", "search_chunks", "enumerate_elements")
+
+
+def _all_gates(**overrides):
+    """三把既有闸全开时的 reflect 渲染参数(枚举白名单走唯一定义点)。"""
+    from app.services.collection_catalog import (
+        ENUMERABLE_ELEMENT_KINDS,
+        ENUMERABLE_KG_OBJECT_TYPES,
+    )
+    kwargs = dict(element_kinds=ENUMERABLE_ELEMENT_KINDS,
+                  object_types=ENUMERABLE_KG_OBJECT_TYPES,
+                  outline=True, consult_memory=True, search_chunks=True)
+    kwargs.update(overrides)
+    return kwargs
+
+
+def test_kg_actions_true_never_leaks_the_gate_into_the_default_path():
+    """验收 1/7 的有图半:`kg_actions=True` 与**不传这个参数**渲染相同。
+
+    ⚠ 这条**不是**与 T2 之前的基线逐字节对账:默认值就是 True,所以两边同参时
+    这组等式恒真。它守的是另一件事——「这把闸没漏进默认路径」:默认被改成 False、
+    True 分支被接到无图那半、或某把老闸把 `kg_actions` 一起带偏时,它先红。四把闸
+    的全部组合都过一遍,闸与闸之间不得互相污染;最后一条(模块级常量 vs 函数)则
+    是真正的跨对象对账。无图侧「只减不改」的对账在下面那条 framing 用例。
+    """
+    import itertools
+
+    from app.services.collection_catalog import (
+        ENUMERABLE_ELEMENT_KINDS,
+        ENUMERABLE_KG_OBJECT_TYPES,
+    )
+    from app.services.prompts import (
+        REFLECT_SCHEMA_HINT, reflect_prompt, reflect_schema_hint,
+    )
+
+    combos = itertools.product(
+        [(), ENUMERABLE_ELEMENT_KINDS], [(), ENUMERABLE_KG_OBJECT_TYPES],
+        [False, True], [False, True], [False, True])
+    for kinds, types, outline, consult, chunks in combos:
+        args = (kinds, types, outline, consult, chunks)
+        assert (reflect_schema_hint(*args)
+                == reflect_schema_hint(*args, True)), args
+        assert (reflect_prompt("问题", "候选", *args)
+                == reflect_prompt("问题", "候选", *args, True)), args
+    # 模块级常量(默认全关)同样不动。
+    assert REFLECT_SCHEMA_HINT == reflect_schema_hint(kg_actions=True)
+
+
+def test_reflect_schema_drops_every_graph_branch_when_the_scope_has_no_kg():
+    """验收 1 的 schema 半:五个图动作与它们的参数分支一起消失,原文/集合那一半
+    原样留下。"""
+    from app.services.prompts import reflect_schema_hint
+
+    off = reflect_schema_hint(**_all_gates(kg_actions=False))
+    for action in _KG_ONLY_ACTIONS:
+        assert action not in off, action
+    for field in _KG_ONLY_SCHEMA_FIELDS:
+        assert field not in off, field
+    for action in _KG_FREE_ACTIONS:
+        assert action in off, action
+    # 保留的那一半:enumerate 分支还在(只是没了 object_type),自由文本字段里
+    # 只少了 ppr_query。
+    assert '"enumerate":{"kind":"' in off and '"collection":""' in off
+    assert _free_text_retrieval_fields(off) == {
+        "new_sub_query.query", "elements_query", "chunks_query", "exact_term"}
+    on = reflect_schema_hint(**_all_gates())
+    assert _free_text_retrieval_fields(on) == {
+        "new_sub_query.query", "elements_query", "ppr_query", "chunks_query",
+        "exact_term"}
+
+
+def test_reflect_prompt_drops_every_graph_sentence_when_the_scope_has_no_kg():
+    """验收 1 的 prompt 半。
+
+    判据刻意是「这五个词一次都不出现」而不是「这五条 `- 动作:` 说明不出现」:
+    指导句里指向一个不存在动作的**引用**(consult_memory 的重试清单、
+    search_chunks 的对比句、范围词规则里的 ppr_query)与动作说明本身一样有害
+    ——模型照着它去选一个白名单会拒绝的动作,白烧一轮反思。
+    """
+    from app.services.prompts import reflect_prompt
+
+    off = reflect_prompt("布局布线怎么做", "候选", **_all_gates(kg_actions=False))
+    for action in _KG_ONLY_ACTIONS:
+        assert action not in off, action
+    assert "ppr_query" not in off
+    # `object_type` 与 `ppr_query` 对称:schema 无图时已不提供这个字段,prompt 就
+    # 不能再两次点名它(enumerate.collection 那段的「OVERRIDES ... kind/object_type」
+    # 与「(kind, object_type, source_id ...)」)。
+    assert "object_type" not in off
+    for action in _KG_FREE_ACTIONS:
+        assert f"- {action}:" in off, action
+    assert "- update_outline:" in off and "- consult_memory:" in off
+    # 首句:图 → 文库。
+    assert off.startswith("You decide the NEXT retrieval step for answering a "
+                          "question from a document library.")
+    # 范围词规则那句只少了 ppr_query 一项(其余四项一个不少)。
+    assert ("new_sub_query.query, elements_query, chunks_query and exact_term"
+            in off)
+
+
+#: 无图渲染里**被改写**过的措辞 → 它在有图渲染里的拼写。整份 reflect_prompt 的
+#: 图/无图差异只有两类:整句删除(五个图动作的 `- 动作:` 说明),以及这张表里
+#: 的逐句改写。
+_CONDITIONED_PHRASES = (
+    ("question from a document library",
+     "question from a knowledge graph"),
+    ("- search_elements: fall back to raw document ",
+     "- search_elements: the KG is too thin; fall back to raw document "),
+    ("question asks. It differs from search_elements",
+     "question asks, or when the knowledge graph is thin or absent. It differs "
+     "from search_elements"),
+    ("formulas, tables, figures): this one searches",
+     "formulas, tables, figures) and from ppr_retrieve (which propagates "
+     "through the graph): this one searches"),
+    ("is EMPTY for the action above",
+     "is EMPTY for both actions above"),
+    ("OVERRIDES the action and its kind, so carrying",
+     "OVERRIDES the action and its kind/object_type, so carrying"),
+    ('"sources" (kind, source_id and source_title',
+     '"sources" (kind, object_type, source_id and source_title'),
+    ("before repeating an action (exact_lookup, search_elements) that has",
+     "before repeating an action (ppr_retrieve, exact_lookup, expand_graph, "
+     "follow_chain) that has"),
+    ("you fill: new_sub_query.query, elements_query, chunks_query and "
+     "exact_term",
+     "you fill: new_sub_query.query, elements_query, ppr_query, chunks_query "
+     "and exact_term"),
+)
+
+
+def test_reflect_prompt_changes_only_the_framing_and_graph_bound_sentences():
+    """验收 7:无图渲染 = 有图渲染**删掉五条图动作说明**再套用上表的逐句改写。
+
+    做法刻意**不是**「整行 startswith 豁免」:一整行被豁免掉之后,那行里再漏一个
+    图字段就永远不会红——T2 首版的 `object_type` 正是这样从
+    `- enumerate.collection is EMPTY ...` 那一整行里漏出去的。这里改成把上表逐条
+    **还原**回有图拼写,还原完剩下的每一行都必须原样出现在有图渲染里,于是任何
+    第三类漂移都会露出来。
+
+    表本身也双向对账:每条的无图拼写必须真的出现在无图渲染里、有图拼写真的出现
+    在有图渲染里——过时的条目不能默默留着继续「豁免」一句已经不存在的话。
+    """
+    from app.services.prompts import reflect_prompt
+
+    on = reflect_prompt("布局布线怎么做", "候选", **_all_gates())
+    off = reflect_prompt("布局布线怎么做", "候选", **_all_gates(kg_actions=False))
+    normalised = off
+    for off_text, on_text in _CONDITIONED_PHRASES:
+        assert off_text in normalised, off_text
+        assert on_text in on, on_text
+        normalised = normalised.replace(off_text, on_text, 1)
+    on_lines = on.splitlines()
+    for line in normalised.splitlines():
+        assert line in on_lines, line
+
+
+class _KgActionCapture:
+    """反射替身:记下模型**实际收到**的 prompt/schema,并硬吐一个指定动作。"""
+
+    configured = True
+
+    def __init__(self, action):
+        self._action = action
+        self.seen = []
+
+    def chat_json(self, messages, schema_hint, **kwargs):
+        self.seen.append((messages[-1]["content"], schema_hint))
+        return json.dumps({"next_action": self._action,
+                           "expand": {"object_id": "obj-1"}})
+
+
+def _reflect_with_scope_gate(rrepo, notebook_id, action, *, fail_closed=False):
+    """按 `notebook_id` 的真实有图/无图事实开闸,跑一次 `reflect`。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    capture = _KgActionCapture(action)
+    bind_chat_client(rrepo, "reasoning_agent", capture)
+    rr = ReasoningRetriever.from_repository(
+        rrepo, rrepo.settings, fail_closed=fail_closed)
+    # 白名单里的枚举那半由 `enumeration and kg_actions` 双闸把守:枚举闸自己关着
+    # 的话,`enumerate_kg_objects` 被拒是因为枚举关了,与本组要守的 kg 闸无关,
+    # 变异也就不会红。这里先钉住枚举确实开着。
+    assert rr.enumeration_active(), "枚举闸必须开着,否则 kg 闸的守卫是空的"
+    decision = rr.reflect("布局布线怎么做", "候选",
+                          kg_actions=rr._kg_in_scope(notebook_id))
+    return decision, capture.seen[-1]
+
+
+def test_no_kg_run_shrinks_the_action_space_in_prompt_schema_and_whitelist(rrepo):
+    """验收 1 的接线半:无图 run 里模型**实际收到**的 prompt/schema 都没有那五个
+    动作,白名单也逐个拒绝它们;有图 run 三处原样。
+
+    五个动作**逐个**喂一遍,而不是只喂 `expand_graph` 一个:白名单里它们分属三
+    条不同的分支(四个图动作一条、`enumerate_kg_objects` 另有 `enumeration and
+    kg_actions` 一条),只喂一个就只守住了其中一条。
+    """
+    nb_no_kg = _seed_notebook_without_kg(rrepo)
+    for graph_action in _KG_ONLY_ACTIONS:
+        decision, (prompt, schema) = _reflect_with_scope_gate(
+            rrepo, nb_no_kg.id, graph_action)
+        for action in _KG_ONLY_ACTIONS:
+            assert action not in prompt and action not in schema, action
+        assert "search_chunks" in prompt and "search_chunks" in schema
+        assert "enumerate_elements" in prompt and "enumerate_elements" in schema
+        # 白名单:模型硬吐一个图动作 ⇒ 按既有未知动作合同退成 answer。
+        assert decision.next_action == "answer", graph_action
+
+    nb_kg = _seed_two_nodes(rrepo)
+    _, (kg_prompt, kg_schema) = _reflect_with_scope_gate(
+        rrepo, nb_kg.id, "answer")
+    for action in _KG_ONLY_ACTIONS:
+        assert action in kg_prompt and action in kg_schema, action
+
+
+#: 五个图动作各自**合法**的一份响应(fail_closed 对每个动作还有必填字段校验,
+#: 少了它们有图那半会撞上「missing ...」而不是本组要看的 `invalid action`)。
+_KG_ACTION_PAYLOADS = {
+    "expand_graph": {"expand": {"object_id": "obj-1"}},
+    "ppr_retrieve": {"ppr_query": "布局"},
+    "expand_community": {"community_focal": "DeepSeek-V4"},
+    "follow_chain": {"follow_chain": {"start_object_id": "obj-1"}},
+    "enumerate_kg_objects": {"enumerate": {"object_type": "claim"}},
+}
+
+
+def test_no_kg_run_rejects_every_graph_action_when_fail_closed(rrepo):
+    """解析层:fail_closed 调用方拿到的是既有的 `invalid action` 硬失败,不是一个
+    悄悄退化成 answer 的决策——五个图动作逐个验(同上,它们分属三条分支)。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    class _Graph:
+        configured = True
+
+        def __init__(self, payload):
+            self._payload = payload
+
+        def chat_json(self, messages, schema_hint, **kwargs):
+            return json.dumps(self._payload)
+
+    assert set(_KG_ACTION_PAYLOADS) == set(_KG_ONLY_ACTIONS)
+    for graph_action in _KG_ONLY_ACTIONS:
+        payload = dict(_KG_ACTION_PAYLOADS[graph_action],
+                       next_action=graph_action)
+        bind_chat_client(rrepo, "reasoning_agent", _Graph(payload))
+        rr = ReasoningRetriever.from_repository(
+            rrepo, rrepo.settings, fail_closed=True)
+        assert rr.enumeration_active(), "枚举闸必须开着,否则守卫是空的"
+        with pytest.raises(ValueError, match="invalid action"):
+            rr.reflect("布局布线怎么做", "候选", kg_actions=False)
+        # 同一份响应在有图 run 里照旧是合法动作(闸没有把它一起废掉)。
+        assert rr.reflect(
+            "布局布线怎么做", "候选").next_action == graph_action
+
+
+#: 「`reflect()` 压根没把这个参数传下去」与「传了 False」是两回事,不能都摊成
+#: None —— 前者说明接线断了,两条守卫都必须红。
+_KG_ACTIONS_NOT_PASSED = "<未传>"
+
+
+def _captured_reflect_kg_actions(run_once):
+    """跑一次完整 run,捕获 `run()` 经 `reflect()` 传给两个渲染函数的
+    `kg_actions` **实参**。
+
+    取值走 `inspect.signature(...).bind(...)` 而不是数位置:`reflect()` 对
+    `reflect_schema_hint` 是按位置传参的,写死 `args[5]` 会在任何一次参数增删或
+    改序之后悄悄取到**别的**参数——更糟的是取不到时会静默落到「没传」那条分支,
+    守卫于是变成一句恒真的话。绑定失败(签名对不上)会直接抛,不会静默通过。
+    """
+    import inspect
+
+    import app.services.reasoning_retrieval as rr_mod
+
+    seen = []
+    originals = {"prompt": rr_mod.reflect_prompt,
+                 "schema": rr_mod.reflect_schema_hint}
+
+    def _spy(kind):
+        original = originals[kind]
+
+        def _wrapped(*args, **kwargs):
+            bound = inspect.signature(original).bind(*args, **kwargs)
+            seen.append((kind, bound.arguments.get(
+                "kg_actions", _KG_ACTIONS_NOT_PASSED)))
+            return original(*args, **kwargs)
+
+        return _wrapped
+
+    rr_mod.reflect_prompt = _spy("prompt")
+    rr_mod.reflect_schema_hint = _spy("schema")
+    try:
+        run_once()
+    finally:
+        rr_mod.reflect_prompt = originals["prompt"]
+        rr_mod.reflect_schema_hint = originals["schema"]
+    assert seen, "reflect 必须真的被调用过"
+    assert {kind for kind, _value in seen} == {"prompt", "schema"}
+    return {value for _kind, value in seen}
+
+
+def test_reflect_is_told_kg_actions_is_on_for_a_notebook_with_a_kg(rrepo):
+    """有图 run 的守卫:`run()` 传给两个渲染函数的 `kg_actions` 必须是 True。
+
+    整轮 run 的输出对账(上面那条)只能证明「渲染结果里有那五个动作」;这条捕获
+    **实参**,把「有图 run 走的是默认那条路径」直接钉死——把闸接反(比如误传
+    `not kg_in_scope`)时它先红。
+    """
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    nb = _seed_two_nodes(rrepo)
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "RTL到GDSII流程"}]},
+        reflects=[{"next_action": "answer", "sufficient": True}]))
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    # 有图 run:`run()` 走「有才传」的空 kwargs 路径 ⇒ 两处都拿到默认 True。
+    assert _captured_reflect_kg_actions(
+        lambda: rr.run(nb.id, "RTL到GDSII流程", "")) == {True}
+
+
+def test_reflect_is_told_kg_actions_is_off_for_a_notebook_without_a_kg(rrepo):
+    """无图 run 的孪生守卫,也是整个 T2 **唯一**的生产接线点。
+
+    `run()` 里那行 `reflect_kwargs = {} if state.kg_in_scope else
+    {"kg_actions": False}` 是把闸真正接到生产路径上的唯一一句;把它改回 `{}`,
+    上面所有按 `kg_actions=False` **直接调** `reflect()`/渲染函数的用例照旧全绿,
+    只有这一条会红。所以它必须存在,而且必须走完整的 `run()`。
+    """
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    rrepo.settings.graph_ppr_enabled = False
+    nb = _seed_notebook_without_kg(rrepo)
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "布局布线"}]},
+        reflects=[{"next_action": "answer", "sufficient": True}]))
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    _stub_search_chunks(rr, [], {None: [_chunk_hit("ck-1")]})
+    assert _captured_reflect_kg_actions(
+        lambda: rr.run(nb.id, "布局布线怎么做", "")) == {False}
+
+
+def test_no_kg_run_opens_with_the_disclosure_step(rrepo):
+    """T2 披露步:无图 run 的第一条轨迹就是那句人话;有图 run 一步都不记。
+
+    ⚠ 这个库刻意**接上了库级理解**(`agent_profile` + 一行已写入的理解),所以
+    `_first_round_prompt_blocks` 真的会记一条 `profile` 步。不这么做的话「披露步
+    排在 prompt_blocks 之前」这条顺序契约只挡住一半:prompt_blocks 一步都不产出
+    时,把披露挪到它后面轨迹依然是同一个样子,变异不红。
+    """
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    rrepo.settings.graph_ppr_enabled = False
+    plan = {"sub_queries": [{"query": "布局布线"}]}
+    answer = [{"next_action": "answer", "sufficient": True}]
+
+    def _with_understanding(notebook_id):
+        """给这个库写一行「已有理解」,并把 store 接到 retriever 上。
+
+        `from_repository` 刻意不接 `agent_profile`(见工厂里的注释),所以走
+        Ask 的显式接线形状:`test_agent_profile_injection` 用的也是这一套。
+        """
+        rrepo.agent_profile.write_block(
+            notebook_id, "", "corpus_shape",
+            value="这个库主要是后端版图流程手册", evidence=[],
+            expected_revision=0, origin="job", actor="")
+        rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+        rr.agent_profile = rrepo.agent_profile
+        rr.profile_owner_id = "u1"
+        return rr
+
+    nb_no_kg = _seed_notebook_without_kg(rrepo)
+    bind_chat_client(rrepo, "reasoning_agent",
+                     _SeqLLM(plan=plan, reflects=list(answer)))
+    rr = _with_understanding(nb_no_kg.id)
+    _stub_search_chunks(rr, [], {None: [_chunk_hit("ck-1")]})
+    res = rr.run(nb_no_kg.id, "布局布线怎么做", "")
+
+    first = res.trace[0]
+    assert first.step_type == "skip"
+    assert first.detail == {"reason": "kg_unavailable"}
+    assert first.summary == "本笔记本尚未构建知识图谱,本轮只用原文检索与集合清单"
+    # skip 步不写 `result_ids`(Agentic Memory P4 硬规则)。
+    assert "result_ids" not in first.detail
+    # 顺序契约:披露步排在 `_first_round_prompt_blocks` 产出的那一步**之前**。
+    kinds = [t.step_type for t in res.trace]
+    assert "profile" in kinds, "理解块必须真的记了一步,否则这条顺序断言是空的"
+    assert kinds.index("profile") == 1, kinds
+
+    nb_kg = _seed_two_nodes(rrepo)
+    bind_chat_client(rrepo, "reasoning_agent",
+                     _SeqLLM(plan=plan, reflects=list(answer)))
+    res2 = _with_understanding(nb_kg.id).run(nb_kg.id, "布局布线怎么做", "")
+    assert not any(t.detail.get("reason") == "kg_unavailable"
+                   for t in res2.trace)
+    # 有图 run 里 prompt_blocks 那一步就是**第一**步(没有披露步插在它前面)。
+    assert res2.trace[0].step_type == "profile"
+
+
+def test_plan_drops_kg_node_types_only_when_the_scope_has_no_kg(rrepo, monkeypatch):
+    """T2 规划措辞的生产落点:plan() 真正发出的是 expand_query_prompt,它唯一的
+    图措辞由 want_types 门住。无图 run 关掉它;有图 run 与接入前逐字同参。"""
+    import app.services.query_rewrite as qr
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    seen = []
+
+    def _capture(*_a, **k):
+        seen.append(k.get("want_types"))
+        return qr.ExpandedQuery(query="x", sub_queries=[qr.SubQuerySpec("sub A")])
+
+    monkeypatch.setattr(qr, "expand_query", _capture)
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    rr.plan("问题")
+    rr.plan("问题", kg_available=False)
+    assert seen == [True, False]
+
+    # 端到端:无图库的首轮 plan 关掉 types,有图库保持 True。
+    #
+    # 不传 `max_steps`:本 fixture 没有配 reasoning chat client,`reflect()` 一进
+    # 门就走「未配置 ⇒ answer」那条早退,所以 run 必然在首轮之后立刻收束——用
+    # `max_steps=0` 去「限制步数」反而是假的:0 是 falsy,会被默认值悄悄顶掉。
+    seen.clear()
+    nb_no_kg = _seed_notebook_without_kg(rrepo)
+    rr.run(nb_no_kg.id, "布局布线是什么")
+    nb_kg = _seed_two_nodes(rrepo)
+    rr.run(nb_kg.id, "布局布线是什么")
+    assert seen == [False, True]

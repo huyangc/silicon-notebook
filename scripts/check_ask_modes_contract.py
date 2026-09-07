@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Cross-stack contract: the frontend's user-facing ask-mode ids
 (frontend/app/ask-modes.ts) must exactly equal the backend registry's
-user_facing ids (backend/app/services/ask_modes.py), and each mode's
-frontend ``streamsTrace`` must equal the backend's ``streaming``. Adding or
-renaming a mode on one side without the other — or claiming a live trace for an
-engine that never streams one — fails here. Run by scripts/check.sh."""
+user_facing ids (backend/app/services/ask_modes.py), each mode's frontend
+``streamsTrace`` must equal the backend's ``streaming``, and its frontend
+``requiresKg`` must equal the backend's ``requires_kg``. Adding or renaming a
+mode on one side without the other — claiming a live trace for an engine that
+never streams one, or gating submission on a graph the backend no longer
+requires — fails here. Run by scripts/check.sh."""
 from __future__ import annotations
 
 import re
@@ -42,20 +44,33 @@ def frontend_ids() -> list[str]:
     return ids
 
 
-def frontend_streams_trace() -> dict[str, bool]:
-    """`{id: streamsTrace}` — a mode missing the flag is a contract error, not
-    a silent default: the UI would then guess whether to show a live trace."""
+def _frontend_flags(field: str) -> dict[str, bool]:
+    """`{id: <field>}` for a boolean field of the built-in table — a mode
+    missing the flag is a contract error, not a silent default: the UI would
+    then guess whether to show a live trace / whether to gate submission."""
     flags: dict[str, bool] = {}
+    pattern = re.compile(rf"\b{re.escape(field)}:\s*(true|false)")
     for entry in _mode_entries():
         found = re.search(r'id:\s*"([A-Za-z0-9_]+)"', entry)
         if not found:
             continue
-        streams = re.search(r"streamsTrace:\s*(true|false)", entry)
-        if not streams:
+        flag = pattern.search(entry)
+        if not flag:
             raise SystemExit(
-                f"ask-modes.ts: mode {found.group(1)!r} has no streamsTrace flag")
-        flags[found.group(1)] = streams.group(1) == "true"
+                f"ask-modes.ts: mode {found.group(1)!r} has no {field} flag")
+        flags[found.group(1)] = flag.group(1) == "true"
     return flags
+
+
+def frontend_streams_trace() -> dict[str, bool]:
+    return _frontend_flags("streamsTrace")
+
+
+def frontend_requires_kg() -> dict[str, bool]:
+    """`{id: requiresKg}`. The frontend submit gate blocks a mode outright when
+    this is true and the notebook has no graph, so it must mirror the backend's
+    ``requires_kg`` exactly — a hard precondition, never a quality hint."""
+    return _frontend_flags("requiresKg")
 
 
 _PLUGIN_MODE_LITERAL = re.compile(
@@ -116,18 +131,29 @@ def main() -> int:
         print(f"  only backend: {sorted(backend - frontend)} | "
               f"only frontend: {sorted(frontend - backend)}", file=sys.stderr)
         return 1
-    frontend_streams = frontend_streams_trace()
-    drift = {
-        mode_id: (BACKEND_ASK_MODES[mode_id].streaming, frontend_streams[mode_id])
-        for mode_id in sorted(backend)
-        if BACKEND_ASK_MODES[mode_id].streaming != frontend_streams[mode_id]
-    }
-    if drift:
-        print("ask-mode streaming contract MISMATCH", file=sys.stderr)
-        for mode_id, (backend_flag, frontend_flag) in drift.items():
-            print(f"  {mode_id}: backend streaming={backend_flag} | "
-                  f"frontend streamsTrace={frontend_flag}", file=sys.stderr)
-        return 1
+    # (backend attribute, frontend field, frontend reader). Every boolean the
+    # two tables both carry is reconciled here; a flag reconciled on one side
+    # only is exactly how reasoning's requires_kg drifted apart before.
+    for backend_attr, frontend_field, reader in (
+        ("streaming", "streamsTrace", frontend_streams_trace),
+        ("requires_kg", "requiresKg", frontend_requires_kg),
+    ):
+        frontend_flags = reader()
+        drift = {
+            mode_id: (
+                getattr(BACKEND_ASK_MODES[mode_id], backend_attr),
+                frontend_flags[mode_id],
+            )
+            for mode_id in sorted(backend)
+            if getattr(BACKEND_ASK_MODES[mode_id], backend_attr)
+            != frontend_flags[mode_id]
+        }
+        if drift:
+            print(f"ask-mode {backend_attr} contract MISMATCH", file=sys.stderr)
+            for mode_id, (backend_flag, frontend_flag) in drift.items():
+                print(f"  {mode_id}: backend {backend_attr}={backend_flag} | "
+                      f"frontend {frontend_field}={frontend_flag}", file=sys.stderr)
+            return 1
     hard_coded = hard_coded_plugin_modes()
     if hard_coded:
         print("ask-mode plugin literal contract MISMATCH", file=sys.stderr)

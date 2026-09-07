@@ -21,9 +21,14 @@ class UnknownAskMode(ValueError):
 
 
 # Insertion order = display order for user_facing modes.
+# ``requires_kg`` is a hard precondition ("this engine cannot run without a
+# knowledge graph"), not a quality hint. Built-in reasoning is False: without a
+# graph it retrieves source passages and collection listings instead, and only
+# the graph-shaped actions drop out. The field stays on AskMode because plugin
+# engine descriptors may still declare True, and the frontend gate honours those.
 ASK_MODES: dict[str, AskMode] = {
     "chunk":     AskMode("chunk",     "ask_chunk",     "general", False, False, True),
-    "reasoning": AskMode("reasoning", "ask_reasoning", "strict",  True,  True,  True),
+    "reasoning": AskMode("reasoning", "ask_reasoning", "strict",  True,  False, True),
 }
 
 DEFAULT_MODE = "chunk"

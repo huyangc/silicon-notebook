@@ -52,14 +52,18 @@ from tests.test_reasoning_retrieval import (
     _SeqLLM,
     _mk_rk,
     _retriever_counting_exact_lookup,
+    _chunk_hit,
     _seed_manual_notebook,
+    _seed_notebook_without_kg,
     _seed_two_nodes,
+    _stub_search_chunks,
     rrepo,  # noqa: F401 -- pytest fixture, resolved by name
 )
 
 
 # --------------------------------------------------------------- write side
-# reasoning_retrieval.py's eight emit sites (修复轮 spec①新增第⑧个).
+# reasoning_retrieval.py's ten emit sites (修复轮 spec①新增第⑧个;
+# search_chunks 的播种与动作两处是第⑨/⑩个).
 
 
 def test_initial_retrieve_step_carries_result_ids(rrepo):
@@ -396,6 +400,88 @@ def test_exact_lookup_action_step_writes_empty_result_ids_on_zero_hits(rrepo):
     assert step.detail["result_ids"] == []
 
 
+def test_chunk_seed_step_carries_result_ids_and_zero_hit_writes_empty_list(rrepo):
+    """⑨ 无图首轮的原文播种:内容 + 零命中两种形状。
+
+    零命中写 ``result_ids: []`` 而不是缺席——I/O 真的发起过,缺席是 skip 分支
+    才有的信号。"""
+    nb = _seed_notebook_without_kg(rrepo)
+    rrepo.settings.graph_ppr_enabled = False
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "布局布线"}]},
+        reflects=[{"next_action": "answer", "sufficient": True}]))
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    _stub_search_chunks(rr, [], {None: [_chunk_hit("ck-s1"), _chunk_hit("ck-s2")]})
+    res = rr.run(nb.id, "布局布线怎么做", "")
+    step = next(t for t in res.trace if t.step_type == "search_chunks")
+    assert step.detail["result_ids"] == ["ck-s1", "ck-s2"]
+    assert step.detail["phase"] == "seed"
+
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "布局布线"}]},
+        reflects=[{"next_action": "answer", "sufficient": True}]))
+    rr2 = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    _stub_search_chunks(rr2, [], {})
+    res2 = rr2.run(nb.id, "布局布线怎么做", "")
+    step2 = next(t for t in res2.trace if t.step_type == "search_chunks")
+    assert step2.detail["found"] == 0
+    assert step2.detail["result_ids"] == []
+    assert "result_ids" in step2.detail          # 键必须存在,不能缺席
+
+
+def test_search_chunks_action_step_carries_result_ids(rrepo):
+    """⑩ search_chunks 动作步:与播种不同的新 chunk,证明这是独立写点。"""
+    nb = _seed_two_nodes(rrepo)
+    rrepo.settings.graph_ppr_enabled = False
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "布局布线"}]},
+        reflects=[{"next_action": "search_chunks", "chunks_query": "布局"},
+                  {"next_action": "answer", "sufficient": True}]))
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    _stub_search_chunks(rr, [], {"布局": [_chunk_hit("ck-action")]})
+    res = rr.run(nb.id, "布局布线怎么做", "")
+    step = next(t for t in res.trace if t.step_type == "search_chunks")
+    assert step.detail["result_ids"] == ["ck-action"]
+    assert step.detail["query"] == "布局"
+    assert "phase" not in step.detail            # 动作步不是 seed
+
+
+def test_search_chunks_action_step_writes_empty_result_ids_on_zero_hits(rrepo):
+    """⑩ 的零命中形状——动作调用返回空列表。"""
+    nb = _seed_two_nodes(rrepo)
+    rrepo.settings.graph_ppr_enabled = False
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "布局布线"}]},
+        reflects=[{"next_action": "search_chunks", "chunks_query": "布局"},
+                  {"next_action": "answer", "sufficient": True}]))
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    _stub_search_chunks(rr, [], {})
+    res = rr.run(nb.id, "布局布线怎么做", "")
+    step = next(t for t in res.trace if t.step_type == "search_chunks")
+    assert step.detail["found"] == 0
+    assert step.detail["result_ids"] == []
+
+
+def test_search_chunks_cap_skip_never_writes_result_ids(rrepo):
+    """硬判据的另一半,对新通道同样成立:`chunk_search_cap` 是 skip,不写键。"""
+    nb = _seed_two_nodes(rrepo)
+    rrepo.settings.graph_ppr_enabled = False
+    rrepo.settings.reasoning_max_chunk_searches = 0
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "布局布线"}]},
+        reflects=[{"next_action": "search_chunks", "chunks_query": "布局"},
+                  {"next_action": "answer", "sufficient": True}]))
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    calls = []
+    _stub_search_chunks(rr, calls, {"布局": [_chunk_hit("ck-nope")]})
+    res = rr.run(nb.id, "布局布线怎么做", "")
+    assert calls == []                           # 上限为 0 ⇒ 一次 I/O 都没有
+    skip = next(t for t in res.trace
+                if t.step_type == "skip"
+                and t.detail.get("reason") == "chunk_search_cap")
+    assert "result_ids" not in skip.detail
+
+
 def test_skip_branches_never_write_result_ids(rrepo):
     """硬判据的另一半:skip 分支一个都不写 ``result_ids`` 键。
 
@@ -414,6 +500,28 @@ def test_skip_branches_never_write_result_ids(rrepo):
                if t.step_type == "skip"
                and t.detail.get("reason") == "exact_term_not_identifier")
     assert "result_ids" not in skip.detail
+
+
+def test_kg_unavailable_disclosure_step_never_writes_result_ids(rrepo):
+    """T2 的无图披露步同属 skip 分支:零 I/O ⇒ 不写这把键。
+
+    它是唯一一个**不是**「某个动作被跳过」而是「向读轨迹的人交代一句」的 skip,
+    所以单独钉一次——把它误写成 retrieve 类步(或顺手补上 result_ids)会让经验
+    投影把这句人话当成一次检索计进闭集词表。
+    """
+    nb = _seed_notebook_without_kg(rrepo)
+    rrepo.settings.graph_ppr_enabled = False
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "布局布线"}]},
+        reflects=[{"next_action": "answer", "sufficient": True}]))
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    _stub_search_chunks(rr, [], {None: [_chunk_hit("ck-1")]})
+    res = rr.run(nb.id, "布局布线怎么做", "")
+    skip = next(t for t in res.trace
+                if t.step_type == "skip"
+                and t.detail.get("reason") == "kg_unavailable")
+    assert "result_ids" not in skip.detail
+    assert skip.detail == {"reason": "kg_unavailable"}
 
 
 # ------------------------------------------------------- ask_service.py write

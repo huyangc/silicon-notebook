@@ -309,7 +309,8 @@ class RetrievalService:
 
         R1 is preserved: only the BASE dimension is consulted. The active
         notebook is dropped from the participant list and answered separately
-        by ``has_kg`` at both call sites, so narrowing local sources cannot
+        by the ``has_kg`` half of the same expression, so narrowing local
+        sources cannot
         touch this and unchecking a reference library cannot disable the active
         notebook's own channels.
 
@@ -319,8 +320,13 @@ class RetrievalService:
         CHECKED library, short-circuited by ``any()`` -- and zero of the latter
         when every library is unchecked, which is cheaper than before. Paid
         once per run, only on reasoning/graph and only when the active notebook
-        has no graph of its own (both call sites short-circuit on ``has_kg``
-        first).
+        has no graph of its own (the ``or`` in
+        ``reasoning_retrieval.kg_in_scope_for`` short-circuits on ``has_kg``
+        first). That helper is now the SINGLE evaluation point -- both
+        consumers of this fact (``ask_service``'s ``no_usable_kg`` early exit
+        and ``ReasoningRetriever``'s no-graph seeding) read it through the same
+        request-level memo, so the pair is computed at most once per request
+        rather than once per call site.
 
         Deliberately gated on ``base_scope_ceiling_active``, not
         ``base_scope_restricted``: a full selection is still a FROZEN

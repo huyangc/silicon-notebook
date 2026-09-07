@@ -2095,6 +2095,23 @@ def complete_row(
         # JSON-envelope query, so turn it off explicitly for the same
         # defense-in-depth reason as its neighbors above.
         reasoning_retriever.allow_consult_memory = False
+        # Raw-passage retrieval (the `search_chunks` action AND the no-graph
+        # first-round seed) is off here for three independent reasons, any one
+        # of which is enough:
+        #   1. The retrieval string is the same JSON envelope that already
+        #      disqualified exact lookup above (table_title/known_cells/
+        #      content_md). Embedding an envelope and MMR-selecting against it
+        #      retrieves whatever the envelope's boilerplate looks like, not
+        #      what the empty cell needs.
+        #   2. On a notebook with no graph the seed is UNCONDITIONAL and
+        #      concurrent: one full chunk recall per sub-query, on completion's
+        #      critical path, for every single completion request — the exact
+        #      cost profile this profile turns PPR/community/enumeration off to
+        #      avoid.
+        #   3. Completion runs `fail_closed=True`, so a transient chunk-recall
+        #      failure inside the seed pass propagates and escalates into a
+        #      failure of the whole completion instead of a missing channel.
+        reasoning_retriever.allow_search_chunks = False
         reasoning_retriever.untrusted_evidence = True
         reasoning_result = reasoning_retriever.run(
             notebook_id,

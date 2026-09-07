@@ -201,6 +201,14 @@ class _MinimalRetrieval:
     def ppr_retrieve(self, notebook_id, question):
         return []
 
+    # KG 可用性对随 `kg_in_scope_for` 的单点求值搬到 `RetrievalPort` 上,
+    # `no_usable_kg` 因此从 retrieval 座位读(候选生产座位不再声明它们)。
+    def has_kg(self, notebook_id):
+        return True
+
+    def any_base_has_kg(self, notebook_id):
+        return False
+
 
 class _MinimalEvidence:
     def tier_map(self, notebook_ids):
@@ -361,8 +369,8 @@ def test_reasoning_complete_knowhow_bypasses_ranked_top_n_and_model():
 def test_reasoning_hybrid_without_kg_keeps_batch_coverage_metadata():
     service = _minimal_ask_service()
     service.knowhow_store = _EnumerableKnowhow()
-    service.candidates.has_kg = lambda notebook_id: False
-    service.candidates.any_base_has_kg = lambda notebook_id: False
+    service.retrieval.has_kg = lambda notebook_id: False
+    service.retrieval.any_base_has_kg = lambda notebook_id: False
 
     response = service.ask_reasoning(
         "nb",
@@ -377,7 +385,10 @@ def test_reasoning_hybrid_without_kg_keeps_batch_coverage_metadata():
     assert response.result_coverage is not None
     assert response.result_coverage.complete is True
     assert response.result_coverage.returned_rows == 100
-    assert "尚未构建知识图谱" in response.conclusion
+    # 这个 stub 服务连来源计数都拿不到(地图端口是空的),所以仍走早退——文案是
+    # 「范围里没有来源」而不是「先建图」:图不再是 reasoning 的前提。
+    assert "当前检索范围内没有可用来源" in response.conclusion
+    assert "知识图谱" not in response.conclusion
 
 
 def test_reasoning_conditional_complete_query_does_not_claim_full_table():
