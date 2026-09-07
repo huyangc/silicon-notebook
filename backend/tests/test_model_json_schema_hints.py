@@ -533,3 +533,70 @@ def test_an_unadvertised_key_that_is_not_tolerated_is_still_rejected():
     with pytest.raises(ModelJsonRepairError) as caught:
         parse_model_json_object(f"{payload[:-1]},}}", hint, allow_repair=True)
     assert caught.value.reason == "unknown_key"
+
+
+def test_v2_malformed_sufficient_and_arguments_are_rejected_before_the_parser():
+    """F1(复审):`parse_reflect_v2` 里 `_V2_INVALID_SUFFICIENT`/
+    `_V2_INVALID_ARGUMENTS_OBJECT` 两支在生产不可达——真实形状闸先拒。
+
+    schema hint 写的是 `"sufficient":false` / `"arguments":{}`,一个非布尔的
+    `sufficient` 或非对象的 `arguments` 在到达 `parse_reflect_v2` 之前就已经被
+    这个真实的传输层校验函数以 `invalid_boolean`/`invalid_type` 拒绝,重试耗尽
+    后走既有 fail-open 合同。解析层那两支分支只为测试替身与 fail_closed 调用方
+    的纵深防御保留,钉住这一点是为了不让文档/代码合同再次分叉。
+    """
+    hint = prompts.reflect_v2_schema_hint(_v2_capabilities())
+
+    bad_sufficient = json.dumps({
+        "next_action": "answer", "sufficient": "false", "arguments": {},
+        "reason": "done",
+    }, ensure_ascii=False)
+    with pytest.raises(ModelJsonRepairError) as caught:
+        validate_model_json_shape(bad_sufficient, hint)
+    assert caught.value.reason == "invalid_boolean"
+
+    bad_arguments = json.dumps({
+        "next_action": "answer", "sufficient": True, "arguments": "x",
+        "reason": "done",
+    }, ensure_ascii=False)
+    with pytest.raises(ModelJsonRepairError) as caught:
+        validate_model_json_shape(bad_arguments, hint)
+    assert caught.value.reason == "invalid_type"
+
+
+def test_nested_assessment_key_is_only_tolerated_at_the_root():
+    """F4(复审):`assessment` 的具名豁免只在根级生效,嵌套同名键仍是 unknown_key。
+
+    `_TOLERATED_UNADVERTISED_KEYS` 曾经在 `_validate_against_example` 的递归
+    dict 分支里生效,于是任意深度的 `assessment` 键都能逃过 `unknown_key`。
+    `arguments` 是开放对象、本身不检查未知键,所以借道 legacy hint 的 `expand`
+    分支——一个非开放的嵌套 dict——来钉住这一点。
+    """
+    hint = prompts.reflect_schema_hint(kg_actions=True)
+    payload = json.dumps({
+        "next_action": "expand_graph",
+        "sufficient": False,
+        "expand": {"object_id": "ko-1", "edge_type": None, "direction": "out",
+                   "assessment": {"x": 1}},
+        "reason": "done",
+    }, ensure_ascii=False)
+
+    with pytest.raises(ModelJsonRepairError) as caught:
+        parse_model_json_object(f"{payload[:-1]},}}", hint, allow_repair=True)
+    assert caught.value.reason == "unknown_key"
+
+
+def test_root_level_assessment_key_survives_repair_on_the_legacy_hint():
+    """根级豁免对 legacy hint(顶层同样不是开放对象)一样成立,不止 v2。"""
+    hint = prompts.reflect_schema_hint(kg_actions=True)
+    payload = json.dumps({
+        "next_action": "answer",
+        "sufficient": True,
+        "assessment": {"x": 1},
+        "reason": "done",
+    }, ensure_ascii=False)
+
+    parsed = parse_model_json_object(
+        f"{payload[:-1]},}}", hint, allow_repair=True)
+    assert parsed.repaired is True
+    validate_model_json_shape(parsed.content, hint)

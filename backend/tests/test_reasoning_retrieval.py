@@ -6436,6 +6436,48 @@ def test_v2_spent_follow_chain_quota_leaves_the_action_out_of_the_prompt(
     assert "follow_chain_cap" not in reasons
 
 
+def test_v2_enumeration_budget_exhaustion_is_an_observation_not_a_dead_run(
+    rrepo
+):
+    """枚举预算(复审 F5):三池共用一个 run 级配额,不是逐动作的一个数字。
+
+    与上面几条"配额读数守卫"同一类回归,换成枚举那三个共用池(行/页/载荷)之一
+    到 0 的形状。耗尽后 `enumerate_elements`/`enumerate_kg_objects` 必须一起从
+    下一轮 prompt 摘掉;模型仍硬选时记 `unavailable_action:enumeration_budget`,
+    执行处那条纵深防御的 `enumeration_budget` skip(评审 F1/`_unsafe_scope_
+    restricted` 那一支同类)绝不该被走到——那支只服务测试替身与畸形响应。
+    """
+    from dataclasses import replace
+    from app.core.ask_retrieval_policy import ask_retrieval_limits
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    nb = _seed_two_nodes(_v2_repo(rrepo))
+    # 库里恰好一个 claim,行池设成 1:第一次 enumerate_kg_objects(object_type=
+    # claim) 一次就把行池吃到 0,页/载荷池仍留有余量——精确钉住行池这一维。
+    limits = replace(ask_retrieval_limits("standard"), enum_rows_per_run=1)
+    llm = _GatedV2LLM(
+        plan={"sub_queries": [{"query": "RTL到GDSII流程"}]},
+        reflects=[
+            {"next_action": "enumerate_kg_objects", "sufficient": False,
+             "arguments": {"object_type": "claim"}, "reason": "先看有哪些论断"},
+            {"next_action": "enumerate_kg_objects", "sufficient": False,
+             "arguments": {"object_type": "procedure"},
+             "reason": "配额已尽还想再来"},
+            {"next_action": "answer", "sufficient": True, "arguments": {}},
+        ])
+    bind_chat_client(rrepo, "reasoning_agent", llm)
+    result = ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(
+        nb.id, "RTL到GDSII流程", "", limits=limits)
+
+    assert "enumerate_kg_objects" in llm.prompt_actions(0)
+    assert "enumerate_elements" not in llm.prompt_actions(1)
+    assert "enumerate_kg_objects" not in llm.prompt_actions(1)
+    reasons = _skip_reasons(result)
+    assert "unavailable_action:enumeration_budget" in reasons
+    # 投影已经在模型面前把两个枚举动作都摘掉了,执行处那条预算 skip 不该被走到。
+    assert "enumeration_budget" not in reasons
+    assert result.trace[-1].step_type == "answer"
+
+
 def test_v2_answer_and_consult_must_send_an_empty_arguments_object():
     """`answer`/`consult_memory` 携带非空 arguments 记 invalid(设计稿 §5.2)。
 
@@ -6468,9 +6510,22 @@ def test_capabilities_scope_restriction_names_the_enumeration_reason_correctly()
     执行处的纵深防御分支记的是 `source_scope_unsafe_channel`;投影报
     `enumeration_disabled` 的话,"prompt 说不可用"与"执行处 skip 了"在排查时对不
     上同一个词——而本模块承诺复用执行处的 skip reason。
+
+    `scope_restricted=True` 与 `enumeration_active=True` 同时成立在生产不可达
+    ——调用方的 `ReasoningRetriever.enumeration_active()` 已经把
+    `not self._unsafe_scope_restricted()` 折进了这个布尔值本身,所以真实调用永
+    远不会喂进"范围收窄但 enumeration_active 仍是 True"这个组合(复审 F2)。用它
+    做夹具时,`_first_blocker` 无论先查 scope 还是先查 enum 接线都会因为
+    `enumeration_active=True` 让第二项检查天然通过,于是这条用例哪怕守卫顺序被
+    改错也照样绿——测的是一个测不到优先级的组合。换成生产可达的组合
+    (`enumeration_active=False`,与真实折叠后的取值一致):范围收窄本身仍应
+    赢在接线检查之前,原因码仍是 `source_scope_unsafe_channel` 而不是
+    `enumeration_disabled`——这才是对"范围收窄排在接线检查之前"这条优先级的真
+    实钉子。
     """
     from app.services.reasoning_actions import build_reflect_capabilities
-    caps = build_reflect_capabilities(_full_house_facts(scope_restricted=True))
+    caps = build_reflect_capabilities(
+        _full_house_facts(scope_restricted=True, enumeration_active=False))
     for action in ("enumerate_elements", "enumerate_kg_objects"):
         assert caps.reason_for(action) == "source_scope_unsafe_channel"
     # 范围没收窄时仍然按接线/预算报自己的原因。
