@@ -35,6 +35,8 @@ from app.services.agent_profile_block import (
 )
 from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
 from app.services.citation_markers import LOOSE_MARKER_RE
+from app.services.document_overview import overview_intent
+from app.services.model_work import MalformedModelResponse
 from app.services.collection_catalog import (
     ENUMERABLE_ELEMENT_KINDS, ENUMERABLE_KG_OBJECT_TYPES,
 )
@@ -153,6 +155,137 @@ NO_NEW_EVIDENCE_NOTE = (
     "且继续同类检索难有新增,请直接选择 next_action=answer,并在答案中"
     "如实说明依据不足、据现有信息推理;不要为凑证据而重复无效检索。)"
 )
+
+# **首轮**空手时的提示。与上面那条的区别是根本性的:上一条讲的是「查过好几轮都
+# 没新增了」——此时直接作答是合理收尾;而首轮零命中最常见的成因是查询措辞与语料
+# 不匹配(中文元问题打英文语料)或问题本身是目录/清单类,此时把 NO_NEW_EVIDENCE_
+# NOTE 那句「请直接选择 answer」送上去,等于在模型还一条通道都没换过的时候就劝它
+# 零证据合成 —— 这正是生产复现里「答案只剩集合地图计数」的最后一环。
+#
+# 中间那句**建议**按本 run 真实开着的动作拼装,不能写死。写死会点名两个动作,
+# 而 knowhow 补全那档正好把它们**双双关掉**且 `fail_closed=True`:模型照提示选
+# `search_chunks` → 不在白名单 → `reflect()` 在 fail_closed 下 `ValueError` →
+# 整轮检索硬失败。提示词与动作白名单必须同源,这与 reflect prompt / schema /
+# `allowed_actions` 三处同步是同一条纪律。
+def first_round_empty_note(chunk_search: bool, enumeration: bool) -> str:
+    """首轮空手提示。两把闸决定建议句提哪些通道(闸全关时只说「换一个」)。"""
+    advice = (
+        "用语料语言的关键词做 search_chunks、或用 enumerate 列目录/清单"
+        if chunk_search and enumeration else
+        "用语料语言的关键词做 search_chunks" if chunk_search else
+        "用 enumerate 列目录/清单" if enumeration else
+        "换一个可用的检索通道或改写查询"
+    )
+    return (
+        "（系统提示:首轮检索未命中任何证据。这通常是查询措辞与语料不匹配"
+        f"(语言、术语)或问题属于目录/清单类。请先换通道或改写查询——{advice}"
+        "——不要在零证据下直接作答;"
+        "只有多次尝试仍无命中时才 answer 并如实说明依据不足。)"
+    )
+
+
+# 兜底原因里模型自由文本(非法动作名)的宽度上限。畸形响应可以把一整篇正文塞进
+# next_action,而这个串既上屏(trace summary)又进 detail。
+_REFLECT_FALLBACK_VALUE_CHARS = 60
+# `MalformedModelResponse` 的稳定错误码(`model_work` 里由构造函数钉死)。见
+# `_reflect_fallback_reason` 里为什么按码而不是按异常类型分支。
+_MALFORMED_RESPONSE_CODE = "malformed_response"
+# `_stable_error_code` 的兜底档:它对一切认不出来的异常都返回这一个值,信息量
+# 不比类名多,所以那一档退回类名(本地 bug 要的正是类名)。
+_GENERIC_PROVIDER_CODE = "provider_error"
+# 兜底原因里属于「模型回了话但这句话没法用」的那一族。用于把轨迹 summary 写成
+# 人话,不参与任何判据。除了这里列的两个本地原因(非对象 / 非法动作)之外,其余
+# 全部来自 `ModelJsonRepairError.reason`——那是一份封闭的、由校验层拥有的词表,
+# 所以在这里显式抄一份比按前缀猜要稳。不在集合里的原因(provider 错误码、
+# 模型未配置、异常类名)一律算「模型调用失败」。
+_REFLECT_REJECTION_REASONS = frozenset({
+    "non_object", _MALFORMED_RESPONSE_CODE,
+    "empty", "incomplete_object", "invalid_boolean", "invalid_enum",
+    "invalid_json", "invalid_type", "missing_expected_key",
+    "non_finite_number", "non_json_value", "non_string_key",
+    "repair_failed", "serialization_failed", "string_changed",
+    "unknown_key", "unsupported_syntax",
+})
+_REFLECT_INVALID_ACTION_PREFIX = "invalid_action:"
+
+
+def _reflect_fallback(reason: str) -> "ReflectDecision":
+    """fail-open 兜底的唯一产地:决定本身带上「我是兜底、原因是什么」。
+
+    标记走**两个专用字段**(`fallback` / `fallback_reason`)而不是 `reason` 上的
+    一个字符串前缀:`reason` 是模型可控的自由文本,一个吐出
+    ``"reflect_fallback:证据够了"`` 的响应就能把自己伪装成兜底(反过来也一样),
+    而这个标记正是用来区分「模型判的」与「我们兜的」——判据不能落在被判据方
+    能写的那一格里。
+    """
+    return ReflectDecision(
+        sufficient=True, next_action="answer",
+        fallback=True, fallback_reason=reason,
+    )
+
+
+def _reflect_fallback_reason(exc: BaseException) -> str:
+    """把一次模型调用失败折成一个稳定的兜底原因码。
+
+    **按 `.code` 分支,不按异常类型。**生产的 reflect client 是
+    `ScheduledJsonChatClient`,它的 `_resolve` 把一切异常重抛成
+    `ModelInvocationError`——那是 `MalformedModelResponse` 的**兄弟**类而不是
+    子类(`model_provider.py::_invocation_error`),所以 `except
+    MalformedModelResponse` 在生产里永不触发,只会匹配到直接抛裸类型的测试替身
+    (`catalog_job.py` 里登记过同一个坑并给出同一条裁决)。`code` 是刻意稳定、
+    脱敏的那一格,所以它才是能分支的东西。
+
+    真正有用的原因(`invalid_enum` …)还要再往下一层:重抛时
+    `ModelInvocationError.__cause__` 是 `MalformedModelResponse`,而
+    `ModelJsonRepairError.reason` 挂在**它**的 `__cause__` 上。所以沿
+    `__cause__`/`__context__` 链向下找第一个带非空 `.reason` 的异常,而不是只看
+    一层。
+    """
+    code = str(getattr(exc, "code", "") or "").strip()
+    if code == _MALFORMED_RESPONSE_CODE or isinstance(exc, MalformedModelResponse):
+        seen: set[int] = set()
+        cursor: BaseException | None = exc
+        while cursor is not None and id(cursor) not in seen:
+            seen.add(id(cursor))
+            reason = str(getattr(cursor, "reason", "") or "").strip()
+            if reason:
+                return reason[:_REFLECT_FALLBACK_VALUE_CHARS]
+            cursor = cursor.__cause__ or cursor.__context__
+        return _MALFORMED_RESPONSE_CODE
+    if code:
+        # 已经分过类的异常(`ModelInvocationError` / `ModelSchedulingError`)自带
+        # 稳定码,直接用。**不能**把它再喂给 `_stable_error_code`:那个函数按原始
+        # 异常的 status_code/类型分类,对一个已经折叠好的 `ModelInvocationError`
+        # 只会认不出来、退回泛化档,把 `provider_unavailable` 丢成 `provider_error`。
+        return code[:_REFLECT_FALLBACK_VALUE_CHARS]
+    try:
+        from app.services.model_provider import _stable_error_code
+    except ImportError:  # pragma: no cover — 只为不让排查用的分类拖垮兜底
+        return type(exc).__name__
+    classified = _stable_error_code(exc)
+    # 泛化档不比类名多任何信息,而类名正是排查本地 bug(比如这里自己 json.loads
+    # 炸了)要的东西。
+    return (classified if classified and classified != _GENERIC_PROVIDER_CODE
+            else type(exc).__name__)
+
+
+def _reflect_step_summary(decision: "ReflectDecision") -> str:
+    """reflect 步上屏的那一行。兜底轮说人话,正常轮维持原样。
+
+    上屏文案是给人读的,机器原因只进 `detail.fallback_reason`——前端
+    (`reasoning-trace.ts`)因此一个字都不用改。
+    """
+    if not decision.fallback:
+        return decision.reason or decision.next_action
+    reason = decision.fallback_reason
+    rejected = (
+        reason in _REFLECT_REJECTION_REASONS
+        or reason.startswith(_REFLECT_INVALID_ACTION_PREFIX)
+    )
+    return (
+        f"反思结果无法采用（校验拒绝：{reason}），按直接作答处理"
+        if rejected else "反思结果无法采用（模型调用失败），按直接作答处理"
+    )
 
 # 集合枚举动作的两个稳定 id。合起来是一件事(一个 run 级预算池、一份续跑账目、
 # 一个 trace 步类型),分开只在于取哪一类白名单与调哪个执行器方法。
@@ -1793,6 +1926,13 @@ class ReflectDecision:
     # reflect() 在这一层根本不知道候选是什么。
     outline_sections: List[OutlineSection] = field(default_factory=list)
     reason: str = ""
+    # 这份决定不是模型判的,而是 `reflect()` 的 fail-open 兜底(见
+    # `_reflect_fallback`)。两个字段都**不来自模型**:`reason` 是模型可控的自由
+    # 文本,把兜底标记编进它就等于让被判据方自己写判据。`fallback_reason` 是稳定
+    # 的机器码(`invalid_enum` / `provider_rate_limited` / `model_unconfigured`…),
+    # run() 据它在 reflect 步 detail 上写稀疏键、并把上屏那行换成中文整句。
+    fallback: bool = False
+    fallback_reason: str = ""
 
 
 @dataclass
@@ -1905,12 +2045,22 @@ class _ReasoningRunState:
     能从 `run` 里搬成独立、可单测的阶段:那些阶段之间靠十几个可变容器与计数器
     交接,不给它们一个显式载体就只能继续挤在同一个函数里。
 
-    ⚠ **它是首轮与 reflect 循环之间的一次性交接,不是全程的状态权威。**`run`
-    在首轮结束后把它整体解包成局部名,此后 reflect 循环与收尾只读写那些局部名,
-    再也不回看这个对象——所以本对象上的标量字段(`steps`/`stale`/`enum_*` 等)
-    在解包之后就是陈旧值。可变容器(dict/list/set)是同一个对象,两侧看到的一直
-    是同一份数据。这样安排是为了让 reflect 循环本体一个字都不用改(本次结构项
-    刻意不动它),代价就是这条「解包之后别再读 state 标量」的纪律。
+    ⚠ **它主要是首轮与 reflect 循环之间的一次性交接,不是全程的状态权威。**`run`
+    在首轮结束后把绝大多数字段解包成局部名,此后循环与收尾只读写那些局部名——
+    被解包的标量(`steps`/`stale`/`outline_updates` …)在 `state` 上因此是陈旧
+    值,**别再从 `state` 读它们**。可变容器(dict/list/set)是同一个对象,两侧看到
+    的一直是同一份数据。
+
+    这条纪律有一组**明确的例外**,它们刻意不解包、全程以 `state` 为权威,读写
+    都必须走 `state.`:
+
+    * `enum_rows_used` / `enum_pages_used` / `enum_payload_used` —— 三个枚举预算池
+      的扣减发生在 `_run_enumeration` 里(它有两个调用点:首轮目录播种与循环里的
+      枚举动作),解包成局部名就会读到播种之前的旧数;
+    * `enumeration_active` / `kg_in_scope` —— run 级不变量,`_new_run_state` 算一次,
+      循环直读。
+
+    这样安排是为了让 reflect 循环本体一个字都不用改(本次结构项刻意不动它)。
 
     每个字段的注释说明它**由谁写、被谁读**。
     """
@@ -1918,6 +2068,11 @@ class _ReasoningRunState:
     # —— 冻结输入:由 `run` 的形参原样带入,任何阶段都只读 ——
     notebook_id: str
     question: str
+    # 用户**原样**输入的问题(不含已确认问题契约那段生成文本)。检索用的
+    # `question` 在高级界面确认合同后会变成「原问题 + 整段契约」的复合串,而目录
+    # 问法分类器(`overview_intent`)是按人写的问句钉的模板 —— 拿复合串去问它必然
+    # 不命中。空串 = 调用方没有区分这两者,判据回退到 `question`。
+    original_question: str
     history: str
     # `run(intent_queries=...)` 原样带入;只有规划阶段读它(去重成 reviewed_all)。
     intent_queries: object
@@ -1964,7 +2119,10 @@ class _ReasoningRunState:
     # —— 邻居展开截断账目:只有 reflect 的 expand_graph 分支写 ——
     neighbor_truncated: Dict[str, str]
 
-    # —— 类型化集合枚举:地图由首轮建,预算池与续跑账目由 reflect 循环消费 ——
+    # —— 类型化集合枚举:地图由首轮建;预算池与续跑账目有**两个**写者 ——
+    # 首轮的目录问法播种(`_first_round_catalog_seed`)与 reflect 循环的枚举动作,
+    # 两者都经 `_run_enumeration` 落账。因此这三个计数器是上面那组「不解包」的
+    # 例外之一:循环里一律直读 `state.enum_rows_used` 等,不拷贝成局部名。
     enum_rows_used: int
     enum_pages_used: int
     enum_payload_used: int
@@ -2524,12 +2682,13 @@ class ReasoningRetriever:
         `allowed_actions` **三处同时**消失——任何一处不同步,模型就会看到一个
         它调不动的动作,或反过来调一个没被告知的动作。"""
         raise_if_cancelled(self.cancel_event)
-        answer_decision = ReflectDecision(sufficient=True, next_action="answer")
         client = self.model_clients.chat("reasoning_agent")
         if not getattr(client, "configured", False):
             if self.fail_closed:
                 raise RuntimeError("reasoning model is not configured")
-            return answer_decision
+            # 未配置也是兜底:它与「模型判定证据够了」在轨迹上同形,而两者对
+            # 排查是天差地别的两件事(一个是部署没接好,一个是推理结论)。
+            return _reflect_fallback("model_unconfigured")
         enumeration = self.enumeration_active()
         # `search_chunks` 的闸是部署级 kill switch,所以在这里现算而不是像
         # outline/consult_memory 那样从调用处传进来:它不看档位、不看请求,
@@ -2567,7 +2726,7 @@ class ReasoningRetriever:
             if not isinstance(data, dict):
                 if self.fail_closed:
                     raise ValueError("reasoning model returned a non-object reflection")
-                return answer_decision
+                return _reflect_fallback("non_object")
             action = str(data.get("next_action", "answer"))
             # 白名单与 reflect_prompt 都**不随 flag 改写**(沿用 ppr_retrieve 立下的
             # 先例:不把开关串进 prompt 签名)。exact_lookup_enabled=False 时该动作
@@ -2593,13 +2752,27 @@ class ReasoningRetriever:
                 if enumeration and kg_actions else ()
             ) + ((OUTLINE_ACTION,) if outline else ()
             ) + ((CONSULT_MEMORY_ACTION,) if consult_memory else ())
-            if action not in allowed_actions:
+            action_rejected = action not in allowed_actions
+            rejected_action = ""
+            if action_rejected:
                 if self.fail_closed:
                     raise ValueError("reasoning model returned an invalid action")
+                # 判据是 `action_rejected` 这个 bool,**不是** `rejected_action`
+                # 这个串:空串 `next_action` 也是一个非法动作,而按串判会把它当
+                # 「没有被拒的动作」放过去,造出一条自称有理由的假决定——这正是
+                # 校验层放行空枚举串之后新长出来的形状(空串不再被 schema 拦下,
+                # 于是第一次真的走到了这里)。
+                rejected_action = action[:_REFLECT_FALLBACK_VALUE_CHARS]
                 action = "answer"
             sufficient_value = data.get("sufficient", False)
             if self.fail_closed and not isinstance(sufficient_value, bool):
                 raise ValueError("reasoning model returned invalid sufficient")
+            if action_rejected:
+                # 非法动作退成 answer 是 fail-open 合同的一部分,但它**不是**模型
+                # 说的「够了」:整份载荷的其余字段都是给那个不存在的动作填的,照
+                # 单收下只会让轨迹上留下一条自称有理由的假决定。走与其它兜底同一
+                # 个产地,原因带上被拒的动作名。
+                return _reflect_fallback(f"invalid_action:{rejected_action}")
             d = ReflectDecision(
                 sufficient=sufficient_value is True,
                 next_action=action, reason=str(data.get("reason", "")))
@@ -2735,10 +2908,14 @@ class ReasoningRetriever:
             return d
         except AskCancelled:
             raise
-        except Exception:
+        except Exception as exc:  # noqa: BLE001 — fail-open 合同,原因见兜底字段
             if self.fail_closed:
                 raise
-            return answer_decision
+            # 一条 except 管所有非取消异常,分类交给 `_reflect_fallback_reason`:
+            # 生产路径上拒收根本不是以 `MalformedModelResponse` 的形态到达这里的
+            # (见那个函数的说明),所以「畸形」与「调用失败」不能按 except 子句
+            # 分——那样分只在测试替身上成立。
+            return _reflect_fallback(_reflect_fallback_reason(exc))
 
     # --- 编排 ---
     def _quota_rerank(self, notebook_id, collected, used_queries, top_n):
@@ -2956,6 +3133,7 @@ class ReasoningRetriever:
             intent_queries=list(stage.intent_queries),
             limits=stage.limits,
             intent_detail=(stage.intent.as_json_mapping() if stage.intent else None),
+            original_question=stage.original_question,
         )
         if type(result) is not ReasoningResult:
             raise StageBoundaryError("invalid reasoning retrieval result")
@@ -2983,7 +3161,7 @@ class ReasoningRetriever:
 
     def _new_run_state(
         self, notebook_id, question, history, on_step, *,
-        max_steps, intent_queries, limits, intent_detail,
+        max_steps, intent_queries, limits, intent_detail, original_question="",
     ) -> "_ReasoningRunState":
         """解析本 run 的预算/开关并铺开 run 级账目(除 `_kg_in_scope` 那对 EXISTS 外零 I/O)。
 
@@ -3043,8 +3221,7 @@ class ReasoningRetriever:
             else ask_retrieval_limits(DEFAULT_RETRIEVAL_EFFORT)
         )
         enumeration_active = self.enumeration_active()
-        enum_rows_used = 0
-        enum_pages_used = 0
+        enum_rows_used = enum_pages_used = 0
         # 载荷预算与行/页预算一样是 **run 级** 的:`structured_payload_chars`
         # 是「一次问答最多返回多少结构化载荷」的公开契约(256k),不是「每个
         # 动作各来一份」。每次动作只发剩余额度,执行器据实回传本次消耗
@@ -3127,6 +3304,7 @@ class ReasoningRetriever:
         return _ReasoningRunState(
             notebook_id=notebook_id,
             question=question,
+            original_question=original_question,
             history=history,
             intent_queries=intent_queries,
             intent_detail=intent_detail,
@@ -3359,6 +3537,35 @@ class ReasoningRetriever:
         state.experience_block = experience_block
         state.experience_entries = experience_entries
         state.collection_map_text = collection_map_text
+
+    def _first_round_catalog_seed(self, state: "_ReasoningRunState") -> None:
+        """目录问法的确定性播种:原问题一望即知要文档目录时,先列一次。
+
+        沿用 PPR / 精确查找 / 无图原文那三条 seed 的同一条哲学——**不赌模型**。
+        「当前notebook的文章说明了什么」这类问题的答案就是那份目录,而让模型在
+        reflect 里自己选中目录动作要赌两件事:它读懂了动作说明,以及那一轮的响应
+        能通过 JSON 校验(生产上正是后者塌了)。判据是确定性的、与 chunk 模式的
+        文档介绍通道**同一个**分类器(`overview_intent`),所以两侧不会对同一句话
+        给出两种判断。
+
+        四把闸合成一个 `state.enumeration_active`(即 `enumeration_active()`):
+        部署 kill switch、两个集合服务在场、调用方策略位 `allow_enumeration`
+        (knowhow 补全关着它)、以及作用域未受限(受限 scope 本就禁用整集合枚举)。
+        再判一次等于把那个单点判据抄成两份。
+
+        执行走与 reflect 目录动作**同一个** `_run_enumeration`:同一个预算池、
+        同一份续跑账目,所以模型之后再选目录动作会被 `already_enumerated` 跳过,
+        而不是把同一份清单列两遍。有图无图都播种——目录与图无关。
+        """
+        if not state.enumeration_active:
+            return
+        intent = overview_intent(state.original_question or state.question)
+        if intent is None or intent.kind != "catalog":
+            return
+        self._run_enumeration(state, ReflectDecision(
+            next_action=ENUMERATE_ELEMENTS_ACTION,
+            enumerate_collection=ENUMERATE_SOURCES_COLLECTION,
+        ), phase="seed")
 
     def _first_round_plan(self, state: "_ReasoningRunState") -> None:
         """确定本轮的检索方向:已确认意图优先,否则调 `plan()`,并记 plan 步。"""
@@ -4100,10 +4307,18 @@ class ReasoningRetriever:
         """首轮:reflect 循环之前的全部确定性工作。
 
         阶段顺序本身是合同(每一条都有独立理由,见各阶段的原注释):
-        无图披露 → 理解/打法/地图注入 → 规划 → 初检索 → PPR seed → 精确查找
-        seed → 无图原文播种 → 空证据兜底 → 已确认方向补种。特别地,精确查找 seed 必须
-        排在 PPR seed **之后**,否则 PPR 那一步的 `seen_chunks` 去重与 `seeded`
-        计数会变;无图原文播种同理排在两条 seed 之后。
+        无图披露 → 理解/打法/地图注入 → 目录问法播种 → 规划 → 初检索 → PPR seed
+        → 精确查找 seed → 无图原文播种 → 空证据兜底 → 已确认方向补种。特别地,
+        精确查找 seed 必须排在 PPR seed **之后**,否则 PPR 那一步的 `seen_chunks`
+        去重与 `seeded` 计数会变;无图原文播种同理排在两条 seed 之后。
+
+        目录问法播种排在**规划之前**,理由是它要进候选:目录是这类问题的答案本身,
+        它必须先于 plan 步进入轨迹与候选摘要,第一次 reflect 才看得见它——排到
+        空证据兜底之后就晚了一整轮(那时首轮空手提示已经按「零证据」发出去了)。
+        它自己既不写 `collected/elements/chunks` 也不碰 `seen_chunks`,所以对后面
+        每一条 seed 的输入与计数都是中性的——三条既有 seed 的顺序断言因此逐字
+        成立。(它**不**依赖地图注入:枚举接线判据 `state.enumeration_active` 在
+        `_new_run_state` 里就算好了。)
         """
         notebook_id = state.notebook_id
         question = state.question
@@ -4130,6 +4345,7 @@ class ReasoningRetriever:
         try:
             self._first_round_kg_disclosure(state)
             self._first_round_prompt_blocks(state)
+            self._first_round_catalog_seed(state)
             self._first_round_plan(state)
             self._first_round_initial_search(state)
             self._first_round_ppr_seed(state, ppr_future)
@@ -4155,22 +4371,312 @@ class ReasoningRetriever:
 
         # 是否"上一步检索未带来新证据":喂回 reflect,让模型自主判断要不要直接作答。
         # 初检索 0 命中也视为无进展(提前提示模型 KG 可能为空)。
+        # 枚举行数与循环里的口径**必须同一份**(循环用
+        # `len(collected)+len(elements)+len(chunks)+len(chains)+state.enum_rows_used`):
+        # 首轮播种列出了整份文档目录却不数它,等于对模型说「一条证据都没查到」,
+        # 接着把首轮空手提示送上去——而那份目录恰恰就是目录问法要的答案。
         state.no_progress = not (
-            state.collected or state.elements or state.chunks)
+            state.collected or state.elements or state.chunks
+            or state.enum_rows_used > 0)
         # 确定性熔断: 连续无有效进展轮数; search_elements 累计执行次数。
         # 软提示(NO_NEW_EVIDENCE_NOTE)交模型自觉, stale 是硬熔断——模型若无视软提示
         # 反复请求同一已访问节点 / 反复 search_elements, 这里强制收尾, 不空转到上限。
         state.stale = 1 if state.no_progress else 0
 
+    def _run_enumeration(
+        self, state: "_ReasoningRunState", decision: "ReflectDecision",
+        *, phase: str = "",
+    ) -> None:
+        """执行一次集合枚举动作:预算 → 判重/校验 → 执行 → 记账 → trace。
+
+        **抽成方法是因为它有两个调用点**:reflect 循环里的动作分发,以及首轮
+        目录问法的确定性播种(`_first_round_catalog_seed`)。两处必须是同一个
+        预算池、同一份续跑账目(`state.enum_chains`)、同一种 trace 形状——否则
+        播种过的目录不会被模型后来那次目录动作按「已列全」跳过,同一份清单会被
+        列两遍、扣两次预算,而回喂账目里出现两条互相矛盾的覆盖率。
+
+        ``phase`` 只进 trace detail(稀疏键):播种与模型主动选之间的区别对
+        排查是第一位的,但它不改变任何执行语义,所以不进任何判据。**成功步与
+        每一条 skip 都带它**——只给成功步打标的话,「播种被预算/作用域挡掉了」
+        这件事在轨迹上与「模型选的那次被挡掉了」完全同形,而那正是最需要分清
+        的一种失败。
+        """
+        notebook_id = state.notebook_id
+        record = state.record
+        enum_chains = state.enum_chains
+        enum_limits = state.enum_limits
+        enumerations = state.enumerations
+        # 两个动作走同一条分支:预算池、续跑账目、trace 步类型都是一套,
+        # 差别只在取哪一份白名单、调执行器的哪个方法。
+        #
+        # 第三个集合(来源清单)从**参数**进来而不是从第三个动作 id
+        # (design doc §6.2 用户拍板):``enumerate.collection=="sources"``
+        # 时无论模型选了哪个 enumerate 动作,这一轮列的都是文档目录。它
+        # 优先于 kind/object_type——模型明确说了要哪个集合,再去猜它填的
+        # 那个 kind 是不是更可信,只会让同一个请求有两种解释。
+        # 按**非空**判定而不是再比一次字面量:解析期已经把这个字段收窄成
+        # 「"sources" 或空串」(与 kind/object_type 同形的白名单处理),校验
+        # 因此只有一处。再比一次会让那处白名单变成不可观测的冗余——坏掉也
+        # 没有任何测试会红。
+        is_sources = bool(decision.enumerate_collection)
+        is_elements = (
+            not is_sources
+            and decision.next_action == ENUMERATE_ELEMENTS_ACTION
+        )
+        collection = (
+            "sources" if is_sources
+            else "elements" if is_elements
+            else "kg_objects"
+        )
+        # sources 没有子类型,kind 恒为空串——下面那条「没指定条目类型」的
+        # skip 因此必须放它过去(见该分支的条件)。
+        kind = (
+            "" if is_sources
+            else decision.enumerate_kind if is_elements
+            else decision.enumerate_object_type
+        )
+        source_id = decision.enumerate_source_id if is_elements else ""
+        source_title = (
+            decision.enumerate_source_title if is_elements else ""
+        )
+        label = _collection_label(collection, kind)
+        # 「列出《某某》里的公式」只能按**名字**表达:内部 source id 从不
+        # 上屏,候选摘要与引用里给模型看的一直是来源标题。所以这里先做
+        # 一次确定性的名字→id 解析,再进下面所有以 source_id 为键的逻辑
+        # (续跑链的键、执行器的作用域校验)。给了 id 就以 id 为准——那说明
+        # id 本来就是服务端发出去的,不需要再猜。
+        # None = 本轮没做过解析(要么给了 id,要么根本没给名字)。
+        source_matches: "int | None" = None
+        source_truncated = False
+        resolve_error = ""
+        if kind and is_elements and not source_id and source_title:
+            try:
+                source_id, source_matches, source_truncated = (
+                    self.collection_enumeration.resolve_source_title(
+                        notebook_id, kind, source_title,
+                        cancel_event=self.cancel_event,
+                    )
+                )
+            except AskCancelled:
+                raise
+            except Exception as exc:  # noqa: BLE001 — 见下的 skip
+                # 解析不出来与「名字对不上」对用户是同一件事:这一个动作
+                # 做不成。绝不退成「那就枚举整个库吧」——那会把一个被限定
+                # 到单一来源的请求悄悄换成另一个问题的答案。
+                if self.fail_closed:
+                    raise
+                source_id, source_matches = "", 0
+                source_truncated = False
+                resolve_error = str(exc)[:120]
+        key = (collection, kind, source_id)
+        chain_state = enum_chains.get(key)
+        rows_left = enum_limits.enum_rows_per_run - state.enum_rows_used
+        pages_left = enum_limits.enum_pages_per_run - state.enum_pages_used
+        payload_left = (
+            enum_limits.structured_payload_chars - state.enum_payload_used
+        )
+        if not kind and not is_sources:
+            # 措辞按「该给什么」写,不是「你给错了」(exact_lookup 那条
+            # 教训):模型给了一个非法 collection 值时,它显然是在**试图**
+            # 请求某个集合,只回一句「没指定类型」会让它下一轮换一个同样
+            # 非法的值再试一次。所以这里点名唯一合法值,并把它给的原值
+            # 带进 detail 供排查(不上屏 —— trace summary 才上屏)。
+            rejected = decision.enumerate_collection_rejected
+            record(TraceStep(
+                step_type="skip",
+                summary=(
+                    f"跳过枚举(「{rejected[:60]}」不是可枚举的集合名;"
+                    "要列库里的文档请用 sources,其他集合按条目类型指定)"
+                    if rejected else
+                    "跳过枚举(没有指定可列出的条目类型)"
+                ),
+                detail={"reason": "enumeration_kind",
+                        "collection": collection,
+                        **({"requested_collection": rejected[:120]}
+                           if rejected else {}),
+                        **({"phase": phase} if phase else {})}))
+        elif source_matches is not None and (
+            source_truncated or source_matches != 1
+        ):
+            # 名字没有唯一对应的来源。detail 只报匹配个数与模型给的
+            # 名字,不报任何内部 id——它们从来就不该出现在轨迹里。
+            # (匹配数 2 的含义是「至少两个」,见 resolve_source_title:
+            # 扫到第二个就停,再往下数没有意义。truncated 则表示可查的
+            # 来源太多、解析器拒绝从前缀断言唯一,此时 matches 无意义。)
+            record(TraceStep(
+                step_type="skip",
+                summary=(
+                    f"跳过枚举{label}(可按名称查找的来源太多,"
+                    "无法确定是哪一个)"
+                    if source_truncated else
+                    f"跳过枚举{label}(没有名称匹配的来源)"
+                    if source_matches == 0 else
+                    f"跳过枚举{label}(名称匹配到多个来源,无法确定是哪一个)"
+                ),
+                detail={"reason": "enumeration_source_unresolved",
+                        "collection": collection, "kind": kind,
+                        "requested_title": source_title[:200],
+                        "matches": source_matches,
+                        "truncated": source_truncated,
+                        **({"error": resolve_error}
+                           if resolve_error else {}),
+                        **({"phase": phase} if phase else {})}))
+        elif chain_state is not None and chain_state.state == "complete":
+            record(TraceStep(
+                step_type="skip",
+                summary=f"跳过枚举{label}(本轮已全部列出)",
+                detail={"reason": "already_enumerated",
+                        "collection": collection, "kind": kind,
+                        **({"phase": phase} if phase else {})}))
+        elif chain_state is not None and chain_state.state == "conflict":
+            # 冲突是终态。重开一条链会把已经报出去的条目再列一遍,而前后
+            # 两段取自不同时刻的资料,拼起来既不完整也无法向用户解释。
+            record(TraceStep(
+                step_type="skip",
+                summary=f"跳过枚举{label}(资料有变动,无法继续)",
+                detail={"reason": "enumeration_conflict",
+                        "collection": collection, "kind": kind,
+                        **({"phase": phase} if phase else {})}))
+        elif rows_left < 1 or pages_left < 1 or payload_left < 1:
+            # 预算耗尽必须跳过而不是请求 0 行:EnumerationBudget 对非正
+            # 上限直接 ValueError,而一个「返回 0 条的部分结果」与真的截断
+            # 长得一模一样。三个池共用同一条 skip:对用户是同一句话
+            # (「本轮能列的已经列完了」),池的名字不该上屏。
+            record(TraceStep(
+                step_type="skip",
+                summary="跳过枚举(已达本轮可列出的条目上限)",
+                detail={"reason": "enumeration_budget",
+                        "collection": collection, "kind": kind,
+                        "rows_left": rows_left,
+                        "pages_left": pages_left,
+                        "payload_left": payload_left,
+                        **({"phase": phase} if phase else {})}))
+        else:
+            listed = None
+            try:
+                # 构造在 try 之内:一个被改坏的档位(某个 enum_* 配成 0)会让
+                # EnumerationBudget 直接 ValueError,而这个异常一旦穿出 run()
+                # 就会被 ask_service 的 broad except 吞成「整轮检索失败」——
+                # 用户看到的是「依据不足」,而不是「这一个动作没跑」。
+                budget = EnumerationBudget(
+                    page_size=enum_limits.enum_page_size,
+                    max_rows=rows_left,
+                    max_pages=pages_left,
+                    max_payload_chars=payload_left,
+                    excerpt_chars=enum_limits.cell_excerpt_chars,
+                )
+                if is_elements:
+                    listed = self.collection_enumeration.enumerate_elements(
+                        notebook_id, kind, source_id=source_id,
+                        budget=budget,
+                        cursor=chain_state.cursor if chain_state else None,
+                        cancel_event=self.cancel_event)
+                elif is_sources:
+                    listed = self.collection_enumeration.enumerate_sources(
+                        notebook_id, budget=budget,
+                        cursor=chain_state.cursor if chain_state else None,
+                        cancel_event=self.cancel_event)
+                else:
+                    listed = self.collection_enumeration.enumerate_kg_objects(
+                        notebook_id, kind, budget=budget,
+                        cursor=chain_state.cursor if chain_state else None,
+                        cancel_event=self.cancel_event)
+            except AskCancelled:
+                raise
+            except ValueError as exc:
+                # 两类来源:执行器对「未知 kind / 不在作用域的 source_id」
+                # 抛 ValueError(它把 fail-open 的决定权留给调用方——只有
+                # 这里知道这一轮还能不能继续),以及上面被改坏的档位值让
+                # EnumerationBudget 拒绝构造。两者都只废掉这一个动作。
+                if self.fail_closed:
+                    raise
+                record(TraceStep(
+                    step_type="skip",
+                    summary=f"跳过枚举{label}(请求的范围不可用)",
+                    detail={"reason": "enumeration_rejected",
+                            "collection": collection, "kind": kind,
+                            "error": str(exc)[:120],
+                            **({"phase": phase} if phase else {})}))
+            except Exception as exc:  # noqa: BLE001 — 同上,清单不是必需品
+                if self.fail_closed:
+                    raise
+                record(TraceStep(
+                    step_type="skip",
+                    summary=f"跳过枚举{label}(清单暂时取不到)",
+                    detail={"reason": "enumeration_unavailable",
+                            "collection": collection, "kind": kind,
+                            "error": str(exc)[:120],
+                            **({"phase": phase} if phase else {})}))
+            if listed is not None:
+                coverage = listed.coverage
+                state.enum_rows_used += coverage.returned
+                # 执行器回传本次真实发生的额外往返数(非首页请求数),据实
+                # 计费。夹到 pages_left 只是防越界记账,正常路径下执行器本身
+                # 就受同一个 max_pages 约束。
+                state.enum_pages_used += min(pages_left, listed.extra_pages)
+                # 同上,按执行器回传的真实消耗扣减。夹到 payload_left
+                # 只是防越界记账:执行器本身就受同一个上限约束。
+                state.enum_payload_used += min(
+                    payload_left, max(0, listed.payload_chars)
+                )
+                if chain_state is None:
+                    outcome = CollectionEnumerationOutcome(
+                        collection=collection, kind=kind,
+                        source_id=source_id,
+                        items=list(listed.items), coverage=coverage)
+                    chain_state = _EnumChain(outcome=outcome)
+                    enum_chains[key] = chain_state
+                    enumerations.append(outcome)
+                else:
+                    # 续跑:执行器只回传本次的尾巴,直接接上即可;coverage
+                    # 换成最新那份(它的 returned_total 是整条链的累计)。
+                    chain_state.outcome.items.extend(listed.items)
+                    chain_state.outcome.coverage = coverage
+                chain_state.cursor = listed.cursor
+                # T3 合同:complete=False ⟹ 游标非空,唯一例外是
+                # concurrent_change。所以「没列全又没给游标」= 冲突。
+                chain_state.state = (
+                    "complete" if coverage.complete
+                    else "open" if listed.cursor is not None
+                    else "conflict"
+                )
+                record(TraceStep(
+                    step_type="enumerate",
+                    summary=_enumeration_step_summary(
+                        label, coverage, source_id),
+                    # 字段名刻意与 Knowhow 那条 enumerate 步不同:那边数的
+                    # 是表的「行」(scanned_rows/known_total_rows),这里数的
+                    # 是集合的「条目」,而且分母可能未知(total=None)。复用
+                    # 它的名字会让前端把 12 条公式渲染成「12/0 行」——一个
+                    # 单位错、分母还是假的数。T6 为本形状加自己的分支。
+                    detail={
+                        "collection": collection,
+                        "kind": kind,
+                        "source_id": source_id,
+                        "returned": coverage.returned,
+                        "returned_total": coverage.returned_total,
+                        "scanned": coverage.scanned,
+                        "total": coverage.total,
+                        "complete": coverage.complete,
+                        "has_more": coverage.has_more,
+                        "truncated_reason": coverage.truncated_reason,
+                        **({"phase": phase} if phase else {}),
+                    }))
+
     def run(self, notebook_id, question, history="", on_step=None, top_n=None,
             max_steps=None, intent_queries=None,
             limits: Optional[AskRetrievalLimits] = None,
-            intent_detail=None):
+            intent_detail=None, original_question=""):
         """一次逐步推理检索:首轮 → reflect 循环 → 收尾。
 
         首轮已整体搬进 `_run_first_round`(阶段为 `_first_round_*`,run 级状态
         走 `_ReasoningRunState`);reflect 循环本体、它的三个嵌套 def 与收尾的
         证据预算/配额重排/采用回写仍在本函数里,是登记在案的下一件结构工作。
+
+        ``original_question`` = 用户原样输入的问句(不含已确认问题契约那段生成
+        文本)。可选、默认空串 → 回退到 `question`,所以既有调用方(报告管线、
+        knowhow 补全与全部窄测试)的调用形状一个字都不用改。唯一消费者是首轮的
+        目录问法播种,见 `_first_round_catalog_seed`。
         """
         raise_if_cancelled(self.cancel_event)
         self._per_query_scored.clear()
@@ -4178,6 +4684,7 @@ class ReasoningRetriever:
             notebook_id, question, history, on_step,
             max_steps=max_steps, intent_queries=intent_queries,
             limits=limits, intent_detail=intent_detail,
+            original_question=original_question,
         )
         self._run_first_round(state)
 
@@ -4205,9 +4712,9 @@ class ReasoningRetriever:
         neighbor_truncated = state.neighbor_truncated
         neighbor_expand_limit = state.neighbor_expand_limit
         enum_limits = state.enum_limits
-        enum_rows_used = state.enum_rows_used
-        enum_pages_used = state.enum_pages_used
-        enum_payload_used = state.enum_payload_used
+        # 三个枚举预算池刻意**不**解包成局部名:执行体已经搬进 `_run_enumeration`
+        # (与首轮目录播种共用),扣减发生在 `state` 上,这里再拷一份标量就会读到
+        # 播种之前的旧数。下面四处消费一律直读 `state.enum_rows_used`。
         enum_chains = state.enum_chains
         enumerations = state.enumerations
         collection_map_text = state.collection_map_text
@@ -4464,6 +4971,7 @@ class ReasoningRetriever:
                 detail=outline_detail))
 
         forced_overflow_repair = False
+        first_reflect = True
         while steps < max_steps:
             raise_if_cancelled(self.cancel_event)
             terminal_overflow_repair = forced_overflow_repair
@@ -4475,7 +4983,18 @@ class ReasoningRetriever:
                 collected, elements, chunks, chains, outline_active,
                 ever_shown_outline_keys, limits, outline)
             if no_progress:
-                summary = f"{summary}\n\n{NO_NEW_EVIDENCE_NOTE}"
+                # 首轮空手与「查了好几轮都没新增」是两件不同的事,提示也必须不同
+                # (见 first_round_empty_note):前者要的是换通道,后者才是收尾。
+                # 判据用「本 run 的第一次 reflect」而不是 `steps == 0`——已确认方向
+                # 补种(`_first_round_coverage_pass`)也记在同一个 steps 上,那个数
+                # 进循环时并不恒为 0。建议句按本 run 真开着的两把闸拼装,与下面
+                # 传给 `reflect()` 的白名单同源。
+                summary = f"{summary}\n\n" + (
+                    first_round_empty_note(
+                        self.chunk_search_active(), state.enumeration_active)
+                    if first_reflect else NO_NEW_EVIDENCE_NOTE
+                )
+            first_reflect = False
             # 已展开过的节点回喂 reflect, 提示模型勿重复请求(治"反复 expand 同节点"根源)。
             if visited:
                 vis = ", ".join(
@@ -4667,7 +5186,7 @@ class ReasoningRetriever:
                 summary = (
                     f"{summary}\n\n{collection_map_text}"
                     + _allowance_suffix(
-                        enum_limits.enum_rows_per_run - enum_rows_used
+                        enum_limits.enum_rows_per_run - state.enum_rows_used
                     )
                 )
             # 可选参数按「有才传」(同 plan() 的 max_subqueries/collection_map):
@@ -4689,9 +5208,13 @@ class ReasoningRetriever:
                 # 关闭态/低档位的 reflect detail 多出一个键——冻结基线的口径是
                 # 「逐键不变」,而不是「值不变」。
                 reflect_detail["outline_nudged"] = True
-            record(TraceStep(step_type="reflect",
-                             summary=decision.reason or decision.next_action,
-                             detail=reflect_detail))
+            if decision.fallback:
+                # 同款稀疏键:这一轮的决定不是模型判的,而是校验/调用失败后的
+                # fail-open 兜底。没有它,一次 `invalid_enum` 与一次真正的「够了」
+                # 在轨迹上完全同形。机器码只进 detail,上屏那行说人话。
+                reflect_detail["fallback_reason"] = decision.fallback_reason
+            record(TraceStep(step_type="reflect", detail=reflect_detail,
+                             summary=_reflect_step_summary(decision)))
             # 采用账目:模型**主动选**了哪些动作。记在这里(而不是收尾按 trace 的
             # step_type 反推)是刻意的——初检索、PPR/精查 seed pass 都是确定性发生
             # 的,按 step_type 数会把「注入过」当成「被采用」,而 ``adopted`` 是淘汰
@@ -4764,7 +5287,7 @@ class ReasoningRetriever:
                 break
             before = (
                 len(collected) + len(elements) + len(chunks) + len(chains)
-                + enum_rows_used
+                + state.enum_rows_used
             )
             if (
                 self._unsafe_scope_restricted()
@@ -4956,254 +5479,9 @@ class ReasoningRetriever:
             elif decision.next_action in (
                 ENUMERATE_ELEMENTS_ACTION, ENUMERATE_KG_OBJECTS_ACTION
             ):
-                # 两个动作走同一条分支:预算池、续跑账目、trace 步类型都是一套,
-                # 差别只在取哪一份白名单、调执行器的哪个方法。
-                #
-                # 第三个集合(来源清单)从**参数**进来而不是从第三个动作 id
-                # (design doc §6.2 用户拍板):``enumerate.collection=="sources"``
-                # 时无论模型选了哪个 enumerate 动作,这一轮列的都是文档目录。它
-                # 优先于 kind/object_type——模型明确说了要哪个集合,再去猜它填的
-                # 那个 kind 是不是更可信,只会让同一个请求有两种解释。
-                # 按**非空**判定而不是再比一次字面量:解析期已经把这个字段收窄成
-                # 「"sources" 或空串」(与 kind/object_type 同形的白名单处理),校验
-                # 因此只有一处。再比一次会让那处白名单变成不可观测的冗余——坏掉也
-                # 没有任何测试会红。
-                is_sources = bool(decision.enumerate_collection)
-                is_elements = (
-                    not is_sources
-                    and decision.next_action == ENUMERATE_ELEMENTS_ACTION
-                )
-                collection = (
-                    "sources" if is_sources
-                    else "elements" if is_elements
-                    else "kg_objects"
-                )
-                # sources 没有子类型,kind 恒为空串——下面那条「没指定条目类型」的
-                # skip 因此必须放它过去(见该分支的条件)。
-                kind = (
-                    "" if is_sources
-                    else decision.enumerate_kind if is_elements
-                    else decision.enumerate_object_type
-                )
-                source_id = decision.enumerate_source_id if is_elements else ""
-                source_title = (
-                    decision.enumerate_source_title if is_elements else ""
-                )
-                label = _collection_label(collection, kind)
-                # 「列出《某某》里的公式」只能按**名字**表达:内部 source id 从不
-                # 上屏,候选摘要与引用里给模型看的一直是来源标题。所以这里先做
-                # 一次确定性的名字→id 解析,再进下面所有以 source_id 为键的逻辑
-                # (续跑链的键、执行器的作用域校验)。给了 id 就以 id 为准——那说明
-                # id 本来就是服务端发出去的,不需要再猜。
-                # None = 本轮没做过解析(要么给了 id,要么根本没给名字)。
-                source_matches: "int | None" = None
-                source_truncated = False
-                resolve_error = ""
-                if kind and is_elements and not source_id and source_title:
-                    try:
-                        source_id, source_matches, source_truncated = (
-                            self.collection_enumeration.resolve_source_title(
-                                notebook_id, kind, source_title,
-                                cancel_event=self.cancel_event,
-                            )
-                        )
-                    except AskCancelled:
-                        raise
-                    except Exception as exc:  # noqa: BLE001 — 见下的 skip
-                        # 解析不出来与「名字对不上」对用户是同一件事:这一个动作
-                        # 做不成。绝不退成「那就枚举整个库吧」——那会把一个被限定
-                        # 到单一来源的请求悄悄换成另一个问题的答案。
-                        if self.fail_closed:
-                            raise
-                        source_id, source_matches = "", 0
-                        source_truncated = False
-                        resolve_error = str(exc)[:120]
-                key = (collection, kind, source_id)
-                chain_state = enum_chains.get(key)
-                rows_left = enum_limits.enum_rows_per_run - enum_rows_used
-                pages_left = enum_limits.enum_pages_per_run - enum_pages_used
-                payload_left = (
-                    enum_limits.structured_payload_chars - enum_payload_used
-                )
-                if not kind and not is_sources:
-                    # 措辞按「该给什么」写,不是「你给错了」(exact_lookup 那条
-                    # 教训):模型给了一个非法 collection 值时,它显然是在**试图**
-                    # 请求某个集合,只回一句「没指定类型」会让它下一轮换一个同样
-                    # 非法的值再试一次。所以这里点名唯一合法值,并把它给的原值
-                    # 带进 detail 供排查(不上屏 —— trace summary 才上屏)。
-                    rejected = decision.enumerate_collection_rejected
-                    record(TraceStep(
-                        step_type="skip",
-                        summary=(
-                            f"跳过枚举(「{rejected[:60]}」不是可枚举的集合名;"
-                            "要列库里的文档请用 sources,其他集合按条目类型指定)"
-                            if rejected else
-                            "跳过枚举(没有指定可列出的条目类型)"
-                        ),
-                        detail={"reason": "enumeration_kind",
-                                "collection": collection,
-                                **({"requested_collection": rejected[:120]}
-                                   if rejected else {})}))
-                elif source_matches is not None and (
-                    source_truncated or source_matches != 1
-                ):
-                    # 名字没有唯一对应的来源。detail 只报匹配个数与模型给的
-                    # 名字,不报任何内部 id——它们从来就不该出现在轨迹里。
-                    # (匹配数 2 的含义是「至少两个」,见 resolve_source_title:
-                    # 扫到第二个就停,再往下数没有意义。truncated 则表示可查的
-                    # 来源太多、解析器拒绝从前缀断言唯一,此时 matches 无意义。)
-                    record(TraceStep(
-                        step_type="skip",
-                        summary=(
-                            f"跳过枚举{label}(可按名称查找的来源太多,"
-                            "无法确定是哪一个)"
-                            if source_truncated else
-                            f"跳过枚举{label}(没有名称匹配的来源)"
-                            if source_matches == 0 else
-                            f"跳过枚举{label}(名称匹配到多个来源,无法确定是哪一个)"
-                        ),
-                        detail={"reason": "enumeration_source_unresolved",
-                                "collection": collection, "kind": kind,
-                                "requested_title": source_title[:200],
-                                "matches": source_matches,
-                                "truncated": source_truncated,
-                                **({"error": resolve_error}
-                                   if resolve_error else {})}))
-                elif chain_state is not None and chain_state.state == "complete":
-                    record(TraceStep(
-                        step_type="skip",
-                        summary=f"跳过枚举{label}(本轮已全部列出)",
-                        detail={"reason": "already_enumerated",
-                                "collection": collection, "kind": kind}))
-                elif chain_state is not None and chain_state.state == "conflict":
-                    # 冲突是终态。重开一条链会把已经报出去的条目再列一遍,而前后
-                    # 两段取自不同时刻的资料,拼起来既不完整也无法向用户解释。
-                    record(TraceStep(
-                        step_type="skip",
-                        summary=f"跳过枚举{label}(资料有变动,无法继续)",
-                        detail={"reason": "enumeration_conflict",
-                                "collection": collection, "kind": kind}))
-                elif rows_left < 1 or pages_left < 1 or payload_left < 1:
-                    # 预算耗尽必须跳过而不是请求 0 行:EnumerationBudget 对非正
-                    # 上限直接 ValueError,而一个「返回 0 条的部分结果」与真的截断
-                    # 长得一模一样。三个池共用同一条 skip:对用户是同一句话
-                    # (「本轮能列的已经列完了」),池的名字不该上屏。
-                    record(TraceStep(
-                        step_type="skip",
-                        summary="跳过枚举(已达本轮可列出的条目上限)",
-                        detail={"reason": "enumeration_budget",
-                                "collection": collection, "kind": kind,
-                                "rows_left": rows_left,
-                                "pages_left": pages_left,
-                                "payload_left": payload_left}))
-                else:
-                    listed = None
-                    try:
-                        # 构造在 try 之内:一个被改坏的档位(某个 enum_* 配成 0)会让
-                        # EnumerationBudget 直接 ValueError,而这个异常一旦穿出 run()
-                        # 就会被 ask_service 的 broad except 吞成「整轮检索失败」——
-                        # 用户看到的是「依据不足」,而不是「这一个动作没跑」。
-                        budget = EnumerationBudget(
-                            page_size=enum_limits.enum_page_size,
-                            max_rows=rows_left,
-                            max_pages=pages_left,
-                            max_payload_chars=payload_left,
-                            excerpt_chars=enum_limits.cell_excerpt_chars,
-                        )
-                        if is_elements:
-                            listed = self.collection_enumeration.enumerate_elements(
-                                notebook_id, kind, source_id=source_id,
-                                budget=budget,
-                                cursor=chain_state.cursor if chain_state else None,
-                                cancel_event=self.cancel_event)
-                        elif is_sources:
-                            listed = self.collection_enumeration.enumerate_sources(
-                                notebook_id, budget=budget,
-                                cursor=chain_state.cursor if chain_state else None,
-                                cancel_event=self.cancel_event)
-                        else:
-                            listed = self.collection_enumeration.enumerate_kg_objects(
-                                notebook_id, kind, budget=budget,
-                                cursor=chain_state.cursor if chain_state else None,
-                                cancel_event=self.cancel_event)
-                    except AskCancelled:
-                        raise
-                    except ValueError as exc:
-                        # 两类来源:执行器对「未知 kind / 不在作用域的 source_id」
-                        # 抛 ValueError(它把 fail-open 的决定权留给调用方——只有
-                        # 这里知道这一轮还能不能继续),以及上面被改坏的档位值让
-                        # EnumerationBudget 拒绝构造。两者都只废掉这一个动作。
-                        if self.fail_closed:
-                            raise
-                        record(TraceStep(
-                            step_type="skip",
-                            summary=f"跳过枚举{label}(请求的范围不可用)",
-                            detail={"reason": "enumeration_rejected",
-                                    "collection": collection, "kind": kind,
-                                    "error": str(exc)[:120]}))
-                    except Exception as exc:  # noqa: BLE001 — 同上,清单不是必需品
-                        if self.fail_closed:
-                            raise
-                        record(TraceStep(
-                            step_type="skip",
-                            summary=f"跳过枚举{label}(清单暂时取不到)",
-                            detail={"reason": "enumeration_unavailable",
-                                    "collection": collection, "kind": kind,
-                                    "error": str(exc)[:120]}))
-                    if listed is not None:
-                        coverage = listed.coverage
-                        enum_rows_used += coverage.returned
-                        # 执行器回传本次真实发生的额外往返数(非首页请求数),据实
-                        # 计费。夹到 pages_left 只是防越界记账,正常路径下执行器本身
-                        # 就受同一个 max_pages 约束。
-                        enum_pages_used += min(pages_left, listed.extra_pages)
-                        # 同上,按执行器回传的真实消耗扣减。夹到 payload_left
-                        # 只是防越界记账:执行器本身就受同一个上限约束。
-                        enum_payload_used += min(
-                            payload_left, max(0, listed.payload_chars)
-                        )
-                        if chain_state is None:
-                            outcome = CollectionEnumerationOutcome(
-                                collection=collection, kind=kind,
-                                source_id=source_id,
-                                items=list(listed.items), coverage=coverage)
-                            chain_state = _EnumChain(outcome=outcome)
-                            enum_chains[key] = chain_state
-                            enumerations.append(outcome)
-                        else:
-                            # 续跑:执行器只回传本次的尾巴,直接接上即可;coverage
-                            # 换成最新那份(它的 returned_total 是整条链的累计)。
-                            chain_state.outcome.items.extend(listed.items)
-                            chain_state.outcome.coverage = coverage
-                        chain_state.cursor = listed.cursor
-                        # T3 合同:complete=False ⟹ 游标非空,唯一例外是
-                        # concurrent_change。所以「没列全又没给游标」= 冲突。
-                        chain_state.state = (
-                            "complete" if coverage.complete
-                            else "open" if listed.cursor is not None
-                            else "conflict"
-                        )
-                        record(TraceStep(
-                            step_type="enumerate",
-                            summary=_enumeration_step_summary(
-                                label, coverage, source_id),
-                            # 字段名刻意与 Knowhow 那条 enumerate 步不同:那边数的
-                            # 是表的「行」(scanned_rows/known_total_rows),这里数的
-                            # 是集合的「条目」,而且分母可能未知(total=None)。复用
-                            # 它的名字会让前端把 12 条公式渲染成「12/0 行」——一个
-                            # 单位错、分母还是假的数。T6 为本形状加自己的分支。
-                            detail={
-                                "collection": collection,
-                                "kind": kind,
-                                "source_id": source_id,
-                                "returned": coverage.returned,
-                                "returned_total": coverage.returned_total,
-                                "scanned": coverage.scanned,
-                                "total": coverage.total,
-                                "complete": coverage.complete,
-                                "has_more": coverage.has_more,
-                                "truncated_reason": coverage.truncated_reason,
-                            }))
+                # 执行体与首轮目录播种共用(见 `_run_enumeration`):两处各写
+                # 一份就等于给「同一个动作两种语义」留一条只能靠人复核的缝。
+                self._run_enumeration(state, decision)
             elif decision.next_action == OUTLINE_ACTION:
                 # 与 sufficient 短路之前那次应用共用同一个函数(见 apply_outline_
                 # update 的说明):两处各写一份就等于给「语义一致」留一条只能靠人
@@ -5637,7 +5915,7 @@ class ReasoningRetriever:
             # 本轮动作后是否有新增(候选节点或原文段)。无新增 → 下一轮提示模型 + 累加 stale。
             no_progress = (
                 len(collected) + len(elements) + len(chunks) + len(chains)
-                + enum_rows_used
+                + state.enum_rows_used
             ) == before
             if no_progress and consult_delivered_this_turn:
                 # codex #538 R3 P2:送达了内容的 consult 轮对 stale **持平**——
@@ -5719,7 +5997,7 @@ class ReasoningRetriever:
                          # 清单是独立证据通道:条目数不进 top_n 预算(那是相关性
                          # 席位),这里只报「列了几个集合、共多少条」供排查。
                          "enumerations": len(enumerations),
-                         "enumerated_items": enum_rows_used}
+                         "enumerated_items": state.enum_rows_used}
         raise_if_cancelled(self.cancel_event)
         if self.settings.reasoning_quota_enabled and len(used_queries) >= 2:
             # 复合问题: 按子查询配额 round-robin, 避免一方通吃。

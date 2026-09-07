@@ -3936,16 +3936,16 @@ class AskService:
                 evidence = execute_reasoning_retrieval_stage(
                     retriever,
                     ReasoningRunInput(
-                        notebook_id=notebook_id,
-                        question=research_question,
+                        notebook_id=notebook_id, question=research_question,
                         history=reasoning_history,
-                        top_n=None,
-                        max_steps=None,
-                        intent_queries=tuple(intent_queries),
-                        limits=limits,
+                        top_n=None, max_steps=None,
+                        intent_queries=tuple(intent_queries), limits=limits,
                         # 关闭字段投影与 intent trace 同源；检索器只能通过
                         # ``as_mapping`` 进入既有 project_run_step 收窄点。
                         intent=prepared.intent_projection,
+                        # 用户原样输入的问句；``question`` 传的是确认合同后的复合
+                        # 串,目录问法分类器按人写的问句钉模板,拿它去问必不命中。
+                        original_question=prepared.question,
                     ),
                     retrieval_runtime,
                 )

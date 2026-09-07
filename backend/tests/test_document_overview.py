@@ -78,6 +78,27 @@ from tests.model_testkit import bind_chat_client
     ("Please list all documents in this notebook", "catalog"),
     ("What are the papers in this library about?", "catalog"),
     ("What does each document cover?", "catalog"),
+    # 生产复现题(「说明」不在原动词表里,整题因此掉出目录通道)与它的同义写法。
+    ("当前notebook的文章说明了什么？", "catalog"),
+    ("这篇文章说明了什么", "source"),
+    ("what do the papers in this notebook say", "catalog"),
+    ("这些论文讲了些什么", "catalog"),
+    ("这些论文说了什么", "catalog"),
+    ("这些论文主要说什么", "catalog"),
+    ("这篇文章的大意是什么", "source"),
+    ("What are the papers in this library saying", "catalog"),
+    ("What does this paper explain?", "source"),
+    # 新动词也要在 source 通道上有正例:catalog 与 source 走的是同一张动词表、
+    # 不同的主语模板,只钉 catalog 的话「单篇 + 新动词」可能在主语侧悄悄漏掉。
+    ("文档描述了什么", "source"),
+    ("这份文档阐述了什么内容", "source"),
+    ("这篇论文讨论了什么", "source"),
+    # 扩表不得放宽边界:动词后面跟话题修饰语的仍旧走 ranked。
+    ("文章说明了 CMRR 如何计算", None),
+    ("这篇文章说明的公式是什么", None),
+    ("当前notebook里关于布局的文章讲了什么", None),
+    ("这篇文章描述的版图约束有哪些", None),
+    ("What does this paper say about CMRR?", None),
 ])
 def test_overview_routes_only_explicit_document_introductions(question, kind):
     result = overview_intent(question)
@@ -228,6 +249,28 @@ def test_generic_question_does_not_match_a_title_by_substring(repo):
     client = AnswerClient()
     bind_chat_client(repo, "ask_answer", client)
     response = ask(repo, nb.id, "这篇文档介绍了什么内容")
+    assert not client.prompts
+    assert "仅选择要介绍的文档" in response.answer
+    assert not response.citations and not response.anchors
+
+
+def test_new_verb_reaches_the_overview_lane_end_to_end(repo):
+    """新动词不是只有分类器单测:它必须真的把请求送进
+    `ask_service._try_document_overview`,并在那条路上得到既有的终态。
+
+    多篇未收窄 ⇒ 「请在来源面板仅选择要介绍的文档」——与
+    `test_generic_question_does_not_match_a_title_by_substring` 同一个终态,只是
+    问句用的是扩表新加的动词。分类器不命中的话这句话根本不会出现(请求会掉回
+    ranked 通道,合成客户端也会被调用)。
+    """
+    nb = repo.create_notebook(NotebookCreate(name="资料"))
+    seed(repo, nb.id, "a", "部署手册", "", ["甲文正文"])
+    seed(repo, nb.id, "b", "运维手册", "", ["乙文正文"])
+    client = AnswerClient()
+    bind_chat_client(repo, "ask_answer", client)
+
+    response = ask(repo, nb.id, "文档描述了什么")
+
     assert not client.prompts
     assert "仅选择要介绍的文档" in response.answer
     assert not response.citations and not response.anchors

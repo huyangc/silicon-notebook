@@ -207,7 +207,30 @@ def _validate_repair_surface(raw: str, value: dict[str, Any]) -> None:
 
 
 def _validate_against_example(value: Any, example: Any) -> None:
-    """Validate repaired JSON against the example-shaped schema hint."""
+    """Validate repaired JSON against the example-shaped schema hint.
+
+    This layer owns SHAPE only — types, containers, and the advertised key set.
+    Semantic whitelisting stays with each domain parser, which already narrows
+    every enum field it reads (``kind if kind in ENUMERABLE_ELEMENT_KINDS else
+    ""``, ``direction`` falling back to ``"both"``, an unrecognised
+    ``next_action`` handled by the fail-closed/answer contract). A second,
+    stricter semantic gate here can only manufacture disagreements between the
+    prompt and the validator.
+
+    Hence the enum rule: a hint string containing ``|`` means "IF filled, it
+    must be one of these values". The empty string means "this run does not use
+    the field" and is always accepted; a non-empty value outside the set is
+    still ``invalid_enum``.
+
+    Root cause this rule fixes (2026-09-07): ``reflect_schema_hint`` spells
+    ``"kind":"formula|table|image|code_block"`` while the reflect prompt tells
+    the model to leave ``kind`` empty when listing the document roster
+    (``enumerate.collection="sources"``). Treating ``|`` as a closed set made
+    the model's prompt-conforming decision fail ``invalid_enum``, which showed
+    up as ``MalformedModelResponse`` and pushed ``reflect()`` into its fail-open
+    "answer" fallback — so the document-roster and ``enumerate_kg_objects``
+    actions were dead in production.
+    """
     if example is None:
         # Hints use null for optional scalar fields whose concrete value may be
         # null or a string (for example an optional edge type).
@@ -221,7 +244,7 @@ def _validate_against_example(value: Any, example: Any) -> None:
     if isinstance(example, str):
         if not isinstance(value, str):
             raise ModelJsonRepairError("invalid_type")
-        if "|" in example and value not in example.split("|"):
+        if "|" in example and value and value not in example.split("|"):
             raise ModelJsonRepairError("invalid_enum")
         return
     if isinstance(example, int):
