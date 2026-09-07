@@ -73,6 +73,12 @@ PHASE_ACTION = "action"
 PURPOSE_CHARS = 80
 #: 规范化请求身份在观察行里的宽度上限(模型自由文本可以是一整段)。
 REQUEST_CHARS = 60
+#: 稳定原因码在观察行里的宽度上限。今天的原因码全是服务端字面量(最长的
+#: `unavailable_action:` 前缀加一个动作名也远在这个数之内),但其中的
+#: `unavailable_action:`/`missing_argument:` 两族后缀来自**模型提交的载荷**,
+#: 而这一格与请求身份、目的一样会被拼进 `- #N …；原因=…` 那一行。不截长就等于
+#: 让模型自己决定这一行有多长,不折叠就等于让它决定这一行有几行。
+REASON_CHARS = 60
 
 _STATUS_LABELS: Mapping[str, str] = MappingProxyType({
     STATUS_SUCCESS: "有新证据",
@@ -109,10 +115,17 @@ class ActionObservation:
     #: 稳定原因码,取自执行处已有的 skip reason,不新造同义词。
     reason: str
     #: 这条通道执行后还剩多少额度,一句话。空串 = 这个动作不扣配额。
+    #: 今天唯一的写入方是 run 的**全局剩余步数**(`剩余步数 N`),不是这条通道
+    #: 自己的专用配额(元素检索次数、枚举行/页/载荷…)——那些各有自己的披露口径,
+    #: 混进同一格会让模型把"还能再枚举多少行"读成"还能再走多少步"。
     budget_left: str
     #: 本次真正新增的候选标识(取自 trace detail 的 `result_ids`,已在那里按
     #: `TRACE_RESULT_IDS_MAX` 截过)。证据卡的"本轮新增"档读它。
     result_ids: Tuple[str, ...] = ()
+    #: 这条**链**到目前为止的累计返回数(只有枚举有:续跑把同一个集合分页列
+    #: 出来)。与 `returned`(本次这一页返回了几条)是两个数,渲染成两格——把累计
+    #: 摆在"返回"那一格上,模型会把「第 3 页返回 3 条」读成「这一次返回了 9 条」。
+    total: int = 0
 
 
 # --- step_type → 动作的对照表 -----------------------------------------------
@@ -127,6 +140,16 @@ class _StepContract:
     #: 备用的新增键。`retrieve` 一个 step_type 服务两种形状:首轮初检索写
     #: `count`(池子总量,那一刻等于新增),子查询/补种写 `new`。
     fallback_new_key: str = ""
+    #: **附加**新增键:与主键相加,不是二选一。`retrieve` 的 `new` 只说 KG 候选
+    #: (它与同一份 detail 的 `result_ids` 一一对应,见
+    #: `_search_passages_if_graphless` 的说明),无图库上那条通道恒空手,该方向
+    #: 真正到手的证据全在原文半的 `chunks_found` 里。只读 `new` 就会让一次真的
+    #: 捞到 5 段原文的 add_subquery 在观察账上显示成「执行了但零新增」——模型据
+    #: 此换问法另起炉灶,白丢已经到手的证据。这与 `attempted` 那条账目的口径
+    #: (记**证据总数**)因此是同一个:两处都不能只数 KG 半。
+    extra_new_keys: Tuple[str, ...] = ()
+    #: 链级累计返回数(只有枚举有)。单独一格渲染,不占"返回"那一格。
+    total_key: str = ""
     #: 这条通道的**计数键说的是"返回了几条"而不是"新增了几条"**,新增只能数
     #: `result_ids`(它装的就是真正进池子的那批)。目前只有 `expand`:它的
     #: `found` 是 `self.neighbors()` 返回的邻居总数,里面可能一条都不是新的
@@ -139,7 +162,8 @@ TRACE_OBSERVATION_CONTRACT: Mapping[str, _StepContract] = MappingProxyType({
     # 首轮初检索 / 已确认方向补种 / reflect 的 add_subquery —— 同一条联邦 KG
     # 检索通道的三个入口,所以折成同一个动作 id;seed 与 action 由 phase 区分。
     "retrieve": _StepContract(ADD_SUBQUERY_ACTION, "new",
-                              fallback_new_key="count"),
+                              fallback_new_key="count",
+                              extra_new_keys=("chunks_found",)),
     "ppr": _StepContract(PPR_RETRIEVE_ACTION, "found"),
     "exact_lookup": _StepContract(EXACT_LOOKUP_ACTION, "found"),
     "search_chunks": _StepContract(
@@ -151,8 +175,11 @@ TRACE_OBSERVATION_CONTRACT: Mapping[str, _StepContract] = MappingProxyType({
     "expand_community": _StepContract(
         EXPAND_COMMUNITY_ACTION, "new", returned_key="peers"),
     "follow_chain": _StepContract(FOLLOW_CHAIN_ACTION, "count"),
+    # `returned_total` 是**整条链**的累计(续跑把它一路加上去),不是这一次返回
+    # 了几条。它因此走 `total_key` 单独渲染:摆在"返回"那一格上,一次只列出 3 条
+    # 的续跑会显示成「返回9」,而模型下一步要不要再续跑,读的正是这个数。
     "enumerate": _StepContract(
-        ENUMERATE_ELEMENTS, "returned", returned_key="returned_total",
+        ENUMERATE_ELEMENTS, "returned", total_key="returned_total",
         truncation_keys=("has_more", "truncated_reason")),
     # `search_elements` 的成功步历史上就叫 `fallback`(降级查原文)。
     "fallback": _StepContract(SEARCH_ELEMENTS_ACTION, "found"),
@@ -170,9 +197,15 @@ NON_ACTION_STEP_TYPES: frozenset = frozenset({
 # --- skip reason → 状态 -----------------------------------------------------
 # 表里没有的 reason 一律落到 `unavailable`(最保守的那一档:说"这条路本轮没走
 # 成"永远为真),而不是猜成 empty —— 把"没执行"记成"已检索"是设计稿点名的谎报。
+#: 「这一次请求与先前**成功完成**的同一请求重复,被既有身份判据拦下」。
+#: `empty_or_visited` 在 v2 下的唯一含义就是「这个节点已经展开过」:
+#: `object_id` 为空那一半在解析期已经被 `missing_argument:object_id` 拦掉,
+#: 走不到这条 skip(legacy 没有那道闸,所以这个码在 legacy 里仍是二义的——但
+#: legacy 不构造账本)。归 `unavailable` 会把一次「你已经看过它了」说成「这条
+#: 通道本轮不存在」,模型于是去换通道而不是换节点。
 _DUPLICATE_REASONS: frozenset = frozenset({
     "duplicate_subquery", "duplicate_exact_lookup", "duplicate_follow_chain",
-    "already_enumerated", "no_focal_or_done",
+    "already_enumerated", "no_focal_or_done", "empty_or_visited",
 })
 _INVALID_REASONS: frozenset = frozenset({
     "missing_new_sub_query", "missing_exact_term", "missing_chain_start",
@@ -224,14 +257,33 @@ def status_for_skip(reason: str) -> str:
 
 
 def _int(detail: Mapping, key: str) -> int:
+    """一个计数键 → 非负整数。**列表按长度计**。
+
+    执行处的计数有两种写法:一个数(`found` / `new` / `returned`),或者那批东西
+    本身(`peers` 是同类实体名的列表,`sections` 是大纲节的列表)。只认 `int` 的话
+    后一种恒读成 0——一次真的纳入了 5 个同类实体的横向对比,在观察账上与一次
+    彻底空手长得一模一样。
+    """
     value = detail.get(key)
+    if isinstance(value, (list, tuple)):
+        return len(value)
     if isinstance(value, bool) or not isinstance(value, int):
         return 0
     return max(0, value)
 
 
 def _clip(text: str, limit: int) -> str:
+    """折叠成一行 + 去控制字符 + 截长。
+
+    与 `agent_profile_block._clean` / `retrieval_experience_block._clean` 同款的
+    伪造防御,理由也一样:这些值会被拼进 `- #N …；请求=…；目的=…` 那一行,而其中
+    的请求身份、目的、以及两族原因码后缀都来自模型自己提交的载荷。带字面换行的
+    一个 `reason` 能在渲染出来的账里伪造出第二条观察行,甚至一整个
+    `【动作观察账 — …】` 块头;`.split()` 只管空白,余下的 C0/C1 控制字符(它们能
+    让终端与部分渲染器把后面的内容当另一段)在这里一并去掉。
+    """
     text = " ".join(str(text or "").split())
+    text = "".join(ch for ch in text if ch >= " " and ch != "\x7f")
     return text if len(text) <= limit else f"{text[:limit]}…"
 
 
@@ -243,26 +295,39 @@ class _PendingDecision:
     request: str
     purpose: str
     budget_left: str
+    #: 这一次请求里**用户/模型写的那段自然语言**,不含参与身份的规范化参数
+    #: (`types=…` / `prefer=…` / `dir=both`)、也不含 `ko-…` 这类内部标识。
+    #: 证据卡的摘录窗口拿它当检索词来源;身份串只进观察行。两者混用的话,摘录
+    #: 会去正文里找 "prefer=balanced" 这种在任何文档里都不存在的词。
+    query_text: str = ""
 
 
 class ActionObservationLedger:
     """run 内的观察账。只在 v2 总闸开着时被构造(关闭态零新状态)。
 
-    它有**两个**写入口,刻意分工:
+    它有**四个**写入口,刻意分工:
 
     * `note_decision` —— 模型这一轮选了什么、为什么、还剩多少额度。这些只有
       `ReflectDecision` 与 run 的额度账知道,trace detail 里没有。
     * `observe` —— 由 `_TraceRecorder` 在每次记账时调用,把**实际执行结果**折成
       观察。它绝不读 `_PendingDecision.purpose` 去推断发生了什么,只借它给这条
       观察标上"当时的动作目的"。
+    * `note_fresh_ids` / `note_failed` —— **侧信道**(见下面各自的说明)。它们
+      存在的理由是 legacy 的 trace 键集是冻结基线:有三条通道的执行结果今天
+      根本没有以「本轮新增了这些标识」的形状写进 detail,而往 detail 里加新键
+      会改动关闭态的账目。侧信道只在 v2 挂了账本时被调用(`observer is None`
+      时调用方一次都不进来),关闭态因此零调用、零分配。
     """
 
-    __slots__ = ("_rows", "_pending", "_turn_start")
+    __slots__ = ("_rows", "_pending", "_turn_start", "_extra_fresh",
+                 "_failed_reason")
 
     def __init__(self) -> None:
         self._rows: List[ActionObservation] = []
         self._pending: Optional[_PendingDecision] = None
         self._turn_start = 0
+        self._extra_fresh: List[str] = []
+        self._failed_reason = ""
 
     @property
     def rows(self) -> Tuple[ActionObservation, ...]:
@@ -270,8 +335,13 @@ class ActionObservationLedger:
 
     @property
     def last_request(self) -> str:
-        """上一次决定的规范化请求身份。证据卡的摘录窗口用它当检索词来源之一。"""
+        """上一次决定的规范化请求身份。只进观察行,不进摘录检索词。"""
         return self._pending.request if self._pending is not None else ""
+
+    @property
+    def last_query(self) -> str:
+        """上一次决定里那段**原始查询文本**。证据卡的摘录窗口用它当检索词。"""
+        return self._pending.query_text if self._pending is not None else ""
 
     def fresh_result_ids(self) -> Tuple[str, ...]:
         """上一轮决定之后**真的新进池子**的候选标识,保序去重。
@@ -280,6 +350,9 @@ class ActionObservationLedger:
         一轮里可能落多条 trace 步(例如枚举续跑),漏掉其中一条就会让证据卡把刚
         到手的证据当成历史材料。首轮没有决定,`_turn_start` 恒为 0,于是整个首轮
         播种的产出都算"本轮新增"——那正是第一次 reflect 眼里的事实。
+
+        两个来源:trace detail 的 `result_ids`,以及侧信道 `note_fresh_ids`。
+        后者排在后面,所以同一条证据两处都报时,顺序仍由 trace 决定。
         """
         out: List[str] = []
         seen: set = set()
@@ -288,22 +361,63 @@ class ActionObservationLedger:
                 if key not in seen:
                     seen.add(key)
                     out.append(key)
+        for key in self._extra_fresh:
+            if key not in seen:
+                seen.add(key)
+                out.append(key)
         return tuple(out)
 
     def note_decision(
         self, action_id: str, request: str, purpose: str, budget_left: str,
+        query_text: str = "",
     ) -> None:
         self._pending = _PendingDecision(
             action_id=action_id,
             request=_clip(request, REQUEST_CHARS),
             purpose=_clip(purpose, PURPOSE_CHARS),
             budget_left=budget_left,
+            query_text=query_text,
         )
         self._turn_start = len(self._rows)
+        # 与 `_turn_start` 同一次翻页:上一轮的新增到此为止,下一轮从零开始。
+        self._extra_fresh = []
+
+    def note_fresh_ids(self, ids: Sequence[str]) -> None:
+        """侧信道:本轮**真的新进候选池**的标识,由执行处直接送来。
+
+        为什么不走 trace detail:`search_elements`(detail 只有 query/found)、
+        `expand_community`(只有 peers/new)、无图 run 的原文半(它的 detail 刻意
+        只承载 KG object_id,见 `_search_passages_if_graphless`)这三条通道今天
+        都不写本次新增的标识,而 legacy 的 trace 键集是冻结基线——往里加键会改
+        动关闭态的账目与前端读法。于是"本轮新增"那一档对这三条通道结构性失效:
+        刚查到的高分元素永远进不了下一轮的证据卡。
+
+        它**只喂证据卡的选取顺序**,不进观察行的计数(那些数各有自己的权威键),
+        更不进任何判重/配额判据。
+        """
+        for key in ids:
+            key = str(key)
+            if key:
+                self._extra_fresh.append(key)
+
+    def note_failed(self, reason: str) -> None:
+        """侧信道:紧接着要记账的那一步,其实**没查成**(不是"查了没有")。
+
+        seed 路径的 fail-open 把异常吞成 `[]`,调用方随后照常记一条 `found: 0`
+        的成功步——于是"数据库读炸了"与"这个问法在库里真的没有内容"在观察账上
+        完全同形,而这两件事该导致的下一步正好相反(重试/换通道 vs 换问法)。
+        detail 里没有能表达这件事的键(加一个就改了关闭态的键集),所以走侧信道。
+
+        标记只对**下一条**观察生效,并且无条件在下一次 `observe` 时清掉——即便
+        那一次没折出观察行,也不许把标记留给再下一条不相干的步。
+        """
+        self._failed_reason = reason
 
     def observe(self, step) -> None:
+        failed_reason, self._failed_reason = self._failed_reason, ""
         row = observation_from_step(
-            step, seq=len(self._rows) + 1, pending=self._pending)
+            step, seq=len(self._rows) + 1, pending=self._pending,
+            failed_reason=failed_reason)
         if row is not None:
             self._rows.append(row)
 
@@ -324,23 +438,33 @@ def _phase_of(detail: Mapping, pending: Optional[_PendingDecision]) -> str:
 
 
 def _enumerate_action(detail: Mapping) -> str:
-    """两个枚举动作共用一个 step_type;detail 的 `kind` 键区分它们。
+    """两个枚举动作共用一个 step_type;detail 的 `collection` 键区分它们。
 
-    元素枚举写 `kind`,知识对象枚举写的也是 `kind`(执行体共用),所以按
-    `collection` 与 `kind` 都拿不到动作 id 时保守落在元素枚举那一档——两者的
-    预算池、覆盖账目本来就是共用的,这一格只影响观察行的字面。
+    `_run_enumeration` 把三个集合折成一个 `collection ∈ {elements, kg_objects,
+    sources}`,子类型一律写进同一把 `kind` 键——它**从不**写 `object_type`。所以
+    按 `object_type` 判等于恒为假:一次 `enumerate_kg_objects` 在观察账上会显示
+    成 `enumerate_elements`,而模型据这一行决定下一步再枚举哪个集合。
+
+    `sources`(文档目录)不是这两个动作 id 中的任何一个:模型选哪个动作都可能落
+    到它。保守落在元素枚举那一档——两者的预算池与覆盖账目本来就是共用的,这一格
+    只影响观察行的字面。
     """
-    if detail.get("object_type"):
+    if str(detail.get("collection", "") or "") == "kg_objects":
         return ENUMERATE_KG_OBJECTS
     return ENUMERATE_ELEMENTS
 
 
 def observation_from_step(
     step, *, seq: int, pending: Optional[_PendingDecision],
+    failed_reason: str = "",
 ) -> Optional[ActionObservation]:
     """一条 `TraceStep` → 一条观察,或 None(这一步不是动作执行)。
 
     只读结构化 `detail`;`summary` 那句中文一个字都不读。
+
+    ``failed_reason`` 来自侧信道(`ActionObservationLedger.note_failed`):这一步
+    的某条臂 fail-open 吞了异常。它只改状态与原因码,不改任何计数——已经到手的
+    那部分证据是真的。
     """
     step_type = str(getattr(step, "step_type", "") or "")
     detail = getattr(step, "detail", None) or {}
@@ -364,7 +488,8 @@ def observation_from_step(
             seq=seq, phase=PHASE_ACTION, action_id=pending.action_id,
             request=pending.request, purpose=pending.purpose,
             status=status_for_skip(reason), returned=0, new=0, upgraded=0,
-            truncated=False, reason=reason, budget_left=pending.budget_left,
+            truncated=False, reason=_clip(reason, REASON_CHARS),
+            budget_left=pending.budget_left,
         )
     contract = TRACE_OBSERVATION_CONTRACT.get(step_type)
     if contract is None:
@@ -378,11 +503,19 @@ def observation_from_step(
         new = _int(detail, contract.new_key)
         if not new and contract.fallback_new_key:
             new = _int(detail, contract.fallback_new_key)
+        # 附加新增键与主键**相加**(见 `extra_new_keys`):无图 run 的原文半是
+        # 同一次动作的另一半产出,不是另一个动作。
+        for key in contract.extra_new_keys:
+            new += _int(detail, key)
     returned = (
         _int(detail, contract.returned_key) if contract.returned_key else new)
     returned = max(returned, new)
     truncated = any(bool(detail.get(k)) for k in contract.truncation_keys)
-    if step_type == "outline":
+    if failed_reason:
+        # 「没查成」与「查了没有」严格区分。已经到手的那部分是真的,所以有新增时
+        # 是 partial(部分臂成功)而不是 failed。
+        status = STATUS_PARTIAL if new else STATUS_FAILED
+    elif step_type == "outline":
         # 大纲不产生证据:它的"成功"是这份结构被接纳,不是新增了几条候选。
         status = STATUS_SUCCESS
     elif truncated and new:
@@ -403,10 +536,12 @@ def observation_from_step(
                  if pending is not None and phase == PHASE_ACTION else ""),
         status=status, returned=returned, new=new,
         upgraded=_int(detail, "upgraded"), truncated=truncated,
-        reason=str(detail.get("truncated_reason", "") or ""),
+        reason=_clip(
+            failed_reason or detail.get("truncated_reason", ""), REASON_CHARS),
         budget_left=(pending.budget_left
                      if pending is not None and phase == PHASE_ACTION else ""),
         result_ids=result_ids,
+        total=_int(detail, contract.total_key) if contract.total_key else 0,
     )
 
 
@@ -437,11 +572,21 @@ def render_observation_row(row: ActionObservation) -> str:
     ]
     if row.request:
         parts.append(f"请求={row.request}")
-    parts.append(_STATUS_LABELS.get(row.status, row.status))
-    if row.status in (STATUS_SUCCESS, STATUS_PARTIAL, STATUS_EMPTY):
-        parts.append(
-            f"返回{row.returned}/新增{row.new}"
-            if row.returned != row.new else f"新增{row.new}")
+    if row.action_id == UPDATE_OUTLINE and row.status == STATUS_SUCCESS:
+        # 大纲不是一条检索通道:它的产出是一份被接纳的结构,不是证据。沿用检索
+        # 那套标签会渲染出「有新证据；新增0」——同一行里既说有又说没有,而两种
+        # 读法都讲得通。被拒的那几种(`outline_empty` 等)走 skip,状态不是
+        # success,因此仍按原因码渲染,不会被这一格说成"已更新"。
+        parts.append(f"大纲已更新，{row.new} 节")
+    else:
+        parts.append(_STATUS_LABELS.get(row.status, row.status))
+        if row.status in (STATUS_SUCCESS, STATUS_PARTIAL, STATUS_EMPTY):
+            parts.append(
+                f"返回{row.returned}/新增{row.new}"
+                if row.returned != row.new else f"新增{row.new}")
+        if row.total and row.total != row.returned:
+            # 「这一次返回 N 条」之外再说一句「这条链累计 M 条」。
+            parts.append(f"累计{row.total}")
     if row.upgraded:
         parts.append(f"升级{row.upgraded}")
     if row.truncated:
@@ -463,6 +608,12 @@ def render_observations(
     两道界同时生效:条数(`recent`)与字符(`state_chars`,可压缩区的总预算)。装不
     下时**明确说省略了几条**——一份悄悄少了两行的账目比没有账目更危险,模型会把
     "没写"读成"没发生"。
+
+    `state_chars` 是**硬界**:披露后缀本身也算进去。按"先装行、最后再拼一句
+    `（更早的 N 条未列出）`"的写法,那句话的长度不在任何一次预算判断里,整块因此
+    可以稳定超出预算十几个字符——而这一块的存在理由就是给可压缩区定一个上限。
+    所以下面在拼完整块之后回头量一次,超了就再丢最早的一行(丢一行必然让披露数
+    +1,那句后缀最多长一位,所以循环单调收敛)。
     """
     if not rows:
         return ""
@@ -480,9 +631,13 @@ def render_observations(
         used += len(text) + 1
         lines.append(text)
     lines.reverse()
-    if not lines:
-        return ""
-    head = OBSERVATION_BLOCK_TITLE
-    if dropped > 0:
-        head = f"{head}（更早的 {dropped} 条未列出）"
-    return "\n".join([head, *lines, HISTORY_NOTE])
+    while lines:
+        head = OBSERVATION_BLOCK_TITLE
+        if dropped > 0:
+            head = f"{head}（更早的 {dropped} 条未列出）"
+        text = "\n".join([head, *lines, HISTORY_NOTE])
+        if len(text) <= state_chars:
+            return text
+        lines.pop(0)
+        dropped += 1
+    return ""
