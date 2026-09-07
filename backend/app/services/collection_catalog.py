@@ -203,11 +203,13 @@ class CollectionMap:
     # full of documents, which reads as a fact rather than as a missing field.
     sources: int
     # The same user-visible count restricted to the ACTIVE notebook — the
-    # ``sources`` total minus every mounted reference library's share.  It is
-    # NOT rendered (the map's job is to describe what the *enumeration* tools
-    # can reach, and those are federated); it exists because one consumer,
-    # ``AskService._no_kg_scope_admits_run``, has to judge a channel whose
-    # reach is narrower than the map's: source-passage retrieval
+    # ``sources`` total minus every mounted reference library's share.  Two
+    # consumers now.  It is rendered beside the federated total because the
+    # source roster is enumerable at EITHER scope (``enumerate.scope``), so the
+    # model choosing between them needs both numbers, not one.  And it exists
+    # in the first place because ``AskService._no_kg_scope_admits_run`` has to
+    # judge a channel whose reach is narrower than the map's: source-passage
+    # retrieval
     # (``search_chunks`` / the no-graph first-round seed) rides chunk mode's
     # own primitives, and those are active-notebook-local by design.  Deriving
     # it here rather than counting again at the call site costs zero extra
@@ -238,6 +240,16 @@ def render_collection_map(collection_map: CollectionMap) -> str:
     source: "spread over 1 source" is exactly what a bare non-zero count
     already means, and every character here is prompt budget spent on every
     round of the run.
+
+    ``sources`` is the one count rendered TWICE — the federated total and, in
+    parentheses, the active notebook's share.  It is the only collection whose
+    enumeration takes a scope parameter (``enumerate.scope``), so the model has
+    to pick between two numbers; showing only the federated one leaves it
+    guessing what ``current_notebook`` would return, and a wrong guess is not
+    free (a listing spends the run's shared row budget).  Unconditional, unlike
+    the element spread above: "the two numbers happen to be equal" and "this
+    build does not report the second number" must not look the same, and the
+    equal case is exactly the one where picking either scope is safe.
     """
     elements = ", ".join(
         f"{item.kind} {item.count}"
@@ -252,7 +264,8 @@ def render_collection_map(collection_map: CollectionMap) -> str:
         f"elements: {elements} | "
         f"KG objects: {kg_objects} | "
         f"knowhow tables: {collection_map.knowhow_tables} | "
-        f"sources: {collection_map.sources}"
+        f"sources: {collection_map.sources} "
+        f"(current notebook: {collection_map.active_sources})"
     )
     if len(text) > COLLECTION_MAP_MAX_CHARS:
         return text[: COLLECTION_MAP_MAX_CHARS - 1] + "…"

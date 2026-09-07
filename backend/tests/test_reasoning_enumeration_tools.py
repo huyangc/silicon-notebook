@@ -134,6 +134,35 @@ class _SeqLLM:
         return json.dumps({"next_action": "answer", "sufficient": True})
 
 
+class _ValidatingLLM(_SeqLLM):
+    """把回放的 JSON 真的送过**生产的那两道校验**再交给 reflect()。
+
+    镜像 `model_provider.ScheduledJsonChatClient` 的拒收合同:解析失败或形状不合
+    schema 提示时 `MalformedModelResponse() from ModelJsonRepairError`。
+
+    工具参数(尤其是枚举分支那几个)的用例一律走这个替身而不是 `_SeqLLM`:
+    参数的形状合同有**两个**执行者——`_validate_against_example` 先按 schema 提示
+    的示例值判类型/枚举,解析器才拿到它。只测后者的用例会给出「模型这样填是可以的」
+    这个结论,而生产上那一轮早就被前者打成兜底了(F1 修的正是这个)。
+    """
+
+    def chat_json(self, messages, schema_hint, **kwargs):
+        from app.core.model_json import (
+            ModelJsonRepairError, parse_model_json_object,
+            validate_model_json_shape,
+        )
+        from app.services.model_work import MalformedModelResponse
+
+        raw = super().chat_json(messages, schema_hint, **kwargs)
+        try:
+            parsed = parse_model_json_object(
+                raw, schema_hint, allow_repair=False)
+            validate_model_json_shape(parsed.content, schema_hint)
+        except ModelJsonRepairError as exc:
+            raise MalformedModelResponse() from exc
+        return parsed.content
+
+
 def _enumerate_action(kind="formula", **extra):
     request = {"kind": kind}
     request.update(extra)
@@ -1671,12 +1700,12 @@ def test_collection_counts_survive_a_full_evidence_partition(repo):
     assert prompt.count("S") < 5_000
 
 
-# ------------------------------------------------- 目录问法的确定性播种(F2)
+# --------------------------------------------- 目录由模型自选,服务端不代它决定
 #
-# 生产复现:「当前notebook的文章说明了什么」的答案就是那份文档目录,而此前唯一的
-# 到达方式是赌模型在 reflect 里选中目录动作 —— 要赌它读懂了动作说明,还要赌那一轮
-# 响应通过 JSON 校验(线上塌的正是后者)。播种把这件事变成确定性的,判据与 chunk
-# 模式的文档介绍通道共用同一个分类器。
+# 生产复现:「当前notebook的文章说明了什么」的答案就是那份文档目录。曾经的修法是
+# 在首轮按问法正则确定性地播一次目录;用户裁决撤回了它——agentic 模式里要不要列
+# 目录是模型经工具自己的决定,服务端不拿正则替它做。这里钉的是撤回后的形态:首轮
+# 不枚举,模型选了才枚举,而范围是工具的**参数**。
 
 _CATALOG_QUESTION = "当前notebook的文章说明了什么？"
 
@@ -1697,154 +1726,17 @@ def _seed_sources_only(repo, titles, *, summaries=None):
     return notebook
 
 
-def _seed_step(result):
-    steps = [step for step in _steps(result, "enumerate")
-             if step.detail.get("phase") == "seed"]
-    return steps[0] if steps else None
+def test_a_catalog_question_alone_does_not_enumerate_anything(repo):
+    """问法正则不再是枚举的触发者(用户裁决)。
 
-
-def test_catalog_question_seeds_the_document_roster_before_the_model_acts(repo):
-    """目录问法 ⇒ 首轮播一次目录;目录进回喂账目;模型随后再选目录动作按「已列全」
-    跳过(同一预算池、同一条续跑链,不会把同一份清单列两遍)。"""
-    notebook = _seed_sources_only(repo, ["论文一", "论文二"])
-    llm = _SeqLLM([
-        _enumerate_sources_action(),
-        {"next_action": "answer", "sufficient": True},
-    ])
-    retriever, limits = _retriever(repo, llm)
-
-    result = retriever.run(notebook.id, _CATALOG_QUESTION, "", limits=limits)
-
-    seed = _seed_step(result)
-    assert seed is not None and seed.detail["collection"] == "sources"
-    assert seed.detail["complete"] is True
-    assert [o.collection for o in result.enumerations] == ["sources"]
-    # 目录必须真的到了模型手里(回喂账目 + 标题豁免)。
-    assert "来源清单" in llm.reflect_prompts[0]
-    assert "论文一" in llm.reflect_prompts[0]
-    # 模型再选一次 ⇒ already_enumerated,而不是第二条链。
-    assert "already_enumerated" in _skips(result)
-    assert len(result.enumerations) == 1
-
-
-def test_seeded_roster_counts_as_first_round_progress(repo):
-    """播种列出的目录**就是**进展。
-
-    首轮的 `no_progress` 口径必须与循环里的那一份同源(循环数
-    `state.enum_rows_used`)。不数枚举行的话,一个只有来源、chunk 零命中的库会在
-    列全了目录之后仍被判「首轮空手」:`stale` 从 1 起步(离硬熔断只差一步),而
-    第一次 reflect 还会收到「一条证据都没查到,请先换通道」——就在那份目录已经
-    躺在同一份上下文里的时候。
+    模型这一轮直接作答 ⇒ 轨迹上一条 `enumerate` 都不该有。把首轮的确定性目录
+    播种加回来,这条必须红。
     """
-    from app.services.reasoning_retrieval import first_round_empty_note
-
-    notebook = _seed_sources_only(repo, ["论文一", "论文二"])
-    llm = _SeqLLM([{"next_action": "answer", "sufficient": True}])
-    retriever, limits = _retriever(repo, llm)
-    empty_note = first_round_empty_note(
-        retriever.chunk_search_active(), retriever.enumeration_active())
-
-    result = retriever.run(notebook.id, _CATALOG_QUESTION, "", limits=limits)
-
-    assert _seed_step(result) is not None            # 播种真的发生了
-    first_reflect = _steps(result, "reflect")[0]
-    assert first_reflect.detail["no_progress"] is False
-    assert first_reflect.detail["stale"] == 0
-    # 目录进了第一次 reflect 的上下文,而首轮空手提示没有。
-    assert "论文一" in llm.reflect_prompts[0]
-    assert empty_note not in llm.reflect_prompts[0]
-
-
-def test_catalog_seeding_also_happens_with_a_graph_in_scope(repo):
-    """目录与图无关:有图库同样播种(``_seed`` 建了 KG 对象)。"""
-    notebook = _seed(repo, formulas=1)
-    llm = _SeqLLM([{"next_action": "answer", "sufficient": True}])
-    retriever, limits = _retriever(repo, llm)
-
-    result = retriever.run(notebook.id, _CATALOG_QUESTION, "", limits=limits)
-
-    assert _seed_step(result) is not None
-    assert [o.collection for o in result.enumerations] == ["sources"]
-
-
-def test_catalog_seed_step_comes_before_the_plan_step(repo):
-    """播种排在 **plan 之前**是首轮阶段顺序合同的一条。
-
-    理由不是接线判据的可用时机(`enumeration_active` 在 `_new_run_state` 就算好
-    了),而是候选:目录是这类问题的答案本身,它必须先于 plan 进入轨迹与候选摘要,
-    第一次 reflect 才看得见。把 `_first_round_catalog_seed` 挪到
-    `_first_round_empty_fallback` 之后,这条断言必须红。
-    """
-    notebook = _seed_sources_only(repo, ["论文一"])
-    llm = _SeqLLM([{"next_action": "answer", "sufficient": True}])
-    retriever, limits = _retriever(repo, llm)
-
-    result = retriever.run(notebook.id, _CATALOG_QUESTION, "", limits=limits)
-
-    kinds = [step.step_type for step in result.trace]
-    assert "enumerate" in kinds and "plan" in kinds
-    assert kinds.index("enumerate") < kinds.index("plan")
-
-
-def test_topical_question_does_not_seed_the_roster(repo):
-    """话题修饰语让问题回到 ranked 通道:播种绝不能替它决定「其实你要目录」。"""
-    notebook = _seed_sources_only(repo, ["论文一"])
-    llm = _SeqLLM([{"next_action": "answer", "sufficient": True}])
-    retriever, limits = _retriever(repo, llm)
-
-    result = retriever.run(
-        notebook.id, "当前notebook里关于布局的文章讲了什么", "", limits=limits)
-
-    assert _steps(result, "enumerate") == []
-    assert result.enumerations == []
-
-
-def test_catalog_seeding_uses_the_original_question_not_the_contract(repo):
-    """高级界面确认合同后 `question` 是「原问题 + 整段契约」的复合串,分类器对它
-    必然不命中;播种因此读 `original_question`。"""
-    notebook = _seed_sources_only(repo, ["论文一"])
-    composite = f"{_CATALOG_QUESTION}\n【已确认的研究问题】…必答主题:1. 方法 2. 结论"
-    llm = _SeqLLM([{"next_action": "answer", "sufficient": True}])
-    retriever, limits = _retriever(repo, llm)
-
-    without = retriever.run(notebook.id, composite, "", limits=limits)
-    assert _steps(without, "enumerate") == []
-
-    llm2 = _SeqLLM([{"next_action": "answer", "sufficient": True}])
-    retriever2, limits2 = _retriever(repo, llm2)
-    with_original = retriever2.run(
-        notebook.id, composite, "", limits=limits2,
-        original_question=_CATALOG_QUESTION)
-    assert _seed_step(with_original) is not None
-
-
-def test_catalog_seeding_respects_the_enumeration_policy_bit(repo):
-    """knowhow 补全关的是 `allow_enumeration`:播种与动作走同一把闸,一起消失。"""
-    notebook = _seed_sources_only(repo, ["论文一"])
-    llm = _SeqLLM([{"next_action": "answer", "sufficient": True}])
-    retriever, limits = _retriever(repo, llm)
-    retriever.allow_enumeration = False
-
-    result = retriever.run(notebook.id, _CATALOG_QUESTION, "", limits=limits)
-
-    assert _steps(result, "enumerate") == []
-    assert result.enumerations == []
-
-
-def test_catalog_seeding_is_off_for_a_restricted_source_scope(repo):
-    """受限 scope 本就禁用整集合枚举;播种不得绕过那道闸。"""
-    from app.services.source_scope import source_scope_context
-
     notebook = _seed_sources_only(repo, ["论文一", "论文二"])
     llm = _SeqLLM([{"next_action": "answer", "sufficient": True}])
     retriever, limits = _retriever(repo, llm)
 
-    with source_scope_context(
-        notebook.id, {"mode": "include", "source_ids": ["s1"]}
-    ):
-        assert retriever.enumeration_active() is False
-        result = retriever.run(notebook.id, _CATALOG_QUESTION, "",
-                               limits=limits)
+    result = retriever.run(notebook.id, _CATALOG_QUESTION, "", limits=limits)
 
     assert _steps(result, "enumerate") == []
     assert result.enumerations == []
@@ -1855,28 +1747,10 @@ def test_production_repro_reaches_the_roster_through_the_real_validator(repo):
 
     reflect 走**真实**的 `parse_model_json_object` + `validate_model_json_shape`
     (假 provider 只负责回放 JSON 字符串),所以「目录决定的 `kind` 为空」这件事必须
-    真的被校验层接受 —— 那正是 F1 修的枚举字段空串规则。播种保证轨迹上有
-    `enumerate`(sources)步,校验层保证模型那一轮不是伪装成 answer 的兜底。
+    真的被校验层接受 —— 那正是 F1 修的枚举字段空串规则。轨迹上的 `enumerate`
+    (sources)步来自**模型自己选的**目录动作(服务端不再按问法播种),校验层保证
+    那一轮不是伪装成 answer 的兜底。
     """
-    from app.core.model_json import (
-        ModelJsonRepairError, parse_model_json_object, validate_model_json_shape,
-    )
-    from app.services.model_work import MalformedModelResponse
-
-    class _ValidatingLLM(_SeqLLM):
-        """镜像 `model_provider.ScheduledJsonChatClient` 的拒收合同:解析失败或
-        形状不合 schema 提示时 `MalformedModelResponse() from ModelJsonRepairError`。"""
-
-        def chat_json(self, messages, schema_hint, **kwargs):
-            raw = super().chat_json(messages, schema_hint, **kwargs)
-            try:
-                parsed = parse_model_json_object(
-                    raw, schema_hint, allow_repair=False)
-                validate_model_json_shape(parsed.content, schema_hint)
-            except ModelJsonRepairError as exc:
-                raise MalformedModelResponse() from exc
-            return parsed.content
-
     notebook = _seed_sources_only(
         repo, ["Recursive Depth Language Models"],
         summaries={"Recursive Depth Language Models": "递归深度语言模型的摘要"})
@@ -1892,11 +1766,10 @@ def test_production_repro_reaches_the_roster_through_the_real_validator(repo):
         "",
         limits=limits,
         intent_queries=[f"{_CATALOG_QUESTION}\n【已确认的研究问题】逐篇说明"],
-        original_question=_CATALOG_QUESTION,
     )
 
-    seed = _seed_step(result)
-    assert seed is not None and seed.detail["collection"] == "sources"
+    listed = _steps(result, "enumerate")
+    assert listed and listed[0].detail["collection"] == "sources"
     assert [o.collection for o in result.enumerations] == ["sources"]
     assert result.enumerations[0].coverage.returned_total == 1
     # 校验层接受了目录决定 ⇒ 那一轮不是兜底(F1 未落地时这里会红)。
@@ -1905,17 +1778,25 @@ def test_production_repro_reaches_the_roster_through_the_real_validator(repo):
         "fallback_reason" not in step.detail for step in reflect_steps)
 
 
-# --------------------------------------- 播种的参考库范围(codex 本轮 P2)
 
-_LOCAL_ONLY_QUESTION = "总结当前notebook的文章，不包括参考库"
-_WITH_LIBRARIES_QUESTION = "介绍当前notebook和参考库的文章"
+
+# ---------------------------------------------- 来源清单的范围是工具的**参数**
+#
+# 「这份目录列多大一片」由模型在选目录动作的**同一次调用**里填:`enumerate.scope`，
+# 合法值 `all`(默认，= 检索范围内的全部文档，与集合地图 `sources: N` 同口径)与
+# `current_notebook`(收窄成只列本库)。服务端不解析问句去猜。
+#
+# 参数刻意是**字符串枚举而不是布尔**:`_validate_against_example` 对布尔示例是硬
+# 类型校验(模型吐 `"true"` 直接 `invalid_boolean`、整轮 reflect 被打成兜底)，
+# 对字符串示例才享受 F1 立的空串宽容规则。所以这一节的用例全部走 `_ValidatingLLM`
+# ——只测解析器会得出「这样填可以」的结论，而生产上那一轮早被前一道校验废掉了。
 
 
 def _mount_reference_library(repo, notebook_id, titles):
     """挂载并勾选一个有来源的参考库。
 
     勾选是默认态:未受限的来源范围 = 全参与集(`scoped_participants` 不裁剪),
-    所以挂上就等于这一轮读得到——这正是 P2 那条泄漏路径的前置条件。
+    所以挂上就等于这一轮读得到——这正是「默认列全部」这条口径的前置条件。
     """
     base = repo.create_notebook(NotebookCreate(name="base"))
     repo.mark_notebook_base(base.id)
@@ -1927,120 +1808,294 @@ def _mount_reference_library(repo, notebook_id, titles):
 
 
 def _listed_titles(result):
-    return [item.source_title for outcome in result.enumerations
-            for item in outcome.items]
+    return sorted(item.source_title for outcome in result.enumerations
+                  for item in outcome.items)
 
 
-def test_catalog_seed_excludes_reference_libraries_when_asked_to(repo):
-    """「不包括参考库」必须一路传到执行器:被排除的文档不进证据、不占预算。"""
-    notebook = _seed_sources_only(repo, ["论文一", "论文二"])
-    _mount_reference_library(repo, notebook.id, ["参考库甲", "参考库乙", "参考库丙"])
-    llm = _SeqLLM([{"next_action": "answer", "sufficient": True}])
-    retriever, limits = _retriever(repo, llm)
-
-    result = retriever.run(notebook.id, _LOCAL_ONLY_QUESTION, "", limits=limits)
-
-    seed = _seed_step(result)
-    assert seed is not None and seed.detail["collection"] == "sources"
-    assert seed.detail["local_only"] is True          # 稀疏键,仅为真时写
-    assert _listed_titles(result) == ["论文一", "论文二"]
-    # 共享枚举预算只按本库行数扣:3 篇参考库文档一行都没走过。
-    assert seed.detail["returned"] == 2 and seed.detail["returned_total"] == 2
-    assert seed.detail["total"] == 2 and seed.detail["complete"] is True
-    assert result.enumerations[0].local_only is True
-    # 目录进了模型上下文,被排除的参考库文档没有。
-    assert "论文一" in llm.reflect_prompts[0]
-    assert "参考库甲" not in llm.reflect_prompts[0]
+def _fallback_reasons(result):
+    return [step.detail.get("fallback_reason")
+            for step in _steps(result, "reflect")
+            if "fallback_reason" in step.detail]
 
 
-def test_catalog_seed_without_a_scope_clause_stays_local(repo):
-    """`include_reference_libraries` 的**默认值**就是 False。
+@pytest.mark.parametrize("action", [
+    _enumerate_sources_action(),                 # 字段整个缺省
+    _enumerate_sources_action(scope=""),         # 显式留空(F1 的宽容规则)
+])
+def test_the_roster_defaults_to_every_document_in_scope(repo, action):
+    """不填 / 留空 ⇒ 列出**检索范围内的全部文档**,并且不废掉这一轮。
 
-    没提参考库的问句与显式排除的问句在这里同为「只列本库」——播种的口径必须与
-    chunk 侧那行 `local_only=(kind == "catalog" and not include_...)` 逐字一致,
-    而不是把默认值读成「那就全都列吧」。
+    默认值必须与集合地图 `sources: N` 的联邦口径一致:模型是照着那个计数决定要不要
+    枚举的,默认却只列本库的话,它看到 5、拿回 2,而这两个数在轨迹上都没有解释。
+    留空之所以也必须落到这里,是 F1 的规则:字符串枚举字段的空串永远合法(=「这一轮
+    不用它」),模型不理解这个旋钮时留空,动作照样成立。
     """
-    notebook = _seed_sources_only(repo, ["论文一"])
-    _mount_reference_library(repo, notebook.id, ["参考库甲"])
-    llm = _SeqLLM([{"next_action": "answer", "sufficient": True}])
+    notebook = _seed_sources_only(repo, ["论文一", "论文二"])
+    _mount_reference_library(repo, notebook.id, ["参考库甲", "参考库乙"])
+    llm = _ValidatingLLM([action, {"next_action": "answer", "sufficient": True}])
     retriever, limits = _retriever(repo, llm)
 
     result = retriever.run(notebook.id, _CATALOG_QUESTION, "", limits=limits)
 
-    seed = _seed_step(result)
-    assert seed is not None and seed.detail["local_only"] is True
-    assert _listed_titles(result) == ["论文一"]
+    listed = _steps(result, "enumerate")
+    assert len(listed) == 1 and listed[0].detail["collection"] == "sources"
+    # 稀疏键:只在收窄时才写,所以默认路径上根本不该出现。
+    assert "local_only" not in listed[0].detail
+    assert _listed_titles(result) == ["参考库乙", "参考库甲", "论文一", "论文二"]
+    assert listed[0].detail["returned_total"] == 4
+    assert listed[0].detail["complete"] is True
+    assert result.enumerations[0].local_only is False
+    # 校验层接受了它 ⇒ 这一轮不是兜底(布尔参数在这里必红:`invalid_boolean`)。
+    assert _fallback_reasons(result) == []
 
 
-def test_catalog_seed_lists_reference_libraries_when_the_question_asks(repo):
-    """显式「和参考库」才含挂载库;此时轨迹上没有 `local_only` 这个键。"""
-    notebook = _seed_sources_only(repo, ["论文一"])
-    _mount_reference_library(repo, notebook.id, ["参考库甲"])
-    llm = _SeqLLM([{"next_action": "answer", "sufficient": True}])
+def test_current_notebook_scope_narrows_the_roster(repo):
+    """`scope="current_notebook"` ⇒ 只列本库,轨迹与上屏摘要都说出这件事。"""
+    notebook = _seed_sources_only(repo, ["论文一", "论文二"])
+    _mount_reference_library(repo, notebook.id, ["参考库甲", "参考库乙", "参考库丙"])
+    llm = _ValidatingLLM([
+        _enumerate_sources_action(scope="current_notebook"),
+        {"next_action": "answer", "sufficient": True},
+    ])
     retriever, limits = _retriever(repo, llm)
 
-    result = retriever.run(
-        notebook.id, _WITH_LIBRARIES_QUESTION, "", limits=limits)
+    result = retriever.run(notebook.id, _CATALOG_QUESTION, "", limits=limits)
 
-    seed = _seed_step(result)
-    assert seed is not None and "local_only" not in seed.detail
-    assert sorted(_listed_titles(result)) == ["参考库甲", "论文一"]
-    assert result.enumerations[0].local_only is False
+    listed = _steps(result, "enumerate")
+    assert len(listed) == 1
+    assert listed[0].detail["local_only"] is True     # 稀疏键,仅为真时写
+    assert _listed_titles(result) == ["论文一", "论文二"]
+    # 共享枚举预算只按本库行数扣:3 篇参考库文档一行都没走过。
+    assert listed[0].detail["returned"] == 2
+    assert listed[0].detail["total"] == 2
+    assert result.enumerations[0].local_only is True
+    assert _fallback_reasons(result) == []
 
 
-def test_model_roster_action_cannot_reopen_the_chain_at_another_scope(repo):
-    """模型随后再选目录动作:按「已列全」跳过,参考库文档不会从第二条链混进来。
+def test_a_narrowed_roster_says_so_on_screen_and_in_the_ledger(repo):
+    """范围可见:上屏摘要与回喂给模型的账目都带「(仅当前笔记本)」。
 
-    动作本身不带任何范围信息(默认全参与集),所以「以本次请求为准」的写法会在
-    这里开出第二条链——那条链列的正是用户明确排除掉的那些文档。
+    没有它,一个挂着参考库的库里「已全部列出 2 条」对用户是一句假话,对模型则是
+    「这个库就这些」——而它本来可以再用 `scope:"all"` 问一次。
     """
     notebook = _seed_sources_only(repo, ["论文一"])
     _mount_reference_library(repo, notebook.id, ["参考库甲"])
-    llm = _SeqLLM([
+    llm = _ValidatingLLM([
+        _enumerate_sources_action(scope="current_notebook"),
+        _enumerate_action(),                      # 只为多跑一轮 reflect 拿到账目
+        {"next_action": "answer", "sufficient": True},
+    ])
+    retriever, limits = _retriever(repo, llm)
+
+    result = retriever.run(notebook.id, _CATALOG_QUESTION, "", limits=limits)
+
+    listed = _steps(result, "enumerate")
+    assert listed[0].summary == "枚举来源清单: 已全部列出 1 条（仅当前笔记本）"
+    ledger = [p for p in llm.reflect_prompts if "本轮已枚举的清单" in p]
+    assert ledger and "（仅当前笔记本）" in ledger[-1]
+
+
+def test_a_default_scope_roster_says_nothing_about_scope(repo):
+    """与上一条成对:默认(联邦)范围下不写任何范围后缀。
+
+    后缀若无条件出现,它就不再携带信息——「仅当前笔记本」必须只在真的收窄时说。
+    """
+    notebook = _seed_sources_only(repo, ["论文一"])
+    _mount_reference_library(repo, notebook.id, ["参考库甲"])
+    llm = _ValidatingLLM([
+        _enumerate_sources_action(),
+        _enumerate_action(),
+        {"next_action": "answer", "sufficient": True},
+    ])
+    retriever, limits = _retriever(repo, llm)
+
+    result = retriever.run(notebook.id, _CATALOG_QUESTION, "", limits=limits)
+
+    assert _steps(result, "enumerate")[0].summary == (
+        "枚举来源清单: 已全部列出 2 条")
+    ledger = [p for p in llm.reflect_prompts if "本轮已枚举的清单" in p]
+    assert ledger and "（仅当前笔记本）" not in ledger[-1]
+
+
+def test_an_empty_local_notebook_still_lists_its_reference_libraries(repo):
+    """本库 0 篇 + 挂载库 N 篇、模型什么都不填 ⇒ 照样列出参考库的文档。
+
+    这是「默认 = 联邦」这条口径唯一会被用户直接感觉到的场景:默认若是本库,这类
+    笔记本上的目录请求会返回一份空清单,而地图上明明写着有文档。地图的双计数
+    (`sources: N (current notebook: 0)`)正是让模型事先看懂这一点的东西。
+    """
+    notebook = _seed_sources_only(repo, [])
+    _mount_reference_library(repo, notebook.id, ["参考库甲", "参考库乙"])
+    llm = _ValidatingLLM([
         _enumerate_sources_action(),
         {"next_action": "answer", "sufficient": True},
     ])
     retriever, limits = _retriever(repo, llm)
 
-    result = retriever.run(notebook.id, _LOCAL_ONLY_QUESTION, "", limits=limits)
+    result = retriever.run(notebook.id, _CATALOG_QUESTION, "", limits=limits)
 
+    assert "sources: 2 (current notebook: 0)" in result.collection_map_text
+    assert _listed_titles(result) == ["参考库乙", "参考库甲"]
+    assert _steps(result, "enumerate")[0].detail["returned_total"] == 2
+    assert _fallback_reasons(result) == []
+
+
+# ----------------------------------------- 非法范围值:如实记录**校验层**的行为
+#
+# F1 立的规则是「空串永远合法,非空非法仍拒」,所以 `"yes"` 这类非空非法字符串会在
+# 模型响应到达解析器**之前**就被 `invalid_enum` 拒掉,整轮 reflect 走兜底。这不与
+# 「解析器对任何取值都不废动作」矛盾:那是第二道防线,管的是绕过校验层的路径。
+# 让模型不踩雷靠的是枚举值自描述 + 留空永远安全,不是把非法值也认下来。
+
+
+def test_an_illegal_scope_string_is_rejected_by_the_validation_layer(repo):
+    """非空非法字符串 ⇒ `invalid_enum`,整轮兜底(与 kind/direction 同一条规则)。"""
+    notebook = _seed_sources_only(repo, ["论文一"])
+    llm = _ValidatingLLM([
+        _enumerate_sources_action(scope="yes"),
+        {"next_action": "answer", "sufficient": True},
+    ])
+    retriever, limits = _retriever(repo, llm)
+
+    result = retriever.run(notebook.id, _CATALOG_QUESTION, "", limits=limits)
+
+    assert _fallback_reasons(result) == ["invalid_enum"]
+    assert _steps(result, "enumerate") == []
+
+
+@pytest.mark.parametrize("bogus", [1, None, {}])
+def test_a_non_string_scope_is_rejected_by_the_validation_layer(repo, bogus):
+    """非字符串 ⇒ `invalid_type`(示例值是字符串,类型判据先于枚举判据)。"""
+    notebook = _seed_sources_only(repo, ["论文一"])
+    llm = _ValidatingLLM([
+        _enumerate_sources_action(scope=bogus),
+        {"next_action": "answer", "sufficient": True},
+    ])
+    retriever, limits = _retriever(repo, llm)
+
+    result = retriever.run(notebook.id, _CATALOG_QUESTION, "", limits=limits)
+
+    assert _fallback_reasons(result) == ["invalid_type"]
+    assert _steps(result, "enumerate") == []
+
+
+def test_the_parser_never_voids_an_action_over_the_scope_value(repo):
+    """第二道防线:解析器对任何取不到的范围值都落回默认,连 fail_closed 也不抛。
+
+    走 `_SeqLLM`(不经校验层)是**刻意**的:这条测的正是「校验层没拦住时会怎样」。
+    `fail_closed` 管的是动作合法性(缺 object_id / 缺 kind 那类「这个动作根本做不
+    成」),范围不属于那一类——动作照旧成立,只是范围按默认走。
+    """
+    notebook = _seed_sources_only(repo, ["论文一"])
+    _mount_reference_library(repo, notebook.id, ["参考库甲"])
+    llm = _SeqLLM([
+        _enumerate_sources_action(scope="yes"),
+        {"next_action": "answer", "sufficient": True},
+    ])
+    retriever, limits = _retriever(repo, llm, fail_closed=True)
+
+    result = retriever.run(notebook.id, _CATALOG_QUESTION, "", limits=limits)
+
+    listed = _steps(result, "enumerate")
+    assert len(listed) == 1 and "local_only" not in listed[0].detail
+    assert _listed_titles(result) == ["参考库甲", "论文一"]
+
+
+# ------------------------------------------------- 范围是续跑键的一部分(P1-3)
+
+
+def test_widening_the_scope_opens_a_second_chain(repo):
+    """先 `current_notebook` 列全、再 `all` ⇒ **新开一条链**,不被「已全部列出」拦掉。
+
+    范围是清单身份的一部分:两次请求要的本来就不是同一份目录。链键不含范围时,
+    第二次会被 `already_enumerated` 跳过,模型一个完全合理的追问(「那参考库里
+    有哪些?」)就永远拿不到答案。两条链共用同一个 run 级预算池,所以重复列的代价
+    自然被夹住。
+    """
+    notebook = _seed_sources_only(repo, ["论文一"])
+    _mount_reference_library(repo, notebook.id, ["参考库甲"])
+    llm = _ValidatingLLM([
+        _enumerate_sources_action(scope="current_notebook"),
+        _enumerate_sources_action(scope="all"),
+        {"next_action": "answer", "sufficient": True},
+    ])
+    retriever, limits = _retriever(repo, llm)
+
+    result = retriever.run(notebook.id, _CATALOG_QUESTION, "", limits=limits)
+
+    listed = _steps(result, "enumerate")
+    assert len(listed) == 2
+    assert listed[0].detail["local_only"] is True
+    assert "local_only" not in listed[1].detail
+    assert "already_enumerated" not in _skips(result)
+    assert [o.local_only for o in result.enumerations] == [True, False]
+    assert sorted(item.source_title
+                  for item in result.enumerations[1].items) == [
+        "参考库甲", "论文一"]
+
+
+def test_narrowing_the_scope_also_opens_a_second_chain(repo):
+    """反向同理:先 `all` 后 `current_notebook` 也是新链(判据对称,不是特判)。"""
+    notebook = _seed_sources_only(repo, ["论文一"])
+    _mount_reference_library(repo, notebook.id, ["参考库甲"])
+    llm = _ValidatingLLM([
+        _enumerate_sources_action(),
+        _enumerate_sources_action(scope="current_notebook"),
+        {"next_action": "answer", "sufficient": True},
+    ])
+    retriever, limits = _retriever(repo, llm)
+
+    result = retriever.run(notebook.id, _CATALOG_QUESTION, "", limits=limits)
+
+    assert len(_steps(result, "enumerate")) == 2
+    assert "already_enumerated" not in _skips(result)
+    assert [o.local_only for o in result.enumerations] == [False, True]
+
+
+def test_repeating_the_same_scope_is_still_already_enumerated(repo):
+    """同一范围的重复请求照旧按「本轮已全部列出」跳过——范围进键没有把判重拆掉。"""
+    notebook = _seed_sources_only(repo, ["论文一"])
+    _mount_reference_library(repo, notebook.id, ["参考库甲"])
+    llm = _ValidatingLLM([
+        _enumerate_sources_action(scope="current_notebook"),
+        _enumerate_sources_action(scope="current_notebook"),
+        {"next_action": "answer", "sufficient": True},
+    ])
+    retriever, limits = _retriever(repo, llm)
+
+    result = retriever.run(notebook.id, _CATALOG_QUESTION, "", limits=limits)
+
+    assert len(_steps(result, "enumerate")) == 1
     assert "already_enumerated" in _skips(result)
     assert len(result.enumerations) == 1
-    assert _listed_titles(result) == ["论文一"]
 
 
-def test_a_resumed_roster_chain_keeps_the_seeded_scope(repo):
-    """播种被截断后模型那次**续跑**同样沿用开链时的范围(链级账目,不是本次请求)。
+def test_the_roster_scope_is_a_tool_parameter_the_model_fills(repo):
+    """schema 与动作说明都要出现这个参数,且只在枚举闸开着时出现。
 
-    用 stub 驱动:三个预算池都是 run 级的,真执行器一次就把小库列完了,续跑这一
-    步在真库上做不出来。断言落在执行器实际收到的 `local_only` 上——把传参去掉、
-    或改成「以本次请求为准」,第二次调用就会变成 False。
+    闸关着时模型看不到 enumerate 分支,留一个它填不了的槽位只会让它去推理一件
+    做不到的事(与 `object_type` 随 `kg_actions` 一起消失同一条纪律)。
     """
-    from app.services.collection_enumeration import SourceEnumeration
-
-    notebook = _seed_sources_only(repo, ["论文一", "论文二"])
-    partial = SourceEnumeration(
-        items=(), cursor="cursor-1", extra_pages=0, payload_chars=10,
-        coverage=_coverage(returned=1, returned_total=1, complete=False,
-                           has_more=True, total=2,
-                           truncated_reason=TRUNCATED_BUDGET),
+    from app.services.collection_catalog import (
+        ENUMERABLE_ELEMENT_KINDS, ENUMERABLE_KG_OBJECT_TYPES,
     )
-    done = SourceEnumeration(
-        items=(), cursor=None, extra_pages=0, payload_chars=10,
-        coverage=_coverage(returned=1, returned_total=2, total=2),
-    )
-    stub = _StubEnumeration([partial, done])
-    llm = _SeqLLM([
-        _enumerate_sources_action(),
-        {"next_action": "answer", "sufficient": True},
-    ])
-    retriever, limits = _retriever(repo, llm)
-    retriever.collection_enumeration = stub
+    from app.services.prompts import reflect_prompt, reflect_schema_hint
+    from app.services.reasoning_retrieval import ENUMERATE_SCOPES
 
-    result = retriever.run(notebook.id, _LOCAL_ONLY_QUESTION, "", limits=limits)
+    off = reflect_prompt("q", "s")
+    on = reflect_prompt("q", "s", element_kinds=ENUMERABLE_ELEMENT_KINDS,
+                        object_types=ENUMERABLE_KG_OBJECT_TYPES)
+    schema_on = reflect_schema_hint(ENUMERABLE_ELEMENT_KINDS,
+                                    ENUMERABLE_KG_OBJECT_TYPES)
 
-    assert [call["local_only"] for call in stub.calls] == [True, True]
-    assert stub.calls[0]["cursor"] is None
-    assert stub.calls[1]["cursor"] == "cursor-1"
-    assert len(result.enumerations) == 1
-    assert result.enumerations[0].local_only is True
+    # 与 collection 并列,写成**字符串枚举**:布尔示例会让 `"true"` 整轮被拒
+    # (`invalid_boolean`),字符串示例才吃得下 F1 的空串宽容规则。
+    assert '"collection":"","scope":"all|current_notebook",' in schema_on
+    # schema 里的两个取值必须就是解析器认的那两个,不能各写一份。
+    assert '"scope":"' + "|".join(ENUMERATE_SCOPES) + '"' in schema_on
+    assert 'enumerate.scope' in on
+    assert '"current_notebook"' in on
+    assert "By default the roster lists EVERY document in retrieval scope" in on
+    # 闸关 ⇒ 字段与那句指导一并消失。
+    assert '"scope"' not in reflect_schema_hint()
+    assert "enumerate.scope" not in off

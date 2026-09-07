@@ -1581,6 +1581,10 @@ def test_graphless_base_sources_still_admit_the_federated_enumeration_rail(arepo
     枚举工具是联邦的——元素/知识对象/来源三份清单都跨库,所以参与集口径对它是
     真话。上一条收窄的只是原文那条通道的口径,不是把「无图参考库有来源」这条
     放行整个拆掉;这里钉的就是没有拆过头,而且清单真的把参考库的文档列了出来。
+
+    来源清单的范围是**工具参数**(`enumerate.scope`),而它的默认值就是联邦——
+    与集合地图 `sources: N` 同口径。所以这里模型什么都不填:本库一篇文档都没有的
+    笔记本上,默认路径必须能把挂载参考库的文档列出来,否则这条放行就是空的。
     """
     arepo.settings.reasoning_enum_tools_enabled = True
     nb = _seed(arepo, formulas=0, with_kg=False, with_source=False)
@@ -1589,7 +1593,8 @@ def test_graphless_base_sources_still_admit_the_federated_enumeration_rail(arepo
         plan={"sub_queries": [{"query": "文章分析"}]},
         reflects=[
             {"next_action": "enumerate_elements",
-             "enumerate": {"collection": "sources"}, "reason": "先拿目录"},
+             "enumerate": {"collection": "sources"},
+             "reason": "先拿目录"},
             {"next_action": "answer", "sufficient": True},
         ],
         answer={"answer": "参考库里有一篇。", "grounded": True},
