@@ -2,7 +2,7 @@
 
 日期：2026-09-07
 
-状态：T1–T4 已实施（分支 `claude/retrieval-agent-reflect-optimization-3a5be5`，18 个提交 `69d8fb932..09d8f65b7`，基线 `00bbeff51`），总闸 `REASONING_REFLECT_V2_ENABLED` 默认关闭，**未开启生产新策略**；T0（§1.1 离线轨迹统计）与 §9.2 真实模型 A/B 待规划。落地记录见 `fangan_done.md` §32，开闸前待办见 `fangan_todo.md`「reflect v2 开闸前待办」。
+状态：T1–T4 已实施（分支 `claude/retrieval-agent-reflect-optimization-3a5be5`，基线 `00bbeff51`，自 `69d8fb932` 起共 20 个提交），总闸 `REASONING_REFLECT_V2_ENABLED` 默认关闭，**未开启生产新策略**；T0（§1.1 离线轨迹统计）与 §9.2 真实模型 A/B 待规划。落地记录见 `fangan_done.md` §32，开闸前待办见 `fangan_todo.md`「reflect v2 开闸前待办」。
 
 核对基线：`65b97406cddea6317a7f1b9fbf8dc45b707f54c7`。实施前重新检查 HEAD、工作区和当前 owning documents，按符号定位，不依赖本文的历史行号。
 
