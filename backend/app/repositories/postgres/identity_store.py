@@ -142,9 +142,16 @@ class IdentityStore:
         # 最近上线(规格 docs/superpowers/specs/
         # 2026-09-07-admin-usage-overview-usage-signals-design_zh.md §3
         # B1、§7 决策 1):登录/注册/新建会话与 auth_sessions 同一写事务里
-        # 一并写 users.last_seen_at——这里总是刚登录,不需要节流或单调判断。
+        # 一并写 users.last_seen_at——这里总是刚登录,不需要节流判断。仍带
+        # 单调守卫(AND last_seen_at IS NULL OR < %s):与 resolve_session 的
+        # touch 路径共用同一条不变量(`docs/development*.md`「单调不回退」),
+        # 使该表述对登录路径同样成立——SQLite 侧同名方法用裸本地时刻
+        # (`datetime.now()`),DST 回拨时会真的倒退;PG 侧这里加同一守卫
+        # 主要是保持两侧语义逐字对齐,而不是因为 PG 服务器时钟本身有回退风险。
         connection.execute(
-            "UPDATE users SET last_seen_at=%s WHERE id=%s", (now, user_id)
+            "UPDATE users SET last_seen_at=%s "
+            "WHERE id=%s AND (last_seen_at IS NULL OR last_seen_at<%s)",
+            (now, user_id, now),
         )
         return token
 
@@ -262,7 +269,24 @@ class IdentityStore:
         )
         if row["last_seen_at"] <= touch_before:
             with self.database.write() as connection:
-                cursor = connection.execute(
+                # 加锁顺序必须是 users 先、auth_sessions 后,与
+                # change_user_password / admin_reset_user_password 一致(那两个
+                # 方法先 `SELECT users ... FOR UPDATE` 再 `DELETE FROM
+                # auth_sessions`)。这里以前是反过来(先 CAS auth_sessions 再
+                # 按 CAS 结果决定要不要碰 users),两条路径因此以相反顺序申请
+                # 对方持有的行锁——在本机 PG 上可复现 DeadlockDetected(两个
+                # 并发事务,一个走本 touch 路径、另一个走改密路径)。单调不
+                # 回退(AND last_seen_at IS NULL OR < %s)已经让重复/并发的
+                # touch 请求各自写 users 都无害,因此不再需要先看 auth_sessions
+                # 的 CAS 是否命中才决定要不要写 users——直接按新顺序发两条
+                # UPDATE。这一列不随 auth_sessions 行被删除(登出/吊销)而
+                # 清空,登出后仍保留。
+                connection.execute(
+                    "UPDATE users SET last_seen_at=%s "
+                    "WHERE id=%s AND (last_seen_at IS NULL OR last_seen_at<%s)",
+                    (now, user["id"], now),
+                )
+                connection.execute(
                     "UPDATE auth_sessions SET last_seen_at=%s,expires_at=%s "
                     "WHERE token=%s AND last_seen_at=%s AND expires_at>%s",
                     (
@@ -273,17 +297,6 @@ class IdentityStore:
                         now,
                     ),
                 )
-                # 最近上线(规格 §3 B1、§7 决策 1):只在赢得上面的 CAS 时才
-                # 写 users.last_seen_at——同一节流窗口内的并发请求只应有
-                # 一个赢家推进这两处状态。单调不回退(AND last_seen_at IS
-                # NULL OR < %s):避免落后的并发写把列往回拨。这一列不随
-                # auth_sessions 行被删除(登出/吊销)而清空,登出后仍保留。
-                if cursor.rowcount == 1:
-                    connection.execute(
-                        "UPDATE users SET last_seen_at=%s "
-                        "WHERE id=%s AND (last_seen_at IS NULL OR last_seen_at<%s)",
-                        (now, user["id"], now),
-                    )
         return self._user_profile(user, profile)
 
     def delete_session(self, token: str) -> None:
