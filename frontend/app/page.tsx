@@ -226,6 +226,12 @@ import { createOwnedWorkspaceExtensionActions } from "../features/extension-sdk/
 import { WorkspaceExtensionOutlet } from "../features/extension-sdk/host";
 import { WORKSPACE_UI_CONTRIBUTIONS } from "../features/extension-sdk/workspace-registry";
 import { sourceElementDomId } from "./source-detail-state";
+import {
+  elementHeadingLevel,
+  elementLocationNote,
+  elementTypeTag,
+  withSectionDividers,
+} from "./source-element-display";
 import { SchemaManager, type SchemaView } from "./schema-manager";
 import { usePendingActions, PendingBell, PendingToast, type PendingItem } from "./pending-center";
 import { canSeeAdminUsage } from "./admin/usage/format.ts";
@@ -289,7 +295,7 @@ import {
   type UnifiedConceptNode,
 } from "./workspace-model";
 import { documentUploadBlockReason, resolveDocumentCapacity } from "./document-limit";
-import { label, PARSE_STATUS, ELEMENT_TYPE, KNOWLEDGE_STATUS, SEVERITY, CHECKUP_FIX, CHECKUP_FIX_BUSY } from "./vocabulary";
+import { label, PARSE_STATUS, KNOWLEDGE_STATUS, SEVERITY, CHECKUP_FIX, CHECKUP_FIX_BUSY } from "./vocabulary";
 
 /**
  * 标签页重新可见时,两次「访问权复核」之间至少隔这么久。
@@ -6963,18 +6969,17 @@ export default function Home() {
                     onClick={() => loadSourceElementPage("previous").catch(reportError)}
                   >{sourceElementsLoading ? "加载中…" : `加载前面的元素（已显示 ${sourceElements.length}/${sourceElementsTotal}）`}</button>
                 )}
-                {sourceElements.length > 0 ? sourceElements.map((element) => (
-                  <article
-                    className={`item source-element-card${element.id === highlightedElementId ? " source-element-card--highlighted" : ""}`}
-                    key={element.id}
-                    id={sourceElementDomId(element.id)}
-                  >
-                    <div className="element-head">
-                      <h3>{element.location_label}</h3>
-                      <span className="tag element-type-tag">{label(ELEMENT_TYPE, element.element_type, "内容")}</span>
-                    </div>
-                    <ElementBody element={element} notebookId={currentNotebookId ?? ""} />
-                  </article>
+                {sourceElements.length > 0 ? withSectionDividers(sourceElements).map(({ element, divider }) => (
+                  <Fragment key={element.id}>
+                    {divider && (
+                      <div className="source-element-divider"><span>{divider}</span></div>
+                    )}
+                    <SourceElementCard
+                      element={element}
+                      highlighted={element.id === highlightedElementId}
+                      notebookId={currentNotebookId ?? ""}
+                    />
+                  </Fragment>
                 )) : (
                   <article className="item">
                     <h3>等待解析</h3>
@@ -7727,7 +7732,37 @@ function sanitizeTableHtml(html: string): string {
   return withoutHandlers.replace(/<\/?[a-z][^>]*>/gi, (tag) => (allowed.test(tag) ? tag : " "));
 }
 
+// 来源详情里的一个元素。呈现规则(分隔线/标题级别/哪些类型贴标签/行号)全在
+// source-element-display.ts,这里只负责把规则落成 DOM。location_label 刻意不渲染:
+// 它是引用坐标,不是给读者看的(见该模块顶部说明)。
+function SourceElementCard({ element, highlighted, notebookId }: {
+  element: SourceElement;
+  highlighted: boolean;
+  notebookId: string;
+}) {
+  const note = elementLocationNote(element);
+  const tag = elementTypeTag(element.element_type);
+  return (
+    <article
+      className={`item source-element-card${highlighted ? " source-element-card--highlighted" : ""}`}
+      id={sourceElementDomId(element.id)}
+    >
+      {(note || tag) && (
+        <div className="element-head">
+          {note && <span className="element-location-note">{note}</span>}
+          {tag && <span className="tag element-type-tag">{tag}</span>}
+        </div>
+      )}
+      <ElementBody element={element} notebookId={notebookId} />
+    </article>
+  );
+}
+
 function ElementBody({ element, notebookId }: { element: SourceElement; notebookId: string }) {
+  if (element.element_type === "heading") {
+    const HeadingTag = `h${elementHeadingLevel(element)}` as "h3" | "h4" | "h5";
+    return <HeadingTag className="element-heading">{element.text}</HeadingTag>;
+  }
   if (element.element_type === "formula") {
     return <FormulaView latex={element.text} />;
   }
