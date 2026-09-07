@@ -2651,6 +2651,63 @@ def test_run_expand_community_no_base_noop(rrepo, monkeypatch):
     assert any(t.step_type == "expand_community" for t in res.trace)
 
 
+def test_run_expand_community_disabled_by_policy_skips_without_ending_loop(rrepo, monkeypatch):
+    """调用方策略关掉社区扩展(knowhow 补全那档)时,模型选中它只烧本轮:零社区
+    I/O、记一条 skip,下一轮仍能选别的通道并正常走到 answer。
+
+    修复前这段闸写在 elif 链之前并以 `break` 收尾——一次被禁动作就终止整个反思
+    循环,后面本可执行的 add_subquery/search_elements 全被放弃(设计稿 §8)。
+    """
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    nb = _seed_two_nodes(rrepo)
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "RTL到GDSII流程"}]},
+        reflects=[
+            {"next_action": "expand_community", "community_focal": "DeepSeek-V4"},
+            {"next_action": "add_subquery",
+             "new_sub_query": {"query": "布局布线步骤", "prefer": "balanced"}},
+            {"next_action": "answer", "sufficient": True}]))
+    retriever = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    retriever.allow_community_expansion = False
+
+    def _boom(*a, **k):
+        raise AssertionError("被禁的社区扩展不得发起任何社区 I/O")
+    monkeypatch.setattr(retriever.communities, "mounted_base_ids", _boom)
+    monkeypatch.setattr(retriever.communities, "resolve_comparison_peers", _boom)
+
+    res = retriever.run(nb.id, "DeepSeek-V4 相比其他", "")
+    kinds = [t.step_type for t in res.trace]
+    skip_idx = next(i for i, t in enumerate(res.trace)
+                    if t.detail.get("reason") == "community_expansion_disabled")
+    # skip 之后循环还在跑:补充子查询真的执行了,最后才是 answer。
+    later = [t for t in res.trace[skip_idx + 1:]]
+    assert any(t.step_type == "retrieve" and "补充子查询" in t.summary for t in later)
+    assert kinds[-1] == "answer"
+    assert kinds.count("reflect") == 3
+    assert "布局布线步骤" in [a["query"] for a in res.attempted]
+
+
+def test_run_expand_community_disabled_repeatedly_still_trips_stale_breaker(rrepo, monkeypatch):
+    """被禁动作走链尾记账:反复请求它累加 stale,到上限照常熔断——不能因为改掉了
+    `break` 就让模型靠重复非法请求规避熔断(设计稿 §8「不能改成裸 continue」)。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    nb = _seed_two_nodes(rrepo)
+    rrepo.settings.reasoning_stale_limit = 3
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "RTL到GDSII流程"}]},
+        reflects=[{"next_action": "expand_community", "community_focal": "X"}] * 6))
+    retriever = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    retriever.allow_community_expansion = False
+
+    res = retriever.run(nb.id, "X 相比其他", "")
+    kinds = [t.step_type for t in res.trace]
+    reasons = [t.detail.get("reason") for t in res.trace if t.step_type == "skip"]
+    assert reasons.count("community_expansion_disabled") == 3
+    assert "stale_circuit_breaker" in reasons
+    assert kinds.count("reflect") == 3           # 第 3 轮无进展即熔断,不再请求模型
+    assert kinds[-1] == "answer"
+
+
 def test_merge_element_hits_keeps_max_score_across_queries():
     """codex PR#391 round-2: 同一元素被多次 search_elements 命中时保留最高分——
     合成阶段按分数裁 answer_element_items,只留首个(可能偏低的)查询分会把

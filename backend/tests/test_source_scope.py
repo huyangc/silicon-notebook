@@ -1186,6 +1186,46 @@ def test_checkbox_scope_skips_per_action_unsafe_channels_with_zero_io():
         assert result.enumerations == []
 
 
+def test_checkbox_scope_rejected_community_expansion_does_not_end_loop():
+    """受限 run 下模型选中 expand_community:记一条 skip 后循环继续——下一轮的
+    search_elements(来源可寻址,受限下允许)照常执行,再由模型收尾。
+
+    修复前这道闸以 `break` 收尾,一次被拒的社区扩展就终止整个反思循环。
+    """
+    retrieval = _ScopedRunRetrieval()
+    retriever = ReasoningRetriever(
+        retrieval=retrieval,
+        model_clients=_ScopedRunModels(),
+        communities=_ScopedRunCommunities(),
+        settings=_ScopedRunSettings(),
+    )
+    retriever.plan = lambda *a, **k: [SubQuery(query="plain question")]
+    decisions = iter([
+        ReflectDecision(next_action="expand_community", community_focal="A"),
+        ReflectDecision(next_action="search_elements", elements_query="A"),
+        ReflectDecision(next_action="answer", sufficient=True),
+    ])
+    retriever.reflect = lambda *a, **k: next(
+        decisions, ReflectDecision(next_action="answer", sufficient=True)
+    )
+
+    with source_scope_context(
+        "nb", SourceScope(mode="include", source_ids=["A"])
+    ):
+        result = retriever.run("nb", "plain question")
+
+    kinds = [step.step_type for step in result.trace]
+    skip_idx = next(
+        i for i, step in enumerate(result.trace)
+        if step.detail.get("reason") == "source_scope_unsafe_channel"
+    )
+    assert "跨库同类实体扩展" in result.trace[skip_idx].summary
+    # 被拒之后循环还在跑:元素检索步真的落了,最后才是 answer。
+    assert "fallback" in kinds[skip_idx + 1:]
+    assert kinds[-1] == "answer"
+    assert kinds.count("reflect") == 3
+
+
 # ---------------------------------------------------------------------------
 # 冻结上限里的隐藏证据**按种类分别定范围**。
 #
