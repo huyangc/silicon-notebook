@@ -659,6 +659,11 @@ export default function AdminUsagePage() {
   const pageCount = Math.max(1, Math.ceil(sortedRows.length / pageSize));
   const currentPage = Math.min(page, pageCount);
   const visibleRows = sortedRows.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+  // 行内反馈的兜底:按文档上限 / 角色排序时,改完的那一行会立刻按新值重排、可能跳到别页,
+  // 行内那条反馈就没处渲染了(codex R1 P2)。此时退回表格上方的横幅,结果不能凭空消失。
+  const orphanNotice = rowNotice && !visibleRows.some((row) => row.id === rowNotice.userId)
+    ? rowNotice
+    : null;
 
   if (state.kind !== "ready") {
     return (
@@ -726,6 +731,14 @@ export default function AdminUsagePage() {
           ? <CellFeedback notice={defaultNotice} />
           : <span className="usage-settings-hint">管理员的笔记本不受限；为某位用户单独设置后，以其设置为准。</span>}
       </div>
+      {orphanNotice && (
+        <div
+          className={`usage-role-notice usage-role-notice-${orphanNotice.kind}`}
+          role={orphanNotice.kind === "error" ? "alert" : "status"}
+        >
+          {orphanNotice.text}
+        </div>
+      )}
       <div className="usage-panel">
       <div className="usage-table-wrap">
         <table className="usage-table">

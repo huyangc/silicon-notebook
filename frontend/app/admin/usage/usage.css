@@ -189,15 +189,18 @@
    position: fixed 逃出 .usage-panel / .usage-table-wrap 的 overflow 裁剪,位置由组件量取后写入。
    文档上限与密码重置共用这一套。 */
 .usage-limit-popover {
-  position: fixed; z-index: 40; width: max-content;
+  position: fixed; z-index: 40; width: max-content; max-width: calc(100vw - 16px);
   display: flex; flex-direction: column; gap: 8px;
   padding: 12px; border: 1px solid var(--line); border-radius: 10px;
   background: var(--panel); box-shadow: var(--shadow);
-  font-size: 13px; white-space: nowrap;
+  font-size: 13px; white-space: normal;
 }
 .usage-limit-popover-title { font-weight: 600; color: var(--ink); }
-.usage-limit-popover-row { display: flex; align-items: center; gap: 6px; }
-.usage-limit-popover-input { flex: 1; min-width: 84px; }
+/* 行内允许换行:375px 视口装不下「输入框 + 两个按钮」一整行时按钮折到下一行,而不是被
+   clampPopoverLeft 夹到左缘后仍有控件溢出视口(fixed 定位滚表格也露不出来,codex R1 P2)。 */
+.usage-limit-popover-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.usage-limit-popover-input { flex: 1 1 84px; min-width: 84px; }
+.usage-limit-popover .usage-limit-input-password { flex: 1 1 120px; }
 .usage-limit-popover .usage-cell-feedback { max-width: 260px; }
 
 /* ——— 分页:面板页脚 ——— */
@@ -221,7 +224,7 @@
 .usage-pagination-actions button:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
 .usage-pagination-actions button:disabled { cursor: not-allowed; opacity: .45; }
 
-/* 提示横幅(仅分析页签的加载失败仍用它;用户列表的动作结果已改为控件旁反馈)。 */
+/* 提示横幅:分析页签的加载失败,以及用户列表行内反馈的兜底(被改的行按新值重排跳到别页时)。 */
 .usage-role-notice {
   margin: 0 0 12px; padding: 9px 12px; border: 1px solid var(--line); border-radius: 8px; font-size: 13px;
 }

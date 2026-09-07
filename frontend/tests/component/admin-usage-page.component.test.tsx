@@ -528,3 +528,39 @@ test("展开区新增用户摘要不改变主表列头数量与文案", async ()
     "最近活跃", "用户分析", "文档上限", "密码", "权限管理",
   ]);
 });
+
+test("被改的行按新值重排跳到别页时,动作反馈退回表格上方横幅而不是消失", async () => {
+  // codex #692 R1 P2:行内反馈挂在那一行上;按文档上限排序、给第 1 页某用户调高上限后,
+  // 该行立刻排到末尾(第 2 页),行内那条反馈没处渲染。此时必须有可见的兜底。
+  primeCommonMocks();
+  const pagedRows = Array.from({ length: 22 }, (_, index) => ({
+    ...rows[1],
+    id: `user-${index}`,
+    username: `user-${String(index).padStart(2, "0")}`,
+    created_at: `2026-07-${String(index + 1).padStart(2, "0")}T00:00:00`,
+  }));
+  mocks.fetchAdminUsers.mockResolvedValue(pagedRows);
+  mocks.updateAdminUserUploadLimit.mockResolvedValue({
+    id: "user-0", // fixture 的 id 是 user-<index>,用户名才是补零的 user-00
+    username: "user-00",
+    upload_limit: 500,
+    upload_limit_overridden: true,
+  });
+  const user = userEvent.setup();
+
+  render(<AdminUsagePage />);
+  await screen.findByText("user-00");
+  await user.click(within(screen.getByRole("table")).getByRole("button", { name: "文档上限" }));
+  const target = within((await screen.findByText("user-00")).closest("tr") as HTMLTableRowElement);
+  await user.click(target.getByRole("button", { name: "编辑" }));
+  const input = target.getByLabelText("user-00 的文档上限");
+  await user.clear(input);
+  await user.type(input, "500");
+  await user.click(target.getByRole("button", { name: "保存" }));
+
+  // 反馈仍可见(退回横幅)……
+  expect(await screen.findByRole("status")).toHaveTextContent("已将 user-00 的文档上限设为 500");
+  // ……而该行已按新值排到末尾、离开第 1 页(先等反馈落地,再断言行已不在:mock 的
+  // resolve 与 rows 更新在同一次微任务批里,顺序反过来会在更新前就断言)。
+  expect(screen.queryByText("user-00")).toBeNull();
+});
