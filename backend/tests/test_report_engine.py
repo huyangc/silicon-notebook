@@ -3511,3 +3511,42 @@ def test_auto_generate_off_still_stops_at_intent_ready(repo, monkeypatch):
     assert detail["understanding"]["auto_generate_requested"] is False
     assert detail["understanding"]["confirmed"] is False
     assert llm.outline_calls == 0
+
+
+def test_deep_dive_passes_the_sections_intent_questions(repo, monkeypatch):
+    """T4 §7.1:`_deep_dive` 把本节 `intent_questions` 传进 `run(intent_detail=)`。
+
+    这份清单是 `_bind_outline_to_intent` 在大纲阶段按用户确认过的意图契约写进
+    每一节、随 ``reports.outline_json`` 一起持久化的东西(与上面那条用例读的
+    ``intent_contract`` 同源),检索器据它建必答方面账——**零新增查询、零新增模型
+    调用**,只是把已经在手上的东西也传下去。
+
+    没有这份清单的节保持**稀疏**:一个多余的键都不带(所以上面那条断言精确
+    字典相等的用例不受影响),检索器照常回落到"整条节问题作为唯一方面"。
+    """
+    from app.services.report_engine import ReportEngine
+
+    captured: list = []
+
+    class _Capturing:
+        def __init__(self, **kwargs):
+            pass
+
+        def run(self, *args, **kwargs):
+            from app.services.reasoning_retrieval import ReasoningResult
+
+            captured.append(kwargs.get("intent_detail"))
+            return ReasoningResult()
+
+    monkeypatch.setattr(
+        "app.services.reasoning_retrieval.ReasoningRetriever", _Capturing,
+    )
+    eng = ReportEngine.from_repository(repo, repo.settings)
+    nb = _mk_nb(repo)
+    eng._deep_dive(nb.id, {
+        "title": "一节", "scope": "范围",
+        "intent_questions": ["本节问题一", "本节问题二"]}, "问题")
+    eng._deep_dive(nb.id, {"title": "二节", "scope": "范围"}, "问题")
+
+    assert captured[0]["intent_questions"] == ["本节问题一", "本节问题二"]
+    assert "intent_questions" not in captured[1]
