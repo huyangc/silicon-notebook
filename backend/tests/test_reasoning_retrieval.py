@@ -6172,6 +6172,49 @@ def test_reflect_v2_unavailable_action_is_recorded_and_loop_continues(rrepo):
     assert result.trace[-1].step_type == "answer"
 
 
+def test_expand_community_error_survives_the_synthetic_empty_trace(
+    rrepo, monkeypatch,
+):
+    """社区解析异常之后,无条件补的那条空结果 `expand_community` 步不能把这次
+    失败悄悄清成"又走通了"。
+
+    `_action_expand_community` 的异常分支先记一条 `skip`(`community_error`,
+    折成一次 failed 观察),但函数末尾无条件还会再落一条 0 结果的
+    `expand_community` 成功步——观察器按时间线取**最后一次执行**,那条合成的
+    空成功会把真正的故障吃掉:`unrecovered_channels` 空手,结束原因也从
+    `retrieval_degraded` 退化成 `stale`/`step_budget`。
+
+    修复:异常路径在落下最终那条步之前再打一次 `note_failed("community_error")`
+    (侧信道只对紧接着那一条观察生效),让最后落下的仍然是 failed。
+
+    变异:去掉修复里新增的 `state.record.observer.note_failed("community_error")`
+    调用 ⇒ 这条红(`unrecovered_channels` 变回 `()`,`reason` 变回 `stale`)。
+    """
+    from app.domain.retrieval_termination import TERMINATION_RETRIEVAL_DEGRADED
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    nb = _seed_two_nodes(rrepo)
+    rrepo.settings.reasoning_reflect_v2_enabled = True
+    rrepo.settings.reasoning_stale_limit = 1
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "RTL到GDSII流程"}]},
+        reflects=[{"next_action": "expand_community", "sufficient": False,
+                   "arguments": {"focal": "DeepSeek-V4"}}] * 2))
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("community backend down")
+    monkeypatch.setattr(rr.communities, "mounted_base_ids", _boom)
+
+    result = rr.run(nb.id, "RTL到GDSII流程", "")
+    skip_reasons = [t.detail.get("reason") for t in result.trace
+                    if t.step_type == "skip"]
+    assert "community_error" in skip_reasons
+    assert "stale_circuit_breaker" in skip_reasons
+    assert result.termination.reason == TERMINATION_RETRIEVAL_DEGRADED
+    assert result.termination.unrecovered_channels == ("expand_community",)
+
+
 def test_reflect_v2_only_answer_ends_without_asking_the_model(
     rrepo, monkeypatch
 ):
@@ -8254,6 +8297,43 @@ def test_run_level_assessment_rejects_a_pool_key_that_was_never_rendered(rrepo):
     assert result.termination.unresolved_aspect_ids == ("a1",)
 
 
+def test_run_level_assessment_rejects_a_key_only_shown_by_the_outline_summary(
+    rrepo,
+):
+    """大纲开启时,候选摘要的头/尾窗口一样不能替代证据卡登记资格。
+
+    与上一条用例的唯一差别是 `limits=exhaustive`(大纲开启,`_reflection_summary`
+    因此会把候选摘要渲染成带 id 的形状,见 `_summarize(show_ids=True)`)。`ck-q0`
+    只出现在候选池只有一段时必然落入的头/尾窗口里——它由**大纲便签的按名展示**
+    驱动,不是证据卡预算放行的。
+
+    修复前 `_reflection_summary` 会把这批头/尾窗口键也登进
+    `ever_shown_outline_keys`,模型据此抄一个从没上过证据卡的键就能蒙混过关;
+    修复后只有真正渲染出来的证据卡才给绑定资格,legacy(上一条用例,无大纲)逐
+    字节不变。
+
+    变异:把 `run()` 里传给 `_reflection_summary` 的 `shown_binding_keys` 参数
+    改回恒为 `ever_shown_outline_keys`(即撤销修复)⇒ 这条红。
+    """
+    from app.core.ask_retrieval_policy import ask_retrieval_limits
+    zero_budget = {effort: 1 for effort in (
+        "overview", "standard", "deep", "thorough", "exhaustive")}
+    llm, result = _v2_aspect_run(
+        rrepo,
+        intent_detail={"mandatory_topics": ["问题一"]},
+        limits=ask_retrieval_limits("exhaustive"),
+        reasoning_reflect_evidence_chars_by_effort=zero_budget,
+        reflects=[_answer(assessment={"supported": [
+            {"aspect_id": "a1", "evidence_keys": ["ck-q0"]}]})],
+    )
+    # 前提成立:这一轮真的一张卡都没渲染,而那个键真的在池子里。
+    assert llm.evidence_lines(0) == []
+    assert any(c.chunk_id == "ck-q0" for c in result.chunks)
+    aspect = result.termination.aspects[0]
+    assert aspect.evidence_keys == () and aspect.status != "supported"
+    assert result.termination.unresolved_aspect_ids == ("a1",)
+
+
 def test_assessment_keeps_only_the_legal_half_of_a_mixed_key_list():
     """非法键**剔除**而不是拒整份:抄错一个键不该作废它对别的方面的判断。"""
     ledger = _ledger("问题一", "问题二")
@@ -8836,6 +8916,41 @@ def test_a_channel_failure_that_another_channel_recovered_is_only_disclosed(
     assert result.termination.unrecovered_channels == ("search_chunks",)
 
 
+def test_update_outline_after_a_failure_does_not_erase_retrieval_degraded(
+    rrepo,
+):
+    """`update_outline` 不做检索 I/O,它的 success 观察不算"最后一次真的又查
+    成了"(§7.2 的检索恢复判据只认真实检索动作)。
+
+    检索失败之后紧跟一次大纲更新耗尽预算收尾:`update_outline` 只是把已有材料
+    整理成便签,不产生新证据。修复前"最后一次真实执行"的扫描不区分动作类型,
+    这次成功的大纲更新会被当成"后来又查成了",把 `retrieval_degraded` 悄悄吃
+    掉、误判成 `step_budget`;`unrecovered_channels` 也因此漏掉 `add_subquery`。
+
+    变异:去掉 `_retrieval_degraded`/`_unrecovered_channels` 里按
+    `_is_retrieval_action` 的过滤 ⇒ 这条红(退化成 `step_budget`,披露清单空)。
+    """
+    from app.core.ask_retrieval_policy import ask_retrieval_limits
+    from app.domain.retrieval_termination import TERMINATION_RETRIEVAL_DEGRADED
+
+    _, result = _v2_aspect_run(
+        rrepo, max_steps=2,
+        limits=ask_retrieval_limits("exhaustive"),
+        chunk_results=_BoomFor({"完整问题": [_chunk_hit("ck-q0")]}, {"方向甲"}),
+        intent_detail={"mandatory_topics": ["问题一"]},
+        reflects=[
+            {"next_action": "add_subquery", "sufficient": False,
+             "arguments": {"query": "方向甲"}, "reason": "补个方向"},
+            {"next_action": "update_outline", "sufficient": False,
+             "arguments": {"sections": [
+                 {"id": "a", "title": "一节", "evidence": []}]},
+             "reason": "先记笔记"},
+        ],
+    )
+    assert result.termination.reason == TERMINATION_RETRIEVAL_DEGRADED
+    assert result.termination.unrecovered_channels == ("add_subquery",)
+
+
 def test_termination_reason_and_aspect_status_are_closed_sets():
     """DTO 自己守住两个闭集:拼错的 reason/status 在**构造期**响亮失败。
 
@@ -9070,6 +9185,43 @@ def test_termination_matrix_last_execution_failed(terminal_reason, expected):
         trace, observations, AspectLedger(["问题一"], source="intent_topics"))
     assert termination.reason == expected
     assert termination.unrecovered_channels == ("add_subquery",)
+
+
+def test_non_retrieval_actions_are_excluded_from_the_last_execution_scan():
+    """`update_outline` / `consult_memory` 不做检索 I/O:它们的观察既不算「最后
+    一次真实检索执行」,也不是一条检索通道(§7.2 规则 3)。
+
+    第一段:检索失败之后一次 `update_outline` 成功——扫描必须跳过它,仍然认定
+    最后一次真实检索是 failed(单元级钉 `_retrieval_degraded`)。第二段:
+    `consult_memory` 自己失败(`consult_memory_unavailable` 这类原因码折成
+    failed 观察)不该冒充成一条"没走通的检索通道"被披露出去,它压根不是检索
+    通道(单元级钉 `_unrecovered_channels`)。
+
+    变异:去掉 `_retrieval_degraded`/`_unrecovered_channels` 里
+    `_is_retrieval_action` 的过滤,两段各自的断言都会红——第一段 `reason` 变成
+    `step_budget`,第二段 `unrecovered_channels` 多出 `consult_memory`。
+    """
+    from app.domain.retrieval_termination import TERMINATION_RETRIEVAL_DEGRADED
+    from app.services.reasoning_aspects import AspectLedger, classify_termination
+    from app.services.reasoning_observation import STATUS_FAILED, STATUS_SUCCESS
+
+    degraded_by_a_stale_outline_note = classify_termination(
+        [],
+        [_fake_observation("add_subquery", STATUS_FAILED),
+         _fake_observation("update_outline", STATUS_SUCCESS)],
+        AspectLedger(["问题一"], source="intent_topics"))
+    assert degraded_by_a_stale_outline_note.reason == (
+        TERMINATION_RETRIEVAL_DEGRADED)
+    assert degraded_by_a_stale_outline_note.unrecovered_channels == (
+        "add_subquery",)
+
+    consult_failure_is_not_a_channel = classify_termination(
+        [],
+        [_fake_observation("search_chunks", STATUS_SUCCESS),
+         _fake_observation("consult_memory", STATUS_FAILED)],
+        AspectLedger(["问题一"], source="intent_topics"))
+    assert "consult_memory" not in (
+        consult_failure_is_not_a_channel.unrecovered_channels)
 
 
 def test_termination_skip_step_discloses_the_unrecovered_channels(rrepo):

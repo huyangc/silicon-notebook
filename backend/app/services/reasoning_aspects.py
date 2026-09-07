@@ -42,6 +42,7 @@ from app.domain.retrieval_termination import (
     TERMINATION_RETRIEVAL_DEGRADED, TERMINATION_STALE,
     TERMINATION_STEP_BUDGET,
 )
+from app.services.reasoning_actions import ACTION_DEFINITIONS
 from app.services.reasoning_observation import (
     STATUS_EMPTY, STATUS_FAILED, STATUS_PARTIAL, STATUS_SUCCESS, _clip,
 )
@@ -746,8 +747,22 @@ def _observation_status(row: object) -> str:
     return ""
 
 
+def _is_retrieval_action(action_id: str) -> bool:
+    """这个动作 id 会不会产生新证据(§7.2 的「真实检索执行」判据)。
+
+    `update_outline` / `consult_memory` 不做检索 I/O(`ACTION_DEFINITIONS` 里
+    `produces_evidence=False`,与 prompt/schema/白名单同一份定义,不新造第二份
+    口径)——它们的 success 观察不该被当成"这次 run 后来又查成了"。缺一份定义
+    的 action_id(理论上不会发生,`ActionObservationLedger` 只在 v2 下产生,而
+    v2 的动作全部登记在 `ACTION_DEFINITIONS` 里)保守地当作非检索动作,不让一个
+    拼错的 id 冒充恢复证据。
+    """
+    definition = ACTION_DEFINITIONS.get(action_id)
+    return bool(definition is not None and definition.produces_evidence)
+
+
 def _retrieval_degraded(observations: Sequence[object]) -> bool:
-    """这次 run 的**最后一次真实 I/O 执行**是不是炸的(§7.2)。
+    """这次 run 的**最后一次真实检索 I/O 执行**是不是炸的(§7.2)。
 
     判据按**时间线**取最后一次执行,而不是按通道取"有没有哪条通道最后一次是
     炸的":§7.2 写的是「单个可恢复工具失败若随后继续完成检索,只作为 observation
@@ -755,6 +770,11 @@ def _retrieval_degraded(observations: Sequence[object]) -> bool:
     run 后来还是查成了,没有限定必须是同一条通道。按通道判会把「KG 播种炸了 →
     换 `search_chunks` 查全 → 模型自报充分」误标成整次降级,而那次 run 的证据
     收集其实正常完成了。
+
+    扫描先按 `_is_retrieval_action` 过滤掉 `update_outline`/`consult_memory`
+    这类不产证据的动作:它们不做检索 I/O,一次大纲更新/记忆咨询的成功观察不能
+    冒充"最后一次真的又查成了",否则检索失败之后紧跟一次大纲更新耗尽预算收尾,
+    会把 `retrieval_degraded` 悄悄吃掉、误报成 `stale`/`step_budget`。
 
     没被恢复的那条通道不因此消失:它另走 `_unrecovered_channels`,进
     `RetrievalTermination.unrecovered_channels` 供披露,不占 `reason`。两个口径
@@ -764,6 +784,8 @@ def _retrieval_degraded(observations: Sequence[object]) -> bool:
     区分(这也是 `note_failed` 侧信道存在的全部理由)。
     """
     for row in reversed(list(observations)):
+        if not _is_retrieval_action(str(getattr(row, "action_id", "") or "")):
+            continue
         status = _observation_status(row)
         if status:
             return status == STATUS_FAILED
@@ -771,17 +793,23 @@ def _retrieval_degraded(observations: Sequence[object]) -> bool:
 
 
 def _unrecovered_channels(observations: Sequence[object]) -> Tuple[str, ...]:
-    """最后一次执行仍是 `failed` 的那些通道(action_id),**按首次出现顺序**。
+    """最后一次执行仍是 `failed` 的那些检索通道(action_id),**按首次出现顺序**。
 
     纯披露:`reason` 不读它。一条通道在这里出现,只说明"这条路这次 run 没走通",
     不说明这次检索失败了——`search_elements` 全程炸掉、而 `search_chunks` 查回了
     答案所需的全部原文,是一次正常完成的 run 加一条要如实说出去的通道故障。
+
+    与 `_retrieval_degraded` 同一份 `_is_retrieval_action` 过滤:`update_outline`
+    / `consult_memory` 不产证据,不算检索通道,不该出现在这份披露清单里。
     """
     last: dict = {}
     for row in observations:
+        action_id = str(getattr(row, "action_id", "") or "")
+        if not _is_retrieval_action(action_id):
+            continue
         status = _observation_status(row)
         if status:
-            last[str(getattr(row, "action_id", "") or "")] = status
+            last[action_id] = status
     return tuple(
         action_id for action_id, status in last.items()
         if status == STATUS_FAILED)

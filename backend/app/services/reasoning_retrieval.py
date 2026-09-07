@@ -5262,6 +5262,15 @@ class ReasoningRetriever:
             record(TraceStep(step_type="skip",
                              summary="跳过横向对比(对比层不可用)",
                              detail={"reason": "community_error", "error": str(exc)[:120]}))
+            if state.record.observer is not None:
+                # 上面那条 skip 已经记成一次 failed 观察,但下面无条件还会再落
+                # 一条零结果的 `expand_community` 成功步(peers=[] 也是"执行了,
+                # 只是空")。两条都记的话,观察器按时间线取**最后一次**执行 ——
+                # 那条空成功会把这次真正的故障悄悄吃掉,`unrecovered_channels`
+                # 与 `retrieval_degraded` 都会漏掉它。这里在**下一条**观察上再
+                # 打一次失败标记(`note_failed` 只对紧接着那一条生效),让最后
+                # 落下的仍然是 failed,不伪造一次"通道又走通了"。
+                state.record.observer.note_failed("community_error")
             peers, peer_source = [], "community"
         # 总量帽(见 _COMMUNITY_PEERS_CAP_FACTOR 注释):合并各库结果后才截断,
         # 取自 mounted_base_ids 的确定性遍历顺序(MOUNT_ORDER)+ list.append 的
@@ -6148,7 +6157,7 @@ class ReasoningRetriever:
                 break
             summary = self._reflection_summary(
                 collected, elements, chunks, chains, outline_active,
-                ever_shown_outline_keys, limits, outline)
+                ever_shown_outline_keys if capabilities is None else None, limits, outline)
             if no_progress:
                 # 首轮空手与「查了好几轮都没新增」是两件不同的事,提示也必须不同
                 # (见 first_round_empty_note):前者要的是换通道,后者才是收尾。
