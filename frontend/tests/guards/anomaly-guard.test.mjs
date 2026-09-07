@@ -57,6 +57,9 @@ import {
 //     换成手搓样式,那个文件的计数就从 1 掉到 0。
 const ANOMALY_SOURCE_FILES = [
   "page.tsx",
+  // 来源行(异常小字的主落点)PR-5 分片 2 起住在这里;形态黑名单必须跟着走,否则
+  // 整段来源行都成了守卫盲区。
+  "source-list-panel.tsx",
   "dev/logs/activity/source-view.tsx",
   "dev/logs/activity/ActivityScopePanel.tsx",
   "dev/logs/activity/ActivityStream.tsx",
@@ -132,17 +135,35 @@ test("来源异常落点里不再对 paper_meta_status 做 missing/not_paper 比
   assert.deepEqual(offenders, []);
 });
 
-test("page.tsx:sourceAnomalies 只在来源行+来源详情各调用一次，AnomalyBadge 只渲染这两处", async () => {
-  // 计数断言刻意保持严格的 === 2(不放宽成 >= 1):move 变异(把某处 AnomalyBadge
-  // 换成等价内联样式)正是靠 2→1 的计数下降被抓到,放宽会打穿这个能力。已知
-  // 脆性:若未来把来源行/详情两处的渲染抽成共享 helper 内部复用同一个
-  // <AnomalyBadge>,这里的计数需要同步改成 1——那不是本守卫失败,是渲染结构
-  // 变了,改测试前先确认改动确实是这种重构而非静默丢弃了一处渲染。
+test("sourceAnomalies 只在来源行+来源详情各调用一次，AnomalyBadge 只渲染这两处", async () => {
+  // 按模块分别断言,不取两文件总和:总和===2 挡不住「来源行的 AnomalyBadge 被换成
+  // 手搓 <span style>,同时来源详情多渲染一次重复徽标」这种一升一降、总数不变的
+  // 漂移。PR-5 分片 2 起「来源行」那一处住在 source-list-panel.tsx(各恰好 1 次),
+  // 「来源详情」那一处仍在 page.tsx(各恰好 1 次)——分别钉死才能同时抓住 move 变异
+  // (某一侧换成内联样式,该侧计数 1→0)和「重复渲染」变异(另一侧 1→2)。
   const page = await parseModule("page.tsx");
-  const sourceAnomaliesCalls = callsIn(page).filter((name) => name === "sourceAnomalies");
-  assert.equal(sourceAnomaliesCalls.length, 2, "sourceAnomalies 调用次数漂移，检查是否有落点绕开了唯一渲染路径");
-  const badgeElements = jsxElements(page, "AnomalyBadge");
-  assert.equal(badgeElements.length, 2, "AnomalyBadge 渲染次数漂移，检查是否有徽标被换成了手搓内联样式");
+  const panel = await parseModule("source-list-panel.tsx");
+
+  assert.equal(
+    callsIn(page).filter((name) => name === "sourceAnomalies").length,
+    1,
+    "page.tsx 里 sourceAnomalies 调用次数漂移(来源详情那一处)",
+  );
+  assert.equal(
+    jsxElements(page, "AnomalyBadge").length,
+    1,
+    "page.tsx 里 AnomalyBadge 渲染次数漂移(来源详情那一处)",
+  );
+  assert.equal(
+    callsIn(panel).filter((name) => name === "sourceAnomalies").length,
+    1,
+    "source-list-panel.tsx 里 sourceAnomalies 调用次数漂移(来源行那一处)",
+  );
+  assert.equal(
+    jsxElements(panel, "AnomalyBadge").length,
+    1,
+    "source-list-panel.tsx 里 AnomalyBadge 渲染次数漂移(来源行那一处)",
+  );
 });
 
 test("活动视图三栏都只经共享的 <SourceAnomalies> 渲染异常小字", async () => {

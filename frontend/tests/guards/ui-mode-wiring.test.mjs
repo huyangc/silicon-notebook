@@ -18,6 +18,7 @@ import { findFunction, parseModule } from "../../test-support/semantic-source.mj
 
 
 const page = await parseModule("page.tsx");
+const sourceListPanel = await parseModule("source-list-panel.tsx");
 const askSession = await parseModule("use-ask-session.ts");
 const reportWorkspace = await parseModule("use-report-workspace.ts");
 
@@ -84,6 +85,10 @@ function askPolicyProperty(name) {
  * `.source-row` 是 3-track grid——不叠加 `.source-row--no-select` 修饰类就会让第三个
  * item 落进第一条 max-content track，长标题把列撑宽、把删除/打开按钮顶出可视区
  * （桌面宽度必现，默认模式）。
+ *
+ * PR-5 分片 2 起来源行住在 `source-list-panel.tsx`；判据不变，只换扫描目标。该组件
+ * 收的是 `uiMode` 原值而不是算好的 `advanced` 布尔，正是为了让下面这条
+ * `isAdvanced(uiMode)` 判据继续成立（传布尔等于把判断挪回 page 后无人钉住）。
  */
 function sourceRowClassNameTemplate() {
   const templates = [];
@@ -96,7 +101,7 @@ function sourceRowClassNameTemplate() {
     }
     ts.forEachChild(node, visit);
   }
-  visit(page);
+  visit(sourceListPanel);
   assert.equal(
     templates.length,
     1,
@@ -108,7 +113,7 @@ function sourceRowClassNameTemplate() {
 
 test("非 advanced 模式下 source-row 必须叠加 source-row--no-select 修饰类", () => {
   const template = sourceRowClassNameTemplate();
-  const spanTexts = template.templateSpans.map((span) => span.expression.getText(page));
+  const spanTexts = template.templateSpans.map((span) => span.expression.getText(sourceListPanel));
   const noSelectSpan = spanTexts.find((text) => text.includes("source-row--no-select"));
   assert.ok(
     noSelectSpan,

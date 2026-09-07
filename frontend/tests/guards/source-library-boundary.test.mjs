@@ -50,6 +50,26 @@ test("page composes one source-library owner and does not retain source CRUD/det
 });
 
 
+// PR-5 分片 2:来源搜索框 / 来源行 / 分页整体住进 source-list-panel.tsx。防回填——
+// 「顺手在 page 里再写一行来源行」会让呈现判据(ui-mode-wiring 的 .source-row 模板、
+// source-agent-badge-guard 的徽标门控、组件测试)全部只盯着组件那一份,page 里的副本
+// 无人看管。
+test("page renders the source list through SourceListPanel, not inline markup", async () => {
+  const page = await parseModule("page.tsx");
+  const text = page.getText(page);
+
+  assert.equal((text.match(/<SourceListPanel\b/g) ?? []).length, 1);
+  for (const movedMarkup of [
+    'className="source-list"',
+    'className="source-search"',
+    "source-row compact-source-row",
+    'className="source-delete-button"',
+  ]) {
+    assert.equal(text.includes(movedMarkup), false, `page still renders ${movedMarkup} inline`);
+  }
+});
+
+
 test("source-library hook is narrow and does not depend on other workspace domains", async () => {
   const hook = await parseModule("use-source-library.ts");
   const modules = importsIn(hook).map((item) => item.module);

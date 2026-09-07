@@ -21,6 +21,7 @@ import {
 
 
 const page = await parseModule("page.tsx");
+const sourceListPanel = await parseModule("source-list-panel.tsx");
 const sourceLibrary = await parseModule("use-source-library.ts");
 
 
@@ -163,8 +164,10 @@ test("delete tombstones suppress stale rows and snapshot reads converge across t
 });
 
 
+// 列表那一半 PR-5 分片 2 起住在 source-list-panel.tsx,详情那一半仍在 page.tsx;
+// 两侧一起扫,「列表与详情各自有可访问的删除中态」这条判据不因搬家而只剩一半。
 test("source list and detail expose an accessible deleting state", () => {
-  const buttons = jsxElements(page, "button");
+  const buttons = [...jsxElements(sourceListPanel, "button"), ...jsxElements(page, "button")];
   const sourceMain = buttons.find(({ attributes }) => attributes.className === "source-row-main");
   const deleteButtons = buttons.filter(
     ({ attributes }) => attributes.className === "source-delete-button"
@@ -180,7 +183,15 @@ test("source list and detail expose an accessible deleting state", () => {
     bindings?.disabled === "reparsingSource || sourceDetailDeleting"
     && bindings?.["aria-label"]?.includes("正在删除来源")
   )));
-  assert.equal(jsxElements(page, "Loader2").length >= 3, true);
+  // 按模块分别设下限,不取两文件总和:总和>=3 挡不住「来源行少渲染一个 Loader2、
+  // 详情端多渲染一个」这种一升一降、总数不变的漂移。当前实际形态是 page.tsx 3 处
+  // (详情弹窗/重命名/删除等 busy 态)、source-list-panel.tsx 2 处(搜索中 + 行内删除),
+  // 分别钉住各自的下限。
+  assert.ok(jsxElements(page, "Loader2").length >= 3, "page.tsx 里 Loader2 渲染次数低于预期下限");
+  assert.ok(
+    jsxElements(sourceListPanel, "Loader2").length >= 2,
+    "source-list-panel.tsx 里 Loader2 渲染次数低于预期下限",
+  );
 });
 
 

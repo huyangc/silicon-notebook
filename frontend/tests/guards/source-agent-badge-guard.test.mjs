@@ -1,8 +1,10 @@
 // 「Agent 添加」来源徽标守卫。
 //
-// page.tsx 巨大且没有整页渲染的组件测试基建（无 mock provider/API 的先例），所以渲染
-// 门控与文案走 AST 语义扫描（仿 source-poll-refresh-guard.test.mjs：对 `parseModule`
-// 产出的节点树做结构判断，而不是裸文本正则）。样式面单独读一次 globals.css 原文
+// 来源行原本住在 page.tsx（巨大、无整页渲染基建），所以渲染门控与文案走 AST 语义扫描
+// （仿 source-poll-refresh-guard.test.mjs：对 `parseModule` 产出的节点树做结构判断，而
+// 不是裸文本正则）。PR-5 分片 2 把来源行搬进 `source-list-panel.tsx` 后判据一条不减，
+// 只把扫描目标换成那个模块（呈现面另有 source-list-panel.component.test.tsx 真渲染，
+// 但门控表达式的"逐字形态"仍由本文件钉住）。样式面单独读一次 globals.css 原文
 // （仿 effort-picker-style-guard.test.mjs / answer-heading-scope-guard.test.mjs）——CSS
 // 没有语义 AST 可消费，jsdom 的 getComputedStyle 也不实现选择器特异性/级联，文本是
 // 唯一诚实的输入；因此本文件已按 static-source-policy.test.mjs 的
@@ -48,7 +50,7 @@ function cssRules(css) {
   return rules;
 }
 
-/** page.tsx 里 className="source-agent-badge" 的 <span> JSX 开标签节点(不存在则 null)。 */
+/** 模块里 className="source-agent-badge" 的 <span> JSX 开标签节点(不存在则 null)。 */
 function findAgentBadgeSpan(sourceFile) {
   let found = null;
   const visit = (node) => {
@@ -90,9 +92,10 @@ function conjunctsOf(node, sourceFile) {
  * 从该 JSX 节点向上找**最近**一层门控此节点渲染的表达式,接受两种形态:
  *   · `a && (<jsx/>)`  —— BinaryExpression 且 `.right === 当前节点`;
  *   · `a ? (<jsx/>) : b` —— ConditionalExpression 且 `.whenTrue === 当前节点`。
- * 必须是"最近"而不是"任意一层祖先"——page.tsx 顶层还有 `isWorkspace &&
- * currentNotebook && (...)` 这样的外层门控包住整块来源列表,若不限定"直接命中
- * right/whenTrue"会把外层无关门控也算进来(实测按祖先枚举会误命中 2 条)。中间插入
+ * 必须是"最近"而不是"任意一层祖先"——徽标外层还有 `sources.length === 0 ? … : …`
+ * 这样的门控包住整块来源列表(搬进 source-list-panel.tsx 之前是 page.tsx 顶层的
+ * `isWorkspace && currentNotebook && (...)`),若不限定"直接命中 right/whenTrue"会把
+ * 外层无关门控也算进来(实测按祖先枚举会误命中 2 条)。中间插入
  * 的普通 JSX 包裹(比如外包一层 <div>)不影响判定——climb 只按 `.parent` 链走,不关心
  * 中间节点类型,只在每一层检查"这一层的父节点是不是恰好把当前节点当 right/whenTrue"。
  */
@@ -118,11 +121,11 @@ function nearestGate(node, sourceFile) {
 }
 
 test("source list gates the Agent-added badge on source.agent_created", async () => {
-  const page = await parseModule("page.tsx");
+  const page = await parseModule("source-list-panel.tsx");
   const span = findAgentBadgeSpan(page);
 
   // 变异验证①:把整段渲染删掉,span 就找不到了。
-  assert.ok(span, "expected a <span className=\"source-agent-badge\"> in page.tsx");
+  assert.ok(span, "expected a <span className=\"source-agent-badge\"> in source-list-panel.tsx");
 
   const gate = nearestGate(span, page);
   // 变异验证②:门控被整段摘掉(徽标变成无条件渲染)——找不到最近门控。
@@ -145,7 +148,7 @@ test("source list gates the Agent-added badge on source.agent_created", async ()
 });
 
 test("Agent-added badge renders exactly once with the provenance title", async () => {
-  const page = await parseModule("page.tsx");
+  const page = await parseModule("source-list-panel.tsx");
   const spans = jsxElements(page, "span");
   const badgeSpans = spans.filter(
     (el) => el.attributes.className === "source-agent-badge",
@@ -159,8 +162,11 @@ test("Agent-added badge renders exactly once with the provenance title", async (
 });
 
 test("no span combines the source-agent-badge class with anomaly/danger/warning styling", async () => {
-  const page = await parseModule("page.tsx");
-  const spans = jsxElements(page, "span");
+  // 两个模块一起扫:徽标住在 source-list-panel.tsx,但 page.tsx 仍是工作区编排层,
+  // 任何一侧新写出的"徽标 + 警示色"混搭都要报红(判据不因搬家而缩到一个文件)。
+  const spans = (await Promise.all(
+    ["source-list-panel.tsx", "page.tsx"].map(async (module) => jsxElements(await parseModule(module), "span")),
+  )).flat();
   // 全文件扫描(不预先按精确相等过滤className),否则"是否混入警示色类"这条断言会
   // 在前置精确过滤下永不可能失败——精确等于 "source-agent-badge" 的字符串里本来就
   // 不可能同时含 anomaly/danger/warning。

@@ -151,11 +151,16 @@ function jsxTree(sourceFile) {
 
 
 const TREE = jsxTree(page);
+// PR-5 分片 2:「本库来源」标题 + 搜索表单 + 滚动列表搬进了 source-list-panel.tsx。
+// 下面两条判据(搜索框排在参考库之后、且装在分组里;列表不被包进分组)一条不减,只是
+// 现在跨两棵树验:page 侧验「工具条 → 参考库 → <SourceListPanel>」的顺序与那个组件
+// 的直接父节点,组件侧验它内部的顺序与祖先链。
+const PANEL_TREE = jsxTree(await parseModule("source-list-panel.tsx"));
 
-const byClassName = (className) => TREE.filter((node) => node.className === className);
+const byClassName = (className, tree = TREE) => tree.filter((node) => node.className === className);
 
-function only(className) {
-  const found = byClassName(className);
+function only(className, tree = TREE) {
+  const found = byClassName(className, tree);
   assert.equal(found.length, 1, `期望恰好一个 .${className},实际 ${found.length} 个`);
   return found[0];
 }
@@ -167,23 +172,27 @@ const ancestorTags = (node) => node.ancestors.map((a) => a.tag);
 // 用户原话:搜索框放在最顶上「给人一个误解是能搜索到参考库中的内容」。它只查当前
 // 笔记本,所以必须落在「本库来源」那一组里,排在参考库分组之后。
 test("来源搜索框归入「本库来源」分组,排在参考库分组之后", () => {
-  const LANDMARKS = [
-    "source-scope-toolbar",
-    "base-scope-list",
-    "source-search",
-    "source-list",
-  ];
-  const order = TREE
-    .filter((node) => LANDMARKS.includes(node.className))
-    .map((node) => node.className);
+  const PAGE_LANDMARKS = ["source-scope-toolbar", "base-scope-list"];
+  const pageOrder = TREE
+    .filter((node) => PAGE_LANDMARKS.includes(node.className) || node.tag === "SourceListPanel")
+    .map((node) => node.className ?? node.tag);
   assert.deepEqual(
-    order,
-    LANDMARKS,
-    "顺序必须是 检索范围工具条 → 参考库 → 搜索框 → 本库来源列表;"
+    pageOrder,
+    [...PAGE_LANDMARKS, "SourceListPanel"],
+    "顺序必须是 检索范围工具条 → 参考库 → 本库来源(搜索框+列表);"
       + "搜索框排到参考库之前会让人以为能搜到参考库里的内容",
   );
 
-  const search = only("source-search");
+  const panelOrder = PANEL_TREE
+    .filter((node) => ["source-search", "source-list"].includes(node.className))
+    .map((node) => node.className);
+  assert.deepEqual(
+    panelOrder,
+    ["source-search", "source-list"],
+    "组件内顺序必须是 搜索框 → 列表",
+  );
+
+  const search = only("source-search", PANEL_TREE);
   assert.ok(
     ancestorClassNames(search).includes("scope-group"),
     "搜索框要装在「本库来源」分组里,不能又变成面板上一个无归属的浮块",
@@ -195,16 +204,28 @@ test("来源搜索框归入「本库来源」分组,排在参考库分组之后"
 // 剩余高度并自己滚动。把它塞进新分组的 wrapper 里就得把这套算术复制一遍,否则列表
 // 不再滚动、整个面板被撑长。
 test("本库来源列表没有被包进新分组", () => {
-  const sourceList = only("source-list");
+  const sourceList = only("source-list", PANEL_TREE);
   const ancestors = ancestorClassNames(sourceList);
   assert.equal(
     ancestors.includes("scope-group"),
     false,
     ".source-list 不能被包进 .scope-group",
   );
-  assert.ok(
-    ancestors.includes("workspace-panel-body sources-body"),
-    ".source-list 必须留在 .sources-body 内",
+  // 组件返回 Fragment,所以 .source-list 在组件内**没有任何元素祖先**;它在页面里的
+  // 父节点就是 <SourceListPanel> 的父节点。这两条加起来比原来的「祖先链里有
+  // .sources-body」更紧:直接父子关系正是滚动算术的载荷,套一层 wrapper 就会报红。
+  assert.deepEqual(
+    ancestors,
+    [],
+    "SourceListPanel 必须返回 Fragment,不能给 .source-list 套 wrapper——"
+      + "滚动算术在 .sources-body 上,多一层就得原样复制一遍",
+  );
+  const panelUse = TREE.filter((node) => node.tag === "SourceListPanel");
+  assert.equal(panelUse.length, 1, "page.tsx 里应恰好渲染一次 <SourceListPanel>");
+  assert.equal(
+    ancestorClassNames(panelUse[0]).at(-1),
+    "workspace-panel-body sources-body",
+    "<SourceListPanel> 必须是 .sources-body 的直接子节点",
   );
 });
 

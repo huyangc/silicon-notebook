@@ -18,6 +18,7 @@ import {
 
 
 const page = await parseModule("page.tsx");
+const sourceListPanel = await parseModule("source-list-panel.tsx");
 
 
 test("workspace composes executable Ask and account components", () => {
@@ -87,9 +88,10 @@ test("workspace has no retired Studio panel and keeps a labelled exit", () => {
 });
 
 
+// 来源行的删除/外链动作 PR-5 分片 2 起住在 source-list-panel.tsx;判据不变,只换模块。
 test("source actions remain available by accessible meaning", () => {
-  const buttons = jsxElements(page, "button");
-  const links = jsxElements(page, "a");
+  const buttons = jsxElements(sourceListPanel, "button");
+  const links = jsxElements(sourceListPanel, "a");
   assert.ok(buttons.some(({ attributes }) => attributes.title === "删除来源"));
   assert.ok(links.some(({ attributes }) => attributes["aria-label"] === "打开原始链接"));
 });
