@@ -166,6 +166,18 @@ def test_same_title_requires_selection_instead_of_guessing(repo):
     assert not response.citations and not response.anchors
 
 
+def test_generic_question_does_not_match_a_title_by_substring(repo):
+    nb = repo.create_notebook(NotebookCreate(name="资料"))
+    seed(repo, nb.id, "a", "文档", "", ["不应被猜中"])
+    seed(repo, nb.id, "b", "部署手册", "", ["另一篇文档"])
+    client = AnswerClient()
+    bind_chat_client(repo, "ask_answer", client)
+    response = ask(repo, nb.id, "这篇文档介绍了什么内容")
+    assert not client.prompts
+    assert "仅选择要介绍的文档" in response.answer
+    assert not response.citations and not response.anchors
+
+
 def test_synthesis_failure_remains_visible_and_keeps_directory(repo):
     nb = repo.create_notebook(NotebookCreate(name="资料"))
     seed(repo, nb.id, "a", "手册", "摘要")
