@@ -7823,6 +7823,33 @@ def test_v2_seed_search_failure_is_reported_as_failed_not_empty(rrepo):
     assert res.trace and res.trace[-1].step_type == "answer"
 
 
+def test_trace_recorder_lets_any_core_cancellation_through_not_just_ask_cancelled():
+    """转换器的取消放行是**基类** `CoreCancellation`,不是只认 `AskCancelled`
+    这一个子类:任何取消语义都不能被下面那句 `except Exception` 当成"观察折
+    不出来"吞掉。
+
+    变异:把 `_TraceRecorder.__call__` 里的 `except CoreCancellation: raise`
+    改回 `except AskCancelled: raise` ⇒ 这条红(自定义子类被吞掉,不再上抛)。
+    """
+    from app.domain.cancellation import CoreCancellation
+    from app.models.ask import TraceStep
+    from app.services.reasoning_retrieval import _TraceRecorder
+
+    class _OtherCancellation(CoreCancellation):
+        """`AskCancelled` 之外的另一个取消子类,专为这条用例造的。"""
+
+    class _BoomObserver:
+        def observe(self, step):
+            raise _OtherCancellation()
+
+    recorder = _TraceRecorder(trace=[], cancel_event=None, on_step=None)
+    recorder.observer = _BoomObserver()
+    with pytest.raises(_OtherCancellation):
+        recorder(TraceStep(step_type="ppr", summary="", detail={}))
+    # 轨迹本身仍然落定了(取消只影响观察转换那一句,不影响记账本身)。
+    assert recorder._trace and recorder._trace[0].step_type == "ppr"
+
+
 def test_observation_converter_failure_does_not_kill_the_run(rrepo):
     """转换器抛了只丢那一条观察,不废掉整次检索(取消仍然照抛)。"""
     from app.core.ask_retrieval_policy import ask_retrieval_limits
