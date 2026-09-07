@@ -1063,6 +1063,7 @@ class CollectionEnumerationService:
         budget: EnumerationBudget,
         cursor: Optional[SourceCursor] = None,
         cancel_event: CancelEvent = None,
+        local_only: bool = False,
     ) -> SourceEnumeration:
         """List the scope's USER-VISIBLE documents, in the source tab's order.
 
@@ -1101,6 +1102,8 @@ class CollectionEnumerationService:
 
         with self._database.connect() as db:
             notebook_ids, tiers = self._participants(db, active_notebook_id)
+            if local_only:
+                notebook_ids = tuple(n for n in notebook_ids if n == active_notebook_id)
             plan = self._catalog.scope_source_plan(db, notebook_ids)
             sources: Optional[Tuple[ScopeSource, ...]] = plan.sources
             total: Optional[int] = plan.total
@@ -1172,6 +1175,8 @@ class CollectionEnumerationService:
                 exhausted = False
 
             closing_ids = self._closing_participants(db, active_notebook_id)
+            if local_only:
+                closing_ids = tuple(n for n in closing_ids if n == active_notebook_id)
             scope_stable = (
                 closing_ids == tuple(notebook_ids)
                 and self._catalog.scope_signal_fingerprint(db, closing_ids)

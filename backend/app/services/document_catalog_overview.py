@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import json
 from typing import Any
 
 from app.core.ask_retrieval_policy import AskRetrievalLimits
@@ -19,7 +20,8 @@ from app.services.reasoning_retrieval import CollectionEnumerationOutcome
 
 _SUMMARY_GUIDANCE = (
     "[Directory overview: document rows contain stored summary excerpts, not "
-    "verified full text. Explain each document only from its supplied summary; "
+    "verified full text. Explain each document only from its supplied summary "
+    "or explicitly supplied supplemental original excerpts; "
     "a title alone does not establish its contents. Explicitly disclose missing "
     "summaries and that directory completeness does not mean full-text analysis.]"
 )
@@ -33,6 +35,7 @@ class CatalogOverview:
     result_sets: list[TypedCollectionResult]
     coverage_note: str
     items: list[SourceItem]
+    active_notebook_id: str = ""
 
 
 def catalog_coverage_note(result: TypedCollectionResult, *, attempted: bool = True) -> str:
@@ -54,6 +57,8 @@ def prepare_catalog_overview(
     limits: AskRetrievalLimits,
     budget_chars: int,
     cancel_event: CancelEvent = None,
+    *,
+    local_only: bool = False,
 ) -> CatalogOverview:
     """List authorized sources and project the delivered list into bounded context.
 
@@ -73,6 +78,7 @@ def prepare_catalog_overview(
             excerpt_chars=limits.cell_excerpt_chars,
         ),
         cancel_event=cancel_event,
+        local_only=local_only,
     )
     raise_if_cancelled(cancel_event)
     outcomes = [CollectionEnumerationOutcome(
@@ -114,4 +120,46 @@ def prepare_catalog_overview(
         result_sets=results,
         coverage_note=note,
         items=delivered_items,
+        active_notebook_id=notebook_id,
     )
+
+
+def supplement_missing_summaries(
+    catalog: CatalogOverview, sources: Any, *, budget_chars: int,
+    max_elements: int, generation_reader: Any, cancel_event: CancelEvent = None,
+) -> None:
+    """Share the remaining context and element budget across previewed empty rows.
+
+    The directory remains the coverage authority; original excerpts never turn
+    its stored summary or source card into a fabricated ingestion result.
+    """
+    from app.services.document_source_overview import prepare_source_overview
+
+    preview_sources = {entry.get("source_id") for entry in catalog.id_map.values()}
+    missing = [item for item in catalog.items
+               if not item.summary.strip() and item.source_id in preview_sources]
+    remaining_elements = max_elements
+    for index, item in enumerate(missing):
+        raise_if_cancelled(cancel_event)
+        remaining_rows = len(missing) - index
+        element_share = remaining_elements // remaining_rows
+        directory_key = next(key for key, entry in catalog.id_map.items()
+                             if entry.get("object_type") == "source" and entry.get("object_id") == item.source_id)
+        header = f"\n\n[Supplemental original excerpts for document {directory_key}; bounded sampling, not a full reading] " + json.dumps(
+            item.source_title, ensure_ascii=False,
+        ).replace("[", "［").replace("]", "］") + "\n"
+        char_share = (budget_chars - len(catalog.context_block)) // remaining_rows - len(header)
+        if element_share <= 0 or char_share <= 0:
+            continue
+        key_offset = max((int(key[1:]) for key in catalog.id_map), default=0)
+        original = prepare_source_overview(
+            sources, item, char_share, element_share, cancel_event,
+            generation_reader=generation_reader, key_offset=key_offset,
+            active_notebook_id=catalog.active_notebook_id,
+        )
+        remaining_elements -= element_share
+        if original.context_block:
+            catalog.context_block += header + original.context_block
+            catalog.id_map.update(original.id_map)
+            catalog.citations.update({c.element_id: c for c in original.citations})
+        catalog.coverage_note += "\n目录中缺少摘要的文档：" + original.coverage_note

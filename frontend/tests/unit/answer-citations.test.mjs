@@ -45,6 +45,14 @@ test("引用标记渲染为 cite: 链接(urlTransform 保留 cite: 协议)", () 
   assert.match(html, />\[1\]</);
 });
 
+test("文档导读标题中的中和标记保持文字，正文引用仍可点击", () => {
+  const refs = { k5001: { id: "r1", displayLabel: "[1]" }, k5002: { id: "r2", displayLabel: "[2]" } };
+  const html = render("### 文章 ［k5002］ 与 ［2］\n\n已存摘要：字面标记 ［k5002］。 [k5001]\n\n另一篇 [k5002]", refs);
+  assert.match(html, /文章 ［k5002］ 与 ［2］/);
+  assert.equal((html.match(/href="cite:k5002"/g) || []).length, 1);
+  assert.equal((html.match(/href="cite:k5001"/g) || []).length, 1);
+});
+
 test("数字复合引用渲染为多个 cite 链接", () => {
   const refs = {
     1: { id: "r1", displayLabel: "[1]" },

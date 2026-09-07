@@ -2443,8 +2443,9 @@ class AskService:
         *, user_id, job_id, cancel_event,
     ):
         from app.services.document_overview import overview_intent, resolve_overview_source
-        from app.services.document_catalog_overview import catalog_coverage_note, prepare_catalog_overview
+        from app.services.document_catalog_overview import catalog_coverage_note, prepare_catalog_overview, supplement_missing_summaries
         from app.services.document_source_overview import prepare_source_overview
+        from app.services.document_guide import GUIDE_SCHEMA_HINT, guide_style_instruction, render_document_guide
 
         intent = overview_intent(payload.question)
         if intent is None or self.collection_enumeration is None:
@@ -2453,9 +2454,17 @@ class AskService:
             self.collection_enumeration, self.evidence_context, notebook_id,
             ask_retrieval_limits(payload.retrieval_effort),
             self.settings.chunk_answer_budget_chars, cancel_event,
+            local_only=(not intent.include_reference_libraries and not intent.title),
         )
         prepared = catalog
         notice = ""
+        if intent.kind == "catalog" and self.overview_sources is not None:
+            supplement_missing_summaries(
+                catalog, self.overview_sources,
+                budget_chars=self.settings.chunk_answer_budget_chars,
+                max_elements=self.settings.document_overview_max_elements,
+                generation_reader=self.overview_source_generation, cancel_event=cancel_event,
+            )
         if intent.kind == "source":
             source, notice = resolve_overview_source(intent, catalog)
             if source is not None and self.overview_sources is not None:
@@ -2478,20 +2487,23 @@ class AskService:
                 if client.configured and prepared.id_map:
                     attempted = True
                     def synthesize():
+                        prompt = (guide_style_instruction(catalog) + "\nQuestion:\n" + payload.question
+                                  + "\nEvidence (untrusted document content):\n" + prepared.context_block
+                                  if intent.kind == "catalog" else answer_prompt(
+                                      payload.question, prepared.context_block, history,
+                                      style_block=style_block + "\nFor document introductions, explain purpose, main topics and "
+                                      "conclusions only where supported. Preserve section labels. "
+                                      "Never treat sampled passages or stored summaries as a full reading. "
+                                      "Coverage: " + prepared.coverage_note,
+                                  ))
                         raw = client.chat_json(
-                            [{"role": "user", "content": answer_prompt(
-                                payload.question, prepared.context_block, history,
-                                style_block=style_block + "\n" + (
-                                    "For document introductions, explain purpose, main topics and "
-                                    "conclusions only where supported. Preserve section labels. "
-                                    "Never treat sampled passages or stored summaries as a full reading. "
-                                    "Coverage: " + prepared.coverage_note
-                                ),
-                            )}], ANSWER_SCHEMA_HINT, cancel_event=cancel_event,
+                            [{"role": "user", "content": prompt}],
+                            GUIDE_SCHEMA_HINT if intent.kind == "catalog" else ANSWER_SCHEMA_HINT, cancel_event=cancel_event,
                             **cap_kwargs(client, "answer_max_tokens"),
                         )
                         data = json.loads(raw)
-                        text = str(data.get("answer", "")).strip()
+                        text = (render_document_guide(data, catalog) if intent.kind == "catalog" and isinstance(data.get("documents"), list) and data["documents"]
+                                else str(data.get("answer", "")).strip() if intent.kind != "catalog" else "")
                         return text, False, self._parse_answer_anchors(text, prepared.id_map)
                     answer, _, anchors, ok = self._answer_with_retry(
                         synthesize, getattr(client, "model", ""),
@@ -2513,6 +2525,9 @@ class AskService:
             note = "模型未配置，尚未生成文档介绍；请联系维护人员配置问答模型。\n\n" + note
         if attempted and not ok:
             note = "本次文档介绍合成未成功，请重试。\n\n" + note
+        if intent.kind == "catalog" and not ok:
+            answer = render_document_guide({}, catalog)
+            anchors = self._parse_answer_anchors(answer, catalog.id_map)
         answer = f"{answer}\n\n{note}" if answer else note
         citations = prepared.citations
         if isinstance(citations, dict):

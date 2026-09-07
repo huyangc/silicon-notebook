@@ -1778,6 +1778,25 @@ Directory enumeration and synthesis-preview coverage remain separate. This path
 uses the request's existing enumeration rails and `CHUNK_ANSWER_BUDGET_CHARS`;
 it does not claim to read every document's full text.
 
+Mixed Chinese/English scope names such as “介绍一下这个notebook中的文章” are
+recognized. Catalog introductions default to the active notebook's visible,
+selected documents; mounted libraries participate only when the question explicitly
+includes reference libraries, always intersected with the request's authorized
+library selection. Named single-document lookup can still locate an authorized
+mounted document. The directory traversal and its closing consistency check use
+the same effective scope, so its counts cannot include excluded libraries.
+
+The guide renders one entry per delivered document in directory order, with its
+stored display title and separately attributed purpose, method, and contribution
+where evidence supports them. Model omissions fall back visibly to stored summary
+excerpts; missing evidence and documents outside the synthesis preview are disclosed
+instead of silently omitted. Relationships and reading-order suggestions use only
+known document references. Empty summaries may use bounded original excerpts from
+the remaining shared character budget and the shared `DOCUMENT_OVERVIEW_MAX_ELEMENTS`
+allowance across those documents; source cards continue to show stored summaries.
+The answer separately reports generated introductions and fallbacks; preview
+coverage remains a measure of model input, not proof of semantic completeness.
+
 Explicit single-document introductions resolve a unique title (use `《full title》`)
 or the only document in the effective scope. An incomplete directory, absent title,
 or ambiguous target asks the reader to narrow the source selection, never guesses.

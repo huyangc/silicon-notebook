@@ -35,6 +35,7 @@ def prepare_source_overview(
     *,
     active_notebook_id: str,
     generation_reader: Callable[[str], str] | None = None,
+    key_offset: int = 0,
 ) -> SourceOverview:
     """Read evenly spaced elements, including the last source-detail position.
 
@@ -90,7 +91,7 @@ def prepare_source_overview(
         for element in elements
     ]
     whole_fits = sum(
-        len(f"k{index + 1}: " + json.dumps(body, ensure_ascii=False)) + 1
+        len(f"k{key_offset + index + 1}: " + json.dumps(body, ensure_ascii=False)) + 1
         for index, body in enumerate(bodies)
     ) <= budget_chars
     for index, element in enumerate(elements):
@@ -98,7 +99,7 @@ def prepare_source_overview(
         # Reserve a fair share for every sampled position; the opening cannot
         # exhaust the budget before a late-document conclusion reaches synthesis.
         slot = (budget_chars - used) if whole_fits else (budget_chars - used) // (len(elements) - index)
-        key = f"k{len(lines) + 1}"
+        key = f"k{key_offset + len(lines) + 1}"
         section = str(element.metadata.get("section_path") or element.location_label)
         original = element.text
         body = bodies[index]

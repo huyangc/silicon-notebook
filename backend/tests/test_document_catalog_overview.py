@@ -8,7 +8,7 @@ from app.core.ask_retrieval_policy import ask_retrieval_limits
 from app.models.ask import Citation
 from app.services.cancellation import AskCancelled
 from app.services.collection_enumeration import EnumerationCoverage, SourceItem
-from app.services.document_catalog_overview import prepare_catalog_overview
+from app.services.document_catalog_overview import prepare_catalog_overview, supplement_missing_summaries
 
 
 class Directory:
@@ -102,3 +102,40 @@ def test_cancellation_prevents_directory_access():
     with pytest.raises(AskCancelled):
         prepare(directory, cancel_event=event)
     assert directory.calls == []
+
+
+def test_missing_summaries_share_context_and_element_budget_without_changing_cards():
+    from app.models.sources import PaginatedSourceElements, SourceElement
+
+    class Pages:
+        def __init__(self):
+            self.calls = []
+
+        def source_elements_page(self, source_id, offset=0, limit=1):
+            self.calls.append((source_id, offset))
+            return PaginatedSourceElements(items=[SourceElement(
+                id=f"{source_id}-{offset}", source_id=source_id,
+                element_type="paragraph", location_label="正文", text="真实内容" * 100,
+            )], total_count=10, offset=offset, limit=limit)
+
+    directory = Directory()
+    directory.items = tuple(replace(item, summary="") for item in directory.items)
+    catalog = prepare(directory)
+    preview_keys = set(catalog.id_map)
+    reader = Pages()
+    supplement_missing_summaries(catalog, reader, budget_chars=2000, max_elements=4,
+                                generation_reader=lambda _: "v1")
+    assert len(reader.calls) == 4
+    assert {source for source, _ in reader.calls} == {"a", "b"}
+    assert len(catalog.context_block) <= 2000
+    assert len(catalog.id_map) == len(preview_keys) + 4
+    assert all(item.text == "" for item in catalog.result_sets[0].items)
+    assert catalog.result_sets[0].synthesis_rows == 2
+    assert "不代表覆盖所有章节" in catalog.coverage_note
+
+
+def test_no_remaining_budget_does_not_read_originals():
+    catalog = prepare()
+    supplement_missing_summaries(catalog, object(), budget_chars=len(catalog.context_block),
+                                max_elements=4, generation_reader=lambda _: "v1")
+    assert len(catalog.id_map) == 2
