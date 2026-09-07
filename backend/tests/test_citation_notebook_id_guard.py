@@ -237,7 +237,8 @@ class _SiteCollector(ast.NodeVisitor):
         self.sites: list[
             tuple[str, str, list[tuple[str, ast.expr | None]], ast.Call]
         ] = []
-        # (qualname, source text, value node, lineno)
+        # (qualname, source text, value node) — the line number is read off the
+        # node only when a diagnostic is formatted, never carried as identity.
         self.writes: list[tuple[str, str, ast.expr, int]] = []
 
     def _scoped(self, node: ast.AST) -> None:
@@ -273,7 +274,7 @@ class _SiteCollector(ast.NodeVisitor):
         for key, value in zip(node.keys, node.values):
             if isinstance(key, ast.Constant) and key.value == ID_MAP_KEY:
                 self.writes.append(
-                    (qualname, ast.unparse(value), value, value.lineno)
+                    (qualname, ast.unparse(value), value)
                 )
         self.generic_visit(node)
 
@@ -411,7 +412,7 @@ def _collect(
                 "is registered in REGISTERED_SITES"
             )
 
-    for qualname, text, value, lineno in collector.writes:
+    for qualname, text, value in collector.writes:
         site = (relative, qualname)
         if site not in builders:
             continue
@@ -419,7 +420,7 @@ def _collect(
         if _is_helper_call(value) or text in builders[site][0]:
             continue
         scan.offenders.append(
-            f'{relative}:{lineno}: id_map write "{ID_MAP_KEY}": {text} in '
+            f'{relative}:{value.lineno}: id_map write "{ID_MAP_KEY}": {text} in '
             f"{qualname or '<module>'} neither calls {HELPER_NAME}() nor "
             "matches the source pinned in BUILDER_SITES"
         )
