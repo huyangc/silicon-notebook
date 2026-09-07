@@ -53,6 +53,44 @@ test("1 个候选：仍渲染成一个可点击项，点击前不回调 onPick",
   expect(onPick).toHaveBeenCalledWith("b1");
 });
 
+test("私有/共享库与失效的公共库不是合格目标：不渲染、也不算进 0 态判定", () => {
+  const onPick = vi.fn();
+  render(
+    <PromotionTargetModal
+      storageKey="test.promotion.window"
+      title="选择贡献目标"
+      description="说明文字"
+      bases={[
+        { ...base("p1", "我的私有库"), tier: "personal" },
+        { ...base("b0", "已下线的公共库"), active: false, inactive_reason: "demoted" },
+        base("b1", "物理知识库"),
+      ]}
+      onPick={onPick}
+      onClose={() => undefined}
+    />,
+  );
+
+  expect(screen.getByRole("button", { name: "物理知识库" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "我的私有库" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "已下线的公共库" })).toBeNull();
+  expect(screen.queryByText("可选的公共知识库已变化，请关闭后重新提交")).toBeNull();
+});
+
+test("只剩私有库时按 0 态处理（不列出后端必拒的目标）", () => {
+  render(
+    <PromotionTargetModal
+      storageKey="test.promotion.window"
+      title="选择贡献目标"
+      description="说明文字"
+      bases={[{ ...base("p1", "我的私有库"), tier: "personal" }]}
+      onPick={vi.fn()}
+      onClose={() => undefined}
+    />,
+  );
+  expect(screen.getByText("可选的公共知识库已变化，请关闭后重新提交")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "我的私有库" })).toBeNull();
+});
+
 test(">1 个候选：渲染完整列表(每个候选各一个按钮)，点击后回调对应的目标库 id", async () => {
   const user = userEvent.setup();
   const onPick = vi.fn();

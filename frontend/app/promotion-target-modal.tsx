@@ -1,7 +1,7 @@
 "use client";
 
 import { FloatingModalCard } from "./floating-modal-card";
-import type { MountedBase } from "./notebook-bases";
+import { promotionTargetOptions, type MountedBase } from "./notebook-bases";
 
 /**
  * 多领域基准库 A5:「选择贡献目标」弹窗——page.tsx(知识条目晋升)与
@@ -17,6 +17,10 @@ import type { MountedBase } from "./notebook-bases";
  * resolvePromotionTarget 判过一次、只在 "choose" 分支才有值的 options)——弹窗
  * 打开期间挂载集合可能变化(任何 refreshActiveNotebook),用后者在候选缩到
  * 1 个时会把"已挂载 1 个"误判成"未挂载",显示一句断言错误的 0-态提示。
+ *
+ * 完整列表里混着私有/共享库,它们不是合格的晋升目标(后端必回 400),所以先经
+ * 唯一定义点 `promotionTargetOptions`(与 resolvePromotionTarget 同一条规则)过滤,
+ * 再判 0 项 / 渲染列表。
  *
  * 因此这里**不**做"1 项自动选中并跳过渲染"的静默写入——1 项也照常渲染成一个
  * 可点击项,由用户自己点(哪怕列表只有一个,也不代自动提交);0 项时原地给出
@@ -39,6 +43,7 @@ export function PromotionTargetModal({
   onPick: (baseId: string) => void;
   onClose: () => void;
 }) {
+  const options = promotionTargetOptions(bases);
   return (
     <FloatingModalCard storageKey={storageKey} className="utility-modal-card narrow">
       {(floating) => (<>
@@ -50,10 +55,10 @@ export function PromotionTargetModal({
           <button className="icon-button" onClick={onClose} title="Close">×</button>
         </div>
         <div className="promotion-target-list">
-          {bases.length === 0 ? (
+          {options.length === 0 ? (
             <p className="tool-hint">可选的公共知识库已变化，请关闭后重新提交</p>
           ) : (
-            bases.map((base) => (
+            options.map((base) => (
               <button
                 key={base.id}
                 type="button"
