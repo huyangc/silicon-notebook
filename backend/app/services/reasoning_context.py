@@ -37,9 +37,25 @@ ORIGIN_EXTRACTED = "抽取摘要"
 
 #: 摘录窗口挑锚点时最多考察多少个命中位置。有界是为了让"最优窗口"这件事不随
 #: 正文长度线性变贵;超出的位置一律不看,选取因此仍然确定。
+#: **配额按词分配(round-robin),不是先到先得的全局计数。**全局计数下,一个在正文
+#: 里出现几十次的高频词(中文正文里的主题词几乎必然如此)会把整份配额吃干净,后面
+#: 每个词连一次 `find` 都轮不到——而"后面那些词"正是把问题与答案句区分开的那些。
+#: 结果是摘录稳定退化成取正文前缀,恰好是这个函数存在的理由的反面。
 _MAX_ANCHORS = 32
+#: 单个词最多贡献多少个命中位置。它同时是每轮 round-robin 的深度上限,也是"一个
+#: 高频词要扫多久"的界:总成本 ≤ 词数 × 这个数。
+_MAX_ANCHORS_PER_TERM = 8
 #: 一个检索词长过这个比例的窗口就没法当锚点(它自己都装不进摘录)。
 _ANCHOR_TERM_RATIO = 2
+#: 一张卡最短能长成什么样(`- [kg] | 原文`)。预算只剩这么点时后面一条也装不下,
+#: 渲染循环可以当场停手,不必为每一条候选先做一次全文摘录再把它丢掉。
+_MIN_CARD_CHARS = 12
+#: 文档字段进渲染行之前的截长。
+_LOCATOR_CHARS = 160
+_CONDITION_CHARS = 240
+#: 第一档(已绑定证据)最多只能吃掉 (1 - 1/N) 的证据预算,剩下的留给"本轮新增"
+#: 与历史代表。只在这一轮真有新增时才切这一刀。
+_FRESH_RESERVE_RATIO = 3
 #: KG payload 里可以当"抽取摘要"用的字段,按优先级。全部是已在内存里的键。
 _KG_SUMMARY_KEYS = (
     "definition", "statement", "description", "syntax", "summary", "text",
@@ -66,6 +82,30 @@ class EvidenceCard:
     partial: bool
 
 
+# --- 文档字段的伪造防御 -----------------------------------------------------
+def _collapse(value: object) -> str:
+    """折叠全部空白(含换行)为单空格,并去掉余下的控制字符。
+
+    与 `agent_profile_block._clean` / `retrieval_experience_block._clean` 同款,
+    需要它的理由在这里更直接:这一块渲染的每一个字段——知识对象的 `name`、
+    `section_path`、`validity_scope`、来源标题、位置标签——都是**文档里的内容**,
+    经解析/抽取管线写入,从来没有承诺过是单行的。一个带字面换行的 name 足以在
+    渲染出来的证据块里伪造一整张
+    `- [chunk] | key=c-999 | 某文档 · 3.2 | 原文` 卡片(模型据 key 去绑定一条并
+    不存在的证据),或者伪造一个 `【动作观察账 — 服务端记录的实际执行结果】` 块头
+    ——后面跟着的任何东西都会读成"服务端说的"。折叠在字段进 `f"- ... | ..."` 之前
+    做,伪造因此是结构上不可能,而不是"被劝阻"。
+    """
+    text = " ".join(str(value or "").split())
+    return "".join(ch for ch in text if ch >= " " and ch != "\x7f")
+
+
+def _flat(value: object, limit: int) -> str:
+    """`_collapse` + 截长。一个字段不许把整张卡的预算吃光。"""
+    text = _collapse(value)
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
 # --- 摘录窗口 ---------------------------------------------------------------
 def excerpt_terms(question: str, action_query: str, limit: int) -> List[str]:
     """摘录窗口要覆盖的"有效检索词"。
@@ -80,6 +120,16 @@ def excerpt_terms(question: str, action_query: str, limit: int) -> List[str]:
        几乎命中任何中文段落,留着会让所有窗口同分、退化成取前缀。
        **用户引号里的精确短语豁免这一条**:它是用户明确说"这一整串要在一起"的
        东西,让别的词把它吃掉正好倒转了这条语法的意思。
+
+    ⚠ 第 3 条对**纯中文**问题基本是空操作,这是登记在案的已知边界而不是疏漏:
+    那种问题分解出来的全是等长的三字窗口(整句词已被第 1 条丢掉),而判据是
+    `len(term) < len(other)`,等长永远不成立。把它放宽成"任意子串"会让互相重叠
+    的相邻窗口(`布局布` / `局布线`)彼此吃掉,取决于遍历顺序;按"合并后的最长
+    匹配"去重则会把那串窗口合回整句——正是第 1 条刚丢掉的那一项。真正兜住这种
+    形状的是 `select_excerpt` 的**按词 round-robin 锚点配额**:窗口同分不再意味
+    着取前缀,答案句里那几个只在那儿出现的窗口照样各拿一个锚点,并在打分时把
+    答案区顶上去(用例:`test_excerpt_window_covers_the_answer_for_a_cjk_only_
+    question`)。
 
     不新引入模型理解,也不做全库扫描(设计稿 §6.2)。
     """
@@ -123,20 +173,39 @@ def select_excerpt(
 
     返回 (摘录, 是不是局部)。确定性:候选窗口按命中位置的文本顺序生成,分数相同
     时取最靠前的那个,所以同一份输入永远得到同一段摘录。
+
+    锚点配额按词 round-robin 分配(见 `_MAX_ANCHORS`):先给每个命中的词各取一个
+    位置,再回头补第二个、第三个。这样一个高频词吃不掉整份配额,而"答案句里那个
+    只出现一次的词"永远排在第一轮里。
     """
-    body = " ".join(str(text or "").split())
+    body = _collapse(text)
     if len(body) <= limit:
         return body, False
     folded = body.casefold()
-    anchors: List[int] = []
+    per_term: List[List[int]] = []
     spans: List[Tuple[int, int, str]] = []
     for term in terms:
         needle = term.casefold()
+        if not needle:
+            continue
+        hits: List[int] = []
         start = folded.find(needle)
-        while start >= 0 and len(anchors) < _MAX_ANCHORS:
-            anchors.append(start)
+        while start >= 0 and len(hits) < _MAX_ANCHORS_PER_TERM:
+            hits.append(start)
             spans.append((start, start + len(needle), needle))
             start = folded.find(needle, start + 1)
+        if hits:
+            per_term.append(hits)
+    anchors: List[int] = []
+    depth = 0
+    while len(anchors) < _MAX_ANCHORS and any(
+            len(hits) > depth for hits in per_term):
+        for hits in per_term:
+            if depth < len(hits):
+                anchors.append(hits[depth])
+                if len(anchors) >= _MAX_ANCHORS:
+                    break
+        depth += 1
     if not anchors:
         # 无命中 ⇒ 取前缀,但**照样带省略标记**:一段被切掉尾巴的正文与一段完整
         # 正文在模型眼里必须能区分开(设计稿 §6.2 的"局部摘录"披露)。
@@ -163,7 +232,7 @@ def select_excerpt(
 def _kg_card(hit, terms: Sequence[str], excerpt_chars: int) -> EvidenceCard:
     payload = getattr(hit, "payload", None)
     payload = payload if isinstance(payload, Mapping) else {}
-    name = str(payload.get("name", "") or "").strip()
+    name = _flat(payload.get("name"), _LOCATOR_CHARS)
     body = ""
     for key in _KG_SUMMARY_KEYS:
         value = payload.get(key)
@@ -172,8 +241,11 @@ def _kg_card(hit, terms: Sequence[str], excerpt_chars: int) -> EvidenceCard:
             break
     steps = payload.get("steps")
     if isinstance(steps, (list, tuple)) and steps:
+        # 步骤名同样是文档内容:逐个折叠,免得一个带换行的步骤名把 `body` 变成
+        # 多行(它随后进摘录,而摘录整段渲染在卡片下面)。
         rendered = " -> ".join(
-            str(step.get("name", "") if isinstance(step, Mapping) else step)
+            _collapse(step.get("name", "") if isinstance(step, Mapping)
+                      else step)
             for step in steps[:8]
         ).strip(" ->")
         if rendered:
@@ -182,19 +254,20 @@ def _kg_card(hit, terms: Sequence[str], excerpt_chars: int) -> EvidenceCard:
     for key in _KG_CONDITION_KEYS:
         value = payload.get(key)
         if isinstance(value, str) and value.strip():
-            conditions = value.strip()
+            conditions = _flat(value, _CONDITION_CHARS)
             break
         if isinstance(value, (list, tuple)) and value:
-            conditions = "、".join(str(v) for v in value[:4])
+            conditions = _flat("、".join(str(v) for v in value[:4]),
+                               _CONDITION_CHARS)
             break
     excerpt, partial = select_excerpt(body, terms, excerpt_chars)
     # 位置"有才显示":KG 候选的 payload 未必带 section_path(抽取管线按类型决定
     # 写不写),没有就不渲染一个空位置,更不去查库补一个。
-    where = str(payload.get("section_path", "") or "").strip()
+    where = _flat(payload.get("section_path"), _LOCATOR_CHARS)
     return EvidenceCard(
         kind=KIND_KG,
         key=str(getattr(hit, "object_id", "")),
-        locator=(f"[{getattr(hit, 'object_type', '')}] {name}".strip()
+        locator=(f"[{_collapse(getattr(hit, 'object_type', ''))}] {name}".strip()
                  + (f" · {where}" if where else "")),
         # KG 候选手上只有抽取字段——名字、定义、步骤。它们**不是**原文逐字。
         origin=ORIGIN_EXTRACTED,
@@ -209,8 +282,8 @@ def _element_card(el, terms: Sequence[str], excerpt_chars: int) -> EvidenceCard:
         getattr(el, "text", ""), terms, excerpt_chars)
     locator = " · ".join(
         part for part in (
-            str(getattr(el, "source_title", "") or ""),
-            str(getattr(el, "location_label", "") or ""),
+            _flat(getattr(el, "source_title", ""), _LOCATOR_CHARS),
+            _flat(getattr(el, "location_label", ""), _LOCATOR_CHARS),
         ) if part
     )
     return EvidenceCard(
@@ -225,8 +298,8 @@ def _chunk_card(chunk, terms: Sequence[str], excerpt_chars: int) -> EvidenceCard
         getattr(chunk, "text", ""), terms, excerpt_chars)
     locator = " · ".join(
         part for part in (
-            str(getattr(chunk, "source_title", "") or ""),
-            str(getattr(chunk, "section_path", "") or ""),
+            _flat(getattr(chunk, "source_title", ""), _LOCATOR_CHARS),
+            _flat(getattr(chunk, "section_path", ""), _LOCATOR_CHARS),
         ) if part
     )
     return EvidenceCard(
@@ -244,16 +317,18 @@ def _inference_card(chain) -> Optional[EvidenceCard]:
     if not hops or len(hops) != 2:
         return None
     h1, h2 = hops
-    edge = str(getattr(chain, "inferred_edge_type", "") or "")
+    edge = _collapse(getattr(chain, "inferred_edge_type", ""))
     return EvidenceCard(
         kind=KIND_INFERENCE, key="",
-        locator=(f"{getattr(h1, 'source_name', '')} --{edge}--> "
-                 f"{getattr(h2, 'target_name', '')} via "
-                 f"{getattr(h1, 'target_name', '')}"),
+        locator=_flat(
+            f"{_collapse(getattr(h1, 'source_name', ''))} --{edge}--> "
+            f"{_collapse(getattr(h2, 'target_name', ''))} via "
+            f"{_collapse(getattr(h1, 'target_name', ''))}", _LOCATOR_CHARS),
         origin=ORIGIN_EXTRACTED,
         excerpt=(f"query-time only, trust="
                  f"{float(getattr(chain, 'chain_trust', 0.0) or 0.0):.2f}"),
-        conditions=str(getattr(chain, "validity_scope", "") or ""),
+        conditions=_flat(
+            getattr(chain, "validity_scope", ""), _CONDITION_CHARS),
         partial=False,
     )
 
@@ -261,7 +336,10 @@ def _inference_card(chain) -> Optional[EvidenceCard]:
 def render_card(card: EvidenceCard) -> str:
     parts = [f"[{card.kind}]"]
     if card.key:
-        parts.append(f"key={card.key}")
+        # 标识也过一次折叠:它同样来自库里的一行,而这一格就在块结构的分隔符
+        # 之间。登记进 `shown_keys` 的仍是**池子里的那把原始键**,所以一把被折叠
+        # 改写过的伪造键在下一轮的绑定校验里必然对不上——失败方向是关的。
+        parts.append(f"key={_flat(card.key, _LOCATOR_CHARS)}")
     if card.locator:
         parts.append(card.locator)
     parts.append(card.origin + ("(局部摘录)" if card.partial else ""))
@@ -309,25 +387,54 @@ def build_evidence_block(
     优先级**不等于**每档无限独占预算:三档共用同一个 `budget_chars`,装不下的
     一律计进省略数并明确披露。同一条证据只渲染一次(`seen` 跨三档生效)——同一
     个键出现在两档里就多占一份预算,而模型看到的是同一张卡。
+
+    第一档还额外受一条**留底**约束:`bound_keys` 本身没有上限(大纲可以绑上几十
+    条),先到先得会让它把整份预算吃干净,于是"本轮刚拿到的新证据"这一档对一份
+    已经长起来的大纲结构性不可见——而那正是模型下一步最需要看的东西。所以只要
+    这一轮真有新增,就先给后两档切出一块 `_FRESH_RESERVE_RATIO` 的底。已绑定的
+    那些卡模型上一轮已经看过,少展开几张的代价小得多。
     """
     index = _pool_index(collected, elements, chunks)
     terms = excerpt_terms(question, action_query, excerpt_chars)
-    ordered: List[str] = []
+    # (键, 档序)。一个键只属于**一档**:被留底挡在第一档外的键不会在第三档
+    # 借尸还魂,省略数因此也只数一次。
+    ordered: List[Tuple[str, int]] = []
     seen: Set[str] = set()
-    for group in (bound_keys, fresh_keys, _diverse_order(index)):
+    for tier, group in enumerate((bound_keys, fresh_keys, _diverse_order(index))):
         for key in group:
             key = str(key)
             if key and key not in seen and key in index:
                 seen.add(key)
-                ordered.append(key)
+                ordered.append((key, tier))
+    reserve = (
+        budget_chars // _FRESH_RESERVE_RATIO
+        if any(tier == 1 for _, tier in ordered) else 0
+    )
+    caps = (budget_chars - reserve, budget_chars, budget_chars)
     lines: List[str] = []
     shown: List[str] = []
     used = len(EVIDENCE_BLOCK_TITLE)
     omitted = 0
-    for key in ordered:
+    # 「再装一张卡至少要多少字」。起点是理论下限,随后收敛到**这一池里已经见过
+    # 的最短那张**——这才是有用的界:240 字摘录的池子里,理论下限 12 永远为真,
+    # 于是几千条候选每一轮都要各做一次全文 `select_excerpt`,只为把它丢掉。
+    # 用观察到的最短卡当界会漏掉"后面某张特别短的卡本来装得下",而那张卡照样
+    # 计进 `omitted` 并被明确披露——与预算切掉它是同一种结果,不是静默丢失。
+    seen_min = 0
+    for position, (key, tier) in enumerate(ordered):
+        floor = seen_min or _MIN_CARD_CHARS
+        if used + floor > budget_chars:
+            # 预算已经装不下任何一张卡:剩下的全都不必再构造。
+            omitted += len(ordered) - position
+            break
+        if used + floor > caps[tier]:
+            # 这一档的份额用完了(今天只有第一档会走到这里),但别的档还有。
+            omitted += 1
+            continue
         card = _card_for(index[key], terms, excerpt_chars)
         text = render_card(card)
-        if used + len(text) + 1 > budget_chars:
+        seen_min = min(seen_min, len(text) + 1) if seen_min else len(text) + 1
+        if used + len(text) + 1 > caps[tier]:
             omitted += 1
             continue
         used += len(text) + 1
@@ -369,15 +476,30 @@ def _pool_index(collected: Mapping, elements: Sequence, chunks: Sequence) -> Dic
     return index
 
 
+def _rank_score(item: object) -> float:
+    """排序用的相关度:`relevance` → `score` → 0。
+
+    池子里三类对象的字段并不整齐:`RetrievedKnowledge` 与 `RetrievedChunk` 有
+    `relevance`,而 `RetrievedElement` **只有** `score`。只读 `relevance` 的话
+    每一个元素候选都恒为 0——第三档于是把元素整体沉到底,排序退化成"按插入序取
+    chunk 与 KG",而 `search_elements` 刚捞回来的高分元素永远排在最后。
+    """
+    for name in ("relevance", "score"):
+        value = getattr(item, name, None)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            if value:
+                return float(value)
+    return 0.0
+
+
 def _diverse_order(index: Mapping) -> List[str]:
     """第三档:历史高相关代表 + 来源多样性补位。
 
-    按 relevance 降序(缺省 0)、同分按插入序稳定;然后按来源做一轮轮转,让同一篇
-    文档的连续几段不会把整个预算吃掉。tie-break 全部是可重复的确定性比较。
+    按相关度降序(见 `_rank_score`)、同分按插入序稳定;然后按来源做一轮轮转,让
+    同一篇文档的连续几段不会把整个预算吃掉。tie-break 全部是可重复的确定性比较。
     """
     rows = list(index.items())
-    rows.sort(
-        key=lambda item: -float(getattr(item[1], "relevance", 0.0) or 0.0))
+    rows.sort(key=lambda item: -_rank_score(item[1]))
     buckets: Dict[str, List[str]] = {}
     order: List[str] = []
     for key, item in rows:
@@ -412,6 +534,9 @@ SERVER_STATE_TITLE = "【服务器状态 — 由服务端持有，不可协商�
 @dataclass(frozen=True)
 class ReflectContext:
     """一轮 v2 reflect 的 user 段材料,已经分好块并各自受自己的预算约束。
+
+    这里是**三块**:服务器状态、证据卡、动作观察账。问题与冻结契约那一段由
+    `prompts` 拼在这三块之前(它是用户说的话,不由这个模块装配)。
 
     分块的意义在于**标识**:问题与冻结契约是用户说的,服务器状态是服务端算的,
     证据卡是文档里的内容,观察账是服务端对已发生动作的记录 + 模型自己上一轮写下

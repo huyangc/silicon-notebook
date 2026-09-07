@@ -611,6 +611,40 @@ def v2_request_identity(decision: "ReflectDecision") -> str:
     return ""
 
 
+def v2_request_query_text(decision: "ReflectDecision") -> str:
+    """这一次请求里那段**自然语言查询文本**,给证据卡的摘录窗口当检索词来源。
+
+    与 `v2_request_identity` 刻意分家。身份串为了判两次请求算不算同一次,把
+    `types=…`、`prefer=balanced`、`dir=both` 这些参数折了进来,还包含 `ko-…`
+    这类内部标识——拿它去正文里挑摘录窗口,等于让摘录去找一批在任何文档里都不
+    会出现的词,于是每个窗口同分、退化成取前缀。摘录要的是"这一步在找什么",
+    身份要的是"这一步是不是刚才那一步",两个问题的答案不该是同一个串。
+
+    以对象 id 为主的两个动作(`expand_graph` / `follow_chain`)返回空串:它们的
+    参数里没有任何自然语言,摘录只能退回问题本身的检索词——那是如实的。
+    """
+    action = decision.next_action
+    if action == "add_subquery":
+        return decision.new_sub_query.query if decision.new_sub_query else ""
+    if action == "search_elements":
+        return decision.elements_query
+    if action == "search_chunks":
+        return decision.chunks_query
+    if action == "ppr_retrieve":
+        return decision.ppr_query
+    if action == "exact_lookup":
+        return decision.exact_term
+    if action == "expand_community":
+        return decision.community_focal
+    if action in (ENUMERATE_ELEMENTS_ACTION, ENUMERATE_KG_OBJECTS_ACTION):
+        # 来源标题是文档名(用户看得到的那个),kind/object_type 是白名单里的
+        # 子类型词——两者都可能逐字出现在正文里,内部 source id 不会。
+        return " ".join(part for part in (
+            decision.enumerate_source_title, decision.enumerate_kind,
+            decision.enumerate_object_type) if part)
+    return ""
+
+
 def parse_reflect_v2(
     data: dict, capabilities: "ReflectCapabilities",
 ) -> "ReflectDecision":
@@ -2539,7 +2573,17 @@ class _TraceRecorder:
         self._last_ts = now
         self._trace.append(step)
         if self.observer is not None:
-            self.observer.observe(step)
+            try:
+                self.observer.observe(step)
+            except AskCancelled:
+                raise
+            except Exception:  # noqa: BLE001
+                # 观察账是**投影**:它折不出这一条,代价是账上少一行;它把异常放
+                # 出去,代价是整次检索死在一个纯展示的转换上。转换读的是模型可以
+                # 影响形状的 detail(枚举 kind、子查询 query…),所以"它永远不会
+                # 抛"不是一个可以假设的性质。轨迹本身在上一行就已经落定,人仍然
+                # 看得到这一步真的发生过。
+                pass
         if self._on_step:
             self._on_step(step)
 
@@ -3407,7 +3451,9 @@ class ReasoningRetriever:
             bound_keys=[key for section in outline
                         for key in section.evidence_keys],
             fresh_keys=observer.fresh_result_ids(),
-            question=state.question, action_query=observer.last_request,
+            # 摘录检索词取**原始查询文本**,不是规范化身份串(见
+            # `v2_request_query_text`)。
+            question=state.question, action_query=observer.last_query,
             budget_chars=budget,
             excerpt_chars=int(getattr(
                 settings, "reasoning_reflect_excerpt_chars", 240)),
@@ -4182,6 +4228,13 @@ class ReasoningRetriever:
             # 就让该方向的 KG 证据被静默永久丢弃(此前由 run 后独立
             # 检索兜底覆盖)。
             state.failed_search_queries.add(sq.query)
+            # 同一件事的模型侧披露(v2 only,`observer` 为 None 时零调用):
+            # `failed_search_queries` 只被 run 后的方向兜底读,模型看到的那条
+            # 观察行仍然是「执行了但零新增」——一次瞬态库故障因此在模型眼里与
+            # 「这个方向库里真的没有内容」完全同形。
+            observer = state.record.observer
+            if observer is not None:
+                observer.note_failed("kg_search_error")
             return []
 
     def _first_round_kg_disclosure(self, state: "_ReasoningRunState") -> None:
@@ -4578,10 +4631,16 @@ class ReasoningRetriever:
                 summary=f"按名称精确查找:新增 {len(found)} 段原文",
                 detail=_exact_seed_detail))
 
-    def _chunk_seed_search(self, notebook_id, query, take):
+    def _chunk_seed_search(self, notebook_id, query, take, observer=None):
         """播种里的一条子查询。失败语义与 `_first_round_search` 逐字一致:
         fail-open 吞掉、`fail_closed` 下照抛、`AskCancelled` 始终上抛——一条
-        子查询炸掉不该拖垮整轮播种。"""
+        子查询炸掉不该拖垮整轮播种。
+
+        `observer` 非空(v2 挂了账本)时,吞掉的那次异常会经侧信道
+        `note_failed` 说出去:不打标的话,调用方随后照常记一条 `found: 0`,
+        而「没查成」与「查了没有」在观察账上完全同形——这两件事该导致的下一步
+        正好相反。legacy 传 None,行为逐字节不变。
+        """
         raise_if_cancelled(self.cancel_event)
         try:
             return self.search_chunks(notebook_id, query, k=take)
@@ -4590,6 +4649,8 @@ class ReasoningRetriever:
         except Exception:
             if self.fail_closed:
                 raise
+            if observer is not None:
+                observer.note_failed("chunk_search_error")
             return []
 
     def _keyword_seed_search(
@@ -4713,7 +4774,8 @@ class ReasoningRetriever:
             # 丢掉 per-user 的模型/日志路由。
             futures = [
                 ex.submit(contextvars.copy_context().run,
-                          self._chunk_seed_search, notebook_id, sq.query, take)
+                          self._chunk_seed_search, notebook_id, sq.query, take,
+                          state.record.observer)
                 for sq in subqueries
             ]
             # 按提交顺序 result:第 i 个结果仍对应第 i 个子查询,故去重与串行版
@@ -4818,12 +4880,19 @@ class ReasoningRetriever:
         """
         if state.kg_in_scope or not self.chunk_search_active():
             return 0
+        observer = state.record.observer
         new = take_distinct_chunk_hits(
-            self._chunk_seed_search(state.notebook_id, query, k),
+            self._chunk_seed_search(state.notebook_id, query, k,
+                                    observer=observer),
             state.seen_chunks, state.chunks)
         state.chunks.extend(new)
         if detail is not None:
             detail["chunks_found"] = len(new)
+        # 侧信道(v2 only,`observer` 为 None 时零调用):这批 chunk_id 刻意**不**
+        # 进 detail 的 `result_ids`(理由见上),于是"本轮新增"那一档对无图 run 的
+        # 原文半完全失明——刚捞到的段落进不了下一轮证据卡,模型只能看见历史材料。
+        if observer is not None:
+            observer.note_fresh_ids([c.chunk_id for c in new])
         return len(new)
 
     def _action_ppr_retrieve(
@@ -4996,6 +5065,10 @@ class ReasoningRetriever:
         if len(peers) > peers_cap:
             peers = peers[:peers_cap]
         added, names = 0, []
+        # 本次真正新进池子的对象标识。detail 只写 `new`(一个数)与 `peers`
+        # (实体名),没有一把承载标识的键,而 legacy 的 trace 键集是冻结基线——
+        # 所以它们经侧信道交给观察者,不进 detail(见 `note_fresh_ids`)。
+        new_ids: List[str] = []
         for pname in peers:
             raise_if_cancelled(self.cancel_event)
             key = _norm_query(pname)
@@ -5007,6 +5080,7 @@ class ReasoningRetriever:
                     collected[h.object_id] = h
                     added += 1
                     got += 1
+                    new_ids.append(h.object_id)
             attempted[key] = _QueryAttempt(query=pname, new=got, tries=1)
             if pname not in used_queries:
                 used_queries.append(pname)
@@ -5016,9 +5090,31 @@ class ReasoningRetriever:
         step_summary = (f"横向对比(共提):纳入 {len(names)} 个同类实体,新增候选 {added}"
                         if peer_source == "comention"
                         else f"横向对比:纳入 {len(names)} 个同社区实体,新增候选 {added}")
+        if state.record.observer is not None:
+            state.record.observer.note_fresh_ids(new_ids)
         record(TraceStep(step_type="expand_community", summary=step_summary,
                          detail={"focal": focal_name, "peers": names,
                                  "new": added, "source": peer_source}))
+
+    @staticmethod
+    def _note_fresh_elements(state: "_ReasoningRunState", added: List) -> List:
+        """把刚并入的元素标识送进观察账的侧信道,并原样交回那批元素。
+
+        `search_elements` 的两个写点(首轮空证据兜底、reflect 的降级查原文)记的
+        `fallback` 步 detail 只有 `query` 与 `found` ——**没有**承载标识的键,而
+        legacy 的 trace 键集是冻结基线,不能为此加一把新键。于是"本轮新增"那一
+        档对整条元素通道结构性失明:刚查到的高分元素进不了下一轮的证据卡,模型
+        看到的仍然只有历史材料,于是重复请求同一件已经到手的东西。
+
+        写成"穿过去"的形状(收什么交什么)是为了让两个调用点都能就地包在既有那
+        一行上,不必各加两行——其中一个在 `run()` 里,而 `run()` 是零松弛长度天
+        花板下的热函数。`observer` 为 None(关闭态)时零调用、零分配。
+        """
+        observer = state.record.observer
+        if observer is not None:
+            observer.note_fresh_ids(
+                [str(getattr(el, "element_id", "")) for el in added])
+        return added
 
     def _first_round_empty_fallback(
         self, state: "_ReasoningRunState",
@@ -5043,7 +5139,8 @@ class ReasoningRetriever:
         ):
             elements_searches = 1
             found = self.search_elements(notebook_id, question)
-            added = merge_element_hits(elements, found)
+            added = self._note_fresh_elements(
+                state, merge_element_hits(elements, found))
             record(TraceStep(
                 step_type="fallback",
                 summary=f"初始证据未命中，补查来源原文，新增 {len(added)} 段",
@@ -6016,10 +6113,10 @@ class ReasoningRetriever:
             raise_if_cancelled(self.cancel_event)
             if capabilities is not None:
                 state.record.observer.note_decision(
-                    (decision.invalid_requested_action
-                     or decision.next_action),
-                    v2_request_identity(decision),
-                    decision.reason, f"剩余步数 {max_steps - steps}")
+                    decision.invalid_requested_action or decision.next_action,
+                    v2_request_identity(decision), decision.reason,
+                    f"剩余步数 {max_steps - steps}",
+                    v2_request_query_text(decision))
             reflect_detail = {"next_action": decision.next_action,
                               "sufficient": decision.sufficient,
                               "no_progress": no_progress, "stale": stale}
@@ -6282,7 +6379,7 @@ class ReasoningRetriever:
                     eq = decision.elements_query or question
                     found = self.search_elements(notebook_id, eq)
                     raise_if_cancelled(self.cancel_event)
-                    els = merge_element_hits(elements, found)
+                    els = self._note_fresh_elements(state, merge_element_hits(elements, found))
                     record(TraceStep(step_type="fallback",
                                      summary=f"降级查原文: {eq},新增 {len(els)} 段",
                                      detail={"query": eq, "found": len(els)}))
