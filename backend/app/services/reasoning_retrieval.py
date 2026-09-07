@@ -1951,6 +1951,9 @@ class CollectionEnumerationOutcome:
     source_id: str                        # 仅元素:限定单一来源时的 id,否则 ""
     items: List[object] = field(default_factory=list)
     coverage: object = None
+    # 仅 sources:这份清单是否只列了当前笔记本(不含挂载的参考库)。范围是
+    # 清单身份的一部分——同一条 "sources" 链换了范围就不是同一份目录了。
+    local_only: bool = False
 
 
 @dataclass
@@ -1961,6 +1964,26 @@ class _EnumChain:
     cursor: object = None
     # open=还能续;complete=已列全;conflict=作用域在枚举期间变了,不能续也不能重来
     state: str = "open"
+    # 开链时用的参考库范围(见 `_enumeration_local_only`);续跑沿用它。
+    local_only: bool = False
+
+
+def _enumeration_local_only(chain_state, is_sources: bool,
+                            requested: bool) -> bool:
+    """本次枚举是否只列当前笔记本的文档(不含挂载的参考库)。
+
+    范围只对来源清单有意义:元素与知识对象的执行器根本没有这个参数,所以
+    非 sources 的请求恒为 False。首次开链取调用方解析出的那一份——目录问法
+    播种把分类器的 ``include_reference_libraries`` 取反传进来,与 chunk 侧的
+    文档目录通道(`ask_service._try_document_overview`)同一个口径。
+
+    已有链则**沿用开链时那一份**,不看本次请求:模型后来选的目录动作不带任何
+    范围信息(参数默认全参与集),按默认续跑/重开会把用户明确排除掉的参考库
+    文档从第二条链混进同一份答案的证据里,还要再扣一次共享枚举预算。
+    """
+    if chain_state is not None:
+        return chain_state.local_only
+    return bool(requested) and is_sources
 
 
 @dataclass
@@ -3556,6 +3579,14 @@ class ReasoningRetriever:
         执行走与 reflect 目录动作**同一个** `_run_enumeration`:同一个预算池、
         同一份续跑账目,所以模型之后再选目录动作会被 `already_enumerated` 跳过,
         而不是把同一份清单列两遍。有图无图都播种——目录与图无关。
+
+        参考库范围也来自同一个分类器,口径与 chunk 侧的文档目录通道逐字相同
+        (`ask_service._try_document_overview`:`local_only=(kind == "catalog"
+        and not include_reference_libraries)`)。注意 `include_reference_libraries`
+        是**默认 False**——没提参考库的问句(「总结当前notebook的文章」)与显式
+        排除的问句(「…不包括参考库」)在这里同为只列当前笔记本;只有问句明确说
+        了「包括参考库」「和参考库」才把挂载库一起列进来。范围随后进续跑账目,
+        模型之后的目录动作沿用它(见 `_enumeration_local_only`)。
         """
         if not state.enumeration_active:
             return
@@ -3565,7 +3596,7 @@ class ReasoningRetriever:
         self._run_enumeration(state, ReflectDecision(
             next_action=ENUMERATE_ELEMENTS_ACTION,
             enumerate_collection=ENUMERATE_SOURCES_COLLECTION,
-        ), phase="seed")
+        ), phase="seed", local_only=not intent.include_reference_libraries)
 
     def _first_round_plan(self, state: "_ReasoningRunState") -> None:
         """确定本轮的检索方向:已确认意图优先,否则调 `plan()`,并记 plan 步。"""
@@ -4385,7 +4416,7 @@ class ReasoningRetriever:
 
     def _run_enumeration(
         self, state: "_ReasoningRunState", decision: "ReflectDecision",
-        *, phase: str = "",
+        *, phase: str = "", local_only: bool = False,
     ) -> None:
         """执行一次集合枚举动作:预算 → 判重/校验 → 执行 → 记账 → trace。
 
@@ -4470,11 +4501,11 @@ class ReasoningRetriever:
                 resolve_error = str(exc)[:120]
         key = (collection, kind, source_id)
         chain_state = enum_chains.get(key)
+        local_only = _enumeration_local_only(chain_state, is_sources, local_only)
         rows_left = enum_limits.enum_rows_per_run - state.enum_rows_used
         pages_left = enum_limits.enum_pages_per_run - state.enum_pages_used
         payload_left = (
-            enum_limits.structured_payload_chars - state.enum_payload_used
-        )
+            enum_limits.structured_payload_chars - state.enum_payload_used)
         if not kind and not is_sources:
             # 措辞按「该给什么」写,不是「你给错了」(exact_lookup 那条
             # 教训):模型给了一个非法 collection 值时,它显然是在**试图**
@@ -4573,7 +4604,7 @@ class ReasoningRetriever:
                         cancel_event=self.cancel_event)
                 elif is_sources:
                     listed = self.collection_enumeration.enumerate_sources(
-                        notebook_id, budget=budget,
+                        notebook_id, budget=budget, local_only=local_only,
                         cursor=chain_state.cursor if chain_state else None,
                         cancel_event=self.cancel_event)
                 else:
@@ -4617,14 +4648,13 @@ class ReasoningRetriever:
                 # 同上,按执行器回传的真实消耗扣减。夹到 payload_left
                 # 只是防越界记账:执行器本身就受同一个上限约束。
                 state.enum_payload_used += min(
-                    payload_left, max(0, listed.payload_chars)
-                )
+                    payload_left, max(0, listed.payload_chars))
                 if chain_state is None:
                     outcome = CollectionEnumerationOutcome(
                         collection=collection, kind=kind,
-                        source_id=source_id,
+                        source_id=source_id, local_only=local_only,
                         items=list(listed.items), coverage=coverage)
-                    chain_state = _EnumChain(outcome=outcome)
+                    chain_state = _EnumChain(outcome, local_only=local_only)
                     enum_chains[key] = chain_state
                     enumerations.append(outcome)
                 else:
@@ -4661,6 +4691,7 @@ class ReasoningRetriever:
                         "has_more": coverage.has_more,
                         "truncated_reason": coverage.truncated_reason,
                         **({"phase": phase} if phase else {}),
+                        **({"local_only": True} if local_only else {}),
                     }))
 
     def run(self, notebook_id, question, history="", on_step=None, top_n=None,
