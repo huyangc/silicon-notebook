@@ -29,6 +29,8 @@ import ts from "typescript";
 import { callSitesIn, callsIn, findFunction, findFunctionIn, importsIn, parseModule, variableInitializersIn } from "../../test-support/semantic-source.mjs";
 
 const page = await parseModule("page.tsx");
+// 知识图谱视图的 JSX（含只读工作区的两处遮蔽）搬进了自己的模块（PR-5 分片 3）。
+const kgGraphView = await parseModule("kg-graph-view.tsx");
 const composition = await parseModule("use-kg-workspace.ts");
 const ownerGate = await parseModule("use-kg-owner.ts");
 const knowledge = await parseModule("use-kg-knowledge.ts");
@@ -554,7 +556,9 @@ test("read-only review recovery and every provider-side write are policy gated",
       name,
     );
   }
-  const pageText = page.getText(page);
-  assert.match(pageText, /!readOnlyWorkspace && \([\s\S]{0,400}onClick=\{reviewPendingMerges\}/);
-  assert.match(pageText, /!readOnlyWorkspace && <span className="kg-merge-actions">/);
+  // 呈现侧的两处只读遮蔽随知识图谱视图 JSX 搬到 kg-graph-view.tsx；判据逐字不变
+  // （「自动判重」整段与每行的合并/拒绝按钮，只读成员都看不到）。
+  const viewText = kgGraphView.getText(kgGraphView);
+  assert.match(viewText, /!readOnlyWorkspace && \([\s\S]{0,400}onClick=\{reviewPendingMerges\}/);
+  assert.match(viewText, /!readOnlyWorkspace && <span className="kg-merge-actions">/);
 });

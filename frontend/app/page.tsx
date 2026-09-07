@@ -3,7 +3,6 @@
 import { ChangeEvent, DragEvent as ReactDragEvent, FormEvent, Fragment, KeyboardEvent as ReactKeyboardEvent, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, ArrowLeft, BarChart3, Check, ChevronRight, Cpu, Database, Edit3, ExternalLink, GitMerge, LayoutDashboard, LayoutGrid, Link2, List as ListIcon, Loader2, Network, PanelLeftClose, PanelLeftOpen, Plus, Settings, Share2, Sparkles, Table2, Trash2, Upload, User, Users, X } from "lucide-react";
 import "katex/dist/katex.min.css";
-import dynamic from "next/dynamic";
 import { AnswerView, LatexText, ReasoningTracePanel } from "./answer-panel";
 import { AuthedImage } from "./authed-image";
 import { FormulaView } from "./formula-view";
@@ -11,8 +10,6 @@ import {
   currentPreviewImage,
   type AnswerImagePreviewRequest,
 } from "./image-preview";
-import { KgEvidenceBody } from "./kg-evidence-body";
-import { KgEvidenceList, kgConfidenceLabel } from "./kg-evidence-list";
 import { MemoryPanel, MemorySaveDialog } from "./memory-panel";
 import { KnowhowPanel } from "./knowhow-panel";
 import { ContentOverviewCards } from "./content-overview-cards";
@@ -47,7 +44,10 @@ import {
   closeKnowhowNavigation,
   openKnowhowNavigation,
 } from "./knowhow-navigation";
-import { KG_TYPE_STYLE, KgTypeMark, kgTypeLabel } from "./kg-type-mark";
+import { KgTypeMark, kgTypeLabel } from "./kg-type-mark";
+import { KgGraphView } from "./kg-graph-view";
+import { fieldLabel, KgOccurrenceCard, KgProcedureStepCard, kgNodeName } from "./kg-object-cards";
+import { formatRelativeTime } from "./relative-time.ts";
 import { KgAnalysisView } from "./kg-analysis-view";
 import { AgentProfilePanel } from "./agent-profile-panel";
 import { kgBandTarget, kgBandVelocity, kgTypeBandTargets } from "./kg-layout";
@@ -128,7 +128,7 @@ import {
   type RootModalOwner,
   type RootModalSlot,
 } from "./use-root-modal-coordinator.ts";
-import { KG_RANGE_DEFAULT, KG_RANGE_STEPS, kgCanvasState } from "./kg-workspace-model.ts";
+import { KG_RANGE_DEFAULT, kgCanvasState } from "./kg-workspace-model.ts";
 import { API_BASE } from "./api-config";
 import { clearToken, getToken } from "./auth-session";
 import { copyTextSafely } from "./copy-text";
@@ -273,8 +273,6 @@ import {
   type Health,
   type KgBuildJobStatus,
   type KgObject,
-  type KgOccurrence,
-  type KgProcedureStep,
   type KnowledgeItem,
   type KnowledgeKind,
   type KnowledgeTypeCount,
@@ -300,48 +298,12 @@ import { label, PARSE_STATUS, ELEMENT_TYPE, KNOWLEDGE_STATUS, SEVERITY, CHECKUP_
  * 复核本身是尽力而为的——没有推送通道,一直停在前台不动的标签页仍然要等下一次交互
  * 撞上 403(见 page.tsx 里那个 visibilitychange effect 的说明)。
  */
-// react-force-graph-2d uses canvas/window; load client-side only.
-const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false });
 
 // 旧版二进制 Office 不被 MinerU 支持，给专门提示引导用户另存为 OOXML。.xls 是例外：
 // xlrd 纯 Python 可读，注册表 builtin 引擎已直接放行，这里只剩 doc/ppt 两个仍需
 // 引导另存为的旧格式。
 const LEGACY_OFFICE_EXTENSIONS = ["doc", "ppt"];
 
-// 图谱边类型 → 中文。取值真源:prompts.py 列出的 edge_type 词表(supports /
-// depends_on / contrasts_with / about / defines / used_in / composed_of / mixed,
-// 外加可传递的 derived_from / kind_of / prerequisite_of / precedes / part_of)。
-// 此前有 8 个值只是把英文 id 抄了一遍(about: "about"),另有 5 个值压根没进表、
-// 靠 `?? edge_type` 直接把英文渲染给用户——两条路都是英文外泄,一并补齐。
-const RELATION_LABELS: Record<string, string> = {
-  related_concepts: "关联概念",
-  related_claims: "关联论断",
-  related_formulas: "关联公式",
-  related_procedures: "关联过程",
-  about: "关于",
-  defines: "定义",
-  supports: "支持",
-  depends_on: "依赖",
-  composed_of: "包含",
-  part_of: "属于",
-  precedes: "先于",
-  contrasts_with: "对比",
-  used_in: "用于",
-  derived_from: "推导自",
-  kind_of: "是一种",
-  prerequisite_of: "前置于",
-  mixed: "多种关联"
-};
-
-/**
- * 边类型的界面名。未映射时退到中性的「关联」,**绝不回落成 edge_type 原值**——
- * 后端每加一个边类型,`RELATION_LABELS[t] ?? t` 那种写法都会把英文 id 直接画到
- * 图上(used_in / mixed 等 5 个值就是这么泄出去的)。label() 强制传兜底词,并在
- * 开发期把未映射的值 console.error 出来,让新值被发现而不是被静默渲染。
- */
-function relationLabel(edgeType: string): string {
-  return label(RELATION_LABELS, edgeType, "关联");
-}
 
 const KG_TYPE_ORDER = ["concept", "claim", "formula", "procedure"];
 
@@ -579,16 +541,6 @@ function StartingScreen({ snapshot, onRetry }: { snapshot: ReadySnapshot | null;
 // confirmIndexAction 移到组件内部(见 Home() 内定义)——需要闭包 setInfoModal 才能弹
 // 定制样式弹窗,放在模块级够不到 state。
 
-function formatRelativeTime(iso: string): string {
-  const then = new Date(iso).getTime();
-  if (!Number.isFinite(then)) return "";
-  const diffSec = Math.round((Date.now() - then) / 1000);
-  if (diffSec < 60) return "刚刚";
-  if (diffSec < 3600) return `${Math.floor(diffSec / 60)} 分钟前`;
-  if (diffSec < 86400) return `${Math.floor(diffSec / 3600)} 小时前`;
-  if (diffSec < 86400 * 30) return `${Math.floor(diffSec / 86400)} 天前`;
-  return new Date(then).toLocaleDateString();
-}
 // 服务端搜索：FTS5 + ANN 混合，返回命中列表（不再客户端拉全量图）。命中数由服务端 k 参数控制。
 // 逐跳展开：返回指定节点的邻居节点+边（bounded）。
 
@@ -603,21 +555,6 @@ function sourceTypeLabel(source: SourceSummary): string {
   return source.type || source.file_name.split(".").pop()?.toLowerCase() || "source";
 }
 
-function kgNodeName(node: UnifiedConceptNode): string {
-  const name = typeof node.payload.name === "string" ? node.payload.name.trim() : "";
-  return name || node.id.replace(/^K-/, "");
-}
-
-function truncateKgLabel(label: string, max = 34): string {
-  return label.length > max ? `${label.slice(0, max - 1)}…` : label;
-}
-
-function kgPayloadValue(value: unknown): string {
-  if (value == null || value === "") return "";
-  if (Array.isArray(value)) return value.map(kgPayloadValue).filter(Boolean).join(", ");
-  if (typeof value === "object") return JSON.stringify(value);
-  return String(value);
-}
 
 function kgTypeBandForce(width: number, height: number, activeTypes: string[]) {
   let nodes: FgNode[] = [];
@@ -641,100 +578,6 @@ function kgTypeBandForce(width: number, height: number, activeTypes: string[]) {
   return force;
 }
 
-function drawKgNode(node: FgNode, ctx: CanvasRenderingContext2D, globalScale: number, selectedId: string | null, denseView: boolean) {
-  const x = node.x ?? 0;
-  const y = node.y ?? 0;
-  // Object.hasOwn 而非 KG_TYPE_STYLE[node.type]:后者走原型链,node.type 为自定义类型
-  // "constructor"/"__proto__" 时命中继承属性(函数)→ style.color/glyph 变 undefined、
-  // 图谱节点渲染异常。与 kg-type-mark.tsx 的 KgTypeMark 同款防护(PR A 原型链教训)。
-  const style = Object.hasOwn(KG_TYPE_STYLE, node.type) ? KG_TYPE_STYLE[node.type] : { color: "#64748b", border: "#334155", text: node.type.slice(0, 2).toUpperCase(), glyph: "circle" };
-  const selected = node.id === selectedId;
-  const radius = 10 + Math.min(14, Math.sqrt(Math.max(1, node.val)) * 3.2) + (selected ? 2 : 0);
-
-  ctx.save();
-  ctx.beginPath();
-  if (style.glyph === "diamond") {
-    ctx.moveTo(x, y - radius);
-    ctx.lineTo(x + radius, y);
-    ctx.lineTo(x, y + radius);
-    ctx.lineTo(x - radius, y);
-    ctx.closePath();
-  } else if (style.glyph === "square") {
-    ctx.rect(x - radius, y - radius, radius * 2, radius * 2);
-  } else if (style.glyph === "triangle") {
-    ctx.moveTo(x, y - radius);
-    ctx.lineTo(x + radius * 1.08, y + radius * 0.9);
-    ctx.lineTo(x - radius * 1.08, y + radius * 0.9);
-    ctx.closePath();
-  } else {
-    ctx.arc(x, y, radius, 0, Math.PI * 2);
-  }
-  ctx.fillStyle = style.color;
-  ctx.fill();
-  ctx.lineWidth = (selected ? 3 : 1.5) / globalScale;
-  ctx.strokeStyle = selected ? "#111827" : style.border;
-  ctx.stroke();
-
-  const innerFont = Math.max(7, 9 / globalScale);
-  ctx.fillStyle = "#ffffff";
-  ctx.font = `700 ${innerFont}px Inter, ui-sans-serif, system-ui, sans-serif`;
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.fillText(style.text, x, y + (style.glyph === "triangle" ? radius * 0.12 : 0));
-
-  const shouldDrawLabel = selected || !denseView || node.degree >= 2;
-  if (!shouldDrawLabel) {
-    ctx.restore();
-    return;
-  }
-
-  const label = truncateKgLabel(node.name, denseView ? 18 : (node.type === "claim" ? 30 : 24));
-  const labelFont = Math.min(14, Math.max(9, 12 / globalScale));
-  ctx.font = `650 ${labelFont}px Inter, ui-sans-serif, system-ui, sans-serif`;
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  const labelX = x;
-  const labelY = y + radius + labelFont * 0.95;
-  const metrics = ctx.measureText(label);
-  ctx.fillStyle = selected ? "rgba(255,255,255,0.96)" : "rgba(255,255,255,0.82)";
-  ctx.fillRect(labelX - metrics.width / 2 - 3 / globalScale, labelY - labelFont * 0.75, metrics.width + 6 / globalScale, labelFont * 1.5);
-  ctx.fillStyle = selected ? "#111827" : "#27303f";
-  ctx.fillText(label, labelX, labelY);
-  ctx.restore();
-}
-
-function paintKgPointerArea(node: FgNode, color: string, ctx: CanvasRenderingContext2D) {
-  const x = node.x ?? 0;
-  const y = node.y ?? 0;
-  const radius = 18 + Math.min(16, Math.sqrt(Math.max(1, node.val)) * 3.2);
-  ctx.fillStyle = color;
-  ctx.beginPath();
-  ctx.arc(x, y, radius, 0, Math.PI * 2);
-  ctx.fill();
-}
-
-function drawKgLinkLabel(link: FgLink, ctx: CanvasRenderingContext2D, globalScale: number, denseView: boolean) {
-  if (denseView) return;
-  const source = typeof link.source === "object" ? link.source : null;
-  const target = typeof link.target === "object" ? link.target : null;
-  if (!source || !target || source.x == null || source.y == null || target.x == null || target.y == null) return;
-  const x = (source.x + target.x) / 2;
-  const y = (source.y + target.y) / 2;
-  let label = truncateKgLabel(relationLabel(link.label), 18);
-  if ((link.sourceCount ?? 1) >= 2) label += ` ×${link.sourceCount}`;
-  const fontSize = Math.min(12, Math.max(8, 10 / globalScale));
-
-  ctx.save();
-  ctx.font = `600 ${fontSize}px Inter, ui-sans-serif, system-ui, sans-serif`;
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  const width = ctx.measureText(label).width + 8 / globalScale;
-  ctx.fillStyle = "rgba(255,255,255,0.88)";
-  ctx.fillRect(x - width / 2, y - fontSize * 0.72, width, fontSize * 1.45);
-  ctx.fillStyle = "#475569";
-  ctx.fillText(label, x, y);
-  ctx.restore();
-}
 
 function cardTone(index: number): string {
   return ["tone-green", "tone-cream", "tone-lavender", "tone-rose", "tone-cream", "tone-blue"][index % 6];
@@ -7649,374 +7492,44 @@ export default function Home() {
 
 
       {kgGraph.open && (
-        <section className="kg-view" role="dialog" aria-modal="true">
-          <div className="kg-view-header">
-            <div><h2>知识图谱</h2><p>Object 级知识图谱：Concept / Claim / Formula / Procedure 同屏展示。节点名称、类型形状和边标签直接画在主视图中。</p></div>
-            <div className="kg-view-header-actions">
-              {/* 「图谱分析」= 只读诊断报告(对象构成 / 合并收敛 / 主题板块 / 板块俯瞰图 /
-                  关联稀疏的来源)。后端两个端点走 require_notebook_read,只读成员也能看,
-                  所以这里不做 admin 门控;面板本身不含任何写动作。 */}
-              <button
-                type="button"
-                className="sort-button kg-schema-button"
-                onClick={openKgAnalysis}
-                title="查看这个知识库的构成、合并收敛与主题板块分布"
-              >
-                <BarChart3 size={16} /> 图谱分析
-              </button>
-              <button
-                type="button"
-                className="sort-button kg-schema-button"
-                onClick={openKgSchemas}
-                title="查看当前笔记本采用的知识对象类型与字段"
-              >
-                <Database size={16} /> 图谱 Schema
-              </button>
-              <button className="icon-button" onClick={() => closeKgView()} title="Close">×</button>
-            </div>
-          </div>
-          <div className="kg-view-body">
-            <aside className="kg-rail">
-              <input className="kg-search" placeholder="搜索节点名称或类型…" value={kgGraph.search} onChange={(e) => handleKgSearchChange(e.target.value)} />
-              {!readOnlyWorkspace && (
-              <div className="kg-rail-section">
-                <h3>图谱处理</h3>
-                <div className="kg-action-stack">
-                  {/* codex R4 P2(B):「重新合并」与「补上关联」共用服务端同一把按笔记本
-                      单飞锁，disabled 必须认「任一忙碌位为真即忙」——否则占槽的那一件事
-                      在跑时，另一颗按钮仍可点，点了也只会撞 409。各自的进行态文案不变。 */}
-                  <button
-                    type="button"
-                    className="sort-button"
-                    disabled={kgGraph.relinking || kgGraph.rebuilding || kgGraph.buildingKg}
-                    title="为没建立关联的内容补上关联（快速、确定性，不覆盖现有图）"
-                    onClick={relinkFromKgView}
-                  >
-                    {kgGraph.relinking ? "补连中…" : "补上关联"}
-                  </button>
-                  <button
-                    type="button"
-                    className="sort-button"
-                    disabled={kgGraph.rebuilding || kgGraph.relinking || kgGraph.buildingKg}
-                    title="对现有概念重新聚类 / 跨文档合并并刷新（不重新分析来源，会先确认）"
-                    onClick={confirmRefreshUnifiedKg}
-                  >
-                    {kgGraph.rebuilding ? "合并中…" : "重新合并"}
-                  </button>
-                  <button
-                    type="button"
-                    className="sort-button kg-action-danger"
-                    disabled={kgGraph.buildingKg}
-                    title="清空现有知识图谱并重新分析全部来源（后台任务，可能数分钟）"
-                    onClick={() => { if (currentNotebookId) startKgRebuild(currentNotebookId); }}
-                  >
-                    {kgGraph.buildingKg ? "分析中…" : "全部重新分析"}
-                  </button>
-                </div>
-              </div>
-              )}
-              <div className="kg-rail-section">
-                <h3>当前视图</h3>
-                <div className="tag-row">
-                  <span className="tag">节点 {fgData.nodes.length}{!kgSearching && kgGraph.merged ? ` / ${kgGraph.merged.nodes.length}` : ""}</span>
-                  <span className="tag">边 {fgData.links.length}{!kgSearching && kgGraph.merged ? ` / ${kgGraph.merged.edges.length}` : ""}</span>
-                </div>
-                <label className="kg-range">
-                  <span>范围</span>
-                  <select value={kgGraph.rangeLimit} disabled={kgGraph.rangeBusy || kgSearching} onChange={(e) => changeKgRange(Number(e.target.value))}>
-                    {KG_RANGE_STEPS
-                      .filter((opt) => {
-                        // index 索引库（base_kg_available）用搜索+展开代替全量拉取，隐藏「全部」。
-                        if (opt.value === 0 && currentNotebook?.base_kg_available) return false;
-                        return true;
-                      })
-                      .map((opt) => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
-                  </select>
-                </label>
-                {kgSearching ? (
-                  <p className="tool-hint" style={{ margin: "4px 2px 0" }}>
-                    {kgGraph.searchBusy
-                      ? "搜索中…"
-                      : `命中 ${fgData.searchHitCount} 个节点`}
-                  </p>
-                ) : kgGraph.graph && (
-                  <p className="tool-hint" style={{ margin: "4px 2px 0" }}>
-                    {kgGraph.rangeBusy
-                      ? "加载中…"
-                      : kgGraph.graph.truncated
-                        ? `已载 ${kgGraph.graph.nodes.length} / 共 ${kgGraph.graph.total_nodes ?? kgGraph.graph.nodes.length} 节点 · 按连接度，可扩大范围`
-                        : `共 ${kgGraph.graph.total_nodes ?? kgGraph.graph.nodes.length} 节点（已全部显示）`}
-                  </p>
-                )}
-                {kgGraph.status && (
-                  <div className="tag-row" style={{ marginTop: 4 }}>
-                    {/* 纯状态展示,非交互——唯一动作入口是上方「重新合并」按钮(去重复,见其 title)。 */}
-                    <span
-                      className="tag"
-                      title="概念合并状态；点击上方「重新合并」按钮可手动刷新"
-                      style={{ color: kgGraph.status.dirty ? "var(--color-warn, #b97a00)" : undefined }}
-                    >
-                      {kgGraph.rebuilding ? "重建中…" : kgGraph.status.dirty ? "待重建" : "最新"}
-                    </span>
-                    {kgGraph.status.last_rebuild_at && (
-                      <span className="tag">上次重建 · {formatRelativeTime(kgGraph.status.last_rebuild_at)}</span>
-                    )}
-                    {scaleIndexStatus && (() => {
-                      const s = scaleIndexStatus;
-                      const v = describeScaleIndex(s);
-                      const clickable = v.primaryOp !== null && !readOnlyWorkspace;
-                      const color = v.tone === "warn" ? "var(--color-warn, #b97a00)"
-                        : v.tone === "ok" ? "var(--color-ok, #1a7f5a)" : undefined;
-                      const label = `检索索引：${v.stateLabel}${v.state === "indexed" ? ` · ${s.n_nodes} 节点` : ""}`;
-                      return (
-                        <span
-                          className="tag"
-                          role={clickable ? "button" : undefined}
-                          tabIndex={clickable ? 0 : undefined}
-                          title={clickable
-                            ? (v.primaryOp === "update" ? "点击更新检索索引（会先确认）" : v.primaryOp === "rebuild" ? "点击全量重建检索索引（会先确认）" : "点击构建检索索引（会先确认）")
-                            : v.state === "queued" ? queuedScheduleHint(s, new Date())
-                            : (s.eligible ? "" : "内容较少，暂不需要检索索引（直接搜索已够快）")}
-                          onClick={clickable ? () => runScaleIndexOp(v.primaryOp!) : undefined}
-                          onKeyDown={clickable ? ((e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); runScaleIndexOp(v.primaryOp!); } }) : undefined}
-                          style={{ cursor: clickable ? "pointer" : "default", color }}
-                        >
-                          {label}
-                          {s.exists && !s.delta_searchable && (s.unindexed_sources ?? 0) > 0 && (
-                            <span title={UNINDEXED_SCOPE_HINT}>
-                              {` · ${s.unindexed_sources} 源待索引`}
-                            </span>
-                          )}
-                        </span>
-                      );
-                    })()}
-                  </div>
-                )}
-              </div>
-              <div className="kg-rail-section">
-                <h3>类型过滤</h3>
-                <div className="kg-type-filter">
-                  <button
-                    aria-pressed={kgGraph.selectedTypes.length === 0}
-                    className={kgGraph.selectedTypes.length === 0 ? "active" : ""}
-                    onClick={kgWorkspace.clearTypes}
-                  >
-                    <span className="kg-shape-stack">
-                      {kgTypeCounts.slice(0, 4).map((item) => <KgTypeMark key={item.type} type={item.type} />)}
-                    </span>
-                    <strong>全部</strong>
-                    <em>{kgGraph.graph?.nodes.length ?? 0}</em>
-                  </button>
-                  {kgTypeCounts.map((item) => (
-                    <button
-                      aria-pressed={kgGraph.selectedTypes.includes(item.type)}
-                      className={kgGraph.selectedTypes.includes(item.type) ? "active" : ""}
-                      key={item.type}
-                      onClick={() => toggleKgType(item.type)}
-                    >
-                      <KgTypeMark type={item.type} />
-                      <strong>{item.label}</strong>
-                      <em>{item.count}</em>
-                    </button>
-                  ))}
-                </div>
-              </div>
-              <div className="kg-rail-section">
-                <h3>待确认合并 ({kgGraph.pendingMerges.length})</h3>
-                {!readOnlyWorkspace && (
-                  <>
-                    <button className="ghost-button" onClick={reviewPendingMerges} disabled={!kgGraph.pendingMerges.length || kgGraph.reviewBusy}>
-                      {kgGraph.reviewBusy ? "判重中…" : "自动判重"}
-                    </button>
-                    <button
-                      className="ghost-button"
-                      onClick={reviewAllMerges}
-                      disabled={!kgGraph.pendingMerges.length || kgGraph.reviewAllStarting || kgGraph.reviewAllJob?.status === "running"}
-                    >
-                      {kgGraph.reviewAllJob?.status === "running"
-                        ? `全部判重中… ${kgGraph.reviewAllJob.done}/${kgGraph.reviewAllJob.total}`
-                        : kgGraph.reviewAllStarting
-                          ? "全部判重中…"
-                          : "全部自动判重"}
-                    </button>
-                  </>
-                )}
-                {kgGraph.pendingMerges.length === 0 ? <p className="tool-hint">无</p> : kgGraph.pendingMerges.map((m) => (
-                  <div className="kg-merge-row" key={m.id}>
-                    <span>{m.canonical_a.replace(/^K-/, "")} ↔ {m.canonical_b.replace(/^K-/, "")} <em>({m.score.toFixed(2)})</em></span>
-                    {!readOnlyWorkspace && <span className="kg-merge-actions">
-                      {/* 确认会连带跑一次全量概念合并重建；重建完成前锁住整列，避免新决定
-                          与正在发布的旧候选代次竞态。拒绝不重建，但提交期间同样防重复点。 */}
-                      <button disabled={kgGraph.decidingMerge !== null || kgGraph.rebuilding} onClick={() => decideMerge(m, true)}>
-                        {kgGraph.decidingMerge?.id === m.id && kgGraph.decidingMerge.confirm ? "合并中…" : "合并"}
-                      </button>
-                      <button disabled={kgGraph.decidingMerge !== null || kgGraph.rebuilding} onClick={() => decideMerge(m, false)}>
-                        {kgGraph.decidingMerge?.id === m.id && !kgGraph.decidingMerge.confirm ? "分开中…" : "拒绝"}
-                      </button>
-                    </span>}
-                  </div>
-                ))}
-              </div>
-            </aside>
-            <div className="kg-canvas" ref={kgCanvasRef}>
-              {kgCanvas === "loading" ? (
-                <p className="tool-hint kg-canvas-empty">加载中…</p>
-              ) : kgCanvas === "building" ? (
-                <div className="tool-hint kg-canvas-empty">
-                  <strong>图谱索引构建中，首次构建大库可能需要几分钟…</strong>
-                  <p style={{ marginTop: 6 }}>建成后会自动刷新为完整图谱</p>
-                </div>
-              ) : kgCanvas === "unavailable" ? (
-                <div className="tool-hint kg-canvas-empty">
-                  <strong>库规模较大，图谱预览将在下一次索引构建后可用</strong>
-                  <p style={{ marginTop: 6 }}>这一次打开不会在后台生成预览；其余功能不受影响</p>
-                </div>
-              ) : kgCanvas === "empty" ? (
-                <p className="tool-hint kg-canvas-empty">没有匹配的节点。清空搜索后可查看完整图谱。</p>
-              ) : (
-                <ForceGraph2D
-                  ref={kgGraphRef}
-                  graphData={fgData}
-                  nodeLabel={(n: any) => `${n.name} (${n.type})`}
-                  nodeVal={(n: any) => n.val}
-                  width={kgSize.width}
-                  height={kgSize.height}
-                  linkDirectionalArrowLength={7}
-                  linkDirectionalArrowRelPos={1}
-                  linkColor={() => "rgba(91, 105, 130, 0.42)"}
-                  linkWidth={(link: any) => 1.35 + Math.min(((link.sourceCount ?? 1) - 1), 4) * 0.5}
-                  linkLabel={(link: any) => {
-                    const base = relationLabel(link.label);
-                    return (link.sourceCount ?? 1) >= 2 ? `${base} · ${link.sourceCount} 源支持` : base;
-                  }}
-                  linkCanvasObjectMode={() => "after"}
-                  linkCanvasObject={(link: any, ctx: CanvasRenderingContext2D, globalScale: number) => drawKgLinkLabel(link, ctx, globalScale, kgDenseView)}
-                  nodeCanvasObject={(node: any, ctx: CanvasRenderingContext2D, globalScale: number) => drawKgNode(node, ctx, globalScale, kgGraph.selectedNodeId, kgDenseView)}
-                  nodePointerAreaPaint={(node: any, color: string, ctx: CanvasRenderingContext2D) => paintKgPointerArea(node, color, ctx)}
-                  d3VelocityDecay={0.32}
-                  onEngineStop={() => fitKgGraphView(350)}
-                  onNodeClick={(n: any) => selectKgNode(n.id)}
-                />
-              )}
-              <div className="kg-legend">
-                {Object.entries(KG_TYPE_STYLE).map(([type]) => (
-                  <span key={type}><KgTypeMark type={type} />{kgTypeLabel(type)}</span>
-                ))}
-              </div>
-            </div>
-            <aside className="kg-detail" ref={kgDetailRef}>
-              <div className="kg-node-overview">
-                <div className="kg-detail-heading">
-                  <h3>节点总览</h3>
-                  <span>{kgNodeGroups.reduce((sum, group) => sum + group.nodes.length, 0)} 个</span>
-                </div>
-                {kgNodeGroups.length === 0 ? <p className="tool-hint">暂无节点。</p> : kgNodeGroups.map((group) => (
-                  <section className="kg-type-group" key={group.type}>
-                    <div className="kg-type-header">
-                      <span><KgTypeMark type={group.type} />{group.label}</span>
-                      <strong>{group.nodes.length}</strong>
-                    </div>
-                    <div className="kg-node-list">
-                      {group.nodes.map((node) => (
-                        <button
-                          className={`kg-node-button ${kgGraph.selectedNodeId === node.id ? "active" : ""}`}
-                          key={node.id}
-                          onClick={() => selectKgNode(node.id).catch(reportError)}
-                        >
-                          <span>{truncateKgLabel(node.name, 58)}</span>
-                          <em>{node.degree}</em>
-                        </button>
-                      ))}
-                    </div>
-                  </section>
-                ))}
-              </div>
-
-              <div className="kg-selected-detail">
-                {!selectedKgNode ? <p className="tool-hint">点击图中节点或总览列表查看详情。</p> : (
-                  <div className="stack">
-                    <h3><LatexText text={kgNodeName(selectedKgNode)} isFormula={selectedKgNode.object_type === "formula"} /></h3>
-                    <div className="tag-row">
-                      <span className="tag kg-selected-type"><KgTypeMark type={selectedKgNode.object_type} />{kgTypeLabel(selectedKgNode.object_type)}</span>
-                      <span className="tag">关系 {selectedKgEdges.length}</span>
-                    </div>
-                    {Object.entries(selectedKgNode.payload)
-                      .filter(([key, value]) => !["name", "section_path"].includes(key) && Boolean(kgPayloadValue(value)))
-                      .map(([key, value]) => (
-                        <p key={key}><strong>{fieldLabel(key)}：</strong>{kgPayloadValue(value)}</p>
-                      ))}
-                    {selectedKgEdges.length > 0 && (
-                      <>
-                        <h4>相邻关系</h4>
-                        {selectedKgEdges.slice(0, 24).map((edge, index) => (
-                          <div className="kg-relation-row" key={`${edge.source_object_id}-${edge.target_object_id}-${index}`}>
-                            <span className="kg-relation-node"><KgTypeMark type={edge.sourceType} /><span>{truncateKgLabel(edge.sourceName, 28)}</span></span>
-                            {edge.source_count && edge.source_count >= 2 ? (
-                              <span className="kg-relation-mid">
-                                <strong>{relationLabel(edge.edge_type)}</strong>
-                                <span className="tag">×{edge.source_count}源</span>
-                              </span>
-                            ) : (
-                              <strong>{relationLabel(edge.edge_type)}</strong>
-                            )}
-                            <span className="kg-relation-node"><KgTypeMark type={edge.targetType} /><span>{truncateKgLabel(edge.targetName, 28)}</span></span>
-                          </div>
-                        ))}
-                      </>
-                    )}
-                    {kgGraph.nodeContext?.definition && (<><h4>定义</h4><p className="kg-text-card">{kgGraph.nodeContext.definition}</p></>)}
-                    {kgGraph.nodeContext?.object_type === "procedure" && kgGraph.nodeContext.steps && kgGraph.nodeContext.steps.length > 0 && (
-                      <><h4>流程步骤</h4>{kgGraph.nodeContext.steps.map((s, i) => (
-                        <KgProcedureStepCard step={s} index={i} key={`${s.name}-${i}`} />
-                      ))}</>
-                    )}
-                    {kgGraph.conceptDetail && (
-                      <>
-                        <h4>出处</h4>
-                        <KgEvidenceList evidence={kgGraph.conceptDetail.evidence} resetKey={`${kgGraph.conceptDetail.canonical_id}:${kgGraph.conceptDetailGeneration}`} />
-                        <h4>相关节点</h4>
-                        {relatedNodeGroups.length === 0 ? <p className="tool-hint">无</p> : relatedNodeGroups.map((group) => (
-                          <section className="kg-related-group" key={group.type}>
-                            <div className="kg-type-header">
-                              <span><KgTypeMark type={group.type} />{group.label}</span>
-                              <strong>{group.nodes.length}</strong>
-                            </div>
-                            <div className="kg-related-list">
-                              {group.nodes.map((node) => (
-                                <div className="kg-related-node" key={node.id}>
-                                  <span><KgTypeMark type={node.object_type} /><LatexText text={String(node.payload.name ?? "")} isFormula={node.object_type === "formula"} /></span>
-                                  {node.edge_type ? <em>{relationLabel(node.edge_type)}</em> : null}
-                                </div>
-                              ))}
-                            </div>
-                          </section>
-                        ))}
-                        {kgGraph.conceptDetail.next_cursor && (
-                          <button
-                            type="button"
-                            className="kg-load-more-members"
-                            disabled={kgGraph.conceptMembersLoadingMore}
-                            onClick={() => kgWorkspace.loadMoreConceptMembers().catch(reportError)}
-                          >
-                            {kgGraph.conceptMembersLoadingMore
-                              ? "加载中…"
-                              : kgGraph.conceptMembersLoadError
-                                ? "加载失败，点击重试"
-                                : `加载更多成员（已加载 ${kgGraph.conceptDetail.members.length}/${kgGraph.conceptDetail.member_total}）`}
-                          </button>
-                        )}
-                      </>
-                    )}
-                    {!kgGraph.conceptDetail && kgGraph.nodeContext && (kgGraph.nodeContext.occurrences ?? []).length > 0 && (
-                      <><h4>出处</h4>{(kgGraph.nodeContext.occurrences ?? []).slice(0, 10).map((o, i) => (
-                        <KgOccurrenceCard occurrence={o} index={i} key={`${o.source_title || o.source_id}-${i}`} />
-                      ))}</>
-                    )}
-                  </div>
-                )}
-              </div>
-            </aside>
-          </div>
+        <KgGraphView
+          kgGraph={kgGraph}
+          fgData={fgData}
+          kgCanvas={kgCanvas}
+          kgSearching={kgSearching}
+          kgDenseView={kgDenseView}
+          kgSize={kgSize}
+          kgTypeCounts={kgTypeCounts}
+          kgNodeGroups={kgNodeGroups}
+          selectedKgNode={selectedKgNode}
+          selectedKgEdges={selectedKgEdges}
+          relatedNodeGroups={relatedNodeGroups}
+          kgCanvasRef={kgCanvasRef}
+          kgGraphRef={kgGraphRef}
+          kgDetailRef={kgDetailRef}
+          readOnlyWorkspace={readOnlyWorkspace}
+          currentNotebookId={currentNotebookId}
+          baseKgAvailable={Boolean(currentNotebook?.base_kg_available)}
+          scaleIndexStatus={scaleIndexStatus}
+          openKgAnalysis={openKgAnalysis}
+          openKgSchemas={openKgSchemas}
+          closeKgView={closeKgView}
+          relinkFromKgView={relinkFromKgView}
+          confirmRefreshUnifiedKg={confirmRefreshUnifiedKg}
+          startKgRebuild={startKgRebuild}
+          handleKgSearchChange={handleKgSearchChange}
+          changeKgRange={changeKgRange}
+          toggleKgType={toggleKgType}
+          reviewPendingMerges={reviewPendingMerges}
+          reviewAllMerges={reviewAllMerges}
+          decideMerge={decideMerge}
+          fitKgGraphView={fitKgGraphView}
+          runScaleIndexOp={runScaleIndexOp}
+          onClearTypes={kgWorkspace.clearTypes}
+          onLoadMoreConceptMembers={() => kgWorkspace.loadMoreConceptMembers().catch(reportError)}
+          onSelectCanvasNode={(nodeId) => selectKgNode(nodeId)}
+          onSelectOverviewNode={(nodeId) => selectKgNode(nodeId).catch(reportError)}
+        >
           {rootModals.view("kg-analysis").open && kgGraph.analysisOpen && currentNotebookId && (
             <KgAnalysisView
               notebookId={currentNotebookId}
@@ -8029,7 +7542,7 @@ export default function Home() {
               onClose={closeKgAnalysis}
             />
           )}
-        </section>
+        </KgGraphView>
       )}
 
       {knowhowNavigation.isOpen && currentNotebookId && (
@@ -8278,49 +7791,6 @@ function EvidenceLine({ evidence }: { evidence: Evidence[] }) {
   );
 }
 
-function KgOccurrenceCard({ occurrence, index }: { occurrence: KgOccurrence; index: number }) {
-  const sourceLabel = occurrence.source_title || occurrence.source_id || "未知来源";
-  const meta = [
-    occurrence.location_label,
-    label(ELEMENT_TYPE, occurrence.element_type ?? "", ""),
-    kgConfidenceLabel(occurrence.confidence)
-  ].filter(Boolean);
-
-  return (
-    <article className="kg-evidence-card">
-      <div className="kg-evidence-header">
-        <span className="kg-evidence-index">{index + 1}</span>
-        <div className="kg-evidence-source">
-          <strong title={sourceLabel}>{sourceLabel}</strong>
-          {meta.length > 0 && (
-            <div className="kg-evidence-meta">
-              {meta.map((item) => <span key={item}>{item}</span>)}
-            </div>
-          )}
-        </div>
-      </div>
-      <KgEvidenceBody
-        elementType={occurrence.element_type}
-        text={occurrence.element_text || occurrence.quoted_span}
-      />
-    </article>
-  );
-}
-
-function KgProcedureStepCard({ step, index }: { step: KgProcedureStep; index: number }) {
-  return (
-    <article className="kg-evidence-card kg-step-card">
-      <div className="kg-evidence-header">
-        <span className="kg-evidence-index">{index + 1}</span>
-        <div className="kg-evidence-source">
-          <strong>{step.name || `步骤 ${index + 1}`}</strong>
-          <div className="kg-evidence-meta"><span>流程步骤</span></div>
-        </div>
-      </div>
-      <KgEvidenceBody text={step.element_text} />
-    </article>
-  );
-}
 
 
 function knowledgeHeadline(_kind: KnowledgeKind, item: KnowledgeItem): string {
@@ -8328,33 +7798,6 @@ function knowledgeHeadline(_kind: KnowledgeKind, item: KnowledgeItem): string {
   return item.title || item.id;
 }
 
-// Field-key labels for the generic (case/claim/finding/concept/...) renderer.
-const FIELD_LABELS: Record<string, string> = {
-  statement: "陈述", claim_type: "类型", measurement_condition: "测量条件",
-  limitation: "局限", metric: "指标", condition: "条件", dataset: "数据集",
-  term: "术语", definition: "定义", why_it_matters: "意义", related_concepts: "相关概念",
-  rationale: "依据", applies_to: "适用范围", problem: "问题", approach: "做法",
-  result: "结果", symptom: "症状", context: "背景", root_cause: "根因",
-  resolution: "解决", lesson_learned: "经验", required_evidence: "所需证据",
-  question: "检查项", related_claims: "相关论断",
-  related_formulas: "相关公式", related_procedures: "相关过程"
-};
-
-/**
- * 知识对象字段名的界面名。未命中时**刻意**原样显示 key —— 与 relationLabel 的中性
- * 兜底相反,理由是 object schema 允许用户自建类型与字段(「图谱 Schema」里的新增
- * 类型 / 归纳候选),此时 key 就是用户自己起的名字,原样显示才诚实;换成中性词反而
- * 把用户唯一能辨认这个字段的信息抹掉。故它不是「兜底即原值」那个 bug,而是一条经
- * 评审的透出路径,写法与 kg-type-mark.tsx 透出自定义 object_type 保持一致。
- *
- * 用 Object.hasOwn 而非 `FIELD_LABELS[k] ?? k`:后者走原型链,key 撞上
- * "constructor"/"toString"/"__proto__" 时会返回函数/对象,渲染进 JSX 就是
- * "Objects are not valid as a React child" 白屏(vocabulary.ts 的 label() 记着同一个
- * 坑)。字段名由用户自定义,撞上这些词完全可能。
- */
-function fieldLabel(key: string): string {
-  return Object.hasOwn(FIELD_LABELS, key) ? FIELD_LABELS[key] : key;
-}
 
 function genericBody(item: KnowledgeItem) {
   const fields = (item.fields ?? []).filter((f) => f.value && f.value !== item.headline);

@@ -60,8 +60,9 @@
 
 ### 架构与清理
 
-- [ ] **架构渐进整改阶段 5：前端 workspace 状态拆分**。`frontend/app/page.tsx` 仍约 8900 行。
-      其余阶段（Repository composition、application boundary、FastAPI lifespan）已交付。
+- [ ] **前端 `page.tsx` 继续减负（阶段 5 三片已交付后的后续）**：三片合入后 `frontend/app/page.tsx`
+      约 8000 行，剩余大块为问答区、知识库浏览器与工作区壳；按同一纪律（零行为变化、守卫重指向、
+      组件测试）再分片，有需要时立项。
 
 ### Ask / Deep Report
 

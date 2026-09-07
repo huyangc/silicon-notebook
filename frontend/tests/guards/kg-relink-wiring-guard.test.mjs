@@ -7,6 +7,8 @@ import { findFunction, parseModule } from "../../test-support/semantic-source.mj
 // 拆分后 relink 追踪落在 KG 图谱领域 owner 里（`use-kg-workspace.ts` 只剩组合层）。
 const hook = await parseModule("use-kg-graph.ts");
 const page = await parseModule("page.tsx");
+// 知识图谱视图的 JSX 搬进了自己的模块（PR-5 分片 3）；委派函数仍在 page.tsx。
+const kgGraphView = await parseModule("kg-graph-view.tsx");
 const source = hook.getFullText();
 
 function body(name) {
@@ -106,8 +108,9 @@ test("owner recovery adopts a server-running relink under the actor+notebook key
 });
 
 test("presentation delegates relink to the hook and disables it during either maintenance kind", () => {
-  const text = page.getFullText();
+  // 判据一条不减，只是分居两个模块：委派函数 relinkFromKgView 留在 page.tsx，
+  // 「补上关联」按钮的 disabled 随知识图谱视图 JSX 搬到了 kg-graph-view.tsx。
   assert.match(body("startRelink"), /policyRef\.current\.canWriteKg/);
-  assert.match(text, /async function relinkFromKgView\(\)[\s\S]{0,120}kgWorkspace\.startRelink\(\)/);
-  assert.match(text, /disabled=\{kgGraph\.relinking \|\| kgGraph\.rebuilding \|\| kgGraph\.buildingKg\}/);
+  assert.match(page.getFullText(), /async function relinkFromKgView\(\)[\s\S]{0,120}kgWorkspace\.startRelink\(\)/);
+  assert.match(kgGraphView.getFullText(), /disabled=\{kgGraph\.relinking \|\| kgGraph\.rebuilding \|\| kgGraph\.buildingKg\}/);
 });
