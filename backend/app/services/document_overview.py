@@ -36,6 +36,14 @@ def overview_intent(question: str) -> OverviewIntent | None:
         return None
     if not (_OVERVIEW.search(q) or (_LIST.search(q) and _DOCUMENT.search(q))):
         return None
+    # One-source preparation must never silently drop another named target.
+    # Preserve the ordinary multi-query lane for explicit multi-document asks.
+    if len(_QUOTED.findall(q)) > 1:
+        return None
+    # "Summarize the methods in this paper" asks for a topic, not a whole
+    # document. The existing relevance path retains that topic as its query.
+    if re.search(r"\b(?:in|from)\s+(?:this|that|the)\s+(?:document|paper|article|file)\b", q, re.I):
+        return None
     quoted = _QUOTED.search(q)
     is_document_title = quoted and (quoted[0].startswith("《") or _DOCUMENT.search(q))
     topic_probe = _QUOTED.sub("文档", q) if is_document_title else q
