@@ -59,8 +59,10 @@ REFLECT_ASPECT_MAX_COUNT = 16
 #: 一个可伪造的自由文本槽位再开一条路。
 _ASPECT_ID_PREFIX = "a"
 
-#: 方面原文来自用户契约,**不截长**(§7.1「用户内容不得静默截掉」)。折叠仍然
-#: 要做:换行/控制字符/字段分隔符会在渲染出来的清单里伪造出一整行。
+#: 方面原文来自用户契约,**不截长**(§7.1「用户内容不得静默截掉」)。折叠(换行/
+#: 控制字符/字段分隔符会在渲染出来的清单里伪造出一整行)只在**渲染时**做,见
+#: `_fold`:账本与快照里存的是用户审阅过的那份原文,分隔符替换属于某一种渲染的
+#: 自我保护,不该改写下游(披露、诊断、以后的结构化输出)读到的用户内容。
 #: `_clip` 只在超过上限时才截,给一个到不了的上限就是"只折叠不截长"。
 _NO_TRUNCATION = 1 << 30
 
@@ -84,8 +86,18 @@ ASPECT_BLOCK_NOTE = (
 
 
 def _text(value: object) -> str:
-    """用户契约里的一段原文 → 单行、无控制字符、分隔符已归一,**不截长**。"""
-    return _clip(str(value or ""), _NO_TRUNCATION)
+    """用户契约里的一段原文。只去两端空白,**内容一个字都不动**。"""
+    return str(value or "").strip()
+
+
+def _fold(text: str) -> str:
+    """渲染态的一行:折成单行、去控制字符、归一分隔符,**不截长**。
+
+    只在 `render_aspect_block` 里调用。折叠是那一个渲染格式(`a | b | c` 的行)
+    的自我保护,不是用户内容的规范化——存进快照的仍是原文,所以主题里真的带着
+    `|` 或 `;` 的用户不会在别处看到自己的问题被改写成 `，`。
+    """
+    return _clip(text, _NO_TRUNCATION)
 
 
 def _topic_text(row: object) -> str:
@@ -373,7 +385,14 @@ def render_aspect_block(ledger: AspectLedger) -> str:
     不是用户确认过的必答清单。
 
     每一行:id | 状态 | 已绑定证据数 | 方面原文 | 缺口。原文与约束是用户内容,
-    只折叠不截长;`gap` 是模型文本,按模型文本的上限截。
+    渲染时只折叠(`_fold`)不截长;`gap` 是模型文本,写进账本时就已按模型文本的
+    上限截过。
+
+    ⚠ **开闸前成本表项(不改行为)**:这个块**每一轮逐字重渲染**并整块进 prompt,
+    没有增量。契约上界 ≈ 20KB/轮:16 个方面 × (方面原文 ≤ 冻结契约的单条上限
+    + `gap` ≤ 240 字符 + 固定前后缀),再加约束行。它不受 `state_chars` 约束
+    (见上),所以这份成本是**确定发生**的,不会被观察账那边的压缩吸收——放量
+    评估时按「轮数 × 20KB」计入每 run 的输入 token,与 T3 的证据卡预算并列。
     """
     rows = ledger.snapshot()
     if not rows:
@@ -387,7 +406,7 @@ def render_aspect_block(ledger: AspectLedger) -> str:
             f"- {row.aspect_id}",
             _STATUS_LABELS.get(row.status, row.status),
             f"已绑定证据 {len(row.evidence_keys)} 条",
-            row.question,
+            _fold(row.question),
         ]
         if row.gap:
             parts.append(f"缺口: {row.gap}")
@@ -397,7 +416,8 @@ def render_aspect_block(ledger: AspectLedger) -> str:
             parts.append(f"服务端降级: {row.demotion}")
         lines.append(" | ".join(parts))
     if ledger.constraints:
-        lines.append("约束条件: " + "、".join(ledger.constraints))
+        lines.append(
+            "约束条件: " + "、".join(_fold(item) for item in ledger.constraints))
     lines.append(ASPECT_BLOCK_NOTE)
     return "\n".join(lines)
 
@@ -407,19 +427,27 @@ def evidence_bound_keys(
 ) -> List[str]:
     """证据卡第一档的键序(§6.2)。
 
-    = 「各方面已绑定的键(按方面轮转)」+「大纲绑定里还没被带上的键」。两者都是
-    「当前已绑定且存活的证据的代表」,合起来才是第一档;顺序上方面在前,因为
-    大纲的键上一轮模型刚看过整份结构,而方面代表是它自己说"这条撑住了这一项"
-    的那些。
+    = 「大纲绑定的键」+「各方面已绑定、还没被带上的键(按方面轮转)」。两者都是
+    「当前已绑定且存活的证据的代表」,合起来才是第一档。
+
+    **大纲在前、方面补位**:第一档在紧预算下会被截,谁排在后面谁先被挤出去。
+    大纲的键是上一轮模型自己写进结构里的绑定,一旦从卡上消失,下一轮它就只能
+    在"这条证据还在不在"上瞎猜(而 `update_outline` 的证据键校验按池子算数);
+    方面代表则可以从方面块的「已绑定证据 N 条」看到还在。反过来排(方面在前)
+    的代价正是紧预算下挤掉上一轮刚绑好的大纲证据。
 
     T3 的留底规则(`_FRESH_RESERVE_RATIO`)一个字都不变:它切的是第一档**整体**
     的份额,与这一档里怎么排序无关。
     """
-    keys = list(ledger.bound_keys()) if ledger is not None else []
-    seen = set(keys)
+    keys: List[str] = []
+    seen: Set[str] = set()
     for key in outline_keys:
         key = str(key)
         if key and key not in seen:
+            seen.add(key)
+            keys.append(key)
+    for key in (ledger.bound_keys() if ledger is not None else ()):
+        if key not in seen:
             seen.add(key)
             keys.append(key)
     return keys
@@ -486,24 +514,53 @@ def _terminal_marker(trace: Sequence[object]) -> Optional[Tuple[str, bool, bool]
 _EXECUTED_STATUSES = (STATUS_SUCCESS, STATUS_EMPTY, STATUS_PARTIAL)
 
 
+def _observation_status(row: object) -> str:
+    """一条观察的状态,零 I/O 的那几档折成空串(它们不是一次执行)。"""
+    status = str(getattr(row, "status", "") or "")
+    if status == STATUS_FAILED or status in _EXECUTED_STATUSES:
+        return status
+    return ""
+
+
 def _retrieval_degraded(observations: Sequence[object]) -> bool:
-    """有没有哪条通道**最后一次执行是炸的**(§7.2)。
+    """这次 run 的**最后一次真实 I/O 执行**是不是炸的(§7.2)。
 
-    判据按**通道**(action_id)而不是整条时间线:「单个可恢复工具失败若随后继续
-    完成检索,只作为 observation 留存」说的是**那个工具**又跑通了,不是别的通道
-    跑通了。按时间线取最后一条会让"原文库整个读不出来、于是一段正文都没有"被
-    紧随其后的一次空手元素检索(执行成功、返回 0 条)盖掉——而那两件事该导致的
-    披露正好相反。
+    判据按**时间线**取最后一次执行,而不是按通道取"有没有哪条通道最后一次是
+    炸的":§7.2 写的是「单个可恢复工具失败若随后继续完成检索,只作为 observation
+    留存,不强制把整个 run 标为 retrieval_degraded」——**继续完成检索**说的是这次
+    run 后来还是查成了,没有限定必须是同一条通道。按通道判会把「KG 播种炸了 →
+    换 `search_chunks` 查全 → 模型自报充分」误标成整次降级,而那次 run 的证据
+    收集其实正常完成了。
 
-    `empty` 算恢复:通道是通的、这个问法在库里真的没有内容,与"没查成"严格
+    没被恢复的那条通道不因此消失:它另走 `_unrecovered_channels`,进
+    `RetrievalTermination.unrecovered_channels` 供披露,不占 `reason`。两个口径
+    分开,正是为了不让"哪条路没走通"与"这次检索有没有正常收尾"互相冒充。
+
+    `empty` 算一次执行:通道是通的、这个问法在库里真的没有内容,与"没查成"严格
     区分(这也是 `note_failed` 侧信道存在的全部理由)。
+    """
+    for row in reversed(list(observations)):
+        status = _observation_status(row)
+        if status:
+            return status == STATUS_FAILED
+    return False
+
+
+def _unrecovered_channels(observations: Sequence[object]) -> Tuple[str, ...]:
+    """最后一次执行仍是 `failed` 的那些通道(action_id),**按首次出现顺序**。
+
+    纯披露:`reason` 不读它。一条通道在这里出现,只说明"这条路这次 run 没走通",
+    不说明这次检索失败了——`search_elements` 全程炸掉、而 `search_chunks` 查回了
+    答案所需的全部原文,是一次正常完成的 run 加一条要如实说出去的通道故障。
     """
     last: dict = {}
     for row in observations:
-        status = str(getattr(row, "status", "") or "")
-        if status == STATUS_FAILED or status in _EXECUTED_STATUSES:
+        status = _observation_status(row)
+        if status:
             last[str(getattr(row, "action_id", "") or "")] = status
-    return any(status == STATUS_FAILED for status in last.values())
+    return tuple(
+        action_id for action_id, status in last.items()
+        if status == STATUS_FAILED)
 
 
 def classify_termination(
@@ -516,9 +573,15 @@ def classify_termination(
 
     * `model_degraded` 排第一:那一轮根本没有模型决定可言,把它读成任何一种
       "模型说的"都是谎报。
-    * `retrieval_degraded` 排第二,**会盖过模型自报的充分**:证据收集没有正常
-      完成这件事不因为模型说"够了"而消失。模型怎么说的仍然保留在
-      `model_assessed_sufficient` 里,两个口径不合并。
+    * `retrieval_degraded` 排第二,但**只在模型没有正常结束这次 run 时**成立:
+      判据是「没有 model_end 标记 且 最后一次真实 I/O 执行是 failed」。模型走到
+      answer/sufficient 那一步意味着它看着已经到手的证据决定停下,这时把 run
+      标成"检索通道异常收尾"是把一次恢复了的故障说成整次失败(§7.2 的「单个
+      可恢复工具失败若随后继续完成检索…不强制标 degraded」)。没被恢复的通道
+      照样如实披露,走 `unrecovered_channels`,不占 `reason`。
+    * 反过来,最后一次执行炸掉之后走到 stale/预算收尾的,`retrieval_degraded`
+      仍然盖过 `stale`/`step_budget`:那两个原因说"没进展/没步数了",而真正
+      发生的是"最后一次去查的时候查不动了"。
     * `step_budget` 排最后,而且只在 trace 里**一个终止标记都没有**时才出现
       ——不在最终步骤号等于 max_steps 时覆盖同一轮模型已经作出的正常结束决定。
 
@@ -531,7 +594,7 @@ def classify_termination(
         TERMINATION_STEP_BUDGET, False, False)
     if degraded:
         reason = TERMINATION_MODEL_DEGRADED
-    elif _retrieval_degraded(observations):
+    elif kind != "model_end" and _retrieval_degraded(observations):
         reason = TERMINATION_RETRIEVAL_DEGRADED
     elif kind == "model_end":
         # 「自报充分与方面记录矛盾」与「模型结束但仍有未解决」在 §7.2 是同一个
@@ -546,5 +609,6 @@ def classify_termination(
         reason=reason,
         unresolved_aspect_ids=unresolved,
         model_assessed_sufficient=model_sufficient and not degraded,
+        unrecovered_channels=_unrecovered_channels(observations),
         aspects=ledger.snapshot(),
     )

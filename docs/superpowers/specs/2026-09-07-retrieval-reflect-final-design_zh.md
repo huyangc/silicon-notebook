@@ -205,6 +205,8 @@ system/user 拆分可能改善公共前缀复用，但不新增 provider 缓存�
 
 服务端只确认：方面 ID 合法、证据键在池内且已展示、集合/来源身份不能冒充细粒度证据。非法键剔除后没有支撑的项不得保持 supported。模型对语义支撑的判断始终标为 `model_assessed`；不新增 grounded 分数，不改变 evidence_level 阈值。
 
+取舍记录（T4-A 实施时定，写下来免得下一次又被当成遗漏）：**约束（constraints）不各自成为一个方面**，只随方面块一起渲染。第一行写的是「从 mandatory_topics 和相关约束生成稳定方面 ID」，实现时按前者建方面、把后者作为整块的约束行带出去。理由是约束是**答案的谓词**（「只看 7nm」「只用 2024 年以后的材料」），不是可以被证据独立支撑的检索对象：给它一个能被标成 supported 的 id，模型无从为它引证据键，于是它永远停在 unknown，`unresolved_aspect_ids` 恒非空，`model_sufficient` 结构上不可达，而这两件事下游都当真。约束仍然进 prompt（每轮渲染在方面块末尾），只是不参与「有没有支撑」这本账。
+
 来源/元素完整枚举的 complete 继续只由确定性执行器证明。方面全 supported 不能据此声称枚举了全部物理集合；反之完整目录也不能证明每篇文章已被分析。
 
 私有 Memory 的外层召回、所选来源图和 Report run 后补取当前发生在这一循环之外。首期不为它们增加检索器读取座位；终态模型评估明确只覆盖当时可见候选，不能据其否定后续新材料，也不能自动把后续候选记为已经反思验证。
@@ -226,6 +228,8 @@ system/user 拆分可能改善公共前缀复用，但不新增 provider 缓存�
 取消和不可恢复阶段错误仍是异常/取消，不落入“成功生成 termination”以掩盖失败。收尾前的 outline overflow 修复沿用原规则；修复不能把既有 stale/预算原因改成充分。
 
 单个可恢复工具失败若随后继续完成检索，只作为 observation 留存，不强制把整个 run 标为 retrieval_degraded。异常终止优先记对应 degraded 原因；否则保留真实首先触发的终止条件，不在最终步骤号等于 max_steps 时覆盖同轮模型已经作出的正常结束决定。
+
+`retrieval_degraded` 的精确判据（T4-A 复审裁决）：**这次 run 没有模型正常结束标记（trace 里第一个终止标记不是 model_end），且时间线上最后一次真实 I/O 执行的观察是 `failed`**。两个条件都要。按「任一通道最后一次执行 failed」判会把跨通道恢复（KG 播种炸掉 → 模型改走 search_chunks 查全 → 自报充分）误标成整次降级，而上一段说的「继续完成检索」并不要求是同一条通道；反过来，最后一次去查时查不动、随后走 stale/预算收尾的，`retrieval_degraded` 仍然盖过 stale/step_budget。没有被恢复的通道另记 `RetrievalTermination.unrecovered_channels`（元组，口径是「该通道最后一次执行仍是 failed」，按首次出现排序），只用于披露，不参与 `reason`：「哪条路没走通」与「这次检索有没有正常收尾」是两个口径，不互相冒充。
 
 把类型化终态经 `ReasoningResult → ReasoningEvidenceSnapshot → ResponseDraftInput` 的实际使用链传递，保留 evidence 对象身份和不可变 envelope 规则。跨层 DTO 放到允许的依赖层；需要扩 application import allowlist 时只增加具体模块并同步架构守卫，不放宽整包。
 

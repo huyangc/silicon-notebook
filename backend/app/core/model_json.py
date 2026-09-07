@@ -241,6 +241,15 @@ def _is_open_object(example: Any) -> bool:
     the repair path did not, so a non-empty ``arguments`` object plus one
     trailing comma was rejected as ``unknown_key`` — a real retrieval action
     losing its repair net over a syntax fault the layer exists to absorb.
+
+    JSON ``null`` counts as such an object on both paths (see the two call
+    sites).  A hint that says "the fields are specified elsewhere" is in no
+    position to insist the object be present at all: the domain parser that
+    owns those fields is the one that knows whether absence is legal, and for
+    every current open object it is (``arguments`` and ``assessment`` both
+    normalise ``None`` to "not sent").  Rejecting it here would spend the
+    retries and drop the whole call into its fail-open fallback over a value
+    the parser one layer down accepts.
     """
     return isinstance(example, dict) and not example
 
@@ -314,10 +323,14 @@ def _validate_against_example(
                 _validate_against_example(item, example[0], is_root=False)
         return
     if isinstance(example, dict):
+        if _is_open_object(example):
+            # Checked BEFORE the dict type check: an open object also accepts
+            # JSON null (see ``_is_open_object``).
+            if value is None or isinstance(value, dict):
+                return
+            raise ModelJsonRepairError("invalid_type")
         if not isinstance(value, dict):
             raise ModelJsonRepairError("invalid_type")
-        if _is_open_object(example):
-            return
         tolerated = _TOLERATED_UNADVERTISED_KEYS if is_root else frozenset()
         extra = set(value) - tolerated
         if not extra.issubset(example):
@@ -357,13 +370,16 @@ def _validate_known_shape(
     ):
         return
     if isinstance(example, dict):
+        if _is_open_object(example):
+            # Same rule as the repair path, null included (see
+            # ``_is_open_object``). Spelled out rather than left implicit in
+            # the ``if example and ...`` below, so the two paths cannot drift
+            # apart again.
+            if value is None or isinstance(value, dict):
+                return
+            raise ModelJsonRepairError("invalid_type")
         if not isinstance(value, dict):
             raise ModelJsonRepairError("invalid_type")
-        if _is_open_object(example):
-            # Same rule as the repair path (see ``_is_open_object``). Spelled
-            # out rather than left implicit in the ``if example and ...`` below,
-            # so the two paths cannot drift apart again.
-            return
         if field_name == "frame_assignments":
             # The hint's ``facet-id`` is a placeholder. Actual keys come from
             # the report frame and are checked against that frame downstream;
@@ -376,17 +392,10 @@ def _validate_known_shape(
         # These named nested objects have entirely optional children in their
         # downstream contracts. Other described nested objects still need at
         # least one usable field, so an empty plan item remains a mismatch.
-        #
-        # ``assessment`` joined them with reflect v2's aspect protocol: both of
-        # its lists are optional (a turn may report only supported aspects,
-        # only unresolved ones, or -- on a turn where it has nothing new to say
-        # -- neither), so ``"assessment": {}`` is a legal payload. Without this
-        # the strict path would answer ``missing_expected_key`` where the
-        # repair path accepts, and one empty object would push a perfectly good
-        # retrieval decision into the fail-open answer fallback.
+        # (Reflect v2's ``assessment`` needs no entry here: its hint advertises
+        # an OPEN object, which returns above.)
         if example and not shared_keys and not (
-            field_name in {"frame", "validity_scope", "assessment"}
-            and not value
+            field_name in {"frame", "validity_scope"} and not value
         ):
             raise ModelJsonRepairError("missing_expected_key")
         for key in shared_keys:

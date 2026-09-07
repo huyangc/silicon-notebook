@@ -18,6 +18,7 @@ from typing import List, Optional, Sequence
 
 from app.core.query_syntax import quoted_phrases
 from app.domain.retrieval_termination import (
+    ASPECT_UNRESOLVED_STATUSES,
     REFLECT_ASPECT_GAP_MAX_CHARS, REFLECT_ASPECT_MAX_EVIDENCE_KEYS,
 )
 from app.services.prompt_layers import fragment_text
@@ -1155,17 +1156,20 @@ def _v2_param_line(spec) -> str:
 #: half of the turn.  The aspect list itself is server state and rides in the
 #: user message; what belongs here is the contract for reporting on it: same
 #: turn as the action, omission preserves, listing replaces, and every bound
-#: that makes a payload rejectable.  Numbers are interpolated from the protocol
-#: constants so prompt and validator cannot drift.
+#: that makes a payload rejectable.  Numbers AND the ``status`` enum are
+#: interpolated from the protocol constants so prompt and validator cannot
+#: drift — the schema hint advertises ``assessment`` as an OPEN object (its
+#: shape is validated by ``AspectLedger.apply``, not by the transport gate), so
+#: this paragraph is the only place the model learns the legal status values.
 _V2_ASSESSMENT_INSTRUCTION = (
     "The user's MANDATORY ASPECTS are listed in the user message, each with a "
     "stable id. In every turn — in the same JSON as your action, never as a "
     "separate message — fill `assessment` for the aspects you can judge now:\n"
     "- `supported`: aspect_id plus the `evidence_keys` that support it, "
     "copied EXACTLY as printed on the evidence cards (`key=...`).\n"
-    "- `unresolved`: aspect_id, a `status` of partial / conflicting / "
-    "unknown, any `evidence_keys` found so far, and a short `gap` naming what "
-    "is still missing.\n"
+    "- `unresolved`: aspect_id, a `status` of "
+    f"`{'|'.join(ASPECT_UNRESOLVED_STATUSES)}`, any `evidence_keys` found so "
+    "far, and a short `gap` naming what is still missing.\n"
     "An aspect you leave out keeps the status it already has; listing one "
     "REPLACES everything you said about it before, which is how you withdraw "
     "a judgement you no longer stand behind. You cannot add, rename, merge or "
@@ -1311,29 +1315,32 @@ def reflect_v2_schema_hint(capabilities) -> str:
     where it reads as an instruction, and the exact typed validation of the
     CHOSEN action's fields happens in the reasoning layer.
 
-    ``assessment`` (design doc §7.1) is advertised as a CLOSED object, unlike
-    ``arguments``: its two lists have one fixed item shape each, so the gate
-    can carry the shape and leave only identity (is this aspect id real, was
-    this evidence key actually shown) to the reasoning layer. Two properties
-    the example must keep, and the ``test_model_json_schema_hints`` sweep pins
-    both because getting them wrong is exactly how T2's hint and the real gate
-    disagreed: every list item is an OBJECT (so the repair path validates its
-    fields rather than rejecting it as ``invalid_type``), and ``evidence_keys``
-    is a list of STRINGS. ``status`` is spelled as a ``a|b`` enum, which the
-    gate reads as "if filled, one of these" on both paths -- ``supported``
-    items carry no status at all, and that stays legal because the enum lives
-    only under ``unresolved``. The whole ``assessment`` object is optional: a
-    turn that only picks an action is not a protocol violation.
+    ``assessment`` (design doc §7.1) follows ``arguments`` and is advertised as
+    an EMPTY — that is, OPEN — object, NOT as its real nested shape. A closed
+    example would put the transport layer in charge of a payload whose only
+    legal rejection is a survivable one: ``AspectLedger.apply`` rejects an
+    out-of-bounds assessment WHOLE, folds the turn into a zero-I/O observation
+    and lets the loop continue, while a transport rejection burns the retries
+    and drops the whole run into the fail-open ``answer`` fallback. The closed
+    spelling shipped with T4-A was exactly that trap: ``"assessment": null``
+    (which JSON emitters produce for "nothing to report") failed
+    ``invalid_type`` on both paths, and one extra key on an item — a
+    ``supported`` row carrying ``gap`` or ``confidence`` — failed
+    ``unknown_key`` on the repair path while its strict twin passed. Same shape
+    of accident as T2's, one turn away from ending a healthy run.
+
+    So the split is: this gate owns "assessment is an object (or null)", and
+    ``AspectLedger.apply`` owns every field, enum and bound inside it. The
+    legal status values reach the model through the system prompt, which
+    interpolates the same ``ASPECT_UNRESOLVED_STATUSES`` constant the parser
+    whitelists. The whole ``assessment`` object stays optional: a turn that
+    only picks an action is not a protocol violation.
     """
     return (
         '{"next_action":"' + "|".join(capabilities.recognized_actions) + '",'
         '"sufficient":false,'
         '"arguments":{},'
-        '"assessment":{'
-        '"supported":[{"aspect_id":"","evidence_keys":[""]}],'
-        '"unresolved":[{"aspect_id":"",'
-        '"status":"partial|conflicting|unknown",'
-        '"evidence_keys":[""],"gap":""}]},'
+        '"assessment":{},'
         '"reason":""}'
     )
 

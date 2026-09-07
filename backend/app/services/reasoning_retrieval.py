@@ -587,6 +587,12 @@ def v2_request_identity(decision: "ReflectDecision") -> str:
     而分叉的那一天没有任何测试会红(设计稿 §6.1)。
     """
     action = decision.next_action
+    if action == REFLECT_INVALID_ACTION:
+        # 伪动作没有自己的参数。非空 = 这一轮的动作载荷本来是**合法**的,只是
+        # 另一半(方面自评)越界把整份决定折了下来——那个请求真实存在过,观察行
+        # 该显示它,而不是一句"(无请求)"。解析期折下来的 invalid 决定这一格是
+        # 空串(它们的参数根本没通过校验),行为与接入前逐字相同。
+        return decision.invalid_request_identity
     if action == "add_subquery":
         sub = decision.new_sub_query
         if sub is None:
@@ -709,7 +715,10 @@ def parse_reflect_v2(
     )
     raw_assessment = data.get("assessment")
     if isinstance(raw_assessment, dict):
-        # 只留存,不消费(T4)。存在即报错是本期明确禁止的行为。
+        # 只留存,消费在 `_absorb_assessment`。JSON `null` 在这里归一为**缺省**
+        # (走不进这一支):schema hint 把 `assessment` 写成开放对象之后,传输层
+        # 放行 null,而协议里"这一轮我没有新判断"与"我没带这个字段"是同一件事。
+        # 把 null 当越界载荷处理,会让一个常见的序列化产物白扣一步。
         decision.assessment = raw_assessment
     try:
         _v2_apply_arguments(action, arguments, capabilities, decision)
@@ -2459,9 +2468,15 @@ class ReflectDecision:
     # `next_action` 此时是伪动作,所以这是观察账唯一能说清"它想干什么"的一格。
     # 空串 = 连动作名都认不出来(`unknown_action`),那时观察账如实不写动作名。
     invalid_requested_action: str = ""
-    # 模型对必答方面的自评(设计稿 §7)。**本期只解析、不消费**:T4 才把它接进
-    # 终态与方面账目。留这个入口是为了让 v2 载荷从第一天起就允许携带它而不报错
-    # ——一个「有它就崩」的解析器会逼 T4 去改协议版本。
+    # 被 `_absorb_assessment` 折成 invalid 之前,那个**合法动作**的请求身份串
+    # (`v2_request_identity` 的产物)。只有这一族 invalid 有它:方面自评越界时
+    # 动作参数本身已经全部通过校验,观察行显示"(无请求)"是失真的。解析期的
+    # invalid 决定留空,行为与接入前逐字相同。
+    invalid_request_identity: str = ""
+    # 模型对必答方面的自评(设计稿 §7)。解析期**只留存**;消费在
+    # `ReasoningRetriever._absorb_assessment`(T4-A),它把这份载荷落进方面账或
+    # 把整份决定折成 invalid。解析器从 T2 起就允许载荷携带它而不报错——一个
+    # 「有它就崩」的解析器会逼 T4 去改协议版本。
     assessment: Optional[dict] = None
 
 
@@ -3551,9 +3566,44 @@ class ReasoningRetriever:
         )
         if not why:
             return decision
-        return _reflect_invalid(
+        folded = _reflect_invalid(
             f"{_V2_INVALID_ASSESSMENT_PREFIX}{why}",
             decision.invalid_requested_action or decision.next_action)
+        # 这一族 invalid 与解析期那几族不同:动作参数**已经全部通过校验**,那次
+        # 请求是真实存在过的。身份串在折叠前算好带走,否则观察行会把一次
+        # `search_chunks "布局收敛"` 显示成"(无请求)",模型下一轮既看不出自己
+        # 请求了什么,也无从判断该不该重来一次。
+        folded.invalid_request_identity = v2_request_identity(decision)
+        return folded
+
+    def _open_v2_ledgers(self, state: "_ReasoningRunState") -> None:
+        """v2 的两本账,都开在首轮**之前**(§6.1 / §7.1)。
+
+        观察账:首轮播种也要进账、与循环动作共用同一次转换。方面清单:按**冻结
+        的**意图契约定型,不随检索变——所以它读 `state` 上首轮之前就已经定好的
+        那两格,而不是循环里的任何中间产物。
+
+        关闭态(`reflect_v2_active()` 为假)一次都不进来,不构造任何新状态。
+        """
+        state.record.observer = ActionObservationLedger()
+        state.aspects = build_aspect_ledger(state.intent_detail, state.question)
+
+    def _v2_note_turn(
+        self, state: "_ReasoningRunState", decision: "ReflectDecision",
+        budget_left: int,
+    ) -> "ReflectDecision":
+        """一轮 reflect 决定的 v2 记账:先吸收方面自评,再登记动作观察。
+
+        顺序是硬的:`_absorb_assessment` 可能把整份决定折成一条 invalid 伪动作,
+        而观察账要记的是**折叠之后**那个决定(否则账上会出现一次实际没有发生的
+        检索请求)。返回的就是后续 `run()` 唯一该认的那份决定。
+        """
+        decision = self._absorb_assessment(state, decision)
+        state.record.observer.note_decision(
+            decision.invalid_requested_action or decision.next_action,
+            v2_request_identity(decision), decision.reason,
+            f"剩余步数 {budget_left}", v2_request_query_text(decision))
+        return decision
 
     def _run_termination(
         self, state: "_ReasoningRunState",
@@ -5745,11 +5795,7 @@ class ReasoningRetriever:
             limits=limits, intent_detail=intent_detail,
         )
         if self.reflect_v2_active():
-            # 两本账都挂在首轮**之前**:首轮播种也要进观察账、与循环动作共用同一
-            # 次转换(§6.1);方面清单按**冻结的**意图契约定型,不随检索变(§7.1)。
-            # 关闭态这两行不执行,不构造任何新状态。
-            state.record.observer = ActionObservationLedger()
-            state.aspects = build_aspect_ledger(intent_detail, question)
+            self._open_v2_ledgers(state)     # 观察账 + 方面账(见那个方法)
         self._run_first_round(state)
 
         # --- 首轮 → reflect 循环的交接 ---------------------------------------
@@ -6240,12 +6286,10 @@ class ReasoningRetriever:
             decision = self.reflect(question, summary, **reflect_kwargs)
             raise_if_cancelled(self.cancel_event)
             if capabilities is not None:
-                decision = self._absorb_assessment(state, decision)
-                state.record.observer.note_decision(
-                    decision.invalid_requested_action or decision.next_action,
-                    v2_request_identity(decision), decision.reason,
-                    f"剩余步数 {max_steps - steps}",
-                    v2_request_query_text(decision))
+                # 方面自评 + 动作观察(见 `_v2_note_turn`:自评可能把这份决定
+                # 折成 invalid,后面认的就是它返回的那份)。
+                decision = self._v2_note_turn(
+                    state, decision, max_steps - steps)
             reflect_detail = {"next_action": decision.next_action,
                               "sufficient": decision.sufficient,
                               "no_progress": no_progress, "stale": stale}

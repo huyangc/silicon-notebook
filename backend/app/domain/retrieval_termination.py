@@ -107,8 +107,31 @@ class RetrievalTermination:
 
     reason: str
     unresolved_aspect_ids: Tuple[str, ...] = ()
-    #: 终止那一轮模型自己是否声称证据已足。与 `reason` 分开:
-    #: `retrieval_degraded` 完全可能发生在模型自报充分的同一轮,而把这两件事
-    #: 折成一个字段就再也分不出"模型怎么说的"与"服务端看到了什么"。
+    #: 终止那一轮模型自己是否声称证据已足。与 `reason` 分开:一次没被恢复的
+    #: 通道故障完全可能发生在模型自报充分的同一轮,而把这两件事折成一个字段就
+    #: 再也分不出"模型怎么说的"与"服务端看到了什么"。
     model_assessed_sufficient: bool = False
+    #: 这次 run 里**最后一次执行仍是失败**的通道(action_id)。纯披露字段:
+    #: `reason` 不读它(判据见 `classify_termination`)。一条通道在这里出现只
+    #: 说明"这条路这次没走通",不说明整次检索失败——两个口径分开,正是为了不让
+    #: "哪条路没走通"与"这次检索有没有正常收尾"互相冒充(§7.2)。
+    unrecovered_channels: Tuple[str, ...] = ()
     aspects: Tuple[AspectSnapshot, ...] = field(default_factory=tuple)
+
+    def __post_init__(self) -> None:
+        """闭集守卫:`reason` 与每个方面的 `status` 都必须在各自的闭集里。
+
+        这两个闭集是跨层契约——终态沿 `ReasoningResult → ReasoningEvidenceSnapshot
+        → ResponseDraftInput` 走到披露与合成,那边按 reason 查文案、按 status 决
+        定怎么说"未解决"。一个拼错的字符串在下游只会静默退化成"检索结束"这类兜底
+        文案,谁都不会红;在这里响亮地失败,是让它变成一次**构造期**的错误。
+
+        DTO 只认识自己的闭集,不认识生成规则(那在 `app.services.reasoning_aspects`)
+        ——这是形状校验,不是判据。
+        """
+        if self.reason not in TERMINATION_REASONS:
+            raise ValueError(f"unknown termination reason: {self.reason!r}")
+        for aspect in self.aspects:
+            if aspect.status not in ASPECT_STATUSES:
+                raise ValueError(
+                    f"unknown aspect status: {aspect.status!r}")

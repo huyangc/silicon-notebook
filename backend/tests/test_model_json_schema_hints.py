@@ -606,6 +606,11 @@ def test_root_level_assessment_key_survives_repair_on_the_legacy_hint():
 # T2 的教训是「schema hint 与形状闸语义不符」:hint 上写得通、真闸拒。所以这里的
 # 每一条都跑**真实**的 `parse_model_json_object` + `validate_model_json_shape`,
 # 而且严格与修复两条路径各跑一遍。
+#
+# T4-A 复审(P1-1)之后 `assessment` 是**开放对象**:传输层只管"它是对象或
+# null",形状与边界的拒绝权全部在 `AspectLedger.apply`(那种拒绝是可存活的零
+# I/O 观察,而传输层的拒绝会烧掉重试并把整次 run 推进 fail-open 收尾)。所以
+# 下面这张表里多出来的几种形状**必须过闸**,它们该不该被接受由方面账去答。
 
 _V2_ASSESSMENT_SHAPES = (
     ("both-lists", {
@@ -620,6 +625,19 @@ _V2_ASSESSMENT_SHAPES = (
     ("empty-lists", {"supported": [], "unresolved": []}),
     # 「这一轮我没什么新判断」:整个对象为空也是合法载荷,不能只在严格路径上活着。
     ("empty-object", {}),
+    # JSON 序列化器给"没有内容"的那一格写 null 是常见产物。闭合对象下它在两条
+    # 路径上都是 `invalid_type` —— 一次 null 结束整次 run。
+    ("null", None),
+    # `supported` 项带 `gap`:协议没要求它,但模型顺手写上完全正常。闭合对象下
+    # 严格路径放行、修复路径 `unknown_key`,同一份载荷两个答案(T2 事故同形)。
+    ("supported-item-with-gap", {
+        "supported": [{"aspect_id": "a1", "evidence_keys": ["ko-1"],
+                       "gap": "顺手写了一句"}]}),
+    ("item-with-unknown-key", {
+        "unresolved": [{"aspect_id": "a1", "status": "partial",
+                        "confidence": 0.4}]}),
+    ("evidence-keys-empty", {
+        "supported": [{"aspect_id": "a1", "evidence_keys": []}]}),
 )
 
 
@@ -645,52 +663,91 @@ def test_reflect_v2_assessment_shapes_pass_both_gate_paths(label, assessment):
     assert json.loads(repaired.content)["assessment"] == assessment
 
 
-def test_reflect_v2_assessment_status_is_a_closed_set_on_both_paths():
-    """`status` 是 `a|b` 枚举:填了就必须在集合里,而 `supported` 组不带它。"""
+def test_tolerated_assessment_payloads_reach_the_ledger_from_both_paths():
+    """四种"曾经会杀死整次 run"的载荷:两条真闸放行 → 解析 → 方面账**接受**。
+
+    这四种在闭合对象下的下场各不相同(null 两条路径都 `invalid_type`;`supported`
+    项多一个键在修复路径 `unknown_key`),共同点是它们都不该结束一次 run。
+    """
+    from app.services.reasoning_actions import build_reflect_capabilities
+    from app.services.reasoning_aspects import AspectLedger
+    from app.services.reasoning_retrieval import parse_reflect_v2
+
     hint = prompts.reflect_v2_schema_hint(_v2_capabilities())
-    bogus = json.dumps({
-        "next_action": "answer", "sufficient": False, "arguments": {},
-        "assessment": {"unresolved": [
-            {"aspect_id": "a1", "status": "definitely-not"}]},
-        "reason": "done",
-    }, ensure_ascii=False)
+    caps = build_reflect_capabilities(
+        _v2_facts())  # 解析白名单与 hint 同一个能力投影
+    for label, assessment, expected_status in (
+        ("null", None, "unknown"),
+        ("item-with-unknown-key",
+         {"supported": [{"aspect_id": "a1", "evidence_keys": ["ck-1"],
+                         "confidence": 0.9}]}, "supported"),
+        ("evidence-keys-empty",
+         {"supported": [{"aspect_id": "a1", "evidence_keys": []}]}, "unknown"),
+        ("empty-object", {}, "unknown"),
+    ):
+        payload = json.dumps({
+            "next_action": "answer", "sufficient": True, "arguments": {},
+            "assessment": assessment, "reason": "done",
+        }, ensure_ascii=False)
+        parsed = parse_model_json_object(payload, hint, allow_repair=True)
+        validate_model_json_shape(parsed.content, hint)
+        repaired = parse_model_json_object(
+            f"{payload[:-1]},}}", hint, allow_repair=True)
+        assert repaired.repaired is True, label
+        validate_model_json_shape(repaired.content, hint)
 
-    with pytest.raises(ModelJsonRepairError) as strict:
-        validate_model_json_shape(bogus, hint)
-    assert strict.value.reason == "invalid_enum"
-    with pytest.raises(ModelJsonRepairError) as repaired:
-        parse_model_json_object(f"{bogus[:-1]},}}", hint, allow_repair=True)
-    assert repaired.value.reason == "invalid_enum"
+        decision = parse_reflect_v2(json.loads(repaired.content), caps)
+        assert decision.invalid_reason == "", label
+        ledger = AspectLedger(["问题一"], source="intent_topics")
+        if decision.assessment is not None:
+            assert ledger.apply(
+                decision.assessment, allowed_keys={"ck-1"}) == "", label
+        assert ledger.snapshot()[0].status == expected_status, label
 
 
-def test_reflect_v2_assessment_items_must_be_objects_with_known_fields():
-    """列表元素是**对象**、`evidence_keys` 是**字符串列表**——两条形状都由闸守。"""
+def test_reflect_v2_assessment_shape_faults_are_the_ledgers_to_reject():
+    """形状越界的自评**过传输闸**,拒绝权在方面账(可存活的零 I/O 观察)。
+
+    这几种载荷在闭合对象下会被传输层拒掉(`invalid_type` / `invalid_enum` /
+    `unknown_key`)——那种拒绝烧重试、把整次 run 推进 fail-open 收尾。现在它们
+    一路走到 `AspectLedger.apply`,由它给出稳定原因码,整轮折成一条 invalid 观察
+    而循环继续。
+
+    变异:把 hint 里的 `assessment` 改回闭合对象 ⇒ 这条红。
+    """
+    from app.services.reasoning_aspects import AspectLedger
+
     hint = prompts.reflect_v2_schema_hint(_v2_capabilities())
-    for assessment, reason in (
-        ({"supported": ["a1"]}, "invalid_type"),
+    for assessment, why in (
+        ({"supported": ["a1"]}, "item_not_object"),
         ({"supported": [{"aspect_id": "a1", "evidence_keys": "ko-1"}]},
-         "invalid_type"),
+         "evidence_keys_not_list"),
         ({"supported": [{"aspect_id": "a1", "evidence_keys": [{"k": 1}]}]},
-         "invalid_type"),
-        ({"supported": "a1"}, "invalid_type"),
+         "evidence_key_not_string"),
+        ({"supported": "a1"}, "supported_not_list"),
+        ({"unresolved": [{"aspect_id": "a1", "status": "definitely-not"}]},
+         "invalid_status"),
     ):
         payload = json.dumps({
             "next_action": "answer", "sufficient": False, "arguments": {},
             "assessment": assessment, "reason": "done",
         }, ensure_ascii=False)
-        with pytest.raises(ModelJsonRepairError) as caught:
-            validate_model_json_shape(payload, hint)
-        assert caught.value.reason == reason, assessment
+        # 两条真闸都放行。
+        parsed = parse_model_json_object(payload, hint, allow_repair=True)
+        validate_model_json_shape(parsed.content, hint)
+        repaired = parse_model_json_object(
+            f"{payload[:-1]},}}", hint, allow_repair=True)
+        assert repaired.repaired is True
+        validate_model_json_shape(repaired.content, hint)
+        # 拒绝发生在这里,而且带稳定原因码。
+        ledger = AspectLedger(["问题一"], source="intent_topics")
+        assert ledger.apply(assessment, allowed_keys=set()) == why, assessment
 
 
-def test_reflect_v2_assessment_is_advertised_and_legacy_is_untouched():
-    """v2 广告它;legacy hint 一个字节都没变(关闭态等价)。"""
+def test_reflect_v2_assessment_is_an_open_object_and_legacy_is_untouched():
+    """v2 广告它、且是**开放对象**;legacy hint 一个字节都没变(关闭态等价)。"""
     v2 = json.loads(prompts.reflect_v2_schema_hint(_v2_capabilities()))
-    assert set(v2["assessment"]) == {"supported", "unresolved"}
-    assert set(v2["assessment"]["supported"][0]) == {
-        "aspect_id", "evidence_keys"}
-    assert set(v2["assessment"]["unresolved"][0]) == {
-        "aspect_id", "status", "evidence_keys", "gap"}
+    assert v2["assessment"] == {}
     for kinds, types, outline, memory, chunks, kg in itertools.product(
         ((), ENUMERABLE_ELEMENT_KINDS), ((), ENUMERABLE_KG_OBJECT_TYPES),
         (False, True), (False, True), (False, True), (False, True),
@@ -698,3 +755,63 @@ def test_reflect_v2_assessment_is_advertised_and_legacy_is_untouched():
         legacy = prompts.reflect_schema_hint(
             kinds, types, outline, memory, chunks, kg)
         assert "assessment" not in json.loads(legacy)
+
+
+def _open_object_paths(example: Any, prefix: tuple = ()) -> list[tuple]:
+    """示例里所有**空 dict**(= 开放对象)的路径。"""
+    found: list[tuple] = []
+    if isinstance(example, dict):
+        if not example:
+            return [prefix]
+        for key, item in example.items():
+            found.extend(_open_object_paths(item, prefix + (key,)))
+    elif isinstance(example, list):
+        for index, item in enumerate(example):
+            found.extend(_open_object_paths(item, prefix + (index,)))
+    return found
+
+
+def test_open_objects_exist_only_in_the_v2_hint():
+    """开放对象放行 null 这件事,对**其它每一份提示**结构上零影响。
+
+    "开放对象也接受 null" 是 T4-A 复审(P1-1)在 `model_json` 两条路径上加的
+    规则。它只可能作用在示例里写着空 dict 的那一格上,而下面这次巡检(既有的
+    `_schema_hint_constants` + 全部 `reflect_schema_hint` 组合)证明:全仓库只有
+    v2 那一份提示有开放对象,而且只有 `arguments` / `assessment` 两格。所以
+    legacy 与其它工作负载的形状闸行为逐字节不变——不是"应该没影响",是没有
+    可以受影响的那一格。
+    """
+    for name, hint in _schema_hint_constants():
+        assert _open_object_paths(json.loads(hint)) == [], name
+    for label, hint in _reflect_hint_cases():
+        assert _open_object_paths(json.loads(hint)) == [], label
+    for label, hint in _reflect_v2_hint_cases():
+        assert sorted(_open_object_paths(json.loads(hint))) == [
+            ("arguments",), ("assessment",)], label
+
+
+def test_open_objects_accept_json_null_on_both_paths():
+    """`arguments` / `assessment` 收到 null:两条路径一致放行(下游归一为缺省)。
+
+    变异:把 `_is_open_object` 的两个调用点改回"必须是 dict" ⇒ 这条红。
+    """
+    hint = prompts.reflect_v2_schema_hint(_v2_capabilities())
+    for field in ("arguments", "assessment"):
+        payload = json.dumps({
+            "next_action": "answer", "sufficient": True,
+            "arguments": {}, "assessment": {}, "reason": "done",
+            field: None,
+        }, ensure_ascii=False)
+        parsed = parse_model_json_object(payload, hint, allow_repair=True)
+        validate_model_json_shape(parsed.content, hint)
+        repaired = parse_model_json_object(
+            f"{payload[:-1]},}}", hint, allow_repair=True)
+        assert repaired.repaired is True
+        validate_model_json_shape(repaired.content, hint)
+    # 非对象非 null 仍然是 `invalid_type`:放行的是 null,不是"什么都行"。
+    bogus = json.dumps({
+        "next_action": "answer", "sufficient": True, "arguments": 7,
+        "reason": "done"}, ensure_ascii=False)
+    with pytest.raises(ModelJsonRepairError) as caught:
+        validate_model_json_shape(bogus, hint)
+    assert caught.value.reason == "invalid_type"
