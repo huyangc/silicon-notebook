@@ -125,7 +125,11 @@ class ActionObservation:
     #: 这条**链**到目前为止的累计返回数(只有枚举有:续跑把同一个集合分页列
     #: 出来)。与 `returned`(本次这一页返回了几条)是两个数,渲染成两格——把累计
     #: 摆在"返回"那一格上,模型会把「第 3 页返回 3 条」读成「这一次返回了 9 条」。
-    total: int = 0
+    #: 命名刻意不叫 `total`:枚举 detail 自己的 `total` 键(见
+    #: `collection_enumeration`)说的是另一件事——那份 detail 从不流进这个字段
+    #: (这里读的是 `returned_total`,见 `total_key`),但两个同名不同义的 `total`
+    #: 挤在同一段讨论里容易让人以为它们是同一个数。
+    chain_total: int = 0
 
 
 # --- step_type → 动作的对照表 -----------------------------------------------
@@ -272,18 +276,30 @@ def _int(detail: Mapping, key: str) -> int:
     return max(0, value)
 
 
+#: 观察行的字段分隔符(`；`,`render_observation_row` 用它 `"；".join(parts)`)
+#: 与证据卡的字段分隔符(`|`/`｜`,`render_card` 用 `" | ".join(parts)`)。模型
+#: 自己写的 `reason`/`request`/`purpose` 里带上这四个字符中的任何一个,都能在
+#: 渲染出来的那一行里冒充出一个新字段——例如 `reason = "推进；余额=剩余步数 99"`
+#: 会在观察行里多出一个看起来来自服务端的 `余额=`。折成全角逗号:字面文字仍然
+#: 保留(它原本就是这条证据/这次决定的内容),只是不再能被读成分隔符。
+_ROW_SEPARATORS = "；;|｜"
+
+
 def _clip(text: str, limit: int) -> str:
-    """折叠成一行 + 去控制字符 + 截长。
+    """折叠成一行 + 去控制字符 + 归一分隔符 + 截长。
 
     与 `agent_profile_block._clean` / `retrieval_experience_block._clean` 同款的
     伪造防御,理由也一样:这些值会被拼进 `- #N …；请求=…；目的=…` 那一行,而其中
     的请求身份、目的、以及两族原因码后缀都来自模型自己提交的载荷。带字面换行的
     一个 `reason` 能在渲染出来的账里伪造出第二条观察行,甚至一整个
     `【动作观察账 — …】` 块头;`.split()` 只管空白,余下的 C0/C1 控制字符(它们能
-    让终端与部分渲染器把后面的内容当另一段)在这里一并去掉。
+    让终端与部分渲染器把后面的内容当另一段)在这里一并去掉。分隔符归一见
+    `_ROW_SEPARATORS`。
     """
     text = " ".join(str(text or "").split())
     text = "".join(ch for ch in text if ch >= " " and ch != "\x7f")
+    for sep in _ROW_SEPARATORS:
+        text = text.replace(sep, "，")
     return text if len(text) <= limit else f"{text[:limit]}…"
 
 
@@ -541,7 +557,7 @@ def observation_from_step(
         budget_left=(pending.budget_left
                      if pending is not None and phase == PHASE_ACTION else ""),
         result_ids=result_ids,
-        total=_int(detail, contract.total_key) if contract.total_key else 0,
+        chain_total=_int(detail, contract.total_key) if contract.total_key else 0,
     )
 
 
@@ -584,12 +600,19 @@ def render_observation_row(row: ActionObservation) -> str:
             parts.append(
                 f"返回{row.returned}/新增{row.new}"
                 if row.returned != row.new else f"新增{row.new}")
-        if row.total and row.total != row.returned:
+        if row.chain_total and row.chain_total != row.returned:
             # 「这一次返回 N 条」之外再说一句「这条链累计 M 条」。
-            parts.append(f"累计{row.total}")
+            parts.append(f"累计{row.chain_total}")
     if row.upgraded:
         parts.append(f"升级{row.upgraded}")
-    if row.truncated:
+    if row.truncated and row.status != STATUS_FAILED:
+        # `failed` 与 `truncated` 能同时成立(见 `note_failed`:某条臂真的没查
+        # 成,同一步里另一条臂又被自己的截断键标了位)。这时状态标签已经说了
+        # "执行失败",不能再叠一句"已知截断"——那是"这条路本来是通的、只是被
+        # 上限切了一刀"的意思,与"根本没查成"是两件事,不能读起来像同一件。
+        # `status_for_skip` 也能产出 `failed`,但那条 skip 分支从不设
+        # `truncated=True`,所以这里的 `truncated=True ∧ failed` 组合只可能
+        # 来自 `note_failed`,判据因此是准确的,不是近似。
         parts.append("已知截断" + (f"({row.reason})" if row.reason else ""))
     elif row.reason:
         parts.append(f"原因={row.reason}")
@@ -614,6 +637,12 @@ def render_observations(
     可以稳定超出预算十几个字符——而这一块的存在理由就是给可压缩区定一个上限。
     所以下面在拼完整块之后回头量一次,超了就再丢最早的一行(丢一行必然让披露数
     +1,那句后缀最多长一位,所以循环单调收敛)。
+
+    **下界保护**:丢到只剩最新一行、那一行自己还是装不下时,不再继续丢成空
+    块——空字符串在模型眼里与"这一轮什么都没发生"没有区别,而这里恰恰相反:
+    发生了,只是账目装不下。这时改成把这最后一行截到预算内,省略披露(`更早的
+    N 条未列出`)照旧跟着走;只有连标题、提示语和这句披露本身都装不进预算的
+    极端值,才真的交回空块。
     """
     if not rows:
         return ""
@@ -631,6 +660,7 @@ def render_observations(
         used += len(text) + 1
         lines.append(text)
     lines.reverse()
+    head = OBSERVATION_BLOCK_TITLE
     while lines:
         head = OBSERVATION_BLOCK_TITLE
         if dropped > 0:
@@ -638,6 +668,17 @@ def render_observations(
         text = "\n".join([head, *lines, HISTORY_NOTE])
         if len(text) <= state_chars:
             return text
+        if len(lines) == 1:
+            break
         lines.pop(0)
         dropped += 1
-    return ""
+    if not lines:
+        return ""
+    overhead = len(head) + len(HISTORY_NOTE) + 2
+    floor = state_chars - overhead
+    if floor <= 0:
+        return ""
+    newest = lines[0]
+    if len(newest) > floor:
+        newest = newest[:floor - 1] + "…"
+    return "\n".join([head, newest, HISTORY_NOTE])
