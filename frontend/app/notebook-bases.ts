@@ -159,10 +159,17 @@ export type PromotionTargetResolution =
   | { kind: "auto"; baseId: string }
   | { kind: "choose"; options: MountedBase[] };
 
+// 合格的晋升目标 = 当前生效的公共知识库。唯一定义点:resolvePromotionTarget
+// (按钮三态)与 PromotionTargetModal(弹窗列表)都从这里取,弹窗打开期间宿主传的是
+// 完整挂载集合,私有/共享库必须在这里被滤掉,否则会列出一个后端必回 400 的目标。
+export const promotionTargetOptions = (
+  bases: readonly MountedBase[]
+): MountedBase[] => bases.filter((b) => b.tier === "base" && b.active);
+
 export const resolvePromotionTarget = (
   bases: readonly MountedBase[]
 ): PromotionTargetResolution => {
-  const options = bases.filter((b) => b.tier === "base" && b.active);
+  const options = promotionTargetOptions(bases);
   if (options.length === 0) return { kind: "none" };
   if (options.length === 1) return { kind: "auto", baseId: options[0].id };
   return { kind: "choose", options };
