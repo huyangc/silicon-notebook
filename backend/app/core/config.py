@@ -1,11 +1,13 @@
+import json
 import os
 from functools import lru_cache
 from pathlib import Path
-from typing import Annotated, List, Literal
+from typing import Annotated, Dict, List, Literal
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
+from app.core.ask_retrieval_policy import RETRIEVAL_EFFORTS
 from app.core.database_url import (
     database_identity,
     normalize_database_url,
@@ -43,6 +45,19 @@ DEFAULT_CHUNK_KG_MAX_DEPTH = 1
 DEFAULT_CHUNK_KG_FAN_OUT = 8
 DEFAULT_REPORT_RETRIEVAL_FANOUT = 8
 DEFAULT_REPORT_PROBE_CHANNEL_CONCURRENCY = 2
+
+# reflect v2 证据卡的按档位字符预算(设计稿 §4 的初始质量/成本预算)。字面量只
+# 在这里出现一次:Settings 的默认值、文档数值表与校验都指向它,调用点绝不复制。
+DEFAULT_REFLECT_EVIDENCE_CHARS_BY_EFFORT: "dict[str, int]" = {
+    "overview": 4_000,
+    "standard": 6_000,
+    "deep": 8_000,
+    "thorough": 12_000,
+    "exhaustive": 16_000,
+}
+# 单个档位的合法区间与"随档位不递减"一起构成这份映射的全部校验。
+REFLECT_EVIDENCE_CHARS_MIN = 1_000
+REFLECT_EVIDENCE_CHARS_MAX = 64_000
 
 
 def env_file_diagnosis(root: "Path | None" = None) -> "tuple[Path, bool, list[str]]":
@@ -983,6 +998,43 @@ class Settings(BaseSettings):
     # 「flag 关 = 执行处 skip、不改动作面」的惯例——这条回喂本来也不新增动作)。
     reasoning_outline_kg_gap_enabled: bool = Field(
         True, validation_alias="REASONING_OUTLINE_KG_GAP_ENABLED")
+    # 检索 Agent reflect 新策略(设计稿 2026-09-07 §4)的**总闸**,默认关闭:开着
+    # 时 Ask 与深度报告的 reflect 换用能力投影 + 单一 arguments 的 v2 协议;关着
+    # 时逐字节回到接入前(旧 prompt/schema/白名单/调用次数/trace 键集)。它不是
+    # 前端档位,也不由档位推导——用户选的是检索深度,不是模型协议版本。
+    # Knowhow 补全**显式**保持 legacy(见 `knowhow/api.py` 的策略位),不靠
+    # 「它恰好没传 limits」这种偶然性。
+    reasoning_reflect_v2_enabled: bool = Field(
+        False, validation_alias="REASONING_REFLECT_V2_ENABLED")
+    # v2 证据卡的每轮总预算(按档位)。刻意**独立于**最终合成的
+    # `kg_context_chars`/`chunk_context_chars`:反思要的是"够不够判断下一步",
+    # 合成要的是"够不够写答案",两者的信息粒度不同,按比例换算只会同时把两边
+    # 都配错。校验见 `_validate_reflect_evidence_chars`:必须恰含五个 effort、
+    # 每个值是 1000–64000 的整数(bool 不算整数)、且随档位不递减。
+    #
+    # NoDecode + 自己 json.loads:pydantic-settings 默认会把复杂字段的环境变量
+    # 当 JSON 解一次,解不动时抛的是 SettingsError 而不是 ValueError——那条路径
+    # 绕过下面的校验器,错误信息也不会说出"该给什么"。自己解就只有一处报错口径。
+    reasoning_reflect_evidence_chars_by_effort: Annotated[
+        Dict[str, int], NoDecode
+    ] = Field(
+        default_factory=lambda: dict(DEFAULT_REFLECT_EVIDENCE_CHARS_BY_EFFORT),
+        validation_alias="REASONING_REFLECT_EVIDENCE_CHARS_BY_EFFORT",
+    )
+    # 单条证据的原文摘录上限(字符)。
+    reasoning_reflect_excerpt_chars: int = Field(
+        240, ge=80, le=1000,
+        validation_alias="REASONING_REFLECT_EXCERPT_CHARS")
+    # **可压缩区**(观察账目与历史建议)的投影预算。它不是"整个 prompt 只有这么
+    # 多字符":用户完整问题、冻结约束、当前合法动作与额度、完整大纲/枚举覆盖等
+    # 必要状态各按自己的边界保留,不进这个池子、也不许被整体裁尾。
+    reasoning_reflect_state_chars: int = Field(
+        6000, ge=1000, le=32000,
+        validation_alias="REASONING_REFLECT_STATE_CHARS")
+    # 回喂给模型的"近期动作观察"最多多少行。
+    reasoning_reflect_recent_observations: int = Field(
+        6, ge=1, le=20,
+        validation_alias="REASONING_REFLECT_RECENT_OBSERVATIONS")
     # Agentic Memory P1:Agent 对每个笔记本的「已有理解」(共享底座 + 个人覆盖层)
     # 总开关。判据只有一处 —— ``reasoning_retrieval.profile_wiring_active``,注入、
     # 巡固触发、API 可见性与前端显隐四处必须共用它(镜像上面那把枚举闸的教训:
@@ -1485,6 +1537,83 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             return [item.strip() for item in value.split(",") if item.strip()]
         return value
+
+    @field_validator(
+        "reasoning_reflect_evidence_chars_by_effort", mode="before"
+    )
+    @classmethod
+    def validate_reflect_evidence_chars(cls, value):
+        """reflect v2 证据预算映射的唯一校验点(设计稿 §4)。
+
+        四条硬约束,缺一条就会在生产里变成一个**静默**的坏预算:
+
+        1. **恰含五个 effort**。多一个 key 说明写的人以为存在第六档;少一个 key
+           会让那一档在运行期 KeyError 或退回一个没人登记过的默认值。
+        2. **值是整数,bool 不算**。`{"deep": true}` 在 Python 里是 `1`,那是一
+           张一个字符的证据卡——比报错难查得多。
+        3. **1000–64000**。下界之下装不下一张卡的元信息,上界之上一轮反思的输入
+           就超过了最终合成的证据预算,那是配置错了而不是"更仔细"。
+        4. **随档位不递减**。用户把档位调高却拿到更小的证据预算,是与档位语义
+           直接矛盾的配置;静默接受它等于让"档位"这个概念在这一项上失效。
+
+        `NoDecode` 让环境变量原样是字符串到这里,所以 JSON 解析也在这一处,
+        报错口径与上面四条一致。
+        """
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                raise ValueError(
+                    "REASONING_REFLECT_EVIDENCE_CHARS_BY_EFFORT 不能为空;"
+                    "需要一个恰含五个档位的 JSON 映射"
+                )
+            try:
+                value = json.loads(text)
+            except ValueError as exc:
+                raise ValueError(
+                    "REASONING_REFLECT_EVIDENCE_CHARS_BY_EFFORT 不是合法 JSON:"
+                    f"{exc}"
+                ) from exc
+        if not isinstance(value, dict):
+            raise ValueError(
+                "REASONING_REFLECT_EVIDENCE_CHARS_BY_EFFORT 必须是 JSON 对象"
+            )
+        expected = set(RETRIEVAL_EFFORTS)
+        actual = set(value)
+        if actual != expected:
+            missing = sorted(expected - actual)
+            unknown = sorted(actual - expected)
+            raise ValueError(
+                "REASONING_REFLECT_EVIDENCE_CHARS_BY_EFFORT 必须恰含五个档位 "
+                f"{sorted(expected)}"
+                + (f";缺少 {missing}" if missing else "")
+                + (f";出现未知档位 {unknown}" if unknown else "")
+            )
+        resolved: "dict[str, int]" = {}
+        previous = 0
+        for effort in RETRIEVAL_EFFORTS:
+            raw = value[effort]
+            if isinstance(raw, bool) or not isinstance(raw, int):
+                raise ValueError(
+                    "REASONING_REFLECT_EVIDENCE_CHARS_BY_EFFORT["
+                    f"{effort}] 必须是整数(布尔值不算整数)"
+                )
+            if not (
+                REFLECT_EVIDENCE_CHARS_MIN <= raw <= REFLECT_EVIDENCE_CHARS_MAX
+            ):
+                raise ValueError(
+                    "REASONING_REFLECT_EVIDENCE_CHARS_BY_EFFORT["
+                    f"{effort}]={raw} 越界(须在 "
+                    f"{REFLECT_EVIDENCE_CHARS_MIN}–"
+                    f"{REFLECT_EVIDENCE_CHARS_MAX} 之间)"
+                )
+            if raw < previous:
+                raise ValueError(
+                    "REASONING_REFLECT_EVIDENCE_CHARS_BY_EFFORT 必须随档位不递减:"
+                    f"{effort}={raw} 小于上一档的 {previous}"
+                )
+            previous = raw
+            resolved[effort] = raw
+        return resolved
 
     @field_validator("database_url", mode="before")
     @classmethod

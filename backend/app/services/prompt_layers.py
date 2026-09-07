@@ -51,7 +51,10 @@ L0-ONLY PROMPTS
 The following prompt-building functions in ``app.services.prompts`` carry NO
 L1 fragment at all — every word of their text is control-flow or
 self-optimization machinery that must not vary per notebook:
-``reflect_prompt`` (and ``reflect_schema_hint``), ``report_synthesis_prompt``,
+``reflect_prompt`` (and ``reflect_schema_hint``), their v2 counterparts
+``reflect_v2_system_prompt`` / ``reflect_v2_user_prompt`` /
+``reflect_v2_schema_hint`` (an action space, a parameter contract and a
+stopping rule — control flow, not per-notebook wording), ``report_synthesis_prompt``,
 ``report_sufficiency_prompt``, the evidence-verification path
 (``evidence_refine_prompt``), ``followup_rewrite_prompt``, and the whole
 Agentic Memory group (``agent_profile_base_prompt``,
@@ -277,8 +280,10 @@ L2_BLOCKS: Tuple[L2Block, ...] = (
     ),
     L2Block(
         "candidates_summary",
-        ("reflect_prompt",),
-        "reflect 循环当前已收集候选证据的摘要文本，驱动下一步检索动作的选择。",
+        ("reflect_prompt", "reflect_v2_user_prompt"),
+        "reflect 循环当前已收集候选证据的摘要文本，驱动下一步检索动作的选择。"
+        "（v2 协议把一轮 reflect 拆成 system/user 两段，这个块落在 user 段——"
+        "指令与数据分离的整个意义就是它不能和固定指令混在一条消息里。）",
         "app.services.reasoning_retrieval（组装）",
     ),
     L2Block(
