@@ -13,6 +13,10 @@ from typing import Any, Callable, Mapping, Protocol
 
 from app.core.ask_retrieval_policy import AskRetrievalLimits
 from app.domain.cancellation import CancelEvent
+# One named domain module, not a package-wide loosening: the architecture guard's
+# ``ALLOWED_APPLICATION_PREFIXES`` lists this module explicitly, so a second
+# domain type still has to be admitted deliberately (design doc §7.2).
+from app.domain.retrieval_termination import RetrievalTermination
 from app.models.ask import AskResponse, QueryIntentContract
 
 
@@ -178,6 +182,13 @@ class ReasoningEvidenceSnapshot:
     outline: tuple[object, ...]
     outline_evidence: tuple[object, ...]
     baseline_manifest: object | None
+    #: Why retrieval stopped, plus each mandatory aspect's state at that moment
+    #: (design doc §7.2).  ``None`` whenever reflect v2 is off -- which is the
+    #: default -- and on any historical result that predates the field, so no
+    #: existing consumer changes.  Answer assembly starts reading it in T4-B;
+    #: this stage only carries it across the boundary, keeping the frozen DTO's
+    #: identity and the immutable-envelope rule intact.
+    termination: RetrievalTermination | None = None
 
     @classmethod
     def from_result(cls, result: object) -> "ReasoningEvidenceSnapshot":
@@ -198,6 +209,11 @@ class ReasoningEvidenceSnapshot:
             outline=tuple(getattr(result, "outline", ())),
             outline_evidence=tuple(getattr(result, "outline_evidence", ())),
             baseline_manifest=getattr(result, "baseline_manifest", None),
+            # ``getattr`` with a default, like every field above it: narrow
+            # test doubles and any historical result object simply do not have
+            # this attribute, and a missing typed terminal state is ``None``,
+            # never an error.
+            termination=getattr(result, "termination", None),
         )
 
 

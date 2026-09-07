@@ -17,6 +17,9 @@ from __future__ import annotations
 from typing import List, Optional, Sequence
 
 from app.core.query_syntax import quoted_phrases
+from app.domain.retrieval_termination import (
+    REFLECT_ASPECT_GAP_MAX_CHARS, REFLECT_ASPECT_MAX_EVIDENCE_KEYS,
+)
 from app.services.prompt_layers import fragment_text
 
 
@@ -1148,6 +1151,39 @@ def _v2_param_line(spec) -> str:
     return f"    - {spec.name}{star}{choices}{mark}.{note}\n"
 
 
+#: The mandatory-aspect protocol (design doc §7.1), stated once in the FIXED
+#: half of the turn.  The aspect list itself is server state and rides in the
+#: user message; what belongs here is the contract for reporting on it: same
+#: turn as the action, omission preserves, listing replaces, and every bound
+#: that makes a payload rejectable.  Numbers are interpolated from the protocol
+#: constants so prompt and validator cannot drift.
+_V2_ASSESSMENT_INSTRUCTION = (
+    "The user's MANDATORY ASPECTS are listed in the user message, each with a "
+    "stable id. In every turn — in the same JSON as your action, never as a "
+    "separate message — fill `assessment` for the aspects you can judge now:\n"
+    "- `supported`: aspect_id plus the `evidence_keys` that support it, "
+    "copied EXACTLY as printed on the evidence cards (`key=...`).\n"
+    "- `unresolved`: aspect_id, a `status` of partial / conflicting / "
+    "unknown, any `evidence_keys` found so far, and a short `gap` naming what "
+    "is still missing.\n"
+    "An aspect you leave out keeps the status it already has; listing one "
+    "REPLACES everything you said about it before, which is how you withdraw "
+    "a judgement you no longer stand behind. You cannot add, rename, merge or "
+    "drop an aspect — that list comes from the user and only the user changes "
+    "it.\n"
+    "Never cite a key you have not actually been shown on a card this run, "
+    "and never use a document title, a source id or a collection name as an "
+    "evidence key: the server removes keys it did not show you, and an aspect "
+    "left with none of them stops counting as supported. The same aspect must "
+    "not appear in both lists or twice in one list; neither list may be longer "
+    "than the aspect list; at most "
+    f"{REFLECT_ASPECT_MAX_EVIDENCE_KEYS} evidence keys and "
+    f"{REFLECT_ASPECT_GAP_MAX_CHARS} characters of gap per aspect. A payload "
+    "that breaks one of these bounds is rejected WHOLE, runs no retrieval, and "
+    "costs you a step.\n"
+)
+
+
 def reflect_v2_system_prompt(capabilities, unavailable_max: int = 6) -> str:
     """The FIXED instruction half of a v2 reflect turn (design doc §6.3).
 
@@ -1226,7 +1262,8 @@ def reflect_v2_system_prompt(capabilities, unavailable_max: int = 6) -> str:
         "further retrieval keeps failing. sufficient=true together with a "
         "retrieval action is a contradiction and the whole turn is rejected: "
         "retrieve OR stop, never both in one turn.\n"
-        "In reason, one line on why this step. NEVER claim that 'all/every X "
+        + _V2_ASSESSMENT_INSTRUCTION
+        + "In reason, one line on why this step. NEVER claim that 'all/every X "
         "have been retrieved' unless an enumerate action reported that "
         "collection's coverage as complete; relevance-based retrieval, "
         "however wide, cannot prove completeness. Otherwise state what has "
@@ -1272,14 +1309,31 @@ def reflect_v2_schema_hint(capabilities) -> str:
     populated retrieval payload and the legal ``{}`` that ``answer`` sends pass
     on either path. The per-action field contract lives in the system prompt,
     where it reads as an instruction, and the exact typed validation of the
-    CHOSEN action's fields happens in the reasoning layer. ``assessment`` is
-    deliberately NOT advertised yet (T4 owns it); the gate tolerates it as a
-    named unadvertised key on both paths.
+    CHOSEN action's fields happens in the reasoning layer.
+
+    ``assessment`` (design doc §7.1) is advertised as a CLOSED object, unlike
+    ``arguments``: its two lists have one fixed item shape each, so the gate
+    can carry the shape and leave only identity (is this aspect id real, was
+    this evidence key actually shown) to the reasoning layer. Two properties
+    the example must keep, and the ``test_model_json_schema_hints`` sweep pins
+    both because getting them wrong is exactly how T2's hint and the real gate
+    disagreed: every list item is an OBJECT (so the repair path validates its
+    fields rather than rejecting it as ``invalid_type``), and ``evidence_keys``
+    is a list of STRINGS. ``status`` is spelled as a ``a|b`` enum, which the
+    gate reads as "if filled, one of these" on both paths -- ``supported``
+    items carry no status at all, and that stays legal because the enum lives
+    only under ``unresolved``. The whole ``assessment`` object is optional: a
+    turn that only picks an action is not a protocol violation.
     """
     return (
         '{"next_action":"' + "|".join(capabilities.recognized_actions) + '",'
         '"sufficient":false,'
         '"arguments":{},'
+        '"assessment":{'
+        '"supported":[{"aspect_id":"","evidence_keys":[""]}],'
+        '"unresolved":[{"aspect_id":"",'
+        '"status":"partial|conflicting|unknown",'
+        '"evidence_keys":[""],"gap":""}]},'
         '"reason":""}'
     )
 
