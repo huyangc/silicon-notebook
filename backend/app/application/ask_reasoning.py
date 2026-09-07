@@ -260,6 +260,16 @@ class ResponseDraftInput:
     kg_required: bool
     candidate_manifest: object | None
     spreadsheet_results: tuple[object, ...] = ()
+    #: Why retrieval stopped, and each mandatory aspect's state at that moment
+    #: (design doc §7.2) -- the last hop of ``ReasoningResult ->
+    #: ReasoningEvidenceSnapshot -> ResponseDraftInput``.  Answer assembly reads
+    #: it twice: once BEFORE synthesis, to state the run's terminal facts in the
+    #: prompt, and once AFTER, to re-check each aspect against the evidence that
+    #: actually entered that prompt.  ``None`` whenever reflect v2 is off (the
+    #: default) and on every historical/narrow-double input, in which case both
+    #: reads collapse to "no block, no extra trace keys" and the drafted answer
+    #: is byte-identical to the one before this field existed.
+    termination: RetrievalTermination | None = None
 
 
 @dataclass(frozen=True, slots=True)

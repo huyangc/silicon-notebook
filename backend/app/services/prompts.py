@@ -302,6 +302,7 @@ def answer_prompt(
     section_index: int = 0,
     section_total: int = 0,
     style_block: str = "",
+    termination_block: str = "",
 ) -> str:
     """按节合成的四个形参是 **keyword-only**:三个既有位置参数(question/context/
     history)是所有调用方的形状,把模式开关也做成位置参数,只会让「第四个位置传了
@@ -310,7 +311,18 @@ def answer_prompt(
     from ``search_profile.render_style_block`` (organization/wording only —
     the block's own preamble states that boundary), empty string when the
     feature/switch is off or the user has no profile set, which reproduces
-    this function's pre-feature output byte for byte."""
+    this function's pre-feature output byte for byte.
+
+    ``termination_block`` (设计稿 §7.2) is the same keyword-only shape: the
+    run's terminal facts rendered by
+    ``reasoning_aspects.render_termination_block`` -- why retrieval stopped,
+    which mandatory questions it left open, which channels never recovered.
+    Empty string under reflect v2's default-off switch and on every legacy
+    path, which reproduces this function's pre-feature output byte for byte.
+    It is a **server fact, not evidence**: the block's own preamble says it
+    carries no ``[k]`` id and must never be cited, so the numbered citation
+    rules above need no change (and deliberately get none -- their numbering
+    is an L0 cross-stack contract)."""
     history_section = (
         "Prior conversation (for context; the current question may refer to it):\n"
         f"{history_block}\n\n"
@@ -325,6 +337,12 @@ def answer_prompt(
     # binding or relaxing rule 2's grounding requirement) and must not be
     # mistaken for part of the question itself.
     style_section = f"{style_block}\n\n" if style_block else ""
+    # Same placement argument as ``style_section``: after the numbered rules
+    # (it is not a rule and must never be read as authorizing a new [k]
+    # binding) and before the Question line (it is not part of the question).
+    # Deliberately NOT adjacent to the knowledge items — a server note sitting
+    # against the evidence partition reads like one more item.
+    termination_section = f"{termination_block}\n\n" if termination_block else ""
     return (
         "You answer an engineer's question using the notebook knowledge below, "
         "and you may reason beyond it.\n"
@@ -402,6 +420,7 @@ def answer_prompt(
         f"{history_section}"
         f"{section_section}"
         f"{style_section}"
+        f"{termination_section}"
         f"Question: {question}\n\n"
         f"Knowledge items (id: [type][tier] name — context):\n{context_block}\n\n"
         'Return JSON only: {"answer":"<text with [k] markers>","grounded":true|false}'
@@ -1576,12 +1595,17 @@ def report_section_prompt(section_title: str, section_scope: str, question: str,
                           context_block: str, allow_parametric: bool = True,
                           discovered_structure: str = "",
                           assumptions: str = "", report_frame: str = "",
-                          synthesis_commitment: str = "") -> str:
+                          synthesis_commitment: str = "",
+                          termination_block: str = "") -> str:
     """``discovered_structure`` = 本节深挖时整理出的子大纲(报告 PR-5)。
 
     它是**增补式细化**:只影响本节内部的 `###` 子标题,绝不增删改用户确认过的
     章节合同。缺席(空串,即非穷尽档或本节没整理出大纲)时返回值逐字回到接入前
     —— 那是这个可选参数唯一可接受的关闭态。
+
+    ``termination_block``(设计稿 §7.2)= 本节深挖 run 的结束事实,由
+    ``reasoning_aspects.render_termination_block`` 渲染。同样是**服务端事实、
+    非证据、不可引用**(块自带这句说明),同样以空串为关闭态并逐字回到接入前。
     """
     # 规则 2 的传递前提只在通识开着时才提【通识】:关掉通识的 prompt 里不得出现该标记
     # (test_report_prompts_contract 钉住的既有契约),否则模型会从规则 2 学到一个本节
@@ -1632,6 +1656,9 @@ def report_section_prompt(section_title: str, section_scope: str, question: str,
         "from different studies unless their stated conditions are comparable.\n"
         if synthesis_commitment else ""
     )
+    # 与 assumption/frame/commitment 同一位置族:在规则之前、与章节合同一起
+    # 交代这一节的上下文,而不是挨着知识条目(那会读成又一条证据)。
+    termination_section = f"{termination_block}\n" if termination_block else ""
     return (
         "You write ONE section of a deep technical report for an engineer. "
         "Write ONLY this section — no report title, no executive summary, no "
@@ -1642,6 +1669,7 @@ def report_section_prompt(section_title: str, section_scope: str, question: str,
         f"{assumption_block}"
         f"{frame_block}"
         f"{commitment_block}"
+        f"{termination_section}"
         "Rules:\n"
         "1. When a sentence uses a knowledge item, append its id marker like "
         "[k1] at the end of that sentence. A [k] marker may ONLY be attached "

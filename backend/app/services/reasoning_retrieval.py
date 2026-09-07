@@ -3496,9 +3496,12 @@ class ReasoningRetriever:
         selection = build_evidence_block(
             collected=state.collected, elements=state.elements,
             chunks=state.chunks, chains=state.chains,
-            # 当前"已绑定证据的代表"(§6.2 第一档)= 各必答方面已绑定的键(按
-            # 方面轮转)+ 大纲真正持有的那些键。`build_evidence_block` 一个字都
-            # 没改:它当初就把这一档定义成"一份键序",T4 只是把方面那半并进来。
+            # 当前"已绑定证据的代表"(§6.2 第一档)= **大纲在前、方面补位**:
+            # 大纲真正持有的那些键排在最前,各必答方面已绑定的键(按方面轮转)
+            # 补在后面。紧预算下被截掉的是队尾,所以上一轮刚绑进结构的大纲证据
+            # 不会被方面代表挤出去(理由见 `evidence_bound_keys` 的 docstring)。
+            # `build_evidence_block` 一个字都没改:它当初就把这一档定义成"一份
+            # 键序",T4 只是把方面那半并进来。
             bound_keys=evidence_bound_keys(
                 state.aspects,
                 [key for section in outline for key in section.evidence_keys]),
@@ -3642,6 +3645,12 @@ class ReasoningRetriever:
                 "model_assessed_sufficient":
                     termination.model_assessed_sufficient,
                 "aspect_source": state.aspects.source,
+                # 纯披露(§7.2):这次 run 里最后一次执行仍是失败的通道。它不参与
+                # `reason`,但必须说出去——"KG 那条路今天没走通"是用户重试/换问法
+                # 时唯一有用的那条线索,只留在服务器内存里等于没记。动作 id 是内部
+                # 词,与 trace 里其它步的 detail 同级,不进任何公开投影(见
+                # `conversation_public_view` 的白名单)。
+                "unrecovered_channels": list(termination.unrecovered_channels),
             }))
         return termination
 

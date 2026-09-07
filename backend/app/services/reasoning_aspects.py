@@ -33,7 +33,7 @@ from typing import (
 
 from app.domain.retrieval_termination import (
     ASPECT_CONFLICTING, ASPECT_PARTIAL, ASPECT_SUPPORTED, ASPECT_UNKNOWN,
-    ASPECT_UNRESOLVED_STATUSES, AspectSnapshot,
+    ASPECT_UNRESOLVED_STATUSES, AspectDelivery, AspectSnapshot,
     DEMOTION_KEYS_MISSING, DEMOTION_KEYS_REJECTED,
     REFLECT_ASPECT_GAP_MAX_CHARS, REFLECT_ASPECT_MAX_EVIDENCE_KEYS,
     RetrievalTermination,
@@ -476,6 +476,178 @@ _TERMINATION_SUMMARIES: Mapping[str, str] = {
 
 def termination_summary(reason: str) -> str:
     return _TERMINATION_SUMMARIES.get(reason, "检索结束")
+
+
+# --- 合成侧:服务端事实块与最终装配复核(§7.2 后半) --------------------------
+#: 结束原因 → **给模型看的**一句英文事实。刻意与 `_TERMINATION_SUMMARIES`
+#: (给用户看的中文短句)分开:那一份是 UI 文案,改它是产品用词决定;这一份是
+#: 合成 prompt 的输入,改它会改答案。共用一份字符串等于让一次 UI 措辞调整悄悄
+#: 变成一次模型行为变更。两份的**键**仍是同一个闭集(测试钉住)。
+_TERMINATION_PROMPT_FACTS: Mapping[str, str] = {
+    TERMINATION_MODEL_SUFFICIENT:
+        "retrieval finished with every mandatory aspect reported supported",
+    TERMINATION_MODEL_PARTIAL:
+        "retrieval stopped while some mandatory aspects were still open",
+    TERMINATION_STEP_BUDGET: "retrieval ran out of steps",
+    TERMINATION_STALE: "retrieval stopped after several rounds with no progress",
+    TERMINATION_NO_EXECUTABLE_ACTION:
+        "retrieval stopped because no tool other than answering was available",
+    TERMINATION_MODEL_DEGRADED:
+        "the retrieval planner failed and the run ended on a fallback",
+    TERMINATION_RETRIEVAL_DEGRADED:
+        "a retrieval channel failed and evidence collection did not complete",
+}
+
+#: 事实块里最多列几个未解决方面。它挡的是"16 个方面全部未解决"那一版把整段
+#: 事实说明撑成一屏——列举本身不是证据,截断只损失枚举、不损失结论(后面那句
+#: 「还有 N 项」如实补上数)。
+_TERMINATION_BLOCK_MAX_ASPECTS = 6
+
+
+def render_termination_block(
+    termination: Optional[RetrievalTermination],
+) -> str:
+    """结束事实 → 合成 prompt 里的一段**服务端事实**(§7.2)。
+
+    `None`(legacy / 关闭态)返回空串,调用方据此逐字节退回接入前的 prompt。
+
+    三条硬边界,都写在块里让模型看得见:
+
+    1. **不是证据**——它不带 `[k]` id,也永远不该被引用。检索为什么停下来是
+       服务端的记录,不是笔记本里的内容;允许它被引用等于给答案开一条"引用服务端
+       自己"的路。
+    2. **不是"这些内容不存在"**——未解决只说明这次检索没找到,后续补取、别的
+       问法、别的库都可能有。把它读成否定结论就是用一次检索的边界去否定世界。
+    3. **不许改写答案的语气**——模型该做的是在正文里如实说明缺口,不是整段拒答。
+
+    未解决方面带上**问题原文**(用户审阅过的必答清单),因为"哪一件事没查着"正是
+    答案要说明的那句话;`gap` 是模型自己写的文本,不进这个块——把上一轮模型的
+    自述当服务端事实喂回去,正是 §2 拒绝的"原始 reason 回放"。
+    """
+    if termination is None:
+        return ""
+    fact = _TERMINATION_PROMPT_FACTS.get(termination.reason, "")
+    if not fact:
+        return ""
+    by_id = {row.aspect_id: row for row in termination.aspects}
+    open_questions = [
+        _fold(by_id[aspect_id].question)
+        for aspect_id in termination.unresolved_aspect_ids
+        if aspect_id in by_id and by_id[aspect_id].question
+    ]
+    lines = [
+        "Retrieval status (server fact about THIS run — it is NOT a knowledge "
+        "item, carries no [k] id, and must NEVER be cited):",
+        f"- {fact}.",
+    ]
+    if open_questions:
+        shown = open_questions[:_TERMINATION_BLOCK_MAX_ASPECTS]
+        more = len(open_questions) - len(shown)
+        lines.append(
+            "- Questions the retrieval did not resolve: "
+            + "; ".join(shown)
+            + (f" (and {more} more)" if more > 0 else "")
+        )
+    if termination.unrecovered_channels:
+        lines.append(
+            "- Retrieval channels that failed and never recovered in this run: "
+            + ", ".join(termination.unrecovered_channels)
+        )
+    lines.append(
+        "Say plainly in the answer which of those points the evidence below "
+        "does not cover, and do not present a partial result as complete. Do "
+        "NOT refuse to answer and do NOT treat this note as proof that the "
+        "notebook lacks the material — it only states where THIS retrieval "
+        "stopped."
+    )
+    return "\n".join(lines)
+
+
+def review_aspect_delivery(
+    termination: Optional[RetrievalTermination], *,
+    admitted_keys: Set[str], cited_keys: Set[str],
+) -> AspectDelivery:
+    """最终装配之后的方面复核(§7.2)。**纯函数,不读库、不重排、不改状态。**
+
+    `admitted_keys` = 真正进了合成 prompt 的证据身份(Ask/Report 各自从最终
+    `id_map` 的 `object_id` 取);`cited_keys` = 最终答案解析回来的锚点身份。两者
+    都是**装配之后**才知道的,所以这次复核只可能发生在这里——设计稿明确不要求
+    提前重排,也不为复核再读一次库。
+
+    `undelivered` 的判据只有一条:这个方面绑过证据(`evidence_keys` 非空)、状态是
+    supported/partial,而那些键**一个都没进 prompt**。全被预算/过滤挡掉的"已支撑"
+    在屏幕上与真的有支撑长得一样,而它其实没有——降为未送达是 §7.2 点名要的。
+    只绑上一部分的**不**算未送达:模型看见了其中一条,那条支撑真实送达了。
+    """
+    if termination is None:
+        return AspectDelivery()
+    model_supported: List[str] = []
+    admitted: List[str] = []
+    cited: List[str] = []
+    undelivered: List[str] = []
+    for aspect in termination.aspects:
+        keys = set(aspect.evidence_keys)
+        if aspect.status == ASPECT_SUPPORTED:
+            model_supported.append(aspect.aspect_id)
+        if keys & admitted_keys:
+            admitted.append(aspect.aspect_id)
+        elif keys and aspect.status in (ASPECT_SUPPORTED, ASPECT_PARTIAL):
+            undelivered.append(aspect.aspect_id)
+        if keys & cited_keys:
+            cited.append(aspect.aspect_id)
+    return AspectDelivery(
+        model_supported=tuple(model_supported),
+        synthesis_admitted=tuple(admitted),
+        answer_cited=tuple(cited),
+        undelivered=tuple(undelivered),
+    )
+
+
+def termination_synthesis_detail(
+    termination: Optional[RetrievalTermination], *,
+    admitted_keys: Set[str], cited_keys: Set[str],
+) -> dict:
+    """合成终步 trace detail 的 v2-only 稀疏键(§7.2)。
+
+    `None` 返回空 dict,调用方 `update` 一个空 dict ⇒ 关闭态的 detail 键集逐字节
+    不变。三个口径各占一个键,谁都不许替谁作证:`aspects_model_supported` 是模型
+    说的,`aspects_synthesis_admitted` 是真的进了 prompt 的,`aspects_answer_cited`
+    是答案真的引了的。合起来读才知道"已支撑"这三个字在这一轮到底成色如何。
+    """
+    if termination is None:
+        return {}
+    delivery = review_aspect_delivery(
+        termination, admitted_keys=admitted_keys, cited_keys=cited_keys)
+    return {
+        "termination_reason": termination.reason,
+        # 中文短句由服务端给出:前端只渲染字段,不自造一份会与闭集分叉的映射。
+        "termination_summary": termination_summary(termination.reason),
+        "aspects_total": len(termination.aspects),
+        "aspects_pending": len(termination.unresolved_aspect_ids),
+        "aspects_model_supported": len(delivery.model_supported),
+        "aspects_synthesis_admitted": len(delivery.synthesis_admitted),
+        "aspects_answer_cited": len(delivery.answer_cited),
+        "aspects_undelivered": len(delivery.undelivered),
+        "unrecovered_channels": list(termination.unrecovered_channels),
+    }
+
+
+def admitted_evidence_keys(id_map: Mapping[str, object]) -> Set[str]:
+    """最终 `id_map` → 真正进了 prompt 的证据身份集合。
+
+    `id_map` 的值是各 `*_context` builder 建的 evidence 字典,`object_id` 是它们
+    共同的身份键(KG 对象 id / chunk_id / element_id),与方面账里的
+    `evidence_keys` 同一个口径(两者都源自 `outline_binding_keys`)。**按 id_map 而
+    不是按候选池算**:候选进没进 prompt 由预算截断决定,而这次复核问的正是"被截
+    掉了没有"。
+    """
+    keys: Set[str] = set()
+    for value in id_map.values():
+        if isinstance(value, Mapping):
+            key = str(value.get("object_id") or "")
+            if key:
+                keys.add(key)
+    return keys
 
 
 def _terminal_marker(trace: Sequence[object]) -> Optional[Tuple[str, bool, bool]]:
