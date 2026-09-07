@@ -835,6 +835,11 @@ REASONING_ENUM_TOOLS_ENABLED # 逐步推理的类型化集合枚举 reflect 工�
 REASONING_CHUNK_SEARCH_ENABLED # 逐步推理的原文段落检索一等动作 search_chunks 及无图首轮确定性播种总闸（默认 true；false 时动作不进 schema/prompt/白名单、播种不跑、REASONING_MAX_CHUNK_SEARCHES 无消费者，逐字回到接入前——但仍会在请求级 memo 内为判定图是否在范围内付一次图存在性 EXISTS 查询，这与总闸开关无关）
 REASONING_OUTLINE_ENABLED    # 逐步推理的大纲便签 reflect 动作，update_outline（默认 true；不论此开关，仅「穷尽」检索档位提供该动作；false 关闭该动作与按节合成，回到接入前逐字一致的行为）；同一个开关也管深度报告每节深挖在穷尽档（depth 16，见下方 REPORT_MAX_SECTIONS）的启用，不另设报告专属开关
 REASONING_OUTLINE_KG_GAP_ENABLED # 大纲便签的 KG 弱支撑边回喂：每次被接受的 update_outline 之后附带弱支撑关系提示（默认 true；叠在 REASONING_OUTLINE_ENABLED 之上；false 关闭后大纲便签不再附带弱支撑关系提示，零额外查询）；深度报告每节深挖到达穷尽档时同样生效
+REASONING_REFLECT_V2_ENABLED # 逐步推理 Ask 与深度报告的 reflect v2 协议总闸（默认 **false**）。开启时每一轮反思都由一次纯内存的能力投影生成：模型读到的动作说明、schema 的 `next_action` 枚举、解析白名单是同一个值的三处呈现，所以配额耗尽、被调用方策略关掉、在所选来源范围下不安全、或无图时没有意义的动作会**同时**从三处消失；同时把一轮拆成固定的 system 段（任务、材料不可信、范围规则、动作契约、结束规则）与逐轮的 user 段（问题与候选材料），响应用单一 `arguments` 对象取代逐动作的分支字段，并按所选动作类型化校验。关闭时逐字节回到接入前：旧 prompt/schema/白名单/调用次数/trace 键集，不构造能力投影、不增加任何 I/O。它**不是**前端检索档位，也不由档位推导。Knowhow 智能补全无论此开关如何都显式留在 legacy 协议上
+REASONING_REFLECT_EVIDENCE_CHARS_BY_EFFORT # v2 证据卡的按档位字符预算，JSON 对象（默认 `{"overview":4000,"standard":6000,"deep":8000,"thorough":12000,"exhaustive":16000}`）。启动期校验：必须**恰含**五个档位 id，每个值是 1,000–64,000 的整数（JSON 布尔值会被拒绝，而不是被静默读成 0/1），且随档位不递减。刻意独立于最终合成的 `kg_context_chars`/`chunk_context_chars`——判断下一步与写答案要的信息粒度不同，因此不从它们按比例换算
+REASONING_REFLECT_EXCERPT_CHARS # v2 证据卡里单条证据的原文摘录上限（默认 240；80–1,000）
+REASONING_REFLECT_STATE_CHARS # 只界定**可压缩区**（近期动作观察与历史建议）的投影预算（默认 6,000；1,000–32,000）。它不是整个 prompt 的上限：用户完整问题、冻结约束、当前合法动作与额度、完整大纲/溢出与枚举覆盖各自按自己的边界保留，绝不会为了塞进这个池子被裁尾
+REASONING_REFLECT_RECENT_OBSERVATIONS # 最多回喂几行近期动作观察（默认 6；1–20）
 AGENT_PROFILE_ENABLED        # 「AI 对这个库的理解」总闸：同时管住 plan/reflect 注入、后台巡固触发与两个 API 面的可见性（默认 true；false 处处逐字回到接入前——不注入、不记 trace 步、不排巡固，API 返回 enabled=false 而非 404）
 AGENT_PROFILE_BASE_TRIGGER   # 共享底座层（corpus_shape/key_entities/corpus_gaps）重新巡固前累计的来源变更次数（默认 5）
 AGENT_PROFILE_OVERLAY_TRIGGER # 该成员私有覆盖层（retrieval_notes/usage_gaps）重新巡固前累计的已完成提问次数；已完成的深度报告直接达阈（默认 10）

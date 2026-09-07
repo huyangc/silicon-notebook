@@ -42,7 +42,15 @@ from app.services.collection_catalog import (
 from app.services.collection_enumeration import (
     LOCAL_ONLY_SCOPE_SUFFIX, TRUNCATED_CONCURRENT_CHANGE, EnumerationBudget,
 )
-from app.services.prompts import reflect_prompt, reflect_schema_hint
+from app.services.prompts import (
+    reflect_prompt, reflect_schema_hint, reflect_v2_schema_hint,
+    reflect_v2_system_prompt, reflect_v2_user_prompt,
+)
+from app.services.reasoning_actions import (
+    ACTION_DEFINITIONS, REFLECT_INVALID_ACTION, UNAVAILABLE_DISCLOSE_MAX,
+    ActionParam, ReflectCapabilities, ReflectCapabilityFacts,
+    build_reflect_capabilities,
+)
 from app.services.retrieval_experience_block import (
     CONSULT_MEMORY_TOP_K, action_id_for, adopted_entry_ids, clip_rationale,
     render_consult_block, render_experience_block,
@@ -268,12 +276,262 @@ def _reflect_fallback_reason(exc: BaseException) -> str:
             else type(exc).__name__)
 
 
+# --- v2 协议的解析层(设计稿 §5.2) ------------------------------------------
+# 稳定的 invalid 原因码。前缀式的两个(`missing_argument:` / `invalid_argument:`)
+# 带上字段名:模型下一轮要知道的是「哪一个参数」,只说「参数不对」它多半换一个
+# 同样不对的值再试一次(exact_lookup 的那条教训)。
+_V2_UNKNOWN_ACTION = "unknown_action"
+_V2_UNAVAILABLE_PREFIX = "unavailable_action:"
+_V2_MISSING_ARGUMENT_PREFIX = "missing_argument:"
+_V2_INVALID_ARGUMENT_PREFIX = "invalid_argument:"
+_V2_INVALID_SUFFICIENT = "invalid_sufficient"
+_V2_INVALID_ARGUMENTS_OBJECT = "invalid_arguments_object"
+_V2_SUFFICIENT_CONTRADICTION = "sufficient_with_retrieval_action"
+
+
+class _V2ArgumentError(Exception):
+    """一次参数校验失败。``code`` 直接进 `ReflectDecision.invalid_reason`。"""
+
+    def __init__(self, code: str):
+        super().__init__(code)
+        self.code = code
+
+
+def _reflect_invalid(reason: str) -> "ReflectDecision":
+    """invalid/unavailable 决定的唯一产地。
+
+    `sufficient` 恒为 False:一份被判定不可执行的载荷里,那一格与其它字段一样是
+    给那个做不成的动作填的,照单收下就会让 run() 的 `or decision.sufficient`
+    短路把它当成一次「模型说够了」直接收尾——一个非法动作因此可以终止检索。
+    """
+    return ReflectDecision(
+        sufficient=False,
+        next_action=REFLECT_INVALID_ACTION,
+        invalid_reason=reason,
+    )
+
+
+def _v2_text(arguments: dict, name: str, *, required: bool) -> str:
+    value = arguments.get(name, "")
+    if value is None:
+        value = ""
+    if not isinstance(value, str):
+        raise _V2ArgumentError(f"{_V2_INVALID_ARGUMENT_PREFIX}{name}")
+    value = value.strip()
+    if required and not value:
+        raise _V2ArgumentError(f"{_V2_MISSING_ARGUMENT_PREFIX}{name}")
+    return value
+
+
+def _v2_enum(
+    arguments: dict, spec: "Optional[ActionParam]", *, default: str = "",
+) -> str:
+    """枚举参数:非白名单值是 invalid,**不**静默清成空串。
+
+    legacy 在这里清成空串、让执行处记一条 skip;v2 明确把它折成 invalid 观察,
+    原因码带上字段名。差别是刻意的:清空之后模型收到的信号是「这个动作没做
+    成」,而它需要知道的是「kind 这个值不在允许集里」。
+
+    `spec` 为 None = 这一轮的投影里没有这个参数分支(能力收窄把它摘掉了)。此时
+    取默认值而不是抛类型错误:一个模型看不到的槽位,它填了什么都不该改变分派。
+    """
+    if spec is None:
+        return default
+    value = arguments.get(spec.name, "")
+    if value is None or value == "":
+        return default
+    if not isinstance(value, str):
+        raise _V2ArgumentError(f"{_V2_INVALID_ARGUMENT_PREFIX}{spec.name}")
+    value = value.strip()
+    if not value:
+        return default
+    if spec.choices and value not in spec.choices:
+        raise _V2ArgumentError(f"{_V2_INVALID_ARGUMENT_PREFIX}{spec.name}")
+    return value
+
+
+def _v2_apply_arguments(
+    action: str,
+    arguments: dict,
+    capabilities: "ReflectCapabilities",
+    decision: "ReflectDecision",
+) -> None:
+    """把 v2 的 `arguments` 适配到既有 `ReflectDecision` 的字段上。
+
+    **只做适配,不做第二套执行**:每个动作的执行体、预算、trace 与 legacy 完全
+    共用 —— 两条协议在 `run()` 之后走的是同一份代码。这里的每一行都只是把
+    「单一 arguments 对象里的某个键」搬到「decision 上那个动作的既有字段」。
+    """
+    if action == "add_subquery":
+        query = _v2_text(arguments, "query", required=True)
+        types: List[str] = []
+        if capabilities.param(action, "types") is not None:
+            # 无图 run 的投影把 `types` 整个摘掉了(没有知识对象类型这个概念)。
+            # 那种情况下**连读都不读**:一个模型从没被告知的槽位,既不该改变
+            # 检索,也不该成为一条它无从理解的参数错误。
+            raw_types = arguments.get("types")
+            if raw_types is not None and not isinstance(raw_types, list):
+                raise _V2ArgumentError(f"{_V2_INVALID_ARGUMENT_PREFIX}types")
+            types = [
+                t for t in (raw_types or [])
+                if isinstance(t, str) and t in KG_TYPES
+            ]
+        prefer_spec = capabilities.param(action, "prefer")
+        prefer = (
+            _v2_enum(arguments, prefer_spec, default="balanced")
+            if prefer_spec is not None else "balanced"
+        )
+        decision.new_sub_query = SubQuery(
+            query=query, types=types, prefer=prefer, reason=decision.reason)
+    elif action == "search_elements":
+        decision.elements_query = _v2_text(arguments, "query", required=False)
+    elif action == "search_chunks":
+        decision.chunks_query = _v2_text(arguments, "query", required=False)
+    elif action == "ppr_retrieve":
+        decision.ppr_query = _v2_text(arguments, "query", required=False)
+    elif action == "exact_lookup":
+        # 清洗与 legacy 共用 `clean_exact_term`(去包裹标点、不截长);"缺名称"
+        # 在清洗**之后**判,否则一个只有引号的 term 会被当成给了名称。
+        term = clean_exact_term(_v2_text(arguments, "term", required=True))
+        if not term:
+            raise _V2ArgumentError(f"{_V2_MISSING_ARGUMENT_PREFIX}term")
+        decision.exact_term = term
+    elif action == "expand_graph":
+        decision.expand_object_id = _v2_text(
+            arguments, "object_id", required=True)
+        edge = _v2_text(arguments, "edge_type", required=False)
+        decision.expand_edge_type = edge or None
+        decision.expand_direction = _v2_enum(
+            arguments, capabilities.param(action, "direction"), default="both")
+    elif action == "expand_community":
+        decision.community_focal = _v2_text(
+            arguments, "focal", required=False)
+    elif action == "follow_chain":
+        decision.chain_start_object_id = _v2_text(
+            arguments, "start_object_id", required=True)
+        decision.chain_target_object_id = _v2_text(
+            arguments, "target_object_id", required=False)
+        edge = _v2_text(arguments, "edge_type", required=False)
+        decision.chain_edge_type = edge or None
+        decision.chain_direction = _v2_enum(
+            arguments, capabilities.param(action, "direction"), default="out")
+    elif action in (ENUMERATE_ELEMENTS_ACTION, ENUMERATE_KG_OBJECTS_ACTION):
+        _v2_apply_enumerate(action, arguments, capabilities, decision)
+    elif action == OUTLINE_ACTION:
+        decision.outline_sections = parse_outline_sections(
+            arguments.get("sections"))
+        if not decision.outline_sections:
+            raise _V2ArgumentError(f"{_V2_MISSING_ARGUMENT_PREFIX}sections")
+
+
+def _v2_apply_enumerate(
+    action: str,
+    arguments: dict,
+    capabilities: "ReflectCapabilities",
+    decision: "ReflectDecision",
+) -> None:
+    """枚举分支的 arguments 适配。
+
+    `collection="sources"` 与 kind/object_type 是一个 required_group:两者都空
+    才是缺参数。这条正是既有 fail_closed 校验必须放行的那一条(文档目录请求本
+    来就没有子类型),所以 v2 也按同一条规则判,不是各写一份。
+    """
+    subtype_name = (
+        "kind" if action == ENUMERATE_ELEMENTS_ACTION else "object_type")
+    subtype = _v2_enum(arguments, capabilities.param(action, subtype_name))
+    collection = _v2_enum(arguments, capabilities.param(action, "collection"))
+    if not subtype and not collection:
+        raise _V2ArgumentError(
+            f"{_V2_MISSING_ARGUMENT_PREFIX}{subtype_name}")
+    decision.enumerate_collection = collection
+    if action == ENUMERATE_ELEMENTS_ACTION:
+        decision.enumerate_kind = subtype
+        decision.enumerate_source_id = _v2_text(
+            arguments, "source_id", required=False)
+        decision.enumerate_source_title = _v2_text(
+            arguments, "source_title", required=False)
+    else:
+        decision.enumerate_object_type = subtype
+
+
+def parse_reflect_v2(
+    data: dict, capabilities: "ReflectCapabilities",
+) -> "ReflectDecision":
+    """v2 载荷 → `ReflectDecision`(或一条 invalid/unavailable 决定)。
+
+    校验顺序即诊断价值顺序:**先**说清「你选的这个动作本轮存在吗」,再说
+    「布尔值是不是真布尔」,最后才是参数。反过来的话,一个选了被禁动作又填错
+    参数的载荷会被报成参数问题,而模型要改的其实是通道。
+
+    白名单直接读 `capabilities.actions` —— 与 prompt 的动作列表、schema 的
+    `next_action` 枚举同一个对象,三处不可能不同步。
+    """
+    action = data.get("next_action", "")
+    action = action if isinstance(action, str) else ""
+    action = action.strip()
+    if not capabilities.has(action):
+        if action in ACTION_DEFINITIONS:
+            reason = capabilities.reason_for(action) or "action_unavailable"
+            return _reflect_invalid(f"{_V2_UNAVAILABLE_PREFIX}{reason}")
+        return _reflect_invalid(_V2_UNKNOWN_ACTION)
+    sufficient = data.get("sufficient", False)
+    if not isinstance(sufficient, bool):
+        # 真 boolean 校验(设计稿 §5.2)。`"true"` / `1` 不算——一个把字符串当真
+        # 值用的协议里,`"false"` 也是真。
+        return _reflect_invalid(_V2_INVALID_SUFFICIENT)
+    if sufficient and ACTION_DEFINITIONS[action].produces_evidence:
+        # 「再检索一次」与「证据已经够了」不能在同一轮同时成立。绝不静默地先跑
+        # 那次检索再宣称充分:那会把一次没被看过的检索结果算进"已充分"的依据。
+        return _reflect_invalid(_V2_SUFFICIENT_CONTRADICTION)
+    arguments = data.get("arguments", {})
+    if arguments is None:
+        arguments = {}
+    if not isinstance(arguments, dict):
+        return _reflect_invalid(_V2_INVALID_ARGUMENTS_OBJECT)
+    decision = ReflectDecision(
+        sufficient=sufficient, next_action=action,
+        reason=str(data.get("reason", "")),
+    )
+    raw_assessment = data.get("assessment")
+    if isinstance(raw_assessment, dict):
+        # 只留存,不消费(T4)。存在即报错是本期明确禁止的行为。
+        decision.assessment = raw_assessment
+    try:
+        _v2_apply_arguments(action, arguments, capabilities, decision)
+    except _V2ArgumentError as exc:
+        return _reflect_invalid(exc.code)
+    return decision
+
+
+def reflect_invalid_summary(decision: "ReflectDecision") -> str:
+    """v2 下一条 invalid/unavailable 观察的上屏文案。
+
+    分三档说人话:通道本轮不可用 / 参数缺失或不合法 / 其它协议问题。措辞按
+    「这一步没做成什么」写而不是抄机器码——机器码进 detail,那才是给排查用的。
+    """
+    reason = decision.invalid_reason
+    if reason.startswith(_V2_UNAVAILABLE_PREFIX):
+        return "本轮不提供模型选择的这个动作,未执行任何检索"
+    if reason.startswith(
+        (_V2_MISSING_ARGUMENT_PREFIX, _V2_INVALID_ARGUMENT_PREFIX)
+    ):
+        return "模型给出的动作参数不完整或不合法,未执行任何检索"
+    if reason == _V2_SUFFICIENT_CONTRADICTION:
+        return "模型同时要求继续检索又声称证据已足,本轮不予执行"
+    return "模型这一轮的决定无法执行,未执行任何检索"
+
+
 def _reflect_step_summary(decision: "ReflectDecision") -> str:
     """reflect 步上屏的那一行。兜底轮说人话,正常轮维持原样。
 
     上屏文案是给人读的,机器原因只进 `detail.fallback_reason`——前端
     (`reasoning-trace.ts`)因此一个字都不用改。
     """
+    if decision.invalid_reason:
+        # v2 专用:模型给了合规 JSON,但它选的动作本轮做不了(或参数不合法)。
+        # 上屏说人话,机器码只进下面那条 skip 步的 detail。legacy 决定的
+        # `invalid_reason` 恒为空串,所以这条分支对关闭态不可达。
+        return reflect_invalid_summary(decision)
     if not decision.fallback:
         return decision.reason or decision.next_action
     reason = decision.fallback_reason
@@ -1970,6 +2228,18 @@ class ReflectDecision:
     # run() 据它在 reflect 步 detail 上写稀疏键、并把上屏那行换成中文整句。
     fallback: bool = False
     fallback_reason: str = ""
+    # --- v2 协议专用(设计稿 §5.2)。legacy 路径永不写这两个字段,所以关闭态的
+    # 决定与接入前逐字段相同。 ---
+    # 一份「可识别但本轮不可执行 / 缺参数 / 字段矛盾」的载荷被折成的稳定原因码。
+    # 非空 ⇒ `next_action` 是 `REFLECT_INVALID_ACTION` 这个伪动作,`run()` 据它记
+    # 一条零 I/O 的观察并走链尾统一记账。它**不是** `fallback`:那一族说的是
+    # 「模型没能给出可用响应」(provider/JSON 失败),这一族说的是「模型给了一个
+    # 合规 JSON,但它选的事这一轮做不了」——两者对排查是完全不同的两件事。
+    invalid_reason: str = ""
+    # 模型对必答方面的自评(设计稿 §7)。**本期只解析、不消费**:T4 才把它接进
+    # 终态与方面账目。留这个入口是为了让 v2 载荷从第一天起就允许携带它而不报错
+    # ——一个「有它就崩」的解析器会逼 T4 去改协议版本。
+    assessment: Optional[dict] = None
 
 
 @dataclass
@@ -2363,6 +2633,12 @@ class ReasoningRetriever:
         # keys (knowhow completion) turn this off: an enumerated list would
         # spend the run's budget on items their prompt cannot cite.
         self.allow_enumeration = True
+        # reflect v2 协议的**调用方**策略位(设计稿 §4)。部署总闸
+        # ``REASONING_REFLECT_V2_ENABLED`` 之上再叠一层,理由与
+        # ``allow_consult_memory`` 那条完全一样:knowhow 补全显式留在 legacy,
+        # 而"它恰好没传 limits / 恰好关掉了半数通道"这类偶然性不是策略。
+        # Ask 与深度报告保持 True,总闸打开时两者一起换协议。
+        self.allow_reflect_v2 = True
         self.untrusted_evidence = False
         # P1-B: 留存 search() 调用的全量打分(norm_key → {oid: (relevance, score)}),
         # 供收尾 _quota_rerank 复用而非重跑 federated_retrieve。见 search()/_quota_rerank。
@@ -2432,6 +2708,96 @@ class ReasoningRetriever:
     def _kg_in_scope(self, notebook_id) -> bool:
         """本 run 的检索范围内有没有知识图谱。判据单点在 `kg_in_scope_for`。"""
         return kg_in_scope_for(self.retrieval, notebook_id)
+
+    # --- reflect v2 协议 ---
+    def reflect_v2_active(self) -> bool:
+        """本 run 的 reflect 用不用 v2 协议(设计稿 §4)。
+
+        与其它几把闸同款单点判定:**同一个**判据决定构不构造能力投影、
+        prompt/schema 走哪一套、解析走哪一套。关闭态因此逐字节回到接入前——
+        不构造任何新状态、不多付一次探测,`run()` 里除了这一个判断之外没有第二
+        处会问"现在是 v1 还是 v2"。
+
+        `getattr` 而不是直读:窄测试替身与离线工具里的 duck-typed settings 适配器
+        并不带这个字段(镜像 `reasoning_quota_reuse_enabled` 的既有写法),而缺省
+        必须是**关**——一个认不出这个开关的调用方绝不该被静默切到新协议上。
+        """
+        return (
+            bool(getattr(self.settings, "reasoning_reflect_v2_enabled", False))
+            and self.allow_reflect_v2
+        )
+
+    def _reflect_capabilities(
+        self,
+        state: "_ReasoningRunState",
+        *,
+        steps: int,
+        elements_searches: int,
+        exact_lookups: int,
+        follow_chain_searches: int,
+        consult_used: int,
+        outline_updates: int,
+        outline_overflow: bool,
+        outline_cap_repair_used: bool,
+        terminal_overflow_repair: bool,
+    ) -> "ReflectCapabilities":
+        """把这一轮的运行时事实折成一次不可变的能力投影。
+
+        计数器从 `run()` 传进来而不是从 `state` 读:reflect 循环把大部分标量解包
+        成了局部名,`state` 上那几个是**陈旧值**(见 `_ReasoningRunState` 的纪律
+        说明)。`ppr_searches`/`chunk_searches`/枚举三池是那条纪律的既有例外,
+        它们仍以 `state` 为权威,所以这里直读。
+
+        这个方法只做加减法与布尔合并,零 I/O 例外只有 `_unsafe_scope_restricted`
+        与 `chunk_search_active` 两个既有的请求级判定——它们在同一轮的动作分发
+        里本来就会被问到,这里不新增数据库探测。
+        """
+        policy = state.action_policy
+        enumeration = state.enumeration_active
+        limits = state.enum_limits
+        facts = ReflectCapabilityFacts(
+            kg_in_scope=state.kg_in_scope,
+            scope_restricted=self._unsafe_scope_restricted(),
+            has_candidates=bool(state.collected),
+            chunk_search_active=self.chunk_search_active(),
+            exact_lookup_active=bool(
+                self.settings.exact_lookup_enabled and self.allow_exact_lookup),
+            ppr_active=bool(self.allow_ppr and self.settings.graph_ppr_enabled),
+            community_active=bool(self.allow_community_expansion),
+            enumeration_active=enumeration,
+            consult_memory_active=bool(
+                state.consult_memory_flag and self.allow_consult_memory),
+            outline_active=state.outline_active,
+            element_searches_left=max(
+                0,
+                self.settings.reasoning_max_element_searches
+                - elements_searches),
+            chunk_searches_left=max(
+                0, policy.max_chunk_searches - state.chunk_searches),
+            exact_lookups_left=max(
+                0, policy.max_exact_lookups - exact_lookups),
+            ppr_left=max(0, policy.max_ppr_retrieves - state.ppr_searches),
+            follow_chain_left=max(
+                0, policy.max_follow_chain_actions - follow_chain_searches),
+            consult_left=max(0, policy.max_consult_memory - consult_used),
+            outline_updates_left=max(
+                0, state.max_outline_updates - outline_updates),
+            enum_rows_left=limits.enum_rows_per_run - state.enum_rows_used,
+            enum_pages_left=limits.enum_pages_per_run - state.enum_pages_used,
+            enum_payload_left=(
+                limits.structured_payload_chars - state.enum_payload_used),
+            element_kinds=(
+                tuple(ENUMERABLE_ELEMENT_KINDS) if enumeration else ()),
+            object_types=(
+                tuple(ENUMERABLE_KG_OBJECT_TYPES) if enumeration else ()),
+            # 回想的产出只进**下一轮**上下文,末轮执行等于白花一步(既有的
+            # consult_memory_last_turn 判据,这里只是把它提前到能力投影上)。
+            last_turn=steps >= state.max_steps,
+            outline_repair_available=(
+                outline_overflow and not outline_cap_repair_used),
+            terminal_overflow_repair=terminal_overflow_repair,
+        )
+        return build_reflect_capabilities(facts)
 
     # --- 集合枚举工具的总闸 ---
     def enumeration_active(self) -> bool:
@@ -2711,9 +3077,69 @@ class ReasoningRetriever:
                for s in ex.sub_queries]
         return out or fallback
 
+    def _reflect_v2(
+        self, question, candidates_summary,
+        capabilities: "ReflectCapabilities", client,
+    ) -> "ReflectDecision":
+        """一轮 v2 reflect:能力投影 → system/user 两段 → 类型化校验(设计稿 §5.2)。
+
+        与 legacy 的唯一共同点是传输(`chat_json`)与产出(`ReflectDecision`),
+        中间三件事都换了:动作面由 `capabilities` 一处生成、指令与数据分成
+        system/user 两条消息、参数由 reasoning 层按所选动作类型化校验。校验之后
+        **不复制第二套执行代码**——`run()` 的动作分发链原样消费同一个决定。
+
+        失败合同与 legacy 逐字一致:provider/JSON 在既有重试之后仍失败走
+        `_reflect_fallback`(`fail_closed` 下照抛),`AskCancelled` 始终上抛。
+        一次兜底**不是**"模型认为证据够了",两者在轨迹上由 `fallback_reason`
+        分开(见 `_reflect_fallback` 的说明)。
+        """
+        try:
+            system_text = reflect_v2_system_prompt(
+                capabilities, UNAVAILABLE_DISCLOSE_MAX)
+            if self.untrusted_evidence:
+                # 严格调用方的额外一句"材料不可信"接在固定指令**之前**:v2 的
+                # system 段本身已经讲了这件事,这一句是那条更严格的既有合同,
+                # 两者同向叠加,不互相覆盖。
+                system_text = (
+                    f"{UNTRUSTED_EVIDENCE_SYSTEM_INSTRUCTION}\n\n{system_text}")
+            raw = client.chat_json(
+                [
+                    {"role": "system", "content": system_text},
+                    {"role": "user", "content": reflect_v2_user_prompt(
+                        question, candidates_summary)},
+                ],
+                reflect_v2_schema_hint(capabilities),
+                timeout=self.settings.reasoning_timeout_seconds,
+                max_retries=self.settings.reasoning_max_retries,
+                cancel_event=self.cancel_event)
+            data = json.loads(raw)
+            if not isinstance(data, dict):
+                if self.fail_closed:
+                    raise ValueError(
+                        "reasoning model returned a non-object reflection")
+                return _reflect_fallback("non_object")
+            decision = parse_reflect_v2(data, capabilities)
+            if decision.invalid_reason and self.fail_closed:
+                raise ValueError(
+                    "reasoning model returned an unusable reflection: "
+                    f"{decision.invalid_reason}")
+            return decision
+        except AskCancelled:
+            raise
+        except Exception as exc:  # noqa: BLE001 — fail-open 合同,同 legacy
+            if self.fail_closed:
+                raise
+            return _reflect_fallback(_reflect_fallback_reason(exc))
+
     def reflect(self, question, candidates_summary, outline: bool = False,
-                consult_memory: bool = False, kg_actions: bool = True):
-        """``outline`` = 本 run 提供大纲便签动作(仅 exhaustive 档,见
+                consult_memory: bool = False, kg_actions: bool = True,
+                capabilities: "Optional[ReflectCapabilities]" = None):
+        """``capabilities`` 非空 = 本轮走 v2 协议(设计稿 §5.2),由 `run()` 在
+        总闸开启时构造并传入;None(默认,以及全部既有调用方与测试替身)= legacy
+        路径,下面每一个字节与接入前相同。三把 legacy 闸(outline/consult_memory/
+        kg_actions)在 v2 下不再被读取——它们表达的条件已经并进能力投影里了。
+
+        ``outline`` = 本 run 提供大纲便签动作(仅 exhaustive 档,见
         ``outline_wiring_active``)。默认 False,所以既有调用方(与关闭态)拿到的
         prompt/schema 与接入前逐字相同。档位是 run() 的参数而不是实例状态,所以
         这把闸只能从调用处传进来——与枚举那把由实例状态算出的闸并列、互不影响。
@@ -2738,6 +3164,9 @@ class ReasoningRetriever:
             # 未配置也是兜底:它与「模型判定证据够了」在轨迹上同形,而两者对
             # 排查是天差地别的两件事(一个是部署没接好,一个是推理结论)。
             return _reflect_fallback("model_unconfigured")
+        if capabilities is not None:
+            return self._reflect_v2(
+                question, candidates_summary, capabilities, client)
         enumeration = self.enumeration_active()
         # `search_chunks` 的闸是部署级 kill switch,所以在这里现算而不是像
         # outline/consult_memory 那样从调用处传进来:它不看档位、不看请求,
@@ -4196,6 +4625,98 @@ class ReasoningRetriever:
                          summary=f"检索原文段落:{cq},新增 {len(new)} 段",
                          detail=_chunk_action_detail))
 
+    def _action_expand_community(
+        self, state: "_ReasoningRunState", decision: "ReflectDecision",
+    ) -> None:
+        """reflect 的 `expand_community` 动作分支(逐字搬自 `run` 的 elif 链)。
+
+        与 `_action_ppr_retrieve`/`_action_search_chunks` 同形、同理由:`run` 是
+        有零松弛长度天花板的热函数,动作执行体不记在它头上。这里读写的全是
+        `state` 上的**同一批可变容器**(`collected`/`attempted`/`used_queries`/
+        `community_focals_done`),标量只读不写,所以行为逐位不变。
+
+        搬动时唯一消失的东西是一处**局部名遮蔽**:原来这段把展示文案赋给了叫
+        `summary` 的局部名,而那正是 reflect 循环拼候选摘要用的名字。它每轮开头
+        都会被重算,所以遮蔽从来没有产生过可观察后果——但也从来不是有意的。
+        """
+        record = state.record
+        notebook_id = state.notebook_id
+        collected = state.collected
+        attempted = state.attempted
+        used_queries = state.used_queries
+        # 横向对比:焦点 → 兄弟实体(共提优先、社区回退),逐个发子查询。
+        # 焦点缺省用当前最高分候选名;同一 focal 一 run 只做一次;fail-open。
+        focal_name = decision.community_focal or (
+            max(collected.values(), key=lambda h: h.score).payload.get("name", "")
+            if collected else "")
+        fkey = _norm_query(focal_name)
+        if not focal_name or fkey in state.community_focals_done:
+            record(TraceStep(step_type="skip",
+                             summary="跳过 expand_community(无焦点或已扩展)",
+                             detail={"reason": "no_focal_or_done", "focal": focal_name}))
+            return
+        state.community_focals_done.add(fkey)
+        # 挂载的参考库可能有多个(多领域基准库),逐个扩展、去重合并——
+        # 不再是「拿全局唯一 base 的一个 id」。source 一旦被某个库以
+        # comention(共提,高精度路径)命中就不再被后续库的 community
+        # (社区回退)覆盖——sticky-prefer comention,避免把已发生的高精度
+        # 贡献在展示文案上错误降级成「同社区实体」。单库场景(循环只跑
+        # 一轮)与改前逐字等价。
+        peers, peer_source = [], "community"
+        try:
+            for base_nb in self.communities.mounted_base_ids(notebook_id):
+                found, src = self.communities.resolve_comparison_peers(
+                    base_nb, focal_name, state.question,
+                    top_k=self.settings.community_peers_topk,
+                    candidates=self.settings.community_rerank_candidates)
+                for pname in found:
+                    if pname not in peers:
+                        peers.append(pname)
+                if found and peer_source != "comention":
+                    peer_source = src
+        except Exception as exc:  # noqa: BLE001 — 注释声称 fail-open 但原代码未实现兜底:
+            if self.fail_closed:
+                raise
+            # community/共提层任何故障(缺表 / 数据异常)都不该拖垮 reasoning 或
+            # 深度报告的社区/横向对比节 —— 跳过扩展、继续。
+            record(TraceStep(step_type="skip",
+                             summary="跳过 expand_community(对比层不可用)",
+                             detail={"reason": "community_error", "error": str(exc)[:120]}))
+            peers, peer_source = [], "community"
+        # 总量帽(见 _COMMUNITY_PEERS_CAP_FACTOR 注释):合并各库结果后才截断,
+        # 取自 mounted_base_ids 的确定性遍历顺序(MOUNT_ORDER)+ list.append 的
+        # 插入序,不依赖 dict/set 遍历顺序,同样的输入总是截出同样的前 N 个。
+        peers_cap = (
+            self.settings.community_peers_topk
+            * state.action_policy.community_peers_cap_factor
+        )
+        if len(peers) > peers_cap:
+            peers = peers[:peers_cap]
+        added, names = 0, []
+        for pname in peers:
+            raise_if_cancelled(self.cancel_event)
+            key = _norm_query(pname)
+            if key in attempted:
+                continue
+            got = 0
+            for h in self.search(notebook_id, pname)[:state.per_query_take]:
+                if h.object_id not in collected:
+                    collected[h.object_id] = h
+                    added += 1
+                    got += 1
+            attempted[key] = _QueryAttempt(query=pname, new=got, tries=1)
+            if pname not in used_queries:
+                used_queries.append(pname)
+            names.append(pname)
+        # 文案随来源切:共提命中 →「横向对比(共提)…个同类实体」,社区回退 → 原文案。
+        # step_type 不变(前端「对比」标签零改动);detail 增 source 供观测。
+        step_summary = (f"横向对比(共提):纳入 {len(names)} 个同类实体,新增候选 {added}"
+                        if peer_source == "comention"
+                        else f"横向对比:纳入 {len(names)} 个同社区实体,新增候选 {added}")
+        record(TraceStep(step_type="expand_community", summary=step_summary,
+                         detail={"focal": focal_name, "peers": names,
+                                 "new": added, "source": peer_source}))
+
     def _first_round_empty_fallback(
         self, state: "_ReasoningRunState",
     ) -> None:
@@ -4763,7 +5284,7 @@ class ReasoningRetriever:
         failed_search_queries = state.failed_search_queries
         attempted = state.attempted
         used_queries = state.used_queries
-        community_focals_done = state.community_focals_done
+        # `community_focals_done` 不解包:唯一读写点在 `_action_expand_community`。
         follow_chain_done = state.follow_chain_done
         steps = state.steps
         uncovered_intent_queries = state.uncovered_intent_queries
@@ -4990,6 +5511,27 @@ class ReasoningRetriever:
                 outline_terminal_repair_used = True
                 forced_overflow_repair = False
             steps += 1
+            # reflect v2(设计稿 §5.1):一次纯内存能力投影,prompt/schema/解析
+            # 白名单三处共用它。总闸关着时**不构造**,`run()` 因此逐字节回到
+            # 接入前——这一个判断是整个循环里唯一问"现在是哪套协议"的地方。
+            capabilities = self._reflect_capabilities(
+                state, steps=steps, elements_searches=elements_searches,
+                exact_lookups=exact_lookups, consult_used=consult_used,
+                follow_chain_searches=follow_chain_searches,
+                outline_updates=outline_updates,
+                outline_overflow=bool(outline_overflow),
+                outline_cap_repair_used=outline_cap_repair_used,
+                terminal_overflow_repair=terminal_overflow_repair,
+            ) if self.reflect_v2_active() else None
+            if capabilities is not None and capabilities.only_answer:
+                # 除 answer 外无可执行动作:服务端直接以能力原因收尾,不再花一次
+                # 模型调用去请求一个只可能回 answer 的决定,也不伪造一条"模型判定
+                # 充分"的 reflect 步(设计稿 §5.1)。
+                record(TraceStep(
+                    step_type="skip",
+                    summary="除作答外已无可执行的检索动作,直接收尾",
+                    detail={"reason": "no_executable_action"}))
+                break
             summary = self._reflection_summary(
                 collected, elements, chunks, chains, outline_active,
                 ever_shown_outline_keys, limits, outline)
@@ -5209,6 +5751,8 @@ class ReasoningRetriever:
                 reflect_kwargs["outline"] = True
             if consult_memory_flag:
                 reflect_kwargs["consult_memory"] = True
+            if capabilities is not None:
+                reflect_kwargs["capabilities"] = capabilities
             decision = self.reflect(question, summary, **reflect_kwargs)
             raise_if_cancelled(self.cancel_event)
             reflect_detail = {"next_action": decision.next_action,
@@ -5281,7 +5825,16 @@ class ReasoningRetriever:
                 len(collected) + len(elements) + len(chunks) + len(chains)
                 + state.enum_rows_used
             )
-            if (
+            if decision.next_action == REFLECT_INVALID_ACTION:
+                # v2:模型选了一个本轮不可执行的动作、或参数缺失/矛盾。零工具
+                # I/O 记一条观察,再落到链尾与其它 skip **同一份**
+                # no_progress/stale 记账(设计稿 §5.2)。不能裸 continue——那会绕过
+                # 链尾记账,反复提交非法动作就规避了熔断。
+                record(TraceStep(
+                    step_type="skip",
+                    summary=reflect_invalid_summary(decision),
+                    detail={"reason": decision.invalid_reason}))
+            elif (
                 self._unsafe_scope_restricted()
                 and decision.next_action in (
                     ENUMERATE_ELEMENTS_ACTION, ENUMERATE_KG_OBJECTS_ACTION
@@ -5850,78 +6403,9 @@ class ReasoningRetriever:
                     },
                 ))
             elif decision.next_action == "expand_community":
-                # 横向对比:焦点 → 兄弟实体(共提优先、社区回退),逐个发子查询。
-                # 焦点缺省用当前最高分候选名;同一 focal 一 run 只做一次;fail-open。
-                focal_name = decision.community_focal or (
-                    max(collected.values(), key=lambda h: h.score).payload.get("name", "")
-                    if collected else "")
-                fkey = _norm_query(focal_name)
-                if not focal_name or fkey in community_focals_done:
-                    record(TraceStep(step_type="skip",
-                                     summary="跳过 expand_community(无焦点或已扩展)",
-                                     detail={"reason": "no_focal_or_done", "focal": focal_name}))
-                else:
-                    community_focals_done.add(fkey)
-                    # 挂载的参考库可能有多个(多领域基准库),逐个扩展、去重合并——
-                    # 不再是「拿全局唯一 base 的一个 id」。source 一旦被某个库以
-                    # comention(共提,高精度路径)命中就不再被后续库的 community
-                    # (社区回退)覆盖——sticky-prefer comention,避免把已发生的高精度
-                    # 贡献在展示文案上错误降级成「同社区实体」。单库场景(循环只跑
-                    # 一轮)与改前逐字等价。
-                    peers, peer_source = [], "community"
-                    try:
-                        for base_nb in self.communities.mounted_base_ids(notebook_id):
-                            found, src = self.communities.resolve_comparison_peers(
-                                base_nb, focal_name, question,
-                                top_k=self.settings.community_peers_topk,
-                                candidates=self.settings.community_rerank_candidates)
-                            for pname in found:
-                                if pname not in peers:
-                                    peers.append(pname)
-                            if found and peer_source != "comention":
-                                peer_source = src
-                    except Exception as exc:  # noqa: BLE001 — 注释声称 fail-open 但原代码未实现兜底:
-                        if self.fail_closed:
-                            raise
-                        # community/共提层任何故障(缺表 / 数据异常)都不该拖垮 reasoning 或
-                        # 深度报告的社区/横向对比节 —— 跳过扩展、继续。
-                        record(TraceStep(step_type="skip",
-                                         summary="跳过 expand_community(对比层不可用)",
-                                         detail={"reason": "community_error", "error": str(exc)[:120]}))
-                        peers, peer_source = [], "community"
-                    # 总量帽(见 _COMMUNITY_PEERS_CAP_FACTOR 注释):合并各库结果后才截断,
-                    # 取自 mounted_base_ids 的确定性遍历顺序(MOUNT_ORDER)+ list.append 的
-                    # 插入序,不依赖 dict/set 遍历顺序,同样的输入总是截出同样的前 N 个。
-                    peers_cap = (
-                        self.settings.community_peers_topk
-                        * action_policy.community_peers_cap_factor
-                    )
-                    if len(peers) > peers_cap:
-                        peers = peers[:peers_cap]
-                    added, names = 0, []
-                    for pname in peers:
-                        raise_if_cancelled(self.cancel_event)
-                        key = _norm_query(pname)
-                        if key in attempted:
-                            continue
-                        got = 0
-                        for h in self.search(notebook_id, pname)[:per_query_take]:
-                            if h.object_id not in collected:
-                                collected[h.object_id] = h
-                                added += 1
-                                got += 1
-                        attempted[key] = _QueryAttempt(query=pname, new=got, tries=1)
-                        if pname not in used_queries:
-                            used_queries.append(pname)
-                        names.append(pname)
-                    # 文案随来源切:共提命中 →「横向对比(共提)…个同类实体」,社区回退 → 原文案。
-                    # step_type 不变(前端「对比」标签零改动);detail 增 source 供观测。
-                    summary = (f"横向对比(共提):纳入 {len(names)} 个同类实体,新增候选 {added}"
-                               if peer_source == "comention"
-                               else f"横向对比:纳入 {len(names)} 个同社区实体,新增候选 {added}")
-                    record(TraceStep(step_type="expand_community", summary=summary,
-                                     detail={"focal": focal_name, "peers": names,
-                                             "new": added, "source": peer_source}))
+                # 执行体整体住在 `_action_expand_community`(与 ppr/search_chunks
+                # 同形):`run` 是有零松弛长度天花板的热函数。
+                self._action_expand_community(state, decision)
             else:
                 break
             # 本轮动作后是否有新增(候选节点或原文段)。无新增 → 下一轮提示模型 + 累加 stale。

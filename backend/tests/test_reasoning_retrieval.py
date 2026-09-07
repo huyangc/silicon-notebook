@@ -5456,3 +5456,635 @@ def test_knowhow_completion_gear_never_sees_an_unavailable_channel(
     assert "search_chunks" not in summaries[0]
     assert "enumerate" not in summaries[0]
     assert "换一个可用的检索通道或改写查询" in summaries[0]
+
+
+# ---------------------------------------------------------------------------
+# T2 能力与协议(设计稿 2026-09-07 §4/§5)
+# ---------------------------------------------------------------------------
+
+
+def test_reflect_v2_settings_defaults():
+    """五个新 Settings 的默认值。总闸默认**关**——本期不改变任何生产行为。"""
+    from app.core.config import Settings
+    s = Settings(_env_file=None)
+    assert s.reasoning_reflect_v2_enabled is False
+    assert s.reasoning_reflect_evidence_chars_by_effort == {
+        "overview": 4000, "standard": 6000, "deep": 8000,
+        "thorough": 12000, "exhaustive": 16000,
+    }
+    assert s.reasoning_reflect_excerpt_chars == 240
+    assert s.reasoning_reflect_state_chars == 6000
+    assert s.reasoning_reflect_recent_observations == 6
+
+
+def test_reflect_v2_settings_env_roundtrip(monkeypatch):
+    """映射走 JSON 环境变量,`.env` 示例里能直接抄的那种形状。"""
+    from app.core.config import Settings
+    monkeypatch.setenv("REASONING_REFLECT_V2_ENABLED", "true")
+    monkeypatch.setenv(
+        "REASONING_REFLECT_EVIDENCE_CHARS_BY_EFFORT",
+        '{"overview":2000,"standard":2000,"deep":3000,'
+        '"thorough":3000,"exhaustive":64000}')
+    monkeypatch.setenv("REASONING_REFLECT_EXCERPT_CHARS", "80")
+    monkeypatch.setenv("REASONING_REFLECT_STATE_CHARS", "32000")
+    monkeypatch.setenv("REASONING_REFLECT_RECENT_OBSERVATIONS", "20")
+    s = Settings(_env_file=None)
+    assert s.reasoning_reflect_v2_enabled is True
+    assert s.reasoning_reflect_evidence_chars_by_effort["exhaustive"] == 64000
+    # 相等(不递减)是合法的,严格递增不是要求。
+    assert s.reasoning_reflect_evidence_chars_by_effort["standard"] == 2000
+    assert (s.reasoning_reflect_excerpt_chars,
+            s.reasoning_reflect_state_chars,
+            s.reasoning_reflect_recent_observations) == (80, 32000, 20)
+
+
+@pytest.mark.parametrize("raw,needle", [
+    # 未知 key
+    ('{"overview":4000,"standard":6000,"deep":8000,"thorough":12000,'
+     '"exhaustive":16000,"insane":20000}', "未知档位"),
+    # 缺 key
+    ('{"overview":4000,"standard":6000,"deep":8000,"thorough":12000}',
+     "缺少"),
+    # bool 冒充整数(Python 里 True == 1,静默接受就是一张 1 字符的证据卡)
+    ('{"overview":true,"standard":6000,"deep":8000,"thorough":12000,'
+     '"exhaustive":16000}', "必须是整数"),
+    # 非单调
+    ('{"overview":16000,"standard":6000,"deep":8000,"thorough":12000,'
+     '"exhaustive":16000}', "不递减"),
+    # 越界(下界)
+    ('{"overview":999,"standard":6000,"deep":8000,"thorough":12000,'
+     '"exhaustive":16000}', "越界"),
+    # 越界(上界)
+    ('{"overview":4000,"standard":6000,"deep":8000,"thorough":12000,'
+     '"exhaustive":64001}', "越界"),
+    # 不是 JSON
+    ('overview=4000', "不是合法 JSON"),
+    # 不是对象
+    ('[4000,6000,8000,12000,16000]', "必须是 JSON 对象"),
+])
+def test_reflect_evidence_chars_rejects_bad_mappings(monkeypatch, raw, needle):
+    from app.core.config import Settings
+    monkeypatch.setenv("REASONING_REFLECT_EVIDENCE_CHARS_BY_EFFORT", raw)
+    with pytest.raises(Exception) as excinfo:
+        Settings(_env_file=None)
+    assert needle in str(excinfo.value)
+
+
+@pytest.mark.parametrize("name,value", [
+    ("REASONING_REFLECT_EXCERPT_CHARS", "79"),
+    ("REASONING_REFLECT_EXCERPT_CHARS", "1001"),
+    ("REASONING_REFLECT_STATE_CHARS", "999"),
+    ("REASONING_REFLECT_STATE_CHARS", "32001"),
+    ("REASONING_REFLECT_RECENT_OBSERVATIONS", "0"),
+    ("REASONING_REFLECT_RECENT_OBSERVATIONS", "21"),
+])
+def test_reflect_scalar_budgets_are_bounded(monkeypatch, name, value):
+    from app.core.config import Settings
+    monkeypatch.setenv(name, value)
+    with pytest.raises(Exception):
+        Settings(_env_file=None)
+
+
+def _full_house_facts(**overrides):
+    """一组"什么都开着、预算都还有"的事实,单项覆盖后即为被测条件。"""
+    from app.services.collection_catalog import (
+        ENUMERABLE_ELEMENT_KINDS, ENUMERABLE_KG_OBJECT_TYPES,
+    )
+    from app.services.reasoning_actions import ReflectCapabilityFacts
+    base = dict(
+        kg_in_scope=True, scope_restricted=False, has_candidates=True,
+        chunk_search_active=True, exact_lookup_active=True, ppr_active=True,
+        community_active=True, enumeration_active=True,
+        consult_memory_active=True, outline_active=True,
+        element_searches_left=5, chunk_searches_left=3, exact_lookups_left=3,
+        ppr_left=3, follow_chain_left=3, consult_left=2,
+        outline_updates_left=6, enum_rows_left=200, enum_pages_left=4,
+        enum_payload_left=256_000,
+        element_kinds=tuple(ENUMERABLE_ELEMENT_KINDS),
+        object_types=tuple(ENUMERABLE_KG_OBJECT_TYPES),
+        last_turn=False, outline_repair_available=False,
+        terminal_overflow_repair=False,
+    )
+    base.update(overrides)
+    return ReflectCapabilityFacts(**base)
+
+
+def test_capabilities_full_house_offers_all_thirteen_actions():
+    from app.services.reasoning_actions import (
+        ACTION_DEFINITIONS, build_reflect_capabilities,
+    )
+    caps = build_reflect_capabilities(_full_house_facts())
+    assert set(caps.actions) == set(ACTION_DEFINITIONS)
+    assert caps.unavailable == ()
+    assert caps.only_answer is False
+
+
+def test_capabilities_graphless_removes_graph_actions_and_the_types_param():
+    """无图 run:五个图动作消失,`add_subquery` 的 `types` 参数分支也一起消失。
+
+    参数分支必须跟着动作/事实走 —— 留一个模型填不出所以然的槽位,与留一个它调
+    不动的动作是同一种缺陷。
+    """
+    from app.services.reasoning_actions import build_reflect_capabilities
+    caps = build_reflect_capabilities(_full_house_facts(kg_in_scope=False))
+    for action in ("expand_graph", "ppr_retrieve", "expand_community",
+                   "follow_chain", "enumerate_kg_objects"):
+        assert not caps.has(action)
+        assert caps.reason_for(action) == "no_kg_in_scope"
+    # 无图但原文通道还在 → add_subquery 仍然可用,只是没有 types。
+    assert caps.has("add_subquery")
+    assert [p.name for p in caps.params_for("add_subquery")] == [
+        "query", "prefer"]
+    assert caps.has("enumerate_elements")
+
+
+def test_capabilities_source_scope_restriction_removes_unsafe_channels():
+    from app.services.reasoning_actions import build_reflect_capabilities
+    caps = build_reflect_capabilities(_full_house_facts(scope_restricted=True))
+    for action in ("expand_graph", "ppr_retrieve", "expand_community",
+                   "follow_chain", "exact_lookup"):
+        assert caps.reason_for(action) == "source_scope_unsafe_channel"
+    # 枚举那两个在受限范围下由调用方的 `enumeration_active` 关掉(既有判据),
+    # 这里只钉住"范围受限不会把 search_elements 也误伤掉"。
+    assert caps.has("search_elements")
+
+
+@pytest.mark.parametrize("action,overrides,reason", [
+    ("search_elements", {"element_searches_left": 0}, "element_search_cap"),
+    ("search_chunks", {"chunk_searches_left": 0}, "chunk_search_cap"),
+    ("search_chunks", {"chunk_search_active": False},
+     "chunk_search_disabled"),
+    ("exact_lookup", {"exact_lookups_left": 0}, "exact_lookup_cap"),
+    ("exact_lookup", {"exact_lookup_active": False}, "exact_lookup_disabled"),
+    ("ppr_retrieve", {"ppr_left": 0}, "ppr_retrieve_cap"),
+    ("ppr_retrieve", {"ppr_active": False}, "ppr_disabled"),
+    ("expand_community", {"community_active": False},
+     "community_expansion_disabled"),
+    ("follow_chain", {"follow_chain_left": 0}, "follow_chain_cap"),
+    ("follow_chain", {"has_candidates": False}, "chain_no_candidates"),
+    ("enumerate_elements", {"enum_rows_left": 0}, "enumeration_budget"),
+    ("enumerate_elements", {"enum_pages_left": 0}, "enumeration_budget"),
+    ("enumerate_elements", {"enum_payload_left": 0}, "enumeration_budget"),
+    ("enumerate_elements", {"enumeration_active": False},
+     "enumeration_disabled"),
+    ("consult_memory", {"consult_left": 0}, "consult_memory_cap"),
+    ("consult_memory", {"last_turn": True}, "consult_memory_last_turn"),
+    ("consult_memory", {"consult_memory_active": False},
+     "consult_memory_disabled"),
+    ("update_outline", {"outline_updates_left": 0}, "outline_budget"),
+    ("update_outline", {"outline_active": False}, "outline_disabled"),
+    ("add_subquery",
+     {"kg_in_scope": False, "chunk_search_active": False},
+     "subquery_channel_unavailable"),
+])
+def test_capabilities_each_condition_removes_exactly_its_action(
+    action, overrides, reason
+):
+    """条件表逐格钉住:动作消失 + 原因码是那个稳定码。"""
+    from app.services.reasoning_actions import build_reflect_capabilities
+    caps = build_reflect_capabilities(_full_house_facts(**overrides))
+    assert not caps.has(action)
+    assert caps.reason_for(action) == reason
+
+
+def test_capabilities_outline_repair_survives_a_spent_regular_budget():
+    """普通额度耗尽但一次性溢出纠错资格还在 → 动作保留。"""
+    from app.services.reasoning_actions import build_reflect_capabilities
+    caps = build_reflect_capabilities(_full_house_facts(
+        outline_updates_left=0, outline_repair_available=True))
+    assert caps.has("update_outline")
+
+
+def test_capabilities_terminal_repair_round_offers_only_the_outline():
+    """终态纠错轮:只许同结构换键,任何检索动作都不该再被摆出来。"""
+    from app.services.reasoning_actions import build_reflect_capabilities
+    caps = build_reflect_capabilities(
+        _full_house_facts(terminal_overflow_repair=True))
+    assert caps.actions == ("answer", "update_outline")
+    assert all(row.reason == "outline_overflow_repair_only"
+               for row in caps.unavailable)
+
+
+def test_capabilities_only_answer_when_every_channel_is_gone():
+    from app.services.reasoning_actions import build_reflect_capabilities
+    caps = build_reflect_capabilities(_full_house_facts(
+        kg_in_scope=False, chunk_search_active=False,
+        enumeration_active=False, exact_lookup_active=False,
+        consult_memory_active=False, outline_active=False,
+        element_searches_left=0))
+    assert caps.only_answer is True
+    assert caps.actions == ("answer",)
+
+
+def _v2_arguments_for(caps, action):
+    """按能力投影为一个动作造一份**刚好合法**的 arguments。"""
+    args = {}
+    for spec in caps.params_for(action):
+        if not (spec.required or spec.required_group):
+            continue
+        if spec.kind == "sections":
+            args[spec.name] = [{"id": "s1", "title": "一节", "evidence": []}]
+        elif spec.choices:
+            args[spec.name] = spec.choices[0]
+        else:
+            args[spec.name] = "x"
+        if spec.required_group:
+            # 组内填第一个就够(至少一个),再填第二个会改变分派语义。
+            break
+    return args
+
+
+def _capability_combinations():
+    import itertools
+    for (kg, restricted, chunks, enumeration, outline, consult,
+         repair) in itertools.product((True, False), repeat=7):
+        yield _full_house_facts(
+            kg_in_scope=kg, scope_restricted=restricted,
+            chunk_search_active=chunks, enumeration_active=enumeration,
+            outline_active=outline, consult_memory_active=consult,
+            terminal_overflow_repair=repair,
+        )
+
+
+def test_prompt_schema_and_parser_are_one_capability_source():
+    """三处同源:prompt 的动作清单、schema 的 `next_action` 枚举、解析白名单,
+    在**所有**能力组合下必须逐个相等。
+
+    这是本任务最重要的一条守卫。三处各写一份 gate 表达式(legacy `reflect()` 的
+    形态)时,任何一处漏改都只会在真实模型上表现为"偶尔白烧一轮反思",测试里完全
+    看不出来。这里把它变成一个结构性断言。
+    """
+    import re
+    from app.services.prompts import (
+        reflect_v2_schema_hint, reflect_v2_system_prompt,
+    )
+    from app.services.reasoning_actions import (
+        ACTION_DEFINITIONS, build_reflect_capabilities,
+    )
+    from app.services.reasoning_retrieval import parse_reflect_v2
+
+    seen_combinations = 0
+    for facts in _capability_combinations():
+        caps = build_reflect_capabilities(facts)
+        seen_combinations += 1
+        prompt_ids = re.findall(
+            r"^- ([a-z_]+):", reflect_v2_system_prompt(caps), re.M)
+        assert tuple(prompt_ids) == caps.actions, facts
+        schema = reflect_v2_schema_hint(caps)
+        enum = re.search(r'"next_action":"([^"]*)"', schema).group(1)
+        assert tuple(enum.split("|")) == caps.actions, facts
+        for action in ACTION_DEFINITIONS:
+            payload = {
+                "next_action": action, "sufficient": False,
+                "arguments": _v2_arguments_for(caps, action), "reason": "r",
+            }
+            decision = parse_reflect_v2(payload, caps)
+            accepted = not decision.invalid_reason
+            assert accepted is caps.has(action), (action, facts)
+    assert seen_combinations == 128
+
+
+def test_v2_rejects_a_recognizable_but_unavailable_action_with_zero_io():
+    """本轮不可用但可识别的动作 → unavailable 观察,原因码带上通道原因。"""
+    from app.services.reasoning_actions import build_reflect_capabilities
+    from app.services.reasoning_retrieval import (
+        REFLECT_INVALID_ACTION, parse_reflect_v2,
+    )
+    caps = build_reflect_capabilities(_full_house_facts(ppr_left=0))
+    decision = parse_reflect_v2(
+        {"next_action": "ppr_retrieve", "sufficient": False,
+         "arguments": {"query": "x"}}, caps)
+    assert decision.next_action == REFLECT_INVALID_ACTION
+    assert decision.invalid_reason == "unavailable_action:ppr_retrieve_cap"
+    # 不可执行的决定绝不能带 sufficient=True:那会让 run() 的短路把它当成
+    # 一次"模型说够了"直接收尾。
+    assert decision.sufficient is False
+
+
+def test_v2_rejects_an_unknown_action():
+    from app.services.reasoning_actions import build_reflect_capabilities
+    from app.services.reasoning_retrieval import parse_reflect_v2
+    caps = build_reflect_capabilities(_full_house_facts())
+    for bogus in ("read_evidence", "", "  "):
+        decision = parse_reflect_v2(
+            {"next_action": bogus, "sufficient": False}, caps)
+        assert decision.invalid_reason == "unknown_action"
+
+
+def test_v2_requires_a_real_boolean_for_sufficient():
+    from app.services.reasoning_actions import build_reflect_capabilities
+    from app.services.reasoning_retrieval import parse_reflect_v2
+    caps = build_reflect_capabilities(_full_house_facts())
+    for value in ("true", "false", 1, 0, None):
+        decision = parse_reflect_v2(
+            {"next_action": "answer", "sufficient": value}, caps)
+        assert decision.invalid_reason == "invalid_sufficient", value
+    # 缺省即 False,这是合法的。
+    assert parse_reflect_v2(
+        {"next_action": "answer"}, caps).invalid_reason == ""
+
+
+def test_v2_retrieval_action_with_sufficient_true_is_a_contradiction():
+    """检索 + "证据已足" 不能同轮成立;而不产生证据的两个动作可以。"""
+    from app.services.reasoning_actions import build_reflect_capabilities
+    from app.services.reasoning_retrieval import parse_reflect_v2
+    caps = build_reflect_capabilities(_full_house_facts())
+    contradiction = parse_reflect_v2(
+        {"next_action": "search_chunks", "sufficient": True,
+         "arguments": {"query": "x"}}, caps)
+    assert contradiction.invalid_reason == "sufficient_with_retrieval_action"
+    # update_outline + sufficient=true 保留:先应用绑定、再按既有规则收尾。
+    outline = parse_reflect_v2(
+        {"next_action": "update_outline", "sufficient": True,
+         "arguments": {"sections": [{"id": "s1", "title": "一节"}]}}, caps)
+    assert outline.invalid_reason == ""
+    assert outline.sufficient is True and outline.outline_sections
+    consult = parse_reflect_v2(
+        {"next_action": "consult_memory", "sufficient": True,
+         "arguments": {}}, caps)
+    assert consult.invalid_reason == ""
+
+
+@pytest.mark.parametrize("action,arguments,reason", [
+    ("expand_graph", {}, "missing_argument:object_id"),
+    ("add_subquery", {"query": "   "}, "missing_argument:query"),
+    ("follow_chain", {}, "missing_argument:start_object_id"),
+    ("exact_lookup", {"term": "\"\""}, "missing_argument:term"),
+    ("update_outline", {"sections": []}, "missing_argument:sections"),
+    ("enumerate_elements", {}, "missing_argument:kind"),
+    ("enumerate_kg_objects", {}, "missing_argument:object_type"),
+    ("add_subquery", {"query": 7}, "invalid_argument:query"),
+    ("add_subquery", {"query": "x", "types": "claim"},
+     "invalid_argument:types"),
+    ("add_subquery", {"query": "x", "prefer": "vibes"},
+     "invalid_argument:prefer"),
+    ("expand_graph", {"object_id": "o", "direction": "sideways"},
+     "invalid_argument:direction"),
+    ("enumerate_elements", {"kind": "not_a_kind"}, "invalid_argument:kind"),
+    ("enumerate_elements", {"kind": "formula", "collection": "elements"},
+     "invalid_argument:collection"),
+])
+def test_v2_typed_argument_validation(action, arguments, reason):
+    from app.services.reasoning_actions import build_reflect_capabilities
+    from app.services.reasoning_retrieval import parse_reflect_v2
+    caps = build_reflect_capabilities(_full_house_facts())
+    decision = parse_reflect_v2(
+        {"next_action": action, "sufficient": False,
+         "arguments": arguments}, caps)
+    assert decision.invalid_reason == reason
+
+
+def test_v2_enumerate_sources_collection_needs_no_subtype():
+    """`collection="sources"` 刻意没有子类型 —— required_group 必须放它过去。"""
+    from app.services.reasoning_actions import build_reflect_capabilities
+    from app.services.reasoning_retrieval import parse_reflect_v2
+    caps = build_reflect_capabilities(_full_house_facts())
+    decision = parse_reflect_v2(
+        {"next_action": "enumerate_elements", "sufficient": False,
+         "arguments": {"collection": "sources"}}, caps)
+    assert decision.invalid_reason == ""
+    assert decision.enumerate_collection == "sources"
+    assert decision.enumerate_kind == ""
+
+
+def test_v2_arguments_must_be_an_object():
+    from app.services.reasoning_actions import build_reflect_capabilities
+    from app.services.reasoning_retrieval import parse_reflect_v2
+    caps = build_reflect_capabilities(_full_house_facts())
+    decision = parse_reflect_v2(
+        {"next_action": "answer", "sufficient": True,
+         "arguments": ["query"]}, caps)
+    assert decision.invalid_reason == "invalid_arguments_object"
+
+
+def test_v2_tolerates_but_does_not_consume_assessment():
+    """`assessment` 本期只留存:存在不得报错,也不得改变任何判据(T4 才消费)。"""
+    from app.services.reasoning_actions import build_reflect_capabilities
+    from app.services.reasoning_retrieval import parse_reflect_v2
+    caps = build_reflect_capabilities(_full_house_facts())
+    payload = {
+        "next_action": "answer", "sufficient": True,
+        "arguments": {},
+        "assessment": {"supported": [{"aspect_id": "a1",
+                                      "evidence_keys": ["k"]}]},
+        "reason": "够了",
+    }
+    decision = parse_reflect_v2(payload, caps)
+    assert decision.invalid_reason == ""
+    assert decision.sufficient is True
+    assert decision.assessment == payload["assessment"]
+
+
+def test_v2_adapts_arguments_onto_the_existing_decision_fields():
+    """适配层不复制第二套执行代码:v2 的 arguments 落在 legacy 的既有字段上。"""
+    from app.services.reasoning_actions import build_reflect_capabilities
+    from app.services.reasoning_retrieval import parse_reflect_v2
+    caps = build_reflect_capabilities(_full_house_facts())
+    sub = parse_reflect_v2({
+        "next_action": "add_subquery", "sufficient": False,
+        "arguments": {"query": " 版图寄生 ", "types": ["claim", "bogus"],
+                      "prefer": "keyword"},
+        "reason": "补一个方向"}, caps)
+    assert sub.new_sub_query.query == "版图寄生"
+    assert sub.new_sub_query.types == ["claim"]
+    assert sub.new_sub_query.prefer == "keyword"
+    chain = parse_reflect_v2({
+        "next_action": "follow_chain", "sufficient": False,
+        "arguments": {"start_object_id": "ko-1", "target_object_id": "ko-9",
+                      "edge_type": "derived_from", "direction": "in"}}, caps)
+    assert (chain.chain_start_object_id, chain.chain_target_object_id,
+            chain.chain_edge_type, chain.chain_direction) == (
+        "ko-1", "ko-9", "derived_from", "in")
+    exact = parse_reflect_v2({
+        "next_action": "exact_lookup", "sufficient": False,
+        "arguments": {"term": "「set_db」"}}, caps)
+    assert exact.exact_term == "set_db"
+
+
+class _CapturingSeqLLM(_SeqLLM):
+    """`_SeqLLM` 加一份"模型到底收到了什么"的留存(messages + schema_hint)。"""
+
+    def __init__(self, plan, reflects):
+        super().__init__(plan, reflects)
+        self.reflect_calls = []
+
+    def chat_json(self, messages, schema_hint, **kwargs):
+        if "sub_queries" not in schema_hint:
+            self.reflect_calls.append((list(messages), schema_hint))
+        return super().chat_json(messages, schema_hint, **kwargs)
+
+
+def test_reflect_v2_flag_off_keeps_the_legacy_payload_byte_for_byte(rrepo):
+    """总闸关闭 = 等价:模型收到的仍是 legacy 单条 user 消息与 legacy schema。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    nb = _seed_two_nodes(rrepo)
+    llm = _CapturingSeqLLM(
+        plan={"sub_queries": [{"query": "RTL到GDSII流程"}]},
+        reflects=[{"next_action": "answer", "sufficient": True}])
+    bind_chat_client(rrepo, "reasoning_agent", llm)
+    assert rrepo.settings.reasoning_reflect_v2_enabled is False
+    ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(
+        nb.id, "RTL到GDSII流程", "")
+    messages, schema = llm.reflect_calls[0]
+    assert [m["role"] for m in messages] == ["user"]
+    assert '"new_sub_query"' in schema and '"arguments"' not in schema
+
+
+def test_reflect_v2_flag_on_sends_split_system_user_and_the_v2_schema(rrepo):
+    """总闸开启:指令与数据分成 system/user 两段(§6.3),schema 换成单一
+    `arguments` 形状,动作枚举由能力投影生成。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    nb = _seed_two_nodes(rrepo)
+    rrepo.settings.reasoning_reflect_v2_enabled = True
+    llm = _CapturingSeqLLM(
+        plan={"sub_queries": [{"query": "RTL到GDSII流程"}]},
+        reflects=[{"next_action": "answer", "sufficient": True,
+                   "arguments": {}, "reason": "够了"}])
+    bind_chat_client(rrepo, "reasoning_agent", llm)
+    ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(
+        nb.id, "RTL到GDSII流程", "")
+    messages, schema = llm.reflect_calls[0]
+    assert [m["role"] for m in messages] == ["system", "user"]
+    system, user = messages[0]["content"], messages[1]["content"]
+    # 固定指令在 system,问题与材料在 user —— 分离的意义就在这条边界上。
+    assert "RTL到GDSII流程" not in system
+    assert "RTL到GDSII流程" in user
+    assert "- answer:" in system and "- add_subquery:" in system
+    assert '"arguments":{}' in schema and "new_sub_query" not in schema
+
+
+def test_reflect_v2_invalid_action_costs_a_step_but_no_io(rrepo, monkeypatch):
+    """v2 下一份缺参数的载荷:零工具 I/O、记一条观察、循环继续,下一轮的合法
+    检索照跑(设计稿 §5.2)。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    nb = _seed_two_nodes(rrepo)
+    rrepo.settings.reasoning_reflect_v2_enabled = True
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "RTL到GDSII流程"}]},
+        reflects=[
+            {"next_action": "expand_graph", "sufficient": False,
+             "arguments": {}, "reason": "深挖"},
+            {"next_action": "add_subquery", "sufficient": False,
+             "arguments": {"query": "布局布线的具体步骤"}},
+            {"next_action": "answer", "sufficient": True, "arguments": {}},
+        ]))
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+
+    def _unexpected(*_a, **_k):
+        pytest.fail("被判定不可执行的动作不得发起任何图 I/O")
+
+    monkeypatch.setattr(rr, "neighbors", _unexpected)
+    result = rr.run(nb.id, "RTL到GDSII流程", "")
+    kinds = [t.step_type for t in result.trace]
+    skip = next(t for t in result.trace
+                if t.detail.get("reason") == "missing_argument:object_id")
+    assert skip.step_type == "skip"
+    assert "参数" in skip.summary
+    # 被拒的那一轮之后仍然跑到了一次真正的检索,循环没有被终止。
+    assert kinds.index("skip") < len(kinds) - 1
+    assert any(t.step_type == "retrieve"
+               and t.detail.get("query") == "布局布线的具体步骤"
+               for t in result.trace)
+
+
+def test_reflect_v2_repeated_invalid_actions_still_trip_the_breaker(rrepo):
+    """反复提交非法动作**不能**规避熔断——这正是"不能裸 continue"的理由。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    nb = _seed_two_nodes(rrepo)
+    rrepo.settings.reasoning_reflect_v2_enabled = True
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "RTL到GDSII流程"}]},
+        reflects=[{"next_action": "follow_chain", "sufficient": False,
+                   "arguments": {}} for _ in range(8)]))
+    result = ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(
+        nb.id, "RTL到GDSII流程", "")
+    breaker = [t for t in result.trace
+               if t.detail.get("reason") == "stale_circuit_breaker"]
+    assert len(breaker) == 1
+    reflects = [t for t in result.trace if t.step_type == "reflect"]
+    assert len(reflects) <= 4          # 熔断真的把循环掐住了
+    assert all(t.detail.get("reason") == "missing_argument:start_object_id"
+               for t in result.trace
+               if t.detail.get("reason", "").startswith("missing_argument"))
+
+
+def test_reflect_v2_unavailable_action_is_recorded_and_loop_continues(rrepo):
+    """被策略禁用的通道:模型仍可能选它 → unavailable 观察,循环继续。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    nb = _seed_two_nodes(rrepo)
+    rrepo.settings.reasoning_reflect_v2_enabled = True
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "RTL到GDSII流程"}]},
+        reflects=[
+            {"next_action": "expand_community", "sufficient": False,
+             "arguments": {"focal": "某实体"}},
+            {"next_action": "answer", "sufficient": True, "arguments": {}},
+        ]))
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    rr.allow_community_expansion = False
+    result = rr.run(nb.id, "RTL到GDSII流程", "")
+    skip = next(t for t in result.trace if t.detail.get("reason", "")
+                .startswith("unavailable_action:"))
+    assert skip.detail["reason"] == (
+        "unavailable_action:community_expansion_disabled")
+    assert result.trace[-1].step_type == "answer"
+
+
+def test_reflect_v2_only_answer_ends_without_asking_the_model(
+    rrepo, monkeypatch
+):
+    """除 answer 外无可执行动作 → 服务端直接收尾,不再请求模型(设计稿 §5.1)。"""
+    from app.models.schemas import NotebookCreate
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    nb = rrepo.create_notebook(NotebookCreate(name="no-graph"))
+    rrepo.settings.reasoning_reflect_v2_enabled = True
+    rrepo.settings.reasoning_max_element_searches = 0
+    llm = _CapturingSeqLLM(
+        plan={"sub_queries": [{"query": "布局布线步骤"}]},
+        reflects=[{"next_action": "answer", "sufficient": True,
+                   "arguments": {}}])
+    bind_chat_client(rrepo, "reasoning_agent", llm)
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    monkeypatch.setattr(rr, "_kg_in_scope", lambda _nb: False)
+    rr.allow_search_chunks = False
+    rr.allow_enumeration = False
+    rr.allow_exact_lookup = False
+    result = rr.run(nb.id, "布局布线步骤", "")
+    assert any(t.detail.get("reason") == "no_executable_action"
+               for t in result.trace)
+    # 既没有请求模型,也没有伪造一条"模型判定充分"的反思步。
+    assert llm.reflect_calls == []
+    assert not any(t.step_type == "reflect" for t in result.trace)
+
+
+def test_knowhow_completion_explicitly_stays_on_the_legacy_reflect(rrepo):
+    """Knowhow 补全**显式**关掉 v2,而不是靠"它恰好没传 limits"这种偶然性。"""
+    import inspect
+    from app.services.knowhow import api as knowhow_api
+    source = inspect.getsource(knowhow_api)
+    assert "reasoning_retriever.allow_reflect_v2 = False" in source
+
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    rrepo.settings.reasoning_reflect_v2_enabled = True
+    rr = ReasoningRetriever.from_repository(
+        rrepo, rrepo.settings, fail_closed=True)
+    assert rr.reflect_v2_active() is True     # 默认调用方跟随总闸
+    rr.allow_reflect_v2 = False
+    assert rr.reflect_v2_active() is False    # 策略位单独否决
+
+
+def test_v2_ignores_a_parameter_branch_the_projection_removed():
+    """被投影摘掉的参数分支:连读都不读(不改分派,也不制造参数错误)。
+
+    无图 run 里 `add_subquery` 没有 `types` 槽位——模型从没被告知它,所以它填的
+    任何东西都不该改变检索,也不该变成一条它无从理解的参数错误。
+    """
+    from app.services.reasoning_actions import build_reflect_capabilities
+    from app.services.reasoning_retrieval import parse_reflect_v2
+    caps = build_reflect_capabilities(_full_house_facts(kg_in_scope=False))
+    decision = parse_reflect_v2({
+        "next_action": "add_subquery", "sufficient": False,
+        "arguments": {"query": "版图寄生", "types": "not-even-a-list"}}, caps)
+    assert decision.invalid_reason == ""
+    assert decision.new_sub_query.types == []
