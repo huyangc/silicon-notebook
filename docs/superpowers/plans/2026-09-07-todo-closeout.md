@@ -80,7 +80,7 @@ notebook opener 打开对应会话并复用既有接回逻辑。契约登记进 
 真源 `docs/superpowers/specs/2026-08-18-retrieval-image-citations-and-md-bundle-upload-design_zh.md`
 §2 与 `fangan_done.md` 二期登记。后端 `report_engine` 已通过 `attach_reference_images` 给参考文献
 挂图；本期把 Ask 的 `rehype-citation-images`（块级定位、跨引用去重、`CitationImageOrder`、页内
-预览）接到 `report-view.tsx` 的正文渲染，并保留现有引用详情「本段附图」。公开分享报告页同样生效。
+预览）接到 `report-view.tsx` 的正文渲染，并保留现有引用详情「本段附图」。公开分享报告页 `/r/{token}` **不**生效（实施期核实：`report_public_view` 的投影 allowlist 无 `asset_id`/`element_id`，报告也没有 token 别名的匿名资产端点，要做需同时改投影与新开匿名端点，属独立的披露面决定；已在双语文档与守卫反向钉住）。
 组件测试对齐 Ask 既有用例（带图渲染、缺字段回退、未展开不发图片请求）。
 
 ## PR-5 起：前端 workspace 状态拆分（架构阶段 5，分片推进）

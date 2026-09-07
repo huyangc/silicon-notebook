@@ -25,7 +25,6 @@ import {
   renderTextWithReferenceNumbers,
   splitInlineLatex,
   type AnswerReference,
-  type CitationImageLike,
 } from "./answer-formatting";
 import { AnswerMarkdown } from "./answer-markdown";
 import type { CitationImageOrder, CitationImageSlotItem } from "./rehype-citation-images";
@@ -36,6 +35,11 @@ import { type ReasoningTraceStep } from "./ask-stream";
 import { placeCitationPopover } from "./citation-popover";
 import { copyTextSafely } from "./copy-text";
 import { FormulaView } from "./formula-view";
+import {
+  InlineCitationImages,
+  referenceImages,
+  resolveCitationImageRows,
+} from "./inline-citation-images";
 import {
   buildImageGallery,
   imagePreviewRequest,
@@ -845,81 +849,13 @@ function referenceLocation(reference: AnswerReference): string {
 }
 
 
-// 检索结果带图(T1/T2)：anchor 优先、citation 兜底,与本文件其余 reference* helper
-// 的既有惯例一致(anchor/citation 二选一,由 buildAnswerReferences 全有全无保证)。
-// 枚举清单行的引用(evidence_context.py collection_item_citations)不调
-// attach_citation_images,故 images 恒缺席;但枚举行**锚点**走的是别的装配点,可能带
-// 图——这里不做特判,读取路径对两者一视同仁,由数据形状自然决定是否渲染。
-//
-// F5(评审登记,checkpoint b6541f26):弹层高频开合(点引用→关闭→再点回同一条)会让
-// 附图重复下载——AuthedImage 卸载即 revoke objectURL,下次挂载是全新的 fetch,这里
-// 没有跨挂载的结果缓存。这是复用既有 AuthedImage 组件带来的已登记代价,不在本处
-// 加一层 blob 缓存去解决它:objectURL 的生命周期一旦要跨组件实例存活,谁负责在
-// 「最后一个引用者卸载」时 revoke 会显著复杂化,而附图请求本身走鉴权 fetch、体量
-// 有限,权衡后维持现状。
-function referenceImages(reference: AnswerReference): CitationImageLike[] {
-  return reference.anchor?.images ?? reference.citation?.images ?? [];
-}
+// `referenceImages` / `InlineCitationImages` 已抽到 ./inline-citation-images（深度报告
+// 正文接同一条内联图片管线，两个面必须共用同一份 alt/标签取值规则）。
 
 function directlyReferencesImageElement(reference: AnswerReference): boolean {
   const elementId = reference.anchor?.element_id || reference.citation?.element_id || "";
   return Boolean(elementId) && referenceImages(reference)
     .some((image) => image.element_id === elementId);
-}
-
-
-type ResolvedCitationImage = Readonly<{
-  reference: AnswerReference;
-  image: CitationImageLike;
-}>;
-
-
-function InlineCitationImages({
-  rows,
-  notebookId,
-  onPreviewImage,
-}: {
-  rows: readonly ResolvedCitationImage[];
-  notebookId: string;
-  /** 点开这一张附图。左右切换用的画册由 AnswerView 统一定位（见其 imageGallery）,
-   *  所以这里只报「点的是哪一张」。没有承接方时图片仍显示但不可点击。 */
-  onPreviewImage?: (image: AnswerImagePreviewItem) => void;
-}) {
-  if (rows.length === 0) return null;
-  const labels = [...new Set(rows.map((row) => row.reference.displayLabel))];
-  return (
-    <aside className="answer-inline-images" aria-label={`引用图片 ${labels.join("、")}`}>
-      <div className="answer-inline-images-heading">
-        <span>引用 {labels.join("、")}</span>
-        <small title="模型可能读取过图注或图片描述，但没有直接读取图片">模型未直接读取图片</small>
-      </div>
-      <ul className="answer-inline-image-list">
-        {rows.map(({ reference, image }) => {
-          const url = sourceImageAssetUrl(API_BASE, notebookId, image.asset_id);
-          const alt = image.caption || `${reference.displayLabel} 的附图`;
-          return (
-            <li key={image.asset_id} className="answer-inline-image-item">
-              {url
-                ? <AuthedImage url={url} alt={alt} />
-                : <p className="tool-hint">图片不可用</p>}
-              {url && onPreviewImage && (
-                <button
-                  type="button"
-                  className="answer-inline-image-open"
-                  aria-label={`放大查看${reference.displayLabel}的附图`}
-                  onClick={() => onPreviewImage({
-                    assetId: image.asset_id,
-                    alt,
-                    referenceLabel: reference.displayLabel,
-                  })}
-                />
-              )}
-            </li>
-          );
-        })}
-      </ul>
-    </aside>
-  );
 }
 
 
@@ -1461,15 +1397,9 @@ export function AnswerView({
     : undefined;
   const renderCitationImages = (items: CitationImageSlotItem[]) => {
     if (!notebookId) return null;
-    const rows = items.flatMap(({ citationKey, imageId }) => {
-      const reference = referencesByCitationKey[citationKey];
-      if (!reference) return [];
-      const image = referenceImages(reference).find((candidate) => candidate.asset_id === imageId);
-      return image ? [{ reference, image }] : [];
-    });
     return (
       <InlineCitationImages
-        rows={rows}
+        rows={resolveCitationImageRows(items, (key) => referencesByCitationKey[key])}
         notebookId={notebookId}
         onPreviewImage={previewImage}
       />

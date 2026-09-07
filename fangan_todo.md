@@ -65,8 +65,6 @@
 
 ### Ask / Deep Report
 
-- [ ] **Deep Report 正文引用图片内联（第二期）**：Ask 与公开会话已交付；Deep Report 仍走引用详情
-      展示，需复用同一套块级定位 / 去重 / 页内预览合同。
 - [ ] **问答纠偏规则 12（限定词保真）人工 A/B**：仓库无问答质量评测台，放量前用「点名子部件 /
       周期性 / 方向」三句式各问一次验证；ledger 喂摘要未做。
 - [ ] **Prompt 三层化后的 per-notebook 定制与 self-evo**：接缝只有 `fragment_text()`；L1 片段分

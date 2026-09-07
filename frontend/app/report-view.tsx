@@ -6,7 +6,7 @@
  */
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowDown, ArrowLeft, ArrowUp, Check, CheckSquare, ChevronRight, Copy, Download, Plus, Share2, Sparkles, Square, Trash2, X } from "lucide-react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkMath from "remark-math";
@@ -24,7 +24,26 @@ import { API_BASE } from "./api-config";
 import { AuthedImage } from "./authed-image";
 import { useCopyResult } from "./copy-result";
 import { EffortPicker, type EffortOption } from "./effort-picker";
+import {
+  buildImageGallery,
+  imagePreviewRequest,
+  type AnswerImagePreviewItem,
+  type AnswerImagePreviewRequest,
+} from "./image-preview";
+import {
+  InlineCitationImages,
+  referenceImages,
+  resolveCitationImageRows,
+} from "./inline-citation-images";
 import { quotedPhraseHint } from "./query-syntax";
+import {
+  CITATION_IMAGE_SLOT_ATTRIBUTE,
+  citationImageSlotItems,
+  rehypeCitationImages,
+  type CitationImageIdsByKey,
+  type CitationImageOrder,
+  type CitationImageSlotItem,
+} from "./rehype-citation-images";
 import { sourceImageAssetUrl } from "./source-image";
 import { isAdvanced, type UiMode } from "./ui-mode.ts";
 import { WaitingWishCarousel } from "./waiting-wish-carousel";
@@ -176,86 +195,210 @@ function reportReferencesAsAnswerReferences(
   }));
 }
 
+// 正文引用图片（二期）：渲染期变化的数据经 Context 送达，components 表本身是模块级
+// 常量。理由与 answer-markdown.tsx 逐字相同：react-markdown 的 components 是组件
+// **类型**，每次渲染重建一份就会让 React 换型重挂载整棵子树——已加载的 AuthedImage
+// 随之 revoke objectURL 并重新取图（真机症状就是图片与它下方的正文一起频闪）。报告
+// 侧点一次引用徽章就会改 selectedRefKey，触发的正是这种重渲染。
+type ReportMarkdownRenderState = Readonly<{
+  refsByKey: Record<string, AnswerReference>;
+  selectedRefKey: string | null;
+  onSelectReference: (key: string) => void;
+  renderCitationImages: (items: readonly CitationImageSlotItem[]) => React.ReactNode;
+}>;
+
+const ReportMarkdownRenderContext = createContext<ReportMarkdownRenderState | null>(null);
+
+function ReportMarkdownLink({ href, children }: { href?: string; children?: React.ReactNode }) {
+  const state = useContext(ReportMarkdownRenderContext);
+  if (href?.startsWith("cite:")) {
+    const key = href.slice(5);
+    if (state?.refsByKey[key]) {
+      return (
+        <button
+          type="button"
+          className={`cite-chip${state.selectedRefKey === key ? " active" : ""}`}
+          onClick={() => state.onSelectReference(key)}
+        >
+          {children}
+        </button>
+      );
+    }
+    return <span>{children}</span>;
+  }
+  return (
+    <a href={href} target="_blank" rel="noreferrer">
+      {children}
+    </a>
+  );
+}
+
+function ReportMarkdownHeading2({ children }: { children?: React.ReactNode }) {
+  const text = Array.isArray(children) ? children.join("") : String(children ?? "");
+  return <h2 id={text.includes("参考文献") ? "report-references" : undefined}>{children}</h2>;
+}
+
+// 代码块/表格沿用问答区现有样式 class,保持全站观感一致。
+function ReportMarkdownPre({ children }: { children?: React.ReactNode }) {
+  return <pre className="answer-code">{children}</pre>;
+}
+
+function ReportMarkdownTable({ children }: { children?: React.ReactNode }) {
+  return (
+    <div className="answer-table-wrap">
+      <table className="answer-table">{children}</table>
+    </div>
+  );
+}
+
+function ReportMarkdownAside({
+  node,
+  children,
+}: {
+  node?: { properties?: Record<string, unknown> };
+  children?: React.ReactNode;
+}) {
+  const state = useContext(ReportMarkdownRenderContext);
+  const items = citationImageSlotItems(node?.properties?.[CITATION_IMAGE_SLOT_ATTRIBUTE]);
+  if (items.length > 0) return state?.renderCitationImages(items) ?? null;
+  return <aside>{children}</aside>;
+}
+
+const REPORT_MARKDOWN_COMPONENTS = {
+  a: ReportMarkdownLink,
+  h2: ReportMarkdownHeading2,
+  pre: ReportMarkdownPre,
+  table: ReportMarkdownTable,
+  aside: ReportMarkdownAside,
+} satisfies NonNullable<Parameters<typeof ReactMarkdown>[0]["components"]>;
+
+// 默认参数必须是模块级常量：写成 `references = []` 会让省略这个 prop 的调用方每次
+// 渲染拿到一个新数组，下面按引用比较的 useMemo 永远失效（同 answer-markdown.tsx）。
+const NO_REPORT_REFERENCES: ReportDetailT["references"] = [];
+
 export function ReportMarkdown({
   markdown,
-  references = [],
+  references = NO_REPORT_REFERENCES,
   notebookId = "",
+  onPreviewImage,
 }: {
   markdown: string;
   references?: ReportDetailT["references"];
   /**
-   * 本段附图（T6）资产代理端点用的 active notebook id。可选——镜像
-   * answer-panel.tsx SelectedReferenceDetail 的 `notebookId: string | null`
-   * 防御式惯例：没有可用 notebook 上下文的调用点（如纯 markdown 渲染测试）
-   * 不必传，此时附图区整体不渲染，与"无附图"等价，不是渲染失败。
+   * 本段附图（T6）与正文引用图片（二期）资产代理端点用的 active notebook id。
+   * 可选——镜像 answer-panel.tsx SelectedReferenceDetail 的
+   * `notebookId: string | null` 防御式惯例：没有可用 notebook 上下文的调用点
+   * （如纯 markdown 渲染测试）不必传，此时图片整体不渲染，与"无附图"等价，
+   * 不是渲染失败。
    */
   notebookId?: string;
+  /**
+   * 点开正文里的一张引用图片。可选——没有承接方（只读/测试调用点）时图片照常
+   * 显示，只是不可点击放大，与 Ask 侧 `onPreviewImage` 的既有惯例一致。交出的是
+   * 整本画册（按正文顺序）而不是单张，左右切换因此能走遍整份报告。
+   */
+  onPreviewImage?: (request: AnswerImagePreviewRequest) => void;
 }) {
   const [selectedRefKey, setSelectedRefKey] = useState<string | null>(null);
-  const refObjs = reportReferencesAsAnswerReferences(references);
-  const refsByKey = referenceByAnchorKey(refObjs);
+  const refsByKey = useMemo(
+    () => referenceByAnchorKey(reportReferencesAsAnswerReferences(references)),
+    [references],
+  );
   const selectedReference = selectedRefKey ? refsByKey[selectedRefKey]?.anchor : undefined;
-  const components = {
-    a({ href, children }: { href?: string; children?: React.ReactNode }) {
-      if (href?.startsWith("cite:")) {
-        const key = href.slice(5);
-        if (refsByKey[key]) {
-          return (
-            <button
-              type="button"
-              className={`cite-chip${selectedRefKey === key ? " active" : ""}`}
-              onClick={() => {
-                setSelectedRefKey(key);
-                document
-                  .getElementById("report-references")
-                  ?.scrollIntoView({ behavior: "smooth", block: "start" });
-              }}
-            >
-              {children}
-            </button>
-          );
-        }
-        return <span>{children}</span>;
-      }
+  // 引用 key 与正文标记同一个命名空间：后端在写 content_md 之前已经把每节的局部
+  // 标记全局重编号成 `kN`，`references[i].key` 就是正文里写的那个 N（report_engine
+  // 的 `_sub`/`ref_pos`）。所以这里按 key 建映射即可，不需要按节偏移再算一次。
+  const imageIdsByCitationKey: CitationImageIdsByKey = useMemo(() => Object.fromEntries(
+    Object.entries(refsByKey).map(([key, reference]) => [
+      key,
+      referenceImages(reference).map((image) => image.asset_id),
+    ]),
+  ), [refsByKey]);
+  // 本份报告里可以左右切换的全部附图。顺序不在这里推导——渲染管线一边把图片区块
+  // 插进正文一边记账(citationImageOrder)，这里读的就是那本账（完整理由见
+  // rehype-citation-images.ts）。读发生在点击那一刻，此时本次渲染早已跑完。
+  const citationImageOrder = useRef<CitationImageOrder>({ items: [] }).current;
+  // useCallback:这两个闭包只经 Context 送达 ReportMarkdownAside/Link,不进
+  // markdownTree 的依赖表——如果每次渲染都是新函数,下面把 Provider value 包进
+  // useMemo 就没有意义(引用相等性会被这两个闭包的重建打破)。ternary 留在
+  // useCallback 外层:onPreviewImage 未传时 previewImage 必须是 `undefined`
+  // 而不是「一个总是 no-op 的函数」——InlineCitationImages 是否渲染放大按钮
+  // 就看这个值是不是真值。
+  const previewImageCallback = useCallback(
+    (image: AnswerImagePreviewItem) => onPreviewImage?.(imagePreviewRequest(
+      buildImageGallery(citationImageOrder.items, (key) => {
+        const reference = refsByKey[key];
+        return reference
+          ? { displayLabel: reference.displayLabel, images: referenceImages(reference) }
+          : undefined;
+      }),
+      image,
+    )),
+    [onPreviewImage, citationImageOrder, refsByKey],
+  );
+  const previewImage = onPreviewImage ? previewImageCallback : undefined;
+  const renderCitationImages = useCallback(
+    (items: readonly CitationImageSlotItem[]) => {
+      if (!notebookId) return null;
       return (
-        <a href={href} target="_blank" rel="noreferrer">
-          {children}
-        </a>
+        <InlineCitationImages
+          rows={resolveCitationImageRows(items, (key) => refsByKey[key])}
+          notebookId={notebookId}
+          onPreviewImage={previewImage}
+        />
       );
     },
-    h2({ children }: { children?: React.ReactNode }) {
-      const text = Array.isArray(children) ? children.join("") : String(children ?? "");
-      return <h2 id={text.includes("参考文献") ? "report-references" : undefined}>{children}</h2>;
-    },
-    // 代码块/表格沿用问答区现有样式 class,保持全站观感一致。
-    pre({ children }: { children?: React.ReactNode }) {
-      return <pre className="answer-code">{children}</pre>;
-    },
-    table({ children }: { children?: React.ReactNode }) {
-      return (
-        <div className="answer-table-wrap">
-          <table className="answer-table">{children}</table>
-        </div>
-      );
-    },
-  } as Parameters<typeof ReactMarkdown>[0]["components"];
+    [notebookId, refsByKey, previewImage],
+  );
+  // 选中引用只换高亮与下方详情，正文没变时直接复用上一次的 ReactMarkdown 元素：
+  // remark+KaTeX+rehype 解析是 O(正文) 的开销，更要紧的是重解析会重建整棵子树、
+  // 让已加载的附图重新取图。选中态与回调经 Context 送达，穿透被跳过的子树。
+  const markdownTree = useMemo(() => (
+    <ReactMarkdown
+      remarkPlugins={[
+        remarkGfmPlugin,
+        remarkMath,
+        [remarkCitations, refsByKey] as [typeof remarkCitations, Record<string, AnswerReference>],
+        remarkAnswerInference,
+      ]}
+      rehypePlugins={[
+        rehypeKatex,
+        [rehypeCitationImages, imageIdsByCitationKey, citationImageOrder] as [
+          typeof rehypeCitationImages, CitationImageIdsByKey, CitationImageOrder,
+        ],
+      ]}
+      // 默认 urlTransform 会清掉 cite: 协议 → 徽章 href 丢失;放行 cite:,
+      // 其余仍走默认清洗(防 javascript: 等不安全协议)。
+      urlTransform={(url) => (url.startsWith("cite:") ? url : defaultUrlTransform(url))}
+      components={REPORT_MARKDOWN_COMPONENTS}
+    >
+      {normalizeInferenceListMarkers(normalizeMathMarkdown(markdown))}
+    </ReactMarkdown>
+  ), [markdown, refsByKey, imageIdsByCitationKey, citationImageOrder]);
+  // Provider value 本身也要稳定:react-markdown 把 markdownTree 记进 useMemo 是为了
+  // 不重挂载子树,但子树里读 Context 的 ReportMarkdownLink/ReportMarkdownAside 每次
+  // 拿到一个新 value 对象仍然会重渲染。onSelectReference 定义在工厂函数内部——它
+  // 不捕获会变的依赖(setSelectedRefKey 是稳定引用),所以只随这个 useMemo 本身的
+  // 重算频率重建,不需要单独 useCallback。
+  const renderContextValue = useMemo(
+    () => ({
+      refsByKey,
+      selectedRefKey,
+      onSelectReference: (key: string) => {
+        setSelectedRefKey(key);
+        document
+          .getElementById("report-references")
+          ?.scrollIntoView({ behavior: "smooth", block: "start" });
+      },
+      renderCitationImages,
+    }),
+    [refsByKey, selectedRefKey, renderCitationImages],
+  );
   return (
     <div className="report-markdown answer-markdown">
-      <ReactMarkdown
-        remarkPlugins={[
-          remarkGfmPlugin,
-          remarkMath,
-          [remarkCitations, refsByKey] as [typeof remarkCitations, Record<string, AnswerReference>],
-          remarkAnswerInference,
-        ]}
-        rehypePlugins={[rehypeKatex]}
-        // 默认 urlTransform 会清掉 cite: 协议 → 徽章 href 丢失;放行 cite:,
-        // 其余仍走默认清洗(防 javascript: 等不安全协议)。
-        urlTransform={(url) => (url.startsWith("cite:") ? url : defaultUrlTransform(url))}
-        components={components}
-      >
-        {normalizeInferenceListMarkers(normalizeMathMarkdown(markdown))}
-      </ReactMarkdown>
+      <ReportMarkdownRenderContext.Provider value={renderContextValue}>
+        {markdownTree}
+      </ReportMarkdownRenderContext.Provider>
       {selectedReference && (
         <aside className="report-reference-detail" aria-label="引用原文">
           <strong>{selectedReference.source_title || selectedReference.label}</strong>
@@ -276,7 +419,11 @@ export function ReportMarkdown({
               懒加载。这里刻意**不**接 onOpenSource 跳转（对比 answer-panel.tsx
               第 922 行 Ask 侧图片可点击跳转来源）：本组件没有这个 prop——报告
               侧引用详情区本就没有"打开来源"的交互面，与 Ask 侧的不对称是 v1
-              范围内的刻意决定，不是遗漏。 */}
+              范围内的刻意决定，不是遗漏。
+              二期（正文内联引用图片）保留本区块不动，与 Ask 侧的「正文图片区 +
+              引用浮层缩略图」同构：正文那份是**按资产全篇去重**的（同一张图只在
+              第一次被引用处出现一次），而这里是「这一条引用挂了哪些图」的完整
+              清单，两者回答的不是同一个问题。 */}
           {(selectedReference.images?.length ?? 0) > 0 && notebookId && (
             <div className="cite-detail-images">
               <span className="cite-detail-images-label">本段附图</span>
@@ -1177,6 +1324,14 @@ export interface ReportsPanelProps {
   maxSections?: number;
   maxSubqueriesPerSection?: number;
   uiMode?: UiMode;
+  /**
+   * 报告正文里的引用图片被点开时的承接方。刻意复用 page.tsx 那一格
+   * `answer-image-preview`（root modal coordinator 已登记的席位），而不是在报告侧
+   * 另开一个不受协调器管辖的弹窗：两个面用的是同一套 `AnswerImagePreviewRequest`
+   * 与同一个 active notebook 的资产代理 URL。可选——不传时正文图片照常显示，
+   * 只是不可点击放大。
+   */
+  onPreviewImage?: (request: AnswerImagePreviewRequest) => void;
 }
 
 export function ReportsPanel({
@@ -1189,6 +1344,7 @@ export function ReportsPanel({
   maxSections = DEFAULT_REPORT_MAX_SECTIONS,
   maxSubqueriesPerSection = DEFAULT_REPORT_MAX_SUBQUERIES_PER_SECTION,
   uiMode = "advanced",
+  onPreviewImage,
 }: ReportsPanelProps) {
   const {
     reports,
@@ -1449,7 +1605,17 @@ export function ReportsPanel({
           </div>
         )}
         {active.content_md ? (
-          <ReportMarkdown markdown={active.content_md} references={active.references} notebookId={notebookId} />
+          // key=active.id:ReportsPanel 本身不因切换报告而重挂载(workspace.active
+          // 只是换了个对象),selectedRefKey 是 ReportMarkdown 内部 state,不会跟着
+          // 自动清零——不加这个 key,报告 A 里点开的引用详情卡会带着 A 的 selectedRefKey
+          // 在切到报告 B 后继续渲染,连带发出一次用户没点过的附图请求。
+          <ReportMarkdown
+            key={active.id}
+            markdown={active.content_md}
+            references={active.references}
+            notebookId={notebookId}
+            onPreviewImage={onPreviewImage}
+          />
         ) : (
           !isReportActive(active.status)
           && !["failed", "intent_ready", "outline_ready"].includes(active.status) && (
