@@ -30,10 +30,47 @@ from tests.model_testkit import bind_chat_client
     ('Summarize the papers "Deployment" and "Operations"', None),
     ("Summarize the experimental methods in this paper", None),
     ("Summarize the key findings from the article", None),
+    ("列出关于机器学习的论文", None),
+    ("What documents cover OAuth token expiration?", None),
+    ("Summarize the methodology of this paper", None),
+    ("List documents about OAuth", None),
+    ("Summarize all papers about machine learning", None),
+    ("请介绍这个库中关于机器学习的论文", None),
+    ("介绍这篇文档的实验结论", None),
+    ("Summarize the methodology of the paper \"Deployment\"", None),
+    ("介绍《部署手册》的认证流程", None),
+    ("请简要介绍一下这篇论文的主要内容。", "source"),
+    ("介绍一下这篇文档", "source"),
+    ("该文档的主要内容是什么？", "source"),
+    ("请逐篇介绍这个库中的文档", "catalog"),
+    ("这些论文分别讲了什么？", "catalog"),
+    ("文档分别介绍了什么内容？", "catalog"),
+    ("请列出这个库中的所有文档", "catalog"),
+    ("这个库里有哪些文章？", "catalog"),
+    ("Please summarize this document.", "source"),
+    ("Give me an overview of that article", "source"),
+    ("What does this file cover?", "source"),
+    ("Please list all documents in this notebook", "catalog"),
+    ("What are the papers in this library about?", "catalog"),
+    ("What does each document cover?", "catalog"),
 ])
 def test_overview_routes_only_explicit_document_introductions(question, kind):
     result = overview_intent(question)
     assert (result.kind if result else None) == kind
+
+
+@pytest.mark.parametrize("question,title", [
+    ("介绍《部署手册》", "部署手册"),
+    ("介绍文档“部署手册”", "部署手册"),
+    ("“部署手册”这篇文档讲了什么？", "部署手册"),
+    ('Summarize the paper "Deployment"', "Deployment"),
+    ('What is the document "Deployment" about?', "Deployment"),
+    ("介绍《系统设计与评审》", "系统设计与评审"),
+])
+def test_overview_extracts_only_whole_document_title_subjects(question, title):
+    result = overview_intent(question)
+    assert result is not None and result.kind == "source"
+    assert result.title == title
 
 
 class AnswerClient:
