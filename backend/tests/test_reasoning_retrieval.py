@@ -6600,10 +6600,12 @@ def test_reflect_turns_do_not_each_pay_a_second_scope_probe(
 ):
     """无图 + 精查/枚举都关着 ⇒ 范围改变不了动作面,能力投影不该再探一次。
 
-    动作分发链头上那次纵深防御探测仍在(每轮一次),所以多两轮 = 多两次;能力投影
-    若无条件跟着探,同样的两轮就要多四次。exhaustive 档 16 轮的差值正是这个系数。
+    动作分发链头上那道枚举纵深防御先看动作再探(探针按契约禁止 memo,「全选」形状
+    下是两次库读),所以非枚举动作的一轮**零探针**:多两轮 = 多零次。能力投影若无条件
+    跟着探,同样的两轮就要多两次;链头若把探针放回第一操作数,又多两次。exhaustive
+    档 16 轮的差值正是这两个系数。
     """
     _v2_repo(rrepo)
     base = _scope_probe_calls_for_turns(rrepo, monkeypatch, 1)
     more = _scope_probe_calls_for_turns(rrepo, monkeypatch, 3)
-    assert more - base == 2
+    assert more - base == 0

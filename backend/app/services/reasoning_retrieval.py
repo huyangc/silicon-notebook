@@ -5907,10 +5907,10 @@ class ReasoningRetriever:
                     summary=_REFLECT_INVALID_SKIP_SUMMARY,
                     detail={"reason": decision.invalid_reason}))
             elif (
-                self._unsafe_scope_restricted()
-                and decision.next_action in (
+                decision.next_action in (
                     ENUMERATE_ELEMENTS_ACTION, ENUMERATE_KG_OBJECTS_ACTION
                 )
+                and self._unsafe_scope_restricted()
             ):
                 # Defense in depth: the restricted reflect schema does not
                 # offer enumeration, but a malformed model response or a test
