@@ -11,6 +11,7 @@ from typing import Any
 
 from app.services.document_catalog_overview import CatalogOverview
 from app.services.citation_markers import LOOSE_MARKER_RE, marker_keys
+from app.services.prompt_layers import fragment_text
 
 
 GUIDE_SCHEMA_HINT = '''{"documents":[{"reference":"k5001","purpose":"研究问题；证据不足时留空","method":"核心方法；证据不足时留空","contribution":"主要贡献或结论；证据不足时留空"}],"relationships":[{"description":"有证据支持的联系","references":["k5001","k5002"]}],"reading_order":[{"reference":"k5001","reason":"根据已提供内容说明阅读顺序建议"}]}'''
@@ -70,7 +71,7 @@ def _text(value: Any, allowed: set[str]) -> str | None:
 def guide_style_instruction(catalog: CatalogOverview) -> str:
     keys = ", ".join(_source_keys(catalog).values())
     return (
-        "Return the document-guide JSON schema. Write Chinese prose. For EACH supplied "
+        "Return the document-guide JSON schema. " + fragment_text("answer.style_language") + " For EACH supplied "
         "document reference, fill purpose, method and contribution only from its own "
         "stored summary or explicitly supplied original passages; leave unsupported slots empty. "
         "Use the exact reference identity, never substitute another document. Do not write titles "

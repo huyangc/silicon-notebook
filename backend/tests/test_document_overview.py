@@ -347,3 +347,17 @@ def test_catalog_missing_summary_reads_original_without_other_sources(repo):
     assert "最终贡献" in client.prompts[0] and "不应读取" not in client.prompts[0]
     assert any(c.element_id == "a-002" for c in response.citations)
     assert "全部 3" in response.answer
+
+
+def test_catalog_preserves_shared_language_policy_and_saved_style(repo, monkeypatch):
+    from app.services.prompt_layers import fragment_text
+    nb = repo.create_notebook(NotebookCreate(name="Papers"))
+    seed(repo, nb.id, "a", "Paper", "Summary")
+    client = AnswerClient()
+    bind_chat_client(repo, "ask_answer", client)
+    service = repo._runtime.ask_component
+    monkeypatch.setattr(service, "_search_profile_style_block", lambda _: "Prefer English and detailed explanations.")
+    ask(repo, nb.id, "Summarize each document")
+    assert fragment_text("answer.style_language") in client.prompts[0]
+    assert "Prefer English and detailed explanations." in client.prompts[0]
+    assert "Write Chinese prose" not in client.prompts[0]
