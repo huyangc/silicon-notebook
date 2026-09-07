@@ -479,8 +479,12 @@ KG mutation-version bump 失败，已经提交的 chunk 也会在同一 run 内�
 上面的私有 timeout 与熔断保护。
 该补偿恢复的是 sidecar 缺失来源的词法可见性，不是对已索引来源内部变更或无词面重合
 delta 的语义强一致；这些内容仍须完成 fold 或开启 `SCALE_SEARCH_INCLUDE_DELTA=true`。可设
-`CHUNK_FTS_WITH_ANN_ENABLED=true` 做 A/B 或恢复报告的完整词法补召回；ANN 不可用时，报告仍用
-有界 FTS fail-open 回退。冻结的全选来源清单在 sidecar 证明全部索引 source code 均获允许时，
+`CHUNK_FTS_WITH_ANN_ENABLED=true` 做 A/B 或恢复报告的完整词法补召回；ANN 不可用时，跑在**大库**
+（`copyable=false`）或整库 chunk 数超过 `CHUNK_BRUTEFORCE_MAX_CHUNKS` 的库上的报告 run 仍用有界
+FTS fail-open 回退——这把守卫是**库**的属性，与本次 run 的来源范围无关。跑在小库上的报告 run
+走的是有界暴力向量路径（按允许来源取 chunk 行，向量取缓存的整库矩阵并在打分前掩码到这些
+chunk 上），所以 `chunk_bruteforce_skipped` 出现在小库上是需要排查的信号，不是预期回退。
+冻结的全选来源清单在 sidecar 证明全部索引 source code 均获允许时，
 也不再支付 HNSW Python filter callback；只要出现未知或未授权 code，就继续走过滤/按范围路径。
 
 诊断时用无正文耗时事件，不要再把旧聚合字段当成纯 ANN：`site=chunk_scale_index` 给出

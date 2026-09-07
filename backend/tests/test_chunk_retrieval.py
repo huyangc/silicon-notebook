@@ -608,7 +608,16 @@ def test_report_unscoped_ann_authority_probe_failure_fails_closed(
 def test_report_unscoped_baseline_fallback_keeps_actor_source_ceiling(
     repo, monkeypatch, failure_mode
 ):
-    """Every ANN-unavailable branch must reach FTS with the actor ceiling."""
+    """Every ANN-unavailable branch must reach FTS with the actor ceiling.
+
+    ``copyable=False`` below is load-bearing, not scenery: FTS degradation is
+    the LARGE-library lane. A ceiling-bearing report run against a small
+    library takes the bounded brute-force lane instead -- covered by
+    ``test_report_unscoped_baseline_fallback_ceils_the_bruteforce_lane``.
+    Before the scoped-vector-lane fix, ``allowed_source_ids is not None``
+    short-circuited to FTS for BOTH library sizes, which is exactly the
+    defect that made every UI-issued question skip chunk vector recall.
+    """
     from app.services.retrieval_run import retrieval_run
 
     visible_source = "visible-source"
@@ -671,6 +680,11 @@ def test_report_unscoped_baseline_fallback_keeps_actor_source_ceiling(
         "_retrieve_chunks_fts_degraded",
         _bounded_fts,
     )
+    monkeypatch.setattr(
+        repo.retrieval.candidates,
+        "notebook_copy_stats",
+        lambda _notebook_id: {"copyable": False, "size": {}},
+    )
 
     with retrieval_run(run_kind="report_generation", actor_id="actor"):
         out = repo.retrieval.candidates._retrieve_chunks_baseline(
@@ -679,6 +693,72 @@ def test_report_unscoped_baseline_fallback_keeps_actor_source_ceiling(
 
     assert out == ([], [], None)
     assert observed == [(visible_source,)]
+
+
+def test_report_unscoped_baseline_fallback_ceils_the_bruteforce_lane(
+    repo, monkeypatch
+):
+    """Small library, no ANN: the report actor ceiling binds the BRUTE lane.
+
+    Sibling of the FTS test above. A report run carries no browser scope, so
+    ``_chunk_source_ceiling`` materializes the actor's authorized universe;
+    that list must keep bounding candidate generation on the lane a small
+    library actually takes (``_gather_chunks(..., allowed_source_ids=...)``),
+    not only on the large-library FTS lane.
+    """
+    from app.services.retrieval_run import retrieval_run
+
+    visible_source = "visible-source"
+
+    monkeypatch.setattr(
+        repo.retrieval.candidates.sources,
+        "all_visible_source_ids",
+        lambda _notebook_id: [visible_source],
+    )
+    monkeypatch.setattr(
+        repo.retrieval.candidates.sources,
+        "hidden_source_ids",
+        lambda _notebook_id, _actor_id: [],
+    )
+    monkeypatch.setattr(
+        repo.retrieval.candidates, "_embed_query", lambda _query: [0.25] * 16
+    )
+    monkeypatch.setattr(
+        repo.retrieval.candidates, "_scale_index", lambda *_a, **_kw: None
+    )
+    monkeypatch.setattr(
+        repo.retrieval.candidates,
+        "notebook_copy_stats",
+        lambda _notebook_id: {"copyable": True, "size": {}},
+    )
+    monkeypatch.setattr(
+        repo.retrieval.candidates,
+        "_retrieve_chunks_fts_degraded",
+        lambda *_a, **_kw: pytest.fail("small library must not degrade to FTS"),
+    )
+
+    gathered = []
+    orig_gather = repo.retrieval.candidates._gather_chunks
+
+    def _spy_gather(db, notebook_id, allowed_source_ids=None):
+        gathered.append(
+            tuple(allowed_source_ids) if allowed_source_ids is not None else None
+        )
+        return orig_gather(db, notebook_id, allowed_source_ids)
+
+    monkeypatch.setattr(
+        repo.retrieval.candidates, "_gather_chunks", _spy_gather
+    )
+
+    with retrieval_run(run_kind="report_generation", actor_id="actor"):
+        repo.retrieval.candidates._retrieve_chunks_baseline(
+            "shared-library", "query", drifted=False
+        )
+
+    assert gathered == [(visible_source,)], (
+        "the brute-force lane must receive the same actor ceiling the FTS "
+        f"lane does, got {gathered}"
+    )
 
 
 def test_report_unscoped_authority_failure_blocks_baseline_and_contributors(

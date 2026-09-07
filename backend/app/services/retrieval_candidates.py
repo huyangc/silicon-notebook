@@ -315,6 +315,16 @@ class _RetrievalState:
     def notebook_copy_stats(self, notebook_id: str) -> dict:
         return self.scale_runtime.notebook_copy_stats(notebook_id)
 
+    def notebook_chunk_count(self, notebook_id: str) -> int:
+        """整库 chunk 计数,经 seq-gated memo(方言各自的
+        ``knowledge_counts_cache.chunk_count``,由 ``IndexProjectionStore
+        .total_chunk_count`` 收口)。
+
+        与 ``/scale-index/status`` 开库路径同一份 memo:冷起一次覆盖扫描,warm 就
+        是一次主键 seq 读。裸 ``chunks.count_row`` 在 chunk 通道上是每子查询一次
+        整库 COUNT——一次问答会被 ``_retrieve_chunks_multi`` 放大到最多 8 次。"""
+        return self.scale_runtime.projections.total_chunk_count(notebook_id)
+
     def maybe_auto_index(self, notebook_id: str) -> None:
         self.scale_runtime.maybe_auto_index(notebook_id)
 
@@ -993,15 +1003,25 @@ class CandidateRetrievalService(_RetrievalState):
     def _gather_chunks(
         self, db: object, notebook_id: str, allowed_source_ids=None
     ) -> List[dict]:
+        """整库(``allowed_source_ids is None``)或按允许来源收窄的 chunk 文本行。
+
+        分批只发生在**第二跳**。来源 id 那一跳不需要 ``_in_batches``:
+        ``ChunkStore.ids_for_sources`` 两个方言都把清单整体绑成**一个**参数
+        (SQLite ``json_each(?)``、PostgreSQL ``source_id=ANY(%s)``),占位符数
+        与来源数无关。它返回的 **chunk** id 却是 ``hydrate_rows`` 的
+        ``IN (?,?,…)`` 直接展开,行数 = 允许来源里的 chunk 总数——一个来源就能有
+        上千 chunk,轻易越过 SQLite 的变量上限。因此这一跳按 ``_in_batches``
+        (``_IN_CHUNK`` = 900)分批;它按构造去重保序,``extend`` 不产生重复行,
+        与 ``hydrate_chunk_candidates`` 同一纪律。"""
         if allowed_source_ids is None:
             rows = self.chunks.retrieval_rows(db, notebook_id)
         else:
             id_rows = self.chunks.ids_for_sources(
                 db, notebook_id, allowed_source_ids
             )
-            rows = self.chunks.hydrate_rows(
-                db, [row["id"] for row in id_rows]
-            )
+            rows = []
+            for batch in self._in_batches(row["id"] for row in id_rows):
+                rows.extend(self.chunks.hydrate_rows(db, batch))
         return [{
             "chunk_id": r["id"], "source_id": r["source_id"], "text": r["text"],
             "section_path": r["section_path"], "source_title": r["source_title"],
@@ -1045,6 +1065,28 @@ class CandidateRetrievalService(_RetrievalState):
                                 runtime_dim=runtime_dim)
 
         return self._vector_cache.get(f"{notebook_id}:matrix:{table}", version, _load)
+    @staticmethod
+    def _mask_vector_matrix(ids: List[str], mat, keep_ids):
+        """``(ids, mat)`` 的**打分前**子集:只保留 ``keep_ids`` 里的行,行序不变。
+
+        供有界暴力路径把 ``_vector_matrix`` 那份**整库**缓存收窄到本次允许的
+        chunk 上。掩码必须发生在 ``score_chunks``/MMR **之前**:被排除的候选
+        既不得占用 Top-K,也不得作为 MMR 的多样性对照行提供隐藏前提
+        (``docs/product-and-api.md``:"post-filtering alone is not authority
+        because excluded candidates can consume Top-K")。
+
+        返回的矩阵是 numpy 花式索引产生的**拷贝**,与进程缓存里那份整库矩阵各自
+        独立——共享的缓存行绝不能被就地改写或被调用方持有引用。空子集返回
+        ``(0, dim)``(整库本身为空时 ``(0, 0)``),``query_sims`` 按 ``size == 0``
+        原样返回空 sims,与从前 ``build_matrix`` 的空返回同语义。"""
+        import numpy as np
+
+        keep = np.fromiter(
+            (i for i, vid in enumerate(ids) if vid in keep_ids),
+            dtype=np.intp,
+            count=-1,
+        )
+        return [ids[int(i)] for i in keep], mat[keep]
     def _vector_matrix_warm(self, db: object, notebook_id: str, table: str) -> bool:
         """True 当且仅当 `table` 的向量矩阵已经暖在 _vector_cache 里(版本匹配当前
         数据)—— 不触发 loader,只是 peek。供大库场景「加载前先问值不值得」的
@@ -2979,17 +3021,6 @@ class CandidateRetrievalService(_RetrievalState):
                 )
                 if ann is not None:
                     return ann
-        if allowed_source_ids is not None:
-            # A selected scope is always a bounded candidate query.  Do not
-            # materialize every chunk/vector merely because the enclosing
-            # notebook is below the broad copy/share threshold.  The degraded
-            # helper uses n_chunks only for diagnostics; avoid an otherwise
-            # unnecessary whole-notebook COUNT on this source-bounded path.
-            return self._retrieve_chunks_fts_degraded(
-                notebook_id, query, query_vector, recall, -1,
-                allowed_source_ids=allowed_source_ids,
-                source_restricted=source_restricted,
-            )
         # ── 大库暴力守卫(镜像 #171 冷矩阵守卫哲学):走到这里 = ANN 不可用(未建
         # scale 索引 / embed 失败 query_vector=None / ANN fail-open)。超阈值的库
         # 绝不落进下面「全表拉文本 + 逐 chunk 纯 Python 分词」——生产 55 万 KG 级
@@ -2999,16 +3030,58 @@ class CandidateRetrievalService(_RetrievalState):
         # 大库暴力守卫(统一「大库」定义 = not copyable,与其余 5 条检索路径一把尺子):
         # 大库无论 chunk 多少都强制走索引/FTS 降级,绝不全表暴力。chunk 计数阈值
         # chunk_bruteforce_max_chunks 作叠加下限保留(小库 chunk 极多也降级)。
+        #
+        # scoped 与 unscoped 共用这一把守卫。#422 曾在这道守卫**之前**加过一条
+        # 「``allowed_source_ids is not None`` → 直接 FTS 降级」的早返回,理由是
+        # 「选定范围本来就是有界查询,别为小库全表物化」。那条早返回是生产缺陷:
+        # HTTP 侧冻结的来源范围**恒**给出清单——全选冻结也带允许列表(见
+        # ``source_scope.scoped_allowed_source_ids`` 的 docstring,codex #640 R1
+        # 裁决)——所以界面发出的每一次问答,只要库没建 scale 索引,chunk 通道就
+        # 只剩 FTS 词法候选、完全不做向量检索,中文问英文语料首轮恒空(离线对照
+        # 集:同库同题,无范围 134 命中 / 冻结单来源范围 0 命中)。
+        #
+        # #422 那条顾虑落到实现上是「别为小库物化整库矩阵」,而下面这条暴力路径
+        # 并不需要为 scoped 请求额外物化任何东西:它对 scoped 与 unscoped 取的是
+        # **同一份** ``_vector_matrix`` 版本键控进程缓存,scoped 只是在打分之前对
+        # 它做一次**掩码**(``_mask_vector_matrix``,按已 gather 的允许 chunk id
+        # 取行子集)。真正需要防的是「库本身大」,而库大不大与这次请求选了几个来源
+        # 无关——因此判据只留 ``large``(not copyable)与 chunk 计数超阈值两条,
+        # 两条都是**库**的属性。FTS 降级因此只服务大库/超阈值库,
+        # ``chunk_bruteforce_skipped`` 事件也只在这两种库出现;小库的 scoped 请求
+        # 走下面的有界暴力向量路径。
         large = not self.notebook_copy_stats(notebook_id)["copyable"]
         threshold = self.settings.chunk_bruteforce_max_chunks
         if large or threshold > 0:
-            with self._connect() as db:
-                n_chunks = self.chunks.count_row(db, notebook_id)["c"]
+            # 整库真实计数,经 seq-gated memo(见 ``notebook_chunk_count``)。
+            # ``large`` 分支只把它当事件诊断用,同样走 memo:warm 一次主键 seq 读,
+            # 比每子查询一次整库 COUNT 便宜一个数量级。
+            n_chunks = self.notebook_chunk_count(notebook_id)
             if large or n_chunks > threshold:
                 return self._retrieve_chunks_fts_degraded(
-                    notebook_id, query, query_vector, recall, n_chunks
+                    notebook_id, query, query_vector, recall, n_chunks,
+                    allowed_source_ids=allowed_source_ids,
+                    source_restricted=source_restricted,
                 )
-        # ↓ 现有暴力路径保持不变
+        # ↓ 有界暴力路径:scoped 与 unscoped 取**同一份**版本键控进程缓存矩阵,
+        # scoped 只在打分之前多做一次掩码。
+        #
+        # 为什么不为 scoped 现建一份「只含允许来源」的矩阵(``vector_rows_for_ids``
+        # + ``build_matrix``):那样每个子查询各建一次、零缓存复用。一次问答被
+        # ``_retrieve_chunks_multi`` 放大到最多 8 个并发子查询,每个都各自解码一遍
+        # 同一批向量行(legacy JSON 行 5000×1024 实测 ~264ms/次)并各自持有一份矩阵。
+        # 走 ``_vector_matrix`` 则整库只解码一次、被同一次问答的 N 个子查询共享。
+        #
+        # 为什么不能把整库 ``(ids, mat)`` 原样返回、只靠 ``chunks`` 收窄:
+        #   * ``ids/mat`` 是返回值的一部分,上层 MMR 拿它当**多样性矩阵**——里面若
+        #     留着不允许的行,被排除的内容就以「隐藏前提」的形式参与了选择;
+        #   * 全选冻结≠生产者读到的宇宙(冻结清单的隐藏半按请求人解析,不带清单的
+        #     生产者读到的是每一位成员的隐藏 Memory,见
+        #     ``source_scope.scoped_allowed_source_ids`` 的 docstring),所以「全选
+        #     时清单恒真、可以省掉」这条捷径不成立;
+        #   * 过滤必须发生在 ``score_chunks`` **之前**:被排除的候选不得占用 Top-K
+        #     (``docs/product-and-api.md`` 的原话)。
+        # 掩码同时满足这三条:候选与矩阵行都严格 ⊆ 允许 chunk,且发生在打分之前。
+        # 代价 = unscoped 的代价 + 一次子集拷贝(全选冻结时拷贝整库那么大)。
         with self._connect() as db:
             chunks = (
                 self._gather_chunks(db, notebook_id)
@@ -3017,18 +3090,12 @@ class CandidateRetrievalService(_RetrievalState):
                     db, notebook_id, allowed_source_ids=allowed_source_ids
                 )
             )
-            if allowed_source_ids is None:
-                ids, mat = self._vector_matrix(
-                    db, notebook_id, "chunk_embeddings", "chunk_id"
-                )
-            else:
-                from app.services.vector_index import build_matrix
-                chunk_ids = [chunk["chunk_id"] for chunk in chunks]
-                vector_rows = self.embeddings.vector_rows_for_ids(
-                    db, notebook_id, "chunk_embeddings", "chunk_id", chunk_ids
-                )
-                ids, mat = build_matrix(
-                    (row["vid"], row["vector"]) for row in vector_rows
+            ids, mat = self._vector_matrix(
+                db, notebook_id, "chunk_embeddings", "chunk_id"
+            )
+            if allowed_source_ids is not None:
+                ids, mat = self._mask_vector_matrix(
+                    ids, mat, {chunk["chunk_id"] for chunk in chunks}
                 )
         chunk_sims = query_sims(query_vector, ids, mat) if query_vector else None
         scored = score_chunks(query, chunks, query_vector, chunk_sims, limit=recall)
@@ -3053,6 +3120,13 @@ class CandidateRetrievalService(_RetrievalState):
         全表、不全量分词、不触发全量向量矩阵加载(与 PR#158「查询恒定成本」取向
         一致)。fail-open:FTS 异常(如旧库缺 chunks_fts)按零候选处理 →
         ([], [], None),事件携带 fts_error 供 diag_slow.py 定位。
+
+        ``n_chunks`` 是**整库**的 chunk 计数,不是本次允许来源内的计数,也不是候选
+        数——它是触发这次降级的那把守卫读到的同一个数,和事件里的 ``threshold``
+        成对解释「为什么降级」。调用方一律走 seq-gated memo 取真实计数
+        (``notebook_chunk_count`` → ``knowledge_counts_cache.chunk_count``),
+        不得传 -1 之类的占位值(那会让排查者以为计数探针坏了),也不得为省一次
+        COUNT 而在热路径上裸调 ``chunks.count_row``。
 
         ``source_restricted`` 是**路由**问题(这次运行真被收窄了吗),由
         ``_retrieve_chunks_baseline`` 现探一次后传下来,不得由
