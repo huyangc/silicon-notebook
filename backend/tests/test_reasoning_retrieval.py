@@ -8863,3 +8863,297 @@ def test_flag_off_produces_no_termination_no_aspect_block_and_no_new_step(rrepo)
     assert all(
         ASPECT_BLOCK_TITLE not in message["content"]
         for messages, _hint in llm.reflect_calls for message in messages)
+
+
+# ------------------------------------------ T4-A 复审遗留:degraded 的两个前件
+
+def test_a_run_whose_last_retrieval_failed_but_ended_on_the_model_is_not_degraded(
+    rrepo,
+):
+    """最后一次去查的时候查不动了,但**模型自己正常结束**了这次 run ⇒ 不是 degraded。
+
+    这是 §7.2 的裁决:`retrieval_degraded` 的两个前件缺一不可——「trace 里第一个
+    终止标记不是 model_end」**且**「时间线上最后一次真实执行是 failed」。这条用例
+    让第二个前件成立而第一个不成立:播种空手、补查也空手、模型补的那条方向的原文
+    半炸掉(fail-open 吞下、经侧信道记 failed),池子里 0 段原文;下一轮模型看着这份
+    空手自己走到 answer/sufficient。
+
+    模型走到 answer 意味着它是**看着已经到手的东西**决定停下的,把这种 run 标成
+    "检索通道异常收尾"是在描述服务端没做的判断;真实发生的是「模型在没有支撑的
+    情况下宣布结束」,那正是 `model_partial` 存在的理由(方面 a1 从头到尾没支撑)。
+    没走通的通道照样如实披露,走 `unrecovered_channels`,不占 `reason`。
+
+    变异:去掉 `classify_termination` 里的 `kind != "model_end"` 前件 ⇒ 这条红
+    (reason 变成 retrieval_degraded),而"模型宣布充分"这件事在屏幕上消失。
+    """
+    from app.domain.retrieval_termination import (
+        TERMINATION_MODEL_PARTIAL, TERMINATION_RETRIEVAL_DEGRADED,
+    )
+
+    _, result = _v2_aspect_run(
+        rrepo,
+        # 一个查得回来的串都没有:播种空手,模型补的那条方向直接炸。
+        chunk_results=_BoomFor({}, {"方向甲"}),
+        intent_detail={"mandatory_topics": ["问题一"]},
+        reflects=[
+            {"next_action": "add_subquery", "sufficient": False,
+             "arguments": {"query": "方向甲"}, "reason": "补个方向"},
+            _answer(),
+        ],
+    )
+    assert result.chunks == []
+    assert result.termination.reason != TERMINATION_RETRIEVAL_DEGRADED
+    assert result.termination.reason == TERMINATION_MODEL_PARTIAL
+    # 模型确实自报了充分——这一格与 reason 分开记,正是为了看得出这次矛盾。
+    assert result.termination.model_assessed_sufficient is True
+    assert result.termination.unresolved_aspect_ids == ("a1",)
+    # 没走通的通道如实披露(否则"最后一次查不动了"这件事一个字都不会留下)。
+    assert result.termination.unrecovered_channels == ("add_subquery",)
+
+
+def test_a_zero_io_round_after_a_failure_does_not_look_like_a_recovery(rrepo):
+    """零 I/O 的那几档不是"一次执行",不能把一条没恢复的通道洗白(§7.2)。
+
+    时间线:播种成功 → `add_subquery` 的原文半炸掉(failed)→ 逐字重复同一条
+    方向(`duplicate_subquery`,**连试都没试**)→ 熔断收尾。最后一条观察是
+    duplicate,但它不是一次执行:真正"最后一次去查"的结果仍然是炸的。
+
+    变异:把 `_observation_status` 的折叠去掉(直接返回 row.status)⇒ 这条红两
+    次——`reason` 退回 `stale`(把一次没执行读成了"后来又好了"),
+    `unrecovered_channels` 变空(duplicate 覆盖掉了同一通道上的 failed)。
+    """
+    from app.domain.retrieval_termination import (
+        TERMINATION_RETRIEVAL_DEGRADED,
+    )
+
+    _, result = _v2_aspect_run(
+        rrepo, reasoning_stale_limit=2,
+        chunk_results=_BoomFor({"完整问题": [_chunk_hit("ck-q0")]}, {"方向甲"}),
+        intent_detail={"mandatory_topics": ["问题一"]},
+        reflects=[
+            {"next_action": "add_subquery", "sufficient": False,
+             "arguments": {"query": "方向甲"}, "reason": "补个方向"},
+            # 逐字重复 ⇒ duplicate_subquery,零 I/O。
+            {"next_action": "add_subquery", "sufficient": False,
+             "arguments": {"query": "方向甲"}, "reason": "再来一次"},
+            _answer(),
+        ],
+    )
+    assert "duplicate_subquery" in _skip_reasons(result)
+    assert "stale_circuit_breaker" in _skip_reasons(result)
+    assert result.termination.reason == TERMINATION_RETRIEVAL_DEGRADED
+    assert result.termination.unrecovered_channels == ("add_subquery",)
+
+
+def _fake_skip(reason: str):
+    from types import SimpleNamespace
+    return SimpleNamespace(step_type="skip", detail={"reason": reason})
+
+
+def _fake_observation(action_id: str, status: str):
+    from types import SimpleNamespace
+    return SimpleNamespace(action_id=action_id, status=status)
+
+
+@pytest.mark.parametrize("terminal_reason,expected", [
+    # 判据矩阵:**最后一次真实执行是 failed** 这一列。左边是 trace 里第一个终止
+    # 标记,右边是 classify_termination 该给出的原因。`retrieval_degraded` 盖过
+    # 服务端侧的那两个收尾原因——它们说"没步数了 / 没动作可选了",而真正发生的
+    # 是最后一次去查的时候查不动了;只有模型自己正常结束(model_end)才挡得住它。
+    ("stale_circuit_breaker", "retrieval_degraded"),
+    ("no_executable_action", "retrieval_degraded"),
+    (None, "retrieval_degraded"),  # 一个标记都没有 ⇒ 本该 step_budget
+])
+def test_termination_matrix_last_execution_failed(terminal_reason, expected):
+    """失败之后走 stale / no_executable_action / 预算耗尽,三格都是 degraded。
+
+    前两格是 T4-A 复审点名要补的;第三格(预算耗尽)与它们同一条判据,一起放在
+    这张表里,免得下次有人只改一格。
+    """
+    from app.services.reasoning_aspects import AspectLedger, classify_termination
+    from app.services.reasoning_observation import STATUS_FAILED, STATUS_SUCCESS
+
+    trace = [_fake_skip(terminal_reason)] if terminal_reason else []
+    observations = [
+        _fake_observation("search_chunks", STATUS_SUCCESS),
+        _fake_observation("add_subquery", STATUS_FAILED),
+    ]
+    termination = classify_termination(
+        trace, observations, AspectLedger(["问题一"], source="intent_topics"))
+    assert termination.reason == expected
+    assert termination.unrecovered_channels == ("add_subquery",)
+
+
+def test_termination_skip_step_discloses_the_unrecovered_channels(rrepo):
+    """`unrecovered_channels` 有消费者:收尾那条 skip 步如实带出去(§7.2)。
+
+    它不参与 `reason`,但必须说出去——"KG 那条路今天没走通"是用户重试/换问法时
+    唯一有用的线索,只留在服务端内存里等于没记。
+    """
+    _, result = _v2_aspect_run(
+        rrepo,
+        chunk_results=_BoomFor({"方向二": [_chunk_hit("ck-b1")]}, {"完整问题"}),
+        intent_detail={"mandatory_topics": ["问题一"]},
+        reflects=[
+            {"next_action": "add_subquery", "sufficient": False,
+             "arguments": {"query": "方向二"}, "reason": "换条方向"},
+            _answer(),
+        ],
+    )
+    step = [t for t in result.trace
+            if t.detail.get("reason") == "retrieval_termination"][0]
+    assert step.detail["unrecovered_channels"] == ["search_chunks"]
+    assert tuple(step.detail["unrecovered_channels"]) == (
+        result.termination.unrecovered_channels)
+
+
+# ---------------------------------- T4-B 合成侧:服务端事实块与最终装配复核
+
+def _term(reason="model_partial", aspects=(), unresolved=(), channels=()):
+    from app.domain.retrieval_termination import (
+        AspectSnapshot, RetrievalTermination,
+    )
+    return RetrievalTermination(
+        reason=reason,
+        unresolved_aspect_ids=tuple(unresolved),
+        unrecovered_channels=tuple(channels),
+        aspects=tuple(
+            AspectSnapshot(aspect_id=aspect_id, question=question,
+                           status=status, evidence_keys=tuple(keys))
+            for aspect_id, question, status, keys in aspects
+        ),
+    )
+
+
+def test_termination_block_is_a_server_fact_not_a_citable_item():
+    """事实块自己写明三件事:不是知识条目、没有 [k]、绝不可引用(§7.2)。
+
+    它进的是合成 prompt 的**指令区**(规则之后、Question 之前),不进证据区,也不
+    进 id_map —— 所以既不占号段,也不可能被 `parse_anchors` 绑上。块里如实列出
+    没解决的必答问题原文与没恢复的通道,并明确它**不是**"库里没有这些内容"的
+    证明:那是一次检索的边界,不是世界的边界。
+    """
+    from app.services.reasoning_aspects import render_termination_block
+
+    block = render_termination_block(_term(
+        reason="retrieval_degraded",
+        aspects=(("a1", "TX 的功耗上限是多少", "unknown", ()),
+                 ("a2", "已支撑的那件事", "supported", ("ck-1",))),
+        unresolved=("a1",), channels=("search_elements",)))
+    assert "NOT a knowledge item" in block and "never be cited" in block.lower()
+    assert "[k]" in block
+    assert "TX 的功耗上限是多少" in block
+    # 已支撑的方面不进"没解决"那一行。
+    assert "已支撑的那件事" not in block
+    assert "search_elements" in block
+    assert "evidence collection did not complete" in block
+    # 关闭态:一个字都不渲染 ⇒ prompt 逐字节回到接入前。
+    assert render_termination_block(None) == ""
+
+
+def test_termination_block_does_not_replay_the_models_own_gap_text():
+    """`gap` 是上一轮模型自己写的文本,不进服务端事实块(§2 拒绝的 reason 回放)。"""
+    from app.domain.retrieval_termination import AspectSnapshot, RetrievalTermination
+    from app.services.reasoning_aspects import render_termination_block
+
+    block = render_termination_block(RetrievalTermination(
+        reason="model_partial", unresolved_aspect_ids=("a1",),
+        aspects=(AspectSnapshot(
+            aspect_id="a1", question="问题原文", status="partial",
+            gap="模型自己写的一句缺口描述"),)))
+    assert "问题原文" in block
+    assert "模型自己写的一句缺口描述" not in block
+
+
+def test_termination_block_bounds_the_open_question_list():
+    """未解决方面很多时只列前几条,并如实补上"还有 N 项"——截断不隐瞒。"""
+    from app.services.reasoning_aspects import (
+        _TERMINATION_BLOCK_MAX_ASPECTS, render_termination_block,
+    )
+
+    count = _TERMINATION_BLOCK_MAX_ASPECTS + 3
+    block = render_termination_block(_term(
+        aspects=tuple((f"a{n}", f"问题{n}", "unknown", ())
+                      for n in range(1, count + 1)),
+        unresolved=tuple(f"a{n}" for n in range(1, count + 1))))
+    assert f"问题{_TERMINATION_BLOCK_MAX_ASPECTS}" in block
+    assert f"问题{_TERMINATION_BLOCK_MAX_ASPECTS + 1}" not in block
+    assert "(and 3 more)" in block
+
+
+def test_prompt_facts_and_ui_summaries_cover_the_same_closed_set():
+    """两份文案共用**键**的闭集,但刻意不共用字符串(§7.2)。
+
+    UI 那份是给用户看的中文短句,改它是产品用词决定;prompt 这份是模型输入,改它
+    会改答案。共用一份等于让一次措辞调整悄悄变成一次模型行为变更。
+    """
+    from app.domain.retrieval_termination import TERMINATION_REASONS
+    from app.services.reasoning_aspects import (
+        _TERMINATION_PROMPT_FACTS, _TERMINATION_SUMMARIES,
+    )
+    assert set(_TERMINATION_PROMPT_FACTS) == set(TERMINATION_REASONS)
+    assert set(_TERMINATION_SUMMARIES) == set(TERMINATION_REASONS)
+    assert not (set(_TERMINATION_PROMPT_FACTS.values())
+                & set(_TERMINATION_SUMMARIES.values()))
+
+
+def test_an_aspect_whose_every_support_was_budgeted_out_becomes_undelivered():
+    """支撑全被最终装配挤掉 ⇒ 未送达,不许继续显示"已支撑"(§7.2)。
+
+    这是三口径分开记的全部意义:`model_supported` 说的是模型怎么判的,
+    `synthesis_admitted` 说的是服务端真的送了什么进 prompt,`answer_cited` 说的
+    是答案真的引了什么。折成一个数就再也分不出这三件事。
+
+    变异:复核时不把"全部被移除"降为未送达(例如 undelivered 恒为空)⇒ 这条红。
+    """
+    from app.services.reasoning_aspects import review_aspect_delivery
+
+    termination = _term(aspects=(
+        # 支撑全被挤掉:模型说有,prompt 里一条都没有。
+        ("a1", "问题一", "supported", ("ck-1", "ck-2")),
+        # 部分送达:留一条就不算未送达——模型看见了那条支撑。
+        ("a2", "问题二", "supported", ("ck-3", "ck-9")),
+        # partial 也要复核,而且它绑的证据也可能被答案引用。
+        ("a3", "问题三", "partial", ("ck-4",)),
+        # 什么都没绑 ⇒ 谈不上"被移除",不算未送达。
+        ("a4", "问题四", "unknown", ()),
+    ))
+    delivery = review_aspect_delivery(
+        termination, admitted_keys={"ck-3", "ck-4"}, cited_keys={"ck-4"})
+    assert delivery.model_supported == ("a1", "a2")
+    assert delivery.synthesis_admitted == ("a2", "a3")
+    assert delivery.answer_cited == ("a3",)
+    assert delivery.undelivered == ("a1",)
+    # 关闭态:空 delivery,零判断。
+    assert review_aspect_delivery(
+        None, admitted_keys=set(), cited_keys=set()).undelivered == ()
+
+
+def test_synthesis_detail_keys_are_v2_only_and_report_three_registers():
+    """合成终步的稀疏键:关闭态一个都不出现,开启时三个口径各占一格。"""
+    from app.services.reasoning_aspects import (
+        admitted_evidence_keys, termination_synthesis_detail,
+    )
+
+    assert termination_synthesis_detail(
+        None, admitted_keys=set(), cited_keys=set()) == {}
+    detail = termination_synthesis_detail(
+        _term(reason="model_partial",
+              aspects=(("a1", "问题一", "supported", ("ck-1",)),
+                       ("a2", "问题二", "unknown", ())),
+              unresolved=("a2",), channels=("expand_graph",)),
+        admitted_keys=set(), cited_keys=set())
+    assert detail["termination_reason"] == "model_partial"
+    assert detail["termination_summary"] == "检索结束：仍有必答方面没有完整支撑"
+    assert detail["aspects_total"] == 2
+    assert detail["aspects_pending"] == 1
+    assert detail["aspects_model_supported"] == 1
+    assert detail["aspects_synthesis_admitted"] == 0
+    assert detail["aspects_answer_cited"] == 0
+    assert detail["aspects_undelivered"] == 1
+    assert detail["unrecovered_channels"] == ["expand_graph"]
+    # 身份口径取的是 id_map 的 object_id(= 方面账里 evidence_keys 的同一口径)。
+    assert admitted_evidence_keys({
+        "k1": {"object_id": "ck-1"}, "k2": {"object_id": ""},
+        "k3": "不是映射",
+    }) == {"ck-1"}

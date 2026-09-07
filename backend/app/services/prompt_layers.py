@@ -378,4 +378,17 @@ L2_BLOCKS: Tuple[L2Block, ...] = (
         "语料库实际内容的摘要（该库真正包含什么），供大纲跨专家视角规划参考。",
         "app.services.report_engine",
     ),
+    L2Block(
+        "termination_block",
+        ("answer_prompt", "report_section_prompt"),
+        "检索 run 的结束事实（设计稿 §7.2）：为什么停下来、哪些必答问题没解决、"
+        "哪些检索通道全程没恢复。标为**服务端事实**：不带 [k] id、不可引用、"
+        "不得被读成「库里没有这些内容」。reflect v2 总闸关闭（默认）时为空串，"
+        "两个 prompt 逐字回到接入前。"
+        "（刻意做成 L2 数据块而不是 L1 文本槽位：它每轮的内容由服务端事实决定，"
+        "可被定制的是「要不要注入」这件事本身，不是这段措辞——改措辞会直接改"
+        "答案对缺口的表述，而那是 L0 完整性披露合同的一部分。）",
+        "app.services.reasoning_aspects.render_termination_block；"
+        "装配点 app.services.ask_service / app.services.report_engine",
+    ),
 )

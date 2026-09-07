@@ -29,7 +29,8 @@ import threading
 import time
 from dataclasses import dataclass
 from typing import (
-    Any, Callable, Dict, Iterable, List, Optional, Sequence, TYPE_CHECKING,
+    Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence,
+    TYPE_CHECKING,
 )
 
 if TYPE_CHECKING:
@@ -76,6 +77,15 @@ from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancel
 from app.services.citation_markers import LOOSE_MARKER_RE, MARKER_RE, marker_keys
 from app.services.evidence_context import anchor_image_targets
 from app.services.model_work import ModelNotConfiguredError
+# 必答方面/结束事实的纯函数(设计稿 §7.2)。零 I/O、只依赖
+# ``app.domain.retrieval_termination`` 与 ``reasoning_observation``,不 import
+# 回本模块,所以模块级 import 不构成 import SCC(与上面 evidence_context 同款);
+# ``reasoning_retrieval`` 那几处的惰性 import 是为了那条真实存在的环,不适用这里。
+from app.services.reasoning_aspects import (
+    admitted_evidence_keys,
+    render_termination_block,
+    termination_synthesis_detail,
+)
 # 待确认中心「进行中的提问」的推送入口(同步 Ask 路径)。``pending_bus`` 是叶子
 # 模块,模块级 import 不构成 import SCC。
 from app.services.pending_bus import publish_snapshot
@@ -447,6 +457,114 @@ def _uncovered_directions_from_trace(trace: object) -> tuple[str, ...]:
             seen.add(phrase)
             gaps.append(phrase)
     return tuple(gaps[:GAP_CONSULT_MAX_GAP_PHRASES])
+
+
+def _synthesis_step_detail(
+    *,
+    citations: int,
+    anchors: Sequence[Any],
+    evidence_level: str,
+    counts: Mapping[str, Any],
+    enumerated_collections: int,
+    enumeration_block_dropped: bool,
+    outline_planned: bool,
+    sectioned: Any,
+    outline_fallback: bool,
+    outline_skipped: Sequence[str],
+    termination: Any,
+    id_map: Mapping[str, Any],
+) -> dict:
+    """The terminal ``synthesis`` trace step's ``detail`` — a pure builder.
+
+    Lifted out of ``_draft_reasoning_response`` verbatim (same keys, same
+    order, same values) so the run-terminal facts below could be added without
+    spending that hot function's zero-slack length ceiling.  It reads nothing
+    but its arguments and writes nothing: every value here is already decided
+    by the time the step is written.
+    """
+
+    detail = {
+        "citations": citations,
+        "anchors": len(anchors),
+        "evidence_level": evidence_level,
+        # Actual counts that entered the synthesis prompt (post
+        # per-partition budget truncation), distinct from the
+        # earlier "answer" step's pre-truncation candidate pool.
+        "included_kg": counts.get("included_kg", 0),
+        "included_chunks": counts.get("included_chunks", 0),
+        "included_elements": counts.get("included_elements", 0),
+        "included_collections": counts.get("included_collections", 0),
+        # 本轮产生的类型化集合清单数(诊断字段,不上屏)。清单本身
+        # 进合成 prompt / 结果卡由 T5 接管;在这里露一个数,是为了
+        # 让「工具跑了但答案没体现」这种情况在轨迹里可查。
+        "enumerated_collections": enumerated_collections,
+        # 枚举块因预算太紧(连块头都放不下)被整体挤出合成证据;
+        # 结果卡不受影响(typed_collection_result_sets 仍然完整),
+        # 只是模型这一轮没看到清单预览。trace 已闭合,这是唯一
+        # 挂点。
+        "enumeration_block_dropped": enumeration_block_dropped,
+        # Agentic Memory P4 (T1): the answer's actually-bound
+        # [k] anchors, by object_id — the raw material for
+        # step→anchor attribution (see TRACE_ANCHOR_EVIDENCE_
+        # IDS_MAX's docstring in app.models.ask for the
+        # disclosure argument and the cap's derivation).
+        # Written unconditionally, including the empty-list
+        # zero-anchor case — a synthesis step with no anchors
+        # is itself a real signal, not an absent one.
+        "anchor_evidence_ids": [
+            anchor.object_id for anchor in anchors
+        ][:TRACE_ANCHOR_EVIDENCE_IDS_MAX],
+    }
+    if len(anchors) > TRACE_ANCHOR_EVIDENCE_IDS_MAX:
+        # Sparse marker (mirrors the "neighbor_truncated" pattern
+        # in reasoning_retrieval.py's expand step): the cap is a
+        # protocol ceiling that should never actually bind in
+        # practice under the existing per-tier retrieval budgets,
+        # so this key only appears on the (unexpected) day it does.
+        detail["anchor_evidence_ids_truncated"] = True
+    if outline_planned:
+        # 这组键在大纲**规划跑过**时就出现,而不只在按节合成真的被尝试
+        # 过时(codex r6):大纲只装配出 1 个有证据节时按节合成被绕过,
+        # 但另一节「问到了没找到」的披露不能跟着消失——否则单节答案看
+        # 起来是完整的。没有大纲、低档位与关闭态下规划不会跑,synthesis
+        # 步的 detail 仍逐键不变(冻结基线口径)。
+        detail.update({
+            # 实际合成的节数;回退时为 0(分节产物已全部丢弃)。
+            "outline_sections": (
+                sectioned.sections if sectioned is not None else 0
+            ),
+            "outline_fallback": outline_fallback,
+            # 被跳过的空节标题:它们是「问到了但没找到」的诚实记录,
+            # 只在轨迹里露面,答案里不留空壳标题。
+            "outline_skipped": outline_skipped,
+            # 只落 trace detail,不扩 AskResponse。每节结果已经过该节
+            # 自己的 classify_evidence,不是模型裸自报。
+            "section_grounded": (
+                sectioned.section_grounding if sectioned is not None else []
+            ),
+            "ungrounded_sections": (
+                [
+                    item["title"]
+                    for item in sectioned.section_grounding
+                    if not item["grounded"]
+                ]
+                if sectioned is not None else []
+            ),
+        })
+    # 结束事实 + 最终装配之后的方面复核(设计稿 §7.2)。**v2-only 稀疏键**:
+    # `termination is None`(legacy / 关闭态 / 历史输入)时 update 一个空 dict,
+    # 上面那份 detail 的键集逐字节不变。
+    #
+    # 复核用的是**实际进入 prompt 的证据身份**(最终 `id_map` 的 object_id),
+    # 不是候选池:一个方面绑的证据全被预算截掉时,"已支撑"在屏幕上与真有支撑
+    # 长得一样,而它其实没送达。锚点(`anchors`)另给第三个口径——进了 prompt
+    # 不等于答案引用了它。三个口径分开记,谁都不许替谁作证。
+    detail.update(termination_synthesis_detail(
+        termination,
+        admitted_keys=admitted_evidence_keys(id_map),
+        cited_keys={str(anchor.object_id) for anchor in anchors},
+    ))
+    return detail
 
 
 class DefaultResponseDraftStage:
@@ -2055,6 +2173,7 @@ class AskService:
         section_index: int = 0,
         section_total: int = 0,
         style_block: str = "",
+        termination_block: str = "",
     ):
         """Synthesise the reasoning-mode answer. When PPR chunks are present they
         become first-class [k]-citable evidence: chunk segment k1..N + KG reasoning
@@ -2079,7 +2198,14 @@ class AskService:
         证据精炼跳过。缺省为「不在按节合成里」,单次合成路径逐字节不变。节模式下
         调用方只传该节绑定的证据,Memory / 推导链 / 集合地图 / 结构化预览一律不传
         ——它们不可被大纲绑定,留在回退路径上(v1 刻意的边界)。``style_block``:
-        见 ``_answer_chunks`` 同名参数,单次合成与按节合成共用调用方传入的同一份。"""
+        见 ``_answer_chunks`` 同名参数,单次合成与按节合成共用调用方传入的同一份。
+
+        ``termination_block``(设计稿 §7.2):本次检索 run 的结束事实,**服务端事实、
+        非证据、不可引用**(块自带这句说明,见
+        ``reasoning_aspects.render_termination_block``)。它不进 ``id_map``、不占
+        ``[k]`` 号段、不参与 ``counts``——所以合成计数与引用绑定一个字都不变。
+        reflect v2 关闭(默认)时为空串,``answer_prompt`` 的输出逐字节回到接入前。
+        按节合成把同一份原样转发给每一节:结束事实是整次 run 的,不按节重算。"""
         raise_if_cancelled(cancel_event)
         chunks = chunks or []
         chains = chains or []
@@ -2264,6 +2390,7 @@ class AskService:
                 section_index=section_index,
                 section_total=section_total,
                 style_block=style_block,
+                termination_block=termination_block,
             )}],
             ANSWER_SCHEMA_HINT,
             timeout=self.settings.reasoning_timeout_seconds,
@@ -2309,6 +2436,7 @@ class AskService:
         cancel_event: CancelEvent = None,
         on_section=None,
         style_block: str = "",
+        termination_block: str = "",
     ):
         """按节合成(设计文档 §3.1):每节一次合成调用,只喂该节绑定的证据。
 
@@ -2329,6 +2457,10 @@ class AskService:
 
         ``style_block``:见 ``_answer_chunks`` 同名参数,原样转发给每一节的
         ``_answer_reasoning`` 调用——同一份风格提示对全篇一致,不按节重新点读。
+
+        ``termination_block``(设计稿 §7.2)同样原样转发:结束事实是整次 run 的,
+        每一节看见的是同一份。按节复述"这次检索在哪儿停下来"没有意义,而按节
+        **重算**更糟——那会让同一次 run 的结束原因在不同节里长得不一样。
         """
         from app.services.outline_synthesis import outline_answer_text
 
@@ -2368,6 +2500,7 @@ class AskService:
                     section_index=item.index + 1,
                     section_total=total,
                     style_block=style_block,
+                    termination_block=termination_block,
                 )
                 return text_, grounded_, anchors_
 
@@ -3529,6 +3662,41 @@ class AskService:
             )
             return []
 
+    def _build_reasoning_retriever(self, *, cancel_event, user_id: str):
+        """The one production ``ReasoningRetriever`` construction for Ask.
+
+        端口化构造(与冻结的 ``from_repository`` 工厂逐字段同源):检索/模型/社区
+        端口直通,``communities`` 逐次新建 —— ``sibling_min_bridge`` 调用时读。
+
+        单独成方法只为把这段固定接线移出 ``_run_reasoning_stage`` 的零松弛长度
+        天花板;字段与顺序逐字未改,调用点仍然只有那一处。
+        """
+        from app.services.reasoning_retrieval import ReasoningRetriever
+
+        return ReasoningRetriever(
+            retrieval=self.retrieval,
+            model_clients=self.model_clients,
+            communities=self.communities(),
+            settings=self.settings,
+            cancel_event=cancel_event,
+            collection_catalog=self.collection_catalog,
+            collection_enumeration=self.collection_enumeration,
+            agent_profile=self.agent_profile,
+            # 提问者身份**显式**传入(绝不让 retriever 回退 ContextVar,
+            # 那会在 ContextVar 未设时读到 seeded admin 的覆盖层)。这条
+            # 路径上 `user_id` 就是本次提问的持久化归属。
+            profile_owner_id=user_id,
+            # Agentic Memory P2:检索打法库。刻意**没有** owner 参数
+            # ——那张表没有任何租户维度,条目也不属于任何人。
+            retrieval_experiences=self.retrieval_experiences,
+            # Agentic Memory P3(T8):规划侧的风格提示座位。retriever 内部
+            # 用 profile_owner_id(= user_id)自己点读一次,与合成侧的
+            # style_block(供 _answer_reasoning 用)各自独立读取——两个消费点
+            # 各自 fail-open,不共享一次读取(见 _search_profile_style_block
+            # 的模块注释)。
+            identity_store=self.identity_store,
+        )
+
     def _run_reasoning_stage(self, prepared, runtime):
         """Orchestrate one prepared reasoning Ask across the typed stages.
 
@@ -3549,7 +3717,6 @@ class AskService:
         )
         from app.services.reasoning_retrieval import (
             ReasoningResult,
-            ReasoningRetriever,
             kg_in_scope_for,
         )
 
@@ -3903,29 +4070,8 @@ class AskService:
                     execute_reasoning_retrieval_stage,
                 )
 
-                retriever = ReasoningRetriever(
-                    retrieval=self.retrieval,
-                    model_clients=self.model_clients,
-                    communities=self.communities(),
-                    settings=self.settings,
-                    cancel_event=cancel_event,
-                    collection_catalog=self.collection_catalog,
-                    collection_enumeration=self.collection_enumeration,
-                    agent_profile=self.agent_profile,
-                    # 提问者身份**显式**传入(绝不让 retriever 回退 ContextVar,
-                    # 那会在 ContextVar 未设时读到 seeded admin 的覆盖层)。这条
-                    # 路径上 `user_id` 就是本次提问的持久化归属。
-                    profile_owner_id=user_id,
-                    # Agentic Memory P2:检索打法库。刻意**没有** owner 参数
-                    # ——那张表没有任何租户维度,条目也不属于任何人。
-                    retrieval_experiences=self.retrieval_experiences,
-                    # Agentic Memory P3(T8):规划侧的风格提示座位。retriever 内部
-                    # 用 profile_owner_id(= user_id)自己点读一次,与上面 style_block
-                    # (合成侧、供 _answer_reasoning 用)各自独立读取——两个消费点
-                    # 各自 fail-open,不共享一次读取(见 _search_profile_style_block
-                    # 的模块注释)。
-                    identity_store=self.identity_store,
-                )
+                retriever = self._build_reasoning_retriever(
+                    cancel_event=cancel_event, user_id=user_id)
                 retrieval_runtime = ReasoningRetrievalRuntime(
                     scope=runtime.scope,
                     retrieval_run=runtime.retrieval_run,
@@ -4030,6 +4176,12 @@ class AskService:
                     # 跨过边界。
                     candidate_manifest=getattr(result, "baseline_manifest", None),
                     spreadsheet_results=tuple(spreadsheet_results),
+                    # 结束事实的最后一跳(设计稿 §7.2)。与 candidate_manifest
+                    # 同款 getattr 语义:broad-except 降级时 ``result`` 仍是进入
+                    # 这一轮时的那个对象,取不到就是 None。降级路径上证据被清空
+                    # 而终态留着,恰好是对的——最终装配复核会照实把每个方面记成
+                    # 未送达,而不是让「模型说已支撑」独自留在屏幕上。
+                    termination=getattr(result, "termination", None),
                 ),
                 runtime,
             )
@@ -4173,6 +4325,9 @@ class AskService:
         conversation_id = prepared.conversation_id
         reasoning_history = prepared.history
         style_block = prepared.style_block
+        # 本次 run 的结束事实 → 合成 prompt 的服务端事实段(设计稿 §7.2)。
+        # ``termination is None``(legacy / v2 关闭)⇒ 空串 ⇒ prompt 逐字节不变。
+        termination_block = render_termination_block(stage.termination)
         research_question = prepared.research_question
         limits = prepared.limits
         retrieval_effort = prepared.retrieval_effort
@@ -4370,7 +4525,8 @@ class AskService:
                 collection_map_block=collection_map_prompt_block,
                 counts_sink=reasoning_counts,
                 baseline_sink=reasoning_baseline,
-                style_block=style_block)
+                style_block=style_block,
+                termination_block=termination_block)
             return ans, llm_grounded_, anchors_
 
         # ---------------------------------------------- 按节合成(设计文档 §3.1)
@@ -4429,6 +4585,7 @@ class AskService:
                         answer_client=answer_client, cancel_event=cancel_event,
                         on_section=record_section_step,
                         style_block=style_block,
+                        termination_block=termination_block,
                     )
         # 按节合成失败(某一节两次都吐不出内容)→ 整体回退单次合成,已经产出
         # 的分节文本全部丢弃。多付一次合成调用是 fail-open 的价钱。
@@ -4676,79 +4833,19 @@ class AskService:
                     f"已生成答案，引用 {len(anchors)} 处证据"
                     if answer else "答案合成未产出内容"
                 ),
-                detail={
-                    "citations": len(citations),
-                    "anchors": len(anchors),
-                    "evidence_level": evidence_level,
-                    # Actual counts that entered the synthesis prompt (post
-                    # per-partition budget truncation), distinct from the
-                    # earlier "answer" step's pre-truncation candidate pool.
-                    "included_kg": reasoning_counts.get("included_kg", 0),
-                    "included_chunks": reasoning_counts.get("included_chunks", 0),
-                    "included_elements": reasoning_counts.get("included_elements", 0),
-                    "included_collections": reasoning_counts.get(
-                        "included_collections", 0
-                    ),
-                    # 本轮产生的类型化集合清单数(诊断字段,不上屏)。清单本身
-                    # 进合成 prompt / 结果卡由 T5 接管;在这里露一个数,是为了
-                    # 让「工具跑了但答案没体现」这种情况在轨迹里可查。
-                    "enumerated_collections": len(enumerations),
-                    # 枚举块因预算太紧(连块头都放不下)被整体挤出合成证据;
-                    # 结果卡不受影响(typed_collection_result_sets 仍然完整),
-                    # 只是模型这一轮没看到清单预览。trace 已闭合,这是唯一
-                    # 挂点。
-                    "enumeration_block_dropped": enumeration_block_dropped,
-                    # Agentic Memory P4 (T1): the answer's actually-bound
-                    # [k] anchors, by object_id — the raw material for
-                    # step→anchor attribution (see TRACE_ANCHOR_EVIDENCE_
-                    # IDS_MAX's docstring in app.models.ask for the
-                    # disclosure argument and the cap's derivation).
-                    # Written unconditionally, including the empty-list
-                    # zero-anchor case — a synthesis step with no anchors
-                    # is itself a real signal, not an absent one.
-                    "anchor_evidence_ids": [
-                        anchor.object_id for anchor in anchors
-                    ][:TRACE_ANCHOR_EVIDENCE_IDS_MAX],
-                },
+                detail=_synthesis_step_detail(
+                    citations=len(citations), anchors=anchors,
+                    evidence_level=evidence_level, counts=reasoning_counts,
+                    enumerated_collections=len(enumerations),
+                    enumeration_block_dropped=enumeration_block_dropped,
+                    outline_planned=outline_planned, sectioned=sectioned,
+                    outline_fallback=outline_fallback,
+                    outline_skipped=outline_skipped,
+                    termination=stage.termination,
+                    id_map=reasoning_baseline.get("id_map") or {},
+                ),
                 duration_ms=round((time.perf_counter() - synthesis_started) * 1000),
             )
-            if len(anchors) > TRACE_ANCHOR_EVIDENCE_IDS_MAX:
-                # Sparse marker (mirrors the "neighbor_truncated" pattern
-                # in reasoning_retrieval.py's expand step): the cap is a
-                # protocol ceiling that should never actually bind in
-                # practice under the existing per-tier retrieval budgets,
-                # so this key only appears on the (unexpected) day it does.
-                synthesis_step.detail["anchor_evidence_ids_truncated"] = True
-            if outline_planned:
-                # 这组键在大纲**规划跑过**时就出现,而不只在按节合成真的被尝试
-                # 过时(codex r6):大纲只装配出 1 个有证据节时按节合成被绕过,
-                # 但另一节「问到了没找到」的披露不能跟着消失——否则单节答案看
-                # 起来是完整的。没有大纲、低档位与关闭态下规划不会跑,synthesis
-                # 步的 detail 仍逐键不变(冻结基线口径)。
-                synthesis_step.detail.update({
-                    # 实际合成的节数;回退时为 0(分节产物已全部丢弃)。
-                    "outline_sections": (
-                        sectioned.sections if sectioned is not None else 0
-                    ),
-                    "outline_fallback": outline_fallback,
-                    # 被跳过的空节标题:它们是「问到了但没找到」的诚实记录,
-                    # 只在轨迹里露面,答案里不留空壳标题。
-                    "outline_skipped": outline_skipped,
-                    # 只落 trace detail,不扩 AskResponse。每节结果已经过该节
-                    # 自己的 classify_evidence,不是模型裸自报。
-                    "section_grounded": (
-                        sectioned.section_grounding
-                        if sectioned is not None else []
-                    ),
-                    "ungrounded_sections": (
-                        [
-                            item["title"]
-                            for item in sectioned.section_grounding
-                            if not item["grounded"]
-                        ]
-                        if sectioned is not None else []
-                    ),
-                })
             trace.append(synthesis_step)
             if on_trace:
                 on_trace(synthesis_step)

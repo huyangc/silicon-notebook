@@ -3550,3 +3550,93 @@ def test_deep_dive_passes_the_sections_intent_questions(repo, monkeypatch):
 
     assert captured[0]["intent_questions"] == ["本节问题一", "本节问题二"]
     assert "intent_questions" not in captured[1]
+
+
+# ------------------------------------------ T4-B:终态贯通到报告的节撰写
+# 设计稿 2026-09-07 §7.2:Report 节撰写与 Ask 合成拿同一份事实说明、走同一套
+# 复核口径与同一份纯函数——报告不另立一本账。
+
+def _termination_for_report(reason, aspects, unresolved=(), channels=()):
+    from app.domain.retrieval_termination import (
+        AspectSnapshot, RetrievalTermination,
+    )
+    return RetrievalTermination(
+        reason=reason, unresolved_aspect_ids=tuple(unresolved),
+        unrecovered_channels=tuple(channels),
+        aspects=tuple(
+            AspectSnapshot(aspect_id=aspect_id, question=question,
+                           status=status, evidence_keys=tuple(keys))
+            for aspect_id, question, status, keys in aspects),
+    )
+
+
+class _SectionPromptLLM:
+    configured = True
+    model = "m"
+
+    def __init__(self):
+        self.prompts = []
+
+    def chat_json(self, messages, schema_hint, **kwargs):
+        self.prompts.append(messages[-1]["content"])
+        return json.dumps({"markdown": "## A\nbody", "grounded": False,
+                           "claims": []})
+
+
+def test_report_section_gets_the_termination_facts_and_delivery_review(repo):
+    """节撰写 prompt 多一段服务端事实,节结果多一组同款稀疏字段(§7.2)。
+
+    这一节的复核用的是**本节自己**的 `id_map` 与正文解析回来的锚点:节内 `[k]`
+    只解析本节证据,所以"进没进 prompt"在这里天然是按节回答的。这一节的证据
+    没有一条被绑定过(`id_map` 为空),于是那条自报 supported 记未送达。
+    """
+    from app.services.reasoning_retrieval import ReasoningResult
+
+    stub = _SectionPromptLLM()
+    eng = _mk_engine(repo, stub)
+    nb = _mk_nb(repo)
+    result = ReasoningResult()
+    result.termination = _termination_for_report(
+        "model_partial",
+        (("a1", "本节必须回答的那件事", "supported", ("ko-missing",)),
+         ("a2", "没查着的那件事", "unknown", ())),
+        unresolved=("a2",), channels=("ppr_retrieve",))
+    out = eng._draft_section(
+        nb.id, {"title": "A", "scope": "s"}, "q", result)
+
+    prompt = stub.prompts[-1]
+    assert "Retrieval status (server fact" in prompt
+    assert "没查着的那件事" in prompt
+    assert "ppr_retrieve" in prompt
+    # 服务端事实排在编号规则之前:它不是规则,也不是一条知识条目。
+    assert prompt.index("Retrieval status") < prompt.index("Rules:")
+
+    assert out["termination_reason"] == "model_partial"
+    assert out["termination_summary"] == "检索结束：仍有必答方面没有完整支撑"
+    assert out["aspects_total"] == 2 and out["aspects_pending"] == 1
+    assert out["aspects_model_supported"] == 1
+    assert out["aspects_synthesis_admitted"] == 0
+    assert out["aspects_undelivered"] == 1
+    assert out["unrecovered_channels"] == ["ppr_retrieve"]
+
+
+def test_report_section_without_termination_is_byte_identical(repo):
+    """关闭态 / 历史 result:prompt 无新块,节结果无新键。"""
+    from app.services.reasoning_retrieval import ReasoningResult
+
+    stub = _SectionPromptLLM()
+    eng = _mk_engine(repo, stub)
+    nb = _mk_nb(repo)
+    out = eng._draft_section(
+        nb.id, {"title": "A", "scope": "s"}, "q", ReasoningResult())
+    assert "Retrieval status (server fact" not in stub.prompts[-1]
+    assert not [key for key in out
+                if key.startswith(("termination_", "aspects_"))
+                or key == "unrecovered_channels"]
+    # 连 `termination` 属性都没有的窄替身(冻结调用点)照常工作:getattr 兜底。
+    from types import SimpleNamespace
+    out_narrow = eng._draft_section(
+        nb.id, {"title": "A", "scope": "s"}, "q",
+        SimpleNamespace(top_hits=[], elements=[], chunks=[], attempted=[],
+                        trace=[]))
+    assert "termination_reason" not in out_narrow

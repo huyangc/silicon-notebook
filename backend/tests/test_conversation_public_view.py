@@ -884,3 +884,42 @@ def test_gap_suggestions_never_reach_the_public_projection():
     # The turn is otherwise projected normally — this is an exclusion, not a
     # payload that silently fails to render.
     assert turn["references"][0]["key"] == "k1"
+
+
+def test_termination_and_assessment_never_cross_the_public_boundary():
+    """T4(设计稿 2026-09-07 §7.2):结束事实与方面自评不进公开会话。
+
+    「不把完整 assessment 自动加入公开会话」在这条投影里不是靠一条黑名单成立的,
+    而是靠白名单本身:`public_turn` 逐字构造一个键集固定的新 dict,`reasoning_trace`
+    整个字段从来就不在其中,所以那条收尾 `skip` 步(方面原文是用户的必答清单、
+    通道名是内部词)与合成终步上的三口径计数结构上都跨不出去。
+
+    这条用例把"结构上安全"变成"经过验证":哪天有人把这份投影改写成"复制输入再
+    删几个键"的形状,它就会红。
+    """
+    payload = {
+        "answer": "答案正文",
+        "evidence_level": "grounded",
+        "reasoning_trace": [
+            {"step_type": "skip", "summary": "检索结束：检索通道异常",
+             "detail": {"reason": "retrieval_termination",
+                        "termination": "retrieval_degraded",
+                        "aspect_source": "intent_topics",
+                        "unrecovered_channels": ["search_elements"]}},
+            {"step_type": "synthesis", "summary": "已生成答案",
+             "detail": {"termination_reason": "retrieval_degraded",
+                        "termination_summary": "检索结束：检索通道异常",
+                        "aspects_undelivered": 2,
+                        "unrecovered_channels": ["search_elements"]}},
+        ],
+    }
+    projected = _project_turn(
+        {"question": "问题", "payload": payload},
+        share_token="tok", images_enabled=True,
+    )
+    serialized = json.dumps(projected, ensure_ascii=False)
+    assert "reasoning_trace" not in projected
+    for leaked in ("retrieval_termination", "retrieval_degraded",
+                   "aspects_undelivered", "unrecovered_channels",
+                   "search_elements", "intent_topics"):
+        assert leaked not in serialized

@@ -51,6 +51,13 @@ TERMINATION_NO_EXECUTABLE_ACTION = "no_executable_action"
 #: 模型/JSON 在既有重试之后仍失败,决定是 fail-open 兜底。**不是**"模型认为够了"。
 TERMINATION_MODEL_DEGRADED = "model_degraded"
 #: 检索器/工具异常触发既有 fail-open 收尾,证据收集未正常完成。
+#:
+#: ⚠ 循环内**可达**的失败面比名字看起来窄:动作执行器里只有 `add_subquery` 的
+#: 原文半(无图库补本库原文那条路)带 fail-open + `note_failed` 侧信道,首轮播种
+#: 的 `_chunk_seed_search` 同款。`_action_search_chunks` 等其余执行器**没有**
+#: fail-open——检索器异常直接穿出 `run()`,按取消/阶段错误的既有合同终止,根本走
+#: 不到这里(§7.2「取消和不可恢复阶段错误仍是异常」)。所以这个 reason 覆盖的是
+#: 「已经被既有 fail-open 吞掉、只在观察账上留下 failed」的那一类,不是所有异常。
 TERMINATION_RETRIEVAL_DEGRADED = "retrieval_degraded"
 
 TERMINATION_REASONS: Tuple[str, ...] = (
@@ -128,6 +135,12 @@ class RetrievalTermination:
 
         DTO 只认识自己的闭集,不认识生成规则(那在 `app.services.reasoning_aspects`)
         ——这是形状校验,不是判据。
+
+        **`unrecovered_channels` 刻意不校验元素。**它不是闭集:元素是动作 id
+        (`add_subquery` / `search_chunks` …),而动作空间由能力投影按档位/图状态/
+        配额逐轮决定(§5.1),在这一层复制一份动作名清单等于给同一个闭集立第二个
+        权威——两边分叉时先红的会是这个无辜的 DTO,而真正该红的是能力投影。上面
+        两个闭集不同:`reason` 与 `status` 的取值就在本模块里定义,校验它们是自证。
         """
         if self.reason not in TERMINATION_REASONS:
             raise ValueError(f"unknown termination reason: {self.reason!r}")
@@ -135,3 +148,30 @@ class RetrievalTermination:
             if aspect.status not in ASPECT_STATUSES:
                 raise ValueError(
                     f"unknown aspect status: {aspect.status!r}")
+
+
+@dataclass(frozen=True, slots=True)
+class AspectDelivery:
+    """最终装配之后的方面复核(§7.2)。**三个口径,各答各的问题。**
+
+    * ``model_supported``——模型说这个方面有支撑(= `AspectSnapshot.status ==
+      supported`,服务端只验过键合法,没验语义);
+    * ``synthesis_admitted``——它绑的证据里**至少有一条真的进了合成 prompt**;
+    * ``answer_cited``——最终答案里真的出现了绑到那条证据的 `[k]` 锚点。
+
+    三者是包含关系吗?**不是,而且不许假设是。**一个方面可以 model_supported 却
+    没进 prompt(预算截掉),可以进了 prompt 却没被引用(模型没写它),也可以被引用
+    却从来不是 supported(模型标 partial 却仍引了那条证据)。折成一个"支撑度"就
+    再也分不出"谁说的"与"发生了什么"——这正是 §7.2 要求分开记的理由。
+
+    ``undelivered`` 是这里唯一的**判断**:一个 supported/partial 方面绑过证据,
+    而那些证据**全部**被最终装配的预算/过滤挡在外面。它是一个并列集合,不是
+    `AspectSnapshot.status` 的第五档——状态闭集说的是"模型这一轮怎么判的",而
+    未送达说的是"服务端最后送了什么进 prompt",两本账混一起就又要靠猜来还原。
+    绑定为空的方面不在其中:什么都没绑,就谈不上"被移除"。
+    """
+
+    model_supported: Tuple[str, ...] = ()
+    synthesis_admitted: Tuple[str, ...] = ()
+    answer_cited: Tuple[str, ...] = ()
+    undelivered: Tuple[str, ...] = ()

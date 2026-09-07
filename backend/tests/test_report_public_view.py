@@ -152,3 +152,34 @@ def test_the_report_body_is_still_served_whole():
     payload = public_report_payload({"question": "q", "content_md": body}, [])
 
     assert payload["content_md"] == body
+
+
+def test_report_termination_fields_never_cross_the_public_boundary():
+    """T4(设计稿 2026-09-07 §7.2):节上的结束事实字段不进公开报告。
+
+    节撰写把 `termination_*` / `aspects_*` / `unrecovered_channels` 挂在**报告
+    自己的私有持久路径**(section 行)上。公开面读的是已渲染的 `content_md` 与
+    引用卡,section 行根本不在输入里;这条用例把它钉住——即使有人把整行塞进
+    payload,白名单也一个字都不带出去。
+    """
+    payload = public_report_payload(
+        {
+            "question": "报告问题",
+            "content_md": "## A\n正文",
+            "created_at": "2026-09-07T00:00:00Z",
+            "updated_at": "2026-09-07T00:00:00Z",
+            # 最坏输入:把节上的诊断字段整份塞进来。
+            "termination_reason": "retrieval_degraded",
+            "termination_summary": "检索结束：检索通道异常，证据收集未正常完成",
+            "aspects_undelivered": 2,
+            "unrecovered_channels": ["ppr_retrieve"],
+            "sections": [{"aspects_model_supported": 3}],
+        },
+        [],
+    )
+    serialized = str(payload)
+    for leaked in ("termination_reason", "termination_summary",
+                   "aspects_undelivered", "aspects_model_supported",
+                   "unrecovered_channels", "ppr_retrieve",
+                   "retrieval_degraded"):
+        assert leaked not in serialized

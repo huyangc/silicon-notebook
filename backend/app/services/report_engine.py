@@ -48,6 +48,11 @@ from app.core.llm import cap_kwargs
 from app.domain.extensions import RetrievalContributorHostPort
 from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
 from app.services.citation_markers import MARKER_RE, marker_keys
+from app.services.reasoning_aspects import (
+    admitted_evidence_keys,
+    render_termination_block,
+    termination_synthesis_detail,
+)
 from app.services.report_execution import REPORT_CANCELLATIONS
 from app.services.report_corpus_profile import (
     PROFILE_FAILED,
@@ -2089,6 +2094,63 @@ class ReportEngine:
         return result
 
     # --- Stage C(单节):撰写 ---
+    def _section_evidence_grade(self, markdown: str, id_map: dict, anchors,
+                                llm_grounded: bool):
+        """本节的证据档位 + 高风险断言审计 → `(档位, top_relevance, 审计)`。
+
+        证据池按**本节自己的** `id_map` 建(节内 k 号只解析本节证据),模型自报
+        只是三个输入之一 —— `classify_evidence` 那道真实门照旧。高风险断言超阈值
+        时把 `grounded` 确定性降到 `overview`:审计说的是"这一节里没有引用支撑的
+        高风险句太多",而那与"至少引了一条"并不矛盾,所以降级发生在分档之后。
+
+        单独成方法只为把这段移出 `_draft_section` 的零松弛长度天花板;逐字未改。
+        """
+        from types import SimpleNamespace
+        from app.services.retrieval import classify_evidence
+        evidence_pool = [SimpleNamespace(
+            object_id=str(value.get("object_id") or ""),
+            relevance=float(value.get("relevance", 0.0) or 0.0),
+        ) for value in id_map.values() if value.get("object_id")]
+        evidence_level, top_relevance = classify_evidence(
+            evidence_pool, anchors, llm_grounded,
+            self.settings.evidence_tau_low, self.settings.evidence_tau_high,
+        )
+        citation_audit = audit_high_risk_assertions(
+            markdown,
+            id_map,
+            max_unsupported_ratio=self.settings.report_high_risk_unsupported_ratio,
+        )
+        if (
+            self.settings.report_high_risk_downgrade_enabled
+            and citation_audit["threshold_exceeded"]
+            and evidence_level == "grounded"
+        ):
+            evidence_level = "overview"
+            citation_audit["downgrade_applied"] = True
+        return evidence_level, top_relevance, citation_audit
+
+    def _source_families_fail_open(self, id_map: dict) -> dict:
+        """本节引用到的来源 → 期刊/系列家族解析,**失败不阻断本节撰写**。
+
+        解析不了就把每个来源都当"不确定",`annotate_trend_evidence` 据此保守标注
+        ——趋势断言宁可少一个"同源"标记,也不能因为一次家族解析失败让整节消失。
+
+        单独成方法只为把这段移出 `_draft_section` 的零松弛长度天花板;逐字未改。
+        """
+        claim_source_ids = {
+            str(context.get("source_id") or "")
+            for context in id_map.values()
+            if str(context.get("source_id") or "")
+        }
+        try:
+            return self._resolve_source_families(claim_source_ids)
+        except Exception:
+            return {
+                "family_by_source": {},
+                "uncertain_source_ids": list(claim_source_ids),
+                "unresolved_source_ids": list(claim_source_ids),
+            }
+
     def _draft_section(self, notebook_id: str, section: dict, question: str, result,
                        depth=None, *, report_frame: Optional[dict] = None,
                        synthesis: Optional[dict] = None,
@@ -2108,6 +2170,11 @@ class ReportEngine:
         # 本节深挖整理出的子大纲(仅穷尽档非空)。它有三个消费点,顺序不能倒:先决定
         # 谁进来源分区、再决定谁进 KG 上下文,最后才据装配好的 id_map 渲染结构块。
         sub_outline = list(getattr(result, "outline", None) or [])
+        # 本节深挖 run 的结束事实(设计稿 §7.2)。取法与 `sub_outline` 同款
+        # getattr 兜底:窄测试替身与冻结调用点的 `result` 没有这个属性,而
+        # reflect v2 关闭(默认)时它本来就是 None —— 两种情况都退回空块,
+        # `report_section_prompt` 与本节结果逐字节回到接入前。
+        termination = getattr(result, "termination", None)
         bound_keys = (outline_bound_evidence_keys(sub_outline)
                       if limits is not None else set())
         # 来源分区(chunk + 直接原文段)同样要给大纲绑定留位置(codex PR#418 R4):
@@ -2331,6 +2398,7 @@ class ReportEngine:
                         )[:1000],
                         report_frame=frame_block,
                         synthesis_commitment=synthesis_block,
+                        termination_block=render_termination_block(termination),
                     )}],
                     REPORT_SECTION_SCHEMA_HINT, cancel_event=self.cancel_event,
                     **cap_kwargs(client, "report_section_max_tokens"))
@@ -2359,47 +2427,15 @@ class ReportEngine:
             if markdown:
                 break
         anchors = deps.evidence_context.parse_anchors(markdown, id_map) if markdown else []
-        from types import SimpleNamespace
-        from app.services.retrieval import classify_evidence
-        evidence_pool = [SimpleNamespace(
-            object_id=str(value.get("object_id") or ""),
-            relevance=float(value.get("relevance", 0.0) or 0.0),
-        ) for value in id_map.values() if value.get("object_id")]
-        evidence_level, top_relevance = classify_evidence(
-            evidence_pool, anchors, llm_grounded,
-            self.settings.evidence_tau_low, self.settings.evidence_tau_high,
-        )
-        citation_audit = audit_high_risk_assertions(
-            markdown,
-            id_map,
-            max_unsupported_ratio=self.settings.report_high_risk_unsupported_ratio,
-        )
-        if (
-            self.settings.report_high_risk_downgrade_enabled
-            and citation_audit["threshold_exceeded"]
-            and evidence_level == "grounded"
-        ):
-            evidence_level = "overview"
-            citation_audit["downgrade_applied"] = True
+        evidence_level, top_relevance, citation_audit = self._section_evidence_grade(
+            markdown, id_map, anchors, llm_grounded)
         claims, claim_ledger_status = normalize_claim_ledger(
             raw_claims,
             markdown=markdown,
             legal_anchor_keys=set(id_map),
             frame=report_frame,
         )
-        claim_source_ids = {
-            str(context.get("source_id") or "")
-            for context in id_map.values()
-            if str(context.get("source_id") or "")
-        }
-        try:
-            family_resolution = self._resolve_source_families(claim_source_ids)
-        except Exception:
-            family_resolution = {
-                "family_by_source": {},
-                "uncertain_source_ids": list(claim_source_ids),
-                "unresolved_source_ids": list(claim_source_ids),
-            }
+        family_resolution = self._source_families_fail_open(id_map)
         claims = annotate_trend_evidence(
             claims,
             id_map=id_map,
@@ -2421,6 +2457,16 @@ class ReportEngine:
                 "intent_ids": list(section.get("intent_ids") or []),
                 "id_map": id_map,      # 节内 k -> ctx;仅供 _assemble 全局重编号,不入库
                 "attempted": list(getattr(result, "attempted", []) or [])}
+        # 结束事实 + 最终装配之后的方面复核(设计稿 §7.2)。**v2-only 稀疏键**:
+        # 关闭态 update 一个空 dict,本节结果的键集逐字节不变。复核用的是这一节
+        # **实际进了 prompt** 的证据身份(`id_map`)与正文真正解析回来的锚点,与
+        # Ask 侧同一份纯函数、同一套口径——报告不另立一本账。走的是报告已有的
+        # 私有持久路径(section 行),公开投影按白名单照旧不带它。
+        base.update(termination_synthesis_detail(
+            termination,
+            admitted_keys=admitted_evidence_keys(id_map),
+            cited_keys={str(anchor.object_id) for anchor in anchors},
+        ))
         if not markdown:
             try:
                 deps.model_errors.note_model_error(
