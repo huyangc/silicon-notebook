@@ -615,11 +615,22 @@ def test_users_last_seen_follows_session_throttle(core_stores: CoreStores):
     assert after_login["last_seen_at"] is not None
 
     # 节流窗口内(默认 300s):resolve_session 不应推进 users.last_seen_at。
+    # 两侧时钟都截到整秒,如果直接跟登录值比,把 users 写移出节流块(照抄
+    # auth_sessions 的新值,而不是真的跳过)也不会让断言变红——所以先把
+    # users.last_seen_at 手工改成一个可分辨的旧值(登录值减 1 小时),同时
+    # 保持 auth_sessions.last_seen_at 新鲜(仍在窗口内),再断言这一列原样
+    # 不动。
+    distinguishable = after_login["last_seen_at"] - timedelta(hours=1)
+    _write_sql(
+        core_stores,
+        "UPDATE users SET last_seen_at=%s WHERE id=%s",
+        (distinguishable, user.id),
+    )
     assert core_stores.identity.resolve_session(token).id == user.id
     still_login_time = _fetch_one(
         core_stores, "SELECT last_seen_at FROM users WHERE id=%s", (user.id,)
     )
-    assert still_login_time["last_seen_at"] == after_login["last_seen_at"]
+    assert still_login_time["last_seen_at"] == distinguishable
 
     # 人为把 auth_sessions 与 users 两列都拨回节流窗口之外,模拟"上一次
     # touch 已经是很久以前"——下一次 resolve_session 应该同时推进两列。

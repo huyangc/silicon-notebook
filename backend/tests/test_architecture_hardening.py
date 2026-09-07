@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ast
 import contextvars
+from datetime import datetime, timedelta
 from pathlib import Path
 import threading
 import time
@@ -433,13 +434,24 @@ def test_last_seen_touch_follows_session_throttle(tmp_path):
     assert after_login is not None
 
     # 节流窗口内(默认 300s):resolve_session 不应推进 auth_sessions 也不应
-    # 推进 users.last_seen_at。
+    # 推进 users.last_seen_at。两侧时钟都截到整秒,如果直接跟登录值比,把
+    # users 写移出节流块(照抄 auth_sessions 的新值,而不是真的跳过)也不会
+    # 让断言变红——所以先把 users.last_seen_at 手工改成一个可分辨的旧值
+    # (登录值减 1 小时),同时保持 auth_sessions.last_seen_at 新鲜(仍在窗口
+    # 内),再断言这一列原样不动。
+    login_dt = datetime.fromisoformat(after_login)
+    distinguishable = (login_dt - timedelta(hours=1)).replace(microsecond=0).isoformat()
+    with repo._connect() as db:
+        db.execute(
+            "UPDATE users SET last_seen_at=? WHERE id=?",
+            (distinguishable, "user-local"),
+        )
     assert repo.resolve_session(token).id == "user-local"
     with repo._connect() as db:
         still_login_time = db.execute(
             "SELECT last_seen_at FROM users WHERE id=?", ("user-local",)
         ).fetchone()[0]
-    assert still_login_time == after_login
+    assert still_login_time == distinguishable
 
     # 人为把 auth_sessions 与 users 两列都拨回节流窗口之外,模拟"上一次
     # touch 已经是很久以前"——下一次 resolve_session 应该同时推进两列。
