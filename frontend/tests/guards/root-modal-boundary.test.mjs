@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import ts from "typescript";
 
 import {
   callSitesIn,
@@ -10,6 +11,35 @@ import {
   parseModule,
 } from "../../test-support/semantic-source.mjs";
 
+// `handleRootModalClosed`'s switch has one CaseClause per slot, each ending in
+// its own `return` (no fallthrough) — so a CaseClause node's own statements
+// are exactly that slot's close-sink body. Used below to pin the
+// promotion-queue/edge-review case blocks to *exactly* `clearQueue()`: the
+// existing `closeCalls.includes("promotionQueue.clearQueue")` check only
+// proves that call is *somewhere* in the whole switch, so a second call
+// (e.g. a `releaseAfterClose()` slipped in next to `clearQueue()`) would not
+// be caught by it.
+function caseClauseIn(functionNode, label) {
+  let match;
+  function visit(node) {
+    if (match) return;
+    if (
+      ts.isCaseClause(node)
+      && ts.isStringLiteral(node.expression)
+      && node.expression.text === label
+    ) {
+      match = node;
+      return;
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(functionNode);
+  if (!match) {
+    throw new Error(`case clause not found: "${label}"`);
+  }
+  return match;
+}
+
 const page = await parseModule("page.tsx");
 const hook = await parseModule("use-root-modal-coordinator.ts");
 const modelPanel = await parseModule("model-service-panel.tsx");
@@ -18,6 +48,13 @@ const searchProfileModal = await parseModule("search-profile-modal.tsx");
 const memoryPanel = await parseModule("memory-panel.tsx");
 const catalogPanel = await parseModule("command-catalog-panel.tsx");
 const conversationShare = await parseModule("conversation-share-modal.tsx");
+// PR-5 分片 1：晋升队列与关系审核队列从 page.tsx 搬到各自的 owner hook + 弹窗组件。
+// 下面凡是原本按「函数住在 page.tsx 的 Home 里」认身份的断言，只改「去哪个模块找」，
+// 判据本身一条不变。
+const promotionQueueHook = await parseModule("use-promotion-queue.ts");
+const promotionQueueModal = await parseModule("promotion-queue-modal.tsx");
+const edgeReviewHook = await parseModule("use-edge-review-queue.ts");
+const edgeReviewModal = await parseModule("edge-review-modal.tsx");
 const pageText = page.getText(page);
 const hookText = hook.getText(hook);
 
@@ -104,10 +141,21 @@ test("authenticated bootstrap activates modal authority before publishing the us
 });
 
 test("deferred root openers publish frozen tickets instead of opening from live state", () => {
-  for (const name of ["openShareModal", "openSharedByMe", "openPromoQueue", "openEdgeReviewQueue"]) {
+  for (const name of ["openShareModal", "openSharedByMe"]) {
     const calls = callSitesIn(findFunctionIn(page, "Home", name)).map(({ target }) => target);
     assert.ok(calls.includes("rootModals.issue"), name);
     assert.ok(calls.includes("rootModals.publish"), name);
+  }
+  // 两个治理队列的开窗搬进了各自的 owner hook；协调器在那里是注入进来的窄命令面
+  // `modals`，所以调用目标从 `rootModals.*` 变成 `modals.*`，判据（issue → publish 的
+  // 冻结票据）不变。
+  for (const [module, parent, name] of [
+    [promotionQueueHook, "usePromotionQueue", "openPromoQueue"],
+    [edgeReviewHook, "useEdgeReviewQueue", "openEdgeReviewQueue"],
+  ]) {
+    const calls = callSitesIn(findFunctionIn(module, parent, name)).map(({ target }) => target);
+    assert.ok(calls.includes("modals.issue"), name);
+    assert.ok(calls.includes("modals.publish"), name);
   }
   assert.match(pageText, /previewShared\(token\)[\s\S]*rootModals\.publish\(modalLease\)/);
   for (const name of ["presentNotebookEditor", "presentNotebookDelete"]) {
@@ -154,8 +202,10 @@ test("every coordinated root surface leaves the interaction tree when it is cove
   const inlineSlots = [
     "notebook-share", "shared-preview", "shared-by-me", "source-add",
     "notebook-editor", "notebook-delete", "info", "analytics",
-    "kg-schema", "understanding", "promotion-queue", "promotion-target",
-    "edge-review",
+    // promotion-queue / edge-review 不再内联在 page.tsx——它们的 section 随 PR-5 分片 1
+    // 搬进了 PromotionQueueModal / EdgeReviewModal，改由下面 componentBindings 那张表钉住
+    // （与 memory-save、kg-analysis 等既有组件化弹窗同一判据）。
+    "kg-schema", "understanding", "promotion-target",
   ];
   for (const slot of inlineSlots) {
     const view = `rootModals\\.view\\("${slot}"\\)`;
@@ -174,6 +224,8 @@ test("every coordinated root surface leaves the interaction tree when it is cove
     ["SourceDetailWindow", "source-detail"],
     ["KgAnalysisView", "kg-analysis"],
     ["ImagePreviewModal", "answer-image-preview"],
+    ["PromotionQueueModal", "promotion-queue"],
+    ["EdgeReviewModal", "edge-review"],
   ];
   for (const [component, slot] of componentBindings) {
     const view = `rootModals\\.view\\("${slot}"\\)`;
@@ -183,7 +235,10 @@ test("every coordinated root surface leaves the interaction tree when it is cove
       component,
     );
   }
-  for (const source of [passwordModal, searchProfileModal, memoryPanel, catalogPanel, conversationShare]) {
+  for (const source of [
+    passwordModal, searchProfileModal, memoryPanel, catalogPanel, conversationShare,
+    promotionQueueModal, edgeReviewModal,
+  ]) {
     const text = source.getText(source);
     assert.match(text, /aria-hidden=\{!interactive\}/);
     assert.match(text, /inert=\{interactive \? undefined : true\}/);
@@ -198,14 +253,41 @@ test("presentation close never releases an in-flight domain operation", () => {
   for (const [name, operation] of [
     ["openShareModal", "shareOperationRef.current"],
     ["openSharedByMe", "shareOperationRef.current"],
-    ["openPromoQueue", "promoOperationRef.current"],
-    ["openEdgeReviewQueue", "edgeOperationRef.current"],
   ]) {
     assert.ok(
       ifConditionsIn(findFunctionIn(page, "Home", name))
         .some((condition) => condition.includes(operation)),
       `${name} must not replace an in-flight domain operation`,
     );
+  }
+  // 两个治理队列的 close sink 现在只调 owner hook 的 clearQueue（page 侧那两条 case 就是
+  // 它）。同一条「关闭 ≠ 请求结束」的判据因此下沉一层：clearQueue 只许清可见载荷，不许
+  // 把单飞闸置空、也不许复位 busy——否则关掉弹窗就能让同一候选被批准两次。
+  for (const [module, parent, opener, operation] of [
+    [promotionQueueHook, "usePromotionQueue", "openPromoQueue", "promoOperationRef.current"],
+    [edgeReviewHook, "useEdgeReviewQueue", "openEdgeReviewQueue", "edgeOperationRef.current"],
+  ]) {
+    assert.ok(
+      ifConditionsIn(findFunctionIn(module, parent, opener))
+        .some((condition) => condition.includes(operation)),
+      `${opener} must not replace an in-flight domain operation`,
+    );
+    const clearText = findFunctionIn(module, parent, "clearQueue").getText(module);
+    assert.doesNotMatch(clearText, /OperationRef\.current\s*=\s*null/, parent);
+    assert.doesNotMatch(clearText, /set(?:Promo|Edge)Busy\(false\)/, parent);
+  }
+  const closeCalls = callSitesIn(close).map(({ target }) => target);
+  assert.ok(closeCalls.includes("promotionQueue.clearQueue"));
+  assert.ok(closeCalls.includes("edgeReview.clearQueue"));
+  // 逐字比对整个 case 块的调用清单(不是"清单里有没有它"),这样紧挨着
+  // clearQueue() 多塞一条 releaseAfterClose() 之类的调用(把 operationRef 置空
+  // /把 busy 复位)也会被抓到——不再只靠上面两条 includes。
+  for (const [label, expectedCalls] of [
+    ["promotion-queue", ["promotionQueue.clearQueue"]],
+    ["edge-review", ["edgeReview.clearQueue"]],
+  ]) {
+    const clauseCalls = callSitesIn(caseClauseIn(close, label)).map(({ target }) => target);
+    assert.deepEqual(clauseCalls, expectedCalls, label);
   }
 });
 
@@ -214,11 +296,17 @@ test("modal mutations suppress errors after their frozen lease becomes stale", (
     "enableShareLink",
     "handleUnshare",
     "handleUnshareFromOverview",
-    "decidePromotion",
-    "decideEdge",
   ]) {
     const text = findFunctionIn(page, "Home", name).getText(page);
     assert.match(text, /catch \(error\)[\s\S]*rootModals\.owns\(modalLease\)[\s\S]*throw error/, name);
+  }
+  // 同一条判据，随两个治理队列搬到各自的 owner hook；协调器在那里叫 `modals`。
+  for (const [module, parent, name] of [
+    [promotionQueueHook, "usePromotionQueue", "decidePromotion"],
+    [edgeReviewHook, "useEdgeReviewQueue", "decideEdge"],
+  ]) {
+    const text = findFunctionIn(module, parent, name).getText(module);
+    assert.match(text, /catch \(error\)[\s\S]*modals\.owns\(modalLease\)[\s\S]*throw error/, name);
   }
   const promotion = findFunctionIn(page, "Home", "submitPromotion").getText(page);
   assert.match(promotion, /const actorId = currentUser\?\.id/);

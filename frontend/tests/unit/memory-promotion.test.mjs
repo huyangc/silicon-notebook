@@ -34,6 +34,9 @@ test("promotion helpers target the owner-authenticated Memory endpoint and expla
 test("Memory panel exposes promotion while the admin queue identifies Memory proposals", async () => {
   const panel = await parseModule("memory-panel.tsx");
   const page = await parseModule("page.tsx");
+  // PR-5 分片 1：「内容审核」弹窗的候选卡片搬到了 promotion-queue-modal.tsx，
+  //「记忆提取候选」这枚标签随之过去。判据不变，只换成看那个模块。
+  const promotionQueueModal = await parseModule("promotion-queue-modal.tsx");
   const panelModelImports = new Set(
     importsFrom(panel, "./memory-model").map((item) => item.imported),
   );
@@ -42,5 +45,5 @@ test("Memory panel exposes promotion while the admin queue identifies Memory pro
   assert.equal(panelModelImports.has("canPromoteMemory"), true);
   assert.ok(jsxTextValues(panel).some((value) => value.includes("贡献到公共知识库")));
   assert.ok(stringLiterals(page).includes("memory"));
-  assert.ok(jsxTextValues(page).some((value) => value.includes("记忆提取候选")));
+  assert.ok(jsxTextValues(promotionQueueModal).some((value) => value.includes("记忆提取候选")));
 });

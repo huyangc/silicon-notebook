@@ -63,15 +63,9 @@ import {
   type AskRetrievalEffortId,
 } from "./ask-retrieval-effort";
 import { EffortPicker } from "./effort-picker";
-import {
-  approvePromotion,
-  fetchPromotionQueue,
-  proposePromotion,
-  rejectPromotion,
-  type PromotionCandidate,
-} from "./promotion-queue";
-import { PromotionCandidateActions } from "./promotion-candidate-actions";
-import { promotionReviewSections } from "./promotion-review";
+import { proposePromotion } from "./promotion-queue";
+import { PromotionQueueModal } from "./promotion-queue-modal";
+import { usePromotionQueue } from "./use-promotion-queue";
 import { PromotionTargetModal } from "./promotion-target-modal";
 import { setNotebookTier, tierActionState } from "./notebook-tier";
 import {
@@ -109,7 +103,8 @@ import { parseUrlLines } from "./url-sources";
 import {
   normalizedNotebookName,
 } from "./notebook-creation";
-import { fetchEdgeReviewQueue, reviewRelation, formatEdgeReviewQueueTitle, type EdgeReviewItem } from "./edge-review-queue";
+import { EdgeReviewModal } from "./edge-review-modal";
+import { useEdgeReviewQueue } from "./use-edge-review-queue";
 import { conversationsOlderThan, CLEANUP_PRESETS } from "./conversation-cleanup";
 import { fetchMe, logoutUser, updateUiMode, type AuthUser } from "./auth";
 import { autoModeAskPlaceholder, isAdvanced, normalizeUiMode, type UiMode } from "./ui-mode.ts";
@@ -296,7 +291,7 @@ import {
   type UnifiedConceptNode,
 } from "./workspace-model";
 import { documentUploadBlockReason, resolveDocumentCapacity } from "./document-limit";
-import { label, PARSE_STATUS, ELEMENT_TYPE, KNOWLEDGE_STATUS, PROMOTION_STATUS, SEVERITY, CHECKUP_FIX, CHECKUP_FIX_BUSY } from "./vocabulary";
+import { label, PARSE_STATUS, ELEMENT_TYPE, KNOWLEDGE_STATUS, SEVERITY, CHECKUP_FIX, CHECKUP_FIX_BUSY } from "./vocabulary";
 
 /**
  * 标签页重新可见时,两次「访问权复核」之间至少隔这么久。
@@ -1065,10 +1060,9 @@ export default function Home() {
     { id: string; title: string; throughAnswerId: string } | null
   >(null);
   const [chatMode, setChatMode] = useState<ChatMode>("ask");
-  // Promotion queue modal (Track F governance)
-  const [promoQueue, setPromoQueue] = useState<PromotionCandidate[] | null>(null);
-  const [promoBusy, setPromoBusy] = useState(false);
-  const promoOperationRef = useRef<object | null>(null);
+  // Promotion queue modal (Track F governance) 的状态与写入住在 use-promotion-queue.ts；
+  // 关系审核队列同理住在 use-edge-review-queue.ts。两个 owner 在 rootModals 组合好之后
+  // 接线（见下方 promotionQueue / edgeReview）。
   // 多领域基准库 A4:提交晋升前需要知道本笔记本挂了几个公共知识库
   // (resolvePromotionTarget:0 个禁用按钮/1 个直接用/>1 个弹选择器)。数据源
   // 统一到下方 notebookPromotionBases(打开笔记本就有的 base_notebooks),不再
@@ -1076,12 +1070,6 @@ export default function Home() {
   // 拉取中/失败时会把 promotionTarget 误判成"0 个"而显示假的"需先挂载"提示。
   // 挂了 >1 个公共知识库时,点「提交晋升」先记下待定的知识对象 id,弹选择器要求选一个。
   const [pendingPromotionObjectId, setPendingPromotionObjectId] = useState<string | null>(null);
-  const [edgeQueue, setEdgeQueue] = useState<EdgeReviewItem[] | null>(null);
-  // R3 T-A3: the endpoint's true queue size, independent of the `limit`-bounded
-  // `edgeQueue` page above — shown in the modal header as "共 N 条".
-  const [edgeQueueTotal, setEdgeQueueTotal] = useState<number | null>(null);
-  const [edgeBusy, setEdgeBusy] = useState(false);
-  const edgeOperationRef = useRef<object | null>(null);
   // 分享(owner 侧):shareModal 存**当前**分享状态并驱动分享弹窗。它现在由
   // `GET .../share` 填充(只读),而不是打开弹窗就 POST 一条链接出来——弹窗里还有
   // 「共享给群组」一节,只想共享给群组的用户不该顺带被发一条分享链接(P1-T4)。
@@ -1155,6 +1143,14 @@ export default function Home() {
   // 弹窗本身仍渲染在视图外层——它是独立的浮动窗,关掉知识图谱不必连它一起收。
   // 它的业务数据仍由 AgentProfilePanel 自持；根层是否呈现及切库同步失效由
   // useRootModalCoordinator 的 workspace lease 负责。
+  // Ordering constraint: `usePromotionQueue`/`useEdgeReviewQueue` below take
+  // `rootModals` as their `modals` prop, so this call must stay above them.
+  // `handleRootModalClosed` (the close sink passed in as `onClosed`) is safe
+  // to reference here even though it reads `promotionQueue`/`edgeReview`
+  // consts declared later in this component: it is a hoisted function
+  // declaration, and React only invokes it from an effect after the whole
+  // component body — including those consts — has finished evaluating.
+  // Never during render.
   const rootModals = useRootModalCoordinator({
     actorId: currentUser?.id ?? null,
     sourceId: sourceDetail?.id ?? null,
@@ -1180,6 +1176,21 @@ export default function Home() {
       rootModals.requestClose("kg-analysis", "button");
     }
   }, [notebookCollection.editor?.target?.id, notebookCollection.deletion?.target?.id, sourceDetail?.id, kgSchema.open, kgGraph.analysisOpen]); // eslint-disable-line react-hooks/exhaustive-deps
+  // 两个治理队列的 owner。只把它们真正需要的东西传进去:协调器的窄命令面(结构类型自动
+  // 收窄,见各 hook 的 Pick<RootModalCoordinator, …>)与两条 effect,而不是整个 page state。
+  // Ordering constraint: both hooks below must stay after the `rootModals`
+  // coordinator call above — they consume it as `modals`.
+  const promotionQueue = usePromotionQueue({
+    modals: rootModals,
+    effects: {
+      notify: setToast,
+      refreshCollection: () => loadNotebookCollection(),
+    },
+  });
+  const edgeReview = useEdgeReviewQueue({
+    modals: rootModals,
+    effects: { notify: setToast },
+  });
   const [knowhowNavigation, setKnowhowNavigation] = useState(CLOSED_KNOWHOW_NAVIGATION);
   // Task 12（引用跳转）：ask 引用命中 knowhow 格子时的跳转目标——非 null 时
   // KnowhowPanel 挂载即定位到该表该行的抽屉（见 openKnowhowAt）。
@@ -2877,8 +2888,8 @@ export default function Home() {
       switchChatMode("reports");
       if (item.report_id) reportWorkspace.focusReport(item.report_id);
     } else if (item.type === "governance") {
-      if (item.subtype === "edge") { await openEdgeReviewQueue(item.notebook_id); }
-      else if (item.subtype === "promotion") { await openPromoQueue(); }
+      if (item.subtype === "edge") { await edgeReview.openEdgeReviewQueue(item.notebook_id); }
+      else if (item.subtype === "promotion") { await promotionQueue.openPromoQueue(); }
       else { await openKgView(undefined, item.notebook_id); }
     } else if (item.type === "index") {
       await openKgView(undefined, item.notebook_id);
@@ -4549,17 +4560,9 @@ export default function Home() {
   }
 
   // --- Governance: promotion queue (Track F) ---------------------------
-  async function openPromoQueue() {
-    if (promoOperationRef.current) return;
-    const modalLease = rootModals.issue("promotion-queue", rootModals.captureActorOwner());
-    if (!modalLease) return;
-    try {
-      const queue = await fetchPromotionQueue();
-      if (rootModals.publish(modalLease)) setPromoQueue(queue);
-    } catch (error) {
-      if (rootModals.leaseIsCurrent(modalLease)) throw error;
-    }
-  }
+  // 开窗与批准/拒绝住在 use-promotion-queue.ts(promotionQueue.openPromoQueue /
+  // .decidePromotion);这里只剩「提交晋升」——它属于知识条目与 Memory 的**提交**路径,
+  // 不是审核队列的一部分。
 
   // targetBaseId 未传时按 promotionTarget(渲染时用 notebookPromotionBases 算出)三态分派:
   // none(0 个公共库挂载)拒绝、auto(1 个)直接用、choose(>1 个)转去弹选择器,选好后
@@ -4590,79 +4593,6 @@ export default function Home() {
       if (isCurrent()) setToast("已提交贡献申请");
     } catch (error) {
       if (isCurrent()) throw error;
-    }
-  }
-
-  async function decidePromotion(candidateId: string, decision: "approve" | "reject", reason = "") {
-    const modalLease = rootModals.activeLease("promotion-queue");
-    if (!modalLease || promoOperationRef.current) return;
-    const operation = {};
-    promoOperationRef.current = operation;
-    setPromoBusy(true);
-    try {
-      if (decision === "approve") {
-        const result = await approvePromotion(candidateId);
-        if (!rootModals.owns(modalLease)) return;
-        const merged = result.merged_into ? `（与 ${result.merged_into.slice(0, 8)} 合并）` : "";
-        setToast(`已批准收录${merged}，内容已加入公共知识库`);
-      } else {
-        await rejectPromotion(candidateId, reason);
-        if (!rootModals.owns(modalLease)) return;
-        setToast("贡献未采纳，个人内容保持不变");
-      }
-      if (!rootModals.owns(modalLease)) return;
-      // Refresh queue, then any loaded notebook collection / knowledge list.
-      const queue = await fetchPromotionQueue();
-      if (!rootModals.owns(modalLease)) return;
-      setPromoQueue(queue);
-      await loadNotebookCollection();
-    } catch (error) {
-      if (rootModals.owns(modalLease)) throw error;
-    } finally {
-      if (promoOperationRef.current === operation) {
-        promoOperationRef.current = null;
-        setPromoBusy(false);
-      }
-    }
-  }
-
-  // --- Track E: edge review queue ----------------------------------------
-  async function openEdgeReviewQueue(notebookId: string | null = currentNotebookId) {
-    if (!notebookId || edgeOperationRef.current) return;
-    const modalLease = rootModals.issue("edge-review", rootModals.captureWorkspaceOwner());
-    if (!modalLease || modalLease.owner.kind !== "workspace" || modalLease.owner.notebookId !== notebookId) return;
-    try {
-      const { items, total } = await fetchEdgeReviewQueue(notebookId);
-      if (rootModals.publish(modalLease)) {
-        setEdgeQueue(items);
-        setEdgeQueueTotal(total);
-      }
-    } catch (error) {
-      if (rootModals.leaseIsCurrent(modalLease)) throw error;
-    }
-  }
-
-  async function decideEdge(relId: string, status: "verified" | "rejected") {
-    const modalLease = rootModals.activeLease("edge-review");
-    if (!modalLease || modalLease.owner.kind !== "workspace" || edgeOperationRef.current) return;
-    const operation = {};
-    edgeOperationRef.current = operation;
-    setEdgeBusy(true);
-    try {
-      await reviewRelation(modalLease.owner.notebookId, relId, status);
-      if (!rootModals.owns(modalLease)) return;
-      setToast(status === "verified" ? "关系已确认" : "关系已拒绝，后续图推理将忽略它");
-      const { items, total } = await fetchEdgeReviewQueue(modalLease.owner.notebookId);
-      if (!rootModals.owns(modalLease)) return;
-      setEdgeQueue(items);
-      setEdgeQueueTotal(total);
-    } catch (error) {
-      if (rootModals.owns(modalLease)) throw error;
-    } finally {
-      if (edgeOperationRef.current === operation) {
-        edgeOperationRef.current = null;
-        setEdgeBusy(false);
-      }
     }
   }
 
@@ -4759,14 +4689,13 @@ export default function Home() {
         kgWorkspace.closeAnalysis();
         return;
       case "promotion-queue":
-        setPromoQueue(null);
+        promotionQueue.clearQueue();
         return;
       case "promotion-target":
         setPendingPromotionObjectId(null);
         return;
       case "edge-review":
-        setEdgeQueue(null);
-        setEdgeQueueTotal(null);
+        edgeReview.clearQueue();
         return;
       case "answer-image-preview":
         setAnswerImagePreview(null);
@@ -5400,11 +5329,11 @@ export default function Home() {
                     message: "对当前笔记本的知识图谱与参考库做治理与审查（部分操作仅管理员）。输出在弹窗中呈现。",
                     sections: baseNames.length ? [["本笔记本的参考库", baseNames] as [string, string[]]] : undefined,
                     actions: [
-                      ...(currentUser?.role === "admin" ? [{ label: "内容审核", desc: "审核待收录进公共知识库的内容（管理员）", action: () => openPromoQueue().catch(reportError) }] : []),
+                      ...(currentUser?.role === "admin" ? [{ label: "内容审核", desc: "审核待收录进公共知识库的内容（管理员）", action: () => promotionQueue.openPromoQueue().catch(reportError) }] : []),
                       ...(currentUser?.role === "admin" ? [{ label: tier.label, desc: "把当前笔记本设为公共知识库，供其他笔记本挂为参考库（管理员）", action: () => handleTierAction().catch(reportError) }] : []),
                       // 检索索引的立即/空闲时重建已收敛进「看板 → 索引与构建」面板(检索索引行,
                       // 与 tier 解耦、大库亦可建)，此处不再重复列出，避免同一动作多处入口各自确认。
-                      { label: "关系审核队列", desc: "审核知识图谱中待人工确认的实体关联", action: () => openEdgeReviewQueue().catch(reportError) }
+                      { label: "关系审核队列", desc: "审核知识图谱中待人工确认的实体关联", action: () => edgeReview.openEdgeReviewQueue(currentNotebookId).catch(reportError) }
                     ]
                     });
                   }}>
@@ -8242,106 +8171,16 @@ export default function Home() {
       )}
 
       {rootModals.view("promotion-queue").open && (
-        <section
-          className="utility-modal"
-          role="dialog"
-          aria-modal={rootModals.view("promotion-queue").topmost}
-          aria-hidden={!rootModals.view("promotion-queue").topmost}
-          inert={rootModals.view("promotion-queue").topmost ? undefined : true}
-          style={{ zIndex: rootModals.view("promotion-queue").zIndex }}
-          onClick={(event) => { if (event.currentTarget === event.target) rootModals.requestClose("promotion-queue", "backdrop"); }}
-        >
-          <FloatingModalCard storageKey="promotion.window" className="utility-modal-card">
-            {(floating) => (<>
-            <div className="source-modal-header" {...floating.dragHandleProps}>
-              <div>
-                <h2>内容审核</h2>
-                <p>个人知识库中的内容与记忆候选申请收录到公共知识库。批准后会合并重复并加入所选的目标公共知识库。</p>
-              </div>
-              <button className="icon-button" onClick={() => rootModals.requestClose("promotion-queue", "button")} title="Close">×</button>
-            </div>
-            <div className="source-detail-body">
-              {(promoQueue ?? []).length === 0 ? (
-                <p className="tool-hint">暂无待审核的收录申请。</p>
-              ) : (
-                <div className="stack">
-                  {(promoQueue ?? []).map((cand) => {
-                    const review = promotionReviewSections(cand);
-                    return (
-                    <article className="item" key={cand.id}>
-                      <div className="tag-row">
-                        <span className="tag">{label(PROMOTION_STATUS, cand.status, "处理中")}</span>
-                        <span className="tag">{cand.object_type}</span>
-                        {cand.source_kind === "memory" && <span className="tag">记忆提取候选</span>}
-                        {cand.source_kind === "memory" && review.sourceRevision > 0 && (
-                          <span className="tag">固定修订 #{review.sourceRevision}</span>
-                        )}
-                        {cand.base_match_id && (
-                          <span className="tag conflict">疑似重复: {cand.base_match_id.slice(0, 10)}</span>
-                        )}
-                      </div>
-                      <h3>{String((cand.payload as Record<string, unknown>).name ?? (cand.payload as Record<string, unknown>).title ?? cand.object_id)}</h3>
-                      {cand.source_kind === "memory" && review.candidates.length > 0 && (
-                        <div className="stack" aria-label="记忆待审知识对象">
-                          {review.candidates.map((item, index) => (
-                            <section className="item" key={`${cand.id}-${item.objectType}-${index}`}>
-                              <strong>{item.objectType}</strong>
-                              {item.fields.map(([label, value]) => (
-                                <div key={label}>
-                                  <span className="tool-hint">{label}</span>
-                                  <div style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{value}</div>
-                                </div>
-                              ))}
-                            </section>
-                          ))}
-                        </div>
-                      )}
-                      <p className="tool-hint">来源笔记本: {cand.notebook_id.slice(0, 10)}</p>
-                      {cand.target_base_id && (
-                        <p className="tool-hint">
-                          {/* Task 13 审查 #4:优先用后端 join 出来的 target_base_name(策展人不一定是
-                              目标库 owner,notebookCollection.rows 只覆盖自有∪只读加入,猜不出别人
-                              创建的公共库真名)；查不到再回退旧写法(notebookCollection.rows.find),
-                              最后兜底截断 id。 */}
-                          目标公共知识库: {cand.target_base_name || notebookCollection.rows.find((n) => n.id === cand.target_base_id)?.name || cand.target_base_id.slice(0, 10)}
-                        </p>
-                      )}
-                      {review.evidence.length > 0 && (
-                        <div className="stack" aria-label="服务端校验证据">
-                          <strong>证据</strong>
-                          {review.evidence.map((evidence, index) => (
-                            <article className="item" key={`${cand.id}-evidence-${index}`}>
-                              <div className="tool-hint">
-                                {evidence.sourceTitle || "来源"}
-                                {evidence.locationLabel ? ` · ${evidence.locationLabel}` : ""}
-                              </div>
-                              <div style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>
-                                {evidence.quotedSpan}
-                              </div>
-                            </article>
-                          ))}
-                        </div>
-                      )}
-                      {cand.base_match_id && (
-                        <p className="conflict-note">公共知识库中已有相似内容 — 批准后将合并。</p>
-                      )}
-                      {(cand.status === "proposed" || cand.status === "under_review") && (
-                        <PromotionCandidateActions
-                          hasTargetBase={Boolean(cand.target_base_id)}
-                          busy={promoBusy}
-                          onApprove={() => decidePromotion(cand.id, "approve").catch(reportError)}
-                          onReject={() => decidePromotion(cand.id, "reject").catch(reportError)}
-                        />
-                      )}
-                    </article>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-            </>)}
-          </FloatingModalCard>
-        </section>
+        <PromotionQueueModal
+          candidates={promotionQueue.view.candidates}
+          busy={promotionQueue.view.busy}
+          lookupNotebookName={(notebookId) => notebookCollection.rows.find((n) => n.id === notebookId)?.name}
+          interactive={rootModals.view("promotion-queue").topmost}
+          zIndex={rootModals.view("promotion-queue").zIndex}
+          onRequestClose={(reason) => rootModals.requestClose("promotion-queue", reason)}
+          onApprove={(candidateId) => promotionQueue.decidePromotion(candidateId, "approve").catch(reportError)}
+          onReject={(candidateId) => promotionQueue.decidePromotion(candidateId, "reject").catch(reportError)}
+        />
       )}
 
       {rootModals.view("promotion-target").open && pendingPromotionObjectId && (
@@ -8371,64 +8210,15 @@ export default function Home() {
       )}
 
       {rootModals.view("edge-review").open && (
-        <section
-          className="utility-modal"
-          role="dialog"
-          aria-modal={rootModals.view("edge-review").topmost}
-          aria-hidden={!rootModals.view("edge-review").topmost}
-          inert={rootModals.view("edge-review").topmost ? undefined : true}
-          style={{ zIndex: rootModals.view("edge-review").zIndex }}
-          onClick={(event) => { if (event.currentTarget === event.target) rootModals.requestClose("edge-review", "backdrop"); }}
-        >
-          <FloatingModalCard storageKey="edgeReview.window" className="utility-modal-card">
-            {(floating) => (<>
-            <div className="source-modal-header" {...floating.dragHandleProps}>
-              <div>
-                <h2>关系审核队列{formatEdgeReviewQueueTitle(edgeQueueTotal, (edgeQueue ?? []).length)}</h2>
-                <p>按「高中心性 × 低可信」排序的关系。确认可信的关联，或拒绝错误的关联（被拒的关联将从所有图推理遍历中排除）。</p>
-              </div>
-              <button className="icon-button" onClick={() => rootModals.requestClose("edge-review", "button")} title="Close">×</button>
-            </div>
-            <div className="source-detail-body">
-              {(edgeQueue ?? []).length === 0 ? (
-                <p className="tool-hint">暂无待审关系。</p>
-              ) : (
-                <div className="stack">
-                  {(edgeQueue ?? []).map((edge) => (
-                    <article className="item" key={edge.rel_id}>
-                      <div className="tag-row">
-                        <span className="tag">{edge.edge_type}</span>
-                        <span className="tag">{edge.review_status}</span>
-                        <span className="tag">可信 {edge.trust_score.toFixed(2)}</span>
-                        <span className="tag">优先级 {edge.review_priority.toFixed(2)}</span>
-                      </div>
-                      <h3>{(edge.source_name || edge.source_object_id)} → {(edge.target_name || edge.target_object_id)}</h3>
-                      {edge.review_status !== "rejected" && (
-                        <div className="modal-actions">
-                          <button
-                            className="sort-button"
-                            disabled={edgeBusy}
-                            onClick={() => decideEdge(edge.rel_id, "rejected").catch(reportError)}
-                          >
-                            拒绝
-                          </button>
-                          <button
-                            className="new-pill"
-                            disabled={edgeBusy}
-                            onClick={() => decideEdge(edge.rel_id, "verified").catch(reportError)}
-                          >
-                            确认可信
-                          </button>
-                        </div>
-                      )}
-                    </article>
-                  ))}
-                </div>
-              )}
-            </div>
-            </>)}
-          </FloatingModalCard>
-        </section>
+        <EdgeReviewModal
+          edges={edgeReview.view.edges}
+          total={edgeReview.view.total}
+          busy={edgeReview.view.busy}
+          interactive={rootModals.view("edge-review").topmost}
+          zIndex={rootModals.view("edge-review").zIndex}
+          onRequestClose={(reason) => rootModals.requestClose("edge-review", reason)}
+          onDecide={(relId, status) => edgeReview.decideEdge(relId, status).catch(reportError)}
+        />
       )}
 
       {toast && <div className="toast">{toast}</div>}

@@ -579,3 +579,9 @@ export function useRootModalCoordinator({ actorId, sourceId, onClosed }: RootMod
     view,
   };
 }
+
+// 协调器的完整命令面。给**别的模块**用来 `Pick<>` 出自己真正需要的那几个命令
+// （见 use-promotion-queue.ts / use-edge-review-queue.ts）——它们因此拿到的是结构
+// 类型的窄面，而不是"整个 rootModals"；page.tsx 直接把 rootModals 传过去即可。
+// 纯类型别名，无运行时代码，不改变本模块"只依赖 react、不持有任何领域负载"的边界。
+export type RootModalCoordinator = ReturnType<typeof useRootModalCoordinator>;
