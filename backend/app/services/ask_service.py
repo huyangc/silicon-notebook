@@ -2482,7 +2482,7 @@ class AskService:
             self.collection_enumeration, self.evidence_context, notebook_id,
             ask_retrieval_limits(payload.retrieval_effort),
             self.settings.chunk_answer_budget_chars, cancel_event,
-            local_only=(not intent.include_reference_libraries and not intent.title),
+            local_only=(intent.kind == "catalog" and not intent.include_reference_libraries),
         )
         prepared = catalog
         notice = ""
