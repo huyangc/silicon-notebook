@@ -864,6 +864,11 @@
               "title": "Created At",
               "type": "string"
             },
+            "groups": {
+              "default": 0,
+              "title": "Groups",
+              "type": "integer"
+            },
             "id": {
               "title": "Id",
               "type": "string"
@@ -872,6 +877,21 @@
               "default": false,
               "title": "Is Online",
               "type": "boolean"
+            },
+            "joined_notebooks": {
+              "default": 0,
+              "title": "Joined Notebooks",
+              "type": "integer"
+            },
+            "kg_builds": {
+              "default": 0,
+              "title": "Kg Builds",
+              "type": "integer"
+            },
+            "knowhow_tables": {
+              "default": 0,
+              "title": "Knowhow Tables",
+              "type": "integer"
             },
             "last_active": {
               "anyOf": [
@@ -884,6 +904,11 @@
               ],
               "title": "Last Active"
             },
+            "memory_count": {
+              "default": 0,
+              "title": "Memory Count",
+              "type": "integer"
+            },
             "notebooks": {
               "title": "Notebooks",
               "type": "integer"
@@ -892,8 +917,23 @@
               "title": "Questions",
               "type": "integer"
             },
+            "questions_30d": {
+              "default": 0,
+              "title": "Questions 30D",
+              "type": "integer"
+            },
+            "questions_failed": {
+              "default": 0,
+              "title": "Questions Failed",
+              "type": "integer"
+            },
             "reports": {
               "title": "Reports",
+              "type": "integer"
+            },
+            "reports_failed": {
+              "default": 0,
+              "title": "Reports Failed",
               "type": "integer"
             },
             "role": {
@@ -907,6 +947,11 @@
             },
             "sources": {
               "title": "Sources",
+              "type": "integer"
+            },
+            "storage_bytes": {
+              "default": 0,
+              "title": "Storage Bytes",
               "type": "integer"
             },
             "upload_limit": {

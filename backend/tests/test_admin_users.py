@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta, timezone
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -122,12 +124,16 @@ def test_list_user_usage_sources_matches_last_active_predicate(repo):
         #           u1(规格 §7 决策 2,与 last_active 同一谓词)。
         #  s-null   uploaded_by 为 NULL——深拷贝副本或极早期未回填行,
         #           COALESCE 落到 nb.created_by=u1。
+        #  s-blank  uploaded_by 为空串——插入路径把空白折成 NULL,今天不可达,
+        #           但 NULLIF(uploaded_by,'') 就是为它存在的防御:少了它这行
+        #           会归到 '' 这个不存在的用户名下、从 u1 的计数里消失。
         #  s-memory / s-knowhow 合成来源(source_type 落在 memory/knowhow),
         #           VISIBLE_SOURCE_TYPES_PREDICATE 排除,不计入任何人。
         for sid, source_type, uploaded_by in (
             ("s-self", "pdf", "u1"),
             ("s-shared", "pdf", "u2"),
             ("s-null", "pdf", None),
+            ("s-blank", "pdf", ""),
             ("s-memory", "memory", "u1"),
             ("s-knowhow", "knowhow", "u1"),
         ):
@@ -145,9 +151,9 @@ def test_list_user_usage_sources_matches_last_active_predicate(repo):
             ("s-copying", "n-copy", "s-copying", "pdf", now, now, "u1"),
         )
     usage = {row["id"]: row for row in repo.list_user_usage()}
-    # u1: s-self + s-null(NULL 归 owner)= 2;s-shared 归 u2;s-copying、
-    # s-memory、s-knowhow 都不计入任何人。
-    assert usage["u1"]["sources"] == 2
+    # u1: s-self + s-null(NULL 归 owner)+ s-blank(空串归 owner)= 3;
+    # s-shared 归 u2;s-copying、s-memory、s-knowhow 都不计入任何人。
+    assert usage["u1"]["sources"] == 3
     assert usage["u2"]["sources"] == 1
 
 
@@ -285,6 +291,311 @@ def test_source_store_stamps_visible_upload_actor_but_not_hidden_projection(repo
             )
         }
     assert rows == {"visible-actor": "user-local", "hidden-actor": None}
+
+
+# ---------------------------------------------------------------------------
+# Phase B/C 使用强度信号(不含 last_seen,那是独立迁移任务):见规格
+# docs/superpowers/specs/2026-09-07-admin-usage-overview-usage-signals-design_zh.md
+# §3 Phase B/C。
+# ---------------------------------------------------------------------------
+
+
+def test_list_user_usage_storage_bytes_matches_sources_attribution(repo):
+    """B2:与 `sources` 完全同一归因(uploaded_by 优先,NULL 回落 nb.created_by)、
+    同一 live+可见过滤,只是把 COUNT(*) 换成 SUM(file_size)。"""
+    now = "2026-07-07T00:00:00"
+    with repo._write() as db:
+        for uid, uname in (("u1", "a00000001"), ("u2", "b00000002")):
+            db.execute(
+                "INSERT INTO users (id,email,display_name,role,status,username,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (uid, f"{uid}@x", uid.upper(), "user", "active", uname, now, now),
+            )
+        for nid, status in (("n1", "ready"), ("n-copy", "copying")):
+            db.execute(
+                "INSERT INTO notebooks (id,name,created_by,status,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?)", (nid, nid, "u1", status, now, now),
+            )
+        for sid, notebook_id, source_type, uploaded_by, file_size in (
+            ("s-self", "n1", "pdf", "u1", 1000),
+            ("s-shared", "n1", "pdf", "u2", 2000),
+            ("s-null", "n1", "pdf", None, 300),        # NULL 回落 owner u1
+            ("s-memory", "n1", "memory", "u1", 5000),  # 排除:合成来源
+            ("s-copying", "n-copy", "pdf", "u1", 9000),  # 排除:copying 库
+        ):
+            db.execute(
+                "INSERT INTO sources "
+                "(id,notebook_id,title,source_type,created_at,updated_at,uploaded_by,file_size) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (sid, notebook_id, sid, source_type, now, now, uploaded_by, file_size),
+            )
+    usage = {row["id"]: row for row in repo.list_user_usage()}
+    assert usage["u1"]["storage_bytes"] == 1300  # s-self + s-null
+    assert usage["u2"]["storage_bytes"] == 2000
+
+
+def test_list_user_usage_questions_30d_window(repo):
+    """B3:近 30 天提问数——窗口内/窗口外/贴近边界各一条,裸 UTC 与带 offset 的
+    ISO 串各覆盖一次,证明 SQLite 侧走 `_absolute_instant`(与 last_active 同一
+    判据)而不是裸文本比较。真实墙钟相对时间(而非固定字面量),因为 SQL 侧
+    用的是 `julianday('now','-30 days')`,没有可注入的时钟种子——`_absolute_instant`
+    的 COALESCE 兜底值是公元 1 年,不会误入窗口。"""
+    now = datetime.now(timezone.utc)
+
+    def bare(dt: datetime) -> str:
+        return dt.strftime("%Y-%m-%dT%H:%M:%S")
+
+    created_now = bare(now)
+    in_window_bare = bare(now - timedelta(days=10))
+    # 带本机 +08:00 offset 的 ISO 串,与 _absolute_instant 文档里举的例子同一格式。
+    in_window_offset = (
+        (now - timedelta(days=5)).astimezone(timezone(timedelta(hours=8))).isoformat()
+    )
+    # 贴近 30 天边界但留出安全余量(测试执行耗时远小于分钟级),验证 `>=` 判据
+    # 会把「刚好还在窗口里」的行计入,而不是掐着微秒做不稳定的边界断言。
+    near_boundary_included = bare(now - timedelta(days=29, hours=23, minutes=50))
+    out_window = bare(now - timedelta(days=40))
+
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO users (id,email,display_name,role,status,username,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            ("u1", "u1@x", "U1", "user", "active", "a00000001", created_now, created_now),
+        )
+        db.execute(
+            "INSERT INTO notebooks (id,name,created_by,status,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?)", ("n1", "n1", "u1", "ready", created_now, created_now),
+        )
+        for jid, created_at in (
+            ("j-in-bare", in_window_bare),
+            ("j-in-offset", in_window_offset),
+            ("j-near-boundary", near_boundary_included),
+            ("j-out", out_window),
+        ):
+            db.execute(
+                "INSERT INTO ask_jobs "
+                "(id,notebook_id,created_by,mode,question,status,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (jid, "n1", "u1", "chunk", "q?", "completed", created_at, created_at),
+            )
+    usage = next(row for row in repo.list_user_usage() if row["id"] == "u1")
+    assert usage["questions_30d"] == 3
+
+
+def test_list_user_usage_questions_30d_retained_branch_same_window(repo):
+    """B3 retained 分支:笔记本删除后的留存快照仍按同一 30 天窗口计入/排除,
+    与 live 分支同一比较语义(created_at 在留存快照里原样保留)。"""
+    now = datetime.now(timezone.utc)
+    created_now = now.isoformat()
+    recent = (now - timedelta(days=3)).isoformat()
+    old = (now - timedelta(days=40)).isoformat()
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO users (id,email,display_name,role,status,username,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            ("u1", "u1@x", "U1", "user", "active", "a00000001", created_now, created_now),
+        )
+        db.execute(
+            "INSERT INTO notebooks (id,name,created_by,status,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?)", ("n1", "n1", "u1", "ready", created_now, created_now),
+        )
+        db.execute(
+            "INSERT INTO ask_jobs "
+            "(id,notebook_id,created_by,mode,question,status,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            ("j-recent", "n1", "u1", "chunk", "q1", "completed", recent, recent),
+        )
+        db.execute(
+            "INSERT INTO ask_jobs "
+            "(id,notebook_id,created_by,mode,question,status,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            ("j-old", "n1", "u1", "chunk", "q2", "completed", old, old),
+        )
+    repo._runtime.notebook_store.delete_row_and_orphan_embeddings("n1")
+    usage = next(row for row in repo.list_user_usage() if row["id"] == "u1")
+    assert usage["questions_30d"] == 1
+
+
+def test_list_user_usage_questions_failed_and_reports_failed(repo):
+    """B5:status='failed' 计入失败数;cancelled 不算失败。"""
+    now = "2026-07-07T00:00:00"
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO users (id,email,display_name,role,status,username,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            ("u1", "u1@x", "U1", "user", "active", "a00000001", now, now),
+        )
+        db.execute(
+            "INSERT INTO notebooks (id,name,created_by,status,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?)", ("n1", "n1", "u1", "ready", now, now),
+        )
+        for jid, status in (
+            ("j-failed", "failed"), ("j-cancelled", "cancelled"), ("j-done", "completed"),
+        ):
+            db.execute(
+                "INSERT INTO ask_jobs "
+                "(id,notebook_id,created_by,mode,question,status,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (jid, "n1", "u1", "chunk", "q?", status, now, now),
+            )
+        for rid, status in (
+            ("r-failed", "failed"), ("r-cancelled", "cancelled"), ("r-done", "done"),
+        ):
+            db.execute(
+                "INSERT INTO reports (id,notebook_id,question,status,created_by,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (rid, "n1", "q?", status, "u1", now, now),
+            )
+    usage = next(row for row in repo.list_user_usage() if row["id"] == "u1")
+    assert usage["questions_failed"] == 1
+    assert usage["reports_failed"] == 1
+
+
+def test_list_user_usage_failed_counts_retained_branch(repo):
+    """B5 retained 分支:笔记本删除后,留存快照里 status='failed' 的提问/报告
+    仍计入失败数(与 live 分支同一口径)。"""
+    now = "2026-07-07T00:00:00"
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO users (id,email,display_name,role,status,username,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            ("u1", "u1@x", "U1", "user", "active", "a00000001", now, now),
+        )
+        db.execute(
+            "INSERT INTO notebooks (id,name,created_by,status,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?)", ("n1", "n1", "u1", "ready", now, now),
+        )
+        db.execute(
+            "INSERT INTO ask_jobs "
+            "(id,notebook_id,created_by,mode,question,status,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            ("j-failed", "n1", "u1", "chunk", "q?", "failed", now, now),
+        )
+        db.execute(
+            "INSERT INTO reports (id,notebook_id,question,status,created_by,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            ("r-failed", "n1", "q?", "failed", "u1", now, now),
+        )
+    repo._runtime.notebook_store.delete_row_and_orphan_embeddings("n1")
+    usage = next(row for row in repo.list_user_usage() if row["id"] == "u1")
+    assert usage["questions_failed"] == 1
+    assert usage["reports_failed"] == 1
+
+
+def test_list_user_usage_kg_builds_counts_all_statuses_excludes_empty_creator(repo):
+    """B4:所有状态都算(与 questions 含失败/取消同口径);created_by 空串
+    (早期/异常写入)不算有效用户键。"""
+    now = "2026-07-07T00:00:00"
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO users (id,email,display_name,role,status,username,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            ("u1", "u1@x", "U1", "user", "active", "a00000001", now, now),
+        )
+        db.execute(
+            "INSERT INTO notebooks (id,name,created_by,status,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?)", ("n1", "n1", "u1", "ready", now, now),
+        )
+        for kid, created_by, status in (
+            ("kg-done", "u1", "completed"),
+            ("kg-failed", "u1", "failed"),
+            ("kg-noowner", "", "completed"),
+        ):
+            db.execute(
+                "INSERT INTO kg_build_jobs "
+                "(id,notebook_id,created_by,mode,status,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (kid, "n1", created_by, "full", status, now, now),
+            )
+    usage = next(row for row in repo.list_user_usage() if row["id"] == "u1")
+    assert usage["kg_builds"] == 2
+
+
+def test_list_user_usage_memory_count_excludes_rejected(repo):
+    """Phase C:memory_count 排除 status='rejected'——被拒绝的候选不代表用户
+    采纳了 Memory 机制。"""
+    now = "2026-07-07T00:00:00"
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO users (id,email,display_name,role,status,username,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            ("u1", "u1@x", "U1", "user", "active", "a00000001", now, now),
+        )
+        db.execute(
+            "INSERT INTO notebooks (id,name,created_by,status,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?)", ("n1", "n1", "u1", "ready", now, now),
+        )
+        for mid, status in (
+            ("m-confirmed", "confirmed"), ("m-candidate", "candidate"), ("m-rejected", "rejected"),
+        ):
+            db.execute(
+                "INSERT INTO memory_items "
+                "(id,notebook_id,created_by,origin,status,title,content_md,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (mid, "n1", "u1", "ask_answer", status, "T", "C", now, now),
+            )
+    usage = next(row for row in repo.list_user_usage() if row["id"] == "u1")
+    assert usage["memory_count"] == 2
+
+
+def test_list_user_usage_knowhow_tables_excludes_empty_creator(repo):
+    """Phase C:knowhow_tables 按 created_by,空串(早期/异常写入)不算有效
+    用户键,同 kg_builds 口径。"""
+    now = "2026-07-07T00:00:00"
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO users (id,email,display_name,role,status,username,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            ("u1", "u1@x", "U1", "user", "active", "a00000001", now, now),
+        )
+        db.execute(
+            "INSERT INTO notebooks (id,name,created_by,status,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?)", ("n1", "n1", "u1", "ready", now, now),
+        )
+        for kid, created_by in (("k1", "u1"), ("k2", "")):
+            db.execute(
+                "INSERT INTO knowhow_tables "
+                "(id,notebook_id,title,created_by,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?)",
+                (kid, "n1", kid, created_by, now, now),
+            )
+    usage = next(row for row in repo.list_user_usage() if row["id"] == "u1")
+    assert usage["knowhow_tables"] == 1
+
+
+def test_list_user_usage_joined_notebooks_and_groups(repo):
+    """Phase C:joined_notebooks 按 notebook_members.user_id(他人库的成员身份),
+    groups 按 group_members.user_id;自有库/群组创建者不经这两张表。"""
+    now = "2026-07-07T00:00:00"
+    with repo._write() as db:
+        for uid, uname in (("u1", "a00000001"), ("u2", "b00000002")):
+            db.execute(
+                "INSERT INTO users (id,email,display_name,role,status,username,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (uid, f"{uid}@x", uid.upper(), "user", "active", uname, now, now),
+            )
+        db.execute(
+            "INSERT INTO notebooks (id,name,created_by,status,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?)", ("n1", "n1", "u1", "ready", now, now),
+        )
+        db.execute(
+            "INSERT INTO notebook_members (notebook_id,user_id,role,added_at) "
+            "VALUES (?,?,?,?)", ("n1", "u2", "reader", now),
+        )
+        db.execute(
+            "INSERT INTO groups (id,name,kind,created_by,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?)", ("g1", "G1", "project", "u1", now, now),
+        )
+        db.execute(
+            "INSERT INTO group_members (group_id,user_id,role,added_at) "
+            "VALUES (?,?,?,?)", ("g1", "u2", "member", now),
+        )
+    usage = {row["id"]: row for row in repo.list_user_usage()}
+    assert usage["u2"]["joined_notebooks"] == 1
+    assert usage["u2"]["groups"] == 1
+    assert usage["u1"]["joined_notebooks"] == 0
+    assert usage["u1"]["groups"] == 0
+
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
