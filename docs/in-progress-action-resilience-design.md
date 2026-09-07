@@ -1,7 +1,12 @@
 # 进行中动作的刷新韧性（In-Progress Action Resilience）
 
 **日期**：2026-07-08
-**状态**：设计已与用户确认，待写实现计划
+**状态**（2026-09-07 对账）：三个工作流均已合入 master。WS1 的 KG 在跑标志
+（`NotebookSummary.kg_building`）、WS2a 的 `ask_jobs` 持久化 + `started` 事件 + 取消端点、
+WS2b 的 `GET …/ask/jobs/{job_id}` 重连 + append-only 轨迹 + 前端接回均已上线；离开 / 刷新后的
+接回契约由 PR #661 / #662 / #664 / #665（2026-09-02～03）收口。行为契约以
+`docs/product-and-api*.md`、`architecture.md` 与 `fangan_done.md` 为准，下文保留为设计历史。
+唯一未做的是 §6.3 标为可选的「待办中心露出问答进行中」，登记在 `fangan_todo.md`。
 **范围**：三个独立 PR —— WS1（后台 job 刷新重连）、WS2a（ask 脱离连接跑到完成）、WS2b（重开会话实时接回）
 
 ---
