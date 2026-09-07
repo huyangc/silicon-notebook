@@ -7584,60 +7584,6 @@
           "title": "NotebookSummary",
           "type": "object"
         },
-        "NotebookTemplate": {
-          "properties": {
-            "expected_questions": {
-              "items": {
-                "type": "string"
-              },
-              "title": "Expected Questions",
-              "type": "array"
-            },
-            "id": {
-              "title": "Id",
-              "type": "string"
-            },
-            "label": {
-              "title": "Label",
-              "type": "string"
-            },
-            "primary_domain": {
-              "default": "Semiconductor",
-              "title": "Primary Domain",
-              "type": "string"
-            },
-            "purpose": {
-              "default": "",
-              "title": "Purpose",
-              "type": "string"
-            },
-            "source_types": {
-              "items": {
-                "type": "string"
-              },
-              "title": "Source Types",
-              "type": "array"
-            },
-            "target_users": {
-              "default": "",
-              "title": "Target Users",
-              "type": "string"
-            },
-            "taxonomy": {
-              "items": {
-                "type": "string"
-              },
-              "title": "Taxonomy",
-              "type": "array"
-            }
-          },
-          "required": [
-            "id",
-            "label"
-          ],
-          "title": "NotebookTemplate",
-          "type": "object"
-        },
         "NotebookUpdate": {
           "additionalProperties": false,
           "properties": {
@@ -16299,28 +16245,6 @@
             }
           },
           "summary": "Get System Model Services Status"
-        }
-      },
-      "/api/notebook-templates": {
-        "get": {
-          "operationId": "list_notebook_templates_api_notebook_templates_get",
-          "responses": {
-            "200": {
-              "content": {
-                "application/json": {
-                  "schema": {
-                    "items": {
-                      "$ref": "#/components/schemas/NotebookTemplate"
-                    },
-                    "title": "Response List Notebook Templates Api Notebook Templates Get",
-                    "type": "array"
-                  }
-                }
-              },
-              "description": "Successful Response"
-            }
-          },
-          "summary": "List Notebook Templates"
         }
       },
       "/api/notebooks": {

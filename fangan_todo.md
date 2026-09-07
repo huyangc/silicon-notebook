@@ -20,20 +20,18 @@
   + Deep Report + Memory / Knowhow + MCP + 群组分享 + 部署插件扩展点。
 - 2026-08-29 起的「生产热路径修复计划」（批 0 / 1 / 2 / 3·W1–W4）全部实施项已合入（至 PR #676）。
   剩余为用户侧生产动作与各设计稿登记的残余债。
-- 本文件按「近期可动手」→「产品功能」→「长期方向」排列。
+- 本文件按「近期可动手」→「产品功能」→「长期方向」排列。可直接实现的项已排进
+  `docs/superpowers/plans/2026-09-07-todo-closeout.md`（PR-1～PR-5），需拍板的项留在本文件。
 
 ---
 
 ## 一、生产热路径修复：收官后剩余
 
-### 用户侧动作（需要生产环境或 sudo，仓库内无法代做）
+### 用户侧动作（需要生产环境，仓库内无法代做）
 
-- [ ] **T-0 生产只读测量**：生产重启 + 一次全量 rebuild 后跑 `scripts/diag_pg_hotpaths.py`，
-      对账批 3·W2（代际切换）/ W4 的收益。它同时是 SR-1（element 搜索腿 OR→UNION，已被
-      差分测量证伪并撤销）是否重试的前置。
-- [ ] **PostgreSQL 调参 runbook** 的 sudo 应用（shared_buffers 等，见 `docs/operations*.md`）。
-- [ ] **批 1 索引生产落地**：`scripts/build_hotpath_indexes.py --apply`（CONCURRENTLY，
-      30–90 分钟，逐条可中断续跑）。
+> T-0 生产只读测量、PostgreSQL 调参 runbook、批 1 索引 `--apply` 三项已由用户在生产环境完成
+> （2026-09-07 告知）。SR-1（element 搜索腿 OR→UNION）已被差分测量证伪撤销，不再重试。
+
 - [ ] **backfill-images 放量前**：原图缺口盘点只命中 12.3%，要么找回其它 MinerU output 根，
       要么接受部分回填；先挑 1–2 个来源用 `--source-id` 试点，在问答里亲眼看到引用带图再放量。
 
@@ -64,10 +62,6 @@
 
 - [ ] **架构渐进整改阶段 5：前端 workspace 状态拆分**。`frontend/app/page.tsx` 仍约 8900 行。
       其余阶段（Repository composition、application boundary、FastAPI lifespan）已交付。
-- [ ] `/notebook-templates` 端点与 `backend/app/services/notebook_templates.py` 无任何调用方，待删除。
-- [ ] `repository_facade._citation()` 零调用者死代码（多领域基准库遗留 A1 点名）。
-- [ ] `backend/app/extension_sdk/deployment.py` 的 `TODO(T7)`：把 `configure` 成本规则与
-      capability 命名规则并入面向运维的部署插件文档。
 
 ### Ask / Deep Report
 
@@ -88,8 +82,6 @@
       候选：Concept `aliases[]`/`kind`/`definition`、Claim `quantitative_values{}`/`polarity`、
       Formula `variables{}`/`role`。决策牵动抽取 prompt、`models.Node`、canonicalize、评测维度。
 - [ ] **gold 人工策展**：`fangan/testcases_kg/` 仍在 `.gitignore`，未有策展后的权威 gold 入库。
-- [ ] **KG 抽取超时默认值**：`KG_LLM_TIMEOUT_SECONDS` 与 `OPENAI_COMPAT_TIMEOUT_SECONDS` 默认仍为
-      60s，此前实测 240s 零错误；流式传输落地后是否仍需上调待评估。
 - [ ] **跨文档概念合并的真模型质量验证**：Embedder 现只有 openai / dashscope 协议 + FakeEmbedder
       （本地 BGE 路线已随 model_registry 退役），真模型下灰区候选量未做正式 smoke。
 - [ ] **推理分层**：边类型已有 supports / contrasts_with，无 extends、无 Level 0–4 分层、无

@@ -83,7 +83,6 @@ def test_system_endpoints_are_owned_by_the_system_router():
         "get_system_model_services_status",
         "list_doc_types",
         "detect_doc_types",
-        "list_notebook_templates",
         "me_pending_actions",
         "me_pending_stream",
     ):

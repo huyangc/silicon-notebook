@@ -12,7 +12,6 @@ from app.api.deps import (
     identity_repository,
     model_service_binding_summary,
     model_status_service,
-    notebook_catalog_repository,
     repository,
     user_error,
 )
@@ -28,7 +27,6 @@ from app.repositories.identity_errors import (
     PasswordMismatchError,
 )
 from app.models.model_services import ModelServicesStatus
-from app.models.notebooks import NotebookTemplate
 from app.models.sources import DetectDocTypesRequest, DetectedDocType
 from app.models.system import (
     SystemConfiguration,
@@ -209,11 +207,6 @@ def detect_doc_types(payload: DetectDocTypesRequest) -> List[DetectedDocType]:
         )
         for item in payload.items
     ]
-
-
-@router.get("/notebook-templates", response_model=List[NotebookTemplate])
-def list_notebook_templates() -> List[NotebookTemplate]:
-    return notebook_catalog_repository().list_notebook_templates()
 
 
 # --- 待确认中心 (Pending Actions Center) ---------------------------------

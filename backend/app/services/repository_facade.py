@@ -41,7 +41,6 @@ from app.core.request_context import (
 )
 from app.core.ask_context import _ASK_EMBED_CACHE, _ASK_MODEL_ERRORS
 from app.core.llm import OpenAICompatibleClient, cap_kwargs
-from app.models.common import Evidence
 from app.models.identity import (
     AgentPrincipal,
     AgentProfile,
@@ -54,7 +53,6 @@ from app.models.notebooks import (
     NotebookAnalytics,
     NotebookCreate,
     NotebookSummary,
-    NotebookTemplate,
     NotebookUpdate,
 )
 from app.models.sources import (
@@ -1247,9 +1245,6 @@ class RepositoryFacade:
 
     def list_notebooks(self) -> List[NotebookSummary]:
         return self._runtime.catalog.list_notebooks()
-
-    def list_notebook_templates(self) -> List[NotebookTemplate]:
-        return self._runtime.catalog.list_notebook_templates()
 
     def create_notebook(self, payload: NotebookCreate) -> NotebookSummary:
         return self._runtime.catalog.create_notebook(payload)
@@ -4562,17 +4557,6 @@ def _now() -> str:
     # precision so two conversations touched inside one wall-clock second still
     # have a meaningful recency order (UUID/id tie-breakers are not activity).
     return datetime.now().astimezone().isoformat(timespec="microseconds")
-
-
-def _citation(label: str, evidence: Evidence, tier: str = "personal") -> Citation:
-    return Citation(
-        label=label,
-        source_id=evidence.source_id,
-        element_id=evidence.element_id,
-        location_label=evidence.location_label,
-        quoted_span=evidence.quoted_span,
-        tier=tier,
-    )
 
 
 def _as_str_list(value: object) -> List[str]:

@@ -109,7 +109,6 @@
   "NotebookRef",
   "NotebookSearchResponse",
   "NotebookSummary",
-  "NotebookTemplate",
   "NotebookUpdate",
   "ObjectSchemaCreate",
   "ObjectSchemaModel",

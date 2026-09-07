@@ -75,7 +75,6 @@ MOVED_MODEL_OWNERS = {
     "ShareResponse": "notebooks",
     "SharedPreview": "notebooks",
     "SharedByMeItem": "notebooks",
-    "NotebookTemplate": "notebooks",
     "SetTierRequest": "notebooks",
     "SetBasesRequest": "notebooks",
     "MountedByCount": "notebooks",

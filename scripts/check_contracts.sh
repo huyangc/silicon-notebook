@@ -44,7 +44,6 @@ trap 'printf "%s=%s\n" "$CHECK_LANE_NAME" "$((SECONDS - START_SECONDS))" > "$CHE
   "$ROOT_DIR/backend/app/services/kg_ingest.py" \
   "$ROOT_DIR/backend/app/services/reextract.py" \
   "$ROOT_DIR/backend/app/services/mineru_client.py" \
-  "$ROOT_DIR/backend/app/services/notebook_templates.py" \
   "$ROOT_DIR/backend/app/services/parsers.py" \
   "$ROOT_DIR/backend/app/services/prompts.py" \
   "$ROOT_DIR/backend/app/services/query_rewrite.py" \

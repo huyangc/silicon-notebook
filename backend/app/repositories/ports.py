@@ -69,7 +69,6 @@ from app.models.notebooks import (
     NotebookAnalytics,
     NotebookCreate,
     NotebookSummary,
-    NotebookTemplate,
     NotebookUpdate,
 )
 from app.models.sources import (
@@ -598,7 +597,6 @@ class MemoryRepository(Protocol):
 
 
 class NotebookCatalogRepository(Protocol):
-    def list_notebook_templates(self) -> list[NotebookTemplate]: ...
     def list_notebooks(self) -> list[NotebookSummary]: ...
     def create_notebook(self, payload: NotebookCreate) -> NotebookSummary: ...
     def get_notebook(self, notebook_id: str) -> NotebookSummary: ...
