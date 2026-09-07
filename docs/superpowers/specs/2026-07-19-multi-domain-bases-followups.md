@@ -5,6 +5,23 @@ PR #304 合入时**明知未做**的事项，集中记在这里，之后单独�
 
 关联：[规格](2026-07-18-multi-domain-base-libraries-design.md) · [计划](../plans/2026-07-18-multi-domain-base-libraries.md)
 
+## 对账（2026-09-07，按当前代码）
+
+| 项 | 状态 | 依据 |
+| --- | --- | --- |
+| A1 | 半做 | 已知构造点（`evidence_context.py` chunk/knowledge/citations_from、`ask_service.py` 各处、`kg/follow_chain.py`）均已归一化并由 `test_evidence_context_service.py` 钉住；**静态守卫未建**，`repository_facade._citation()` 死代码未删 |
+| A2 | 未做 | `evidence_context.py` 的 graph-BFS 节点注释仍写「暂未填」 |
+| A3 | 未做 | `page.tsx` 晋升队列对 `target_base_id` 为空的候选仍可点批准/拒绝，无回填脚本提示 |
+| A4 | 未做 | 知识晋升读 `currentNotebookBases`，Memory 晋升读 `base_notebooks` |
+| A5 | 未做 | `page.tsx` 与 `memory-panel.tsx` 各有一份「选择贡献目标」弹窗 |
+| A6 | 未做 | `sharing_store.py` 的 `_COPY_SNAPSHOT_QUERIES` 无 `notebook_bases`，也未列入「Deliberately absent」注释 |
+| A7 | 未做 | `migrations.py` `migrate()` 仍只有 `current >= SCHEMA_VERSION: return []`，无「库版本高于代码」报错 |
+| A8 | 未做 | `MOUNT_VALID_EXPR` 无 `test_access_sql_contract.py` 那种形状扫描守卫 |
+| A9 | 部分 | 「基准库」用户可见残留已由 `docs/ui-vocabulary.md` + 守卫清掉；README promote 端点 `target_base_id`/400 未补；陈旧注释因行号漂移未核 |
+| B 全部 | 已修 | `test_ui_vocabulary_guard`/`test_user_error` 绿；`smoke_memory_mcp.py` 白名单改为从 `PUBLIC_TOOLS` 派生；schema 版本守卫改为按 `SCHEMA_VERSION` 动态断言 |
+
+未做项已登记进根目录 `fangan_todo.md`「多领域基准库合入后遗留」；本文其余部分保留为当时的问题描述与落点。
+
 ---
 
 ## A. 本特性自身的遗留

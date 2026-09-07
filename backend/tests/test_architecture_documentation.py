@@ -746,7 +746,7 @@ def test_current_docs_describe_reports_and_sharing_without_retired_article_contr
     assert "every other browser session of that user is revoked" in product
     assert "内置 `admin` 账号在两条路径都被拒绝（409）" in product_zh
     assert "该用户其他浏览器会话全部吊销" in product_zh
-    assert "更新日期：2026-08-31" in fangan_done
+    assert "更新日期：2026-09-07" in fangan_done
     assert "历史记录：Article Studio（已退役）" in fangan_done
     assert "历史记录（已退役）：Derived Rule Candidate" in fangan_done
 
