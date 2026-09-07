@@ -153,6 +153,7 @@ _REAL_SQLITE_MIGRATION_MODULES = {
     "test_retrieval_experience_store.py",
     "test_search_profile_job.py",
     "test_shadow_sqlite_schema_validation.py",
+    "test_sqlite_migrations.py",
     "test_ui_mode.py",
 }
 

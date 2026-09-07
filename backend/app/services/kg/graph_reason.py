@@ -16,6 +16,7 @@ from typing import Dict, List, Optional, Tuple
 
 import rustworkx as rx
 
+from app.domain.citation_origin import foreign_notebook_id
 from app.services.kg.edge_schema import (
     DEFAULT_REASONING_EDGE_TYPES,
     is_queryable_edge_pair,
@@ -271,6 +272,8 @@ def render_subgraph_context(
     subgraph: List[Tuple[dict, Optional[dict], Optional[str]]],
     id_offset: int = 0,
     knowhow_enabled: bool = True,
+    *,
+    active_notebook_id: str,
 ) -> Tuple[str, dict]:
     """Render the (node, edge, src_oid) subgraph into (context_block_str, id_map).
 
@@ -295,6 +298,20 @@ def render_subgraph_context(
     id_offset lets the caller start numbering after an existing context block
     (e.g., so graph nodes can begin at k{n+1} to avoid key collisions).
 
+    ``active_notebook_id`` is the notebook this ask/report runs against.  Every
+    federated node payload carries its OWN owning notebook id — the active
+    notebook's nodes included (``graph_retrieval._federated_rx_graph._load``
+    stamps ``notebook_id`` for every participant, not only mounted ones) — so
+    the id_map value must be normalised against it via the shared
+    ``foreign_notebook_id`` rule.  Required (no default), mirroring
+    ``follow_chain.render_follow_chain_context``: a caller that silently forgot
+    it would echo the active id back and make the frontend badge ordinary
+    own-notebook evidence as 「来自「当前笔记本自己的名字」」.  This replaced an
+    earlier ``tier == "base"`` test (A2), which dropped the id of a node from a
+    mounted PRIVATE library — such a library keeps ``tier="personal"`` while
+    genuinely being a different notebook, so its citations lost their library
+    badge and fell back to the generic tier wording.
+
     gate ii (T3, knowhow KG-node retrieval): when a node is a single-row knowhow
     cell KO it carries the raw `{table_id, rows}` (threaded here by
     `graph_retrieval._federated_rx_graph._load` → `build_rx_graph`, only when the
@@ -313,6 +330,8 @@ def render_subgraph_context(
     """
     # Lazy import (evidence_context pulls schemas/retrieval): keep graph_reason
     # import-light and cycle-free, matching verify_chain_edges' cancellation import.
+    # ``foreign_notebook_id`` needs no such care: app.domain.citation_origin is a
+    # dependency-free leaf, so it is imported at module scope like edge_schema.
     from app.services.evidence_context import _knowhow_ref_from_payload
 
     lines: List[str] = []
@@ -353,11 +372,13 @@ def render_subgraph_context(
             "source_title": "",
             "location_label": "",
             "tier": node_tier,
-            # Active personal anchors preserve the established empty-id wire
-            # convention; mounted base nodes retain their real participant id
-            # so citation focus can resolve under the active notebook's auth.
-            "notebook_id": (
-                node.get("notebook_id", "") if node_tier == "base" else ""
+            # A2: every node — whatever its tier — keeps its real owning
+            # notebook id unless that id IS the active notebook, in which case
+            # the established empty-id wire convention applies.  A mounted
+            # PRIVATE library keeps tier="personal", so the old tier test
+            # dropped its id and the citation lost its library badge.
+            "notebook_id": foreign_notebook_id(
+                node.get("notebook_id", ""), active_notebook_id
             ),
             "knowhow": knowhow,
         }

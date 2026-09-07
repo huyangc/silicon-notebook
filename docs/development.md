@@ -45,6 +45,18 @@ Schema changes remain version-gated behind `SqliteMigrator`: append a new
 Startup recovery, stable seeds, and administrator upgrades run every boot
 outside that version gate.
 
+SQLite migrations are one-way. `SqliteMigrator.migrate()` refuses to start
+against a database whose stamped `PRAGMA user_version` is newer than the
+running build's `SCHEMA_VERSION`: it logs and raises a `RuntimeError` naming
+both numbers ("schema contains a future version", the same phrase the
+PostgreSQL ledger guard uses), so a downgraded binary fails fast at startup
+instead of silently running against a schema it does not understand. The
+readiness endpoint only reports the redacted "database initialization failed";
+the numbers are in the backend log. A database stamped exactly
+at `SCHEMA_VERSION` still runs no migrations. The only supported way back is
+to restore the pre-upgrade backup, or redeploy a build whose `SCHEMA_VERSION`
+is at least the database's — there is no reverse migration.
+
 The current schema version is 71. This is the SQLite schema version. The committed v9 compatibility fixture
 upgrades through migrations v10–v71 and remains readable. Those migrations
 cover compatibility and SQLite hot-path indexes (v10–v12), Memory/Agent and

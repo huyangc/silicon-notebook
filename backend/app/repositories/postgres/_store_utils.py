@@ -23,6 +23,8 @@ _TIMESTAMP_COLUMNS_BY_TABLE = {
     "knowledge_objects": ("created_at", "updated_at", "last_reviewed"),
     "knowledge_relations": ("created_at",),
     "notebook_assets": ("created_at",),
+    # A6: 深拷贝携带的挂载边，created_at 由拷贝服务写成新的 ISO 串。
+    "notebook_bases": ("created_at",),
     "notebooks": ("created_at", "updated_at"),
     "relation_embeddings": ("created_at",),
     "source_authors": ("created_at",),

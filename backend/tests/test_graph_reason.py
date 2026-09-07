@@ -1,6 +1,10 @@
 # backend/tests/test_graph_reason.py
 import pytest
 
+# The notebook an ask/report runs against; render_subgraph_context normalises
+# a node's own notebook id against it (see app/domain/citation_origin.py).
+ACTIVE_NB = "nb-active"
+
 # ── synthetic fixture ────────────────────────────────────────────────────────
 # 4 nodes: A→B derived_from, B→C supports, C→D depends_on; one bad edge D→A
 NODES = {
@@ -168,7 +172,8 @@ def test_render_subgraph_context_k_ids():
     G, idx_to_oid, oid_to_idx = build_rx_graph(NODES, RELATIONS)
     sub = multihop_subgraph(G, oid_to_idx, idx_to_oid, ["A"],
                             {"derived_from", "supports"}, max_depth=2, max_fan_out=10)
-    ctx, id_map = render_subgraph_context(sub, id_offset=0)
+    ctx, id_map = render_subgraph_context(
+        sub, id_offset=0, active_notebook_id=ACTIVE_NB)
     # k1 = seed A (no edge), k2 = B (derived_from), k3 = C (supports)
     assert "k1" in id_map and id_map["k1"]["object_id"] == "A"
     assert "k2" in id_map and id_map["k2"]["object_id"] == "B"
@@ -181,7 +186,8 @@ def test_render_subgraph_context_edge_annotation():
     G, idx_to_oid, oid_to_idx = build_rx_graph(NODES, RELATIONS)
     sub = multihop_subgraph(G, oid_to_idx, idx_to_oid, ["A"],
                             {"derived_from"}, max_depth=1, max_fan_out=10)
-    ctx, id_map = render_subgraph_context(sub, id_offset=0)
+    ctx, id_map = render_subgraph_context(
+        sub, id_offset=0, active_notebook_id=ACTIVE_NB)
     # The context block must contain the chain annotation
     assert "[k1] Node A --derived_from--> [k2] Node B" in ctx
 
@@ -192,7 +198,8 @@ def test_render_subgraph_context_id_offset():
     G, idx_to_oid, oid_to_idx = build_rx_graph(NODES, RELATIONS)
     sub = multihop_subgraph(G, oid_to_idx, idx_to_oid, ["A"],
                             {"derived_from"}, max_depth=1, max_fan_out=10)
-    ctx, id_map = render_subgraph_context(sub, id_offset=5)
+    ctx, id_map = render_subgraph_context(
+        sub, id_offset=5, active_notebook_id=ACTIVE_NB)
     assert "k6" in id_map
     assert "k7" in id_map
     assert "k1" not in id_map
@@ -204,7 +211,8 @@ def test_render_subgraph_context_evidence_quote():
     G, idx_to_oid, oid_to_idx = build_rx_graph(NODES, RELATIONS)
     sub = multihop_subgraph(G, oid_to_idx, idx_to_oid, ["A"],
                             {"derived_from"}, max_depth=1, max_fan_out=10)
-    ctx, id_map = render_subgraph_context(sub, id_offset=0)
+    ctx, id_map = render_subgraph_context(
+        sub, id_offset=0, active_notebook_id=ACTIVE_NB)
     assert "A derives B" in ctx
 
 
@@ -482,7 +490,8 @@ def test_cluster_hub_never_emitted_rendered_or_verified():
     assert all((e is None or e.get("edge_type") != "synonym") for _, e, _ in sub)
 
     # (2) render: hub absent from text and id_map
-    ctx, id_map = render_subgraph_context(sub, id_offset=0)
+    ctx, id_map = render_subgraph_context(
+        sub, id_offset=0, active_notebook_id=ACTIVE_NB)
     assert "cluster:K-x" not in ctx
     assert "K-x" not in ctx
     assert all(v["object_id"] != "cluster:K-x" for v in id_map.values())

@@ -11,6 +11,7 @@ import re
 from typing import Any, Iterable, Mapping, MutableMapping, Sequence
 
 from app.core.config import Settings
+from app.domain.citation_origin import foreign_notebook_id
 from app.models.ask import (
     AnswerAnchor, Citation, CitationImage, CitationKnowhowRef,
 )
@@ -353,7 +354,7 @@ class EvidenceContextService:
                         "file_name", ""
                     ),
                     tier=str(getattr(item, "tier", "personal") or "personal"),
-                    notebook_id=(origin if origin != active_notebook_id else ""),
+                    notebook_id=foreign_notebook_id(origin, active_notebook_id),
                     knowhow=None,
                 )
                 continue
@@ -404,7 +405,7 @@ class EvidenceContextService:
                 quoted_span=quoted[:300],
                 source_file_name=item_source_info.get("file_name", ""),
                 tier=str(getattr(item, "tier", "personal") or "personal"),
-                notebook_id=(origin if origin != active_notebook_id else ""),
+                notebook_id=foreign_notebook_id(origin, active_notebook_id),
                 knowhow=_knowhow_ref(evidence_row) if evidence_row else None,
             )
         return citations
@@ -464,18 +465,17 @@ class EvidenceContextService:
             line = prefix + text
             lines.append(line)
             used += separator + len(line)
-            # raw_origin: chunk.notebook_id 的原始值;origin 另外回退本次 ask 的
-            # notebook_id 供 tier 查表用(同库 chunk 也要查得到 tier)。徽章库名
-            # 映射(Task 14)要的是"真正跨库才非空"的 raw_origin——但联邦/PPR 检索
+            # origin: chunk.notebook_id 回退本次 ask 的 notebook_id,供 tier 查表用
+            # (同库 chunk 也要查得到 tier)。raw_origin 是写进 id_map 的徽章口径
+            # ——"真正跨库才非空"——由 foreign_notebook_id 归一:联邦/PPR 检索
             # (federated_retrieve/_ppr_retrieve)对本库命中同样会把 notebook_id
             # 打成 active 自己的 id,并非只在跨库命中时才打标(codex r2 review 修
-            # 正此前的错误假设),故显式比较 notebook_id 归零,镜像
-            # follow_chain.py 的 `hop.notebook_id != active_notebook_id` 处理,
-            # 否则前端会把"本库自己"解出一个多余的"来自「当前笔记本」"徽章。
-            raw_origin = getattr(chunk, "notebook_id", "") or ""
-            origin = raw_origin or notebook_id
-            if raw_origin == notebook_id:
-                raw_origin = ""
+            # 正此前的错误假设),不归零前端就会解出一个多余的"来自「当前笔记本」"
+            # 徽章。规则的唯一定义在 domain/citation_origin.py。
+            origin = (getattr(chunk, "notebook_id", "") or "") or notebook_id
+            raw_origin = foreign_notebook_id(
+                getattr(chunk, "notebook_id", ""), notebook_id
+            )
             element_ids = getattr(chunk, "element_ids", None) or []
             evidence_by_id[key] = {
                 "object_id": chunk.chunk_id,
@@ -653,17 +653,16 @@ class EvidenceContextService:
                 if cluster_id in seen_clusters:
                     continue
                 seen_clusters.add(cluster_id)
-                # raw_origin: hit.notebook_id 的原始值,供 Task 14 的引用徽章库名映射
-                # 用;origin 另外回退本次 ask 的 notebook_id,供 node_context 查询用
-                # (同库命中也要查得到详情)。徽章要的是"真正跨库才非空"的
-                # raw_origin——但 federated_retrieve 对本库命中同样会把 notebook_id
-                # 打成 active 自己的 id(并非只在跨库命中时才打标,codex r2 review 修
-                # 正此前的错误假设),故显式比较 notebook_id 归零,镜像
-                # follow_chain.py 的 `hop.notebook_id != active_notebook_id` 处理。
-                raw_origin = getattr(hit, "notebook_id", "") or ""
-                origin = raw_origin or notebook_id
-                if raw_origin == notebook_id:
-                    raw_origin = ""
+                # origin: hit.notebook_id 回退本次 ask 的 notebook_id,供
+                # node_context 查询用(同库命中也要查得到详情)。raw_origin 是写进
+                # id_map 的徽章口径——"真正跨库才非空"——由 foreign_notebook_id
+                # 归一:federated_retrieve 对本库命中同样会把 notebook_id 打成
+                # active 自己的 id(并非只在跨库命中时才打标,codex r2 review 修正
+                # 此前的错误假设)。规则的唯一定义在 domain/citation_origin.py。
+                origin = (getattr(hit, "notebook_id", "") or "") or notebook_id
+                raw_origin = foreign_notebook_id(
+                    getattr(hit, "notebook_id", ""), notebook_id
+                )
                 if not notebook_in_scope(origin):
                     # 参考库勾选闸,落在**装配点**而不是下面的 node_context 读上。
                     # 这里是 KG 命中变成「答案 prompt 里的一行 + 一个活的 k{n}
@@ -885,9 +884,16 @@ class EvidenceContextService:
                     source_id=source_id,
                     element_id=str(context.get("element_id", "")),
                     tier=str(context.get("tier", "personal")),
-                    # Task 14: 只有 chunk_context/knowledge_context 填了才非空
-                    # (render_subgraph_context 的纯 graph-BFS 节点暂未填,`.get`
-                    # 安全回退空串,徽章优雅退回泛化 tier 文案,不崩不猜)。
+                    # Task 14 / A2: 会跨库的五个 id_map builder(chunk_context /
+                    # knowledge_context / render_follow_chain_context /
+                    # render_subgraph_context / spreadsheet_prompt_block)写这个
+                    # 键时都已过 domain/citation_origin.foreign_notebook_id
+                    # (表格通道照抄同一结果里 `_citation` 归一好的值);
+                    # element_context 结构上单库、恒写空串。所以这里照抄即可,
+                    # 真正跨库才非空。
+                    # `.get` 仍保留:记忆上下文等不带这个键的 evidence 安全回退
+                    # 空串,不崩不猜。本读取点在 test_citation_notebook_id_guard
+                    # 的登记清单里。
                     notebook_id=str(context.get("notebook_id", "")),
                     provenance=dict(context.get("provenance") or {}),
                     # Task 12b: 只有 knowledge_context 建的 evidence_by_id 才带
@@ -1109,17 +1115,15 @@ class EvidenceContextService:
             # (_federated_retrieve_impl)对 active 库自己的命中打上 active 自己
             # 的 id——resolve_participants/participant_tiers 首项恒为 active
             # 本身,`for nid in notebook_ids: h.notebook_id = nid` 对每一本都无
-            # 条件执行,并不是只有跨库命中才打标(chunk_context/knowledge_context/
-            # render_follow_chain_context 都踩过、也都已按同一模式修过这个错误
-            # 假设——本函数此前的注释也这样误判过,codex r3 review 当时把它判
-            # 定为"不可达"是错的:citations_from 的产出会在答案合成失败、或模型
-            # 没吐出任何有效 [k] 锚点时,被前端 buildAnswerReferences 当"回退
-            # 列表"直接展示——见其 `if (references.length > 0) return
-            # references;` 之后的 citations 兜底分支。必须显式与调用方
-            # notebook_id 比较,相等则归零,镜像既有三处处理。
-            hit_notebook_id = getattr(hit, "notebook_id", "") or ""
-            if hit_notebook_id == notebook_id:
-                hit_notebook_id = ""
+            # 条件执行,并不是只有跨库命中才打标(本函数此前的注释曾这样误判过,
+            # codex r3 review 当时把它判定为"不可达"是错的:citations_from 的产出
+            # 会在答案合成失败、或模型没吐出任何有效 [k] 锚点时,被前端
+            # buildAnswerReferences 当"回退列表"直接展示——见其
+            # `if (references.length > 0) return references;` 之后的 citations
+            # 兜底分支)。归一化每命中一次,下面的 Citation 直接用这个已归一的值。
+            hit_notebook_id = foreign_notebook_id(
+                getattr(hit, "notebook_id", ""), notebook_id
+            )
             for evidence in hit.evidence:
                 if evidence.element_id and evidence.element_id not in valid_element_ids:
                     continue

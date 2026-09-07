@@ -98,23 +98,6 @@
 
 - [ ] 扫描件本地 OCR（MinerU 之外无 OCR 路径）；DOCX / PPTX 的 OMML 公式解析。
 
-### 多领域基准库合入后遗留（2026-09-07 对账）
-
-真源 `docs/superpowers/specs/2026-07-19-multi-domain-bases-followups.md`；B 节四项 master 既有缺陷已全部修复。
-
-- [ ] A1 半做：所有已知 Citation / AnswerAnchor 构造点已归一化并有测试，但缺「新构造点必须
-      归一化 notebook_id」的静态守卫。
-- [ ] A2 graph BFS 节点的锚点不带来源库 id（`evidence_context.py` 注释仍写「暂未填」）。
-- [ ] A3 `target_base_id` 为空的存量待批晋升候选在队列里仍可点、必失败，前端未提示
-      `scripts/backfill_promotion_targets.py`。
-- [ ] A4 知识晋升用 `currentNotebookBases`、Memory 晋升用 `base_notebooks`，挂载数据源两处未统一。
-- [ ] A5 「选择贡献目标」弹窗 JSX 在 `page.tsx` 与 `memory-panel.tsx` 重复。
-- [ ] A6 深拷贝不复制 `notebook_bases` 挂载边，且未登记为刻意缺席。
-- [ ] A7 SQLite `migrate()` 对「库版本高于代码」不报错；schema 单向性无文档。
-- [ ] A8 `MOUNT_VALID_EXPR` 唯一定义点无结构守卫（`access_sql` 有同款守卫可照抄）。
-- [ ] A9 残留：README API 清单未提 promote 端点的 `target_base_id` 与 400 态；点名的陈旧注释因
-      行号漂移未核。
-
 ---
 
 ## 三、长期方向（方案 v0.4 / v1.0）

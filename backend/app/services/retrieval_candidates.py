@@ -4000,7 +4000,7 @@ class CandidateRetrievalService(_RetrievalState):
                 for hit in node_hits
             ]
             block, id_map = render_subgraph_context(
-                subgraph, id_offset=id_offset
+                subgraph, id_offset=id_offset, active_notebook_id=notebook_id
             )
             return block, id_map, node_hits, {}
         rel_hits = self.federated_retrieve_relations(notebook_id, hl or query)[
@@ -4025,7 +4025,9 @@ class CandidateRetrievalService(_RetrievalState):
         subgraph = scoped_subgraph_nodes(subgraph)
         if not subgraph:
             return "", {}, [], {}
-        block, id_map = render_subgraph_context(subgraph, id_offset=id_offset)
+        block, id_map = render_subgraph_context(
+            subgraph, id_offset=id_offset, active_notebook_id=notebook_id
+        )
         from app.services.retrieval import RetrievalSupport, merge_retrieval_supports
 
         support_by_object = {}

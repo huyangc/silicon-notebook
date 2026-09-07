@@ -70,13 +70,15 @@ import {
   rejectPromotion,
   type PromotionCandidate,
 } from "./promotion-queue";
+import { PromotionCandidateActions } from "./promotion-candidate-actions";
 import { promotionReviewSections } from "./promotion-review";
+import { PromotionTargetModal } from "./promotion-target-modal";
 import { setNotebookTier, tierActionState } from "./notebook-tier";
 import {
   groupMountable,
-  listBases,
   mergeMountCandidates,
   mountCostHint,
+  PROMOTION_TARGET_NONE_REASON,
   resolvePromotionTarget,
   shouldShowBorrowedBaseHint,
   toMountedBases,
@@ -996,11 +998,14 @@ export default function Home() {
         resetStagedIntake();
         openSourceModal();
       },
-      onNotebookUpdated: (notebook, bases) => {
+      // A4:notebook 参数自带刷新过的 base_notebooks(见 use-notebook-collection.ts
+      // 调用点——setBases 之后紧接着重新 getNotebook),setCurrentNotebook 已经
+      // 把它接上 notebookPromotionBases 那份 useMemo,不再需要单独接住 bases
+      // 回调参数存一份 currentNotebookBases。
+      onNotebookUpdated: (notebook) => {
         if (activeNotebookIdRef.current !== notebook.id) return;
         setCurrentNotebook((current) => current?.id === notebook.id ? notebook : current);
         setTitleDraft(notebook.name);
-        setCurrentNotebookBases(bases);
       },
       onNotebookDeleted: (notebookId) => {
         if (activeNotebookIdRef.current === notebookId) showCollection();
@@ -1064,10 +1069,11 @@ export default function Home() {
   const [promoQueue, setPromoQueue] = useState<PromotionCandidate[] | null>(null);
   const [promoBusy, setPromoBusy] = useState(false);
   const promoOperationRef = useRef<object | null>(null);
-  // 多领域基准库:提交晋升前需要知道本笔记本挂了几个公共知识库(resolvePromotionTarget:
-  // 0 个禁用按钮/1 个直接用/>1 个弹选择器)。只在进入「Rules」知识浏览 tab 时按 owner
-  // 门控拉取(switchChatMode),不在打开笔记本时无条件调用。
-  const [currentNotebookBases, setCurrentNotebookBases] = useState<MountedBase[]>([]);
+  // 多领域基准库 A4:提交晋升前需要知道本笔记本挂了几个公共知识库
+  // (resolvePromotionTarget:0 个禁用按钮/1 个直接用/>1 个弹选择器)。数据源
+  // 统一到下方 notebookPromotionBases(打开笔记本就有的 base_notebooks),不再
+  // 单独拉取 owner-only 的 /bases——那份数据源曾经只在进「Rules」tab 时才有,
+  // 拉取中/失败时会把 promotionTarget 误判成"0 个"而显示假的"需先挂载"提示。
   // 挂了 >1 个公共知识库时,点「提交晋升」先记下待定的知识对象 id,弹选择器要求选一个。
   const [pendingPromotionObjectId, setPendingPromotionObjectId] = useState<string | null>(null);
   const [edgeQueue, setEdgeQueue] = useState<EdgeReviewItem[] | null>(null);
@@ -2292,12 +2298,13 @@ export default function Home() {
     for (const base of currentNotebook?.base_notebooks ?? []) names[base.id] = base.name;
     return names;
   }, [notebookCollection.rows, currentNotebook]);
-  // 多领域基准库(Task 14 追加项):Memory 晋升按钮要复用与知识条目同一套
-  // resolvePromotionTarget(0 个禁用/1 个直接用/>1 个弹选择器)。数据源刻意不用
-  // owner-only 的 /bases 端点(currentNotebookBases 只在进「Rules」tab 时按
-  // canGovernKnowledge 门控拉取,只读访客会 404)——改用打开笔记本就有、
-  // owner/reader 都能看到的 NotebookSummary.base_notebooks;该查询本就只回填
-  // 当前生效的挂载边,天然等价于 active=true,不需要再喊一次接口。
+  // 多领域基准库 A4:知识条目晋升(promotionTarget)与 Memory 晋升按钮共用
+  // 同一套 resolvePromotionTarget(0 个禁用/1 个直接用/>1 个弹选择器)与同一份
+  // 数据源——此前知识条目那边单独拉 owner-only 的 /bases 端点(只在进「Rules」
+  // tab 时按 canGovernKnowledge 门控请求,只读访客会 404,且拉取中/失败时会把
+  // promotionTarget 误判成"0 个"而显示假的"需先挂载"提示)。改用打开笔记本就
+  // 有、owner/reader 都能看到的 NotebookSummary.base_notebooks;该查询本就只
+  // 回填当前生效的挂载边,天然等价于 active=true,不需要再喊一次接口。
   const notebookPromotionBases: MountedBase[] = useMemo(
     () => toMountedBases(currentNotebook?.base_notebooks ?? []),
     [currentNotebook?.base_notebooks],
@@ -2603,13 +2610,14 @@ export default function Home() {
    * hook 的 state，彼此不互读，同一 React 批次内提交出的渲染结果相同。
    *
    * ⚠ 第三处重排：`commitNotebookSnapshot`（来源库那一步唯一的 commit 相位）相对
-   * `applyOpenedNotebook` 里那五个 setState（`setBaseScopeSelection`/
-   * `setBackfillingMeta`/`setChatMode`/`setOuterView`/`setCurrentNotebookBases`），
-   * 接入前排在它们**之前**（夹在 `setTitleDraft` 与这五个之间——八个 setState 里的
-   * 「中间」位置）；现在编排器先跑完整个 `apply()`（八个 setState 全部同步发出）再
-   * 进入 commit 循环，`commitNotebookSnapshot` 因此挪到了这五个**之后**。同样可证明
-   * 惰性：它只读写 sourceLibrary 自己 hook 的状态，不读也不写这五个 setState 写的
-   * page 状态，八者仍在同一次 React 批次内提交，最终渲染结果不变。
+   * `applyOpenedNotebook` 里那四个 setState（`setBaseScopeSelection`/
+   * `setBackfillingMeta`/`setChatMode`/`setOuterView`——A4 删掉
+   * `setCurrentNotebookBases` 后剩这四个），接入前排在它们**之前**（夹在
+   * `setTitleDraft` 与这四个之间——七个 setState 里的「中间」位置）；现在编排器
+   * 先跑完整个 `apply()`（七个 setState 全部同步发出）再进入 commit 循环，
+   * `commitNotebookSnapshot` 因此挪到了这四个**之后**。同样可证明惰性：它只读写
+   * sourceLibrary 自己 hook 的状态，不读也不写这四个 setState 写的 page 状态，
+   * 七者仍在同一次 React 批次内提交，最终渲染结果不变。
    *
    * ⚠ step 顺序也决定 commit 顺序（编排器按声明序逐个 await 有 Promise 返回值的
    * commit）：source-library 必须排在 ask-session 之前——它的 commit
@@ -2729,7 +2737,6 @@ export default function Home() {
     setBackfillingMeta(Boolean(notebook.paper_meta_backfilling));
     setChatMode("ask");
     setOuterView("notebooks");
-    setCurrentNotebookBases([]);
     return { ...owner, notebook };
   }
 
@@ -4548,7 +4555,7 @@ export default function Home() {
     }
   }
 
-  // targetBaseId 未传时按 promotionTarget(渲染时用 currentNotebookBases 算出)三态分派:
+  // targetBaseId 未传时按 promotionTarget(渲染时用 notebookPromotionBases 算出)三态分派:
   // none(0 个公共库挂载)拒绝、auto(1 个)直接用、choose(>1 个)转去弹选择器,选好后
   // 选择器自己会带着 targetBaseId 回调本函数——这一次不再重新分派,直接提交。
   async function submitPromotion(objectId: string, targetBaseId?: string) {
@@ -4560,10 +4567,10 @@ export default function Home() {
       && activeNotebookIdRef.current === notebookId
       && workspaceEpochRef.current === workspaceEpoch;
     if (!targetBaseId) {
-      if (promotionTarget.kind === "none") {
-        setToast("需先挂载一个公共知识库，才能贡献内容");
-        return;
-      }
+      // A5:none 态时「提交晋升」按钮本身已经 disabled 并带 title 提示(见下方
+      // proposeDisabledReason),这才是紧邻按钮的结果呈现——这里只是防御性兜底
+      // (disabled 按钮不会触发 onClick),不再额外弹一条独立的全局 toast。
+      if (promotionTarget.kind === "none") return;
       if (promotionTarget.kind === "choose") {
         if (rootModals.open("promotion-target", rootModals.captureWorkspaceOwner())) {
           setPendingPromotionObjectId(objectId);
@@ -4664,33 +4671,11 @@ export default function Home() {
     }
     if (mode === "rules") {
       void kgWorkspace.enterKnowledge();
-      // 提交晋升要知道本笔记本挂了几个公共知识库(resolvePromotionTarget)。/bases
-      // 是 owner-only 端点,非 owner 404(见 notebook-bases.ts 顶部注释)——不能像
-      // loadKnowledgeTypes 那样对所有访客无条件调用,这里显式门控 canGovernKnowledge。
-      if (currentNotebookId && capabilities.canGovernKnowledge) {
-        const notebookId = currentNotebookId;
-        const actorId = currentUser?.id ?? null;
-        const workspaceEpoch = workspaceEpochRef.current;
-        listBases(notebookId).then((bases) => {
-          if (
-            actorId
-            && workspaceActorIdRef.current === actorId
-            && activeNotebookIdRef.current === notebookId
-            && workspaceEpochRef.current === workspaceEpoch
-          ) {
-            setCurrentNotebookBases(bases);
-          }
-        }).catch((error) => {
-          if (
-            actorId
-            && workspaceActorIdRef.current === actorId
-            && activeNotebookIdRef.current === notebookId
-            && workspaceEpochRef.current === workspaceEpoch
-          ) {
-            reportError(error);
-          }
-        });
-      }
+      // A4:提交晋升要知道本笔记本挂了几个公共知识库(resolvePromotionTarget),
+      // 但不再在这里单独拉取——owner-only 的 /bases 曾经只在进这个 tab 时按
+      // canGovernKnowledge 门控请求,拉取中/失败的空档会让 promotionTarget 误判
+      // 成"0 个"。改用 notebookPromotionBases(打开笔记本就有的 base_notebooks,
+      // owner/reader 都能看到),与 Memory 晋升同一份数据源,无需再喊一次接口。
     }
   }
 
@@ -5030,7 +5015,8 @@ export default function Home() {
   // 判据统一走 workspaceCapabilities,不在这里第二次拼 access/can_manage_content。
   const readOnlyWorkspace = !capabilities.canWriteNotebook;
   // 挂了几个公共知识库决定「提交晋升」按钮的行为(none=禁用/auto=直接用/choose=弹选择器)。
-  const promotionTarget = resolvePromotionTarget(currentNotebookBases);
+  // A4:与 Memory 晋升共用同一份数据源(notebookPromotionBases),不再单独拉取。
+  const promotionTarget = resolvePromotionTarget(notebookPromotionBases);
   const modelSummaryView = deriveModelServiceSummaryView({
     apiStatus: health?.status ?? null,
     statusText,
@@ -6138,7 +6124,7 @@ export default function Home() {
                     reload={kgWorkspace.refreshKnowledge}
                     tier={currentNotebook?.tier}
                     onPropose={(id) => submitPromotion(id).catch(reportError)}
-                    proposeDisabledReason={promotionTarget.kind === "none" ? "需先挂载一个公共知识库" : undefined}
+                    proposeDisabledReason={promotionTarget.kind === "none" ? PROMOTION_TARGET_NONE_REASON : undefined}
                     total={kgKnowledge.total}
                     page={kgKnowledge.page}
                     onPage={kgWorkspace.goToKnowledgePage}
@@ -8322,22 +8308,12 @@ export default function Home() {
                         <p className="conflict-note">公共知识库中已有相似内容 — 批准后将合并。</p>
                       )}
                       {(cand.status === "proposed" || cand.status === "under_review") && (
-                        <div className="modal-actions">
-                          <button
-                            className="sort-button"
-                            disabled={promoBusy}
-                            onClick={() => decidePromotion(cand.id, "reject").catch(reportError)}
-                          >
-                            拒绝
-                          </button>
-                          <button
-                            className="new-pill"
-                            disabled={promoBusy}
-                            onClick={() => decidePromotion(cand.id, "approve").catch(reportError)}
-                          >
-                            批准收录
-                          </button>
-                        </div>
+                        <PromotionCandidateActions
+                          hasTargetBase={Boolean(cand.target_base_id)}
+                          busy={promoBusy}
+                          onApprove={() => decidePromotion(cand.id, "approve").catch(reportError)}
+                          onReject={() => decidePromotion(cand.id, "reject").catch(reportError)}
+                        />
                       )}
                     </article>
                     );
@@ -8360,34 +8336,19 @@ export default function Home() {
           style={{ zIndex: rootModals.view("promotion-target").zIndex }}
           onClick={(event) => { if (event.currentTarget === event.target) rootModals.requestClose("promotion-target", "backdrop"); }}
         >
-          <FloatingModalCard storageKey="promotionTarget.window" className="utility-modal-card narrow">
-            {(floating) => (<>
-            <div className="source-modal-header" {...floating.dragHandleProps}>
-              <div>
-                <h2>选择贡献目标</h2>
-                <p>本笔记本挂载了多个公共知识库，请选择这条知识要进入哪一个。</p>
-              </div>
-              <button className="icon-button" onClick={() => rootModals.requestClose("promotion-target", "button")} title="Close">×</button>
-            </div>
-            <div className="promotion-target-list">
-              {(promotionTarget.kind === "choose" ? promotionTarget.options : []).map((base) => (
-                <button
-                  key={base.id}
-                  type="button"
-                  className="sort-button promotion-target-option"
-                  onClick={() => {
-                    const objectId = pendingPromotionObjectId;
-                    if (objectId && rootModals.requestClose("promotion-target", "button")) {
-                      submitPromotion(objectId, base.id).catch(reportError);
-                    }
-                  }}
-                >
-                  <span className="promotion-target-name" title={base.name}>{base.name}</span>
-                </button>
-              ))}
-            </div>
-            </>)}
-          </FloatingModalCard>
+          <PromotionTargetModal
+            storageKey="promotionTarget.window"
+            title="选择贡献目标"
+            description="本笔记本挂载了多个公共知识库，请选择这条知识要进入哪一个。"
+            bases={notebookPromotionBases}
+            onClose={() => rootModals.requestClose("promotion-target", "button")}
+            onPick={(baseId) => {
+              const objectId = pendingPromotionObjectId;
+              if (objectId && rootModals.requestClose("promotion-target", "button")) {
+                submitPromotion(objectId, baseId).catch(reportError);
+              }
+            }}
+          />
         </section>
       )}
 

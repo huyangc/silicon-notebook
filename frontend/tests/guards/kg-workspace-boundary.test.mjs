@@ -26,7 +26,7 @@ import assert from "node:assert/strict";
 
 import ts from "typescript";
 
-import { callSitesIn, callsIn, findFunction, findFunctionIn, importsIn, parseModule } from "../../test-support/semantic-source.mjs";
+import { callSitesIn, callsIn, findFunction, findFunctionIn, importsIn, parseModule, variableInitializersIn } from "../../test-support/semantic-source.mjs";
 
 const page = await parseModule("page.tsx");
 const composition = await parseModule("use-kg-workspace.ts");
@@ -473,9 +473,28 @@ test("workspace transition and both authentication paths bind KG authority", () 
     (text.match(/activateWorkspaceOwners\(u\.id\);[\s\S]{0,220}setCurrentUser\(u\)/g) ?? []).length,
     2,
   );
-  assert.match(
-    text,
-    /listBases\(notebookId\)[\s\S]{0,300}workspaceActorIdRef\.current === actorId[\s\S]{0,180}activeNotebookIdRef\.current === notebookId[\s\S]{0,180}workspaceEpochRef\.current === workspaceEpoch/,
+  // 多领域基准库 A4:此前"rules" 分支里紧邻 kgWorkspace.enterKnowledge() 的
+  // listBases(notebookId) 异步拉取(需要 actorId/notebookId/workspaceEpoch 三件
+  // 一起比对才能防止陈旧响应落回过期的工作区)已经删掉——晋升目标数据源改用
+  // currentNotebook?.base_notebooks 同步派生,不再有单独的请求窗口,原先钉住的
+  // 陈旧防护也就随之不再适用。新的钉法直接盯数据源本身,而不是钉一个已经
+  // 不存在的异步拉取窗口:
+  //  (a) notebookPromotionBases 这份 memo 的初始化表达式就是同步派生
+  //      toMountedBases(currentNotebook?.base_notebooks ?? []),不是别的调用;
+  //  (b) page.tsx 不再从 "./notebook-bases" 导入 owner-only 的 listBases——
+  //      防止有人为了某个新用例把它加回来,悄悄重开这条陈旧数据竞态。
+  const notebookPromotionBasesInit = variableInitializersIn(page).find(
+    (entry) => entry.name === "notebookPromotionBases",
+  );
+  assert.ok(notebookPromotionBasesInit, "page.tsx must declare notebookPromotionBases");
+  assert.equal(
+    notebookPromotionBasesInit.initializer,
+    "useMemo(() => toMountedBases(currentNotebook?.base_notebooks ?? []), [currentNotebook?.base_notebooks])",
+  );
+  assert.equal(
+    importsIn(page).some(({ module, imported }) => module === "./notebook-bases" && imported === "listBases"),
+    false,
+    "page.tsx must not import the owner-only listBases — promotion data comes from base_notebooks",
   );
 });
 

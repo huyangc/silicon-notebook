@@ -4087,7 +4087,21 @@ class SqliteMigrator:
     def migrate(self) -> list[int]:
         with self._connect() as db:
             current = int(db.execute("PRAGMA user_version").fetchone()[0])
-        if current >= SCHEMA_VERSION:
+        if current > SCHEMA_VERSION:
+            # "future version" mirrors the PostgreSQL ledger guard's wording so
+            # one alert rule catches both backends. Logged here as well because
+            # the startup path reports only a redacted "database initialization
+            # failed" (conninfo hygiene), which would hide the two numbers the
+            # operator needs.
+            message = (
+                f"SQLite database schema contains a future version: stamped "
+                f"{current}, this build's SCHEMA_VERSION is {SCHEMA_VERSION}. "
+                "SQLite migrations are one-way: run a build whose SCHEMA_VERSION "
+                f"is at least {current}, or restore the pre-upgrade backup."
+            )
+            logger.error(message)
+            raise RuntimeError(message)
+        if current == SCHEMA_VERSION:
             return []
         applied: list[int] = []
         for version in range(current + 1, SCHEMA_VERSION + 1):

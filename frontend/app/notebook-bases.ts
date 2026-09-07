@@ -142,6 +142,12 @@ export const mergeMountCandidates = (
   return merged;
 };
 
+// promotionTarget.kind === "none" 时两个宿主(page.tsx 的知识条目「提交晋升」
+// 按钮 title、memory-panel.tsx 的「贡献到公共知识库」按钮 title)共用同一句
+// 提示文案——此前各写各的字面量,一份带「，才能贡献内容」后缀一份不带,拆出
+// 唯一定义避免再次分叉。
+export const PROMOTION_TARGET_NONE_REASON = "需先挂载一个公共知识库，才能贡献内容";
+
 // 提交晋升时的目标解析。晋升只能进公共知识库(tier==='base')且挂载边当前生效
 // (active——死边是降级/易主后的残留,不是可用候选,呼应 list_mount_edges 的
 // "失效边保留展示+置灰"语义)。三种结果:

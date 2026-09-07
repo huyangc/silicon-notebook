@@ -14,6 +14,9 @@ from tests.model_testkit import bind_chat_client, bind_all_embedding_clients
 
 BASE_NB_ID = "nb-base-001"
 PERS_NB_ID = "nb-pers-001"
+# The notebook an ask/report runs against. render_subgraph_context needs it
+# to tell own-notebook evidence (id normalised to "") from foreign evidence.
+ACTIVE_NB = "nb-active-001"
 
 NODES_FEDERATED = {
     "B1": {"type": "Formula", "name": "Base Formula"},
@@ -217,7 +220,7 @@ class TestTask3TierAnnotatedRender:
         """id_map entries must include a 'tier' key."""
         from app.services.kg.graph_reason import render_subgraph_context
         sub = self._make_federated_subgraph()
-        _, id_map = render_subgraph_context(sub)
+        _, id_map = render_subgraph_context(sub, active_notebook_id=ACTIVE_NB)
         for key, entry in id_map.items():
             assert "tier" in entry, f"id_map[{key}] missing 'tier'"
 
@@ -248,15 +251,63 @@ class TestTask3TierAnnotatedRender:
             seed_ids=["base-object"],
             edge_types=set(),
         )
-        _context, id_map = render_subgraph_context(subgraph)
+        _context, id_map = render_subgraph_context(
+            subgraph, active_notebook_id=ACTIVE_NB)
 
         assert id_map["k1"]["notebook_id"] == "base-notebook"
+
+    def _render_single_node(self, tier, notebook_id, *, active_notebook_id):
+        from app.services.kg.graph_reason import (
+            build_rx_graph,
+            multihop_subgraph,
+            render_subgraph_context,
+        )
+
+        graph, index_to_id, id_to_index = build_rx_graph(
+            {
+                "only-object": {
+                    "type": "claim",
+                    "name": "Only claim",
+                    "tier": tier,
+                    "notebook_id": notebook_id,
+                }
+            },
+            [],
+        )
+        subgraph = multihop_subgraph(
+            graph, id_to_index, index_to_id,
+            seed_ids=["only-object"], edge_types=set(),
+        )
+        _context, id_map = render_subgraph_context(
+            subgraph, active_notebook_id=active_notebook_id)
+        return id_map["k1"]["notebook_id"]
+
+    def test_graph_bfs_mounted_private_library_anchor_keeps_its_notebook(self):
+        """A2: a mounted PRIVATE library keeps tier='personal' while being a
+        genuinely different notebook.  The old tier=='base' test dropped its id
+        and the citation lost its library badge; the normalisation is "!= the
+        active notebook", not "is a base library"."""
+        assert self._render_single_node(
+            "personal", "nb-mounted-private",
+            active_notebook_id=ACTIVE_NB,
+        ) == "nb-mounted-private"
+
+    def test_graph_bfs_active_notebook_anchor_normalises_to_empty(self):
+        """The active notebook's own nodes carry their id in the federated node
+        payload too, so echoing it back would badge own-notebook evidence as
+        「来自「当前笔记本自己的名字」」."""
+        assert self._render_single_node(
+            "personal", ACTIVE_NB, active_notebook_id=ACTIVE_NB,
+        ) == ""
+        assert self._render_single_node(
+            "base", ACTIVE_NB, active_notebook_id=ACTIVE_NB,
+        ) == ""
 
     def test_base_edge_node_gets_base_tier_in_id_map(self):
         """A node reached via a base edge carries tier='base' in id_map."""
         from app.services.kg.graph_reason import render_subgraph_context
         sub = self._make_federated_subgraph()
-        _, id_map = render_subgraph_context(sub)
+        _, id_map = render_subgraph_context(sub, active_notebook_id=ACTIVE_NB)
         # B2 is reached via r1 (base edge derived_from)
         b2_entry = next(v for v in id_map.values() if v["object_id"] == "B2")
         assert b2_entry["tier"] == "base"
@@ -265,7 +316,7 @@ class TestTask3TierAnnotatedRender:
         """A node reached via a personal edge carries tier='personal' in id_map."""
         from app.services.kg.graph_reason import render_subgraph_context
         sub = self._make_federated_subgraph()
-        _, id_map = render_subgraph_context(sub)
+        _, id_map = render_subgraph_context(sub, active_notebook_id=ACTIVE_NB)
         # P2 is reached via r3 (personal edge depends_on from P1);
         # or P2 itself reached via personal edge.
         personal_entries = [v for v in id_map.values() if v["tier"] == "personal"]
@@ -275,7 +326,7 @@ class TestTask3TierAnnotatedRender:
         """Context block lines for non-seed nodes carry [tier] tag: '[Claim][base] …'."""
         from app.services.kg.graph_reason import render_subgraph_context
         sub = self._make_federated_subgraph()
-        ctx, _ = render_subgraph_context(sub)
+        ctx, _ = render_subgraph_context(sub, active_notebook_id=ACTIVE_NB)
         # At least one line must carry a tier tag
         assert "[base]" in ctx or "[personal]" in ctx, (
             f"No tier tag in context block:\n{ctx}")
@@ -284,7 +335,7 @@ class TestTask3TierAnnotatedRender:
         """Chain annotation lines must include tier information per hop."""
         from app.services.kg.graph_reason import render_subgraph_context
         sub = self._make_federated_subgraph()
-        ctx, _ = render_subgraph_context(sub)
+        ctx, _ = render_subgraph_context(sub, active_notebook_id=ACTIVE_NB)
         lines = ctx.splitlines()
         chain_lines = [l for l in lines if "--" in l and "-->" in l]
         assert chain_lines, "expected at least one chain annotation line"

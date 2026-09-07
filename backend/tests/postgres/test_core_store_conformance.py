@@ -2764,6 +2764,211 @@ def test_full_notebook_copy_preserves_source_fact_jsonb(
     assert backfill["after_object_id"] == fact["global_object_id"]
 
 
+def test_full_notebook_copy_carries_only_recipient_valid_mounts(
+    core_stores: CoreStores, tmp_path,
+):
+    """多领域基准库 followups spec A6 的 PG 对照：深拷贝携带挂载边，但按新
+    owner 重判 ``MOUNT_VALID_EXPR``。
+
+    SQLite 侧在 ``test_notebook_share_copy.py`` 有完整的三支 + 丢弃日志 + 补偿
+    级联覆盖；这里只需证明 PG 方言自己的查询拼装（``%s`` 占位、``<>``、以及
+    ``postgres/mount_sql`` 的同款谓词）判出同一个集合。"""
+    owner = core_stores.identity.create_user("m00123456", "password-13")
+    recipient = core_stores.identity.create_user("m00987654", "password-13")
+    public = core_stores.notebooks.create_row(NotebookCreate(name="Public"), owner.id)
+    recipient_private = core_stores.notebooks.create_row(
+        NotebookCreate(name="Recipient private"), recipient.id
+    )
+    stranger_private = core_stores.notebooks.create_row(
+        NotebookCreate(name="Stranger private"), owner.id
+    )
+    source = core_stores.notebooks.create_row(NotebookCreate(name="Mounted"), owner.id)
+    with core_stores.database.write() as connection:
+        connection.execute("UPDATE notebooks SET tier='base' WHERE id=%s", (public,))
+        for base in (public, recipient_private, stranger_private):
+            connection.execute(
+                "INSERT INTO notebook_bases "
+                "(notebook_id, base_notebook_id, created_at, created_by) "
+                "VALUES (%s,%s,%s,%s)",
+                (source, base, NOW, owner.id),
+            )
+
+    counters: dict[str, int] = {}
+
+    class Catalog:
+        def get_notebook(self, target_id: str):
+            row = core_stores.sharing.notebook_row(target_id)
+            assert row is not None
+            return SimpleNamespace(
+                id=target_id, name=row["name"], status=row["status"]
+            )
+
+    copied = NotebookCopyService(
+        store=core_stores.sharing,
+        catalog=Catalog(),
+        seams=RepositoryCompatibilitySeams(
+            new_id=lambda prefix: (
+                counters.__setitem__(prefix, counters.get(prefix, 0) + 1)
+                or f"{prefix}-mount-copy-{counters[prefix]}"
+            ),
+            now=lambda: NOW,
+            copy_chunk_size=lambda: 100,
+            remap_json_ids=repository_facade._remap_json_ids,
+            in_chunk_size=lambda: 500,
+        ),
+        storage_dir=lambda: tmp_path,
+        schedule_projection=lambda _table_id: None,
+    ).copy_notebook(source, new_owner_id=recipient.id)
+
+    with core_stores.database.connect() as connection:
+        carried = {
+            row["base_notebook_id"]
+            for row in connection.execute(
+                "SELECT base_notebook_id, created_by FROM notebook_bases "
+                "WHERE notebook_id=%s",
+                (copied.id,),
+            ).fetchall()
+        }
+        creators = {
+            row["created_by"]
+            for row in connection.execute(
+                "SELECT created_by FROM notebook_bases WHERE notebook_id=%s",
+                (copied.id,),
+            ).fetchall()
+        }
+        untouched = {
+            row["base_notebook_id"]
+            for row in connection.execute(
+                "SELECT base_notebook_id FROM notebook_bases WHERE notebook_id=%s",
+                (source,),
+            ).fetchall()
+        }
+    assert carried == {public, recipient_private}
+    assert creators == {recipient.id}
+    assert untouched == {public, recipient_private, stranger_private}
+
+
+def test_full_notebook_copy_carries_borrowed_and_everyone_mounts(
+    core_stores: CoreStores, tmp_path,
+):
+    """A6 的另外两支在 PG 方言下的对照：``everyone`` 授权边与借入读权。
+
+    上一条只覆盖 `tier='base'` ∨ 同 owner；这一条钉 ``MOUNT_VALID_EXPR`` 后两支
+    经 PG 的 ``%s`` 拼装同样判得出来：``everyone`` 授权的库随副本走；接收者**自己**
+    经 ``notebook_members`` / 点名 ``user`` 授权边够得到的库随副本走；只授权给
+    **源库 owner** 的那本不随走。源库自身已被共享（有成员行），而未共享门判的是
+    **目的地**副本（它没有任何成员/授权边），所以借入边照走——把重判改成以源库为
+    挂载方，这三条边会被门一起关掉。SQLite 侧的等价覆盖在
+    ``test_notebook_share_copy.py``。"""
+    lib_owner = core_stores.identity.create_user("m00223456", "password-13")
+    src_owner = core_stores.identity.create_user("m00334567", "password-13")
+    recipient = core_stores.identity.create_user("m00445678", "password-13")
+    bystander = core_stores.identity.create_user("m00556789", "password-13")
+    open_base = core_stores.notebooks.create_row(
+        NotebookCreate(name="Everyone granted"), lib_owner.id
+    )
+    by_member = core_stores.notebooks.create_row(
+        NotebookCreate(name="Borrowed via membership"), lib_owner.id
+    )
+    by_grant = core_stores.notebooks.create_row(
+        NotebookCreate(name="Borrowed via named grant"), lib_owner.id
+    )
+    lent_to_source_owner = core_stores.notebooks.create_row(
+        NotebookCreate(name="Lent to the source owner only"), lib_owner.id
+    )
+    source = core_stores.notebooks.create_row(
+        NotebookCreate(name="Mounted"), src_owner.id
+    )
+    _pg_grant(core_stores, "gr-everyone", open_base, "everyone", "", lib_owner.id)
+    _pg_grant(core_stores, "gr-to-recipient", by_grant, "user", recipient.id, lib_owner.id)
+    _pg_grant(
+        core_stores, "gr-to-src-owner", lent_to_source_owner, "user",
+        src_owner.id, lib_owner.id,
+    )
+    core_stores.sharing.add_member(by_member, recipient.id)
+    core_stores.sharing.add_member(source, bystander.id)  # 源库已共享:门只看目的地
+    bases = (open_base, by_member, by_grant, lent_to_source_owner)
+    with core_stores.database.write() as connection:
+        for base in bases:
+            connection.execute(
+                "INSERT INTO notebook_bases "
+                "(notebook_id, base_notebook_id, created_at, created_by) "
+                "VALUES (%s,%s,%s,%s)",
+                (source, base, NOW, src_owner.id),
+            )
+
+    counters: dict[str, int] = {}
+
+    class Catalog:
+        def get_notebook(self, target_id: str):
+            row = core_stores.sharing.notebook_row(target_id)
+            assert row is not None
+            return SimpleNamespace(
+                id=target_id, name=row["name"], status=row["status"]
+            )
+
+    copied = NotebookCopyService(
+        store=core_stores.sharing,
+        catalog=Catalog(),
+        seams=RepositoryCompatibilitySeams(
+            new_id=lambda prefix: (
+                counters.__setitem__(prefix, counters.get(prefix, 0) + 1)
+                or f"{prefix}-borrowed-copy-{counters[prefix]}"
+            ),
+            now=lambda: NOW,
+            copy_chunk_size=lambda: 100,
+            remap_json_ids=repository_facade._remap_json_ids,
+            in_chunk_size=lambda: 500,
+        ),
+        storage_dir=lambda: tmp_path,
+        schedule_projection=lambda _table_id: None,
+    ).copy_notebook(source, new_owner_id=recipient.id)
+
+    with core_stores.database.connect() as connection:
+        carried = {
+            row["base_notebook_id"]
+            for row in connection.execute(
+                "SELECT base_notebook_id FROM notebook_bases WHERE notebook_id=%s",
+                (copied.id,),
+            ).fetchall()
+        }
+    assert carried == {open_base, by_member, by_grant}
+
+
+def test_copied_mount_edge_insert_tolerates_a_vanished_base(core_stores: CoreStores):
+    """跨库外键竞态在 PG 侧的收窄(评审 P2)：有效性判定与插入不在同一条连接上，
+    被挂库在两者之间被删掉时只丢这一条边。
+
+    PG 与 SQLite 的行为差别正在这里：PostgreSQL 的外键违例会把**整个事务**置为
+    aborted，只有 SAVEPOINT 能把它收窄回单行。所以这条直接打 store 的方法——去掉
+    SAVEPOINT 会让同一批里排在它后面的那条边也一起写不进去(事务已 aborted)，
+    这里报红；SQLite 侧的端到端竞态覆盖在 ``test_notebook_share_copy.py``。"""
+    owner = core_stores.identity.create_user("m00667890", "password-13")
+    mounter = core_stores.notebooks.create_row(NotebookCreate(name="Mounter"), owner.id)
+    live_base = core_stores.notebooks.create_row(NotebookCreate(name="Base"), owner.id)
+
+    def edge(base_id: str) -> dict:
+        return {
+            "notebook_id": mounter, "base_notebook_id": base_id,
+            "created_at": NOW, "created_by": owner.id,
+        }
+
+    inserted = core_stores.sharing.insert_copied_mount_edges(
+        [edge("nb-deleted-mid-copy"), edge(live_base)], chunk_size=100
+    )
+
+    assert inserted == 1
+    with core_stores.database.connect() as connection:
+        landed = {
+            row["base_notebook_id"]
+            for row in connection.execute(
+                "SELECT base_notebook_id FROM notebook_bases WHERE notebook_id=%s",
+                (mounter,),
+            ).fetchall()
+        }
+    assert landed == {live_base}
+
+
 def test_source_jsonb_hydration_and_ordinal_sample_order(core_stores: CoreStores):
     owner = core_stores.identity.create_user("d00123456", "password-3")
     notebook_id = core_stores.notebooks.create_row(NotebookCreate(name="Sources"), owner.id)

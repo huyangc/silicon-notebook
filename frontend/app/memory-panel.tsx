@@ -19,7 +19,8 @@ import { requestTaskStream } from "./request-task-stream.ts";
 import { copyTextSafely } from "./copy-text";
 import { humanizedError, logDiagnostic, toUserMessage } from "./errors.ts";
 import { FloatingModalCard } from "./floating-modal-card";
-import { resolvePromotionTarget, type MountedBase } from "./notebook-bases";
+import { PROMOTION_TARGET_NONE_REASON, resolvePromotionTarget, type MountedBase } from "./notebook-bases";
+import { PromotionTargetModal } from "./promotion-target-modal";
 import { useFloatingWindow } from "./use-floating-window";
 import {
   canEditMemory,
@@ -802,10 +803,12 @@ export function MemoryPanel({
     if (busyId || sessionSignal.aborted || !canPromoteMemory(memory)) return;
     if (!targetBaseId) {
       const target = promotionTargetFor(memory);
-      if (target.kind === "none") {
-        setError("需先挂载一个公共知识库，才能贡献内容");
-        return;
-      }
+      // A5:none 态时「贡献到公共知识库」按钮本身已经 disabled 并带 title 提示
+      // (呼应下方 memory-promote-action 的 disabled/title),这才是紧邻按钮的
+      // 结果呈现——这里只是防御性兜底(disabled 按钮不会触发 onClick),不再
+      // 额外弹一条独立的错误横幅(与 page.tsx::submitPromotion 的 none 分支
+      // 呈现方式统一)。
+      if (target.kind === "none") return;
       if (target.kind === "choose") {
         setPendingPromotionMemory(memory);
         return;
@@ -966,13 +969,14 @@ export function MemoryPanel({
     setQuery(queryDraft.trim());
   }
 
-  // 选择器弹窗展示的候选:按弹窗当前挂起的那条记忆(而非某个固定 scope 级
-  // 别的值)解析——global 视图下不同记忆的候选集本就可能不同。
-  const pendingPromotionTarget = pendingPromotionMemory
-    ? promotionTargetFor(pendingPromotionMemory)
-    : null;
-  const pendingPromotionOptions =
-    pendingPromotionTarget?.kind === "choose" ? pendingPromotionTarget.options : [];
+  // 选择器弹窗展示的候选:传完整的当前挂载列表,不是 promotionTargetFor 派生
+  // 出的 "choose" 分支 options——弹窗打开期间挂载集合可能变化(任何
+  // refreshActiveNotebook),用派生结果会在候选缩到 1 个时把"已挂载 1 个"
+  // 误判成"未挂载"而显示假的 0-态提示。按弹窗当前挂起的那条记忆(而非某个
+  // 固定 scope 级别的值)取值——global 视图下不同记忆的候选集本就可能不同。
+  const pendingPromotionBases: MountedBase[] = pendingPromotionMemory
+    ? (scope === "notebook" ? (bases ?? []) : (notebookBases?.[pendingPromotionMemory.notebook_id] ?? []))
+    : [];
 
   return (
     <section className={`memory-panel memory-panel-${scope}`} aria-label={scope === "global" ? "全部记忆" : "笔记本记忆"}>
@@ -1292,7 +1296,7 @@ export function MemoryPanel({
                               type="button"
                               className="memory-promote-action"
                               disabled={busy || promotionTarget.kind === "none"}
-                              title={promotionTarget.kind === "none" ? "需先挂载一个公共知识库，才能贡献内容" : undefined}
+                              title={promotionTarget.kind === "none" ? PROMOTION_TARGET_NONE_REASON : undefined}
                               onClick={() => promoteMemory(memory)}
                             >
                               <ArrowUpCircle size={14} /> 贡献到公共知识库
@@ -1409,37 +1413,22 @@ export function MemoryPanel({
           aria-modal="true"
           onClick={(event) => { if (event.currentTarget === event.target) setPendingPromotionMemory(null); }}
         >
-          <FloatingModalCard storageKey="memory.promotion.window" className="utility-modal-card narrow">
-            {(floating) => (<>
-            <div className="source-modal-header" {...floating.dragHandleProps}>
-              <div>
-                <h2>选择贡献目标</h2>
-                <p>这条记忆所在的笔记本挂载了多个公共知识库，请选择要进入哪一个。</p>
-              </div>
-              <button className="icon-button" onClick={() => setPendingPromotionMemory(null)} title="Close">×</button>
-            </div>
-            <div className="promotion-target-list">
-              {pendingPromotionOptions.map((base) => (
-                <button
-                  key={base.id}
-                  type="button"
-                  className="sort-button promotion-target-option"
-                  onClick={() => {
-                    const memory = pendingPromotionMemory;
-                    setPendingPromotionMemory(null);
-                    if (memory) {
-                      promoteMemory(memory, base.id).catch(
-                        (cause) => setError(toUserMessage(cause, "提交失败，请稍后重试")),
-                      );
-                    }
-                  }}
-                >
-                  <span className="promotion-target-name" title={base.name}>{base.name}</span>
-                </button>
-              ))}
-            </div>
-            </>)}
-          </FloatingModalCard>
+          <PromotionTargetModal
+            storageKey="memory.promotion.window"
+            title="选择贡献目标"
+            description="这条记忆所在的笔记本挂载了多个公共知识库，请选择要进入哪一个。"
+            bases={pendingPromotionBases}
+            onClose={() => setPendingPromotionMemory(null)}
+            onPick={(baseId) => {
+              const memory = pendingPromotionMemory;
+              setPendingPromotionMemory(null);
+              if (memory) {
+                promoteMemory(memory, baseId).catch(
+                  (cause) => setError(toUserMessage(cause, "提交失败，请稍后重试")),
+                );
+              }
+            }}
+          />
         </section>
       )}
     </section>
