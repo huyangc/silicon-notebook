@@ -62,6 +62,9 @@ _KG_SUMMARY_KEYS = (
 )
 #: KG payload 里可以当"适用条件"用的字段。
 _KG_CONDITION_KEYS = ("validity_scope", "applies_to", "scope", "condition")
+#: `validity_scope` 字典形态(`kg/extract.py::_parse_validity_scope` 摄取产出)的
+#: 已知子键渲染顺序;字典里出现但不在这份元组里的键仍会渲染,追加在后面。
+_VALIDITY_SCOPE_KEY_ORDER = ("region", "assumptions", "approximation", "range")
 
 
 @dataclass(frozen=True)
@@ -175,15 +178,27 @@ def excerpt_terms(question: str, action_query: str, limit: int) -> List[str]:
             strip_accepted_quote_markers(text).strip() if phrases
             else text.strip()
         ).casefold()
+        candidates: List[str] = []
+        local_seen: Set[str] = set()
         for term in lexical_recall_terms(text):
             folded = term.casefold()
             if (
                 folded in seen
-                or folded == sentence
+                or folded in local_seen
                 or len(term) > max(1, limit // _ANCHOR_TERM_RATIO)
             ):
                 continue
-            seen.add(folded)
+            local_seen.add(folded)
+            candidates.append(term)
+        # 整句词只在这份候选里**还有别的词**时才丢(codex #698 R2 P2):问题/
+        # action_query 整个就是一个引号短语或一个单一术语时,去重后候选只剩
+        # 这一项——丢掉它会让这段文本对 `excerpt_terms` 交白卷,后面按
+        # `protected` 做的短语保护救不回一个从没进过 `raw` 的词(实测:
+        # `excerpt_terms('"static timing analysis"', '', 80)` 曾经因此返回
+        # `[]`)。还有别的候选词时,丢整句词的原始理由(1. 的注释)不变。
+        non_sentence = [c for c in candidates if c.casefold() != sentence]
+        for term in (non_sentence or candidates):
+            seen.add(term.casefold())
             raw.append(term)
     return [
         term for term in raw
@@ -259,6 +274,35 @@ def select_excerpt(
     )
 
 
+def _condition_mapping_text(value: Mapping) -> str:
+    """把字典形态的适用条件字段(`validity_scope`)渲染成「键: 值」序列
+    (codex #698 R2 P2)。
+
+    真实摄取形状见 `kg/extract.py::_parse_validity_scope`/`kg_ingest.py` 的
+    `_bounded_validity_scope`:落进 payload 的 `validity_scope` 是
+    `{region:[str,...], assumptions:[str,...], approximation:str, range:str}`
+    的任意非空子集——从来不是字符串或列表。此前的条件循环只认 str/list 两种
+    形态,字典直接被跳过,KG 抽取管线特意结构化出来的适用条件因此从不上卡。
+    这里逐键渲染而不是整体 `str(dict)`:后者会把 Python repr
+    (`{'region': [...]}`)原样糊给模型,既不折叠也不受下面的 `_flat` 截长约束。
+    """
+    ordered_keys = list(_VALIDITY_SCOPE_KEY_ORDER)
+    ordered_keys.extend(k for k in value.keys() if k not in ordered_keys)
+    parts: List[str] = []
+    for key in ordered_keys:
+        if key not in value:
+            continue
+        raw = value[key]
+        if isinstance(raw, (list, tuple)):
+            item = "，".join(_collapse(v) for v in raw if _collapse(v))
+        else:
+            item = _collapse(raw)
+        if not item:
+            continue
+        parts.append(f"{key}: {item}")
+    return "; ".join(parts)
+
+
 # --- 卡片构造(池内材料 → 卡,零 I/O) ---------------------------------------
 def _kg_card(hit, terms: Sequence[str], excerpt_chars: int) -> EvidenceCard:
     payload = getattr(hit, "payload", None)
@@ -291,6 +335,13 @@ def _kg_card(hit, terms: Sequence[str], excerpt_chars: int) -> EvidenceCard:
             conditions = _flat("、".join(str(v) for v in value[:4]),
                                _CONDITION_CHARS)
             break
+        if isinstance(value, Mapping) and value:
+            # 字典形态(真实摄取产出,见 `_condition_mapping_text`):逐键渲染,
+            # 渲染结果为空(比如全是空白值)就不算命中,继续看下一个候选字段。
+            rendered = _condition_mapping_text(value)
+            if rendered:
+                conditions = _flat(rendered, _CONDITION_CHARS)
+                break
     excerpt, partial = select_excerpt(body, terms, excerpt_chars)
     # 位置"有才显示":KG 候选的 payload 未必带 section_path(抽取管线按类型决定
     # 写不写),没有就不渲染一个空位置,更不去查库补一个。
