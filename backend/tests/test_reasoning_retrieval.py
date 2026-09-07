@@ -7113,6 +7113,29 @@ def test_kg_card_is_labelled_as_an_extraction_not_verbatim_source_text():
     assert ORIGIN_VERBATIM in chunk_line
 
 
+def test_inference_card_renders_dict_shaped_validity_scope():
+    """推导链的 `validity_scope` 是 `follow_chain.merge_validity_scopes` 合并出的
+    字典(与 KG 节点同一套 schema)。此前 `_inference_card` 把它直接送进
+    `_flat`,`_collapse` 的 `str(dict)` 会把 Python repr `{'region': [...]}`
+    糊给模型——与 codex #698 R2 P2 修的 KG 卡同源,修复轮顺手对齐。
+
+    变异:去掉 `_inference_card` 里的 `isinstance(scope, Mapping)` 分支 ⇒ 这条红
+    (卡面出现 `{'region'`)。
+    """
+    from types import SimpleNamespace
+    from app.services.reasoning_context import _inference_card, render_card
+
+    chain = SimpleNamespace(
+        hops=(SimpleNamespace(source_name="A", target_name="B"),
+              SimpleNamespace(source_name="B", target_name="C")),
+        inferred_edge_type="derived_from", chain_trust=0.5,
+        validity_scope={"region": ["7nm 以下"], "range": "0-100MHz"},
+    )
+    line = render_card(_inference_card(chain))
+    assert "region: 7nm 以下" in line and "range: 0-100MHz" in line
+    assert "{'region'" not in line
+
+
 def test_kg_card_renders_dict_shaped_validity_scope():
     """真实摄取形状(见 `kg/extract.py::_parse_validity_scope` /
     `kg_ingest.py` 写 payload 那一行)是字典,不是 str/list——`region`/
