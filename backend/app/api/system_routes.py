@@ -231,16 +231,21 @@ async def me_pending_stream(
     pending_bus.bind_loop()
 
     async def gen():
-        # 1) 先补发离线期间缓冲的瞬时事件(跨会话)
-        for ev in pending_bus.flush_buffer(uid):
-            yield json.dumps({"kind": "event", **ev}, ensure_ascii=False) + "\n"
-        # 2) 初始 snapshot —— DB 计算放线程池,勿阻塞 loop
-        loop = asyncio.get_running_loop()
-        data = await loop.run_in_executor(None, repository().pending_actions, uid)
-        yield json.dumps({"kind": "snapshot", "data": data}, ensure_ascii=False) + "\n"
-        # 3) 注册连接,循环等待推送 + keepalive
+        # 0) 先注册,再算初始 snapshot。顺序不能反:mark_dirty 现在按
+        #    has_subscribers 闸门跳过无人订阅的 user(pending_bus),若先算初始帧
+        #    再注册,那一帧读到「进行中」之后、注册之前落地的终态推送会被闸门整帧
+        #    丢掉,而终态不会再有下一帧——这条连接就永远停在陈旧的初始快照上。
+        #    先注册,初始帧计算期间的推送进队列,循环里紧随初始帧之后送达。
         q = pending_bus.register(uid)
         try:
+            # 1) 补发离线期间缓冲的瞬时事件(跨会话)
+            for ev in pending_bus.flush_buffer(uid):
+                yield json.dumps({"kind": "event", **ev}, ensure_ascii=False) + "\n"
+            # 2) 初始 snapshot —— DB 计算放线程池,勿阻塞 loop
+            loop = asyncio.get_running_loop()
+            data = await loop.run_in_executor(None, repository().pending_actions, uid)
+            yield json.dumps({"kind": "snapshot", "data": data}, ensure_ascii=False) + "\n"
+            # 3) 循环等待推送 + keepalive
             while True:
                 if await request.is_disconnected():
                     break

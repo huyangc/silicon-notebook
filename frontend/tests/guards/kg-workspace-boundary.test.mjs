@@ -483,6 +483,21 @@ test("workspace transition and both authentication paths bind KG authority", () 
   //      toMountedBases(currentNotebook?.base_notebooks ?? []),不是别的调用;
   //  (b) page.tsx 不再从 "./notebook-bases" 导入 owner-only 的 listBases——
   //      防止有人为了某个新用例把它加回来,悄悄重开这条陈旧数据竞态。
+  // codex #684 R1 P2:switchChatMode 写 URL hash 必须用 activeNotebookIdRef(在
+  // openNotebook 里同步更新)而不是闭包里的 currentNotebookId——铃铛里点另一本库
+  // 的「进行中的提问」是 openNotebook(B) 之后再调本函数,导航前渲染的闭包若用
+  // state 会把刚写好的 #notebook=B 改回 A。
+  const switchChatModeText = findFunctionIn(page, "Home", "switchChatMode").getText();
+  assert.match(
+    switchChatModeText,
+    /const hashNotebookId = activeNotebookIdRef\.current \?\? currentNotebookId;/,
+    "switchChatMode must derive the URL notebook id from activeNotebookIdRef",
+  );
+  assert.doesNotMatch(
+    switchChatModeText,
+    /notebookHash\(currentNotebookId\)|memoryHash\(currentNotebookId\)/,
+    "switchChatMode must not write the stale closure notebook id into the URL",
+  );
   const notebookPromotionBasesInit = variableInitializersIn(page).find(
     (entry) => entry.name === "notebookPromotionBases",
   );
