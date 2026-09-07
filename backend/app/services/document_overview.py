@@ -77,7 +77,7 @@ def overview_intent(question: str) -> OverviewIntent | None:
     return None
 
 
-def resolve_overview_source(intent: OverviewIntent, catalog, question: str):
+def resolve_overview_source(intent: OverviewIntent, catalog):
     """Prove uniqueness over a complete authorized directory, never its prefix."""
     if not catalog.result_sets or not catalog.result_sets[0].coverage.complete:
         return None, "当前文档目录尚未完整读取，请在来源面板仅选择目标文档后重试。"
@@ -86,9 +86,9 @@ def resolve_overview_source(intent: OverviewIntent, catalog, question: str):
         normalize = lambda text: "".join(text.split()).casefold()
         matches = [item for item in items if normalize(item.source_title) == normalize(intent.title)]
     else:
-        matches = [item for item in items if item.source_title and item.source_title in question]
-        if not matches and len(items) == 1:
-            matches = items
+        # Generic words in an untitled question are not source identities.
+        # A document named "文档" must not capture "这篇文档介绍了什么".
+        matches = items if len(items) == 1 else []
     if len(matches) == 1:
         return matches[0], ""
     if not matches and intent.title:

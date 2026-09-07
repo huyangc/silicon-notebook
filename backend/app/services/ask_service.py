@@ -2458,7 +2458,7 @@ class AskService:
         prepared = catalog
         notice = ""
         if intent.kind == "source":
-            source, notice = resolve_overview_source(intent, catalog, payload.question)
+            source, notice = resolve_overview_source(intent, catalog)
             if source is not None and self.overview_sources is not None:
                 prepared = prepare_source_overview(
                     self.overview_sources, source,
