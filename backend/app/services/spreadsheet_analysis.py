@@ -10,8 +10,9 @@ from datetime import date, datetime
 from pathlib import Path
 from statistics import fmean
 from time import perf_counter
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
+from app.domain.citation_origin import foreign_notebook_id
 from app.models.ask import (
     Citation,
     SpreadsheetAnalysisResult,
@@ -588,6 +589,7 @@ class SpreadsheetAnalysisService:
         notebook_id: str,
         source_ids: Sequence[str],
         source_refs: Sequence[tuple[str, str]] | None = None,
+        notebook_tiers: Mapping[str, str] | None = None,
         question: str,
         planner_client: Any,
         cancel_event: Any = None,
@@ -599,13 +601,7 @@ class SpreadsheetAnalysisService:
         manifest_refs = source_refs or tuple(
             (notebook_id, source_id) for source_id in source_ids
         )
-        manifests = [
-            manifest
-            for manifest_notebook_id, source_id in manifest_refs
-            if (manifest := self.artifacts.load_spreadsheet_manifest(
-                manifest_notebook_id, source_id
-            )) is not None
-        ]
+        manifests = self._load_manifests(manifest_refs)
         if not manifests:
             return [], None
         raise_if_cancelled(cancel_event)
@@ -614,7 +610,12 @@ class SpreadsheetAnalysisService:
         if plan is None:
             return [], None
         raise_if_cancelled(cancel_event)
-        result = self._execute(plan, manifests)
+        result = self._execute(
+            plan,
+            manifests,
+            active_notebook_id=notebook_id,
+            notebook_tiers=notebook_tiers or {},
+        )
         if result is None:
             return [], None
         duration_ms = round((perf_counter() - started) * 1000)
@@ -633,6 +634,28 @@ class SpreadsheetAnalysisService:
             duration_ms=duration_ms,
         )
         return [result], trace
+
+    def _load_manifests(
+        self, manifest_refs: Sequence[tuple[str, str]]
+    ) -> list[dict[str, Any]]:
+        """Load one compiled manifest per ``(notebook_id, source_id)`` ref.
+
+        参与集里挂载的参考库工作簿走的是同一条路径，所以这里必须把「这份 manifest
+        属于哪个 notebook」保留下来——下游 `_citation` 要用它归一跨库署名。归属取
+        **载入键**而不是 manifest 里存的那个字段：载入键就是这份 JSON 实际所在的
+        目录，一份随源复制（分享/复制笔记本）搬过来的 manifest 里那个字段仍指向
+        它当初编译时的库，照抄会把本库证据标成「来自某某库」。
+        """
+        manifests: list[dict[str, Any]] = []
+        for manifest_notebook_id, source_id in manifest_refs:
+            manifest = self.artifacts.load_spreadsheet_manifest(
+                manifest_notebook_id, source_id
+            )
+            if manifest is None:
+                continue
+            manifest["notebook_id"] = manifest_notebook_id
+            manifests.append(manifest)
+        return manifests
 
     def _plan(
         self,
@@ -867,7 +890,12 @@ class SpreadsheetAnalysisService:
         return matches[0] if len(matches) == 1 else ""
 
     def _execute(
-        self, plan: dict[str, Any], manifests: Sequence[dict[str, Any]]
+        self,
+        plan: dict[str, Any],
+        manifests: Sequence[dict[str, Any]],
+        *,
+        active_notebook_id: str,
+        notebook_tiers: Mapping[str, str],
     ) -> SpreadsheetAnalysisResult | None:
         manifest = next(
             (row for row in manifests if row["source_id"] == plan.get("source_id")), None
@@ -894,7 +922,13 @@ class SpreadsheetAnalysisService:
             output = self._profile(filtered, headers)
         output_rows, output_headers = output
         citation_rows = output_rows if operation in {"top", "filter"} else filtered
-        citation = self._citation(manifest, sheet, citation_rows)
+        citation = self._citation(
+            manifest,
+            sheet,
+            citation_rows,
+            active_notebook_id=active_notebook_id,
+            notebook_tiers=notebook_tiers,
+        )
         delivered, delivered_headers, complete, truncated_reason, budget_warnings = (
             self._bounded_result_preview(
                 output_rows, output_headers, citation=citation
@@ -1208,11 +1242,24 @@ class SpreadsheetAnalysisService:
         manifest: dict[str, Any],
         sheet: dict[str, Any],
         rows: Sequence[dict[str, Any]],
+        *,
+        active_notebook_id: str,
+        notebook_tiers: Mapping[str, str],
     ) -> Citation | None:
+        """Build the one row-anchored receipt for this workbook result.
+
+        工作簿不是「只可能来自本库」的证据：ask 的表格通道按参与集
+        `(notebook_id, source_id)` 逐个载入 manifest，挂载参考库里的工作簿会一路
+        走到这里。所以署名走与其它跨库证据完全相同的两条规则——归属过
+        `domain.citation_origin.foreign_notebook_id`（本库归空串，跨库才留 id），
+        tier 查 `NotebookStore.tier_map`（与 graph_retrieval 同一张表，不另立第二
+        套判定）。`notebook_tiers` 缺项/为空时回落 "personal"，即模型字段原默认值。
+        """
         element_id = next(
             (str(row.get("__element_id") or "") for row in rows if row.get("__element_id")),
             "",
         )
+        origin_notebook_id = str(manifest.get("notebook_id") or "")
         return Citation(
             label=f"{manifest.get('source_title', '')} · {sheet['name']}!{sheet['range']}",
             source_id=manifest["source_id"],
@@ -1220,6 +1267,8 @@ class SpreadsheetAnalysisService:
             location_label=f"{sheet['name']}!{sheet['range']}",
             quoted_span="电子表格确定性分析结果",
             source_file_name=manifest.get("source_file_name", ""),
+            tier=notebook_tiers.get(origin_notebook_id, "personal"),
+            notebook_id=foreign_notebook_id(origin_notebook_id, active_notebook_id),
         )
 
 
@@ -1266,8 +1315,15 @@ def spreadsheet_prompt_block(
             "source_title": result.source_title,
             "source_file_name": result.source_file_name,
             "location_label": f"{result.sheet}!{result.range}",
-            "tier": "personal",
-            "notebook_id": "",
+            # 跨库归属/层级照抄同一结果的引用：`_citation` 已经把归属过了
+            # `domain.citation_origin.foreign_notebook_id`、把 tier 查过
+            # `NotebookStore.tier_map`。这里拿不到 active notebook id，再算一次
+            # 就是第七份内联的同一条规则。`parse_anchors` 从这张 id_map 直接照抄
+            # 这两个键，所以本写入点登记在 test_citation_notebook_id_guard 的
+            # BUILDER_SITES 里。结果一行不剩（如筛不中任何行）时没有引用可抄，
+            # 回落到模型字段原默认值。
+            "tier": citation.tier if citation else "personal",
+            "notebook_id": citation.notebook_id if citation else "",
             "relevance": 1.0,
             "knowhow": None,
         }

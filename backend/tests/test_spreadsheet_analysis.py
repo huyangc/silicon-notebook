@@ -472,6 +472,93 @@ def test_analysis_loads_manifest_from_owning_participant_notebook(tmp_path):
     assert trace is not None
 
 
+def test_mounted_base_workbook_receipts_carry_their_owning_notebook(tmp_path):
+    """A1: 挂载参考库里的工作簿是跨库证据,引用和锚点都要带来源库署名与 tier。"""
+    settings = _settings(tmp_path)
+    service = SpreadsheetAnalysisService(
+        artifacts=AnalysisArtifactStore(Path(settings.storage_dir), retention_days=30),
+        settings=settings,
+        event_log=_EventLog(),
+        now=lambda: "2026-08-31T01:00:00+00:00",
+    )
+    base_path = tmp_path / "base-sales.xlsx"
+    _workbook(base_path)
+    base_source = _source(base_path)
+    base_source.id = "base-sheet"
+    base_source.notebook_id = "base-kept"
+    assert service.compile_source(
+        base_source, notebook_name="Base", owner_id="owner-base", row_element_ids={}
+    )
+    own_path = tmp_path / "own-sales.xlsx"
+    _workbook(own_path)
+    assert service.compile_source(
+        _source(own_path), notebook_name="Notebook", owner_id="user-1",
+        row_element_ids={},
+    )
+    tiers = {"nb-1": "personal", "base-kept": "base"}
+
+    [base_result], _ = service.analyze(
+        notebook_id="nb-1",
+        source_ids=(),
+        source_refs=(("base-kept", "base-sheet"),),
+        notebook_tiers=tiers,
+        question="分析挂载参考库中的 Excel 数据概况",
+        planner_client=_OfflinePlanner(),
+    )
+    [own_result], _ = service.analyze(
+        notebook_id="nb-1",
+        source_ids=("src-1",),
+        source_refs=(("nb-1", "src-1"),),
+        notebook_tiers=tiers,
+        question="分析这个 Excel 的数据概况",
+        planner_client=_OfflinePlanner(),
+    )
+
+    base_citation = base_result.rows[0].citation
+    assert (base_citation.notebook_id, base_citation.tier) == ("base-kept", "base")
+    own_citation = own_result.rows[0].citation
+    assert (own_citation.notebook_id, own_citation.tier) == ("", "personal")
+
+    _, evidence = spreadsheet_prompt_block(
+        [base_result, own_result], preview_rows=20, max_bytes=65_536
+    )
+    assert (evidence["k6001"]["notebook_id"], evidence["k6001"]["tier"]) == (
+        "base-kept", "base",
+    )
+    assert (evidence["k6002"]["notebook_id"], evidence["k6002"]["tier"]) == (
+        "", "personal",
+    )
+
+
+def test_manifest_origin_comes_from_the_load_key_not_the_stored_field(tmp_path):
+    """一份随源复制过来的 manifest 里存的还是原库 id;照抄它会把本库证据标成跨库。"""
+    settings = _settings(tmp_path)
+    artifacts = AnalysisArtifactStore(Path(settings.storage_dir), retention_days=30)
+    service = SpreadsheetAnalysisService(
+        artifacts=artifacts,
+        settings=settings,
+        event_log=_EventLog(),
+        now=lambda: "2026-08-31T01:00:00+00:00",
+    )
+    path = tmp_path / "sales.xlsx"
+    _workbook(path)
+    assert service.compile_source(
+        _source(path), notebook_name="Notebook", owner_id="user-1", row_element_ids={}
+    )
+    stale = artifacts.load_spreadsheet_manifest("nb-1", "src-1")
+    stale["notebook_id"] = "nb-donor"
+    artifacts.save_spreadsheet_manifest("nb-copy", "src-1", stale)
+
+    [result], _ = service.analyze(
+        notebook_id="nb-copy",
+        source_ids=("src-1",),
+        question="分析这个 Excel 的数据概况",
+        planner_client=_OfflinePlanner(),
+    )
+
+    assert result.rows[0].citation.notebook_id == ""
+
+
 def test_result_preview_is_bounded_by_cells_and_serialized_bytes(tmp_path):
     path = tmp_path / "wide.xlsx"
     workbook = Workbook()
@@ -686,10 +773,12 @@ def test_reasoning_spreadsheet_lane_honors_exclude_scope():
         def __init__(self) -> None:
             self.source_ids = ()
             self.source_refs = ()
+            self.notebook_tiers = None
 
         def analyze(self, **kwargs):
             self.source_ids = kwargs["source_ids"]
             self.source_refs = kwargs["source_refs"]
+            self.notebook_tiers = kwargs["notebook_tiers"]
             return [], None
 
     analysis = _CapturingAnalysis()
@@ -707,6 +796,14 @@ def test_reasoning_spreadsheet_lane_honors_exclude_scope():
         notebook_id
     ]
     service.ask_engine_hidden_sources = lambda notebook_id, user_id: ("src-hidden",)
+    # A1: 表格通道的引用 tier 与其它跨库证据同源——`_tier_map_for` 一路走到
+    # `EvidenceContextService.tier_map` → `NotebookStore.tier_map`。
+    tiers = {"nb-1": "personal", "base-kept": "base", "base-excluded": "base"}
+    service.evidence_context = SimpleNamespace(
+        tier_map=lambda notebook_ids: {
+            notebook_id: tiers[notebook_id] for notebook_id in notebook_ids
+        }
+    )
     service.model_clients = SimpleNamespace(chat=lambda workload: _OfflinePlanner())
     runtime = SimpleNamespace(
         scope=ActiveSourceScope(
@@ -731,6 +828,9 @@ def test_reasoning_spreadsheet_lane_honors_exclude_scope():
         ("nb-1", "src-kept"),
         ("base-kept", "base-sheet"),
     )
+    assert analysis.notebook_tiers == {
+        "nb-1": "personal", "base-kept": "base", "base-excluded": "base",
+    }
 
 
 def test_planner_cancellation_is_not_downgraded_to_local_profile(tmp_path):

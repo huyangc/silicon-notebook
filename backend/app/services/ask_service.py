@@ -45,6 +45,7 @@ from app.core.ask_context import _ASK_EMBED_CACHE, _ASK_MODEL_ERRORS
 from app.core.ask_retrieval_policy import RetrievalEffort, ask_retrieval_limits
 from app.core.config import Settings
 from app.core.llm import cap_kwargs
+from app.domain.citation_origin import foreign_notebook_id
 from app.domain.gap_consult import (
     GAP_CONSULT_MAX_GAP_PHRASES,
     GAP_CONSULT_MAX_SUGGESTIONS,
@@ -1576,9 +1577,8 @@ class AskService:
                     quoted_span=record.quoted_span or evidence.text,
                     source_file_name=record.source_file_name,
                     tier=tier_map.get(record.notebook_id, "personal"),
-                    notebook_id=(
-                        record.notebook_id
-                        if record.notebook_id != prepared.notebook_id else ""
+                    notebook_id=foreign_notebook_id(
+                        record.notebook_id, prepared.notebook_id
                     ),
                     knowhow=knowhow_refs.get(record.element_id),
                 ))
@@ -1619,9 +1619,8 @@ class AskService:
                         source_id=record.source_id,
                         element_id=record.element_id,
                         tier=tier_map.get(record.notebook_id, "personal"),
-                        notebook_id=(
-                            record.notebook_id
-                            if record.notebook_id != prepared.notebook_id else ""
+                        notebook_id=foreign_notebook_id(
+                            record.notebook_id, prepared.notebook_id
                         ),
                         knowhow=knowhow_refs.get(record.element_id),
                     ))
@@ -2709,13 +2708,9 @@ class AskService:
                 return chunk_tier_map.get(c.notebook_id or notebook_id, "personal")
             # Task 14 codex r4 fix: c.notebook_id 同样会被 PPR(_mix_retrieve 第三路
             # 概念漫游,merge 进 selected 的 chunk)对 active 库自己的命中打上 active
-            # 自己的 id,并非只在跨库命中时才打标——citations_from 同一根因的镜像
-            # 修复(见 evidence_context.py citations_from 的 codex r4 fix 注释)。这
-            # 里直接构造 Citation(不经 citations_from),必须同样与调用方
-            # notebook_id 比较,相等则归零,否则前端会显示一个多余的「来自「当前
-            # 笔记本」」徽章。
-            def _cite_notebook_id(c) -> str:
-                return c.notebook_id if c.notebook_id != notebook_id else ""
+            # 自己的 id,并非只在跨库命中时才打标。下面两个构造点因此各自走共享的
+            # foreign_notebook_id(唯一定义在 domain/citation_origin.py),否则前端
+            # 会显示一个多余的「来自「当前笔记本」」徽章。
             # Task 12b（引用跳转扩面）：chunk 模式此前从未富化过
             # citation.knowhow（此前只有 reasoning 模式的 citations_from 会查）
             # ——同池同权补上。批量查一次 knowhow 定位标签，覆盖 selected 里
@@ -2744,7 +2739,9 @@ class AskService:
                             source_id=c.source_id, element_id=eid,
                             location_label=c.section_path, quoted_span=c.text[:200],
                             source_file_name=source_info.get("file_name", ""),
-                            tier=_chunk_tier(c), notebook_id=_cite_notebook_id(c),
+                            tier=_chunk_tier(c),
+                            notebook_id=foreign_notebook_id(
+                                c.notebook_id, notebook_id),
                             knowhow=knowhow_refs.get(eid))
                         citations.append(citation)
                         citation_image_targets.append((citation, c.element_ids))
@@ -2758,7 +2755,9 @@ class AskService:
                         source_id=c.source_id, element_id=eid,
                         location_label=c.section_path, quoted_span=c.text[:200],
                         source_file_name=source_info.get("file_name", ""),
-                        tier=_chunk_tier(c), notebook_id=_cite_notebook_id(c),
+                        tier=_chunk_tier(c),
+                        notebook_id=foreign_notebook_id(
+                            c.notebook_id, notebook_id),
                         knowhow=knowhow_refs.get(eid))
                     citations.append(citation)
                     citation_image_targets.append((citation, c.element_ids))
@@ -3335,6 +3334,9 @@ class AskService:
                     if source_notebook_id == notebook_id
                 ),
                 source_refs=source_refs,
+                # 挂载参考库里的工作簿会一路走到 `_citation`,所以表格通道也要
+                # 拿到与其它跨库证据同一张 tier 表(NotebookStore.tier_map)。
+                notebook_tiers=self._tier_map_for(participant_notebook_ids),
                 question=prepared.research_question,
                 planner_client=self.model_clients.chat("reasoning_agent"),
                 cancel_event=runtime.cancellation,

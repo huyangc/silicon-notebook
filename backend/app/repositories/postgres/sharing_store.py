@@ -5,6 +5,7 @@ from datetime import timedelta
 from typing import Callable, Sequence
 
 from psycopg import sql
+from psycopg.errors import ForeignKeyViolation
 from psycopg.types.json import Jsonb
 
 from app.core.config import Settings
@@ -34,6 +35,7 @@ from app.repositories.postgres.access_sql import (
 )
 from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.postgres.knowhow_history_store import record_change
+from app.repositories.postgres.mount_sql import MOUNT_VALID_EXPR
 
 
 _KNOWHOW_SOURCE_IDS = "SELECT id FROM sources WHERE source_type='knowhow'"
@@ -98,6 +100,18 @@ _KNOWHOW_SOURCE_IDS = "SELECT id FROM sources WHERE source_type='knowhow'"
 # `groups`/`group_members`. Its rows are general tactics for HOW to search
 # rather than anything belonging to a notebook, so a copy inherits them by
 # simply living in the same deployment.
+#
+# Deliberately PRESENT but re-evaluated, not replayed: `notebook_bases`
+# (multi-domain base libraries — followups spec A6). The full rationale lives
+# in the SQLite twin's registry comment: a mount edge is the recipient's
+# retrieval scope (not access-control state, not process state), but it is
+# also not an authorization token, so the edges travel with the copy and are
+# re-judged against the DESTINATION notebook through
+# `valid_copied_mount_base_ids` below; edges invalid for the new owner are
+# dropped rather than carried greyed-out, and copy_notebook logs how many.
+# Same consequence here as there: `notebook_bases` is the one snapshot table
+# deliberately absent from `_COPY_VALIDATED_TABLES`, because unequal
+# source/destination row counts are precisely its contract.
 _COPY_SNAPSHOT_QUERIES: tuple[tuple[str, str], ...] = (
     # codex #659 R14 P1: liveness-filtered — see the SQLite twin's comment
     # for the full rationale (a tombstone landing between the route's token
@@ -106,6 +120,8 @@ _COPY_SNAPSHOT_QUERIES: tuple[tuple[str, str], ...] = (
     # one pins, so re-adding the predicate to each child-table query would
     # be redundant, not merely optional).
     ("notebooks", f"SELECT * FROM notebooks WHERE id=%s AND {NOTEBOOK_LIVE_SQL}"),
+    # 参考库挂载边——原样取出，有效性由服务层按新 owner 重判（见上面的登记段）。
+    ("notebook_bases", "SELECT * FROM notebook_bases WHERE notebook_id=%s"),
     ("sources", "SELECT * FROM sources WHERE notebook_id=%s"),
     (
         "source_paper_meta",
@@ -220,6 +236,7 @@ _COPY_VALIDATED_TABLES = (
     ("notebook_object_schemas", ""),
     ("knowhow_tables", ""),
     ("notebook_assets", ""),
+    # `notebook_bases` intentionally absent — see the registry comment above.
 )
 _COPY_VALIDATED_JOIN_TABLES = (
     (
@@ -643,6 +660,75 @@ class SharingStore:
         with self.database.connect() as connection:
             connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
             return self._copy_limit_violation(connection, notebook_id) is None
+
+    def valid_copied_mount_base_ids(
+        self, notebook_id: str, base_notebook_ids: Sequence[str]
+    ) -> set[str]:
+        """SQLite ``valid_copied_mount_base_ids`` 的镜像（followups spec A6）。
+
+        完整理由写在 SQLite 那一份：``notebook_id`` 是**目的地**笔记本，它的
+        哨兵行必须已**提交**（不只是"已插入"）——谓词要 join 这一行取
+        ``a.created_by``，而这里是在**另一条连接**上读它，未提交就等于不存在、
+        全部候选一律判无效。提交之后 ``created_by`` 即接收者、自身没有任何
+        成员/授权边，判据逐字
+        复用 ``MOUNT_VALID_EXPR``（import，不手拼——第二份副本正是
+        ``test_mount_sql_contract`` 要禁的东西）；FROM 子句取
+        ``mountable_notebooks`` 那一款而不是 ``MOUNT_JOIN``，因为此刻目的地
+        还没有任何 ``notebook_bases`` 行可供 join。
+        """
+        wanted = [nb_id for nb_id in dict.fromkeys(base_notebook_ids) if nb_id]
+        valid: set[str] = set()
+        if not wanted:
+            return valid
+        with self.database.connect() as connection:
+            for start in range(0, len(wanted), 400):
+                batch = wanted[start:start + 400]
+                placeholders = ",".join("%s" for _ in batch)
+                valid.update(
+                    row["id"]
+                    for row in connection.execute(
+                        "SELECT b.id AS id FROM notebooks b JOIN notebooks a ON a.id=%s "
+                        f"WHERE b.id <> a.id AND b.id IN ({placeholders}) "
+                        f"AND {MOUNT_VALID_EXPR}",
+                        (notebook_id, *batch),
+                    ).fetchall()
+                )
+        return valid
+
+    def insert_copied_mount_edges(
+        self, rows: Sequence[dict], *, chunk_size: int
+    ) -> int:
+        """SQLite ``insert_copied_mount_edges`` 的镜像（followups spec A6）。
+
+        完整理由见 SQLite 那一份：挂载边是深拷贝里**唯一**允许单行失败的表。
+        有效性判定与这里的插入不在同一条连接上，被挂库在两者之间被删掉时会
+        撞上 ``notebook_bases`` 外键违例；那等价于"这条边无效、被丢弃"，不该
+        把整本副本连同补偿回滚一起赔进去。返回真正落库的条数，缺口由调用方
+        计入 ``dropped``。
+
+        与 SQLite 的唯一差别在语句级恢复：PostgreSQL 的外键违例会把**整个
+        事务**置为 aborted，只有 SAVEPOINT 能把它收窄回单行（同
+        ``postgres/search.py`` 的 KNN 探针写法）。容忍面同样只到
+        ``ForeignKeyViolation``：其它异常照旧向上抛、照旧走补偿。
+        """
+        inserted = 0
+        for index in range(0, len(rows), chunk_size):
+            with self.database.write() as connection:
+                for data in rows[index : index + chunk_size]:
+                    connection.execute("SAVEPOINT copied_mount_edge")
+                    try:
+                        self.insert_row(
+                            connection,
+                            "notebook_bases",
+                            normalize_timestamp_row("notebook_bases", data),
+                        )
+                    except ForeignKeyViolation:
+                        connection.execute("ROLLBACK TO SAVEPOINT copied_mount_edge")
+                        connection.execute("RELEASE SAVEPOINT copied_mount_edge")
+                        continue
+                    connection.execute("RELEASE SAVEPOINT copied_mount_edge")
+                    inserted += 1
+        return inserted
 
     def insert_copy_rows(self, table: str, rows: Sequence[dict], *, chunk_size: int) -> None:
         if table not in _COPY_INSERT_TABLES:

@@ -15,8 +15,8 @@ Design under test:
   * The ON/OFF gate is the settings flag `knowhow_kg_node_retrieval_enabled`,
     read in `_federated_rx_graph._load` (graph_retrieval.py): flag OFF ⇒ the
     node meta carries NO table_id/rows ⇒ byte-identical cached graph.
-  * `render_subgraph_context(subgraph, id_offset, knowhow_enabled=True)` computes
-    the ref from the node's raw `{table_id, rows}` via the SHARED anchor helper
+  * `render_subgraph_context(subgraph, id_offset, knowhow_enabled=True, *,
+    active_notebook_id)` computes the ref from the node's raw `{table_id, rows}` via the SHARED anchor helper
     `evidence_context._knowhow_ref_from_payload` (len(rows)==1 rule — merged
     multi-row KOs stay None). `knowhow_enabled=False` forces None even for a
     single-row node (render-level off-switch, exercised below).
@@ -39,6 +39,9 @@ from app.services.sqlite_repository import SQLiteRepository
 from tests.model_testkit import bind_all_embedding_clients
 
 _FLAG = "knowhow_kg_node_retrieval_enabled"
+# The notebook an ask/report runs against; these synthetic nodes carry no
+# notebook_id, so every id_map entry normalises to "" regardless.
+ACTIVE_NB = "nb-active"
 
 
 def _set_flag(settings, value):
@@ -84,7 +87,8 @@ def test_render_single_row_knowhow_carries_ref():
     """A single-row knowhow KO node ⇒ id_map entry with a non-None knowhow ref
     ({table_id, row_id})."""
     node = _knowhow_node(["row-1"])
-    _ctx, id_map = render_subgraph_context([(node, None, None)], id_offset=0)
+    _ctx, id_map = render_subgraph_context(
+        [(node, None, None)], id_offset=0, active_notebook_id=ACTIVE_NB)
     ref = id_map["k1"]["knowhow"]
     assert ref is not None
     assert ref.table_id == "tbl-1"
@@ -95,7 +99,8 @@ def test_render_multi_row_merged_knowhow_none():
     """A KO merged across >1 row has no single unambiguous row ⇒ knowhow None
     (the shared helper's len(rows)==1 rule)."""
     node = _knowhow_node(["row-1", "row-2"])
-    _ctx, id_map = render_subgraph_context([(node, None, None)])
+    _ctx, id_map = render_subgraph_context(
+        [(node, None, None)], active_notebook_id=ACTIVE_NB)
     assert id_map["k1"]["knowhow"] is None
 
 
@@ -103,7 +108,8 @@ def test_render_plain_doc_ko_knowhow_none():
     """A plain (non-knowhow) KG node has no table_id/rows ⇒ knowhow None."""
     node = {"object_id": "A", "object_type": "formula",
             "name": "Node A", "tier": "personal"}
-    _ctx, id_map = render_subgraph_context([(node, None, None)])
+    _ctx, id_map = render_subgraph_context(
+        [(node, None, None)], active_notebook_id=ACTIVE_NB)
     assert "knowhow" in id_map["k1"]
     assert id_map["k1"]["knowhow"] is None
 
@@ -113,14 +119,16 @@ def test_render_knowhow_disabled_forces_none_even_single_row():
     (the render-level off-switch)."""
     node = _knowhow_node(["row-1"])
     _ctx, id_map = render_subgraph_context(
-        [(node, None, None)], knowhow_enabled=False)
+        [(node, None, None)], knowhow_enabled=False,
+        active_notebook_id=ACTIVE_NB)
     assert id_map["k1"]["knowhow"] is None
 
 
 def test_render_knowhow_missing_table_id_none():
     """rows present but no table_id ⇒ null-safe None (never raises)."""
     node = _knowhow_node(["row-1"], table_id="")
-    _ctx, id_map = render_subgraph_context([(node, None, None)])
+    _ctx, id_map = render_subgraph_context(
+        [(node, None, None)], active_notebook_id=ACTIVE_NB)
     assert id_map["k1"]["knowhow"] is None
 
 
@@ -136,7 +144,8 @@ def test_build_rx_graph_threads_knowhow_meta_into_payload():
     assert payload["table_id"] == "tbl-1"
     assert payload["rows"] == ["row-1"]
     # ...and the threaded payload renders to a non-None ref.
-    _ctx, id_map = render_subgraph_context([(dict(payload), None, None)])
+    _ctx, id_map = render_subgraph_context(
+        [(dict(payload), None, None)], active_notebook_id=ACTIVE_NB)
     assert id_map["k1"]["knowhow"].row_id == "row-1"
 
 
@@ -197,7 +206,8 @@ def test_federated_load_carries_knowhow_when_flag_on(kh_store, monkeypatch):
     payload = G[oid_to_idx[kh_oid]]
     assert payload.get("table_id") == "tbl-1"
     assert payload.get("rows") == ["row-1"]
-    _ctx, id_map = render_subgraph_context([(dict(payload), None, None)])
+    _ctx, id_map = render_subgraph_context(
+        [(dict(payload), None, None)], active_notebook_id=ACTIVE_NB)
     assert id_map["k1"]["knowhow"].row_id == "row-1"
 
 
@@ -212,6 +222,7 @@ def test_federated_load_omits_knowhow_when_flag_off(kh_store, monkeypatch):
     assert "table_id" not in payload
     assert "rows" not in payload
     # render still yields None ⇒ anchor.knowhow excluded (behavior unchanged).
-    _ctx, id_map = render_subgraph_context([(dict(payload), None, None)])
+    _ctx, id_map = render_subgraph_context(
+        [(dict(payload), None, None)], active_notebook_id=ACTIVE_NB)
     assert id_map["k1"]["knowhow"] is None
 

@@ -50,6 +50,12 @@ NOTEBOOK_SCOPED_TABLES = [
     "extraction_candidates", "articles", "article_claims", "conversations",
     "answers", "feedback", "ask_jobs", "kg_build_jobs", "reports", "memory_items",
     "knowhow_tables", "notebook_assets", "notebook_members", "agent_token_notebooks",
+    # v20 多领域基准库: 挂载边随笔记本走。⚠ 与 sharing_store 的**深拷贝**
+    # (followups spec A6) 语义刻意不同: 深拷贝造的是一本新 owner 的新笔记本,
+    # 所以它按新 owner 重判每条边、丢掉不成立的; 合并调和的是**同一本**笔记本
+    # 的两份副本(owner 与被挂库都是同一批行, 一起随合并进来), 边的有效性判据
+    # 与合并前逐字相同, 因此原样搬运。不要为了"对齐"而给任一侧加上另一侧的
+    # 行为。
     "notebook_bases",
     # v49 群组知识共享 P1: notebook_grants 直接带 notebook_id 列，与
     # notebook_members 同一形状——按 notebook_id IN (sec_nb) 筛即可。

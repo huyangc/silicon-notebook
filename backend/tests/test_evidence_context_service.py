@@ -380,9 +380,9 @@ def test_evidence_context_numeric_group_anchors_match_master():
         ("k1", "o1", "base"), ("k2", "o2", "personal")
     ]
     assert service.parse_anchors("mixed [k1, k999]", evidence) == []
-    # Task 14: 两条 evidence 都没带 "notebook_id" 键(render_subgraph_context 的
-    # 纯 graph-BFS 节点尚未填充这个键)——`.get` 必须安全回退空串,不抛 KeyError,
-    # 徽章優雅退回泛化 tier 文案。
+    # Task 14: 两条 evidence 都没带 "notebook_id" 键(记忆上下文等不填这个键的
+    # 供给方)——`.get` 必须安全回退空串,不抛 KeyError,徽章優雅退回泛化 tier
+    # 文案。A2 之后每个 id_map builder(含 render_subgraph_context)都会填。
     assert [anchor.notebook_id for anchor in anchors] == ["", ""]
 
 

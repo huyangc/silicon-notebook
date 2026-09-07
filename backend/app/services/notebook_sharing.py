@@ -95,6 +95,110 @@ def _reset_copied_notebook_row(
     )
 
 
+def _carry_valid_mount_edges(
+    store,
+    edges: list[dict],
+    *,
+    new_id: str,
+    new_owner_id: str,
+    now: str,
+    chunk_size: int,
+) -> None:
+    """Carry the source's reference-library mounts that are still valid for the
+    recipient, and drop (with a log line) the ones that are not.
+
+    多领域基准库 followups spec A6。挂载边是**接收者的检索参与集**——一本带着
+    参考库回答问题的库，副本若空手到达，同一个问题的答案会明显变差；但挂载边
+    同时**不是授权凭证**（``mount_sql`` 模块 docstring：有效性每次解析实时判定），
+    所以照抄源库的边会让副本挂着一批它的新 owner 永远读不到的死边。故：边随
+    副本走，但**按目的地重判**——``store.valid_copied_mount_base_ids`` 用
+    ``MOUNT_VALID_EXPR`` 以副本自身为挂载方求值，于是
+
+    * ``tier='base'`` 的公共知识库、以及带 ``everyone`` 授权边的库，恒随副本走；
+    * 私有库只在「副本的 owner 就是该库的 owner」时随走（自己拷自己的库）；
+    * 借入边只在接收者**自己**对该库有读权时随走（副本此刻无成员/授权边，
+      「未共享门」自然满足；分享给别人的那本副本一旦被再共享，边照常失效）。
+
+    ``created_at``/``created_by`` 改写成副本自己的——这批边是这次拷贝为新 owner
+    建立的配置，不是源库那次挂载的历史。无效边**丢弃**而不是像源库那样保留置灰：
+    源库上的灰边是 owner 自己做过、还可能恢复的配置，副本上的灰边则是接收者
+    从未做过、通常也永远恢复不了的配置，只会变成一行「已不可用的知识库」。
+
+    丢弃条数落**日志**：``copy_notebook`` 对外返回的是 ``NotebookSummary``，没有
+    可以扩展的拷贝结果形状，为一个诊断计数新开 API 字段不成比例。
+
+    **前置条件**：副本的哨兵 ``notebooks`` 行必须已经**提交**（不只是"已插入"）。
+    有效性判定跑在 store 自己的另一条连接上、且要 join 目的地这一行取
+    ``a.created_by``——未提交则读不到，全部候选一律判无效、边一条不剩。
+
+    判定与插入分属两条连接，所以中间存在一个跨库竞态：被挂库在这两步之间被删
+    掉时插入会撞外键。这条边因此不走 ``insert_copy_rows``，而走
+    ``store.insert_copied_mount_edges``——它逐行插入并把 ``notebook_bases`` 的
+    外键违例当成**又一条被丢弃的边**（返回真正落库的条数），而不是让一次无关的
+    删库把整本副本连同补偿回滚一起赔进去。
+    """
+    if not edges:
+        return
+    wanted = list(
+        dict.fromkeys(
+            row["base_notebook_id"] for row in edges if row.get("base_notebook_id")
+        )
+    )
+    valid = store.valid_copied_mount_base_ids(new_id, wanted)
+    carried = store.insert_copied_mount_edges(
+        [
+            {
+                "notebook_id": new_id,
+                "base_notebook_id": base_id,
+                "created_at": now,
+                "created_by": new_owner_id,
+            }
+            for base_id in wanted
+            if base_id in valid
+        ],
+        chunk_size=chunk_size,
+    )
+    dropped = len(wanted) - carried
+    if dropped:
+        _log.info(
+            "copy_notebook: 副本 %s 携带 %d 条挂载边，丢弃 %d 条对新 owner %s "
+            "无效的边（接收者可在副本里重新挂载他读得到的库）",
+            new_id, carried, dropped, new_owner_id,
+        )
+
+
+def _insert_copy_fts_mirrors(
+    store,
+    *,
+    new_id: str,
+    objects_out: list[dict],
+    chunks_out: list[dict],
+    chunk_size: int,
+) -> None:
+    """Fill the copy's SQLite FTS mirror tables (a no-op on PostgreSQL, whose
+    GIN/trigram indexes are maintained from the base rows — see that backend's
+    ``insert_fts_rows``).
+
+    Deprecated knowledge objects and name-less ones are skipped exactly as the
+    live KG write path skips them; a chunk mirrors its text verbatim.
+    """
+    kg_fts_rows = [
+        (data["id"], new_id, (json.loads(data["payload"]).get("name") or "").strip())
+        for data in objects_out
+        if data.get("status") != "deprecated"
+    ]
+    store.insert_fts_rows(
+        "INSERT INTO kg_objects_fts(object_id, notebook_id, name) VALUES (?, ?, ?)",
+        [row for row in kg_fts_rows if row[2]],
+        chunk_size=chunk_size,
+    )
+    store.insert_fts_rows(
+        "INSERT INTO chunks_fts(chunk_id, notebook_id, text) VALUES (?, ?, ?)",
+        [(data["id"], new_id, data.get("text") or "") for data in chunks_out],
+        chunk_size=chunk_size,
+    )
+
+
 class NotebookCopyService:
     """Deep-copy orchestration: ID remapping, chunked transactions through the
     store, filesystem copy and compensation ordering.
@@ -220,8 +324,12 @@ class NotebookCopyService:
                 new_owner_id=new_owner_id,
                 now=now,
             )
-            self._store.insert_copy_rows(
-                "notebooks", [notebook_row], chunk_size=chunk_size
+            # 哨兵行必须先**提交**（不只是"已插入"）：下一步的挂载有效性判定跑在
+            # store 的另一条连接上，还要 join 目的地这一行取 created_by。
+            self._store.insert_copy_rows("notebooks", [notebook_row], chunk_size=chunk_size)
+            _carry_valid_mount_edges(
+                self._store, snapshot["notebook_bases"], new_id=new_id,
+                new_owner_id=new_owner_id, now=now, chunk_size=chunk_size,
             )
 
             source_map: dict = {}
@@ -750,29 +858,9 @@ class NotebookCopyService:
                 "concept_clusters", clusters_out, chunk_size=chunk_size
             )
 
-            kg_fts_rows = [
-                (
-                    data["id"],
-                    new_id,
-                    (json.loads(data["payload"]).get("name") or "").strip(),
-                )
-                for data in objects_out
-                if data.get("status") != "deprecated"
-            ]
-            kg_fts_rows = [row for row in kg_fts_rows if row[2]]
-            self._store.insert_fts_rows(
-                "INSERT INTO kg_objects_fts(object_id, notebook_id, name) VALUES (?, ?, ?)",
-                kg_fts_rows,
-                chunk_size=chunk_size,
-            )
-
-            chunk_fts_rows = [
-                (data["id"], new_id, data.get("text") or "") for data in chunks_out
-            ]
-            self._store.insert_fts_rows(
-                "INSERT INTO chunks_fts(chunk_id, notebook_id, text) VALUES (?, ?, ?)",
-                chunk_fts_rows,
-                chunk_size=chunk_size,
+            _insert_copy_fts_mirrors(
+                self._store, new_id=new_id, objects_out=objects_out,
+                chunks_out=chunks_out, chunk_size=chunk_size,
             )
 
             self._store.validate_copy(source_notebook_id, new_id)

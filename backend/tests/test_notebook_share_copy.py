@@ -5,6 +5,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.core.config import Settings
+from app.repositories.sqlite.sharing_store import SharingStore
 from app.services.sqlite_repository import SQLiteRepository, _now
 
 
@@ -1443,3 +1444,262 @@ def test_join_route_rechecks_liveness_before_the_cached_400(
         _tombstone_then_cached_true,
     )
     assert client.post(f"/api/shared/{token}/join").status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# 多领域基准库 followups spec A6：深拷贝携带「对接收者仍有效」的挂载边
+# ---------------------------------------------------------------------------
+
+
+def _mount(repo, notebook_id, base_id, created_by="user-local"):
+    """直接写一条挂载边(绕过 replace_mounts 的候选校验)——测试要的正是
+    「源库上存在、但对接收者未必有效」这种边。"""
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO notebook_bases (notebook_id, base_notebook_id, created_at, created_by) "
+            "VALUES (?,?,?,?)",
+            (notebook_id, base_id, "2020-01-01T00:00:00", created_by),
+        )
+
+
+def _mounted(repo, notebook_id):
+    with repo._connect() as db:
+        return {
+            row["base_notebook_id"]
+            for row in db.execute(
+                "SELECT base_notebook_id FROM notebook_bases WHERE notebook_id=?",
+                (notebook_id,),
+            ).fetchall()
+        }
+
+
+def _seed_mount_fixture(repo):
+    """(source, public_base, recipient_private, stranger_private) —— 覆盖
+    MOUNT_VALID_EXPR 的三支:公共知识库 / 与接收者同 owner 的私有库 / 谁都没有
+    授权给接收者的私有库。源库挂着全部三本。"""
+    _mk_user(repo, "src-owner")
+    _mk_user(repo, "copy-owner")
+    _mk_user(repo, "lib-owner")
+    public = _mk_nb(repo, "public base", "lib-owner")
+    with repo._write() as db:
+        db.execute("UPDATE notebooks SET tier='base' WHERE id=?", (public,))
+    recipient_private = _mk_nb(repo, "recipient private", "copy-owner")
+    stranger_private = _mk_nb(repo, "stranger private", "src-owner")
+    source = _mk_nb(repo, "source", "src-owner")
+    for base in (public, recipient_private, stranger_private):
+        _mount(repo, source, base, created_by="src-owner")
+    return source, public, recipient_private, stranger_private
+
+
+def test_copy_carries_only_the_mounts_still_valid_for_the_recipient(repo):
+    """A6 钉子:深拷贝**携带**挂载边,但按新 owner 重判有效性。
+
+    公共知识库随每一次拷贝走;接收者自己 owner 的库随走;既非公共、接收者也
+    读不到的库被丢弃。把携带逻辑删掉(副本零挂载边)或改成照抄源库的边(三条
+    全在),两种变异都在这里报红。"""
+    source, public, recipient_private, stranger_private = _seed_mount_fixture(repo)
+
+    copied = repo.copy_notebook(
+        source, new_owner_id="copy-owner", new_name="copied"
+    )
+
+    assert _mounted(repo, copied.id) == {public, recipient_private}
+    assert stranger_private not in _mounted(repo, copied.id)
+    # 源库的边一条不动——拷贝只写目的地。
+    assert _mounted(repo, source) == {public, recipient_private, stranger_private}
+
+
+def test_copied_mount_edges_belong_to_the_new_owner(repo):
+    """携带来的边是**这次拷贝为新 owner 建立的配置**,不是源库那次挂载的历史:
+    created_by 改写成接收者,created_at 改写成拷贝时刻。"""
+    source, public, _recipient_private, _stranger = _seed_mount_fixture(repo)
+
+    copied = repo.copy_notebook(source, new_owner_id="copy-owner")
+
+    with repo._connect() as db:
+        row = db.execute(
+            "SELECT created_by, created_at FROM notebook_bases "
+            "WHERE notebook_id=? AND base_notebook_id=?",
+            (copied.id, public),
+        ).fetchone()
+    assert row["created_by"] == "copy-owner"
+    assert row["created_at"] != "2020-01-01T00:00:00"
+
+
+def test_copy_logs_how_many_mount_edges_it_dropped(repo, caplog):
+    """丢弃条数必须留痕:拷贝结果是一个普通 NotebookSummary,没有可扩展的形状,
+    所以「静默丢了一条边」与「本来就没有边」只能靠这条日志区分。"""
+    source, _public, _recipient_private, _stranger = _seed_mount_fixture(repo)
+
+    with caplog.at_level("INFO", logger="silicon_notebook.sharing"):
+        repo.copy_notebook(source, new_owner_id="copy-owner")
+
+    dropped_lines = [
+        record.getMessage()
+        for record in caplog.records
+        if "挂载边" in record.getMessage()
+    ]
+    assert len(dropped_lines) == 1
+    assert "携带 2 条挂载边" in dropped_lines[0]
+    assert "丢弃 1 条" in dropped_lines[0]
+
+
+def test_self_copy_keeps_every_mount_the_owner_could_already_use(repo, caplog):
+    """自己拷自己的库:同 owner 那一支恒真,边一条不丢,也不记丢弃日志。
+
+    「不记日志」与「一条不丢」是同一件事的两面,所以两句都断言:去掉服务层的
+    ``if dropped:`` 守卫(变成每次拷贝都记一行"丢弃 0 条")在这里报红。"""
+    _mk_user(repo, "solo")
+    base = _mk_nb(repo, "own base", "solo")
+    source = _mk_nb(repo, "own source", "solo")
+    _mount(repo, source, base, created_by="solo")
+
+    with caplog.at_level("INFO", logger="silicon_notebook.sharing"):
+        copied = repo.copy_notebook(source, new_owner_id="solo")
+
+    assert _mounted(repo, copied.id) == {base}
+    assert [r.getMessage() for r in caplog.records if "丢弃" in r.getMessage()] == []
+
+
+def test_half_copied_mount_edges_cannot_leak_past_compensation(repo, monkeypatch):
+    """挂载边紧跟哨兵行插入,失败补偿必须连它一起清干净——``compensate_copy``
+    删的是 ``status='copying'`` 的 notebooks 行,``notebook_bases`` 两列都是
+    ``ON DELETE CASCADE``(且 SQLite 侧 ``PRAGMA foreign_keys=ON``),所以边随行
+    级联消失。把级联当成理所当然的假设,这条测试就是它的钉子。"""
+    _mk_user(repo, "copy-owner")
+    _mk_user(repo, "lib-owner")
+    public = _mk_nb(repo, "public base", "lib-owner")
+    recipient_private = _mk_nb(repo, "recipient private", "copy-owner")
+    with repo._write() as db:
+        db.execute("UPDATE notebooks SET tier='base' WHERE id=?", (public,))
+    source = _seed_full_notebook(repo, owner="user-local")
+    for base in (public, recipient_private):
+        _mount(repo, source, base)
+
+    orig_insert_row = repo._insert_row
+    seen = {"bases": 0}
+
+    def boom_after_the_mounts(db, table, data):
+        if table == "notebook_bases":
+            seen["bases"] += 1
+        if table == "sources":
+            raise RuntimeError("simulated crash right after the mount edges")
+        return orig_insert_row(db, table, data)
+
+    monkeypatch.setattr(repo, "_insert_row", boom_after_the_mounts)
+    with pytest.raises(RuntimeError):
+        repo.copy_notebook(source, new_owner_id="copy-owner")
+
+    assert seen["bases"] == 2  # 边确实写过,不是「没写所以没泄漏」
+    with repo._connect() as db:
+        orphan = db.execute(
+            "SELECT COUNT(*) FROM notebook_bases WHERE notebook_id NOT IN "
+            "(SELECT id FROM notebooks)"
+        ).fetchone()[0]
+        copying = db.execute(
+            "SELECT COUNT(*) FROM notebook_bases nb JOIN notebooks n ON n.id=nb.notebook_id "
+            "WHERE n.status='copying'"
+        ).fetchone()[0]
+    assert orphan == 0
+    assert copying == 0
+
+
+def _insert_grant(repo, notebook_id, principal_type, principal_id, creator, gid):
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO notebook_grants "
+            "(id,notebook_id,principal_type,principal_id,role,created_by,created_at) "
+            "VALUES (?,?,?,?,'viewer',?,?)",
+            (gid, notebook_id, principal_type, principal_id, creator, _now()),
+        )
+
+
+def _add_member(repo, notebook_id, user_id):
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO notebook_members (notebook_id, user_id, role, added_at) "
+            "VALUES (?,?, 'reader', ?)",
+            (notebook_id, user_id, _now()),
+        )
+
+
+def test_everyone_granted_library_travels_with_every_copy(repo):
+    """MOUNT_VALID_EXPR 第 3 支(``everyone`` 授权)在拷贝里也成立。
+
+    与 `tier='base'` 同理:受众本来就是全员,接收者直接打开也读得到,随副本走
+    不多给任何人任何东西。把重判缩成「公共库 ∨ 同 owner」两支,这里报红。"""
+    _mk_user(repo, "src-owner")
+    _mk_user(repo, "copy-owner")
+    _mk_user(repo, "lib-owner")
+    open_base = _mk_nb(repo, "everyone-granted", "lib-owner")
+    _insert_grant(repo, open_base, "everyone", "", "lib-owner", "gr-everyone")
+    source = _mk_nb(repo, "source", "src-owner")
+    _mount(repo, source, open_base, created_by="src-owner")
+
+    copied = repo.copy_notebook(source, new_owner_id="copy-owner")
+
+    assert _mounted(repo, copied.id) == {open_base}
+
+
+def test_borrowed_edges_travel_only_on_the_recipients_own_read_access(repo):
+    """MOUNT_VALID_EXPR 第 4 支(借入读权)在拷贝里的判法:凭**接收者自己**的
+    读权,不凭源库 owner 的。
+
+    三本库同挂在源库上,只有接收者自己够得到的两本随副本走:一本经
+    `notebook_members`、一本经点名 `user` 授权边;源库 owner 借来的那本(授权给
+    的是 src-owner,不是接收者)被丢弃——按源库 owner 判,它会被错误地带上。
+
+    未共享门那一半同时钉住:源库自己**已被共享**(有成员行),而
+    `_MOUNTER_NOT_SHARED_EXPR` 判的是**目的地**副本(它没有任何成员/授权边),
+    所以借入边照走;把重判改成以源库为挂载方,这两条边会被门关掉。"""
+    _mk_user(repo, "src-owner")
+    _mk_user(repo, "copy-owner")
+    _mk_user(repo, "lib-owner")
+    _mk_user(repo, "bystander")
+    by_member = _mk_nb(repo, "borrowed via membership", "lib-owner")
+    by_grant = _mk_nb(repo, "borrowed via named grant", "lib-owner")
+    owners_own_loan = _mk_nb(repo, "lent to the SOURCE owner only", "lib-owner")
+    _add_member(repo, by_member, "copy-owner")
+    _insert_grant(repo, by_grant, "user", "copy-owner", "lib-owner", "gr-to-copy-owner")
+    _insert_grant(repo, owners_own_loan, "user", "src-owner", "lib-owner", "gr-to-src")
+    source = _mk_nb(repo, "source", "src-owner")
+    _add_member(repo, source, "bystander")   # 源库已被共享:门只看目的地
+    for base in (by_member, by_grant, owners_own_loan):
+        _mount(repo, source, base, created_by="src-owner")
+
+    copied = repo.copy_notebook(source, new_owner_id="copy-owner")
+
+    assert _mounted(repo, copied.id) == {by_member, by_grant}
+
+
+def test_a_base_deleted_between_the_check_and_the_insert_is_one_more_drop(
+    repo, monkeypatch, caplog,
+):
+    """跨库外键竞态(评审 P2):有效性判定与插入不在同一条连接上,被挂库在这两步
+    之间被删掉时,``notebook_bases`` 的外键违例只算**又丢了一条边**。
+
+    把 store 的 ``insert_copied_mount_edges`` 退回 ``insert_copy_rows``(整批插、
+    不容忍单行外键违例),这条测试报红:IntegrityError 会冒到 copy_notebook 外面,
+    整本副本连同补偿回滚一起赔进去。"""
+    source, public, recipient_private, _stranger = _seed_mount_fixture(repo)
+    original = SharingStore.valid_copied_mount_base_ids
+
+    def delete_the_public_base_after_judging(store_self, notebook_id, base_ids):
+        valid = original(store_self, notebook_id, base_ids)
+        with repo._write() as db:
+            db.execute("DELETE FROM notebooks WHERE id=?", (public,))
+        return valid
+
+    monkeypatch.setattr(
+        SharingStore,
+        "valid_copied_mount_base_ids",
+        delete_the_public_base_after_judging,
+    )
+    with caplog.at_level("INFO", logger="silicon_notebook.sharing"):
+        copied = repo.copy_notebook(source, new_owner_id="copy-owner")
+
+    assert _mounted(repo, copied.id) == {recipient_private}
+    lines = [r.getMessage() for r in caplog.records if "挂载边" in r.getMessage()]
+    assert len(lines) == 1
+    assert "携带 1 条挂载边" in lines[0]
+    assert "丢弃 2 条" in lines[0]

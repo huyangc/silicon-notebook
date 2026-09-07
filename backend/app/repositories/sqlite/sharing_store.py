@@ -22,6 +22,7 @@ from app.repositories.sqlite.access_sql import (
 )
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.knowhow_history_store import record_change
+from app.repositories.sqlite.mount_sql import MOUNT_VALID_EXPR
 
 # knowhow-table content, PR-2+3 Task 13: knowledge_objects/knowledge_relations
 # derived FROM a knowhow hidden source stay EXCLUDED from a deep copy — they
@@ -114,6 +115,35 @@ _KNOWHOW_SOURCE_IDS = "SELECT id FROM sources WHERE source_type = 'knowhow'"
 # covers `groups`/`group_members`. Its rows are general tactics for HOW to
 # search rather than anything belonging to a notebook, so a copy inherits them
 # by simply existing in the same deployment.
+#
+# Deliberately PRESENT but re-evaluated, not replayed: `notebook_bases`
+# (multi-domain base libraries, schema v20 — followups spec A6). A mount edge
+# is not access-control state and not process state: it is the recipient's
+# retrieval scope, the one piece of configuration that makes a copied library
+# answer questions the way the original did, so a copy that silently arrived
+# with an empty participant set would give visibly worse answers than the
+# notebook it was copied from. But an edge is also not an authorization token
+# (`mount_sql`'s module docstring: validity is judged live at every
+# participant-set resolution), so replaying the source's edge list verbatim
+# would leave the copy carrying permanently-dead edges to libraries its new
+# owner can never read. The snapshot therefore takes the source's edges here
+# and `NotebookCopyService.copy_notebook` re-evaluates each one against the
+# DESTINATION notebook through `valid_copied_mount_base_ids` below — public
+# `tier='base'` libraries and `everyone`-granted ones survive every copy,
+# a privately-owned library survives only a copy whose owner still owns it,
+# and a borrowed edge survives only if the recipient holds that read access
+# in their own right. Invalid edges are dropped (not carried greyed-out like
+# `list_mount_edges` does on the SOURCE): a greyed edge on the source is the
+# owner's own configuration, temporarily inactive and recoverable, whereas a
+# dropped edge on a copy is configuration the recipient never made and
+# usually can never revive — the recipient re-mounts what they can reach.
+# The count of dropped edges is logged by copy_notebook (there is no copy
+# result shape to carry it: the API returns a plain `NotebookSummary`).
+#
+# ⚠ `notebook_bases` is therefore the ONE snapshot table deliberately absent
+# from `_COPY_VALIDATED_TABLES` below: that check asserts source/destination
+# row PARITY, and this table's whole contract is that the two counts may
+# legitimately differ. Do not "fix" the omission by adding it there.
 _COPY_SNAPSHOT_QUERIES: tuple[tuple[str, str], ...] = (
     # codex #659 R14 P1: liveness-filtered — a tombstone landing between the
     # route's token resolution and this snapshot must stop the copy here,
@@ -127,6 +157,8 @@ _COPY_SNAPSHOT_QUERIES: tuple[tuple[str, str], ...] = (
     # one row's liveness (checked in the SAME snapshot) is definitionally
     # what every other row in this dict is consistent with.
     ("notebooks", f"SELECT * FROM notebooks WHERE id = ? AND {NOTEBOOK_LIVE_SQL}"),
+    # 参考库挂载边——原样取出，有效性由服务层按新 owner 重判（见上面的登记段）。
+    ("notebook_bases", "SELECT * FROM notebook_bases WHERE notebook_id = ?"),
     ("sources", "SELECT * FROM sources WHERE notebook_id = ?"),
     (
         # 1:1 with sources (PK = source_id) — joined the same way as the
@@ -237,6 +269,8 @@ _COPY_SNAPSHOT_QUERIES: tuple[tuple[str, str], ...] = (
 # with the knowhow-exclusion predicate (if any) that matches its snapshot
 # query above. Applied to BOTH source and destination counts: a no-op on
 # "" entries and the real filter on the still-excluded KO/relation legs.
+# `notebook_bases` is snapshotted but intentionally NOT listed here — see its
+# paragraph in the registry comment above: unequal counts are its contract.
 _COPY_VALIDATED_TABLES: tuple[tuple[str, str], ...] = (
     # PR-2+3 Task 13 makes the knowhow hidden source + its chunks travel WITH
     # the copy (snapshot `sources`/`chunks` above carry no knowhow exclusion),
@@ -716,6 +750,88 @@ class SharingStore:
         with self.database.connect() as db:
             db.execute("BEGIN")
             return self._copy_limit_violation(db, notebook_id) is None
+
+    def valid_copied_mount_base_ids(
+        self, notebook_id: str, base_notebook_ids: Sequence[str]
+    ) -> set[str]:
+        """Which of ``base_notebook_ids`` ``notebook_id`` may legitimately mount.
+
+        The deep copy's mount-edge filter (followups spec A6): ``notebook_id``
+        is the DESTINATION notebook, whose sentinel row must already be
+        **committed** — not merely inserted — when this runs, because the
+        predicate joins that ``notebooks`` row for ``a.created_by`` and reads
+        it on a DIFFERENT connection than the one that wrote it; an uncommitted
+        sentinel is simply not there and every candidate would judge invalid.
+        Committed, its ``created_by`` is the recipient and it carries no
+        members/grants of its own, so the answer is exactly
+        ``MOUNT_VALID_EXPR`` — imported, never re-spelled,
+        because a second hand-written copy of that predicate is what
+        ``test_mount_sql_contract`` exists to forbid and what a drift here
+        would turn into "the copy shows a library it cannot actually search".
+
+        FROM-clause shape is `mountable_notebooks`', not ``MOUNT_JOIN``: the
+        rows being judged are candidate libraries, not existing edge rows —
+        the destination has no ``notebook_bases`` rows yet at this point, so
+        joining through them would return nothing. ``MOUNT_VALID_EXPR``
+        consumes no positional parameter of its own (mount_sql's contract),
+        so the only binds here are the mounter id and the candidate ids.
+
+        Batched at 400 ids per statement to stay clear of SQLite's variable
+        limit; a real notebook mounts a handful, the bound is defensive.
+        """
+        wanted = [nb_id for nb_id in dict.fromkeys(base_notebook_ids) if nb_id]
+        valid: set[str] = set()
+        if not wanted:
+            return valid
+        with self.database.connect() as db:
+            for start in range(0, len(wanted), 400):
+                batch = wanted[start:start + 400]
+                placeholders = ",".join("?" for _ in batch)
+                valid.update(
+                    row["id"]
+                    for row in db.execute(
+                        "SELECT b.id AS id FROM notebooks b JOIN notebooks a ON a.id = ? "
+                        f"WHERE b.id != a.id AND b.id IN ({placeholders}) "
+                        f"AND {MOUNT_VALID_EXPR}",
+                        (notebook_id, *batch),
+                    ).fetchall()
+                )
+        return valid
+
+    def insert_copied_mount_edges(
+        self, rows: Sequence[dict], *, chunk_size: int
+    ) -> int:
+        """Insert the deep copy's carried mount edges; return how many landed.
+
+        Deliberately NOT ``insert_copy_rows``: this is the one copied table
+        where a single row may fail without failing the copy. Validity is
+        judged by ``valid_copied_mount_base_ids`` on a different connection
+        than the one inserting here, so a base notebook deleted in between
+        arrives as a ``notebook_bases`` foreign-key violation. For every other
+        copied table that would rightly abort the copy; for this one it must
+        not — an edge is the recipient's retrieval scope, not the notebook's
+        substance, and destroying the whole copy (plus a full compensation
+        rollback) because some unrelated library was deleted mid-copy trades a
+        diagnostic-grade problem for a total one. Such a row is exactly one
+        more DROPPED edge, outcome-identical to the base having been deleted a
+        moment earlier, and the caller counts the shortfall as such.
+
+        The tolerance is deliberately narrow — ``IntegrityError`` on this one
+        table only. SQLite fails the offending statement, not the transaction,
+        so the rest of the chunk still commits; anything else (including the
+        failure injection the compensation test drives through the
+        ``_insert_row`` seat) still propagates and still compensates the copy.
+        """
+        inserted = 0
+        for index in range(0, len(rows), chunk_size):
+            with self.database.write() as db:
+                for data in rows[index:index + chunk_size]:
+                    try:
+                        self.insert_row(db, "notebook_bases", data)
+                    except sqlite3.IntegrityError:
+                        continue
+                    inserted += 1
+        return inserted
 
     def insert_copy_rows(
         self,

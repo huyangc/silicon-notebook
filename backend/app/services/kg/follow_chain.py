@@ -16,6 +16,7 @@ import json
 import math
 from typing import Iterable, Mapping, Optional, Sequence
 
+from app.domain.citation_origin import foreign_notebook_id
 from app.domain.graph import (
     ChainHop,
     FollowChainResult,
@@ -589,7 +590,10 @@ def render_follow_chain_context(
                 # Own-notebook hop -> "" (matches the raw_origin convention);
                 # a genuinely foreign (mounted-base) hop passes its real id
                 # through, letting the frontend badge resolve a library name.
-                "notebook_id": hop.notebook_id if hop.notebook_id != active_notebook_id else "",
+                # Single definition of the rule: domain/citation_origin.py.
+                "notebook_id": foreign_notebook_id(
+                    hop.notebook_id, active_notebook_id
+                ),
                 # Extra metadata is retained for relation-aware clients.  The
                 # existing AnswerAnchor parser simply ignores unknown fields.
                 "source_id": str(primary.get("source_id") or ""),
