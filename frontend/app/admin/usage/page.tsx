@@ -1,6 +1,9 @@
 "use client";
 
-import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState,
+  type RefObject,
+} from "react";
 import { fetchMe } from "../../auth.ts";
 import { clampPopoverLeft } from "../../effort-picker-logic";
 import { PageHeader } from "../../components/PageHeader.tsx";
@@ -50,19 +53,50 @@ function initialSheet(): UsageSheet {
   return value === "questions" || value === "issues" ? value : "users";
 }
 
+// 动作结果反馈(AGENTS.md「Interactive feedback」):结果落在触发它的控件旁,而不是
+// 页面顶部横幅——横幅在长表上会滚出视口、离指针落点远,第二次点击时文案原样重复,
+// 真实生效反而读成「没反应」。到点自清,时长与 admin/extensions 的行内错误同一量级。
+const FEEDBACK_TTL_MS = 6000;
+
+type Notice = { kind: "ok" | "error"; text: string };
+type RowNoticeCell = "role" | "limit" | "password";
+type RowNotice = Notice & { userId: string; cell: RowNoticeCell };
+
+function CellFeedback({ notice }: { notice: Notice }) {
+  return (
+    <p
+      className={`usage-cell-feedback usage-cell-feedback-${notice.kind}`}
+      role={notice.kind === "error" ? "alert" : "status"}
+    >
+      {notice.text}
+    </p>
+  );
+}
+
+/** 反馈到点自清:notice 一变就重挂定时器,cleanup 顺带取消旧的(镜像 extensions 页)。 */
+function useAutoClear<T>(value: T | null, clear: () => void) {
+  useEffect(() => {
+    if (value === null) return;
+    const timer = setTimeout(clear, FEEDBACK_TTL_MS);
+    return () => clearTimeout(timer);
+  }, [value, clear]);
+}
+
 type SortableHeaderProps = {
   label: string;
   sortKey: AdminUserSortKey;
   activeKey: AdminUserSortKey;
   direction: SortDirection;
   onSort: (key: AdminUserSortKey) => void;
+  /** 数字列传 "num":表头与单元格一起右对齐。 */
+  align?: "num";
 };
 
-function SortableHeader({ label, sortKey, activeKey, direction, onSort }: SortableHeaderProps) {
+function SortableHeader({ label, sortKey, activeKey, direction, onSort, align }: SortableHeaderProps) {
   const active = activeKey === sortKey;
   const ariaSort = active ? (direction === "asc" ? "ascending" : "descending") : "none";
   return (
-    <th aria-sort={ariaSort}>
+    <th aria-sort={ariaSort} className={align === "num" ? "usage-col-num" : undefined}>
       <button
         type="button"
         className={`usage-sort-button${active ? " usage-sort-button-active" : ""}`}
@@ -81,42 +115,26 @@ function SortableHeader({ label, sortKey, activeKey, direction, onSort }: Sortab
 const LIMIT_POPOVER_MARGIN = 8;
 const LIMIT_POPOVER_GAP = 6;
 
-type UploadLimitCellProps = {
-  user: AdminUserUsage;
-  /** 本行处于编辑态(弹出层打开)。 */
-  editing: boolean;
-  /** 其他行正在编辑,本行入口暂不可点。 */
-  lockedByOther: boolean;
-  /** 本行的保存/重置请求进行中。 */
+type AnchoredPopoverOptions = {
+  open: boolean;
+  /** 请求进行中:点外部 / Esc 不关,避免丢掉 pending 反馈。 */
   pending: boolean;
-  /** 任一行请求进行中(入口统一禁点,镜像旧行为)。 */
-  anyPending: boolean;
-  input: string;
-  onInput: (value: string) => void;
-  onOpen: () => void;
+  anchorRef: RefObject<HTMLElement | null>;
+  popoverRef: RefObject<HTMLElement | null>;
   onCancel: () => void;
-  onSave: () => void;
-  onReset: () => void;
 };
 
 /**
- * 文档上限单元格:查看态常驻「数值 + 标签 + 编辑」,编辑控件放进锚定在按钮下方的
- * 浮动弹出层。此前编辑态在单元格里内联展开(输入框 + 三个按钮),会把整张表顶宽、
- * 出现横向滚动条,末尾按钮被截在可视区外——弹出层不占表格布局,行宽在两态间不变。
+ * 锚定弹出层的定位与关闭:定位到锚点下方并夹回视口(放不下时翻到上方),
+ * scroll / resize / 布局位移时重算;点外部或 Esc 关闭(镜像 EffortPicker)。
+ * 文档上限与密码重置两个单元格共用。返回 null 表示尚未量出位置(首帧绘制前由
+ * layout effect 填上;jsdom 量不出宽度时保持 CSS 默认位)。
  */
-function UploadLimitCell({
-  user, editing, lockedByOther, pending, anyPending,
-  input, onInput, onOpen, onCancel, onSave, onReset,
-}: UploadLimitCellProps) {
-  const anchorRef = useRef<HTMLDivElement | null>(null);
-  const popoverRef = useRef<HTMLDivElement | null>(null);
-  // null = 尚未量出位置(首帧绘制前由 layout effect 填上;jsdom 量不出宽度时保持 CSS 默认位)。
+function useAnchoredPopover({ open, pending, anchorRef, popoverRef, onCancel }: AnchoredPopoverOptions) {
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
 
-  // 打开时量一次锚点与弹出层,定位到「编辑」按钮下方并夹回视口;表格横向滚动、页面
-  // 滚动或窗口变化都会挪动锚点,所以 scroll(捕获)/resize 时重算。
   useLayoutEffect(() => {
-    if (!editing) {
+    if (!open) {
       setPos(null);
       return;
     }
@@ -151,8 +169,8 @@ function UploadLimitCell({
     sync();
     window.addEventListener("resize", sync);
     window.addEventListener("scroll", sync, true);
-    // 无滚动/缩放的布局位移也要跟:校验/请求横幅插到表格上方、上方行展开笔记本清单
-    // 都会把锚点向下推(codex R1 P2)。这些都会改变 body 高度,观察 body 尺寸即可覆盖;
+    // 无滚动/缩放的布局位移也要跟:上方行展开笔记本清单、控件旁出现反馈文案都会把
+    // 锚点向下推(codex R1 P2)。这些都会改变 body 高度,观察 body 尺寸即可覆盖;
     // 弹出层自身也观察——「保存」变「保存中…」会改宽度,右对齐的夹取要重算。
     const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(sync);
     if (observer) {
@@ -164,11 +182,10 @@ function UploadLimitCell({
       window.removeEventListener("scroll", sync, true);
       observer?.disconnect();
     };
-  }, [editing]);
+  }, [open, anchorRef, popoverRef]);
 
-  // 点外部 / Esc 关闭(镜像 EffortPicker);请求进行中不关,避免丢掉 pending 反馈。
   useEffect(() => {
-    if (!editing) return;
+    if (!open) return;
     function handlePointerDown(event: PointerEvent) {
       if (pending) return;
       const target = event.target;
@@ -185,70 +202,190 @@ function UploadLimitCell({
       window.removeEventListener("pointerdown", handlePointerDown);
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [editing, pending, onCancel]);
+  }, [open, pending, onCancel, anchorRef, popoverRef]);
+
+  return pos;
+}
+
+type UploadLimitCellProps = {
+  user: AdminUserUsage;
+  /** 本行处于编辑态(弹出层打开)。 */
+  editing: boolean;
+  /** 其他行正在编辑,本行入口暂不可点。 */
+  lockedByOther: boolean;
+  /** 本行的保存/重置请求进行中。 */
+  pending: boolean;
+  /** 任一行请求进行中(入口统一禁点,镜像旧行为)。 */
+  anyPending: boolean;
+  /** 本行本列的动作结果;编辑态时显示在弹出层内,否则显示在入口按钮下方。 */
+  notice: Notice | null;
+  input: string;
+  onInput: (value: string) => void;
+  onOpen: () => void;
+  onCancel: () => void;
+  onSave: () => void;
+  onReset: () => void;
+};
+
+/**
+ * 文档上限单元格:查看态常驻「数值 + 标签 + 编辑」,编辑控件放进锚定在按钮下方的
+ * 浮动弹出层。此前编辑态在单元格里内联展开(输入框 + 三个按钮),会把整张表顶宽、
+ * 出现横向滚动条,末尾按钮被截在可视区外——弹出层不占表格布局,行宽在两态间不变。
+ */
+function UploadLimitCell({
+  user, editing, lockedByOther, pending, anyPending, notice,
+  input, onInput, onOpen, onCancel, onSave, onReset,
+}: UploadLimitCellProps) {
+  const anchorRef = useRef<HTMLDivElement | null>(null);
+  const popoverRef = useRef<HTMLDivElement | null>(null);
+  const pos = useAnchoredPopover({ open: editing, pending, anchorRef, popoverRef, onCancel });
 
   return (
-    <div className="usage-limit-view" ref={anchorRef}>
-      <span className="usage-limit-value">{user.upload_limit}</span>
-      <span className={`usage-limit-tag${user.upload_limit_overridden ? " usage-limit-tag-custom" : ""}`}>
-        {user.upload_limit_overridden ? "自定义" : "默认"}
-      </span>
-      <button
-        type="button"
-        className={`usage-role-button${editing ? " usage-role-button-open" : ""}`}
-        disabled={anyPending || lockedByOther}
-        aria-haspopup="dialog"
-        aria-expanded={editing}
-        onClick={() => (editing ? onCancel() : onOpen())}
-      >编辑</button>
-      {editing && (
-        <div
-          className="usage-limit-popover"
-          role="dialog"
-          aria-label={`设置 ${user.username} 的文档上限`}
-          ref={popoverRef}
-          style={pos === null ? undefined : { left: pos.left, top: pos.top }}
-        >
-          <div className="usage-limit-popover-title">文档上限 · {user.username}</div>
-          <div className="usage-limit-popover-row">
-            <input
-              className="usage-limit-input usage-limit-popover-input"
-              type="number"
-              min={1}
-              max={100000}
-              value={input}
-              disabled={pending}
-              autoFocus
-              aria-label={`${user.username} 的文档上限`}
-              onChange={(event) => onInput(event.target.value)}
-              onKeyDown={(event) => { if (event.key === "Enter") onSave(); }}
-            />
-            <button
-              type="button"
-              className="usage-role-button usage-role-button-confirm"
-              disabled={pending}
-              onClick={onSave}
-            >
-              {pending ? "保存中…" : "保存"}
-            </button>
+    <div className="usage-cell-stack">
+      <div className="usage-limit-view" ref={anchorRef}>
+        <span className="usage-limit-value">{user.upload_limit}</span>
+        <span className={`usage-limit-tag${user.upload_limit_overridden ? " usage-limit-tag-custom" : ""}`}>
+          {user.upload_limit_overridden ? "自定义" : "默认"}
+        </span>
+        <button
+          type="button"
+          className={`usage-role-button${editing ? " usage-role-button-open" : ""}`}
+          disabled={anyPending || lockedByOther}
+          aria-haspopup="dialog"
+          aria-expanded={editing}
+          onClick={() => (editing ? onCancel() : onOpen())}
+        >编辑</button>
+        {editing && (
+          <div
+            className="usage-limit-popover"
+            role="dialog"
+            aria-label={`设置 ${user.username} 的文档上限`}
+            ref={popoverRef}
+            style={pos === null ? undefined : { left: pos.left, top: pos.top }}
+          >
+            <div className="usage-limit-popover-title">文档上限 · {user.username}</div>
+            <div className="usage-limit-popover-row">
+              <input
+                className="usage-limit-input usage-limit-popover-input"
+                type="number"
+                min={1}
+                max={100000}
+                value={input}
+                disabled={pending}
+                autoFocus
+                aria-label={`${user.username} 的文档上限`}
+                onChange={(event) => onInput(event.target.value)}
+                onKeyDown={(event) => { if (event.key === "Enter") onSave(); }}
+              />
+              <button
+                type="button"
+                className="usage-role-button usage-role-button-confirm"
+                disabled={pending}
+                onClick={onSave}
+              >
+                {pending ? "保存中…" : "保存"}
+              </button>
+            </div>
+            <div className="usage-limit-popover-row">
+              <button
+                type="button"
+                className="usage-role-button"
+                disabled={pending}
+                title="恢复为默认文档上限"
+                onClick={onReset}
+              >重置默认</button>
+              <button
+                type="button"
+                className="usage-role-button"
+                disabled={pending}
+                onClick={onCancel}
+              >取消</button>
+            </div>
+            {notice && <CellFeedback notice={notice} />}
           </div>
-          <div className="usage-limit-popover-row">
-            <button
-              type="button"
-              className="usage-role-button"
-              disabled={pending}
-              title="恢复为默认文档上限"
-              onClick={onReset}
-            >重置默认</button>
-            <button
-              type="button"
-              className="usage-role-button"
-              disabled={pending}
-              onClick={onCancel}
-            >取消</button>
+        )}
+      </div>
+      {!editing && notice && <CellFeedback notice={notice} />}
+    </div>
+  );
+}
+
+type ResetPasswordCellProps = {
+  user: AdminUserUsage;
+  editing: boolean;
+  lockedByOther: boolean;
+  pending: boolean;
+  anyPending: boolean;
+  notice: Notice | null;
+  input: string;
+  onInput: (value: string) => void;
+  onOpen: () => void;
+  onCancel: () => void;
+  onSubmit: () => void;
+};
+
+/** 密码重置单元格:与文档上限同形——入口按钮常驻,输入框与确认放进锚定弹出层。 */
+function ResetPasswordCell({
+  user, editing, lockedByOther, pending, anyPending, notice,
+  input, onInput, onOpen, onCancel, onSubmit,
+}: ResetPasswordCellProps) {
+  const anchorRef = useRef<HTMLDivElement | null>(null);
+  const popoverRef = useRef<HTMLDivElement | null>(null);
+  const pos = useAnchoredPopover({ open: editing, pending, anchorRef, popoverRef, onCancel });
+
+  return (
+    <div className="usage-cell-stack">
+      <div className="usage-limit-view" ref={anchorRef}>
+        <button
+          type="button"
+          className={`usage-role-button${editing ? " usage-role-button-open" : ""}`}
+          disabled={anyPending || lockedByOther}
+          aria-haspopup="dialog"
+          aria-expanded={editing}
+          onClick={() => (editing ? onCancel() : onOpen())}
+        >重置密码</button>
+        {editing && (
+          <div
+            className="usage-limit-popover"
+            role="dialog"
+            aria-label={`重置 ${user.username} 的密码`}
+            ref={popoverRef}
+            style={pos === null ? undefined : { left: pos.left, top: pos.top }}
+          >
+            <div className="usage-limit-popover-title">重置密码 · {user.username}</div>
+            <div className="usage-limit-popover-row">
+              <input
+                className="usage-limit-input usage-limit-input-password"
+                type="password"
+                autoComplete="new-password"
+                value={input}
+                disabled={pending}
+                autoFocus
+                aria-label={`${user.username} 的新密码`}
+                onChange={(event) => onInput(event.target.value)}
+                onKeyDown={(event) => { if (event.key === "Enter") onSubmit(); }}
+              />
+              <button
+                type="button"
+                className="usage-role-button usage-role-button-confirm"
+                disabled={pending}
+                onClick={onSubmit}
+              >
+                {pending ? "重置中…" : "确认重置"}
+              </button>
+              <button
+                type="button"
+                className="usage-role-button"
+                disabled={pending}
+                onClick={onCancel}
+              >取消</button>
+            </div>
+            <span className="usage-settings-hint">重置后该用户的所有浏览器会话将被登出。</span>
+            {notice && <CellFeedback notice={notice} />}
           </div>
-        </div>
-      )}
+        )}
+      </div>
+      {!editing && notice && <CellFeedback notice={notice} />}
     </div>
   );
 }
@@ -261,23 +398,28 @@ export default function AdminUsagePage() {
   const [currentUserId, setCurrentUserId] = useState("");
   const [confirmingRole, setConfirmingRole] = useState<{ userId: string; role: AdminUserRole } | null>(null);
   const [rolePendingId, setRolePendingId] = useState("");
-  const [roleNotice, setRoleNotice] = useState<{ kind: "ok" | "error"; message: string } | null>(null);
   const [uploadLimitDefault, setUploadLimitDefault] = useState<number | null>(null);
   const [defaultInput, setDefaultInput] = useState("");
   const [defaultSaving, setDefaultSaving] = useState(false);
+  const [defaultNotice, setDefaultNotice] = useState<Notice | null>(null);
   const [editingLimitId, setEditingLimitId] = useState("");
   const [limitInput, setLimitInput] = useState("");
   const [limitPendingId, setLimitPendingId] = useState("");
-  const [limitNotice, setLimitNotice] = useState<{ kind: "ok" | "error"; message: string } | null>(null);
   const [resettingId, setResettingId] = useState("");
   const [resetInput, setResetInput] = useState("");
   const [resetPendingId, setResetPendingId] = useState("");
-  const [resetNotice, setResetNotice] = useState<{ kind: "ok" | "error"; message: string } | null>(null);
+  // 行级动作(权限 / 文档上限 / 密码)的结果,同一时刻只保留最近一条,落在对应行对应列。
+  const [rowNotice, setRowNotice] = useState<RowNotice | null>(null);
   const [sortKey, setSortKey] = useState<AdminUserSortKey>("created_at");
   const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState<number>(PAGE_SIZE_OPTIONS[0]);
   const [sheet, setSheet] = useState<UsageSheet>(initialSheet);
+
+  const clearDefaultNotice = useMemo(() => () => setDefaultNotice(null), []);
+  const clearRowNotice = useMemo(() => () => setRowNotice(null), []);
+  useAutoClear(defaultNotice, clearDefaultNotice);
+  useAutoClear(rowNotice, clearRowNotice);
 
   useEffect(() => {
     (async () => {
@@ -333,9 +475,13 @@ export default function AdminUsagePage() {
     }
   }
 
+  function noticeFor(userId: string, cell: RowNoticeCell): Notice | null {
+    return rowNotice && rowNotice.userId === userId && rowNotice.cell === cell ? rowNotice : null;
+  }
+
   async function submitRoleChange(target: AdminUserUsage, role: AdminUserRole) {
     setRolePendingId(target.id);
-    setRoleNotice(null);
+    setRowNotice(null);
     try {
       const updated = await updateAdminUserRole(target.id, role);
       setState((previous) => previous.kind === "ready"
@@ -347,9 +493,11 @@ export default function AdminUsagePage() {
           }
         : previous);
       setConfirmingRole(null);
-      setRoleNotice({
+      setRowNotice({
+        userId: target.id,
+        cell: "role",
         kind: "ok",
-        message: role === "admin"
+        text: role === "admin"
           ? `已授予 ${updated.username} 管理员权限`
           : `已撤销 ${updated.username} 的管理员权限`,
       });
@@ -358,7 +506,10 @@ export default function AdminUsagePage() {
         setState({ kind: "forbidden" });
         return;
       }
-      setRoleNotice({ kind: "error", message: toUserMessage(error, "权限更新失败，请稍后重试") });
+      setRowNotice({
+        userId: target.id, cell: "role", kind: "error",
+        text: toUserMessage(error, "权限更新失败，请稍后重试"),
+      });
     } finally {
       setRolePendingId("");
     }
@@ -367,11 +518,11 @@ export default function AdminUsagePage() {
   async function saveDefault() {
     const parsed = parseUploadLimit(defaultInput);
     if (parsed === null) {
-      setLimitNotice({ kind: "error", message: "请输入 1 到 100000 之间的整数" });
+      setDefaultNotice({ kind: "error", text: "请输入 1 到 100000 之间的整数" });
       return;
     }
     setDefaultSaving(true);
-    setLimitNotice(null);
+    setDefaultNotice(null);
     try {
       const saved = await updateUploadLimitDefault(parsed);
       setUploadLimitDefault(saved);
@@ -383,13 +534,13 @@ export default function AdminUsagePage() {
             rows: previous.rows.map((row) => row.upload_limit_overridden ? row : { ...row, upload_limit: saved }),
           }
         : previous);
-      setLimitNotice({ kind: "ok", message: `已将默认文档上限设为 ${saved}` });
+      setDefaultNotice({ kind: "ok", text: `已将默认文档上限设为 ${saved}` });
     } catch (error) {
       if (error instanceof Error && error.message === FORBIDDEN_SENTINEL) {
         setState({ kind: "forbidden" });
         return;
       }
-      setLimitNotice({ kind: "error", message: toUserMessage(error, "默认文档上限更新失败，请稍后重试") });
+      setDefaultNotice({ kind: "error", text: toUserMessage(error, "默认文档上限更新失败，请稍后重试") });
     } finally {
       setDefaultSaving(false);
     }
@@ -399,7 +550,7 @@ export default function AdminUsagePage() {
   // 哨兵分流 + 就地更新对应行 + 人话层错误。
   async function submitLimitChange(target: AdminUserUsage, limit: number | null) {
     setLimitPendingId(target.id);
-    setLimitNotice(null);
+    setRowNotice(null);
     try {
       const updated = await updateAdminUserUploadLimit(target.id, limit);
       setState((previous) => previous.kind === "ready"
@@ -411,9 +562,11 @@ export default function AdminUsagePage() {
           }
         : previous);
       setEditingLimitId("");
-      setLimitNotice({
+      setRowNotice({
+        userId: target.id,
+        cell: "limit",
         kind: "ok",
-        message: updated.upload_limit_overridden
+        text: updated.upload_limit_overridden
           ? `已将 ${updated.username} 的文档上限设为 ${updated.upload_limit}`
           : `已恢复 ${updated.username} 的文档上限为默认值（${updated.upload_limit}）`,
       });
@@ -422,7 +575,10 @@ export default function AdminUsagePage() {
         setState({ kind: "forbidden" });
         return;
       }
-      setLimitNotice({ kind: "error", message: toUserMessage(error, "文档上限更新失败，请稍后重试") });
+      setRowNotice({
+        userId: target.id, cell: "limit", kind: "error",
+        text: toUserMessage(error, "文档上限更新失败，请稍后重试"),
+      });
     } finally {
       setLimitPendingId("");
     }
@@ -431,7 +587,7 @@ export default function AdminUsagePage() {
   function saveLimit(target: AdminUserUsage) {
     const parsed = parseUploadLimit(limitInput);
     if (parsed === null) {
-      setLimitNotice({ kind: "error", message: "请输入 1 到 100000 之间的整数" });
+      setRowNotice({ userId: target.id, cell: "limit", kind: "error", text: "请输入 1 到 100000 之间的整数" });
       return;
     }
     void submitLimitChange(target, parsed);
@@ -441,37 +597,47 @@ export default function AdminUsagePage() {
   // 吊销(纯后端行为,这里只负责收起编辑态并给出提示)。
   async function submitResetPassword(target: AdminUserUsage) {
     if (!resetInput.trim()) {
-      setResetNotice({ kind: "error", message: "请输入新密码" });
+      setRowNotice({ userId: target.id, cell: "password", kind: "error", text: "请输入新密码" });
       return;
     }
     setResetPendingId(target.id);
-    setResetNotice(null);
+    setRowNotice(null);
     try {
       const updated = await resetAdminUserPassword(target.id, resetInput);
       setResettingId("");
       setResetInput("");
-      setResetNotice({
+      setRowNotice({
+        userId: target.id,
+        cell: "password",
         kind: "ok",
-        message: `已重置 ${updated.username} 的密码，该用户需用新密码重新登录`,
+        text: `已重置 ${updated.username} 的密码，该用户需用新密码重新登录`,
       });
     } catch (error) {
       if (error instanceof Error && error.message === FORBIDDEN_SENTINEL) {
         setState({ kind: "forbidden" });
         return;
       }
-      setResetNotice({ kind: "error", message: toUserMessage(error, "密码重置失败，请稍后重试") });
+      setRowNotice({
+        userId: target.id, cell: "password", kind: "error",
+        text: toUserMessage(error, "密码重置失败，请稍后重试"),
+      });
     } finally {
       setResetPendingId("");
     }
+  }
+
+  function cancelResetPassword() {
+    setResettingId("");
+    // 收起编辑态时同步清掉已输入的明文新密码,别让凭据在 state 里过夜。
+    setResetInput("");
   }
 
   function resetRowInteractions() {
     setExpanded(null);
     setConfirmingRole(null);
     setEditingLimitId("");
-    setResettingId("");
-    // 收起编辑态时同步清掉已输入的明文新密码,别让凭据在 state 里过夜。
-    setResetInput("");
+    cancelResetPassword();
+    setRowNotice(null);
   }
 
   function changeSort(nextKey: AdminUserSortKey) {
@@ -494,11 +660,16 @@ export default function AdminUsagePage() {
   const currentPage = Math.min(page, pageCount);
   const visibleRows = sortedRows.slice((currentPage - 1) * pageSize, currentPage * pageSize);
 
-  if (state.kind === "loading") return <main className="usage-page">加载中…</main>;
-  if (state.kind === "forbidden")
-    return <main className="usage-page usage-empty">无权限:仅管理员可查看用户使用总览。</main>;
-  if (state.kind === "error")
-    return <main className="usage-page usage-empty">加载失败:{state.message}</main>;
+  if (state.kind !== "ready") {
+    return (
+      <main className="usage-page">
+        <PageHeader title="用户使用总览" />
+        {state.kind === "loading" && <div className="usage-state">加载中…</div>}
+        {state.kind === "forbidden" && <div className="usage-state">无权限:仅管理员可查看用户使用总览。</div>}
+        {state.kind === "error" && <div className="usage-state usage-state-error">加载失败:{state.message}</div>}
+      </main>
+    );
+  }
 
   function changePage(nextPage: number) {
     setPage(Math.max(1, Math.min(nextPage, pageCount)));
@@ -541,6 +712,7 @@ export default function AdminUsagePage() {
           value={defaultInput}
           disabled={uploadLimitDefault === null || defaultSaving}
           onChange={(event) => setDefaultInput(event.target.value)}
+          onKeyDown={(event) => { if (event.key === "Enter") void saveDefault(); }}
         />
         <button
           type="button"
@@ -550,23 +722,11 @@ export default function AdminUsagePage() {
         >
           {defaultSaving ? "保存中…" : "保存"}
         </button>
-        <span className="usage-settings-hint">管理员的笔记本不受限；为某位用户单独设置后，以其设置为准。</span>
+        {defaultNotice
+          ? <CellFeedback notice={defaultNotice} />
+          : <span className="usage-settings-hint">管理员的笔记本不受限；为某位用户单独设置后，以其设置为准。</span>}
       </div>
-      {roleNotice && (
-        <div className={`usage-role-notice usage-role-notice-${roleNotice.kind}`} role="status">
-          {roleNotice.message}
-        </div>
-      )}
-      {limitNotice && (
-        <div className={`usage-role-notice usage-role-notice-${limitNotice.kind}`} role="status">
-          {limitNotice.message}
-        </div>
-      )}
-      {resetNotice && (
-        <div className={`usage-role-notice usage-role-notice-${resetNotice.kind}`} role="status">
-          {resetNotice.message}
-        </div>
-      )}
+      <div className="usage-panel">
       <div className="usage-table-wrap">
         <table className="usage-table">
           <thead>
@@ -575,10 +735,10 @@ export default function AdminUsagePage() {
               <SortableHeader label="用户名" sortKey="username" activeKey={sortKey} direction={sortDirection} onSort={changeSort} />
               <SortableHeader label="角色" sortKey="role" activeKey={sortKey} direction={sortDirection} onSort={changeSort} />
               <SortableHeader label="注册时间" sortKey="created_at" activeKey={sortKey} direction={sortDirection} onSort={changeSort} />
-              <SortableHeader label="笔记本" sortKey="notebooks" activeKey={sortKey} direction={sortDirection} onSort={changeSort} />
-              <SortableHeader label="来源" sortKey="sources" activeKey={sortKey} direction={sortDirection} onSort={changeSort} />
-              <SortableHeader label="提问" sortKey="questions" activeKey={sortKey} direction={sortDirection} onSort={changeSort} />
-              <SortableHeader label="报告" sortKey="reports" activeKey={sortKey} direction={sortDirection} onSort={changeSort} />
+              <SortableHeader label="笔记本" sortKey="notebooks" activeKey={sortKey} direction={sortDirection} onSort={changeSort} align="num" />
+              <SortableHeader label="来源" sortKey="sources" activeKey={sortKey} direction={sortDirection} onSort={changeSort} align="num" />
+              <SortableHeader label="提问" sortKey="questions" activeKey={sortKey} direction={sortDirection} onSort={changeSort} align="num" />
+              <SortableHeader label="报告" sortKey="reports" activeKey={sortKey} direction={sortDirection} onSort={changeSort} align="num" />
               <SortableHeader label="最近活跃" sortKey="last_active" activeKey={sortKey} direction={sortDirection} onSort={changeSort} />
               <th>用户分析</th>
               <SortableHeader label="文档上限" sortKey="upload_limit" activeKey={sortKey} direction={sortDirection} onSort={changeSort} />
@@ -591,6 +751,7 @@ export default function AdminUsagePage() {
             const isOpen = expanded === u.id;
             const entry = nbCache[u.id];
             const isOnline = onlineIds.has(u.id);
+            const roleNotice = noticeFor(u.id, "role");
             return (
               <Fragment key={u.id}>
                 <tr className={isOpen ? "usage-row-expanded" : undefined}>
@@ -612,15 +773,19 @@ export default function AdminUsagePage() {
                       aria-label={isOnline ? "在线" : "离线"}
                       title={isOnline ? "在线" : "离线"}
                     />
-                    {u.username}
+                    <span className="usage-username">{u.username}</span>
                   </td>
-                  <td>{u.role === "admin" ? "管理员" : "用户"}</td>
-                  <td>{formatLastActive(u.created_at)}</td>
-                  <td>{u.notebooks}</td>
-                  <td>{u.sources}</td>
-                  <td>{u.questions}</td>
-                  <td>{u.reports}</td>
-                  <td>{formatLastActive(u.last_active)}</td>
+                  <td>
+                    {u.role === "admin"
+                      ? <span className="usage-tag usage-tag-admin">管理员</span>
+                      : <span className="usage-tag">用户</span>}
+                  </td>
+                  <td className="usage-col-time">{formatLastActive(u.created_at)}</td>
+                  <td className="usage-col-num">{u.notebooks}</td>
+                  <td className="usage-col-num">{u.sources}</td>
+                  <td className="usage-col-num">{u.questions}</td>
+                  <td className="usage-col-num">{u.reports}</td>
+                  <td className="usage-col-time">{formatLastActive(u.last_active)}</td>
                   <td>
                     <span className="usage-analysis-links">
                       <a href={questionsDrillHref(u.id)}>查看提问</a>
@@ -638,9 +803,10 @@ export default function AdminUsagePage() {
                         lockedByOther={Boolean(editingLimitId) && editingLimitId !== u.id}
                         pending={limitPendingId === u.id}
                         anyPending={Boolean(limitPendingId)}
+                        notice={noticeFor(u.id, "limit")}
                         input={limitInput}
                         onInput={setLimitInput}
-                        onOpen={() => { setEditingLimitId(u.id); setLimitInput(String(u.upload_limit)); setLimitNotice(null); }}
+                        onOpen={() => { setEditingLimitId(u.id); setLimitInput(String(u.upload_limit)); setRowNotice(null); }}
                         onCancel={() => setEditingLimitId("")}
                         onSave={() => saveLimit(u)}
                         onReset={() => void submitLimitChange(u, null)}
@@ -652,76 +818,60 @@ export default function AdminUsagePage() {
                       <span className="usage-role-locked" title="内置管理员密码由部署配置决定">受保护</span>
                     ) : u.id === currentUserId ? (
                       <span className="usage-role-locked" title="请在主界面头像菜单中修改自己的密码">本人</span>
-                    ) : resettingId === u.id ? (
-                      <span className="usage-limit-edit">
-                        <input
-                          className="usage-limit-input"
-                          type="password"
-                          autoComplete="new-password"
-                          value={resetInput}
-                          disabled={resetPendingId === u.id}
-                          aria-label={`${u.username} 的新密码`}
-                          onChange={(event) => setResetInput(event.target.value)}
-                        />
-                        <button
-                          type="button"
-                          className="usage-role-button usage-role-button-confirm"
-                          disabled={resetPendingId === u.id}
-                          onClick={() => void submitResetPassword(u)}
-                        >
-                          {resetPendingId === u.id ? "重置中…" : "确认重置"}
-                        </button>
-                        <button
-                          type="button"
-                          className="usage-role-button"
-                          disabled={resetPendingId === u.id}
-                          onClick={() => { setResettingId(""); setResetInput(""); }}
-                        >取消</button>
-                      </span>
                     ) : (
-                      <button
-                        type="button"
-                        className="usage-role-button"
-                        disabled={Boolean(resetPendingId) || Boolean(resettingId)}
-                        onClick={() => { setResettingId(u.id); setResetInput(""); setResetNotice(null); }}
-                      >重置密码</button>
+                      <ResetPasswordCell
+                        user={u}
+                        editing={resettingId === u.id}
+                        lockedByOther={Boolean(resettingId) && resettingId !== u.id}
+                        pending={resetPendingId === u.id}
+                        anyPending={Boolean(resetPendingId)}
+                        notice={noticeFor(u.id, "password")}
+                        input={resetInput}
+                        onInput={setResetInput}
+                        onOpen={() => { setResettingId(u.id); setResetInput(""); setRowNotice(null); }}
+                        onCancel={cancelResetPassword}
+                        onSubmit={() => void submitResetPassword(u)}
+                      />
                     )}
                   </td>
                   <td>
-                    {!u.role_mutable ? (
-                      <span className="usage-role-locked">
-                        {u.id === currentUserId ? "当前账户" : "受保护"}
-                      </span>
-                    ) : confirmingRole?.userId === u.id ? (
-                      <span className="usage-role-confirm">
-                        <button
-                          type="button"
-                          className="usage-role-button usage-role-button-confirm"
-                          disabled={rolePendingId === u.id}
-                          onClick={() => void submitRoleChange(u, confirmingRole.role)}
-                        >
-                          {rolePendingId === u.id ? "更新中…" : "确认"}
-                        </button>
+                    <div className="usage-cell-stack">
+                      {!u.role_mutable ? (
+                        <span className="usage-role-locked">
+                          {u.id === currentUserId ? "当前账户" : "受保护"}
+                        </span>
+                      ) : confirmingRole?.userId === u.id ? (
+                        <span className="usage-role-confirm">
+                          <button
+                            type="button"
+                            className="usage-role-button usage-role-button-confirm"
+                            disabled={rolePendingId === u.id}
+                            onClick={() => void submitRoleChange(u, confirmingRole.role)}
+                          >
+                            {rolePendingId === u.id ? "更新中…" : "确认"}
+                          </button>
+                          <button
+                            type="button"
+                            className="usage-role-button"
+                            disabled={rolePendingId === u.id}
+                            onClick={() => setConfirmingRole(null)}
+                          >取消</button>
+                        </span>
+                      ) : (
                         <button
                           type="button"
                           className="usage-role-button"
-                          disabled={rolePendingId === u.id}
-                          onClick={() => setConfirmingRole(null)}
-                        >取消</button>
-                      </span>
-                    ) : (
-                      <button
-                        type="button"
-                        className="usage-role-button"
-                        disabled={Boolean(rolePendingId)}
-                        onClick={() => setConfirmingRole({
-                          userId: u.id,
-                          role: u.role === "admin" ? "user" : "admin",
-                        })}
-                      >
-                        {u.role === "admin" ? "撤销管理员" : "设为管理员"}
-                      </button>
-                    )}
+                          disabled={Boolean(rolePendingId)}
+                          onClick={() => { setRowNotice(null); setConfirmingRole({
+                            userId: u.id,
+                            role: u.role === "admin" ? "user" : "admin",
+                          }); }}
+                        >
+                          {u.role === "admin" ? "撤销管理员" : "设为管理员"}
+                        </button>
+                      )}
+                      {roleNotice && <CellFeedback notice={roleNotice} />}
+                    </div>
                   </td>
                 </tr>
                 {isOpen && (
@@ -730,53 +880,59 @@ export default function AdminUsagePage() {
                       {/* 用户摘要:仅依赖行数据 u,与笔记本明细的加载状态无关,故不受
                           entry 是否就绪影响,始终无条件渲染(规格 §3 B6/Phase C)。 */}
                       <div className="usage-summary" role="group" aria-label="用户摘要">
-                        <dl className="usage-summary-row">
-                          <div className="usage-summary-item">
-                            <dt>最近上线</dt>
-                            <dd>{formatLastActive(u.last_seen)}</dd>
-                          </div>
-                          <div className="usage-summary-item">
-                            <dt>存储</dt>
-                            <dd>{formatBytes(u.storage_bytes)}</dd>
-                          </div>
-                          <div className="usage-summary-item">
-                            <dt>近 30 天提问</dt>
-                            <dd>{u.questions_30d}</dd>
-                          </div>
-                          <div className="usage-summary-item">
-                            <dt>提问</dt>
-                            <dd>{u.questions}{u.questions_failed > 0 ? `（失败 ${u.questions_failed}）` : ""}</dd>
-                          </div>
-                          <div className="usage-summary-item">
-                            <dt>报告</dt>
-                            <dd>{u.reports}{u.reports_failed > 0 ? `（失败 ${u.reports_failed}）` : ""}</dd>
-                          </div>
-                          <div className="usage-summary-item">
-                            {/* 界面用词以 docs/ui-vocabulary.md 为准:KG 构建动作显示「图谱整理」,
-                                与主界面「整理知识图谱」同词(规格 §3 B6)。 */}
-                            <dt>图谱整理</dt>
-                            <dd>{u.kg_builds}</dd>
-                          </div>
-                        </dl>
-                        <dl className="usage-summary-row">
-                          <div className="usage-summary-item">
-                            {/* 界面用词以 docs/ui-vocabulary.md 为准:Memory 显示「记忆」(规格 §3 B6)。 */}
-                            <dt>记忆</dt>
-                            <dd>{u.memory_count}</dd>
-                          </div>
-                          <div className="usage-summary-item">
-                            <dt>Knowhow 表</dt>
-                            <dd>{u.knowhow_tables}</dd>
-                          </div>
-                          <div className="usage-summary-item">
-                            <dt>加入的共享库</dt>
-                            <dd>{u.joined_notebooks}</dd>
-                          </div>
-                          <div className="usage-summary-item">
-                            <dt>群组</dt>
-                            <dd>{u.groups}</dd>
-                          </div>
-                        </dl>
+                        <div className="usage-summary-group">
+                          <span className="usage-summary-caption">使用强度</span>
+                          <dl className="usage-summary-row">
+                            <div className="usage-summary-item">
+                              <dt>最近上线</dt>
+                              <dd>{formatLastActive(u.last_seen)}</dd>
+                            </div>
+                            <div className="usage-summary-item">
+                              <dt>存储</dt>
+                              <dd>{formatBytes(u.storage_bytes)}</dd>
+                            </div>
+                            <div className="usage-summary-item">
+                              <dt>近 30 天提问</dt>
+                              <dd>{u.questions_30d}</dd>
+                            </div>
+                            <div className="usage-summary-item">
+                              <dt>提问</dt>
+                              <dd>{u.questions}{u.questions_failed > 0 ? `（失败 ${u.questions_failed}）` : ""}</dd>
+                            </div>
+                            <div className="usage-summary-item">
+                              <dt>报告</dt>
+                              <dd>{u.reports}{u.reports_failed > 0 ? `（失败 ${u.reports_failed}）` : ""}</dd>
+                            </div>
+                            <div className="usage-summary-item">
+                              {/* 界面用词以 docs/ui-vocabulary.md 为准:KG 构建动作显示「图谱整理」,
+                                  与主界面「整理知识图谱」同词(规格 §3 B6)。 */}
+                              <dt>图谱整理</dt>
+                              <dd>{u.kg_builds}</dd>
+                            </div>
+                          </dl>
+                        </div>
+                        <div className="usage-summary-group">
+                          <span className="usage-summary-caption">采纳与协作</span>
+                          <dl className="usage-summary-row">
+                            <div className="usage-summary-item">
+                              {/* 界面用词以 docs/ui-vocabulary.md 为准:Memory 显示「记忆」(规格 §3 B6)。 */}
+                              <dt>记忆</dt>
+                              <dd>{u.memory_count}</dd>
+                            </div>
+                            <div className="usage-summary-item">
+                              <dt>Knowhow 表</dt>
+                              <dd>{u.knowhow_tables}</dd>
+                            </div>
+                            <div className="usage-summary-item">
+                              <dt>加入的共享库</dt>
+                              <dd>{u.joined_notebooks}</dd>
+                            </div>
+                            <div className="usage-summary-item">
+                              <dt>群组</dt>
+                              <dd>{u.groups}</dd>
+                            </div>
+                          </dl>
+                        </div>
                       </div>
                       {entry === "loading" && (
                         <div className="usage-subtable-status">加载中…</div>
@@ -792,7 +948,9 @@ export default function AdminUsagePage() {
                           <thead>
                             <tr>
                               <th>笔记本</th><th>状态</th>
-                              <th>来源</th><th>提问</th><th>报告</th>
+                              <th className="usage-col-num">来源</th>
+                              <th className="usage-col-num">提问</th>
+                              <th className="usage-col-num">报告</th>
                               <th>创建</th><th>最近更新</th>
                             </tr>
                           </thead>
@@ -801,11 +959,11 @@ export default function AdminUsagePage() {
                               <tr key={nb.id}>
                                 <td>{nb.name}</td>
                                 <td>{notebookStatusLabel(nb.status)}</td>
-                                <td>{nb.sources}</td>
-                                <td>{nb.questions}</td>
-                                <td>{nb.reports}</td>
-                                <td>{formatLastActive(nb.created_at)}</td>
-                                <td>{formatLastActive(nb.updated_at)}</td>
+                                <td className="usage-col-num">{nb.sources}</td>
+                                <td className="usage-col-num">{nb.questions}</td>
+                                <td className="usage-col-num">{nb.reports}</td>
+                                <td className="usage-col-time">{formatLastActive(nb.created_at)}</td>
+                                <td className="usage-col-time">{formatLastActive(nb.updated_at)}</td>
                               </tr>
                             ))}
                           </tbody>
@@ -847,6 +1005,7 @@ export default function AdminUsagePage() {
           <button type="button" disabled={currentPage === pageCount} onClick={() => changePage(pageCount)}>末页</button>
         </div>
       </nav>
+      </div>
       </>)}
     </main>
   );

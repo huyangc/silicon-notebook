@@ -21,8 +21,8 @@ const APPROVED_BARE_STATUS_ERRORS = Object.freeze({
 });
 const APPROVED_MESSAGE_READS = Object.freeze({
   "admin/usage/page.tsx|<module>.AdminUsagePage|property|message": {
-    count: 5,
-    reason: "one access is a forbidden sentinel; view, role-notice, limit-notice and reset-notice states contain fixed or humanized copy",
+    count: 2,
+    reason: "one access is a forbidden sentinel; the view state contains humanized copy (action feedback moved to a Notice type whose field is `text`, not `message`)",
   },
   "admin/usage/page.tsx|<module>.AdminUsagePage.submitRoleChange|property|message": {
     count: 1,
