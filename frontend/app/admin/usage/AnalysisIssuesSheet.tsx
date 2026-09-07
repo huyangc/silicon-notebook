@@ -149,7 +149,7 @@ export function AnalysisIssuesSheet({ users }: { users: AdminUserUsage[] }) {
         本页只读。失败文件，以及所有功能中未通过 JSON 协议校验的模型请求与回答，由系统私有保存并在保留期到期后清除；管理员不能在此重试、删除或改动用户内容。
       </p>
       {failure && <div className="usage-role-notice usage-role-notice-error" role="alert">{failure}</div>}
-      <div className="usage-table-wrap">
+      <div className="usage-panel usage-table-wrap">
         <table className="usage-table usage-issues-table">
           <thead>
             <tr>

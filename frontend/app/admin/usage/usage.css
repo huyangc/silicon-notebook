@@ -1,190 +1,235 @@
-.usage-page { max-width: 1440px; margin: 0 auto; padding: 24px; }
-.usage-page h1 { font-size: 20px; margin-bottom: 16px; }
-.usage-empty { color: var(--muted, #666); }
-.usage-description { margin: 4px 0 14px; color: var(--muted, #666); font-size: 14px; }
-.usage-sheet-tabs { display: flex; gap: 4px; margin: 0 0 16px; border-bottom: 1px solid var(--border, #e5e7eb); }
-.usage-sheet-tabs button {
-  padding: 8px 14px; border: 0; border-bottom: 2px solid transparent;
-  background: transparent; color: var(--muted, #666); cursor: pointer; font: inherit;
+/* 用户使用总览。颜色一律取 globals.css `:root` 的 token,不写自己的一套——此前这里
+   引用的 --accent / --border / --hover / --surface 在 :root 里并不存在,页面实际吃的
+   全是各处回退色字面量(#2563eb / #e5e7eb …),与主界面的 --blue / --line / --soft
+   差半档。仅保留两处系统已有的着色底(蓝 #eaf1ff、绿 #e7f4ee,与 logs.css 的
+   .logrow.selected / .badge.ok 同值),不再新造第三种。
+   版式镜像 admin/questions/questions.css:工具条与结果表各是一张 panel 卡(线框 +
+   11px 圆角),分页做卡片页脚。 */
+
+.usage-page { max-width: 1440px; margin: 0 auto; padding: 24px 24px 48px; }
+.usage-description { margin: 4px 0 16px; color: var(--muted); font-size: 14px; line-height: 1.55; }
+
+/* 加载 / 无权限 / 加载失败:与 questions-state 同形的居中虚线框,不再是左上角一行裸文字。 */
+.usage-state {
+  display: flex; align-items: center; justify-content: center;
+  min-height: 160px; margin-top: 18px; padding: 24px;
+  border: 1px dashed var(--line); border-radius: 11px;
+  color: var(--muted); font-size: 14px; text-align: center;
 }
-.usage-sheet-tabs button[aria-current="page"] { border-bottom-color: var(--accent, #2563eb); color: var(--accent, #2563eb); font-weight: 600; }
+.usage-state-error { color: var(--danger); }
+
+.usage-sheet-tabs { display: flex; gap: 4px; margin: 0 0 16px; border-bottom: 1px solid var(--line); }
+.usage-sheet-tabs button {
+  padding: 8px 14px; border: 0; border-bottom: 2px solid transparent; margin-bottom: -1px;
+  background: transparent; color: var(--muted); font: inherit;
+}
+.usage-sheet-tabs button:hover { color: var(--ink); }
+.usage-sheet-tabs button:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; border-radius: 4px; }
+.usage-sheet-tabs button[aria-current="page"] { border-bottom-color: var(--blue); color: var(--blue); font-weight: 600; }
+
+/* 面板卡:用户表 / 分析表都装在里面。overflow 裁圆角;弹出层是 position: fixed,不受裁。 */
+.usage-panel { border: 1px solid var(--line); border-radius: 11px; background: var(--panel); overflow: hidden; }
+
+/* 工具条(默认文档上限设置 / 分析页签的筛选)同一形态。 */
+.usage-settings-bar, .usage-analysis-toolbar {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 10px 14px;
+  margin: 0 0 14px; padding: 12px 14px;
+  border: 1px solid var(--line); border-radius: 11px; background: var(--panel); font-size: 13px;
+}
+.usage-settings-label { font-weight: 600; color: var(--ink); }
+.usage-settings-hint { color: var(--muted); }
+.usage-analysis-toolbar label { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); }
+.usage-analysis-toolbar select {
+  min-width: 120px; padding: 6px 26px 6px 9px; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--panel); color: var(--ink); font: inherit;
+}
+.usage-analysis-toolbar span, .usage-analysis-note { color: var(--muted); font-size: 13px; line-height: 1.5; }
+.usage-analysis-note { margin: 0 0 12px; }
 .usage-analysis-sheet { min-width: 0; }
 .usage-analysis-links { display: inline-flex; align-items: center; gap: 10px; white-space: nowrap; }
-.usage-analysis-toolbar {
-  display: flex; align-items: center; flex-wrap: wrap; gap: 10px 16px;
-  margin-bottom: 12px; padding: 10px 12px; border: 1px solid var(--border, #e5e7eb);
-  border-radius: 8px; background: var(--hover, #f9fafb); font-size: 13px;
-}
-.usage-analysis-toolbar label { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; }
-.usage-analysis-toolbar select { padding: 5px 26px 5px 8px; border: 1px solid var(--border, #d1d5db); border-radius: 6px; background: var(--surface, #fff); color: inherit; }
-.usage-analysis-toolbar span, .usage-analysis-note { color: var(--muted, #666); font-size: 13px; }
-.usage-analysis-note { margin: 0 0 12px; }
-.usage-analysis-empty { padding: 24px !important; text-align: center !important; color: var(--muted, #666); }
+.usage-analysis-empty { padding: 28px !important; text-align: center !important; color: var(--muted); }
+
 .usage-issues-table td { white-space: normal; vertical-align: top; line-height: 1.45; }
 .usage-issues-table td:nth-child(4) { min-width: 260px; }
-.usage-issue-status { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; }
-.usage-issue-status-open { background: #fff4e5; color: #8a5a10; }
-.usage-issue-status-resolved { background: #edf9f2; color: #177a55; }
+.usage-issue-status { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; white-space: nowrap; }
+.usage-issue-status-open { background: var(--warning-bg); color: var(--warning); }
+.usage-issue-status-resolved { background: #e7f4ee; color: var(--green); }
 .usage-model-artifact { display: grid; gap: 8px; padding: 12px 4px 2px; }
 .usage-model-artifact p { margin: 0; }
 .usage-model-artifact pre {
   max-height: 320px; margin: 0; padding: 10px 12px; overflow: auto;
-  border: 1px solid var(--border, #e5e7eb); border-radius: 6px;
-  background: var(--surface, #fff); color: inherit; white-space: pre-wrap;
+  border: 1px solid var(--line); border-radius: 6px;
+  background: var(--panel); color: inherit; white-space: pre-wrap;
   overflow-wrap: anywhere; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 .usage-model-artifact details { display: grid; gap: 8px; }
-.usage-model-artifact summary { cursor: pointer; color: var(--accent, #2563eb); }
+.usage-model-artifact summary { cursor: pointer; color: var(--blue); }
+
+/* ——— 主表 ——— */
 .usage-table-wrap { overflow-x: auto; }
-.usage-table { width: 100%; border-collapse: collapse; font-size: 14px; }
+.usage-table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 .usage-table th, .usage-table td {
-  text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--border, #e5e7eb);
-  white-space: nowrap;
+  text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line);
+  white-space: nowrap; vertical-align: middle;
 }
-.usage-table th { color: var(--muted, #666); font-weight: 600; }
+.usage-table th { color: var(--muted); font-size: 12.5px; font-weight: 600; background: var(--soft); }
+.usage-table tbody tr:last-child td { border-bottom: 0; }
+.usage-table tbody tr:hover { background: var(--soft); }
+.usage-table tr.usage-row-expanded, .usage-table tr.usage-row-expanded:hover { background: var(--soft); }
+/* 数字列右对齐 + 等宽数字,同列上下位数对齐;表头的排序按钮跟着靠右。 */
+.usage-col-num { text-align: right !important; font-variant-numeric: tabular-nums; }
+.usage-col-time { font-variant-numeric: tabular-nums; color: var(--muted); }
+
 .usage-sort-button {
   display: inline-flex; align-items: center; gap: 5px; margin: -4px -6px; padding: 4px 6px;
   border: 0; border-radius: 5px; background: transparent; color: inherit; font: inherit;
-  font-weight: inherit; white-space: nowrap; cursor: pointer;
+  font-weight: inherit; white-space: nowrap;
 }
-.usage-sort-button:hover { background: var(--hover, #f3f4f6); color: inherit; }
-.usage-sort-button:focus-visible { outline: 2px solid var(--accent, #2563eb); outline-offset: 1px; }
-.usage-sort-button-active { color: var(--accent, #2563eb); }
-.usage-sort-indicator { width: 10px; color: var(--muted, #9ca3af); font-size: 9px; text-align: center; }
-.usage-sort-button-active .usage-sort-indicator { color: currentColor; }
-.usage-table td a { color: var(--accent, #2563eb); text-decoration: none; }
+.usage-sort-button:hover { background: var(--line); color: var(--ink); }
+.usage-sort-button:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
+.usage-sort-button-active { color: var(--blue); }
+.usage-sort-indicator { width: 10px; color: var(--muted); font-size: 9px; text-align: center; opacity: .7; }
+.usage-sort-button-active .usage-sort-indicator { color: currentColor; opacity: 1; }
+.usage-table td a { color: var(--blue); text-decoration: none; }
 .usage-table td a:hover { text-decoration: underline; }
 
-.usage-table tbody tr:hover { background: var(--hover, #f9fafb); }
-.usage-table tr.usage-row-expanded { background: var(--hover, #f3f4f6); }
-.usage-table tr.usage-row-expanded:hover { background: var(--hover, #f3f4f6); }
-
-.usage-expand-col { width: 28px; padding-right: 0; }
+.usage-expand-col { width: 28px; padding-right: 0 !important; }
 .usage-expand-btn {
   display: inline-flex; align-items: center; justify-content: center;
   width: 20px; height: 20px; padding: 0; border: none; background: transparent;
-  color: var(--muted, #666); font-size: 12px; line-height: 1; cursor: pointer;
-  border-radius: 4px;
+  color: var(--muted); font-size: 12px; line-height: 1; border-radius: 4px;
 }
-.usage-expand-btn:hover { background: var(--border, #e5e7eb); color: inherit; }
+.usage-expand-btn:hover { background: var(--line); color: var(--ink); }
+.usage-expand-btn:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
 
-.usage-subrow td {
-  padding: 0 12px 12px 40px;
-  background: var(--hover, #fafafa);
-  border-bottom: 1px solid var(--border, #e5e7eb);
-  white-space: normal;
-}
-.usage-subtable-status { padding: 10px 4px; color: var(--muted, #666); font-size: 13px; }
-.usage-subtable-error { color: var(--danger, #dc2626); }
-
-/* 展开区「用户摘要」:两行,字号与 .usage-subtable 一致(13px),行间 4px。
-   分隔符「·」用 ::after 伪元素实现,不拼进 dt/dd 的文本内容(不进 DOM 文本/
-   textContent,例如测试里按 textContent 取值不会读到它)。这里无害是因为容器
-   已有显式 aria-label="用户摘要",伪元素 content 按可访问名计算规范本身仍会参与
-   accessible name 拼接。 */
-.usage-summary {
-  display: flex; flex-direction: column; gap: 4px;
-  padding: 10px 4px 6px; font-size: 13px; color: inherit;
-}
-.usage-summary-row { display: flex; flex-wrap: wrap; align-items: baseline; margin: 0; }
-.usage-summary-item { display: inline-flex; align-items: baseline; margin: 0; }
-.usage-summary-item dt { margin: 0; color: var(--muted, #666); }
-.usage-summary-item dd { margin: 0 0 0 4px; font-variant-numeric: tabular-nums; }
-.usage-summary-item:not(:last-child)::after { content: "·"; margin: 0 8px; color: var(--muted, #9ca3af); }
-
-.usage-subtable {
-  width: 100%; border-collapse: collapse; font-size: 13px;
-  background: var(--surface, #fff); border: 1px solid var(--border, #e5e7eb); border-radius: 6px;
-  overflow: hidden;
-}
-.usage-subtable th, .usage-subtable td {
-  text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border, #e5e7eb);
-  white-space: nowrap;
-}
-.usage-subtable th { color: var(--muted, #666); font-weight: 600; background: var(--hover, #f9fafb); }
-.usage-subtable tbody tr:last-child td { border-bottom: none; }
-
+.usage-username { font-weight: 600; color: var(--ink); }
 .usage-dot {
   display: inline-block; width: 8px; height: 8px; border-radius: 50%;
   margin-right: 8px; vertical-align: middle; box-sizing: border-box;
 }
-.usage-dot-online { background: var(--green, #177a55); }
-.usage-dot-offline { background: transparent; border: 1.5px solid var(--muted, #9ca3af); }
+.usage-dot-online { background: var(--green); box-shadow: 0 0 0 2px #e7f4ee; }
+.usage-dot-offline { background: transparent; border: 1.5px solid var(--line); }
 
-.usage-role-notice {
-  margin: 0 0 12px; padding: 9px 12px; border: 1px solid var(--border, #e5e7eb);
-  border-radius: 7px; font-size: 13px;
+/* 药丸标签:角色 / 文档上限来源。与 extensions.css 的 .ext-trust 同形,蓝档只描边不铺底。 */
+.usage-tag {
+  display: inline-block; padding: 1px 8px; border: 1px solid var(--line); border-radius: 999px;
+  background: var(--soft); color: var(--muted); font-size: 12px; white-space: nowrap;
 }
-.usage-role-notice-ok { color: var(--green, #177a55); background: #f0fdf7; }
-.usage-role-notice-error { color: var(--danger, #dc2626); background: #fff7f7; }
-.usage-role-locked { color: var(--muted, #777); font-size: 13px; }
+.usage-tag-admin, .usage-limit-tag-custom { border-color: var(--blue); background: var(--panel); color: var(--blue); }
+
+/* ——— 展开区 ——— */
+.usage-subrow td { padding: 4px 14px 14px 40px; background: var(--soft); white-space: normal; }
+.usage-subtable-status { padding: 10px 4px; color: var(--muted); font-size: 13px; }
+.usage-subtable-error { color: var(--danger); }
+
+/* 「用户摘要」两行:每项是 logs.css .stat-chip 同形的药丸(标签淡、数值粗),两行各带
+   一个说明性小标题(使用强度 / 采纳与协作)。dt/dd 结构与 .usage-summary-item 类名
+   不动——组件测试按「dt 命中 → 同一 item 内的 dd」配对断言。 */
+.usage-summary { display: flex; flex-direction: column; gap: 8px; padding: 10px 0 12px; }
+.usage-summary-group { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; }
+.usage-summary-caption { min-width: 72px; color: var(--muted); font-size: 12px; font-weight: 600; }
+.usage-summary-row { display: contents; margin: 0; }
+.usage-summary-item {
+  display: inline-flex; align-items: baseline; gap: 5px; margin: 0; padding: 2px 10px;
+  border: 1px solid var(--line); border-radius: 999px; background: var(--panel); font-size: 12px;
+}
+.usage-summary-item dt { margin: 0; color: var(--muted); }
+.usage-summary-item dd { margin: 0; color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+
+.usage-subtable {
+  width: 100%; border-collapse: collapse; font-size: 13px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 8px; overflow: hidden;
+}
+.usage-subtable th, .usage-subtable td {
+  text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--line); white-space: nowrap;
+}
+.usage-subtable th { color: var(--muted); font-size: 12px; font-weight: 600; background: var(--soft); }
+.usage-subtable tbody tr:last-child td { border-bottom: none; }
+
+/* ——— 行内动作 ——— */
+.usage-role-locked { color: var(--muted); font-size: 13px; }
 .usage-role-confirm { display: inline-flex; gap: 6px; }
 .usage-role-button {
-  padding: 4px 9px; border: 1px solid var(--border, #d1d5db); border-radius: 6px;
-  background: var(--surface, #fff); color: inherit; font: inherit; cursor: pointer;
+  padding: 4px 10px; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--panel); color: var(--ink); font: inherit; font-size: 13px; white-space: nowrap;
 }
-.usage-role-button:hover:not(:disabled) { background: var(--hover, #f3f4f6); }
+.usage-role-button:hover:not(:disabled) { background: var(--soft); }
+.usage-role-button:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
 .usage-role-button:disabled { cursor: not-allowed; opacity: .55; }
-.usage-role-button-confirm { border-color: var(--accent, #2563eb); color: var(--accent, #2563eb); }
+.usage-role-button-confirm { border-color: var(--blue); color: var(--blue); }
+.usage-role-button-confirm:hover:not(:disabled) { background: #eaf1ff; }
+.usage-role-button-open { background: var(--soft); border-color: var(--blue); }
 
-.usage-settings-bar {
-  display: flex; align-items: center; flex-wrap: wrap; gap: 10px;
-  margin: 0 0 14px; padding: 12px 14px;
-  border: 1px solid var(--border, #e5e7eb); border-radius: 8px;
-  background: var(--hover, #f9fafb); font-size: 14px;
-}
-.usage-settings-label { font-weight: 600; }
-.usage-settings-hint { color: var(--muted, #666); font-size: 13px; }
+/* 动作结果落在控件旁(AGENTS.md「Interactive feedback」):单元格里控件下方一行小字,
+   成功绿、失败红,到点自清。允许换行并限宽,不把整列顶宽。 */
+.usage-cell-stack { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+/* min-width:中文逐字可断行,auto 表格布局会把这一列压到几个字宽再换四五行;给个下限。 */
+.usage-cell-feedback { margin: 0; min-width: 150px; max-width: 220px; font-size: 11.5px; line-height: 1.4; white-space: normal; }
+.usage-cell-feedback-ok { color: var(--green); }
+.usage-cell-feedback-error { color: var(--danger); }
+.usage-settings-bar .usage-cell-feedback { max-width: none; }
 
 .usage-limit-input {
-  width: 84px; padding: 4px 8px; border: 1px solid var(--border, #d1d5db);
-  border-radius: 6px; background: var(--surface, #fff); color: inherit; font: inherit;
-  font-variant-numeric: tabular-nums;
+  width: 84px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--panel); color: var(--ink); font: inherit; font-variant-numeric: tabular-nums;
 }
+.usage-limit-input:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
 .usage-limit-input:disabled { opacity: .55; cursor: not-allowed; }
+.usage-limit-input-password { width: 150px; font-variant-numeric: normal; }
 
 .usage-limit-cell { white-space: nowrap; }
 .usage-limit-view { display: inline-flex; align-items: center; gap: 6px; }
 .usage-limit-value { font-variant-numeric: tabular-nums; font-weight: 600; }
 .usage-limit-tag {
-  padding: 1px 8px; border-radius: 999px; font-size: 12px;
-  background: var(--border, #eef1f5); color: var(--muted, #666);
+  padding: 1px 8px; border: 1px solid var(--line); border-radius: 999px; font-size: 12px;
+  background: var(--soft); color: var(--muted);
 }
-.usage-limit-tag-custom { background: #eff4ff; color: var(--accent, #2563eb); }
 
 /* 编辑控件放进锚定弹出层:表格布局在查看/编辑两态间保持不变,不再被内联控件顶宽。
-   position: fixed 逃出 .usage-table-wrap 的 overflow 裁剪,位置由组件量取后写入。 */
-.usage-role-button-open { background: var(--hover, #f3f4f6); border-color: var(--accent, #2563eb); }
+   position: fixed 逃出 .usage-panel / .usage-table-wrap 的 overflow 裁剪,位置由组件量取后写入。
+   文档上限与密码重置共用这一套。 */
 .usage-limit-popover {
   position: fixed; z-index: 40; width: max-content;
   display: flex; flex-direction: column; gap: 8px;
-  padding: 12px; border: 1px solid var(--border, #e5e7eb); border-radius: 10px;
-  background: var(--surface, #fff); box-shadow: 0 10px 28px rgba(15, 23, 42, .16);
+  padding: 12px; border: 1px solid var(--line); border-radius: 10px;
+  background: var(--panel); box-shadow: var(--shadow);
   font-size: 13px; white-space: nowrap;
 }
-.usage-limit-popover-title { font-weight: 600; }
+.usage-limit-popover-title { font-weight: 600; color: var(--ink); }
 .usage-limit-popover-row { display: flex; align-items: center; gap: 6px; }
 .usage-limit-popover-input { flex: 1; min-width: 84px; }
+.usage-limit-popover .usage-cell-feedback { max-width: 260px; }
 
+/* ——— 分页:面板页脚 ——— */
 .usage-pagination {
   display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 12px;
-  margin-top: 14px; color: var(--muted, #666); font-size: 13px;
+  padding: 10px 14px; border-top: 1px solid var(--line); background: var(--panel);
+  color: var(--muted); font-size: 13px;
 }
 .usage-pagination-summary { margin-right: auto; font-variant-numeric: tabular-nums; }
 .usage-page-size-label { display: inline-flex; align-items: center; gap: 6px; }
 .usage-page-size-select {
-  padding: 4px 24px 4px 8px; border: 1px solid var(--border, #d1d5db); border-radius: 6px;
-  background: var(--surface, #fff); color: inherit; font: inherit;
+  padding: 4px 24px 4px 8px; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--panel); color: var(--ink); font: inherit;
 }
 .usage-pagination-actions { display: inline-flex; gap: 6px; }
 .usage-pagination-actions button {
-  padding: 4px 9px; border: 1px solid var(--border, #d1d5db); border-radius: 6px;
-  background: var(--surface, #fff); color: inherit; font: inherit; cursor: pointer;
+  padding: 4px 10px; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--panel); color: var(--ink); font: inherit; font-size: 13px;
 }
-.usage-pagination-actions button:hover:not(:disabled) { background: var(--hover, #f3f4f6); }
+.usage-pagination-actions button:hover:not(:disabled) { background: var(--soft); }
+.usage-pagination-actions button:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
 .usage-pagination-actions button:disabled { cursor: not-allowed; opacity: .45; }
 
+/* 提示横幅(仅分析页签的加载失败仍用它;用户列表的动作结果已改为控件旁反馈)。 */
+.usage-role-notice {
+  margin: 0 0 12px; padding: 9px 12px; border: 1px solid var(--line); border-radius: 8px; font-size: 13px;
+}
+.usage-role-notice-ok { color: var(--green); background: #e7f4ee; }
+.usage-role-notice-error { color: var(--danger); background: var(--danger-bg); border-color: var(--danger-border); }
+
 @media (max-width: 900px) {
+  .usage-page { padding: 20px 14px 40px; }
   .usage-pagination { justify-content: flex-start; }
   .usage-pagination-summary { flex-basis: 100%; }
 }
