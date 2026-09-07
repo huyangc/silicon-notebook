@@ -5050,3 +5050,352 @@ def test_plan_drops_kg_node_types_only_when_the_scope_has_no_kg(rrepo, monkeypat
     nb_kg = _seed_two_nodes(rrepo)
     rr.run(nb_kg.id, "布局布线是什么")
     assert seen == [False, True]
+
+
+# --------------------------------------------------- reflect 兜底可观测(F1)
+#
+# 生产复现的最后一环:`reflect()` 的 fail-open 兜底与模型真的判定「证据够了」在
+# 轨迹上完全同形(summary 都是光秃秃的 "answer"、sufficient 都是 true),于是一次
+# `invalid_enum` 冒充了一整轮推理。
+#
+# ⚠ 这一组里**核心的两条经真实 `RuntimeModelProvider`**(`_provider_reflect`),
+# 不用 `bind_chat_client` 注裸替身。理由是生产 client 是
+# `ScheduledJsonChatClient`:它的 `_resolve` 把一切异常重抛成
+# `ModelInvocationError` —— `MalformedModelResponse` 的**兄弟**类而不是子类,而
+# 真正的原因(`invalid_enum`)因此躺在**第二层** `__cause__` 上。裸替身直接抛
+# `MalformedModelResponse from ModelJsonRepairError` 的话,测的是一个生产上根本
+# 不存在的形状,`except MalformedModelResponse` 那种写法会一路绿到线上。
+
+
+def _reflect_once(rrepo, client, **kwargs):
+    """裸替身路径:只够测 `reflect()` 自己解析响应体那一段(非法动作/非对象)。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    bind_chat_client(rrepo, "reasoning_agent", client)
+    retriever = ReasoningRetriever.from_repository(
+        rrepo, rrepo.settings, fail_closed=False
+    )
+    return retriever.reflect("q", "evidence", **kwargs)
+
+
+class _RawChat:
+    """`RuntimeModelProvider` 底下那个「裸」chat client。
+
+    它只负责返回一个字符串(或抛一个传输层异常);校验、拒收、重抛全部发生在它
+    **之上**的 `ScheduledJsonChatClient` 里——那正是这组用例要经过的那一段。
+    """
+
+    configured = True
+    model = "raw-private-model"
+
+    def __init__(self, reflect_result, plan=None):
+        self.reflect_result = reflect_result
+        self.plan = json.dumps(plan or {"sub_queries": [{"query": "布局布线步骤"}]})
+
+    def chat_json(self, messages, response_schema_hint, **kwargs):
+        if "sub_queries" in response_schema_hint:
+            return self.plan
+        if isinstance(self.reflect_result, BaseException):
+            raise self.reflect_result
+        return self.reflect_result
+
+
+def _provider_backed_retriever(rrepo, reflect_result):
+    """`model_clients` 换成真实 provider,其余接线(枚举白名单等)照旧。"""
+    from app.core.config import Settings
+    from app.services import model_provider as provider_mod
+    from app.services.model_registry import (
+        ModelServiceDefinition, SystemModelServiceRegistry,
+    )
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    service = ModelServiceDefinition(
+        id="chat", display_name="chat", kind="chat", protocol="openai",
+        base_url="https://chat.example/v1", model="safe-chat",
+        api_key_env="CHAT_KEY", api_key="sk-private", max_concurrency=2,
+        fingerprint="fp-chat",
+    )
+    provider = provider_mod.RuntimeModelProvider(
+        Settings(_env_file=None, event_log_enabled=False, llm_log_enabled=False),
+        type("_Events", (), {"emit": lambda self, event: None})(),
+        registry=SystemModelServiceRegistry(
+            {"chat": service}, {"reasoning_agent": "chat"}, None
+        ),
+        chat_factory=lambda _service: _RawChat(reflect_result),
+    )
+    retriever = ReasoningRetriever.from_repository(
+        rrepo, rrepo.settings, fail_closed=False
+    )
+    retriever.model_clients = provider
+    return retriever, provider
+
+
+def _provider_reflect(rrepo, reflect_result):
+    retriever, provider = _provider_backed_retriever(rrepo, reflect_result)
+    try:
+        return retriever.reflect("q", "evidence")
+    finally:
+        provider.close()
+
+
+# 生产复现那一轮的原样载荷:目录决定把 `kind` 留空(reflect prompt 就是这么要求
+# 的),而枚举白名单让 `kind` 在 schema 提示里是个枚举串。F1 之前它被判
+# `invalid_enum`;这里故意填一个**真的**非法值,好让校验层照旧拒收,从而测出
+# 拒收原因是怎样穿过两层 `__cause__` 到达兜底的。
+_BOGUS_CATALOG_DECISION = json.dumps({
+    "sufficient": False,
+    "next_action": "enumerate_elements",
+    "enumerate": {"kind": "bogus", "collection": "sources"},
+    "reason": "先列出当前笔记本的文档目录",
+}, ensure_ascii=False)
+
+
+def test_reflect_fallback_reports_invalid_enum_through_the_real_provider(rrepo):
+    """校验层拒收 ⇒ 决定自证是兜底,原因是校验层给的那一格(不是「畸形」)。"""
+    decision = _provider_reflect(rrepo, _BOGUS_CATALOG_DECISION)
+
+    assert decision.next_action == "answer"
+    assert decision.fallback is True
+    assert decision.fallback_reason == "invalid_enum"
+    # 标记绝不寄生在模型可控的 `reason` 上。
+    assert decision.reason == ""
+
+
+def test_reflect_fallback_reports_a_stable_code_for_a_transport_failure(rrepo):
+    """429/网络故障与「校验拒收」是两件事,兜底原因必须区分得开。"""
+    class _RateLimited(Exception):
+        status_code = 429
+
+    class _Offline(ConnectionError):
+        pass
+
+    assert _provider_reflect(rrepo, _RateLimited("429")).fallback_reason == (
+        "provider_rate_limited"
+    )
+    offline = _provider_reflect(rrepo, _Offline("connection reset"))
+    assert offline.fallback is True
+    assert offline.fallback_reason == "provider_unavailable"
+
+
+def test_run_records_the_fallback_reason_through_the_real_provider(rrepo):
+    """轨迹契约:reflect 步 summary 是中文整句,机器原因只进 `detail`。"""
+    retriever, provider = _provider_backed_retriever(
+        rrepo, _BOGUS_CATALOG_DECISION)
+    nb = _seed_two_nodes(rrepo)
+    try:
+        result = retriever.run(nb.id, "库里有什么", "")
+    finally:
+        provider.close()
+
+    reflect_steps = [s for s in result.trace if s.step_type == "reflect"]
+    assert len(reflect_steps) == 1
+    assert reflect_steps[0].detail["fallback_reason"] == "invalid_enum"
+    assert reflect_steps[0].detail["next_action"] == "answer"
+    assert reflect_steps[0].summary == (
+        "反思结果无法采用（校验拒绝：invalid_enum），按直接作答处理"
+    )
+
+
+def test_run_reflect_summary_names_an_invocation_failure_in_chinese(rrepo):
+    class _RateLimited(Exception):
+        status_code = 429
+
+    retriever, provider = _provider_backed_retriever(rrepo, _RateLimited("429"))
+    nb = _seed_two_nodes(rrepo)
+    try:
+        result = retriever.run(nb.id, "库里有什么", "")
+    finally:
+        provider.close()
+
+    step = [s for s in result.trace if s.step_type == "reflect"][0]
+    assert step.detail["fallback_reason"] == "provider_rate_limited"
+    assert step.summary == "反思结果无法采用（模型调用失败），按直接作答处理"
+
+
+def test_reflect_fallback_names_an_invalid_action(rrepo):
+    class _Bogus:
+        configured = True
+
+        def chat_json(self, *_args, **_kwargs):
+            return '{"next_action":"bogus","reason":"我觉得够了"}'
+
+    decision = _reflect_once(rrepo, _Bogus())
+
+    assert decision.next_action == "answer"
+    assert decision.fallback is True
+    assert decision.fallback_reason == "invalid_action:bogus"
+
+
+def test_reflect_fallback_rejects_an_empty_next_action(rrepo):
+    """空串 `next_action` 也是非法动作。
+
+    判据必须是「动作不在白名单里」这个 bool,不是「被拒的动作名非空」——按名字
+    判会把空串放过去,造出一条 `sufficient=true`、带模型自己写的理由、却没有任何
+    兜底标记的假决定。空串以前被 schema 的枚举闸挡在更外面,F1 让枚举字段接受空
+    串之后,这条路径第一次真的能走到 `reflect()` 里。
+    """
+    class _Empty:
+        configured = True
+
+        def chat_json(self, *_args, **_kwargs):
+            return '{"next_action":"","sufficient":true,"reason":"我觉得够了"}'
+
+    decision = _reflect_once(rrepo, _Empty())
+
+    assert decision.next_action == "answer"
+    assert decision.fallback is True
+    assert decision.fallback_reason == "invalid_action:"
+    assert decision.reason == ""
+
+
+def test_reflect_fallback_names_a_non_object_and_unparsable_response(rrepo):
+    class _NotJson:
+        configured = True
+
+        def chat_json(self, *_args, **_kwargs):
+            return "这不是 JSON"
+
+    class _NotObject:
+        configured = True
+
+        def chat_json(self, *_args, **_kwargs):
+            return '["answer"]'
+
+    # 非 JSON:兜底原因留异常类名(解析层的 JSONDecodeError),而不是沉默。
+    assert _reflect_once(rrepo, _NotJson()).fallback_reason == "JSONDecodeError"
+    assert _reflect_once(rrepo, _NotObject()).fallback_reason == "non_object"
+
+
+def test_reflect_fallback_marks_an_unconfigured_model(rrepo):
+    """「模型没配」以前返回的是裸 `answer_decision` —— 与推理结论同形,而它其实
+    是一条部署故障。"""
+    class _Unconfigured:
+        configured = False
+
+        def chat_json(self, *_args, **_kwargs):  # pragma: no cover
+            raise AssertionError("must not be called")
+
+    decision = _reflect_once(rrepo, _Unconfigured())
+
+    assert decision.fallback is True
+    assert decision.fallback_reason == "model_unconfigured"
+
+
+def test_run_reflect_step_has_no_fallback_key_on_a_real_decision(rrepo):
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    nb = _seed_two_nodes(rrepo)
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "布局布线步骤"}]},
+        reflects=[{"next_action": "answer", "sufficient": True,
+                   "reason": "证据够了"}]))
+    result = ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(
+        nb.id, "布局布线", "")
+
+    reflect_steps = [s for s in result.trace if s.step_type == "reflect"]
+    assert reflect_steps and all(
+        "fallback_reason" not in s.detail for s in reflect_steps)
+    assert reflect_steps[0].summary == "证据够了"
+
+
+# ------------------------------------------------ 首轮空手换通道提示(F3)
+
+
+def test_first_round_empty_gets_the_switch_channel_note_then_the_old_one(
+    rrepo, monkeypatch
+):
+    """首轮零命中要的是「换通道/改写查询」,不是「请直接选择 answer」——后者会在
+    模型一条通道都没换过的时候就劝它零证据合成(生产复现的最后一环)。之后各轮
+    无进展仍用旧提示:那时「继续同类检索难有新增」才是真的。"""
+    from app.models.schemas import NotebookCreate
+    from app.services.reasoning_retrieval import (
+        NO_NEW_EVIDENCE_NOTE, ReasoningRetriever, first_round_empty_note,
+    )
+
+    nb = rrepo.create_notebook(NotebookCreate(name="empty"))   # 首轮必然空手
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "布局布线步骤"}]},
+        reflects=[
+            {"next_action": "search_elements", "elements_query": "q"},
+            {"next_action": "search_elements", "elements_query": "q2"},
+        ]))
+    retriever = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    expected = first_round_empty_note(
+        retriever.chunk_search_active(), retriever.enumeration_active())
+
+    summaries: list[str] = []
+    original = retriever.reflect
+
+    def _capture(question, candidates_summary, **kwargs):
+        summaries.append(candidates_summary)
+        return original(question, candidates_summary, **kwargs)
+
+    monkeypatch.setattr(retriever, "reflect", _capture)
+    retriever.run(nb.id, "这个库讲了什么", "")
+
+    assert len(summaries) >= 2
+    assert expected in summaries[0]
+    assert NO_NEW_EVIDENCE_NOTE not in summaries[0]
+    assert NO_NEW_EVIDENCE_NOTE in summaries[1]
+    assert expected not in summaries[1]
+
+
+def test_first_round_empty_note_only_names_channels_this_run_offers():
+    """提示词与动作白名单必须同源。写死两个动作名会让 knowhow 补全那档
+    (两把闸都关 + `fail_closed=True`)照提示选一个不存在的动作 → 硬失败。"""
+    from app.services.reasoning_retrieval import first_round_empty_note
+
+    both = first_round_empty_note(True, True)
+    assert "search_chunks" in both and "enumerate" in both
+
+    only_chunks = first_round_empty_note(True, False)
+    assert "search_chunks" in only_chunks and "enumerate" not in only_chunks
+
+    only_enum = first_round_empty_note(False, True)
+    assert "enumerate" in only_enum and "search_chunks" not in only_enum
+
+    neither = first_round_empty_note(False, False)
+    assert "search_chunks" not in neither and "enumerate" not in neither
+    assert "换一个可用的检索通道或改写查询" in neither
+    # 其余措辞四档逐字相同:变的只有中间那句建议。
+    for note in (both, only_chunks, only_enum, neither):
+        assert note.startswith("（系统提示:首轮检索未命中任何证据。")
+        assert note.endswith("只有多次尝试仍无命中时才 answer 并如实说明依据不足。)")
+
+
+def test_knowhow_completion_gear_never_sees_an_unavailable_channel(
+    rrepo, monkeypatch
+):
+    """knowhow 补全档位:`allow_enumeration` / `allow_search_chunks` 双关 +
+    `fail_closed=True`。写死两个动作名的提示会让模型照做 → 动作不在白名单 →
+    `reflect()` 在 fail_closed 下 `ValueError` → 整轮硬失败。所以这一档的首轮
+    空手提示里一个动作名都不能出现。"""
+    from app.models.schemas import NotebookCreate
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    nb = rrepo.create_notebook(NotebookCreate(name="empty"))
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "布局布线步骤"}]},
+        reflects=[{"next_action": "answer", "sufficient": True,
+                   "reason": "依据不足"}]))
+    retriever = ReasoningRetriever.from_repository(
+        rrepo, rrepo.settings, fail_closed=True)
+    retriever.allow_enumeration = False
+    retriever.allow_search_chunks = False
+    retriever.allow_ppr = False
+    retriever.allow_exact_lookup = False
+
+    summaries: list[str] = []
+    original = retriever.reflect
+
+    def _capture(question, candidates_summary, **kwargs):
+        summaries.append(candidates_summary)
+        return original(question, candidates_summary, **kwargs)
+
+    monkeypatch.setattr(retriever, "reflect", _capture)
+    retriever.run(nb.id, "这个库讲了什么", "")   # 不得抛
+
+    assert summaries
+    assert "search_chunks" not in summaries[0]
+    assert "enumerate" not in summaries[0]
+    assert "换一个可用的检索通道或改写查询" in summaries[0]

@@ -25,6 +25,18 @@ _EN_SOURCE = rf"(?:(?:this|that|the) {_EN_DOCUMENT}|(?:the )?{_EN_DOCUMENT} @tit
 _EN_CATALOG = rf"(?:(?:each|every) {_EN_DOCUMENT}|(?:all(?: the)?|the|these) {_EN_DOCUMENT}s|{_EN_DOCUMENT}s)(?: {_EN_SCOPE})?"
 
 
+# 「整篇/整库讲了什么」这件事的中文说法表。同一个动作在语料里至少有十几种写法
+# (说明/阐述/描述/讨论…),只钉其中五个的话,分类器命中与否取决于用户碰巧用了哪个
+# 同义词——这正是「当前notebook的文章说明了什么」在生产里掉出目录通道的根因。
+#
+# 扩表**不会**放宽边界:边界由外面的 `fullmatch` 与尾巴约束(必须以「什么/哪些内容/
+# 什么内容」收尾)保证,话题修饰语(「说明了 CMRR 如何计算」「说明的公式是什么」)
+# 照旧落回 ranked。长词写在短词前面只为省一次回溯,不影响结果。
+_CN_OVERVIEW_VERBS = (
+    "介绍|讲述|讲的|讲|包含|说明|阐述|描述|讨论|探讨|研究|谈|写|说"
+)
+
+
 def _whole_document_request(question: str, subject: str, *, english: bool) -> bool:
     """Match complete subject/action templates, leaving any topic modifiers ranked."""
     if english:
@@ -33,13 +45,16 @@ def _whole_document_request(question: str, subject: str, *, english: bool) -> bo
             rf"(?:please )?(?:give|provide)(?: me)? (?:a |an )?(?:brief )?(?:summary|overview|introduction) of {subject}",
             rf"(?:a |an )?(?:summary|overview|introduction) of {subject}",
             rf"what (?:is|are) {subject} about",
-            rf"what (?:does|do) {subject} (?:cover|discuss|describe)",
+            rf"what (?:is|are) {subject} saying",
+            rf"what (?:does|do) {subject} "
+            rf"(?:cover|discuss|describe|say|explain|present|show|talk about)",
         )
     else:
         patterns = (
             rf"(?:请|请帮我|帮我|请给我|给我)?(?:分别|逐篇)?(?:简单|简要)?(?:介绍|概述|概括|总结)(?:一下|下)?{subject}(?:的(?:主要内容|内容|主题))?",
-            rf"{subject}(?:分别|各自)?(?:都)?(?:主要)?(?:介绍|讲|讲述|讲的|包含)(?:了)?(?:什么|哪些内容|什么内容)",
-            rf"{subject}的(?:主要内容|内容|主题)(?:是|有)什么",
+            rf"{subject}(?:分别|各自)?(?:都)?(?:主要)?(?:{_CN_OVERVIEW_VERBS})"
+            rf"(?:了)?(?:些)?(?:什么|哪些内容|什么内容)",
+            rf"{subject}的(?:主要内容|内容|主题|大意)(?:是|有)什么",
         )
     return any(re.fullmatch(pattern, question, re.I) for pattern in patterns)
 

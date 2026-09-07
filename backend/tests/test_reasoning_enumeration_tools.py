@@ -1668,3 +1668,237 @@ def test_collection_counts_survive_a_full_evidence_partition(repo):
     assert block in prompt
     assert prompt.index(block) < prompt.index("SSS")
     assert prompt.count("S") < 5_000
+
+
+# ------------------------------------------------- 目录问法的确定性播种(F2)
+#
+# 生产复现:「当前notebook的文章说明了什么」的答案就是那份文档目录,而此前唯一的
+# 到达方式是赌模型在 reflect 里选中目录动作 —— 要赌它读懂了动作说明,还要赌那一轮
+# 响应通过 JSON 校验(线上塌的正是后者)。播种把这件事变成确定性的,判据与 chunk
+# 模式的文档介绍通道共用同一个分类器。
+
+_CATALOG_QUESTION = "当前notebook的文章说明了什么？"
+
+
+def _seed_sources_only(repo, titles, *, summaries=None):
+    """只有文档、没有图的笔记本(生产复现的形态:1 篇英文论文、无图)。"""
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    with repo._write() as db:
+        for index, title in enumerate(titles, start=1):
+            db.execute(
+                "INSERT INTO sources (id,notebook_id,title,source_type,status,"
+                "parse_status,summary,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (f"s{index}", notebook.id, title, "pdf", "extracted",
+                 "extracted", (summaries or {}).get(title, ""), NOW, NOW),
+            )
+    repo.collection_catalog.invalidate()
+    return notebook
+
+
+def _seed_step(result):
+    steps = [step for step in _steps(result, "enumerate")
+             if step.detail.get("phase") == "seed"]
+    return steps[0] if steps else None
+
+
+def test_catalog_question_seeds_the_document_roster_before_the_model_acts(repo):
+    """目录问法 ⇒ 首轮播一次目录;目录进回喂账目;模型随后再选目录动作按「已列全」
+    跳过(同一预算池、同一条续跑链,不会把同一份清单列两遍)。"""
+    notebook = _seed_sources_only(repo, ["论文一", "论文二"])
+    llm = _SeqLLM([
+        _enumerate_sources_action(),
+        {"next_action": "answer", "sufficient": True},
+    ])
+    retriever, limits = _retriever(repo, llm)
+
+    result = retriever.run(notebook.id, _CATALOG_QUESTION, "", limits=limits)
+
+    seed = _seed_step(result)
+    assert seed is not None and seed.detail["collection"] == "sources"
+    assert seed.detail["complete"] is True
+    assert [o.collection for o in result.enumerations] == ["sources"]
+    # 目录必须真的到了模型手里(回喂账目 + 标题豁免)。
+    assert "来源清单" in llm.reflect_prompts[0]
+    assert "论文一" in llm.reflect_prompts[0]
+    # 模型再选一次 ⇒ already_enumerated,而不是第二条链。
+    assert "already_enumerated" in _skips(result)
+    assert len(result.enumerations) == 1
+
+
+def test_seeded_roster_counts_as_first_round_progress(repo):
+    """播种列出的目录**就是**进展。
+
+    首轮的 `no_progress` 口径必须与循环里的那一份同源(循环数
+    `state.enum_rows_used`)。不数枚举行的话,一个只有来源、chunk 零命中的库会在
+    列全了目录之后仍被判「首轮空手」:`stale` 从 1 起步(离硬熔断只差一步),而
+    第一次 reflect 还会收到「一条证据都没查到,请先换通道」——就在那份目录已经
+    躺在同一份上下文里的时候。
+    """
+    from app.services.reasoning_retrieval import first_round_empty_note
+
+    notebook = _seed_sources_only(repo, ["论文一", "论文二"])
+    llm = _SeqLLM([{"next_action": "answer", "sufficient": True}])
+    retriever, limits = _retriever(repo, llm)
+    empty_note = first_round_empty_note(
+        retriever.chunk_search_active(), retriever.enumeration_active())
+
+    result = retriever.run(notebook.id, _CATALOG_QUESTION, "", limits=limits)
+
+    assert _seed_step(result) is not None            # 播种真的发生了
+    first_reflect = _steps(result, "reflect")[0]
+    assert first_reflect.detail["no_progress"] is False
+    assert first_reflect.detail["stale"] == 0
+    # 目录进了第一次 reflect 的上下文,而首轮空手提示没有。
+    assert "论文一" in llm.reflect_prompts[0]
+    assert empty_note not in llm.reflect_prompts[0]
+
+
+def test_catalog_seeding_also_happens_with_a_graph_in_scope(repo):
+    """目录与图无关:有图库同样播种(``_seed`` 建了 KG 对象)。"""
+    notebook = _seed(repo, formulas=1)
+    llm = _SeqLLM([{"next_action": "answer", "sufficient": True}])
+    retriever, limits = _retriever(repo, llm)
+
+    result = retriever.run(notebook.id, _CATALOG_QUESTION, "", limits=limits)
+
+    assert _seed_step(result) is not None
+    assert [o.collection for o in result.enumerations] == ["sources"]
+
+
+def test_catalog_seed_step_comes_before_the_plan_step(repo):
+    """播种排在 **plan 之前**是首轮阶段顺序合同的一条。
+
+    理由不是接线判据的可用时机(`enumeration_active` 在 `_new_run_state` 就算好
+    了),而是候选:目录是这类问题的答案本身,它必须先于 plan 进入轨迹与候选摘要,
+    第一次 reflect 才看得见。把 `_first_round_catalog_seed` 挪到
+    `_first_round_empty_fallback` 之后,这条断言必须红。
+    """
+    notebook = _seed_sources_only(repo, ["论文一"])
+    llm = _SeqLLM([{"next_action": "answer", "sufficient": True}])
+    retriever, limits = _retriever(repo, llm)
+
+    result = retriever.run(notebook.id, _CATALOG_QUESTION, "", limits=limits)
+
+    kinds = [step.step_type for step in result.trace]
+    assert "enumerate" in kinds and "plan" in kinds
+    assert kinds.index("enumerate") < kinds.index("plan")
+
+
+def test_topical_question_does_not_seed_the_roster(repo):
+    """话题修饰语让问题回到 ranked 通道:播种绝不能替它决定「其实你要目录」。"""
+    notebook = _seed_sources_only(repo, ["论文一"])
+    llm = _SeqLLM([{"next_action": "answer", "sufficient": True}])
+    retriever, limits = _retriever(repo, llm)
+
+    result = retriever.run(
+        notebook.id, "当前notebook里关于布局的文章讲了什么", "", limits=limits)
+
+    assert _steps(result, "enumerate") == []
+    assert result.enumerations == []
+
+
+def test_catalog_seeding_uses_the_original_question_not_the_contract(repo):
+    """高级界面确认合同后 `question` 是「原问题 + 整段契约」的复合串,分类器对它
+    必然不命中;播种因此读 `original_question`。"""
+    notebook = _seed_sources_only(repo, ["论文一"])
+    composite = f"{_CATALOG_QUESTION}\n【已确认的研究问题】…必答主题:1. 方法 2. 结论"
+    llm = _SeqLLM([{"next_action": "answer", "sufficient": True}])
+    retriever, limits = _retriever(repo, llm)
+
+    without = retriever.run(notebook.id, composite, "", limits=limits)
+    assert _steps(without, "enumerate") == []
+
+    llm2 = _SeqLLM([{"next_action": "answer", "sufficient": True}])
+    retriever2, limits2 = _retriever(repo, llm2)
+    with_original = retriever2.run(
+        notebook.id, composite, "", limits=limits2,
+        original_question=_CATALOG_QUESTION)
+    assert _seed_step(with_original) is not None
+
+
+def test_catalog_seeding_respects_the_enumeration_policy_bit(repo):
+    """knowhow 补全关的是 `allow_enumeration`:播种与动作走同一把闸,一起消失。"""
+    notebook = _seed_sources_only(repo, ["论文一"])
+    llm = _SeqLLM([{"next_action": "answer", "sufficient": True}])
+    retriever, limits = _retriever(repo, llm)
+    retriever.allow_enumeration = False
+
+    result = retriever.run(notebook.id, _CATALOG_QUESTION, "", limits=limits)
+
+    assert _steps(result, "enumerate") == []
+    assert result.enumerations == []
+
+
+def test_catalog_seeding_is_off_for_a_restricted_source_scope(repo):
+    """受限 scope 本就禁用整集合枚举;播种不得绕过那道闸。"""
+    from app.services.source_scope import source_scope_context
+
+    notebook = _seed_sources_only(repo, ["论文一", "论文二"])
+    llm = _SeqLLM([{"next_action": "answer", "sufficient": True}])
+    retriever, limits = _retriever(repo, llm)
+
+    with source_scope_context(
+        notebook.id, {"mode": "include", "source_ids": ["s1"]}
+    ):
+        assert retriever.enumeration_active() is False
+        result = retriever.run(notebook.id, _CATALOG_QUESTION, "",
+                               limits=limits)
+
+    assert _steps(result, "enumerate") == []
+    assert result.enumerations == []
+
+
+def test_production_repro_reaches_the_roster_through_the_real_validator(repo):
+    """验收 1:无图库 + 1 篇有摘要的来源 + 高级界面确认合同(检索问题带整段契约)。
+
+    reflect 走**真实**的 `parse_model_json_object` + `validate_model_json_shape`
+    (假 provider 只负责回放 JSON 字符串),所以「目录决定的 `kind` 为空」这件事必须
+    真的被校验层接受 —— 那正是 F1 修的枚举字段空串规则。播种保证轨迹上有
+    `enumerate`(sources)步,校验层保证模型那一轮不是伪装成 answer 的兜底。
+    """
+    from app.core.model_json import (
+        ModelJsonRepairError, parse_model_json_object, validate_model_json_shape,
+    )
+    from app.services.model_work import MalformedModelResponse
+
+    class _ValidatingLLM(_SeqLLM):
+        """镜像 `model_provider.ScheduledJsonChatClient` 的拒收合同:解析失败或
+        形状不合 schema 提示时 `MalformedModelResponse() from ModelJsonRepairError`。"""
+
+        def chat_json(self, messages, schema_hint, **kwargs):
+            raw = super().chat_json(messages, schema_hint, **kwargs)
+            try:
+                parsed = parse_model_json_object(
+                    raw, schema_hint, allow_repair=False)
+                validate_model_json_shape(parsed.content, schema_hint)
+            except ModelJsonRepairError as exc:
+                raise MalformedModelResponse() from exc
+            return parsed.content
+
+    notebook = _seed_sources_only(
+        repo, ["Recursive Depth Language Models"],
+        summaries={"Recursive Depth Language Models": "递归深度语言模型的摘要"})
+    llm = _ValidatingLLM([
+        _enumerate_sources_action(),
+        {"next_action": "answer", "sufficient": True},
+    ])
+    retriever, limits = _retriever(repo, llm)
+
+    result = retriever.run(
+        notebook.id,
+        f"{_CATALOG_QUESTION}\n【已确认的研究问题】逐篇说明本库文章的主要内容",
+        "",
+        limits=limits,
+        intent_queries=[f"{_CATALOG_QUESTION}\n【已确认的研究问题】逐篇说明"],
+        original_question=_CATALOG_QUESTION,
+    )
+
+    seed = _seed_step(result)
+    assert seed is not None and seed.detail["collection"] == "sources"
+    assert [o.collection for o in result.enumerations] == ["sources"]
+    assert result.enumerations[0].coverage.returned_total == 1
+    # 校验层接受了目录决定 ⇒ 那一轮不是兜底(F1 未落地时这里会红)。
+    reflect_steps = _steps(result, "reflect")
+    assert reflect_steps and all(
+        "fallback_reason" not in step.detail for step in reflect_steps)

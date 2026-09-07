@@ -809,6 +809,7 @@ def reflect_prompt(
         "sub-type). "
         "Do that when the question asks WHICH documents the library holds, or "
         "asks for a per-document treatment of it ('库里有哪几篇', "
+        "'当前notebook的文章说明了什么', "
         "'逐篇分析当前notebook', 'summarize each paper here'). It lists every "
         "document in scope with its type and stored summary, in the order the "
         "library shows them. Use it FIRST for that shape of question — the "
