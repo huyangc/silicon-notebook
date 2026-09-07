@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Guard: user-facing Chinese UI copy must not leak internal jargon.
 
-Scope follows the **trust boundary, not the directory**. Two sources of copy reach
-a user's screen, and both are scanned:
+Scope follows the **trust boundary, not the directory**. Three sources of copy reach
+a user's screen, and all three are scanned:
 
   1. frontend/app and frontend/features *.ts/*.tsx *rendered text* — string
      literals plus JSX text nodes.
@@ -12,6 +12,16 @@ a user's screen, and both are scanned:
      string is therefore a promise that it is user copy, so it inherits the copy
      rules. Scoping this guard to `frontend/app` alone is what let 「基准库」and 「晋升队列」
      ship inside marked 403s while the guard stayed green.
+  3. backend **reasoning-trace summaries** — the server writes them, the front end
+     renders them **verbatim** (`answer-panel.tsx` prints `step.summary` with no
+     mapping of its own), so they are user copy that never passes through
+     `frontend/app`. Two shapes are scanned, in `TRACE_SUMMARY_MODULES`:
+     `TraceStep(..., summary=<literal>)` calls, and the module-level termination
+     copy table `reasoning_aspects._TERMINATION_SUMMARIES` (its values reach the
+     screen twice — as the closing skip step's `summary` and as the terminal
+     synthesis step's `termination_summary` field). This channel is what catches
+     「必答方面」: it is the server-side ledger name, the UI word is 「方面」, and both
+     sentences carrying it were rendered verbatim while this guard stayed green.
 
   Bare `HTTPException(detail=str(exc))` is deliberately **not** scanned: it is never
   displayed (the front end falls back to a generic message by status code) and its
@@ -88,6 +98,42 @@ USER_ERROR = "user_error"
 # 匹配数会掉到 0 而退出码仍是 0 —— 正是本次要根治的那种假绿。这不是精确台账
 # (新增站点不该让构建红),只是「扫描面塌了」的哨兵。当前实际 21 处。
 MIN_USER_ERROR_SITES = 15
+
+# —— 第三条通道:服务端写、前端逐字渲染的推理轨迹摘要 ——————————————————
+# 扫描面是**具名模块**而不是整个 backend/app:轨迹摘要有一个明确的产出方(推理
+# 检索器与它的两个纯数据模块),把 `TraceStep(summary=…)` 这个形状泛化到全仓会把
+# 一堆同名 kwarg 的非 UI 调用拖进来,而收益是零。新增一个会写轨迹步的模块时,
+# 把它加进这张表——这是有意的显式登记,不是靠 glob 猜。
+#
+# 路径按 `ROOT` 直接写死,**刻意不经过 `BACKEND_APP`**:那个常量是可被重定向的
+# (`--extra-root` 的仓库外插件自检、以及把它指向 tmp 目录的几条自检用例),而这条
+# 通道的扫描面是本仓库里这三个具名模块,与插件自检面没有任何关系。跟着一个会被
+# 重定向的根走,只会让"把后端根指到别处"的那几种调用顺带把这条通道也一起关掉。
+TRACE_SUMMARY_MODULES = (
+    ROOT / "backend" / "app" / "services" / "reasoning_aspects.py",
+    ROOT / "backend" / "app" / "services" / "reasoning_observation.py",
+    ROOT / "backend" / "app" / "services" / "reasoning_retrieval.py",
+)
+TRACE_STEP = "TraceStep"
+# 模块级的「结束原因 → 上屏中文短句」表。它不经 `TraceStep(...)` 的字面量参数上屏
+# (值先进 dict、再由 `termination_summary()` 取出),所以按名字直接扫这张表:一处
+# 是收尾 skip 步的 `summary`,一处是合成终步 detail 里的 `termination_summary` 字段,
+# 两处都逐字渲染。
+TRACE_SUMMARY_TABLES = ("_TERMINATION_SUMMARIES",)
+# 非空性下限,同 MIN_USER_ERROR_SITES 的理由(当前实际 71 处:64 个字面量 summary
+# + 7 条结束短句)。`TraceStep` 改名或摘要全改成变量拼装都会让它掉下来。
+MIN_TRACE_SUMMARY_SITES = 50
+
+# 这条通道开通**之前**就已存在的一条违规,登记为例外而不是静默放行:
+# 「本笔记本尚未构建知识图谱…」里的「构建知识图谱」按词表该写成「整理知识图谱」,
+# 但这句是被 `docs/product-and-api*.md` 逐字冻结的协议串(文档明写「含其中的半角
+# 逗号」),还被 `backend/tests/fixtures/repository_contract/ask_responses.json` 这份
+# 仓库黄金 fixture 钉住。改它要同改文档、既有用例与 fixture,属于独立的一次改动;
+# 登记在这里是为了让它可见且**有界**——例外按逐字全串匹配,改一个字就重新违规。
+# 后续项登记在 `fangan_todo.md` 的「问答」一节。
+GRANDFATHERED_TRACE_SUMMARIES = frozenset({
+    "本笔记本尚未构建知识图谱,本轮只用原文检索与集合清单",
+})
 
 # ASCII acronyms/words: matched only when not glued to another ASCII letter, so
 # identifiers (currentNotebook, MemoryPanel, schemaBusy, PKG) cannot trip them.
@@ -390,6 +436,61 @@ def scan_user_error(path: Path) -> tuple[int, list[tuple[int, str, str]]]:
     return sites, sorted(hits)
 
 
+def scan_trace_summaries(path: Path) -> tuple[int, list[tuple[int, str, str]]]:
+    """Blacklisted jargon in this module's server-written trace summaries.
+
+    Two shapes, both rendered verbatim by the front end (see docstring channel 3):
+    ``TraceStep(..., summary=<literal>)`` and the values of the module-level
+    termination copy tables named in ``TRACE_SUMMARY_TABLES``.
+
+    Summaries built from a variable or a helper call are *not* statically
+    checkable and are skipped, exactly as ``_message_literal`` skips a computed
+    ``user_error`` message. Returns (sites seen, hits) — the count feeds the
+    non-vacuity floor.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    sites, hits = 0, []
+
+    def check(lineno: int, text: str) -> None:
+        nonlocal sites
+        sites += 1
+        if text in GRANDFATHERED_TRACE_SUMMARIES:
+            return
+        for term in terms_in(text):
+            hits.append((lineno, term, text))
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+            if name != TRACE_STEP:
+                continue
+            for keyword in node.keywords:
+                if keyword.arg != "summary":
+                    continue
+                text = _message_literal(keyword.value)
+                if text is not None:
+                    check(node.lineno, text)
+            continue
+        # 模块级 `_TERMINATION_SUMMARIES: Mapping[str, str] = {...}` —— 带注解的
+        # 赋值是 AnnAssign,不是 Assign,两种写法都要认(只认一种就会在有人补上
+        # 类型注解的那天静默失去这半个扫描面)。
+        targets = (
+            list(node.targets) if isinstance(node, ast.Assign)
+            else [node.target] if isinstance(node, ast.AnnAssign) else []
+        )
+        if not any(
+            isinstance(target, ast.Name) and target.id in TRACE_SUMMARY_TABLES
+            for target in targets
+        ):
+            continue
+        if isinstance(node.value, ast.Dict):
+            for value in node.value.values:
+                text = _message_literal(value)
+                if text is not None:
+                    check(getattr(value, "lineno", node.lineno), text)
+    return sites, sorted(hits)
+
+
 def _rel(path: Path) -> str:
     """Repo-relative path for reporting; falls back to the absolute one when the
     scan root has been redirected (the self-tests point it at a tmpdir)."""
@@ -485,6 +586,38 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
+    # 第三条通道:服务端写、前端逐字渲染的推理轨迹摘要(见模块 docstring)。
+    # 刻意排在 MIN_USER_ERROR_SITES **之后**:两条后端通道各有自己的「扫描面塌了」
+    # 哨兵,而一次把 BACKEND_APP 指错的误配置会同时触发两条。先报 user_error 那条
+    # 是因为它先于这条存在,原有那条自检用例的输出契约不该被这次扩面改写。
+    trace_sites = 0
+    for path in TRACE_SUMMARY_MODULES:
+        if not path.exists():
+            print(
+                f"check_ui_vocabulary: trace-summary module missing: {_rel(path)} "
+                f"(update TRACE_SUMMARY_MODULES)",
+                file=sys.stderr,
+            )
+            return 1
+        sites, hits = scan_trace_summaries(path)
+        trace_sites += sites
+        rel = _rel(path)
+        for line, term, snippet in hits:
+            snippet = snippet if len(snippet) <= 80 else snippet[:77] + "…"
+            violations.append(
+                f"  {rel}:{line}: 「{term}」in trace summary: {snippet!r}"
+            )
+
+    if trace_sites < MIN_TRACE_SUMMARY_SITES:
+        print(
+            f"check_ui_vocabulary: only {trace_sites} literal trace summaries found "
+            f"across {len(TRACE_SUMMARY_MODULES)} module(s) (expected ≥ "
+            f"{MIN_TRACE_SUMMARY_SITES}). 这条通道失去了扫描面——{TRACE_STEP} 是不是"
+            f"改名 / 摘要改成了变量拼装?别调低下限来「修」它。",
+            file=sys.stderr,
+        )
+        return 1
+
     if violations:
         print("UI vocabulary contract MISMATCH — internal jargon in user-visible copy:", file=sys.stderr)
         print("\n".join(violations), file=sys.stderr)
@@ -496,7 +629,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     ok_message = (
         f"UI vocabulary contract OK: scanned {len(files)} frontend production files + "
-        f"{marked_sites} backend {USER_ERROR}() messages "
+        f"{marked_sites} backend {USER_ERROR}() messages + "
+        f"{trace_sites} trace summaries "
         f"({len(CJK_TERMS) + len(ASCII_TERMS)} blacklisted terms)"
     )
     if extra_roots:

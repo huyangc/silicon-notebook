@@ -337,11 +337,15 @@ def answer_prompt(
     # binding or relaxing rule 2's grounding requirement) and must not be
     # mistaken for part of the question itself.
     style_section = f"{style_block}\n\n" if style_block else ""
-    # Same placement argument as ``style_section``: after the numbered rules
-    # (it is not a rule and must never be read as authorizing a new [k]
-    # binding) and before the Question line (it is not part of the question).
-    # Deliberately NOT adjacent to the knowledge items — a server note sitting
-    # against the evidence partition reads like one more item.
+    # 服务端事实块的位置只有**一条**不变量,两份 prompt 共用(见
+    # ``report_section_prompt`` 的同名块,那里逐字重复这段论证):**绝不挨着知识
+    # 条目**——一段贴着证据分区的服务端说明会被读成又一条证据。除此之外它跟随
+    # 各自 prompt 里「交代这一轮上下文」的那一族;那一族在两份 prompt 里本来就
+    # 在不同的位置,所以绝对位置不同不是两套互相打架的论证:
+    #   * answer_prompt:该族(``style_section``)在编号规则**之后**、Question 行
+    #     之前——它不是规则(绝不可被读成授权一个新的 [k] 绑定),也不是问题本身。
+    #   * report_section_prompt:该族(意图假设 / 分析框架 / 合成承诺)在编号规则
+    #     **之前**,与章节合同一起交代这一节的上下文。
     termination_section = f"{termination_block}\n\n" if termination_block else ""
     return (
         "You answer an engineer's question using the notebook knowledge below, "
@@ -1656,8 +1660,15 @@ def report_section_prompt(section_title: str, section_scope: str, question: str,
         "from different studies unless their stated conditions are comparable.\n"
         if synthesis_commitment else ""
     )
-    # 与 assumption/frame/commitment 同一位置族:在规则之前、与章节合同一起
-    # 交代这一节的上下文,而不是挨着知识条目(那会读成又一条证据)。
+    # 服务端事实块的位置只有**一条**不变量,两份 prompt 共用(见 ``answer_prompt``
+    # 的同名块,那里逐字重复这段论证):**绝不挨着知识条目**——一段贴着证据分区的
+    # 服务端说明会被读成又一条证据。除此之外它跟随各自 prompt 里「交代这一轮上下文」
+    # 的那一族;那一族在两份 prompt 里本来就在不同的位置,所以绝对位置不同不是两套
+    # 互相打架的论证:
+    #   * answer_prompt:该族(``style_section``)在编号规则**之后**、Question 行
+    #     之前——它不是规则(绝不可被读成授权一个新的 [k] 绑定),也不是问题本身。
+    #   * report_section_prompt:该族(意图假设 / 分析框架 / 合成承诺)在编号规则
+    #     **之前**,与章节合同一起交代这一节的上下文。
     termination_section = f"{termination_block}\n" if termination_block else ""
     return (
         "You write ONE section of a deep technical report for an engineer. "

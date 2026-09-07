@@ -367,7 +367,7 @@ def test_v2_termination_reaches_the_synthesis_prompt_and_trace(arepo):
 
     detail = _synthesis_detail(resp)
     assert detail["termination_reason"] == "model_partial"
-    assert detail["termination_summary"] == "检索结束：仍有必答方面没有完整支撑"
+    assert detail["termination_summary"] == "检索结束：仍有方面没有完整支撑"
     assert detail["aspects_total"] == 1 and detail["aspects_pending"] == 1
     assert detail["aspects_model_supported"] == 0
     assert detail["aspects_undelivered"] == 0

@@ -68,6 +68,12 @@
   后者是「这个方面到检索结束都没找到支撑」。合起来说会让「模型判断」与「服务端
   实际送了什么进合成」再也分不开。结束原因的中文短句由服务端给（
   `termination_summary`），前端只渲染字段，不在前端另立一份 reason 码→文案映射。
+  服务端那份短句表（`reasoning_aspects._TERMINATION_SUMMARIES`）与前端渲染文本、后端
+  `user_error()` 一样在 `scripts/check_ui_vocabulary.py` 的扫描面里（第三条通道）。
+- 检索收尾那条轨迹步复用 `skip` 这个 `step_type`，但界面标签是**「结束」**而不是
+  「跳过」：它不是跳过了什么，它就是这次检索的结束。真正被跳过的步（重复子查询、
+  达次数上限、范围不允许）仍然叫「跳过」，`TRACE_STEP_LABELS.skip` 不变；判据是
+  `detail.reason === "retrieval_termination"`（`getTraceStepLabel`）。
 
 ## 答案正文内的标记
 

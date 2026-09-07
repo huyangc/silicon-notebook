@@ -59,7 +59,7 @@ import {
   formatDuration,
   getReasoningTraceSummary,
   getTraceStepDetail,
-  TRACE_STEP_LABELS,
+  getTraceStepLabel,
 } from "./reasoning-trace";
 import {
   STRUCTURED_ENUMERATION_LIMITS,
@@ -1191,7 +1191,7 @@ export function ReasoningTracePanel({
             const hasTime = typeof step.duration_ms === "number";
             return (
               <li key={`${step.step_type}-${index}`} className={index === visibleSteps.length - 1 && live ? "active" : ""}>
-                <span>{label(TRACE_STEP_LABELS, step.step_type, "处理中")}</span>
+                <span>{getTraceStepLabel(step)}</span>
                 <strong>{step.summary}</strong>
                 {(detail || hasTime) && (
                   <div className="reasoning-trace-meta">

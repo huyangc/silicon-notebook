@@ -346,7 +346,7 @@
     "backend/app/extensions/ask.py::AskCompletedObserverHost.observe_application": 160,
     "backend/app/extensions/parser_chain.py::ParserProviderChainHost._run": 307,
     "backend/app/extensions/retrieval.py::RetrievalContributorHost._run": 363,
-    "backend/app/services/ask_service.py::AskService._draft_reasoning_response": 689,
+    "backend/app/services/ask_service.py::AskService._draft_reasoning_response": 697,
     "backend/app/services/ask_service.py::AskService._run_reasoning_stage": 533,
     "backend/app/services/ask_service.py::AskService.ask_chunk": 388,
     "backend/app/services/knowledge_lifecycle.py::KnowledgeLifecycleService.complete_relations_for_source": 425,

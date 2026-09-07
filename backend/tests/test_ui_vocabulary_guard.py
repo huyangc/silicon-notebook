@@ -433,6 +433,106 @@ def test_后端真实文案确实曾经违规过(tmp_path):
 
 
 # --------------------------------------------------------------------------
+# 5b. 第三条通道:服务端写、前端逐字渲染的推理轨迹摘要
+#
+# 这条通道补的是与「后端 user_error」同构的一个缺口:`TraceStep.summary` 与结束
+# 原因短句表都由服务端写,前端 answer-panel.tsx 原样打印,没有任何前端映射——
+# 它们是用户文案,却从不经过 frontend/app,于是「必答方面」这个服务端记账名一路
+# 上屏两次(收尾 skip 步的 summary + 合成终步的 termination_summary),而守卫全绿。
+# --------------------------------------------------------------------------
+
+
+def scan_trace(tmp_path: pathlib.Path, code: str) -> list[str]:
+    path = tmp_path / "trace_sample.py"
+    path.write_text(code, encoding="utf-8")
+    return [term for _line, term, _text in guard.scan_trace_summaries(path)[1]]
+
+
+def trace_sites(tmp_path: pathlib.Path, code: str) -> int:
+    path = tmp_path / "trace_sites.py"
+    path.write_text(code, encoding="utf-8")
+    return guard.scan_trace_summaries(path)[0]
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        # 真实回归样本:接入时这两句就是这么写的。
+        '_TERMINATION_SUMMARIES = {"model_sufficient": "检索结束：每个必答方面都已找到支撑"}',
+        'record(TraceStep(step_type="skip", summary="跳过必答方面复核"))',
+        # 带类型注解的表(AnnAssign)同样要认。
+        '_TERMINATION_SUMMARIES: Mapping[str, str] = {"a": "已抽取 3 个必答方面"}',
+        # f-string:字面量部分照查,插值剥掉(同 user_error 规则)。
+        'TraceStep(step_type="skip", summary=f"跳过 {n} 个必答方面")',
+    ],
+)
+def test_轨迹摘要里的黑话会被抓到(tmp_path, code):
+    assert scan_trace(tmp_path, code), f"没抓到轨迹摘要里的黑话:{code}"
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        # 变量拼装的摘要静态查不了,放行而非瞎猜(同 user_error 的同类边界)。
+        'text = "必答方面"\nTraceStep(step_type="skip", summary=text)',
+        'TraceStep(step_type="skip", summary=_summary("必答方面"))',
+        # summary 之外的 kwarg 不是上屏文案(detail 是诊断契约,不上屏)。
+        'TraceStep(step_type="skip", detail={"reason": "必答方面"})',
+        # 同名 kwarg 但不是 TraceStep 的调用
+        'log.event(summary="必答方面已记账")',
+        # 另一张同名 key 的表不在登记的表名里
+        '_INTERNAL_NOTES = {"a": "必答方面"}',
+    ],
+)
+def test_不在轨迹摘要扫描面上的字符串不误报(tmp_path, code):
+    assert scan_trace(tmp_path, code) == [], f"误报:{code}"
+
+
+def test_轨迹摘要的例外按逐字全串匹配(tmp_path):
+    """登记的例外只放行**那一整句**,改一个字就重新违规。
+
+    没有这条,`GRANDFATHERED_TRACE_SUMMARIES` 会退化成一条「凡是含这个词的都放行」
+    的隐形豁免——那正是这条通道要根治的东西。
+    """
+    frozen = next(iter(guard.GRANDFATHERED_TRACE_SUMMARIES))
+    assert scan_trace(
+        tmp_path, f'TraceStep(step_type="skip", summary="{frozen}")') == []
+    assert scan_trace(
+        tmp_path, f'TraceStep(step_type="skip", summary="{frozen}!")'), (
+        "例外不是全串匹配 —— 改一个字就该重新违规")
+
+
+@pytest.mark.architecture_contract
+def test_真实轨迹摘要扫描面非空且登记的模块都在(tmp_path):
+    """非空性 + 登记表不许指向已经不存在的模块。"""
+    total = 0
+    for path in guard.TRACE_SUMMARY_MODULES:
+        assert path.exists(), f"TRACE_SUMMARY_MODULES 指向了不存在的模块:{path}"
+        total += guard.scan_trace_summaries(path)[0]
+    assert total >= guard.MIN_TRACE_SUMMARY_SITES, (
+        f"只找到 {total} 条字面量轨迹摘要 —— 扫描面塌了"
+    )
+
+
+def test_结束原因短句表真的在扫描面里(tmp_path):
+    """变异验证:把界面词「方面」改回服务端记账名「必答方面」,守卫必须红。
+
+    没有这条,「守卫扫了这张表」与「扫了但规则对它不生效」在绿灯下分不开。
+    """
+    module = next(p for p in guard.TRACE_SUMMARY_MODULES
+                  if p.name == "reasoning_aspects.py")
+    src = module.read_text(encoding="utf-8")
+    assert "检索结束：仍有方面没有完整支撑" in src, "文案漂了,本变异样本需同步"
+    mutated = tmp_path / "aspects_mutated.py"
+    mutated.write_text(
+        src.replace("检索结束：仍有方面没有完整支撑", "检索结束：仍有必答方面没有完整支撑"),
+        encoding="utf-8",
+    )
+    hits = [term for _line, term, _text in guard.scan_trace_summaries(mutated)[1]]
+    assert "必答方面" in hits, "改回记账名后守卫仍不报——规则没作用到这张表"
+
+
+# --------------------------------------------------------------------------
 # 6. 端到端归属:真实源码扫描只在 contracts lane 执行一次
 # --------------------------------------------------------------------------
 

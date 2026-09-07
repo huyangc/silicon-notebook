@@ -5205,7 +5205,7 @@ class ReasoningRetriever:
         fkey = _norm_query(focal_name)
         if not focal_name or fkey in state.community_focals_done:
             record(TraceStep(step_type="skip",
-                             summary="跳过 expand_community(无焦点或已扩展)",
+                             summary="跳过横向对比(无焦点或已扩展)",
                              detail={"reason": "no_focal_or_done", "focal": focal_name}))
             return
         state.community_focals_done.add(fkey)
@@ -5233,7 +5233,7 @@ class ReasoningRetriever:
             # community/共提层任何故障(缺表 / 数据异常)都不该拖垮 reasoning 或
             # 深度报告的社区/横向对比节 —— 跳过扩展、继续。
             record(TraceStep(step_type="skip",
-                             summary="跳过 expand_community(对比层不可用)",
+                             summary="跳过横向对比(对比层不可用)",
                              detail={"reason": "community_error", "error": str(exc)[:120]}))
             peers, peer_source = [], "community"
         # 总量帽(见 _COMMUNITY_PEERS_CAP_FACTOR 注释):合并各库结果后才截断,

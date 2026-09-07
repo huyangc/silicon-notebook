@@ -3612,7 +3612,7 @@ def test_report_section_gets_the_termination_facts_and_delivery_review(repo):
     assert prompt.index("Retrieval status") < prompt.index("Rules:")
 
     assert out["termination_reason"] == "model_partial"
-    assert out["termination_summary"] == "检索结束：仍有必答方面没有完整支撑"
+    assert out["termination_summary"] == "检索结束：仍有方面没有完整支撑"
     assert out["aspects_total"] == 2 and out["aspects_pending"] == 1
     assert out["aspects_model_supported"] == 1
     assert out["aspects_synthesis_admitted"] == 0
