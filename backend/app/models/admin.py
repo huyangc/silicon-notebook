@@ -68,6 +68,9 @@ class AdminUserUsage(BaseModel):
     questions: int
     reports: int
     last_active: Optional[str] = None
+    # 最近上线:会话 touch 节流写入的 users.last_seen_at,与 last_active 的
+    # "产出动作"口径刻意不同(规格 §3 B1、§7 决策 1)。
+    last_seen: Optional[str] = None
     is_online: bool = False
     role_mutable: bool = True
     # 该用户当前生效的「每笔记本文档数量上限」及其是否为单独覆盖值。

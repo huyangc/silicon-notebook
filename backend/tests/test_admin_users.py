@@ -294,10 +294,35 @@ def test_source_store_stamps_visible_upload_actor_but_not_hidden_projection(repo
 
 
 # ---------------------------------------------------------------------------
-# Phase B/C 使用强度信号(不含 last_seen,那是独立迁移任务):见规格
+# Phase B/C 使用强度信号,含 B1 last_seen(users.last_seen_at 迁移 + 会话
+# touch 双写,见 identity 侧测试:backend/tests/test_architecture_hardening.py
+# 的 test_last_seen_touch_follows_session_throttle):见规格
 # docs/superpowers/specs/2026-09-07-admin-usage-overview-usage-signals-design_zh.md
 # §3 Phase B/C。
 # ---------------------------------------------------------------------------
+
+
+def test_list_user_usage_last_seen_reads_users_column(repo):
+    """B1:`list_user_usage()["last_seen"]` 直接读 `users.last_seen_at`——
+    未上线过为 None,上线过原样返回字符串(与 SQLite 侧其它时间列一致,不做
+    额外解析)。写路径(登录/节流 touch)由 identity 测试覆盖。"""
+    now = "2026-07-07T00:00:00"
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO users "
+            "(id,email,display_name,role,status,username,created_at,updated_at,last_seen_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            ("u1", "u1@x", "U1", "user", "active", "a00000001", now, now, "2026-07-08T00:00:00"),
+        )
+        db.execute(
+            "INSERT INTO users "
+            "(id,email,display_name,role,status,username,created_at,updated_at,last_seen_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            ("u2", "u2@x", "U2", "user", "active", "b00000002", now, now, None),
+        )
+    usage = {row["id"]: row for row in repo.list_user_usage()}
+    assert usage["u1"]["last_seen"] == "2026-07-08T00:00:00"
+    assert usage["u2"]["last_seen"] is None
 
 
 def test_list_user_usage_storage_bytes_matches_sources_attribution(repo):

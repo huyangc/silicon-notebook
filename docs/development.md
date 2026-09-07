@@ -57,8 +57,8 @@ at `SCHEMA_VERSION` still runs no migrations. The only supported way back is
 to restore the pre-upgrade backup, or redeploy a build whose `SCHEMA_VERSION`
 is at least the database's — there is no reverse migration.
 
-The current schema version is 71. This is the SQLite schema version. The committed v9 compatibility fixture
-upgrades through migrations v10–v71 and remains readable. Those migrations
+The current schema version is 72. This is the SQLite schema version. The committed v9 compatibility fixture
+upgrades through migrations v10–v72 and remains readable. Those migrations
 cover compatibility and SQLite hot-path indexes (v10–v12), Memory/Agent and
 Memory-derived source links/indexes (v13–v15), knowhow tables and cell code
 (v16/v18), paper metadata (v17), source-linked assets (v19), and multi-domain
@@ -666,7 +666,19 @@ strict-prefix indexes that would hijack the predicated readers' plans are
 retired with it). Reader results are byte-identical while every row is at
 generation 0 and both pointers are 0. The replicated unique surface count
 is unchanged (one four-column unique replaces one three-column unique).
-The current pair is SQLite 71 / PostgreSQL 51 / epoch 1.
+
+The admin usage overview usage-signals batch (SQLite v72 / PostgreSQL 0052)
+adds a nullable `users.last_seen_at` (design doc `docs/superpowers/specs/
+2026-09-07-admin-usage-overview-usage-signals-design_zh.md` Sec 3 B1, Sec 7
+decision 1): nothing is backfilled — NULL means "has not signed in since this
+migration ran", a distinct claim from "signed in a long time ago". The write
+path updates it in `identity_store`'s existing session-touch write
+transaction, reusing the same 300s throttle
+(`auth_session_touch_interval_seconds`) and staying monotonic; unlike
+`auth_sessions.last_seen_at`, this column survives logout/revocation. No
+table, index or foreign key is added — `list_user_usage`'s one-shot
+aggregate reads the column directly. The current pair is SQLite 72 /
+PostgreSQL 52 / epoch 1.
 
 Run it only while application/background writers are stopped:
 

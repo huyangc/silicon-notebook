@@ -170,7 +170,14 @@ _RECOVERY_REAP_PAGES_BUDGET = 40
 # unified_kg_state row) select exactly what they selected before. Design doc
 # docs/superpowers/specs/2026-09-03-batch3-w2-generational-cluster-swap-
 # design_zh.md Sec 1.1.
-SCHEMA_VERSION = 71
+# v72 adds users.last_seen_at (nullable TEXT, no backfill), parity with
+# PostgreSQL 0052_users_last_seen_at.sql — design doc docs/superpowers/specs/
+# 2026-09-07-admin-usage-overview-usage-signals-design_zh.md §3 B1, §7
+# decision 1. NULL means "has not signed in since this migration ran";
+# updated in the same write transaction as the existing 300s-throttled
+# auth_sessions touch and on login, and survives logout. No table, index, FK
+# or unique-surface change.
+SCHEMA_VERSION = 72
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -3831,6 +3838,24 @@ class SqliteMigrator:
                 DROP INDEX IF EXISTS idx_clusters_nb_canonical;
                 """
             )
+
+    def _migration_72(self) -> None:
+        """Users last-seen timestamp, parity with PostgreSQL
+        0052_users_last_seen_at.sql. See SCHEMA_VERSION's docstring.
+
+        ``last_seen_at`` stays NULLABLE with no backfill — NULL is a
+        load-bearing value meaning "has not signed in since this migration
+        ran", distinct from "signed in a long time ago". The write path
+        (identity_store touch, both backends) updates it in the same write
+        transaction as the existing 300s-throttled ``auth_sessions`` touch,
+        monotonically, and it is not deleted on logout the way
+        ``auth_sessions`` rows are — see the design doc's rejected
+        auth_sessions-aggregate alternative for why that distinction
+        matters. ``add_column_if_missing`` keeps this migration re-runnable,
+        same guard as every other additive column migration in this file.
+        """
+        with self._connect() as db:
+            self.add_column_if_missing(db, "users", "last_seen_at", "TEXT")
 
     def _reap_stale_derived_generations(self) -> None:
         """批 3·W2 启动恢复(sqlite 化身):先全局释放滞留在飞认领(启动这

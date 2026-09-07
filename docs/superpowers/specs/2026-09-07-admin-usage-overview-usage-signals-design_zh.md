@@ -111,7 +111,9 @@ WHERE nb.status NOT IN ('copying', 'deleting')
 GROUP BY 1
 ```
 
-与 Phase A 同一归因、同一过滤；已删笔记本的文件已物理清理，不计。前端以 KB/MB/GB 显示。
+与 Phase A 同一归因、同一过滤；已删笔记本的文件已物理清理，不计（留存快照也不落 `file_size`）。实现上与
+`sources` 的 live 分支合成**一次扫描**（`COUNT(*)` 与 `SUM(file_size)` 同一条查询，retained 分支补 `0 AS b`），
+不为同一谓词扫两遍。前端以 KB/MB/GB 显示。
 
 #### B3 近 30 天提问 `questions_30d`
 
@@ -161,10 +163,13 @@ UNION ALL  -- retained: activity_type='report' AND status='failed'
 
 ### Phase C — 采纳度与协作（与 B 同批，展开区第二行）
 
-- `memory_count`：`memory_items` 按 `created_by`，`status <> 'rejected'`。
-- `knowhow_tables`：`knowhow_tables` 按 `created_by`。
-- `joined_notebooks`：`notebook_members` 按 `user_id`（他人库的成员身份）。
+- `memory_count`：`memory_items` 按 `created_by`，`status <> 'rejected'`，只算 live 笔记本里的。
+- `knowhow_tables`：`knowhow_tables` 按 `created_by`，只算 live 笔记本里的。深拷贝把副本的 `created_by`
+  改成接收方，因此这个数含拷来的副本（与来源的资产口径一致；按原作者归因要改拷贝路径，本期不做）。
+- `joined_notebooks`：`notebook_members` 按 `user_id`（他人库的成员身份），只算 live 笔记本，与用户自己
+  库列表的 `joined_notebook_rows` 同一过滤，避免 deleting 过渡态下同屏数字不一致。
 - `groups`：`group_members` 按 `user_id`。
+- 三个按笔记本挂的计数都 JOIN `notebooks` 加 `NOTEBOOK_LIVE_SQL`；`groups` 无笔记本维度不加。
 
 呈现见 B6 第二行；不进主表。
 

@@ -143,8 +143,9 @@ def test_expected_snapshot_has_rows_reads_context_and_ask_metadata():
     # 表，以及 v70 提问提交幂等键 ask_jobs.client_request_id 与其部分唯一索引
     # idx_ask_jobs_client_request，以及 v71（批 3·W2 PR-1）三张簇图派生表的
     # generation 列 + unified_kg_state 代次控制块 + 三条索引整改（四列唯一取代
-    # 三列唯一、两条覆盖索引带 generation 尾键），合法升级到当前版本。
-    assert snapshot["schema"]["user_version"] == 71
+    # 三列唯一、两条覆盖索引带 generation 尾键），以及 v72 用户总览最近上线
+    # users.last_seen_at（可空，无回填），合法升级到当前版本。
+    assert snapshot["schema"]["user_version"] == 72
     assert snapshot["rows"]["notebooks"]
     assert snapshot["reads"]["notebook"]
     assert snapshot["context"]["source_files"]

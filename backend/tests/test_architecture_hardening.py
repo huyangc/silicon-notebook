@@ -416,3 +416,76 @@ def test_session_resolution_does_not_write_on_every_request(tmp_path):
             "SELECT last_seen_at, expires_at FROM auth_sessions WHERE token=?", (token,)
         ).fetchone()
     assert tuple(after) == tuple(before)
+
+
+def test_last_seen_touch_follows_session_throttle(tmp_path):
+    """users.last_seen_at(规格 §3 B1、§7 决策 1):登录即写;节流窗口内的
+    resolve_session 不推进它(与 auth_sessions.last_seen_at 同一节流窗口);
+    窗口外的下一次请求推进它;登出后该列仍保留(不像 auth_sessions 行被
+    删除);list_user_usage()["last_seen"] 与该列一致。"""
+    repo = SQLiteRepository(_settings(tmp_path))
+    token = repo.create_session("user-local")
+
+    with repo._connect() as db:
+        after_login = db.execute(
+            "SELECT last_seen_at FROM users WHERE id=?", ("user-local",)
+        ).fetchone()[0]
+    assert after_login is not None
+
+    # 节流窗口内(默认 300s):resolve_session 不应推进 auth_sessions 也不应
+    # 推进 users.last_seen_at。
+    assert repo.resolve_session(token).id == "user-local"
+    with repo._connect() as db:
+        still_login_time = db.execute(
+            "SELECT last_seen_at FROM users WHERE id=?", ("user-local",)
+        ).fetchone()[0]
+    assert still_login_time == after_login
+
+    # 人为把 auth_sessions 与 users 两列都拨回节流窗口之外,模拟"上一次
+    # touch 已经是很久以前"——下一次 resolve_session 应该同时推进两列。
+    stale = "2000-01-01T00:00:00"
+    with repo._connect() as db:
+        db.execute(
+            "UPDATE auth_sessions SET last_seen_at=? WHERE token=?", (stale, token)
+        )
+        db.execute("UPDATE users SET last_seen_at=? WHERE id=?", (stale, "user-local"))
+
+    assert repo.resolve_session(token).id == "user-local"
+    with repo._connect() as db:
+        touched = db.execute(
+            "SELECT last_seen_at FROM users WHERE id=?", ("user-local",)
+        ).fetchone()[0]
+    assert touched is not None
+    assert touched > stale
+
+    # 登出删除 auth_sessions 行,但 users.last_seen_at 不受影响(与
+    # auth_sessions 聚合口径的关键区别,规格 §7 决策 1)。
+    repo.delete_session(token)
+    with repo._connect() as db:
+        after_logout = db.execute(
+            "SELECT last_seen_at FROM users WHERE id=?", ("user-local",)
+        ).fetchone()[0]
+    assert after_logout == touched
+
+    usage = {row["id"]: row for row in repo.list_user_usage()}
+    assert usage["user-local"]["last_seen"] == after_logout
+
+    # 单调性(不回退):把 users.last_seen_at 人为设到未来,再制造一次"节流
+    # 窗口外"的 touch(auth_sessions 侧拨回过去以通过节流判断)——真实 now
+    # 落在过去 users 行的未来值之前,`last_seen_at<?` 守卫必须挡住这次
+    # touch,而不是用 now 覆盖回去。这是对 identity_store 里
+    # `WHERE id=? AND (last_seen_at IS NULL OR last_seen_at<?)` 那一条守卫
+    # 的变异验证锚点:把守卫去掉(或把 AND 条件删掉)会让下面的断言失败。
+    token2 = repo.create_session("user-local")
+    future = "2999-01-01T00:00:00"
+    with repo._connect() as db:
+        db.execute("UPDATE users SET last_seen_at=? WHERE id=?", (future, "user-local"))
+        db.execute(
+            "UPDATE auth_sessions SET last_seen_at=? WHERE token=?", (stale, token2)
+        )
+    assert repo.resolve_session(token2).id == "user-local"
+    with repo._connect() as db:
+        guarded = db.execute(
+            "SELECT last_seen_at FROM users WHERE id=?", ("user-local",)
+        ).fetchone()[0]
+    assert guarded == future

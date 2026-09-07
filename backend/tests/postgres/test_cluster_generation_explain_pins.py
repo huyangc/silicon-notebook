@@ -71,7 +71,7 @@ _PUBLISHED = (
 def test_cluster_member_rows_keeps_index_only_scan_with_the_predicate(
     postgres_database,
 ):
-    assert PostgresMigrator(postgres_database).migrate() == 51
+    assert PostgresMigrator(postgres_database).migrate() == 52
     _seed(postgres_database, "nb-ios", 5000)
     with postgres_database.connect() as connection:
         plan = _plan(
@@ -91,7 +91,7 @@ def test_cluster_member_rows_keeps_index_only_scan_with_the_predicate(
 def test_version_facts_cluster_component_scans_the_created_gen_index(
     postgres_database,
 ):
-    assert PostgresMigrator(postgres_database).migrate() == 51
+    assert PostgresMigrator(postgres_database).migrate() == 52
     _seed(postgres_database, "nb-vf", 5000)
     with postgres_database.connect() as connection:
         plan = _plan(
@@ -107,7 +107,7 @@ def test_version_facts_cluster_component_scans_the_created_gen_index(
 
 
 def test_concept_clusters_count_skip_gate_leg_stays_index_only(postgres_database):
-    assert PostgresMigrator(postgres_database).migrate() == 51
+    assert PostgresMigrator(postgres_database).migrate() == 52
     _seed(postgres_database, "nb-cnt", 5000)
     with postgres_database.connect() as connection:
         plan = _plan(

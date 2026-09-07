@@ -86,7 +86,7 @@ def core_stores(request) -> CoreStores:
     postgres_settings = request.getfixturevalue("postgres_settings")
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 51
+    assert PostgresMigrator(postgres_database).migrate() == 52
     yield CoreStores(
         database=postgres_database,
         identity=PostgresIdentityStore(postgres_database, postgres_settings),
@@ -599,6 +599,80 @@ def test_identity_session_expiry_and_touch_throttle(core_stores: CoreStores):
         (active,),
     )
     assert _iso(touched["last_seen_at"]) > old_seen
+
+
+def test_users_last_seen_follows_session_throttle(core_stores: CoreStores):
+    """users.last_seen_at(规格 §3 B1、§7 决策 1):登录即写;节流窗口内的
+    resolve_session 不推进它(与 auth_sessions.last_seen_at 同一节流窗口);
+    窗口外的下一次请求推进它;登出后该列仍保留(不像 auth_sessions 行被
+    删除);list_user_usage()["last_seen"] 与该列一致。"""
+    user = core_stores.identity.create_user("h00654321", "password-9")
+    token = core_stores.identity.create_session(user.id)
+
+    after_login = _fetch_one(
+        core_stores, "SELECT last_seen_at FROM users WHERE id=%s", (user.id,)
+    )
+    assert after_login["last_seen_at"] is not None
+
+    # 节流窗口内(默认 300s):resolve_session 不应推进 users.last_seen_at。
+    assert core_stores.identity.resolve_session(token).id == user.id
+    still_login_time = _fetch_one(
+        core_stores, "SELECT last_seen_at FROM users WHERE id=%s", (user.id,)
+    )
+    assert still_login_time["last_seen_at"] == after_login["last_seen_at"]
+
+    # 人为把 auth_sessions 与 users 两列都拨回节流窗口之外,模拟"上一次
+    # touch 已经是很久以前"——下一次 resolve_session 应该同时推进两列。
+    stale = "2000-01-01T00:00:00+00:00"
+    _write_sql(
+        core_stores,
+        "UPDATE auth_sessions SET last_seen_at=%s WHERE token=%s",
+        (stale, token),
+    )
+    _write_sql(
+        core_stores, "UPDATE users SET last_seen_at=%s WHERE id=%s", (stale, user.id)
+    )
+
+    assert core_stores.identity.resolve_session(token).id == user.id
+    touched = _fetch_one(
+        core_stores, "SELECT last_seen_at FROM users WHERE id=%s", (user.id,)
+    )
+    assert touched["last_seen_at"] is not None
+    assert _iso(touched["last_seen_at"]) > stale
+
+    # 登出删除 auth_sessions 行,但 users.last_seen_at 不受影响(与
+    # auth_sessions 聚合口径的关键区别,规格 §7 决策 1)。
+    core_stores.identity.delete_session(token)
+    after_logout = _fetch_one(
+        core_stores, "SELECT last_seen_at FROM users WHERE id=%s", (user.id,)
+    )
+    assert after_logout["last_seen_at"] == touched["last_seen_at"]
+
+    usage = {row["id"]: row for row in core_stores.queries.list_user_usage()}
+    assert usage[user.id]["last_seen"] == _iso(after_logout["last_seen_at"])
+
+    # 单调性(不回退):把 users.last_seen_at 人为设到未来,再制造一次"节流
+    # 窗口外"的 touch(auth_sessions 侧拨回过去以通过节流判断)——真实 now
+    # 落在过去 users 行的未来值之前,`last_seen_at<%s` 守卫必须挡住这次
+    # touch,而不是用 now 覆盖回去。这是对 identity_store 里
+    # `WHERE id=%s AND (last_seen_at IS NULL OR last_seen_at<%s)` 那一条
+    # 守卫的变异验证锚点:把守卫去掉(或把 AND 条件删掉)会让下面的断言
+    # 失败。
+    token2 = core_stores.identity.create_session(user.id)
+    future = "2999-01-01T00:00:00+00:00"
+    _write_sql(
+        core_stores, "UPDATE users SET last_seen_at=%s WHERE id=%s", (future, user.id)
+    )
+    _write_sql(
+        core_stores,
+        "UPDATE auth_sessions SET last_seen_at=%s WHERE token=%s",
+        (stale, token2),
+    )
+    assert core_stores.identity.resolve_session(token2).id == user.id
+    guarded = _fetch_one(
+        core_stores, "SELECT last_seen_at FROM users WHERE id=%s", (user.id,)
+    )
+    assert _iso(guarded["last_seen_at"]) == future
 
 
 def test_system_model_status_is_monotonic(core_stores: CoreStores):
@@ -2172,7 +2246,7 @@ def test_pg_task6_timestamp_inputs_normalize_naive_local_seams(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 51
+    assert PostgresMigrator(postgres_database).migrate() == 52
     local_zone = ZoneInfo("America/Los_Angeles")
     naive_local = datetime(2026, 7, 22, 3, 0, 0)
     expected_utc = naive_local.replace(tzinfo=local_zone).astimezone(timezone.utc)
@@ -2255,7 +2329,7 @@ def test_pg_copy_sentinel_sweep_respects_naive_local_creation_time(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 51
+    assert PostgresMigrator(postgres_database).migrate() == 52
     settings = postgres_settings.model_copy(
         update={"notebook_copy_stale_seconds": 60}
     )
@@ -2327,7 +2401,7 @@ def test_pg_copy_sentinel_sweep_preserves_production_clock_dst_fold(
     from app.repositories.postgres import sharing_store as pg_sharing_store
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 51
+    assert PostgresMigrator(postgres_database).migrate() == 52
     settings = postgres_settings.model_copy(
         update={"notebook_copy_stale_seconds": 120}
     )

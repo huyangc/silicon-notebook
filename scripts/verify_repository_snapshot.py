@@ -4176,5 +4176,37 @@ MIGRATION_MANIFEST[(70, 71)] = {
 }
 
 
+# v72 (users last-seen timestamp, parity with PostgreSQL
+# 0052_users_last_seen_at.sql -- design doc docs/superpowers/specs/
+# 2026-09-07-admin-usage-overview-usage-signals-design_zh.md Sec 3 B1, Sec 7
+# decision 1): the nullable ``users.last_seen_at`` column. No new table,
+# index, trigger or view, and no backfill (existing rows stay NULL).
+USERS_LAST_SEEN_COLUMNS = {
+    "users": {
+        "last_seen_at": ("last_seen_at", "TEXT", 0, None, 0),
+    },
+}
+MIGRATION_MANIFEST = {
+    (key[0], 72, *key[2:]): {
+        **manifest,
+        "columns": {
+            **manifest["columns"],
+            "users": {
+                **manifest["columns"].get("users", {}),
+                **USERS_LAST_SEEN_COLUMNS["users"],
+            },
+        },
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(71, 72)] = {
+    "tables": {},
+    "columns": USERS_LAST_SEEN_COLUMNS,
+    "indexes": {},
+    "triggers": {},
+    "views": {},
+}
+
+
 if __name__ == "__main__":
     raise SystemExit(main())
