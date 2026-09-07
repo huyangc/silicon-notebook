@@ -116,7 +116,8 @@ def test_ask_service_module_never_imports_facade_or_private_db():
 
 class _MinimalAskState:
     def prepare_turn(self, notebook_id, conversation_id, question, user_id):
-        return SimpleNamespace(conversation_id="conv", history="")
+        from app.repositories.ports import PreparedAskTurn
+        return PreparedAskTurn(conversation_id="conv", history="")
 
     def save_answer(self, notebook_id, conversation_id, question, response, user_id):
         return "answer-1"
