@@ -90,6 +90,18 @@
 - [ ] **Prompt 三层化后的 per-notebook 定制与 self-evo**：接缝只有 `fragment_text()`；L1 片段分
       两类（A 类离线 GEPA + 人审，B 类只改示例槽位），尚未拍板开放。
 - [ ] **Agentic Memory 注入开闸与 A/B**：P1–P4 已合入，注入默认关闭，开闸是独立决定。
+- [ ] **深度报告一侧的方面送达复核补上簇折叠表**：Ask 侧 `_answer_context` 已经把
+      `knowledge_context` 的 `fold_sink`（同 canonical 簇被折叠掉的成员 → 代表）折进
+      `admitted_evidence_keys`；报告侧 `_draft_section` 走 `knowledge_context_with_outline`，
+      给它加 sink 参数会改端口签名，而 `test_report_outline_integration.py` /
+      `test_report_engine_ports.py` 的测试替身逐字钉住了那个形状。补齐要连同那些替身一起
+      同步。眼下报告侧是**保守口径**（可能多报「未送达」，不会漏报）。
+- [ ] **无图披露步文案「构建知识图谱」→「整理知识图谱」**：`reasoning_retrieval.py` 那条
+      `kg_unavailable` 披露步的 `summary` 违反界面词汇表，但它被 `docs/product-and-api*.md`
+      逐字冻结（文档明写「含其中的半角逗号」）、并被 `tests/fixtures/repository_contract/
+      ask_responses.json` 与 `test_reasoning_retrieval.py` 钉住。眼下登记在
+      `scripts/check_ui_vocabulary.py::GRANDFATHERED_TRACE_SUMMARIES`（逐字全串例外，改一个字
+      就重新违规）；改它要同改文案、两份文档、既有用例与黄金 fixture，是独立的一次改动。
 - [ ] 自动模式对含「刚才 / 这个 / 那个」的订正句落 chunk+standard：登记为已知行为不修。
 
 ### 知识图谱

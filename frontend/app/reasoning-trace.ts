@@ -295,9 +295,11 @@ export function getTraceStepDetail(step: ReasoningTraceStep): string {
     return parts.join(" · ");
   }
   // 检索收尾那条 skip 步(reflect v2,设计稿 §7.2)。它复用既有的 `skip` 类型 +
-  // 一个稳定原因码,不新增 step_type。必须排在下面 `detail.pending` 那条之前:
-  // 两者的 detail 形状不相交,但把 run 级叙述交给一条按 `pending` 判的分支去
-  // 处理,只会在哪天它多出一个 pending 键时静默渲染成"N 个方向未执行"。
+  // 一个稳定原因码,不新增 step_type。**排在下面 `detail.pending` 那条之前是防御性
+  // 的**:两条分支的 detail 形状眼下不相交(收尾步不带 `pending`),所以现在换个
+  // 顺序也不会改变任何一次渲染;之所以仍然写在前面,是因为哪天收尾步的 detail 多
+  // 出一个 pending 键,靠后就会被那条按 `pending` 判的分支静默渲染成"N 个方向未
+  // 执行"——一句关于另一件事的假话。
   // 结束原因本身不在这里复述——它已经是这一步的 `summary`(标题位)。
   if (step.step_type === "skip" && detail.reason === "retrieval_termination") {
     return terminationParts(detail).join(" · ");
@@ -338,6 +340,23 @@ export function getTraceStepDetail(step: ReasoningTraceStep): string {
   return "";
 }
 
+// 一条轨迹步的界面标签。默认就是 `TRACE_STEP_LABELS` 那张表,**唯一的例外**是
+// 检索收尾那条步(设计稿 §7.2):它复用 `skip` 这个 step_type,但「跳过」说的是
+// "这一步没做",而它恰恰是这次检索**做完了**的那一刻——标签得说「结束」。
+//
+// `TRACE_STEP_LABELS.skip` 一个字不动:真正被跳过的那些步(重复子查询、达次数
+// 上限、范围不允许)仍然叫「跳过」。共用一个 step_type 不等于共用一个标签,而
+// 给收尾步单开一个 step_type 会改后端的既有键集(关闭态与历史轨迹的红线)。
+// 判据(`detail.reason === "retrieval_termination"`)与 `getTraceStepDetail` 里
+// 那条完全同源,不另立第二份口径。
+export function getTraceStepLabel(step: ReasoningTraceStep): string {
+  const detail = step.detail ?? {};
+  if (step.step_type === "skip" && detail.reason === "retrieval_termination") {
+    return "结束";
+  }
+  return label(TRACE_STEP_LABELS, step.step_type, "处理中");
+}
+
 export function getReasoningTraceSummary(
   steps: ReasoningTraceStep[],
   live = false,
@@ -357,7 +376,7 @@ export function getReasoningTraceSummary(
   const totalMs = totalDurationMs(visibleSteps);
   return {
     title: live ? "Agent 推理中" : "Agent 推理轨迹",
-    latestLabel: label(TRACE_STEP_LABELS, latest.step_type, "处理中"),
+    latestLabel: getTraceStepLabel(latest),
     latestSummary: latest.summary,
     latestDetail: getTraceStepDetail(latest),
     stepCountLabel: `${visibleSteps.length} 步`,

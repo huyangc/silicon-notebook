@@ -2458,10 +2458,10 @@ class ReportEngine:
                 "id_map": id_map,      # 节内 k -> ctx;仅供 _assemble 全局重编号,不入库
                 "attempted": list(getattr(result, "attempted", []) or [])}
         # 结束事实 + 最终装配之后的方面复核(设计稿 §7.2)。**v2-only 稀疏键**:
-        # 关闭态 update 一个空 dict,本节结果的键集逐字节不变。复核用的是这一节
-        # **实际进了 prompt** 的证据身份(`id_map`)与正文真正解析回来的锚点,与
-        # Ask 侧同一份纯函数、同一套口径——报告不另立一本账。走的是报告已有的
-        # 私有持久路径(section 行),公开投影按白名单照旧不带它。
+        # 关闭态 update 一个空 dict,本节结果的键集逐字节不变。复核用实际进了 prompt
+        # 的证据身份(`id_map`)与正文解析回来的锚点,与 Ask 侧同一份纯函数;⚠ 这一侧
+        # **不带簇折叠表**,是保守口径(可能多报未送达,见 `admitted_evidence_keys`)。
+        # 走报告已有的私有持久路径(section 行);公开投影按白名单照旧不带它。
         base.update(termination_synthesis_detail(
             termination,
             admitted_keys=admitted_evidence_keys(id_map),

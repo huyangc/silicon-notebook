@@ -93,9 +93,10 @@ def _text(value: object) -> str:
 def _fold(text: str) -> str:
     """渲染态的一行:折成单行、去控制字符、归一分隔符,**不截长**。
 
-    只在 `render_aspect_block` 里调用。折叠是那一个渲染格式(`a | b | c` 的行)
-    的自我保护,不是用户内容的规范化——存进快照的仍是原文,所以主题里真的带着
-    `|` 或 `;` 的用户不会在别处看到自己的问题被改写成 `，`。
+    两个调用点,都是**某一种行式渲染的自我保护**,不是用户内容的规范化:
+    `render_aspect_block` 的 `a | b | c` 行,与 `render_termination_block` 里那条
+    `; ` 分隔的未解决方面清单。存进快照的仍是原文,所以主题里真的带着 `|` 或 `;`
+    的用户不会在别处看到自己的问题被改写成 `，`。
     """
     return _clip(text, _NO_TRUNCATION)
 
@@ -463,9 +464,13 @@ SKIP_STALE_CIRCUIT_BREAKER = "stale_circuit_breaker"
 #: 终态 trace 步的稳定原因码。它是 run 级叙述,不产生动作观察。
 TERMINATION_SKIP_REASON = "retrieval_termination"
 
+#: 结束原因 → **上屏**的中文短句。这份表是界面文案:它经收尾那条 skip 步的
+#: `summary` 与合成终步的 `termination_summary` 两处逐字渲染,所以受
+#: `docs/ui-vocabulary.md` 的界面词汇表约束(界面只说「方面」,「必答」是契约侧的
+#: 记账措辞)。`scripts/check_ui_vocabulary.py` 的第三条扫描通道直接读这张表。
 _TERMINATION_SUMMARIES: Mapping[str, str] = {
-    TERMINATION_MODEL_SUFFICIENT: "检索结束：每个必答方面都已找到支撑",
-    TERMINATION_MODEL_PARTIAL: "检索结束：仍有必答方面没有完整支撑",
+    TERMINATION_MODEL_SUFFICIENT: "检索结束：每个方面都已找到支撑",
+    TERMINATION_MODEL_PARTIAL: "检索结束：仍有方面没有完整支撑",
     TERMINATION_STEP_BUDGET: "检索结束：步骤预算用完",
     TERMINATION_STALE: "检索结束：连续多轮没有新进展",
     TERMINATION_NO_EXECUTABLE_ACTION: "检索结束：除作答外已无可执行的动作",
@@ -505,11 +510,21 @@ _TERMINATION_BLOCK_MAX_ASPECTS = 6
 
 
 def render_termination_block(
-    termination: Optional[RetrievalTermination],
+    termination: Optional[RetrievalTermination], *, directive: bool = True,
 ) -> str:
     """结束事实 → 合成 prompt 里的一段**服务端事实**(§7.2)。
 
     `None`(legacy / 关闭态)返回空串,调用方据此逐字节退回接入前的 prompt。
+
+    `directive`:块尾那条祈使句(「在正文里说清哪些点没被覆盖」)要不要跟着这一份
+    事实一起给。**按节合成时只有最后一节给**——每节都给会让同一句"请说明缺口"
+    在一篇答案里被执行 k 次,读者看到的是每一节末尾各挂一段免责声明,而缺口本来
+    只需要在全篇说一次。其余各节仍拿到**完整的事实**(哪一件事没查着、哪条通道
+    没恢复),只是不再各自被要求就它写一段;单次合成默认给。
+
+    尾句在**这次检索确实没有缺口可说**时也省掉:`model_sufficient` 且没有未解决
+    方面、没有未恢复通道时,「说清哪些点没被覆盖」指向的是一个空集合,而一条指向
+    空集合的祈使句只会诱导模型编一个缺口出来交差。
 
     三条硬边界,都写在块里让模型看得见:
 
@@ -553,13 +568,19 @@ def render_termination_block(
             "- Retrieval channels that failed and never recovered in this run: "
             + ", ".join(termination.unrecovered_channels)
         )
-    lines.append(
-        "Say plainly in the answer which of those points the evidence below "
-        "does not cover, and do not present a partial result as complete. Do "
-        "NOT refuse to answer and do NOT treat this note as proof that the "
-        "notebook lacks the material — it only states where THIS retrieval "
-        "stopped."
+    nothing_open = (
+        termination.reason == TERMINATION_MODEL_SUFFICIENT
+        and not open_questions
+        and not termination.unrecovered_channels
     )
+    if directive and not nothing_open:
+        lines.append(
+            "Say plainly in the answer which of those points the evidence below "
+            "does not cover, and do not present a partial result as complete. Do "
+            "NOT refuse to answer and do NOT treat this note as proof that the "
+            "notebook lacks the material — it only states where THIS retrieval "
+            "stopped."
+        )
     return "\n".join(lines)
 
 
@@ -575,9 +596,16 @@ def review_aspect_delivery(
     提前重排,也不为复核再读一次库。
 
     `undelivered` 的判据只有一条:这个方面绑过证据(`evidence_keys` 非空)、状态是
-    supported/partial,而那些键**一个都没进 prompt**。全被预算/过滤挡掉的"已支撑"
-    在屏幕上与真的有支撑长得一样,而它其实没有——降为未送达是 §7.2 点名要的。
-    只绑上一部分的**不**算未送达:模型看见了其中一条,那条支撑真实送达了。
+    supported/partial/conflicting,而那些键**一个都没进 prompt**。全被预算/过滤
+    挡掉的"已支撑"在屏幕上与真的有支撑长得一样,而它其实没有——降为未送达是
+    §7.2 点名要的。只绑上一部分的**不**算未送达:模型看见了其中一条,那条支撑
+    真实送达了。
+
+    `conflicting` 与 `partial` 同构地计入:三种状态说的都是「模型看见过这几条
+    材料并据此作了判断」,而这次复核问的正是"那几条材料还在不在合成里"。把冲突
+    项排除在外,会让「模型看到两条互相矛盾的证据、而它们全被预算挤掉了」这一种
+    静默通过——那恰恰是最该报出来的一格:答案里那句"存在分歧"背后已经空无一物。
+    `unknown` 结构上没有键可绑,不进这个判据。
     """
     if termination is None:
         return AspectDelivery()
@@ -591,7 +619,8 @@ def review_aspect_delivery(
             model_supported.append(aspect.aspect_id)
         if keys & admitted_keys:
             admitted.append(aspect.aspect_id)
-        elif keys and aspect.status in (ASPECT_SUPPORTED, ASPECT_PARTIAL):
+        elif keys and aspect.status in (
+                ASPECT_SUPPORTED, ASPECT_PARTIAL, ASPECT_CONFLICTING):
             undelivered.append(aspect.aspect_id)
         if keys & cited_keys:
             cited.append(aspect.aspect_id)
@@ -632,7 +661,10 @@ def termination_synthesis_detail(
     }
 
 
-def admitted_evidence_keys(id_map: Mapping[str, object]) -> Set[str]:
+def admitted_evidence_keys(
+    id_map: Mapping[str, object],
+    cluster_fold: Optional[Mapping[str, str]] = None,
+) -> Set[str]:
     """最终 `id_map` → 真正进了 prompt 的证据身份集合。
 
     `id_map` 的值是各 `*_context` builder 建的 evidence 字典,`object_id` 是它们
@@ -640,6 +672,23 @@ def admitted_evidence_keys(id_map: Mapping[str, object]) -> Set[str]:
     `evidence_keys` 同一个口径(两者都源自 `outline_binding_keys`)。**按 id_map 而
     不是按候选池算**:候选进没进 prompt 由预算截断决定,而这次复核问的正是"被截
     掉了没有"。
+
+    `cluster_fold` = 「被折叠掉的成员 object_id → 代表 object_id」,由
+    `EvidenceContextService.knowledge_context` 的 `fold_sink` 在装配时**顺手**记下
+    (零新增查询:折叠表本来就要算,这里只是把已经算出的对应关系带出来)。KG 证据
+    按 canonical 簇去重,进 prompt 的是代表那条命中的 `object_id`;被折叠掉的成员
+    的内容**确实送达了模型**(它们与代表同属一个簇),只是身份换成了代表的那个。
+    不折进来,一个绑在成员 id 上的方面会被误报「未送达」——多参考库场景下同一个
+    概念在各库各有一份对象 id,这不是边角情况。代表自己没能进 prompt(被范围闸、
+    `node_context` 缺失或预算挡下)时,它不在 `id_map` 里,成员因此也不会被算作
+    送达——折叠表在这里天然是保守的。
+
+    ⚠ **深度报告一侧眼下不传这张表**,那条路径因此是**保守口径:可能多报未送达**。
+    报告的 KG 装配走 `report_engine.knowledge_context_with_outline`,给它加一个
+    sink 参数会改端口签名,而那正是几条既有用例的测试替身逐字钉住的形状;补齐它
+    要连同那些替身一起同步,是独立的一次改动(登记在 `fangan_todo.md`)。保守的
+    方向是对的:多报"没送达"只会让服务端把一个其实送到了的方面记成未送达,不会
+    反过来把真的没送达的说成送到了。
     """
     keys: Set[str] = set()
     for value in id_map.values():
@@ -647,6 +696,9 @@ def admitted_evidence_keys(id_map: Mapping[str, object]) -> Set[str]:
             key = str(value.get("object_id") or "")
             if key:
                 keys.add(key)
+    for member, representative in (cluster_fold or {}).items():
+        if representative in keys:
+            keys.add(str(member))
     return keys
 
 

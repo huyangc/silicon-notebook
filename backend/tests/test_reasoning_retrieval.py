@@ -9144,7 +9144,7 @@ def test_synthesis_detail_keys_are_v2_only_and_report_three_registers():
               unresolved=("a2",), channels=("expand_graph",)),
         admitted_keys=set(), cited_keys=set())
     assert detail["termination_reason"] == "model_partial"
-    assert detail["termination_summary"] == "检索结束：仍有必答方面没有完整支撑"
+    assert detail["termination_summary"] == "检索结束：仍有方面没有完整支撑"
     assert detail["aspects_total"] == 2
     assert detail["aspects_pending"] == 1
     assert detail["aspects_model_supported"] == 1
@@ -9157,3 +9157,140 @@ def test_synthesis_detail_keys_are_v2_only_and_report_three_registers():
         "k1": {"object_id": "ck-1"}, "k2": {"object_id": ""},
         "k3": "不是映射",
     }) == {"ck-1"}
+
+
+def test_termination_block_directive_rides_only_the_last_section():
+    """事实每节都给,块尾的祈使句只随最后一节给(§7.2 / 按节合成)。
+
+    每节都被要求"说清哪些点没被覆盖",读者会在每一节末尾各读到一段免责声明,
+    而缺口本来只需要在全篇说一次。非末节仍要拿到**完整的事实**——一节的合成
+    模型只看得见自己那份证据,不给它就无从知道自己写的这段落在一次没查完的
+    检索上。
+
+    变异:`directive` 恒 True(每节都给祈使句)⇒ 这条红。
+    """
+    from app.services.reasoning_aspects import render_termination_block
+
+    termination = _term(
+        reason="model_partial",
+        aspects=(("a1", "没查着的那件事", "unknown", ()),),
+        unresolved=("a1",), channels=("ppr_retrieve",))
+    facts = render_termination_block(termination, directive=False)
+    full = render_termination_block(termination)
+    # 事实一个字不少:结束原因、未解决问题原文、未恢复通道。
+    for fragment in ("Retrieval status (server fact", "没查着的那件事",
+                     "ppr_retrieve"):
+        assert fragment in facts and fragment in full
+    assert "Say plainly in the answer" not in facts
+    assert "Say plainly in the answer" in full
+    # 非末节那份是末节那份的**前缀**:两者说的是同一份事实,不是两套措辞。
+    assert full.startswith(facts)
+    # 关闭态不受 directive 影响:两个方向都是空串。
+    assert render_termination_block(None, directive=False) == ""
+
+
+def test_termination_block_drops_the_directive_when_nothing_is_open():
+    """`model_sufficient` 且无未解决方面、无未恢复通道 ⇒ 尾句省掉(§7.2 P3-3)。
+
+    那句话指向的是一个空集合;留着只会诱导模型编一个缺口出来交差。事实本身照常
+    给:"这次检索每个方面都报了支撑"是模型该知道的上下文。
+    """
+    from app.services.reasoning_aspects import render_termination_block
+
+    clean = render_termination_block(_term(
+        reason="model_sufficient",
+        aspects=(("a1", "问题一", "supported", ("ck-1",)),)))
+    assert "every mandatory aspect reported supported" in clean
+    assert "Say plainly in the answer" not in clean
+    # 同样是 model_sufficient,但有一条通道没恢复 ⇒ 缺口非空,尾句回来。
+    with_channel = render_termination_block(_term(
+        reason="model_sufficient",
+        aspects=(("a1", "问题一", "supported", ("ck-1",)),),
+        channels=("search_elements",)))
+    assert "Say plainly in the answer" in with_channel
+
+
+def test_conflicting_support_that_never_reached_the_prompt_is_undelivered():
+    """`conflicting` 与 `partial` 同构地计入未送达判据(§7.2)。
+
+    三种状态说的都是「模型看见过那几条材料并据此作了判断」。把冲突项排除在外,
+    「模型看到两条互相矛盾的证据、而它们全被预算挤掉了」会静默通过——而那恰恰
+    是最该报出来的一格:答案里那句"存在分歧"背后已经空无一物。
+
+    变异:判据里去掉 `conflicting` ⇒ 这条红。
+    """
+    from app.services.reasoning_aspects import review_aspect_delivery
+
+    delivery = review_aspect_delivery(
+        _term(aspects=(
+            ("a1", "有分歧的那件事", "conflicting", ("ck-1", "ck-2")),
+            ("a2", "分歧但送到了一条", "conflicting", ("ck-3", "ck-4")),
+            # unknown 结构上没有键可绑,不进这个判据。
+            ("a3", "没绑过证据", "unknown", ()),
+        )),
+        admitted_keys={"ck-3"}, cited_keys=set())
+    assert delivery.undelivered == ("a1",)
+    assert delivery.synthesis_admitted == ("a2",)
+    # 冲突不是"模型说有支撑",所以一个都不进 model_supported。
+    assert delivery.model_supported == ()
+
+
+def test_admitted_keys_include_members_folded_into_an_admitted_cluster():
+    """同 canonical 簇被折叠掉的成员算作送达(§7.2 复核的身份口径)。
+
+    KG 证据按簇去重,进 prompt 的是代表那条命中的 `object_id`;被折叠掉的成员的
+    内容随代表一起进去了,只是身份换成了代表的。不折进来,绑在成员 id 上的方面
+    会被误报「未送达」——多参考库场景下同一个概念在各库各有一份对象 id,这不是
+    边角情况。代表自己没进 prompt 时(不在 id_map 里)成员也不算送达。
+
+    变异:`admitted_evidence_keys` 忽略 `cluster_fold` ⇒ 这条红。
+    """
+    from app.services.reasoning_aspects import (
+        admitted_evidence_keys, review_aspect_delivery,
+    )
+
+    id_map = {"k1": {"object_id": "ko-rep"}}
+    fold = {"ko-member": "ko-rep", "ko-orphan": "ko-dropped"}
+    assert admitted_evidence_keys(id_map, fold) == {"ko-rep", "ko-member"}
+    # 不给折叠表 ⇒ 保守口径,只认真的写进 id_map 的那一个。
+    assert admitted_evidence_keys(id_map) == {"ko-rep"}
+    delivery = review_aspect_delivery(
+        _term(aspects=(("a1", "跨库的那件事", "supported", ("ko-member",)),
+                       ("a2", "代表被挤掉的那件事", "supported", ("ko-orphan",)))),
+        admitted_keys=admitted_evidence_keys(id_map, fold), cited_keys=set())
+    assert delivery.synthesis_admitted == ("a1",)
+    assert delivery.undelivered == ("a2",)
+
+
+def test_observation_status_buckets_cover_every_status_constant():
+    """`_observation_status` 的三个桶对**全部** observation 状态做穷尽归类。
+
+    新增一个状态而不归类,`_retrieval_degraded` / `_unrecovered_channels` 会静默
+    把它当成"不是一次执行"忽略掉——一条新的失败态就此在结束原因与通道披露里
+    双双消失。这条用例按闭集断言,所以那天它先红。
+    """
+    from app.services.reasoning_observation import (
+        OBSERVATION_STATUSES, STATUS_FAILED,
+    )
+    from app.services.reasoning_aspects import _EXECUTED_STATUSES, _observation_status
+
+    class _Row:
+        def __init__(self, status):
+            self.status = status
+
+    zero_io = set(OBSERVATION_STATUSES) - set(_EXECUTED_STATUSES) - {STATUS_FAILED}
+    # 三个桶不重叠、且并起来正是闭集本身。
+    assert set(_EXECUTED_STATUSES) & {STATUS_FAILED} == set()
+    assert set(_EXECUTED_STATUSES) | {STATUS_FAILED} | zero_io == set(
+        OBSERVATION_STATUSES)
+    for status in _EXECUTED_STATUSES:
+        assert _observation_status(_Row(status)) == status
+    assert _observation_status(_Row(STATUS_FAILED)) == STATUS_FAILED
+    for status in zero_io:
+        # 零 I/O 的那几档连试都没试,折成空串:它们不是一次执行,也就不能充当
+        # 一次通道恢复的证明。
+        assert _observation_status(_Row(status)) == ""
+    # 闭集之外的取值(将来新增而忘了登记)同样折成空串——这正是上面那条穷尽
+    # 断言要先红的理由:静默忽略不是安全的默认。
+    assert _observation_status(_Row("brand_new_status")) == ""
+    assert _observation_status(_Row("")) == ""
