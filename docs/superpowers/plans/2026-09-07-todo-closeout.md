@@ -173,3 +173,39 @@ notebook opener 打开对应会话并复用既有接回逻辑。契约登记进 
 
 不加新端点、不加端口方法、不写任何新的写路径；不做「在途提问」的取消入口（铃铛只导航，
 取消仍在会话内的「停止」按钮）；不为在途提问做 toast（`doneMessage` 只服务完成事件）。
+
+## PR-5 slice 1 设计定稿（晋升队列 + 关系审核队列）
+
+**范围**：把 `frontend/app/page.tsx` 里两个同形的治理队列弹窗整体搬出去，行为零变化。
+两者形状完全一致（`issue`→`fetch`→`publish` 的冻结票据开窗、`activeLease`+`owns` 守着的
+决策写入、单飞 `operationRef`、close sink 只清载荷），所以一并抽，共用同一套接缝。
+
+**接缝**：每个队列一对文件——`use-*.ts` 持有领域状态与协调器交互，`*-modal.tsx` 持有
+`<section role="dialog">` 曲面。理由：`memory-panel.tsx` / `kg-analysis-view.tsx` /
+`command-catalog-panel.tsx` 已经是「组件自持 section，page 只传 `interactive` / `zIndex` /
+`onClose`」的既定形态（root-modal-boundary 守卫的 `componentBindings` 表就是为它们建的）；
+而 `use-kg-workspace.ts` / `use-report-workspace.ts` 是「hook 收状态 + effects 注入」的既定
+形态。两者叠加即本片接缝，不发明新范式。
+
+- `app/use-promotion-queue.ts`：`usePromotionQueue({ modals, effects })`，`modals` 是
+  `Pick<RootModalCoordinator, "issue"|"publish"|"leaseIsCurrent"|"owns"|"activeLease"|"captureActorOwner">`
+  的窄面（结构类型，page 直接传 `rootModals`，不是把整个 page state 灌进去），`effects` 只有
+  `notify(message)` 与 `refreshCollection()`。返回 `{ view: { candidates, busy }, openPromoQueue,
+  decidePromotion, clearQueue }`。函数名沿用 page.tsx 里的原名，守卫只需改「去哪个模块找」。
+- `app/promotion-queue-modal.tsx`：`PromotionQueueModal`，props 全部显式——`candidates`、
+  `busy`、`lookupNotebookName(id)`（目标库名的第二级回退，原本读 `notebookCollection.rows`）、
+  `interactive`、`zIndex`、`onRequestClose(reason)`、`onApprove(id)`、`onReject(id)`。
+  `PromotionCandidateActions` / `PromotionTargetModal` 原样不动。
+- `app/use-edge-review-queue.ts` + `app/edge-review-modal.tsx`：同构，view 多一个 `total`。
+- `promotion-target` slot 留在 page.tsx：它由 `submitPromotion`（知识条目 / Memory 的**提交**
+  路径）驱动，与审核队列不是同一条流程，本片不动。
+
+**协调器语义保持**：section 的 `aria-modal={interactive}` / `aria-hidden={!interactive}` /
+`inert={interactive ? undefined : true}` / `style={{ zIndex }}` 与背景点击照搬；背景与「×」
+关闭原本用的是**不同** reason（`"backdrop"` / `"button"`，`ROOT_MODAL_POLICIES` 按 reason 判
+是否允许关闭），所以回调是 `onRequestClose(reason)` 而不是无参 `onClose`——沿用
+`model-service-panel.tsx` 的 `onClose("escape")` 先例。
+
+**守卫**：`tests/guards/root-modal-boundary.test.mjs` 有 4 处按「函数住在 page.tsx 的 Home 里」
+认身份，本片只改「去哪找」，判据一条不减，并为两个新 hook 补上「clear 不许释放在飞操作」的
+对称断言（原本只钉 page 的 close sink）。
