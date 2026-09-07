@@ -206,7 +206,8 @@ def _validate_repair_surface(raw: str, value: dict[str, Any]) -> None:
         raise ModelJsonRepairError("unsupported_syntax")
 
 
-#: Keys a domain parser may receive without the hint advertising them.
+#: Keys a domain parser may receive without the hint advertising them, at the
+#: TOP LEVEL of the response object only (see the ``is_root`` guard below).
 #
 # The repair branch below otherwise rejects every unadvertised key
 # (``unknown_key``), while the strict branch tolerates extras.  That asymmetry
@@ -238,7 +239,9 @@ def _is_open_object(example: Any) -> bool:
     return isinstance(example, dict) and not example
 
 
-def _validate_against_example(value: Any, example: Any) -> None:
+def _validate_against_example(
+    value: Any, example: Any, *, is_root: bool = True,
+) -> None:
     """Validate repaired JSON against the example-shaped schema hint.
 
     This layer owns SHAPE only — types, containers, and the advertised key set.
@@ -262,6 +265,12 @@ def _validate_against_example(value: Any, example: Any) -> None:
     up as ``MalformedModelResponse`` and pushed ``reflect()`` into its fail-open
     "answer" fallback — so the document-roster and ``enumerate_kg_objects``
     actions were dead in production.
+
+    ``is_root`` gates ``_TOLERATED_UNADVERTISED_KEYS``: the top-level response
+    object may carry a tolerated key the hint does not advertise, but a nested
+    object at any depth may not smuggle the same key past ``unknown_key`` — the
+    tolerance is for one named, product-known top-level field, not a general
+    escape hatch that follows the key name into every dict in the payload.
     """
     if example is None:
         # Hints use null for optional scalar fields whose concrete value may be
@@ -296,19 +305,20 @@ def _validate_against_example(value: Any, example: Any) -> None:
             raise ModelJsonRepairError("invalid_type")
         if example:
             for item in value:
-                _validate_against_example(item, example[0])
+                _validate_against_example(item, example[0], is_root=False)
         return
     if isinstance(example, dict):
         if not isinstance(value, dict):
             raise ModelJsonRepairError("invalid_type")
         if _is_open_object(example):
             return
-        extra = set(value) - _TOLERATED_UNADVERTISED_KEYS
+        tolerated = _TOLERATED_UNADVERTISED_KEYS if is_root else frozenset()
+        extra = set(value) - tolerated
         if not extra.issubset(example):
             raise ModelJsonRepairError("unknown_key")
         for key, item in value.items():
             if key in example:
-                _validate_against_example(item, example[key])
+                _validate_against_example(item, example[key], is_root=False)
         return
     raise ModelJsonRepairError("invalid_type")
 

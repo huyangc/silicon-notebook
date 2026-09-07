@@ -487,11 +487,19 @@ def parse_reflect_v2(
         if action in ACTION_DEFINITIONS:
             reason = capabilities.reason_for(action) or "action_unavailable"
             return _reflect_invalid(f"{_V2_UNAVAILABLE_PREFIX}{reason}")
+        # 生产不可达:schema hint 的 `next_action` 枚举只列 13 个合法 id,传输层
+        # `validate_model_json_shape`/`_validate_repaired_shape` 先以
+        # `invalid_enum` 拒绝一切不在枚举里的值,重试耗尽后走既有 fail-open
+        # (`_reflect_fallback`),从不会把畸形值带到这里。保留这一支只为纵深
+        # 防御——测试替身与 fail_closed 调用方仍可能直接构造这样的 dict 调用
+        # `parse_reflect_v2`。
         return _reflect_invalid(_V2_UNKNOWN_ACTION)
     sufficient = data.get("sufficient", False)
     if not isinstance(sufficient, bool):
         # 真 boolean 校验(设计稿 §5.2)。`"true"` / `1` 不算——一个把字符串当真
-        # 值用的协议里,`"false"` 也是真。
+        # 值用的协议里,`"false"` 也是真。生产不可达:hint 写的
+        # `"sufficient":false` 让传输层先以 `invalid_boolean` 拒绝非 bool 值并
+        # 走 fail-open;这里同 `_V2_UNKNOWN_ACTION` 一样只为纵深防御。
         return _reflect_invalid(_V2_INVALID_SUFFICIENT)
     if sufficient and ACTION_DEFINITIONS[action].produces_evidence:
         # 「再检索一次」与「证据已经够了」不能在同一轮同时成立。绝不静默地先跑
@@ -501,6 +509,9 @@ def parse_reflect_v2(
     if arguments is None:
         arguments = {}
     if not isinstance(arguments, dict):
+        # 生产不可达:hint 写的 `"arguments":{}` 是开放对象,但类型仍是
+        # object——传输层先以 `invalid_type` 拒绝非 dict 值并走 fail-open;
+        # 同上,只为纵深防御。
         return _reflect_invalid(_V2_INVALID_ARGUMENTS_OBJECT)
     decision = ReflectDecision(
         sufficient=sufficient, next_action=action,
