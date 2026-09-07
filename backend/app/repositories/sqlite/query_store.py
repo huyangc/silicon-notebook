@@ -743,28 +743,26 @@ class QueryStore:
                     f"WHERE {access_sql.NOTEBOOK_LIVE_SQL} GROUP BY created_by"
                 ).fetchall()
             }
-            # 「来源」总数与 last_active 的上传候选同一谓词(规格
-            # docs/superpowers/specs/2026-09-07-admin-usage-overview-usage-signals-design_zh.md
-            # §3 Phase A):只算 live 笔记本 + 可见来源,归因
-            # COALESCE(NULLIF(uploaded_by,''), nb.created_by)——深拷贝副本
-            # uploaded_by 为 NULL,记接收方 owner;这是**资产**口径,与
-            # last_active 的**动作**口径刻意不同(规格 §7 决策 2)。
-            # retained 分支同一条资产口径:实际上传者优先,actor_id 为空
-            # (留存时 uploaded_by 为 NULL)回落到当时的 notebook_owner_id——
-            # 否则删除笔记本会让这类来源从所有人的计数里消失;last_active 的
-            # retained 候选仍只看 actor_id(动作口径)。retained_user_activity
-            # 写入时(见 sqlite/notebook_store.py 的 source_rows SELECT)已经
-            # 用 VISIBLE_SOURCE_TYPES_PREDICATE 过滤过,这里不必再排除
-            # memory/knowhow。
+            # 「来源」总数与 last_active 的上传候选同一谓词——与 PostgreSQL 侧
+            # 同一条裁决(资产口径、NULL/空串归 owner、retained 回落 owner、
+            # 留存写入侧已排除合成来源),理由见 postgres/query_store.py 同位置
+            # 的注释与规格 §3 Phase A / §7 决策 2。
+            #
+            # live 分支的归因表达式与 FROM/WHERE 片段抽成下面两个局部变量,
+            # `sources`(资产总数)与 `storage_bytes`(规格 §3 B2)共用同一条谓词,
+            # 避免两处各自维护同一逻辑而漂移。
+            live_source_key_sql = "COALESCE(NULLIF(s.uploaded_by,''),nb.created_by)"
+            live_source_scope_sql = (
+                "FROM sources s JOIN notebooks nb ON nb.id=s.notebook_id "
+                f"WHERE nb.{access_sql.NOTEBOOK_LIVE_SQL} "
+                f"AND {VISIBLE_SOURCE_TYPES_PREDICATE} "
+            )
             sources = {
                 row["k"]: row["c"]
                 for row in db.execute(
                     "SELECT k,SUM(c) AS c FROM ("
-                    "SELECT COALESCE(NULLIF(s.uploaded_by,''),nb.created_by) AS k,"
-                    "COUNT(*) AS c FROM sources s "
-                    "JOIN notebooks nb ON nb.id=s.notebook_id "
-                    f"WHERE nb.{access_sql.NOTEBOOK_LIVE_SQL} "
-                    f"AND {VISIBLE_SOURCE_TYPES_PREDICATE} "
+                    f"SELECT {live_source_key_sql} AS k,COUNT(*) AS c "
+                    f"{live_source_scope_sql}"
                     "GROUP BY 1 "
                     "UNION ALL "
                     "SELECT COALESCE(NULLIF(a.actor_id,''),a.notebook_owner_id) AS k,"
@@ -774,6 +772,18 @@ class QueryStore:
                     "AND NOT EXISTS(SELECT 1 FROM notebooks live "
                     "WHERE live.id=a.notebook_id) GROUP BY 1"
                     ") GROUP BY k"
+                ).fetchall()
+            }
+            # 存储占用(规格 §3 B2):与 `sources` 完全同一归因、同一 live+可见过滤,
+            # 只是把 COUNT(*) 换成 SUM(file_size)。已删笔记本的文件已物理清理,
+            # 不计;retained_user_activity 快照不落 file_size 列,因此不像
+            # sources/questions/reports 那样有 retained 分支。
+            storage_bytes = {
+                row["k"]: int(row["b"] or 0)
+                for row in db.execute(
+                    f"SELECT {live_source_key_sql} AS k,SUM(s.file_size) AS b "
+                    f"{live_source_scope_sql}"
+                    "GROUP BY 1"
                 ).fetchall()
             }
             conversations = {
@@ -814,6 +824,108 @@ class QueryStore:
                     "AND NOT EXISTS(SELECT 1 FROM notebooks live "
                     "WHERE live.id=a.notebook_id) GROUP BY a.actor_id"
                     ") GROUP BY k"
+                ).fetchall()
+            }
+            # 近 30 天提问数(规格 §3 B3):判断用户当前是否还在用,而不是靠累计
+            # questions 总数猜。窗口固定 30 天、服务端算,不做可配置。SQLite 的
+            # created_at 混有裸 UTC 与带 offset 的 ISO 串,窗口比较必须走
+            # _absolute_instant(与 last_active 的排序判据同一条),不能裸文本比较——
+            # 空串/不可解析值落到 UNRESOLVED_INSTANT_ISO(公元 1 年),天然被
+            # >= 窗口排除。
+            _questions_30d_floor_sql = "julianday('now','-30 days')"
+            questions_30d = {
+                row["k"]: row["c"]
+                for row in db.execute(
+                    "SELECT k,SUM(c) AS c FROM ("
+                    "SELECT created_by AS k,COUNT(*) AS c FROM ask_jobs "
+                    f"WHERE {_absolute_instant('created_at')}>={_questions_30d_floor_sql} "
+                    "GROUP BY created_by "
+                    "UNION ALL "
+                    "SELECT a.actor_id AS k,COUNT(*) AS c FROM retained_user_activity a "
+                    "WHERE a.activity_type='ask' "
+                    "AND julianday(a.expires_at)>julianday('now') "
+                    f"AND {_absolute_instant('a.created_at')}>={_questions_30d_floor_sql} "
+                    "AND NOT EXISTS(SELECT 1 FROM notebooks live "
+                    "WHERE live.id=a.notebook_id) "
+                    "GROUP BY a.actor_id) t GROUP BY k"
+                ).fetchall()
+            }
+            # 提问/报告失败数(规格 §3 B5):status='failed';cancelled 不算失败。
+            # 展开区摘要与总数并列显示(如「提问 120(失败 3)」)。
+            questions_failed = {
+                row["k"]: row["c"]
+                for row in db.execute(
+                    "SELECT k,SUM(c) AS c FROM ("
+                    "SELECT created_by AS k,COUNT(*) AS c FROM ask_jobs "
+                    "WHERE status='failed' GROUP BY created_by "
+                    "UNION ALL "
+                    "SELECT a.actor_id AS k,COUNT(*) AS c FROM retained_user_activity a "
+                    "WHERE a.activity_type='ask' AND a.status='failed' "
+                    "AND julianday(a.expires_at)>julianday('now') "
+                    "AND NOT EXISTS(SELECT 1 FROM notebooks live "
+                    "WHERE live.id=a.notebook_id) "
+                    "GROUP BY a.actor_id) t GROUP BY k"
+                ).fetchall()
+            }
+            reports_failed = {
+                row["k"]: row["c"]
+                for row in db.execute(
+                    "SELECT k,SUM(c) AS c FROM ("
+                    "SELECT created_by AS k,COUNT(*) AS c FROM reports "
+                    "WHERE status='failed' GROUP BY created_by "
+                    "UNION ALL "
+                    "SELECT a.actor_id AS k,COUNT(*) AS c FROM retained_user_activity a "
+                    "WHERE a.activity_type='report' AND a.status='failed' "
+                    "AND julianday(a.expires_at)>julianday('now') "
+                    "AND NOT EXISTS(SELECT 1 FROM notebooks live "
+                    "WHERE live.id=a.notebook_id) "
+                    "GROUP BY a.actor_id) t GROUP BY k"
+                ).fetchall()
+            }
+            # 图谱构建次数(规格 §3 B4):所有状态都算(与 questions 含失败/取消同一
+            # 口径)。kg_build_jobs 不在 retained_user_activity 覆盖范围内,删库后的
+            # 构建记录随库消失,接受(规格已注明)。created_by 排除空串:早期/异常写入
+            # 可能留空,空串不是有效用户键。
+            kg_builds = {
+                row["k"]: row["c"]
+                for row in db.execute(
+                    "SELECT created_by AS k,COUNT(*) AS c FROM kg_build_jobs "
+                    "WHERE created_by<>'' GROUP BY created_by"
+                ).fetchall()
+            }
+            # 采纳度与协作信号(规格 §3 Phase C),全部按 created_by/user_id 直接聚合,
+            # 不涉及 live/可见过滤或 retained 快照(这些表本身没有对应的留存镜像)。
+            # memory_count 排除 status='rejected'——被拒绝的候选不代表用户采纳了
+            # Memory 机制。
+            memory_count = {
+                row["k"]: row["c"]
+                for row in db.execute(
+                    "SELECT created_by AS k,COUNT(*) AS c FROM memory_items "
+                    "WHERE status<>'rejected' GROUP BY created_by"
+                ).fetchall()
+            }
+            # knowhow_tables.created_by 早期/异常写入可能留空,同 kg_builds 排除空串。
+            knowhow_tables = {
+                row["k"]: row["c"]
+                for row in db.execute(
+                    "SELECT created_by AS k,COUNT(*) AS c FROM knowhow_tables "
+                    "WHERE created_by<>'' GROUP BY created_by"
+                ).fetchall()
+            }
+            # 加入的共享库数:notebook_members 记的是他人库的成员身份(自有库不经
+            # 这张表),按 user_id 直接计数。
+            joined_notebooks = {
+                row["k"]: row["c"]
+                for row in db.execute(
+                    "SELECT user_id AS k,COUNT(*) AS c FROM notebook_members "
+                    "GROUP BY user_id"
+                ).fetchall()
+            }
+            groups = {
+                row["k"]: row["c"]
+                for row in db.execute(
+                    "SELECT user_id AS k,COUNT(*) AS c FROM group_members "
+                    "GROUP BY user_id"
                 ).fetchall()
             }
             # 「最近活跃」与管理员活动流使用同一批用户动作:上传可见来源、提交
@@ -902,6 +1014,15 @@ class QueryStore:
                     "last_active": active.get(user["id"]),
                     "upload_limit": override if override is not None else global_default,
                     "upload_limit_overridden": override is not None,
+                    "storage_bytes": storage_bytes.get(user["id"], 0),
+                    "questions_30d": questions_30d.get(user["id"], 0),
+                    "questions_failed": questions_failed.get(user["id"], 0),
+                    "reports_failed": reports_failed.get(user["id"], 0),
+                    "kg_builds": kg_builds.get(user["id"], 0),
+                    "memory_count": memory_count.get(user["id"], 0),
+                    "knowhow_tables": knowhow_tables.get(user["id"], 0),
+                    "joined_notebooks": joined_notebooks.get(user["id"], 0),
+                    "groups": groups.get(user["id"], 0),
                 }
             )
         return result

@@ -75,6 +75,27 @@ class AdminUserUsage(BaseModel):
     # 给该用户单独设的覆盖值,False 表示继承全局默认。
     upload_limit: int = 0
     upload_limit_overridden: bool = False
+    # 以下为使用强度信号(规格 docs/superpowers/specs/
+    # 2026-09-07-admin-usage-overview-usage-signals-design_zh.md §3 Phase B/C),
+    # 只在展开区「用户摘要」呈现,不进主表列;全部带默认值兼容旧客户端。
+    # 与「来源」总数同一归因(uploaded_by 回落笔记本 owner)、同一 live+可见过滤,SUM(file_size)。
+    storage_bytes: int = 0
+    # 近 30 天提交的提问数(ask_jobs.created_at 窗口 + retained 同窗口),用于判断当前是否还在用。
+    questions_30d: int = 0
+    # 提问失败数(status='failed';cancelled 不算)。
+    questions_failed: int = 0
+    # 报告失败数(status='failed';cancelled 不算)。
+    reports_failed: int = 0
+    # 图谱构建次数,按 created_by,所有状态都算(kg_build_jobs 不在留存快照覆盖范围内)。
+    kg_builds: int = 0
+    # 有效 Memory 条数(排除 status='rejected')。
+    memory_count: int = 0
+    # 建过的 Knowhow 表数。
+    knowhow_tables: int = 0
+    # 作为成员加入的他人共享笔记本数(不含自有库)。
+    joined_notebooks: int = 0
+    # 所属群组数。
+    groups: int = 0
 
 
 class AdminUserRoleUpdate(BaseModel):
