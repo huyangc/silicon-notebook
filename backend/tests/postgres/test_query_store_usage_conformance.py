@@ -311,6 +311,36 @@ def test_storage_bytes_matches_sources_attribution(postgres_database, store):
     assert usage["u-storage-shared"]["storage_bytes"] == 2000
 
 
+def test_storage_bytes_excludes_retained_branch(postgres_database, store):
+    """B2 合成一次扫描后:`sources` 与 `storage_bytes` 出自同一条 UNION 查询,
+    retained 分支给 `0 AS b`(快照不落 file_size 列),因此笔记本删除后
+    `sources` 仍按 retained 计入这条来源,但 `storage_bytes` 不把它的字节数
+    算进去(规格 §3 B2)。"""
+    from app.repositories.postgres.notebook_store import NotebookStore
+
+    with postgres_database.write() as connection:
+        _insert_user(connection, "u-storage-retained")
+        _insert_notebook(connection, "n-storage-retained", "u-storage-retained")
+        _insert_source(
+            connection, "s-storage-retained", "n-storage-retained", NOW,
+            uploaded_by="u-storage-retained", file_size=777,
+        )
+
+    notebooks = NotebookStore(
+        postgres_database,
+        new_id=lambda prefix: f"{prefix}-unused",
+        now=lambda: datetime.now(timezone.utc),
+        activity_retention_days=180,
+    )
+    notebooks.delete_row_and_orphan_embeddings("n-storage-retained")
+
+    usage = next(
+        row for row in store.list_user_usage() if row["id"] == "u-storage-retained"
+    )
+    assert usage["sources"] == 1
+    assert usage["storage_bytes"] == 0
+
+
 def test_questions_30d_window(postgres_database, store):
     """B3:近 30 天提问数——窗口内/窗口外/贴近边界各一条,验证
     `created_at >= CURRENT_TIMESTAMP - INTERVAL '30 days'`。真实墙钟相对时间
@@ -374,7 +404,8 @@ def test_questions_failed_and_reports_failed(postgres_database, store):
 
 def test_failed_counts_retained_branch(postgres_database, store):
     """B5 retained 分支:笔记本删除后,留存快照里 status='failed' 的提问/报告
-    仍计入失败数。"""
+    仍计入失败数;同一批留存快照里非 failed 的 completed/cancelled 行不应该
+    被 status='failed' 过滤漏计进来。"""
     from app.repositories.postgres.notebook_store import NotebookStore
 
     with postgres_database.write() as connection:
@@ -384,9 +415,17 @@ def test_failed_counts_retained_branch(postgres_database, store):
             connection, "j-failed", "n-failed-retained", "u-failed-retained", NOW,
             status="failed",
         )
+        _insert_ask(
+            connection, "j-completed", "n-failed-retained", "u-failed-retained", NOW,
+            status="completed",
+        )
         _insert_report(
             connection, "r-failed", "n-failed-retained", "u-failed-retained", NOW,
             status="failed",
+        )
+        _insert_report(
+            connection, "r-cancelled", "n-failed-retained", "u-failed-retained", NOW,
+            status="cancelled",
         )
 
     notebooks = NotebookStore(
@@ -418,36 +457,51 @@ def test_kg_builds_counts_all_statuses_excludes_empty_creator(postgres_database,
 
 
 def test_memory_count_excludes_rejected(postgres_database, store):
-    """Phase C:memory_count 排除 status='rejected'。"""
+    """Phase C:memory_count 排除 status='rejected';挂在 status='deleting'
+    笔记本上的行也不计,与 `joined_notebook_rows` 同一条 live 过滤(规格 §3
+    Phase C)。"""
     with postgres_database.write() as connection:
         _insert_user(connection, "u-memory")
         _insert_notebook(connection, "n-memory", "u-memory")
+        _insert_notebook(connection, "n-memory-deleting", "u-memory", status="deleting")
         _insert_memory_item(connection, "m-confirmed", "n-memory", "u-memory", status="confirmed")
         _insert_memory_item(connection, "m-candidate", "n-memory", "u-memory", status="candidate")
         _insert_memory_item(connection, "m-rejected", "n-memory", "u-memory", status="rejected")
+        _insert_memory_item(
+            connection, "m-deleting", "n-memory-deleting", "u-memory", status="confirmed",
+        )
     usage = next(row for row in store.list_user_usage() if row["id"] == "u-memory")
     assert usage["memory_count"] == 2
 
 
 def test_knowhow_tables_excludes_empty_creator(postgres_database, store):
-    """Phase C:knowhow_tables 按 created_by,空串不算有效用户键。"""
+    """Phase C:knowhow_tables 按 created_by,空串不算有效用户键;挂在
+    status='deleting' 笔记本上的表也不计(与 memory_count/joined_notebooks
+    同一条 live 过滤,规格 §3 Phase C)。"""
     with postgres_database.write() as connection:
         _insert_user(connection, "u-knowhow")
         _insert_notebook(connection, "n-knowhow", "u-knowhow")
+        _insert_notebook(connection, "n-knowhow-deleting", "u-knowhow", status="deleting")
         _insert_knowhow_table(connection, "k1", "n-knowhow", "u-knowhow")
         _insert_knowhow_table(connection, "k2", "n-knowhow", "")
+        _insert_knowhow_table(connection, "k-deleting", "n-knowhow-deleting", "u-knowhow")
     usage = next(row for row in store.list_user_usage() if row["id"] == "u-knowhow")
     assert usage["knowhow_tables"] == 1
 
 
 def test_joined_notebooks_and_groups(postgres_database, store):
     """Phase C:joined_notebooks 按 notebook_members.user_id(他人库的成员身份),
-    groups 按 group_members.user_id;自有库/群组创建者不经这两张表。"""
+    只算 live 笔记本(status='deleting' 的成员身份不计,与 memory_count/
+    knowhow_tables 同一条 live 过滤,规格 §3 Phase C);groups 按
+    group_members.user_id,无笔记本维度不加 live 过滤;自有库/群组创建者不经
+    这两张表。"""
     with postgres_database.write() as connection:
         _insert_user(connection, "u-owner")
         _insert_user(connection, "u-member")
         _insert_notebook(connection, "n-joined", "u-owner")
+        _insert_notebook(connection, "n-joined-deleting", "u-owner", status="deleting")
         _insert_notebook_member(connection, "n-joined", "u-member")
+        _insert_notebook_member(connection, "n-joined-deleting", "u-member")
         _insert_group(connection, "g-joined", "u-owner")
         _insert_group_member(connection, "g-joined", "u-member")
     usage = {row["id"]: row for row in store.list_user_usage()}

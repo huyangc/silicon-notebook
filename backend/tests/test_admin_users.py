@@ -359,6 +359,34 @@ def test_list_user_usage_storage_bytes_matches_sources_attribution(repo):
     assert usage["u2"]["storage_bytes"] == 2000
 
 
+def test_list_user_usage_storage_bytes_excludes_retained_branch(repo):
+    """B2 合成一次扫描后:`sources` 与 `storage_bytes` 出自同一条 UNION 查询,
+    retained 分支给 `0 AS b`(快照不落 file_size 列),因此笔记本删除后
+    `sources` 仍按 retained 计入这条来源,但 `storage_bytes` 不把它的字节数
+    算进去——这是本字段唯一的口径差异(规格 §3 B2)。"""
+    now = "2026-07-07T00:00:00"
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO users (id,email,display_name,role,status,username,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            ("u1", "u1@x", "U1", "user", "active", "a00000001", now, now),
+        )
+        db.execute(
+            "INSERT INTO notebooks (id,name,created_by,status,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?)", ("n1", "n1", "u1", "ready", now, now),
+        )
+        db.execute(
+            "INSERT INTO sources "
+            "(id,notebook_id,title,source_type,created_at,updated_at,uploaded_by,file_size) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            ("s-retained", "n1", "s-retained", "pdf", now, now, "u1", 777),
+        )
+    repo._runtime.notebook_store.delete_row_and_orphan_embeddings("n1")
+    usage = next(row for row in repo.list_user_usage() if row["id"] == "u1")
+    assert usage["sources"] == 1
+    assert usage["storage_bytes"] == 0
+
+
 def test_list_user_usage_questions_30d_window(repo):
     """B3:近 30 天提问数——窗口内/窗口外/贴近边界各一条,裸 UTC 与带 offset 的
     ISO 串各覆盖一次,证明 SQLite 侧走 `_absolute_instant`(与 last_active 同一
@@ -380,6 +408,16 @@ def test_list_user_usage_questions_30d_window(repo):
     # 会把「刚好还在窗口里」的行计入,而不是掐着微秒做不稳定的边界断言。
     near_boundary_included = bare(now - timedelta(days=29, hours=23, minutes=50))
     out_window = bare(now - timedelta(days=40))
+    # 真实时刻在窗外(30 天 6 小时前),但用 +08:00 渲染成 ISO 串后,裸文本的
+    # 日期/时间数字部分等价于「29 天 22 小时前」——如果比较逻辑退化成裸文本
+    # 比较(忽略 offset,把打印出来的数字当成 UTC),这行会被误判成还在窗口
+    # 内。只有真的走 `_absolute_instant`(按 offset 换算成绝对时刻再比较)才会
+    # 正确排除它。
+    offset_trap_out_of_window = (
+        (now - timedelta(days=30, hours=6))
+        .astimezone(timezone(timedelta(hours=8)))
+        .isoformat()
+    )
 
     with repo._write() as db:
         db.execute(
@@ -396,6 +434,7 @@ def test_list_user_usage_questions_30d_window(repo):
             ("j-in-offset", in_window_offset),
             ("j-near-boundary", near_boundary_included),
             ("j-out", out_window),
+            ("j-offset-trap", offset_trap_out_of_window),
         ):
             db.execute(
                 "INSERT INTO ask_jobs "
@@ -404,6 +443,8 @@ def test_list_user_usage_questions_30d_window(repo):
                 (jid, "n1", "u1", "chunk", "q?", "completed", created_at, created_at),
             )
     usage = next(row for row in repo.list_user_usage() if row["id"] == "u1")
+    # 3 = in-bare + in-offset + near-boundary;out-window 与 offset-trap 都
+    # 应被排除(后者证明比较走的是绝对时刻,不是裸文本)。
     assert usage["questions_30d"] == 3
 
 
@@ -478,7 +519,8 @@ def test_list_user_usage_questions_failed_and_reports_failed(repo):
 
 def test_list_user_usage_failed_counts_retained_branch(repo):
     """B5 retained 分支:笔记本删除后,留存快照里 status='failed' 的提问/报告
-    仍计入失败数(与 live 分支同一口径)。"""
+    仍计入失败数(与 live 分支同一口径);同一批留存快照里非 failed 的
+    completed/cancelled 行不应该被 status='failed' 过滤漏计进来。"""
     now = "2026-07-07T00:00:00"
     with repo._write() as db:
         db.execute(
@@ -490,17 +532,19 @@ def test_list_user_usage_failed_counts_retained_branch(repo):
             "INSERT INTO notebooks (id,name,created_by,status,created_at,updated_at) "
             "VALUES (?,?,?,?,?,?)", ("n1", "n1", "u1", "ready", now, now),
         )
-        db.execute(
-            "INSERT INTO ask_jobs "
-            "(id,notebook_id,created_by,mode,question,status,created_at,updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?)",
-            ("j-failed", "n1", "u1", "chunk", "q?", "failed", now, now),
-        )
-        db.execute(
-            "INSERT INTO reports (id,notebook_id,question,status,created_by,created_at,updated_at) "
-            "VALUES (?,?,?,?,?,?,?)",
-            ("r-failed", "n1", "q?", "failed", "u1", now, now),
-        )
+        for jid, status in (("j-failed", "failed"), ("j-completed", "completed")):
+            db.execute(
+                "INSERT INTO ask_jobs "
+                "(id,notebook_id,created_by,mode,question,status,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (jid, "n1", "u1", "chunk", "q?", status, now, now),
+            )
+        for rid, status in (("r-failed", "failed"), ("r-cancelled", "cancelled")):
+            db.execute(
+                "INSERT INTO reports (id,notebook_id,question,status,created_by,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (rid, "n1", "q?", status, "u1", now, now),
+            )
     repo._runtime.notebook_store.delete_row_and_orphan_embeddings("n1")
     usage = next(row for row in repo.list_user_usage() if row["id"] == "u1")
     assert usage["questions_failed"] == 1
@@ -538,7 +582,9 @@ def test_list_user_usage_kg_builds_counts_all_statuses_excludes_empty_creator(re
 
 def test_list_user_usage_memory_count_excludes_rejected(repo):
     """Phase C:memory_count 排除 status='rejected'——被拒绝的候选不代表用户
-    采纳了 Memory 机制。"""
+    采纳了 Memory 机制;挂在 status='deleting' 笔记本上的行也不计,与
+    `joined_notebook_rows` 同一条 live 过滤(规格 §3 Phase C),避免 deleting
+    过渡态下这块摘要与下方笔记本明细表同屏数字不一致。"""
     now = "2026-07-07T00:00:00"
     with repo._write() as db:
         db.execute(
@@ -550,14 +596,21 @@ def test_list_user_usage_memory_count_excludes_rejected(repo):
             "INSERT INTO notebooks (id,name,created_by,status,created_at,updated_at) "
             "VALUES (?,?,?,?,?,?)", ("n1", "n1", "u1", "ready", now, now),
         )
-        for mid, status in (
-            ("m-confirmed", "confirmed"), ("m-candidate", "candidate"), ("m-rejected", "rejected"),
+        db.execute(
+            "INSERT INTO notebooks (id,name,created_by,status,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?)", ("n-deleting", "n-deleting", "u1", "deleting", now, now),
+        )
+        for mid, notebook_id, status in (
+            ("m-confirmed", "n1", "confirmed"),
+            ("m-candidate", "n1", "candidate"),
+            ("m-rejected", "n1", "rejected"),
+            ("m-deleting", "n-deleting", "confirmed"),
         ):
             db.execute(
                 "INSERT INTO memory_items "
                 "(id,notebook_id,created_by,origin,status,title,content_md,created_at,updated_at) "
                 "VALUES (?,?,?,?,?,?,?,?,?)",
-                (mid, "n1", "u1", "ask_answer", status, "T", "C", now, now),
+                (mid, notebook_id, "u1", "ask_answer", status, "T", "C", now, now),
             )
     usage = next(row for row in repo.list_user_usage() if row["id"] == "u1")
     assert usage["memory_count"] == 2
@@ -565,7 +618,8 @@ def test_list_user_usage_memory_count_excludes_rejected(repo):
 
 def test_list_user_usage_knowhow_tables_excludes_empty_creator(repo):
     """Phase C:knowhow_tables 按 created_by,空串(早期/异常写入)不算有效
-    用户键,同 kg_builds 口径。"""
+    用户键,同 kg_builds 口径;挂在 status='deleting' 笔记本上的表也不计
+    (与 memory_count/joined_notebooks 同一条 live 过滤,规格 §3 Phase C)。"""
     now = "2026-07-07T00:00:00"
     with repo._write() as db:
         db.execute(
@@ -577,12 +631,18 @@ def test_list_user_usage_knowhow_tables_excludes_empty_creator(repo):
             "INSERT INTO notebooks (id,name,created_by,status,created_at,updated_at) "
             "VALUES (?,?,?,?,?,?)", ("n1", "n1", "u1", "ready", now, now),
         )
-        for kid, created_by in (("k1", "u1"), ("k2", "")):
+        db.execute(
+            "INSERT INTO notebooks (id,name,created_by,status,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?)", ("n-deleting", "n-deleting", "u1", "deleting", now, now),
+        )
+        for kid, notebook_id, created_by in (
+            ("k1", "n1", "u1"), ("k2", "n1", ""), ("k-deleting", "n-deleting", "u1"),
+        ):
             db.execute(
                 "INSERT INTO knowhow_tables "
                 "(id,notebook_id,title,created_by,created_at,updated_at) "
                 "VALUES (?,?,?,?,?,?)",
-                (kid, "n1", kid, created_by, now, now),
+                (kid, notebook_id, kid, created_by, now, now),
             )
     usage = next(row for row in repo.list_user_usage() if row["id"] == "u1")
     assert usage["knowhow_tables"] == 1
@@ -590,7 +650,10 @@ def test_list_user_usage_knowhow_tables_excludes_empty_creator(repo):
 
 def test_list_user_usage_joined_notebooks_and_groups(repo):
     """Phase C:joined_notebooks 按 notebook_members.user_id(他人库的成员身份),
-    groups 按 group_members.user_id;自有库/群组创建者不经这两张表。"""
+    只算 live 笔记本(status='deleting' 的成员身份不计,与 memory_count/
+    knowhow_tables 同一条 live 过滤,规格 §3 Phase C);groups 按
+    group_members.user_id,无笔记本维度不加 live 过滤;自有库/群组创建者不经
+    这两张表。"""
     now = "2026-07-07T00:00:00"
     with repo._write() as db:
         for uid, uname in (("u1", "a00000001"), ("u2", "b00000002")):
@@ -604,8 +667,16 @@ def test_list_user_usage_joined_notebooks_and_groups(repo):
             "VALUES (?,?,?,?,?,?)", ("n1", "n1", "u1", "ready", now, now),
         )
         db.execute(
+            "INSERT INTO notebooks (id,name,created_by,status,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?)", ("n-deleting", "n-deleting", "u1", "deleting", now, now),
+        )
+        db.execute(
             "INSERT INTO notebook_members (notebook_id,user_id,role,added_at) "
             "VALUES (?,?,?,?)", ("n1", "u2", "reader", now),
+        )
+        db.execute(
+            "INSERT INTO notebook_members (notebook_id,user_id,role,added_at) "
+            "VALUES (?,?,?,?)", ("n-deleting", "u2", "reader", now),
         )
         db.execute(
             "INSERT INTO groups (id,name,kind,created_by,created_at,updated_at) "
