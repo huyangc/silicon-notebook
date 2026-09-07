@@ -6322,11 +6322,18 @@ def test_v2_invalid_shapes_are_observations_and_the_loop_keeps_going(
 
 @pytest.mark.parametrize("syntax_fault", _V2_SYNTAX_FAULTS)
 def test_v2_assessment_crosses_the_gate_on_both_paths(rrepo, syntax_fault):
-    """`assessment` 本期不进 schema(T4 才消费),但它必须过得了两条路径。
+    """`assessment` 必须过得了严格与修复两条路径。
 
     修复分支的未知键规则曾把它判成 `unknown_key`:同一份载荷,严格路径放行、
     带一个尾逗号就被拒——一条只由语法运气决定的合同。
+
+    ⚠ T4 把 `assessment` 写进了 v2 的 schema hint 并真的消费它,所以这条 T3 用例
+    的两处前提随之更新(它原来的 docstring 写的就是「本期不进 schema,T4 才
+    消费」):方面 id 必须是**这个 run 真有的**那个(没有意图契约 ⇒ 兼容路径,
+    整条问题是唯一方面 `a1`;`a2` 现在是 `invalid_assessment:unknown_aspect`),
+    收尾多一条 run 级的结束原因披露。**过闸这件事本身一个字都没改。**
     """
+    from app.services.reasoning_aspects import TERMINATION_SKIP_REASON
     from app.services.reasoning_retrieval import ReasoningRetriever
     nb = _seed_two_nodes(_v2_repo(rrepo))
     llm = _GatedV2LLM(
@@ -6335,7 +6342,7 @@ def test_v2_assessment_crosses_the_gate_on_both_paths(rrepo, syntax_fault):
             {"next_action": "add_subquery", "sufficient": False,
              "arguments": {"query": "布局布线的具体步骤"},
              "assessment": {"unresolved": [
-                 {"aspect_id": "a2", "status": "partial", "gap": "缺适用条件"}]},
+                 {"aspect_id": "a1", "status": "partial", "gap": "缺适用条件"}]},
              "reason": "补一个方面"},
             {"next_action": "answer", "sufficient": True, "arguments": {},
              "assessment": {"supported": [
@@ -6347,7 +6354,7 @@ def test_v2_assessment_crosses_the_gate_on_both_paths(rrepo, syntax_fault):
     result = ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(
         nb.id, "RTL到GDSII流程", "")
 
-    assert _skip_reasons(result) == []
+    assert _skip_reasons(result) == [TERMINATION_SKIP_REASON]
     assert any(t.step_type == "retrieve"
                and t.detail.get("query") == "布局布线的具体步骤"
                for t in result.trace)

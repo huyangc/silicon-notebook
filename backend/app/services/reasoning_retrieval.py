@@ -57,6 +57,12 @@ from app.services.reasoning_actions import (
     ActionParam, ReflectCapabilities, ReflectCapabilityFacts,
     build_reflect_capabilities,
 )
+from app.domain.retrieval_termination import RetrievalTermination
+from app.services.reasoning_aspects import (
+    AspectLedger, TERMINATION_SKIP_REASON, build_aspect_ledger,
+    classify_termination, evidence_bound_keys, render_aspect_block,
+    termination_summary,
+)
 from app.services.reasoning_context import ReflectContext, build_evidence_block
 from app.services.reasoning_observation import (
     ActionObservationLedger, render_observations,
@@ -377,6 +383,10 @@ _V2_INVALID_SUFFICIENT = "invalid_sufficient"
 _V2_INVALID_ARGUMENTS_OBJECT = "invalid_arguments_object"
 _V2_UNEXPECTED_ARGUMENTS = "unexpected_arguments"
 _V2_SUFFICIENT_CONTRADICTION = "sufficient_with_retrieval_action"
+#: T4:方面自评越界。后缀是 `AspectLedger.apply` 返回的稳定 why 码
+#: (`unknown_aspect` / `duplicate_aspect` / `gap_overflow` …),同样带上"哪一条
+#: 边界"——只说"评估不合法"模型下一轮多半原样再报一遍。
+_V2_INVALID_ASSESSMENT_PREFIX = "invalid_assessment:"
 
 #: v2 下 invalid 观察在 skip 步上屏的短文案。reflect 步已经用
 #: `reflect_invalid_summary` 说过这一轮为什么不成立,两步再重复同一句只是把同
@@ -725,6 +735,8 @@ def reflect_invalid_summary(decision: "ReflectDecision") -> str:
         return "模型给出的动作参数不完整或不合法,未执行任何检索"
     if reason == _V2_SUFFICIENT_CONTRADICTION:
         return "模型同时要求继续检索又声称证据已足,本轮不予执行"
+    if reason.startswith(_V2_INVALID_ASSESSMENT_PREFIX):
+        return "模型对必答方面的自评越界,整轮决定不予执行"
     return "模型这一轮的决定无法执行,未执行任何检索"
 
 
@@ -2532,6 +2544,10 @@ class ReasoningResult:
     # Internal selected-source regression oracle.  It is never serialized into
     # Ask/report responses; callers may emit only its redacted event payload.
     baseline_manifest: object | None = None
+    # 这次检索**为什么停下来**,以及停下来那一刻每个必答方面的状态(设计稿 §7.2)。
+    # **v2-only**:总闸关着时恒为 None,关闭态因此逐字段与接入前相同,既有消费者
+    # (它们一个都不读这个字段)零改动。合成层的实际使用由 T4-B 接。
+    termination: "Optional[RetrievalTermination]" = None
 
 
 class _TraceRecorder:
@@ -2774,6 +2790,12 @@ class _ReasoningRunState:
     # 这两个仍由 `run` 解包成局部标量(它们的分支还在 elif 链里)。
     follow_chain_searches: int = 0
     exact_lookups: int = 0
+
+    # —— 必答方面账(T4 / 设计稿 §7):**只在 reflect v2 下构造**,关闭态恒为
+    # None(零新状态)。与上面三个枚举预算池同一档纪律:不解包成局部名,读写一律
+    # 走 `state.aspects`——它的写点在 `_absorb_assessment`(每轮一次)而收尾的
+    # `_run_termination` 要读到那些写入。
+    aspects: "Optional[AspectLedger]" = None
 
 
 class ReasoningRetriever:
@@ -3437,6 +3459,11 @@ class ReasoningRetriever:
         绝不因为少一个字段就把预算当成 0。
         """
         settings = self.settings
+        if state.aspects is None:
+            # 同 `observer` 那条:总闸在一次 run 的中途被翻开时,账从这一轮起
+            # 建,而不是让整次检索崩在一个 None 上。
+            state.aspects = build_aspect_ledger(
+                state.intent_detail, state.question)
         observer = state.record.observer
         if observer is None:
             # 总闸在**一次 run 的中途**被翻开(只可能发生在测试或热更配置里):
@@ -3454,10 +3481,12 @@ class ReasoningRetriever:
         selection = build_evidence_block(
             collected=state.collected, elements=state.elements,
             chunks=state.chunks, chains=state.chains,
-            # 当前"已绑定证据的代表"= 大纲真正持有的那些键。T4 的必答方面接进来
-            # 时把方面代表键并进这一档即可,选取函数本身不用改(见它的说明)。
-            bound_keys=[key for section in outline
-                        for key in section.evidence_keys],
+            # 当前"已绑定证据的代表"(§6.2 第一档)= 各必答方面已绑定的键(按
+            # 方面轮转)+ 大纲真正持有的那些键。`build_evidence_block` 一个字都
+            # 没改:它当初就把这一档定义成"一份键序",T4 只是把方面那半并进来。
+            bound_keys=evidence_bound_keys(
+                state.aspects,
+                [key for section in outline for key in section.evidence_keys]),
             fresh_keys=observer.fresh_result_ids(),
             # 摘录检索词取**原始查询文本**,不是规范化身份串(见
             # `v2_request_query_text`)。
@@ -3469,8 +3498,13 @@ class ReasoningRetriever:
         # **只登记真的渲染出来的键。**被预算挤出窗口的候选一个都不登记——模型没
         # 见过它,就不该因为"它在池子里"取得大纲绑定资格(设计稿 §6.2)。
         state.ever_shown_outline_keys.update(selection.shown_keys)
+        aspect_block = render_aspect_block(state.aspects)
         return ReflectContext(
-            server_state=summary,
+            # 必答方面清单接在服务器状态块的**尾部**,与它一起受"按现有输入/协议
+            # 边界保留、不整体裁尾"的处理(§4):它是用户确认过的必答清单,不属于
+            # `state_chars` 界定的那块可压缩区。
+            server_state=(f"{summary}\n\n{aspect_block}" if aspect_block
+                          else summary),
             evidence=selection.text,
             observations=render_observations(
                 observer.rows,
@@ -3480,6 +3514,86 @@ class ReasoningRetriever:
                     settings, "reasoning_reflect_state_chars", 6000)),
             ),
         )
+
+    def _absorb_assessment(
+        self, state: "_ReasoningRunState", decision: "ReflectDecision",
+    ) -> "ReflectDecision":
+        """把这一轮的 `assessment` 落进方面账,或把整份决定折成一条 invalid。
+
+        只在 v2 下被调用(`run()` 的 `capabilities is not None` 分支),关闭态一次
+        都不进来。
+
+        `assessment` 是同一次 reflect 的**附加**结果:缺省不算 invalid(模型完全
+        可以只给动作,设计稿 §7.1),所以 `None` 原样返回。给了但越界的,按 §7.1
+        「超限按 invalid 决定处理」走 T2 已有的那条路——`_reflect_invalid` 产出的
+        伪动作决定,`run()` 的链尾照常记零 I/O 观察、扣一步、进 stale 记账。原因码
+        带上是哪一条边界(`invalid_assessment:<why>`)。
+
+        **一份 invalid 决定的 assessment 不被吸收**:`_reflect_invalid` 产出的
+        决定上根本没有这个字段。这是刻意的——整份载荷已经被判不成立,再采纳它的
+        另一半就是"接受半个决定",而模型下一轮看到的方面状态会来自一轮它自己都
+        没做成的判断。
+
+        合法键的口径直接复用 `outline_binding_keys`:候选池 ∩ 曾真实展示。它天然
+        不含枚举条目 id 与来源 id(见那个函数的说明),所以"集合/来源身份冒充细粒度
+        证据"在这里是结构上不可能,不靠一条会过期的黑名单。
+        """
+        if state.aspects is None:
+            state.aspects = build_aspect_ledger(
+                state.intent_detail, state.question)
+        if decision.assessment is None:
+            return decision
+        why = state.aspects.apply(
+            decision.assessment,
+            allowed_keys=outline_binding_keys(
+                state.collected, state.elements, state.chunks,
+                state.ever_shown_outline_keys),
+        )
+        if not why:
+            return decision
+        return _reflect_invalid(
+            f"{_V2_INVALID_ASSESSMENT_PREFIX}{why}",
+            decision.invalid_requested_action or decision.next_action)
+
+    def _run_termination(
+        self, state: "_ReasoningRunState",
+    ) -> "Optional[RetrievalTermination]":
+        """run 收尾:生成结束事实并落一条 trace 步(设计稿 §7.2)。
+
+        **v2-only**——`state.aspects` 为 None(关闭态)时返回 None 且一步都不记,
+        所以关闭态的 trace 键集逐字节不变。
+
+        判据全部读**已经发生的事实**:trace 里第一个终止标记、动作观察账里最后
+        一次真的执行过的检索、以及方面账当前的状态。刻意不在 `run()` 的每个
+        `break` 上再挂一个赋值——那几处都在零松弛长度天花板下的热函数里,而 trace
+        本来就是这些事实的权威记录(每一条都是执行处刚写下的结构化 detail),再抄
+        一份只会多出一处可以与它分叉的账。
+
+        trace 步复用既有的 `skip` 类型 + 一个稳定原因码,**不新增 step_type**:
+        前端怎么展示由 T4-B 决定,那之前它按既有的 skip 渲染路径显示一句中文。
+        `detail` 的几个键只在 v2 下出现。
+        """
+        if state.aspects is None:
+            return None
+        observer = state.record.observer
+        termination = classify_termination(
+            state.trace,
+            observer.rows if observer is not None else (),
+            state.aspects,
+        )
+        state.record(TraceStep(
+            step_type="skip",
+            summary=termination_summary(termination.reason),
+            detail={
+                "reason": TERMINATION_SKIP_REASON,
+                "termination": termination.reason,
+                "aspects": len(termination.aspects),
+                "unresolved_aspects": len(termination.unresolved_aspect_ids),
+                "model_assessed_sufficient":
+                    termination.model_assessed_sufficient,
+                "aspect_source": state.aspects.source,
+            }))
+        return termination
 
     def reflect(self, question, candidates_summary, outline: bool = False,
                 consult_memory: bool = False, kg_actions: bool = True,
@@ -5631,9 +5745,11 @@ class ReasoningRetriever:
             limits=limits, intent_detail=intent_detail,
         )
         if self.reflect_v2_active():
-            # 观察账挂在首轮**之前**:首轮的确定性播种也要进账,而且要与循环动作
-            # 共用同一次转换(设计稿 §6.1)。关闭态这两行不执行,不构造任何新状态。
+            # 两本账都挂在首轮**之前**:首轮播种也要进观察账、与循环动作共用同一
+            # 次转换(§6.1);方面清单按**冻结的**意图契约定型,不随检索变(§7.1)。
+            # 关闭态这两行不执行,不构造任何新状态。
             state.record.observer = ActionObservationLedger()
+            state.aspects = build_aspect_ledger(intent_detail, question)
         self._run_first_round(state)
 
         # --- 首轮 → reflect 循环的交接 ---------------------------------------
@@ -6124,6 +6240,7 @@ class ReasoningRetriever:
             decision = self.reflect(question, summary, **reflect_kwargs)
             raise_if_cancelled(self.cancel_event)
             if capabilities is not None:
+                decision = self._absorb_assessment(state, decision)
                 state.record.observer.note_decision(
                     decision.invalid_requested_action or decision.next_action,
                     v2_request_identity(decision), decision.reason,
@@ -6857,6 +6974,7 @@ class ReasoningRetriever:
                             "pending": len(still),
                             "directions": shown}))
 
+        termination = self._run_termination(state)   # 结束原因(设计稿 §7.2)
         # 证据预算在此(而非入口)解析:used_queries 到这里才定型(含 add_subquery /
         # expand_community 兄弟),预算随"问题的方面数"走。
         top_n = effective_top_n(
@@ -6965,6 +7083,7 @@ class ReasoningRetriever:
             collection_map_text=collection_map_text, outline=outline,
             outline_evidence=outline_evidence,
             baseline_manifest=baseline_manifest,
+            termination=termination,
             # `failed` 是**稀疏**键:只有检索本身抛过异常且未被后续成功清除的
             # 查询才带它——常规行形状逐字不变(reflect 回喂/trace 消费方按具名
             # 键取值,多余键中性)。报告的 run 后方向兜底据它把「检索炸了」与

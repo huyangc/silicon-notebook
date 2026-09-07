@@ -231,12 +231,18 @@ NON_ACTION_SKIP_REASONS: frozenset = frozenset({
     "stale_circuit_breaker", "outline_evidence_overflow_unresolved",
     "intent_coverage_incomplete", "initial_evidence_empty",
     "no_executable_action", "outline_overflow_repair_declined",
+    # T4:run 收尾的结束原因披露。它是整次 run 的叙述,不是某一次动作的执行
+    # 结果——记成观察会在账里多出一条谁都没请求过的"动作"。
+    "retrieval_termination",
 })
 
 #: v2 把一份可识别但不可执行/参数不合法的载荷折成的原因码前缀(见
 #: `parse_reflect_v2`)。前缀式的三族分别落 unavailable / invalid。
 _UNAVAILABLE_REASON_PREFIX = "unavailable_action:"
-_INVALID_REASON_PREFIXES = ("missing_argument:", "invalid_argument:")
+#: `invalid_assessment:` 是 T4 的方面自评越界(方面 id 不合法、同一方面重复、
+#: 每方面键数或 gap 超限…)。与另外两族同理落 invalid:载荷本身不成立,零 I/O。
+_INVALID_REASON_PREFIXES = (
+    "missing_argument:", "invalid_argument:", "invalid_assessment:")
 
 
 def status_for_skip(reason: str) -> str:

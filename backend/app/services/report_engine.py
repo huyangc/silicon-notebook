@@ -1931,6 +1931,18 @@ class ReportEngine:
                       "result_scope"),
                   "completeness_required": (section.get("intent_contract") or {}).get(
                       "completeness_required"),
+                  # T4 §7.1:本节的必答方面。来源是 ``intent_questions`` ——
+                  # ``_bind_outline_to_intent`` 在大纲阶段按用户确认过的意图
+                  # 契约写进这一节的那份清单(与上面两个键同源、同样已持久化),
+                  # 不是节内模型现场重规划出来的东西。零新增查询、零新增模型
+                  # 调用:只是把已经在手上的 ``intent_questions`` 也传下去。
+                  #
+                  # **稀疏键**(同本仓库其它 detail 的口径):没有这份清单的节
+                  # 一个多余的键都不带,检索器于是照常回落到「整条节问题作为唯一
+                  # 方面」的兼容路径,而不是收到一个空列表还要去猜它什么意思。
+                  # reflect v2 关闭时这个键根本不被读,关闭态无差别。
+                  **({"intent_questions": intent_questions}
+                     if intent_questions else {}),
               })
 
         # The outline's approved retrieval directions are execution requirements,

@@ -213,10 +213,16 @@ def _validate_repair_surface(raw: str, value: dict[str, Any]) -> None:
 # (``unknown_key``), while the strict branch tolerates extras.  That asymmetry
 # is deliberate for keys a repair could have INVENTED, but it must not decide
 # the fate of a field the product knowingly accepts and merely does not ask the
-# model for yet: reflect v2's ``assessment`` is parsed and stored today and
-# advertised in T4, so with a stray trailing comma the same payload would be
-# rejected while its strict twin passes.  Named, bounded, and — no current hint
-# describes a key by this name — inert for every other workload.
+# model for yet: reflect v2's ``assessment`` was parsed and stored before its
+# own hint advertised it, so with a stray trailing comma the same payload would
+# be rejected while its strict twin passes.  Named, bounded, and — no other
+# hint describes a key by this name — inert for every other workload.
+#
+# T4 advertises ``assessment`` in ``reflect_v2_schema_hint``, which makes this
+# exemption INERT for reflect v2 (an advertised key needs none).  It stays
+# because the LEGACY reflect hint still does not advertise it and legacy is a
+# frozen byte-for-byte baseline: removing the entry would TIGHTEN the
+# closed-state gate, which is a behaviour change in the rejecting direction.
 _TOLERATED_UNADVERTISED_KEYS = frozenset({"assessment"})
 
 
@@ -370,8 +376,17 @@ def _validate_known_shape(
         # These named nested objects have entirely optional children in their
         # downstream contracts. Other described nested objects still need at
         # least one usable field, so an empty plan item remains a mismatch.
+        #
+        # ``assessment`` joined them with reflect v2's aspect protocol: both of
+        # its lists are optional (a turn may report only supported aspects,
+        # only unresolved ones, or -- on a turn where it has nothing new to say
+        # -- neither), so ``"assessment": {}`` is a legal payload. Without this
+        # the strict path would answer ``missing_expected_key`` where the
+        # repair path accepts, and one empty object would push a perfectly good
+        # retrieval decision into the fail-open answer fallback.
         if example and not shared_keys and not (
-            field_name in {"frame", "validity_scope"} and not value
+            field_name in {"frame", "validity_scope", "assessment"}
+            and not value
         ):
             raise ModelJsonRepairError("missing_expected_key")
         for key in shared_keys:
