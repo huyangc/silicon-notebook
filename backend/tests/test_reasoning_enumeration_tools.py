@@ -199,10 +199,11 @@ class _StubEnumeration:
                            "cancel_event": cancel_event})
 
     def enumerate_sources(self, notebook_id, *, budget, cursor=None,
-                          cancel_event=None):
+                          cancel_event=None, local_only=False):
         return self._next({"collection": "sources", "kind": "",
                            "budget": budget, "cursor": cursor,
-                           "cancel_event": cancel_event})
+                           "cancel_event": cancel_event,
+                           "local_only": local_only})
 
 
 def _coverage(**overrides):
@@ -1902,3 +1903,144 @@ def test_production_repro_reaches_the_roster_through_the_real_validator(repo):
     reflect_steps = _steps(result, "reflect")
     assert reflect_steps and all(
         "fallback_reason" not in step.detail for step in reflect_steps)
+
+
+# --------------------------------------- 播种的参考库范围(codex 本轮 P2)
+
+_LOCAL_ONLY_QUESTION = "总结当前notebook的文章，不包括参考库"
+_WITH_LIBRARIES_QUESTION = "介绍当前notebook和参考库的文章"
+
+
+def _mount_reference_library(repo, notebook_id, titles):
+    """挂载并勾选一个有来源的参考库。
+
+    勾选是默认态:未受限的来源范围 = 全参与集(`scoped_participants` 不裁剪),
+    所以挂上就等于这一轮读得到——这正是 P2 那条泄漏路径的前置条件。
+    """
+    base = repo.create_notebook(NotebookCreate(name="base"))
+    repo.mark_notebook_base(base.id)
+    for index, title in enumerate(titles, start=1):
+        _add_source_row(repo, base.id, f"b{index}", title)
+    repo.replace_notebook_bases(notebook_id, [base.id], "user-local")
+    repo.collection_catalog.invalidate()
+    return base
+
+
+def _listed_titles(result):
+    return [item.source_title for outcome in result.enumerations
+            for item in outcome.items]
+
+
+def test_catalog_seed_excludes_reference_libraries_when_asked_to(repo):
+    """「不包括参考库」必须一路传到执行器:被排除的文档不进证据、不占预算。"""
+    notebook = _seed_sources_only(repo, ["论文一", "论文二"])
+    _mount_reference_library(repo, notebook.id, ["参考库甲", "参考库乙", "参考库丙"])
+    llm = _SeqLLM([{"next_action": "answer", "sufficient": True}])
+    retriever, limits = _retriever(repo, llm)
+
+    result = retriever.run(notebook.id, _LOCAL_ONLY_QUESTION, "", limits=limits)
+
+    seed = _seed_step(result)
+    assert seed is not None and seed.detail["collection"] == "sources"
+    assert seed.detail["local_only"] is True          # 稀疏键,仅为真时写
+    assert _listed_titles(result) == ["论文一", "论文二"]
+    # 共享枚举预算只按本库行数扣:3 篇参考库文档一行都没走过。
+    assert seed.detail["returned"] == 2 and seed.detail["returned_total"] == 2
+    assert seed.detail["total"] == 2 and seed.detail["complete"] is True
+    assert result.enumerations[0].local_only is True
+    # 目录进了模型上下文,被排除的参考库文档没有。
+    assert "论文一" in llm.reflect_prompts[0]
+    assert "参考库甲" not in llm.reflect_prompts[0]
+
+
+def test_catalog_seed_without_a_scope_clause_stays_local(repo):
+    """`include_reference_libraries` 的**默认值**就是 False。
+
+    没提参考库的问句与显式排除的问句在这里同为「只列本库」——播种的口径必须与
+    chunk 侧那行 `local_only=(kind == "catalog" and not include_...)` 逐字一致,
+    而不是把默认值读成「那就全都列吧」。
+    """
+    notebook = _seed_sources_only(repo, ["论文一"])
+    _mount_reference_library(repo, notebook.id, ["参考库甲"])
+    llm = _SeqLLM([{"next_action": "answer", "sufficient": True}])
+    retriever, limits = _retriever(repo, llm)
+
+    result = retriever.run(notebook.id, _CATALOG_QUESTION, "", limits=limits)
+
+    seed = _seed_step(result)
+    assert seed is not None and seed.detail["local_only"] is True
+    assert _listed_titles(result) == ["论文一"]
+
+
+def test_catalog_seed_lists_reference_libraries_when_the_question_asks(repo):
+    """显式「和参考库」才含挂载库;此时轨迹上没有 `local_only` 这个键。"""
+    notebook = _seed_sources_only(repo, ["论文一"])
+    _mount_reference_library(repo, notebook.id, ["参考库甲"])
+    llm = _SeqLLM([{"next_action": "answer", "sufficient": True}])
+    retriever, limits = _retriever(repo, llm)
+
+    result = retriever.run(
+        notebook.id, _WITH_LIBRARIES_QUESTION, "", limits=limits)
+
+    seed = _seed_step(result)
+    assert seed is not None and "local_only" not in seed.detail
+    assert sorted(_listed_titles(result)) == ["参考库甲", "论文一"]
+    assert result.enumerations[0].local_only is False
+
+
+def test_model_roster_action_cannot_reopen_the_chain_at_another_scope(repo):
+    """模型随后再选目录动作:按「已列全」跳过,参考库文档不会从第二条链混进来。
+
+    动作本身不带任何范围信息(默认全参与集),所以「以本次请求为准」的写法会在
+    这里开出第二条链——那条链列的正是用户明确排除掉的那些文档。
+    """
+    notebook = _seed_sources_only(repo, ["论文一"])
+    _mount_reference_library(repo, notebook.id, ["参考库甲"])
+    llm = _SeqLLM([
+        _enumerate_sources_action(),
+        {"next_action": "answer", "sufficient": True},
+    ])
+    retriever, limits = _retriever(repo, llm)
+
+    result = retriever.run(notebook.id, _LOCAL_ONLY_QUESTION, "", limits=limits)
+
+    assert "already_enumerated" in _skips(result)
+    assert len(result.enumerations) == 1
+    assert _listed_titles(result) == ["论文一"]
+
+
+def test_a_resumed_roster_chain_keeps_the_seeded_scope(repo):
+    """播种被截断后模型那次**续跑**同样沿用开链时的范围(链级账目,不是本次请求)。
+
+    用 stub 驱动:三个预算池都是 run 级的,真执行器一次就把小库列完了,续跑这一
+    步在真库上做不出来。断言落在执行器实际收到的 `local_only` 上——把传参去掉、
+    或改成「以本次请求为准」,第二次调用就会变成 False。
+    """
+    from app.services.collection_enumeration import SourceEnumeration
+
+    notebook = _seed_sources_only(repo, ["论文一", "论文二"])
+    partial = SourceEnumeration(
+        items=(), cursor="cursor-1", extra_pages=0, payload_chars=10,
+        coverage=_coverage(returned=1, returned_total=1, complete=False,
+                           has_more=True, total=2,
+                           truncated_reason=TRUNCATED_BUDGET),
+    )
+    done = SourceEnumeration(
+        items=(), cursor=None, extra_pages=0, payload_chars=10,
+        coverage=_coverage(returned=1, returned_total=2, total=2),
+    )
+    stub = _StubEnumeration([partial, done])
+    llm = _SeqLLM([
+        _enumerate_sources_action(),
+        {"next_action": "answer", "sufficient": True},
+    ])
+    retriever, limits = _retriever(repo, llm)
+    retriever.collection_enumeration = stub
+
+    result = retriever.run(notebook.id, _LOCAL_ONLY_QUESTION, "", limits=limits)
+
+    assert [call["local_only"] for call in stub.calls] == [True, True]
+    assert stub.calls[0]["cursor"] is None
+    assert stub.calls[1]["cursor"] == "cursor-1"
+    assert len(result.enumerations) == 1
+    assert result.enumerations[0].local_only is True

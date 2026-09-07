@@ -82,7 +82,7 @@ def prepare_catalog_overview(
     )
     raise_if_cancelled(cancel_event)
     outcomes = [CollectionEnumerationOutcome(
-        collection="sources", kind="", source_id="",
+        collection="sources", kind="", source_id="", local_only=local_only,
         items=list(listing.items), coverage=listing.coverage,
     )]
     citations = evidence_context.collection_item_citations(
