@@ -4668,11 +4668,16 @@ export default function Home() {
 
   function switchChatMode(mode: ChatMode) {
     setChatMode(mode);
-    if (currentNotebookId) {
+    // 写 URL 用 activeNotebookIdRef 而不是闭包里的 currentNotebookId:铃铛里点
+    // 另一本库的「进行中的提问」会先 openNotebook(B) 再调用本函数,而这个闭包是
+    // 导航前渲染的——用 state 会把刚写好的 #notebook=B 又改回 A,界面在 B、刷新
+    // 却回到 A。ref 在 openNotebook 里同步更新,永远是此刻真正打开的库。
+    const hashNotebookId = activeNotebookIdRef.current ?? currentNotebookId;
+    if (hashNotebookId) {
       window.history.replaceState(
         null,
         "",
-        mode === "memory" ? memoryHash(currentNotebookId) : notebookHash(currentNotebookId),
+        mode === "memory" ? memoryHash(hashNotebookId) : notebookHash(hashNotebookId),
       );
     }
     if (mode === "rules") {

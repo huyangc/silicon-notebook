@@ -64,3 +64,48 @@ def test_me_pending_stream_first_frame_is_snapshot():
         await resp.body_iterator.aclose()
 
     asyncio.run(scenario())
+
+
+def test_me_pending_stream_registers_before_the_initial_snapshot(monkeypatch):
+    """注册必须先于初始快照(codex #684 R1 P2)。
+
+    ``mark_dirty`` 按 ``has_subscribers`` 闸门跳过无人订阅的 user。若端点先算
+    初始帧再注册,那一帧读到「进行中」之后、注册之前落地的终态推送会被闸门整帧
+    丢掉,而终态不再有下一帧——连接就永远停在陈旧的初始快照上。这里让初始快照
+    的计算过程本身触发一次推送,断言它紧随初始帧送达。
+    """
+    from app.api import system_routes
+    from app.services.pending_bus import pending_bus
+
+    user = UserProfile(
+        id="user-stream-order", email="o@example.com", display_name="O", role="admin",
+    )
+    pending_bus.reset()
+    pushed = {"count": 1, "items": [{"type": "ask", "id": "job-terminal"}]}
+    pending_bus.set_recompute(lambda _uid: pushed)
+
+    class _Repo:
+        def pending_actions(self, uid):
+            # 初始帧计算期间(线程池线程)恰好落地一条推送——正是评审描述的窗口。
+            pending_bus.mark_dirty(uid)
+            return {"count": 0, "items": []}
+
+    monkeypatch.setattr(system_routes, "repository", lambda: _Repo())
+
+    async def scenario():
+        resp = await system_routes.me_pending_stream(_FakeRequest(), user)
+        first = _json.loads((await resp.body_iterator.__anext__()).rstrip("\n"))
+        assert first == {"kind": "snapshot", "data": {"count": 0, "items": []}}
+        second = _json.loads(
+            (await asyncio.wait_for(resp.body_iterator.__anext__(), timeout=5)).rstrip("\n")
+        )
+        assert second == {"kind": "snapshot", "data": pushed}, (
+            "a publish that lands while the initial snapshot is being computed must "
+            "reach the connecting client — registration has to precede the initial frame"
+        )
+        await resp.body_iterator.aclose()
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        pending_bus.reset()
