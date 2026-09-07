@@ -202,6 +202,20 @@ class CollectionMap:
     # No default: a silently-zero count would render "sources: 0" on a library
     # full of documents, which reads as a fact rather than as a missing field.
     sources: int
+    # The same user-visible count restricted to the ACTIVE notebook — the
+    # ``sources`` total minus every mounted reference library's share.  It is
+    # NOT rendered (the map's job is to describe what the *enumeration* tools
+    # can reach, and those are federated); it exists because one consumer,
+    # ``AskService._no_kg_scope_admits_run``, has to judge a channel whose
+    # reach is narrower than the map's: source-passage retrieval
+    # (``search_chunks`` / the no-graph first-round seed) rides chunk mode's
+    # own primitives, and those are active-notebook-local by design.  Deriving
+    # it here rather than counting again at the call site costs zero extra
+    # queries (the per-notebook loop already reads each participant's signal
+    # rows) and keeps ONE definition of "user-visible source" for both numbers.
+    # No default, for ``sources``' reason and then some: a silent zero here
+    # turns into a refusal to answer.
+    active_sources: int
 
     def element_count(self, kind: str) -> int:
         for item in self.elements:
@@ -343,7 +357,9 @@ class CollectionCatalogService:
             notebook_ids = scoped_participants(
                 self._notebooks.participant_ids(db, active_notebook_id)
             )
-            elements, sources = self._scope_signal_row_counts(db, notebook_ids)
+            elements, sources, active_sources = self._scope_signal_row_counts(
+                db, notebook_ids, active_notebook_id
+            )
             kg_objects = self._scope_kg_counts(db, notebook_ids)
             knowhow_tables = self._scope_knowhow_tables(db, notebook_ids)
         return CollectionMap(
@@ -352,6 +368,7 @@ class CollectionCatalogService:
             kg_objects=kg_objects,
             knowhow_tables=knowhow_tables,
             sources=sources,
+            active_sources=active_sources,
         )
 
     def collection_map_text(self, active_notebook_id: str) -> str:
@@ -590,8 +607,8 @@ class CollectionCatalogService:
 
     # ----------------------------------------------------------------- element
     def _scope_signal_row_counts(
-        self, db: object, notebook_ids: Sequence[str]
-    ) -> Tuple[Tuple[ElementKindCount, ...], int]:
+        self, db: object, notebook_ids: Sequence[str], active_notebook_id: str
+    ) -> Tuple[Tuple[ElementKindCount, ...], int, int]:
         """Element counts AND the user-visible source count, in one pass.
 
         Both answers come out of the same ``source_change_signal_rows`` read, so
@@ -600,10 +617,17 @@ class CollectionCatalogService:
         so calling it twice per notebook would double the map's floor cost on a
         50 000-source base for nothing.  Peak memory is unchanged — one
         notebook's signal list at a time, exactly as before.
+
+        The active notebook's own share of that source count comes out of the
+        SAME loop iteration (third return value) rather than from a second
+        counting road: it is the one number an active-notebook-local channel may
+        judge itself by (see ``CollectionMap.active_sources``), and computing it
+        anywhere else would be a second definition of "user-visible source".
         """
         totals: Dict[str, int] = {kind: 0 for kind in ENUMERABLE_ELEMENT_KINDS}
         source_totals: Dict[str, int] = {kind: 0 for kind in ENUMERABLE_ELEMENT_KINDS}
         visible_sources = 0
+        active_visible_sources = 0
         for notebook_id in notebook_ids:
             signals = list(self._sources.source_change_signal_rows(db, notebook_id))
             for item in self._notebook_element_counts(db, notebook_id, signals):
@@ -611,16 +635,19 @@ class CollectionCatalogService:
                 source_totals[item.kind] += item.sources
             # 计数只要个数,不要顺序:排序留给真的要遍历那份清单的调用方
             # (`scope_source_plan`),否则 5 万源的库会为了一个 len() 排一遍。
-            visible_sources += len(
+            notebook_visible = len(
                 self._visible_signal_rows(signals, notebook_id)
             )
+            visible_sources += notebook_visible
+            if notebook_id == active_notebook_id:
+                active_visible_sources += notebook_visible
         elements = tuple(
             ElementKindCount(
                 kind=kind, count=totals[kind], sources=source_totals[kind]
             )
             for kind in ENUMERABLE_ELEMENT_KINDS
         )
-        return elements, visible_sources
+        return elements, visible_sources, active_visible_sources
 
     def _notebook_element_counts(
         self, db: object, notebook_id: str, signals: Sequence[Tuple[str, ...]]

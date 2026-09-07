@@ -413,6 +413,33 @@ def test_mounted_base_counts_into_scope(repo):
     assert mounted.element_count("image") == 1
 
 
+def test_active_sources_excludes_mounted_bases(repo):
+    """``active_sources`` 是同一份来源计数按**当前笔记本**切出来的那一份。
+
+    它服务的是一条比地图窄的通道:原文段落检索(``search_chunks`` / 无图首轮
+    播种)复用 chunk 模式的 notebook-local 原语,够不着参考库,所以
+    ``AskService._no_kg_scope_admits_run`` 只能拿这个数给它放行(codex #690 R2
+    P2-1)。两个数必须来自同一个可见性谓词——各数各的迟早会分家。
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    base = repo.create_notebook(NotebookCreate(name="base"))
+    repo.mark_notebook_base(base.id)
+    _add_source(repo, notebook.id, "s1", [("formula", 1)])
+    _add_source(repo, base.id, "b1", [("formula", 1)])
+    _add_source(repo, base.id, "b2", [("formula", 1)])
+    repo.replace_notebook_bases(notebook.id, [base.id], "user-local")
+
+    mounted = _catalog(repo).collection_map(notebook.id)
+    assert mounted.sources == 3
+    assert mounted.active_sources == 1
+    # 零源的当前笔记本 + 有源参考库:参与集非零、当前笔记本仍为零。
+    empty = repo.create_notebook(NotebookCreate(name="empty"))
+    repo.replace_notebook_bases(empty.id, [base.id], "user-local")
+    borrowed = _catalog(repo).collection_map(empty.id)
+    assert borrowed.sources == 2
+    assert borrowed.active_sources == 0
+
+
 def test_unmounted_library_never_leaks_into_scope(repo):
     notebook = repo.create_notebook(NotebookCreate(name="nb"))
     other = repo.create_notebook(NotebookCreate(name="other"))
@@ -659,6 +686,8 @@ def _map(elements, kg, knowhow, sources=0):
         kg_objects=tuple(kg),
         knowhow_tables=knowhow,
         sources=sources,
+        # 渲染用例都是单笔记本作用域,当前笔记本的份额就是全部。
+        active_sources=sources,
     )
 
 

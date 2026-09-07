@@ -2283,6 +2283,14 @@ class ReasoningRetriever:
         当前表自身投影,新通道不得绕过;后者是并发扇出闸,首轮播种一次提交
         N 条子查询,不占同一把闸就等于把它开了个后门。
 
+        **范围是当前笔记本,不是参与集**(codex #690 R2 P2-1)。复用 chunk 模式
+        的原语就一并继承了它们的范围:`retrieve_chunk_candidates` 的索引与库读
+        都是 notebook-local,所以挂载的参考库的原文段落不在这条通道里——参考库
+        只经知识图谱与元素/知识对象/来源清单参与。无图早退的放行判据因此按
+        `collection_map.active_sources` 判这条通道(见
+        `AskService._no_kg_scope_admits_run`);联邦化是独立特性,登记在
+        `fangan_todo.md` 的检索一节。
+
         扇出闸只圈住 `retrieve_chunk_candidates` 这一步(它是发 I/O 的那半);
         `select_chunk_candidates` 的 MMR 是纯 CPU、只读已在手的候选与矩阵,
         圈进临界区只会让 N 条并发子查询彼此排队等对方算完 MMR。
@@ -3512,6 +3520,24 @@ class ReasoningRetriever:
         seed 不是 agent 动作,与 PPR/精确 seed 同口径**不**计入
         `max_chunk_searches`。零模型调用;查询 embedding 走请求级 memo,与
         chunk 模式共享同一份缓存语义。
+
+        **命中要记回首轮账目(codex #690 R2 P2-2)。** 播种是**按子查询**发的,
+        每条子查询新增了几段是已知的,所以并入时就给 `state.attempted` 里那条
+        (由 `_first_round_initial_search` 建立)的 `new` 加上该条真正新增的段数。
+        口径与补种 / `add_subquery` 的原文半逐字一致:`new` 记的是**证据总数**
+        (KG + 原文),不是 KG 候选数。不这么记的后果不是「账目不好看」——回喂
+        reflect 的措辞是「新增为 0 的方向请换明显不同的问法」,无图 run 里 KG 半
+        恒空手,于是每一条真检索到原文的方向都会被指认为空手,模型被反复推着
+        为已经拿到证据的方向另起炉灶。`tries` **不**动:播种与初检索是同一次
+        方向尝试的两半(KG 半已经记过一次),再加一次就成了「已试 2 次」的假账。
+
+        `setdefault` 是防御性的(理论上首轮初检索一定先为每条子查询建过条目),
+        与 `_first_round_initial_search` 同形:同样的 label 口径——只有本轮子查询
+        来自已确认意图种子时才写注册表简称,否则留空、渲染回退到 query 原文。
+
+        `detail` 不加按查询的命中分布:这一步的 `found`/`phase`/`result_ids`
+        已经定稿,而"哪条子查询领走了哪一段"对读轨迹的人没有新信息(并入顺序就
+        是子查询顺序),对归因链也没有——`result_ids` 已经是全部新增段落的身份。
         """
         if state.kg_in_scope or not self.chunk_search_active():
             return
@@ -3542,7 +3568,12 @@ class ReasoningRetriever:
                 found.append(future.result())
                 raise_if_cancelled(self.cancel_event)
         seeded: List = []
-        for hits in found:
+        attempted = state.attempted
+        label_of = state.label_of
+        reviewed_queries = state.reviewed_queries
+        # `found` 与 `subqueries` 逐位对齐(futures 按提交顺序 result),所以
+        # zip 起来就是「这条子查询捞到了这些段」——账目要的正是这个配对。
+        for sq, hits in zip(subqueries, found):
             # 逐条并入与先拼成一个大列表**等价**:`take_distinct_chunk_hits`
             # 单次调用内也按 id/内容键去重并就地升级(它把本次新收的段落也登记
             # 进 by_id/by_content),跨子查询的重复不会漏过去。保留逐条只是让
@@ -3550,6 +3581,13 @@ class ReasoningRetriever:
             new = take_distinct_chunk_hits(hits, seen_chunks, chunks)
             chunks.extend(new)
             seeded.extend(new)
+            # 记回该方向的首轮账目(见 docstring:`new` 是证据总数,`tries` 不动)。
+            rec = attempted.setdefault(
+                _norm_query(sq.query),
+                _QueryAttempt(query=sq.query,
+                              label=(label_of.get(sq.query, "")
+                                     if reviewed_queries else "")))
+            rec.new += len(new)
         _result_ids, _result_ids_truncated = _capped_result_ids(
             [c.chunk_id for c in seeded])
         _chunk_seed_detail = {"found": len(seeded), "phase": "seed",

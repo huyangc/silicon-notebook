@@ -3774,6 +3774,84 @@ def test_first_round_chunk_seed_takes_the_effort_tier_per_query_allowance(rrepo)
     assert seed.detail["found"] == 3
 
 
+def test_first_round_chunk_seed_credits_hits_to_each_query_attempt(rrepo):
+    """codex #690 R2 P2-2:播种的命中要记回**发起它的那条子查询**的首轮账目。
+
+    无图 run 里 KG 侧恒空手,首轮初检索因此把每条方向都记成 `new=0`。播种随后
+    真的检索到了原文,却不动账目——于是每一轮 reflect 都被告知「这些方向新增为
+    0,请换明显不同的问法」,模型被推着为已经拿到证据的方向另起炉灶,白丢已到手
+    的原文。这里钉三件事:①各方向的 `new` 等于**自己**新增的段数(不是总数、
+    也不是别人的);②回喂措辞不再对它们说「新增0条」;③`tries` 不动(播种与初
+    检索是同一次尝试的两半,记成「已试2次」是假账)。
+    """
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    nb = _seed_notebook_without_kg(rrepo)
+    rrepo.settings.graph_ppr_enabled = False
+    captured: list[str] = []
+
+    class _RecordingLLM:
+        configured = True
+
+        def chat_json(self, messages, schema_hint, **kwargs):
+            if "sub_queries" in schema_hint:
+                return json.dumps({"sub_queries": [
+                    {"query": "布局布线"}, {"query": "静态时序分析"}]})
+            captured.append(messages[-1]["content"])
+            return json.dumps({"next_action": "answer", "sufficient": True})
+
+    bind_chat_client(rrepo, "reasoning_agent", _RecordingLLM())
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    _stub_search_chunks(rr, [], {
+        "布局布线": [_chunk_hit("ck-a"), _chunk_hit("ck-b")],
+        "静态时序分析": [_chunk_hit("ck-c")],
+    })
+    res = rr.run(nb.id, "布局布线怎么做", "")
+
+    ledger = {row["query"]: row for row in res.attempted}
+    assert ledger["布局布线"]["new"] == 2
+    assert ledger["静态时序分析"]["new"] == 1
+    # 同一次方向尝试的两半,不是两次尝试。
+    assert ledger["布局布线"]["tries"] == 1
+    assert ledger["静态时序分析"]["tries"] == 1
+    # 播种那一步自己的账目不变(全部新增段落合起来记一次)。
+    seed = next(t for t in res.trace if t.step_type == "search_chunks")
+    assert seed.detail["found"] == 3
+    # 回喂给模型的那句话不再指认这两条方向是空手的。
+    assert captured and "「布局布线」(新增2条)" in captured[0]
+    assert "「静态时序分析」(新增1条)" in captured[0]
+    assert "(新增0条" not in captured[0]
+
+
+def test_first_round_chunk_seed_leaves_a_graph_run_ledger_untouched(rrepo):
+    """有图 run 的账目逐字不变:播种整条路径不执行(D-1),所以把它换成 no-op
+    得到的 `attempted` 必须与真实实现逐字相同——记账那一步同样只在无图侧生效。
+    """
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    nb = _seed_two_nodes(rrepo)
+    rrepo.settings.graph_ppr_enabled = False
+    plan = {"sub_queries": [{"query": "RTL到GDSII流程"}, {"query": "时序收敛方法"}]}
+    answer = [{"next_action": "answer", "sufficient": True}]
+
+    bind_chat_client(rrepo, "reasoning_agent",
+                     _SeqLLM(plan=plan, reflects=list(answer)))
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    calls: list = []
+    _stub_search_chunks(rr, calls, {None: [_chunk_hit("ck-x")]})
+    real = rr.run(nb.id, "RTL到GDSII流程", "")
+
+    bind_chat_client(rrepo, "reasoning_agent",
+                     _SeqLLM(plan=plan, reflects=list(answer)))
+    rr2 = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    _stub_search_chunks(rr2, [], {None: [_chunk_hit("ck-x")]})
+    rr2._first_round_chunk_seed = lambda state: None
+    without_seed = rr2.run(nb.id, "RTL到GDSII流程", "")
+
+    assert calls == []                       # 有图 run 一次都不发起播种
+    assert real.attempted == without_seed.attempted
+
+
 def test_first_round_chunk_seed_sits_between_exact_seed_and_empty_fallback(rrepo):
     """验收 3:播种排在精确查找 seed **之后**(不改那一步的去重与计数)、空证据
     兜底**之前**(播种有命中时兜底自然不触发)。"""

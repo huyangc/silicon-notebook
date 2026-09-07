@@ -474,6 +474,7 @@ def test_collection_map_block_endorses_a_markerless_count():
         kg_objects=(("concept", 5),),
         knowhow_tables=0,
         sources=40,
+        active_sources=40,
     ))
     block = collection_map_block(text)
     assert text in block
@@ -1295,7 +1296,7 @@ def test_prose_only_library_reaches_the_document_roster(arepo):
     # 没有被早退挡住:合成真的跑了,不是那句确定性兜底。
     assert llm.answer_prompts, "纯散文库仍被早退挡住了"
     assert resp.llm_mode != "deterministic"
-    assert "没有可用来源" not in resp.conclusion
+    assert "没有可检索的来源" not in resp.conclusion
     # 目录真的产出了。
     rows = [row for row in resp.result_sets if row.kind == "collection"]
     assert len(rows) == 1 and rows[0].collection == "sources"
@@ -1336,7 +1337,7 @@ def test_map_build_failure_keeps_the_early_return(arepo, monkeypatch):
     )
 
     assert resp.llm_mode == "deterministic"
-    assert "当前检索范围内没有可用来源" in resp.conclusion
+    assert "当前笔记本没有可检索的来源" in resp.conclusion
     assert not llm.answer_prompts
     assert resp.kg_required is True
 
@@ -1367,12 +1368,12 @@ def test_notebook_without_a_kg_still_reaches_the_enumeration_tools(arepo):
     assert resp.llm_mode != "deterministic"
     # 旗标语义不变:无图且无可用参考库仍是 True。
     assert resp.kg_required is True
-    assert "没有可用来源" not in resp.conclusion
+    assert "没有可检索的来源" not in resp.conclusion
 
 
 def test_notebook_without_a_kg_and_without_collections_keeps_the_early_return(arepo):
     """反向:既没有图、作用域里也没有任何可列出的集合时,早退原样保留——
-    进循环只会让每个工具都返回空,那句明确的「没有可用来源」才是对的。
+    进循环只会让每个工具都返回空,那句明确的「没有可检索的来源」才是对的。
 
     「什么都列不出来」现在必须是**零源**库:纯散文库(有文档、没有元素)有文档这一个
     集合,放行是对的(见上一条)。
@@ -1389,7 +1390,7 @@ def test_notebook_without_a_kg_and_without_collections_keeps_the_early_return(ar
 
     assert resp.kg_required is True
     assert resp.llm_mode == "deterministic"
-    assert "当前检索范围内没有可用来源" in resp.conclusion
+    assert "当前笔记本没有可检索的来源" in resp.conclusion
     assert not llm.answer_prompts
 
 
@@ -1443,7 +1444,7 @@ def test_enum_kill_switch_does_not_block_a_no_kg_library_with_sources(arepo):
 
     assert llm.answer_prompts, "kill switch 把无图库的原文检索一起挡掉了"
     assert resp.llm_mode != "deterministic"
-    assert "没有可用来源" not in resp.conclusion
+    assert "没有可检索的来源" not in resp.conclusion
     # 「没早退」还不够:原文通道必须真的跑过并且拿到了东西。
     steps = _chunk_search_steps(resp)
     assert steps, "无图首轮原文播种没有跑"
@@ -1476,7 +1477,7 @@ def test_both_kill_switches_off_early_exits_a_no_kg_library_with_sources(arepo):
     resp = arepo.ask(nb.id, AskRequest(question="库里有哪些公式", mode="reasoning"))
 
     assert resp.llm_mode == "deterministic"
-    assert "当前检索范围内没有可用来源" in resp.conclusion
+    assert "当前笔记本没有可检索的来源" in resp.conclusion
     assert not llm.answer_prompts
 
 
@@ -1500,7 +1501,7 @@ def test_chunk_search_switch_alone_admits_a_no_kg_library_with_sources(arepo):
     resp = arepo.ask(nb.id, AskRequest(question="版图设计要点是什么", mode="reasoning"))
 
     assert resp.llm_mode != "deterministic"
-    assert "没有可用来源" not in resp.conclusion
+    assert "没有可检索的来源" not in resp.conclusion
     steps = _chunk_search_steps(resp)
     assert steps, "枚举闸关、原文闸开时无图首轮播种必须照常跑"
     assert any((step.detail or {}).get("found", 0) > 0 for step in steps)
@@ -1523,8 +1524,88 @@ def test_enum_kill_switch_still_early_exits_a_zero_source_library(arepo):
     resp = arepo.ask(nb.id, AskRequest(question="库里有哪些公式", mode="reasoning"))
 
     assert resp.llm_mode == "deterministic"
-    assert "当前检索范围内没有可用来源" in resp.conclusion
+    assert "当前笔记本没有可检索的来源" in resp.conclusion
     assert not llm.answer_prompts
+
+
+def _mount_graphless_base_with_sources(repo, active_id):
+    """给 ``active_id`` 挂一个**有来源、没有图**的参考库,并返回它。
+
+    这是 P2-1 的场景素材:参与集的来源数因此非零,而当前笔记本仍是零源。
+    """
+    base = repo.create_notebook(NotebookCreate(name="base"))
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO sources (id,notebook_id,title,source_type,status,"
+            "parse_status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
+            ("b1", base.id, "参考库论文", "pdf", "extracted", "extracted", NOW, NOW),
+        )
+    repo.mark_notebook_base(base.id)
+    repo.replace_notebook_bases(active_id, [base.id], "user-local")
+    repo.collection_catalog.invalidate()
+    return base
+
+
+def test_graphless_base_sources_do_not_admit_the_active_only_passage_channel(arepo):
+    """codex #690 R2 P2-1:原文通道够不着参考库,放行判据就不能拿它当理由。
+
+    场景是当前笔记本**零源** + 一个有来源、没有图的参考库 + 枚举接线关掉。此时
+    唯一还活着的放行理由是「原文段落检索有得可检」,而 `search_chunks` 复用的是
+    chunk 模式的 notebook-local 原语——参考库的段落根本不在通道里。用参与集的
+    来源数(`collection_map.sources`)放行,进去的是一轮播种恒空手、动作恒空手的
+    空转:三次模型调用换一个空答案。判据因此只数 `active_sources`。
+    """
+    arepo.settings.reasoning_enum_tools_enabled = False
+    nb = _seed(arepo, formulas=0, with_kg=False, with_source=False)
+    _mount_graphless_base_with_sources(arepo, nb.id)
+    # 前提确认:参与集的来源数非零(否则这条测的不是「口径之差」),当前笔记本为零。
+    mapped = arepo.collection_catalog.collection_map(nb.id)
+    assert mapped.sources == 1 and mapped.active_sources == 0
+    llm = _SeqLLM(
+        plan={"sub_queries": [{"query": "版图设计要点"}]},
+        reflects=[{"next_action": "answer", "sufficient": True}],
+        answer={"answer": "不该跑到这里。", "grounded": True},
+    )
+    _bind_reasoning(arepo, llm)
+
+    resp = arepo.ask(nb.id, AskRequest(question="版图设计要点是什么", mode="reasoning"))
+
+    assert resp.llm_mode == "deterministic"
+    assert "当前笔记本没有可检索的来源" in resp.conclusion
+    assert not llm.answer_prompts
+
+
+def test_graphless_base_sources_still_admit_the_federated_enumeration_rail(arepo):
+    """与上一条成对:同样的场景,枚举接线**开着**时照常放行。
+
+    枚举工具是联邦的——元素/知识对象/来源三份清单都跨库,所以参与集口径对它是
+    真话。上一条收窄的只是原文那条通道的口径,不是把「无图参考库有来源」这条
+    放行整个拆掉;这里钉的就是没有拆过头,而且清单真的把参考库的文档列了出来。
+    """
+    arepo.settings.reasoning_enum_tools_enabled = True
+    nb = _seed(arepo, formulas=0, with_kg=False, with_source=False)
+    _mount_graphless_base_with_sources(arepo, nb.id)
+    llm = _SeqLLM(
+        plan={"sub_queries": [{"query": "文章分析"}]},
+        reflects=[
+            {"next_action": "enumerate_elements",
+             "enumerate": {"collection": "sources"}, "reason": "先拿目录"},
+            {"next_action": "answer", "sufficient": True},
+        ],
+        answer={"answer": "参考库里有一篇。", "grounded": True},
+    )
+    _bind_reasoning(arepo, llm)
+
+    resp = arepo.ask(
+        nb.id, AskRequest(question="当前notebook有哪几篇文章", mode="reasoning")
+    )
+
+    assert llm.answer_prompts, "枚举接线开着时不该被早退挡住"
+    assert resp.llm_mode != "deterministic"
+    assert "没有可检索的来源" not in resp.conclusion
+    rows = [row for row in resp.result_sets if row.kind == "collection"]
+    assert len(rows) == 1 and rows[0].collection == "sources"
+    assert [item.source_title for item in rows[0].items] == ["参考库论文"]
 
 
 def _completeness_required_payload(

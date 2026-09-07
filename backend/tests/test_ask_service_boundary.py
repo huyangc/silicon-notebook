@@ -386,9 +386,10 @@ def test_reasoning_hybrid_without_kg_keeps_batch_coverage_metadata():
     assert response.result_coverage.complete is True
     assert response.result_coverage.returned_rows == 100
     # 这个 stub 服务连来源计数都拿不到(地图端口是空的),所以仍走早退——文案是
-    # 「范围里没有来源」而不是「先建图」:图不再是 reasoning 的前提。
-    assert "当前检索范围内没有可用来源" in response.conclusion
-    assert "知识图谱" not in response.conclusion
+    # 「当前笔记本没有可检索的来源」而不是「先建图」:图不再是当前笔记本作答的
+    # 前提(文案里唯一提到图的地方是参考库那条出路的真实条件)。
+    assert "当前笔记本没有可检索的来源" in response.conclusion
+    assert "尚未构建知识图谱" not in response.conclusion
 
 
 def test_reasoning_conditional_complete_query_does_not_claim_full_table():
