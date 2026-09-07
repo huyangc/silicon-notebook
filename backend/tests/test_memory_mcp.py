@@ -926,8 +926,8 @@ async def test_ask_notebook_reasoning_answers_a_notebook_without_a_kg(mcp_env):
     payload = _payload(result)
     assert payload["mode"] == "reasoning"
     # 不是那句零源早退,而且整个回答里不再出现「先建图」的旧措辞。
-    assert "没有可用来源" not in payload["conclusion"]
-    assert "没有可用来源" not in payload["answer"]
+    assert "没有可检索的来源" not in payload["conclusion"]
+    assert "没有可检索的来源" not in payload["answer"]
     assert "知识图谱" not in payload["conclusion"]
     assert llm.answer_prompts, "reasoning 没跑到合成,被某个前置闸挡住了"
     assert responses and responses[-1].kg_required is True

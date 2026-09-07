@@ -941,9 +941,19 @@ class AskService:
 
         * **枚举工具能列出东西** —— 地图上有非零集合(元素 / 知识对象 / 来源)。
           接线判据与 run 内的总闸共用 ``enumeration_wiring_active``;
-        * **原文段落检索有得可检** —— 范围内有用户可见来源。接线判据同样共用
-          ``chunk_search_wiring_active``,因为原文检索根本不经枚举接线,拿枚举那把
-          闸当唯一放行条件会把无图笔记本的主检索通道一起挡掉。
+        * **原文段落检索有得可检** —— **当前笔记本**里有用户可见来源。接线判据
+          同样共用 ``chunk_search_wiring_active``,因为原文检索根本不经枚举接线,
+          拿枚举那把闸当唯一放行条件会把无图笔记本的主检索通道一起挡掉。
+
+        两条理由的**范围口径不同,这是合同不是疏漏**(codex R2 P2-1)。枚举那条数
+        参与集(当前 notebook + 勾选的参考库):枚举工具本身就是联邦的,元素/知识
+        对象/来源三份清单都跨库。原文那条只数 ``collection_map.active_sources``
+        —— chunk 模式的检索原语是 active-only(见 ``docs/product-and-api*.md``
+        「检索模式」段),``ReasoningRetriever.search_chunks`` 复用的正是它们,所以
+        参考库的原文段落根本不在这条通道里。用参与集的来源数给它放行,等于拿一个
+        它到不了的库当理由:当前笔记本零源、只有一个无图参考库有来源时,放行进去
+        的是一轮播种恒空手、动作恒空手的空转。参考库的原文段落联邦检索是独立
+        特性(见 ``fangan_todo.md`` 检索一节的登记),没做之前判据必须说真话。
 
         两处接线判据都必须与 run 内的总闸**同源**:各写一份(或干脆不判)就会出现
         「早退放行了、run 里却什么工具都没有」的空转——两把 kill switch 都关时是
@@ -1011,7 +1021,8 @@ class AskService:
             or collection_map.sources > 0
         ):
             return True
-        return chunk_search_wired and collection_map.sources > 0
+        # active_sources,不是 sources:见 docstring 的范围口径一节。
+        return chunk_search_wired and collection_map.active_sources > 0
 
     def _tier_map_for(self, notebook_ids: Iterable[str]) -> Dict[str, str]:
         return self.evidence_context.tier_map(list(notebook_ids))
@@ -3811,7 +3822,7 @@ class AskService:
 
         # 无图 ≠ 无法作答。原文段落检索与元素/知识对象清单在「解析了来源但没建
         # 图」的库里照样作答,而自动 KG 抽取默认是关的——那正是常态。所以早退收窄
-        # 成「无图 **且** 枚举工具拿不出东西 **且** 范围内一条可检索来源都没有」;
+        # 成「无图 **且** 枚举工具拿不出东西 **且** 当前笔记本一条可检索来源都没有」;
         # 放行后进入正常 reasoning 循环:图是空的,图动作自然收缩,原文检索照常。
         # kg_required 的语义原样保留(无图且无可用参考库 = True),它只是不再顺带
         # 阻断执行——旗标是响应契约的一部分,不能因为这一轮跑通了就变成假的。
@@ -3838,8 +3849,8 @@ class AskService:
                         "本次请求不能视为全部结果。\n\n"
                         if completeness_unavailable else ""
                     )
-                    + "当前检索范围内没有可用来源；请先添加来源，或在"
-                    "「设置 → 编辑当前笔记本」里挂载一个参考库。"
+                    + "当前笔记本没有可检索的来源；请先添加来源，或挂载/整理一个"
+                    "已建知识图谱的参考库。"
                 ),
                 answer=coverage_answer,
                 grounded=bool(structured_batch and structured_batch.complete),

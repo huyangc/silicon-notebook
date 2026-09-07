@@ -154,8 +154,15 @@ prompt 签名不该随运维开关漂移。`kg_in_scope` 是**每次 run 的笔�
   拆成两个判定：`_collections_reachable`（枚举工具语义，保留原样）与新的 `_scope_has_searchable_sources`（只读来源计数，不看枚举接线）。
 - 结果：只有零源范围、或地图与来源计数都取不到（fail 到早退方向，与现状同）时才早退。
 
-**早退文案。** 「本笔记本尚未构建知识图谱……请先点『构建知识图谱』」改为「当前检索范围内没有可用来源；请先添加来源，或在「设置 → 编辑当前笔记本」里挂载一个参考库。」
+**早退文案。** 「本笔记本尚未构建知识图谱……请先点『构建知识图谱』」改为「当前笔记本没有可检索的来源；请先添加来源，或挂载/整理一个已建知识图谱的参考库。」
 （与前端 `askUnavailable` 文案同口径）。结构化 Knowhow 批次的 `coverage_prefix`/`completeness_unavailable` 前缀逻辑不变。
+
+> **R2 修订（codex #690 第 2 轮 P2-1）。** 落地实现是单点判据 `_no_kg_scope_admits_run`（不是本节设想的
+> `_scope_has_searchable_sources`），且两条放行理由的**范围口径不同**：枚举那条按参与集（`collection_map.sources` 等三类计数），
+> 原文那条只按**当前笔记本**的用户可见来源数（`collection_map.active_sources`）——`search_chunks` 复用 chunk 模式的
+> notebook-local 原语，参考库的原文段落不在这条通道里，用参与集的来源数给它放行会换来一轮播种与动作都空手的空转。
+> 参考库原文段落的联邦检索登记为独立待办（`fangan_todo.md` 检索一节）。文案随之改成上面这句中性说法，
+> 覆盖「当前笔记本零源、只有无图参考库有来源、枚举接线关」这种也会走到早退的情形。
 
 **`kg_required` 字段。** 保留、语义不变（「本 run 范围内无可用图、且无 Memory 命中」），继续在三处如实写入（早退响应、检索器降级路径、正常合成路径）。
 它从今天起是**纯披露**：前端本来不读它，MCP 与分享页原样透传。产品文档把它的解释从「需要先建图」改为「本轮未使用知识图谱；建图可增强」。
@@ -221,7 +228,7 @@ prompt 签名不该随运维开关漂移。`kg_in_scope` 是**每次 run 的笔�
 3. 首轮播种：无图 run 在 exact seed 之后、empty fallback 之前记 `search_chunks`/`phase=seed` 步；有图 run 不记；播种命中后 fallback 不触发；每子查询取 `ranked_per_query_take`。
 4. `test_trace_result_ids.py`：`search_chunks` 执行步无条件写 `result_ids`，skip 步不写。
 5. `test_retrieval_experience_*`：`RETRIEVAL_ACTIONS` 含 `search_chunks`，investigation/zero-hit 统计对它生效（D-2 通过时）。
-6. `test_ask_service_boundary.py` / reasoning 早退测试：无图有源 → 不早退、`kg_required=True`、响应含答案；零源 → 早退且文案为「没有可用来源」；枚举 kill switch 关 + 无图有源 → 仍不早退（T3 的关键用例）。
+6. `test_ask_service_boundary.py` / reasoning 早退测试：无图有源 → 不早退、`kg_required=True`、响应含答案；零源 → 早退且文案为「没有可检索的来源」（R2 起还包括「当前笔记本零源 + 无图参考库有源 + 枚举接线关」，同一句文案）；枚举 kill switch 关 + 无图有源 → 仍不早退（T3 的关键用例）。
 7. `test_prompt_layers.py` 现有对账继续通过（`kg_available` 不是 block id，不触发双向对账）；另加用例：`plan_prompt(kg_available=True)` 与 `reflect_prompt(kg_actions=True)` 的渲染与基线逐字节相等，`False` 时只有首句与动作段不同。
 8. MCP：无图笔记本 `ask_notebook(mode="reasoning")` 得到非早退答案。
 9. `scripts/check_ask_modes_contract.py`：`requires_kg` 跨栈对账；前端 `tests/unit/ask-modes.test.mjs` 同步 reasoning 的 `requiresKg=false`，`tests/component/use-ask-session.component.test.tsx` 确认无图 + reasoning 不再弹「需要知识图谱」；`tests/unit/reasoning-trace.test.mjs` 覆盖 `search_chunks` 的标签与详情渲染。
