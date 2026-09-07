@@ -1526,6 +1526,30 @@ def _still_uncovered_directions(
     return [q for q in pending if _norm_query(label_of[q]) not in covered_norms]
 
 
+def _resolve_subquery_identity(
+    submitted: str,
+    matched_direction: "Optional[str]",
+    label_of: Dict[str, str],
+) -> "tuple[str, str, str, str]":
+    """`add_subquery` 提交串 → (执行串, 账目键, 展示串, 账目 label)。
+
+    `matched_direction` 非空 = 提交串(简称)解回了某条已确认方向:执行用方向
+    本身的完整原文(方向 + 已确认问题契约的复合串)而不是简称——契约是检索用
+    的附加约束,只给简称会丢掉它,检索质量与补种(coverage pass)、首轮切片同
+    型。账目也记在方向原文的身份上,这样它同时从未覆盖清单
+    (`_still_uncovered_directions` 按 `a.query in label_of` 识别)摘除,且后续
+    再用简称重提会被调用处的 `matched_direction` 分支拦住。
+
+    `matched_direction` 为 None = 模型提交了一个全新查询(非 intent 路径):原文
+    直接执行,展示回退到提交串本身、`label` 留空——中性硬约束,那条路径的渲染
+    逐字节不变。
+    """
+    if matched_direction is None:
+        return submitted, _norm_query(submitted), submitted, ""
+    return (matched_direction, _norm_query(matched_direction),
+            label_of[matched_direction], label_of[matched_direction])
+
+
 def clean_exact_term(raw: str) -> str:
     """模型给的名称去首尾包裹标点。**不在这里截长。**
 
@@ -3537,6 +3561,54 @@ class ReasoningRetriever:
             summary=f"检索原文段落:本笔记本无知识图谱,新增 {len(seeded)} 段",
             detail=_chunk_seed_detail))
 
+    def _search_passages_if_graphless(
+        self, state: "_ReasoningRunState", query: str,
+        detail: Optional[dict] = None, k: Optional[int] = None,
+    ) -> int:
+        """无图 run 的**方向级**原文补检索:并入 `state.chunks`,返回新增段数。
+
+        为什么需要它(codex #690 R1 P2):`_first_round_chunk_seed` 只给首轮切片
+        (`state.subqueries`)播了种。首轮装不下的已确认方向走补种
+        (`_first_round_coverage_pass`)、模型后补的方向走 `add_subquery`——这两条
+        路径都只经 KG 侧的 `self.search`,在无图库上恒空手,却照样把该方向写进
+        `attempted`。于是这些方向的原文证据被永久丢掉:防重判据是归一化键在不
+        在 `attempted` 里(与新增数无关),模型之后重提同一条只会被
+        `duplicate_subquery` 拦下。补上这条原文调用之后,「已尝试」才是真话。
+
+        两把闸与首轮播种同源:`state.kg_in_scope` 为真(有图 run 的 chunk 分区由
+        PPR/精确 seed 填,再叠一路会改变预算分配与引用构成,设计 D-1),或
+        `chunk_search_active()` 为假(部署级 kill switch)时**零 I/O、零写点**,
+        连 `detail` 都一个键不加——有图 run 与关闸 run 的调用序列、trace detail
+        键集合因此逐字节不变。
+
+        **不**计入 `action_policy.max_chunk_searches`:那把闸管的是模型主动选
+        `search_chunks` 动作的次数(`_action_search_chunks`)。补种是与首轮播种
+        同口径的确定性 seed;add_subquery 的这一次是该动作自带的原文半。两者都
+        已经被各自的预算(补种的一半 `max_steps`、add_subquery 的动作步)收过费,
+        再收一次等于让同一次工作付两份预算。
+
+        失败语义复用 `_chunk_seed_search`(fail-open;`fail_closed` 下照抛;
+        `AskCancelled` 始终上抛),与这两条路径 KG 半的 `_first_round_search`
+        逐字一致——一条原文检索炸掉不该拖垮整轮。
+
+        `detail` 非空时写 `chunks_found`(本次新增段数,零命中也写:I/O 发起过
+        就得留痕)。**不**写 chunk 的 `result_ids`:这两条路径的 `result_ids` 是
+        KG object_id 清单、与 `detail["new"]` 一一对应,把 chunk_id 混进同一把键
+        会让那条归因链读不出来;原文段落的身份由并入的 `state.chunks` 承载。
+
+        `k` 缺省 = 动作口径(`chunk_mmr_k`,add_subquery 用);补种显式传档位的
+        `per_query_take`,与首轮播种同口径。
+        """
+        if state.kg_in_scope or not self.chunk_search_active():
+            return 0
+        new = take_distinct_chunk_hits(
+            self._chunk_seed_search(state.notebook_id, query, k),
+            state.seen_chunks, state.chunks)
+        state.chunks.extend(new)
+        if detail is not None:
+            detail["chunks_found"] = len(new)
+        return len(new)
+
     def _action_ppr_retrieve(
         self, state: "_ReasoningRunState", decision: "ReflectDecision",
     ) -> None:
@@ -3736,15 +3808,6 @@ class ReasoningRetriever:
                         collected[h.object_id] = h
                         added += 1
                         new_ids.append(h.object_id)
-                # 账目与 add_subquery 分支同型:进 attempted(供 reflect 回喂与防重)、
-                # 进 used_queries(它是"方面数",决定配额轮转与最终证据预算)。
-                # label 恒写(取自注册表的唯一简称):补种只处理 pending_intent_queries,
-                # 来源必为已确认意图,query 恒是 label_of 的键。
-                attempted[_norm_query(query)] = _QueryAttempt(
-                    query=query, new=added, tries=1,
-                    label=label_of[query])
-                if query not in used_queries:
-                    used_queries.append(query)
                 # detail["query"] 只带简称(与轨迹 summary、reflect 回喂账目同口径)——
                 # 完整原文是「方向+已确认问题契约」的复合串,原样进 NDJSON 推给浏览器
                 # 并持久化没有意义,还会把契约全文重复吐给前端。执行仍用 query 原文
@@ -3755,6 +3818,25 @@ class ReasoningRetriever:
                                     "result_ids": _result_ids}
                 if _result_ids_truncated:
                     _coverage_detail["result_ids_truncated"] = True
+                # 无图 run 的原文半(codex #690 R1 P2):上面那次 KG 检索在无图库上
+                # 恒空手,这条方向的证据只可能来自原文。闸、预算口径与不写
+                # chunk result_ids 的理由都在 helper 的 docstring 里;有图 run 与
+                # kill switch 关闭时它零 I/O、`_coverage_detail` 一个键不加。
+                # detail["new"]/result_ids 仍只说 KG 候选(两者必须对得上),原文另
+                # 记 `chunks_found`;`attempted` 那条记的是**证据总数**——回喂措辞
+                # 就叫「新增证据数」,把「KG 空但原文有命中」记成 0 会让模型以为这
+                # 条方向是干的、改问法另起炉灶,白丢已经到手的原文证据。
+                added += self._search_passages_if_graphless(
+                    state, query, _coverage_detail, state.per_query_take)
+                # 账目与 add_subquery 分支同型:进 attempted(供 reflect 回喂与防重)、
+                # 进 used_queries(它是"方面数",决定配额轮转与最终证据预算)。
+                # label 恒写(取自注册表的唯一简称):补种只处理 pending_intent_queries,
+                # 来源必为已确认意图,query 恒是 label_of 的键。
+                attempted[_norm_query(query)] = _QueryAttempt(
+                    query=query, new=added, tries=1,
+                    label=label_of[query])
+                if query not in used_queries:
+                    used_queries.append(query)
                 record(TraceStep(
                     step_type="retrieve",
                     summary=f"补充已确认方向:{label_of[query]}",
@@ -4575,11 +4657,8 @@ class ReasoningRetriever:
                         # 检索质量与补种(coverage pass)、首轮切片同型。未命中
                         # 任何已确认方向(matched_direction 为 None)时走原有
                         # 非 intent 路径,原文直接执行,label 留空——中性硬约束。
-                        exec_query = (matched_direction if matched_direction is not None
-                                     else sq.query)
-                        exec_key = _norm_query(exec_query)
-                        display = (label_of[exec_query] if matched_direction is not None
-                                  else sq.query)
+                        exec_query, exec_key, display, exec_label = _resolve_subquery_identity(
+                            sq.query, matched_direction, label_of)
                         added = 0
                         # P4 (T1): also collect the newly-added ids alongside
                         # the existing `added` count — this loop used to only
@@ -4592,21 +4671,24 @@ class ReasoningRetriever:
                                 collected[h.object_id] = h
                                 added += 1
                                 new_ids.append(h.object_id)
-                        # 账目记在 exec_query(方向原文)的身份上,而非模型提交
-                        # 的简称——这样它同时从未覆盖清单(_still_uncovered_
-                        # directions 按 a.query in label_of 识别)摘除,且后续
-                        # 再用简称重提会被上面的 matched_direction 分支拦住。
-                        attempted[exec_key] = _QueryAttempt(
-                            query=exec_query, new=added, tries=1,
-                            label=(label_of[exec_query]
-                                  if matched_direction is not None else ""))
-                        if exec_query not in used_queries:
-                            used_queries.append(exec_query)
                         _result_ids, _result_ids_truncated = _capped_result_ids(new_ids)
                         _subquery_detail = {"query": display, "new": added,
                                             "result_ids": _result_ids}
                         if _result_ids_truncated:
                             _subquery_detail["result_ids_truncated"] = True
+                        # 无图 run 的原文半(codex #690 R1 P2):KG 那次检索在无图
+                        # 库上恒空手。detail 的 "new"/result_ids 已定稿(仍只说 KG
+                        # 候选),原文另记 `chunks_found`,attempted 记证据**总数**。
+                        added += self._search_passages_if_graphless(
+                            state, exec_query, _subquery_detail)
+                        # 账目记在 exec_query(方向原文)的身份上,而非模型提交
+                        # 的简称——这样它同时从未覆盖清单(_still_uncovered_
+                        # directions 按 a.query in label_of 识别)摘除,且后续
+                        # 再用简称重提会被上面的 matched_direction 分支拦住。
+                        attempted[exec_key] = _QueryAttempt(
+                            query=exec_query, new=added, tries=1, label=exec_label)
+                        if exec_query not in used_queries:
+                            used_queries.append(exec_query)
                         record(TraceStep(step_type="retrieve",
                                          summary=f"补充子查询: {display}",
                                          detail=_subquery_detail))

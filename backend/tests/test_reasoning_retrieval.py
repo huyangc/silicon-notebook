@@ -3837,6 +3837,178 @@ def test_chunk_search_kill_switch_removes_the_first_round_seed_entirely(rrepo):
     assert not any(t.step_type == "search_chunks" for t in res.trace)
 
 
+# --------------------------------------------------------------------------- #
+# 无图 run 的两条**补检索**路径也必须走原文(codex #690 R1 P2)
+# --------------------------------------------------------------------------- #
+#
+# 首轮播种只覆盖 `state.subqueries`(首轮切片)。首轮装不下的已确认方向走补种、
+# 模型后补的方向走 add_subquery —— 这两条此前只经 KG 侧的 `search`,在无图库上
+# 恒空手却照样把方向写进 `attempted`,于是方向的原文证据被永久丢掉(防重判据只
+# 看归一化键在不在 attempted 里,模型重提只会被 duplicate_subquery 拦下)。
+
+
+def _no_kg_run(rrepo, *, reflects, intent_queries=None, limits=None,
+               chunk_results, llm_cls=_SeqLLM):
+    """在无图库上跑一次 run,`search_chunks` 换成记账替身。
+
+    KG 侧**不**打桩:无图库上 `self.search` 本来就恒空手,这正是要被覆盖的形态。
+    """
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    nb = _seed_notebook_without_kg(rrepo)
+    rrepo.settings.graph_ppr_enabled = False
+    llm = llm_cls(plan={"sub_queries": [{"query": "planner 不应执行"}]},
+                  reflects=list(reflects))
+    bind_chat_client(rrepo, "reasoning_agent", llm)
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    calls = []
+    _stub_search_chunks(rr, calls, chunk_results)
+    res = rr.run(nb.id, "完整问题", "", intent_queries=intent_queries,
+                 limits=limits)
+    return res, calls, llm
+
+
+def test_coverage_pass_searches_passages_on_a_graphless_run(rrepo):
+    """补种方向的原文命中必须进 `chunks`,并在该步 detail 里留 `chunks_found`。
+
+    首轮切片装不下的那条方向此前只经 KG 侧 `search`(无图恒空),证据整条丢失。
+    两篇内容不同的"文档"由替身按检索串区分,首轮方向与补种方向的段落因此可辨。
+    """
+    from app.core.ask_retrieval_policy import ask_retrieval_limits
+
+    limits = ask_retrieval_limits("overview")      # 首轮宽度 2、max_steps 4
+    res, calls, llm = _no_kg_run(
+        rrepo,
+        reflects=[{"next_action": "answer", "sufficient": True}],
+        intent_queries=["完整问题", "方向一", "方向二"],
+        limits=limits,
+        chunk_results={"完整问题": [_chunk_hit("ck-q0")],
+                       "方向一": [_chunk_hit("ck-a1")],
+                       "方向二": [_chunk_hit("ck-b1"), _chunk_hit("ck-b2")]},
+        llm_cls=_RecordingSeqLLM,
+    )
+
+    # 补种方向真的发起了原文检索,且用的是**档位**的每查询纳入数(与播种同口径)。
+    assert ("方向二", limits.ranked_per_query_take) in calls
+    covered = _coverage_retrieves(res.trace)
+    assert [s.detail["query"] for s in covered] == ["方向二"]
+    # KG 半仍然空手(detail["new"]/result_ids 只说 KG 候选,两者必须对得上),
+    # 原文半单独记一把键。
+    assert covered[0].detail["new"] == 0
+    assert covered[0].detail["result_ids"] == []
+    assert covered[0].detail["chunks_found"] == 2
+    # 最终结果里有补种方向**独有**的段落 —— 这正是此前被丢掉的那部分证据。
+    assert [c.chunk_id for c in res.chunks] == ["ck-q0", "ck-a1", "ck-b1", "ck-b2"]
+    # 账目:该方向进 attempted(所以后续重提被判重复是正确的),而"新增证据数"
+    # 记的是总数 —— 记成 0 会让模型以为这条方向是干的、换问法另起炉灶。
+    row = next(r for r in res.attempted if r["query"] == "方向二")
+    assert row["new"] == 2 and row["tries"] == 1
+    assert "「方向二」(新增2条" in llm.reflect_prompts[0]
+
+
+def test_add_subquery_searches_passages_on_a_graphless_run(rrepo):
+    """模型后补的子查询同样要走原文,且不能被当作零命中/重复而丢掉证据。"""
+    res, calls, llm = _no_kg_run(
+        rrepo,
+        reflects=[{"next_action": "add_subquery",
+                   "new_sub_query": {"query": "新方向"}},
+                  {"next_action": "answer", "sufficient": True}],
+        chunk_results={"planner 不应执行": [_chunk_hit("ck-plan")],
+                       "新方向": [_chunk_hit("ck-n1"), _chunk_hit("ck-n2")]},
+        llm_cls=_RecordingSeqLLM,
+    )
+
+    # 动作口径:k 缺省(= chunk_mmr_k),与 `_action_search_chunks` 同参。
+    assert ("新方向", None) in calls
+    step = next(t for t in res.trace
+                if t.step_type == "retrieve" and t.detail.get("query") == "新方向")
+    assert step.detail["new"] == 0 and step.detail["result_ids"] == []
+    assert step.detail["chunks_found"] == 2
+    assert [c.chunk_id for c in res.chunks] == ["ck-plan", "ck-n1", "ck-n2"]
+    # 不被当成重复:这一轮真的执行了检索,没有走 duplicate_subquery。
+    assert not [t for t in res.trace
+                if t.step_type == "skip"
+                and t.detail.get("reason") == "duplicate_subquery"]
+    row = next(r for r in res.attempted if r["query"] == "新方向")
+    assert row["new"] == 2
+    assert "「新方向」(新增2条" in llm.reflect_prompts[1]
+
+
+def test_graphless_add_subquery_after_coverage_keeps_the_passage_evidence(rrepo):
+    """codex #690 R1 P2 的完整形态:补种执行过的方向,模型再提会被判重复 ——
+    那是对的,前提是补种当初**真的**替它取到了原文。两者合起来才是"延迟但
+    保证",单有防重就是"证据丢了还不许再找"。"""
+    from app.core.ask_retrieval_policy import ask_retrieval_limits
+
+    res, calls, _llm = _no_kg_run(
+        rrepo,
+        reflects=[{"next_action": "add_subquery",
+                   "new_sub_query": {"query": "方向二"}},
+                  {"next_action": "answer", "sufficient": True}],
+        intent_queries=["完整问题", "方向一", "方向二"],
+        limits=ask_retrieval_limits("overview"),
+        chunk_results={"方向二": [_chunk_hit("ck-b1")]},
+    )
+
+    assert calls.count(("方向二", None)) == 0          # 重复轮零 I/O
+    assert any(t.step_type == "skip"
+               and t.detail.get("reason") == "duplicate_subquery"
+               for t in res.trace)
+    assert "ck-b1" in [c.chunk_id for c in res.chunks]
+
+
+def test_graphless_passage_backfill_leaves_a_graph_run_untouched(rrepo):
+    """有图 run:两条路径都不发起原文检索,trace detail 键集合逐字节不变。"""
+    from app.core.ask_retrieval_policy import ask_retrieval_limits
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    nb = _seed_two_nodes(rrepo)                     # 有图
+    rrepo.settings.graph_ppr_enabled = False
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "planner 不应执行"}]},
+        reflects=[{"next_action": "add_subquery",
+                   "new_sub_query": {"query": "新方向"}},
+                  {"next_action": "answer", "sufficient": True}]))
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    calls = []
+    _stub_search_chunks(rr, calls, {None: [_chunk_hit("ck-x")]})
+    res = rr.run(nb.id, "完整问题", "",
+                 intent_queries=["完整问题", "方向一", "方向二"],
+                 limits=ask_retrieval_limits("overview"))
+
+    covered = _coverage_retrieves(res.trace)
+    assert covered, "有图 run 的补种照跑,只是不叠原文"
+    added = next(t for t in res.trace
+                 if t.step_type == "retrieve" and t.detail.get("query") == "新方向")
+    assert calls == []                              # spy:一次都没被调用
+    assert "chunks_found" not in covered[0].detail
+    assert "chunks_found" not in added.detail
+
+
+def test_chunk_search_kill_switch_removes_the_passage_backfill_too(rrepo):
+    """kill switch 关:无图 run 的两条补检索路径也一并消失(与播种同一条通路)。"""
+    from app.core.ask_retrieval_policy import ask_retrieval_limits
+
+    rrepo.settings.reasoning_chunk_search_enabled = False
+    res, calls, _llm = _no_kg_run(
+        rrepo,
+        reflects=[{"next_action": "add_subquery",
+                   "new_sub_query": {"query": "新方向"}},
+                  {"next_action": "answer", "sufficient": True}],
+        intent_queries=["完整问题", "方向一", "方向二"],
+        limits=ask_retrieval_limits("overview"),
+        chunk_results={None: [_chunk_hit("ck-x")]},
+    )
+
+    assert calls == []
+    covered = _coverage_retrieves(res.trace)
+    assert covered and "chunks_found" not in covered[0].detail
+    added = next(t for t in res.trace
+                 if t.step_type == "retrieve" and t.detail.get("query") == "新方向")
+    assert "chunks_found" not in added.detail
+    assert res.chunks == []
+
+
 def test_search_chunks_stays_available_under_a_narrowed_source_scope(rrepo):
     """新通道**不**挂 `_unsafe_scope_restricted` 闸,理由必须站得住:它是
     source-addressable 的。
