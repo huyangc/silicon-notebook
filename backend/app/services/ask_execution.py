@@ -45,6 +45,9 @@ from typing import TYPE_CHECKING, Any, Callable, Protocol
 from app.repositories.ports import AskRequestKeyConflict
 from app.services.ask_modes import AUTO_MODE
 from app.services.cancellation import AskCancelled
+# 待确认中心「进行中的提问」的推送入口。模块级 import 是安全的:``pending_bus``
+# 是叶子模块(只依赖 asyncio/threading/time),不会与本模块构成 import SCC。
+from app.services.pending_bus import publish_snapshot
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from app.core.event_logging import EventLogger
@@ -293,6 +296,16 @@ class AskExecutionCoordinator:
             run_payload = payload
             engine_id = mode_id
             try:
+                # 待确认中心的「进行中的提问」起点。放在 worker 线程体里(而不是请求
+                # 线程里 `events.put({"event": "started"})` 的旁边):
+                # ``publish_snapshot`` 会在调用线程做一次 ``pending_actions`` 的 DB
+                # 计算,放在请求线程就是把这段延迟直接加在用户按下发送到真正开跑之间。
+                # job 行在 submit 之前就已提交,所以这里读到的快照必定含本次提问。
+                # **在 ``try`` 之内、且是第一句**:它自身 fail-open 只吞 ``Exception``,
+                # 若在这里冒出 ``BaseException``(如 worker 线程刚起就被打断),放在
+                # ``try`` 外会连 ``finally: events.put(None)`` 一起跳过,读端就永远等
+                # 不到哨兵、把整条流挂死。
+                publish_snapshot(user_id)
                 if resolve is not None:
                     run_payload, engine = resolve(cancel_event)
                     engine_id = engine.id
@@ -330,11 +343,20 @@ class AskExecutionCoordinator:
                 events.put({"event": "error", "error": f"{type(exc).__name__}: {exc}"})
             finally:
                 events.put(None)
+                # 终态刷一次铃铛,让「进行中的提问」条目消失。位置与
+                # ``_note_ask_completed`` 同一条理由:**在终态事件入队之后**——
+                # ``publish_snapshot`` 是一次 DB 计算,夹在 ``_finish`` 与浏览器
+                # 正在等的 ``final`` 之间就是白白拖慢答案投递。三条分支
+                # (done/cancelled/failed)共用这一处,不各写一遍。
+                publish_snapshot(user_id)
 
         try:
             self.job_submitter.submit(worker, name=f"ask-{mode_id}")
         except BaseException as exc:
             self._finish(job_id, "failed", error=f"{type(exc).__name__}: {exc}")
+            # worker 从未运行 → 上面那次起点推送也从未发生。快照是绝对值而不是
+            # 增量,所以这里单独一次终态推送就足以把这条从未真正开跑的 job 抹掉。
+            publish_snapshot(user_id)
             raise
         return events
 

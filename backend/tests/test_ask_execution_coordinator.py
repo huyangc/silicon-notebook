@@ -1014,3 +1014,146 @@ def test_failed_job_replays_the_error_the_original_stream_delivered():
         "nb-1", AskRequest(question="Q?", mode="chunk", client_request_id="key-1"),
         ASK_MODES["chunk"], user_id="user-t23"))
     assert delivered[-1] == {"event": "error", "error": "AskPluginEngineError: plugin down"}
+
+
+# ---------------------------------------------------------------------------
+# 待确认中心「进行中的提问」的推送边界(起点一次、终态一次,进度点零次)
+# ---------------------------------------------------------------------------
+
+def _publish_spy(monkeypatch, calls):
+    import app.services.ask_execution as ask_execution_module
+
+    monkeypatch.setattr(
+        ask_execution_module, "publish_snapshot",
+        lambda user_id: calls.append(("publish", user_id)),
+    )
+
+
+def _recording_queue(calls):
+    class _RecordingQueue(queue.Queue):
+        def put(self, item, *args, **kwargs):
+            if isinstance(item, dict) and item.get("event") in ("final", "cancelled", "error"):
+                calls.append(("put_terminal", item["event"]))
+            if item is None:
+                calls.append(("sentinel",))
+            return super().put(item, *args, **kwargs)
+
+    return _RecordingQueue
+
+
+def test_pending_snapshot_publishes_at_start_and_after_the_terminal_event(monkeypatch):
+    """铃铛的「进行中的提问」只在两个时刻刷新:job 开跑、job 到达终态。
+
+    终态那次必须排在**终态事件入队之后**——``publish_snapshot`` 会在调用线程做一次
+    ``pending_actions`` 的 DB 计算,夹在 ``_finish`` 与浏览器正在等的 ``final`` 之间
+    就是白白拖慢答案投递(与 ``_note_ask_completed`` 被移到 ``events.put`` 之后是同
+    一条理由)。起点那次同理不在请求线程:它在 worker 体的第一句,请求线程发完
+    ``started`` 就返回。
+    """
+    import app.services.ask_execution as ask_execution_module
+
+    calls: list = []
+    _publish_spy(monkeypatch, calls)
+    monkeypatch.setattr(ask_execution_module.queue, "Queue", _recording_queue(calls))
+
+    coordinator = _coordinator(
+        RecordingAskState(calls),
+        runner=lambda *_args, **_kwargs: _response(),
+    )
+    _drain(coordinator.start(
+        "nb-1", AskRequest(question="Q?", mode="chunk"), ASK_MODES["chunk"],
+        user_id="user-t23",
+    ))
+
+    assert calls == [
+        ("begin", "nb-1", "chunk", "user-t23"),
+        ("publish", "user-t23"),                       # 起点:worker 体第一句
+        ("finish", "done", "ans-t23", ""),
+        ("put_terminal", "final"),
+        ("sentinel",),
+        ("publish", "user-t23"),                       # 终态:终态事件之后
+    ]
+
+
+def test_pending_snapshot_is_not_published_per_trace_step(monkeypatch):
+    """轨迹进度点**绝不**推送:重算快照是一次数据库读取,按 trace step 推会把
+    worker 线程拖成查询风暴(``pending_bus`` 的 docstring 已把「起始与完成必达、
+    进度点走节流」定死;这里连节流版都不用——在途提问的呈现没有任何随 trace
+    变化的字段)。"""
+    calls: list = []
+    _publish_spy(monkeypatch, calls)
+
+    def runner(notebook_id, payload, on_trace=None, cancel_event=None):
+        for index in range(5):
+            on_trace(TraceStep(step_type="plan", summary=f"s{index}", detail={}))
+        return _response()
+
+    coordinator = _coordinator(RecordingAskState(calls), runner=runner)
+    _drain(coordinator.start(
+        "nb-1", AskRequest(question="Q?", mode="reasoning"), ASK_MODES["reasoning"],
+        user_id="user-t23",
+    ))
+
+    assert sum(1 for call in calls if call[0] == "trace") == 5
+    assert [call for call in calls if call[0] == "publish"] == [
+        ("publish", "user-t23"), ("publish", "user-t23")
+    ]
+
+
+def test_submit_failure_publishes_one_terminal_pending_snapshot(monkeypatch):
+    """worker 从未运行 → 起点那次推送也从未发生;失败收尾仍要推一次,否则这条
+    从未真正开跑的 job 会在已连接的铃铛里留成一条永不消失的「进行中」。"""
+    calls: list = []
+    _publish_spy(monkeypatch, calls)
+
+    coordinator = _coordinator(
+        RecordingAskState(calls),
+        submitter=RaisingSubmitter(RuntimeError("thread start failed")),
+        runner=lambda *_args, **_kwargs: _response(),
+    )
+    with pytest.raises(RuntimeError, match="thread start failed"):
+        coordinator.start(
+            "nb-1", AskRequest(question="Q?", mode="chunk"),
+            ASK_MODES["chunk"], user_id="user-t23",
+        )
+
+    assert [call for call in calls if call[0] == "publish"] == [("publish", "user-t23")]
+    assert calls.index(("finish", "failed", "", "RuntimeError: thread start failed")) \
+        < calls.index(("publish", "user-t23"))
+
+
+def test_a_baseexception_from_the_start_publish_still_delivers_the_sentinel(monkeypatch):
+    """起点那次推送必须在 worker 的 ``try`` **之内**。
+
+    ``publish_snapshot`` 自身 fail-open,但它只吞 ``Exception``;若这里冒出
+    ``BaseException``(worker 线程刚起就被打断是最现实的一种),而调用点在 ``try``
+    之外,``finally: events.put(None)`` 就会被一起跳过——读端拿不到哨兵,那条流不是
+    报错,是**永远读不完**。铃铛的一次尽力而为的推送不该有能力挂死一条问答流。
+    """
+    import app.services.ask_execution as ask_execution_module
+
+    class _Boom(BaseException):
+        pass
+
+    calls: list = []
+    published: list = []
+
+    def _explode_once(user_id):
+        published.append(user_id)
+        if len(published) == 1:
+            raise _Boom("interrupted right after the worker started")
+
+    monkeypatch.setattr(ask_execution_module, "publish_snapshot", _explode_once)
+    monkeypatch.setattr(ask_execution_module.queue, "Queue", _recording_queue(calls))
+
+    coordinator = _coordinator(
+        RecordingAskState(calls),
+        runner=lambda *_args, **_kwargs: _response(),
+    )
+    with pytest.raises(_Boom):
+        coordinator.start(
+            "nb-1", AskRequest(question="Q?", mode="chunk"), ASK_MODES["chunk"],
+            user_id="user-t23",
+        )
+
+    assert ("sentinel",) in calls, "哨兵必须照发,否则读端永远等不到流的结尾"

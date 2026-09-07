@@ -8,6 +8,7 @@ import {
   currentSigs,
   pruneSigs,
   pendingView,
+  askElapsedLabel,
 } from "../../app/pending-actions.ts";
 
 const report = { type: "report_outline", notebook_id: "nb1", notebook_name: "NB1", report_id: "r1", title: "T" };
@@ -97,4 +98,51 @@ test("mixed-kind done items on one notebook are signed and counted independently
   assert.equal(pendingView([], done, [], []).unread, 2);
   // 只把 index_done 标为已读 → 仅 paper_meta_done 仍未读
   assert.equal(pendingView([], done, [doneSig("nbM", "index_done")], []).unread, 1);
+});
+
+// --- 进行中的提问(待确认中心「问答进行中」分组) ---------------------------
+
+const ask = {
+  type: "ask",
+  notebook_id: "nb4",
+  notebook_name: "NB4",
+  job_id: "askjob-1",
+  conversation_id: "conv-1",
+  title: "带隙基准的温漂机理",
+  state: "running",
+  asked_at: "2026-09-07T10:00:00Z",
+};
+
+test("itemSig: ask is identified by its job, not by elapsed time", () => {
+  assert.equal(itemSig(ask), "ask:askjob-1");
+  // 时长与摘要变化不改身份——否则每半分钟就换一个新签名,关掉过的项会一直复活。
+  assert.equal(itemSig({ ...ask, asked_at: "2026-09-07T11:00:00Z" }), "ask:askjob-1");
+  assert.equal(itemSig({ ...ask, title: "另一段摘要" }), "ask:askjob-1");
+});
+
+test("pendingView: running asks are visible but never counted as unread", () => {
+  // 与 index/paper_meta 的刻意分歧:那两类是用户没发起的后台活,仍计未读;
+  // 提问是用户几秒前自己发起的,记未读会让铃铛每问一个问题就亮一次。
+  const v = pendingView([ask, idx], [], [], []);
+  assert.deepEqual(v.visibleItems.map(itemSig), ["ask:askjob-1", "index:nb3:suggested"]);
+  assert.equal(v.unread, 1);   // 只有 index 那条
+});
+
+test("pendingView: a dismissed ask disappears like any other item", () => {
+  const v = pendingView([ask], [], [], [itemSig(ask)]);
+  assert.deepEqual(v.visibleItems, []);
+  assert.equal(v.unread, 0);
+});
+
+test("askElapsedLabel: seconds, minutes and hours; unparseable input yields nothing", () => {
+  const started = Date.parse("2026-09-07T10:00:00Z");
+  assert.equal(askElapsedLabel("2026-09-07T10:00:00Z", started + 5_000), "刚刚开始");
+  assert.equal(askElapsedLabel("2026-09-07T10:00:00Z", started + 59_000), "刚刚开始");
+  assert.equal(askElapsedLabel("2026-09-07T10:00:00Z", started + 3 * 60_000), "已进行 3 分钟");
+  assert.equal(askElapsedLabel("2026-09-07T10:00:00Z", started + 2 * 3600_000), "已进行 2 小时");
+  // 空串 / 脏值:整段省略,而不是显示一个从 1970 年算起的荒谬时长。
+  assert.equal(askElapsedLabel("", started), "");
+  assert.equal(askElapsedLabel("not-a-time", started), "");
+  // 客户端时钟快于服务端时不显示负数。
+  assert.equal(askElapsedLabel("2026-09-07T10:00:00Z", started - 60_000), "刚刚开始");
 });

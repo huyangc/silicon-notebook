@@ -37,7 +37,27 @@ export function itemSig(it: PendingItem): string {
   // (诚实反映积压变化,与治理项同一手法)。它没有 notebook 维度。
   if (it.type === "share_request") return `share_req:${it.group_id ?? ""}:${it.count ?? 0}`;
   if (it.type === "paper_meta") return `paper_meta:${it.notebook_id}:${it.state ?? ""}`;
+  // 进行中的提问按 job 认身份。签名里**不带**已进行时长:那个值每 30 秒就变一次,
+  // 带上它等于每半分钟给这条待办换一个新身份,关掉过的项会一直复活。job 只有
+  // running 一个在途态,终态即整条消失,所以身份不需要再编码状态。
+  if (it.type === "ask") return `ask:${it.job_id ?? ""}`;
   return `index:${it.notebook_id}:${it.state ?? ""}`;
+}
+
+/** 「已进行多久」——纯函数,时钟由调用方传入(组件测试因此不依赖真实时间)。
+ *
+ * `askedAt` 解析不出来(空串、旧行、脏值)就返回空串,让调用方整段省略这一截,
+ * 而不是显示一个从 1970 年算起的荒谬时长。未来时刻(客户端时钟快于服务端)同样
+ * 归零处理 —— 显示「刚刚」而不是负数。
+ */
+export function askElapsedLabel(askedAt: string, nowMs: number): string {
+  const started = Date.parse(askedAt || "");
+  if (!Number.isFinite(started)) return "";
+  const seconds = Math.floor((nowMs - started) / 1000);
+  if (seconds < 60) return "刚刚开始";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `已进行 ${minutes} 分钟`;
+  return `已进行 ${Math.floor(minutes / 60)} 小时`;
 }
 
 // kind 可选,省略时与旧签名(仅 notebook_id)保持一致(向后兼容)。传入 kind 供两种完成
@@ -73,8 +93,13 @@ export function pendingView(
   const seenSet = new Set(seen);
   const dismSet = new Set(dismissed);
   const visibleItems = items.filter((it) => !dismSet.has(itemSig(it)));
+  // 「进行中的提问」刻意**不计入未读徽标**,与其它待办项分岔。它是用户自己几秒前
+  // 发起的动作,不是送到他面前的消息:算进未读的话,每问一个问题铃铛就亮一次红点,
+  // 徽标从「有东西等你处理」退化成常态噪音。它仍然可见、可关掉、终态即消失。
+  // 索引构建中 / 论文补全中那两类仍然计未读——那是用户没发起、可能已经忘了的后台
+  // 活,提醒他一次是有价值的;这条分岔正是这个差别。
   const unread =
-    visibleItems.filter((it) => !seenSet.has(itemSig(it))).length +
+    visibleItems.filter((it) => it.type !== "ask" && !seenSet.has(itemSig(it))).length +
     done.filter((d) => !seenSet.has(doneSig(d.notebook_id, d.kind))).length;
   return { visibleItems, visibleDone: done, unread };
 }

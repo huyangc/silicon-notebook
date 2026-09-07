@@ -4,7 +4,11 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Bell } from "lucide-react";
 import { performApiRequest } from "./api-client.ts";
 import { getToken } from "./auth";
-import { itemSig, currentSigs, doneMessage, pruneSigs, pendingView } from "./pending-actions";
+import { itemSig, currentSigs, doneMessage, pruneSigs, pendingView, askElapsedLabel } from "./pending-actions";
+
+// 「进行中的提问」在铃铛打开时的重算间隔。快照只在提问起止时推送,已进行时长要
+// 自己走时钟;只在面板打开且真有在途提问时起表,关掉即停。
+const ASK_ELAPSED_TICK_MS = 30000;
 
 // localStorage 读写(私密模式/SSR 容错):待办的「已读/关掉」状态按用户存本地。
 const loadSigs = (key: string): string[] => {
@@ -15,7 +19,7 @@ const saveSigs = (key: string, v: string[]) => {
 };
 
 export type PendingItem = {
-  type: "report_outline" | "governance" | "index" | "paper_meta" | "share_request";
+  type: "report_outline" | "governance" | "index" | "paper_meta" | "share_request" | "ask";
   // share_request 是**组维度**的项——没有 notebook,所以这两个字段对它是可选/空。
   notebook_id?: string;
   notebook_name?: string;
@@ -23,6 +27,11 @@ export type PendingItem = {
   group_name?: string;  // share_request:群组名(行标签)
   subtype?: "merge" | "edge" | "promotion";
   report_id?: string;
+  // ask:后端只带回 job/会话两个 id + 问题摘要(不是全文)+ 提交时刻。点击靠
+  // conversation_id 打开会话,接回逻辑由会话详情自己承担,铃铛不碰 job 流。
+  job_id?: string;
+  conversation_id?: string;
+  asked_at?: string;
   title?: string;
   count?: number;
   state?: string;
@@ -161,6 +170,8 @@ export function PendingBell(props: {
   const dismKey = `pending:dismissed:${userId || "anon"}`;
   const [seen, setSeen] = useState<string[]>([]);
   const [dismissed, setDismissed] = useState<string[]>([]);
+  // 「已进行多久」的时钟。默认取挂载时刻,面板打开且有在途提问时才起表(见下)。
+  const [nowMs, setNowMs] = useState<number>(() => Date.now());
 
   // 用户切换(登录/登出)→ 重载各自的集合。
   useEffect(() => { setSeen(loadSigs(seenKey)); setDismissed(loadSigs(dismKey)); }, [seenKey, dismKey]);
@@ -178,6 +189,17 @@ export function PendingBell(props: {
 
   const view = pendingView(snapshot.items, doneItems, seen, dismissed);
   const badge = view.unread + checkupUnread;
+
+  // 已进行时长只在**面板打开且真有在途提问**时走表:关掉面板或提问全部结束就停,
+  // 铃铛平时不因为这个特性产生任何定时器。打开的瞬间先对一次时,免得屏上留着上次
+  // 打开时的旧时刻。
+  const hasAskItems = view.visibleItems.some((it) => it.type === "ask");
+  useEffect(() => {
+    if (!open || !hasAskItems) return;
+    setNowMs(Date.now());
+    const timer = setInterval(() => setNowMs(Date.now()), ASK_ELAPSED_TICK_MS);
+    return () => clearInterval(timer);
+  }, [open, hasAskItems]);
 
   // 打开面板即把体检提醒标为已读(徽标归零),与下方 items 的已读逻辑并行、互不干扰。
   useEffect(() => {
@@ -232,6 +254,8 @@ export function PendingBell(props: {
   };
 
   const groups: { key: string; label: string; items: PendingItem[] }[] = [
+    // 排在最前:离开页面后回来找「我刚才那个问题跑到哪了」,是打开铃铛最常见的动机。
+    { key: "ask", label: "进行中的提问", items: view.visibleItems.filter((i) => i.type === "ask") },
     { key: "report_outline", label: "深度报告待确认", items: view.visibleItems.filter((i) => i.type === "report_outline") },
     { key: "share_request", label: "共享申请", items: view.visibleItems.filter((i) => i.type === "share_request") },
     { key: "governance", label: "治理待办", items: view.visibleItems.filter((i) => i.type === "governance") },
@@ -241,6 +265,13 @@ export function PendingBell(props: {
 
   const labelFor = (it: PendingItem): string => {
     if (it.type === "report_outline") return `深度报告《${it.title}》`;
+    if (it.type === "ask") {
+      // 库名已由 pending-row-nb 单独呈现,这里不再重复(与报告条目同一处理)。
+      // title 是后端截断过的问题摘要;摘要为空(理论上不该发生)时至少说清是什么。
+      const head = it.title || "提问中";
+      const elapsed = askElapsedLabel(it.asked_at ?? "", nowMs);
+      return elapsed ? `${head} · ${elapsed}` : head;
+    }
     if (it.type === "share_request") return `${it.group_name || "群组"} · ${it.count ?? 0} 项待审批`;
     if (it.type === "governance") {
       const n = it.subtype === "merge" ? "待合并" : it.subtype === "edge" ? "关系审核" : "内容审核";

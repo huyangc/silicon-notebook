@@ -2882,6 +2882,12 @@ export default function Home() {
       else { await openKgView(undefined, item.notebook_id); }
     } else if (item.type === "index") {
       await openKgView(undefined, item.notebook_id);
+    } else if (item.type === "ask") {
+      // 进行中的提问:回到问答视图 + 打开那个会话。铃铛只负责导航——「实时接回」
+      // 由 openAskSession → applySessionDetail 既有的在途轮次 + 轮询逻辑承担,
+      // 这里不碰 job 流,也不复制任何接回状态机。
+      switchChatMode("ask");
+      if (item.conversation_id) await openAskSession(item.conversation_id);
     }
   }
   async function openDoneItem(d: { notebook_id: string; kind?: string }) {

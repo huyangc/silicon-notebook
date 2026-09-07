@@ -96,3 +96,80 @@ notebook opener 打开对应会话并复用既有接回逻辑。契约登记进 
 - 每 PR：`bash scripts/check.sh` 全绿 + PG lane（涉及 SQL 时）→ push → codex 闭环 → CI 全绿 →
   `gh pr merge --rebase`。下一 PR 从合入后的 master 起分支。
 - 完成项从 `fangan_todo.md` 移除并补进 `fangan_done.md`。
+
+---
+
+## 附：PR-3 设计定稿（实现前写下，实现按此执行）
+
+### D1 状态口径：在途集合恰好是 `status='running'`
+
+`ask_jobs` 没有 `queued` 状态——`_insert_job_row` 直接插 `'running'`（两个后端逐字相同）。
+终态四个：`done` / `failed` / `cancelled`，以及重启兜底
+（`sqlite/migrations.py::_recover_interrupted_jobs` 把残留 `running` 改写成 `interrupted`）。
+故「进行中的提问」= `status = 'running'` **精确匹配**（不写 `NOT IN (终态…)`：新增一个
+中间状态时否定式会把它悄悄放进铃铛，而精确匹配 fail-safe）。计划正文写的
+`running`/`queued` 按代码事实收窄为 `running`，并在契约文档里写明理由。
+
+### D2 聚合走既有 projection 接缝，不新增端口方法
+
+新分组在 `*/query_store.py::pending_actions_projection_rows` 内产出，与「报告待确认」
+那一半同构：
+
+- **不在 `if notebook_ids:` 闸内**——谓词只有 `created_by` + 读权，一个 notebook id 都不
+  消费；闸内会让「没有自有库的成员」在共享库里提的问不进铃铛（与 P1-T3b 同一形态）。
+- **属主隔离**：`j.created_by = <当前用户>`。别人在我库里跑的提问不进我的铃铛，我在别人
+  库里跑的提问进我的铃铛。
+- **可见性**：库名走 `LEFT JOIN notebooks`，再叠加规范读谓词
+  `access_sql.read_access_exists_clause("j")` 与 `NOTEBOOK_LIVE_SQL`（复用片段，绝不重拼）。
+  失权/删除中的库里的在途提问不进铃铛，与报告那一半同口径。
+- **有界**：按与 `idx_ask_jobs_creator_activity` 一致的
+  `(_absolute_instant(created_at) DESC, id DESC)` 取最新 `RUNNING_ASK_ROWS` 条。
+- **字段**：`type:"ask"`、`state:"running"`、`job_id`、`notebook_id`、`notebook_name`、
+  `conversation_id`、`title`（问题摘要，截断到 `ASK_QUESTION_PREVIEW_CHARS`，不出全文）、
+  `asked_at`（浏览器提交时刻，空则回落到服务端 `created_at`）。
+  复用既有 `title` / `state` 字段名而不新造，前端 `PendingItem` 只需多两个可选 id 字段。
+- **两侧常量同一份**：`RUNNING_ASK_ROWS` / `ASK_QUESTION_PREVIEW_CHARS` 与行整形放
+  `app/repositories/pending_action_rows.py`（中性层，仿 `group_rows.py`），杜绝双后端
+  截断长度或上限分叉。数值围栏登记进 `docs/product-and-api*.md`。
+
+`PendingActionsService.list_for_user` 的 `count` 不变：它按 type 白名单计数，`ask` 不在
+白名单里 —— **在途提问不响铃**，与 index building / paper_meta building 同一裁决（那是
+状态展示，不是「待你确认」）。
+
+### D3 推送边界：只在起点与终态各一次
+
+复用 `pending_bus.publish_snapshot(user_id)`（fail-open、无连接时零开销）。落点：
+
+| 路径 | 起点 | 终态 |
+|---|---|---|
+| 流式（`AskExecutionCoordinator.start`） | worker 线程体第一句 | worker `finally`，**在 `events.put(None)` 之后**；外加 `job_submitter.submit` 失败那条 `_finish` 之后 |
+| 同步（`AskService.ask_current`） | `begin_job_current` 之后 | 四个 `finish_job` 之后各一次 |
+
+两条红线：
+
+1. **绝不放进 `_finish` / `finish_job` 内部**，也绝不放在终态事件入队之前。
+   `publish_snapshot` 会在调用线程做一次 `pending_actions` 的 DB 计算，夹在
+   `_finish` 与浏览器等待的 `final` 事件之间就是白白拖慢答案投递——与
+   `_note_ask_completed` 被移到 `events.put` 之后是同一条理由。
+2. **绝不在进度点（`on_trace`）推**。轨迹步是高频点，`mark_dirty` 每次都要重算快照；
+   `pending_bus` 的 docstring 已把「起始与完成必达、进度点走节流」定死，这里连节流版
+   都不用——在途提问的呈现里没有任何随 trace 变化的字段。
+
+`attach_existing`（幂等键重放）不建新 job，故不推送。
+
+### D4 前端：新分组「进行中的提问」，未读语义与其它项不同
+
+- `pending-center.tsx` 新分组排在「深度报告待确认」之前（它是用户此刻最可能在找的东西），
+  行文案 `${notebook_name} · 提问中 · ${title}`；`itemSig` = `ask:${job_id}`。
+- **不计入未读徽标**：`pendingView` 把 `type === "ask"` 排除在 `unread` 之外。理由——
+  在途提问是用户**自己几秒前发起**的，不是消息；把它算进未读会让「每问一个问题铃铛就
+  亮一次」变成常态噪音。它仍然可见、可关掉、终态即消失。这是与 index/paper_meta
+  building（那两个仍计未读）的**刻意分歧**，因为那两个是用户没发起、可能忘了的后台活。
+- 点击：`openPendingItem` 走既有原子 opener `openNotebook(nb, "push", …, {coalesce:false})`，
+  再 `switchChatMode("ask")` + `openAskSession(conversation_id)`；接回由既有
+  `applySessionDetail` → `ConversationDetail` 的在途 turn + 轮询逻辑承担，本 PR 不碰。
+
+### D5 不做
+
+不加新端点、不加端口方法、不写任何新的写路径；不做「在途提问」的取消入口（铃铛只导航，
+取消仍在会话内的「停止」按钮）；不为在途提问做 toast（`doneMessage` 只服务完成事件）。

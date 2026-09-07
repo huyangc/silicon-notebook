@@ -2259,6 +2259,52 @@ it there.
 | Inference job trigger | 20 completed asks for that user (`USER_SEARCH_PROFILE_TRIGGER`, default) |
 | Deployment gate | `USER_SEARCH_PROFILE_ENABLED` (default true) — off reverts everywhere to byte-identical pre-feature behavior; `GET /me` still returns any existing value already on the row rather than forging `search_profile: null`, but `PATCH /me/search-profile` 409s |
 
+### Asks in progress in the pending-actions center
+
+The bell (`GET /api/me/pending-actions` and its stream) carries a fourth read-only
+group beside deep-report confirmations, governance queues and index/paper-metadata
+status: the signed-in user's **asks that are still running**, so someone who
+navigated away or reloaded can find the question they left behind and reopen it.
+It is a projection plus navigation — no new endpoint, no write path, and no
+cancellation entry (stopping an ask stays the in-session 「停止」 button).
+
+- **Membership is exact.** An item exists only while `ask_jobs.status = 'running'`,
+  the single in-flight state the table has (`queued` does not exist: a job row is
+  inserted already running). The terminal states `done` / `failed` / `cancelled`, and
+  the `interrupted` that restart recovery rewrites a stale `running` into, never
+  appear. The predicate is a positive match, never `NOT IN (<terminal…>)`, so a
+  future intermediate state does not silently acquire a clickable deep link.
+- **Owner isolation.** `ask_jobs.created_by` must be the requesting user: an ask
+  someone else is running inside my library is their action, not mine, and my ask
+  inside someone else's library is mine. Visibility is layered on top with the same
+  canonical read predicate and lifecycle filter the rest of the projection uses, so
+  losing read access on that library removes the item and regaining it brings the
+  item back.
+- **Fields** — `type: "ask"`, `state: "running"`, `job_id`, `notebook_id`,
+  `notebook_name`, `conversation_id`, `title` (a truncated question preview — the
+  full prompt is never carried into the bell), and `asked_at` (the browser-captured
+  submission instant, falling back to the server-side creation instant when the row
+  has none). Clicking opens that notebook and that conversation; the existing
+  conversation-detail reattach path takes over from there.
+- **It never rings.** In-progress asks are excluded from the payload's `count`, and
+  the client excludes them from its unread badge — this is a deliberate divergence
+  from index-building and paper-metadata-backfill items, which do count as unread.
+  Those are background work the user did not start and may have forgotten; an ask is
+  something they started seconds ago, and badging it would make the bell light up on
+  every question.
+- **Push boundaries.** The user's pending snapshot is republished exactly twice per
+  ask: once when the job starts and once when it reaches a terminal state. Trace
+  progress never publishes (recomputing the snapshot is a database read; the
+  per-step rate would turn it into a query storm), and the terminal publish is
+  ordered strictly *after* the terminal event is queued for the browser so it can
+  never delay answer delivery.
+
+| Bound | Value |
+| --- | --- |
+| Running asks carried per snapshot | 20, newest first (`RUNNING_ASK_ROWS`) |
+| Question preview | Whitespace collapsed to single spaces, then cut to 60 characters (`ASK_QUESTION_PREVIEW_CHARS`) |
+| Elapsed-time refresh in the bell | 30s, and only while the panel is open with at least one running ask |
+
 ### Outline scratchpad and section-by-section synthesis
 
 Reasoning Ask gated to the `exhaustive` effort tier can maintain a bounded, model-authored outline scratchpad across its reflect loop, and — when the final outline resolves into two or more sections that still carry live evidence — synthesizes the answer section by section from it rather than as one pass over everything. This is controlled by `REASONING_OUTLINE_ENABLED` (default true); when off, or at any lower effort tier, the mechanism is entirely absent — no action, no schema branch, no trace step, byte-identical to the feature not existing.

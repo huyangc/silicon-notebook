@@ -62,10 +62,11 @@ def _insert_member(connection, notebook_id: str, user_id: str) -> None:
 def _insert_ask(connection, job_id, notebook_id, created_by, created_at, **kw) -> None:
     connection.execute(
         "INSERT INTO ask_jobs "
-        "(id,notebook_id,created_by,mode,question,status,asked_at,answer_id,error,"
-        "created_at,updated_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+        "(id,notebook_id,conversation_id,created_by,mode,question,status,asked_at,"
+        "answer_id,error,created_at,updated_at) "
+        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
         (
-            job_id, notebook_id, created_by,
+            job_id, notebook_id, kw.get("conversation_id", ""), created_by,
             kw.get("mode", "chunk"), kw.get("question", "q?"),
             kw.get("status", "completed"), kw.get("asked_at", ""),
             kw.get("answer_id", ""), kw.get("error", ""),
@@ -1033,3 +1034,101 @@ def test_deletion_refreshes_merged_retained_snapshot_and_expiry_postgres(
     assert {
         (row["expires_at"] - row["deleted_at"]).days for row in rows
     } == {180}
+
+
+def test_running_ask_items_mirror_the_sqlite_projection(postgres_database, store):
+    """PostgreSQL 侧的「进行中的提问」与 SQLite 侧同一份不变量:属主隔离、终态
+    缺席、上限与最新优先、失权即出。
+
+    SQLite 侧的孪生断言在 ``backend/tests/test_pending_actions.py``;两个后端各有
+    一份实现,所以这些不变量必须两边各钉一次——分叉的形态不是报错,而是同一个用户
+    在两个后端看到的铃铛内容不同。
+    """
+    from app.repositories.pending_action_rows import (
+        ASK_QUESTION_PREVIEW_CHARS,
+        RUNNING_ASK_ROWS,
+    )
+
+    with postgres_database.write() as connection:
+        _insert_user(connection, "u-owner")
+        _insert_user(connection, "u-member")          # 没有任何自有 notebook
+        _insert_notebook(connection, "n-shared", "u-owner")
+        _insert_member(connection, "n-shared", "u-member")
+        long_question = "为" * (ASK_QUESTION_PREVIEW_CHARS + 40)
+        _insert_ask(connection, "askjob-member", "n-shared", "u-member", NOW,
+                    status="running", question=long_question,
+                    conversation_id="conv-m", asked_at="2026-08-01T10:00:00+00:00")
+        # 干扰项:库主自己的在途提问 + 成员的各种终态。
+        _insert_ask(connection, "askjob-owner", "n-shared", "u-owner", NOW,
+                    status="running")
+        for index, status in enumerate(("done", "failed", "cancelled", "interrupted")):
+            _insert_ask(connection, f"askjob-{status}", "n-shared", "u-member",
+                        NOW, status=status)
+
+    def _member_asks():
+        return [
+            it for it in store.pending_actions_projection_rows("u-member")["items"]
+            if it["type"] == "ask"
+        ]
+
+    asks = _member_asks()
+    assert [it["job_id"] for it in asks] == ["askjob-member"]
+    item = asks[0]
+    assert item["state"] == "running"
+    assert item["notebook_id"] == "n-shared"
+    assert item["notebook_name"] == "NB-n-shared"      # 共享库的库名随行带回
+    assert item["conversation_id"] == "conv-m"
+    assert item["asked_at"] == "2026-08-01T10:00:00+00:00"
+    assert item["title"] == long_question[:ASK_QUESTION_PREVIEW_CHARS]
+
+    # 多行提问先归一空白再截断。两个后端共用 `ask_question_preview`,但摘要是**用户
+    # 可见**的:一侧折行、另一侧不折的分叉不会报错,只会让同一个人在两个后端看到不同
+    # 的铃铛,所以两边各钉一次(SQLite 侧的孪生断言在 test_pending_actions.py)。
+    multiline = "第一行问题\n\n   第二行   接着问\t还有制表符\n" + "尾" * 80
+    with postgres_database.write() as connection:
+        _insert_ask(connection, "askjob-multiline", "n-shared", "u-member",
+                    datetime(2026, 8, 1, 10, 30, 0, tzinfo=timezone.utc),
+                    status="running", question=multiline)
+    collapsed = [it for it in _member_asks() if it["job_id"] == "askjob-multiline"][0]
+    assert collapsed["title"] == " ".join(multiline.split())[:ASK_QUESTION_PREVIEW_CHARS]
+    assert "\n" not in collapsed["title"] and "  " not in collapsed["title"]
+
+    # 属主隔离:库主的铃铛里只有他自己那条。
+    owner_asks = [
+        it for it in store.pending_actions_projection_rows("u-owner")["items"]
+        if it["type"] == "ask"
+    ]
+    assert [it["job_id"] for it in owner_asks] == ["askjob-owner"]
+
+    # asked_at 为空时回落到服务端 created_at,并转成与 SQLite 同形的 ISO 串。
+    with postgres_database.write() as connection:
+        _insert_ask(connection, "askjob-noaskedat", "n-shared", "u-member",
+                    datetime(2026, 8, 1, 11, 0, 0, tzinfo=timezone.utc),
+                    status="running", asked_at="")
+    fallback = [it for it in _member_asks() if it["job_id"] == "askjob-noaskedat"]
+    assert fallback and fallback[0]["asked_at"].startswith("2026-08-01T11:00:00")
+
+    # 上限 + 最新优先(逐分钟递增的 created_at 给出确定顺序)。
+    with postgres_database.write() as connection:
+        for index in range(RUNNING_ASK_ROWS + 5):
+            _insert_ask(
+                connection, f"askjob-b{index:03d}", "n-shared", "u-member",
+                datetime(2026, 8, 2, 0, index % 60, index // 60,
+                         tzinfo=timezone.utc),
+                status="running",
+            )
+    bounded = _member_asks()
+    assert len(bounded) == RUNNING_ASK_ROWS
+    newest = [
+        f"askjob-b{index:03d}"
+        for index in range(RUNNING_ASK_ROWS + 4, RUNNING_ASK_ROWS + 4 - RUNNING_ASK_ROWS, -1)
+    ]
+    assert [it["job_id"] for it in bounded] == newest
+
+    # 失权即出铃铛(与待确认报告那一半同口径)。
+    with postgres_database.write() as connection:
+        connection.execute(
+            "DELETE FROM notebook_members WHERE notebook_id=%s AND user_id=%s",
+            ("n-shared", "u-member"),
+        )
+    assert _member_asks() == []

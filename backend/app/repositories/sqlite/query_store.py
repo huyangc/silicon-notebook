@@ -26,6 +26,11 @@ from app.models.sources import (
 )
 from app.repositories.group_rows import SHARED_TO_GROUPS_COLUMN
 from app.repositories.like_pattern import escape_like_pattern
+from app.repositories.pending_action_rows import (
+    RUNNING_ASK_ROWS,
+    RUNNING_ASK_STATUSES,
+    running_ask_item,
+)
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.identity_store import (
     _UPLOAD_LIMIT_DEFAULT_KEY,
@@ -1552,6 +1557,60 @@ class QueryStore:
             paper_meta_counts=paper_meta_counts,
         )
 
+    def _running_ask_items(self, db: sqlite3.Connection, user_id: str) -> list[dict]:
+        """当前用户仍在跑的提问,最新 `RUNNING_ASK_ROWS` 条(待确认中心「进行中的
+        提问」分组)。
+
+        谓词只有「这次提问是我发起的」+「我现在还读得到那本库」,**一个 notebook id
+        都不消费**——所以调用点和「待确认报告」那一半一样放在 `if notebook_ids:`
+        闸之外:在共享库里提问的人可能一本自有库都没有,闸内会让他的在途提问整体缺席。
+
+        属主隔离是硬约束:`j.created_by = ?`。别人在我库里跑的提问不进我的铃铛(那是
+        他的动作),我在别人库里跑的提问进我的铃铛(那是我的动作)。
+
+        `JOIN notebooks`(而不是报告那一半的 `LEFT JOIN` + 独立 EXISTS)是刻意的:
+        这条待办的**全部意义**就是「点它打开那本库里的那个会话」,库行不在就没有可去
+        的地方,不该呈现一条点不开的项。读权与生命周期因此直接作用在同一行上——复用
+        `access_sql` 的片段,绝不在这里重拼谓词。
+
+        排序表达式与 `idx_ask_jobs_creator_activity`(v62 / PG 0040)逐字一致,
+        `LIMIT` 才能在索引里停下;`_absolute_instant` 的理由见它自己的 docstring
+        (`created_at` 是混合格式文本,裸文本序不是绝对时刻序)。
+        """
+        placeholders = ",".join("?" for _ in RUNNING_ASK_STATUSES)
+        rows = db.execute(
+            "SELECT j.id AS id, j.question AS question, j.status AS status, "
+            "j.notebook_id AS notebook_id, j.conversation_id AS conversation_id, "
+            "j.asked_at AS asked_at, j.created_at AS created_at, "
+            "nb.name AS notebook_name "
+            "FROM ask_jobs j JOIN notebooks nb ON nb.id = j.notebook_id "
+            f"WHERE j.created_by = ? AND j.status IN ({placeholders}) "
+            f"AND nb.{access_sql.NOTEBOOK_LIVE_SQL} AND "
+            + access_sql.read_access_clause()
+            + f" ORDER BY {_absolute_instant('j.created_at')} DESC, j.id DESC "
+            "LIMIT ?",
+            (
+                user_id,
+                *RUNNING_ASK_STATUSES,
+                *access_sql.read_access_params(user_id),
+                RUNNING_ASK_ROWS,
+            ),
+        ).fetchall()
+        return [
+            running_ask_item(
+                job_id=row["id"],
+                notebook_id=row["notebook_id"],
+                notebook_name=row["notebook_name"],
+                conversation_id=row["conversation_id"],
+                question=row["question"],
+                status=row["status"],
+                # asked_at 是浏览器提交时刻(可能是空串:该列 NOT NULL DEFAULT ''),
+                # 空则回落到服务端写入时刻,免得前端算不出「已进行多久」。
+                asked_at=row["asked_at"] or row["created_at"] or "",
+            )
+            for row in rows
+        ]
+
     def pending_actions_projection_rows(self, user_id: str) -> dict:
         items: list[dict[str, Any]] = []
         with self.database.connect() as db:
@@ -1627,6 +1686,9 @@ class QueryStore:
                         "count": int(row["c"]),
                     }
                 )
+            # 「进行中的提问」同样在 `if notebook_ids:` **之外**,理由见
+            # `_running_ask_items` 的 docstring(谓词不消费 notebook id)。
+            items.extend(self._running_ask_items(db, user_id))
             if notebook_ids:
                 role_row = db.execute(
                     "SELECT role FROM users WHERE id = ?", (user_id,)

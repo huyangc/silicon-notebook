@@ -6,7 +6,7 @@
 WS2b 的 `GET …/ask/jobs/{job_id}` 重连 + append-only 轨迹 + 前端接回均已上线；离开 / 刷新后的
 接回契约由 PR #661 / #662 / #664 / #665（2026-09-02～03）收口。行为契约以
 `docs/product-and-api*.md`、`architecture.md` 与 `fangan_done.md` 为准，下文保留为设计历史。
-唯一未做的是 §6.3 标为可选的「待办中心露出问答进行中」，登记在 `fangan_todo.md`。
+§6.3 标为可选的「待办中心露出问答进行中」也已由待办收尾 PR-3（2026-09-07）交付：铃铛新增「进行中的提问」分组（仅本人 `running` 的 ask job，不计入未读），点击经原子 notebook opener 打开会话并复用既有接回逻辑；契约见 `docs/product-and-api*.md`。
 **范围**：三个独立 PR —— WS1（后台 job 刷新重连）、WS2a（ask 脱离连接跑到完成）、WS2b（重开会话实时接回）
 
 ---
