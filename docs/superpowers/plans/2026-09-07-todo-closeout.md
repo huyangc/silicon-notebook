@@ -263,3 +263,82 @@ owner-window 世代守卫、`sourcesPageLoading` 的开合时机、搜索与翻�
 **组件测试**：`tests/component/source-list-panel.component.test.tsx`——空态文案；行按注入
 数据渲染；提交搜索调注入命令且按钮变「搜索中…」；`busy` 时分页上下页禁用；KG 徽章 +
 解析状态点 + Agent 徽章一行；删除/打开回调交回 source。
+
+## PR-5 slice 3 设计定稿（知识图谱视图）
+
+**范围**：`frontend/app/page.tsx` 的 L7651–8033（`{kgGraph.open && (<section className="kg-view" …>`
+到它的闭合，383 行）整体搬进 `frontend/app/kg-graph-view.tsx` 的 `KgGraphView`，行为零变化。
+它是**一整块**三栏视图（`.kg-rail` 左栏 / `.kg-canvas` 画布 / `.kg-detail` 右栏），三栏之间
+共享 `kgGraph` 这一个命名空间对象与同一套派生 memo，拆成三个组件只会让父组件变成 40 个 prop
+的转发层——所以按 slice-2 的判据（「各自已是天然边界、且有各自的 props」）判定**不拆**，
+一个组件一个文件。
+
+**留在 page.tsx 的**：所有 state、ref、useMemo 派生、effects、命令函数一律不动（use-kg-graph.ts /
+use-kg-workspace.ts 的边界也一律不动，本片没有向 hook 增删任何 view 字段或命令）。`{kgGraph.open && …}`
+开合门也留在 page（root-modal-boundary 的注释把「kg-view 由 kgGraph.open 直接控制、不是
+RootModalSlot」写成既有设计，门留在 page 才看得见这条）。
+
+**KgAnalysisView 仍由 page 渲染**：它现在是 `.kg-view` section 的**最后一个子节点**（
+`position:fixed` 的 section 自建层叠上下文，挪出去会改变 z-index 归属）。所以 `KgGraphView`
+接 `children` 并原位渲染，page 侧 `<KgAnalysisView interactive={rootModals.view("kg-analysis").topmost} …/>`
+的 JSX 一字不动——root-modal-boundary 那条 `pageText` 断言因此**完全不用改**，rootModals
+的开关编排也一条不外泄进组件。
+
+**props：扁平、显式、且与原局部变量同名**。同名是硬要求而非偷懒：搬过去的 JSX 因此**逐字节
+不变**（`disabled={kgGraph.relinking || kgGraph.rebuilding || kgGraph.buildingKg}` 这类正是
+kg-relink/kg-rebuild 两个守卫的判据文本），等价性可以用 diff 直接看。分三组：
+
+- 命名空间：`kgGraph: Pick<KgWorkspace["graph"], …24 个字段>`。按 slice-2 存疑 #1 用 `Pick<>`
+  收窄——JSX 只读这 24 个字段，hook 的命令面一个都不进组件。`kgGraph` 本身是 page 里既有的
+  合法命名空间别名（`const { …, graph: kgGraph } = kgWorkspace`），不构成 owner-view 再摊平。
+- 派生只读：`fgData` `kgCanvas` `kgSearching` `kgDenseView` `kgSize` `kgTypeCounts`
+  `kgNodeGroups` `selectedKgNode` `selectedKgEdges` `relatedNodeGroups`；上下文
+  `readOnlyWorkspace` `currentNotebookId` `baseKgAvailable` `scaleIndexStatus`；
+  ref `kgCanvasRef` `kgGraphRef` `kgDetailRef`（三者都还被 page 的 effect / 命令读，必须留在
+  page 声明，只把 ref 对象下传）。
+- 回调：`openKgAnalysis` `openKgSchemas` `closeKgView` `relinkFromKgView`
+  `confirmRefreshUnifiedKg` `startKgRebuild` `handleKgSearchChange` `changeKgRange`
+  `toggleKgType` `reviewPendingMerges` `reviewAllMerges` `decideMerge` `fitKgGraphView`
+  `runScaleIndexOp`，加三个改名的：`onClearTypes`（原 `kgWorkspace.clearTypes`）、
+  `onLoadMoreConceptMembers`、`onSelectOverviewNode`。
+
+  - `baseKgAvailable` 传布尔而不是整个 `currentNotebook`：JSX 只读
+    `currentNotebook?.base_kg_available` 一处，且没有任何守卫钉这段文本；传整条笔记本才是
+    把 page state 灌进组件。
+  - `reportError` 不进组件（slice-2 纪律）：`onLoadMoreConceptMembers` /
+    `onSelectOverviewNode` 由 page 侧包好 `.catch(reportError)`。
+  - **`selectKgNode` 刻意保留两个入口**：画布 `onNodeClick` 现在是不带 catch 的
+    `selectKgNode(n.id)`（浮空 promise），总览列表是 `selectKgNode(node.id).catch(reportError)`。
+    统一成一个回调会把画布那条的失败从「unhandledrejection」变成 toast——那是行为变化，
+    不在零变化片里做。故 `onSelectCanvasNode`（不 catch）与 `onSelectOverviewNode`（catch）
+    分开传，并在组件里注明这处不对称是登记在案的既有缺口。
+
+**连带搬迁（单一定义，不复制）**：
+
+| 去处 | 内容 | 理由 |
+|---|---|---|
+| `kg-graph-view.tsx`（只有这个视图用） | `ForceGraph2D` 的 `dynamic(…, { ssr:false })`、`RELATION_LABELS`+`relationLabel`、`truncateKgLabel`、`kgPayloadValue`、`drawKgNode`、`paintKgPointerArea`、`drawKgLinkLabel` | 全部只被这块 JSX 与它自己的 canvas 绘制函数消费 |
+| 新 `kg-object-cards.tsx`（page 与视图**共用**） | `kgNodeName`、`KgOccurrenceCard`、`KgProcedureStepCard`、`FIELD_LABELS`+`fieldLabel` | page 侧 `fgData`/`selectedKgEdges` 两个 memo 与 `KnowledgeBrowser`/`genericBody` 仍在用；从 page.tsx 反向 import 会成环，只能提取共享模块 |
+| 新 `relative-time.ts`（共用） | `formatRelativeTime` | 同上，page 另有 3 个调用点 |
+
+`kgTypeBandForce`（d3 力）留在 page.tsx——它只被 page 的 `useEffect` 用，不进 JSX。
+`kg-focus.ts` / `focusKgGraphNode` 同理不动（它是注入给 hook 的 effect，不在这块 JSX 里）。
+
+**守卫重指向（判据一条不减）**：
+
+| 守卫 | 改动 | 理由 |
+|---|---|---|
+| `kg-relink-wiring-guard.test.mjs` 最后一条 | `disabled={kgGraph.relinking \|\| …}` 的匹配目标 page.tsx → kg-graph-view.tsx；`relinkFromKgView` 委派仍判 page | 按钮跨模块了，两条判据（委派给 hook、三个忙碌位或起来）逐字保留 |
+| `kg-rebuild-wiring-guard.test.mjs` 「presentation disables both…」 | 同上，`disabled={kgGraph.rebuilding \|\| …}` 判在 kg-graph-view.tsx；早退 `if (kgGraph.rebuilding \|\| …) return` 仍判 page | 同上 |
+| `long-task-button-guard.test.mjs` | `LONG_TASK_BUTTONS` 每项加 `module`（缺省 `page.tsx`），`relinkFromKgView` / `decideMerge(` / `reviewAllMerges` 三项指向 kg-graph-view.tsx；按 module 分组解析、分组内仍「匹配 0 个即失败」 | 入口整体搬走后原表会静默变成 0 匹配——现表的响亮失败语义按模块保留，`requires` 在飞标志判据不变 |
+| `root-modal-boundary.test.mjs` 「no legacy modal booleans」 | 删掉 kg-view 的挖洞 `replace(...)`，page 侧直接断言**不存在**任何静态 `aria-modal`；把 `<section className="kg-view" role="dialog" aria-modal="true">` 的存在断言移到 kg-graph-view.tsx | 判得比原来**更紧**（page 从「除 kg-view 外无静态 aria-modal」变成「无静态 aria-modal」），kg-view 自身的形状判据在新模块原样保留 |
+
+新增防回填断言：page.tsx 不得再出现 `className="kg-view"` / `<ForceGraph2D`。
+
+**组件测试** `tests/component/kg-graph-view.component.test.tsx`（`react-force-graph-2d`
+经 `next/dynamic` 桩化，并断言 `ssr:false` 确实传下去）：画布四态（graph / 「图谱索引构建中」/
+「库规模较大…」/ 空态）各渲染各自的曲面；`kgCanvas === "graph"` 时 ForceGraph2D 拿到注入的
+`graphData` / `width` / `height`；待确认合并的「合并」「拒绝」把候选与 confirm 位交回注入命令，
+且 `decidingMerge`/`rebuilding` 时两颗都禁用；概念详情经既有 `KgEvidenceList` 渲染出处，
+`next_cursor` 存在时「加载更多成员」调注入命令；搜索框改字调 `handleKgSearchChange`；
+只读工作区隐藏「图谱处理」栏与合并决定按钮。

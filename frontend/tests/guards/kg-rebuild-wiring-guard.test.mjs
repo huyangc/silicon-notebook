@@ -8,6 +8,8 @@ import { findFunction, parseModule } from "../../test-support/semantic-source.mj
 // 拆分后 rebuild 追踪落在 KG 图谱领域 owner 里（`use-kg-workspace.ts` 只剩组合层）。
 const hook = await parseModule("use-kg-graph.ts");
 const page = await parseModule("page.tsx");
+// 知识图谱视图的 JSX 搬进了自己的模块（PR-5 分片 3）；命令编排仍在 page.tsx。
+const kgGraphView = await parseModule("kg-graph-view.tsx");
 const source = hook.getFullText();
 
 function body(name) {
@@ -152,7 +154,9 @@ test("owner recovery adopts server-running rebuild without inferring pending wor
 });
 
 test("presentation disables both maintenance actions while either shared task is busy", () => {
-  const text = page.getFullText();
-  assert.match(text, /if \(kgGraph\.rebuilding \|\| kgGraph\.relinking \|\| kgGraph\.buildingKg\) return/);
-  assert.match(text, /disabled=\{kgGraph\.rebuilding \|\| kgGraph\.relinking \|\| kgGraph\.buildingKg\}/);
+  // 判据一条不减，只是分居两个模块：早退守卫是 page.tsx 的命令编排
+  // (confirmRefreshUnifiedKg / confirmGenerateKgAnalysis)，按钮的 disabled 随知识图谱
+  // 视图 JSX 搬到了 kg-graph-view.tsx。两处的「三个忙碌位或起来」逐字保持不变。
+  assert.match(page.getFullText(), /if \(kgGraph\.rebuilding \|\| kgGraph\.relinking \|\| kgGraph\.buildingKg\) return/);
+  assert.match(kgGraphView.getFullText(), /disabled=\{kgGraph\.rebuilding \|\| kgGraph\.relinking \|\| kgGraph\.buildingKg\}/);
 });

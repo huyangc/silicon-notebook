@@ -30,16 +30,20 @@ import { CHECKUP_FIX, CHECKUP_FIX_BUSY } from "../../app/vocabulary.ts";
 // 「保留了别的条件、只把在飞那一项摘掉」——那种改动 disabled 仍然非平凡,守卫会假绿
 // (实测:把 `reviewAllStarting ||` 删掉,只有 requires 这条能抓到)。所以凡是 disabled
 // 由多个条件或起来的入口,都必须把那个**在飞标志**的名字钉在这里。
+//
+// `module` 是这个入口的 JSX 现在住在哪个模块（缺省 page.tsx）。知识图谱视图整块搬进
+// `kg-graph-view.tsx`（PR-5 分片 3）之后，若不带这一维，表里那三项会在 page.tsx 上
+// 匹配到 0 个按钮——而「匹配 0 即失败」的响亮语义正是靠**指对模块**才有意义。
 const LONG_TASK_BUTTONS = [
   { match: "runFix(", why: "体检修复 CTA(补齐向量/重新解析/分析新增):后端无单飞,重复点=重复排活" },
-  { match: "relinkFromKgView", why: "补上关联:后台任务,忙碌位由 relink/status 轮询解除,期间不能再点", requires: "kgGraph.relinking" },
+  { match: "relinkFromKgView", module: "kg-graph-view.tsx", why: "补上关联:后台任务,忙碌位由 relink/status 轮询解除,期间不能再点", requires: "kgGraph.relinking" },
   { match: 'runScaleIndexOp("rebuild", bumpCheckupRepairPoll)', why: "H8 损坏态重建索引:该格常驻显示,不走「忙碌换取消」" },
   { match: "confirmUpload(", why: "上传:multipart 传大文件期间不能重复提交", requires: "uploadBusy" },
   { match: "reparseSource(", why: "来源重新解析:同步等完,大 PDF 可能数分钟" },
-  { match: "decideMerge(", why: "待确认合并落决定:确认分支连带跑全量重建,两颗按钮都需防重复提交", requires: "kgGraph.rebuilding" },
+  { match: "decideMerge(", module: "kg-graph-view.tsx", why: "待确认合并落决定:确认分支连带跑全量重建,两颗按钮都需防重复提交", requires: "kgGraph.rebuilding" },
   { match: "runFindDuplicates(", why: "查重:全库归一化比对,大库不是瞬时的" },
   { match: "runMerge(", why: "重复条目合并:连带重拉列表/类型统计并重跑一次查重" },
-  { match: "reviewAllMerges", why: "全部自动判重:POST 在飞期间也不能再点(job id 还没回来)", requires: "kgGraph.reviewAllStarting" },
+  { match: "reviewAllMerges", module: "kg-graph-view.tsx", why: "全部自动判重:POST 在飞期间也不能再点(job id 还没回来)", requires: "kgGraph.reviewAllStarting" },
   { match: "retryIndexingPipelineRebuild(", why: "索引管线重试重建:排全库重建 job,成功后按钮随投影翻 pending 卸载,失败态可再点是合法重试", requires: "editor?.busy" },
   { match: "revertIndexingPipelineToBuiltin(", why: "切回内建索引管线:同上,排全库重建 job", requires: "editor?.busy" },
   // 打开笔记本:大库的 load 相位(getNotebook + listSources)在后端要跑数秒,期间不禁用
@@ -77,23 +81,30 @@ function buttonsMatching(elements, match) {
   });
 }
 
-test("page.tsx 的长任务按钮都带非平凡的 disabled(点完不能再点)", async () => {
-  const page = await parseModule("page.tsx");
-  const buttons = jsxElements(page, "button");
+test("工作区的长任务按钮都带非平凡的 disabled(点完不能再点)", async () => {
+  const modules = new Map();
+  for (const name of new Set(LONG_TASK_BUTTONS.map((entry) => entry.module ?? "page.tsx"))) {
+    modules.set(name, await parseModule(name));
+  }
   // 与下面 file input 那条同一手法:`disabled` 绑的可能是一个派生常量(例如列表行里
   // 每行算一次的 `const opening = openingNotebookId === notebook.id`)。只看绑定文本
   // 会在 `requires` 这一关误报,所以统一解一层变量引用再找在飞标志。对本来就写内联
   // 表达式的入口是无害的:查不到初始化器时拼接的是空串,判定与解析前逐字相同。
-  const initializers = new Map(
-    variableInitializersIn(page).map((item) => [item.name, item.initializer]),
-  );
+  // 键必须带模块名前缀:page.tsx 与 kg-graph-view.tsx 各自可能有同名变量(例如两处
+  // 都叫 `busy`),裸变量名做键时后解析的模块会覆盖先解析的那份初始化表达式,
+  // requires 加固就会在错的模块上核对,静默失效。
+  const initializers = new Map();
+  for (const [moduleName, module] of modules) {
+    for (const item of variableInitializersIn(module)) initializers.set(`${moduleName}:${item.name}`, item.initializer);
+  }
   const offenders = [];
 
   for (const entry of LONG_TASK_BUTTONS) {
-    const matched = buttonsMatching(buttons, entry.match);
+    const moduleName = entry.module ?? "page.tsx";
+    const matched = buttonsMatching(jsxElements(modules.get(moduleName), "button"), entry.match);
     // 匹配为 0 说明入口被改名/删了 —— 也算失败:守卫必须响亮失败,不能静默变成空断言。
     if (matched.length === 0) {
-      offenders.push(`${entry.match}：没找到任何按钮（入口被改名或删除？守卫失效）`);
+      offenders.push(`${entry.match}：在 ${moduleName} 里没找到任何按钮（入口被改名或删除？守卫失效）`);
       continue;
     }
     for (const element of matched) {
@@ -101,7 +112,7 @@ test("page.tsx 的长任务按钮都带非平凡的 disabled(点完不能再点)
       const expression = disabled === undefined ? undefined : String(disabled).trim();
       const resolved = expression === undefined
         ? ""
-        : `${expression} ${initializers.get(expression) ?? ""}`;
+        : `${expression} ${initializers.get(`${moduleName}:${expression}`) ?? ""}`;
       if (disabled === undefined) {
         offenders.push(`${entry.match}：缺 disabled —— ${entry.why}`);
       } else if (TRIVIALLY_FALSE.has(expression)) {

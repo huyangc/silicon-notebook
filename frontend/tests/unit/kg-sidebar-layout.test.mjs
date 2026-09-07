@@ -14,13 +14,16 @@ test("KG sidebar composes structured evidence cards", async () => {
   // KgEvidenceCard (and its progressive-disclosure wrapper KgEvidenceList)
   // moved out of page.tsx into their own module (codex PR #639 R1 P2) so the
   // "show more evidence" reveal/reset behaviour is directly unit-testable —
-  // see kg-evidence-list.component.test.tsx. KgOccurrenceCard stays in
-  // page.tsx (it serves the non-concept-detail occurrence fallback path
-  // only, no progressive disclosure).
-  const page = await parseModule("page.tsx");
+  // see kg-evidence-list.component.test.tsx. KgOccurrenceCard still serves the
+  // non-concept-detail occurrence fallback path only (no progressive
+  // disclosure), but it now lives in kg-object-cards.tsx: the KG view left
+  // page.tsx (PR-5 slice 3) while KnowledgeBrowser stayed, and both render it —
+  // importing back from page.tsx would be a cycle, so it moved to the shared
+  // leaf module. 判据不变：它仍是与 KgEvidenceCard **分开**的一件东西。
+  const objectCards = await parseModule("kg-object-cards.tsx");
   const evidenceList = await parseModule("kg-evidence-list.tsx");
-  const pageFunctionNames = new Set(
-    declarations(page)
+  const objectCardFunctionNames = new Set(
+    declarations(objectCards)
       .filter((finding) => finding.kind === "function")
       .map((finding) => finding.name),
   );
@@ -30,7 +33,7 @@ test("KG sidebar composes structured evidence cards", async () => {
       .map((finding) => finding.name),
   );
   const evidenceCards = [
-    ...jsxElements(page, "article"),
+    ...jsxElements(objectCards, "article"),
     ...jsxElements(evidenceList, "article"),
   ].filter(({ attributes }) => (
     typeof attributes.className === "string"
@@ -39,7 +42,7 @@ test("KG sidebar composes structured evidence cards", async () => {
 
   assert.equal(evidenceListFunctionNames.has("KgEvidenceCard"), true);
   assert.equal(evidenceListFunctionNames.has("KgEvidenceList"), true);
-  assert.equal(pageFunctionNames.has("KgOccurrenceCard"), true);
+  assert.equal(objectCardFunctionNames.has("KgOccurrenceCard"), true);
   assert.ok(evidenceCards.length >= 2);
 });
 

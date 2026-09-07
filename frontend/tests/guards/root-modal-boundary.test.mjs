@@ -55,6 +55,9 @@ const promotionQueueHook = await parseModule("use-promotion-queue.ts");
 const promotionQueueModal = await parseModule("promotion-queue-modal.tsx");
 const edgeReviewHook = await parseModule("use-edge-review-queue.ts");
 const edgeReviewModal = await parseModule("edge-review-modal.tsx");
+// 知识图谱主视图搬进了自己的模块（PR-5 分片 3）；page.tsx 仍持有它的开合门与
+// 「图谱分析」弹窗的 rootModals 编排（作为 children 原位渲染在 .kg-view 内）。
+const kgGraphView = await parseModule("kg-graph-view.tsx");
 const pageText = page.getText(page);
 const hookText = hook.getText(hook);
 
@@ -69,22 +72,28 @@ test("page composes one typed root-modal coordinator and has no legacy modal boo
     assert.match(pageText, new RegExp(`rootModals\\.view\\(\\"${slot}\\"\\)`), slot);
   }
   // 与标识符无关的判据(取代上面三条已随 editingNotebook/deleteNotebook/
-  // schemaModalOpen 被删除而永真的 doesNotMatch):page.tsx 里除 kg-view(知识图谱
-  // 主视图,见下方说明)外,任何 role="dialog" 曲面的 aria-modal 都不许是静态字面量
-  // "true"/"false",必须是 rootModals.view("<slot>").topmost 表达式。这样不论回潮
-  // 时用的是哪个已删的旧布尔变量名(不局限于上面三个),都会被这条钉住。
+  // schemaModalOpen 被删除而永真的 doesNotMatch):page.tsx 里任何 role="dialog"
+  // 曲面的 aria-modal 都不许是静态字面量 "true"/"false",必须是
+  // rootModals.view("<slot>").topmost 表达式。这样不论回潮时用的是哪个已删的旧布尔
+  // 变量名(不局限于上面三个),都会被这条钉住。
   //
-  // kg-view 不是 RootModalSlot(见 use-root-modal-coordinator.ts 的 RootModalSlot
-  // 联合类型,其中没有 "kg-view")——它是知识图谱主视图,由 kgGraph.open 直接控制,
-  // 独立于本文件描述的 rootModals 协调器边界之外,不参与「被覆盖时退出交互树」的
-  // inert/aria-hidden 契约,是先于本次 root-modal-boundary 工作就存在的既有设计。
-  // 用它自己的结构标记(className="kg-view")整体挖掉后,残留文本里不该再出现任何
-  // 静态 aria-modal 字面量。
-  const pageTextWithoutKgView = pageText.replace(
-    /<section className="kg-view" role="dialog" aria-modal="true">/,
-    "",
+  // kg-view 曾是这条的唯一例外(靠 className="kg-view" 挖洞豁免);它整块搬去
+  // kg-graph-view.tsx 之后,page 侧不再需要例外——判据因此比原来**更紧**。kg-view
+  // 自身的形状(它不是 RootModalSlot,见 use-root-modal-coordinator.ts 的
+  // RootModalSlot 联合类型,其中没有 "kg-view";它是由 kgGraph.open 直接控制的知识
+  // 图谱主视图,不参与「被覆盖时退出交互树」的 inert/aria-hidden 契约,是先于
+  // root-modal-boundary 工作就存在的既有设计)在新模块上原样钉住,并要求它是那里
+  // 唯一的静态 aria-modal。
+  assert.doesNotMatch(pageText, /aria-modal="(?:true|false)"/);
+  const kgViewText = kgGraphView.getText(kgGraphView);
+  assert.match(kgViewText, /<section className="kg-view" role="dialog" aria-modal="true">/);
+  assert.doesNotMatch(
+    kgViewText.replace(/<section className="kg-view" role="dialog" aria-modal="true">/, ""),
+    /aria-modal="(?:true|false)"/,
   );
-  assert.doesNotMatch(pageTextWithoutKgView, /aria-modal="(?:true|false)"/);
+  // 防回填:视图曲面不许再长回 page.tsx。
+  assert.doesNotMatch(pageText, /className="kg-view"/);
+  assert.doesNotMatch(pageText, /<ForceGraph2D/);
   assert.match(pageText, /<SourceDetailWindow[\s\S]{0,240}interactive=\{rootModals\.view\("source-detail"\)\.topmost\}/);
   assert.match(pageText, /<KgAnalysisView[\s\S]{0,300}interactive=\{rootModals\.view\("kg-analysis"\)\.topmost\}/);
 });
