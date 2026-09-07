@@ -626,9 +626,15 @@ def test_retrieve_chunks_large_library_copyable_degrades(repo, monkeypatch):
     fts_calls = {"n": 0}
     orig_fts = repo.retrieval.candidates._retrieve_chunks_fts_degraded
 
-    def _spy_fts(notebook_id, query, query_vector, recall, n_chunks):
+    def _spy_fts(notebook_id, query, query_vector, recall, n_chunks, **kwargs):
         fts_calls["n"] += 1
-        return orig_fts(notebook_id, query, query_vector, recall, n_chunks)
+        # 大库守卫现在对 scoped/unscoped 一视同仁地把两个 kwarg 透传下去
+        # (见 _retrieve_chunks_baseline);无 scope 这一支必须恒等于两个默认值,
+        # 这才是「unscoped 行为不变」的判据。
+        fts_calls["kwargs"] = (kwargs.get("allowed_source_ids"),
+                               kwargs.get("source_restricted"))
+        return orig_fts(notebook_id, query, query_vector, recall, n_chunks,
+                        **kwargs)
 
     monkeypatch.setattr(repo.retrieval.candidates, "_retrieve_chunks_fts_degraded", _spy_fts)
 
@@ -644,6 +650,10 @@ def test_retrieve_chunks_large_library_copyable_degrades(repo, monkeypatch):
     scored, ids, mat = repo.retrieval.candidates._retrieve_chunks(nb.id, "bandgap")
 
     assert fts_calls["n"] == 1, "copyable=False 大库必须走 _retrieve_chunks_fts_degraded"
+    assert fts_calls["kwargs"] == (None, False), (
+        "无 scope 的大库降级必须恒等于「无清单 + 未收窄」,"
+        f"实际 {fts_calls['kwargs']}"
+    )
     assert gather_calls["n"] == 0, "大库降级路径绝不 _gather_chunks 全表"
     assert len(scored) >= 1                                        # FTS 词法命中召回(候选内打分)
     assert all(c.chunk_id.startswith("ck-") for c in scored)      # 召回来自本 nb 的真实 chunk
@@ -1657,3 +1667,322 @@ def test_chunk_answer_context_resolves_tier_per_chunk_notebook_id(repo):
     assert nb_by_chunk["ck-own"] == "", (
         f"notebook_id 等于调用方自己(own_nb)的 chunk,evidence 的 notebook_id 必须"
         f"归一成空串(不是「跨库」),实为 {nb_by_chunk['ck-own']!r}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 13. scoped 请求的 chunk 向量通道(#422 早返回回归):HTTP 侧冻结的来源范围恒
+#     带允许清单(全选冻结也带,codex #640 R1),而 #422 曾用
+#     ``allowed_source_ids is not None`` 在大库守卫**之前**直接 FTS 降级 →
+#     所有没建 scale 索引的小库、所有界面发出的问答,chunk 通道都只剩词法候选,
+#     中文问英文语料首轮恒空。scoped 与 unscoped 现在共用同一把大库守卫。
+# ═══════════════════════════════════════════════════════════════════════════
+
+_CROSS_LINGUAL_QUERY = "什么是递归深度语言模型"
+_ENGLISH_CORPUS = [
+    "Recursive depth language models adjust the number of transformer layers "
+    "applied per token at inference time, spending more compute on hard spans.",
+    "The recursion depth controller predicts how many recurrent blocks to run "
+    "for each position in the sequence before the decoder head reads it.",
+]
+
+
+def _small_scoped_library(repo):
+    """小库(copyable=True、chunk 数远低于阈值)+ 未建 scale 索引 + FTS 已回填。
+
+    返回 ``(notebook, source_id)``。刻意不动 ``notebook_copy_stats`` 与
+    ``chunk_bruteforce_max_chunks``:这条 fixture 描述的正是「界面上最普通的一个
+    小库」,大库守卫在这里必须不触发。
+    """
+    nb, sid = _seed_chunks(repo, list(_ENGLISH_CORPUS))
+    repo.backfill_chunk_fts(nb.id)
+    assert repo.retrieval.candidates.notebook_copy_stats(nb.id)["copyable"], (
+        "前提:这条 fixture 必须是小库(copyable=True),否则测的是大库降级臂"
+    )
+    return nb, sid
+
+
+def test_scoped_small_library_keeps_the_chunk_vector_lane(repo):
+    """小库 + 冻结 include 范围 + 关键词零重叠的跨语言查询 → 必须有向量命中。
+
+    中文问句对英文正文:FTS 词法臂必然零命中(``_ENGLISH_CORPUS`` 里没有一个中文
+    词项),所以这条用例只能靠向量臂过。#422 的早返回在这里把向量臂整个跳掉,
+    结果恒为 0 条——线上「问了没反应/答不出来」的直接成因。
+
+    **变异锚点**:把 ``_retrieve_chunks_baseline`` 里那条
+    ``if allowed_source_ids is not None: return self._retrieve_chunks_fts_degraded(...)``
+    早返回加回大库守卫之前 → 本条报红(``scoped`` 变成 0 条)。
+    """
+    from app.models.source_scope import ResolvedSourceScope
+    from app.services.source_scope import source_scope_context
+
+    nb, sid = _small_scoped_library(repo)
+
+    # 对照:同一个查询在无范围时本来就有命中(证明「零命中」不是语料/嵌入的锅)。
+    unscoped, _ids_u, _mat_u = repo.retrieval.candidates._retrieve_chunks(
+        nb.id, _CROSS_LINGUAL_QUERY
+    )
+    assert unscoped, "前提:无范围时这个跨语言查询本来就有向量命中"
+
+    scope = ResolvedSourceScope(mode="include", source_ids=[sid], narrowed=True)
+    with source_scope_context(nb.id, scope):
+        scoped, _ids, _mat = repo.retrieval.candidates._retrieve_chunks(
+            nb.id, _CROSS_LINGUAL_QUERY
+        )
+
+    assert scoped, (
+        "冻结来源范围下,小库的 chunk 通道必须仍走按范围有界的向量检索;"
+        "实际零命中 = #422 的 `allowed_source_ids is not None` 早返回回归"
+    )
+    assert all(c.chunk_id.startswith("ck-") for c in scoped)
+    # 命中必须来自向量臂:词法臂对中文问句在英文语料上零命中。
+    assert any(
+        any(s.origin == "semantic" for s in (c.retrieval_supports or ()))
+        for c in scoped
+    ), (
+        "跨语言查询的命中只可能来自语义臂;若全是 lexical support 说明向量臂仍未跑"
+    )
+
+
+def test_scoped_small_library_emits_no_bruteforce_skipped_event(repo, monkeypatch):
+    """小库的 scoped 请求不得再发 ``chunk_bruteforce_skipped``。
+
+    该事件的语义是「这个**库**大到不能暴力」,和这次请求选了几个来源无关。
+    #422 之后它在每一次界面问答上都出现(且 ``n_chunks=-1``),把真正的大库信号
+    淹没成噪音。
+    """
+    from app.models.source_scope import ResolvedSourceScope
+    from app.services.source_scope import source_scope_context
+
+    nb, sid = _small_scoped_library(repo)
+    events = _capture_events(repo, monkeypatch)
+    scope = ResolvedSourceScope(mode="include", source_ids=[sid], narrowed=True)
+    with source_scope_context(nb.id, scope):
+        repo.retrieval.candidates._retrieve_chunks(nb.id, _CROSS_LINGUAL_QUERY)
+
+    skipped = [e for e in events if e.get("kind") == "chunk_bruteforce_skipped"]
+    assert skipped == [], (
+        f"小库的 scoped 请求不得发大库降级事件,实际 {skipped}"
+    )
+
+
+def test_scoped_all_selected_freeze_matches_unscoped_candidates(repo):
+    """全选冻结与无范围**候选集合一致**——限定「库内没有他人隐藏来源」时。
+
+    冻结本身不是一个过滤条件,它只是把「此刻可见的来源」钉住;全选时钉下来的清单
+    在这条 fixture 的单人库上恰好覆盖整库,候选集因此不该因为冻结而变。
+
+    这条限定是**必要的**,不是谨慎措辞:冻结清单的隐藏半按**请求人**解析
+    (``SourceStore.hidden_source_ids`` 的 ``memory_items.created_by`` 谓词),
+    而不带清单的生产者读到的是**每一位成员**的隐藏 Memory。共享库里只要另一位
+    成员有已确认的 Memory,两个宇宙就相差恰好那一份投影,全选冻结的候选集**应当**
+    比无范围窄——那是冻结在做它该做的事,不是回归。见
+    ``source_scope.scoped_allowed_source_ids`` 的 docstring(codex #640 R1)。
+    """
+    from app.models.source_scope import ResolvedSourceScope
+    from app.services.source_scope import source_scope_context
+
+    nb, sid = _small_scoped_library(repo)
+
+    unscoped, _ids_u, _mat_u = repo.retrieval.candidates._retrieve_chunks(
+        nb.id, _CROSS_LINGUAL_QUERY
+    )
+    all_selected = ResolvedSourceScope(
+        mode="include", source_ids=[sid], narrowed=False
+    )
+    with source_scope_context(nb.id, all_selected):
+        scoped, _ids, _mat = repo.retrieval.candidates._retrieve_chunks(
+            nb.id, _CROSS_LINGUAL_QUERY
+        )
+
+    assert unscoped, "前提:无范围时本来就有命中"
+    assert scoped == unscoped, (
+        "这条 fixture 的库里没有他人隐藏来源,全选冻结的清单覆盖整库,候选集"
+        "(chunk_id/score/relevance)必须与无范围一致,"
+        f"实际 无范围={[c.chunk_id for c in unscoped]} 全选冻结={[c.chunk_id for c in scoped]}"
+    )
+
+
+def _chunk_ids_of_source(repo, source_id):
+    with repo._connect() as db:
+        return {
+            row["id"] for row in db.execute(
+                "SELECT id FROM chunks WHERE source_id=?", (source_id,)
+            ).fetchall()
+        }
+
+
+def test_scoped_partial_freeze_still_ceils_hits_to_allowed_sources(repo):
+    """范围天花板仍然生效:只含部分来源的冻结范围,候选**与返回的矩阵行**都只
+    来自允许来源。
+
+    修好向量臂不等于放松过滤。有界暴力路径的两半各自收窄:文本行由
+    ``_gather_chunks(..., allowed_source_ids=...)`` 收窄;向量行取的是
+    ``_vector_matrix`` 那份**整库**缓存,靠 ``_mask_vector_matrix`` 在
+    ``score_chunks`` **之前**掩掉不允许的行。第二半必须单独钉住——返回的
+    ``(ids, mat)`` 会被上层 MMR 当多样性矩阵用,里面留着不允许的行就等于让被排除
+    的内容以隐藏前提的形式参与选择,而只看 ``scored`` 的断言看不到这一点。
+
+    **变异锚点**:删掉 ``_mask_vector_matrix`` 那一跳(直接返回整库 ``ids/mat``)
+    → 本条的 ``ids`` 子集断言报红。
+    """
+    from app.models.source_scope import ResolvedSourceScope
+    from app.services.source_scope import source_scope_context
+
+    nb, allowed_sid = _small_scoped_library(repo)
+    other_sid = _add_chunk_source(repo, nb.id, [
+        "Recursive depth language models were also evaluated on long-context "
+        "retrieval benchmarks in a separate follow-up study.",
+    ])
+    repo.backfill_chunk_fts(nb.id)
+    allowed_chunk_ids = _chunk_ids_of_source(repo, allowed_sid)
+    other_chunk_ids = _chunk_ids_of_source(repo, other_sid)
+    assert allowed_chunk_ids and other_chunk_ids, "前提:两个来源都真的有 chunk"
+
+    unscoped, ids_u, _mat_u = repo.retrieval.candidates._retrieve_chunks(
+        nb.id, _CROSS_LINGUAL_QUERY
+    )
+    assert {c.source_id for c in unscoped} >= {allowed_sid, other_sid}, (
+        "前提:无范围时两个来源都应进候选,否则天花板断言测不到东西;"
+        f"实际 {sorted({c.source_id for c in unscoped})}"
+    )
+    assert set(ids_u) >= other_chunk_ids, (
+        "前提:无范围时返回的矩阵本来就含另一个来源的行,否则掩码断言是空转;"
+        f"实际 {sorted(ids_u)}"
+    )
+
+    scope = ResolvedSourceScope(
+        mode="include", source_ids=[allowed_sid], narrowed=True
+    )
+    with source_scope_context(nb.id, scope):
+        scoped, ids, mat = repo.retrieval.candidates._retrieve_chunks(
+            nb.id, _CROSS_LINGUAL_QUERY
+        )
+
+    assert scoped, "被允许的来源里有内容,不该零命中"
+    assert {c.source_id for c in scoped} == {allowed_sid}, (
+        "冻结范围只含部分来源时,命中必须只来自允许来源,实际 "
+        f"{sorted({c.source_id for c in scoped})}"
+    )
+    assert set(ids) <= allowed_chunk_ids, (
+        "返回的矩阵行必须严格 ⊆ 允许来源的 chunk(掩码发生在打分之前);漏进来的 "
+        f"{sorted(set(ids) - allowed_chunk_ids)}"
+    )
+    assert mat.shape[0] == len(ids), (
+        f"掩码后 ids 与矩阵行必须仍然逐行对齐,实际 {len(ids)} vs {mat.shape}"
+    )
+
+
+def test_scoped_brute_lane_reuses_the_cached_whole_notebook_matrix(
+    repo, monkeypatch
+):
+    """scoped 暴力路径必须**复用**版本键控的整库矩阵缓存,不得每次现建。
+
+    一次问答会被 ``_retrieve_chunks_multi`` 拆成最多 8 个并发子查询,每个都走一遍
+    这条路径。若 scoped 一支自己 ``vector_rows_for_ids`` + ``build_matrix``,那 N
+    个子查询就各解码一遍同一批向量行、各持一份矩阵(legacy JSON 行 5000×1024 实测
+    ~264ms/次);走 ``_vector_matrix`` 则整库只解码一次、由它们共享。
+
+    **变异锚点**:把 scoped 一支改回 ``vector_rows_for_ids`` + ``build_matrix``
+    → ``vector_rows`` 归零 / ``vector_rows_for_ids`` 非零,本条报红。
+    """
+    from app.models.source_scope import ResolvedSourceScope
+    from app.services.source_scope import source_scope_context
+
+    nb, sid = _small_scoped_library(repo)
+    candidates = repo.retrieval.candidates
+    # 矩阵缓存是进程级的,建库过程本身可能已经把它预热;先逐出,否则「只加载一次」
+    # 会退化成「一次都不加载」,变异也就测不出来了。
+    candidates._vector_cache.invalidate(f"{nb.id}:matrix:chunk_embeddings")
+
+    loads = {"vector_rows": 0, "vector_rows_for_ids": 0}
+    orig_rows = candidates.embeddings.vector_rows
+    orig_rows_for_ids = candidates.embeddings.vector_rows_for_ids
+
+    def _spy_rows(db, notebook_id, table, *args, **kwargs):
+        # 只数 chunk 那张表:同一次 _retrieve_chunks 里别的臂也会加载别的矩阵。
+        if table == "chunk_embeddings":
+            loads["vector_rows"] += 1
+        return orig_rows(db, notebook_id, table, *args, **kwargs)
+
+    def _spy_rows_for_ids(db, notebook_id, table, *args, **kwargs):
+        if table == "chunk_embeddings":
+            loads["vector_rows_for_ids"] += 1
+        return orig_rows_for_ids(db, notebook_id, table, *args, **kwargs)
+
+    monkeypatch.setattr(candidates.embeddings, "vector_rows", _spy_rows)
+    monkeypatch.setattr(
+        candidates.embeddings, "vector_rows_for_ids", _spy_rows_for_ids
+    )
+
+    scope = ResolvedSourceScope(mode="include", source_ids=[sid], narrowed=True)
+    with source_scope_context(nb.id, scope):
+        first, ids_a, _mat_a = candidates._retrieve_chunks(
+            nb.id, _CROSS_LINGUAL_QUERY
+        )
+        second, ids_b, _mat_b = candidates._retrieve_chunks(
+            nb.id, "recursion depth controller"
+        )
+
+    assert first and second, "前提:两次子查询都要真的走到暴力向量路径"
+    assert loads["vector_rows"] == 1, (
+        "同一 run 内的两个子查询必须共享同一份整库矩阵缓存(只加载一次),"
+        f"实际加载 {loads['vector_rows']} 次"
+    )
+    assert loads["vector_rows_for_ids"] == 0, (
+        "scoped 一支不得再按允许 id 现拉向量行——那条路零缓存复用,"
+        f"实际调用 {loads['vector_rows_for_ids']} 次"
+    )
+    assert set(ids_a) == set(ids_b), (
+        "同一范围的两次子查询,掩码后的行集合必须一致"
+    )
+
+
+def test_scoped_large_library_still_degrades_to_fts_with_a_real_count(
+    repo, monkeypatch
+):
+    """大库(copyable=False)的 scoped 请求行为不变:仍走 FTS 降级。
+
+    并且事件里的 ``n_chunks`` 必须是真实计数,不再是 #422 传下来的 -1 占位值
+    ——排查者会把 -1 读成「计数探针坏了」。允许清单与 ``source_restricted``
+    仍必须原样下推(过滤不放松、语料语言闸的路由语义不变)。
+    """
+    from app.models.source_scope import ResolvedSourceScope
+    from app.services.source_scope import source_scope_context
+
+    nb, sid = _seed_chunks(repo, list(_ENGLISH_CORPUS))
+    repo.backfill_chunk_fts(nb.id)
+    monkeypatch.setattr(repo.retrieval.candidates, "notebook_copy_stats",
+                        lambda nb_id: {"copyable": False, "size": {}})
+
+    degraded_calls = []
+    orig = repo.retrieval.candidates._retrieve_chunks_fts_degraded
+
+    def _spy(notebook_id, query, query_vector, recall, n_chunks, **kwargs):
+        degraded_calls.append((n_chunks, kwargs.get("allowed_source_ids"),
+                               kwargs.get("source_restricted")))
+        return orig(notebook_id, query, query_vector, recall, n_chunks, **kwargs)
+
+    monkeypatch.setattr(
+        repo.retrieval.candidates, "_retrieve_chunks_fts_degraded", _spy
+    )
+    events = _capture_events(repo, monkeypatch)
+
+    scope = ResolvedSourceScope(mode="include", source_ids=[sid], narrowed=True)
+    with source_scope_context(nb.id, scope):
+        repo.retrieval.candidates._retrieve_chunks(nb.id, "recursion depth")
+
+    assert len(degraded_calls) == 1, (
+        f"大库的 scoped 请求必须仍走 FTS 降级,实际调用 {degraded_calls}"
+    )
+    n_chunks, allowed, restricted = degraded_calls[0]
+    assert n_chunks >= 1, f"n_chunks 必须是真实整库计数,不得是 -1 占位,实际 {n_chunks}"
+    assert allowed == (sid,), f"允许清单必须原样下推,实际 {allowed!r}"
+    assert restricted is True, (
+        f"真收窄的 scoped 请求 source_restricted 必须是 True,实际 {restricted!r}"
+    )
+
+    skipped = [e for e in events if e.get("kind") == "chunk_bruteforce_skipped"]
+    assert len(skipped) == 1, f"大库降级仍必须发事件,实际 {skipped}"
+    assert skipped[0]["n_chunks"] == n_chunks >= 1, (
+        f"事件里的 n_chunks 必须是真实计数,实际 {skipped[0]}"
+    )

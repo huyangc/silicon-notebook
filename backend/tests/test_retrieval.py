@@ -557,10 +557,21 @@ def test_copyable_selected_element_search_routes_scope_into_bounded_chunks(
     )]
 
 
-def test_copyable_selected_chunk_search_always_uses_bounded_fts(
+def test_copyable_selected_chunk_search_uses_the_bounded_vector_lane(
     repo, monkeypatch
 ):
-    calls = []
+    """小库 + 选定来源 → 有界**暴力向量**路径,不是 FTS 降级。
+
+    这条曾经断言的是相反的行为(#422:「选定范围恒走有界 FTS」)。那个契约是生产
+    缺陷:HTTP 侧冻结的来源范围恒非 None(全选冻结也带清单,codex #640 R1),于是
+    界面发出的每一次问答在未建 scale 索引的库上都失去 chunk 语义召回。FTS 降级是
+    **大库**的 lane(见下一条);小库带清单时走
+    ``_gather_chunks(..., allowed_source_ids=...)`` 取文本行,向量则取
+    ``_vector_matrix`` 那份版本键控的整库缓存、再由 ``_mask_vector_matrix`` 在打分
+    前掩到允许 chunk 上——scoped 因此不比 unscoped 多物化任何东西,#422 那条顾虑
+    在这条路径上并不成立。规格:
+    ``docs/superpowers/specs/2026-09-07-scoped-chunk-vector-lane-design_zh.md``。
+    """
     monkeypatch.setattr(
         repo.retrieval.candidates,
         "notebook_copy_stats",
@@ -568,16 +579,81 @@ def test_copyable_selected_chunk_search_always_uses_bounded_fts(
     )
     monkeypatch.setattr(
         repo.retrieval.candidates,
-        "_gather_chunks",
+        "_retrieve_chunks_fts_degraded",
         lambda *_args, **_kwargs: pytest.fail(
-            "selected source search must not materialize every chunk/vector"
+            "a small library must keep its vector lane, scoped or not"
         ),
     )
+
+    gathered = []
+    orig_gather = repo.retrieval.candidates._gather_chunks
+
+    def _spy_gather(db, notebook_id, allowed_source_ids=None):
+        gathered.append((
+            notebook_id,
+            tuple(allowed_source_ids) if allowed_source_ids is not None else None,
+        ))
+        return orig_gather(db, notebook_id, allowed_source_ids)
+
     monkeypatch.setattr(
-        repo.retrieval.candidates.chunks,
-        "count_row",
+        repo.retrieval.candidates, "_gather_chunks", _spy_gather
+    )
+
+    repo.retrieval.candidates._retrieve_chunks(
+        "nb", "target command", recall=7, allowed_source_ids=("A", "B")
+    )
+
+    assert gathered == [("nb", ("A", "B"))], (
+        "暴力向量路径必须原样收到允许清单(范围天花板不因为换了 lane 就放松),"
+        f"实际 {gathered}"
+    )
+
+
+def test_large_selected_chunk_search_uses_bounded_fts(repo, monkeypatch):
+    """大库 + 选定来源 → 有界 FTS 降级,清单原样下推,``n_chunks`` 是真实计数。
+
+    ``copyable=False`` 是这条的判据,不是背景:FTS 降级只服务大库。
+
+    库里**必须**真的有 chunk。空库的真实计数与占位值 0 逐字相同,断言
+    ``n_chunks == 0`` 既通过「取到了真计数」也通过「计数探针整个没跑」——那正是
+    这条断言要挡的失败模式。种三条 chunk 让两者分开。
+    """
+    from app.models.schemas import NotebookCreate
+
+    nb = repo.create_notebook(NotebookCreate(name="large manuals"))
+    now = "2026-07-01T00:00:00"
+    seeded = [
+        ("chunk-a", "A", "target command in manual A"),
+        ("chunk-b", "B", "target command in manual B"),
+        ("chunk-c", "C", "target command in manual C"),
+    ]
+    with repo._write() as db:
+        for source_id in ("A", "B", "C"):
+            db.execute(
+                "INSERT INTO sources "
+                "(id,notebook_id,title,source_type,status,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (source_id, nb.id, f"Manual {source_id}", "md", "ready", now, now),
+            )
+        for chunk_id, source_id, text in seeded:
+            db.execute(
+                "INSERT INTO chunks "
+                "(id,notebook_id,source_id,text,section_path,element_ids,created_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (chunk_id, nb.id, source_id, text, "Commands", "[]", now),
+            )
+
+    calls = []
+    monkeypatch.setattr(
+        repo.retrieval.candidates,
+        "notebook_copy_stats",
+        lambda _notebook_id: {"copyable": False},
+    )
+    monkeypatch.setattr(
+        repo.retrieval.candidates,
+        "_gather_chunks",
         lambda *_args, **_kwargs: pytest.fail(
-            "selected source search must not scan the notebook for a count"
+            "large library must not materialize every chunk/vector"
         ),
     )
 
@@ -593,7 +669,7 @@ def test_copyable_selected_chunk_search_always_uses_bounded_fts(
         repo.retrieval.candidates, "_retrieve_chunks_fts_degraded", bounded
     )
     assert repo.retrieval.candidates._retrieve_chunks(
-        "nb", "target command", recall=7, allowed_source_ids=("A", "B")
+        nb.id, "target command", recall=7, allowed_source_ids=("A", "B")
     ) == ([], [], None)
     # codex #640 R2 P1:一个非 None 的 allowed_source_ids 本身不再是「真收窄」的
     # 证明——``_retrieve_elements`` 把它自己物化出的**上下文天花板**用完全相同的
@@ -601,16 +677,18 @@ def test_copyable_selected_chunk_search_always_uses_bounded_fts(
     # 元素回退臂重新关闭语料语言闸(见该方法与 ``_lexical_gate_source_scoped``
     # 的说明)。不带 ``producer_explicit=True``、也没有真收窄的 request scope 时,
     # 语料语言闸保持打开(source_restricted=False)。
-    assert calls == [("nb", "target command", 7, -1, ("A", "B"), False)]
+    # ``n_chunks`` 是经 seq-gated memo 取到的真实**整库**计数(3 条,含不在允许
+    # 清单里的 C):不是允许来源内的计数(那会是 2),更不是 #422 传下来的 -1。
+    assert calls == [(nb.id, "target command", 7, 3, ("A", "B"), False)]
 
     # 对照:调用方显式 attest ``producer_explicit=True``(真正的 producer 级
     # 收窄清单)时,豁免照旧生效——这条腿没有回归。
     calls.clear()
     assert repo.retrieval.candidates._retrieve_chunks(
-        "nb", "target command", recall=7, allowed_source_ids=("A", "B"),
+        nb.id, "target command", recall=7, allowed_source_ids=("A", "B"),
         producer_explicit=True,
     ) == ([], [], None)
-    assert calls == [("nb", "target command", 7, -1, ("A", "B"), True)]
+    assert calls == [(nb.id, "target command", 7, 3, ("A", "B"), True)]
 
 
 def test_keyword_score_ignores_stopwords():

@@ -584,7 +584,13 @@ This restores lexical visibility for a source missing from the sidecar, not
 semantic strong consistency for changes inside an already indexed source or delta with no
 term overlap; those still require a fold or `SCALE_SEARCH_INCLUDE_DELTA=true`. Set
 `CHUNK_FTS_WITH_ANN_ENABLED=true` to A/B or restore the full report lexical supplement. If
-ANN is unavailable, the report still uses bounded FTS as its fail-open fallback. A frozen
+ANN is unavailable, a report run against a **large** library (`copyable=false`) or one whose
+whole-notebook chunk count exceeds `CHUNK_BRUTEFORCE_MAX_CHUNKS` still uses bounded FTS as its
+fail-open fallback — that guard is a property of the library, not of the run's source scope. A
+report run against a small library keeps the bounded brute-force vector lane instead (chunk
+rows read for the allowed sources, the cached whole-notebook vector matrix masked down to those
+chunks before scoring), so `chunk_bruteforce_skipped` appearing on a small library is a signal
+to investigate, not the expected fallback. A frozen
 all-selected source list also no longer pays the HNSW Python filter callback when the sidecar
 proves every indexed source code is allowed; any unknown or unallowed code keeps the
 filtered/scoped path.
