@@ -5766,23 +5766,26 @@ export default function Home() {
                     能一并搜到参考库里的内容，而它只查当前笔记本。 */}
                 <div className="scope-group">
                   <h3 className="scope-group-title" id="local-source-scope-title">本库来源</h3>
-                  <div className="source-search-wrap">
-                    <input
-                      className="source-search"
-                      type="search"
-                      placeholder="搜索来源（标题/作者/文件名）"
-                      value={sourceQuery}
-                      onChange={(e) => sourceLibrary.setSourceQuery(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter" && currentNotebookId) {
-                          loadSourcesPage(currentNotebookId, { page: 0, q: sourceQuery }).catch(reportError);
-                        }
-                      }}
-                    />
-                    {sourcesPageLoading && (
-                      <Loader2 size={15} className="busy-spin source-search-spinner" aria-hidden="true" />
-                    )}
-                  </div>
+                  <form className="source-search-form" onSubmit={(event) => {
+                    event.preventDefault();
+                    sourceLibrary.searchSources().catch(reportError);
+                  }}>
+                    <div className="source-search-wrap">
+                      <input
+                        className="source-search"
+                        type="search"
+                        placeholder="搜索来源（标题/作者/文件名）"
+                        value={sourceQuery}
+                        onChange={(e) => sourceLibrary.setSourceQuery(e.target.value)}
+                      />
+                      {sourcesPageLoading && (
+                        <Loader2 size={15} className="busy-spin source-search-spinner" aria-hidden="true" />
+                      )}
+                    </div>
+                    <button type="submit" className="ghost-button" disabled={!currentNotebookId || sourcesPageLoading}>
+                      {sourcesPageLoading ? "搜索中…" : "搜索"}
+                    </button>
+                  </form>
                 </div>
                 {/* role="group" 是 aria-labelledby 的生效条件：挂在无 role 的通用 div
                     上，辅助技术基本会忽略这条标注，分组语义等于没接。它不影响布局
