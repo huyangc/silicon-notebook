@@ -174,3 +174,138 @@ def test_publish_snapshot_is_fail_open_and_skips_empty_uid():
         pb_module.publish_snapshot("u1")  # 不得抛
     finally:
         pb_module.pending_bus.mark_dirty = original
+
+
+# --- 订阅闸:没人在看时不重算 -------------------------------------------------
+
+
+def test_recompute_is_skipped_for_a_user_nobody_is_watching():
+    """loop 已绑定,但**这个 user** 没人订阅 → 一次 recompute 都不跑。
+
+    `bind_loop` 是进程级且绑定后不解绑:进程内只要有一个人打开过铃铛,原先那道
+    "loop is None 就返回"对所有其他用户就永久失效了,于是每次发布都白算一遍完整
+    快照(6 个投影查询 + 逐库索引状态),算完再被 `_fanout_snapshot` 丢掉。这条用例
+    钉的就是"白算"不再发生。
+    """
+    async def scenario():
+        bus = PendingBus()
+        calls: list = []
+        bus.set_recompute(lambda uid: calls.append(uid) or {"count": 0, "items": []})
+        bus.bind_loop()
+
+        # 有人订阅 u1,但 u2 无人订阅 —— 闸是 per-user 的,不是 per-process。
+        q = bus.register("u1")
+        try:
+            bus.mark_dirty("u2")
+            bus.mark_dirty_throttled("u2")
+            await asyncio.sleep(0.01)
+            assert calls == [], "没人在看 u2 的铃铛,不该为它查一次库"
+            assert bus._last_publish == {}, "被闸掉的发布不该留下限频时间戳"
+
+            bus.mark_dirty("u1")
+            await asyncio.sleep(0.01)
+            assert calls == ["u1"]
+            assert q.get_nowait()["kind"] == "snapshot"
+        finally:
+            bus.unregister("u1", q)
+
+    asyncio.run(scenario())
+
+
+def test_attach_and_detach_flip_the_subscriber_gate():
+    """闸随连接的建立/断开翻转,并与 `_conns`(投递用的那份)始终一致。
+
+    两份结构:`_conns` 是 loop 线程私有的投递结构,`_subscribers` 是给 job 线程跨线程
+    读的锁保护镜像。它们只在 register/unregister 两处成对维护——这条用例逐步核对,
+    以免哪天只改了一处,把"有人在看"读成"没人在看"、静默吞掉全部推送。
+    """
+    bus = PendingBus()
+    assert bus.has_subscribers("u1") is False
+
+    q1 = bus.register("u1")
+    assert bus.has_subscribers("u1") is True
+    assert bus.online_user_ids() == {"u1"}
+    assert bus.has_subscribers("u2") is False
+
+    # 同一 user 的第二条连接:断开其中一条仍算在线。
+    q2 = bus.register("u1")
+    bus.unregister("u1", q1)
+    assert bus.has_subscribers("u1") is True
+    assert bus.online_user_ids() == {"u1"}
+
+    bus.unregister("u1", q2)
+    assert bus.has_subscribers("u1") is False
+    assert bus.online_user_ids() == set()
+
+    # 重复 unregister(同一条连接的 finally 被走两次)不得把计数减成负数,
+    # 否则下一位订阅者会被判成"没人在看"。
+    bus.unregister("u1", q2)
+    q3 = bus.register("u1")
+    assert bus.has_subscribers("u1") is True
+    bus.unregister("u1", q3)
+    assert bus.has_subscribers("u1") is False
+
+    # reset()(测试夹具用)必须把镜像一起清掉,否则计数跨用例串味。
+    bus.register("u1")
+    bus.reset()
+    assert bus.has_subscribers("u1") is False
+
+
+def test_the_gate_is_readable_from_a_job_thread():
+    """闸必须能在 job 线程读到:`_conns` 是 loop 线程私有的,镜像才是跨线程那份。"""
+    import threading as _threading
+
+    async def scenario():
+        bus = PendingBus()
+        calls: list = []
+        bus.set_recompute(lambda uid: calls.append(uid) or {"count": 0, "items": []})
+        bus.bind_loop()
+        q = bus.register("u1")
+        seen: list = []
+        try:
+            def job() -> None:
+                seen.append(bus.has_subscribers("u1"))
+                seen.append(bus.has_subscribers("u2"))
+                bus.mark_dirty("u1")   # 重算就发生在这条线程上
+
+            t = _threading.Thread(target=job)
+            t.start()
+            t.join(2.0)
+            await asyncio.sleep(0.01)
+            assert seen == [True, False]
+            assert calls == ["u1"]
+            assert q.get_nowait()["kind"] == "snapshot"
+        finally:
+            bus.unregister("u1", q)
+
+    asyncio.run(scenario())
+
+
+def test_a_connection_attaching_after_the_gate_check_is_fail_open():
+    """闸后才接上来的连接会错过这一帧——刻意的,且不会让它看到陈旧状态。
+
+    闸是**投递等价**的:`_fanout_snapshot` 本来就在 `_conns` 为空时丢弃快照,加闸只
+    是把同一个判断提前到花掉一次重算之前。唯一收窄的是一个窄窗口——恰在 has_subscribers
+    之后、fan-out 之前接上来的连接。这条 fail-open 成立的理由是 SSE 端点自己的开场:
+    `me_pending_stream` 在 `register` 之前先用线程池算一帧完整快照发给新连接(REST 口径
+    的初始态),新连接的初始状态从来不靠捡这一帧;而每次提问必发起止两帧,后一帧一定
+    落在窗口之外。
+    """
+    async def scenario():
+        bus = PendingBus()
+        bus.set_recompute(lambda uid: {"count": 7, "items": []})
+        bus.bind_loop()
+
+        bus.mark_dirty("u1")           # 闸掉:此刻无人订阅
+        q = bus.register("u1")         # 之后才接上
+        await asyncio.sleep(0.01)
+        assert q.empty(), "错过的那一帧不补发(端点开场自带一帧 REST 快照)"
+
+        try:
+            bus.mark_dirty("u1")       # 下一帧照常送达 —— 闸没有粘住
+            await asyncio.sleep(0.01)
+            assert q.get_nowait()["data"]["count"] == 7
+        finally:
+            bus.unregister("u1", q)
+
+    asyncio.run(scenario())

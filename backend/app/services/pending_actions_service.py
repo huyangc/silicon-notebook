@@ -74,6 +74,9 @@ class PendingActionsService:
                 item["type"] == "index"
                 and item["state"] in ("stale", "suggested")
             )
+            # type "ask"(进行中的提问)同样不计入 count:它是**状态展示**,不是
+            # 「待你确认」的动作——用户几秒前刚发起它,让它响铃就是每问一个问题
+            # 都响一次。呈现照旧(条目在 items 里),只是不进这个数。
             # paper_meta building 不计入 count(跟 index building 一致——只显示，不响铃)
         )
         return {"count": count, "items": items}

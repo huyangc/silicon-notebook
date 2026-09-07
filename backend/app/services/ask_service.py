@@ -76,6 +76,9 @@ from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancel
 from app.services.citation_markers import LOOSE_MARKER_RE, MARKER_RE, marker_keys
 from app.services.evidence_context import anchor_image_targets
 from app.services.model_work import ModelNotConfiguredError
+# 待确认中心「进行中的提问」的推送入口(同步 Ask 路径)。``pending_bus`` 是叶子
+# 模块,模块级 import 不构成 import SCC。
+from app.services.pending_bus import publish_snapshot
 from app.services.prompts import (
     ANSWER_SCHEMA_HINT,
     FOLLOWUP_REWRITE_SCHEMA_HINT,
@@ -781,31 +784,56 @@ class AskService:
         job_id, _conversation_id = self.begin_job_current(
             notebook_id, payload, mode.id, cancel_event
         )
+        # 待确认中心的「进行中的提问」:起点一次、终点一次,中间不推(同步路径没有
+        # 进度点)。`finally` 覆盖全部四个终态出口——三条抛出的和一条正常返回的——
+        # 而不是在每个 `finish_job` 旁边各抄一遍;抄四遍迟早会漏掉后来新增的那条,
+        # 而漏掉的形态是「铃铛上留着一条永远不消失的进行中提问」。fail-open,见
+        # `publish_snapshot` 自己的 docstring。
+        #
+        # 这两次**刻意留在请求线程上**,与流式那条(跑在 worker 线程里)不同:
+        # - 代价有界。铃铛没打开时是一次锁保护的字典读(`PendingBus.has_subscribers`
+        #   在重算之前就挡住),这是绝大多数请求的形态;打开着时是两次
+        #   `pending_actions` 重算,加在一个本来就要阻塞若干秒等模型的同步请求上。
+        #   同步路径没有进度点,所以永远恰好两次,不随提问复杂度增长。
+        # - 挪走会换来一个更坏的错。快照是绝对值不是增量,谁最后到就是谁说了算;而
+        #   `mark_dirty` 的重算跑在调用线程,投递顺序 = 重算完成顺序。把两次推送各扔
+        #   进一条新后台线程,起点那次(含「进行中」条目)就可能落在终点那次之后,在
+        #   铃铛上留下一条永不消失的假进行中项——快速失败的提问(校验不过 / 模型未配置)
+        #   两次提交只隔毫秒,这个倒序完全够得着。流式那条能挪出请求线程,正是因为它的
+        #   两次推送在**同一条 worker 线程**上,天然有序。
+        # 顺序不变量由 test_pending_actions.py 的「同一线程」用例钉住:要挪走它,得先
+        # 有一条按 user 串行的发布通道。
+        publish_snapshot(user_id)
         try:
-            response = self.ask(
-                notebook_id,
-                payload,
-                user_id=user_id,
-                job_id=job_id,
-                cancel_event=cancel_event,
-            )
-        except AskCancelled:
-            self.finish_job(job_id, "cancelled")
-            raise
-        except BaseException as exc:
-            self.finish_job(
-                job_id, "failed", error=f"{type(exc).__name__}: {exc}"
-            )
-            raise
-        answer_id = str(getattr(response, "answer_id", "") or "")
-        if not answer_id:
-            error = RuntimeError("synchronous Ask completed without a durable answer")
-            self.finish_job(
-                job_id, "failed", error=f"{type(error).__name__}: {error}"
-            )
-            raise error
-        self.finish_job(job_id, "done", answer_id=answer_id)
-        return response
+            try:
+                response = self.ask(
+                    notebook_id,
+                    payload,
+                    user_id=user_id,
+                    job_id=job_id,
+                    cancel_event=cancel_event,
+                )
+            except AskCancelled:
+                self.finish_job(job_id, "cancelled")
+                raise
+            except BaseException as exc:
+                self.finish_job(
+                    job_id, "failed", error=f"{type(exc).__name__}: {exc}"
+                )
+                raise
+            answer_id = str(getattr(response, "answer_id", "") or "")
+            if not answer_id:
+                error = RuntimeError(
+                    "synchronous Ask completed without a durable answer"
+                )
+                self.finish_job(
+                    job_id, "failed", error=f"{type(error).__name__}: {error}"
+                )
+                raise error
+            self.finish_job(job_id, "done", answer_id=answer_id)
+            return response
+        finally:
+            publish_snapshot(user_id)
 
     def ask_chunk_current(
         self, notebook_id: str, payload: AskRequest, cancel_event: CancelEvent = None

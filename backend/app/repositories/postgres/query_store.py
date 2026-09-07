@@ -25,6 +25,11 @@ from app.models.sources import (
 )
 from app.repositories.group_rows import SHARED_TO_GROUPS_COLUMN
 from app.repositories.like_pattern import escape_like_pattern
+from app.repositories.pending_action_rows import (
+    RUNNING_ASK_ROWS,
+    RUNNING_ASK_STATUSES,
+    running_ask_item,
+)
 from app.repositories.postgres import access_sql
 from app.repositories.postgres._store_utils import (
     iso_timestamp,
@@ -1362,6 +1367,47 @@ class QueryStore:
             paper_meta_counts=paper_meta_counts,
         )
 
+    def _running_ask_items(self, db: object, user_id: str) -> list[dict]:
+        """SQLite 侧 ``_running_ask_items`` 的孪生实现——投影字段、属主隔离、读权与
+        生命周期过滤、排序与上限逐条对应,理由见那一份 docstring。
+
+        两处方言差异,都只是写法:占位符是 ``%s``;``asked_at`` 是 ``text``(直接用),
+        而 ``created_at`` 是 ``timestamptz``,回落时要经 ``iso_timestamp`` 转成与
+        SQLite 同形的 ISO 串——否则同一条待办在两个后端的 ``asked_at`` 类型不同。
+        排序表达式与 ``idx_ask_jobs_creator_activity``(0040)逐字一致。
+        """
+        placeholders = ",".join("%s" for _ in RUNNING_ASK_STATUSES)
+        rows = db.execute(
+            "SELECT j.id AS id, j.question AS question, j.status AS status, "
+            "j.notebook_id AS notebook_id, j.conversation_id AS conversation_id, "
+            "j.asked_at AS asked_at, j.created_at AS created_at, "
+            "nb.name AS notebook_name "
+            "FROM ask_jobs j JOIN notebooks nb ON nb.id = j.notebook_id "
+            f"WHERE j.created_by = %s AND j.status IN ({placeholders}) "
+            f"AND nb.{access_sql.NOTEBOOK_LIVE_SQL} AND "
+            + access_sql.read_access_clause()
+            + f" ORDER BY {_absolute_instant('j.created_at')} DESC, j.id DESC "
+            "LIMIT %s",
+            (
+                user_id,
+                *RUNNING_ASK_STATUSES,
+                *access_sql.read_access_params(user_id),
+                RUNNING_ASK_ROWS,
+            ),
+        ).fetchall()
+        return [
+            running_ask_item(
+                job_id=row["id"],
+                notebook_id=row["notebook_id"],
+                notebook_name=row["notebook_name"],
+                conversation_id=row["conversation_id"],
+                question=row["question"],
+                status=row["status"],
+                asked_at=row["asked_at"] or iso_timestamp(row["created_at"]) or "",
+            )
+            for row in rows
+        ]
+
     def pending_actions_projection_rows(self, user_id: str) -> dict:
         items: list[dict[str, Any]] = []
         with self.database.connect() as db:
@@ -1424,6 +1470,9 @@ class QueryStore:
                         "count": int(row["c"]),
                     }
                 )
+            # 「进行中的提问」同样在 `if notebook_ids:` **之外**,理由与 SQLite 侧
+            # 逐字相同(谓词不消费 notebook id)。
+            items.extend(self._running_ask_items(db, user_id))
             if notebook_ids:
                 role_row = db.execute(
                     "SELECT role FROM users WHERE id = %s", (user_id,)
