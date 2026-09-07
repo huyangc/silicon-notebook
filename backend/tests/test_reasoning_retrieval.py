@@ -8077,6 +8077,34 @@ def test_assessment_only_accepts_keys_that_were_actually_shown():
     assert row.demotion == DEMOTION_KEYS_REJECTED
 
 
+def test_run_level_assessment_rejects_a_pool_key_that_was_never_rendered(rrepo):
+    """run 级:池子里有、但**从没渲染进任何一轮 prompt** 的键一样不算支撑。
+
+    `ck-q0` 确实在候选池里(它就是首轮播种拿到的那一段),但证据预算被压到装不下
+    任何一张卡,所以模型这一轮一个键都没见过。它把这个键抄进 supported ——服务端
+    必须剔掉它并拒绝把这个方面记成已支撑。
+
+    变异:把 `_absorb_assessment` 的 `outline_binding_keys(...)` 换成"池子里所有
+    键"(即去掉「必须曾展示」这一半)⇒ 这条红。上面那条单元用例钉的是账本自己的
+    过滤,这一条钉的是**接线**——两处缺一,那个变异就能从缝里过去。
+    """
+    zero_budget = {effort: 1 for effort in (
+        "overview", "standard", "deep", "thorough", "exhaustive")}
+    llm, result = _v2_aspect_run(
+        rrepo,
+        intent_detail={"mandatory_topics": ["问题一"]},
+        reasoning_reflect_evidence_chars_by_effort=zero_budget,
+        reflects=[_answer(assessment={"supported": [
+            {"aspect_id": "a1", "evidence_keys": ["ck-q0"]}]})],
+    )
+    # 前提成立:这一轮真的一张卡都没渲染,而那个键真的在池子里。
+    assert llm.evidence_lines(0) == []
+    assert any(c.chunk_id == "ck-q0" for c in result.chunks)
+    aspect = result.termination.aspects[0]
+    assert aspect.evidence_keys == () and aspect.status != "supported"
+    assert result.termination.unresolved_aspect_ids == ("a1",)
+
+
 def test_assessment_keeps_only_the_legal_half_of_a_mixed_key_list():
     """非法键**剔除**而不是拒整份:抄错一个键不该作废它对别的方面的判断。"""
     ledger = _ledger("问题一", "问题二")
