@@ -68,7 +68,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import ts from "typescript";
 
-import { appSourceModules, findFunction, parseModule } from "../../test-support/semantic-source.mjs";
+import { appSourceModules, findFunction, parseModule, parseText } from "../../test-support/semantic-source.mjs";
 
 // Hook files that intentionally do not own a notebook/actor-scoped "view"
 // object at all, and are therefore out of scope for this guard entirely.
@@ -176,6 +176,22 @@ function isUnstableEmptyBranch(node) {
   return false;
 }
 
+// A bare `state ?? []` / `state || {}` sitting directly as a property value
+// or a local initializer (no ternary around it) is the same instability with
+// one fewer token: whenever `state` is nullish/falsy the field is a fresh
+// literal per render. Until 2026-09-07 only ternary branches were judged, so
+// this spelling escaped the guard (found while extracting
+// use-promotion-queue.ts / use-edge-review-queue.ts, which were rewritten to
+// the ternary shape precisely to be covered). Top-level fallbacks are now
+// judged with the same `isUnstableEmptyBranch` rule as a ternary branch.
+function isNullishOrOrFallback(expression) {
+  return ts.isBinaryExpression(expression)
+    && (
+      expression.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken
+      || expression.operatorToken.kind === ts.SyntaxKind.BarBarToken
+    );
+}
+
 // Either branch being unstable is unstable — we don't assume which side of
 // the ternary is "the hidden-state fallback" vs. "the live data"; both
 // existing incidents put the bare literal on the `whenFalse` side, but
@@ -243,6 +259,13 @@ function scanObjectLiteralForUnstableEmpties(
           shape: shapeLabel,
         });
       }
+    } else if (isNullishOrOrFallback(value)) {
+      if (isUnstableEmptyBranch(value)) {
+        violations.push({
+          field: path,
+          shape: `${shapeLabel}（裸 \`??\` / \`||\` 兜底）`,
+        });
+      }
     } else if (ts.isObjectLiteralExpression(value)) {
       scanObjectLiteralForUnstableEmpties(value, sourceFile, path, violations, stats, shapeLabel);
     }
@@ -250,7 +273,12 @@ function scanObjectLiteralForUnstableEmpties(
 }
 
 async function scanHook(fileName, functionName) {
-  const sourceFile = await parseModule(fileName);
+  return scanHookSource(await parseModule(fileName), functionName);
+}
+
+// Split from `scanHook` so the synthetic-source tests below can feed an
+// in-memory module through the very same scan that runs over frontend/app/.
+function scanHookSource(sourceFile, functionName) {
   const hookFunctionNode = findFunction(sourceFile, functionName);
 
   const violations = [];
@@ -281,6 +309,13 @@ async function scanHook(fileName, functionName) {
         violations.push({
           field: name,
           shape: "局部变量声明（先算成变量再放进 return）",
+        });
+      }
+    } else if (isNullishOrOrFallback(initializer)) {
+      if (isUnstableEmptyBranch(initializer)) {
+        violations.push({
+          field: name,
+          shape: "局部变量声明（先算成变量再放进 return；裸 `??` / `||` 兜底）",
         });
       }
     } else if (ts.isObjectLiteralExpression(initializer)) {
@@ -414,4 +449,52 @@ test("workspace hooks never hand back a bare [] / {} literal for the owner-hidde
   );
 
   assert.deepEqual(offenders, []);
+});
+
+// Synthetic-source pins for the bare `??` / `||` fallback shapes. They feed
+// in-memory modules through the same scan as the real hooks, so a future
+// simplification of `scanObjectLiteralForUnstableEmpties` that quietly drops
+// the fallback branch turns these red instead of silently narrowing coverage.
+function syntheticHook(body) {
+  return parseText(
+    `const NO_ITEMS = Object.freeze([]);\nexport function useSynthetic(state) {\n${body}\n}\n`,
+    "use-synthetic.ts",
+  );
+}
+
+test("a bare `state ?? []` / `state || {}` view field is flagged like a ternary branch", () => {
+  const fields = scanHookSource(
+    syntheticHook("  return { items: state ?? [], meta: state || {}, live: state ? state : NO_ITEMS };"),
+    "useSynthetic",
+  );
+  assert.deepEqual(
+    fields.violations.map((violation) => violation.field),
+    ["items", "meta"],
+  );
+  assert.ok(
+    fields.violations.every((violation) => violation.shape.includes("裸 `??` / `||` 兜底")),
+    JSON.stringify(fields.violations),
+  );
+
+  const local = scanHookSource(
+    syntheticHook("  const selected = state ?? new Set();\n  return { selected };"),
+    "useSynthetic",
+  );
+  assert.deepEqual(local.violations.map((violation) => violation.field), ["selected"]);
+
+  const chained = scanHookSource(
+    syntheticHook("  return { items: state ?? (state.other || []) };"),
+    "useSynthetic",
+  );
+  assert.deepEqual(chained.violations.map((violation) => violation.field), ["items"]);
+});
+
+test("a bare `state ?? STABLE_CONST` fallback stays green", () => {
+  const scanned = scanHookSource(
+    syntheticHook("  const rows = state ?? NO_ITEMS;\n  return { items: state ?? NO_ITEMS, rows, name: state || \"\" };"),
+    "useSynthetic",
+  );
+  assert.deepEqual(scanned.violations, []);
+  assert.equal(scanned.scannedFields, 2); // `rows` is shorthand — not a `field: value` pair
+  assert.equal(scanned.localDeclarations, 1);
 });
