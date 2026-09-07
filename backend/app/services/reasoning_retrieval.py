@@ -51,6 +51,10 @@ from app.services.reasoning_actions import (
     ActionParam, ReflectCapabilities, ReflectCapabilityFacts,
     build_reflect_capabilities,
 )
+from app.services.reasoning_context import ReflectContext
+from app.services.reasoning_observation import (
+    ActionObservationLedger, render_observations,
+)
 from app.services.retrieval_experience_block import (
     CONSULT_MEMORY_TOP_K, action_id_for, adopted_entry_ids, clip_rationale,
     render_consult_block, render_experience_block,
@@ -191,6 +195,85 @@ def first_round_empty_note(chunk_search: bool, enumeration: bool) -> str:
     )
 
 
+def legacy_action_ledger_note(
+    visited, collected, neighbor_truncated, neighbor_expand_limit,
+    attempted, exact_lookup_log,
+) -> str:
+    """legacy reflect 每轮拼在候选摘要之后的**四段散文账目**,原样搬出来。
+
+    这是一次纯粹的位置变更:四段的判据、措辞、拼接顺序与前缀 ``\\n\\n`` 逐字节
+    与它们当初写在 `run()` 里时相同,调用处 `summary = f"{summary}{...}"` 与
+    原来的四次逐段追加等价(空账目返回空串,一个字符都不加)。搬出来的理由有两
+    个:`run()` 是零松弛长度天花板下的热函数,而 v2 用**动作观察账**取代这四段
+    重复回喂(设计稿 §6.1),两条协议因此需要一个能整体切换的边界——把这四段留在
+    循环里、只在外面套一个 `if`,等于把这个天花板的额度花在缩进上。
+
+    `tests/test_reasoning_retrieval.py` 有一条逐字节等价用例钉住这次搬迁。
+    """
+    note = ""
+    # 已展开过的节点回喂 reflect, 提示模型勿重复请求(治"反复 expand 同节点"根源)。
+    if visited:
+        vis = ", ".join(
+            f"{str(collected[o].payload.get('name', o)) if o in collected else o}"
+            for o in visited)
+        note = f"{note}\n\n（已展开过的节点，勿重复 expand_graph 请求它们: {vis}）"
+    # 邻居被上限截断的节点回喂 reflect(镜像上面几份账目):轨迹只对用户
+    # 可见,模型看不到就会把「只展开了前 N 个」当成「这个节点只有这些
+    # 邻居」,据此下结论。措辞要给出下一步该做什么——重复 expand_graph
+    # 只会命中 visited 判重、拿不到更多邻居。展示条数有界。
+    if neighbor_truncated:
+        # 节点名走与已确认方向简称同一条截长范式:节点名来自 payload,
+        # 可能是一整句话,原样重放会每轮顶掉半屏回喂预算。
+        shown = [
+            intent_direction_label(name)
+            for name in list(neighbor_truncated.values())[
+                :_NEIGHBOR_TRUNCATION_DISCLOSE]
+        ]
+        names = "、".join(f"「{n}」" for n in shown)
+        note = (
+            f"{note}\n\n（以下节点的关系数超过单次展开的每方向上限"
+            f"{neighbor_expand_limit},只展开了其中一部分邻居: {names}"
+            + (f" 等 {len(neighbor_truncated)} 个"
+               if len(neighbor_truncated) > _NEIGHBOR_TRUNCATION_DISCLOSE
+               else "")
+            + "。它们周边未展开的证据请改用针对性的 add_subquery 或"
+              "search_elements 定向检索;重复 expand_graph 请求同一节点"
+              "不会给出更多邻居。）")
+    # 已执行过的子查询账目回喂 reflect(镜像 visited 回喂,治"反复补充同
+    # 一条子查询"):模型据此区分"没查过"与"查过但没捞到";账目含尝试次数,
+    # 重复被跳过时 prompt 仍变化 → 不再是不动点,LLM 缓存不会逐字重放决策。
+    # 有 label 用 label(intent 路径:query 可能是「方向+已确认问题契约」的
+    # 复合串,原样重放每轮都要多花 ~150% 字符);无 label 回退原文 query
+    # (非 intent 路径,即模型 plan/add_subquery 产生的查询)——这是中性
+    # 硬约束,那条路径的渲染逐字节不变。
+    if attempted:
+        tried = "、".join(
+            f"「{a.label or a.query}」(新增{a.new}条"
+            + (f",已试{a.tries}次" if a.tries > 1 else "") + ")"
+            for a in attempted.values())
+        note = (f"{note}\n\n（已执行过的子查询及各自新增证据数: {tried}。"
+                "勿重复提交相同子查询;新增为 0 的方向请换明显不同的问法,"
+                "或改用其他动作。）")
+    # 已精确查找过的名称回喂 reflect(镜像上面的子查询账目):seed pass 那次
+    # 也在内,模型据此知道问题里的名称已经查过了,不必再花一轮请求同一个。
+    # 与子查询账目同理带尝试次数,重复被跳过时 prompt 仍变化 → 不是不动点。
+    # note 非空的行是被 skip 掉、根本没发起探测的尝试——渲染教学措辞而
+    # 非"新增N段"(那会谎称查过),模型才知道"为什么"而不只是"又没用"。
+    if exact_lookup_log:
+        looked_up = "、".join(
+            (a.note + (f"（已尝试{a.tries}次）" if a.tries > 1 else ""))
+            if a.note else
+            ("".join(f"「{t}」" for t in a.terms)
+             + f"(新增{a.new}段"
+             + (f",已试{a.tries}次" if a.tries > 1 else "") + ")")
+            for a in exact_lookup_log)
+        note = (f"{note}\n\n（已按名称精确查找过及各自结果: "
+                f"{looked_up}。勿重复请求相同名称;新增为 0 说明本笔记本内"
+                "未定位到该名称对应的完整章节(挂载的参考库不在精确查找"
+                "范围),请改用其他动作。）")
+    return note
+
+
 # 兜底原因里模型自由文本(非法动作名)的宽度上限。畸形响应可以把一整篇正文塞进
 # next_action,而这个串既上屏(trace summary)又进 detail。
 _REFLECT_FALLBACK_VALUE_CHARS = 60
@@ -303,17 +386,23 @@ class _V2ArgumentError(Exception):
         self.code = code
 
 
-def _reflect_invalid(reason: str) -> "ReflectDecision":
+def _reflect_invalid(reason: str, requested: str = "") -> "ReflectDecision":
     """invalid/unavailable 决定的唯一产地。
 
     `sufficient` 恒为 False:一份被判定不可执行的载荷里,那一格与其它字段一样是
     给那个做不成的动作填的,照单收下就会让 run() 的 `or decision.sufficient`
     短路把它当成一次「模型说够了」直接收尾——一个非法动作因此可以终止检索。
+
+    ``requested`` = 模型**本来想选的**那个动作 id(能认出来时)。`next_action`
+    已经被换成伪动作,这一格是唯一还记得"它想干什么"的地方;动作观察账拿它写
+    那一行,否则一条 `missing_argument:term` 的观察会显示成
+    `__reflect_invalid__`,模型下一轮既不知道是哪个动作缺参数,也无从改。
     """
     return ReflectDecision(
         sufficient=False,
         next_action=REFLECT_INVALID_ACTION,
         invalid_reason=reason,
+        invalid_requested_action=requested,
     )
 
 
@@ -468,6 +557,56 @@ def _v2_apply_enumerate(
         decision.enumerate_object_type = subtype
 
 
+def v2_request_identity(decision: "ReflectDecision") -> str:
+    """一次动作请求的**规范化身份**,给动作观察账当"请求"那一格用。
+
+    构成与 `ACTION_DEFINITIONS[...].identity_fields` 声明的一致:自由检索带
+    types/prefer,图动作带 edge_type/direction,枚举带 collection/子类型/来源。
+    这些参数参与身份,是因为"同一个 query 换一组 types"根本不是同一次请求。
+
+    ⚠ **它不是判重的判据。**真正拦下重复请求的仍然是各自的既有权威 ——
+    `attempted`(子查询)、`visited`(节点)、`exact_terms_done`(名称)、
+    `follow_chain_done`(链)、`enum_chains` 的 cursor 覆盖。这个串只被渲染,
+    从不被比较:一旦拿它去做判重,就等于凭空造出第二份可以与那些状态分叉的账,
+    而分叉的那一天没有任何测试会红(设计稿 §6.1)。
+    """
+    action = decision.next_action
+    if action == "add_subquery":
+        sub = decision.new_sub_query
+        if sub is None:
+            return ""
+        extras = (
+            ([f"types={','.join(sorted(sub.types))}"] if sub.types else [])
+            + ([f"prefer={sub.prefer}"] if sub.prefer else [])
+        )
+        return " ".join([sub.query, *extras])
+    if action == "search_elements":
+        return decision.elements_query
+    if action == "search_chunks":
+        return decision.chunks_query
+    if action == "ppr_retrieve":
+        return decision.ppr_query
+    if action == "exact_lookup":
+        return decision.exact_term
+    if action == "expand_graph":
+        return " ".join(part for part in (
+            decision.expand_object_id, decision.expand_edge_type or "",
+            f"dir={decision.expand_direction}") if part)
+    if action == "expand_community":
+        return decision.community_focal
+    if action == "follow_chain":
+        return " ".join(part for part in (
+            decision.chain_start_object_id, decision.chain_target_object_id,
+            decision.chain_edge_type or "",
+            f"dir={decision.chain_direction}") if part)
+    if action in (ENUMERATE_ELEMENTS_ACTION, ENUMERATE_KG_OBJECTS_ACTION):
+        return " ".join(part for part in (
+            decision.enumerate_collection, decision.enumerate_kind,
+            decision.enumerate_object_type, decision.enumerate_source_id,
+            decision.enumerate_source_title) if part)
+    return ""
+
+
 def parse_reflect_v2(
     data: dict, capabilities: "ReflectCapabilities",
 ) -> "ReflectDecision":
@@ -486,7 +625,8 @@ def parse_reflect_v2(
     if not capabilities.has(action):
         if action in ACTION_DEFINITIONS:
             reason = capabilities.reason_for(action) or "action_unavailable"
-            return _reflect_invalid(f"{_V2_UNAVAILABLE_PREFIX}{reason}")
+            return _reflect_invalid(
+                f"{_V2_UNAVAILABLE_PREFIX}{reason}", action)
         # 生产不可达:schema hint 的 `next_action` 枚举只列 13 个合法 id,传输层
         # `validate_model_json_shape`/`_validate_repaired_shape` 先以
         # `invalid_enum` 拒绝一切不在枚举里的值,重试耗尽后走既有 fail-open
@@ -500,11 +640,11 @@ def parse_reflect_v2(
         # 值用的协议里,`"false"` 也是真。生产不可达:hint 写的
         # `"sufficient":false` 让传输层先以 `invalid_boolean` 拒绝非 bool 值并
         # 走 fail-open;这里同 `_V2_UNKNOWN_ACTION` 一样只为纵深防御。
-        return _reflect_invalid(_V2_INVALID_SUFFICIENT)
+        return _reflect_invalid(_V2_INVALID_SUFFICIENT, action)
     if sufficient and ACTION_DEFINITIONS[action].produces_evidence:
         # 「再检索一次」与「证据已经够了」不能在同一轮同时成立。绝不静默地先跑
         # 那次检索再宣称充分:那会把一次没被看过的检索结果算进"已充分"的依据。
-        return _reflect_invalid(_V2_SUFFICIENT_CONTRADICTION)
+        return _reflect_invalid(_V2_SUFFICIENT_CONTRADICTION, action)
     arguments = data.get("arguments", {})
     if arguments is None:
         arguments = {}
@@ -512,7 +652,7 @@ def parse_reflect_v2(
         # 生产不可达:hint 写的 `"arguments":{}` 是开放对象,但类型仍是
         # object——传输层先以 `invalid_type` 拒绝非 dict 值并走 fail-open;
         # 同上,只为纵深防御。
-        return _reflect_invalid(_V2_INVALID_ARGUMENTS_OBJECT)
+        return _reflect_invalid(_V2_INVALID_ARGUMENTS_OBJECT, action)
     decision = ReflectDecision(
         sufficient=sufficient, next_action=action,
         reason=str(data.get("reason", "")),
@@ -524,7 +664,7 @@ def parse_reflect_v2(
     try:
         _v2_apply_arguments(action, arguments, capabilities, decision)
     except _V2ArgumentError as exc:
-        return _reflect_invalid(exc.code)
+        return _reflect_invalid(exc.code, action)
     return decision
 
 
@@ -2263,6 +2403,10 @@ class ReflectDecision:
     # 「模型没能给出可用响应」(provider/JSON 失败),这一族说的是「模型给了一个
     # 合规 JSON,但它选的事这一轮做不了」——两者对排查是完全不同的两件事。
     invalid_reason: str = ""
+    # 被折成 invalid/unavailable 之前,模型本来选的那个动作 id(认得出来时)。
+    # `next_action` 此时是伪动作,所以这是观察账唯一能说清"它想干什么"的一格。
+    # 空串 = 连动作名都认不出来(`unknown_action`),那时观察账如实不写动作名。
+    invalid_requested_action: str = ""
     # 模型对必答方面的自评(设计稿 §7)。**本期只解析、不消费**:T4 才把它接进
     # 终态与方面账目。留这个入口是为了让 v2 载荷从第一天起就允许携带它而不报错
     # ——一个「有它就崩」的解析器会逼 T4 去改协议版本。
@@ -2369,7 +2513,7 @@ class _TraceRecorder:
     不会中途重新构造或替换 `cancel_event`。
     """
 
-    __slots__ = ("_trace", "_cancel_event", "_on_step", "_last_ts")
+    __slots__ = ("_trace", "_cancel_event", "_on_step", "_last_ts", "observer")
 
     def __init__(self, trace: List[TraceStep], cancel_event: CancelEvent,
                  on_step) -> None:
@@ -2377,6 +2521,12 @@ class _TraceRecorder:
         self._cancel_event = cancel_event
         self._on_step = on_step
         self._last_ts = time.perf_counter()
+        # reflect v2 的动作观察账(设计稿 §6.1)。默认 None ⇒ **关闭态零新状态**:
+        # 没有账本对象、没有转换、没有多余分配,`__call__` 只多一次 `is not None`。
+        # 由 `run()` 在总闸开着时挂上——观察是 run 级的东西,而这个记账器是
+        # 首轮与循环唯一共用的那个把手,挂在这里首轮 seed 与循环动作就自动共用
+        # 同一次转换(设计稿要求),不必在十几条动作分支里各抄一句。
+        self.observer = None
 
     def __call__(self, step: TraceStep) -> None:
         raise_if_cancelled(self._cancel_event)
@@ -2384,6 +2534,8 @@ class _TraceRecorder:
         step.duration_ms = round((now - self._last_ts) * 1000)
         self._last_ts = now
         self._trace.append(step)
+        if self.observer is not None:
+            self.observer.observe(step)
         if self._on_step:
             self._on_step(step)
 
@@ -3203,9 +3355,44 @@ class ReasoningRetriever:
                 raise
             return _reflect_fallback(_reflect_fallback_reason(exc))
 
+    def _reflect_v2_context(
+        self, state: "_ReasoningRunState", summary: str,
+    ) -> "ReflectContext":
+        """一轮 v2 reflect 的 user 段材料:服务器状态 + 动作观察账。
+
+        两块各有自己的**具名**预算,谁也不许为了塞进别人的池子被裁尾(设计稿 §4):
+
+        * 服务器状态 = 调用方已经拼好的 `summary`(候选摘要、枚举覆盖、大纲便签、
+          集合地图、理解/打法/consult 块…)。它按各自既有的边界保留,这里一个字
+          都不动。
+        * 观察账 ← `reasoning_reflect_recent_observations` 与
+          `reasoning_reflect_state_chars`(只界定这一块可压缩区)。
+
+        `evidence` 这一格由本任务的下一步(证据卡)填,现在恒为空串——`ReflectContext`
+        装配时空块直接不渲染。
+
+        `getattr` 读 settings:窄测试替身与离线工具的 duck-typed 适配器不带这两
+        个字段(镜像 `reflect_v2_active` 的既有写法),缺省一律回到已登记的默认值,
+        绝不因为少一个字段就把预算当成 0。
+        """
+        settings = self.settings
+        observer = state.record.observer
+        return ReflectContext(
+            server_state=summary,
+            evidence="",
+            observations=render_observations(
+                observer.rows,
+                recent=int(getattr(
+                    settings, "reasoning_reflect_recent_observations", 6)),
+                state_chars=int(getattr(
+                    settings, "reasoning_reflect_state_chars", 6000)),
+            ),
+        )
+
     def reflect(self, question, candidates_summary, outline: bool = False,
                 consult_memory: bool = False, kg_actions: bool = True,
-                capabilities: "Optional[ReflectCapabilities]" = None):
+                capabilities: "Optional[ReflectCapabilities]" = None,
+                context: "Optional[ReflectContext]" = None):
         """``capabilities`` 非空 = 本轮走 v2 协议(设计稿 §5.2),由 `run()` 在
         总闸开启时构造并传入;None(默认,以及全部既有调用方与测试替身)= legacy
         路径,下面每一个字节与接入前相同。三把 legacy 闸(outline/consult_memory/
@@ -3237,8 +3424,14 @@ class ReasoningRetriever:
             # 排查是天差地别的两件事(一个是部署没接好,一个是推理结论)。
             return _reflect_fallback("model_unconfigured")
         if capabilities is not None:
+            # `context` 非空 = run() 已经把 user 段分好块(问题/服务器状态/证据卡/
+            # 观察账)。为空时退回"整段候选摘要"——T2 的窄用例与任何直接调
+            # `reflect(capabilities=...)` 的调用方因此不必改签名。
             return self._reflect_v2(
-                question, candidates_summary, capabilities, client)
+                question,
+                (context.as_user_block() if context is not None
+                 else candidates_summary),
+                capabilities, client)
         enumeration = self.enumeration_active()
         # `search_chunks` 的闸是部署级 kill switch,所以在这里现算而不是像
         # outline/consult_memory 那样从调用处传进来:它不看档位、不看请求,
@@ -5290,6 +5483,10 @@ class ReasoningRetriever:
             max_steps=max_steps, intent_queries=intent_queries,
             limits=limits, intent_detail=intent_detail,
         )
+        if self.reflect_v2_active():
+            # 观察账挂在首轮**之前**:首轮的确定性播种也要进账,而且要与循环动作
+            # 共用同一次转换(设计稿 §6.1)。关闭态这两行不执行,不构造任何新状态。
+            state.record.observer = ActionObservationLedger()
         self._run_first_round(state)
 
         # --- 首轮 → reflect 循环的交接 ---------------------------------------
@@ -5620,66 +5817,14 @@ class ReasoningRetriever:
                     if first_reflect else NO_NEW_EVIDENCE_NOTE
                 )
             first_reflect = False
-            # 已展开过的节点回喂 reflect, 提示模型勿重复请求(治"反复 expand 同节点"根源)。
-            if visited:
-                vis = ", ".join(
-                    f"{str(collected[o].payload.get('name', o)) if o in collected else o}"
-                    for o in visited)
-                summary = f"{summary}\n\n（已展开过的节点，勿重复 expand_graph 请求它们: {vis}）"
-            # 邻居被上限截断的节点回喂 reflect(镜像上面几份账目):轨迹只对用户
-            # 可见,模型看不到就会把「只展开了前 N 个」当成「这个节点只有这些
-            # 邻居」,据此下结论。措辞要给出下一步该做什么——重复 expand_graph
-            # 只会命中 visited 判重、拿不到更多邻居。展示条数有界。
-            if neighbor_truncated:
-                # 节点名走与已确认方向简称同一条截长范式:节点名来自 payload,
-                # 可能是一整句话,原样重放会每轮顶掉半屏回喂预算。
-                shown = [
-                    intent_direction_label(name)
-                    for name in list(neighbor_truncated.values())[
-                        :_NEIGHBOR_TRUNCATION_DISCLOSE]
-                ]
-                names = "、".join(f"「{n}」" for n in shown)
-                summary = (
-                    f"{summary}\n\n（以下节点的关系数超过单次展开的每方向上限"
-                    f"{neighbor_expand_limit},只展开了其中一部分邻居: {names}"
-                    + (f" 等 {len(neighbor_truncated)} 个"
-                       if len(neighbor_truncated) > _NEIGHBOR_TRUNCATION_DISCLOSE
-                       else "")
-                    + "。它们周边未展开的证据请改用针对性的 add_subquery 或"
-                      "search_elements 定向检索;重复 expand_graph 请求同一节点"
-                      "不会给出更多邻居。）")
-            # 已执行过的子查询账目回喂 reflect(镜像 visited 回喂,治"反复补充同
-            # 一条子查询"):模型据此区分"没查过"与"查过但没捞到";账目含尝试次数,
-            # 重复被跳过时 prompt 仍变化 → 不再是不动点,LLM 缓存不会逐字重放决策。
-            # 有 label 用 label(intent 路径:query 可能是「方向+已确认问题契约」的
-            # 复合串,原样重放每轮都要多花 ~150% 字符);无 label 回退原文 query
-            # (非 intent 路径,即模型 plan/add_subquery 产生的查询)——这是中性
-            # 硬约束,那条路径的渲染逐字节不变。
-            if attempted:
-                tried = "、".join(
-                    f"「{a.label or a.query}」(新增{a.new}条"
-                    + (f",已试{a.tries}次" if a.tries > 1 else "") + ")"
-                    for a in attempted.values())
-                summary = (f"{summary}\n\n（已执行过的子查询及各自新增证据数: {tried}。"
-                           "勿重复提交相同子查询;新增为 0 的方向请换明显不同的问法,"
-                           "或改用其他动作。）")
-            # 已精确查找过的名称回喂 reflect(镜像上面的子查询账目):seed pass 那次
-            # 也在内,模型据此知道问题里的名称已经查过了,不必再花一轮请求同一个。
-            # 与子查询账目同理带尝试次数,重复被跳过时 prompt 仍变化 → 不是不动点。
-            # note 非空的行是被 skip 掉、根本没发起探测的尝试——渲染教学措辞而
-            # 非"新增N段"(那会谎称查过),模型才知道"为什么"而不只是"又没用"。
-            if exact_lookup_log:
-                looked_up = "、".join(
-                    (a.note + (f"（已尝试{a.tries}次）" if a.tries > 1 else ""))
-                    if a.note else
-                    ("".join(f"「{t}」" for t in a.terms)
-                     + f"(新增{a.new}段"
-                     + (f",已试{a.tries}次" if a.tries > 1 else "") + ")")
-                    for a in exact_lookup_log)
-                summary = (f"{summary}\n\n（已按名称精确查找过及各自结果: "
-                           f"{looked_up}。勿重复请求相同名称;新增为 0 说明本笔记本内"
-                           "未定位到该名称对应的完整章节(挂载的参考库不在精确查找"
-                           "范围),请改用其他动作。）")
+            # legacy 的四段散文账目(visited / 邻居截断 / 子查询 / 精查名称)。
+            # v2 不拼它们:同一批事实由动作观察账一次性投影(设计稿 §6.1),而
+            # visited、方向身份、精查名称这些**状态本身**仍由原处拥有,观察账只是
+            # 它们的投影,不是可以分叉的第二份权威。
+            if capabilities is None:
+                summary += legacy_action_ledger_note(
+                    visited, collected, neighbor_truncated,
+                    neighbor_expand_limit, attempted, exact_lookup_log)
             # 未执行的已确认方向回喂 reflect(镜像上面几份账目):模型据此知道哪些
             # 用户确认过的方向还没跑过,可以优先用 add_subquery 把它们补上,而不是
             # 另起炉灶猜一个新角度。每轮按 attempted 现算 —— 模型真把某条补上了,
@@ -5825,8 +5970,18 @@ class ReasoningRetriever:
                 reflect_kwargs["consult_memory"] = True
             if capabilities is not None:
                 reflect_kwargs["capabilities"] = capabilities
+                # `summary` 到这里已经是完整的**服务器状态**块;证据卡与观察账是
+                # 另外两块,由这个 helper 各按自己的预算装配(设计稿 §6.3)。
+                reflect_kwargs["context"] = self._reflect_v2_context(
+                    state, summary)
             decision = self.reflect(question, summary, **reflect_kwargs)
             raise_if_cancelled(self.cancel_event)
+            if capabilities is not None:
+                state.record.observer.note_decision(
+                    (decision.invalid_requested_action
+                     or decision.next_action),
+                    v2_request_identity(decision),
+                    decision.reason, f"剩余步数 {max_steps - steps}")
             reflect_detail = {"next_action": decision.next_action,
                               "sufficient": decision.sufficient,
                               "no_progress": no_progress, "stale": stale}
