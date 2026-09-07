@@ -831,6 +831,109 @@ async def test_ask_notebook_reasoning_accepts_a_clear_question(mcp_env, monkeypa
     assert payload["answer_id"] == "ans-reasoning-clear"
 
 
+class _ReasoningSeqLLM:
+    """plan 固定、reflect 直接收敛到 answer、答案固定——只为把一次真实的
+    reasoning run 跑到合成,不做任何检索质量断言。"""
+
+    configured = True
+
+    def __init__(self) -> None:
+        self.answer_prompts: list[str] = []
+
+    def chat_json(self, messages, schema_hint, **kwargs):
+        if "sub_queries" in schema_hint:
+            return json.dumps({"sub_queries": [{"query": "evidence"}]})
+        if "next_action" in schema_hint:
+            return json.dumps({"next_action": "answer", "sufficient": True})
+        if '"relevant"' in schema_hint:
+            return json.dumps({"relevant": []})
+        self.answer_prompts.append(messages[-1]["content"])
+        return json.dumps({"answer": "Evidence exists [k1].", "grounded": True})
+
+
+@pytest.mark.anyio
+async def test_ask_notebook_reasoning_answers_a_notebook_without_a_kg(mcp_env):
+    """无图但有来源的笔记本,经 MCP 的 reasoning 也必须拿到真答案。
+
+    MCP 侧本来就没有 KG 闸(`mcp_tools/*` 与 `mcp_server.py` 里没有 `has_kg` /
+    `requires_kg` 的任何引用),所以这条钉的是**后端早退**不再挡住它:早退现在只在
+    「无图 且 集合枚举拿不出东西 且 范围内一条可检索来源都没有」时发生。注册表把
+    reasoning 的 `requires_kg` 翻成 False 之后,前端提交闸也不再拦——MCP 与 UI 从
+    这里起是同一套判定,这条用例守的就是别再从后端把它悄悄堵回去。
+
+    `kg_required` 不在 MCP 投影里(投影只带 answer/anchors/citations 那几个键),
+    所以从真身 `ask` 的返回值上取:它必须仍然如实为 True——放行只是不再阻断,
+    不是把「这个库没有图」说成假的。
+
+    如实登记本用例的性质:它是一条**守门**用例,不是本次改动的差分证据。改动前
+    这个笔记本靠 `_no_kg_scope_admits_run` 的来源计数就已放行,所以改动前后都绿;
+    早退拆分本身的差分证据在 `test_typed_collection_result_sets.py` 的两把 kill
+    switch 三条用例里。这里守的是 MCP 这条入口从今往后不长出 KG 门。
+    """
+    from app.services.sqlite_repository import _now
+
+    repo = repository()
+    now = _now()
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO sources (id,notebook_id,title,source_type,status,"
+            "parse_status,file_name,file_path,file_size,file_hash,summary,"
+            "doc_type,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("mcp-nokg-source", mcp_env["notebook"].id, "Evidence", "markdown",
+             "extracted", "parsed", "e.md", "", 0, "", "", "textbook", now, now),
+        )
+        db.execute(
+            "INSERT INTO chunks (id,notebook_id,source_id,text,section_path,"
+            "element_ids,created_at) VALUES (?,?,?,?,?,?,?)",
+            ("mcp-nokg-chunk", mcp_env["notebook"].id, "mcp-nokg-source",
+             "the threshold voltage is set by the doping profile", "1", "[]", now),
+        )
+    repo.collection_catalog.invalidate()
+    # 前提:这个笔记本确实没有图(一条 knowledge_objects 行都没有,也没挂参考库)
+    # ——否则这条测的不是无图路径。
+    assert repo.retrieval.has_kg(mcp_env["notebook"].id) is False
+    assert repo.retrieval.any_base_has_kg(mcp_env["notebook"].id) is False
+
+    llm = _ReasoningSeqLLM()
+    for role in ("reasoning_agent", "evidence_refine", "ask_answer"):
+        bind_chat_client(repo, role, llm)
+
+    responses: list[object] = []
+    real_ask = repo.ask
+
+    def recording_ask(*args, **kwargs):
+        response = real_ask(*args, **kwargs)
+        responses.append(response)
+        return response
+
+    repo.ask = recording_ask  # type: ignore[method-assign]
+    try:
+        async with OfficialMcpClient(
+            mcp_env["app"], mcp_env["token_a"].token
+        ) as client:
+            _payload(await client.call(
+                "select_notebook", {"notebook_id": mcp_env["notebook"].id}
+            ))
+            result = await client.call(
+                "ask_notebook",
+                {"question": "阈值电压由什么决定", "mode": "reasoning"},
+            )
+    finally:
+        del repo.ask
+
+    assert not result.isError, result
+    payload = _payload(result)
+    assert payload["mode"] == "reasoning"
+    # 不是那句零源早退,而且整个回答里不再出现「先建图」的旧措辞。
+    assert "没有可用来源" not in payload["conclusion"]
+    assert "没有可用来源" not in payload["answer"]
+    assert "知识图谱" not in payload["conclusion"]
+    assert llm.answer_prompts, "reasoning 没跑到合成,被某个前置闸挡住了"
+    assert responses and responses[-1].kg_required is True
+    assert responses[-1].llm_mode != "deterministic"
+
+
 class _FakeAskEngineHost:
     """Stand-in for extensions.ask_engine.AskEngineHost's read surface only --
     the three methods _validate_ask_mode actually calls."""

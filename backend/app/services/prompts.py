@@ -413,7 +413,7 @@ PLAN_SCHEMA_HINT = (
 def plan_prompt(
     question: str, history_block: str = "", collection_map: str = "",
     profile_block: str = "", experience_block: str = "",
-    *, style_block: str = "",
+    *, style_block: str = "", kg_available: bool = True,
 ) -> str:
     history_section = (
         "Prior conversation (resolve pronouns/ellipsis against it):\n"
@@ -448,14 +448,51 @@ def plan_prompt(
     # spelling (see the NOTE above); the parameter is added here too so the
     # two spellings never state different plans.
     style_section = f"{style_block}\n\n" if style_block else ""
-    return (
+    # ``kg_available`` is a run-level GATE (not an L2 data block, so it is
+    # deliberately NOT registered in ``prompt_layers.L2_BLOCKS``: the two-way
+    # reconciliation there only covers parameters named after a registered
+    # block id).  False = this run's retrieval scope holds no knowledge graph
+    # (``reasoning_retrieval.kg_in_scope_for``), so the KG framing of the
+    # opening paragraph would describe a store that does not exist; the JSON
+    # contract is untouched (``types`` stays a legal, ignorable list).  True is
+    # byte-for-byte the text this function produced before the gate existed.
+    #
+    # The "must be added to BOTH spellings" discipline of the NOTE above does
+    # NOT require a matching gate in ``expand_query_prompt``: that discipline
+    # exists so the two spellings never state DIFFERENT plans, and
+    # ``expand_query_prompt``'s own opening sentence is already KG-neutral
+    # ("retrieval over a document corpus") — the only KG wording it carries is
+    # the ``want_types`` line, which is a separate caller-supplied gate and is
+    # untouched here.  Adding this gate therefore moves the backup spelling
+    # TOWARD the production one rather than away from it, and the L1 fragment
+    # ``expand_query.decomposition_guidance`` (the decomposition heuristics the
+    # BOTH-rule was written for) is not touched at all.
+    kg_opening = (
         "You plan how to retrieve a knowledge graph (KG) to answer an "
         "engineer's question. The KG has 4 node types: concept (definitions), "
         "claim (conclusions), formula (math/models), procedure (step flows).\n"
+        if kg_available else
+        "You plan how to retrieve evidence from a document library to answer "
+        "an engineer's question. Sub-queries are run against source passages; "
+        "the `types` field is ignored when the library has no knowledge "
+        "graph.\n"
+    )
+    # The ``types`` field description names "the 4" node types the KG opening
+    # paragraph introduces; with that paragraph gone the reference dangles, so
+    # the False branch says what the field actually does in a graph-less run
+    # instead of pointing at a list the prompt no longer contains.
+    types_field = (
+        "- types: which node types to search (subset of the 4; omit/empty = all).\n"
+        if kg_available else
+        "- types: ignored when the library has no knowledge graph; leave it "
+        "empty.\n"
+    )
+    return (
+        f"{kg_opening}"
         "Decompose the question into 1-N standalone sub-queries. For EACH:\n"
         "- query: a self-contained search string (resolve any references using "
         "the prior conversation).\n"
-        "- types: which node types to search (subset of the 4; omit/empty = all).\n"
+        f"{types_field}"
         "- prefer: keyword (exact terms/codes), semantic (paraphrase/concept), "
         "or balanced.\n"
         "- reason: one line on why this sub-query.\n"
@@ -479,6 +516,8 @@ def reflect_schema_hint(
     object_types: Sequence[str] = (),
     outline: bool = False,
     consult_memory: bool = False,
+    search_chunks: bool = False,
+    kg_actions: bool = True,
 ) -> str:
     """The reflect response schema, with the enumeration branch iff offered.
 
@@ -500,14 +539,48 @@ def reflect_schema_hint(
     ``reasoning_retrieval.consult_memory_active``). It adds no schema FIELDS —
     the action takes no parameters — only one more word to the ``next_action``
     enum, so False leaves every other byte of the schema untouched.
+
+    ``search_chunks`` is a FOURTH gate on the same principle, and the only one
+    of the four that is a pure deployment kill switch
+    (``REASONING_CHUNK_SEARCH_ENABLED``, resolved once per run by
+    ``reasoning_retrieval.ReasoningRetriever.chunk_search_active``). It adds one
+    word to the ``next_action`` enum and one field (``chunks_query``) to the
+    tail group, so False is again byte-for-byte the schema from before the
+    action existed.
+
+    ``kg_actions`` is the one gate that SUBTRACTS. False = this run's retrieval
+    scope holds no knowledge graph (``reasoning_retrieval.kg_in_scope_for``), so
+    the five graph-shaped actions (``expand_graph``, ``ppr_retrieve``,
+    ``expand_community``, ``follow_chain``, ``enumerate_kg_objects``) and their
+    parameter branches (``expand``, ``follow_chain``, ``community_focal``,
+    ``ppr_query``, ``enumerate.object_type``) are removed — they could only ever
+    return empty. It is a run-level FACT, not a deployment switch, so it rides
+    the same precedent as the enumeration/outline/consult_memory gates. True
+    (the default, and every pre-existing caller) is byte-for-byte the schema
+    from before the gate existed.
     """
     actions = (
         "answer|expand_graph|add_subquery|"
         "search_elements|ppr_retrieve|expand_community|follow_chain|exact_lookup"
+        if kg_actions else
+        "answer|add_subquery|search_elements|exact_lookup"
     )
+    if search_chunks:
+        actions += "|search_chunks"
+    # Shown beside the other free-text retrieval fields in the tail group, and
+    # only when the action exists — an unusable field in the template is a
+    # field some model will fill in anyway.
+    chunks_query_field = '"chunks_query":"",' if search_chunks else ""
     enumerate_branch = ""
     if element_kinds or object_types:
-        actions += "|enumerate_elements|enumerate_kg_objects"
+        # Two INDEPENDENT branches now: listing document elements needs no
+        # graph, listing extracted knowledge objects is meaningless without
+        # one. The enumerate branch itself still rides the single enumeration
+        # gate (``element_kinds or object_types``) so ``kg_actions=True`` is
+        # byte-for-byte what it was, in every whitelist combination.
+        actions += "|enumerate_elements"
+        if kg_actions:
+            actions += "|enumerate_kg_objects"
         # ``collection`` is the third collection's whole model-facing surface:
         # the action space stays at ten ids and the document roster arrives as a
         # PARAMETER value beside kind/object_type (design doc §6.2).  It rides
@@ -523,9 +596,13 @@ def reflect_schema_hint(
         # listing into the document roster.  The value belongs in the ACTION
         # DESCRIPTION, where it reads as a conditional instruction; the schema
         # only has to show the field exists and defaults to absent.
+        object_type_field = (
+            '"object_type":"' + "|".join(object_types) + '",'
+            if kg_actions else ""
+        )
         enumerate_branch = (
             '"enumerate":{"kind":"' + "|".join(element_kinds) + '",'
-            '"object_type":"' + "|".join(object_types) + '",'
+            + object_type_field +
             '"collection":"",'
             '"source_id":"","source_title":""},'
         )
@@ -543,14 +620,34 @@ def reflect_schema_hint(
             '"outline":{"sections":[{"id":"","title":"","parent":"",'
             '"evidence":[""],"remove_evidence":[""]}]},'
         )
-    return (
-        '{"sufficient":false,"next_action":"' + actions + '","expand":'
-        '{"object_id":"","edge_type":null,'
-        '"direction":"out|in|both"},"new_sub_query":{"query":"","types":[],'
-        '"prefer":"balanced","reason":""},"follow_chain":{"start_object_id":"",'
+    # The four graph-shaped parameter branches. Each is spelled in the exact
+    # position (and with the exact bytes) it occupied before the gate existed,
+    # so ``kg_actions=True`` reassembles the previous string character for
+    # character; ``False`` removes the fields whose actions are gone rather
+    # than leaving the model a template slot it can fill in anyway.
+    expand_branch = (
+        '"expand":{"object_id":"","edge_type":null,'
+        '"direction":"out|in|both"},' if kg_actions else ""
+    )
+    chain_branch = (
+        '"follow_chain":{"start_object_id":"",'
         '"target_object_id":"","edge_type":null,"direction":"out|in|both"},'
-        + enumerate_branch + outline_branch +
-        '"community_focal":"","elements_query":"","ppr_query":"","exact_term":"",'
+        if kg_actions else ""
+    )
+    community_focal_field = '"community_focal":"",' if kg_actions else ""
+    ppr_query_field = '"ppr_query":"",' if kg_actions else ""
+    return (
+        '{"sufficient":false,"next_action":"' + actions + '",'
+        + expand_branch +
+        '"new_sub_query":{"query":"","types":[],'
+        '"prefer":"balanced","reason":""},'
+        + chain_branch
+        + enumerate_branch + outline_branch
+        + community_focal_field
+        + '"elements_query":"",'
+        + ppr_query_field
+        + '"exact_term":"",'
+        + chunks_query_field +
         '"reason":""}'
     )
 
@@ -565,6 +662,8 @@ def reflect_prompt(
     object_types: Sequence[str] = (),
     outline: bool = False,
     consult_memory: bool = False,
+    search_chunks: bool = False,
+    kg_actions: bool = True,
 ) -> str:
     """Next-step decision prompt.
 
@@ -580,18 +679,81 @@ def reflect_prompt(
     (deep-and-above effort AND the experience-library injection switch, see
     ``reasoning_retrieval.consult_memory_active``); False = it is not, and
     every byte of this prompt is what it was before the action existed.
+
+    ``search_chunks`` True = the raw-passage retrieval action is offered this
+    run (deployment kill switch ``REASONING_CHUNK_SEARCH_ENABLED``, resolved
+    once per run by ``ReasoningRetriever.chunk_search_active``); False = it is
+    not, and once more every byte is what it was before the action existed.
+
+    ``kg_actions`` False = this run's retrieval scope holds NO knowledge graph
+    (``reasoning_retrieval.kg_in_scope_for``), so the five graph-shaped actions
+    (``expand_graph``, ``ppr_retrieve``, ``expand_community``, ``follow_chain``,
+    ``enumerate_kg_objects``) are not offered, and — just as importantly —
+    every OTHER sentence that names one of them is rewritten or dropped: a
+    prompt that keeps telling the model to compare ``search_chunks`` against
+    ``ppr_retrieve``, or to fill ``ppr_query`` carefully, is a prompt that
+    advertises actions the schema and the whitelist will both reject. True (the
+    default) is byte-for-byte the prompt from before this gate existed.
     """
     enumeration_tools = bool(element_kinds or object_types)
+    # Placed right after ``add_subquery`` so the three passage-shaped channels
+    # read as a group. The last sentence is the whole reason the action needs a
+    # description at all: a model that already has ``search_elements`` and
+    # ``ppr_retrieve`` will otherwise never guess what a THIRD passage action
+    # is for.
+    #
+    # The two ``kg_actions`` seams inside it name actions that do not exist in
+    # a graph-less run ("the knowledge graph is thin or absent" is also simply
+    # untrue there — it is absent, full stop, and saying "thin" invites the
+    # model to keep probing for it). Both are spelled as suffix/infix clauses so
+    # the gate-open text is byte-for-byte the sentence from before T2.
+    search_chunks_action = (
+        "- search_chunks: retrieve raw SOURCE PASSAGES from the documents "
+        "themselves, by semantics and keywords (set chunks_query). Reach for it "
+        "when the candidates carry no passage-level evidence for what the "
+        "question asks"
+        + (", or when the knowledge graph is thin or absent"
+           if kg_actions else "")
+        + ". It "
+        "differs from search_elements (which returns TYPED document elements — "
+        "formulas, tables, figures)"
+        + (" and from ppr_retrieve (which propagates "
+           "through the graph)" if kg_actions else "")
+        + ": this one searches the passage text directly, so it "
+        "works even with no graph at all.\n"
+        if search_chunks else ""
+    )
     # The reflect-local half of the scope-grounding rule: this is the prompt with
-    # four separate free-text retrieval fields, and each of them is a place a
-    # scope word can leak back in after the paragraph above told the model to
+    # four separate free-text retrieval fields (FIVE once ``search_chunks``
+    # offers ``chunks_query``), and each of them is a place a scope word can leak
+    # back in after the paragraph above told the model to
     # drop it. ``exact_term`` is named explicitly because it is the one field
     # that is matched LITERALLY — "当前notebook" as an exact_term is a guaranteed
     # zero-hit probe. The library-composition sentence only appears with the
     # tools, since the counts line it points at only exists then.
+    #
+    # ``chunks_query`` is listed here for the same reason as the other four and
+    # ONLY when its action exists: an enumeration that silently omits a live
+    # retrieval field is worse than no enumeration, because the model reads the
+    # list as exhaustive and treats the unlisted field as exempt. With the gate
+    # closed the sentence is byte-for-byte what it was before the field existed.
+    # ``exact_term`` stays LAST so the "exact_term especially" clause that
+    # follows still lands on the field it names.
+    #
+    # ``ppr_query`` drops out of the list with its action (``kg_actions``): the
+    # list is read as EXHAUSTIVE, so naming a field the schema does not offer is
+    # the mirror image of the omission problem described above. ``exact_term``
+    # stays out of the joined list so the "exact_term especially" clause that
+    # follows still lands on the field it names.
+    scope_fields = ["new_sub_query.query", "elements_query"]
+    if kg_actions:
+        scope_fields.append("ppr_query")
+    if search_chunks:
+        scope_fields.append("chunks_query")
     scope_fields_rule = (
-        "This applies to every retrieval field you fill: new_sub_query.query, "
-        "elements_query, ppr_query and exact_term. exact_term especially — it "
+        "This applies to every retrieval field you fill: "
+        + ", ".join(scope_fields)
+        + " and exact_term. exact_term especially — it "
         "is matched literally against document text, so a scope word there "
         "returns nothing.\n"
         + (
@@ -616,16 +778,33 @@ def reflect_prompt(
         "action when the title matches no source or more than one); use "
         "enumerate.source_id only if an id was given to you. Leave both empty "
         "to cover the whole scope.\n"
-        "- enumerate_kg_objects: the same, for extracted knowledge objects of "
-        "one type. Set enumerate.object_type to one of: "
-        + ", ".join(object_types) + ".\n"
-        "- enumerate.collection is EMPTY for both actions above; set it to "
+        # The knowledge-object listing rides ``kg_actions``: with no graph in
+        # scope there are no extracted objects to walk, and the schema drops
+        # ``enumerate.object_type`` alongside it.
+        + (
+            "- enumerate_kg_objects: the same, for extracted knowledge objects "
+            "of one type. Set enumerate.object_type to one of: "
+            + ", ".join(object_types) + ".\n"
+            if kg_actions else ""
+        )
+        + "- enumerate.collection is EMPTY for "
+        + ("both actions above" if kg_actions else "the action above")
+        + "; set it to "
         "\"sources\" ONLY to list the DOCUMENTS themselves instead of anything "
         "inside them, and leave it empty in every other enumerate call — it "
-        "OVERRIDES the action and its kind/object_type, so carrying it along out "
+        # ``object_type`` rides ``kg_actions`` here for the same reason it does
+        # in the schema: with the graph gone the field does not exist, and a
+        # rule that keeps naming it tells the model to reason about a slot it
+        # cannot fill. Both mentions are spelled as infix clauses so the
+        # gate-open sentences are byte-for-byte what they were before T2.
+        "OVERRIDES the action and its kind"
+        + ("/object_type" if kg_actions else "")
+        + ", so carrying it along out "
         "of habit turns a formula listing into a document roster. To list the "
         "documents, choose enumerate_elements with enumerate.collection set to "
-        "\"sources\" (kind, object_type, source_id and source_title are then "
+        "\"sources\" (kind, "
+        + ("object_type, " if kg_actions else "")
+        + "source_id and source_title are then "
         "ignored — the library's document roster is one whole collection with no "
         "sub-type). "
         "Do that when the question asks WHICH documents the library holds, or "
@@ -695,9 +874,15 @@ def reflect_prompt(
     # Agentic Memory P4 (T5). Zero parameters — the model just picks the
     # action, the server decides what to hand back — so there is nothing to
     # tell it HOW to fill in beyond WHEN to reach for it.
+    # The parenthetical enumerates EXAMPLE channels worth reconsidering, so it
+    # has to name channels this run actually has: three of the four listed are
+    # graph actions. With ``kg_actions`` closed it falls back to the two
+    # non-graph retrieval channels that always exist.
     consult_memory_action = (
-        "- consult_memory: before repeating an action (ppr_retrieve, "
-        "exact_lookup, expand_graph, follow_chain) that has already come back "
+        "- consult_memory: before repeating an action ("
+        + ("ppr_retrieve, exact_lookup, expand_graph, follow_chain"
+           if kg_actions else "exact_lookup, search_elements")
+        + ") that has already come back "
         "empty a few times in THIS run, recall tactical hints from earlier "
         "runs on this shape of question, plus your own earlier notes for this "
         "library. Takes no parameters. Returns advice on WHICH channel tends "
@@ -719,20 +904,17 @@ def reflect_prompt(
         "Instead state what has actually been found so far and what, if "
         "anything, is still missing.\n\n"
     )
-    return (
-        "You decide the NEXT retrieval step for answering a question from a "
-        "knowledge graph. Below are the candidates gathered so far.\n"
-        "Choose next_action:\n"
-        "- answer: candidates suffice — stop and answer.\n"
+    # The graph-shaped action descriptions. Each is spelled in the exact
+    # position (and with the exact bytes) it had before the gate existed, so
+    # ``kg_actions=True`` reassembles the previous prompt character for
+    # character.
+    expand_graph_action = (
         "- expand_graph: a candidate looks central; follow its relations one "
         "more hop (set expand.object_id, optional edge_type/direction). You may "
         "expand repeatedly across turns — go as deep as the question needs.\n"
-        "- add_subquery: an aspect of the question is uncovered; add one "
-        "sub-query (set new_sub_query). Never re-submit a sub-query already "
-        "listed as tried in the context; rephrase it substantially or choose "
-        "a different action.\n"
-        "- search_elements: the KG is too thin; fall back to raw document "
-        "passages (set elements_query).\n"
+        if kg_actions else ""
+    )
+    graph_retrieval_actions = (
         "- ppr_retrieve: the question compares across models/sources or needs "
         "breadth across documents; pull cross-document source passages via PPR "
         "(set ppr_query). Prefer this for comparison / cross-paper questions where "
@@ -750,6 +932,33 @@ def reflect_prompt(
         "prerequisite_of, precedes, or part_of chains. NEVER request it for supports, "
         "depends_on, contrasts_with, about, defines, used_in, composed_of, or mixed "
         "edge types because those are not safely transitive.\n"
+        if kg_actions else ""
+    )
+    # ``search_elements`` itself survives the gate (typed document elements need
+    # no graph), but its RATIONALE does not: "the KG is too thin" describes a
+    # graph that exists and disappoints, and in a graph-less run it invites the
+    # model to keep probing for one that was never built. Only the leading
+    # clause is conditioned, so gate-open is byte-for-byte the pre-T2 sentence.
+    search_elements_action = (
+        "- search_elements: "
+        + ("the KG is too thin; fall back" if kg_actions else "fall back")
+        + " to raw document "
+        "passages (set elements_query).\n"
+    )
+    return (
+        "You decide the NEXT retrieval step for answering a question from a "
+        + ("knowledge graph" if kg_actions else "document library")
+        + ". Below are the candidates gathered so far.\n"
+        "Choose next_action:\n"
+        "- answer: candidates suffice — stop and answer.\n"
+        f"{expand_graph_action}"
+        "- add_subquery: an aspect of the question is uncovered; add one "
+        "sub-query (set new_sub_query). Never re-submit a sub-query already "
+        "listed as tried in the context; rephrase it substantially or choose "
+        "a different action.\n"
+        f"{search_chunks_action}"
+        f"{search_elements_action}"
+        f"{graph_retrieval_actions}"
         "- exact_lookup: the question names a specific command / API / option / "
         "parameter (e.g. 'set_db') and the candidates do not yet cover its full "
         "definition (arguments, defaults, examples). Set exact_term to that name "

@@ -85,6 +85,14 @@ from app.domain.retrieval_experience import (
 #: here: memory recall is not something the reflect loop CHOOSES to invoke —
 #: there is no ``memory`` action id for the model to reach for — so a THEN
 #: side entry about it would recommend a channel nobody can act on.
+#: ⚠ ``search_chunks`` is APPENDED, never inserted. This tuple is a persisted,
+#: content-addressed vocabulary: an appended value leaves every existing
+#: entry's primary key untouched, and only lets the new channel's
+#: invocation/zero-hit statistics (and the ``consult_memory`` advice built from
+#: them) cover it at all. Leaving it out would make the ONE first-class passage
+#: channel a no-graph run has a blind spot in the experience library — the same
+#: hole ``search_elements`` still has, where a ``fallback`` step is dropped
+#: whole by the projection.
 RETRIEVAL_ACTIONS: tuple[str, ...] = (
     "retrieve",
     "ppr",
@@ -94,6 +102,7 @@ RETRIEVAL_ACTIONS: tuple[str, ...] = (
     "follow_chain",
     "enumerate",
     "outline",
+    "search_chunks",
 )
 
 RetrievalAction = Literal[
@@ -105,6 +114,7 @@ RetrievalAction = Literal[
     "follow_chain",
     "enumerate",
     "outline",
+    "search_chunks",
 ]
 
 #: An entry's verdict. Two values, and the second one carries most of the

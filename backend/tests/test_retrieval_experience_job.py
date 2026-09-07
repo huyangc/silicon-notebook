@@ -139,7 +139,49 @@ def test_the_action_vocabulary_excludes_memory():
     still moves the number this test is watching.
     """
     assert "memory" not in RETRIEVAL_ACTIONS
-    assert len(RETRIEVAL_ACTIONS) == 8
+    # 9 = 原 8 个 + `search_chunks`(逐步推理的原文段落检索通道,D-2 追加)。
+    assert len(RETRIEVAL_ACTIONS) == 9
+
+
+def test_the_vocabulary_covers_the_raw_passage_channel():
+    """D-2:``search_chunks`` 进 THEN 侧词表,否则无图 run 的**主**检索通道在
+    经验库里是盲区(与今天 ``search_elements`` 记成 ``fallback`` 步、被投影整步
+    丢弃一样)。追加值对既有条目是无损的:它只是词表末尾多一个词。"""
+    assert RETRIEVAL_ACTIONS[-1] == "search_chunks"
+    assert RETRIEVAL_ACTIONS[:-1] == (
+        "retrieve", "ppr", "exact_lookup", "expand", "expand_community",
+        "follow_chain", "enumerate", "outline")
+
+
+def test_the_projection_counts_search_chunks_invocations_and_zero_hits():
+    """验收 5:investigation/zero-hit 统计对新通道生效。
+
+    播种步与动作步都是 ``step_type="search_chunks"``,两者的 ``found`` 都被
+    ``_TRACE_COUNT_KEYS`` 读成 ``count``,所以零命中是可观测的——这正是这条
+    通道该拿到的那半个信号。
+    """
+    observed = project_run(
+        _run(
+            [
+                _intent_step(),
+                {"step_type": "search_chunks", "summary": "",
+                 "detail": {"found": 2, "phase": "seed",
+                            "result_ids": ["ck-1", "ck-2"]}},
+                {"step_type": "search_chunks", "summary": "",
+                 "detail": {"query": "布局", "found": 0, "result_ids": []}},
+                {"step_type": "synthesis", "summary": "",
+                 "detail": {"citations": 3, "anchors": 1,
+                            "anchor_evidence_ids": ["ck-1"]}},
+            ]
+        )
+    )
+    assert observed is not None
+    action = next(a for a in observed.observation.actions
+                  if a.action == "search_chunks")
+    assert action.invocations == 2
+    assert action.zero_hits == 1
+    # result_ids 两步都写了 ⇒ 可归因;交集只数真的被答案引用的那一条。
+    assert (action.attributable, action.anchored_hits) == (True, 1)
 
 
 def test_the_batch_never_reads_more_runs_than_one_entry_can_remember():

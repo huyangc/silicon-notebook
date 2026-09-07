@@ -77,11 +77,16 @@ test("grouping + default engine per group", () => {
   assert.equal(defaultModeForGroup("strict"), "reasoning");   // groupDefault
 });
 
+// T4:内置逐步推理不再要求知识图谱(它现在自己有原文段落检索这个一等动作,
+// 无图也能拿到与通用问答同等级的原文证据——见设计规格 T1/T2)。requiresKg 字段
+// 本身保留:部署插件模式仍可声明 requires_kg=true,上面"deployment mode
+// projection is data-driven, strict, and restorable"用例里的 corp.search 断言
+// (`requiresKg("corp.search", modes)`)钉着这条对插件模式继续生效。
 test("kg gating", () => {
   assert.equal(requiresKg("chunk"), false);
-  assert.equal(requiresKg("reasoning"), true);
+  assert.equal(requiresKg("reasoning"), false);
   assert.equal(canUseMode("chunk", false), true);     // 通用问答无需 KG
-  assert.equal(canUseMode("reasoning", false), false);
+  assert.equal(canUseMode("reasoning", false), true); // 无图也能跑:原文段落检索是一等动作
   assert.equal(canUseMode("reasoning", true), true);
 });
 

@@ -154,6 +154,9 @@ _ACTION_IDS: dict[str, str] = {
     "follow_chain": "follow_chain",
     "enumerate": "enumerate_*",
     "outline": "update_outline",
+    # The one entry whose two spellings coincide: the trace step type and the
+    # reflect action id are both ``search_chunks``.
+    "search_chunks": "search_chunks",
 }
 assert set(_ACTION_IDS) == set(RETRIEVAL_ACTIONS), (
     "_ACTION_IDS must name exactly the actions in RETRIEVAL_ACTIONS"
@@ -183,6 +186,11 @@ ADOPTION_ACTIONS: dict[str, str] = {
     "enumerate_elements": "enumerate",
     "enumerate_kg_objects": "enumerate",
     "update_outline": "outline",
+    # Unlike the initial retrieval and the PPR/exact-lookup seed passes, the
+    # no-graph first-round passage seed emits its OWN ``phase="seed"`` step and
+    # this table is only consulted for what reflect actually CHOSE, so counting
+    # it as adoption stays honest.
+    "search_chunks": "search_chunks",
 }
 assert set(ADOPTION_ACTIONS.values()) <= set(RETRIEVAL_ACTIONS), (
     "ADOPTION_ACTIONS must resolve into RETRIEVAL_ACTIONS"

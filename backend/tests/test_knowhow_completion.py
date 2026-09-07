@@ -1045,3 +1045,43 @@ def test_llm_complete_origin_is_accepted_recorded_and_guarded(tmp_path, monkeypa
         },
     )
     assert stale.status_code == 409
+
+
+def test_completion_turns_off_every_channel_unsafe_for_a_json_envelope(monkeypatch):
+    """补全侧的策略位一次钉齐,含新增的 `allow_search_chunks`(规格 T1 P1-2)。
+
+    原文段落检索与 PPR/精确查找/枚举/consult 关掉的理由同源:补全的「查询」是
+    一个 JSON 信封,不是自然语言问题。它还多两条独立理由——无图库上首轮播种是
+    **无条件并发**的全量召回,落在补全关键路径上;而补全跑 `fail_closed=True`,
+    播种里一次瞬态检索故障会升级成整个补全失败。
+    """
+    from app.services import reasoning_retrieval
+
+    class _PolicyRetriever:
+        def run(self, *_args, **_kwargs):
+            return SimpleNamespace(
+                top_hits=[], elements=[], chunks=[], chains=[], trace=[]
+            )
+
+    built: list = []
+
+    def _factory(_repo, _settings, **_kwargs):
+        retriever = _PolicyRetriever()
+        built.append(retriever)
+        return retriever
+
+    monkeypatch.setattr(
+        reasoning_retrieval, "reasoning_retriever_from_repository", _factory
+    )
+    repo, _errors = _repo_with_client(_CompletionClient({"suggestions": []}))
+    knowhow_api.complete_row(repo, "nb", _table(), "current", ["cause"])
+
+    assert len(built) == 1
+    retriever = built[0]
+    # 五个策略位都是**显式**关闭的(缺省是开,靠继承会随缺省一起漂)。
+    assert retriever.allow_search_chunks is False
+    assert retriever.allow_community_expansion is False
+    assert retriever.allow_ppr is False
+    assert retriever.allow_exact_lookup is False
+    assert retriever.allow_enumeration is False
+    assert retriever.allow_consult_memory is False

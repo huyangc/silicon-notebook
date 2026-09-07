@@ -226,9 +226,11 @@ test("NEXT_ACTION 覆盖后端全部真实取值(非机制名)", () => {
   // 是第 12 个,这条随之补上。
   // search_evidence 曾短暂作为一个动作存在(模型判断来源那一版),随该特性整体
   // 移除;它是这张表**减少**过的唯一一次,所以这里也留个记号:动作被删时同样要改这张表。
+  // search_chunks(T1):原文段落检索一等动作,无图 run 与有图 run 均可选,是第 13 个。
   const cases = {
     answer: "开始作答", expand_graph: "顺着相关内容继续找", add_subquery: "换个角度再查一遍",
-    search_elements: "回原文里找细节", enumerate_elements: "列元素清单",
+    search_elements: "回原文里找细节", search_chunks: "在原文段落里检索",
+    enumerate_elements: "列元素清单",
     enumerate_kg_objects: "列知识对象清单",
     ppr_retrieve: "顺着关联扩大范围",
     expand_community: "找相似内容对比", follow_chain: "顺着推导链继续",
@@ -278,6 +280,66 @@ test("exact_lookup 有短标签,detail 显示查了哪个名称、捞回多少�
     getTraceStepDetail({ step_type: "exact_lookup", summary: "", detail: {} }),
     "",
   );
+});
+
+// search_chunks(T1):原文段落检索一等动作。首轮无图播种带 phase:"seed"(没有
+// 单条 query,只有 found);反思循环里的 agent 动作不带 phase(有 query,与 ppr
+// 步同形)。两种形态共用同一个 step_type、也共用这一条渲染。
+test("search_chunks 有短标签,detail 显示查询与新增段数(与 ppr 步同形,seed 走同一渲染)", () => {
+  const action = {
+    step_type: "search_chunks",
+    summary: "检索原文段落:set_db 的参数,新增 5 段",
+    detail: { query: "set_db 的参数", found: 5 },
+  };
+  assert.equal(getReasoningTraceSummary([action], true).latestLabel, "段落");
+  assert.equal(getTraceStepDetail(action), "set_db 的参数 · 新增 5 段");
+  // 与 fallback("原文")不同名——见 reasoning-trace.ts 顶部 search_chunks 键上方
+  // 的注释:两步说的是不同的事(一等检索动作 vs 元素兜底),同名会让轨迹里出现
+  // 两条读起来一样、说的却是两回事的步。
+  assert.notEqual(TRACE_STEP_LABELS.search_chunks, TRACE_STEP_LABELS.fallback);
+
+  // 首轮播种:与 PPR seed 记账口径一致,没有单条 query,只有 found —— 走同一
+  // 渲染分支,不能因为 query 缺失就落到别的分支变成空字符串。
+  const seed = {
+    step_type: "search_chunks",
+    summary: "首轮原文播种:新增 12 段",
+    detail: { found: 12, phase: "seed" },
+  };
+  assert.equal(getReasoningTraceSummary([seed], true).latestLabel, "段落");
+  assert.equal(getTraceStepDetail(seed), "新增 12 段");
+
+  // 达上限被跳过的 skip 步(真实形态:step_type 是 "skip",不是
+  // "search_chunks"——见 reasoning_retrieval.py `_action_search_chunks` 的
+  // cap 分支):不能露出空壳分隔符。
+  assert.equal(
+    getTraceStepDetail({
+      step_type: "skip",
+      summary: "跳过原文段落检索(已达次数上限 2)",
+      detail: { reason: "chunk_search_cap" },
+    }),
+    "",
+  );
+  assert.equal(
+    getTraceStepDetail({ step_type: "search_chunks", summary: "", detail: {} }),
+    "",
+  );
+});
+
+// result_ids 是 step→anchor 归因的原始材料,不该改变既有折叠态展示——与 ppr 步
+// 同一条钉法(见上面 result_ids/anchor_evidence_ids 的"不上屏"用例)。
+test("search_chunks 的 result_ids 出现在 detail 里不改变既有渲染(不上屏)", () => {
+  const ids = ["chunk-aaaaaaaaaaaaaaaa", "chunk-bbbbbbbbbbbbbbbb"];
+  const base = {
+    step_type: "search_chunks",
+    summary: "",
+    detail: { query: "参数说明", found: 2 },
+  };
+  const withIds = {
+    step_type: "search_chunks",
+    summary: "",
+    detail: { query: "参数说明", found: 2, result_ids: ids },
+  };
+  assert.equal(getTraceStepDetail(withIds), getTraceStepDetail(base));
 });
 
 test("新增 exact_lookup 后,未知 step_type / next_action 的兜底仍成立(精确匹配,不前缀命中)", () => {

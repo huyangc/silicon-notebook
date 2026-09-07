@@ -24,8 +24,10 @@ def test_ask_modes_endpoint_lists_user_facing(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     body = client.get("/api/ask-modes").json()
     assert [m["id"] for m in body] == ["chunk", "reasoning"]
+    # 两个内置引擎都不再把知识图谱当硬前提(reasoning 无图时走原文段落检索),
+    # 前端内置表的 requiresKg 由 scripts/check_ask_modes_contract.py 对账。
     assert {m["id"]: m["requires_kg"] for m in body} == {
-        "chunk": False, "reasoning": True}
+        "chunk": False, "reasoning": False}
 
 
 def test_unknown_mode_returns_422_not_silent_fast(tmp_path, monkeypatch):

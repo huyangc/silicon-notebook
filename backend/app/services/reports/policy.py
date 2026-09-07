@@ -13,6 +13,7 @@ DEFAULT_REPORT_MAX_TOP_FAMILY_SHARE = 0.8
 
 DEFAULT_REASONING_MAX_PPR_RETRIEVES = 3
 DEFAULT_REASONING_MAX_EXACT_LOOKUPS = 3
+DEFAULT_REASONING_MAX_CHUNK_SEARCHES = 3
 DEFAULT_REASONING_MAX_FOLLOW_CHAIN_ACTIONS = 3
 DEFAULT_REASONING_COMMUNITY_PEERS_CAP_FACTOR = 2
 DEFAULT_REASONING_MAX_OUTLINE_UPDATES = 6
@@ -64,6 +65,7 @@ class ReasoningActionPolicy:
     community_peers_cap_factor: int
     max_outline_updates: int
     max_consult_memory: int
+    max_chunk_searches: int
 
     @property
     def max_pending_outline_evidence(self) -> int:
@@ -127,11 +129,17 @@ def reasoning_action_policy(settings) -> ReasoningActionPolicy:
             "reasoning_max_consult_memory",
             DEFAULT_REASONING_MAX_CONSULT_MEMORY,
         )),
+        max_chunk_searches=int(getattr(
+            settings,
+            "reasoning_max_chunk_searches",
+            DEFAULT_REASONING_MAX_CHUNK_SEARCHES,
+        )),
     )
 
 
 __all__ = [
     "DEFAULT_REASONING_COMMUNITY_PEERS_CAP_FACTOR",
+    "DEFAULT_REASONING_MAX_CHUNK_SEARCHES",
     "DEFAULT_REASONING_MAX_CONSULT_MEMORY",
     "DEFAULT_REASONING_MAX_EXACT_LOOKUPS",
     "DEFAULT_REASONING_MAX_FOLLOW_CHAIN_ACTIONS",

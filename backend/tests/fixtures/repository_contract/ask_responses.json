@@ -105,7 +105,7 @@
         "answer_id": "<ans-id-1>",
         "answered_at": "<timestamp>",
         "citations": [],
-        "conclusion": "本笔记本尚未构建知识图谱,也没有已建图的参考库;请先点『构建知识图谱』,或为本笔记本挂载一个已建图的公共知识库。",
+        "conclusion": "当前检索范围内没有可用来源；请先添加来源，或在「设置 → 编辑当前笔记本」里挂载一个参考库。",
         "conversation_id": "<conv-id-1>",
         "evidence_level": "inferred",
         "grounded": false,
@@ -145,7 +145,7 @@
         "answer_id": "<ans-id-1>",
         "answered_at": "<timestamp>",
         "citations": [],
-        "conclusion": "本笔记本尚未构建知识图谱,也没有已建图的参考库;请先点『构建知识图谱』,或为本笔记本挂载一个已建图的公共知识库。",
+        "conclusion": "当前检索范围内没有可用来源；请先添加来源，或在「设置 → 编辑当前笔记本」里挂载一个参考库。",
         "conversation_id": "<conv-id-1>",
         "evidence_level": "inferred",
         "grounded": false,
@@ -182,15 +182,31 @@
     },
     "no_kg": {
       "answers_payload": {
-        "anchors": [],
+        "anchors": [
+          {
+            "definition": null,
+            "element_id": "<el-id-1>",
+            "key": "k1",
+            "label": "§1 Gain",
+            "location_label": "§1 Gain",
+            "name": "§1 Gain",
+            "object_id": "<chunk-id-1>",
+            "object_type": "chunk",
+            "snippet": "Fixture gain is stable because source degeneration adds feedback.",
+            "source_file_name": "fixture.md",
+            "source_id": "<src-id-1>",
+            "source_title": "Fixture amplifier notes",
+            "tier": "personal"
+          }
+        ],
         "answer": "Fixture evidence establishes stable gain [k1].",
         "answer_id": "<ans-id-1>",
         "answered_at": "<timestamp>",
         "citations": [],
         "conclusion": "Fixture evidence establishes stable gain .",
         "conversation_id": "<conv-id-1>",
-        "evidence_level": "inferred",
-        "grounded": false,
+        "evidence_level": "grounded",
+        "grounded": true,
         "index_required": false,
         "intent": {
           "ambiguities": [],
@@ -212,7 +228,7 @@
           "result_scope": "ranked"
         },
         "kg_required": true,
-        "llm_mode": "ungrounded",
+        "llm_mode": "grounded",
         "mode": "reasoning",
         "model_errors": [],
         "reasoning_trace": [
@@ -241,15 +257,21 @@
           },
           {
             "detail": {
+              "reason": "kg_unavailable"
+            },
+            "duration_ms": 1,
+            "step_type": "skip",
+            "summary": "本笔记本尚未构建知识图谱,本轮只用原文检索与集合清单"
+          },
+          {
+            "detail": {
               "source": "planner",
               "sub_queries": [
                 {
                   "prefer": "balanced",
                   "query": "fixture gain",
                   "reason": "",
-                  "types": [
-                    "claim"
-                  ]
+                  "types": []
                 }
               ]
             },
@@ -269,12 +291,14 @@
           {
             "detail": {
               "found": 1,
-              "query": "fixture gain",
-              "reason": "initial_evidence_empty"
+              "phase": "seed",
+              "result_ids": [
+                "<chunk-id-1>"
+              ]
             },
             "duration_ms": 1,
-            "step_type": "fallback",
-            "summary": "初始证据未命中，补查来源原文，新增 1 段"
+            "step_type": "search_chunks",
+            "summary": "检索原文段落:本笔记本无知识图谱,新增 1 段"
           },
           {
             "detail": {
@@ -290,7 +314,7 @@
           {
             "detail": {
               "chains": 0,
-              "elements": 1,
+              "elements": 0,
               "enumerated_items": 0,
               "enumerations": 0,
               "kg": 0,
@@ -302,37 +326,55 @@
           },
           {
             "detail": {
-              "anchor_evidence_ids": [],
-              "anchors": 0,
+              "anchor_evidence_ids": [
+                "<chunk-id-1>"
+              ],
+              "anchors": 1,
               "citations": 0,
               "enumerated_collections": 0,
               "enumeration_block_dropped": false,
-              "evidence_level": "inferred",
-              "included_chunks": 0,
+              "evidence_level": "grounded",
+              "included_chunks": 1,
               "included_collections": 0,
-              "included_elements": 1,
+              "included_elements": 0,
               "included_kg": 0
             },
             "duration_ms": 5,
             "step_type": "synthesis",
-            "summary": "已生成答案，引用 0 处证据"
+            "summary": "已生成答案，引用 1 处证据"
           }
         ],
         "related_knowledge": [],
         "retrieval_effort": "standard",
         "retrieval_query": "fixture gain",
-        "top_relevance": 0.5
+        "top_relevance": 1.0
       },
       "response": {
-        "anchors": [],
+        "anchors": [
+          {
+            "definition": null,
+            "element_id": "<el-id-1>",
+            "key": "k1",
+            "label": "§1 Gain",
+            "location_label": "§1 Gain",
+            "name": "§1 Gain",
+            "object_id": "<chunk-id-1>",
+            "object_type": "chunk",
+            "snippet": "Fixture gain is stable because source degeneration adds feedback.",
+            "source_file_name": "fixture.md",
+            "source_id": "<src-id-1>",
+            "source_title": "Fixture amplifier notes",
+            "tier": "personal"
+          }
+        ],
         "answer": "Fixture evidence establishes stable gain [k1].",
         "answer_id": "<ans-id-1>",
         "answered_at": "<timestamp>",
         "citations": [],
         "conclusion": "Fixture evidence establishes stable gain .",
         "conversation_id": "<conv-id-1>",
-        "evidence_level": "inferred",
-        "grounded": false,
+        "evidence_level": "grounded",
+        "grounded": true,
         "index_required": false,
         "intent": {
           "ambiguities": [],
@@ -354,7 +396,7 @@
           "result_scope": "ranked"
         },
         "kg_required": true,
-        "llm_mode": "ungrounded",
+        "llm_mode": "grounded",
         "mode": "reasoning",
         "model_errors": [],
         "reasoning_trace": [
@@ -383,15 +425,21 @@
           },
           {
             "detail": {
+              "reason": "kg_unavailable"
+            },
+            "duration_ms": 1,
+            "step_type": "skip",
+            "summary": "本笔记本尚未构建知识图谱,本轮只用原文检索与集合清单"
+          },
+          {
+            "detail": {
               "source": "planner",
               "sub_queries": [
                 {
                   "prefer": "balanced",
                   "query": "fixture gain",
                   "reason": "",
-                  "types": [
-                    "claim"
-                  ]
+                  "types": []
                 }
               ]
             },
@@ -411,12 +459,14 @@
           {
             "detail": {
               "found": 1,
-              "query": "fixture gain",
-              "reason": "initial_evidence_empty"
+              "phase": "seed",
+              "result_ids": [
+                "<chunk-id-1>"
+              ]
             },
             "duration_ms": 1,
-            "step_type": "fallback",
-            "summary": "初始证据未命中，补查来源原文，新增 1 段"
+            "step_type": "search_chunks",
+            "summary": "检索原文段落:本笔记本无知识图谱,新增 1 段"
           },
           {
             "detail": {
@@ -432,7 +482,7 @@
           {
             "detail": {
               "chains": 0,
-              "elements": 1,
+              "elements": 0,
               "enumerated_items": 0,
               "enumerations": 0,
               "kg": 0,
@@ -444,26 +494,28 @@
           },
           {
             "detail": {
-              "anchor_evidence_ids": [],
-              "anchors": 0,
+              "anchor_evidence_ids": [
+                "<chunk-id-1>"
+              ],
+              "anchors": 1,
               "citations": 0,
               "enumerated_collections": 0,
               "enumeration_block_dropped": false,
-              "evidence_level": "inferred",
-              "included_chunks": 0,
+              "evidence_level": "grounded",
+              "included_chunks": 1,
               "included_collections": 0,
-              "included_elements": 1,
+              "included_elements": 0,
               "included_kg": 0
             },
             "duration_ms": 5,
             "step_type": "synthesis",
-            "summary": "已生成答案，引用 0 处证据"
+            "summary": "已生成答案，引用 1 处证据"
           }
         ],
         "related_knowledge": [],
         "retrieval_effort": "standard",
         "retrieval_query": "fixture gain",
-        "top_relevance": 0.5
+        "top_relevance": 1.0
       }
     },
     "reasoning": {

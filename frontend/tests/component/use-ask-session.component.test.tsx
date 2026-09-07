@@ -366,6 +366,76 @@ test("a deployment Ask engine uses the durable Ask stream and receives live plug
   expect(value!.turns[0]?.response.reasoning_trace?.[0]?.duration_ms).toBe(125);
 });
 
+// T4:内置逐步推理不再要求知识图谱(reasoning-kg-optional 设计规格 T1/T2/T4)——
+// 它自己有原文段落检索这个一等动作,无图笔记本上不该再被这道闸拦下。requiresKg
+// 在 submit 与 executeAsk 各有一处判据,两处都不删,只是对内置 reasoning 不再
+// 触发;下一个用例钉住它们对声明 requires_kg=true 的部署插件模式仍然生效。
+// ⚠ 这两条行为用例只能钉住「submit 那道 ∨ executeAsk 那道」的析取,钉不住 submit
+// 那道单独存在:reasoning 走 submit→意图预检→executeAsk 的路径,两道判据对它都
+// 不触发,不构成区分;corp.locked 走 submit 里非 reasoning 分支直接调 executeAsk,
+// 命中的是 executeAsk 自己那道,不经过 submit 那道。submit 那道单独有没有,由
+// tests/unit/ask-intent-contract.test.mjs 里的源码守卫钉住(已用变异验证确认:
+// 单独删掉 submit 那道判据,这两条行为用例仍然全绿)。
+test("T4: 无图笔记本上内置逐步推理不再弹「需要知识图谱」,正常发起提问", async () => {
+  const noKgPolicy: AskPolicy = { ...DEFAULT_POLICY, kgAvailable: false };
+  api.previewAskIntent.mockResolvedValue(contractFor("无图也能查的问题", false));
+  api.runAskStream.mockResolvedValue({ ...answer("conversation-no-kg"), mode: "reasoning" });
+  render(<Harness policy={noKgPolicy} />);
+  beginOwnedNotebook();
+  act(() => value!.selectMode("reasoning"));
+
+  await act(async () => {
+    await value!.submit("无图也能查的问题");
+  });
+
+  expect(effects.notify).not.toHaveBeenCalled();
+  expect(api.previewAskIntent).toHaveBeenCalledTimes(1);
+  expect(api.runAskStream).toHaveBeenCalledTimes(1);
+  expect(api.runAskStream.mock.calls[0]?.[1]).toMatchObject({
+    question: "无图也能查的问题",
+    mode: "reasoning",
+  });
+});
+
+test("T4: 声明 requires_kg 的插件模式在无图笔记本上仍被知识图谱闸拦截", async () => {
+  api.fetchAskModes.mockResolvedValue([{
+    id: "corp.locked",
+    group: "extension",
+    label: "受限插件",
+    desc: "需要知识图谱才能工作的部署引擎",
+    requires_kg: true,
+    streaming: true,
+    streams_trace: true,
+  }]);
+  const noKgPolicy: AskPolicy = { ...DEFAULT_POLICY, kgAvailable: false };
+  render(<Harness policy={noKgPolicy} />);
+  let owner: ReturnType<HookValue["beginNotebookTransition"]> = null;
+  act(() => {
+    owner = value!.beginNotebookTransition({
+      actorId: "user-a",
+      notebookId: "notebook-a",
+      workspaceEpoch: 1,
+    });
+  });
+  // finishNotebookTransition's own async act flush is required here: fetchAskModes
+  // resolves on a microtask, and the plain sync beginOwnedNotebook() helper (used
+  // elsewhere for builtin modes, already present without any fetch) does not wait
+  // for it — see "a deployment Ask engine…" above for the same pattern.
+  await act(async () => {
+    value!.finishNotebookTransition(owner!, true);
+  });
+  expect(value!.askModes.some((candidate) => candidate.id === "corp.locked")).toBe(true);
+
+  act(() => value!.selectMode("corp.locked"));
+  await act(async () => {
+    await value!.submit("插件问题");
+  });
+
+  expect(effects.notify).toHaveBeenCalledWith(expect.stringContaining("需要知识图谱"));
+  expect(api.previewAskIntent).not.toHaveBeenCalled();
+  expect(api.runAskStream).not.toHaveBeenCalled();
+});
+
 test("simplified mode submits the backend auto selector without intent preview", async () => {
   const simplifiedPolicy: AskPolicy = { ...DEFAULT_POLICY, advanced: false };
   api.runAskStream.mockResolvedValue({

@@ -59,6 +59,15 @@ class _StubRetrieval:
     def ppr_retrieve(self, nb, q):
         return []
 
+    # `RetrievalPort` 上的 KG 可用性对(`reasoning_retrieval.kg_in_scope_for`)。
+    # 这两个替身演的是**有图**库:配额复用与图在不在正交,无图会额外触发首轮
+    # 原文播种、把这里的打分对账搅进第三条通道。
+    def has_kg(self, nb):
+        return True
+
+    def any_base_has_kg(self, nb):
+        return False
+
 
 class _StubRepo:
     def __init__(self):
@@ -143,6 +152,13 @@ class _PreferAwareRetrieval:
 
     def ppr_retrieve(self, nb, q):
         return []
+
+    # 同上:有图库,让 prefer 回归只测打分权重这一件事。
+    def has_kg(self, nb):
+        return True
+
+    def any_base_has_kg(self, nb):
+        return False
 
 
 class _PreferAwareRepo:

@@ -28,7 +28,7 @@ REQUIRED_CASES = {
     #   no_kg          = 纯散文库(有文档、零可枚举元素、零知识对象)。文档本身是
     #                    可枚举集合之一,所以它**照常进循环**——用户问「库里有哪几篇」
     #                    时那份目录才是答案(codex R5 P1);
-    #   no_collections = 零源库,三类计数全为零 ⇒ 早退那句「请先构建知识图谱」。
+    #   no_collections = 零源库,三类计数全为零 ⇒ 早退那句「没有可用来源」。
     "no_kg",
     "no_collections",
     # graph 这个 ask 模式退役时一并删除了三个案例:"graph"(引擎本身)、
@@ -75,13 +75,15 @@ def test_ask_early_exit_flags_are_frozen():
     no_collections = cases["no_collections"]["response"]
     assert no_collections["kg_required"] is True
     assert no_collections["llm_mode"] == "deterministic"
-    assert "本笔记本尚未构建知识图谱" in no_collections["conclusion"]
+    # 文案说的是「范围里没有来源」——图不再是 reasoning 的前提,零源才是。
+    assert "当前检索范围内没有可用来源" in no_collections["conclusion"]
+    assert "知识图谱" not in no_collections["conclusion"]
     # 纯散文库:放行进循环(不是确定性兜底),但旗标仍如实为 True——放行只是不再
     # 阻断,不是把「这个库没有图」说成假的。
     prose_only = cases["no_kg"]["response"]
     assert prose_only["kg_required"] is True
     assert prose_only["llm_mode"] != "deterministic"
-    assert "本笔记本尚未构建知识图谱" not in prose_only["conclusion"]
+    assert "没有可用来源" not in prose_only["conclusion"]
 
 
 def test_current_repository_runtime_matches_the_frozen_ask_oracle():

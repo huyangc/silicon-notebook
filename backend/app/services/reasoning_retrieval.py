@@ -53,7 +53,10 @@ from app.services.retrieval import (
     NeighborExpansion, RetrievedChunk, RetrievedElement, RetrievedKnowledge,
     prefer_stronger_chunk_candidate,
 )
-from app.services.retrieval_run import retrieval_fanout_slot
+from app.services.retrieval_run import (
+    memoized_retrieval_value,
+    retrieval_fanout_slot,
+)
 from app.services.search_profile import render_style_block
 from app.services.source_element_selection import (
     rank_source_elements,
@@ -180,6 +183,49 @@ def enumeration_wiring_active(settings, catalog, enumeration) -> bool:
         getattr(settings, "reasoning_enum_tools_enabled", True)
         and catalog is not None
         and enumeration is not None
+    )
+
+
+def chunk_search_wiring_active(settings) -> bool:
+    """接线层面上,原文段落检索这一整套是否可用(kill switch)。
+
+    与 ``enumeration_wiring_active`` 同款、同理由:它有**第二个**调用方——
+    ``ask_service`` 的无图早退判据 ``_no_kg_scope_admits_run``。那条早退跑在
+    ``ReasoningRetriever`` 之前,而「无图但有来源」的放行理由**就是**原文段落
+    检索还能跑;这把闸一关,那个理由整个消失。两处必须用**同一个**判据:各写一
+    份(或早退处干脆不判)就会出现「早退放行了,但 run 里既没有枚举工具、也没有
+    ``search_chunks``、还没有首轮播种」的空转——plan+reflect+answer 三次模型调
+    用换一个空答案,而接入前是零调用的确定性早退。
+
+    只读部署开关(不看档位、不看端口在场与否),所以在一个 run 内恒定。
+    """
+    return bool(getattr(settings, "reasoning_chunk_search_enabled", True))
+
+
+def kg_in_scope_for(retrieval: "RetrievalPort", notebook_id) -> bool:
+    """本次请求的检索范围内有没有知识图谱(本库有图 或 勾选的参考库里有图)。
+
+    `ask_service.ask_reasoning` 的 `no_usable_kg`(Memory 命中另算)与
+    `ReasoningRetriever._kg_in_scope` 是同一个事实的两个消费者,所以它只在这里
+    算一次:``any_base_has_kg`` 已按勾选的参考库维度收窄,两处各写一份判据迟早
+    会分叉。Memory 命中**不**并进来——它影响的是「有没有可用证据」,不改变「图
+    动作有没有意义」。
+
+    结果按 ``notebook_id`` 做**请求级** memo(``memoized_retrieval_value``,与
+    chunk 候选的授权探针同一份缓存语义):这对 EXISTS 是 run 级不变量,两个调用
+    点因此一共只付一次。没有 retrieval run 在场时(直接构造引擎的测试)memo 退化
+    成直算,值不变。范围收窄用的 ``base_scope_ceiling_active``/
+    ``scoped_participants`` 都是请求级 ContextVar,在一次 run 内恒定,故不进 key。
+
+    两个方法都是 ``RetrievalPort`` 上的正式成员(``AskCandidatePort`` 不再重复
+    声明:候选生产不是「图在不在」这个问题的归属,而这里是它唯一的求值点),所以
+    这里是直呼属性、**不**吞异常:它就是两次 EXISTS,炸了就该和其它 DB 错误一样
+    让这次 run 失败(``AskCancelled`` 照旧上抛),而不是悄悄按「有图」继续。
+    """
+    return memoized_retrieval_value(
+        ("reasoning_kg_in_scope", notebook_id),
+        lambda: bool(retrieval.has_kg(notebook_id)
+                     or retrieval.any_base_has_kg(notebook_id)),
     )
 
 
@@ -1225,16 +1271,20 @@ def consult_memory_active(settings, limits, experience_store) -> bool:
     )
 
 
-#: 四个可实测「本轮新增证据数」的动作分支(存储词表拼写,见
+#: 五个可实测「本轮新增证据数」的动作分支(存储词表拼写,见
 #: ``retrieval_experience_projection.RETRIEVAL_ACTIONS``),T6 步级零命中提示
-#: 只track 这四个——它们各自已经在 dispatch 里算出一个确定性的「新增数」
+#: 只track 这五个——它们各自已经在 dispatch 里算出一个确定性的「新增数」
 #: (ppr/exact_lookup 的 ``new``、expand 的 ``neigh``、follow_chain 的
 #: ``new_chains``),复用它判零命中不需要新读。``retrieve``(add_subquery)
 #: 刻意不在其中:它的「新增为 0」在措辞上已经是「换个问法」而非「换个通道」,
 #: 与本提示要解决的「同一通道反复空转」是两回事;``enumerate``/
 #: ``expand_community``/``outline`` 同样不track,前两者已有自己的账目回喂
 #: (集合枚举的续跑账目、`community_focals_done`），后者不产证据。
-_ZERO_HIT_TRACKED_ACTIONS: Tuple[str, ...] = ("ppr", "exact_lookup", "expand", "follow_chain")
+#: ``search_chunks`` joins them for the same reason: its dispatch already
+#: computes a deterministic "new this turn" number (the ``take_distinct_chunk_
+#: hits`` return), so judging zero-hit needs no extra read.
+_ZERO_HIT_TRACKED_ACTIONS: Tuple[str, ...] = ("ppr", "exact_lookup", "expand",
+                                              "follow_chain", "search_chunks")
 
 #: 同一个动作连续(累计)多少次零新增才够格被提示一次。与
 #: ``_ZERO_HIT_NUDGE_MAX_PER_RUN`` 都是确定性阈值,不是学出来的——P4 开工
@@ -1636,9 +1686,9 @@ class SubQuery:
 @dataclass
 class ReflectDecision:
     sufficient: bool = False
-    # answer|expand_graph|add_subquery|search_elements|ppr_retrieve|
-    # expand_community|follow_chain|exact_lookup|enumerate_elements|
-    # enumerate_kg_objects
+    # answer|expand_graph|add_subquery|search_elements|search_chunks|
+    # ppr_retrieve|expand_community|follow_chain|exact_lookup|
+    # enumerate_elements|enumerate_kg_objects
     next_action: str = "answer"
     expand_object_id: str = ""
     expand_edge_type: Optional[str] = None
@@ -1647,6 +1697,9 @@ class ReflectDecision:
     community_focal: str = ""
     elements_query: str = ""
     ppr_query: str = ""
+    # search_chunks 的检索串。与 elements_query/ppr_query 同款「空则回退到原
+    # 问题」,解析处不做必填校验。
+    chunks_query: str = ""
     exact_term: str = ""
     chain_start_object_id: str = ""
     chain_target_object_id: str = ""
@@ -1821,6 +1874,10 @@ class _ReasoningRunState:
     outline_active: bool
     consult_memory_flag: bool
     kg_gap_active: bool
+    # 本 run 的检索范围内是否存在知识图谱(本库有图,或勾选的参考库里有图)。
+    # 由 `_new_run_state` 算一次(见 `ReasoningRetriever._kg_in_scope`),之后是
+    # run 级不变量:无图 run 的确定性原文播种以它为唯一判据。
+    kg_in_scope: bool
 
     # —— 证据池:首轮各阶段写入,reflect 循环继续就地写入,收尾读 ——
     collected: Dict[str, RetrievedKnowledge]
@@ -1921,7 +1978,14 @@ class _ReasoningRunState:
     stale: int = 0
 
     # reflect 循环的动作配额计数器,构造时归零后只由循环自己推进。
+    # ⚠ 下面两个**不被 `run` 解包**:`ppr_retrieve`/`search_chunks` 的执行体整体
+    # 住在 `_action_ppr_retrieve`/`_action_search_chunks` 里(`run` 是有零松弛长度
+    # 天花板的热函数),那两个方法就地读写这里,所以没有「解包之后别再回看
+    # state 标量」那条纪律的问题。两条 seed pass 都不经过它们,所以这两个计数只
+    # 数 agent 动作。
     ppr_searches: int = 0
+    chunk_searches: int = 0
+    # 这两个仍由 `run` 解包成局部标量(它们的分支还在 elif 链里)。
     follow_chain_searches: int = 0
     exact_lookups: int = 0
 
@@ -2004,6 +2068,16 @@ class ReasoningRetriever:
         # which alone keeps the action unreachable, but a future call site
         # that starts passing one should not silently inherit this channel).
         self.allow_consult_memory = True
+        # Authoring-flow policy hook mirroring allow_ppr/allow_exact_lookup:
+        # True (Ask's and the report engine's behavior) keeps BOTH halves of the
+        # raw-passage channel live — the no-graph first-round seed and the
+        # reflect ``search_chunks`` action; False takes both away through the
+        # same single gate the deployment kill switch uses
+        # (``chunk_search_active``), so the action never reaches the schema, the
+        # prompt or the allowed-action whitelist and the seed never runs.
+        # knowhow completion sets it False — see that call site for why this
+        # channel is unsafe against a JSON-envelope query.
+        self.allow_search_chunks = True
         # Authoring flows whose synthesis only accepts server-issued evidence
         # keys (knowhow completion) turn this off: an enumerated list would
         # spend the run's budget on items their prompt cannot cite.
@@ -2051,6 +2125,29 @@ class ReasoningRetriever:
             and callable(drift_probe)
             and drift_probe(scope.notebook_id)
         )
+
+    # --- 原文段落检索通道的总闸 ---
+    def chunk_search_active(self) -> bool:
+        """本 run 是否提供 `search_chunks` 动作与无图首轮原文播种。
+
+        与枚举那把闸同款单点判定:**同一个**判据同时决定 reflect prompt 写不写
+        这个动作、schema 给不给 `chunks_query`、动作在不在 allowed_actions 里、
+        首轮播不播种。关闭态因此逐字节回到接入前——模型压根看不到这个动作,
+        `reasoning_max_chunk_searches` 也没有消费者。
+
+        它读部署开关与调用方策略位 `allow_search_chunks`(不看档位、不看端口在场
+        与否),两者在一个 run 内都恒定;与 `enumeration_active` 一样每次调用现算,
+        不缓存。接线判据本身走模块级的 `chunk_search_wiring_active`——
+        `ask_service` 的无图早退是它的第二个调用方,两处各读一次 settings 就会出现
+        「早退放行了、run 里却没有这个通道」的空转。策略位刻意**并进同一个**判
+        据(而不是只挡动作分支):关掉它的调用方要的是整条通道消失,漏掉播种半边
+        就等于把最贵的那半留在关键路径上。
+        """
+        return chunk_search_wiring_active(self.settings) and self.allow_search_chunks
+
+    def _kg_in_scope(self, notebook_id) -> bool:
+        """本 run 的检索范围内有没有知识图谱。判据单点在 `kg_in_scope_for`。"""
+        return kg_in_scope_for(self.retrieval, notebook_id)
 
     # --- 集合枚举工具的总闸 ---
     def enumeration_active(self) -> bool:
@@ -2147,6 +2244,34 @@ class ReasoningRetriever:
             "chunk", retrieved
         )
 
+    def search_chunks(self, notebook_id, query, *, k: Optional[int] = None):
+        """按语义 + 关键词检索来源原文段落(chunk)。零模型调用。
+
+        复用 chunk 模式的现成原语,不新写检索:召回走
+        `retrieve_chunk_candidates`(`chunk_recall` 候选池、来源范围天花板与
+        `filter_retrieval_items` 都在通道里),选择走 `select_chunk_candidates`
+        的 MMR。`k` 缺省 = agent 动作口径(`chunk_mmr_k`,与 chunk 模式单查询
+        分支同参);首轮播种显式传 `ranked_per_query_take`(档位字段),让「档位
+        买更多首轮证据」对原文同样成立。
+
+        与 `ppr_retrieve`/`exact_lookup` 包装同形地走 `_filter_candidates`
+        与 `retrieval_fanout_slot`:knowhow 智能补全用前者剔除私有 Memory 与
+        当前表自身投影,新通道不得绕过;后者是并发扇出闸,首轮播种一次提交
+        N 条子查询,不占同一把闸就等于把它开了个后门。
+
+        扇出闸只圈住 `retrieve_chunk_candidates` 这一步(它是发 I/O 的那半);
+        `select_chunk_candidates` 的 MMR 是纯 CPU、只读已在手的候选与矩阵,
+        圈进临界区只会让 N 条并发子查询彼此排队等对方算完 MMR。
+        """
+        with retrieval_fanout_slot():
+            scored, ids, matrix = self.retrieval.retrieve_chunk_candidates(
+                notebook_id, query)
+        selected = self.retrieval.select_chunk_candidates(
+            scored, ids, matrix,
+            self.settings.chunk_mmr_k if k is None else k,
+            self.settings.chunk_mmr_lambda)
+        return self._filter_candidates("chunk", selected)
+
     def exact_lookup(self, notebook_id, query):
         """按名称精确定位小节 → 整节 chunk。零模型调用、零 embedding。
 
@@ -2188,7 +2313,8 @@ class ReasoningRetriever:
 
     # --- LLM 决策点 ---
     def plan(self, question, history="", max_subqueries=None, collection_map="",
-             profile_block="", experience_block="", style_block=""):
+             profile_block="", experience_block="", style_block="",
+             kg_available=True):
         raise_if_cancelled(self.cancel_event)
         from app.services.query_rewrite import expand_query
         fallback = [SubQuery(query=question)]
@@ -2201,7 +2327,13 @@ class ReasoningRetriever:
                               if max_subqueries is not None
                               else self.settings.reasoning_max_subqueries
                           ),
-                          want_types=True,
+                          # T2「规划措辞」的生产落点:production 规划 prompt 是
+                          # expand_query_prompt(plan_prompt 只是备份拼写,无生产
+                          # 调用者),它唯一的图措辞就是 want_types 门住的那行
+                          # 「which KG node types to search」与 types/prefer 字段。
+                          # 范围内无图时关掉它,规划模型不再被要求按图节点类型
+                          # 拆问题;有图 run 恒 True,调用形状与接入前逐字一致。
+                          want_types=kg_available,
                           cancel_event=self.cancel_event,
                           fail_closed=self.fail_closed,
                           system_instruction=(
@@ -2226,7 +2358,7 @@ class ReasoningRetriever:
         return out or fallback
 
     def reflect(self, question, candidates_summary, outline: bool = False,
-                consult_memory: bool = False):
+                consult_memory: bool = False, kg_actions: bool = True):
         """``outline`` = 本 run 提供大纲便签动作(仅 exhaustive 档,见
         ``outline_wiring_active``)。默认 False,所以既有调用方(与关闭态)拿到的
         prompt/schema 与接入前逐字相同。档位是 run() 的参数而不是实例状态,所以
@@ -2234,7 +2366,16 @@ class ReasoningRetriever:
 
         ``consult_memory`` = 本 run 提供 consult_memory 动作(deep 及以上档 且
         经验库注入闸开着,见 ``consult_memory_active``)。同款默认 False、同款
-        由调用处传入。"""
+        由调用处传入。
+
+        ``kg_actions`` = 本 run 的检索范围内**有图**(`state.kg_in_scope`,判据
+        单点在 `kg_in_scope_for`)。它与上面两把闸同形从调用处传入——是 run 级
+        的笔记本事实而不是部署配置,所以不像 `chunk_search` 那样在这里现算:
+        `run()` 每轮都用同一个值,而这个方法自己拿不到 notebook_id。默认 True,
+        所以既有调用方(含所有测试替身)拿到的 prompt/schema/白名单与 T2 之前
+        逐字节相同;False 时五个图动作从 prompt 说明、schema 分支、下面的
+        `allowed_actions` **三处同时**消失——任何一处不同步,模型就会看到一个
+        它调不动的动作,或反过来调一个没被告知的动作。"""
         raise_if_cancelled(self.cancel_event)
         answer_decision = ReflectDecision(sufficient=True, next_action="answer")
         client = self.model_clients.chat("reasoning_agent")
@@ -2243,6 +2384,10 @@ class ReasoningRetriever:
                 raise RuntimeError("reasoning model is not configured")
             return answer_decision
         enumeration = self.enumeration_active()
+        # `search_chunks` 的闸是部署级 kill switch,所以在这里现算而不是像
+        # outline/consult_memory 那样从调用处传进来:它不看档位、不看请求,
+        # run() 的调用形状因此一个字都不用改。
+        chunk_search = self.chunk_search_active()
         # 白名单从 collection_catalog import(唯一字面量定义点),prompt/schema/
         # 解析三处共用同一份,不各写一份副本。
         element_kinds = ENUMERABLE_ELEMENT_KINDS if enumeration else ()
@@ -2254,6 +2399,7 @@ class ReasoningRetriever:
                     question, candidates_summary,
                     element_kinds=element_kinds, object_types=object_types,
                     outline=outline, consult_memory=consult_memory,
+                    search_chunks=chunk_search, kg_actions=kg_actions,
                 ),
             }]
             if self.untrusted_evidence:
@@ -2264,7 +2410,8 @@ class ReasoningRetriever:
             raw = client.chat_json(
                 messages,
                 reflect_schema_hint(
-                    element_kinds, object_types, outline, consult_memory
+                    element_kinds, object_types, outline, consult_memory,
+                    chunk_search, kg_actions,
                 ),
                 timeout=self.settings.reasoning_timeout_seconds,
                 max_retries=self.settings.reasoning_max_retries,
@@ -2279,13 +2426,24 @@ class ReasoningRetriever:
             # 先例:不把开关串进 prompt 签名)。exact_lookup_enabled=False 时该动作
             # 在执行处被 skip 掉,零 I/O;代价只是模型偶尔选到它浪费一轮反思,换来
             # prompt 与动作契约不随部署配置漂移。
+            #
+            # `kg_actions` 是这条先例之外的一类:它不是部署配置,而是本 run 的
+            # 笔记本事实(范围内有没有图),与 enumeration/outline/consult_memory
+            # 三把 run 级闸同类。无图时五个图动作在这里、在 schema、在 prompt 说
+            # 明三处一起消失;模型硬吐一个 `expand_graph` 就按既有的未知动作合同
+            # 处理(fail_closed 抛错,否则退成 answer)。
             allowed_actions = (
-                "answer", "expand_graph", "add_subquery", "search_elements",
-                "ppr_retrieve", "expand_community", "follow_chain",
-                "exact_lookup",
+                ("answer", "add_subquery", "search_elements", "exact_lookup")
             ) + (
-                (ENUMERATE_ELEMENTS_ACTION, ENUMERATE_KG_OBJECTS_ACTION)
-                if enumeration else ()
+                ("expand_graph", "ppr_retrieve", "expand_community",
+                 "follow_chain") if kg_actions else ()
+            ) + (
+                ("search_chunks",) if chunk_search else ()
+            ) + (
+                (ENUMERATE_ELEMENTS_ACTION,) if enumeration else ()
+            ) + (
+                (ENUMERATE_KG_OBJECTS_ACTION,)
+                if enumeration and kg_actions else ()
             ) + ((OUTLINE_ACTION,) if outline else ()
             ) + ((CONSULT_MEMORY_ACTION,) if consult_memory else ())
             if action not in allowed_actions:
@@ -2316,6 +2474,10 @@ class ReasoningRetriever:
             d.community_focal = str(data.get("community_focal", "")).strip()
             d.elements_query = str(data.get("elements_query", "")).strip()
             d.ppr_query = str(data.get("ppr_query", "")).strip()
+            # 与 enumerate/outline 分支同形:关闭态连读都不读,模型硬吐一个
+            # chunks_query 也不会有任何影响(动作本身不在白名单里)。
+            if chunk_search:
+                d.chunks_query = str(data.get("chunks_query", "")).strip()
             d.exact_term = clean_exact_term(data.get("exact_term", ""))
             enumerate_request = data.get("enumerate")
             if enumeration and isinstance(enumerate_request, dict):
@@ -2412,6 +2574,7 @@ class ReasoningRetriever:
                     d.community_focal,
                     d.elements_query,
                     d.ppr_query,
+                    d.chunks_query,
                     d.exact_term,
                     d.chain_start_object_id,
                     d.chain_target_object_id,
@@ -2675,7 +2838,7 @@ class ReasoningRetriever:
         self, notebook_id, question, history, on_step, *,
         max_steps, intent_queries, limits, intent_detail,
     ) -> "_ReasoningRunState":
-        """解析本 run 的全部预算/开关并铺开 run 级账目(零 I/O、零模型调用)。
+        """解析本 run 的预算/开关并铺开 run 级账目(除 `_kg_in_scope` 那对 EXISTS 外零 I/O)。
 
         搬自 `run` 的开头一段,逐行未改。判定入口(`enumeration_active()`、
         `outline_wiring_active`、`consult_memory_active`、
@@ -2808,7 +2971,7 @@ class ReasoningRetriever:
         consult_overlay_note = ""
         consult_block_text = ""
 
-        # Agentic Memory P4 (T6): 步级零命中提示的 run 级账目。四个可实测「本轮
+        # Agentic Memory P4 (T6): 步级零命中提示的 run 级账目。五个可实测「本轮
         # 新增数」的动作分支各自计数(见 _ZERO_HIT_TRACKED_ACTIONS 的说明),
         # ``nudged_actions`` 保证同一个动作一个 run 只提醒一次。
         zero_hit_by_action: Dict[str, int] = {}
@@ -2836,6 +2999,7 @@ class ReasoningRetriever:
             outline_active=outline_active,
             consult_memory_flag=consult_memory_flag,
             kg_gap_active=kg_gap_active,
+            kg_in_scope=self._kg_in_scope(notebook_id),
             collected=collected,
             elements=elements,
             elements_searches=elements_searches,
@@ -2901,6 +3065,33 @@ class ReasoningRetriever:
             # 检索兜底覆盖)。
             state.failed_search_queries.add(sq.query)
             return []
+
+    def _first_round_kg_disclosure(self, state: "_ReasoningRunState") -> None:
+        """无图 run 的开场披露(给人读的一句话,不是一次检索)。
+
+        用 `skip` 类型是刻意的(设计 T2):经验投影按设计整步丢弃 skip,所以这
+        句人话不会污染 `RETRIEVAL_ACTIONS` 那个闭集词表。也因此它**不写**
+        `result_ids`——Agentic Memory P4 的硬规则是「真正发起 I/O 的步无条件写
+        `result_ids`,skip 步不写」,而这一步零 I/O、零模型调用。
+
+        排在 `_first_round_prompt_blocks` 之前:它是本轮首轮轨迹的第一句,读轨迹
+        的人应该先看到「这个库没有图」,再看到后面为什么只有原文与集合类的步。
+
+        对耗时口径的影响是「切一刀」而不是「零影响」:`_TraceRecorder` 给每步算
+        的是**距上一条记账的墙钟差**,不是这一步自己花的时间(见 `_TraceRecorder`
+        的类注释,以及 `_first_round_ppr_seed` 那种「记账点必须留在工作完成之后」
+        的承重口径)。所以这一句虽然零 I/O、零模型调用,它的 duration_ms 仍是
+        「上一条记账到这里」的那一段(首轮里就是 PPR 预取 submit 那点开销),并把
+        同样长的一段从紧随其后的 `_first_round_prompt_blocks` 首步里扣掉。两边之
+        和不变,量级在毫秒内;这一步没有任何工作可以挪到记账点之前,所以也不存在
+        「记账早了把自己的工作漏掉」那类问题。
+        """
+        if state.kg_in_scope:
+            return
+        state.record(TraceStep(
+            step_type="skip",
+            summary="本笔记本尚未构建知识图谱,本轮只用原文检索与集合清单",
+            detail={"reason": "kg_unavailable"}))
 
     def _first_round_prompt_blocks(self, state: "_ReasoningRunState") -> None:
         """注入三块规划背景:Agent 库理解、部署级检索打法、集合地图。
@@ -3093,6 +3284,11 @@ class ReasoningRetriever:
             plan_kwargs["experience_block"] = experience_block
         if style_block:
             plan_kwargs["style_block"] = style_block
+        # 无图 run 才传:有图 run 的 plan() 调用形状与接入前逐字一致(镜像上面
+        # 「有才传」的规矩);判据是 run 级事实 state.kg_in_scope,与 reflect 的
+        # kg_actions 门同源。
+        if not state.kg_in_scope:
+            plan_kwargs["kg_available"] = False
         subqueries = (
             [SubQuery(query=query) for query in reviewed_queries]
             if reviewed_queries
@@ -3258,6 +3454,191 @@ class ReasoningRetriever:
                 summary=f"按名称精确查找:新增 {len(found)} 段原文",
                 detail=_exact_seed_detail))
 
+    def _chunk_seed_search(self, notebook_id, query, take):
+        """播种里的一条子查询。失败语义与 `_first_round_search` 逐字一致:
+        fail-open 吞掉、`fail_closed` 下照抛、`AskCancelled` 始终上抛——一条
+        子查询炸掉不该拖垮整轮播种。"""
+        raise_if_cancelled(self.cancel_event)
+        try:
+            return self.search_chunks(notebook_id, query, k=take)
+        except AskCancelled:
+            raise
+        except Exception:
+            if self.fail_closed:
+                raise
+            return []
+
+    def _first_round_chunk_seed(self, state: "_ReasoningRunState") -> None:
+        """无图首轮的原文播种 pass(确定性兜底,镜像 PPR/精确查找 seed pass)。
+
+        **仅** `kg_in_scope=False` 时执行:有图 run 的 chunk 分区由 PPR seed
+        填充,再叠一路会改变预算分配与引用构成(设计 D-1),所以有图 run 在这
+        条路径上一字不动。
+
+        排在精确查找 seed 之后、空证据兜底之前:前者保证 PPR/精确两条通道的
+        `seen_chunks` 去重与新增计数逐位不变(本通道只往 `chunks` 追加);后者
+        的触发条件 `not (collected or elements or chunks)` 不变——播种有命中时
+        它自然不触发,全空时仍照旧补一次 `search_elements`。
+
+        每子查询的 MMR k 取 `state.per_query_take`(= 档位的
+        `ranked_per_query_take`)而不是 `chunk_mmr_k`:首轮是并发多路、合成侧
+        还有 `chunk_context_chars` 兜底,用档位字段让「档位买更多首轮证据」的
+        既有语义对原文同样成立。
+
+        seed 不是 agent 动作,与 PPR/精确 seed 同口径**不**计入
+        `max_chunk_searches`。零模型调用;查询 embedding 走请求级 memo,与
+        chunk 模式共享同一份缓存语义。
+        """
+        if state.kg_in_scope or not self.chunk_search_active():
+            return
+        subqueries = state.subqueries
+        if not subqueries:
+            return
+        record = state.record
+        notebook_id = state.notebook_id
+        chunks = state.chunks
+        seen_chunks = state.seen_chunks
+        take = state.per_query_take
+        raise_if_cancelled(self.cancel_event)
+        with ThreadPoolExecutor(max_workers=min(len(subqueries), 8)) as ex:
+            # Context must be copied once PER task (见 `_first_round_initial_
+            # search` 的同款注释):一个 Context 不能被并发进入,而裸执行器会
+            # 丢掉 per-user 的模型/日志路由。
+            futures = [
+                ex.submit(contextvars.copy_context().run,
+                          self._chunk_seed_search, notebook_id, sq.query, take)
+                for sq in subqueries
+            ]
+            # 按提交顺序 result:第 i 个结果仍对应第 i 个子查询,故去重与串行版
+            # 完全等价(同一段先被哪条子查询领走是确定的)。取消检查与
+            # `_first_round_initial_search` 同形:**逐个** future 收完就查一次,
+            # 而不是等整批收齐——否则一次取消要多等最慢那条子查询。
+            found = []
+            for future in futures:
+                found.append(future.result())
+                raise_if_cancelled(self.cancel_event)
+        seeded: List = []
+        for hits in found:
+            # 逐条并入与先拼成一个大列表**等价**:`take_distinct_chunk_hits`
+            # 单次调用内也按 id/内容键去重并就地升级(它把本次新收的段落也登记
+            # 进 by_id/by_content),跨子查询的重复不会漏过去。保留逐条只是让
+            # 并入顺序与子查询顺序显式对齐,读起来不必回去推。
+            new = take_distinct_chunk_hits(hits, seen_chunks, chunks)
+            chunks.extend(new)
+            seeded.extend(new)
+        _result_ids, _result_ids_truncated = _capped_result_ids(
+            [c.chunk_id for c in seeded])
+        _chunk_seed_detail = {"found": len(seeded), "phase": "seed",
+                              "result_ids": _result_ids}
+        if _result_ids_truncated:
+            _chunk_seed_detail["result_ids_truncated"] = True
+        record(TraceStep(
+            step_type="search_chunks",
+            summary=f"检索原文段落:本笔记本无知识图谱,新增 {len(seeded)} 段",
+            detail=_chunk_seed_detail))
+
+    def _action_ppr_retrieve(
+        self, state: "_ReasoningRunState", decision: "ReflectDecision",
+    ) -> None:
+        """reflect 的 `ppr_retrieve` 动作分支(逐字搬自 `run` 的 elif 链)。
+
+        与 `_action_search_chunks` 同形:`run` 是有零松弛长度天花板的热函数,
+        动作执行体不记在它头上。计数器 `state.ppr_searches` 因此**不再**被
+        `run` 解包成局部标量,由本方法就地读写——容器(`chunks`/`seen_chunks`/
+        `zero_hit_by_action`)本来就是同一个对象,行为逐位不变。
+        """
+        record = state.record
+        action_policy = state.action_policy
+        if self._unsafe_scope_restricted():
+            record(TraceStep(
+                step_type="skip",
+                summary="跳过概念漫游（指定来源范围下不可用）",
+                detail={"reason": "source_scope_unsafe_channel"},
+            ))
+        elif not self.allow_ppr:
+            record(TraceStep(step_type="skip",
+                             summary="跳过概念漫游（当前检索范围不允许）",
+                             detail={"reason": "ppr_disabled_by_policy"}))
+        elif not self.settings.graph_ppr_enabled:
+            record(TraceStep(step_type="skip",
+                             summary="跳过概念漫游(未启用)",
+                             detail={"reason": "ppr_disabled"}))
+        elif state.ppr_searches >= action_policy.max_ppr_retrieves:
+            record(TraceStep(step_type="skip",
+                             summary=("跳过概念漫游(已达次数上限 "
+                                      f"{action_policy.max_ppr_retrieves})"),
+                             detail={"reason": "ppr_retrieve_cap"}))
+        else:
+            state.ppr_searches += 1
+            pq = decision.ppr_query or state.question
+            new = take_distinct_chunk_hits(
+                self.ppr_retrieve(state.notebook_id, pq),
+                state.seen_chunks, state.chunks)
+            state.chunks.extend(new)
+            # Agentic Memory P4 (T6,修复轮 spec③): 命中即清零,纯内存
+            # O(1),不改变本分支任何既有行为(除了让"连续"变真话)。
+            if not new:
+                state.zero_hit_by_action["ppr"] = (
+                    state.zero_hit_by_action.get("ppr", 0) + 1)
+            else:
+                state.zero_hit_by_action["ppr"] = 0
+            _result_ids, _result_ids_truncated = _capped_result_ids(
+                [c.chunk_id for c in new])
+            _ppr_action_detail = {"query": pq, "found": len(new), "phase": "action",
+                                  "result_ids": _result_ids}
+            if _result_ids_truncated:
+                _ppr_action_detail["result_ids_truncated"] = True
+            record(TraceStep(step_type="ppr",
+                             summary=f"概念漫游:{pq},新增 {len(new)} 段",
+                             detail=_ppr_action_detail))
+
+    def _action_search_chunks(
+        self, state: "_ReasoningRunState", decision: "ReflectDecision",
+    ) -> None:
+        """reflect 的 `search_chunks` 动作分支(与 `_action_ppr_retrieve` 同形)。
+
+        整体住在这里而不是 `run` 的 elif 链里:`run` 是有零松弛长度天花板的热
+        函数,新通道的执行体按 `_first_round_*` 的先例不记在它头上。计数器就地
+        读写 `state.chunk_searches`(它是本方法独占的 run 级账目,`run` 不解包
+        它,所以没有「解包之后别再读 state 标量」那条纪律的问题)。
+        """
+        record = state.record
+        action_policy = state.action_policy
+        if not self.chunk_search_active():
+            # 纵深防御:关闭态该动作不在 allowed_actions 里,正常路径到不了这
+            # 里;测试替身或畸形响应仍可能直达,那也必须零 I/O。
+            record(TraceStep(step_type="skip",
+                             summary="跳过原文段落检索(未启用)",
+                             detail={"reason": "chunk_search_disabled"}))
+            return
+        if state.chunk_searches >= action_policy.max_chunk_searches:
+            record(TraceStep(step_type="skip",
+                             summary=("跳过原文段落检索(已达次数上限 "
+                                      f"{action_policy.max_chunk_searches})"),
+                             detail={"reason": "chunk_search_cap"}))
+            return
+        state.chunk_searches += 1
+        cq = decision.chunks_query or state.question
+        new = take_distinct_chunk_hits(
+            self.search_chunks(state.notebook_id, cq),
+            state.seen_chunks, state.chunks)
+        state.chunks.extend(new)
+        # 命中即清零,与 ppr 分支同形(让"连续"是真话)。
+        if not new:
+            state.zero_hit_by_action["search_chunks"] = (
+                state.zero_hit_by_action.get("search_chunks", 0) + 1)
+        else:
+            state.zero_hit_by_action["search_chunks"] = 0
+        _result_ids, _result_ids_truncated = _capped_result_ids(
+            [c.chunk_id for c in new])
+        _chunk_action_detail = {"query": cq, "found": len(new),
+                                "result_ids": _result_ids}
+        if _result_ids_truncated:
+            _chunk_action_detail["result_ids_truncated"] = True
+        record(TraceStep(step_type="search_chunks",
+                         summary=f"检索原文段落:{cq},新增 {len(new)} 段",
+                         detail=_chunk_action_detail))
+
     def _first_round_empty_fallback(
         self, state: "_ReasoningRunState",
     ) -> None:
@@ -3391,9 +3772,10 @@ class ReasoningRetriever:
         """首轮:reflect 循环之前的全部确定性工作。
 
         阶段顺序本身是合同(每一条都有独立理由,见各阶段的原注释):
-        理解/打法/地图注入 → 规划 → 初检索 → PPR seed → 精确查找 seed →
-        空证据兜底 → 已确认方向补种。特别地,精确查找 seed 必须排在 PPR seed
-        **之后**,否则 PPR 那一步的 `seen_chunks` 去重与 `seeded` 计数会变。
+        无图披露 → 理解/打法/地图注入 → 规划 → 初检索 → PPR seed → 精确查找
+        seed → 无图原文播种 → 空证据兜底 → 已确认方向补种。特别地,精确查找 seed 必须
+        排在 PPR seed **之后**,否则 PPR 那一步的 `seen_chunks` 去重与 `seeded`
+        计数会变;无图原文播种同理排在两条 seed 之后。
         """
         notebook_id = state.notebook_id
         question = state.question
@@ -3418,11 +3800,13 @@ class ReasoningRetriever:
                 contextvars.copy_context().run,
                 self.ppr_retrieve, notebook_id, question)
         try:
+            self._first_round_kg_disclosure(state)
             self._first_round_prompt_blocks(state)
             self._first_round_plan(state)
             self._first_round_initial_search(state)
             self._first_round_ppr_seed(state, ppr_future)
             self._first_round_exact_seed(state)
+            self._first_round_chunk_seed(state)
             self._first_round_empty_fallback(state)
         finally:
             # 无论正常走完、plan/初检索抛异常(含 AskCancelled)、还是上面
@@ -3539,7 +3923,6 @@ class ReasoningRetriever:
         uncovered_intent_queries = state.uncovered_intent_queries
         no_progress = state.no_progress
         stale = state.stale
-        ppr_searches = state.ppr_searches
         follow_chain_searches = state.follow_chain_searches
         exact_lookups = state.exact_lookups
 
@@ -3959,11 +4342,11 @@ class ReasoningRetriever:
                         enum_limits.enum_rows_per_run - enum_rows_used
                     )
                 )
-            # 可选参数按「有才传」(同 plan() 的 max_subqueries/collection_map、
-            # 以及 _construct_reasoning_retriever 对 fail_closed 的处理):关闭态与
-            # 低档位下调用形状与接入前逐字一致,既有的 reflect 测试替身不必为一个
-            # 它们永远收不到的参数改签名。
-            reflect_kwargs = {}
+            # 可选参数按「有才传」(同 plan() 的 max_subqueries/collection_map):
+            # 关闭态、低档位与**有图** run 下调用形状与接入前逐字一致,既有的
+            # reflect 测试替身不必为收不到的参数改签名。`kg_in_scope` 是 run 级
+            # 不变量(`_new_run_state` 算一次),这里直读 state,不解包成局部名。
+            reflect_kwargs = {} if state.kg_in_scope else {"kg_actions": False}
             if outline_active:
                 reflect_kwargs["outline"] = True
             if consult_memory_flag:
@@ -4633,48 +5016,10 @@ class ReasoningRetriever:
                             step_type="skip",
                             summary="回想以往打法:读取记录失败,本轮跳过",
                             detail={"reason": "consult_memory_unavailable"}))
+            elif decision.next_action == "search_chunks":
+                self._action_search_chunks(state, decision)
             elif decision.next_action == "ppr_retrieve":
-                if self._unsafe_scope_restricted():
-                    record(TraceStep(
-                        step_type="skip",
-                        summary="跳过概念漫游（指定来源范围下不可用）",
-                        detail={"reason": "source_scope_unsafe_channel"},
-                    ))
-                elif not self.allow_ppr:
-                    record(TraceStep(step_type="skip",
-                                     summary="跳过概念漫游（当前检索范围不允许）",
-                                     detail={"reason": "ppr_disabled_by_policy"}))
-                elif not self.settings.graph_ppr_enabled:
-                    record(TraceStep(step_type="skip",
-                                     summary="跳过概念漫游(未启用)",
-                                     detail={"reason": "ppr_disabled"}))
-                elif ppr_searches >= action_policy.max_ppr_retrieves:
-                    record(TraceStep(step_type="skip",
-                                     summary=("跳过概念漫游(已达次数上限 "
-                                              f"{action_policy.max_ppr_retrieves})"),
-                                     detail={"reason": "ppr_retrieve_cap"}))
-                else:
-                    ppr_searches += 1
-                    pq = decision.ppr_query or question
-                    new = take_distinct_chunk_hits(
-                        self.ppr_retrieve(notebook_id, pq), seen_chunks, chunks)
-                    chunks.extend(new)
-                    # Agentic Memory P4 (T6,修复轮 spec③): 命中即清零,纯内存
-                    # O(1),不改变本分支任何既有行为(除了让"连续"变真话)。
-                    if not new:
-                        zero_hit_by_action["ppr"] = (
-                            zero_hit_by_action.get("ppr", 0) + 1)
-                    else:
-                        zero_hit_by_action["ppr"] = 0
-                    _result_ids, _result_ids_truncated = _capped_result_ids(
-                        [c.chunk_id for c in new])
-                    _ppr_action_detail = {"query": pq, "found": len(new), "phase": "action",
-                                          "result_ids": _result_ids}
-                    if _result_ids_truncated:
-                        _ppr_action_detail["result_ids_truncated"] = True
-                    record(TraceStep(step_type="ppr",
-                                     summary=f"概念漫游:{pq},新增 {len(new)} 段",
-                                     detail=_ppr_action_detail))
+                self._action_ppr_retrieve(state, decision)
             elif decision.next_action == "exact_lookup":
                 # 名称已在 reflect() 里清洗过(去包裹标点,不截长——见 clean_exact_term)。
                 # fail_closed 的硬闸(:485 一带)先对超长 exact_term 生效;这里才截到

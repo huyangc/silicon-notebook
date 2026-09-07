@@ -16,6 +16,12 @@ export const TRACE_STEP_LABELS: Record<string, string> = {
   expand_community: "对比",
   follow_chain: "推导",
   fallback: "原文",
+  // search_chunks = 在原文段落里检索(T1,无图 reflect 动作 + 无图首轮播种共用
+  // 这一个 step_type)。⚠ 不能用 fallback: "原文"——那个词已经被上面的
+  // search_elements 兜底步占了,两步同名会让轨迹里出现两条读起来一样、说的却是
+  // 两回事的步(一条是「回原文里找细节」的元素兜底,一条是「按语义/关键词检索
+  // 原文段落」的一等检索动作)。
+  search_chunks: "段落",
   // outline = 大纲便签(update_outline reflect 动作写的那一步);仅 exhaustive 档
   // 且 REASONING_OUTLINE_ENABLED 开启时出现(设计文档 §3.1)。
   outline: "大纲",
@@ -49,16 +55,18 @@ export const TRACE_STEP_LABELS: Record<string, string> = {
 
 // next_action 取值来自 backend/app/services/prompts.py 的状态机决策(reflect 步骤
 // next-step 提议),原样显示会把英文动作名泄漏给用户。
-// 全部 12 个真实取值见 reasoning_retrieval.py 的 next_action if/elif 分发链——从
+// 全部 13 个真实取值见 reasoning_retrieval.py 的 next_action if/elif 分发链——从
 // `decision.next_action == "answer" or decision.sufficient` 起,到
 // `elif decision.next_action == "expand_community":` 止(PR-2 在其中插入了
 // enumerate_elements/enumerate_kg_objects 两个,精确查找通道插入了 exact_lookup
 // 一个,O1 插入了 update_outline(`OUTLINE_ACTION`)一个,Agentic Memory P4 插入了
 // consult_memory(`CONSULT_MEMORY_ACTION`,仅 deep 及以上档且经验注入闸开启时
-// 出现)一个,原为 7 个)。按分支内容定位而非行号:本仓库的行号指针已知会随后续
-// 改动腐烂(见 test_architecture_documentation 一类语义化守卫的教训),这里不重
-// 蹈覆辙。用「下一步意图」措辞而非机制名(ppr/community/chain/enumerate/
-// exact_lookup/update_outline/consult_memory 这些是内部机制,不该摆给用户)。
+// 出现)一个,T1 插入了 search_chunks(在原文段落里检索,无图时是唯一进入大预算
+// 分区的一等入口,有图 run 也可选)一个,原为 7 个)。按分支内容定位而非行号:
+// 本仓库的行号指针已知会随后续改动腐烂(见 test_architecture_documentation 一类
+// 语义化守卫的教训),这里不重蹈覆辙。用「下一步意图」措辞而非机制名(ppr/
+// community/chain/enumerate/exact_lookup/update_outline/consult_memory 这些是
+// 内部机制,不该摆给用户)。
 //
 // PR-2.5 的来源清单刻意**不在**这张表里:它不是新增动作,而是 enumerate 动作的
 // 一个参数值(`enumerate.collection="sources"`),所以反思步的「下一步意图」仍是
@@ -70,6 +78,7 @@ const NEXT_ACTION: Record<string, string> = {
   expand_graph: "顺着相关内容继续找",
   add_subquery: "换个角度再查一遍",
   search_elements: "回原文里找细节",
+  search_chunks: "在原文段落里检索",
   enumerate_elements: "列元素清单",
   enumerate_kg_objects: "列知识对象清单",
   ppr_retrieve: "顺着关联扩大范围",
@@ -214,6 +223,17 @@ export function getTraceStepDetail(step: ReasoningTraceStep): string {
       : [];
     const parts: string[] = [];
     if (terms.length) parts.push(terms.join("、"));
+    if (typeof detail.found === "number") parts.push(`新增 ${detail.found} 段`);
+    return parts.join(" · ");
+  }
+  // search_chunks(T1):原文段落检索一等动作,首轮无图播种(detail.phase==="seed",
+  // 无 query)与反思循环里的 agent 动作(不带 phase,有 query,与 ppr 步同形)
+  // 共用同一个 step_type,也共用这一条渲染——seed 没有单条 query 时就只显示
+  // found,不编造。必须排在下面 `detail.found` 通用分支之前,否则会把 query
+  // 悄悄吞掉,只剩「新增 N」,用户看不出查的是哪句话。
+  if (step.step_type === "search_chunks") {
+    const parts: string[] = [];
+    if (typeof detail.query === "string" && detail.query) parts.push(detail.query);
     if (typeof detail.found === "number") parts.push(`新增 ${detail.found} 段`);
     return parts.join(" · ");
   }

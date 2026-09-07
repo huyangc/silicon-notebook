@@ -905,6 +905,12 @@ class Settings(BaseSettings):
     reasoning_max_follow_chain_actions: int = Field(
         3, ge=0, validation_alias="REASONING_MAX_FOLLOW_CHAIN_ACTIONS"
     )
+    # reflect 动作 search_chunks(按语义+关键词检索来源原文段落)的每 run 次数
+    # 上限。默认与 PPR/精确查找一致;首轮的无图原文播种是确定性兜底、不是 agent
+    # 动作,与 PPR/精确 seed 同口径**不**计入这个上限。
+    reasoning_max_chunk_searches: int = Field(
+        3, ge=0, validation_alias="REASONING_MAX_CHUNK_SEARCHES"
+    )
     # Agentic Memory P4 (T5): reflect 动作 consult_memory 的总开关与 per-run 次数
     # 上限。仅在 deep 及以上档且 ``RETRIEVAL_EXPERIENCE_INJECT_ENABLED`` 也开着时
     # 才提供这个动作(见 ``reasoning_retrieval.consult_memory_active`` 的单点判定
@@ -953,6 +959,18 @@ class Settings(BaseSettings):
     # 每次调用的成本由档位表的 enum_* 预算(每 run 行数/额外翻页)封死,不是这里。
     reasoning_enum_tools_enabled: bool = Field(
         True, validation_alias="REASONING_ENUM_TOOLS_ENABLED")
+    # 逐步推理的原文段落检索动作(reflect 动作 search_chunks)与无图首轮原文播种的
+    # 总开关。与上面那把枚举闸同一「off 就是旧行为」契约:关掉即完全回到接入前
+    # ——动作不进 schema/prompt/白名单、首轮不播种、`REASONING_MAX_CHUNK_SEARCHES`
+    # 无消费者,零额外检索。
+    #
+    # ⚠ 关闭态**不是**零额外查询:`kg_in_scope`(本库或勾选的参考库有没有图)这对
+    # EXISTS 照付一次。它不归这把闸管——`ask_service` 的 `no_usable_kg` 早退本来
+    # 就要这个事实,T2 的图动作收缩也要,所以它是 run 级事实而不是本特性的开销;
+    # 两个调用点共用 `reasoning_retrieval.kg_in_scope_for` 的请求级 memo,一次请求
+    # 总共只付一次。
+    reasoning_chunk_search_enabled: bool = Field(
+        True, validation_alias="REASONING_CHUNK_SEARCH_ENABLED")
     # 逐步推理的大纲便签(reflect 动作 update_outline)总开关。它**另外**受档位
     # 约束:只有用户把检索档位选到「穷尽」时才提供(设计文档 §3.1,用户拍板),
     # 因为按节合成的成本要由用户显式选择来承担。关掉即两处都回到接入前:prompt
