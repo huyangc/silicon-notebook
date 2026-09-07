@@ -5277,25 +5277,6 @@ class ReasoningRetriever:
                         forced_overflow_repair = True
                         continue
                 break
-            if (
-                decision.next_action == "expand_community"
-                and (
-                    not self.allow_community_expansion
-                    or self._unsafe_scope_restricted()
-                )
-            ):
-                record(TraceStep(
-                    step_type="skip",
-                    summary="跳过跨库同类实体扩展（当前检索范围不允许）",
-                    detail={
-                        "reason": (
-                            "source_scope_unsafe_channel"
-                            if self._unsafe_scope_restricted()
-                            else "community_expansion_disabled"
-                        )
-                    },
-                ))
-                break
             before = (
                 len(collected) + len(elements) + len(chunks) + len(chains)
                 + state.enum_rows_used
@@ -5849,6 +5830,25 @@ class ReasoningRetriever:
                                     "trust": round(chain.chain_trust, 4),
                                     "validity_scope": chain.validity_scope,
                                 } for chain in new_chains[:4]]}))
+            elif decision.next_action == "expand_community" and (
+                not self.allow_community_expansion
+                or self._unsafe_scope_restricted()
+            ):
+                # 通道被调用方策略或来源上限禁用:零 I/O 记 skip,**落到链尾与其它
+                # skip 同一份 no_progress/stale 记账**(设计稿 §8)。此前写在链前并
+                # `break`——选一次被禁动作整个循环就终止,其余通道全被放弃;也不能
+                # 裸 `continue`,那会绕过链尾记账,反复请求被禁动作就规避了熔断。
+                record(TraceStep(
+                    step_type="skip",
+                    summary="跳过跨库同类实体扩展（当前检索范围不允许）",
+                    detail={
+                        "reason": (
+                            "source_scope_unsafe_channel"
+                            if self._unsafe_scope_restricted()
+                            else "community_expansion_disabled"
+                        )
+                    },
+                ))
             elif decision.next_action == "expand_community":
                 # 横向对比:焦点 → 兄弟实体(共提优先、社区回退),逐个发子查询。
                 # 焦点缺省用当前最高分候选名;同一 focal 一 run 只做一次;fail-open。
