@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   canSeeAdminUsage,
+  formatBytes,
   formatLastActive,
   logsDrillHref,
   parseUploadLimit,
@@ -20,6 +21,23 @@ test("formatLastActive 处理空值与格式", () => {
   assert.equal(formatLastActive(null), "—");
   assert.equal(formatLastActive(undefined), "—");
   assert.equal(formatLastActive("2026-07-06T12:34:56"), "2026-07-06 12:34");
+});
+
+// 规格 §3 B6:进位判断放在四舍五入之后(1048570/1048575 不出现「1024.0 KB」假进位);
+// TB 是最高单位,顶到 1024.0 TB 也不再进位;负数/NaN/非有限值统一 "0 B"。
+test("formatBytes 按 1024 进制格式化,进位在四舍五入之后判断,TB 顶格不再进位,异常输入归零", () => {
+  assert.equal(formatBytes(0), "0 B");
+  assert.equal(formatBytes(1023), "1023 B");
+  assert.equal(formatBytes(1024), "1.0 KB");
+  assert.equal(formatBytes(1536), "1.5 KB");
+  assert.equal(formatBytes(1048570), "1.0 MB"); // 舍入前 1023.99...KB,不得停留在 KB 显示「1024.0 KB」
+  assert.equal(formatBytes(1048575), "1.0 MB");
+  assert.equal(formatBytes(1048576), "1.0 MB");
+  assert.equal(formatBytes(1932735283), "1.8 GB");
+  assert.equal(formatBytes(1099511627776), "1.0 TB");
+  assert.equal(formatBytes(1125899906842624), "1024.0 TB"); // TB 已是最高单位,不再进位
+  assert.equal(formatBytes(-1), "0 B");
+  assert.equal(formatBytes(NaN), "0 B");
 });
 
 test("用户分析下钻链接编码 owner 并分别进入提问与 LLM 日志", () => {

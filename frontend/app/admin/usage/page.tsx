@@ -18,6 +18,7 @@ import {
   type AdminUserUsage,
 } from "./api.ts";
 import {
+  formatBytes,
   formatLastActive,
   logsDrillHref,
   parseUploadLimit,
@@ -598,7 +599,7 @@ export default function AdminUsagePage() {
                       type="button"
                       className="usage-expand-btn"
                       aria-expanded={isOpen}
-                      aria-label={isOpen ? "收起笔记本列表" : "展开笔记本列表"}
+                      aria-label={isOpen ? "收起用户详情" : "展开用户详情"}
                       onClick={() => toggleExpand(u.id)}
                     >
                       {isOpen ? "▾" : "▸"}
@@ -726,6 +727,57 @@ export default function AdminUsagePage() {
                 {isOpen && (
                   <tr className="usage-subrow">
                     <td colSpan={13}>
+                      {/* 用户摘要:仅依赖行数据 u,与笔记本明细的加载状态无关,故不受
+                          entry 是否就绪影响,始终无条件渲染(规格 §3 B6/Phase C)。 */}
+                      <div className="usage-summary" role="group" aria-label="用户摘要">
+                        <dl className="usage-summary-row">
+                          <div className="usage-summary-item">
+                            <dt>最近上线</dt>
+                            <dd>{formatLastActive(u.last_seen)}</dd>
+                          </div>
+                          <div className="usage-summary-item">
+                            <dt>存储</dt>
+                            <dd>{formatBytes(u.storage_bytes)}</dd>
+                          </div>
+                          <div className="usage-summary-item">
+                            <dt>近 30 天提问</dt>
+                            <dd>{u.questions_30d}</dd>
+                          </div>
+                          <div className="usage-summary-item">
+                            <dt>提问</dt>
+                            <dd>{u.questions}{u.questions_failed > 0 ? `（失败 ${u.questions_failed}）` : ""}</dd>
+                          </div>
+                          <div className="usage-summary-item">
+                            <dt>报告</dt>
+                            <dd>{u.reports}{u.reports_failed > 0 ? `（失败 ${u.reports_failed}）` : ""}</dd>
+                          </div>
+                          <div className="usage-summary-item">
+                            {/* 界面用词以 docs/ui-vocabulary.md 为准:KG 构建动作显示「图谱整理」,
+                                与主界面「整理知识图谱」同词(规格 §3 B6)。 */}
+                            <dt>图谱整理</dt>
+                            <dd>{u.kg_builds}</dd>
+                          </div>
+                        </dl>
+                        <dl className="usage-summary-row">
+                          <div className="usage-summary-item">
+                            {/* 界面用词以 docs/ui-vocabulary.md 为准:Memory 显示「记忆」(规格 §3 B6)。 */}
+                            <dt>记忆</dt>
+                            <dd>{u.memory_count}</dd>
+                          </div>
+                          <div className="usage-summary-item">
+                            <dt>Knowhow 表</dt>
+                            <dd>{u.knowhow_tables}</dd>
+                          </div>
+                          <div className="usage-summary-item">
+                            <dt>加入的共享库</dt>
+                            <dd>{u.joined_notebooks}</dd>
+                          </div>
+                          <div className="usage-summary-item">
+                            <dt>群组</dt>
+                            <dd>{u.groups}</dd>
+                          </div>
+                        </dl>
+                      </div>
                       {entry === "loading" && (
                         <div className="usage-subtable-status">加载中…</div>
                       )}

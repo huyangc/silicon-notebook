@@ -44,6 +44,21 @@ beforeEach(() => {
   window.history.replaceState({}, "", "/admin/usage");
 });
 
+// 展开区「用户摘要」用的默认口径值(规格 §3 B1–B5/Phase C)；单个用例需要不同数值时
+// 用 `{ ...rows[n], 字段: 值 }` 覆盖,不必每处手写全部字段。
+const usageSummaryDefaults = {
+  last_seen: null as string | null,
+  storage_bytes: 0,
+  questions_30d: 0,
+  questions_failed: 0,
+  reports_failed: 0,
+  kg_builds: 0,
+  memory_count: 0,
+  knowhow_tables: 0,
+  joined_notebooks: 0,
+  groups: 0,
+};
+
 const rows = [
   {
     id: "user-local",
@@ -60,6 +75,7 @@ const rows = [
     role_mutable: false,
     upload_limit: 20,
     upload_limit_overridden: false,
+    ...usageSummaryDefaults,
   },
   {
     id: "user-target",
@@ -76,6 +92,7 @@ const rows = [
     role_mutable: true,
     upload_limit: 20,
     upload_limit_overridden: false,
+    ...usageSummaryDefaults,
   },
 ];
 
@@ -92,6 +109,18 @@ async function targetRow() {
   const row = targetName.closest("tr");
   expect(row).not.toBeNull();
   return within(row as HTMLTableRowElement);
+}
+
+// 「用户摘要」按 dt/dd 配对断言,而不是分别断言标签存在、数值存在——后者即便
+// 标签与数值互换(变异)也不会报红。取 dt 命中的 .usage-summary-item,读取其内的
+// dd 文本,把标签与相邻的值绑在一起判定。
+function summaryItemValue(scope: ReturnType<typeof within>, label: string): string {
+  const dt = scope.getByText(label);
+  const item = dt.closest(".usage-summary-item");
+  expect(item).not.toBeNull();
+  const dd = (item as HTMLElement).querySelector("dd");
+  expect(dd).not.toBeNull();
+  return dd?.textContent ?? "";
 }
 
 test("管理员可在用户总览中二次确认并授予管理员权限", async () => {
@@ -366,5 +395,136 @@ test("点击可排序表头会对完整用户集合切换升降序", async () =>
   expect(sortButton.closest("th")).toHaveAttribute("aria-sort", "descending");
   expect(within(table).getAllByRole("row").slice(1).map((row) => row.children[1]?.textContent)).toEqual([
     "alpha", "gamma", "beta",
+  ]);
+});
+
+test("展开行前不渲染用户摘要，展开后渲染两行且数值来自后端字段", async () => {
+  primeCommonMocks();
+  mocks.fetchAdminUsers.mockResolvedValue([
+    rows[0],
+    {
+      ...rows[1],
+      last_seen: "2026-09-07T10:32:00",
+      storage_bytes: 1932735283, // formatBytes → "1.8 GB"
+      questions_30d: 37,
+      questions: 120,
+      questions_failed: 3,
+      reports: 8,
+      reports_failed: 1,
+      kg_builds: 5,
+      memory_count: 14,
+      knowhow_tables: 2,
+      joined_notebooks: 3,
+      groups: 1,
+    },
+  ]);
+  mocks.fetchUserNotebooks.mockResolvedValue([]);
+  const user = userEvent.setup();
+
+  render(<AdminUsagePage />);
+  const target = await targetRow();
+  // 展开前:摘要容器不存在。
+  expect(screen.queryByRole("group", { name: "用户摘要" })).toBeNull();
+
+  await user.click(target.getByRole("button", { name: "展开用户详情" }));
+
+  const summary = within(await screen.findByRole("group", { name: "用户摘要" }));
+  // 按「标签 → 相邻的值」配对断言:标签与数值互换(变异)必然报红,不像分别断言
+  // 标签存在、数值存在那样近乎恒真。
+  expect(summaryItemValue(summary, "最近上线")).toBe("2026-09-07 10:32");
+  expect(summaryItemValue(summary, "存储")).toBe("1.8 GB");
+  expect(summaryItemValue(summary, "近 30 天提问")).toBe("37");
+  expect(summaryItemValue(summary, "提问")).toBe("120（失败 3）");
+  expect(summaryItemValue(summary, "报告")).toBe("8（失败 1）");
+  expect(summaryItemValue(summary, "图谱整理")).toBe("5");
+  expect(summaryItemValue(summary, "记忆")).toBe("14");
+  expect(summaryItemValue(summary, "Knowhow 表")).toBe("2");
+  expect(summaryItemValue(summary, "加入的共享库")).toBe("3");
+  expect(summaryItemValue(summary, "群组")).toBe("1");
+});
+
+test("失败数为 0 时摘要不出现「失败」字样，last_seen 为空显示「—」，存储为 0 显示「0 B」", async () => {
+  primeCommonMocks(); // rows[1] 的 questions_failed/reports_failed 均为 0,last_seen 为 null
+  mocks.fetchUserNotebooks.mockResolvedValue([]);
+  const user = userEvent.setup();
+
+  render(<AdminUsagePage />);
+  const target = await targetRow();
+  await user.click(target.getByRole("button", { name: "展开用户详情" }));
+
+  const summary = within(await screen.findByRole("group", { name: "用户摘要" }));
+  expect(summaryItemValue(summary, "最近上线")).toBe("—"); // last_seen 为 null
+  expect(summaryItemValue(summary, "存储")).toBe("0 B"); // storage_bytes=0 走 formatBytes
+  // 其余指标本身也是 0,逐项确切断言(而非恒真的 "至少有一个 0")。
+  expect(summaryItemValue(summary, "近 30 天提问")).toBe("0");
+  expect(summaryItemValue(summary, "提问")).toBe("0");
+  expect(summaryItemValue(summary, "报告")).toBe("0");
+  expect(summaryItemValue(summary, "图谱整理")).toBe("0");
+  expect(summaryItemValue(summary, "记忆")).toBe("0");
+  expect(summaryItemValue(summary, "Knowhow 表")).toBe("0");
+  expect(summaryItemValue(summary, "加入的共享库")).toBe("0");
+  expect(summaryItemValue(summary, "群组")).toBe("0");
+  expect(summary.queryByText(/失败/)).toBeNull();
+});
+
+test("笔记本明细仍在加载(甚至永不完成)时,用户摘要两行照常渲染", async () => {
+  // 规格 §3 B6/Phase C:摘要只依赖行数据 u,不依赖笔记本明细请求状态——用一个
+  // 永不 resolve 的 Promise 钉住这条不变量:哪怕笔记本列表永远停在加载中,摘要
+  // 也必须已经渲染出来。
+  primeCommonMocks();
+  mocks.fetchAdminUsers.mockResolvedValue([
+    rows[0],
+    {
+      ...rows[1],
+      last_seen: "2026-09-07T10:32:00",
+      storage_bytes: 1536,
+      questions_30d: 37,
+    },
+  ]);
+  mocks.fetchUserNotebooks.mockReturnValue(new Promise(() => {}));
+  const user = userEvent.setup();
+
+  render(<AdminUsagePage />);
+  const target = await targetRow();
+  await user.click(target.getByRole("button", { name: "展开用户详情" }));
+
+  const summary = within(await screen.findByRole("group", { name: "用户摘要" }));
+  expect(summaryItemValue(summary, "最近上线")).toBe("2026-09-07 10:32");
+  expect(summaryItemValue(summary, "存储")).toBe("1.5 KB");
+  expect(summaryItemValue(summary, "近 30 天提问")).toBe("37");
+  // 笔记本明细区仍处于加载态,不受摘要渲染影响。
+  expect(screen.getByText("加载中…")).toBeInTheDocument();
+});
+
+test("展开区新增用户摘要不改变主表列头数量与文案", async () => {
+  primeCommonMocks();
+  mocks.fetchUserNotebooks.mockResolvedValue([
+    {
+      id: "nb-1", name: "笔记本 1", status: "ready",
+      sources: 1, conversations: 1, questions: 1, reports: 0,
+      created_at: "2026-07-02T00:00:00", updated_at: "2026-07-03T00:00:00",
+    },
+  ]);
+  const user = userEvent.setup();
+  const { container } = render(<AdminUsagePage />);
+  const target = await targetRow();
+
+  // 先展开目标行:笔记本明细子表渲染出自己的一份 <thead>(笔记本/来源/提问/报告…),
+  // 与主表表头有同名列。用 within(主表 thead) 精确取列头,证明取的是主表列而不是
+  // 混进子表列——不加这层 scope,展开后重名列头会污染下面的数组断言。
+  await user.click(target.getByRole("button", { name: "展开用户详情" }));
+  await screen.findByText("笔记本 1");
+
+  const mainThead = container.querySelector(".usage-table thead");
+  expect(mainThead).not.toBeNull();
+  // 只比对标签文本,剥掉排序指示符 span(↕ 未激活/▲ 升序/▼ 降序),不把它写进期望值。
+  const headers = within(mainThead as HTMLElement).getAllByRole("columnheader").map((th) => {
+    const indicator = th.querySelector(".usage-sort-indicator");
+    const indicatorText = indicator?.textContent ?? "";
+    return (th.textContent ?? "").replace(indicatorText, "");
+  });
+  expect(headers).toEqual([
+    "", "用户名", "角色", "注册时间", "笔记本", "来源", "提问", "报告",
+    "最近活跃", "用户分析", "文档上限", "密码", "权限管理",
   ]);
 });
