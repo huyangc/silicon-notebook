@@ -10,8 +10,10 @@ These Protocols describe the widest conformant shape. The authority on what is
 actually admitted is ``app.extensions.discovery``'s explicit checks at process
 startup — read the per-class notes below for where the two differ.
 
-TODO(T7): fold the ``configure`` cost rule and the capability-naming rule below
-into the operator-facing deployment plugin documentation.
+The operator-facing statement of the ``configure`` cost rule and the
+capability-naming rule lives in ``docs/deployment-extensions-sop.md`` §3.2 and
+§3.3 (Chinese pair ``docs/deployment-extensions-sop_zh.md``); the docstrings
+below restate them for readers arriving from the code.
 """
 from __future__ import annotations
 

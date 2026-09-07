@@ -542,8 +542,6 @@ def check_api_layer() -> None:
         ok("GET", "/api/me")
         doc_types = ok("GET", "/api/doc-types")
         assert {item["id"] for item in doc_types} >= {"", "academic_paper", "textbook"}
-        templates = ok("GET", "/api/notebook-templates")
-        assert isinstance(templates, list) and templates
 
         nb = ok(
             "POST",
@@ -552,7 +550,6 @@ def check_api_layer() -> None:
                 "name": "API smoke",
                 "purpose": "p",
                 "primary_domain": "d",
-                "template": "article",
             },
         )
         nid = nb["id"]

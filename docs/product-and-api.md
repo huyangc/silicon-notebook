@@ -1108,7 +1108,10 @@ analysis that never finishes. Only an uncatchable end (SIGKILL, OOM kill, power
 loss) leaves the row in progress, and that case is settled by startup recovery.
 
 Each KG model request uses `KG_LLM_TIMEOUT_SECONDS` (default `60`) and at most
-`KG_LLM_MAX_RETRIES` retries (default `2`, allowed `0..3`). If transient
+`KG_LLM_MAX_RETRIES` retries (default `2`, allowed `0..3`). KG requests ride
+the streaming transport, so that timeout bounds the connect phase and each wait
+between streamed chunks rather than the whole reply: a long extraction that
+keeps producing tokens is not cut off at 60 seconds, only a silent upstream is. If transient
 unavailability persists, or the service rejects/authenticates the request
 permanently, the shared control for that one job stops new requests, cancels
 queued source/window work, publishes `stopping` from the first failing window

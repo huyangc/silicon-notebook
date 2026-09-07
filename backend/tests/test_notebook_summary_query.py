@@ -25,7 +25,6 @@ def test_summary_query_owns_projection_implementations():
 
 def test_catalog_owns_declared_orchestration():
     expected = {
-        "list_notebook_templates",
         "list_notebooks",
         "create_notebook",
         "get_notebook",

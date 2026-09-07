@@ -21,7 +21,6 @@ from app.models.notebooks import (
     NotebookCreate,
     NotebookRef,
     NotebookSummary,
-    NotebookTemplate,
     NotebookUpdate,
 )
 from app.models.ask import SEARCH_HIT_CAP, NotebookSearchResponse, SearchHit
@@ -43,7 +42,6 @@ from app.repositories.ports import (
 # historical importers unchanged.
 from app.repositories.source_files import delete_source_file as _delete_source_file
 from app.services.knowledge_contracts import USABLE_STATUSES
-from app.services.notebook_templates import NOTEBOOK_TEMPLATES
 
 
 # Search has one canonical total-hit contract in app.models.ask. Memory is an
@@ -693,9 +691,6 @@ class NotebookCatalogService:
     def _paper_meta_backfilling(self, notebook_id: str) -> bool:
         service = self.source_ingestion() if self.source_ingestion is not None else None
         return False if service is None else service.paper_meta_backfilling(notebook_id)
-
-    def list_notebook_templates(self) -> list[NotebookTemplate]:
-        return [NotebookTemplate(**t) for t in NOTEBOOK_TEMPLATES]
 
     def list_notebooks(self) -> list[NotebookSummary]:
         return self._summaries.list_for_user(self._identity.current_user().id)

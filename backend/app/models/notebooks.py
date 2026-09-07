@@ -15,7 +15,10 @@ class NotebookCreate(BaseModel):
     source_types: List[str] = Field(default_factory=list)
     taxonomy: List[str] = Field(default_factory=list)
     access_scope: str = ""
-    template: str = ""  # optional template id to apply preset defaults (§6.2)
+    # Accepted and persisted for compatibility only. The template catalog that
+    # once applied preset defaults (§6.2) was retired on 2026-09-07; nothing
+    # reads this value any more.
+    template: str = ""
 
 
 class NotebookUpdate(BaseModel):
@@ -291,17 +294,6 @@ class SharedByMeItem(BaseModel):
     # 「只读共享 ∨ 共享给群组」,与卡片上的「已分享」徽标同一个判据;`share_token`
     # 为空而本字段非 0 的行,就是一条只因群组共享而出现的记录(没有分享链接可发)。
     group_count: int = 0
-
-
-class NotebookTemplate(BaseModel):
-    id: str
-    label: str
-    purpose: str = ""
-    primary_domain: str = "Semiconductor"
-    target_users: str = ""
-    expected_questions: List[str] = Field(default_factory=list)
-    source_types: List[str] = Field(default_factory=list)
-    taxonomy: List[str] = Field(default_factory=list)
 
 
 class NotebookDeleteResponse(BaseModel):

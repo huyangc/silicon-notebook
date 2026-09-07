@@ -3563,12 +3563,6 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade.list_notebook_templates",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.list_notebooks",
         "target": "_runtime"
       },
