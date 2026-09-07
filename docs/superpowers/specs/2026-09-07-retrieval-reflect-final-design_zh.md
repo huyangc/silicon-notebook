@@ -229,7 +229,7 @@ system/user 拆分可能改善公共前缀复用，但不新增 provider 缓存�
 
 单个可恢复工具失败若随后继续完成检索，只作为 observation 留存，不强制把整个 run 标为 retrieval_degraded。异常终止优先记对应 degraded 原因；否则保留真实首先触发的终止条件，不在最终步骤号等于 max_steps 时覆盖同轮模型已经作出的正常结束决定。
 
-`retrieval_degraded` 的精确判据（T4-A 复审裁决）：**这次 run 没有模型正常结束标记（trace 里第一个终止标记不是 model_end），且时间线上最后一次真实 I/O 执行的观察是 `failed`**。两个条件都要。按「任一通道最后一次执行 failed」判会把跨通道恢复（KG 播种炸掉 → 模型改走 search_chunks 查全 → 自报充分）误标成整次降级，而上一段说的「继续完成检索」并不要求是同一条通道；反过来，最后一次去查时查不动、随后走 stale/预算收尾的，`retrieval_degraded` 仍然盖过 stale/step_budget。没有被恢复的通道另记 `RetrievalTermination.unrecovered_channels`（元组，口径是「该通道最后一次执行仍是 failed」，按首次出现排序），只用于披露，不参与 `reason`：「哪条路没走通」与「这次检索有没有正常收尾」是两个口径，不互相冒充。
+`retrieval_degraded` 的精确判据（T4-A 复审裁决）：**这次 run 没有模型正常结束标记（trace 里第一个终止标记不是 model_end），且时间线上最后一次真实 I/O 执行的观察是 `failed`**。两个条件都要。按「任一通道最后一次执行 failed」判会把跨通道恢复（KG 播种炸掉 → 模型改走 search_chunks 查全 → 自报充分）误标成整次降级，而上一段说的「继续完成检索」并不要求是同一条通道；反过来，最后一次去查时查不动、随后走 stale/预算收尾的，`retrieval_degraded` 仍然盖过 stale/step_budget。没有被恢复的通道另记 `RetrievalTermination.unrecovered_channels`（元组，口径是「该通道最后一次执行仍是 failed」，按首次出现排序），不参与 `reason`：「哪条路没走通」与「这次检索有没有正常收尾」是两个口径，不互相冒充。它的披露落点在 T4-B 已经落实为三处：检索收尾那条 `skip` 步的 detail、Ask 合成终步与报告章节行上的稀疏字段（都是既有的私有持久路径），以及合成 prompt 里那段服务端事实的最后一行。界面只显示条数（动作 id 是内部词），公开分享面一个字都不带。
 
 把类型化终态经 `ReasoningResult → ReasoningEvidenceSnapshot → ResponseDraftInput` 的实际使用链传递，保留 evidence 对象身份和不可变 envelope 规则。跨层 DTO 放到允许的依赖层；需要扩 application import allowlist 时只增加具体模块并同步架构守卫，不放宽整包。
 

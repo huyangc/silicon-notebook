@@ -127,6 +127,9 @@ ASCII_TERMS = {
     "community": re.compile(r"(?<![A-Za-z])communit(?:y|ies)(?![A-Za-z])", re.IGNORECASE),
     "outlier": re.compile(r"(?<![A-Za-z])outliers?(?![A-Za-z])", re.IGNORECASE),
     "centrality": re.compile(r"(?<![A-Za-z])centrality(?![A-Za-z])", re.IGNORECASE),
+    # 检索结束事实(设计稿 2026-09-07 §7.2):一个必答方面的支撑全被最终装配的
+    # 预算/过滤挡在合成之外,界面说「未送达」。内部名不上屏。
+    "undelivered": re.compile(r"(?<![A-Za-z])undelivered(?![A-Za-z])", re.IGNORECASE),
 }
 
 # CJK jargon. Regex (not plain substring) so the ambiguous rows can carry their
@@ -164,6 +167,9 @@ CJK_TERMS = {
     # 复合形态,不会误伤正常措辞。
     "调用记账": re.compile(r"调用记账"),
     "能力档": re.compile(r"能力档"),
+    # 检索结束事实(设计稿 §7.2)的服务端记账名。界面只说「方面」——「必答」是
+    # 契约侧的措辞,上屏会让用户以为自己漏答了什么。无歧义复合形态,不误伤。
+    "必答方面": re.compile(r"必答方面"),
     # —— 其余各行
     "投影": re.compile(r"投影"),
     "预审": re.compile(r"预审"),
