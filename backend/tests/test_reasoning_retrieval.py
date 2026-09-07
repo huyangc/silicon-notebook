@@ -5841,7 +5841,110 @@ def test_v2_typed_argument_validation(action, arguments, reason):
     assert decision.invalid_reason == reason
 
 
-def test_v2_enumerate_sources_collection_needs_no_subtype():
+def test_v2_system_prompt_describes_outline_sections_nested_shape():
+    """codex #698 R3 P2:v2 的 `sections` 是唯一一个嵌套结构的参数,而 schema
+    hint 的 `arguments` 对它是开放对象 `{}` —— 模型对节对象嵌套形状的**唯一**
+    认知来源就是 system prompt 里这一行参数说明。缺了它,模型只能照抄
+    `assessment` 教的 `evidence_keys` 拼法(`_V2_ASSESSMENT_INSTRUCTION` 用的
+    正是这个名字),`parse_outline_sections` 会把它当未知键静默丢弃。
+
+    数字全部从 `OUTLINE_MAX_SECTIONS` / `OUTLINE_TITLE_CHARS` /
+    `OUTLINE_MAX_EVIDENCE` 插值,不手写字面量,常量一动这条断言跟着动。
+
+    变异:把 `reasoning_actions._UPDATE_OUTLINE_SECTIONS_NOTE` 换回旧的
+    "**整份**大纲;省略的节会被丢弃。" ⇒ 这条红。
+    """
+    from app.services.prompts import reflect_v2_system_prompt
+    from app.services.reasoning_actions import build_reflect_capabilities
+    from app.services.reports.policy import (
+        OUTLINE_MAX_EVIDENCE, OUTLINE_MAX_SECTIONS, OUTLINE_TITLE_CHARS,
+    )
+    caps = build_reflect_capabilities(_full_house_facts())
+
+    prompt = reflect_v2_system_prompt(caps)
+
+    section = prompt[prompt.index("- update_outline:"):]
+    section = section[:section.index("\n    arguments:") + 2000]
+    for field in ("id", "title", "parent", "evidence", "remove_evidence"):
+        assert field in section, field
+    assert str(OUTLINE_MAX_SECTIONS) in section
+    assert str(OUTLINE_TITLE_CHARS) in section
+    assert str(OUTLINE_MAX_EVIDENCE) in section
+
+
+def test_v2_outline_evidence_keys_alias_survives_the_gate(rrepo):
+    """codex #698 R3 P2:模型用 `assessment` 教的 `evidence_keys` 拼法给
+    `update_outline` 也不该丢绑定 —— v2 适配层在调用 `parse_outline_sections`
+    之前把 `evidence_keys` / `remove_evidence_keys` 归一到 legacy 的
+    `evidence` / `remove_evidence`,legacy 解析与 v1 协议一字不动。
+
+    载荷经真实传输闸(`_GatedV2LLM`)进入 `run()`,证明这不是绕过闸的白盒调用。
+
+    变异:删掉 `_v2_apply_arguments` 里对 `_v2_normalize_outline_sections` 的
+    调用(改回直接传 `arguments.get("sections")`)⇒ 这条红
+    (`result.outline[0].evidence_keys` 变回空列表)。
+    """
+    from app.core.ask_retrieval_policy import ask_retrieval_limits
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    nb = _seed_two_nodes(_v2_repo(rrepo))
+    claim = next(h for h in rrepo._retrieve_scored(nb.id, "RTL到GDSII流程")
+                 if h.object_type == "claim")
+    llm = _GatedV2LLM(
+        plan={"sub_queries": [{"query": "RTL到GDSII流程"}]},
+        reflects=[
+            {"next_action": "update_outline", "sufficient": False,
+             "arguments": {"sections": [
+                 {"id": "s1", "title": "流程总览",
+                  "evidence_keys": [claim.object_id]}]},
+             "reason": "搭结构,用 evidence_keys 拼法"},
+            {"next_action": "answer", "sufficient": True, "arguments": {}},
+        ])
+    bind_chat_client(rrepo, "reasoning_agent", llm)
+    result = ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(
+        nb.id, "RTL到GDSII流程", "", limits=ask_retrieval_limits("exhaustive"))
+
+    outline_steps = [t for t in result.trace if t.step_type == "outline"]
+    assert len(outline_steps) == 1
+    assert outline_steps[0].detail["sections"][0]["evidence"] == [
+        claim.object_id]
+    assert outline_steps[0].detail["dropped_evidence"] == 0
+    assert [s.id for s in result.outline] == ["s1"]
+    assert result.outline[0].evidence_keys == [claim.object_id]
+
+
+def test_v2_outline_remove_evidence_keys_alias_survives_the_gate(rrepo):
+    """`remove_evidence_keys` 别名同样要归一 —— 与 `evidence_keys` 是同一条
+    适配逻辑的两半,单独钉一条以免只测了半份别名表就当整改完成。
+
+    变异:`_v2_normalize_outline_sections` 里只处理 `evidence_keys` 分支、漏掉
+    `remove_evidence_keys` 分支 ⇒ 这条红(旧绑定没有被撤销)。
+    """
+    from app.core.ask_retrieval_policy import ask_retrieval_limits
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    nb = _seed_two_nodes(_v2_repo(rrepo, reasoning_stale_limit=99))
+    claim = next(h for h in rrepo._retrieve_scored(nb.id, "RTL到GDSII流程")
+                 if h.object_type == "claim")
+    llm = _GatedV2LLM(
+        plan={"sub_queries": [{"query": "RTL到GDSII流程"}]},
+        reflects=[
+            {"next_action": "update_outline", "sufficient": False,
+             "arguments": {"sections": [
+                 {"id": "s1", "title": "流程总览",
+                  "evidence_keys": [claim.object_id]}]},
+             "reason": "先绑一个"},
+            {"next_action": "update_outline", "sufficient": False,
+             "arguments": {"sections": [
+                 {"id": "s1", "title": "流程总览",
+                  "remove_evidence_keys": [claim.object_id]}]},
+             "reason": "再用别名撤销,用别名拼法"},
+            {"next_action": "answer", "sufficient": True, "arguments": {}},
+        ])
+    bind_chat_client(rrepo, "reasoning_agent", llm)
+    result = ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(
+        nb.id, "RTL到GDSII流程", "", limits=ask_retrieval_limits("exhaustive"))
+
+    assert result.outline[0].evidence_keys == []
+
     """`collection="sources"` 刻意没有子类型 —— required_group 必须放它过去。"""
     from app.services.reasoning_actions import build_reflect_capabilities
     from app.services.reasoning_retrieval import parse_reflect_v2

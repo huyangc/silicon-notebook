@@ -27,6 +27,12 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Dict, Mapping, Optional, Tuple
 
+from app.services.reports.policy import (
+    OUTLINE_MAX_EVIDENCE,
+    OUTLINE_MAX_SECTIONS,
+    OUTLINE_TITLE_CHARS,
+)
+
 
 # --- 动作 id(13 个,与 legacy 完全一致——v2 不新增也不删减动作) -------------
 ANSWER_ACTION = "answer"
@@ -131,6 +137,26 @@ _ENUMERATE_SCOPE_NOTE = (
     "文档(当前笔记本 + 已勾选的参考库),与 [Collections in scope] 的 sources "
     "计数同口径;只有问题明确在问当前笔记本时才填 \"current_notebook\"。"
     "换一档是**另一份清单**(续跑账目按范围记键),不算重复请求。"
+)
+
+#: ``update_outline`` 的 ``sections`` 参数说明。v2 的 ``arguments`` 在 schema
+#: hint 里是开放对象 ``{}``(形状校验在 ``parse_outline_sections``,不在传输
+#: 闸),模型对嵌套节对象的**唯一**认知来源就是这句话——与 legacy
+#: ``prompts.py`` 里 ``outline_action`` 段(``reflect_prompt``)描述的是同一份
+#: 合同,只是从"一大段英文指令"收缩成"一条参数行",字段名与措辞口径对齐,
+#: 免得模型换个协议就换一套拼法(``evidence_keys`` 就是这么漏出来的)。上限数字
+#: 全部从 ``reports.policy`` 的大纲常量插值,不手写,常量一动这句话跟着动。
+_UPDATE_OUTLINE_SECTIONS_NOTE = (
+    "**整份**大纲;省略的节会被丢弃。每节是一个对象,字段:"
+    "id(短而稳定的句柄,下一轮原样重提用它认哪一节)、"
+    "title(问题的语言,一句话)、"
+    "parent(可选,填另一节的 id 表示挂在它下面,只支持一层嵌套)、"
+    "evidence(该节绑定的证据 key 列表,**逐字**抄自候选证据卡上的 `key=`,"
+    "不是候选序号也不是来源标题)、"
+    "remove_evidence(要从该节撤销绑定的旧 key 列表;省略 evidence 里的旧 key "
+    "不会删除它,只有出现在 remove_evidence 才会撤销)。上限:至多 "
+    f"{OUTLINE_MAX_SECTIONS} 节、标题至多 {OUTLINE_TITLE_CHARS} 字符、每节"
+    f"最多绑定 {OUTLINE_MAX_EVIDENCE} 个证据 key。"
 )
 
 ACTION_DEFINITIONS: Mapping[str, ActionDefinition] = MappingProxyType({
@@ -246,7 +272,7 @@ ACTION_DEFINITIONS: Mapping[str, ActionDefinition] = MappingProxyType({
         ActionDefinition(
             UPDATE_OUTLINE,
             (ActionParam("sections", PARAM_SECTIONS, required=True,
-                         note="**整份**大纲;省略的节会被丢弃。"),),
+                         note=_UPDATE_OUTLINE_SECTIONS_NOTE),),
             False, "outline", (), ("outline_wiring", "outline_budget"),
         ),
     )
