@@ -1085,3 +1085,49 @@ def test_completion_turns_off_every_channel_unsafe_for_a_json_envelope(monkeypat
     assert retriever.allow_exact_lookup is False
     assert retriever.allow_enumeration is False
     assert retriever.allow_consult_memory is False
+
+
+def test_completion_enters_the_retrieval_loop_on_the_legacy_reflect(monkeypatch):
+    """补全在**进入 `run()` 的那一刻** reflect v2 判据必须为 False(总闸开着)。
+
+    这条守卫此前是在 `knowhow.api` 的源码里找一行赋值字面量——把那行搬到
+    `run()` 之后(或搬进一个从没被调用的分支)照样绿,而那正是它要防的缺陷。
+    现在在真实补全路径上拦住 retriever 工厂,交回一个**真的** `ReasoningRetriever`
+    子类:`reflect_v2_active()` 是生产实现,`allow_reflect_v2` 的缺省是"跟随总闸",
+    所以只有补全代码真的在调用 `run()` 之前把它关掉,这条才会绿。
+    """
+    from app.services import reasoning_retrieval
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    seen: list[bool] = []
+
+    class _ProbeRetriever(ReasoningRetriever):
+        def __init__(self, settings):
+            # 只装配这条判据需要的两样东西:生产的 `reflect_v2_active()` 只读
+            # `self.settings` 与 `self.allow_reflect_v2`,别的一概不碰。
+            self.settings = settings
+            self.allow_reflect_v2 = True   # 缺省 = 跟随总闸
+
+        def run(self, *_args, **_kwargs):
+            seen.append(self.reflect_v2_active())
+            return SimpleNamespace(
+                top_hits=[], elements=[], chunks=[], chains=[], trace=[]
+            )
+
+    repo, _errors = _repo_with_client(_CompletionClient({"suggestions": []}))
+    repo.settings.reasoning_reflect_v2_enabled = True
+
+    def _factory(_repo, settings, **_kwargs):
+        return _ProbeRetriever(settings)
+
+    monkeypatch.setattr(
+        reasoning_retrieval, "reasoning_retriever_from_repository", _factory
+    )
+    knowhow_api.complete_row(repo, "nb", _table(), "current", ["cause"])
+
+    assert seen == [False]
+
+    # 同一个判据在缺省调用方身上跟随总闸——否则上面的 False 可能只是因为这个
+    # 开关对谁都没生效。
+    probe = _ProbeRetriever(repo.settings)
+    assert probe.reflect_v2_active() is True

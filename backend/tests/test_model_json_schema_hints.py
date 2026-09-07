@@ -384,3 +384,152 @@ def test_reasoning_chat_json_still_rejects_a_bogus_enum_value():
         and event.get("status") == "rejected"
     ]
     assert [event["reason"] for event in rejected] == ["invalid_enum"]
+
+
+# --- reflect v2 的提示是**带参数的函数**,模块级常量巡检看不到它 -------------
+# 上面的 sweep 只收集模块级 `*_SCHEMA_HINT` 常量和 legacy `reflect_schema_hint`
+# 的门组合,所以 T2 新增的 `reflect_v2_schema_hint(capabilities)` 从来没被这道守卫
+# 看过一眼——它的两个 P1 缺陷(按配额收窄的 next_action 枚举、被判 unknown_key 的
+# 非空 arguments)正是从这条缝里漏出去的。
+
+def _v2_facts(**overrides):
+    from app.services.reasoning_actions import ReflectCapabilityFacts
+
+    base = dict(
+        kg_in_scope=True, scope_restricted=False, has_candidates=True,
+        chunk_search_active=True, exact_lookup_active=True, ppr_active=True,
+        community_active=True, enumeration_active=True,
+        consult_memory_active=True, outline_active=True,
+        element_searches_left=5, chunk_searches_left=3, exact_lookups_left=3,
+        ppr_left=3, follow_chain_left=3, consult_left=2,
+        outline_updates_left=6, enum_rows_left=200, enum_pages_left=4,
+        enum_payload_left=256_000,
+        element_kinds=tuple(ENUMERABLE_ELEMENT_KINDS),
+        object_types=tuple(ENUMERABLE_KG_OBJECT_TYPES),
+    )
+    base.update(overrides)
+    return ReflectCapabilityFacts(**base)
+
+
+def _v2_capabilities(**overrides):
+    from app.services.reasoning_actions import build_reflect_capabilities
+
+    return build_reflect_capabilities(_v2_facts(**overrides))
+
+
+def _reflect_v2_hint_cases() -> list[tuple[str, str]]:
+    """代表性的能力组合:全开、无图、范围收窄、配额全空、终态纠错轮。"""
+    shapes = (
+        ("full-house", {}),
+        ("graphless", {"kg_in_scope": False}),
+        ("scope-restricted", {"scope_restricted": True}),
+        ("budgets-spent", {
+            "element_searches_left": 0, "chunk_searches_left": 0,
+            "exact_lookups_left": 0, "ppr_left": 0, "follow_chain_left": 0,
+            "consult_left": 0, "outline_updates_left": 0,
+        }),
+        ("terminal-repair", {"terminal_overflow_repair": True}),
+    )
+    return [
+        (f"reflect_v2[{label}]",
+         prompts.reflect_v2_schema_hint(_v2_capabilities(**overrides)))
+        for label, overrides in shapes
+    ]
+
+
+@pytest.mark.parametrize(
+    ("label", "hint"),
+    _reflect_v2_hint_cases(),
+    ids=[label for label, _ in _reflect_v2_hint_cases()],
+)
+def test_reflect_v2_schema_hint_accepts_unused_enum_fields(label, hint):
+    obj, enum_paths = _assert_blank_enums_are_accepted(hint)
+    assert enum_paths, label  # next_action is an enum in every shape
+    _assert_bogus_enums_are_rejected(hint, obj, enum_paths)
+
+
+def test_reflect_v2_enum_never_narrows_with_the_turn_s_budget():
+    """枚举列全部 13 个可识别动作,与本轮可用性无关。
+
+    收窄的话,一个配额耗尽但可识别的动作会在**传输层**被判 `invalid_enum`:模型
+    永远等不到那条"这条路本轮走不通,换别的"的观察,重试耗尽后整份反思退成
+    fail-open 的 answer,检索循环就此终止。
+    """
+    from app.services.reasoning_actions import ACTION_ORDER
+
+    spent = _v2_capabilities(ppr_left=0, exact_lookups_left=0)
+    assert "ppr_retrieve" not in spent.actions
+    hint = prompts.reflect_v2_schema_hint(spent)
+    assert json.loads(hint)["next_action"] == "|".join(ACTION_ORDER)
+
+    for action in ("ppr_retrieve", "exact_lookup"):
+        payload = json.dumps(
+            {"next_action": action, "sufficient": False,
+             "arguments": {"query": "x"}, "reason": "撞一次墙"},
+            ensure_ascii=False)
+        parsed = parse_model_json_object(payload, hint, allow_repair=True)
+        validate_model_json_shape(parsed.content, hint)
+
+
+_V2_ARGUMENT_SHAPES = (
+    ("query", "add_subquery",
+     {"query": "set_db 的默认值", "types": ["claim"], "prefer": "keyword"}),
+    ("term", "exact_lookup", {"term": "set_db"}),
+    ("object_id", "expand_graph",
+     {"object_id": "ko-1", "edge_type": "depends_on", "direction": "both"}),
+    ("chain", "follow_chain",
+     {"start_object_id": "ko-1", "target_object_id": "ko-9",
+      "direction": "out"}),
+    ("enumerate", "enumerate_elements",
+     {"kind": "formula", "source_title": "论文一"}),
+    ("sections", "update_outline",
+     {"sections": [{"id": "s1", "title": "一节", "evidence": []}]}),
+    ("empty", "answer", {}),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "action", "arguments"), _V2_ARGUMENT_SHAPES,
+    ids=[shape[0] for shape in _V2_ARGUMENT_SHAPES])
+def test_reflect_v2_populated_arguments_pass_both_gate_paths(
+    label, action, arguments
+):
+    """`arguments` 是"开放对象":严格与修复两条路径必须给出同一个答案。
+
+    修复分支的 `issubset` 曾把空 example 读成"一个键都不许有",于是所有带真实参数
+    的检索动作在模型打一个尾逗号时就失去修复网。`assessment` 同理:本期不进 schema
+    (T4 才消费),但它不能只在严格路径上活着。
+    """
+    hint = prompts.reflect_v2_schema_hint(_v2_capabilities())
+    payload = json.dumps({
+        "next_action": action,
+        "sufficient": False,
+        "arguments": arguments,
+        "assessment": {"unresolved": [
+            {"aspect_id": "a2", "status": "partial", "gap": "still missing"}]},
+        "reason": "next step",
+    }, ensure_ascii=False)
+
+    parsed = parse_model_json_object(payload, hint, allow_repair=True)
+    validate_model_json_shape(parsed.content, hint)
+    assert parsed.repaired is False
+
+    repaired = parse_model_json_object(
+        f"{payload[:-1]},}}", hint, allow_repair=True)
+    assert repaired.repaired is True
+    validate_model_json_shape(repaired.content, hint)
+    assert json.loads(repaired.content)["arguments"] == arguments
+
+
+def test_an_unadvertised_key_that_is_not_tolerated_is_still_rejected():
+    """开放对象与具名豁免都是**有界**的:别的未声明根级键照旧 unknown_key。"""
+    hint = prompts.reflect_v2_schema_hint(_v2_capabilities())
+    payload = json.dumps({
+        "next_action": "answer", "sufficient": True, "arguments": {},
+        "reason": "done", "smuggled": {"anything": 1},
+    }, ensure_ascii=False)
+
+    validate_model_json_shape(payload, hint)      # 严格路径历来容忍额外键
+    with pytest.raises(ModelJsonRepairError) as caught:
+        parse_model_json_object(f"{payload[:-1]},}}", hint, allow_repair=True)
+    assert caught.value.reason == "unknown_key"

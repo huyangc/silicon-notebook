@@ -739,3 +739,84 @@ def test_the_accum_passed_to_a_later_render_holds_only_delivered_rows(repo, monk
     assert len(second) == len(set(second)), (
         "滞留的未送达行被再选后 append 成了重复: " + str(second)
     )
+
+
+# ------------------------------------- ⑥ v2:配额读数 ↔ 执行处判据(评审 P2-6)
+# 能力投影里的 `consult_left` 是「上限 − 已用」的一次减法,末轮判据是
+# `steps >= max_steps`;真正决定跳不跳的执行处写的是 `used >= max` 与它自己的末轮
+# 分支。两处差一,就是 prompt 摆出一个必然被 skip 的动作(白烧一轮反思),或反过来
+# 提前一轮摘掉它。判据用「模型硬选那个已耗尽的动作」而不是「它没被选」——后者在
+# 动作根本没被请求时恒真。
+
+class _V2SeqLLM(_SeqLLM):
+    """v2 下 reflect 是 system+user 两段,动作清单在 system 段里。"""
+
+    def __init__(self, reflects=None, plan=None):
+        super().__init__(reflects, plan)
+        self.reflect_systems: list[str] = []
+
+    def chat_json(self, messages, schema_hint, **kwargs):
+        if "sub_queries" not in schema_hint and messages[0]["role"] == "system":
+            self.reflect_systems.append(messages[0]["content"])
+        return super().chat_json(messages, schema_hint, **kwargs)
+
+    def prompt_actions(self, turn: int) -> list[str]:
+        import re
+
+        return re.findall(r"^- ([a-z_]+):", self.reflect_systems[turn], re.M)
+
+
+def _v2_skip_reasons(result) -> list[str]:
+    return [step.detail.get("reason", "") for step in _steps(result, "skip")]
+
+
+def _v2_consult_repo(repo):
+    repo.settings.reasoning_reflect_v2_enabled = True
+    repo.settings.reasoning_stale_limit = 9
+    return repo
+
+
+def test_v2_spent_consult_budget_leaves_the_action_out_of_the_prompt(repo):
+    notebook = _seed(_v2_consult_repo(repo))
+    repo.settings.reasoning_max_consult_memory = 1
+    _write_many_experiences(repo, [("ppr", "bad", RATIONALE_PPR),
+                                   ("exact_lookup", "good", RATIONALE_EXACT)])
+    llm = _V2SeqLLM([
+        {"next_action": "consult_memory", "sufficient": False,
+         "arguments": {}, "reason": "先回想"},
+        {"next_action": "consult_memory", "sufficient": False,
+         "arguments": {}, "reason": "配额已尽还想再来"},
+        {"next_action": "answer", "sufficient": True, "arguments": {}},
+    ])
+    retriever = _retriever(repo, llm)
+    result, _ = _run(retriever, notebook, "deep")
+
+    assert "consult_memory" in llm.prompt_actions(0)
+    assert "consult_memory" not in llm.prompt_actions(1)
+    reasons = _v2_skip_reasons(result)
+    assert "unavailable_action:consult_memory_cap" in reasons
+    # 投影已经在模型面前摘掉了它,执行处那条 cap 分支不该被走到。
+    assert "consult_memory_cap" not in reasons
+
+
+def test_v2_last_turn_removes_consult_before_it_can_be_wasted(repo):
+    """末轮回想的产出只进**下一轮**上下文,而末轮没有下一轮。
+
+    `last_turn = steps >= max_steps`(steps 在进入本轮时已经自增)。写成 `>` 就
+    会把最后一轮也当成"还有下文",模型在那一轮选它 = 一整步预算换一段没人读的建议。
+    """
+    notebook = _seed(_v2_consult_repo(repo))
+    _write_many_experiences(repo, [("ppr", "bad", RATIONALE_PPR)])
+    llm = _V2SeqLLM([
+        {"next_action": "consult_memory", "sufficient": False,
+         "arguments": {}, "reason": "末轮还想回想"},
+    ])
+    retriever = _retriever(repo, llm)
+    result, _ = _run(retriever, notebook, "deep", max_steps=1)
+
+    assert llm.reflect_systems, "末轮仍然要请求一次模型(还有别的动作可选)"
+    assert "consult_memory" not in llm.prompt_actions(0)
+    reasons = _v2_skip_reasons(result)
+    assert "unavailable_action:consult_memory_last_turn" in reasons
+    assert "consult_memory_last_turn" not in reasons
+    assert not _steps(result, "consult_memory")
