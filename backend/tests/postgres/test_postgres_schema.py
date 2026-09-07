@@ -238,6 +238,7 @@ def test_packaged_index_migration_phases_are_exact():
         (49, "notebook_delete_jobs"),
         (50, "ask_jobs_client_request_id"),
         (51, "derived_generation"),
+        (52, "users_last_seen_at"),
     ]
 
     def index_declarations(version: int) -> list[tuple[bool, str]]:
