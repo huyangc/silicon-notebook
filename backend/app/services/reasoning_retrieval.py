@@ -487,6 +487,38 @@ def _v2_enumerate_scope(
     return value if value in ENUMERATE_SCOPES else ENUMERATE_SCOPE_ALL
 
 
+def _v2_normalize_outline_sections(raw: object) -> object:
+    """把 v2 载荷里 ``sections`` 每节的证据字段别名归一到 legacy 字段名。
+
+    ``parse_outline_sections`` 认的字段名是 ``evidence`` / ``remove_evidence``
+    (legacy schema 与 ``reasoning_actions.py`` 的 ``sections`` 参数 note 写的都
+    是这两个);但 v2 的 ``arguments`` 在 schema hint 里是一个开放对象
+    ``{}``,传输闸不校验它的键名,而同一轮 prompt 里 ``_V2_ASSESSMENT_INSTRUCTION``
+    教模型另一处证据字段偏偏叫 ``evidence_keys``。模型套用那个拼法时,
+    ``parse_outline_sections`` 只会把 ``evidence_keys`` 当未知键静默丢弃,产出
+    一个"节建成了、绑定却是空的"的假成功。
+
+    只在**进 legacy 解析之前**接一层键名别名,不改 ``parse_outline_sections``
+    一个字节:canonical 字段(``evidence`` / ``remove_evidence``)只要出现就
+    是权威值,不被别名覆盖;别名只在 canonical 字段缺席时补上。形状/边界夹取
+    一律仍由 ``parse_outline_sections`` 一处判定。
+    """
+    if not isinstance(raw, list):
+        return raw
+    normalized: List[object] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            normalized.append(entry)
+            continue
+        entry = dict(entry)
+        if "evidence" not in entry and "evidence_keys" in entry:
+            entry["evidence"] = entry["evidence_keys"]
+        if "remove_evidence" not in entry and "remove_evidence_keys" in entry:
+            entry["remove_evidence"] = entry["remove_evidence_keys"]
+        normalized.append(entry)
+    return normalized
+
+
 def _v2_apply_arguments(
     action: str,
     arguments: dict,
@@ -564,7 +596,7 @@ def _v2_apply_arguments(
         _v2_apply_enumerate(action, arguments, capabilities, decision)
     elif action == OUTLINE_ACTION:
         decision.outline_sections = parse_outline_sections(
-            arguments.get("sections"))
+            _v2_normalize_outline_sections(arguments.get("sections")))
         if not decision.outline_sections:
             raise _V2ArgumentError(f"{_V2_MISSING_ARGUMENT_PREFIX}sections")
 
