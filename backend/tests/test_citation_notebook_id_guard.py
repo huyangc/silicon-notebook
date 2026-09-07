@@ -83,6 +83,7 @@ EVIDENCE_CONTEXT = "backend/app/services/evidence_context.py"
 FOLLOW_CHAIN = "backend/app/services/kg/follow_chain.py"
 GRAPH_REASON = "backend/app/services/kg/graph_reason.py"
 SPREADSHEET = "backend/app/services/spreadsheet_analysis.py"
+DOC_OVERVIEW = "backend/app/services/document_source_overview.py"
 
 Site = tuple[str, str]
 # site -> (exact expected argument sources at that site, why they are allowed)
@@ -147,6 +148,13 @@ BUILDER_SITES: Registry = {
         "re-implementing the rule a seventh time.  The `else ''` arm is the "
         "degenerate no-delivered-rows case, where there is no citation to "
         "copy and the model field's own default is the answer.",
+    ),
+    (DOC_OVERVIEW, "prepare_source_overview"): (
+        ("foreign_notebook_id(source_item.notebook_id, active_notebook_id)",),
+        "Document-overview evidence (PR #681) may come from a mounted library: "
+        "the enumerated SourceItem carries the raw participant notebook id, so "
+        "the id_map write normalises it against the required active_notebook_id "
+        "keyword, same as the Citation it emits beside it.",
     ),
     (EVIDENCE_CONTEXT, "EvidenceContextService.element_context"): (
         ("''",),

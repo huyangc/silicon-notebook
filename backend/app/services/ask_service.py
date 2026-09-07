@@ -2464,6 +2464,7 @@ class AskService:
                     budget_chars=self.settings.chunk_answer_budget_chars,
                     max_elements=self.settings.document_overview_max_elements,
                     cancel_event=cancel_event,
+                    active_notebook_id=notebook_id,
                     generation_reader=self.overview_source_generation,
                 )
             elif source is not None:

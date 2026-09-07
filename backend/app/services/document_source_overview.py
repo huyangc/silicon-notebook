@@ -6,6 +6,7 @@ import json
 import re
 from typing import Callable
 
+from app.domain.citation_origin import foreign_notebook_id
 from app.models.ask import Citation
 from app.repositories.ports import SourceStorePort
 from app.services.cancellation import CancelEvent, raise_if_cancelled
@@ -32,6 +33,7 @@ def prepare_source_overview(
     max_elements: int,
     cancel_event: CancelEvent = None,
     *,
+    active_notebook_id: str,
     generation_reader: Callable[[str], str] | None = None,
 ) -> SourceOverview:
     """Read evenly spaced elements, including the last source-detail position.
@@ -39,6 +41,13 @@ def prepare_source_overview(
     The caller owns source authorization and title resolution. Every read is a
     single bounded page; there is no full-source hydration. Without a generation
     witness this function never certifies an unchanged complete document.
+
+    ``active_notebook_id`` is required (no default) on purpose: the overview
+    source may live in a mounted library, and ``Citation.notebook_id`` /
+    the id_map ``notebook_id`` must be non-empty only for such cross-notebook
+    evidence.  A defaulted argument would let a caller forget it and echo the
+    active notebook's own id back, which is exactly the badge bug the A1 guard
+    (``tests/test_citation_notebook_id_guard.py``) exists to prevent.
     """
     raise_if_cancelled(cancel_event)
     if budget_chars <= 0 or max_elements <= 0:
@@ -116,14 +125,15 @@ def prepare_source_overview(
             "snippet": quote, "source_title": source_item.source_title,
             "source_id": source_id, "element_id": element.id,
             "location_label": element.location_label,
-            "tier": source_item.tier, "notebook_id": source_item.notebook_id,
+            "tier": source_item.tier,
+            "notebook_id": foreign_notebook_id(source_item.notebook_id, active_notebook_id),
             "relevance": 1.0,
         }
         citations.append(Citation(
             label=source_item.source_title, source_id=source_id,
             element_id=element.id, location_label=element.location_label,
             quoted_span=quote, tier=source_item.tier,
-            notebook_id=source_item.notebook_id,
+            notebook_id=foreign_notebook_id(source_item.notebook_id, active_notebook_id),
         ))
     if not total:
         note = "这篇文档没有可读取的原文，请先完成文档解析。"
