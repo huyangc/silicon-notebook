@@ -839,7 +839,7 @@ REASONING_REFLECT_V2_ENABLED # 逐步推理 Ask 与深度报告的 reflect v2 �
 REASONING_REFLECT_EVIDENCE_CHARS_BY_EFFORT # v2 证据卡的按档位字符预算，JSON 对象（默认 `{"overview":4000,"standard":6000,"deep":8000,"thorough":12000,"exhaustive":16000}`）。启动期校验：必须**恰含**五个档位 id，每个值是 1,000–64,000 的整数（JSON 布尔值会被拒绝，而不是被静默读成 0/1），且随档位不递减。刻意独立于最终合成的 `kg_context_chars`/`chunk_context_chars`——判断下一步与写答案要的信息粒度不同，因此不从它们按比例换算
 REASONING_REFLECT_EXCERPT_CHARS # v2 证据卡里单条证据的原文摘录上限（默认 240；80–1,000）
 REASONING_REFLECT_STATE_CHARS # 只界定**可压缩区**（近期动作观察与历史建议）的投影预算（默认 6,000；1,000–32,000）。它不是整个 prompt 的上限：用户完整问题、冻结约束、当前合法动作与额度、完整大纲/溢出与枚举覆盖各自按自己的边界保留，绝不会为了塞进这个池子被裁尾
-REASONING_REFLECT_RECENT_OBSERVATIONS # 最多回喂几行近期动作观察（默认 6；1–20）。与上面三项证据/状态预算一样，在证据卡接入（T3）之前尚无消费者：启动期照常校验，但当前没有代码读取它们的值
+REASONING_REFLECT_RECENT_OBSERVATIONS # 最多回喂几行近期动作观察（默认 6；1–20）。它与 `REASONING_REFLECT_STATE_CHARS` 一起界定 v2 的动作观察账，上面两项证据预算界定 v2 的证据卡。四项都只在 `REASONING_REFLECT_V2_ENABLED` 打开时生效——协议关闭时没有任何代码读取它们（启动期照常校验）
 AGENT_PROFILE_ENABLED        # 「AI 对这个库的理解」总闸：同时管住 plan/reflect 注入、后台巡固触发与两个 API 面的可见性（默认 true；false 处处逐字回到接入前——不注入、不记 trace 步、不排巡固，API 返回 enabled=false 而非 404）
 AGENT_PROFILE_BASE_TRIGGER   # 共享底座层（corpus_shape/key_entities/corpus_gaps）重新巡固前累计的来源变更次数（默认 5）
 AGENT_PROFILE_OVERLAY_TRIGGER # 该成员私有覆盖层（retrieval_notes/usage_gaps）重新巡固前累计的已完成提问次数；已完成的深度报告直接达阈（默认 10）
