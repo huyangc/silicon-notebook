@@ -587,46 +587,38 @@ class QueryStore:
             # 用 VISIBLE_SOURCE_TYPES_PREDICATE 过滤过,这里不必再排除
             # memory/knowhow。
             #
-            # live 分支的归因表达式与 FROM/WHERE 片段抽成下面两个局部变量,
-            # `sources`(资产总数)与 `storage_bytes`(规格 §3 B2)共用同一条谓词,
-            # 避免两处各自维护同一逻辑而漂移;retained 分支的归因表达式与 FROM/WHERE
-            # 片段同样抽出复用(只是聚合函数不同:COUNT(*) vs SUM(file_size),
-            # storage_bytes 不统计 retained——见下方注释)。
+            # live 分支的归因表达式与 FROM/WHERE 片段抽成下面两个局部变量,只有这一部分
+            # 被 `sources`(资产总数)与 `storage_bytes`(规格 §3 B2)真正共用,避免两处
+            # 各自维护同一谓词而漂移。retained 分支不抽取——它只出现在 sources 这一条
+            # 查询里,直接内联在 SQL 里更直观。`sources` 与 `storage_bytes` 合成**一次
+            # 扫描**:live 分支同时算 COUNT(*) 与 SUM(file_size),retained 分支只有
+            # source 计数(`0 AS b`)——retained_user_activity 快照不落 file_size 列,
+            # 已删笔记本的文件已物理清理,这是 storage_bytes 与 sources 唯一的口径差异,
+            # 原因是数据不可得而非设计选择;而不是像改之前那样为同一谓词各扫一遍。
             live_source_key_sql = "COALESCE(NULLIF(s.uploaded_by,''),nb.created_by)"
             live_source_scope_sql = (
                 "FROM sources s JOIN notebooks nb ON nb.id=s.notebook_id "
                 f"WHERE nb.{access_sql.NOTEBOOK_LIVE_SQL} "
                 f"AND {VISIBLE_SOURCE_TYPES_PREDICATE} "
             )
-            sources = {
-                row["k"]: row["c"]
-                for row in db.execute(
-                    "SELECT k,SUM(c) AS c FROM ("
-                    f"SELECT {live_source_key_sql} AS k,COUNT(*) AS c "
-                    f"{live_source_scope_sql}"
-                    "GROUP BY 1 "
-                    "UNION ALL "
-                    "SELECT COALESCE(NULLIF(a.actor_id,''),a.notebook_owner_id) AS k,"
-                    "COUNT(*) AS c FROM retained_user_activity a "
-                    "WHERE a.activity_type='source' AND a.expires_at>CURRENT_TIMESTAMP "
-                    "AND NOT EXISTS(SELECT 1 FROM notebooks live "
-                    "WHERE live.id=a.notebook_id) "
-                    "GROUP BY 1) retained_counts GROUP BY k"
-                ).fetchall()
-            }
-            # 存储占用(规格 §3 B2):与 `sources` 完全同一归因、同一 live+可见过滤,
-            # 只是把 COUNT(*) 换成 SUM(file_size)。已删笔记本的文件已物理清理,
-            # 不计;retained_user_activity 快照不落 file_size 列,因此不像
-            # sources/questions/reports 那样有 retained 分支——这是本字段与其它
-            # 累计型信号唯一的口径差异,原因是数据不可得而非设计选择。
-            storage_bytes = {
-                row["k"]: int(row["b"] or 0)
-                for row in db.execute(
-                    f"SELECT {live_source_key_sql} AS k,SUM(s.file_size) AS b "
-                    f"{live_source_scope_sql}"
-                    "GROUP BY 1"
-                ).fetchall()
-            }
+            sources: dict[str, int] = {}
+            storage_bytes: dict[str, int] = {}
+            for row in db.execute(
+                "SELECT k,SUM(c) AS c,SUM(b) AS b FROM ("
+                f"SELECT {live_source_key_sql} AS k,COUNT(*) AS c,"
+                "SUM(s.file_size) AS b "
+                f"{live_source_scope_sql}"
+                "GROUP BY 1 "
+                "UNION ALL "
+                "SELECT COALESCE(NULLIF(a.actor_id,''),a.notebook_owner_id) AS k,"
+                "COUNT(*) AS c,0 AS b FROM retained_user_activity a "
+                "WHERE a.activity_type='source' AND a.expires_at>CURRENT_TIMESTAMP "
+                "AND NOT EXISTS(SELECT 1 FROM notebooks live "
+                "WHERE live.id=a.notebook_id) "
+                "GROUP BY 1) retained_counts GROUP BY k"
+            ).fetchall():
+                sources[row["k"]] = int(row["c"] or 0)
+                storage_bytes[row["k"]] = int(row["b"] or 0)
             conversations = {
                 row["k"]: row["c"]
                 for row in db.execute(
@@ -668,7 +660,7 @@ class QueryStore:
             # 可空,NULL 行 `>=` 比较结果为 NULL(=false),天然被排除,与 retained 分支的
             # created_at 窗口条件同一比较语义,不必额外 COALESCE。
             questions_30d = {
-                row["k"]: row["c"]
+                row["k"]: int(row["c"] or 0)
                 for row in db.execute(
                     "SELECT k,SUM(c) AS c FROM ("
                     "SELECT created_by AS k,COUNT(*) AS c FROM ask_jobs "
@@ -687,7 +679,7 @@ class QueryStore:
             # 与「用户分析」里唯一定义失败的口径一致。展开区摘要与总数并列显示
             # (如「提问 120(失败 3)」)。
             questions_failed = {
-                row["k"]: row["c"]
+                row["k"]: int(row["c"] or 0)
                 for row in db.execute(
                     "SELECT k,SUM(c) AS c FROM ("
                     "SELECT created_by AS k,COUNT(*) AS c FROM ask_jobs "
@@ -702,7 +694,7 @@ class QueryStore:
                 ).fetchall()
             }
             reports_failed = {
-                row["k"]: row["c"]
+                row["k"]: int(row["c"] or 0)
                 for row in db.execute(
                     "SELECT k,SUM(c) AS c FROM ("
                     "SELECT created_by AS k,COUNT(*) AS c FROM reports "
@@ -727,23 +719,33 @@ class QueryStore:
                     "WHERE created_by<>'' GROUP BY created_by"
                 ).fetchall()
             }
-            # 采纳度与协作信号(规格 §3 Phase C),全部按 created_by/user_id 直接聚合,
-            # 不涉及 live/可见过滤或 retained 快照(这些表本身没有对应的留存镜像)。
+            # 采纳度与协作信号(规格 §3 Phase C),按 created_by/user_id 聚合,不涉及
+            # retained 快照(这些表本身没有对应的留存镜像)。其中三个按笔记本挂的
+            # 计数(memory_count/knowhow_tables/joined_notebooks)都 JOIN notebooks
+            # 加 NOTEBOOK_LIVE_SQL 过滤——与 `joined_notebook_rows`(展开行的笔记本
+            # 列表)同一条 live 过滤,避免 deleting 过渡态下这块摘要与下方笔记本明细
+            # 表同屏数字不一致;`groups` 没有笔记本维度,不加。
             # memory_count 排除 status='rejected'——被拒绝的候选不代表用户采纳了
             # Memory 机制。
             memory_count = {
                 row["k"]: row["c"]
                 for row in db.execute(
-                    "SELECT created_by AS k,COUNT(*) AS c FROM memory_items "
-                    "WHERE status<>'rejected' GROUP BY created_by"
+                    "SELECT mi.created_by AS k,COUNT(*) AS c FROM memory_items mi "
+                    "JOIN notebooks nb ON nb.id=mi.notebook_id "
+                    f"WHERE mi.status<>'rejected' AND nb.{access_sql.NOTEBOOK_LIVE_SQL} "
+                    "GROUP BY mi.created_by"
                 ).fetchall()
             }
             # knowhow_tables.created_by 早期/异常写入可能留空,同 kg_builds 排除空串。
+            # 深拷贝把副本的 created_by 改成接收方,因此这个数含拷来的副本——与来源的
+            # 资产口径一致(规格 §3 Phase C;按原作者归因要改拷贝路径,本期不做)。
             knowhow_tables = {
                 row["k"]: row["c"]
                 for row in db.execute(
-                    "SELECT created_by AS k,COUNT(*) AS c FROM knowhow_tables "
-                    "WHERE created_by<>'' GROUP BY created_by"
+                    "SELECT kt.created_by AS k,COUNT(*) AS c FROM knowhow_tables kt "
+                    "JOIN notebooks nb ON nb.id=kt.notebook_id "
+                    f"WHERE kt.created_by<>'' AND nb.{access_sql.NOTEBOOK_LIVE_SQL} "
+                    "GROUP BY kt.created_by"
                 ).fetchall()
             }
             # 加入的共享库数:notebook_members 记的是他人库的成员身份(自有库不经
@@ -751,8 +753,10 @@ class QueryStore:
             joined_notebooks = {
                 row["k"]: row["c"]
                 for row in db.execute(
-                    "SELECT user_id AS k,COUNT(*) AS c FROM notebook_members "
-                    "GROUP BY user_id"
+                    "SELECT m.user_id AS k,COUNT(*) AS c FROM notebook_members m "
+                    "JOIN notebooks nb ON nb.id=m.notebook_id "
+                    f"WHERE nb.{access_sql.NOTEBOOK_LIVE_SQL} "
+                    "GROUP BY m.user_id"
                 ).fetchall()
             }
             groups = {

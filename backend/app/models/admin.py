@@ -91,11 +91,13 @@ class AdminUserUsage(BaseModel):
     reports_failed: int = 0
     # 图谱构建次数,按 created_by,所有状态都算(kg_build_jobs 不在留存快照覆盖范围内)。
     kg_builds: int = 0
-    # 有效 Memory 条数(排除 status='rejected')。
+    # 有效 Memory 条数(排除 status='rejected'),只算 live 笔记本里的(规格 §3 Phase C)。
     memory_count: int = 0
-    # 建过的 Knowhow 表数。
+    # 建过的 Knowhow 表数,只算 live 笔记本里的。深拷贝把副本的 created_by 改成接收方,
+    # 因此这个数含拷来的副本(与来源的资产口径一致;按原作者归因要改拷贝路径,本期不做)。
     knowhow_tables: int = 0
-    # 作为成员加入的他人共享笔记本数(不含自有库)。
+    # 作为成员加入的他人共享笔记本数(不含自有库),只算 live 笔记本,与该用户展开行
+    # 「加入的笔记本」列表(joined_notebook_rows)同一过滤,避免同屏数字不一致。
     joined_notebooks: int = 0
     # 所属群组数。
     groups: int = 0
