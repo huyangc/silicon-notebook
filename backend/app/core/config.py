@@ -1107,6 +1107,9 @@ class Settings(BaseSettings):
     chunk_mmr_k: int = Field(16, validation_alias="CHUNK_MMR_K")
     chunk_mmr_lambda: float = Field(0.5, validation_alias="CHUNK_MMR_LAMBDA")
     chunk_answer_budget_chars: int = Field(30000, validation_alias="CHUNK_ANSWER_BUDGET_CHARS")
+    document_overview_max_elements: int = Field(
+        64, ge=2, validation_alias="DOCUMENT_OVERVIEW_MAX_ELEMENTS",
+    )
     # 大库 chunk 暴力回退守卫:ANN 不可用(未建 scale 索引/embed 失败/ANN fail-open)
     # 时,chunk 数超过该阈值的库不再「全表拉文本+全量纯 Python 分词」(生产 55 万 KG
     # 级库曾因 .env 丢失走到这里,单问磨半小时),改走 FTS 词法候选+有界打分并发

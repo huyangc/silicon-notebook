@@ -1739,6 +1739,33 @@ Deep Report post-completion uses its own deployment rail. `REPORT_POST_COMPLETIO
 | **`chunk`** (default) | general | no | Chunk-native general Q&A: large recall → selection → long-context synthesis → citations bound to source chunks. |
 | **`reasoning`** | strict | yes | Agentic, iterative plan → retrieve → reflect → answer (streams a live trace). |
 
+**Document introductions in general Q&A.** Explicit library-document introductions
+(for example, “summarize each document”) use the shared authorized source directory,
+without a KG or embedding prerequisite, before relevance retrieval. Each document's
+title, type, and stored summary excerpt is available in the existing typed source
+result card. Missing summaries are disclosed; titles alone are not content evidence.
+Directory enumeration and synthesis-preview coverage remain separate. This path
+uses the request's existing enumeration rails and `CHUNK_ANSWER_BUDGET_CHARS`;
+it does not claim to read every document's full text.
+
+Explicit single-document introductions resolve a unique title (use `《full title》`)
+or the only document in the effective scope. An incomplete directory, absent title,
+or ambiguous target asks the reader to narrow the source selection, never guesses.
+Original parsed elements are read in bounded, distributed source-detail order,
+including the last position. The default maximum is 64 elements
+(`DOCUMENT_OVERVIEW_MAX_ELEMENTS`, minimum 2); the shared chunk context character
+budget is apportioned across samples. Short documents whose entire parsed text fits
+can report complete parsed-element coverage only after an unchanged generation
+check. Long documents and clipped text explicitly disclose sampling, which does
+not prove every chapter was covered. Source-detail order is the existing stable
+`(created_at, id)` order, not a new semantic chapter ordering; the last sampled
+position is not guaranteed to be the logical conclusion of every document.
+A changed parse discards the mixed evidence.
+Answers retain original element citations, persist as `mode="chunk"`, and use the
+conservative `overview` evidence level. These paths recognize explicit Chinese and
+English introduction phrasing; topical, comparison, and unrecognized questions keep
+the existing retrieval path. Automatic-mode engine selection remains unchanged.
+
 All three answer-synthesis paths — chunk retrieval, chunk×graph mix, and `reasoning` (including
 sectioned synthesis) — share one synthesis rule set (`answer_prompt`, rule 12): the answer must
 preserve every qualifier the question states — scope, operating condition, direction (e.g. TX vs

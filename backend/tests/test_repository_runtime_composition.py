@@ -67,6 +67,7 @@ RUNTIME_ATTRIBUTES = [
     "collection_catalog",
     "collection_enumeration",
     "command_catalog",
+    "content_tools",
     "database",
     "embedding_store",
     "event_log",
