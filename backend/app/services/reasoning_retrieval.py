@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextvars
 import json
+import logging
 import math
 import re
 import threading
@@ -28,6 +29,7 @@ from app.core.config import (
     DEFAULT_REFLECT_EVIDENCE_CHARS_BY_EFFORT,
     Settings,
 )
+from app.domain.cancellation import CoreCancellation
 from app.models.ask import TRACE_RESULT_IDS_MAX, TraceStep
 from app.repositories.lexical_query import (
     MAX_EXACT_PHRASE_CHARS, MAX_QUOTED_PHRASES, exact_probe_query,
@@ -2575,15 +2577,21 @@ class _TraceRecorder:
         if self.observer is not None:
             try:
                 self.observer.observe(step)
-            except AskCancelled:
+            except CoreCancellation:
+                # 放行整个取消基类,不只是 `AskCancelled` 这一个子类:任何取消
+                # 语义都必须穿过这个转换往上传,不能被下面那句 `except Exception`
+                # 吞掉当成"观察折不出来"。
                 raise
             except Exception:  # noqa: BLE001
                 # 观察账是**投影**:它折不出这一条,代价是账上少一行;它把异常放
                 # 出去,代价是整次检索死在一个纯展示的转换上。转换读的是模型可以
                 # 影响形状的 detail(枚举 kind、子查询 query…),所以"它永远不会
                 # 抛"不是一个可以假设的性质。轨迹本身在上一行就已经落定,人仍然
-                # 看得到这一步真的发生过。
-                pass
+                # 看得到这一步真的发生过——这里只留一条 debug 日志,让"折不出来"
+                # 这件事至少在日志里可查,而不是彻底静默。
+                logging.getLogger(__name__).debug(
+                    "reflect v2 observation conversion failed for step_type=%s",
+                    step.step_type, exc_info=True)
         if self._on_step:
             self._on_step(step)
 
@@ -5067,7 +5075,10 @@ class ReasoningRetriever:
         added, names = 0, []
         # 本次真正新进池子的对象标识。detail 只写 `new`(一个数)与 `peers`
         # (实体名),没有一把承载标识的键,而 legacy 的 trace 键集是冻结基线——
-        # 所以它们经侧信道交给观察者,不进 detail(见 `note_fresh_ids`)。
+        # 所以它们经侧信道交给观察者,不进 detail(见 `note_fresh_ids`)。关闭态
+        # (`observer is None`)不收集这份列表:侧信道本来就不会被消费,收集了
+        # 也只是一份从未离开这个函数的分配——关闭态零新状态的承诺包括这一份。
+        observing = state.record.observer is not None
         new_ids: List[str] = []
         for pname in peers:
             raise_if_cancelled(self.cancel_event)
@@ -5080,7 +5091,8 @@ class ReasoningRetriever:
                     collected[h.object_id] = h
                     added += 1
                     got += 1
-                    new_ids.append(h.object_id)
+                    if observing:
+                        new_ids.append(h.object_id)
             attempted[key] = _QueryAttempt(query=pname, new=got, tries=1)
             if pname not in used_queries:
                 used_queries.append(pname)
@@ -5090,7 +5102,7 @@ class ReasoningRetriever:
         step_summary = (f"横向对比(共提):纳入 {len(names)} 个同类实体,新增候选 {added}"
                         if peer_source == "comention"
                         else f"横向对比:纳入 {len(names)} 个同社区实体,新增候选 {added}")
-        if state.record.observer is not None:
+        if observing:
             state.record.observer.note_fresh_ids(new_ids)
         record(TraceStep(step_type="expand_community", summary=step_summary,
                          detail={"focal": focal_name, "peers": names,

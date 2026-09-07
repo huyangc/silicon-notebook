@@ -83,8 +83,31 @@ class EvidenceCard:
 
 
 # --- 文档字段的伪造防御 -----------------------------------------------------
+#: C0(`ch < " "`)与 DEL(`\x7f`)之外还要挡两族不显示的字符:C1(U+0080–U+009F,
+#: 与 C0 同源、部分终端一样会把它们当控制序列解析)和零宽/双向格式控制符
+#: (U+200B–U+200F 零宽空格/连接符与从左到右、从右到左标记;U+202A–U+202E 的
+#: 双向嵌入/覆盖;U+2060–U+2064 词连接符一族;U+FEFF 字节序标记/零宽不换行
+#: 空格)。它们和换行一样"不显示但仍是排版指令",一段文档正文里夹带几个零宽
+#: 字符看起来与折叠前逐字相同,却能在某些渲染器里改变从左到右的阅读顺序或
+#: 悄悄拼接本该分开的两段文字。
+_FORMATTING_CONTROLS = frozenset(
+    chr(c) for c in (
+        *range(0x80, 0xA0),
+        *range(0x200B, 0x2010),
+        *range(0x202A, 0x202F),
+        *range(0x2060, 0x2065),
+        0xFEFF,
+    )
+)
+#: 证据卡的字段分隔符(`render_card` 用 `" | "` 分隔字段、`key=` 标识引用键)。
+#: 文档字段带上这两个字符中的任何一个都能在卡片行里冒充出一个新字段——例如
+#: KG 的 `name` 里混进 `｜key=ko-999`,会在这张卡上多开一个看起来可引用的
+#: `key=` 槽。折成全角逗号:字面文字仍然保留,只是不再能被读成分隔符。
+_FIELD_SEPARATORS = "|｜"
+
+
 def _collapse(value: object) -> str:
-    """折叠全部空白(含换行)为单空格,并去掉余下的控制字符。
+    """折叠全部空白(含换行)为单空格,去掉控制字符,并归一字段分隔符。
 
     与 `agent_profile_block._clean` / `retrieval_experience_block._clean` 同款,
     需要它的理由在这里更直接:这一块渲染的每一个字段——知识对象的 `name`、
@@ -95,9 +118,17 @@ def _collapse(value: object) -> str:
     不存在的证据),或者伪造一个 `【动作观察账 — 服务端记录的实际执行结果】` 块头
     ——后面跟着的任何东西都会读成"服务端说的"。折叠在字段进 `f"- ... | ..."` 之前
     做,伪造因此是结构上不可能,而不是"被劝阻"。
+
+    去掉的控制字符与归一的分隔符分别见 `_FORMATTING_CONTROLS` 与
+    `_FIELD_SEPARATORS`。
     """
     text = " ".join(str(value or "").split())
-    return "".join(ch for ch in text if ch >= " " and ch != "\x7f")
+    text = "".join(
+        ch for ch in text
+        if ch >= " " and ch != "\x7f" and ch not in _FORMATTING_CONTROLS)
+    for sep in _FIELD_SEPARATORS:
+        text = text.replace(sep, "，")
+    return text
 
 
 def _flat(value: object, limit: int) -> str:
