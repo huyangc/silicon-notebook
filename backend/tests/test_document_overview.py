@@ -26,6 +26,10 @@ from tests.model_testkit import bind_chat_client
     ("库中文档介绍了哪些错误码", None),
     ("比较这些论文的方法", None),
     ("Summarize this paper's methodology", None),
+    ("分别介绍《部署手册》和《运维手册》", None),
+    ('Summarize the papers "Deployment" and "Operations"', None),
+    ("Summarize the experimental methods in this paper", None),
+    ("Summarize the key findings from the article", None),
 ])
 def test_overview_routes_only_explicit_document_introductions(question, kind):
     result = overview_intent(question)
