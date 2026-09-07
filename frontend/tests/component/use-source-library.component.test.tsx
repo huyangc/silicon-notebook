@@ -79,6 +79,42 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+test.each(["", "   ", "\t　 "])("blank source search %j restores all sources and releases busy", async (blank) => {
+  render(<Harness />);
+  const all = [source("match", "notebook-a"), source("other", "notebook-a")];
+  act(() => {
+    value!.commitNotebookSnapshot({
+      actorId: "user-a", notebookId: "notebook-a", workspaceEpoch: 1,
+      page: { items: all, total_count: 2, offset: 0, limit: 50 },
+    });
+    value!.toggleSource("other");
+    value!.setSourceQuery("match");
+  });
+  api.listSources.mockResolvedValueOnce({ items: [all[0]], total_count: 1, offset: 0, limit: 50 });
+  await act(async () => value!.searchSources());
+  expect(value!.sources).toEqual([all[0]]);
+
+  const reset = deferred<{ items: SourceSummary[]; total_count: number; offset: number; limit: number }>();
+  api.listSources.mockReturnValueOnce(reset.promise);
+  let loading!: Promise<void>;
+  act(() => {
+    value!.setSourceQuery(blank);
+    loading = value!.searchSources();
+  });
+  expect(value!.sourceQuery).toBe("");
+  expect(value!.sourcesPageLoading).toBe(true);
+  expect(api.listSources).toHaveBeenLastCalledWith("notebook-a", 0, 50, "", expect.any(AbortSignal));
+  reset.resolve({ items: all, total_count: 2, offset: 0, limit: 50 });
+  await act(async () => loading);
+  expect(value!.sources).toEqual(all);
+  expect(value!.sourcesTotal).toBe(2);
+  expect(value!.notebookSourceTotal).toBe(2);
+  expect(value!.sourcesPage).toBe(0);
+  expect(value!.sourcesPageLoading).toBe(false);
+  expect(value!.currentPageRequest()).toEqual({ page: 0, q: "" });
+  expect(value!.sourceScopeSelection.ids.has("other")).toBe(true);
+});
+
 test("late upload and URL results cannot commit across notebook or actor transitions", () => {
   const view = render(<Harness />);
   let ownerA = null as ReturnType<HookValue["captureOwner"]>;

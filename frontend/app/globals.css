@@ -6199,7 +6199,15 @@ code.schema-detail-name {
 /* 来源搜索请求在飞时的反馈落在输入框自身紧邻处，不是页面顶部横幅：转圈图标叠在
    输入框右侧内边，翻页/回车触发的同一个 in-flight 状态都会点亮它。
    pointer-events: none 让图标纯视觉，不挡输入框的点击与文本选中。 */
+.source-search-form {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .source-search-wrap {
+  flex: 1;
+  min-width: 0;
   position: relative;
   display: flex;
   align-items: center;
