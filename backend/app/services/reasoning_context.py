@@ -400,6 +400,12 @@ def _inference_card(chain) -> Optional[EvidenceCard]:
         return None
     h1, h2 = hops
     edge = _collapse(getattr(chain, "inferred_edge_type", ""))
+    # 推导链的 validity_scope 是 `follow_chain.merge_validity_scopes` 合并出的
+    # 字典(与 KG 节点同一套 schema),不是字符串——走与 `_kg_card` 同一条字典
+    # 渲染,否则 `_collapse` 的 `str(dict)` 会把 Python repr 糊给模型。
+    scope = getattr(chain, "validity_scope", "")
+    if isinstance(scope, Mapping):
+        scope = _condition_mapping_text(scope)
     return EvidenceCard(
         kind=KIND_INFERENCE, key="",
         locator=_flat(
@@ -409,8 +415,7 @@ def _inference_card(chain) -> Optional[EvidenceCard]:
         origin=ORIGIN_EXTRACTED,
         excerpt=(f"query-time only, trust="
                  f"{float(getattr(chain, 'chain_trust', 0.0) or 0.0):.2f}"),
-        conditions=_flat(
-            getattr(chain, "validity_scope", ""), _CONDITION_CHARS),
+        conditions=_flat(scope, _CONDITION_CHARS),
         partial=False,
     )
 
