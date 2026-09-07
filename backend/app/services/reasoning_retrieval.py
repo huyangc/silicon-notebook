@@ -35,7 +35,6 @@ from app.services.agent_profile_block import (
 )
 from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
 from app.services.citation_markers import LOOSE_MARKER_RE
-from app.services.document_overview import overview_intent
 from app.services.model_work import MalformedModelResponse
 from app.services.collection_catalog import (
     ENUMERABLE_ELEMENT_KINDS, ENUMERABLE_KG_OBJECT_TYPES,
@@ -302,6 +301,20 @@ ENUMERATE_KG_OBJECTS_ACTION = "enumerate_kg_objects"
 # kind/object_type 分派(fail-open,与本分支其他非白名单值的处理同形)。
 ENUMERATE_SOURCES_COLLECTION = "sources"
 
+# ``enumerate.scope`` 的两个合法值:来源清单要不要把挂载并勾选的参考库一起列进来。
+#
+# **刻意是字符串枚举而不是布尔**(见 prompts.py 同处的通用纪律注释):
+# ``model_json._validate_against_example`` 对布尔字段是**硬类型**校验——模型吐
+# `"true"` / `"yes"` 会 `invalid_boolean`,整轮 reflect 被打成兜底,与 F1 修的
+# 根因同类;而字符串枚举字段享受 F1 立的空串宽容规则(留空 = 这一轮不用它)。
+# 枚举值本身自描述,模型不必去猜「true 是哪一边」。
+ENUMERATE_SCOPE_ALL = "all"
+ENUMERATE_SCOPE_CURRENT_NOTEBOOK = "current_notebook"
+# 默认 = 旧行为:列出检索范围内的**全部**参与集文档,与集合地图 `sources: N` 的
+# 联邦口径一致。缺省/空串/非法值/非字符串一律落到这里(fail-open,连 fail_closed
+# 也不抛:范围不是动作合法性问题,动作照旧成立,只是范围按默认走)。
+ENUMERATE_SCOPES = (ENUMERATE_SCOPE_ALL, ENUMERATE_SCOPE_CURRENT_NOTEBOOK)
+
 
 def enumeration_wiring_active(settings, catalog, enumeration) -> bool:
     """接线层面上,枚举工具这一整套是否可用(kill switch + 两个服务都在)。
@@ -533,15 +546,25 @@ def _allowance_suffix(rows_left: int) -> str:
     return f" | listing allowance left: {max(0, int(rows_left))} rows"
 
 
-def _enumeration_step_summary(label: str, coverage, source_id: str) -> str:
+def _enumeration_step_summary(label: str, coverage, source_id: str, *,
+                              local_only: bool = False) -> str:
     """enumerate 步的上屏摘要。
 
     三种结局说三句不同的话,因为它们对用户意味着三件不同的事:列全了 / 到本轮
     上限了(还能继续) / 资料变了(既不能续也不能声称完整)。数字一律用**链上累计**
     ``returned_total``——用户看的是「这个清单目前列了多少」,不是「刚刚那一次调用
     返回了多少」。分母未知时省略,绝不写成 /0。
+
+    范围后缀与既有的「(限指定来源)」同形、同位置:两者都在回答同一个问题——
+    「这个数是从多大的一片资料里数出来的」。没有它,「已全部列出 2 条」在一个挂了
+    参考库的库里读起来就是一句假话。两个后缀互斥(source_id 只有元素清单会给,
+    local_only 只有来源清单会给),所以不会叠出一串括号。
     """
-    scope = "（限指定来源）" if source_id else ""
+    scope = (
+        "（限指定来源）" if source_id
+        else "（仅当前笔记本）" if local_only
+        else ""
+    )
     if coverage.complete:
         return f"枚举{label}: 已全部列出 {coverage.returned_total} 条{scope}"
     total = f"/共 {coverage.total}" if coverage.total is not None else ""
@@ -645,24 +668,30 @@ def _enumeration_note(chains) -> str:
             _source_titles_note(chain.outcome.items)
             if chain.outcome.collection == "sources" else ""
         )
+        # 范围后缀与上屏摘要同形同词。模型看的是这份账目:不写范围的话,「已完整
+        # 列出 2 条」会让它以为参考库里也就这些,从而放弃再用 `scope:"all"` 问一次
+        # ——而那正是链键含范围之后它**可以**做的事。
+        scope = "（仅当前笔记本）" if chain.outcome.local_only else ""
         if chain.state == "complete":
-            parts.append(f"「{label}」已完整列出 {returned_total} 条{titles}")
+            parts.append(f"「{label}」已完整列出 {returned_total} 条{scope}{titles}")
         elif chain.state == "conflict":
             parts.append(
                 f"「{label}」列出 {returned_total} 条后资料发生变动,"
-                f"既不能继续也不能当作完整{titles}"
+                f"既不能继续也不能当作完整{scope}{titles}"
             )
         else:
             total = getattr(coverage, "total", None)
             denominator = f"/共 {total}" if total is not None else ""
             parts.append(
-                f"「{label}」已列出 {returned_total} 条{denominator},尚未列完{titles}"
+                f"「{label}」已列出 {returned_total} 条{denominator},"
+                f"尚未列完{scope}{titles}"
             )
     omitted = max(0, len(chains) - _ENUM_NOTE_MAX_ITEMS)
     tail = f",另有 {omitted} 个清单从略" if omitted else ""
     return (
         "（本轮已枚举的清单: " + "、".join(parts) + tail +
-        "。同一清单再次请求会从上次停下的位置继续;已完整列出的不要再请求,"
+        "。同一清单再次请求会从上次停下的位置继续;已完整列出的不要再请求"
+        "(换一个 scope 的来源清单不算同一份清单),"
         "改用其他动作或直接作答。)"
     )
 
@@ -1921,6 +1950,13 @@ class ReflectDecision:
     # 模型给了 collection 但不是合法值时留下的原值,仅用于把 skip 文案写成教学式
     # (「该给什么」),从不参与分派。
     enumerate_collection_rejected: str = ""
+    # 来源清单的范围,由模型自己填(agentic:范围是工具的参数,不是服务端拿正则
+    # 替模型解析出来的)。**字符串枚举而不是布尔**,理由见 ENUMERATE_SCOPES。
+    # 默认 `"all"` = 列出检索范围内的全部文档(当前笔记本 + 勾选的参考库),与
+    # 集合地图 `sources: N` 的联邦口径一致;`"current_notebook"` 才收窄成只列
+    # 本库。只对 `collection=="sources"` 有意义——另两个集合的执行器根本没有这个
+    # 参数,所以 `_run_enumeration` 里换算成 `local_only` 时要与 `is_sources` 与上。
+    enumerate_scope: str = ENUMERATE_SCOPE_ALL
     # update_outline 携带的**整份章节结构**;同 id 的证据 union/显式删除在 run()
     # 应用。解析期只夹形状与边界,证据 key 的合法性要看 run 局部候选集合——
     # reflect() 在这一层根本不知道候选是什么。
@@ -1952,38 +1988,29 @@ class CollectionEnumerationOutcome:
     items: List[object] = field(default_factory=list)
     coverage: object = None
     # 仅 sources:这份清单是否只列了当前笔记本(不含挂载的参考库)。范围是
-    # 清单身份的一部分——同一条 "sources" 链换了范围就不是同一份目录了。
+    # 清单身份的一部分——同一条 "sources" 链换了范围就不是同一份目录了,所以它
+    # 也进续跑键。读者:上屏摘要与回喂账目的「(仅当前笔记本)」后缀,以及结果卡。
     local_only: bool = False
 
 
 @dataclass
 class _EnumChain:
-    """一个集合的续跑状态。仅 run 局部,绝不持久化(游标是进程内句柄)。"""
+    """一个集合的续跑状态。仅 run 局部,绝不持久化(游标是进程内句柄)。
+
+    续跑键是 ``(collection, kind, source_id, local_only)`` —— **范围在键里**,因为
+    范围是清单身份的一部分:换了范围要的本来就不是同一份目录。三个后果都是想要的:
+    一条链上每一次续跑的范围天然相同(所以这里**不再单独存范围**,「沿用开链范围」
+    那个判据没有了存在余地);「先只列本库、后要全部」是**新开一条链**,不再被
+    ``already_enumerated`` 拦掉模型一个完全合理的追问(「那参考库里有哪些?」);
+    反向同理。重复列的代价不需要特判——两条链共用同一个 run 级预算池。
+
+    要读某条链的范围看 ``outcome.local_only``(上屏摘要与回喂账目的后缀取自那里)。
+    """
 
     outcome: CollectionEnumerationOutcome
     cursor: object = None
     # open=还能续;complete=已列全;conflict=作用域在枚举期间变了,不能续也不能重来
     state: str = "open"
-    # 开链时用的参考库范围(见 `_enumeration_local_only`);续跑沿用它。
-    local_only: bool = False
-
-
-def _enumeration_local_only(chain_state, is_sources: bool,
-                            requested: bool) -> bool:
-    """本次枚举是否只列当前笔记本的文档(不含挂载的参考库)。
-
-    范围只对来源清单有意义:元素与知识对象的执行器根本没有这个参数,所以
-    非 sources 的请求恒为 False。首次开链取调用方解析出的那一份——目录问法
-    播种把分类器的 ``include_reference_libraries`` 取反传进来,与 chunk 侧的
-    文档目录通道(`ask_service._try_document_overview`)同一个口径。
-
-    已有链则**沿用开链时那一份**,不看本次请求:模型后来选的目录动作不带任何
-    范围信息(参数默认全参与集),按默认续跑/重开会把用户明确排除掉的参考库
-    文档从第二条链混进同一份答案的证据里,还要再扣一次共享枚举预算。
-    """
-    if chain_state is not None:
-        return chain_state.local_only
-    return bool(requested) and is_sources
 
 
 @dataclass
@@ -2078,8 +2105,8 @@ class _ReasoningRunState:
     都必须走 `state.`:
 
     * `enum_rows_used` / `enum_pages_used` / `enum_payload_used` —— 三个枚举预算池
-      的扣减发生在 `_run_enumeration` 里(它有两个调用点:首轮目录播种与循环里的
-      枚举动作),解包成局部名就会读到播种之前的旧数;
+      的扣减发生在 `_run_enumeration` 里(不在循环本体),解包成局部名就会读到
+      扣减之前的旧数;
     * `enumeration_active` / `kg_in_scope` —— run 级不变量,`_new_run_state` 算一次,
       循环直读。
 
@@ -2091,11 +2118,6 @@ class _ReasoningRunState:
     # —— 冻结输入:由 `run` 的形参原样带入,任何阶段都只读 ——
     notebook_id: str
     question: str
-    # 用户**原样**输入的问题(不含已确认问题契约那段生成文本)。检索用的
-    # `question` 在高级界面确认合同后会变成「原问题 + 整段契约」的复合串,而目录
-    # 问法分类器(`overview_intent`)是按人写的问句钉的模板 —— 拿复合串去问它必然
-    # 不命中。空串 = 调用方没有区分这两者,判据回退到 `question`。
-    original_question: str
     history: str
     # `run(intent_queries=...)` 原样带入;只有规划阶段读它(去重成 reviewed_all)。
     intent_queries: object
@@ -2142,9 +2164,8 @@ class _ReasoningRunState:
     # —— 邻居展开截断账目:只有 reflect 的 expand_graph 分支写 ——
     neighbor_truncated: Dict[str, str]
 
-    # —— 类型化集合枚举:地图由首轮建;预算池与续跑账目有**两个**写者 ——
-    # 首轮的目录问法播种(`_first_round_catalog_seed`)与 reflect 循环的枚举动作,
-    # 两者都经 `_run_enumeration` 落账。因此这三个计数器是上面那组「不解包」的
+    # —— 类型化集合枚举:地图由首轮建;预算池与续跑账目由 reflect 循环的枚举
+    # 动作经 `_run_enumeration` 落账。因此这三个计数器是上面那组「不解包」的
     # 例外之一:循环里一律直读 `state.enum_rows_used` 等,不拷贝成局部名。
     enum_rows_used: int
     enum_pages_used: int
@@ -2861,6 +2882,20 @@ class ReasoningRetriever:
                 # 只说「你给错了」的话,模型下一轮往往换一个同样非法的值再试。
                 if collection and not d.enumerate_collection:
                     d.enumerate_collection_rejected = collection
+                # 来源清单的范围。与 kind/object_type/collection 同一条纪律:
+                # 白名单内取之,其余(缺省、空串、非法字符串、非字符串)一律落回
+                # 默认 `"all"`,不抛——连 fail_closed 也不抛,因为范围不是动作
+                # 合法性问题(动作照旧成立,只是范围按默认走)。默认取 `"all"`
+                # 而不是本库:那是这个参数出现之前的行为,也是集合地图 `sources: N`
+                # 的口径,模型不填时看到的数与列到的数才对得上。
+                # 只对来源清单有意义,但**这里不与 collection 与一次**:与不与
+                # 的结果在下游完全一样(非 sources 的执行器压根没有这个参数,
+                # `_run_enumeration` 会再与一次 `is_sources`),多写的那半个条件
+                # 是不可观测的——它坏掉不会有任何测试红。
+                scope = enumerate_request.get("scope", "")
+                d.enumerate_scope = (
+                    scope if scope in ENUMERATE_SCOPES else ENUMERATE_SCOPE_ALL
+                )
             if outline:
                 # 与 enumerate 分支同形:只在这一把闸打开时才看这个字段,关闭态
                 # 连读都不读(模型硬吐一份大纲也不会有任何影响)。夹取与丢弃的规则
@@ -3156,7 +3191,6 @@ class ReasoningRetriever:
             intent_queries=list(stage.intent_queries),
             limits=stage.limits,
             intent_detail=(stage.intent.as_json_mapping() if stage.intent else None),
-            original_question=stage.original_question,
         )
         if type(result) is not ReasoningResult:
             raise StageBoundaryError("invalid reasoning retrieval result")
@@ -3184,7 +3218,7 @@ class ReasoningRetriever:
 
     def _new_run_state(
         self, notebook_id, question, history, on_step, *,
-        max_steps, intent_queries, limits, intent_detail, original_question="",
+        max_steps, intent_queries, limits, intent_detail,
     ) -> "_ReasoningRunState":
         """解析本 run 的预算/开关并铺开 run 级账目(除 `_kg_in_scope` 那对 EXISTS 外零 I/O)。
 
@@ -3327,7 +3361,6 @@ class ReasoningRetriever:
         return _ReasoningRunState(
             notebook_id=notebook_id,
             question=question,
-            original_question=original_question,
             history=history,
             intent_queries=intent_queries,
             intent_detail=intent_detail,
@@ -3560,43 +3593,6 @@ class ReasoningRetriever:
         state.experience_block = experience_block
         state.experience_entries = experience_entries
         state.collection_map_text = collection_map_text
-
-    def _first_round_catalog_seed(self, state: "_ReasoningRunState") -> None:
-        """目录问法的确定性播种:原问题一望即知要文档目录时,先列一次。
-
-        沿用 PPR / 精确查找 / 无图原文那三条 seed 的同一条哲学——**不赌模型**。
-        「当前notebook的文章说明了什么」这类问题的答案就是那份目录,而让模型在
-        reflect 里自己选中目录动作要赌两件事:它读懂了动作说明,以及那一轮的响应
-        能通过 JSON 校验(生产上正是后者塌了)。判据是确定性的、与 chunk 模式的
-        文档介绍通道**同一个**分类器(`overview_intent`),所以两侧不会对同一句话
-        给出两种判断。
-
-        四把闸合成一个 `state.enumeration_active`(即 `enumeration_active()`):
-        部署 kill switch、两个集合服务在场、调用方策略位 `allow_enumeration`
-        (knowhow 补全关着它)、以及作用域未受限(受限 scope 本就禁用整集合枚举)。
-        再判一次等于把那个单点判据抄成两份。
-
-        执行走与 reflect 目录动作**同一个** `_run_enumeration`:同一个预算池、
-        同一份续跑账目,所以模型之后再选目录动作会被 `already_enumerated` 跳过,
-        而不是把同一份清单列两遍。有图无图都播种——目录与图无关。
-
-        参考库范围也来自同一个分类器,口径与 chunk 侧的文档目录通道逐字相同
-        (`ask_service._try_document_overview`:`local_only=(kind == "catalog"
-        and not include_reference_libraries)`)。注意 `include_reference_libraries`
-        是**默认 False**——没提参考库的问句(「总结当前notebook的文章」)与显式
-        排除的问句(「…不包括参考库」)在这里同为只列当前笔记本;只有问句明确说
-        了「包括参考库」「和参考库」才把挂载库一起列进来。范围随后进续跑账目,
-        模型之后的目录动作沿用它(见 `_enumeration_local_only`)。
-        """
-        if not state.enumeration_active:
-            return
-        intent = overview_intent(state.original_question or state.question)
-        if intent is None or intent.kind != "catalog":
-            return
-        self._run_enumeration(state, ReflectDecision(
-            next_action=ENUMERATE_ELEMENTS_ACTION,
-            enumerate_collection=ENUMERATE_SOURCES_COLLECTION,
-        ), phase="seed", local_only=not intent.include_reference_libraries)
 
     def _first_round_plan(self, state: "_ReasoningRunState") -> None:
         """确定本轮的检索方向:已确认意图优先,否则调 `plan()`,并记 plan 步。"""
@@ -4338,18 +4334,15 @@ class ReasoningRetriever:
         """首轮:reflect 循环之前的全部确定性工作。
 
         阶段顺序本身是合同(每一条都有独立理由,见各阶段的原注释):
-        无图披露 → 理解/打法/地图注入 → 目录问法播种 → 规划 → 初检索 → PPR seed
-        → 精确查找 seed → 无图原文播种 → 空证据兜底 → 已确认方向补种。特别地,
-        精确查找 seed 必须排在 PPR seed **之后**,否则 PPR 那一步的 `seen_chunks`
-        去重与 `seeded` 计数会变;无图原文播种同理排在两条 seed 之后。
+        无图披露 → 理解/打法/地图注入 → 规划 → 初检索 → PPR seed → 精确查找
+        seed → 无图原文播种 → 空证据兜底 → 已确认方向补种。特别地,精确查找
+        seed 必须排在 PPR seed **之后**,否则 PPR 那一步的 `seen_chunks` 去重与
+        `seeded` 计数会变;无图原文播种同理排在两条 seed 之后。
 
-        目录问法播种排在**规划之前**,理由是它要进候选:目录是这类问题的答案本身,
-        它必须先于 plan 步进入轨迹与候选摘要,第一次 reflect 才看得见它——排到
-        空证据兜底之后就晚了一整轮(那时首轮空手提示已经按「零证据」发出去了)。
-        它自己既不写 `collected/elements/chunks` 也不碰 `seen_chunks`,所以对后面
-        每一条 seed 的输入与计数都是中性的——三条既有 seed 的顺序断言因此逐字
-        成立。(它**不**依赖地图注入:枚举接线判据 `state.enumeration_active` 在
-        `_new_run_state` 里就算好了。)
+        首轮**没有**目录播种:agentic 模式下要不要列目录由模型经 `enumerate`
+        工具自己决定(参数 `collection="sources"`),服务端不拿问法正则替它做这个
+        判断。首轮唯一与集合枚举有关的事是把集合地图注入进去,让模型看得见可列
+        的东西有多少。
         """
         notebook_id = state.notebook_id
         question = state.question
@@ -4376,7 +4369,6 @@ class ReasoningRetriever:
         try:
             self._first_round_kg_disclosure(state)
             self._first_round_prompt_blocks(state)
-            self._first_round_catalog_seed(state)
             self._first_round_plan(state)
             self._first_round_initial_search(state)
             self._first_round_ppr_seed(state, ppr_future)
@@ -4404,8 +4396,9 @@ class ReasoningRetriever:
         # 初检索 0 命中也视为无进展(提前提示模型 KG 可能为空)。
         # 枚举行数与循环里的口径**必须同一份**(循环用
         # `len(collected)+len(elements)+len(chunks)+len(chains)+state.enum_rows_used`):
-        # 首轮播种列出了整份文档目录却不数它,等于对模型说「一条证据都没查到」,
-        # 接着把首轮空手提示送上去——而那份目录恰恰就是目录问法要的答案。
+        # 首轮当前不会枚举(目录是模型自己在 reflect 里选的),这一项因此恒为 0;
+        # 保留它是为了口径同源——两处对「有没有进展」必须永远给同一个答案,而不是
+        # 靠「首轮碰巧没有枚举者」这个会随首轮阶段增减而失效的巧合。
         state.no_progress = not (
             state.collected or state.elements or state.chunks
             or state.enum_rows_used > 0)
@@ -4416,21 +4409,13 @@ class ReasoningRetriever:
 
     def _run_enumeration(
         self, state: "_ReasoningRunState", decision: "ReflectDecision",
-        *, phase: str = "", local_only: bool = False,
     ) -> None:
         """执行一次集合枚举动作:预算 → 判重/校验 → 执行 → 记账 → trace。
 
-        **抽成方法是因为它有两个调用点**:reflect 循环里的动作分发,以及首轮
-        目录问法的确定性播种(`_first_round_catalog_seed`)。两处必须是同一个
-        预算池、同一份续跑账目(`state.enum_chains`)、同一种 trace 形状——否则
-        播种过的目录不会被模型后来那次目录动作按「已列全」跳过,同一份清单会被
-        列两遍、扣两次预算,而回喂账目里出现两条互相矛盾的覆盖率。
-
-        ``phase`` 只进 trace detail(稀疏键):播种与模型主动选之间的区别对
-        排查是第一位的,但它不改变任何执行语义,所以不进任何判据。**成功步与
-        每一条 skip 都带它**——只给成功步打标的话,「播种被预算/作用域挡掉了」
-        这件事在轨迹上与「模型选的那次被挡掉了」完全同形,而那正是最需要分清
-        的一种失败。
+        抽成方法是为了让 reflect 循环的动作分发只剩一行调用:预算池
+        (`state.enum_*_used`)、续跑账目(`state.enum_chains`)与 trace 形状是
+        一整套合同,散在循环体里改一处漏一处就会出现「同一份清单列两遍、扣两次
+        预算,而回喂账目里两条互相矛盾的覆盖率」。
         """
         notebook_id = state.notebook_id
         record = state.record
@@ -4466,6 +4451,10 @@ class ReasoningRetriever:
             else decision.enumerate_kind if is_elements
             else decision.enumerate_object_type
         )
+        # 模型填的范围换算成执行器的 `local_only`,与 `is_sources` 与一次(理由与
+        # 取值见 ENUMERATE_SCOPES;另两个集合的执行器没有这个参数)。
+        local_only = is_sources and (
+            decision.enumerate_scope == ENUMERATE_SCOPE_CURRENT_NOTEBOOK)
         source_id = decision.enumerate_source_id if is_elements else ""
         source_title = (
             decision.enumerate_source_title if is_elements else ""
@@ -4499,9 +4488,9 @@ class ReasoningRetriever:
                 source_id, source_matches = "", 0
                 source_truncated = False
                 resolve_error = str(exc)[:120]
-        key = (collection, kind, source_id)
+        # 续跑键含**范围**:换了范围就不是同一份目录了(见 `_EnumChain`)。
+        key = (collection, kind, source_id, local_only)
         chain_state = enum_chains.get(key)
-        local_only = _enumeration_local_only(chain_state, is_sources, local_only)
         rows_left = enum_limits.enum_rows_per_run - state.enum_rows_used
         pages_left = enum_limits.enum_pages_per_run - state.enum_pages_used
         payload_left = (
@@ -4524,8 +4513,7 @@ class ReasoningRetriever:
                 detail={"reason": "enumeration_kind",
                         "collection": collection,
                         **({"requested_collection": rejected[:120]}
-                           if rejected else {}),
-                        **({"phase": phase} if phase else {})}))
+                           if rejected else {})}))
         elif source_matches is not None and (
             source_truncated or source_matches != 1
         ):
@@ -4550,15 +4538,13 @@ class ReasoningRetriever:
                         "matches": source_matches,
                         "truncated": source_truncated,
                         **({"error": resolve_error}
-                           if resolve_error else {}),
-                        **({"phase": phase} if phase else {})}))
+                           if resolve_error else {})}))
         elif chain_state is not None and chain_state.state == "complete":
             record(TraceStep(
                 step_type="skip",
                 summary=f"跳过枚举{label}(本轮已全部列出)",
                 detail={"reason": "already_enumerated",
-                        "collection": collection, "kind": kind,
-                        **({"phase": phase} if phase else {})}))
+                        "collection": collection, "kind": kind}))
         elif chain_state is not None and chain_state.state == "conflict":
             # 冲突是终态。重开一条链会把已经报出去的条目再列一遍,而前后
             # 两段取自不同时刻的资料,拼起来既不完整也无法向用户解释。
@@ -4566,8 +4552,7 @@ class ReasoningRetriever:
                 step_type="skip",
                 summary=f"跳过枚举{label}(资料有变动,无法继续)",
                 detail={"reason": "enumeration_conflict",
-                        "collection": collection, "kind": kind,
-                        **({"phase": phase} if phase else {})}))
+                        "collection": collection, "kind": kind}))
         elif rows_left < 1 or pages_left < 1 or payload_left < 1:
             # 预算耗尽必须跳过而不是请求 0 行:EnumerationBudget 对非正
             # 上限直接 ValueError,而一个「返回 0 条的部分结果」与真的截断
@@ -4580,8 +4565,7 @@ class ReasoningRetriever:
                         "collection": collection, "kind": kind,
                         "rows_left": rows_left,
                         "pages_left": pages_left,
-                        "payload_left": payload_left,
-                        **({"phase": phase} if phase else {})}))
+                        "payload_left": payload_left}))
         else:
             listed = None
             try:
@@ -4626,8 +4610,7 @@ class ReasoningRetriever:
                     summary=f"跳过枚举{label}(请求的范围不可用)",
                     detail={"reason": "enumeration_rejected",
                             "collection": collection, "kind": kind,
-                            "error": str(exc)[:120],
-                            **({"phase": phase} if phase else {})}))
+                            "error": str(exc)[:120]}))
             except Exception as exc:  # noqa: BLE001 — 同上,清单不是必需品
                 if self.fail_closed:
                     raise
@@ -4636,8 +4619,7 @@ class ReasoningRetriever:
                     summary=f"跳过枚举{label}(清单暂时取不到)",
                     detail={"reason": "enumeration_unavailable",
                             "collection": collection, "kind": kind,
-                            "error": str(exc)[:120],
-                            **({"phase": phase} if phase else {})}))
+                            "error": str(exc)[:120]}))
             if listed is not None:
                 coverage = listed.coverage
                 state.enum_rows_used += coverage.returned
@@ -4654,7 +4636,7 @@ class ReasoningRetriever:
                         collection=collection, kind=kind,
                         source_id=source_id, local_only=local_only,
                         items=list(listed.items), coverage=coverage)
-                    chain_state = _EnumChain(outcome, local_only=local_only)
+                    chain_state = _EnumChain(outcome)
                     enum_chains[key] = chain_state
                     enumerations.append(outcome)
                 else:
@@ -4673,7 +4655,7 @@ class ReasoningRetriever:
                 record(TraceStep(
                     step_type="enumerate",
                     summary=_enumeration_step_summary(
-                        label, coverage, source_id),
+                        label, coverage, source_id, local_only=local_only),
                     # 字段名刻意与 Knowhow 那条 enumerate 步不同:那边数的
                     # 是表的「行」(scanned_rows/known_total_rows),这里数的
                     # 是集合的「条目」,而且分母可能未知(total=None)。复用
@@ -4690,24 +4672,18 @@ class ReasoningRetriever:
                         "complete": coverage.complete,
                         "has_more": coverage.has_more,
                         "truncated_reason": coverage.truncated_reason,
-                        **({"phase": phase} if phase else {}),
                         **({"local_only": True} if local_only else {}),
                     }))
 
     def run(self, notebook_id, question, history="", on_step=None, top_n=None,
             max_steps=None, intent_queries=None,
             limits: Optional[AskRetrievalLimits] = None,
-            intent_detail=None, original_question=""):
+            intent_detail=None):
         """一次逐步推理检索:首轮 → reflect 循环 → 收尾。
 
         首轮已整体搬进 `_run_first_round`(阶段为 `_first_round_*`,run 级状态
         走 `_ReasoningRunState`);reflect 循环本体、它的三个嵌套 def 与收尾的
         证据预算/配额重排/采用回写仍在本函数里,是登记在案的下一件结构工作。
-
-        ``original_question`` = 用户原样输入的问句(不含已确认问题契约那段生成
-        文本)。可选、默认空串 → 回退到 `question`,所以既有调用方(报告管线、
-        knowhow 补全与全部窄测试)的调用形状一个字都不用改。唯一消费者是首轮的
-        目录问法播种,见 `_first_round_catalog_seed`。
         """
         raise_if_cancelled(self.cancel_event)
         self._per_query_scored.clear()
@@ -4715,7 +4691,6 @@ class ReasoningRetriever:
             notebook_id, question, history, on_step,
             max_steps=max_steps, intent_queries=intent_queries,
             limits=limits, intent_detail=intent_detail,
-            original_question=original_question,
         )
         self._run_first_round(state)
 
@@ -4743,9 +4718,9 @@ class ReasoningRetriever:
         neighbor_truncated = state.neighbor_truncated
         neighbor_expand_limit = state.neighbor_expand_limit
         enum_limits = state.enum_limits
-        # 三个枚举预算池刻意**不**解包成局部名:执行体已经搬进 `_run_enumeration`
-        # (与首轮目录播种共用),扣减发生在 `state` 上,这里再拷一份标量就会读到
-        # 播种之前的旧数。下面四处消费一律直读 `state.enum_rows_used`。
+        # 三个枚举预算池刻意**不**解包成局部名:执行体已经搬进 `_run_enumeration`,
+        # 扣减发生在 `state` 上,这里再拷一份标量就会读到扣减之前的旧数。
+        # 下面四处消费一律直读 `state.enum_rows_used`。
         enum_chains = state.enum_chains
         enumerations = state.enumerations
         collection_map_text = state.collection_map_text
@@ -5510,8 +5485,9 @@ class ReasoningRetriever:
             elif decision.next_action in (
                 ENUMERATE_ELEMENTS_ACTION, ENUMERATE_KG_OBJECTS_ACTION
             ):
-                # 执行体与首轮目录播种共用(见 `_run_enumeration`):两处各写
-                # 一份就等于给「同一个动作两种语义」留一条只能靠人复核的缝。
+                # 两个动作走同一个执行体(见 `_run_enumeration`):预算池、续跑
+                # 账目与 trace 形状是一整套合同,两处各写一份就等于给「同一个动作
+                # 两种语义」留一条只能靠人复核的缝。
                 self._run_enumeration(state, decision)
             elif decision.next_action == OUTLINE_ACTION:
                 # 与 sufficient 短路之前那次应用共用同一个函数(见 apply_outline_

@@ -600,10 +600,27 @@ def reflect_schema_hint(
             '"object_type":"' + "|".join(object_types) + '",'
             if kg_actions else ""
         )
+        # ``scope`` sits beside ``collection`` because it is that collection's
+        # only parameter: the reference-library scope of a document roster is
+        # the model's call, not something the server parses out of the question
+        # for it.
+        #
+        # GENERAL DISCIPLINE, not a local taste: a tool parameter is spelled as
+        # a SELF-DESCRIBING STRING ENUM, never as a boolean.  The validation
+        # layer treats the two differently and only one of them is survivable.
+        # ``model_json._validate_against_example`` rejects a non-bool against a
+        # bool example outright (``invalid_boolean``), so a model answering
+        # ``"true"`` or ``"yes"`` — which they do — loses the WHOLE reflect turn
+        # to the fail-open fallback; that is the same root cause F1 fixed. A
+        # string example carries F1's tolerance rule instead: empty is always
+        # accepted, so a model that does not understand the knob can leave it
+        # alone and still have its action land.  The enum values then say what
+        # they do (``all`` / ``current_notebook``), where ``true`` would have
+        # left the model guessing which side of the switch it is on.
         enumerate_branch = (
             '"enumerate":{"kind":"' + "|".join(element_kinds) + '",'
             + object_type_field +
-            '"collection":"",'
+            '"collection":"","scope":"all|current_notebook",'
             '"source_id":"","source_title":""},'
         )
     if consult_memory:
@@ -818,6 +835,20 @@ def reflect_prompt(
         "that document's TITLE from the list. Relevance search cannot "
         "substitute: it returns passages from whichever documents matched, "
         "never the roster.\n"
+        # The roster's scope is the MODEL's decision, made here, in the same
+        # call that asks for the roster — the server never classifies the
+        # question to guess it. The default is the whole retrieval scope, which
+        # is what the [Collections in scope] ``sources`` count describes, so the
+        # number the model was shown and the number it gets back agree when it
+        # leaves the knob alone. Spelled as a string enum, never a boolean —
+        # see ``reflect_schema_hint``'s ``scope`` comment for why.
+        "By default the roster lists EVERY document in retrieval scope (this "
+        "notebook plus the checked reference libraries) — the same count the "
+        "[Collections in scope] line reports as sources. Set enumerate.scope "
+        "to \"current_notebook\" ONLY when the question asks specifically about "
+        "the current notebook ('当前notebook的文章', '本库', 'the documents in "
+        "this notebook'); that narrows the roster to the parenthesised "
+        "'current notebook' count on the same line. Leave it empty otherwise.\n"
         "Use the [Collections in scope] counts to decide BEFORE acting: a "
         "collection whose count fits this run's listing allowance can be "
         "listed in full, but when the count is far larger than that allowance, "
@@ -826,7 +857,8 @@ def reflect_prompt(
         "request (one source, one section, one topic). Requesting the same "
         "collection again CONTINUES from where the previous call stopped; it "
         "never restarts, and a collection already reported complete must not "
-        "be requested again.\n"
+        "be requested again — except a roster already listed at one "
+        "enumerate.scope, which may be listed once at the other.\n"
         if enumeration_tools else ""
     )
     # The outline scratchpad (design doc §3.1).  Three things have to be said

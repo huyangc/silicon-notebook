@@ -1,5 +1,16 @@
 # 「当前notebook的文章说明了什么」怪回答的根因整改：枚举校验、目录问法、首轮空手提示（设计规格 v1，已拍板）
 
+> **状态更新（本 PR，用户裁决）**：F2 的 **reasoning 目录播种半已撤回**。用户裁决「agentic 模式里目录该由 LLM 通过工具自己决定是否
+> 调用，不该用正则路由替模型做决定」，因此 `_first_round_catalog_seed`、`ReasoningRunInput.original_question` 与随播种引入的
+> `_run_enumeration(phase=...)` 全部删除，来源清单的范围改为**工具参数** `enumerate.scope`（由模型填，**字符串枚举** `all|current_notebook`，
+> 默认 `all` = 检索范围内全部文档，与集合地图 `sources: N` 的联邦口径一致；`current_notebook` 才收窄成只列本库）。参数刻意不是布尔：
+> `model_json._validate_against_example` 对布尔示例是硬类型校验，模型吐 `"true"` 会整轮被打成兜底（与 F1 修的根因同类），字符串枚举
+> 才享受 F1 的空串宽容规则；非空非法字符串仍按 `invalid_enum` 拒、非字符串按 `invalid_type` 拒，解析器则对任何取不到的值落回默认且不废动作。
+> 范围进**续跑键**（`(collection, kind, source_id, local_only)`），所以换范围是新开一条链而不是 `already_enumerated`；范围在集合地图
+> （`sources: N (current notebook: M)`）、`enumerate` 步摘要与回喂账目（后缀「（仅当前笔记本）」）三处可见。F2 的另一半
+> （`document_overview.py` 动词表扩展）保留，但它此后**只服务 chunk 模式**的文档介绍通道，随归一第四步一并退役。
+> F1、F3 与 `_run_enumeration` 抽取全部保留。
+>
 > **状态**：已拍板（2026-09-07，用户：「按这个顺序修，重点考虑修法的泛化性」）。生产复现：本机部署（PR #690 版本）
 > 笔记本「递归深度语言模型」，1 篇英文论文、无图、高级模式「深入分析」。整改项按根因权重排序；第 4 项（相关度地板对跨语言
 > 查询的行为）刻意留到归一第三步的对照集里量化再动。
@@ -50,12 +61,17 @@
      按串判会把它当「没有被拒的动作」放过去）；**模型未配置**同样打标（`model_unconfigured`），不再返回裸 `answer_decision`。
      回归测试必须**经真实 `RuntimeModelProvider`** 调 `reflect()`；直接 `raise MalformedModelResponse() from exc` 的替身测的是生产上不存在的形状。
 
-### F2 目录问法：一份分类器、两侧共用，reasoning 加确定性播种
+### F2 目录问法：分类器动词表扩展（保留）＋ reasoning 确定性播种（**已撤回**）
 
 - `document_overview.py` 中文动词表扩为 介绍|讲|讲述|讲的|包含|说明|阐述|描述|讨论|探讨|研究|谈|写，并补「讲了些什么/说了什么/主要说什么」类尾巴；
   英文补 `what (?:does|do) {subject} (?:say|explain|present|show|talk about)`、`what (?:is|are) {subject} saying`。用既有 fullmatch + 尾巴约束保住
   「话题类问题保持 ranked」（`文章说明了 CMRR 如何计算`、`这篇文章说明的公式` 不得命中）；测试正反各钉。
-- **reasoning 确定性目录播种**（沿用「不赌模型」的 seed 哲学）：首轮在集合地图之后，若 `overview_intent(原问题).kind == "catalog"` 且枚举接线开、
+> **以下播种小节整段已撤回（见文首状态更新）。** 保留在此仅作决策记录：agentic 模式里目录是模型经 `enumerate.collection="sources"`
+> 自选的动作，范围是同一次调用的参数 `enumerate.scope`（字符串枚举，默认 `all` = 全参与集）。「预算先手」「播种算首轮
+> 进展」「播种排在 plan 之前」「`phase` 稀疏键」四条随播种一并作废；`no_progress` 计入 `state.enum_rows_used` 的**口径同源**保留
+> （首轮此后恒为 0，但两处对「有没有进展」必须永远给同一个答案）。
+
+- ~~**reasoning 确定性目录播种**~~（沿用「不赌模型」的 seed 哲学）：首轮在集合地图之后，若 `overview_intent(原问题).kind == "catalog"` 且枚举接线开、
   作用域未受限（受限 scope 本就禁用整集合枚举），则用与 reflect 目录动作**同一个执行路径**列一次文档目录（同一预算池、同一续跑账目：模型之后再选
   目录动作按「已枚举过」跳过），记一条 `enumerate` 步（`detail.phase="seed"`），目录进入候选摘要与结果卡。原问题从 `ReasoningRunInput` 新字段
   `original_question`（默认空串 → 回退 `question`）传入；`run()` 兼容入口加同名可选 kwarg。chunk 模式的 `_try_document_overview` 与它共用 `overview_intent`。
@@ -94,6 +110,8 @@
 
 1. 生产复现题在修后的引擎上：第一次 reflect 的目录决定被接受，轨迹出现 `enumerate`（sources）步，答案基于来源摘要（用真实校验层 + 假模型回放）。
 2. 通用守卫：所有 schema 提示置空枚举通过；非法非空仍拒。
-3. 分类器正反用例；reasoning 目录播种在 catalog 问法下发生、在话题问法下不发生、受限 scope 不发生、knowhow 补全不发生。
+3. 分类器正反用例（chunk 侧）；~~reasoning 目录播种在 catalog 问法下发生、在话题问法下不发生、受限 scope 不发生、knowhow 补全不发生~~
+   → 撤回后改为：catalog 问法**不**触发任何枚举（模型不选就不列），目录动作的范围按 `scope` 参数生效
+   （缺省/留空/解析不出 → `all`，含挂载参考库；`current_notebook` → 只列本库；换范围 = 新开一条链，同范围重复 = `already_enumerated`）。
 4. 首轮空手提示切换用例。
 5. `bash scripts/check.sh` 全绿。

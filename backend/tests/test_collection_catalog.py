@@ -676,7 +676,7 @@ def test_created_at_key_does_not_change_the_fingerprint():
 
 # ------------------------------------------------------------------ 地图文本
 
-def _map(elements, kg, knowhow, sources=0):
+def _map(elements, kg, knowhow, sources=0, active_sources=None):
     return CollectionMap(
         notebook_ids=("nb",),
         elements=tuple(
@@ -686,8 +686,8 @@ def _map(elements, kg, knowhow, sources=0):
         kg_objects=tuple(kg),
         knowhow_tables=knowhow,
         sources=sources,
-        # 渲染用例都是单笔记本作用域,当前笔记本的份额就是全部。
-        active_sources=sources,
+        # 默认是单笔记本作用域,当前笔记本的份额就是全部;挂了参考库的场景显式给。
+        active_sources=sources if active_sources is None else active_sources,
     )
 
 
@@ -704,9 +704,24 @@ def test_render_matches_the_documented_shape():
         "[Collections in scope] elements: formula 12 (3 sources), "
         "table 5 (2 sources), image 0, code_block 7 | "
         "KG objects: concept 1234, claim 567, formula 89, procedure 45 | "
-        "knowhow tables: 2 | sources: 7"
+        "knowhow tables: 2 | sources: 7 (current notebook: 7)"
     )
     assert len(text) <= COLLECTION_MAP_MAX_CHARS
+
+
+def test_render_separates_the_federated_total_from_the_current_notebook():
+    """挂了参考库时,`sources` 必须给出**两个**数。
+
+    来源清单是唯一带范围参数的集合(`enumerate.scope`),模型要在两个范围之间选。
+    只报联邦总数的话,它没法知道 `current_notebook` 会拿回多少——而猜错不是免费的
+    (一次枚举要花掉 run 级共享行预算)。
+    """
+    text = render_collection_map(_map(
+        [(kind, 0, 0) for kind in ENUMERABLE_ELEMENT_KINDS],
+        [("concept", 0), ("claim", 0), ("formula", 0), ("procedure", 0)],
+        0, 7, active_sources=2,
+    ))
+    assert text.endswith("sources: 7 (current notebook: 2)")
 
 
 def test_render_zero_shape_is_stable():
@@ -719,7 +734,7 @@ def test_render_zero_shape_is_stable():
     assert text == (
         "[Collections in scope] elements: formula 0, table 0, image 0, code_block 0 | "
         "KG objects: concept 0, claim 0, formula 0, procedure 0 | "
-        "knowhow tables: 0 | sources: 0"
+        "knowhow tables: 0 | sources: 0 (current notebook: 0)"
     )
 
 

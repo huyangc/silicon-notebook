@@ -156,12 +156,6 @@ class ReasoningRunInput:
     intent_queries: tuple[str, ...]
     limits: AskRetrievalLimits | None
     intent: ReasoningIntentProjection | None
-    # The asker's own wording, before the confirmed research contract is folded
-    # into ``question``.  Deterministic question-shape classifiers (the document
-    # catalog lane) must read the human sentence, not the generated composite;
-    # empty means the caller does not distinguish the two and the retriever
-    # falls back to ``question``.
-    original_question: str = ""
 
 
 @dataclass(frozen=True, slots=True)
