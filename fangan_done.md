@@ -1,6 +1,6 @@
 # silicon-notebook 方案已完成情况
 
-更新日期：2026-09-07
+更新日期：2026-09-08
 
 对照依据：`silicon_notebook_fangan.md`（产品方案）。
 
@@ -473,3 +473,28 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 - **来源页签检索/分页性能专项（2026-09-01）**：一次生产自查（4.9 万 source 库）串起来源页签浅页/翻页/搜索三条独立热路径，7 个提交分三块交付。**水合**：来源页签的 `kg_extracted` 判定原以 `knowledge_objects` 行为驱动集，一页 50 source 命中 33.9 万 KO 行时对每行跑 3 次 `extraction_runs` 子查询，单条查询 3650ms，是浅页 API 3.3s 墙钟的大头；改为以页内 source id 为驱动集（VALUES CTE + KO EXISTS 半连接 + 每 source 一组 latest-run 探针），微基准（5 source×2000 KO）85.2ms→0.13ms。PostgreSQL/SQLite 双端、批量与单行两路径同构改写，判定矩阵先在旧实现跑通再切换实现钉住语义不变；两轮评审收口补齐形状守卫（spy 断言真实发出的 SQL 走 VALUES CTE 驱动而非回退到 `knowledge_objects`，PG 侧另断言 EXPLAIN 走 Values Scan + Nested Loop Semi Join，SQLite 断言 EXPLAIN QUERY PLAN 走 covering index）与「同刻两条 run 由插入序定胜负」的 tie-break 用例，其中一条删除变异只有在自持连接强制 Seq Scan+Sort 后才能被钉住（默认计划下反向索引扫描恰好隐式给出同序）。**检索**：`list_sources_page` 带 `q` 的过滤原是跨表 `OR EXISTS`，planner 只能选 hashed subplan——生产实测带 q 的 COUNT 单次 363ms，`source_authors` 21 万行、`source_paper_meta` 3.9 万行整表扫，短词与长词几乎同耗时；改写为 id 半连接三腿 UNION（title/file_name 一腿含 BitmapOr、authors 一腿、paper_meta 一腿），双端同构，配 0048 批 4 三条 notebook 前置复合 GIN trgm 索引（PostgreSQL-only，同 0042 先例，SQLite 侧只落改写不加索引）。实测长词每次用户操作 161.5ms→0.30ms（538×），短词受 trgm 三连字符下限限制单项最多 +40%，但按用户操作净计仍 3.4–4.1× 更快，已登记于迁移头注释；语义口径统一把搜索腿并入 `report_source_rows` 等报表腿的口径（按子表自身 notebook_id 收窄），水合腿 `paper_meta_for_sources` 未跟进改写，是登记在案的残留分歧。**前端**：来源翻页/搜索此前零 in-flight 反馈——`Pagination` 的 busy 属性没接，连点会叠加多个完整请求，requestId 只丢弃过期响应而服务端照算；新增 `sourcesPageLoading` 状态与请求级 `AbortController`，起手 abort 前序请求。两轮评审在同一处独立复现回归：busy 释放判据把「被后继请求顶替」与「guard/owner 否决」混成一个判据，effect cleanup 置 cancelled 后 guard 恒假，导致转圈不停 + 翻页控件永久禁用；修复为按「本请求是否仍是窗口持有者」释放，并补齐 unmount 时 abort 在飞请求、`TypeError: terminated`（undici 在 body 流读取期 abort 的异常形状，与 `AbortError`/`DOMException` 不同）判别、四个 transition 站点的守卫覆盖（第五个经结构性证明不可达，以注释代替用例）；全部经变异验证（删对应逻辑各自使守卫报红后还原）。
 
 - 已完成（2026-08-24，§6.4 / §9.1）：KG 起始探活复用统一短输出预算，不再以探测专用小上限截断推理型模型的可见 JSON；探活和正式抽取复用共享流式 JSON 传输，持续收到 chunk 的长输出不再受请求总墙钟误伤，任务熔断能合作式停止兄弟流；流式传输请求并采集 provider 最终 usage trailer，恢复按用户 prompt/completion/total token 精确统计，明确不支持该可选参数的 provider 只探测一次后回退且不本地猜数；HTTP 成功但空白、截断或无效 JSON 的响应落成 `model_response_invalid`，界面明确显示“模型响应不可用”并保留继续分析入口，不再泛化为人工“分析已中断”。
+
+## 32. 检索 Agent reflect 优化 T1–T4（2026-09-07/08）
+
+设计真源 `docs/superpowers/specs/2026-09-07-retrieval-reflect-final-design_zh.md`（§1 七条交付）。分支基线 `00bbeff51`，18 个提交 `69d8fb932..09d8f65b7`（T1 一条、T2 五条、T3 四条、T4 六条、T5 对账与文档两条）。**总闸 `REASONING_REFLECT_V2_ENABLED` 默认关闭**，关闭态是接入前的逐字节等价：legacy 的 prompt、schema、白名单、模型调用次数与轨迹键集合完全不变，不构造能力投影、不构造观察账与方面账、不多付任何 I/O 或转换。Knowhow 智能补全按设计显式留在 legacy 协议上，与这把闸无关。
+
+- **§1.2 被禁动作不再终止整个循环（T1，`9af6a035e`→`69d8fb932`）**：被调用方策略关掉的 `expand_community` 原先让整个 reflect 循环收尾；改为记一条零 I/O 的 skip，走链尾统一的 no_progress / stale 记账，后续合法检索照常可达，重复提交非法动作仍被既有熔断兜住。这是本期唯一在**关闭态**也生效的行为修复（legacy 路径上的真 bug），其余六条都在 v2 闸后。
+- **§1.3 每轮统一的可执行动作视图 + 按所选动作校验参数 + 统一观察账（T2、T3-A）**：新增 `services/reasoning_actions.py`——纯数据的 13 个动作 id / 参数形状 / 是否产生证据 / 预算类别 / 重复身份 / 依赖条件，加一次纯内存的 `build_reflect_capabilities`。模型看到的动作说明、schema 的 `next_action` 枚举与解析白名单三处共用**同一个不可变对象**，128 种能力组合逐格断言 prompt 清单 ≡ 解析白名单。响应改用单一 `arguments` 对象取代逐动作分支字段，按所选动作逐字段类型校验。**schema 的 `next_action` 枚举刻意不随可用性收窄**：通用形状闸把含 `|` 的示例串当闭集，收窄会让「可识别但本轮不可用」的选择在**传输层**被判 `invalid_enum`，重试耗尽后终止的是整个循环——比 legacy 还差，正是 T1 刚修掉的形状。可用性因此只由 prompt 与解析白名单承担，它们能说清原因并把这一轮变成可继续的观察。新增 `services/reasoning_observation.py`：观察由 `_TraceRecorder` 上的账本在**每次轨迹记账时**从那一步的结构化 detail 折出，所以首轮播种与循环动作共用同一次转换，`run` 的十几条动作分支一行未改；一份 `TRACE_OBSERVATION_CONTRACT` 把「每个 step_type 读哪些键」写成可断言的表，AST 守卫扫 `reasoning_retrieval` 里全部 `TraceStep(step_type=...)` 与其 detail 字面量，任何漂移当场报红。**观察是投影不是第二份权威**：判重仍属 `attempted`/`visited`/`exact_terms_done`/`follow_chain_done`/`enum_chains` 的 cursor 覆盖，观察账一个都不写。
+- **§1.4 有界证据卡与指令/数据分层（T3-B）**：新增 `services/reasoning_context.py`——证据卡只用候选池内材料（零 LLM、零查库、零补 hydrate），user 段装配成「服务器状态 → 证据卡 → 动作观察账」三个各自带标题的块，system 段固定不变（任务、不可信材料框定、范围规则、动作契约、停机规则）。四项预算 `REASONING_REFLECT_EVIDENCE_CHARS_BY_EFFORT` / `_EXCERPT_CHARS` / `_STATE_CHARS` / `_RECENT_OBSERVATIONS` 只在 v2 下被消费。**只回喂近期动作意图，不回放完整思考过程**；「曾真实展示」的键只登记真的渲染出来的证据卡，被预算挤出窗口的候选一个都不登记——大纲绑定的合法集因此是事实而不是意图。分块渲染逐条做了伪造防御：文档字段折成一行并归一分隔符（`；;|｜`），带换行的 name / section_path / reason 在结构上再也开不出第二张卡、第二个块头或第二个「余额=」字段。
+- **§1.5 轻量必答方面记录（T4-A）**：新增 `services/reasoning_aspects.py` + `domain/retrieval_termination.py`。方面来自**用户冻结的契约**，模型在同一轮 JSON 里回传 `assessment`（`supported` / `unresolved`），唯一写入口 `AspectLedger.apply` 是全量替换（省略即保持、列出即替换，这是模型撤回旧判断的唯一方式），非法证据键剔除后不得保持 supported。三个口径分开记：`model_supported`（模型判断有支撑）/ `synthesis_admitted`（进入合成）/ `answer_cited`（最终引用），加上执行层本来就有的「查询执行」，正是设计稿要区分的四件事。**不可增删改方面**：那份清单来自用户。越界载荷（方面 id 不合法、同一方面重复、每方面超 8 个证据键或 gap 超 240 字符）整份折成零 I/O 的 invalid 观察，绝不用来裁剪用户的主题、问题或约束。
+- **§1.6 明确结束原因贯通（T4-B）**：`RetrievalTermination` 是七个 reason 的闭集，贯通链 `ReasoningResult.termination → ReasoningEvidenceSnapshot.termination → ResponseDraftInput.termination`（每一跳 `getattr` 兜底、缺省 None）。Ask 在 `_draft_reasoning_response` 里读它两次——合成**之前**渲染服务端事实块（登记在 `prompt_layers.L2_BLOCKS`），合成**之后**用最终 `id_map` 与解析回来的锚点做方面送达复核；Report 侧 `_draft_section` 用同一份纯函数、同一套口径。前端 `reasoning-trace.ts` 展示结束事实，`answer-panel.tsx` 同步。公开分享面不变（两条匿名投影本来就是白名单，不带推理面）。
+- **§1.7 默认关闭（T2 起，全程保持）**：`REASONING_REFLECT_V2_ENABLED` 默认 `false`，不是用户可见档位、也不由档位派生；四项 v2 预算在关闭态没有任何读取方（仍在启动期校验）。生产开闸是**独立决定**，待 §1.1 的离线统计与真实模型 A/B 之后。
+- **§1.1 离线轨迹统计与 A/B 通道（T0）：本期未做**，用户决定另行规划。已登记在 `fangan_todo.md`「reflect v2 开闸前待办」(a)。
+
+**用户裁决与取舍记录：**
+
+- **冻结的 constraints 不构成方面**：约束是对答案的限定，不是「必须被证据覆盖的一块内容」；把它折成方面会让一个「只看 2024 年之后」的限定条件变成一个永远拿不到证据的未解决项，从而无限期阻止收尾。
+- **`retrieval_degraded` 要两个前件**：「本轮没有 model_end 标记」且「时间线上最后一次真实执行是 failed」。只看「有没有失败过」会把一次中途失败、后来恢复并正常收尾的 run 也判成降级；没恢复的通道另走纯披露的 `unrecovered_channels`，不与结束原因混。
+- **`assessment` 在 schema 里是开放对象**：闭合写法会把拒绝权交给**传输层**——那里的拒绝是不可生还的（烧完重试后整个 run 掉进 fail-open 的 answer），而 `AspectLedger.apply` 的拒绝是可生还的（折成零 I/O 观察，循环继续）。T4-A 最初的闭合写法正是这个陷阱：`"assessment": null`（JSON 序列化器给「没有内容」的常见产物）会 `invalid_type`，`supported` 项多一个 `gap` 键会在修复路径上 `unknown_key`。合法状态值经 system prompt 传达，与解析白名单读同一个常量。
+- **本期明确不做**：多动作并发、`read_evidence`、原文段落联邦化、原生 tool-use / provider 改造、独立 critic、自动改写 prompt 的 self-evo、低档位完整大纲、固定直答档位、先合成再检索。重新进入条件见设计稿 §11 与 `fangan_todo.md` 的 (f)。
+
+**验证口径：**
+
+- **标准门**：`scripts/check.sh` 全绿（架构守卫含热函数零松弛棘轮：`run` 1359、`_run_enumeration` 267、`_new_run_state` 201、`_run_reasoning_stage` 530、`_draft_reasoning_response` 697、`_draft_section` 333，均为实测值，新增代码全部下沉为纯 helper，**没有提高任何一条上限**）；前端 `node --test tests/unit/reasoning-trace.test.mjs` 与 `tsc --noEmit`。矩阵覆盖 legacy / 无图 / 有图 / 受限来源范围 / Report / Knowhow。
+- **变异验证**：新增守卫按「删掉这一行则这条红」逐条注明并实跑过（能力三处同源、观察账 detail 键漂移、证据卡伪造边界、分隔符归一、方面越界的可生还拒绝、终态时间线判据、请求身份含范围）。
+- **真实模型 A/B：未做**。仓库没有问答质量评测台，本期不宣称检索质量提升，只宣称上述结构性与可观测性交付。开闸前的待办见 `fangan_todo.md`。
