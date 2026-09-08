@@ -441,6 +441,24 @@ def test_admin_url_and_database_url_must_share_a_server_before_drop():
     assert "6543" in reason or "5432" in reason
 
 
+def test_admin_targets_same_server_compares_live_identity_not_forwarded_port():
+    """带真连接的那一半比的是两条连接各自落到的**服务器身份**,不是「服务端监听
+    端口 == URL 端口」(codex #700 R8 P2):Docker 端口映射 / SSH 隧道
+    `localhost:15432 → server:5432` 下 `inet_server_port()` 回 5432,老判据会把
+    合法的 seed/teardown 全拒掉。用替身注入身份:同身份放行,异身份拒绝。"""
+    admin = "postgresql://127.0.0.1:15432/postgres"
+    db = "postgresql://127.0.0.1:15432/silicon_notebook_t0_test"
+
+    same = {admin: ("system_identifier", 7), db: ("system_identifier", 7)}
+    ok, reason = rig._admin_targets_same_server(admin, db, identity=same.get)
+    assert ok is True and reason == ""
+
+    other = {admin: ("system_identifier", 7), db: ("system_identifier", 8)}
+    ok, reason = rig._admin_targets_same_server(admin, db, identity=other.get)
+    assert ok is False
+    assert "不是同一台服务器" in reason
+
+
 # --- 日志脱敏(codex #700 R1 P2) ---------------------------------------------
 
 
@@ -1379,6 +1397,54 @@ def test_search_loop_concurrent_reaches_the_requested_peak_concurrency(
         for line in (tmp_path / "search-legacy.jsonl").read_text().splitlines()
     ]
     assert len(rows) == len(plan)
+
+
+def test_search_loop_concurrent_writes_a_failed_row_and_reports_failures(
+    tmp_path, monkeypatch,
+):
+    """worker 抛异常的 run 不能只留一行日志就从 JSONL 里消失(codex #700 R8
+    P2):分析脚本只读 JSONL,失败会从状态分布里蒸发、样本数偏向跑成的一侧。
+    要求:失败 run 落成 `status=failed` 的闭集行(题号/格/策略/档位齐全、
+    `scope_narrowed=None`),其余 run 照常;`_search_loop_concurrent` 回失败数,
+    日志里有 FAILED 与异常类名、没有问题原文。"""
+    plan = [
+        {"question_key": f"Q{i:02d}", "corpus_cell": "A_nokg", "policy": "legacy",
+         "effort": "standard", "question": "秘密原文不得进日志"}
+        for i in range(4)
+    ]
+    facts = {"A_nokg": {"notebook": "nb-a", "sources": 1, "kg_in_scope": True}}
+    settings_by_policy = {"legacy": object(), "v2": object()}
+
+    def fake_run_search_once(repo, settings, *, notebook, item, prepared,
+                             on_step, cancel_event, actor_id,
+                             scope_source_ids=None):
+        if item["question_key"] == "Q02":
+            raise ValueError("provider exploded")
+        return types.SimpleNamespace(termination=None)
+
+    monkeypatch.setattr(rig, "run_search_once", fake_run_search_once)
+    runner = rig.Runner(dry_run=False, out_dir=tmp_path)
+    failed = rig._search_loop_concurrent(
+        _concurrent_search_args(), runner, plan, facts, None,
+        settings_by_policy, actor_id="t0-owner",
+        profile=types.SimpleNamespace(id="t0-owner"), concurrency=2,
+    )
+
+    assert failed == 1
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "search-legacy.jsonl").read_text().splitlines()
+    ]
+    assert len(rows) == len(plan)
+    by_key = {row["question_key"]: row for row in rows}
+    assert by_key["Q02"]["status"] == "failed"
+    assert by_key["Q02"]["scope_narrowed"] is None
+    assert by_key["Q02"]["effort"] == "standard"
+    assert by_key["Q02"]["corpus_cell"] == "A_nokg"
+    assert all(by_key[k]["status"] != "failed" for k in ("Q00", "Q01", "Q03"))
+    log_text = (tmp_path / "search-runs.log").read_text("utf-8")
+    assert "Q02 A_nokg legacy standard FAILED ValueError" in log_text
+    assert "秘密原文" not in log_text
 
 
 def test_search_loop_concurrent_cancels_remaining_runs_on_policy_mismatch(
