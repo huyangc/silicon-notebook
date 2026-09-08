@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections import Counter
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -139,6 +140,19 @@ TERMINATION_SKIP_REASON = "retrieval_termination"
 #: 无图披露步的原因码。`kg_gap_unavailable`(缺口回想通道不可用)刻意不在其中:
 #: 那是一个动作通道的可用性,不是「这个库有没有图」。
 KG_UNAVAILABLE_REASONS: frozenset[str] = frozenset({"kg_unavailable"})
+
+#: 图形状的检索步:出现过就是「这一轮确实动用了图」的正面证据。`retrieve`
+#: 不在其中——它同时服务图检索与原文检索,单看 step_type 分不清,只能按
+#: detail 里的产出键区分(见 `_is_kg_shaped_retrieve`)。
+KG_SHAPED_STEP_TYPES: frozenset[str] = frozenset({
+    "expand", "ppr", "follow_chain", "expand_community",
+})
+
+#: 无图原文半留下的印记。`_search_passages_if_graphless`
+#: (`reasoning_retrieval.py`)只在 `state.kg_in_scope` 为假时才把这个键写进
+#: 同一条 `retrieve` 步的 detail——它一在场,这一步的 `new` 就只可能是空手的
+#: 图查询,不能拿来当「图在场」的证据。
+_GRAPHLESS_RETRIEVE_MARK = "chunks_found"
 
 STALE_BREAKER_REASON = "stale_circuit_breaker"
 NO_EXECUTABLE_ACTION_REASON = "no_executable_action"
@@ -464,16 +478,48 @@ def _consumer(steps: Sequence[Mapping]) -> str:
     return "ask_single"
 
 
-def _kg_in_scope(steps: Sequence[Mapping], payload: Mapping) -> bool | None:
+def _is_kg_shaped_retrieve(step_type: str, detail: Mapping) -> bool:
+    """`retrieve` 步是不是「图有产出」的正面证据。
+
+    只有 `new`/`found`(补种 / `add_subquery` 的方向级检索,写侧只在实际有
+    命中时才写这两个键之一,且值只计 KG 候选)算数;首轮"初检索"步只写
+    `count`(图与原文混合抓取的粗计数,分不清就不算,§3);带
+    `_GRAPHLESS_RETRIEVE_MARK` 的步是无图原文半自己的印记——它一出现,这一步
+    的 `new` 就只可能是空手的图查询,不能倒过来当「图在场」证据。
+    """
+    if step_type != "retrieve" or _GRAPHLESS_RETRIEVE_MARK in detail:
+        return False
+    for key in ("new", "found"):
+        value = _int(detail.get(key))
+        if value is not None and value > 0:
+            return True
+    return False
+
+
+def _kg_in_scope(
+    steps: Sequence[Mapping], payload: Mapping, mode: str,
+) -> bool | None:
+    """图是否在这一轮的检索范围内(§3)。只认**正面证据**。
+
+    `AskResponse.kg_required` 默认 `False` 且总被序列化——早退 / chunk 轨迹
+    会因此被误判成「不在范围」以外的东西都读不出来,所以它**不再**单独把结果
+    判成 `True`;`kg_required=True` 仍是「这条库没图」的另一种写法,继续叠加
+    进 `False` 的判据。
+    """
     if any(
         step["step_type"] == "skip"
         and _reason(step["detail"]) in KG_UNAVAILABLE_REASONS
         for step in steps
     ):
         return False
-    required = payload.get("kg_required")
-    if isinstance(required, bool):
-        return not required
+    if payload.get("kg_required") is True:
+        return False
+    if mode in ("reasoning", "auto→reasoning") and any(
+        step["step_type"] in KG_SHAPED_STEP_TYPES
+        or _is_kg_shaped_retrieve(step["step_type"], step["detail"])
+        for step in steps
+    ):
+        return True
     return None
 
 
@@ -554,6 +600,7 @@ def project_run(
     tags = rig_tags or {}
     payload = _mapping(answer_payload) or {}
     normalized = normalize_steps(steps)
+    mode = _mode(job_row, payload, tags)
 
     v2_reason = _v2_termination(normalized)
     effort = closed_value(
@@ -576,9 +623,9 @@ def project_run(
         # rig 显式声明。声明值仍过闭集:`consumer=<自由文本>` 进不来。
         "consumer": _closed_exact(tags.get("consumer"), CONSUMERS)
         if tags.get("consumer") else _consumer(normalized),
-        "mode": _mode(job_row, payload, tags),
+        "mode": mode,
         "effort": effort,
-        "kg_in_scope": _kg_in_scope(normalized, payload),
+        "kg_in_scope": _kg_in_scope(normalized, payload, mode),
         "policy_version": "v2" if v2_reason is not None else "legacy",
         "has_intent_contract": bool(intent),
         "corpus_cell": _closed_exact(tags.get("corpus_cell"), CORPUS_CELLS),
@@ -619,6 +666,7 @@ def project_run(
     }
     row.update(counters)
     assert_closed(row)
+    assert_projection_values(row)
     return row
 
 
@@ -679,6 +727,7 @@ def project_report_section(
         "top_relevance": _float(data.get("top_relevance")),
     }
     assert_closed(row)
+    assert_projection_values(row)
     return row
 
 
@@ -694,3 +743,100 @@ def assert_closed(row: Mapping) -> None:
             "projection row carries keys outside RUN_PROJECTION_KEYS: "
             + ", ".join(sorted(extra))
         )
+
+
+#: 「短码」字符串的字符集与长度上限。`action_seq` / `corpus_cell` /
+#: `question_key` 这类编号都落在这个集合里;一句人写的话(空格、中文标点、
+#: 换行)进不来。长度上限只是再加一道保险——短码不该无限长。
+#: `→` 是唯一放行的非 ASCII 字符:`MODES` 的闭集成员 `auto→chunk` /
+#: `auto→reasoning`(§3)拿它当分隔符,是词表本身的一部分,不是自由文本。
+_SHORT_CODE_PATTERN = re.compile(r"^[A-Za-z0-9_:\-.+→]+$")
+_SHORT_CODE_MAX_LEN = 64
+
+
+def _is_short_code(value: object) -> bool:
+    if not isinstance(value, str) or not value:
+        return False
+    if len(value) > _SHORT_CODE_MAX_LEN:
+        return False
+    if any(ch.isspace() for ch in value):
+        return False
+    return _SHORT_CODE_PATTERN.match(value) is not None
+
+
+def _is_scalar_value(value: object) -> bool:
+    """标量:`bool`/`int`/`float`/`None`,或一个短码字符串。"""
+    if value is None or isinstance(value, (bool, int, float)):
+        return True
+    return _is_short_code(value)
+
+
+def _is_numeric_leaf(value: object) -> bool:
+    """字典的「值」半只到数值这一层——`bool`/`int`/`float`/`None`,不再放行
+    字符串(字符串值属于短码标量,走的是 `_is_scalar_value` 那条分支)。"""
+    return value is None or isinstance(value, (bool, int, float))
+
+
+def assert_projection_values(row: Mapping) -> None:
+    """投影行的**结构性**值校验。
+
+    `assert_closed` 只挡「多了一个闭集外的键」,挡不住「往一个允许的键里塞
+    一段自由文本值」——例如新写一处直接把 `scope: "看 Qwen-VL 和 DeepSeek"`
+    塞进某个允许的键。这里逐值校验**形状**,不看键名,所以自由文本不管挂在
+    闭集内哪个键下都会被拦住。
+
+    允许的值形状(闭集,不允许别的):
+
+    - 标量:`bool` / `int` / `float` / `None`,或一个短码字符串(≤ 64 字符、
+      不含空白、只由 ``[A-Za-z0-9_:\\-.+]`` 组成);
+    - 短码列表(`action_seq`):每一项都是短码字符串;
+    - 短码 → 数值字典(`actions_by_type` / `skip_reasons` / `durations_ms`
+      这类计数表):键是短码,值是 `bool`/`int`/`float`/`None`;
+    - 短码 → {短码 → 数值} 两层字典:`citation_contribution` 的形状。
+    """
+    for key, value in row.items():
+        _assert_projection_value(key, value)
+
+
+def _assert_projection_value(key: str, value: object) -> None:
+    if _is_scalar_value(value):
+        return
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            if not _is_short_code(item):
+                raise ValueError(
+                    f"projection value at {key!r} carries a non-short-code "
+                    f"list item: {item!r}"
+                )
+        return
+    if isinstance(value, Mapping):
+        for inner_key, inner_value in value.items():
+            if not _is_short_code(inner_key):
+                raise ValueError(
+                    f"projection value at {key!r} carries a non-short-code "
+                    f"dict key: {inner_key!r}"
+                )
+            if _is_numeric_leaf(inner_value):
+                continue
+            if isinstance(inner_value, Mapping):
+                for leaf_key, leaf_value in inner_value.items():
+                    if not _is_short_code(leaf_key):
+                        raise ValueError(
+                            f"projection value at {key!r}.{inner_key!r} "
+                            f"carries a non-short-code dict key: {leaf_key!r}"
+                        )
+                    if not _is_numeric_leaf(leaf_value):
+                        raise ValueError(
+                            f"projection value at {key!r}.{inner_key!r}."
+                            f"{leaf_key!r} is not a scalar number: "
+                            f"{leaf_value!r}"
+                        )
+                continue
+            raise ValueError(
+                f"projection value at {key!r}.{inner_key!r} is neither a "
+                f"number nor a nested short-code dict: {inner_value!r}"
+            )
+        return
+    raise ValueError(
+        f"projection value at {key!r} has an unsupported shape: {value!r}"
+    )

@@ -88,10 +88,71 @@ def test_dry_run_plan_covers_each_cell_effort_and_question(capsys):
 
 def test_dry_run_touches_nothing(tmp_path, capsys):
     out_dir = tmp_path / "t0"
-    for command in ("seed", "ask", "report", "export", "teardown"):
+    for command in ("seed", "ask", "report", "restart", "export", "teardown"):
         assert rig.main(["--dry-run", "--out-dir", str(out_dir), command]) == 0
     capsys.readouterr()
     assert not out_dir.exists()
+
+
+# --- restart 子命令 -----------------------------------------------------------
+
+
+def test_restart_dry_run_prints_the_stop_and_start_plan(tmp_path, capsys):
+    out_dir = tmp_path / "t0"
+    out_dir.mkdir()
+    (out_dir / "rig-state.json").write_text(json.dumps({
+        "policy": "legacy", "backend_pid": 4242, "port": 8011,
+        "database_url": "postgresql://127.0.0.1:5432/silicon_notebook_t0_test",
+        "storage_dir": ".local/storage-t0", "env_file": None,
+        "notebooks": {},
+    }), encoding="utf-8")
+    assert rig.main([
+        "--dry-run", "--out-dir", str(out_dir), "--policy", "v2", "restart",
+    ]) == 0
+    printed = capsys.readouterr().out
+    assert "[dry-run]" in printed
+    assert "pid=4242" in printed
+    assert "policy legacy -> v2" in printed
+    assert "REASONING_REFLECT_V2_ENABLED=true" in printed
+    # dry-run 是纯打印:state 文件必须原封不动。
+    assert json.loads((out_dir / "rig-state.json").read_text("utf-8"))["policy"] == "legacy"
+
+
+def test_ask_refuses_to_run_when_state_policy_disagrees(tmp_path, capsys):
+    """`ask` 开跑前核对 state 记的策略;不一致(哪怕只是 dry-run)也要当场报错,
+    而不是悄悄跑出一批策略对不上号的轨迹(读 state 文件不是副作用,所以这条
+    闸在 `--dry-run` 下同样生效)。
+    """
+    out_dir = tmp_path / "t0"
+    out_dir.mkdir()
+    (out_dir / "rig-state.json").write_text(json.dumps({
+        "policy": "legacy", "backend_pid": 4242, "notebooks": {}, "token": "",
+    }), encoding="utf-8")
+    with pytest.raises(RuntimeError, match=r"restart --policy v2"):
+        rig.main([
+            "--dry-run", "--out-dir", str(out_dir), "--policy", "v2", "ask",
+        ])
+
+
+def test_report_refuses_to_run_when_state_policy_disagrees(tmp_path):
+    out_dir = tmp_path / "t0"
+    out_dir.mkdir()
+    (out_dir / "rig-state.json").write_text(json.dumps({
+        "policy": "v2", "backend_pid": 4242, "notebooks": {}, "token": "",
+    }), encoding="utf-8")
+    with pytest.raises(RuntimeError, match=r"restart --policy legacy"):
+        rig.main([
+            "--dry-run", "--out-dir", str(out_dir), "--policy", "legacy",
+            "report",
+        ])
+
+
+def test_ask_proceeds_when_state_has_no_recorded_policy_yet(tmp_path, capsys):
+    """线上从没跑过 `seed`/`restart` 的 out-dir:不知道就不拦,而不是报错。"""
+    out_dir = tmp_path / "t0"
+    assert rig.main([
+        "--dry-run", "--out-dir", str(out_dir), "--limit", "1", "ask",
+    ]) == 0
 
 
 def test_ask_plan_pairs_legacy_and_v2_on_the_same_question_key():

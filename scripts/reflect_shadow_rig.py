@@ -10,7 +10,7 @@
     python scripts/reflect_shadow_rig.py --dry-run ask
     python scripts/reflect_shadow_rig.py --dry-run report
 
-子命令:`seed` / `ask` / `report` / `export` / `teardown`。
+子命令:`seed` / `ask` / `report` / `restart` / `export` / `teardown`。
 **`--dry-run` 打印将要做的每一步与每个 `client_request_id` 的编码,不连库、不
 起后端、不发任何请求**——它是唯一进标准门的路径(rig 本体要网络与真实模型)。
 
@@ -20,6 +20,10 @@
   连接、只跑一条 SELECT(重建 A 语料的 markdown)。所有写入都在测试库。
 * **策略靠重启**:`REASONING_REFLECT_V2_ENABLED` 是进程级 Settings,rig 不去
   热改它;`ask` / `report` 每次只跑**一个** `--policy`,换策略 = 换一次后端。
+  `restart` 是唯一的换策略手段:优雅停掉 state 里记的那台后端、按新
+  `--policy` 重起同一份端口/DB/env-file 配置;`ask` / `report` 开跑前会核对
+  state 里记的策略与这次的 `--policy` 是否一致,不一致直接报错,而不是悄悄
+  跑出一批策略对不上号的轨迹。
 * **编号不进问题文本**:题号/语料格/策略/档位只编进 `client_request_id`(见
   `encode_client_request_id`),导出时据它打标。模型永远看不到这些编号。
 """
@@ -31,6 +35,7 @@ import mimetypes
 import os
 import secrets
 import shlex
+import signal
 import subprocess
 import sys
 import time
@@ -45,6 +50,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from app.domain.reasoning_trace_stats import (  # noqa: E402
     CORPUS_CELLS,
     assert_closed,
+    assert_projection_values,
     merge_key,
     project_report_section,
     project_run,
@@ -606,6 +612,14 @@ def _seed_notebooks(
     state: dict[str, Any] = {
         "user": args.user, "token": token, "backend_pid": backend_pid,
         "notebooks": {},
+        # `restart` 靠这几项在只有 `--policy` 的情况下重起同一台后端(§2.3):
+        # 它读的是这次 seed 真的用了哪套配置,而不是 `restart` 调用自己的
+        # 命令行默认值。
+        "policy": "legacy",
+        "port": args.port,
+        "database_url": args.database_url,
+        "storage_dir": args.storage_dir,
+        "env_file": args.env_file,
     }
     for cell in cells:
         created = runner.http("POST", f"{base}/api/notebooks",
@@ -679,7 +693,48 @@ def _start_backend(args: argparse.Namespace, policy: str) -> subprocess.Popen:
     raise RuntimeError("temporary backend did not become ready")
 
 
+def _read_raw_state(state_path: Path) -> dict:
+    """原始 state 读取,**不经过** `Runner.load_state` 的 dry-run 短路。
+
+    `Runner.load_state` 在 `--dry-run` 下故意不读磁盘上真的那份 state(其他
+    命令的 dry-run 要打印的是「从零开始会做什么」)。但 `restart` 与策略核对
+    天生只对「现在这台后端」有意义——dry-run 也该照真实 state 打印停/起计划、
+    照真实 state 核对策略,而不是对着一份假的占位状态算。这只是读一个已经
+    存在的文件,不写任何东西,不违反 dry-run 的零副作用承诺。
+    """
+    if not state_path.exists():
+        return {}
+    try:
+        raw = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _read_state_policy(state_path: Path) -> str | None:
+    """state 里记的策略,`None` = 不知道(文件不存在,或从没写过这个键)。"""
+    policy = _read_raw_state(state_path).get("policy")
+    return policy if isinstance(policy, str) else None
+
+
+def _assert_policy_matches_backend(runner: Runner, policy: str) -> None:
+    """`ask` / `report` 开跑前的策略闸(§2.3)。
+
+    后端当前真的跑在哪个策略上,只有 `restart`(和 `seed`)落过的 state 知道。
+    不一致时继续跑只会把 legacy 轨迹当成 v2 导出(或反过来)——一个要等到
+    分析阶段才会被发现的静默错误,这里让它当场报响亮失败。
+    """
+    recorded = _read_state_policy(runner.state_path())
+    if recorded is not None and recorded != policy:
+        raise RuntimeError(
+            f"state 记录的后端策略是 {recorded!r},但这次要用 --policy="
+            f"{policy!r}。先执行 `restart --policy {policy}` 切到位,"
+            "再跑这条命令"
+        )
+
+
 def cmd_ask(args: argparse.Namespace, runner: Runner) -> int:
+    _assert_policy_matches_backend(runner, args.policy)
     questions = load_questions()
     state = runner.load_state()
     plan = ask_plan(
@@ -765,6 +820,7 @@ def cmd_report(args: argparse.Namespace, runner: Runner) -> int:
     子类把 `_deep_dive` 的 `on_step` 复制一份进 JSONL。**子类住在 rig 里,生产
     代码一行不动。**
     """
+    _assert_policy_matches_backend(runner, args.policy)
     if not runner.dry_run:
         # dry-run 连 os.environ 都不碰:它的全部承诺是「只打印」。
         _apply_process_env(args)
@@ -874,6 +930,7 @@ def _run_reports(
                 )
                 for row in _report_rows(repo, notebook, report_id, item, captured):
                     assert_closed(row)
+                    assert_projection_values(row)
                     handle.write(
                         json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n"
                     )
@@ -1009,6 +1066,84 @@ def cmd_export(args: argparse.Namespace, runner: Runner) -> int:
     return 0
 
 
+def _stop_backend_gracefully(
+    runner: Runner, pid: int, *, timeout: float = 15.0,
+) -> None:
+    """SIGTERM,给它 `timeout` 秒退出;超时了才 SIGKILL(§2.3「优雅停止」)。
+
+    轮询用 `os.kill(pid, 0)`(不发信号,只探测进程还在不在)——PID 不存在时
+    这一探测本身就抛 `OSError`,拿来当"已经退出"的判据,不用额外 waitpid
+    (uvicorn 子进程可能已经被系统回收,不一定还是本进程的直接子进程)。
+    """
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError as exc:
+        runner.say("stop backend failed", str(exc))
+        return
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return
+        time.sleep(0.5)
+    try:
+        os.kill(pid, signal.SIGKILL)
+        runner.say("stop backend", f"pid={pid} 超时 {timeout}s 未退出,已 SIGKILL")
+    except OSError:
+        pass
+
+
+def cmd_restart(args: argparse.Namespace, runner: Runner) -> int:
+    """优雅停掉 state 里记的后端,按 `--policy` 重起同一份配置(§2.3)。
+
+    端口 / DB / storage-dir / env-file 从 state 取(seed 落的那份),不是这次
+    调用的命令行默认值——这样 `restart --policy v2` 不需要重复 `seed` 用过的
+    全部参数就能起同一台后端。重启复用 `_start_backend`,因此复用它的就绪
+    判据(`/api/ready` 的 `{"ready": true}`),不是「端口能连上」就算数。
+    """
+    state = _read_raw_state(runner.state_path())
+    pid = int(state.get("backend_pid") or 0)
+    port = int(state.get("port") or args.port)
+    database_url = str(state.get("database_url") or args.database_url)
+    storage_dir = str(state.get("storage_dir") or args.storage_dir)
+    env_file = state.get("env_file", args.env_file)
+    new_flag = backend_env(args, args.policy)["REASONING_REFLECT_V2_ENABLED"]
+
+    runner.say(
+        "stop backend",
+        f"pid={pid or '<unknown>'} policy {state.get('policy', '<unknown>')} "
+        f"-> {args.policy}",
+    )
+    runner.say(
+        "start backend",
+        f"port={port} database_url={database_url} "
+        f"REASONING_REFLECT_V2_ENABLED={new_flag}",
+    )
+    if runner.dry_run:
+        return 0
+
+    if pid:
+        _stop_backend_gracefully(runner, pid)
+
+    restart_args = argparse.Namespace(**vars(args))
+    restart_args.port = port
+    restart_args.database_url = database_url
+    restart_args.storage_dir = storage_dir
+    restart_args.env_file = env_file
+    restart_args.base_url = f"http://127.0.0.1:{port}"
+    backend = _start_backend(restart_args, args.policy)
+
+    state.update({
+        "backend_pid": backend.pid, "policy": args.policy, "port": port,
+        "database_url": database_url, "storage_dir": storage_dir,
+        "env_file": env_file,
+    })
+    runner.save_state(state)
+    runner.say("restarted", f"pid={backend.pid} policy={args.policy}")
+    return 0
+
+
 def _teardown_targets_this_run(args: argparse.Namespace) -> bool:
     """`--db-name` 说的那个库,真的是这次 rig 写进去的那个吗?
 
@@ -1129,7 +1264,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "command",
-        choices=("seed", "ask", "report", "export", "teardown"),
+        choices=("seed", "ask", "report", "restart", "export", "teardown"),
     )
     return parser
 
@@ -1143,7 +1278,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     runner = Runner(dry_run=args.dry_run, out_dir=Path(args.out_dir))
     handlers = {
         "seed": cmd_seed, "ask": cmd_ask, "report": cmd_report,
-        "export": cmd_export, "teardown": cmd_teardown,
+        "restart": cmd_restart, "export": cmd_export, "teardown": cmd_teardown,
     }
     return handlers[args.command](args, runner)
 
