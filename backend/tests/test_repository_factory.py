@@ -600,6 +600,114 @@ def test_postgresql_repository_import_is_lazy(monkeypatch, tmp_path):
     assert factory.create_repository(settings) is postgres_sentinel
 
 
+def test_create_repository_omits_migrate_and_seed_kwargs_by_default(monkeypatch, tmp_path):
+    """默认调用逐字不变:`migrate`/`seed` 两个关键字**不进**构造调用,一个不
+    接受它们的最小替身(比如上面那条测试的单参数 lambda)不受影响
+    (codex #700 R1 P1)。"""
+    module_name = "app.repositories.postgres.repository"
+    sys.modules.pop(module_name, None)
+    factory = _repository_factory_module()
+
+    postgres_module = ModuleType(module_name)
+    postgres_sentinel = object()
+    postgres_module.PostgresRepository = lambda _settings: postgres_sentinel
+    monkeypatch.setitem(sys.modules, module_name, postgres_module)
+    settings = _settings(
+        tmp_path,
+        database_url="postgresql://active:secret@db.example/notebook",
+    )
+    # 不传 migrate/seed(默认 True/True)时,单参数替身照样能被正常调用——
+    # 说明这两个关键字压根没被塞进构造调用。
+    assert factory.create_repository(settings) is postgres_sentinel
+
+
+def test_create_repository_forwards_migrate_and_seed_when_overridden(monkeypatch, tmp_path):
+    """`migrate=False, seed=False` 必须原样转发给 PostgreSQL 适配器
+    (codex #700 R1 P1)——`search` 这类只读工具靠这两个关键字关掉
+    `bundle._initialize` 的迁移与 admin 密码重写。"""
+    module_name = "app.repositories.postgres.repository"
+    sys.modules.pop(module_name, None)
+    factory = _repository_factory_module()
+
+    calls: list[dict] = []
+
+    def fake_postgres_repository(_settings, **kwargs):
+        calls.append(kwargs)
+        return object()
+
+    postgres_module = ModuleType(module_name)
+    postgres_module.PostgresRepository = fake_postgres_repository
+    monkeypatch.setitem(sys.modules, module_name, postgres_module)
+    settings = _settings(
+        tmp_path,
+        database_url="postgresql://active:secret@db.example/notebook",
+    )
+    factory.create_repository(settings, migrate=False, seed=False)
+    assert calls == [{"migrate": False, "seed": False}]
+
+
+def test_create_repository_forwards_migrate_and_seed_to_sqlite_backend(monkeypatch, tmp_path):
+    """SQLite 侧同一形状:`create_repository` 把 `migrate`/`seed` 转发给
+    `SQLiteRepository`(codex #700 R1 P1)——`SqliteMigrator.seed()` 有跟
+    PostgreSQL 侧同形的 `UPDATE users` admin 密码重写。"""
+    factory = _repository_factory_module()
+
+    calls: list[dict] = []
+
+    def fake_sqlite_repository(_settings, **kwargs):
+        calls.append(kwargs)
+        return object()
+
+    monkeypatch.setattr(factory, "SQLiteRepository", fake_sqlite_repository)
+    settings = _settings(tmp_path)
+    factory.create_repository(settings, migrate=False, seed=False)
+    assert calls == [{"migrate": False, "seed": False}]
+
+    calls.clear()
+    factory.create_repository(settings)
+    assert calls == [{}]
+
+
+def test_sqlite_migrate_false_seed_false_never_touches_the_admin_row(tmp_path):
+    """端到端(真实 SQLite 文件,不是替身):`migrate=False, seed=False`
+    构造出来的仓储,admin 行的 `updated_at` 真的没被碰过;默认构造
+    (`migrate=True, seed=True`)会重写它——这正是为什么只读工具必须走前一条
+    路(codex #700 R1 P1)。变异:把 `create_repository(..., migrate=False,
+    seed=False)` 改回不传这两个关键字,这条用例必须翻红。
+    """
+    import sqlite3
+
+    factory = _repository_factory_module()
+    settings = _settings(tmp_path)
+    db_path = tmp_path / "repository.db"
+
+    def admin_updated_at() -> str | None:
+        conn = sqlite3.connect(db_path)
+        try:
+            row = conn.execute(
+                "SELECT updated_at FROM users WHERE id = 'user-local'"
+            ).fetchone()
+        finally:
+            conn.close()
+        return row[0] if row else None
+
+    repo = factory.create_repository(settings)
+    repo.close()
+    first = admin_updated_at()
+    assert first is not None
+
+    # 不拥有 schema 的只读构造:admin 行原封不动。
+    repo_readonly = factory.create_repository(settings, migrate=False, seed=False)
+    repo_readonly.close()
+    assert admin_updated_at() == first
+
+    # 默认构造(拥有 schema 的正常路径):seed() 的 UPDATE 重写它——这就是
+    # `migrate=False, seed=False` 要挡住的那个写。
+    repo_owned = factory.create_repository(settings)
+    repo_owned.close()
+    assert admin_updated_at() != first
+
+
 def test_create_repository_fails_closed_if_validated_identity_is_impossible(monkeypatch):
     factory = _repository_factory_module()
 

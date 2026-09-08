@@ -4146,7 +4146,7 @@ class SqliteMigrator:
     def seed(self) -> None:
         self._seed()
 
-    def initialize(self) -> list[int]:
+    def initialize(self, *, migrate: bool = True, seed: bool = True) -> list[int]:
         """构造仓储时跑的那部分：migrate + seed，**不含**崩溃兜底。
 
         恢复（``recover_interrupted_jobs``）已移交服务端 lifespan 启动路径显式调用
@@ -4154,7 +4154,18 @@ class SqliteMigrator:
         理由：``SQLiteRepository.__init__`` 会无条件跑到这里，而离线 CLI／脚本每次
         运行都会直接构造一个仓储——它们不是这个库的主人，没有资格把「进行中」的行
         判成上次崩溃的残骸。旧行为下，跑一次离线脚本就会把服务端正在处理的 pending
-        行刷成 failed。"""
-        applied = self.migrate()
-        self.seed()
+        行刷成 failed。
+
+        ``migrate``/``seed`` 镜像 PostgreSQL 侧
+        ``PostgresPersistenceBundleFactory`` 的同名开关（见其 docstring）：
+        默认都是 ``True``，保持既有行为逐字不变。唯一允许传 ``False`` 的调用者
+        是不拥有这份 schema 的**只读**工具——目前是
+        ``scripts/reflect_shadow_rig.py`` 的 `search` 子命令，它对主库整条路
+        只读，而 ``seed()`` 的 ``UPDATE users`` 会用 ``settings.admin_password``
+        无条件重写 admin 密码哈希（同一类问题已经在 PostgreSQL 主库上真实发生
+        过一次）。任何要落库/建图/写数据的调用者都不得传 ``False``。
+        """
+        applied = self.migrate() if migrate else []
+        if seed:
+            self.seed()
         return applied
