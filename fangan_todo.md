@@ -101,6 +101,26 @@
       **仍未做的是拿它们跑出首份基线与对照报告**（要真实模型与网络，不进 CI），以及
       §9.2 的真实模型 A/B 通道。仓库仍没有问答质量评测台，所以本期只宣称结构性与可
       观测性交付，**开闸必须在此之后单独决定**；A/B 与 T0 使用同一题集。
+      A/B 的 rig 通道（T-AB2，设计真源
+      `docs/superpowers/specs/2026-09-09-reflect-ab-design_zh.md`）已交付：
+      `scripts/reflect_shadow_rig.py ab` 在 `seed` 建出来的一次性测试库上**进程内**跑
+      完整 Ask（意图契约 → 检索 → 合成 → 引用绑定），同题同档的 legacy/v2 背靠背、
+      臂序随机，逐 run 出 `backend/app/eval/reflect_ab.py` 的闭集投影（`ab-runs.jsonl`；
+      答案正文、引用与冻结契约只落 `.local`）。用法：
+
+      ```bash
+      python scripts/reflect_shadow_rig.py --dry-run --limit 2 --round 1 \
+          --database-url postgresql://127.0.0.1:5432/silicon_notebook_t0_test \
+          --source-db-url postgresql://127.0.0.1:5432/<主库> \
+          --out-dir .local/ab ab
+      ```
+
+      `--database-url` 必填且必须以 `_test` 结尾（这条路会往库里写 conversation 与
+      answer 行）；`--source-db-url` 是主库连接，只用于跑前跑后的「主库零接触」断言。
+      `--concurrency > 1` 时成本三键（`prompt_tokens`/`completion_tokens`/`model_calls`）
+      强制写成 unknown——它们靠 LLM 日志的时间窗切片归因，并发下切不干净。
+      **仍未做的是 T-AB1 的 gold 正文（34 题的 `gold_facts`、B 侧 `gold_sources`）、
+      T-AB3 的 `ab-judge`/`ab-report`，以及 T-AB4 的首份报告。**
       (b) 报告侧 admitted 复核的簇折叠表仍是保守口径——同下条独立待办。
       (c) 灰名单字符串「本笔记本尚未构建知识图谱…」的界面词表违规——同下下条独立待办。
       (d) **`reasoning_retrieval.py` 的「纳入 N 个同社区实体」上屏文案含界面词表的「社区」**：
