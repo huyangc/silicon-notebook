@@ -310,6 +310,90 @@ def test_teardown_only_drops_the_postgres_database_this_run_wrote(tmp_path):
     ) is False
 
 
+def test_default_database_url_follows_db_name(monkeypatch):
+    """`--db-name another_t0 seed` 建的是 another_t0,默认 `--database-url` 却
+    钉在常量 DEFAULT_TEST_DB 上——扩展安装与迁移/播种会打到旧库(存在就被写,
+    不存在就报一句无关的连接错)(codex #700 R5 P2)。默认 URL 必须跟着
+    `--db-name` 走;显式给了 `--database-url` 时不动它。"""
+    seen: list[Any] = []
+    monkeypatch.setattr(rig, "cmd_seed", lambda args, runner: seen.append(args) or 0)
+
+    assert rig.main(["--dry-run", "--db-name", "another_t0", "seed"]) == 0
+    assert seen[-1].database_url == "postgresql://127.0.0.1:5432/another_t0"
+    assert seen[-1].database_url_explicit is False
+
+    assert rig.main(["--dry-run", "seed"]) == 0
+    assert seen[-1].database_url == f"postgresql://127.0.0.1:5432/{rig.DEFAULT_TEST_DB}"
+
+    explicit = "postgresql://db.internal:6543/whatever_test"
+    assert rig.main([
+        "--dry-run", "--db-name", "another_t0", "--database-url", explicit, "seed",
+    ]) == 0
+    assert seen[-1].database_url == explicit
+    assert seen[-1].database_url_explicit is True
+
+
+def test_seed_refuses_when_database_url_and_db_name_disagree(tmp_path, capsys):
+    """显式 `--database-url` 指向的库名与 `--db-name` 不一致 ⇒ seed 在建库之前
+    就拒绝(退出码 2),连 dry-run 也一样——这是字面核对,不必连库
+    (codex #700 R5 P2)。"""
+    rc = rig.main([
+        "--dry-run", "--out-dir", str(tmp_path / "t0"),
+        "--db-name", "another_t0",
+        "--database-url", "postgresql://127.0.0.1:5432/silicon_notebook_t0_test",
+        "seed",
+    ])
+    printed = capsys.readouterr().out
+    assert rc == 2
+    assert "refuse" in printed
+    assert "another_t0" in printed and "silicon_notebook_t0_test" in printed
+    assert "create database" not in printed, "拒绝要发生在建库计划打印之前"
+    assert "install extensions" not in printed
+
+    args = rig.build_parser().parse_args([
+        "--db-name", "x_test", "--database-url", "postgresql://h/x_test?sslmode=require",
+        "seed",
+    ])
+    assert rig._seed_target_mismatch(args) is None, "查询串不该干扰库名比对"
+
+
+def test_start_backend_refuses_an_endpoint_that_already_answers(monkeypatch):
+    """就绪探测分不清应答者是刚起的子进程还是早就占着端口的别人;后者会让
+    `_start_backend` 把别人的 PID 当成功返回,seed 的注册/上传/建图全打到那台
+    后端上(codex #700 R5 P2)。任何 HTTP 应答(含 503/404)都算占用;只有连接
+    被拒/超时才算空闲。"""
+    import io
+    import urllib.error
+    import urllib.request
+
+    class _Resp(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(
+        urllib.request, "urlopen",
+        lambda url, timeout=0: _Resp(b'{"ready": true}'),
+    )
+    with pytest.raises(RuntimeError, match="已经有后端在应答"):
+        rig._assert_endpoint_free("http://127.0.0.1:8011")
+
+    def _http_503(url, timeout=0):
+        raise urllib.error.HTTPError(url, 503, "warming", None, None)
+
+    monkeypatch.setattr(urllib.request, "urlopen", _http_503)
+    with pytest.raises(RuntimeError, match="已经有后端在应答"):
+        rig._assert_endpoint_free("http://127.0.0.1:8011")
+
+    def _refused(url, timeout=0):
+        raise urllib.error.URLError(ConnectionRefusedError(61, "refused"))
+
+    monkeypatch.setattr(urllib.request, "urlopen", _refused)
+    assert rig._assert_endpoint_free("http://127.0.0.1:8011") is None
+
+
 def test_admin_url_and_database_url_must_share_a_server_before_drop():
     """host:port 不一致就当场拒绝——不必真的连一次 PG(codex #700 R1 P1)。
 
