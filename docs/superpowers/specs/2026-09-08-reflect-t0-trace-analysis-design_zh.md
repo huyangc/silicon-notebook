@@ -126,8 +126,8 @@ T0 首跑改走 `search`：**不建测试库、不建图、不合成答案**，�
 指标（每个都允许 `null` = unknown）：
 
 - `reflect_turns`、`action_seq`（step_type 闭集序列，seed 前缀标 `seed:`）、`actions_by_type`、`seed_actions_by_type`
-- `skip_reasons`（reason 码 → 次数）、`fallback_count`、`fallback_reasons`、`stale_breaker`（bool）、`stale_max`
-- `termination_reason`（v2 读 termination 步；legacy 反推：末尾 reflect 的 `next_action=answer`/`sufficient` → `model_end`，有 `stale_circuit_breaker` → `stale`，reflect 数 == 档位上限且无 answer → `step_budget`，其余 unknown）
+- `skip_reasons`（reason 码 → 次数）、`fallback_count`/`fallback_reasons`（2026-09-08 订正：只数 reflect 步 detail 里带 `fallback_reason` 键的**模型兜底**——反思调用失败/响应畸形后的 fail-open 收尾；`search_elements` 那个同名的 `fallback` step_type 是路由决策，不是模型兜底，只在 `actions_by_type` 里以 `fallback` 计，不进这两个键）、`stale_breaker`（bool）、`stale_max`
+- `termination_reason`（v2 读 termination 步；legacy 反推：有 `stale_circuit_breaker` → `stale`；末尾 reflect 带 `fallback_reason` → `model_degraded`（须先判，fail-open 兜底会把 `next_action` 写成 `answer`，与「模型自己说够了」同形）；否则末尾 reflect 的 `next_action=answer`/`sufficient` → `model_end`；reflect 数 == 档位上限且无 answer → `step_budget`；其余 unknown）
 - `aspects_total` / `aspects_pending` / `aspects_undelivered` / `unrecovered_channels_count`（v2 only）
 - `candidates_kg` / `candidates_chunks` / `candidates_elements`（answer 步）、`included_kg` / `included_chunks` / `included_elements`（synthesis 步）、`anchors`（synthesis 步）
 - `citation_contribution`（§4.4）：`{action_type: {steps, steps_with_ids, cited_hits, unknown_steps}}`
@@ -159,6 +159,12 @@ T0 首跑改走 `search`：**不建测试库、不建图、不合成答案**，�
 ### 4.5 结束原因（legacy 反推的置信度）
 
 反推结果带 `termination_inferred=true`；v2 读到 termination 步则 `false`。聚合表分两列。
+
+`model_degraded`（反思调用失败后的 fail-open 兜底）与 `model_end`（模型自己说够了）在
+`next_action`/`sufficient` 两个字段上完全同形——`_reflect_fallback`
+（`reasoning_retrieval.py`）兜底时同样把 `next_action` 写成 `answer`。legacy 轨迹里唯一
+能把两者分开的信号是末尾 reflect 步 detail 里带不带 `fallback_reason` 键，所以反推**必须**
+先判这个键，再退到 `next_action=answer`/`sufficient`，否则会把兜底收尾误判成模型主动判定。
 
 ## 5. 题集（rig 用；A/B 题集另立）
 

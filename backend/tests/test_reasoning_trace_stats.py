@@ -12,6 +12,7 @@ import pytest
 from app.core.ask_retrieval_policy import ASK_RETRIEVAL_LIMITS
 from app.domain.reasoning_trace_stats import (
     RUN_PROJECTION_KEYS,
+    TERMINATION_MODEL_DEGRADED,
     TERMINATION_MODEL_END,
     TERMINATION_SKIP_REASON,
     UNKNOWN,
@@ -366,21 +367,62 @@ def test_empty_actions_are_counted_per_action_key():
     assert row["empty_actions_by_type"] == {"search_chunks": 1, "seed:ppr": 1}
 
 
-def test_skip_and_fallback_reason_codes_are_tallied():
+def test_skip_reason_codes_are_tallied():
     steps = [
         step("skip", {"reason": "kg_unavailable"}),
         step("skip", {"reason": "ppr_disabled"}),
         step("skip", {}),
-        step("fallback", {"reason": "initial_evidence_empty", "found": 0}),
-        step("fallback", {"found": 1}),
     ]
     row = project_run(JOB, steps, PAYLOAD)
     assert row["skip_reasons"] == {
         "kg_unavailable": 1, "ppr_disabled": 1, UNKNOWN: 1,
     }
-    assert row["fallback_count"] == 2
-    assert row["fallback_reasons"] == {"initial_evidence_empty": 1, UNKNOWN: 1}
     assert row["kg_in_scope"] is False
+
+
+def test_search_elements_fallback_step_type_does_not_count_as_model_fallback():
+    """`step_type == "fallback"` 是 `search_elements` 的路由决策(初检索空手后
+    补查原文),不是模型兜底(2026-09-08 口径修正前两者被混算)。它只应该出现在
+    `actions_by_type`,`fallback_count`/`fallback_reasons` 必须保持 0/空。
+    """
+    steps = [
+        step("fallback", {"reason": "initial_evidence_empty", "found": 0}),
+        step("fallback", {"found": 1}),
+    ]
+    row = project_run(JOB, steps, PAYLOAD)
+    assert row["fallback_count"] == 0
+    assert row["fallback_reasons"] == {}
+    # 两步都在第一条 reflect 之前(没有一条),按位置判据算作播种。
+    assert row["seed_actions_by_type"] == {"fallback": 2}
+
+
+def test_reflect_fallback_reason_is_tallied_as_model_fallback():
+    """真正的模型兜底(`reasoning_retrieval._reflect_fallback` 写的
+    `fallback_reason` 键)才计入 `fallback_count`/`fallback_reasons`,原因码
+    透传、不折成 unknown。"""
+    steps = [
+        reflect("ppr"),
+        reflect("answer", sufficient=True, fallback_reason="provider_unavailable"),
+    ]
+    row = project_run(JOB, steps, PAYLOAD)
+    assert row["fallback_count"] == 1
+    assert row["fallback_reasons"] == {"provider_unavailable": 1}
+
+
+def test_reflect_fallback_reason_infers_model_degraded_not_model_end():
+    """末尾 reflect 带 `fallback_reason` 时,反推的结束原因是
+    `model_degraded`,不是 `model_end`——fail-open 兜底会把 `next_action` 写成
+    `answer`,与「模型自己说够了」在 `next_action`/`sufficient` 上完全同形,
+    唯一能分开两者的信号就是这个键在不在。"""
+    steps = [
+        reflect("ppr"),
+        reflect("answer", sufficient=True, fallback_reason="provider_unavailable"),
+    ]
+    row = project_run(JOB, steps, PAYLOAD)
+    assert row["termination_reason"] == TERMINATION_MODEL_DEGRADED
+    assert row["termination_inferred"] is True
+    assert row["fallback_count"] == 1
+    assert row["fallback_reasons"] == {"provider_unavailable": 1}
 
 
 # --- 两种 step_json 类型 ----------------------------------------------------

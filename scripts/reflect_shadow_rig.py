@@ -142,16 +142,24 @@ def corpus_cells(selected: Sequence[str]) -> list[str]:
 def ask_plan(
     questions: dict, *, cells: Sequence[str], policy: str, limit: int | None,
     lang: str, mode: str, efforts: Sequence[str],
+    only_questions: Sequence[str] = (),
 ) -> list[dict]:
     """`ask` 要发的全部 run,一条一行。**dry-run 与真跑读的是同一个函数**。
 
     dry-run 若另起一份枚举,它验证的就不是将要跑的那件事了。
+
+    `only_questions` 非空时按题号(`row["key"]`,不带 `-en` 后缀)先筛一遍,
+    **筛在 `limit` 切片之前**——`search` 的 `--only-question`/`--only-cell` 与
+    `--limit` 同时给时约定「先筛后限」,这里是唯一的切点。默认空 = 不筛,
+    `ask` 命令不传这个参数,行为逐字不变。
     """
     plan: list[dict] = []
     langs = ("zh", "en") if lang == "both" else (lang,)
     for cell in cells:
         corpus = cell.split("_", 1)[0]
         rows = [row for row in questions["ask"] if row["corpus"] == corpus]
+        if only_questions:
+            rows = [row for row in rows if row["key"] in only_questions]
         if limit is not None:
             rows = rows[:limit]
         for row in rows:
@@ -186,6 +194,7 @@ def search_cells(selected: Sequence[str]) -> list[str]:
 def search_plan(
     questions: dict, *, cells: Sequence[str], policies: Sequence[str],
     limit: int | None, lang: str, efforts: Sequence[str],
+    only_questions: Sequence[str] = (),
 ) -> list[dict]:
     """`search` 要跑的全部 run,一条一行。**枚举复用 `ask_plan`**。
 
@@ -201,12 +210,16 @@ def search_plan(
     * **丢掉 `client_request_id`**。那个键的全部意义是「幂等键落进 `ask_jobs`、
       导出时据它打标」,而 `search` 一条 `ask_jobs` 都不写。留着它会让人以为
       能按它在库里查到这批 run。
+
+    `only_questions` 是 `--only-question` 的落点,转发给 `ask_plan`(那边负责
+    「先筛后限」的次序)。`--only-cell` 不在这里处理——它收窄的是调用方传入的
+    `cells` 本身(见 `cmd_search`),不属于这份枚举内部的过滤规则。
     """
     plan: list[dict] = []
     for policy in policies:
         for item in ask_plan(
             questions, cells=cells, policy=policy, limit=limit, lang=lang,
-            mode="reasoning", efforts=efforts,
+            mode="reasoning", efforts=efforts, only_questions=only_questions,
         ):
             item.pop("client_request_id", None)
             plan.append(item)
@@ -1123,18 +1136,23 @@ def cmd_search(args: argparse.Namespace, runner: Runner) -> int:
     """
     questions = load_questions()
     cells = search_cells(args.cell)
+    if args.only_cell:
+        # `--only-cell` 收窄的是「这次要跑哪些格」本身,所以在这里做,而不是
+        # 塞进 `search_plan` 内部——下面 `if not cells` 的预检、「corpus cell」
+        # 的逐条打印,与真跑要用的 `notebooks` 查找,都得看到同一份收窄结果。
+        cells = [cell for cell in cells if cell in args.only_cell]
     notebooks = {
         "A_nokg": args.source_notebook_a, "B_kg": args.source_notebook_b,
     }
     if not cells:
-        # 这一条在 `--dry-run` 下也拦:选空了的 `--cell` 会让 dry-run 打印一份
-        # 「零个 run」的计划,而那看起来完全像一次正常的预演。
+        # 这一条在 `--dry-run` 下也拦:选空了的 `--cell`/`--only-cell` 会让
+        # dry-run 打印一份「零个 run」的计划,而那看起来完全像一次正常的预演。
         print("ERROR: " + _search_preflight(args, cells, notebooks),
               file=sys.stderr)
         return 2
     plan = search_plan(
         questions, cells=cells, policies=POLICIES, limit=args.limit,
-        lang=args.lang, efforts=EFFORTS,
+        lang=args.lang, efforts=EFFORTS, only_questions=args.only_question,
     )
     unique_questions = {
         (item["corpus_cell"], item["question_key"]) for item in plan
@@ -1159,6 +1177,13 @@ def cmd_search(args: argparse.Namespace, runner: Runner) -> int:
                f"{runner.out_dir}/search-<policy>.jsonl + search-runs.log"
                + ("" if args.no_intent else
                   f" + {runner.out_dir}/intents.jsonl(**不进数据集/仓库**)"))
+    if args.keep_raw_trace:
+        runner.say(
+            "raw trace",
+            f"{runner.out_dir}/raw/<policy>/<question_key>_<corpus_cell>_"
+            "<effort>.json(每个 run 一份原始 TraceStep 列表 + termination DTO,"
+            "**含标题与模型 reason,不进数据集/仓库**)",
+        )
     runner.say(
         "concurrency",
         f"{args.concurrency}(两阶段:先并发算意图契约,再并发跑 run;"
@@ -1528,12 +1553,72 @@ def trace_step_row(step: Any) -> dict:
     }
 
 
+def raw_trace_step_row(step: Any) -> dict:
+    """`TraceStep` → **未收窄**的 dict,`--keep-raw-trace` 专用。
+
+    与 `trace_step_row` 的唯一区别是带上 `summary`(那条人话摘要,里面可能有
+    问题原文的只言片语与模型的自由文本)。只在这一条命令行开关打开时才收集,
+    产物写进 `--out-dir` 下的 `raw/`,不进 `search-<policy>.jsonl`(见
+    `SYNTHESIS_ONLY_KEYS`/§6 的隐私闭集与 `_raw_trace_path` 的说明)。
+    """
+    return {
+        "step_type": step.step_type,
+        "summary": step.summary,
+        "detail": dict(getattr(step, "detail", None) or {}),
+        "duration_ms": getattr(step, "duration_ms", None),
+    }
+
+
+def _raw_trace_path(out_dir: Path, policy: str, item: dict) -> Path:
+    return (
+        out_dir / "raw" / policy
+        / f"{item['question_key']}_{item['corpus_cell']}_{item['effort']}.json"
+    )
+
+
+def raw_trace_payload(raw_steps: Sequence[dict], result: Any) -> dict:
+    """`--keep-raw-trace` 一个 run 的落盘内容:原始步 + 结束事实(若有)。
+
+    `result.termination` 只在 v2 下不是 `None`(`RetrievalTermination`,一个
+    `frozen` dataclass,见 `app.domain.retrieval_termination`);legacy 恒
+    `None`,这里如实写 `None`,不用 `infer_legacy_termination` 反推去填——这份
+    文件是给人核对反推口径用的原始证据,自己先做一次反推就失去了核对的意义。
+    """
+    import dataclasses
+
+    termination = getattr(result, "termination", None)
+    return {
+        "trace_steps": list(raw_steps),
+        "termination": (
+            dataclasses.asdict(termination) if termination is not None else None
+        ),
+    }
+
+
+def write_raw_trace(
+    out_dir: Path, policy: str, item: dict, raw_steps: Sequence[dict], result: Any,
+) -> None:
+    """把一个 run 的 `raw_trace_payload` 写到 `<out-dir>/raw/<policy>/…json`。
+
+    **这份文件含标题与模型 reason,刻意不进数据集/不进仓库**(§6 的闭集约束
+    只管 `search-<policy>.jsonl`,不管这里)——它的用途是人工核对反推口径,
+    不是喂给 `analyze_reasoning_trace.py`。
+    """
+    path = _raw_trace_path(out_dir, policy, item)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(raw_trace_payload(raw_steps, result), ensure_ascii=False,
+                   indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+
 def _search_preflight(
     args: argparse.Namespace, cells: Sequence[str], notebooks: dict[str, str],
 ) -> str:
     """真跑前的硬前提。返回空串 = 通过,否则是要打给用户的那句话。"""
     if not cells:
-        return (f"--cell 选中的格子不在 search 的范围里(它只跑 "
+        return (f"--cell/--only-cell 选中的格子不在 search 的范围里(它只跑 "
                 f"{', '.join(SEARCH_CELLS)};另外两格在主库上不存在)")
     if not args.database_url_explicit:
         return ("search 必须显式给 --database-url(主库连接;全程只读)。"
@@ -1692,11 +1777,20 @@ def _search_loop(
                 item["question"], item["effort"],
             )
             steps: list[dict] = []
+            raw_steps: list[dict] = []
+
+            def _on_step(step: Any) -> None:
+                # 闭包捕获的是这次迭代新建的 `steps`/`raw_steps`(每轮都重新
+                # 绑定,不是共享的循环变量),调用又发生在同一轮 `run_search_once`
+                # 返回之前,不存在延迟绑定的坑。
+                steps.append(trace_step_row(step))
+                if args.keep_raw_trace:
+                    raw_steps.append(raw_trace_step_row(step))
+
             started = time.monotonic()
             result = run_search_once(
                 repo, settings, notebook=fact["notebook"], item=item,
-                prepared=prepared,
-                on_step=lambda step: steps.append(trace_step_row(step)),
+                prepared=prepared, on_step=_on_step,
                 cancel_event=cancel_event, actor_id=actor_id,
             )
             elapsed_ms = round((time.monotonic() - started) * 1000)
@@ -1710,6 +1804,8 @@ def _search_loop(
             )
             assert_closed(row)
             assert_projection_values(row)
+            if args.keep_raw_trace:
+                write_raw_trace(runner.out_dir, policy, item, raw_steps, result)
             handle = handles.get(policy)
             if handle is None:
                 handle = handles[policy] = (
@@ -1866,7 +1962,7 @@ def _search_loop_concurrent(
             event.set()
         runner.say("search aborted", reason)
 
-    def worker(item: dict) -> tuple[dict, float] | None:
+    def worker(item: dict) -> tuple[dict, float, list[dict] | None, Any] | None:
         if aborted.is_set():
             # 已经决定收摊:还没真的开始跑的任务(`executor.shutdown(
             # cancel_futures=True)` 撤不掉已经被 worker 线程取出来的这一个)
@@ -1886,11 +1982,17 @@ def _search_loop_concurrent(
                 item["question"], item["effort"],
             )
             steps: list[dict] = []
+            raw_steps: list[dict] = []
+
+            def _on_step(step: Any) -> None:
+                steps.append(trace_step_row(step))
+                if args.keep_raw_trace:
+                    raw_steps.append(raw_trace_step_row(step))
+
             started = time.monotonic()
             result = run_search_once(
                 repo, settings, notebook=fact["notebook"], item=item,
-                prepared=prepared,
-                on_step=lambda step: steps.append(trace_step_row(step)),
+                prepared=prepared, on_step=_on_step,
                 cancel_event=cancel_event, actor_id=actor_id,
             )
             elapsed_ms = round((time.monotonic() - started) * 1000)
@@ -1904,7 +2006,10 @@ def _search_loop_concurrent(
             )
             assert_closed(row)
             assert_projection_values(row)
-            return row, elapsed_ms
+            # `raw_steps`/`result` 只在 `--keep-raw-trace` 时真的被消费(写盘发生
+            # 在 `write_lock` 内,见下方 `as_completed` 循环);不开这个开关就不带
+            # 出去,免得线程池里堆着一堆没人要用的原始轨迹。
+            return row, elapsed_ms, (raw_steps if args.keep_raw_trace else None), result
         finally:
             reset_request_user(ctx)
             with active_lock:
@@ -1941,7 +2046,7 @@ def _search_loop_concurrent(
                     continue
                 if outcome is None:
                     continue
-                row, elapsed_ms = outcome
+                row, elapsed_ms, raw_steps, result = outcome
                 policy = item["policy"]
                 with write_lock:
                     handle = handles.get(policy)
@@ -1953,6 +2058,13 @@ def _search_loop_concurrent(
                         json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n"
                     )
                     handle.flush()
+                    if raw_steps is not None:
+                        # 每条路径唯一(题号+语料格+档位各一份),锁在这里只为
+                        # 与其余输出共用同一个「不交错」的写纪律,不是为了防真的
+                        # 路径冲突。
+                        write_raw_trace(
+                            runner.out_dir, policy, item, raw_steps, result,
+                        )
                     completed += 1
                     done_n = completed
                     line = (
@@ -2214,6 +2326,25 @@ def build_parser() -> argparse.ArgumentParser:
              "给一个线程池。SQLite 主库真跑时强制 clamp 到 1;PG 主库按"
              "POSTGRES_POOL_MAX_SIZE clamp——跑之前先确认模型服务的并发限流"
              "与连接池都吃得下这个数,否则要么被限流打回、要么在拿连接时死等",
+    )
+    parser.add_argument(
+        "--keep-raw-trace", action="store_true",
+        help="`search` 额外把每个 run 的原始 TraceStep 列表(含 summary)与 "
+             "termination DTO 写到 <out-dir>/raw/<policy>/<question_key>_"
+             "<corpus_cell>_<effort>.json。**这份文件含标题与模型 reason,"
+             "不进数据集/不进仓库**,只用来人工核对反推口径",
+    )
+    parser.add_argument(
+        "--only-question", action="append", default=[],
+        help="`search` 只跑这些题号(可多次,如 B-q03);筛选发生在 --limit "
+             "切片之前(先筛后限)。默认不筛,全量参与 --limit",
+    )
+    parser.add_argument(
+        "--only-cell", action="append", default=[],
+        choices=list(SEARCH_CELLS),
+        help="`search` 只跑这些语料格(可多次,取值同 SEARCH_CELLS:"
+             f"{', '.join(SEARCH_CELLS)})。在 --cell 选中的格子里再收窄一层,"
+             "与 --only-question 一样先筛后限",
     )
     parser.add_argument("--corpus-dir", help="B 语料 markdown 所在目录")
     parser.add_argument(
