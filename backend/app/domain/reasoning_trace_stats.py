@@ -699,7 +699,13 @@ def project_run(
         "effort": effort,
         "kg_in_scope": _kg_in_scope(normalized, payload, mode),
         "policy_version": policy_version,
-        "has_intent_contract": bool(intent),
+        # payload 缺席(失败/取消前没落答案)时从轨迹回收:`intent` 步只在按确认
+        # 后的契约开跑时才记(`ask_service._prepare_reasoning_ask` /
+        # `_run_reasoning_stage`),读到它就是用了契约(codex #700 R16 P2)。否则
+        # 失败 run 恒记 false,配对身份含此键后就与同契约的成功 run 配不上。
+        "has_intent_contract": bool(intent) or any(
+            step["step_type"] == "intent" for step in normalized
+        ),
         "corpus_cell": _closed_exact(tags.get("corpus_cell"), CORPUS_CELLS),
         "question_key": str(tags.get("question_key") or "") or UNKNOWN,
         "notebook_bucket": source_bucket(sources_count),
