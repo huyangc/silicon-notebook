@@ -21,6 +21,7 @@ import importlib.util
 import json
 import sys
 import threading
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -249,24 +250,92 @@ def test_anchors_on_gold_is_unknown_when_one_element_does_not_resolve():
     ) is None
 
 
-def test_an_element_with_an_empty_section_path_is_unknown_not_a_miss():
-    """元素在库里、`metadata.section_path` 是空串 ⇒ 前缀匹配无从谈起 ⇒ unknown。"""
+def test_an_element_with_an_empty_section_path_is_a_miss_not_unknown():
+    """元素在库里、`metadata.section_path` 是空串 ⇒ **不命中**,不是 unknown。
+
+    `structural_markdown.section_path()` 对「首个标题之前的块」返回 ""——那不是
+    一次解析失败,是一条真实的「这段文字不在任何一节下面」。判成 unknown 会让
+    一个这样的锚点就把整个 run 的这一列废掉(codex 质量评审 P2-11)。
+    """
     assert count_anchors_on_gold(
         [_anchor(element_id="e1")], _A_GOLD,
         element_sections={"e1": ""}, source_titles={},
+    ) == 0
+    # 同一个 run 里另有一个真命中的元素时,空 section 的那个只是不进分子。
+    assert count_anchors_on_gold(
+        [_anchor(key="k1", element_id="e1"), _anchor(key="k2", element_id="e2")],
+        _A_GOLD,
+        element_sections={"e1": "", "e2": "Abstract"}, source_titles={},
+    ) == 1
+
+
+def test_a_chunk_anchor_hits_gold_through_its_own_section_path():
+    """chunk 锚点的 `location_label` 就是 `chunk.section_path`(§7.1 的 chunk 跳)。
+
+    `build_chunks` 按 600 字聚合多个元素,`element_id` 只在 chunk 恰好只含一个
+    元素时非空(`evidence_context.py:495`),所以多数 chunk 锚点根本没有
+    `element_id`。此前这一跳缺席,它们进了分母却进不了分子——`anchors_on_gold`
+    因此系统性偏低(codex 规格评审 P1-2)。
+    """
+    hits = count_anchors_on_gold(
+        [
+            _anchor(key="k1", element_id="e1"),
+            _anchor(key="k2", object_id="c1", object_type="chunk",
+                    location_label="4.1 Setup"),
+            _anchor(key="k3", object_id="c2", object_type="chunk",
+                    location_label="7. Appendix"),
+        ],
+        _A_GOLD,
+        element_sections={"e1": "Abstract"}, source_titles={},
+    )
+    assert hits == 2
+
+
+def test_a_chunk_anchor_without_a_label_resolves_through_the_chunks_table():
+    """没带 `location_label` 的 chunk ⇒ 按 `chunk_id` 查 `chunks.section_path`。"""
+    anchors = [_anchor(key="k1", object_id="c1", object_type="chunk")]
+    assert count_anchors_on_gold(
+        anchors, _A_GOLD, element_sections={}, source_titles={},
+        chunk_sections={"c1": "4.1 Setup"},
+    ) == 1
+    # 查询表整体缺席(那一步查库失败)⇒ 整键 unknown,不猜「零命中」。
+    assert count_anchors_on_gold(
+        anchors, _A_GOLD, element_sections={}, source_titles={},
+        chunk_sections=None,
+    ) is None
+    # 表在、这个 chunk 不在表里 ⇒ 一次真实的解析失败 ⇒ unknown。
+    assert count_anchors_on_gold(
+        anchors, _A_GOLD, element_sections={}, source_titles={},
+        chunk_sections={"other": "4.1"},
     ) is None
 
 
-def test_an_anchor_without_an_element_id_is_not_a_failed_hop():
-    """KG 对象锚点没有 `element_id`——那是另一类锚点,不是解析失败。
+def test_an_anchor_with_neither_an_element_nor_a_section_is_a_failed_hop():
+    """A 格里既没有 `element_id`、也没有任何 section 信息 ⇒ 解析失败 ⇒ unknown。
 
-    把它当成失败会让几乎每个 run 的这一列都变成 unknown,等于把这条判据废掉;
-    它照常进 `anchors_total` 的分母,只是不进分子。
+    A 格(`gold_section_path`)是单篇语料格,跑在 `A_nokg` 上、没有知识图谱,
+    所以这条路上不会出现「纯 KG 对象锚点」那种天然没有 section 的锚点;真出现
+    一个三样都没有的锚点,那就是一次名副其实的解析失败,不能折成「不命中」
+    (§7.1「任一跳解析不到 ⇒ 整键 unknown」)。
     """
-    hits = count_anchors_on_gold(
+    assert count_anchors_on_gold(
         [_anchor(key="k1", element_id="e1"), _anchor(key="k2")],
         _A_GOLD,
         element_sections={"e1": "Abstract"}, source_titles={},
+    ) is None
+
+
+def test_the_b_shape_still_exempts_anchors_that_carry_no_source_id():
+    """B 格保留那条豁免:chunk 与元素锚点都带 `source_id`,分子漏不掉。
+
+    豁免只放过纯 KG 对象锚点——B_kg 上它们真实存在,把它们算成解析失败会让
+    几乎每个 run 的这一列变成 unknown,等于把这条判据废掉。
+    """
+    hits = count_anchors_on_gold(
+        [_anchor(key="k1", source_id="s1"), _anchor(key="k2")],
+        _B_GOLD,
+        element_sections={},
+        source_titles={"s1": "src-193b32d112_06_KIVI_mineru.md"},
     )
     assert hits == 1
 
@@ -434,6 +503,41 @@ def test_a_missing_finish_reason_becomes_a_short_code_not_an_empty_string():
         start=start, end=start + timedelta(seconds=30),
     )
     assert usage.finish_reason_codes == {"length": 1, "unknown": 1}
+    assert_projection_values({"finish_reason_codes": usage.finish_reason_codes})
+
+
+@pytest.mark.parametrize("raw, expected", [
+    ("stop", "stop"),
+    ("  length  ", "length"),
+    ("content filter", "content_filter"),        # 带空白
+    ("length/stop", "length_stop"),              # 带斜杠
+    ("模型侧异常", "_____"),                       # 非 ASCII 也归一,不抛
+    ("", "unknown"),
+    (None, "unknown"),
+    (17, "unknown"),
+    ("x" * 200, "x" * 64),                       # 超长截断到短码上限
+])
+def test_a_provider_finish_reason_is_normalised_into_a_short_code(raw, expected):
+    """provider 报什么形状都不该在**投影那一步**炸掉整批(codex 质量评审 P2-7)。
+
+    `finish_reason` 是 provider 自己的字符串,合同上只保证有值。原样落进
+    `finish_reason_codes` 会被 `assert_projection_values` 拒掉——而那一拒发生在
+    整个 run 已经跑完之后,一次坏读数于是打掉的是几百次模型调用的一批。
+    """
+    from app.eval.reflect_ab import normalize_finish_reason
+
+    assert normalize_finish_reason(raw) == expected
+    assert_projection_values({"finish_reason_codes": {expected: 1}})
+
+
+def test_a_non_short_code_finish_reason_survives_the_whole_slice():
+    """端到端:切片吐出来的那张表整体过得了投影校验。"""
+    start = datetime(2026, 9, 9, 12, 0, 0)
+    usage = slice_llm_usage(
+        [_llm_record(1, finish="content filter"), _llm_record(2, finish="stop")],
+        start=start, end=start + timedelta(seconds=30),
+    )
+    assert usage.finish_reason_codes == {"content_filter": 1, "stop": 1}
     assert_projection_values({"finish_reason_codes": usage.finish_reason_codes})
 
 
@@ -1096,3 +1200,626 @@ def test_the_arm_lives_on_the_repository_not_on_a_settings_argument(rrepo):
     assert ask.settings is rrepo.settings
     retriever = ask._build_reasoning_retriever(cancel_event=None, user_id="u")
     assert retriever.settings is rrepo.settings
+
+
+# ---------------------------------------------------------------------------
+# 预检的其余硬前提(§5.4 / §5.5-2 / §5.5-3)
+# ---------------------------------------------------------------------------
+
+
+def test_ab_refuses_no_intent_because_the_contract_assertion_would_be_vacuous():
+    """§5.5-3 要「两臂引用同一条契约」;`--no-intent` 下根本没有契约可比。
+
+    那时两臂各自现算检索方向,比的已经不是同一件事,而同一性断言退化成
+    `digest(None) == digest(None)` 恒真——一条永远绿的断言比没有断言更坏
+    (codex 质量评审 P2-8)。
+    """
+    problem = rig._ab_preflight(_ab_args(no_intent=True), ["A_nokg"])
+    assert "--no-intent" in problem and "§5.5-3" in problem
+
+
+@pytest.mark.parametrize("round_", [0, -1, 4])
+def test_ab_refuses_a_round_outside_the_repeat_range(round_):
+    """`--round` 是下标不是舒适度阈值:越界该报错,不该 clamp 成边界值。
+
+    clamp 会让 `--round 4 --repeats 3` 安静地把第 3 轮重跑一遍,两轮数据混进
+    同一格。
+    """
+    problem = rig._ab_preflight(_ab_args(round=round_, repeats=3), ["A_nokg"])
+    assert "--round" in problem and "1..3" in problem
+
+
+def test_ab_accepts_a_round_inside_the_range():
+    assert rig._ab_preflight(_ab_args(round=3, repeats=3), ["A_nokg"]) == ""
+
+
+def test_ab_refuses_a_main_database_url_that_is_the_test_database():
+    """两个 URL 同指一处 ⇒ 「主库快照」量的是 ab 自己正在写的那个库。
+
+    那样这条断言要么必然假红(ab 真的往里写了),要么什么都不证明——两种都让
+    §5.5-2 失效(codex 质量评审 P1-1)。
+    """
+    same = "postgresql://127.0.0.1:5432/nb_t0_test"
+    problem = rig._ab_preflight(
+        _ab_args(database_url=same, source_db_url=same + "/"), ["A_nokg"],
+    )
+    assert "--source-db-url" in problem and "--database-url" in problem
+
+
+# ---------------------------------------------------------------------------
+# 「主库零接触」的证据资格与收尾时机(§5.5-2)
+# ---------------------------------------------------------------------------
+
+
+def test_a_baseline_that_counts_nothing_is_not_evidence():
+    """三张证据表全 `None` ⇒ before == after 恒成立 ⇒ 断言恒真。
+
+    `_readonly_counts` 对每张数不出来的表都记 `None`,所以一条指错库/连不上的
+    `--source-db-url` 会让 §5.5-2 静默通过(codex 质量评审 P1-1)。
+    """
+    assert rig.readonly_baseline_problem(
+        {"ask_jobs": None, "answers": None, "conversations": None,
+         "knowledge_objects": None, "retrieval_experiences": None}
+    ) != ""
+    # 有一张数得出来就够:剩下的 `None` 是「这次不看它」,不是「没连上」。
+    assert rig.readonly_baseline_problem(
+        {"ask_jobs": 0, "answers": None, "conversations": None}
+    ) == ""
+
+
+def _ab_run_harness(monkeypatch, tmp_path, *, counts, loop):
+    """把 `_run_ab` 的每个真实依赖换掉,只留下要验的那一段编排。
+
+    这条路真跑要连两个库、构造两个仓储、读部署 TOML;用例一个都不需要——要验
+    的是「基线不合格时整批停在第一个模型调用之前」与「收尾断言在异常路径上也
+    跑」这两件编排事实。
+    """
+    settings = SimpleNamespace(llm_log_path=str(tmp_path / "llm" / "llm.jsonl"))
+    repo = SimpleNamespace(
+        maintenance=SimpleNamespace(
+            resolve_owner_profile=lambda name: SimpleNamespace(id="ab-owner"),
+        ),
+        settings=settings,
+    )
+    # `os.environ.update(...)` 不受 monkeypatch 管辖,会漏进同进程的别的用例。
+    monkeypatch.setattr(rig, "_ab_process_env", lambda args: {})
+    monkeypatch.setattr(rig, "_settings_by_policy",
+                        lambda: {"legacy": settings, "v2": settings})
+    monkeypatch.setattr(rig, "_search_repository", lambda s: repo)
+    monkeypatch.setattr(rig, "assert_knowhow_reflect_v2_off", lambda r, s: None)
+    monkeypatch.setattr(rig, "_ab_notebook_ids",
+                        lambda url, cells: {cell: "nb-1" for cell in cells})
+    monkeypatch.setattr(
+        rig, "_ab_corpus_facts",
+        lambda args, runner, r, cells, nbs, kg: {c: _fact() for c in cells},
+    )
+    monkeypatch.setattr(rig, "_ab_assert_gold_resolves",
+                        lambda *a, **kw: 0)
+    monkeypatch.setattr(rig, "_ab_model_contract",
+                        lambda s: ("0123456789abcdef", "fake"))
+    seen: list[str] = []
+
+    def _counts(url):
+        seen.append(url)
+        return dict(counts)
+
+    monkeypatch.setattr(rig, "_readonly_counts", _counts)
+    monkeypatch.setattr(rig, "_ab_loop", loop)
+    return seen
+
+
+def test_ab_stops_with_exit_2_when_the_main_database_baseline_is_all_unknown(
+    tmp_path, monkeypatch, capsys,
+):
+    """§5.5-2 未验证 ≠ 通过:基线点不出任何一张证据表就整批不跑。"""
+    ran: list[int] = []
+    seen = _ab_run_harness(
+        monkeypatch, tmp_path,
+        counts={"ask_jobs": None, "answers": None, "conversations": None},
+        loop=lambda *a, **kw: ran.append(1) or 0,
+    )
+    args = _ab_args(dry_run=False, out_dir=str(tmp_path))
+    runner = rig.Runner(dry_run=False, out_dir=tmp_path)
+    assert rig._run_ab(args, runner, [_unit()], ["A_nokg"]) == 2
+    err = capsys.readouterr().err
+    assert "证据表" in err
+    # 跑批从来没开始,收尾那次快照也就不该发生。
+    assert ran == [] and len(seen) == 1
+
+
+def test_the_readonly_assertion_runs_even_when_the_batch_blows_up(
+    tmp_path, monkeypatch, capsys,
+):
+    """收尾的「主库零接触」核对在 `finally` 里(codex 质量评审 P2-5)。
+
+    此前它在 try 之后:跑批中途抛出去时整条断言被跳过——而异常路径恰恰是最该
+    量一次的时刻。原始异常照常往上抛,不被那次核对掩盖。
+    """
+    def _boom(*args, **kwargs):
+        raise RuntimeError("批里炸了")
+
+    seen = _ab_run_harness(
+        monkeypatch, tmp_path,
+        counts={"ask_jobs": 3, "answers": 1, "conversations": 1},
+        loop=_boom,
+    )
+    args = _ab_args(dry_run=False, out_dir=str(tmp_path))
+    runner = rig.Runner(dry_run=False, out_dir=tmp_path)
+    with pytest.raises(RuntimeError, match="批里炸了"):
+        rig._run_ab(args, runner, [_unit()], ["A_nokg"])
+    capsys.readouterr()
+    assert len(seen) == 2, "收尾快照没跑"
+
+
+def test_a_failed_batch_exits_non_zero(tmp_path, monkeypatch, capsys):
+    """跑完但每个 run 都 `status=failed` 不能看起来像一次成功的跑批。"""
+    _ab_run_harness(
+        monkeypatch, tmp_path,
+        counts={"ask_jobs": 3, "answers": 1, "conversations": 1},
+        loop=lambda *a, **kw: 2,
+    )
+    args = _ab_args(dry_run=False, out_dir=str(tmp_path))
+    runner = rig.Runner(dry_run=False, out_dir=tmp_path)
+    assert rig._run_ab(args, runner, [_unit()], ["A_nokg"]) == 1
+    assert "2 个 run FAILED" in capsys.readouterr().err
+
+
+def test_the_readonly_violation_message_names_the_command(tmp_path, capsys):
+    """文案不写死「search」:`ab` 的读者不该以为报错来自另一条没跑的命令。"""
+    runner = rig.Runner(dry_run=False, out_dir=tmp_path)
+    with pytest.raises(RuntimeError, match="这次 ab 之后变了"):
+        rig._assert_readonly(
+            runner, {"ask_jobs": 1}, {"ask_jobs": 2}, command="ab",
+        )
+    capsys.readouterr()
+
+
+# ---------------------------------------------------------------------------
+# 进程环境与 LLM 日志的归属(§5.5-4;§7.2)
+# ---------------------------------------------------------------------------
+
+
+def test_both_process_envs_carry_exactly_the_same_keys():
+    """注入三闸此前在两处逐字重复;漏一项在数据上看不出任何区别。
+
+    键集相同这条断言是那份清单只有一份的证据(codex 质量评审 P2-9)。
+    """
+    args = _ab_args(env_file="/tmp/does-not-matter.env")
+    assert set(rig._search_process_env(args)) == set(rig._ab_process_env(args))
+    without = _ab_args(env_file=None)
+    assert set(rig._search_process_env(without)) == set(rig._ab_process_env(without))
+    assert "SILICON_NOTEBOOK_ENV_FILE" not in rig._ab_process_env(without)
+
+
+def test_the_two_process_envs_still_point_at_different_databases():
+    """同一份清单、两个 `DATABASE_URL`:`search` 连主库,`ab` 连一次性测试库。"""
+    args = _ab_args()
+    assert rig._ab_process_env(args)["DATABASE_URL"] == args.database_url
+    for gate in ("RETRIEVAL_EXPERIENCE_INJECT_ENABLED",
+                 "REASONING_CONSULT_MEMORY_ENABLED", "AGENT_PROFILE_ENABLED"):
+        assert rig._ab_process_env(args)[gate] == "false"
+
+
+def test_the_llm_log_is_pinned_to_the_out_dir_and_read_back_from_there(tmp_path):
+    """成本三键的归因前提:这个 run 的模型调用写在**只有它在写**的那份日志里。
+
+    默认落点 `.local/logs/llm.jsonl` 是整台机器共用的,同一天里别的后端/冒烟/
+    rig 会话都往同一个文件追加——时间窗切片于是把别人的 token 记到本 run 上
+    (codex 质量评审 P1-2 / 规格评审 P2-2)。
+    """
+    args = _ab_args(out_dir=str(tmp_path / "ab"))
+    pinned = rig._ab_process_env(args)["LLM_LOG_PATH"]
+    assert pinned == str((tmp_path / "ab" / "llm" / "llm.jsonl").resolve())
+    # 读侧同源:`_ab_llm_log_dir` 读的就是这一条 env 装出来的 `Settings` 字段,
+    # 所以写在哪、读在哪不会分叉。
+    assert rig._ab_llm_log_dir(
+        SimpleNamespace(llm_log_path=pinned)
+    ) == (tmp_path / "ab" / "llm").resolve()
+
+
+def test_only_the_records_written_after_the_run_started_are_read_back(tmp_path):
+    """每 run 重读整天日志是 O(N²) + 内存尖峰(codex 质量评审 P2-6)。
+
+    offset 只负责「不重读别的 run 已经数过的行」,归因判据仍是时间窗。
+    """
+    log_dir = tmp_path / "llm"
+    (log_dir / "u1").mkdir(parents=True)
+    path = log_dir / "u1" / "llm-2026-09-09.jsonl"
+    path.write_text(json.dumps(_llm_record(-100)) + "\n", encoding="utf-8")
+    offsets = rig._ab_llm_offsets(log_dir)
+    assert offsets == {str(path): path.stat().st_size}
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(_llm_record(1)) + "\n")
+    fresh = rig._ab_read_llm_records(log_dir, offsets)
+    assert len(fresh) == 1
+    # 不给 offset 就是从头读(第一个 run 之前目录还不存在的那种情况)。
+    assert len(rig._ab_read_llm_records(log_dir, {})) == 2
+
+
+def test_llm_offsets_on_a_directory_that_does_not_exist_yet(tmp_path):
+    assert rig._ab_llm_offsets(tmp_path / "nope") == {}
+    assert rig._ab_read_llm_records(tmp_path / "nope", {}) == []
+
+
+# ---------------------------------------------------------------------------
+# 枚举链终态与锚点查询表(§7.1)
+# ---------------------------------------------------------------------------
+
+
+def _coverage(complete: bool | None):
+    return SimpleNamespace(complete=complete)
+
+
+def test_coverage_complete_reads_the_enumeration_result_sets():
+    """枚举链终态住在 `result_sets[*].coverage`,不在 `result_coverage`。
+
+    `result_coverage` 是 `StructuredBatchCoverage`,只有表格批量那条路会写。只读
+    它的后果不是少一个信号,而是**反号**:目录题真的枚举完整时它仍是 `None`,
+    `completeness_claim_candidate` 于是把「共 12 篇」判成虚报候选,所有目录题
+    两臂全被强制进人工(codex 规格评审 P1-1)。
+    """
+    complete = SimpleNamespace(
+        result_sets=[SimpleNamespace(coverage=_coverage(True))],
+        result_coverage=None,
+    )
+    partial = SimpleNamespace(
+        result_sets=[SimpleNamespace(coverage=_coverage(False))],
+        result_coverage=None,
+    )
+    none = SimpleNamespace(result_sets=[], result_coverage=None)
+    assert rig._ab_coverage_complete(complete) is True
+    assert rig._ab_coverage_complete(partial) is False
+    assert rig._ab_coverage_complete(none) is None
+    # 两条链都在场:有一条走到终态就是 complete。
+    mixed = SimpleNamespace(
+        result_sets=[SimpleNamespace(coverage=_coverage(False)),
+                     SimpleNamespace(coverage=_coverage(True))],
+        result_coverage=_coverage(False),
+    )
+    assert rig._ab_coverage_complete(mixed) is True
+    # 表格批量那条路仍然算数(它自己那份 coverage 是它的权威)。
+    table_only = SimpleNamespace(result_sets=[], result_coverage=_coverage(True))
+    assert rig._ab_coverage_complete(table_only) is True
+
+
+def test_a_complete_enumeration_stops_the_completeness_candidate():
+    """端到端:枚举链报 complete ⇒ 「共 12 篇」不再是虚报候选。"""
+    response = SimpleNamespace(
+        result_sets=[SimpleNamespace(coverage=_coverage(True))],
+        result_coverage=None,
+    )
+    assert completeness_claim_candidate(
+        "共 12 篇。", coverage_complete=rig._ab_coverage_complete(response),
+    ) is False
+
+
+def test_an_all_empty_id_list_short_circuits_instead_of_building_in_nothing():
+    """`["", "", ""]` 非空、唯一 id 集合却是空的 ⇒ 拼出来的是 `IN ()`。
+
+    在 SQLite 上它返回 `[]`(每个锚点都「查不到」⇒ 整键 unknown),在 PostgreSQL
+    上是一句语法错、被外层大 `except` 吞成同一个 unknown(codex 规格评审 P2-1)。
+    这里用一个连不上的 URL 分辨两种返回:`{}` = 短路了(压根没查),`None` =
+    真去查了并且失败。
+    """
+    dead = "postgresql://127.0.0.1:1/nope"
+    assert rig._ab_unique_ids(["", None, "  ", "e1", "e1"]) == ["e1"]
+    assert rig._ab_element_sections(dead, ["", "", ""]) == {}
+    assert rig._ab_chunk_sections(dead, ["", None]) == {}
+    # 真有 id 时才去查,查不通就是 unknown。
+    assert rig._ab_element_sections(dead, ["e1"]) is None
+
+
+def test_the_b_shape_never_queries_the_element_or_chunk_tables():
+    """B 格走 `source_titles`(已在 `_ab_corpus_facts` 点清),不该再打两条查询。"""
+    def _boom(*args, **kwargs):
+        raise AssertionError("B 格不该查库")
+
+    saved = (rig._ab_element_sections, rig._ab_chunk_sections)
+    rig._ab_element_sections = _boom
+    rig._ab_chunk_sections = _boom
+    try:
+        anchors = [SimpleNamespace(element_id="e1", object_id="", object_type="",
+                                   location_label="")]
+        assert rig._ab_section_lookups("db", _B_GOLD, anchors) == (None, None)
+        # 没 gold 的题同理:`count_anchors_on_gold` 对它恒返回 None。
+        assert rig._ab_section_lookups("db", None, anchors) == (None, None)
+    finally:
+        rig._ab_element_sections, rig._ab_chunk_sections = saved
+
+
+def test_the_a_shape_only_asks_the_chunks_table_about_labelless_chunks():
+    """带 `location_label` 的 chunk 锚点已经自带 section,不必再查一次库。"""
+    asked: dict[str, list[str]] = {}
+
+    def _record(name):
+        def _inner(url, ids):
+            asked[name] = list(ids)
+            return {}
+        return _inner
+
+    saved = (rig._ab_element_sections, rig._ab_chunk_sections)
+    rig._ab_element_sections = _record("elements")
+    rig._ab_chunk_sections = _record("chunks")
+    try:
+        rig._ab_section_lookups("db", _A_GOLD, [
+            SimpleNamespace(element_id="e1", object_id="c0", object_type="chunk",
+                            location_label=""),
+            SimpleNamespace(element_id="", object_id="c1", object_type="chunk",
+                            location_label="4.1 Setup"),
+            SimpleNamespace(element_id="", object_id="c2", object_type="chunk",
+                            location_label=""),
+        ])
+    finally:
+        rig._ab_element_sections, rig._ab_chunk_sections = saved
+    assert asked["elements"] == ["e1", "", ""]
+    assert asked["chunks"] == ["c2"]
+
+
+# ---------------------------------------------------------------------------
+# 失败 run 的落行、契约同一性与并发收摊(§5.5-3;codex 质量评审 P2-3/P2-4)
+# ---------------------------------------------------------------------------
+
+
+def _fixed_intents(monkeypatch, contract: Any = None):
+    """把 `_IntentCache.get` 换成一个固定返回,用例里不算真实意图契约。"""
+    payload = contract if contract is not None else {"resolved_question": "q"}
+    monkeypatch.setattr(
+        rig._IntentCache, "get",
+        lambda self, repo, settings, item, *, actor_id, notebook: payload,
+    )
+    return payload
+
+
+def _run_one_unit(tmp_path, unit, args, *, state=None, intents=None,
+                  facts=None, runner=None):
+    """跑一个配对单元,回 `(读回来的行, state)`。"""
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    runner = runner or rig.Runner(dry_run=False, out_dir=out_dir)
+    state = state or {"verified": set(), "index": 0, "total": 2, "failed": 0,
+                      "lock": threading.Lock()}
+    rows_path = out_dir / "ab-runs.jsonl"
+    with rows_path.open("a", encoding="utf-8") as rows_handle, \
+            (out_dir / "ab-runs.log").open("a", encoding="utf-8") as log:
+        rig._run_ab_unit(
+            unit, args=args, runner=runner,
+            facts=facts or {"A_nokg": _fact()}, repos_by_arm=_repos_by_arm(),
+            actor_id="ab-owner", profile=None, concurrency=1,
+            intents=intents or rig._IntentCache(
+                out_dir / "intents.jsonl", enabled=False),
+            gold_by_key=load_ab_gold(load_questions()),
+            model_contract="0123456789abcdef", log_dir=out_dir,
+            clock=datetime.now, state=state,
+            rows_handle=rows_handle, log=log,
+        )
+    rows = [json.loads(line) for line in rows_path.read_text().splitlines()]
+    return rows, state
+
+
+def test_a_scope_failure_lands_one_failed_row_per_arm(
+    tmp_path, monkeypatch, capsys,
+):
+    """声明了范围却解析不到唯一匹配 ⇒ 两臂各落一行 `status=failed`。
+
+    此前这条路直接 `return`:整个单元从 `ab-runs.jsonl` 里凭空消失,而分析脚本
+    只读 JSONL——样本数因此偏向跑成的那一侧(codex 质量评审 P2-4)。
+    """
+    ran: list[str] = []
+    monkeypatch.setattr(rig, "resolve_scope_source_ids", lambda *a, **kw: None)
+    monkeypatch.setattr(rig, "run_ab_once",
+                        lambda *a, **kw: ran.append("跑了") or _FakeResponse())
+    rows, state = _run_one_unit(
+        tmp_path, _unit(scope_source_titles=("KIVI",)),
+        _ab_args(only_policy=[], out_dir=str(tmp_path / "ab"), dry_run=False),
+    )
+    capsys.readouterr()
+    assert ran == [], "范围没解析出来就不该真的去跑"
+    assert len(rows) == 2
+    assert {row["arm"] for row in rows} == {"legacy", "v2"}
+    # 失败行按 rig **声明**的臂归组:空轨迹没有协议证据,不给声明标签的话 v2 的
+    # 失败会被投影成 legacy(codex #700 R9/R10 P2 的同一条口径)。
+    assert {row["policy_version"] for row in rows} == {"legacy", "v2"}
+    for row in rows:
+        assert row["status"] == "failed"
+        assert set(row) <= AB_PROJECTION_KEYS
+        assert_projection_values(row)
+        # 数值键落 unknown 而不是 0:`answer_chars=0` 会被读成「模型答了个空串」。
+        assert row["answer_chars"] is None and row["citations"] is None
+        assert row["latency_ms_total"] is None
+        # 工作负载维度照常落,失败行要能与成功行放进同一张分组表。
+        assert row["effort"] == "standard" and row["corpus_cell"] == "A_nokg"
+        assert row["question_key"] == "A-q08" and row["repeat"] == 1
+        assert row["corpus_signature"] == "fedcba9876543210"
+    assert state["failed"] == 2
+
+
+def test_an_arm_that_blows_up_lands_a_failed_row_without_losing_the_other_arm(
+    tmp_path, monkeypatch, capsys,
+):
+    """一条臂崩了不作废另一条,而且崩掉的那条也要在数据集里留下一行。
+
+    「哪一侧更容易崩」本身就是 A/B 要量的东西之一;把失败静静吞掉会让它变成
+    「v2 的样本更少」这种看不出来的偏差(codex 质量评审 P2-4)。
+    """
+    def _fake_run(repo, *, notebook, item, arm, contract, on_trace,
+                  cancel_event, actor_id, scope_source_ids=None):
+        for step in _steps(arm):
+            on_trace(SimpleNamespace(step_type=step["step_type"], summary="",
+                                     detail=step["detail"], duration_ms=3))
+        if arm == "v2":
+            raise RuntimeError("provider 502")
+        return _FakeResponse()
+
+    monkeypatch.setattr(rig, "run_ab_once", _fake_run)
+    monkeypatch.setattr(rig, "_ab_element_sections", lambda url, ids: {})
+    monkeypatch.setattr(rig, "_ab_chunk_sections", lambda url, ids: {})
+    monkeypatch.setattr(rig, "_ab_usage_for_window",
+                        lambda *a, **kw: UNKNOWN_USAGE)
+    rows, state = _run_one_unit(
+        tmp_path, _unit(),
+        _ab_args(only_policy=[], out_dir=str(tmp_path / "ab"), dry_run=False),
+    )
+    capsys.readouterr()
+    by_arm = {row["arm"]: row for row in rows}
+    assert set(by_arm) == {"legacy", "v2"}
+    assert by_arm["legacy"]["status"] == "done"
+    assert by_arm["legacy"]["answer_chars"] > 0
+    assert by_arm["v2"]["status"] == "failed"
+    assert by_arm["v2"]["policy_version"] == "v2"
+    # 失败前捕获到的轨迹步不丢(codex #700 R13 P2):丢掉它们会把
+    # `reflect_turns` 记成 0,失败多的那一侧看起来「反思轮更少」。
+    assert by_arm["v2"]["reflect_turns"] == by_arm["legacy"]["reflect_turns"]
+    assert state["failed"] == 1
+    # 崩掉的那条臂不消费「第一个样本」的名额——它没有协议证据可对。
+    assert state["verified"] == {"legacy"}
+    log_text = (tmp_path / "ab" / "ab-runs.log").read_text(encoding="utf-8")
+    assert "status=failed reason=RuntimeError" in log_text
+    assert "provider 502" not in log_text  # 只记类名,不记异常正文
+
+
+def test_the_contract_digest_is_taken_fresh_inside_the_arm_loop(
+    tmp_path, monkeypatch, capsys,
+):
+    """§5.5-3 的断言必须**在臂的循环里各取各比**(codex 规格评审 P2-3)。
+
+    循环外取一次、循环内拿同一个对象比自己的短码,那条断言恒真——而它要挡的
+    恰恰是「哪天有人把 `intents.get` 挪进臂的循环」:挪进来之后数据照样出得来,
+    两臂却已经在比两件不同的事了。
+    """
+    handed: list[dict] = []
+    # 取第 1 次(基线)、第 2 次(第一条臂)拿到同一份;第 3 次(第二条臂)换人。
+    contracts = [{"a": 1}, {"a": 1}, {"a": 2}]
+    fetched: list[int] = []
+
+    def _get(self, repo, settings, item, *, actor_id, notebook):
+        fetched.append(1)
+        return contracts[min(len(fetched) - 1, len(contracts) - 1)]
+
+    def _fake_run(repo, *, notebook, item, arm, contract, on_trace,
+                  cancel_event, actor_id, scope_source_ids=None):
+        handed.append(contract)
+        for step in _steps(arm):
+            on_trace(SimpleNamespace(step_type=step["step_type"], summary="",
+                                     detail=step["detail"], duration_ms=1))
+        return _FakeResponse()
+
+    monkeypatch.setattr(rig._IntentCache, "get", _get)
+    monkeypatch.setattr(rig, "run_ab_once", _fake_run)
+    monkeypatch.setattr(rig, "_ab_element_sections", lambda url, ids: {})
+    monkeypatch.setattr(rig, "_ab_chunk_sections", lambda url, ids: {})
+    monkeypatch.setattr(rig, "_ab_usage_for_window",
+                        lambda *a, **kw: UNKNOWN_USAGE)
+    args = _ab_args(only_policy=[], out_dir=str(tmp_path / "ab"), dry_run=False)
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True)
+    with pytest.raises(RuntimeError, match="不是同一份"):
+        _run_one_unit(
+            tmp_path, _unit(), args,
+            intents=rig._IntentCache(out_dir / "intents.jsonl", enabled=True),
+        )
+    capsys.readouterr()
+    # 第一条臂拿到的是与基线相同的那一份;第二条臂再取一次,发现换人了就停。
+    assert handed == [{"a": 1}]
+    # 基线一次 + 每条臂各一次 = 3 次:循环外取一次、循环内比同一个对象的写法
+    # 只会取 1 次,那种写法下这条断言恒真。
+    assert len(fetched) == 3
+
+
+def test_the_progress_total_follows_the_arms_that_are_actually_run(
+    tmp_path, monkeypatch, capsys,
+):
+    """`--only-policy` 只跑一侧时,分母不该恒按两臂算(codex 评审 P3)。"""
+    monkeypatch.setattr(
+        rig, "run_ab_once",
+        lambda repo, **kw: (
+            [kw["on_trace"](SimpleNamespace(
+                step_type=step["step_type"], summary="",
+                detail=step["detail"], duration_ms=1))
+             for step in _steps(kw["arm"])],
+            _FakeResponse(),
+        )[1],
+    )
+    monkeypatch.setattr(rig, "_ab_element_sections", lambda url, ids: {})
+    monkeypatch.setattr(rig, "_ab_chunk_sections", lambda url, ids: {})
+    monkeypatch.setattr(rig, "_ab_usage_for_window",
+                        lambda *a, **kw: UNKNOWN_USAGE)
+    _fixed_intents(monkeypatch)
+    out_dir = tmp_path / "ab"
+    runner = rig.Runner(dry_run=False, out_dir=out_dir)
+    args = _ab_args(only_policy=["v2"], out_dir=str(out_dir), dry_run=False)
+    failed = rig._ab_loop(
+        args, runner, [_unit(question_key="A-q08"), _unit(question_key="A-q14")],
+        {"A_nokg": _fact()}, _repos_by_arm(),
+        actor_id="ab-owner", profile=None, concurrency=1,
+        gold_by_key=load_ab_gold(load_questions()),
+        model_contract="0123456789abcdef", log_dir=out_dir,
+        clock=datetime.now,
+    )
+    capsys.readouterr()
+    assert failed == 0
+    lines = (out_dir / "ab-runs.log").read_text(encoding="utf-8").splitlines()
+    assert [line.split()[0] for line in lines] == ["0001/2", "0002/2"]
+
+
+def test_a_concurrent_batch_cancels_the_remaining_units_after_the_first_abort(
+    tmp_path, monkeypatch, capsys,
+):
+    """守卫:§5.5 的硬断言不成立 ⇒ 收摊,余下单元不再执行。
+
+    此前这里是 `with ThreadPoolExecutor(...)` + `as_completed`,退出走的是默认
+    `shutdown(wait=True)`:剩下的单元一个不少地照跑完,「先修再跑整批」这句话
+    不成立,Ctrl-C 也停不下来(codex 质量评审 P2-3)。
+
+    第一个单元(`Q00`)回一份 legacy 形状的轨迹,而它声明的臂是 v2 ⇒
+    `assert_arm_matches_evidence` 抛;其余单元卡在**各自的** `cancel_event.wait()`
+    上,只有被 `abort()` 设过之后才会醒来。断言:异常真的抛出来、没有全部 8 个
+    单元都执行到、而且在跑的那个被及时唤醒(不是靠 5s 超时自己醒的)。
+    """
+    from app.services.cancellation import AskCancelled
+
+    total = 8
+    units = [_unit(question_key=f"Q{i:02d}") for i in range(total)]
+    executed: list[str] = []
+    lock = threading.Lock()
+
+    def _fake_run(repo, *, notebook, item, arm, contract, on_trace,
+                  cancel_event, actor_id, scope_source_ids=None):
+        with lock:
+            executed.append(item["question_key"])
+        if item["question_key"] == "Q00":
+            # legacy 形状:没有终态披露步,而声明的臂是 v2。
+            on_trace(SimpleNamespace(step_type="reflect", summary="",
+                                     detail={"next_action": "answer"},
+                                     duration_ms=1))
+            return _FakeResponse()
+        if cancel_event.wait(timeout=5):
+            raise AskCancelled()
+        raise TimeoutError("cancel_event 一直没被设置——abort() 没生效")
+
+    monkeypatch.setattr(rig, "run_ab_once", _fake_run)
+    monkeypatch.setattr(rig, "_ab_element_sections", lambda url, ids: {})
+    monkeypatch.setattr(rig, "_ab_chunk_sections", lambda url, ids: {})
+    monkeypatch.setattr(rig, "_ab_usage_for_window",
+                        lambda *a, **kw: UNKNOWN_USAGE)
+    _fixed_intents(monkeypatch)
+
+    out_dir = tmp_path / "ab"
+    runner = rig.Runner(dry_run=False, out_dir=out_dir)
+    args = _ab_args(only_policy=["v2"], out_dir=str(out_dir), dry_run=False)
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match="policy_version"):
+        rig._ab_loop(
+            args, runner, units, {"A_nokg": _fact()}, _repos_by_arm(),
+            actor_id="ab-owner", profile=None, concurrency=2,
+            gold_by_key=load_ab_gold(load_questions()),
+            model_contract="0123456789abcdef", log_dir=out_dir,
+            clock=datetime.now,
+        )
+    elapsed = time.monotonic() - started
+    capsys.readouterr()
+    assert len(executed) < total, executed
+    # 队列里还没开始跑的靠 `shutdown(cancel_futures=True)` 撤掉;**已经在跑、卡在
+    # 自己 cancel_event 上**的那一个只能靠 `abort()` 主动 `.set()` 唤醒。它上面
+    # 那个 5s 超时就是留给「abort() 没生效」的:那种退化不会让断言失败,只会让
+    # 用例慢一拍,所以这里把它钉成响亮失败。
+    assert elapsed < 3.0, f"in-flight 单元没有被 abort() 及时唤醒({elapsed:.1f}s)"

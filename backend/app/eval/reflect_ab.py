@@ -259,18 +259,15 @@ def count_anchors_on_gold(
     *,
     element_sections: Mapping[str, str] | None,
     source_titles: Mapping[str, str] | None,
+    chunk_sections: Mapping[str, str] | None = None,
 ) -> int | None:
     """落在 gold 上的**不同**锚点数。任一跳解析不到 ⇒ `None`,绝不写 0。
 
     两种格式(§7.1):
 
-    * **A 格**:锚点 → `element_id` → `source_elements.metadata.section_path`,
-      按前缀匹配 `gold_section_path`。`source_elements` 表**没有** `section_path`
-      列(2026-09-09 复核 `0001_initial.sql`:该表只有 id / source_id /
-      element_type / location_label / text / metadata / created_at / ordinal),
-      这个值住在 `metadata` 这一列的 jsonb 里,两侧仓储都按
-      `metadata.get("section_path")` 读(`postgres/catalog_store.py:445`、
-      `sqlite/catalog_store.py:539`)。
+    * **A 格**:锚点 → 一个 `section_path` → 按前缀匹配 `gold_section_path`。
+      拿到 `section_path` 有三条路(见 `_anchor_section`),因为服务端签发的
+      锚点不止元素一种。
     * **B 格**:锚点 → `source_id` → 标题包含 `gold_sources` 的某个短名。
 
     「解析不到」这三个字的口径,是这个函数里唯一容易写错的地方,所以写死在
@@ -278,41 +275,91 @@ def count_anchors_on_gold(
 
     * 查询表整体缺席(`element_sections is None`)= rig 那一步查库失败 ⇒ 整键
       unknown;
-    * 一个**带了 id** 的锚点,其 id 在查询表里查不到(或查到空值)= 一次真实
-      的解析失败 ⇒ 整键 unknown;
-    * 一个**根本没带这个 id** 的锚点(KG 对象锚点没有 `element_id`)≠ 解析
-      失败:它是另一类锚点,不进分子,但照常进 `anchors_total` 的分母。把它
-      当成解析失败会让几乎每个 run 的这一列都变成 unknown,那等于把这条判据
-      废掉。
+    * 一个**带了 id** 的锚点,其 id 在查询表里查不到 = 一次真实的解析失败 ⇒
+      整键 unknown;
+    * 一个 id 查得到、但那一行的 `section_path` 是空串 ≠ 解析失败:那是一条
+      「首个标题之前的块」(`structural_markdown.section_path()` 对它返回 "")。
+      前缀匹配对它只能判**不命中**——它进分母、不进分子,而不是让一个 run 的
+      整列变成 unknown(codex 质量评审 P2-11)。
+
+    B 格那一半保留「根本没带 `source_id` 的锚点不算解析失败」的口径:chunk 与
+    元素锚点都携带 `source_id`,所以那一条只放过纯 KG 对象锚点,不会把分子漏
+    掉;A 格没有这条豁免,理由见 `_anchor_section`。
     """
     if gold is None or not gold.has_anchor_gold:
         return None
     if gold.gold_section_path:
         return _anchors_on_section_gold(
-            anchors, gold.gold_section_path, element_sections
+            anchors, gold.gold_section_path, element_sections, chunk_sections
         )
     return _anchors_on_source_gold(anchors, gold.gold_sources, source_titles)
+
+
+def _anchor_section(
+    anchor: object,
+    element_sections: Mapping[str, str],
+    chunk_sections: Mapping[str, str] | None,
+) -> tuple[str, str] | None:
+    """一个锚点的 `(去重身份, section_path)`。**解析不到返回 `None`**。
+
+    三条路,按可靠性排:
+
+    1. `element_id` 非空 ⇒ 查 `source_elements.metadata.section_path`。
+       `source_elements` 表**没有** `section_path` 列(2026-09-09 复核
+       `0001_initial.sql`:只有 id / source_id / element_type / location_label
+       / text / metadata / created_at / ordinal),值住在 `metadata` 的 jsonb
+       里,两侧仓储都按 `metadata.get("section_path")` 读
+       (`postgres/catalog_store.py:445`、`sqlite/catalog_store.py:539`)。
+    2. 没有 `element_id`、但锚点自带 `location_label` ⇒ 直接用它。**chunk 锚点
+       走的就是这一条**:`build_chunks` 按 600 字聚合多个元素,`element_id` 只
+       在 chunk 恰好只含一个元素时非空(`evidence_context.py:495`),而
+       `location_label` 恒等于 `chunk.section_path`(同文件 :493)。此前这一跳
+       缺席,于是多数 chunk 锚点进了分母却进不了分子——`anchors_on_gold` 因此
+       系统性偏低(codex 规格评审 P1-2)。
+    3. 既没有 `element_id` 也没有 `location_label`、但它是一个 chunk ⇒ 按
+       `object_id`(= `chunk_id`)查 `chunks.section_path`(那是一列真实的列,
+       `0001_initial.sql:113`)。
+
+    三条都不通 ⇒ **解析失败**,由调用方判成整键 unknown。这里刻意**不**给
+    「什么 id 都没带」的锚点留豁免:A 格(`gold_section_path`)是单篇语料格,
+    它跑在 `A_nokg` 上、没有知识图谱,所以这条路上不会出现纯 KG 对象锚点;而
+    真出现了一个三样都没有的锚点,那就是一次名副其实的解析失败,不该被折成
+    「不命中」。B 格(`gold_sources`)另有豁免,见 `count_anchors_on_gold`。
+    """
+    element_id = _anchor_field(anchor, "element_id")
+    if element_id:
+        if element_id not in element_sections:
+            return None
+        return f"element:{element_id}", str(element_sections.get(element_id) or "")
+    object_id = _anchor_field(anchor, "object_id")
+    label = _anchor_field(anchor, "location_label")
+    if label:
+        return f"anchor:{object_id or _anchor_field(anchor, 'key')}", label
+    if _anchor_field(anchor, "object_type") == "chunk" and object_id:
+        if chunk_sections is None or object_id not in chunk_sections:
+            return None
+        return f"chunk:{object_id}", str(chunk_sections.get(object_id) or "")
+    return None
 
 
 def _anchors_on_section_gold(
     anchors: Sequence[object],
     gold_section_path: Sequence[str],
     element_sections: Mapping[str, str] | None,
+    chunk_sections: Mapping[str, str] | None,
 ) -> int | None:
     if element_sections is None:
         return None
     hits: set[str] = set()
     for anchor in anchors:
-        element_id = _anchor_field(anchor, "element_id")
-        if not element_id:
-            continue
-        if element_id not in element_sections:
+        resolved = _anchor_section(anchor, element_sections, chunk_sections)
+        if resolved is None:
             return None
-        section = str(element_sections.get(element_id) or "")
-        if not section:
-            return None
-        if any(section.startswith(prefix) for prefix in gold_section_path):
-            hits.add(element_id)
+        identity, section = resolved
+        if section and any(
+            section.startswith(prefix) for prefix in gold_section_path
+        ):
+            hits.add(identity)
     return len(hits)
 
 
@@ -421,10 +468,13 @@ def completeness_claim_candidate(
 ) -> bool:
     """答案里出现完整性断言、**且**本 run 的枚举链终态不是 `complete`。
 
-    `coverage_complete` 取 `AskResponse.result_coverage.complete`——集合级覆盖
-    对象是 complete/partial 的权威(见 `AskResponse.result_sets` 的注释)。这次
-    run 压根没走集合枚举时它是 `None`,而 `None` 在这里就是「没有任何东西背书
-    这句完整性断言」,所以照样算候选。
+    `coverage_complete` 由调用方从**这次 run 的枚举链终态**算出来
+    (rig 侧 `_ab_coverage_complete`:`AskResponse.result_sets[*].coverage
+    .complete`,表格批量路径另有 `result_coverage`)。集合级覆盖对象是
+    complete/partial 的权威——见 `AskResponse.result_sets` 的注释「their
+    coverage object is the authority for complete/partial」。这次 run 压根没走
+    任何枚举时它是 `None`,而 `None` 在这里就是「没有任何东西背书这句完整性
+    断言」,所以照样算候选。
     """
     if coverage_complete is True:
         return False
@@ -485,6 +535,32 @@ UNKNOWN_USAGE = AbUsage()
 #: 报 finish_reason」本身是要计数的一类(T0 的 20% 空正文靠它归因)。
 FINISH_REASON_UNKNOWN = "unknown"
 
+#: 短码校验放行的字符(与 `reasoning_trace_stats._SHORT_CODE_PATTERN` 同一口径,
+#: 少一个只在 T0 动作序列里出现的 `→`)。
+_FINISH_REASON_UNSAFE = re.compile(r"[^A-Za-z0-9_:\-.+]")
+#: 与 `reasoning_trace_stats._SHORT_CODE_MAX_LEN` 同值。
+FINISH_REASON_MAX_LEN = 64
+
+
+def normalize_finish_reason(raw: object) -> str:
+    """provider 报上来的 `finish_reason` → 一个过得了投影短码校验的码。
+
+    `finish_reason` 是 provider 自己的字符串,合同上只保证有值,不保证形状:
+    带空格的 `"content filter"`、带斜杠的 `"length/stop"`、乃至一整句中文错误
+    描述都出现过。`assert_projection_values` 只放行 ≤64 字符、无空白、
+    `[A-Za-z0-9_:\\-.+]` 的短码,所以原样落进
+    `finish_reason_codes` 会在**投影那一步**抛 `ValueError`——那一抛发生在整个
+    run 已经跑完之后,一次坏读数于是打掉的是整批(codex 质量评审 P2-7)。
+
+    归一而不是丢弃:非法字符逐个换成 `_`、超长截断,信息保住形状,坏读数最多
+    变成一个丑一点的短码。全空 ⇒ `unknown`(与「压根没报」同一格,因为两者
+    在下游都只意味着「这次调用没有可用的终止原因」)。
+    """
+    if not isinstance(raw, str):
+        return FINISH_REASON_UNKNOWN
+    code = _FINISH_REASON_UNSAFE.sub("_", raw.strip())[:FINISH_REASON_MAX_LEN]
+    return code or FINISH_REASON_UNKNOWN
+
 
 def _parse_ts(raw: object) -> datetime | None:
     if not isinstance(raw, str) or not raw:
@@ -530,9 +606,7 @@ def slice_llm_usage(
         if isinstance(usage, Mapping):
             prompt += int(usage.get("prompt_tokens") or 0)
             completion += int(usage.get("completion_tokens") or 0)
-        raw_reason = record.get("finish_reason")
-        reason = str(raw_reason).strip() if isinstance(raw_reason, str) else ""
-        code = reason or FINISH_REASON_UNKNOWN
+        code = normalize_finish_reason(record.get("finish_reason"))
         reasons[code] = reasons.get(code, 0) + 1
     return AbUsage(
         model_calls=calls,
@@ -583,6 +657,7 @@ def project_ab_run(
     notebook_id: str = "",
     gold: AbGold | None = None,
     element_sections: Mapping[str, str] | None = None,
+    chunk_sections: Mapping[str, str] | None = None,
     source_titles: Mapping[str, str] | None = None,
     allowed_source_ids: frozenset[str] | None = None,
     usage: AbUsage = UNKNOWN_USAGE,
@@ -622,6 +697,11 @@ def project_ab_run(
             "trace_source": "in_process",
             "corpus_cell": corpus_cell,
             "question_key": question_key,
+            # 只在 `status` 非 done 时被 `project_run` 读(codex #700 R10 P2):
+            # 空轨迹没有协议证据,不给声明标签的话 v2 的失败 run 会被投影成
+            # legacy,于是从 v2 那一列里消失、还给 legacy 那列添一笔。跑成的
+            # run 仍以证据为准,声明盖不掉它。
+            "policy": arm,
         },
     )
     row["kg_in_scope"] = kg_in_scope if isinstance(kg_in_scope, bool) else None
@@ -637,6 +717,7 @@ def project_ab_run(
         "anchors_on_gold": count_anchors_on_gold(
             anchors, gold,
             element_sections=element_sections, source_titles=source_titles,
+            chunk_sections=chunk_sections,
         ),
         "anchors_unresolved": count_unresolved_anchors(text, anchors),
         "citations_out_of_scope": count_citations_out_of_scope(
