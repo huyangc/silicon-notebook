@@ -4047,6 +4047,11 @@ class ReasoningRetriever:
             f"{_V2_MODEL_DEGRADED_PREFIX}{decision.fallback_reason}")
         # 观察行上那句「原因=model_degraded:output_budget_exhausted」是给模型看
         # 的:它据此知道下一轮该缩短输出,而不是只看到一句"上一轮没成"。
+        if state.aspects is not None:
+            # 这一轮的 prompt 已经渲染过了,追问那一句因此被 `render_aspect_block`
+            # 消费掉——可这次调用根本没成交,模型一个字都没读到。重新置位,否则
+            # 服务端退回一整轮换来的是一句谁都没看见的话(两道闸在那个方法里)。
+            state.aspects.restore_pending_nudge()
         return folded
 
     def _run_termination(

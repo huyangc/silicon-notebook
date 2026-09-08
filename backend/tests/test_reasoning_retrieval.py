@@ -10267,6 +10267,53 @@ def test_the_assessment_nudge_is_rendered_exactly_once(rrepo):
     assert "未执行任何检索" not in nudge
 
 
+def test_a_degraded_turn_re_arms_the_nudge_it_never_delivered(rrepo):
+    """降级轮把追问句"消费"掉了,但模型一个字都没读到 ⇒ 下一轮重新挂上。
+
+    `render_aspect_block` 把「渲染 = 说给模型听了」当消费点,而一轮降级说的正是
+    那次调用没有成交:prompt 渲染出来了,回来的是 provider 故障后的兜底。不重新
+    置位的话,服务端花一整轮退回收尾、追问额度也扣掉了,换回来的是一句谁都没看见
+    的话——而 `REFLECT_ASSESSMENT_MAX_PROMPTS=1` 意味着它没有第二次机会。
+
+    变异:去掉 `_survive_reflect_failure` 里的 `restore_pending_nudge()` ⇒ 第 3 轮
+    的 prompt 不再带追问句,这条红。
+    """
+    from app.services.reasoning_aspects import ASPECT_ASSESSMENT_NUDGE
+
+    class _FailTheSecondReflect(_V2ContextLLM):
+        reflects_seen = 0
+
+        def chat_json(self, messages, schema_hint, **kwargs):
+            if "sub_queries" in schema_hint:
+                return super().chat_json(messages, schema_hint, **kwargs)
+            self.reflects_seen += 1
+            if self.reflects_seen == 2:
+                # 渲染确实发生了(追问在这一份 prompt 里、也因此被消费),只是这
+                # 次调用没成交。父类的留存在委托之前,所以这里自己留一份。
+                self.user_prompts.append(messages[1]["content"])
+                raise RuntimeError("provider down")
+            return super().chat_json(messages, schema_hint, **kwargs)
+
+    llm, result = _v2_aspect_run(
+        rrepo,
+        intent_detail={"mandatory_topics": ["问题一"]},
+        llm=_FailTheSecondReflect(
+            plan={"sub_queries": [{"query": "完整问题"}]},
+            reflects=[
+                _answer(),                                 # 空手收尾 ⇒ 被退回
+                _answer(assessment={"supported": [
+                    {"aspect_id": "a1", "evidence_keys": ["ck-q0"]}]}),
+            ]),
+    )
+    nudge = ASPECT_ASSESSMENT_NUDGE.format(ids="a1")
+    # 第 2 轮挂上(退回之后那一次)、那一轮降级 ⇒ 第 3 轮**重新**挂上。
+    assert [nudge in prompt for prompt in llm.user_prompts] == [
+        False, True, True]
+    # 重新问一次换回来的正是那份逐方面读数,而不是一张 omitted 的空账。
+    assert [row.assessment_omitted for row in result.termination.aspects] == [
+        False]
+
+
 def test_a_partial_close_is_pushed_back_too_and_yields_the_per_aspect_read(rrepo):
     """`answer` + `sufficient=false` 同样是**收尾载荷**,同样要自评一次。
 

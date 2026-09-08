@@ -327,6 +327,7 @@ class AspectLedger:
     __slots__ = (
         "_records", "_by_id", "source", "constraints",
         "assessment_prompts", "assessment_omitted", "nudge_pending",
+        "nudge_answered",
     )
 
     def __init__(
@@ -351,6 +352,12 @@ class AspectLedger:
         #: 与 `assessment_prompts` 分开:那一格是"一共退回过几次"的计数(判据是
         #: 它),这一格是"这一句现在还该不该出现"的一次性开关。
         self.nudge_pending: bool = False
+        #: 最近这一次追问**已经被回应**(自上次发出追问以来吸收到过非空自评)。
+        #: 只服务 `restore_pending_nudge`:一次降级轮要重新置位追问之前,得先分清
+        #: 「那一句还欠着」与「模型早就照办了、这一轮只是失败了」。判据必须是
+        #: "自上次追问以来",不是"这次 run 里有没有给过自评"——后者会让一次早期
+        #: 自评永久豁免掉后面所有的追问。
+        self.nudge_answered: bool = False
 
     # --- 读 ---------------------------------------------------------------
     @property
@@ -432,7 +439,25 @@ class AspectLedger:
             return False
         self.assessment_prompts += 1
         self.nudge_pending = True
+        self.nudge_answered = False
         return True
+
+    def restore_pending_nudge(self) -> None:
+        """追问那一句没送达就不算被消费,重新置位(§5.2 的降级轮)。
+
+        `render_aspect_block` 把「渲染 = 已经说给模型听了」当成消费点,而一轮
+        降级说的正是**那一次模型调用没有成交**:prompt 渲染出来了,回来的却是
+        provider 故障后的兜底,模型没读到这一句、更没机会照办。不重新置位的话,
+        服务端花了一整轮把收尾退回去、追问额度也扣掉了,换回来的是一句谁都没
+        看见的话。
+
+        两道闸,免得这一格变成"每轮都挂着的斥责":从来没发出过追问
+        (`assessment_prompts == 0`)不置位;上一次追问已经被回应
+        (`nudge_answered`,`apply` 吸收到非空自评时置上)也不置位——那时该做的是
+        继续检索,不是再交一遍同一份自评。
+        """
+        if self.assessment_prompts and not self.nudge_answered:
+            self.nudge_pending = True
 
     # --- 写(唯一入口) ----------------------------------------------------
     def apply(
@@ -491,6 +516,7 @@ class AspectLedger:
                     return error
         if updates:
             self.nudge_pending = False
+            self.nudge_answered = True
         for update in updates:
             record = update.record
             record.status = update.status
