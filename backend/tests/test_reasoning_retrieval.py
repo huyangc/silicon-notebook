@@ -9999,6 +9999,39 @@ def test_a_second_silent_closing_turn_is_accepted_and_recorded_as_omitted(rrepo)
     assert ASPECT_ASSESSMENT_NUDGE.format(ids="a1") in llm.user_prompts[1]
 
 
+def test_missing_assessment_pushback_holds_stale_steady(rrepo):
+    """`missing_assessment` 退回轮对 stale **持平**,不像其它零 I/O skip 那样递增。
+
+    与送达了内容的 consult 轮同款判据(见 `run()` 链尾那句持平判据的注释):追问
+    的上限已经由 `REFLECT_ASSESSMENT_MAX_PROMPTS=1` 兜住,不会被反复利用;递增
+    stale 只会让"退回一次换一份自评"这个纯记账动作更容易撞上熔断,而它换回的
+    读数与真正的空转背道而驰。
+
+    `reasoning_stale_limit=1` 把熔断收得很紧:如果退回轮真的递增了 stale,第一
+    轮(退回)就会把 stale 顶到 1、当场触发熔断,第二轮(真正补上自评的收尾)
+    永远到不了,终态会是 `stale` 而不是 `model_sufficient`。
+
+    变异:把 `run()` 链尾那句持平判据里的
+    `decision.invalid_reason == _V2_MISSING_ASSESSMENT` 去掉(只留
+    `consult_delivered_this_turn`)⇒ 这条红。
+    """
+    from app.domain.retrieval_termination import TERMINATION_MODEL_SUFFICIENT
+
+    llm, result = _v2_aspect_run(
+        rrepo,
+        intent_detail={"mandatory_topics": ["问题一"]},
+        reasoning_stale_limit=1,
+        reflects=[
+            _answer(),                                     # 空手收尾 ⇒ 被退回
+            _answer(assessment={"supported": [
+                {"aspect_id": "a1", "evidence_keys": ["ck-q0"]}]}),
+        ],
+    )
+    assert "missing_assessment" in _skip_reasons(result)
+    assert "stale_circuit_breaker" not in _skip_reasons(result)
+    assert result.termination.reason == TERMINATION_MODEL_SUFFICIENT
+
+
 def _outline_close(sections, **extra):
     """`update_outline` + `sufficient=true`:exhaustive 档真机上最常见的收尾形状。
 

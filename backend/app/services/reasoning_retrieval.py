@@ -3892,9 +3892,13 @@ class ReasoningRetriever:
         解析期就已经是 `sufficient_with_retrieval_action`。
 
         退回走 T2 已有的那条路(`_reflect_invalid` 伪动作 → 链尾零 I/O 观察 → 扣
-        一步 → 进 stale 记账),不新造第二种"这一轮不算数"的机制。追问只发一次:
-        第二次仍然空着,`note_missing_assessment` 返回 False,这份收尾照原样被接受,
-        快照里的 `assessment_omitted` 记下"问过了、它不给"。
+        一步),不新造第二种"这一轮不算数"的机制。**但这一轮对 stale 持平、不
+        递增**(`run()` 链尾那句判据,与送达了内容的 consult 轮同款——见那处
+        注释):追问的上限已经由 `REFLECT_ASSESSMENT_MAX_PROMPTS=1` 兜住,不会
+        被反复利用,递增 stale 只会让"退回一次换一份自评"这个纯记账动作更容易
+        撞上熔断,而它换回的读数与真的空转背道而驰。追问只发一次:第二次仍然
+        空着,`note_missing_assessment` 返回 False,这份收尾照原样被接受,快照
+        里的 `assessment_omitted` 记下"问过了、它不给"。
 
         ⚠ **折叠之前必须先把同一轮的大纲载荷应用掉。** `update_outline` 收尾那
         一轮带的是模型刚补齐的最后一批绑定;折成 invalid 之后 `run()` 走的是
@@ -7382,13 +7386,13 @@ class ReasoningRetriever:
                 len(collected) + len(elements) + len(chunks) + len(chains)
                 + state.enum_rows_used
             ) == before
-            if no_progress and consult_delivered_this_turn:
-                # codex #538 R3 P2:送达了内容的 consult 轮对 stale **持平**——
-                # 不带新证据(照 outline 论证不能清零,否则反复回想可把熔断
-                # 空转上限无限抬高),但也不能递增:模型在 stale 逼近上限时
-                # 选它(恰是连续空手后最可能选它的时刻),递增会当轮熔断,刚
-                # 送达的打法块永远到不了下一轮 reflect,一步预算白花。skip
-                # 各态(cap/nothing_new/block_full/unavailable)照常递增。
+            if no_progress and (consult_delivered_this_turn or decision.invalid_reason == _V2_MISSING_ASSESSMENT):
+                # codex #538 R3 P2 + missing_assessment 退回轮,对 stale 都**持平**——
+                # consult 送达内容但不带新证据(不能清零,否则反复回想能把熔断空转
+                # 上限无限抬高),也不能递增(模型在 stale 逼近上限时最可能选它,
+                # 递增会让刚送达的材料到不了下一轮 reflect)。missing_assessment
+                # 已经扣步、记观察(§7.1),max_prompts=1 兜住重复利用,不必再罚 stale。
+                # skip 各态(cap/nothing_new/block_full/unavailable)照常递增。
                 pass
             else:
                 stale = stale + 1 if no_progress else 0
