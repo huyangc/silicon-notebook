@@ -254,6 +254,22 @@ def test_failed_run_without_evidence_keeps_the_declared_rig_labels():
     assert junk["effort"] == "unknown"
 
 
+def test_intent_presence_is_recovered_from_the_trace_when_payload_is_missing():
+    """失败/取消前没落答案的 run 没有 payload,但轨迹里的 `intent` 步只在按确认
+    后的契约开跑时才记——读到它就该记 has_intent_contract=True(codex #700 R16
+    P2);否则失败 run 恒 false,配对身份含此键后就配不上同契约的成功 run。"""
+    intent_step = {"step_type": "intent", "detail": {}, "duration_ms": 1}
+    failed = project_run({"mode": "reasoning", "status": "failed"},
+                         [intent_step, reflect("ppr")], None)
+    assert failed["has_intent_contract"] is True
+    # 没有 intent 步也没有 payload:仍是 False,不猜。
+    bare = project_run({"mode": "reasoning", "status": "failed"}, [reflect("ppr")], None)
+    assert bare["has_intent_contract"] is False
+    # payload 在时以 payload 为准,轨迹只补缺。
+    done = project_run(JOB, [reflect("ppr")], {**PAYLOAD, "intent": {"x": 1}})
+    assert done["has_intent_contract"] is True
+
+
 def test_stale_breaker_wins_over_the_budget_inference():
     ceiling = ASK_RETRIEVAL_LIMITS["standard"].max_reasoning_steps
     steps = [reflect("ppr") for _ in range(ceiling)]
