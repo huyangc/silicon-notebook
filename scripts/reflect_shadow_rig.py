@@ -1397,6 +1397,17 @@ def _report_rows(
         row.pop("merge_key", None)
         row["section_index"] = None
         row["status"] = "failed"
+        # 成功行是「结果级 + 轨迹级」合成的一行,带 effort/mode/trace_source/
+        # policy_version;失败行也要带同样的工作负载维度,否则 `pair_table` 按这
+        # 几个维度分格时,失败的那一侧掉进另一个格,对照整个消失(codex #700 R14
+        # P2)。这些值都是 rig 已知的声明,不是编造的证据。
+        row.update({
+            "effort": effort, "mode": "reasoning", "trace_source": "in_process",
+            "policy_version": item["policy"],
+            "has_intent_contract": bool(report.get("understanding")),
+        })
+        assert_closed(row)
+        assert_projection_values(row)
         yield row
         return
     for index, section in enumerate(sections):

@@ -2086,6 +2086,12 @@ def test_report_generate_marks_clarification_gate_failed_when_the_claim_is_lost(
     assert len(rows) == 1
     assert rows[0]["status"] == "failed"
     assert "merge_key" not in rows[0], "失败行没有轨迹半份可对,不该带 merge_key"
+    # 失败行要带与成功行相同的工作负载维度,否则配对表按维度分格时对照消失
+    # (codex #700 R14 P2):depth=1 ⇒ overview;声明策略 legacy。
+    assert rows[0]["effort"] == "overview"
+    assert rows[0]["mode"] == "reasoning"
+    assert rows[0]["trace_source"] == "in_process"
+    assert rows[0]["policy_version"] == "legacy"
 
 
 def test_report_generate_marks_planning_failure_failed_on_the_straight_path(
