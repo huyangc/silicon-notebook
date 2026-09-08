@@ -64,7 +64,16 @@ class SQLiteRepository(RepositoryFacade):
         ask_engine_host: AskEngineHostPort | None = None,
         indexing_pipeline_host: IndexingPipelineHostPort | None = None,
         gap_consult_host: GapConsultHostPort | None = None,
+        migrate: bool = True,
+        seed: bool = True,
     ) -> None:
+        """``migrate``/``seed`` mirror the PostgreSQL adapter's same-named seam
+        (see ``PostgresRepository.__init__``/``bundle._initialize``): only a
+        process that does not own this schema — today, a read-only tool such
+        as ``scripts/reflect_shadow_rig.py``'s `search` subcommand — passes
+        ``False``. Every other caller keeps the defaults and today's exact
+        behaviour.
+        """
         super().__init__(
             settings,
             SqlitePersistenceBundleFactory(),
@@ -79,7 +88,7 @@ class SQLiteRepository(RepositoryFacade):
         )
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._migrator = SqliteMigrator(self._runtime.database, self.settings)
-        self._migrator.initialize()
+        self._migrator.initialize(migrate=migrate, seed=seed)
 
     @property
     def db_path(self) -> Path:

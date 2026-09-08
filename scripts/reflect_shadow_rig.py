@@ -23,8 +23,21 @@
 
 * **主库只读**:`seed` 碰主库时只用 `--source-db-url` 显式给出的连接、只跑一条
   SELECT(重建 A 语料的 markdown),写入全在测试库;`search` 整条路对
-  `--database-url`(必须显式给出的主库连接)只读,跑前跑后各点一次
-  `READONLY_TABLES` 的行数,不等就报错。
+  `--database-url`(必须显式给出的主库连接)只读——仓储走 `_search_repository`,
+  即 `create_repository(..., migrate=False, seed=False)`(codex #700 R1
+  P1):默认的 `migrate=True, seed=True` 会在 PostgreSQL 上无条件跑一次
+  `bundle._initialize`,先迁移再用 `settings.admin_password` 重写 admin 密码
+  哈希——这是一次真实的、非幂等的写,已经在生产主库上真实发生过一次
+  (`users` 表 admin 行的 `updated_at` 被改)。跑前跑后各点一次
+  `READONLY_TABLES` 的行数 + `users.updated_at` 的最大值(`_readonly_counts`),
+  不等就报错;后一项是因为 admin 密码重写是 `UPDATE`,行数断言对它是瞎的,
+  这次真实事故就是从这个盲区钻过去的。**没有**额外在连接串上强制
+  `default_transaction_read_only=on`:`app/repositories/postgres/search.py`
+  的知识图谱检索用到 `CREATE TEMP TABLE` scratch 表,而这条路径恰恰是
+  `search` 的 `B_kg` 语料格要跑的那一半——把整个会话钉成服务端强制只读,
+  真出问题时会把"这条防线生效了"和"知识图谱检索本身跑不动了"混成同一个
+  报错,分不清是谁挡的。防线因此只有两层:构造入口不迁移/不 seed,加上
+  跑前跑后的值断言,而不是第三层"会话级只读"。
 * **策略靠重启**(HTTP 路径):`REASONING_REFLECT_V2_ENABLED` 是进程级 Settings,
   rig 不去热改它;`ask` / `report` 每次只跑**一个** `--policy`,换策略 = 换一次
   后端。`restart` 是唯一的换策略手段:优雅停掉 state 里记的那台后端、按新
@@ -547,6 +560,59 @@ def await_index(
         time.sleep(10)
 
 
+# --- 日志脱敏(codex #700 R1 P2) --------------------------------------------
+#
+# `rig-state.json` 与内部变量该存什么原样存什么——`_teardown_targets_this_run`
+# 就是靠 state 里那份逐字的 `database_url` 才能核对"这次真的是同一个库"
+# (见上面的 docstring)。脱敏只发生在**打印给人看**的这一层,不动任何被后续
+# 逻辑读回去比较的值。
+
+#: 大小写不敏感,子串匹配。命中就把整个值换成 `<redacted>`,不猜哪一部分是
+#: 密钥——环境变量的值从不需要在日志里部分可读。
+_SENSITIVE_ENV_KEY_MARKERS: tuple[str, ...] = ("DATABASE_URL", "API_KEY", "PASSWORD")
+
+
+def _redact_url(url: str) -> str:
+    """去掉连接串里 `user:pass@` 的密码部分,只留 user、host、port、db。
+
+    只读工具的日志/进度打印会把 `--admin-url` / `--database-url` 摊出来给人
+    看;这两个参数在生产环境里可能带真实密码。SQLite 路径没有凭据,原样返回。
+    解析失败(不是一个能识别的 URL)时返回一个占位符,而不是原样打印——脱敏
+    失败不该退化成"没脱敏"。
+    """
+    from urllib.parse import urlsplit, urlunsplit
+
+    if not url or url.startswith("sqlite"):
+        return url
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return "<unparseable-url>"
+    if not parsed.hostname:
+        return "<unparseable-url>"
+    host = parsed.hostname
+    if ":" in host:
+        host = f"[{host}]"
+    netloc = f"{host}:{parsed.port}" if parsed.port is not None else host
+    if parsed.username:
+        netloc = f"{parsed.username}@{netloc}"
+    return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
+
+
+def _redact_env_for_log(env: dict[str, str]) -> str:
+    """`k=v,k=v` 形式的环境变量摘要,敏感键的值一律 `<redacted>`。"""
+    parts = []
+    for key, value in env.items():
+        upper = key.upper()
+        shown = (
+            "<redacted>"
+            if any(marker in upper for marker in _SENSITIVE_ENV_KEY_MARKERS)
+            else value
+        )
+        parts.append(f"{key}={shown}")
+    return ",".join(parts)
+
+
 # --- 子命令 -----------------------------------------------------------------
 
 
@@ -590,7 +656,10 @@ def _backend_command(args: argparse.Namespace) -> list[str]:
 
 def cmd_seed(args: argparse.Namespace, runner: Runner) -> int:
     questions = load_questions()
-    runner.say("create database", f"{args.admin_url} :: CREATE DATABASE {args.db_name}")
+    runner.say(
+        "create database",
+        f"{_redact_url(args.admin_url)} :: CREATE DATABASE {args.db_name}",
+    )
     runner.say("install extensions", ", ".join(PG_EXTENSIONS))
     if not runner.dry_run and not args.skip_create_db:
         _create_test_database(args)
@@ -602,8 +671,7 @@ def cmd_seed(args: argparse.Namespace, runner: Runner) -> int:
 
     runner.say("start backend",
                shlex.join(_backend_command(args))
-               + "  env=" + ",".join(f"{k}={v}" for k, v in
-                                     backend_env(args, "legacy").items()))
+               + "  env=" + _redact_env_for_log(backend_env(args, "legacy")))
     backend = _start_backend(args, "legacy") if not runner.dry_run else None
     try:
         return _seed_notebooks(args, runner, corpus, cells,
@@ -844,11 +912,15 @@ def cmd_ask(args: argparse.Namespace, runner: Runner) -> int:
             "client_request_id": item["client_request_id"],
         }
         if contract is not None:
+            # `answers=[]` 会被 `finalize_query_intent` 的门拒掉,只要契约带
+            # 必填澄清项(`auto_clarification_answers` 那条确定性代答规则同
+            # `_plan_intent`,见其上方注释;codex #700 R1 P2)——没有人在场
+            # 回答,但整批 `ask` 也不能因为一道题目的契约带了必填项就起不来。
             body["intent"] = {
                 "contract": contract,
                 "resolved_question": contract.get("resolved_question")
                 or item["question"],
-                "answers": [],
+                "answers": auto_clarification_answers(contract),
             }
         # **必须走 /ask/stream,不是 /ask**:同步端点经 `begin_durable_job` 建
         # 行,而那条路 `client_request_id=None` 是写死的
@@ -1277,8 +1349,30 @@ def _settings_by_policy() -> dict[str, Any]:
     return built
 
 
-def _readonly_counts(database_url: str) -> dict[str, int | None]:
-    """`READONLY_TABLES` 的行数快照。**每张表一条独立的只读连接**。
+#: `_readonly_counts` 除了 `READONLY_TABLES` 的行数,还额外带一个**按值**的
+#: 信号(codex #700 R1 P1)。`bundle._initialize` 的 admin 密码重写是一次
+#: `UPDATE users`,行数一根毫毛不动——`READONLY_TABLES` 那套按 `COUNT(*)` 的
+#: 断言对它是瞎的,这条真实事故(生产主库 `users` 表 admin 行的 `updated_at`
+#: 被改)就是从这个盲区钻过去的。
+USERS_UPDATED_AT_MAX_KEY = "users_updated_at_max"
+
+
+def _users_updated_at_max(database_url: str) -> str | None:
+    """`users` 表 `updated_at` 的表内最大值。表不存在/空表记 `None`。"""
+    from export_reasoning_traces import _Reader
+
+    try:
+        with _Reader(database_url) as reader:
+            rows = reader.query("SELECT MAX(updated_at) AS m FROM users")
+        value = rows[0]["m"] if rows else None
+        return str(value) if value is not None else None
+    except Exception:  # noqa: BLE001 — 数不出来就是 unknown,不当成"没变"
+        return None
+
+
+def _readonly_counts(database_url: str) -> dict[str, int | str | None]:
+    """`READONLY_TABLES` 的行数快照 + `users.updated_at` 的最大值。**每张表
+    一条独立的只读连接**。
 
     一条连接跑五次 count 更省,但 PG 上任何一条失败(表不存在)会把整个事务打
     成 aborted、后面四张跟着报错——那会让「有一张表改名了」看起来像「五张表都
@@ -1287,7 +1381,7 @@ def _readonly_counts(database_url: str) -> dict[str, int | None]:
     """
     from export_reasoning_traces import _Reader
 
-    counts: dict[str, int | None] = {}
+    counts: dict[str, int | str | None] = {}
     for table in READONLY_TABLES:
         try:
             with _Reader(database_url) as reader:
@@ -1295,6 +1389,7 @@ def _readonly_counts(database_url: str) -> dict[str, int | None]:
             counts[table] = int(rows[0]["n"]) if rows else 0
         except Exception:  # noqa: BLE001 — 表不存在 ⇒ 这次不看它(记 None)
             counts[table] = None
+    counts[USERS_UPDATED_AT_MAX_KEY] = _users_updated_at_max(database_url)
     return counts
 
 
@@ -1313,30 +1408,37 @@ def _source_count(database_url: str, notebook_id: str) -> int | None:
         return None
 
 
-def _format_counts(counts: dict[str, int | None]) -> str:
+#: `_assert_readonly` 逐个比对的键:`READONLY_TABLES` 的行数,加上按值比对的
+#: `USERS_UPDATED_AT_MAX_KEY`(行数断言看不见的那一类写)。
+READONLY_CHECKED_KEYS: tuple[str, ...] = (*READONLY_TABLES, USERS_UPDATED_AT_MAX_KEY)
+
+
+def _format_counts(counts: dict[str, int | str | None]) -> str:
     return ", ".join(
-        f"{table}={counts.get(table) if counts.get(table) is not None else 'n/a'}"
-        for table in READONLY_TABLES
+        f"{key}={counts.get(key) if counts.get(key) is not None else 'n/a'}"
+        for key in READONLY_CHECKED_KEYS
     )
 
 
 def _assert_readonly(
-    runner: Runner, before: dict[str, int | None], after: dict[str, int | None],
+    runner: Runner,
+    before: dict[str, int | str | None],
+    after: dict[str, int | str | None],
 ) -> None:
-    """跑前跑后逐张表的行数必须相等。不等就标红并报错。"""
+    """跑前跑后,`READONLY_CHECKED_KEYS` 逐项必须相等。不等就标红并报错。"""
     drifted = {
-        table: (before.get(table), after.get(table))
-        for table in READONLY_TABLES
-        if before.get(table) != after.get(table)
+        key: (before.get(key), after.get(key))
+        for key in READONLY_CHECKED_KEYS
+        if before.get(key) != after.get(key)
     }
     if not drifted:
         runner.say("readonly ok", _format_counts(after))
         return
     detail = ", ".join(
-        f"{table}: {old} -> {new}" for table, (old, new) in sorted(drifted.items())
+        f"{key}: {old} -> {new}" for key, (old, new) in sorted(drifted.items())
     )
     print(f"\033[31m[READ-ONLY VIOLATION]\033[0m {detail}", file=sys.stderr)
-    raise RuntimeError("主库行数在这次 search 之后变了: " + detail)
+    raise RuntimeError("主库在这次 search 之后变了: " + detail)
 
 
 class _IntentCache:
@@ -1696,6 +1798,28 @@ def _resolve_concurrency(
     return requested
 
 
+def _search_repository(settings: Any) -> Any:
+    """`search` 专用的仓储构造入口。**`migrate=False, seed=False`,不是
+    `create_repository` 的默认值**(codex #700 R1 P1)。
+
+    `search` 对主库整条路只读(模块 docstring「主库只读」),但
+    `create_repository` 默认的 `migrate=True, seed=True` 会在 PostgreSQL 上
+    无条件跑一次 `bundle._initialize`:先跑迁移,再用 `settings.admin_password`
+    重写 admin 密码哈希——这是一次真实的、非幂等的写,已经在生产主库上真实
+    发生过一次(`users` 表 admin 行的 `updated_at` 被改)。SQLite 侧
+    `SqliteMigrator.seed()` 有同一形状的 `UPDATE users`,一并关掉。
+
+    `create_repository` 而不是 `create_application_repository`:后者还会装
+    插件宿主并 prime 一次扩展准入表。这条路只跑检索、而且对主库只读,接一层
+    可能带写路径的扩展面没有收益。这个函数是**唯一**接线点,好让用例直接
+    monkeypatch `create_repository` 断言这两个关键字,而不必真的跑一遍
+    `_run_search` 那一整条 HTTP/并发路径。
+    """
+    from app.repositories.factory import create_repository
+
+    return create_repository(settings, migrate=False, seed=False)
+
+
 def _run_search(
     args: argparse.Namespace, runner: Runner, plan: Sequence[dict],
     notebooks: dict[str, str], cells: Sequence[str],
@@ -1709,7 +1833,6 @@ def _run_search(
     os.environ.update(_search_process_env(args))
 
     from app.core.request_context import reset_request_user, set_request_user
-    from app.repositories.factory import create_repository
     from app.services.reasoning_retrieval import kg_in_scope_for
 
     settings_by_policy = _settings_by_policy()
@@ -1717,10 +1840,7 @@ def _run_search(
         runner, args.database_url, settings_by_policy["legacy"],
         args.concurrency,
     )
-    # `create_repository` 而不是 `create_application_repository`:后者还会
-    # 装插件宿主并 prime 一次扩展准入表。这条路只跑检索、而且对主库只读,
-    # 接一层可能带写路径的扩展面没有收益。
-    repo = create_repository(settings_by_policy["legacy"])
+    repo = _search_repository(settings_by_policy["legacy"])
     profile = repo.maintenance.resolve_owner_profile(args.owner)
     if profile is None:
         print(f"ERROR: 主库里找不到属主: {args.owner or '<第一个 admin>'}",
@@ -2225,7 +2345,7 @@ def cmd_restart(args: argparse.Namespace, runner: Runner) -> int:
     )
     runner.say(
         "start backend",
-        f"port={port} database_url={database_url} "
+        f"port={port} database_url={_redact_url(database_url)} "
         f"REASONING_REFLECT_V2_ENABLED={new_flag}",
     )
     if runner.dry_run:
@@ -2252,29 +2372,79 @@ def cmd_restart(args: argparse.Namespace, runner: Runner) -> int:
     return 0
 
 
-def _teardown_targets_this_run(args: argparse.Namespace) -> bool:
-    """`--db-name` 说的那个库,真的是这次 rig 写进去的那个吗?
+def _teardown_targets_this_run(
+    args: argparse.Namespace, state: dict | None = None,
+) -> bool:
+    """`--db-name` 说的那个库,真的是这次 rig 写进去的那个吗?(codex #700 R1 P1)
 
-    `teardown` 的 DROP 走的是 `--admin-url`(PG 维护连接),而 `--db-name` 有个
-    默认值。一次跑在别的后端上的 rig(比如 SQLite 冒烟)照样会让 teardown 去
-    PG 上 DROP 那个默认名字的库——它可能是别人的。判据取 `--database-url`:只有
-    当这次真的写在 PG 的 `--db-name` 上时才删。
+    真源是 `rig-state.json` 里 `seed`/`restart` 落的 `database_url`——**不是**
+    这次调用自己的 `--database-url`:它有默认值(`postgresql://127.0.0.1:5432/
+    {DEFAULT_TEST_DB}`),一次跑在别的后端上的 rig(比如 SQLite 冒烟,或者
+    `--out-dir` 指向一份从没 seed 过、state 里根本没有这个键的目录)照样会让
+    `--database-url` 落到那个"看起来像 PG"的默认值上,而 teardown 原先只看
+    这个默认值,不核对它是不是这次真写过的那个库。
+
+    只有 state 记的 URL 与这次 `--database-url` **逐字相等**、而且是 PG、
+    库名等于 `--db-name` 时才继续(到 `cmd_teardown` 里再做一次针对
+    `--admin-url` 的服务器身份核对)。state 缺这个键、或者跟这次的
+    `--database-url` 对不上号(哪怕只是因为都退回了各自的默认值,一个是
+    SQLite 一个是 PG),一律拒绝 DROP——不拿命令行默认值去猜"大概率是同一个
+    库"。
     """
-    url = str(args.database_url or "")
-    if not url.startswith(("postgres://", "postgresql://")):
+    state = state or {}
+    state_url = str(state.get("database_url") or "")
+    if not state_url or state_url != str(args.database_url or ""):
         return False
-    return url.rstrip("/").rsplit("/", 1)[-1].split("?")[0] == args.db_name
+    if not state_url.startswith(("postgres://", "postgresql://")):
+        return False
+    return state_url.rstrip("/").rsplit("/", 1)[-1].split("?")[0] == args.db_name
+
+
+def _admin_targets_same_server(admin_url: str, database_url: str) -> tuple[bool, str]:
+    """`--admin-url`(维护连接,真正执行 DROP 的那一个)与 `--database-url`
+    是不是同一台 PG 服务器?(codex #700 R1 P1)
+
+    `_teardown_targets_this_run` 只核对了 `--database-url` 与 state 记的是否
+    一致,从没检查过用来执行 DROP 的 `--admin-url` 是不是同一台服务器——两者
+    是两个独立的命令行参数,一个打错端口/host 就会让 teardown 在**另一台**
+    服务器上删一个同名的库。先比 URL 本身的 host:port,再用一条实时查询核对
+    `inet_server_port()`(admin 连接实际落在哪个服务端端口)——host 相同但走
+    了端口转发/隧道到别的服务器时,URL 上的端口对不上号,这条能拦下来。
+    """
+    from urllib.parse import urlsplit
+
+    admin_parts = urlsplit(admin_url)
+    db_parts = urlsplit(database_url)
+    admin_endpoint = (admin_parts.hostname, admin_parts.port or 5432)
+    db_endpoint = (db_parts.hostname, db_parts.port or 5432)
+    if admin_endpoint != db_endpoint:
+        return False, (
+            f"--admin-url 指向 {admin_endpoint[0]}:{admin_endpoint[1]},"
+            f"--database-url 指向 {db_endpoint[0]}:{db_endpoint[1]} —— 不是"
+            "同一台服务器,拒绝 DROP"
+        )
+    import psycopg
+
+    with psycopg.connect(admin_url, autocommit=True) as conn:
+        row = conn.execute("SELECT inet_server_port() AS port").fetchone()
+    server_port = int(row[0]) if row and row[0] is not None else None
+    if server_port != db_endpoint[1]:
+        return False, (
+            f"--admin-url 连接的实际服务端口是 {server_port},与 "
+            f"--database-url 的端口 {db_endpoint[1]} 不一致 —— 拒绝 DROP"
+        )
+    return True, ""
 
 
 def cmd_teardown(args: argparse.Namespace, runner: Runner) -> int:
     state = runner.load_state()
     pid = int(state.get("backend_pid") or 0)
     runner.say("stop backend", f"port {args.port} pid={pid or '<unknown>'}")
-    drop = _teardown_targets_this_run(args)
+    drop = _teardown_targets_this_run(args, state)
     runner.say(
         "drop database" if drop else "skip drop database",
-        f"{args.admin_url} :: DROP DATABASE {args.db_name}" if drop else
-        f"--database-url 不是 PG 的 {args.db_name},不碰任何库",
+        f"{_redact_url(args.admin_url)} :: DROP DATABASE {args.db_name}" if drop
+        else "state 记的库跟这次 --database-url 对不上号(或不是 PG),不碰任何库",
     )
     if runner.dry_run:
         return 0
@@ -2288,6 +2458,11 @@ def cmd_teardown(args: argparse.Namespace, runner: Runner) -> int:
             runner.say("stop backend failed", str(exc))
     if not drop:
         return 0
+    ok, reason = _admin_targets_same_server(args.admin_url, args.database_url)
+    if not ok:
+        runner.say("skip drop database", reason)
+        print(f"ERROR: {reason}", file=sys.stderr)
+        return 2
     import psycopg
 
     with psycopg.connect(args.admin_url, autocommit=True) as conn:

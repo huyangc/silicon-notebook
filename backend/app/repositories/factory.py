@@ -30,8 +30,27 @@ def create_repository(
     ask_engine_host: AskEngineHostPort | None = None,
     indexing_pipeline_host: IndexingPipelineHostPort | None = None,
     gap_consult_host: GapConsultHostPort | None = None,
+    migrate: bool = True,
+    seed: bool = True,
 ) -> NotebookRepository:
+    """``migrate``/``seed`` forward the schema-ownership seam both backend
+    adapters already expose (``PostgresRepository``/``SQLiteRepository`` —
+    see their docstrings). Defaults keep every existing caller's behaviour
+    byte-for-byte: the two keywords are only added to the constructor call
+    when a caller explicitly asks for something other than the default, so a
+    stand-in/mocked backend that does not accept them (as in
+    ``test_repository_factory.py``) is unaffected.
+
+    Only a **read-only** tool that does not own the schema may pass
+    ``migrate=False, seed=False`` — today that is
+    ``scripts/reflect_shadow_rig.py``'s `search` subcommand, which runs
+    retrieval against the live main database and must never trigger a schema
+    migration or the seed step's unconditional admin-password rewrite.
+    """
     host_kwargs = {}
+    if migrate is not True or seed is not True:
+        host_kwargs["migrate"] = migrate
+        host_kwargs["seed"] = seed
     if retrieval_contributor_host is not None:
         host_kwargs["retrieval_contributor_host"] = retrieval_contributor_host
     if parser_provider_chain_host is not None:

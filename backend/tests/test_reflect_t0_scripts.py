@@ -250,22 +250,212 @@ def test_upload_body_sends_one_doc_type_pair_per_file(tmp_path):
 
 
 def test_teardown_only_drops_the_postgres_database_this_run_wrote(tmp_path):
-    # `--db-name` 有默认值,而 DROP 走的是 `--admin-url`:一次跑在 SQLite 上的
-    # rig 不该让 teardown 去 PG 上删一个同名的、别人的库。
-    def parsed(database_url: str):
-        return rig.build_parser().parse_args(
-            ["--database-url", database_url, "teardown"]
-        )
+    """真源是 `rig-state.json` 里 seed 落的 `database_url`,**不是**这次调用
+    自己的 `--database-url`——它有默认值,一次从没 seed 过的 out-dir、或者
+    seed 在别的后端上跑过的 out-dir,不该让 teardown 拿命令行默认值去猜"大概
+    率是同一个库"(codex #700 R1 P1)。
+    """
+    def parsed(database_url: str, *, db_name: str | None = None):
+        argv = ["--database-url", database_url]
+        if db_name is not None:
+            argv = ["--db-name", db_name, *argv]
+        return rig.build_parser().parse_args([*argv, "teardown"])
 
+    pg_url = "postgresql://127.0.0.1:5432/silicon_notebook_t0_test"
+
+    # state 与这次 --database-url 逐字一致、是 PG、库名对得上 --db-name ⇒ 删。
     assert rig._teardown_targets_this_run(
-        parsed("postgresql://127.0.0.1:5432/silicon_notebook_t0_test")
+        parsed(pg_url), {"database_url": pg_url}
     ) is True
+    # state 里没有这个键(比如 out-dir 从没 seed 过)⇒ 不删,不拿命令行默认值
+    # 顶上去猜。
+    assert rig._teardown_targets_this_run(parsed(pg_url), {}) is False
+    assert rig._teardown_targets_this_run(parsed(pg_url), None) is False
+    # state 记的库跟这次 --database-url 对不上号 ⇒ 不删,哪怕两边都是 PG。
     assert rig._teardown_targets_this_run(
-        parsed(f"sqlite:///{tmp_path / 'silicon_notebook_t0_test'}")
+        parsed(pg_url),
+        {"database_url": "postgresql://127.0.0.1:5432/somebody_elses_db"},
     ) is False
+    # 本条是这次修复要拦的真实场景:state 记的是 SQLite(比如一次 SQLite 冒烟
+    # seed),这次调用却没显式给 --database-url,退回到"看起来合理"的默认 PG
+    # 参数——两个默认值凑巧都"像"这次 rig 该用的东西,但根本不是同一个库。
+    default_pg_url = f"postgresql://127.0.0.1:5432/{rig.DEFAULT_TEST_DB}"
     assert rig._teardown_targets_this_run(
-        parsed("postgresql://127.0.0.1:5432/somebody_elses_db")
+        parsed(default_pg_url),
+        {"database_url": f"sqlite:///{tmp_path / 'silicon_notebook_t0_test'}"},
     ) is False
+    # state 与这次 --database-url 一致,但库名跟 --db-name 对不上 ⇒ 不删。
+    other_db_url = "postgresql://127.0.0.1:5432/somebody_elses_db"
+    assert rig._teardown_targets_this_run(
+        parsed(other_db_url, db_name="silicon_notebook_t0_test"),
+        {"database_url": other_db_url},
+    ) is False
+
+
+def test_admin_url_and_database_url_must_share_a_server_before_drop():
+    """host:port 不一致就当场拒绝——不必真的连一次 PG(codex #700 R1 P1)。
+
+    `inet_server_port()` 那一半需要一条真连接,交给跑基线的人在真实 PG 上验;
+    这里钉的是不用连库就能判定的那一半:两个 URL 从字面上就不是同一台服务器。
+    """
+    ok, reason = rig._admin_targets_same_server(
+        "postgresql://127.0.0.1:5432/postgres",
+        "postgresql://10.0.0.9:5432/silicon_notebook_t0_test",
+    )
+    assert ok is False
+    assert "不是" in reason and "同一台服务器" in reason
+
+    ok, reason = rig._admin_targets_same_server(
+        "postgresql://127.0.0.1:6543/postgres",
+        "postgresql://127.0.0.1:5432/silicon_notebook_t0_test",
+    )
+    assert ok is False
+    assert "6543" in reason or "5432" in reason
+
+
+# --- 日志脱敏(codex #700 R1 P2) ---------------------------------------------
+
+
+def test_redact_url_drops_the_password_keeps_user_host_port_db():
+    assert rig._redact_url(
+        "postgresql://admin:s3cr3t@10.0.0.5:5432/silicon_notebook"
+    ) == "postgresql://admin@10.0.0.5:5432/silicon_notebook"
+    # 没有凭据的 URL 原样(不额外加东西)。
+    assert rig._redact_url(
+        "postgresql://127.0.0.1:5432/silicon_notebook_t0_test"
+    ) == "postgresql://127.0.0.1:5432/silicon_notebook_t0_test"
+    # SQLite 没有凭据这回事,原样返回。
+    assert rig._redact_url("sqlite:////tmp/t0.db") == "sqlite:////tmp/t0.db"
+
+
+def test_redact_env_for_log_masks_every_sensitive_key():
+    printed = rig._redact_env_for_log({
+        "DATABASE_URL": "postgresql://admin:s3cr3t@10.0.0.5:5432/db",
+        "SOME_API_KEY": "sk-secret",
+        "ADMIN_PASSWORD": "hunter2",
+        "PORT": "8001",
+    })
+    assert "s3cr3t" not in printed
+    assert "sk-secret" not in printed
+    assert "hunter2" not in printed
+    assert "PORT=8001" in printed
+    assert printed.count("<redacted>") == 3
+
+
+# --- search 的仓储构造入口(codex #700 R1 P1) -------------------------------
+
+
+def test_search_repository_disables_migrate_and_seed(monkeypatch):
+    """`search` 的仓储必须带 `migrate=False, seed=False`——去掉这两个关键字
+    (变异)必须让这条用例翻红,而不是安静地通过。默认的 `migrate=True,
+    seed=True` 会在 PostgreSQL 上无条件重写 admin 密码哈希,这类写已经在生产
+    主库上真实发生过一次。
+    """
+    calls: list[dict] = []
+
+    def fake_create_repository(settings, **kwargs):
+        calls.append(kwargs)
+        return object()
+
+    monkeypatch.setattr(
+        "app.repositories.factory.create_repository", fake_create_repository,
+    )
+    sentinel = object()
+    result = rig._search_repository(sentinel)
+    assert result is not sentinel  # 拿到的是 create_repository 的返回值
+    assert calls == [{"migrate": False, "seed": False}]
+
+
+# --- users.updated_at 的只读断言(codex #700 R1 P1) --------------------------
+
+
+def test_readonly_counts_include_users_updated_at_max_and_catch_its_drift(
+    tmp_path, capsys,
+):
+    """`READONLY_TABLES` 按行数,对 `bundle._initialize` 的 admin 密码重写
+    (一次 `UPDATE`,行数不动)是瞎的——这条真实事故就是从这个盲区钻过去的。
+    这里钉住 `_readonly_counts` 额外带了 `users_updated_at_max`,并且
+    `_assert_readonly` 真的会因为它翻红。
+    """
+    import sqlite3
+
+    db_path = tmp_path / "t0.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE users (id TEXT PRIMARY KEY, updated_at TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO users VALUES ('user-local', '2026-09-08T00:00:00')"
+    )
+    conn.commit()
+    conn.close()
+    database_url = f"sqlite:///{db_path}"
+
+    before = rig._readonly_counts(database_url)
+    assert before[rig.USERS_UPDATED_AT_MAX_KEY] == "2026-09-08T00:00:00"
+
+    runner = rig.Runner(dry_run=False, out_dir=tmp_path)
+    rig._assert_readonly(runner, before, dict(before))
+    capsys.readouterr()
+
+    # 模拟 admin 密码重写:行数一根毫毛不动,只有 updated_at 变了。
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "UPDATE users SET updated_at = '2026-09-09T00:00:00' "
+        "WHERE id = 'user-local'"
+    )
+    conn.commit()
+    conn.close()
+    after = rig._readonly_counts(database_url)
+    assert after["ask_jobs"] == before["ask_jobs"]  # 行数断言看不出任何差别
+    with pytest.raises(RuntimeError, match="users_updated_at_max"):
+        rig._assert_readonly(runner, before, after)
+    assert "READ-ONLY VIOLATION" in capsys.readouterr().err
+
+
+# --- ask 的必填澄清项代答(codex #700 R1 P2) ---------------------------------
+
+
+def test_ask_answers_required_ambiguities_before_streaming(tmp_path, monkeypatch):
+    """`/ask/intent` 返回带必填澄清项的契约时,提交给 `/ask/stream` 的
+    `intent.answers` 不能是 `[]`——那会被 `finalize_query_intent` 的门拒掉,
+    整批 `ask` 起不来(`_plan_intent` 已经踩过同一个坑,`auto_clarification_
+    answers` 是同一条确定性代答规则)。
+    """
+    out_dir = tmp_path / "t0"
+    out_dir.mkdir()
+    (out_dir / "rig-state.json").write_text(json.dumps({
+        "policy": "legacy", "token": "tok", "notebooks": {"A_nokg": "nb-a"},
+    }), encoding="utf-8")
+
+    contract = {
+        "resolved_question": "RTL到GDSII流程是什么",
+        "ambiguities": [
+            {"id": "scope", "question": "限定哪种工艺?", "required": True,
+             "options": ["7nm", "14nm"]},
+            {"id": "optional-1", "question": "要不要举例?", "required": False},
+        ],
+    }
+    submitted: list[dict] = []
+
+    def fake_http(self, method, url, *, json_body=None, **kwargs):
+        assert url.endswith("/ask/intent")
+        return dict(contract)
+
+    def fake_stream(self, method, url, *, json_body, **kwargs):
+        submitted.append(json_body)
+        return {}
+
+    monkeypatch.setattr(rig.Runner, "http", fake_http)
+    monkeypatch.setattr(rig.Runner, "stream", fake_stream)
+    monkeypatch.setattr(rig, "_assert_tag_landed", lambda *a, **k: None)
+
+    assert rig.main([
+        "--out-dir", str(out_dir), "--limit", "1", "--cell", "A_nokg", "ask",
+    ]) == 0
+    assert submitted, "没有提交任何 /ask/stream 请求"
+    for body in submitted:
+        assert body["intent"]["answers"] == [{"id": "scope", "answer": "7nm"}]
 
 
 # --- 导出(SQLite 侧) ------------------------------------------------------
