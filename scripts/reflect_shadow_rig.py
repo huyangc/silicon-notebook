@@ -2952,8 +2952,9 @@ def cmd_ab(args: argparse.Namespace, runner: Runner) -> int:
     绑定」。search-only 量不出答案质量,而 A/B 要补的正是那一半(§0-5)。
 
     与 `ask`(HTTP)的分工:`ask` 换策略必须重启后端,两条臂只能整批分开、相隔
-    数小时,provider 的漂移会整块落在臂的差上;`ab` 同进程为两个策略各构造一份
-    `Settings`,同题同档背靠背跑(§5.1)。
+    数小时,provider 的漂移会整块落在臂的差上;`ab` 在同一个进程里为两个策略各
+    构造一份 `Settings` **和一个 repo**,同题同档背靠背跑(§5.1)。两个 repo 而
+    不是两份 Settings 的理由见 `run_ab_once`。
     """
     questions = load_questions()
     cells = ab_cells(args.cell)
@@ -2979,7 +2980,7 @@ def cmd_ab(args: argparse.Namespace, runner: Runner) -> int:
         runner.say("corpus cell", f"{cell} -> notebook name="
                                   + AB_NOTEBOOK_NAME.format(cell=cell))
     runner.say("arms", ", ".join(AB_ARMS)
-               + "(同进程换 Settings;每单元内背靠背,臂序按 run 随机)")
+               + "(同进程各一个 repo;每单元内背靠背,臂序按 run 随机)")
     runner.say("efforts", ", ".join(efforts))
     rounds = 1 if args.round is not None else args.repeats
     runner.say("repeats", f"{args.repeats}"
@@ -3308,7 +3309,7 @@ def assert_knowhow_reflect_v2_off(repo: Any, settings: Any) -> None:
 
 
 def run_ab_once(
-    repo: Any, *, notebook: str, item: dict, arm: str, settings: Any,
+    repo: Any, *, notebook: str, item: dict, arm: str,
     contract: dict | None, on_trace: Any, cancel_event: Any, actor_id: str,
     scope_source_ids: Sequence[str] | None = None,
 ) -> Any:
@@ -3329,11 +3330,21 @@ def run_ab_once(
     不是绕过:语料是公开论文,题面公开,答案是模型对公开论文的作答。`.local`
     的隔离是仓库卫生,不是保密(§5.2 / §7.3)。
 
+    **臂由 `repo` 本身承载,不由一个额外的 settings 参数承载。** 这一点与
+    `run_search_once` 相反,而且是这条路唯一容易写错、写错了还照样跑得出数据的
+    地方:`search` 直调 `ReasoningRetriever.from_repository(repo, settings)`,
+    检索器读的是**传进去**的那一份;而 Ask 走
+    `AskService._build_reasoning_retriever`,它写死 `settings=self.settings`
+    ——即构造这个 repo 时用的那一份(已核实 `repo.settings is
+    ask_component.settings`)。给 `ask_reasoning` 递一份别的 Settings 没有任何
+    入口,所以两条臂必须是**两个 repo**(见 `_run_ab` 的 `repos_by_arm`)。用
+    一个 repo 加一个 settings 参数,两条臂会双双跑 legacy,而产出的数据从形状
+    上完全看不出这件事。
+
     开跑前当场核对 `retriever.reflect_v2_active()` 与这条 run 声明的臂一致
-    (§5.5-1)。核对用的检索器是**另外构造的一份**,不是 Ask 内部那一个——但它
-    读的是同一份 `settings`,而 `reflect_v2_active()` 只看 `self.settings` 与
-    `allow_reflect_v2`,两者都不经 repo。这一步是「协议对不对号」的唯一事前
-    证据;事后还有一次,由投影出来的 `policy_version` 对(见
+    (§5.5-1)。核对用的检索器是另外构造的一份,但它读的正是 `repo.settings`
+    ——与 Ask 内部那一个逐字同源。这一步是「协议对不对号」的唯一事前证据;
+    事后还有一次,由投影出来的 `policy_version` 对(见
     `assert_arm_matches_evidence`)。
     """
     from app.models.ask import AskRequest
@@ -3343,11 +3354,12 @@ def run_ab_once(
     from app.services.retrieval_run import retrieval_run
     from app.services.source_scope import source_scope_context
 
-    probe = ReasoningRetriever.from_repository(repo, settings, cancel_event)
+    probe = ReasoningRetriever.from_repository(repo, repo.settings, cancel_event)
     if probe.reflect_v2_active() is not (arm == "v2"):
         raise RuntimeError(
-            f"retriever 的协议与声明的 arm={arm!r} 不符:"
+            f"repo 的协议与声明的 arm={arm!r} 不符:"
             f"reflect_v2_active()={probe.reflect_v2_active()}"
+            "(臂由 repo 承载——Ask 读的是构造这个 repo 的那一份 Settings)"
         )
     scope = (
         SourceScope(
@@ -3462,16 +3474,27 @@ def _run_ab(
     concurrency = _resolve_concurrency(
         runner, args.database_url, settings_by_arm["legacy"], args.concurrency,
     )
+    # **每条臂一个 repo**,不是「一个 repo + 两份 Settings」。`search` 那条路能
+    # 共用一个 repo,是因为它直调 `ReasoningRetriever.from_repository(repo,
+    # settings)`,检索器读的是传进去的那一份;而 Ask 走
+    # `AskService._build_reasoning_retriever`,那里写死 `settings=self.settings`
+    # ——构造这个 repo 时用的那一份(`repo.settings is ask_component.settings`,
+    # 已核实)。共用一个 repo 会让两条臂双双跑 legacy,而数据从形状上看不出来。
     # `create_repository(settings, migrate=False, seed=False)`,不是默认值:默认
     # 的 `seed=True` 会用 `settings.admin_password` 重写 admin 密码哈希(codex
     # #700 R1 P1)。测试库已经由 `seed` 子命令建好并迁移过,这里只需要连上去。
-    repo = _search_repository(settings_by_arm["legacy"])
+    repos_by_arm = {
+        arm: _search_repository(settings_by_arm[arm]) for arm in AB_ARMS
+    }
+    runner.say("arm repositories",
+               "每条臂各一个 repo(Ask 读构造期的 Settings,换不了)")
+    repo = repos_by_arm["legacy"]
     profile = repo.maintenance.resolve_owner_profile(args.user)
     if profile is None:
         print(f"ERROR: 测试库里找不到 fixture 用户: {args.user}", file=sys.stderr)
         return 2
     actor_id = str(getattr(profile, "id", "") or "")
-    assert_knowhow_reflect_v2_off(repo, settings_by_arm["v2"])
+    assert_knowhow_reflect_v2_off(repos_by_arm["v2"], settings_by_arm["v2"])
     runner.say("knowhow assertion",
                "allow_reflect_v2=False ⇒ reflect_v2_active() 为假(§5.5-5)")
 
@@ -3489,7 +3512,7 @@ def _run_ab(
     context = set_request_user(profile)
     try:
         _ab_loop(
-            args, runner, units, facts, repo, settings_by_arm,
+            args, runner, units, facts, repos_by_arm,
             actor_id=actor_id, profile=profile, concurrency=concurrency,
             gold_by_key=gold_by_key, model_contract=contract_short,
             log_dir=_ab_llm_log_dir(settings_by_arm["legacy"]),
@@ -3566,9 +3589,9 @@ def _ab_assert_gold_resolves(
 
 def _ab_loop(
     args: argparse.Namespace, runner: Runner, units: Sequence[dict],
-    facts: dict[str, dict], repo: Any, settings_by_arm: dict[str, Any],
+    facts: dict[str, dict], repos_by_arm: dict[str, Any],
     *, actor_id: str, profile: Any, concurrency: int, gold_by_key: Mapping,
-    model_contract: str, log_dir: Path, clock: Any,
+    model_contract: str | None, log_dir: Path, clock: Any,
 ) -> None:
     """整批配对单元。每个单元产出**两行**(两臂),一起写、一起标 `paired`。
 
@@ -3591,8 +3614,8 @@ def _ab_loop(
         for repeat, batch in _ab_round_units(units):
             runner.say("repeat round", f"r{repeat}: {len(batch)} 个配对单元")
             _ab_run_batch(
-                batch, args=args, runner=runner, facts=facts, repo=repo,
-                settings_by_arm=settings_by_arm, actor_id=actor_id,
+                batch, args=args, runner=runner, facts=facts,
+                repos_by_arm=repos_by_arm, actor_id=actor_id,
                 profile=profile, concurrency=concurrency, intents=intents,
                 gold_by_key=gold_by_key, model_contract=model_contract,
                 log_dir=log_dir, clock=clock, state=state,
@@ -3654,10 +3677,10 @@ def ab_contract_digest(contract: object) -> str:
 
 def _run_ab_unit(
     unit: dict, *, args: argparse.Namespace, runner: Runner,
-    facts: dict[str, dict], repo: Any, settings_by_arm: dict[str, Any],
+    facts: dict[str, dict], repos_by_arm: dict[str, Any],
     actor_id: str, profile: Any, concurrency: int, intents: "_IntentCache",
-    gold_by_key: Mapping, model_contract: str, log_dir: Path, clock: Any,
-    state: dict, rows_handle: Any, log: Any,
+    gold_by_key: Mapping, model_contract: str | None, log_dir: Path,
+    clock: Any, state: dict, rows_handle: Any, log: Any,
 ) -> None:
     """一个配对单元:同题同档同轮,两条臂背靠背跑完,两行一起落。
 
@@ -3668,6 +3691,9 @@ def _run_ab_unit(
     **意图契约每题只算一次**(`_IntentCache`,键取 `question_key`——英文题面有
     自己的题号 `<key>-en`,所以 §5.4 说的 `question_key + lang` 已经被这一个键
     覆盖),两臂共用同一份;同一性由 `ab_contract_digest` 当场比一次(§5.5-3)。
+    契约固定用 **legacy 那个 repo** 去算:契约是 corpus-blind 且与反思策略无关
+    的,固定一侧是为了不让「契约用哪个 repo」变成一个会随字典迭代顺序漂移的
+    隐藏不确定量(与 `_precompute_intents` 同一条口径)。
 
     `--only-policy` 只跑一侧时,这一行的 `paired` 是 `False`:它进单臂基线表,
     不进配对差值表(§4.2)。
@@ -3677,8 +3703,9 @@ def _run_ab_unit(
     fact = facts[unit["corpus_cell"]]
     arms = list(args.only_policy) if args.only_policy else list(AB_ARMS)
     random.shuffle(arms)
+    intent_repo = repos_by_arm["legacy"]
     contract = intents.get(
-        repo, settings_by_arm["legacy"], unit, actor_id=actor_id,
+        intent_repo, intent_repo.settings, unit, actor_id=actor_id,
         notebook=fact["notebook"],
     )
     digest = ab_contract_digest(contract)
@@ -3700,8 +3727,7 @@ def _run_ab_unit(
                 "(§5.5-3)。这道题整题作废,先修再跑"
             )
         rows.append(_run_ab_arm(
-            unit, arm=arm, fact=fact, repo=repo,
-            settings=settings_by_arm[arm], actor_id=actor_id,
+            unit, arm=arm, fact=fact, repo=repos_by_arm[arm], actor_id=actor_id,
             contract=contract, concurrency=concurrency, scope_ids=scope_ids,
             gold=gold_for(gold_by_key, unit["question_key"]),
             model_contract=model_contract, log_dir=log_dir, clock=clock,
@@ -3736,11 +3762,14 @@ def _run_ab_unit(
 
 def _run_ab_arm(
     unit: dict, *, arm: str, fact: dict, repo: Any,
-    settings: Any, actor_id: str, contract: dict | None, concurrency: int,
-    scope_ids: Sequence[str] | None, gold: Any, model_contract: str,
+    actor_id: str, contract: dict | None, concurrency: int,
+    scope_ids: Sequence[str] | None, gold: Any, model_contract: str | None,
     log_dir: Path, clock: Any, out_dir: Path, database_url: str,
 ) -> dict:
     """一条臂的一个 run:跑 Ask、投影成一行、`.local` 落一份原始存档。
+
+    `repo` 就是这条臂的那一个(`repos_by_arm[arm]`)——臂由 repo 承载,见
+    `run_ab_once` 的说明。
 
     `clock` 是**墙钟**(`datetime.now`),不是 `time.monotonic`:成本三键靠 LLM
     日志的时间窗切片归因(§7.2),而日志里那个 `ts` 是
@@ -3760,7 +3789,7 @@ def _run_ab_arm(
     started_at = clock()
     started = time.monotonic()
     response = run_ab_once(
-        repo, notebook=fact["notebook"], item=item, arm=arm, settings=settings,
+        repo, notebook=fact["notebook"], item=item, arm=arm,
         contract=contract, on_trace=_on_trace,
         cancel_event=threading.Event(), actor_id=actor_id,
         scope_source_ids=scope_ids,

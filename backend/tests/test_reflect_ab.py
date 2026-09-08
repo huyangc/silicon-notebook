@@ -778,7 +778,7 @@ def test_run_ab_once_refuses_a_settings_that_disagrees_with_the_arm(rrepo):
         rig.run_ab_once(
             rrepo, notebook=notebook.id,
             item={"question": "RTL到GDSII流程", "effort": "standard"},
-            arm="v2", settings=rrepo.settings, contract=None, on_trace=None,
+            arm="v2", contract=None, on_trace=None,
             cancel_event=threading.Event(), actor_id="ab-owner",
         )
 
@@ -825,6 +825,20 @@ def _unit(**overrides: Any) -> dict:
     return unit
 
 
+def _repos_by_arm() -> dict[str, Any]:
+    """两条臂各一个 repo(编排层只按 `arm` 取用,不读它们的任何字段)。
+
+    真跑时它们是两个 `create_repository(settings, migrate=False, seed=False)`
+    ——臂由 repo 承载,因为 `AskService._build_reasoning_retriever` 读的是构造
+    这个 repo 的那一份 Settings,`ask_reasoning` 没有别的入口(见 `run_ab_once`
+    的说明)。用一个 repo 加一个 settings 参数,两条臂会双双跑 legacy。
+    """
+    return {
+        arm: SimpleNamespace(name=f"{arm}-repo", settings=SimpleNamespace(arm=arm))
+        for arm in ("legacy", "v2")
+    }
+
+
 def _fact() -> dict:
     return {
         "notebook": "nb-1", "sources": 1,
@@ -845,7 +859,7 @@ def test_a_pair_unit_runs_both_arms_back_to_back_and_writes_two_paired_rows(
     """
     seen: list[str] = []
 
-    def _fake_run(repo, *, notebook, item, arm, settings, contract, on_trace,
+    def _fake_run(repo, *, notebook, item, arm, contract, on_trace,
                   cancel_event, actor_id, scope_source_ids=None):
         seen.append(arm)
         for step in _steps(arm):
@@ -871,7 +885,7 @@ def test_a_pair_unit_runs_both_arms_back_to_back_and_writes_two_paired_rows(
             log_path.open("a", encoding="utf-8") as log:
         rig._run_ab_unit(
             _unit(), args=args, runner=runner, facts={"A_nokg": _fact()},
-            repo=object(), settings_by_arm={"legacy": object(), "v2": object()},
+            repos_by_arm=_repos_by_arm(),
             actor_id="ab-owner", profile=None, concurrency=1,
             intents=rig._IntentCache(out_dir / "intents.jsonl", enabled=False),
             gold_by_key=load_ab_gold(load_questions()),
@@ -897,7 +911,7 @@ def test_the_written_dataset_carries_no_free_text(tmp_path, monkeypatch, capsys)
     secret_question = "只看 Qwen-VL 和 DeepSeek-V2 这两篇"
     secret_answer = "它们各自这样处理图像输入 [k1]。"
 
-    def _fake_run(repo, *, notebook, item, arm, settings, contract, on_trace,
+    def _fake_run(repo, *, notebook, item, arm, contract, on_trace,
                   cancel_event, actor_id, scope_source_ids=None):
         for step in _steps(arm):
             on_trace(SimpleNamespace(
@@ -921,8 +935,7 @@ def test_the_written_dataset_carries_no_free_text(tmp_path, monkeypatch, capsys)
             log_path.open("a", encoding="utf-8") as log:
         rig._run_ab_unit(
             _unit(question=secret_question), args=args, runner=runner,
-            facts={"A_nokg": _fact()}, repo=object(),
-            settings_by_arm={"legacy": object(), "v2": object()},
+            facts={"A_nokg": _fact()}, repos_by_arm=_repos_by_arm(),
             actor_id="ab-owner", profile=None, concurrency=1,
             intents=rig._IntentCache(out_dir / "intents.jsonl", enabled=False),
             gold_by_key=load_ab_gold(load_questions()),
@@ -956,7 +969,7 @@ def test_a_first_run_whose_evidence_disagrees_with_the_arm_stops_the_batch(
     tmp_path, monkeypatch, capsys,
 ):
     """声明 v2、轨迹里却一个 termination 都没有 ⇒ 整批停(§5.5-1 的事后那一半)。"""
-    def _fake_run(repo, *, notebook, item, arm, settings, contract, on_trace,
+    def _fake_run(repo, *, notebook, item, arm, contract, on_trace,
                   cancel_event, actor_id, scope_source_ids=None):
         # legacy 形状的轨迹:没有终态披露步。
         on_trace(SimpleNamespace(step_type="reflect", summary="",
@@ -977,8 +990,7 @@ def test_a_first_run_whose_evidence_disagrees_with_the_arm_stops_the_batch(
         with pytest.raises(RuntimeError, match="policy_version"):
             rig._run_ab_unit(
                 _unit(), args=args, runner=runner, facts={"A_nokg": _fact()},
-                repo=object(),
-                settings_by_arm={"legacy": object(), "v2": object()},
+                repos_by_arm=_repos_by_arm(),
                 actor_id="ab-owner", profile=None, concurrency=1,
                 intents=rig._IntentCache(out_dir / "intents.jsonl", enabled=False),
                 gold_by_key=load_ab_gold(load_questions()),
@@ -1008,7 +1020,7 @@ def test_ab_loop_keeps_the_two_arms_together_even_when_units_run_concurrently(
     threads_by_unit: dict[tuple, set[str]] = {}
     order: list[int] = []
 
-    def _fake_run(repo, *, notebook, item, arm, settings, contract, on_trace,
+    def _fake_run(repo, *, notebook, item, arm, contract, on_trace,
                   cancel_event, actor_id, scope_source_ids=None):
         key = (item["question_key"], item["repeat"])
         threads_by_unit.setdefault(key, set()).add(threading.current_thread().name)
@@ -1034,8 +1046,7 @@ def test_ab_loop_keeps_the_two_arms_together_even_when_units_run_concurrently(
         _unit(question_key="A-q08", repeat=2), _unit(question_key="A-q14", repeat=2),
     ]
     rig._ab_loop(
-        args, runner, units, {"A_nokg": _fact()}, repo=object(),
-        settings_by_arm={"legacy": object(), "v2": object()},
+        args, runner, units, {"A_nokg": _fact()}, _repos_by_arm(),
         actor_id="ab-owner", profile=None, concurrency=2,
         gold_by_key=load_ab_gold(load_questions()),
         model_contract="0123456789abcdef", log_dir=out_dir, clock=datetime.now,
@@ -1064,3 +1075,24 @@ def test_the_rig_and_the_projection_agree_on_what_the_two_arms_are():
 
     assert rig.AB_ARMS == ARMS
     assert set(ARMS) == set(rig.POLICIES)
+
+
+def test_the_arm_lives_on_the_repository_not_on_a_settings_argument(rrepo):
+    """A/B 的两个 repo 不是浪费,是 Ask 这条路的形状决定的。
+
+    `search` 能共用一个 repo:它直调
+    `ReasoningRetriever.from_repository(repo, settings)`,检索器读的是**传进去**
+    的那一份 Settings。Ask 没有这个入口——`AskService._build_reasoning_retriever`
+    写死 `settings=self.settings`,而 `self.settings` 就是构造这个 repo 时用的
+    那一份。这条用例把两件事钉住:
+
+    1. `repo.settings` 与 Ask 组件读的那一份是**同一个对象**;
+    2. 生产路径构造出来的检索器读的也是它。
+
+    任何一条变了,`ab` 的「每条臂一个 repo」就该跟着重新审——而不是等到跑完
+    408 个 run 才发现两条臂其实都是 legacy(那种数据从形状上完全看不出来)。
+    """
+    ask = rrepo._runtime.ask_component
+    assert ask.settings is rrepo.settings
+    retriever = ask._build_reasoning_retriever(cancel_event=None, user_id="u")
+    assert retriever.settings is rrepo.settings
