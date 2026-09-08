@@ -48,8 +48,10 @@ import shlex
 import signal
 import subprocess
 import sys
+import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
@@ -1157,6 +1159,12 @@ def cmd_search(args: argparse.Namespace, runner: Runner) -> int:
                f"{runner.out_dir}/search-<policy>.jsonl + search-runs.log"
                + ("" if args.no_intent else
                   f" + {runner.out_dir}/intents.jsonl(**不进数据集/仓库**)"))
+    runner.say(
+        "concurrency",
+        f"{args.concurrency}(两阶段:先并发算意图契约,再并发跑 run;"
+        "真跑时 SQLite 主库强制 1,PG 主库按 POSTGRES_POOL_MAX_SIZE clamp——"
+        "跑之前先确认模型服务限流与连接池都吃得下这个数)",
+    )
     if runner.dry_run:
         for item in plan:
             runner.say(
@@ -1313,12 +1321,18 @@ class _IntentCache:
 
     键取 `question_key`,不带语料格:契约是 **corpus-blind** 的
     (`plan_query_intent` 一个字的语料都不读),而 A/B 两格的题号本来就不同。
+
+    **`_lock` 只保护「查缓存 / 落缓存 / 写文件」这三步,不盖住模型调用那一段**:
+    并发预算的意义就在于让多题的模型调用真的并行,锁只用来防两件事——同一题被
+    两个线程各算一次(双重检查:锁内确认仍然缺失才去算),以及并发写
+    `intents.jsonl` 在磁盘层面交错成半行。
     """
 
     def __init__(self, path: Path, *, enabled: bool) -> None:
         self.path = path
         self.enabled = enabled
         self._rows: dict[str, dict] = {}
+        self._lock = threading.Lock()
         if not (enabled and path.exists()):
             return
         for line in path.read_text(encoding="utf-8").splitlines():
@@ -1337,18 +1351,23 @@ class _IntentCache:
         if not self.enabled:
             return None
         key = item["question_key"]
-        if key not in self._rows:
-            self._rows[key] = _plan_intent(
-                repo, settings, item["question"], actor_id=actor_id,
-                notebook=notebook,
-            )
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            with self.path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(
-                    {"question_key": key, "contract": self._rows[key]},
-                    ensure_ascii=False,
-                ) + "\n")
-        return self._rows[key]
+        with self._lock:
+            if key in self._rows:
+                return self._rows[key]
+        contract = _plan_intent(
+            repo, settings, item["question"], actor_id=actor_id,
+            notebook=notebook,
+        )
+        with self._lock:
+            if key not in self._rows:
+                self._rows[key] = contract
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                with self.path.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(
+                        {"question_key": key, "contract": contract},
+                        ensure_ascii=False,
+                    ) + "\n")
+            return self._rows[key]
 
 
 def _plan_intent(
@@ -1528,6 +1547,40 @@ def _search_preflight(
     return ""
 
 
+def _resolve_concurrency(
+    runner: Runner, database_url: str, settings: Any, requested: int,
+) -> int:
+    """真跑时的有效并发度。**只在这里做 clamp**,`--dry-run` 不算(它连
+    `Settings()` 都不构造,零副作用的承诺不因为多打一行诊断而破例)。
+
+    SQLite 主库强制 1:这条路的多线程只在 PG(`psycopg_pool.ConnectionPool`)
+    上验证过安全,SQLite 分支只出现在冒烟/dry-run 场景,不为它另开一条并发
+    正确性的举证责任。PG 按 `postgres_pool_max_size` clamp:一次并发拿的连接
+    数超过池容量,后到的线程会在拿连接那一步死等到 `postgres_pool_acquire_
+    timeout_seconds`,而不是报一个指向"调小 --concurrency"的好懂错误——clamp
+    在这里做,永远不会死等。
+    """
+    requested = max(1, int(requested))
+    if database_url.startswith("sqlite"):
+        if requested > 1:
+            runner.say(
+                "concurrency clamp",
+                f"SQLite 主库不支持这条路的真并发,{requested} -> 1",
+            )
+        return 1
+    pool_max = int(
+        getattr(settings, "postgres_pool_max_size", requested) or requested
+    )
+    if requested > pool_max:
+        runner.say(
+            "concurrency clamp",
+            f"--concurrency={requested} 超过 POSTGRES_POOL_MAX_SIZE="
+            f"{pool_max},clamp 到 {pool_max}(否则并发跑会在拿连接时死等)",
+        )
+        return pool_max
+    return requested
+
+
 def _run_search(
     args: argparse.Namespace, runner: Runner, plan: Sequence[dict],
     notebooks: dict[str, str], cells: Sequence[str],
@@ -1540,13 +1593,15 @@ def _run_search(
     # import 期读的(与 `_apply_process_env` 同一条理由)。
     os.environ.update(_search_process_env(args))
 
-    import threading
-
     from app.core.request_context import reset_request_user, set_request_user
     from app.repositories.factory import create_repository
     from app.services.reasoning_retrieval import kg_in_scope_for
 
     settings_by_policy = _settings_by_policy()
+    concurrency = _resolve_concurrency(
+        runner, args.database_url, settings_by_policy["legacy"],
+        args.concurrency,
+    )
     # `create_repository` 而不是 `create_application_repository`:后者还会
     # 装插件宿主并 prime 一次扩展准入表。这条路只跑检索、而且对主库只读,
     # 接一层可能带写路径的扩展面没有收益。
@@ -1565,10 +1620,20 @@ def _run_search(
         facts = _search_corpus_facts(
             args, runner, repo, cells, notebooks, kg_in_scope_for,
         )
-        _search_loop(
-            args, runner, plan, facts, repo, settings_by_policy,
-            actor_id=actor_id, cancel_event=threading.Event(),
-        )
+        if concurrency == 1:
+            # **不经过线程池**:`--concurrency 1` 的行为必须与并发功能落地前
+            # 逐字一致,包括「所有调用都在主线程里发生」这件事本身——哪怕是
+            # `ThreadPoolExecutor(max_workers=1)`也会把每次调用挪到另一个
+            # 线程,单是这一点就足以让 ContextVar 的可见性行为变掉。
+            _search_loop(
+                args, runner, plan, facts, repo, settings_by_policy,
+                actor_id=actor_id, cancel_event=threading.Event(),
+            )
+        else:
+            _search_loop_concurrent(
+                args, runner, plan, facts, repo, settings_by_policy,
+                actor_id=actor_id, profile=profile, concurrency=concurrency,
+            )
     finally:
         reset_request_user(context)
     _assert_readonly(runner, before, _readonly_counts(args.database_url))
@@ -1682,6 +1747,263 @@ def _search_loop(
         log.close()
         for handle in handles.values():
             handle.close()
+
+
+def _precompute_intents(
+    args: argparse.Namespace, runner: Runner, plan: Sequence[dict],
+    facts: dict[str, dict], repo: Any, settings_by_policy: dict[str, Any],
+    *, actor_id: str, profile: Any, concurrency: int,
+) -> "_IntentCache":
+    """并发路的第一阶段:把这批题**各算一次**意图契约,缓存写文件加锁。
+
+    契约是 corpus-blind 且不分策略的(`_IntentCache` 的说明),固定用
+    `settings_by_policy["legacy"]` 这一份去算——两个策略共用同一份意图契约本来
+    就是这条路的前提(`search_plan` 的说明),这里不该让"契约用哪份 Settings"
+    变成一个隐藏的、可能因字典迭代顺序而漂移的不确定量。
+
+    去重在**提交前**做:`plan` 里每题最多出现 `len(POLICIES) × len(EFFORTS)`
+    次,不去重会让同一题被排进多个 worker、靠 `_IntentCache` 内部的锁互相
+    等——能跑对,但白白把并发度浪费在锁等待上。
+    """
+    intents = _IntentCache(
+        runner.out_dir / "intents.jsonl", enabled=not args.no_intent,
+    )
+    if not intents.enabled:
+        return intents
+    unique_items: dict[str, dict] = {}
+    for item in plan:
+        unique_items.setdefault(item["question_key"], item)
+    with intents._lock:
+        pending = [
+            item for key, item in unique_items.items() if key not in intents._rows
+        ]
+    if not pending:
+        runner.say("precompute intents", f"0/{len(unique_items)}(全部缓存命中)")
+        return intents
+    runner.say(
+        "precompute intents",
+        f"{len(pending)}/{len(unique_items)} 题,concurrency={concurrency}",
+    )
+    settings = settings_by_policy["legacy"]
+
+    def worker(item: dict) -> None:
+        from app.core.request_context import reset_request_user, set_request_user
+
+        ctx = set_request_user(profile)
+        try:
+            fact = facts[item["corpus_cell"]]
+            intents.get(
+                repo, settings, item, actor_id=actor_id, notebook=fact["notebook"],
+            )
+        finally:
+            reset_request_user(ctx)
+
+    with ThreadPoolExecutor(max_workers=concurrency) as pool:
+        futures = [pool.submit(worker, item) for item in pending]
+        for future in as_completed(futures):
+            # 意图算不出来是硬失败:先修再跑正式检索,不把一批坏契约悄悄地
+            # 传给 `run_search_once`(它会拿一份 `contract=None` 继续跑,而
+            # 那看起来完全像"这题没有意图契约"而不是"算它的时候炸了")。
+            future.result()
+    return intents
+
+
+def _search_loop_concurrent(
+    args: argparse.Namespace, runner: Runner, plan: Sequence[dict],
+    facts: dict[str, dict], repo: Any, settings_by_policy: dict[str, Any],
+    *, actor_id: str, profile: Any, concurrency: int,
+) -> None:
+    """并发版整批 run(`concurrency > 1`)。
+
+    两阶段:`_precompute_intents` 先把意图契约并发算完,再把全部 run(legacy /
+    v2 **合并进同一个池**,总吞吐最高)提交给 `ThreadPoolExecutor`。
+
+    ContextVar 与取消事件都是**每个 worker 自己的**:`model_work_scope` /
+    `retrieval_run` / `source_scope_context` 已经在 `run_search_once` 内部按
+    `with` 块设置/重置,天然是"每次调用一份"、不需要额外处理;但
+    `set_request_user` 是在 `_run_search` 里对**整段**外层调用设的一次
+    ContextVar——线程池的 worker 线程不继承调用方线程已经 `.set()` 过的那份
+    context(这与 asyncio 任务默认 `copy_context()` 不同),所以这里在每个
+    worker 内部重新 `set_request_user(profile)`,用完立即 reset。`cancel_event`
+    同理:每个 run 自建一个 `threading.Event()`,不共享——共享一个事件对象会让
+    "取消其中一个 run" 变成"取消全体在跑的 run"。
+
+    输出用一把 `write_lock` 保护:`search-<policy>.jsonl` 与
+    `search-runs.log` 的写入(含 flush)都在这把锁内做,完成顺序可以乱,但
+    每一行仍是一份完整的投影,不会被另一个线程的写入截断或交错。
+
+    第一个**完成**(不一定是第一个提交)的 run 校验一次"声明的策略与轨迹证据
+    是否一致";不一致就 `abort()`——给所有仍在跑的 run 的 `cancel_event` 各
+    `.set()` 一次,再 `executor.shutdown(cancel_futures=True)` 撤掉还没开始跑的
+    任务。`AskCancelled` 与 `KeyboardInterrupt` 走同一条 `abort()` 路径。
+    """
+    from app.core.request_context import reset_request_user, set_request_user
+    from app.services.cancellation import AskCancelled
+
+    intents = _precompute_intents(
+        args, runner, plan, facts, repo, settings_by_policy,
+        actor_id=actor_id, profile=profile, concurrency=concurrency,
+    )
+    runner.out_dir.mkdir(parents=True, exist_ok=True)
+    handles: dict[str, Any] = {}
+    write_lock = threading.Lock()
+    verified: set[str] = set()
+    active_events: list[threading.Event] = []
+    active_lock = threading.Lock()
+    aborted = threading.Event()
+    log = (runner.out_dir / "search-runs.log").open("a", encoding="utf-8")
+    total = len(plan)
+    completed = 0
+    started_at = time.monotonic()
+
+    def abort(reason: str) -> None:
+        if aborted.is_set():
+            return
+        aborted.set()
+        with active_lock:
+            events = list(active_events)
+        for event in events:
+            event.set()
+        runner.say("search aborted", reason)
+
+    def worker(item: dict) -> tuple[dict, float] | None:
+        if aborted.is_set():
+            # 已经决定收摊:还没真的开始跑的任务(`executor.shutdown(
+            # cancel_futures=True)` 撤不掉已经被 worker 线程取出来的这一个)
+            # 直接退出,不再发起新的模型调用。
+            return None
+        cancel_event = threading.Event()
+        with active_lock:
+            active_events.append(cancel_event)
+        ctx = set_request_user(profile)
+        try:
+            fact = facts[item["corpus_cell"]]
+            policy = item["policy"]
+            settings = settings_by_policy[policy]
+            prepared = _prepare_search_intent(
+                intents.get(repo, settings, item, actor_id=actor_id,
+                            notebook=fact["notebook"]),
+                item["question"], item["effort"],
+            )
+            steps: list[dict] = []
+            started = time.monotonic()
+            result = run_search_once(
+                repo, settings, notebook=fact["notebook"], item=item,
+                prepared=prepared,
+                on_step=lambda step: steps.append(trace_step_row(step)),
+                cancel_event=cancel_event, actor_id=actor_id,
+            )
+            elapsed_ms = round((time.monotonic() - started) * 1000)
+            row = project_search_run(
+                steps, result=result, effort=item["effort"], policy=policy,
+                question_key=item["question_key"],
+                corpus_cell=item["corpus_cell"],
+                kg_in_scope=fact["kg_in_scope"],
+                has_intent_contract=prepared is not None,
+                sources_count=fact["sources"],
+            )
+            assert_closed(row)
+            assert_projection_values(row)
+            return row, elapsed_ms
+        finally:
+            reset_request_user(ctx)
+            with active_lock:
+                if cancel_event in active_events:
+                    active_events.remove(cancel_event)
+
+    pool = ThreadPoolExecutor(max_workers=concurrency)
+    fatal: BaseException | None = None
+    try:
+        futures = {pool.submit(worker, item): item for item in plan}
+        try:
+            for future in as_completed(futures):
+                item = futures[future]
+                try:
+                    outcome = future.result()
+                except AskCancelled as exc:
+                    abort(f"AskCancelled: {item['question_key']}")
+                    fatal = exc
+                    break
+                except Exception as exc:  # noqa: BLE001 — 单个 run 失败要隔离,
+                    # 不带原文:只记异常类名与题号,问题原文一个字都不进日志。
+                    with write_lock:
+                        log.write(
+                            f"{item['question_key']} {item['corpus_cell']} "
+                            f"{item['policy']} {item['effort']} FAILED "
+                            f"{type(exc).__name__}\n"
+                        )
+                        log.flush()
+                    runner.say(
+                        "search failed",
+                        f"{item['question_key']} {item['corpus_cell']} "
+                        f"{item['policy']} {type(exc).__name__}",
+                    )
+                    continue
+                if outcome is None:
+                    continue
+                row, elapsed_ms = outcome
+                policy = item["policy"]
+                with write_lock:
+                    handle = handles.get(policy)
+                    if handle is None:
+                        handle = handles[policy] = (
+                            runner.out_dir / f"search-{policy}.jsonl"
+                        ).open("a", encoding="utf-8")
+                    handle.write(
+                        json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n"
+                    )
+                    handle.flush()
+                    completed += 1
+                    done_n = completed
+                    line = (
+                        f"done {done_n}/{total}  {item['question_key']} "
+                        f"{item['corpus_cell']} {policy} {item['effort']} "
+                        f"reflect={row['reflect_turns']} "
+                        f"term={row['termination_reason']} "
+                        f"{elapsed_ms / 1000:.1f}s"
+                    )
+                    log.write(line + "\n")
+                    log.flush()
+                    first_for_policy = policy not in verified
+                    if first_for_policy:
+                        verified.add(policy)
+                runner.say("search done", line)
+                if first_for_policy:
+                    # **第一个完成的 run**,不一定是第一个提交的:并发下完成
+                    # 顺序由调度决定,校验按到达顺序做,而不是按 `plan` 里的
+                    # 下标——按下标等,会在下标 0 的那个 run 恰好跑得慢时白白
+                    # 拖住已经能验的另一侧。
+                    if row["policy_version"] != policy:
+                        message = (
+                            f"声明 --policy={policy!r},但第一个完成的 run 证据"
+                            f"是 {row['policy_version']!r}(v2 的判据是 run 产出"
+                            "了 termination 事实)。先修再跑整批"
+                        )
+                        abort(message)
+                        fatal = RuntimeError(message)
+                        break
+                    runner.say(
+                        "first run ok(第一个完成的 run)",
+                        f"policy={row['policy_version']} "
+                        f"reflect_turns={row['reflect_turns']} "
+                        f"termination={row['termination_reason']}",
+                    )
+        except KeyboardInterrupt as exc:
+            abort("KeyboardInterrupt")
+            fatal = exc
+    finally:
+        pool.shutdown(wait=True, cancel_futures=True)
+        log.close()
+        for handle in handles.values():
+            handle.close()
+    elapsed_total = time.monotonic() - started_at
+    runner.say(
+        "search totals",
+        f"{completed}/{total} run(s) 完成,并发度={concurrency},"
+        f"总耗时={elapsed_total:.1f}s",
+    )
+    if fatal is not None:
+        raise fatal
 
 
 def cmd_export(args: argparse.Namespace, runner: Runner) -> int:
@@ -1885,6 +2207,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="`search` 跳过意图契约(省一次/题的模型调用)。代价是 v2 只剩"
              "整题一个方面,方面账那几列因此不可比",
     )
+    parser.add_argument(
+        "--concurrency", type=int, default=1,
+        help="`search` 用几个线程并发跑 run(默认 1,行为与不加这个参数逐字"
+             "一致)。两阶段:先按同一并发度并发算意图契约,再把全部 run 提交"
+             "给一个线程池。SQLite 主库真跑时强制 clamp 到 1;PG 主库按"
+             "POSTGRES_POOL_MAX_SIZE clamp——跑之前先确认模型服务的并发限流"
+             "与连接池都吃得下这个数,否则要么被限流打回、要么在拿连接时死等",
+    )
     parser.add_argument("--corpus-dir", help="B 语料 markdown 所在目录")
     parser.add_argument(
         "--base-url", default="",
@@ -1955,6 +2285,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     args.database_url = (
         args.database_url or f"postgresql://127.0.0.1:5432/{DEFAULT_TEST_DB}"
     )
+    # 负数/零没有意义;`_resolve_concurrency` 的 clamp 是"往下调",这里只挡住
+    # 明显打错的值,不在这里做 SQLite/连接池那两条(它们要跑到真库连上才判断
+    # 得出来)。
+    args.concurrency = max(1, int(args.concurrency))
     runner = Runner(dry_run=args.dry_run, out_dir=Path(args.out_dir))
     handlers = {
         "seed": cmd_seed, "ask": cmd_ask, "report": cmd_report,

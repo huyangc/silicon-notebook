@@ -12,7 +12,11 @@ import re
 import sqlite3
 import sys
 import threading
+import time
+import types
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -664,3 +668,258 @@ def test_dry_run_search_refuses_a_cell_it_cannot_run(capsys):
     """`--cell A_kg search`:主库上没有那个格子,不许打印一份「零个 run」的计划。"""
     assert rig.main(["--dry-run", "--cell", "A_kg", "search"]) == 2
     assert "不在 search 的范围里" in capsys.readouterr().err
+
+
+# --- search 并发(--concurrency) ---------------------------------------------
+
+
+def test_dry_run_search_with_concurrency_flag_has_zero_side_effects(capsys):
+    """`--dry-run --concurrency 4 search`:只打印,不连库、不起线程池。"""
+    assert rig.main(
+        ["--dry-run", "--concurrency", "4", "--limit", "1", "search"]
+    ) == 0
+    printed = capsys.readouterr().out
+    assert "concurrency" in printed
+    assert "4(两阶段" in printed
+
+
+def test_resolve_concurrency_forces_sqlite_to_one(tmp_path, capsys):
+    """SQLite 主库不为它验证真并发,真跑时一律 clamp 到 1。"""
+    runner = rig.Runner(dry_run=False, out_dir=tmp_path)
+    result = rig._resolve_concurrency(
+        runner, f"sqlite:///{tmp_path / 't.db'}", object(), 4,
+    )
+    assert result == 1
+    assert "SQLite" in capsys.readouterr().out
+    # 请求的就是 1:不该打印一条没意义的 clamp 诊断
+    capsys.readouterr()
+    rig._resolve_concurrency(runner, f"sqlite:///{tmp_path / 't.db'}", object(), 1)
+    assert "clamp" not in capsys.readouterr().out
+
+
+def test_resolve_concurrency_clamps_to_postgres_pool_max_size(tmp_path, capsys):
+    """请求的并发度超过 `POSTGRES_POOL_MAX_SIZE` 时 clamp,没超时原样通过。"""
+    runner = rig.Runner(dry_run=False, out_dir=tmp_path)
+    settings = types.SimpleNamespace(postgres_pool_max_size=3)
+    clamped = rig._resolve_concurrency(
+        runner, "postgresql://127.0.0.1:5432/main", settings, 10,
+    )
+    assert clamped == 3
+    assert "POSTGRES_POOL_MAX_SIZE" in capsys.readouterr().out
+    within = rig._resolve_concurrency(
+        runner, "postgresql://127.0.0.1:5432/main", settings, 2,
+    )
+    assert within == 2
+
+
+class _ThreadLocalLLM:
+    """把 `chat_json` 转发给"当前线程绑定"的那个替身。
+
+    并发用例要在同一个 workload_id(`"reasoning_agent"`)上同时跑 legacy / v2
+    两套协议,而 `bind_chat_client` 的覆盖是**整个 repo 共享**的一个键——两个
+    worker 线程各绑一次会互相踩。这里换一层:绑定只发生在各自的 worker 线程
+    里(`threading.local`),`chat_json` 只转发,不持有任何跨线程的可变状态。
+    """
+
+    configured = True
+
+    def __init__(self) -> None:
+        self._local = threading.local()
+
+    def bind(self, client: Any) -> None:  # noqa: ANN401 — 测试替身,类型从简
+        self._local.client = client
+
+    def chat_json(self, messages, schema_hint, **kwargs):
+        return self._local.client.chat_json(messages, schema_hint, **kwargs)
+
+
+def test_search_concurrent_two_questions_across_both_policies_on_one_repo(
+    rrepo, tmp_path
+):
+    """concurrency=2 的真端到端:2 题 × 2 策略 = 4 个 run 真的并发跑在同一个
+    SQLite repo 上。钉住:legacy / v2 各出两行、`policy_version` 正确、只读
+    计数不变、JSONL 每行可原样序列化再解析回来。
+
+    这条走的是 `run_search_once` 本身(`ThreadPoolExecutor.map` 直接驱动),
+    不经 `_search_loop_concurrent` 的编排——编排层的并发峰值与失败隔离/取消
+    由下面两条纯逻辑用例(假 `run_search_once`)分别钉住。
+    """
+    notebook = _seed_two_nodes(rrepo)
+    rrepo.settings.reasoning_stale_limit = 9
+    legacy_settings = rrepo.settings
+    v2_settings = rrepo.settings.model_copy()
+    v2_settings.reasoning_reflect_v2_enabled = True
+    settings_by_policy = {"legacy": legacy_settings, "v2": v2_settings}
+
+    dispatcher = _ThreadLocalLLM()
+    bind_chat_client(rrepo, "reasoning_agent", dispatcher)
+
+    plan = [
+        {"question_key": key, "corpus_cell": "A_nokg", "policy": policy,
+         "effort": "standard", "question": "RTL到GDSII流程"}
+        for key in ("A-q01", "A-q02")
+        for policy in ("legacy", "v2")
+    ]
+
+    database_url = f"sqlite:///{tmp_path / 't.db'}"
+    before = rig._readonly_counts(database_url)
+    assert before["knowledge_objects"]
+
+    def run_one(item: dict) -> dict:
+        policy = item["policy"]
+        if policy == "legacy":
+            client = _SeqLLM(
+                plan={"sub_queries": [{"query": "RTL到GDSII流程"}]},
+                reflects=[{"next_action": "answer", "sufficient": True}],
+            )
+        else:
+            client = _GatedV2LLM(
+                plan={"sub_queries": [{"query": "RTL到GDSII流程"}]},
+                reflects=[{"next_action": "answer", "sufficient": True,
+                           "arguments": {}}],
+            )
+        dispatcher.bind(client)
+        steps: list = []
+        result = rig.run_search_once(
+            rrepo, settings_by_policy[policy], notebook=notebook.id, item=item,
+            prepared=None,
+            on_step=lambda step: steps.append(rig.trace_step_row(step)),
+            cancel_event=threading.Event(), actor_id="t0-owner",
+        )
+        return rig.project_search_run(
+            steps, result=result, effort=item["effort"], policy=policy,
+            question_key=item["question_key"], corpus_cell=item["corpus_cell"],
+            kg_in_scope=True,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        rows = list(pool.map(run_one, plan))
+
+    assert len(rows) == 4
+    for row in rows:
+        assert row["reflect_turns"] >= 1
+        assert row["trace_steps"] > 0
+        assert row["question_key"] in ("A-q01", "A-q02")
+        assert row["corpus_cell"] == "A_nokg"
+        # 每行都能原样序列化再解析回来——JSONL"每行一份完整投影"的前提。
+        line = json.dumps(row, ensure_ascii=False, sort_keys=True)
+        assert json.loads(line) == row
+    legacy_rows = [r for r in rows if r["policy_version"] == "legacy"]
+    v2_rows = [r for r in rows if r["policy_version"] == "v2"]
+    assert len(legacy_rows) == 2, rows
+    assert len(v2_rows) == 2, rows
+    assert rig._readonly_counts(database_url) == before
+
+
+def _concurrent_search_args(no_intent: bool = True) -> Any:
+    args = rig.build_parser().parse_args(["search"])
+    args.no_intent = no_intent
+    return args
+
+
+def test_search_loop_concurrent_reaches_the_requested_peak_concurrency(
+    tmp_path, monkeypatch,
+):
+    """`_search_loop_concurrent` 编排层的纯逻辑用例:假 `run_search_once` 用一个
+    `threading.Barrier` 逼真并发——凑不齐 `concurrency` 个线程就会在这里超时,
+    所以峰值确实达到 `concurrency` 是**确定性**结论,不是靠 sleep 猜时序。
+    """
+    concurrency = 3
+    plan = [
+        {"question_key": f"Q{i:02d}", "corpus_cell": "A_nokg", "policy": "legacy",
+         "effort": "standard", "question": "q"}
+        for i in range(concurrency * 2)
+    ]
+    facts = {"A_nokg": {"notebook": "nb-a", "sources": 1, "kg_in_scope": True}}
+    settings_by_policy = {"legacy": object(), "v2": object()}
+    barrier = threading.Barrier(concurrency, timeout=5)
+    lock = threading.Lock()
+    state = {"current": 0, "peak": 0}
+
+    def fake_run_search_once(repo, settings, *, notebook, item, prepared,
+                             on_step, cancel_event, actor_id):
+        with lock:
+            state["current"] += 1
+            state["peak"] = max(state["peak"], state["current"])
+        try:
+            barrier.wait()
+        except threading.BrokenBarrierError:
+            pass
+        finally:
+            with lock:
+                state["current"] -= 1
+        return types.SimpleNamespace(termination=None)
+
+    monkeypatch.setattr(rig, "run_search_once", fake_run_search_once)
+
+    runner = rig.Runner(dry_run=False, out_dir=tmp_path)
+    profile = types.SimpleNamespace(id="t0-owner")
+    rig._search_loop_concurrent(
+        _concurrent_search_args(), runner, plan, facts, None,
+        settings_by_policy, actor_id="t0-owner", profile=profile,
+        concurrency=concurrency,
+    )
+
+    assert state["peak"] == concurrency
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "search-legacy.jsonl").read_text().splitlines()
+    ]
+    assert len(rows) == len(plan)
+
+
+def test_search_loop_concurrent_cancels_remaining_runs_on_policy_mismatch(
+    tmp_path, monkeypatch,
+):
+    """守卫:声明的策略与第一个完成的 run 的证据不一致 ⇒ 取消剩余任务。
+
+    第一个 run(`Q00`,声明 `--policy=v2`)立即回一个 legacy 形状的证据
+    (`termination=None`),触发 `abort()`;其余 run 卡在**各自的**
+    `cancel_event.wait()` 上,只有被 `abort()` 设过之后才会醒来抛
+    `AskCancelled`。断言:异常真的抛出来,而且没有全部 8 个 run 都执行到——
+    `executor.shutdown(cancel_futures=True)` 确实撤掉了还没开始跑的那些。
+    """
+    from app.services.cancellation import AskCancelled
+
+    total = 8
+    plan = [
+        {"question_key": f"Q{i:02d}", "corpus_cell": "A_nokg",
+         "policy": "v2" if i == 0 else "legacy", "effort": "standard",
+         "question": "q"}
+        for i in range(total)
+    ]
+    facts = {"A_nokg": {"notebook": "nb-a", "sources": 1, "kg_in_scope": True}}
+    settings_by_policy = {"legacy": object(), "v2": object()}
+    executed: list[str] = []
+    lock = threading.Lock()
+
+    def fake_run_search_once(repo, settings, *, notebook, item, prepared,
+                             on_step, cancel_event, actor_id):
+        with lock:
+            executed.append(item["question_key"])
+        if item["question_key"] == "Q00":
+            return types.SimpleNamespace(termination=None)
+        if cancel_event.wait(timeout=5):
+            raise AskCancelled()
+        raise TimeoutError("cancel_event 一直没被设置——abort() 没生效")
+
+    monkeypatch.setattr(rig, "run_search_once", fake_run_search_once)
+
+    runner = rig.Runner(dry_run=False, out_dir=tmp_path)
+    profile = types.SimpleNamespace(id="t0-owner")
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match="声明 --policy"):
+        rig._search_loop_concurrent(
+            _concurrent_search_args(), runner, plan, facts, None,
+            settings_by_policy, actor_id="t0-owner", profile=profile,
+            concurrency=2,
+        )
+    elapsed = time.monotonic() - started
+
+    assert len(executed) < total, executed
+    # 队列里还没开始跑的那几个靠 `shutdown(cancel_futures=True)` 就够撤掉,
+    # 但**已经在跑、卡在自己 cancel_event 上**的那一个(Q01)只能靠 `abort()`
+    # 主动 `.set()` 唤醒——它上面绑的 5s 超时就是留给"abort() 没生效"这种
+    # 退化的:那种情况下这条用例不会断言失败,但会顶着 5s 变慢,这里把它钉成
+    # 响亮失败而不是"凑巧通过但慢一拍"。
+    assert elapsed < 3.0, f"in-flight run 没有被 abort() 及时唤醒(耗时 {elapsed:.1f}s)"
