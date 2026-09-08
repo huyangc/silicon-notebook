@@ -1,0 +1,377 @@
+{
+  "version": 1,
+  "note": "reflect v2 开闸前 T0 的 rig 题集(设计规格 2026-09-08 §5)。语料是公开 LLM 论文,题面本身不含任何私有数据;gold 只对 A 语料保留,供后续 §9.2 的真实决策 A/B 使用,T0 本身只用题号(key)。key 里不许出现半角冒号——它是 client_request_id 的字段分隔符。",
+  "corpus": {
+    "A": {
+      "kind": "single_paper",
+      "source": "rebuilt_from_source_elements",
+      "note": "arXiv 2502.05171(递归深度语言模型)。PDF 不在磁盘,rig 用 --source-db-url 从主库的 source_elements 只读重建 markdown 后上传;主库 notebook id 由 --source-notebook 显式传入,刻意不落进仓库。"
+    },
+    "B": {
+      "kind": "multi_paper",
+      "dir": ".local/storage/notebooks/nb-b37185f4ae",
+      "files": [
+        "src-af28908c73_deepseek_papers__01_DeepSeek-V2_mineru.md",
+        "src-8b53d48cd3_05_DeepSeekV2_mineru.md",
+        "src-f37b996be8_qwen_papers__04_Qwen-VL_mineru.md",
+        "src-32c3a2ecba_16_ForesightKV_mineru.md",
+        "src-193b32d112_06_KIVI_mineru.md",
+        "src-1675b22a0f_llm_papers_2024_arch__01_Jamba_mineru.md"
+      ],
+      "note": "6 篇公开论文。前两个文件是同一篇 DeepSeek-V2 的两次不同解析(140KB / 86KB),刻意保留——B-q07「同标题/同内容」问的就是它们。"
+    }
+  },
+  "ask": [
+    {
+      "key": "A-q01",
+      "corpus": "A",
+      "shape": "single_paper",
+      "zh": "当前notebook的文章说明了什么？",
+      "en": "What does the paper in this notebook say?",
+      "gold_section_path": [
+        "Abstract",
+        "1. Scaling"
+      ]
+    },
+    {
+      "key": "A-q02",
+      "corpus": "A",
+      "shape": "single_paper",
+      "zh": "这篇论文的核心贡献是什么？",
+      "en": "What is the main contribution of this paper?",
+      "gold_section_path": [
+        "Abstract",
+        "1. Scaling"
+      ]
+    },
+    {
+      "key": "A-q03",
+      "corpus": "A",
+      "shape": "single_paper",
+      "zh": "什么是递归深度语言模型？",
+      "en": "What is a recurrent-depth language model?",
+      "gold_section_path": [
+        "Abstract",
+        "1. Scaling",
+        "2. Why"
+      ]
+    },
+    {
+      "key": "A-q04",
+      "corpus": "A",
+      "shape": "single_paper",
+      "zh": "为什么要训练带循环深度的模型？",
+      "en": "Why train models with recurrent depth?",
+      "gold_section_path": [
+        "2. Why"
+      ]
+    },
+    {
+      "key": "A-q05",
+      "corpus": "A",
+      "shape": "single_paper",
+      "zh": "模型的宏观架构是怎样的，prelude、循环块和 coda 各做什么？",
+      "en": "What is the macroscopic design: what do the prelude, recurrent block and coda do?",
+      "gold_section_path": [
+        "3.1"
+      ]
+    },
+    {
+      "key": "A-q06",
+      "corpus": "A",
+      "shape": "single_paper",
+      "zh": "循环块的微观设计用了什么归一化和注意力机制？",
+      "en": "What normalization and attention are used in the microscopic design of the recurrent block?",
+      "gold_section_path": [
+        "3.2"
+      ]
+    },
+    {
+      "key": "A-q07",
+      "corpus": "A",
+      "shape": "single_paper",
+      "zh": "训练目标是怎么定义的，循环次数如何采样？",
+      "en": "How is the training objective defined and how is the number of recurrences sampled?",
+      "gold_section_path": [
+        "3.3"
+      ]
+    },
+    {
+      "key": "A-q08",
+      "corpus": "A",
+      "shape": "single_paper",
+      "zh": "模型训练用了多少参数和多少 token？",
+      "en": "How many parameters and how many tokens were used in training?",
+      "gold_section_path": [
+        "4.1",
+        "Abstract"
+      ]
+    },
+    {
+      "key": "A-q09",
+      "corpus": "A",
+      "shape": "single_paper",
+      "zh": "训练用了什么硬件，算力是怎么安排的？",
+      "en": "What hardware and compute setup was used for training?",
+      "gold_section_path": [
+        "4.2"
+      ]
+    },
+    {
+      "key": "A-q10",
+      "corpus": "A",
+      "shape": "single_paper",
+      "zh": "归一化和初始化在大规模训练下为什么重要？",
+      "en": "Why do norms and initializations matter at scale?",
+      "gold_section_path": [
+        "4.3"
+      ]
+    },
+    {
+      "key": "A-q11",
+      "corpus": "A",
+      "shape": "single_paper",
+      "zh": "在标准基准上的结果如何，和 OLMo 相比怎么样？",
+      "en": "How does the model perform on standard benchmarks compared with OLMo?",
+      "gold_section_path": [
+        "5.1"
+      ]
+    },
+    {
+      "key": "A-q12",
+      "corpus": "A",
+      "shape": "single_paper",
+      "zh": "数学和代码基准上的表现如何？",
+      "en": "How does it perform on math and coding benchmarks?",
+      "gold_section_path": [
+        "5.2"
+      ]
+    },
+    {
+      "key": "A-q13",
+      "corpus": "A",
+      "shape": "single_paper",
+      "zh": "循环在哪些任务上帮助最大？",
+      "en": "Where does recurrence help most?",
+      "gold_section_path": [
+        "5.3"
+      ]
+    },
+    {
+      "key": "A-q14",
+      "corpus": "A",
+      "shape": "single_paper",
+      "zh": "权重平均带来了什么提升？",
+      "en": "What improvement does weight averaging bring?",
+      "gold_section_path": [
+        "5.4"
+      ]
+    },
+    {
+      "key": "A-q15",
+      "corpus": "A",
+      "shape": "single_paper",
+      "zh": "测试时如何做零样本自适应计算？",
+      "en": "How does zero-shot adaptive compute at test time work?",
+      "gold_section_path": [
+        "6.1"
+      ]
+    },
+    {
+      "key": "A-q16",
+      "corpus": "A",
+      "shape": "single_paper",
+      "zh": "KV 缓存共享是怎么做到的？",
+      "en": "How is zero-shot KV-cache sharing achieved?",
+      "gold_section_path": [
+        "6.2"
+      ]
+    },
+    {
+      "key": "A-q17",
+      "corpus": "A",
+      "shape": "single_paper",
+      "zh": "连续思维链是什么意思？",
+      "en": "What is zero-shot continuous chain-of-thought?",
+      "gold_section_path": [
+        "6.3"
+      ]
+    },
+    {
+      "key": "A-q18",
+      "corpus": "A",
+      "shape": "single_paper",
+      "zh": "自推测解码是怎么实现的？",
+      "en": "How is self-speculative decoding implemented?",
+      "gold_section_path": [
+        "6.4"
+      ]
+    },
+    {
+      "key": "A-q19",
+      "corpus": "A",
+      "shape": "single_paper",
+      "zh": "大规模下涌现了哪些机制，隐空间轨迹长什么样？",
+      "en": "What mechanisms emerge at scale and what do the latent-space trajectories look like?",
+      "gold_section_path": [
+        "7. What",
+        "B. Latent"
+      ]
+    },
+    {
+      "key": "A-q20",
+      "corpus": "A",
+      "shape": "single_paper",
+      "zh": "相关工作里和哪些方法做了对比？",
+      "en": "Which related approaches are discussed in the related work?",
+      "gold_section_path": [
+        "8. Related"
+      ]
+    },
+    {
+      "key": "A-q21",
+      "corpus": "A",
+      "shape": "single_paper",
+      "zh": "论文提出的未来工作有哪些？",
+      "en": "What future work does the paper propose?",
+      "gold_section_path": [
+        "9. Future"
+      ]
+    },
+    {
+      "key": "A-q22",
+      "corpus": "A",
+      "shape": "single_paper",
+      "zh": "预训练数据是怎么构成的？",
+      "en": "How is the pretraining data composed?",
+      "gold_section_path": [
+        "C. Pretraining"
+      ]
+    },
+    {
+      "key": "A-q23",
+      "corpus": "A",
+      "shape": "single_paper",
+      "zh": "这个模型有哪些缺点或局限？",
+      "en": "What are the limitations of this model?",
+      "gold_section_path": [
+        "9. Future",
+        "5.1",
+        "Potential"
+      ]
+    },
+    {
+      "key": "A-q24",
+      "corpus": "A",
+      "shape": "single_paper",
+      "zh": "GSM8K 上 r=1 和 r=32 的得分分别是多少？",
+      "en": "What are the GSM8K scores at r=1 versus r=32?",
+      "gold_section_path": [
+        "5.2",
+        "5.3"
+      ]
+    },
+    {
+      "key": "B-q01",
+      "corpus": "B",
+      "shape": "roster",
+      "zh": "这个笔记本里都有哪些文章?请按标题逐一列出。",
+      "en": "List every paper in this notebook, one by one, by title."
+    },
+    {
+      "key": "B-q02",
+      "corpus": "B",
+      "shape": "type_inventory",
+      "zh": "这些来源里一共有多少张表格、多少个公式?分别出自哪几篇?",
+      "en": "How many tables and how many formulas are there across these sources, and which paper does each come from?"
+    },
+    {
+      "key": "B-q03",
+      "corpus": "B",
+      "shape": "compare_two",
+      "zh": "DeepSeek-V2 的 MLA 与 KIVI 的 KV 量化,在降低 KV 缓存开销上的思路有什么不同?",
+      "en": "How do DeepSeek-V2's MLA and KIVI's KV quantization differ in how they reduce KV cache cost?"
+    },
+    {
+      "key": "B-q04",
+      "corpus": "B",
+      "shape": "compare_two",
+      "zh": "ForesightKV 与 KIVI 在压缩或驱逐 KV 缓存时各自的判据是什么?哪一个需要额外训练?",
+      "en": "What criteria do ForesightKV and KIVI each use to compress or evict the KV cache, and which one needs extra training?"
+    },
+    {
+      "key": "B-q05",
+      "corpus": "B",
+      "shape": "param_default",
+      "zh": "Jamba 公布的注意力层与 Mamba 层配比默认是多少?在什么条件下会改这个比例?",
+      "en": "What is Jamba's published default ratio of attention layers to Mamba layers, and under what conditions is that ratio changed?"
+    },
+    {
+      "key": "B-q06",
+      "corpus": "B",
+      "shape": "param_default",
+      "zh": "KIVI 默认把 key 和 value 各量化到多少 bit?沿哪个维度分组,默认组大小是多少?",
+      "en": "By default, to how many bits does KIVI quantize keys and values, along which axis does it group, and what is the default group size?"
+    },
+    {
+      "key": "B-q07",
+      "corpus": "B",
+      "shape": "duplicate_sources",
+      "zh": "这个笔记本里有没有内容重复的来源?如果有,它们之间的差别在哪里?",
+      "en": "Does this notebook contain duplicate sources? If so, how do they differ from each other?"
+    },
+    {
+      "key": "B-q08",
+      "corpus": "B",
+      "shape": "first_round_empty",
+      "zh": "这些论文里关于「思维链蒸馏」的实验结果是怎样的?",
+      "en": "What are the chain-of-thought distillation results reported in these papers?"
+    },
+    {
+      "key": "B-q09",
+      "corpus": "B",
+      "shape": "scope_narrowed",
+      "zh": "只看 Qwen-VL 和 DeepSeek-V2 这两篇,它们各自是怎么处理图像输入的?",
+      "en": "Looking only at Qwen-VL and DeepSeek-V2, how does each of them handle image input?",
+      "scope_sources": 2
+    },
+    {
+      "key": "B-q10",
+      "corpus": "B",
+      "shape": "over_budget_survey",
+      "zh": "把这个笔记本里所有论文在降低推理开销上的做法做一次完整综述,逐篇给出方法、代价与适用条件。",
+      "en": "Write a complete survey of what every paper in this notebook does to reduce inference cost, giving the method, its cost and its applicable conditions for each."
+    }
+  ],
+  "report": [
+    {
+      "key": "R-q01",
+      "corpus": "B",
+      "profile": "standard",
+      "depth": 2,
+      "question": "这批论文在降低 KV 缓存开销上有哪几条技术路线?各自的取舍是什么?"
+    },
+    {
+      "key": "R-q02",
+      "corpus": "B",
+      "profile": "standard",
+      "depth": 2,
+      "question": "混合架构(注意力 + 状态空间)在这批论文里的动机、做法与已报告的收益分别是什么?"
+    },
+    {
+      "key": "R-q03",
+      "corpus": "B",
+      "profile": "deep",
+      "depth": 8,
+      "question": "以这批论文为依据,综述大模型推理成本的来源与现有缓解手段,并指出彼此矛盾或尚未验证的结论。"
+    },
+    {
+      "key": "R-q04",
+      "corpus": "B",
+      "profile": "deep",
+      "depth": 8,
+      "question": "多模态模型与纯文本模型在这批论文里的评测口径有何不同?哪些比较是不能直接对齐的?"
+    }
+  ],
+  "report_depth_note": "报告侧的旋钮是 reports.depth(每节反思步上限,1..16),不是 Ask 的 retrieval_effort;profile 只是 standard/deep 两档的人读标签。"
+}
