@@ -418,6 +418,49 @@ def test_seed_refuses_when_database_url_and_db_name_disagree(tmp_path, capsys):
     assert rc == 0
 
 
+def test_rig_tag_decoder_rejects_segments_that_are_not_short_codes():
+    """API 放行 128 字的幂等键,一段 65 字的题号却会让 `project_run` 的值形状守卫
+    抛 ValueError、打死整次导出(codex #700 R20 P2)。畸形段按「不是 rig 发的」
+    处理:返回空字典,只进基线表。"""
+    from export_reasoning_traces import decode_client_request_id
+
+    good = "t0:A-q01:A_kg:legacy:deep:reasoning"
+    assert decode_client_request_id(good)["question_key"] == "A-q01"
+    too_long = "t0:" + "q" * 65 + ":A_kg:legacy:deep:reasoning"
+    assert len(too_long) <= 128
+    assert decode_client_request_id(too_long) == {}
+    assert decode_client_request_id("t0:A q01:A_kg:legacy:deep:reasoning") == {}
+    assert decode_client_request_id("t0::A_kg:legacy:deep:reasoning") == {}
+
+
+def test_await_parse_walks_every_page_of_sources(monkeypatch):
+    """`sources` 单页上限 200:超过 200 个来源时只看第一页会在后页还在解析时就
+    宣布完成,后页的失败也数不到(codex #700 R20 P2)。以短页为终止翻完全部。"""
+    calls: list[str] = []
+    page1 = [{"id": f"s{i}", "parse_status": "extracted"} for i in range(200)]
+    page2 = [{"id": "s200", "parse_status": "queued"}]
+    state = {"round": 0}
+
+    def fake_http(self, method, url, **kwargs):
+        calls.append(url)
+        if "offset=0" in url:
+            return {"items": page1, "total": 201}
+        if "offset=200" in url:
+            # 第一轮还在排队,第二轮解析完——只看第一页的实现会在第一轮就返回。
+            status = "queued" if state["round"] == 0 else "extracted"
+            state["round"] += 1
+            return {"items": [{**page2[0], "parse_status": status}], "total": 201}
+        raise AssertionError(f"unexpected page {url}")
+
+    monkeypatch.setattr(rig.Runner, "http", fake_http)
+    monkeypatch.setattr(rig.time, "sleep", lambda *_: None)
+    runner = rig.Runner(dry_run=False, out_dir=Path("/nonexistent"))
+    items = rig.await_parse(runner, "http://b", "nb", token="t", timeout=60)
+    assert len(items) == 201
+    assert state["round"] == 2, "第二页的排队项必须被等到终态"
+    assert any("offset=200" in url for url in calls)
+
+
 def test_http_error_bodies_are_reduced_to_safe_codes(monkeypatch):
     """4xx 正文会回显被拒的输入(问题原文、意图契约);整段抄进 RuntimeError 打到
     stderr 就是原文泄露(codex #700 R19 P2)。只保留短错误码,其余脱敏;

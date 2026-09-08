@@ -540,6 +540,28 @@ def upload_corpus(
     return uploaded
 
 
+def _list_all_sources(
+    runner: Runner, base: str, notebook_id: str, *, token: str,
+) -> list[dict]:
+    """翻完 `sources` 的**每一页**(codex #700 R20 P2):端点单页上限 200,
+    语料超过 200 个来源时只看第一页会在后面几页还在排队/解析时就宣布解析完成,
+    后页的失败也永远数不到。以「短页」为终止,不依赖 `total` 字段。"""
+    items: list[dict] = []
+    offset = 0
+    limit = 200
+    while True:
+        page = runner.http(
+            "GET",
+            f"{base}/api/notebooks/{notebook_id}/sources?offset={offset}&limit={limit}",
+            token=token, timeout=60, quiet=True,
+        ) or {}
+        batch = list(page.get("items") or [])
+        items.extend(batch)
+        if len(batch) < limit:
+            return items
+        offset += len(batch)
+
+
 def await_parse(
     runner: Runner, base: str, notebook_id: str, *, token: str, timeout: float,
 ) -> list[dict]:
@@ -551,11 +573,7 @@ def await_parse(
     """
     deadline = time.monotonic() + timeout
     while True:
-        page = runner.http(
-            "GET", f"{base}/api/notebooks/{notebook_id}/sources?offset=0&limit=200",
-            token=token, timeout=60, quiet=True,
-        ) or {}
-        items = list(page.get("items") or [])
+        items = _list_all_sources(runner, base, notebook_id, token=token)
         pending = [s for s in items if str(s.get("parse_status") or "")
                    not in PARSE_TERMINAL]
         if items and not pending:
