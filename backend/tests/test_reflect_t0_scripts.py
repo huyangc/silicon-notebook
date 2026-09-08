@@ -418,6 +418,46 @@ def test_seed_refuses_when_database_url_and_db_name_disagree(tmp_path, capsys):
     assert rc == 0
 
 
+def test_http_error_bodies_are_reduced_to_safe_codes(monkeypatch):
+    """4xx 正文会回显被拒的输入(问题原文、意图契约);整段抄进 RuntimeError 打到
+    stderr 就是原文泄露(codex #700 R19 P2)。只保留短错误码,其余脱敏;
+    `Runner.http` 与 `Runner.stream` 同一条规则。"""
+    import io
+    import urllib.error
+    import urllib.request
+
+    secret = "机密问题原文:RTL到GDSII流程"
+    assert rig._safe_http_error_detail(
+        json.dumps({"detail": {"code": "invalid_username", "message": secret}}).encode()
+    ) == "code=invalid_username"
+    assert rig._safe_http_error_detail(
+        json.dumps({"detail": secret}).encode()
+    ) == "<body redacted>"
+    assert rig._safe_http_error_detail(secret.encode()) == "<body redacted>"
+    assert rig._safe_http_error_detail(
+        json.dumps({"detail": {"code": "has space in it"}}).encode()
+    ) == "<body redacted>"
+
+    def _raise_422(request, timeout=0):
+        raise urllib.error.HTTPError(
+            request.full_url, 422, "Unprocessable", None,
+            io.BytesIO(json.dumps({"detail": {"code": "intent_mismatch",
+                                             "question": secret}}).encode()),
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", _raise_422)
+    runner = rig.Runner(dry_run=False, out_dir=Path("/nonexistent"))
+    for call in (
+        lambda: runner.http("POST", "http://127.0.0.1:1/ask/intent", json_body={"q": secret}),
+        lambda: runner.stream("POST", "http://127.0.0.1:1/ask/stream", json_body={"q": secret}),
+    ):
+        with pytest.raises(RuntimeError) as excinfo:
+            call()
+        message = str(excinfo.value)
+        assert "422" in message and "code=intent_mismatch" in message
+        assert secret not in message
+
+
 def test_start_backend_refuses_an_endpoint_that_already_answers(monkeypatch):
     """就绪探测分不清应答者是刚起的子进程还是早就占着端口的别人;后者会让
     `_start_backend` 把别人的 PID 当成功返回,seed 的注册/上传/建图全打到那台

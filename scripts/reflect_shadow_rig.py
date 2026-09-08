@@ -56,6 +56,7 @@ import argparse
 import json
 import mimetypes
 import os
+import re
 import secrets
 import shlex
 import signal
@@ -325,6 +326,35 @@ def rebuild_source_markdown(source_db_url: str, notebook_id: str) -> dict[str, s
 # --- 真跑侧的薄执行器 -------------------------------------------------------
 
 
+_SAFE_ERROR_CODE = re.compile(r"^[A-Za-z0-9_.:\-]{1,64}$")
+
+
+def _safe_http_error_detail(body: bytes) -> str:
+    """HTTP 错误正文 → 只保留**短错误码**的诊断串(codex #700 R19 P2)。
+
+    校验错误的正文常常回显被拒的输入(问题原文、意图契约),整段抄进异常再打到
+    stderr 就是一次原文泄露,截 500 字不算脱敏。这里只认 JSON 里的
+    `detail.code` / `detail.error_code` / `code` / `error_code`(且形如短码);
+    其余一律记 `<body redacted>`。状态码由调用方拼。
+    """
+    try:
+        parsed = json.loads(body.decode("utf-8", "replace") or "null")
+    except ValueError:
+        return "<body redacted>"
+    candidates: list[object] = []
+    if isinstance(parsed, dict):
+        detail = parsed.get("detail")
+        if isinstance(detail, dict):
+            candidates.extend([detail.get("code"), detail.get("error_code")])
+        elif isinstance(detail, str):
+            candidates.append(detail)
+        candidates.extend([parsed.get("code"), parsed.get("error_code")])
+    for candidate in candidates:
+        if isinstance(candidate, str) and _SAFE_ERROR_CODE.match(candidate):
+            return f"code={candidate}"
+    return "<body redacted>"
+
+
 class Runner:
     """把「要做什么」和「真的去做」分开的那一层。
 
@@ -377,8 +407,10 @@ class Runner:
         except urllib.error.HTTPError as exc:
             # 后端的 4xx 正文是唯一说得清「为什么被拒」的东西(用户名不合法、
             # 文件类型不支持、LLM 未配置…)。默认的 HTTPError 只带一个状态码,
-            # 那会让一次跑了半小时的 seed 死在一句「HTTP Error 400」上。
-            detail = exc.read().decode("utf-8", "replace")[:500]
+            # 那会让一次跑了半小时的 seed 死在一句「HTTP Error 400」上。但正文
+            # 可能回显被拒的输入(问题原文、意图契约),只能取其中的短错误码
+            # (`_safe_http_error_detail`;codex #700 R19 P2)。
+            detail = _safe_http_error_detail(exc.read())
             raise RuntimeError(f"{method} {url} -> {exc.code}: {detail}") from exc
         return json.loads(text) if text else None
 
@@ -417,7 +449,7 @@ class Runner:
                     except ValueError:
                         continue
         except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", "replace")[:500]
+            detail = _safe_http_error_detail(exc.read())
             raise RuntimeError(f"{method} {url} -> {exc.code}: {detail}") from exc
         self.say("stream done",
                  f"{events} event(s), last event={last.get('event', '<none>')}")
