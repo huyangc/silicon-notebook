@@ -3886,25 +3886,37 @@ def _ab_assert_gold_resolves(
     成 0」。这一步刻意放在第一个模型调用之前:一次 408 run 的批要跑几个小时,
     而这条错在第一秒就看得见。
 
+    缓存键是 **`(corpus_cell, question_key)`**,不是只有 `question_key`:同时
+    选 `B_kg` 与 `B_nokg` 时,同一道题会跑在两个不同的笔记本上,`gold_sources`
+    短名在其中一个笔记本里缺失或歧义,不能因为另一个笔记本先解析通过了就被
+    绕过——那会让这道题在跑坏的那一格上悄悄产出一行误导的 0 或虚高
+    (codex #703 R2 P2-2)。
+
     解析结果本身**刻意不留**:`anchors_on_gold` 的 B 格第三跳走的是同一条
     「标题包含短名」的规则(`count_anchors_on_gold` 里),把一份等价的 id 集合
     再传一遍,只会多出一个可能与它分叉的第二真源。这里要的是那条断言,不是它
     的返回值。返回的题数只用来打日志。
     """
-    from app.eval.reflect_ab import gold_for
+    from app.eval.reflect_ab import GoldError, gold_for
 
-    checked: set[str] = set()
+    checked: set[tuple[str, str]] = set()
     for unit in units:
         key = unit["question_key"]
-        if key in checked:
+        cell = unit["corpus_cell"]
+        cache_key = (cell, key)
+        if cache_key in checked:
             continue
         gold = gold_for(gold_by_key, key)
         if gold is None or not gold.gold_sources:
             continue
-        resolve_gold_sources(gold, facts[unit["corpus_cell"]]["source_rows"])
-        checked.add(key)
+        try:
+            resolve_gold_sources(gold, facts[cell]["source_rows"])
+        except GoldError as exc:
+            raise GoldError(f"[{cell}] {exc}") from exc
+        checked.add(cache_key)
     runner.say("gold sources resolved",
-               f"{len(checked)} 道题的 gold_sources 各解析到唯一来源(§5.5-6)")
+               f"{len(checked)} 组(题×格)的 gold_sources 各解析到唯一来源"
+               "(§5.5-6)")
     return len(checked)
 
 

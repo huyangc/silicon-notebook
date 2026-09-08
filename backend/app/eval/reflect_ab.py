@@ -363,6 +363,27 @@ def _anchors_on_section_gold(
     return len(hits)
 
 
+def _anchor_identity(anchor: object) -> str:
+    """锚点的去重身份键:同一个 chunk/元素/KG 对象不管在锚点列表里出现几次,
+    都要折叠到同一个键;不同对象哪怕共享同一个 `source_id`,也要分开计数。
+
+    优先级与 `_anchor_section` 的三跳一致(`element_id` → `object_id` →
+    `key`),但这里不要求解析到 section——B 格(`gold_sources`)只看来源标题,
+    不需要 section 信息,所以不能直接借 `_anchor_section` 的返回值(它对解析
+    不到 section 的锚点会返回 `None`,而 B 格里这类锚点是要正常计数的)。
+    """
+    element_id = _anchor_field(anchor, "element_id")
+    if element_id:
+        return f"element:{element_id}"
+    object_id = _anchor_field(anchor, "object_id")
+    if object_id:
+        return f"object:{object_id}"
+    key = _anchor_field(anchor, "key")
+    if key:
+        return f"key:{key}"
+    return f"anchor:{id(anchor)}"
+
+
 def _anchors_on_source_gold(
     anchors: Sequence[object],
     gold_sources: Sequence[str],
@@ -381,7 +402,7 @@ def _anchors_on_source_gold(
         if not title:
             return None
         if any(name in title for name in gold_sources):
-            hits.add(source_id)
+            hits.add(_anchor_identity(anchor))
     return len(hits)
 
 
