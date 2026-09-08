@@ -1233,8 +1233,14 @@ def _generate_report(
                         intent_contract=frozen,
                     )
                     current = repo.get_report(notebook, report_id)
-                if not claimed or str(current.get("status") or "") != "done":
+                if not claimed:
                     gate_reason = "clarification_gate"
+    # codex #700 R4 P2: two execution paths converge here; any non-done
+    # terminal status (planning failure, generation failure, still gated)
+    # must project as a failed run instead of being logged as "report done".
+    final_status = str(current.get("status") or "")
+    if final_status != "done" and gate_reason is None:
+        gate_reason = f"report_{final_status or 'unknown'}"
     return captured, gate_reason
 
 
