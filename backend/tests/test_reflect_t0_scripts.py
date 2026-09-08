@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import sqlite3
 import sys
 from pathlib import Path
@@ -141,6 +142,52 @@ def test_heading_elements_become_markdown_headings():
     assert rig._element_markdown("heading", "Abstract", {}) == "## Abstract"
     assert rig._element_markdown("list_item", "a", {}) == "- a"
     assert rig._element_markdown("paragraph", "a", {}) == "a"
+
+
+# --- 上传体与 teardown 闸(都是纯函数,不碰网络/库) -------------------------
+
+
+def test_upload_body_sends_one_doc_type_pair_per_file(tmp_path):
+    # 后端按**位置**对齐 files / doc_types / doc_type_explicit
+    # (`app/api/source_routes.py:_parse_source_upload`)。少发一个 doc_types
+    # 不会报错,只会让后面每个文件都错位拿到上一个文件的类型——所以条数相等是
+    # 断言,不是巧合。
+    paths = []
+    for name in ("a.md", "b.md"):
+        path = tmp_path / name
+        path.write_text("# " + name, encoding="utf-8")
+        paths.append(path)
+    body, content_type = rig.build_upload_body(paths)
+    assert content_type.startswith("multipart/form-data; boundary=")
+    text = body.decode("utf-8")
+    assert text.count('name="files"') == 2
+    assert text.count('name="doc_types"') == 2
+    assert text.count('name="doc_type_explicit"') == 2
+    # 表单键必须**恰好**是后端的闭集:多一个键是 422。
+    keys = set(re.findall(r'(?<!file)name="([^"]+)"', text))
+    assert keys == set(rig.UPLOAD_FORM_KEYS)
+    for path in paths:
+        assert f'filename="{path.name}"' in text
+        assert path.read_text("utf-8") in text
+
+
+def test_teardown_only_drops_the_postgres_database_this_run_wrote(tmp_path):
+    # `--db-name` 有默认值,而 DROP 走的是 `--admin-url`:一次跑在 SQLite 上的
+    # rig 不该让 teardown 去 PG 上删一个同名的、别人的库。
+    def parsed(database_url: str):
+        return rig.build_parser().parse_args(
+            ["--database-url", database_url, "teardown"]
+        )
+
+    assert rig._teardown_targets_this_run(
+        parsed("postgresql://127.0.0.1:5432/silicon_notebook_t0_test")
+    ) is True
+    assert rig._teardown_targets_this_run(
+        parsed(f"sqlite:///{tmp_path / 'silicon_notebook_t0_test'}")
+    ) is False
+    assert rig._teardown_targets_this_run(
+        parsed("postgresql://127.0.0.1:5432/somebody_elses_db")
+    ) is False
 
 
 # --- 导出(SQLite 侧) ------------------------------------------------------
