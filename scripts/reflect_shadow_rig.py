@@ -6,26 +6,36 @@
 `scripts/export_reasoning_traces.py` 导出;Report 的逐节轨迹不落库,由本脚本
 **进程内**捕获成 JSONL(§2.3)。
 
+另有一条**不建测试库**的路:`search` 直接对**主库(只读)**里两个既有笔记本
+跑检索过程(plan + reflect 循环),轨迹在进程内投影成 JSONL。它不建库、不建图、
+不合成答案,也因此不写 ask_jobs / answers / conversations 任何一行。
+
     python scripts/reflect_shadow_rig.py --dry-run seed
     python scripts/reflect_shadow_rig.py --dry-run ask
     python scripts/reflect_shadow_rig.py --dry-run report
+    python scripts/reflect_shadow_rig.py --dry-run --limit 5 search
 
-子命令:`seed` / `ask` / `report` / `restart` / `export` / `teardown`。
+子命令:`seed` / `ask` / `report` / `search` / `restart` / `export` / `teardown`。
 **`--dry-run` 打印将要做的每一步与每个 `client_request_id` 的编码,不连库、不
 起后端、不发任何请求**——它是唯一进标准门的路径(rig 本体要网络与真实模型)。
 
 三条红线,代码层面的落点在下面各处注释里:
 
-* **主库只读**:只有 `seed` 会碰主库,而且只用 `--source-db-url` 显式给出的
-  连接、只跑一条 SELECT(重建 A 语料的 markdown)。所有写入都在测试库。
-* **策略靠重启**:`REASONING_REFLECT_V2_ENABLED` 是进程级 Settings,rig 不去
-  热改它;`ask` / `report` 每次只跑**一个** `--policy`,换策略 = 换一次后端。
-  `restart` 是唯一的换策略手段:优雅停掉 state 里记的那台后端、按新
+* **主库只读**:`seed` 碰主库时只用 `--source-db-url` 显式给出的连接、只跑一条
+  SELECT(重建 A 语料的 markdown),写入全在测试库;`search` 整条路对
+  `--database-url`(必须显式给出的主库连接)只读,跑前跑后各点一次
+  `READONLY_TABLES` 的行数,不等就报错。
+* **策略靠重启**(HTTP 路径):`REASONING_REFLECT_V2_ENABLED` 是进程级 Settings,
+  rig 不去热改它;`ask` / `report` 每次只跑**一个** `--policy`,换策略 = 换一次
+  后端。`restart` 是唯一的换策略手段:优雅停掉 state 里记的那台后端、按新
   `--policy` 重起同一份端口/DB/env-file 配置;`ask` / `report` 开跑前会核对
   state 里记的策略与这次的 `--policy` 是否一致,不一致直接报错,而不是悄悄
-  跑出一批策略对不上号的轨迹。
+  跑出一批策略对不上号的轨迹。**`search` 不在此列**:它是进程内直调
+  `ReasoningRetriever`,而那个类读的是**传进去的**那份 Settings,所以两个策略
+  各构造一份 Settings 就能在同一次进程里交替跑(见 `_settings_by_policy`)。
 * **编号不进问题文本**:题号/语料格/策略/档位只编进 `client_request_id`(见
   `encode_client_request_id`),导出时据它打标。模型永远看不到这些编号。
+  `search` 不经 job,标签直接进投影行;问题原文一个字都不进它的日志与 JSONL。
 """
 from __future__ import annotations
 
@@ -49,11 +59,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from app.domain.reasoning_trace_stats import (  # noqa: E402
     CORPUS_CELLS,
+    MAX_REFLECT_STEPS,
     assert_closed,
     assert_projection_values,
     merge_key,
     project_report_section,
     project_run,
+    project_search_run,
 )
 from app.eval.reflect_t0 import load_questions  # noqa: E402
 from export_reasoning_traces import RIG_FIELDS, RIG_PREFIX  # noqa: E402
@@ -74,6 +86,20 @@ UPLOAD_BATCH = 20
 #: 来源解析的终态(`source_ingestion` 的 `_emit_status` 三个落点)。轮询等的是
 #: 「不再变」,不是「成功」——failed 也要停,否则一个坏文件把整次 seed 挂死。
 PARSE_TERMINAL: frozenset[str] = frozenset({"extracted", "failed", "metadata-only"})
+#: `search` 跑的两个语料格。**它们是主库里既有的事实,不是 rig 造出来的**:
+#: `--source-notebook-a` 那个笔记本一个 knowledge_object 都没有,
+#: `--source-notebook-b` 那个有四万多个。`search` 不建库也不建图,所以另外两格
+#: (`A_kg` / `B_nokg`)在主库上根本不存在,不在这条路的枚举里。
+SEARCH_CELLS: tuple[str, ...] = ("A_nokg", "B_kg")
+#: `search` 的只读断言盯的表。前四张是 Ask / 答案 / 会话 / 图的写入面;
+#: `retrieval_experiences` 是 `ReasoningRetriever.run` 全程**唯一**的写路径
+#: (收尾那一次有界 `note_adopted` UPDATE,只在注入开着时可达——而 rig 另外把
+#: 注入开关强制关掉,见 `_search_process_env`)。表不存在时那一格记 `None` =
+#: 「这次不看它」,而不是当成 0:否则一次改名会静默通过。
+READONLY_TABLES: tuple[str, ...] = (
+    "ask_jobs", "answers", "conversations", "knowledge_objects",
+    "retrieval_experiences",
+)
 
 
 # --- client_request_id 编码 -------------------------------------------------
@@ -148,6 +174,40 @@ def ask_plan(
                         ),
                         "question": text,
                     })
+    return plan
+
+
+def search_cells(selected: Sequence[str]) -> list[str]:
+    return [cell for cell in SEARCH_CELLS if not selected or cell in selected]
+
+
+def search_plan(
+    questions: dict, *, cells: Sequence[str], policies: Sequence[str],
+    limit: int | None, lang: str, efforts: Sequence[str],
+) -> list[dict]:
+    """`search` 要跑的全部 run,一条一行。**枚举复用 `ask_plan`**。
+
+    两条路的枚举必须是同一份:`search` 与 `ask` 出的行进的是同一张对照表
+    (`analyze_reasoning_trace.py` 按 `question_key` + `corpus_cell` + `effort`
+    配对),各写一份枚举就等于给「哪些题在哪些格上跑」立两个权威。
+
+    与 `ask` 的两点不同:
+
+    * **一次跑两侧策略**。`search` 是进程内直调,换策略只是换一份 Settings
+      (`_settings_by_policy`),不用重启后端,所以 legacy/v2 在同一次调用里
+      跑完——这正是配对最干净的形状。
+    * **丢掉 `client_request_id`**。那个键的全部意义是「幂等键落进 `ask_jobs`、
+      导出时据它打标」,而 `search` 一条 `ask_jobs` 都不写。留着它会让人以为
+      能按它在库里查到这批 run。
+    """
+    plan: list[dict] = []
+    for policy in policies:
+        for item in ask_plan(
+            questions, cells=cells, policy=policy, limit=limit, lang=lang,
+            mode="reasoning", efforts=efforts,
+        ):
+            item.pop("client_request_id", None)
+            plan.append(item)
     return plan
 
 
@@ -1040,6 +1100,590 @@ def _report_rows(
         yield row
 
 
+# --- search:主库只读的进程内检索 run --------------------------------------
+
+
+def cmd_search(args: argparse.Namespace, runner: Runner) -> int:
+    """两个既有笔记本 × 两个策略 × 两个档位,**进程内只跑检索过程**。
+
+    与 `ask` 的分工:`ask` 是「建测试库 → 起后端 → 走 HTTP → 答案落库 → 轨迹
+    从库里导」;`search` 是「对**主库只读**跑 plan + reflect 循环 → 轨迹在进程
+    内投影成 JSONL」。它**不建测试库、不建图、不合成答案**,所以 ask_jobs /
+    answers / conversations 一行都不写,`knowledge_objects` 也一个字节不动。
+
+    策略切换不重启:`reasoning_reflect_v2_enabled` 是 Settings 字段,而
+    `ReasoningRetriever.from_repository(repo, settings)` 用的是**传入的**那份
+    settings(`reflect_v2_active()` 只读 `self.settings` 与 `allow_reflect_v2`,
+    两者都不经 repo)。所以这里为两个策略各构造一份 Settings,在同一个 repo 上
+    交替跑,一次进程跑完整批。每个 run 开跑前还会当场核对
+    `retriever.reflect_v2_active()` 与这条 run 声明的策略一致——协议对不对号是
+    这批数据唯一的立身之本,不能只靠"我设过那个环境变量"。
+    """
+    questions = load_questions()
+    cells = search_cells(args.cell)
+    notebooks = {
+        "A_nokg": args.source_notebook_a, "B_kg": args.source_notebook_b,
+    }
+    if not cells:
+        # 这一条在 `--dry-run` 下也拦:选空了的 `--cell` 会让 dry-run 打印一份
+        # 「零个 run」的计划,而那看起来完全像一次正常的预演。
+        print("ERROR: " + _search_preflight(args, cells, notebooks),
+              file=sys.stderr)
+        return 2
+    plan = search_plan(
+        questions, cells=cells, policies=POLICIES, limit=args.limit,
+        lang=args.lang, efforts=EFFORTS,
+    )
+    unique_questions = {
+        (item["corpus_cell"], item["question_key"]) for item in plan
+    }
+    runner.say("target",
+               "主库只读:不建库、不建图、不合成,只跑 plan + reflect 循环")
+    runner.say("database-url",
+               "<given>" if args.database_url_explicit else "<MISSING:必须显式给>")
+    for cell in cells:
+        runner.say("corpus cell",
+                   f"{cell} -> notebook={notebooks.get(cell) or '<required>'}")
+    runner.say("policies",
+               ", ".join(POLICIES) + "(同进程换 Settings,不重启后端)")
+    runner.say("efforts", ", ".join(EFFORTS))
+    runner.say("planned runs",
+               f"{len(plan)}({len(unique_questions)} 题 × {len(POLICIES)} 策略 "
+               f"× {len(EFFORTS)} 档)")
+    runner.say("model calls (estimate)",
+               _search_call_estimate(plan, len(unique_questions),
+                                     no_intent=args.no_intent))
+    runner.say("out",
+               f"{runner.out_dir}/search-<policy>.jsonl + search-runs.log"
+               + ("" if args.no_intent else
+                  f" + {runner.out_dir}/intents.jsonl(**不进数据集/仓库**)"))
+    if runner.dry_run:
+        for item in plan:
+            runner.say(
+                "search",
+                f"{item['question_key']} cell={item['corpus_cell']} "
+                f"policy={item['policy']} effort={item['effort']}",
+            )
+        return 0
+    return _run_search(args, runner, plan, notebooks, cells)
+
+
+def _search_call_estimate(
+    plan: Sequence[dict], question_count: int, *, no_intent: bool,
+) -> str:
+    """每 run 的模型调用估计。**是上界,不是预测**。
+
+    意图契约每题只算一次并缓存(同一题的四个 run 共用那一份,契约是
+    corpus-blind 的);**带**契约的 run 不再调 plan —— 已确认意图直接作首轮
+    种子,`ReasoningRetriever` 的 `reviewed_queries` 分支整个跳过 `plan()`。
+    `--no-intent` 反过来:零 intent 调用,每个 run 付一次 plan。reflect 每轮
+    一次,上界是该档位的 `max_reasoning_steps`(`MAX_REFLECT_STEPS` 读的是
+    `ask_retrieval_policy` 那一份唯一真源)。
+    """
+    intent_calls = 0 if no_intent else question_count
+    plan_calls = len(plan) if no_intent else 0
+    reflect_ceiling = sum(
+        MAX_REFLECT_STEPS.get(item["effort"], 0) for item in plan
+    )
+    return (
+        f"intent {intent_calls} + plan {plan_calls} + reflect ≤ "
+        f"{reflect_ceiling}  ⇒  ≤ {intent_calls + plan_calls + reflect_ceiling}"
+    )
+
+
+def _search_process_env(args: argparse.Namespace) -> dict[str, str]:
+    """`search` 装进**本进程**的环境变量。必须在 import `app.core.config` 之前设。
+
+    `DATABASE_URL` 显式覆盖:主库连接由 `--database-url` 给出,不从 `.env` 猜
+    ——那个文件里写的是这台机器平时连的库,而这条路会真的对它跑检索。
+
+    另外三把**注入闸强制关**。它们本来就默认关、而且 `from_repository` 压根不
+    接 `agent_profile` / `retrieval_experiences` / `identity_store` 三个端口
+    (所以注入在结构上就不可达),这里再关一次是为了让「主库只读」不依赖于
+    「那三个端口恰好没接线」这个会随重构漂移的前提:注入闸一关,
+    `experience_wiring_active` 恒假,收尾那条 `note_adopted` UPDATE 就连分支
+    都进不去。
+    """
+    env = {
+        "DATABASE_URL": args.database_url,
+        "RETRIEVAL_EXPERIENCE_INJECT_ENABLED": "false",
+        "REASONING_CONSULT_MEMORY_ENABLED": "false",
+        "AGENT_PROFILE_ENABLED": "false",
+    }
+    if args.env_file:
+        env["SILICON_NOTEBOOK_ENV_FILE"] = str(Path(args.env_file).expanduser())
+    return env
+
+
+def _settings_by_policy() -> dict[str, Any]:
+    """两个策略各一份 `Settings`。**不重启后端,也不热改已构造好的那一份**。
+
+    构造走环境变量而不是 `model_copy(update=...)`:`Settings` 带跨字段校验与
+    别名解析,绕过构造器改一个布尔位不会重跑它们,而这里要的正是「像后端那样
+    按 `REASONING_REFLECT_V2_ENABLED` 起来的一份配置」。显式环境变量优先于
+    env_file,所以 `--env-file` 里就算写了这一项也盖不住;万一被盖住,下面那
+    条断言当场报错,而不是安静地跑出一批策略对不上号的轨迹。
+    """
+    from app.core.config import Settings
+
+    built: dict[str, Any] = {}
+    for policy in POLICIES:
+        os.environ["REASONING_REFLECT_V2_ENABLED"] = (
+            "true" if policy == "v2" else "false"
+        )
+        settings = Settings()
+        if bool(settings.reasoning_reflect_v2_enabled) is not (policy == "v2"):
+            raise RuntimeError(
+                f"Settings 没有按 {policy!r} 起来:REASONING_REFLECT_V2_ENABLED "
+                "被别处盖掉了"
+            )
+        built[policy] = settings
+    return built
+
+
+def _readonly_counts(database_url: str) -> dict[str, int | None]:
+    """`READONLY_TABLES` 的行数快照。**每张表一条独立的只读连接**。
+
+    一条连接跑五次 count 更省,但 PG 上任何一条失败(表不存在)会把整个事务打
+    成 aborted、后面四张跟着报错——那会让「有一张表改名了」看起来像「五张表都
+    没了」。一张表一条连接,一次失败只影响它自己。连接由 `_Reader` 开
+    `read_only`,所以这几条 count 在服务端就写不动任何东西。
+    """
+    from export_reasoning_traces import _Reader
+
+    counts: dict[str, int | None] = {}
+    for table in READONLY_TABLES:
+        try:
+            with _Reader(database_url) as reader:
+                rows = reader.query(f"SELECT COUNT(*) AS n FROM {table}")
+            counts[table] = int(rows[0]["n"]) if rows else 0
+        except Exception:  # noqa: BLE001 — 表不存在 ⇒ 这次不看它(记 None)
+            counts[table] = None
+    return counts
+
+
+def _source_count(database_url: str, notebook_id: str) -> int | None:
+    """一个笔记本的来源数,只读。投影里只以 `notebook_bucket`(桶)出现。"""
+    from export_reasoning_traces import _Reader
+
+    try:
+        with _Reader(database_url) as reader:
+            rows = reader.query(
+                "SELECT COUNT(*) AS n FROM sources WHERE notebook_id = ?",
+                (notebook_id,),
+            )
+        return int(rows[0]["n"]) if rows else 0
+    except Exception:  # noqa: BLE001 — 数不出来就是 unknown,不猜 0
+        return None
+
+
+def _format_counts(counts: dict[str, int | None]) -> str:
+    return ", ".join(
+        f"{table}={counts.get(table) if counts.get(table) is not None else 'n/a'}"
+        for table in READONLY_TABLES
+    )
+
+
+def _assert_readonly(
+    runner: Runner, before: dict[str, int | None], after: dict[str, int | None],
+) -> None:
+    """跑前跑后逐张表的行数必须相等。不等就标红并报错。"""
+    drifted = {
+        table: (before.get(table), after.get(table))
+        for table in READONLY_TABLES
+        if before.get(table) != after.get(table)
+    }
+    if not drifted:
+        runner.say("readonly ok", _format_counts(after))
+        return
+    detail = ", ".join(
+        f"{table}: {old} -> {new}" for table, (old, new) in sorted(drifted.items())
+    )
+    print(f"\033[31m[READ-ONLY VIOLATION]\033[0m {detail}", file=sys.stderr)
+    raise RuntimeError("主库行数在这次 search 之后变了: " + detail)
+
+
+class _IntentCache:
+    """每题只算一次意图契约,落 `intents.jsonl` 复用。
+
+    **这个文件不进数据集、不进仓库**:契约里带着问题原文与模型改写过的
+    `resolved_question`,是自由文本,而 rig 写进 JSONL 的每一行都受闭集约束
+    (§6)。它落在 `--out-dir`(默认在 `.local/` 下)只为一件事:一次中断的
+    rig 重跑时不用再付一遍 intent 的模型调用。
+
+    键取 `question_key`,不带语料格:契约是 **corpus-blind** 的
+    (`plan_query_intent` 一个字的语料都不读),而 A/B 两格的题号本来就不同。
+    """
+
+    def __init__(self, path: Path, *, enabled: bool) -> None:
+        self.path = path
+        self.enabled = enabled
+        self._rows: dict[str, dict] = {}
+        if not (enabled and path.exists()):
+            return
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            row = json.loads(line)
+            key = str(row.get("question_key") or "")
+            if key and isinstance(row.get("contract"), dict):
+                self._rows[key] = row["contract"]
+
+    def get(
+        self, repo: Any, settings: Any, item: dict, *, actor_id: str,
+        notebook: str,
+    ) -> dict | None:
+        if not self.enabled:
+            return None
+        key = item["question_key"]
+        if key not in self._rows:
+            self._rows[key] = _plan_intent(
+                repo, settings, item["question"], actor_id=actor_id,
+                notebook=notebook,
+            )
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with self.path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(
+                    {"question_key": key, "contract": self._rows[key]},
+                    ensure_ascii=False,
+                ) + "\n")
+        return self._rows[key]
+
+
+def _plan_intent(
+    repo: Any, settings: Any, question: str, *, actor_id: str, notebook: str,
+) -> dict:
+    """一次 `/ask/intent` 的进程内等价物 + 「问题清晰、直接确认」那一下。
+
+    两步逐字照 `AskService.preview_reasoning_intent` 与
+    `_confirmed_reasoning_intent`:`plan_query_intent` 出契约,
+    `finalize_query_intent(..., answers=[])` 冻结它。**没有人在场回答澄清项,
+    rig 也不替用户编答案**——那正是高级界面里「问题清晰 ⇒ 自动确认」走的那条,
+    也是 `ask` 子命令通过 HTTP 走的那条。
+
+    契约是 corpus-blind 的,所以这一步不需要 notebook 也不产生任何检索;
+    `notebook` 只用来给模型调度的归属打标(与检索 run 同一个 scope 形状)。
+    """
+    from app.services.model_work import ModelPriority, model_work_scope
+    from app.services.query_intent import finalize_query_intent, plan_query_intent
+
+    with model_work_scope(
+        priority=ModelPriority.INTERACTIVE, actor_id=actor_id,
+        notebook_id=notebook, question=question,
+    ):
+        seed = plan_query_intent(
+            repo.chat("reasoning_agent"), question, "",
+            max_topics=settings.reasoning_max_subqueries,
+            purpose="step-by-step evidence-grounded answer",
+        )
+    return finalize_query_intent(
+        seed,
+        resolved_question=str(seed.get("resolved_question") or ""),
+        answers=[],
+    )
+
+
+def _prepare_search_intent(
+    contract: dict | None, question: str, effort: str,
+) -> dict | None:
+    """已确认契约 → `run()` 的三个入参,逐字照 `_prepare_reasoning_ask`。
+
+    * `research_question`:合成后的检索问题(`confirmed_research_question`);
+    * `intent_queries`:首轮种子。**非空时 `run()` 不调 plan 的 LLM**——已确认
+      意图是权威,检索器直接拿它当首轮子查询;
+    * `intent_detail`:`ReasoningIntentProjection.as_json_mapping()`,v2 的方面
+      账从它拿 `mandatory_topics`。
+
+    `max_queries` 与 Ask 同式 `max(max_initial_subqueries, 1 + 必答方面数)`:
+    档位限的是首轮**并发宽度**,不是「哪些必答方面配得到一个种子」;按宽度截会
+    在检索器看到它们之前就丢掉靠后的方面。
+    """
+    if contract is None:
+        return None
+    from app.application.ask_reasoning import ReasoningIntentProjection
+    from app.core.ask_retrieval_policy import ask_retrieval_limits
+    from app.models.ask import QueryIntentContract
+    from app.services.query_intent import (
+        confirmed_intent_queries,
+        confirmed_research_question,
+    )
+
+    frozen = QueryIntentContract(**contract)
+    payload = frozen.model_dump()
+    # 与 `_prepare_reasoning_ask` 的 `auto_confirmed_clear_intent` 同一个判据:
+    # 提交了契约、没有待澄清项、没有澄清回答 ⇒ 用户原文仍是首要权威。
+    authoritative = not frozen.needs_clarification
+    limits = ask_retrieval_limits(effort)
+    return {
+        "research_question": confirmed_research_question(
+            payload, question, objective_is_authoritative=authoritative,
+        ),
+        "intent_queries": confirmed_intent_queries(
+            payload, question, objective_is_authoritative=authoritative,
+            max_queries=max(
+                limits.max_initial_subqueries, 1 + len(frozen.mandatory_topics)
+            ),
+        ),
+        "intent_detail": ReasoningIntentProjection(
+            resolved_question=frozen.resolved_question,
+            result_scope=frozen.result_scope,
+            completeness_required=frozen.completeness_required,
+            retrieval_effort=effort,
+            entities=tuple(frozen.entities),
+            constraints=tuple(frozen.constraints),
+            excluded_topics=tuple(frozen.excluded_topics),
+            assumptions=tuple(frozen.assumptions),
+            expected_output=frozen.expected_output,
+            mandatory_topics=tuple(
+                topic.question for topic in frozen.mandatory_topics
+            ),
+        ).as_json_mapping(),
+    }
+
+
+def run_search_once(
+    repo: Any, settings: Any, *, notebook: str, item: dict,
+    prepared: dict | None, on_step: Any, cancel_event: Any, actor_id: str,
+) -> Any:
+    """一个 run:三层 scope + `ReasoningRetriever.run`。生产接线的逐字复刻。
+
+    三层 scope 与 Ask 生产路径同形,少哪一层都不是「少记一点日志」:
+
+    * `model_work_scope(INTERACTIVE)` —— 模型调用的归属与优先级(Ask 是交互档,
+      不是报告档;两者的 deadline 差一个数量级);
+    * `retrieval_run(run_kind="ask_reasoning")` —— 请求级的查询向量 memo 与扇出
+      预算,`kg_in_scope_for` 的 memo 也挂在它上面。**`event_log=None`**:那个
+      事件汇是这条路上唯一会往库里写的旁路,主库只读,所以刻意不接;
+    * `source_scope_context(notebook, None, None)` —— 不收窄范围时它是个 no-op,
+      留着是为了与 `_generate_report` 那半程同形。
+
+    注入面全部不接:`from_repository` 不传 `agent_profile` /
+    `retrieval_experiences` / `identity_store`(见 `_construct_reasoning_retriever`
+    的说明),所以 `profile_owner_id` 保持空串——那是**合法且安全**的取值,意思
+    是「只用共享底座,不碰任何人的私有覆盖层」。属主身份仍然真实存在:它走
+    `set_request_user` 与这里的 `actor_id`。
+    """
+    from app.core.ask_retrieval_policy import ask_retrieval_limits
+    from app.services.model_work import ModelPriority, model_work_scope
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    from app.services.retrieval_run import retrieval_run
+    from app.services.source_scope import source_scope_context
+
+    retriever = ReasoningRetriever.from_repository(repo, settings, cancel_event)
+    if retriever.reflect_v2_active() is not (item["policy"] == "v2"):
+        raise RuntimeError(
+            f"retriever 的协议与声明的 --policy={item['policy']!r} 不符:"
+            f"reflect_v2_active()={retriever.reflect_v2_active()}"
+        )
+    question = (prepared or {}).get("research_question") or item["question"]
+    seeds = list((prepared or {}).get("intent_queries") or [])
+    with model_work_scope(
+        priority=ModelPriority.INTERACTIVE, actor_id=actor_id,
+        notebook_id=notebook, question=question,
+    ):
+        with retrieval_run(
+            run_kind="ask_reasoning", event_log=None, actor_id=actor_id,
+            cancel_event=cancel_event,
+        ):
+            with source_scope_context(notebook, None, None):
+                return retriever.run(
+                    notebook, question, "", on_step=on_step,
+                    intent_queries=seeds or None,
+                    limits=ask_retrieval_limits(item["effort"]),
+                    intent_detail=(prepared or {}).get("intent_detail"),
+                )
+
+
+def trace_step_row(step: Any) -> dict:
+    """`TraceStep` → 投影能吃的 dict。与 `_generate_report` 的 sink 同形。
+
+    `normalize_steps` 的解码点只认 Mapping 与 JSON 串,而 `TraceStep` 是一个
+    数据类;`record()` 在调 `on_step` **之前**就回填了 `duration_ms`,所以这里
+    拿到的耗时与落库那一份是同一个数。摘要(`summary`,一句人话)刻意不带。
+    """
+    return {
+        "step_type": step.step_type,
+        "detail": dict(getattr(step, "detail", None) or {}),
+        "duration_ms": getattr(step, "duration_ms", None),
+    }
+
+
+def _search_preflight(
+    args: argparse.Namespace, cells: Sequence[str], notebooks: dict[str, str],
+) -> str:
+    """真跑前的硬前提。返回空串 = 通过,否则是要打给用户的那句话。"""
+    if not cells:
+        return (f"--cell 选中的格子不在 search 的范围里(它只跑 "
+                f"{', '.join(SEARCH_CELLS)};另外两格在主库上不存在)")
+    if not args.database_url_explicit:
+        return ("search 必须显式给 --database-url(主库连接;全程只读)。"
+                "默认值指向的是 ask/seed 用的一次性测试库,不是主库")
+    missing = [cell for cell in cells if not notebooks.get(cell)]
+    if missing:
+        flags = ", ".join(
+            f"--source-notebook-{cell.split('_', 1)[0].lower()}" for cell in missing
+        )
+        return f"search 的 {', '.join(missing)} 需要 {flags}"
+    return ""
+
+
+def _run_search(
+    args: argparse.Namespace, runner: Runner, plan: Sequence[dict],
+    notebooks: dict[str, str], cells: Sequence[str],
+) -> int:
+    problem = _search_preflight(args, cells, notebooks)
+    if problem:
+        print(f"ERROR: {problem}", file=sys.stderr)
+        return 2
+    # 必须在 import `app.core.config` 之前:`_ENV_FILE` 与 Settings 的字段都是
+    # import 期读的(与 `_apply_process_env` 同一条理由)。
+    os.environ.update(_search_process_env(args))
+
+    import threading
+
+    from app.core.request_context import reset_request_user, set_request_user
+    from app.repositories.factory import create_repository
+    from app.services.reasoning_retrieval import kg_in_scope_for
+
+    settings_by_policy = _settings_by_policy()
+    # `create_repository` 而不是 `create_application_repository`:后者还会
+    # 装插件宿主并 prime 一次扩展准入表。这条路只跑检索、而且对主库只读,
+    # 接一层可能带写路径的扩展面没有收益。
+    repo = create_repository(settings_by_policy["legacy"])
+    profile = repo.maintenance.resolve_owner_profile(args.owner)
+    if profile is None:
+        print(f"ERROR: 主库里找不到属主: {args.owner or '<第一个 admin>'}",
+              file=sys.stderr)
+        return 2
+    actor_id = str(getattr(profile, "id", "") or "")
+    before = _readonly_counts(args.database_url)
+    runner.say("readonly baseline", _format_counts(before))
+
+    context = set_request_user(profile)
+    try:
+        facts = _search_corpus_facts(
+            args, runner, repo, cells, notebooks, kg_in_scope_for,
+        )
+        _search_loop(
+            args, runner, plan, facts, repo, settings_by_policy,
+            actor_id=actor_id, cancel_event=threading.Event(),
+        )
+    finally:
+        reset_request_user(context)
+    _assert_readonly(runner, before, _readonly_counts(args.database_url))
+    return 0
+
+
+def _search_corpus_facts(
+    args: argparse.Namespace, runner: Runner, repo: Any,
+    cells: Sequence[str], notebooks: dict[str, str], kg_in_scope_for: Any,
+) -> dict[str, dict]:
+    """每个语料格的两件事实,**跑之前一次点清**。
+
+    `kg_in_scope` 取 `kg_in_scope_for` 的直接判定(检索器自己用的同一个函数,
+    一次 EXISTS),而不是事后从轨迹形状反推——投影里那个字段因此是事实而不是
+    推断。`sources` 只为算 `notebook_bucket`(桶,不是计数:小样本里一个精确的
+    来源数就是准 id)。
+    """
+    facts: dict[str, dict] = {}
+    for cell in cells:
+        notebook = notebooks[cell]
+        repo.get_notebook(notebook)  # 不存在直接 KeyError,而不是跑出一批空 run
+        facts[cell] = {
+            "notebook": notebook,
+            "sources": _source_count(args.database_url, notebook),
+            "kg_in_scope": bool(kg_in_scope_for(repo.retrieval, notebook)),
+        }
+        runner.say(
+            "corpus fact",
+            f"{cell}: sources={facts[cell]['sources']} "
+            f"kg_in_scope={facts[cell]['kg_in_scope']}",
+        )
+    return facts
+
+
+def _search_loop(
+    args: argparse.Namespace, runner: Runner, plan: Sequence[dict],
+    facts: dict[str, dict], repo: Any, settings_by_policy: dict[str, Any],
+    *, actor_id: str, cancel_event: Any,
+) -> None:
+    """整批 run。每个 run 一行 JSONL + 一行日志,**都不含任何问题原文**。"""
+    intents = _IntentCache(
+        runner.out_dir / "intents.jsonl", enabled=not args.no_intent
+    )
+    runner.out_dir.mkdir(parents=True, exist_ok=True)
+    handles: dict[str, Any] = {}
+    verified: set[str] = set()
+    log = (runner.out_dir / "search-runs.log").open("a", encoding="utf-8")
+    try:
+        for index, item in enumerate(plan, 1):
+            fact = facts[item["corpus_cell"]]
+            policy = item["policy"]
+            settings = settings_by_policy[policy]
+            prepared = _prepare_search_intent(
+                intents.get(repo, settings, item, actor_id=actor_id,
+                            notebook=fact["notebook"]),
+                item["question"], item["effort"],
+            )
+            steps: list[dict] = []
+            started = time.monotonic()
+            result = run_search_once(
+                repo, settings, notebook=fact["notebook"], item=item,
+                prepared=prepared,
+                on_step=lambda step: steps.append(trace_step_row(step)),
+                cancel_event=cancel_event, actor_id=actor_id,
+            )
+            elapsed_ms = round((time.monotonic() - started) * 1000)
+            row = project_search_run(
+                steps, result=result, effort=item["effort"], policy=policy,
+                question_key=item["question_key"],
+                corpus_cell=item["corpus_cell"],
+                kg_in_scope=fact["kg_in_scope"],
+                has_intent_contract=prepared is not None,
+                sources_count=fact["sources"],
+            )
+            assert_closed(row)
+            assert_projection_values(row)
+            handle = handles.get(policy)
+            if handle is None:
+                handle = handles[policy] = (
+                    runner.out_dir / f"search-{policy}.jsonl"
+                ).open("a", encoding="utf-8")
+            handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+            handle.flush()
+            line = (
+                f"{index:03d}/{len(plan)} {item['question_key']} "
+                f"{item['corpus_cell']} {policy} {item['effort']} "
+                f"{elapsed_ms}ms reflect_turns={row['reflect_turns']} "
+                f"termination={row['termination_reason']}"
+            )
+            log.write(line + "\n")
+            log.flush()
+            runner.say("search done", line)
+            if policy not in verified:
+                # **每个策略的第一个 run 之后**就把「声明的策略」与「轨迹里真的
+                # 发生了什么」对上一次。整批跑完再发现 v2 那半其实跑的是 legacy,
+                # 代价是几百次模型调用;这里的代价是一次比较。
+                if row["policy_version"] != policy:
+                    raise RuntimeError(
+                        f"声明 --policy={policy!r},但这个 run 的证据是 "
+                        f"{row['policy_version']!r}(v2 的判据是 run 产出了 "
+                        "termination 事实)。先修再跑整批"
+                    )
+                verified.add(policy)
+                runner.say(
+                    "first run ok",
+                    f"policy={row['policy_version']} "
+                    f"reflect_turns={row['reflect_turns']} "
+                    f"termination={row['termination_reason']}",
+                )
+    finally:
+        log.close()
+        for handle in handles.values():
+            handle.close()
+
+
 def cmd_export(args: argparse.Namespace, runner: Runner) -> int:
     out = runner.out_dir / "t0-dataset.jsonl"
     export_out = runner.out_dir / "ask-runs.jsonl"
@@ -1201,9 +1845,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--db-name", default=DEFAULT_TEST_DB)
     parser.add_argument(
+        # 默认值刻意留成 `None`,由 `main()` 填:`search` 要求这一项**显式给出**
+        # (它连的是主库),而「有没有显式给」只能靠一个哨兵分辨。其余子命令拿到
+        # 的默认值与从前逐字相同。
         "--database-url",
-        default=f"postgresql://127.0.0.1:5432/{DEFAULT_TEST_DB}",
-        help="**测试库**连接。所有写入都落在这里",
+        help=f"**测试库**连接,所有写入都落在这里(默认 "
+             f"postgresql://127.0.0.1:5432/{DEFAULT_TEST_DB})。"
+             "`search` 例外:它连的是**主库**,必须显式给出,且全程只读",
     )
     parser.add_argument(
         "--admin-url", default="postgresql://127.0.0.1:5432/postgres",
@@ -1216,6 +1864,26 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--source-notebook",
         help="主库里 A 语料所在的 notebook id(刻意不写进仓库)",
+    )
+    parser.add_argument(
+        "--source-notebook-a",
+        help="`search` 的 A_nokg 格:主库里那个**无图**单篇笔记本的 id"
+             "(刻意不写进仓库)",
+    )
+    parser.add_argument(
+        "--source-notebook-b",
+        help="`search` 的 B_kg 格:主库里那个**有图**多篇笔记本的 id"
+             "(刻意不写进仓库)",
+    )
+    parser.add_argument(
+        "--owner",
+        help="`search` 用哪个主库用户的身份跑(用户名,大小写不敏感)。"
+             "默认 = users 表里最早的那个 admin",
+    )
+    parser.add_argument(
+        "--no-intent", action="store_true",
+        help="`search` 跳过意图契约(省一次/题的模型调用)。代价是 v2 只剩"
+             "整题一个方面,方面账那几列因此不可比",
     )
     parser.add_argument("--corpus-dir", help="B 语料 markdown 所在目录")
     parser.add_argument(
@@ -1249,7 +1917,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ready-timeout", type=float, default=600.0)
     parser.add_argument("--parse-timeout", type=float, default=3600.0)
     parser.add_argument("--index-timeout", type=float, default=7200.0)
-    parser.add_argument("--policy", choices=POLICIES, default="legacy")
+    parser.add_argument(
+        "--policy", choices=POLICIES, default="legacy",
+        help="`ask` / `report` / `restart` 用它选策略。**`search` 不读它**:"
+             "那条路一次进程内跑完两侧,配对因此天然干净",
+    )
     parser.add_argument(
         "--cell", action="append", default=[], choices=list(CORPUS_CELLS),
         help="只跑这些语料格(可多次);默认四格全跑",
@@ -1264,7 +1936,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "command",
-        choices=("seed", "ask", "report", "restart", "export", "teardown"),
+        choices=("seed", "ask", "report", "search", "restart", "export",
+                 "teardown"),
     )
     return parser
 
@@ -1275,10 +1948,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     # 起在 8011、却被对着 8001 轮询的后端。端口是真源,base-url 只在显式给出时
     # 才覆盖(比如后端起在容器里)。
     args.base_url = args.base_url or f"http://127.0.0.1:{args.port}"
+    # `--database-url` 的默认值在这里填,而不是在 argparse 里:`search` 连的是
+    # **主库**,拿一个指向测试库的默认值去跑它是最坏的一种"能跑起来"。哨兵让
+    # 「有没有显式给」变成一个可判定的事实。
+    args.database_url_explicit = args.database_url is not None
+    args.database_url = (
+        args.database_url or f"postgresql://127.0.0.1:5432/{DEFAULT_TEST_DB}"
+    )
     runner = Runner(dry_run=args.dry_run, out_dir=Path(args.out_dir))
     handlers = {
         "seed": cmd_seed, "ask": cmd_ask, "report": cmd_report,
-        "restart": cmd_restart, "export": cmd_export, "teardown": cmd_teardown,
+        "search": cmd_search, "restart": cmd_restart, "export": cmd_export,
+        "teardown": cmd_teardown,
     }
     return handlers[args.command](args, runner)
 

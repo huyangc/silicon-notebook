@@ -55,6 +55,45 @@
 - `export`：调 §2.1 导出 Ask 轨迹，与 `report` 的 JSONL 合并成一份数据集。
 - 全程零接触主库写路径：主库只做**只读**的元素重建；所有写入都在测试库。结束 `--teardown` 删库。
 
+#### `search`：不建测试库的首跑路径
+
+上面 `seed → ask/report → export` 那条要先复制一份语料、建图、起后端，成本以小时计。
+T0 首跑改走 `search`：**不建测试库、不建图、不合成答案**，直接对**主库（只读）**里两个
+既有笔记本跑检索过程（plan + reflect 循环），轨迹在进程内投影成 JSONL。
+
+- **语料格**：`A_nokg`（`--source-notebook-a`，主库里那个本来就没有 `knowledge_objects`
+  的单篇笔记本）与 `B_kg`（`--source-notebook-b`，有图多篇）。另外两格在主库上不存在，
+  不在枚举里。notebook id 刻意不落仓库。题集按 §5 的 `corpus` 字段分流，`--limit 5`
+  各取前 5 题 ⇒ `2 格 × 5 题 × {legacy, v2} × {standard, deep}` = 40 个 run。
+- **策略切换不重启**：`ReasoningRetriever.from_repository(repo, settings)` 用的是**传入
+  的**那份 Settings（`reflect_v2_active()` 只读 `self.settings` 与 `allow_reflect_v2`，
+  两者都不经 repo），所以为两个策略各构造一份 `Settings()`（按
+  `REASONING_REFLECT_V2_ENABLED` 走构造器，不是 `model_copy` 绕过校验），在同一个进程、
+  同一个 repo 上交替跑。每个 run 开跑前核对 `retriever.reflect_v2_active()` 与该 run
+  声明的策略；每个策略的**第一个** run 之后再核对一次投影出来的 `policy_version`
+  （v2 的判据是这次 run 产出了 `termination` 事实）——对不上直接停，不跑完整批再发现。
+- **意图契约**：走高级界面那条路的进程内等价物（`plan_query_intent` +
+  `finalize_query_intent(answers=[])`，即「问题清晰⇒自动确认」），每题算一次并缓存进
+  `--out-dir/intents.jsonl`。**那个文件不进数据集、不进仓库**（契约含问题原文）。
+  由它派生 `research_question` / `intent_queries` / `intent_detail` 三个入参，与
+  `AskService._prepare_reasoning_ask` 逐字同式；带契约的 run 因此**不调 plan 的 LLM**。
+  `--no-intent` 跳过，代价是 v2 只剩整题一个方面。
+- **投影**：`app.domain.reasoning_trace_stats.project_search_run`，复用 `project_run`
+  的全部内部逻辑，只补三件调用方手上有确凿事实的东西：结束事实读 `result.termination`
+  这个 DTO（v2-only；`None` ⇒ legacy 走既有反推，`termination_inferred=True`）并据它补
+  `aspects_total` / `aspects_pending` / `unrecovered_channels_count`；`kg_in_scope` 取
+  `kg_in_scope_for` 的直接判定；**没跑合成的那几列**（`anchors` / `included_*` /
+  `citation_contribution`）一律 unknown。`consumer=ask_single`、`status=done`、
+  `trace_source=in_process`（`TRACE_SOURCES` 的既有成员）由 rig 声明但仍过闭集。
+- **只读断言**：跑前跑后各点一次 `ask_jobs` / `answers` / `conversations` /
+  `knowledge_objects` / `retrieval_experiences` 的行数，任何一张对不上就标红报错。
+  `ReasoningRetriever.run` 唯一的写路径是收尾那次 `note_adopted` UPDATE（仅注入开启时
+  可达），rig 另外把注入三闸强制关。`retrieval_run` 的 `event_log` 不接。
+- **输出**：`--out-dir/search-<policy>.jsonl`（每行一个 run，闭集投影）+
+  `search-runs.log`（run 序号/题号/格/策略/档位/耗时/reflect 轮数/终态，无原文）。
+  两份 JSONL 直接进 §2.2 的聚合器，与 `ask` 那边按 `question_key + corpus_cell +
+  effort` 成对（§4.2），聚合脚本零改动。
+
 ### 2.4 守卫与测试
 
 - `backend/tests/test_reasoning_trace_stats.py`：合成 fixture 覆盖 legacy 缺字段（无 `result_ids`、无 termination 步）、空数组、`result_ids_truncated`、seed/action 分离（`phase` 键与首轮位置回退）、同一证据被多步命中的归因口径（§4.4）、v2 `retrieval_termination` 步与 legacy 反推同一 run 不重复计数、`unknown` 分母、`min_samples` 门、SQLite TEXT / PG jsonb 两种 `step_json` 类型同一投影。

@@ -686,6 +686,114 @@ def _truncated(steps: Sequence[Mapping]) -> bool:
     )
 
 
+#: rig 的 `search` 子命令(进程内**只跑检索**、不合成)写出的两个固定标签。
+#: 那条路不经 Ask 的 durable job,轨迹里也没有 synthesis 步可以据以判定消费者,
+#: 所以两者都只能由 rig 声明;声明值仍过 `project_run` 的闭集。
+SEARCH_CONSUMER = "ask_single"
+SEARCH_TRACE_SOURCE = "in_process"
+
+#: `search` 行里因为**没跑合成**而恒为 unknown 的键。它们全部由合成/装配阶段
+#: 写进 synthesis 步的 detail(锚点、进 prompt 的三类证据数、每动作引用贡献),
+#: 一条 run 只检索不合成时它们**不存在**,不是「零」——0 会被读成「一条证据都
+#: 没进 prompt / 一个锚点都没有」,那是一句关于合成的假话。
+SYNTHESIS_ONLY_KEYS: tuple[str, ...] = (
+    "anchors", "included_kg", "included_chunks", "included_elements",
+    "citation_contribution",
+)
+
+
+def project_search_run(
+    steps: Sequence[object],
+    *,
+    result: object,
+    effort: str,
+    policy: str,
+    question_key: str,
+    corpus_cell: str,
+    kg_in_scope: bool | None,
+    mode: str = "reasoning",
+    has_intent_contract: bool = False,
+    sources_count: object = None,
+) -> dict:
+    """rig 的**进程内检索 run** → 一行闭集投影(设计规格 §2.3 `search`)。
+
+    与 Ask 导出走的是**同一条** `project_run`(检索跑的就是
+    `ReasoningRetriever.run`,换一份投影只会让两边口径分叉);这里只补三件
+    `project_run` 从轨迹里读不到、而进程内调用方手上有确凿事实的东西:
+
+    1. **结束事实**。v2 的权威是 `result.termination` 这个 DTO 本身
+       (`reason` / `unresolved_aspect_ids` / `unrecovered_channels` /
+       `aspects`),不是轨迹里那条披露步——DTO 是构造期就过了闭集守卫的,而
+       轨迹步只是它的一份渲染。`termination is None` 就是 legacy(那个字段
+       **v2-only**,见 `_run_termination`),此时照 `project_run` 已经做过的
+       `infer_legacy_termination` 反推,不二次加工。
+       **方面账两个数也在这里补**:`project_run` 是从 synthesis/answer 步的
+       detail 里读它们的,而那是 Ask 合成阶段写的,只检索的 run 里没有。
+    2. **图在不在范围内**。调用方拿的是 `kg_in_scope_for` 的直接判定(一次
+       EXISTS),比从轨迹形状反推的正面证据更硬,所以直接盖掉。
+    3. **没跑合成的那几列**(`SYNTHESIS_ONLY_KEYS`)一律落 unknown。
+
+    `policy` 是 rig 的**声明**,只在这里过一次闭集校验、**不进投影**:
+    `policy_version` 只认这次 run 自己留下的证据。声明与证据不一致(声明 v2、
+    却一个 `termination` 都没有)恰恰是最该被看见的那件事,把声明写进去等于
+    把它抹平;让它响亮失败是调用方的事(rig 在第一个 run 之后就核对)。
+
+    `steps` 必须是**已经归一成 dict 的**轨迹步(`TraceStep` 数据类不是
+    Mapping,`normalize_steps` 解不了它),与 `_report_rows` 那条路同形。
+    """
+    if policy not in POLICY_VERSIONS:
+        raise ValueError(f"unknown policy: {policy!r}")
+    rows = list(steps)
+    row = project_run(
+        {"mode": mode, "status": "done"},
+        rows,
+        {
+            "mode": mode,
+            "retrieval_effort": effort,
+            # `project_run` 只读它的真假(`has_intent_contract`)。契约内容是
+            # 自由文本,这一层从头到尾不碰,所以这里放一个布尔而不是契约本身。
+            "intent": True if has_intent_contract else None,
+        },
+        sources_count=sources_count,
+        rig_tags={
+            "consumer": SEARCH_CONSUMER,
+            "trace_source": SEARCH_TRACE_SOURCE,
+            "corpus_cell": corpus_cell,
+            "question_key": question_key,
+        },
+    )
+    row["kg_in_scope"] = kg_in_scope if isinstance(kg_in_scope, bool) else None
+    termination = getattr(result, "termination", None)
+    if termination is not None:
+        row["policy_version"] = "v2"
+        row["termination_reason"] = _closed_exact(
+            getattr(termination, "reason", ""), TERMINATION_REASON_VALUES
+        )
+        row["termination_inferred"] = False
+        row["aspects_total"] = len(getattr(termination, "aspects", ()) or ())
+        row["aspects_pending"] = len(
+            getattr(termination, "unresolved_aspect_ids", ()) or ()
+        )
+        row["unrecovered_channels_count"] = len(
+            getattr(termination, "unrecovered_channels", ()) or ()
+        )
+    if not _has_synthesis_step(rows):
+        for key in SYNTHESIS_ONLY_KEYS:
+            row[key] = None
+    assert_closed(row)
+    assert_projection_values(row)
+    return row
+
+
+def _has_synthesis_step(steps: Sequence[object]) -> bool:
+    """轨迹里有没有 synthesis 步。判据与 `normalize_steps` 同一个解码点。"""
+    for raw in steps:
+        step = _mapping(raw)
+        if step is not None and _step_type(step) == "synthesis":
+            return True
+    return False
+
+
 def project_report_section(
     section: object,
     *,

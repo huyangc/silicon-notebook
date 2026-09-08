@@ -396,6 +396,24 @@ python scripts/reflect_shadow_rig.py \
 python scripts/reflect_shadow_rig.py --dry-run restart --policy v2
 python scripts/reflect_shadow_rig.py restart --policy v2
 python scripts/reflect_shadow_rig.py --limit 2 --policy v2 ask
+
+# 4) search:**不建测试库、不建图、不合成**,直接对主库(只读)里两个既有笔记本
+#    跑检索过程(plan + reflect 循环),轨迹进程内投影成 JSONL。
+#    先 dry-run 看计划与模型调用估计:
+python scripts/reflect_shadow_rig.py --dry-run --limit 5 search
+
+#    再真跑(一次进程跑完 legacy 与 v2 两侧,--policy 在这条路上不读):
+python scripts/reflect_shadow_rig.py \
+  --database-url postgresql://127.0.0.1:5432/<主库名> \
+  --env-file /path/to/main-checkout/.env \
+  --source-notebook-a nb-<无图单篇> --source-notebook-b nb-<有图多篇> \
+  --owner <主库用户名> --limit 5 --out-dir .local/t0-search search
+
+#    出的两份 JSONL 与 ask/report 那边同格式,直接进同一个聚合器:
+python scripts/analyze_reasoning_trace.py \
+  .local/t0-search/search-legacy.jsonl .local/t0-search/search-v2.jsonl \
+  --group-by corpus_cell,policy_version,effort \
+  --out-md .local/t0-search/search.md --out-json .local/t0-search/search.json
 ```
 
 **隐私口径(三个脚本同一份)**:每个 run 输出一行,键取自
@@ -437,8 +455,34 @@ bool、数值、`None`,短码的列表(`action_seq`),或以短码为键、数值
   `begin_or_attach_durable_job`(stream 端点)才把幂等键落库。走错端点的话整批 run 的
   `question_key`/`corpus_cell` 全是 unknown、对照表恒空,而且要跑完几百个 run 才看得
   出来。rig 在**第一个 run 之后**就回读测试库确认标签落了库,不落就当场停。
-- rig 本体要网络与真实模型,**不进 `check.sh`**;进门的只有 `--dry-run` 的枚举、编码与
-  上传体/teardown 闸的纯函数用例(`backend/tests/test_reflect_t0_scripts.py`)。
+- rig 本体要网络与真实模型,**不进 `check.sh`**;进门的只有 `--dry-run` 的枚举、编码、
+  上传体/teardown 闸的纯函数用例,以及 `search` 那条在 SQLite 测试替身上跑真检索、
+  假模型的接线用例(`backend/tests/test_reflect_t0_scripts.py`)。
+
+**`search` 的硬约束(它是唯一直接对主库跑检索的子命令)**:
+- **主库只读,而且是可核对的只读**。`--database-url` 必须**显式给出**(默认值指向的是
+  `ask`/`seed` 用的一次性测试库,拿它去跑 `search` 是最坏的一种"能跑起来");所有库读
+  都走 `_Reader`(PG 侧连接开 `read_only`)。跑前跑后各点一次 `ask_jobs` / `answers` /
+  `conversations` / `knowledge_objects` / `retrieval_experiences` 的行数,任何一张对不上
+  就标红报错。`ReasoningRetriever.run` 全程唯一的写路径是收尾那次 `note_adopted`
+  UPDATE,只在注入开着时可达——rig 另外把 `RETRIEVAL_EXPERIENCE_INJECT_ENABLED` /
+  `REASONING_CONSULT_MEMORY_ENABLED` / `AGENT_PROFILE_ENABLED` 全部强制关。
+- **不建库、不建图、不合成答案**,所以它跑的是两个**主库里既有的**语料格:
+  `A_nokg`(`--source-notebook-a`,那个笔记本本来就没有 knowledge_objects)与 `B_kg`
+  (`--source-notebook-b`)。另外两格在主库上不存在,不在枚举里。notebook id 刻意不落
+  仓库,只从命令行传。
+- **换策略不重启**:`ReasoningRetriever.from_repository(repo, settings)` 读的是传进去的
+  那份 Settings,所以 `search` 为 legacy / v2 各构造一份、在同一个进程同一个 repo 上
+  交替跑(`--policy` 在这条路上不读)。每个策略的第一个 run 之后当场核对「声明的策略」
+  与「轨迹里真的发生了什么」(v2 的判据是 run 产出了 `termination` 事实),对不上直接停。
+- **没跑合成的列如实留 unknown**:`anchors` / `included_kg` / `included_chunks` /
+  `included_elements` / `citation_contribution` 全部是 `null`。它们由合成阶段写,这条路
+  压根没走到那儿——写 0 会被读成「一条证据都没进 prompt」,那是一句关于合成的假话。
+- **`intents.jsonl` 不进数据集、不进仓库**。意图契约每题只算一次并缓存在 `--out-dir`
+  (默认在 `.local/` 下),纯粹为了一次中断的 rig 重跑时不再付一遍 intent 的模型调用;
+  它带着问题原文与模型改写过的 `resolved_question`,是自由文本。进数据集的只有
+  `search-<policy>.jsonl`(闭集投影)与 `search-runs.log`(题号/格/策略/档/耗时/reflect
+  轮数/终态,无原文)。`--no-intent` 可以跳过这一步,代价是 v2 只剩整题一个方面。
 
 `seed` 走的是真实的浏览器上传面(`multipart/form-data`,`files` + 每文件一对
 `doc_types`/`doc_type_explicit`,一批 ≤20 个),上传后轮询 `parse_status` 到终态、再按
