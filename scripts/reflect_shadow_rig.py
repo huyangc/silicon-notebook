@@ -818,6 +818,11 @@ def _seed_target_mismatch(args: argparse.Namespace) -> str | None:
     迁移、播种落在两个不同的库上(codex #700 R5 P2)。字面核对,不连库;返回
     `None` 表示一致,否则是给人看的原因。
     """
+    if not str(args.database_url or "").startswith(("postgres://", "postgresql://")):
+        # 这两条核对保护的是 CREATE DATABASE / 扩展安装那两笔 PG 写;SQLite 冒烟
+        # (`--skip-create-db` + `sqlite:///...`,见 scripts/README.md)没有这两笔,
+        # 库名与 admin 端点对它都没有意义(codex #700 R7 P2)。
+        return None
     actual = _url_db_name(args.database_url)
     if actual != args.db_name:
         return (
