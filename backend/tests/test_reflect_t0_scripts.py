@@ -1264,3 +1264,230 @@ def test_auto_clarification_answers_only_required_rows_and_prefer_first_option()
     ]
     assert rig.auto_clarification_answers(seed) == answers
     assert rig.auto_clarification_answers({}) == []
+
+
+# ---------------------------------------------------------------------------
+# export:按 merge_key 合并,不重复(codex #700 R2 P2)
+# ---------------------------------------------------------------------------
+
+
+def test_export_merge_dedupes_by_merge_key_keeping_the_traced_row(tmp_path):
+    """`--reports` 导出的结果级独行与 rig 自己写的 `report-trace-*.jsonl`
+    (同一个 `merge_key`,但带了轨迹)撞号时,合并只留一行——且是带轨迹
+    (`trace_steps` 键)的那行,不是逐字节拼接文件、把一份报告的一节报成两个
+    run(README 479–481 的「每节一行」不变量)。没有 `merge_key` 的行(纯 Ask
+    run)不受影响,原样透传。"""
+    ask_runs = tmp_path / "ask-runs.jsonl"
+    report_trace = tmp_path / "report-trace-legacy.jsonl"
+    ask_runs.write_text(
+        json.dumps({"consumer": "ask_single", "question_key": "A-q01"},
+                   sort_keys=True) + "\n"
+        + json.dumps({
+            "consumer": "report_section", "merge_key": "deadbeef01234567",
+            "section_index": 0, "section_total": 1, "attempted": 0,
+        }, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    report_trace.write_text(
+        json.dumps({
+            "consumer": "report_section", "merge_key": "deadbeef01234567",
+            "section_index": 0, "section_total": 1, "trace_steps": 3,
+            "reflect_turns": 1, "policy_version": "legacy",
+        }, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "t0-dataset.jsonl"
+
+    rig._merge_export_parts([ask_runs, report_trace], out)
+
+    rows = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == 2, f"应该是 1 条 ask 行 + 1 条合并后的报告行,实得 {rows!r}"
+    merged = [row for row in rows if row.get("merge_key") == "deadbeef01234567"]
+    assert len(merged) == 1, "同一个 merge_key 撞出了两行——回到了逐字节拼接的老问题"
+    assert merged[0]["trace_steps"] == 3, (
+        "撞号时结果级独行(没有 trace_steps)赢了;应该是带轨迹的那行赢"
+    )
+    assert any(row.get("consumer") == "ask_single" for row in rows)
+
+
+def test_export_merge_keeps_a_report_row_with_no_matching_trace_file(tmp_path):
+    """结果级行如果没有轨迹半份可对(`report-trace-*.jsonl` 缺失或不含它),
+    仍然要保留——不是「没有轨迹就整行丢弃」。"""
+    ask_runs = tmp_path / "ask-runs.jsonl"
+    ask_runs.write_text(
+        json.dumps({
+            "consumer": "report_section", "merge_key": "onlyresultlevel0",
+            "section_index": 0, "section_total": 1,
+        }, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "t0-dataset.jsonl"
+
+    rig._merge_export_parts([ask_runs], out)
+
+    rows = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == 1
+    assert rows[0]["merge_key"] == "onlyresultlevel0"
+    assert "trace_steps" not in rows[0]
+
+
+# ---------------------------------------------------------------------------
+# report:澄清门代答 + 门控失败可观测(codex #700 R2 P2)
+# ---------------------------------------------------------------------------
+
+
+def _report_item(question: str) -> dict:
+    return {
+        "question_key": "t0-report-01", "corpus_cell": "B_kg",
+        "policy": "legacy", "depth": 1, "profile": "shallow",
+        "question": question,
+    }
+
+
+def _stub_report_generation_at_class_level(monkeypatch):
+    """`_stub_auto_run_corpus`(test_report_engine.py)的类级等价物:rig 的
+    `_generate_report` 在函数内部自建引擎实例,拿不到现成的 `eng` 打实例补丁,
+    所以这里直接打在 `ReportEngine` 类上——子类(若有)未覆写这两个方法时同样
+    生效。"""
+    from app.services.reasoning_retrieval import ReasoningResult
+    from app.services.report_engine import ReportEngine
+
+    monkeypatch.setattr(ReportEngine, "_build_corpus_map", lambda self, n, q: "MAP")
+    monkeypatch.setattr(
+        ReportEngine, "_deep_dive",
+        lambda self, nb_id, section, question, depth=None, on_step=None:
+            ReasoningResult(),
+    )
+
+
+def test_report_generate_recovers_when_auto_confirm_intent_returns_none(
+    rrepo, monkeypatch,
+):
+    """替身:强制 `ReportEngine._auto_confirm_intent` 一律 fail-open 返回
+    `None`(其 docstring 承诺的行为——契约带必填澄清项、范围重验不过、CAS 输
+    给别人时都会这样)。修复前 `_generate_report`/`_run_reports` 对此一无所
+    知:报告原地停在 `intent_ready`,`sections` 恒空,调用方照样打『report
+    done』——看起来完全像成功(codex #700 R2 P2)。修复后:rig 用与
+    `POST .../reports/{id}/intent` 手工确认端点同一条入口
+    (`confirmed_understanding` + `claim_report_intent`)代为确认,答案走
+    `auto_clarification_answers` 那条确定性规则,报告应该正常跑到 `done`。"""
+    from types import SimpleNamespace
+
+    from app.services.model_work import ModelPriority, model_work_scope
+    from app.services.report_engine import ReportEngine
+    from app.services.source_scope import source_scope_context
+    from tests.test_report_engine import _AutoRunLLM, _bind_report_llm, _mk_nb
+
+    nb = _mk_nb(rrepo)
+    llm = _AutoRunLLM()  # 清晰问题:本来完全不需要人工确认
+    _bind_report_llm(rrepo, llm)
+    _stub_report_generation_at_class_level(monkeypatch)
+    monkeypatch.setattr(rrepo.retrieval, "federated_retrieve", lambda a, q: [])
+    monkeypatch.setattr(
+        ReportEngine, "_auto_confirm_intent", lambda self, *a, **kw: None,
+    )
+    question = "分析 PLL 稳定性"
+    report_id = rrepo.create_report(nb.id, question, depth=1)
+    item = _report_item(question)
+    profile = SimpleNamespace(id="rig-owner")
+
+    captured, gate_reason = rig._generate_report(
+        rrepo, ReportEngine, profile, nb.id, report_id, item,
+        model_work_scope=model_work_scope, model_priority=ModelPriority.REPORT,
+        source_scope_context=source_scope_context,
+    )
+
+    assert gate_reason is None, "代答应该已经把报告解开,不该再判门控失败"
+    detail = rrepo.get_report(nb.id, report_id)
+    assert detail["status"] == "done", detail.get("error")
+
+    rows = list(rig._report_rows(
+        rrepo, nb.id, report_id, item, captured, gate_reason=gate_reason,
+    ))
+    assert rows, "代答成功后应该有真实的节可对"
+    assert all(row.get("status") != "failed" for row in rows)
+
+
+def test_report_generate_marks_clarification_gate_failed_when_the_claim_is_lost(
+    rrepo, monkeypatch,
+):
+    """代答的确认入口本身也走不通(这里模拟 CAS 输给别的写者)时:不能再假装
+    『report done』——报告记 `gate_reason="clarification_gate"`,投影行带
+    `status="failed"`,而不是一行都不产出、看起来和"这份报告本来就没内容"一
+    模一样(codex #700 R2 P2)。"""
+    from types import SimpleNamespace
+
+    from app.services.model_work import ModelPriority, model_work_scope
+    from app.services.report_engine import ReportEngine
+    from app.services.source_scope import source_scope_context
+    from tests.test_report_engine import _AutoRunLLM, _bind_report_llm, _mk_nb
+
+    nb = _mk_nb(rrepo)
+    llm = _AutoRunLLM()
+    _bind_report_llm(rrepo, llm)
+    _stub_report_generation_at_class_level(monkeypatch)
+    monkeypatch.setattr(rrepo.retrieval, "federated_retrieve", lambda a, q: [])
+    monkeypatch.setattr(
+        ReportEngine, "_auto_confirm_intent", lambda self, *a, **kw: None,
+    )
+    monkeypatch.setattr(rrepo, "claim_report_intent", lambda *a, **kw: False)
+    question = "分析 PLL 稳定性"
+    report_id = rrepo.create_report(nb.id, question, depth=1)
+    item = _report_item(question)
+    profile = SimpleNamespace(id="rig-owner")
+
+    captured, gate_reason = rig._generate_report(
+        rrepo, ReportEngine, profile, nb.id, report_id, item,
+        model_work_scope=model_work_scope, model_priority=ModelPriority.REPORT,
+        source_scope_context=source_scope_context,
+    )
+
+    assert gate_reason == "clarification_gate"
+    detail = rrepo.get_report(nb.id, report_id)
+    assert detail["status"] == "intent_ready", "没能代答,报告应该原地留在人工门"
+
+    rows = list(rig._report_rows(
+        rrepo, nb.id, report_id, item, captured, gate_reason=gate_reason,
+    ))
+    assert len(rows) == 1
+    assert rows[0]["status"] == "failed"
+    assert "merge_key" not in rows[0], "失败行没有轨迹半份可对,不该带 merge_key"
+
+
+# ---------------------------------------------------------------------------
+# search:代答过的题以确认后的问题为权威,对齐生产判据(codex #700 R2 P2)
+# ---------------------------------------------------------------------------
+
+
+def test_prepare_search_intent_authoritative_only_without_submitted_answers():
+    """`authoritative` 要与 `AskService._prepare_reasoning_ask` 的
+    `auto_confirmed_clear_intent` 同一个判据:提交了契约、没有待澄清项、
+    **也没有提交过澄清答案**才让用户原文权威。`finalize_query_intent` 恒把
+    `needs_clarification` 清空,所以只看那一位在 rig 里恒真——真正把"代答过"
+    和"本来就没有歧义"分开的是 `clarification_answers`。"""
+    question = "原始问题文本（未澄清）"
+    resolved = "确认后的研究问题（已澄清）"
+    base_contract = {
+        "objective": question,
+        "resolved_question": resolved,
+        "needs_clarification": False,
+    }
+
+    # 代答过必填项:合成后的 resolved_question 才是权威,不是用户原文。
+    answered = {
+        **base_contract,
+        "clarification_answers": [
+            {"id": "a1", "question": "范围？", "answer": "全部来源"},
+        ],
+    }
+    prepared = rig._prepare_search_intent(answered, question, "standard")
+    assert prepared["research_question"].startswith(resolved), (
+        "提交过澄清答案时应该以确认后的问题为权威,而不是恒真地保留用户原文"
+    )
+    assert prepared["intent_queries"][0].startswith(resolved)
+
+    # 没有代答过:与现状一致,用户原文仍是首要权威。
+    clear = {**base_contract, "clarification_answers": []}
+    prepared_clear = rig._prepare_search_intent(clear, question, "standard")
+    assert prepared_clear["research_question"].startswith(question)
+    assert prepared_clear["intent_queries"][0].startswith(question)
