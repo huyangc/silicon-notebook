@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any, Iterable, Sequence
@@ -64,7 +65,16 @@ def decode_client_request_id(raw: object) -> dict:
     parts = text[len(RIG_PREFIX):].split(":")
     if len(parts) != len(RIG_FIELDS):
         return {}
+    # 每一段都要形如短码(≤64 个 `[A-Za-z0-9_.+-]`):API 允许 128 字的幂等键,
+    # 一段 65 个字符的「题号」能过 API 校验却会让 `project_run` 的值形状守卫抛
+    # ValueError,一条这样的落库 job 就打死整次导出(codex #700 R20 P2)。畸形
+    # 标签按「不是 rig 发的」处理:进基线表,不进对照表。
+    if not all(_RIG_SEGMENT.match(part) for part in parts):
+        return {}
     return dict(zip(RIG_FIELDS, parts))
+
+
+_RIG_SEGMENT = re.compile(r"^[A-Za-z0-9_.+\-]{1,64}$")
 
 
 class _Reader:
