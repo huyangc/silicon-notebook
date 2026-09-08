@@ -1247,6 +1247,72 @@ def test_search_loop_marks_unresolved_scope_failed_without_calling_run_search_on
     assert row["question_key"] == "A-q01"
 
 
+def test_backend_env_forces_kg_auto_extract_off():
+    """有图/无图格靠 rig 只对 *_kg 格调 `/kg/build` 区分;继承环境或 --env-file
+    开着 KG_AUTO_EXTRACT 会让上传即建图,A_nokg/B_nokg 不再无图(codex #700 R12
+    P2)。fixture 后端必须显式关掉,且不受 --env-file 影响(显式环境变量优先)。"""
+    args = rig.build_parser().parse_args(["--env-file", "/tmp/x.env", "seed"])
+    args.database_url = "postgresql://127.0.0.1:5432/x_test"
+    env = rig.backend_env(args, "legacy")
+    assert env["KG_AUTO_EXTRACT"] == "false"
+    assert env["SILICON_NOTEBOOK_ENV_FILE"].endswith("x.env")
+
+
+def test_search_loop_serial_writes_a_failed_row_and_counts_it(
+    rrepo, tmp_path, monkeypatch,
+):
+    """串行路径(默认并发 1、SQLite 强制)里 `run_search_once` 抛异常此前直接
+    打断整批、不落行(codex #700 R12 P2):要与并发路径同口径——失败 run 落
+    `status=failed` 行、日志只记异常类名、返回失败数;取消仍然向上抛。"""
+    from app.services.cancellation import AskCancelled
+
+    notebook = _seed_two_nodes(rrepo)
+    calls: list[str] = []
+
+    def fake_run_search_once(repo, settings, *, notebook, item, prepared,
+                             on_step, cancel_event, actor_id,
+                             scope_source_ids=None):
+        calls.append(item["question_key"])
+        if item["question_key"] == "A-q01":
+            raise ValueError("provider exploded 秘密原文")
+        return types.SimpleNamespace(termination=None)
+
+    monkeypatch.setattr(rig, "run_search_once", fake_run_search_once)
+    first = dict(_search_item("legacy"))
+    second = dict(_search_item("legacy")); second["question_key"] = "A-q02"
+    facts = {"A_nokg": {"notebook": notebook.id, "sources": 0, "kg_in_scope": False}}
+    out_dir = tmp_path / "serial"
+    runner = rig.Runner(dry_run=False, out_dir=out_dir)
+    failed = rig._search_loop(
+        _search_loop_args(f"sqlite:///{tmp_path / 't.db'}"), runner,
+        [first, second], facts, rrepo,
+        {"legacy": rrepo.settings, "v2": rrepo.settings},
+        actor_id="t0-owner", cancel_event=threading.Event(),
+    )
+    assert failed == 1
+    assert calls == ["A-q01", "A-q02"], "失败不该打断后面的 run"
+    rows = [json.loads(l) for l in (out_dir / "search-legacy.jsonl").read_text().splitlines()]
+    by_key = {r["question_key"]: r for r in rows}
+    assert by_key["A-q01"]["status"] == "failed"
+    assert by_key["A-q02"]["status"] != "failed"
+    log_text = (out_dir / "search-runs.log").read_text("utf-8")
+    assert "A-q01 A_nokg legacy standard FAILED ValueError" in log_text
+    assert "秘密原文" not in log_text
+
+    def cancelled(*a, **k):
+        raise AskCancelled()
+
+    monkeypatch.setattr(rig, "run_search_once", cancelled)
+    with pytest.raises(AskCancelled):
+        rig._search_loop(
+            _search_loop_args(f"sqlite:///{tmp_path / 't2.db'}"),
+            rig.Runner(dry_run=False, out_dir=tmp_path / "serial2"),
+            [dict(_search_item("legacy"))], facts, rrepo,
+            {"legacy": rrepo.settings, "v2": rrepo.settings},
+            actor_id="t0-owner", cancel_event=threading.Event(),
+        )
+
+
 def test_failed_run_row_keeps_the_requested_policy_and_loops_count_it(
     rrepo, tmp_path, monkeypatch,
 ):

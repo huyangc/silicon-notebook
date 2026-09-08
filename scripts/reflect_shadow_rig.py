@@ -635,6 +635,10 @@ def backend_env(args: argparse.Namespace, policy: str) -> dict[str, str]:
         "SILICON_NOTEBOOK_STORAGE_DIR": args.storage_dir,
         "SILICON_NOTEBOOK_AUTH_OPTIONAL": "true",
         "REASONING_REFLECT_V2_ENABLED": "true" if policy == "v2" else "false",
+        # 语料格的「有图/无图」靠 rig 只对 *_kg 格调 `/kg/build` 来区分;继承的
+        # 环境或 `--env-file` 若开着 KG_AUTO_EXTRACT,上传即自动建图,A_nokg /
+        # B_nokg 就不再无图、`--skip-kg` 也拦不住(codex #700 R12 P2)。显式关掉。
+        "KG_AUTO_EXTRACT": "false",
         "PORT": str(args.port),
     }
     if args.env_file:
@@ -2260,6 +2264,8 @@ def _search_loop(
     *, actor_id: str, cancel_event: Any,
 ) -> int:
     """整批 run。每个 run 一行 JSONL + 一行日志,**都不含任何问题原文**。"""
+    from app.services.cancellation import AskCancelled
+
     intents = _IntentCache(
         runner.out_dir / "intents.jsonl", enabled=not args.no_intent
     )
@@ -2301,24 +2307,44 @@ def _search_loop(
                         raw_steps.append(raw_trace_step_row(step))
 
                 started = time.monotonic()
-                result = run_search_once(
-                    repo, settings, notebook=fact["notebook"], item=item,
-                    prepared=prepared, on_step=_on_step,
-                    cancel_event=cancel_event, actor_id=actor_id,
-                    scope_source_ids=scope_ids,
-                )
-                elapsed_ms = round((time.monotonic() - started) * 1000)
-                row = project_search_run(
-                    steps, result=result, effort=item["effort"], policy=policy,
-                    question_key=item["question_key"],
-                    corpus_cell=item["corpus_cell"],
-                    kg_in_scope=fact["kg_in_scope"],
-                    has_intent_contract=prepared is not None,
-                    sources_count=fact["sources"],
-                )
-                row["scope_narrowed"] = bool(scope_ids)
-                if args.keep_raw_trace:
-                    write_raw_trace(runner.out_dir, policy, item, raw_steps, result)
+                try:
+                    result = run_search_once(
+                        repo, settings, notebook=fact["notebook"], item=item,
+                        prepared=prepared, on_step=_on_step,
+                        cancel_event=cancel_event, actor_id=actor_id,
+                        scope_source_ids=scope_ids,
+                    )
+                except AskCancelled:
+                    raise
+                except Exception as exc:  # noqa: BLE001 — 单个 run 失败要隔离
+                    # 与并发路径同一口径(codex #700 R12 P2):失败 run 落一行
+                    # `status=failed`,日志只记异常类名,整批以非零退出码收尾;
+                    # 不能让串行(SQLite 强制、默认并发 1)那条路的失败凭空消失。
+                    elapsed_ms = round((time.monotonic() - started) * 1000)
+                    row = _failed_run_row(item, fact)
+                    runner.say(
+                        "search failed",
+                        f"{item['question_key']} {item['corpus_cell']} "
+                        f"{policy} {type(exc).__name__}",
+                    )
+                    log.write(
+                        f"{item['question_key']} {item['corpus_cell']} "
+                        f"{policy} {item['effort']} FAILED {type(exc).__name__}\n"
+                    )
+                    log.flush()
+                else:
+                    elapsed_ms = round((time.monotonic() - started) * 1000)
+                    row = project_search_run(
+                        steps, result=result, effort=item["effort"], policy=policy,
+                        question_key=item["question_key"],
+                        corpus_cell=item["corpus_cell"],
+                        kg_in_scope=fact["kg_in_scope"],
+                        has_intent_contract=prepared is not None,
+                        sources_count=fact["sources"],
+                    )
+                    row["scope_narrowed"] = bool(scope_ids)
+                    if args.keep_raw_trace:
+                        write_raw_trace(runner.out_dir, policy, item, raw_steps, result)
             assert_closed(row)
             assert_projection_values(row)
             handle = handles.get(policy)
@@ -2328,10 +2354,7 @@ def _search_loop(
                 ).open("a", encoding="utf-8")
             handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
             handle.flush()
-            status_suffix = (
-                "" if row.get("status") != "failed"
-                else " status=failed reason=scope_unresolved"
-            )
+            status_suffix = "" if row.get("status") != "failed" else " status=failed"
             line = (
                 f"{index:03d}/{len(plan)} {item['question_key']} "
                 f"{item['corpus_cell']} {policy} {item['effort']} "
