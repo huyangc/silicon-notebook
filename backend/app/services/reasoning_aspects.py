@@ -193,6 +193,102 @@ class _Update:
     demotion: str
 
 
+#: `normalize_assessment_payload` 认的 (a) 设计稿列表形的顶层键闭集。方面 id 由
+#: `_ASPECT_ID_PREFIX` 确定性生成(`a1..aN`),永远不会撞上这两个字面量,所以「顶层
+#: 键集合是不是这个闭集的子集」这条判据不会把一份真正的 (b) 映射形误判成列表形。
+_ASSESSMENT_LISTFORM_KEYS = frozenset({"supported", "unresolved"})
+
+
+def normalize_assessment_payload(raw: object) -> object:
+    """把 `assessment` 的形状别名归一成 `apply()` 认识的列表形。
+
+    2026-09-09 本机 deepseek-v4-flash 关思考实测:55 次收尾自评里 41 次没有按
+    设计稿写 `{"supported": [...], "unresolved": [...]}`,而是按方面 id 直接
+    映射:`{"a1": {"status": "partial", "supported": false, "evidence_keys": [],
+    "gap": "..."}}`(`supported` 有时是布尔、有时缺省,`status` 同理)。这份映射
+    被 `apply()` 当成两组都没给的空载荷——不是"模型不填",是**形状不合**。
+
+    只做**形状**归一,不碰语义:三种输入都归一到同一份列表形之后,`apply()` 既有
+    的键合法性、上限、重复校验原样生效,越权/超限仍然被拒。非 dict 输入原样
+    返回,交给调用方(`apply()` 的 `not_object` 分支、`assessment_is_empty()`
+    的非 Mapping 分支)处理——那不是这个函数的判断范围。
+
+    认三种形状:
+
+    (a) 设计稿列表形:`{"supported": [...], "unresolved": [...]}`,原样通过
+        (仍会走 (c) 的 `id` 别名归一)。
+    (b) 按方面 id 的映射:顶层键不是 (a) 的闭集子集时按这种形状处理——每个键是
+        一个方面 id,值是该方面这一轮的判断。`supported is True` 或
+        `status == "supported"` 进 `supported`(带 `evidence_keys`);否则进
+        `unresolved`,`status` 取值合法集 `partial`/`conflicting`/`unknown`,不
+        合法或缺省一律归一成 `unknown`——**不是** `apply()` 列表形自己的默认档
+        `partial`,映射形省略 `status` 说的是"没细分",不是"已知是部分支撑"。
+        `gap` 透传。
+    (c) 列表形的 item 带 `id` 而非 `aspect_id`:两个键都认,`id` 只在缺
+        `aspect_id` 时补位。
+    """
+    if not isinstance(raw, Mapping):
+        return raw
+    if set(raw.keys()) <= _ASSESSMENT_LISTFORM_KEYS:
+        return _normalize_listform_ids(raw)
+    return _normalize_mapping_form(raw)
+
+
+def _normalize_listform_ids(raw: Mapping) -> dict:
+    """(c):列表形 item 里的 `id` 别名补成 `aspect_id`。不改其它任何东西。"""
+    out: dict = {}
+    for group in ("supported", "unresolved"):
+        rows = raw.get(group)
+        if rows is None:
+            continue
+        if not isinstance(rows, (list, tuple)):
+            # 非列表原样传递,交给 `apply()` 既有的 `<group>_not_list` 校验。
+            out[group] = rows
+            continue
+        out[group] = [
+            {**row, "aspect_id": row["id"]}
+            if (isinstance(row, Mapping) and "aspect_id" not in row
+                and isinstance(row.get("id"), str))
+            else row
+            for row in rows
+        ]
+    return out
+
+
+def _normalize_mapping_form(raw: Mapping) -> dict:
+    """(b):按方面 id 的映射 → `apply()` 认识的列表形。"""
+    supported: List[dict] = []
+    unresolved: List[dict] = []
+    for aspect_id, body in raw.items():
+        if not isinstance(aspect_id, str):
+            # 方面 id 永远是字符串;一个非字符串键不可能指向任何真实方面,丢弃它
+            # 比伪造一条 `apply()` 认不出的 id 更安全。
+            continue
+        fields = body if isinstance(body, Mapping) else {}
+        status = fields.get("status")
+        status = status if isinstance(status, str) else ""
+        item: dict = {"aspect_id": aspect_id}
+        evidence_keys = fields.get("evidence_keys")
+        if evidence_keys is not None:
+            item["evidence_keys"] = evidence_keys
+        gap = fields.get("gap")
+        if gap is not None:
+            item["gap"] = gap
+        if fields.get("supported") is True or status == ASPECT_SUPPORTED:
+            supported.append(item)
+        else:
+            item["status"] = (
+                status if status in ASPECT_UNRESOLVED_STATUSES
+                else ASPECT_UNKNOWN)
+            unresolved.append(item)
+    out: dict = {}
+    if supported:
+        out["supported"] = supported
+    if unresolved:
+        out["unresolved"] = unresolved
+    return out
+
+
 class AspectLedger:
     """run 内的必答方面账。只在 reflect v2 总闸开着时被构造(关闭态零新状态)。
 
@@ -342,7 +438,12 @@ class AspectLedger:
 
         吸收到**非空**自评时顺手清掉 `nudge_pending`:追问已经被回应,那一句不该
         再出现在后续任何一轮(渲染侧也会清,两处同向,见 `render_aspect_block`)。
+
+        **入口先经 `normalize_assessment_payload` 做形状归一**:按方面 id 的
+        映射写法(2026-09-09 本机实测里占多数)与设计稿的列表写法在这里被当成
+        同一件事,下面的校验只认归一之后的形状。
         """
+        assessment = normalize_assessment_payload(assessment)
         if not isinstance(assessment, Mapping):
             return "not_object"
         updates: List[_Update] = []
@@ -457,7 +558,12 @@ def assessment_is_empty(assessment: object) -> bool:
 
     非 Mapping(模型回了个列表/字符串)也算空:`apply` 对它返回 `not_object`,
     但那条路只在字段存在时才走到;这里只回答"有没有表态",答案同样是没有。
+
+    **入口先经 `normalize_assessment_payload`**,理由与 `apply` 同:一份按方面
+    id 映射写的、内容非空的自评,顶层没有 `supported`/`unresolved` 键,若不先
+    归一会被这里误判成"没有表态",进而触发一次不该发生的追问。
     """
+    assessment = normalize_assessment_payload(assessment)
     if not isinstance(assessment, Mapping):
         return True
     for group in ("supported", "unresolved"):

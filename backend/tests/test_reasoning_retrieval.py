@@ -8742,6 +8742,124 @@ def test_over_limit_assessment_becomes_an_invalid_decision_with_zero_io(rrepo):
     assert any("本不该被执行" in row for row in lines), lines
 
 
+# ------------------------------------------- A2b assessment 形状别名归一
+# 2026-09-09 本机 deepseek-v4-flash 关思考实测:v2 的 55 次收尾自评里 41 次没有
+# 按设计稿写 `{"supported": [...], "unresolved": [...]}`,而是按方面 id 直接
+# 映射:`{"a1": {"status": "partial", "supported": false, ...}}`。这份映射被
+# `apply()` 当成两组都没给的空载荷——不是"模型不填",是**形状不合**。下面这组
+# 钉住 `normalize_assessment_payload` 认的三种形状,以及它们各自的既有校验路径
+# (合法/超限/降级)一个都没被绕过。
+
+def test_normalize_accepts_the_by_aspect_id_mapping_shape():
+    """(b) 映射形单元测试:supported 布尔/status 字面量的四种组合各自落对。
+
+    变异:把 `normalize_assessment_payload` 里 `set(raw.keys()) <= ...` 那条形状
+    判据删掉(总是走列表形分支)⇒ 这条红(映射形被当成 `supported_not_list`)。
+    """
+    from app.services.reasoning_aspects import normalize_assessment_payload
+    normalized = normalize_assessment_payload({
+        "a1": {"supported": True, "evidence_keys": ["k1"]},
+        "a2": {"status": "partial", "supported": False, "gap": "缺甲"},
+        "a3": {"status": "conflicting"},
+        "a4": {},                              # 缺省 → unknown,不是 partial
+        "a5": {"status": "bogus-status"},      # 不合法 → unknown,不是被拒
+    })
+    supported = {row["aspect_id"]: row for row in normalized["supported"]}
+    unresolved = {row["aspect_id"]: row for row in normalized["unresolved"]}
+    assert supported["a1"]["evidence_keys"] == ["k1"]
+    assert unresolved["a2"] == {
+        "aspect_id": "a2", "gap": "缺甲", "status": "partial"}
+    assert unresolved["a3"]["status"] == "conflicting"
+    assert unresolved["a4"]["status"] == "unknown"
+    assert unresolved["a5"]["status"] == "unknown"
+
+
+def test_normalize_accepts_id_alias_in_listform_items():
+    """(c) 列表形 item 带 `id` 而非 `aspect_id` 也认,`aspect_id` 优先于 `id`。
+
+    变异:去掉 `_normalize_listform_ids` 里的别名补位 ⇒ 这条红
+    (归一后的 item 仍然没有 `aspect_id`,`apply()` 判 `unknown_aspect`)。
+    """
+    from app.services.reasoning_aspects import normalize_assessment_payload
+    normalized = normalize_assessment_payload({"supported": [
+        {"id": "a1", "evidence_keys": ["k1"]},
+        {"id": "ignored", "aspect_id": "a2"},  # 两个键都在时 aspect_id 优先
+    ]})
+    assert normalized["supported"][0]["aspect_id"] == "a1"
+    assert normalized["supported"][1]["aspect_id"] == "a2"
+
+
+def test_normalize_passes_the_design_listform_through_unchanged():
+    """(a) 设计稿列表形是恒等变换(形状判据不会误伤它)。"""
+    from app.services.reasoning_aspects import normalize_assessment_payload
+    payload = {"supported": [{"aspect_id": "a1", "evidence_keys": ["k1"]}],
+               "unresolved": [{"aspect_id": "a2", "status": "partial"}]}
+    assert normalize_assessment_payload(payload) == payload
+
+
+def test_normalize_leaves_non_mapping_input_untouched():
+    """非 dict 输入原样返回,交给 `apply()`/`assessment_is_empty()` 的既有分支。"""
+    from app.services.reasoning_aspects import normalize_assessment_payload
+    assert normalize_assessment_payload(None) is None
+    assert normalize_assessment_payload(["a1"]) == ["a1"]
+    assert normalize_assessment_payload("a1") == "a1"
+
+
+def test_mapping_form_supported_with_illegal_keys_still_demotes():
+    """映射形里 `supported: true` 但 evidence_keys 全非法 ⇒ 沿用既有降级。
+
+    走的是 `apply()` 既有的 `_legal_keys` 降级路径,证明归一之后校验没有被绕过。
+    """
+    from app.domain.retrieval_termination import DEMOTION_KEYS_REJECTED
+    ledger = _ledger("问题一")
+    assert ledger.apply(
+        {"a1": {"supported": True, "evidence_keys": ["编的键"]}},
+        allowed_keys={"k1"}) == ""
+    row = ledger.snapshot()[0]
+    assert row.status == "partial" and row.demotion == DEMOTION_KEYS_REJECTED
+
+
+def test_mapping_form_is_absorbed_through_a_real_run(rrepo):
+    """(b) 映射形经真实传输闸 `_GatedV2LLM` 进 run,方面状态与证据键落对。
+
+    变异:去掉 `AspectLedger.apply`/`assessment_is_empty` 里的
+    `normalize_assessment_payload` 调用 ⇒ 这条红——映射形被判"没有表态",收尾
+    被判 `model_partial` 而不是 `model_sufficient`,且 `missing_assessment` 会
+    出现在 skip 原因里(整份被当空,退回追问一轮之后才接受)。
+    """
+    from app.domain.retrieval_termination import TERMINATION_MODEL_PARTIAL
+    llm, result = _v2_aspect_run(
+        rrepo,
+        intent_detail={"mandatory_topics": ["问题一", "问题二"]},
+        reflects=[_answer(assessment={
+            "a1": {"supported": True, "evidence_keys": ["ck-q0"]},
+            "a2": {"status": "partial", "supported": False, "gap": "缺乙"},
+        })],
+    )
+    assert "missing_assessment" not in _skip_reasons(result)
+    aspects = {row.aspect_id: row for row in result.termination.aspects}
+    assert aspects["a1"].status == "supported"
+    assert aspects["a1"].evidence_keys == ("ck-q0",)
+    assert aspects["a2"].status == "partial" and aspects["a2"].gap == "缺乙"
+    # a2 未支撑,不是 model_sufficient——但 assessment 本身被正确吸收,不是空账。
+    assert result.termination.reason == TERMINATION_MODEL_PARTIAL
+
+
+def test_listform_id_alias_is_absorbed_through_a_real_run(rrepo):
+    """(c) 列表形 `id` 别名经真实传输闸进 run,一样能收尾为 `model_sufficient`。"""
+    from app.domain.retrieval_termination import TERMINATION_MODEL_SUFFICIENT
+    llm, result = _v2_aspect_run(
+        rrepo,
+        intent_detail={"mandatory_topics": ["问题一"]},
+        reflects=[_answer(assessment={"supported": [
+            {"id": "a1", "evidence_keys": ["ck-q0"]}]})],
+    )
+    assert "missing_assessment" not in _skip_reasons(result)
+    assert result.termination.aspects[0].status == "supported"
+    assert result.termination.aspects[0].evidence_keys == ("ck-q0",)
+    assert result.termination.reason == TERMINATION_MODEL_SUFFICIENT
+
+
 def test_aspect_changes_never_reset_the_stale_breaker(rrepo):
     """方面变化只是观察记录,**不清零 stale**(§6.1)。
 
