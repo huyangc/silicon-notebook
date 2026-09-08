@@ -1424,8 +1424,35 @@ def _plan_intent(
     return finalize_query_intent(
         seed,
         resolved_question=str(seed.get("resolved_question") or ""),
-        answers=[],
+        answers=auto_clarification_answers(seed),
     )
+
+
+# 无人在场时替用户回答必填澄清项的**确定性**规则:有选项取第一个,没有就用一句
+# 「不额外限定」。首跑实测 8 题里有题目的契约带必填澄清项,`answers=[]` 会被
+# `finalize_query_intent` 的门拒掉、整批 run 起不来。规则写死是为了两侧策略、两次
+# 重跑拿到**同一份**契约;答案本身只影响 `clarification_answers` 与范围信号,不进
+# 数据集。
+AUTO_CLARIFICATION_ANSWER = "按问题原意理解，不额外限定"
+
+
+def auto_clarification_answers(seed: dict) -> list[dict]:
+    """`finalize_query_intent(answers=...)` 的确定性代答:只答必填项。"""
+    answers: list[dict] = []
+    for row in seed.get("ambiguities") or []:
+        if not isinstance(row, dict) or not row.get("id"):
+            continue
+        if row.get("required") is False:
+            continue
+        options = [
+            str(option).strip() for option in (row.get("options") or [])
+            if str(option).strip()
+        ]
+        answers.append({
+            "id": str(row["id"]),
+            "answer": options[0] if options else AUTO_CLARIFICATION_ANSWER,
+        })
+    return answers
 
 
 def _prepare_search_intent(
