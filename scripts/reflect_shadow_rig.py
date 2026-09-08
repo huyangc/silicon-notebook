@@ -3684,9 +3684,11 @@ def _ab_coverage_complete(response: Any) -> bool | None:
     枚举完整时 `result_coverage` 仍是 `None`,`completeness_claim_candidate` 于
     是把答案里那句「共 12 篇」判成虚报候选,两条臂的目录题因此全被强制进人工。
 
-    「任一 result_set 报 complete」= 这次 run 存在一条走到终态的枚举链。两条链
-    都在场时按同一条规则合并:有一个 complete 就是 complete;都不 complete 就是
-    False;一条都没有才是 `None` = 「没有任何东西背书那句完整性断言」。
+    合并规则(codex #703 R3 P2):**所有**在场的 coverage 都 complete 才算
+    complete;有任何一条 partial 就是 False——答案里那句「共 N 篇」可能正是关于
+    那条没枚举完的集合说的,一条无关的 complete 集合不能替它免掉人工复核
+    (表格批量里「单表耗尽但批次漏了别的表」正是文档点名的那种区别)。一条
+    coverage 都没有才是 `None` = 「没有任何东西背书那句完整性断言」。
     """
     coverages = [
         getattr(row, "coverage", None)
@@ -3701,7 +3703,7 @@ def _ab_coverage_complete(response: Any) -> bool | None:
     seen = [value for value in values if isinstance(value, bool)]
     if not seen:
         return None
-    return any(seen)
+    return all(seen)
 
 
 def _run_ab(

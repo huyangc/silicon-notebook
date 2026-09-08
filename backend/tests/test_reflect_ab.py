@@ -535,6 +535,28 @@ def test_llm_usage_sums_only_the_records_inside_the_window():
     assert usage.finish_reason_codes == {"stop": 2}
 
 
+def test_llm_usage_token_totals_are_unknown_when_any_call_lacks_that_counter():
+    """provider 可能不回 usage(被拒后去掉 usage 选项重试;`_usage_dict` 允许缺
+    字段):把缺的那次当 0 会把部分和报成全程总量,A/B 成本对照假装省了钱
+    (codex #703 R3 P2)。两个 token 计数各自判完整;调用数与 finish_reason 照常。"""
+    start = datetime(2026, 9, 9, 12, 0, 0)
+    end = start + timedelta(seconds=30)
+    with_gap = [_llm_record(1), _llm_record(2)]
+    with_gap[1] = {**with_gap[1], "usage": {"completion_tokens": 5}}  # 缺 prompt_tokens
+    usage = slice_llm_usage(with_gap, start=start, end=end)
+    assert usage.model_calls == 2
+    assert usage.prompt_tokens is None
+    assert usage.completion_tokens == 10
+    assert usage.finish_reason_codes == {"stop": 2}
+
+    no_usage = [_llm_record(1), {**_llm_record(2), "usage": None}]
+    usage = slice_llm_usage(no_usage, start=start, end=end)
+    assert usage.model_calls == 2
+    assert usage.prompt_tokens is None and usage.completion_tokens is None
+    assert_projection_values({"prompt_tokens": usage.prompt_tokens,
+                              "completion_tokens": usage.completion_tokens})
+
+
 def test_a_missing_finish_reason_becomes_a_short_code_not_an_empty_string():
     """空串过不了投影的短码校验,而「这次没报 finish_reason」本身要计数——
     T0 那 20% 空正文靠这一列归因(§9 硬判据 4)。"""
@@ -1784,13 +1806,21 @@ def test_coverage_complete_reads_the_enumeration_result_sets():
     assert rig._ab_coverage_complete(complete) is True
     assert rig._ab_coverage_complete(partial) is False
     assert rig._ab_coverage_complete(none) is None
-    # 两条链都在场:有一条走到终态就是 complete。
+    # 两条链都在场:有一条 partial 就不算 complete——那句「共 N 篇」可能正是
+    # 关于没枚举完的那条说的,一条无关的 complete 不能替它免掉人工复核
+    # (codex #703 R3 P2)。
     mixed = SimpleNamespace(
         result_sets=[SimpleNamespace(coverage=_coverage(False)),
                      SimpleNamespace(coverage=_coverage(True))],
         result_coverage=_coverage(False),
     )
-    assert rig._ab_coverage_complete(mixed) is True
+    assert rig._ab_coverage_complete(mixed) is False
+    all_complete = SimpleNamespace(
+        result_sets=[SimpleNamespace(coverage=_coverage(True)),
+                     SimpleNamespace(coverage=_coverage(True))],
+        result_coverage=None,
+    )
+    assert rig._ab_coverage_complete(all_complete) is True
     # 表格批量那条路仍然算数(它自己那份 coverage 是它的权威)。
     table_only = SimpleNamespace(result_sets=[], result_coverage=_coverage(True))
     assert rig._ab_coverage_complete(table_only) is True
