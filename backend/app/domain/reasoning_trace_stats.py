@@ -54,6 +54,12 @@ RUN_PROJECTION_KEYS: frozenset[str] = frozenset({
     "status",
     "trace_source",
     "merge_key",
+    # rig 的 `search`/`ask` 侧声明:这道题是不是按显式来源身份收窄了检索范围
+    # (codex #700 R3 P2)。`True`=收窄且已解析到位,`False`=题目本来就没有
+    # 声明范围,`None`=声明了范围但解析不到唯一匹配、这次 run 没跑
+    # (`status=failed`)。不是从轨迹反推的——`search`/`ask` 是唯一手上有
+    # 「这道题声明了哪些来源标题」这件事实的调用方,线上导出恒不写这个键。
+    "scope_narrowed",
     # --- Ask 轨迹指标(§3 下半表) ---
     "reflect_turns",
     "action_seq",

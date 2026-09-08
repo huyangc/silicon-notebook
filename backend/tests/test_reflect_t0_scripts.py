@@ -198,6 +198,24 @@ def test_english_variants_get_their_own_question_key():
     assert [item["question_key"] for item in plan] == ["A-q01", "A-q01-en"]
 
 
+def test_ask_plan_carries_scope_source_titles_only_for_the_declaring_question():
+    """`scope_sources`(计数)已经改成 `scope_source_titles`(标题列表)——
+    没有一个消费者读过前者(codex #700 R3 P2),这里钉住 `ask_plan` 现在按
+    标题原样转发,其余题目恒是空元组。"""
+    questions = rig.load_questions()
+    plan = rig.ask_plan(
+        questions, cells=["B_nokg"], policy="legacy", limit=None, lang="zh",
+        mode="reasoning", efforts=("standard",),
+    )
+    by_key = {item["question_key"]: item for item in plan}
+    assert by_key["B-q09"]["scope_source_titles"] == (
+        "qwen_papers__04_Qwen-VL_mineru.md",
+        "deepseek_papers__01_DeepSeek-V2_mineru.md",
+    )
+    assert by_key["B-q01"]["scope_source_titles"] == ()
+    assert by_key["B-q10"]["scope_source_titles"] == ()
+
+
 def test_corpus_cells_only_receive_their_own_corpus_questions():
     questions = rig.load_questions()
     plan = rig.ask_plan(
@@ -843,6 +861,200 @@ def test_search_core_refuses_a_settings_that_disagrees_with_the_policy(rrepo):
         )
 
 
+# --- 显式来源范围(codex #700 R3 P2) -----------------------------------------
+
+
+def _insert_source_row(repo: Any, source_id: str, notebook_id: str, title: str) -> None:
+    """往 `sources` 表插一行,只为 `resolve_scope_source_ids` 的解析用例—— repo
+    的公开建来源接口要走真实上传/解析流程,这里只需要 `id`/`notebook_id`/
+    `title` 三个字段就位。"""
+    with repo._connect() as db:
+        db.execute(
+            "INSERT INTO sources "
+            "(id,notebook_id,title,source_type,status,parse_status,file_name,"
+            "error_message,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (source_id, notebook_id, title, "text", "extracted", "extracted",
+             title, "", "2026-09-08T00:00:00", "2026-09-08T00:00:00"),
+        )
+
+
+def test_resolve_scope_source_ids_matches_by_title_substring(rrepo, tmp_path):
+    """`ask`/`seed` 重新上传出的测试库里,标题会带上主库存储层加的
+    `{source_id}_` 前缀(见题集 B-q09 的 `note`);子串匹配让同一份标题在
+    「主库既有笔记本」与「重新上传出的测试库」两条路上都能解析到位。"""
+    notebook = _seed_two_nodes(rrepo)
+    _insert_source_row(rrepo, "src-qwen", notebook.id,
+                       "qwen_papers__04_Qwen-VL_mineru.md")
+    _insert_source_row(
+        rrepo, "src-deepseek-v2", notebook.id,
+        # 模拟 `ask`/`seed` 重新上传的那份:磁盘文件名本身带着主库存储层的
+        # `{source_id}_` 前缀,整段被当成新上传的文件名。
+        "src-af28908c73_deepseek_papers__01_DeepSeek-V2_mineru.md",
+    )
+    # 同一篇论文的另一次解析(B-q07「同标题/同内容」那个),标题完全不同,
+    # 不该被误撞进匹配。
+    _insert_source_row(rrepo, "src-deepseek-dup", notebook.id,
+                       "05_DeepSeekV2_mineru.md")
+    database_url = f"sqlite:///{tmp_path / 't.db'}"
+    resolved = rig.resolve_scope_source_ids(
+        database_url, notebook.id,
+        ("qwen_papers__04_Qwen-VL_mineru.md",
+         "deepseek_papers__01_DeepSeek-V2_mineru.md"),
+    )
+    assert resolved == ["src-qwen", "src-deepseek-v2"]
+
+
+def test_resolve_scope_source_ids_fails_loud_on_zero_or_ambiguous_matches(
+    rrepo, tmp_path,
+):
+    """0 个命中(标题不存在)与 ≥2 个命中(同一子串撞了两个来源)都判失败——
+    调用方据此把这道题标 `status=failed`,不静默退化成全库检索。"""
+    notebook = _seed_two_nodes(rrepo)
+    database_url = f"sqlite:///{tmp_path / 't.db'}"
+    assert rig.resolve_scope_source_ids(
+        database_url, notebook.id, ("no-such-title.md",),
+    ) is None
+    _insert_source_row(rrepo, "src-1", notebook.id, "paper_v1.md")
+    _insert_source_row(rrepo, "src-2", notebook.id, "paper_v1_final.md")
+    assert rig.resolve_scope_source_ids(
+        database_url, notebook.id, ("paper_v1",),
+    ) is None
+
+
+def test_run_search_once_applies_the_resolved_source_scope(rrepo, monkeypatch):
+    """`scope_source_ids` 非空时,`retriever.run` 执行期间的
+    `current_source_scope()` 必须是 `mode="include"` + 那份 id 集合——
+    `source_scope_context(notebook, None, None)` 那条 no-op 分支不该被走到。
+    """
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    from app.services.source_scope import current_source_scope
+
+    notebook = _seed_two_nodes(rrepo)
+    captured: dict[str, Any] = {}
+
+    def fake_run(self, notebook_id, question, history="", on_step=None,
+                 top_n=None, max_steps=None, intent_queries=None,
+                 limits=None, intent_detail=None):
+        scope = current_source_scope()
+        captured["mode"] = scope.mode if scope else None
+        captured["source_ids"] = set(scope.source_ids) if scope else None
+        return types.SimpleNamespace(termination=None)
+
+    monkeypatch.setattr(ReasoningRetriever, "run", fake_run)
+    rig.run_search_once(
+        rrepo, rrepo.settings, notebook=notebook.id, item=_search_item("legacy"),
+        prepared=None, on_step=lambda step: None, cancel_event=threading.Event(),
+        actor_id="t0-owner", scope_source_ids=["src-qwen", "src-deepseek-v2"],
+    )
+    assert captured["mode"] == "include"
+    assert captured["source_ids"] == {"src-qwen", "src-deepseek-v2"}
+
+
+def test_run_search_once_leaves_scope_a_no_op_when_no_ids_are_given(
+    rrepo, monkeypatch,
+):
+    """改动前的默认行为逐字不变:`scope_source_ids=None`(未声明范围的题)
+    仍然是 `source_scope_context(notebook, None, None)` 的 no-op。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    from app.services.source_scope import current_source_scope
+
+    notebook = _seed_two_nodes(rrepo)
+    captured: dict[str, Any] = {}
+
+    def fake_run(self, notebook_id, question, history="", on_step=None,
+                 top_n=None, max_steps=None, intent_queries=None,
+                 limits=None, intent_detail=None):
+        captured["scope"] = current_source_scope()
+        return types.SimpleNamespace(termination=None)
+
+    monkeypatch.setattr(ReasoningRetriever, "run", fake_run)
+    rig.run_search_once(
+        rrepo, rrepo.settings, notebook=notebook.id, item=_search_item("legacy"),
+        prepared=None, on_step=lambda step: None, cancel_event=threading.Event(),
+        actor_id="t0-owner",
+    )
+    assert captured["scope"] is None
+
+
+def _search_loop_args(database_url: str) -> Any:
+    args = rig.build_parser().parse_args(["search"])
+    args.database_url = database_url
+    args.no_intent = True
+    args.keep_raw_trace = False
+    return args
+
+
+def test_search_loop_marks_unresolved_scope_failed_without_calling_run_search_once(
+    rrepo, tmp_path, monkeypatch,
+):
+    """标题解析不到唯一匹配:整道题标 `status=failed`/`scope_narrowed=None`,
+    `run_search_once` 绝不能被调到——那正是 codex #700 R3 P2 要堵的「解析不到
+    位就悄悄退化成一次不设限的全库检索」。把这个守卫改回去(删掉
+    `_search_loop` 里的 `scope_failed` 分支)时,这条用例会因为
+    `run_search_once` 被调用而报红,这就是它的变异验证。
+    """
+    notebook = _seed_two_nodes(rrepo)
+    database_url = f"sqlite:///{tmp_path / 't.db'}"
+
+    def _boom(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError(
+            "范围解析失败时不该调 run_search_once —— 不能悄悄退化成全库检索"
+        )
+
+    monkeypatch.setattr(rig, "run_search_once", _boom)
+
+    item = dict(_search_item("legacy"))
+    item["scope_source_titles"] = ("no-such-title.md",)
+    out_dir = tmp_path / "out"
+    runner = rig.Runner(dry_run=False, out_dir=out_dir)
+    facts = {"A_nokg": {"notebook": notebook.id, "sources": 0,
+                        "kg_in_scope": False}}
+    rig._search_loop(
+        _search_loop_args(database_url), runner, [item], facts, rrepo,
+        {"legacy": rrepo.settings, "v2": rrepo.settings},
+        actor_id="t0-owner", cancel_event=threading.Event(),
+    )
+    lines = (out_dir / "search-legacy.jsonl").read_text("utf-8").splitlines()
+    assert len(lines) == 1
+    row = json.loads(lines[0])
+    assert row["status"] == "failed"
+    assert row["scope_narrowed"] is None
+    assert row["question_key"] == "A-q01"
+
+
+def test_search_loop_writes_scope_narrowed_true_for_a_resolved_scope(
+    rrepo, tmp_path,
+):
+    """解析到位的题:`run_search_once` 真的带着 `include` 范围跑一次真检索,
+    落盘的投影行 `scope_narrowed=True`。"""
+    notebook = _seed_two_nodes(rrepo)
+    _insert_source_row(rrepo, "src-a", notebook.id, "paper-a.md")
+    _insert_source_row(rrepo, "src-b", notebook.id, "paper-b.md")
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "RTL到GDSII流程"}]},
+        reflects=[{"next_action": "answer", "sufficient": True}]))
+
+    database_url = f"sqlite:///{tmp_path / 't.db'}"
+    item = dict(_search_item("legacy"))
+    item["scope_source_titles"] = ("paper-a.md", "paper-b.md")
+    out_dir = tmp_path / "out"
+    runner = rig.Runner(dry_run=False, out_dir=out_dir)
+    facts = {"A_nokg": {"notebook": notebook.id, "sources": 2,
+                        "kg_in_scope": True}}
+    rig._search_loop(
+        _search_loop_args(database_url), runner, [item], facts, rrepo,
+        {"legacy": rrepo.settings, "v2": rrepo.settings},
+        actor_id="t0-owner", cancel_event=threading.Event(),
+    )
+    lines = (out_dir / "search-legacy.jsonl").read_text("utf-8").splitlines()
+    assert len(lines) == 1
+    row = json.loads(lines[0])
+    assert row["status"] != "failed"
+    assert row["scope_narrowed"] is True
+    assert row["reflect_turns"] >= 1
+
+
 def test_readonly_assertion_reports_every_table_that_moved(capsys):
     runner = rig.Runner(dry_run=False, out_dir=Path("."))
     before = {table: 3 for table in rig.READONLY_TABLES}
@@ -1027,7 +1239,8 @@ def test_search_loop_concurrent_reaches_the_requested_peak_concurrency(
     state = {"current": 0, "peak": 0}
 
     def fake_run_search_once(repo, settings, *, notebook, item, prepared,
-                             on_step, cancel_event, actor_id):
+                             on_step, cancel_event, actor_id,
+                             scope_source_ids=None):
         with lock:
             state["current"] += 1
             state["peak"] = max(state["peak"], state["current"])
@@ -1084,7 +1297,8 @@ def test_search_loop_concurrent_cancels_remaining_runs_on_policy_mismatch(
     lock = threading.Lock()
 
     def fake_run_search_once(repo, settings, *, notebook, item, prepared,
-                             on_step, cancel_event, actor_id):
+                             on_step, cancel_event, actor_id,
+                             scope_source_ids=None):
         with lock:
             executed.append(item["question_key"])
         if item["question_key"] == "Q00":
@@ -1130,6 +1344,46 @@ def test_dry_run_search_only_question_and_only_cell_filter_to_four_runs(capsys):
     for line in printed.splitlines():
         if line.startswith("[dry-run]") and " search " in line:
             assert "B-q03" in line and "cell=B_kg" in line
+
+
+def test_dry_run_search_prints_the_scope_note_for_the_narrowed_question(capsys):
+    """B-q09 声明了两个来源标题;dry-run 不连库,打印的只是静态计数
+    `scope=2 sources`,不该触发 `resolve_scope_source_ids` 的任何 DB 读。"""
+    assert rig.main([
+        "--dry-run", "--only-question", "B-q09", "--only-cell", "B_kg",
+        "search",
+    ]) == 0
+    printed = capsys.readouterr().out
+    found = False
+    for line in printed.splitlines():
+        if line.startswith("[dry-run]") and " search " in line and "B-q09" in line:
+            assert "scope=2 sources" in line
+            found = True
+    assert found, printed
+    # 没声明范围的题不该被误标上一个 scope 注记。
+    for line in printed.splitlines():
+        if "B-q03" in line:
+            assert "scope=" not in line
+
+
+def test_dry_run_ask_prints_the_scope_note_for_the_narrowed_question(
+    tmp_path, capsys,
+):
+    """`ask` 没有 `--only-question`,用 `--limit 9` 把 B 语料的前 9 题(含
+    B-q09)排进计划(codex #700 R3 P2:HTTP `ask` 路径此前完全不知道范围
+    这件事)。"""
+    out_dir = tmp_path / "t0"
+    assert rig.main([
+        "--dry-run", "--out-dir", str(out_dir), "--cell", "B_nokg",
+        "--limit", "9", "ask",
+    ]) == 0
+    printed = capsys.readouterr().out
+    found = False
+    for line in printed.splitlines():
+        if line.startswith("[dry-run]") and " ask " in line and "B-q09" in line:
+            assert "scope=2 sources" in line
+            found = True
+    assert found, printed
 
 
 def test_only_question_filters_before_the_limit_is_applied():
@@ -1217,7 +1471,8 @@ def test_search_loop_concurrent_writes_raw_trace_under_the_write_lock(
     settings_by_policy = {"legacy": object(), "v2": object()}
 
     def fake_run_search_once(repo, settings, *, notebook, item, prepared,
-                             on_step, cancel_event, actor_id):
+                             on_step, cancel_event, actor_id,
+                             scope_source_ids=None):
         on_step(types.SimpleNamespace(
             step_type="reflect", summary="人话",
             detail={"next_action": "answer", "sufficient": True},
