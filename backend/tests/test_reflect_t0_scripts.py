@@ -923,3 +923,134 @@ def test_search_loop_concurrent_cancels_remaining_runs_on_policy_mismatch(
     # 退化的:那种情况下这条用例不会断言失败,但会顶着 5s 变慢,这里把它钉成
     # 响亮失败而不是"凑巧通过但慢一拍"。
     assert elapsed < 3.0, f"in-flight run 没有被 abort() 及时唤醒(耗时 {elapsed:.1f}s)"
+
+
+# --- search 的 --only-question / --only-cell 筛选 ---------------------------
+
+
+def test_dry_run_search_only_question_and_only_cell_filter_to_four_runs(capsys):
+    """`--only-question B-q03 --only-cell B_kg`:1 题 × 1 格 × 2 策略 × 2 档 = 4。"""
+    assert rig.main([
+        "--dry-run", "--only-question", "B-q03", "--only-cell", "B_kg",
+        "search",
+    ]) == 0
+    printed = capsys.readouterr().out
+    assert "planned runs  4" in printed
+    assert "A_nokg" not in printed
+    for line in printed.splitlines():
+        if line.startswith("[dry-run]") and " search " in line:
+            assert "B-q03" in line and "cell=B_kg" in line
+
+
+def test_only_question_filters_before_the_limit_is_applied():
+    """先筛后限:`--only-question` 选中的题不该被 `--limit` 提前的切片挡在外面。"""
+    questions = rig.load_questions()
+    # B 语料的题号顺序里 B-q03 排第三;limit=1 若先切片会把它切掉。
+    plan = rig.search_plan(
+        questions, cells=["B_kg"], policies=rig.POLICIES, limit=1,
+        lang="zh", efforts=rig.EFFORTS, only_questions=["B-q03"],
+    )
+    assert plan  # 先筛后限:B-q03 没有被 limit=1 的前置切片挡掉
+    assert {item["question_key"] for item in plan} == {"B-q03"}
+    assert len(plan) == 4  # 2 策略 × 2 档
+
+
+def test_only_cell_narrows_the_cells_the_preflight_and_plan_both_see(capsys):
+    """`--only-cell` 收窄的是 `cmd_search` 里同一份 `cells`,预检与计划打印同源。"""
+    assert rig.main(["--dry-run", "--only-cell", "A_nokg", "search"]) == 0
+    printed = capsys.readouterr().out
+    assert "B_kg" not in printed
+    assert "corpus cell  A_nokg" in printed
+
+
+# --- search 的 --keep-raw-trace ---------------------------------------------
+
+
+def test_search_loop_writes_raw_trace_files_only_when_the_flag_is_set(
+    rrepo, tmp_path,
+):
+    """`--keep-raw-trace` 落盘的原始轨迹带 `summary`(投影里没有的那一份),
+    并且带上了 termination DTO;不给这个开关时 `raw/` 目录不该被创建。
+    """
+    notebook = _seed_two_nodes(rrepo)
+    rrepo.settings.reasoning_stale_limit = 9
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "RTL到GDSII流程"}]},
+        reflects=[{"next_action": "answer", "sufficient": True}]))
+
+    plan = [_search_item("legacy")]
+    facts = {"A_nokg": {"notebook": notebook.id, "sources": 1,
+                        "kg_in_scope": True}}
+    settings_by_policy = {"legacy": rrepo.settings, "v2": rrepo.settings}
+
+    args = rig.build_parser().parse_args(["search"])
+    args.no_intent = True
+    args.keep_raw_trace = False
+    runner = rig.Runner(dry_run=False, out_dir=tmp_path)
+    rig._search_loop(
+        args, runner, plan, facts, rrepo, settings_by_policy,
+        actor_id="t0-owner", cancel_event=threading.Event(),
+    )
+    assert not (tmp_path / "raw").exists()
+
+    # 同一个笔记本再跑一遍,这次打开开关。
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "RTL到GDSII流程"}]},
+        reflects=[{"next_action": "answer", "sufficient": True}]))
+    args.keep_raw_trace = True
+    rig._search_loop(
+        args, runner, plan, facts, rrepo, settings_by_policy,
+        actor_id="t0-owner", cancel_event=threading.Event(),
+    )
+    raw_path = tmp_path / "raw" / "legacy" / "A-q01_A_nokg_standard.json"
+    assert raw_path.exists()
+    payload = json.loads(raw_path.read_text(encoding="utf-8"))
+    assert payload["trace_steps"], "原始轨迹不该是空的"
+    first = payload["trace_steps"][0]
+    assert set(first) == {"step_type", "summary", "detail", "duration_ms"}
+    assert isinstance(first["summary"], str) and first["summary"]
+    # legacy 没有 termination DTO。
+    assert payload["termination"] is None
+
+
+def test_search_loop_concurrent_writes_raw_trace_under_the_write_lock(
+    tmp_path, monkeypatch,
+):
+    """并发路径:`--keep-raw-trace` 的文件写在既有 `write_lock` 保护的那一段里,
+    每题一份、互不覆盖。"""
+    plan = [
+        {"question_key": f"Q{i:02d}", "corpus_cell": "A_nokg", "policy": "legacy",
+         "effort": "standard", "question": "q"}
+        for i in range(3)
+    ]
+    facts = {"A_nokg": {"notebook": "nb-a", "sources": 1, "kg_in_scope": True}}
+    settings_by_policy = {"legacy": object(), "v2": object()}
+
+    def fake_run_search_once(repo, settings, *, notebook, item, prepared,
+                             on_step, cancel_event, actor_id):
+        on_step(types.SimpleNamespace(
+            step_type="reflect", summary="人话",
+            detail={"next_action": "answer", "sufficient": True},
+            duration_ms=5,
+        ))
+        return types.SimpleNamespace(termination=None)
+
+    monkeypatch.setattr(rig, "run_search_once", fake_run_search_once)
+
+    args = _concurrent_search_args()
+    args.keep_raw_trace = True
+    runner = rig.Runner(dry_run=False, out_dir=tmp_path)
+    profile = types.SimpleNamespace(id="t0-owner")
+    rig._search_loop_concurrent(
+        args, runner, plan, facts, None, settings_by_policy,
+        actor_id="t0-owner", profile=profile, concurrency=3,
+    )
+
+    raw_files = sorted((tmp_path / "raw" / "legacy").glob("*.json"))
+    assert [p.name for p in raw_files] == [
+        "Q00_A_nokg_standard.json", "Q01_A_nokg_standard.json",
+        "Q02_A_nokg_standard.json",
+    ]
+    for path in raw_files:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        assert payload["trace_steps"][0]["summary"] == "人话"

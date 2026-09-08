@@ -427,6 +427,24 @@ python scripts/analyze_reasoning_trace.py \
   .local/t0-search/search-legacy.jsonl .local/t0-search/search-v2.jsonl \
   --group-by corpus_cell,policy_version,effort \
   --out-md .local/t0-search/search.md --out-json .local/t0-search/search.json
+
+#    只想跑某几题/某个语料格(核对反推口径、复现一个可疑 run)时用
+#    --only-question(可多次,题号如 B-q03)/--only-cell(A_nokg 或 B_kg);
+#    两者都在 --limit 切片**之前**生效(先筛后限),dry-run 与真跑读的是
+#    同一份枚举:
+python scripts/reflect_shadow_rig.py --dry-run \
+  --only-question B-q03 --only-cell B_kg search
+
+#    --keep-raw-trace 额外把每个 run 的原始 TraceStep 列表(含 summary 人话
+#    摘要)与 termination DTO 写到 <out-dir>/raw/<policy>/<question_key>_
+#    <corpus_cell>_<effort>.json。**这份文件含标题与模型 reason,不进数据集/
+#    不进仓库**,只用来人工核对 §4.5 的反推口径:
+python scripts/reflect_shadow_rig.py \
+  --database-url postgresql://127.0.0.1:5432/<主库名> \
+  --env-file /path/to/main-checkout/.env \
+  --source-notebook-a nb-<无图单篇> --source-notebook-b nb-<有图多篇> \
+  --owner <主库用户名> --only-question B-q03 --only-cell B_kg \
+  --keep-raw-trace --out-dir .local/t0-search search
 ```
 
 **隐私口径(三个脚本同一份)**:每个 run 输出一行,键取自
@@ -437,6 +455,20 @@ bool、数值、`None`,短码的列表(`action_seq`),或以短码为键、数值
 文本、模型 reason、trace summary 和任何 id 都不会出现在输出里**;笔记本只以来源数分桶
 (`notebook_bucket`)出现,题目只以题号(`question_key`)出现。写每一行之前都过一次
 `assert_closed`,加错一个键会当场炸,而不是安静地把一列自由文本落进 JSONL。
+
+**`search` 的 `--keep-raw-trace` 不受这份闭集约束**:它写的
+`<out-dir>/raw/<policy>/<question_key>_<corpus_cell>_<effort>.json` 是原始
+TraceStep(含 `summary` 人话摘要)与 termination DTO 的逐字落盘,**含标题与
+模型 reason**,只为人工核对反推口径,不进 `search-<policy>.jsonl`、不进数据集、
+不进仓库(`--out-dir` 默认在 `.local/` 下,已被 `.gitignore` 排除)。
+
+**`fallback_count`/`fallback_reasons` 只数模型兜底**(2026-09-08 订正):reflect 步 detail
+里带 `fallback_reason` 键的那些,即反思调用失败或响应畸形后的 fail-open 收尾(原因码如
+`provider_unavailable`/`invalid_enum`/`malformed_response`)。`search_elements` 那个同名
+的 `fallback` step_type 是初检索空手后补查原文的路由决策,与模型兜底无关,只在
+`actions_by_type` 里以 `fallback` 计数,不进这两个键。末尾 reflect 带 `fallback_reason` 时,
+`termination_reason` 的 legacy 反推给出 `model_degraded`(与 v2 闭集同一个码),不是
+`model_end`。
 
 **`unknown` 是一等值**:旧轨迹缺字段就是 `null`,不折成 0/false;聚合侧为每个指标分别
 报 `n_observed` / `n_missing`,并且只在 `n_observed >= --min-samples` 时输出 P50/P95。

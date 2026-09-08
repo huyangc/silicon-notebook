@@ -161,12 +161,20 @@ NO_EXECUTABLE_ACTION_REASON = "no_executable_action"
 #: 分成 model_sufficient / model_partial(要读方面账才分得出来),legacy 轨迹里
 #: 没有方面账,所以只能停在这个更粗的码上。
 TERMINATION_MODEL_END = "model_end"
+#: legacy 反推出来的「反思调用失败后 fail-open 兜底收尾」。与 v2 闭集同一个码
+#: (逐字抄自 `app.domain.retrieval_termination.TERMINATION_MODEL_DEGRADED`)——
+#: 都是模型/JSON 调用本身出了问题,不是模型判断证据够/不够。fail-open 兜底会把
+#: `next_action` 写成 `answer`(见 `reasoning_retrieval._reflect_fallback`),
+#: 与真正的「模型自己说够了」在 `next_action`/`sufficient` 这两个字段上完全
+#: 同形;legacy 轨迹里唯一能把两者分开的信号,是末尾 reflect 步 detail 自己带
+#: 没带 `fallback_reason` 键。
+TERMINATION_MODEL_DEGRADED = "model_degraded"
 #: 投影可能写出的全部 termination 码:v2 的闭集(逐字抄自
 #: `app.domain.retrieval_termination.TERMINATION_REASONS`,由用例钉住)+ 上面
 #: 那个 legacy-only 的粗码。
 TERMINATION_REASON_VALUES: tuple[str, ...] = (
     "model_sufficient", "model_partial", "step_budget", "stale",
-    "no_executable_action", "model_degraded", "retrieval_degraded",
+    "no_executable_action", TERMINATION_MODEL_DEGRADED, "retrieval_degraded",
     TERMINATION_MODEL_END,
 )
 
@@ -425,16 +433,38 @@ def _has_skip_reason(steps: Sequence[Mapping], reason: str) -> bool:
     )
 
 
+def _reflect_fallback_reason(step: Mapping) -> str | None:
+    """一条 reflect 步的 `fallback_reason`,不是 reflect 步就是 `None`。
+
+    这是**模型兜底**唯一的真源(`reasoning_retrieval._reflect_fallback` 写的
+    那个键)。`step_type == "fallback"` 是另一件事——那是 `search_elements`
+    补查原文的路由决策(初检索空手后的动作,见同文件
+    `not (collected or elements or chunks)` 那处 `record`),与「反思调用失败
+    后 fail-open 收尾」毫无关系,只是恰好撞了同一个英文词。原因码本身透传、
+    不闭集(生产侧的码见 `_reflect_fallback_reason` 的 docstring,如
+    `provider_unavailable`/`invalid_enum`/`malformed_response`),空字符串按
+    「没有」处理而不是折成 unknown——没有这个键就压根不是兜底步。
+    """
+    if step["step_type"] != "reflect":
+        return None
+    raw = step["detail"].get("fallback_reason")
+    return raw if isinstance(raw, str) and raw else None
+
+
 def infer_legacy_termination(
     steps: Sequence[Mapping], effort: str,
 ) -> str | None:
     """legacy 轨迹的结束原因反推。返回 `None` = unknown。
 
-    次序刻意让**记录下来的事实**先于推断:熔断步与「无可执行动作」步是执行处
-    当场写下的,读到就是它;只有都没有时才去读末尾 reflect 的决定,再不行才用
-    「reflect 轮数已经顶到档位上限」这条最弱的推断。三条判据在真实轨迹里互斥
-    (熔断/无动作都会让当轮 reflect 的决定不是 answer),排序因此不改变结论,
-    只固定了「同一条 run 只算一次」。
+    次序刻意让**记录下来的事实**先于推断:熔断步、「无可执行动作」步、以及末尾
+    reflect 步自己 detail 里的 `fallback_reason` 都是执行处当场写下的,读到就
+    是它;只有这些都没有时才去读末尾 reflect 的「模型说够了」决定,再不行才用
+    「reflect 轮数已经顶到档位上限」这条最弱的推断。`fallback_reason` 必须排在
+    `next_action == "answer"` 之前判——fail-open 兜底本身就会把 `next_action`
+    写成 `answer`(`reasoning_retrieval._reflect_fallback`),不优先读它就会把
+    「反思调用失败后兜底收尾」误判成「模型自己说够了」。四条判据在真实轨迹里
+    互斥(熔断/无动作/兜底都会让当轮 reflect 的决定不是模型真判定),排序因此
+    不改变结论,只固定了「同一条 run 只算一次」。
     """
     if _has_skip_reason(steps, STALE_BREAKER_REASON):
         return "stale"
@@ -442,7 +472,10 @@ def infer_legacy_termination(
         return NO_EXECUTABLE_ACTION_REASON
     reflects = [step for step in steps if step["step_type"] == "reflect"]
     if reflects:
-        detail = reflects[-1]["detail"]
+        last = reflects[-1]
+        if _reflect_fallback_reason(last) is not None:
+            return TERMINATION_MODEL_DEGRADED
+        detail = last["detail"]
         if detail.get("next_action") == "answer" or detail.get("sufficient"):
             return TERMINATION_MODEL_END
     ceiling = MAX_REFLECT_STEPS.get(effort)
@@ -545,6 +578,11 @@ def _terminal_detail(steps: Sequence[Mapping], key: str) -> int | None:
 
 
 def _counters(steps: Sequence[Mapping]) -> dict[str, dict]:
+    """`fallback_count`/`fallback_reasons` 只数**模型兜底**(reflect 步 detail
+    里带 `fallback_reason` 键),不数 `search_elements` 那个同名的 `fallback`
+    step_type——那是初检索空手后的路由决策,继续像以前一样只在
+    `actions_by_type` 里以 `fallback` 计(见 `_reflect_fallback_reason`)。
+    """
     actions: Counter = Counter()
     seeds: Counter = Counter()
     empty: Counter = Counter()
@@ -560,6 +598,9 @@ def _counters(steps: Sequence[Mapping]) -> dict[str, dict]:
         if step_type == "skip":
             skips[_reason(step["detail"])] += 1
             continue
+        fallback_reason = _reflect_fallback_reason(step)
+        if fallback_reason is not None:
+            fallbacks[fallback_reason] += 1
         if step_type in NON_ACTION_STEP_TYPES:
             continue
         key = _action_key(step_type, step["seed"])
@@ -567,8 +608,6 @@ def _counters(steps: Sequence[Mapping]) -> dict[str, dict]:
         (seeds if step["seed"] else actions)[step_type] += 1
         if step["count"] == 0:
             empty[key] += 1
-        if step_type == "fallback":
-            fallbacks[_reason(step["detail"])] += 1
     return {
         "action_seq": sequence,
         "actions_by_type": dict(sorted(actions.items())),
