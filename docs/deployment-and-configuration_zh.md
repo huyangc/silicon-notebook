@@ -506,14 +506,19 @@ Knowhow 单行空格补全使用两个 interactive chat workload：`reasoning_ag
   派发前会响应取消；
 - 致命 provider 错误立即打开熔断器；连续 3 次瞬态错误也会打开。冷却 30 秒后只允许
   1 个 half-open 恢复探针。畸形模型回复（空正文、坏 JSON、截断）从不计入熔断——那是
-  模型行为不是 provider 可用性问题，已有自己的逐调用重试与 run 级降级路径。
+  模型行为不是 provider 可用性问题，已有自己的逐调用重试与 run 级降级路径。它仍然被
+  记为一条健康观测，但**不改变可用性**：面板上服务状态保持 `ok`（provider 确实答复了
+  这一次调用），诊断信息落在 `code`（`malformed_response`）与 `trigger`
+  （`observed_failure`）两列；它不会武装恢复探针，也不会覆盖一条尚未被成功调用清掉的
+  `error` 行。
 
 调度器与熔断状态只存在于进程内。生产必须只运行一个后端进程：
 `scripts/prod.sh` 固定 Uvicorn `--workers 1`。多 worker 会把声明的服务并发度成倍放大，
 并把队列、熔断与健康状态分裂到多个进程。
 
 普通用户看到的**模型服务**面板是只读的，展示脱敏后的系统服务身份、绑定 workload、
-最近健康状态、active/maximum、排队数、最老等待时间和熔断状态。
+最近健康状态、active/maximum、排队数、最老等待时间和熔断状态。畸形模型回复在这里只
+以观测出现（`ok` + `malformed_response`），不改变可用性。
 `GET /api/model-services/status` 只读本地状态，绝不自动探测上游。只有 admin 可通过
 `POST /api/admin/model-services/{service_id}/test` 或
 `POST /api/admin/model-services/test-all` 显式测试一个或全部服务。endpoint、凭证、

@@ -1037,6 +1037,12 @@ class RuntimeModelProvider:
             return
 
         if classify_provider_failure(error) is FailureKind.IGNORED:
+            if isinstance(error, MalformedModelResponse):
+                self._observe_malformed_response(
+                    runtime, call, service_generation, occurred_at)
+            # Other IGNORED outcomes (local scheduling errors, cancellation)
+            # say nothing about the remote service and are not observed at
+            # all — they may never have reached it.
             return
         self._needs_recovery.add(service_generation)
         typed = _invocation_error(runtime, workload, call, error)
@@ -1045,6 +1051,61 @@ class RuntimeModelProvider:
             config_fingerprint=runtime.service.fingerprint,
             status="error",
             code=typed.code,
+            trigger="observed_failure",
+            support_id=call.context.support_id,
+            latency_ms=self._execution_latency_ms(call),
+            occurred_at=occurred_at,
+        ))
+
+    def _observe_malformed_response(
+        self,
+        runtime: _ServiceRuntime,
+        call: _SubmittedCall,
+        service_generation: tuple[str, str],
+        occurred_at: str,
+    ) -> None:
+        """Record a malformed model reply as an observation that does NOT
+        change the service's availability.
+
+        A malformed body (empty content, bad JSON, truncation) is model
+        *behavior*: the HTTP round trip to the provider succeeded, so the
+        service is demonstrably reachable.  classify_provider_failure already
+        keeps it out of the breaker; before this it also fell out of the
+        health panel entirely, which made a real and recurring failure mode
+        invisible to the only surface an administrator has.
+
+        The observation is therefore recorded with the *availability* status
+        left at "ok" and the diagnostic in `code`/`trigger`: the panel reads
+        "available, last observation malformed_response (observed_failure)".
+        Two alternatives were rejected:
+
+        * status="error" — the durable row IS the panel's availability field
+          (model_status._snapshot_item) and it only ever heals through
+          `_needs_recovery`, which arms the ok/recovery_probe row on the next
+          success.  Writing "error" here without arming that would pin the
+          service to "unhealthy" forever after a single malformed reply;
+          arming it would put a model-behavior event back on the availability
+          ledger, which is exactly what this change removes.
+        * a third status value ("degraded") — `status` is constrained by a
+          CHECK constraint in both stores plus the public API literal and the
+          frontend's sanitizer, so it would need a schema migration and a UI
+          vocabulary change to express a diagnostic that, by construction,
+          must not affect availability.
+
+        Guard: if the service is already flagged as needing recovery, a real
+        failure row is standing and un-cleared; do not overwrite it with an
+        "ok" availability reading.  (Across a process restart `_needs_recovery`
+        starts empty, so a stale error row can be cleared by a malformed
+        reply — acceptable, because "the provider answered" is true evidence
+        either way.)
+        """
+        if service_generation in self._needs_recovery:
+            return
+        self._submit_observation(ProviderObservation(
+            service_id=runtime.service.id,
+            config_fingerprint=runtime.service.fingerprint,
+            status="ok",
+            code="malformed_response",
             trigger="observed_failure",
             support_id=call.context.support_id,
             latency_ms=self._execution_latency_ms(call),
