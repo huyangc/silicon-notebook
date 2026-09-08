@@ -3161,22 +3161,31 @@ def _ab_notebook_ids(database_url: str, cells: Sequence[str]) -> dict[str, str]:
 
 
 def _ab_source_rows(database_url: str, notebook_id: str) -> list[dict]:
-    """一个笔记本的 `(id, title)` 全表,只读。三处消费:
+    """一个笔记本的 `(id, title, updated_at)` 全表,只读。四处消费:
 
     1. `resolve_gold_sources` —— B 格 gold 短名的唯一解析(§5.5-6);
     2. `citations_out_of_scope` 的允许集合(题目没声明范围时 = 全库);
     3. `anchors_on_gold` 的 B 格第三跳(来源 → 标题)。
+    4. `_ab_corpus_signature` —— 语料指纹的 `(id, title, updated_at)` 那一段
+       (codex #703 R1 P2)。
 
-    标题**只留在进程内**:它进不了投影行(闭集里没有 `title`),只在 `.local`
-    的 raw 存档里出现(§7.3)。
+    标题/`updated_at` **只留在进程内**:它们进不了投影行(闭集里没有这两个
+    键),只在 `.local` 的 raw 存档里出现(§7.3);进指纹的只是它们的短哈希。
     """
     from export_reasoning_traces import _Reader
 
     with _Reader(database_url) as reader:
         rows = reader.query(
-            "SELECT id, title FROM sources WHERE notebook_id = ?", (notebook_id,)
+            "SELECT id, title, updated_at FROM sources WHERE notebook_id = ?",
+            (notebook_id,),
         )
-    return [{"id": str(row["id"]), "title": str(row["title"] or "")} for row in rows]
+    return [
+        {
+            "id": str(row["id"]), "title": str(row["title"] or ""),
+            "updated_at": str(row["updated_at"] or ""),
+        }
+        for row in rows
+    ]
 
 
 def _ab_unique_ids(ids: Sequence[str]) -> list[str]:
@@ -3307,14 +3316,59 @@ def _ab_model_contract(settings: Any) -> tuple[str | None, str]:
     return merge_key(*parts), "; ".join(readable)
 
 
-def _ab_corpus_signature(cell: str, fact: Mapping) -> str:
+def _ab_corpus_signature(
+    cell: str, fact: Mapping, database_url: str,
+) -> str:
     """语料/索引指纹(§7.1)。同样是短码:跨 `seed` 混用时当场可见。
 
-    进指纹的是「这次 run 跑在什么语料上」这件事的全部可观察面:语料格、来源
-    条数、图在不在范围内。notebook id **不**进——它是一个数据库 id,而投影行
-    里一个 id 都不许有(§7.3);它对指纹的贡献已经被 `cell` + 来源条数覆盖。
+    单靠语料格、来源条数、图在不在范围内(旧实现)测不出「同一个格换了一篇
+    论文」或「同一批来源重新分块/重新抽取元素/重建了 KG」——这三件事都不改
+    来源**条数**,签名却必须跟着变(codex #703 R1 P2)。进指纹的因此还有:
+
+    * 每个来源的 `(id, title, updated_at)` 按 `id` 排序后有序拼接——换一篇
+      论文(标题变)、重新解析同一份文件(`updated_at` 变)都会让这一段变;
+    * `chunks` / `source_elements` 的行数——重新分块/重新抽取元素会改行数,
+      即使来源条数、标题、`updated_at` 都不变;
+    * `unified_kg_state.object_count`——KG 对象数,是这张状态表上现成的计数
+      列,不用现场数 `knowledge_objects` 的行。这个笔记本还没建过 KG(表里没
+      有那一行)时记 `None` = unknown,不是 `0`——「还没建过」与「建过但空」是
+      两件不同的事,不能用同一个数字表示。
+
+    `notebook id` 本身**不**进指纹——它是一个数据库 id,投影行里一个 id 都不
+    许有(§7.3);它对指纹的贡献已经被上面这几项(尤其是来源的 `id`,只作为
+    指纹的哈希输入,不是原样落进投影行)覆盖。查询失败(测试库连不上/表不存
+    在)不兜底——这是跑批前一次性的语料事实收集(`_ab_corpus_facts`),与
+    `_ab_source_rows` 同一批查询同一条口径:查不出来就是配置错误,响亮失败,
+    不能悄悄退化成一份看起来正常、其实没量到东西的签名。
     """
-    return merge_key(cell, fact.get("sources"), fact.get("kg_in_scope"))
+    from export_reasoning_traces import _Reader
+
+    notebook_id = fact["notebook"]
+    source_key = "|".join(
+        f"{row['id']}:{row['title']}:{row.get('updated_at', '')}"
+        for row in sorted(fact["source_rows"], key=lambda row: row["id"])
+    )
+    with _Reader(database_url) as reader:
+        chunk_rows = reader.query(
+            "SELECT COUNT(*) AS n FROM chunks WHERE notebook_id = ?",
+            (notebook_id,),
+        )
+        element_rows = reader.query(
+            "SELECT COUNT(*) AS n FROM source_elements se "
+            "JOIN sources s ON se.source_id = s.id WHERE s.notebook_id = ?",
+            (notebook_id,),
+        )
+        kg_rows = reader.query(
+            "SELECT object_count FROM unified_kg_state WHERE notebook_id = ?",
+            (notebook_id,),
+        )
+    chunk_count = int(chunk_rows[0]["n"]) if chunk_rows else 0
+    element_count = int(element_rows[0]["n"]) if element_rows else 0
+    kg_object_count = int(kg_rows[0]["object_count"]) if kg_rows else None
+    return merge_key(
+        cell, fact.get("sources"), fact.get("kg_in_scope"),
+        source_key, chunk_count, element_count, kg_object_count,
+    )
 
 
 def _ab_llm_log_dir(settings: Any) -> Path:
@@ -3369,16 +3423,24 @@ def _ab_read_llm_records(
 
     **只取数值字段的那几行原样返回**,正文的裁剪交给 `slice_llm_usage`(它只读
     `ts` / `usage` / `finish_reason`,prompt / response 片段一个字都不碰,§7.2)。
+
+    日志目录本身还不存在(第一个 run 之前它还没被建出来)⇒ 空列表,与
+    `_ab_llm_offsets` 同一条口径,这是正常的第一次状态,不算失败。但目录**存在**
+    之后,任何一个被 glob 到的文件打不开/读不出来(权限、磁盘错误)⇒ `OSError`
+    原样往上抛,不吞掉——调用方(`_ab_usage_for_window`)据此把这个 run 的成本
+    三键落成 unknown,而不是「这个文件此刻没有新增行」那种沉默的 0(codex #703
+    R1 P2)。
     """
     records: list[dict] = []
-    for path in sorted(log_dir.glob(AB_LLM_LOG_GLOB)):
+    try:
+        paths = sorted(log_dir.glob(AB_LLM_LOG_GLOB))
+    except OSError:
+        return records
+    for path in paths:
         start = int(offsets.get(str(path), 0) or 0)
-        try:
-            with path.open("rb") as handle:
-                handle.seek(start)
-                blob = handle.read()
-        except OSError:
-            continue
+        with path.open("rb") as handle:
+            handle.seek(start)
+            blob = handle.read()
         for line in blob.decode("utf-8", errors="replace").splitlines():
             line = line.strip()
             if not line:
@@ -3394,22 +3456,27 @@ def _ab_read_llm_records(
 
 def _ab_usage_for_window(
     log_dir: Path, started: "datetime", ended: "datetime", *, concurrency: int,
-    offsets: Mapping[str, int] | None = None,
+    offsets: Mapping[str, int] | None = None, llm_log_enabled: bool = True,
 ) -> Any:
     """一个 run 的成本三键。`concurrency > 1` 时**恒 unknown**(§4.4/§7.2)。
 
     `offsets` 是这个 run 开跑之前 `_ab_llm_offsets` 记下的那一份;时间窗切片
     仍然照做——offset 只负责「不重读别的 run 已经数过的行」,归因的判据还是
     `[started, ended]` 这个闭区间。
+
+    `llm_log_enabled=False`(`settings.llm_log_enabled` 关着)⇒ 恒 unknown,连
+    读都不读:Ask 在这个开关关着时照样调模型,只是不写交互日志,这时候把空
+    列表喂给 `slice_llm_usage` 会投出一整批看起来精确、实则全错的
+    `model_calls=0`(codex #703 R1 P2)。
     """
     from app.eval.reflect_ab import UNKNOWN_USAGE, slice_llm_usage
 
-    if concurrency > 1:
+    if concurrency > 1 or not llm_log_enabled:
         return UNKNOWN_USAGE
     try:
         records = _ab_read_llm_records(log_dir, offsets or {})
     except OSError:
-        # 日志读不出来就是 unknown,不当成「这个 run 一次模型都没调」。
+        # 文件打不开/读不出来就是 unknown,不当成「这个 run 一次模型都没调」。
         return UNKNOWN_USAGE
     return slice_llm_usage(records, start=started, end=ended)
 
@@ -3709,6 +3776,21 @@ def _run_ab(
     contract_short, contract_readable = _ab_model_contract(settings_by_arm["legacy"])
     runner.say("model contract", f"{contract_short}  ({contract_readable})")
 
+    # 两条臂共用同一份进程环境构造(`_settings_by_policy` 只翻
+    # `REASONING_REFLECT_V2_ENABLED`),`llm_log_enabled` 恒同,取哪一侧都一样。
+    # 关着时 Ask 照样调模型,只是不写交互日志——这时候成本三键必须整批记
+    # unknown,不能把空日志喂给 `slice_llm_usage` 投出一批假的 0(codex #703
+    # R1 P2)。
+    llm_log_enabled = bool(
+        getattr(settings_by_arm["legacy"], "llm_log_enabled", True)
+    )
+    if not llm_log_enabled:
+        runner.say(
+            "llm log disabled",
+            "LLM_LOG_ENABLED=false,这一批的成本三键"
+            "(model_calls/prompt_tokens/completion_tokens)整批记 unknown",
+        )
+
     before = _readonly_counts(args.source_db_url)
     runner.say("main database baseline", _format_counts(before))
     baseline_problem = readonly_baseline_problem(before)
@@ -3723,7 +3805,7 @@ def _run_ab(
             actor_id=actor_id, profile=profile, concurrency=concurrency,
             gold_by_key=gold_by_key, model_contract=contract_short,
             log_dir=_ab_llm_log_dir(settings_by_arm["legacy"]),
-            clock=datetime.now,
+            clock=datetime.now, llm_log_enabled=llm_log_enabled,
         )
     finally:
         reset_request_user(context)
@@ -3781,7 +3863,9 @@ def _ab_corpus_facts(
             "source_titles": {row["id"]: row["title"] for row in rows},
             "kg_in_scope": bool(kg_in_scope_for(repo.retrieval, notebook)),
         }
-        fact["corpus_signature"] = _ab_corpus_signature(cell, fact)
+        fact["corpus_signature"] = _ab_corpus_signature(
+            cell, fact, args.database_url,
+        )
         facts[cell] = fact
         runner.say(
             "corpus fact",
@@ -3829,6 +3913,7 @@ def _ab_loop(
     facts: dict[str, dict], repos_by_arm: dict[str, Any],
     *, actor_id: str, profile: Any, concurrency: int, gold_by_key: Mapping,
     model_contract: str | None, log_dir: Path, clock: Any,
+    llm_log_enabled: bool = True,
 ) -> int:
     """整批配对单元。每个单元产出**两行**(两臂),一起写、一起标 `paired`。
 
@@ -3854,6 +3939,15 @@ def _ab_loop(
     }
     rows_handle = (runner.out_dir / "ab-runs.jsonl").open("a", encoding="utf-8")
     log = (runner.out_dir / "ab-runs.log").open("a", encoding="utf-8")
+    if not llm_log_enabled:
+        # 整批一次(codex #703 R1 P2):落进 `ab-runs.log`,不是只打在终端——
+        # 事后翻这份数据的人不该靠回想「当时是不是关了日志」来解释一整批
+        # unknown。
+        log.write(
+            "NOTE: LLM_LOG_ENABLED=false,本批全部 run 的成本三键"
+            "(model_calls/prompt_tokens/completion_tokens)记 unknown\n"
+        )
+        log.flush()
     try:
         for repeat, batch in _ab_round_units(units):
             runner.say("repeat round", f"r{repeat}: {len(batch)} 个配对单元")
@@ -3864,6 +3958,7 @@ def _ab_loop(
                 gold_by_key=gold_by_key, model_contract=model_contract,
                 log_dir=log_dir, clock=clock, state=state,
                 rows_handle=rows_handle, log=log,
+                llm_log_enabled=llm_log_enabled,
             )
     finally:
         log.close()
@@ -3952,7 +4047,11 @@ def _ab_run_batch(
                 try:
                     future.result()
                 except BaseException as exc:  # noqa: BLE001 — 见 docstring
-                    abort(f"{type(exc).__name__}: {exc}"[:200])
+                    # 只传类名(codex #703 R1 P2):`str(exc)` 可能带本机路径
+                    # (如 `_write_ab_raw` 撞上 `PermissionError` 时把
+                    # `.local` 的绝对路径编进异常文本)或 provider 侧的请求
+                    # 细节,截 200 字不构成脱敏,进度日志与终端都不该收它。
+                    abort(type(exc).__name__)
                     fatal = exc
                     break
         except KeyboardInterrupt as exc:
@@ -4034,7 +4133,7 @@ def _run_ab_unit(
     actor_id: str, profile: Any, concurrency: int, intents: "_IntentCache",
     gold_by_key: Mapping, model_contract: str | None, log_dir: Path,
     clock: Any, state: dict, rows_handle: Any, log: Any,
-    cancel_event: Any = None,
+    cancel_event: Any = None, llm_log_enabled: bool = True,
 ) -> None:
     """一个配对单元:同题同档同轮,两条臂背靠背跑完,两行一起落。
 
@@ -4104,7 +4203,7 @@ def _run_ab_unit(
                 gold=gold_for(gold_by_key, unit["question_key"]),
                 model_contract=model_contract, log_dir=log_dir, clock=clock,
                 out_dir=runner.out_dir, database_url=args.database_url,
-                cancel_event=cancel_event,
+                cancel_event=cancel_event, llm_log_enabled=llm_log_enabled,
             )
             rows.append(row)
             if failure:
@@ -4186,7 +4285,7 @@ def _run_ab_arm(
     actor_id: str, contract: dict | None, concurrency: int,
     scope_ids: Sequence[str] | None, gold: Any, model_contract: str | None,
     log_dir: Path, clock: Any, out_dir: Path, database_url: str,
-    cancel_event: Any = None,
+    cancel_event: Any = None, llm_log_enabled: bool = True,
 ) -> tuple[dict, str]:
     """一条臂的一个 run。返回 `(投影行, 失败原因类名或空串)`。
 
@@ -4259,7 +4358,7 @@ def _run_ab_arm(
         ),
         usage=_ab_usage_for_window(
             log_dir, started_at, ended_at, concurrency=concurrency,
-            offsets=offsets,
+            offsets=offsets, llm_log_enabled=llm_log_enabled,
         ),
         latency_ms_total=latency_ms,
         model_contract=model_contract,

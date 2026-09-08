@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import sys
 import threading
 import time
@@ -1441,6 +1442,196 @@ def test_llm_offsets_on_a_directory_that_does_not_exist_yet(tmp_path):
     assert rig._ab_read_llm_records(tmp_path / "nope", {}) == []
 
 
+def test_read_llm_records_lets_an_unreadable_file_error_out_instead_of_skipping_it(
+    tmp_path,
+):
+    """一个被 glob 到的文件打不开(权限)⇒ `OSError` 原样往上抛,不吞成
+    「这个文件此刻没有新增行」那种沉默的空列表(codex #703 R1 P2)。目录本身
+    还不存在(见上一条用例)是另一件事,继续兜成空列表。
+    """
+    log_dir = tmp_path / "llm"
+    (log_dir / "u1").mkdir(parents=True)
+    path = log_dir / "u1" / "llm-2026-09-09.jsonl"
+    path.write_text(json.dumps(_llm_record(0)) + "\n", encoding="utf-8")
+    path.chmod(0o000)
+    try:
+        with pytest.raises(OSError):
+            rig._ab_read_llm_records(log_dir, {})
+    finally:
+        path.chmod(0o644)
+
+
+def test_usage_for_window_is_unknown_when_a_file_cannot_be_read(tmp_path):
+    """`_ab_usage_for_window` 据此把这个 run 的成本三键落成 unknown,不是
+    当成「这个 run 一次模型都没调」的沉默 0(codex #703 R1 P2)。"""
+    log_dir = tmp_path / "llm"
+    (log_dir / "u1").mkdir(parents=True)
+    path = log_dir / "u1" / "llm-2026-09-09.jsonl"
+    path.write_text(json.dumps(_llm_record(0)) + "\n", encoding="utf-8")
+    path.chmod(0o000)
+    try:
+        start = datetime(2026, 9, 9, 12, 0, 0)
+        usage = rig._ab_usage_for_window(
+            log_dir, start, start + timedelta(seconds=30), concurrency=1,
+        )
+    finally:
+        path.chmod(0o644)
+    assert usage.model_calls is None
+    assert usage.prompt_tokens is None
+    assert usage.completion_tokens is None
+
+
+def test_usage_for_window_is_unknown_when_the_llm_log_is_disabled(
+    tmp_path, monkeypatch,
+):
+    """`LLM_LOG_ENABLED=false` ⇒ 成本三键恒 unknown,连读都不读(codex #703
+    R1 P2)。Ask 在这个开关关着时照样调模型,只是不写交互日志——这时候把空
+    列表喂给 `slice_llm_usage` 会投出一批看起来精确、实则全错的
+    `model_calls=0`。这里连日志目录里明明有一条落在窗口内的记录都不该被读到。
+    """
+    log_dir = tmp_path / "llm"
+    (log_dir / "u1").mkdir(parents=True)
+    path = log_dir / "u1" / "llm-2026-09-09.jsonl"
+    start = datetime(2026, 9, 9, 12, 0, 0)
+    path.write_text(json.dumps(_llm_record(0)) + "\n", encoding="utf-8")
+
+    def _must_not_be_called(*a, **kw):
+        raise AssertionError("llm_log_enabled=False 不该再去读日志文件")
+
+    monkeypatch.setattr(rig, "_ab_read_llm_records", _must_not_be_called)
+    usage = rig._ab_usage_for_window(
+        log_dir, start, start + timedelta(seconds=30), concurrency=1,
+        llm_log_enabled=False,
+    )
+    assert usage is UNKNOWN_USAGE
+
+
+# ---------------------------------------------------------------------------
+# 语料/索引指纹的组成(§7.1,codex #703 R1 P2)
+# ---------------------------------------------------------------------------
+
+
+def _insert_source_row(repo: Any, source_id: str, notebook_id: str, title: str) -> None:
+    """往 `sources` 表插一行,只为这里的指纹用例——与 `test_reflect_t0_scripts`
+    的同名 helper 同一条口径(公开建来源接口要走真实上传/解析流程,这里只需要
+    `id`/`notebook_id`/`title` 三个字段就位)。"""
+    with repo._connect() as db:
+        db.execute(
+            "INSERT INTO sources "
+            "(id,notebook_id,title,source_type,status,parse_status,file_name,"
+            "error_message,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (source_id, notebook_id, title, "text", "extracted", "extracted",
+             title, "", "2026-09-08T00:00:00", "2026-09-08T00:00:00"),
+        )
+
+
+def _insert_chunk_row(repo: Any, chunk_id: str, notebook_id: str, source_id: str) -> None:
+    with repo._connect() as db:
+        db.execute(
+            "INSERT INTO chunks "
+            "(id, notebook_id, source_id, text, section_path, element_ids, "
+            "created_at) VALUES (?,?,?,?,?,?,?)",
+            (chunk_id, notebook_id, source_id, "text", "", "[]",
+             "2026-09-08T00:00:00"),
+        )
+
+
+def _update_source_title(repo: Any, source_id: str, title: str) -> None:
+    with repo._connect() as db:
+        db.execute("UPDATE sources SET title = ? WHERE id = ?", (title, source_id))
+
+
+def test_corpus_signature_is_stable_across_repeated_calls_on_unchanged_state(
+    rrepo, tmp_path,
+):
+    notebook = _seed_two_nodes(rrepo)
+    _insert_source_row(rrepo, "src-1", notebook.id, "paper_v1.md")
+    database_url = f"sqlite:///{tmp_path / 't.db'}"
+    fact = {
+        "notebook": notebook.id, "kg_in_scope": False,
+        "sources": 1, "source_rows": rig._ab_source_rows(database_url, notebook.id),
+    }
+    first = rig._ab_corpus_signature("A_nokg", fact, database_url)
+    second = rig._ab_corpus_signature("A_nokg", fact, database_url)
+    assert first == second
+    assert re.fullmatch(r"[0-9a-f]{16}", first)
+
+
+def test_corpus_signature_changes_when_a_source_title_changes(rrepo, tmp_path):
+    """换一篇论文(标题变了)必须让签名跟着变——旧实现只哈希来源条数,同一个
+    格换一篇论文条数不变,签名也不变(codex #703 R1 P2)。"""
+    notebook = _seed_two_nodes(rrepo)
+    _insert_source_row(rrepo, "src-1", notebook.id, "paper_v1.md")
+    database_url = f"sqlite:///{tmp_path / 't.db'}"
+    before = rig._ab_corpus_signature("A_nokg", {
+        "notebook": notebook.id, "kg_in_scope": False, "sources": 1,
+        "source_rows": rig._ab_source_rows(database_url, notebook.id),
+    }, database_url)
+    _update_source_title(rrepo, "src-1", "a_completely_different_paper.md")
+    after = rig._ab_corpus_signature("A_nokg", {
+        "notebook": notebook.id, "kg_in_scope": False, "sources": 1,
+        "source_rows": rig._ab_source_rows(database_url, notebook.id),
+    }, database_url)
+    assert before != after
+
+
+def test_corpus_signature_changes_when_the_chunk_count_changes(rrepo, tmp_path):
+    """重新分块会改 `chunks` 的行数,即使来源条数/标题/`kg_in_scope` 都不变
+    (codex #703 R1 P2)。"""
+    notebook = _seed_two_nodes(rrepo)
+    _insert_source_row(rrepo, "src-1", notebook.id, "paper_v1.md")
+    database_url = f"sqlite:///{tmp_path / 't.db'}"
+    fact = {
+        "notebook": notebook.id, "kg_in_scope": False, "sources": 1,
+        "source_rows": rig._ab_source_rows(database_url, notebook.id),
+    }
+    before = rig._ab_corpus_signature("A_nokg", fact, database_url)
+    _insert_chunk_row(rrepo, "chunk-1", notebook.id, "src-1")
+    after = rig._ab_corpus_signature("A_nokg", fact, database_url)
+    assert before != after
+
+
+def test_corpus_signature_treats_never_built_kg_differently_from_a_zero_count(
+    rrepo, tmp_path,
+):
+    """`unified_kg_state` 里没有这一行(还没建过 KG)与「建过但对象数是 0」是
+    两件不同的事,签名不该把它们混成同一个值(codex #703 R1 P2)。
+
+    同一个笔记本先后取两次签名,中间只改 `unified_kg_state` 这一件事——来源
+    这一段(id/title/updated_at)与 `chunks`/`source_elements` 行数全程不变,
+    真正把两次签名分开的只能是「有没有那一行 `unified_kg_state`」这一项。
+
+    `notebook_store.create_notebook` 本身就会插一行 `unified_kg_state`
+    (`object_count` 默认 0,已用真实调用核实过)——SQLite 侧一个真实存在的
+    笔记本因此**恒有**这一行,「压根没那一行」在这条路上不会自然出现。这里
+    用一次显式 `DELETE` 造出这个边界(测的是 `_ab_corpus_signature` 自己对
+    「查不到行」的处理,不是「哪条生产路径会走到这里」)。
+    """
+    from app.models.schemas import NotebookCreate
+
+    notebook = rrepo.create_notebook(NotebookCreate(name="nb-kg-state"))
+    _insert_source_row(rrepo, "src-1", notebook.id, "paper_v1.md")
+    database_url = f"sqlite:///{tmp_path / 't.db'}"
+    fact = {
+        "notebook": notebook.id, "kg_in_scope": True, "sources": 1,
+        "source_rows": rig._ab_source_rows(database_url, notebook.id),
+    }
+    with rrepo._connect() as db:
+        db.execute(
+            "DELETE FROM unified_kg_state WHERE notebook_id = ?", (notebook.id,)
+        )
+    never_built = rig._ab_corpus_signature("B_kg", fact, database_url)
+    with rrepo._connect() as db:
+        db.execute(
+            "INSERT INTO unified_kg_state (notebook_id, object_count, updated_at) "
+            "VALUES (?, 0, ?)",
+            (notebook.id, "2026-09-08T00:00:00"),
+        )
+    built_empty = rig._ab_corpus_signature("B_kg", fact, database_url)
+    assert never_built != built_empty
+
+
 # ---------------------------------------------------------------------------
 # 枚举链终态与锚点查询表(§7.1)
 # ---------------------------------------------------------------------------
@@ -1823,3 +2014,66 @@ def test_a_concurrent_batch_cancels_the_remaining_units_after_the_first_abort(
     # 那个 5s 超时就是留给「abort() 没生效」的:那种退化不会让断言失败,只会让
     # 用例慢一拍,所以这里把它钉成响亮失败。
     assert elapsed < 3.0, f"in-flight 单元没有被 abort() 及时唤醒({elapsed:.1f}s)"
+
+
+def test_a_concurrent_abort_logs_only_the_exception_class_not_its_text(
+    tmp_path, monkeypatch, capsys,
+):
+    """并发收摊那句 `runner.say("ab aborted", ...)` 曾经把 `str(exc)` 原样内插
+    进去(截 200 字不算脱敏):`_write_ab_raw` 撞上 `PermissionError` 时,异常
+    文本里带着本机的绝对路径,会被原样打进终端与 `ab-runs.log`;别的异常也
+    可能带 provider 侧的请求细节(codex #703 R1 P2)。这里让 Q00 在
+    `_write_ab_raw` 那一步抛一个带假路径的 `PermissionError`,其余单元照
+    `test_a_concurrent_batch_cancels_the_remaining_units_after_the_first_abort`
+    的老办法卡在各自的 `cancel_event` 上,断言 stdout 与 `ab-runs.log` 都不含
+    那段路径,只含类名。
+    """
+    from app.services.cancellation import AskCancelled
+
+    total = 4
+    units = [_unit(question_key=f"Q{i:02d}") for i in range(total)]
+    executed: list[str] = []
+    lock = threading.Lock()
+
+    def _fake_run(repo, *, notebook, item, arm, contract, on_trace,
+                  cancel_event, actor_id, scope_source_ids=None):
+        with lock:
+            executed.append(item["question_key"])
+        if item["question_key"] == "Q00":
+            for step in _steps(arm):
+                on_trace(SimpleNamespace(step_type=step["step_type"], summary="",
+                                         detail=step["detail"], duration_ms=1))
+            return _FakeResponse()
+        if cancel_event.wait(timeout=5):
+            raise AskCancelled()
+        raise TimeoutError("cancel_event 一直没被设置——abort() 没生效")
+
+    def _boom_write_ab_raw(*a, **kw):
+        raise PermissionError(
+            "[Errno 13] Permission denied: '/Users/secret/path/ab/raw.json'"
+        )
+
+    monkeypatch.setattr(rig, "run_ab_once", _fake_run)
+    monkeypatch.setattr(rig, "_ab_element_sections", lambda url, ids: {})
+    monkeypatch.setattr(rig, "_ab_chunk_sections", lambda url, ids: {})
+    monkeypatch.setattr(rig, "_ab_usage_for_window",
+                        lambda *a, **kw: UNKNOWN_USAGE)
+    monkeypatch.setattr(rig, "_write_ab_raw", _boom_write_ab_raw)
+    _fixed_intents(monkeypatch)
+
+    out_dir = tmp_path / "ab"
+    runner = rig.Runner(dry_run=False, out_dir=out_dir)
+    args = _ab_args(only_policy=["v2"], out_dir=str(out_dir), dry_run=False)
+    with pytest.raises(PermissionError):
+        rig._ab_loop(
+            args, runner, units, {"A_nokg": _fact()}, _repos_by_arm(),
+            actor_id="ab-owner", profile=None, concurrency=2,
+            gold_by_key=load_ab_gold(load_questions()),
+            model_contract="0123456789abcdef", log_dir=out_dir,
+            clock=datetime.now,
+        )
+    out = capsys.readouterr().out
+    log_text = (out_dir / "ab-runs.log").read_text(encoding="utf-8")
+    assert "/Users/secret/path" not in out
+    assert "/Users/secret/path" not in log_text
+    assert "PermissionError" in out
