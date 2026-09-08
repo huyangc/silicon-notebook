@@ -362,6 +362,51 @@ timeout 与熔断跳过次数。它只读日志和 manifest，不打开数据库
 | `shadow_sqlite_to_postgres.py` | 显式 SQLite→PostgreSQL 正向 shadow CLI：`preflight` / `start-forward` / `status` / `verify` / 前台 `worker`；单独设置 `SHADOW_DATABASE_URL` 不会启动同步，且不得与停写 importer 共用目标库，完整 runbook 见 `docs/operations_zh.md` |
 | `shadow.sh` | 本机 shadow worker supervisor：按 run/work-dir 做 PID identity 校验并提供 `start/status/stop/restart`；生产也必须保持单 worker |
 | `git-cleanup.sh` | 清理「PR 已合并」的本地分支 + worktree:默认 dry-run 预演,`--apply` 执行,`--remote` 连带删远程(保护 master / 当前分支 / `eval` / `backup/*`) |
+| `export_reasoning_traces.py` / `analyze_reasoning_trace.py` / `reflect_shadow_rig.py` | reflect v2 开闸前 T0 的三件套:只读导出轨迹 → 闭集投影 JSONL、离线聚合出表、以及在一次性测试库上跑影子 run 的 rig,见下 |
+
+### reflect v2 开闸前 T0 —— 轨迹统计与影子 run
+
+设计真源:`docs/superpowers/specs/2026-09-08-reflect-t0-trace-analysis-design_zh.md`。
+三个脚本读写分离,**导出与分析对任何库都只读**,rig 的写入全部落在一次性测试库。
+
+```bash
+# 1) 只读导出:--database-url 必填(脚本不读 .env、不隐式连库);PG 与 SQLite 通用
+python scripts/export_reasoning_traces.py \
+  --database-url postgresql://127.0.0.1:5432/<库名> --reports \
+  --out .local/t0/baseline.jsonl
+
+# 2) 离线聚合:零 DB / 零模型 / 零网络,只吃上一步的 JSONL
+python scripts/analyze_reasoning_trace.py .local/t0/baseline.jsonl \
+  --group-by consumer,policy_version,effort,kg_in_scope \
+  --min-samples 5 --out-md .local/t0/baseline.md --out-json .local/t0/baseline.json
+
+# 3) 影子 run:先看它打算做什么,再真跑
+python scripts/reflect_shadow_rig.py --dry-run seed
+python scripts/reflect_shadow_rig.py --dry-run --limit 2 ask
+```
+
+**隐私口径(三个脚本同一份)**:每个 run 输出一行,键取自
+`app.domain.reasoning_trace_stats.RUN_PROJECTION_KEYS` 这个闭集,值只能是闭集字符串、
+bool、数值、`None`,或「闭集键 → 数值」的字典。**问题原文、答案正文、来源标题、证据
+文本、模型 reason、trace summary 和任何 id 都不会出现在输出里**;笔记本只以来源数分桶
+(`notebook_bucket`)出现,题目只以题号(`question_key`)出现。写每一行之前都过一次
+`assert_closed`,加错一个键会当场炸,而不是安静地把一列自由文本落进 JSONL。
+
+**`unknown` 是一等值**:旧轨迹缺字段就是 `null`,不折成 0/false;聚合侧为每个指标分别
+报 `n_observed` / `n_missing`,并且只在 `n_observed >= --min-samples` 时输出 P50/P95。
+
+**rig 的三条硬约束**:
+- 主库只在 `seed` 重建 A 语料时被读一次(`--source-db-url` 必须显式给,PG 侧连接开
+  `read_only`);所有写入都在 `--database-url` 指向的测试库,`teardown` 删库。
+- 换检索策略靠**重启后端**(`REASONING_REFLECT_V2_ENABLED`),rig 不热改 Settings;
+  `ask` / `report` 每次只跑一个 `--policy`。
+- 题号 / 语料格 / 策略 / 档位只编进 `client_request_id`(`t0:<题号>:<语料格>:<策略>:
+  <档位>:<mode>`),导出时据它打标——**不进问题文本,模型看不到**。
+- rig 本体要网络与真实模型,**不进 `check.sh`**;进门的只有 `--dry-run` 的枚举与编码
+  用例(`backend/tests/test_reflect_t0_scripts.py`)。
+
+题集在 `backend/app/eval/reflect_t0/questions.json`(A 单篇 24 题带 gold、B 多篇 10 题、
+报告 4 题),语料是公开论文;主库的 notebook id 刻意不落仓库,由 `--source-notebook` 传。
 
 ### `kg_quality_audit.py` —— 「库里的节点都是些什么」
 
