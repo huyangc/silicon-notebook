@@ -2216,17 +2216,25 @@ def _scope_unresolved_row(item: dict, fact: dict) -> dict:
     return _failed_run_row(item, fact)
 
 
-def _failed_run_row(item: dict, fact: dict) -> dict:
-    """没跑成的 run 的那一行:`status="failed"`、空轨迹、`scope_narrowed=None`。
+def _failed_run_row(
+    item: dict, fact: dict, *, steps: Sequence[dict] = (),
+    has_intent_contract: bool = False,
+) -> dict:
+    """没跑成的 run 的那一行:`status="failed"`、`scope_narrowed=None`。
+
+    `steps` 是失败前已经捕获到的轨迹步(codex #700 R13 P2):检索在发出若干
+    reflect 步之后才抛异常时,丢掉它们会把 `reflect_turns`/`trace_steps`/
+    `fallback_count` 记成 0、`has_intent_contract` 记成 false——都是编造的零,
+    会让失败多的那一侧看起来"反思轮更少"。范围解析失败根本没跑,传空即可。
 
     范围解析失败与 worker 里抛异常(codex #700 R8 P2:并发分支此前只写一行日志
     就 `continue`,分析脚本只读 JSONL,失败 run 从状态分布里凭空消失,样本数
     偏向跑成的那一侧)共用这一行——投影是闭集,失败原因只进 `search-runs.log`。
     """
     row = project_search_run(
-        [], result=None, effort=item["effort"], policy=item["policy"],
+        list(steps), result=None, effort=item["effort"], policy=item["policy"],
         question_key=item["question_key"], corpus_cell=item["corpus_cell"],
-        kg_in_scope=fact["kg_in_scope"], has_intent_contract=False,
+        kg_in_scope=fact["kg_in_scope"], has_intent_contract=has_intent_contract,
         sources_count=fact["sources"],
     )
     row["status"] = "failed"
@@ -2321,7 +2329,10 @@ def _search_loop(
                     # `status=failed`,日志只记异常类名,整批以非零退出码收尾;
                     # 不能让串行(SQLite 强制、默认并发 1)那条路的失败凭空消失。
                     elapsed_ms = round((time.monotonic() - started) * 1000)
-                    row = _failed_run_row(item, fact)
+                    row = _failed_run_row(
+                        item, fact, steps=steps,
+                        has_intent_contract=prepared is not None,
+                    )
                     runner.say(
                         "search failed",
                         f"{item['question_key']} {item['corpus_cell']} "
@@ -2546,12 +2557,25 @@ def _search_loop_concurrent(
                     raw_steps.append(raw_trace_step_row(step))
 
             started = time.monotonic()
-            result = run_search_once(
-                repo, settings, notebook=fact["notebook"], item=item,
-                prepared=prepared, on_step=_on_step,
-                cancel_event=cancel_event, actor_id=actor_id,
-                scope_source_ids=scope_ids,
-            )
+            try:
+                result = run_search_once(
+                    repo, settings, notebook=fact["notebook"], item=item,
+                    prepared=prepared, on_step=_on_step,
+                    cancel_event=cancel_event, actor_id=actor_id,
+                    scope_source_ids=scope_ids,
+                )
+            except AskCancelled:
+                raise
+            except Exception as exc:  # noqa: BLE001 — 单个 run 失败要隔离
+                # 在 worker 里就把失败投影出来,失败前捕获到的轨迹步不丢
+                # (codex #700 R13 P2);异常对象放在 `result` 位上带回主循环记
+                # 日志(只记类名)。主循环那条 `except` 只剩 run 之外的失败。
+                elapsed_ms = round((time.monotonic() - started) * 1000)
+                row = _failed_run_row(
+                    item, fact, steps=steps,
+                    has_intent_contract=prepared is not None,
+                )
+                return row, elapsed_ms, None, exc
             elapsed_ms = round((time.monotonic() - started) * 1000)
             row = project_search_run(
                 steps, result=result, effort=item["effort"], policy=policy,
@@ -2640,13 +2664,18 @@ def _search_loop_concurrent(
                         )
                     completed += 1
                     if row.get("status") == "failed":
-                        # 范围解析不到位的 run 以正常 outcome 回来,但它没跑
-                        # ——一样计进失败数,整批不能退出码 0(codex #700 R9 P2)。
+                        # 范围解析不到位、或 run 内部抛异常的 run 都以正常
+                        # outcome 回来,但它没跑成——计进失败数,整批不能退出码 0
+                        # (codex #700 R9 P2)。
                         failed += 1
                     done_n = completed
+                    reason = (
+                        type(result).__name__ if isinstance(result, BaseException)
+                        else "scope_unresolved"
+                    )
                     status_suffix = (
                         "" if row.get("status") != "failed"
-                        else " status=failed reason=scope_unresolved"
+                        else f" status=failed reason={reason}"
                     )
                     line = (
                         f"done {done_n}/{total}  {item['question_key']} "
