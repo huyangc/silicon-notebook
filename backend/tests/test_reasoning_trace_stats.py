@@ -219,6 +219,41 @@ def test_step_budget_inference_uses_the_policy_ceiling():
     assert row["termination_inferred"] is True
 
 
+def test_explicit_step_ceiling_overrides_the_effort_table_for_reports():
+    """报告逐节深挖的有效上限是 `min(depth, 档位上限)`(引擎传 `max_steps=depth`),
+    depth=2 的节两轮就停;只按 standard 档 8 轮判会得到 unknown(codex #700 R10
+    P2)。`step_ceiling` 给了就以它为准;没给仍按档位表。"""
+    steps = [reflect("ppr") for _ in range(2)]
+    assert project_run(JOB, steps, PAYLOAD)["termination_reason"] is None
+    row = project_run(JOB, steps, PAYLOAD, step_ceiling=2)
+    assert row["termination_reason"] == "step_budget"
+    assert row["termination_inferred"] is True
+    # 上限没顶到就不是预算收尾。
+    assert project_run(JOB, steps, PAYLOAD, step_ceiling=3)["termination_reason"] is None
+
+
+def test_failed_run_without_evidence_keeps_the_declared_rig_labels():
+    """v2 的 Ask 在发出 termination 步、落答案之前就失败:没有协议证据、没有
+    payload,按证据判会记成 legacy/unknown,失败从 v2 对照列里消失(codex #700 R10
+    P2)。失败/取消的 run 用 rig 声明的标签;跑成的 run 仍以证据为准。"""
+    tags = {"policy": "v2", "effort": "deep", "question_key": "A-q01",
+            "corpus_cell": "A_nokg"}
+    failed = project_run({"mode": "reasoning", "status": "failed"}, [], None,
+                         rig_tags=tags)
+    assert failed["policy_version"] == "v2"
+    assert failed["effort"] == "deep"
+    assert failed["status"] == "failed"
+    # 跑成的 run:声明 v2 但轨迹里没有 termination 事实 ⇒ 证据说 legacy,声明不改证据。
+    done = project_run(JOB, [reflect("ppr")], PAYLOAD, rig_tags=tags)
+    assert done["policy_version"] == "legacy"
+    assert done["effort"] == PAYLOAD["retrieval_effort"]
+    # 声明不过闭集就还是 unknown/legacy,不猜。
+    junk = project_run({"mode": "reasoning", "status": "failed"}, [], None,
+                       rig_tags={"policy": "V2", "effort": "ultra"})
+    assert junk["policy_version"] == "legacy"
+    assert junk["effort"] == "unknown"
+
+
 def test_stale_breaker_wins_over_the_budget_inference():
     ceiling = ASK_RETRIEVAL_LIMITS["standard"].max_reasoning_steps
     steps = [reflect("ppr") for _ in range(ceiling)]
