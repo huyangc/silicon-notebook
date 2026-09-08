@@ -10305,6 +10305,104 @@ def test_a_partial_close_is_pushed_back_too_and_yields_the_per_aspect_read(rrepo
         False]
 
 
+def test_an_outline_close_eating_the_last_update_slot_is_accepted_not_nudged(
+    rrepo,
+):
+    """收尾动作是 `update_outline` 且这一次就吃掉最后一格额度 ⇒ 不退回。
+
+    退回之后的下一轮如果只剩 `answer`,`run()` 会在发出模型调用之前就按
+    `only_answer` 收尾——追问句根本没机会送到模型面前,而这一轮模型自己的
+    `sufficient` 判读已经被换掉。所以按「第二次沉默」处理:接受收尾、记
+    `assessment_omitted`,大纲绑定照常由收尾分支应用。
+
+    变异:去掉 `_nudge_missing_assessment` 里的 `outline_left <= 1` 判据 ⇒ 多一
+    轮退回(`missing_assessment` 出现)、多一次 reflect 调用,这条红。
+    """
+    from app.domain.retrieval_termination import TERMINATION_MODEL_PARTIAL
+
+    llm, result = _v2_aspect_run(
+        rrepo, limits=_exhaustive(),
+        intent_detail={"mandatory_topics": ["问题一"]},
+        reasoning_max_outline_updates=1,
+        reflects=[
+            _outline_close([{"id": "s1", "title": "一节",
+                             "evidence": ["ck-q0"]}]),
+            _answer(assessment={"supported": [
+                {"aspect_id": "a1", "evidence_keys": ["ck-q0"]}]}),
+        ],
+    )
+    assert "missing_assessment" not in _skip_reasons(result)
+    assert len(llm.user_prompts) == 1          # 第二份 reflect 载荷没被用到
+    # 「问过了它不给」那一档:清单上仍是 unknown,但快照分得出这两件事。
+    assert [row.assessment_omitted for row in result.termination.aspects] == [
+        True]
+    assert _termination_skip(result)["aspects_assessment_omitted"] == 1
+    assert result.termination.reason == TERMINATION_MODEL_PARTIAL
+    # 短路的这一条同样不丢绑定——它走的是 `run()` 的收尾分支。
+    assert [(s.id, list(s.evidence_keys)) for s in result.outline] == [
+        ("s1", ["ck-q0"])]
+
+
+def test_a_nudge_that_never_reached_the_model_is_still_booked_as_omitted(rrepo):
+    """追问发出了却一次都没送达 ⇒ run 收尾时仍要记 `assessment_omitted`。
+
+    退回的下一轮在**发出模型调用之前**就以 `only_answer` 收尾(这里用「模型答完
+    第一轮之后剩下的通道全关了」模拟):追问句从未被渲染、从未被消费,而终态被
+    `no_executable_action` 改写。没有收尾兜底的话,这种 run 在方面账上什么都没
+    记——放量评估里它与"模型根本没走到收尾那一步"混成一堆,而这两件事的补救方向
+    完全不同。
+
+    变异:去掉 `_run_termination` 里那句 `if state.aspects.nudge_pending:` 兜底
+    ⇒ `assessment_omitted` 全为 False,这条红。
+    """
+    from app.domain.retrieval_termination import (
+        TERMINATION_NO_EXECUTABLE_ACTION,
+    )
+    from app.services.reasoning_aspects import ASPECT_ASSESSMENT_NUDGE
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    _v2_repo(rrepo, reasoning_max_element_searches=0)
+    nb = _seed_notebook_without_kg(rrepo)
+    rrepo.settings.graph_ppr_enabled = False
+
+    class _CloseChunkSearchAfterTheFirstReflect(_V2ContextLLM):
+        """第一轮反思之后原文通道也没了 ⇒ 下一轮只剩 `answer`。
+
+        枚举/精查是 run 级不变量(在 `state` 上冻结),所以那两条在开跑前就关掉;
+        原文检索每轮现算,正好用来模拟"退回之后动作面塌了"。
+        """
+
+        retriever = None
+
+        def chat_json(self, messages, schema_hint, **kwargs):
+            out = super().chat_json(messages, schema_hint, **kwargs)
+            if self.retriever is not None and "sub_queries" not in schema_hint:
+                self.retriever.allow_search_chunks = False
+            return out
+
+    llm = _CloseChunkSearchAfterTheFirstReflect(
+        plan={"sub_queries": [{"query": "完整问题"}]},
+        reflects=[_answer(), _answer()])
+    bind_chat_client(rrepo, "reasoning_agent", llm)
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    llm.retriever = rr
+    rr.allow_enumeration = False
+    rr.allow_exact_lookup = False
+    _stub_search_chunks(rr, [], {"完整问题": [_chunk_hit("ck-q0")]})
+    result = rr.run(nb.id, "完整问题", "",
+                    intent_detail={"mandatory_topics": ["问题一"]})
+
+    # 追问确实发出过(退回轮在账上),但没有任何一轮 prompt 带上那句话。
+    assert "missing_assessment" in _skip_reasons(result)
+    assert len(llm.user_prompts) == 1
+    nudge = ASPECT_ASSESSMENT_NUDGE.format(ids="a1")
+    assert not any(nudge in prompt for prompt in llm.user_prompts)
+    assert result.termination.reason == TERMINATION_NO_EXECUTABLE_ACTION
+    assert [row.assessment_omitted for row in result.termination.aspects] == [
+        True]
+    assert _termination_skip(result)["aspects_assessment_omitted"] == 1
+
+
 def test_missing_assessment_is_an_invalid_zero_io_observation():
     """`missing_assessment` 落 invalid(载荷不成立、零 I/O),不是 unavailable。
 
