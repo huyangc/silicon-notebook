@@ -1405,6 +1405,11 @@ def _report_rows(
             "effort": effort, "mode": "reasoning", "trace_source": "in_process",
             "policy_version": item["policy"],
             "has_intent_contract": bool(report.get("understanding")),
+            # `project_report_section({})` 把 `failed` 初始化成 False——那是「这一
+            # 节没失败」的观测值,而这里根本没有节:整份报告在规划/生成阶段失败
+            # 了。记 True,`summarize_group` 的 failed 指标才不会把一批全失败的
+            # 报告统计成零失败(codex #700 R15 P2)。
+            "failed": True,
         })
         assert_closed(row)
         assert_projection_values(row)

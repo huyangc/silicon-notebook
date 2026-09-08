@@ -906,6 +906,16 @@ def test_pair_table_does_not_pair_across_workloads(tmp_path, capsys):
     pairs = json.loads(js.read_text("utf-8"))["pairs"]
     assert len(pairs) == 1 and pairs[0]["trace_source"] == "in_process"
 
+    # `--no-intent` 的 run(无冻结契约)与带契约的 run 也不是同一种工作负载
+    # (codex #700 R15 P2)。
+    intent_mixed = _write_rows(tmp_path / "i.jsonl", [
+        _row(has_intent_contract=True),
+        _row(policy_version="v2", has_intent_contract=False),
+    ])
+    analyze.main([str(intent_mixed), "--out-json", str(js)])
+    capsys.readouterr()
+    assert json.loads(js.read_text("utf-8"))["pairs"] == []
+
 
 def test_analysis_refuses_rows_with_keys_outside_the_closed_set(tmp_path):
     source = _write_rows(tmp_path / "rows.jsonl", [_row(question="原文")])
@@ -2092,6 +2102,7 @@ def test_report_generate_marks_clarification_gate_failed_when_the_claim_is_lost(
     assert rows[0]["mode"] == "reasoning"
     assert rows[0]["trace_source"] == "in_process"
     assert rows[0]["policy_version"] == "legacy"
+    assert rows[0]["failed"] is True, "整份报告失败,不能被记成一节『没失败』的观测"
 
 
 def test_report_generate_marks_planning_failure_failed_on_the_straight_path(

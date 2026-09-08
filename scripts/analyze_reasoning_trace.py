@@ -68,8 +68,11 @@ COUNTER_METRICS: tuple[str, ...] = (
 # 进程内 run(`trace_source=in_process`),导出的 Ask run 是检索+合成的完整 run;
 # 同题同格同档的 legacy 检索 run 与 v2 完整 Ask run 摆在同一行,比的是检索耗时
 # 对检索+合成耗时。`consumer` / `mode` / `trace_source` 三个键一起把它们分开。
+# `has_intent_contract` 也是工作负载的一部分(codex #700 R15 P2):`--no-intent`
+# 的 run 没有冻结契约,首轮查询规划与 v2 的方面账都不同,不能与带契约的 run 配对。
 PAIR_DIMENSIONS: tuple[str, ...] = (
     "question_key", "corpus_cell", "effort", "consumer", "mode", "trace_source",
+    "has_intent_contract",
 )
 
 
