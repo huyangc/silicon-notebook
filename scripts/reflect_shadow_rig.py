@@ -1150,8 +1150,11 @@ def cmd_search(args: argparse.Namespace, runner: Runner) -> int:
         print("ERROR: " + _search_preflight(args, cells, notebooks),
               file=sys.stderr)
         return 2
+    # `--only-policy` 只在重跑某一侧(如一侧被网络故障整批打废)时用:配对表
+    # 靠 question_key+corpus_cell+effort 对上,两侧分两次进程跑不影响配对。
+    policies = tuple(args.only_policy) if args.only_policy else POLICIES
     plan = search_plan(
-        questions, cells=cells, policies=POLICIES, limit=args.limit,
+        questions, cells=cells, policies=policies, limit=args.limit,
         lang=args.lang, efforts=EFFORTS, only_questions=args.only_question,
     )
     unique_questions = {
@@ -1165,10 +1168,10 @@ def cmd_search(args: argparse.Namespace, runner: Runner) -> int:
         runner.say("corpus cell",
                    f"{cell} -> notebook={notebooks.get(cell) or '<required>'}")
     runner.say("policies",
-               ", ".join(POLICIES) + "(同进程换 Settings,不重启后端)")
+               ", ".join(policies) + "(同进程换 Settings,不重启后端)")
     runner.say("efforts", ", ".join(EFFORTS))
     runner.say("planned runs",
-               f"{len(plan)}({len(unique_questions)} 题 × {len(POLICIES)} 策略 "
+               f"{len(plan)}({len(unique_questions)} 题 × {len(policies)} 策略 "
                f"× {len(EFFORTS)} 档)")
     runner.say("model calls (estimate)",
                _search_call_estimate(plan, len(unique_questions),
@@ -2409,6 +2412,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--policy", choices=POLICIES, default="legacy",
         help="`ask` / `report` / `restart` 用它选策略。**`search` 不读它**:"
              "那条路一次进程内跑完两侧,配对因此天然干净",
+    )
+    parser.add_argument(
+        "--only-policy", action="append", default=[], choices=list(POLICIES),
+        help="`search` 只跑这一侧策略(可多次;默认两侧都跑)。用于一侧被网络故障"
+             "整批打废后的重跑;配对靠 question_key+corpus_cell+effort,不受影响",
     )
     parser.add_argument(
         "--cell", action="append", default=[], choices=list(CORPUS_CELLS),
