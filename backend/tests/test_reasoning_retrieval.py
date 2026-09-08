@@ -9881,21 +9881,183 @@ def test_a_second_silent_closing_turn_is_accepted_and_recorded_as_omitted(rrepo)
     assert ASPECT_ASSESSMENT_NUDGE.format(ids="a1") in llm.user_prompts[1]
 
 
-def test_a_partial_close_that_admits_the_gap_is_never_pushed_back(rrepo):
-    """`sufficient=false` 的收尾不强制自评:它本来就是"我知道还差东西"。
+def _outline_close(sections, **extra):
+    """`update_outline` + `sufficient=true`:exhaustive 档真机上最常见的收尾形状。
 
-    退回它只是白扣一步——一张全是 unknown 的方面账与这句话并不矛盾。
+    prompt 教的就是「最后一批绑定补上、同一轮宣布够了」,而 `update_outline`
+    不产证据,所以它与 `sufficient=true` 并存在解析期完全合法。
+    """
+    return {"next_action": "update_outline", "sufficient": True,
+            "arguments": {"sections": sections}, "reason": "定稿", **extra}
 
-    变异:把 `_nudge_missing_assessment` 的 `sufficient is not True` 判据删掉
-    ⇒ 这条红。
+
+def _exhaustive():
+    from app.core.ask_retrieval_policy import ask_retrieval_limits
+    return ask_retrieval_limits("exhaustive")
+
+
+def test_an_outline_close_without_assessment_keeps_the_binding_and_is_nudged(rrepo):
+    """`update_outline`+`sufficient=true` 也要自评——但**大纲载荷先落地**。
+
+    这是 exhaustive 档真机上最常见的收尾形状:模型把最后一批绑定补上、同一轮宣布
+    够了。判据只认 `answer` 的话,它一次都不会被追问;而折成 invalid 之前不先把
+    大纲应用掉的话,退回的代价就变成丢掉它这一轮**真正做成的事**——`run()` 随后
+    走的是 REFLECT_INVALID 那条 skip 分支,6723 处的 `apply_outline_update` 再也
+    不会被调到,下一轮模型看到的还是上一轮那份空节大纲。
+
+    变异一:把收尾判据改回只认 `answer` ⇒ 没有追问轮、终态退回 `model_partial`。
+    变异二:把 `_nudge_missing_assessment` 里的 `apply_outline(...)` 删掉 ⇒ 终态
+    大纲上那一节的绑定为空。两条各红一处断言。
+    """
+    from app.domain.retrieval_termination import TERMINATION_MODEL_SUFFICIENT
+
+    _, result = _v2_aspect_run(
+        rrepo, limits=_exhaustive(),
+        intent_detail={"mandatory_topics": ["问题一"]},
+        reflects=[
+            _outline_close([{"id": "s1", "title": "一节",
+                             "evidence": ["ck-q0"]}]),
+            _answer(assessment={"supported": [
+                {"aspect_id": "a1", "evidence_keys": ["ck-q0"]}]}),
+        ],
+    )
+    assert "missing_assessment" in _skip_reasons(result)
+    # 同一轮的绑定没有被退回吃掉。
+    assert [(s.id, list(s.evidence_keys)) for s in result.outline] == [
+        ("s1", ["ck-q0"])]
+    assert [step.step_type for step in result.trace].count("outline") == 1
+    # 下一轮补上自评 ⇒ 终态是模型自己的判断,不是一张空账。
+    assert result.termination.reason == TERMINATION_MODEL_SUFFICIENT
+    assert _termination_skip(result)["aspects_assessment_omitted"] == 0
+
+
+def test_a_second_silent_outline_close_is_accepted_with_the_binding_intact(rrepo):
+    """两轮都不自评 ⇒ 照原样收尾并记 `assessment_omitted`,大纲绑定照样保留。
+
+    第二次沉默走的是「接受收尾」那条路,所以这一轮的大纲载荷由 `run()` 的收尾
+    分支照常应用——两条路径都不会丢绑定,一条靠退回前先应用,一条靠短路前先应用,
+    而且用的是**同一个** `apply_outline_update`。
+    """
+    from app.domain.retrieval_termination import TERMINATION_MODEL_PARTIAL
+
+    _, result = _v2_aspect_run(
+        rrepo, limits=_exhaustive(),
+        intent_detail={"mandatory_topics": ["问题一"]},
+        reflects=[
+            _outline_close([{"id": "s1", "title": "一节",
+                             "evidence": ["ck-q0"]}]),
+            _outline_close([{"id": "s1", "title": "一节",
+                             "evidence": ["ck-q0"]}]),
+        ],
+    )
+    assert _skip_reasons(result).count("missing_assessment") == 1
+    assert result.termination.reason == TERMINATION_MODEL_PARTIAL
+    assert [row.assessment_omitted for row in result.termination.aspects] == [
+        True]
+    assert [(s.id, list(s.evidence_keys)) for s in result.outline] == [
+        ("s1", ["ck-q0"])]
+
+
+def test_the_last_step_accepts_a_silent_close_instead_of_burning_the_run(rrepo):
+    """步数用尽那一轮不追问:退回它换不回任何东西,只会改写终态。
+
+    追问的全部价值在于「下一轮把自评补上」。这一轮之后没有下一轮时,退回做的是
+    两件纯亏的事:追问句渲染给一个不会到来的回合;而被折成 invalid 的收尾会把
+    模型自己的 `sufficient` 判读换成一句 `step_budget`——服务端于是既没拿到自评,
+    又把"模型看着证据决定停下"说成了"没步数了"。所以直接按「第二次沉默」处理:
+    接受收尾、记 `assessment_omitted`,终态仍是模型的那份判读。
+
+    变异:去掉 `_v2_note_turn` 里的 `budget_left >= 1` ⇒ 多一次 reflect 调用、
+    终态变 `step_budget`、`assessment_omitted` 拿不到,这条红。
+    """
+    from app.domain.retrieval_termination import TERMINATION_MODEL_PARTIAL
+
+    llm, result = _v2_aspect_run(
+        rrepo, max_steps=1,
+        intent_detail={"mandatory_topics": ["问题一"]},
+        reflects=[_answer()],
+    )
+    # 没有多余的 reflect 调用,也没有一条"这一轮不算数"的观察。
+    assert len([s for s in result.trace if s.step_type == "reflect"]) == 1
+    assert len(llm.user_prompts) == 1
+    assert "missing_assessment" not in _skip_reasons(result)
+    # 终态保持模型的判读(它说够了、清单上还有未解决 ⇒ model_partial),
+    # 而不是 step_budget。
+    assert result.termination.reason == TERMINATION_MODEL_PARTIAL
+    assert result.termination.model_assessed_sufficient is True
+    assert [row.assessment_omitted for row in result.termination.aspects] == [
+        True]
+    assert _termination_skip(result)["aspects_assessment_omitted"] == 1
+
+
+def test_the_assessment_nudge_is_rendered_exactly_once(rrepo):
+    """追问句只挂被退回的**下一轮**那一次,不是整个 run 每一轮都挂。
+
+    两个理由:这句话回述的是"上一次收尾"这件具体的事,第三轮之后它就是一句假话
+    (接入时的措辞里还写着「那一轮已被退回、未执行任何检索」——第三轮读起来就是
+    在说这次检索什么都没做);而模型照办之后仍每轮收到同一句斥责,它下一步该做的
+    是继续检索,不是再交一遍同一份自评。
+
+    变异:去掉 `render_aspect_block` 里那句 `ledger.nudge_pending = False`
+    (或把判据改回 `assessment_prompts and not assessment_omitted`)⇒ 第 3 轮
+    仍然挂着追问,这条红。
+    """
+    from app.services.reasoning_aspects import ASPECT_ASSESSMENT_NUDGE
+
+    llm, _result = _v2_aspect_run(
+        rrepo,
+        intent_detail={"mandatory_topics": ["问题一"]},
+        reflects=[
+            _answer(),                                     # 空手收尾 ⇒ 被退回
+            {"next_action": "search_chunks", "sufficient": False,
+             "arguments": {"query": "换个问法"}, "reason": "再查一轮"},
+            _answer(assessment={"supported": [
+                {"aspect_id": "a1", "evidence_keys": ["ck-q0"]}]}),
+        ],
+        chunk_results={"完整问题": [_chunk_hit("ck-q0")],
+                       "换个问法": [_chunk_hit("ck-q1")]},
+    )
+    nudge = ASPECT_ASSESSMENT_NUDGE.format(ids="a1")
+    assert [nudge in prompt for prompt in llm.user_prompts] == [
+        False, True, False]
+    # 措辞里不再回述"那一轮未执行任何检索"——那句话在第三轮就是假的。
+    assert "未执行任何检索" not in nudge
+
+
+def test_a_partial_close_is_pushed_back_too_and_yields_the_per_aspect_read(rrepo):
+    """`answer` + `sufficient=false` 同样是**收尾载荷**,同样要自评一次。
+
+    判据是 `run()` 自己的收尾条件(`next_action == "answer"` 或
+    `sufficient is True`),而不是"模型有没有说够了"。一次自认不足的收尾同样终止
+    整次检索,而那一刻方面账仍然是这次检索**唯一**的成色记录:全是 unknown 的账
+    让合成侧只能笼统说一句「仍有方面没有完整支撑」,而模型其实分得清哪一个方面
+    拿到了什么、哪一个没有。追问一轮换回来的正是这份逐方面读数(下面的 gap)。
+
+    接入时这里的判据是「`answer` **且** `sufficient is True`」,那一版把这种收尾
+    整个放过去;现在收窄成 run() 的收尾条件本身,理由见
+    `_nudge_missing_assessment` 的说明。
+
+    变异:把判据改回只认 `answer` 且 `sufficient is True` ⇒ 追问轮消失、
+    `unresolved` 的 gap 拿不到,这条红。
     """
     _, result = _v2_aspect_run(
         rrepo,
         intent_detail={"mandatory_topics": ["问题一"]},
-        reflects=[{"next_action": "answer", "sufficient": False,
-                   "arguments": {}, "reason": "先答一半"}],
+        reflects=[
+            {"next_action": "answer", "sufficient": False,
+             "arguments": {}, "reason": "先答一半"},
+            {"next_action": "answer", "sufficient": False, "arguments": {},
+             "reason": "补上自评再收尾",
+             "assessment": {"unresolved": [
+                 {"aspect_id": "a1", "status": "partial",
+                  "gap": "只找到综述,缺一手数据"}]}},
+        ],
     )
-    assert "missing_assessment" not in _skip_reasons(result)
+    assert "missing_assessment" in _skip_reasons(result)
+    # 追问换回来的是**逐方面**读数,不是又一张空账:状态与缺口都落进了快照。
+    assert [(row.status, row.gap) for row in result.termination.aspects] == [
+        ("partial", "只找到综述,缺一手数据")]
+    # 模型自己给了判断 ⇒ 不是"问过了它不给"那一种。
     assert [row.assessment_omitted for row in result.termination.aspects] == [
         False]
 

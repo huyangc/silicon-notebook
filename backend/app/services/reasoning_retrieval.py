@@ -3805,6 +3805,7 @@ class ReasoningRetriever:
 
     def _absorb_assessment(
         self, state: "_ReasoningRunState", decision: "ReflectDecision",
+        apply_outline, overflow_repair: bool, more_turns: bool,
     ) -> "ReflectDecision":
         """把这一轮的 `assessment` 落进方面账,或把整份决定折成一条 invalid。
 
@@ -3840,15 +3841,16 @@ class ReasoningRetriever:
         if state.aspects is None:
             state.aspects = build_aspect_ledger(
                 state.intent_detail, state.question)
+        nudge_args = (apply_outline, overflow_repair, more_turns)
         if decision.assessment is None:
-            return self._nudge_missing_assessment(state, decision)
+            return self._nudge_missing_assessment(state, decision, *nudge_args)
         allowed = outline_binding_keys(
             state.collected, state.elements, state.chunks,
             state.ever_shown_outline_keys)
         allowed |= complete_enumeration_keys(state.enum_chains)
         why = state.aspects.apply(decision.assessment, allowed_keys=allowed)
         if not why:
-            return self._nudge_missing_assessment(state, decision)
+            return self._nudge_missing_assessment(state, decision, *nudge_args)
         folded = _reflect_invalid(
             f"{_V2_INVALID_ASSESSMENT_PREFIX}{why}",
             decision.invalid_requested_action or decision.next_action)
@@ -3861,38 +3863,56 @@ class ReasoningRetriever:
 
     def _nudge_missing_assessment(
         self, state: "_ReasoningRunState", decision: "ReflectDecision",
+        apply_outline=None, overflow_repair: bool = False,
+        more_turns: bool = True,
     ) -> "ReflectDecision":
         """收尾载荷没有自评任何方面 ⇒ 退回一次并追问(§7.1)。v2-only。
 
-        判据只认**收尾**那一种载荷:`next_action == "answer"` 且
-        `sufficient is True`。那句话的字面意思是"每个必答方面都已经有支撑",而
-        方面账是这句话唯一的落点——载荷里没有 `assessment`,账本一格都不更新,
-        同一份决定于是在两处给出互相矛盾的读数(模型说够了 / 服务端的清单上全是
-        unknown),`classify_termination` 据后者判 `model_partial`,合成 prompt 恒
-        挂一句「仍有方面没有完整支撑」。2026-09-08 实测里 16 个 run 全部落在这个
-        形状上,14 个的直接原因就是这一格空着。
+        **判据 = run() 的收尾条件本身**:`next_action == "answer"` 或
+        `sufficient is True`。这两种载荷都会让 `run()` 当场 break,而收尾那一刻
+        方面账就是"这次检索到底拿到了什么"的唯一记录——载荷里没有 `assessment`,
+        账本一格都不更新,同一份决定于是在两处给出互相矛盾的读数(模型说到此为止 /
+        服务端的清单上全是 unknown),`classify_termination` 据后者判 `model_partial`,
+        合成 prompt 恒挂一句「仍有方面没有完整支撑」。2026-09-08 实测里 16 个 run
+        全部落在这个形状上,14 个的直接原因就是这一格空着。
 
-        **`sufficient=false` 的部分收尾不强制**:那句话本来就是"我知道还差东西",
-        与一张 unknown 的方面账不矛盾,退回它只是白扣一步。带了检索动作的轮次同理
-        ——它们还没有在宣布任何结论。
+        判据**不能**只认 `answer`:`update_outline`(以及别的不产证据的动作)与
+        `sufficient=true` 并存是合法的——prompt 教的正是"最后一批绑定补上、同一轮
+        宣布够了",而 exhaustive 档的真机 run 就是这么收尾的。只认 `answer` 的话,
+        真机上最常见的那种收尾一次都不会被追问,`assessment_omitted` 也永远不会被
+        标上。带了**检索**动作的轮次不在此列:`sufficient=true` + 产证据的动作在
+        解析期就已经是 `sufficient_with_retrieval_action`。
 
         退回走 T2 已有的那条路(`_reflect_invalid` 伪动作 → 链尾零 I/O 观察 → 扣
         一步 → 进 stale 记账),不新造第二种"这一轮不算数"的机制。追问只发一次:
         第二次仍然空着,`note_missing_assessment` 返回 False,这份收尾照原样被接受,
         快照里的 `assessment_omitted` 记下"问过了、它不给"。
+
+        ⚠ **折叠之前必须先把同一轮的大纲载荷应用掉。** `update_outline` 收尾那
+        一轮带的是模型刚补齐的最后一批绑定;折成 invalid 之后 `run()` 走的是
+        REFLECT_INVALID 那条 skip 分支,6723 那里的 `apply_outline_update` 再也不
+        会被调到,于是"退回一轮让它补自评"的代价变成**丢掉它这一轮真正做成的事**
+        ——下一轮它看到的大纲还是上一轮那份带空节的。所以这里用调用方传下来的
+        **同一个** `apply_outline_update`(预算/校验/trace 语义因此不可能分叉),
+        `overflow_repair` 也用 `run()` 本来会用的那一份。
+
+        `more_turns=False`(步数用尽,或这一轮是强制的大纲溢出纠错轮)时不退回:
+        见 `note_missing_assessment` 的 `may_prompt`。
         """
-        if (decision.next_action != "answer"
-                or decision.sufficient is not True
-                or not assessment_is_empty(decision.assessment)):
+        closing = decision.next_action == "answer" or decision.sufficient is True
+        if not closing or not assessment_is_empty(decision.assessment):
             return decision
-        if not state.aspects.note_missing_assessment():
+        if not state.aspects.note_missing_assessment(may_prompt=more_turns):
             return decision
+        if decision.next_action == OUTLINE_ACTION and apply_outline is not None:
+            apply_outline(decision, overflow_repair=overflow_repair)
         folded = _reflect_invalid(
             _V2_MISSING_ASSESSMENT,
             decision.invalid_requested_action or decision.next_action)
-        # 与 `invalid_assessment:` 同理:这一轮模型真的请求了 `answer`,观察行该
-        # 显示它,而不是一句"(无请求)"。`answer` 没有参数,身份串因此是空的——
-        # 这里带走的是**动作 id**(上面那个参数),不是参数串。
+        # 与 `invalid_assessment:` 同理:这一轮模型真的请求了那个动作,观察行该
+        # 显示它,而不是一句"(无请求)"。`answer` 没有参数,身份串因此是空的;
+        # `update_outline` 有——这里带走的是**动作 id**(上面那个参数)与身份串
+        # 两件事,各按各的既有口径。
         folded.invalid_request_identity = v2_request_identity(decision)
         return folded
 
@@ -3910,7 +3930,8 @@ class ReasoningRetriever:
 
     def _v2_note_turn(
         self, state: "_ReasoningRunState", decision: "ReflectDecision",
-        budget_left: int,
+        budget_left: int, apply_outline=None, overflow_repair: bool = False,
+        has_next_turn: bool = True,
     ) -> "ReflectDecision":
         """一轮 reflect 决定的 v2 记账:先处理调用失败,再吸收方面自评,最后
         登记动作观察。
@@ -3924,10 +3945,18 @@ class ReasoningRetriever:
         `next_action` 恒为 `answer`、`sufficient` 恒为 True——那三格**不是模型
         填的**,拿它去触发"收尾必须自评"的追问,等于对着一次 provider 故障要求
         模型补交作业。
+
+        后三个参数只为「收尾必须自评」那条路服务(见 `_nudge_missing_assessment`):
+        `apply_outline` / `overflow_repair` 是 `run()` 本轮**本来就会用的**那次
+        大纲应用,折叠前先把它做掉;`has_next_turn` 是「退回之后真的还有下一轮吗」
+        —— `budget_left >= 1`(这一轮之后还剩几步)与「这一轮不是强制的溢出纠错轮」
+        两件事的合取,由 `run()` 算好传下来。
         """
         decision = self._survive_reflect_failure(state, decision)
         if not decision.fallback:
-            decision = self._absorb_assessment(state, decision)
+            decision = self._absorb_assessment(
+                state, decision, apply_outline, overflow_repair,
+                has_next_turn and budget_left >= 1)
         state.record.observer.note_decision(
             decision.invalid_requested_action or decision.next_action,
             v2_request_identity(decision), decision.reason,
@@ -6677,11 +6706,16 @@ class ReasoningRetriever:
                     state, summary, outline)
             decision = self.reflect(question, summary, **reflect_kwargs)
             raise_if_cancelled(self.cancel_event)
+            # 这一轮的大纲提交算不算「溢出纠错」:提前算与原地算等价(四个输入只由
+            # `apply_outline_update` 改),而折叠一份收尾载荷前要先用它应用大纲。
+            overflow_repair_submission = terminal_overflow_repair or (
+                bool(outline_overflow)
+                and outline_updates >= max_outline_updates
+                and not outline_cap_repair_used)
             if capabilities is not None:
-                # 方面自评 + 动作观察(见 `_v2_note_turn`:自评可能把这份决定
-                # 折成 invalid,后面认的就是它返回的那份)。
-                decision = self._v2_note_turn(
-                    state, decision, max_steps - steps)
+                decision = self._v2_note_turn(          # 见 `_v2_note_turn`
+                    state, decision, max_steps - steps, apply_outline_update,
+                    overflow_repair_submission, not terminal_overflow_repair)
             reflect_detail = {"next_action": decision.next_action,
                               "sufficient": decision.sufficient,
                               "no_progress": no_progress, "stale": stale}
@@ -6703,11 +6737,6 @@ class ReasoningRetriever:
             # 排序的第一个键。见 ADOPTION_ACTIONS 的说明。
             if experience_entries:
                 adopted_actions.add(decision.next_action)
-            overflow_repair_submission = terminal_overflow_repair or (
-                bool(outline_overflow)
-                and outline_updates >= max_outline_updates
-                and not outline_cap_repair_used
-            )
             if terminal_overflow_repair:
                 # 这次是 sufficient / stale 收尾前、且仍在 max_steps 内的专用纠错
                 # 轮,绝不能借机再发一次检索。模型不按便签换键就如实保留未解决状态。
