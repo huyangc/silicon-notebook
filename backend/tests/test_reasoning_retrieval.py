@@ -8753,8 +8753,8 @@ def test_over_limit_assessment_becomes_an_invalid_decision_with_zero_io(rrepo):
 def test_normalize_accepts_the_by_aspect_id_mapping_shape():
     """(b) 映射形单元测试:supported 布尔/status 字面量的四种组合各自落对。
 
-    变异:把 `normalize_assessment_payload` 里 `set(raw.keys()) <= ...` 那条形状
-    判据删掉(总是走列表形分支)⇒ 这条红(映射形被当成 `supported_not_list`)。
+    变异:把 `normalize_assessment_payload` 里那条形状判据删掉(总是走列表形
+    分支)⇒ 这条红(映射形被当成 `supported_not_list`)。
     """
     from app.services.reasoning_aspects import normalize_assessment_payload
     normalized = normalize_assessment_payload({
@@ -8772,6 +8772,98 @@ def test_normalize_accepts_the_by_aspect_id_mapping_shape():
     assert unresolved["a3"]["status"] == "conflicting"
     assert unresolved["a4"]["status"] == "unknown"
     assert unresolved["a5"]["status"] == "unknown"
+
+
+def test_listform_with_an_extra_top_level_key_is_still_absorbed():
+    """列表形 + 一个陌生顶层键(模型顺手加的说明)仍按列表形吸收。
+
+    形状判据是**交集**不是子集:`apply()` 在归一之前只遍历 `supported` /
+    `unresolved` 两组、其余顶层键一概不看,所以这份载荷本来就读得懂。用子集
+    判据会把它推进映射形分支——`supported` 那个列表被当成一个方面 id 的判断体,
+    整份载荷退化成两条 `unknown`,模型明确说了已支撑的方面反而被记成没表态。
+
+    变异:判据改回 `set(raw.keys()) <= _ASSESSMENT_LISTFORM_KEYS` ⇒ 这条红。
+    """
+    from app.services.reasoning_aspects import normalize_assessment_payload
+    ledger = _ledger("问题一", "问题二")
+    assert ledger.apply({
+        "supported": [{"aspect_id": "a1", "evidence_keys": ["k1"]}],
+        "unresolved": [{"aspect_id": "a2", "status": "partial"}],
+        "note": "以上是我这一轮的判断",
+    }, allowed_keys={"k1"}) == ""
+    rows = {row.aspect_id: row for row in ledger.snapshot()}
+    assert rows["a1"].status == "supported"
+    assert rows["a1"].evidence_keys == ("k1",)
+    assert rows["a2"].status == "partial"
+    # 归一层自己也不该把陌生顶层键搬进任何一组。
+    normalized = normalize_assessment_payload(
+        {"supported": [{"aspect_id": "a1"}], "note": "x"})
+    assert set(normalized) == {"supported"}
+
+
+def test_mixed_shape_is_read_as_listform_and_ignores_the_stray_aspect_entry():
+    """混合形 `{"supported": [...], "a2": {...}}` 按列表形处理,忽略 `a2`。
+
+    这是判据从子集改交集之后唯一被放弃的东西:一份既有列表形又挂着方面 id 的
+    载荷里,方面 id 那半读不到。取舍是明确的——两半只能选一半,而列表形那半是
+    设计稿的写法、且 `apply()` 归一前本来就只认它;把整份推进映射形分支会连
+    列表形那半一起丢掉(见上一条)。
+    """
+    from app.services.reasoning_aspects import normalize_assessment_payload
+    normalized = normalize_assessment_payload({
+        "supported": [{"aspect_id": "a1", "evidence_keys": ["k1"]}],
+        "a2": {"status": "partial"},
+    })
+    assert normalized == {
+        "supported": [{"aspect_id": "a1", "evidence_keys": ["k1"]}]}
+
+
+def test_mapping_form_supported_flag_loses_to_an_explicit_other_status():
+    """映射形两格冲突取保守一边(一):`status` 明确给了非 supported 的值。
+
+    `{"supported": true, "status": "partial"}` ⇒ 未解决/partial(带 gap),
+    不是 supported。模型写下一个具体的未解决档位,信息量大于它顺手带上的布尔。
+
+    变异:判定改回「`supported is True` **或** `status == supported`」这种取宽
+    写法 ⇒ 这条红(a1 落进 supported)。
+    """
+    ledger = _ledger("问题一")
+    assert ledger.apply(
+        {"a1": {"supported": True, "status": "partial",
+                "evidence_keys": ["k1"], "gap": "缺甲"}},
+        allowed_keys={"k1"}) == ""
+    row = ledger.snapshot()[0]
+    assert row.status == "partial" and row.gap == "缺甲"
+    # 不合法的 status 同样算「明确给了别的值」⇒ 保守到 unknown,不是 supported。
+    ledger = _ledger("问题一")
+    assert ledger.apply(
+        {"a1": {"supported": True, "status": "bogus-status"}},
+        allowed_keys={"k1"}) == ""
+    assert ledger.snapshot()[0].status == "unknown"
+
+
+def test_mapping_form_supported_status_loses_to_an_explicit_false_flag():
+    """映射形两格冲突取保守一边(二):`status: supported` + `supported: false`。
+
+    一份自相矛盾的载荷不足以支撑「这个方面已经有支撑」,归一到未解决的
+    `unknown`——那一档说的正是"服务端没拿到可用判断"。`supported` 缺省时
+    `status: supported` 仍然照常成立(下面那半)。
+
+    变异:同上取宽写法 ⇒ 这条红。
+    """
+    ledger = _ledger("问题一")
+    # 带上一个**合法**证据键:否则取宽写法下这一项也会因为"剔完没有支撑"被既有
+    # 降级路径打到非 supported,这条用例就盖不住取宽这个变异。
+    assert ledger.apply(
+        {"a1": {"status": "supported", "supported": False,
+                "evidence_keys": ["k1"]}},
+        allowed_keys={"k1"}) == ""
+    assert ledger.snapshot()[0].status == "unknown"
+    ledger = _ledger("问题一")
+    assert ledger.apply(
+        {"a1": {"status": "supported", "evidence_keys": ["k1"]}},
+        allowed_keys={"k1"}) == ""
+    assert ledger.snapshot()[0].status == "supported"
 
 
 def test_normalize_accepts_id_alias_in_listform_items():

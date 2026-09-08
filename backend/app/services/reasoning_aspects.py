@@ -193,9 +193,17 @@ class _Update:
     demotion: str
 
 
-#: `normalize_assessment_payload` 认的 (a) 设计稿列表形的顶层键闭集。方面 id 由
-#: `_ASPECT_ID_PREFIX` 确定性生成(`a1..aN`),永远不会撞上这两个字面量,所以「顶层
-#: 键集合是不是这个闭集的子集」这条判据不会把一份真正的 (b) 映射形误判成列表形。
+#: `normalize_assessment_payload` 认的 (a) 设计稿列表形的顶层键。方面 id 由
+#: `_ASPECT_ID_PREFIX` 确定性生成(`a1..aN`),永远不会撞上这两个字面量,所以
+#: 「出现了其中任意一个」这条判据不会把一份真正的 (b) 映射形误判成列表形。
+#:
+#: 判据是**交集**而不是「子集」:`apply()` 归一前只遍历这两组、其余顶层键一概
+#: 不看,所以一份带了额外顶层键的列表形(`{"supported": [...], "note": "…"}`
+#: ——模型顺手加一句说明是常见写法)在归一之前本来就能被正常吸收。用子集判据
+#: 会把它推进映射形分支,于是 `supported` 那个**列表**被当成某个方面 id 的
+#: 判断体、`isinstance(body, Mapping)` 为假 ⇒ 整份载荷变成两条 `unknown`,
+#: 模型明确说了"已支撑"的方面反而被记成没表态。归一只该拓宽能被读懂的形状,
+#: 不该让原本读得懂的一份变得读不懂。
 _ASSESSMENT_LISTFORM_KEYS = frozenset({"supported", "unresolved"})
 
 
@@ -215,21 +223,18 @@ def normalize_assessment_payload(raw: object) -> object:
 
     认三种形状:
 
-    (a) 设计稿列表形:`{"supported": [...], "unresolved": [...]}`,原样通过
-        (仍会走 (c) 的 `id` 别名归一)。
-    (b) 按方面 id 的映射:顶层键不是 (a) 的闭集子集时按这种形状处理——每个键是
-        一个方面 id,值是该方面这一轮的判断。`supported is True` 或
-        `status == "supported"` 进 `supported`(带 `evidence_keys`);否则进
-        `unresolved`,`status` 取值合法集 `partial`/`conflicting`/`unknown`,不
-        合法或缺省一律归一成 `unknown`——**不是** `apply()` 列表形自己的默认档
-        `partial`,映射形省略 `status` 说的是"没细分",不是"已知是部分支撑"。
-        `gap` 透传。
+    (a) 设计稿列表形:顶层出现 `supported`/`unresolved` 任一键就按这种形状处理
+        (陌生顶层键原样忽略,与归一前 `apply()` 只遍历两组的语义一致),两组
+        原样通过(仍会走 (c) 的 `id` 别名归一)。
+    (b) 按方面 id 的映射:顶层**不含** `supported`/`unresolved` 任一键时按这种
+        形状处理——每个键是一个方面 id,值是该方面这一轮的判断。判定见
+        `_normalize_mapping_form`(两格冲突时取保守的那一边)。
     (c) 列表形的 item 带 `id` 而非 `aspect_id`:两个键都认,`id` 只在缺
         `aspect_id` 时补位。
     """
     if not isinstance(raw, Mapping):
         return raw
-    if set(raw.keys()) <= _ASSESSMENT_LISTFORM_KEYS:
+    if _ASSESSMENT_LISTFORM_KEYS & set(raw.keys()):
         return _normalize_listform_ids(raw)
     return _normalize_mapping_form(raw)
 
@@ -256,7 +261,24 @@ def _normalize_listform_ids(raw: Mapping) -> dict:
 
 
 def _normalize_mapping_form(raw: Mapping) -> dict:
-    """(b):按方面 id 的映射 → `apply()` 认识的列表形。"""
+    """(b):按方面 id 的映射 → `apply()` 认识的列表形。
+
+    `supported`(布尔)与 `status`(字面量)是同一件事的两种写法,模型两格都给
+    而且**互相矛盾**时取**保守的那一边**——归一是形状转换,不该在两个读数之间
+    替模型挑更乐观的那个:
+
+    * `supported is True` 且 `status` 缺省或就是 `supported` ⇒ 进 `supported`;
+    * `status` 明确给了别的值(`partial`/`conflicting`/`unknown`,或任何不合法
+      的字面量)⇒ **以 status 为准**进 `unresolved`(不合法的归一成 `unknown`,
+      `gap` 照常透传)。模型写下一个具体的未解决档位,比它顺手带上的
+      `supported: true` 信息量大得多,而两者只能有一个成立;
+    * `status == "supported"` 但 `supported is False` ⇒ 同理进 `unresolved` 的
+      `unknown`:一份自相矛盾的载荷不足以支撑「这个方面已经有支撑」这个结论,
+      而 `unknown` 正是"服务端没拿到可用判断"的那一档。
+
+    保守的代价是一个真的已支撑的方面晚一轮拿到 supported(模型下一轮可以重报);
+    取宽的代价是服务端据一份矛盾载荷宣布支撑,而它正是 §7.1 要防的那件事。
+    """
     supported: List[dict] = []
     unresolved: List[dict] = []
     for aspect_id, body in raw.items():
@@ -274,7 +296,11 @@ def _normalize_mapping_form(raw: Mapping) -> dict:
         gap = fields.get("gap")
         if gap is not None:
             item["gap"] = gap
-        if fields.get("supported") is True or status == ASPECT_SUPPORTED:
+        if status == ASPECT_SUPPORTED:
+            is_supported = fields.get("supported") is not False
+        else:
+            is_supported = not status and fields.get("supported") is True
+        if is_supported:
             supported.append(item)
         else:
             item["status"] = (
