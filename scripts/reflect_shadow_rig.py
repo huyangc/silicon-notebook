@@ -1062,6 +1062,8 @@ def _run_reports(
         return 2
     ctx = set_request_user(profile)
     out.parent.mkdir(parents=True, exist_ok=True)
+    log = (runner.out_dir / "report-runs.log").open("a", encoding="utf-8")
+    gated = 0
     try:
         with out.open("a", encoding="utf-8") as handle:
             for item in plan:
@@ -1069,31 +1071,47 @@ def _run_reports(
                 report_id = repo.create_report(
                     notebook, item["question"], depth=item["depth"]
                 )
-                captured = _generate_report(
+                captured, gate_reason = _generate_report(
                     repo, engine_class, profile, notebook, report_id, item,
                     model_work_scope=model_work_scope,
                     model_priority=ModelPriority.REPORT,
                     source_scope_context=source_scope_context,
                 )
-                for row in _report_rows(repo, notebook, report_id, item, captured):
+                for row in _report_rows(
+                    repo, notebook, report_id, item, captured,
+                    gate_reason=gate_reason,
+                ):
                     assert_closed(row)
                     assert_projection_values(row)
                     handle.write(
                         json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n"
                     )
-                runner.say("report done", item["question_key"])
+                if gate_reason is not None:
+                    # 卡在澄清门、代答也没能解开(见 `_generate_report`):
+                    # 不能再打「report done」——那是这条 codex 发现的原始
+                    # 症状,静默看起来完全成功(codex #700 R2 P2)。
+                    gated += 1
+                    line = f"failed {item['question_key']} reason={gate_reason}"
+                    log.write(line + "\n")
+                    log.flush()
+                    runner.say("report failed", line)
+                else:
+                    log.write(f"done {item['question_key']}\n")
+                    log.flush()
+                    runner.say("report done", item["question_key"])
     finally:
         reset_request_user(ctx)
+        log.close()
     runner.say("wrote report trace", str(out))
-    return 0
+    return 2 if gated else 0
 
 
 def _generate_report(
     repo: Any, engine_class: type, profile: Any, notebook: str, report_id: str,
     item: dict, *, model_work_scope: Any, model_priority: Any,
     source_scope_context: Any,
-) -> dict[int, list[dict]]:
-    """跑一份报告,返回 `{节号: [步, ...]}`。
+) -> tuple[dict[int, list[dict]], str | None]:
+    """跑一份报告,返回(`{节号: [步, ...]}`, 门控失败原因或 `None`)。
 
     两层 scope 与 `report_execution.ReportExecutionCoordinator.start_plan` 逐字
     同形:`model_work_scope`(模型调用的归属与优先级)+ `source_scope_context`
@@ -1104,7 +1122,25 @@ def _generate_report(
     `generate(...)`:`generate` 要一份已确认的大纲,报告行是空的时候直接调它没有
     任何东西可生成。这一条正是协调器 `start_plan` 在 `intent_contract is None`
     时走的那条(理解 → 自动确认契约 → 规划大纲 → 生成)。
+
+    `ReportEngine._auto_confirm_intent` 按设计 fail-open 到人工门:契约带必填
+    澄清项时,没有人在场回答,`run()` 就原地停在 `intent_ready`(其 docstring
+    「Confirm a *clear* intent... or fail open」)。没有这一步的话,报告的
+    `sections` 恒空,调用方会把它当成「已完成、只是没写什么」悄悄放过
+    (codex #700 R2 P2)。这里代为确认——不是新写一套编排,而是走与
+    `POST .../reports/{id}/intent` 手工确认端点**同一条入口**
+    (`confirmed_understanding` + `claim_report_intent`,两者都是
+    `app.services.reports.intent_confirmation` / repo 上已有的公开函数),
+    答案取 `auto_clarification_answers` 那条与 `/ask/intent` 同款的确定性
+    规则,确保两侧策略、两次重跑拿到同一份确认。只有这条确认入口本身也走
+    不通(代答后仍有必填项没被覆盖,或 CAS 输给了别的写者)时才返回非空的
+    `gate_reason`,交给调用方记 `status=failed`。
     """
+    from app.services.reports.intent_confirmation import (
+        ReportIntentConfirmationError,
+        confirmed_understanding,
+    )
+
     captured: dict[int, list[dict]] = {}
 
     def sink(index: int, step: Any) -> None:
@@ -1122,6 +1158,7 @@ def _generate_report(
     ).dependencies
     engine = engine_class(dependencies, user_id=str(profile.id))
     engine.sink = sink
+    gate_reason: str | None = None
     with model_work_scope(
         priority=model_priority, parent_id=report_id,
         actor_id=str(profile.id), notebook_id=notebook,
@@ -1133,14 +1170,46 @@ def _generate_report(
                 depth=item["depth"], auto_generate=True,
                 require_intent_review=True,
             )
-    return captured
+            current = repo.get_report(notebook, report_id)
+            if str(current.get("status") or "") == "intent_ready":
+                contract = dict(current.get("understanding") or {})
+                try:
+                    frozen = confirmed_understanding(
+                        contract,
+                        resolved_question=str(
+                            contract.get("resolved_question") or ""
+                        ),
+                        answers=auto_clarification_answers(contract),
+                    )
+                except ReportIntentConfirmationError:
+                    frozen = None
+                claimed = bool(
+                    frozen is not None
+                    and repo.claim_report_intent(notebook, report_id, frozen)
+                )
+                if claimed:
+                    engine.run(
+                        notebook, report_id, item["question"], "",
+                        depth=item["depth"], auto_generate=True,
+                        intent_contract=frozen,
+                    )
+                    current = repo.get_report(notebook, report_id)
+                if not claimed or str(current.get("status") or "") != "done":
+                    gate_reason = "clarification_gate"
+    return captured, gate_reason
 
 
 def _report_rows(
     repo: Any, notebook: str, report_id: str, item: dict,
-    captured: dict[int, list[dict]],
+    captured: dict[int, list[dict]], *, gate_reason: str | None = None,
 ) -> Iterable[dict]:
     """逐节**一行**:轨迹投影与结果级投影按 `merge_key` 当场合成。
+
+    `gate_reason` 非 `None`(见 `_generate_report`)时是这条不变量唯一的例外:
+    报告卡在澄清门、代答也没能解开,没有一节可对——但也不能一行都不产出,
+    「静默 0 行」和「这份报告本来就没内容」在聚合表里长得一模一样
+    (codex #700 R2 P2)。这里显式记一行 `status=failed`,不带 `merge_key`
+    (没有轨迹半份可以对)。
 
     轨迹那一半走的是与 Ask 完全相同的 `project_run`——报告的逐节深挖跑的就是
     `ReasoningRetriever.run`,换一份投影只会让两边的口径分叉。结果级那一半走
@@ -1166,6 +1235,16 @@ def _report_rows(
         "trace_source": "in_process",
         "policy_version": item["policy"],
     }
+    if gate_reason is not None:
+        row = project_report_section(
+            {}, section_index=0, section_total=0,
+            report_depth=item["depth"], report_id=report_id, rig_tags=tags,
+        )
+        row.pop("merge_key", None)
+        row["section_index"] = None
+        row["status"] = "failed"
+        yield row
+        return
     for index, section in enumerate(sections):
         # 节号来自 `_deep_dive` 时按对象身份求出的那个 index,与
         # `sections_json` 的下标同源(`_run_sections` 按 `enumerate(outline)`
@@ -1588,8 +1667,15 @@ def _prepare_search_intent(
     frozen = QueryIntentContract(**contract)
     payload = frozen.model_dump()
     # 与 `_prepare_reasoning_ask` 的 `auto_confirmed_clear_intent` 同一个判据:
-    # 提交了契约、没有待澄清项、没有澄清回答 ⇒ 用户原文仍是首要权威。
-    authoritative = not frozen.needs_clarification
+    # 提交了契约、没有待澄清项、**没有提交过澄清答案** ⇒ 用户原文仍是首要权威
+    # (codex #700 R2 P2)。`finalize_query_intent` 恒把 `needs_clarification`
+    # 清空,所以只看这一位在 rig 里恒真——真正把「代答过」和「本来就没歧义」
+    # 分开的是 `clarification_answers`:代答过必填项的题,合成后的
+    # `resolved_question` 才是权威(研究问题与首轮种子随之取确认后的方向,而
+    # 不是用户原文)。
+    authoritative = (
+        not frozen.needs_clarification and not frozen.clarification_answers
+    )
     limits = ask_retrieval_limits(effort)
     return {
         "research_question": confirmed_research_question(
@@ -2287,11 +2373,51 @@ def cmd_export(args: argparse.Namespace, runner: Runner) -> int:
     runner.say("merge", " + ".join(str(part) for part in parts) + f" -> {out}")
     if runner.dry_run:
         return 0
-    with out.open("w", encoding="utf-8") as handle:
-        for part in parts:
-            if part.exists():
-                handle.write(part.read_text(encoding="utf-8"))
+    _merge_export_parts(parts, out)
     return 0
+
+
+def _merge_export_parts(parts: Sequence[Path], out: Path) -> None:
+    """把 `parts` 按 `merge_key` 去重后写成一份 JSONL(§README「每节一行」)。
+
+    `--reports` 从库里导出的结果级行(`export_reasoning_traces.py --reports`,
+    `project_report_section` 直出,没有 `trace_steps` 键)与 rig 自己写的
+    `report-trace-*.jsonl`(同一份 `report_id`+`section_index` 已经按
+    `merge_key` 把轨迹合成过,带 `trace_steps` 键)会撞同一个 `merge_key`——
+    原来逐字节拼接文件会把它们各写一行,一份 3 节的报告就报成 6 个 run
+    (codex #700 R2 P2,同 README 479–481 的不变量)。没有 `merge_key` 的行
+    (纯 Ask run)不会跟别的行撞号,原样按原有顺序透传。
+    """
+    merged: dict[str, dict] = {}
+    order: list[str] = []
+    passthrough: list[dict] = []
+    for part in parts:
+        if not part.exists():
+            continue
+        for line in part.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            key = row.get("merge_key")
+            if not key:
+                passthrough.append(row)
+                continue
+            existing = merged.get(key)
+            if existing is None:
+                merged[key] = row
+                order.append(key)
+                continue
+            # 撞号:带轨迹的那行(project_run 出的 `trace_steps` 键)赢——
+            # 结果级独行永远输给已经合并过轨迹的版本,而不是各写一行。
+            if "trace_steps" not in existing and "trace_steps" in row:
+                merged[key] = row
+    with out.open("w", encoding="utf-8") as handle:
+        for row in passthrough:
+            handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+        for key in order:
+            handle.write(
+                json.dumps(merged[key], ensure_ascii=False, sort_keys=True) + "\n"
+            )
 
 
 def _stop_backend_gracefully(
