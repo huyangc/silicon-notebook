@@ -1054,3 +1054,23 @@ def test_search_loop_concurrent_writes_raw_trace_under_the_write_lock(
     for path in raw_files:
         payload = json.loads(path.read_text(encoding="utf-8"))
         assert payload["trace_steps"][0]["summary"] == "人话"
+
+
+def test_auto_clarification_answers_only_required_rows_and_prefer_first_option():
+    """无人在场时 rig 替用户答必填澄清项(首跑实测契约带必填项时 `answers=[]`
+    被 `finalize_query_intent` 拒掉、整批起不来):有选项取第一个、无选项用固定
+    句、非必填不答;两次调用同一份 seed 得到逐字相同的答案(确定性)。"""
+    seed = {"ambiguities": [
+        {"id": "a1", "question": "范围?", "required": True,
+         "options": [" 全部来源 ", "仅本库"]},
+        {"id": "a2", "question": "口径?", "required": True, "options": []},
+        {"id": "a3", "question": "可选项", "required": False},
+        {"question": "无 id 的坏行", "required": True},
+    ]}
+    answers = rig.auto_clarification_answers(seed)
+    assert answers == [
+        {"id": "a1", "answer": "全部来源"},
+        {"id": "a2", "answer": rig.AUTO_CLARIFICATION_ANSWER},
+    ]
+    assert rig.auto_clarification_answers(seed) == answers
+    assert rig.auto_clarification_answers({}) == []
