@@ -352,9 +352,23 @@ def test_seed_refuses_when_database_url_and_db_name_disagree(tmp_path, capsys):
 
     args = rig.build_parser().parse_args([
         "--db-name", "x_test", "--database-url", "postgresql://h/x_test?sslmode=require",
+        "--admin-url", "postgresql://h:5432/postgres",
         "seed",
     ])
     assert rig._seed_target_mismatch(args) is None, "查询串不该干扰库名比对"
+
+    # 库名一致但 --admin-url 与 --database-url 不是同一台服务器 ⇒ 建库落 A 机、
+    # 扩展/迁移/播种落 B 机,同样在建库之前拒绝(codex #700 R6 P2)。
+    rc = rig.main([
+        "--dry-run", "--out-dir", str(tmp_path / "t0"),
+        "--admin-url", "postgresql://db-a.internal:5432/postgres",
+        "--database-url", "postgresql://db-b.internal:5432/silicon_notebook_t0_test",
+        "seed",
+    ])
+    printed = capsys.readouterr().out
+    assert rc == 2
+    assert "不是同一台服务器" in printed
+    assert "create database" not in printed
 
 
 def test_start_backend_refuses_an_endpoint_that_already_answers(monkeypatch):
@@ -1745,6 +1759,10 @@ def test_report_generate_recovers_when_auto_confirm_intent_returns_none(
     ))
     assert rows, "代答成功后应该有真实的节可对"
     assert all(row.get("status") != "failed" for row in rows)
+    # 报告的投影要带真实上下文,不是 None payload 投出来的 unknown/false
+    # (codex #700 R6 P2):depth=1 ⇒ 生产映射 overview;契约已确认 ⇒ True。
+    assert all(row["effort"] == "overview" for row in rows)
+    assert all(row["has_intent_contract"] is True for row in rows)
 
 
 def test_report_generate_marks_clarification_gate_failed_when_the_claim_is_lost(

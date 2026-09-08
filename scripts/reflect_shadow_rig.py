@@ -819,12 +819,15 @@ def _seed_target_mismatch(args: argparse.Namespace) -> str | None:
     `None` 表示一致,否则是给人看的原因。
     """
     actual = _url_db_name(args.database_url)
-    if actual == args.db_name:
-        return None
-    return (
-        f"--database-url 指向库 {actual!r},但 --db-name 是 {args.db_name!r}:"
-        "CREATE DATABASE 与扩展/迁移/播种会落在两个不同的库上,拒绝继续"
-    )
+    if actual != args.db_name:
+        return (
+            f"--database-url 指向库 {actual!r},但 --db-name 是 {args.db_name!r}:"
+            "CREATE DATABASE 与扩展/迁移/播种会落在两个不同的库上,拒绝继续"
+        )
+    ok, reason = _same_endpoint_literal(args.admin_url, args.database_url)
+    if not ok:
+        return reason + ":CREATE DATABASE 与扩展/迁移/播种会落在两台服务器上,拒绝继续"
+    return None
 
 
 def _assert_endpoint_free(base_url: str) -> None:
@@ -854,6 +857,11 @@ def _assert_endpoint_free(base_url: str) -> None:
 def _create_test_database(args: argparse.Namespace) -> None:
     import psycopg
 
+    # 字面核对在 `_seed_target_mismatch` 已做;这里是带一条实时查询的那一半
+    # (`inet_server_port()`),挡住 host 相同但经端口转发落到别的服务器的情况。
+    ok, reason = _admin_targets_same_server(args.admin_url, args.database_url)
+    if not ok:
+        raise RuntimeError(reason.replace("拒绝 DROP", "拒绝 CREATE DATABASE"))
     with psycopg.connect(args.admin_url, autocommit=True) as conn:
         conn.execute(f'CREATE DATABASE "{args.db_name}"')
     with psycopg.connect(args.database_url, autocommit=True) as conn:
@@ -1321,6 +1329,8 @@ def _report_rows(
     「有没有 v2 终态步」判出来的证据,而结果级那一半只能照抄 rig 的声明——rig
     声明跑的是 v2、而轨迹里一个 v2 终态步都没有时,该被记下来的正是这件事。
     """
+    from app.services.report_engine import report_retrieval_effort
+
     report = repo.get_report(notebook, report_id)
     sections = list(report.get("sections") or [])
     tags = {
@@ -1329,6 +1339,17 @@ def _report_rows(
         "consumer": "report_section",
         "trace_source": "in_process",
         "policy_version": item["policy"],
+    }
+    # 报告没有 Ask 那份 answer payload,但投影要读的三样东西报告都有确定的来源
+    # (codex #700 R6 P2):档位按生产的 `report_retrieval_effort(depth)` 映射
+    # (`report_retrieval_limits` 就是 `ask_retrieval_limits(该档位)`,所以 legacy
+    # 步数预算推断用同一档位的天花板即是报告的有效天花板);意图契约是报告
+    # 已确认的 `understanding`。传 None 会让每节都记 effort=unknown、
+    # has_intent_contract=false,聚合时把各深度的报告混成一格。
+    payload = {
+        "mode": "reasoning",
+        "retrieval_effort": report_retrieval_effort(int(item["depth"])),
+        "intent": report.get("understanding") or None,
     }
     if gate_reason is not None:
         row = project_report_section(
@@ -1350,7 +1371,7 @@ def _report_rows(
             report_depth=item["depth"], report_id=report_id, rig_tags=tags,
         )
         trace_row = project_run(
-            {"mode": "reasoning", "status": "done"}, steps, None,
+            {"mode": "reasoning", "status": "done"}, steps, payload,
             sources_count=None, rig_tags=tags,
         )
         row.update(trace_row)
@@ -2755,6 +2776,29 @@ def _teardown_targets_this_run(
     return state_url.rstrip("/").rsplit("/", 1)[-1].split("?")[0] == args.db_name
 
 
+def _pg_endpoint(url: str) -> tuple[str | None, int]:
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(url)
+    return parts.hostname, parts.port or 5432
+
+
+def _same_endpoint_literal(admin_url: str, database_url: str) -> tuple[bool, str]:
+    """`_admin_targets_same_server` 不用连库就能判定的那一半:两个 URL 从字面上
+    是不是同一个 host:port。seed 在建库之前也用它(codex #700 R6 P2):库名一致
+    但服务器不同,CREATE DATABASE 会落在 A 机、扩展/迁移/播种落在 B 机——B 机若
+    恰好有同名库,写进去的是别人的数据。"""
+    admin_endpoint = _pg_endpoint(admin_url)
+    db_endpoint = _pg_endpoint(database_url)
+    if admin_endpoint != db_endpoint:
+        return False, (
+            f"--admin-url 指向 {admin_endpoint[0]}:{admin_endpoint[1]},"
+            f"--database-url 指向 {db_endpoint[0]}:{db_endpoint[1]} —— 不是"
+            "同一台服务器"
+        )
+    return True, ""
+
+
 def _admin_targets_same_server(admin_url: str, database_url: str) -> tuple[bool, str]:
     """`--admin-url`(维护连接,真正执行 DROP 的那一个)与 `--database-url`
     是不是同一台 PG 服务器?(codex #700 R1 P1)
@@ -2766,18 +2810,10 @@ def _admin_targets_same_server(admin_url: str, database_url: str) -> tuple[bool,
     `inet_server_port()`(admin 连接实际落在哪个服务端端口)——host 相同但走
     了端口转发/隧道到别的服务器时,URL 上的端口对不上号,这条能拦下来。
     """
-    from urllib.parse import urlsplit
-
-    admin_parts = urlsplit(admin_url)
-    db_parts = urlsplit(database_url)
-    admin_endpoint = (admin_parts.hostname, admin_parts.port or 5432)
-    db_endpoint = (db_parts.hostname, db_parts.port or 5432)
-    if admin_endpoint != db_endpoint:
-        return False, (
-            f"--admin-url 指向 {admin_endpoint[0]}:{admin_endpoint[1]},"
-            f"--database-url 指向 {db_endpoint[0]}:{db_endpoint[1]} —— 不是"
-            "同一台服务器,拒绝 DROP"
-        )
+    ok, reason = _same_endpoint_literal(admin_url, database_url)
+    if not ok:
+        return False, reason + ",拒绝 DROP"
+    db_endpoint = _pg_endpoint(database_url)
     import psycopg
 
     with psycopg.connect(admin_url, autocommit=True) as conn:
