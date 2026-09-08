@@ -613,8 +613,8 @@ def slice_llm_usage(
     入,解不出来只可能是日志被别的东西污染过。
     """
     calls = 0
-    prompt = 0
-    completion = 0
+    prompt: int | None = 0
+    completion: int | None = 0
     reasons: dict[str, int] = {}
     for record in records:
         if not isinstance(record, Mapping):
@@ -624,9 +624,13 @@ def slice_llm_usage(
             continue
         calls += 1
         usage = record.get("usage")
-        if isinstance(usage, Mapping):
-            prompt += int(usage.get("prompt_tokens") or 0)
-            completion += int(usage.get("completion_tokens") or 0)
+        # 两个 token 计数各自记「是否完整」(codex #703 R3 P2):provider 可能不回
+        # usage(`_stream_chat_content` 被拒后会去掉 usage 选项重试;`_usage_dict`
+        # 允许缺字段),此时把缺的那次当 0 会把部分和报成全程总量,A/B 成本对照
+        # 就会假装省了钱。窗口内任一次调用缺某个计数 ⇒ 该计数整 run unknown。
+        usage_map = usage if isinstance(usage, Mapping) else {}
+        prompt = _accumulate(prompt, usage_map.get("prompt_tokens"))
+        completion = _accumulate(completion, usage_map.get("completion_tokens"))
         code = normalize_finish_reason(record.get("finish_reason"))
         reasons[code] = reasons.get(code, 0) + 1
     return AbUsage(
@@ -635,6 +639,15 @@ def slice_llm_usage(
         completion_tokens=completion,
         finish_reason_codes=dict(sorted(reasons.items())),
     )
+
+
+def _accumulate(total: int | None, raw: object) -> int | None:
+    """token 计数的累加:已经 unknown 就一直 unknown;本次缺值/非数 ⇒ unknown。"""
+    if total is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return None
+    return total + int(raw)
 
 
 # --- 声明与证据的对号(§5.5-1) ----------------------------------------------
