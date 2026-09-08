@@ -662,6 +662,10 @@ def _backend_command(args: argparse.Namespace) -> list[str]:
 
 def cmd_seed(args: argparse.Namespace, runner: Runner) -> int:
     questions = load_questions()
+    mismatch = _seed_target_mismatch(args)
+    if mismatch is not None:
+        runner.say("refuse", mismatch)
+        return 2
     runner.say(
         "create database",
         f"{_redact_url(args.admin_url)} :: CREATE DATABASE {args.db_name}",
@@ -802,6 +806,51 @@ def _seed_notebooks(
     return 0
 
 
+def _url_db_name(url: str) -> str:
+    """连接串里的库名(去掉尾斜杠与查询串);SQLite 等非 PG 串返回路径末段。"""
+    return str(url or "").rstrip("/").rsplit("/", 1)[-1].split("?")[0]
+
+
+def _seed_target_mismatch(args: argparse.Namespace) -> str | None:
+    """`seed` 要写的库(`--database-url`)必须就是它要建的库(`--db-name`)。
+
+    两个参数各自有默认值,单改其中一个就会让 CREATE DATABASE 与后面的扩展安装、
+    迁移、播种落在两个不同的库上(codex #700 R5 P2)。字面核对,不连库;返回
+    `None` 表示一致,否则是给人看的原因。
+    """
+    actual = _url_db_name(args.database_url)
+    if actual == args.db_name:
+        return None
+    return (
+        f"--database-url 指向库 {actual!r},但 --db-name 是 {args.db_name!r}:"
+        "CREATE DATABASE 与扩展/迁移/播种会落在两个不同的库上,拒绝继续"
+    )
+
+
+def _assert_endpoint_free(base_url: str) -> None:
+    """起临时后端**之前**确认端口上没有别的后端在应答(codex #700 R5 P2)。
+
+    就绪探测只问「这个 URL 有没有 ready 的后端」,分不清应答的是刚起的子进程还是
+    早已占着端口的别人:后者会让 `_start_backend` 在子进程 bind 失败之前就把
+    别人的 PID 当成功返回,随后 seed 的注册、上传、建图全打到那台后端上。任何
+    HTTP 应答(包括 503/404)都算占用;只有连接被拒/超时才算空闲。
+    """
+    import urllib.error
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(f"{base_url}/api/ready", timeout=3) as r:
+            r.read()
+    except urllib.error.HTTPError:
+        pass  # 有 HTTP 应答 ⇒ 端口被占,下面统一报
+    except Exception:  # noqa: BLE001 — 连接被拒/超时 = 空闲,是这里想要的结果
+        return
+    raise RuntimeError(
+        f"{base_url} 上已经有后端在应答;拒绝在被占用的端点上起临时后端——"
+        "先停掉它或换 --port"
+    )
+
+
 def _create_test_database(args: argparse.Namespace) -> None:
     import psycopg
 
@@ -822,6 +871,7 @@ def _start_backend(args: argparse.Namespace, policy: str) -> subprocess.Popen:
     """
     import urllib.request
 
+    _assert_endpoint_free(args.base_url)
     env = dict(os.environ)
     env.update(backend_env(args, policy))
     process = subprocess.Popen(_backend_command(args), env=env, cwd=str(ROOT))
@@ -2928,8 +2978,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     # **主库**,拿一个指向测试库的默认值去跑它是最坏的一种"能跑起来"。哨兵让
     # 「有没有显式给」变成一个可判定的事实。
     args.database_url_explicit = args.database_url is not None
+    # 默认库名跟着 `--db-name` 走,不是常量:`--db-name another_t0 seed` 建的是
+    # another_t0,扩展与迁移却打到常量默认库上——那个库若恰好存在就被写了,不存在
+    # 就报一句和 `--db-name` 无关的连接错误(codex #700 R5 P2)。
     args.database_url = (
-        args.database_url or f"postgresql://127.0.0.1:5432/{DEFAULT_TEST_DB}"
+        args.database_url or f"postgresql://127.0.0.1:5432/{args.db_name}"
     )
     # 负数/零没有意义;`_resolve_concurrency` 的 clamp 是"往下调",这里只挡住
     # 明显打错的值,不在这里做 SQLite/连接池那两条(它们要跑到真库连上才判断
