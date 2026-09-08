@@ -66,7 +66,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
@@ -420,7 +420,7 @@ class Runner:
             detail = exc.read().decode("utf-8", "replace")[:500]
             raise RuntimeError(f"{method} {url} -> {exc.code}: {detail}") from exc
         self.say("stream done",
-                 f"{events} event(s), last type={last.get('type', '<none>')}")
+                 f"{events} event(s), last event={last.get('event', '<none>')}")
         return last
 
     def write(self, path: Path, text: str) -> None:
@@ -966,6 +966,7 @@ def cmd_ask(args: argparse.Namespace, runner: Runner) -> int:
     token = str(state.get("token") or "")
     verified = runner.dry_run
     gated = 0
+    failed = 0
     for item in plan:
         notebook = state["notebooks"].get(item["corpus_cell"], "<unknown>")
         base = f"{args.base_url}/api/notebooks/{notebook}"
@@ -1036,11 +1037,24 @@ def cmd_ask(args: argparse.Namespace, runner: Runner) -> int:
         # 只有 `begin_or_attach_durable_job`(即 stream 端点)会把幂等键落库。
         # 走同步端点的话,整批 run 的 `question_key`/`corpus_cell` 全是 unknown
         # ——§4.2 的对照表恒空,而且要跑完几百个 run 才看得出来。
-        runner.stream("POST", f"{base}/ask/stream", json_body=body, token=token)
+        last = runner.stream("POST", f"{base}/ask/stream", json_body=body, token=token)
+        # 执行阶段的失败/取消走 HTTP 200 里的 `event="error"` / `"cancelled"`
+        # 帧,不是 HTTP 错误;只看「标签落库」只证明 job 建了,整批全失败也会
+        # 退出码 0(codex #700 R9 P2)。终帧不是 `final` 就算失败;只记事件名,
+        # 不记 error 正文。
+        terminal = "final" if runner.dry_run else str(last.get("event") or "<none>")
+        if terminal != "final":
+            failed += 1
+            runner.say(
+                "ask failed",
+                f"crid={item['client_request_id']} terminal event={terminal}",
+            )
         if not verified:
             _assert_tag_landed(args, runner, item["client_request_id"])
             verified = True
-    return 2 if gated else 0
+    if failed:
+        print(f"ERROR: {failed} 个 ask run 未以 final 帧收尾", file=sys.stderr)
+    return 2 if gated else (1 if failed else 0)
 
 
 def _assert_tag_landed(
@@ -2127,7 +2141,7 @@ def _run_search(
             # 逐字一致,包括「所有调用都在主线程里发生」这件事本身——哪怕是
             # `ThreadPoolExecutor(max_workers=1)`也会把每次调用挪到另一个
             # 线程,单是这一点就足以让 ContextVar 的可见性行为变掉。
-            _search_loop(
+            failed = _search_loop(
                 args, runner, plan, facts, repo, settings_by_policy,
                 actor_id=actor_id, cancel_event=threading.Event(),
             )
@@ -2204,6 +2218,11 @@ def _failed_run_row(item: dict, fact: dict) -> dict:
     )
     row["status"] = "failed"
     row["scope_narrowed"] = None
+    # 空轨迹没有协议证据,`project_search_run` 会把它推成 legacy——v2 的失败
+    # run 就会被分析脚本记到 legacy 那一列(codex #700 R9 P2)。失败行按 rig
+    # **声明**的策略归组(它本来就写在 `search-<policy>.jsonl` 里),不参与
+    # 「声明 vs 证据」核对。
+    row["policy_version"] = item["policy"]
     # 手改过 `project_search_run` 已经验过的行,再验一遍:调用方直接把这一行
     # 写进 JSONL,不会再经过一次共同的校验点。
     assert_closed(row)
@@ -2230,7 +2249,7 @@ def _search_loop(
     args: argparse.Namespace, runner: Runner, plan: Sequence[dict],
     facts: dict[str, dict], repo: Any, settings_by_policy: dict[str, Any],
     *, actor_id: str, cancel_event: Any,
-) -> None:
+) -> int:
     """整批 run。每个 run 一行 JSONL + 一行日志,**都不含任何问题原文**。"""
     intents = _IntentCache(
         runner.out_dir / "intents.jsonl", enabled=not args.no_intent
@@ -2238,6 +2257,7 @@ def _search_loop(
     runner.out_dir.mkdir(parents=True, exist_ok=True)
     handles: dict[str, Any] = {}
     verified: set[str] = set()
+    failed = 0
     log = (runner.out_dir / "search-runs.log").open("a", encoding="utf-8")
     try:
         for index, item in enumerate(plan, 1):
@@ -2314,7 +2334,9 @@ def _search_loop(
             runner.say("search done", line)
             if row.get("status") == "failed":
                 # 没跑,没有协议证据可对——不参与下面这道「声明策略 vs 轨迹
-                # 证据」的核对,也不该被它当成第一个样本消费掉。
+                # 证据」的核对,也不该被它当成第一个样本消费掉;但要计进失败数
+                # (codex #700 R9 P2)。
+                failed += 1
                 continue
             if policy not in verified:
                 # **每个策略的第一个 run 之后**就把「声明的策略」与「轨迹里真的
@@ -2337,6 +2359,7 @@ def _search_loop(
         log.close()
         for handle in handles.values():
             handle.close()
+    return failed
 
 
 def _precompute_intents(
@@ -2584,6 +2607,10 @@ def _search_loop_concurrent(
                             runner.out_dir, policy, item, raw_steps, result,
                         )
                     completed += 1
+                    if row.get("status") == "failed":
+                        # 范围解析不到位的 run 以正常 outcome 回来,但它没跑
+                        # ——一样计进失败数,整批不能退出码 0(codex #700 R9 P2)。
+                        failed += 1
                     done_n = completed
                     status_suffix = (
                         "" if row.get("status") != "failed"
@@ -2859,8 +2886,9 @@ def _admin_targets_same_server(
     if not ok:
         return False, reason + ",拒绝 DROP"
     probe = identity or _live_server_identity
-    admin_identity = probe(admin_url)
-    db_identity = probe(database_url)
+    admin_identity, db_identity = _comparable_identity(
+        probe(admin_url), probe(database_url)
+    )
     if admin_identity != db_identity:
         return False, (
             f"--admin-url 连到的服务器身份是 {admin_identity},--database-url "
@@ -2869,26 +2897,41 @@ def _admin_targets_same_server(
     return True, ""
 
 
-def _live_server_identity(url: str) -> tuple:
+def _comparable_identity(a: Mapping, b: Mapping) -> tuple[tuple, tuple]:
+    """两条连接的身份按**同一把尺**比(codex #700 R9 P2):admin 是超级用户、
+    database 角色读不到 `pg_control_system()` 时,一边有 system_identifier、
+    一边没有,直接比会把同一台服务器判成两台。任一边缺 system_identifier 就两边
+    都退回服务端 addr:port 比。"""
+    if a.get("system_identifier") is not None and b.get("system_identifier") is not None:
+        return (("system_identifier", a["system_identifier"]),
+                ("system_identifier", b["system_identifier"]))
+    return (("server_endpoint", *a["server_endpoint"]),
+            ("server_endpoint", *b["server_endpoint"]))
+
+
+def _live_server_identity(url: str) -> dict:
     """一条连接落在哪台 PG 上:`pg_control_system().system_identifier` 是集群
     初始化时生成的 64 位标识,与客户端从哪个端口/隧道进来无关(codex #700 R8
     P2:此前拿 `inet_server_port()` 与 URL 端口比,Docker 端口映射或 SSH 隧道
     `localhost:15432 → server:5432` 会被误判成两台机器)。角色读不到控制文件
     时退回服务端视角的 `(inet_server_addr, inet_server_port)`——同样是服务端
-    自报的值,两条连接可比。"""
+    自报的值,两条连接可比。两样都取回来,由 `_comparable_identity` 决定用哪把
+    尺(两边都有 system_identifier 才用它)。"""
     import psycopg
 
     with psycopg.connect(url, autocommit=True) as conn:
+        endpoint = conn.execute(
+            "SELECT inet_server_addr()::text, inet_server_port()"
+        ).fetchone()
         try:
             row = conn.execute(
                 "SELECT system_identifier FROM pg_control_system()"
             ).fetchone()
-            return ("system_identifier", int(row[0]))
-        except Exception:  # noqa: BLE001 — 权限不够等,退回服务端地址视角
-            row = conn.execute(
-                "SELECT inet_server_addr()::text, inet_server_port()"
-            ).fetchone()
-            return ("server_endpoint", row[0], row[1])
+            system_identifier: int | None = int(row[0])
+        except Exception:  # noqa: BLE001 — 权限不够等:只剩服务端地址视角
+            system_identifier = None
+    return {"system_identifier": system_identifier,
+            "server_endpoint": (endpoint[0], endpoint[1])}
 
 
 def cmd_teardown(args: argparse.Namespace, runner: Runner) -> int:
