@@ -409,6 +409,19 @@ python scripts/reflect_shadow_rig.py \
   --source-notebook-a nb-<无图单篇> --source-notebook-b nb-<有图多篇> \
   --owner <主库用户名> --limit 5 --out-dir .local/t0-search search
 
+#    题目多、要跑得快时加 --concurrency(默认 1,行为与不加这个参数逐字一致):
+#    两阶段——先按同一并发度并发把这批题的意图契约算完,再把全部 run(legacy /
+#    v2 合并进同一个线程池)提交上去跑。真跑前**先确认**:模型服务那边的并发
+#    限流吃得下这个数(否则会被限流打回,不是变快而是变成一堆失败),以及主库是
+#    PG 时 POSTGRES_POOL_MAX_SIZE 不小于它(rig 会自动 clamp,但 clamp 到 1 就等于
+#    没加速);SQLite 主库(冒烟场景)真跑时一律强制 clamp 到 1。
+python scripts/reflect_shadow_rig.py \
+  --database-url postgresql://127.0.0.1:5432/<主库名> \
+  --env-file /path/to/main-checkout/.env \
+  --source-notebook-a nb-<无图单篇> --source-notebook-b nb-<有图多篇> \
+  --owner <主库用户名> --limit 5 --concurrency 6 \
+  --out-dir .local/t0-search search
+
 #    出的两份 JSONL 与 ask/report 那边同格式,直接进同一个聚合器:
 python scripts/analyze_reasoning_trace.py \
   .local/t0-search/search-legacy.jsonl .local/t0-search/search-v2.jsonl \
@@ -456,8 +469,11 @@ bool、数值、`None`,短码的列表(`action_seq`),或以短码为键、数值
   `question_key`/`corpus_cell` 全是 unknown、对照表恒空,而且要跑完几百个 run 才看得
   出来。rig 在**第一个 run 之后**就回读测试库确认标签落了库,不落就当场停。
 - rig 本体要网络与真实模型,**不进 `check.sh`**;进门的只有 `--dry-run` 的枚举、编码、
-  上传体/teardown 闸的纯函数用例,以及 `search` 那条在 SQLite 测试替身上跑真检索、
-  假模型的接线用例(`backend/tests/test_reflect_t0_scripts.py`)。
+  上传体/teardown 闸的纯函数用例,`search` 那条在 SQLite 测试替身上跑真检索、假模型的
+  接线用例,以及 `--concurrency` 的并发编排用例——一条在同一个 SQLite repo 上真的并发
+  跑 legacy / v2、一条用假 `run_search_once`(`threading.Barrier`)钉住并发峰值真的到
+  了 `N`、一条钉住「声明策略与证据不一致 ⇒ 取消剩余任务」这条守卫
+  (`backend/tests/test_reflect_t0_scripts.py`)。
 
 **`search` 的硬约束(它是唯一直接对主库跑检索的子命令)**:
 - **主库只读,而且是可核对的只读**。`--database-url` 必须**显式给出**(默认值指向的是
@@ -483,6 +499,22 @@ bool、数值、`None`,短码的列表(`action_seq`),或以短码为键、数值
   它带着问题原文与模型改写过的 `resolved_question`,是自由文本。进数据集的只有
   `search-<policy>.jsonl`(闭集投影)与 `search-runs.log`(题号/格/策略/档/耗时/reflect
   轮数/终态,无原文)。`--no-intent` 可以跳过这一步,代价是 v2 只剩整题一个方面。
+- **`--concurrency N` 默认 1,行为逐字不变**(不经线程池,单线程顺序跑,与加这个
+  参数之前完全一样)。`N > 1` 走两阶段:先按同一并发度并发把这批题的意图契约算完
+  (`intents.jsonl` 的写入与缓存查询都加了锁,同一题只算一次),再把全部 run(legacy /
+  v2 合并进**同一个**线程池,总吞吐最高)提交给 `ThreadPoolExecutor`。每个 run 自建
+  一份 `threading.Event()` 取消事件与请求身份的 ContextVar(线程池的 worker 线程不
+  继承调用方线程已经 `.set()` 过的 context,必须每次调用内部自己设),不共享
+  `ReasoningRetriever`。输出用一把锁保护、每行写完立刻 `flush`,完成顺序可以乱但每行
+  仍是一份完整投影;终端进度打印 `done k/N ...`,每个策略**第一个完成**(不一定是第一
+  个提交)的 run 之后照旧核对「声明的策略与证据是否一致」,不一致就
+  `executor.shutdown(cancel_futures=True)` 撤掉还没开始跑的任务、并给所有在跑的 run
+  的取消事件逐个 `.set()`。单个 run 抛异常只记异常类名与题号(不记原文)、隔离后继续
+  跑其它 run;`KeyboardInterrupt` / `AskCancelled` 触发全体取消。**真跑前必须确认**
+  模型服务的并发限流与(PG 主库时)`POSTGRES_POOL_MAX_SIZE` 都吃得下这个 `N`——PG 连接
+  池不够会被 rig 自动 clamp(打印一行 `concurrency clamp` 诊断),SQLite 主库(只在冒烟
+  场景出现)真跑时一律强制 clamp 到 1;这两条 clamp 都不影响 `--dry-run`,后者只打印
+  请求的并发度,零副作用。
 
 `seed` 走的是真实的浏览器上传面(`multipart/form-data`,`files` + 每文件一对
 `doc_types`/`doc_type_explicit`,一批 ≤20 个),上传后轮询 `parse_status` 到终态、再按
