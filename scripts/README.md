@@ -383,30 +383,60 @@ python scripts/analyze_reasoning_trace.py .local/t0/baseline.jsonl \
 # 3) 影子 run:先看它打算做什么,再真跑
 python scripts/reflect_shadow_rig.py --dry-run seed
 python scripts/reflect_shadow_rig.py --dry-run --limit 2 ask
+
+# 3b) 不调模型的冒烟:一次性 SQLite 后端 + 一份小 markdown,只验上传与解析半程
+python scripts/reflect_shadow_rig.py \
+  --database-url sqlite:///$TMP/t0.db --env-file $TMP/empty.env \
+  --storage-dir $TMP/storage --out-dir $TMP/out --corpus-dir $TMP/corpusB \
+  --cell B_kg --port 8011 --skip-create-db --skip-kg --skip-embed seed
 ```
 
 **隐私口径(三个脚本同一份)**:每个 run 输出一行,键取自
 `app.domain.reasoning_trace_stats.RUN_PROJECTION_KEYS` 这个闭集,值只能是闭集字符串、
-bool、数值、`None`,或「闭集键 → 数值」的字典。**问题原文、答案正文、来源标题、证据
+bool、数值、`None`,短码的列表(`action_seq`),或以短码为键、数值为叶的字典
+(`skip_reasons` 是一层,`citation_contribution` 是两层)。其中 `skip_reasons` /
+`fallback_reasons` 的**键是服务端原因码的透传**,不另过闭集校验。**问题原文、答案正文、来源标题、证据
 文本、模型 reason、trace summary 和任何 id 都不会出现在输出里**;笔记本只以来源数分桶
 (`notebook_bucket`)出现,题目只以题号(`question_key`)出现。写每一行之前都过一次
 `assert_closed`,加错一个键会当场炸,而不是安静地把一列自由文本落进 JSONL。
 
 **`unknown` 是一等值**:旧轨迹缺字段就是 `null`,不折成 0/false;聚合侧为每个指标分别
 报 `n_observed` / `n_missing`,并且只在 `n_observed >= --min-samples` 时输出 P50/P95。
+两处已知的恒 `unknown`,是**写侧没有这个字段**、不是数据缺失:`candidates_chunks`
+(answer 步的 detail 里没有 chunk 候选计数),以及线上导出的 `corpus_cell` /
+`question_key`(浏览器铸的幂等键不带 rig 编号,那些 run 只进基线表、不进对照表)。
 
-**rig 的三条硬约束**:
+报告侧**每节只写一行**:轨迹投影与结果级投影按 `merge_key` 当场合成。写成两行会让一份
+3 节的报告在聚合表里报成 6 个 run、每个指标恰好一半「缺失」——`n_observed` 那套分母就
+此报废,而表面上完全看不出来。
+
+**rig 的硬约束**:
 - 主库只在 `seed` 重建 A 语料时被读一次(`--source-db-url` 必须显式给,PG 侧连接开
-  `read_only`);所有写入都在 `--database-url` 指向的测试库,`teardown` 删库。
+  `read_only`);所有写入都在 `--database-url` 指向的测试库。`teardown` 只在
+  `--database-url` 确实是 PG 的 `--db-name` 时才删库——否则它会去 PG 上删一个同名的、
+  可能是别人的库。
 - 换检索策略靠**重启后端**(`REASONING_REFLECT_V2_ENABLED`),rig 不热改 Settings;
   `ask` / `report` 每次只跑一个 `--policy`。
 - 题号 / 语料格 / 策略 / 档位只编进 `client_request_id`(`t0:<题号>:<语料格>:<策略>:
   <档位>:<mode>`),导出时据它打标——**不进问题文本,模型看不到**。
-- rig 本体要网络与真实模型,**不进 `check.sh`**;进门的只有 `--dry-run` 的枚举与编码
-  用例(`backend/tests/test_reflect_t0_scripts.py`)。
+- `ask` 提交必须走 `/ask/stream`,**不能走同步的 `/ask`**:同步端点经
+  `begin_durable_job` 建行,那条路的 `client_request_id=None` 是写死的
+  (`repositories/postgres/ask_state_store.py`,SQLite 侧同形),只有
+  `begin_or_attach_durable_job`(stream 端点)才把幂等键落库。走错端点的话整批 run 的
+  `question_key`/`corpus_cell` 全是 unknown、对照表恒空,而且要跑完几百个 run 才看得
+  出来。rig 在**第一个 run 之后**就回读测试库确认标签落了库,不落就当场停。
+- rig 本体要网络与真实模型,**不进 `check.sh`**;进门的只有 `--dry-run` 的枚举、编码与
+  上传体/teardown 闸的纯函数用例(`backend/tests/test_reflect_t0_scripts.py`)。
+
+`seed` 走的是真实的浏览器上传面(`multipart/form-data`,`files` + 每文件一对
+`doc_types`/`doc_type_explicit`,一批 ≤20 个),上传后轮询 `parse_status` 到终态、再按
+需 `kg/build` 并轮询 `index-status`。`--skip-kg` / `--skip-embed` 把后两步关掉,给
+「没有模型配置」的冒烟用。fixture 用户名必须是「单个小写字母 + 八位数字」(注册端点的
+正则),默认 `t00000001`。worktree 里没有 `.env`,模型配置靠 `--env-file` 指向主 checkout。
 
 题集在 `backend/app/eval/reflect_t0/questions.json`(A 单篇 24 题带 gold、B 多篇 10 题、
-报告 4 题),语料是公开论文;主库的 notebook id 刻意不落仓库,由 `--source-notebook` 传。
+报告 4 题),语料是公开论文;A 语料的主库 notebook id 刻意不落仓库,由 `--source-notebook`
+传(B 语料的磁盘路径与文件名在题集里,那是本机 MinerU 产物的位置)。
 
 ### `kg_quality_audit.py` —— 「库里的节点都是些什么」
 
