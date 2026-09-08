@@ -370,6 +370,18 @@ def test_seed_refuses_when_database_url_and_db_name_disagree(tmp_path, capsys):
     assert "不是同一台服务器" in printed
     assert "create database" not in printed
 
+    # SQLite 冒烟(README 的 `--skip-create-db` 路径)不是 PG 目标:库名与 admin
+    # 端点核对对它没有意义,不得把它挡在门外(codex #700 R7 P2)。
+    sqlite_url = f"sqlite:///{tmp_path / 't0.db'}"
+    args = rig.build_parser().parse_args(["--database-url", sqlite_url, "seed"])
+    assert rig._seed_target_mismatch(args) is None
+    rc = rig.main([
+        "--dry-run", "--out-dir", str(tmp_path / "t0-sqlite"),
+        "--database-url", sqlite_url, "--skip-create-db", "seed",
+    ])
+    capsys.readouterr()
+    assert rc == 0
+
 
 def test_start_backend_refuses_an_endpoint_that_already_answers(monkeypatch):
     """就绪探测分不清应答者是刚起的子进程还是早就占着端口的别人;后者会让
