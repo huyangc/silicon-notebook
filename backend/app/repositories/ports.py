@@ -341,6 +341,16 @@ class JsonChatClientPort(Protocol):
         bypass_cache: bool = False,
         response_validator: Optional[Callable[[str], bool]] = None,
         thinking_mode: Optional[Literal["enabled", "disabled"]] = None,
+        # Optional OUT-parameter (``app.core.llm.CALL_STATS_KWARG``): a
+        # caller-owned mapping the implementation fills with this call's
+        # provider-side outcome (``finish_reason``). It belongs on the port
+        # because the reflect layer forwards it through the scheduled adapter
+        # down to the physical client — without it, an empty completion and one
+        # the server cut off at ``max_tokens`` are the same empty string
+        # everywhere downstream. Callers that omit it are unaffected;
+        # implementations that cannot fill it declare
+        # ``supports_call_stats = False``.
+        call_stats: Optional[Dict[str, Any]] = None,
     ) -> str: ...
 
 

@@ -217,6 +217,9 @@ _INVALID_REASONS: frozenset = frozenset({
     "enumeration_kind", "enumeration_rejected", "enumeration_conflict",
     "enumeration_source_unresolved", "outline_empty",
     "outline_repair_structure",
+    # v2 §7.1:模型宣布证据已足却一个必答方面都没自评,整轮退回并追问一次。
+    # 归 invalid 而不是 unavailable:通道好好的,是这份载荷不成立。
+    "missing_assessment",
 })
 _FAILED_REASONS: frozenset = frozenset({
     "community_error", "enumeration_unavailable", "consult_memory_unavailable",
@@ -243,6 +246,14 @@ _UNAVAILABLE_REASON_PREFIX = "unavailable_action:"
 #: 每方面键数或 gap 超限…)。与另外两族同理落 invalid:载荷本身不成立,零 I/O。
 _INVALID_REASON_PREFIXES = (
     "missing_argument:", "invalid_argument:", "invalid_assessment:")
+#: v2 §5.2:反思调用本身失败、但这一轮不收尾(连续失败还没到两轮)。落
+#: `failed` 而不是 invalid:载荷没有不成立——**根本没有载荷**,是调用炸了。
+#: 后缀是稳定的兜底原因码(`output_budget_exhausted` / `empty` / provider 码),
+#: 它逐字进观察行的「原因=」那一格,模型据此知道该缩短输出还是该换个问法。
+#: 这个 action_id 恒是 `REFLECT_INVALID_ACTION` 伪动作,不在 `ACTION_DEFINITIONS`
+#: 里,所以它**不会**被 `_retrieval_degraded` / `_unrecovered_channels` 当成一条
+#: 检索通道的故障——那两处只看产证据的动作。
+_FAILED_REASON_PREFIXES = ("model_degraded:",)
 
 
 def status_for_skip(reason: str) -> str:
@@ -257,6 +268,8 @@ def status_for_skip(reason: str) -> str:
         return STATUS_EMPTY
     if reason.startswith(_UNAVAILABLE_REASON_PREFIX):
         return STATUS_UNAVAILABLE
+    if any(reason.startswith(p) for p in _FAILED_REASON_PREFIXES):
+        return STATUS_FAILED
     if any(reason.startswith(p) for p in _INVALID_REASON_PREFIXES):
         return STATUS_INVALID
     if reason in ("unknown_action", "invalid_sufficient",

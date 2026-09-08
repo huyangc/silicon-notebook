@@ -40,6 +40,7 @@ class ExpandedQuery:
 
 def expand_query(client, question: str, history: str = "", *,
                  timeout: Optional[float] = None, max_retries: Optional[int] = None,
+                 max_tokens: Optional[int] = None,
                  max_subqueries: int = 4, want_types: bool = False,
                  corpus_langs: Optional[List[str]] = None,
                  cancel_event: CancelEvent = None,
@@ -62,7 +63,10 @@ def expand_query(client, question: str, history: str = "", *,
     绝不说「读哪些来源」——来源范围只由用户勾选决定。
     style_block:用户的检索/回答风格偏好提示(Agentic Memory P3,B-Profile,
     见 app.services.search_profile.render_style_block),空串=不注入(默认
-    形态)。同样是**背景**,只影响组织形态/措辞,绝不触及来源范围或检索档位。"""
+    形态)。同样是**背景**,只影响组织形态/措辞,绝不触及来源范围或检索档位。
+    max_tokens:这一次调用的输出上限,None=不传(由 `chat_json` 的全局默认决定)。
+    与 timeout/max_retries 同一档:调用方按**工种**给预算,而不是把全局调高——
+    逐步推理的规划走 `REASONING_MAX_TOKENS`,别的调用方一个字都不用改。"""
     from app.services.prompts import expand_query_prompt, EXPAND_SCHEMA_HINT
     fallback = ExpandedQuery(query=question,
                              sub_queries=[SubQuerySpec(query=normalize_terms(question))])
@@ -73,6 +77,7 @@ def expand_query(client, question: str, history: str = "", *,
     kw = {}
     if timeout is not None: kw["timeout"] = timeout
     if max_retries is not None: kw["max_retries"] = max_retries
+    if max_tokens is not None: kw["max_tokens"] = max_tokens
     try:
         messages = [{
             "role": "user",

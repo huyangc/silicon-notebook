@@ -17,13 +17,15 @@ import weakref
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from typing import (
-    Dict, List, Mapping, Optional, Protocol, Sequence, Tuple, TYPE_CHECKING,
+    Any, Dict, List, Mapping, Optional, Protocol, Sequence, Set, Tuple,
+    TYPE_CHECKING,
 )
 
 from app.core.ask_retrieval_policy import (
     DEFAULT_RETRIEVAL_EFFORT, EXHAUSTIVE_RETRIEVAL_EFFORT, AskRetrievalLimits,
     ask_retrieval_limits,
 )
+from app.core.llm import CALL_STATS_KWARG, budget_kwargs
 from app.core.config import (
     DEFAULT_REASONING_PER_QUERY_LIMIT,
     DEFAULT_REFLECT_EVIDENCE_CHARS_BY_EFFORT,
@@ -58,11 +60,13 @@ from app.services.reasoning_actions import (
     ActionParam, ReflectCapabilities, ReflectCapabilityFacts,
     build_reflect_capabilities,
 )
-from app.domain.retrieval_termination import RetrievalTermination
+from app.domain.retrieval_termination import (
+    ASPECT_COLLECTION_KEY_PREFIX, RetrievalTermination,
+)
 from app.services.reasoning_aspects import (
-    AspectLedger, TERMINATION_SKIP_REASON, build_aspect_ledger,
-    classify_termination, evidence_bound_keys, render_aspect_block,
-    termination_summary,
+    AspectLedger, TERMINATION_SKIP_REASON, assessment_is_empty,
+    build_aspect_ledger, classify_termination, evidence_bound_keys,
+    render_aspect_block, termination_summary,
 )
 from app.services.reasoning_context import ReflectContext, build_evidence_block
 from app.services.reasoning_observation import (
@@ -310,6 +314,56 @@ _REFLECT_REJECTION_REASONS = frozenset({
     "unknown_key", "unsupported_syntax",
 })
 _REFLECT_INVALID_ACTION_PREFIX = "invalid_action:"
+#: 「模型回了话,但正文是空的」在传输层的原因码(`model_json.parse_model_json_object`
+#: 对空串抛的那一个)。它到反思层时已经沿 `__cause__` 链折成这个字符串。
+_REFLECT_EMPTY_BODY_REASON = "empty"
+#: 空正文 **且** provider 说这次是被输出预算切断的(`finish_reason == "length"`)。
+#: 与 `empty` 分开是这次整改的起点:2026-09-08 的实测里 118 次反思调用有 24 次
+#: 正文为空,其中 6 次的 completion_tokens 恰好等于 `openai_compat_max_tokens`
+#: (思考把预算吃光,最终正文一个 token 都没轮到),另外 13 次只用了一两百 token
+#: 就结束——两类的补救方向正好相反(加预算 vs 重试/换问法),而它们在
+#: `finish_reason` 之外没有任何可分辨的痕迹。
+REFLECT_OUTPUT_BUDGET_EXHAUSTED = "output_budget_exhausted"
+#: provider 报「输出被 max_tokens 截断」的那个 finish_reason 字面(OpenAI 兼容)。
+_FINISH_REASON_LENGTH = "length"
+#: 反思调用**连续**失败几轮之后才按 fail-open 收尾(见 `_survive_reflect_failure`)。
+#: 2 是刻意的:一次失败在实测里几乎总能在下一轮恢复(24 次空正文分散在 118 次调用
+#: 里,没有一次是连着两轮的),而它砍掉的是整次检索已经到手的全部证据;连着两轮
+#: 失败说明的则是通道本身出了问题,再多试几轮只是在一条塌了的路上花步数。
+REFLECT_MAX_CONSECUTIVE_FAILURES = 2
+#: 输出预算打满之后那一次重试要的倍数(见 `_reflect_v2`)。取"同一个配置数 × 2"
+#: 而不是另一个字面量:一次部署把 `REASONING_MAX_TOKENS` 调高的决定,重试要跟着
+#: 走,而不是撞上一堵单独钉死的墙。
+REFLECT_RETRY_BUDGET_MULTIPLIER = 2
+#: 逐步推理(规划 + 每一轮反思)的单次输出上限所在的 Settings 属性名。
+REASONING_BUDGET_ATTR = "reasoning_max_tokens"
+
+
+def reasoning_budget_kwargs(settings, *, multiplier: int = 1) -> "Dict[str, Any]":
+    """规划/反思这一次调用的 `max_tokens` splat。**legacy 与 v2 共用。**
+
+    这是部署配置不是策略:同一个工种(逐步推理)在两条路径上要的是同一个输出上限,
+    所以 `REASONING_REFLECT_V2_ENABLED` 关着时这个数照样生效——关闭态的「逐字节
+    等价」说的是 prompt / schema / trace,不含这一格预算。
+
+    预算从 `self.settings` 取而不是从客户端取(`cap_kwargs`):检索器自己持有权威
+    的 `Settings`,而它拿到的反思客户端可能是一个没有 settings 的离线桩——那时
+    "读不到预算"应该是配置缺失,不该由客户端身份决定。
+    """
+    return budget_kwargs(settings, REASONING_BUDGET_ATTR, multiplier=multiplier)
+
+
+def _call_stats_kwargs(client, sink: "Dict[str, Any]") -> "Dict[str, Any]":
+    """只对**自己声明支持**的客户端传 `call_stats` 出参。
+
+    同 `cap_kwargs` 的处世方式:一个 duck-typed 的测试替身或插件绑定的客户端不该
+    因为反思层想多要一格诊断信息就被迫改签名。判据用一个显式的类属性
+    (`supports_call_stats`)而不是 `inspect.signature`——签名反射会把一个写了
+    `**kwargs` 的替身认成"支持",于是 sink 恒为空、上面那次加预算重试永远不触发,
+    而没有任何一条用例会红。
+    """
+    return {CALL_STATS_KWARG: sink} if getattr(
+        client, "supports_call_stats", False) else {}
 
 
 def _reflect_fallback(reason: str) -> "ReflectDecision":
@@ -327,8 +381,14 @@ def _reflect_fallback(reason: str) -> "ReflectDecision":
     )
 
 
-def _reflect_fallback_reason(exc: BaseException) -> str:
+def _reflect_fallback_reason(exc: BaseException, finish_reason: str = "") -> str:
     """把一次模型调用失败折成一个稳定的兜底原因码。
+
+    ``finish_reason``(v2 才传,legacy 调用处一个字都没改)是这一次 provider 调用
+    的结束原因。它只在**空正文**这一档上改变结论:`empty` + `length` 说的是"这次
+    的输出预算被吃光了,最终正文没轮到",而 `empty` + 别的(或未知)说的是"模型
+    交了白卷"。两者共用一个 `empty` 码,harness 就分不出该加预算还是该重试——
+    这正是 §5.2 兜底原因码存在的理由:它不是给人读的一句话,是下一步的依据。
 
     **按 `.code` 分支,不按异常类型。**生产的 reflect client 是
     `ScheduledJsonChatClient`,它的 `_resolve` 把一切异常重抛成
@@ -352,6 +412,9 @@ def _reflect_fallback_reason(exc: BaseException) -> str:
             seen.add(id(cursor))
             reason = str(getattr(cursor, "reason", "") or "").strip()
             if reason:
+                if (reason == _REFLECT_EMPTY_BODY_REASON
+                        and finish_reason == _FINISH_REASON_LENGTH):
+                    return REFLECT_OUTPUT_BUDGET_EXHAUSTED
                 return reason[:_REFLECT_FALLBACK_VALUE_CHARS]
             cursor = cursor.__cause__ or cursor.__context__
         return _MALFORMED_RESPONSE_CODE
@@ -388,6 +451,14 @@ _V2_SUFFICIENT_CONTRADICTION = "sufficient_with_retrieval_action"
 #: (`unknown_aspect` / `duplicate_aspect` / `gap_overflow` …),同样带上"哪一条
 #: 边界"——只说"评估不合法"模型下一轮多半原样再报一遍。
 _V2_INVALID_ASSESSMENT_PREFIX = "invalid_assessment:"
+#: 收尾载荷(`answer` + `sufficient=true`)一个方面都没自评。整份决定退回一次,
+#: 下一轮的 user 段带上逐个 id 的追问(见 `AspectLedger.note_missing_assessment`)。
+_V2_MISSING_ASSESSMENT = "missing_assessment"
+#: 反思调用本身失败、但这次**不收尾**(连续失败还没到两轮)。后缀是
+#: `_reflect_fallback_reason` 给出的稳定码,所以模型在观察账上看到的是
+#: 「原因=model_degraded:output_budget_exhausted」——它据此知道该缩短输出,
+#: 而不是只看到一句泛泛的"上一轮没成"(§5.2 / 交付 3d)。
+_V2_MODEL_DEGRADED_PREFIX = "model_degraded:"
 
 #: v2 下 invalid 观察在 skip 步上屏的短文案。reflect 步已经用
 #: `reflect_invalid_summary` 说过这一轮为什么不成立,两步再重复同一句只是把同
@@ -813,6 +884,14 @@ def reflect_invalid_summary(decision: "ReflectDecision") -> str:
         return "模型同时要求继续检索又声称证据已足,本轮不予执行"
     if reason.startswith(_V2_INVALID_ASSESSMENT_PREFIX):
         return "模型对必答方面的自评越界,整轮决定不予执行"
+    if reason == _V2_MISSING_ASSESSMENT:
+        return "模型宣布证据已足却没有逐个自评必答方面,本轮退回并要求补齐"
+    if reason.startswith(_V2_MODEL_DEGRADED_PREFIX):
+        code = reason[len(_V2_MODEL_DEGRADED_PREFIX):]
+        return (
+            "本轮反思调用失败（输出预算打满），未执行任何检索,继续下一轮"
+            if code == REFLECT_OUTPUT_BUDGET_EXHAUSTED
+            else "本轮反思调用失败,未执行任何检索,继续下一轮")
     return "模型这一轮的决定无法执行,未执行任何检索"
 
 
@@ -1240,6 +1319,87 @@ def _enumeration_note(chains) -> str:
         "(换一个 scope 的来源清单不算同一份清单),"
         "改用其他动作或直接作答。)"
     )
+
+
+# --- 集合完整性证据键(v2-only,设计稿 §7.1) --------------------------------
+#: 一条枚举链**已列全**的那个状态字面(见 `_EnumChain.state`)。
+_ENUM_CHAIN_COMPLETE = "complete"
+
+COLLECTION_KEYS_NOTE_TITLE = (
+    "【集合完整性证据键 — 服务端签发，只有已完整列出的清单才有】")
+COLLECTION_KEYS_NOTE_TAIL = (
+    "（这些键可以直接写进 assessment 的 evidence_keys，用来支撑「本库有哪些…」"
+    "这一类必须靠清单本身回答的方面。没有列在上面的集合没有键：一份没列完的"
+    "清单不能证明任何完整性。）"
+)
+
+
+def enum_evidence_key(outcome) -> str:
+    """一条枚举链的**集合身份**→ 它的证据键。确定性,同一条链永远同一个键。
+
+    构成与续跑键 `(collection, kind, source_id, local_only)` 一一对应,一个字段
+    都不省:换了范围的来源清单本来就不是同一份目录(见 `_EnumChain`),两条链共用
+    一个键会让「只列了本库」的那份完整性给「全部范围」那个方面作证。
+
+    键里不含用户内容,只含白名单里的集合名/子类型与内部 source id——它会被模型
+    抄回来,让它承载文档标题等于又开一条自由文本槽位。
+    """
+    parts = [str(getattr(outcome, "collection", "") or "")]
+    kind = str(getattr(outcome, "kind", "") or "")
+    if kind:
+        parts.append(kind)
+    source_id = str(getattr(outcome, "source_id", "") or "")
+    if source_id:
+        parts.append(f"src={source_id}")
+    if getattr(outcome, "local_only", False):
+        parts.append("local")
+    return ASPECT_COLLECTION_KEY_PREFIX + ":".join(part for part in parts if part)
+
+
+def complete_enumeration_keys(enum_chains) -> Set[str]:
+    """本 run 里 **coverage 完整**的那些集合的证据键(§7.1)。
+
+    `state == "complete"` 是硬判据,与 `_collection_map_note` 那条「列过就算」的
+    放宽刻意不同:半份清单证明不了完整性,而这批键存在的全部理由就是"这个集合
+    已经被列全了"。`open`(还能续)与 `conflict`(枚举期间资料变了,既不能续也不
+    能当作完整)都不签发。
+
+    没有它,目录题在 v2 下结构上无解:枚举条目按合同不进候选池、条目 id 对模型
+    不可见(见 `outline_binding_keys`),于是模型把一个覆盖完整的目录方面标成
+    supported 时,引什么键都会被剔掉、按 §7.1 降级——服务端一边报告"已全部列出
+    84 条",一边告诉合成侧"这个方面没有支撑"。
+    """
+    return {
+        enum_evidence_key(chain.outcome)
+        for chain in (enum_chains or {}).values()
+        if getattr(chain, "state", "") == _ENUM_CHAIN_COMPLETE
+    }
+
+
+def render_collection_keys_note(enum_chains) -> str:
+    """已完整枚举的集合 → 一段**可引用的键**清单。v2-only,零 I/O。
+
+    刻意不并进 `_enumeration_note`:那段账目在关闭态也逐字进 prompt,而这里是
+    v2 专有的协议内容。分开写,关闭态因此一个字都不变。
+
+    展示是 §7.1 的硬前提:合法集合由服务端算出,但模型只能引用**服务端真的给过
+    它**的标识——一个算得出却从没印出来的键,与让模型猜 id 没有区别。
+    """
+    lines = []
+    for chain in (enum_chains or {}).values():
+        if getattr(chain, "state", "") != _ENUM_CHAIN_COMPLETE:
+            continue
+        outcome = chain.outcome
+        label = _collection_label(outcome.collection, outcome.kind)
+        scope = LOCAL_ONLY_SCOPE_SUFFIX if outcome.local_only else ""
+        returned = getattr(getattr(outcome, "coverage", None), "returned_total", 0)
+        lines.append(
+            f"- {enum_evidence_key(outcome)} | 「{label}」已完整列出 "
+            f"{returned} 条{scope}")
+    if not lines:
+        return ""
+    return "\n".join([COLLECTION_KEYS_NOTE_TITLE, *lines,
+                      COLLECTION_KEYS_NOTE_TAIL])
 
 
 # --------------------------------------------------------- 大纲便签(outline)
@@ -2871,6 +3031,14 @@ class _ReasoningRunState:
     # `_run_termination` 要读到那些写入。
     aspects: "Optional[AspectLedger]" = None
 
+    # —— 反思调用**连续**失败的轮数(v2-only,写点单一在 `_v2_note_turn`)。
+    # 一次 provider 失败不再直接终止整次检索:那一轮折成零 I/O 的降级观察继续
+    # 走,连着两轮都失败才按既有 fail-open 收尾(终态 `model_degraded`)。所以它
+    # 必须是**连续**计数——中间任何一轮成功都清零,否则一次 run 里两次相隔很远、
+    # 各自都恢复了的抖动会被读成"这条模型通道塌了"。同上一档纪律:不解包成
+    # 局部名,读写一律走 `state`。
+    reflect_failures: int = 0
+
 
 class ReasoningRetriever:
     def __init__(
@@ -3402,6 +3570,9 @@ class ReasoningRetriever:
         ex = expand_query(client, question, history,
                           timeout=self.settings.reasoning_timeout_seconds,
                           max_retries=self.settings.reasoning_max_retries,
+                          # 规划与反思是同一个工种(逐步推理),拿同一个输出预算
+                          # (`REASONING_MAX_TOKENS`)。见 reasoning_budget_kwargs。
+                          **reasoning_budget_kwargs(self.settings),
                           max_subqueries=(
                               max_subqueries
                               if max_subqueries is not None
@@ -3464,7 +3635,38 @@ class ReasoningRetriever:
         `_reflect_fallback`(`fail_closed` 下照抛),`AskCancelled` 始终上抛。
         一次兜底**不是**"模型认为证据够了",两者在轨迹上由 `fallback_reason`
         分开(见 `_reflect_fallback` 的说明)。
+
+        **v2 多一次同轮重试**:兜底原因是 `output_budget_exhausted`(正文为空且
+        provider 说这次被 `max_tokens` 切断)时,原样再调一次、把这一次的输出
+        预算翻倍(`REASONING_MAX_TOKENS × 2`)。倍数落在**同一个配置数**上而不是
+        另找一个字面量:一次部署把反思预算调高的决定,重试要跟着走,而不是撞上
+        一堵单独钉死的墙。全局配置一个字都不改——只有这一次调用带更高的上限。
+        仍失败才走兜底(随后由 `_survive_reflect_failure` 决定是继续还是收尾)。
         """
+        decision = self._reflect_v2_attempt(
+            question, candidates_summary, capabilities, client)
+        if (decision.fallback
+                and decision.fallback_reason == REFLECT_OUTPUT_BUDGET_EXHAUSTED):
+            decision = self._reflect_v2_attempt(
+                question, candidates_summary, capabilities, client,
+                budget_multiplier=REFLECT_RETRY_BUDGET_MULTIPLIER)
+        return decision
+
+    def _reflect_v2_attempt(
+        self, question, candidates_summary,
+        capabilities: "ReflectCapabilities", client,
+        *, budget_multiplier: int = 1,
+    ) -> "ReflectDecision":
+        """`_reflect_v2` 的一次调用尝试。``budget_multiplier`` 只放大这一次的
+        `max_tokens`(1 = 配置里的原值)。
+
+        `call_stats` 是一个**出参**:`chat_json` 在返回之前把这次调用的
+        `finish_reason` 写进去(见 `app.core.llm`)。它只在客户端自己声明支持时
+        才传(`_call_stats_kwargs`),所以既有的 duck-typed 替身与插件绑定的客户端
+        一个签名都不用改;拿不到 finish_reason 的调用方退回接入前的行为(空正文
+        一律记 `empty`,不触发上面那次加预算重试)。
+        """
+        stats: Dict[str, Any] = {}
         try:
             system_text = reflect_v2_system_prompt(
                 capabilities, UNAVAILABLE_DISCLOSE_MAX)
@@ -3483,7 +3685,10 @@ class ReasoningRetriever:
                 reflect_v2_schema_hint(capabilities),
                 timeout=self.settings.reasoning_timeout_seconds,
                 max_retries=self.settings.reasoning_max_retries,
-                cancel_event=self.cancel_event)
+                cancel_event=self.cancel_event,
+                **reasoning_budget_kwargs(
+                    self.settings, multiplier=budget_multiplier),
+                **_call_stats_kwargs(client, stats))
             data = json.loads(raw)
             if not isinstance(data, dict):
                 if self.fail_closed:
@@ -3505,7 +3710,8 @@ class ReasoningRetriever:
         except Exception as exc:  # noqa: BLE001 — fail-open 合同,同 legacy
             if self.fail_closed:
                 raise
-            return _reflect_fallback(_reflect_fallback_reason(exc))
+            return _reflect_fallback(_reflect_fallback_reason(
+                exc, str(stats.get("finish_reason") or "")))
 
     def _reflect_v2_context(
         self, state: "_ReasoningRunState", summary: str, outline,
@@ -3575,13 +3781,18 @@ class ReasoningRetriever:
         # **只登记真的渲染出来的键。**被预算挤出窗口的候选一个都不登记——模型没
         # 见过它,就不该因为"它在池子里"取得大纲绑定资格(设计稿 §6.2)。
         state.ever_shown_outline_keys.update(selection.shown_keys)
-        aspect_block = render_aspect_block(state.aspects)
+        # 必答方面清单 + 已完整枚举的集合键,都接在服务器状态块的**尾部**,与它
+        # 一起受"按现有输入/协议边界保留、不整体裁尾"的处理(§4):方面清单是用户
+        # 确认过的必答清单,集合键是服务端签发的证据身份——两者都不属于
+        # `state_chars` 界定的那块可压缩区。集合键排在方面清单**之后**:模型是先
+        # 读到"a2 还没支撑"、再去找"有什么键能支撑它"。
+        blocks = [
+            summary,
+            render_aspect_block(state.aspects),
+            render_collection_keys_note(state.enum_chains),
+        ]
         return ReflectContext(
-            # 必答方面清单接在服务器状态块的**尾部**,与它一起受"按现有输入/协议
-            # 边界保留、不整体裁尾"的处理(§4):它是用户确认过的必答清单,不属于
-            # `state_chars` 界定的那块可压缩区。
-            server_state=(f"{summary}\n\n{aspect_block}" if aspect_block
-                          else summary),
+            server_state="\n\n".join(block for block in blocks if block),
             evidence=selection.text,
             observations=render_observations(
                 observer.rows,
@@ -3611,23 +3822,33 @@ class ReasoningRetriever:
         另一半就是"接受半个决定",而模型下一轮看到的方面状态会来自一轮它自己都
         没做成的判断。
 
-        合法键的口径直接复用 `outline_binding_keys`:候选池 ∩ 曾真实展示。它天然
-        不含枚举条目 id 与来源 id(见那个函数的说明),所以"集合/来源身份冒充细粒度
-        证据"在这里是结构上不可能,不靠一条会过期的黑名单。
+        合法键的口径是**两份服务端签发的身份的并集**:
+
+        * `outline_binding_keys`——候选池 ∩ 曾真实展示,即细粒度证据(KG 对象 /
+          元素 / 原文块)。它天然不含枚举条目 id 与来源 id(见那个函数的说明);
+        * `complete_enumeration_keys`——**已完整列出**的集合的身份键。§7.1 原来
+          那条边界收窄成「**未完整**枚举的集合身份不能冒充细粒度证据」:一份列完
+          了的目录是服务端自己记下的、可核对的事实,而目录题("这个库里有哪些
+          文档")要的支撑本来就是这件事,不是任何一条具体文档。没有它,一个
+          coverage 报了 complete 的目录方面在结构上永远拿不到 supported——模型引
+          什么键都会被剔掉,然后按 §7.1 降级。
+
+        未完整(`open`/`conflict`)的枚举链**不签发键**,所以它照旧不可能冒充。
+        模型自己拼一个 `enum:…` 出来同样被剔:合法集是服务端算出来的那一份,不是
+        按前缀放行。
         """
         if state.aspects is None:
             state.aspects = build_aspect_ledger(
                 state.intent_detail, state.question)
         if decision.assessment is None:
-            return decision
-        why = state.aspects.apply(
-            decision.assessment,
-            allowed_keys=outline_binding_keys(
-                state.collected, state.elements, state.chunks,
-                state.ever_shown_outline_keys),
-        )
+            return self._nudge_missing_assessment(state, decision)
+        allowed = outline_binding_keys(
+            state.collected, state.elements, state.chunks,
+            state.ever_shown_outline_keys)
+        allowed |= complete_enumeration_keys(state.enum_chains)
+        why = state.aspects.apply(decision.assessment, allowed_keys=allowed)
         if not why:
-            return decision
+            return self._nudge_missing_assessment(state, decision)
         folded = _reflect_invalid(
             f"{_V2_INVALID_ASSESSMENT_PREFIX}{why}",
             decision.invalid_requested_action or decision.next_action)
@@ -3635,6 +3856,43 @@ class ReasoningRetriever:
         # 请求是真实存在过的。身份串在折叠前算好带走,否则观察行会把一次
         # `search_chunks "布局收敛"` 显示成"(无请求)",模型下一轮既看不出自己
         # 请求了什么,也无从判断该不该重来一次。
+        folded.invalid_request_identity = v2_request_identity(decision)
+        return folded
+
+    def _nudge_missing_assessment(
+        self, state: "_ReasoningRunState", decision: "ReflectDecision",
+    ) -> "ReflectDecision":
+        """收尾载荷没有自评任何方面 ⇒ 退回一次并追问(§7.1)。v2-only。
+
+        判据只认**收尾**那一种载荷:`next_action == "answer"` 且
+        `sufficient is True`。那句话的字面意思是"每个必答方面都已经有支撑",而
+        方面账是这句话唯一的落点——载荷里没有 `assessment`,账本一格都不更新,
+        同一份决定于是在两处给出互相矛盾的读数(模型说够了 / 服务端的清单上全是
+        unknown),`classify_termination` 据后者判 `model_partial`,合成 prompt 恒
+        挂一句「仍有方面没有完整支撑」。2026-09-08 实测里 16 个 run 全部落在这个
+        形状上,14 个的直接原因就是这一格空着。
+
+        **`sufficient=false` 的部分收尾不强制**:那句话本来就是"我知道还差东西",
+        与一张 unknown 的方面账不矛盾,退回它只是白扣一步。带了检索动作的轮次同理
+        ——它们还没有在宣布任何结论。
+
+        退回走 T2 已有的那条路(`_reflect_invalid` 伪动作 → 链尾零 I/O 观察 → 扣
+        一步 → 进 stale 记账),不新造第二种"这一轮不算数"的机制。追问只发一次:
+        第二次仍然空着,`note_missing_assessment` 返回 False,这份收尾照原样被接受,
+        快照里的 `assessment_omitted` 记下"问过了、它不给"。
+        """
+        if (decision.next_action != "answer"
+                or decision.sufficient is not True
+                or not assessment_is_empty(decision.assessment)):
+            return decision
+        if not state.aspects.note_missing_assessment():
+            return decision
+        folded = _reflect_invalid(
+            _V2_MISSING_ASSESSMENT,
+            decision.invalid_requested_action or decision.next_action)
+        # 与 `invalid_assessment:` 同理:这一轮模型真的请求了 `answer`,观察行该
+        # 显示它,而不是一句"(无请求)"。`answer` 没有参数,身份串因此是空的——
+        # 这里带走的是**动作 id**(上面那个参数),不是参数串。
         folded.invalid_request_identity = v2_request_identity(decision)
         return folded
 
@@ -3654,18 +3912,65 @@ class ReasoningRetriever:
         self, state: "_ReasoningRunState", decision: "ReflectDecision",
         budget_left: int,
     ) -> "ReflectDecision":
-        """一轮 reflect 决定的 v2 记账:先吸收方面自评,再登记动作观察。
+        """一轮 reflect 决定的 v2 记账:先处理调用失败,再吸收方面自评,最后
+        登记动作观察。
 
-        顺序是硬的:`_absorb_assessment` 可能把整份决定折成一条 invalid 伪动作,
-        而观察账要记的是**折叠之后**那个决定(否则账上会出现一次实际没有发生的
-        检索请求)。返回的就是后续 `run()` 唯一该认的那份决定。
+        顺序是硬的:`_survive_reflect_failure` 可能把一份 fail-open 兜底决定折成
+        可继续的 invalid 伪动作,`_absorb_assessment` 可能把一份正常决定折成另一
+        种 invalid 伪动作,而观察账要记的是**折叠之后**那个决定(否则账上会出现
+        一次实际没有发生的检索请求)。返回的就是后续 `run()` 唯一该认的那份决定。
+
+        兜底决定不进 `_absorb_assessment`:它的 `assessment` 恒为 None、
+        `next_action` 恒为 `answer`、`sufficient` 恒为 True——那三格**不是模型
+        填的**,拿它去触发"收尾必须自评"的追问,等于对着一次 provider 故障要求
+        模型补交作业。
         """
-        decision = self._absorb_assessment(state, decision)
+        decision = self._survive_reflect_failure(state, decision)
+        if not decision.fallback:
+            decision = self._absorb_assessment(state, decision)
         state.record.observer.note_decision(
             decision.invalid_requested_action or decision.next_action,
             v2_request_identity(decision), decision.reason,
             f"剩余步数 {budget_left}", v2_request_query_text(decision))
         return decision
+
+    def _survive_reflect_failure(
+        self, state: "_ReasoningRunState", decision: "ReflectDecision",
+    ) -> "ReflectDecision":
+        """一次反思调用失败**不再直接终止整次检索**(v2-only)。
+
+        接入前的合同是:provider/JSON 在既有重试之后仍失败 ⇒ `_reflect_fallback`
+        产出 `answer` + `sufficient=True` ⇒ `run()` 当场 break。于是一次抖动
+        (2026-09-08 实测:118 次调用里 24 次正文为空)就把整次检索砍掉,而**已经
+        到手的证据与刚播下的方向全部作废**——这与"模型看着证据决定停下"在结果上
+        无法区分,只在 `fallback_reason` 那一格留了个记号。
+
+        新合同:第一次失败折成一条零 I/O 的降级观察,这一轮当作没有进展的 stale
+        轮继续走(链尾的 no_progress/stale 记账原样生效,所以反复失败仍然会被既有
+        熔断收住);**连续第二次**失败才把兜底决定原样交回去,由 `run()` 按既有
+        fail-open 收尾,`classify_termination` 读到那条带 `fallback_reason` 的
+        reflect 步,终态 `model_degraded`。首轮失败走同一条路——首轮没有任何豁免
+        理由,那时作废的东西反而最多(整次检索还没开始)。
+
+        中间任何一轮成功都清零:计数问的是"这条模型通道是不是塌了",而不是"这次
+        run 一共抖过几次"。取消(`AskCancelled`)与 `fail_closed` 的阶段错误从不
+        到这里——它们在 `_reflect_v2` 里照常上抛。
+        """
+        if not decision.fallback:
+            state.reflect_failures = 0
+            return decision
+        state.reflect_failures += 1
+        if state.reflect_failures >= REFLECT_MAX_CONSECUTIVE_FAILURES:
+            return decision
+        # 折成 invalid 伪动作而不是"带着 fallback 标记继续":`_terminal_marker`
+        # 认的正是 reflect 步 detail 上那一格 `fallback_reason`,留着它,一次已经
+        # 恢复了的抖动会在收尾时把终态写成 `model_degraded`——而 §7.2 的
+        # `model_degraded` 说的是"这次 run 是踩着一次失败结束的"。
+        folded = _reflect_invalid(
+            f"{_V2_MODEL_DEGRADED_PREFIX}{decision.fallback_reason}")
+        # 观察行上那句「原因=model_degraded:output_budget_exhausted」是给模型看
+        # 的:它据此知道下一轮该缩短输出,而不是只看到一句"上一轮没成"。
+        return folded
 
     def _run_termination(
         self, state: "_ReasoningRunState",
@@ -3704,6 +4009,12 @@ class ReasoningRetriever:
                 "model_assessed_sufficient":
                     termination.model_assessed_sufficient,
                 "aspect_source": state.aspects.source,
+                # 「服务端问过之后模型仍然没有自评」的方面数(§7.1)。与
+                # `unresolved_aspects` 分开:后者数的是"还没有支撑",而这一格数
+                # 的是"模型根本没参与判断"——放量评估要能把一次协议不合作与一次
+                # 正常的中途收尾分开,否则两者在终态上完全同形。
+                "aspects_assessment_omitted": sum(
+                    1 for row in termination.aspects if row.assessment_omitted),
                 # 纯披露(§7.2):这次 run 里最后一次执行仍是失败的通道。它不参与
                 # `reason`,但必须说出去——"KG 那条路今天没走通"是用户重试/换问法
                 # 时唯一有用的那条线索,只留在服务器内存里等于没记。动作 id 是内部
@@ -3788,7 +4099,11 @@ class ReasoningRetriever:
                 ),
                 timeout=self.settings.reasoning_timeout_seconds,
                 max_retries=self.settings.reasoning_max_retries,
-                cancel_event=self.cancel_event)
+                cancel_event=self.cancel_event,
+                # 输出预算是**部署配置不是策略**:legacy 与 v2 同一个工种,拿同一
+                # 个数。这是 v2 总闸关着时 legacy 路径唯一改变的行为(prompt /
+                # schema / trace 逐字未动)。
+                **reasoning_budget_kwargs(self.settings))
             data = json.loads(raw)
             if not isinstance(data, dict):
                 if self.fail_closed:

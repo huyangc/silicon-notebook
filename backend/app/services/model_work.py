@@ -262,8 +262,20 @@ class ModelNotConfiguredError(ModelProviderError):
 
 
 class MalformedModelResponse(ModelProviderError):
-    def __init__(self, message: str = "malformed model response") -> None:
+    def __init__(
+        self, message: str = "malformed model response", *,
+        finish_reason: str = "",
+    ) -> None:
         super().__init__(message, code="malformed_response")
+        #: The provider's own reason for ending this completion ("length",
+        #: "stop", …), when the caller asked the transport for it. It is
+        #: DIAGNOSTIC CONTEXT, never a code to branch the error class on: an
+        #: empty body with finish_reason="length" and one with finish_reason
+        #: "stop" are the same malformed response, but the first is a budget
+        #: that ran out and the second is a model that returned nothing, and
+        #: only the consumer knows which remedy applies. Empty = unknown (a
+        #: thin server omitted it, or nobody asked).
+        self.finish_reason = finish_reason
 
 
 @dataclass(frozen=True)

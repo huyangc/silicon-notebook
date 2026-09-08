@@ -85,6 +85,18 @@ REFLECT_ASPECT_MAX_EVIDENCE_KEYS = 8
 #: 一个方面的 `gap`(模型写的"还缺什么")最多多少字符。
 REFLECT_ASPECT_GAP_MAX_CHARS = 240
 
+#: **服务端签发的集合身份键**的前缀(§7.1)。目录题("这个库里有哪些文档?")的
+#: 支撑不是任何一条细粒度证据,而是「这个集合已经被完整列出」这件事本身——枚举
+#: 条目按合同不进候选池、也没有对模型可见的 id,所以没有它,一个覆盖完整的目录
+#: 问答**结构上**永远拿不到 supported。
+#:
+#: 它只由服务端为 **coverage 完整**的枚举链签发并展示(见
+#: `reasoning_retrieval.enum_evidence_key`);模型自己拼一个出来,`AspectLedger`
+#: 照常剔除(合法集是服务端算出来的那一份,不是按前缀放行)。§7.1 原来那条
+#: 「集合/来源身份不能冒充细粒度证据」因此收窄成「**未完整**枚举的集合身份不能
+#: 冒充」——完整枚举是一个服务端自己记的、可核对的事实,而不是模型的自述。
+ASPECT_COLLECTION_KEY_PREFIX = "enum:"
+
 
 @dataclass(frozen=True, slots=True)
 class AspectSnapshot:
@@ -106,6 +118,13 @@ class AspectSnapshot:
     model_assessed: bool = False
     #: 服务端把一个自报 supported 的方面降下来的依据(见上面两个常量)。
     demotion: str = ""
+    #: 服务端**问过之后**模型仍然没有对这个方面给出任何判断。与
+    #: `model_assessed=False` 刻意分开:后者只说"这一格没有模型判断",而它可能
+    #: 只是因为 run 早早被熔断/预算收尾,模型根本没走到收尾那一步;这一格说的
+    #: 是"模型宣布证据已足、服务端退回并明确要它逐个自评、它第二次仍然没给"
+    #: (§7.1)。放量评估要能把这两种沉默分开数,否则一次协议不合作会被读成一次
+    #: 正常的中途收尾。
+    assessment_omitted: bool = False
 
 
 @dataclass(frozen=True, slots=True)

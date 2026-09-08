@@ -32,6 +32,7 @@ from typing import (
 )
 
 from app.domain.retrieval_termination import (
+    ASPECT_COLLECTION_KEY_PREFIX,
     ASPECT_CONFLICTING, ASPECT_PARTIAL, ASPECT_SUPPORTED, ASPECT_UNKNOWN,
     ASPECT_UNRESOLVED_STATUSES, AspectDelivery, AspectSnapshot,
     DEMOTION_KEYS_MISSING, DEMOTION_KEYS_REJECTED,
@@ -54,6 +55,17 @@ from app.services.reasoning_observation import (
 #: 方面数上限。复用 `QueryIntentContract.mandatory_topics` 的既有契约上限
 #: (`max_length=16`),不另立一个会与它分叉的数。
 REFLECT_ASPECT_MAX_COUNT = 16
+
+#: 收尾载荷缺 `assessment` 时,服务端最多**退回并追问几次**。
+#:
+#: 1 是刻意的。2026-09-08 的本机实测里 16 个 run 全部终于 `model_partial`,而
+#: 其中 14 个的根因是同一件事:模型在 `answer` + `sufficient=true` 的那一轮
+#: 根本没填 `assessment`,方面账因此一格都没更新,合成 prompt 于是恒收到「仍有
+#: 方面没有完整支撑」——一句与检索实际成色无关的话。追问一次把「忘了填」这一类
+#: 救回来;追问第二次要花的是模型不合作时的真金白银(一轮反思调用 + 一步预算),
+#: 而它换不回新的信息:第二次仍然不填,说明这不是遗漏。所以第二次直接接受收尾,
+#: 并把「问过了、它没给」如实记进快照(`assessment_omitted`),不再空转。
+REFLECT_ASSESSMENT_MAX_PROMPTS = 1
 
 #: 方面 id 的构造:契约顺序 + 1 起编,`a1..aN`。确定性(同一份契约永远得到同一
 #: 组 id),而且**不含用户内容**——id 会被模型抄回来,让它承载问题原文等于给
@@ -83,6 +95,17 @@ ASPECT_BLOCK_TITLE = "【必答方面 — 用户确认过的必答清单，服�
 ASPECT_BLOCK_NOTE = (
     "（上面的状态是此前某一轮模型自己的判断，不是服务端对语义支撑的证明；"
     "本轮请在同一份 JSON 的 assessment 里重新给出，省略的方面保留现状。）"
+)
+#: 收尾载荷缺 `assessment` 被退回之后,下一轮回喂的那一句。**指名道姓列出方面
+#: id**:上一轮那份载荷证明了泛泛一句「请填 assessment」不够——它在系统段里已经
+#: 说过一遍了。这里说的是「就这几个 id,一个都不能少」,并把再次省略的后果写在
+#: 同一句里,让模型知道沉默不会换来另一次追问。
+ASPECT_ASSESSMENT_NUDGE = (
+    "⚠ 上一轮你在收尾（next_action=answer 且 sufficient=true）时没有给出 "
+    "assessment，那一轮已被退回、未执行任何检索。本轮的 JSON 必须带 "
+    "assessment，并对下面每一个方面 id 各给一条判断——有支撑的放进 supported "
+    "并附上证据卡上的键，还缺东西的放进 unresolved 并附上 status 与 gap："
+    "{ids}。若再次省略，服务端将按「仍有方面没有完整支撑」收尾。"
 )
 
 
@@ -142,6 +165,7 @@ class _AspectRecord:
     gap: str = ""
     model_assessed: bool = False
     demotion: str = ""
+    assessment_omitted: bool = False
 
     def snapshot(self) -> AspectSnapshot:
         return AspectSnapshot(
@@ -149,6 +173,7 @@ class _AspectRecord:
             status=self.status, evidence_keys=self.evidence_keys,
             gap=self.gap, model_assessed=self.model_assessed,
             demotion=self.demotion,
+            assessment_omitted=self.assessment_omitted,
         )
 
 
@@ -172,7 +197,10 @@ class AspectLedger:
     没说它",不是"删掉它";必答清单本身只能由用户的契约改变(§7.1)。
     """
 
-    __slots__ = ("_records", "_by_id", "source", "constraints")
+    __slots__ = (
+        "_records", "_by_id", "source", "constraints",
+        "assessment_prompts", "assessment_omitted",
+    )
 
     def __init__(
         self, questions: Sequence[str], *, source: str,
@@ -186,6 +214,12 @@ class AspectLedger:
         self._by_id = {row.aspect_id: row for row in self._records}
         self.source = source
         self.constraints: Tuple[str, ...] = tuple(constraints)
+        #: 服务端已经因为「收尾载荷缺 assessment」退回过几轮(见
+        #: `note_missing_assessment`)。
+        self.assessment_prompts: int = 0
+        #: 追问用完之后模型仍然没给自评 ⇒ 这次 run 的方面账是**模型没参与**的
+        #: 那一种,不是"它判断还差东西"。
+        self.assessment_omitted: bool = False
 
     # --- 读 ---------------------------------------------------------------
     @property
@@ -228,6 +262,39 @@ class AspectLedger:
                     out.append(keys[depth])
             depth += 1
         return tuple(out)
+
+    # --- 写:收尾载荷缺自评(§7.1) ----------------------------------------
+    def note_missing_assessment(self) -> bool:
+        """模型在收尾那一轮没有给出 `assessment`。返回 True = 退回并追问一次。
+
+        为什么不接受这种收尾:`answer` + `sufficient=true` 的字面意思是「每个必答
+        方面都已经有支撑」,而**方面账是这句话的唯一落点**。载荷里没有
+        `assessment`,账本就一格都不更新,于是同一份决定在两处给出互相矛盾的读
+        数——模型说够了,服务端的必答清单上全是 `unknown`。`classify_termination`
+        据后者判 `model_partial`,合成 prompt 因此恒挂一句「仍有方面没有完整支
+        撑」。这不是"保守",而是**服务端根本没拿到模型的判断**却按它作了叙述。
+
+        追问一次而不是无限次(见 `REFLECT_ASSESSMENT_MAX_PROMPTS`)。用完之后接受
+        收尾,并把还没被判断过的方面标上 `assessment_omitted`——它们的状态仍然是
+        `unknown`(服务端从不替模型判 supported),但快照里从此能分出"模型没走到
+        这一步"与"问过了、它不给"。
+
+        `sufficient=false` 的部分收尾**不走这里**:那句话的意思本来就是"我知道
+        还差东西",与一张全是 unknown 的方面账并不矛盾,退回它只是白扣一步。
+
+        没有方面的 run(兼容路径下问题原文为空)返回 False:没有清单可以逐个自评,
+        追问一句"请对下列 0 个方面各给一条判断"只会烧掉一轮。
+        """
+        if not self._records:
+            return False
+        if self.assessment_prompts >= REFLECT_ASSESSMENT_MAX_PROMPTS:
+            self.assessment_omitted = True
+            for row in self._records:
+                if not row.model_assessed:
+                    row.assessment_omitted = True
+            return False
+        self.assessment_prompts += 1
+        return True
 
     # --- 写(唯一入口) ----------------------------------------------------
     def apply(
@@ -344,6 +411,29 @@ def _legal_keys(
     return (), DEMOTION_KEYS_MISSING
 
 
+def assessment_is_empty(assessment: object) -> bool:
+    """这份 `assessment` 有没有对**任何一个**方面表态。
+
+    三种载荷在这里是同一件事:字段缺省(`None`)、`{}`、以及
+    `{"supported": [], "unresolved": []}`。协议上它们都说"我这一轮没有新判断",
+    而收尾那一轮不允许没有判断(见 `note_missing_assessment`)。
+
+    刻意**不看内容合法性**:一份带了行但越界的载荷由 `apply` 判(它会整份拒并
+    折成 `invalid_assessment:<why>`),两条路各说各的——把"给了但不合法"也算成
+    "没给",模型会收到一句要它填它其实已经填了的东西的追问。
+
+    非 Mapping(模型回了个列表/字符串)也算空:`apply` 对它返回 `not_object`,
+    但那条路只在字段存在时才走到;这里只回答"有没有表态",答案同样是没有。
+    """
+    if not isinstance(assessment, Mapping):
+        return True
+    for group in ("supported", "unresolved"):
+        rows = assessment.get(group)
+        if isinstance(rows, (list, tuple)) and rows:
+            return False
+    return True
+
+
 def build_aspect_ledger(intent_detail: object, question: str) -> AspectLedger:
     """按 §7.1 的三条来源建账。**不新增任何模型调用、不做重规划。**
 
@@ -421,6 +511,12 @@ def render_aspect_block(ledger: AspectLedger) -> str:
         lines.append(
             "约束条件: " + "、".join(_fold(item) for item in ledger.constraints))
     lines.append(ASPECT_BLOCK_NOTE)
+    if ledger.assessment_prompts and not ledger.assessment_omitted:
+        # 追问只在**已经退回过、而且还没放弃**的那一段时间里出现。放弃之后
+        # (`assessment_omitted`)这一轮就是最后一轮,再挂一句"下次要填"是对着一个
+        # 不会再来的回合说话。
+        lines.append(ASPECT_ASSESSMENT_NUDGE.format(
+            ids="、".join(ledger.aspect_ids)))
     return "\n".join(lines)
 
 
@@ -615,7 +711,16 @@ def review_aspect_delivery(
     cited: List[str] = []
     undelivered: List[str] = []
     for aspect in termination.aspects:
-        keys = set(aspect.evidence_keys)
+        # 集合身份键(`enum:…`)不进这本账的任何一格。它不是候选池里的一条证据,
+        # 所以既不会出现在 `admitted_keys`(那是最终 `id_map` 的 object_id),也
+        # 不会出现在 `cited_keys`(答案里的 `[k]` 锚点)——把它留在集合里,一个
+        # **只**靠"目录已列全"支撑的方面会被恒判未送达,而那条支撑其实压根不走
+        # 证据预算这条路(枚举结果另有自己的合成通道)。只绑集合键的方面因此在
+        # 三格里都不出现:如实的"这一格答不了",而不是一个假的"没送达"。
+        keys = {
+            key for key in aspect.evidence_keys
+            if not key.startswith(ASPECT_COLLECTION_KEY_PREFIX)
+        }
         if aspect.status == ASPECT_SUPPORTED:
             model_supported.append(aspect.aspect_id)
         if keys & admitted_keys:

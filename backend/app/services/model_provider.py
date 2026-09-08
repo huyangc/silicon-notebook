@@ -15,7 +15,7 @@ from typing import Any, Callable, Literal
 
 from app.core.config import Settings
 from app.core.ask_context import _ASK_MODEL_ERRORS
-from app.core.llm import OpenAICompatibleClient
+from app.core.llm import CALL_STATS_KWARG, OpenAICompatibleClient
 from app.core.llm_logging import (
     current_interaction_support_id,
     interaction_support_scope,
@@ -442,6 +442,10 @@ class _ScheduledAdapter:
 
 class ScheduledJsonChatClient(_ScheduledAdapter):
     settings: Settings
+    #: Forwards the ``call_stats`` out-parameter to the physical client (see
+    #: ``app.core.llm.CALL_STATS_KWARG``). Both ends must declare it: the
+    #: reflect layer only passes a sink to a client that says it fills one.
+    supports_call_stats = True
 
     def __init__(
         self, provider, workload, *, initial_runtime=None, pinned_runtime=None
@@ -490,6 +494,7 @@ class ScheduledJsonChatClient(_ScheduledAdapter):
         bypass_cache=False,
         response_validator: Callable[[str], bool] | None = None,
         thinking_mode: Literal["enabled", "disabled"] | None = None,
+        call_stats: dict[str, Any] | None = None,
     ) -> str:
         # Freeze the physical runtime and its workload policy from the same
         # hot-reloaded registry generation.  A queued call may then finish on
@@ -531,6 +536,10 @@ class ScheduledJsonChatClient(_ScheduledAdapter):
                         else configured_thinking_mode
                     )
                 ),
+                # Forwarded only when the caller asked for it, so every
+                # duck-typed physical client keeps its current signature.
+                **({CALL_STATS_KWARG: call_stats}
+                   if call_stats is not None else {}),
             )
             raw_response = content if isinstance(content, str) else str(content)
             repair_mode = (
@@ -551,7 +560,10 @@ class ScheduledJsonChatClient(_ScheduledAdapter):
                     self._emit_json_repair_event(
                         status="rejected", reason=exc.reason
                     )
-                raise MalformedModelResponse() from exc
+                raise MalformedModelResponse(
+                    finish_reason=str(
+                        (call_stats or {}).get("finish_reason") or "")
+                ) from exc
             if parsed.repaired:
                 self._emit_json_repair_event(
                     status=(
