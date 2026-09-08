@@ -2579,10 +2579,14 @@ def _search_loop_concurrent(
     started_at = time.monotonic()
 
     def abort(reason: str) -> None:
-        if aborted.is_set():
-            return
-        aborted.set()
+        # `aborted.set()` 与快照 `active_events` 在同一把锁里(codex #700 R21
+        # P2):否则一个刚过了入口 `aborted` 检查、还在解析范围的 worker 会在快照
+        # 之后才登记事件,带着一个永远不会被 set 的 cancel_event 开始调模型,
+        # 而 `shutdown(wait=True)` 只能等它跑完。
         with active_lock:
+            if aborted.is_set():
+                return
+            aborted.set()
             events = list(active_events)
         for event in events:
             event.set()
@@ -2604,6 +2608,10 @@ def _search_loop_concurrent(
             return row, 0.0, None, None
         cancel_event = threading.Event()
         with active_lock:
+            # 与 `abort()` 在同一把锁下复核:收摊已经开始就不再登记、不再开跑
+            # (codex #700 R21 P2)。
+            if aborted.is_set():
+                return None
             active_events.append(cancel_event)
         ctx = set_request_user(profile)
         try:
