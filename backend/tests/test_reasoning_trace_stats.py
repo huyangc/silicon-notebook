@@ -335,6 +335,22 @@ def test_first_hit_attribution_and_shared_hits():
     assert shared == 1
 
 
+def test_shared_hits_are_unknown_when_anchors_are_unavailable():
+    """只跑检索的 search run 没有 synthesis 步,锚点集合不可信,每一步都绕过了
+    共享命中记账——此时 `shared_hits` 是「没法数」而不是 0(codex #700 R18 P2):
+    分析脚本会把 0 当成观测到的零重叠样本。"""
+    steps = [
+        step("ppr", {"phase": "seed", "result_ids": ["a", "b"]}),
+        reflect("search_chunks"),
+        step("search_chunks", {"result_ids": ["b", "c"]}),
+    ]
+    contribution, shared = citation_contribution(normalize_steps(steps))
+    assert shared is None
+    assert contribution["seed:ppr"]["cited_hits"] is None
+    row = project_run(JOB, steps, PAYLOAD)
+    assert row["shared_hits"] is None and row["anchors"] is None
+
+
 def test_truncated_result_ids_poison_only_that_step():
     steps = [
         step("ppr", {"phase": "seed", "result_ids": ["a"],
