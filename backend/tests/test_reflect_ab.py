@@ -1052,3 +1052,15 @@ def test_ab_loop_keeps_the_two_arms_together_even_when_units_run_concurrently(
     assert len(rows) == 8
     assert all(row["paired"] is True for row in rows)
     assert all(set(row) <= AB_PROJECTION_KEYS for row in rows)
+
+
+def test_the_rig_and_the_projection_agree_on_what_the_two_arms_are():
+    """臂的词表在两处出现(rig 声明侧、投影侧),必须逐字相同。
+
+    分叉不会当场报错,而是安静地伤到 `mark_paired`:它按 `len(ARMS)` 判「两臂
+    都在场」,词表少一项就会把每一行标成未配对,整张差值表凭空空掉。
+    """
+    from app.eval.reflect_ab import ARMS
+
+    assert rig.AB_ARMS == ARMS
+    assert set(ARMS) == set(rig.POLICIES)
