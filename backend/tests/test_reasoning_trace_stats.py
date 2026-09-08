@@ -22,6 +22,7 @@ from app.domain.reasoning_trace_stats import (
     normalize_steps,
     project_report_section,
     project_run,
+    project_search_run,
     source_bucket,
 )
 
@@ -528,3 +529,150 @@ def test_report_section_without_grounding_is_unknown_not_false():
     assert row["grounded"] is None
     assert row["evidence_level"] == UNKNOWN
     assert row["top_relevance"] is None
+
+
+# --- search(rig 的进程内检索 run) ------------------------------------------
+
+
+def _search_steps(*extra):
+    """一条只检索、不合成的轨迹:plan → retrieve → reflect → answer。
+
+    `answer` 是 `ReasoningRetriever.run` 自己的收尾步(候选池计数在它的 detail
+    里);**synthesis 步不在其中**——那一步由 Ask 的合成阶段写,而这条路没有。
+    """
+    return [
+        step("plan", {"count": 1}, duration_ms=10),
+        step("retrieve", {"query": "q", "new": 3}, duration_ms=20),
+        *extra,
+        step("answer", {"kg": 7, "elements": 2}, duration_ms=5),
+    ]
+
+
+def _search_row(steps, *, result=None, policy="legacy", **overrides):
+    kwargs = {
+        "result": result,
+        "effort": "standard",
+        "policy": policy,
+        "question_key": "B-q03",
+        "corpus_cell": "B_kg",
+        "kg_in_scope": True,
+    }
+    kwargs.update(overrides)
+    return project_search_run(steps, **kwargs)
+
+
+def test_search_run_declares_its_consumer_and_trace_source():
+    """两个标签只能由 rig 声明(没有 job、没有 synthesis 步),但仍过闭集。"""
+    row = _search_row(_search_steps(reflect("answer", True)))
+    assert set(row) <= RUN_PROJECTION_KEYS
+    assert row["consumer"] == "ask_single"
+    assert row["trace_source"] == "in_process"
+    assert row["corpus_cell"] == "B_kg" and row["question_key"] == "B-q03"
+    assert row["status"] == "done" and row["mode"] == "reasoning"
+    assert row["kg_in_scope"] is True
+    assert row["candidates_kg"] == 7 and row["candidates_elements"] == 2
+
+
+def test_search_run_without_a_termination_fact_infers_legacy():
+    """`result.termination` 是 **v2-only**,`None` 就是 legacy。
+
+    此时结束原因走 `project_run` 已经做过的那次反推,`termination_inferred`
+    必须是 True —— 「反推出来的」和「run 自己记下来的」不是同一个可信度。
+    """
+    row = _search_row(_search_steps(reflect("answer", True)))
+    assert row["policy_version"] == "legacy"
+    assert row["termination_reason"] == TERMINATION_MODEL_END
+    assert row["termination_inferred"] is True
+    # 方面账是 v2 的东西,legacy 一条都读不出来 —— unknown,不是 0。
+    assert row["aspects_total"] is None and row["aspects_pending"] is None
+    assert row["unrecovered_channels_count"] is None
+
+
+def test_search_run_reads_the_termination_dto_not_the_trace_step():
+    """v2 的权威是 `RetrievalTermination` 这个 DTO,不是它在轨迹里的那份渲染。
+
+    所以这条用例的轨迹里**一条 v2 终态步都没有**:只看轨迹的话
+    `project_run` 会判成 legacy。DTO 在场就必须翻过来——它是构造期就过了闭集
+    守卫的事实,而轨迹步只是它的一次渲染,可能被截尾、可能还没写。
+    """
+    from app.domain.retrieval_termination import (
+        AspectSnapshot,
+        RetrievalTermination,
+    )
+
+    termination = RetrievalTermination(
+        reason="model_partial",
+        unresolved_aspect_ids=("a2",),
+        unrecovered_channels=("search_chunks", "add_subquery"),
+        aspects=(
+            AspectSnapshot(aspect_id="a1", question="Q1", status="supported"),
+            AspectSnapshot(aspect_id="a2", question="Q2", status="partial"),
+        ),
+    )
+    row = _search_row(
+        _search_steps(reflect("answer", True)),
+        result=type("_Result", (), {"termination": termination})(),
+        policy="v2",
+    )
+    assert row["policy_version"] == "v2"
+    assert row["termination_reason"] == "model_partial"
+    assert row["termination_inferred"] is False
+    assert row["aspects_total"] == 2 and row["aspects_pending"] == 1
+    assert row["unrecovered_channels_count"] == 2
+
+
+def test_search_run_leaves_every_synthesis_only_metric_unknown():
+    """没跑合成 ⇒ 锚点/进 prompt 的证据数/每动作引用贡献一律 unknown。
+
+    0 会被读成「一条证据都没进 prompt」「一个锚点都没有」,那是一句关于合成的
+    假话:这条 run 压根没走到合成。`citation_contribution` 同理——每动作的
+    `steps` 计数还在,但整张表的意义是"被引用了多少",在没有答案的 run 上
+    不成立。
+    """
+    row = _search_row(_search_steps(reflect("ppr"), reflect("answer", True)))
+    for key in ("anchors", "included_kg", "included_chunks",
+                "included_elements", "citation_contribution"):
+        assert row[key] is None, key
+    assert row["reflect_turns"] == 2
+
+
+def test_search_run_keeps_synthesis_metrics_when_a_synthesis_step_exists():
+    """闸判的是「有没有 synthesis 步」,不是「是不是 search 这条路」。
+
+    合成真的跑过的时候,那几列必须照常出——否则这个 unknown 会从"如实"变成
+    "一律抹掉"。
+    """
+    steps = _search_steps(
+        reflect("answer", True),
+        step("synthesis", {"anchors": 4, "included_kg": 6,
+                           "anchor_evidence_ids": ["e1"]}),
+    )
+    row = _search_row(steps)
+    assert row["anchors"] == 4 and row["included_kg"] == 6
+    assert isinstance(row["citation_contribution"], dict)
+
+
+def test_search_run_rejects_a_policy_outside_the_closed_set():
+    with pytest.raises(ValueError, match="unknown policy"):
+        _search_row(_search_steps(), policy="reflect-v3")
+
+
+def test_search_run_marks_kg_out_of_scope_when_the_caller_says_so():
+    """`kg_in_scope` 由调用方的直接判定(一次 EXISTS)决定,盖掉轨迹反推。
+
+    无图格里模型照样可能发出一个空手的图检索步,而那条步的形状会被
+    `project_run` 读成"图有产出"。调用方手上的事实更硬。
+    """
+    row = _search_row(_search_steps(reflect("answer", True)), kg_in_scope=False)
+    assert row["kg_in_scope"] is False
+
+
+def test_search_run_records_whether_an_intent_contract_was_used():
+    without = _search_row(_search_steps(reflect("answer", True)))
+    with_intent = _search_row(
+        _search_steps(reflect("answer", True)), has_intent_contract=True
+    )
+    assert without["has_intent_contract"] is False
+    assert with_intent["has_intent_contract"] is True
+    # 契约内容一个字都不进投影:行里只多一个布尔。
+    assert set(without) == set(with_intent)

@@ -11,9 +11,21 @@ import json
 import re
 import sqlite3
 import sys
+import threading
 from pathlib import Path
 
 import pytest
+
+from tests.model_testkit import bind_chat_client
+# `search` 的接线用例借的是 reasoning 检索自己那套测试替身:一个 SQLite 上的
+# 真 repo(`rrepo`)加两个按序列作答的假模型。**不另起一份**——那两个替身钉的
+# 正是 legacy / v2 两套 reflect 协议的真实载荷形状,抄一份只会让它们分叉。
+from tests.test_reasoning_retrieval import (  # noqa: F401 — rrepo 是 fixture
+    _GatedV2LLM,
+    _SeqLLM,
+    _seed_two_nodes,
+    rrepo,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = ROOT / "scripts"
@@ -88,7 +100,8 @@ def test_dry_run_plan_covers_each_cell_effort_and_question(capsys):
 
 def test_dry_run_touches_nothing(tmp_path, capsys):
     out_dir = tmp_path / "t0"
-    for command in ("seed", "ask", "report", "restart", "export", "teardown"):
+    for command in ("seed", "ask", "report", "search", "restart", "export",
+                    "teardown"):
         assert rig.main(["--dry-run", "--out-dir", str(out_dir), command]) == 0
     capsys.readouterr()
     assert not out_dir.exists()
@@ -468,3 +481,186 @@ def test_analysis_refuses_an_unknown_group_by_dimension(tmp_path):
     source = _write_rows(tmp_path / "rows.jsonl", [_row()])
     with pytest.raises(SystemExit):
         analyze.main([str(source), "--group-by", "question"])
+
+
+# --- search 子命令 -----------------------------------------------------------
+
+
+def test_dry_run_search_enumerates_two_cells_two_policies_two_efforts(capsys):
+    assert rig.main(["--dry-run", "--limit", "5", "search"]) == 0
+    printed = capsys.readouterr().out
+    # 5 题 × 2 格 × 2 策略 × 2 档 = 40。
+    assert "planned runs  40" in printed
+    assert "policy=legacy effort=standard" in printed
+    assert "policy=v2 effort=deep" in printed
+    # `search` 不建库也不建图,所以另外两格在主库上根本不存在,不许出现在计划里。
+    assert "A_kg" not in printed and "B_nokg" not in printed
+    # 主库连接必须显式给:`--database-url` 的默认值指向的是 ask/seed 的测试库。
+    assert "<MISSING:必须显式给>" in printed
+    # 调用量估计:每题一次意图 + 不调 plan(已确认意图直接作首轮种子)。
+    assert "intent 10 + plan 0 + reflect ≤" in printed
+
+
+def test_dry_run_search_charges_a_plan_call_per_run_without_intent(capsys):
+    assert rig.main(["--dry-run", "--limit", "1", "--no-intent", "search"]) == 0
+    printed = capsys.readouterr().out
+    assert "intent 0 + plan 8 + reflect ≤" in printed
+
+
+def test_search_plan_pairs_the_two_policies_and_carries_no_idempotency_key():
+    questions = rig.load_questions()
+    plan = rig.search_plan(
+        questions, cells=list(rig.SEARCH_CELLS), policies=rig.POLICIES,
+        limit=5, lang="zh", efforts=rig.EFFORTS,
+    )
+    assert len(plan) == 40
+    # `search` 一条 ask_jobs 都不写,留着幂等键会让人以为库里查得到这批 run。
+    assert all("client_request_id" not in item for item in plan)
+    sides = {
+        policy: [(item["question_key"], item["corpus_cell"], item["effort"])
+                 for item in plan if item["policy"] == policy]
+        for policy in rig.POLICIES
+    }
+    assert sides["legacy"] == sides["v2"]
+
+
+def test_search_preflight_requires_the_main_database_url_and_both_notebooks():
+    """两个硬前提在**跑之前**就说清楚,而不是跑到一半才发现连错了库。"""
+    args = rig.build_parser().parse_args(["search"])
+    args.database_url_explicit = False
+    assert "必须显式给 --database-url" in rig._search_preflight(
+        args, ["A_nokg"], {})
+    args.database_url_explicit = True
+    assert "--source-notebook-a" in rig._search_preflight(
+        args, ["A_nokg"], {})
+    assert "--source-notebook-b" in rig._search_preflight(
+        args, ["B_kg"], {"A_nokg": "nb-a"})
+    assert rig._search_preflight(
+        args, ["A_nokg", "B_kg"], {"A_nokg": "nb-a", "B_kg": "nb-b"}
+    ) == ""
+    # `--cell A_kg search` 这种选空了的组合不许静默跑出零个 run。
+    assert "不在 search 的范围里" in rig._search_preflight(args, [], {})
+
+
+def test_search_process_env_forces_every_injection_switch_off():
+    """主库只读不许依赖「那三个端口恰好没接线」这个会随重构漂移的前提。"""
+    args = rig.build_parser().parse_args(
+        ["--database-url", "postgresql://127.0.0.1:5432/main", "search"])
+    env = rig._search_process_env(args)
+    assert env["DATABASE_URL"] == "postgresql://127.0.0.1:5432/main"
+    assert env["RETRIEVAL_EXPERIENCE_INJECT_ENABLED"] == "false"
+    assert env["REASONING_CONSULT_MEMORY_ENABLED"] == "false"
+    assert env["AGENT_PROFILE_ENABLED"] == "false"
+
+
+def _search_item(policy: str) -> dict:
+    return {
+        "question_key": "A-q01", "corpus_cell": "A_nokg", "policy": policy,
+        "effort": "standard", "question": "RTL到GDSII流程",
+    }
+
+
+def test_search_core_runs_both_policies_on_one_repo_and_writes_nothing(
+    rrepo, tmp_path
+):
+    """**不调真实模型的端到端**:同一个 repo 上,legacy / v2 各跑一次真检索。
+
+    钉住三件事:
+
+    1. **策略切换靠换 Settings,不靠重启**。两次 run 用的是同一个 `rrepo`,
+       只有传给 `run_search_once` 的那份 settings 不同;两行投影的
+       `policy_version` 必须因此分成 legacy / v2。这正是
+       `ReasoningRetriever.from_repository(repo, settings)` 读传入 settings
+       (而不是 repo 内部那份)这条前提的验证。
+    2. **投影是从真轨迹上出来的**,不是构造出来的:`reflect_turns >= 1`、
+       没跑合成的那几列一律 unknown。
+    3. **只读**:一次真检索前后,`READONLY_TABLES` 的行数逐张相等。
+
+    这条走的是 CLI 底下的核心函数(`run_search_once` / `project_search_run`),
+    不经 argparse、不连 PG、不发任何模型请求。
+    """
+    from app.domain.reasoning_trace_stats import TERMINATION_REASON_VALUES
+
+    notebook = _seed_two_nodes(rrepo)
+    # 熔断是另一条守卫的题目;这里要的是"两套协议都跑得到收尾"。
+    rrepo.settings.reasoning_stale_limit = 9
+    legacy_settings = rrepo.settings
+    v2_settings = rrepo.settings.model_copy()
+    v2_settings.reasoning_reflect_v2_enabled = True
+    assert legacy_settings.reasoning_reflect_v2_enabled is False
+
+    database_url = f"sqlite:///{tmp_path / 't.db'}"
+    before = rig._readonly_counts(database_url)
+    # 语料真的种进去了,否则下面那条只读断言是在一个空库上恒真。
+    assert before["knowledge_objects"]
+
+    rows: dict[str, dict] = {}
+    for policy, settings, client in (
+        ("legacy", legacy_settings, _SeqLLM(
+            plan={"sub_queries": [{"query": "RTL到GDSII流程"}]},
+            reflects=[{"next_action": "answer", "sufficient": True}])),
+        ("v2", v2_settings, _GatedV2LLM(
+            plan={"sub_queries": [{"query": "RTL到GDSII流程"}]},
+            reflects=[{"next_action": "answer", "sufficient": True,
+                       "arguments": {}}])),
+    ):
+        bind_chat_client(rrepo, "reasoning_agent", client)
+        item = _search_item(policy)
+        steps: list = []
+        result = rig.run_search_once(
+            rrepo, settings, notebook=notebook.id, item=item, prepared=None,
+            on_step=lambda step: steps.append(rig.trace_step_row(step)),
+            cancel_event=threading.Event(), actor_id="t0-owner",
+        )
+        rows[policy] = rig.project_search_run(
+            steps, result=result, effort=item["effort"], policy=policy,
+            question_key=item["question_key"],
+            corpus_cell=item["corpus_cell"], kg_in_scope=True,
+        )
+
+    assert rows["legacy"]["policy_version"] == "legacy"
+    assert rows["v2"]["policy_version"] == "v2"
+    for policy, row in rows.items():
+        assert row["reflect_turns"] >= 1, policy
+        assert row["trace_source"] == "in_process", policy
+        assert row["consumer"] == "ask_single", policy
+        assert row["question_key"] == "A-q01", policy
+        assert row["corpus_cell"] == "A_nokg", policy
+        assert row["anchors"] is None, policy
+        assert row["citation_contribution"] is None, policy
+        assert row["trace_steps"] > 0, policy
+    assert rows["legacy"]["termination_inferred"] is True
+    assert rows["v2"]["termination_inferred"] is False
+    assert rows["v2"]["termination_reason"] in TERMINATION_REASON_VALUES
+    assert rig._readonly_counts(database_url) == before
+
+
+def test_search_core_refuses_a_settings_that_disagrees_with_the_policy(rrepo):
+    """声明 v2、settings 却是 legacy ⇒ 当场报错,而不是跑出一批贴错标的轨迹。"""
+    notebook = _seed_two_nodes(rrepo)
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "RTL到GDSII流程"}]},
+        reflects=[{"next_action": "answer", "sufficient": True}]))
+    with pytest.raises(RuntimeError, match="reflect_v2_active"):
+        rig.run_search_once(
+            rrepo, rrepo.settings, notebook=notebook.id,
+            item=_search_item("v2"), prepared=None, on_step=None,
+            cancel_event=threading.Event(), actor_id="t0-owner",
+        )
+
+
+def test_readonly_assertion_reports_every_table_that_moved(capsys):
+    runner = rig.Runner(dry_run=False, out_dir=Path("."))
+    before = {table: 3 for table in rig.READONLY_TABLES}
+    rig._assert_readonly(runner, before, dict(before))
+    capsys.readouterr()
+    after = dict(before, answers=4, conversations=5)
+    with pytest.raises(RuntimeError, match="answers: 3 -> 4"):
+        rig._assert_readonly(runner, before, after)
+    assert "READ-ONLY VIOLATION" in capsys.readouterr().err
+
+
+def test_dry_run_search_refuses_a_cell_it_cannot_run(capsys):
+    """`--cell A_kg search`:主库上没有那个格子,不许打印一份「零个 run」的计划。"""
+    assert rig.main(["--dry-run", "--cell", "A_kg", "search"]) == 2
+    assert "不在 search 的范围里" in capsys.readouterr().err
