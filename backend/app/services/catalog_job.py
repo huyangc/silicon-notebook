@@ -2678,16 +2678,24 @@ class CommandCatalogService:
         Three remedies, all bounded, and all keyed on what this seam can
         actually observe.
 
-        ``finish_reason`` is NOT observable here: ``chat_json`` returns the
-        content string alone (``JsonChatClientPort.chat_json``'s signature is
-        pinned by a contract test, so widening it is a change to a heavily
-        guarded seam, not a local one). What a length-truncated reply looks
-        like from this side is a non-empty body that will not parse as a JSON
-        object — which the provider reports with the stable error code
-        ``malformed_response`` (see ``_call`` for why the code, not the
-        exception class, is what this branches on). So "malformed" is the
-        length signal and the remedy is C0's: halve the slice's parameter list
-        and ask again, up to ``MAX_SLICE_SPLIT_DEPTH``.
+        ``finish_reason`` is NOT read here, and the slice-halving remedy stays
+        even though the port has since been widened to make it readable:
+        ``JsonChatClientPort.chat_json`` now takes an optional ``call_stats``
+        out-parameter (``app.core.llm.CALL_STATS_KWARG``), which the reflect
+        layer uses to tell an exhausted output budget from a blank reply. This
+        seam does not opt in, for two reasons. The sink is only filled when
+        every hop declares ``supports_call_stats``, so on a deployment whose
+        transport predates it the answer is "unknown" — a remedy keyed on it
+        would quietly stop working there. And the remedy this layer wants is
+        the same either way: what a length-truncated reply looks like from this
+        side is a non-empty body that will not parse as a JSON object — which
+        the provider reports with the stable error code ``malformed_response``
+        (see ``_call`` for why the code, not the exception class, is what this
+        branches on). So "malformed" is the length signal and the remedy is
+        C0's: halve the slice's parameter list and ask again, up to
+        ``MAX_SLICE_SPLIT_DEPTH``. Reading the sink would buy a sharper
+        *diagnostic*, not a different action; whoever wants that can add it
+        here without touching the port.
 
         An empty body is C0's other measured failure (a retry came back empty).
         Be precise about what this layer can actually tell apart, because the
