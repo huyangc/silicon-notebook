@@ -139,8 +139,10 @@
         的辅助信号、不是判据，等真有 prompt 版本号了再补。
       * **`early_stop` 与判分模型/人工键一起延后到 T-AB3**：键集已经闭上，值恒 `None`。
       * **纯逻辑仍住在 rig 里**：`_ab_round_units` / `_ab_call_estimate` /
-        `ab_contract_digest` / `_ab_corpus_signature` 零 I/O、零模型，可以移进
-        `backend/app/eval/reflect_ab.py`；`_resolve_item_scope` 每个单元重查一次
+        `ab_contract_digest` 零 I/O、零模型，可以移进
+        `backend/app/eval/reflect_ab.py`（`_ab_corpus_signature` 自 codex #703 R1 起
+        要查测试库的 sources/chunks/source_elements/unified_kg_state 才能指纹语料身份，
+        不再是纯逻辑，留在 rig）；`_resolve_item_scope` 每个单元重查一次
         `sources`，而 `fact["source_rows"]` 里已经有那份表。两条都是纯搬运，与
         T-AB3 的改动一起做更省一轮评审。
       (b) 报告侧 admitted 复核的簇折叠表仍是保守口径——同下条独立待办。
