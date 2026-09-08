@@ -364,6 +364,78 @@ def test_scheduled_chat_forwards_response_validator_to_raw_client():
         provider.close()
 
 
+class _StrictChat(_Chat):
+    """A physical client pinned to the port signature -- no ``**kwargs``.
+
+    That is the realistic shape of a plugin-bound transport or an older
+    in-tree client: it never saw ``call_stats``, so being handed one is a
+    ``TypeError``, not a silently ignored keyword.  The ``_Chat`` double this
+    file uses everywhere else swallows anything, which is exactly why that one
+    cannot catch a hop that forwards unconditionally.
+    """
+
+    def chat_json(
+        self, messages, response_schema_hint, *, timeout=None,
+        max_retries=None, temperature=1.0, top_p=1.0, max_tokens=None,
+        cancel_event=None, bypass_cache=False, response_validator=None,
+        thinking_mode=None,
+    ):
+        self.calls.append({"messages": messages, "kwargs": {}})
+        return self.result
+
+
+def test_call_stats_is_not_forwarded_to_a_client_that_does_not_declare_it():
+    """Every hop must declare ``supports_call_stats``, not just the caller.
+
+    ``ScheduledJsonChatClient`` declares it because it *forwards* the sink, but
+    the client behind ``runtime.raw`` is duck-typed.  Forwarding on the
+    caller's say-so alone turns a working reflect call into a provider error on
+    every deployment whose transport predates the out-parameter.  An undeclared
+    client just leaves the sink empty -- the "finish_reason unknown" branch
+    every consumer already handles.
+
+    Mutation: drop the ``getattr(runtime.raw, "supports_call_stats", False)``
+    guard and this raises ``TypeError`` inside the scheduled call.
+    """
+    raw = _StrictChat()
+    provider = _provider(chat=raw)
+    stats: dict = {}
+    try:
+        assert provider.chat("ask_answer").chat_json(
+            [], "{}", call_stats=stats) == raw.result
+    finally:
+        provider.close()
+    assert stats == {}
+
+
+def test_call_stats_is_forwarded_to_a_client_that_declares_it():
+    """The other half of the closed set: a declaring client still gets it.
+
+    Without this one the guard above could be "never forward" and nothing would
+    go red, which would silently kill the budget-exhausted retry on the
+    production transport.
+    """
+    class _StatsChat(_Chat):
+        supports_call_stats = True
+
+        def chat_json(self, messages, response_schema_hint, **kwargs):
+            sink = kwargs.get("call_stats")
+            if sink is not None:
+                sink["finish_reason"] = "length"
+            return super().chat_json(messages, response_schema_hint, **kwargs)
+
+    raw = _StatsChat()
+    provider = _provider(chat=raw)
+    stats: dict = {}
+    try:
+        assert provider.chat("ask_answer").chat_json(
+            [], "{}", call_stats=stats) == raw.result
+    finally:
+        provider.close()
+    assert raw.calls[-1]["kwargs"]["call_stats"] is stats
+    assert stats == {"finish_reason": "length"}
+
+
 def test_ask_contract_failure_archives_the_exact_request_and_response():
     rejected = '{"answer":[],"grounded":true}'
     records = []

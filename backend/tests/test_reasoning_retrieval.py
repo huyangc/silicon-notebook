@@ -10239,9 +10239,16 @@ def test_empty_body_with_finish_reason_length_is_a_budget_code_not_empty():
     assert _reflect_fallback_reason(exc, "length") == (
         REFLECT_OUTPUT_BUDGET_EXHAUSTED)
     assert _reflect_fallback_reason(exc, "stop") == "empty"
-    # 拿不到 finish_reason 的调用方(legacy、不声明 call_stats 的替身)退回接入前
-    # 的行为,不因为"不知道"就猜一个预算问题。
-    assert _reflect_fallback_reason(exc) == "empty"
+    # 出参空着时读**异常自己带的那一格**:`MalformedModelResponse` 上本来就有
+    # finish_reason,而只填它、不声明 `supports_call_stats` 的客户端(插件绑定的
+    # 传输、测试替身)一样该拿到预算码。不读它的话,§5.2 那条同轮翻倍重试对这类
+    # 调用方结构性不生效。
+    #
+    # 变异:把 `_reflect_fallback_reason` 开头那行 `finish_reason or getattr(...)`
+    # 删掉 ⇒ 这条红。
+    assert _reflect_fallback_reason(exc) == REFLECT_OUTPUT_BUDGET_EXHAUSTED
+    # 两条来源都空 = 真的不知道 ⇒ 退回 `empty`,不因为"不知道"就猜一个预算问题。
+    assert _reflect_fallback_reason(_boom("")) == "empty"
 
 
 def test_a_budget_truncated_reflect_call_retries_once_with_a_doubled_budget(
@@ -10270,33 +10277,70 @@ def test_a_budget_truncated_reflect_call_retries_once_with_a_doubled_budget(
     assert result.termination.reason == TERMINATION_MODEL_SUFFICIENT
 
 
-def test_a_reflect_client_that_does_not_report_finish_reason_keeps_old_behaviour(
-    rrepo,
-):
-    """不声明 `supports_call_stats` 的客户端:一个签名都不用改,行为回到接入前。
+class _MuteLLM(_FlakyReflectLLM):
+    """不声明 `supports_call_stats` 的反思客户端:签名一个字都不用改。
 
     判据用显式类属性而不是签名反射:一个写了 `**kwargs` 的替身会被反射认成
     "支持",于是 sink 恒为空、加预算重试永不触发,而没有任何一条用例会红。
-
-    变异:把 `_call_stats_kwargs` 改成无条件传 ⇒ 这个替身的 `chat_json` 会收到
-    一个它没声明的 `call_stats`(这里靠 `**kwargs` 吞掉),但 sink 永远空着,
-    下面 `max_tokens` 只有一格的断言仍然成立——所以真正被这条守住的是**反过来**
-    那半:把判据换成 `inspect.signature` 探测 ⇒ 替身被认成支持、sink 仍然空、
-    重试仍然不触发,而 `_FlakyReflectLLM` 那条用例还绿。两条合起来才是闭集。
     """
-    class _MuteLLM(_FlakyReflectLLM):
-        supports_call_stats = False
 
-        def chat_json(self, messages, schema_hint, **kwargs):
-            assert "call_stats" not in kwargs
-            return super().chat_json(messages, schema_hint, **kwargs)
+    supports_call_stats = False
 
+    def chat_json(self, messages, schema_hint, **kwargs):
+        assert "call_stats" not in kwargs
+        return super().chat_json(messages, schema_hint, **kwargs)
+
+
+def test_an_exception_borne_finish_reason_is_honoured_when_the_sink_is_empty(
+    rrepo,
+):
+    """出参空着 ⇒ 读异常自己带的 finish_reason,重试照样触发。
+
+    `MalformedModelResponse` 本来就有这一格,而它与 `call_stats` 是同一件事的两条
+    来源:一个客户端可以只填异常而不声明 `supports_call_stats`(插件绑定的传输、
+    测试替身)。只认出参的话,§5.2 那条「预算打满就同轮翻倍重试」对这类调用方
+    结构性不生效——而它们空正文的比例恰恰最高(没人给它们填过统计)。
+
+    `call_stats` 仍然一次都没传给它(替身里那句 assert),两件事互不牵连。
+
+    变异:把 `_reflect_fallback_reason` 开头那行异常兜底删掉 ⇒ `max_tokens` 只有
+    一格、原因码变回 `empty`,这条红。
+    """
     rrepo.settings.reasoning_max_tokens = 4096
-    llm = _MuteLLM(plan={"sub_queries": [{"query": "完整问题"}]},
-                   reflects=[], fail_calls=(1, 2), finish_reason="length")
+    llm = _MuteLLM(
+        plan={"sub_queries": [{"query": "完整问题"}]},
+        fail_calls=(1, 2), finish_reason="length",
+        reflects=[_answer(assessment={"supported": [
+            {"aspect_id": "a1", "evidence_keys": ["ck-q0"]}]})])
     _, result = _v2_aspect_run(
         rrepo, intent_detail={"mandatory_topics": ["问题一"]}, llm=llm)
-    # 拿不到 finish_reason ⇒ 空正文一律记 `empty`,不触发加预算重试。
+    # 第 1 轮:原值 + 翻倍(两次都炸)⇒ 这一轮降级继续;第 2 轮一次就成。
+    assert llm.max_tokens == [4096, 8192, 4096]
+    assert [r for r in _skip_reasons(result)
+            if r.startswith("model_degraded:")] == [
+        "model_degraded:output_budget_exhausted"]
+
+
+def test_a_reflect_client_that_reports_no_finish_reason_at_all_stays_empty(
+    rrepo,
+):
+    """两条来源都空 = 真的不知道 ⇒ 空正文一律记 `empty`,不触发加预算重试。
+
+    "不知道"不能被当成"预算不够":猜错的代价是每一次白卷都多花一次翻倍预算的
+    调用。这条与上一条合起来才是闭集(知道 / 不知道各一半)。
+
+    变异:把 `_call_stats_kwargs` 改成无条件传 ⇒ 这个替身的 `chat_json` 里那句
+    assert 先红。
+    """
+    rrepo.settings.reasoning_max_tokens = 4096
+    llm = _MuteLLM(
+        plan={"sub_queries": [{"query": "完整问题"}]},
+        fail_calls=(1,), finish_reason="",
+        reflects=[_answer(assessment={"supported": [
+            {"aspect_id": "a1", "evidence_keys": ["ck-q0"]}]})])
+    _, result = _v2_aspect_run(
+        rrepo, intent_detail={"mandatory_topics": ["问题一"]}, llm=llm)
+    # 一格预算、一次调用:同轮翻倍重试根本没被触发。
     assert llm.max_tokens == [4096, 4096]
     assert [r for r in _skip_reasons(result)
             if r.startswith("model_degraded:")] == ["model_degraded:empty"]
