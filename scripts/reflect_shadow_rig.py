@@ -10,12 +10,22 @@
 跑检索过程(plan + reflect 循环),轨迹在进程内投影成 JSONL。它不建库、不建图、
 不合成答案,也因此不写 ask_jobs / answers / conversations 任何一行。
 
+第三条路是 `ab`(A/B 设计规格 `2026-09-09-reflect-ab-design_zh.md`):在 `seed`
+建出来的**一次性测试库**上进程内跑**完整 Ask**(意图契约 → 检索 → 合成 → 引用
+绑定),同题同档的 legacy / v2 **背靠背**跑、臂序随机。它与 `search` 的分工是
+「search-only 量不出答案质量」;与 `ask`(HTTP)的分工是「HTTP 换策略必须重启
+后端,两条臂只能整批分开、相隔数小时,provider 的漂移会整块落在臂的差上」。
+
     python scripts/reflect_shadow_rig.py --dry-run seed
     python scripts/reflect_shadow_rig.py --dry-run ask
     python scripts/reflect_shadow_rig.py --dry-run report
     python scripts/reflect_shadow_rig.py --dry-run --limit 5 search
+    python scripts/reflect_shadow_rig.py --dry-run --limit 2 \
+        --database-url postgresql://127.0.0.1:5432/silicon_notebook_t0_test \
+        --source-db-url postgresql://127.0.0.1:5432/silicon_notebook ab
 
-子命令:`seed` / `ask` / `report` / `search` / `restart` / `export` / `teardown`。
+子命令:`seed` / `ask` / `report` / `search` / `ab` / `restart` / `export` /
+`teardown`。
 **`--dry-run` 打印将要做的每一步与每个 `client_request_id` 的编码,不连库、不
 起后端、不发任何请求**——它是唯一进标准门的路径(rig 本体要网络与真实模型)。
 
@@ -56,6 +66,7 @@ import argparse
 import json
 import mimetypes
 import os
+import random
 import re
 import secrets
 import shlex
@@ -2808,6 +2819,1003 @@ def _search_loop_concurrent(
     return failed
 
 
+# ===========================================================================
+# `ab`:进程内跑**完整 Ask**,两臂背靠背配对
+# (A/B 设计规格 `docs/superpowers/specs/2026-09-09-reflect-ab-design_zh.md`)
+# ===========================================================================
+
+#: `ab` 的主矩阵语料格(§4.1)。`B_nokg` 是 P1 探针,要跑它得显式 `--cell B_nokg`
+#: ——它不进主表,单出一节。四个格子都必须已经由 `seed` 建在测试库里。
+AB_DEFAULT_CELLS: tuple[str, ...] = ("A_nokg", "B_kg")
+#: `ab` 的两条臂。与 `POLICIES` 同值而不同义:这是 rig 的**声明**,轨迹反推出来
+#: 的那一个叫 `policy_version`(§7.1)。
+AB_ARMS: tuple[str, ...] = POLICIES
+#: 测试库名的强制后缀(§5.4「必填,不读 .env」+ §5.5-2「主库零接触」)。`ab` 会
+#: 往库里写 conversation + answer 行,所以拿错连接的代价不是一次读脏数据,而是
+#: 往用户的活库里写。一个后缀挡不住所有误用,但它挡住了最常见的那一种:把
+#: `search` 用惯的主库 URL 直接抄过来。
+AB_TEST_DB_SUFFIX = "_test"
+#: `seed` 给每个语料格建的笔记本名(见 `_seed_notebooks`)。`ab` 按它在测试库里
+#: 反查 notebook id,而不是读 `--out-dir` 下的 `rig-state.json`:两条命令的
+#: `--out-dir` 通常不是同一个(§5.4 的产物落在 `.local/ab`),而库里那个名字是
+#: `seed` 自己写下的、与 out-dir 无关的事实。
+AB_NOTEBOOK_NAME = "t0-{cell}"
+
+
+def ab_cells(selected: Sequence[str]) -> list[str]:
+    """`--cell` 选中的格。**不给就是主矩阵两格**,不是「四格全跑」。
+
+    与 `corpus_cells`(seed 的口径:不给 = 全跑)刻意不同:`ab` 的第三、第四格
+    (`A_kg` / `B_nokg`)一个是刻意不做的(§11:A 是单篇,KG 增益小),一个是
+    单出一节的 P1 探针(§4.3)。把它们卷进默认值,等于让每一次 `ab` 都默默多
+    跑一倍预算。
+    """
+    if not selected:
+        return list(AB_DEFAULT_CELLS)
+    return [cell for cell in CORPUS_CELLS if cell in selected]
+
+
+def ab_plan(
+    questions: dict, *, cells: Sequence[str], efforts: Sequence[str],
+    repeats: int, round_: int | None, lang: str, limit: int | None,
+    only_questions: Sequence[str] = (),
+) -> list[dict]:
+    """`ab` 要跑的全部**配对单元**,一条一行。跑批顺序就是这份列表的顺序。
+
+    顺序是 `repeat → effort → question`(§4.2),两条臂在**每个单元内部**背靠背
+    跑、臂序按 run 随机(见 `_run_ab_unit`)。两条约束各自换来一件事:
+
+    * **重复轮在最外层** ⇒ 任何被预算或故障截断的前缀都是一份配对完整、平衡的
+      数据集(第 1 轮跑完就有一份能出结论的 n=1 数据);
+    * **两臂在最内层背靠背** ⇒ provider 的排队与限流漂移对两臂等量,臂序本身
+      不成为系统偏差。这正是选进程内路径(而不是 HTTP)的直接原因(§5.1)。
+
+    题面枚举复用 `ask_plan`——`ab` 与 `search`/`ask` 出的行进的是同一张对照表,
+    各写一份枚举就等于给「哪些题在哪些格上跑」立两个权威。`policy` 那一维在这里
+    被丢掉:臂是单元内部的事,不是枚举的一维。
+    """
+    rounds = [round_] if round_ is not None else list(range(1, repeats + 1))
+    units: list[dict] = []
+    for repeat in rounds:
+        for effort in efforts:
+            for item in ask_plan(
+                questions, cells=cells, policy=AB_ARMS[0], limit=limit,
+                lang=lang, mode="reasoning", efforts=(effort,),
+                only_questions=only_questions,
+            ):
+                item.pop("client_request_id", None)
+                item.pop("policy", None)
+                item["repeat"] = repeat
+                units.append(item)
+    return units
+
+
+def _ab_call_estimate(
+    units: Sequence[dict], question_count: int, *, no_intent: bool,
+) -> str:
+    """每个单元的模型调用估计。**是上界,不是预测**(措辞沿用 T0
+    `_search_call_estimate`,理由也一样:reflect 的轮数是模型自己决定的,只有
+    档位的硬上限是确定的)。
+
+    与 `search` 的两点不同,都是「跑的是完整 Ask」带来的:
+
+    * 每个单元有**两个** run(两条臂),所以检索侧的每一项都乘 2;
+    * 每个 run 在检索之后还有一次**合成**调用(`search` 整条路不合成)。合成
+      的重试与按节合成不计——那是下界之上的浮动,而这是一条上界。
+
+    意图契约仍是每题一次并缓存,两臂共用同一份冻结契约(§5.4)——这不是省钱的
+    小聪明,而是 A/B 成立的前提:契约不同,必答方面就不同,两臂根本不在比同一
+    件事。
+    """
+    runs = len(units) * len(AB_ARMS)
+    intent_calls = 0 if no_intent else question_count
+    plan_calls = runs if no_intent else 0
+    reflect_ceiling = sum(
+        MAX_REFLECT_STEPS.get(unit["effort"], 0) for unit in units
+    ) * len(AB_ARMS)
+    total = intent_calls + plan_calls + reflect_ceiling + runs
+    return (
+        f"intent {intent_calls} + plan {plan_calls} + reflect ≤ "
+        f"{reflect_ceiling} + synthesis {runs}  ⇒  ≤ {total}"
+    )
+
+
+def _ab_preflight(args: argparse.Namespace, cells: Sequence[str]) -> str:
+    """真跑前的硬前提。返回空串 = 通过,否则是要打给用户的那句话。
+
+    三条都在 `--dry-run` 下也拦(枚举为空的那条尤其):一份「零个 run」的计划
+    看起来完全像一次正常的预演。
+    """
+    if not cells:
+        return (f"--cell 选中的格子不在 ab 的范围里(可选 "
+                f"{', '.join(CORPUS_CELLS)};默认 {', '.join(AB_DEFAULT_CELLS)})")
+    if not args.database_url_explicit:
+        return ("ab 必须显式给 --database-url(§5.4:必填,不读 .env)。"
+                "它是 `seed` 建出来的一次性测试库——ab 会往里写 conversation "
+                "与 answer 行(§5.2)")
+    if not str(args.database_url).rstrip("/").endswith(AB_TEST_DB_SUFFIX):
+        return (f"ab 的 --database-url 必须指向名字以 {AB_TEST_DB_SUFFIX!r} 结尾"
+                "的一次性测试库(§5.5-2 主库零接触)")
+    if not args.source_db_url:
+        return ("ab 需要 --source-db-url(**主库**连接,全程只读):§5.5-2 的"
+                "「主库零接触」是一条硬断言,跑前跑后各点一次主库的 "
+                f"{'/'.join(READONLY_TABLES[:3])} 行数。没有它这条断言只能记"
+                "「未验证」,而未验证不等于通过")
+    return ""
+
+
+def cmd_ab(args: argparse.Namespace, runner: Runner) -> int:
+    """两条臂 × 两个档位 × N 轮重复,**进程内跑完整 Ask**(§5)。
+
+    与 `search` 的分工:`search` 是「对主库只读跑 plan + reflect 循环,不合成
+    答案」;`ab` 是「在 `seed` 的一次性测试库上跑意图契约 + 检索 + 合成 + 引用
+    绑定」。search-only 量不出答案质量,而 A/B 要补的正是那一半(§0-5)。
+
+    与 `ask`(HTTP)的分工:`ask` 换策略必须重启后端,两条臂只能整批分开、相隔
+    数小时,provider 的漂移会整块落在臂的差上;`ab` 同进程为两个策略各构造一份
+    `Settings`,同题同档背靠背跑(§5.1)。
+    """
+    questions = load_questions()
+    cells = ab_cells(args.cell)
+    # **dry-run 也拦**:一份跑在错库上、或者枚举为空的计划,预演出来看起来完全
+    # 像一次正常的预演(见 `_ab_preflight`)。
+    problem = _ab_preflight(args, cells)
+    if problem:
+        print("ERROR: " + problem, file=sys.stderr)
+        return 2
+    efforts = tuple(args.efforts) if args.efforts else EFFORTS
+    units = ab_plan(
+        questions, cells=cells, efforts=efforts, repeats=args.repeats,
+        round_=args.round, lang=args.lang, limit=args.limit,
+        only_questions=args.only_question,
+    )
+    unique_questions = {
+        (unit["corpus_cell"], unit["question_key"]) for unit in units
+    }
+    runner.say("target", "一次性测试库:意图契约 + 检索 + 合成 + 引用绑定")
+    runner.say("database-url", f"<given>(测试库,以 {AB_TEST_DB_SUFFIX} 结尾)")
+    runner.say("main database (read-only probe)", "<given>")
+    for cell in cells:
+        runner.say("corpus cell", f"{cell} -> notebook name="
+                                  + AB_NOTEBOOK_NAME.format(cell=cell))
+    runner.say("arms", ", ".join(AB_ARMS)
+               + "(同进程换 Settings;每单元内背靠背,臂序按 run 随机)")
+    runner.say("efforts", ", ".join(efforts))
+    rounds = 1 if args.round is not None else args.repeats
+    runner.say("repeats", f"{args.repeats}"
+               + (f",只跑第 {args.round} 轮" if args.round is not None else ""))
+    runner.say("planned runs",
+               f"{len(units) * len(AB_ARMS)}({len(units)} 个配对单元 × "
+               f"{len(AB_ARMS)} 臂;{len(unique_questions)} 题 × "
+               f"{len(efforts)} 档 × {rounds} 轮)")
+    runner.say("model calls (estimate)",
+               _ab_call_estimate(units, len(unique_questions),
+                                 no_intent=args.no_intent))
+    runner.say("out", f"{runner.out_dir}/ab-runs.jsonl + ab-runs.log")
+    runner.say(
+        "local only",
+        f"{runner.out_dir}/raw/<arm>/<key>_<cell>_<effort>_r<n>.json"
+        "(答案正文/引用/锚点/契约/原始 TraceStep)+ "
+        f"{runner.out_dir}/intents.jsonl(含问题原文)"
+        "——**两者都不进数据集/不进仓库**(§7.3)",
+    )
+    runner.say("concurrency", _ab_concurrency_note(args.concurrency))
+    if runner.dry_run:
+        for index, unit in enumerate(units, 1):
+            titles = unit.get("scope_source_titles") or ()
+            scope_note = f" scope={len(titles)} sources" if titles else ""
+            runner.say(
+                "ab unit",
+                f"{index:03d} {unit['question_key']} "
+                f"cell={unit['corpus_cell']} effort={unit['effort']} "
+                f"r{unit['repeat']} arms={'/'.join(AB_ARMS)}(序随机)"
+                f"{scope_note}",
+            )
+        return 0
+    return _run_ab(args, runner, units, cells)
+
+
+def _ab_concurrency_note(concurrency: int) -> str:
+    """`--concurrency` 那一行日志。>1 时必须当场说清成本三键会变成 unknown。
+
+    理由不是保守(§4.4):token 归因靠 LLM 日志的**时间窗切片**(§7.2),并发下
+    窗口重叠,切片会把别的 run 的 token 记到本 run 上。那种数比没有更坏,所以
+    rig 强制把 `prompt_tokens` / `completion_tokens` / `model_calls` 三个键写成
+    unknown,只保留自己掐的 `latency_ms_total`。
+    """
+    if concurrency <= 1:
+        return "1(默认;成本三键按 LLM 日志的时间窗切片归因)"
+    return (
+        f"{concurrency}(并发单元数;每个单元内部两臂仍背靠背)。"
+        "⚠ 成本三键(prompt_tokens / completion_tokens / model_calls)将强制写成 "
+        "unknown:窗口重叠,时间窗切片会把别的 run 的 token 记到本 run 上"
+    )
+
+
+def _ab_process_env(args: argparse.Namespace) -> dict[str, str]:
+    """`ab` 装进**本进程**的环境变量。必须在 import `app.core.config` 之前设。
+
+    `DATABASE_URL` 指向**测试库**(与 `search` 那条指向主库的相反),注入三闸
+    照 `search` 的口径强制关(§5.5-4):它们本来就默认关,再关一次是为了让
+    「注入面全关」不依赖于「那几个端口恰好没接线」这个会随重构漂移的前提。
+    """
+    env = {
+        "DATABASE_URL": args.database_url,
+        "RETRIEVAL_EXPERIENCE_INJECT_ENABLED": "false",
+        "REASONING_CONSULT_MEMORY_ENABLED": "false",
+        "AGENT_PROFILE_ENABLED": "false",
+    }
+    if args.env_file:
+        env["SILICON_NOTEBOOK_ENV_FILE"] = str(Path(args.env_file).expanduser())
+    return env
+
+
+def _ab_notebook_ids(database_url: str, cells: Sequence[str]) -> dict[str, str]:
+    """测试库里每个语料格的 notebook id,按 `seed` 写下的名字反查。
+
+    每个名字必须**恰好**命中一个笔记本。命中 0 个 = 这个格还没 seed;命中 ≥2 个
+    = 同一个测试库被 seed 过两次,两份语料混在一起——两种都必须响亮失败,不能
+    随便挑一个跑出一批不知道跑在哪份语料上的数据。
+    """
+    from export_reasoning_traces import _Reader
+
+    out: dict[str, str] = {}
+    with _Reader(database_url) as reader:
+        for cell in cells:
+            name = AB_NOTEBOOK_NAME.format(cell=cell)
+            rows = reader.query(
+                "SELECT id FROM notebooks WHERE name = ?", (name,)
+            )
+            if len(rows) != 1:
+                raise RuntimeError(
+                    f"测试库里名为 {name!r} 的笔记本有 {len(rows)} 个(必须恰好 "
+                    "1 个)。先跑 `seed`,或换一个干净的测试库"
+                )
+            out[cell] = str(rows[0]["id"])
+    return out
+
+
+def _ab_source_rows(database_url: str, notebook_id: str) -> list[dict]:
+    """一个笔记本的 `(id, title)` 全表,只读。三处消费:
+
+    1. `resolve_gold_sources` —— B 格 gold 短名的唯一解析(§5.5-6);
+    2. `citations_out_of_scope` 的允许集合(题目没声明范围时 = 全库);
+    3. `anchors_on_gold` 的 B 格第三跳(来源 → 标题)。
+
+    标题**只留在进程内**:它进不了投影行(闭集里没有 `title`),只在 `.local`
+    的 raw 存档里出现(§7.3)。
+    """
+    from export_reasoning_traces import _Reader
+
+    with _Reader(database_url) as reader:
+        rows = reader.query(
+            "SELECT id, title FROM sources WHERE notebook_id = ?", (notebook_id,)
+        )
+    return [{"id": str(row["id"]), "title": str(row["title"] or "")} for row in rows]
+
+
+def _ab_element_sections(
+    database_url: str, element_ids: Sequence[str],
+) -> dict[str, str] | None:
+    """`element_id` → `metadata.section_path`。`anchors_on_gold` 的 A 格第二跳。
+
+    `source_elements` 表**没有** `section_path` 列(2026-09-09 复核
+    `0001_initial.sql:609`:只有 id / source_id / element_type / location_label
+    / text / metadata / created_at / ordinal),那个值住在 `metadata` 这一列的
+    jsonb 里——两侧仓储都按 `metadata.get("section_path")` 读它
+    (`postgres/catalog_store.py:445`、`sqlite/catalog_store.py:539`),所以这里
+    也在 Python 侧解 metadata,而不是写一句只在 PG 上成立的 `->>` SQL。
+
+    查库本身失败 ⇒ 返回 `None` = unknown(调用方据此把 `anchors_on_gold` 整键
+    落 `None`),不是「一个都没解析到」。查得到但某个 id 不在结果里,是**另一
+    件事**:那是一次真实的解析失败,由 `count_anchors_on_gold` 判成 unknown。
+    """
+    from export_reasoning_traces import _Reader
+
+    if not element_ids:
+        return {}
+    unique = sorted({str(value) for value in element_ids if value})
+    placeholders = ",".join("?" for _ in unique)
+    try:
+        with _Reader(database_url) as reader:
+            rows = reader.query(
+                f"SELECT id, metadata FROM source_elements WHERE id IN ({placeholders})",
+                tuple(unique),
+            )
+    except Exception:  # noqa: BLE001 — 查不出来就是 unknown,不猜「零命中」
+        return None
+    out: dict[str, str] = {}
+    for row in rows:
+        raw = row["metadata"]
+        if isinstance(raw, (str, bytes, bytearray)):
+            try:
+                raw = json.loads(raw)
+            except ValueError:
+                raw = {}
+        meta = raw if isinstance(raw, dict) else {}
+        out[str(row["id"])] = str(meta.get("section_path") or "")
+    return out
+
+
+def _ab_model_contract(settings: Any) -> tuple[str | None, str]:
+    """`(短码, 人读串)`。短码进投影行,人读串只进 `ab-runs.log`。
+
+    §3.3 要求复用 `ModelSamplingContract` 的**形状**(provider / model /
+    prompt_version / temperature / top_p / seed,另加 `thinking_mode`);这里
+    刻意只把它**压成一个短码**写进数据集,理由是投影的值形状闭集
+    (`assert_projection_values`):字典的值半只到数值这一层,一个字段是字符串的
+    dataclass 塞不进去,而为它放宽那道闸就等于给整份数据集开一个自由文本口子。
+    短码是 `merge_key` 的单向哈希——「跨批次混用当场可见」这件事它办得到(不同
+    配置 ⇒ 不同短码),而「看得懂是哪个模型」由日志那一份负责。
+
+    取值来自 `SystemModelServiceRegistry.load(settings)`,不连库、不发请求:
+    服务定义自带 `fingerprint`(配置指纹),两个反思相关的 workload
+    (`reasoning_agent` 出反思决策,`ask_answer` 出最终答案)各取一份。
+
+    读不出来(没有部署 TOML、或它的形状变了)⇒ 短码是 `None` = unknown,整批
+    照跑:这一列是「跨批次混用当场可见」的辅助信号,不是判据;为它把一次几小时
+    的批跑挡在门外,换来的只是少一个提示。真正拦门的是 §5.5 那六条。
+    """
+    from app.services.model_registry import SystemModelServiceRegistry
+
+    try:
+        registry = SystemModelServiceRegistry.load(settings)
+    except Exception as exc:  # noqa: BLE001 — 读不出配置就是 unknown,不是硬失败
+        return None, f"<unavailable: {type(exc).__name__}>"
+    parts: list[str] = []
+    readable: list[str] = []
+    for workload_id in ("reasoning_agent", "ask_answer"):
+        service = registry.service_for(workload_id)
+        thinking = registry.thinking_mode_for(workload_id)
+        model = getattr(service, "model", "") if service is not None else ""
+        top_p = getattr(service, "top_p", None) if service is not None else None
+        fingerprint = (
+            getattr(service, "fingerprint", "") if service is not None else ""
+        )
+        parts.extend([workload_id, model, fingerprint, str(top_p), str(thinking)])
+        readable.append(
+            f"{workload_id}={model or '<unbound>'} top_p={top_p} "
+            f"thinking={thinking}"
+        )
+    return merge_key(*parts), "; ".join(readable)
+
+
+def _ab_corpus_signature(cell: str, fact: Mapping) -> str:
+    """语料/索引指纹(§7.1)。同样是短码:跨 `seed` 混用时当场可见。
+
+    进指纹的是「这次 run 跑在什么语料上」这件事的全部可观察面:语料格、来源
+    条数、图在不在范围内。notebook id **不**进——它是一个数据库 id,而投影行
+    里一个 id 都不许有(§7.3);它对指纹的贡献已经被 `cell` + 来源条数覆盖。
+    """
+    return merge_key(cell, fact.get("sources"), fact.get("kg_in_scope"))
+
+
+def _ab_llm_log_dir(settings: Any) -> Path:
+    """LLM 交互日志的目录(`app.core.llm_logging` 的落点)。
+
+    `LLMInteractionLogger` 把 `llm_log_path` 的**目录**当 base,按 owner 分子
+    目录、按天分文件(`llm-YYYY-MM-DD.jsonl`,见 `EventLogger._target_path_for_day`)。
+    rig 因此不认文件名,只认这个目录,读的时候按 `**/llm-*.jsonl` 铺开。
+    """
+    path = Path(getattr(settings, "llm_log_path", ".local/logs/llm.jsonl"))
+    if not path.is_absolute():
+        path = ROOT / path
+    return path.parent
+
+
+def _ab_read_llm_records(log_dir: Path, day_keys: Sequence[str]) -> list[dict]:
+    """把这几天的 LLM 日志读成记录列表。**只取数值字段的那几行原样返回**,
+    正文的裁剪交给 `slice_llm_usage`(它只读 `ts` / `usage` / `finish_reason`,
+    prompt / response 片段一个字都不碰,§7.2)。
+    """
+    records: list[dict] = []
+    for day in day_keys:
+        for path in sorted(log_dir.glob(f"**/llm-{day}.jsonl")):
+            for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(row, dict):
+                    records.append(row)
+    return records
+
+
+def _ab_usage_for_window(
+    log_dir: Path, started: "datetime", ended: "datetime", *, concurrency: int,
+) -> Any:
+    """一个 run 的成本三键。`concurrency > 1` 时**恒 unknown**(§4.4/§7.2)。"""
+    from app.eval.reflect_ab import UNKNOWN_USAGE, slice_llm_usage
+
+    if concurrency > 1:
+        return UNKNOWN_USAGE
+    days = sorted({started.strftime("%Y-%m-%d"), ended.strftime("%Y-%m-%d")})
+    try:
+        records = _ab_read_llm_records(log_dir, days)
+    except OSError:
+        # 日志读不出来就是 unknown,不当成「这个 run 一次模型都没调」。
+        return UNKNOWN_USAGE
+    return slice_llm_usage(records, start=started, end=ended)
+
+
+def ab_intent_confirmation(contract: Mapping, question: str) -> Any:
+    """冻结契约 → `AskRequest.intent`。**同一份契约两臂共用**(§5.5-3)。
+
+    这一步不是简单地把契约塞进请求:`AskService._confirmed_reasoning_intent`
+    会对提交上来的契约**再跑一次** `finalize_query_intent`,而 T0 的
+    `_IntentCache` 存的已经是 finalize **之后**的那一份(`ambiguities` 被清空、
+    `clarification_answers` 已填)。直接提交会让那批代答在第二次 finalize 里
+    被清掉(`submitted` 只认还在 `ambiguities` 里的 id),于是:
+
+    * 契约的 `clarification_answers` 变空 ⇒ `confirmed_research_question` 少了
+      「用户确认」那几条补充,检索问题与 T0 的 `search` 那条路不再逐字相同;
+    * `auto_confirmed_clear_intent` 反而变真 ⇒ 权威从「确认后的方向」翻回
+      「用户原文」,与 `_prepare_search_intent` 的判据相反。
+
+    所以这里把 `ambiguities` 按 `clarification_answers` 原样**还原**再提交:
+    id 与 question 都是当初记下来的原值,不是编的;第二次 finalize 于是拿到与
+    第一次逐字相同的输入,输出也逐字相同(`finalize_query_intent` 在这条路上
+    是幂等的)。没有代答的题走 else 分支,两侧同样逐字不变。
+    """
+    from app.models.ask import (
+        AskIntentConfirmation, QueryIntentAmbiguity, QueryIntentContract,
+    )
+
+    payload = dict(contract)
+    answers = [
+        row for row in (payload.get("clarification_answers") or [])
+        if isinstance(row, Mapping) and str(row.get("id") or "").strip()
+    ]
+    payload["ambiguities"] = [
+        QueryIntentAmbiguity(
+            id=str(row["id"]),
+            question=str(row.get("question") or row["id"]),
+            required=True,
+        ).model_dump()
+        for row in answers
+    ]
+    return AskIntentConfirmation(
+        contract=QueryIntentContract(**payload),
+        resolved_question=str(payload.get("resolved_question") or question),
+        answers=[
+            {"id": str(row["id"]), "answer": str(row.get("answer") or "")}
+            for row in answers
+            if str(row.get("answer") or "").strip()
+        ],
+    )
+
+
+def assert_knowhow_reflect_v2_off(repo: Any, settings: Any) -> None:
+    """§5.5-5:Knowhow 路径的 `reflect_v2_active()` 必须为假,**即使 v2 开着**。
+
+    Knowhow 不设臂(§4.3):它构造检索器时把 `allow_reflect_v2` 关掉,两条臂对
+    它逐字相同。这里按 `app/services/knowhow/api.py` 的那一行原样复现一次构造
+    并当场断言——断言失败就整批停,因为那意味着「Knowhow 不受这次开闸影响」这
+    个前提在这份代码上已经不成立了,而整批 A/B 的结论都建在它上面。
+    """
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    retriever = ReasoningRetriever.from_repository(repo, settings, None)
+    retriever.allow_reflect_v2 = False
+    if retriever.reflect_v2_active():
+        raise RuntimeError(
+            "Knowhow 断言失败:allow_reflect_v2=False 的检索器仍然报告 "
+            "reflect_v2_active()=True。开闸会连带改到 Knowhow,先修再跑"
+        )
+
+
+def run_ab_once(
+    repo: Any, *, notebook: str, item: dict, arm: str, settings: Any,
+    contract: dict | None, on_trace: Any, cancel_event: Any, actor_id: str,
+    scope_source_ids: Sequence[str] | None = None,
+) -> Any:
+    """一个 run:三层 scope + `repo.ask_reasoning`。生产接线的逐字复刻。
+
+    三层 scope 与 `run_search_once` 同形、同理由(模型调度归属 / 请求级检索预算
+    / 来源范围)。两处不同,都是「这次要跑完整 Ask」带来的:
+
+    * 调的是 `repo.ask_reasoning(...)`,不是 `ReasoningRetriever.run`。它 =
+      `_prepare_reasoning_ask` + `_run_reasoning_stage(...).response`,所以意图
+      契约、gap 补取、结构化预览、合成与引用绑定全在里面——rig 侧不重造任何一
+      段(§5.3:重造就变成「评测 rig 自己的合成」)。
+    * `job_id` 走默认空串 ⇒ `_prepare_turn` 的 legacy create-or-continue 分支:
+      不建 durable job、不写 `ask_trace_steps`。轨迹经 `on_trace` 在进程内拿,
+      所以也不需要 `export` 那一步(§5.2)。
+
+    **合成会落库**(conversation + answer),落在一次性测试库里,这是接受的、
+    不是绕过:语料是公开论文,题面公开,答案是模型对公开论文的作答。`.local`
+    的隔离是仓库卫生,不是保密(§5.2 / §7.3)。
+
+    开跑前当场核对 `retriever.reflect_v2_active()` 与这条 run 声明的臂一致
+    (§5.5-1)。核对用的检索器是**另外构造的一份**,不是 Ask 内部那一个——但它
+    读的是同一份 `settings`,而 `reflect_v2_active()` 只看 `self.settings` 与
+    `allow_reflect_v2`,两者都不经 repo。这一步是「协议对不对号」的唯一事前
+    证据;事后还有一次,由投影出来的 `policy_version` 对(见
+    `assert_arm_matches_evidence`)。
+    """
+    from app.models.ask import AskRequest
+    from app.models.source_scope import SourceScope
+    from app.services.model_work import ModelPriority, model_work_scope
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    from app.services.retrieval_run import retrieval_run
+    from app.services.source_scope import source_scope_context
+
+    probe = ReasoningRetriever.from_repository(repo, settings, cancel_event)
+    if probe.reflect_v2_active() is not (arm == "v2"):
+        raise RuntimeError(
+            f"retriever 的协议与声明的 arm={arm!r} 不符:"
+            f"reflect_v2_active()={probe.reflect_v2_active()}"
+        )
+    scope = (
+        SourceScope(
+            mode="include", source_ids=list(scope_source_ids), narrowed=True,
+        )
+        if scope_source_ids else None
+    )
+    payload = AskRequest(
+        question=item["question"], mode="reasoning",
+        retrieval_effort=item["effort"], source_scope=scope,
+        intent=(
+            ab_intent_confirmation(contract, item["question"])
+            if contract is not None else None
+        ),
+    )
+    with model_work_scope(
+        priority=ModelPriority.INTERACTIVE, actor_id=actor_id,
+        notebook_id=notebook, question=item["question"],
+    ):
+        with retrieval_run(
+            run_kind="ask_reasoning", event_log=None, actor_id=actor_id,
+            cancel_event=cancel_event,
+        ):
+            with source_scope_context(notebook, scope, None):
+                return repo.ask_reasoning(
+                    notebook, payload, on_trace, cancel_event,
+                )
+
+
+def ab_raw_payload(item: dict, arm: str, response: Any, raw_steps: Sequence[dict],
+                   contract: dict | None) -> dict:
+    """`.local` 的一份 run 存档:答案正文、引用、锚点、契约、原始 TraceStep。
+
+    **只在 `.local`,不进数据集/不进仓库**(§5.4 的产物表、§7.3)。它的用途是
+    人工抽样(§6 第二层)与核对确定性判据的命中,所以这里刻意**不**做任何收
+    窄——收窄过的存档没法用来裁决收窄本身。
+    """
+    return {
+        "question_key": item["question_key"],
+        "corpus_cell": item["corpus_cell"],
+        "effort": item["effort"],
+        "repeat": item["repeat"],
+        "arm": arm,
+        "question": item["question"],
+        "intent_contract": contract,
+        "answer": str(getattr(response, "answer", "") or ""),
+        "conclusion": str(getattr(response, "conclusion", "") or ""),
+        "evidence_level": str(getattr(response, "evidence_level", "") or ""),
+        "citations": [
+            row.model_dump() if hasattr(row, "model_dump") else dict(row)
+            for row in (getattr(response, "citations", None) or ())
+        ],
+        "anchors": [
+            row.model_dump() if hasattr(row, "model_dump") else dict(row)
+            for row in (getattr(response, "anchors", None) or ())
+        ],
+        "trace_steps": list(raw_steps),
+    }
+
+
+def _ab_raw_path(out_dir: Path, arm: str, item: dict) -> Path:
+    return (
+        out_dir / "raw" / arm
+        / f"{item['question_key']}_{item['corpus_cell']}_{item['effort']}"
+          f"_r{item['repeat']}.json"
+    )
+
+
+def _ab_coverage_complete(response: Any) -> bool | None:
+    """`AskResponse.result_coverage.complete`,拿不到就是 `None` = unknown。
+
+    集合级覆盖对象是 complete/partial 的**权威**(见 `AskResponse.result_sets`
+    的注释);这次 run 压根没走集合枚举时它缺席,而缺席在
+    `completeness_claim_candidate` 里的意思是「没有任何东西背书那句完整性断言」。
+    """
+    coverage = getattr(response, "result_coverage", None)
+    if coverage is None:
+        return None
+    value = getattr(coverage, "complete", None)
+    return bool(value) if isinstance(value, bool) else None
+
+
+def _run_ab(
+    args: argparse.Namespace, runner: Runner, units: Sequence[dict],
+    cells: Sequence[str],
+) -> int:
+    """`ab` 的真跑路径。§5.5 的六条硬断言全部落在这个函数与它直接调的那几个里。
+
+    断言与落点的对账(改这里之前先读一遍):
+
+    1. **策略对号** —— 事前 `run_ab_once` 里核 `reflect_v2_active()`;事后每条
+       臂的第一个 run 之后核 `policy_version`(`assert_arm_matches_evidence`)。
+    2. **主库零接触** —— `--database-url` 必须以 `_test` 结尾(`_ab_preflight`),
+       跑前跑后各点一次**主库**的 `_readonly_counts`(`_assert_readonly`)。
+    3. **契约一致** —— 两臂共用 `_IntentCache` 里同一条缓存行,`_run_ab_unit`
+       在提交前比一次 hash。
+    4. **注入面全关** —— `_ab_process_env` 的三把闸。
+    5. **Knowhow 断言** —— `assert_knowhow_reflect_v2_off`,一次性。
+    6. **gold 可解析** —— `resolve_gold_sources` 在跑批**之前**把每个短名解析
+       成恰好一个 `source_id`,解析不到就整批不跑。
+    """
+    from datetime import datetime
+
+    # 必须在 import `app.core.config` 之前(与 `_search_process_env` 同一条理由)。
+    os.environ.update(_ab_process_env(args))
+
+    from app.core.request_context import reset_request_user, set_request_user
+    from app.eval.reflect_ab import load_ab_gold, resolve_gold_sources
+    from app.services.reasoning_retrieval import kg_in_scope_for
+
+    settings_by_arm = _settings_by_policy()
+    concurrency = _resolve_concurrency(
+        runner, args.database_url, settings_by_arm["legacy"], args.concurrency,
+    )
+    # `create_repository(settings, migrate=False, seed=False)`,不是默认值:默认
+    # 的 `seed=True` 会用 `settings.admin_password` 重写 admin 密码哈希(codex
+    # #700 R1 P1)。测试库已经由 `seed` 子命令建好并迁移过,这里只需要连上去。
+    repo = _search_repository(settings_by_arm["legacy"])
+    profile = repo.maintenance.resolve_owner_profile(args.user)
+    if profile is None:
+        print(f"ERROR: 测试库里找不到 fixture 用户: {args.user}", file=sys.stderr)
+        return 2
+    actor_id = str(getattr(profile, "id", "") or "")
+    assert_knowhow_reflect_v2_off(repo, settings_by_arm["v2"])
+    runner.say("knowhow assertion",
+               "allow_reflect_v2=False ⇒ reflect_v2_active() 为假(§5.5-5)")
+
+    notebooks = _ab_notebook_ids(args.database_url, cells)
+    facts = _ab_corpus_facts(args, runner, repo, cells, notebooks, kg_in_scope_for)
+    gold_by_key = load_ab_gold(load_questions())
+    _ab_assert_gold_resolves(
+        runner, units, gold_by_key, facts, resolve_gold_sources,
+    )
+    contract_short, contract_readable = _ab_model_contract(settings_by_arm["legacy"])
+    runner.say("model contract", f"{contract_short}  ({contract_readable})")
+
+    before = _readonly_counts(args.source_db_url)
+    runner.say("main database baseline", _format_counts(before))
+    context = set_request_user(profile)
+    try:
+        _ab_loop(
+            args, runner, units, facts, repo, settings_by_arm,
+            actor_id=actor_id, profile=profile, concurrency=concurrency,
+            gold_by_key=gold_by_key, model_contract=contract_short,
+            log_dir=_ab_llm_log_dir(settings_by_arm["legacy"]),
+            clock=datetime.now,
+        )
+    finally:
+        reset_request_user(context)
+    _assert_readonly(runner, before, _readonly_counts(args.source_db_url))
+    return 0
+
+
+def _ab_corpus_facts(
+    args: argparse.Namespace, runner: Runner, repo: Any, cells: Sequence[str],
+    notebooks: dict[str, str], kg_in_scope_for: Any,
+) -> dict[str, dict]:
+    """每个语料格的事实,**跑之前一次点清**。与 `_search_corpus_facts` 同形,
+    另外多带两样 A/B 才用得上的东西:来源的 `(id, title)` 全表(gold 解析、范围
+    判据、锚点第三跳都要它)与该格的 `corpus_signature`。
+    """
+    facts: dict[str, dict] = {}
+    for cell in cells:
+        notebook = notebooks[cell]
+        repo.get_notebook(notebook)  # 不存在直接 KeyError,而不是跑出一批空 run
+        rows = _ab_source_rows(args.database_url, notebook)
+        fact = {
+            "notebook": notebook,
+            "sources": len(rows),
+            "source_rows": rows,
+            "source_titles": {row["id"]: row["title"] for row in rows},
+            "kg_in_scope": bool(kg_in_scope_for(repo.retrieval, notebook)),
+        }
+        fact["corpus_signature"] = _ab_corpus_signature(cell, fact)
+        facts[cell] = fact
+        runner.say(
+            "corpus fact",
+            f"{cell}: sources={fact['sources']} "
+            f"kg_in_scope={fact['kg_in_scope']} "
+            f"corpus_signature={fact['corpus_signature']}",
+        )
+    return facts
+
+
+def _ab_assert_gold_resolves(
+    runner: Runner, units: Sequence[dict], gold_by_key: Mapping,
+    facts: Mapping, resolve_gold_sources: Any,
+) -> int:
+    """§5.5-6:跑批**之前**把每道题的 `gold_sources` 解析一遍,解析不到就整批停。
+
+    §3.2 的原话是「解析不到任何一个就是配置错误,跑批之前响亮失败,不能静默变
+    成 0」。这一步刻意放在第一个模型调用之前:一次 408 run 的批要跑几个小时,
+    而这条错在第一秒就看得见。
+
+    解析结果本身**刻意不留**:`anchors_on_gold` 的 B 格第三跳走的是同一条
+    「标题包含短名」的规则(`count_anchors_on_gold` 里),把一份等价的 id 集合
+    再传一遍,只会多出一个可能与它分叉的第二真源。这里要的是那条断言,不是它
+    的返回值。返回的题数只用来打日志。
+    """
+    from app.eval.reflect_ab import gold_for
+
+    checked: set[str] = set()
+    for unit in units:
+        key = unit["question_key"]
+        if key in checked:
+            continue
+        gold = gold_for(gold_by_key, key)
+        if gold is None or not gold.gold_sources:
+            continue
+        resolve_gold_sources(gold, facts[unit["corpus_cell"]]["source_rows"])
+        checked.add(key)
+    runner.say("gold sources resolved",
+               f"{len(checked)} 道题的 gold_sources 各解析到唯一来源(§5.5-6)")
+    return len(checked)
+
+
+def _ab_loop(
+    args: argparse.Namespace, runner: Runner, units: Sequence[dict],
+    facts: dict[str, dict], repo: Any, settings_by_arm: dict[str, Any],
+    *, actor_id: str, profile: Any, concurrency: int, gold_by_key: Mapping,
+    model_contract: str, log_dir: Path, clock: Any,
+) -> None:
+    """整批配对单元。每个单元产出**两行**(两臂),一起写、一起标 `paired`。
+
+    `--concurrency > 1` 时并发的是**单元**,不是臂:臂序随机与背靠背是 A/B 的
+    立身之本(§4.2),把两条臂拆到不同线程会让「同题同档同时刻」这句话不再成
+    立。重复轮之间加一道栅栏(逐轮 `_ab_round_units`),这样被截断的前缀仍然是
+    一份**完整轮**的数据集。
+    """
+    runner.out_dir.mkdir(parents=True, exist_ok=True)
+    intents = _IntentCache(
+        runner.out_dir / "intents.jsonl", enabled=not args.no_intent
+    )
+    state = {
+        "verified": set(), "index": 0, "total": len(units) * len(AB_ARMS),
+        "lock": threading.Lock(),
+    }
+    rows_handle = (runner.out_dir / "ab-runs.jsonl").open("a", encoding="utf-8")
+    log = (runner.out_dir / "ab-runs.log").open("a", encoding="utf-8")
+    try:
+        for repeat, batch in _ab_round_units(units):
+            runner.say("repeat round", f"r{repeat}: {len(batch)} 个配对单元")
+            _ab_run_batch(
+                batch, args=args, runner=runner, facts=facts, repo=repo,
+                settings_by_arm=settings_by_arm, actor_id=actor_id,
+                profile=profile, concurrency=concurrency, intents=intents,
+                gold_by_key=gold_by_key, model_contract=model_contract,
+                log_dir=log_dir, clock=clock, state=state,
+                rows_handle=rows_handle, log=log,
+            )
+    finally:
+        log.close()
+        rows_handle.close()
+
+
+def _ab_round_units(units: Sequence[dict]) -> list[tuple[int, list[dict]]]:
+    """按重复轮切段,**保持原顺序**。重复轮是最外层循环(§4.2)。"""
+    batches: dict[int, list[dict]] = {}
+    for unit in units:
+        batches.setdefault(int(unit["repeat"]), []).append(unit)
+    return [(repeat, batches[repeat]) for repeat in sorted(batches)]
+
+
+def _ab_run_batch(
+    batch: Sequence[dict], *, concurrency: int, **kwargs: Any,
+) -> None:
+    if concurrency <= 1:
+        # **不经过线程池**:`--concurrency 1` 的行为必须与并发落地前逐字一致,
+        # 包括「所有调用都在主线程里发生」这件事本身(与 `_search_loop` 同一条
+        # 理由:`ThreadPoolExecutor(max_workers=1)` 也会把调用挪到另一个线程,
+        # 单这一点就足以让 ContextVar 的可见性行为变掉)。
+        for unit in batch:
+            _run_ab_unit(unit, concurrency=concurrency, **kwargs)
+        return
+    profile = kwargs["profile"]
+
+    def worker(unit: dict) -> None:
+        from app.core.request_context import reset_request_user, set_request_user
+
+        ctx = set_request_user(profile)
+        try:
+            _run_ab_unit(unit, concurrency=concurrency, **kwargs)
+        finally:
+            reset_request_user(ctx)
+
+    with ThreadPoolExecutor(max_workers=concurrency) as pool:
+        futures = [pool.submit(worker, unit) for unit in batch]
+        for future in as_completed(futures):
+            future.result()
+
+
+def ab_contract_digest(contract: object) -> str:
+    """一份冻结契约的短码。§5.5-3「两臂必须引用同一条契约缓存行」的**比较对象**。
+
+    两臂共用同一份契约是 A/B 成立的前提(§5.4:契约不同,必答方面就不同,两臂
+    根本不在比同一件事)。今天它由构造保证——`_run_ab_unit` 只调一次
+    `_IntentCache.get`,两臂拿到的是同一个对象。断言的意义在于那条构造哪天被
+    改掉:把 `intents.get` 挪进臂的循环里,数据看起来照样出得来,而两臂已经在
+    比两件不同的事了。契约正文不进日志也不进数据集,所以比的是短码。
+    """
+    return merge_key(json.dumps(contract, ensure_ascii=False, sort_keys=True,
+                                default=str))
+
+
+def _run_ab_unit(
+    unit: dict, *, args: argparse.Namespace, runner: Runner,
+    facts: dict[str, dict], repo: Any, settings_by_arm: dict[str, Any],
+    actor_id: str, profile: Any, concurrency: int, intents: "_IntentCache",
+    gold_by_key: Mapping, model_contract: str, log_dir: Path, clock: Any,
+    state: dict, rows_handle: Any, log: Any,
+) -> None:
+    """一个配对单元:同题同档同轮,两条臂背靠背跑完,两行一起落。
+
+    **臂序按 run 随机**(§4.2):provider 的排队与限流漂移对两臂等量,臂序本身
+    不成为系统偏差。随机不带种子——它要的就是不可预测,而这批数据的可复现性由
+    题号/档位/轮次那三维负责,不由臂序负责。
+
+    **意图契约每题只算一次**(`_IntentCache`,键取 `question_key`——英文题面有
+    自己的题号 `<key>-en`,所以 §5.4 说的 `question_key + lang` 已经被这一个键
+    覆盖),两臂共用同一份;同一性由 `ab_contract_digest` 当场比一次(§5.5-3)。
+
+    `--only-policy` 只跑一侧时,这一行的 `paired` 是 `False`:它进单臂基线表,
+    不进配对差值表(§4.2)。
+    """
+    from app.eval.reflect_ab import assert_arm_matches_evidence, gold_for, mark_paired
+
+    fact = facts[unit["corpus_cell"]]
+    arms = list(args.only_policy) if args.only_policy else list(AB_ARMS)
+    random.shuffle(arms)
+    contract = intents.get(
+        repo, settings_by_arm["legacy"], unit, actor_id=actor_id,
+        notebook=fact["notebook"],
+    )
+    digest = ab_contract_digest(contract)
+    scope_ids, scope_failed = _resolve_item_scope(args, unit, fact)
+    if scope_failed:
+        # 声明了范围却解析不到唯一匹配:整个单元作废,不退化成一次不设限的全库
+        # 检索(codex #700 R3 P2 的同一条口径)。两臂都不跑 ⇒ 也不写半行。
+        runner.say(
+            "ab scope unresolved",
+            f"{unit['question_key']} {unit['corpus_cell']} "
+            f"titles={list(unit.get('scope_source_titles') or ())} -> 整单元跳过",
+        )
+        return
+    rows: list[dict] = []
+    for arm in arms:
+        if ab_contract_digest(contract) != digest:
+            raise RuntimeError(
+                f"{unit['question_key']}: 两臂拿到的意图契约不是同一份"
+                "(§5.5-3)。这道题整题作废,先修再跑"
+            )
+        rows.append(_run_ab_arm(
+            unit, arm=arm, fact=fact, repo=repo,
+            settings=settings_by_arm[arm], actor_id=actor_id,
+            contract=contract, concurrency=concurrency, scope_ids=scope_ids,
+            gold=gold_for(gold_by_key, unit["question_key"]),
+            model_contract=model_contract, log_dir=log_dir, clock=clock,
+            out_dir=runner.out_dir, database_url=args.database_url,
+        ))
+    mark_paired(rows)
+    with state["lock"]:
+        for row, arm in zip(rows, arms):
+            state["index"] += 1
+            rows_handle.write(
+                json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n"
+            )
+            line = (
+                f"{state['index']:04d}/{state['total']} {unit['question_key']} "
+                f"{unit['corpus_cell']} {arm} {unit['effort']} "
+                f"r{unit['repeat']} {row['latency_ms_total']}ms "
+                f"reflect_turns={row['reflect_turns']} "
+                f"termination={row['termination_reason']} "
+                f"answer_chars={row['answer_chars']} paired={row['paired']}"
+            )
+            log.write(line + "\n")
+            runner.say("ab done", line)
+            if arm not in state["verified"]:
+                # **每条臂的第一个 run 之后**就把「声明的臂」与「轨迹里真的发生
+                # 了什么」对上一次(§5.5-1)。整批跑完再发现 v2 那半其实跑的是
+                # legacy,代价是几百次模型调用。
+                assert_arm_matches_evidence(arm, row["policy_version"])
+                state["verified"].add(arm)
+        rows_handle.flush()
+        log.flush()
+
+
+def _run_ab_arm(
+    unit: dict, *, arm: str, fact: dict, repo: Any,
+    settings: Any, actor_id: str, contract: dict | None, concurrency: int,
+    scope_ids: Sequence[str] | None, gold: Any, model_contract: str,
+    log_dir: Path, clock: Any, out_dir: Path, database_url: str,
+) -> dict:
+    """一条臂的一个 run:跑 Ask、投影成一行、`.local` 落一份原始存档。
+
+    `clock` 是**墙钟**(`datetime.now`),不是 `time.monotonic`:成本三键靠 LLM
+    日志的时间窗切片归因(§7.2),而日志里那个 `ts` 是
+    `datetime.now().isoformat()` 写的,两边必须是同一个钟。`latency_ms_total`
+    另外用 `time.monotonic` 掐——它量的是时长,不该受系统时间调整影响。
+    """
+    from app.eval.reflect_ab import project_ab_run
+
+    item = dict(unit)
+    steps: list[dict] = []
+    raw_steps: list[dict] = []
+
+    def _on_trace(step: Any) -> None:
+        steps.append(trace_step_row(step))
+        raw_steps.append(raw_trace_step_row(step))
+
+    started_at = clock()
+    started = time.monotonic()
+    response = run_ab_once(
+        repo, notebook=fact["notebook"], item=item, arm=arm, settings=settings,
+        contract=contract, on_trace=_on_trace,
+        cancel_event=threading.Event(), actor_id=actor_id,
+        scope_source_ids=scope_ids,
+    )
+    latency_ms = round((time.monotonic() - started) * 1000)
+    ended_at = clock()
+    anchors = list(getattr(response, "anchors", None) or ())
+    row = project_ab_run(
+        steps, arm=arm, effort=unit["effort"], repeat=int(unit["repeat"]),
+        question_key=unit["question_key"], corpus_cell=unit["corpus_cell"],
+        answer=str(getattr(response, "answer", "") or ""),
+        citations=list(getattr(response, "citations", None) or ()),
+        anchors=anchors,
+        coverage_complete=_ab_coverage_complete(response),
+        kg_in_scope=fact["kg_in_scope"], sources_count=fact["sources"],
+        has_intent_contract=contract is not None,
+        notebook_id=fact["notebook"], gold=gold,
+        element_sections=_ab_element_sections(
+            database_url,
+            [str(getattr(anchor, "element_id", "") or "") for anchor in anchors],
+        ),
+        source_titles=fact["source_titles"],
+        # 题目声明了范围 ⇒ 允许集合就是解析出来的那几个;没声明 ⇒ 全库
+        # (`citations_out_of_scope` 的正确值在两种情况下都恒为 0,§9-1)。
+        allowed_source_ids=(
+            frozenset(scope_ids) if scope_ids
+            else frozenset(fact["source_titles"])
+        ),
+        usage=_ab_usage_for_window(
+            log_dir, started_at, ended_at, concurrency=concurrency,
+        ),
+        latency_ms_total=latency_ms,
+        model_contract=model_contract,
+        corpus_signature=fact["corpus_signature"],
+    )
+    _write_ab_raw(out_dir, arm, item, response, raw_steps, contract)
+    return row
+
+
+def _write_ab_raw(
+    out_dir: Path, arm: str, item: dict, response: Any,
+    raw_steps: Sequence[dict], contract: dict | None,
+) -> None:
+    """`.local` 的一份 run 存档。**不进数据集/不进仓库**(§7.3)。"""
+    path = _ab_raw_path(out_dir, arm, item)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            ab_raw_payload(item, arm, response, raw_steps, contract),
+            ensure_ascii=False, indent=2, sort_keys=True, default=str,
+        ),
+        encoding="utf-8",
+    )
+
+
 def cmd_export(args: argparse.Namespace, runner: Runner) -> int:
     out = runner.out_dir / "t0-dataset.jsonl"
     export_out = runner.out_dir / "ask-runs.jsonl"
@@ -3286,12 +4294,28 @@ def build_parser() -> argparse.ArgumentParser:
         help="每个语料格只取前 N 题(先验证用);默认全量",
     )
     parser.add_argument("--lang", choices=("zh", "en", "both"), default="zh")
+    # --- `ab` 专属(A/B 设计规格 §5.4) ---
+    parser.add_argument(
+        "--efforts", action="append", default=[], choices=list(EFFORTS),
+        help="`ab` 跑哪些档位(可多次;默认两档全跑)。`search`/`ask` 不读它"
+             "——它们的档位维度由 EFFORTS 定死",
+    )
+    parser.add_argument(
+        "--repeats", type=int, default=3,
+        help="`ab` 的重复轮数(§4.1 默认 3)。重复轮是**最外层**循环,所以任何"
+             "被预算或故障截断的前缀都是一份配对完整、平衡的数据集",
+    )
+    parser.add_argument(
+        "--round", type=int,
+        help="`ab` 只跑第 N 轮(与 --repeats 配合:先跑第 1 轮看结论,再补"
+             "第 2/3 轮)。不给就是 1..--repeats 全跑",
+    )
     parser.add_argument(
         "--mode", choices=("reasoning", "chunk", "auto"), default="reasoning",
     )
     parser.add_argument(
         "command",
-        choices=("seed", "ask", "report", "search", "restart", "export",
+        choices=("seed", "ask", "report", "search", "ab", "restart", "export",
                  "teardown"),
     )
     return parser
@@ -3317,11 +4341,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     # 明显打错的值,不在这里做 SQLite/连接池那两条(它们要跑到真库连上才判断
     # 得出来)。
     args.concurrency = max(1, int(args.concurrency))
+    # `ab` 的重复轮数同理:0 或负数会让整批枚举变成空的,而那看起来完全像一次
+    # 「这批题都被过滤掉了」。`--round` 不 clamp——它是一个下标,越界该报错。
+    args.repeats = max(1, int(args.repeats))
     runner = Runner(dry_run=args.dry_run, out_dir=Path(args.out_dir))
     handlers = {
         "seed": cmd_seed, "ask": cmd_ask, "report": cmd_report,
-        "search": cmd_search, "restart": cmd_restart, "export": cmd_export,
-        "teardown": cmd_teardown,
+        "search": cmd_search, "ab": cmd_ab, "restart": cmd_restart,
+        "export": cmd_export, "teardown": cmd_teardown,
     }
     return handlers[args.command](args, runner)
 
