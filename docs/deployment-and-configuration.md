@@ -621,7 +621,10 @@ Scheduling policy is fixed in code:
   and 1,800 seconds for background work; cancellation is honored before dispatch;
 - a fatal provider failure opens the circuit immediately; three consecutive
   transient failures also open it. The cooldown is 30 seconds and admits one
-  half-open recovery probe.
+  half-open recovery probe. A malformed model response (empty body, bad
+  JSON, truncation) never counts toward the breaker — it is model behavior,
+  not provider availability, and already has its own per-call retry and
+  run-level degrade path.
 
 The scheduler and breaker are process-local. Production must run exactly one
 backend process (`scripts/prod.sh` pins Uvicorn to `--workers 1`); multiple

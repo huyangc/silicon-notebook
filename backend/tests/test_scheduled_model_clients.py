@@ -716,7 +716,12 @@ def test_rerank_uses_a_capacity_bounded_submission_window_for_many_batches():
         provider.close()
 
 
-def test_malformed_rerank_rows_are_breaker_visible_and_fall_back_with_typed_error():
+def test_malformed_rerank_rows_fall_back_with_typed_error_but_never_open_breaker():
+    # Malformed rerank rows are model behavior, not provider availability —
+    # classify_provider_failure returns IGNORED for MalformedModelResponse,
+    # so repeated malformed rows must never trip TRANSIENT_THRESHOLD and
+    # open the breaker (that would incorrectly deny unrelated in-flight
+    # work). Each call still degrades to the typed fallback error.
     class MalformedReranker(_Reranker):
         def _rerank_batch(self, query, documents):
             return [{"index": "bad", "relevance_score": "not-a-number"}]
@@ -732,7 +737,7 @@ def test_malformed_rerank_rows_are_breaker_visible_and_fall_back_with_typed_erro
             "malformed_response",
             "malformed_response",
         ]
-        assert provider.scheduler_snapshot("rerank").breaker_state == "open"
+        assert provider.scheduler_snapshot("rerank").breaker_state == "closed"
     finally:
         provider.close()
 
@@ -927,8 +932,7 @@ def test_ignored_programming_error_does_not_arm_or_emit_recovery():
     assert observations == []
 
 
-@pytest.mark.parametrize("failure", ["malformed", "transient"])
-def test_provider_failure_classes_emit_one_failure_and_one_recovery(failure):
+def test_transient_provider_failure_emits_one_failure_and_one_recovery():
     observations = []
     observed = threading.Event()
 
@@ -941,11 +945,7 @@ def test_provider_failure_classes_emit_one_failure_and_one_recovery(failure):
             if not self.first:
                 return super().chat_json(messages, response_schema_hint, **kwargs)
             self.first = False
-            if failure == "malformed":
-                return "[]"
-            if failure == "transient":
-                raise TimeoutError("provider timeout")
-            raise AssertionError(failure)
+            raise TimeoutError("provider timeout")
 
     def observer(value):
         observations.append(value)
@@ -967,6 +967,40 @@ def test_provider_failure_classes_emit_one_failure_and_one_recovery(failure):
         ]
     finally:
         provider.close()
+
+
+def test_malformed_provider_response_does_not_emit_health_observations():
+    # A malformed body (bad JSON here) is model behavior, not a provider
+    # availability signal — classify_provider_failure returns IGNORED for
+    # it, so it must not feed the "模型服务" health panel any more than the
+    # local-programming-error case above (test_ignored_programming_error_
+    # does_not_arm_or_emit_recovery): no "observed_failure", and no arming
+    # of a "recovery_probe" on the next success either.
+    observations = []
+
+    class MalformedThenSuccessfulChat(_Chat):
+        def __init__(self):
+            super().__init__()
+            self.first = True
+
+        def chat_json(self, messages, response_schema_hint, **kwargs):
+            if self.first:
+                self.first = False
+                return "[]"
+            return super().chat_json(messages, response_schema_hint, **kwargs)
+
+    provider = _provider(
+        chat=MalformedThenSuccessfulChat(), observation_sink=observations.append
+    )
+    try:
+        client = provider.chat("ask_answer")
+        with pytest.raises(provider_mod.ModelInvocationError):
+            client.chat_json([], "{}")
+        assert client.chat_json([], "{}") == '{"ok": true}'
+    finally:
+        provider.close()
+
+    assert observations == []
 
 
 def test_fatal_provider_failure_is_observed_and_opens_without_false_recovery():
