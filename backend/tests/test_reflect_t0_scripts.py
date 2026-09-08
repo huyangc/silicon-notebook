@@ -1763,6 +1763,61 @@ def test_search_loop_concurrent_writes_a_failed_row_and_reports_failures(
     assert "秘密原文" not in log_text
 
 
+def test_search_loop_concurrent_does_not_start_a_run_registered_after_abort(
+    tmp_path, monkeypatch,
+):
+    """竞态(codex #700 R21 P2):worker 过了入口 `aborted` 检查、还在解析范围时
+    别的 run 触发 `abort()`;它随后才登记 cancel_event,快照里没有它,于是带着一个
+    永远不会被 set 的事件开始调模型。修复后登记与 abort 同锁复核:收摊已开始的
+    worker 直接退出,`run_search_once` 不再被调。用「Q01 的范围解析等到 abort 发生
+    之后才返回」把时序钉死,不靠 sleep。"""
+    plan = [
+        {"question_key": "Q00", "corpus_cell": "A_nokg", "policy": "v2",
+         "effort": "standard", "question": "q"},
+        {"question_key": "Q01", "corpus_cell": "A_nokg", "policy": "legacy",
+         "effort": "standard", "question": "q"},
+    ]
+    facts = {"A_nokg": {"notebook": "nb-a", "sources": 1, "kg_in_scope": True}}
+    settings_by_policy = {"legacy": object(), "v2": object()}
+    aborted_seen = threading.Event()
+    executed: list[str] = []
+    lock = threading.Lock()
+
+    real_resolve = rig._resolve_item_scope
+
+    def slow_resolve(args, item, fact):
+        if item["question_key"] == "Q01":
+            assert aborted_seen.wait(timeout=5), "abort 一直没发生,时序没钉住"
+        return real_resolve(args, item, fact)
+
+    def fake_run_search_once(repo, settings, *, notebook, item, prepared,
+                             on_step, cancel_event, actor_id,
+                             scope_source_ids=None):
+        with lock:
+            executed.append(item["question_key"])
+        # Q00 声明 v2 却回 legacy 形状的证据 ⇒ 主循环 abort()。
+        return types.SimpleNamespace(termination=None)
+
+    real_say = rig.Runner.say
+
+    def spy_say(self, action, detail=""):
+        if action == "search aborted":
+            aborted_seen.set()
+        return real_say(self, action, detail)
+
+    monkeypatch.setattr(rig, "_resolve_item_scope", slow_resolve)
+    monkeypatch.setattr(rig, "run_search_once", fake_run_search_once)
+    monkeypatch.setattr(rig.Runner, "say", spy_say)
+    runner = rig.Runner(dry_run=False, out_dir=tmp_path)
+    with pytest.raises(RuntimeError, match="声明 --policy"):
+        rig._search_loop_concurrent(
+            _concurrent_search_args(), runner, plan, facts, None,
+            settings_by_policy, actor_id="t0-owner",
+            profile=types.SimpleNamespace(id="t0-owner"), concurrency=2,
+        )
+    assert executed == ["Q00"], "abort 之后才登记的 Q01 不该开始调模型"
+
+
 def test_search_loop_concurrent_cancels_remaining_runs_on_policy_mismatch(
     tmp_path, monkeypatch,
 ):
