@@ -1371,11 +1371,16 @@ def _report_rows(
     # 步数预算推断用同一档位的天花板即是报告的有效天花板);意图契约是报告
     # 已确认的 `understanding`。传 None 会让每节都记 effort=unknown、
     # has_intent_contract=false,聚合时把各深度的报告混成一格。
+    effort = report_retrieval_effort(int(item["depth"]))
     payload = {
         "mode": "reasoning",
-        "retrieval_effort": report_retrieval_effort(int(item["depth"])),
+        "retrieval_effort": effort,
         "intent": report.get("understanding") or None,
     }
+    # 逐节深挖的有效反思轮上限:`ReportEngine._deep_dive` 传 `max_steps=depth`,
+    # 检索器取 `min(depth, 档位上限)`(codex #700 R10 P2)。只按档位表判,depth=2
+    # 的报告两轮就停会被记成 unknown 而不是 step_budget。
+    step_ceiling = min(int(item["depth"]), MAX_REFLECT_STEPS.get(effort, int(item["depth"])))
     if gate_reason is not None:
         row = project_report_section(
             {}, section_index=0, section_total=0,
@@ -1397,7 +1402,7 @@ def _report_rows(
         )
         trace_row = project_run(
             {"mode": "reasoning", "status": "done"}, steps, payload,
-            sources_count=None, rig_tags=tags,
+            sources_count=None, rig_tags=tags, step_ceiling=step_ceiling,
         )
         row.update(trace_row)
         row["merge_key"] = merge_key(report_id, index)

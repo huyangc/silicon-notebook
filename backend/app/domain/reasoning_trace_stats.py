@@ -458,9 +458,14 @@ def _reflect_fallback_reason(step: Mapping) -> str | None:
 
 
 def infer_legacy_termination(
-    steps: Sequence[Mapping], effort: str,
+    steps: Sequence[Mapping], effort: str, *, step_ceiling: int | None = None,
 ) -> str | None:
     """legacy 轨迹的结束原因反推。返回 `None` = unknown。
+
+    `step_ceiling` 是调用方**已知的有效**反思轮上限(报告逐节深挖:引擎传
+    `max_steps=depth`,检索器取 `min(depth, 档位上限)`;codex #700 R10 P2)。
+    给了就用它,不给才退回档位表 `MAX_REFLECT_STEPS[effort]`——一份 depth=2 的
+    报告两轮就停,按 standard 档的 8 轮上限去判会得到 unknown 而不是 step_budget。
 
     次序刻意让**记录下来的事实**先于推断:熔断步、「无可执行动作」步、以及末尾
     reflect 步自己 detail 里的 `fallback_reason` 都是执行处当场写下的,读到就
@@ -484,7 +489,7 @@ def infer_legacy_termination(
         detail = last["detail"]
         if detail.get("next_action") == "answer" or detail.get("sufficient"):
             return TERMINATION_MODEL_END
-    ceiling = MAX_REFLECT_STEPS.get(effort)
+    ceiling = step_ceiling if step_ceiling is not None else MAX_REFLECT_STEPS.get(effort)
     if ceiling is not None and len(reflects) >= ceiling:
         return "step_budget"
     return None
@@ -633,8 +638,12 @@ def project_run(
     *,
     sources_count: object = None,
     rig_tags: Mapping | None = None,
+    step_ceiling: int | None = None,
 ) -> dict:
     """一次 Ask run → 一行闭集投影(§3)。
+
+    `step_ceiling`:调用方已知的有效反思轮上限,透传给 legacy 终态推断(报告
+    逐节深挖用;Ask 不传,按档位表)。
 
     `job_row` 只被读 `mode` / `status`;`answer_payload` 只被读
     `mode` / `retrieval_effort` / `intent` / `kg_required`(有没有、是不是
@@ -654,8 +663,26 @@ def project_run(
     if v2_reason is not None:
         termination, inferred = v2_reason, False
     else:
-        termination = infer_legacy_termination(normalized, effort)
+        termination = infer_legacy_termination(
+            normalized, effort, step_ceiling=step_ceiling
+        )
         inferred = None if termination is None else True
+    status = closed_value(job_row.get("status"), JOB_STATUSES)
+    # 没跑到底的 run(failed/cancelled)没有协议证据,也常常没有落答案:按证据判
+    # 会把 v2 的失败记成 legacy、档位记成 unknown,失败就从 v2 的对照列里消失
+    # (codex #700 R10 P2)。这时用 rig 声明的标签(过闭集);跑成的 run 仍以证据
+    # 为准,声明只补 unknown 不改证据。
+    declared_policy = _closed_exact(
+        tags.get("policy") or tags.get("policy_version"), POLICY_VERSIONS
+    )
+    if v2_reason is not None:
+        policy_version = "v2"
+    elif status in ("failed", "cancelled") and declared_policy != UNKNOWN:
+        policy_version = declared_policy
+    else:
+        policy_version = "legacy"
+    if effort == UNKNOWN:
+        effort = closed_value(tags.get("effort"), SITUATION_RETRIEVAL_EFFORTS)
     breaker, stale_max = _stale(normalized)
     contribution, shared = citation_contribution(normalized)
     counters = _counters(normalized)
@@ -671,12 +698,12 @@ def project_run(
         "mode": mode,
         "effort": effort,
         "kg_in_scope": _kg_in_scope(normalized, payload, mode),
-        "policy_version": "v2" if v2_reason is not None else "legacy",
+        "policy_version": policy_version,
         "has_intent_contract": bool(intent),
         "corpus_cell": _closed_exact(tags.get("corpus_cell"), CORPUS_CELLS),
         "question_key": str(tags.get("question_key") or "") or UNKNOWN,
         "notebook_bucket": source_bucket(sources_count),
-        "status": closed_value(job_row.get("status"), JOB_STATUSES),
+        "status": status,
         "trace_source": closed_value(
             tags.get("trace_source") or "trace_steps", TRACE_SOURCES
         ),
