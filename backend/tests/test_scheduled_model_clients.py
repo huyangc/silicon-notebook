@@ -969,13 +969,21 @@ def test_transient_provider_failure_emits_one_failure_and_one_recovery():
         provider.close()
 
 
-def test_malformed_provider_response_does_not_emit_health_observations():
+def test_malformed_provider_response_is_observed_without_changing_health():
     # A malformed body (bad JSON here) is model behavior, not a provider
-    # availability signal — classify_provider_failure returns IGNORED for
-    # it, so it must not feed the "模型服务" health panel any more than the
-    # local-programming-error case above (test_ignored_programming_error_
-    # does_not_arm_or_emit_recovery): no "observed_failure", and no arming
-    # of a "recovery_probe" on the next success either.
+    # availability signal — classify_provider_failure returns IGNORED for it,
+    # so it neither opens the breaker nor arms a recovery probe.  It is also
+    # the most common real failure mode, and the "模型服务" panel is the only
+    # surface an administrator has, so it IS recorded: one observation whose
+    # *availability* status stays "ok" (the provider demonstrably answered)
+    # and whose diagnostic rides in code/trigger.  That is the difference
+    # from the local-programming-error case above
+    # (test_ignored_programming_error_does_not_arm_or_emit_recovery), which
+    # may never have reached the provider and is recorded nowhere.
+    #
+    # Exactly one observation: the following success emits nothing, because
+    # `_needs_recovery` was never armed.  That absence is what keeps a model
+    # behavior off the availability ledger.
     observations = []
 
     class MalformedThenSuccessfulChat(_Chat):
@@ -1000,7 +1008,44 @@ def test_malformed_provider_response_does_not_emit_health_observations():
     finally:
         provider.close()
 
-    assert observations == []
+    assert [
+        (item.status, item.code, item.trigger) for item in observations
+    ] == [("ok", "malformed_response", "observed_failure")]
+    assert provider.scheduler_snapshot("chat").breaker_state == "closed"
+
+
+def test_malformed_response_never_overwrites_a_standing_failure_row():
+    # A service that is already flagged as failing keeps its "error" row: the
+    # malformed observation is a diagnostic, not a recovery signal, and must
+    # not clear an availability failure that no success has cleared yet.
+    # Only a real success emits the ok/recovery_probe row.
+    observations = []
+
+    class FailingThenMalformedChat(_Chat):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        def chat_json(self, messages, response_schema_hint, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                raise TimeoutError("provider timeout")
+            return "[]"
+
+    provider = _provider(
+        chat=FailingThenMalformedChat(), observation_sink=observations.append
+    )
+    try:
+        client = provider.chat("ask_answer")
+        for _ in range(2):
+            with pytest.raises(provider_mod.ModelInvocationError):
+                client.chat_json([], "{}")
+    finally:
+        provider.close()
+
+    assert [(item.status, item.trigger) for item in observations] == [
+        ("error", "observed_failure")
+    ]
 
 
 def test_fatal_provider_failure_is_observed_and_opens_without_false_recovery():

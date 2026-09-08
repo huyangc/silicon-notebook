@@ -624,7 +624,12 @@ Scheduling policy is fixed in code:
   half-open recovery probe. A malformed model response (empty body, bad
   JSON, truncation) never counts toward the breaker — it is model behavior,
   not provider availability, and already has its own per-call retry and
-  run-level degrade path.
+  run-level degrade path. It is still recorded as a health observation, but
+  one that does not change availability: the panel keeps the service's
+  status at `ok` (the provider demonstrably answered) and carries the
+  diagnostic in the `code` (`malformed_response`) and `trigger`
+  (`observed_failure`) columns. It never arms a recovery probe, and it never
+  overwrites a standing `error` row that no success has cleared yet.
 
 The scheduler and breaker are process-local. Production must run exactly one
 backend process (`scripts/prod.sh` pins Uvicorn to `--workers 1`); multiple
@@ -633,7 +638,9 @@ breaker, and health state.
 
 The **模型服务** panel is read-only for ordinary users. It shows sanitized
 system service identity, bound workloads, last-known health, active/maximum,
-queued work, oldest wait, and breaker state. Reading
+queued work, oldest wait, and breaker state. A malformed model reply shows up
+there as an observation only (`ok` + `malformed_response`), never as a change
+in availability. Reading
 `GET /api/model-services/status` never probes an upstream service. Only admins
 can explicitly probe one service or all services through
 `POST /api/admin/model-services/{service_id}/test` and
