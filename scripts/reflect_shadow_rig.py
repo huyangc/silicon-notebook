@@ -685,7 +685,9 @@ def cmd_seed(args: argparse.Namespace, runner: Runner) -> int:
     backend = _start_backend(args, "legacy") if not runner.dry_run else None
     try:
         return _seed_notebooks(args, runner, corpus, cells,
-                               backend_pid=backend.pid if backend else 0)
+                               backend_pid=backend.pid if backend else 0,
+                               backend_identity=_process_identity(backend.pid)
+                               if backend else None)
     except BaseException:
         # 后端在成功路径上刻意**留着**(seed 之后紧接着就是 ask,重起一次要再等
         # 一遍就绪探测),但失败时必须收掉:否则下一次 seed 会撞在同一个端口上,
@@ -750,6 +752,7 @@ def _stage_corpus(
 def _seed_notebooks(
     args: argparse.Namespace, runner: Runner, corpus: dict[str, list[Path]],
     cells: Sequence[str], *, backend_pid: int = 0,
+    backend_identity: str | None = None,
 ) -> int:
     """注册 fixture 用户 → 四个语料格各建一个笔记本 → 上传 → 等解析 → 建图。
 
@@ -764,6 +767,7 @@ def _seed_notebooks(
     token = str((auth or {}).get("token") or "")
     state: dict[str, Any] = {
         "user": args.user, "token": token, "backend_pid": backend_pid,
+        "backend_identity": backend_identity,
         "notebooks": {},
         # `restart` 靠这几项在只有 `--policy` 的情况下重起同一台后端(§2.3):
         # 它读的是这次 seed 真的用了哪套配置,而不是 `restart` 调用自己的
@@ -2744,32 +2748,76 @@ def _merge_export_parts(parts: Sequence[Path], out: Path) -> None:
             )
 
 
+def _process_identity(pid: int) -> str | None:
+    """`ps` 报的「启动时刻 + 命令行」——PID 之外再认一次人(codex #700 R11 P2)。
+    进程不存在返回 None。macOS/Linux 的 `ps -o lstart=,command=` 同形。"""
+    if not pid:
+        return None
+    try:
+        out = subprocess.run(
+            ["ps", "-o", "lstart=,command=", "-p", str(pid)],
+            capture_output=True, text=True, check=False, timeout=5,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return out or None
+
+
+def _backend_process_is_ours(
+    pid: int, expected_identity: str | None,
+) -> tuple[bool, str]:
+    """state 里的 PID 现在指向的还是我们起的那台后端吗?
+
+    后端已退出而 PID 被别的进程复用时,照 PID 发 SIGTERM/SIGKILL 会打到用户的
+    无关进程上(codex #700 R11 P2)。有 seed/restart 记下的身份就逐字比;老 state
+    没记身份时至少要求命令行是 uvicorn 起的 `app.main:app`。
+    """
+    identity = _process_identity(pid)
+    if identity is None:
+        return False, f"pid={pid} 已不存在"
+    if expected_identity:
+        if identity == expected_identity:
+            return True, ""
+        return False, f"pid={pid} 已被别的进程复用,不发信号"
+    if "uvicorn" in identity and "app.main:app" in identity:
+        return True, ""
+    return False, f"pid={pid} 不是 rig 起的 uvicorn 后端,不发信号"
+
+
 def _stop_backend_gracefully(
     runner: Runner, pid: int, *, timeout: float = 15.0,
-) -> None:
+    expected_identity: str | None = None,
+) -> bool:
     """SIGTERM,给它 `timeout` 秒退出;超时了才 SIGKILL(§2.3「优雅停止」)。
+    发信号之前先核对进程身份(`_backend_process_is_ours`);不是我们的进程就
+    什么都不发,返回 False。
 
     轮询用 `os.kill(pid, 0)`(不发信号,只探测进程还在不在)——PID 不存在时
     这一探测本身就抛 `OSError`,拿来当"已经退出"的判据,不用额外 waitpid
     (uvicorn 子进程可能已经被系统回收,不一定还是本进程的直接子进程)。
     """
+    ours, why = _backend_process_is_ours(pid, expected_identity)
+    if not ours:
+        runner.say("stop backend skipped", why)
+        return False
     try:
         os.kill(pid, signal.SIGTERM)
     except OSError as exc:
         runner.say("stop backend failed", str(exc))
-        return
+        return False
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
             os.kill(pid, 0)
         except OSError:
-            return
+            return True
         time.sleep(0.5)
     try:
         os.kill(pid, signal.SIGKILL)
         runner.say("stop backend", f"pid={pid} 超时 {timeout}s 未退出,已 SIGKILL")
     except OSError:
         pass
+    return True
 
 
 def cmd_restart(args: argparse.Namespace, runner: Runner) -> int:
@@ -2802,7 +2850,9 @@ def cmd_restart(args: argparse.Namespace, runner: Runner) -> int:
         return 0
 
     if pid:
-        _stop_backend_gracefully(runner, pid)
+        _stop_backend_gracefully(
+            runner, pid, expected_identity=state.get("backend_identity"),
+        )
 
     restart_args = argparse.Namespace(**vars(args))
     restart_args.port = port
@@ -2813,7 +2863,9 @@ def cmd_restart(args: argparse.Namespace, runner: Runner) -> int:
     backend = _start_backend(restart_args, args.policy)
 
     state.update({
-        "backend_pid": backend.pid, "policy": args.policy, "port": port,
+        "backend_pid": backend.pid,
+        "backend_identity": _process_identity(backend.pid),
+        "policy": args.policy, "port": port,
         "database_url": database_url, "storage_dir": storage_dir,
         "env_file": env_file,
     })
@@ -2954,11 +3006,14 @@ def cmd_teardown(args: argparse.Namespace, runner: Runner) -> int:
     if pid:
         # 先收后端再删库:还连着的会话会让 DROP 走 FORCE 去踢连接,而被踢掉的
         # uvicorn 之后每个请求都在报连接错——留一个这样的进程占着端口比留一个
-        # 库更烦人。
-        try:
-            os.kill(pid, 15)
-        except OSError as exc:
-            runner.say("stop backend failed", str(exc))
+        # 库更烦人。发信号前核对进程身份,停完就把 PID 从 state 里清掉,重复
+        # teardown 不会再对一个可能被复用的 PID 发信号(codex #700 R11 P2)。
+        _stop_backend_gracefully(
+            runner, pid, expected_identity=state.get("backend_identity"),
+        )
+        state["backend_pid"] = 0
+        state["backend_identity"] = None
+        runner.save_state(state)
     if not drop:
         return 0
     ok, reason = _admin_targets_same_server(args.admin_url, args.database_url)

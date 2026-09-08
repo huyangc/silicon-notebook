@@ -114,6 +114,41 @@ def test_dry_run_touches_nothing(tmp_path, capsys):
 # --- restart 子命令 -----------------------------------------------------------
 
 
+def test_stop_backend_refuses_a_pid_that_is_not_our_backend(monkeypatch):
+    """后端已退出、PID 被别的进程复用时,照 PID 发 SIGTERM/SIGKILL 会打到用户的
+    无关进程(codex #700 R11 P2)。发信号前逐字比 seed/restart 记下的进程身份;
+    不符就一个信号都不发。老 state 没记身份时至少要求命令行是 uvicorn 的
+    `app.main:app`。"""
+    import os as _os
+
+    kills: list[tuple[int, int]] = []
+
+    def fake_kill(pid, sig):
+        kills.append((pid, sig))
+        if sig == 0:
+            raise ProcessLookupError(pid)
+
+    monkeypatch.setattr(_os, "kill", fake_kill)
+    runner = rig.Runner(dry_run=False, out_dir=Path("/nonexistent"))
+    ours = "Tue Sep  9 10:00:00 2026 uvicorn app.main:app --port 8011"
+
+    monkeypatch.setattr(rig, "_process_identity", lambda pid: "Tue Sep  9 11:00:00 2026 vim notes.txt")
+    assert rig._stop_backend_gracefully(runner, 4242, expected_identity=ours) is False
+    assert kills == []
+    # 老 state 没有身份:命令行不是 rig 的 uvicorn 后端也不发。
+    assert rig._stop_backend_gracefully(runner, 4242, expected_identity=None) is False
+    assert kills == []
+
+    monkeypatch.setattr(rig, "_process_identity", lambda pid: None)
+    assert rig._stop_backend_gracefully(runner, 4242, expected_identity=ours) is False
+    assert kills == []
+
+    monkeypatch.setattr(rig, "_process_identity", lambda pid: ours)
+    assert rig._stop_backend_gracefully(runner, 4242, expected_identity=ours) is True
+    assert kills[0] == (4242, 15)
+    assert all(sig in (15, 0) for _, sig in kills), "身份对上就不该走到 SIGKILL"
+
+
 def test_restart_dry_run_prints_the_stop_and_start_plan(tmp_path, capsys):
     out_dir = tmp_path / "t0"
     out_dir.mkdir()
@@ -847,6 +882,29 @@ def test_pair_table_needs_both_sides_and_a_question_key(tmp_path, capsys):
     analyze.main([str(anonymous), "--out-json", str(js)])
     capsys.readouterr()
     assert json.loads(js.read_text("utf-8"))["pairs"] == []
+
+
+def test_pair_table_does_not_pair_across_workloads(tmp_path, capsys):
+    """同题同格同档,一侧是只跑检索的进程内 run(`trace_source=in_process`)、
+    另一侧是导出的完整 Ask run(`trace_steps`):不是同一种工作负载,不能配成
+    一对去比耗时(codex #700 R11 P2)。同工作负载才配。"""
+    js = tmp_path / "t0.json"
+    mixed = _write_rows(tmp_path / "m.jsonl", [
+        _row(trace_source="in_process"),
+        _row(policy_version="v2", trace_source="trace_steps"),
+    ])
+    analyze.main([str(mixed), "--out-json", str(js)])
+    capsys.readouterr()
+    assert json.loads(js.read_text("utf-8"))["pairs"] == []
+
+    same = _write_rows(tmp_path / "s.jsonl", [
+        _row(trace_source="in_process"),
+        _row(policy_version="v2", trace_source="in_process"),
+    ])
+    analyze.main([str(same), "--out-json", str(js)])
+    capsys.readouterr()
+    pairs = json.loads(js.read_text("utf-8"))["pairs"]
+    assert len(pairs) == 1 and pairs[0]["trace_source"] == "in_process"
 
 
 def test_analysis_refuses_rows_with_keys_outside_the_closed_set(tmp_path):

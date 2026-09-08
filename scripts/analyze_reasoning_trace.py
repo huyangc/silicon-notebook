@@ -64,7 +64,13 @@ COUNTER_METRICS: tuple[str, ...] = (
     "actions_by_type", "seed_actions_by_type", "empty_actions_by_type",
     "skip_reasons", "fallback_reasons", "durations_ms",
 )
-PAIR_DIMENSIONS: tuple[str, ...] = ("question_key", "corpus_cell", "effort")
+# 配对还要按**工作负载**分格(codex #700 R11 P2):`search-*.jsonl` 是只跑检索的
+# 进程内 run(`trace_source=in_process`),导出的 Ask run 是检索+合成的完整 run;
+# 同题同格同档的 legacy 检索 run 与 v2 完整 Ask run 摆在同一行,比的是检索耗时
+# 对检索+合成耗时。`consumer` / `mode` / `trace_source` 三个键一起把它们分开。
+PAIR_DIMENSIONS: tuple[str, ...] = (
+    "question_key", "corpus_cell", "effort", "consumer", "mode", "trace_source",
+)
 
 
 def load_rows(paths: Sequence[str]) -> list[dict]:
