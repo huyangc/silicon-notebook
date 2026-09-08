@@ -967,6 +967,21 @@ def test_pair_table_needs_both_sides_and_a_question_key(tmp_path, capsys):
     assert json.loads(js.read_text("utf-8"))["pairs"] == []
 
 
+def test_min_samples_must_be_positive_and_empty_metrics_never_reach_quantiles(tmp_path):
+    """`--min-samples 0`/负数会让没有观测的指标进分位数分支,`_nearest([])` 抛
+    IndexError 打死整份报告(codex #700 R22 P3)。CLI 拒绝非正数;函数层即便被
+    直接传 0 也不对空观测算分位数。"""
+    source = _write_rows(tmp_path / "rows.jsonl", [_row(total_ms=None)])
+    with pytest.raises(SystemExit):
+        analyze.main([str(source), "--min-samples", "0"])
+    with pytest.raises(SystemExit):
+        analyze.main([str(source), "--min-samples", "-3"])
+    summary = analyze.summarize_group([_row(total_ms=None)], min_samples=0)
+    entry = summary["numeric"]["total_ms"]
+    assert entry["n_observed"] == 0
+    assert "p50" not in entry and "p95" not in entry
+
+
 def test_pair_table_does_not_pair_across_workloads(tmp_path, capsys):
     """同题同格同档,一侧是只跑检索的进程内 run(`trace_source=in_process`)、
     另一侧是导出的完整 Ask run(`trace_steps`):不是同一种工作负载,不能配成
