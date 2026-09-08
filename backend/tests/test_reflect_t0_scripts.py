@@ -1709,6 +1709,54 @@ def test_report_generate_marks_clarification_gate_failed_when_the_claim_is_lost(
     assert "merge_key" not in rows[0], "失败行没有轨迹半份可对,不该带 merge_key"
 
 
+def test_report_generate_marks_planning_failure_failed_on_the_straight_path(
+    rrepo, monkeypatch,
+):
+    """两条执行路径(自动确认直通 / rig 代答后重跑)在 `_generate_report` 末尾
+    汇合;只在代答分支里看终态,直通路径上规划或生成失败(引擎把报告置成
+    `status="failed"`、`sections` 恒空)仍会被 `_run_reports` 打成『report
+    done』(codex #700 R4 P2)。修复后:任何非 `done` 终态都记
+    `gate_reason="report_<status>"`,投影出一行 `status="failed"`。"""
+    from types import SimpleNamespace
+
+    from app.services.model_work import ModelPriority, model_work_scope
+    from app.services.report_engine import ReportEngine
+    from app.services.source_scope import source_scope_context
+    from tests.test_report_engine import _AutoRunLLM, _bind_report_llm, _mk_nb
+
+    nb = _mk_nb(rrepo)
+    _bind_report_llm(rrepo, _AutoRunLLM())
+    _stub_report_generation_at_class_level(monkeypatch)
+    monkeypatch.setattr(rrepo.retrieval, "federated_retrieve", lambda a, q: [])
+
+    def _boom(self, n, q):
+        raise RuntimeError("corpus map exploded")
+
+    # 直通路径:意图自动确认成功,规划阶段炸掉——引擎自己吞异常记 failed。
+    monkeypatch.setattr(ReportEngine, "_build_corpus_map", _boom)
+    question = "分析 PLL 稳定性"
+    report_id = rrepo.create_report(nb.id, question, depth=1)
+    item = _report_item(question)
+    profile = SimpleNamespace(id="rig-owner")
+
+    captured, gate_reason = rig._generate_report(
+        rrepo, ReportEngine, profile, nb.id, report_id, item,
+        model_work_scope=model_work_scope, model_priority=ModelPriority.REPORT,
+        source_scope_context=source_scope_context,
+    )
+
+    detail = rrepo.get_report(nb.id, report_id)
+    assert detail["status"] == "failed", detail
+    assert gate_reason == "report_failed"
+
+    rows = list(rig._report_rows(
+        rrepo, nb.id, report_id, item, captured, gate_reason=gate_reason,
+    ))
+    assert len(rows) == 1
+    assert rows[0]["status"] == "failed"
+    assert "merge_key" not in rows[0]
+
+
 # ---------------------------------------------------------------------------
 # search:代答过的题以确认后的问题为权威,对齐生产判据(codex #700 R2 P2)
 # ---------------------------------------------------------------------------
