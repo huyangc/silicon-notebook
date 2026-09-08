@@ -409,6 +409,14 @@ def _reflect_fallback_reason(exc: BaseException, finish_reason: str = "") -> str
     `finish_reason`——一个直接抛它、却不声明 `supports_call_stats` 的物理客户端
     (插件绑定的传输、测试替身)填的是后者。不读它的话,这类调用方的空正文一律
     落回 `empty`,§5.2 里那条「预算打满就同轮翻倍重试」对它们结构性不生效。
+
+    异常兜底那条同样**沿链走**,而且与 `.reason` 共用上面那一次遍历:生产的
+    `ScheduledJsonChatClient` 把 `MalformedModelResponse` 重抛成
+    `ModelInvocationError`,而 `finish_reason` 只挂在被包住的那一层上——只读最外
+    层的话,这类调用方(不声明 `supports_call_stats` 的传输 + 生产的重抛)空正文
+    永远落回 `empty`,预算打满与模型交白卷又分不开了,正是上一段要修的那件事。
+    每个 cursor 先补 `finish_reason` 再判 `.reason`,所以同一个异常上两格都在时
+    (`MalformedModelResponse` 的典型形状)也读得到。
     """
     finish_reason = finish_reason or str(
         getattr(exc, "finish_reason", "") or "").strip()
@@ -418,6 +426,8 @@ def _reflect_fallback_reason(exc: BaseException, finish_reason: str = "") -> str
         cursor: BaseException | None = exc
         while cursor is not None and id(cursor) not in seen:
             seen.add(id(cursor))
+            finish_reason = finish_reason or str(
+                getattr(cursor, "finish_reason", "") or "").strip()
             reason = str(getattr(cursor, "reason", "") or "").strip()
             if reason:
                 if (reason == _REFLECT_EMPTY_BODY_REASON

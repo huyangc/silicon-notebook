@@ -10494,6 +10494,59 @@ def test_empty_body_with_finish_reason_length_is_a_budget_code_not_empty():
     assert _reflect_fallback_reason(_boom("")) == "empty"
 
 
+def test_finish_reason_is_read_along_the_cause_chain_not_just_one_level():
+    """生产形状:`MalformedModelResponse` 被 `ModelInvocationError` 包一层之后,
+    `finish_reason` 只挂在**被包住的那一层**上,仍要读得到。
+
+    `ScheduledJsonChatClient._resolve` 把一切异常重抛成 `ModelInvocationError`
+    (它是 `MalformedModelResponse` 的兄弟类,不是子类),而重抛出来的那个对象
+    上没有 `finish_reason`。只读最外层的话,生产里**所有**空正文都落回 `empty`,
+    §5.2 的「预算打满就同轮翻倍重试」结构性不生效——正是 `.reason` 那条链当初
+    要修的同一个坑,只是换了一格字段。
+
+    变异:把 `_reflect_fallback_reason` 循环里那句 `finish_reason = finish_reason
+    or getattr(cursor, "finish_reason", ...)` 删掉(只读最外层)⇒ 这条红。
+    """
+    from app.core.model_json import ModelJsonRepairError
+    from app.services.model_provider import ModelInvocationError
+    from app.services.model_registry import (
+        ModelServiceDefinition, WorkloadSpec,
+    )
+    from app.services.model_work import MalformedModelResponse
+    from app.services.reasoning_retrieval import (
+        REFLECT_OUTPUT_BUDGET_EXHAUSTED, _reflect_fallback_reason,
+    )
+
+    service = ModelServiceDefinition(
+        id="primary-chat", display_name="主模型服务", kind="chat",
+        protocol="openai_chat", base_url="https://model.invalid/v1",
+        model="safe-model", api_key_env="MODEL_KEY", api_key="secret",
+        max_concurrency=2, fingerprint="fp",
+    )
+    workload = WorkloadSpec(
+        id="ask_reflect", kind="chat", default_priority="interactive",
+        display_label="反思",
+    )
+    try:
+        try:
+            try:
+                raise ModelJsonRepairError("empty")
+            except ModelJsonRepairError as cause:
+                raise MalformedModelResponse(finish_reason="length") from cause
+        except MalformedModelResponse as cause:
+            raise ModelInvocationError(
+                service=service, workload=workload,
+                code="malformed_response", support_id="mdl-support-safe",
+            ) from cause
+    except ModelInvocationError as exc:
+        wrapped = exc
+
+    assert getattr(wrapped, "finish_reason", "") == ""   # 最外层没有这一格
+    assert _reflect_fallback_reason(wrapped) == REFLECT_OUTPUT_BUDGET_EXHAUSTED
+    # 出参仍然优先:客户端两端都声明支持时填的那一格说了别的,就以它为准。
+    assert _reflect_fallback_reason(wrapped, "stop") == "empty"
+
+
 def test_a_budget_truncated_reflect_call_retries_once_with_a_doubled_budget(
     rrepo,
 ):
