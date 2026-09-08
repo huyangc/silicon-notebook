@@ -389,6 +389,13 @@ python scripts/reflect_shadow_rig.py \
   --database-url sqlite:///$TMP/t0.db --env-file $TMP/empty.env \
   --storage-dir $TMP/storage --out-dir $TMP/out --corpus-dir $TMP/corpusB \
   --cell B_kg --port 8011 --skip-create-db --skip-kg --skip-embed seed
+
+# 3c) 换策略:seed 起的后端默认是 legacy;换 v2 之前用 restart 切过去,
+#     不要自己去 kill -TERM 再手动重起 uvicorn(端口/DB/env-file 从 state 里
+#     seed 落的那份取,不用重复输入)
+python scripts/reflect_shadow_rig.py --dry-run restart --policy v2
+python scripts/reflect_shadow_rig.py restart --policy v2
+python scripts/reflect_shadow_rig.py --limit 2 --policy v2 ask
 ```
 
 **隐私口径(三个脚本同一份)**:每个 run 输出一行,键取自
@@ -416,7 +423,12 @@ bool、数值、`None`,短码的列表(`action_seq`),或以短码为键、数值
   `--database-url` 确实是 PG 的 `--db-name` 时才删库——否则它会去 PG 上删一个同名的、
   可能是别人的库。
 - 换检索策略靠**重启后端**(`REASONING_REFLECT_V2_ENABLED`),rig 不热改 Settings;
-  `ask` / `report` 每次只跑一个 `--policy`。
+  `ask` / `report` 每次只跑一个 `--policy`。重启用 `restart` 子命令——它读 state
+  里 `seed` 落的 `backend_pid`,优雅停止(SIGTERM,超时 SIGKILL)后按 `--policy`
+  重起同一份端口/DB/env-file 配置,等 `/api/ready` 翻牌再更新 state 里的 pid 与
+  policy;不要手动 `kill` 再另起一个 uvicorn。`ask` / `report` 开跑前会核对 state
+  记的策略与这次的 `--policy` 是否一致,不一致直接报错("先 `restart --policy
+  <目标策略>`"),不会悄悄跑出一批策略对不上号的轨迹。
 - 题号 / 语料格 / 策略 / 档位只编进 `client_request_id`(`t0:<题号>:<语料格>:<策略>:
   <档位>:<mode>`),导出时据它打标——**不进问题文本,模型看不到**。
 - `ask` 提交必须走 `/ask/stream`,**不能走同步的 `/ask`**:同步端点经

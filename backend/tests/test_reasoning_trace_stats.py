@@ -16,6 +16,7 @@ from app.domain.reasoning_trace_stats import (
     TERMINATION_SKIP_REASON,
     UNKNOWN,
     assert_closed,
+    assert_projection_values,
     citation_contribution,
     merge_key,
     normalize_steps,
@@ -79,6 +80,69 @@ def test_assert_closed_rejects_an_extra_key():
     row["question"] = "这行不该存在"
     with pytest.raises(ValueError, match="RUN_PROJECTION_KEYS"):
         assert_closed(row)
+
+
+def test_assert_projection_values_accepts_real_action_seq_and_citation_shapes():
+    """`action_seq`(短码列表)与 `citation_contribution`(两层短码→数值字典)
+    是这道闸要放行的两种真实复合形状——闭集键之外,这是它唯一要认得的东西。
+    """
+    row = project_run(
+        JOB,
+        [
+            step("ppr", {"phase": "seed", "result_ids": ["a", "b"]}),
+            reflect("search_chunks"),
+            step("search_chunks", {"result_ids": ["b", "c"]}),
+            step("synthesis", {"anchors": 3,
+                               "anchor_evidence_ids": ["a", "b", "c"]}),
+        ],
+        PAYLOAD,
+    )
+    assert row["action_seq"] == ["seed:ppr", "search_chunks"]
+    assert row["citation_contribution"]["seed:ppr"]["cited_hits"] == 2
+    assert_projection_values(row)  # 不炸就是通过
+
+
+def test_assert_projection_values_rejects_a_free_text_value():
+    """结构性值校验不看键名——自由文本值不管挂在闭集内哪个键下都会被拦住。
+
+    这里刻意往一个**不在闭集里**的键(`scope`)塞一句人话:即便有人把这个键
+    也加进 `RUN_PROJECTION_KEYS`,值本身的自由文本形态照样会被这道闸挡下,
+    与 `assert_closed`(只管键名)是互补的两道闸。
+    """
+    row = dict(project_run(JOB, [], PAYLOAD))
+    row["scope"] = "看 Qwen-VL 和 DeepSeek"
+    with pytest.raises(ValueError):
+        assert_projection_values(row)
+
+
+def test_assert_projection_values_enforces_the_short_code_length_limit():
+    row = dict(project_run(JOB, [], PAYLOAD))
+    row["question_key"] = "q" * 65  # 字符集合规,纯粹是太长
+    with pytest.raises(ValueError):
+        assert_projection_values(row)
+
+
+def test_assert_projection_values_rejects_a_non_short_code_dict_value():
+    row = dict(project_run(JOB, [], PAYLOAD))
+    row["actions_by_type"] = {"ppr": "很多次"}
+    with pytest.raises(ValueError):
+        assert_projection_values(row)
+
+
+def test_assert_projection_values_accepts_the_auto_mode_arrow():
+    """`→` 是 `MODES` 闭集自己的分隔符(`auto→reasoning`),不是自由文本。"""
+    row = project_run(
+        JOB, [], PAYLOAD, rig_tags={"requested_mode": "auto"},
+    )
+    assert row["mode"] == "auto→reasoning"
+    assert_projection_values(row)  # 不炸就是通过
+
+
+def test_assert_projection_values_rejects_a_non_short_code_nested_key():
+    row = dict(project_run(JOB, [], PAYLOAD))
+    row["citation_contribution"] = {"看起来像动作但其实是句话": {"steps": 1}}
+    with pytest.raises(ValueError):
+        assert_projection_values(row)
 
 
 def test_projection_never_carries_trace_summaries():
@@ -377,10 +441,58 @@ def test_rig_tags_are_closed_and_case_sensitive():
     )["corpus_cell"] == UNKNOWN
 
 
-def test_kg_required_payload_drives_kg_in_scope():
+def test_kg_in_scope_only_reads_positive_evidence():
+    """`kg_required` 默认 `False` 且总被序列化;它不再单独把结果判成 `True`。
+
+    四种用例(设计规格 §3 该行订正后的用例):chunk 模式、早退(reasoning 但
+    轨迹为空)、有图 reasoning、无图 reasoning。
+    """
+    # chunk 模式:kg_required=False 摆在那里,但没有图形状步——不能定案。
+    chunk_row = project_run(
+        {"mode": "chunk", "status": "done"}, [],
+        {"mode": "chunk", "kg_required": False},
+    )
+    assert chunk_row["kg_in_scope"] is None
+
+    # 早退:reasoning 模式,轨迹却是空的(一步检索动作都没跑到)。
+    early_row = project_run(JOB, [], {"kg_required": False, "mode": "reasoning"})
+    assert early_row["kg_in_scope"] is None
+
+    # 有图 reasoning:轨迹里出现过图形状的步。
+    kg_row = project_run(
+        JOB, [step("ppr", {"phase": "seed", "found": 2})], PAYLOAD,
+    )
+    assert kg_row["kg_in_scope"] is True
+
+    # 无图 reasoning:无图披露步在场,`kg_required` 的默认值盖不过它。
+    nokg_row = project_run(
+        JOB, [step("skip", {"reason": "kg_unavailable"})],
+        {"kg_required": False, "mode": "reasoning"},
+    )
+    assert nokg_row["kg_in_scope"] is False
+
+
+def test_kg_required_true_is_still_evidence_for_false():
     assert project_run(JOB, [], {"kg_required": True})["kg_in_scope"] is False
-    assert project_run(JOB, [], {"kg_required": False})["kg_in_scope"] is True
-    assert project_run(JOB, [], {})["kg_in_scope"] is None
+
+
+def test_ambiguous_retrieve_step_is_not_kg_evidence():
+    """首轮"初检索"步只写 `count`(图/原文混合抓取),分不清就不算。"""
+    row = project_run(JOB, [step("retrieve", {"count": 4})], PAYLOAD)
+    assert row["kg_in_scope"] is None
+
+
+def test_graphless_retrieve_half_is_not_kg_evidence():
+    """`chunks_found` 在场说明这一步的 `new` 只可能是空手的图查询。"""
+    row = project_run(
+        JOB, [step("retrieve", {"new": 0, "chunks_found": 3})], PAYLOAD,
+    )
+    assert row["kg_in_scope"] is None
+
+
+def test_retrieve_step_with_new_hits_is_kg_evidence():
+    row = project_run(JOB, [step("retrieve", {"new": 2})], PAYLOAD)
+    assert row["kg_in_scope"] is True
 
 
 # --- 报告段 -----------------------------------------------------------------

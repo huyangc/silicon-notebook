@@ -39,6 +39,7 @@ sys.path.insert(0, str(ROOT / "backend"))
 
 from app.domain.reasoning_trace_stats import (  # noqa: E402
     assert_closed,
+    assert_projection_values,
     project_report_section,
     project_run,
 )
@@ -223,6 +224,7 @@ def export_ask_runs(
             rig_tags=tags,
         )
         assert_closed(row)
+        assert_projection_values(row)
         rows.append(row)
     return rows
 
@@ -257,6 +259,7 @@ def export_report_sections(
                 report_id=report.get("id"),
             )
             assert_closed(row)
+            assert_projection_values(row)
             rows.append(row)
     return rows
 
@@ -267,6 +270,7 @@ def write_jsonl(rows: Iterable[dict], out: Path) -> int:
     with out.open("w", encoding="utf-8") as handle:
         for row in rows:
             assert_closed(row)
+            assert_projection_values(row)
             handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
             count += 1
     return count

@@ -77,7 +77,7 @@
 | `consumer` | `ask_single` / `ask_sectioned` / `report_section` | Ask：synthesis 步 detail 有 `section_total` 即 sectioned；Report：rig 标 |
 | `mode` | `chunk` / `reasoning` / `auto→chunk` / `auto→reasoning` | `ask_jobs.mode` + payload `mode` |
 | `effort` | 五档 | payload `retrieval_effort`；缺则 `unknown` |
-| `kg_in_scope` | `true` / `false` / `unknown` | trace 里的无图披露步（`kg_unavailable` 类 reason）或 `kg_required`；都没有 = unknown |
+| `kg_in_scope` | `true` / `false` / `unknown` | 只认正面证据（2026-09-08 订正）：(a) 轨迹里有无图披露步（`kg_unavailable` 类 reason）→ `false`；(b) 否则 `mode` 是 reasoning 且轨迹里出现过图形状的步（`expand`/`ppr`/`follow_chain`/`expand_community`，或 `retrieve` 步 detail 的 `new`/`found` > 0 且不带无图原文半的 `chunks_found` 印记）→ `true`；(c) 其余 → `unknown`。`kg_required=True` 仍叠加进 (a) 的判据，但 `kg_required=False`（默认值，早退/chunk 轨迹总是带着它）不再单独判成 `true`——它曾经把从没碰过图的 run 误报成有图 |
 | `policy_version` | `legacy` / `v2` | trace 有 `reason=retrieval_termination` 的 skip 步或 `termination_reason` 键 → v2；否则 legacy |
 | `has_intent_contract` | bool | payload `intent` 非空 |
 | `corpus_cell` | `A_kg` / `A_nokg` / `B_kg` / `B_nokg` / `unknown` | rig 编码；线上导出恒 unknown |
