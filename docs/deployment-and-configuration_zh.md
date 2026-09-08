@@ -882,6 +882,7 @@ REPORT_HIGH_RISK_DOWNGRADE_ENABLED # 深度报告高风险引证审计超阈值�
 REPORT_HIGH_RISK_UNSUPPORTED_RATIO # 深度报告高风险引证审计阈值；数值契约只在 docs/product-and-api_zh.md 维护
 REASONING_MAX_PPR_RETRIEVES / REASONING_MAX_EXACT_LOOKUPS / REASONING_MAX_FOLLOW_CHAIN_ACTIONS / REASONING_COMMUNITY_PEERS_CAP_FACTOR / REASONING_MAX_OUTLINE_UPDATES # 集中的 reasoning 动作/扩展护栏；默认保持历史行为，精确护栏见 product-and-api
 REASONING_MAX_CHUNK_SEARCHES # 逐步推理 search_chunks 动作每 run 的调用次数上限（默认 3，与 REASONING_MAX_PPR_RETRIEVES/REASONING_MAX_EXACT_LOOKUPS 一致；ge=0；无图首轮的确定性播种不计入这个上限）
+REASONING_MAX_TOKENS # 逐步推理单次调用的输出上限（max_tokens）：规划（查询扩展）调用与每一轮反思（默认 16384；ge=1）。它是**部署配置不是策略**——legacy 与 v2 两条反思协议都用它，所以 `REASONING_REFLECT_V2_ENABLED` 关着时同样生效（那条路径的 prompt/schema/trace 仍逐字未变，只有这一格预算变了）。单列一档而不是调高全局 `OPENAI_COMPAT_MAX_TOKENS`：思考模式下推理过程可能把全局 8192 吃光，provider 交回一份空正文并报 `finish_reason=length`。v2 下被这样截断的一轮会在**同一轮**里按本值的两倍重试一次；全局默认一个字都不改
 ```
 
 三个 `REPORT_*_MAX_TOKENS` 是 completion 上限，不是总上下文声明，也不会预占输出。
@@ -969,7 +970,7 @@ SLOW_REQUEST_MS         # 超过该毫秒数的请求标记 SLOW（默认 3000�
 SILICON_NOTEBOOK_CORS_ORIGINS
 ```
 
-`.env.example` 是非服务变量与密钥槽位的权威清单，`model-services.example.toml` 是服务、绑定与容量模板；上面分组只列常用项。推理专用模型通过 TOML 把 `reasoning_agent` 绑定到独立服务，其护栏仍是 `REASONING_MAX_STEPS`、`REASONING_MAX_SUBQUERIES`、`REASONING_TIMEOUT_SECONDS`、`REASONING_MAX_RETRIES`。其余可调项还包括检索/接地参数（`PROC_MIN`、`EVIDENCE_TAU_LOW`、`EVIDENCE_TAU_HIGH`）、可选调试日志查看器（`DEBUG_LOGS_ENABLED`）和运行身份（`SILICON_NOTEBOOK_ENV`、`SILICON_NOTEBOOK_SINGLE_USER_EMAIL`、`SILICON_NOTEBOOK_SINGLE_USER_NAME`）。
+`.env.example` 是非服务变量与密钥槽位的权威清单，`model-services.example.toml` 是服务、绑定与容量模板；上面分组只列常用项。推理专用模型通过 TOML 把 `reasoning_agent` 绑定到独立服务，其护栏仍是 `REASONING_MAX_STEPS`、`REASONING_MAX_SUBQUERIES`、`REASONING_TIMEOUT_SECONDS`、`REASONING_MAX_RETRIES`、`REASONING_MAX_TOKENS`。其余可调项还包括检索/接地参数（`PROC_MIN`、`EVIDENCE_TAU_LOW`、`EVIDENCE_TAU_HIGH`）、可选调试日志查看器（`DEBUG_LOGS_ENABLED`）和运行身份（`SILICON_NOTEBOOK_ENV`、`SILICON_NOTEBOOK_SINGLE_USER_EMAIL`、`SILICON_NOTEBOOK_SINGLE_USER_NAME`）。
 
 `USER_ACTIVITY_RETENTION_DAYS` 控制笔记本删除后最小用户分析摘要的留存天数（默认
 180，可取 1–3650）。它不会延长答案/来源/报告正文、引用或推理轨迹的生命周期。该值在

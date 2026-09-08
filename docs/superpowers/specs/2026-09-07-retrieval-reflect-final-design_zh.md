@@ -203,7 +203,11 @@ system/user 拆分可能改善公共前缀复用，但不新增 provider 缓存�
 
 载荷有明确边界：supported/unresolved 各不超过冻结方面数，同一方面不能同时出现在两组或重复出现；每方面证据键最多 8 个，gap 最多 240 字符，分别以专属协议常量 `REFLECT_ASPECT_MAX_EVIDENCE_KEYS`、`REFLECT_ASPECT_GAP_MAX_CHARS` 声明并登记到产品/API 数值表。这些限制只针对模型生成的内部载荷；超限按 invalid 决定处理，不裁剪用户的主题、问题或约束。
 
-服务端只确认：方面 ID 合法、证据键在池内且已展示、集合/来源身份不能冒充细粒度证据。非法键剔除后没有支撑的项不得保持 supported。模型对语义支撑的判断始终标为 `model_assessed`；不新增 grounded 分数，不改变 evidence_level 阈值。
+服务端只确认：方面 ID 合法、证据键是服务端签发过且已展示的身份、**未完整枚举**的集合/来源身份不能冒充细粒度证据。非法键剔除后没有支撑的项不得保持 supported。模型对语义支撑的判断始终标为 `model_assessed`；不新增 grounded 分数，不改变 evidence_level 阈值。
+
+取舍记录（2026-09-08 本机实测后收窄，边界从「集合/来源身份不能冒充细粒度证据」改为「**未完整**枚举的集合身份不能冒充」）：目录题（「这个库里有哪些文档」）要的支撑不是任何一条细粒度证据，而是「这个集合已经被完整列出」这件事本身；而枚举条目按合同不进候选池、条目 id 对模型不可见，于是原来那条边界让一个 coverage 报了 complete 的目录方面**结构上**永远拿不到 supported——服务端一边报告「已全部列出 84 条」，一边告诉合成侧「这个方面没有支撑」。现在服务端为 `state == complete` 的枚举链签发确定性的集合身份键（`enum:` 前缀 + 集合/子类型/限定来源/范围，与续跑键一一对应、不含用户内容），在证据卡区位展示给模型，并把它并进 `assessment` 的合法键集。未完整（`open`/`conflict`）的链不签发键，模型自拼的同样被剔除——合法集是服务端算出的那一份，不是按前缀放行。上一段「完整枚举的 complete 只由确定性执行器证明」因此仍然成立：被接受的是**服务端自己记下的**完整性，不是模型的自述。集合键不参与送达复核（它不走证据预算、不产生 `[k]` 锚点）。
+
+取舍记录（同上）：**收尾那一轮必须自评。** `answer` + `sufficient=true` 的字面意思是「每个必答方面都已经有支撑」，而方面账是这句话唯一的落点；载荷里没有 `assessment`，同一份决定就在两处给出互相矛盾的读数（模型说够了 / 服务端清单上全是 unknown），`classify_termination` 据后者判 `model_partial`。2026-09-08 实测 16 个 run 全部落在这个形状上，14 个的直接原因就是这一格空着。所以这种载荷整轮退回（零 I/O 的 `missing_assessment` 观察，走既有的步数/无进展/熔断记账），下一轮逐个列出方面 id 追问；追问**最多一次**（`REFLECT_ASSESSMENT_MAX_PROMPTS = 1`），第二次仍然空着就接受收尾，并把没被判断过的方面标 `assessment_omitted`——它与「模型根本没走到收尾那一步」在放量评估里要能分开数。`sufficient=false` 的部分收尾不强制。
 
 取舍记录（T4-A 实施时定，写下来免得下一次又被当成遗漏）：**约束（constraints）不各自成为一个方面**，只随方面块一起渲染。第一行写的是「从 mandatory_topics 和相关约束生成稳定方面 ID」，实现时按前者建方面、把后者作为整块的约束行带出去。理由是约束是**答案的谓词**（「只看 7nm」「只用 2024 年以后的材料」），不是可以被证据独立支撑的检索对象：给它一个能被标成 supported 的 id，模型无从为它引证据键，于是它永远停在 unknown，`unresolved_aspect_ids` 恒非空，`model_sufficient` 结构上不可达，而这两件事下游都当真。约束仍然进 prompt（每轮渲染在方面块末尾），只是不参与「有没有支撑」这本账。
 
@@ -222,12 +226,14 @@ system/user 拆分可能改善公共前缀复用，但不新增 provider 缓存�
 | `step_budget` | 正常步骤预算耗尽 |
 | `stale` | 现有无进展熔断触发 |
 | `no_executable_action` | 除 answer 外无可执行动作 |
-| `model_degraded` | 模型/JSON 在已有重试后仍失败而降级 |
+| `model_degraded` | 反思调用在已有重试后**连续两轮**仍失败而降级（v2；legacy 仍是一轮即降级） |
 | `retrieval_degraded` | 检索器/工具异常触发调用方现有 fail-open 收尾，证据收集未正常完成 |
 
 取消和不可恢复阶段错误仍是异常/取消，不落入“成功生成 termination”以掩盖失败。收尾前的 outline overflow 修复沿用原规则；修复不能把既有 stale/预算原因改成充分。
 
 单个可恢复工具失败若随后继续完成检索，只作为 observation 留存，不强制把整个 run 标为 retrieval_degraded。异常终止优先记对应 degraded 原因；否则保留真实首先触发的终止条件，不在最终步骤号等于 max_steps 时覆盖同轮模型已经作出的正常结束决定。
+
+取舍记录（2026-09-08 本机实测后加，v2-only）：**单个反思调用失败与单个工具失败同权**。接入前 provider/JSON 失败一次就直接 `_reflect_fallback` → `run()` 当场 break，一次抖动（实测 118 次调用里 24 次空正文）把整次检索已经到手的证据与刚播下的方向全部作废，而结果与「模型看着证据决定停下」只在 `fallback_reason` 那一格分得开。现在第一次失败折成零 I/O 的 `model_degraded:<稳定码>` 观察、当没有进展的一轮继续（既有 stale 熔断照常收住反复失败），**连续第二次**才按 fail-open 收尾记 `model_degraded`；首轮不豁免，任何一轮成功都清零。原因码逐字回喂给模型。新增码 `output_budget_exhausted`（空正文 + `finish_reason=length`）与 `empty` 分开，因为两者的补救方向相反；命中前者时同一轮按 `REASONING_MAX_TOKENS × 2` 原样重试一次。取消与 `fail_closed` 的阶段错误照常上抛。
 
 `retrieval_degraded` 的精确判据（T4-A 复审裁决）：**这次 run 没有模型正常结束标记（trace 里第一个终止标记不是 model_end），且时间线上最后一次真实 I/O 执行的观察是 `failed`**。两个条件都要。按「任一通道最后一次执行 failed」判会把跨通道恢复（KG 播种炸掉 → 模型改走 search_chunks 查全 → 自报充分）误标成整次降级，而上一段说的「继续完成检索」并不要求是同一条通道；反过来，最后一次去查时查不动、随后走 stale/预算收尾的，`retrieval_degraded` 仍然盖过 stale/step_budget。没有被恢复的通道另记 `RetrievalTermination.unrecovered_channels`（元组，口径是「该通道最后一次执行仍是 failed」，按首次出现排序），不参与 `reason`：「哪条路没走通」与「这次检索有没有正常收尾」是两个口径，不互相冒充。它的披露落点在 T4-B 已经落实为三处：检索收尾那条 `skip` 步的 detail、Ask 合成终步与报告章节行上的稀疏字段（都是既有的私有持久路径），以及合成 prompt 里那段服务端事实的最后一行。界面只显示条数（动作 id 是内部词），公开分享面一个字都不带。
 
