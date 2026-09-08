@@ -1,5 +1,5 @@
 "use client";
-import { ExternalLink, FileText, Loader2, Trash2 } from "lucide-react";
+import { ExternalLink, FileText, Loader2, Search, Trash2 } from "lucide-react";
 
 import { AnomalyBadge } from "./anomaly-badge";
 import { sourceAnomalies } from "./anomaly-severity";
@@ -70,23 +70,27 @@ export function SourceListPanel({
           能一并搜到参考库里的内容，而它只查当前笔记本。 */}
       <div className="scope-group">
         <h3 className="scope-group-title" id="local-source-scope-title">本库来源</h3>
-        <form className="source-search-form" onSubmit={(event) => {
+        {/* 整个表单是一只带边框的搜索框：左侧放大镜、中间无边框输入、右侧「搜索」
+            做成与上方「全选/清空」同款的蓝色文字按钮。之前输入框和按钮各自裸用
+            浏览器默认外观（深色内嵌边框 + 灰色方块按钮），与侧栏其余控件（圆角
+            细边框、蓝色文字动作、行内图标按钮）明显不是一套。
+            在途反馈仍落在控件自身：放大镜换成转圈，按钮文案变「搜索中…」并禁用。 */}
+        <form className="source-search-form" role="search" onSubmit={(event) => {
           event.preventDefault();
           onSubmitSearch();
         }}>
-          <div className="source-search-wrap">
-            <input
-              className="source-search"
-              type="search"
-              placeholder="搜索来源（标题/作者/文件名）"
-              value={sourceQuery}
-              onChange={(e) => onQueryChange(e.target.value)}
-            />
-            {sourcesPageLoading && (
-              <Loader2 size={15} className="busy-spin source-search-spinner" aria-hidden="true" />
-            )}
-          </div>
-          <button type="submit" className="ghost-button" disabled={!notebookId || sourcesPageLoading}>
+          {sourcesPageLoading
+            ? <Loader2 size={15} className="busy-spin source-search-icon" aria-hidden="true" />
+            : <Search size={15} className="source-search-icon" aria-hidden="true" />}
+          <input
+            className="source-search"
+            type="search"
+            placeholder="搜索标题/作者/文件名"
+            aria-label="搜索本库来源"
+            value={sourceQuery}
+            onChange={(e) => onQueryChange(e.target.value)}
+          />
+          <button type="submit" className="source-search-submit" disabled={!notebookId || sourcesPageLoading}>
             {sourcesPageLoading ? "搜索中…" : "搜索"}
           </button>
         </form>
