@@ -6196,43 +6196,78 @@ code.schema-detail-name {
   min-width: 0;
 }
 
-/* 来源搜索请求在飞时的反馈落在输入框自身紧邻处，不是页面顶部横幅：转圈图标叠在
-   输入框右侧内边，翻页/回车触发的同一个 in-flight 状态都会点亮它。
-   pointer-events: none 让图标纯视觉，不挡输入框的点击与文本选中。 */
+/* 本库来源搜索框：表单本身就是那只带边框的「输入框」——边框、圆角、白底与侧栏的
+   收起把手 / 行内图标按钮同一套（rgba(34,48,68,.16) 细边框 + 9px 圆角），里面的
+   input 不再自带浏览器默认的深色内嵌边框。左侧放大镜说明用途，右侧「搜索」用与
+   上方「全选/清空」相同的蓝色文字按钮，而不是一颗灰色方块按钮。
+   在途反馈落在控件自身紧邻处，不是页面顶部横幅：放大镜位换成转圈（tsx 里按
+   in-flight 状态切换图标），翻页/回车触发的同一个 in-flight 状态都会点亮它。 */
 .source-search-form {
   display: flex;
   align-items: center;
   gap: 6px;
+  min-height: 34px;
+  padding: 0 4px 0 10px;
+  border: 1px solid rgba(34, 48, 68, 0.16);
+  border-radius: 9px;
+  background: #fff;
+  transition: border-color 140ms ease, box-shadow 140ms ease;
 }
 
-.source-search-wrap {
-  flex: 1;
-  min-width: 0;
-  position: relative;
-  display: flex;
-  align-items: center;
+.source-search-form:focus-within {
+  border-color: var(--blue);
+  box-shadow: 0 0 0 3px rgba(31, 94, 255, 0.12);
 }
 
-.source-search-wrap .source-search {
+/* pointer-events: none 让图标纯视觉，不挡输入框的点击与文本选中。 */
+.source-search-icon {
+  flex: none;
+  color: var(--muted);
+  pointer-events: none;
+}
+
+.source-search-form .source-search {
   flex: 1 1 auto;
   min-width: 0;
-  padding-right: 26px;
-  padding-left: 12px;
+  padding: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: #1f2733;
+  font-size: 13px;
 }
 
-/* type=search 的原生清除按钮(✕)在有文本时会渲染在输入框右侧内边区域，与上面
-   为转圈反馈图标留出的 26px 空间重叠、叠在一起。反馈图标是这里唯一需要的右侧
-   控件，去掉浏览器自带的✕，而不是去猜它的渲染位置去避让。 */
-.source-search-wrap .source-search::-webkit-search-cancel-button {
+/* type=search 的原生清除按钮(✕)会在有文本时冒出来，夹在文字与「搜索」之间成为
+   第二颗动作控件，而且清空文字并不会重跑搜索（还得再按一次搜索），容易误导。
+   右侧只保留「搜索」这一个动作。 */
+.source-search-form .source-search::-webkit-search-cancel-button {
   -webkit-appearance: none;
   appearance: none;
 }
 
-.source-search-spinner {
-  position: absolute;
-  right: 8px;
-  color: var(--muted);
-  pointer-events: none;
+/* 与 .source-scope-toolbar button（全选/清空）同一套：无边框、透明底、蓝色文字、
+   禁用变灰。hover 底色对齐行内图标按钮 .source-link-button:hover。 */
+.source-search-submit {
+  flex: none;
+  border: 0;
+  background: transparent;
+  color: var(--blue);
+  padding: 3px 6px;
+  border-radius: 6px;
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.source-search-submit:hover {
+  background: #eef3ff;
+}
+
+.source-search-submit:disabled,
+.source-search-submit:disabled:hover {
+  background: transparent;
+  color: #98a2b3;
+  cursor: not-allowed;
 }
 
 .scope-group-title {
