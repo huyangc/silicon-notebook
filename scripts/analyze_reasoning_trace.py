@@ -112,6 +112,15 @@ def _numeric(values: Iterable[Any]) -> list[float]:
     ]
 
 
+def _positive_int(raw: str) -> int:
+    """`--min-samples` 必须 ≥ 1:0 或负数会让「没有观测」的指标也去算分位数
+    (codex #700 R22 P3)。"""
+    value = int(raw)
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"--min-samples 必须 ≥ 1,给的是 {raw!r}")
+    return value
+
+
 def summarize_group(rows: Sequence[dict], min_samples: int) -> dict:
     summary: dict[str, Any] = {"n_runs": len(rows)}
     for metric in NUMERIC_METRICS:
@@ -122,8 +131,10 @@ def summarize_group(rows: Sequence[dict], min_samples: int) -> dict:
         }
         if values:
             entry["mean"] = round(sum(values) / len(values), 3)
-        if len(values) >= min_samples:
+        if values and len(values) >= min_samples:
             # 分位数只在样本够的时候出:三条样本的 P95 是一个看起来精确的谎。
+            # `values` 非空另判一次:门槛被设成 0/负数时,空观测也会进这条分支
+            # 而 `_nearest([])` 抛 IndexError(codex #700 R22 P3)。
             entry["p50"] = round(_nearest(values, 0.50), 3)
             entry["p95"] = round(_nearest(values, 0.95), 3)
         summary.setdefault("numeric", {})[metric] = entry
@@ -367,7 +378,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("inputs", nargs="+", help="一个或多个投影 JSONL")
     parser.add_argument("--group-by", default=DEFAULT_GROUP_BY)
-    parser.add_argument("--min-samples", type=int, default=5)
+    parser.add_argument("--min-samples", type=_positive_int, default=5)
     parser.add_argument("--out-md")
     parser.add_argument("--out-json")
     args = parser.parse_args(argv)
