@@ -360,6 +360,46 @@ def test_anchors_on_gold_uses_source_titles_for_the_b_shape():
     ) is None
 
 
+def test_the_b_shape_dedupes_by_anchor_identity_not_by_source():
+    """B 格按锚点身份去重,不是按 `source_id` 折叠(codex #703 R2 P2-1)。
+
+    同一篇 gold 论文的 3 个不同锚点(1 个元素 + 2 个不同 chunk)全部命中,
+    即使它们共享同一个 `source_id`,也要各算各的——折成来源集合会让
+    `anchors_on_gold` 悄悄变成「命中来源数」,在 `anchors_total=3` 时把指标
+    腰斩成 1。
+    """
+    hits = count_anchors_on_gold(
+        [
+            _anchor(key="k1", source_id="s1", element_id="e1"),
+            _anchor(key="k2", source_id="s1", object_id="c1", object_type="chunk"),
+            _anchor(key="k3", source_id="s1", object_id="c2", object_type="chunk"),
+        ],
+        _B_GOLD,
+        element_sections={},
+        source_titles={"s1": "src-193b32d112_06_KIVI_mineru.md"},
+    )
+    assert hits == 3
+    # 同一个锚点(同一个 element_id)在锚点列表里重复出现只算 1。
+    dup_hits = count_anchors_on_gold(
+        [
+            _anchor(key="k1", source_id="s1", element_id="e1"),
+            _anchor(key="k2", source_id="s1", element_id="e1"),
+        ],
+        _B_GOLD,
+        element_sections={},
+        source_titles={"s1": "src-193b32d112_06_KIVI_mineru.md"},
+    )
+    assert dup_hits == 1
+    # 非 gold 来源的锚点不计——即便它带着看起来合法的身份信息。
+    non_gold_hits = count_anchors_on_gold(
+        [_anchor(key="k1", source_id="s2", element_id="e9")],
+        _B_GOLD,
+        element_sections={},
+        source_titles={"s2": "src-1675b22a0f_Jamba_mineru.md"},
+    )
+    assert non_gold_hits == 0
+
+
 def test_a_question_without_gold_skips_the_metric_instead_of_scoring_zero():
     """§3.2:没 gold 的题在该指标上跳过,不计 0。"""
     assert count_anchors_on_gold(
@@ -951,6 +991,89 @@ def _fact() -> dict:
         "source_titles": {"s1": "recurrent-depth.md"},
         "kg_in_scope": False, "corpus_signature": "fedcba9876543210",
     }
+
+
+# ---------------------------------------------------------------------------
+# gold 来源解析的跑前断言按 `(corpus_cell, question_key)` 缓存(§5.5-6)
+# ---------------------------------------------------------------------------
+
+
+def test_gold_resolution_preflight_checks_every_selected_cell_for_the_same_question(
+    tmp_path,
+):
+    """`B_kg` 与 `B_nokg` 同时选中时,同一题在两个格各自解析一遍(codex #703 R2 P2-2)。
+
+    此前缓存只按 `question_key` 记「查过了」:第一个格解析通过就不会再碰第二个
+    格,第二个格里 gold 短名缺失/歧义会绕过这道跑前断言,变成一行误导的
+    0 或虚高。
+    """
+    gold_by_key = {
+        "B-q06": AbGold(question_key="B-q06", corpus="B", gold_sources=("KIVI",)),
+    }
+    facts = {
+        "B_kg": {"source_rows": [{"id": "s1", "title": "src-a_KIVI_mineru.md"}]},
+        "B_nokg": {"source_rows": [{"id": "s2", "title": "src-b_Jamba_mineru.md"}]},
+    }
+    units = [
+        _unit(question_key="B-q06", corpus_cell="B_kg"),
+        _unit(question_key="B-q06", corpus_cell="B_nokg"),
+    ]
+    runner = rig.Runner(dry_run=True, out_dir=tmp_path)
+    with pytest.raises(GoldError, match=r"\[B_nokg\].*KIVI.*0 个来源"):
+        rig._ab_assert_gold_resolves(
+            runner, units, gold_by_key, facts, resolve_gold_sources,
+        )
+
+
+def test_gold_resolution_preflight_passes_when_every_selected_cell_resolves(
+    tmp_path,
+):
+    """两个格都能解析 ⇒ 通过,且两格各自拿到自己笔记本里的 `source_id`。"""
+    gold_by_key = {
+        "B-q06": AbGold(question_key="B-q06", corpus="B", gold_sources=("KIVI",)),
+    }
+    facts = {
+        "B_kg": {"source_rows": [{"id": "s1", "title": "src-a_KIVI_mineru.md"}]},
+        "B_nokg": {"source_rows": [{"id": "s2", "title": "src-b_KIVI_mineru.md"}]},
+    }
+    units = [
+        _unit(question_key="B-q06", corpus_cell="B_kg"),
+        _unit(question_key="B-q06", corpus_cell="B_nokg"),
+    ]
+    runner = rig.Runner(dry_run=True, out_dir=tmp_path)
+    checked = rig._ab_assert_gold_resolves(
+        runner, units, gold_by_key, facts, resolve_gold_sources,
+    )
+    assert checked == 2
+    # 两格各自解析到的是自己笔记本里的 source_id,不是同一个。
+    assert resolve_gold_sources(
+        gold_by_key["B-q06"], facts["B_kg"]["source_rows"]
+    ) == {"KIVI": "s1"}
+    assert resolve_gold_sources(
+        gold_by_key["B-q06"], facts["B_nokg"]["source_rows"]
+    ) == {"KIVI": "s2"}
+
+
+def test_gold_resolution_preflight_does_not_recheck_the_same_cell_twice(tmp_path):
+    """同一个 `(corpus_cell, question_key)` 出现在多个重复轮次里只解析一次。"""
+    gold_by_key = {
+        "B-q06": AbGold(question_key="B-q06", corpus="B", gold_sources=("KIVI",)),
+    }
+    calls: list[str] = []
+
+    def _spy(gold, source_rows):
+        calls.append(gold.question_key)
+        return {}
+
+    facts = {"B_kg": {"source_rows": [{"id": "s1", "title": "KIVI"}]}}
+    units = [
+        _unit(question_key="B-q06", corpus_cell="B_kg", repeat=1),
+        _unit(question_key="B-q06", corpus_cell="B_kg", repeat=2),
+    ]
+    runner = rig.Runner(dry_run=True, out_dir=tmp_path)
+    checked = rig._ab_assert_gold_resolves(runner, units, gold_by_key, facts, _spy)
+    assert checked == 1
+    assert calls == ["B-q06"]
 
 
 def test_a_pair_unit_runs_both_arms_back_to_back_and_writes_two_paired_rows(
