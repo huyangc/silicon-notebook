@@ -862,13 +862,19 @@ def _assert_endpoint_free(base_url: str) -> None:
 def _create_test_database(args: argparse.Namespace) -> None:
     import psycopg
 
-    # 字面核对在 `_seed_target_mismatch` 已做;这里是带一条实时查询的那一半
-    # (`inet_server_port()`),挡住 host 相同但经端口转发落到别的服务器的情况。
-    ok, reason = _admin_targets_same_server(args.admin_url, args.database_url)
-    if not ok:
-        raise RuntimeError(reason.replace("拒绝 DROP", "拒绝 CREATE DATABASE"))
+    # 字面核对在 `_seed_target_mismatch` 已做。带真连接的那一半要等库建出来
+    # 才能连 `--database-url`:先建,再比两条连接的服务器身份,不一致就把刚建的
+    # 那个库(这次自己建的,别人不可能有数据)收回并响亮失败——扩展/迁移/播种
+    # 一笔都不下。
     with psycopg.connect(args.admin_url, autocommit=True) as conn:
         conn.execute(f'CREATE DATABASE "{args.db_name}"')
+    ok, reason = _admin_targets_same_server(args.admin_url, args.database_url)
+    if not ok:
+        with psycopg.connect(args.admin_url, autocommit=True) as conn:
+            conn.execute(f'DROP DATABASE IF EXISTS "{args.db_name}"')
+        raise RuntimeError(
+            reason.replace("拒绝 DROP", "已回收刚建的库,拒绝安装扩展与播种")
+        )
     with psycopg.connect(args.database_url, autocommit=True) as conn:
         for extension in PG_EXTENSIONS:
             conn.execute(f'CREATE EXTENSION IF NOT EXISTS "{extension}"')
@@ -2115,6 +2121,7 @@ def _run_search(
         facts = _search_corpus_facts(
             args, runner, repo, cells, notebooks, kg_in_scope_for,
         )
+        failed = 0
         if concurrency == 1:
             # **不经过线程池**:`--concurrency 1` 的行为必须与并发功能落地前
             # 逐字一致,包括「所有调用都在主线程里发生」这件事本身——哪怕是
@@ -2125,13 +2132,18 @@ def _run_search(
                 actor_id=actor_id, cancel_event=threading.Event(),
             )
         else:
-            _search_loop_concurrent(
+            failed = _search_loop_concurrent(
                 args, runner, plan, facts, repo, settings_by_policy,
                 actor_id=actor_id, profile=profile, concurrency=concurrency,
             )
     finally:
         reset_request_user(context)
     _assert_readonly(runner, before, _readonly_counts(args.database_url))
+    if failed:
+        # 失败 run 已各自落成 `status=failed` 行;整批仍以非零退出码收尾,不能让
+        # 「每个 run 都失败」看起来像一次成功的跑批(codex #700 R8 P2)。
+        print(f"ERROR: {failed} 个 run FAILED,见 search-runs.log", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -2174,6 +2186,16 @@ def _scope_unresolved_row(item: dict, fact: dict) -> dict:
     `_search_loop`/`_search_loop_concurrent` 的「声明策略 vs 轨迹证据」核对
     ——它没跑,没有协议证据可对。
     """
+    return _failed_run_row(item, fact)
+
+
+def _failed_run_row(item: dict, fact: dict) -> dict:
+    """没跑成的 run 的那一行:`status="failed"`、空轨迹、`scope_narrowed=None`。
+
+    范围解析失败与 worker 里抛异常(codex #700 R8 P2:并发分支此前只写一行日志
+    就 `continue`,分析脚本只读 JSONL,失败 run 从状态分布里凭空消失,样本数
+    偏向跑成的那一侧)共用这一行——投影是闭集,失败原因只进 `search-runs.log`。
+    """
     row = project_search_run(
         [], result=None, effort=item["effort"], policy=item["policy"],
         question_key=item["question_key"], corpus_cell=item["corpus_cell"],
@@ -2182,9 +2204,8 @@ def _scope_unresolved_row(item: dict, fact: dict) -> dict:
     )
     row["status"] = "failed"
     row["scope_narrowed"] = None
-    # 手改过 `project_search_run` 已经验过的行,再验一遍:两个调用方
-    # (`_search_loop` 的串行分支、`_search_loop_concurrent` 的 worker)都
-    # 直接把这一行写进 JSONL,不会再经过一次共同的校验点。
+    # 手改过 `project_search_run` 已经验过的行,再验一遍:调用方直接把这一行
+    # 写进 JSONL,不会再经过一次共同的校验点。
     assert_closed(row)
     assert_projection_values(row)
     return row
@@ -2381,7 +2402,7 @@ def _search_loop_concurrent(
     args: argparse.Namespace, runner: Runner, plan: Sequence[dict],
     facts: dict[str, dict], repo: Any, settings_by_policy: dict[str, Any],
     *, actor_id: str, profile: Any, concurrency: int,
-) -> None:
+) -> int:
     """并发版整批 run(`concurrency > 1`)。
 
     两阶段:`_precompute_intents` 先把意图契约并发算完,再把全部 run(legacy /
@@ -2498,8 +2519,18 @@ def _search_loop_concurrent(
                 if cancel_event in active_events:
                     active_events.remove(cancel_event)
 
+    def _jsonl_handle(policy: str) -> Any:
+        # 只在 `write_lock` 内调用。
+        handle = handles.get(policy)
+        if handle is None:
+            handle = handles[policy] = (
+                runner.out_dir / f"search-{policy}.jsonl"
+            ).open("a", encoding="utf-8")
+        return handle
+
     pool = ThreadPoolExecutor(max_workers=concurrency)
     fatal: BaseException | None = None
+    failed = 0
     try:
         futures = {pool.submit(worker, item): item for item in plan}
         try:
@@ -2513,6 +2544,9 @@ def _search_loop_concurrent(
                     break
                 except Exception as exc:  # noqa: BLE001 — 单个 run 失败要隔离,
                     # 不带原文:只记异常类名与题号,问题原文一个字都不进日志。
+                    # 但 JSONL 里必须有它那一行(`status=failed`),否则分析脚本
+                    # 看不见失败;整批退出码也要非零(codex #700 R8 P2)。
+                    failed += 1
                     with write_lock:
                         log.write(
                             f"{item['question_key']} {item['corpus_cell']} "
@@ -2520,6 +2554,12 @@ def _search_loop_concurrent(
                             f"{type(exc).__name__}\n"
                         )
                         log.flush()
+                        handle = _jsonl_handle(item["policy"])
+                        handle.write(json.dumps(
+                            _failed_run_row(item, facts[item["corpus_cell"]]),
+                            ensure_ascii=False, sort_keys=True,
+                        ) + "\n")
+                        handle.flush()
                     runner.say(
                         "search failed",
                         f"{item['question_key']} {item['corpus_cell']} "
@@ -2531,11 +2571,7 @@ def _search_loop_concurrent(
                 row, elapsed_ms, raw_steps, result = outcome
                 policy = item["policy"]
                 with write_lock:
-                    handle = handles.get(policy)
-                    if handle is None:
-                        handle = handles[policy] = (
-                            runner.out_dir / f"search-{policy}.jsonl"
-                        ).open("a", encoding="utf-8")
+                    handle = _jsonl_handle(policy)
                     handle.write(
                         json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n"
                     )
@@ -2602,11 +2638,12 @@ def _search_loop_concurrent(
     elapsed_total = time.monotonic() - started_at
     runner.say(
         "search totals",
-        f"{completed}/{total} run(s) 完成,并发度={concurrency},"
-        f"总耗时={elapsed_total:.1f}s",
+        f"{completed}/{total} run(s) 完成,{failed} 个 FAILED,"
+        f"并发度={concurrency},总耗时={elapsed_total:.1f}s",
     )
     if fatal is not None:
         raise fatal
+    return failed
 
 
 def cmd_export(args: argparse.Namespace, runner: Runner) -> int:
@@ -2804,32 +2841,54 @@ def _same_endpoint_literal(admin_url: str, database_url: str) -> tuple[bool, str
     return True, ""
 
 
-def _admin_targets_same_server(admin_url: str, database_url: str) -> tuple[bool, str]:
+def _admin_targets_same_server(
+    admin_url: str, database_url: str, *, identity: Any = None,
+) -> tuple[bool, str]:
     """`--admin-url`(维护连接,真正执行 DROP 的那一个)与 `--database-url`
     是不是同一台 PG 服务器?(codex #700 R1 P1)
 
     `_teardown_targets_this_run` 只核对了 `--database-url` 与 state 记的是否
     一致,从没检查过用来执行 DROP 的 `--admin-url` 是不是同一台服务器——两者
     是两个独立的命令行参数,一个打错端口/host 就会让 teardown 在**另一台**
-    服务器上删一个同名的库。先比 URL 本身的 host:port,再用一条实时查询核对
-    `inet_server_port()`(admin 连接实际落在哪个服务端端口)——host 相同但走
-    了端口转发/隧道到别的服务器时,URL 上的端口对不上号,这条能拦下来。
+    服务器上删一个同名的库。先比 URL 本身的 host:port,再各连一次比服务器身份
+    (`_live_server_identity`)——host:port 相同但两条连接其实落到不同服务器时
+    这条能拦下来;同一台服务器经端口映射进来不会被误拒。`identity` 只给用例
+    注入替身。
     """
     ok, reason = _same_endpoint_literal(admin_url, database_url)
     if not ok:
         return False, reason + ",拒绝 DROP"
-    db_endpoint = _pg_endpoint(database_url)
-    import psycopg
-
-    with psycopg.connect(admin_url, autocommit=True) as conn:
-        row = conn.execute("SELECT inet_server_port() AS port").fetchone()
-    server_port = int(row[0]) if row and row[0] is not None else None
-    if server_port != db_endpoint[1]:
+    probe = identity or _live_server_identity
+    admin_identity = probe(admin_url)
+    db_identity = probe(database_url)
+    if admin_identity != db_identity:
         return False, (
-            f"--admin-url 连接的实际服务端口是 {server_port},与 "
-            f"--database-url 的端口 {db_endpoint[1]} 不一致 —— 拒绝 DROP"
+            f"--admin-url 连到的服务器身份是 {admin_identity},--database-url "
+            f"连到的是 {db_identity} —— 不是同一台服务器,拒绝 DROP"
         )
     return True, ""
+
+
+def _live_server_identity(url: str) -> tuple:
+    """一条连接落在哪台 PG 上:`pg_control_system().system_identifier` 是集群
+    初始化时生成的 64 位标识,与客户端从哪个端口/隧道进来无关(codex #700 R8
+    P2:此前拿 `inet_server_port()` 与 URL 端口比,Docker 端口映射或 SSH 隧道
+    `localhost:15432 → server:5432` 会被误判成两台机器)。角色读不到控制文件
+    时退回服务端视角的 `(inet_server_addr, inet_server_port)`——同样是服务端
+    自报的值,两条连接可比。"""
+    import psycopg
+
+    with psycopg.connect(url, autocommit=True) as conn:
+        try:
+            row = conn.execute(
+                "SELECT system_identifier FROM pg_control_system()"
+            ).fetchone()
+            return ("system_identifier", int(row[0]))
+        except Exception:  # noqa: BLE001 — 权限不够等,退回服务端地址视角
+            row = conn.execute(
+                "SELECT inet_server_addr()::text, inet_server_port()"
+            ).fetchone()
+            return ("server_endpoint", row[0], row[1])
 
 
 def cmd_teardown(args: argparse.Namespace, runner: Runner) -> int:
