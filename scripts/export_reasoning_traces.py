@@ -92,8 +92,11 @@ class _Reader:
                 if path.startswith(prefix):
                     path = path[len(prefix):]
                     break
+            # 文件名先百分号编码再拼 URI(codex #700 R17 P2):路径里的 `?`/`#`/`%`
+            # 直接内插会改变 URI 含义——`#` 会把后面的 `mode=ro` 当片段丢掉,
+            # 以默认可写方式打开(甚至新建)另一个文件。
             self._conn = sqlite3.connect(
-                f"file:{Path(path).resolve()}?mode=ro", uri=True
+                f"{Path(path).resolve().as_uri()}?mode=ro", uri=True
             )
             self._conn.row_factory = sqlite3.Row
         return self
