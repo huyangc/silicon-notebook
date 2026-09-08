@@ -1077,6 +1077,7 @@ REPORT_HIGH_RISK_DOWNGRADE_ENABLED # deep-report citation audit may cap a ground
 REPORT_HIGH_RISK_UNSUPPORTED_RATIO # deep-report high-risk citation-audit threshold; the numeric contract is owned by docs/product-and-api.md
 REASONING_MAX_PPR_RETRIEVES / REASONING_MAX_EXACT_LOOKUPS / REASONING_MAX_FOLLOW_CHAIN_ACTIONS / REASONING_COMMUNITY_PEERS_CAP_FACTOR / REASONING_MAX_OUTLINE_UPDATES # centralized reasoning action/expansion rails; defaults preserve historical behavior, exact rails in product-and-api
 REASONING_MAX_CHUNK_SEARCHES # per-run call cap for reasoning Ask's search_chunks action (default 3, matching REASONING_MAX_PPR_RETRIEVES/REASONING_MAX_EXACT_LOOKUPS; ge=0; the no-graph first-round deterministic seed does not count against this cap)
+REASONING_MAX_TOKENS # per-call output cap (max_tokens) for step-by-step reasoning: the plan (query-expansion) call and every reflect turn (default 16384; ge=1). This is deployment configuration, not policy — the LEGACY and the v2 reflect protocol both use it, so it applies with REASONING_REFLECT_V2_ENABLED off as well (prompt, schema and trace stay byte-identical there; only this budget changes). It gets its own tier instead of raising OPENAI_COMPAT_MAX_TOKENS globally: with thinking enabled, reasoning can consume the whole 8192 global budget and the provider returns an empty body with finish_reason=length. On v2, a reflect turn cut off that way is retried once within the same turn at twice this value; the global default is never touched
 ```
 
 The three `REPORT_*_MAX_TOKENS` values are completion ceilings, not total-context
@@ -1181,7 +1182,7 @@ SILICON_NOTEBOOK_CORS_ORIGINS
 slots; `model-services.example.toml` is the service/binding/capacity template. The groups
 above highlight the common settings. A dedicated reasoning model is selected by binding
 `reasoning_agent` to a separate service in TOML, while its guardrails remain
-`REASONING_MAX_STEPS`, `REASONING_MAX_SUBQUERIES`, `REASONING_TIMEOUT_SECONDS`, and `REASONING_MAX_RETRIES`;
+`REASONING_MAX_STEPS`, `REASONING_MAX_SUBQUERIES`, `REASONING_TIMEOUT_SECONDS`, `REASONING_MAX_RETRIES`, and `REASONING_MAX_TOKENS`;
 retrieval/grounding tuning (`PROC_MIN`, `EVIDENCE_TAU_LOW`,
 `EVIDENCE_TAU_HIGH`), the opt-in debug log viewer (`DEBUG_LOGS_ENABLED`), and runtime
 identity (`SILICON_NOTEBOOK_ENV`, `SILICON_NOTEBOOK_SINGLE_USER_EMAIL`,
