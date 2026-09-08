@@ -100,12 +100,17 @@ ASPECT_BLOCK_NOTE = (
 #: id**:上一轮那份载荷证明了泛泛一句「请填 assessment」不够——它在系统段里已经
 #: 说过一遍了。这里说的是「就这几个 id,一个都不能少」,并把再次省略的后果写在
 #: 同一句里,让模型知道沉默不会换来另一次追问。
+#: 措辞刻意**只描述现在要做什么**,不描述上一轮发生了什么。「那一轮已被退回、
+#: 未执行任何检索」这类回述只在紧接着被退回的下一轮为真;这一句一旦挂在整个
+#: run 的每一轮上(接入时的形状),它在第三轮之后就是一句假话——而模型据以推断
+#: 「我上一轮什么都没查到」的正是这句话。现在它只渲染一次(`nudge_pending`),
+#: 回述也一并去掉,两条改动同向:让这句话在任何一轮读起来都成立。
 ASPECT_ASSESSMENT_NUDGE = (
-    "⚠ 上一轮你在收尾（next_action=answer 且 sufficient=true）时没有给出 "
-    "assessment，那一轮已被退回、未执行任何检索。本轮的 JSON 必须带 "
-    "assessment，并对下面每一个方面 id 各给一条判断——有支撑的放进 supported "
-    "并附上证据卡上的键，还缺东西的放进 unresolved 并附上 status 与 gap："
-    "{ids}。若再次省略，服务端将按「仍有方面没有完整支撑」收尾。"
+    "⚠ 你上一次的收尾载荷（next_action=answer，或任何带 sufficient=true 的"
+    "动作）没有给出 assessment。本轮的 JSON 必须带 assessment，并对下面每一个"
+    "方面 id 各给一条判断——有支撑的放进 supported 并附上证据卡上的键，还缺"
+    "东西的放进 unresolved 并附上 status 与 gap：{ids}。"
+    "若再次省略，服务端将按「仍有方面没有完整支撑」收尾。"
 )
 
 
@@ -199,7 +204,7 @@ class AspectLedger:
 
     __slots__ = (
         "_records", "_by_id", "source", "constraints",
-        "assessment_prompts", "assessment_omitted",
+        "assessment_prompts", "assessment_omitted", "nudge_pending",
     )
 
     def __init__(
@@ -220,6 +225,10 @@ class AspectLedger:
         #: 追问用完之后模型仍然没给自评 ⇒ 这次 run 的方面账是**模型没参与**的
         #: 那一种,不是"它判断还差东西"。
         self.assessment_omitted: bool = False
+        #: 追问句「还欠着」——被退回之后**只渲染一次**(见 `render_aspect_block`)。
+        #: 与 `assessment_prompts` 分开:那一格是"一共退回过几次"的计数(判据是
+        #: 它),这一格是"这一句现在还该不该出现"的一次性开关。
+        self.nudge_pending: bool = False
 
     # --- 读 ---------------------------------------------------------------
     @property
@@ -264,36 +273,43 @@ class AspectLedger:
         return tuple(out)
 
     # --- 写:收尾载荷缺自评(§7.1) ----------------------------------------
-    def note_missing_assessment(self) -> bool:
+    def note_missing_assessment(self, *, may_prompt: bool = True) -> bool:
         """模型在收尾那一轮没有给出 `assessment`。返回 True = 退回并追问一次。
 
-        为什么不接受这种收尾:`answer` + `sufficient=true` 的字面意思是「每个必答
-        方面都已经有支撑」,而**方面账是这句话的唯一落点**。载荷里没有
-        `assessment`,账本就一格都不更新,于是同一份决定在两处给出互相矛盾的读
-        数——模型说够了,服务端的必答清单上全是 `unknown`。`classify_termination`
-        据后者判 `model_partial`,合成 prompt 因此恒挂一句「仍有方面没有完整支
-        撑」。这不是"保守",而是**服务端根本没拿到模型的判断**却按它作了叙述。
+        为什么不接受这种收尾:一份**收尾载荷**(`answer`,或任何带
+        `sufficient=true` 的动作)的字面意思是「这次检索到此为止/每个必答方面都
+        已经有支撑」,而**方面账是这句话的唯一落点**。载荷里没有 `assessment`,
+        账本就一格都不更新,于是同一份决定在两处给出互相矛盾的读数——模型说
+        够了,服务端的必答清单上全是 `unknown`。`classify_termination` 据后者判
+        `model_partial`,合成 prompt 因此恒挂一句「仍有方面没有完整支撑」。这不是
+        "保守",而是**服务端根本没拿到模型的判断**却按它作了叙述。
 
         追问一次而不是无限次(见 `REFLECT_ASSESSMENT_MAX_PROMPTS`)。用完之后接受
         收尾,并把还没被判断过的方面标上 `assessment_omitted`——它们的状态仍然是
         `unknown`(服务端从不替模型判 supported),但快照里从此能分出"模型没走到
         这一步"与"问过了、它不给"。
 
-        `sufficient=false` 的部分收尾**不走这里**:那句话的意思本来就是"我知道
-        还差东西",与一张全是 unknown 的方面账并不矛盾,退回它只是白扣一步。
+        ``may_prompt=False`` = 调用方已经知道**这一轮之后不会再有下一轮**(步数
+        用尽,或这一轮是服务端强制的大纲溢出纠错轮——它无论如何都要 break)。这时
+        退回没有任何收益:追问句会渲染给一个不会到来的回合,而被折成 invalid 的
+        收尾会把模型自己的 `sufficient` 判读换成一句 `step_budget`。所以直接按
+        「第二次沉默」处理——接受收尾、记 `assessment_omitted`,追问一次的额度
+        留在原地。
 
         没有方面的 run(兼容路径下问题原文为空)返回 False:没有清单可以逐个自评,
         追问一句"请对下列 0 个方面各给一条判断"只会烧掉一轮。
         """
         if not self._records:
             return False
-        if self.assessment_prompts >= REFLECT_ASSESSMENT_MAX_PROMPTS:
+        if (not may_prompt
+                or self.assessment_prompts >= REFLECT_ASSESSMENT_MAX_PROMPTS):
             self.assessment_omitted = True
             for row in self._records:
                 if not row.model_assessed:
                     row.assessment_omitted = True
             return False
         self.assessment_prompts += 1
+        self.nudge_pending = True
         return True
 
     # --- 写(唯一入口) ----------------------------------------------------
@@ -306,11 +322,26 @@ class AspectLedger:
         折成一条 invalid 观察),账本一个字都不改。半份被吸收的评估比没有评估更
         危险——模型下一轮看到的状态既不是它说的,也不是服务端算的。
 
-        `allowed_keys` = 候选池里**曾真实展示给模型**的那批键
-        (`outline_binding_keys` 的口径)。它天然排除枚举条目 id 与来源 id,所以
-        "集合/来源身份冒充细粒度证据"在这里是结构上不可能,不是靠一条黑名单。
+        `allowed_keys` 是**两份服务端签发的身份的并集**(调用方 `_absorb_assessment`
+        算出来的那一份):
+
+        * 候选池里**曾真实展示给模型**的细粒度证据键(`outline_binding_keys` 的
+          口径)。它天然排除枚举条目 id 与来源 id,所以"条目/来源身份冒充细粒度
+          证据"在这里是结构上不可能,不是靠一条黑名单;
+        * 本 run 内 coverage 报告 **complete** 的枚举链的集合完整性键
+          (`complete_enumeration_keys`,`enum:` 前缀)。它是目录题唯一可能的支撑
+          ——一份列完了的目录是服务端自己记下的事实。未完整(`open`/`conflict`)
+          的链不签发键,模型自拼的同样进不了这个集合。
+
+        换句话说:这个集合**不再只是细粒度证据键**,所以不能再按"含 `:` 或 `src=`
+        的键一定是集合身份、一定非法"这类形状判断——合法与否只看它在不在这一份
+        服务端算出来的集合里。
+
         非法键**剔除**(不是拒绝整份载荷:模型抄错一个键不该让它对另外几个方面
         的判断也一起作废),剔完没有支撑的项按 §7.1 不得保持 supported。
+
+        吸收到**非空**自评时顺手清掉 `nudge_pending`:追问已经被回应,那一句不该
+        再出现在后续任何一轮(渲染侧也会清,两处同向,见 `render_aspect_block`)。
         """
         if not isinstance(assessment, Mapping):
             return "not_object"
@@ -331,6 +362,8 @@ class AspectLedger:
                     row, group, statuses, claimed, updates, allowed_keys)
                 if error:
                     return error
+        if updates:
+            self.nudge_pending = False
         for update in updates:
             record = update.record
             record.status = update.status
@@ -480,6 +513,11 @@ def render_aspect_block(ledger: AspectLedger) -> str:
     渲染时只折叠(`_fold`)不截长;`gap` 是模型文本,写进账本时就已按模型文本的
     上限截过。
 
+    ⚠ **这个函数有一处写:** 渲染追问句的同时消费掉 `ledger.nudge_pending`
+    (一次性,见下面的注释)。生产只有一个调用点、每轮一次(`_reflect_v2_context`),
+    所以"渲染 = 已经说给模型听了"在这里是准确的;真要加第二个调用点(诊断、
+    预览),那一个必须先想清楚它算不算"说过了"。
+
     ⚠ **开闸前成本表项(不改行为)**:这个块**每一轮逐字重渲染**并整块进 prompt,
     没有增量。契约上界 ≈ 20KB/轮:16 个方面 × (方面原文 ≤ 冻结契约的单条上限
     + `gap` ≤ 240 字符 + 固定前后缀),再加约束行。它不受 `state_chars` 约束
@@ -511,12 +549,15 @@ def render_aspect_block(ledger: AspectLedger) -> str:
         lines.append(
             "约束条件: " + "、".join(_fold(item) for item in ledger.constraints))
     lines.append(ASPECT_BLOCK_NOTE)
-    if ledger.assessment_prompts and not ledger.assessment_omitted:
-        # 追问只在**已经退回过、而且还没放弃**的那一段时间里出现。放弃之后
-        # (`assessment_omitted`)这一轮就是最后一轮,再挂一句"下次要填"是对着一个
-        # 不会再来的回合说话。
+    if ledger.nudge_pending:
+        # 追问**只挂被退回的下一轮那一次**,渲染完就消费掉。挂在整个 run 的每一
+        # 轮上有两个代价:一是这句话回述的是"上一次收尾"这件具体的事,第三轮之后
+        # 它就是一句假话;二是模型已经照办之后仍每轮收到同一句斥责,而它下一步该
+        # 做的是继续检索,不是再交一遍同一份自评。模型给出非空自评时 `apply` 那边
+        # 同样清掉这一格,两处同向。
         lines.append(ASPECT_ASSESSMENT_NUDGE.format(
             ids="、".join(ledger.aspect_ids)))
+        ledger.nudge_pending = False
     return "\n".join(lines)
 
 
