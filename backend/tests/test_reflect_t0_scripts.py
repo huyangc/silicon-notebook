@@ -917,6 +917,30 @@ def test_pair_table_does_not_pair_across_workloads(tmp_path, capsys):
     assert json.loads(js.read_text("utf-8"))["pairs"] == []
 
 
+def test_sqlite_reader_encodes_odd_filenames_and_stays_read_only(tmp_path):
+    """路径里带 `#`/`?`/`%`/空格时,直接内插进 `file:` URI 会把 `mode=ro` 当片段丢
+    掉、以可写方式打开(甚至新建)别的文件(codex #700 R17 P2)。先按 RFC 编码
+    再拼查询串:读得到真实文件,且仍是只读。"""
+    import sqlite3
+
+    from export_reasoning_traces import _Reader
+
+    odd_dir = tmp_path / "odd dir #1"
+    odd_dir.mkdir()
+    db_path = odd_dir / "t0 100%?.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("CREATE TABLE t (v TEXT)")
+        conn.execute("INSERT INTO t VALUES ('ok')")
+        conn.commit()
+
+    with _Reader(f"sqlite:///{db_path}") as reader:
+        assert reader.query("SELECT v FROM t", ())[0]["v"] == "ok"
+        with pytest.raises(sqlite3.OperationalError):
+            reader._conn.execute("INSERT INTO t VALUES ('nope')")
+    # 没有因为 URI 被截断而新建出别的文件。
+    assert sorted(p.name for p in odd_dir.iterdir()) == [db_path.name]
+
+
 def test_analysis_refuses_rows_with_keys_outside_the_closed_set(tmp_path):
     source = _write_rows(tmp_path / "rows.jsonl", [_row(question="原文")])
     with pytest.raises(SystemExit, match="闭集外的键"):
