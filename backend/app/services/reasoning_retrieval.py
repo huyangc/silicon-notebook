@@ -4235,9 +4235,14 @@ class ReasoningRetriever:
                     enumerate_request.get("source_id", "")
                 ).strip()
                 # 模型看得到的是来源**标题**(候选摘要与引用里就是标题),内部
-                # id 从不上屏,所以「列出《某某》里的公式」只能靠标题表达。
-                # 服务端在作用域源清单里确定性解析;id 优先(给了 id 就说明
-                # 它是从服务端来的,不需要再猜)。
+                # id 不作为可检索的身份上屏,所以「列出《某某》里的公式」只能靠
+                # 标题表达。服务端在作用域源清单里确定性解析;id 优先(给了 id
+                # 就说明它是从服务端来的,不需要再猜)。
+                # 唯一的例外是集合完整性键(`enum_evidence_key`):限定了来源的
+                # 那种链,它的键里带一段 `src=<id>`,而那份键会在服务器状态块里
+                # 展示给模型。那是**证据身份**,不是可以填回这里的检索参数——模型
+                # 抄它回来只能进 assessment 的 evidence_keys;这里仍然只认标题
+                # (或服务端此前发出去的 id),所以上面那条解析路径不受影响。
                 d.enumerate_source_title = str(
                     enumerate_request.get("source_title", "")
                 ).strip()
@@ -5991,11 +5996,11 @@ class ReasoningRetriever:
             decision.enumerate_source_title if is_elements else ""
         )
         label = _collection_label(collection, kind)
-        # 「列出《某某》里的公式」只能按**名字**表达:内部 source id 从不
-        # 上屏,候选摘要与引用里给模型看的一直是来源标题。所以这里先做
-        # 一次确定性的名字→id 解析,再进下面所有以 source_id 为键的逻辑
-        # (续跑链的键、执行器的作用域校验)。给了 id 就以 id 为准——那说明
-        # id 本来就是服务端发出去的,不需要再猜。
+        # 「列出《某某》里的公式」只能按**名字**表达:内部 source id 不作为可检索
+        # 的身份上屏(唯一例外是集合完整性键 `enum:…:src=<id>`——那是证据身份,只
+        # 能进 assessment 的 evidence_keys,不是这里的参数;见 `enum_evidence_key`)。
+        # 所以先做一次确定性的名字→id 解析,再进下面所有以 source_id 为键的逻辑
+        # (续跑链的键、执行器的作用域校验)。给了 id 就以服务端发出的那个 id 为准。
         # None = 本轮没做过解析(要么给了 id,要么根本没给名字)。
         source_matches: "int | None" = None
         source_truncated = False
