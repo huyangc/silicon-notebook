@@ -403,7 +403,15 @@ def _reflect_fallback_reason(exc: BaseException, finish_reason: str = "") -> str
     `ModelJsonRepairError.reason` 挂在**它**的 `__cause__` 上。所以沿
     `__cause__`/`__context__` 链向下找第一个带非空 `.reason` 的异常,而不是只看
     一层。
+
+    ``finish_reason`` 有**两条来源**,出参优先、异常兜底。出参(`call_stats`)只
+    在客户端两端都声明支持时才被填,而 `MalformedModelResponse` 自己就带一格
+    `finish_reason`——一个直接抛它、却不声明 `supports_call_stats` 的物理客户端
+    (插件绑定的传输、测试替身)填的是后者。不读它的话,这类调用方的空正文一律
+    落回 `empty`,§5.2 里那条「预算打满就同轮翻倍重试」对它们结构性不生效。
     """
+    finish_reason = finish_reason or str(
+        getattr(exc, "finish_reason", "") or "").strip()
     code = str(getattr(exc, "code", "") or "").strip()
     if code == _MALFORMED_RESPONSE_CODE or isinstance(exc, MalformedModelResponse):
         seen: set[int] = set()

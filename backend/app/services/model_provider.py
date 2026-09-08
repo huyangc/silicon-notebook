@@ -443,8 +443,11 @@ class _ScheduledAdapter:
 class ScheduledJsonChatClient(_ScheduledAdapter):
     settings: Settings
     #: Forwards the ``call_stats`` out-parameter to the physical client (see
-    #: ``app.core.llm.CALL_STATS_KWARG``). Both ends must declare it: the
-    #: reflect layer only passes a sink to a client that says it fills one.
+    #: ``app.core.llm.CALL_STATS_KWARG``). Every hop must declare it: the
+    #: reflect layer only passes a sink to a client that says it fills one,
+    #: and ``chat_json`` below only passes it on to a ``runtime.raw`` that says
+    #: the same. So this flag means "I forward it", not "the client behind me
+    #: fills it" -- a sink can still come back empty.
     supports_call_stats = True
 
     def __init__(
@@ -513,6 +516,17 @@ class ScheduledJsonChatClient(_ScheduledAdapter):
 
         raw_response = ""
         rejection_reason = ""
+        # Both ends must declare support, not just the caller.  This adapter
+        # says ``supports_call_stats = True`` because it *forwards* the sink,
+        # but the physical client behind ``runtime.raw`` is duck-typed (an
+        # offline double, a plugin-bound transport, an older in-tree client)
+        # and may not have the keyword at all -- handing it one raises
+        # TypeError inside ``invoke`` and turns a working reflect call into a
+        # provider error.  An undeclared client simply leaves the sink empty,
+        # which is exactly the "finish_reason unknown" branch every consumer
+        # already handles.
+        forward_stats = call_stats is not None and getattr(
+            runtime.raw, "supports_call_stats", False)
 
         def invoke() -> str:
             nonlocal raw_response, rejection_reason
@@ -536,10 +550,10 @@ class ScheduledJsonChatClient(_ScheduledAdapter):
                         else configured_thinking_mode
                     )
                 ),
-                # Forwarded only when the caller asked for it, so every
-                # duck-typed physical client keeps its current signature.
-                **({CALL_STATS_KWARG: call_stats}
-                   if call_stats is not None else {}),
+                # Forwarded only when the caller asked for it AND this
+                # physical client declares it, so every duck-typed client
+                # keeps its current signature (see ``forward_stats``).
+                **({CALL_STATS_KWARG: call_stats} if forward_stats else {}),
             )
             raw_response = content if isinstance(content, str) else str(content)
             repair_mode = (
