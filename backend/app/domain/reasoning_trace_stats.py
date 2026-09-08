@@ -358,7 +358,7 @@ def _anchor_evidence(steps: Sequence[Mapping]) -> tuple[set[str], bool]:
     return anchors, present and not truncated
 
 
-def citation_contribution(steps: Sequence[Mapping]) -> tuple[dict, int]:
+def citation_contribution(steps: Sequence[Mapping]) -> tuple[dict, int | None]:
     """每动作引用贡献 + 跨动作重复命中数(§4.4)。
 
     三条规则,一条都不许放松:
@@ -411,7 +411,10 @@ def citation_contribution(steps: Sequence[Mapping]) -> tuple[dict, int]:
         }
         for key, entry in sorted(entries.items())
     }
-    return contribution, shared_hits
+    # 锚点集合不可信(只跑检索的 search run 没有 synthesis 步;或带截断标)时,
+    # 每一步都绕过了共享命中的记账——此时 0 不是观测值,是「没法数」
+    # (codex #700 R18 P2):回 None,与 `anchors`/`cited_hits` 的缺失口径一致。
+    return contribution, (shared_hits if usable else None)
 
 
 # --- 结束原因(§3 / §4.5) ---------------------------------------------------
