@@ -190,7 +190,13 @@ def ask_plan(
                         "requested_mode": mode,
                         "lang": language,
                         "shape": row.get("shape", ""),
-                        "scope_sources": row.get("scope_sources"),
+                        # 显式来源标题(见题集 B-q09 的 `note`)。空元组 = 这道题
+                        # 没有声明范围;两条消费路径(`search`/`ask`)各自把它解析
+                        # 成目标笔记本里的 source_id 列表,解析不到唯一匹配就把这
+                        # 道题标 `status=failed`,不静默退化成全库检索。
+                        "scope_source_titles": tuple(
+                            row.get("scope_source_titles") or ()
+                        ),
                         "client_request_id": encode_client_request_id(
                             question_key=key, corpus_cell=cell, policy=policy,
                             effort=effort, requested_mode=mode,
@@ -890,20 +896,51 @@ def cmd_ask(args: argparse.Namespace, runner: Runner) -> int:
     runner.say("planned runs", str(len(plan)))
     token = str(state.get("token") or "")
     verified = runner.dry_run
+    gated = 0
     for item in plan:
         notebook = state["notebooks"].get(item["corpus_cell"], "<unknown>")
         base = f"{args.base_url}/api/notebooks/{notebook}"
+        titles = tuple(item.get("scope_source_titles") or ())
+        source_scope_body: dict[str, Any] | None = None
+        scope_note = ""
+        if titles:
+            scope_note = f" scope={len(titles)} sources"
+            if not runner.dry_run:
+                # 只读一次测试库:`ask` 全程只碰它,不是主库(`search` 那条路
+                # 才读主库)。解析不到唯一匹配就跳过这道题的提交——绝不能把
+                # 「范围解析失败」悄悄退化成一次不设限的全库检索
+                # (codex #700 R3 P2)。dry-run 不做这次 DB 读:模块 docstring
+                # 的承诺是「不连库」,这里的 `scope=N sources` 只是静态计数。
+                scope_ids = resolve_scope_source_ids(
+                    args.database_url, notebook, titles,
+                )
+                if scope_ids is None:
+                    gated += 1
+                    runner.say(
+                        "ask scope unresolved",
+                        f"{item['question_key']} cell={item['corpus_cell']} "
+                        f"titles={list(titles)} -> status=failed "
+                        "reason=scope_unresolved,跳过提交",
+                    )
+                    continue
+                source_scope_body = {"mode": "include", "source_ids": scope_ids}
         runner.say(
             "ask",
             f"{item['question_key']} cell={item['corpus_cell']} "
             f"effort={item['effort']} mode={item['requested_mode']} "
-            f"crid={item['client_request_id']}",
+            f"crid={item['client_request_id']}{scope_note}",
         )
         # 高级界面路径:先 /ask/intent 拿契约,再带着确认过的契约提交。
-        # 只有这条路径才让方面账拿到真实的 mandatory_topics(§2.3)。
+        # 只有这条路径才让方面账拿到真实的 mandatory_topics(§2.3)。范围一并
+        # 带上:生产的 `/ask/intent`(`app.api.ask_routes`)本来就在
+        # `source_scope_context` 里算契约,题目声明了范围时不能只在
+        # `/ask/stream` 才收窄,那样算出来的方面账会是全库口径的。
+        intent_body: dict[str, Any] = {"question": item["question"]}
+        if source_scope_body is not None:
+            intent_body["source_scope"] = source_scope_body
         contract = runner.http(
             "POST", f"{base}/ask/intent",
-            json_body={"question": item["question"]}, token=token,
+            json_body=intent_body, token=token,
         )
         body: dict[str, Any] = {
             "question": item["question"],
@@ -911,6 +948,8 @@ def cmd_ask(args: argparse.Namespace, runner: Runner) -> int:
             "retrieval_effort": item["effort"],
             "client_request_id": item["client_request_id"],
         }
+        if source_scope_body is not None:
+            body["source_scope"] = source_scope_body
         if contract is not None:
             # `answers=[]` 会被 `finalize_query_intent` 的门拒掉,只要契约带
             # 必填澄清项(`auto_clarification_answers` 那条确定性代答规则同
@@ -932,7 +971,7 @@ def cmd_ask(args: argparse.Namespace, runner: Runner) -> int:
         if not verified:
             _assert_tag_landed(args, runner, item["client_request_id"])
             verified = True
-    return 0
+    return 2 if gated else 0
 
 
 def _assert_tag_landed(
@@ -1346,10 +1385,12 @@ def cmd_search(args: argparse.Namespace, runner: Runner) -> int:
     )
     if runner.dry_run:
         for item in plan:
+            titles = item.get("scope_source_titles") or ()
+            scope_note = f" scope={len(titles)} sources" if titles else ""
             runner.say(
                 "search",
                 f"{item['question_key']} cell={item['corpus_cell']} "
-                f"policy={item['policy']} effort={item['effort']}",
+                f"policy={item['policy']} effort={item['effort']}{scope_note}",
             )
         return 0
     return _run_search(args, runner, plan, notebooks, cells)
@@ -1485,6 +1526,48 @@ def _source_count(database_url: str, notebook_id: str) -> int | None:
         return int(rows[0]["n"]) if rows else 0
     except Exception:  # noqa: BLE001 — 数不出来就是 unknown,不猜 0
         return None
+
+
+def resolve_scope_source_ids(
+    database_url: str, notebook_id: str, titles: Sequence[str],
+) -> list[str] | None:
+    """把题集里的显式来源标题解析成目标笔记本里的 `source_id` 列表,只读。
+
+    按**子串**匹配,不是精确相等:`search` 读的是主库既有笔记本,
+    `sources.title` 是上传时的原始文件名;`ask`/`seed` 把**同一份**磁盘文件
+    重新上传进一次性测试库,那份磁盘文件名本身就带着主库存储层加的
+    `{source_id}_` 前缀(`app.repositories.source_files.stored_upload_name`),
+    所以测试库那份 `title` 是"主库标题前面多一段前缀"的超串。子串匹配让题集
+    只需要写一份标题,两条消费路径都能解析到位;写精确相等则测试库那侧
+    永远解析不到(见题集 B-q09 的 `note`)。
+
+    每个标题必须在这个笔记本里**恰好**命中一个来源;命中 0 个或 ≥2 个,整体
+    判失败、返回 `None`。调用方据此把这道题标 `status=failed`(原因
+    `scope_unresolved`),不能把「解析不到位」悄悄退化成不设限的全库检索
+    ——那正是 codex #700 R3 P2 指出的根因:两条消费路径此前都无条件装配
+    「不收窄」的范围,`scope_sources` 这个字段只在题集里存在、从没有一处
+    真的按它建过范围。
+    """
+    from export_reasoning_traces import _Reader
+
+    try:
+        with _Reader(database_url) as reader:
+            rows = reader.query(
+                "SELECT id, title FROM sources WHERE notebook_id = ?",
+                (notebook_id,),
+            )
+    except Exception:  # noqa: BLE001 — 查不出来就是解析失败,不是「没有范围」
+        return None
+    resolved: list[str] = []
+    for title in titles:
+        matches = [
+            str(row["id"]) for row in rows
+            if title and title in str(row.get("title") or "")
+        ]
+        if len(matches) != 1:
+            return None
+        resolved.append(matches[0])
+    return resolved
 
 
 #: `_assert_readonly` 逐个比对的键:`READONLY_TABLES` 的行数,加上按值比对的
@@ -1707,6 +1790,7 @@ def _prepare_search_intent(
 def run_search_once(
     repo: Any, settings: Any, *, notebook: str, item: dict,
     prepared: dict | None, on_step: Any, cancel_event: Any, actor_id: str,
+    scope_source_ids: Sequence[str] | None = None,
 ) -> Any:
     """一个 run:三层 scope + `ReasoningRetriever.run`。生产接线的逐字复刻。
 
@@ -1717,8 +1801,12 @@ def run_search_once(
     * `retrieval_run(run_kind="ask_reasoning")` —— 请求级的查询向量 memo 与扇出
       预算,`kg_in_scope_for` 的 memo 也挂在它上面。**`event_log=None`**:那个
       事件汇是这条路上唯一会往库里写的旁路,主库只读,所以刻意不接;
-    * `source_scope_context(notebook, None, None)` —— 不收窄范围时它是个 no-op,
-      留着是为了与 `_generate_report` 那半程同形。
+    * `source_scope_context(notebook, scope, None)` —— `scope_source_ids` 为空
+      时 `scope=None`,是个 no-op,与 `_generate_report` 那半程同形;非空时
+      装配成 `mode="include"` 的本地范围(与生产 `AskRequest.source_scope` /
+      `SourceScope` 同一形状),调用方(`_search_loop`)已经用
+      `resolve_scope_source_ids` 把题集声明的来源标题解析成这里的 id 列表
+      ——解析不到位的题从不会走到这里(codex #700 R3 P2)。
 
     注入面全部不接:`from_repository` 不传 `agent_profile` /
     `retrieval_experiences` / `identity_store`(见 `_construct_reasoning_retriever`
@@ -1740,6 +1828,10 @@ def run_search_once(
         )
     question = (prepared or {}).get("research_question") or item["question"]
     seeds = list((prepared or {}).get("intent_queries") or [])
+    scope = (
+        {"mode": "include", "source_ids": list(scope_source_ids)}
+        if scope_source_ids else None
+    )
     with model_work_scope(
         priority=ModelPriority.INTERACTIVE, actor_id=actor_id,
         notebook_id=notebook, question=question,
@@ -1748,7 +1840,7 @@ def run_search_once(
             run_kind="ask_reasoning", event_log=None, actor_id=actor_id,
             cancel_event=cancel_event,
         ):
-            with source_scope_context(notebook, None, None):
+            with source_scope_context(notebook, scope, None):
                 return retriever.run(
                     notebook, question, "", on_step=on_step,
                     intent_queries=seeds or None,
@@ -1989,6 +2081,48 @@ def _search_corpus_facts(
     return facts
 
 
+def _scope_unresolved_row(item: dict, fact: dict) -> dict:
+    """一道声明了 `scope_source_titles`、却解析不到唯一匹配的题:仍然产出
+    **一行**,`status="failed"`、`scope_narrowed=None`(没跑,不知道)——不是
+    悄悄跳过、也不是退化成一次不设限的全库检索(codex #700 R3 P2)。
+
+    走的还是 `project_search_run` 那一份闭集投影(`steps=[]`、
+    `result=None`):空轨迹让 `termination`/`reflect_turns` 等字段如实落成
+    「零步」「unknown」,不是编造的假证据。这一行**不参与**
+    `_search_loop`/`_search_loop_concurrent` 的「声明策略 vs 轨迹证据」核对
+    ——它没跑,没有协议证据可对。
+    """
+    row = project_search_run(
+        [], result=None, effort=item["effort"], policy=item["policy"],
+        question_key=item["question_key"], corpus_cell=item["corpus_cell"],
+        kg_in_scope=fact["kg_in_scope"], has_intent_contract=False,
+        sources_count=fact["sources"],
+    )
+    row["status"] = "failed"
+    row["scope_narrowed"] = None
+    # 手改过 `project_search_run` 已经验过的行,再验一遍:两个调用方
+    # (`_search_loop` 的串行分支、`_search_loop_concurrent` 的 worker)都
+    # 直接把这一行写进 JSONL,不会再经过一次共同的校验点。
+    assert_closed(row)
+    assert_projection_values(row)
+    return row
+
+
+def _resolve_item_scope(
+    args: argparse.Namespace, item: dict, fact: dict,
+) -> tuple[list[str] | None, bool]:
+    """一道题的范围解析结果:`(source_ids或None, 解析失败?)`。
+
+    没声明 `scope_source_titles` 时恒 `(None, False)`——`run_search_once` 的
+    `scope_source_ids=None` 是 no-op,与改动前逐字一致。
+    """
+    titles = tuple(item.get("scope_source_titles") or ())
+    if not titles:
+        return None, False
+    scope_ids = resolve_scope_source_ids(args.database_url, fact["notebook"], titles)
+    return scope_ids, scope_ids is None
+
+
 def _search_loop(
     args: argparse.Namespace, runner: Runner, plan: Sequence[dict],
     facts: dict[str, dict], repo: Any, settings_by_policy: dict[str, Any],
@@ -2007,41 +2141,54 @@ def _search_loop(
             fact = facts[item["corpus_cell"]]
             policy = item["policy"]
             settings = settings_by_policy[policy]
-            prepared = _prepare_search_intent(
-                intents.get(repo, settings, item, actor_id=actor_id,
-                            notebook=fact["notebook"]),
-                item["question"], item["effort"],
-            )
-            steps: list[dict] = []
-            raw_steps: list[dict] = []
+            scope_ids, scope_failed = _resolve_item_scope(args, item, fact)
+            if scope_failed:
+                row = _scope_unresolved_row(item, fact)
+                elapsed_ms = 0
+                runner.say(
+                    "search scope unresolved",
+                    f"{item['question_key']} {item['corpus_cell']} "
+                    f"titles={list(item.get('scope_source_titles') or ())}"
+                    " -> status=failed reason=scope_unresolved",
+                )
+            else:
+                prepared = _prepare_search_intent(
+                    intents.get(repo, settings, item, actor_id=actor_id,
+                                notebook=fact["notebook"]),
+                    item["question"], item["effort"],
+                )
+                steps: list[dict] = []
+                raw_steps: list[dict] = []
 
-            def _on_step(step: Any) -> None:
-                # 闭包捕获的是这次迭代新建的 `steps`/`raw_steps`(每轮都重新
-                # 绑定,不是共享的循环变量),调用又发生在同一轮 `run_search_once`
-                # 返回之前,不存在延迟绑定的坑。
-                steps.append(trace_step_row(step))
+                def _on_step(step: Any) -> None:
+                    # 闭包捕获的是这次迭代新建的 `steps`/`raw_steps`(每轮都
+                    # 重新绑定,不是共享的循环变量),调用又发生在同一轮
+                    # `run_search_once` 返回之前,不存在延迟绑定的坑。
+                    steps.append(trace_step_row(step))
+                    if args.keep_raw_trace:
+                        raw_steps.append(raw_trace_step_row(step))
+
+                started = time.monotonic()
+                result = run_search_once(
+                    repo, settings, notebook=fact["notebook"], item=item,
+                    prepared=prepared, on_step=_on_step,
+                    cancel_event=cancel_event, actor_id=actor_id,
+                    scope_source_ids=scope_ids,
+                )
+                elapsed_ms = round((time.monotonic() - started) * 1000)
+                row = project_search_run(
+                    steps, result=result, effort=item["effort"], policy=policy,
+                    question_key=item["question_key"],
+                    corpus_cell=item["corpus_cell"],
+                    kg_in_scope=fact["kg_in_scope"],
+                    has_intent_contract=prepared is not None,
+                    sources_count=fact["sources"],
+                )
+                row["scope_narrowed"] = bool(scope_ids)
                 if args.keep_raw_trace:
-                    raw_steps.append(raw_trace_step_row(step))
-
-            started = time.monotonic()
-            result = run_search_once(
-                repo, settings, notebook=fact["notebook"], item=item,
-                prepared=prepared, on_step=_on_step,
-                cancel_event=cancel_event, actor_id=actor_id,
-            )
-            elapsed_ms = round((time.monotonic() - started) * 1000)
-            row = project_search_run(
-                steps, result=result, effort=item["effort"], policy=policy,
-                question_key=item["question_key"],
-                corpus_cell=item["corpus_cell"],
-                kg_in_scope=fact["kg_in_scope"],
-                has_intent_contract=prepared is not None,
-                sources_count=fact["sources"],
-            )
+                    write_raw_trace(runner.out_dir, policy, item, raw_steps, result)
             assert_closed(row)
             assert_projection_values(row)
-            if args.keep_raw_trace:
-                write_raw_trace(runner.out_dir, policy, item, raw_steps, result)
             handle = handles.get(policy)
             if handle is None:
                 handle = handles[policy] = (
@@ -2049,15 +2196,23 @@ def _search_loop(
                 ).open("a", encoding="utf-8")
             handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
             handle.flush()
+            status_suffix = (
+                "" if row.get("status") != "failed"
+                else " status=failed reason=scope_unresolved"
+            )
             line = (
                 f"{index:03d}/{len(plan)} {item['question_key']} "
                 f"{item['corpus_cell']} {policy} {item['effort']} "
                 f"{elapsed_ms}ms reflect_turns={row['reflect_turns']} "
-                f"termination={row['termination_reason']}"
+                f"termination={row['termination_reason']}{status_suffix}"
             )
             log.write(line + "\n")
             log.flush()
             runner.say("search done", line)
+            if row.get("status") == "failed":
+                # 没跑,没有协议证据可对——不参与下面这道「声明策略 vs 轨迹
+                # 证据」的核对,也不该被它当成第一个样本消费掉。
+                continue
             if policy not in verified:
                 # **每个策略的第一个 run 之后**就把「声明的策略」与「轨迹里真的
                 # 发生了什么」对上一次。整批跑完再发现 v2 那半其实跑的是 legacy,
@@ -2204,12 +2359,19 @@ def _search_loop_concurrent(
             # cancel_futures=True)` 撤不掉已经被 worker 线程取出来的这一个)
             # 直接退出,不再发起新的模型调用。
             return None
+        fact = facts[item["corpus_cell"]]
+        # 范围解析只是一次只读 DB 查询,不碰模型、不需要 `cancel_event`/
+        # `set_request_user`——放在那两样之前做,解析失败时干脆不进入下面那段
+        # 需要清理的临界区。
+        scope_ids, scope_failed = _resolve_item_scope(args, item, fact)
+        if scope_failed:
+            row = _scope_unresolved_row(item, fact)
+            return row, 0.0, None, None
         cancel_event = threading.Event()
         with active_lock:
             active_events.append(cancel_event)
         ctx = set_request_user(profile)
         try:
-            fact = facts[item["corpus_cell"]]
             policy = item["policy"]
             settings = settings_by_policy[policy]
             prepared = _prepare_search_intent(
@@ -2230,6 +2392,7 @@ def _search_loop_concurrent(
                 repo, settings, notebook=fact["notebook"], item=item,
                 prepared=prepared, on_step=_on_step,
                 cancel_event=cancel_event, actor_id=actor_id,
+                scope_source_ids=scope_ids,
             )
             elapsed_ms = round((time.monotonic() - started) * 1000)
             row = project_search_run(
@@ -2240,6 +2403,7 @@ def _search_loop_concurrent(
                 has_intent_contract=prepared is not None,
                 sources_count=fact["sources"],
             )
+            row["scope_narrowed"] = bool(scope_ids)
             assert_closed(row)
             assert_projection_values(row)
             # `raw_steps`/`result` 只在 `--keep-raw-trace` 时真的被消费(写盘发生
@@ -2303,16 +2467,25 @@ def _search_loop_concurrent(
                         )
                     completed += 1
                     done_n = completed
+                    status_suffix = (
+                        "" if row.get("status") != "failed"
+                        else " status=failed reason=scope_unresolved"
+                    )
                     line = (
                         f"done {done_n}/{total}  {item['question_key']} "
                         f"{item['corpus_cell']} {policy} {item['effort']} "
                         f"reflect={row['reflect_turns']} "
                         f"term={row['termination_reason']} "
-                        f"{elapsed_ms / 1000:.1f}s"
+                        f"{elapsed_ms / 1000:.1f}s{status_suffix}"
                     )
                     log.write(line + "\n")
                     log.flush()
-                    first_for_policy = policy not in verified
+                    # `status=failed`(范围解析不到位、没真的跑)不参与「声明
+                    # 策略 vs 轨迹证据」核对,也不消费这个策略的「第一个样本」
+                    # 名额——留给下一个真的跑了的 run 去验。
+                    first_for_policy = (
+                        row.get("status") != "failed" and policy not in verified
+                    )
                     if first_for_policy:
                         verified.add(policy)
                 runner.say("search done", line)

@@ -333,7 +333,11 @@
       "shape": "scope_narrowed",
       "zh": "只看 Qwen-VL 和 DeepSeek-V2 这两篇,它们各自是怎么处理图像输入的?",
       "en": "Looking only at Qwen-VL and DeepSeek-V2, how does each of them handle image input?",
-      "scope_sources": 2
+      "scope_source_titles": [
+        "qwen_papers__04_Qwen-VL_mineru.md",
+        "deepseek_papers__01_DeepSeek-V2_mineru.md"
+      ],
+      "note": "范围通过来源身份表达,不改问题文本。标题按主库 nb-b37185f4ae 里这两篇的 sources.title(即上传时的原始文件名,不含存储层加的 source_id 前缀)写;rig 在目标笔记本里按标题**子串**匹配解析成 source_id(`search` 的主库来源与 `ask`/`seed` 重新上传出的测试库来源,后者的 title 会带上原文件名里 `src-<id>_` 那段前缀,子串匹配让两条路径用同一份标题都能解析到位)。解析不到唯一匹配就把这道题标 status=failed、原因 scope_unresolved,不静默退化成全库检索。"
     },
     {
       "key": "B-q10",
