@@ -1274,6 +1274,7 @@ def test_search_loop_serial_writes_a_failed_row_and_counts_it(
                              scope_source_ids=None):
         calls.append(item["question_key"])
         if item["question_key"] == "A-q01":
+            on_step(types.SimpleNamespace(step_type="reflect", detail={}, duration_ms=5))
             raise ValueError("provider exploded 秘密原文")
         return types.SimpleNamespace(termination=None)
 
@@ -1294,6 +1295,7 @@ def test_search_loop_serial_writes_a_failed_row_and_counts_it(
     rows = [json.loads(l) for l in (out_dir / "search-legacy.jsonl").read_text().splitlines()]
     by_key = {r["question_key"]: r for r in rows}
     assert by_key["A-q01"]["status"] == "failed"
+    assert by_key["A-q01"]["reflect_turns"] == 1, "失败前捕获的轨迹步不该被丢成 0"
     assert by_key["A-q02"]["status"] != "failed"
     log_text = (out_dir / "search-runs.log").read_text("utf-8")
     assert "A-q01 A_nokg legacy standard FAILED ValueError" in log_text
@@ -1611,6 +1613,8 @@ def test_search_loop_concurrent_writes_a_failed_row_and_reports_failures(
                              on_step, cancel_event, actor_id,
                              scope_source_ids=None):
         if item["question_key"] == "Q02":
+            # 失败前已经走了一轮反思:这一步不能从失败行里消失(codex #700 R13 P2)。
+            on_step(types.SimpleNamespace(step_type="reflect", detail={}, duration_ms=5))
             raise ValueError("provider exploded")
         return types.SimpleNamespace(termination=None)
 
@@ -1632,11 +1636,13 @@ def test_search_loop_concurrent_writes_a_failed_row_and_reports_failures(
     assert by_key["Q02"]["status"] == "failed"
     assert by_key["Q02"]["scope_narrowed"] is None
     assert by_key["Q02"]["policy_version"] == "legacy"
+    assert by_key["Q02"]["reflect_turns"] == 1, "失败前捕获的轨迹步不该被丢成 0"
+    assert by_key["Q02"]["trace_steps"] == 1
     assert by_key["Q02"]["effort"] == "standard"
     assert by_key["Q02"]["corpus_cell"] == "A_nokg"
     assert all(by_key[k]["status"] != "failed" for k in ("Q00", "Q01", "Q03"))
     log_text = (tmp_path / "search-runs.log").read_text("utf-8")
-    assert "Q02 A_nokg legacy standard FAILED ValueError" in log_text
+    assert "Q02" in log_text and "status=failed reason=ValueError" in log_text
     assert "秘密原文" not in log_text
 
 
