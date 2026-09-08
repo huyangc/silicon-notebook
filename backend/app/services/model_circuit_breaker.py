@@ -85,7 +85,22 @@ def classify_provider_failure(error: BaseException) -> FailureKind:
     if isinstance(error, (ModelSchedulingError, CancelledError)):
         return FailureKind.IGNORED
     if isinstance(error, MalformedModelResponse):
-        return FailureKind.TRANSIENT
+        # A malformed body (empty content, bad JSON, truncation) is model
+        # *behavior*, not provider *availability*: the HTTP round trip to
+        # the service already succeeded — a real connection failure would
+        # instead surface as ConnectionError/TimeoutError/a 5xx status and
+        # is still classified TRANSIENT further down. The call site already
+        # owns this failure mode end to end (per-call retry via
+        # reasoning_max_retries, then a run-level degrade after repeated
+        # failures in reasoning_retrieval/ask_service); having the breaker
+        # also count it toward TRANSIENT_THRESHOLD double-charges the same
+        # event and, under concurrency, a handful of malformed replies alone
+        # can trip a 30s cooldown that has nothing to do with the service
+        # being down. This isinstance check must stay ahead of the
+        # `isinstance(error, ModelProviderError)` fallback below —
+        # MalformedModelResponse is one of its subclasses, so if that
+        # fallback ran first it would reclassify this back to TRANSIENT.
+        return FailureKind.IGNORED
 
     status = _status_code(error)
     if status in (401, 403):
@@ -206,6 +221,44 @@ class ServiceCircuitBreaker:
                         state=self._state, failure_kind=failure_kind
                     )
                 if failure_kind is FailureKind.IGNORED:
+                    if isinstance(error, MalformedModelResponse):
+                        # The half-open probe's whole job is to test remote
+                        # availability, and a malformed body already answers
+                        # that question: the provider round-tripped a
+                        # response, it just wasn't usable content (a model
+                        # behavior problem with its own retry/degrade path,
+                        # see classify_provider_failure above) — that is
+                        # strictly *more* evidence of availability than the
+                        # generic IGNORED case below (local scheduling
+                        # errors / cancellation, which say nothing about the
+                        # remote service either way). Treating this probe as
+                        # failed would still bounce back through "open" and
+                        # allow an immediate retry (opened_at below is left
+                        # untouched), so no user-visible request is denied
+                        # either way — but leaving it as a "failure" would
+                        # discard the consecutive-transient reset that a
+                        # closed breaker gets, and would keep charging any
+                        # later genuine connection failure against a breaker
+                        # that never got to prove itself recovered. Close it
+                        # like a real success instead.
+                        self._half_open_permit = None
+                        self._state = "closed"
+                        self._opened_at = None
+                        self._consecutive_transient = 0
+                        self._epoch += 1
+                        return BreakerTransition(
+                            state="closed", failure_kind=failure_kind, changed=True
+                        )
+                    # Other IGNORED half-open outcomes (ModelSchedulingError,
+                    # CancelledError, and anything unclassified) carry no
+                    # signal about the remote service in either direction —
+                    # unlike the malformed-response case above, they may not
+                    # even have reached the provider. Don't declare success,
+                    # but don't spend a fresh 30s cooldown either: bounce
+                    # back to "open" without resetting _opened_at (or the
+                    # epoch), so the very next admit() call finds the
+                    # cooldown already elapsed and immediately grants another
+                    # half-open probe.
                     self._half_open_permit = None
                     self._state = "open"
                     return BreakerTransition(

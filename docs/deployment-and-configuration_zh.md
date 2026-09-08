@@ -505,7 +505,8 @@ Knowhow 单行空格补全使用两个 interactive chat workload：`reasoning_ag
 - 排队截止时间固定为 interactive 30 秒、report 300 秒、background 1800 秒，
   派发前会响应取消；
 - 致命 provider 错误立即打开熔断器；连续 3 次瞬态错误也会打开。冷却 30 秒后只允许
-  1 个 half-open 恢复探针。
+  1 个 half-open 恢复探针。畸形模型回复（空正文、坏 JSON、截断）从不计入熔断——那是
+  模型行为不是 provider 可用性问题，已有自己的逐调用重试与 run 级降级路径。
 
 调度器与熔断状态只存在于进程内。生产必须只运行一个后端进程：
 `scripts/prod.sh` 固定 Uvicorn `--workers 1`。多 worker 会把声明的服务并发度成倍放大，

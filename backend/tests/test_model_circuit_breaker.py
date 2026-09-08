@@ -45,7 +45,6 @@ class StatusError(Exception):
         StatusError(429),
         StatusError(500),
         StatusError(503),
-        MalformedModelResponse("empty success payload"),
     ],
 )
 def test_transient_provider_failures_are_classified(error: Exception):
@@ -75,6 +74,7 @@ def test_fatal_provider_failures_are_classified(error: Exception):
         CancelledError(),
         ValueError("local validation"),
         RuntimeError("local persistence"),
+        MalformedModelResponse("empty success payload"),
     ],
 )
 def test_local_queue_and_cancellation_failures_do_not_affect_breaker(
@@ -119,15 +119,49 @@ def test_fatal_failure_opens_immediately():
     assert breaker.state == "open"
 
 
-def test_malformed_success_payload_uses_transient_threshold():
+def test_five_consecutive_malformed_responses_never_open_the_breaker():
+    # MalformedModelResponse (empty body, bad JSON, truncation) is model
+    # behavior, not provider availability — the call already has its own
+    # retry/degrade path (reasoning_max_retries, then a run-level degrade),
+    # so the breaker must never trip purely on repeated malformed content.
     breaker = ServiceCircuitBreaker(clock=FakeClock())
 
-    for expected_open in (False, False, True):
+    for _ in range(5):
         permit = breaker.admit()
         transition = breaker.record_failure(
             permit, MalformedModelResponse("empty payload")
         )
-        assert transition.opened is expected_open
+        assert transition.opened is False
+        assert transition.failure_kind is FailureKind.IGNORED
+    assert breaker.state == "closed"
+
+
+def test_malformed_response_does_not_advance_or_reset_the_transient_streak():
+    # A malformed reply sandwiched between real connection failures neither
+    # counts toward the transient streak nor clears it: IGNORED failures in
+    # the closed state are a pure no-op on `_consecutive_transient`, so the
+    # two ConnectionErrors still combine to trip TRANSIENT_THRESHOLD (3) on
+    # the third one.
+    breaker = ServiceCircuitBreaker(clock=FakeClock())
+
+    first = breaker.admit()
+    assert breaker.record_failure(first, ConnectionError("one")).opened is False
+
+    malformed_permit = breaker.admit()
+    malformed_transition = breaker.record_failure(
+        malformed_permit, MalformedModelResponse("empty payload")
+    )
+    assert malformed_transition.opened is False
+    assert malformed_transition.failure_kind is FailureKind.IGNORED
+    assert breaker.state == "closed"
+
+    second = breaker.admit()
+    assert breaker.record_failure(second, ConnectionError("two")).opened is False
+
+    third = breaker.admit()
+    transition = breaker.record_failure(third, ConnectionError("three"))
+    assert transition.opened is True
+    assert breaker.state == "open"
 
 
 def _open_with_transient_failures(breaker: ServiceCircuitBreaker) -> None:
@@ -161,6 +195,59 @@ def test_cooldown_admits_exactly_one_half_open_probe_and_failure_reopens():
     next_probe = breaker.admit()
     breaker.record_success(next_probe)
     assert breaker.state == "closed"
+
+
+def test_half_open_probe_with_malformed_response_closes_like_a_success():
+    # A malformed body still proves the provider round-tripped a response —
+    # more evidence of availability than the probe needs — so it closes the
+    # breaker the same way record_success would, instead of bouncing back
+    # through "open".
+    clock = FakeClock()
+    breaker = ServiceCircuitBreaker(clock=clock)
+    _open_with_transient_failures(breaker)
+    clock.advance(30)
+
+    probe = breaker.admit()
+    assert breaker.state == "half_open"
+    transition = breaker.record_failure(
+        probe, MalformedModelResponse("empty payload")
+    )
+
+    assert transition.opened is False
+    assert transition.state == "closed"
+    assert transition.failure_kind is FailureKind.IGNORED
+    assert breaker.state == "closed"
+
+    # The breaker is fully reset, not just nudged: a fresh call is admitted
+    # without going through another half-open probe/cooldown cycle.
+    fresh = breaker.admit()
+    assert fresh.half_open is False
+
+
+def test_half_open_probe_with_local_scheduling_error_reopens_for_instant_retry():
+    # A local scheduling error / cancellation during the probe says nothing
+    # about the remote service in either direction (unlike a malformed
+    # response, which at least proves connectivity), so it doesn't close the
+    # breaker — but it also doesn't spend a fresh 30s cooldown: the breaker
+    # bounces back to "open" without resetting _opened_at, so the next
+    # admit() immediately grants another half-open probe.
+    clock = FakeClock()
+    breaker = ServiceCircuitBreaker(clock=clock)
+    _open_with_transient_failures(breaker)
+    clock.advance(30)
+
+    probe = breaker.admit()
+    assert breaker.state == "half_open"
+    transition = breaker.record_failure(probe, CancelledError())
+
+    assert transition.opened is False
+    assert transition.state == "open"
+    assert transition.failure_kind is FailureKind.IGNORED
+    assert breaker.state == "open"
+
+    retry_probe = breaker.admit()
+    assert breaker.state == "half_open"
+    assert retry_probe.half_open is True
 
 
 def test_manual_probe_cannot_bypass_half_open_cooldown():
