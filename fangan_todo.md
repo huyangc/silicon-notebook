@@ -93,10 +93,14 @@
 - [ ] **reflect v2 开闸前待办**（特性 T1–T4 见 `fangan_done.md` §32，2026-09-08/09 的三条
       鲁棒性合同见 §32.1；总闸 `REASONING_REFLECT_V2_ENABLED` 默认关，设计真源
       `docs/superpowers/specs/2026-09-07-retrieval-reflect-final-design_zh.md`）：
-      (a) **T0 与真实模型 A/B 未做**——设计稿 §1.1 的离线轨迹统计脚本
-      `scripts/analyze_reasoning_trace.py`（无服务、无正文输出）与 §9.2 的真实模型 A/B 通道，
-      用户决定另行规划。仓库没有问答质量评测台，所以本期只宣称结构性与可观测性交付，
-      **开闸必须在此之后单独决定**；A/B 与 T0 应使用同一题集。
+      (a) **T0 脚本已交付，基线报告待跑**——`scripts/export_reasoning_traces.py`（只读导出
+      → 闭集投影 JSONL）、`scripts/analyze_reasoning_trace.py`（零 DB / 零模型聚合）、
+      `scripts/reflect_shadow_rig.py`（一次性测试库上的影子 run，带 `--dry-run`）与题集
+      `backend/app/eval/reflect_t0/questions.json` 已随
+      `docs/superpowers/specs/2026-09-08-reflect-t0-trace-analysis-design_zh.md` 实施；
+      **仍未做的是拿它们跑出首份基线与对照报告**（要真实模型与网络，不进 CI），以及
+      §9.2 的真实模型 A/B 通道。仓库仍没有问答质量评测台，所以本期只宣称结构性与可
+      观测性交付，**开闸必须在此之后单独决定**；A/B 与 T0 使用同一题集。
       (b) 报告侧 admitted 复核的簇折叠表仍是保守口径——同下条独立待办。
       (c) 灰名单字符串「本笔记本尚未构建知识图谱…」的界面词表违规——同下下条独立待办。
       (d) **`reasoning_retrieval.py` 的「纳入 N 个同社区实体」上屏文案含界面词表的「社区」**：
