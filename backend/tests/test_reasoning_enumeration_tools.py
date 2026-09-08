@@ -2136,3 +2136,187 @@ def test_the_roster_scope_is_a_tool_parameter_the_model_fills(repo):
     # 闸关 ⇒ 字段与那句指导一并消失。
     assert '"scope"' not in reflect_schema_hint()
     assert "enumerate.scope" not in off
+
+
+# --------------------------------------------- 集合完整性证据键(v2,§7.1)
+#
+# 真机动机(2026-09-08):目录题在 v2 下**结构上**无解。枚举条目按合同不进候选池、
+# 条目 id 对模型不可见,于是模型把一个"本库有哪些文档"的方面标成 supported 时,
+# 引什么键都会被剔掉、按 §7.1 降级 —— 服务端一边报告「已全部列出 84 条」,一边
+# 告诉合成侧「这个方面没有支撑」。签发**集合身份键**是这条边界的收窄:未完整枚举
+# 的集合身份仍然不能冒充,已完整列出的那一份则是服务端自己记下的可核对事实。
+
+def _v2(repo):
+    repo.settings.reasoning_reflect_v2_enabled = True
+    # 空手轮不该把循环提前掐断:这一节的题目是键的合法性,不是熔断。
+    repo.settings.reasoning_stale_limit = 9
+    return repo
+
+
+def _v2_enumerate(kind="formula", **extra):
+    request = {"kind": kind}
+    request.update(extra)
+    return {"next_action": "enumerate_elements", "sufficient": False,
+            "arguments": request, "reason": "列出公式"}
+
+
+def _v2_answer_citing(*keys, aspect_id="a1"):
+    return {"next_action": "answer", "sufficient": True, "arguments": {},
+            "assessment": {"supported": [
+                {"aspect_id": aspect_id, "evidence_keys": list(keys)}]},
+            "reason": "清单已列全"}
+
+
+def test_enum_evidence_key_is_the_resume_identity_field_for_field():
+    """键的构成与续跑键 `(collection, kind, source_id, local_only)` 一一对应。
+
+    一个字段都不能省:换了范围的来源清单本来就不是同一份目录,两条链共用一个键
+    会让「只列了本库」的那份完整性给「全部范围」那个方面作证。键里也不含任何用户
+    内容——它会被模型抄回来,承载文档标题等于又开一条自由文本槽位。
+
+    变异:把 `enum_evidence_key` 里的 `local` 后缀去掉 ⇒ 两条范围不同的链撞键,
+    这条红。
+    """
+    from app.models.ask import TypedCollectionCoverage
+    from app.services.reasoning_retrieval import (
+        CollectionEnumerationOutcome, enum_evidence_key,
+    )
+
+    def _outcome(**kw):
+        base = dict(collection="sources", kind="", source_id="",
+                    coverage=TypedCollectionCoverage(
+                        returned_total=2, total=2, complete=True))
+        base.update(kw)
+        return CollectionEnumerationOutcome(**base)
+
+    assert enum_evidence_key(_outcome()) == "enum:sources"
+    assert enum_evidence_key(_outcome(local_only=True)) == "enum:sources:local"
+    assert enum_evidence_key(
+        _outcome(collection="elements", kind="formula")) == "enum:elements:formula"
+    assert enum_evidence_key(
+        _outcome(source_id="s1")) == "enum:sources:src=s1"
+    # 范围不同 ⇒ 键必须不同(同一集合、同一子类型)。
+    assert enum_evidence_key(_outcome()) != enum_evidence_key(
+        _outcome(local_only=True))
+
+
+def test_only_complete_chains_get_a_key_and_get_shown(repo):
+    """`state == "complete"` 是硬判据:半份清单证明不了完整性。
+
+    `open`(还能续)与 `conflict`(枚举期间资料变了)都不签发,也都不上屏——展示
+    是 §7.1 的硬前提:合法集由服务端算,但模型只能引用**服务端真的给过它**的标识。
+
+    变异:把 `complete_enumeration_keys` 的判据放宽成「列过就算」⇒ 这条红。
+    """
+    from app.models.ask import TypedCollectionCoverage
+    from app.services.reasoning_retrieval import (
+        CollectionEnumerationOutcome, _EnumChain, complete_enumeration_keys,
+        render_collection_keys_note,
+    )
+
+    def _chain(state, **kw):
+        base = dict(collection="sources", kind="", source_id="",
+                    coverage=TypedCollectionCoverage(
+                        returned_total=84, total=84, complete=(state == "complete")))
+        base.update(kw)
+        return _EnumChain(outcome=CollectionEnumerationOutcome(**base),
+                          state=state)
+
+    chains = {
+        ("sources", "", "", False): _chain("complete"),
+        ("elements", "formula", "", False): _chain(
+            "open", collection="elements", kind="formula"),
+        ("kg_objects", "claim", "", False): _chain(
+            "conflict", collection="kg_objects", kind="claim"),
+    }
+    assert complete_enumeration_keys(chains) == {"enum:sources"}
+    note = render_collection_keys_note(chains)
+    assert "enum:sources" in note and "已完整列出 84 条" in note
+    assert "enum:elements:formula" not in note
+    assert "enum:kg_objects:claim" not in note
+    # 一条完整链都没有 ⇒ 整段不渲染(关闭态与无枚举 run 一个字都不多)。
+    assert render_collection_keys_note({}) == ""
+    assert complete_enumeration_keys(None) == set()
+
+
+def test_a_completely_listed_collection_can_support_a_roster_aspect(repo):
+    """枚举报 `complete` ⇒ 服务端签发的集合键可以支撑一个目录方面。
+
+    没有它,一个 coverage 报了 complete 的目录方面在结构上永远拿不到 supported。
+
+    变异:把 `_absorb_assessment` 里那行 `allowed |= complete_enumeration_keys(...)`
+    删掉 ⇒ 键被剔除、方面降到 partial,终态回到 `model_partial`,这条红。
+    """
+    from app.domain.retrieval_termination import TERMINATION_MODEL_SUFFICIENT
+
+    notebook = _seed(_v2(repo), formulas=3)
+    llm = _ValidatingLLM([_v2_enumerate(),
+                          _v2_answer_citing("enum:elements:formula")])
+    retriever, limits = _retriever(repo, llm)
+
+    result = retriever.run(notebook.id, "库里有哪些公式", "", limits=limits)
+
+    assert result.enumerations[0].coverage.complete is True
+    # 键真的展示给了模型:算得出却没印出来,与让模型猜 id 没有区别。
+    assert "enum:elements:formula" in llm.reflect_prompts[1]
+    aspect = result.termination.aspects[0]
+    assert aspect.status == "supported"
+    assert aspect.evidence_keys == ("enum:elements:formula",)
+    assert aspect.demotion == ""
+    assert result.termination.reason == TERMINATION_MODEL_SUFFICIENT
+
+
+def test_an_incompletely_listed_collection_signs_no_key_at_all(repo):
+    """没列完的清单不签发键,模型自己拼一个照样被剔除。
+
+    合法集是服务端算出来的那一份,**不是按前缀放行**——否则 §7.1 那条边界就只剩
+    一个可以随手伪造的字符串前缀。
+
+    变异:把 `_absorb_assessment` 的合法集换成"凡 `enum:` 开头即放行"⇒ 这条红。
+    """
+    from app.domain.retrieval_termination import TERMINATION_MODEL_PARTIAL
+    from app.domain.retrieval_termination import DEMOTION_KEYS_REJECTED
+
+    notebook = _seed(_v2(repo), formulas=5)
+    llm = _ValidatingLLM([_v2_enumerate(),
+                          _v2_answer_citing("enum:elements:formula")])
+    retriever, limits = _retriever(
+        repo, llm, limits_overrides={"enum_rows_per_run": 2})
+
+    result = retriever.run(notebook.id, "库里有哪些公式", "", limits=limits)
+
+    assert result.enumerations[0].coverage.complete is False
+    assert "enum:elements:formula" not in llm.reflect_prompts[1]
+    aspect = result.termination.aspects[0]
+    assert aspect.status != "supported"
+    assert aspect.evidence_keys == ()
+    assert aspect.demotion == DEMOTION_KEYS_REJECTED
+    assert result.termination.reason == TERMINATION_MODEL_PARTIAL
+
+
+def test_a_collection_key_is_never_counted_as_an_undelivered_evidence_key(repo):
+    """集合键不进送达账的任何一格。
+
+    它不是候选池里的一条证据,所以既不会出现在 `admitted_keys`(最终 id_map 的
+    object_id),也不会出现在 `cited_keys`(答案里的 `[k]` 锚点)。留在集合里,一个
+    **只**靠"目录已列全"支撑的方面会被恒判「未送达」——而那条支撑压根不走证据
+    预算这条路。
+
+    变异:把 `review_aspect_delivery` 里那段 `startswith(ASPECT_COLLECTION_KEY_PREFIX)`
+    过滤删掉 ⇒ `undelivered` 里冒出 a1,这条红。
+    """
+    from app.domain.retrieval_termination import AspectSnapshot, RetrievalTermination
+    from app.services.reasoning_aspects import review_aspect_delivery
+
+    termination = RetrievalTermination(
+        reason="model_sufficient",
+        aspects=(AspectSnapshot(
+            aspect_id="a1", question="本库有哪些文档", status="supported",
+            evidence_keys=("enum:sources",), model_assessed=True),),
+    )
+    delivery = review_aspect_delivery(
+        termination, admitted_keys=set(), cited_keys=set())
+    assert delivery.model_supported == ("a1",)
+    assert delivery.undelivered == ()
+    assert delivery.synthesis_admitted == ()
+    assert delivery.answer_cited == ()

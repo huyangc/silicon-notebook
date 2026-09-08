@@ -659,6 +659,37 @@ def test_reflect_passes_reasoning_timeout_and_retries(rrepo):
     assert kwargs.get("max_retries") == 3
 
 
+def test_reasoning_output_budget_is_one_number_for_plan_and_both_reflects(rrepo):
+    """规划与反思(legacy + v2)拿的是同一个 `REASONING_MAX_TOKENS`。
+
+    这一格是**部署配置不是策略**:同一个工种在两条协议上要的是同一个输出上限,
+    所以 v2 总闸关着时它照样生效——关闭态的「逐字节等价」说的是 prompt / schema /
+    trace,不含这一格预算(交付说明点名的唯一 legacy 行为变化)。
+
+    变异:把 legacy 那一路的 `reasoning_budget_kwargs(...)` 删掉 ⇒ 这条红。真机
+    动机在 §5.2:全局 8192 在思考模式下会被推理过程吃光,provider 交回一份空正文
+    而 `finish_reason=length`,harness 只能读成"模型抽风"。
+    """
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    # 默认值本身是合同的一部分:反思要的是与答案合成同档的长输出。
+    assert rrepo.settings.reasoning_max_tokens == 16384
+
+    rrepo.settings.reasoning_max_tokens = 20480
+    llm = _KwargsRecordingLLM(
+        plan={"sub_queries": [{"query": "q"}]},
+        reflect={"next_action": "answer", "sufficient": True})
+    bind_chat_client(rrepo, "reasoning_agent", llm)
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    rr.plan("问题", "")
+    rr.reflect("问题", "summary")                      # legacy(总闸默认关)
+    rrepo.settings.reasoning_reflect_v2_enabled = True
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    rr.reflect("问题", "summary")                      # v2
+    assert [kwargs.get("max_tokens") for _, kwargs in llm.calls] == [
+        20480, 20480, 20480]
+
+
 def test_plan_parses_subqueries(rrepo):
     rr = _rr_with_llm(rrepo, plan={"sub_queries": [
         {"query": "RTL综合", "types": ["claim"], "prefer": "keyword", "reason": "r"},
@@ -6857,7 +6888,12 @@ def _scope_probe_calls_for_turns(rrepo, monkeypatch, extra_turns: int) -> int:
         {"next_action": "search_elements", "sufficient": False,
          "arguments": {"query": f"元素{i}"}, "reason": "查元素"}
         for i in range(extra_turns)
-    ] + [{"next_action": "answer", "sufficient": True, "arguments": {}}]
+    ] + [{"next_action": "answer", "sufficient": True, "arguments": {},
+          # 收尾轮必须自评(§7.1):不给 assessment 会被退回并追问一轮,
+          # 这里的判据是"每轮恰好一次 reflect",多出来的那一轮会把它读花。
+          # 唯一方面是整条问题(无 intent_detail ⇒ 方面来源=问题本身)。
+          "assessment": {"unresolved": [
+              {"aspect_id": "a1", "status": "partial", "gap": "还差一半"}]}}]
     llm = _GatedV2LLM(
         plan={"sub_queries": [{"query": "布局布线步骤"}]}, reflects=reflects)
     bind_chat_client(rrepo, "reasoning_agent", llm)
@@ -9766,3 +9802,339 @@ def test_observation_status_buckets_cover_every_status_constant():
     # 断言要先红的理由:静默忽略不是安全的默认。
     assert _observation_status(_Row("brand_new_status")) == ""
     assert _observation_status(_Row("")) == ""
+
+
+# --- T5:反思鲁棒性(收尾必须自评 / 调用失败降级 / 输出预算) ----------------
+# 真机动机(2026-09-08,本机 deepseek-v4-flash):v2 的 16 个 run 全部终于
+# `model_partial`,14 个的直接原因是模型在 `answer`+`sufficient=true` 那一轮根本
+# 没填 `assessment`;同一批 run 里 118 次反思调用有 24 次正文为空,其中 6 次的
+# completion_tokens 恰好等于当时的全局 `openai_compat_max_tokens`。三条交付各自的
+# 守卫都在这一节,每条的"变异"注释指向一个具体删改。
+
+
+def _termination_skip(result) -> dict:
+    from app.services.reasoning_aspects import TERMINATION_SKIP_REASON
+    return next(step.detail for step in result.trace
+                if step.step_type == "skip"
+                and step.detail.get("reason") == TERMINATION_SKIP_REASON)
+
+
+def test_a_closing_turn_without_any_self_assessment_is_pushed_back_once(rrepo):
+    """`answer`+`sufficient=true` 却一个方面都没自评 ⇒ 退回一轮并逐个 id 追问。
+
+    不退回的话,同一份决定在两处给出互相矛盾的读数:模型说"够了",而方面账一格
+    都没更新、必答清单上全是 unknown,`classify_termination` 据后者判
+    `model_partial`,合成 prompt 于是恒挂一句与检索成色无关的「仍有方面没有完整
+    支撑」。这正是实测里 16/16 的形状。
+
+    变异:把 `_nudge_missing_assessment` 的 `note_missing_assessment()` 调用删掉
+    (直接 `return decision`)⇒ 追问轮消失,终态退回 `model_partial`,这条红。
+    """
+    from app.domain.retrieval_termination import TERMINATION_MODEL_SUFFICIENT
+    from app.services.reasoning_aspects import ASPECT_ASSESSMENT_NUDGE
+
+    llm, result = _v2_aspect_run(
+        rrepo,
+        intent_detail={"mandatory_topics": ["问题一", "问题二"]},
+        reflects=[
+            _answer(),                                     # 空手收尾 ⇒ 被退回
+            _answer(assessment={"supported": [
+                {"aspect_id": "a1", "evidence_keys": ["ck-q0"]},
+                {"aspect_id": "a2", "evidence_keys": ["ck-q0"]}]}),
+        ],
+    )
+    assert "missing_assessment" in _skip_reasons(result)
+    # 追问**指名道姓**列出方面 id:上一轮已经证明系统段里那句泛泛的要求不够。
+    nudge = ASPECT_ASSESSMENT_NUDGE.format(ids="a1、a2")
+    assert nudge not in llm.user_prompts[0]
+    assert nudge in llm.user_prompts[1]
+    assert result.termination.reason == TERMINATION_MODEL_SUFFICIENT
+    assert _termination_skip(result)["aspects_assessment_omitted"] == 0
+
+
+def test_a_second_silent_closing_turn_is_accepted_and_recorded_as_omitted(rrepo):
+    """追问一次就够:第二次仍然空着 ⇒ 照原样收尾,并如实记下"问过了、它不给"。
+
+    追问第二次要花的是模型不合作时的真金白银(一轮反思调用 + 一步预算),而它换
+    不回新的信息。`assessment_omitted` 与 `model_assessed=False` 刻意分开:后者
+    可能只是 run 早早被熔断/预算收尾,模型根本没走到收尾那一步。
+
+    变异:把 `REFLECT_ASSESSMENT_MAX_PROMPTS` 调到 2 ⇒ 追问轮多一轮,
+    `assessment_omitted` 在这条构造下拿不到,这条红。
+    """
+    from app.domain.retrieval_termination import TERMINATION_MODEL_PARTIAL
+    from app.services.reasoning_aspects import ASPECT_ASSESSMENT_NUDGE
+
+    llm, result = _v2_aspect_run(
+        rrepo,
+        intent_detail={"mandatory_topics": ["问题一"]},
+        reflects=[_answer(), _answer()],
+    )
+    assert _skip_reasons(result).count("missing_assessment") == 1
+    assert result.termination.reason == TERMINATION_MODEL_PARTIAL
+    assert result.termination.unresolved_aspect_ids == ("a1",)
+    assert [row.assessment_omitted for row in result.termination.aspects] == [
+        True]
+    assert _termination_skip(result)["aspects_assessment_omitted"] == 1
+    # 放弃之后不再挂追问:那一轮已经是最后一轮,再要它"下次补上"是对着一个不会
+    # 再来的回合说话。
+    assert ASPECT_ASSESSMENT_NUDGE.format(ids="a1") in llm.user_prompts[1]
+
+
+def test_a_partial_close_that_admits_the_gap_is_never_pushed_back(rrepo):
+    """`sufficient=false` 的收尾不强制自评:它本来就是"我知道还差东西"。
+
+    退回它只是白扣一步——一张全是 unknown 的方面账与这句话并不矛盾。
+
+    变异:把 `_nudge_missing_assessment` 的 `sufficient is not True` 判据删掉
+    ⇒ 这条红。
+    """
+    _, result = _v2_aspect_run(
+        rrepo,
+        intent_detail={"mandatory_topics": ["问题一"]},
+        reflects=[{"next_action": "answer", "sufficient": False,
+                   "arguments": {}, "reason": "先答一半"}],
+    )
+    assert "missing_assessment" not in _skip_reasons(result)
+    assert [row.assessment_omitted for row in result.termination.aspects] == [
+        False]
+
+
+def test_missing_assessment_is_an_invalid_zero_io_observation():
+    """`missing_assessment` 落 invalid(载荷不成立、零 I/O),不是 unavailable。
+
+    通道好好的,是这一份载荷不成立;记成 unavailable 会让下游把它读成"这条路今天
+    走不通",而它下一轮就该被原样再走一次。
+    """
+    from app.services.reasoning_observation import STATUS_INVALID, status_for_skip
+    assert status_for_skip("missing_assessment") == STATUS_INVALID
+
+
+# ---- 3c:一轮反思失败不再终止整次检索 ----------------------------------------
+
+class _FlakyReflectLLM(_V2ContextLLM):
+    """按轮次注入反思调用故障;并留存每次调用拿到的 `max_tokens`。
+
+    故障形状照抄生产:`ScheduledJsonChatClient` 在传输层解析失败时抛的是
+    `MalformedModelResponse(finish_reason=…) from ModelJsonRepairError`,而空正文
+    的 `reason` 正是 `parse_model_json_object` 自己给的 `"empty"`。直接抛一个裸
+    `RuntimeError` 的替身测不到 `_reflect_fallback_reason` 那条 `__cause__` 链。
+    """
+
+    #: 与 `OpenAICompatibleClient` / `ScheduledJsonChatClient` 同一格声明:反思层
+    #: 只对自己说支持的客户端传 `call_stats` 出参。
+    supports_call_stats = True
+
+    def __init__(self, plan, reflects, *, fail_calls=(), finish_reason="length"):
+        super().__init__(plan, reflects)
+        self._fail_calls = set(fail_calls)
+        self._finish_reason = finish_reason
+        self.reflect_calls = 0
+        self.max_tokens: list = []
+
+    def chat_json(self, messages, schema_hint, **kwargs):
+        from app.core.model_json import (
+            ModelJsonRepairError, parse_model_json_object,
+        )
+        from app.services.model_work import MalformedModelResponse
+
+        if "sub_queries" in schema_hint:
+            return super().chat_json(messages, schema_hint, **kwargs)
+        self.reflect_calls += 1
+        self.max_tokens.append(kwargs.get("max_tokens"))
+        if self.reflect_calls in self._fail_calls:
+            stats = kwargs.get("call_stats")
+            if stats is not None:
+                stats["finish_reason"] = self._finish_reason
+            try:
+                parse_model_json_object("", schema_hint, allow_repair=True)
+            except ModelJsonRepairError as exc:
+                raise MalformedModelResponse(
+                    finish_reason=self._finish_reason) from exc
+            raise AssertionError("空正文必须被传输层判 empty")
+        return super().chat_json(messages, schema_hint, **kwargs)
+
+
+def _flaky_run(rrepo, *, reflects, fail_calls, finish_reason="length", **extra):
+    llm = _FlakyReflectLLM(
+        plan={"sub_queries": [{"query": "完整问题"}]}, reflects=list(reflects),
+        fail_calls=fail_calls, finish_reason=finish_reason)
+    return _v2_aspect_run(
+        rrepo, intent_detail={"mandatory_topics": ["问题一"]}, llm=llm, **extra)
+
+
+def test_one_failed_reflect_turn_does_not_throw_away_the_whole_retrieval(rrepo):
+    """单轮反思失败 ⇒ 一条零 I/O 的降级观察 + 继续下一轮,而不是当场收尾。
+
+    接入前一次抖动就把整次检索砍掉,**已经到手的证据与刚播下的方向全部作废**,
+    而结果与"模型看着证据决定停下"在终态上无法区分。
+
+    变异:把 `_survive_reflect_failure` 里 `< REFLECT_MAX_CONSECUTIVE_FAILURES`
+    的那一段删掉(失败即原样交回兜底决定)⇒ 终态变回 `model_degraded`,这条红。
+    """
+    from app.domain.retrieval_termination import TERMINATION_MODEL_SUFFICIENT
+
+    llm, result = _flaky_run(
+        rrepo,
+        # 只有第一轮那一次调用炸(`stop` 不是预算问题 ⇒ 不触发同轮加预算重试,
+        # 所以"第 1 次调用"就是"第 1 轮")。
+        fail_calls=(1,),
+        finish_reason="stop",
+        reflects=[_answer(assessment={"supported": [
+            {"aspect_id": "a1", "evidence_keys": ["ck-q0"]}]})],
+    )
+    degraded = [r for r in _skip_reasons(result) if r.startswith("model_degraded:")]
+    # 3d:失败原因码逐字进观察账那一行,模型据此知道下一轮该怎么改。
+    assert degraded == ["model_degraded:empty"]
+    # 一次已经恢复了的抖动不该把终态写成 degraded。
+    assert result.termination.reason == TERMINATION_MODEL_SUFFICIENT
+    assert result.termination.model_assessed_sufficient is True
+
+
+def test_two_consecutive_failed_reflect_turns_close_the_run_degraded(rrepo):
+    """连着两轮失败 = 这条模型通道塌了 ⇒ 按既有 fail-open 收尾,终态 degraded。
+
+    首轮同样适用:首轮没有任何豁免理由,那时作废的东西反而最多。
+
+    变异:把 `REFLECT_MAX_CONSECUTIVE_FAILURES` 调到 3(或让计数永不清零)⇒
+    这条红。
+    """
+    from app.domain.retrieval_termination import TERMINATION_MODEL_DEGRADED
+
+    llm, result = _flaky_run(
+        rrepo, fail_calls=(1, 2), finish_reason="stop", reflects=[])
+    assert result.termination.reason == TERMINATION_MODEL_DEGRADED
+    assert result.termination.model_assessed_sufficient is False
+    # 第一轮折成观察继续,第二轮才收尾:两轮各一次调用。
+    assert llm.reflect_calls == 2
+
+
+def test_a_recovered_turn_resets_the_consecutive_failure_count(rrepo):
+    """中间任何一轮成功都清零:计数问的是"通道是不是塌了",不是"抖过几次"。
+
+    变异:把 `_survive_reflect_failure` 里成功路径上的 `state.reflect_failures = 0`
+    删掉 ⇒ 两次相隔很远、各自都恢复了的抖动被读成通道塌了,这条红。
+    """
+    from app.domain.retrieval_termination import TERMINATION_MODEL_SUFFICIENT
+
+    llm, result = _flaky_run(
+        rrepo,
+        fail_calls=(1, 3),                 # 第 1 轮炸、第 2 轮成、第 3 轮炸
+        finish_reason="stop",
+        reflects=[
+            {"next_action": "search_chunks", "sufficient": False,
+             "arguments": {"query": "方向甲"}, "reason": "补一刀"},
+            _answer(assessment={"supported": [
+                {"aspect_id": "a1", "evidence_keys": ["ck-q0"]}]}),
+        ],
+        chunk_results={"完整问题": [_chunk_hit("ck-q0")],
+                       "方向甲": [_chunk_hit("ck-a1")]},
+    )
+    assert [r for r in _skip_reasons(result)
+            if r.startswith("model_degraded:")] == [
+        "model_degraded:empty", "model_degraded:empty"]
+    assert result.termination.reason == TERMINATION_MODEL_SUFFICIENT
+
+
+def test_model_degraded_observations_are_failed_not_invalid():
+    """降级观察落 `failed`:载荷没有不成立——**根本没有载荷**,是调用炸了。"""
+    from app.services.reasoning_observation import STATUS_FAILED, status_for_skip
+    assert status_for_skip("model_degraded:empty") == STATUS_FAILED
+    assert status_for_skip(
+        "model_degraded:output_budget_exhausted") == STATUS_FAILED
+
+
+# ---- 3a/3b:finish_reason 与打满预算之后的同轮重试 ---------------------------
+
+def test_empty_body_with_finish_reason_length_is_a_budget_code_not_empty():
+    """空正文的两类失败必须分得开:补救方向正好相反。
+
+    `empty` + `length` = 这次的输出预算被吃光了(加预算);`empty` + 别的 =
+    模型交了白卷(重试/换问法)。两者共用一个 `empty` 码,harness 就无从选择。
+
+    变异:把 `_reflect_fallback_reason` 里那两行 `finish_reason` 判据删掉 ⇒ 红。
+    """
+    from app.core.model_json import ModelJsonRepairError
+    from app.services.model_work import MalformedModelResponse
+    from app.services.reasoning_retrieval import (
+        REFLECT_OUTPUT_BUDGET_EXHAUSTED, _reflect_fallback_reason,
+    )
+
+    def _boom(finish_reason):
+        """生产的形状:传输层把 `ModelJsonRepairError` 重抛成
+        `MalformedModelResponse`,真正有用的 `.reason` 挂在 `__cause__` 上。"""
+        try:
+            try:
+                raise ModelJsonRepairError("empty")
+            except ModelJsonRepairError as cause:
+                raise MalformedModelResponse(
+                    finish_reason=finish_reason) from cause
+        except MalformedModelResponse as exc:
+            return exc
+
+    exc = _boom("length")
+    assert exc.finish_reason == "length"
+    assert _reflect_fallback_reason(exc, "length") == (
+        REFLECT_OUTPUT_BUDGET_EXHAUSTED)
+    assert _reflect_fallback_reason(exc, "stop") == "empty"
+    # 拿不到 finish_reason 的调用方(legacy、不声明 call_stats 的替身)退回接入前
+    # 的行为,不因为"不知道"就猜一个预算问题。
+    assert _reflect_fallback_reason(exc) == "empty"
+
+
+def test_a_budget_truncated_reflect_call_retries_once_with_a_doubled_budget(
+    rrepo,
+):
+    """打满输出预算 ⇒ 同一轮里原样再调一次、预算翻倍;成功就当无事发生。
+
+    倍数落在**同一个配置数**上:一次部署把 `REASONING_MAX_TOKENS` 调高的决定,
+    重试要跟着走,而不是撞上一堵单独钉死的墙。
+
+    变异:把 `_reflect_v2` 里那个 `REFLECT_OUTPUT_BUDGET_EXHAUSTED` 分支删掉 ⇒
+    这一轮直接降级,`max_tokens` 只有一格,这条红。
+    """
+    from app.domain.retrieval_termination import TERMINATION_MODEL_SUFFICIENT
+
+    rrepo.settings.reasoning_max_tokens = 4096
+    llm, result = _flaky_run(
+        rrepo, fail_calls=(1,), finish_reason="length",
+        reflects=[_answer(assessment={"supported": [
+            {"aspect_id": "a1", "evidence_keys": ["ck-q0"]}]})],
+    )
+    # 同一轮两次调用:原值 + 翻倍。第二次成功 ⇒ 一条降级观察都不该有。
+    assert llm.max_tokens == [4096, 8192]
+    assert [r for r in _skip_reasons(result)
+            if r.startswith("model_degraded:")] == []
+    assert result.termination.reason == TERMINATION_MODEL_SUFFICIENT
+
+
+def test_a_reflect_client_that_does_not_report_finish_reason_keeps_old_behaviour(
+    rrepo,
+):
+    """不声明 `supports_call_stats` 的客户端:一个签名都不用改,行为回到接入前。
+
+    判据用显式类属性而不是签名反射:一个写了 `**kwargs` 的替身会被反射认成
+    "支持",于是 sink 恒为空、加预算重试永不触发,而没有任何一条用例会红。
+
+    变异:把 `_call_stats_kwargs` 改成无条件传 ⇒ 这个替身的 `chat_json` 会收到
+    一个它没声明的 `call_stats`(这里靠 `**kwargs` 吞掉),但 sink 永远空着,
+    下面 `max_tokens` 只有一格的断言仍然成立——所以真正被这条守住的是**反过来**
+    那半:把判据换成 `inspect.signature` 探测 ⇒ 替身被认成支持、sink 仍然空、
+    重试仍然不触发,而 `_FlakyReflectLLM` 那条用例还绿。两条合起来才是闭集。
+    """
+    class _MuteLLM(_FlakyReflectLLM):
+        supports_call_stats = False
+
+        def chat_json(self, messages, schema_hint, **kwargs):
+            assert "call_stats" not in kwargs
+            return super().chat_json(messages, schema_hint, **kwargs)
+
+    rrepo.settings.reasoning_max_tokens = 4096
+    llm = _MuteLLM(plan={"sub_queries": [{"query": "完整问题"}]},
+                   reflects=[], fail_calls=(1, 2), finish_reason="length")
+    _, result = _v2_aspect_run(
+        rrepo, intent_detail={"mandatory_topics": ["问题一"]}, llm=llm)
+    # 拿不到 finish_reason ⇒ 空正文一律记 `empty`,不触发加预算重试。
+    assert llm.max_tokens == [4096, 4096]
+    assert [r for r in _skip_reasons(result)
+            if r.startswith("model_degraded:")] == ["model_degraded:empty"]

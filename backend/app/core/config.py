@@ -1112,6 +1112,20 @@ class Settings(BaseSettings):
     # 的全局 openai_compat_* 解耦：单步更短超时 + 更少重试，避免卡死时久等。
     reasoning_timeout_seconds: int = Field(90, validation_alias="REASONING_TIMEOUT_SECONDS")
     reasoning_max_retries: int = Field(1, validation_alias="REASONING_MAX_RETRIES")
+    # 逐步推理(规划 + 每一轮反思)的单次输出上限。与 `answer_max_tokens` 同款:
+    # 一个**输出更长的工种**从全局默认里分出来,而不是把全局调高。
+    # ⚠ 它是部署配置,不是策略——legacy 与 v2 反思走同一个数,关掉
+    # `REASONING_REFLECT_V2_ENABLED` 也照样生效。
+    # 默认取 16384 而不是 `openai_compat_max_tokens` 的 8192:2026-09-08 本机
+    # deepseek-v4-flash 实测,思考模式下 118 次反思调用有 6 次的 completion_tokens
+    # 恰好等于 8192——推理过程把输出预算吃光,最终 JSON 一个 token 都没轮到,
+    # 客户端只看到一份空正文。给反思一个与答案合成同档的上限,是把这一类失败
+    # 从"模型抽风"还原成"预算不够"。
+    # ge=1:0 在 `openai_compat_max_tokens` 那里的语义是"不传、随服务端默认",
+    # 而这里的存在理由就是**显式**要一个更高的上限,再留一个"其实不生效"的取值
+    # 只会让一次误配静默退回 8192。
+    reasoning_max_tokens: int = Field(
+        16384, ge=1, validation_alias="REASONING_MAX_TOKENS")
     # Global 问答:map-reduce 时纳入的社区报告上限(按 size 取前 N)。
     global_max_communities: int = Field(20, validation_alias="GLOBAL_MAX_COMMUNITIES")
     # 问题感知证据精炼: 默认开启(隔离 eval: 正确性 1.57→1.73 且伪引用全层→0%;

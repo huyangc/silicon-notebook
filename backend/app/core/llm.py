@@ -151,6 +151,26 @@ def _response_validator_allows(
         return False
 
 
+def budget_kwargs(
+    settings: Any, attr: str, *, multiplier: int = 1
+) -> Dict[str, Any]:
+    """Splat helper for a per-call max_tokens override read straight off a
+    Settings-like object. Returns ``{"max_tokens": N * multiplier}`` for a
+    positive integer budget ``attr``, else ``{}`` (fall back to chat_json's own
+    default).
+
+    Split out of ``cap_kwargs`` because a caller does not always reach its budget
+    through a client: the reasoning retriever owns the ``Settings`` itself and its
+    reflect client may be an offline stub carrying none. ``multiplier`` serves the
+    one retry that asks for a bigger budget after a completion the provider cut
+    off at max_tokens — a factor on the SAME configured number, so a deployment
+    that raises the budget raises the retry with it instead of the retry drifting
+    onto a second hard-coded ceiling."""
+    value = getattr(settings, attr, None) if settings is not None else None
+    return ({"max_tokens": value * multiplier}
+            if isinstance(value, int) and value > 0 else {})
+
+
 def cap_kwargs(client: Any, attr: str) -> Dict[str, Any]:
     """Splat helper for a per-call max_tokens override. Returns
     ``{"max_tokens": N}`` read from the client's Settings budget ``attr`` (e.g.
@@ -159,12 +179,34 @@ def cap_kwargs(client: Any, attr: str) -> Dict[str, Any]:
     synthesis / KG extraction can request a higher cap than the global default
     without breaking duck-typed clients that don't accept the kwarg. A non-positive
     budget also yields ``{}`` (fall back to chat_json's own default)."""
-    settings = getattr(client, "settings", None)
-    value = getattr(settings, attr, None) if settings is not None else None
-    return {"max_tokens": value} if isinstance(value, int) and value > 0 else {}
+    return budget_kwargs(getattr(client, "settings", None), attr)
+
+
+#: Name of the optional OUT-parameter a caller may pass to ``chat_json`` to get
+#: this call's provider-side outcome back. The value is a caller-owned mutable
+#: mapping; ``chat_json`` writes ``finish_reason`` into it before returning.
+#:
+#: It exists because ``chat_json`` returns a plain ``str``: an empty completion
+#: and a completion the server cut off at ``max_tokens`` arrive as the SAME empty
+#: string, and the only thing that tells them apart — ``finish_reason`` — dies
+#: inside this function. Downstream that difference decides the remedy (retry
+#: with a larger budget vs. treat the model as having produced nothing), so a
+#: caller that wants to act on it needs the value, not just a log line.
+#:
+#: Spelled as a constant so the reflect layer's splat helper and this signature
+#: cannot drift. Callers that do not pass it are byte-for-byte unaffected.
+CALL_STATS_KWARG = "call_stats"
 
 
 class OpenAICompatibleClient:
+    #: This client honours the ``call_stats`` out-parameter (see
+    #: ``CALL_STATS_KWARG``). Declared as a class attribute rather than left to
+    #: signature reflection: a duck-typed double that spells ``**kwargs`` would
+    #: pass a signature probe while silently never filling the sink, and nothing
+    #: downstream would fail — it would just quietly stop distinguishing a
+    #: budget-truncated reply from an empty one.
+    supports_call_stats = True
+
     def __init__(self, settings: Settings, *, base_url: Optional[str] = None,
                  api_key: Optional[str] = None, model: Optional[str] = None,
                  max_retries: Optional[int] = None,
@@ -310,6 +352,7 @@ class OpenAICompatibleClient:
         thinking_mode: Optional[
             Literal["enabled", "disabled"]
         ] = None,
+        call_stats: Optional[Dict[str, Any]] = None,
     ) -> str:
         if not self.configured:
             raise RuntimeError("OpenAI-compatible LLM settings are not configured")
@@ -515,6 +558,14 @@ class OpenAICompatibleClient:
                 finish_reason = getattr(choice, "finish_reason", None)
                 content = strip_json_fences(choice.message.content or "")
                 usage = _usage_dict(response)
+            # Hand the provider-side outcome back to a caller that asked for it
+            # (see CALL_STATS_KWARG), and record it either way. Without it an
+            # empty completion and one the server cut off at max_tokens are the
+            # same empty string everywhere downstream, and llm.jsonl cannot tell
+            # a token-budget truncation from a model that returned nothing.
+            record["finish_reason"] = finish_reason or ""
+            if call_stats is not None:
+                call_stats["finish_reason"] = finish_reason or ""
             # Best-effort write, and only of a reply that is actually usable —
             # the empty "{}" fallback, unparseable JSON and budget-truncated
             # completions are all excluded (see is_cacheable_llm_response for
