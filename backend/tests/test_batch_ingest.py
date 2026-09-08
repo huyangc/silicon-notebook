@@ -64,6 +64,40 @@ def repo(tmp_path, monkeypatch):
     return r
 
 
+_TERMINATION_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+
+
+@pytest.fixture
+def termination_signals():
+    """Snapshot SIGINT/SIGTERM/SIGHUP and put them back on teardown.
+
+    Signal dispositions are process-global, and pytest-xdist reuses one worker
+    process for many tests, so any test that touches them must (a) establish
+    its own precondition rather than trusting whatever the process inherited
+    and (b) restore what it found. The inherited state is not neutral:
+    ``bash scripts/check.sh`` backgrounds each lane with ``&`` from a
+    non-interactive shell, which makes SIGINT SIG_IGN, and running the gate
+    under ``nohup``/a detached harness makes SIGHUP SIG_IGN. Since
+    ``_install_termination_signals`` deliberately leaves ignored signals
+    ignored, a test asserting "a handler got installed" must first make the
+    signal not-ignored. Returns a setter so the test's precondition is also
+    undone by the same teardown.
+    """
+    previous = {signum: signal.getsignal(signum) for signum in _TERMINATION_SIGNALS}
+
+    def _set(signum, handler):
+        assert signum in previous
+        signal.signal(signum, handler)
+
+    try:
+        yield _set
+    finally:
+        for signum, handler in previous.items():
+            if handler is None:  # pragma: no cover - C-installed handler; unrestorable
+                continue
+            signal.signal(signum, handler)
+
+
 def _make_md_dir(tmp_path, n=2):
     d = tmp_path / "docs"
     (d / "sub").mkdir(parents=True)
@@ -393,7 +427,7 @@ def test_report_already_running_still_prints_paths_when_details_unreadable(
 
 
 def test_main_interrupt_exits_cleanly_with_shell_convention(
-    repo, monkeypatch, capsys
+    repo, monkeypatch, capsys, termination_signals
 ):
     """Ctrl-C 不该以 traceback 收场;收尾在被中断的那层完成,这里只给 130。
     顺带钉住会排空的那条路径(build_notebook_kg)确实被终止信号转换包住了,并在
@@ -401,7 +435,7 @@ def test_main_interrupt_exits_cleanly_with_shell_convention(
     nb_id = bi.ensure_notebook(repo, None, "nb")
     bind_chat_client(repo, "kg_extract", _StubLLM())
     during = {}
-    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    termination_signals(signal.SIGTERM, signal.SIG_DFL)
 
     def _interrupt(nb, **_kwargs):
         during["sigterm"] = signal.getsignal(signal.SIGTERM)
@@ -419,13 +453,19 @@ def test_main_interrupt_exits_cleanly_with_shell_convention(
 
 
 def test_limited_kg_uses_durable_termination_signals(
-    repo, monkeypatch, capsys
+    repo, monkeypatch, capsys, termination_signals
 ):
-    """limit 分支也必须进入 durable job，因而使用同一终止信号协议。"""
+    """limit 分支也必须进入 durable job，因而使用同一终止信号协议。
+
+    SIGHUP 是这里的关键:``_install_termination_signals`` 对已忽略的信号保持忽略,
+    而 ``nohup``/后台 harness 会让整棵 pytest 进程树继承 SIGHUP=SIG_IGN,所以必须
+    先把它置回 SIG_DFL,否则"装上了 handler"这条断言取决于启动环境而非被测代码。
+    """
     nb_id = bi.ensure_notebook(repo, None, "nb")
     bind_chat_client(repo, "kg_extract", _StubLLM())
     bind_chat_client(repo, "kg_extract", _StubKgChatClient())
-    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    termination_signals(signal.SIGTERM, signal.SIG_DFL)
+    termination_signals(signal.SIGHUP, signal.SIG_DFL)
     observed = {}
 
     def _build(_notebook_id, **_kwargs):
@@ -443,6 +483,7 @@ def test_limited_kg_uses_durable_termination_signals(
     assert callable(observed["sigterm"])
     assert callable(observed["sighup"])
     assert signal.getsignal(signal.SIGTERM) is signal.SIG_DFL
+    assert signal.getsignal(signal.SIGHUP) is signal.SIG_DFL
 
 
 def test_limited_kg_interrupt_cancels_and_drains_accepted_workers(
@@ -629,47 +670,47 @@ def test_main_interrupt_after_a_committed_build_still_reports_130(
     assert "已中断" in capsys.readouterr().err
 
 
-def test_install_termination_signals_converts_once_absorbs_repeats_and_restores():
-    previous_sigint = signal.getsignal(signal.SIGINT)
-    # pytest-xdist workers may inherit SIGINT=SIG_IGN from their controller.
-    # Establish the callable precondition this test exercises, then restore the
-    # worker's original state so ignored-signal preservation remains intact.
-    signal.signal(signal.SIGINT, signal.default_int_handler)
+def test_install_termination_signals_converts_once_absorbs_repeats_and_restores(
+    termination_signals,
+):
+    # The worker may inherit SIGINT=SIG_IGN (backgrounded lane) and
+    # SIGTERM/SIGHUP in any state; establish the exact preconditions this test
+    # exercises and let the fixture restore whatever the process started with.
+    termination_signals(signal.SIGINT, signal.default_int_handler)
+    termination_signals(signal.SIGTERM, signal.SIG_DFL)
+    termination_signals(signal.SIGHUP, signal.SIG_DFL)
+    saved = bi._install_termination_signals()
     try:
-        saved = bi._install_termination_signals()
-        try:
-            assert signal.SIGTERM in [signum for signum, _ in saved]
-            handler = signal.getsignal(signal.SIGTERM)
-            assert callable(handler)
-            with pytest.raises(KeyboardInterrupt):
-                handler(signal.SIGTERM, None)
+        assert sorted(signum for signum, _ in saved) == sorted(
+            int(signum) for signum in _TERMINATION_SIGNALS
+        )
+        handler = signal.getsignal(signal.SIGTERM)
+        assert callable(handler)
+        with pytest.raises(KeyboardInterrupt):
             handler(signal.SIGTERM, None)
-            sigint_handler = signal.getsignal(signal.SIGINT)
-            assert callable(sigint_handler)
-            sigint_handler(signal.SIGINT, None)
-        finally:
-            bi._restore_signals(saved)
-        assert signal.getsignal(signal.SIGTERM) is signal.SIG_DFL
-        assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
+        handler(signal.SIGTERM, None)
+        sigint_handler = signal.getsignal(signal.SIGINT)
+        assert callable(sigint_handler)
+        sigint_handler(signal.SIGINT, None)
     finally:
-        signal.signal(signal.SIGINT, previous_sigint)
-    assert signal.getsignal(signal.SIGINT) is previous_sigint
+        bi._restore_signals(saved)
+    assert signal.getsignal(signal.SIGTERM) is signal.SIG_DFL
+    assert signal.getsignal(signal.SIGHUP) is signal.SIG_DFL
+    assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
 
 
-def test_install_termination_signals_keeps_ignored_sighup_ignored():
+def test_install_termination_signals_keeps_ignored_sighup_ignored(
+    termination_signals,
+):
     """`nohup` 把 SIGHUP 置为 SIG_IGN;抢回来会让本来能扛住 SSH 掉线的长跑批处理
     在断连时被杀掉,所以已忽略的信号必须保持忽略。"""
-    previous = signal.getsignal(signal.SIGHUP)
-    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    termination_signals(signal.SIGHUP, signal.SIG_IGN)
+    saved = bi._install_termination_signals()
     try:
-        saved = bi._install_termination_signals()
-        try:
-            assert signal.SIGHUP not in [signum for signum, _ in saved]
-            assert signal.getsignal(signal.SIGHUP) is signal.SIG_IGN
-        finally:
-            bi._restore_signals(saved)
+        assert signal.SIGHUP not in [signum for signum, _ in saved]
+        assert signal.getsignal(signal.SIGHUP) is signal.SIG_IGN
     finally:
-        signal.signal(signal.SIGHUP, previous)
+        bi._restore_signals(saved)
 
 
 def test_install_termination_signals_noop_off_the_main_thread():
