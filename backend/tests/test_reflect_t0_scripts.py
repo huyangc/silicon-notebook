@@ -449,14 +449,27 @@ def test_admin_targets_same_server_compares_live_identity_not_forwarded_port():
     admin = "postgresql://127.0.0.1:15432/postgres"
     db = "postgresql://127.0.0.1:15432/silicon_notebook_t0_test"
 
-    same = {admin: ("system_identifier", 7), db: ("system_identifier", 7)}
+    def ident(sysid, endpoint=("10.0.0.5", 5432)):
+        return {"system_identifier": sysid, "server_endpoint": endpoint}
+
+    same = {admin: ident(7), db: ident(7)}
     ok, reason = rig._admin_targets_same_server(admin, db, identity=same.get)
     assert ok is True and reason == ""
 
-    other = {admin: ("system_identifier", 7), db: ("system_identifier", 8)}
+    other = {admin: ident(7), db: ident(8)}
     ok, reason = rig._admin_targets_same_server(admin, db, identity=other.get)
     assert ok is False
     assert "不是同一台服务器" in reason
+
+    # 混合权限(codex #700 R9 P2):admin 是超级用户读得到 system_identifier,
+    # database 角色读不到——同一台服务器要按两边都有的尺(服务端 addr:port)比,
+    # 不能因为表示形不同就拒。
+    mixed_same = {admin: ident(7), db: ident(None)}
+    ok, reason = rig._admin_targets_same_server(admin, db, identity=mixed_same.get)
+    assert ok is True, reason
+    mixed_other = {admin: ident(7), db: ident(None, ("10.0.0.6", 5432))}
+    ok, reason = rig._admin_targets_same_server(admin, db, identity=mixed_other.get)
+    assert ok is False
 
 
 # --- 日志脱敏(codex #700 R1 P2) ---------------------------------------------
@@ -590,7 +603,7 @@ def test_ask_answers_required_ambiguities_before_streaming(tmp_path, monkeypatch
 
     def fake_stream(self, method, url, *, json_body, **kwargs):
         submitted.append(json_body)
-        return {}
+        return {"event": "final"}
 
     monkeypatch.setattr(rig.Runner, "http", fake_http)
     monkeypatch.setattr(rig.Runner, "stream", fake_stream)
@@ -605,6 +618,31 @@ def test_ask_answers_required_ambiguities_before_streaming(tmp_path, monkeypatch
 
 
 # --- 导出(SQLite 侧) ------------------------------------------------------
+
+
+def test_ask_counts_runs_without_a_final_frame_as_failures(tmp_path, monkeypatch, capsys):
+    """执行阶段失败/取消走 HTTP 200 里的 `event="error"`/`"cancelled"` 帧;只看
+    标签落库只证明 job 建了,整批全失败也会退出码 0(codex #700 R9 P2)。终帧不是
+    `final` 的 run 计失败、整批退出码 1;日志只记事件名,不记 error 正文。"""
+    out_dir = tmp_path / "t0"
+    out_dir.mkdir()
+    (out_dir / "rig-state.json").write_text(json.dumps({
+        "policy": "legacy", "token": "tok", "notebooks": {"A_nokg": "nb-a"},
+    }), encoding="utf-8")
+    monkeypatch.setattr(rig.Runner, "http", lambda self, *a, **k: None)
+    monkeypatch.setattr(
+        rig.Runner, "stream",
+        lambda self, *a, **k: {"event": "error", "error": "秘密错误正文 RuntimeError"},
+    )
+    monkeypatch.setattr(rig, "_assert_tag_landed", lambda *a, **k: None)
+
+    rc = rig.main([
+        "--out-dir", str(out_dir), "--limit", "1", "--cell", "A_nokg", "ask",
+    ])
+    out = capsys.readouterr()
+    assert rc == 1
+    assert "terminal event=error" in out.out
+    assert "秘密错误正文" not in out.out and "秘密错误正文" not in out.err
 
 
 def _sqlite_fixture(path: Path) -> None:
@@ -1151,6 +1189,36 @@ def test_search_loop_marks_unresolved_scope_failed_without_calling_run_search_on
     assert row["question_key"] == "A-q01"
 
 
+def test_failed_run_row_keeps_the_requested_policy_and_loops_count_it(
+    rrepo, tmp_path, monkeypatch,
+):
+    """空轨迹会被 `project_search_run` 推成 legacy,v2 的失败 run 就进了 legacy
+    那一列(codex #700 R9 P2):失败行 `policy_version` 按 rig 声明的策略;串行
+    循环把 `status=failed` 的行计进返回的失败数(并发循环见
+    `test_search_loop_concurrent_writes_a_failed_row_and_reports_failures`)。"""
+    fact = {"notebook": "nb", "sources": 1, "kg_in_scope": False}
+    item = {"question_key": "B-q09", "corpus_cell": "B_kg", "policy": "v2",
+            "effort": "deep", "question": "q"}
+    assert rig._failed_run_row(item, fact)["policy_version"] == "v2"
+
+    notebook = _seed_two_nodes(rrepo)
+
+    def _boom(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("范围解析失败时不该调 run_search_once")
+
+    monkeypatch.setattr(rig, "run_search_once", _boom)
+    scoped = dict(_search_item("legacy"))
+    scoped["scope_source_titles"] = ("no-such-title.md",)
+    facts = {"A_nokg": {"notebook": notebook.id, "sources": 0, "kg_in_scope": False}}
+    runner = rig.Runner(dry_run=False, out_dir=tmp_path / "serial")
+    failed = rig._search_loop(
+        _search_loop_args(f"sqlite:///{tmp_path / 't.db'}"), runner, [scoped], facts,
+        rrepo, {"legacy": rrepo.settings, "v2": rrepo.settings},
+        actor_id="t0-owner", cancel_event=threading.Event(),
+    )
+    assert failed == 1
+
+
 def test_search_loop_writes_scope_narrowed_true_for_a_resolved_scope(
     rrepo, tmp_path,
 ):
@@ -1439,6 +1507,7 @@ def test_search_loop_concurrent_writes_a_failed_row_and_reports_failures(
     by_key = {row["question_key"]: row for row in rows}
     assert by_key["Q02"]["status"] == "failed"
     assert by_key["Q02"]["scope_narrowed"] is None
+    assert by_key["Q02"]["policy_version"] == "legacy"
     assert by_key["Q02"]["effort"] == "standard"
     assert by_key["Q02"]["corpus_cell"] == "A_nokg"
     assert all(by_key[k]["status"] != "failed" for k in ("Q00", "Q01", "Q03"))
