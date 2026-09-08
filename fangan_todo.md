@@ -116,11 +116,33 @@
       ```
 
       `--database-url` 必填且必须以 `_test` 结尾（这条路会往库里写 conversation 与
-      answer 行）；`--source-db-url` 是主库连接，只用于跑前跑后的「主库零接触」断言。
-      `--concurrency > 1` 时成本三键（`prompt_tokens`/`completion_tokens`/`model_calls`）
-      强制写成 unknown——它们靠 LLM 日志的时间窗切片归因，并发下切不干净。
+      answer 行）；`--source-db-url` 是主库连接，只用于跑前跑后的「主库零接触」断言，
+      不能与 `--database-url` 指同一个库。`ab` 不接受 `--no-intent`（两臂必须引用同一条
+      冻结契约）。`--concurrency > 1` 时成本三键（`prompt_tokens`/`completion_tokens`/
+      `model_calls`）强制写成 unknown——它们靠 LLM 日志的时间窗切片归因，并发下切不干净。
       **仍未做的是 T-AB1 的 gold 正文（34 题的 `gold_facts`、B 侧 `gold_sources`）、
       T-AB3 的 `ab-judge`/`ab-report`，以及 T-AB4 的首份报告。**
+
+      T-AB2 的**已知限制**（codex 评审 P3，知情接受，不改代码；首份报告要照抄）：
+
+      * **成本三键只覆盖 chat 通道**：`app/core/llm.py` 只在唯一一处 chat 调用点写
+        LLM 交互日志（`kind="chat"`），embedding 调用根本不进日志，所以这三个键从来
+        不含 embed 成本——报告里不得写成「含 embed」。
+      * **跨午夜的 run 会少算成本**：`EventLogger._maybe_archive_prev_day` 会把前一天的
+        日志 gzip，而 rig 只 glob 明文 `llm-*.jsonl`。跨午夜那一个 run 因此**少算**而
+        不是记 unknown。跑批尽量不跨零点，或事后按 `latency_ms_total` 复核那一行。
+      * **`invalid_tool_calls` 是臂不对称量**：它按子串吃 T0 的 `skip_reasons`，而
+        `unavailable_action:*` / `invalid_assessment:*` 这两类原因码是 v2 独有的。首份
+        报告必须写明这一列不能直接做臂间差值。
+      * **`model_contract` 短码缺 `prompt_version`**：仓库里没有这个常量，短码由
+        provider/model/fingerprint/top_p/thinking_mode 压成。它是「跨批次混用当场可见」
+        的辅助信号、不是判据，等真有 prompt 版本号了再补。
+      * **`early_stop` 与判分模型/人工键一起延后到 T-AB3**：键集已经闭上，值恒 `None`。
+      * **纯逻辑仍住在 rig 里**：`_ab_round_units` / `_ab_call_estimate` /
+        `ab_contract_digest` / `_ab_corpus_signature` 零 I/O、零模型，可以移进
+        `backend/app/eval/reflect_ab.py`；`_resolve_item_scope` 每个单元重查一次
+        `sources`，而 `fact["source_rows"]` 里已经有那份表。两条都是纯搬运，与
+        T-AB3 的改动一起做更省一轮评审。
       (b) 报告侧 admitted 复核的簇折叠表仍是保守口径——同下条独立待办。
       (c) 灰名单字符串「本笔记本尚未构建知识图谱…」的界面词表违规——同下下条独立待办。
       (d) **`reasoning_retrieval.py` 的「纳入 N 个同社区实体」上屏文案含界面词表的「社区」**：
