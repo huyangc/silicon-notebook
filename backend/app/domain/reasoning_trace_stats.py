@@ -129,17 +129,21 @@ STEP_TYPES: tuple[str, ...] = (
     "answer", "consult_memory", "enumerate", "exact_lookup", "expand",
     "expand_community", "experience", "fallback", "follow_chain",
     "gap_consult", "intent", "memory", "outline", "plan", "plugin", "ppr",
-    "profile", "reflect", "retrieve", "search_chunks", "skip", "spreadsheet",
-    "synthesis",
+    "profile", "reflect", "rerank", "retrieve", "search_chunks", "skip",
+    "spreadsheet", "synthesis",
 )
 STEP_TYPE_OTHER = "other"
 
 #: 「不是一次检索动作」的 step_type。它们各有自己的指标(reflect_turns /
 #: skip_reasons / candidates_* / included_*),不进 `action_seq` 与
 #: `actions_by_type`,否则「哪类动作最常空手」会被一堆记账步稀释。
+#: `rerank`(T-BF6 的收尾重排)在这里而不在动作侧:它不是模型选的一次检索动作,
+#: 是服务端每次收尾都会做的一段记账,进 `action_seq` 会给每条 v2 轨迹尾巴上挂
+#: 一个恒定项,把「模型挑了哪些动作」这份序列稀释掉。它要交代的只有耗时——那由
+#: `durations_ms` 按 step_type 自动承接,不需要新投影键。
 NON_ACTION_STEP_TYPES: frozenset[str] = frozenset({
-    "answer", "experience", "intent", "plan", "profile", "reflect", "skip",
-    "synthesis",
+    "answer", "experience", "intent", "plan", "profile", "reflect", "rerank",
+    "skip", "synthesis",
 })
 
 #: v2 终态步的稳定原因码(= `app.services.reasoning_aspects.TERMINATION_SKIP_REASON`)。

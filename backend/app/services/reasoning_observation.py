@@ -197,8 +197,11 @@ TRACE_OBSERVATION_CONTRACT: Mapping[str, _StepContract] = MappingProxyType({
 #: 这些 step_type 永远不是一次动作观察:它们是 run 级的叙述而不是某个动作的
 #: 执行结果。列成显式集合(而不是"表里没有就忽略")是为了让漂移守卫能区分
 #: 「新增了一个 step_type 但忘了登记」与「这个 step_type 本来就不该有观察」。
+#: `rerank`(T-BF6 的收尾重排)在这里:它发生在最后一次模型决定**之后**,不是
+#: 任何一次动作请求的执行结果——折成观察就会在账上多出一行没有请求与之对应的
+#: 「动作」,而且那一行还会被下一轮模型读到(收尾之后根本没有下一轮)。
 NON_ACTION_STEP_TYPES: frozenset = frozenset({
-    "plan", "profile", "experience", "reflect", "answer",
+    "plan", "profile", "experience", "reflect", "answer", "rerank",
 })
 
 # --- skip reason → 状态 -----------------------------------------------------
