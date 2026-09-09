@@ -4731,13 +4731,20 @@ class ReasoningRetriever:
             return _reflect_fallback(_reflect_fallback_reason(exc))
 
     # --- 编排 ---
-    def _quota_rerank(self, notebook_id, collected, used_queries, top_n):
+    def _quota_rerank(self, notebook_id, collected, used_queries, top_n,
+                      *, stats: Optional[dict] = None):
         """复合问题: 按子查询配额 round-robin 选 top_n。
         步骤 1: 每个子查询的全库打分——P1-B 优先复用 run 中留存的 map(一次 run 内
         图只读⇒与重跑逐位等价,见 search() 留存点);无留存(带 types 的子查询/
         flag 关)则原样重跑该查询(fail-open,容错: 抛错则该组空)。
         步骤 2-4: 分组+轮转委托给通用 quota_fuse。
-        返回 (top_hits, counts): counts[i]=第 i 个子查询贡献数, counts[-1]=兜底组。"""
+        返回 (top_hits, counts): counts[i]=第 i 个子查询贡献数, counts[-1]=兜底组。
+
+        ``stats`` 非空时按键累加这一段的成本口径(T-BF6):``reused`` / ``researched``
+        是复用与重跑的子查询数,``researched_ms`` 只计**重跑那几次**的墙钟——复用
+        分支是纯内存重建,把它算进去会让「缓存到底省了多少」这个数永远看不出来。
+        重跑抛错的那次也计时:那段时间照样花掉了,不计等于把失败说成免费。默认
+        `None` ⇒ 关闭态与既有调用方零改动、零额外分配。"""
         from dataclasses import replace
         from app.services.retrieval import quota_fuse
         reuse = self.settings.reasoning_quota_enabled and getattr(
@@ -4750,14 +4757,95 @@ class ReasoningRetriever:
                 # 不随查询变,replace 版与重跑版字段级相同)。
                 per_q.append({oid: replace(collected[oid], relevance=rel, score=sc)
                               for oid, (rel, sc) in stored.items() if oid in collected})
+                if stats is not None:
+                    stats["reused"] = stats.get("reused", 0) + 1
                 continue
+            began = time.perf_counter()
             try:
                 per_q.append({h.object_id: h for h in self.search(notebook_id, q)})
             except Exception:
                 if self.fail_closed:
                     raise
                 per_q.append({})
+            finally:
+                if stats is not None:
+                    stats["researched"] = stats.get("researched", 0) + 1
+                    stats["researched_ms"] = (
+                        stats.get("researched_ms", 0.0)
+                        + (time.perf_counter() - began) * 1000)
         return quota_fuse(collected, per_q, top_n)
+
+    def _closing_rerank(self, notebook_id, question, collected, used_queries,
+                        top_n, outline, answer_detail, record):
+        """检索循环跑完之后的收尾重排,连同它自己的那条轨迹步(T-BF6)。
+
+        返回 `(top_hits, outline_evidence)`;`answer_detail["quota"]` 由配额分支
+        就地补上(与抽出来之前逐字相同)。
+
+        **为什么要有自己的一步**:`_TraceRecorder` 按相邻两次记账的墙钟差计时,
+        而这一段此前整个夹在上一步与 `answer` 步之间——生产上因此出现过 195 秒的
+        「合成候选」步,其中绝大部分花在这里(配额分支缓存未命中时会逐子查询重
+        检索,单查询分支则是一次全库 `retrieve_scored`),而 legacy 的同一条步多
+        为 1–2 ms。记在这里之后,`answer` 步的耗时才真的只剩「拼那份候选账」。
+
+        **门是 `reflect_v2_active()` 而不是调用方传进来的 `capabilities`**:两者
+        同源(能力投影正是在这个判据为真时才构造),但 `capabilities` 是 `run()`
+        反思循环里的局部名字——`max_steps` 为 0 时循环一次都不进,那个名字在收尾
+        处根本没有绑定。用一个可能未绑定的名字当闸,关闭态会以 `NameError` 的形
+        式炸在最不该炸的地方。
+
+        零新增调用与 I/O:重排本身一行没改,新增的只有计时与一条记账。
+        """
+        stats: dict = {"reused": 0, "researched": 0, "researched_ms": 0.0}
+        if self.settings.reasoning_quota_enabled and len(used_queries) >= 2:
+            # 复合问题: 按子查询配额 round-robin, 避免一方通吃。
+            top_hits, counts = self._quota_rerank(
+                notebook_id, collected, used_queries, top_n, stats=stats)
+            # 只暴露各子查询贡献数(不含兜底组), 便于观测。
+            answer_detail["quota"] = counts[:len(used_queries)]
+            # 配额融合没有全局重排 map,补集只能按"被选集挤出去的不会比选集里最差
+            # 的更相关"夹一刀(见 outline_truncated_kg_evidence 的说明)。
+            outline_evidence = outline_truncated_kg_evidence(
+                outline, collected, top_hits,
+                relevance_ceiling=min(
+                    (hit.relevance for hit in top_hits), default=0.0),
+            )
+        else:
+            # 单查询/开关关: 原全局重排(用原问题统一打分), 行为不变。
+            began = time.perf_counter()
+            with retrieval_fanout_slot():
+                rescored = self.retrieval.retrieve_scored(
+                    notebook_id, question
+                )
+            # 这一支只有一次打分,而且它数的是「原问题」这一次,与
+            # `used_queries` 的条数无关——所以 `researched` 恒 1、`reused` 恒 0,
+            # 而 detail 里的 `queries` 仍如实报本 run 攒下了几个子查询。两个数
+            # 对不上正是这一支的特征:配额关着(或只有一个子查询)时,重排根本
+            # 不按子查询走。计时只圈住那次调用:下面的过滤与排序是纯内存。
+            stats["researched"] = 1
+            stats["researched_ms"] = (time.perf_counter() - began) * 1000
+            scored_map = {
+                h.object_id: h
+                for h in self._filter_candidates(
+                    "knowledge", rescored,
+                )
+            }
+            top_hits = [scored_map.get(oid, rk) for oid, rk in collected.items()]
+            top_hits.sort(key=lambda h: h.relevance, reverse=True)
+            top_hits = top_hits[:top_n]
+            # 补集与选集共用**同一个** scored_map:零新查询,而且相关度同口径。
+            outline_evidence = outline_truncated_kg_evidence(
+                outline, collected, top_hits, rescored=scored_map)
+        if self.reflect_v2_active():
+            record(TraceStep(
+                step_type="rerank",
+                summary="重排候选",
+                detail={"queries": len(used_queries),
+                        "reused": stats["reused"],
+                        "researched": stats["researched"],
+                        "researched_ms": round(stats["researched_ms"]),
+                        "top_n": top_n}))
+        return top_hits, outline_evidence
 
     @staticmethod
     def _window(items, head, tail):
@@ -7898,37 +7986,12 @@ class ReasoningRetriever:
                          "enumerations": len(enumerations),
                          "enumerated_items": state.enum_rows_used}
         raise_if_cancelled(self.cancel_event)
-        if self.settings.reasoning_quota_enabled and len(used_queries) >= 2:
-            # 复合问题: 按子查询配额 round-robin, 避免一方通吃。
-            top_hits, counts = self._quota_rerank(
-                notebook_id, collected, used_queries, top_n)
-            # 只暴露各子查询贡献数(不含兜底组), 便于观测。
-            answer_detail["quota"] = counts[:len(used_queries)]
-            # 配额融合没有全局重排 map,补集只能按"被选集挤出去的不会比选集里最差
-            # 的更相关"夹一刀(见 outline_truncated_kg_evidence 的说明)。
-            outline_evidence = outline_truncated_kg_evidence(
-                outline, collected, top_hits,
-                relevance_ceiling=min(
-                    (hit.relevance for hit in top_hits), default=0.0),
-            )
-        else:
-            # 单查询/开关关: 原全局重排(用原问题统一打分), 行为不变。
-            with retrieval_fanout_slot():
-                rescored = self.retrieval.retrieve_scored(
-                    notebook_id, question
-                )
-            scored_map = {
-                h.object_id: h
-                for h in self._filter_candidates(
-                    "knowledge", rescored,
-                )
-            }
-            top_hits = [scored_map.get(oid, rk) for oid, rk in collected.items()]
-            top_hits.sort(key=lambda h: h.relevance, reverse=True)
-            top_hits = top_hits[:top_n]
-            # 补集与选集共用**同一个** scored_map:零新查询,而且相关度同口径。
-            outline_evidence = outline_truncated_kg_evidence(
-                outline, collected, top_hits, rescored=scored_map)
+        # 收尾重排(配额分支 / 单查询全局重排两支)整块在 `_closing_rerank` 里,
+        # 连同它自己那条 `rerank` 轨迹步——放在这里会让整段耗时被算进下面的
+        # `answer` 步(T-BF6)。
+        top_hits, outline_evidence = self._closing_rerank(
+            notebook_id, question, collected, used_queries, top_n, outline,
+            answer_detail, record)
         if self._unsafe_scope_restricted():
             chains = []
             enumerations = []
