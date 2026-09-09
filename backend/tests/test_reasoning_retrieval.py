@@ -6792,6 +6792,62 @@ def test_v2_enumeration_budget_exhaustion_is_an_observation_not_a_dead_run(
     assert result.trace[-1].step_type == "answer"
 
 
+def test_v2_projection_carries_the_legacy_oversize_listing_hint(rrepo):
+    """v2 能力投影补齐 legacy 的「远大于额度就别翻页」半句(计划 T-BF3)。
+
+    legacy prompt 一直说两件事:默认列全范围,**以及**「计数远大于本轮清单额度时
+    不要逐页翻,按计数 + 样本作答并建议收窄」。v2 的 `_ENUMERATE_SCOPE_NOTE` 只搬
+    了前半句,于是模型在一个 48 839 篇的库里读到 sources 计数之后唯一学到的是
+    「默认就该全列」——生产上八次 run 各用一个动作把整轮行池换成一段无序前缀。
+
+    载荷经真实传输闸(`_GatedV2LLM`),断言看的是**每一轮**的 system 段:这句话
+    住在固定半区,一轮都不能缺。两个数的字面同时对账到它们真正的出处,免得
+    prompt 里说的名字和模型实际看到的行对不上。
+
+    变异:把 `_ENUMERATE_SCOPE_NOTE` 补的那半句删掉 ⇒ 前两段红;把
+    `_allowance_suffix` 的 `listing allowance left` 改个名而不同步这句话 ⇒
+    第三段红。
+    """
+    from app.core.ask_retrieval_policy import ask_retrieval_limits
+    from app.services.prompts import reflect_prompt
+    from app.services.reasoning_retrieval import (
+        ReasoningRetriever, _allowance_suffix,
+    )
+    nb = _seed_two_nodes(_v2_repo(rrepo))
+    llm = _GatedV2LLM(
+        plan={"sub_queries": [{"query": "RTL到GDSII流程"}]},
+        reflects=[
+            {"next_action": "enumerate_elements", "sufficient": False,
+             "arguments": {"collection": "sources"}, "reason": "先看目录"},
+            {"next_action": "add_subquery", "sufficient": False,
+             "arguments": {"query": "布局布线的具体步骤"}, "reason": "再查一条"},
+            {"next_action": "answer", "sufficient": True, "arguments": {}},
+        ])
+    bind_chat_client(rrepo, "reasoning_agent", llm)
+    ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(
+        nb.id, "RTL到GDSII流程", "", limits=ask_retrieval_limits("standard"))
+
+    assert len(llm.system_prompts) >= 3
+    for turn, prompt in enumerate(llm.system_prompts):
+        assert "enumerate_elements" in llm.prompt_actions(turn)
+        assert "计数远大于 R 时**不要**逐页翻" in prompt, turn
+        assert "按计数 + 几条代表性样本作答" in prompt, turn
+        assert "收窄到一个来源、一节或一个主题" in prompt, turn
+
+    # 两个数的字面必须与真正的出处一致:额度后缀每轮现拼、计数来自集合地图行。
+    assert "listing allowance left:" in _allowance_suffix(200)
+    assert "listing allowance left: R rows" in llm.system_prompts[0]
+    assert "[Collections in scope] 的 sources 计数" in llm.system_prompts[0]
+    map_line = rrepo.collection_catalog.collection_map_text(nb.id)
+    assert map_line.startswith("[Collections in scope]")
+    assert "sources: " in map_line and "(current notebook: " in map_line
+
+    # legacy prompt 一字不动:它自己那句英文还在,中文这半句绝不能漏过去。
+    legacy = reflect_prompt("布局布线怎么做", "候选", **_all_gates())
+    assert "do NOT try to page through it" in legacy
+    assert "逐页翻" not in legacy
+
+
 def test_v2_answer_and_consult_must_send_an_empty_arguments_object():
     """`answer`/`consult_memory` 携带非空 arguments 记 invalid(设计稿 §5.2)。
 
