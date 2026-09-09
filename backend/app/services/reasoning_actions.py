@@ -134,6 +134,22 @@ _QUERY_PARAM = ActionParam(
     "query", PARAM_TEXT, note="检索串;留空则回退到原问题。"
 )
 
+#: ``exact_lookup.term`` 的**形状判据**字面。唯一定义点在这里,
+#: ``reasoning_retrieval._NOT_A_NAME_NOTE``(名称被拒后回喂给模型并上屏的那句)
+#: 拼的是同一份字面 —— 参数说明教的"该给什么"与被拒时听到的"该给什么"必须逐字是
+#: 同一句话,否则模型下一轮换一个同样不合法的词再试一次(这条通道的历史教训)。
+#:
+#: 真判据在 ``app/repositories/lexical_query.py::exact_probe_terms``(动作路径恒
+#: ``honor_quotes=False``:名称来自模型而不是用户):从文本里抽出的
+#: ``[A-Za-z0-9]+([._-][A-Za-z0-9]+)+`` 标识符中,含 ``_`` 或 ``.`` 的直接过,只有
+#: 连字符的必须带数字。另有两条同源硬条件**刻意不写进这句话**——至少 4 个字符、
+#: 必须含 ASCII 字母(``identifier_terms``)——因为这份字面同时是 legacy 执行层的
+#: 回喂与 trace 文案、逐字节冻结,而三个例子(``set_db`` / ``config.yaml`` /
+#: ``GPT-4``)已经把它们蕴含在内;再加两条从句只会把一行参数说明撑成一段。
+EXACT_TERM_SHAPE_NOTE = (
+    "要像 set_db、config.yaml 这样带下划线或点;只用连字符连接的词还需带数字,如 GPT-4"
+)
+
 #: ``scope`` 的参数说明,两个枚举动作共用一份。措辞与 legacy prompt 里那段
 #: (``prompts.py`` 的 "By default the roster lists EVERY document…")同口径:
 #: 默认覆盖整个检索范围、与 `[Collections in scope]` 的 sources 计数一致,只有
@@ -226,7 +242,9 @@ ACTION_DEFINITIONS: Mapping[str, ActionDefinition] = MappingProxyType({
         ActionDefinition(
             EXACT_LOOKUP_ACTION,
             (ActionParam("term", PARAM_TEXT, required=True,
-                         note="文档里**逐字**出现的名称(命令/API/选项/参数)。"),),
+                         note="文档里**逐字**出现的名称(命令/API/选项/参数):"
+                              f"{EXACT_TERM_SHAPE_NOTE}。不满足这个形状的词"
+                              "本轮直接判参数不合法,一次检索都不会发生。"),),
             True, "exact_lookup", ("term",),
             ("source_scope", "exact_lookup_wiring", "exact_lookup_budget"),
         ),

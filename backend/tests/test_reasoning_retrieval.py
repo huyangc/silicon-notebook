@@ -5707,6 +5707,12 @@ def test_capabilities_only_answer_when_every_channel_is_gone():
     assert caps.actions == ("answer",)
 
 
+#: 有**形状判据**的自由文本参数的合法样值。`"x"` 对它们不再是"刚好合法":
+#: `exact_lookup.term` 走 `exact_probe_terms`(T-BF4 把判据前移到了解析层),一个
+#: 普通短词是 `invalid_argument:term`,不是一份合法载荷。
+_V2_SHAPED_TEXT_VALUES = {"term": "set_db"}
+
+
 def _v2_arguments_for(caps, action):
     """按能力投影为一个动作造一份**刚好合法**的 arguments。"""
     args = {}
@@ -5718,7 +5724,7 @@ def _v2_arguments_for(caps, action):
         elif spec.choices:
             args[spec.name] = spec.choices[0]
         else:
-            args[spec.name] = "x"
+            args[spec.name] = _V2_SHAPED_TEXT_VALUES.get(spec.name, "x")
         if spec.required_group:
             # 组内填第一个就够(至少一个),再填第二个会改变分派语义。
             break
@@ -6873,6 +6879,134 @@ def test_v2_projection_carries_the_legacy_oversize_listing_hint(rrepo):
     legacy = reflect_prompt("布局布线怎么做", "候选", **_all_gates())
     assert "do NOT try to page through it" in legacy
     assert "逐页翻" not in legacy
+
+
+def _v2_retriever_counting_exact_lookup(repo, calls, states):
+    """`_retriever_counting_exact_lookup` 的 v2 孪生:另留存 run 级账目对象。
+
+    `exact_lookup_log`(被跳过的名称 + 教学措辞)是 run 内部状态,结果对象上没有
+    它的投影,而 v2 这一轮**恰恰**不渲染那份账目(它的四段散文回喂由动作观察账
+    取代,见 `legacy_action_ledger_note` 的调用点)。要证明两条拒绝路径记的是同
+    一笔账,只能在这里把状态本身接出来。
+    """
+    rr = _retriever_counting_exact_lookup(repo, calls)
+    original = rr._new_run_state
+
+    def _captured(*args, **kwargs):
+        state = original(*args, **kwargs)
+        states.append(state)
+        return state
+
+    rr._new_run_state = _captured
+    return rr
+
+
+def test_v2_exact_lookup_shape_gate_is_checked_in_the_parser_and_stated_in_the_note(
+    rrepo,
+):
+    """`exact_lookup.term` 的形状判据前移到解析层,并写进参数说明(计划 T-BF4)。
+
+    判据本来只住在执行层(`elif not probed`),而 v2 的参数说明只字未提,于是模型
+    每换一个普通词都要先烧掉一整轮反思,才从回喂里学到「该给什么」。前移之后同
+    一把闸(`exact_probe_terms`,纯函数、零 I/O)判在解析期:当轮零检索、记
+    `invalid_argument:term`,而"该给什么"那句话每一轮都在 system 段里等着它。
+
+    载荷经真实形状闸(`_GatedV2LLM`)。三段验收各自可变异:
+    - 去掉 `_v2_apply_arguments` 里的形状预校验 ⇒ 原因码退回执行层的
+      `exact_term_not_identifier`,第一段红;
+    - 把 `EXACT_TERM_SHAPE_NOTE` 从 `term` 的参数说明里删掉 ⇒ 第二段红;
+    - 让 `_NOT_A_NAME_NOTE` 另写一份措辞而不共用那份字面 ⇒ 第三段红;
+    - 去掉 run() invalid 分支里的 `feed_exact_lookup_skip` ⇒ 第四段红。
+    """
+    from app.services.reasoning_actions import EXACT_TERM_SHAPE_NOTE
+    from app.services.reasoning_retrieval import _NOT_A_NAME_NOTE
+    nb = _seed_manual_notebook(_v2_repo(rrepo))
+    rrepo.settings.graph_ppr_enabled = False
+    llm = _GatedV2LLM(
+        plan={"sub_queries": [{"query": "布局布线"}]},
+        reflects=[
+            # 普通英文词组:形状闸拒绝的正是这一类(它每篇文档里都可能出现,
+            # 一次探测换不来任何选择度)。
+            {"next_action": "exact_lookup", "sufficient": False,
+             "arguments": {"term": "real-time"}, "reason": "查个名称"},
+            {"next_action": "exact_lookup", "sufficient": False,
+             "arguments": {"term": "set_db"}, "reason": "换个真名称"},
+            {"next_action": "answer", "sufficient": True, "arguments": {}},
+        ])
+    bind_chat_client(rrepo, "reasoning_agent", llm)
+    calls: list = []
+    states: list = []
+    result = _v2_retriever_counting_exact_lookup(rrepo, calls, states).run(
+        nb.id, "这个命令怎么用", "")
+
+    # 1) 被拒的那一轮零 I/O、零执行层判据;合法的名称照常执行。
+    assert calls == ['"set_db"']
+    reasons = _skip_reasons(result)
+    assert "invalid_argument:term" in reasons
+    assert "exact_term_not_identifier" not in reasons
+    steps = [t for t in result.trace if t.step_type == "exact_lookup"]
+    assert [t.detail["terms"] for t in steps] == [["set_db"]]
+
+    # 2) 「该给什么」住在固定半区:每一轮的 system 段都带着形状判据。
+    assert len(llm.system_prompts) >= 3
+    for turn, prompt in enumerate(llm.system_prompts):
+        assert "exact_lookup" in llm.prompt_actions(turn)
+        assert EXACT_TERM_SHAPE_NOTE in prompt, turn
+
+    # 3) 事前说的与事后说的是**同一份字面**:参数说明与被拒回喂各写一份,就一定
+    #    会分叉成两套判据。
+    assert EXACT_TERM_SHAPE_NOTE in _NOT_A_NAME_NOTE.format(term="real-time")
+
+    # 4) 解析期这条拒绝仍记进按名称查找的账本,措辞与执行层那条逐字相同。
+    attempts = [a for a in states[0].exact_lookup_log if a.note]
+    assert [a.note for a in attempts] == [
+        _NOT_A_NAME_NOTE.format(term="real-time")]
+    assert attempts[0].terms == ["real-time"]
+
+
+def test_v2_exact_lookup_shape_gate_judges_the_string_the_executor_would_probe():
+    """前移的那把闸判的必须是执行层**会**拿去探测的那一份字符串(计划 T-BF4)。
+
+    执行层先 `decision.exact_term[:MAX_EXACT_PHRASE_CHARS]` 再抽名称。解析层不跟着
+    截,同一份输入就会在两层得出相反结论:一个把唯一的名称藏在上界之外的超长
+    term 会被解析层放行、再被执行层判 `exact_term_not_identifier`,白烧的那一轮
+    一步没省。回喂给模型的名称也必须是截断后的那一份——它会被原样拼进 prompt。
+
+    变异:去掉预校验里的 `[:MAX_EXACT_PHRASE_CHARS]` ⇒ 这条红。
+    """
+    from app.repositories.lexical_query import MAX_EXACT_PHRASE_CHARS
+    from app.services.reasoning_actions import build_reflect_capabilities
+    from app.services.reasoning_retrieval import parse_reflect_v2
+    caps = build_reflect_capabilities(_full_house_facts())
+    hidden = "x" * MAX_EXACT_PHRASE_CHARS + " set_db"
+    decision = parse_reflect_v2(
+        {"next_action": "exact_lookup", "sufficient": False,
+         "arguments": {"term": hidden}}, caps)
+    assert decision.invalid_reason == "invalid_argument:term"
+    # 带下去的名称有界:模型给多长,prompt 里那句教学措辞就不会跟着多长。
+    assert decision.exact_term == hidden[:MAX_EXACT_PHRASE_CHARS]
+
+
+def test_legacy_exact_lookup_shape_gate_stays_in_the_executor(rrepo):
+    """关闭态同一份输入仍走执行层那条路径(T-BF4 只动 v2)。
+
+    v2 的前移不能顺手把 legacy 的判据也搬走:关闭态的轨迹要逐字节回到接入前。
+    变异:把 legacy 的 `elif not probed` 分支删掉 ⇒ 这条红。
+    """
+    nb = _seed_manual_notebook(rrepo)
+    rrepo.settings.graph_ppr_enabled = False
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
+        plan={"sub_queries": [{"query": "布局布线"}]},
+        reflects=[{"next_action": "exact_lookup", "exact_term": "real-time"},
+                  {"next_action": "answer", "sufficient": True}]))
+    calls: list = []
+    result = _retriever_counting_exact_lookup(rrepo, calls).run(
+        nb.id, "这个命令怎么用", "")
+
+    assert calls == []
+    reasons = _skip_reasons(result)
+    assert "exact_term_not_identifier" in reasons
+    assert "invalid_argument:term" not in reasons
 
 
 def test_v2_answer_and_consult_must_send_an_empty_arguments_object():
