@@ -504,6 +504,26 @@ def test_kg_unavailable_is_a_corpus_fact_not_a_bad_call():
     assert count_invalid_tool_calls({"kg_gap_unavailable": 2}) == 2
 
 
+def test_a_rejected_aspect_is_not_a_bad_tool_call():
+    """逐方面被拒的自评不是一次坏的工具调用(T-BF7):那个工具真的执行了。
+
+    整份形状不成立的那一族仍然计入——那一轮真的整轮作废、工具一次都没打出去。
+
+    变异:把 `_NOT_A_TOOL_CALL_REASONS` 缩回只有 `kg_unavailable` ⇒ 第一条红,
+    v2 臂会凭空多出一批不存在的坏调用。
+    """
+    assert count_invalid_tool_calls({
+        "invalid_assessment:unknown_aspect": 3,
+        "invalid_assessment:duplicate_aspect": 2,
+        "invalid_assessment:evidence_keys_overflow": 1,
+        "invalid_assessment:gap_overflow": 1,
+    }) == 0
+    assert count_invalid_tool_calls({
+        "invalid_assessment:item_not_object": 1,
+        "invalid_assessment:not_object": 2,
+    }) == 3
+
+
 def test_invalid_tool_calls_are_unknown_when_skip_reasons_are():
     assert count_invalid_tool_calls(None) is None
 

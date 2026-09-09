@@ -24,6 +24,7 @@ from datetime import datetime
 from typing import Any, Iterable, Mapping, Sequence
 
 from app.domain.reasoning_trace_stats import (
+    ASSESSMENT_REJECTION_REASONS,
     RUN_PROJECTION_KEYS,
     assert_projection_values,
     project_run,
@@ -509,11 +510,20 @@ def completeness_claim_candidate(
 #: duplicate)。按**子串**判,而不是抄一份会随服务层新增原因码而过期的枚举。
 _INVALID_TOOL_CALL_MARKERS: tuple[str, ...] = ("invalid", "unavailable", "duplicate")
 
-#: 唯一的例外。`kg_unavailable` 是「这个库里没有知识图谱」——一条语料事实,
+#: 例外一。`kg_unavailable` 是「这个库里没有知识图谱」——一条语料事实,
 #: 不是一次坏的工具调用;A 格(`A_nokg`)每个 run 都会有它,计进去会让这一列
 #: 变成「这道题跑在哪个语料格」的复读。`kg_gap_unavailable` 不在例外里:那是
 #: 一个动作通道的可用性(见 `reasoning_trace_stats.KG_UNAVAILABLE_REASONS`)。
-_CORPUS_FACT_REASONS: frozenset[str] = frozenset({"kg_unavailable"})
+#:
+#: 例外二(T-BF7)。`ASSESSMENT_REJECTION_REASONS` 是**逐方面**被拒的自评:原因
+#: 码里带着 `invalid` 三个字母,讲的却不是一次坏的工具调用——同一轮模型请求的
+#: 那个工具**真的执行了**,没被采纳的只是它顺手写的一条方面自评。计进去会让 v2
+#: 臂凭空多出一批不存在的「坏工具调用」。整份形状不成立的那一族(同一个前缀、
+#: 后缀不在那个闭集里)仍然计入:那一轮真的整轮作废、工具一次都没打出去。
+#: ⚠ 这一列因此在 T-BF7 前后不可比,首份报告须说明(计划 §5)。
+_NOT_A_TOOL_CALL_REASONS: frozenset[str] = (
+    frozenset({"kg_unavailable"}) | ASSESSMENT_REJECTION_REASONS
+)
 
 
 def count_invalid_tool_calls(skip_reasons: object) -> int | None:
@@ -521,13 +531,16 @@ def count_invalid_tool_calls(skip_reasons: object) -> int | None:
 
     直接吃 T0 投影已经数好的 `skip_reasons`(短码 → 次数),**不再数一遍轨迹**
     ——两处各数一遍必然分叉。`skip_reasons` 缺席(unknown)时返回 `None`。
+
+    「这次动作根本没打出去」是唯一的判据,所以 `_NOT_A_TOOL_CALL_REASONS` 里那
+    两类都不计:一类根本不是动作,一类的动作照常执行了。
     """
     if not isinstance(skip_reasons, Mapping):
         return None
     total = 0
     for reason, count in skip_reasons.items():
         code = str(reason)
-        if code in _CORPUS_FACT_REASONS:
+        if code in _NOT_A_TOOL_CALL_REASONS:
             continue
         if any(marker in code for marker in _INVALID_TOOL_CALL_MARKERS):
             total += int(count or 0)
