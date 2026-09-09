@@ -11698,3 +11698,180 @@ def test_a_reflect_client_that_reports_no_finish_reason_at_all_stays_empty(
     assert llm.max_tokens == [4096, 4096]
     assert [r for r in _skip_reasons(result)
             if r.startswith("model_degraded:")] == ["model_degraded:empty"]
+
+
+# --- T-BF6 收尾重排的计时归位 -------------------------------------------------
+_RERANK_TICK = 0.25          # 每次收尾重检索让假时钟走 250ms
+
+
+def _rerank_clock(monkeypatch):
+    """假时钟 + 只在 `search()` 里走针的替身。
+
+    所有别的步因此恒 0ms,收尾那条步的耗时就等于「这一段里做了几次重检索」×
+    250ms —— 一个可以逐位断言的数,而不是一个墙钟阈值(那种断言在慢 runner 上
+    会变成偶发红,见 MEMORY 里那几条计时 flake)。
+    """
+    import app.services.reasoning_retrieval as rr
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    clock = [0.0]
+    monkeypatch.setattr(rr.time, "perf_counter", lambda: clock[0])
+    real_search = ReasoningRetriever.search
+
+    def ticking_search(self, notebook_id, query, types=None, prefer="balanced"):
+        clock[0] += _RERANK_TICK
+        return real_search(self, notebook_id, query, types=types, prefer=prefer)
+
+    monkeypatch.setattr(ReasoningRetriever, "search", ticking_search)
+    return clock
+
+
+def _rerank_run(rrepo, **settings):
+    """两个子查询 + 一轮 answer 的最短 v2 run(走配额分支)。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    nb = _seed_two_nodes(_v2_repo(rrepo, **settings))
+    llm = _GatedV2LLM(
+        plan={"sub_queries": [{"query": "RTL到GDSII流程"},
+                              {"query": "布局布线步骤"}]},
+        reflects=[{"next_action": "answer", "sufficient": True,
+                   "arguments": {}}])
+    bind_chat_client(rrepo, "reasoning_agent", llm)
+    return ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(
+        nb.id, "RTL到GDSII流程", "")
+
+
+def _one(trace, step_type):
+    steps = [t for t in trace if t.step_type == step_type]
+    assert len(steps) == 1, f"{step_type} 步不是一条: {len(steps)}"
+    return steps[0]
+
+
+def test_v2_closing_rerank_takes_its_wall_clock_off_the_answer_step(
+    rrepo, monkeypatch
+):
+    """收尾重排有自己的一步,`answer` 步只剩「拼那份候选账」(T-BF6)。
+
+    生产上 v2 的 `answer` 步跑出过 195s/72s/69s,而 legacy 多为 1–2ms —— 差的那
+    一段正是这里:`_TraceRecorder` 按相邻记账之差计时,收尾重排整块夹在上一步与
+    `answer` 之间,于是一段真实成本被记到了一条只做字典拼装的步上。
+
+    变异:去掉 `_closing_rerank` 里那句 `record(...)` ⇒ 这条红(没有 rerank 步);
+    把重排搬回 `run()`(不记步)⇒ `answer` 步重新吃下那 500ms,同样红。
+    """
+    _rerank_clock(monkeypatch)
+    # 复用关掉 ⇒ 两个子查询都要重检索,收尾这一段确定性地走两次针。
+    result = _rerank_run(rrepo, reasoning_quota_reuse_enabled=False)
+    types = [t.step_type for t in result.trace]
+    # 位置:紧挨在 answer 之前(它就是 answer 之前最后发生的那件事)。
+    assert types[-2:] == ["rerank", "answer"]
+    rerank = _one(result.trace, "rerank")
+    assert rerank.duration_ms == 500          # 2 次重检索 × 250ms
+    assert rerank.detail == {"queries": 2, "reused": 0, "researched": 2,
+                             "researched_ms": 500, "top_n": 20}
+    # answer 步只剩自己:整段重排耗时已经不在它头上。
+    assert _one(result.trace, "answer").duration_ms == 0
+
+
+def test_v2_closing_rerank_detail_separates_reused_from_researched(
+    rrepo, monkeypatch
+):
+    """缓存命中与未命中在 detail 上分得开,`researched_ms` 只数真跑的那几次。
+
+    这两个数正是「前缀/打分复用到底省了多少」的唯一读数:把复用也算进
+    `researched_ms`,省下来的那部分会在轨迹上彻底看不见。
+
+    变异:把 `_quota_rerank` 里 `stats["reused"]` 那两行挪进重跑分支 ⇒ 这条红。
+    """
+    _rerank_clock(monkeypatch)
+    # 复用开着(默认):两个子查询在首轮播种时都留存过打分,收尾零重检索。
+    result = _rerank_run(rrepo)
+    rerank = _one(result.trace, "rerank")
+    assert rerank.detail["reused"] == 2
+    assert rerank.detail["researched"] == 0
+    assert rerank.detail["researched_ms"] == 0
+    assert rerank.duration_ms == 0            # 一次针都没走
+
+
+def test_quota_rerank_stats_are_opt_in_and_count_failed_research_time(
+    rrepo, monkeypatch
+):
+    """`stats` 是可选出参:不传时行为逐字不变;传了时抛错那次的时间也算数。
+
+    一次失败的重检索照样花掉了墙钟,不计等于把失败说成免费——而「为什么这一段
+    这么慢」恰恰最常是某条臂在超时后才抛。
+
+    变异:把 `_quota_rerank` 的 `finally` 改成只在成功分支累加 ⇒ 这条红。
+    """
+    import app.services.reasoning_retrieval as rr
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    nb = _seed_two_nodes(rrepo)
+    clock = [0.0]
+    monkeypatch.setattr(rr.time, "perf_counter", lambda: clock[0])
+
+    def fake_search(self, n, q, types=None, prefer="balanced"):
+        clock[0] += 0.25
+        if q == "boom":
+            raise RuntimeError("search blew up")
+        return [_rk("C", 0.9)]
+
+    monkeypatch.setattr(ReasoningRetriever, "search", fake_search)
+    retriever = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    collected = {"C": _rk("C", 0.0)}
+    stats: dict = {}
+    hits, counts = retriever._quota_rerank(
+        nb.id, collected, ["boom", "ok"], top_n=2, stats=stats)
+    assert [h.object_id for h in hits] == ["C"]     # 返回值不受 stats 影响
+    assert stats["researched"] == 2
+    assert stats["researched_ms"] == 500            # 含抛错那一次的 250ms
+    assert stats.get("reused", 0) == 0
+
+
+def test_legacy_trace_keeps_its_step_sequence_and_duration_keys(rrepo):
+    """关闭态:轨迹步序列与 `durations_ms` 键集逐字不变,没有 `rerank` 这一步。
+
+    收尾重排在 legacy 下也搬进了 `_closing_rerank`,但那只是位置——关闭态多出
+    任何一步都会改历史轨迹的键集,是这个 PR 的红线。
+
+    变异:去掉 `_closing_rerank` 里的 `self.reflect_v2_active()` 门 ⇒ 这条红。
+    """
+    from app.domain.reasoning_trace_stats import project_run
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    assert rrepo.settings.reasoning_reflect_v2_enabled is False
+    nb = _seed_two_nodes(rrepo)
+    llm = _SeqLLM(
+        plan={"sub_queries": [{"query": "RTL到GDSII流程"},
+                              {"query": "布局布线步骤"}]},
+        reflects=[{"next_action": "answer", "sufficient": True}])
+    bind_chat_client(rrepo, "reasoning_agent", llm)
+    result = ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(
+        nb.id, "RTL到GDSII流程", "")
+    assert [t.step_type for t in result.trace] == [
+        "plan", "retrieve", "ppr", "reflect", "answer"]
+    row = project_run(
+        {"id": "j1", "notebook_id": nb.id, "mode": "reasoning",
+         "status": "done"},
+        [{"seq": i, "step_type": t.step_type, "summary": t.summary,
+          "detail": t.detail, "duration_ms": t.duration_ms}
+         for i, t in enumerate(result.trace)])
+    assert "rerank" not in row["durations_ms"]
+    assert set(row["durations_ms"]) == {
+        "plan", "retrieve", "ppr", "reflect", "answer"}
+
+
+def test_rerank_step_never_becomes_an_action_observation():
+    """`rerank` 是 run 级记账,不是一次动作的执行结果 ⇒ 观察账对它零产出。
+
+    它发生在最后一次模型决定**之后**,折成观察会在账上多出一行没有请求与之对应
+    的「动作」。闭集登记本身由
+    `test_observation_contract_covers_every_trace_step_type_in_the_retriever`
+    守住,这条守的是登记之后的行为。
+
+    变异:把 `rerank` 从 `reasoning_observation.NON_ACTION_STEP_TYPES` 里删掉
+    ⇒ 那条漂移守卫先红,这条随后红。
+    """
+    from app.models.schemas import TraceStep
+    from app.services.reasoning_observation import observation_from_step
+    assert observation_from_step(
+        TraceStep(step_type="rerank", summary="重排候选",
+                  detail={"queries": 2, "reused": 1, "researched": 1,
+                          "researched_ms": 12, "top_n": 20}),
+        seq=7, pending=None) is None

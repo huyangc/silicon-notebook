@@ -853,3 +853,45 @@ def test_search_run_records_whether_an_intent_contract_was_used():
     assert with_intent["has_intent_contract"] is True
     # 契约内容一个字都不进投影:行里只多一个布尔。
     assert set(without) == set(with_intent)
+
+
+# --- T-BF6 收尾重排步 --------------------------------------------------------
+def test_rerank_step_lands_in_durations_but_not_in_the_action_tallies():
+    """`rerank`(T-BF6 收尾重排)只交代耗时:进 `durations_ms`,不进动作账。
+
+    它是服务端每次收尾都会做的一段记账,不是模型选的一次检索动作——进
+    `action_seq` 会给每条 v2 轨迹尾巴上挂一个恒定项,把「模型挑了哪些动作」这份
+    序列稀释掉。
+
+    变异 1:把 `rerank` 从 `STEP_TYPES` 里删掉 ⇒ 它被折成 `other`,第一条断言红。
+    变异 2:把 `rerank` 从 `NON_ACTION_STEP_TYPES` 里删掉 ⇒ 后两条断言红。
+    """
+    steps = [
+        step("ppr", {"phase": "seed", "found": 2}, duration_ms=30),
+        reflect("answer", sufficient=True),
+        step("rerank", {"queries": 2, "reused": 1, "researched": 1,
+                        "researched_ms": 190000, "top_n": 20},
+             duration_ms=195000),
+        step("answer", {"kg": 5, "elements": 0}, duration_ms=2),
+    ]
+    row = project_run(JOB, steps, PAYLOAD)
+    assert row["durations_ms"]["rerank"] == 195000
+    assert "other" not in row["durations_ms"]
+    assert "rerank" not in row["action_seq"]
+    assert "rerank" not in row["actions_by_type"]
+
+
+def test_a_trace_without_a_rerank_step_still_projects():
+    """历史行(以及所有关闭态的 run)没有 `rerank` 键,投影照读不误。
+
+    新增一个 step_type 不许让旧轨迹变得不可投影:`durations_ms` 是按出现过的
+    step_type 累加的开放字典,缺席就是没有这一项,不是 0、更不是报错。
+    """
+    steps = [
+        step("ppr", {"phase": "seed", "found": 2}, duration_ms=30),
+        step("answer", {"kg": 5, "elements": 0}, duration_ms=195000),
+    ]
+    row = project_run(JOB, steps, PAYLOAD)
+    assert "rerank" not in row["durations_ms"]
+    assert row["durations_ms"] == {"ppr": 30, "answer": 195000}
+    assert row["total_ms"] == 195030
