@@ -49,7 +49,8 @@ from app.services.collection_catalog import (
     render_collection_map,
 )
 from app.services.collection_enumeration import (
-    LOCAL_ONLY_SCOPE_SUFFIX, TRUNCATED_CONCURRENT_CHANGE, EnumerationBudget,
+    LOCAL_ONLY_SCOPE_SUFFIX, TRUNCATED_CONCURRENT_CHANGE,
+    TRUNCATED_OVERSIZE_SAMPLE, EnumerationBudget,
 )
 from app.services.prompts import (
     reflect_prompt, reflect_schema_hint, reflect_v2_schema_hint,
@@ -1189,43 +1190,85 @@ def _allowance_suffix(rows_left: int) -> str:
     return f" | listing allowance left: {max(0, int(rows_left))} rows"
 
 
-#: 「这份来源目录大到翻页没有意义」的倍数。生产上 48 839 篇 / 本轮 300 行额度的
+#: 「这份清单大到翻页没有意义」的倍数。生产上 48 839 篇 / 本轮 300 行额度的
 #: run 里,模型一次动作就把整 run 的行池吃光,换回 300 条无序前缀、`complete=False`
 #: 与一个再也用不上的游标——三个池全空之后什么都做不了。4 是**常量而不是配置项**
 #: (计划 §7 拍板 2):它不是一个要按部署调的阈值,而是「一页 50 行的清单最多值得
 #: 翻到额度用尽」这句话的算术形式——total 已经超过整轮额度的 4 倍时,把额度花光也
-#: 只能看到不足四分之一,那不是一份目录,是一段随机前缀。
-OVERSIZE_SOURCE_LISTING_FACTOR = 4
+#: 只能看到不足四分之一,那不是一份清单,是一段随机前缀。
+#:
+#: 用例改这个数用 monkeypatch(它是模块全局,守卫每次调用现读),不再走形参:
+#: 一个只有测试会传的 `factor` 参数等于把常量做成两份,生产上永远是这一份。
+OVERSIZE_LISTING_FACTOR = 4
 
 
-def oversize_source_listing(
-    map_sources: Optional[int], rows_left: int,
-    factor: int = OVERSIZE_SOURCE_LISTING_FACTOR,
-) -> bool:
-    """这一次来源枚举该不该只取一页样本?纯函数、零 I/O。
+def enumeration_map_count(
+    collection_map: Optional[CollectionMap], *, collection: str, kind: str,
+    local_only: bool, source_id: str,
+) -> Optional[int]:
+    """本次枚举请求的**分母**:集合地图里与它同集合、同 kind、同范围的那个计数。
 
-    `map_sources` 是**集合地图已经算过的那个数**(`CollectionMap.sources`,即
-    prompt 里 `sources: N (current notebook: M)` 的 N),不是这里再查一次库得来
-    的:守卫的全部成本必须是这一次比较。地图建不出来(fail-open)时它是 `None`
-    —— 判据是「已知远超额度」,不是「不知道有多大」,所以 `None` 一律不触发:
-    宁可照旧翻页,也不要凭猜测把一份本来能列全的目录砍成样本。
+    规模守卫的判据是「这一次动作要列的那份清单有多大」,所以分母必须与请求逐项
+    对齐——拿联邦 `sources` 去判一份元素清单,一个只有 3 条公式的库也会被砍成
+    一页样本。四种对齐关系:
+
+    * `sources` + 默认范围 ⇒ `CollectionMap.sources`(prompt 里
+      `sources: N (current notebook: M)` 的 N);
+    * `sources` + `current_notebook` ⇒ `active_sources`(括号里的 M);
+    * `elements` + kind ⇒ 地图里该 kind 的元素计数;
+    * `kg_objects` + object_type ⇒ 地图里该类型的知识对象计数。
+
+    `None` = 「不知道有多大」,守卫一律不触发。三种来源:地图整个建不出来
+    (fail-open)、请求被 `source_id` 收窄到一篇(地图没有「某一篇里有多少条」
+    这个数,拿全库计数去判它会把一份小清单砍成样本)、以及 kind/object_type
+    不在地图给出的那份计数里。刻意**不**复用 `CollectionMap.element_count`:
+    它对缺席的 kind 返回 0,而这里必须把「已知是 0」与「地图没这一项」分开——
+    前者是可判定的(0 不触发),后者只能弃权。
+
+    纯函数、零 I/O、零新增查询:读的全是集合地图**已经算过**的字段。
+    """
+    if collection_map is None or source_id:
+        return None
+    if collection == "sources":
+        return (collection_map.active_sources if local_only
+                else collection_map.sources)
+    if collection == "elements":
+        for item in collection_map.elements:
+            if item.kind == kind:
+                return item.count
+        return None
+    for object_type, count in collection_map.kg_objects:
+        if object_type == kind:
+            return count
+    return None
+
+
+def oversize_listing(map_count: Optional[int], rows_left: int) -> bool:
+    """这一次枚举该不该只取一页样本?纯函数、零 I/O。
+
+    `map_count` 是**集合地图已经算过的那个数**(见 `enumeration_map_count`),
+    不是这里再查一次库得来的:守卫的全部成本必须是这一次比较。它是 `None` 时
+    —— 判据是「已知远超额度」,不是「不知道有多大」——一律不触发:宁可照旧翻页,
+    也不要凭猜测把一份本来能列全的清单砍成样本。
 
     `rows_left` ≤ 0 同样不触发:那是「预算耗尽」,由调用方的 skip 分支处理,
     在这里返回 True 会把它变成一次 `max_rows=0` 的非法预算构造。
     """
-    if map_sources is None or rows_left < 1:
+    if map_count is None or rows_left < 1:
         return False
-    return int(map_sources) > rows_left * max(1, int(factor))
+    return int(map_count) > rows_left * max(1, int(OVERSIZE_LISTING_FACTOR))
 
 
 def _enumeration_step_summary(label: str, coverage, source_id: str, *,
                               local_only: bool = False) -> str:
     """enumerate 步的上屏摘要。
 
-    三种结局说三句不同的话,因为它们对用户意味着三件不同的事:列全了 / 到本轮
-    上限了(还能继续) / 资料变了(既不能续也不能声称完整)。数字一律用**链上累计**
-    ``returned_total``——用户看的是「这个清单目前列了多少」,不是「刚刚那一次调用
-    返回了多少」。分母未知时省略,绝不写成 /0。
+    四种结局说四句不同的话,因为它们对用户意味着四件不同的事:列全了 / 到本轮
+    上限了(还能继续) / 资料变了(既不能续也不能声称完整) / 这个集合远大于一轮
+    能列的量,只取了一页样本(额度**没有**用光,再来一轮也列不全 —— 说成「已达
+    本轮上限」会同时骗两边,与结果卡上那句「内容太多」也对不上)。数字一律用
+    **链上累计** ``returned_total``——用户看的是「这个清单目前列了多少」,不是
+    「刚刚那一次调用返回了多少」。分母未知时省略,绝不写成 /0。
 
     范围后缀与既有的「(限指定来源)」同形、同位置:两者都在回答同一个问题——
     「这个数是从多大的一片资料里数出来的」。没有它,「已全部列出 2 条」在一个挂了
@@ -1245,6 +1288,13 @@ def _enumeration_step_summary(label: str, coverage, source_id: str, *,
         return (
             f"枚举{label}: 资料在检索期间有变动,已列出 "
             f"{coverage.returned_total} 条{total},无法确认是否完整{scope}"
+        )
+    if coverage.truncated_reason == TRUNCATED_OVERSIZE_SAMPLE:
+        # 与结果卡的标签同口径(`answer-panel.tsx` 的 `oversize_sample`):
+        # 「内容太多,本轮只列出其中一页」。
+        return (
+            f"枚举{label}: 内容太多,本轮只列出其中一页,已列 "
+            f"{coverage.returned_total} 条{total}{scope}"
         )
     return (
         f"枚举{label}: 部分结果,已达本轮上限,累计 "
@@ -3018,8 +3068,9 @@ class _ReasoningRunState:
     experience_entries: List = field(default_factory=list)
     # `_first_round_prompt_blocks` 也写:集合地图渲染成 prompt 行**之前**的那个
     # 对象。同一次构建的产物,不是第二次查询——`collection_map_text` 以前把它渲染
-    # 完就丢了,于是「本轮范围里有多少篇文档」这个已经算出来的数,在执行层只剩
-    # 一句人读的英文。规模守卫(`oversize_source_listing`)要的就是它。
+    # 完就丢了,于是「本轮范围里各个集合有多少条」这些已经算出来的数,在执行层
+    # 只剩一句人读的英文。规模守卫(`enumeration_map_count` / `oversize_listing`)
+    # 要的就是它。
     #
     # 带默认值、留空即中性:地图没建(枚举关闭态、或构建失败的 fail-open 分支)
     # 时恒为 None,守卫恒不触发,`_new_run_state` 因此一行都不用改。
@@ -5059,8 +5110,8 @@ class ReasoningRetriever:
         #
         # 先取**对象**再渲染,而不是调 `collection_map_text`(它就是这两步的
         # 合成):同一次构建、同一批查询、同一个字符串,只是不再把对象丢掉。
-        # 「本轮范围里有多少篇文档」这个数是规模守卫的唯一输入,不留下对象就
-        # 只能在执行层再查一次库(见 `oversize_source_listing`)。
+        # 地图上的那些计数是规模守卫的唯一输入,不留下对象就只能在执行层再查
+        # 一次库(见 `enumeration_map_count`)。
         collection_map = state.collection_map
         if enumeration_active:
             try:
@@ -6049,31 +6100,42 @@ class ReasoningRetriever:
         state.stale = 1 if state.no_progress else 0
 
     def _enum_budget(
-        self, state: "_ReasoningRunState", *, is_sources: bool,
-        local_only: bool, rows_left: int, pages_left: int, payload_left: int,
+        self, state: "_ReasoningRunState", *, collection: str, kind: str,
+        local_only: bool, source_id: str, rows_left: int, pages_left: int,
+        payload_left: int,
     ) -> EnumerationBudget:
-        """本次枚举动作的四道天花板,含**目录规模守卫**(计划 T-BF1)。
+        """本次枚举动作的四道天花板,含**清单规模守卫**(计划 T-BF1)。
 
-        守卫只改一个数:一份远大于本轮额度的来源目录,`max_rows` 从「整轮剩余
-        行池」降到「一页」。它不改范围、不拒绝动作、不换集合——模型请求的仍然是
-        那份目录,拿到的仍然是那份目录的开头,只是没有把整轮额度押在一段无序前
-        缀上。生产上 48 839 篇的库正是这样一次动作吃光 300 行,后面三个池全空、
-        每个后续枚举都只能记 `enumeration_budget` skip。
+        守卫只改一个数:一份远大于本轮额度的清单,`max_rows` 从「整轮剩余行池」
+        降到「一页」。它不改范围、不拒绝动作、不换集合——模型请求的仍然是那份
+        清单,拿到的仍然是那份清单的开头,只是没有把整轮额度押在一段无序前缀上。
+        生产上 48 839 篇的库正是这样一次动作吃光 300 行,后面三个池全空、每个
+        后续枚举都只能记 `enumeration_budget` skip。
 
-        四个条件缺一不可:
-        * `collection=="sources"` —— 另两个集合的分母是 kind/object_type 的计数,
-          地图里的 `sources` 说明不了它们;
-        * `scope==all`(即 `local_only` 为假)—— 守卫的分母是地图的联邦总数,
-          `current_notebook` 那一档对应的是括号里的另一个数;
-        * 地图给出的总数**已知**且远超额度(见 `oversize_source_listing`);
+        三个条件缺一不可:
         * `reflect_v2_active()` —— 关闭态逐字节不变是本次的硬约束,legacy 的
-          规模提示写在它自己的 prompt 里,行为一个字都不动。
+          规模提示写在它自己的 prompt 里,行为一个字都不动;
+        * `rows_left > enum_page_size` —— 行池只剩不到一页时,守卫连数字都改不
+          了(`min(rows_left, page_size)` 就是 `rows_left`),改的只有原因码,
+          而那一句「额度没用光、池还留给后面的动作」在这里恰恰是**假话**:池本
+          来就只剩这么多。所以这一档自然落回 `TRUNCATED_BUDGET`;
+        * 与本次请求**同集合、同 kind、同范围**的地图计数已知且远超额度(分母
+          怎么对齐见 `enumeration_map_count`,倍数见 `oversize_listing`)。
+
+        守卫封的是**单次动作的行数**,不是行池本身:`state.enum_rows_used` 只按
+        实际返回的行数扣,能力投影里的 `enum_rows_left` 因此仍然是整池的真实剩
+        余(质量评审 P3-2 刻意不改)——那个数回答的是「这一轮还能列多少」,而它
+        确实没变;守卫回答的是「这一个动作值不值得把池花在这份清单上」。
         """
         enum_limits = state.enum_limits
         oversize = (
-            is_sources and not local_only and self.reflect_v2_active()
-            and oversize_source_listing(
-                getattr(state.collection_map, "sources", None), rows_left)
+            self.reflect_v2_active()
+            and rows_left > enum_limits.enum_page_size
+            and oversize_listing(
+                enumeration_map_count(
+                    state.collection_map, collection=collection, kind=kind,
+                    local_only=local_only, source_id=source_id),
+                rows_left)
         )
         return EnumerationBudget(
             page_size=enum_limits.enum_page_size,
@@ -6082,9 +6144,11 @@ class ReasoningRetriever:
             max_pages=pages_left,
             max_payload_chars=payload_left,
             excerpt_chars=enum_limits.cell_excerpt_chars,
-            # 诚实披露(T-BF2):这份清单短**不是**因为额度用光了(池还剩着),
-            # 报成 `budget` 会同时骗两边——告诉读的人这一轮没地方了(不是),
-            # 又藏起唯一能为这份短清单辩护的事实(再翻也没用)。
+            # 诚实披露(T-BF2):这份清单短**不是**因为额度用光了——池确实还剩
+            # 着,这由上面 `rows_left > enum_page_size` 那一条保证(少了它,池
+            # 只剩半页时这句话就成了假话)。报成 `budget` 会同时骗两边:告诉读
+            # 的人这一轮没地方了(不是),又藏起唯一能为这份短清单辩护的事实
+            # (再翻也没用)。
             oversize_sample=oversize,
         )
 
@@ -6255,7 +6319,8 @@ class ReasoningRetriever:
                 # 就会被 ask_service 的 broad except 吞成「整轮检索失败」——
                 # 用户看到的是「依据不足」,而不是「这一个动作没跑」。
                 budget = self._enum_budget(
-                    state, is_sources=is_sources, local_only=local_only,
+                    state, collection=collection, kind=kind,
+                    local_only=local_only, source_id=source_id,
                     rows_left=rows_left, pages_left=pages_left,
                     payload_left=payload_left)
                 if is_elements:

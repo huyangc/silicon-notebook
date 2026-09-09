@@ -27,11 +27,15 @@
 `_first_round_prompt_blocks`(`reasoning_retrieval.py:5023`)改为先取 `collection_catalog.collection_map(nb)` 再 `render_collection_map`,对象存进 `_ReasoningRunState` 新增**带默认值**字段(`_new_run_state` 零改动);新增纯函数 `oversize_source_listing(map_sources, rows_left, factor)`;`_run_enumeration` 里把现有 `EnumerationBudget(...)` 构造收进新方法 `_enum_budget(...)`(净不增长),守卫命中时 `max_rows=min(rows_left, enum_page_size)`;门 `self.reflect_v2_active()`。不自动改范围、不拒绝动作。
 验收:48839/300 场景返回 50 条、`enum_rows_used` 只扣 50、链态 `open`(不是 `conflict`)、`enum:sources` 不在 `complete_enumeration_keys`;84 篇小库逐字节同现状;baseline 三数按实际重算。
 
+**评审后修正(规格 F2/F3、质量 P2-1/P3-1/P3-3/P3-4)**:守卫按集合泛化,纯函数拆成 `enumeration_map_count(map, collection, kind, local_only, source_id)`(分母:`sources`+`all` ⇒ `CollectionMap.sources`;`sources`+`current_notebook` ⇒ `active_sources`;`elements`+kind ⇒ 该 kind 的元素计数;`kg_objects`+type ⇒ 该类型计数;地图缺项或请求收窄到单篇 ⇒ `None` 不触发)与 `oversize_listing(map_count, rows_left)`(倍数是模块常量 `OVERSIZE_LISTING_FACTOR`,不再有只有测试会传的 `factor` 形参)。守卫再加一条 `rows_left > enum_page_size`:池只剩不到一页时它连行数都改不动,而 `oversize_sample` 的「额度没用光」在那一档是假话,自然落回 `TRUNCATED_BUDGET`。`CollectionMap` 本来就带元素 kind 与 KG 类型的计数,所以泛化**不新增任何查询**,也没有留下集合缺口。
+
 ### T-BF2 规模守卫的诚实披露
 `truncated_reason` **新增第四个值 `oversize_sample`**(拍板:开):`collection_enumeration.py` 词表常量、`collection_enumeration_answer._REASON_LABELS`、`frontend/app/answer-panel.tsx::truncatedReasonLabel`(走 `vocabulary.label(map, v, 中性兜底)`,`raw-enum-fallback` 守卫拦 `MAP[x] ?? x`)、`docs/product-and-api*.md` §集合枚举工具「覆盖率合同」段。观察账零改动(`_StepContract("enumerate")` 的 `truncation_keys` 已含 `truncated_reason`)。
 
 ### T-BF3 v2 能力投影补齐规模提示
 `_ENUMERATE_SCOPE_NOTE` 补 legacy `prompts.py:880-885` 对等半句(计数远大于本轮额度 ⇒ 不翻页、按计数+样本作答、建议收窄到一个来源/一节/一个主题),与地图行 `sources: N (current notebook: M)`、`_allowance_suffix` 的 `listing allowance left: R rows` 口径对齐。验收:`_GatedV2LLM` 用例断言该句每轮在 system 段;legacy prompt 一字不动。
+
+**评审后修正(规格 F2、质量 P3-1)**:那半句与集合无关,却挂在只对 `collection="sources"` 有意义的 `scope` 参数上,等于只对一个集合说这句话。改为 `ActionDefinition` 新增**动作级** `note`(`ReflectCapabilities.note_for` 直接读定义,不进按轮收窄的 `params`;`reflect_v2_system_prompt` 渲染在动作描述之后、`arguments` 之前),`_ENUMERATE_SIZE_NOTE` 由两个枚举动作共用,措辞改成「地图行里**这个集合**的计数」;`_ENUMERATE_SCOPE_NOTE` 只留 sources 专属的范围部分。
 
 ### T-BF4 `exact_lookup` 判据前移 + 写进参数说明
 `EXACT_LOOKUP_ACTION` 的 `term` note 写出形状判据(带下划线/点,或连字符+数字),与 `_NOT_A_NAME_NOTE` 共用字面;`_v2_apply_arguments` 的 `exact_lookup` 分支在 `clean_exact_term` 后用 `exact_probe_terms(term, honor_quotes=False)` 预校验,空 ⇒ `_V2ArgumentError("invalid_argument:term")`(零 I/O invalid 观察,`status_for_skip` 已归 `STATUS_INVALID`);预校验路径接同一条 `feed_exact_lookup_skip` 回喂教学句。legacy 执行层分支原样保留。

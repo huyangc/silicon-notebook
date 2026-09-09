@@ -6796,17 +6796,22 @@ def test_v2_projection_carries_the_legacy_oversize_listing_hint(rrepo):
     """v2 能力投影补齐 legacy 的「远大于额度就别翻页」半句(计划 T-BF3)。
 
     legacy prompt 一直说两件事:默认列全范围,**以及**「计数远大于本轮清单额度时
-    不要逐页翻,按计数 + 样本作答并建议收窄」。v2 的 `_ENUMERATE_SCOPE_NOTE` 只搬
-    了前半句,于是模型在一个 48 839 篇的库里读到 sources 计数之后唯一学到的是
-    「默认就该全列」——生产上八次 run 各用一个动作把整轮行池换成一段无序前缀。
+    不要逐页翻,按计数 + 样本作答并建议收窄」。v2 只搬了前半句,于是模型在一个
+    48 839 篇的库里读到 sources 计数之后唯一学到的是「默认就该全列」——生产上八次
+    run 各用一个动作把整轮行池换成一段无序前缀。
+
+    这句话挂在**动作**上而不是 `scope` 参数上(规格评审 F2):`scope` 只对
+    `collection="sources"` 有意义,挂在那里等于只对其中一个集合说这句话,而它
+    与集合无关——所以两个枚举动作各出现一次,措辞里也不再点名 sources。
 
     载荷经真实传输闸(`_GatedV2LLM`),断言看的是**每一轮**的 system 段:这句话
     住在固定半区,一轮都不能缺。两个数的字面同时对账到它们真正的出处,免得
     prompt 里说的名字和模型实际看到的行对不上。
 
-    变异:把 `_ENUMERATE_SCOPE_NOTE` 补的那半句删掉 ⇒ 前两段红;把
-    `_allowance_suffix` 的 `listing allowance left` 改个名而不同步这句话 ⇒
-    第三段红。
+    变异:把 `_ENUMERATE_SIZE_NOTE` 删掉 ⇒ 前两段红;把它挪回 `scope` 参数的
+    note ⇒ 「动作描述与 arguments 之间」那一段红,而且 `enumerate_kg_objects`
+    的份数对不上;把 `_allowance_suffix` 的 `listing allowance left` 改个名而
+    不同步这句话 ⇒ 倒数第三段红。
     """
     from app.core.ask_retrieval_policy import ask_retrieval_limits
     from app.services.prompts import reflect_prompt
@@ -6827,17 +6832,31 @@ def test_v2_projection_carries_the_legacy_oversize_listing_hint(rrepo):
     ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(
         nb.id, "RTL到GDSII流程", "", limits=ask_retrieval_limits("standard"))
 
+    size_note = "动作之前先比两个数"
     assert len(llm.system_prompts) >= 3
     for turn, prompt in enumerate(llm.system_prompts):
-        assert "enumerate_elements" in llm.prompt_actions(turn)
+        actions = llm.prompt_actions(turn)
+        assert "enumerate_elements" in actions
         assert "计数远大于 R 时**不要**逐页翻" in prompt, turn
         assert "按计数 + 几条代表性样本作答" in prompt, turn
         assert "收窄到一个来源、一节或一个主题" in prompt, turn
+        # 每个可用的枚举动作各带一份,不多不少。
+        assert prompt.count(size_note) == len(
+            [name for name in actions if name.startswith("enumerate_")]), turn
+        # 位置:动作描述之后、`arguments` 之前——不是某一格参数的说明。
+        head = (prompt.split("- enumerate_elements:", 1)[1]
+                .split("arguments:", 1)[0])
+        assert size_note in head, turn
+        # 措辞与集合无关:分母是「这个集合的计数」,不点名 sources。
+        assert "sources" not in head, turn
 
     # 两个数的字面必须与真正的出处一致:额度后缀每轮现拼、计数来自集合地图行。
     assert "listing allowance left:" in _allowance_suffix(200)
     assert "listing allowance left: R rows" in llm.system_prompts[0]
-    assert "[Collections in scope] 的 sources 计数" in llm.system_prompts[0]
+    assert ("[Collections in scope] 那一行里**这个集合**的计数"
+            in llm.system_prompts[0])
+    # `scope` 只留 sources 专属的部分:它仍要说清收窄档对账括号里那个数。
+    assert "同一行括号里的那个数" in llm.system_prompts[0]
     map_line = rrepo.collection_catalog.collection_map_text(nb.id)
     assert map_line.startswith("[Collections in scope]")
     assert "sources: " in map_line and "(current notebook: " in map_line
