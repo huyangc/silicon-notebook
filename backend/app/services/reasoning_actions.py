@@ -295,7 +295,16 @@ ACTION_DEFINITIONS: Mapping[str, ActionDefinition] = MappingProxyType({
                                  "它优先于 kind。"),
                 ActionParam("scope", PARAM_ENUM, choices=ENUMERATE_SCOPES,
                             note=_ENUMERATE_SCOPE_NOTE),
-                ActionParam("source_id", PARAM_TEXT, note="可选,限定到一篇。"),
+                # `source_id` **不在**参数表里(计划 T-BF5)。内部来源 id 从不上屏
+                # ——模型能填进这个槽的只可能是猜的,而猜出来的 id 必然不在范围内,
+                # 于是一个本来成立的「列《某某》里的公式」被换成一条 skip。限定单
+                # 一来源只有一种表达方式:按名称给 `source_title`,服务端做一次确定
+                # 性的名字→id 解析(`resolve_source_title`)。
+                #
+                # 下面 `identity_fields` 里的 `source_id` 刻意保留:身份串渲染的是
+                # 服务端解析出来的那个 id(以及 legacy 协议里模型给的那个),它是
+                # 「这两次枚举是不是同一份清单」的真实判据,与"模型能不能填它"是
+                # 两件事。`ReflectDecision.enumerate_source_id` 同理不动。
                 ActionParam("source_title", PARAM_TEXT,
                             note="可选,候选里**逐字**抄来的来源标题。"),
             ),

@@ -218,6 +218,10 @@ _INVALID_REASONS: frozenset = frozenset({
     "missing_new_sub_query", "missing_exact_term", "missing_chain_start",
     "exact_term_not_identifier", "chain_start_not_candidate",
     "enumeration_kind", "enumeration_rejected", "enumeration_conflict",
+    # 明确点名的 source_id 不在检索范围内(v2 下从 `enumeration_rejected` 拆细
+    # 出来)。与 `enumeration_source_unresolved` 同归 invalid:通道好好的,是这
+    # 份载荷点名的那个来源不成立,而模型改用 source_title 就能自己修好。
+    "enumeration_source_not_in_scope",
     "enumeration_source_unresolved", "outline_empty",
     "outline_repair_structure",
     # v2 §7.1:模型宣布证据已足却一个必答方面都没自评,整轮退回并追问一次。

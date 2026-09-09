@@ -50,7 +50,7 @@ from app.services.collection_catalog import (
 )
 from app.services.collection_enumeration import (
     LOCAL_ONLY_SCOPE_SUFFIX, TRUNCATED_CONCURRENT_CHANGE,
-    TRUNCATED_OVERSIZE_SAMPLE, EnumerationBudget,
+    TRUNCATED_OVERSIZE_SAMPLE, EnumerationBudget, SourceNotInScopeError,
 )
 from app.services.prompts import (
     reflect_prompt, reflect_schema_hint, reflect_v2_schema_hint,
@@ -752,6 +752,14 @@ def _v2_apply_enumerate(
         arguments, capabilities.param(action, "scope"))
     if action == ENUMERATE_ELEMENTS_ACTION:
         decision.enumerate_kind = subtype
+        # T-BF5 之后 `source_id` 已不在 v2 的参数表里(投影摘掉了它),但这里**仍
+        # 然读**它——与 `_v2_enum`/`_v2_enumerate_scope` 对"模型看不到的槽位"取默认
+        # 值的纪律不同,而这个不同是刻意的:那两处的默认值执行出来是**同一件事**
+        # (同一份清单的超集/默认档),这里的默认值却是"那就把整个集合列出来",等
+        # 于把一个被限定到单一来源的请求悄悄换成另一个问题的答案(`_run_enumeration`
+        # 对解析失败也是同一条纪律:绝不退成枚举整个库)。模型硬塞一个猜来的 id,
+        # 就在执行层的作用域校验上被拦下并被告知改用 source_title
+        # (`enumeration_source_not_in_scope`),而不是收到一份它没请求过的清单。
         decision.enumerate_source_id = _v2_text(
             arguments, "source_id", required=False)
         decision.enumerate_source_title = _v2_text(
@@ -1222,6 +1230,35 @@ def _collection_label(collection: str, kind: str) -> str:
         _ELEMENT_KIND_LABELS if collection == "elements" else _KG_OBJECT_LABELS
     )
     return f"{table.get(kind, kind)}清单"
+
+
+def _enumeration_rejection(
+    exc: ValueError, label: str, reflect_v2: bool,
+) -> Tuple[str, str]:
+    """执行器拒绝一次枚举 →(稳定原因码, 上屏文案)。
+
+    同一条 `except ValueError` 收的是三件事:未知 kind、被点名的 source_id 不成
+    立、以及被改坏的档位值让 `EnumerationBudget` 拒绝构造。其中**只有**「id 不在
+    检索范围内」是模型自己改得动的——内部来源 id 从不上屏,它填进那个槽的只可能
+    是猜的,而限定单一来源本来就只有一种表达方式(按名称给 `source_title`,服务端
+    做一次确定性解析)。所以这一类拆出自己的原因码,措辞点名那唯一的表达方式;
+    `not enumerable`(memory 合成源)保留原码:那是来源本身的属性,让模型改用名字
+    再问一次只会换回第二次拒绝。
+
+    **假设**(计划 T-BF5,本地无复现样本):生产那 12 次 `enumeration_rejected` 都
+    是「模型猜 source_id」这个形状。待生产 raw `detail.error` 字符串确认;若实为
+    memory 合成源的 not enumerable,该改成解析器侧过滤,而不是换一份措辞。
+
+    `reflect_v2` 门与规模守卫同款,理由也同款:关闭态的 prompt/schema/trace 逐字节
+    不变。legacy 那一臂与 v2 各臂共用同一份基线做 A/B,legacy 的 `skip_reasons`
+    分布不该被这次改动挪动;而 v2 才是那 12 次的产地(它的投影曾把 `source_id`
+    这个槽摆给模型看)。
+    """
+    if isinstance(exc, SourceNotInScopeError) and reflect_v2:
+        return ("enumeration_source_not_in_scope",
+                f"跳过枚举{label}(请求的来源不在检索范围内,"
+                "请按名称给出(source_title))")
+    return ("enumeration_rejected", f"跳过枚举{label}(请求的范围不可用)")
 
 
 # 每轮拼在集合地图行末尾的剩余额度。prompt 让模型「按额度判断值不值得全量」,
@@ -6498,16 +6535,19 @@ class ReasoningRetriever:
             except AskCancelled:
                 raise
             except ValueError as exc:
-                # 两类来源:执行器对「未知 kind / 不在作用域的 source_id」
-                # 抛 ValueError(它把 fail-open 的决定权留给调用方——只有
-                # 这里知道这一轮还能不能继续),以及上面被改坏的档位值让
+                # 两类来源:执行器对「未知 kind / 不在作用域或不可枚举的
+                # source_id」抛 ValueError(它把 fail-open 的决定权留给调用方
+                # ——只有这里知道这一轮还能不能继续),以及上面被改坏的档位值让
                 # EnumerationBudget 拒绝构造。两者都只废掉这一个动作。
                 if self.fail_closed:
                     raise
+                # 三件事里只有「id 不在范围内」是模型自己改得动的,拆细与它的
+                # v2 门都在 `_enumeration_rejection` 一处判(含 T-BF5 的假设)。
+                reason, summary = _enumeration_rejection(
+                    exc, label, self.reflect_v2_active())
                 record(TraceStep(
-                    step_type="skip",
-                    summary=f"跳过枚举{label}(请求的范围不可用)",
-                    detail={"reason": "enumeration_rejected",
+                    step_type="skip", summary=summary,
+                    detail={"reason": reason,
                             "collection": collection, "kind": kind,
                             "error": str(exc)[:120]}))
             except Exception as exc:  # noqa: BLE001 — 同上,清单不是必需品
