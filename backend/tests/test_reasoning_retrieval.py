@@ -11861,17 +11861,25 @@ def test_rerank_step_never_becomes_an_action_observation():
     """`rerank` 是 run 级记账,不是一次动作的执行结果 ⇒ 观察账对它零产出。
 
     它发生在最后一次模型决定**之后**,折成观察会在账上多出一行没有请求与之对应
-    的「动作」。闭集登记本身由
-    `test_observation_contract_covers_every_trace_step_type_in_the_retriever`
-    守住,这条守的是登记之后的行为。
+    的「动作」。
 
-    变异:把 `rerank` 从 `reasoning_observation.NON_ACTION_STEP_TYPES` 里删掉
-    ⇒ 那条漂移守卫先红,这条随后红。
+    变异说明(实测):把 `rerank` 从 `reasoning_observation.NON_ACTION_STEP_TYPES`
+    里删掉,红的是漂移守卫
+    `test_observation_contract_covers_every_trace_step_type_in_the_retriever`
+    ——**这一条不会红**,因为 `TRACE_OBSERVATION_CONTRACT` 里没有 `rerank` 的
+    条目,函数照样落到那句兜底 `return None`。两条断言合起来才是闭集:第一条钉
+    「今天的行为」,第二条钉「哪天真给它写了一份契约,漂移守卫会拦住」——那才是
+    这个 `None` 唯一可能变成一行假观察的路。
     """
     from app.models.schemas import TraceStep
-    from app.services.reasoning_observation import observation_from_step
+    from app.services.reasoning_observation import (
+        NON_ACTION_STEP_TYPES, TRACE_OBSERVATION_CONTRACT,
+        observation_from_step,
+    )
     assert observation_from_step(
         TraceStep(step_type="rerank", summary="重排候选",
                   detail={"queries": 2, "reused": 1, "researched": 1,
                           "researched_ms": 12, "top_n": 20}),
         seq=7, pending=None) is None
+    assert "rerank" in NON_ACTION_STEP_TYPES
+    assert "rerank" not in TRACE_OBSERVATION_CONTRACT
