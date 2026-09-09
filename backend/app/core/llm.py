@@ -857,7 +857,18 @@ class OpenAICompatibleClient:
             # A stream that already delivered its billed usage trailer before the
             # cancellation landed carries it on the exception; that spend is real
             # and must be reported even though no content comes back.
-            usage = _usage_dict(exc)
+            #
+            # Read straight off the exception, NOT through _usage_dict: what
+            # _StreamingAskCancelled carries is the ALREADY-FLATTENED dict this
+            # module produced from the trailer. Re-flattening it looks harmless
+            # and silently drops `cached_tokens`/`reasoning_tokens` — the nested
+            # containers those were lifted out of no longer exist by then, so the
+            # second pass finds nothing and writes nothing. Those two counters are
+            # the entire point of the prefix-reuse measurement, and a cancelled
+            # call is a normal outcome for it (the user hit Stop), so the loss
+            # would be routine and invisible. A plain AskCancelled has no `usage`
+            # at all and yields None.
+            usage = getattr(exc, "usage", None)
             if usage:
                 record["usage"] = usage
             _record_call_stats(

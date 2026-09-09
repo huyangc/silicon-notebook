@@ -714,13 +714,29 @@ def test_call_stats_reports_wall_clock_and_status_on_the_ok_exit(monkeypatch):
 def test_call_stats_reports_wall_clock_and_status_on_the_cancelled_exit(monkeypatch):
     """(T-PS2-a) A cancelled call still spent wall clock and still hit the
     endpoint; dropping it would silently deflate every run-level total, and the
-    billed usage its stream already delivered would vanish with it."""
+    billed usage its stream already delivered would vanish with it.
+
+    The trailer here carries the NESTED detail counters, because those are the
+    ones the prefix-reuse measurement is actually about and a cancelled call is a
+    perfectly ordinary outcome for it (the user pressed Stop). Mutation: flatten
+    the exception's usage a second time (``_usage_dict(exc)``) and both
+    ``cached_tokens`` and ``reasoning_tokens`` disappear — the containers they
+    were lifted out of are already gone, so the second pass finds nothing.
+    """
     cancel_event = threading.Event()
     stream = _Stream(
-        usage=SimpleNamespace(prompt_tokens=13, completion_tokens=5, total_tokens=18),
+        usage=SimpleNamespace(
+            prompt_tokens=13,
+            completion_tokens=5,
+            total_tokens=18,
+            prompt_tokens_details=SimpleNamespace(cached_tokens=6),
+            completion_tokens_details=SimpleNamespace(reasoning_tokens=2),
+        ),
         before_usage=cancel_event.set,
     )
     client = _make(monkeypatch, _FakeCreate([stream]))
+    logger = _RecordingInteractionLogger()
+    client.interaction_logger = logger
     stats = {}
 
     with pytest.raises(llm_mod.AskCancelled):
@@ -736,8 +752,16 @@ def test_call_stats_reports_wall_clock_and_status_on_the_cancelled_exit(monkeypa
     assert stats["attempts_observed"] is True
     assert isinstance(stats["call_wall_ms"], int) and stats["call_wall_ms"] >= 0
     assert stats["usage"] == {
-        "prompt_tokens": 13, "completion_tokens": 5, "total_tokens": 18,
+        "prompt_tokens": 13,
+        "completion_tokens": 5,
+        "total_tokens": 18,
+        "cached_tokens": 6,
+        "reasoning_tokens": 2,
     }
+    # The log and the out-parameter must not tell two different stories about
+    # one cancelled call either.
+    assert logger.records[-1]["status"] == "cancelled"
+    assert logger.records[-1]["usage"] == stats["usage"]
     # No content came back, so there is no response size and no finish reason.
     assert "response_chars" not in stats
     assert "finish_reason" not in stats
