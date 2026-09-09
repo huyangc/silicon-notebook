@@ -312,8 +312,17 @@ def serialize_provider_messages(messages: List[Dict[str, str]]) -> bytes:
 #: this call's provider-side outcome back. The value is a caller-owned mutable
 #: mapping which ``chat_json`` fills in before returning or raising; see
 #: ``_record_call_stats`` for the exact keys (``status``, ``call_wall_ms``,
-#: ``attempts``, ``attempts_observed`` always; ``finish_reason``,
-#: ``response_chars`` and ``usage`` when they exist).
+#: ``attempts``, ``attempts_observed`` on every exit that reaches the sink;
+#: ``finish_reason``, ``response_chars`` and ``usage`` when they exist).
+#:
+#: ``status`` is one of ``ok`` / ``cancelled`` / ``error`` / ``cache_hit``. An
+#: EMPTY sink after a call is itself information, and has exactly two causes:
+#: either the client did not declare ``supports_call_stats`` (a duck-typed double
+#: or a plugin-bound transport — the caller must then treat every field as
+#: unknown, NOT as zero), or ``chat_json`` refused the call before doing any work
+#: at all (unconfigured settings, or a cancellation already pending on entry) and
+#: there is genuinely nothing to report. Both raise or return before any
+#: measurement exists; neither is a dropped observation.
 #:
 #: It exists because ``chat_json`` returns a plain ``str``: an empty completion
 #: and a completion the server cut off at ``max_tokens`` arrive as the SAME empty
@@ -369,11 +378,22 @@ def _record_call_stats(
     below.
 
     ``status`` / ``call_wall_ms`` / ``attempts`` / ``attempts_observed`` are
-    written on EVERY exit, including cancellation and error: a call that died is
-    exactly the one whose duration and request count a run-level report must not
-    silently drop (a cancelled call still consumed wall clock and still hit the
-    endpoint). Everything else is written only when it exists: an absent key
-    means "no observation", never zero.
+    written by every exit that gets here — the four being success, cancellation,
+    error and a response-cache hit. Cancellation and error are the ones worth
+    naming: a call that died is exactly the one whose duration and request count a
+    run-level report must not silently drop (it still consumed wall clock and
+    still hit the endpoint). The two exits that never reach this function are the
+    pre-flight refusals at the top of ``chat_json`` (unconfigured settings, and a
+    cancellation already pending on entry): both raise before any work, so there
+    is no duration, no request and nothing to report — see ``CALL_STATS_KWARG``
+    for how a consumer reads an empty sink.
+
+    Everything else is written only when it exists: an absent key means "no
+    observation", never zero. ``finish_reason`` is the standing exception — the
+    ok exit passes ``finish_reason or ""``, so an empty STRING there means "the
+    provider did not say", mirroring what llm.jsonl has always recorded. Absent
+    and empty therefore differ for that one key: absent means the call never
+    produced a completion at all (it was cancelled or it failed).
 
     ``attempts_observed`` is True because this client counts requests at the
     transport itself. It is not decoration: a duck-typed client that does not
@@ -596,6 +616,14 @@ class OpenAICompatibleClient:
         # — the documented truncation remedy — correctly lands on a different key.
         _mt = max_tokens if max_tokens is not None else self.settings.openai_compat_max_tokens
         effective_max_tokens = _mt if isinstance(_mt, int) and _mt > 0 else None
+        # Started BEFORE the cache lookup, not after it, because the lookup is on
+        # the clock too: the whole point of measuring a served-from-cache call is
+        # to compare its cost against a real one, and a timer that starts after
+        # the store has already answered would report the one exit that costs
+        # almost nothing as costing exactly nothing. Every later exit reads the
+        # same `start`, so the cache probe is inside all of their durations as
+        # well — which is correct: the caller waited for it either way.
+        start = time.perf_counter()
         # Best-effort cache lookup: a cache fault must never break the call.
         # The response cache is OPT-IN (Codex round 6 / user decision): a caller
         # participates ONLY by supplying a response_validator. cache/ckey are
@@ -643,6 +671,27 @@ class OpenAICompatibleClient:
                     if cached is not None and _response_validator_allows(
                         response_validator, cached
                     ):
+                        # The fourth exit, and the only one that reaches no
+                        # provider at all. It writes no llm.jsonl row (it never
+                        # did — there was no interaction to log), but a caller
+                        # holding a sink must still be able to tell "served from
+                        # the local store" apart from "never called", which an
+                        # empty sink cannot express. `attempts=0` is a MEASURED
+                        # zero, not an absent one: this exit is exactly the case
+                        # where the true request count is known to be none.
+                        #
+                        # `status="cache_hit"` names THIS application-level
+                        # response cache — a reply this process stored earlier
+                        # under `llm_key`. It says nothing whatsoever about the
+                        # provider's own prefix cache, whose reuse is reported
+                        # only by `usage.cached_tokens` on the real exits; the two
+                        # must never be read as the same measurement.
+                        _record_call_stats(
+                            call_stats,
+                            status="cache_hit",
+                            wall_ms=round((time.perf_counter() - start) * 1000),
+                            attempts=0,
+                        )
                         return cached
             except Exception:
                 cache, ckey = None, ""
@@ -687,7 +736,6 @@ class OpenAICompatibleClient:
                 ),
             },
         }
-        start = time.perf_counter()
         # Owned here, incremented at the transport (see _create): every exit
         # below reports how many requests this ONE logical call really issued.
         requests = _RequestCount()

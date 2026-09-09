@@ -767,6 +767,66 @@ def test_call_stats_reports_wall_clock_and_status_on_the_cancelled_exit(monkeypa
     assert "finish_reason" not in stats
 
 
+def test_call_stats_reports_the_response_cache_hit_exit(monkeypatch):
+    """(T-PS2-a) The fourth exit: served from this process's own response cache,
+    without reaching any provider.
+
+    An empty sink cannot express "served locally" — it is indistinguishable from
+    "this client does not report stats at all", and a run-level report would then
+    have to treat a free call as an unknown one. `attempts=0` here is a MEASURED
+    zero, the one place where the true request count is known to be none.
+
+    `status="cache_hit"` names the application-level response cache only. The
+    provider's own prefix reuse is a different measurement entirely, reported by
+    `usage.cached_tokens` on the exits that actually call out.
+
+    Mutation: drop the `_record_call_stats` call at this exit and the sink comes
+    back empty, silently merging free calls into the "unknown" bucket.
+    """
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+
+    class _HitCache:
+        def __init__(self, value):
+            self.value = value
+
+        def get(self, _key):
+            return self.value
+
+        def put(self, *_a, **_k):  # pragma: no cover - asserted by never firing
+            raise AssertionError("a hit must not rewrite the entry")
+
+    create = _FakeCreate([_Resp()])
+    client = OpenAICompatibleClient(
+        Settings(_env_file=None),
+        base_url="https://x",
+        api_key="k",
+        model="m",
+        cache=_HitCache('{"cached":1}'),
+    )
+    monkeypatch.setattr(client, "client", lambda: _FakeOpenAI(create))
+    logger = _RecordingInteractionLogger()
+    client.interaction_logger = logger
+    stats = {}
+
+    out = client.chat_json(
+        [{"role": "user", "content": "hi"}],
+        "{}",
+        response_validator=lambda _c: True,
+        call_stats=stats,
+    )
+
+    assert out == '{"cached":1}'
+    assert create.calls == []  # nothing went on the wire
+    assert set(stats) == {"status", "call_wall_ms", "attempts", "attempts_observed"}
+    assert stats["status"] == "cache_hit"
+    assert stats["attempts"] == 0
+    assert stats["attempts_observed"] is True
+    assert isinstance(stats["call_wall_ms"], int) and stats["call_wall_ms"] >= 0
+    # And still no llm.jsonl row: there was no interaction to log, and this exit
+    # must not start inventing one.
+    assert logger.records == []
+
+
 def test_call_stats_reports_wall_clock_and_status_on_the_error_exit(monkeypatch):
     """(T-PS2-a) Error exit: the request WAS issued, so it is counted."""
     create = _FakeCreate([_api_status_error(401, "denied")])
