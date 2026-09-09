@@ -577,14 +577,17 @@ def test_llm_usage_token_totals_are_unknown_when_any_call_lacks_that_counter():
                               "completion_tokens": usage.completion_tokens})
 
 
-def test_new_usage_counters_follow_the_same_unknown_rule_as_the_old_ones():
-    """`_usage_dict` 现在还会写 `cached_tokens` / `reasoning_tokens`,但**只有
-    provider 报了才写**(T-PS2:缺失绝不写 0)。于是窗口里混着「报了」与「没报」
-    两种记录会是常态——而这恰恰是前缀复用实验最关心的那个计数。
+def test_accumulate_treats_a_missing_counter_as_unknown_not_zero():
+    """`_accumulate` 的 unknown 口径基线,直接对着这个纯函数断言。
 
-    累加口径必须与既有两个 token 计数逐字一致:窗口内任一次调用缺该计数 ⇒ 整个
-    run 该计数 unknown。把缺的那次当 0,会让「provider 根本没测」看起来像
-    「测了,复用为零」,这两者在采纳判据里指向相反结论。
+    它不属于某一个具体计数:`slice_llm_usage` 今天只用它累 prompt/completion,
+    将来若开始读 `cached_tokens` / `reasoning_tokens`,用的也必须是同一把尺子
+    ——这个用例钉的是尺子,不是某次读数(此前的名字暗示后者,名不副实)。
+
+    之所以单独钉住:窗口里混着「provider 报了」与「provider 没报」两种记录会是
+    常态(`_usage_dict` 缺字段就不写键,T-PS2:绝不写 0),而把缺的那次当 0,会让
+    「根本没测」看起来像「测了,结果是零」,这两者在采纳判据里指向相反结论。规则
+    因此是:窗口内任一次调用缺该计数 ⇒ 整个 run 该计数 unknown。
     """
     accumulate = importlib.import_module("app.eval.reflect_ab")._accumulate
 

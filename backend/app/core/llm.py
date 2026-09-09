@@ -238,6 +238,13 @@ def provider_messages(
 
     Returns a fresh list; the caller's own message mappings are passed through by
     reference (this function never mutates them).
+
+    Scope: this is THIS client's wrapper. ``app/services/kg/client.py`` keeps a
+    second, hand-written copy of the same system message for the KG extraction
+    transport, which does not go through ``OpenAICompatibleClient`` at all and is
+    not covered by this function or by anything measured on top of it. That copy
+    is a known duplicate, deliberately left where it is; a measurement of the KG
+    path would have to account for it separately rather than assume this one.
     """
     return [
         {
@@ -347,9 +354,11 @@ class _RequestCount:
     two functions: the retry loop in ``chat_json`` and the two ``create()`` calls
     inside ``_stream_chat_content`` (the second one being the ``stream_options``
     rebuild, which today leaves no trace anywhere). ``chat_json`` owns the
-    instance and hands it down, so ``attempts`` counts what actually went on the
-    wire instead of the number of loop iterations — those differ by exactly the
-    silent fallbacks, which is the difference the experiment is trying to see.
+    instance and hands it down, so ``attempts`` counts requests ISSUED instead of
+    the number of loop iterations — those differ by exactly the silent fallbacks,
+    which is the difference the experiment is trying to see. "Issued", not
+    "delivered": see ``_create`` for the one request that is counted without
+    reaching the network.
     """
 
     __slots__ = ("value",)
@@ -489,14 +498,32 @@ class OpenAICompatibleClient:
             )
         return self._client
 
-    def _create(self, requests: _RequestCount, **call_kwargs: Any) -> Any:
-        """Issue ONE provider request and count it.
+    def _create(
+        self, requests: _RequestCount, /, **call_kwargs: Any
+    ) -> Any:
+        """Issue ONE provider request and count it as ATTEMPTED.
 
         The single choke point for every ``chat.completions.create`` in this
         class, so a request cannot be added without being counted. The client is
         resolved BEFORE the tally: a configuration error raised by ``client()``
         means nothing was sent, and counting it would inflate the request count
         with a call that never left the process.
+
+        The tally is deliberately "issued/attempted", not "went on the wire", and
+        one case makes the two differ: a client-side ``response_format``
+        rejection. The SDK can refuse that parameter locally — ``ValueError``,
+        see ``_is_non_http_response_format_rejection`` — after this counter has
+        already ticked, so the plain-mode fallback that follows is recorded as
+        the second of two attempts when only one request truly left the process.
+        Registered rather than fixed: the tally exists to bound the load a
+        deployment places on its endpoint, an over-count of at most one per call
+        is the safe direction for that, and the alternative — counting after
+        ``create`` returns — would UNDER-count every request that was sent and
+        then failed, which is the case the number is most needed for.
+
+        ``requests`` is positional-only so that a provider parameter that happens
+        to be named ``requests`` cannot bind to it instead of travelling in
+        ``call_kwargs``.
         """
         create = self.client().chat.completions.create
         requests.record()
