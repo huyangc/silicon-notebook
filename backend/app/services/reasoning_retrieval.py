@@ -3498,6 +3498,41 @@ class ReasoningRetriever:
             and self.allow_reflect_v2
         )
 
+    def reflect_optimization(self) -> str:
+        """本 run 的 reflect 用哪一档上下文前缀复用策略(前缀复用最终设计 §5.1)。
+
+        **全仓唯一读点**:settings 上那个策略字段除这里之外没有第二处会读。理由与
+        上面那把闸同款——各处自己读一次 settings 的写法,关掉之后总会剩下一处还
+        在跑(枚举闸与 chunk 闸都栽过)。
+
+        它**叠在** `reflect_v2_active()` 之上,不是与它并列:v2 关着时反思走的是
+        legacy 协议,那条路径上根本没有"前缀"这个概念,所以总闸关(以及 Knowhow 用
+        `allow_reflect_v2=False` 单独否决时)一律返回 `off`,配置里写了什么都不看。
+        这样 `off` 与关闭态是同一条字节路径,不需要在下游再判一次"现在是不是
+        legacy"。
+
+        `getattr` 而不是直读:窄测试替身与离线工具里的 duck-typed settings 适配器
+        并不带这个字段(镜像 `reflect_v2_active` 的既有写法),缺省必须是 `off`
+        ——认不出这个开关的调用方绝不该被静默切到新布局上。非法/未实现取值不在
+        这里兜底:那是启动期校验器的事(`validate_reflect_optimization`),运行期
+        再判一次只会把一个配置错误拖成一次静默降级。
+        """
+        if not self.reflect_v2_active():
+            return "off"
+        return str(getattr(self.settings, "reasoning_reflect_optimization", "off"))
+
+    def reflect_measures_context(self) -> bool:
+        """本 run 要不要多算那份纯内存的上下文块长/前缀观测(拍板 Q2)。
+
+        与 `reflect_optimization()` **正交**:`off` 臂也能开着它,对照实验要的正是
+        两条臂用同一把尺子量。但同样叠在 v2 总闸之上——legacy 路径上没有可测的
+        块结构,关闭态一个字节都不多付。
+        """
+        if not self.reflect_v2_active():
+            return False
+        return bool(
+            getattr(self.settings, "reasoning_reflect_measure_context", False))
+
     def _scope_probe_matters(
         self,
         state: "_ReasoningRunState",

@@ -59,6 +59,15 @@ DEFAULT_REFLECT_EVIDENCE_CHARS_BY_EFFORT: "dict[str, int]" = {
 REFLECT_EVIDENCE_CHARS_MIN = 1_000
 REFLECT_EVIDENCE_CHARS_MAX = 64_000
 
+# reflect 上下文前缀复用的部署策略取值(前缀复用最终设计 §5.1)。四格是这个字段
+# 的**最终**闭集,一次写全:它同时是 Literal 的枚举、文档数值表与轨迹投影闭集的
+# 唯一字面量来源。分成"已实现"与"已登记但未实现"两段,是因为后两格要各自等一个
+# 后续 PR 把实现补上——在那之前配上去必须**响亮**失败,而不是静默退回 `off`:
+# 一个以为自己在跑 delta 的部署,拿到的每一条测量都会被归到错误的臂上。
+REFLECT_OPTIMIZATION_IMPLEMENTED = ("off", "prefix_snapshot")
+REFLECT_OPTIMIZATION_PLANNED = ("prefix_delta", "prefix_delta_lean")
+REFLECT_OPTIMIZATIONS = REFLECT_OPTIMIZATION_IMPLEMENTED + REFLECT_OPTIMIZATION_PLANNED
+
 
 def env_file_diagnosis(root: "Path | None" = None) -> "tuple[Path, bool, list[str]]":
     """启动预检用:(期望的 .env 路径, 是否存在, 疑似改名残骸文件名列表)。
@@ -1035,6 +1044,25 @@ class Settings(BaseSettings):
     reasoning_reflect_recent_observations: int = Field(
         6, ge=1, le=20,
         validation_alias="REASONING_REFLECT_RECENT_OBSERVATIONS")
+    # reflect 上下文的**前缀复用策略**(前缀复用最终设计 §5.1),默认 `off` =
+    # 实施基线的 v2 原行为,逐字节不变。它**叠在** `REASONING_REFLECT_V2_ENABLED`
+    # 之上而不是与它并列:v2 总闸关着时反思走的是 legacy 协议,压根没有"前缀"这个
+    # 概念可谈;Knowhow 补全(策略位 `allow_reflect_v2=False`)同理恒 legacy,这一项
+    # 对它无效。判据的**全仓唯一读点**是 `reasoning_retrieval.reflect_optimization()`
+    # ——各处自己读一次 settings 正是"关掉之后总会剩下一处还在跑"的老形状。
+    #
+    # 它也**不是**前端检索档位,更不由档位推导:用户选的是检索深度,不是上下文
+    # 布局。取值闭集见 `REFLECT_OPTIMIZATIONS`;后两格已登记但本期未实现,由下面
+    # 的校验器响亮拒绝(见 `validate_reflect_optimization`)。
+    reasoning_reflect_optimization: Literal[
+        "off", "prefix_snapshot", "prefix_delta", "prefix_delta_lean"
+    ] = Field("off", validation_alias="REASONING_REFLECT_OPTIMIZATION")
+    # 上下文测量开关,与上面那格**正交**:开着时 reflect 每轮多算一份纯内存的
+    # 块长/字节/公共前缀观测,`off` 臂因此也能出 `message_prefix_bytes`——对照实验
+    # 要的正是两条臂用同一把尺子量。默认关:测量本身不改任何 prompt 与决策,但它
+    # 要序列化一份本轮消息,关闭态一个字节都不该多付。
+    reasoning_reflect_measure_context: bool = Field(
+        False, validation_alias="REASONING_REFLECT_MEASURE_CONTEXT")
     # Agentic Memory P1:Agent 对每个笔记本的「已有理解」(共享底座 + 个人覆盖层)
     # 总开关。判据只有一处 —— ``reasoning_retrieval.profile_wiring_active``,注入、
     # 巡固触发、API 可见性与前端显隐四处必须共用它(镜像上面那把枚举闸的教训:
@@ -1632,6 +1660,27 @@ class Settings(BaseSettings):
             previous = raw
             resolved[effort] = raw
         return resolved
+
+    @field_validator("reasoning_reflect_optimization")
+    @classmethod
+    def validate_reflect_optimization(cls, value):
+        """已登记但**尚未实现**的取值必须在启动期就响亮拒绝。
+
+        闭集写全四格(而不是本期只列两格)是刻意的:`REFLECT_OPTIMIZATIONS` 同时
+        是文档数值表与轨迹投影的字面量来源,每放开一格就改一次枚举会让"这个部署
+        跑的是哪一格"在历史轨迹里失去可比性。但**登记 ≠ 可用**——静默把
+        `prefix_delta` 退回 `off` 会让一个自以为在跑增量的部署,把每一条测量都归到
+        错误的臂上;那比启动失败难查得多。
+
+        `mode="after"`(默认):Literal 先把四格之外的拼写挡掉,报的是取值不在闭集;
+        进到这里的一定是四格之一,所以这里只需要说"这一格还没实现"。
+        """
+        if value in REFLECT_OPTIMIZATION_PLANNED:
+            raise ValueError(
+                f"REASONING_REFLECT_OPTIMIZATION={value} 该取值将在后续 PR 实现,"
+                "当前请用 off 或 prefix_snapshot"
+            )
+        return value
 
     @field_validator("database_url", mode="before")
     @classmethod

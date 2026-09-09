@@ -846,6 +846,8 @@ REASONING_REFLECT_EVIDENCE_CHARS_BY_EFFORT # v2 证据卡的按档位字符预�
 REASONING_REFLECT_EXCERPT_CHARS # v2 证据卡里单条证据的原文摘录上限（默认 240；80–1,000）
 REASONING_REFLECT_STATE_CHARS # 只界定**可压缩区**（近期动作观察与历史建议）的投影预算（默认 6,000；1,000–32,000）。它不是整个 prompt 的上限：用户完整问题、冻结约束、当前合法动作与额度、完整大纲/溢出与枚举覆盖各自按自己的边界保留，绝不会为了塞进这个池子被裁尾
 REASONING_REFLECT_RECENT_OBSERVATIONS # 最多回喂几行近期动作观察（默认 6；1–20）。它与 `REASONING_REFLECT_STATE_CHARS` 一起界定 v2 的动作观察账，上面两项证据预算界定 v2 的证据卡。四项都只在 `REASONING_REFLECT_V2_ENABLED` 打开时生效——协议关闭时没有任何代码读取它们（启动期照常校验）
+REASONING_REFLECT_OPTIMIZATION # reflect 上下文的**前缀复用策略**（默认 `off`；四取值 `off / prefix_snapshot / prefix_delta / prefix_delta_lean`）。`off` 是实施基线的 v2 原行为，逐字节不变；`prefix_snapshot` 把每轮 reflect 消息重排成「稳定的协议与静态工具目录在前、逐轮变化的当前状态在末尾」，让上游模型服务有机会复用不变的前缀。后两格**已登记但本期未实现**：配上去会在启动期被响亮拒绝（`该取值将在后续 PR 实现，当前请用 off 或 prefix_snapshot`），而不是静默退回 `off`——一个自以为在跑增量的部署会把每一条测量都归到错误的臂上。它**叠在** `REASONING_REFLECT_V2_ENABLED` 之上：v2 总闸关着时反思走 legacy 协议，根本没有「前缀」可谈，这一项被忽略；Knowhow 智能补全（显式 legacy）同理忽略它。它**不是**前端检索档位，也不由档位推导。判据的全仓唯一读点是 `reasoning_retrieval.reflect_optimization()`
+REASONING_REFLECT_MEASURE_CONTEXT # reflect 上下文的**测量**开关（默认 false），与 `REASONING_REFLECT_OPTIMIZATION` **正交**：开着时每轮多算一份纯内存的块长/字节/公共前缀观测，因此 `off` 臂也能出同一把尺子量出来的数，对照实验才可比。测量不改任何 prompt 与决策；默认关是因为它要序列化一份本轮消息，关闭态不该多付这笔开销。同样叠在 `REASONING_REFLECT_V2_ENABLED` 之上，v2 关闭与 Knowhow 恒不测量
 AGENT_PROFILE_ENABLED        # 「AI 对这个库的理解」总闸：同时管住 plan/reflect 注入、后台巡固触发与两个 API 面的可见性（默认 true；false 处处逐字回到接入前——不注入、不记 trace 步、不排巡固，API 返回 enabled=false 而非 404）
 AGENT_PROFILE_BASE_TRIGGER   # 共享底座层（corpus_shape/key_entities/corpus_gaps）重新巡固前累计的来源变更次数（默认 5）
 AGENT_PROFILE_OVERLAY_TRIGGER # 该成员私有覆盖层（retrieval_notes/usage_gaps）重新巡固前累计的已完成提问次数；已完成的深度报告直接达阈（默认 10）

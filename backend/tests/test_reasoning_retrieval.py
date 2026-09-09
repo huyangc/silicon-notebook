@@ -5577,6 +5577,158 @@ def test_reflect_scalar_budgets_are_bounded(monkeypatch, name, value):
         Settings(_env_file=None)
 
 
+# ---------------------------------------------------------------------------
+# T-PS6 前缀复用策略位与它的单点判定(前缀复用最终设计 §5.1、计划拍板 Q1/Q2)
+# ---------------------------------------------------------------------------
+
+
+def test_reflect_optimization_settings_default_to_the_baseline():
+    """两个新 Settings 的默认值:策略 `off`、测量关——本期不改任何生产行为。"""
+    from app.core.config import Settings
+    s = Settings(_env_file=None)
+    assert s.reasoning_reflect_optimization == "off"
+    assert s.reasoning_reflect_measure_context is False
+
+
+def test_reflect_optimization_env_roundtrip(monkeypatch):
+    """本期真正可用的那一格,以及与它正交的测量开关。"""
+    from app.core.config import Settings
+    monkeypatch.setenv("REASONING_REFLECT_OPTIMIZATION", "prefix_snapshot")
+    monkeypatch.setenv("REASONING_REFLECT_MEASURE_CONTEXT", "true")
+    s = Settings(_env_file=None)
+    assert s.reasoning_reflect_optimization == "prefix_snapshot"
+    assert s.reasoning_reflect_measure_context is True
+
+
+@pytest.mark.parametrize("value", ["prefix_delta", "prefix_delta_lean"])
+def test_reflect_optimization_rejects_the_unimplemented_values(
+    monkeypatch, value
+):
+    """已登记但未实现的两格:启动期**响亮**拒绝,不静默退回 `off`(拍板 Q1)。
+
+    静默降级会让一个自以为在跑增量的部署把每一条测量都归到错误的臂上——那比
+    启动失败难查得多。措辞也钉住:错误里必须说出"该用哪两格",否则运维只知道
+    配错了、不知道配什么。
+
+    变异:把 `validate_reflect_optimization` 的 `raise` 换成 `return "off"`
+    (或整个校验器删掉)⇒ 这条红。
+    """
+    from app.core.config import Settings
+    monkeypatch.setenv("REASONING_REFLECT_OPTIMIZATION", value)
+    with pytest.raises(Exception) as excinfo:
+        Settings(_env_file=None)
+    text = str(excinfo.value)
+    assert "该取值将在后续 PR 实现" in text
+    assert "off 或 prefix_snapshot" in text
+
+
+def test_reflect_optimization_rejects_a_value_outside_the_closed_set(
+    monkeypatch
+):
+    """闭集之外的拼写由 Literal 挡住:报的是"不在取值范围",不是"未实现"。"""
+    from app.core.config import Settings
+    monkeypatch.setenv("REASONING_REFLECT_OPTIMIZATION", "prefix_snapshoot")
+    with pytest.raises(Exception) as excinfo:
+        Settings(_env_file=None)
+    assert "该取值将在后续 PR 实现" not in str(excinfo.value)
+
+
+@pytest.mark.parametrize("configured", [
+    "off", "prefix_snapshot", "prefix_delta", "prefix_delta_lean",
+])
+@pytest.mark.parametrize("v2_on", [True, False])
+def test_reflect_optimization_is_gated_by_the_v2_master_switch(
+    rrepo, configured, v2_on
+):
+    """四取值 × v2 开/关矩阵:总闸关着时恒 `off`,配了什么都不看。
+
+    这一项**叠在** v2 之上而不是与它并列:总闸关着走的是 legacy 协议,那条路径
+    上根本没有"前缀"可谈。四格全测(包括本期未实现的两格)是刻意的:这条钉的是
+    **门**,不是取值合法性——未实现取值由启动期校验器拦(上面那条),运行期再兜
+    一次底只会把一个配置错误拖成静默降级。
+
+    变异:把 `reflect_optimization()` 里的 `if not self.reflect_v2_active()`
+    去掉 ⇒ v2 关的那四格全红。
+    """
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    rrepo.settings.reasoning_reflect_v2_enabled = v2_on
+    # 未实现取值在生产里进不了 Settings(校验器拦着),这里直接赋值只为把「门」
+    # 与「取值合法性」两件事分开测。
+    rrepo.settings.reasoning_reflect_optimization = configured
+    rr = ReasoningRetriever.from_repository(
+        rrepo, rrepo.settings, fail_closed=True)
+    assert rr.reflect_optimization() == (configured if v2_on else "off")
+
+
+def test_reflect_optimization_policy_bit_can_veto_the_deployment_switch(rrepo):
+    """调用方策略位(Knowhow 用的那一个)单独否决:与总闸同款合取语义。
+
+    变异:把 `reflect_optimization()` 的门从 `reflect_v2_active()` 换成直读
+    `settings.reasoning_reflect_v2_enabled` ⇒ 这条红。
+    """
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    rrepo.settings.reasoning_reflect_v2_enabled = True
+    rrepo.settings.reasoning_reflect_optimization = "prefix_snapshot"
+    rrepo.settings.reasoning_reflect_measure_context = True
+    rr = ReasoningRetriever.from_repository(
+        rrepo, rrepo.settings, fail_closed=True)
+    assert rr.reflect_optimization() == "prefix_snapshot"
+    assert rr.reflect_measures_context() is True
+    rr.allow_reflect_v2 = False
+    assert rr.reflect_optimization() == "off"
+    assert rr.reflect_measures_context() is False
+
+
+def test_reflect_optimization_falls_back_to_off_on_duck_typed_settings():
+    """离线工具/窄替身的 duck-typed settings 缺这两个字段 ⇒ `off` + 不测量。
+
+    镜像 `reflect_v2_active` 的既有写法:认不出这个开关的调用方绝不该被静默切到
+    新布局上,也不该被迫多付一次序列化。
+
+    变异:把两个 `getattr(...)` 换成直读属性 ⇒ 这条以 AttributeError 红。
+    """
+    from types import SimpleNamespace
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    probe = ReasoningRetriever.__new__(ReasoningRetriever)
+    # 生产实现只读这两样(镜像 knowhow 那条守卫的装配口径)。
+    probe.settings = SimpleNamespace(reasoning_reflect_v2_enabled=True)
+    probe.allow_reflect_v2 = True
+    assert probe.reflect_v2_active() is True
+    assert probe.reflect_optimization() == "off"
+    assert probe.reflect_measures_context() is False
+
+
+def test_reflect_optimization_has_exactly_one_settings_read_point():
+    """`reasoning_reflect_optimization` 的读点全仓只有一个。
+
+    这条不是洁癖:各处自己读一次 settings 正是"关掉之后总会剩下一处还在跑"的
+    老形状(枚举闸与 chunk 闸都栽过)。测量开关同理。允许出现的地方只有
+    `config.py` 的字段定义与 `reasoning_retrieval.reflect_optimization()` /
+    `reflect_measures_context()` 各自那一行 `getattr`。
+    """
+    import pathlib
+    root = pathlib.Path(__file__).resolve().parents[1] / "app"
+    for field_name, reader in (
+        ("reasoning_reflect_optimization", "reflect_optimization"),
+        ("reasoning_reflect_measure_context", "reflect_measures_context"),
+    ):
+        hits = []
+        for path in root.rglob("*.py"):
+            for number, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), 1
+            ):
+                if field_name in line and not line.lstrip().startswith("#"):
+                    hits.append((path.relative_to(root).as_posix(), number))
+        modules = {name for name, _ in hits}
+        assert modules <= {"core/config.py", "services/reasoning_retrieval.py"}, (
+            f"{field_name} 出现在了登记之外的模块:{sorted(modules)}")
+        retrieval_hits = [row for row in hits
+                          if row[0] == "services/reasoning_retrieval.py"]
+        assert len(retrieval_hits) == 1, (
+            f"{field_name} 在 reasoning_retrieval 里读了 {len(retrieval_hits)} "
+            f"次,唯一读点应当只在 {reader}()")
+
+
 def _full_house_facts(**overrides):
     """一组"什么都开着、预算都还有"的事实,单项覆盖后即为被测条件。"""
     from app.services.collection_catalog import (
