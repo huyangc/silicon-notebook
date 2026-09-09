@@ -266,11 +266,15 @@ def serialize_provider_messages(messages: List[Dict[str, str]]) -> bytes:
     is a literal byte prefix of the whole — which is what makes a common-prefix
     length meaningful. This is a client-side structural metric only: it is NOT a
     provider cache key and says nothing about what the provider actually reused.
+
+    A non-mapping element raises rather than serializing as empty: for a
+    measurement function, silently emitting plausible-looking bytes for input it
+    did not understand is worse than failing.
     """
     out = bytearray()
     for message in messages:
         for field in ("role", "content"):
-            raw = message.get(field, "") if isinstance(message, dict) else ""
+            raw = message.get(field, "")
             blob = ("" if raw is None else str(raw)).encode("utf-8")
             out += str(len(blob)).encode("ascii")
             out += b":"
@@ -470,6 +474,11 @@ class OpenAICompatibleClient:
         gets back to chat_json the stream is already closed. OpenAI-compatible
         usage has the same lifetime and normally arrives on a final chunk whose
         ``choices`` is empty, so it must be captured before that chunk is skipped.
+
+        ``requests`` is ``chat_json``'s per-call request tally, handed down
+        because the ``stream_options`` rebuild below is a second real request
+        that leaves no log record of its own; it is a required argument so a new
+        request site here cannot forget to be counted.
         """
         raise_if_cancelled(cancel_event)
         call_kwargs: Dict[str, Any] = {**kwargs, **req_kwargs, "stream": True}
