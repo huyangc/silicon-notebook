@@ -521,6 +521,11 @@ _INVALID_TOOL_CALL_MARKERS: tuple[str, ...] = ("invalid", "unavailable", "duplic
 #: 臂凭空多出一批不存在的「坏工具调用」。整份形状不成立的那一族(同一个前缀、
 #: 后缀不在那个闭集里)仍然计入:那一轮真的整轮作废、工具一次都没打出去。
 #: ⚠ 这一列因此在 T-BF7 前后不可比,首份报告须说明(计划 §5)。
+#:
+#: ⚠ **`skip_reasons` 里这几项数的是「轮」不是「方面」**(T-BF7 评审 P2 起,逐方面
+#: 拒绝每轮只记一条 skip 步,条数在那条步的 detail `count` 里)。本列只用它做
+#: **排除**、不做加减,所以口径变化不影响这一列的值;真要数「拒了几个方面」看 T0
+#: 投影的 `assessment_rejections`(它按 `count` 累加)。两处都不再数一遍轨迹。
 _NOT_A_TOOL_CALL_REASONS: frozenset[str] = (
     frozenset({"kg_unavailable"}) | ASSESSMENT_REJECTION_REASONS
 )

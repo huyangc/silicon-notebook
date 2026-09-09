@@ -922,6 +922,34 @@ def test_analysis_output_has_no_free_text_keys(tmp_path, capsys):
                 assert metric in RUN_PROJECTION_KEYS, metric
 
 
+def test_analysis_consumes_every_scalar_projection_key():
+    """投影里每一个**标量**键都要被某一组指标消费掉(T-BF7 评审 F4)。
+
+    `RUN_PROJECTION_KEYS` 是写侧的闭集,聚合器的四组指标是读侧;写侧加了键、读侧
+    忘了加,那一列就在报告里静默缺席——`assessment_rejections` 与 `scope_narrowed`
+    正是这么漏掉的。下面按「投影行里出现过的键」反查,身份/分组键与结构化键
+    (dict/list)显式豁免。
+
+    变异:把 `assessment_rejections` 或 `scope_narrowed` 从指标元组里删掉 ⇒ 这条红。
+    """
+    from app.domain.reasoning_trace_stats import RUN_PROJECTION_KEYS
+
+    covered = set(
+        analyze.NUMERIC_METRICS + analyze.BOOLEAN_METRICS
+        + analyze.CATEGORICAL_METRICS + analyze.COUNTER_METRICS)
+    # 身份/分组维度(它们是分格依据,不是被聚合的指标)与自由文本身份。
+    dimensions = {
+        "consumer", "mode", "effort", "kg_in_scope", "policy_version",
+        "corpus_cell", "question_key", "notebook_bucket", "section_index",
+        "merge_key", "requested_mode",
+    }
+    # 结构化键:值是 dict/list,四组标量指标按定义都吃不下它们。
+    structured = {"citation_contribution", "action_seq"}
+    missing = RUN_PROJECTION_KEYS - covered - dimensions - structured
+    assert not missing, sorted(missing)
+    assert {"assessment_rejections", "scope_narrowed"} <= covered
+
+
 def test_quantiles_are_withheld_below_min_samples(tmp_path, capsys):
     source = _write_rows(tmp_path / "rows.jsonl", [_row() for _ in range(3)])
     js = tmp_path / "t0.json"

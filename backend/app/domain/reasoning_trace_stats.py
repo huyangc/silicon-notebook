@@ -772,27 +772,38 @@ def project_run(
 def _assessment_rejections(steps: Sequence[Mapping]) -> int:
     """这次 run 里**逐方面**被拒的自评条数(一个方面一条)。
 
-    ⚠ **口径与 `skip_reasons` 有意重叠,合计时不要把两者相加。** 同一件事在两处
-    各记一次:`skip_reasons` 数的是轨迹里每一条 skip 步(逐方面拒绝与整份形状
-    错误共用 `invalid_assessment:` 前缀,所以两族都在里面),这一列只数逐方面
-    那一族。因此:
+    ⚠ **口径与 `skip_reasons` 有意重叠,但两者数的东西不同,合计时不要相加。**
+    逐方面被拒的自评**每轮只记一条 skip 步**(见
+    `services.reasoning_retrieval._note_assessment_rejections`:一轮里 16 个方面
+    全写错也只有一条,条数在 detail 的 `count` 里)。因此:
 
-    * 逐方面拒了几个方面 = 这一列;
+    * 逐方面拒了几个**方面** = 这一列(按 `count` 累加);
+    * 逐方面拒过的**轮数** = `skip_reasons` 里后缀属于 `ASPECT_REJECTION_REASONS`
+      的那几项之和;
     * 因为自评而**整轮作废**了几次 = `skip_reasons` 里全部 `invalid_assessment:*`
-      之和 − 这一列。
+      之和 − 上一条。
 
-    分成两列而不是换一套原因码,是为了让 T-BF7 前后的 `skip_reasons` 序列仍然
-    可比(词面不变),同时又能把「一个方面没被采纳」与「一整轮白烧」分开数——
-    T-BF7 之前它们是同一个数,之后不是。
+    分成两列而不是换一套原因码,是为了让 T-BF7 前后的 `skip_reasons` 词面仍然
+    连续,同时又能把「一个方面没被采纳」与「一整轮白烧」分开数——T-BF7 之前它们
+    是同一个数,之后不是。
+
+    `count` 缺席的行按 1 计:T-BF7 与本次评审修复之间落盘的轨迹是「一个方面一条
+    skip」的旧形状,那时一条就是一个方面,按 1 计正好等价。
 
     legacy run 走不到这里(调用方按 `policy_version` 判),所以这里恒返回一个
     真实计数,不返回 unknown。
     """
     return sum(
-        1 for step in steps
+        _rejection_count(step["detail"]) for step in steps
         if step["step_type"] == "skip"
         and _reason(step["detail"]) in ASSESSMENT_REJECTION_REASONS
     )
+
+
+def _rejection_count(detail: Mapping) -> int:
+    """一条逐方面拒绝 skip 步代表几个方面。旧形状(无 `count`)恒 1。"""
+    raw = _int(detail.get("count"))
+    return raw if raw is not None and raw > 0 else 1
 
 
 def _unrecovered_channels(steps: Sequence[Mapping]) -> int | None:

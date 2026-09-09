@@ -45,6 +45,10 @@ NUMERIC_METRICS: tuple[str, ...] = (
     "candidates_kg", "candidates_chunks", "candidates_elements",
     "included_kg", "included_chunks", "included_elements",
     "aspects_total", "aspects_pending", "aspects_undelivered",
+    # 「这次 run 有几个方面的自评没被服务端采纳」(v2-only,legacy 恒 unknown ⇒
+    # 落进 n_missing 而不是被当成 0)。它与 `skip_reasons` 里的
+    # `invalid_assessment:*` 不是同一个数:那边数轮,这边数方面。
+    "assessment_rejections",
     "unrecovered_channels_count",
     "section_total", "report_depth", "attempted", "attempted_failed",
     "top_relevance",
@@ -53,6 +57,10 @@ NUMERIC_METRICS: tuple[str, ...] = (
 BOOLEAN_METRICS: tuple[str, ...] = (
     "stale_breaker", "trace_truncated", "has_intent_contract",
     "grounded", "failed",
+    # 三值(True/False/None)照样进得来:`None` 不是 bool,所以它落进 n_missing
+    # 而不是被当成 False——「这道题没声明范围」与「声明了但解析不到」因此分得开。
+    # 线上导出恒不写这个键,那时整组的 n_observed 是 0,不影响任何别的指标。
+    "scope_narrowed",
 )
 #: 枚举指标:报取值分布(含 unknown 一格)。
 CATEGORICAL_METRICS: tuple[str, ...] = (

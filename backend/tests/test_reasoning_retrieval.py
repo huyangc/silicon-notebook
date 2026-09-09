@@ -6120,12 +6120,19 @@ def test_v2_assessment_status_enum_comes_from_one_constant():
     assert "|".join(ASPECT_UNRESOLVED_STATUSES) in prompt
     ledger = _ledger("问题一")
     for status in ASPECT_UNRESOLVED_STATUSES:
-        assert ledger.apply(
+        accepted = ledger.apply(
             {"unresolved": [{"aspect_id": "a1", "status": status}]},
-            allowed_keys=set()).error == "", status
-    assert ledger.apply(
+            allowed_keys=set())
+        # 白名单内的三个值都**一条拒绝都不产生**:只断言 `error` 的话,一次把它们
+        # 误判进逐方面那一族的回归照样绿(评审 P3)。
+        assert (accepted.error, accepted.rejections) == ("", ()), status
+    # 白名单外的 status 按**方面**拒(T-BF7 评审 F3:这一行归属哪个方面已经确定,
+    # 一个写错的 status 不该吞掉整轮),原因码词面不变。
+    outcome = ledger.apply(
         {"unresolved": [{"aspect_id": "a1", "status": "supported"}]},
-        allowed_keys=set()).error == "invalid_status"
+        allowed_keys=set())
+    assert (outcome.error, outcome.accepted, outcome.rejections) == (
+        "", (), (("a1", "invalid_status"),))
 
 
 def test_v2_tolerates_but_does_not_consume_assessment():
@@ -8592,7 +8599,8 @@ def _ledger(*questions, constraints=()):
 def test_assessment_is_optional_and_absence_is_not_invalid():
     """`assessment` 是同一次 reflect 的**附加**结果:只给动作不算 invalid。"""
     ledger = _ledger("问题一")
-    assert ledger.apply({}, allowed_keys={"k1"}).error == ""
+    outcome = ledger.apply({}, allowed_keys={"k1"})
+    assert (outcome.error, outcome.accepted, outcome.rejections) == ("", (), ())
     assert ledger.snapshot()[0].status == "unknown"
 
 
@@ -8605,9 +8613,11 @@ def test_assessment_only_accepts_keys_that_were_actually_shown():
     from app.domain.retrieval_termination import DEMOTION_KEYS_REJECTED
     ledger = _ledger("问题一")
     # 展示过的只有 k1;k2 在池子里但从没渲染进任何一轮 prompt。
-    assert ledger.apply(
+    # 非法键走的是**剔除+降级**,不是拒绝:`rejections` 必须是空的(评审 P3)。
+    outcome = ledger.apply(
         {"supported": [{"aspect_id": "a1", "evidence_keys": ["k2"]}]},
-        allowed_keys={"k1"}).error == ""
+        allowed_keys={"k1"})
+    assert (outcome.error, outcome.rejections) == ("", ())
     row = ledger.snapshot()[0]
     assert row.evidence_keys == () and row.status != "supported"
     assert row.demotion == DEMOTION_KEYS_REJECTED
@@ -8681,10 +8691,13 @@ def test_run_level_assessment_rejects_a_key_only_shown_by_the_outline_summary(
 def test_assessment_keeps_only_the_legal_half_of_a_mixed_key_list():
     """非法键**剔除**而不是拒整份:抄错一个键不该作废它对别的方面的判断。"""
     ledger = _ledger("问题一", "问题二")
-    assert ledger.apply({"supported": [
+    outcome = ledger.apply({"supported": [
         {"aspect_id": "a1", "evidence_keys": ["k1", "编的", "k2"]},
         {"aspect_id": "a2", "evidence_keys": ["k2"]},
-    ]}, allowed_keys={"k1", "k2"}).error == ""
+    ]}, allowed_keys={"k1", "k2"})
+    # 剔除**不产生拒绝**:两个方面都照常落账(评审 P3)。
+    assert (outcome.error, outcome.accepted, outcome.rejections) == (
+        "", ("a1", "a2"), ())
     rows = ledger.snapshot()
     assert rows[0].evidence_keys == ("k1", "k2") and rows[0].status == "supported"
     assert rows[1].status == "supported"
@@ -8740,30 +8753,28 @@ def test_assessment_bounds_are_rejected_with_a_stable_reason():
     整份形状那一族仍是全有或全无(账本一个字都不改,调用方整轮折成 invalid);
     逐方面那一族只拒那一个方面,同一份载荷里另一个合法方面照常落账。
 
+    整份那一族只剩「读不出这一行归属哪个方面」的三条,外加一道防超大载荷的硬
+    上限(T-BF7 评审 F3/P1)。
+
     变异:把 `evidence_keys_overflow` / `gap_overflow` / `unknown_aspect` /
-    `duplicate_aspect` 中任意一条从 `ASPECT_REJECTION_REASONS` 里删掉 ⇒ 它落进
-    `error`,下面「a2 照常落账」那一半当场红。
+    `duplicate_aspect` / `invalid_status` / `gap_not_string` /
+    `evidence_keys_not_list` / `evidence_key_not_string` 中任意一条从
+    `ASPECT_REJECTION_REASONS` 里删掉 ⇒ 它落进 `error`,下面「a2 照常落账」那一半
+    当场红。
     """
     from app.domain.retrieval_termination import (
         ASPECT_REJECTION_REASONS,
         REFLECT_ASPECT_GAP_MAX_CHARS, REFLECT_ASPECT_MAX_EVIDENCE_KEYS,
     )
     allowed = {f"k{n}" for n in range(20)}
-    # 整份形状不成立:账本一格不动。
+    # 整份形状不成立:账本一格不动。`supported_overflow` 只剩防超大载荷那一档
+    # (2 个方面 ⇒ 上限 8 行),它不再表达任何语义判断。
     integral = {
         "not_object": [],
         "supported_not_list": {"supported": {"aspect_id": "a1"}},
-        "supported_overflow": {"supported": [
-            {"aspect_id": "a1"}, {"aspect_id": "a1"}, {"aspect_id": "a1"}]},
+        "supported_overflow": {
+            "supported": [{"aspect_id": "a1"}] * 9},
         "item_not_object": {"supported": ["a1"]},
-        "evidence_keys_not_list": {"supported": [
-            {"aspect_id": "a1", "evidence_keys": "k1"}]},
-        "evidence_key_not_string": {"supported": [
-            {"aspect_id": "a1", "evidence_keys": [1]}]},
-        "invalid_status": {"unresolved": [
-            {"aspect_id": "a1", "status": "supported"}]},
-        "gap_not_string": {"unresolved": [
-            {"aspect_id": "a1", "status": "partial", "gap": 1}]},
     }
     for why, payload in integral.items():
         ledger = _ledger("问题一", "问题二")
@@ -8780,6 +8791,10 @@ def test_assessment_bounds_are_rejected_with_a_stable_reason():
             "aspect_id": "a1",
             "evidence_keys": [f"k{n}" for n in
                               range(REFLECT_ASPECT_MAX_EVIDENCE_KEYS + 1)]},
+        # 行级字段错误(F3):这一行归属哪个方面已经确定,所以只拒这一个方面。
+        "evidence_keys_not_list": {"aspect_id": "a1", "evidence_keys": "k1"},
+        "evidence_key_not_string": {"aspect_id": "a1", "evidence_keys": [1]},
+        "gap_not_string": {"aspect_id": "a1", "gap": 1},
     }
     for why, bad in per_aspect.items():
         ledger = _ledger("问题一", "问题二")
@@ -8794,17 +8809,21 @@ def test_assessment_bounds_are_rejected_with_a_stable_reason():
         assert rows[0].status == "unknown", why       # a1 保留旧状态
         assert rows[1].status == "supported", why     # 合法的那一格照常落账
 
-    # `gap_overflow` 同族(它只可能出现在 unresolved 那一组)。
-    ledger = _ledger("问题一", "问题二")
-    outcome = ledger.apply({"unresolved": [
-        {"aspect_id": "a1", "status": "partial",
-         "gap": "缺" * (REFLECT_ASPECT_GAP_MAX_CHARS + 1)},
-        {"aspect_id": "a2", "status": "partial", "gap": "还缺条件"},
-    ]}, allowed_keys=allowed)
-    assert outcome.error == ""
-    assert outcome.rejections == (("a1", "gap_overflow"),)
-    assert ledger.snapshot()[0].status == "unknown"
-    assert ledger.snapshot()[1].gap == "还缺条件"
+    # `gap_overflow` / `invalid_status` 同族(它们只可能出现在 unresolved 那一组)。
+    for why, bad in (
+        ("gap_overflow", {"aspect_id": "a1", "status": "partial",
+                          "gap": "缺" * (REFLECT_ASPECT_GAP_MAX_CHARS + 1)}),
+        ("invalid_status", {"aspect_id": "a1", "status": "supported"}),
+    ):
+        ledger = _ledger("问题一", "问题二")
+        outcome = ledger.apply({"unresolved": [
+            bad, {"aspect_id": "a2", "status": "partial", "gap": "还缺条件"},
+        ]}, allowed_keys=allowed)
+        assert why in ASPECT_REJECTION_REASONS, why
+        assert outcome.error == "", why
+        assert outcome.rejections == (("a1", why),), why
+        assert ledger.snapshot()[0].status == "unknown", why
+        assert ledger.snapshot()[1].gap == "还缺条件", why
 
 
 def test_over_limit_aspect_is_disclosed_once_and_never_truncated():
@@ -8856,7 +8875,10 @@ def test_assessment_bounds_do_not_truncate_user_content():
     # 恰好压线的 gap 通过;多一个字符那个方面被拒(不是被截短)。
     fits = {"unresolved": [{"aspect_id": "a1", "status": "partial",
                             "gap": "缺" * REFLECT_ASPECT_GAP_MAX_CHARS}]}
-    assert ledger.apply(fits, allowed_keys=set()).error == ""
+    outcome = ledger.apply(fits, allowed_keys=set())
+    # 压线的那一份**一条拒绝都没有**——差一个字符就是 `gap_overflow`(评审 P3)。
+    assert (outcome.error, outcome.accepted, outcome.rejections) == (
+        "", ("a1",), ())
 
 
 def test_identical_duplicate_aspect_rows_are_deduplicated_deterministically():
@@ -8943,10 +8965,11 @@ def test_a_rejected_aspect_does_not_swallow_the_turns_retrieval(rrepo):
                and t.detail.get("query") == "这一轮该被执行"
                for t in result.trace)
     assert any(c.chunk_id == "ck-x1" for c in result.chunks)
-    # 2) 方面账只改合法那一格;越界的 a1/a9 一格都没动。
+    # 2) 方面账只改合法那一格。a1 没出现在这份载荷里,所以它保持 unknown;越界的
+    #    a9 根本不是这个账本的 id,一格都碰不到。
     statuses = [row.status for row in result.termination.aspects]
     assert statuses == ["unknown", "supported"]
-    # 3) 原因码词面延续(评估口径),而且**一个方面一条**。
+    # 3) 原因码词面延续(评估口径),而且这一轮**只记一条**。
     assert _skip_reasons(result).count("invalid_assessment:unknown_aspect") == 1
     # 4) 下一轮的方面块披露一次,且只有一次。
     blocks = [_aspect_block(llm, turn) for turn in range(len(llm.user_prompts))]
@@ -8955,6 +8978,224 @@ def test_a_rejected_aspect_does_not_swallow_the_turns_retrieval(rrepo):
     lines = llm.observation_lines(1)
     assert sum("这一轮该被执行" in row for row in lines) == 1, lines
     assert not any("invalid_assessment" in row for row in lines), lines
+
+
+def test_a_closing_turn_whose_assessment_lands_nothing_is_pushed_back(rrepo):
+    """收尾轮的自评**逐方面全被拒** ⇒ 与彻底沉默同样处理:退回一次并追问。
+
+    这是 T-BF7 引进的一个洞(评审 P1):逐方面解耦之后,一份收尾载荷可以带着满满
+    几行自评而一格都没落账。按"载荷里有没有行"过闸的话,`_nudge_missing_assessment`
+    当场放行、run 立刻收尾——追问没了,那几条「服务端未采纳」的披露也永远等不到
+    下一轮渲染,模型连自己哪里写错了都不知道。基线(T-BF7 之前)在这份构造上是
+    整轮 invalid + 一轮追问,HEAD 上却只剩一轮。
+
+    变异:`_nudge_missing_assessment` 的判据改回只看 `assessment_is_empty`
+    (不看 `accepted`)⇒ 追问轮消失、方面块的披露一次都不出现,这条红。
+    """
+    from app.domain.retrieval_termination import TERMINATION_MODEL_SUFFICIENT
+    from app.services.reasoning_aspects import ASPECT_ASSESSMENT_NUDGE
+
+    llm, result = _v2_aspect_run(
+        rrepo,
+        intent_detail={"mandatory_topics": ["问题一", "问题二"]},
+        reflects=[
+            # 两行都写了白名单外的 status ⇒ 两个方面各被拒,`accepted` 为空。
+            _answer(assessment={"unresolved": [
+                {"aspect_id": "a1", "status": "yes"},
+                {"aspect_id": "a2", "status": "nope"}]}),
+            _answer(assessment={"supported": [
+                {"aspect_id": "a1", "evidence_keys": ["ck-q0"]},
+                {"aspect_id": "a2", "evidence_keys": ["ck-q0"]}]}),
+        ],
+    )
+    # 1) 真的退回了一轮:两条记账各按各的口径出现一次。
+    assert "missing_assessment" in _skip_reasons(result)
+    assert _skip_reasons(result).count("invalid_assessment:invalid_status") == 1
+    # 2) 追问与被拒披露一起落在**下一轮**的方面块里——它们本来就是同一件事的两
+    #    半:"你这一轮的自评我一格都没收下,原因在这里"。
+    assert len(llm.user_prompts) == 2
+    assert ASPECT_ASSESSMENT_NUDGE.format(ids="a1、a2") in llm.user_prompts[1]
+    block = _aspect_block(llm, 1)
+    assert block.count("服务端未采纳: invalid_status") == 2
+    # 3) 终态与基线一致:补上自评的那一轮照常收尾。
+    assert result.termination.reason == TERMINATION_MODEL_SUFFICIENT
+    assert [row.status for row in result.termination.aspects] == [
+        "supported", "supported"]
+
+
+def test_a_fully_rejected_assessment_never_answers_the_nudge():
+    """`_commit` 只在**真的落账**时清追问位,不看"这一轮有没有行"。
+
+    追问那两格问的是「模型有没有交上一份自评」;一份逐方面全被拒的载荷在账本上
+    留下的读数与沉默逐字相同,清掉追问等于替它答了一次。
+
+    变异:`_commit` 的 `if planned:` 改成 `if planned or rejected or unknown`
+    ⇒ 这条红(追问位被一份一格都没落账的载荷清掉)。
+    """
+    ledger = _ledger("问题一")
+    assert ledger.note_missing_assessment() is True
+    assert ledger.nudge_pending is True
+    outcome = ledger.apply(
+        {"supported": [{"aspect_id": "a9"}]}, allowed_keys=set())
+    assert outcome.accepted == ()
+    assert ledger.nudge_pending is True and ledger.nudge_answered is False
+    # 对照:哪怕只落账一个方面,追问就算被回应了。
+    assert ledger.apply(
+        {"supported": [{"aspect_id": "a1"}]}, allowed_keys=set()).accepted == (
+            "a1",)
+    assert ledger.nudge_pending is False and ledger.nudge_answered is True
+
+
+def test_the_group_row_cap_no_longer_races_deduplication():
+    """组内行数上限挪到规划**之后**,只剩防超大载荷那一档(评审 P1)。
+
+    原来的判据 `len(rows) > len(self._records)` 落在 `_plan_row` 之前,于是 §6
+    要求的「同一方面完全相同的重复项确定性去重」在结构上根本走不到:重复项天然
+    多占一行,一个单方面的账收到两条逐字相同的 supported 就整份作废。
+
+    变异:把 `_group_row_cap(...)` 改回 `len(self._records)` ⇒ 前两段全红。
+    """
+    row = {"aspect_id": "a1", "evidence_keys": ["k1"]}
+    # 单方面账 + 两条完全相同的 supported:去重落账,不是整份作废。
+    single = _ledger("问题一")
+    outcome = single.apply(
+        {"supported": [dict(row), dict(row)]}, allowed_keys={"k1"})
+    assert (outcome.error, outcome.accepted, outcome.rejections) == (
+        "", ("a1",), ())
+    assert single.snapshot()[0].status == "supported"
+    # N 个方面 + N+1 行(其中一条是重复项):落账 N 个。
+    pair = _ledger("问题一", "问题二")
+    outcome = pair.apply({"supported": [
+        dict(row), {"aspect_id": "a2", "evidence_keys": ["k1"]}, dict(row),
+    ]}, allowed_keys={"k1"})
+    assert (outcome.error, outcome.accepted, outcome.rejections) == (
+        "", ("a1", "a2"), ())
+    # 超大载荷仍整份拒:2 个方面 ⇒ 上限 4×2 = 8 行。
+    flood = _ledger("问题一", "问题二")
+    assert flood.apply(
+        {"supported": [dict(row)] * 9}, allowed_keys={"k1"}
+    ).error == "supported_overflow"
+    # 方面多的时候由绝对上限(64)兜住,不是 4×16 之外还能再涨。
+    many = _ledger(*[f"问题{n}" for n in range(16)])
+    assert many.apply(
+        {"supported": [{"aspect_id": "a1"}] * 64}, allowed_keys=set()
+    ).error == ""
+    assert many.apply(
+        {"supported": [{"aspect_id": "a1"}] * 65}, allowed_keys=set()
+    ).error == "supported_overflow"
+
+
+def test_duplicate_assessment_rows_do_not_void_the_turns_retrieval(rrepo):
+    """run 级(评审 P1):单方面账 + 两条逐字相同的 supported ⇒ 检索照常发出。
+
+    变异:把 `_group_row_cap(...)` 改回 `len(self._records)` ⇒ 那一轮被整份折成
+    `invalid_assessment:supported_overflow`,检索一次都没发,这条红。
+    """
+    _, result = _v2_aspect_run(
+        rrepo,
+        intent_detail={"mandatory_topics": ["问题一"]},
+        reflects=[
+            {"next_action": "search_chunks", "sufficient": False,
+             "arguments": {"query": "这一轮该被执行"},
+             "assessment": {"supported": [
+                 {"aspect_id": "a1", "evidence_keys": ["ck-q0"]},
+                 {"aspect_id": "a1", "evidence_keys": ["ck-q0"]}]},
+             "reason": "两条逐字相同的自评"},
+            _answer(assessment={"supported": [
+                {"aspect_id": "a1", "evidence_keys": ["ck-q0"]}]}),
+        ],
+        chunk_results={"完整问题": [_chunk_hit("ck-q0")],
+                       "这一轮该被执行": [_chunk_hit("ck-x1")]},
+    )
+    assert any(t.step_type == "search_chunks"
+               and t.detail.get("query") == "这一轮该被执行"
+               for t in result.trace)
+    assert any(c.chunk_id == "ck-x1" for c in result.chunks)
+    # 去重之后账本只落一格,而且一条拒绝都没有。
+    assert not any(reason.startswith("invalid_assessment:")
+                   for reason in _skip_reasons(result))
+    assert result.termination.aspects[0].status == "supported"
+
+
+def test_a_row_level_field_fault_rejects_only_that_aspect(rrepo):
+    """run 级(评审 F3):a1 写错 `status` + a2 合法 + 一个合法 `search_chunks`。
+
+    带着**已知 aspect_id** 的行级字段错误(`invalid_status` 这一族)不再整轮
+    作废:检索照常发出、a2 照常落账、只有 a1 被拒并在下一轮披露。
+
+    变异:`_plan_row` 的 `invalid_status` 改回返回空 `aspect_id`(或把它从
+    `ASPECT_REJECTION_REASONS` 里删掉)⇒ 整轮折成 invalid,前两条断言红。
+    """
+    llm, result = _v2_aspect_run(
+        rrepo,
+        intent_detail={"mandatory_topics": ["问题一", "问题二"]},
+        reflects=[
+            {"next_action": "search_chunks", "sufficient": False,
+             "arguments": {"query": "这一轮该被执行"},
+             "assessment": {"unresolved": [
+                 {"aspect_id": "a1", "status": "yes"},
+                 {"aspect_id": "a2", "status": "partial", "gap": "还缺条件"}]},
+             "reason": "a1 的 status 写错了"},
+            _answer(assessment={"supported": [
+                {"aspect_id": "a1", "evidence_keys": ["ck-q0"]},
+                {"aspect_id": "a2", "evidence_keys": ["ck-q0"]}]}),
+        ],
+        chunk_results={"完整问题": [_chunk_hit("ck-q0")],
+                       "这一轮该被执行": [_chunk_hit("ck-x1")]},
+    )
+    assert any(t.step_type == "search_chunks"
+               and t.detail.get("query") == "这一轮该被执行"
+               for t in result.trace)
+    assert any(c.chunk_id == "ck-x1" for c in result.chunks)
+    assert _skip_reasons(result).count("invalid_assessment:invalid_status") == 1
+    # 下一轮的方面块披露一次:a1 未采纳,a2 的缺口照常落在账上。
+    blocks = [_aspect_block(llm, turn) for turn in range(len(llm.user_prompts))]
+    assert sum("服务端未采纳: invalid_status" in block for block in blocks) == 1
+    assert sum("缺口: 还缺条件" in block for block in blocks) >= 1
+
+
+def test_a_turn_of_rejections_is_booked_as_one_skip_step_with_counts(rrepo):
+    """一轮里拒了几个方面 ⇒ **一条** skip 步,条数与原因分布在 detail 里(P2)。
+
+    协议上限允许一份自评带 16 个方面,一次形状笔误因此能在一轮里造出 16 条逐字
+    相同的 skip 步:轨迹上一片重复行,观察账的近 N 行窗口被它挤空,而它们讲的是
+    同一件事。合并之后信息一条不少。
+
+    变异:`_note_assessment_rejections` 改回逐条 `defer(...)` ⇒ 第一条断言红。
+    """
+    _, result = _v2_aspect_run(
+        rrepo,
+        intent_detail={"mandatory_topics": ["问题一", "问题二"]},
+        reflects=[
+            {"next_action": "search_chunks", "sufficient": False,
+             "arguments": {"query": "这一轮该被执行"},
+             "assessment": {"unresolved": [
+                 {"aspect_id": "a1", "status": "yes"},
+                 {"aspect_id": "a2", "status": "nope"},
+                 {"aspect_id": "a9"}]},
+             "reason": "三条都不成立"},
+            _answer(assessment={"supported": [
+                {"aspect_id": "a1", "evidence_keys": ["ck-q0"]},
+                {"aspect_id": "a2", "evidence_keys": ["ck-q0"]}]}),
+        ],
+        chunk_results={"完整问题": [_chunk_hit("ck-q0")],
+                       "这一轮该被执行": [_chunk_hit("ck-x1")]},
+    )
+    steps = [t for t in result.trace if t.step_type == "skip"
+             and str(t.detail.get("reason", "")).startswith(
+                 "invalid_assessment:")]
+    assert len(steps) == 1
+    detail = steps[0].detail
+    # 主因取第一条被拒的原因码,与 `_mark_rejected` 只记第一个原因码同源。
+    assert detail["reason"] == "invalid_assessment:invalid_status"
+    assert detail["rejections"] == {"invalid_status": 2, "unknown_aspect": 1}
+    assert detail["count"] == 3
+    assert detail["aspect_ids"] == ["a1", "a2"]
+    assert "3" in steps[0].summary
+    # 模型的自由文本(清单外的方面 id)一个字都不进轨迹。
+    assert "a9" not in json.dumps(detail, ensure_ascii=False)
+    # 那次检索照常发出,而且观察账上仍然只有它自己那一行。
+    assert any(c.chunk_id == "ck-x1" for c in result.chunks)
 
 
 def test_a_rejected_aspect_skip_lands_right_after_its_reflect_step(rrepo):
@@ -8986,6 +9227,31 @@ def test_a_rejected_aspect_skip_lands_right_after_its_reflect_step(rrepo):
     assert types[index - 1] == "reflect"
     # 检索那一步紧随其后:这条记账没有插到动作与它的决定中间。
     assert types[index + 1] == "search_chunks"
+
+
+def test_defer_relies_on_run_booking_nothing_between_note_turn_and_reflect():
+    """`defer` 的正确性靠 `run()` 里一段**没有记账点**的代码,源码级钉住它。
+
+    `_TraceRecorder.defer` 的整份安全性论证只有一句话:`_v2_note_turn(...)` 与它
+    后面那条 `record(TraceStep(step_type="reflect", …))` 之间没有任何别的记账,
+    所以排队的 skip 一定紧跟那条 reflect 步落定。这是一条**隐式**耦合——两者相隔
+    十几行、中间还夹着 `reflect_detail` 的组装,谁在中间插一句 `record(...)`
+    (比如给"这一轮引导过大纲"补一条步),排队的那条 skip 就会安静地落到别人后面,
+    而现有用例只钉相对顺序、钉不住"中间没有第三方"。
+
+    行为级用例做不到这一点:插进来的那条记账如果本身合法,轨迹只是多一步,
+    `types[index - 1] == "reflect"` 反而仍然成立(排队步跟着新那条走)。所以这里
+    读源码。
+
+    变异:在 `run()` 的这两句之间加任何一句 `record(...)` ⇒ 这条红。
+    """
+    import inspect
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    source = inspect.getsource(ReasoningRetriever.run)
+    start = source.index("self._v2_note_turn(")
+    end = source.index('record(TraceStep(step_type="reflect"', start)
+    assert "record(" not in source[start:end], source[start:end]
 
 
 def test_trace_recorder_defer_lands_after_the_next_step_at_zero_cost(
@@ -9789,8 +10055,11 @@ def test_t4_skip_reason_codes_are_classified():
         NON_ACTION_SKIP_REASONS, STATUS_INVALID, is_non_action_skip,
         status_for_skip,
     )
-    for why in ("not_object", "item_not_object", "invalid_status",
-                "supported_not_list"):
+    # 整份那一族只剩「读不出这一行归属哪个方面」的三条 + 防超大载荷的硬上限
+    # (T-BF7 评审 F3/P1:`invalid_status` 等四条行级字段错误已经挪进逐方面那族)。
+    for why in ("not_object", "item_not_object", "supported_not_list",
+                "supported_overflow"):
+        assert why not in ASPECT_REJECTION_REASONS, why
         reason = f"invalid_assessment:{why}"
         assert status_for_skip(reason) == STATUS_INVALID, why
         assert not is_non_action_skip(reason), why
@@ -9814,9 +10083,10 @@ def test_a_rejected_aspect_skip_step_produces_no_action_observation():
         action_id="search_chunks", request="布局收敛", purpose="继续查",
         budget_left="剩余步数 3")
     step = TraceStep(
-        step_type="skip", summary="未采纳一条方面自评（本轮动作照常执行）",
+        step_type="skip", summary="未采纳 1 条方面自评（本轮动作照常执行）",
         detail={"reason": "invalid_assessment:duplicate_aspect",
-                "aspect_id": "a1"})
+                "rejections": {"duplicate_aspect": 1}, "count": 1,
+                "aspect_ids": ["a1"]})
     assert observation_from_step(step, seq=1, pending=pending) is None
     # 对照:整份形状那一族照常折出一条 invalid 观察。
     step.detail["reason"] = "invalid_assessment:item_not_object"
