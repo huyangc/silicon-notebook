@@ -315,6 +315,44 @@ def test_v2_synthesis_keys_are_projected():
     assert (row["aspects_total"], row["aspects_pending"],
             row["aspects_undelivered"]) == (5, 1, 2)
     assert row["anchors"] == 3
+    # v2 却一条都没被拒 ⇒ 0(而不是 unknown):这条 run 真的数过。
+    assert row["assessment_rejections"] == 0
+
+
+def test_assessment_rejections_counts_aspects_not_voided_turns():
+    """`assessment_rejections` 只数**逐方面**被拒的那一族(T-BF7)。
+
+    ⚠ 它与 `skip_reasons` 有意重叠:同一条逐方面拒绝在两处各记一次。两列合起来
+    才分得开「拒了几个方面」与「整轮作废了几次」——后者 = `skip_reasons` 里全部
+    `invalid_assessment:*` 之和 − 这一列。**不要把两列相加。**
+
+    变异:把整份形状那一族也计进来 ⇒ 这条红(会数成 3)。
+    """
+    steps = [
+        step("skip", {"reason": "invalid_assessment:unknown_aspect"}),
+        step("skip", {"reason": "invalid_assessment:gap_overflow",
+                      "aspect_id": "a2"}),
+        # 整份形状不成立 ⇒ 那一轮真的整轮作废,不计进这一列。
+        step("skip", {"reason": "invalid_assessment:item_not_object"}),
+        step("synthesis", {"termination_reason": "model_partial"}),
+    ]
+    row = project_run(JOB, steps, PAYLOAD)
+    assert row["policy_version"] == "v2"
+    assert row["assessment_rejections"] == 2
+    assert sum(
+        count for reason, count in row["skip_reasons"].items()
+        if reason.startswith("invalid_assessment:")
+    ) - row["assessment_rejections"] == 1        # 整轮作废了 1 次
+
+
+def test_assessment_rejections_is_unknown_on_a_legacy_run():
+    """legacy 没有这本账:恒 unknown,不折成 0。
+
+    0 会被 A/B 读成「legacy 这一列表现更好」,而它其实**结构上**不可能有值。
+    """
+    row = project_run(JOB, [step("ppr", {"found": 1})], PAYLOAD)
+    assert row["policy_version"] == "legacy"
+    assert row["assessment_rejections"] is None
 
 
 # --- 引用贡献(§4.4) --------------------------------------------------------

@@ -33,6 +33,10 @@ from app.domain.retrieval_experience import (
     SITUATION_UNKNOWN,
     closed_value,
 )
+from app.domain.retrieval_termination import (
+    ASPECT_REJECTION_REASONS,
+    ASSESSMENT_SKIP_REASON_PREFIX,
+)
 
 UNKNOWN = SITUATION_UNKNOWN
 
@@ -76,6 +80,7 @@ RUN_PROJECTION_KEYS: frozenset[str] = frozenset({
     "aspects_total",
     "aspects_pending",
     "aspects_undelivered",
+    "assessment_rejections",
     "unrecovered_channels_count",
     "candidates_kg",
     "candidates_chunks",
@@ -142,6 +147,16 @@ NON_ACTION_STEP_TYPES: frozenset[str] = frozenset({
 #: `test_reasoning_trace_stats.py::test_termination_skip_reason_matches_service`
 #: 当场打红。
 TERMINATION_SKIP_REASON = "retrieval_termination"
+
+#: 「这条 skip 是一次**逐方面**被拒的自评」的原因码全集。整份形状不成立的那一族
+#: 共用同一个前缀但后缀不在这里,所以两者分得开(见
+#: `app.domain.retrieval_termination.ASPECT_REJECTION_REASONS`)。这一份是
+#: import 来的,不是抄的字面量:同为 domain,没有 `TERMINATION_SKIP_REASON`
+#: 那条「domain 不许 import services」的顾虑。
+ASSESSMENT_REJECTION_REASONS: frozenset[str] = frozenset(
+    f"{ASSESSMENT_SKIP_REASON_PREFIX}{code}"
+    for code in ASPECT_REJECTION_REASONS
+)
 
 #: 无图披露步的原因码。`kg_gap_unavailable`(缺口回想通道不可用)刻意不在其中:
 #: 那是一个动作通道的可用性,不是「这个库有没有图」。
@@ -726,6 +741,9 @@ def project_run(
         "aspects_total": _terminal_detail(normalized, "aspects_total"),
         "aspects_pending": _terminal_detail(normalized, "aspects_pending"),
         "aspects_undelivered": _terminal_detail(normalized, "aspects_undelivered"),
+        "assessment_rejections": (
+            _assessment_rejections(normalized) if policy_version == "v2"
+            else None),
         "unrecovered_channels_count": _unrecovered_channels(normalized),
         "candidates_kg": _terminal_detail(normalized, "kg"),
         # ⚠ 今天的 `answer` 步 detail 只有 `kg` / `elements` / `chains` /
@@ -749,6 +767,32 @@ def project_run(
     assert_closed(row)
     assert_projection_values(row)
     return row
+
+
+def _assessment_rejections(steps: Sequence[Mapping]) -> int:
+    """这次 run 里**逐方面**被拒的自评条数(一个方面一条)。
+
+    ⚠ **口径与 `skip_reasons` 有意重叠,合计时不要把两者相加。** 同一件事在两处
+    各记一次:`skip_reasons` 数的是轨迹里每一条 skip 步(逐方面拒绝与整份形状
+    错误共用 `invalid_assessment:` 前缀,所以两族都在里面),这一列只数逐方面
+    那一族。因此:
+
+    * 逐方面拒了几个方面 = 这一列;
+    * 因为自评而**整轮作废**了几次 = `skip_reasons` 里全部 `invalid_assessment:*`
+      之和 − 这一列。
+
+    分成两列而不是换一套原因码,是为了让 T-BF7 前后的 `skip_reasons` 序列仍然
+    可比(词面不变),同时又能把「一个方面没被采纳」与「一整轮白烧」分开数——
+    T-BF7 之前它们是同一个数,之后不是。
+
+    legacy run 走不到这里(调用方按 `policy_version` 判),所以这里恒返回一个
+    真实计数,不返回 unknown。
+    """
+    return sum(
+        1 for step in steps
+        if step["step_type"] == "skip"
+        and _reason(step["detail"]) in ASSESSMENT_REJECTION_REASONS
+    )
 
 
 def _unrecovered_channels(steps: Sequence[Mapping]) -> int | None:
