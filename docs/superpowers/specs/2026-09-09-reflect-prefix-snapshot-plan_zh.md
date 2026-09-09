@@ -41,6 +41,8 @@
 落点 `llm.py:360-370`。抽模块级纯函数 `provider_messages(messages, response_schema_hint) -> list[dict]`,`chat_json` 自己调用它,`llm_key`(`417-422`)照旧;加确定性 `serialize_provider_messages(msgs) -> bytes`(role/content 带正文不可伪造的分隔符,UTF-8)。
 验收:抽取前后发出的 messages 逐字节相同;`llm_key` 不变;零 I/O。用例:(a) 输出 = wrapper + 调用方消息;(b) 序列化幂等;(c) 只改末尾 content 时公共前缀 = 前面全部字节;(d) `test_llm_client.py` 全绿。
 
+**评审后修正(2026-09-09):长度头移到帧尾。** 首版帧形是 `<len>:<bytes>`,长度在字段之前。T-PS8 的消息形状是 `system(S)` + **一条** `user(C+K+D+T)`,只有 T 逐轮变;长度头因此先于它所计的字节分叉——T 的字节数一变,user 帧刚开头的十进制头就不同,C+K+D 那几千个完全相同的字节全落在分叉点之后,`message_prefix_bytes` 塌回 system 帧长(对照实测 720 vs 真实 3134)。改为 `<bytes>:<len>:`,role 与 content 同形各一格。单射性由**从右向左**的解析给出:末尾一个 `:`,向左扫十进制得 n,再一个 `:` 闭合字段,其前 n 字节即该字段,循环左移;所有结构字节都由端点计数定位、不在正文里搜索,正文因此仍伪造不出边界。每条消息的固定开销 = `len(role) + len(str(len(role))) + len(str(len(content))) + 4` 字节,其中只有 content 自身的长度与它两侧的冒号落在 content 之后——T-PS3 据此算前缀时,**能进入公共前缀的固定开销是 `len(role) + len(str(len(role))) + 2`**(system 消息 `system:6:` 共 9 字节,user 消息 `user:4:` 共 7 字节),content 那一格的 `:<len>:` 不进。
+
 ### T-PS2 `call_stats` 承载单次调用全部必有观测
 落点 `llm.py:185-198、481、566-568、612-632`、`_usage_dict`(`69-86`);`model_provider.py:528-529、556` 转发闸不变。
 新增 `call_wall_ms`(三条出口都写)、`status`(`ok|cancelled|error`)、`response_chars`(不经 clip)、`usage`(dict,缺字段缺键)、`attempts`(四个 `.create()` 点 `301/308/508/526` 各 +1,计数器由 `chat_json` 持有并传进 `_stream_chat_content`)、`attempts_observed`。`_usage_dict` 读 `cached_tokens`/`reasoning_tokens`,缺失不写键(绝不写 0),同步进 `record["usage"]`;llm.jsonl 加 `response_chars`、`attempts`(数值)。
@@ -78,7 +80,7 @@
 验收(§12):同 run 额度耗尽/方面变化/轮数增长 ⇒ S、C 字节不变;最终消息检查覆盖 wrapper,S/C 开头无动态值;P 与 off 冻结输入下同一批证据事实与执行限制;T 的 `allowed_actions` 与 `parse_reflect_v2` 白名单同源;`unavailable_action:*` 计数两模式可读;off 与关闭态字节等价;Knowhow/legacy 不受影响。用例:(a) `_V2ContextLLM` 加 `system_prompt(turn)`/`turn_state_block(turn)` 取值器,额度耗尽多轮 run 断言 S、C 不变;(b) 方面 unresolved→supported ⇒ C 不变 T 变;(c) 还原 provider-facing 消息含 wrapper;(d) 冻结 fixture 上证据键集/可用动作/额度逐项相等;(e) 选目录有、T 无的动作 ⇒ `unavailable_action:<既有 reason>` 零 I/O 观察、循环继续(过 `_GatedV2LLM`);(f) `nudge_pending` 只消费一次且在 T。
 
 ### T-PS9 文档与门
-`docs/deployment-and-configuration_zh.md:848`/`.md:1047` 之后新增 `REASONING_REFLECT_OPTIMIZATION`(默认 off、四取值、本期两格、v2 关与 Knowhow 忽略、不是前端档位、预告 `REASONING_REFLECT_RECENT_OBSERVATIONS` 在 delta 模式 = 重建 K 时保留几条,以及独立测量开关);`docs/product-and-api_zh.md:1408/1422`、`.md:1947/1961` 补 P 模式分块与稳定性口径(合同不变);`architecture.md:111` 补静态目录产地与 `reflect_optimization()` 唯一读点、登记 `reflect_context_bench.py`;`scripts/README.md:488` 附近补第二维臂与 `EVENT_LOG_DIR` 隔离。不改 AGENTS/CLAUDE。
+`docs/deployment-and-configuration_zh.md:848`/`.md:1047` 之后新增 `REASONING_REFLECT_OPTIMIZATION`(默认 off、四取值、本期两格、v2 关与 Knowhow 忽略、不是前端档位、预告 `REASONING_REFLECT_RECENT_OBSERVATIONS` 在 delta 模式 = 重建 K 时保留几条,以及独立测量开关);`docs/product-and-api_zh.md:1408/1422`、`.md:1947/1961` 补 P 模式分块与稳定性口径(合同不变);**llm.jsonl 字段契约**——在「`finish_reason` 无条件写进 LLM 调用日志」那一级(`_zh.md:1452`/`.md:1991`)补 `attempts`(这一次逻辑调用真正发出的请求数,只在终态行,`status="retry"` 行不带,按行累加会重复计入同一次调用)与 `response_chars`(交还给调用方的正文长度,不经 `LLM_LOG_MAX_CHARS` 截断),中英成对,只加数值键;`architecture.md:111` 补静态目录产地与 `reflect_optimization()` 唯一读点、登记 `reflect_context_bench.py`;`scripts/README.md:488` 附近补第二维臂与 `EVENT_LOG_DIR` 隔离。不改 AGENTS/CLAUDE。
 
 依赖:T-PS1→T-PS2→T-PS3;T-PS6→T-PS7→T-PS8;T-PS4 依赖 T-PS3;T-PS5 依赖 T-PS2+T-PS4+T-PS6;T-PS9 收尾。两条链可并行,T-PS5 汇合。
 
