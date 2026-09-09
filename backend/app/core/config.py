@@ -1678,7 +1678,7 @@ class Settings(BaseSettings):
         if value in REFLECT_OPTIMIZATION_PLANNED:
             raise ValueError(
                 f"REASONING_REFLECT_OPTIMIZATION={value} 该取值将在后续 PR 实现,"
-                "当前请用 off 或 prefix_snapshot"
+                "当前请用 " + " 或 ".join(REFLECT_OPTIMIZATION_IMPLEMENTED)
             )
         return value
 

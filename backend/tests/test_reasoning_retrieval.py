@@ -5590,6 +5590,30 @@ def test_reflect_optimization_settings_default_to_the_baseline():
     assert s.reasoning_reflect_measure_context is False
 
 
+def test_reflect_optimization_closed_set_is_registered_once():
+    """字段的 Literal 枚举 = 登记的闭集,且"已实现/待实现"恰好把它二分。
+
+    闭集是文档数值表与后续轨迹投影(T-PS4 的 `OPTIMIZATIONS`)的字面量来源;
+    枚举与登记两处各写一份的话,放开一格时总会漏掉一处。
+
+    变异:往 Literal 里加一格而不登记(或反过来)⇒ 这条红。
+    """
+    import typing
+    from app.core.config import (
+        REFLECT_OPTIMIZATION_IMPLEMENTED, REFLECT_OPTIMIZATION_PLANNED,
+        REFLECT_OPTIMIZATIONS, Settings,
+    )
+    annotation = Settings.model_fields["reasoning_reflect_optimization"]\
+        .annotation
+    assert typing.get_args(annotation) == REFLECT_OPTIMIZATIONS
+    assert (REFLECT_OPTIMIZATION_IMPLEMENTED + REFLECT_OPTIMIZATION_PLANNED
+            == REFLECT_OPTIMIZATIONS)
+    assert not (set(REFLECT_OPTIMIZATION_IMPLEMENTED)
+                & set(REFLECT_OPTIMIZATION_PLANNED))
+    assert Settings.model_fields["reasoning_reflect_optimization"].default == (
+        REFLECT_OPTIMIZATION_IMPLEMENTED[0])
+
+
 def test_reflect_optimization_env_roundtrip(monkeypatch):
     """本期真正可用的那一格,以及与它正交的测量开关。"""
     from app.core.config import Settings
