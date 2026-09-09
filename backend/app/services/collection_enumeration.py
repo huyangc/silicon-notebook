@@ -130,17 +130,23 @@ from app.services.source_scope import scoped_participants
 TRUNCATED_BUDGET = "budget"
 TRUNCATED_PAYLOAD = "payload"
 TRUNCATED_CONCURRENT_CHANGE = "concurrent_change"
-# The fourth value, added with the oversize-roster guard (计划 T-BF2).  It is a
+# The fourth value, added with the oversize-listing guard (计划 T-BF2).  It is a
 # DIFFERENT statement from "budget", which is why it is not folded into it: the
 # run's allowance was NOT spent — the caller deliberately asked for one sample
 # page because the collection is far larger than anything this run could list,
-# and the rest of the pool is still there for the next action.  Reporting that
-# as "ran out of allowance" would be a lie in both directions: it tells the
-# reader the run is out of room (it is not) and it hides the only fact that
+# and MORE than that page is still in the pool for the next action.  Reporting
+# that as "ran out of allowance" would be a lie in both directions: it tells
+# the reader the run is out of room (it is not) and it hides the only fact that
 # makes the short list defensible (paging further would not have helped).
 # Set by the CALLER through ``EnumerationBudget.oversize_sample`` — this module
 # never decides that a collection is too big, it only reports honestly which
-# ceiling it was handed.
+# ceiling it was handed.  Which means the caller owns the "still in the pool"
+# half of that claim too: it must NOT set the flag when the pool holds no more
+# than the single page it is asking for, because there the two reasons describe
+# the same fact and "the allowance was not spent" is simply false.  That is
+# ``ReasoningRetriever._enum_budget``'s ``rows_left > enum_page_size`` guard
+# condition, and it is why a shrinking pool falls back to ``TRUNCATED_BUDGET``
+# on its own.
 TRUNCATED_OVERSIZE_SAMPLE = "oversize_sample"
 
 # 「这个数是从多大的一片资料里数出来的」——``local_only`` 清单的范围后缀,**唯一
@@ -245,6 +251,11 @@ class EnumerationBudget:
     list, and only the caller knows which one it just created.  Every other
     ceiling keeps its own reason: a payload or page stop is still that stop
     even on a sampling call.
+
+    Setting it when ``max_rows`` is everything the run had left is a caller
+    bug this class cannot detect (see ``TRUNCATED_OVERSIZE_SAMPLE``): the two
+    reasons would then be the same fact, and the one the flag picks would be
+    the false one.
     """
 
     page_size: int

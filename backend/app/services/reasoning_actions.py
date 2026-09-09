@@ -121,6 +121,13 @@ class ActionDefinition:
     #: 依赖条件的稳定名字,仅供文档/测试对照 —— 真正的判据在
     #: ``build_reflect_capabilities`` 里,一处实现。
     depends_on: Tuple[str, ...] = ()
+    #: **动作级**的一句话说明,渲染在动作描述之后、参数行之前。参数级的 ``note``
+    #: 说的是「这一格该填什么」,这里说的是「这个动作整体上该怎么用」——一句与
+    #: 任何单个参数都不绑定的话(例如「先看清单有多大再决定要不要列」)挂到某个
+    #: 参数上,就只会对填了那个参数的请求生效。与本轮事实无关,所以它不进
+    #: ``ReflectCapabilities.params`` 那份按轮收窄的结果,由
+    #: ``ReflectCapabilities.note_for`` 直接读定义。
+    note: str = ""
 
 
 _QUERY_PARAM = ActionParam(
@@ -133,28 +140,39 @@ _QUERY_PARAM = ActionParam(
 #: 问题明确在问「当前笔记本」时才收窄。它只对 ``collection="sources"`` 有意义,
 #: 另两个集合的执行器根本没有这个参数。
 #:
-#: 第二半句(「先比两个数」)是 legacy ``prompts.py`` 那段 "Use the [Collections
-#: in scope] counts to decide BEFORE acting … do NOT try to page through it —
-#: answer with the count, a few representative examples, and an explicit
-#: suggestion to narrow the request (one source, one section, one topic)" 的对等
-#: 表述。v2 的能力投影此前只搬了前半句「默认列全范围」,于是模型在一个 48 839 篇
-#: 的库里读到 sources 计数之后,唯一学到的是「默认就该全列」——生产上八次 run
-#: 各用一个动作把整轮行池换成一段无序前缀。两个数的**字面**必须与它们真正的
-#: 出处对齐:计数来自集合地图行 ``sources: N (current notebook: M)``,额度来自
-#: 同一行末尾由 ``reasoning_retrieval._allowance_suffix`` 每轮现拼的
-#: ``listing allowance left: R rows``——说的不是同一个字面,模型就得自己猜该拿
-#: 哪两个数比。服务端的规模守卫是同一件事的兜底,不是它的替代:守卫只保证额度不
-#: 被一次动作吃光,「别翻页、按计数作答」仍然只能由模型自己决定。
 _ENUMERATE_SCOPE_NOTE = (
     "只对 collection=\"sources\" 有意义。默认(留空)= 列出检索范围内的**全部**"
     "文档(当前笔记本 + 已勾选的参考库),与 [Collections in scope] 的 sources "
-    "计数同口径;只有问题明确在问当前笔记本时才填 \"current_notebook\"。"
+    "计数同口径;只有问题明确在问当前笔记本时才填 \"current_notebook\"——那一档"
+    "对应的计数是同一行括号里的那个数,不是 sources 总数。"
     "换一档是**另一份清单**(续跑账目按范围记键),不算重复请求。"
-    "动作之前先比两个数:[Collections in scope] 的 sources 计数(填 "
-    "\"current_notebook\" 时看括号里那个数)与同一行末尾的 listing allowance "
-    "left: R rows。装得下就一次列全;计数远大于 R 时**不要**逐页翻——把额度花光"
-    "也只能看到其中很小一部分,应当按计数 + 几条代表性样本作答,并明确建议把请求"
-    "收窄到一个来源、一节或一个主题。"
+)
+
+#: 两个枚举动作共用的**动作级**说明,是 legacy ``prompts.py`` 那段 "Use the
+#: [Collections in scope] counts to decide BEFORE acting … do NOT try to page
+#: through it — answer with the count, a few representative examples, and an
+#: explicit suggestion to narrow the request (one source, one section, one
+#: topic)" 的对等表述。v2 的能力投影此前只搬了「默认列全范围」那半句,于是模型在
+#: 一个 48 839 篇的库里读到 sources 计数之后,唯一学到的是「默认就该全列」——
+#: 生产上八次 run 各用一个动作把整轮行池换成一段无序前缀。
+#:
+#: 它挂在**动作**上而不是 ``scope`` 参数上,因为这句话与集合无关:一个有上万个
+#: 知识对象的库、或一份几千条公式的清单,与那份 48 839 篇的目录是同一个形状,而
+#: ``scope`` 只对 ``collection="sources"`` 有意义——挂在那里等于只对其中一个集合
+#: 说这句话(规格评审 F2)。所以措辞本身也必须是集合无关的:分母是「地图行里
+#: **这个集合**的计数」,不是 sources 计数。
+#:
+#: 两个数的**字面**必须与它们真正的出处对齐:计数来自集合地图行(``sources: N
+#: (current notebook: M)``,以及各元素 kind / 知识对象类型的计数),额度来自同一
+#: 行末尾由 ``reasoning_retrieval._allowance_suffix`` 每轮现拼的 ``listing
+#: allowance left: R rows``——说的不是同一个字面,模型就得自己猜该拿哪两个数比。
+#: 服务端的规模守卫是同一件事的兜底,不是它的替代:守卫只保证额度不被一次动作
+#: 吃光,「别翻页、按计数作答」仍然只能由模型自己决定。
+_ENUMERATE_SIZE_NOTE = (
+    "动作之前先比两个数:[Collections in scope] 那一行里**这个集合**的计数,与"
+    "同一行末尾的 listing allowance left: R rows。装得下就一次列全;计数远大于 "
+    "R 时**不要**逐页翻——把额度花光也只能看到其中很小一部分,应当按计数 + 几条"
+    "代表性样本作答,并明确建议把请求收窄到一个来源、一节或一个主题。"
 )
 
 #: ``update_outline`` 的 ``sections`` 参数说明。v2 的 ``arguments`` 在 schema
@@ -266,6 +284,7 @@ ACTION_DEFINITIONS: Mapping[str, ActionDefinition] = MappingProxyType({
             True, "enumeration",
             ("kind", "collection", "scope", "source_id"),
             ("enumeration_wiring", "enumeration_budget"),
+            note=_ENUMERATE_SIZE_NOTE,
         ),
         ActionDefinition(
             ENUMERATE_KG_OBJECTS,
@@ -282,6 +301,7 @@ ACTION_DEFINITIONS: Mapping[str, ActionDefinition] = MappingProxyType({
             ),
             True, "enumeration", ("object_type", "collection", "scope"),
             ("kg_in_scope", "enumeration_wiring", "enumeration_budget"),
+            note=_ENUMERATE_SIZE_NOTE,
         ),
         ActionDefinition(
             CONSULT_MEMORY, (), False, "consult_memory", (),
@@ -377,6 +397,16 @@ class ReflectCapabilities:
 
     def params_for(self, action_id: str) -> Tuple[ActionParam, ...]:
         return self.params.get(action_id, ())
+
+    def note_for(self, action_id: str) -> str:
+        """动作级说明(`ActionDefinition.note`),没有就是空串。
+
+        与 `recognized_actions` 同理:这是定义里的**恒定值**,不随本轮事实变化,
+        所以它不做成字段——构造处填错就没法与消费者不同步。未知 id 返回空串,
+        渲染方因此不需要先问「这个动作有没有说明」。
+        """
+        definition = ACTION_DEFINITIONS.get(action_id)
+        return definition.note if definition else ""
 
     def param(self, action_id: str, name: str) -> Optional[ActionParam]:
         for spec in self.params_for(action_id):

@@ -355,7 +355,7 @@
     "backend/app/services/memory_service.py::MemoryService.transfer": 389,
     "backend/app/services/notebook_sharing.py::NotebookCopyService.copy_notebook": 640,
     "backend/app/services/reasoning_retrieval.py::ReasoningRetriever._new_run_state": 201,
-    "backend/app/services/reasoning_retrieval.py::ReasoningRetriever._run_enumeration": 264,
+    "backend/app/services/reasoning_retrieval.py::ReasoningRetriever._run_enumeration": 265,
     "backend/app/services/reasoning_retrieval.py::ReasoningRetriever.run": 1359,
     "backend/app/services/report_engine.py::ReportEngine._assemble": 457,
     "backend/app/services/report_engine.py::ReportEngine._draft_section": 333,

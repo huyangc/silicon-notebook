@@ -2326,7 +2326,7 @@ def test_a_collection_key_is_never_counted_as_an_undelivered_evidence_key(repo):
     assert delivery.answer_cited == ()
 
 
-# ------------------------------------------------- 目录枚举规模守卫(T-BF1)
+# ------------------------------------------------- 集合枚举规模守卫(T-BF1)
 #
 # 生产证据(GLM-5.3,2026-09-08):检索范围 48 839 篇的库里,v2 每次
 # `collection=sources` 枚举都返回 300 条(整轮行池)、`complete=False`、
@@ -2334,6 +2334,10 @@ def test_a_collection_key_is_never_counted_as_an_undelivered_evidence_key(repo):
 # 不足总量 0.7% 的无序前缀上,之后每个枚举动作都只能记 `enumeration_budget`。
 # 守卫把这种请求降成**一页样本**:计数照报、样本照给、链照样能续,但行池留给
 # 后面的动作。它不改范围、不拒绝动作,并且只在 v2 生效(关闭态逐字节不变)。
+#
+# 守卫按集合泛化(规格评审 F2):分母恒取地图里与本次请求**同集合、同 kind、
+# 同范围**的那个计数,所以一份只有 3 条公式的清单不会因为库里有 48 839 篇文档
+# 而被砍成样本,而一个上万条的知识对象类型同样受保护。
 
 
 def _v2_enumerate_sources(reason="先看库里有哪几篇", **extra):
@@ -2344,35 +2348,99 @@ def _v2_enumerate_sources(reason="先看库里有哪几篇", **extra):
             "arguments": request, "reason": reason}
 
 
-def _seed_oversize_roster(repo, count):
-    """一个有 `count` 篇文档的库(s1 带一条公式,好让元素清单也有东西可列)。"""
-    notebook = _seed(repo, formulas=1)
+def _v2_enumerate_kg(object_type="claim", reason="列出论断"):
+    request = {"object_type": object_type}
+    return {"next_action": "enumerate_kg_objects", "sufficient": False,
+            "arguments": request, "reason": reason}
+
+
+def _seed_oversize_roster(repo, count, *, formulas=1):
+    """一个有 `count` 篇文档的库(s1 带 `formulas` 条公式,好让元素清单也有东西可列)。"""
+    notebook = _seed(repo, formulas=formulas)
     for index in range(2, count + 1):
         _add_source_row(repo, notebook.id, f"s{index}", f"论文{index}")
     return notebook
 
 
-def test_oversize_source_listing_is_a_pure_comparison_on_the_map_count():
+def _add_claims(repo, notebook_id, count):
+    """再存 `count` 个 claim 知识对象——地图里该类型的计数就是守卫的分母。"""
+    repo.store_kg(notebook_id, None, [
+        {"local_id": f"C{index}", "object_type": "claim",
+         "payload": {"name": f"论断{index}", "section_path": "1"},
+         "evidence": []}
+        for index in range(2, count + 1)
+    ], [])
+    repo.collection_catalog.invalidate()
+
+
+def test_oversize_listing_is_a_pure_comparison_on_the_map_count():
     """守卫判据本身:纯函数、零 I/O、边界是严格大于。
 
     `None`(地图 fail-open 建不出来)与非正额度都不触发——前者是「不知道有多大」
     而不是「已知远超额度」,后者是预算耗尽,归调用方的 skip 分支。
 
-    变异:把 `>` 放宽成 `>=` ⇒ 恰好 4 倍那一档红;把 `map_sources is None` 那半
-    去掉 ⇒ `None` 那一档抛 TypeError。
+    倍数是**模块常量**,不是形参(质量评审 P3-3):只有测试会传的参数等于把常量
+    做成两份,生产上永远走不到第二份。改它用 monkeypatch。
+
+    变异:把 `>` 放宽成 `>=` ⇒ 恰好 4 倍那一档红;把 `map_count is None` 那半
+    去掉 ⇒ `None` 那一档抛 TypeError;把函数里的常量写死成 4 ⇒ monkeypatch 那
+    一段红。
     """
+    from app.services import reasoning_retrieval
     from app.services.reasoning_retrieval import (
-        OVERSIZE_SOURCE_LISTING_FACTOR, oversize_source_listing,
+        OVERSIZE_LISTING_FACTOR, oversize_listing,
     )
 
-    assert OVERSIZE_SOURCE_LISTING_FACTOR == 4
-    assert oversize_source_listing(48_839, 300) is True
-    assert oversize_source_listing(84, 300) is False
-    assert oversize_source_listing(1_200, 300) is False      # 恰好 4 倍不触发
-    assert oversize_source_listing(1_201, 300) is True
-    assert oversize_source_listing(None, 300) is False       # 地图没建出来
-    assert oversize_source_listing(48_839, 0) is False       # 额度已耗尽
-    assert oversize_source_listing(48_839, 100, factor=1_000) is False
+    assert OVERSIZE_LISTING_FACTOR == 4
+    assert oversize_listing(48_839, 300) is True
+    assert oversize_listing(84, 300) is False
+    assert oversize_listing(1_200, 300) is False      # 恰好 4 倍不触发
+    assert oversize_listing(1_201, 300) is True
+    assert oversize_listing(None, 300) is False       # 地图没建出来
+    assert oversize_listing(48_839, 0) is False       # 额度已耗尽
+
+    monkey = pytest.MonkeyPatch()
+    try:
+        monkey.setattr(reasoning_retrieval, "OVERSIZE_LISTING_FACTOR", 1_000)
+        assert oversize_listing(48_839, 100) is False
+    finally:
+        monkey.undo()
+
+
+def test_the_map_count_is_picked_to_match_the_request(repo):
+    """分母的对齐关系:同集合、同 kind、同范围,取不到就弃权(规格评审 F2)。
+
+    拿联邦 `sources` 去判一份元素清单,一个只有 3 条公式的库也会被砍成一页样本;
+    拿它去判 `current_notebook` 那一档,一份本来能列全的本库目录同样会被砍短。
+
+    变异:让 `elements` 分支回落到 `collection_map.sources` ⇒ 第三段红;
+    把 `local_only` 那一档也读 `sources` ⇒ 第二段红;去掉 `source_id` 的弃权
+    ⇒ 第五段红(单篇请求会拿全库计数当分母)。
+    """
+    from app.services.reasoning_retrieval import enumeration_map_count
+
+    notebook = _seed_oversize_roster(_v2(repo), 4, formulas=3)
+    _add_claims(repo, notebook.id, 6)
+    _mount_reference_library(repo, notebook.id, ["参考一", "参考二", "参考三"])
+    collection_map = repo.collection_catalog.collection_map(notebook.id)
+
+    def count(**kwargs):
+        params = {"collection": "sources", "kind": "", "local_only": False,
+                  "source_id": ""}
+        params.update(kwargs)
+        return enumeration_map_count(collection_map, **params)
+
+    assert count() == 7                                      # 联邦 sources
+    assert count(local_only=True) == 4                       # 括号里那个数
+    assert count(collection="elements", kind="formula") == 3
+    assert count(collection="kg_objects", kind="claim") == 6
+    assert count(collection="elements", kind="formula",
+                 source_id="s1") is None                     # 单篇:地图定不出价
+    assert count(collection="elements", kind="不存在的类型") is None
+    assert count(collection="kg_objects", kind="不存在的类型") is None
+    assert enumeration_map_count(
+        None, collection="sources", kind="", local_only=False,
+        source_id="") is None                                # 地图没建出来
 
 
 def test_an_oversize_roster_spends_one_page_not_the_whole_run_pool(repo):
@@ -2510,8 +2578,8 @@ def test_the_current_notebook_scope_is_not_sampled_by_the_federated_count(repo):
     本库那 3 篇,3 行额度装得下。拿联邦总数去判它,一份本来能列全的本库目录会被
     砍成 2 条、报 partial。
 
-    变异:把 `_enum_budget` 的 `not local_only` 条件去掉 ⇒ 只列 2 条、complete
-    变 False,这条红。
+    变异:让 `enumeration_map_count` 的 `sources` 分支忽略 `local_only`、恒返回
+    联邦 `collection_map.sources` ⇒ 只列 2 条、complete 变 False,这条红。
     """
     notebook = _seed_sources_only(repo, ["论文一", "论文二", "论文三"])
     _mount_reference_library(
@@ -2531,6 +2599,155 @@ def test_the_current_notebook_scope_is_not_sampled_by_the_federated_count(repo):
     assert roster.local_only is True
     assert roster.coverage.returned_total == 3 and roster.coverage.total == 3
     assert roster.coverage.complete is True
+
+
+def test_the_current_notebook_scope_is_sampled_by_its_own_count(repo):
+    """反过来的一半:本库自己就有 13 篇 ⇒ 收窄档同样只取一页样本。
+
+    与上一条配对才把分母钉死:上一条证明联邦总数不能拿来判收窄档,这一条证明
+    收窄档**有**自己的分母(`CollectionMap.active_sources`,地图行括号里那个数),
+    而不是「只要填了 current_notebook 就免于守卫」。
+
+    变异:把 `enumeration_map_count` 的 `sources` 分支在 `local_only` 时返回
+    `None`(当作「地图没这个数」)⇒ 这里列满 3 条、报 `budget`,这条红。
+    """
+    notebook = _seed_sources_only(
+        repo, [f"论文{index}" for index in range(1, 14)])
+    _v2(repo)
+    llm = _ValidatingLLM([
+        _v2_enumerate_sources(scope="current_notebook"),
+        {"next_action": "answer", "sufficient": True, "arguments": {}},
+    ])
+    retriever, limits = _retriever(repo, llm, limits_overrides={
+        "enum_rows_per_run": 3, "enum_page_size": 2,
+    })
+
+    result = retriever.run(notebook.id, _CATALOG_QUESTION, "", limits=limits)
+
+    roster = result.enumerations[0]
+    assert roster.local_only is True
+    assert roster.coverage.returned_total == 2       # 一页样本
+    assert roster.coverage.total == 13
+    assert roster.coverage.truncated_reason == TRUNCATED_OVERSIZE_SAMPLE
+
+
+def test_an_element_listing_is_not_sampled_by_the_source_count(repo):
+    """13 篇文档 + 只有 3 条公式 ⇒ 公式清单照常列全(规格评审 F2 / 质量 P2-2)。
+
+    守卫按集合泛化之前,分母恒是联邦 `sources`:一个 48 839 篇的库里,任何一份
+    元素清单——哪怕只有 3 条——都会被砍成一页样本、报成 partial,而它本来能列全
+    并签发完整性键。这条用例是那道误伤的下界。
+
+    变异:让 `enumeration_map_count` 对 `elements` 也返回 `collection_map.sources`
+    ⇒ 只列 2 条、`complete` 变 False、`truncated_reason` 变 `oversize_sample`,
+    这条红。
+    """
+    notebook = _seed_oversize_roster(_v2(repo), 13, formulas=3)
+    llm = _ValidatingLLM([
+        _v2_enumerate(),                              # kind="formula"
+        {"next_action": "answer", "sufficient": True, "arguments": {}},
+    ])
+    retriever, limits = _retriever(repo, llm, limits_overrides={
+        "enum_rows_per_run": 3, "enum_page_size": 2,
+    })
+
+    result = retriever.run(notebook.id, "库里有哪些公式", "", limits=limits)
+
+    listing = result.enumerations[0]
+    assert listing.collection == "elements" and listing.kind == "formula"
+    assert listing.coverage.returned_total == 3
+    assert listing.coverage.total == 3
+    assert listing.coverage.complete is True
+    assert listing.coverage.truncated_reason == ""
+
+
+def test_an_oversize_kg_object_type_is_sampled_by_its_own_count(repo):
+    """13 个 claim / 3 行额度 ⇒ 知识对象清单同样只取一页样本。
+
+    守卫不是「来源目录专用」:一个上万条的知识对象类型与那份 48 839 篇的目录是
+    同一个形状——把整轮额度换成一段无序前缀,后面的动作全部空手。
+
+    变异:让 `enumeration_map_count` 对 `kg_objects` 恒返回 `None` ⇒ 这里列满
+    3 条、报 `budget`,这条红。
+    """
+    notebook = _seed(_v2(repo), formulas=1)
+    _add_claims(repo, notebook.id, 13)
+    llm = _ValidatingLLM([
+        _v2_enumerate_kg(),
+        {"next_action": "answer", "sufficient": True, "arguments": {}},
+    ])
+    retriever, limits = _retriever(repo, llm, limits_overrides={
+        "enum_rows_per_run": 3, "enum_page_size": 2,
+    })
+
+    result = retriever.run(notebook.id, "有哪些论断", "", limits=limits)
+
+    listing = result.enumerations[0]
+    assert listing.collection == "kg_objects" and listing.kind == "claim"
+    assert listing.coverage.returned_total == 2       # 一页样本
+    assert listing.coverage.total == 13
+    assert listing.coverage.truncated_reason == TRUNCATED_OVERSIZE_SAMPLE
+
+
+def test_a_pool_below_one_page_falls_back_to_the_run_budget_reason(repo):
+    """行池只剩不到一页时,第二次目录请求报 `budget` 而不是 `oversize_sample`。
+
+    守卫在那一档连行数都改不动(`min(rows_left, page_size)` 就是 `rows_left`),
+    改的只有原因码——而 `oversize_sample` 说的是「额度**没有**用光,剩下的留给
+    后面的动作」,这在池只剩 1 行时是假话:那正是「额度用光了」本身。样本页与
+    耗尽池被反过来报,读的人会以为这一轮还有余量(规格评审 F3 / 质量 P2-1)。
+
+    变异:去掉 `_enum_budget` 的 `rows_left > enum_limits.enum_page_size`
+    ⇒ 第二步报 `oversize_sample`,这条红。
+    """
+    notebook = _seed_oversize_roster(_v2(repo), 13)
+    llm = _ValidatingLLM([
+        _v2_enumerate_sources(),
+        _v2_enumerate_sources(reason="再来一页"),
+        {"next_action": "answer", "sufficient": True, "arguments": {}},
+    ])
+    retriever, limits = _retriever(repo, llm, limits_overrides={
+        "enum_rows_per_run": 3, "enum_page_size": 2,
+    })
+
+    result = retriever.run(notebook.id, "库里有哪几篇", "", limits=limits)
+
+    first, second = _steps(result, "enumerate")[:2]
+    # 第一次:池有 3 行 > 一页 ⇒ 真的是「有意只要一页」。
+    assert first.detail["truncated_reason"] == TRUNCATED_OVERSIZE_SAMPLE
+    # 第二次:池只剩 1 行 ⇒ 这就是额度用光,别再说成样本。
+    assert second.detail["truncated_reason"] == TRUNCATED_BUDGET
+    assert result.enumerations[0].coverage.truncated_reason == TRUNCATED_BUDGET
+    assert result.enumerations[0].coverage.returned_total == 3
+
+
+def test_the_oversize_sample_summary_does_not_claim_the_turn_ceiling(repo):
+    """上屏轨迹摘要不得说「已达本轮上限」(规格评审 F1)。
+
+    结果卡与 prompt 侧都已经按 `oversize_sample` 分开措辞,只有轨迹摘要还落在
+    「部分结果,已达本轮上限」那一句上——而那正是这个原因码存在的理由要否认的
+    事情:额度没有用光,再来一轮也列不全。同一次运行里,用户会同时看到卡上的
+    「内容太多」与轨迹里的「已达上限」,两句话互相矛盾。
+
+    变异:把 `_enumeration_step_summary` 的 `oversize_sample` 分支去掉 ⇒ 摘要
+    退回「部分结果,已达本轮上限」,这条红。
+    """
+    notebook = _seed_oversize_roster(_v2(repo), 13)
+    llm = _ValidatingLLM([
+        _v2_enumerate_sources(),
+        {"next_action": "answer", "sufficient": True, "arguments": {}},
+    ])
+    retriever, limits = _retriever(repo, llm, limits_overrides={
+        "enum_rows_per_run": 3, "enum_page_size": 2,
+    })
+
+    result = retriever.run(notebook.id, "库里有哪几篇", "", limits=limits)
+
+    summary = _steps(result, "enumerate")[0].summary
+    # 与结果卡的标签同口径(`answer-panel.tsx` 的 `oversize_sample`)。
+    assert summary == "枚举来源清单: 内容太多,本轮只列出其中一页,已列 2 条/共 13"
+    assert "已达本轮上限" not in summary
+    assert "oversize_sample" not in summary       # 内部代号绝不上屏
 
 
 def test_the_guard_is_v2_only_and_legacy_lists_exactly_as_before(repo):

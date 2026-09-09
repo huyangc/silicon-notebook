@@ -1230,6 +1230,12 @@ def reflect_v2_system_prompt(capabilities, unavailable_max: int = 6) -> str:
         lines.append(
             f"- {action_id}: {_V2_ACTION_DESCRIPTIONS.get(action_id, '')}\n"
         )
+        # 动作级说明:一句与任何单个参数都不绑定的话(例如「先看清单有多大再决定
+        # 要不要列」),所以它排在描述之后、`arguments` 之前,而不是挂到某一格上
+        # ——挂上去就只会对填了那一格的请求生效。多数动作没有,那就一行都不出。
+        action_note = capabilities.note_for(action_id)
+        if action_note:
+            lines.append(f"    {action_note}\n")
         params = capabilities.params_for(action_id)
         if not params:
             lines.append("    arguments: {} (empty object)\n")
