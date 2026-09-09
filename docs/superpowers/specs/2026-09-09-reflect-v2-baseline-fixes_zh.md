@@ -44,7 +44,9 @@
 从 v2 `ENUMERATE_ELEMENTS` 参数表**摘掉 `source_id`**(`source_title` 保留;内部 id 从不上屏,模型填的只可能是猜测);`ReflectDecision.enumerate_source_id` 与 `v2_request_identity` 的 `identity_fields` 不动(legacy 仍解析,服务端解析出的 id 走同一格)。执行层 skip 拆细:范围不符报 `enumeration_source_not_in_scope`,措辞「按名称给出(source_title)」;那条 skip 由 `_enumeration_rejection` 整条产出(原因码与 detail 形状是同一个决定的两半,热函数不背那份字典字面)。**两个都给时以 `source_title` 为准**(评审补充):分派处是 id 压过 title,一个猜来的 id 会把模型如实给出的书名吃掉,所以 v2 解析层在 title 非空时不写 `enumerate_source_id`(类型校验仍做,legacy 与 `_run_enumeration` 逐字节不变)。**假设**:生产 12 条来自模型猜 `source_id`(本地无复现样本);待生产 raw `detail.error` 字符串确认,若实为 memory 合成源 `not enumerable`,改成解析器侧过滤。
 
 ### T-BF6 收尾计时归位
-`run()` 收尾重排整块抽成 `_closing_rerank(...)`(`run()` 净缩,baseline 下调),记新 step_type `rerank`(v2 门 `capabilities is not None`),detail `{"queries", "reused", "researched", "researched_ms", "top_n"}`;单查询分支 `retrieve_scored` 同样计入。登记三处闭集 + 前端标签(候选「收尾重排」,过 `check_ui_vocabulary.py`)。验收:answer 步只剩合成候选本身;`durations_ms` 出现 `rerank`;关闭态轨迹步序列逐字不变。`_nudge_missing_assessment` 不补步(它不是调用)——写进「刻意不做」。
+`run()` 收尾重排整块抽成 `_closing_rerank(...)`(`run()` 净缩,baseline 下调),记新 step_type `rerank`(v2 门 `reflect_v2_active()`),detail `{"queries", "reused", "researched", "researched_ms", "top_n"}`;单查询分支 `retrieve_scored` 同样计入。登记三处闭集 + 前端标签(候选「收尾重排」,过 `check_ui_vocabulary.py`)。验收:answer 步只剩合成候选本身;`durations_ms` 出现 `rerank`;关闭态轨迹步序列逐字不变。`_nudge_missing_assessment` 不补步(它不是调用)——写进「刻意不做」。
+
+**评审后修正(质量 P3-4)**:门写作 `reflect_v2_active()`,不是本节初稿写的 `capabilities is not None`。两者同源(能力投影正是在这个判据为真时才构造),但 `capabilities` 是 `run()` 反思循环里的**局部名**——`max_steps == 0` 时循环一次都不进,那个名字在收尾处根本没有绑定,拿它当闸会让关闭态以 `NameError` 炸在最不该炸的地方;而且 `reflect_v2_active()` 还把调用方策略位 `allow_reflect_v2`(Knowhow 补全恒 legacy)一起算进闸里。
 
 ### T-BF7 assessment 与动作解耦(apply 逐方面)
 `AspectLedger.apply` 返回结构(接受的 updates + 逐方面拒绝清单 `[(aspect_id, why)]`);`_plan_row` 四条整份错误改为跳过该行并记原因;完全相同重复项确定性去重(同 aspect_id 且规范化后全等),冲突重复项拒绝该方面并保留旧状态;`not_object`/`<group>_not_list` 等整份形状错误仍整份拒绝。`_absorb_assessment` 不再 `_reflect_invalid`:合法动作照常执行;拒绝清单 (a) 经 `_AspectRecord` 新增 consume-on-render 字段渲染成「服务端未采纳: <why>」行(与 `nudge_pending` 同款一次性语义),(b) 记 `skip` 步 `reason=invalid_assessment:<why>`,并让 `status_for_skip`/`observation_from_step` 对该前缀不产生动作观察(`NON_ACTION_SKIP_REASONS` 加前缀判据),避免同轮两行观察。缺省 assessment 语义、`note_missing_assessment`/追问、`REFLECT_ASSESSMENT_MAX_PROMPTS` 不动。**投影新增键 `assessment_rejections`**(拍板:加,有意扩面),把「拒了几个方面」与「作废了几轮」分开数。验收:`test_reasoning_retrieval.py:6640/8731/9469-9478` 按新语义重写;新增「一个越界方面 + 一个合法 `search_chunks` ⇒ 检索真的发生、方面账只改合法那一格」端到端用例。
@@ -54,6 +56,10 @@
 
 ## 5. 与 `fangan_todo.md` 的重叠
 (a) 条 T0 基线报告与 A/B 首份报告:PR-1 改公共基线,四臂须在同一基线上重生成;已登记的「`invalid_tool_calls` 臂不对称、`invalid_assessment:*` 为 v2 独有」在 T-BF7 之后含义从「整轮作废」变「一个方面未采纳」,首份报告说明须重写。
+
+**T-BF6 带来的第二个臂不对称量(评审 F1,只登记不改)**:`rerank` 是 v2-only 的非动作步,而 `reasoning_trace_stats` 的 `trace_steps = len(normalized)` 数的是**全部**轨迹步、`scripts/analyze_reasoning_trace.py` 的同名指标照单全收 —— 于是 v2 臂的 `trace_steps` 相对 legacy 恒 **+1**,与「模型多打了一个工具」无关。首份 A/B 报告要么写明这一列含一个恒定偏移,要么把分析脚本改成只数动作步(那是独立一次改动:动作步的闭集判据已经在 `NON_ACTION_STEP_TYPES` 里,但改了会动已产出批次的可比性)。本 PR 只登记,不改任何一侧。
+
+**T-BF6 守卫的假时钟存疑(评审 F2)**:那几条计时守卫 monkeypatch 的是**进程全局** `time.perf_counter`(`reasoning_retrieval` 里的 `rr.time` 就是 stdlib 模块,不是模块别名),并发 lane 下曾一次性红过 3 条、随后 7 次全绿。**不要**把实现里的 `time.perf_counter()` 换成模块级别名来规避:`scripts/generate_repository_contract_fixtures.py` 的 `fixed_perf` 正是靠全局 patch 才能得到确定性耗时,换成别名会让 golden fixture 漂移。若再复现,改用注入时钟(取时函数做成 `_closing_rerank` 的可选形参)。
 
 ## 6. 刻意不做
 不给 legacy 加规模守卫(关闭态字节等价优先;legacy 生产行为不变);不删任何枚举能力;不改 stale 判据、最大步数、工具次数;不改缺省 assessment 语义。

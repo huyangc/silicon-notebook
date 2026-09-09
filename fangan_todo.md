@@ -178,6 +178,35 @@
       确定性合并、保留逐动作归因并处理局部失败/取消；跨库原文按既有待办单独解决候选配额、
       scope、引用与资产解析，不得用移除 notebook-local 过滤冒充联邦化；终态独立 critic
       必须先用本期数据证明收益，不能因为循环里已有 assessment 就再加一次固定模型评审。
+      (i) **PR-1 公共基线修复已落地**（计划真源
+      `docs/superpowers/specs/2026-09-09-reflect-v2-baseline-fixes_zh.md`），四项：
+      1. 枚举侧（T-BF1/2/3）：清单规模守卫按集合泛化、`truncated_reason` 新增
+         `oversize_sample`、v2 能力投影补齐「计数远大于本轮额度就别翻页」半句；
+      2. 参数与原因码（T-BF4/T-BF5）：`exact_lookup` 形状判据前移到解析层并写进参数说明；
+         v2 的 `enumerate` 摘掉 `source_id`，范围不符改报可自修的原因码；
+      3. 收尾计时归位（T-BF6）：收尾重排抽成 `_closing_rerank` 并记新 `rerank` 步；
+      4. 自评解耦（T-BF7）：assessment 按方面拒绝、不再吞掉同轮的检索动作，投影新增
+         `assessment_rejections`。
+
+      **已知限制（知情接受，首份报告要照抄）**：
+
+      * **T-BF5 的修法建立在一条尚未证实的生产假设上**：生产那 12 条
+        `enumeration_rejected` 被当作「模型猜 `source_id`」处理（本地无复现样本）。待生产
+        raw `detail.error` 字符串确认；若实为 memory 合成源的 `not enumerable`，修法要改
+        成解析器侧过滤，届时这一批数据的原因码分布不能与修复后混用。
+      * **规模守卫只对 v2 生效**（拍板 3，legacy 逐字节不变）：所以枚举侧的臂间差里
+        **含守卫本身**，不能读成「v2 的模型更会收窄范围」。
+      * **`trace_steps` 在 v2 臂恒 +1**：`rerank` 是 v2-only 的非动作步，而
+        `reasoning_trace_stats` 的 `trace_steps = len(normalized)` 数的是全部轨迹步，
+        `scripts/analyze_reasoning_trace.py` 的同名指标照单全收。首份 A/B 报告必须写明这一
+        列的臂间差里有一个恒定 +1，或者把分析脚本改成只数动作步（本 PR 只登记，不改）。
+      * **`invalid_assessment:*` 的语义在 2026-09-09 前后变过两次**：详见上面 T-AB2 已知
+        限制那一条，PR-1 收尾时已复核仍然成立——A/B 与 T0 取样**不得跨越这个日期**。
+      * **T-BF6 的守卫用 monkeypatch 打进程全局 `time.perf_counter`**（`rr.time` 就是
+        stdlib，不是模块别名）：并发 lane 下曾一次性红过 3 条、随后 7 次全绿。**不要**把实现
+        里的 `time.perf_counter()` 换成模块别名——`scripts/generate_repository_contract_fixtures.py`
+        的 `fixed_perf` 正是靠全局 patch 才能得到确定性耗时，换别名会让 golden 漂移。若再
+        复现，改用注入时钟（把取时函数做成 `_closing_rerank` 的可选形参）。
 - [ ] **深度报告一侧的方面送达复核补上簇折叠表**：Ask 侧 `_answer_context` 已经把
       `knowledge_context` 的 `fold_sink`（同 canonical 簇被折叠掉的成员 → 代表）折进
       `admitted_evidence_keys`；报告侧 `_draft_section` 走 `knowledge_context_with_outline`，
