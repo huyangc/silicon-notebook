@@ -11883,3 +11883,86 @@ def test_rerank_step_never_becomes_an_action_observation():
         seq=7, pending=None) is None
     assert "rerank" in NON_ACTION_STEP_TYPES
     assert "rerank" not in TRACE_OBSERVATION_CONTRACT
+
+
+def _stub_rerank_legs(monkeypatch, retriever):
+    """收尾重排的两条腿换成零读时钟的替身(配额分支的 `search`、单查询分支的
+    `retrieve_scored`),这样「读了几次时钟」数的就只是被测方法自己。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    monkeypatch.setattr(
+        ReasoningRetriever, "search",
+        lambda self, n, q, types=None, prefer="balanced": [_rk("A", 0.9)])
+    monkeypatch.setattr(
+        retriever.retrieval, "retrieve_scored",
+        lambda n, q, **kw: [_rk("A", 0.9)])
+
+
+def test_legacy_closing_rerank_reads_the_clock_zero_times(rrepo, monkeypatch):
+    """关闭态下 `_closing_rerank` **一次 `perf_counter` 都不读**。
+
+    这不是性能洁癖:每步耗时是相邻两次记账的时钟差,而合成时钟(见
+    `scripts/generate_repository_contract_fixtures.py` 的 `fixed_perf`,每读一次
+    走 1ms)会把「多读两次」直接变成关闭态 `answer` 步耗时 8 → 10 —— 一份冻结
+    oracle 的逐字节红线。本条实测抓到过这个回归:计时最初写成无条件读时钟,
+    `test_ask_repository_golden.py` 当场红。
+
+    变异:把 `_quota_rerank` 的 `began = ... if stats is not None else 0.0` 改回
+    无条件 `time.perf_counter()`,或把 `_closing_rerank` 里的两处 `measure` 判断
+    去掉 ⇒ 这条红(那条 golden 也会红,但它跑一整套 fixture,红了不好定位)。
+    """
+    import app.services.reasoning_retrieval as rr
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    nb = _seed_two_nodes(rrepo)
+    assert rrepo.settings.reasoning_reflect_v2_enabled is False
+    reads = [0]
+
+    def counting_perf_counter():
+        reads[0] += 1
+        return reads[0] * 0.001
+
+    monkeypatch.setattr(rr.time, "perf_counter", counting_perf_counter)
+    retriever = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    # 两条腿都换成零读时钟的替身:检索层自己也读时钟(`retrieve_scored` 内部 9
+    # 次),不换掉它,这条断言数的就不是「这个方法读了几次」。
+    _stub_rerank_legs(monkeypatch, retriever)
+    collected = {"A": _rk("A", 0.0), "B": _rk("B", 0.0)}
+
+    def no_record(step):
+        raise AssertionError(f"关闭态记了一条 {step.step_type} 步")
+
+    for queries in (["q1", "q2"], ["q1"]):     # 配额分支 + 单查询分支
+        reads[0] = 0
+        detail: dict = {}
+        top_hits, _evidence = retriever._closing_rerank(
+            nb.id, "RTL到GDSII流程", collected, queries, 2, None, detail,
+            no_record)
+        assert reads[0] == 0, f"{queries} 分支多读了 {reads[0]} 次时钟"
+        assert top_hits                        # 重排本身照常出结果
+
+
+def test_v2_closing_rerank_does_read_the_clock(rrepo, monkeypatch):
+    """上一条的另一半:v2 下这一段**必须**读时钟,否则 `researched_ms` 恒 0。
+
+    两条合起来才是闭集——只钉「关闭态不读」会被「两边都不读」这个假达成通过。
+    """
+    import app.services.reasoning_retrieval as rr
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    nb = _seed_two_nodes(_v2_repo(rrepo))
+    reads = [0]
+
+    def counting_perf_counter():
+        reads[0] += 1
+        return reads[0] * 0.001
+
+    monkeypatch.setattr(rr.time, "perf_counter", counting_perf_counter)
+    retriever = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    _stub_rerank_legs(monkeypatch, retriever)
+    steps: list = []
+    top_hits, _evidence = retriever._closing_rerank(
+        nb.id, "RTL到GDSII流程", {"A": _rk("A", 0.0)}, ["q1", "q2"], 2, None,
+        {}, steps.append)
+    assert reads[0] == 4                       # 两次重跑各一对读数
+    assert [s.step_type for s in steps] == ["rerank"]
+    assert steps[0].detail["researched"] == 2
+    assert steps[0].detail["researched_ms"] > 0
+    assert top_hits
