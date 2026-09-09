@@ -5860,6 +5860,261 @@ def test_capabilities_only_answer_when_every_channel_is_gone():
     assert caps.actions == ("answer",)
 
 
+# ---------------------------------------------------------------------------
+# T-PS7 同源静态工具目录(前缀复用设计 §4.2、计划拍板 Q4)
+# ---------------------------------------------------------------------------
+
+
+def _static_catalog(**overrides):
+    from app.services.reasoning_actions import (
+        build_reflect_capabilities, static_catalog_facts,
+    )
+    return build_reflect_capabilities(
+        static_catalog_facts(_full_house_facts(**overrides)))
+
+
+def test_static_catalog_facts_normalise_every_per_turn_fluctuation():
+    """逐轮波动项全部归一,通道位一格不动(纯函数逐字段口径)。
+
+    这条是 `static_catalog_facts` 的**字段全貌**守卫:哪几项该归一、哪几项必须
+    原样带过,写死在这里。新增一个逐轮字段却忘了归一,它就会红。
+
+    变异:把 `has_candidates=True`(或任何一格 `*_left=1`)从 `replace(...)` 里
+    删掉 ⇒ 这条红。
+    """
+    from dataclasses import fields
+    from app.services.reasoning_actions import static_catalog_facts
+    turn = _full_house_facts(
+        element_searches_left=0, chunk_searches_left=0, exact_lookups_left=0,
+        ppr_left=0, follow_chain_left=0, consult_left=0,
+        outline_updates_left=0, enum_rows_left=0, enum_pages_left=0,
+        enum_payload_left=0,
+        has_candidates=False, last_turn=True, terminal_overflow_repair=True)
+    static = static_catalog_facts(turn)
+    for name in [f.name for f in fields(turn) if f.name.endswith("_left")]:
+        assert getattr(static, name) == 1, name
+    assert (static.has_candidates, static.last_turn,
+            static.terminal_overflow_repair) == (True, False, False)
+    # 通道位与枚举白名单原样带过(逐字段比对,不靠抽样)。
+    for name in ("kg_in_scope", "scope_restricted", "chunk_search_active",
+                 "exact_lookup_active", "ppr_active", "community_active",
+                 "enumeration_active", "consult_memory_active",
+                 "outline_active", "element_kinds", "object_types",
+                 "outline_repair_available"):
+        assert getattr(static, name) == getattr(turn, name), name
+
+
+def test_static_catalog_facts_are_idempotent_across_turns():
+    """幂等,且不同轮的事实折出**同一份**静态事实 ⇒ 目录逐字节稳定。"""
+    from app.services.reasoning_actions import static_catalog_facts
+    early = _full_house_facts()
+    late = _full_house_facts(
+        element_searches_left=0, ppr_left=0, follow_chain_left=0,
+        consult_left=0, has_candidates=False, last_turn=True)
+    assert static_catalog_facts(static_catalog_facts(early)) == (
+        static_catalog_facts(early))
+    assert static_catalog_facts(early) == static_catalog_facts(late)
+    assert _static_catalog() == _static_catalog(
+        element_searches_left=0, ppr_left=0, follow_chain_left=0,
+        consult_left=0, has_candidates=False, last_turn=True)
+
+
+def test_static_catalog_comes_from_the_one_action_definition_table():
+    """目录与逐轮投影同源:同一份 `ACTION_DEFINITIONS`,没有第二份手写清单。"""
+    from app.services.reasoning_actions import ACTION_DEFINITIONS
+    catalog = _static_catalog()
+    assert set(catalog.actions) == set(ACTION_DEFINITIONS)
+    assert catalog.recognized_actions == tuple(ACTION_DEFINITIONS)
+    # 参数行也来自同一张表(不是照着 prompt 誊的第二份)。通道位全开时
+    # `_narrow_params` 只改 choices、不摘槽位,所以逐个动作的槽位名恒等。
+    for action_id in catalog.actions:
+        assert [p.name for p in catalog.params_for(action_id)] == [
+            p.name for p in ACTION_DEFINITIONS[action_id].params], action_id
+
+
+@pytest.mark.parametrize("overrides,gone", [
+    ({"kg_in_scope": False},
+     ("expand_graph", "ppr_retrieve", "expand_community", "follow_chain",
+      "enumerate_kg_objects")),
+    ({"enumeration_active": False},
+     ("enumerate_elements", "enumerate_kg_objects")),
+    ({"chunk_search_active": False}, ("search_chunks",)),
+    ({"consult_memory_active": False}, ("consult_memory",)),
+    ({"outline_active": False}, ("update_outline",)),
+    ({"ppr_active": False}, ("ppr_retrieve",)),
+    ({"scope_restricted": True},
+     ("expand_graph", "ppr_retrieve", "expand_community", "follow_chain",
+      "exact_lookup")),
+])
+def test_static_catalog_drops_the_channels_this_run_can_never_use(
+    overrides, gone
+):
+    """通道位一格不动:始终不适用的工具**不进**目录(设计 §4.2)。
+
+    无图 run 把五个图动作摆进目录,只会让模型反复选一条必然 skip 的路——那与
+    "额度耗尽但通道还在"是两回事,后者才该留在目录里。
+
+    变异:在 `static_catalog_facts` 里把 `kg_in_scope=True`(或任何一个
+    `*_active=True`)一起归一 ⇒ 对应那格红。
+    """
+    catalog = _static_catalog(**overrides)
+    for action in gone:
+        assert not catalog.has(action), action
+
+
+def test_static_catalog_keeps_a_tool_whose_budget_ran_out():
+    """额度 3→0:目录逐字节不变,而**本轮**动作面如实收窄(拍板 Q4 的形态)。
+
+    这是目录与执行资格分离的核心断言:目录是"可能执行"的超集,不授予调用资格。
+
+    变异:把 `_prime_static_catalog` 的"只写一次"去掉(每轮重算)⇒ 目录会跟着
+    额度走,这条的等式部分红。
+    """
+    from app.services.reasoning_actions import build_reflect_capabilities
+    spent = dict(ppr_left=0, follow_chain_left=0, element_searches_left=0,
+                 consult_left=0, outline_updates_left=0)
+    assert _static_catalog() == _static_catalog(**spent)
+    for action in ("ppr_retrieve", "follow_chain", "search_elements",
+                   "consult_memory", "update_outline"):
+        assert _static_catalog(**spent).has(action), action
+    turn = build_reflect_capabilities(_full_house_facts(**spent))
+    for action, reason in (("ppr_retrieve", "ppr_retrieve_cap"),
+                           ("follow_chain", "follow_chain_cap"),
+                           ("search_elements", "element_search_cap"),
+                           ("consult_memory", "consult_memory_cap"),
+                           ("update_outline", "outline_budget")):
+        assert not turn.has(action)
+        assert turn.reason_for(action) == reason
+
+
+def test_static_catalog_keeps_follow_chain_when_the_pool_is_still_empty():
+    """候选池空:`follow_chain` 在目录里、不在本轮清单里。
+
+    候选池空只是**此刻**没有合法起点——后面任何一次检索都可能补上一个,所以它
+    属于"本 run 可能执行"。
+
+    变异:把 `has_candidates=True` 从 `static_catalog_facts` 里删掉 ⇒ 这条红。
+    """
+    from app.services.reasoning_actions import build_reflect_capabilities
+    assert _static_catalog(has_candidates=False).has("follow_chain")
+    turn = build_reflect_capabilities(_full_house_facts(has_candidates=False))
+    assert not turn.has("follow_chain")
+    assert turn.reason_for("follow_chain") == "chain_no_candidates"
+
+
+def _capabilities_turn(rr, state, **counters):
+    """按一轮的计数器直接问一次能力投影(不经 `run` 的解包)。"""
+    base = dict(steps=1, elements_searches=0, exact_lookups=0,
+                follow_chain_searches=0, consult_used=0, outline_updates=0,
+                outline_overflow=False, outline_cap_repair_used=False,
+                terminal_overflow_repair=False)
+    base.update(counters)
+    return rr._reflect_capabilities(state, **base)
+
+
+def _run_state_for_catalog(rr, notebook_id):
+    return rr._new_run_state(
+        notebook_id, "完整问题", "", None, max_steps=4,
+        intent_queries=None, limits=None, intent_detail=None)
+
+
+@pytest.mark.parametrize("optimization,measure,cached", [
+    ("off", False, False),          # 关闭态:恒 None,一个对象都不构造
+    ("prefix_snapshot", False, True),
+    ("off", True, True),            # 测量与策略正交:只开测量也要有目录
+    ("prefix_snapshot", True, True),
+])
+def test_static_catalog_is_cached_only_when_someone_consumes_it(
+    rrepo, optimization, measure, cached
+):
+    """缓存构造的判据:`reflect_optimization() != "off"` 或测量开(T-PS7)。
+
+    关闭态这份对象没有任何消费者,构造它就是纯开销——`_ReasoningRunState` 上那个
+    带默认值的字段因此恒为 None,`_new_run_state` 一行都不用改。
+
+    变异:把 `_prime_static_catalog` 的两条判据(策略 / 测量)去掉任意一条 ⇒
+    对应那格红。
+    """
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    nb = _seed_two_nodes(rrepo)
+    rrepo.settings.reasoning_reflect_v2_enabled = True
+    rrepo.settings.reasoning_reflect_optimization = optimization
+    rrepo.settings.reasoning_reflect_measure_context = measure
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    state = _run_state_for_catalog(rr, nb.id)
+    assert state.reflect_static_catalog is None      # 起点不算,零额外库读
+    _capabilities_turn(rr, state)
+    assert (state.reflect_static_catalog is not None) is cached
+
+
+def test_static_catalog_is_never_cached_while_v2_is_off(rrepo):
+    """v2 总闸关(以及调用方策略位关)⇒ 目录一次都不构造。
+
+    变异:把 `_prime_static_catalog` 的判据从两个单点换成直读 settings ⇒ 这条红。
+    """
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    nb = _seed_two_nodes(rrepo)
+    rrepo.settings.reasoning_reflect_optimization = "prefix_snapshot"
+    rrepo.settings.reasoning_reflect_measure_context = True
+    assert rrepo.settings.reasoning_reflect_v2_enabled is False
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    state = _run_state_for_catalog(rr, nb.id)
+    _capabilities_turn(rr, state)
+    assert state.reflect_static_catalog is None
+
+    # 总闸开着但调用方策略位关(Knowhow 的形状)同样一次都不构造。
+    rrepo.settings.reasoning_reflect_v2_enabled = True
+    knowhow = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    knowhow.allow_reflect_v2 = False
+    other = _run_state_for_catalog(knowhow, nb.id)
+    _capabilities_turn(knowhow, other)
+    assert other.reflect_static_catalog is None
+
+
+def test_static_catalog_is_written_once_at_the_first_reflect(rrepo):
+    """写点单一、只写一次:第二轮的额度变化不会改写这份目录。
+
+    额度耗尽的第二轮里,本轮动作面如实收窄,而目录仍是首轮那**同一个对象**
+    (`is`)——「静态」这个词就是这么兑现的。
+
+    变异:把 `_prime_static_catalog` 里的 `if state.reflect_static_catalog is not
+    None: return` 去掉 ⇒ 第二轮会换成一个新对象,`is` 断言红。
+    """
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    nb = _seed_two_nodes(rrepo)
+    rrepo.settings.reasoning_reflect_v2_enabled = True
+    rrepo.settings.reasoning_reflect_optimization = "prefix_snapshot"
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    state = _run_state_for_catalog(rr, nb.id)
+
+    first = _capabilities_turn(rr, state)
+    catalog = state.reflect_static_catalog
+    assert catalog is not None
+    assert first.has("search_elements")
+
+    spent = _capabilities_turn(
+        rr, state, steps=state.max_steps,
+        elements_searches=rrepo.settings.reasoning_max_element_searches)
+    assert not spent.has("search_elements")          # 本轮如实收窄
+    assert spent.reason_for("search_elements") == "element_search_cap"
+    assert state.reflect_static_catalog is catalog   # 目录一格没动
+    assert catalog.has("search_elements")            # 说明仍在目录里
+    # 候选池此刻还空(首轮检索尚未跑),本轮没有 `follow_chain`;目录里有。
+    assert not first.has("follow_chain")
+    assert first.reason_for("follow_chain") == "chain_no_candidates"
+    assert catalog.has("follow_chain")
+
+
+def test_static_catalog_ignores_the_last_turn_and_repair_shapes():
+    """末轮与终态纠错轮是"本轮的形态",不该让目录随轮数漂移。"""
+    from app.services.reasoning_actions import build_reflect_capabilities
+    assert _static_catalog(last_turn=True).has("consult_memory")
+    assert _static_catalog(terminal_overflow_repair=True) == _static_catalog()
+    terminal = build_reflect_capabilities(
+        _full_house_facts(terminal_overflow_repair=True))
+    assert terminal.actions == ("answer", "update_outline")
+
+
 #: 有**形状判据**的自由文本参数的合法样值。`"x"` 对它们不再是"刚好合法":
 #: `exact_lookup.term` 走 `exact_probe_terms`(T-BF4 把判据前移到了解析层),一个
 #: 普通短词是 `invalid_argument:term`,不是一份合法载荷。

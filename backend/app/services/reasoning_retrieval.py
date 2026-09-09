@@ -60,7 +60,7 @@ from app.services.reasoning_actions import (
     ACTION_DEFINITIONS, ENUMERATE_SCOPE_ALL, ENUMERATE_SCOPE_CURRENT_NOTEBOOK,
     ENUMERATE_SCOPES, EXACT_TERM_SHAPE_NOTE, REFLECT_INVALID_ACTION,
     UNAVAILABLE_DISCLOSE_MAX, ActionParam, ReflectCapabilities,
-    ReflectCapabilityFacts, build_reflect_capabilities,
+    ReflectCapabilityFacts, build_reflect_capabilities, static_catalog_facts,
 )
 from app.domain.retrieval_termination import (
     ASPECT_COLLECTION_KEY_PREFIX, ASSESSMENT_SKIP_REASON_PREFIX,
@@ -3311,6 +3311,18 @@ class _ReasoningRunState:
     # 局部名,读写一律走 `state`。
     reflect_failures: int = 0
 
+    # —— 本 run 的**静态工具目录**(T-PS7 / 前缀复用设计 §4.2)。
+    #
+    # 带默认值、留空即中性:只有前缀复用策略不是 `off`、或上下文测量开着时才构造
+    # (见 `_prime_static_catalog`),其余情况恒为 None ——`_new_run_state` 因此一行
+    # 都不用改,关闭态零新状态。
+    #
+    # 写点单一且只写一次:本 run **第一次** reflect 那一轮,用那轮已经算好的 facts
+    # 生成。刻意**不**在 run 起点算——那里没有现成的 facts,重算一份要额外付一次
+    # `_unsafe_scope_restricted()`(「全选」形状下两次库读),而这个目录本来就是
+    # 用来省成本的。
+    reflect_static_catalog: "Optional[ReflectCapabilities]" = None
+
 
 class ReasoningRetriever:
     def __init__(
@@ -3644,7 +3656,33 @@ class ReasoningRetriever:
                 outline_overflow and not outline_cap_repair_used),
             terminal_overflow_repair=terminal_overflow_repair,
         )
+        self._prime_static_catalog(state, facts)
         return build_reflect_capabilities(facts)
+
+    def _prime_static_catalog(
+        self, state: "_ReasoningRunState", facts: ReflectCapabilityFacts,
+    ) -> None:
+        """本 run 第一次 reflect 时生成一次静态工具目录并缓存(T-PS7)。
+
+        为什么写点在这里而不是 run 起点:目录要的那份 facts 正是这一轮刚算完的
+        那份,而重新算一份就要再付一次 `_unsafe_scope_restricted()`——它按契约禁止
+        memo,「全选」形状下每次两次库读。用现成的那份是零额外 I/O。
+
+        为什么只在第一次:目录是本 run 的**稳定前缀**,一旦生成就逐字节不变。第二
+        轮开始 facts 已经带上了本轮的额度与形态,拿它重算会让"静态"这个词失效
+        ——那正是前缀复用要消除的逐轮漂移。代价按拍板 Q4 接受:首轮之后范围收窄
+        或通道关闭时,目录里会留着已经不可用的动作,由每轮的当前状态如实说明。
+
+        为什么关闭态什么都不做:`off` 且不测量时这份对象没有任何消费者,构造它就
+        是纯开销。判据走 `reflect_optimization()` / `reflect_measures_context()`
+        两个单点,不在这里第二次读 settings。
+        """
+        if state.reflect_static_catalog is not None:
+            return
+        if self.reflect_optimization() == "off" and not self.reflect_measures_context():
+            return
+        state.reflect_static_catalog = build_reflect_capabilities(
+            static_catalog_facts(facts))
 
     # --- 集合枚举工具的总闸 ---
     def enumeration_active(self) -> bool:
