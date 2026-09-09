@@ -56,7 +56,9 @@
 (a) 条 T0 基线报告与 A/B 首份报告:PR-1 改公共基线,四臂须在同一基线上重生成;已登记的「`invalid_tool_calls` 臂不对称、`invalid_assessment:*` 为 v2 独有」在 T-BF7 之后含义从「整轮作废」变「一个方面未采纳」,首份报告说明须重写。
 
 ## 6. 刻意不做
-不给 legacy 加规模守卫(关闭态字节等价优先;legacy 生产行为不变);不删任何枚举能力;不改 stale 判据、最大步数、工具次数;不补追问 trace 步;不改缺省 assessment 语义。
+不给 legacy 加规模守卫(关闭态字节等价优先;legacy 生产行为不变);不删任何枚举能力;不改 stale 判据、最大步数、工具次数;不改缺省 assessment 语义。
+
+**`_nudge_missing_assessment` 不补 trace 步**(T-BF6 落地结论):轨迹步这个位置是留给「花了时间的事」的——`_TraceRecorder` 给每一步记的就是相邻两次记账之间的墙钟。追问零模型调用、零 I/O,它唯一的成本是让模型多说一轮话,而那一轮的成本已经如实记在**下一条 `reflect` 步**上了。给它补一步会有两个具体代价:轨迹上多一条恒 0ms 的行,以及那条行会把紧随其后的 reflect 步的计时切成两半(前半段挂到这条零成本的记账步上),正好是 T-BF6 要修的那类错位的镜像。`skip` 步 `reason=missing_assessment` 已经把「这一轮追问过」如实上屏,不缺这条信息。
 
 ## 7. 拍板结果(主 agent,2026-09-09)
 1. `truncated_reason` 开第四个值 `oversize_sample`。

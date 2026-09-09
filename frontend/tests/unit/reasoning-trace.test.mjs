@@ -938,3 +938,24 @@ test("收尾那条 skip 步的标签是「结束」,别的 skip 步仍是「跳�
   assert.equal(getTraceStepLabel({ step_type: "synthesis", detail: {} }), "作答");
   assert.equal(getTraceStepLabel({ step_type: "brand_new", detail: {} }), "处理中");
 });
+
+test("labels the closing rerank step apart from every other step (T-BF6)", () => {
+  // 后端新增的 `rerank` 步:检索循环跑完之后、开始合成之前的那一段收尾整理。
+  // 它此前没有自己的一步,耗时被算进紧随其后的「合成」上(生产上出现过 195 秒
+  // 的 answer 步)。标签必须与「合成」「作答」都分得开——否则轨迹里会出现两条
+  // 读起来一样、说的却是两回事的步。
+  const step = {
+    step_type: "rerank",
+    summary: "重排候选",
+    detail: { queries: 3, reused: 2, researched: 1, researched_ms: 190000, top_n: 20 },
+  };
+  assert.equal(getTraceStepLabel(step), "收尾重排");
+  assert.equal(getReasoningTraceSummary([step], true).latestLabel, "收尾重排");
+  assert.notEqual(TRACE_STEP_LABELS.rerank, TRACE_STEP_LABELS.answer);
+  assert.notEqual(TRACE_STEP_LABELS.rerank, TRACE_STEP_LABELS.synthesis);
+  assert.notEqual(TRACE_STEP_LABELS.rerank, TRACE_STEP_LABELS.retrieve);
+  // detail 里全是成本口径(不是候选数),通用分支一个数都读不出来 ⇒ 空串。
+  // 这条是防御性的:哪天它多出一个 `count`/`found` 键,靠通用分支就会渲染成
+  // 「N 个候选」——一句关于另一件事的假话。
+  assert.equal(getTraceStepDetail(step), "");
+});
