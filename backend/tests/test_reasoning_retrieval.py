@@ -1,6 +1,7 @@
 import json
 import re
 import threading
+from contextlib import contextmanager
 
 import pytest
 from tests.model_testkit import bind_all_embedding_clients
@@ -11710,6 +11711,12 @@ def _rerank_clock(monkeypatch):
     所有别的步因此恒 0ms,收尾那条步的耗时就等于「这一段里做了几次重检索」×
     250ms —— 一个可以逐位断言的数,而不是一个墙钟阈值(那种断言在慢 runner 上
     会变成偶发红,见 MEMORY 里那几条计时 flake)。
+
+    ⚠ 打的是**进程全局** `time.perf_counter`(`rr.time` 就是 stdlib 模块)。并发
+    lane 下曾一次性红过 3 条、随后 7 次全绿。**别**为此把实现里的
+    `time.perf_counter()` 换成模块别名:`generate_repository_contract_fixtures.py`
+    的 `fixed_perf` 正靠全局 patch 拿确定性耗时,换别名会让 golden 漂移。若再复
+    现,改用注入时钟(取时函数做成 `_closing_rerank` 的可选形参)。
     """
     import app.services.reasoning_retrieval as rr
     from app.services.reasoning_retrieval import ReasoningRetriever
@@ -11739,7 +11746,28 @@ def _rerank_run(rrepo, **settings):
         nb.id, "RTL到GDSII流程", "")
 
 
-def _one(trace, step_type):
+def _fanout_slot_clock(monkeypatch, clock):
+    """让 `retrieval_fanout_slot()` 的进与出各走一针(250ms)。
+
+    单查询支不经 `search()`,`_rerank_clock` 的针扎不到它。而这一支真正花时间的
+    地方有两处——**排队等并发闸**,以及闸内那次全库 `retrieve_scored`;并发闸那
+    段正是生产上那条 195s 步最可能藏时间的位置。两处都走针,`researched_ms` 才
+    既钉住"计了多少",也钉住"从哪一行开始计"。
+    """
+    import app.services.reasoning_retrieval as rr
+
+    @contextmanager
+    def ticking_slot():
+        clock[0] += _RERANK_TICK
+        try:
+            yield
+        finally:
+            clock[0] += _RERANK_TICK
+
+    monkeypatch.setattr(rr, "retrieval_fanout_slot", ticking_slot)
+
+
+def _only_step(trace, step_type):
     steps = [t for t in trace if t.step_type == step_type]
     assert len(steps) == 1, f"{step_type} 步不是一条: {len(steps)}"
     return steps[0]
@@ -11763,12 +11791,12 @@ def test_v2_closing_rerank_takes_its_wall_clock_off_the_answer_step(
     types = [t.step_type for t in result.trace]
     # 位置:紧挨在 answer 之前(它就是 answer 之前最后发生的那件事)。
     assert types[-2:] == ["rerank", "answer"]
-    rerank = _one(result.trace, "rerank")
+    rerank = _only_step(result.trace, "rerank")
     assert rerank.duration_ms == 500          # 2 次重检索 × 250ms
     assert rerank.detail == {"queries": 2, "reused": 0, "researched": 2,
                              "researched_ms": 500, "top_n": 20}
     # answer 步只剩自己:整段重排耗时已经不在它头上。
-    assert _one(result.trace, "answer").duration_ms == 0
+    assert _only_step(result.trace, "answer").duration_ms == 0
 
 
 def test_v2_closing_rerank_detail_separates_reused_from_researched(
@@ -11784,11 +11812,37 @@ def test_v2_closing_rerank_detail_separates_reused_from_researched(
     _rerank_clock(monkeypatch)
     # 复用开着(默认):两个子查询在首轮播种时都留存过打分,收尾零重检索。
     result = _rerank_run(rrepo)
-    rerank = _one(result.trace, "rerank")
+    rerank = _only_step(result.trace, "rerank")
     assert rerank.detail["reused"] == 2
     assert rerank.detail["researched"] == 0
     assert rerank.detail["researched_ms"] == 0
     assert rerank.duration_ms == 0            # 一次针都没走
+
+
+def test_v2_closing_rerank_charges_the_single_query_leg_too(rrepo, monkeypatch):
+    """配额关着(或只有一个子查询)时走的是全局重排支,它的成本同样落在 `rerank`。
+
+    这一支此前只有"有没有一条 rerank 步"被间接盖到,detail 那四个数一个都没钉:
+    把 `researched` 写成 0、把 `researched_ms` 那行删掉,全量用例照样绿——而这两
+    个数正是"这一段花了多久"在轨迹上的**唯一**读数。
+
+    顺带钉住这一支特有的口径不对称:`queries` 报的是本 run 攒下的子查询数(2),
+    `researched` 恒 1 —— 这一支根本不按子查询走,它只用原问题重新打一次分。
+
+    变异:去掉 `stats["researched"] = 1` ⇒ 红(`researched` 变 0);删掉
+    `stats["researched_ms"] = ...` 那行 ⇒ 红(变 0);把 `began` 挪到
+    `with retrieval_fanout_slot():` 之内 ⇒ 红(500 → 250,少算了排队等闸的那一
+    段,而那正是生产上那条 195s 步最可能藏时间的地方)。
+    """
+    clock = _rerank_clock(monkeypatch)
+    _fanout_slot_clock(monkeypatch, clock)
+    # 两个子查询 + 配额关 ⇒ 收尾确定性地落在 else 支(单查询支)。
+    result = _rerank_run(rrepo, reasoning_quota_enabled=False)
+    assert [t.step_type for t in result.trace][-2:] == ["rerank", "answer"]
+    rerank = _only_step(result.trace, "rerank")
+    assert rerank.detail == {"queries": 2, "reused": 0, "researched": 1,
+                             "researched_ms": 500, "top_n": 20}
+    assert _only_step(result.trace, "answer").duration_ms == 0
 
 
 def test_quota_rerank_stats_are_opt_in_and_count_failed_research_time(
@@ -11799,7 +11853,9 @@ def test_quota_rerank_stats_are_opt_in_and_count_failed_research_time(
     一次失败的重检索照样花掉了墙钟,不计等于把失败说成免费——而「为什么这一段
     这么慢」恰恰最常是某条臂在超时后才抛。
 
-    变异:把 `_quota_rerank` 的 `finally` 改成只在成功分支累加 ⇒ 这条红。
+    变异:把 `_quota_rerank` 的 `finally:` 那块累加挪进 `try:` 里 `per_q.append`
+    之后(等价于"只在成功分支累加")⇒ 这条红:`researched` 变 1、
+    `researched_ms` 变 250。
     """
     import app.services.reasoning_retrieval as rr
     from app.services.reasoning_retrieval import ReasoningRetriever
@@ -11909,6 +11965,10 @@ def test_legacy_closing_rerank_reads_the_clock_zero_times(rrepo, monkeypatch):
     变异:把 `_quota_rerank` 的 `began = ... if stats is not None else 0.0` 改回
     无条件 `time.perf_counter()`,或把 `_closing_rerank` 里的两处 `measure` 判断
     去掉 ⇒ 这条红(那条 golden 也会红,但它跑一整套 fixture,红了不好定位)。
+
+    「关闭态」是**两把闸**的合取,所以两格都要:部署总闸关,以及总闸开着但调用
+    方策略位关(Knowhow 补全恒 legacy)。变异:去掉 `reflect_v2_active()` 里的
+    `and self.allow_reflect_v2` ⇒ 只有第二格会红。
     """
     import app.services.reasoning_retrieval as rr
     from app.services.reasoning_retrieval import ReasoningRetriever
@@ -11921,23 +11981,33 @@ def test_legacy_closing_rerank_reads_the_clock_zero_times(rrepo, monkeypatch):
         return reads[0] * 0.001
 
     monkeypatch.setattr(rr.time, "perf_counter", counting_perf_counter)
-    retriever = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
-    # 两条腿都换成零读时钟的替身:检索层自己也读时钟(`retrieve_scored` 内部 9
-    # 次),不换掉它,这条断言数的就不是「这个方法读了几次」。
-    _stub_rerank_legs(monkeypatch, retriever)
     collected = {"A": _rk("A", 0.0), "B": _rk("B", 0.0)}
 
     def no_record(step):
         raise AssertionError(f"关闭态记了一条 {step.step_type} 步")
 
-    for queries in (["q1", "q2"], ["q1"]):     # 配额分支 + 单查询分支
-        reads[0] = 0
-        detail: dict = {}
-        top_hits, _evidence = retriever._closing_rerank(
-            nb.id, "RTL到GDSII流程", collected, queries, 2, None, detail,
-            no_record)
-        assert reads[0] == 0, f"{queries} 分支多读了 {reads[0]} 次时钟"
-        assert top_hits                        # 重排本身照常出结果
+    def assert_zero_reads(retriever, label):
+        for queries in (["q1", "q2"], ["q1"]):  # 配额分支 + 单查询分支
+            reads[0] = 0
+            detail: dict = {}
+            top_hits, _evidence = retriever._closing_rerank(
+                nb.id, "RTL到GDSII流程", collected, queries, 2, None, detail,
+                no_record)
+            assert reads[0] == 0, f"{label}/{queries} 多读了 {reads[0]} 次时钟"
+            assert top_hits                     # 重排本身照常出结果
+
+    # 两条腿都换成零读时钟的替身:检索层自己也读时钟(`retrieve_scored` 内部 9
+    # 次),不换掉它,这条断言数的就不是「这个方法读了几次」。
+    deployment_off = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    _stub_rerank_legs(monkeypatch, deployment_off)
+    assert_zero_reads(deployment_off, "部署总闸关")
+    # 第二格必须在第一格**之后**建:两个 retriever 共用同一个 settings 对象,
+    # 而闸是调用时读的,先翻开关会把第一格一起翻掉。
+    rrepo.settings.reasoning_reflect_v2_enabled = True
+    caller_off = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    _stub_rerank_legs(monkeypatch, caller_off)
+    caller_off.allow_reflect_v2 = False
+    assert_zero_reads(caller_off, "调用方策略位关")
 
 
 def test_v2_closing_rerank_does_read_the_clock(rrepo, monkeypatch):
