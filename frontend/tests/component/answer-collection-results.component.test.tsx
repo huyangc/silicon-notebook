@@ -219,6 +219,31 @@ test("coverage: concurrent_change 是终态,单独一句话,不与普通「部�
 });
 
 
+test("coverage: oversize_sample 说的是「内容太多只列一页」,不是「已达上限」", () => {
+  // 服务端的规模守卫把一份远大于本轮额度的目录降成一页样本;额度**没有**用光。
+  // 落回 budget 的措辞(「已达本轮枚举上限」)会让用户以为再来一轮就能列全,
+  // 落回兜底的「部分结果」则把唯一有信息量的那半句丢掉。
+  const answer = baseAnswer();
+  answer.result_sets = [collectionResult({
+    collection: "sources",
+    element_kind: "",
+    items: [],
+    coverage: {
+      returned_total: 50, total: 48839, complete: false,
+      truncated_reason: "oversize_sample", overflow_semantics: "explicit_partial",
+    },
+  })];
+  renderAnswer(answer);
+  expect(screen.getByText("已列 50/48839 条")).toBeInTheDocument();
+  expect(
+    screen.getByText("已明确标注为部分结果（内容太多，本轮只列出其中一页）"),
+  ).toBeInTheDocument();
+  // 内部代号绝不上屏,也不得退回「已达本轮枚举上限」。
+  expect(document.body.textContent).not.toContain("oversize_sample");
+  expect(document.body.textContent).not.toContain("已达本轮枚举上限");
+});
+
+
 test("coverage: 枚举完整、分析部分——两轨分开披露", () => {
   const answer = baseAnswer();
   answer.result_sets = [collectionResult({

@@ -6082,6 +6082,10 @@ class ReasoningRetriever:
             max_pages=pages_left,
             max_payload_chars=payload_left,
             excerpt_chars=enum_limits.cell_excerpt_chars,
+            # 诚实披露(T-BF2):这份清单短**不是**因为额度用光了(池还剩着),
+            # 报成 `budget` 会同时骗两边——告诉读的人这一轮没地方了(不是),
+            # 又藏起唯一能为这份短清单辩护的事实(再翻也没用)。
+            oversize_sample=oversize,
         )
 
     def _run_enumeration(

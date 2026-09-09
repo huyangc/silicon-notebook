@@ -45,6 +45,7 @@ from app.services.collection_enumeration import (
     MAX_EVIDENCE_REFS,
     TRUNCATED_BUDGET,
     TRUNCATED_CONCURRENT_CHANGE,
+    TRUNCATED_OVERSIZE_SAMPLE,
     TRUNCATED_PAYLOAD,
     ElementItem,
     EnumerationCoverage,
@@ -364,6 +365,12 @@ def enumeration_sub_budget(
 _REASON_LABELS = {
     TRUNCATED_BUDGET: "run budget",
     TRUNCATED_PAYLOAD: "payload limit",
+    # Deliberately NOT "run budget": the pool was not spent.  The synthesis
+    # side has to be able to say "this collection is far larger than one run
+    # can list, here is a sample and the count" instead of "the listing was cut
+    # short", and it can only say that if the reason survives to it.
+    TRUNCATED_OVERSIZE_SAMPLE: "collection far larger than the run allowance; "
+                               "one sample page only",
 }
 
 # Prompt-line clamp, distinct from the executor's own transport excerpt

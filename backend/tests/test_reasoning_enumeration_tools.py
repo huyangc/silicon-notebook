@@ -22,6 +22,7 @@ from app.services.cancellation import AskCancelled
 from app.services.collection_enumeration import (
     TRUNCATED_BUDGET,
     TRUNCATED_CONCURRENT_CHANGE,
+    TRUNCATED_OVERSIZE_SAMPLE,
     TRUNCATED_PAYLOAD,
     ElementEnumeration,
     EnumerationCoverage,
@@ -2400,9 +2401,13 @@ def test_an_oversize_roster_spends_one_page_not_the_whole_run_pool(repo):
     assert roster.coverage.returned_total == 2       # 一页样本,不是整轮额度
     assert roster.coverage.total == 13               # 计数照报
     assert roster.coverage.complete is False
+    # 诚实披露(T-BF2):额度没用光,所以不是 `budget`。
+    assert roster.coverage.truncated_reason == TRUNCATED_OVERSIZE_SAMPLE
     # 动作没有被拒绝、范围没有被服务端改写。
     assert roster.local_only is False
-    assert _steps(result, "enumerate")[0].detail["collection"] == "sources"
+    enumerate_step = _steps(result, "enumerate")[0]
+    assert enumerate_step.detail["collection"] == "sources"
+    assert enumerate_step.detail["truncated_reason"] == TRUNCATED_OVERSIZE_SAMPLE
     # 行池没有被一次动作吃光:后面的公式清单照常列全。
     assert "enumeration_budget" not in _skips(result)
     assert [o.collection for o in result.enumerations] == ["sources", "elements"]
