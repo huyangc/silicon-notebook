@@ -132,11 +132,29 @@ _QUERY_PARAM = ActionParam(
 #: 默认覆盖整个检索范围、与 `[Collections in scope]` 的 sources 计数一致,只有
 #: 问题明确在问「当前笔记本」时才收窄。它只对 ``collection="sources"`` 有意义,
 #: 另两个集合的执行器根本没有这个参数。
+#:
+#: 第二半句(「先比两个数」)是 legacy ``prompts.py`` 那段 "Use the [Collections
+#: in scope] counts to decide BEFORE acting … do NOT try to page through it —
+#: answer with the count, a few representative examples, and an explicit
+#: suggestion to narrow the request (one source, one section, one topic)" 的对等
+#: 表述。v2 的能力投影此前只搬了前半句「默认列全范围」,于是模型在一个 48 839 篇
+#: 的库里读到 sources 计数之后,唯一学到的是「默认就该全列」——生产上八次 run
+#: 各用一个动作把整轮行池换成一段无序前缀。两个数的**字面**必须与它们真正的
+#: 出处对齐:计数来自集合地图行 ``sources: N (current notebook: M)``,额度来自
+#: 同一行末尾由 ``reasoning_retrieval._allowance_suffix`` 每轮现拼的
+#: ``listing allowance left: R rows``——说的不是同一个字面,模型就得自己猜该拿
+#: 哪两个数比。服务端的规模守卫是同一件事的兜底,不是它的替代:守卫只保证额度不
+#: 被一次动作吃光,「别翻页、按计数作答」仍然只能由模型自己决定。
 _ENUMERATE_SCOPE_NOTE = (
     "只对 collection=\"sources\" 有意义。默认(留空)= 列出检索范围内的**全部**"
     "文档(当前笔记本 + 已勾选的参考库),与 [Collections in scope] 的 sources "
     "计数同口径;只有问题明确在问当前笔记本时才填 \"current_notebook\"。"
     "换一档是**另一份清单**(续跑账目按范围记键),不算重复请求。"
+    "动作之前先比两个数:[Collections in scope] 的 sources 计数(填 "
+    "\"current_notebook\" 时看括号里那个数)与同一行末尾的 listing allowance "
+    "left: R rows。装得下就一次列全;计数远大于 R 时**不要**逐页翻——把额度花光"
+    "也只能看到其中很小一部分,应当按计数 + 几条代表性样本作答,并明确建议把请求"
+    "收窄到一个来源、一节或一个主题。"
 )
 
 #: ``update_outline`` 的 ``sections`` 参数说明。v2 的 ``arguments`` 在 schema
