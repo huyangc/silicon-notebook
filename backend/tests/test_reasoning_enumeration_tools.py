@@ -2337,6 +2337,46 @@ def test_v2_a_guessed_source_id_is_told_to_ask_by_name_instead(repo):
     assert "enumeration_source_not_in_scope" in llm.reflect_prompts[1]
 
 
+def test_v2_a_guessed_source_id_does_not_shadow_the_title_the_model_gave(repo):
+    """两个都给的时候走**名字**那一条(v2 only)。
+
+    分派处的优先级是 id 压过 title(`_run_enumeration` 只在 `not source_id and
+    source_title` 时才做解析)。v2 下 `source_id` 已经不在参数表里、模型填进去的
+    只可能是猜的,于是"猜来的 id + 如实给出的书名"这一形态会让那个猜测把书名整段
+    吃掉:一个本可以成立的请求拿回一条「来源不在检索范围内」。解析层因此在
+    `source_title` 非空时干脆不写那一格。
+
+    这是**解析层**的取舍:legacy 的 `test_source_id_wins_over_source_title` 与
+    `_run_enumeration` 的分派都逐字节不变。
+
+    变异:把 `_v2_apply_enumerate` 的 `enumerate_source_id` 改回无条件赋值 ⇒
+    这条红(枚举为空,skip 里是 `enumeration_source_not_in_scope`)。
+    """
+    notebook = _seed(_v2(repo), formulas=2)
+    _add_titled_source(repo, notebook.id, "s2", "论文二", formulas=3)
+    llm = _ValidatingLLM([
+        _v2_enumerate(source_id="guessed-id", source_title="论文二"),
+        {"next_action": "answer", "sufficient": True,
+         "arguments": {}, "reason": "够了"}])
+    retriever, limits = _retriever(repo, llm)
+
+    result = retriever.run(notebook.id, "《论文二》里有哪些公式", "", limits=limits)
+
+    assert [outcome.source_id for outcome in result.enumerations] == ["s2"]
+    assert len(result.enumerations[0].items) == 3
+    assert "enumeration_source_not_in_scope" not in _skips(result)
+    # 非字符串的 `source_id` 仍然被类型校验拦下:这一层摘掉的是"以它为准",
+    # 不是"不再看它"。
+    caps_llm = _ValidatingLLM([
+        _v2_enumerate(source_id=123, source_title="论文二"),
+        {"next_action": "answer", "sufficient": True,
+         "arguments": {}, "reason": "够了"}])
+    retriever, limits = _retriever(repo, caps_llm)
+    rejected = retriever.run(notebook.id, "哪些公式", "", limits=limits)
+    assert rejected.enumerations == []
+    assert "invalid_argument:source_id" in _skips(rejected)
+
+
 def test_a_collection_key_is_never_counted_as_an_undelivered_evidence_key(repo):
     """集合键不进送达账的任何一格。
 

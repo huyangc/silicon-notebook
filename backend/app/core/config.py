@@ -1316,9 +1316,13 @@ class Settings(BaseSettings):
     # 其中最相关的一块,答案就缺参数细节。零模型调用、零 embedding;查询里没有标识符
     # 时整条通道零 IO(总闸在 identifier_terms)。
     exact_lookup_enabled: bool = Field(True, validation_alias="EXACT_LOOKUP_ENABLED")
-    # 一次问答最多用前 N 个标识符探测(粘贴整页命令表时的上界)。
+    # 一次问答最多用前 N 个标识符探测(粘贴整页命令表时的上界)。`ge=1`:0 或负数
+    # 不是"关掉这条通道"(那是 `EXACT_LOOKUP_ENABLED` 的事),而是让 reflect v2 的
+    # 两层判据分叉——解析层按 `exact_probe_terms` 放行的名称,会被执行层那道按同
+    # 一上界的切片削成空集、再判 `exact_term_not_identifier`。用配置约束堵死,好
+    # 过在解析层复制一份与判据无关的预算切片。
     exact_lookup_max_identifiers: int = Field(
-        3, validation_alias="EXACT_LOOKUP_MAX_IDENTIFIERS")
+        3, ge=1, validation_alias="EXACT_LOOKUP_MAX_IDENTIFIERS")
     # 每个标识符的精确命中窗口(用于统计哪个小节命中最多,不是最终结果数)。
     exact_lookup_fts_k: int = Field(50, validation_alias="EXACT_LOOKUP_FTS_K")
     # 最多取齐几个小节 / 每个小节最多取几块 —— 通道的结构性硬界。

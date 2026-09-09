@@ -19,7 +19,7 @@
 
 ## 2. 统一硬约束
 
-关闭态(`REASONING_REFLECT_V2_ENABLED=false`)prompt/schema/trace 逐字节不变;`scripts/architecture_boundary_baseline.json::function_length_ceiling` 的 `run`(1359)/`_new_run_state`(201)/`_run_enumeration`(267)**双向零松弛**(缩了也要同步下调);prompt/schema 改动用例经 `_GatedV2LLM`;零新增 LLM 调用、零新增 I/O;Knowhow 恒 legacy。
+关闭态(`REASONING_REFLECT_V2_ENABLED=false`)prompt/schema/trace 逐字节不变;`scripts/architecture_boundary_baseline.json::function_length_ceiling` 的 `run`(1359)/`_new_run_state`(201)/`_run_enumeration`(基线 267,T-BF5 评审后收成 260)**双向零松弛**(缩了也要同步下调);prompt/schema 改动用例经 `_GatedV2LLM`;零新增 LLM 调用、零新增 I/O;Knowhow 恒 legacy。
 
 ## 3. 任务
 
@@ -38,10 +38,10 @@
 **评审后修正(规格 F2、质量 P3-1)**:那半句与集合无关,却挂在只对 `collection="sources"` 有意义的 `scope` 参数上,等于只对一个集合说这句话。改为 `ActionDefinition` 新增**动作级** `note`(`ReflectCapabilities.note_for` 直接读定义,不进按轮收窄的 `params`;`reflect_v2_system_prompt` 渲染在动作描述之后、`arguments` 之前),`_ENUMERATE_SIZE_NOTE` 由两个枚举动作共用,措辞改成「地图行里**这个集合**的计数」;`_ENUMERATE_SCOPE_NOTE` 只留 sources 专属的范围部分。
 
 ### T-BF4 `exact_lookup` 判据前移 + 写进参数说明
-`EXACT_LOOKUP_ACTION` 的 `term` note 写出形状判据(带下划线/点,或连字符+数字),与 `_NOT_A_NAME_NOTE` 共用字面;`_v2_apply_arguments` 的 `exact_lookup` 分支在 `clean_exact_term` 后用 `exact_probe_terms(term, honor_quotes=False)` 预校验,空 ⇒ `_V2ArgumentError("invalid_argument:term")`(零 I/O invalid 观察,`status_for_skip` 已归 `STATUS_INVALID`);预校验路径接同一条 `feed_exact_lookup_skip` 回喂教学句。legacy 执行层分支原样保留。
+`EXACT_LOOKUP_ACTION` 的 `term` note 写出形状判据(带下划线/点,或连字符+数字),与 `_NOT_A_NAME_NOTE` 共用字面,并在其后**追加**那份冻结字面只是蕴含的两条从句(至少 4 个字符、含 ASCII 字母);`_v2_apply_arguments` 的 `exact_lookup` 分支在 `clean_exact_term` 后用 `exact_probe_terms(term, honor_quotes=False)` 预校验,空 ⇒ `_V2ArgumentError("invalid_argument:term")`(零 I/O invalid 观察,`status_for_skip` 已归 `STATUS_INVALID`)。**回喂不走 `feed_exact_lookup_skip`**(评审修正):那份 legacy 散文账目只由 `legacy_action_ledger_note` 渲染,而它的判据是 `capabilities is None` —— v2 下永不拼接,写进去是死代码。被拒的词改由 `parse_reflect_v2` 写进 `invalid_request_identity`,经 `v2_request_identity` 落进动作观察账的「请求」列,与原因码同一行上屏;"该给什么"那半由每轮常驻的参数说明承担。legacy 执行层分支原样保留。
 
 ### T-BF5 `enumeration_rejected` 修法(不删枚举能力)
-从 v2 `ENUMERATE_ELEMENTS` 参数表**摘掉 `source_id`**(`source_title` 保留;内部 id 从不上屏,模型填的只可能是猜测);`ReflectDecision.enumerate_source_id` 与 `v2_request_identity` 的 `identity_fields` 不动(legacy 仍解析,服务端解析出的 id 走同一格)。执行层 skip 拆细:范围不符报 `enumeration_source_not_in_scope`,措辞「按名称给出(source_title)」。**假设**:生产 12 条来自模型猜 `source_id`(本地无复现样本);待生产 raw `detail.error` 字符串确认,若实为 memory 合成源 `not enumerable`,改成解析器侧过滤。
+从 v2 `ENUMERATE_ELEMENTS` 参数表**摘掉 `source_id`**(`source_title` 保留;内部 id 从不上屏,模型填的只可能是猜测);`ReflectDecision.enumerate_source_id` 与 `v2_request_identity` 的 `identity_fields` 不动(legacy 仍解析,服务端解析出的 id 走同一格)。执行层 skip 拆细:范围不符报 `enumeration_source_not_in_scope`,措辞「按名称给出(source_title)」;那条 skip 由 `_enumeration_rejection` 整条产出(原因码与 detail 形状是同一个决定的两半,热函数不背那份字典字面)。**两个都给时以 `source_title` 为准**(评审补充):分派处是 id 压过 title,一个猜来的 id 会把模型如实给出的书名吃掉,所以 v2 解析层在 title 非空时不写 `enumerate_source_id`(类型校验仍做,legacy 与 `_run_enumeration` 逐字节不变)。**假设**:生产 12 条来自模型猜 `source_id`(本地无复现样本);待生产 raw `detail.error` 字符串确认,若实为 memory 合成源 `not enumerable`,改成解析器侧过滤。
 
 ### T-BF6 收尾计时归位
 `run()` 收尾重排整块抽成 `_closing_rerank(...)`(`run()` 净缩,baseline 下调),记新 step_type `rerank`(v2 门 `capabilities is not None`),detail `{"queries", "reused", "researched", "researched_ms", "top_n"}`;单查询分支 `retrieve_scored` 同样计入。登记三处闭集 + 前端标签(候选「收尾重排」,过 `check_ui_vocabulary.py`)。验收:answer 步只剩合成候选本身;`durations_ms` 出现 `rerank`;关闭态轨迹步序列逐字不变。`_nudge_missing_assessment` 不补步(它不是调用)——写进「刻意不做」。

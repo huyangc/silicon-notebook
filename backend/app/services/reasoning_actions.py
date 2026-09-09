@@ -142,13 +142,21 @@ _QUERY_PARAM = ActionParam(
 #: 真判据在 ``app/repositories/lexical_query.py::exact_probe_terms``(动作路径恒
 #: ``honor_quotes=False``:名称来自模型而不是用户):从文本里抽出的
 #: ``[A-Za-z0-9]+([._-][A-Za-z0-9]+)+`` 标识符中,含 ``_`` 或 ``.`` 的直接过,只有
-#: 连字符的必须带数字。另有两条同源硬条件**刻意不写进这句话**——至少 4 个字符、
-#: 必须含 ASCII 字母(``identifier_terms``)——因为这份字面同时是 legacy 执行层的
-#: 回喂与 trace 文案、逐字节冻结,而三个例子(``set_db`` / ``config.yaml`` /
-#: ``GPT-4``)已经把它们蕴含在内;再加两条从句只会把一行参数说明撑成一段。
+#: 连字符的必须带数字。另有两条同源硬条件(``identifier_terms``:至少 4 个字符、
+#: 必须含 ASCII 字母)**不在这份共用字面里**——它同时是 legacy 执行层的回喂与
+#: trace 文案、逐字节冻结,一个字都不能动。v2 的 ``term`` 参数说明在这份字面
+#: **之后追加**那两条从句(见 ``EXACT_LOOKUP_ACTION``):被拒后听到的与事前读到
+#: 的仍是同一句形状判据,而事前那一份可以比事后更完整——它不受冻结约束,而三个
+#: 例子只是**蕴含**这两条,蕴含教不会一个正在猜的模型。
 EXACT_TERM_SHAPE_NOTE = (
     "要像 set_db、config.yaml 这样带下划线或点;只用连字符连接的词还需带数字,如 GPT-4"
 )
+
+#: v2 参数说明在共用字面之后追加的两条从句。判据出处是 ``identifier_terms``
+#: (``len(value) < 4`` 与 ``_ASCII_LETTER_RE``),与形状正则同一把闸的两道前置
+#: 条件。单独立一个常量而不是拼在字面里,是为了让用例能分别断言"共用那半逐字节
+#: 没变"和"v2 这半确实补上了"。
+EXACT_TERM_EXTRA_SHAPE_NOTE = "并且至少 4 个字符、含 ASCII 字母"
 
 #: ``scope`` 的参数说明,两个枚举动作共用一份。措辞与 legacy prompt 里那段
 #: (``prompts.py`` 的 "By default the roster lists EVERY document…")同口径:
@@ -243,7 +251,8 @@ ACTION_DEFINITIONS: Mapping[str, ActionDefinition] = MappingProxyType({
             EXACT_LOOKUP_ACTION,
             (ActionParam("term", PARAM_TEXT, required=True,
                          note="文档里**逐字**出现的名称(命令/API/选项/参数):"
-                              f"{EXACT_TERM_SHAPE_NOTE}。不满足这个形状的词"
+                              f"{EXACT_TERM_SHAPE_NOTE},"
+                              f"{EXACT_TERM_EXTRA_SHAPE_NOTE}。不满足这个形状的词"
                               "本轮直接判参数不合法,一次检索都不会发生。"),),
             True, "exact_lookup", ("term",),
             ("source_scope", "exact_lookup_wiring", "exact_lookup_budget"),
