@@ -3012,18 +3012,18 @@ class _ReasoningRunState:
     # —— 以下字段由首轮的某个阶段产出,构造时留空 ——
     # `_first_round_prompt_blocks` 写:Agent 库理解块与它的原始行(后者供
     # consult_memory 复用),部署级打法块与它渲染前的选中集。
-    # `_first_round_prompt_blocks` 写:集合地图渲染成 prompt 行**之前**的那个
-    # 对象。同一次构建的产物,不是第二次查询——`collection_map_text` 以前把它
-    # 渲染完就丢了,于是「本轮范围里有多少篇文档」这个已经算出来的数在执行层
-    # 只剩一句人读的英文。规模守卫(`oversize_source_listing`)要的就是它。
-    #
-    # 带默认值、留空即中性:地图没建(枚举关闭态、或构建失败的 fail-open 分支)
-    # 时恒为 None,守卫恒不触发,`_new_run_state` 因此一行都不用改。
-    collection_map: Optional[CollectionMap] = None
     profile_block: str = ""
     profile_raw_blocks: List = field(default_factory=list)
     experience_block: str = ""
     experience_entries: List = field(default_factory=list)
+    # `_first_round_prompt_blocks` 也写:集合地图渲染成 prompt 行**之前**的那个
+    # 对象。同一次构建的产物,不是第二次查询——`collection_map_text` 以前把它渲染
+    # 完就丢了,于是「本轮范围里有多少篇文档」这个已经算出来的数,在执行层只剩
+    # 一句人读的英文。规模守卫(`oversize_source_listing`)要的就是它。
+    #
+    # 带默认值、留空即中性:地图没建(枚举关闭态、或构建失败的 fail-open 分支)
+    # 时恒为 None,守卫恒不触发,`_new_run_state` 因此一行都不用改。
+    collection_map: Optional[CollectionMap] = None
     # 本 run 里 reflect **主动选中**的动作(经 ADOPTION_ACTIONS 折回存储词表)。
     # 只在真的注入过条目时才积累——没注入就没有「采用」可言。reflect 循环写、
     # 收尾的采用回写读。
