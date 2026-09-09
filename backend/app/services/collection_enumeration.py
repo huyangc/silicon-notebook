@@ -123,13 +123,25 @@ from app.services.source_display import source_display_title
 from app.services.source_scope import scoped_participants
 
 
-# ``truncated_reason`` vocabulary — exactly the three the design doc fixes.
-# "budget" covers both row and page ceilings on purpose: they are the same
-# statement to a reader ("the action ran out of its allowance"), and splitting
-# them would put a knob name into a protocol field.
+# ``truncated_reason`` vocabulary.  "budget" covers both row and page ceilings
+# on purpose: they are the same statement to a reader ("the action ran out of
+# its allowance"), and splitting them would put a knob name into a protocol
+# field.
 TRUNCATED_BUDGET = "budget"
 TRUNCATED_PAYLOAD = "payload"
 TRUNCATED_CONCURRENT_CHANGE = "concurrent_change"
+# The fourth value, added with the oversize-roster guard (计划 T-BF2).  It is a
+# DIFFERENT statement from "budget", which is why it is not folded into it: the
+# run's allowance was NOT spent — the caller deliberately asked for one sample
+# page because the collection is far larger than anything this run could list,
+# and the rest of the pool is still there for the next action.  Reporting that
+# as "ran out of allowance" would be a lie in both directions: it tells the
+# reader the run is out of room (it is not) and it hides the only fact that
+# makes the short list defensible (paging further would not have helped).
+# Set by the CALLER through ``EnumerationBudget.oversize_sample`` — this module
+# never decides that a collection is too big, it only reports honestly which
+# ceiling it was handed.
+TRUNCATED_OVERSIZE_SAMPLE = "oversize_sample"
 
 # 「这个数是从多大的一片资料里数出来的」——``local_only`` 清单的范围后缀,**唯一
 # 定义点**。同一个 run 现在可以同时产出 ``scope:"current_notebook"`` 与
@@ -224,6 +236,15 @@ class EnumerationBudget:
     bug, and answering it with an empty "partial" result would be
     indistinguishable from a real truncation.  A caller whose run budget is
     exhausted must skip the action, not request zero rows.
+
+    ``oversize_sample`` changes NO ceiling.  It only says what ``max_rows``
+    MEANS for this call: not "all the rows this run has left" but "one sample
+    page, deliberately, because the collection dwarfs anything this run could
+    list".  The row ceiling then reports ``TRUNCATED_OVERSIZE_SAMPLE`` instead
+    of ``TRUNCATED_BUDGET`` — the two are different facts about the same short
+    list, and only the caller knows which one it just created.  Every other
+    ceiling keeps its own reason: a payload or page stop is still that stop
+    even on a sampling call.
     """
 
     page_size: int
@@ -231,6 +252,7 @@ class EnumerationBudget:
     max_pages: int
     max_payload_chars: int
     excerpt_chars: int = DEFAULT_EXCERPT_CHARS
+    oversize_sample: bool = False
 
     def __post_init__(self) -> None:
         for name in ("page_size", "max_rows", "max_pages", "max_payload_chars"):
@@ -631,7 +653,13 @@ class _Walk:
             raise _Stop(TRUNCATED_BUDGET)
         remaining = self.budget.max_rows - self.returned
         if remaining <= 0:
-            raise _Stop(TRUNCATED_BUDGET)
+            # The ROW ceiling is the only one the caller can mean as "one
+            # sample page"; the page ceiling above and the payload ceiling in
+            # ``admit`` are transport rails it never sets on purpose.
+            raise _Stop(
+                TRUNCATED_OVERSIZE_SAMPLE if self.budget.oversize_sample
+                else TRUNCATED_BUDGET
+            )
         return max(1, min(int(self.budget.page_size), remaining))
 
     def take_page(

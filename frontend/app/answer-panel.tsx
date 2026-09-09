@@ -95,6 +95,9 @@ const TRUNCATED_REASON_LABELS: Record<string, string> = {
   budget: "已达本轮枚举上限",
   payload: "本轮内容量已达上限",
   concurrent_change: "资料在读取期间有变动",
+  // 与 budget 刻意不同款:额度**没有**用光,是这个集合远大于本轮能列的量,
+  // 所以只取了一页样本。说成「已达上限」会让用户以为再来一轮就能列全。
+  oversize_sample: "内容太多，本轮只列出其中一页",
 };
 
 function truncatedReasonLabel(reason: string): string {
