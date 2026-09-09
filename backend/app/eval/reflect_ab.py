@@ -629,6 +629,16 @@ def slice_llm_usage(
     `ts` 解不出来的记录**跳过**并不影响归因方向的正确性(它谁都不算),但会让
     这个 run 的成本偏低;实际日志里 `ts` 恒由 `datetime.now().isoformat()` 写
     入,解不出来只可能是日志被别的东西污染过。
+
+    **`model_calls` 与 llm.jsonl 行上的 `attempts` 是两套口径,不要互相代入。**
+    这里的 `model_calls` 数的是**行数**——一次逻辑调用留一条终态行(瞬时重试另写
+    `status="retry"` 行,该行不带 `attempts`;见 `app/core/llm.py` 的重试分支)。
+    行上的 `attempts` 数的是**真正发出去的请求数**。两者唯一的分叉点是**静默
+    fallback**(规格 F2):`response_format` 被拒后的明文重试、`stream_options`
+    被拒后的重建流——各自多发一次请求,却不留任何日志行,于是同一行的
+    `attempts` 会大于它在 `model_calls` 里占的那 1。报「端点真实负载」用
+    `attempts`,报「模型被问了几次」用 `model_calls`;把前者当后者,会把一次静默
+    fallback 记成一次额外的推理,反过来则会低报负载。
     """
     calls = 0
     prompt: int | None = 0

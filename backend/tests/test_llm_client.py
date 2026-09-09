@@ -867,9 +867,19 @@ def test_attempts_counts_the_silent_response_format_fallback(monkeypatch):
     llm.jsonl row of its own (only the transient-retry path logs one). Counting
     logical calls instead would report this as one request and understate the
     endpoint's true load — the exact case `attempts_observed` exists to rule
-    out."""
+    out.
+
+    llm.jsonl's own `attempts` is asserted alongside, not just the sink: the log
+    is what the offline A/B rig reads, and three different quantities were
+    spelled `attempt(s)` in this function (the retry-loop budget, this real
+    request count, and the retry row's zero-based index). Mutation: log the loop
+    budget instead of `requests.value` and this row reads 1 while two requests
+    were issued.
+    """
     create = _FakeCreate([ValueError("response_format unsupported"), _Resp()])
     client = _make(monkeypatch, create)
+    logger = _RecordingInteractionLogger()
+    client.interaction_logger = logger
     stats = {}
 
     client.chat_json([{"role": "user", "content": "hi"}], "{}", call_stats=stats)
@@ -877,17 +887,23 @@ def test_attempts_counts_the_silent_response_format_fallback(monkeypatch):
     assert len(create.calls) == 2
     assert stats["attempts"] == 2
     assert stats["attempts_observed"] is True
+    assert logger.records[-1]["attempts"] == 2
+    assert logger.records[-1]["status"] == "ok"
 
 
 def test_attempts_counts_the_silent_stream_options_rebuild(monkeypatch):
     """(T-PS2-d) The other unlogged fallback: a server that rejects
     `stream_options.include_usage` makes the client rebuild the stream, and that
-    rebuild is a real second request."""
+    rebuild is a real second request. This one is issued from inside
+    `_stream_chat_content`, not from the retry loop, so it is also the case a
+    loop-derived count could never see."""
     unsupported = _api_status_error(
         400, "Unsupported parameter: stream_options.include_usage"
     )
     create = _FakeCreate([unsupported, _Stream()])
     client = _make(monkeypatch, create)
+    logger = _RecordingInteractionLogger()
+    client.interaction_logger = logger
     stats = {}
 
     client.chat_json(
@@ -899,6 +915,43 @@ def test_attempts_counts_the_silent_stream_options_rebuild(monkeypatch):
 
     assert len(create.calls) == 2
     assert stats["attempts"] == 2
+    assert logger.records[-1]["attempts"] == 2
+    assert logger.records[-1]["status"] == "ok"
+
+
+def test_only_the_terminal_llm_log_row_carries_attempts(monkeypatch):
+    """(T-PS2-d) A transient blip writes an extra `status="retry"` row under the
+    SAME interaction id, and that row must not carry `attempts`.
+
+    The count is per logical call, not per row: while a retry row is written the
+    tally is still climbing, so a value there would be a snapshot of an unfinished
+    number — and, worse, would invite an analysis pass to sum `attempts` across
+    rows that all describe one call. `reflect_ab.slice_llm_usage` already counts
+    rows for `model_calls`; the two measures are only allowed to diverge at the
+    silent fallbacks, never because one call left several counted rows.
+
+    Mutation: add `attempts` to the retry row (or drop the terminal row's) and
+    one of the two key-set assertions below fires.
+    """
+    monkeypatch.setattr(llm_mod, "sleep_or_cancel", lambda *_a, **_k: None)
+    err = APIConnectionError(request=httpx.Request("POST", "https://x"))
+    create = _FakeCreate([err, _Resp()])
+    client = _make(monkeypatch, create)
+    logger = _RecordingInteractionLogger()
+    client.interaction_logger = logger
+
+    client.chat_json([{"role": "user", "content": "hi"}], "{}")
+
+    retry, terminal = logger.records[-2], logger.records[-1]
+    assert retry["status"] == "retry"
+    assert set(retry) == {
+        "ts", "id", "kind", "model", "request", "status", "attempt",
+        "latency_ms", "error",
+    }
+    assert retry["attempt"] == 0  # zero-based loop index, singular, not a count
+    assert terminal["status"] == "ok"
+    assert terminal["attempts"] == 2  # both requests, on the ONE terminal row
+    assert terminal["id"] == retry["id"]
 
 
 def test_response_chars_measures_the_reply_not_the_clipped_log_copy(monkeypatch):

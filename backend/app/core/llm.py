@@ -693,13 +693,21 @@ class OpenAICompatibleClient:
         requests = _RequestCount()
         # Per-call overrides (interactive reasoning uses a shorter timeout / fewer
         # retries than the batch-extraction global defaults). When not supplied,
-        # behavior is byte-for-byte identical to before: attempts uses the global
-        # setting and no `timeout` is passed to .create() (client default applies).
+        # behavior is byte-for-byte identical to before: the retry budget uses the
+        # global setting and no `timeout` is passed to .create() (client default
+        # applies).
         req_kwargs: Dict[str, Any] = {}
         if timeout is not None:
             req_kwargs["timeout"] = timeout
         try:
-            attempts = 1 + (
+            # NOT the reported `attempts`. This is the CEILING on transient-error
+            # retries — a loop bound, decided before anything is sent — while the
+            # reported `attempts` (`requests.value`) is how many requests actually
+            # went out, which is larger whenever a silent fallback fires and
+            # smaller whenever the loop exits early. Two different quantities that
+            # shared a name here until the review; the reader who conflates them
+            # gets a request count that is really a configuration constant.
+            attempt_budget = 1 + (
                 max_retries if max_retries is not None
                 else self.max_retries
             )
@@ -707,7 +715,7 @@ class OpenAICompatibleClient:
             streamed: Optional[
                 tuple[str, Optional[str], Optional[Dict[str, int]]]
             ] = None
-            for attempt in range(attempts):
+            for attempt in range(attempt_budget):
                 raise_if_cancelled(cancel_event)
                 try:
                     # Prefer native JSON mode; fall back if the server rejects
@@ -745,11 +753,18 @@ class OpenAICompatibleClient:
                 except Exception as exc:
                     if (
                         not is_transient_llm_error(exc)
-                        or attempt + 1 >= attempts
+                        or attempt + 1 >= attempt_budget
                     ):
                         # Exhausted: propagate so the outer handler logs an error.
                         raise
-                    # Visible retry record so blips show up in llm.jsonl.
+                    # Visible retry record so blips show up in llm.jsonl. Its
+                    # `attempt` is this loop's ZERO-BASED index, a third quantity
+                    # again distinct from both the budget and the request count —
+                    # kept singular on purpose so it cannot be read as the plural
+                    # `attempts` the terminal row carries. A retry row deliberately
+                    # has NO `attempts`: the tally is still climbing at that point,
+                    # and a per-row count would invite summing rows that all
+                    # describe the same logical call.
                     logger.log({
                         **record,
                         "status": "retry",
