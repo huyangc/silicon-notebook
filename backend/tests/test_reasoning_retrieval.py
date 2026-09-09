@@ -9529,51 +9529,54 @@ def test_a_rejected_aspect_skip_lands_right_after_its_reflect_step(rrepo):
     assert types[index + 1] == "search_chunks"
 
 
-def test_defer_relies_on_run_booking_nothing_between_note_turn_and_reflect():
-    """`defer` 的正确性靠 `run()` 里一段**没有记账点**的代码,源码级钉住它。
+def test_defer_waits_for_the_reflect_step_that_run_books_after_note_turn():
+    """排队步等的那条记账**确实存在**于 `_v2_note_turn` 之后,源码级钉住它。
 
-    `_TraceRecorder.defer` 的整份安全性论证只有一句话:`_v2_note_turn(...)` 与它
-    后面那条 `record(TraceStep(step_type="reflect", …))` 之间没有任何别的记账,
-    所以排队的 skip 一定紧跟那条 reflect 步落定。这是一条**隐式**耦合——两者相隔
-    十几行、中间还夹着 `reflect_detail` 的组装,谁在中间插一句 `record(...)`
-    (比如给"这一轮引导过大纲"补一条步),排队的那条 skip 就会安静地落到别人后面,
-    而现有用例只钉相对顺序、钉不住"中间没有第三方"。
+    `defer` 的放行判据是 step_type(`after`,默认 `"reflect"`),不再是「下一条
+    记账」;落点因此不受中间记了几步影响(codex #705 R1 P2)。剩下的唯一隐式耦合
+    是:`run()` 在 `_v2_note_turn(...)` 之后必须真的记一条**那个类型**的步——否则
+    排队的披露永远等不到放行,随这次 run 安静地消失。两者相隔十几行,谁把那条
+    reflect 记账挪走、或改了它的 step_type,行为级用例只会表现为"少了一条 skip",
+    指不出原因。这里把 `defer` 的默认 `after` 与 `run()` 记的那条步直接对上。
 
-    行为级用例做不到这一点:插进来的那条记账如果本身合法,轨迹只是多一步,
-    `types[index - 1] == "reflect"` 反而仍然成立(排队步跟着新那条走)。所以这里
-    读源码。
-
-    变异:在 `run()` 的这两句之间加任何一句 `record(...)` ⇒ 这条红。
+    变异:把 `run()` 那句改成别的 step_type ⇒ 这条红。
     """
     import inspect
-    from app.services.reasoning_retrieval import ReasoningRetriever
+    from app.services.reasoning_retrieval import (
+        ReasoningRetriever, _TraceRecorder)
 
+    after = inspect.signature(_TraceRecorder.defer).parameters["after"].default
     source = inspect.getsource(ReasoningRetriever.run)
     start = source.index("self._v2_note_turn(")
-    end = source.index('record(TraceStep(step_type="reflect"', start)
-    assert "record(" not in source[start:end], source[start:end]
+    assert f'record(TraceStep(step_type="{after}"' in source[start:]
 
 
-def test_trace_recorder_defer_lands_after_the_next_step_at_zero_cost(
+def test_trace_recorder_defer_lands_after_the_next_reflect_step_at_zero_cost(
     monkeypatch,
 ):
-    """`defer` 的两条性质,用假时钟钉死(墙钟断言不进用例)。
+    """`defer` 的三条性质,用假时钟钉死(墙钟断言不进用例)。
 
-    顺序:排队的步落在**下一条**记账之后。耗时:那一段墙钟归下一条记账所有,
-    排队的步自己≈0——这正是"当场记账会让 reflect 步显示 0ms"那件事的反面。
+    顺序:排队的步落在**下一条 `after` 类型**的记账之后。中间那条别的类型的记账
+    照常入账、但**不触发放行**——这正是收尾 `update_outline` 那条路的形状
+    (`_nudge_missing_assessment` 会先记一条 outline 步)。耗时:每一段墙钟归它
+    自己那条记账所有,排队的步自己≈0——"当场记账会让 reflect 步显示 0ms"的反面。
+
+    变异:`__call__` 改回无条件 flush ⇒ 顺序那条红(skip 落到 outline 之后)。
     """
     from app.models.ask import TraceStep
     from app.services import reasoning_retrieval
 
-    ticks = iter([0.0, 2.0, 2.0])
+    ticks = iter([0.0, 1.0, 2.0, 2.0])
     monkeypatch.setattr(
         reasoning_retrieval.time, "perf_counter", lambda: next(ticks))
     trace: list = []
     record = reasoning_retrieval._TraceRecorder(trace, None, None)
     record.defer(TraceStep(step_type="skip", summary="排队的那一步"))
-    record(TraceStep(step_type="reflect", summary="下一条记账"))
-    assert [step.step_type for step in trace] == ["reflect", "skip"]
-    assert [step.duration_ms for step in trace] == [2000, 0]
+    record(TraceStep(step_type="outline", summary="夹在中间的记账"))
+    record(TraceStep(step_type="reflect", summary="它等的那条记账"))
+    assert [step.step_type for step in trace] == [
+        "outline", "reflect", "skip"]
+    assert [step.duration_ms for step in trace] == [1000, 1000, 0]
 
 
 def test_malformed_assessment_still_folds_the_whole_turn(rrepo):
@@ -11086,6 +11089,45 @@ def test_an_outline_close_without_assessment_keeps_the_binding_and_is_nudged(rre
     # 下一轮补上自评 ⇒ 终态是模型自己的判断,不是一张空账。
     assert result.termination.reason == TERMINATION_MODEL_SUFFICIENT
     assert _termination_skip(result)["aspects_assessment_omitted"] == 0
+
+
+def test_an_outline_close_with_all_aspects_rejected_keeps_the_skip_after_reflect(
+    rrepo,
+):
+    """收尾 `update_outline` + 自评被**全部**逐方面拒 ⇒ 披露仍然紧跟 reflect 步。
+
+    这条路上 `_v2_note_turn` 里会记两次账:`_absorb_assessment` 先把披露 skip
+    排队,随后 `_nudge_missing_assessment` 为了不丢掉这一轮的绑定先
+    `apply_outline(...)` —— 那条 outline 步落在 reflect 步**之前**。`defer` 若按
+    「下一条记账」放行,披露就跟着那条 outline 步走,排到它所解释的 reflect 步
+    前面,恰好违反排队机制自己要保的那条顺序(codex #705 R1 P2)。
+
+    变异:`_TraceRecorder.__call__` 改回无条件 flush ⇒ 顺序两条断言都红
+    (skip 落在 outline 与 reflect 之间)。
+    """
+    _, result = _v2_aspect_run(
+        rrepo, limits=_exhaustive(),
+        intent_detail={"mandatory_topics": ["问题一"]},
+        reflects=[
+            # 唯一一行自评引用了清单外的 id ⇒ 逐方面全拒、一格都没落账。
+            _outline_close([{"id": "s1", "title": "一节",
+                             "evidence": ["ck-q0"]}],
+                           assessment={"supported": [{"aspect_id": "a9"}]}),
+            _answer(assessment={"supported": [
+                {"aspect_id": "a1", "evidence_keys": ["ck-q0"]}]}),
+        ],
+    )
+    types = [t.step_type for t in result.trace]
+    index = next(
+        i for i, t in enumerate(result.trace)
+        if t.detail.get("reason") == "invalid_assessment:unknown_aspect")
+    assert types[index - 1] == "reflect"
+    # 同一轮先落地的大纲步排在 reflect 之前,而不是插在 reflect 与披露之间。
+    assert types[index - 2] == "outline"
+    # 追问照常发出,这一轮的绑定也没有被退回吃掉。
+    assert "missing_assessment" in _skip_reasons(result)
+    assert [(s.id, list(s.evidence_keys)) for s in result.outline] == [
+        ("s1", ["ck-q0"])]
 
 
 def test_a_second_silent_outline_close_is_accepted_with_the_binding_intact(rrepo):

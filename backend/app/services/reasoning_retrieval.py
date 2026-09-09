@@ -3028,9 +3028,10 @@ class _TraceRecorder:
         self._cancel_event = cancel_event
         self._on_step = on_step
         self._last_ts = time.perf_counter()
-        # 「排在**下一条**记账之后」的步(见 `defer`)。默认空列表 ⇒ 关闭态每次
-        # 记账只多一次空 list 的真值判断,轨迹逐字节不变。
-        self._deferred: List[TraceStep] = []
+        # 「排在下一条**指定类型**的记账之后」的步(见 `defer`),每项是
+        # `(after_step_type, step)`。默认空列表 ⇒ 关闭态每次记账只多一次空 list
+        # 的真值判断,轨迹逐字节不变。
+        self._deferred: List[Tuple[str, TraceStep]] = []
         # reflect v2 的动作观察账(设计稿 §6.1)。默认 None ⇒ **关闭态零新状态**:
         # 没有账本对象、没有转换、没有多余分配,`__call__` 只多一次 `is not None`。
         # 由 `run()` 在总闸开着时挂上——观察是 run 级的东西,而这个记账器是
@@ -3065,12 +3066,22 @@ class _TraceRecorder:
         if self._on_step:
             self._on_step(step)
         if self._deferred:
-            queued, self._deferred = self._deferred, []
-            for item in queued:
-                self(item)
+            # 只有**它等的那种步**能放行(见 `defer` 的 `after`):`_v2_note_turn`
+            # 与那条 reflect 步之间会不会记账,不是这个记账器管得住的事——收尾
+            # `update_outline` 那条路上 `_nudge_missing_assessment` 就先记了一条
+            # outline 步。按类型判之后,中间的记账照常入账、但不触发放行。
+            ready = [item for after, item in self._deferred
+                     if after == step.step_type]
+            if ready:
+                self._deferred = [(after, item)
+                                  for after, item in self._deferred
+                                  if after != step.step_type]
+                for item in ready:
+                    self(item)
 
-    def defer(self, step: TraceStep) -> None:
-        """把这一步排到**下一次记账之后**。v2-only,今天只有一个调用点。
+    def defer(self, step: TraceStep, *, after: str = "reflect") -> None:
+        """把这一步排到**下一条 `after` 类型的记账之后**。v2-only,今天只有一个
+        调用点。
 
         `_absorb_assessment` 在 `run()` 调 `reflect()` 之后、记 `reflect` 步
         **之前**跑(`_v2_note_turn` 的位置),而它要记的那条 skip 讲的正是刚回来
@@ -3082,11 +3093,20 @@ class _TraceRecorder:
            的成本被记到了错误的那一行上。
 
         排队解决两者,而且**不往 `run()` 里加语句**(它在零松弛的长度天花板下)。
-        安全性靠一条硬事实:`_v2_note_turn` 与它后面那句
-        `record(TraceStep(step_type="reflect", …))` 之间没有任何别的记账点,所以
-        排进来的步一定在下一瞬间、紧跟那条 reflect 步落定。
+
+        ⚠ **放行判据是「下一条 `after` 类型的记账」,不是「下一条记账」**
+        (codex #705 R1 P2)。「中间不会有别的记账」曾经是这里的全部安全性论证,
+        而它在收尾 `update_outline` 这条路上不成立:`_absorb_assessment` 排完队
+        之后紧接着调 `_nudge_missing_assessment`,后者为了不丢掉这一轮真正做成的
+        事,会先 `apply_outline(...)` —— 那里记的 outline/skip 步就成了「下一条
+        记账」,排队的披露于是落在它所解释的 reflect 步**前面**,正是上面第 1 条
+        要消灭的东西。按类型判之后,中间记多少步都不影响落点:排队的步始终紧跟
+        下一条 `after` 步,而中间那些步照常按自己的墙钟差入账。
+
+        取消/异常路径下还没放行的排队步随这次 run 一起丢弃(既有取舍不变):它们
+        讲的是一轮被折掉的自评,而那次 run 本身已经没有结果可交。
         """
-        self._deferred.append(step)
+        self._deferred.append((after, step))
 
 
 @dataclass(slots=True)
