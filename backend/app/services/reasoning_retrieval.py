@@ -505,9 +505,13 @@ class _V2ArgumentError(Exception):
     """一次参数校验失败。``code`` 直接进 `ReflectDecision.invalid_reason`。
 
     ``term`` 只有 `exact_lookup` 的形状闸填:被拒的那个名称原文。原因码
-    (`invalid_argument:term`)只说"不合法",而模型需要的是"该给什么" —— run() 的
-    invalid 分支据这一格把 `_NOT_A_NAME_NOTE` 记进按名称查找的账本,与执行层
-    `exact_term_not_identifier` 那条走同一份措辞、同一条回喂。
+    (`invalid_argument:term`)只说"哪个参数不合法",而模型下一轮要改的是**那个
+    词**。`parse_reflect_v2` 把它写进 `invalid_request_identity`,于是它经
+    `v2_request_identity` 落进动作观察账的「请求」那一格,与原因码并排上屏——v2
+    下那是模型唯一读得到的账。**不记进** `exact_lookup_log`:那份 legacy 的散文
+    账目只由 `legacy_action_ledger_note` 渲染,而那一句在 v2 下根本不拼(判据是
+    `capabilities is None`),写进去就是写给没人读的地方。"该给什么"那半在 v2 由
+    参数说明常驻承担(`EXACT_TERM_SHAPE_NOTE` + 追加从句,每轮都在 system 段)。
     """
 
     def __init__(self, code: str, term: str = ""):
@@ -688,12 +692,18 @@ def _v2_apply_arguments(
         # 形状判据前移到解析层(计划 T-BF4)。判据本身仍是执行层那把闸的**同一个
         # 纯函数**(`exact_probe_terms`,零 I/O),只是判得早一轮:模型的参数说明里
         # 已经写着形状要求,再让它先烧一整轮反思才从回喂里学到同一句话,是白花一
-        # 步。三个细节与执行层逐项对齐,否则同一份输入会在两层得出不同结论:
+        # 步。两个细节与执行层逐项对齐,否则同一份输入会在两层得出不同结论:
         # `honor_quotes=False`(名称来自模型不是用户——用户的引号由 seed 通道兑现,
         # 模型不能用 `x "的方法" y` 夹带引号绕开这把按实测定标的低选择度子串闸)、
         # 先截到词法层的精确短语上界再判(超长标识符只有截断后才进得了
-        # `identifier_terms`),以及回喂/带下去的就是这份截断后的名称(它要被原样
-        # 拼进 prompt,长度必须有界)。
+        # `identifier_terms`);被拒时带下去的也是这份截断后的名称,它要被原样拼
+        # 进观察账的「请求」列,长度必须有界。执行层还多一步**切片**
+        # (`_exact_lookup_terms` 按 `exact_lookup_max_identifiers` 取前 N 个),
+        # 这一层刻意不跟:它是"探测几个"的预算,不是"这个词算不算名称"的判据。
+        # 两层因此只在一种配置下会分叉——N ≤ 0 时执行层的非空集合被切成空集、
+        # 解析层放行的输入在执行层仍被判 `exact_term_not_identifier`。那个分叉由
+        # 配置约束堵死(`config.py::exact_lookup_max_identifiers` 的 `ge=1`),
+        # 而不是在这里复制一份切片。
         # legacy 的执行层分支(`elif not probed`)原样保留:关闭态逐字节不变。
         probe_term = term[:MAX_EXACT_PHRASE_CHARS]
         if not exact_probe_terms(probe_term, honor_quotes=False):
@@ -760,10 +770,19 @@ def _v2_apply_enumerate(
         # 对解析失败也是同一条纪律:绝不退成枚举整个库)。模型硬塞一个猜来的 id,
         # 就在执行层的作用域校验上被拦下并被告知改用 source_title
         # (`enumeration_source_not_in_scope`),而不是收到一份它没请求过的清单。
-        decision.enumerate_source_id = _v2_text(
-            arguments, "source_id", required=False)
+        #
+        # 但两个都给的时候(v2 下 `source_id` 只可能是猜的,`source_title` 才是投
+        # 影出去的那个槽),要走**名字**那一条:分派处的优先级是 id 压过 title
+        # (`_run_enumeration` 的 `not source_id and source_title` 才做解析),于是
+        # 一个猜来的 id 会把模型如实给出的书名整段吃掉——请求本可以成立,却拿回一
+        # 条"来源不在检索范围内"。仍然调 `_v2_text` 是为了保住类型校验:一个非字
+        # 符串的 `source_id` 照旧报 `invalid_argument:source_id`,不因为这一层的
+        # 取舍而被静默放过。legacy 与 `_run_enumeration` 的分派逐字节不变。
+        guessed_id = _v2_text(arguments, "source_id", required=False)
         decision.enumerate_source_title = _v2_text(
             arguments, "source_title", required=False)
+        if not decision.enumerate_source_title:
+            decision.enumerate_source_id = guessed_id
     else:
         decision.enumerate_object_type = subtype
 
@@ -784,10 +803,12 @@ def v2_request_identity(decision: "ReflectDecision") -> str:
     """
     action = decision.next_action
     if action == REFLECT_INVALID_ACTION:
-        # 伪动作没有自己的参数。非空 = 这一轮的动作载荷本来是**合法**的,只是
-        # 另一半(方面自评)越界把整份决定折了下来——那个请求真实存在过,观察行
-        # 该显示它,而不是一句"(无请求)"。解析期折下来的 invalid 决定这一格是
-        # 空串(它们的参数根本没通过校验),行为与接入前逐字相同。
+        # 伪动作没有自己的参数,这一格因此由折叠处直接填,有两个产地:方面自评
+        # 越界折下来的那族(`_absorb_assessment`)填**合法**动作的完整身份串——
+        # 那个请求真实存在过,观察行该显示它而不是一句"(无请求)";形状闸折下来
+        # 的 `invalid_argument:term` 填被拒的那个名称(`_V2ArgumentError.term`),
+        # 因为"哪个词被拒了"正是模型下一轮唯一要改的东西。其余解析期错误仍是空
+        # 串:它们的参数根本没通过校验,没有可展示的请求。
         return decision.invalid_request_identity
     if action == "add_subquery":
         sub = decision.new_sub_query
@@ -926,10 +947,14 @@ def parse_reflect_v2(
         _v2_apply_arguments(action, arguments, capabilities, decision)
     except _V2ArgumentError as exc:
         invalid = _reflect_invalid(exc.code, action)
-        # 被形状闸拒掉的名称原样带下去(其余错误这一格恒为空串)。伪动作不分派到
-        # `exact_lookup`,所以这一格不会让任何检索发生——它只是 run() 记那条教学
-        # 回喂时唯一还记得"模型给的是哪个词"的地方。
-        invalid.exact_term = exc.term
+        # 被形状闸拒掉的名称就是这一次请求的身份(其余参数错误这一格仍是空串:
+        # 它们的载荷根本没通过校验,没有可展示的请求)。写进观察账的「请求」列,
+        # 模型下一轮才看得到"被拒的是哪个词",而不是只有一个裸原因码
+        # `invalid_argument:term`——那句话对"换哪个词"没有任何信息量。
+        # 长度两道界:形状闸判的已是 `MAX_EXACT_PHRASE_CHARS` 截断后的那份,
+        # `note_decision` 再按 `REQUEST_CHARS` 截一次(模型自由文本止步于此,
+        # 不进日志、不进 trace summary)。
+        invalid.invalid_request_identity = exc.term
         return invalid
     return decision
 
@@ -1233,9 +1258,14 @@ def _collection_label(collection: str, kind: str) -> str:
 
 
 def _enumeration_rejection(
-    exc: ValueError, label: str, reflect_v2: bool,
-) -> Tuple[str, str]:
-    """执行器拒绝一次枚举 →(稳定原因码, 上屏文案)。
+    exc: ValueError, label: str, collection: str, kind: str, reflect_v2: bool,
+) -> TraceStep:
+    """执行器拒绝一次枚举 → 那一条完整的 skip 轨迹步。
+
+    整条步而不是「原因码 + 文案」两元组:那条 skip 的 detail 形状
+    (`reason`/`collection`/`kind`/截到 120 字的 `error`)与原因码是同一个决定的
+    两半,分成两处写就要让调用点(登记在案的热函数 `_run_enumeration`)多背一份
+    只为它存在的字典字面。拆细的判据与它的 v2 门也都在这里一处判。
 
     同一条 `except ValueError` 收的是三件事:未知 kind、被点名的 source_id 不成
     立、以及被改坏的档位值让 `EnumerationBudget` 拒绝构造。其中**只有**「id 不在
@@ -1255,10 +1285,16 @@ def _enumeration_rejection(
     这个槽摆给模型看)。
     """
     if isinstance(exc, SourceNotInScopeError) and reflect_v2:
-        return ("enumeration_source_not_in_scope",
-                f"跳过枚举{label}(请求的来源不在检索范围内,"
-                "请按名称给出(source_title))")
-    return ("enumeration_rejected", f"跳过枚举{label}(请求的范围不可用)")
+        reason = "enumeration_source_not_in_scope"
+        summary = (f"跳过枚举{label}(请求的来源不在检索范围内,"
+                   "请按名称给出(source_title))")
+    else:
+        reason = "enumeration_rejected"
+        summary = f"跳过枚举{label}(请求的范围不可用)"
+    return TraceStep(
+        step_type="skip", summary=summary,
+        detail={"reason": reason, "collection": collection, "kind": kind,
+                "error": str(exc)[:120]})
 
 
 # 每轮拼在集合地图行末尾的剩余额度。prompt 让模型「按额度判断值不值得全量」,
@@ -2866,10 +2902,11 @@ class ReflectDecision:
     # `next_action` 此时是伪动作,所以这是观察账唯一能说清"它想干什么"的一格。
     # 空串 = 连动作名都认不出来(`unknown_action`),那时观察账如实不写动作名。
     invalid_requested_action: str = ""
-    # 被 `_absorb_assessment` 折成 invalid 之前,那个**合法动作**的请求身份串
-    # (`v2_request_identity` 的产物)。只有这一族 invalid 有它:方面自评越界时
-    # 动作参数本身已经全部通过校验,观察行显示"(无请求)"是失真的。解析期的
-    # invalid 决定留空,行为与接入前逐字相同。
+    # 被折成 invalid 之前,这一次请求里还值得给模型看的那一格。两个产地:
+    # `_absorb_assessment`(方面自评越界)写**合法动作**的完整身份串——那时动作
+    # 参数已经全部通过校验,观察行显示"(无请求)"是失真的;`parse_reflect_v2`
+    # 的形状闸(`invalid_argument:term`)写被拒的那个名称。其余解析期 invalid
+    # 留空,行为与接入前逐字相同。
     invalid_request_identity: str = ""
     # 模型对必答方面的自评(设计稿 §7)。解析期**只留存**;消费在
     # `ReasoningRetriever._absorb_assessment`(T4-A),它把这份载荷落进方面账或
@@ -6541,15 +6578,8 @@ class ReasoningRetriever:
                 # EnumerationBudget 拒绝构造。两者都只废掉这一个动作。
                 if self.fail_closed:
                     raise
-                # 三件事里只有「id 不在范围内」是模型自己改得动的,拆细与它的
-                # v2 门都在 `_enumeration_rejection` 一处判(含 T-BF5 的假设)。
-                reason, summary = _enumeration_rejection(
-                    exc, label, self.reflect_v2_active())
-                record(TraceStep(
-                    step_type="skip", summary=summary,
-                    detail={"reason": reason,
-                            "collection": collection, "kind": kind,
-                            "error": str(exc)[:120]}))
+                record(_enumeration_rejection(
+                    exc, label, collection, kind, self.reflect_v2_active()))
             except Exception as exc:  # noqa: BLE001 — 同上,清单不是必需品
                 if self.fail_closed:
                     raise
@@ -7202,10 +7232,6 @@ class ReasoningRetriever:
                 # I/O 记一条观察,再落到链尾与其它 skip **同一份**
                 # no_progress/stale 记账(设计稿 §5.2)。不能裸 continue——那会绕过
                 # 链尾记账,反复提交非法动作就规避了熔断。
-                if decision.exact_term:  # T-BF4,见 `_V2ArgumentError.term`
-                    feed_exact_lookup_skip(
-                        _norm_query(decision.exact_term), [decision.exact_term],
-                        _NOT_A_NAME_NOTE.format(term=decision.exact_term))
                 record(TraceStep(
                     step_type="skip",
                     summary=_REFLECT_INVALID_SKIP_SUMMARY,

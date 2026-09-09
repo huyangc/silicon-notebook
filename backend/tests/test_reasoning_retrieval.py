@@ -6464,7 +6464,12 @@ def _through_v2_gate(raw: str, schema_hint: str, syntax_fault: str) -> str:
 
 
 class _GatedV2LLM(_SeqLLM):
-    """v2 反思替身:载荷过真闸,并留存每一轮的 system 段(动作清单在里面)。"""
+    """v2 反思替身:载荷过真闸,并留存每一轮的 system 段(动作清单在里面)。
+
+    要断 user 段(服务器状态 / 证据卡 / 动作观察账)用下面的 `_V2ContextLLM`:
+    「该给什么」住在固定半区、「上一轮发生了什么」住在可变半区,是 v2 的分区
+    合同,断错半区等于没断。
+    """
 
     def __init__(self, plan, reflects, *, syntax_fault: str = ""):
         super().__init__(plan, reflects)
@@ -6886,8 +6891,9 @@ def _v2_retriever_counting_exact_lookup(repo, calls, states):
 
     `exact_lookup_log`(被跳过的名称 + 教学措辞)是 run 内部状态,结果对象上没有
     它的投影,而 v2 这一轮**恰恰**不渲染那份账目(它的四段散文回喂由动作观察账
-    取代,见 `legacy_action_ledger_note` 的调用点)。要证明两条拒绝路径记的是同
-    一笔账,只能在这里把状态本身接出来。
+    取代,见 `legacy_action_ledger_note` 的调用点)。要断言"v2 下没往那本死账里
+    写",只能在这里把状态本身接出来 —— 结果对象上看不见它,一次写进去的死代码
+    因此可以永远不被发现。
     """
     rr = _retriever_counting_exact_lookup(repo, calls)
     original = rr._new_run_state
@@ -6911,24 +6917,41 @@ def test_v2_exact_lookup_shape_gate_is_checked_in_the_parser_and_stated_in_the_n
     一把闸(`exact_probe_terms`,纯函数、零 I/O)判在解析期:当轮零检索、记
     `invalid_argument:term`,而"该给什么"那句话每一轮都在 system 段里等着它。
 
-    载荷经真实形状闸(`_GatedV2LLM`)。三段验收各自可变异:
+    被拒的那个**词**必须到得了模型:v2 不渲染 legacy 那份散文账目
+    (`legacy_action_ledger_note` 的判据是 `capabilities is None`),所以它走动作
+    观察账的「请求」列 —— 与原因码同一行。连续两轮给非标识符,断的是第二、三轮
+    **真正发出去的 user 段**,不是任何 run 内部状态。
+
+    载荷经真实形状闸(`_V2ContextLLM`,`_GatedV2LLM` 的子类)。五段验收各自可变异:
     - 去掉 `_v2_apply_arguments` 里的形状预校验 ⇒ 原因码退回执行层的
       `exact_term_not_identifier`,第一段红;
-    - 把 `EXACT_TERM_SHAPE_NOTE` 从 `term` 的参数说明里删掉 ⇒ 第二段红;
-    - 让 `_NOT_A_NAME_NOTE` 另写一份措辞而不共用那份字面 ⇒ 第三段红;
-    - 去掉 run() invalid 分支里的 `feed_exact_lookup_skip` ⇒ 第四段红。
+    - 把 `EXACT_TERM_SHAPE_NOTE` 或追加从句从 `term` 的参数说明里删掉 ⇒ 第二段红;
+    - 让 `_NOT_A_NAME_NOTE` 另写一份字面而不引用那个符号 ⇒ 第三段红;
+    - 去掉 `parse_reflect_v2` 里的 `invalid.invalid_request_identity = exc.term`
+      ⇒ 第四段红(观察行退回一句没有信息量的裸原因码);
+    - 把那条已删的 `feed_exact_lookup_skip` 加回 run() 的 invalid 分支 ⇒ 第五段红。
     """
-    from app.services.reasoning_actions import EXACT_TERM_SHAPE_NOTE
+    import inspect
+
+    from app.services import reasoning_retrieval as rr_module
+    from app.services.reasoning_actions import (
+        EXACT_TERM_EXTRA_SHAPE_NOTE, EXACT_TERM_SHAPE_NOTE,
+    )
     from app.services.reasoning_retrieval import _NOT_A_NAME_NOTE
     nb = _seed_manual_notebook(_v2_repo(rrepo))
     rrepo.settings.graph_ppr_enabled = False
-    llm = _GatedV2LLM(
+    # `_V2ContextLLM` 而不是 `_GatedV2LLM`:第 4 段断的是 user 段里的观察账,
+    # 那半只有它留存。
+    llm = _V2ContextLLM(
         plan={"sub_queries": [{"query": "布局布线"}]},
         reflects=[
             # 普通英文词组:形状闸拒绝的正是这一类(它每篇文档里都可能出现,
-            # 一次探测换不来任何选择度)。
+            # 一次探测换不来任何选择度)。两轮都给,因为「模型换一个同样不合法的
+            # 词再试一次」恰恰是这条通道要治的那个循环。
             {"next_action": "exact_lookup", "sufficient": False,
              "arguments": {"term": "real-time"}, "reason": "查个名称"},
+            {"next_action": "exact_lookup", "sufficient": False,
+             "arguments": {"term": "state-of-the-art"}, "reason": "再换一个"},
             {"next_action": "exact_lookup", "sufficient": False,
              "arguments": {"term": "set_db"}, "reason": "换个真名称"},
             {"next_action": "answer", "sufficient": True, "arguments": {}},
@@ -6939,29 +6962,43 @@ def test_v2_exact_lookup_shape_gate_is_checked_in_the_parser_and_stated_in_the_n
     result = _v2_retriever_counting_exact_lookup(rrepo, calls, states).run(
         nb.id, "这个命令怎么用", "")
 
-    # 1) 被拒的那一轮零 I/O、零执行层判据;合法的名称照常执行。
+    # 1) 被拒的那两轮零 I/O、零执行层判据;合法的名称照常执行。
     assert calls == ['"set_db"']
     reasons = _skip_reasons(result)
-    assert "invalid_argument:term" in reasons
+    assert reasons.count("invalid_argument:term") == 2
     assert "exact_term_not_identifier" not in reasons
     steps = [t for t in result.trace if t.step_type == "exact_lookup"]
     assert [t.detail["terms"] for t in steps] == [["set_db"]]
 
-    # 2) 「该给什么」住在固定半区:每一轮的 system 段都带着形状判据。
-    assert len(llm.system_prompts) >= 3
+    # 2) 「该给什么」住在固定半区:每一轮的 system 段都带着完整的形状判据 ——
+    #    共用那半(与 legacy 回喂逐字节同源)加上 v2 追加的两条从句。
+    assert len(llm.system_prompts) >= 4
     for turn, prompt in enumerate(llm.system_prompts):
         assert "exact_lookup" in llm.prompt_actions(turn)
         assert EXACT_TERM_SHAPE_NOTE in prompt, turn
+        assert EXACT_TERM_EXTRA_SHAPE_NOTE in prompt, turn
 
-    # 3) 事前说的与事后说的是**同一份字面**:参数说明与被拒回喂各写一份,就一定
-    #    会分叉成两套判据。
+    # 3) 事前说的与事后说的是**同一份字面**——判据是源码里那个符号,不是"两串
+    #    字碰巧相等":复制一份同样的措辞过去,子串断言照样绿,而分叉正是从复制
+    #    开始的。
+    source = inspect.getsource(rr_module)
+    definition = source.split("_NOT_A_NAME_NOTE = (", 1)[1].split(")", 1)[0]
+    assert "EXACT_TERM_SHAPE_NOTE" in definition
     assert EXACT_TERM_SHAPE_NOTE in _NOT_A_NAME_NOTE.format(term="real-time")
 
-    # 4) 解析期这条拒绝仍记进按名称查找的账本,措辞与执行层那条逐字相同。
-    attempts = [a for a in states[0].exact_lookup_log if a.note]
-    assert [a.note for a in attempts] == [
-        _NOT_A_NAME_NOTE.format(term="real-time")]
-    assert attempts[0].terms == ["real-time"]
+    # 4) 被拒的词真的到了模型面前:第二、三轮的 user 段里,观察账那一行同时带着
+    #    原因码与上一轮被拒的那个词。只有原因码的话,「换哪个词」没有任何线索。
+    assert "invalid_argument:term" in llm.user_prompts[1]
+    assert "请求=real-time" in llm.user_prompts[1]
+    assert "请求=state-of-the-art" in llm.user_prompts[2]
+
+    # 5) 而 legacy 那份散文账目在 v2 下**不记这条拒绝**:它根本不会被渲染
+    #    (`legacy_action_ledger_note` 只在 `capabilities is None` 时拼),往里
+    #    记教学措辞等于记给没人读的地方。真执行的那次(set_db)仍照常记账,那
+    #    是防重用的状态、与"喂给谁看"无关。
+    ledger = states[0].exact_lookup_log
+    assert [a.terms for a in ledger] == [["set_db"]]
+    assert [a for a in ledger if a.note] == []
 
 
 def test_v2_exact_lookup_shape_gate_judges_the_string_the_executor_would_probe():
@@ -6970,9 +7007,14 @@ def test_v2_exact_lookup_shape_gate_judges_the_string_the_executor_would_probe()
     执行层先 `decision.exact_term[:MAX_EXACT_PHRASE_CHARS]` 再抽名称。解析层不跟着
     截,同一份输入就会在两层得出相反结论:一个把唯一的名称藏在上界之外的超长
     term 会被解析层放行、再被执行层判 `exact_term_not_identifier`,白烧的那一轮
-    一步没省。回喂给模型的名称也必须是截断后的那一份——它会被原样拼进 prompt。
+    一步没省。带下去的名称也必须是截断后的那一份——它会被原样拼进观察账。
 
-    变异:去掉预校验里的 `[:MAX_EXACT_PHRASE_CHARS]` ⇒ 这条红。
+    `honor_quotes=False` 是同一份对齐的另一半,而且是**唯一一处安全相关**的:
+    用户的引号由 seed 通道兑现,模型若能用 `x "的方法" y` 夹带引号,就把一个按
+    实测定标关掉的低选择度子串探测重新打开了(`exact_probe_terms` 的同名参数)。
+
+    变异:去掉预校验里的 `[:MAX_EXACT_PHRASE_CHARS]` ⇒ 第一段红;把预校验的
+    `honor_quotes` 改成 `True` ⇒ 第二段红(夹带引号的短语被当成合法名称放行)。
     """
     from app.repositories.lexical_query import MAX_EXACT_PHRASE_CHARS
     from app.services.reasoning_actions import build_reflect_capabilities
@@ -6983,8 +7025,30 @@ def test_v2_exact_lookup_shape_gate_judges_the_string_the_executor_would_probe()
         {"next_action": "exact_lookup", "sufficient": False,
          "arguments": {"term": hidden}}, caps)
     assert decision.invalid_reason == "invalid_argument:term"
-    # 带下去的名称有界:模型给多长,prompt 里那句教学措辞就不会跟着多长。
-    assert decision.exact_term == hidden[:MAX_EXACT_PHRASE_CHARS]
+    # 带下去的名称有界:模型给多长,观察账里那一格就不会跟着多长。
+    assert decision.invalid_request_identity == hidden[:MAX_EXACT_PHRASE_CHARS]
+
+    # 夹带引号的形状:整串里一个标识符都没有,引号是它唯一的"通行证"。
+    smuggled = 'x "的方法" y'
+    decision = parse_reflect_v2(
+        {"next_action": "exact_lookup", "sufficient": False,
+         "arguments": {"term": smuggled}}, caps)
+    assert decision.invalid_reason == "invalid_argument:term"
+    assert decision.invalid_request_identity == smuggled
+    # 判据的另一半在词法层,这里把它钉住:同一串在 honor_quotes=True 下会过。
+    from app.repositories.lexical_query import exact_probe_terms
+    assert exact_probe_terms(smuggled, honor_quotes=True) == ["的方法"]
+    assert exact_probe_terms(smuggled, honor_quotes=False) == []
+
+    # 两层唯一那处口径差由**配置约束**堵死,而不是在解析层复制一份切片:执行层
+    # 还按 `exact_lookup_max_identifiers` 取前 N 个,N ≤ 0 时解析层放行的名称会在
+    # 那里被切成空集、再判 `exact_term_not_identifier`。
+    # 变异:去掉 `ge=1` ⇒ 这一段红。
+    import pydantic
+
+    from app.core.config import Settings
+    with pytest.raises(pydantic.ValidationError):
+        Settings(EXACT_LOOKUP_MAX_IDENTIFIERS=0)
 
 
 def test_legacy_exact_lookup_shape_gate_stays_in_the_executor(rrepo):
@@ -7063,32 +7127,48 @@ def test_v2_projection_drops_the_enumerate_source_id_slot(rrepo):
 
 
 def test_enumeration_rejection_splits_only_the_out_of_scope_case_under_v2():
-    """执行器拒绝一次枚举 →(原因码, 文案)的逐条判据(计划 T-BF5)。
+    """执行器拒绝一次枚举 → 那一条 skip 步的逐条判据(计划 T-BF5)。
 
     三件事共用同一条 `except ValueError`,只有「点名的 id 不在范围内」是模型自己
     改得动的,所以只有它拆出新码并在措辞里点名 `source_title`;memory 合成源的
     `not enumerable` 保留原码(那是来源本身的属性,改用名字再问只会换回第二次拒
     绝),未知 kind / 档位被改坏同理。
 
-    关闭态那一档是**逐字节不变**这条硬约束的直接断言:同一个异常在 legacy 下仍
-    然报 `enumeration_rejected`,措辞一个字不改。
+    产出的是**整条 TraceStep** 而不是两元组:detail 的形状与原因码是同一个决定的
+    两半,分给调用点写就等于让热函数背一份只为它存在的字典字面。
 
-    变异:去掉 `isinstance` 判据 ⇒ 第一段红;去掉 `reflect_v2` 门 ⇒ 第三段红。
+    关闭态那一档是**逐字节不变**这条硬约束的直接断言:同一个异常在 legacy 下仍
+    然报 `enumeration_rejected`,措辞、detail 键与截断长度一个字不改。
+
+    变异:去掉 `isinstance` 判据 ⇒ 第一段红;去掉 `reflect_v2` 门 ⇒ 第四段红;
+    detail 少一个键或不再截到 120 字 ⇒ 第二段红。
     """
     from app.services.collection_enumeration import SourceNotInScopeError
     from app.services.reasoning_retrieval import _enumeration_rejection
 
+    def _rendered(exc, reflect_v2):
+        step = _enumeration_rejection(
+            exc, "公式清单", "elements", "formula", reflect_v2)
+        assert step.step_type == "skip"
+        return step.detail["reason"], step.summary
+
     out_of_scope = SourceNotInScopeError("source is not in scope: 'x'")
-    assert _enumeration_rejection(out_of_scope, "公式清单", True) == (
+    assert _rendered(out_of_scope, True) == (
         "enumeration_source_not_in_scope",
         "跳过枚举公式清单(请求的来源不在检索范围内,请按名称给出(source_title))")
+    # detail 的形状:集合/子类型如实带出,执行器的原始消息截到 120 字。
+    step = _enumeration_rejection(
+        SourceNotInScopeError("y" * 300), "公式清单", "elements", "formula", True)
+    assert step.detail["collection"] == "elements"
+    assert step.detail["kind"] == "formula"
+    assert step.detail["error"] == "y" * 120
     # 不可枚举 / 未知 kind / 档位被改坏:同一条 except,原码不动。
     for exc in (ValueError("source is not enumerable: 'm'"),
                 ValueError("unknown kind"), ValueError("bad budget")):
-        assert _enumeration_rejection(exc, "公式清单", True) == (
+        assert _rendered(exc, True) == (
             "enumeration_rejected", "跳过枚举公式清单(请求的范围不可用)")
     # 关闭态:同一个异常逐字节回到接入前。
-    assert _enumeration_rejection(out_of_scope, "公式清单", False) == (
+    assert _rendered(out_of_scope, False) == (
         "enumeration_rejected", "跳过枚举公式清单(请求的范围不可用)")
 
 
