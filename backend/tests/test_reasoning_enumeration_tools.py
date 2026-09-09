@@ -1079,6 +1079,10 @@ def test_sources_collection_is_valid_under_fail_closed(repo):
 
 
 def test_out_of_scope_source_id_fails_open_into_a_skip(repo):
+    """关闭态:原因码与措辞逐字节回到接入前(T-BF5 的拆细只在 v2 下生效)。
+
+    变异:把 `_enumeration_rejection` 的 `reflect_v2` 门去掉 ⇒ 这条红。
+    """
     notebook = _seed(repo, formulas=2)
     llm = _SeqLLM([_enumerate_action(source_id="not-in-this-notebook"),
                    {"next_action": "answer", "sufficient": True}])
@@ -1087,6 +1091,7 @@ def test_out_of_scope_source_id_fails_open_into_a_skip(repo):
     result = retriever.run(notebook.id, "哪些公式", "", limits=limits)
 
     assert result.enumerations == []
+    assert "enumeration_source_not_in_scope" not in _skips(result)
     assert _skips(result)["enumeration_rejected"].summary == (
         "跳过枚举公式清单(请求的范围不可用)")
 
@@ -2296,6 +2301,40 @@ def test_an_incompletely_listed_collection_signs_no_key_at_all(repo):
     assert aspect.evidence_keys == ()
     assert aspect.demotion == DEMOTION_KEYS_REJECTED
     assert result.termination.reason == TERMINATION_MODEL_PARTIAL
+
+
+def test_v2_a_guessed_source_id_is_told_to_ask_by_name_instead(repo):
+    """v2 下模型硬塞一个猜来的 `source_id`(计划 T-BF5)。
+
+    投影已经把这个槽摘掉了,所以只有硬塞才到得了这里。解析层**仍然读**它——按
+    `_v2_enum` 那条「模型看不到的槽位填了什么都不改变分派」的纪律取默认值,在这里
+    等于把一个被限定到单一来源的请求悄悄换成「列出整个集合」,即另一个问题的答案
+    (`_run_enumeration` 对名字解析失败也是同一条纪律:绝不退成枚举整个库)。所以
+    它照常落到执行器的作用域校验上,只是那条 skip 拆细成自己的原因码,措辞点名唯一
+    可用的表达方式;原因码进下一轮的动作观察账,模型据此改用 `source_title`。
+
+    变异:去掉 `_enumeration_rejection` 的 `isinstance` 判据 ⇒ 这条红
+    (关闭态那条 `test_out_of_scope_source_id_fails_open_into_a_skip` 仍绿);
+    去掉执行器的 `SourceNotInScopeError` 子类 ⇒ 同样红。
+    """
+    from app.services.reasoning_observation import STATUS_INVALID, status_for_skip
+
+    notebook = _seed(_v2(repo), formulas=2)
+    llm = _ValidatingLLM([_v2_enumerate(source_id="not-in-this-notebook"),
+                          {"next_action": "answer", "sufficient": True,
+                           "arguments": {}, "reason": "作罢"}])
+    retriever, limits = _retriever(repo, llm)
+
+    result = retriever.run(notebook.id, "哪些公式", "", limits=limits)
+
+    assert result.enumerations == []
+    skip = _skips(result)["enumeration_source_not_in_scope"]
+    assert skip.summary == (
+        "跳过枚举公式清单(请求的来源不在检索范围内,请按名称给出(source_title))")
+    # 零 I/O 的载荷问题,不是通道故障:观察账把它记成 invalid。
+    assert status_for_skip(skip.detail["reason"]) == STATUS_INVALID
+    # 稳定原因码真的到了模型面前(下一轮的动作观察账里那一行)。
+    assert "enumeration_source_not_in_scope" in llm.reflect_prompts[1]
 
 
 def test_a_collection_key_is_never_counted_as_an_undelivered_evidence_key(repo):

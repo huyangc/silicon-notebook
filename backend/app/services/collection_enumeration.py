@@ -596,6 +596,24 @@ class EnumerationInvariantError(RuntimeError):
     """
 
 
+class SourceNotInScopeError(ValueError):
+    """An explicitly named ``source_id`` does not belong to this run's scope.
+
+    A ``ValueError`` subclass rather than a new exception family: every caller
+    that already fails open on ``ValueError`` keeps doing exactly that, and no
+    call site has to learn a second name to stay correct.  The subclass exists
+    so the reflect loop can tell this ONE case apart from the other things the
+    same ``except`` catches (an unknown kind, a mis-set budget) WITHOUT parsing
+    the message string — the id is out of scope, which is the one case where
+    the model can fix its own request by naming the source instead of guessing
+    an internal id it was never shown.
+
+    Deliberately NOT raised for the Memory-synthetic case below: "not
+    enumerable" is a property of the source, not of the request, and telling
+    the model to re-ask by title there would just buy a second rejection.
+    """
+
+
 class _Stop(Exception):
     """Internal: a budget ceiling fired mid-traversal."""
 
@@ -1576,8 +1594,12 @@ class CollectionEnumerationService:
         exists, that it belongs to a participant notebook, and that it is not a
         private Memory synthetic row.  An out-of-scope id raises rather than
         returning another notebook's rows, and rather than being answered with
-        a silent empty list; a Memory row raises for the same reason, in the
-        same shape.
+        a silent empty list; a Memory row raises for the same reason.  The two
+        raise the same FAMILY (``ValueError``, so every fail-open caller is
+        unchanged) but not the same class: an out-of-scope id is a request the
+        asker can fix by naming the source instead, and
+        ``SourceNotInScopeError`` is how the caller tells that case apart
+        without reading the message.
 
         The Memory check is defence in depth rather than a reachable path
         today: the only producer of a ``source_id`` here is
@@ -1600,7 +1622,8 @@ class CollectionEnumerationService:
         rows = self._source_display(db, [source_id])
         row = rows.get(source_id)
         if row is None or str(row["notebook_id"]) not in set(notebook_ids):
-            raise ValueError(f"source is not in scope: {source_id!r}")
+            raise SourceNotInScopeError(
+                f"source is not in scope: {source_id!r}")
         owner_notebook_id = str(row["notebook_id"])
         if source_id in set(
             self._sources.memory_source_ids(db, owner_notebook_id)

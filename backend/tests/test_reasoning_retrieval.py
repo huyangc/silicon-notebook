@@ -7009,6 +7009,89 @@ def test_legacy_exact_lookup_shape_gate_stays_in_the_executor(rrepo):
     assert "invalid_argument:term" not in reasons
 
 
+def test_v2_projection_drops_the_enumerate_source_id_slot(rrepo):
+    """v2 的 enumerate 参数表摘掉 `source_id`,`source_title` 保留(计划 T-BF5)。
+
+    内部来源 id 从不上屏,模型能填进那个槽的只可能是猜的,而猜出来的 id 必然不在
+    范围内 —— 生产 12 次 `enumeration_rejected` 的假设成因就是它。限定单一来源只
+    留一种表达方式:按名称给 `source_title`,服务端做一次确定性的名字→id 解析。
+
+    摘掉的是**模型面**的槽位,不是那一格状态:`ReflectDecision.enumerate_source_id`
+    与 `identity_fields` 里的 `source_id` 都不动 —— 身份串渲染的是服务端解析出来
+    的那个 id,它才是「这两次枚举是不是同一份清单」的判据。legacy 的 prompt/schema
+    照旧提供这个字段(关闭态逐字节不变)。
+
+    载荷经真实形状闸(`_GatedV2LLM`),断言看每一轮的 system 段。
+    变异:把 `source_id` 放回 `ENUMERATE_ELEMENTS` 的参数表 ⇒ 第一段红。
+    """
+    from app.core.ask_retrieval_policy import ask_retrieval_limits
+    from app.services.prompts import reflect_prompt, reflect_schema_hint
+    from app.services.reasoning_actions import (
+        ACTION_DEFINITIONS, ENUMERATE_ELEMENTS,
+    )
+    from app.services.reasoning_retrieval import (
+        ENUMERATE_ELEMENTS_ACTION, ReasoningRetriever, ReflectDecision,
+        v2_request_identity,
+    )
+    nb = _seed_two_nodes(_v2_repo(rrepo))
+    llm = _GatedV2LLM(
+        plan={"sub_queries": [{"query": "RTL到GDSII流程"}]},
+        reflects=[
+            {"next_action": "enumerate_elements", "sufficient": False,
+             "arguments": {"collection": "sources"}, "reason": "先看目录"},
+            {"next_action": "answer", "sufficient": True, "arguments": {}},
+        ])
+    bind_chat_client(rrepo, "reasoning_agent", llm)
+    ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(
+        nb.id, "RTL到GDSII流程", "", limits=ask_retrieval_limits("standard"))
+
+    assert len(llm.system_prompts) >= 2
+    for turn, prompt in enumerate(llm.system_prompts):
+        assert "enumerate_elements" in llm.prompt_actions(turn)
+        assert "- source_title" in prompt, turn
+        assert "- source_id" not in prompt, turn
+
+    # 状态那一格没动:身份串仍然带上服务端解析出来的 id。
+    assert "source_id" in ACTION_DEFINITIONS[ENUMERATE_ELEMENTS].identity_fields
+    assert "src-1" in v2_request_identity(ReflectDecision(
+        sufficient=False, next_action=ENUMERATE_ELEMENTS_ACTION,
+        enumerate_kind="formula", enumerate_source_id="src-1"))
+
+    # legacy 一字不动:它的 schema 与 prompt 照旧提供这个字段。
+    assert '"source_id"' in reflect_schema_hint(**_all_gates())
+    assert "source_id" in reflect_prompt("列公式", "候选", **_all_gates())
+
+
+def test_enumeration_rejection_splits_only_the_out_of_scope_case_under_v2():
+    """执行器拒绝一次枚举 →(原因码, 文案)的逐条判据(计划 T-BF5)。
+
+    三件事共用同一条 `except ValueError`,只有「点名的 id 不在范围内」是模型自己
+    改得动的,所以只有它拆出新码并在措辞里点名 `source_title`;memory 合成源的
+    `not enumerable` 保留原码(那是来源本身的属性,改用名字再问只会换回第二次拒
+    绝),未知 kind / 档位被改坏同理。
+
+    关闭态那一档是**逐字节不变**这条硬约束的直接断言:同一个异常在 legacy 下仍
+    然报 `enumeration_rejected`,措辞一个字不改。
+
+    变异:去掉 `isinstance` 判据 ⇒ 第一段红;去掉 `reflect_v2` 门 ⇒ 第三段红。
+    """
+    from app.services.collection_enumeration import SourceNotInScopeError
+    from app.services.reasoning_retrieval import _enumeration_rejection
+
+    out_of_scope = SourceNotInScopeError("source is not in scope: 'x'")
+    assert _enumeration_rejection(out_of_scope, "公式清单", True) == (
+        "enumeration_source_not_in_scope",
+        "跳过枚举公式清单(请求的来源不在检索范围内,请按名称给出(source_title))")
+    # 不可枚举 / 未知 kind / 档位被改坏:同一条 except,原码不动。
+    for exc in (ValueError("source is not enumerable: 'm'"),
+                ValueError("unknown kind"), ValueError("bad budget")):
+        assert _enumeration_rejection(exc, "公式清单", True) == (
+            "enumeration_rejected", "跳过枚举公式清单(请求的范围不可用)")
+    # 关闭态:同一个异常逐字节回到接入前。
+    assert _enumeration_rejection(out_of_scope, "公式清单", False) == (
+        "enumeration_rejected", "跳过枚举公式清单(请求的范围不可用)")
+
+
 def test_v2_answer_and_consult_must_send_an_empty_arguments_object():
     """`answer`/`consult_memory` 携带非空 arguments 记 invalid(设计稿 §5.2)。
 
@@ -8172,6 +8255,8 @@ def test_skip_reason_classification_is_pinned_code_by_code():
         "empty_or_visited": STATUS_DUPLICATE,
         "missing_new_sub_query": STATUS_INVALID,
         "enumeration_conflict": STATUS_INVALID,
+        # v2 从 `enumeration_rejected` 拆细出来:模型点名的来源不在范围内。
+        "enumeration_source_not_in_scope": STATUS_INVALID,
         "outline_empty": STATUS_INVALID,
         "unknown_action": STATUS_INVALID,
         "missing_argument:term": STATUS_INVALID,
