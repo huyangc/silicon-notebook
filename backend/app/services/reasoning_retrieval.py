@@ -58,9 +58,9 @@ from app.services.prompts import (
 )
 from app.services.reasoning_actions import (
     ACTION_DEFINITIONS, ENUMERATE_SCOPE_ALL, ENUMERATE_SCOPE_CURRENT_NOTEBOOK,
-    ENUMERATE_SCOPES, REFLECT_INVALID_ACTION, UNAVAILABLE_DISCLOSE_MAX,
-    ActionParam, ReflectCapabilities, ReflectCapabilityFacts,
-    build_reflect_capabilities,
+    ENUMERATE_SCOPES, EXACT_TERM_SHAPE_NOTE, REFLECT_INVALID_ACTION,
+    UNAVAILABLE_DISCLOSE_MAX, ActionParam, ReflectCapabilities,
+    ReflectCapabilityFacts, build_reflect_capabilities,
 )
 from app.domain.retrieval_termination import (
     ASPECT_COLLECTION_KEY_PREFIX, ASSESSMENT_SKIP_REASON_PREFIX,
@@ -164,9 +164,13 @@ _MAX_EXACT_LOOKUPS = DEFAULT_REASONING_MAX_EXACT_LOOKUPS
 _EXACT_TERM_WRAPPERS = " \t\r\n\"'`“”‘’「」『』《》()（）[]【】<>,，。:：;；!！?？"
 # 名称形状闸拒绝时回喂给模型(并上屏)的措辞。写成「该给什么」而不是「你给错了」:
 # 只说非法,模型下一轮往往换一个同样非法的普通词再试一次,白烧一轮反思。
+# 括号里那半句与 v2 的 `exact_lookup.term` 参数说明**共用一份字面**
+# (`EXACT_TERM_SHAPE_NOTE`,唯一定义点在 reasoning_actions):事前说的"该给什么"
+# 与事后说的"该给什么"分成两份文案,就一定会分叉成两套判据。拼接结果与接入前
+# 逐字节相同 —— legacy 的回喂与 trace summary 因此一个字都没变。
 _NOT_A_NAME_NOTE = (
     "「{term}」不是可精确查找的名称"
-    "(要像 set_db、config.yaml 这样带下划线或点;只用连字符连接的词还需带数字,如 GPT-4)"
+    f"({EXACT_TERM_SHAPE_NOTE})"
 )
 # expand_community 跨挂载库合并去重后的兄弟实体总量帽,相对单库上限
 # community_peers_topk(默认 8)的倍数。多领域基准库下每个挂载库最多贡献
@@ -498,11 +502,18 @@ _ASSESSMENT_REJECTED_SKIP_SUMMARY = "未采纳 {count} 条方面自评（本轮�
 
 
 class _V2ArgumentError(Exception):
-    """一次参数校验失败。``code`` 直接进 `ReflectDecision.invalid_reason`。"""
+    """一次参数校验失败。``code`` 直接进 `ReflectDecision.invalid_reason`。
 
-    def __init__(self, code: str):
+    ``term`` 只有 `exact_lookup` 的形状闸填:被拒的那个名称原文。原因码
+    (`invalid_argument:term`)只说"不合法",而模型需要的是"该给什么" —— run() 的
+    invalid 分支据这一格把 `_NOT_A_NAME_NOTE` 记进按名称查找的账本,与执行层
+    `exact_term_not_identifier` 那条走同一份措辞、同一条回喂。
+    """
+
+    def __init__(self, code: str, term: str = ""):
         super().__init__(code)
         self.code = code
+        self.term = term
 
 
 def _reflect_invalid(reason: str, requested: str = "") -> "ReflectDecision":
@@ -674,6 +685,20 @@ def _v2_apply_arguments(
         term = clean_exact_term(_v2_text(arguments, "term", required=True))
         if not term:
             raise _V2ArgumentError(f"{_V2_MISSING_ARGUMENT_PREFIX}term")
+        # 形状判据前移到解析层(计划 T-BF4)。判据本身仍是执行层那把闸的**同一个
+        # 纯函数**(`exact_probe_terms`,零 I/O),只是判得早一轮:模型的参数说明里
+        # 已经写着形状要求,再让它先烧一整轮反思才从回喂里学到同一句话,是白花一
+        # 步。三个细节与执行层逐项对齐,否则同一份输入会在两层得出不同结论:
+        # `honor_quotes=False`(名称来自模型不是用户——用户的引号由 seed 通道兑现,
+        # 模型不能用 `x "的方法" y` 夹带引号绕开这把按实测定标的低选择度子串闸)、
+        # 先截到词法层的精确短语上界再判(超长标识符只有截断后才进得了
+        # `identifier_terms`),以及回喂/带下去的就是这份截断后的名称(它要被原样
+        # 拼进 prompt,长度必须有界)。
+        # legacy 的执行层分支(`elif not probed`)原样保留:关闭态逐字节不变。
+        probe_term = term[:MAX_EXACT_PHRASE_CHARS]
+        if not exact_probe_terms(probe_term, honor_quotes=False):
+            raise _V2ArgumentError(
+                f"{_V2_INVALID_ARGUMENT_PREFIX}term", probe_term)
         decision.exact_term = term
     elif action == "expand_graph":
         decision.expand_object_id = _v2_text(
@@ -892,7 +917,12 @@ def parse_reflect_v2(
     try:
         _v2_apply_arguments(action, arguments, capabilities, decision)
     except _V2ArgumentError as exc:
-        return _reflect_invalid(exc.code, action)
+        invalid = _reflect_invalid(exc.code, action)
+        # 被形状闸拒掉的名称原样带下去(其余错误这一格恒为空串)。伪动作不分派到
+        # `exact_lookup`,所以这一格不会让任何检索发生——它只是 run() 记那条教学
+        # 回喂时唯一还记得"模型给的是哪个词"的地方。
+        invalid.exact_term = exc.term
+        return invalid
     return decision
 
 
@@ -2746,6 +2776,9 @@ class ReflectDecision:
     # search_chunks 的检索串。与 elements_query/ppr_query 同款「空则回退到原
     # 问题」,解析处不做必填校验。
     chunks_query: str = ""
+    # 要按名称精确查找的那个名称。v2 下它还有第二个(且唯一的另一个)填法:形状闸
+    # 在解析期拒掉的名称原文,此时 `next_action` 是 `REFLECT_INVALID_ACTION`
+    # 伪动作,这一格只被 run() 的 invalid 分支读去记教学回喂,不触发任何检索。
     exact_term: str = ""
     chain_start_object_id: str = ""
     chain_target_object_id: str = ""
@@ -7129,6 +7162,10 @@ class ReasoningRetriever:
                 # I/O 记一条观察,再落到链尾与其它 skip **同一份**
                 # no_progress/stale 记账(设计稿 §5.2)。不能裸 continue——那会绕过
                 # 链尾记账,反复提交非法动作就规避了熔断。
+                if decision.exact_term:  # T-BF4,见 `_V2ArgumentError.term`
+                    feed_exact_lookup_skip(
+                        _norm_query(decision.exact_term), [decision.exact_term],
+                        _NOT_A_NAME_NOTE.format(term=decision.exact_term))
                 record(TraceStep(
                     step_type="skip",
                     summary=_REFLECT_INVALID_SKIP_SUMMARY,
