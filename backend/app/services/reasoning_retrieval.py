@@ -4744,7 +4744,9 @@ class ReasoningRetriever:
         是复用与重跑的子查询数,``researched_ms`` 只计**重跑那几次**的墙钟——复用
         分支是纯内存重建,把它算进去会让「缓存到底省了多少」这个数永远看不出来。
         重跑抛错的那次也计时:那段时间照样花掉了,不计等于把失败说成免费。默认
-        `None` ⇒ 关闭态与既有调用方零改动、零额外分配,**而且一次 `perf_counter`
+        `None` ⇒ 关闭态与既有调用方零改动、**这个方法自己**零额外分配(调用方
+        `_closing_rerank` 仍无条件建一个三键小 dict:它的两条支都要往里写,收进
+        `if measure:` 反而要在单查询支上多一处分支),**而且一次 `perf_counter`
         都不多读**:轨迹步的耗时是相邻两次记账的时钟差,多读两次在真实时钟下无关
         紧要,在合成时钟下(`generate_repository_contract_fixtures.py` 每读一次走
         1ms)却会让关闭态的 `answer` 步耗时从 8 变成 10 —— 那是一份冻结 oracle 的
@@ -4846,6 +4848,10 @@ class ReasoningRetriever:
             outline_evidence = outline_truncated_kg_evidence(
                 outline, collected, top_hits, rescored=scored_map)
         if measure:
+            # `researched_ms` 只圈住真发出去的那几次检索,而这一步的 `duration_ms`
+            # 是整段的墙钟 —— 两者之差就是**融合与补集那段纯内存工作**
+            # (`quota_fuse` / 全局重排的排序切片 + `outline_truncated_kg_evidence`)。
+            # 差得大 ⇒ 慢在本机计算;差得小 ⇒ 慢在检索侧,该看的是 `researched`。
             record(TraceStep(
                 step_type="rerank",
                 summary="重排候选",
