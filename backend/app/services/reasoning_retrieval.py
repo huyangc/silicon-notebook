@@ -4744,7 +4744,11 @@ class ReasoningRetriever:
         是复用与重跑的子查询数,``researched_ms`` 只计**重跑那几次**的墙钟——复用
         分支是纯内存重建,把它算进去会让「缓存到底省了多少」这个数永远看不出来。
         重跑抛错的那次也计时:那段时间照样花掉了,不计等于把失败说成免费。默认
-        `None` ⇒ 关闭态与既有调用方零改动、零额外分配。"""
+        `None` ⇒ 关闭态与既有调用方零改动、零额外分配,**而且一次 `perf_counter`
+        都不多读**:轨迹步的耗时是相邻两次记账的时钟差,多读两次在真实时钟下无关
+        紧要,在合成时钟下(`generate_repository_contract_fixtures.py` 每读一次走
+        1ms)却会让关闭态的 `answer` 步耗时从 8 变成 10 —— 那是一份冻结 oracle 的
+        逐字节红线。"""
         from dataclasses import replace
         from app.services.retrieval import quota_fuse
         reuse = self.settings.reasoning_quota_enabled and getattr(
@@ -4760,7 +4764,7 @@ class ReasoningRetriever:
                 if stats is not None:
                     stats["reused"] = stats.get("reused", 0) + 1
                 continue
-            began = time.perf_counter()
+            began = time.perf_counter() if stats is not None else 0.0
             try:
                 per_q.append({h.object_id: h for h in self.search(notebook_id, q)})
             except Exception:
@@ -4796,11 +4800,15 @@ class ReasoningRetriever:
 
         零新增调用与 I/O:重排本身一行没改,新增的只有计时与一条记账。
         """
+        # 门只问一次,而且**它同时决定记不记步与计不计时**:关闭态一次
+        # `perf_counter` 都不多读(理由见 `_quota_rerank` 的 `stats` 说明)。
+        measure = self.reflect_v2_active()
         stats: dict = {"reused": 0, "researched": 0, "researched_ms": 0.0}
         if self.settings.reasoning_quota_enabled and len(used_queries) >= 2:
             # 复合问题: 按子查询配额 round-robin, 避免一方通吃。
             top_hits, counts = self._quota_rerank(
-                notebook_id, collected, used_queries, top_n, stats=stats)
+                notebook_id, collected, used_queries, top_n,
+                stats=stats if measure else None)
             # 只暴露各子查询贡献数(不含兜底组), 便于观测。
             answer_detail["quota"] = counts[:len(used_queries)]
             # 配额融合没有全局重排 map,补集只能按"被选集挤出去的不会比选集里最差
@@ -4812,7 +4820,7 @@ class ReasoningRetriever:
             )
         else:
             # 单查询/开关关: 原全局重排(用原问题统一打分), 行为不变。
-            began = time.perf_counter()
+            began = time.perf_counter() if measure else 0.0
             with retrieval_fanout_slot():
                 rescored = self.retrieval.retrieve_scored(
                     notebook_id, question
@@ -4823,7 +4831,8 @@ class ReasoningRetriever:
             # 对不上正是这一支的特征:配额关着(或只有一个子查询)时,重排根本
             # 不按子查询走。计时只圈住那次调用:下面的过滤与排序是纯内存。
             stats["researched"] = 1
-            stats["researched_ms"] = (time.perf_counter() - began) * 1000
+            if measure:
+                stats["researched_ms"] = (time.perf_counter() - began) * 1000
             scored_map = {
                 h.object_id: h
                 for h in self._filter_candidates(
@@ -4836,7 +4845,7 @@ class ReasoningRetriever:
             # 补集与选集共用**同一个** scored_map:零新查询,而且相关度同口径。
             outline_evidence = outline_truncated_kg_evidence(
                 outline, collected, top_hits, rescored=scored_map)
-        if self.reflect_v2_active():
+        if measure:
             record(TraceStep(
                 step_type="rerank",
                 summary="重排候选",
