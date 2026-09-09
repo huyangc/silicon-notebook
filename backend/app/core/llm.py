@@ -273,10 +273,11 @@ def serialize_provider_messages(messages: List[Dict[str, str]]) -> bytes:
     whole point of this shape. The measured question is "how much of turn N's
     request is a literal prefix of turn N+1's", and under the layout this client
     actually sends (one system message plus ONE long user message whose tail is
-    the only part that changes per turn) a LEADING length would put a header that depends
-    on the tail in front of the thousands of identical bytes it counts: change
-    the tail's length by one byte and the common prefix collapses at the header,
-    reporting ~0 shared bytes for two requests that share nearly all of them.
+    the only part that changes per turn) a LEADING length would put a header
+    that depends on the tail in front of the thousands of identical bytes it
+    counts: change the tail's length by one byte and the common prefix collapses
+    at that header, reporting ~0 shared bytes for two requests that share nearly
+    all of them.
     With the length behind its field, divergence can only land where the bytes
     themselves first differ.
 
