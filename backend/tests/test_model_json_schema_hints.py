@@ -701,7 +701,7 @@ def test_tolerated_assessment_payloads_reach_the_ledger_from_both_paths():
         ledger = AspectLedger(["问题一"], source="intent_topics")
         if decision.assessment is not None:
             assert ledger.apply(
-                decision.assessment, allowed_keys={"ck-1"}) == "", label
+                decision.assessment, allowed_keys={"ck-1"}).error == "", label
         assert ledger.snapshot()[0].status == expected_status, label
 
 
@@ -741,7 +741,8 @@ def test_reflect_v2_assessment_shape_faults_are_the_ledgers_to_reject():
         validate_model_json_shape(repaired.content, hint)
         # 拒绝发生在这里,而且带稳定原因码。
         ledger = AspectLedger(["问题一"], source="intent_topics")
-        assert ledger.apply(assessment, allowed_keys=set()) == why, assessment
+        outcome = ledger.apply(assessment, allowed_keys=set())
+        assert outcome.error == why, assessment
 
 
 def test_reflect_v2_assessment_is_an_open_object_and_legacy_is_untouched():

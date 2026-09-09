@@ -6122,10 +6122,10 @@ def test_v2_assessment_status_enum_comes_from_one_constant():
     for status in ASPECT_UNRESOLVED_STATUSES:
         assert ledger.apply(
             {"unresolved": [{"aspect_id": "a1", "status": status}]},
-            allowed_keys=set()) == "", status
+            allowed_keys=set()).error == "", status
     assert ledger.apply(
         {"unresolved": [{"aspect_id": "a1", "status": "supported"}]},
-        allowed_keys=set()) == "invalid_status"
+        allowed_keys=set()).error == "invalid_status"
 
 
 def test_v2_tolerates_but_does_not_consume_assessment():
@@ -6637,8 +6637,9 @@ def test_v2_assessment_crosses_the_gate_on_both_paths(rrepo, syntax_fault):
     ⚠ T4 把 `assessment` 写进了 v2 的 schema hint 并真的消费它,所以这条 T3 用例
     的两处前提随之更新(它原来的 docstring 写的就是「本期不进 schema,T4 才
     消费」):方面 id 必须是**这个 run 真有的**那个(没有意图契约 ⇒ 兼容路径,
-    整条问题是唯一方面 `a1`;`a2` 现在是 `invalid_assessment:unknown_aspect`),
-    收尾多一条 run 级的结束原因披露。**过闸这件事本身一个字都没改。**
+    整条问题是唯一方面 `a1`;写 `a2` 会多出一条 `invalid_assessment:unknown_aspect`
+    的 skip 步——T-BF7 起它只拒那一个方面、动作照常执行),收尾多一条 run 级的
+    结束原因披露。**过闸这件事本身一个字都没改。**
     """
     from app.services.reasoning_aspects import TERMINATION_SKIP_REASON
     from app.services.reasoning_retrieval import ReasoningRetriever
@@ -8591,7 +8592,7 @@ def _ledger(*questions, constraints=()):
 def test_assessment_is_optional_and_absence_is_not_invalid():
     """`assessment` 是同一次 reflect 的**附加**结果:只给动作不算 invalid。"""
     ledger = _ledger("问题一")
-    assert ledger.apply({}, allowed_keys={"k1"}) == ""
+    assert ledger.apply({}, allowed_keys={"k1"}).error == ""
     assert ledger.snapshot()[0].status == "unknown"
 
 
@@ -8606,7 +8607,7 @@ def test_assessment_only_accepts_keys_that_were_actually_shown():
     # 展示过的只有 k1;k2 在池子里但从没渲染进任何一轮 prompt。
     assert ledger.apply(
         {"supported": [{"aspect_id": "a1", "evidence_keys": ["k2"]}]},
-        allowed_keys={"k1"}) == ""
+        allowed_keys={"k1"}).error == ""
     row = ledger.snapshot()[0]
     assert row.evidence_keys == () and row.status != "supported"
     assert row.demotion == DEMOTION_KEYS_REJECTED
@@ -8683,7 +8684,7 @@ def test_assessment_keeps_only_the_legal_half_of_a_mixed_key_list():
     assert ledger.apply({"supported": [
         {"aspect_id": "a1", "evidence_keys": ["k1", "编的", "k2"]},
         {"aspect_id": "a2", "evidence_keys": ["k2"]},
-    ]}, allowed_keys={"k1", "k2"}) == ""
+    ]}, allowed_keys={"k1", "k2"}).error == ""
     rows = ledger.snapshot()
     assert rows[0].evidence_keys == ("k1", "k2") and rows[0].status == "supported"
     assert rows[1].status == "supported"
@@ -8734,42 +8735,116 @@ def test_assessment_omission_preserves_and_listing_replaces():
 
 
 def test_assessment_bounds_are_rejected_with_a_stable_reason():
-    """越界一律拒**整份**,原因码稳定且说明是哪一条边界(§7.1)。"""
+    """越界的原因码稳定,并且**整份形状**与**单个方面**分成两族(§6 / T-BF7)。
+
+    整份形状那一族仍是全有或全无(账本一个字都不改,调用方整轮折成 invalid);
+    逐方面那一族只拒那一个方面,同一份载荷里另一个合法方面照常落账。
+
+    变异:把 `evidence_keys_overflow` / `gap_overflow` / `unknown_aspect` /
+    `duplicate_aspect` 中任意一条从 `ASPECT_REJECTION_REASONS` 里删掉 ⇒ 它落进
+    `error`,下面「a2 照常落账」那一半当场红。
+    """
     from app.domain.retrieval_termination import (
+        ASPECT_REJECTION_REASONS,
         REFLECT_ASPECT_GAP_MAX_CHARS, REFLECT_ASPECT_MAX_EVIDENCE_KEYS,
     )
     allowed = {f"k{n}" for n in range(20)}
-    cases = {
+    # 整份形状不成立:账本一格不动。
+    integral = {
         "not_object": [],
         "supported_not_list": {"supported": {"aspect_id": "a1"}},
         "supported_overflow": {"supported": [
             {"aspect_id": "a1"}, {"aspect_id": "a1"}, {"aspect_id": "a1"}]},
         "item_not_object": {"supported": ["a1"]},
-        "unknown_aspect": {"supported": [{"aspect_id": "a9"}]},
-        "duplicate_aspect": {
-            "supported": [{"aspect_id": "a1", "evidence_keys": ["k1"]}],
-            "unresolved": [{"aspect_id": "a1", "status": "partial"}]},
         "evidence_keys_not_list": {"supported": [
             {"aspect_id": "a1", "evidence_keys": "k1"}]},
-        "evidence_keys_overflow": {"supported": [{
-            "aspect_id": "a1",
-            "evidence_keys": [f"k{n}" for n in
-                              range(REFLECT_ASPECT_MAX_EVIDENCE_KEYS + 1)]}]},
         "evidence_key_not_string": {"supported": [
             {"aspect_id": "a1", "evidence_keys": [1]}]},
         "invalid_status": {"unresolved": [
             {"aspect_id": "a1", "status": "supported"}]},
         "gap_not_string": {"unresolved": [
             {"aspect_id": "a1", "status": "partial", "gap": 1}]},
-        "gap_overflow": {"unresolved": [{
-            "aspect_id": "a1", "status": "partial",
-            "gap": "缺" * (REFLECT_ASPECT_GAP_MAX_CHARS + 1)}]},
     }
-    for why, payload in cases.items():
+    for why, payload in integral.items():
         ledger = _ledger("问题一", "问题二")
-        assert ledger.apply(payload, allowed_keys=allowed) == why, why
+        outcome = ledger.apply(payload, allowed_keys=allowed)
+        assert (outcome.error, outcome.accepted, outcome.rejections) == (
+            why, (), ()), why
         # 拒绝是**全有或全无**:账本一个字都没改。
         assert all(row.status == "unknown" for row in ledger.snapshot()), why
+
+    # 逐方面不成立:只拒那一个方面,同一份载荷里的 a2 照常落账。
+    per_aspect = {
+        "unknown_aspect": {"aspect_id": "a9"},
+        "evidence_keys_overflow": {
+            "aspect_id": "a1",
+            "evidence_keys": [f"k{n}" for n in
+                              range(REFLECT_ASPECT_MAX_EVIDENCE_KEYS + 1)]},
+    }
+    for why, bad in per_aspect.items():
+        ledger = _ledger("问题一", "问题二")
+        outcome = ledger.apply(
+            {"supported": [bad, {"aspect_id": "a2", "evidence_keys": ["k1"]}]},
+            allowed_keys=allowed)
+        assert why in ASPECT_REJECTION_REASONS, why
+        assert outcome.error == "", why
+        assert outcome.accepted == ("a2",), why
+        assert [row[1] for row in outcome.rejections] == [why], why
+        rows = ledger.snapshot()
+        assert rows[0].status == "unknown", why       # a1 保留旧状态
+        assert rows[1].status == "supported", why     # 合法的那一格照常落账
+
+    # `gap_overflow` 同族(它只可能出现在 unresolved 那一组)。
+    ledger = _ledger("问题一", "问题二")
+    outcome = ledger.apply({"unresolved": [
+        {"aspect_id": "a1", "status": "partial",
+         "gap": "缺" * (REFLECT_ASPECT_GAP_MAX_CHARS + 1)},
+        {"aspect_id": "a2", "status": "partial", "gap": "还缺条件"},
+    ]}, allowed_keys=allowed)
+    assert outcome.error == ""
+    assert outcome.rejections == (("a1", "gap_overflow"),)
+    assert ledger.snapshot()[0].status == "unknown"
+    assert ledger.snapshot()[1].gap == "还缺条件"
+
+
+def test_over_limit_aspect_is_disclosed_once_and_never_truncated():
+    """被拒的方面在**下一轮**的方面块里披露一次,而且不是被截短(§6)。
+
+    「不截成已充分」是这一条的要害:12 个证据键的 supported 若被截成前 8 个,
+    模型看到的是一份服务端替它挑过的判断,而它自己写的那一条从此无迹可寻。
+
+    变异:`render_aspect_block` 里去掉消费(不清 `rejected`)⇒ 第二次渲染仍带
+    那一行,「只出现一次」当场红;去掉整格披露 ⇒ 第一次就红。
+    """
+    from app.domain.retrieval_termination import REFLECT_ASPECT_GAP_MAX_CHARS
+    from app.services.reasoning_aspects import render_aspect_block
+    ledger = _ledger("问题一")
+    ledger.apply({"unresolved": [{
+        "aspect_id": "a1", "status": "partial",
+        "gap": "缺" * (REFLECT_ASPECT_GAP_MAX_CHARS + 1)}]},
+        allowed_keys=set())
+    block = render_aspect_block(ledger)
+    assert "服务端未采纳: gap_overflow" in block
+    # 旧状态原样保留,超限的 gap 一个字都没进账本。
+    assert ledger.snapshot()[0].status == "unknown"
+    assert ledger.snapshot()[0].gap == ""
+    # 一次性:再渲染一次就没有了(与追问句同款语义)。
+    assert "服务端未采纳" not in render_aspect_block(ledger)
+
+
+def test_unknown_aspect_id_is_disclosed_without_echoing_the_model_string():
+    """未知方面 id 挂不到任何一行上:单独说一句,而且**不回显那个 id**。
+
+    变异:改成把 `aspect_id` 原样拼进那句话 ⇒ 下面 `"a9" not in block` 红。
+    """
+    from app.services.reasoning_aspects import render_aspect_block
+    ledger = _ledger("问题一")
+    outcome = ledger.apply(
+        {"supported": [{"aspect_id": "a9"}]}, allowed_keys=set())
+    assert outcome.rejections == (("", "unknown_aspect"),)
+    block = render_aspect_block(ledger)
+    assert "不在上面的清单里" in block and "a9" not in block
+    assert "不在上面的清单里" not in render_aspect_block(ledger)   # 一次性
 
 
 def test_assessment_bounds_do_not_truncate_user_content():
@@ -8778,16 +8853,170 @@ def test_assessment_bounds_do_not_truncate_user_content():
     long_topic = "必答问题" * 500
     ledger = _ledger(long_topic)
     assert ledger.snapshot()[0].question == long_topic
-    # 恰好压线的 gap 通过;多一个字符整份被拒(不是被截短)。
+    # 恰好压线的 gap 通过;多一个字符那个方面被拒(不是被截短)。
     fits = {"unresolved": [{"aspect_id": "a1", "status": "partial",
                             "gap": "缺" * REFLECT_ASPECT_GAP_MAX_CHARS}]}
-    assert ledger.apply(fits, allowed_keys=set()) == ""
+    assert ledger.apply(fits, allowed_keys=set()).error == ""
 
 
-def test_over_limit_assessment_becomes_an_invalid_decision_with_zero_io(rrepo):
-    """run 级:越界的自评把整轮决定折成一条零 I/O 的 invalid 观察。
+def test_identical_duplicate_aspect_rows_are_deduplicated_deterministically():
+    """同一方面**完全相同**的重复项去重,不作废这个方面(§6)。
 
-    走的是 T2 已有的那条路(伪动作 + 链尾统一记账),原因码带上是哪一条边界。
+    判据落在规范化之后(`_Update.content`):两行只在"抄错了哪个池外的键"上不同、
+    落账结果逐字段相同时,仍然算同一条。
+
+    变异:把 `_Update.content` 的判据改成 `prior is not None` 一律冲突 ⇒ 这条红
+    (a1 会被拒成 duplicate_aspect)。
+    """
+    # 两个方面的账:`<group>_overflow` 的判据是「这一组的行数不超过方面总数」,
+    # 而重复项天然会多占一行。
+    ledger = _ledger("问题一", "问题二")
+    row = {"aspect_id": "a1", "evidence_keys": ["k1"]}
+    outcome = ledger.apply(
+        {"supported": [dict(row), dict(row)]}, allowed_keys={"k1"})
+    assert (outcome.error, outcome.accepted, outcome.rejections) == (
+        "", ("a1",), ())
+    assert ledger.snapshot()[0].status == "supported"
+    assert ledger.snapshot()[0].evidence_keys == ("k1",)
+
+    # 两行的键都在池外 ⇒ 规范化之后同样是 (partial, (), "", keys_rejected)。
+    same = _ledger("问题一", "问题二")
+    assert same.apply({"supported": [
+        {"aspect_id": "a1", "evidence_keys": ["池外甲"]},
+        {"aspect_id": "a1", "evidence_keys": ["池外乙"]},
+    ]}, allowed_keys={"k1"}).rejections == ()
+    assert same.snapshot()[0].status == "partial"
+
+
+def test_conflicting_duplicate_aspect_rows_reject_that_aspect_only():
+    """冲突的重复项拒掉这个方面并**保留旧状态**,不取首条也不取末条(§6)。
+
+    变异:改成"后来者覆盖"或"保留第一条" ⇒ 下面 a1 的状态断言红。
+    """
+    ledger = _ledger("问题一", "问题二")
+    # 先给 a1 一个真实的旧状态,好证明被拒之后它**没被动过**。
+    ledger.apply({"supported": [{"aspect_id": "a1", "evidence_keys": ["k1"]}]},
+                 allowed_keys={"k1", "k2"})
+    outcome = ledger.apply({
+        "supported": [{"aspect_id": "a1", "evidence_keys": ["k2"]},
+                      {"aspect_id": "a2", "evidence_keys": ["k1"]}],
+        "unresolved": [{"aspect_id": "a1", "status": "partial"}],
+    }, allowed_keys={"k1", "k2"})
+    assert outcome.error == ""
+    assert outcome.rejections == (("a1", "duplicate_aspect"),)
+    assert outcome.accepted == ("a2",)
+    rows = ledger.snapshot()
+    assert rows[0].status == "supported" and rows[0].evidence_keys == ("k1",)
+    assert rows[1].status == "supported"
+
+
+def test_a_rejected_aspect_does_not_swallow_the_turns_retrieval(rrepo):
+    """run 级(T-BF7):一个越界方面 + 一个合法 `search_chunks`。
+
+    检索**真的发生**、方面账只改合法那一格、下一轮的方面块出现一次「服务端
+    未采纳」,而观察账里这一轮**只有一行动作观察**(那次检索自己的)。
+
+    这是本任务最重要的一条:生产 68 个 v2 run 里 17 轮整轮作废(每轮约 40 秒)
+    走的正是这条路径。
+
+    变异:`_absorb_assessment` 改回按逐方面原因码 `_reflect_invalid` ⇒ 第一条
+    断言红;`NON_ACTION_ASSESSMENT_SKIP_REASONS` 去掉 ⇒ 观察行那条红(同一次
+    请求出现两行)。
+    """
+    llm, result = _v2_aspect_run(
+        rrepo,
+        intent_detail={"mandatory_topics": ["问题一", "问题二"]},
+        reflects=[
+            {"next_action": "search_chunks", "sufficient": False,
+             "arguments": {"query": "这一轮该被执行"},
+             "assessment": {"supported": [
+                 {"aspect_id": "a9"},
+                 {"aspect_id": "a2", "evidence_keys": ["ck-q0"]}]},
+             "reason": "一个越界方面 + 一个合法方面"},
+            _answer(),
+        ],
+        chunk_results={"完整问题": [_chunk_hit("ck-q0")],
+                       "这一轮该被执行": [_chunk_hit("ck-x1")]},
+    )
+    # 1) 那次检索真的发出去了,证据也真的进了池子。
+    assert any(t.step_type == "search_chunks"
+               and t.detail.get("query") == "这一轮该被执行"
+               for t in result.trace)
+    assert any(c.chunk_id == "ck-x1" for c in result.chunks)
+    # 2) 方面账只改合法那一格;越界的 a1/a9 一格都没动。
+    statuses = [row.status for row in result.termination.aspects]
+    assert statuses == ["unknown", "supported"]
+    # 3) 原因码词面延续(评估口径),而且**一个方面一条**。
+    assert _skip_reasons(result).count("invalid_assessment:unknown_aspect") == 1
+    # 4) 下一轮的方面块披露一次,且只有一次。
+    blocks = [_aspect_block(llm, turn) for turn in range(len(llm.user_prompts))]
+    assert sum("不在上面的清单里" in block for block in blocks) == 1
+    # 5) 观察账:这一轮只有一行动作观察(那次检索),没有第二行同身份的 invalid。
+    lines = llm.observation_lines(1)
+    assert sum("这一轮该被执行" in row for row in lines) == 1, lines
+    assert not any("invalid_assessment" in row for row in lines), lines
+
+
+def test_a_rejected_aspect_skip_lands_right_after_its_reflect_step(rrepo):
+    """那条 skip 排在**解释它的那条 reflect 步之后**,而且不吞它的耗时。
+
+    它在 `run()` 调完 `reflect()`、记 reflect 步之前产生(`_v2_note_turn` 的
+    位置),所以当场记账会同时错两件事:顺序反过来,以及整次反思调用的墙钟被
+    记到这条零成本的记账步上(每步耗时是相邻两次记账之差)。
+
+    变异:`_TraceRecorder.defer` 改成直接 `self(step)` ⇒ 两条断言都红。
+    """
+    _, result = _v2_aspect_run(
+        rrepo,
+        intent_detail={"mandatory_topics": ["问题一"]},
+        reflects=[
+            {"next_action": "search_chunks", "sufficient": False,
+             "arguments": {"query": "这一轮该被执行"},
+             "assessment": {"supported": [{"aspect_id": "a9"}]},
+             "reason": "越界方面"},
+            _answer(),
+        ],
+        chunk_results={"完整问题": [_chunk_hit("ck-q0")],
+                       "这一轮该被执行": [_chunk_hit("ck-x1")]},
+    )
+    types = [t.step_type for t in result.trace]
+    index = next(
+        i for i, t in enumerate(result.trace)
+        if t.detail.get("reason") == "invalid_assessment:unknown_aspect")
+    assert types[index - 1] == "reflect"
+    # 检索那一步紧随其后:这条记账没有插到动作与它的决定中间。
+    assert types[index + 1] == "search_chunks"
+
+
+def test_trace_recorder_defer_lands_after_the_next_step_at_zero_cost(
+    monkeypatch,
+):
+    """`defer` 的两条性质,用假时钟钉死(墙钟断言不进用例)。
+
+    顺序:排队的步落在**下一条**记账之后。耗时:那一段墙钟归下一条记账所有,
+    排队的步自己≈0——这正是"当场记账会让 reflect 步显示 0ms"那件事的反面。
+    """
+    from app.models.ask import TraceStep
+    from app.services import reasoning_retrieval
+
+    ticks = iter([0.0, 2.0, 2.0])
+    monkeypatch.setattr(
+        reasoning_retrieval.time, "perf_counter", lambda: next(ticks))
+    trace: list = []
+    record = reasoning_retrieval._TraceRecorder(trace, None, None)
+    record.defer(TraceStep(step_type="skip", summary="排队的那一步"))
+    record(TraceStep(step_type="reflect", summary="下一条记账"))
+    assert [step.step_type for step in trace] == ["reflect", "skip"]
+    assert [step.duration_ms for step in trace] == [2000, 0]
+
+
+def test_malformed_assessment_still_folds_the_whole_turn(rrepo):
+    """整份形状不成立的自评**仍然**整轮折成一条零 I/O 的 invalid(T-BF7 边界)。
+
+    逐方面解耦只覆盖 `ASPECT_REJECTION_REASONS` 那个闭集;`item_not_object` 这类
+    载荷里"模型到底怎么判的"没有可明确解释的读法,照旧走 T2 那条路。
+
+    变异:把整份形状错误也改成逐方面跳过 ⇒ 「零 I/O」那两条红。
     """
     llm, result = _v2_aspect_run(
         rrepo,
@@ -8795,15 +9024,15 @@ def test_over_limit_assessment_becomes_an_invalid_decision_with_zero_io(rrepo):
         reflects=[
             {"next_action": "search_chunks", "sufficient": False,
              "arguments": {"query": "本不该被执行"},
-             "assessment": {"supported": [{"aspect_id": "a9"}]},
-             "reason": "自评越界"},
+             "assessment": {"supported": ["a1"]},      # item_not_object
+             "reason": "自评形状不合"},
             _answer(),
         ],
         chunk_results={"完整问题": [_chunk_hit("ck-q0")],
                        "本不该被执行": [_chunk_hit("ck-x1")]},
     )
     reasons = _skip_reasons(result)
-    assert "invalid_assessment:unknown_aspect" in reasons
+    assert "invalid_assessment:item_not_object" in reasons
     # 零 I/O:那次检索一次都没发。
     assert not any(t.step_type == "search_chunks"
                    and t.detail.get("query") == "本不该被执行"
@@ -8865,7 +9094,7 @@ def test_listform_with_an_extra_top_level_key_is_still_absorbed():
         "supported": [{"aspect_id": "a1", "evidence_keys": ["k1"]}],
         "unresolved": [{"aspect_id": "a2", "status": "partial"}],
         "note": "以上是我这一轮的判断",
-    }, allowed_keys={"k1"}) == ""
+    }, allowed_keys={"k1"}).error == ""
     rows = {row.aspect_id: row for row in ledger.snapshot()}
     assert rows["a1"].status == "supported"
     assert rows["a1"].evidence_keys == ("k1",)
@@ -8906,14 +9135,14 @@ def test_mapping_form_supported_flag_loses_to_an_explicit_other_status():
     assert ledger.apply(
         {"a1": {"supported": True, "status": "partial",
                 "evidence_keys": ["k1"], "gap": "缺甲"}},
-        allowed_keys={"k1"}) == ""
+        allowed_keys={"k1"}).error == ""
     row = ledger.snapshot()[0]
     assert row.status == "partial" and row.gap == "缺甲"
     # 不合法的 status 同样算「明确给了别的值」⇒ 保守到 unknown,不是 supported。
     ledger = _ledger("问题一")
     assert ledger.apply(
         {"a1": {"supported": True, "status": "bogus-status"}},
-        allowed_keys={"k1"}) == ""
+        allowed_keys={"k1"}).error == ""
     assert ledger.snapshot()[0].status == "unknown"
 
 
@@ -8932,12 +9161,12 @@ def test_mapping_form_supported_status_loses_to_an_explicit_false_flag():
     assert ledger.apply(
         {"a1": {"status": "supported", "supported": False,
                 "evidence_keys": ["k1"]}},
-        allowed_keys={"k1"}) == ""
+        allowed_keys={"k1"}).error == ""
     assert ledger.snapshot()[0].status == "unknown"
     ledger = _ledger("问题一")
     assert ledger.apply(
         {"a1": {"status": "supported", "evidence_keys": ["k1"]}},
-        allowed_keys={"k1"}) == ""
+        allowed_keys={"k1"}).error == ""
     assert ledger.snapshot()[0].status == "supported"
 
 
@@ -8981,7 +9210,7 @@ def test_mapping_form_supported_with_illegal_keys_still_demotes():
     ledger = _ledger("问题一")
     assert ledger.apply(
         {"a1": {"supported": True, "evidence_keys": ["编的键"]}},
-        allowed_keys={"k1"}) == ""
+        allowed_keys={"k1"}).error == ""
     row = ledger.snapshot()[0]
     assert row.status == "partial" and row.demotion == DEMOTION_KEYS_REJECTED
 
@@ -9539,20 +9768,60 @@ def test_termination_reason_and_aspect_status_are_closed_sets():
 
 
 def test_t4_skip_reason_codes_are_classified():
-    """T4 新增的两个稳定原因码各有归类(表里少一条 ⇒ 这条红)。
+    """T4/T-BF7 的稳定原因码各有归类(表里少一条 ⇒ 这条红)。
 
-    `invalid_assessment:*` 是 invalid(载荷不成立、零 I/O);
-    `retrieval_termination` 是 run 级叙述,根本不折成动作观察。
+    同一个 `invalid_assessment:` 前缀分两族,判据是后缀在不在
+    `ASPECT_REJECTION_REASONS` 里:
+
+    * **整份形状**不成立 ⇒ 那一轮真的零 I/O 折成 invalid,照常产生一条 invalid
+      观察;
+    * **逐方面**被拒 ⇒ 同一轮那个动作真的执行了,它自己另有一行观察,所以这条
+      skip **不产生**动作观察——两行都记会让同一次请求在账上出现两遍。
+
+    `retrieval_termination` 是 run 级叙述,同样不折成动作观察。
+
+    变异:把 `is_non_action_skip` 改回 `reason in NON_ACTION_SKIP_REASONS` ⇒
+    逐方面那一族落回 invalid 观察,这条红。
     """
+    from app.domain.retrieval_termination import ASPECT_REJECTION_REASONS
     from app.services.reasoning_aspects import TERMINATION_SKIP_REASON
     from app.services.reasoning_observation import (
-        NON_ACTION_SKIP_REASONS, STATUS_INVALID, status_for_skip,
+        NON_ACTION_SKIP_REASONS, STATUS_INVALID, is_non_action_skip,
+        status_for_skip,
     )
-    assert status_for_skip("invalid_assessment:unknown_aspect") == (
-        STATUS_INVALID)
-    assert status_for_skip("invalid_assessment:evidence_keys_overflow") == (
-        STATUS_INVALID)
+    for why in ("not_object", "item_not_object", "invalid_status",
+                "supported_not_list"):
+        reason = f"invalid_assessment:{why}"
+        assert status_for_skip(reason) == STATUS_INVALID, why
+        assert not is_non_action_skip(reason), why
+    for why in ASPECT_REJECTION_REASONS:
+        assert is_non_action_skip(f"invalid_assessment:{why}"), why
     assert TERMINATION_SKIP_REASON in NON_ACTION_SKIP_REASONS
+    assert is_non_action_skip(TERMINATION_SKIP_REASON)
+
+
+def test_a_rejected_aspect_skip_step_produces_no_action_observation():
+    """那条 skip 步走一次真实的 `observation_from_step` 也折不出观察。
+
+    上一条钉的是判据本身,这一条钉的是**转换点**:`pending` 非空(这一轮模型
+    确实选过动作)时它仍然返回 None,否则同一次请求会被记两遍。
+    """
+    from app.models.ask import TraceStep
+    from app.services.reasoning_observation import (
+        _PendingDecision, observation_from_step,
+    )
+    pending = _PendingDecision(
+        action_id="search_chunks", request="布局收敛", purpose="继续查",
+        budget_left="剩余步数 3")
+    step = TraceStep(
+        step_type="skip", summary="未采纳一条方面自评（本轮动作照常执行）",
+        detail={"reason": "invalid_assessment:duplicate_aspect",
+                "aspect_id": "a1"})
+    assert observation_from_step(step, seq=1, pending=pending) is None
+    # 对照:整份形状那一族照常折出一条 invalid 观察。
+    step.detail["reason"] = "invalid_assessment:item_not_object"
+    row = observation_from_step(step, seq=1, pending=pending)
+    assert row is not None and row.status == "invalid"
 
 
 def test_termination_records_one_skip_step_that_is_not_an_action_observation(
