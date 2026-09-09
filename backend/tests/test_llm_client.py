@@ -242,24 +242,57 @@ def test_serialize_provider_messages_is_deterministic_and_utf8():
     # Length headers count BYTES, not characters: 中文 is 3 bytes per char.
     assert b"11:" + "中文 body".encode("utf-8") in first
     assert serialize_provider_messages([]) == b""
+    # The ROLE is part of the frame, not decoration: the same text spoken by the
+    # model and by the user are different requests, and a serializer that only
+    # walked `content` would report them as a shared prefix.
+    assert serialize_provider_messages([{"role": "user", "content": "x"}]) != (
+        serialize_provider_messages([{"role": "assistant", "content": "x"}])
+    )
 
 
 def test_serialize_provider_messages_frames_cannot_be_forged_from_content():
     """(T-PS1-b) A body that writes the framing syntax cannot move a boundary.
 
-    Two different message lists whose concatenated text is identical must
-    serialize differently; with a plain delimiter they would collide and a
-    hostile (or merely unlucky) document quotation could make two structurally
-    different requests look byte-identical.
+    The pair below is the exact collision a delimiter-separated serializer
+    admits: one message whose CONTENT spells out ``<sep>role<sep>`` serializes
+    identically to two real messages. Model input is untrusted text, so a
+    separator drawn from the text alphabet is forgeable by definition and two
+    structurally different requests would then look byte-identical — silently
+    inflating any common-prefix number computed on top.
+
+    Mutation: replace the length headers with any single delimiter and this
+    equality fires.
     """
     forged = serialize_provider_messages(
-        [{"role": "user", "content": "4:userpayload"}]
+        [{"role": "user", "content": "a|user|b"}]
     )
     genuine = serialize_provider_messages(
-        [{"role": "user", "content": ""}, {"role": "user", "content": "payload"}]
+        [{"role": "user", "content": "a"}, {"role": "user", "content": "b"}]
     )
 
     assert forged != genuine
+
+
+def test_serialize_provider_messages_is_order_preserving_concatenation():
+    """(T-PS1-b/c) List order is preserved and frames are plainly concatenated.
+
+    This is the law the whole prefix metric rests on: ``serialize(head + tail)``
+    starts with ``serialize(head)``. Any normalization that reorders or dedupes
+    messages (sorting them for a "stable" key, say) would make two different
+    conversations share bytes they never shared on the wire.
+    """
+    first = {"role": "user", "content": "zzz"}
+    second = {"role": "user", "content": "aaa"}
+
+    assert serialize_provider_messages([first, second]) == (
+        serialize_provider_messages([first]) + serialize_provider_messages([second])
+    )
+    assert serialize_provider_messages([second, first]) == (
+        serialize_provider_messages([second]) + serialize_provider_messages([first])
+    )
+    assert serialize_provider_messages([first, second]) != (
+        serialize_provider_messages([second, first])
+    )
 
 
 def test_serialize_provider_messages_prefix_covers_every_earlier_message():
