@@ -226,15 +226,17 @@ class AssessmentOutcome:
     两格刻意分开,因为它们导致的处理完全不同:
 
     * `error` 非空 ⇒ **整份载荷形状不成立**(`not_object` /
-      `<group>_not_list` / `item_not_object` / `invalid_status` …),账本一个字
+      `<group>_not_list` / `item_not_object` / `<group>_overflow`),账本一个字
       都没改,调用方照旧把这一轮折成一条零 I/O 的 invalid 观察。这一格非空时
       `accepted`/`rejections` 恒为空:整份被拒就是整份被拒,不留半份副作用。
     * `rejections` 非空 ⇒ 某几个方面的更新**按方面**被拒(闭集
       `ASPECT_REJECTION_REASONS`),其余合法方面照常落账,**同一轮的检索动作
       照常执行**。调用方据它记披露与 skip 步,不折叠这一轮。
 
-    `accepted` 是真正落账的方面 id(保序)。调用方今天只用它的真假,留成 id
-    序列是因为"落了哪几格"与"落了几格"在排查时不是同一个信息量。
+    `accepted` 是真正落账的方面 id(保序)。它**空着**是一件有后果的事:一份行
+    数不为零、却逐方面全被拒的载荷,在账本上留下的读数与一份根本没给的自评逐字
+    相同,所以收尾轮的「必须自评」闸按它判,而不是按"有没有行"判(见
+    `reasoning_retrieval._absorb_assessment` / `_nudge_missing_assessment`)。
     """
 
     error: str = ""
@@ -550,16 +552,22 @@ class AspectLedger:
 
         校验分**两层**(设计稿 §6「动作与 assessment 独立校验」):
 
-        * **整份形状**不成立(不是对象、某一组不是列表、组内条数超过方面总数、
-          某一条不是对象、`evidence_keys` 不是列表、键不是字符串、`gap` 不是
-          字符串、`status` 不在闭集)⇒ 整份拒绝,账本一个字都不改。这一类载荷里
-          "模型到底怎么判的"没有可明确解释的读法,半份被吸收的评估比没有评估更
-          危险——模型下一轮看到的状态既不是它说的,也不是服务端算的。
+        * **整份形状**不成立(不是对象、某一组不是列表、某一条不是对象、某一组
+          的行数超过 `_group_row_cap` 那道防超大载荷的硬上限)⇒ 整份拒绝,账本
+          一个字都不改。这一类载荷里"模型到底怎么判的"没有可明确解释的读法,
+          半份被吸收的评估比没有评估更危险——模型下一轮看到的状态既不是它说的,
+          也不是服务端算的。
         * **单个方面**不成立(闭集 `ASPECT_REJECTION_REASONS`:未知方面 id、
-          同一方面的冲突重复项、这个方面的证据键数或 `gap` 超限)⇒ **只拒这一个
+          同一方面的冲突重复项、这个方面的证据键数或 `gap` 超限、这一行的
+          `evidence_keys`/`gap`/`status` 字段类型或取值不合协议)⇒ **只拒这一个
           方面**,它保留旧状态并在下一轮的方面块里披露;同一份载荷里其它合法的
           方面照常落账,而**这一轮的检索动作照常执行**(调用方不再折叠整轮)。
           一次自评笔误不该吞掉一次已经通过全部参数校验的检索。
+
+        ⚠ **组内条数不再与方面总数比**(T-BF7 评审 P1)。那条判据原来落在
+        `_plan_row` 之前,于是下面那句"完全相同的重复项确定性去重"在结构上根本
+        走不到——重复项天然多占一行。规划之后再看已经没有比的必要:`planned` 按
+        `aspect_id` 归并、id 必须是本账本的,落账候选数恒不超过方面总数。
 
         同一个方面的**完全相同**重复项确定性去重(判据见 `_Update.content`),
         **冲突**的重复项按 `duplicate_aspect` 拒掉这个方面并保留旧状态——不取
@@ -604,7 +612,9 @@ class AspectLedger:
                 continue
             if not isinstance(rows, (list, tuple)):
                 return AssessmentOutcome(error=f"{group}_not_list")
-            if len(rows) > len(self._records):
+            if len(rows) > _group_row_cap(len(self._records)):
+                # **只防超大载荷**,不再拿行数与方面数比(评审 P1)。理由见
+                # `_group_row_cap`。
                 return AssessmentOutcome(error=f"{group}_overflow")
             for row in rows:
                 aspect_id, update, why = self._plan_row(
@@ -643,7 +653,16 @@ class AspectLedger:
         self, planned: "Dict[str, _Update]", rejected: "Dict[str, str]",
         unknown: int,
     ) -> AssessmentOutcome:
-        """把规划结果一次性写进账本。**整份形状错误永远走不到这里。**"""
+        """把规划结果一次性写进账本。**整份形状错误永远走不到这里。**
+
+        ⚠ 判据是 `planned`,**不是**"这一轮有没有行"。追问那两格问的是「模型有没有
+        真的交上一份自评」,而一份逐方面全被拒的载荷一格都没落账——它与沉默在账本
+        上的读数逐字相同。改成 `if planned or rejected or unknown` 会让一次全拒的
+        载荷把 `nudge_pending` 清掉(那一句本该在下一轮渲染给模型),并把
+        `nudge_answered` 置上——于是之后一轮降级时 `restore_pending_nudge` 认定
+        「模型早就照办了」,不再重新置位一句谁都没看见的追问。收尾那道闸另有判据
+        (`_absorb_assessment` 传下去的 `accepted`),两处同向、各挡一半。
+        """
         if planned:
             self.nudge_pending = False
             self.nudge_answered = True
@@ -671,6 +690,13 @@ class AspectLedger:
         原因码非空时更新为 `None`;它属于 `ASPECT_REJECTION_REASONS` ⇒ 只拒这
         一个方面,否则 ⇒ 整份载荷不成立。`aspect_id` 只在它真是本账本的 id 时
         非空(未知 id 那一格恒为空串,理由见 `AssessmentOutcome.rejections`)。
+
+        ⚠ **读出 `aspect_id` 之后的每一条错误都是逐方面的**(T-BF7 评审 F3)。
+        字段类型/取值不合协议(`evidence_keys` 不是列表、键不是字符串、`gap` 不是
+        字符串、`status` 不在闭集)讲的都是**这一行**的事,而这一行归属哪个方面
+        已经确定;把它们留在整份那一族,等于让一个写错了 `status` 的方面继续吞掉
+        同一轮里另外几个合法方面的判断与那次真实的检索动作。整份那一族因此只剩
+        「读不出归属」的两条:载荷不是对象、这一行不是对象。
         """
         if not isinstance(row, Mapping):
             return "", None, "item_not_object"
@@ -682,18 +708,18 @@ class AspectLedger:
         if raw_keys is None:
             raw_keys = ()
         if not isinstance(raw_keys, (list, tuple)):
-            return "", None, "evidence_keys_not_list"
+            return aspect_id, None, "evidence_keys_not_list"
         if len(raw_keys) > REFLECT_ASPECT_MAX_EVIDENCE_KEYS:
             # 按方面拒绝、并如实披露稳定原因(§6)。**绝不截成前 8 个**:截断会
             # 把一份"我引了 12 条"的判断悄悄变成一份服务端替它挑过的"已充分"。
             return aspect_id, None, "evidence_keys_overflow"
         if any(not isinstance(key, str) for key in raw_keys):
-            return "", None, "evidence_key_not_string"
+            return aspect_id, None, "evidence_key_not_string"
         gap = row.get("gap", "")
         if gap is None:
             gap = ""
         if not isinstance(gap, str):
-            return "", None, "gap_not_string"
+            return aspect_id, None, "gap_not_string"
         if len(gap) > REFLECT_ASPECT_GAP_MAX_CHARS:
             return aspect_id, None, "gap_overflow"
         status = ASPECT_SUPPORTED
@@ -702,7 +728,7 @@ class AspectLedger:
             if status is None or status == "":
                 status = ASPECT_PARTIAL
             if not isinstance(status, str) or status not in statuses:
-                return "", None, "invalid_status"
+                return aspect_id, None, "invalid_status"
         keys, demotion = _legal_keys(raw_keys, allowed_keys)
         if status == ASPECT_SUPPORTED and demotion:
             # 非法键剔除后没有支撑的项**不得保持 supported**(§7.1)。降到哪一档
@@ -717,6 +743,30 @@ class AspectLedger:
             record=self._by_id[aspect_id], status=status, keys=keys,
             gap=_clip(gap, REFLECT_ASPECT_GAP_MAX_CHARS),
             demotion=demotion), ""
+
+
+#: 一组自评的行数相对方面数的倍率,与它并行的绝对行数上限。两者取**较小**的那
+#: 一个当上限:方面少的时候按倍率收紧(1 个方面不该收到 20 行),方面多的时候
+#: 由绝对值兜住(16 个方面 × 4 = 64 恰好压在绝对值上)。
+_GROUP_ROWS_FACTOR = 4
+_GROUP_ROWS_HARD_MAX = 64
+
+
+def _group_row_cap(aspect_count: int) -> int:
+    """一组(`supported`/`unresolved`)最多允许几行。超出 ⇒ 整份 `<group>_overflow`。
+
+    ⚠ **这条上限只防超大载荷,不再是"行数不许超过方面数"**(T-BF7 评审 P1)。
+    原来的判据 `len(rows) > len(self._records)` 落在 `_plan_row` **之前**,于是
+    「同一个方面完全相同的重复项确定性去重」这条 §6 要求在结构上不可能兑现:
+    重复项天然多占一行,一个单方面的账收到两条逐字相同的 supported 就整份作废,
+    连同那一轮已经通过全部参数校验的检索动作一起。判据挪到规划之后就自然消失
+    ——`planned` 按 `aspect_id` 归并、id 必须是本账本的,所以落账候选数**恒**
+    不超过方面总数;真正会重复的那一族由 `duplicate_aspect`(冲突)与
+    `_Update.content` 去重(完全相同)各自处理,一格都不多占。
+    留下来的只是一道"这份载荷大得不像一次自评"的闸:它不表达任何语义判断,只
+    避免服务端为一份几万行的数组白跑一遍规划。
+    """
+    return min(aspect_count * _GROUP_ROWS_FACTOR, _GROUP_ROWS_HARD_MAX)
 
 
 def _mark_rejected(
@@ -761,10 +811,12 @@ def assessment_is_empty(assessment: object) -> bool:
     `{"supported": [], "unresolved": []}`。协议上它们都说"我这一轮没有新判断",
     而收尾那一轮不允许没有判断(见 `note_missing_assessment`)。
 
-    刻意**不看内容合法性**:一份带了行但越界的载荷由 `apply` 判(整份形状不成立
-    就折成 `invalid_assessment:<why>`,单个方面越界就只拒那一个方面),两条路各
-    说各的——把"给了但不合法"也算成"没给",模型会收到一句要它填它其实已经填了
-    的东西的追问。
+    刻意**不看内容合法性**:这个纯函数只回答"载荷里有没有行",合法性由 `apply`
+    判(整份形状不成立就折成 `invalid_assessment:<why>`,单个方面越界就只拒那一
+    个方面)。收尾轮的「必须自评」闸要的是两者的**合取结果**——「这一轮实际落账
+    为空」——所以调用方(`_nudge_missing_assessment`)把这个判据与 `apply` 返回的
+    `accepted` 并起来看,而不是在这里偷偷把"给了但不合法"改写成"没给":那样一份
+    只错了一个方面、另外几个方面照常落账的自评也会收到一句要它重填的追问。
 
     非 Mapping(模型回了个列表/字符串)也算空:`apply` 对它返回 `not_object`,
     但那条路只在字段存在时才走到;这里只回答"有没有表态",答案同样是没有。

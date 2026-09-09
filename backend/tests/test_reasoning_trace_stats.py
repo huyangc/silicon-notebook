@@ -11,6 +11,7 @@ import pytest
 
 from app.core.ask_retrieval_policy import ASK_RETRIEVAL_LIMITS
 from app.domain.reasoning_trace_stats import (
+    ASSESSMENT_REJECTION_REASONS,
     RUN_PROJECTION_KEYS,
     TERMINATION_MODEL_DEGRADED,
     TERMINATION_MODEL_END,
@@ -320,29 +321,58 @@ def test_v2_synthesis_keys_are_projected():
 
 
 def test_assessment_rejections_counts_aspects_not_voided_turns():
-    """`assessment_rejections` 只数**逐方面**被拒的那一族(T-BF7)。
+    """`assessment_rejections` 只数**逐方面**被拒的那一族(T-BF7),按 `count` 累加。
 
-    ⚠ 它与 `skip_reasons` 有意重叠:同一条逐方面拒绝在两处各记一次。两列合起来
-    才分得开「拒了几个方面」与「整轮作废了几次」——后者 = `skip_reasons` 里全部
-    `invalid_assessment:*` 之和 − 这一列。**不要把两列相加。**
+    ⚠ 两列数的东西不同,**不要相加**:逐方面拒绝每轮只记一条 skip 步(条数在
+    detail 的 `count` 里),所以 `skip_reasons` 那几项数的是**轮**,这一列数的是
+    **方面**;因为自评而整轮作废了几次 = 全部 `invalid_assessment:*` 之和 − 逐方面
+    那几项之和。
 
-    变异:把整份形状那一族也计进来 ⇒ 这条红(会数成 3)。
+    变异:把整份形状那一族也计进来 ⇒ 这条红;`_rejection_count` 改回恒 1
+    ⇒ 也红(会数成 2)。
     """
     steps = [
-        step("skip", {"reason": "invalid_assessment:unknown_aspect"}),
+        step("skip", {"reason": "invalid_assessment:unknown_aspect",
+                      "rejections": {"unknown_aspect": 1}, "count": 1,
+                      "aspect_ids": []}),
         step("skip", {"reason": "invalid_assessment:gap_overflow",
-                      "aspect_id": "a2"}),
+                      "rejections": {"gap_overflow": 2, "invalid_status": 1},
+                      "count": 3, "aspect_ids": ["a2", "a3", "a4"]}),
         # 整份形状不成立 ⇒ 那一轮真的整轮作废,不计进这一列。
         step("skip", {"reason": "invalid_assessment:item_not_object"}),
         step("synthesis", {"termination_reason": "model_partial"}),
     ]
     row = project_run(JOB, steps, PAYLOAD)
     assert row["policy_version"] == "v2"
-    assert row["assessment_rejections"] == 2
+    assert row["assessment_rejections"] == 4        # 1 + 3 个方面
+    per_aspect_turns = sum(
+        count for reason, count in row["skip_reasons"].items()
+        if reason in ASSESSMENT_REJECTION_REASONS)
+    assert per_aspect_turns == 2                    # 逐方面拒过 2 轮
     assert sum(
         count for reason, count in row["skip_reasons"].items()
         if reason.startswith("invalid_assessment:")
-    ) - row["assessment_rejections"] == 1        # 整轮作废了 1 次
+    ) - per_aspect_turns == 1                       # 整轮作废了 1 次
+
+
+def test_assessment_rejections_reads_pre_merge_traces_as_one_aspect_each():
+    """T-BF7 与「每轮一条」之间落盘的旧轨迹(无 `count`)按一条一个方面计。
+
+    那时确实是「一个方面一条 skip」,所以按 1 计恰好等价——旧数据不必重投影就能
+    和新数据摆在同一列里读。
+
+    ⚠ 但 `skip_reasons` 那一列不等价:旧轨迹里它数的是方面,新轨迹里数的是轮。
+    A/B 取样不得跨越这次改动的日期(已登记进 `fangan_todo.md`)。
+
+    变异:`_rejection_count` 对缺席的 `count` 返回 0 ⇒ 这条红。
+    """
+    steps = [
+        step("skip", {"reason": "invalid_assessment:unknown_aspect"}),
+        step("skip", {"reason": "invalid_assessment:gap_overflow",
+                      "aspect_id": "a2"}),
+        step("synthesis", {"termination_reason": "model_partial"}),
+    ]
+    assert project_run(JOB, steps, PAYLOAD)["assessment_rejections"] == 2
 
 
 def test_assessment_rejections_is_unknown_on_a_legacy_run():

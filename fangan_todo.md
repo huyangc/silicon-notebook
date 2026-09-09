@@ -134,6 +134,15 @@
       * **`invalid_tool_calls` 是臂不对称量**：它按子串吃 T0 的 `skip_reasons`，而
         `unavailable_action:*` / `invalid_assessment:*` 这两类原因码是 v2 独有的。首份
         报告必须写明这一列不能直接做臂间差值。
+      * **`invalid_assessment:*` 的语义在 2026-09-09（T-BF7 及其评审修复）前后变过两次，
+        旧数据重投影也补不回来，A/B 与 T0 取样不得跨越这个日期**：(1) T-BF7 之前它一律
+        表示「整轮作废、工具一次都没打出去」，之后逐方面被拒的那一族表示「工具照常执行了，
+        只是一条自评没被采纳」；(2) T-BF7 评审修复之前逐方面拒绝是**一个方面一条** skip 步，
+        之后是**一轮一条**（条数在那条步 detail 的 `count` 里）。因此 `skip_reasons` 里这
+        几项在三段数据上分别数的是「作废的轮」「被拒的方面」「被拒过的轮」，量纲都不同。
+        `assessment_rejections` 按 `count` 累加，在后两段之间可比（旧行无 `count` 按 1 计
+        恰好等价），但在 T-BF7 之前这一列根本不存在。重投影只能重算，改不了轨迹里当初
+        记了几条 skip 步，所以跨段的对照只能**分批**做，不能靠归一。
       * **`model_contract` 短码缺 `prompt_version`**：仓库里没有这个常量，短码由
         provider/model/fingerprint/top_p/thinking_mode 压成。它是「跨批次混用当场可见」
         的辅助信号、不是判据，等真有 prompt 版本号了再补。

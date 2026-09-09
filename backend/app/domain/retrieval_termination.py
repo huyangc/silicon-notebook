@@ -87,17 +87,26 @@ REFLECT_ASPECT_MAX_EVIDENCE_KEYS = 8
 REFLECT_ASPECT_GAP_MAX_CHARS = 240
 
 #: 一条 assessment **逐方面**被拒时的稳定原因码(闭集,§6「动作与 assessment
-#: 独立校验」)。这四条都只说明「**这一个方面**的这次更新不成立」:模型写了一个
+#: 独立校验」)。每一条都只说明「**这一个方面**的这次更新不成立」:模型写了一个
 #: 不在清单里的 id、同一个方面给了互相冲突的两条判断、某个方面的证据键或 gap
-#: 超过协议上限。它们**不作废同一轮里其它合法的方面更新,更不作废那一轮真实的
-#: 检索动作**——一次自评笔误吞掉一次已经通过全部参数校验的检索,正是生产 68 个
+#: 超过协议上限、某个方面那一行的 `evidence_keys`/`gap`/`status` 字段类型或取值
+#: 不合协议。它们**不作废同一轮里其它合法的方面更新,更不作废那一轮真实的检索
+#: 动作**——一次自评笔误吞掉一次已经通过全部参数校验的检索,正是生产 68 个
 #: v2 run 里 17 轮(每轮约 40 秒)白烧的根因。
 #:
-#: 闭集之外的原因码(`not_object` / `<group>_not_list` / `<group>_overflow` /
-#: `item_not_object` / `evidence_keys_not_list` / `evidence_key_not_string` /
-#: `gap_not_string` / `invalid_status`)说的是**整份载荷的形状**不成立,按原样
-#: 整轮拒绝:那种载荷里"模型到底怎么判的"没有可明确解释的读法,而 §6 只要求
-#: 接受"可明确解释的有效方面更新"。
+#: ⚠ **后四条原来在整份那一族**(评审 F3)。它们都是**某一行的字段**错误,而那
+#: 一行自报的 `aspect_id` 已经确定是本账本里的哪一个方面——「这一个方面这次没被
+#: 采纳」因此有可明确解释的读法,另外几个方面的判断以及那一轮真实的检索动作与
+#: 它无关。留在整份那一族等于让一个写错了 `status` 的方面继续吞掉整轮,而 §6 要
+#: 的正是相反的东西。行本身**不是对象**(`item_not_object`)时读不出 `aspect_id`,
+#: 所以那一条仍然整份拒绝。
+#:
+#: 闭集之外的原因码(`not_object` / `<group>_not_list` / `item_not_object` /
+#: `<group>_overflow`)说的是**整份载荷的形状**不成立,按原样整轮拒绝:那种载荷
+#: 里"模型到底怎么判的"没有可明确解释的读法,而 §6 只要求接受"可明确解释的有效
+#: 方面更新"。`<group>_overflow` 自 T-BF7 评审起只剩**防超大载荷**那一档
+#: (见 `reasoning_aspects._group_row_cap`),行数与方面数的比对已经由逐方面
+#: 去重/冲突判据取代。
 #:
 #: 三个消费者共用这一份闭集(所以它住在两边都 import 得到的 domain 层):
 #: `services.reasoning_aspects` 产生它,`services.reasoning_observation` 据它
@@ -106,6 +115,8 @@ REFLECT_ASPECT_GAP_MAX_CHARS = 240
 ASPECT_REJECTION_REASONS: Tuple[str, ...] = (
     "unknown_aspect", "duplicate_aspect",
     "evidence_keys_overflow", "gap_overflow",
+    "evidence_keys_not_list", "evidence_key_not_string",
+    "gap_not_string", "invalid_status",
 )
 
 #: assessment 被拒时那条 skip 步的原因码前缀。整份形状错误(整轮 invalid)与

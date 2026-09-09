@@ -718,15 +718,18 @@ def test_reflect_v2_assessment_shape_faults_are_the_ledgers_to_reject():
     from app.services.reasoning_aspects import AspectLedger
 
     hint = prompts.reflect_v2_schema_hint(_v2_capabilities())
-    for assessment, why in (
-        ({"supported": ["a1"]}, "item_not_object"),
+    # `integral=True` ⇒ 整份折成 invalid;`False` ⇒ 逐方面拒(T-BF7 评审 F3:
+    # 那一行归属哪个方面已经确定,不该吞掉同轮的检索动作)。两族的**原因码词面
+    # 都不变**,变的只是它落在 `error` 还是 `rejections` 上。
+    for assessment, why, integral in (
+        ({"supported": ["a1"]}, "item_not_object", True),
         ({"supported": [{"aspect_id": "a1", "evidence_keys": "ko-1"}]},
-         "evidence_keys_not_list"),
+         "evidence_keys_not_list", False),
         ({"supported": [{"aspect_id": "a1", "evidence_keys": [{"k": 1}]}]},
-         "evidence_key_not_string"),
-        ({"supported": "a1"}, "supported_not_list"),
+         "evidence_key_not_string", False),
+        ({"supported": "a1"}, "supported_not_list", True),
         ({"unresolved": [{"aspect_id": "a1", "status": "definitely-not"}]},
-         "invalid_status"),
+         "invalid_status", False),
     ):
         payload = json.dumps({
             "next_action": "answer", "sufficient": False, "arguments": {},
@@ -742,7 +745,11 @@ def test_reflect_v2_assessment_shape_faults_are_the_ledgers_to_reject():
         # 拒绝发生在这里,而且带稳定原因码。
         ledger = AspectLedger(["问题一"], source="intent_topics")
         outcome = ledger.apply(assessment, allowed_keys=set())
-        assert outcome.error == why, assessment
+        if integral:
+            assert outcome.error == why, assessment
+        else:
+            assert (outcome.error, [row[1] for row in outcome.rejections]) == (
+                "", [why]), assessment
 
 
 def test_reflect_v2_assessment_is_an_open_object_and_legacy_is_untouched():

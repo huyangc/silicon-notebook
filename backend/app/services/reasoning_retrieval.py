@@ -491,8 +491,10 @@ _V2_MODEL_DEGRADED_PREFIX = "model_degraded:"
 _REFLECT_INVALID_SKIP_SUMMARY = "未执行任何检索"
 
 #: 逐方面被拒的自评在 skip 步上屏的短文案。刻意**不说**"未执行任何检索"——同一
-#: 轮那个动作真的执行了,它自己另有一步;这里被跳过的只是那一条自评。
-_ASSESSMENT_REJECTED_SKIP_SUMMARY = "未采纳一条方面自评（本轮动作照常执行）"
+#: 轮那个动作真的执行了,它自己另有一步;这里被跳过的只是那几条自评。
+#: 一轮合并成一条(见 `_note_assessment_rejections`),所以条数写进文案:少了它,
+#: 「一个方面写错」与「16 个方面全写错」在上屏那行完全同形。
+_ASSESSMENT_REJECTED_SKIP_SUMMARY = "未采纳 {count} 条方面自评（本轮动作照常执行）"
 
 
 class _V2ArgumentError(Exception):
@@ -3973,6 +3975,11 @@ class ReasoningRetriever:
           生产 68 个 v2 run 里 17 轮整轮作废(每轮约 40 秒)全部来自这一族:模型
           的动作参数已经通过了全部校验,吞掉它的是它自己写的一句自评。
 
+        ⚠ **逐方面全被拒的收尾轮不算"已自评"**(评审 P1):`outcome.accepted` 传给
+        `_nudge_missing_assessment`,空元组与空载荷在那里是同一件事,照走既有的
+        追问路径。否则一份"行很多、一格没落账"的收尾会当场结束 run,连同那几条
+        被拒的披露一起消失(它们要到下一轮的方面块才渲染)。
+
         **一份 invalid 决定的 assessment 不被吸收**:`_reflect_invalid` 产出的
         决定上根本没有这个字段。这是刻意的——整份载荷已经被判不成立,再采纳它的
         另一半就是"接受半个决定",而模型下一轮看到的方面状态会来自一轮它自己都
@@ -4007,7 +4014,10 @@ class ReasoningRetriever:
         if not outcome.error:
             # 逐方面被拒的那几条:合法动作照常执行,只记披露与 skip 步。
             self._note_assessment_rejections(state, outcome.rejections)
-            return self._nudge_missing_assessment(state, decision, *nudge_args)
+            # `accepted` 传下去:收尾轮的判据是「这一轮**实际落账**为空」,不是
+            # 「载荷里有没有行」(评审 P1,见 `_nudge_missing_assessment`)。
+            return self._nudge_missing_assessment(
+                state, decision, *nudge_args, accepted=outcome.accepted)
         folded = _reflect_invalid(
             f"{_V2_INVALID_ASSESSMENT_PREFIX}{outcome.error}",
             decision.invalid_requested_action or decision.next_action)
@@ -4021,33 +4031,59 @@ class ReasoningRetriever:
     def _note_assessment_rejections(
         self, state: "_ReasoningRunState", rejections,
     ) -> None:
-        """逐方面被拒的自评 → 每条一步零 I/O 的 `skip`(v2-only)。
+        """逐方面被拒的自评 → **每轮一条**零 I/O 的 `skip`(v2-only)。
 
-        **一个方面一条**,原因码词面与整轮作废那一族逐字相同
+        ⚠ **一轮一条,不是一个方面一条**(T-BF7 评审 P2)。协议上限允许一份自评
+        带 16 个方面,一次形状笔误(比如整份都把 `evidence_keys` 写成字符串)因此
+        能在一轮里造出 16 条逐字相同的 skip 步——轨迹上出现一片重复行,观察账的
+        近 N 行窗口被它挤空,而它们表达的是同一件事:这一轮的自评没被采纳。合并
+        之后信息一条不少:`rejections` 是「原因码 → 条数」,`count` 是总条数,
+        `aspect_ids` 是本账本里受影响的那几个 id。
+
+        `reason` 取**第一条**被拒的原因码(主因),词面与整轮作废那一族逐字相同
         (`invalid_assessment:<why>`):放量评估按原因码统计,换一套新词面等于让
-        T-BF7 之前的数据与之后的数据对不上。两者仍然分得开——后缀属不属于
-        `ASPECT_REJECTION_REASONS` 就是判据,投影的 `assessment_rejections` 正是
-        据它只数「拒了几个方面」。
+        T-BF7 之前的数据与之后的数据对不上。取第一条而不是取众数,与
+        `_mark_rejected` 只记第一个原因码同源——要的是一个稳定的、与它第一次出
+        问题同源的码。两族仍然分得开:后缀属不属于 `ASPECT_REJECTION_REASONS`
+        就是判据。
+
+        `skip_reasons` 的口径因此从「拒了几个方面」变成「**有几轮**的自评被逐方面
+        拒过」,而「拒了几个方面」由投影键 `assessment_rejections` 按 `count` 累加
+        (见 `reasoning_trace_stats._assessment_rejections`)。
 
         这条 skip **不产生动作观察**(见 `reasoning_observation
         .NON_ACTION_ASSESSMENT_SKIP_REASONS`):同一轮那个动作真的执行了,它自己
         另有一行;两行都记的话,同一次请求会在观察账上出现两遍。
 
-        `aspect_id` 只写本账本自己的 id,未知 id 那一格是空串——那串是模型的
-        自由文本,服务端的轨迹里不留它(`AssessmentOutcome.rejections` 同款口径)。
-        排队记账的理由见 `_TraceRecorder.defer`。
+        `aspect_ids` 只写本账本自己的 id,而且**不为未知 id 留空位**——那串是模型
+        的自由文本,服务端的轨迹里一个字都不留(`AssessmentOutcome.rejections`
+        同款口径);未知 id 的条数照样在 `rejections["unknown_aspect"]` 与 `count`
+        里数得出来。排队记账的理由见 `_TraceRecorder.defer`。
         """
+        if not rejections:
+            return
+        counts: Dict[str, int] = {}
+        aspect_ids: List[str] = []
         for aspect_id, why in rejections:
-            state.record.defer(TraceStep(
-                step_type="skip",
-                summary=_ASSESSMENT_REJECTED_SKIP_SUMMARY,
-                detail={"reason": f"{_V2_INVALID_ASSESSMENT_PREFIX}{why}",
-                        "aspect_id": aspect_id}))
+            counts[why] = counts.get(why, 0) + 1
+            if aspect_id and aspect_id not in aspect_ids:
+                aspect_ids.append(aspect_id)
+        state.record.defer(TraceStep(
+            step_type="skip",
+            summary=_ASSESSMENT_REJECTED_SKIP_SUMMARY.format(
+                count=len(rejections)),
+            detail={
+                "reason": f"{_V2_INVALID_ASSESSMENT_PREFIX}{rejections[0][1]}",
+                "rejections": counts,
+                "count": len(rejections),
+                "aspect_ids": aspect_ids,
+            }))
 
     def _nudge_missing_assessment(
         self, state: "_ReasoningRunState", decision: "ReflectDecision",
         apply_outline=None, overflow_repair: bool = False,
         more_turns: bool = True, outline_left: Optional[int] = None,
+        accepted: "Optional[Tuple[str, ...]]" = None,
     ) -> "ReflectDecision":
         """收尾载荷没有自评任何方面 ⇒ 退回一次并追问(§7.1)。v2-only。
 
@@ -4058,6 +4094,17 @@ class ReasoningRetriever:
         服务端的清单上全是 unknown),`classify_termination` 据后者判 `model_partial`,
         合成 prompt 恒挂一句「仍有方面没有完整支撑」。2026-09-08 实测里 16 个 run
         全部落在这个形状上,14 个的直接原因就是这一格空着。
+
+        ⚠ **「没有自评」的判据是「这一轮实际落账为空」,不是「载荷里有没有行」**
+        (T-BF7 评审 P1)。逐方面解耦之后,一份收尾载荷可以带着满满几行自评而
+        **一格都没落账**——每一行都被逐方面拒了(未知 id、写错 `status`、证据键
+        超限……)。此时账本的读数与彻底沉默逐字相同,而按"有行"过闸的话 run 当场
+        收尾:追问没了,那几条被拒的披露也永远等不到下一轮渲染,模型连"我哪里写
+        错了"都不知道。所以调用方(`_absorb_assessment`)把 `apply` 返回的
+        `accepted` 传下来,空元组与空载荷在这里是同一件事,共用既有的追问路径
+        (追问仍然只发一次,`REFLECT_ASSESSMENT_MAX_PROMPTS` 一个字没改)。
+        `accepted is None` = 调用方没说(`assessment` 缺省那条路,以及直调这个方法
+        的测试),行为与加这一条之前完全一致。
 
         判据**不能**只认 `answer`:`update_outline`(以及别的不产证据的动作)与
         `sufficient=true` 并存是合法的——prompt 教的正是"最后一批绑定补上、同一轮
@@ -4107,7 +4154,8 @@ class ReasoningRetriever:
         下一轮补上自评之后,那一轮的收尾照常可以安排纠错轮。
         """
         closing = decision.next_action == "answer" or decision.sufficient is True
-        if not closing or not assessment_is_empty(decision.assessment):
+        if not closing or not (
+                accepted == () or assessment_is_empty(decision.assessment)):
             return decision
         if (decision.next_action == OUTLINE_ACTION
                 and outline_left is not None and outline_left <= 1):
