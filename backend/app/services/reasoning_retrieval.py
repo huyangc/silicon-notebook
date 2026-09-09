@@ -45,7 +45,8 @@ from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancel
 from app.services.citation_markers import LOOSE_MARKER_RE
 from app.services.model_work import MalformedModelResponse
 from app.services.collection_catalog import (
-    ENUMERABLE_ELEMENT_KINDS, ENUMERABLE_KG_OBJECT_TYPES,
+    ENUMERABLE_ELEMENT_KINDS, ENUMERABLE_KG_OBJECT_TYPES, CollectionMap,
+    render_collection_map,
 )
 from app.services.collection_enumeration import (
     LOCAL_ONLY_SCOPE_SUFFIX, TRUNCATED_CONCURRENT_CHANGE, EnumerationBudget,
@@ -1186,6 +1187,35 @@ def _collection_label(collection: str, kind: str) -> str:
 # 计数查询),这个后缀是纯算术,每轮现拼。
 def _allowance_suffix(rows_left: int) -> str:
     return f" | listing allowance left: {max(0, int(rows_left))} rows"
+
+
+#: 「这份来源目录大到翻页没有意义」的倍数。生产上 48 839 篇 / 本轮 300 行额度的
+#: run 里,模型一次动作就把整 run 的行池吃光,换回 300 条无序前缀、`complete=False`
+#: 与一个再也用不上的游标——三个池全空之后什么都做不了。4 是**常量而不是配置项**
+#: (计划 §7 拍板 2):它不是一个要按部署调的阈值,而是「一页 50 行的清单最多值得
+#: 翻到额度用尽」这句话的算术形式——total 已经超过整轮额度的 4 倍时,把额度花光也
+#: 只能看到不足四分之一,那不是一份目录,是一段随机前缀。
+OVERSIZE_SOURCE_LISTING_FACTOR = 4
+
+
+def oversize_source_listing(
+    map_sources: Optional[int], rows_left: int,
+    factor: int = OVERSIZE_SOURCE_LISTING_FACTOR,
+) -> bool:
+    """这一次来源枚举该不该只取一页样本?纯函数、零 I/O。
+
+    `map_sources` 是**集合地图已经算过的那个数**(`CollectionMap.sources`,即
+    prompt 里 `sources: N (current notebook: M)` 的 N),不是这里再查一次库得来
+    的:守卫的全部成本必须是这一次比较。地图建不出来(fail-open)时它是 `None`
+    —— 判据是「已知远超额度」,不是「不知道有多大」,所以 `None` 一律不触发:
+    宁可照旧翻页,也不要凭猜测把一份本来能列全的目录砍成样本。
+
+    `rows_left` ≤ 0 同样不触发:那是「预算耗尽」,由调用方的 skip 分支处理,
+    在这里返回 True 会把它变成一次 `max_rows=0` 的非法预算构造。
+    """
+    if map_sources is None or rows_left < 1:
+        return False
+    return int(map_sources) > rows_left * max(1, int(factor))
 
 
 def _enumeration_step_summary(label: str, coverage, source_id: str, *,
@@ -2982,6 +3012,14 @@ class _ReasoningRunState:
     # —— 以下字段由首轮的某个阶段产出,构造时留空 ——
     # `_first_round_prompt_blocks` 写:Agent 库理解块与它的原始行(后者供
     # consult_memory 复用),部署级打法块与它渲染前的选中集。
+    # `_first_round_prompt_blocks` 写:集合地图渲染成 prompt 行**之前**的那个
+    # 对象。同一次构建的产物,不是第二次查询——`collection_map_text` 以前把它
+    # 渲染完就丢了,于是「本轮范围里有多少篇文档」这个已经算出来的数在执行层
+    # 只剩一句人读的英文。规模守卫(`oversize_source_listing`)要的就是它。
+    #
+    # 带默认值、留空即中性:地图没建(枚举关闭态、或构建失败的 fail-open 分支)
+    # 时恒为 None,守卫恒不触发,`_new_run_state` 因此一行都不用改。
+    collection_map: Optional[CollectionMap] = None
     profile_block: str = ""
     profile_raw_blocks: List = field(default_factory=list)
     experience_block: str = ""
@@ -5018,19 +5056,30 @@ class ReasoningRetriever:
         # 字符串既进规划上下文、又进每一轮 reflect 的候选摘要尾部。
         # fail-open:地图建不出来时照常检索作答——它只是让模型「知道有多少」,
         # 不是任何一条证据的前提。记一条 skip 是为了别把这次失败吞得无影无踪。
+        #
+        # 先取**对象**再渲染,而不是调 `collection_map_text`(它就是这两步的
+        # 合成):同一次构建、同一批查询、同一个字符串,只是不再把对象丢掉。
+        # 「本轮范围里有多少篇文档」这个数是规模守卫的唯一输入,不留下对象就
+        # 只能在执行层再查一次库(见 `oversize_source_listing`)。
+        collection_map = state.collection_map
         if enumeration_active:
             try:
-                collection_map_text = (
-                    self.collection_catalog.collection_map_text(notebook_id)
+                collection_map = (
+                    self.collection_catalog.collection_map(notebook_id)
                 )
+                collection_map_text = render_collection_map(collection_map)
             except AskCancelled:
                 raise
             except Exception as exc:  # noqa: BLE001 — 见上:地图不是必需品
+                # 对象与文本一起回到「没有地图」:半份地图(有对象没文本,或
+                # 反过来)会让 prompt 与守卫看到两个不同的世界。
+                collection_map = None
                 record(TraceStep(
                     step_type="skip",
                     summary="跳过内容清点(暂时读不到各类条目数量)",
                     detail={"reason": "collection_map_unavailable",
                             "error": str(exc)[:120]}))
+        state.collection_map = collection_map
         state.profile_block = profile_block
         state.profile_raw_blocks = profile_raw_blocks
         state.experience_block = experience_block
@@ -5999,6 +6048,42 @@ class ReasoningRetriever:
         # 反复请求同一已访问节点 / 反复 search_elements, 这里强制收尾, 不空转到上限。
         state.stale = 1 if state.no_progress else 0
 
+    def _enum_budget(
+        self, state: "_ReasoningRunState", *, is_sources: bool,
+        local_only: bool, rows_left: int, pages_left: int, payload_left: int,
+    ) -> EnumerationBudget:
+        """本次枚举动作的四道天花板,含**目录规模守卫**(计划 T-BF1)。
+
+        守卫只改一个数:一份远大于本轮额度的来源目录,`max_rows` 从「整轮剩余
+        行池」降到「一页」。它不改范围、不拒绝动作、不换集合——模型请求的仍然是
+        那份目录,拿到的仍然是那份目录的开头,只是没有把整轮额度押在一段无序前
+        缀上。生产上 48 839 篇的库正是这样一次动作吃光 300 行,后面三个池全空、
+        每个后续枚举都只能记 `enumeration_budget` skip。
+
+        四个条件缺一不可:
+        * `collection=="sources"` —— 另两个集合的分母是 kind/object_type 的计数,
+          地图里的 `sources` 说明不了它们;
+        * `scope==all`(即 `local_only` 为假)—— 守卫的分母是地图的联邦总数,
+          `current_notebook` 那一档对应的是括号里的另一个数;
+        * 地图给出的总数**已知**且远超额度(见 `oversize_source_listing`);
+        * `reflect_v2_active()` —— 关闭态逐字节不变是本次的硬约束,legacy 的
+          规模提示写在它自己的 prompt 里,行为一个字都不动。
+        """
+        enum_limits = state.enum_limits
+        oversize = (
+            is_sources and not local_only and self.reflect_v2_active()
+            and oversize_source_listing(
+                getattr(state.collection_map, "sources", None), rows_left)
+        )
+        return EnumerationBudget(
+            page_size=enum_limits.enum_page_size,
+            max_rows=(min(rows_left, enum_limits.enum_page_size)
+                      if oversize else rows_left),
+            max_pages=pages_left,
+            max_payload_chars=payload_left,
+            excerpt_chars=enum_limits.cell_excerpt_chars,
+        )
+
     def _run_enumeration(
         self, state: "_ReasoningRunState", decision: "ReflectDecision",
     ) -> None:
@@ -6165,13 +6250,10 @@ class ReasoningRetriever:
                 # EnumerationBudget 直接 ValueError,而这个异常一旦穿出 run()
                 # 就会被 ask_service 的 broad except 吞成「整轮检索失败」——
                 # 用户看到的是「依据不足」,而不是「这一个动作没跑」。
-                budget = EnumerationBudget(
-                    page_size=enum_limits.enum_page_size,
-                    max_rows=rows_left,
-                    max_pages=pages_left,
-                    max_payload_chars=payload_left,
-                    excerpt_chars=enum_limits.cell_excerpt_chars,
-                )
+                budget = self._enum_budget(
+                    state, is_sources=is_sources, local_only=local_only,
+                    rows_left=rows_left, pages_left=pages_left,
+                    payload_left=payload_left)
                 if is_elements:
                     listed = self.collection_enumeration.enumerate_elements(
                         notebook_id, kind, source_id=source_id,

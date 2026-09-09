@@ -1252,9 +1252,12 @@ def test_collection_map_is_built_once_and_injected_into_plan_and_reflect(repo):
         def __getattr__(self, name):
             return getattr(real, name)
 
-        def collection_map_text(self, notebook_id):
+        # 钩的是**对象**那一步:首轮先取 `CollectionMap` 再渲染(规模守卫要那个
+        # 对象),`collection_map_text` 从此不在 run 的路径上。计数语义没变——
+        # 每 run 只构建一次地图,构建就是这一次调用。
+        def collection_map(self, notebook_id):
             builds.append(notebook_id)
-            return real.collection_map_text(notebook_id)
+            return real.collection_map(notebook_id)
 
     retriever.collection_catalog = _CountingCatalog()
     result = retriever.run(notebook.id, "哪些公式", "", limits=limits)
@@ -1297,7 +1300,7 @@ def test_collection_map_failure_is_fail_open(repo):
     retriever, limits = _retriever(repo, llm)
 
     class _BrokenCatalog:
-        def collection_map_text(self, notebook_id):
+        def collection_map(self, notebook_id):
             raise RuntimeError("counting is down")
 
     retriever.collection_catalog = _BrokenCatalog()
@@ -2320,3 +2323,229 @@ def test_a_collection_key_is_never_counted_as_an_undelivered_evidence_key(repo):
     assert delivery.undelivered == ()
     assert delivery.synthesis_admitted == ()
     assert delivery.answer_cited == ()
+
+
+# ------------------------------------------------- 目录枚举规模守卫(T-BF1)
+#
+# 生产证据(GLM-5.3,2026-09-08):检索范围 48 839 篇的库里,v2 每次
+# `collection=sources` 枚举都返回 300 条(整轮行池)、`complete=False`、
+# `truncated_reason=budget`,run 终态 model_partial——一个动作把整轮额度押在一段
+# 不足总量 0.7% 的无序前缀上,之后每个枚举动作都只能记 `enumeration_budget`。
+# 守卫把这种请求降成**一页样本**:计数照报、样本照给、链照样能续,但行池留给
+# 后面的动作。它不改范围、不拒绝动作,并且只在 v2 生效(关闭态逐字节不变)。
+
+
+def _v2_enumerate_sources(reason="先看库里有哪几篇", **extra):
+    """v2 形状的来源目录动作(参数在 `arguments` 里,不是 legacy 的 `enumerate`)。"""
+    request = {"collection": "sources"}
+    request.update(extra)
+    return {"next_action": "enumerate_elements", "sufficient": False,
+            "arguments": request, "reason": reason}
+
+
+def _seed_oversize_roster(repo, count):
+    """一个有 `count` 篇文档的库(s1 带一条公式,好让元素清单也有东西可列)。"""
+    notebook = _seed(repo, formulas=1)
+    for index in range(2, count + 1):
+        _add_source_row(repo, notebook.id, f"s{index}", f"论文{index}")
+    return notebook
+
+
+def test_oversize_source_listing_is_a_pure_comparison_on_the_map_count():
+    """守卫判据本身:纯函数、零 I/O、边界是严格大于。
+
+    `None`(地图 fail-open 建不出来)与非正额度都不触发——前者是「不知道有多大」
+    而不是「已知远超额度」,后者是预算耗尽,归调用方的 skip 分支。
+
+    变异:把 `>` 放宽成 `>=` ⇒ 恰好 4 倍那一档红;把 `map_sources is None` 那半
+    去掉 ⇒ `None` 那一档抛 TypeError。
+    """
+    from app.services.reasoning_retrieval import (
+        OVERSIZE_SOURCE_LISTING_FACTOR, oversize_source_listing,
+    )
+
+    assert OVERSIZE_SOURCE_LISTING_FACTOR == 4
+    assert oversize_source_listing(48_839, 300) is True
+    assert oversize_source_listing(84, 300) is False
+    assert oversize_source_listing(1_200, 300) is False      # 恰好 4 倍不触发
+    assert oversize_source_listing(1_201, 300) is True
+    assert oversize_source_listing(None, 300) is False       # 地图没建出来
+    assert oversize_source_listing(48_839, 0) is False       # 额度已耗尽
+    assert oversize_source_listing(48_839, 100, factor=1_000) is False
+
+
+def test_an_oversize_roster_spends_one_page_not_the_whole_run_pool(repo):
+    """13 篇 / 本轮 3 行额度 / 页 2 行 ⇒ 只列 2 条,行池还剩 1 行给下一个动作。
+
+    这是生产那 8 次 run 的等比缩影(48 839 / 300 / 50)。守卫不在时第一次动作就
+    把 3 行全吃掉,紧随其后的公式清单只能记 `enumeration_budget`。
+
+    变异:去掉 `_enum_budget` 里的 `oversize` 分支(`max_rows=rows_left`)
+    ⇒ 目录返回 3 条、`enumeration_budget` 出现、只剩一份 enumerations,这条红。
+    """
+    notebook = _seed_oversize_roster(_v2(repo), 13)
+    llm = _ValidatingLLM([
+        _v2_enumerate_sources(),
+        _v2_enumerate(),                      # 行池还剩 1 行 ⇒ 这一轮必须跑得成
+        {"next_action": "answer", "sufficient": True, "arguments": {}},
+    ])
+    retriever, limits = _retriever(repo, llm, limits_overrides={
+        "enum_rows_per_run": 3, "enum_page_size": 2,
+    })
+
+    result = retriever.run(notebook.id, "库里有哪几篇", "", limits=limits)
+
+    roster = result.enumerations[0]
+    assert roster.collection == "sources"
+    assert roster.coverage.returned_total == 2       # 一页样本,不是整轮额度
+    assert roster.coverage.total == 13               # 计数照报
+    assert roster.coverage.complete is False
+    # 动作没有被拒绝、范围没有被服务端改写。
+    assert roster.local_only is False
+    assert _steps(result, "enumerate")[0].detail["collection"] == "sources"
+    # 行池没有被一次动作吃光:后面的公式清单照常列全。
+    assert "enumeration_budget" not in _skips(result)
+    assert [o.collection for o in result.enumerations] == ["sources", "elements"]
+    assert result.enumerations[1].coverage.complete is True
+
+
+def test_an_oversize_roster_stays_open_and_signs_no_completeness_key(repo):
+    """样本链是 `open`(可续)而不是 `conflict`,并且不签发 `enum:sources`。
+
+    两半都承重:守卫把 `max_rows` 降下来之后,截断仍走行池那条路——执行器照常交回
+    游标,所以第二次请求是**续跑**而不是「资料有变动,无法继续」。而没列全的目录
+    永远不签发完整性键,模型自己抄一个照样被剔除(§7.1)。
+
+    变异:让守卫把样本当成终态(不交游标)⇒ 第二轮变成 `enumeration_conflict`,
+    `returned_total` 停在 2,这条红。
+    """
+    from app.domain.retrieval_termination import (
+        DEMOTION_KEYS_REJECTED, TERMINATION_MODEL_PARTIAL,
+    )
+
+    notebook = _seed_oversize_roster(_v2(repo), 13)
+    llm = _ValidatingLLM([
+        _v2_enumerate_sources(),
+        _v2_enumerate_sources(reason="再来一页"),
+        _v2_answer_citing("enum:sources"),
+    ])
+    retriever, limits = _retriever(repo, llm, limits_overrides={
+        "enum_rows_per_run": 3, "enum_page_size": 2,
+    })
+
+    result = retriever.run(notebook.id, "库里有哪几篇", "", limits=limits)
+
+    assert len(result.enumerations) == 1             # 一条链,不是两份清单
+    assert result.enumerations[0].coverage.returned_total == 3   # 2 + 续跑的 1
+    assert result.enumerations[0].coverage.complete is False
+    assert "enumeration_conflict" not in _skips(result)
+    assert "already_enumerated" not in _skips(result)
+    # 第二轮是**续跑**,不是「本轮额度已用光」:守卫不在时第一次动作就把 3 行
+    # 吃光,第二次只能记 `enumeration_budget`。
+    assert "enumeration_budget" not in _skips(result)
+    # 键从来没有被展示给模型,模型硬引也被剔除、方面降级。
+    assert "enum:sources" not in llm.reflect_prompts[2]
+    aspect = result.termination.aspects[0]
+    assert aspect.status != "supported"
+    assert aspect.demotion == DEMOTION_KEYS_REJECTED
+    assert result.termination.reason == TERMINATION_MODEL_PARTIAL
+
+
+def test_a_roster_within_four_times_the_allowance_is_listed_as_before(repo):
+    """12 篇 / 3 行额度 = 恰好 4 倍 ⇒ 守卫不触发,行为逐字回到现状。
+
+    与上面那条只差一篇文档:守卫的边界必须落在「远大于」这一侧,不能把一份只是
+    「装不下」的目录也砍成一页——那会让每个小库都少列一半。
+
+    变异:把判据改成 `>=` ⇒ 这里返回 2 条,红。
+    """
+    notebook = _seed_oversize_roster(_v2(repo), 12)
+    llm = _ValidatingLLM([
+        _v2_enumerate_sources(),
+        {"next_action": "answer", "sufficient": True, "arguments": {}},
+    ])
+    retriever, limits = _retriever(repo, llm, limits_overrides={
+        "enum_rows_per_run": 3, "enum_page_size": 2,
+    })
+
+    result = retriever.run(notebook.id, "库里有哪几篇", "", limits=limits)
+
+    assert result.enumerations[0].coverage.returned_total == 3   # 整轮额度照花
+    assert result.enumerations[0].coverage.total == 12
+
+
+def test_a_small_library_is_listed_in_full_and_still_signs_its_key(repo):
+    """84 篇那一侧的形态:总数远小于额度 ⇒ 列全、报 complete、照常签发键。
+
+    守卫只在「已知远超额度」时改数字,小库这一路必须逐字节同现状。
+    """
+    from app.domain.retrieval_termination import TERMINATION_MODEL_SUFFICIENT
+
+    notebook = _seed_oversize_roster(_v2(repo), 4)
+    llm = _ValidatingLLM([
+        _v2_enumerate_sources(),
+        _v2_answer_citing("enum:sources"),
+    ])
+    retriever, limits = _retriever(repo, llm)
+
+    result = retriever.run(notebook.id, "库里有哪几篇", "", limits=limits)
+
+    roster = result.enumerations[0]
+    assert roster.coverage.returned_total == 4 and roster.coverage.total == 4
+    assert roster.coverage.complete is True
+    assert roster.coverage.truncated_reason == ""
+    assert "enum:sources" in llm.reflect_prompts[1]
+    assert result.termination.reason == TERMINATION_MODEL_SUFFICIENT
+
+
+def test_the_current_notebook_scope_is_not_sampled_by_the_federated_count(repo):
+    """收窄档的分母是括号里那个数,不是联邦总数 ⇒ 守卫不得对它生效。
+
+    本库 3 篇 + 参考库 10 篇 = 地图上的 13;`scope="current_notebook"` 要列的却是
+    本库那 3 篇,3 行额度装得下。拿联邦总数去判它,一份本来能列全的本库目录会被
+    砍成 2 条、报 partial。
+
+    变异:把 `_enum_budget` 的 `not local_only` 条件去掉 ⇒ 只列 2 条、complete
+    变 False,这条红。
+    """
+    notebook = _seed_sources_only(repo, ["论文一", "论文二", "论文三"])
+    _mount_reference_library(
+        repo, notebook.id, [f"参考库{index}" for index in range(1, 11)])
+    _v2(repo)
+    llm = _ValidatingLLM([
+        _v2_enumerate_sources(scope="current_notebook"),
+        {"next_action": "answer", "sufficient": True, "arguments": {}},
+    ])
+    retriever, limits = _retriever(repo, llm, limits_overrides={
+        "enum_rows_per_run": 3, "enum_page_size": 2,
+    })
+
+    result = retriever.run(notebook.id, _CATALOG_QUESTION, "", limits=limits)
+
+    roster = result.enumerations[0]
+    assert roster.local_only is True
+    assert roster.coverage.returned_total == 3 and roster.coverage.total == 3
+    assert roster.coverage.complete is True
+
+
+def test_the_guard_is_v2_only_and_legacy_lists_exactly_as_before(repo):
+    """关闭态(legacy)一个字都不改:同一个 13 篇 / 3 行的形态照旧花光额度。
+
+    legacy 的规模提示写在它自己的 prompt 里(`prompts.py` 的「do NOT try to page
+    through it」),生产行为不变是本次的硬约束。
+
+    变异:把 `_enum_budget` 里的 `self.reflect_v2_active()` 去掉 ⇒ 这条红。
+    """
+    notebook = _seed_oversize_roster(repo, 13)       # 刻意不开 v2
+    llm = _ValidatingLLM([
+        _enumerate_sources_action(),
+        {"next_action": "answer", "sufficient": True},
+    ])
+    retriever, limits = _retriever(repo, llm, limits_overrides={
+        "enum_rows_per_run": 3, "enum_page_size": 2,
+    })
+
+    result = retriever.run(notebook.id, "库里有哪几篇", "", limits=limits)
+
+    assert result.enumerations[0].coverage.returned_total == 3
+    assert result.enumerations[0].coverage.complete is False
