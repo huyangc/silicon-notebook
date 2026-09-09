@@ -11864,12 +11864,12 @@ def test_rerank_step_never_becomes_an_action_observation():
     的「动作」。
 
     变异说明(实测):把 `rerank` 从 `reasoning_observation.NON_ACTION_STEP_TYPES`
-    里删掉,红的是漂移守卫
+    里删掉 ⇒ 本条与漂移守卫
     `test_observation_contract_covers_every_trace_step_type_in_the_retriever`
-    ——**这一条不会红**,因为 `TRACE_OBSERVATION_CONTRACT` 里没有 `rerank` 的
-    条目,函数照样落到那句兜底 `return None`。两条断言合起来才是闭集:第一条钉
-    「今天的行为」,第二条钉「哪天真给它写了一份契约,漂移守卫会拦住」——那才是
-    这个 `None` 唯一可能变成一行假观察的路。
+    双红。注意**第一条断言在那个变异下仍然通过**——`TRACE_OBSERVATION_CONTRACT`
+    里没有 `rerank` 条目,函数照样落到那句兜底 `return None`。所以三条断言合起来
+    才是闭集:第一条钉今天的行为,后两条钉住那个 `None` 的真实来源(登记在闭集
+    里、且没有契约条目),否则哪天有人给它写了一份契约,这条会静默地继续绿。
     """
     from app.models.schemas import TraceStep
     from app.services.reasoning_observation import (
