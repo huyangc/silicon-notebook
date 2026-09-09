@@ -9,8 +9,13 @@ import pytest
 from openai import APIConnectionError, APIStatusError, APITimeoutError
 
 import app.core.llm as llm_mod
+from app.core.cache import llm_key
 from app.core.config import Settings
-from app.core.llm import OpenAICompatibleClient
+from app.core.llm import (
+    OpenAICompatibleClient,
+    provider_messages,
+    serialize_provider_messages,
+)
 
 
 class _Msg:
@@ -111,6 +116,180 @@ def _make(monkeypatch, create, *, model="m"):
     )
     monkeypatch.setattr(c, "client", lambda: _FakeOpenAI(create))
     return c
+
+
+class _RecordingCache:
+    """Cache double that records the key chat_json resolves (always a miss)."""
+
+    def __init__(self):
+        self.gets = []
+        self.puts = []
+
+    def get(self, key):
+        self.gets.append(key)
+        return None
+
+    def put(self, key, value, tag=""):
+        self.puts.append((key, value, tag))
+
+
+def _common_prefix_len(left: bytes, right: bytes) -> int:
+    n = 0
+    for a, b in zip(left, right):
+        if a != b:
+            break
+        n += 1
+    return n
+
+
+def test_provider_messages_is_wrapper_then_caller_messages():
+    """(T-PS1-a) The pure function reproduces the wrapper verbatim.
+
+    The literal wrapper text is asserted here, not paraphrased: this is the
+    byte-for-byte record of what the extraction moved. A wrapper reworded by a
+    later edit changes every provider cache prefix and every recorded
+    ``message_prefix_bytes`` at once, so it must not be able to change silently.
+    """
+    caller = [
+        {"role": "user", "content": "question"},
+        {"role": "assistant", "content": "partial"},
+    ]
+
+    out = provider_messages(caller, "{'a': 1}")
+
+    assert out == [
+        {
+            "role": "system",
+            "content": (
+                "You are the extraction and reasoning engine for "
+                "silicon-notebook. Return valid JSON only, no markdown fences. "
+                "Schema hint: {'a': 1}"
+            ),
+        },
+        {"role": "user", "content": "question"},
+        {"role": "assistant", "content": "partial"},
+    ]
+    # A fresh list, and the caller's own mappings passed through untouched.
+    assert out[1] is caller[0]
+    assert caller == [
+        {"role": "user", "content": "question"},
+        {"role": "assistant", "content": "partial"},
+    ]
+
+
+def test_chat_json_sends_exactly_the_pure_functions_messages(monkeypatch):
+    """(T-PS1-d) What goes on the wire IS ``provider_messages``' output.
+
+    Mutation: reintroduce a second inline wrapper assembly in ``chat_json`` with
+    any wording drift and this equality fails — which is the whole point of the
+    extraction, since a measurement layer computing prefixes off the pure
+    function would otherwise be describing a request that was never sent.
+    """
+    create = _FakeCreate([_Resp()])
+    client = _make(monkeypatch, create)
+    msgs = [{"role": "user", "content": "hi"}]
+
+    client.chat_json(msgs, "{}")
+
+    assert create.calls[0]["messages"] == provider_messages(msgs, "{}")
+
+
+def test_llm_key_still_keys_on_the_provider_facing_messages(monkeypatch):
+    """(T-PS1-d) The cache key keeps eating the wrapped list, not the raw one."""
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    cache = _RecordingCache()
+    client = OpenAICompatibleClient(
+        Settings(_env_file=None),
+        base_url="https://x",
+        api_key="k",
+        model="m",
+        cache=cache,
+    )
+    monkeypatch.setattr(client, "client", lambda: _FakeOpenAI(_FakeCreate([_Resp()])))
+    msgs = [{"role": "user", "content": "hi"}]
+
+    client.chat_json(msgs, "{}", response_validator=lambda _c: True)
+
+    assert cache.gets == [
+        llm_key(
+            "m",
+            provider_messages(msgs, "{}"),
+            "{}",
+            "https://x",
+            temperature=1.0,
+            top_p=1.0,
+            max_tokens=client.settings.openai_compat_max_tokens,
+            thinking_mode=None,
+        )
+    ]
+    assert cache.gets[0] != llm_key(
+        "m", msgs, "{}", "https://x",
+        temperature=1.0, top_p=1.0,
+        max_tokens=client.settings.openai_compat_max_tokens,
+        thinking_mode=None,
+    )
+
+
+def test_serialize_provider_messages_is_deterministic_and_utf8():
+    """(T-PS1-b) Same input -> same bytes, and non-ASCII counts as UTF-8."""
+    msgs = provider_messages([{"role": "user", "content": "中文 body"}], "{}")
+
+    first = serialize_provider_messages(msgs)
+    second = serialize_provider_messages(msgs)
+
+    assert first == second
+    assert isinstance(first, bytes)
+    # Length headers count BYTES, not characters: 中文 is 3 bytes per char.
+    assert b"11:" + "中文 body".encode("utf-8") in first
+    assert serialize_provider_messages([]) == b""
+
+
+def test_serialize_provider_messages_frames_cannot_be_forged_from_content():
+    """(T-PS1-b) A body that writes the framing syntax cannot move a boundary.
+
+    Two different message lists whose concatenated text is identical must
+    serialize differently; with a plain delimiter they would collide and a
+    hostile (or merely unlucky) document quotation could make two structurally
+    different requests look byte-identical.
+    """
+    forged = serialize_provider_messages(
+        [{"role": "user", "content": "4:userpayload"}]
+    )
+    genuine = serialize_provider_messages(
+        [{"role": "user", "content": ""}, {"role": "user", "content": "payload"}]
+    )
+
+    assert forged != genuine
+
+
+def test_serialize_provider_messages_prefix_covers_every_earlier_message():
+    """(T-PS1-c) Changing only the tail content keeps all earlier bytes shared.
+
+    Framing is a plain concatenation of per-message frames, so the head's
+    serialization is a LITERAL prefix of the whole; the divergence caused by a
+    new tail lands inside the tail's own frame and never earlier. (It lands a
+    couple of bytes into that frame, at the length header, rather than exactly
+    at the boundary — the header is what makes the framing unforgeable.)
+    """
+    head = provider_messages([{"role": "user", "content": "stable"}], "{}")
+    turn_a = head + [{"role": "assistant", "content": "turn one"}]
+    turn_b = head + [{"role": "assistant", "content": "turn two but longer"}]
+
+    head_bytes = serialize_provider_messages(head)
+    a_bytes = serialize_provider_messages(turn_a)
+    b_bytes = serialize_provider_messages(turn_b)
+    shared = _common_prefix_len(a_bytes, b_bytes)
+
+    assert a_bytes.startswith(head_bytes)
+    assert b_bytes.startswith(head_bytes)
+    assert shared >= len(head_bytes)
+    assert shared < len(a_bytes)
+    # And an EARLIER change is not absorbed: the shared prefix collapses.
+    moved = provider_messages([{"role": "user", "content": "stabl3"}], "{}")
+    moved_bytes = serialize_provider_messages(
+        moved + [{"role": "assistant", "content": "turn one"}]
+    )
+    assert _common_prefix_len(a_bytes, moved_bytes) < len(head_bytes)
 
 
 def test_client_connection_pool_matches_explicit_service_capacity(monkeypatch):

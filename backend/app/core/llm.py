@@ -182,6 +182,74 @@ def cap_kwargs(client: Any, attr: str) -> Dict[str, Any]:
     return budget_kwargs(getattr(client, "settings", None), attr)
 
 
+#: The wrapper system message this client puts in front of every caller's
+#: messages. Spelled once, here, because two places must agree on it byte for
+#: byte: what actually goes on the wire, and what any measurement of the
+#: provider-facing message sequence reconstructs.
+_PROVIDER_WRAPPER_PREFIX = (
+    "You are the extraction and reasoning engine for "
+    "silicon-notebook. Return valid JSON only, no markdown fences. "
+    "Schema hint: "
+)
+
+
+def provider_messages(
+    messages: List[Dict[str, str]], response_schema_hint: str
+) -> List[Dict[str, str]]:
+    """The exact message list this client sends to the provider: the wrapper
+    system message (role brief + schema hint) followed by the caller's own
+    messages.
+
+    Pulled out of ``chat_json`` as a module-level PURE function — no I/O, no
+    client state, no ``self`` — so a measurement layer can reconstruct what a
+    call would put on the wire without issuing it, and, more importantly, so
+    there is exactly ONE assembly: ``chat_json`` calls this rather than keeping
+    a second copy in sync with it. A duplicated wrapper would drift silently and
+    every prefix/cache-key number computed off the copy would be measuring a
+    message sequence that was never sent.
+
+    Returns a fresh list; the caller's own message mappings are passed through by
+    reference (this function never mutates them).
+    """
+    return [
+        {
+            "role": "system",
+            "content": f"{_PROVIDER_WRAPPER_PREFIX}{response_schema_hint}",
+        },
+        *messages,
+    ]
+
+
+def serialize_provider_messages(messages: List[Dict[str, str]]) -> bytes:
+    """Deterministic UTF-8 serialization of a provider-facing message list,
+    for byte-level structural comparison (e.g. how much of turn N's request is a
+    literal prefix of turn N+1's).
+
+    Framing is length-prefixed — each field goes out as ``<byte length>:<bytes>``
+    — rather than delimiter-separated, because the payload is untrusted model
+    input: any separator drawn from the text alphabet can be written INTO a
+    message body, and a body that forges a boundary would move the apparent
+    field split and silently corrupt the numbers computed on top of this. A
+    decimal length header cannot be forged from inside the bytes it counts.
+
+    Only ``role`` and ``content`` participate, in that order, in list order; a
+    missing field serializes as empty. The result is a plain concatenation of
+    per-message frames, so the serialization of any leading slice of ``messages``
+    is a literal byte prefix of the whole — which is what makes a common-prefix
+    length meaningful. This is a client-side structural metric only: it is NOT a
+    provider cache key and says nothing about what the provider actually reused.
+    """
+    out = bytearray()
+    for message in messages:
+        for field in ("role", "content"):
+            raw = message.get(field, "") if isinstance(message, dict) else ""
+            blob = ("" if raw is None else str(raw)).encode("utf-8")
+            out += str(len(blob)).encode("ascii")
+            out += b":"
+            out += blob
+    return bytes(out)
+
+
 #: Name of the optional OUT-parameter a caller may pass to ``chat_json`` to get
 #: this call's provider-side outcome back. The value is a caller-owned mutable
 #: mapping; ``chat_json`` writes ``finish_reason`` into it before returning.
@@ -357,17 +425,10 @@ class OpenAICompatibleClient:
         if not self.configured:
             raise RuntimeError("OpenAI-compatible LLM settings are not configured")
         raise_if_cancelled(cancel_event)
-        full_messages = [
-            {
-                "role": "system",
-                "content": (
-                    "You are the extraction and reasoning engine for "
-                    "silicon-notebook. Return valid JSON only, no markdown fences. "
-                    f"Schema hint: {response_schema_hint}"
-                ),
-            },
-            *messages,
-        ]
+        # Single assembly point (see provider_messages): what goes on the wire,
+        # what feeds the cache key, and what a measurement layer reconstructs are
+        # the same list, produced by the same pure function.
+        full_messages = provider_messages(messages, response_schema_hint)
         model = self.model
         # Some OpenAI-compatible models accept only one provider-defined
         # nucleus-sampling value (for example top_p=0.95).  A physical-service
