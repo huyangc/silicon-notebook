@@ -262,9 +262,17 @@ def test_serialize_provider_messages_is_deterministic_and_utf8():
 
     assert first == second
     assert isinstance(first, bytes)
-    # Length headers count BYTES, not characters: 中文 is 3 bytes per char.
-    assert b"11:" + "中文 body".encode("utf-8") in first
+    # Lengths count BYTES, not characters: 中文 is 3 bytes per char, and each
+    # field's length TRAILS it (see the docstring: a leading length would make a
+    # changed tail diverge the frame before the bytes it counts).
+    assert "中文 body".encode("utf-8") + b":11:" in first
     assert serialize_provider_messages([]) == b""
+    # Field order and framing, spelled literally: role first, then content, each
+    # followed by its own byte length. Mutation: swap the two fields, or move a
+    # length back in front of its bytes, and this equality fires.
+    assert serialize_provider_messages(
+        [{"role": "user", "content": "hi"}]
+    ) == b"user:4:hi:2:"
     # The ROLE is part of the frame, not decoration: the same text spoken by the
     # model and by the user are different requests, and a serializer that only
     # walked `content` would report them as a shared prefix.
@@ -283,8 +291,12 @@ def test_serialize_provider_messages_frames_cannot_be_forged_from_content():
     structurally different requests would then look byte-identical — silently
     inflating any common-prefix number computed on top.
 
-    Mutation: replace the length headers with any single delimiter and this
-    equality fires.
+    Mutation: drop the per-field byte lengths and separate fields with a bare
+    delimiter — any single one, and any position for it — and this equality
+    fires. The lengths survive being moved BEHIND their fields (the shape this
+    serializer uses) precisely because a right-to-left parse locates them by
+    counting from an end rather than by searching the payload: the second pair
+    below spells the framing syntax inside a body and still cannot collide.
     """
     forged = serialize_provider_messages(
         [{"role": "user", "content": "a|user|b"}]
@@ -294,6 +306,13 @@ def test_serialize_provider_messages_frames_cannot_be_forged_from_content():
     )
 
     assert forged != genuine
+    # The same attempt written in THIS serializer's own alphabet: a body that
+    # spells out a complete second frame.
+    assert serialize_provider_messages(
+        [{"role": "user", "content": "a:1:user:4:b"}]
+    ) != serialize_provider_messages(
+        [{"role": "user", "content": "a"}, {"role": "user", "content": "b"}]
+    )
 
 
 def test_serialize_provider_messages_is_order_preserving_concatenation():
@@ -323,9 +342,8 @@ def test_serialize_provider_messages_prefix_covers_every_earlier_message():
 
     Framing is a plain concatenation of per-message frames, so the head's
     serialization is a LITERAL prefix of the whole; the divergence caused by a
-    new tail lands inside the tail's own frame and never earlier. (It lands a
-    couple of bytes into that frame, at the length header, rather than exactly
-    at the boundary — the header is what makes the framing unforgeable.)
+    new tail lands inside the tail frame's own content bytes, at the first
+    character that actually differs, and never earlier.
     """
     head = provider_messages([{"role": "user", "content": "stable"}], "{}")
     turn_a = head + [{"role": "assistant", "content": "turn one"}]
@@ -338,7 +356,10 @@ def test_serialize_provider_messages_prefix_covers_every_earlier_message():
 
     assert a_bytes.startswith(head_bytes)
     assert b_bytes.startswith(head_bytes)
-    assert shared >= len(head_bytes)
+    # Not merely ">= head": the tail frame's role and the identical leading
+    # "turn " of its content are shared too, because nothing length-dependent
+    # sits in front of them.
+    assert shared == len(head_bytes) + len(b"assistant:9:turn ")
     assert shared < len(a_bytes)
     # And an EARLIER change is not absorbed: the shared prefix collapses.
     moved = provider_messages([{"role": "user", "content": "stabl3"}], "{}")
@@ -346,6 +367,68 @@ def test_serialize_provider_messages_prefix_covers_every_earlier_message():
         moved + [{"role": "assistant", "content": "turn one"}]
     )
     assert _common_prefix_len(a_bytes, moved_bytes) < len(head_bytes)
+
+
+def test_serialize_prefix_survives_a_tail_that_changes_length():
+    """(T-PS1-c) The measurement this serializer exists for, on T-PS8's shape.
+
+    T-PS8 sends ``system(S)`` plus ONE ``user(C+K+D+T)`` message, and only T
+    changes between turns. So the thousands of C+K+D bytes are the shared prefix
+    the experiment is trying to count, and they must stay shared even when T's
+    own byte length changes — a new turn's state block is not going to be the
+    same size as the last one's.
+
+    Mutation (this is the review finding that produced the current framing): put
+    the byte length back in FRONT of its field. The user frame then opens with a
+    decimal header derived from ``len(C+K+D+T)``, the two turns diverge at that
+    header, and the shared prefix collapses to the system frame — reporting ~780
+    shared bytes where ~2790 are genuinely shared.
+    """
+    system = {"role": "system", "content": "S" * 700}
+    ckd = "C" * 800 + "K" * 800 + "D" * 800
+
+    def turn(tail):
+        return [system, {"role": "user", "content": ckd + tail}]
+
+    system_bytes = serialize_provider_messages([system])
+    # The user frame's head: role bytes, then role's own length. Nothing here
+    # depends on the content, which is exactly why C+K+D survives it.
+    user_frame_head = b"user:4:"
+    assert serialize_provider_messages(
+        [{"role": "user", "content": ""}]
+    ) == user_frame_head + b":0:"
+    floor = len(system_bytes) + len(user_frame_head) + len(ckd.encode("utf-8"))
+
+    same_length = serialize_provider_messages(turn("turn state 001"))
+    also_same_length = serialize_provider_messages(turn("turn state 002"))
+    longer = serialize_provider_messages(
+        turn("turn state 003, which this time says a great deal more")
+    )
+
+    # Same-length tail and different-length tail must land in the same league:
+    # both keep every byte of S and of C+K+D.
+    assert _common_prefix_len(same_length, also_same_length) >= floor
+    assert _common_prefix_len(same_length, longer) >= floor
+    # ...and the difference between the two cases is only the tail's own shared
+    # leading text, not a collapse of three orders of magnitude.
+    assert abs(
+        _common_prefix_len(same_length, also_same_length)
+        - _common_prefix_len(same_length, longer)
+    ) <= len("turn state 003")
+
+
+def test_serialize_provider_messages_rejects_a_non_mapping_element():
+    """(T-PS1-b) A measurement function must not invent plausible bytes for
+    input it did not understand: emitting an empty frame for, say, a bare string
+    would silently report a message that has no role and no content, and every
+    prefix number computed downstream would be describing a request nobody built.
+    """
+    with pytest.raises(AttributeError):
+        serialize_provider_messages(["not a message"])
+    with pytest.raises(AttributeError):
+        serialize_provider_messages(
+            [{"role": "user", "content": "ok"}, SimpleNamespace(role="user")]
+        )
 
 
 def test_client_connection_pool_matches_explicit_service_capacity(monkeypatch):

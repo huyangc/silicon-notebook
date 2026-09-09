@@ -253,19 +253,44 @@ def serialize_provider_messages(messages: List[Dict[str, str]]) -> bytes:
     for byte-level structural comparison (e.g. how much of turn N's request is a
     literal prefix of turn N+1's).
 
-    Framing is length-prefixed — each field goes out as ``<byte length>:<bytes>``
-    — rather than delimiter-separated, because the payload is untrusted model
-    input: any separator drawn from the text alphabet can be written INTO a
-    message body, and a body that forges a boundary would move the apparent
-    field split and silently corrupt the numbers computed on top of this. A
-    decimal length header cannot be forged from inside the bytes it counts.
+    Framing is length-SUFFIXED — each field goes out as ``<bytes>:<byte
+    length>:`` — rather than delimiter-separated, because the payload is
+    untrusted model input: any separator drawn from the text alphabet can be
+    written INTO a message body, and a body that forges a boundary would move the
+    apparent field split and silently corrupt the numbers computed on top of
+    this. A decimal length cannot be forged from inside the bytes it counts,
+    because it is only ever read from a position fixed by the parse, not searched
+    for in the text.
+
+    The length trails its field rather than leading it, and that ordering is the
+    whole point of this shape. The measured question is "how much of turn N's
+    request is a literal prefix of turn N+1's", and under the layout this client
+    actually sends (one system message plus ONE long user message whose tail is
+    the only part that changes per turn) a LEADING length would put a header that depends
+    on the tail in front of the thousands of identical bytes it counts: change
+    the tail's length by one byte and the common prefix collapses at the header,
+    reporting ~0 shared bytes for two requests that share nearly all of them.
+    With the length behind its field, divergence can only land where the bytes
+    themselves first differ.
+
+    Injectivity is preserved (nothing is lost by moving the length): the byte
+    string is uniquely decodable RIGHT to LEFT. The stream ends with ``:``;
+    scanning backwards over the decimal digits before it yields ``n``, the ``:``
+    before those digits closes the field, and the ``n`` bytes before that ARE the
+    field — then the same step repeats for the field to its left. Every
+    structural byte is located by counting from an end, never by searching the
+    payload, so no content can move a boundary.
 
     Only ``role`` and ``content`` participate, in that order, in list order; a
     missing field serializes as empty. The result is a plain concatenation of
     per-message frames, so the serialization of any leading slice of ``messages``
     is a literal byte prefix of the whole — which is what makes a common-prefix
-    length meaningful. This is a client-side structural metric only: it is NOT a
-    provider cache key and says nothing about what the provider actually reused.
+    length meaningful. Per message the framing costs a fixed
+    ``len(role) + len(str(len(role))) + len(str(len(content))) + 4`` bytes on top
+    of the payload; all of it precedes ``content`` except that content's own
+    length and the two colons around it, which trail it. This is a client-side
+    structural metric only: it is NOT a provider cache key and says nothing about
+    what the provider actually reused.
 
     A non-mapping element raises rather than serializing as empty: for a
     measurement function, silently emitting plausible-looking bytes for input it
@@ -276,9 +301,10 @@ def serialize_provider_messages(messages: List[Dict[str, str]]) -> bytes:
         for field in ("role", "content"):
             raw = message.get(field, "")
             blob = ("" if raw is None else str(raw)).encode("utf-8")
+            out += blob
+            out += b":"
             out += str(len(blob)).encode("ascii")
             out += b":"
-            out += blob
     return bytes(out)
 
 
