@@ -66,23 +66,51 @@ def _is_stream_usage_rejection(exc: Exception) -> bool:
     )
 
 
-def _usage_dict(response: Any) -> Optional[Dict[str, int]]:
-    usage = (
-        response.get("usage")
-        if isinstance(response, dict)
-        else getattr(response, "usage", None)
+def _usage_field(source: Any, key: str) -> Any:
+    """Read ``key`` off a usage payload that may be a mapping OR an SDK object."""
+    return (
+        source.get(key)
+        if isinstance(source, dict)
+        else getattr(source, key, None)
     )
+
+
+#: Nested usage counters worth flattening: ``(container field, leaf field)``.
+#: ``cached_tokens`` is the provider's own name for the share of the prompt it
+#: served from ITS prefix cache, and ``reasoning_tokens`` the billed-but-hidden
+#: thinking. Both live one level down in the OpenAI-compatible schema and are
+#: optional: plenty of compatible servers never send the details object at all.
+_USAGE_DETAIL_FIELDS = (
+    ("prompt_tokens_details", "cached_tokens"),
+    ("completion_tokens_details", "reasoning_tokens"),
+)
+
+
+def _usage_dict(response: Any) -> Optional[Dict[str, int]]:
+    """Flatten a provider usage payload into plain counters, or None.
+
+    A missing counter is an ABSENT KEY, never a zero (design §8.2): a provider
+    that does not report ``cached_tokens`` is telling us nothing, while a 0 would
+    read downstream as "measured, and it was none" — the single most misleading
+    value this dict can carry, because the whole prefix-reuse experiment is a
+    comparison of those numbers. A provider that genuinely reports 0 still gets
+    its 0 through: this only refuses to INVENT one.
+    """
+    usage = _usage_field(response, "usage")
     if usage is None:
         return None
     out: Dict[str, int] = {}
     for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
-        value = (
-            usage.get(key)
-            if isinstance(usage, dict)
-            else getattr(usage, key, None)
-        )
+        value = _usage_field(usage, key)
         if value is not None:
             out[key] = value
+    for container_key, leaf_key in _USAGE_DETAIL_FIELDS:
+        container = _usage_field(usage, container_key)
+        if container is None:
+            continue
+        value = _usage_field(container, leaf_key)
+        if value is not None:
+            out[leaf_key] = value
     return out or None
 
 
@@ -252,18 +280,89 @@ def serialize_provider_messages(messages: List[Dict[str, str]]) -> bytes:
 
 #: Name of the optional OUT-parameter a caller may pass to ``chat_json`` to get
 #: this call's provider-side outcome back. The value is a caller-owned mutable
-#: mapping; ``chat_json`` writes ``finish_reason`` into it before returning.
+#: mapping which ``chat_json`` fills in before returning or raising; see
+#: ``_record_call_stats`` for the exact keys (``status``, ``call_wall_ms``,
+#: ``attempts``, ``attempts_observed`` always; ``finish_reason``,
+#: ``response_chars`` and ``usage`` when they exist).
 #:
 #: It exists because ``chat_json`` returns a plain ``str``: an empty completion
 #: and a completion the server cut off at ``max_tokens`` arrive as the SAME empty
 #: string, and the only thing that tells them apart — ``finish_reason`` — dies
 #: inside this function. Downstream that difference decides the remedy (retry
 #: with a larger budget vs. treat the model as having produced nothing), so a
-#: caller that wants to act on it needs the value, not just a log line.
+#: caller that wants to act on it needs the value, not just a log line. The same
+#: argument extends to the measurement fields: duration, real request count and
+#: response size are all knowable ONLY here, and a caller that must report per
+#: call (an offline experiment rig) cannot recover them from a log file it does
+#: not own — while a caller that passes nothing pays for none of it.
 #:
 #: Spelled as a constant so the reflect layer's splat helper and this signature
 #: cannot drift. Callers that do not pass it are byte-for-byte unaffected.
 CALL_STATS_KWARG = "call_stats"
+
+
+class _RequestCount:
+    """Real provider requests issued for ONE ``chat_json`` call.
+
+    A counter object rather than a local int because the request sites live in
+    two functions: the retry loop in ``chat_json`` and the two ``create()`` calls
+    inside ``_stream_chat_content`` (the second one being the ``stream_options``
+    rebuild, which today leaves no trace anywhere). ``chat_json`` owns the
+    instance and hands it down, so ``attempts`` counts what actually went on the
+    wire instead of the number of loop iterations — those differ by exactly the
+    silent fallbacks, which is the difference the experiment is trying to see.
+    """
+
+    __slots__ = ("value",)
+
+    def __init__(self) -> None:
+        self.value = 0
+
+    def record(self) -> None:
+        self.value += 1
+
+
+def _record_call_stats(
+    sink: Optional[Dict[str, Any]],
+    *,
+    status: str,
+    wall_ms: int,
+    attempts: int,
+    usage: Optional[Dict[str, int]] = None,
+    finish_reason: Optional[str] = None,
+    response_chars: Optional[int] = None,
+) -> None:
+    """Fill a caller's ``call_stats`` out-parameter (see ``CALL_STATS_KWARG``).
+
+    ``sink is None`` — the overwhelmingly common case — returns immediately, so a
+    caller that never asked for stats is byte-for-byte unaffected by everything
+    below.
+
+    ``status`` / ``call_wall_ms`` / ``attempts`` / ``attempts_observed`` are
+    written on EVERY exit, including cancellation and error: a call that died is
+    exactly the one whose duration and request count a run-level report must not
+    silently drop (a cancelled call still consumed wall clock and still hit the
+    endpoint). Everything else is written only when it exists: an absent key
+    means "no observation", never zero.
+
+    ``attempts_observed`` is True because this client counts requests at the
+    transport itself. It is not decoration: a duck-typed client that does not
+    declare ``supports_call_stats`` leaves the sink empty, and a consumer must
+    then treat the request count as unknown rather than as the logical call
+    count — the two differ precisely when a silent fallback fired.
+    """
+    if sink is None:
+        return
+    sink["status"] = status
+    sink["call_wall_ms"] = wall_ms
+    sink["attempts"] = attempts
+    sink["attempts_observed"] = True
+    if finish_reason is not None:
+        sink["finish_reason"] = finish_reason
+    if response_chars is not None:
+        sink["response_chars"] = response_chars
+    if usage:
+        sink["usage"] = usage
 
 
 class OpenAICompatibleClient:
@@ -340,6 +439,19 @@ class OpenAICompatibleClient:
             )
         return self._client
 
+    def _create(self, requests: _RequestCount, **call_kwargs: Any) -> Any:
+        """Issue ONE provider request and count it.
+
+        The single choke point for every ``chat.completions.create`` in this
+        class, so a request cannot be added without being counted. The client is
+        resolved BEFORE the tally: a configuration error raised by ``client()``
+        means nothing was sent, and counting it would inflate the request count
+        with a call that never left the process.
+        """
+        create = self.client().chat.completions.create
+        requests.record()
+        return create(**call_kwargs)
+
     def _stream_chat_content(
         self,
         kwargs: Dict[str, Any],
@@ -347,6 +459,7 @@ class OpenAICompatibleClient:
         *,
         json_mode: bool,
         cancel_event: CancelEvent,
+        requests: _RequestCount,
     ) -> tuple[str, Optional[str], Optional[Dict[str, int]]]:
         """Return ``(content, finish_reason, usage)``.
 
@@ -366,14 +479,14 @@ class OpenAICompatibleClient:
         if request_usage:
             call_kwargs["stream_options"] = {"include_usage": True}
         try:
-            stream = self.client().chat.completions.create(**call_kwargs)
+            stream = self._create(requests, **call_kwargs)
         except Exception as exc:
             if not request_usage or not _is_stream_usage_rejection(exc):
                 raise
             self._stream_usage_options_supported = False
             call_kwargs.pop("stream_options", None)
             raise_if_cancelled(cancel_event)
-            stream = self.client().chat.completions.create(**call_kwargs)
+            stream = self._create(requests, **call_kwargs)
         parts: List[str] = []
         finish_reason: Optional[str] = None
         usage: Optional[Dict[str, int]] = None
@@ -540,6 +653,9 @@ class OpenAICompatibleClient:
             },
         }
         start = time.perf_counter()
+        # Owned here, incremented at the transport (see _create): every exit
+        # below reports how many requests this ONE logical call really issued.
+        requests = _RequestCount()
         # Per-call overrides (interactive reasoning uses a shorter timeout / fewer
         # retries than the batch-extraction global defaults). When not supplied,
         # behavior is byte-for-byte identical to before: attempts uses the global
@@ -564,9 +680,11 @@ class OpenAICompatibleClient:
                     try:
                         if cancel_event is not None:
                             streamed = self._stream_chat_content(
-                                kwargs, req_kwargs, json_mode=True, cancel_event=cancel_event)
+                                kwargs, req_kwargs, json_mode=True,
+                                cancel_event=cancel_event, requests=requests)
                         else:
-                            response = self.client().chat.completions.create(
+                            response = self._create(
+                                requests,
                                 **kwargs, **req_kwargs, response_format={"type": "json_object"}
                             )
                     except AskCancelled:
@@ -582,9 +700,10 @@ class OpenAICompatibleClient:
                             raise
                         if cancel_event is not None:
                             streamed = self._stream_chat_content(
-                                kwargs, req_kwargs, json_mode=False, cancel_event=cancel_event)
+                                kwargs, req_kwargs, json_mode=False,
+                                cancel_event=cancel_event, requests=requests)
                         else:
-                            response = self.client().chat.completions.create(**kwargs, **req_kwargs)
+                            response = self._create(requests, **kwargs, **req_kwargs)
                     break
                 except AskCancelled:
                     raise
@@ -619,14 +738,12 @@ class OpenAICompatibleClient:
                 finish_reason = getattr(choice, "finish_reason", None)
                 content = strip_json_fences(choice.message.content or "")
                 usage = _usage_dict(response)
-            # Hand the provider-side outcome back to a caller that asked for it
-            # (see CALL_STATS_KWARG), and record it either way. Without it an
-            # empty completion and one the server cut off at max_tokens are the
-            # same empty string everywhere downstream, and llm.jsonl cannot tell
-            # a token-budget truncation from a model that returned nothing.
+            # Recorded either way, and handed back to a caller that asked for it
+            # at the exit below (see CALL_STATS_KWARG). Without it an empty
+            # completion and one the server cut off at max_tokens are the same
+            # empty string everywhere downstream, and llm.jsonl cannot tell a
+            # token-budget truncation from a model that returned nothing.
             record["finish_reason"] = finish_reason or ""
-            if call_stats is not None:
-                call_stats["finish_reason"] = finish_reason or ""
             # Best-effort write, and only of a reply that is actually usable —
             # the empty "{}" fallback, unparseable JSON and budget-truncated
             # completions are all excluded (see is_cacheable_llm_response for
@@ -671,24 +788,64 @@ class OpenAICompatibleClient:
                 except Exception:
                     pass
             record["status"] = "ok"
-            record["latency_ms"] = round((time.perf_counter() - start) * 1000)
+            # ONE perf_counter difference per exit, shared by the log record and
+            # the out-parameter: two readings of the same call must never
+            # disagree, and this is already the monotonic clock the log used.
+            wall_ms = round((time.perf_counter() - start) * 1000)
+            record["latency_ms"] = wall_ms
+            record["attempts"] = requests.value
+            # Length of the content the caller actually receives, NOT of the
+            # clipped copy below: llm.jsonl truncates its body at
+            # `llm_log_max_chars`, so a reply read back out of the log understates
+            # every long completion. Numbers only — the body itself never leaves
+            # the clip.
+            record["response_chars"] = len(content)
             if usage:
                 record["usage"] = usage
             record["response"] = {"content": logger.clip(content)}
+            _record_call_stats(
+                call_stats,
+                status="ok",
+                wall_ms=wall_ms,
+                attempts=requests.value,
+                usage=usage,
+                finish_reason=finish_reason or "",
+                response_chars=len(content),
+            )
             logger.log(record)
             return content
         except AskCancelled as exc:
             record["status"] = "cancelled"
-            record["latency_ms"] = round((time.perf_counter() - start) * 1000)
+            wall_ms = round((time.perf_counter() - start) * 1000)
+            record["latency_ms"] = wall_ms
+            record["attempts"] = requests.value
+            # A stream that already delivered its billed usage trailer before the
+            # cancellation landed carries it on the exception; that spend is real
+            # and must be reported even though no content comes back.
             usage = _usage_dict(exc)
             if usage:
                 record["usage"] = usage
+            _record_call_stats(
+                call_stats,
+                status="cancelled",
+                wall_ms=wall_ms,
+                attempts=requests.value,
+                usage=usage,
+            )
             logger.log(record)
             raise
         except Exception as exc:
             record["status"] = "error"
-            record["latency_ms"] = round((time.perf_counter() - start) * 1000)
+            wall_ms = round((time.perf_counter() - start) * 1000)
+            record["latency_ms"] = wall_ms
+            record["attempts"] = requests.value
             record["error"] = f"{type(exc).__name__}: {exc}"
+            _record_call_stats(
+                call_stats,
+                status="error",
+                wall_ms=wall_ms,
+                attempts=requests.value,
+            )
             logger.log(record)
             raise
 

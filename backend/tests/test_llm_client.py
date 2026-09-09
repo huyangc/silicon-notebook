@@ -96,6 +96,29 @@ class _RecordingInteractionLogger:
         self.records.append(record)
 
 
+class _ClippingInteractionLogger(_RecordingInteractionLogger):
+    """Logger whose clip actually truncates, like the real `llm_log_max_chars`."""
+
+    def __init__(self, limit=10):
+        super().__init__()
+        self.limit = limit
+
+    def clip(self, value):
+        return str(value)[: self.limit]
+
+
+def _usage_obj(**fields):
+    return SimpleNamespace(
+        prompt_tokens=11, completion_tokens=7, total_tokens=18, **fields
+    )
+
+
+def _resp_with_usage(usage, content='{"ok":1}'):
+    resp = _Resp(content)
+    resp.usage = usage
+    return resp
+
+
 def _api_status_error(status, message):
     request = httpx.Request("POST", "https://x/chat/completions")
     response = httpx.Response(
@@ -580,6 +603,250 @@ def test_stream_cancellation_preserves_already_received_usage_trailer(monkeypatc
         "completion_tokens": 5,
         "total_tokens": 18,
     }
+
+
+# ---------------------------------------------------------------------------
+# T-PS2: call_stats carries every must-have per-call observation
+# ---------------------------------------------------------------------------
+
+
+def test_call_stats_reports_wall_clock_and_status_on_the_ok_exit(monkeypatch):
+    """(T-PS2-a) Success exit: status, wall clock, request count, finish reason."""
+    create = _FakeCreate([_Resp()])
+    client = _make(monkeypatch, create)
+    stats = {}
+
+    assert client.chat_json(
+        [{"role": "user", "content": "hi"}], "{}", call_stats=stats
+    ) == '{"ok":1}'
+
+    assert stats["status"] == "ok"
+    assert stats["attempts"] == 1
+    assert stats["attempts_observed"] is True
+    assert stats["finish_reason"] == ""
+    assert stats["response_chars"] == len('{"ok":1}')
+    assert isinstance(stats["call_wall_ms"], int) and stats["call_wall_ms"] >= 0
+
+
+def test_call_stats_reports_wall_clock_and_status_on_the_cancelled_exit(monkeypatch):
+    """(T-PS2-a) A cancelled call still spent wall clock and still hit the
+    endpoint; dropping it would silently deflate every run-level total, and the
+    billed usage its stream already delivered would vanish with it."""
+    cancel_event = threading.Event()
+    stream = _Stream(
+        usage=SimpleNamespace(prompt_tokens=13, completion_tokens=5, total_tokens=18),
+        before_usage=cancel_event.set,
+    )
+    client = _make(monkeypatch, _FakeCreate([stream]))
+    stats = {}
+
+    with pytest.raises(llm_mod.AskCancelled):
+        client.chat_json(
+            [{"role": "user", "content": "hi"}],
+            "{}",
+            cancel_event=cancel_event,
+            call_stats=stats,
+        )
+
+    assert stats["status"] == "cancelled"
+    assert stats["attempts"] == 1
+    assert stats["attempts_observed"] is True
+    assert isinstance(stats["call_wall_ms"], int) and stats["call_wall_ms"] >= 0
+    assert stats["usage"] == {
+        "prompt_tokens": 13, "completion_tokens": 5, "total_tokens": 18,
+    }
+    # No content came back, so there is no response size and no finish reason.
+    assert "response_chars" not in stats
+    assert "finish_reason" not in stats
+
+
+def test_call_stats_reports_wall_clock_and_status_on_the_error_exit(monkeypatch):
+    """(T-PS2-a) Error exit: the request WAS issued, so it is counted."""
+    create = _FakeCreate([_api_status_error(401, "denied")])
+    client = _make(monkeypatch, create)
+    stats = {}
+
+    with pytest.raises(APIStatusError):
+        client.chat_json(
+            [{"role": "user", "content": "hi"}], "{}", call_stats=stats
+        )
+
+    assert stats["status"] == "error"
+    assert stats["attempts"] == 1
+    assert stats["attempts_observed"] is True
+    assert isinstance(stats["call_wall_ms"], int) and stats["call_wall_ms"] >= 0
+    assert "response_chars" not in stats
+
+
+def test_call_stats_usage_carries_cached_and_reasoning_counters(monkeypatch):
+    """(T-PS2-b) The nested detail counters are flattened into usage, and the
+    same dict reaches llm.jsonl — the log and the out-parameter must not tell
+    two different stories about one call."""
+    usage = _usage_obj(
+        prompt_tokens_details=SimpleNamespace(cached_tokens=9),
+        completion_tokens_details=SimpleNamespace(reasoning_tokens=4),
+    )
+    client = _make(monkeypatch, _FakeCreate([_resp_with_usage(usage)]))
+    logger = _RecordingInteractionLogger()
+    client.interaction_logger = logger
+    stats = {}
+
+    client.chat_json([{"role": "user", "content": "hi"}], "{}", call_stats=stats)
+
+    assert stats["usage"] == {
+        "prompt_tokens": 11,
+        "completion_tokens": 7,
+        "total_tokens": 18,
+        "cached_tokens": 9,
+        "reasoning_tokens": 4,
+    }
+    assert logger.records[-1]["usage"] == stats["usage"]
+
+
+@pytest.mark.parametrize("usage_fields", [
+    {},                                                       # no details at all
+    {"prompt_tokens_details": None},                          # details is null
+    {"prompt_tokens_details": SimpleNamespace(other=1)},      # details lacks the leaf
+    {"prompt_tokens_details": SimpleNamespace(cached_tokens=None)},
+])
+def test_absent_cached_tokens_is_an_absent_key_never_a_zero(monkeypatch, usage_fields):
+    """(T-PS2-b) "The provider said nothing" must not be recorded as "it was 0".
+
+    A fabricated 0 is the single most misleading value here: prefix reuse is
+    judged by comparing these counters between arms, and a silent 0 reads as a
+    measured absence of reuse rather than as an unmeasured provider.
+    """
+    client = _make(
+        monkeypatch, _FakeCreate([_resp_with_usage(_usage_obj(**usage_fields))])
+    )
+    stats = {}
+
+    client.chat_json([{"role": "user", "content": "hi"}], "{}", call_stats=stats)
+
+    assert "cached_tokens" not in stats["usage"]
+    assert "reasoning_tokens" not in stats["usage"]
+    assert stats["usage"]["prompt_tokens"] == 11
+
+
+def test_a_provider_reported_zero_cached_tokens_is_kept(monkeypatch):
+    """(T-PS2-b) The rule is "never invent a zero", not "never report one":
+    a provider that explicitly measured 0 cached tokens has told us something."""
+    usage = _usage_obj(prompt_tokens_details=SimpleNamespace(cached_tokens=0))
+    client = _make(monkeypatch, _FakeCreate([_resp_with_usage(usage)]))
+    stats = {}
+
+    client.chat_json([{"role": "user", "content": "hi"}], "{}", call_stats=stats)
+
+    assert stats["usage"]["cached_tokens"] == 0
+
+
+def test_attempts_counts_transport_retries_not_loop_iterations(monkeypatch):
+    """(T-PS2-c) Two transient failures then success == three real requests."""
+    monkeypatch.setattr(llm_mod, "sleep_or_cancel", lambda *_a, **_k: None)
+    err = APIConnectionError(request=httpx.Request("POST", "https://x"))
+    create = _FakeCreate([err, err, _Resp()])
+    client = _make(monkeypatch, create)  # default OPENAI_COMPAT_MAX_RETRIES = 2
+    stats = {}
+
+    client.chat_json([{"role": "user", "content": "hi"}], "{}", call_stats=stats)
+
+    assert len(create.calls) == 3
+    assert stats["attempts"] == 3
+    assert stats["status"] == "ok"
+
+
+def test_attempts_counts_the_silent_response_format_fallback(monkeypatch):
+    """(T-PS2-d) The plain-mode fallback is a SECOND real request that leaves no
+    llm.jsonl row of its own (only the transient-retry path logs one). Counting
+    logical calls instead would report this as one request and understate the
+    endpoint's true load — the exact case `attempts_observed` exists to rule
+    out."""
+    create = _FakeCreate([ValueError("response_format unsupported"), _Resp()])
+    client = _make(monkeypatch, create)
+    stats = {}
+
+    client.chat_json([{"role": "user", "content": "hi"}], "{}", call_stats=stats)
+
+    assert len(create.calls) == 2
+    assert stats["attempts"] == 2
+    assert stats["attempts_observed"] is True
+
+
+def test_attempts_counts_the_silent_stream_options_rebuild(monkeypatch):
+    """(T-PS2-d) The other unlogged fallback: a server that rejects
+    `stream_options.include_usage` makes the client rebuild the stream, and that
+    rebuild is a real second request."""
+    unsupported = _api_status_error(
+        400, "Unsupported parameter: stream_options.include_usage"
+    )
+    create = _FakeCreate([unsupported, _Stream()])
+    client = _make(monkeypatch, create)
+    stats = {}
+
+    client.chat_json(
+        [{"role": "user", "content": "hi"}],
+        "{}",
+        cancel_event=threading.Event(),
+        call_stats=stats,
+    )
+
+    assert len(create.calls) == 2
+    assert stats["attempts"] == 2
+
+
+def test_response_chars_measures_the_reply_not_the_clipped_log_copy(monkeypatch):
+    """(T-PS2-e) llm.jsonl truncates bodies at `llm_log_max_chars`, so a size
+    read back out of the log understates every long completion. The count is
+    taken from the content the caller receives, and only the count travels —
+    the body itself stays clipped."""
+    long_reply = '{"a":"' + "x" * 500 + '"}'
+    create = _FakeCreate([_Resp(long_reply)])
+    client = _make(monkeypatch, create)
+    logger = _ClippingInteractionLogger(limit=10)
+    client.interaction_logger = logger
+    stats = {}
+
+    client.chat_json([{"role": "user", "content": "hi"}], "{}", call_stats=stats)
+
+    assert stats["response_chars"] == len(long_reply) > 10
+    assert logger.records[-1]["response_chars"] == len(long_reply)
+    assert len(logger.records[-1]["response"]["content"]) == 10
+
+
+def test_llm_log_gains_only_numbers_never_request_or_reply_text(monkeypatch):
+    """(T-PS2) The new log fields are counts. A body-bearing field added here
+    would push untrusted model text into a channel that is read back by
+    analysis tooling and shipped in reports."""
+    create = _FakeCreate([_Resp()])
+    client = _make(monkeypatch, create)
+    logger = _RecordingInteractionLogger()
+    client.interaction_logger = logger
+
+    client.chat_json([{"role": "user", "content": "hi"}], "{}")
+
+    record = logger.records[-1]
+    assert isinstance(record["attempts"], int)
+    assert isinstance(record["response_chars"], int)
+    assert set(record) <= {
+        "ts", "id", "kind", "model", "request", "finish_reason", "status",
+        "latency_ms", "attempts", "response_chars", "usage", "response",
+    }
+
+
+def test_passing_call_stats_changes_nothing_about_the_request(monkeypatch):
+    """(T-PS2) The out-parameter is an observer: same wire request, same reply.
+    A caller that passes nothing pays for nothing."""
+    without = _FakeCreate([_Resp()])
+    with_sink = _FakeCreate([_Resp()])
+    quiet = _make(monkeypatch, without)
+    loud = _make(monkeypatch, with_sink)
+    msgs = [{"role": "user", "content": "hi"}]
+
+    quiet_out = quiet.chat_json(msgs, "{}")
+    loud_out = loud.chat_json(msgs, "{}", call_stats={})
+
+    assert quiet_out == loud_out
+    assert without.calls == with_sink.calls
 
 
 def test_kg_llm_limits_have_bounded_defaults(monkeypatch):

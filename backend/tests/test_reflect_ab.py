@@ -577,6 +577,39 @@ def test_llm_usage_token_totals_are_unknown_when_any_call_lacks_that_counter():
                               "completion_tokens": usage.completion_tokens})
 
 
+def test_new_usage_counters_follow_the_same_unknown_rule_as_the_old_ones():
+    """`_usage_dict` 现在还会写 `cached_tokens` / `reasoning_tokens`,但**只有
+    provider 报了才写**(T-PS2:缺失绝不写 0)。于是窗口里混着「报了」与「没报」
+    两种记录会是常态——而这恰恰是前缀复用实验最关心的那个计数。
+
+    累加口径必须与既有两个 token 计数逐字一致:窗口内任一次调用缺该计数 ⇒ 整个
+    run 该计数 unknown。把缺的那次当 0,会让「provider 根本没测」看起来像
+    「测了,复用为零」,这两者在采纳判据里指向相反结论。
+    """
+    accumulate = importlib.import_module("app.eval.reflect_ab")._accumulate
+
+    assert accumulate(0, 9) == 9                    # 报了就累加
+    assert accumulate(9, 0) == 9                    # provider 报的 0 是真读数
+    assert accumulate(9, None) is None              # 这次没报 ⇒ unknown
+    assert accumulate(None, 9) is None              # 已经 unknown 就一直 unknown
+    assert accumulate(9, True) is None              # bool 不是计数
+    assert accumulate(9, "9") is None               # 字符串不是计数
+
+
+def test_slice_llm_usage_ignores_the_new_counters_for_now():
+    """新键进了 llm.jsonl,但成本三键的切片**这一期不读它们**:窗口归因还只报
+    prompt/completion。写在这里是为了让「哪天开始读」成为一次显式改动,而不是
+    某个字典展开顺手带出来的副作用。"""
+    start = datetime(2026, 9, 9, 12, 0, 0)
+    rich = _llm_record(1)
+    rich["usage"] = {**rich["usage"], "cached_tokens": 4, "reasoning_tokens": 2}
+    usage = slice_llm_usage([rich], start=start, end=start + timedelta(seconds=30))
+
+    assert usage.model_calls == 1
+    assert usage.prompt_tokens == 10 and usage.completion_tokens == 5
+    assert not hasattr(usage, "cached_tokens")
+
+
 def test_a_missing_finish_reason_becomes_a_short_code_not_an_empty_string():
     """空串过不了投影的短码校验,而「这次没报 finish_reason」本身要计数——
     T0 那 20% 空正文靠这一列归因(§9 硬判据 4)。"""
