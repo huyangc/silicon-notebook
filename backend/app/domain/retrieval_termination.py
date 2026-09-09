@@ -79,11 +79,39 @@ DEMOTION_KEYS_MISSING = "evidence_keys_missing"
 # import 的这一层:各写一份字面量就会出现"提示说 8、校验按 6 拒"的分叉。
 #
 # ⚠ 这两个上限**只针对模型生成的内部载荷**,绝不用来裁剪用户的主题、问题或
-# 约束(§7.1)。超限的处理是把这一轮的决定折成 invalid,不是把内容截短。
+# 约束(§7.1)。超限的处理是**按方面**拒绝那一条更新(见
+# `ASPECT_REJECTION_REASONS`),不是把内容截短,也不再作废整轮。
 #: 一个方面最多能带几个证据键。
 REFLECT_ASPECT_MAX_EVIDENCE_KEYS = 8
 #: 一个方面的 `gap`(模型写的"还缺什么")最多多少字符。
 REFLECT_ASPECT_GAP_MAX_CHARS = 240
+
+#: 一条 assessment **逐方面**被拒时的稳定原因码(闭集,§6「动作与 assessment
+#: 独立校验」)。这四条都只说明「**这一个方面**的这次更新不成立」:模型写了一个
+#: 不在清单里的 id、同一个方面给了互相冲突的两条判断、某个方面的证据键或 gap
+#: 超过协议上限。它们**不作废同一轮里其它合法的方面更新,更不作废那一轮真实的
+#: 检索动作**——一次自评笔误吞掉一次已经通过全部参数校验的检索,正是生产 68 个
+#: v2 run 里 17 轮(每轮约 40 秒)白烧的根因。
+#:
+#: 闭集之外的原因码(`not_object` / `<group>_not_list` / `<group>_overflow` /
+#: `item_not_object` / `evidence_keys_not_list` / `evidence_key_not_string` /
+#: `gap_not_string` / `invalid_status`)说的是**整份载荷的形状**不成立,按原样
+#: 整轮拒绝:那种载荷里"模型到底怎么判的"没有可明确解释的读法,而 §6 只要求
+#: 接受"可明确解释的有效方面更新"。
+#:
+#: 三个消费者共用这一份闭集(所以它住在两边都 import 得到的 domain 层):
+#: `services.reasoning_aspects` 产生它,`services.reasoning_observation` 据它
+#: 判「这条 skip 不是一次动作观察」(同轮那次动作真的执行了,它自己另有一行),
+#: `domain.reasoning_trace_stats` 据它数 `assessment_rejections`。
+ASPECT_REJECTION_REASONS: Tuple[str, ...] = (
+    "unknown_aspect", "duplicate_aspect",
+    "evidence_keys_overflow", "gap_overflow",
+)
+
+#: assessment 被拒时那条 skip 步的原因码前缀。整份形状错误(整轮 invalid)与
+#: 逐方面拒绝(动作照常执行)**共用这个前缀**:评估口径按原因码词面延续,两者
+#: 由后缀是否属于 `ASPECT_REJECTION_REASONS` 区分。
+ASSESSMENT_SKIP_REASON_PREFIX = "invalid_assessment:"
 
 #: **服务端签发的集合身份键**的前缀(§7.1)。目录题("这个库里有哪些文档?")的
 #: 支撑不是任何一条细粒度证据,而是「这个集合已经被完整列出」这件事本身——枚举

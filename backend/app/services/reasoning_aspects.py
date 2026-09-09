@@ -28,12 +28,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import (
-    Iterable, List, Mapping, Optional, Sequence, Set, Tuple,
+    Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple,
 )
 
 from app.domain.retrieval_termination import (
     ASPECT_COLLECTION_KEY_PREFIX,
-    ASPECT_CONFLICTING, ASPECT_PARTIAL, ASPECT_SUPPORTED, ASPECT_UNKNOWN,
+    ASPECT_CONFLICTING, ASPECT_PARTIAL, ASPECT_REJECTION_REASONS,
+    ASPECT_SUPPORTED, ASPECT_UNKNOWN,
     ASPECT_UNRESOLVED_STATUSES, AspectDelivery, AspectSnapshot,
     DEMOTION_KEYS_MISSING, DEMOTION_KEYS_REJECTED,
     REFLECT_ASPECT_GAP_MAX_CHARS, REFLECT_ASPECT_MAX_EVIDENCE_KEYS,
@@ -171,6 +172,17 @@ class _AspectRecord:
     model_assessed: bool = False
     demotion: str = ""
     assessment_omitted: bool = False
+    #: 这个方面**最近一次**被服务端逐条拒绝的稳定原因码(闭集
+    #: `ASPECT_REJECTION_REASONS`)。**consume-on-render**:
+    #: `render_aspect_block` 渲染出「服务端未采纳」那一格的同时清掉它,与
+    #: `nudge_pending` 同款一次性语义。挂成一次性而不是常驻状态,是因为它讲的是
+    #: 「你上一轮那条自评没被采纳」这件具体的事——每轮重复同一句斥责,模型读到的
+    #: 是一句与它这一轮做了什么无关的话,而它这一轮很可能已经改对了。
+    #:
+    #: 它**不进** `snapshot()`:快照是终态事实(这个方面最后什么状态、绑了哪些
+    #: 证据),而这一格是渲染用的一次性提示,写进跨层 DTO 只会让下游多一个它不
+    #: 该解释的字段。
+    rejected: str = ""
 
     def snapshot(self) -> AspectSnapshot:
         return AspectSnapshot(
@@ -191,6 +203,47 @@ class _Update:
     keys: Tuple[str, ...]
     gap: str
     demotion: str
+
+    @property
+    def content(self) -> Tuple[str, Tuple[str, ...], str, str]:
+        """**落账之后账本会长的样子**,不含方面身份。
+
+        这是「完全相同的重复项」的判据(§6):同一个 aspect_id 的两行,`content`
+        相等 ⇒ 无论采纳哪一条,账本落定后逐字段相同,所以确定性去重根本不需要
+        "取第一条还是最后一条"这个决定——那正是设计稿点名不许随手做的选择。
+        判据落在**规范化之后**(证据键已剔非法、已保序去重,`gap` 已按上限截,
+        `status` 已按降级规则调整),所以两行只在"抄错了哪一个池外的键"上不同、
+        落账结果完全一样时,仍然算同一条;真的会让账本落成两种样子的那种重复,
+        `content` 必然不等,走冲突那条路。
+        """
+        return (self.status, self.keys, self.gap, self.demotion)
+
+
+@dataclass(frozen=True)
+class AssessmentOutcome:
+    """`AspectLedger.apply` 的结果:**整份**判读 + **逐方面**判读(§6)。
+
+    两格刻意分开,因为它们导致的处理完全不同:
+
+    * `error` 非空 ⇒ **整份载荷形状不成立**(`not_object` /
+      `<group>_not_list` / `item_not_object` / `invalid_status` …),账本一个字
+      都没改,调用方照旧把这一轮折成一条零 I/O 的 invalid 观察。这一格非空时
+      `accepted`/`rejections` 恒为空:整份被拒就是整份被拒,不留半份副作用。
+    * `rejections` 非空 ⇒ 某几个方面的更新**按方面**被拒(闭集
+      `ASPECT_REJECTION_REASONS`),其余合法方面照常落账,**同一轮的检索动作
+      照常执行**。调用方据它记披露与 skip 步,不折叠这一轮。
+
+    `accepted` 是真正落账的方面 id(保序)。调用方今天只用它的真假,留成 id
+    序列是因为"落了哪几格"与"落了几格"在排查时不是同一个信息量。
+    """
+
+    error: str = ""
+    accepted: Tuple[str, ...] = ()
+    #: `(aspect_id, why)`。`aspect_id` 只可能是**本账本自己的** id;模型写了一个
+    #: 不在清单里的 id 时这一格是空串(`why == "unknown_aspect"` 已经说清了是
+    #: 哪回事),而那串来自模型的自由文本从不被带进 trace/披露——一个可以由模型
+    #: 决定字面的 id 出现在服务端记录里,只会给伪造留一条路。
+    rejections: Tuple[Tuple[str, str], ...] = ()
 
 
 #: `normalize_assessment_payload` 认的 (a) 设计稿列表形的顶层键。方面 id 由
@@ -327,7 +380,7 @@ class AspectLedger:
     __slots__ = (
         "_records", "_by_id", "source", "constraints",
         "assessment_prompts", "assessment_omitted", "nudge_pending",
-        "nudge_answered",
+        "nudge_answered", "unknown_aspect_rejections",
     )
 
     def __init__(
@@ -358,6 +411,12 @@ class AspectLedger:
         #: "自上次追问以来",不是"这次 run 里有没有给过自评"——后者会让一次早期
         #: 自评永久豁免掉后面所有的追问。
         self.nudge_answered: bool = False
+        #: 上一轮有几条自评因为**方面 id 不在这份清单里**被拒。它挂不到任何一条
+        #: 记录上(那个 id 本来就不存在),所以单独计数,由
+        #: `render_aspect_block` 渲染成一行并同时清零(consume-on-render,与
+        #: `_AspectRecord.rejected` 同款)。只记条数、不记那个 id:它是模型的自由
+        #: 文本,合法 id 就在同一个块里逐行列着,回显一遍不增加任何信息。
+        self.unknown_aspect_rejections: int = 0
 
     # --- 读 ---------------------------------------------------------------
     @property
@@ -459,15 +518,52 @@ class AspectLedger:
         if self.assessment_prompts and not self.nudge_answered:
             self.nudge_pending = True
 
+    def consume_rejection_notes(self) -> Tuple[Dict[str, str], int]:
+        """「上一轮哪几条自评没被采纳」→ `({aspect_id: why}, 未知 id 条数)`。
+
+        **一次性**:读完就清,与 `nudge_pending` 同款语义(见
+        `_AspectRecord.rejected`)。唯一的调用点是 `render_aspect_block`——
+        "渲染 = 已经说给模型听了"。分两格返回是因为两者挂的位置不同:前者是
+        某个方面那一行上的一格,后者挂不到任何一行上,只能单独说一句。
+
+        ⚠ **降级轮不重新置位**(知情取舍,与 `restore_pending_nudge` 刻意不同)。
+        那一格要恢复,是因为服务端**退回了一整轮**去换一份自评:成本真的付出去
+        了,而追问句谁都没看见。这一格只是一句解释,渲染它的那一轮若因 provider
+        故障没成交,代价是模型可能把同一个错误的 id 再写一次——一条自评,不是
+        一轮检索。为它多存一份"消费前的快照"再挂一条恢复路径,收益撑不起那份
+        状态。
+        """
+        notes = {
+            row.aspect_id: row.rejected for row in self._records if row.rejected
+        }
+        for row in self._records:
+            row.rejected = ""
+        unknown, self.unknown_aspect_rejections = (
+            self.unknown_aspect_rejections, 0)
+        return notes, unknown
+
     # --- 写(唯一入口) ----------------------------------------------------
     def apply(
         self, assessment: object, *, allowed_keys: Set[str],
-    ) -> str:
-        """把一份 `assessment` 落进账本。返回空串 = 接受;否则是稳定的原因码。
+    ) -> AssessmentOutcome:
+        """把一份 `assessment` 落进账本。返回 `AssessmentOutcome`(见那里)。
 
-        校验是**全有或全无**:任何一条越界都让整份载荷被拒(调用方据此把这一轮
-        折成一条 invalid 观察),账本一个字都不改。半份被吸收的评估比没有评估更
-        危险——模型下一轮看到的状态既不是它说的,也不是服务端算的。
+        校验分**两层**(设计稿 §6「动作与 assessment 独立校验」):
+
+        * **整份形状**不成立(不是对象、某一组不是列表、组内条数超过方面总数、
+          某一条不是对象、`evidence_keys` 不是列表、键不是字符串、`gap` 不是
+          字符串、`status` 不在闭集)⇒ 整份拒绝,账本一个字都不改。这一类载荷里
+          "模型到底怎么判的"没有可明确解释的读法,半份被吸收的评估比没有评估更
+          危险——模型下一轮看到的状态既不是它说的,也不是服务端算的。
+        * **单个方面**不成立(闭集 `ASPECT_REJECTION_REASONS`:未知方面 id、
+          同一方面的冲突重复项、这个方面的证据键数或 `gap` 超限)⇒ **只拒这一个
+          方面**,它保留旧状态并在下一轮的方面块里披露;同一份载荷里其它合法的
+          方面照常落账,而**这一轮的检索动作照常执行**(调用方不再折叠整轮)。
+          一次自评笔误不该吞掉一次已经通过全部参数校验的检索。
+
+        同一个方面的**完全相同**重复项确定性去重(判据见 `_Update.content`),
+        **冲突**的重复项按 `duplicate_aspect` 拒掉这个方面并保留旧状态——不取
+        首条也不取末条,那等于替模型决定它到底怎么判的。
 
         `allowed_keys` 是**两份服务端签发的身份的并集**(调用方 `_absorb_assessment`
         算出来的那一份):
@@ -496,9 +592,10 @@ class AspectLedger:
         """
         assessment = normalize_assessment_payload(assessment)
         if not isinstance(assessment, Mapping):
-            return "not_object"
-        updates: List[_Update] = []
-        claimed: Set[str] = set()
+            return AssessmentOutcome(error="not_object")
+        planned: "Dict[str, _Update]" = {}
+        rejected: "Dict[str, str]" = {}
+        unknown = 0
         for group, statuses in (
             ("supported", ()), ("unresolved", ASPECT_UNRESOLVED_STATUSES),
         ):
@@ -506,63 +603,106 @@ class AspectLedger:
             if rows is None:
                 continue
             if not isinstance(rows, (list, tuple)):
-                return f"{group}_not_list"
+                return AssessmentOutcome(error=f"{group}_not_list")
             if len(rows) > len(self._records):
-                return f"{group}_overflow"
+                return AssessmentOutcome(error=f"{group}_overflow")
             for row in rows:
-                error = self._plan_row(
-                    row, group, statuses, claimed, updates, allowed_keys)
-                if error:
-                    return error
-        if updates:
+                aspect_id, update, why = self._plan_row(
+                    row, statuses, allowed_keys)
+                if why and why not in ASPECT_REJECTION_REASONS:
+                    # 整份形状错误:**在写任何一格之前**返回,所以这条路上的
+                    # 账本、披露槽位、追问状态全都一个字没动(半份副作用正是
+                    # 这一族要防的东西)。
+                    return AssessmentOutcome(error=why)
+                if why and not aspect_id:
+                    # 未知方面 id。挂不到任何一条记录上,所以按**条**计数而不是
+                    # 按 id 归并——两条自评各写了一个清单外的 id 是两件事,而那
+                    # 两个字符串是模型的自由文本,服务端一个都不留。
+                    unknown += 1
+                    continue
+                if why:
+                    _mark_rejected(rejected, planned, aspect_id, why)
+                    continue
+                if aspect_id in rejected:
+                    # 这个方面已经被拒(冲突重复或它自己越界),后续同 id 的行
+                    # 一律不再落账:一个已经说不清怎么判的方面,不该由排在后面
+                    # 的某一行替它定下来。
+                    continue
+                prior = planned.get(aspect_id)
+                if prior is not None and prior.content != update.content:
+                    _mark_rejected(
+                        rejected, planned, aspect_id, "duplicate_aspect")
+                    continue
+                if prior is None:
+                    planned[aspect_id] = update
+                # `prior.content == update.content` ⇒ 完全相同的重复项,保留已
+                # 有的那一条(两条落账结果逐字段相同,不是"取首条"这个选择)。
+        return self._commit(planned, rejected, unknown)
+
+    def _commit(
+        self, planned: "Dict[str, _Update]", rejected: "Dict[str, str]",
+        unknown: int,
+    ) -> AssessmentOutcome:
+        """把规划结果一次性写进账本。**整份形状错误永远走不到这里。**"""
+        if planned:
             self.nudge_pending = False
             self.nudge_answered = True
-        for update in updates:
+        for update in planned.values():
             record = update.record
             record.status = update.status
             record.evidence_keys = update.keys
             record.gap = update.gap
             record.model_assessed = True
             record.demotion = update.demotion
-        return ""
+        for aspect_id, why in rejected.items():
+            self._by_id[aspect_id].rejected = why
+        self.unknown_aspect_rejections += unknown
+        return AssessmentOutcome(
+            accepted=tuple(planned),
+            rejections=tuple(rejected.items())
+            + (("", "unknown_aspect"),) * unknown,
+        )
 
     def _plan_row(
-        self, row: object, group: str, statuses: Tuple[str, ...],
-        claimed: Set[str], updates: List[_Update], allowed_keys: Set[str],
-    ) -> str:
+        self, row: object, statuses: Tuple[str, ...], allowed_keys: Set[str],
+    ) -> Tuple[str, Optional[_Update], str]:
+        """一行自评 → `(aspect_id, 待落账的更新, 原因码)`。**不写任何状态。**
+
+        原因码非空时更新为 `None`;它属于 `ASPECT_REJECTION_REASONS` ⇒ 只拒这
+        一个方面,否则 ⇒ 整份载荷不成立。`aspect_id` 只在它真是本账本的 id 时
+        非空(未知 id 那一格恒为空串,理由见 `AssessmentOutcome.rejections`)。
+        """
         if not isinstance(row, Mapping):
-            return "item_not_object"
-        aspect_id = row.get("aspect_id")
-        if not isinstance(aspect_id, str) or aspect_id not in self._by_id:
-            return "unknown_aspect"
-        if aspect_id in claimed:
-            # 同一个方面同时出现在两组、或在同一组里重复(§7.1)。两种情况下
-            # "模型到底怎么判的"都没有答案,静默取最后一条等于替它决定。
-            return "duplicate_aspect"
-        claimed.add(aspect_id)
+            return "", None, "item_not_object"
+        raw_id = row.get("aspect_id")
+        if not isinstance(raw_id, str) or raw_id not in self._by_id:
+            return "", None, "unknown_aspect"
+        aspect_id = raw_id
         raw_keys = row.get("evidence_keys")
         if raw_keys is None:
             raw_keys = ()
         if not isinstance(raw_keys, (list, tuple)):
-            return "evidence_keys_not_list"
+            return "", None, "evidence_keys_not_list"
         if len(raw_keys) > REFLECT_ASPECT_MAX_EVIDENCE_KEYS:
-            return "evidence_keys_overflow"
+            # 按方面拒绝、并如实披露稳定原因(§6)。**绝不截成前 8 个**:截断会
+            # 把一份"我引了 12 条"的判断悄悄变成一份服务端替它挑过的"已充分"。
+            return aspect_id, None, "evidence_keys_overflow"
         if any(not isinstance(key, str) for key in raw_keys):
-            return "evidence_key_not_string"
+            return "", None, "evidence_key_not_string"
         gap = row.get("gap", "")
         if gap is None:
             gap = ""
         if not isinstance(gap, str):
-            return "gap_not_string"
+            return "", None, "gap_not_string"
         if len(gap) > REFLECT_ASPECT_GAP_MAX_CHARS:
-            return "gap_overflow"
+            return aspect_id, None, "gap_overflow"
         status = ASPECT_SUPPORTED
         if statuses:
             status = row.get("status", ASPECT_PARTIAL)
             if status is None or status == "":
                 status = ASPECT_PARTIAL
             if not isinstance(status, str) or status not in statuses:
-                return "invalid_status"
+                return "", None, "invalid_status"
         keys, demotion = _legal_keys(raw_keys, allowed_keys)
         if status == ASPECT_SUPPORTED and demotion:
             # 非法键剔除后没有支撑的项**不得保持 supported**(§7.1)。降到哪一档
@@ -573,10 +713,27 @@ class AspectLedger:
                 else ASPECT_UNKNOWN)
         else:
             demotion = ""
-        updates.append(_Update(
+        return aspect_id, _Update(
             record=self._by_id[aspect_id], status=status, keys=keys,
-            gap=_clip(gap, REFLECT_ASPECT_GAP_MAX_CHARS), demotion=demotion))
-        return ""
+            gap=_clip(gap, REFLECT_ASPECT_GAP_MAX_CHARS),
+            demotion=demotion), ""
+
+
+def _mark_rejected(
+    rejected: "Dict[str, str]", planned: "Dict[str, _Update]",
+    aspect_id: str, why: str,
+) -> None:
+    """记下「这个方面本轮不采纳」,并撤掉它此前已经规划好的更新。
+
+    撤掉是**保留旧状态**这条要求的落点(§6):同一个方面先给了一条能落账的
+    判断、后面又给了一条与它冲突的,服务端不许拿前一条当答案——那就是"取首条"。
+    原因码只记**第一个**:一个方面在同一轮里可以既冲突又超限,而披露与 skip 步
+    要的是一个稳定的、与它第一次出问题同源的码,不是一串。
+
+    只处理**本账本自己的** id:未知 id 谈不上"撤掉它的更新",另按条计数。
+    """
+    planned.pop(aspect_id, None)
+    rejected.setdefault(aspect_id, why)
 
 
 def _legal_keys(
@@ -604,9 +761,10 @@ def assessment_is_empty(assessment: object) -> bool:
     `{"supported": [], "unresolved": []}`。协议上它们都说"我这一轮没有新判断",
     而收尾那一轮不允许没有判断(见 `note_missing_assessment`)。
 
-    刻意**不看内容合法性**:一份带了行但越界的载荷由 `apply` 判(它会整份拒并
-    折成 `invalid_assessment:<why>`),两条路各说各的——把"给了但不合法"也算成
-    "没给",模型会收到一句要它填它其实已经填了的东西的追问。
+    刻意**不看内容合法性**:一份带了行但越界的载荷由 `apply` 判(整份形状不成立
+    就折成 `invalid_assessment:<why>`,单个方面越界就只拒那一个方面),两条路各
+    说各的——把"给了但不合法"也算成"没给",模型会收到一句要它填它其实已经填了
+    的东西的追问。
 
     非 Mapping(模型回了个列表/字符串)也算空:`apply` 对它返回 `not_object`,
     但那条路只在字段存在时才走到;这里只回答"有没有表态",答案同样是没有。
@@ -685,6 +843,7 @@ def render_aspect_block(ledger: AspectLedger) -> str:
     rows = ledger.snapshot()
     if not rows:
         return ""
+    rejections, unknown_rejections = ledger.consume_rejection_notes()
     lines = [
         f"{ASPECT_BLOCK_TITLE}"
         f"（已支撑 {ledger.supported_count()}/{len(rows)}）"
@@ -702,7 +861,20 @@ def render_aspect_block(ledger: AspectLedger) -> str:
             # 服务端把自报 supported 降下来的依据。写在这一行上,模型下一轮才
             # 知道它引的键为什么不算数(而不是以为服务端随手改了它的判断)。
             parts.append(f"服务端降级: {row.demotion}")
+        if row.aspect_id in rejections:
+            # 上一轮这个方面的自评**没被采纳**(它的状态因此还是上面那个旧值),
+            # 与「服务端降级」并列而不是合并:降级说的是"你引的键不算数,我把
+            # 你的判断降了一档",未采纳说的是"这一条我根本没落账"。一次性,理由
+            # 见 `_AspectRecord.rejected`。
+            parts.append(f"服务端未采纳: {rejections[row.aspect_id]}")
         lines.append(" | ".join(parts))
+    if unknown_rejections:
+        # 挂不到任何一行上的那一类:模型写的方面 id 不在上面这份清单里。只说
+        # 条数与该怎么办——那个 id 是模型的自由文本,回显一遍不增加任何信息,
+        # 而合法的 id 就在上面逐行列着。
+        lines.append(
+            f"（上一轮有 {unknown_rejections} 条自评的方面 id 不在上面的清单里，"
+            "服务端未采纳；请只使用上面每行开头的那个 id。）")
     if ledger.constraints:
         lines.append(
             "约束条件: " + "、".join(_fold(item) for item in ledger.constraints))

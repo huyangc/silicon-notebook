@@ -63,7 +63,8 @@ from app.services.reasoning_actions import (
     build_reflect_capabilities,
 )
 from app.domain.retrieval_termination import (
-    ASPECT_COLLECTION_KEY_PREFIX, RetrievalTermination,
+    ASPECT_COLLECTION_KEY_PREFIX, ASSESSMENT_SKIP_REASON_PREFIX,
+    RetrievalTermination,
 )
 from app.services.reasoning_aspects import (
     AspectLedger, TERMINATION_SKIP_REASON, assessment_is_empty,
@@ -470,7 +471,11 @@ _V2_SUFFICIENT_CONTRADICTION = "sufficient_with_retrieval_action"
 #: T4:方面自评越界。后缀是 `AspectLedger.apply` 返回的稳定 why 码
 #: (`unknown_aspect` / `duplicate_aspect` / `gap_overflow` …),同样带上"哪一条
 #: 边界"——只说"评估不合法"模型下一轮多半原样再报一遍。
-_V2_INVALID_ASSESSMENT_PREFIX = "invalid_assessment:"
+#:
+#: T-BF7 起这个前缀服务**两件事**(词面刻意不分叉,评估口径因此延续):整份形状
+#: 不成立 ⇒ 照旧整轮折成 invalid;单个方面越界 ⇒ 只记一条 skip 步、动作照常执行
+#: (后缀属于 `ASPECT_REJECTION_REASONS`,那条 skip 不产生动作观察)。
+_V2_INVALID_ASSESSMENT_PREFIX = ASSESSMENT_SKIP_REASON_PREFIX
 #: 收尾载荷(`answer` + `sufficient=true`)一个方面都没自评。整份决定退回一次,
 #: 下一轮的 user 段带上逐个 id 的追问(见 `AspectLedger.note_missing_assessment`)。
 _V2_MISSING_ASSESSMENT = "missing_assessment"
@@ -484,6 +489,10 @@ _V2_MODEL_DEGRADED_PREFIX = "model_degraded:"
 #: `reflect_invalid_summary` 说过这一轮为什么不成立,两步再重复同一句只是把同
 #: 一件事上屏两次;稳定原因码在 skip 步的 detail 里,那才是排查读的地方。
 _REFLECT_INVALID_SKIP_SUMMARY = "未执行任何检索"
+
+#: 逐方面被拒的自评在 skip 步上屏的短文案。刻意**不说**"未执行任何检索"——同一
+#: 轮那个动作真的执行了,它自己另有一步;这里被跳过的只是那一条自评。
+_ASSESSMENT_REJECTED_SKIP_SUMMARY = "未采纳一条方面自评（本轮动作照常执行）"
 
 
 class _V2ArgumentError(Exception):
@@ -2901,7 +2910,8 @@ class _TraceRecorder:
     不会中途重新构造或替换 `cancel_event`。
     """
 
-    __slots__ = ("_trace", "_cancel_event", "_on_step", "_last_ts", "observer")
+    __slots__ = ("_trace", "_cancel_event", "_on_step", "_last_ts", "observer",
+                 "_deferred")
 
     def __init__(self, trace: List[TraceStep], cancel_event: CancelEvent,
                  on_step) -> None:
@@ -2909,6 +2919,9 @@ class _TraceRecorder:
         self._cancel_event = cancel_event
         self._on_step = on_step
         self._last_ts = time.perf_counter()
+        # 「排在**下一条**记账之后」的步(见 `defer`)。默认空列表 ⇒ 关闭态每次
+        # 记账只多一次空 list 的真值判断,轨迹逐字节不变。
+        self._deferred: List[TraceStep] = []
         # reflect v2 的动作观察账(设计稿 §6.1)。默认 None ⇒ **关闭态零新状态**:
         # 没有账本对象、没有转换、没有多余分配,`__call__` 只多一次 `is not None`。
         # 由 `run()` 在总闸开着时挂上——观察是 run 级的东西,而这个记账器是
@@ -2942,6 +2955,29 @@ class _TraceRecorder:
                     step.step_type, exc_info=True)
         if self._on_step:
             self._on_step(step)
+        if self._deferred:
+            queued, self._deferred = self._deferred, []
+            for item in queued:
+                self(item)
+
+    def defer(self, step: TraceStep) -> None:
+        """把这一步排到**下一次记账之后**。v2-only,今天只有一个调用点。
+
+        `_absorb_assessment` 在 `run()` 调 `reflect()` 之后、记 `reflect` 步
+        **之前**跑(`_v2_note_turn` 的位置),而它要记的那条 skip 讲的正是刚回来
+        的这份载荷。当场记账有两个具体代价,都不是风格问题:
+
+        1. **顺序**:那条 skip 会排在它所解释的 `reflect` 步前面;
+        2. **计时**:每步耗时是相邻两次记账的墙钟差,所以当场记账会让这条零成本
+           的记账步吞掉整次反思调用的时间,而 `reflect` 步显示 0ms —— 一次真实
+           的成本被记到了错误的那一行上。
+
+        排队解决两者,而且**不往 `run()` 里加语句**(它在零松弛的长度天花板下)。
+        安全性靠一条硬事实:`_v2_note_turn` 与它后面那句
+        `record(TraceStep(step_type="reflect", …))` 之间没有任何别的记账点,所以
+        排进来的步一定在下一瞬间、紧跟那条 reflect 步落定。
+        """
+        self._deferred.append(step)
 
 
 @dataclass(slots=True)
@@ -3921,10 +3957,21 @@ class ReasoningRetriever:
         都不进来。
 
         `assessment` 是同一次 reflect 的**附加**结果:缺省不算 invalid(模型完全
-        可以只给动作,设计稿 §7.1),所以 `None` 原样返回。给了但越界的,按 §7.1
-        「超限按 invalid 决定处理」走 T2 已有的那条路——`_reflect_invalid` 产出的
-        伪动作决定,`run()` 的链尾照常记零 I/O 观察、扣一步、进 stale 记账。原因码
-        带上是哪一条边界(`invalid_assessment:<why>`)。
+        可以只给动作,设计稿 §7.1),所以 `None` 原样返回。
+
+        ⚠ **动作与 assessment 独立校验(设计稿 §6,T-BF7)。** 给了但越界的载荷
+        分两族,处理完全不同:
+
+        * **整份形状**不成立(`not_object` / `<group>_not_list` /
+          `item_not_object` / `invalid_status` …)⇒ 照旧走 T2 那条路:
+          `_reflect_invalid` 产出的伪动作决定,`run()` 的链尾记零 I/O 观察、扣
+          一步、进 stale 记账,原因码带上是哪一条边界
+          (`invalid_assessment:<why>`);
+        * **单个方面**不成立(`ASPECT_REJECTION_REASONS` 那个闭集)⇒ **这一轮的
+          动作照常执行**,只有那个方面的更新不落账(它保留旧状态,并在下一轮的
+          方面块里披露「服务端未采纳」),另记一条不产生动作观察的 skip 步。
+          生产 68 个 v2 run 里 17 轮整轮作废(每轮约 40 秒)全部来自这一族:模型
+          的动作参数已经通过了全部校验,吞掉它的是它自己写的一句自评。
 
         **一份 invalid 决定的 assessment 不被吸收**:`_reflect_invalid` 产出的
         决定上根本没有这个字段。这是刻意的——整份载荷已经被判不成立,再采纳它的
@@ -3956,11 +4003,13 @@ class ReasoningRetriever:
             state.collected, state.elements, state.chunks,
             state.ever_shown_outline_keys)
         allowed |= complete_enumeration_keys(state.enum_chains)
-        why = state.aspects.apply(decision.assessment, allowed_keys=allowed)
-        if not why:
+        outcome = state.aspects.apply(decision.assessment, allowed_keys=allowed)
+        if not outcome.error:
+            # 逐方面被拒的那几条:合法动作照常执行,只记披露与 skip 步。
+            self._note_assessment_rejections(state, outcome.rejections)
             return self._nudge_missing_assessment(state, decision, *nudge_args)
         folded = _reflect_invalid(
-            f"{_V2_INVALID_ASSESSMENT_PREFIX}{why}",
+            f"{_V2_INVALID_ASSESSMENT_PREFIX}{outcome.error}",
             decision.invalid_requested_action or decision.next_action)
         # 这一族 invalid 与解析期那几族不同:动作参数**已经全部通过校验**,那次
         # 请求是真实存在过的。身份串在折叠前算好带走,否则观察行会把一次
@@ -3968,6 +4017,32 @@ class ReasoningRetriever:
         # 请求了什么,也无从判断该不该重来一次。
         folded.invalid_request_identity = v2_request_identity(decision)
         return folded
+
+    def _note_assessment_rejections(
+        self, state: "_ReasoningRunState", rejections,
+    ) -> None:
+        """逐方面被拒的自评 → 每条一步零 I/O 的 `skip`(v2-only)。
+
+        **一个方面一条**,原因码词面与整轮作废那一族逐字相同
+        (`invalid_assessment:<why>`):放量评估按原因码统计,换一套新词面等于让
+        T-BF7 之前的数据与之后的数据对不上。两者仍然分得开——后缀属不属于
+        `ASPECT_REJECTION_REASONS` 就是判据,投影的 `assessment_rejections` 正是
+        据它只数「拒了几个方面」。
+
+        这条 skip **不产生动作观察**(见 `reasoning_observation
+        .NON_ACTION_ASSESSMENT_SKIP_REASONS`):同一轮那个动作真的执行了,它自己
+        另有一行;两行都记的话,同一次请求会在观察账上出现两遍。
+
+        `aspect_id` 只写本账本自己的 id,未知 id 那一格是空串——那串是模型的
+        自由文本,服务端的轨迹里不留它(`AssessmentOutcome.rejections` 同款口径)。
+        排队记账的理由见 `_TraceRecorder.defer`。
+        """
+        for aspect_id, why in rejections:
+            state.record.defer(TraceStep(
+                step_type="skip",
+                summary=_ASSESSMENT_REJECTED_SKIP_SUMMARY,
+                detail={"reason": f"{_V2_INVALID_ASSESSMENT_PREFIX}{why}",
+                        "aspect_id": aspect_id}))
 
     def _nudge_missing_assessment(
         self, state: "_ReasoningRunState", decision: "ReflectDecision",

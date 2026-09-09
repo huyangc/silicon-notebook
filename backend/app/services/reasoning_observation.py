@@ -36,6 +36,9 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import List, Mapping, Optional, Sequence, Tuple
 
+from app.domain.retrieval_termination import (
+    ASPECT_REJECTION_REASONS, ASSESSMENT_SKIP_REASON_PREFIX,
+)
 from app.services.reasoning_actions import (
     ADD_SUBQUERY_ACTION, CONSULT_MEMORY, ENUMERATE_ELEMENTS,
     ENUMERATE_KG_OBJECTS, EXACT_LOOKUP_ACTION, EXPAND_COMMUNITY_ACTION,
@@ -239,11 +242,30 @@ NON_ACTION_SKIP_REASONS: frozenset = frozenset({
     "retrieval_termination",
 })
 
+#: **逐方面**被拒的自评留下的 skip 原因码(全集)。它们同样不是一次动作观察:
+#: 这一轮模型请求的那个动作**真的执行了**,它自己另有一行观察。两行都记的话,
+#: 同一次 `search_chunks "布局收敛"` 会在账上出现两次(一次 invalid、一次
+#: success),而模型据观察行判断"这条请求该不该重来"——重复的请求身份正好把
+#: 那个判断带反。整份形状不成立的那一族(同一个前缀、后缀不在这个闭集里)不在
+#: 其中:那一轮真的被整份折成了 invalid,零 I/O,它就是那次动作的执行结果。
+NON_ACTION_ASSESSMENT_SKIP_REASONS: frozenset = frozenset(
+    f"{ASSESSMENT_SKIP_REASON_PREFIX}{code}"
+    for code in ASPECT_REJECTION_REASONS
+)
+
+
+def is_non_action_skip(reason: str) -> bool:
+    """这条 skip 该不该产生一条动作观察。`True` = 不产生。"""
+    return (reason in NON_ACTION_SKIP_REASONS
+            or reason in NON_ACTION_ASSESSMENT_SKIP_REASONS)
+
 #: v2 把一份可识别但不可执行/参数不合法的载荷折成的原因码前缀(见
 #: `parse_reflect_v2`)。前缀式的三族分别落 unavailable / invalid。
 _UNAVAILABLE_REASON_PREFIX = "unavailable_action:"
-#: `invalid_assessment:` 是 T4 的方面自评越界(方面 id 不合法、同一方面重复、
-#: 每方面键数或 gap 超限…)。与另外两族同理落 invalid:载荷本身不成立,零 I/O。
+#: `invalid_assessment:` 是自评载荷**整份形状**不成立(不是对象、某一组不是
+#: 列表、某一条不是对象、`status` 不在闭集…)。与另外两族同理落 invalid:载荷
+#: 本身不成立,零 I/O。**逐方面**被拒的那一族共用这个前缀,但它根本不产生动作
+#: 观察(见 `NON_ACTION_ASSESSMENT_SKIP_REASONS`),所以走不到这张表。
 _INVALID_REASON_PREFIXES = (
     "missing_argument:", "invalid_argument:", "invalid_assessment:")
 #: v2 §5.2:反思调用本身失败、但这一轮不收尾(连续失败还没到两轮)。落
@@ -511,7 +533,7 @@ def observation_from_step(
         str(x) for x in (detail.get("result_ids") or []) if str(x))
     if step_type == "skip":
         reason = str(detail.get("reason", "") or "")
-        if reason in NON_ACTION_SKIP_REASONS:
+        if is_non_action_skip(reason):
             return None
         if pending is None:
             # 首轮阶段的 skip(没接线、没图…)也是真实发生的事,但它没有动作
