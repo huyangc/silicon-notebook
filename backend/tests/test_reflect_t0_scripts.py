@@ -2482,3 +2482,122 @@ def test_unknown_measurements_are_missing_not_zero(tmp_path, capsys):
             bucket["n_missing"] += entry["n_missing"]
     assert merged["run_wall_ms"] == {"n_observed": 1, "n_missing": 1}
     assert merged["prefix_turns"] == {"n_observed": 1, "n_missing": 1}
+
+
+def test_optimization_pairs_hold_the_policy_version_fixed(tmp_path, capsys):
+    """沿 `optimization` 配对时 `policy_version` 固定:拿 legacy 的 `off` 去比
+    v2 的 `prefix_snapshot`,差值里混着两处改动,谁也归因不了。
+
+    变异:把 `optimization_pair_table` 的格依据里的 `policy_version` 去掉 ⇒
+    第二段的 `pairs == []` 断言红。
+    """
+    js = tmp_path / "t0.json"
+    same_policy = _write_rows(tmp_path / "a.jsonl", [
+        _measured_row(run_wall_ms=10000, model_calls_real=4),
+        _measured_row(optimization="prefix_snapshot", run_wall_ms=6000,
+                      model_calls_real=4, prefix_bytes_median=3134),
+    ])
+    analyze.main([str(same_policy), "--out-json", str(js)])
+    capsys.readouterr()
+    pairs = json.loads(js.read_text("utf-8"))["optimization_pairs"]
+    assert len(pairs) == 1
+    assert pairs[0]["arm_dimension"] == "optimization"
+    assert pairs[0]["policy_version"] == "v2"
+    assert pairs[0]["variant_arm"] == "prefix_snapshot"
+    assert pairs[0]["off"]["run_wall_ms"] == 10000.0
+    assert pairs[0]["variant"]["run_wall_ms"] == 6000.0
+    assert pairs[0]["variant"]["prefix_bytes_median"] == 3134.0
+
+    cross_policy = _write_rows(tmp_path / "b.jsonl", [
+        _row(optimization="off"),
+        _measured_row(optimization="prefix_snapshot"),
+    ])
+    analyze.main([str(cross_policy), "--out-json", str(js)])
+    capsys.readouterr()
+    assert json.loads(js.read_text("utf-8"))["optimization_pairs"] == []
+
+
+def test_optimization_pairs_need_the_off_baseline_and_a_declared_arm(
+    tmp_path, capsys,
+):
+    """`unknown` 不当臂,基线必须是 `off`。
+
+    一条没声明 optimization 的 run 在这条轴上没有身份;拿它当一臂等于给差值找了
+    个不知道是什么的对照面。
+
+    变异:把 `optimization_pair_table` 里跳过 `unknown` 的那两行删掉 ⇒ 第一段红
+    (`unknown` 会被当成一个变体,和 `off` 配成一对)。
+    """
+    js = tmp_path / "t0.json"
+    undeclared = _write_rows(tmp_path / "a.jsonl", [
+        _measured_row(optimization="off"),
+        _measured_row(optimization="unknown"),
+    ])
+    analyze.main([str(undeclared), "--out-json", str(js)])
+    capsys.readouterr()
+    assert json.loads(js.read_text("utf-8"))["optimization_pairs"] == []
+
+    # 两个变体、没有 `off`:一对都配不出来(不许拿其中一个变体当基线)。
+    no_baseline = _write_rows(tmp_path / "b.jsonl", [
+        _measured_row(optimization="prefix_snapshot"),
+        _measured_row(optimization="prefix_delta"),
+    ])
+    analyze.main([str(no_baseline), "--out-json", str(js)])
+    capsys.readouterr()
+    assert json.loads(js.read_text("utf-8"))["optimization_pairs"] == []
+
+    # 同一格里两个变体 + `off`:两行,各自与 `off` 比。
+    both = _write_rows(tmp_path / "c.jsonl", [
+        _measured_row(),
+        _measured_row(optimization="prefix_snapshot"),
+        _measured_row(optimization="prefix_delta"),
+    ])
+    analyze.main([str(both), "--out-json", str(js)])
+    capsys.readouterr()
+    pairs = json.loads(js.read_text("utf-8"))["optimization_pairs"]
+    assert [pair["variant_arm"] for pair in pairs] == [
+        "prefix_delta", "prefix_snapshot"]
+
+
+def test_policy_pairs_do_not_require_a_matching_optimization_but_report_it(
+    tmp_path, capsys,
+):
+    """legacy vs v2 **不**要求两侧 `optimization` 相同——`optimization` 对
+    legacy 结构上不成立(v2 总闸关时恒 `off`),要求相同就永远配不出
+    「legacy vs v2+prefix_snapshot」这一对,而那正是最终要看的对照。
+
+    代价是 v2 那侧可能混着两个 optimization,所以每一侧都如实报出自己的分布。
+
+    变异:给 `pair_table` 的格依据加上 `optimization` ⇒ 第一段的 `len(pairs)==1`
+    红;把 `_pair_side` 里的 `optimization` 分布删掉 ⇒ 最后两条断言红。
+    """
+    js = tmp_path / "t0.json"
+    source = _write_rows(tmp_path / "a.jsonl", [
+        _row(optimization="off"),
+        _measured_row(optimization="prefix_snapshot"),
+        _measured_row(optimization="off"),
+    ])
+    analyze.main([str(source), "--out-json", str(js)])
+    capsys.readouterr()
+    pairs = json.loads(js.read_text("utf-8"))["pairs"]
+    assert len(pairs) == 1
+    assert pairs[0]["arm_dimension"] == "policy_version"
+    assert pairs[0]["legacy"]["optimization"] == {"off": 1}
+    # 混合可见:v2 那侧两批 run 装在一起,均值是混合值。
+    assert pairs[0]["v2"]["optimization"] == {"off": 1, "prefix_snapshot": 1}
+    assert pairs[0]["v2"]["n_runs"] == 2
+
+
+def test_the_markdown_report_renders_both_arm_axes(tmp_path, capsys):
+    source = _write_rows(tmp_path / "rows.jsonl", [
+        _measured_row(),
+        _measured_row(optimization="prefix_snapshot"),
+        _row(optimization="off"),
+    ])
+    md = tmp_path / "t0.md"
+    analyze.main([str(source), "--out-md", str(md)])
+    capsys.readouterr()
+    rendered = md.read_text("utf-8")
+    assert "## legacy / v2 对照(成对)" in rendered
+    assert "## off / 优化变体对照(成对,同 policy_version)" in rendered
+    assert "prefix_snapshot" in rendered

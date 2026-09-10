@@ -17,6 +17,8 @@
 * **小样本不出分位数**:`n_observed < --min-samples` 的格子只报计数。
 * **对照成对**:legacy 与 v2 只在 `question_key` + `corpus_cell` + `effort`
   三者相同时配对(§4.2);线上导出的 legacy 没有 `question_key`,只进基线表。
+  臂有**两条轴**(`ARM_DIMENSIONS`):`policy_version`(legacy/v2)与
+  `optimization`(`off` / 前缀复用各变体),各出一张成对表,不合成四象限。
 """
 from __future__ import annotations
 
@@ -108,6 +110,27 @@ PAIR_DIMENSIONS: tuple[str, ...] = (
     "has_intent_contract",
 )
 
+#: 一条 run 的**臂身份**是这两个键的一对(T-PS4)。它们刻意都不在
+#: `PAIR_DIMENSIONS` 里:配对的定义就是「同一格里两条只在臂上不同的 run」,把臂
+#: 写进分格依据会让每一格只剩一条 run,一对都配不出来。
+#:
+#: 两条轴各自配一张表,而不是合成一个四象限:
+#:
+#: * `pair_table` 沿 `policy_version` 配(legacy vs v2)。**不**要求两侧
+#:   `optimization` 相同——`optimization` 对 legacy 结构上不成立(v2 总闸关时
+#:   `reflect_optimization()` 恒 `off`),要求相同就等于永远配不出
+#:   「legacy vs v2+prefix_snapshot」这一对,而那恰恰是最终要看的那个对照。
+#:   代价是 v2 那一侧可能同时装着两个 optimization 的 run,于是均值是个混合值;
+#:   所以每一侧都**如实报出自己的 `optimization` 分布**(见 `_pair_side`),让
+#:   混合可见,而不是让它悄悄进均值。
+#: * `optimization_pair_table` 沿 `optimization` 配(`off` vs 各变体),此时
+#:   `policy_version` 是**固定**的:拿 legacy 的 `off` 去比 v2 的
+#:   `prefix_snapshot`,差值里混着两处改动,谁也归因不了。
+ARM_DIMENSIONS: tuple[str, ...] = ("policy_version", "optimization")
+
+#: 沿 `optimization` 配对时的基线臂。`off` 是「测量开着但一处优化都没上」的那一
+#: 臂(计划 §5 Q2:测量开关与 `optimization` 正交),所有变体都与它比。
+OPTIMIZATION_BASELINE = "off"
 
 
 def load_rows(paths: Sequence[str]) -> list[dict]:
@@ -270,21 +293,87 @@ def pair_table(rows: Sequence[dict]) -> list[dict]:
     for key, sides in sorted(cells.items()):
         if not (sides["legacy"] and sides["v2"]):
             continue
-        entry = dict(zip(PAIR_DIMENSIONS, key))
+        entry: dict[str, Any] = dict(zip(PAIR_DIMENSIONS, key))
+        entry["arm_dimension"] = "policy_version"
         for policy in ("legacy", "v2"):
-            side = sides[policy]
-            entry[policy] = {
-                "n_runs": len(side),
-                "reflect_turns": _mean(side, "reflect_turns"),
-                "total_ms": _mean(side, "total_ms"),
-                "anchors": _mean(side, "anchors"),
-                "termination_reason": dict(sorted(Counter(
-                    UNKNOWN if row.get("termination_reason") is None
-                    else str(row["termination_reason"]) for row in side
-                ).items())),
-            }
+            entry[policy] = _pair_side(sides[policy])
         table.append(entry)
     return table
+
+
+def optimization_pair_table(rows: Sequence[dict]) -> list[dict]:
+    """`off` / 各优化变体的成对对照(T-PS4 的第二维臂)。
+
+    与 `pair_table` 的分工见 `ARM_DIMENSIONS`:这一张沿 `optimization` 配,
+    `policy_version` **固定**——所以格的依据是 `PAIR_DIMENSIONS` 再加
+    `policy_version`,而 `optimization` 是臂。
+
+    `unknown` 不当臂:一条没声明 optimization 的 run(线上导出、或 rig 忘了传)
+    在这条轴上没有身份,拿它当一臂等于给差值找了个不知道是什么的对照面。基线恒
+    为 `off`,每个变体各出一行;同一格里出现两个变体就是两行,各自与 `off` 比。
+    """
+    cells: dict[tuple, dict[str, list[dict]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
+    for row in rows:
+        if str(row.get("question_key") or UNKNOWN) == UNKNOWN:
+            continue
+        optimization = str(row.get("optimization") or UNKNOWN)
+        if optimization == UNKNOWN:
+            continue
+        key = tuple(
+            str(row.get(dim) or UNKNOWN)
+            for dim in (*PAIR_DIMENSIONS, "policy_version")
+        )
+        cells[key][optimization].append(row)
+
+    table: list[dict] = []
+    for key, arms in sorted(cells.items()):
+        baseline = arms.get(OPTIMIZATION_BASELINE)
+        if not baseline:
+            continue
+        for label, side in sorted(arms.items()):
+            if label == OPTIMIZATION_BASELINE:
+                continue
+            entry: dict[str, Any] = dict(
+                zip((*PAIR_DIMENSIONS, "policy_version"), key)
+            )
+            entry["arm_dimension"] = "optimization"
+            entry["variant_arm"] = label
+            entry[OPTIMIZATION_BASELINE] = _pair_side(baseline)
+            entry["variant"] = _pair_side(side)
+            table.append(entry)
+    return table
+
+
+#: 每一侧都报的那几个数。前缀三格与 `model_calls_real` 在这里而不是只在分组表
+#: 里:配对差值表是 T-PS4 唯一要回答的那个问题(「前缀复用换到了什么」)的落点。
+PAIR_SIDE_METRICS: tuple[str, ...] = (
+    "reflect_turns", "total_ms", "anchors", "run_wall_ms", "model_calls_real",
+    "prefix_bytes_median", "prefix_turns",
+)
+
+
+def _pair_side(rows: Sequence[dict]) -> dict:
+    """一侧(一条臂)的汇总。
+
+    `optimization` 的分布**如实报出**:沿 `policy_version` 配对时,v2 那一侧可
+    能同时装着 `off` 与 `prefix_snapshot` 两批 run,于是每个均值都是混合值。这
+    一格让混合当场可见——空着它,读表的人会以为自己在看单一臂。
+    """
+    side: dict[str, Any] = {"n_runs": len(rows)}
+    for metric in PAIR_SIDE_METRICS:
+        side[metric] = _mean(rows, metric)
+    side["termination_reason"] = _distribution(rows, "termination_reason")
+    side["optimization"] = _distribution(rows, "optimization")
+    return side
+
+
+def _distribution(rows: Sequence[dict], metric: str) -> dict:
+    return dict(sorted(Counter(
+        UNKNOWN if row.get(metric) is None else str(row[metric])
+        for row in rows
+    ).items()))
 
 
 def _mean(rows: Sequence[dict], metric: str) -> float | None:
@@ -370,6 +459,31 @@ def render_markdown(report: dict) -> str:
     else:
         lines.append("(没有成对样本:输入里没有同时带 `question_key` 的两侧 run)")
 
+    lines += ["", "## off / 优化变体对照(成对,同 policy_version)", ""]
+    if report["optimization_pairs"]:
+        lines += _md_table(
+            [*PAIR_DIMENSIONS, "policy_version", "variant",
+             "off n", "variant n", "off run_wall_ms", "variant run_wall_ms",
+             "off model_calls_real", "variant model_calls_real",
+             "variant prefix_bytes_median"],
+            [
+                [*(pair[dim] for dim in PAIR_DIMENSIONS),
+                 pair["policy_version"], pair["variant_arm"],
+                 pair[OPTIMIZATION_BASELINE]["n_runs"],
+                 pair["variant"]["n_runs"],
+                 pair[OPTIMIZATION_BASELINE]["run_wall_ms"],
+                 pair["variant"]["run_wall_ms"],
+                 pair[OPTIMIZATION_BASELINE]["model_calls_real"],
+                 pair["variant"]["model_calls_real"],
+                 pair["variant"]["prefix_bytes_median"]]
+                for pair in report["optimization_pairs"]
+            ],
+        )
+    else:
+        lines.append(
+            "(没有成对样本:输入里没有同题同格、`optimization` 一侧为 `off`"
+            " 另一侧为变体的 run)"
+        )
     return "\n".join(lines) + "\n"
 
 
@@ -403,6 +517,7 @@ def build_report(
             for key, members in grouped.items()
         ],
         "pairs": pair_table(rows),
+        "optimization_pairs": optimization_pair_table(rows),
     }
 
 
