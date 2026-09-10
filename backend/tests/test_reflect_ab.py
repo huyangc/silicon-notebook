@@ -1017,6 +1017,31 @@ def test_run_ab_once_refuses_a_settings_that_disagrees_with_the_arm(rrepo):
         )
 
 
+def test_run_ab_once_refuses_a_repo_whose_optimization_disagrees(rrepo, monkeypatch):
+    """声明 `prefix_snapshot`、repo 那份 Settings 却跑 `off` ⇒ 当场报错。
+
+    臂的第二维**只有这一次**核对机会:两条 v2 臂的轨迹形状逐字相同,事后从产物
+    里反推不出来。最常见的一种不符是静默降级——v2 总闸没开或 Knowhow 否决时
+    `reflect_optimization()` 恒返回 `off`,配置里写了什么都不看,那时两条臂在跑
+    同一件事而数据看起来完全正常。
+
+    这里把 v2 总闸打开(否则先撞上 `reflect_v2_active` 那条断言),只让第二维
+    对不上:错的那一条断言必须是关于 optimization 的。
+    """
+    notebook = _seed_two_nodes(rrepo)
+    # 改**实例**字段(pydantic 的字段住在实例上,不在类上);monkeypatch 负责
+    # 还原,否则同一个 `rrepo` 的后续用例会跑在一份它没要的策略上。
+    monkeypatch.setattr(rrepo.settings, "reasoning_reflect_v2_enabled", True)
+    with pytest.raises(RuntimeError, match="optimization"):
+        rig.run_ab_once(
+            rrepo, notebook=notebook.id,
+            item={"question": "RTL到GDSII流程", "effort": "standard"},
+            arm="v2", optimization="prefix_snapshot", contract=None,
+            on_trace=None, cancel_event=threading.Event(),
+            actor_id="ab-owner",
+        )
+
+
 def test_knowhow_keeps_reflect_v2_off_even_when_the_switch_is_on(rrepo):
     """§5.5-5:Knowhow 不设臂,两条臂对它逐字相同。"""
     v2_settings = rrepo.settings.model_copy()
@@ -1699,6 +1724,70 @@ def test_both_process_envs_carry_exactly_the_same_keys():
     assert (set(rig._ab_process_env(without))
             - set(rig._search_process_env(without)) == AB_ONLY_ENV_KEYS)
     assert "SILICON_NOTEBOOK_ENV_FILE" not in rig._ab_process_env(without)
+
+
+def _isolate_arm_env(monkeypatch) -> None:
+    """`_settings_by_arm` 直接写 `os.environ`(它要的正是「像后端那样起来」)。
+
+    先用 `monkeypatch.setenv` 把这三项各设一次:monkeypatch 在**这一刻**记下原值,
+    teardown 时无条件还原/删除,不管中间被谁直接改过。不做这一步,这几条用例会
+    把 `REASONING_REFLECT_V2_ENABLED=true` 漏给同一个 worker 里后面的用例——
+    `search` 那条路的接线用例于是跑在一份它没要的策略上。
+    """
+    monkeypatch.setenv("REASONING_REFLECT_V2_ENABLED", "false")
+    monkeypatch.setenv("REASONING_REFLECT_OPTIMIZATION", "off")
+    monkeypatch.setenv("REASONING_REFLECT_MEASURE_CONTEXT", "true")
+
+
+def test_each_arm_gets_a_settings_built_with_its_own_optimization(monkeypatch):
+    """每条臂的 `Settings` 是**按那条臂的环境构造出来**的,不是热改一个字段。
+
+    `Settings` 带跨字段校验与别名解析,绕过构造器改一个值不会重跑它们;而这里要
+    的正是「像后端那样按这两个开关起来的一份配置」。臂由 repo 承载
+    (`AskService._build_reasoning_retriever` 读构造期的 Settings),所以这一份
+    构造错了,那条臂整批跑的就是另一件事,而数据从形状上看不出来。
+    """
+    _isolate_arm_env(monkeypatch)
+    arms = [("legacy", "off"), ("v2", "prefix_snapshot")]
+    built = rig._settings_by_arm(arms)
+    assert set(built) == set(arms)
+    assert built[("legacy", "off")].reasoning_reflect_v2_enabled is False
+    assert built[("legacy", "off")].reasoning_reflect_optimization == "off"
+    assert built[("v2", "prefix_snapshot")].reasoning_reflect_v2_enabled is True
+    assert (built[("v2", "prefix_snapshot")].reasoning_reflect_optimization
+            == "prefix_snapshot")
+    assert all(s.reasoning_reflect_measure_context for s in built.values())
+
+
+def test_an_env_file_that_pins_the_optimization_stops_the_batch(monkeypatch):
+    """显式环境变量被盖住 ⇒ 响亮失败,不静默跑出一批臂对不上号的数据。
+
+    `--env-file` 指向主 checkout 的 `.env`,那里写死一个
+    `REASONING_REFLECT_OPTIMIZATION` 是完全可能的;盖住之后两条臂会双双跑同一
+    档,差值表恒等于噪声。
+    """
+    _isolate_arm_env(monkeypatch)
+
+    class _Pinned:
+        """构造出来的那一份恒是 `off`,不管环境里设了什么。"""
+
+        reasoning_reflect_v2_enabled = True
+        reasoning_reflect_optimization = "off"
+        reasoning_reflect_measure_context = True
+
+    import app.core.config as config
+
+    monkeypatch.setattr(config, "Settings", _Pinned)
+    with pytest.raises(RuntimeError, match="REASONING_REFLECT_OPTIMIZATION"):
+        rig._settings_by_arm([("v2", "prefix_snapshot")])
+
+
+def test_an_arm_whose_measurement_switch_is_off_stops_the_batch(monkeypatch):
+    """一把尺子那条约束也是硬断言,不是一行告警(拍板 Q2)。"""
+    _isolate_arm_env(monkeypatch)
+    monkeypatch.setenv("REASONING_REFLECT_MEASURE_CONTEXT", "false")
+    with pytest.raises(RuntimeError, match="MEASURE_CONTEXT"):
+        rig._settings_by_arm([("v2", "off")])
 
 
 def test_the_ab_arms_share_one_measurement_ruler():
