@@ -63,8 +63,8 @@ _MARKER_CODE_LEN = 12
 
 
 def _marker_code(
-    *, seed: int, block_index: int, arm: str, component: str, index: int,
-    marker_variant: int,
+    *, seed: int, tier: str, block_index: int, arm: str, component: str,
+    index: int, marker_variant: int,
 ) -> str:
     """一个定宽、无语义的十六进制短码。
 
@@ -73,17 +73,23 @@ def _marker_code(
     密码学性质,`component`(`"head"` 或 `"tail"`)与 `arm` 都进摘要输入,是
     为了让 stable 的 head 序列、stable 的 tail 序列、disturbed 的 head 序列、
     disturbed 的 tail 序列这四条流互不相交(§9.1「两臂使用不相同的标识,减少
-    彼此污染」)。
+    彼此污染」)。`tier` 也进摘要输入(codex #T-EX3 F1):一个「序列」的身份是
+    `(tier, block_index, arm)`,不是 `(block_index, arm)`——三个长度档的调用
+    在计划里顺序执行(§9.1「各序列内部保持连续」是 tier 外层),`tier` 缺席时
+    不同档位的同一 `(block_index, arm)` 会复用同一批标记值与
+    (`render_sample` 三档互为前缀的)同一段正文前缀,后一档的调用因此不再是
+    「全新前缀」,把两臂的时间差系统性压小、也污染 `first_observation` 的
+    读法。
     """
     payload = (
-        f"{seed}:{block_index}:{arm}:{component}:{index}:{marker_variant}"
+        f"{seed}:{tier}:{block_index}:{arm}:{component}:{index}:{marker_variant}"
     )
     digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
     return digest[:_MARKER_CODE_LEN]
 
 
 def build_marker_pair(
-    seed: int, block_index: int, arm: str, call_index: int,
+    seed: int, tier: str, block_index: int, arm: str, call_index: int,
     *, marker_variant: int = 0,
 ) -> tuple[str, str]:
     """一次调用要发的 `(head, tail)` 两个标记短码(design §9.1 的两臂构造)。
@@ -92,14 +98,18 @@ def build_marker_pair(
     响亮报错——两臂在这个函数里的差别**只有**「哪一端固定、哪一端逐次变化」,
     没有第三种布局。
 
-    * **stable**:同一个 `(seed, block_index)` 序列内,`head` 对所有
+    一个「序列」的身份是 `(tier, block_index, arm)`(codex #T-EX3 F1;不是
+    `(block_index, arm)`——三个长度档各跑一遍同样的 `(block_index, arm)`
+    组合,`tier` 缺席会让三档共用同一条标记流):
+
+    * **stable**:同一个 `(tier, block_index)` 序列内,`head` 对所有
       `call_index` 恒定(`head_index = 0`),`tail` 逐次不同
       (`tail_index = call_index`);
     * **disturbed**:反过来,`head` 逐次不同、`tail` 序列内恒定。
 
     `marker_variant` 是「换标记值重复验证」的开关(§9.1「更换标记值重复验证」):
-    同一批 `(seed, block_index, arm, call_index)` 换一个 `marker_variant` 就
-    拿到一组全新的值,而计划形状(哪端固定哪端变)不变。
+    同一批 `(seed, tier, block_index, arm, call_index)` 换一个
+    `marker_variant` 就拿到一组全新的值,而计划形状(哪端固定哪端变)不变。
 
     只声明字符/字节匹配,不声明 token 匹配:这里没有可用的 tokenizer,`head`/
     `tail` 全部由 ASCII 十六进制字符 + 一个字母前缀拼成,`len(s) ==
@@ -117,12 +127,12 @@ def build_marker_pair(
             f"{ARM_STABLE!r} or {ARM_DISTURBED!r}"
         )
     head = "H" + _marker_code(
-        seed=seed, block_index=block_index, arm=arm, component="head",
-        index=head_index, marker_variant=marker_variant,
+        seed=seed, tier=tier, block_index=block_index, arm=arm,
+        component="head", index=head_index, marker_variant=marker_variant,
     )
     tail = "T" + _marker_code(
-        seed=seed, block_index=block_index, arm=arm, component="tail",
-        index=tail_index, marker_variant=marker_variant,
+        seed=seed, tier=tier, block_index=block_index, arm=arm,
+        component="tail", index=tail_index, marker_variant=marker_variant,
     )
     return head, tail
 
@@ -220,7 +230,7 @@ def probe_plan(
                 series_index = series_counter
                 series_counter += 1
                 for call_index in range(calls_per_series):
-                    head, tail = build_marker_pair(seed, block_index, arm, call_index)
+                    head, tail = build_marker_pair(seed, tier, block_index, arm, call_index)
                     rows.append({
                         "tier": tier,
                         "block_index": block_index,
@@ -377,12 +387,15 @@ def load_prefix_probe_sample(path: "str | Path") -> dict:
 
 #: 每格调用结果行允许出现的**全部**顶层键(T-EX3 要点 4)。计划里没有的两个
 #: 名字——`ctx_bytes_total` / `message_prefix_bytes`——是刻意的排除,不是遗漏
-#: (见模块 docstring「分工边界」)。
+#: (见模块 docstring「分工边界」)。`gap_ms`(codex #T-EX3 F3)是设计 §9.1
+#: 「各序列内部保持连续,记录间隔」要求的落点:与上一次调用的间隔毫秒,序列
+#: 首格没有「上一次」,值是 `None`,其余格是数值——T-EX4 补记这一列时不需要
+#: 改这份闭集。
 PROBE_ROW_KEYS: frozenset[str] = frozenset({
     "tier", "block_index", "arm", "call_index", "series_index",
     "status", "call_wall_ms", "attempts", "finish_reason", "response_chars",
     "prompt_tokens", "cached_tokens", "completion_tokens",
-    "head_chars", "tail_chars", "message_bytes_total", "is_warmup",
+    "head_chars", "tail_chars", "message_bytes_total", "is_warmup", "gap_ms",
 })
 
 
@@ -487,7 +500,15 @@ def _summarize_region_pairs(rows: Sequence[Mapping]) -> dict:
     }
 
 
-def _first_observation_medians(rows: Sequence[Mapping]) -> dict:
+def _arm_medians(rows: Sequence[Mapping]) -> dict:
+    """`rows` 里各臂的中位墙钟——不看 `call_index`,调用方决定喂哪一批行。
+
+    `_summarize_scope` 拿它算两格对称的报告:`first_observation`(喂首次
+    观测)与 `repeat_observation`(喂重复观测,codex #T-EX3 F4)——design
+    §9.1「并比较后续相对首次的变化」要求能直接读到重复观测各臂的绝对中位数,
+    不是只有配对后的差值/比值,否则「重复观测比首次快了几倍」这个最能说明
+    前缀确实被复用的信号读不出来。
+    """
     by_arm: dict[str, list[float]] = {}
     for row in rows:
         wall = _numeric_wall_ms(row)
@@ -509,13 +530,19 @@ def _summarize_scope(
     *, repeat_rows: Sequence[Mapping], first_rows: Sequence[Mapping],
 ) -> dict:
     pairs = _summarize_region_pairs(repeat_rows)
-    pairs["first_observation"] = _first_observation_medians(first_rows)
+    pairs["first_observation"] = _arm_medians(first_rows)
+    pairs["repeat_observation"] = _arm_medians(repeat_rows)
     return pairs
 
 
 def _verdict(overall: Mapping, *, total_ok: int, total_expected: int) -> str:
-    """三格结论的判据(design §9.1 三格 + T-EX3「建议:两臂配对差的中位数与
-    区组间一致性;样本不足/失败过半 ⇒ undetermined」）。
+    """三格结论的判据(design §9.1 三格结论)。
+
+    判据本身——用两臂配对差的中位数与区组间一致性、样本不足/失败过半判
+    `undetermined`——两份 spec(design §9.1、计划 T-EX3)都没有给出具体的
+    一致性阈值或「过半失败」的精确定义,这是实现自定(spec 对此沉默,自定
+    本身合法,但不该冒充 spec 原文引用;codex #T-EX3 F7)。阈值的文档落点
+    留给 T-EX11 写进 README,不在这里重复。
 
     * `total_expected == 0`(没有非预热行可看)或**过半**非预热行不是
       `"ok"`(含失败与本地缓存出口都不算数,`_SUCCESS_STATUS` 之外的一切)⇒
@@ -666,12 +693,16 @@ def probe_manifest_facts(
     """
     tiers = sorted({row["tier"] for row in plan})
     blocks = len({row["block_index"] for row in plan})
+    all_tier_chars = sample_tier_chars(sample)
     matrix = {
         "tiers": len(tiers),
         "blocks": blocks,
         "arms": len(arms),
         "calls_per_series": calls_per_series,
-        "tier_chars": sample_tier_chars(sample),
+        # codex #T-EX3 F13: 只写 `plan` 实际跑过的档位,不是样本声明的全部
+        # 档位——`matrix["tiers"]` 数的是前者,`tier_chars` 曾经报后者,一份
+        # `probe_plan(tiers=("short",))` 的计划会让这两个数字对不上账。
+        "tier_chars": {tier: all_tier_chars[tier] for tier in tiers},
     }
     return {
         "seed": seed,

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "note": "合成、非敏感的 reflect 上下文样板,供 E1 前缀敏感性探针使用。五块内容全部虚构:static_instructions(S,静态指令与工具目录)、capability_catalog(C,动态能力清单)、evidence_cards(K,证据卡池,唯一随长度档伸缩的区块)、delta_notes(D,增量与阶段压缩提示)、task_target(T,用户任务与输出目标)。三档目标字符数派生自 backend/app/core/config.py 的 REASONING_REFLECT_EVIDENCE_CHARS_BY_EFFORT 默认值(短=overview 4000、中=deep 8000、长=exhaustive 16000; 见 docs/superpowers/specs/2026-09-11-reflect-prefix-experiments-plan_zh.md Q3)。K 块之外的四块字符数固定,不随档位变化。全部正文为本仓库编写的合成占位内容:零真实笔记内容、零 URL、零凭据、零真实题面。",
+  "note": "合成、非敏感的 reflect 上下文样板,供 E1 前缀敏感性探针使用。五块内容全部虚构:static_instructions(S,静态指令与工具目录)、capability_catalog(C,动态能力清单)、evidence_cards(K,证据卡池,唯一随长度档伸缩的区块)、delta_notes(D,增量与阶段压缩提示)、task_target(T,用户任务与输出目标)。三档目标字符数派生自 backend/app/core/config.py 的 DEFAULT_REFLECT_EVIDENCE_CHARS_BY_EFFORT 默认值(短=overview 4000、中=deep 8000、长=exhaustive 16000; 见 docs/superpowers/specs/2026-09-11-reflect-prefix-experiments-plan_zh.md Q3)——这三个字面量与 config 默认值对账用例钉住(test_reflect_prefix_probe.py 的 test_fixture_tier_chars_match_config_defaults),config 那边改了默认值这里的测试会先红。K 块之外的四块字符数固定,不随档位变化。全部正文为本仓库编写的合成占位内容:零真实笔记内容、零 URL、零凭据、零真实题面。",
   "tier_chars": {
     "short": 4000,
     "medium": 8000,
