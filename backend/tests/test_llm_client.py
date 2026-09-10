@@ -14,6 +14,7 @@ from app.core.cache import llm_key
 from app.core.config import Settings
 from app.core.llm import (
     OpenAICompatibleClient,
+    experiment_message_markers,
     provider_messages,
     serialize_provider_messages,
 )
@@ -461,6 +462,575 @@ def test_serialize_provider_messages_rejects_a_non_mapping_element():
         serialize_provider_messages(
             [{"role": "user", "content": "ok"}, SimpleNamespace(role="user")]
         )
+
+
+# --- T-EX2: the offline E1 experiment-marker seam ---------------------------
+#
+# Design §9.1 / plan Q1: `chat_json` may put a fixed-width, meaningless HEAD
+# marker ahead of the wrapper and a TAIL marker at the end of the last message,
+# so an offline probe can vary WHICH end of a request stays stable between
+# consecutive calls while the body and the output task are identical. The seam
+# is a ContextVar, default off, and the four properties below are the whole
+# safety case for touching a production transport at all:
+#
+#   * closed seam => byte-for-byte the pre-seam request (equivalence tests);
+#   * open seam   => head at index 0, tail appended, caller mappings unmutated;
+#   * both markers reach `llm_key`, so a probe arm is never served a local
+#     cached reply it believes it timed;
+#   * exactly one `.set()` point, and no business layer can reach it.
+
+#: Byte transcription of the wrapper as of the pre-seam baseline. Spelled here
+#: rather than imported from the module under test so that a reworded wrapper
+#: also fails the equivalence tests below, instead of both sides drifting
+#: together (the same reason the wrapper is asserted literally further up).
+_PRE_SEAM_WRAPPER = (
+    "You are the extraction and reasoning engine for "
+    "silicon-notebook. Return valid JSON only, no markdown fences. "
+    "Schema hint: "
+)
+
+#: The pre-seam baseline commit, whose `llm.py` the parallel-load test below
+#: loads and compares against. It is the branch point of the change that added
+#: the seam, so it stays reachable in any full clone.
+_PRE_SEAM_BASELINE_SHA = "a61e81bb5fb7d3e9338348a25b713b89a39519ff"
+
+
+def _pre_seam_provider_messages(messages, response_schema_hint):
+    """`provider_messages` as it read before the marker seam existed."""
+    return [
+        {
+            "role": "system",
+            "content": f"{_PRE_SEAM_WRAPPER}{response_schema_hint}",
+        },
+        *messages,
+    ]
+
+
+def _equivalence_groups():
+    """>=200 ``(messages, schema_hint)`` groups for the closed-seam equality.
+
+    Deliberately includes the shapes that could make a naive marker branch
+    behave differently from the pre-seam expression: an empty message list, an
+    empty body, a mapping with no ``content`` key, a mapping carrying an extra
+    key, non-ASCII, a lone surrogate, and bodies that spell the serializer's
+    own framing syntax.
+    """
+    roles = ("user", "assistant", "system", "tool")
+    bodies = (
+        "",
+        "hi",
+        "中文 body",
+        "a:1:user:4:b",
+        "line\nbreak",
+        json.loads('"bad\\ud800tail"'),
+        "     ",
+        "}{",
+    )
+    hints = ("{}", "{'a': 1}", "", "中文 hint", '{"sub_queries": []}')
+    groups = [
+        (
+            [
+                {"role": roles[i % len(roles)], "content": f"{body}{i}"}
+                for i in range(width)
+            ],
+            hint,
+        )
+        for hint in hints
+        for body in bodies
+        for width in (1, 2, 3, 4, 5)
+    ]
+    groups += [
+        ([], "{}"),
+        ([{"role": "user"}], "{}"),
+        ([{"content": "no role"}], "{}"),
+        ([{"role": "user", "content": "x", "name": "extra-key"}], "{}"),
+        ([{"role": "user", "content": None}], "{}"),
+    ]
+    return groups
+
+
+def test_provider_messages_with_no_markers_is_the_pre_seam_bytes():
+    """(T-EX2-a) The closed seam returns the pre-seam list, over 200+ groups.
+
+    Both spellings must agree with the independent transcription above:
+    ``provider_messages(m, h)`` (what production writes) and
+    ``provider_messages(m, h, markers=None)`` (what the seam resolves to when
+    no probe is running). Equality is checked on the list AND on its
+    deterministic serialization, because that byte string is what every prefix
+    and cache-key number downstream is computed from.
+
+    Mutation: make the ``markers is None`` branch insert an empty marker
+    message unconditionally (or fall through into the marker branch with
+    ``("", "")``) and this fires on the first group — the empty-tail variant
+    included, since appending ``""`` still COPIES the last mapping and the
+    identity assertion below catches that.
+    """
+    groups = _equivalence_groups()
+    assert len(groups) >= 200
+
+    for messages, hint in groups:
+        expected = _pre_seam_provider_messages(messages, hint)
+        implicit = provider_messages(messages, hint)
+        explicit = provider_messages(messages, hint, markers=None)
+
+        assert implicit == expected
+        assert explicit == expected
+        assert serialize_provider_messages(implicit) == (
+            serialize_provider_messages(expected)
+        )
+        assert len(implicit) == len(messages) + 1
+        # The caller's own mappings are still passed through BY REFERENCE, not
+        # copied: the never-mutates promise is about not writing to them, and a
+        # defensive copy here would quietly break the reflect measurement's
+        # ability to compare the mapping it handed in with the one that was sent.
+        for index, message in enumerate(messages):
+            assert implicit[index + 1] is message
+            assert explicit[index + 1] is message
+
+
+def test_chat_json_sends_the_pre_seam_bytes_while_the_seam_is_closed(monkeypatch):
+    """(T-EX2-a) The whole transport, not just the pure function.
+
+    The seam costs `chat_json` one ContextVar read, and with nothing armed the
+    three consumers of `full_messages` — `.create()`, the interaction log and
+    (via `llm_key`) the cache probe — must see exactly the pre-seam list. Run
+    over the same 200+ groups so a marker branch that only misbehaves on an
+    odd shape (empty list, missing ``content``) cannot hide.
+    """
+    create = _FakeCreate([_Resp()])
+    client = _make(monkeypatch, create)
+    logger = _RecordingInteractionLogger()
+    client.interaction_logger = logger
+    groups = _equivalence_groups()
+    assert llm_mod._EXPERIMENT_MARKERS.get() is None
+
+    for messages, hint in groups:
+        client.chat_json(messages, hint, bypass_cache=True)
+
+    assert len(create.calls) == len(groups)
+    for (messages, hint), call, record in zip(groups, create.calls, logger.records):
+        expected = _pre_seam_provider_messages(messages, hint)
+        assert call["messages"] == expected
+        assert record["request"]["messages"] == [
+            {"role": m.get("role", ""), "content": str(m.get("content", ""))}
+            for m in expected
+        ]
+
+
+def test_provider_messages_matches_the_baseline_commits_own_module(tmp_path):
+    """(T-EX2-a) Belt-and-braces: load the PRE-SEAM module and compare.
+
+    The transcription in this file is an independent copy of one expression;
+    this test compares against the real thing, by loading the baseline commit's
+    `llm.py` under a second module name and running both implementations over
+    the same groups. It answers the objection that a transcription could be
+    wrong in the same direction as the change.
+
+    It needs the baseline blob, so it SKIPS where history is not available —
+    notably CI, which checks out at depth 1. That is why it is the second
+    guard and not the only one: the two tests above carry this property in
+    every environment, and this one strengthens it wherever the repository is
+    a full clone (i.e. on the machine that wrote the change).
+    """
+    import importlib.util
+    import subprocess
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    try:
+        blob = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(root),
+                "show",
+                f"{_PRE_SEAM_BASELINE_SHA}:backend/app/core/llm.py",
+            ],
+            capture_output=True,
+            check=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError) as exc:
+        pytest.skip(f"pre-seam baseline module unavailable: {exc!r}")
+
+    source = tmp_path / "llm_pre_seam.py"
+    source.write_bytes(blob)
+    spec = importlib.util.spec_from_file_location("llm_pre_seam", source)
+    baseline = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(baseline)
+
+    # The loaded module really is the pre-seam one: it has no seam to read.
+    assert not hasattr(baseline, "experiment_message_markers")
+    assert not hasattr(baseline, "_EXPERIMENT_MARKERS")
+
+    groups = _equivalence_groups()
+    assert len(groups) >= 200
+    for messages, hint in groups:
+        was = baseline.provider_messages(messages, hint)
+        assert provider_messages(messages, hint) == was
+        assert provider_messages(messages, hint, markers=None) == was
+        assert serialize_provider_messages(
+            provider_messages(messages, hint)
+        ) == baseline.serialize_provider_messages(was)
+
+
+def test_marker_head_is_the_first_message_ahead_of_the_wrapper():
+    """(T-EX2-b) Head marker at index 0, wrapper right behind it.
+
+    Position is the entire point: the probe compares a series in which the head
+    is fixed and the tail moves against one in which the head moves and the
+    tail is fixed, so a head marker placed AFTER the wrapper (or merged into
+    it) would make the two arms differ in something other than which end is
+    stable. The byte assertions spell that out: with the head fixed, the
+    wrapper and the body stay inside the shared prefix; with the head moved,
+    divergence lands inside the head's own frame and nothing behind it is
+    shared at all.
+    """
+    caller = [
+        {"role": "user", "content": "question"},
+        {"role": "assistant", "content": "partial"},
+    ]
+
+    out = provider_messages(caller, "{'a': 1}", markers=("HD-0000", "TL-0000"))
+
+    assert out[0] == {"role": "system", "content": "HD-0000"}
+    assert out[1] == {
+        "role": "system",
+        "content": f"{_PRE_SEAM_WRAPPER}{{'a': 1}}",
+    }
+    assert out[2] is caller[0]
+    assert len(out) == len(caller) + 2
+    # Only the tail moves: head frame + wrapper frame + first message stay shared.
+    stable = serialize_provider_messages(out)
+    moved_tail = serialize_provider_messages(
+        provider_messages(caller, "{'a': 1}", markers=("HD-0000", "TL-0001"))
+    )
+    assert _common_prefix_len(stable, moved_tail) >= len(
+        serialize_provider_messages(out[:3])
+    )
+    # Only the head moves: divergence is inside the head frame, so nothing
+    # behind it counts as shared even though those bytes are identical.
+    moved_head = serialize_provider_messages(
+        provider_messages(caller, "{'a': 1}", markers=("HD-0001", "TL-0000"))
+    )
+    head_frame = len(
+        serialize_provider_messages([{"role": "system", "content": "HD-0000"}])
+    )
+    assert _common_prefix_len(stable, moved_head) < head_frame
+
+
+def test_marker_tail_appends_to_a_copy_and_leaves_the_caller_alone():
+    """(T-EX2-c) The tail is appended, on a copy, and never accumulates.
+
+    A probe reuses ONE fixed body for a whole series. Replacing the content
+    would destroy the body the arms are supposed to share; mutating the
+    caller's mapping in place would grow that body by one marker per call, so
+    "same body, different marker" — the only thing the probe varies — would
+    silently become "a body that grows every call".
+
+    Mutation: assign ``marked[-1]["content"] = ...`` without the ``dict(...)``
+    copy and the accumulation assertion fires.
+    """
+    last = {"role": "user", "content": "body"}
+    caller = [{"role": "system", "content": "earlier"}, last]
+
+    out = provider_messages(caller, "{}", markers=("HD-0000", "TL-0000"))
+
+    assert out[-1] == {"role": "user", "content": "bodyTL-0000"}
+    assert out[-1] is not last
+    assert last == {"role": "user", "content": "body"}
+    assert caller == [
+        {"role": "system", "content": "earlier"},
+        {"role": "user", "content": "body"},
+    ]
+    # Untouched messages are still shared by reference, as before the seam.
+    assert out[2] is caller[0]
+    # No accumulation: a second render of the same body carries only its own tail.
+    again = provider_messages(caller, "{}", markers=("HD-0001", "TL-0001"))
+    assert again[-1]["content"] == "bodyTL-0001"
+    # Other keys on the last mapping survive the copy.
+    assert provider_messages(
+        [{"role": "user", "content": "b", "name": "n"}],
+        "{}",
+        markers=("HD-0000", "TL-0000"),
+    )[-1] == {"role": "user", "content": "bTL-0000", "name": "n"}
+    # A last mapping with no content gets the tail as its content, not a crash.
+    assert provider_messages(
+        [{"role": "user"}], "{}", markers=("HD-0000", "TL-0000")
+    )[-1] == {"role": "user", "content": "TL-0000"}
+    # Degenerate: with no caller messages the WRAPPER is the last message and
+    # takes the tail. Documented rather than special-cased — the probe always
+    # sends a body, and appending to the genuinely-last message is honest.
+    empty = provider_messages([], "{}", markers=("HD-0000", "TL-0000"))
+    assert empty == [
+        {"role": "system", "content": "HD-0000"},
+        {"role": "system", "content": f"{_PRE_SEAM_WRAPPER}{{}}TL-0000"},
+    ]
+
+
+def test_experiment_marker_scope_resets_on_every_exit():
+    """(T-EX2-d) The scope resets after a normal exit AND after a raise.
+
+    A leaked marker does not crash anything, which is exactly why it needs a
+    test: every later call on this context would carry two meaningless
+    segments and land on a fresh `llm_key`, disabling the local response cache
+    wholesale while every log line still looks normal.
+
+    Nesting restores the OUTER value rather than ``None`` (``reset(token)``,
+    not ``set(None)``), and the value is carried by a copied context, which is
+    what lets the seam survive the provider's scheduling thread.
+    """
+    import contextvars
+
+    markers = llm_mod._EXPERIMENT_MARKERS
+    assert markers.get() is None
+
+    with experiment_message_markers("HD-0000", "TL-0000"):
+        assert markers.get() == ("HD-0000", "TL-0000")
+    assert markers.get() is None
+
+    with pytest.raises(RuntimeError):
+        with experiment_message_markers("HD-0000", "TL-0000"):
+            assert markers.get() == ("HD-0000", "TL-0000")
+            raise RuntimeError("probe blew up mid-series")
+    assert markers.get() is None
+
+    with experiment_message_markers("HD-0000", "TL-0000"):
+        with experiment_message_markers("HD-0001", "TL-0001"):
+            assert markers.get() == ("HD-0001", "TL-0001")
+        assert markers.get() == ("HD-0000", "TL-0000")
+        # A copied context sees the armed value (the scheduling-thread case).
+        assert contextvars.copy_context().run(markers.get) == (
+            "HD-0000",
+            "TL-0000",
+        )
+    assert markers.get() is None
+
+
+def test_experiment_markers_are_set_in_exactly_one_place():
+    """(T-EX2-e) AST guard: `_EXPERIMENT_MARKERS.set(` has ONE holder.
+
+    Same shape as the aspect-ledger construction-point guard: the risk is not
+    that the scope forgets to reset, it is that a SECOND place learns to arm
+    the seam — at which point the "default off, offline only" claim is no
+    longer structural and the failure it guards against is invisible in logs.
+    AST rather than text so a comment naming the variable cannot trip it, and
+    so an arming statement cannot hide inside a docstring either.
+
+    Mutation: arm the ContextVar anywhere else under ``backend/app`` — inside
+    another function, or at module level — and this fires.
+    """
+    import ast
+    from pathlib import Path
+
+    app_root = Path(__file__).resolve().parents[1] / "app"
+    holders: list[tuple[str, str]] = []
+    total = 0
+    for path in sorted(app_root.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=path.name)
+        relative = path.relative_to(app_root.parents[1]).as_posix()
+
+        def _arms(node):
+            return [
+                call
+                for call in ast.walk(node)
+                if isinstance(call, ast.Call)
+                and isinstance(call.func, ast.Attribute)
+                and call.func.attr == "set"
+                and isinstance(call.func.value, ast.Name)
+                and call.func.value.id == "_EXPERIMENT_MARKERS"
+            ]
+
+        total += len(_arms(tree))
+        holders += [
+            (relative, node.name)
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            for _call in _arms(node)
+        ]
+
+    assert holders == [
+        ("backend/app/core/llm.py", "experiment_message_markers")
+    ], holders
+    # Every arming statement is accounted for by a holder, so one written at
+    # module level (which no function encloses) cannot slip past the list above.
+    assert total == len(holders), total
+
+
+def test_no_business_layer_can_reach_the_experiment_seam():
+    """(T-EX2-f) Negative assertion: services/application never name the seam.
+
+    Design §9.1 refuses random markers in a production policy and refuses
+    public request-level injection. The seam being a module-private ContextVar
+    makes that easy to honour and impossible to verify by reading one file, so
+    the check is mechanical: no module under ``app/services`` or
+    ``app/application`` may import, reference or attribute-access either name.
+
+    This is the risk register's item 1. The bad state does not crash: it just
+    appends two meaningless segments to every request on that path and makes
+    `llm_key` differ per call. Nothing in a log would look wrong.
+    """
+    import ast
+    from pathlib import Path
+
+    forbidden = {"experiment_message_markers", "_EXPERIMENT_MARKERS"}
+    app_root = Path(__file__).resolve().parents[1] / "app"
+    offenders: list[str] = []
+    for layer in ("services", "application"):
+        layer_root = app_root / layer
+        assert layer_root.is_dir(), layer
+        for path in sorted(layer_root.rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=path.name)
+            relative = path.relative_to(app_root.parents[1]).as_posix()
+            for node in ast.walk(tree):
+                named = (
+                    node.attr
+                    if isinstance(node, ast.Attribute)
+                    else node.id
+                    if isinstance(node, ast.Name)
+                    else None
+                )
+                if named in forbidden:
+                    offenders.append(f"{relative}: {named}")
+                if isinstance(node, (ast.Import, ast.ImportFrom)):
+                    offenders += [
+                        f"{relative}: import {alias.name}"
+                        for alias in node.names
+                        if alias.name in forbidden
+                    ]
+
+    assert offenders == [], offenders
+
+
+def test_two_arm_marker_layouts_differ_only_in_which_end_is_stable():
+    """(T-EX2-g) The two arms, at the pure-string layer, no request issued.
+
+    Design §9.1: the arms must carry the same marker COUNT, the same lengths,
+    the same format and the same positions, with the same body and output
+    task — only which end stays stable within a series may differ. Assert all
+    of it structurally, then assert the consequence the probe measures: in the
+    stable arm consecutive requests share the head marker, the wrapper and the
+    body; in the disturbed arm they share nothing past the head's own frame.
+    """
+    body = [{"role": "user", "content": "one fixed body"}]
+    hint = '{"ok": true}'
+    stable = [("HD-0000", f"TL-{index:04d}") for index in range(4)]
+    disturbed = [(f"HD-{index + 1:04d}", "TL-0000") for index in range(4)]
+
+    stable_msgs = [provider_messages(body, hint, markers=m) for m in stable]
+    disturbed_msgs = [provider_messages(body, hint, markers=m) for m in disturbed]
+
+    for (head_s, tail_s), (head_d, tail_d) in zip(stable, disturbed):
+        assert len(head_s) == len(head_d) == len(tail_s) == len(tail_d)
+        assert len(head_s.encode()) == len(head_d.encode())
+    for arm_s, arm_d in zip(stable_msgs, disturbed_msgs):
+        assert len(arm_s) == len(arm_d) == len(body) + 2
+        assert len(serialize_provider_messages(arm_s)) == len(
+            serialize_provider_messages(arm_d)
+        )
+        # Same body, same output task, in both arms.
+        assert arm_s[1] == arm_d[1]
+        assert arm_s[2]["role"] == arm_d[2]["role"] == "user"
+    # The body itself was never written to by either arm.
+    assert body == [{"role": "user", "content": "one fixed body"}]
+
+    head_frame = len(
+        serialize_provider_messages([{"role": "system", "content": "HD-0000"}])
+    )
+    stable_bytes = [serialize_provider_messages(m) for m in stable_msgs]
+    disturbed_bytes = [serialize_provider_messages(m) for m in disturbed_msgs]
+    assert all(
+        _common_prefix_len(stable_bytes[0], other) > head_frame
+        for other in stable_bytes[1:]
+    )
+    assert all(
+        _common_prefix_len(disturbed_bytes[0], other) < head_frame
+        for other in disturbed_bytes[1:]
+    )
+
+
+def test_chat_json_sends_exactly_the_marked_messages_when_the_seam_is_open(
+    monkeypatch,
+):
+    """(T-EX2 acceptance b) What goes on the wire IS the marked output.
+
+    The open-seam counterpart of
+    ``test_chat_json_sends_exactly_the_pure_functions_messages``: the transport
+    must not assemble markers a second way, or the probe's own reconstruction
+    would describe a request that was never sent. Also pins that the seam is
+    scoped — the next call after the block is back on the pre-seam bytes.
+    """
+    create = _FakeCreate([_Resp()])
+    client = _make(monkeypatch, create)
+    logger = _RecordingInteractionLogger()
+    client.interaction_logger = logger
+    msgs = [{"role": "user", "content": "hi"}]
+
+    with experiment_message_markers("HD-0000", "TL-0000"):
+        client.chat_json(msgs, "{}", bypass_cache=True)
+    client.chat_json(msgs, "{}", bypass_cache=True)
+
+    marked = provider_messages(msgs, "{}", markers=("HD-0000", "TL-0000"))
+    assert create.calls[0]["messages"] == marked
+    assert create.calls[0]["messages"][0] == {
+        "role": "system",
+        "content": "HD-0000",
+    }
+    # Third consumer of the same list: the interaction log sees the markers too
+    # (they are locally allocated short codes, so this carries no new content).
+    assert logger.records[0]["request"]["messages"] == [
+        {"role": m["role"], "content": m["content"]} for m in marked
+    ]
+    assert msgs == [{"role": "user", "content": "hi"}]
+    assert create.calls[1]["messages"] == _pre_seam_provider_messages(msgs, "{}")
+
+
+def test_both_markers_feed_the_local_cache_key(monkeypatch):
+    """(T-EX2 acceptance c) Head AND tail are inputs to `llm_key`.
+
+    The probe issues its own calls with ``bypass_cache=True`` (plan Q2), so
+    this is the structural backstop rather than the operating mode: if a marker
+    did not reach the key, two calls the probe considers distinct would collide
+    on one key, and a validator-bearing caller could be served a stored reply
+    for a request it is timing. Asserted per marker so dropping either one is
+    caught.
+
+    Mutation: assemble the key from the marker-free list (or from the head
+    only) and the corresponding inequality below fires.
+    """
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    cache = _RecordingCache()
+    client = OpenAICompatibleClient(
+        Settings(_env_file=None),
+        base_url="https://x",
+        api_key="k",
+        model="m",
+        cache=cache,
+    )
+    monkeypatch.setattr(client, "client", lambda: _FakeOpenAI(_FakeCreate([_Resp()])))
+    msgs = [{"role": "user", "content": "hi"}]
+
+    def _key(markers):
+        return llm_key(
+            "m",
+            provider_messages(msgs, "{}", markers=markers),
+            "{}",
+            "https://x",
+            temperature=1.0,
+            top_p=1.0,
+            max_tokens=client.settings.openai_compat_max_tokens,
+            thinking_mode=None,
+        )
+
+    with experiment_message_markers("HD-0000", "TL-0000"):
+        client.chat_json(msgs, "{}", response_validator=lambda _c: True)
+
+    assert cache.gets == [_key(("HD-0000", "TL-0000"))]
+    # The tail participates: a series that only moves its tail must not collide.
+    assert cache.gets[0] != _key(("HD-0000", "TL-0001"))
+    # The head participates: same, for the disturbed arm.
+    assert cache.gets[0] != _key(("HD-0001", "TL-0000"))
+    # And the marked key is not the marker-free one.
+    assert cache.gets[0] != _key(None)
 
 
 def test_client_connection_pool_matches_explicit_service_capacity(monkeypatch):
