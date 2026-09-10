@@ -1139,12 +1139,16 @@ def test_attempts_observed_is_unknown_when_no_turn_carries_it():
 
 
 def test_a_truncated_trace_does_not_mask_model_calls_real():
-    """截断**不掩盖** `model_calls_real`:看得见的那几步确实各发了这么多次请求,
-    和是一个真实的下界,抹成 `None` 等于把已经量到的东西丢掉。不完整由
-    `attempts_observed=False` 标出来,与同一行的 `trace_truncated` 互相印证。
+    """截断标**既不掩盖** `model_calls_real`,**也不改** `attempts_observed`。
 
-    变异:把 `_reflect_attempts(..., truncated=...)` 的 `truncated` 传成常量
-    `False` ⇒ `attempts_observed` 变 `True`,这条红。
+    `trace_truncated` 判的是某一步自己的 `result_ids`/`anchor_evidence_ids` 被
+    `TRACE_RESULT_IDS_MAX` 那条 20 条上限截了,不是「轨迹少了几轮」——两条读路
+    都整步读、整步给。所以这条 run 的每一轮 reflect 都确实带了 `call_attempts`,
+    `attempts_observed` 就该是 `True`,和是全量而不是下界;拿一步内部的 id 列表
+    太长去否证「每轮都量到了」,是把两件事混成一列(评审 P1)。
+
+    变异:把 `_reflect_attempts` 改回读 `truncated`(全带了但轨迹带截断标 ⇒
+    `False`)⇒ 最后一条断言红。
     """
     row = project_run(
         JOB,
@@ -1158,7 +1162,7 @@ def test_a_truncated_trace_does_not_mask_model_calls_real():
     )
     assert row["trace_truncated"] is True
     assert row["model_calls_real"] == 2
-    assert row["attempts_observed"] is False
+    assert row["attempts_observed"] is True
 
 
 def test_prefix_aggregate_skips_the_first_turn_and_takes_the_nearest_rank_median():

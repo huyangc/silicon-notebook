@@ -105,9 +105,16 @@ RUN_PROJECTION_KEYS: frozenset[str] = frozenset({
     # 请求却不留日志行(见 `app/core/llm.py` 的 `response_format` / `stream_options`
     # 两处重建)。任一 reflect 步缺这个观测 ⇒ 整列 unknown,不按现有的几步求和。
     "model_calls_real",
-    # 上面那个和「全不全」。`True` = 每条 reflect 步都带 `call_attempts` 且轨迹
-    # 没有截断标;`False` = 只带了一部分、或轨迹被截断(和是下界);`None` = 一条
-    # 都没带(旧轨迹 / 测量关)。
+    # 上面那个和「全不全」。`True` = 每一条 reflect 步都带 `call_attempts`;
+    # `False` = 只带了一部分(此时和是下界,不出数);`None` = 一条都没带(旧
+    # 轨迹 / 测量关)。它与 `trace_truncated` **解耦**(见 `_reflect_attempts`):
+    # 那一列说的是某一步的 id 列表被 `TRACE_RESULT_IDS_MAX` 截了,不是轨迹缺轮。
+    #
+    # ⚠ 与 `app/core/llm.py` 的 `attempts_observed` **同名而不同层**:那边是
+    # **单次调用**的「这个 transport 自己在传输层数了请求数」(写进 sink 时恒
+    # `True`,duck-typed 客户端留下空 sink 才叫没量);这一列是**一次 run** 的
+    # 「每一轮 reflect 都把那个数落进轨迹了吗」。一轮的 `True` 不保证整 run 的
+    # `True`——少落一轮就是 `False`。
     "attempts_observed",
     # rig 声明的第二维实验臂(`OPTIMIZATIONS`)。与 `policy_version` 并列而不同
     # 义:那个是从轨迹反推的证据,这个是声明——线上导出恒不写,于是恒 unknown。
@@ -622,7 +629,7 @@ def _reflect_steps(steps: Sequence[Mapping]) -> list[Mapping]:
 
 
 def _reflect_attempts(
-    reflects: Sequence[Mapping], *, truncated: bool,
+    reflects: Sequence[Mapping],
 ) -> tuple[int | None, bool | None]:
     """→ (`model_calls_real`, `attempts_observed`)。
 
@@ -634,10 +641,17 @@ def _reflect_attempts(
     2. **只带了一部分** ⇒ `(None, False)`。手上的和是几步的部分和,不是这次
        run 的真实请求数,报出去就是一句偏低的假话;但「观测不全」这件事本身
        是真的,所以 `attempts_observed` 出 `False` 而不是跟着 unknown。
-    3. **全带了,但轨迹带截断标** ⇒ `(sum, False)`。截断**不掩盖**
-       `model_calls_real`——看得见的那几步确实各发了这么多次请求,和是一个真实
-       的**下界**;把它抹成 `None` 等于把已经量到的东西丢掉。不完整由
-       `attempts_observed=False` 标出来,与 `trace_truncated` 互相印证。
+    3. **每一条都带了** ⇒ `(sum, True)`。
+
+    `attempts_observed` 因此**只**回答一件事:「每一条 reflect 步都带了这个观测
+    吗」。它与 `trace_truncated` 解耦(评审 P1)。曾经的写法是「全带了但轨迹带
+    截断标 ⇒ `False`」,那是借错了标:`_truncated` 判的是某一步自己的
+    `result_ids` / `anchor_evidence_ids` 被 `app.models.ask.TRACE_RESULT_IDS_MAX`
+    那条 20 条上限截了,**不是**轨迹少了几轮——两条读路(`ask_trace_steps` 子表
+    与 legacy 的整列 JSON)都是整步读、整步给,截断只发生在一步内部的 id 列表
+    上。拿它去否证「每轮都量到了 `call_attempts`」,会把一条观测完整的 run 报成
+    观测不全,而那一列本该是聚合侧判「`model_calls_real` 是真值还是下界」的唯一
+    依据。轨迹自身完不完整仍由 `trace_truncated` 单独回答,两列各说各的事。
     """
     values = [_int(step["detail"].get("call_attempts")) for step in reflects]
     present = [value for value in values if value is not None]
@@ -645,15 +659,15 @@ def _reflect_attempts(
         return None, None
     if len(present) != len(values):
         return None, False
-    return sum(present), not truncated
+    return sum(present), True
 
 
 def _reflect_sum(reflects: Sequence[Mapping], key: str) -> int | None:
     """全部 reflect 步都带 `key` 才求和,任一步缺 ⇒ unknown。
 
-    与 `_reflect_attempts` 同一条口径,只是不额外报「全不全」——截断下的部分和
-    仍然出数,读的人按同一行的 `trace_truncated` / `attempts_observed` 判它是不
-    是下界。
+    与 `_reflect_attempts` 同一条口径,只是不额外报「全不全」:一步不缺就出和,
+    缺一步就 unknown。读的人要判这个和是不是整 run 的真实总量,看同一行的
+    `trace_truncated`(轨迹本身有没有被切过)。
     """
     values = [_int(step["detail"].get(key)) for step in reflects]
     if not values or any(value is None for value in values):
@@ -908,9 +922,7 @@ def project_run(
     intent = payload.get("intent")
     truncated = _truncated(normalized)
     reflects = _reflect_steps(normalized)
-    model_calls_real, attempts_observed = _reflect_attempts(
-        reflects, truncated=truncated
-    )
+    model_calls_real, attempts_observed = _reflect_attempts(reflects)
     prefix_median, prefix_min, prefix_turns = _prefix_bytes(reflects)
 
     row: dict[str, Any] = {

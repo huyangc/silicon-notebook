@@ -77,8 +77,11 @@ BOOLEAN_METRICS: tuple[str, ...] = (
     # 而不是被当成 False——「这道题没声明范围」与「声明了但解析不到」因此分得开。
     # 线上导出恒不写这个键,那时整组的 n_observed 是 0,不影响任何别的指标。
     "scope_narrowed",
-    # 三值同理:`True`=每轮都量到了、`False`=只量到一部分或轨迹被截断、
-    # `None`=压根没量。后两者分得开才能判 `model_calls_real` 是真值还是下界。
+    # 三值同理:`True`=每一轮 reflect 都量到了 `call_attempts`、`False`=只量到
+    # 一部分、`None`=压根没量。三者分得开才能判 `model_calls_real` 是不是全量:
+    # `True` 时是,`False` 时那一列恒 unknown(投影侧不出部分和),`None` 时只该
+    # 报 n_missing。它**不**含「轨迹有没有被截断」——那是 `trace_truncated` 单独
+    # 回答的另一件事(截的是某一步的 id 列表,不是轮数)。
     "attempts_observed",
 )
 #: 枚举指标:报取值分布(含 unknown 一格)。
