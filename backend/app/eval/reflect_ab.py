@@ -89,18 +89,20 @@ ARM_POLICIES: tuple[str, ...] = POLICY_VERSIONS
 #:   `off`(全仓唯一读点,见 `reasoning_retrieval.reflect_optimization`),所以
 #:   `legacy:prefix_snapshot` 不是「还没实现」,而是**结构上不存在**:声明它只会
 #:   得到一条 optimization 写着 `prefix_snapshot`、实际跑 `off` 的假数据。
-#: * v2 侧只列**本期已实现**的两格。`prefix_delta` / `prefix_delta_lean` 在
-#:   `OPTIMIZATIONS`(读侧闭集)里有位置,但 `config.validate_reflect_optimization`
-#:   在启动期就响亮拒绝它们——让 rig 排一批起不来的 run 是纯粹的浪费,所以这里
-#:   同期收窄。PR-3/PR-4 各放开一格时,同 diff 往这里加一行。
+#: * v2 侧只列**本期已实现**的三格。`prefix_delta_lean` 在 `OPTIMIZATIONS`
+#:   (读侧闭集)里有位置,但 `config.validate_reflect_optimization` 在启动期
+#:   就响亮拒绝它——让 rig 排一批起不来的 run 是纯粹的浪费,所以这里同期收窄。
+#:   PR-3(T-PD7)往这里加了 `("v2","prefix_delta")` 这一行;PR-4 放开最后一格
+#:   时,同 diff 再加一行。
 ARMS: tuple[tuple[str, str], ...] = (
     ("legacy", "off"),
     ("v2", "off"),
     ("v2", "prefix_snapshot"),
+    ("v2", "prefix_delta"),
 )
 
 #: 一个**配对单元**里的臂数。二维化之前这个数恰好等于 `len(ARMS)`,现在不是了:
-#: `ARMS` 是合法组合的闭集(三格),而一个配对单元恒是 `--arms` 点名的那**两条**
+#: `ARMS` 是合法组合的闭集(四格),而一个配对单元恒是 `--arms` 点名的那**两条**
 #: 臂(`legacy,v2` 或 `v2:off,v2:prefix_snapshot`)。`mark_paired` 判的是后者。
 PAIR_ARM_COUNT = 2
 
@@ -201,7 +203,7 @@ def _parse_one_arm(token: str) -> tuple[str, str]:
             f"臂 {token!r} 是一个**合法值的非法组合**:rig 能跑的臂只有 "
             + ", ".join(format_arm(*arm) for arm in ARMS)
             + "(legacy 路径上没有『前缀』这个概念,reflect_optimization() 在 v2 "
-              "总闸关时恒返回 off;prefix_delta/lean 由 config 的校验器在启动期"
+              "总闸关时恒返回 off;prefix_delta_lean 由 config 的校验器在启动期"
               "拒绝)")
     return policy, optimization
 
@@ -1004,7 +1006,7 @@ def mark_paired(rows: Sequence[dict]) -> None:
 
     判据的两半各自二维化(前缀复用最终设计 §11):在场的臂按 `row_arm` 数
     `(arm, optimization)` 这一对,门槛是 `PAIR_ARM_COUNT` 而**不再是**
-    `len(ARMS)`——后者现在是「合法组合的闭集」(三格),拿它当门槛会让每一批
+    `len(ARMS)`——后者现在是「合法组合的闭集」(四格),拿它当门槛会让每一批
     两臂数据都差一条臂、`paired` 恒 `False`。
     """
     seen: dict[tuple[Any, ...], set[tuple[Any, Any]]] = {}

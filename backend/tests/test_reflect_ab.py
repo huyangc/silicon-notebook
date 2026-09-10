@@ -1448,16 +1448,45 @@ def test_parse_arms_reads_both_the_one_and_two_dimensional_spellings():
     ("", "空写法"),
     ("v2,", "空段"),
     ("shadow", "未知 policy"),
-    ("v2:prefix_delta", "本期未实现的取值"),
+    ("v2:prefix_delta_lean", "本期未实现的取值"),
     ("v2:snapshot", "未知 optimization"),
     ("legacy:prefix_snapshot", "合法值的非法组合"),
     ("v2:off:extra", "不是 policy[:optimization] 的形状"),
     ("v2,v2", "重复臂"),
 ])
 def test_parse_arms_refuses_every_spelling_that_would_produce_fake_data(spec, why):
-    """八种写错法各自被拒。每一种不拒都会安静地产出一批假数据(见 `parse_arms`)。"""
+    """八种写错法各自被拒。每一种不拒都会安静地产出一批假数据(见 `parse_arms`)。
+
+    PR-3(T-PD7)把 `("v2","prefix_delta")` 放进 `ARMS` 之后,`v2:prefix_delta`
+    不再是这条用例的素材——它现在是合法臂(见
+    `test_parse_arms_reads_the_new_prefix_delta_spellings`),换成仍然只登记
+    未实现的 `prefix_delta_lean`。
+    """
     with pytest.raises(ArmSpecError):
         parse_arms(spec)
+
+
+def test_parse_arms_reads_the_new_prefix_delta_spellings():
+    """T-PD7:`ARMS` 放开 `("v2","prefix_delta")` 一格之后的三种新写法。"""
+    assert parse_arms("v2:prefix_delta") == [("v2", "prefix_delta")]
+    assert parse_arms("v2:off,v2:prefix_delta") == [
+        ("v2", "off"), ("v2", "prefix_delta")]
+    assert parse_arms("legacy,v2:prefix_delta") == [
+        ("legacy", "off"), ("v2", "prefix_delta")]
+
+
+def test_legacy_prefix_delta_error_lists_all_four_arms():
+    """`legacy:prefix_delta` 仍是合法值的非法组合;错误文案现在列出四格。
+
+    变异:往 `ARMS` 加一行却漏了这条用例 ⇒ 断言的臂数与 `ARMS` 实际长度分叉时,
+    这条会先红(而不是被动等 `len(ARMS)` 悄悄变化)。
+    """
+    with pytest.raises(ArmSpecError) as excinfo:
+        parse_arms("legacy:prefix_delta")
+    text = str(excinfo.value)
+    assert len(ARMS) == 4
+    for arm in ARMS:
+        assert format_arm(*arm) in text
 
 
 def test_the_arm_label_keeps_the_two_v2_arms_in_different_directories():
@@ -1495,7 +1524,7 @@ def test_pairing_is_two_dimensional_and_a_single_arm_is_never_paired():
     lonely = _project(arm="v2", optimization="prefix_snapshot")
     mark_paired([lonely])
     assert lonely["paired"] is False
-    # 判据是「这一批的两条臂」,不是 `len(ARMS)`(合法组合闭集有三格)。
+    # 判据是「这一批的两条臂」,不是 `len(ARMS)`(合法组合闭集有四格)。
     assert PAIR_ARM_COUNT == 2 and len(ARMS) > PAIR_ARM_COUNT
 
 
@@ -1756,6 +1785,25 @@ def test_each_arm_gets_a_settings_built_with_its_own_optimization(monkeypatch):
     assert built[("v2", "prefix_snapshot")].reasoning_reflect_v2_enabled is True
     assert (built[("v2", "prefix_snapshot")].reasoning_reflect_optimization
             == "prefix_snapshot")
+    assert all(s.reasoning_reflect_measure_context for s in built.values())
+
+
+def test_settings_by_arm_reads_back_the_newly_implemented_prefix_delta(
+    monkeypatch
+):
+    """T-PD7:新格 `("v2","prefix_delta")` 逐臂 Settings 构造回读核对。
+
+    `prefix_delta` 在 T-PD1 之前会在 `Settings()` 构造期就被
+    `validate_reflect_optimization` 拒绝;这条钉住放开一格之后它能像
+    `prefix_snapshot` 一样真的起来,而不是仍被 config 的校验器挡在半路。
+    """
+    _isolate_arm_env(monkeypatch)
+    arms = [("v2", "off"), ("v2", "prefix_delta")]
+    built = rig._settings_by_arm(arms)
+    assert set(built) == set(arms)
+    assert built[("v2", "prefix_delta")].reasoning_reflect_v2_enabled is True
+    assert (built[("v2", "prefix_delta")].reasoning_reflect_optimization
+            == "prefix_delta")
     assert all(s.reasoning_reflect_measure_context for s in built.values())
 
 
@@ -3086,6 +3134,43 @@ def test_dry_run_ab_enumerates_the_second_dimension_and_the_shared_ruler(capsys)
     assert "calls-v2.jsonl" in printed
     assert "calls-v2-prefix_snapshot.jsonl" in printed
     assert "EVENT_LOG_DIR=" in printed
+
+
+def test_dry_run_ab_enumerates_the_newly_implemented_prefix_delta_arm(capsys):
+    """T-PD7:`--arms v2:off,v2:prefix_delta` 走的是同一条 dry-run 枚举路径。
+
+    与上一条同款断言,证据换成新格——`ARMS` 放开一格不需要 dry-run 枚举那半改
+    一行代码,这条钉住的正是那件事。
+    """
+    assert rig.main([
+        "--dry-run", "--limit", "1", "--repeats", "1",
+        "--arms", "v2:off,v2:prefix_delta",
+        "--database-url", "postgresql://127.0.0.1:5432/nb_t0_test",
+        "--source-db-url", "postgresql://127.0.0.1:5432/nb_main",
+        "ab",
+    ]) == 0
+    printed = capsys.readouterr().out
+    assert "v2:off, v2:prefix_delta" in printed
+    assert "REASONING_REFLECT_MEASURE_CONTEXT=true" in printed
+    assert "calls-v2.jsonl" in printed
+    assert "calls-v2-prefix_delta.jsonl" in printed
+
+
+def test_default_dry_run_output_is_unchanged_by_the_new_arm(capsys):
+    """T-PD7 的反面:不给 `--arms` 时,默认两臂 dry-run 的产物计数逐字不变。
+
+    `ARMS` 从三格长到四格,`AB_DEFAULT_ARMS` 仍是既有的一维两臂
+    (`legacy`、`v2:off`)——加一格合法组合不该改动任何没点名它的既有命令。
+    """
+    assert rig.main([
+        "--dry-run", "--limit", "2", "--round", "1",
+        "--database-url", "postgresql://127.0.0.1:5432/nb_t0_test",
+        "--source-db-url", "postgresql://127.0.0.1:5432/nb_main",
+        "ab",
+    ]) == 0
+    out = capsys.readouterr().out
+    assert "planned runs  16(8 个配对单元 × 2 臂" in out
+    assert "prefix_delta" not in out
 
 
 def test_the_one_dimensional_spelling_keeps_its_artifact_paths_byte_identical(
