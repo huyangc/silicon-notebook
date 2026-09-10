@@ -671,9 +671,14 @@ def _build_delta_snapshot(
     游标推到账本末尾:那些还没进过任何一块 D 的观察行由这一版 K 的近期窗与折算计数
     接过去,一条都没有被静默丢掉。纯计算、零 I/O、零 LLM、零配额。
 
-    模块级函数而不是方法:五项预算全部由 `_reflect_v2_context` 一处读完再传下来
-    (计划 §1 M5 的「全仓唯一读点」),所以这里一格 `self` 都不需要——「不会自己再读
-    一次 settings」这件事因此是结构成立的,不靠注释。
+    **绑定资格的登记不在这里**:`ever_shown_outline_keys.update` 由调用方在"确认这
+    一版 K 真的会发出去"之后做。这一次重建可能在紧跟的回退判据上被整个丢弃,而在
+    这里登记就等于让一版从未发出的 K 里的键取得绑定资格——模型没见过卡面,却能引证
+    它(设计 §4.4/§6.2)。返回值就是那一版的选取,调用方据此登记。
+
+    模块级函数而不是方法:五项预算由 `_reflect_v2_context` 与它那两个专用 helper
+    (每个字段恰一个读点,计划 §1 M5)读完再传下来,所以这里一格 `self` 都不需要
+    ——「不会自己再读一次 settings」这件事因此是结构成立的,不靠注释。
     """
     rows = observer.rows
     selection = build_evidence_block(
@@ -699,7 +704,6 @@ def _build_delta_snapshot(
     delta.evidence_chars = len(evidence)
     delta.history_chars = len(history)
     delta.observation_cursor = len(rows)
-    state.ever_shown_outline_keys.update(selection.shown_keys)
     return selection
 
 
@@ -733,45 +737,53 @@ def _delta_cards(
 
 
 def _delta_supplements(
-    state, delta: "ReflectDeltaState", observer, *, fresh_keys,
+    state, delta: "ReflectDeltaState", observer, *, candidate_keys,
     max_cards: int, excerpt_chars: int, budget_left: int,
 ) -> "Tuple[str, ...]":
-    """同 key 的摘录升级 ⇒ 几张标着版本的补充卡(拍板 Q3/Q8)。
+    """同 key 的摘录升级 ⇒ 几张标着版本的补充卡(拍板 Q3/Q8,评审后修正)。
 
-    检测范围按 Q8 收窄成「本轮 `fresh_result_ids()` ∩ 冻结表」的至多 `max_cards`
-    个键。全量比对是每轮 O(池) 次 `select_excerpt`——正是这条臂要省的那笔开销。
+    候选集由调用方给,口径是「**本轮已绑定证据的键** ∩ 冻结表」:绑定键正是这一轮
+    模型要重新判断的那些方面所引的证据,而摘录窗口跟着本轮的 `action_query` 走——
+    同一条证据在这一轮可能真的该给出另一段原文。检测范围仍然是收窄的(至多
+    `max_cards` 个键),因为全量比对是每轮 O(池) 次 `select_excerpt`,正是这条臂要
+    省的那笔开销。
+
+    原先那一版口径是「本轮 `fresh_result_ids()` ∩ 冻结表」,评审证伪:那三个来源
+    (trace detail 的 `result_ids`、`note_fresh_ids` 侧信道、首轮播种)都只报**真的
+    新进池子**的标识,而一个键第一次进池子的那一轮要么还没被冻结,要么刚被同一轮的
+    K/D 用同一批检索词冻结——于是这个交集在生产口径下恒空,整条路径不可达。
+
+    **轮转**(`ReflectDeltaState.supplement_cursor`):每轮从游标处取至多 `max_cards`
+    个候选,游标随之前进。绑定键序是"大纲在前、方面轮转"的固定序,恒从队首取的话
+    队首那几个键每轮被重算一遍摘录、队尾的键永远等不到自己那一轮。
 
     **先选后调**(`ReflectDeltaState.supplement_for` 的调用契约):这里先按
     `max_cards` 与剩余额度定下要发哪几个键,再对它们调 `supplement_for`,非空返回值
     **无条件**拼进本块。反过来(先调再按预算丢)会让那一份更好的摘录从此每轮命中
     判重、恒返回空串,于是它永远到不了模型,而且没有任何一个计数会披露这件事。
 
+    **重算的字节与冻结那一行相同 ⇒ 一张都不发**:那一格由 `supplement_for` 的判重
+    做(冻结的那串字节在 `note_shown` 里就进了 `card_variants`),返回空串即不追加。
+    所以"这一轮摘录没变"的常态代价只有一次重算,不产生任何字节。
+
     额度按 `_SUPPLEMENT_CARD_OVERHEAD` 这个**上界**预留:版本标记的长度只有调用
     之后才知道,而契约不允许"调了再丢"。装不下就 `continue` 而不是 `break` ——一张
     塞不下的大卡不该把后面装得下的小卡一起挡掉,而候选本来就只有至多 `max_cards`
     个,扫完它们的代价是有界的。
-
-    ⚠ **今天这个候选集恒为空,这条路径因此不可达**(T-PD5 交付说明里如实登记)。
-    `fresh_result_ids()` 的三个来源(trace detail 的 `result_ids`、
-    `note_fresh_ids` 侧信道、首轮播种)都只报**真的新进池子**的标识,而一个键第一
-    次进池子的那一轮要么还没有被冻结(它这一轮才第一次渲染),要么刚被同一轮的
-    K/D 用**同一批检索词**冻结(于是这里重算出来的字节与冻结的那一份逐字相同,
-    `supplement_for` 如实返回空串)。所以"既是本轮新增、又已经在冻结表里"在今天的
-    通道口径下不可能同时成立。机制按拍板落地并有单元用例钉住(`key=` 那一格逐字
-    不变、版本标记、同一段摘录不追加第二张),等某条通道开始上报"返回了但不是新
-    增"的标识,或者主 agent 拍板放宽候选集,它就地生效——**不**擅自把范围改宽:
-    Q8 收窄它的理由(每轮 O(池) 次全文摘录)一个字都没有失效。
     """
     candidates = [
-        key for key in dict.fromkeys(str(raw) for raw in fresh_keys)
-        if key in delta.frozen_cards][:max_cards]
+        key for key in dict.fromkeys(str(raw) for raw in candidate_keys)
+        if key in delta.frozen_cards]
     if not candidates or budget_left <= 0:
         return ()
+    start = delta.supplement_cursor % len(candidates)
+    ordered = (candidates[start:] + candidates[:start])[:max_cards]
+    delta.supplement_cursor += len(ordered)
     lines: List[str] = []
     used = 0
     for key, text in render_pool_cards(
             collected=state.collected, elements=state.elements,
-            chunks=state.chunks, keys=candidates,
+            chunks=state.chunks, keys=ordered,
             question=state.question, action_query=observer.last_query,
             excerpt_chars=excerpt_chars):
         if used + len(text) + _SUPPLEMENT_CARD_OVERHEAD + 1 > budget_left:
@@ -4671,10 +4683,12 @@ class ReasoningRetriever:
 
         `getattr` 读 settings:窄测试替身与离线工具的 duck-typed 适配器不带这几
         个字段(镜像 `reflect_v2_active` 的既有写法),缺省一律回到已登记的默认值,
-        绝不因为少一个字段就把预算当成 0。**六项预算在这一处读完**(四项既有 + 两个
-        PR-3 新增,计划 §1 M5):这个方法是它们的全仓唯一读点,`prefix_delta` 那一支
-        拿到的是这里算好的几个数,不是第二处 `getattr` ——同一个字段有两个读点时,
-        「两条臂用了不同的预算」在字节上看着完全正常。
+        绝不因为少一个字段就把预算当成 0。**六项预算每个字段恰一个读点**(四项既有 +
+        两个 PR-3 新增,计划 §1 M5):四项在这个方法体内、两个新配置各在自己那个专
+        用 helper(`_delta_max_cards` / `_delta_target_ratio`,各只有一个调用点、就在
+        这个方法里)。`prefix_delta` 那一支拿到的是这里算好的几个数,不是第二处
+        `getattr` ——同一个字段有两个读点时,「两条臂用了不同的预算」在字节上看着完
+        全正常。
 
         **布局分派(T-PS8)。** `reflect_optimization()` 那个单点说的是两条前缀臂之
         一时,同一批块按稳定性重排成 C/K/D/T(前缀复用设计 §4.1–4.5),并额外带上本
@@ -4722,11 +4736,14 @@ class ReasoningRetriever:
             or DEFAULT_REFLECT_EVIDENCE_CHARS_BY_EFFORT.get(effort)
             or DEFAULT_REFLECT_EVIDENCE_CHARS_BY_EFFORT[
                 DEFAULT_RETRIEVAL_EFFORT])
-        # 剩下三项既有预算与两个新配置(计划 §1 M5)。全部在**这一处**读完:那四项
-        # 的全仓唯一读点是这个方法(architecture.md 已登记),而两个新配置按同一条
-        # 先例落在同一处 —— delta 那一支拿到的是**这里算好的几个数**,不是第二处
-        # `getattr`。少了这一条,同一个字段会有两个读点,而关掉/改掉其中一处的后果
-        # 是「两条臂用了不同的预算」,在字节上看着完全正常。
+        # 剩下三项既有预算与两个新配置(计划 §1 M5)。纪律是**每个字段恰好一个读
+        # 点**:四项既有预算与它们的默认值都在这个方法体内读完,两个新配置各在自己
+        # 那个专用 helper(`_delta_max_cards` / `_delta_target_ratio`)里读一次、而那
+        # 两个 helper 又各只有一个调用点,就在下面几行。少了这一条,同一个字段会有
+        # 两个读点,而关掉/改掉其中一处的后果是「两条臂用了不同的预算」,在字节上
+        # 看着完全正常。守卫在
+        # `test_reflect_optimization_has_exactly_one_settings_read_point`(六项预算
+        # 逐项参数化,AST 判据)。
         excerpt_chars = int(getattr(
             settings, "reasoning_reflect_excerpt_chars", 240))
         recent = int(getattr(
@@ -4745,6 +4762,7 @@ class ReasoningRetriever:
                 and (delta is None or not delta.fallback)):
             context = self._reflect_delta_context(
                 state, summary, outline, observer, catalog=catalog,
+                optimization=optimization,
                 budget=budget, excerpt_chars=excerpt_chars,
                 state_chars=state_chars, recent=recent,
                 ratio=_delta_target_ratio(settings),
@@ -4772,13 +4790,20 @@ class ReasoningRetriever:
             question=state.question, action_query=observer.last_query,
             budget_chars=budget,
             excerpt_chars=excerpt_chars,
+            # 回退轮的 K 也**复用冻结字节**:上文里那些 D 卡是冻结的那串字节,同
+            # 一个键在本轮 K 里按新检索词重算的话,同一条证据就在一条消息里出现两
+            # 种**都不带版本标记**的写法(设计 §4.4「不就地改写旧卡」/§5 风险 4),
+            # 而 S 仍然带着"后来那张标着版本"这句规则。`off` 与 `prefix_snapshot`
+            # 走到这里时 `delta is None` ⇒ 空映射,两条臂逐字节回到接入前。
+            frozen_cards=delta.frozen_cards if delta is not None else {},
         )
         # **只登记真的渲染出来的键。**被预算挤出窗口的候选一个都不登记——模型没
         # 见过它,就不该因为"它在池子里"取得大纲绑定资格(设计稿 §6.2)。
         state.ever_shown_outline_keys.update(selection.shown_keys)
         observations = render_observations(
             observer.rows, recent=recent, state_chars=state_chars)
-        measurement = self._reflect_measurement(state, selection)
+        measurement = self._reflect_measurement(
+            state, selection, optimization)
         if optimization in _PREFIX_LAYOUTS and catalog is not None:
             # 两条前缀臂共用的那一支(T-PS8)。**只换块的位置,不换任何块的内容
             # 判据**:证据卡与观察账是上面同一次装配的产出。走到这里的 delta 只
@@ -4790,9 +4815,16 @@ class ReasoningRetriever:
                 evidence=selection.text, observations=observations,
                 # 回退**不清空已发出的 D**:上文那些标着"新增"的块是模型已经读过
                 # 的材料,抽掉它们等于让一整段上文凭空消失。回退只换"下一块怎么
-                # 装",不改"上面已经装过什么"。
+                # 装",不改"上面已经装过什么"——触发回退的那一次重建清掉的 `blocks`
+                # 由 `_reflect_delta_context` 在置位之前原样还原,所以这里读到的就
+                # 是回退**之前**最后一轮发出去的那几块,逐字节不变。
                 delta=("\n\n".join(delta.blocks) if delta is not None else ""),
-                static_delta=(optimization == "prefix_delta"),
+                # 判据与上面那一格**同源**:S 里那四句 delta 规则解释的正是 D 怎么
+                # 读,所以"发不发规则"必须与"有没有 D 这条通道"是同一个条件。分成
+                # 两处读(一处读投影、一处再读策略位)的后果是它们可以分歧——策略
+                # 位在一次 run 中途翻回 `prefix_snapshot`(热更/测试)就会发出一条
+                # 带 D 块、而 S 已经不解释它的消息。
+                static_delta=(delta is not None),
                 measurement=measurement)
         # 必答方面清单 + 已完整枚举的集合键,都接在服务器状态块的**尾部**,与它
         # 一起受"按现有输入/协议边界保留、不整体裁尾"的处理(§4):方面清单是用户
@@ -4812,7 +4844,7 @@ class ReasoningRetriever:
         )
 
     def _reflect_measurement(
-        self, state: "_ReasoningRunState", selection,
+        self, state: "_ReasoningRunState", selection, optimization: str,
     ) -> "Optional[ReflectMeasurement]":
         """本 run 的上下文观测缓存,并记下这一轮的证据卡账(T-PS3;拍板 Q2)。
 
@@ -4839,11 +4871,15 @@ class ReasoningRetriever:
         `cards_omitted` 是被预算与逐条判据挤出窗口的候选数。`selection is None`
         (delta 臂**没有**重建 K 的那些轮)⇒ 这两格不写:那一轮压根没有"这一次选
         卡"这件事,写上一轮的数就是把一个陈的量说成本轮的。
+
+        ``optimization`` 由调用方**传值**,不在这里第二次问 `reflect_optimization()`
+        ——那已经是同一轮里对同一个决定的第三次读(`_reflect_prefix_layout` 的
+        docstring 反对的正是这件事:一轮里判两次策略,分歧就静默降级)。
         """
         measurement = state.reflect_measurement
         if measurement is None:
             measures = self.reflect_measures_context()
-            if not measures and self.reflect_optimization() != "prefix_delta":
+            if not measures and optimization != "prefix_delta":
                 return None
             measurement = state.reflect_measurement = ReflectMeasurement(
                 measures_messages=measures)
@@ -4903,8 +4939,8 @@ class ReasoningRetriever:
 
     def _reflect_delta_context(
         self, state: "_ReasoningRunState", summary: str, outline, observer, *,
-        catalog, budget: int, excerpt_chars: int, state_chars: int,
-        recent: int, ratio: float, max_cards: int,
+        catalog, optimization: str, budget: int, excerpt_chars: int,
+        state_chars: int, recent: int, ratio: float, max_cards: int,
     ) -> "Optional[ReflectContext]":
         """`prefix_delta` 的一轮装配(计划 §3 T-PD5;顺序 = 设计 §5.2 七步)。
 
@@ -4918,11 +4954,30 @@ class ReasoningRetriever:
         `render_observations` + `fold_observation_counts`,全是纯函数;这个方法不
         碰任何一格配额、不读库、不发请求——它只决定这一轮的输入长什么样。
 
+        **重建触发点是「一张新卡都装不下」,不是「本轮新卡塞不进剩余额度」**(评审
+        取舍,刻意)。后者每次有一张超出剩余额度的卡就压一次 K,而那张卡有省略披露、
+        下一次重建时按同一档序回得来;前者只在"这一块什么新证据都发不出去"时动手,
+        重建抖动因此少一个数量级。代价如实登记:紧预算下一张新卡可能晚几轮才进上文。
+
+        **重建有迟滞**(`ReflectDeltaState.rebuilt_last_turn`):上一轮刚压紧过一版、
+        这一轮又连一张新卡都装不下 ⇒ 这个预算下压缩已经无效,再压一次是纯空转(每
+        轮一次全池 `build_evidence_block` + K 重写 ⇒ 公共前缀塌回只剩 C,这条臂在它
+        自己要改进的两个轴上反而比 `prefix_snapshot` 更贵)。那时直接走回退。历史池
+        溢出触发的重建不受迟滞约束——那是账本真的又长了,压缩对它仍然有效。
+
         返回 `None` = **这一轮刚刚不可逆地回退**(拍板 Q4)。用返回值而不是在这里
         自己再拼一份 P 的装配:那样"回退之后与 `prefix_snapshot` 走同一支"就成了
         两处代码今天恰好一致,而调用方那一支本来就在,少一次重复就少一处会漂开的
-        地方。回退**不清空**已发出的 D、不清空候选池、不清空
-        `ever_shown_outline_keys`、不重置任何配额,也不多一次模型调用或轨迹步。
+        地方。回退**不清空已发出的 D**(重建那一步清掉的 `blocks` 由回退分支原样还
+        原)、不清空候选池、不清空 `ever_shown_outline_keys`、不重置任何配额,也不多
+        一次模型调用或轨迹步。
+
+        ⚠ **回退之后 `evidence_chars` / `history_chars` 两笔账停用。** 那一次被丢弃
+        的重建已经把它们重置成新 K 的长度,而还原回去的 `blocks` 是**旧** K 时代的
+        块——两者对不上。P 的那一支一格都不读这两个数(它每轮按硬预算重新选卡),
+        所以不去修补一份此后没有读者的账;真正要守住的两件事各自成立:上文里已经
+        发出的 D 一个字节都没变,而 `ever_shown_outline_keys` 只登记真发出去过的键
+        (被丢弃那一版 K 的选取一格都不登记)。
         """
         delta = state.reflect_delta
         bound_keys = evidence_bound_keys(
@@ -4938,10 +4993,13 @@ class ReasoningRetriever:
                 state, delta, observer, bound_keys=bound_keys,
                 fresh_keys=fresh_keys, budget=budget, state_chars=state_chars,
                 excerpt_chars=excerpt_chars, recent=recent, ratio=ratio)
-        # ② 待追加事件(全是纯读:这里一格都还没改投影)。
-        pending_rows = observer.rows[delta.observation_cursor:]
-        history_add = _joined_chars(
-            [render_observation_row(row) for row in pending_rows])
+        # ② 待追加事件(全是纯读:这里一格都还没改投影)。观察行只渲染一次,下面
+        #    的记账与 `build_delta_block` 复用同一份列表(同一个输入渲染三遍是这条
+        #    臂本来就要省的那类开销)。
+        pending_lines = [
+            render_observation_row(row)
+            for row in observer.rows[delta.observation_cursor:]]
+        history_add = _joined_chars(pending_lines)
         cards = _delta_cards(
             state, delta, observer, bound_keys=bound_keys,
             fresh_keys=fresh_keys, budget=budget, max_cards=max_cards,
@@ -4949,41 +5007,76 @@ class ReasoningRetriever:
         # ③ 只有"待追加的 D 装不下"才重建(设计 §5.2:短循环不按固定轮数压缩)。
         #    刚建过 K 的那一轮不重建:那一版是这一刻能给出的最紧的一版,再压一次
         #    是纯空转,而 §5 风险 5 点名要挡的就是这种震荡。
+        crowded = bool(cards.omitted and not cards.shown_keys)
+        rebuilt = False
         if snapshot is None and (
-                delta.history_chars + history_add > state_chars
-                or (cards.omitted and not cards.shown_keys)):
+                delta.history_chars + history_add > state_chars or crowded):
+            if crowded and delta.rebuilt_last_turn:
+                # ④ 迟滞:上一轮刚压紧过一版,这一轮又连一张新卡都装不下 ⇒ 这个
+                #    预算下压缩已经无效,第二次重建是纯空转。直接回退(不可逆),
+                #    已发出的 D 一格未动(这一支还没碰 `blocks`)。
+                delta.fallback = True
+                delta.pending_aspect_notes.clear()
+                return None
             # ④ 重建:零 LLM、零 I/O。`blocks` 整体清空、两个累计计数重置、游标
-            #    推到账本末尾(那些待追加的观察行由新 K 的近期窗接过去)。
+            #    推到账本末尾(那些待追加的观察行由新 K 的近期窗接过去)。**先存一
+            #    份 `blocks`**:这一次重建可能在下一句判据上被整个丢弃,而那时上文
+            #    里那些标着"新增"的块是模型已经读过的材料,抽掉它们等于让一整段上
+            #    文凭空消失(拍板 Q4「回退不清空已发出的 D」)。
+            kept_blocks = list(delta.blocks)
+            rebuilt = True
             snapshot = _build_delta_snapshot(
                 state, delta, observer, bound_keys=bound_keys,
                 fresh_keys=fresh_keys, budget=budget, state_chars=state_chars,
                 excerpt_chars=excerpt_chars, recent=recent, ratio=ratio)
             delta.generation += 1
             delta.rebuilds += 1
-            pending_rows = observer.rows[delta.observation_cursor:]
+            # 重建把游标推到了账本末尾,所以这两个量必须**重算**:待追加的观察行
+            # 已经由新 K 的近期窗接过去,本轮的 D 里一行都没有,记账因此是 0。用
+            # 重建之前那个 `history_add` 的话,同一批行会被计两遍(一遍在新 K 的
+            # `snapshot_history` 里、一遍在这一笔追加里),而它最大可以接近整份
+            # `state_chars` ——重建刚做完就可能已经越过阈值,下一轮无条件再压一次。
+            pending_lines = [
+                render_observation_row(row)
+                for row in observer.rows[delta.observation_cursor:]]
+            history_add = _joined_chars(pending_lines)
             cards = _delta_cards(
                 state, delta, observer, bound_keys=bound_keys,
                 fresh_keys=fresh_keys, budget=budget, max_cards=max_cards,
                 excerpt_chars=excerpt_chars)
-            # ⑤ 重建之后仍装不下**最小有效新证据**(至少一张新卡或一行新观察)
-            #    ⇒ 不能每轮反复压缩空转,本 run 剩余部分回退(拍板 Q4,不可逆)。
-            if not pending_rows and cards.omitted and not cards.shown_keys:
+            # ⑤ 本轮**有候选新卡、重建之后一张都装不下** ⇒ 压缩已经无效,本 run
+            #    剩余部分回退(拍板 Q4,不可逆)。没有候选新卡的那些轮不回退:那
+            #    是"这一轮没有新证据",不是"装不下新证据",而 D 本来就允许为空。
+            #    (不再合取"没有待追加的观察行":重建刚把游标推到账本末尾,那一格
+            #    在这个位置恒真,写上去只是让判据看起来比实际宽。)
+            if cards.omitted and not cards.shown_keys:
                 delta.fallback = True
+                delta.blocks[:] = kept_blocks
+                delta.pending_aspect_notes.clear()
                 return None
-        # ⑥ 追加。补充卡按拍板 Q8 用**新卡之后剩下的**那点预算:新证据优先于同一
-        #    条证据的更好摘录,而 `supplement_for` 的调用契约要求"先选定要发的键、
-        #    非空返回值无条件拼进本块",所以剩余额度必须在调用之前就算清楚。
+        # 只登记**真发出去**的那一版 K 的键(设计 §4.4:绑定资格在最终渲染之后才
+        # 登记)。被丢弃那一次重建的选取在上面两条回退分支里已经 `return`,一格都
+        # 没登记——否则模型从没见过的卡会凭"它在某一版被选中过"取得绑定资格。
+        if snapshot is not None:
+            state.ever_shown_outline_keys.update(snapshot.shown_keys)
+        delta.rebuilt_last_turn = rebuilt
+        # ⑥ 追加。补充卡按拍板 Q8 用**新卡之后剩下的**那点预算,而且排在新卡之后:
+        #    新证据优先于同一条证据的更好摘录(两处口径必须一致,否则"优先"只活在
+        #    预算里、在模型眼里反而是补充卡先出现)。`supplement_for` 的调用契约要
+        #    求"先选定要发的键、非空返回值无条件拼进本块",所以剩余额度必须在调用
+        #    之前就算清楚。
         supplements = _delta_supplements(
-            state, delta, observer, fresh_keys=fresh_keys, max_cards=max_cards,
-            excerpt_chars=excerpt_chars,
+            state, delta, observer,
+            candidate_keys=[key for key in bound_keys
+                            if str(key) in delta.frozen_cards],
+            max_cards=max_cards, excerpt_chars=excerpt_chars,
             budget_left=(budget - delta.evidence_chars - _DELTA_HEAD_CHARS
                          - len(cards.text)))
         cards_text = "\n".join(
-            part for part in (*supplements, cards.text) if part)
+            part for part in (cards.text, *supplements) if part)
         notes = tuple(delta.pending_aspect_notes)
         block = build_delta_block(
-            cards_text, [render_observation_row(row) for row in pending_rows],
-            notes, generation=delta.generation)
+            cards_text, pending_lines, notes, generation=delta.generation)
         if block:
             delta.blocks.append(block)
             delta.pending_aspect_notes.clear()
@@ -5000,7 +5093,8 @@ class ReasoningRetriever:
                 delta.note_shown(key, text)
                 delta.visible_keys.add(key)
             state.ever_shown_outline_keys.update(cards.shown_keys)
-        measurement = self._reflect_measurement(state, snapshot)
+        measurement = self._reflect_measurement(
+            state, snapshot, optimization)
         if measurement is not None:
             _note_delta_measurement(measurement, delta)
         # ⑦ 成型。K 的两块取投影上那两串**已经发出去过**的字节,不重新渲染:
@@ -5078,11 +5172,16 @@ class ReasoningRetriever:
         if not outcome.error:
             # 逐方面被拒的那几条:合法动作照常执行,只记披露与 skip 步。
             self._note_assessment_rejections(state, outcome.rejections)
-            if outcome.accepted and state.reflect_delta is not None:
+            if (outcome.accepted and state.reflect_delta is not None
+                    and not state.reflect_delta.fallback):
                 # `prefix_delta` 的 D 里那一节"上一轮已接受的方面更新"(设计 §4.4)。
                 # 写点只能在 `if not outcome.error:` 内(§5 风险 6):整份 assessment
                 # 越界时它已经被折成一条 invalid,一格都没落账——在外面写就会让 D
                 # 里出现一句"服务端已接受 a2",而账本上 a2 根本没动过。
+                #
+                # 回退之后不再 append:那一格从此没有任何消费者(D 不再追加),继续
+                # 往里写就是一个只增不减、永不消费的 list。回退分支自己把它清空一
+                # 次,这里挡住此后每一轮。
                 #
                 # 只记"接受了哪些 id"这条历史事实,方面的**当前状态**整块仍在 T
                 # (计划 §1 M2 的冲突 C1:那个渲染函数带着两处消费副作用,搬进一块
