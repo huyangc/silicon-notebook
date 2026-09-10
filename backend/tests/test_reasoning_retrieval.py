@@ -12795,56 +12795,22 @@ def _prefix_aspect_run(rrepo, **kwargs):
     return _v2_aspect_run(rrepo, **kwargs)
 
 
-def _wrapper_system_content(schema_hint: str) -> str:
-    """还原 `chat_json` 插在调用方消息**最前面**的那段 wrapper。
-
-    ⚠ 这是一份**按形状复制**的还原,不是从生产代码取来的纯函数:T-PS1 会在
-    `app.core.llm` 里抽出 `provider_messages()`,那条分支合并之后这里应当改成直接
-    调它。为了让这份复制不静默走偏,`_assert_wrapper_shape_still_holds` 顺带核对
-    `chat_json` 的源码里仍然是同一串字面量、并且调用方消息仍然排在它之后。
-    """
-    return (
-        "You are the extraction and reasoning engine for "
-        "silicon-notebook. Return valid JSON only, no markdown fences. "
-        f"Schema hint: {schema_hint}"
-    )
-
-
-def _assert_wrapper_shape_still_holds():
-    """核对上面那份还原:wrapper 仍是"一条 system,调用方消息原样跟在后面"。
-
-    按**源码形状**核对而不是照抄一段文案:`chat_json` 里那段字面量是跨行拼的,
-    逐字比对会在任何一次换行调整上误伤。三个特征片段 + `*messages,` 排在
-    `full_messages` 之内,已经足以钉住"wrapper 在前、角色是 system、调用方消息原样
-    在后"这三件事——它们才是公共前缀的判据。
-    """
-    import inspect
-    from app.core.llm import OpenAICompatibleClient
-    source = inspect.getsource(OpenAICompatibleClient.chat_json)
-    head = source.index("full_messages")
-    wrapper = source[head:head + 600]
-    for fragment in ('"role": "system"',
-                     "You are the extraction and reasoning engine for",
-                     "Schema hint: {response_schema_hint}",
-                     "*messages,"):
-        assert fragment in wrapper, fragment
-    assert wrapper.index('"role": "system"') < wrapper.index("*messages,")
-
-
 def _provider_messages(llm, turn: int) -> list:
-    """本轮真正发给 provider 的三条消息(wrapper + system + user)。"""
-    return [
-        {"role": "system",
-         "content": _wrapper_system_content(llm.schema_hints[turn])},
-        *llm.message_lists[turn],
-    ]
+    """本轮真正发给 provider 的三条消息(wrapper + system + user)。
+
+    直接调生产的纯函数,不再"按形状复制"一份 wrapper:`chat_json` 自己也调
+    `provider_messages()`,所以这里还原出来的就是发出去的那一份,wrapper 文案改动
+    再也不需要在测试里同步一遍(旧版靠 `inspect.getsource` 核对源码形状,T-PS1 把
+    拼装搬进纯函数之后那份核对钉的是已经不存在的行)。
+    """
+    from app.core.llm import provider_messages
+    return provider_messages(llm.message_lists[turn], llm.schema_hints[turn])
 
 
 def _serialize(messages) -> bytes:
-    """确定性序列化:角色与正文之间用正文里不可能出现的分隔符。"""
-    return b"".join(
-        f"\x00{row['role']}\x01{row['content']}\x02".encode("utf-8")
-        for row in messages)
+    """生产的确定性序列化(长度后置帧,见 `serialize_provider_messages`)。"""
+    from app.core.llm import serialize_provider_messages
+    return serialize_provider_messages(messages)
 
 
 def _common_prefix(left: bytes, right: bytes) -> int:
@@ -12950,13 +12916,13 @@ def test_prefix_layout_provider_facing_prefix_covers_the_wrapper_and_s(rrepo):
     """(c) 还原到 provider 面前的消息:公共前缀 = wrapper + S 整段(§12 第 2 条)。
 
     只测业务函数产出的字符串不够——真正被复用的前缀是 `chat_json` 拼完之后那一
-    份,wrapper 与 schema hint 也在里面。所以这里按 `chat_json` 的形状还原三条
-    消息、序列化、逐字节求公共前缀,并断言它**至少**覆盖到 wrapper 加 S 的末尾。
+    份,wrapper 与 schema hint 也在里面。所以这里用生产的 `provider_messages()` /
+    `serialize_provider_messages()` 还原三条消息、逐字节求公共前缀,并断言它**至少**
+    覆盖到 wrapper 加 S 的末尾。
 
-    变异:把 wrapper 挪到调用方消息之后 ⇒ 形状守卫红;在 S 里插一个逐轮值 ⇒
+    变异:把 wrapper 挪到调用方消息之后 ⇒ 角色序列断言红;在 S 里插一个逐轮值 ⇒
     公共前缀退到那个值之前,长度断言红。
     """
-    _assert_wrapper_shape_still_holds()
     llm, _result = _prefix_aspect_run(
         rrepo, intent_detail=_TWO_ASPECTS, reflects=_three_turn_reflects(),
         chunk_results=_three_turn_chunks(), reasoning_max_chunk_searches=2)
