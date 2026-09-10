@@ -26,7 +26,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Dict, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import (
+    Collection, Dict, List, Mapping, Optional, Sequence, Set, Tuple,
+)
 
 from app.core.query_syntax import quoted_phrases, strip_accepted_quote_markers
 from app.repositories.lexical_query import lexical_recall_terms
@@ -533,6 +535,7 @@ def build_evidence_block(
     budget_chars: int,
     excerpt_chars: int,
     frozen_cards: Mapping[str, str] = _NO_FROZEN_CARDS,
+    exclude_keys: Collection[str] = (),
 ) -> EvidenceSelection:
     """按 §6.2 的三档确定性顺序选卡,受 `budget_chars` 约束。
 
@@ -557,13 +560,23 @@ def build_evidence_block(
     来自那一轮的决定),而一张变了字节的卡会让整条前缀从它那里断开。选取顺序、预算
     判断、留底、省略披露一格都不改:冻结的是**这张卡长什么样**,不是**要不要选它**。
     默认空映射 ⇒ off/P 逐字节回到接入前。
+
+    `exclude_keys`(`prefix_delta` 回退之后那一支才传)= **此刻已经在别的块里可见**的
+    键,它们对**全部三档**都不是候选。写成一个参数而不是让调用方去滤 `bound_keys`
+    与 `fresh_keys`:第三档的键序是这个函数自己从池子里算的(`_diverse_order(index)`),
+    调用方手上根本没有那份序,滤前两档因此只挡住了三分之二——一张保留 D 里已经发过
+    的卡照样能经第三档回到 K,于是一条消息里出现两份都不带版本标记的同一张卡,还占掉
+    了本该给别的证据的额度(前缀复用设计 §5 风险 4)。
+    实现是**预置 `seen`**:被排除的键连 `ordered` 都进不去,所以它们也不计进
+    `omitted` ——那个数说的是"候选里本轮没展开的",而这些键在模型眼里此刻是**可见**
+    的,把它们报成"未展开"是反的。默认空 ⇒ off/P 逐字节回到接入前。
     """
     index = _pool_index(collected, elements, chunks)
     terms = excerpt_terms(question, action_query, excerpt_chars)
     # (键, 档序)。一个键只属于**一档**:被留底挡在第一档外的键不会在第三档
     # 借尸还魂,省略数因此也只数一次。
     ordered: List[Tuple[str, int]] = []
-    seen: Set[str] = set()
+    seen: Set[str] = {str(key) for key in exclude_keys}
     for tier, group in enumerate((bound_keys, fresh_keys, _diverse_order(index))):
         for key in group:
             key = str(key)

@@ -8434,6 +8434,36 @@ def test_evidence_block_renders_each_piece_of_evidence_exactly_once():
     assert list(selection.shown_keys) == ["c1", "c2"]
 
 
+def test_evidence_block_excludes_the_given_keys_from_every_tier():
+    """`exclude_keys` 对**三档都**生效,而且不计进省略数。
+
+    这份 fixture 里被排除的那个键 `c1` **只可能经第三档**(多样性补位)被选中:
+    `bound_keys` 与 `fresh_keys` 都是空的。所以它断的正是 codex #707 R1 P2 的第一
+    条——调用方在自己手上滤掉前两档的键序时,第三档的键序是这个函数从池子里自己
+    算的(`_diverse_order(index)`),那份过滤对它一点作用都没有。
+
+    省略数为 0 是同一条判据的另一半:那个数说的是"候选里本轮没展开的",而被排除的
+    键此刻在别的块里**可见**,报成"未展开"是反的。
+
+    变异:把排除改成只滤 `bound_keys`/`fresh_keys`(即去掉 `seen` 的预置)⇒ `c1`
+    经第三档回到块里,第一条与第三条同时红。默认不传 ⇒ 两张卡都在(最后一段),
+    off/P 因此逐字节回到接入前。
+    """
+    from app.services.reasoning_context import build_evidence_block
+    chunks = [_card("c1", relevance=0.9, text="全局布局"),
+              _card("c2", relevance=0.5, text="详细布线")]
+    kwargs = dict(
+        collected={}, elements=[], chunks=chunks, chains=[],
+        bound_keys=[], fresh_keys=[], question="布局", action_query="",
+        budget_chars=4000, excerpt_chars=240)
+    selection = build_evidence_block(**kwargs, exclude_keys={"c1"})
+    assert "key=c1" not in selection.text
+    assert list(selection.shown_keys) == ["c2"]
+    assert selection.omitted == 0
+    # 不传 ⇒ 两档一格不变:排除是**新增**的一格,不是把旧行为改掉。
+    assert list(build_evidence_block(**kwargs).shown_keys) == ["c1", "c2"]
+
+
 def test_evidence_block_orders_bound_then_fresh_then_history():
     """三档顺序确定;同一份输入两次调用结果完全相同。"""
     from app.services.reasoning_context import build_evidence_block
@@ -16069,6 +16099,119 @@ def test_delta_keeps_the_cumulative_evidence_budget_across_blocks(rrepo):
     assert any(len(llm.delta_blocks(turn)) >= 2 for turn in range(turns))
 
 
+def _observation_only_run(rrepo, *, pinch, **extra):
+    """一条**第二轮起没有候选新卡、只有观察行**的 run(codex #707 R1 P2 的形态)。
+
+    后三轮重复第一轮那个检索方向 ⇒ 返回的 chunk 已经在池里,`fresh_result_ids()`
+    因此为空;而唯一绑定的键 `ck-q0` 在 K 里已经可见 ⇒ 增量那两档(新增 / 已绑定但
+    此刻不可见)一个候选都没有。于是那几轮的待追加块只有**块头 + 观察行**(第三轮
+    起还有一句方面 note),`cards.omitted` 恒 0 ⇒ 既有的 `crowded` 判据恒假,正是
+    codex 那条复现的形态。
+
+    `pinch(delta, budget, state_chars, pending)` 在**每一轮装配之前**被调一次(拿到
+    的是那一轮真实的投影与两个上限),由各条用例把某一个池顶到边界上——一条 run 里
+    自然攒出 995/1000 这种用量要几十轮,而边界本身才是被断言的东西。
+    """
+    from app.services.reasoning_observation import render_observation_row
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    original = ReasoningRetriever._reflect_delta_context
+    calls: list = []
+
+    def _wrapped(self, state, summary, outline, observer, **kwargs):
+        delta = state.reflect_delta
+        if delta is not None:
+            pending = [render_observation_row(row)
+                       for row in observer.rows[delta.observation_cursor:]]
+            pinch(delta, kwargs["budget"], kwargs["state_chars"], pending)
+        context = original(self, state, summary, outline, observer, **kwargs)
+        delta = state.reflect_delta
+        calls.append((delta.rebuilds, delta.fallback,
+                      delta.evidence_chars, delta.history_chars))
+        return context
+
+    reflects = [
+        {"next_action": "search_chunks", "sufficient": False,
+         "arguments": {"query": "完整问题"}, "reason": "先查一轮"},
+        {"next_action": "search_chunks", "sufficient": False,
+         "arguments": {"query": "完整问题"}, "reason": "同一个方向再来",
+         "assessment": {"supported": [
+             {"aspect_id": "a1", "evidence_keys": ["ck-q0"]}]}},
+        {"next_action": "search_chunks", "sufficient": False,
+         "arguments": {"query": "完整问题"}, "reason": "还是同一个方向"},
+        _answer(),
+    ]
+    ReasoningRetriever._reflect_delta_context = _wrapped
+    try:
+        llm, result = _delta_aspect_run(
+            rrepo, intent_detail=_TWO_ASPECTS, reflects=reflects,
+            chunk_results={"完整问题": [_chunk_hit("ck-q0")]},
+            reasoning_max_chunk_searches=4, **extra)
+    finally:
+        ReasoningRetriever._reflect_delta_context = original
+    return llm, result, calls
+
+
+def test_delta_counts_the_block_head_of_an_observation_only_pending_block(rrepo):
+    """只带观察行的待追加块,**块头**也要在准入之前算进证据池。
+
+    codex #707 R1 P2 的第二条:那种轮次 `cards.omitted` 为 0 ⇒ `crowded` 恒假,于是
+    块头无条件追加,而 delta 的证据池是 **K + 每一块 D 的总和**——一次放过就一路带
+    下去(复现用量 995/1000 ⇒ 追加后 1071)。这里把证据池顶到"只剩 5 个字符"上,断
+    的是两件事:那一轮真的**重建**了,而且发完块之后累计账仍然 ≤ 上限。
+
+    变异:准入判据去掉 `delta.evidence_chars + evidence_add > budget` 那一支(回到
+    只看 `crowded`)⇒ 不重建、`evidence_chars` 越过 `budget`,这条红。
+    """
+    pinched: list = []
+
+    def _pinch(delta, budget, state_chars, pending):
+        # 只顶证据池:历史池离上限还很远,所以这一轮的重建只可能由块头那一笔触发。
+        if not pinched and delta.evidence_chars and not delta.fallback:
+            pinched.append(budget)
+            delta.evidence_chars = budget - 5
+
+    _llm, _result, calls = _observation_only_run(rrepo, pinch=_pinch)
+    assert pinched, calls
+    budget = pinched[0]
+    hit = next(index for index, call in enumerate(calls) if call[0] >= 1)
+    assert calls[hit][0] == 1 and not calls[hit][1], calls
+    for rebuilds, fallback, evidence_chars, _history in calls:
+        assert evidence_chars <= budget, (calls, budget)
+
+
+def test_delta_counts_the_pending_aspect_notes_against_the_history_pool(rrepo):
+    """待追加的**方面 note** 也要在准入之前算进历史池。
+
+    同一条 P2 的另一半:历史侧的判据原来只算观察行,而那句"已接受的方面更新"与观察
+    行一起落进同一个池、一起在同一块 D 里发出去。这里把历史池顶到"观察行刚好装得
+    下、加上 note 就装不下"的那一点上——所以只有把 note 也算进去的判据才会重建。
+
+    变异:准入判据的历史那一笔改回只算观察行(`_joined_chars(pending_lines)`)⇒ 不
+    重建、`history_chars` 越过 `state_chars`,这条红。
+    """
+    from app.services.reasoning_retrieval import _joined_chars
+
+    pinched: list = []
+
+    def _pinch(delta, budget, state_chars, pending):
+        # 只顶历史池,而且**刚好留下观察行的位置**:观察行那一笔单独看装得下
+        # (`history_chars + 观察行 == state_chars`),多出来的正是那句 note。
+        if (not pinched and delta.pending_aspect_notes
+                and not delta.fallback):
+            pinched.append((state_chars, tuple(delta.pending_aspect_notes)))
+            delta.history_chars = state_chars - _joined_chars(pending)
+
+    _llm, _result, calls = _observation_only_run(rrepo, pinch=_pinch)
+    assert pinched, calls
+    state_chars, notes = pinched[0]
+    assert _joined_chars(notes) > 0, pinched
+    hit = next(index for index, call in enumerate(calls) if call[0] >= 1)
+    assert calls[hit][0] == 1 and not calls[hit][1], calls
+    for _rebuilds, _fallback, _evidence, history_chars in calls:
+        assert history_chars <= state_chars, (calls, state_chars)
+
+
 # --- (d) 目标比例不满足仍守硬预算;回退不可逆 ----------------------------------
 
 def _oversize_run(rrepo, **extra):
@@ -17092,8 +17235,12 @@ def test_delta_fallback_turn_keeps_its_own_cards_out_of_the_kept_blocks(rrepo):
     的证据池还剩得下一张卡,于是回退轮的一条消息里 K 与保留 D 同时带卡——那是 P 那一
     支排除 `carried.keys` 唯一有对象可断的形态。
 
-    变异:P 那一支不排除 `carried.keys`(`bound_keys`/`fresh_keys` 原样传下去)⇒ 回退
-    轮的 K 里出现上文 D 里那张卡的第二份、两份都不带版本标记,这条红。
+    变异:P 那一支不传 `exclude_keys=carried.keys` ⇒ 回退轮的 K 里出现上文 D 里那张
+    卡的第二份、两份都不带版本标记,这条红。改成只滤 `bound_keys`/`fresh_keys`(第三
+    档漏掉)在**这条脚本上是绿的**——它的池子小,那张卡本轮同时在绑定档里,所以两档
+    的过滤够用;那条漏洞由
+    `test_evidence_block_excludes_the_given_keys_from_every_tier` 在产地断,而这条
+    只断"回退轮的 K 与保留 D 不交"这个端到端结果(codex #707 R1 P2)。
     """
     llm, result = _crowded_run(rrepo, **{_MEASURE_FLAG: True})
     fallbacks = [detail["context_fallback"] for detail in _reflect_details(result)]
