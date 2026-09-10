@@ -670,12 +670,21 @@ def build_delta_evidence_block(
     与 `build_evidence_block` 共用池索引、检索词、卡片构造与渲染,只有两件事不同,
     而这两件事就是它单独存在的全部理由:
 
-    1. **档序相反**:本轮新增 → 已绑定但从未展示 → 多样性补位。K 的第一档是"已
+    1. **档序相反,而且只有两档**:本轮新增 → 已绑定但从未展示。K 的第一档是"已
        绑定证据的代表",因为那一块要在整轮里当一份完整的当前视图;而增量块回答的
        是另一个问题——"上一次动作之后多了什么"。已经绑定又已经展示过的卡在上文里
        原样躺着,再追加一张同样的只是重复付费。所以已绑定那一档在这里只剩"绑上了
        却从没真的展示过"的那些(它们今天靠 `outline_binding_keys` 的资格链取得绑定
        资格,模型却还没见过卡面)。
+
+       **没有第三档「多样性补位」**(T-PD5 评审后裁定)。K 那一块有第三档,因为它
+       要当一份完整的当前视图,预算里剩下的位置留空没有任何读者;而 D 只装"本轮新
+       增或补充"(设计 §4.4)。给它一个补位档的后果不是"多利用了一点预算",而是
+       **头两轮就把首版 K 按目标比例刻意留出的空档吃光**:没有新证据的那些轮里,池
+       里任意几张卡照样被填进 D,于是证据池一路涨到满、第二轮或第三轮就触发重建
+       ——正好是设计 §5.2 首句("不先把首轮池子填满、第二轮立刻重建")与本条臂省下
+       的那笔前缀开销要一起挡掉的东西。池里那些既不新增、也没绑定的材料本来就由
+       K 的第三档在**下一次重建**时按相关度带进来。
     2. **排除 `already_shown`**:此刻还在消息里的卡都被挡在门外。同一条证据在一条
        消息里出现两遍,模型无从判断哪一份是此刻的。
 
@@ -726,7 +735,10 @@ def build_delta_evidence_block(
     blocked = {str(key) for key in already_shown}
     ordered: List[str] = []
     seen: Set[str] = set()
-    for group in (fresh_keys, bound_keys, _diverse_order(index)):
+    # 两档,没有第三档(理由见 docstring 第 1 条):池里既不新增、也没绑定的材料
+    # 不进 D。`_diverse_order` 仍然是 K 那一块的第三档,这里刻意不调它——顺带也省
+    # 掉每轮一次全池排序。
+    for group in (fresh_keys, bound_keys):
         for key in group:
             key = str(key)
             if (key and key not in seen and key not in blocked
@@ -857,9 +869,9 @@ def render_pool_cards(
 
     补充卡检测(拍板 Q8)唯一需要的东西:同一个键按**本轮**的 `action_query` 重算
     一次摘录,拿去和冻结表里那份比。它**不选卡**——不看档序、不看预算、不看
-    `already_shown`,也因此不付 `_diverse_order` 那一次全池排序;调用方已经按
-    `fresh_result_ids() ∩ 冻结表`、`max_cards` 把键选完了,这里只负责把它们渲染成
-    与 `build_evidence_block` / `build_delta_evidence_block` **逐字节同一种**卡面。
+    `already_shown`;调用方已经按「本轮已绑定 ∩ 冻结表」、轮转起点与 `max_cards`
+    把键选完了,这里只负责把它们渲染成与 `build_evidence_block` /
+    `build_delta_evidence_block` **逐字节同一种**卡面。
 
     为什么是这里的一个公开函数,而不是调用方自己按池子取对象:池键的约定有三种
     形状(`collected` 的 key、元素的 `element_id`、块的 `chunk_id`,见 `_pool_index`),
@@ -1088,9 +1100,9 @@ class ReflectDeltaState:
     整份抖出来;遮它遮的是那份键集,不是那几个版本号。
 
     其余几格留着 `repr`:`observation_cursor`/`evidence_chars`/`history_chars`/
-    `rebuilds`/`fallback`/`generation` 都是纯计数与开关,正是出问题时最该看得见的
-    东西;`visible_keys` 也留着——它只有池键、没有任何正文,而"此刻消息里还剩哪些
-    卡"恰恰是 delta 出问题时第一个要看的东西。
+    `rebuilds`/`fallback`/`generation`/`rebuilt_last_turn`/`supplement_cursor` 都是
+    纯计数与开关,正是出问题时最该看得见的东西;`visible_keys` 也留着——它只有池键、
+    没有任何正文,而"此刻消息里还剩哪些卡"恰恰是 delta 出问题时第一个要看的东西。
 
     * `snapshot_evidence` / `snapshot_history` —— 当前这一版 K 的两块字节。
     * `blocks` —— 已经发出去的每一块 D,**按发出顺序**。只追加;重建时整体清空。
@@ -1118,6 +1130,14 @@ class ReflectDeltaState:
       (K + 所有 D),不是每轮各拿一份满额(设计 §5.1)。判断在追加**之前**做。
     * `rebuilds` / `fallback` / `generation` —— 重建过几次、是否已经不可逆地退回
       P 的有界选择(拍板 Q4)、当前是第几版快照。
+    * `rebuilt_last_turn` —— 上一轮是不是刚重建过。重建的**迟滞**判据就这一格:
+      刚压紧过一版、下一轮又连一张新卡都装不下,说明这个预算下压缩已经无效,再压
+      一次是纯空转(每轮 1 次全池 `build_evidence_block` + K 重写 ⇒ 公共前缀塌回
+      只剩 C,这条臂在它自己要改进的两个轴上反而比 `prefix_snapshot` 更贵)。那时
+      走回退而不是第二次重建。
+    * `supplement_cursor` —— 补充卡候选的**轮转起点**,单调只增。候选集是"本轮已
+      绑定 ∩ 曾展示",而每轮只取前 `max_cards` 个:不轮转的话队首那几个键每轮被重
+      算一遍摘录,队尾的键永远等不到自己那一轮。
     """
 
     snapshot_evidence: str = field(default="", repr=False)
@@ -1135,6 +1155,8 @@ class ReflectDeltaState:
     rebuilds: int = 0
     fallback: bool = False
     generation: int = 1
+    rebuilt_last_turn: bool = False
+    supplement_cursor: int = 0
 
     def note_shown(self, key: str, text: str) -> None:
         """一张**真的渲染出去**的卡:第一次见到就冻结它的字节。
