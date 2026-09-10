@@ -17771,3 +17771,384 @@ def test_delta_with_measurement_off_writes_only_the_behaviour_keys(
         assert detail["delta_blocks"] == turn
     assert {"context_rebuilds", "context_fallback", "delta_blocks"} <= set(
         REFLECT_MEASUREMENT_DETAIL_KEYS)
+
+
+# ---------------------------------------------------------------------------
+# T-PL4 `prefix_delta_lean` 的轻量自评合同(PR-4 计划 §3 T-PL4;设计 §6)
+#
+# L = D + 一份新的自评合同,三格机制各在这一节有守卫:收尾不为记账追加一轮(账本
+# 上那一格 run 级开关)、状态半的尾注换成 lean 双胞胎、合成侧披露「未评估」而不
+# 让它冒充「查过确实没有」。
+#
+# 这一节只断 `reasoning_aspects.py` 的纯函数与账本本身——策略位怎么从
+# `reflect_optimization()` 传下来是 T-PL5 的接线,完整 run(不折轮、`skip_reasons`
+# 里没有 `missing_assessment`、终态那一步的 `aspects_assessment_omitted`)在那一节
+# 断。所以本节每一条 lean 断言都配一条**同构的默认态对照**:四格里 off/P/D 三格
+# 走的是同一段默认值中性的代码,而那三臂的字节等价是本期硬约束。
+# ---------------------------------------------------------------------------
+
+
+def _lean_ledger(*questions, constraints=()):
+    """`_ledger` 的 L 双胞胎:只多开建账时那一格 run 级开关。"""
+    from app.services.reasoning_aspects import build_aspect_ledger
+    return build_aspect_ledger(
+        {"mandatory_topics": list(questions),
+         "constraints": list(constraints)},
+        "整条问题", lean=True)
+
+
+def _fake_model_end(sufficient: bool):
+    """trace 里那个 `model_end` 标记:模型自己走到 answer 那一步。"""
+    from types import SimpleNamespace
+    return SimpleNamespace(
+        step_type="reflect",
+        detail={"next_action": "answer", "sufficient": sufficient})
+
+
+def test_a_lean_run_accepts_a_silent_closing_turn_without_a_follow_up():
+    """(a)(b) L 下收尾轮省略自评 ⇒ 当场接受:不折轮、不扣额度、不挂追问位。
+
+    L 的自评合同(系统段的 `_V2_LEAN_ASSESSMENT_INSTRUCTION`)明说未走到的方面
+    可以留着不评、服务端不会为补齐账目退回一轮。所以在这条臂上「收尾没带
+    assessment」不是不合作,而是照合同办事;退回一轮去追问一份合同里明说可以省
+    的东西,买回来的只有那一轮的钱(实测约 40s/轮)。追问链唯一的闸就是这个返回
+    值,所以这一格短路掉之后 `_absorb_assessment`/`_nudge_missing_assessment`/
+    `run()` 一行都不用改(拍板 Q1)。
+
+    第三组是拍板 Q5 的那条红线:**L 下 `assessment_omitted` 永不置位**。那一格的
+    语义是"服务端问过之后它仍然不给",判据里含着一次真实发生过的追问;L 一次都
+    没问过,把没问过记成"问过了它不给"会让放量评估把一次照章省略读成一次协议不
+    合作。而"这一格没有模型判断"这件事仍如实记着——`model_assessed=False` 就是
+    L 下的那个读数(三格分工见 `note_missing_assessment` 的 docstring)。
+
+    变异:删掉 `note_missing_assessment` 开头那条 `lean_assessment` 闸 ⇒ 第一组
+    红(返回 True、扣掉额度、挂上追问位);闸里补上 `may_prompt=False` 那两行的
+    `assessment_omitted` 写入 ⇒ 第三组红(用例 (g) 的那次变异);把闸改成读
+    `may_prompt` 而不是 `lean_assessment` ⇒ (b) 的对照半红。
+    """
+    lean = _lean_ledger("问题一", "问题二")
+    # 1) 不退回,而且这不是"一次额度用完了"——再来一次仍然接受。
+    assert lean.note_missing_assessment() is False
+    assert lean.note_missing_assessment() is False
+    # 2) 追问链的三格一个都没动;降级轮也不该把追问位补回来(从没发出过追问)。
+    assert lean.assessment_prompts == 0
+    assert lean.nudge_pending is False
+    assert lean.nudge_answered is False
+    lean.restore_pending_nudge()
+    assert lean.nudge_pending is False
+    # 3) `assessment_omitted` run 级与 per-row 两格全 False(拍板 Q5)。
+    assert lean.assessment_omitted is False
+    assert [row.assessment_omitted for row in lean.snapshot()] == [False] * 2
+    # 但模型自己的那份读数照旧如实:没有判断、状态仍是 unknown。
+    assert [row.model_assessed for row in lean.snapshot()] == [False] * 2
+    assert [row.status for row in lean.snapshot()] == ["unknown"] * 2
+
+    # (b) 对照:同一份构造在默认(off/P/D)下照旧退回一次、追问一次。
+    plain = _ledger("问题一", "问题二")
+    assert plain.note_missing_assessment() is True
+    assert (plain.assessment_prompts, plain.nudge_pending) == (1, True)
+    # 第二次沉默才接受,并如实记下"问过了它不给"。
+    assert plain.note_missing_assessment() is False
+    assert plain.assessment_omitted is True
+    assert [row.assessment_omitted for row in plain.snapshot()] == [True] * 2
+
+
+def test_the_lean_switch_is_frozen_on_every_ledger_source():
+    """建账时冻结那一格,**三条来源都要带上**(计划 T-PL4 要点)。
+
+    `build_aspect_ledger` 有三个返回点(Ask 的 `mandatory_topics`、Report 的
+    `intent_questions`、没有契约时的整条问题)。漏掉任一条,那条来源的 run 会在
+    L 臂的标签下跑着 D 的追问合同——一次假的臂标签比一次崩溃更贵,因为它只在
+    A/B 表上看得出来,而那张表正是这次实验的全部产出。
+
+    默认 `False` 同样逐条断:那是三臂字节等价的那一半(计划 §5 风险 1)。
+
+    变异:三个返回点里任去掉一个 `lean_assessment=lean` ⇒ 对应那一格红;把
+    `AspectLedger.__init__` 的默认值改成 `True` ⇒ 默认那一列全红。
+    """
+    from app.services.reasoning_aspects import build_aspect_ledger
+
+    sources = (
+        {"mandatory_topics": ["问题一"]},
+        {"intent_questions": ["本节问题一"]},
+        {},
+    )
+    for detail in sources:
+        assert build_aspect_ledger(
+            detail, "整条问题", lean=True).lean_assessment is True, detail
+        # 默认中性:不传就是三臂的既有语义。
+        assert build_aspect_ledger(
+            detail, "整条问题").lean_assessment is False, detail
+    # 三条来源真的各走一个返回点(空对空不算覆盖)。
+    assert len({
+        build_aspect_ledger(detail, "整条问题", lean=True).source
+        for detail in sources}) == 3
+
+
+def test_the_lean_status_block_differs_only_in_the_closing_note():
+    """(c) 状态半在 L 下**只差尾注那一句**,全部方面行一行不少。
+
+    拍板 Q4:状态半刻意不收窄成"只列未落定 + 计数"。设计 §4.5 明写「其余方面
+    不从状态列表消失」;而且 L 下模型停止每轮重述,这个块因此成了方面账唯一的
+    完整落点——`demotion` 与「服务端未采纳」都挂在那几行上。除自评合同以外的
+    任何一处差异都会毁掉 D↔L 的归因(计划 §5 风险 6)。
+
+    两个账本分别建、喂同一份载荷:那个函数是 consume-on-render,共用一个账本会
+    让先渲染的那一次把披露吃掉。
+
+    变异:`render_aspect_status_block` 里把 lean 分支改成**追加**而不是替换
+    ⇒ 第一/二组红(两句矛盾合同同时在场);L 下过滤掉已支撑的方面行 ⇒ 第三组
+    红;把 `lean` 的默认值改成 `True` ⇒ 默认那一份变成 lean 文本,第一组红。
+    """
+    from app.services.reasoning_aspects import (
+        ASPECT_BLOCK_NOTE, ASPECT_BLOCK_NOTE_LEAN, render_aspect_status_block,
+    )
+
+    def _fed():
+        ledger = _lean_ledger("问题一", "问题二", constraints=["只看 7nm"])
+        ledger.apply({
+            "supported": [{"aspect_id": "a1", "evidence_keys": ["ck-q0"]},
+                          {"aspect_id": "a2", "evidence_keys": ["ck-nope"]}],
+        }, allowed_keys={"ck-q0"})
+        return ledger
+
+    plain = render_aspect_status_block(_fed())
+    lean = render_aspect_status_block(_fed(), lean=True)
+    # 1) 两句各自出现在自己那一份里,一份里只有一句。
+    assert ASPECT_BLOCK_NOTE in plain and ASPECT_BLOCK_NOTE_LEAN not in plain
+    assert ASPECT_BLOCK_NOTE_LEAN in lean and ASPECT_BLOCK_NOTE not in lean
+    # 2) 换掉那一句之后逐字节相同 —— 差量恰好是一行,不多不少。
+    assert lean.replace(ASPECT_BLOCK_NOTE_LEAN, ASPECT_BLOCK_NOTE) == plain
+    assert len(lean.splitlines()) == len(plain.splitlines())
+    # 3) 全部方面行都在(含已支撑的那一行)、计数与降级披露一格不动。
+    assert _aspect_status_facts(lean) == _aspect_status_facts(plain)
+    assert "（已支撑 1/2）" in lean
+    assert lean.count("\n- a") == 2
+    assert "服务端降级:" in lean
+    # 4) lean 那一句与 S 侧的说法对号:省略 = 保留服务端记着的状态,不必重述。
+    assert "只需在 assessment 里给出有变化的方面" in ASPECT_BLOCK_NOTE_LEAN
+    assert "省略的保留现状" in ASPECT_BLOCK_NOTE_LEAN
+    assert "不必重述已支撑项" in ASPECT_BLOCK_NOTE_LEAN
+    # 反面:它没有把「本轮请重新给出」那半句抄过来(两句合同互斥)。
+    assert "重新给出" not in ASPECT_BLOCK_NOTE_LEAN
+
+
+def test_a_lean_turn_that_reports_one_aspect_leaves_the_others_verbatim():
+    """(d) 只报一个方面的那一轮 ⇒ 其余方面的状态与绑定键在下一轮**逐字不变**。
+
+    这是 L 的全部前提:模型敢省略,是因为省略等于"保留服务端记着的状态"。要是
+    省略会让别的方面掉档或掉键,那份 lean 合同就是骗人的——而账本的全量替换只
+    对**被报告的那个方面**生效,这一条把它钉在渲染出来的字节上。
+
+    变异:`AspectLedger.apply` 改成对未报告的方面清状态/清键 ⇒ 第一组红;
+    `render_aspect_status_block` 在 L 下只列有变化的方面 ⇒ 第二组红。
+    """
+    from app.services.reasoning_aspects import render_aspect_status_block
+
+    def _rows(block):
+        return {
+            line.split(" | ")[0]: line
+            for line in block.splitlines() if line.startswith("- ")
+        }
+
+    ledger = _lean_ledger("问题一", "问题二", "问题三")
+    # 第 1 轮:全量自评(L 的第一轮仍然可以全报)。
+    ledger.apply({
+        "supported": [{"aspect_id": "a1", "evidence_keys": ["ck-1"]},
+                      {"aspect_id": "a2", "evidence_keys": ["ck-2", "ck-3"]}],
+        "unresolved": [{"aspect_id": "a3", "status": "partial",
+                        "gap": "还缺 2024 年的数"}],
+    }, allowed_keys={"ck-1", "ck-2", "ck-3"})
+    turn1 = _rows(render_aspect_status_block(ledger, lean=True))
+    # 第 2 轮:只报 a3 的变化,a1/a2 一个字都不提。
+    ledger.apply({"unresolved": [
+        {"aspect_id": "a3", "status": "conflicting",
+         "gap": "两份来源对不上"}]}, allowed_keys={"ck-1"})
+    turn2 = _rows(render_aspect_status_block(ledger, lean=True))
+    # 第 3 轮:什么都不报。
+    turn3 = _rows(render_aspect_status_block(ledger, lean=True))
+
+    # 1) 被省略的两行三轮逐字相同(状态、证据数都在这一行里)。
+    for aspect_id in ("- a1", "- a2"):
+        assert turn1[aspect_id] == turn2[aspect_id] == turn3[aspect_id]
+    assert turn1["- a1"] == "- a1 | 已支撑 | 已绑定证据 1 条"
+    assert turn1["- a2"] == "- a2 | 已支撑 | 已绑定证据 2 条"
+    # 绑定键本身也没动(证据卡第一档读的就是它)。
+    assert ledger.bound_keys() == ("ck-1", "ck-2", "ck-3")
+    assert ledger.supported_count() == 2
+    # 2) 三行始终都在,且被报告的那一行如实换了状态。
+    assert set(turn1) == set(turn2) == set(turn3) == {"- a1", "- a2", "- a3"}
+    assert "部分支撑" in turn1["- a3"] and "还缺 2024 年的数" in turn1["- a3"]
+    assert "证据冲突" in turn2["- a3"] and "两份来源对不上" in turn2["- a3"]
+    assert turn2["- a3"] == turn3["- a3"]
+
+
+def test_a_lean_termination_discloses_what_was_never_assessed():
+    """(e) 合成披露:「未评估」不许冒充「查过确实没有」(设计 §6 末段,拍板 Q6)。
+
+    事实块里「Questions the retrieval did not resolve」那一行在三臂下混着两种
+    东西:查过、确实没找到的方面,与模型压根没表过态的方面。off/P/D 下第二种是
+    异常(收尾缺自评会被退回追问),而 **L 下它是常态**。于是同一行文本在 L 下
+    的含义悄悄从"查过没有"漂成"没查过",而合成读到的是前者——答案里就会出现一句
+    「笔记本里没有这份材料」的假结论。
+
+    这一行把差额如实说出来:模型自己的结束判断(`model_assessed_sufficient`,与
+    `reason` 分开的那一格)、有几个方面没被逐项核验、是哪几个,最后钉一句这
+    **不是**"资料不存在"。终态 reason 闭集一格不改(拍板 Q7),`directive` 尾句
+    与三条硬边界一字不改。
+
+    变异:去掉行里的计数 ⇒ 第一组红(计划 T-PL7 (c) 的那次变异);判据改成只看
+    `not model_assessed` 而不看 `lean_assessment` ⇒ 下一条(B/P/D 恒不出)红;
+    把 `model_assessed_sufficient` 那半写死成一个方向 ⇒ 第一/二组各红一半。
+    """
+    from app.domain.retrieval_termination import (
+        TERMINATION_MODEL_PARTIAL, TERMINATION_MODEL_SUFFICIENT,
+        AspectSnapshot, RetrievalTermination,
+    )
+    from app.services.reasoning_aspects import (
+        _TERMINATION_BLOCK_MAX_ASPECTS, render_termination_block,
+    )
+
+    def _lean_term(reason, *, sufficient, assessed_ids=(), count=3):
+        rows = tuple(
+            AspectSnapshot(
+                aspect_id=f"a{n}", question=f"问题{n}",
+                status="partial" if f"a{n}" in assessed_ids else "unknown",
+                model_assessed=f"a{n}" in assessed_ids)
+            for n in range(1, count + 1))
+        return RetrievalTermination(
+            reason=reason,
+            unresolved_aspect_ids=tuple(row.aspect_id for row in rows),
+            model_assessed_sufficient=sufficient,
+            aspects=rows, lean_assessment=True)
+
+    # 1) 计数只数没被评过的那几个:a1 评过 ⇒ 2 个未核验,且只列那两个。
+    partial = render_termination_block(
+        _lean_term(TERMINATION_MODEL_PARTIAL, sufficient=True,
+                   assessed_ids=("a1",)))
+    assert "2 mandatory aspects were never assessed item by item" in partial
+    assert "问题2; 问题3" in partial
+    assert "问题1" not in partial.split("never assessed")[1]
+    # 模型自己的那句判读保留下来(它与 reason 是分开的两格)。
+    assert "The planner reported the evidence as sufficient" in partial
+    # 三条硬边界那一句仍在,而且这一行自己也钉了一遍"不是资料不存在"。
+    assert "NOT a finding that the notebook lacks the material" in partial
+    assert "does not cover" in partial          # `directive` 尾句一字不改
+    # 上面那一行照旧列全部未解决方面 —— 这一行是**补充披露**,不是替换。
+    assert "Questions the retrieval did not resolve: 问题1; 问题2; 问题3" in (
+        partial)
+
+    # 2) 模型没自报充分的那一版:同一行的另一个方向。
+    not_sufficient = render_termination_block(
+        _lean_term(TERMINATION_MODEL_PARTIAL, sufficient=False))
+    assert "The planner did not report the evidence as sufficient" in (
+        not_sufficient)
+    assert "3 mandatory aspects were never assessed" in not_sufficient
+
+    # 3) `model_sufficient` 那一格终态同样出这一行(判据在 DTO 上,不在 reason)。
+    sufficient = render_termination_block(
+        _lean_term(TERMINATION_MODEL_SUFFICIENT, sufficient=True))
+    assert "3 mandatory aspects were never assessed" in sufficient
+    assert "The planner reported the evidence as sufficient" in sufficient
+
+    # 4) 全部方面都评过了 ⇒ 没有差额可披露,这一行一个字都不出。
+    all_assessed = render_termination_block(
+        _lean_term(TERMINATION_MODEL_PARTIAL, sufficient=True,
+                   assessed_ids=("a1", "a2", "a3")))
+    assert "never assessed" not in all_assessed
+    assert "Questions the retrieval did not resolve" in all_assessed
+
+    # 5) 截断口径与上面那一行共用一份:超出的补 `(and N more)`,不隐瞒总数。
+    many = _TERMINATION_BLOCK_MAX_ASPECTS + 2
+    flood = render_termination_block(
+        _lean_term(TERMINATION_MODEL_PARTIAL, sufficient=False, count=many))
+    assert f"{many} mandatory aspects were never assessed" in flood
+    assert f"问题{_TERMINATION_BLOCK_MAX_ASPECTS}" in flood
+    assert flood.count("(and 2 more)") == 2     # 两行各截一次,各自补数
+
+
+def test_the_unassessed_disclosure_never_reaches_the_other_three_arms():
+    """(f) 合成新行**只在 L** 出现:off/P/D 的事实块逐字节回到 #707 合入态。
+
+    三臂字节等价是本期硬约束(计划 §3 统一硬约束、§5 风险 1),而"有没有
+    `model_assessed=False` 的未解决方面"在三臂下同样能为真——run 早早被熔断或
+    预算收尾时,模型根本没走到收尾那一步。所以判据必须挂在 run 级那一格
+    `lean_assessment` 上,不能从 per-aspect 的沉默里反推。
+
+    变异:把 `render_termination_block` 里那条 `termination.lean_assessment and`
+    去掉(新行无条件渲染)⇒ 这一条红。
+    """
+    from app.domain.retrieval_termination import (
+        TERMINATION_REASONS, AspectSnapshot, RetrievalTermination,
+    )
+    from app.services.reasoning_aspects import render_termination_block
+
+    rows = tuple(
+        AspectSnapshot(aspect_id=f"a{n}", question=f"问题{n}", status="unknown")
+        for n in range(1, 4))
+
+    def _term_with(*, lean):
+        return RetrievalTermination(
+            reason=reason,
+            unresolved_aspect_ids=("a1", "a2", "a3"),
+            model_assessed_sufficient=sufficient,
+            unrecovered_channels=("search_chunks",),
+            aspects=rows, lean_assessment=lean)
+
+    for reason in sorted(TERMINATION_REASONS):
+        for sufficient in (True, False):
+            for directive in (True, False):
+                where = (reason, sufficient, directive)
+                block = render_termination_block(
+                    _term_with(lean=False), directive=directive)
+                assert "never assessed" not in block, where
+                assert "The planner" not in block, where
+                # 反面:这份 fixture 真的满足新行的另一半前件(全部未评估),
+                # 所以"不出"是 `lean_assessment` 挡住的,不是构造不成立。
+                lean = render_termination_block(
+                    _term_with(lean=True), directive=directive)
+                assert "never assessed" in lean, where
+                # 差量恰好是那一行:去掉它之后两份逐字节相同。
+                assert "\n".join(
+                    line for line in lean.splitlines()
+                    if "never assessed" not in line) == block, where
+
+
+def test_classify_termination_carries_the_lean_switch_onto_the_dto():
+    """(g) 账本那一格 run 级事实原样上到终态 DTO,而 `assessment_omitted` 不置位。
+
+    `classify_termination` 的签名一格不改(三个调用点零改动,拍板 Q6),它只是把
+    `AspectLedger.lean_assessment` 承接过去——合成侧那一行需要知道"这条臂本来就
+    不逐项问",而这件事从 per-aspect 的沉默里反推不出来。
+
+    第二段与 T-PL5 那条 run 级 `aspects_assessment_omitted == 0` 断的是同一个量
+    (那个 detail 键数的就是这一格为真的行数),只是低一层:接线在 T-PL5,这里先
+    把源头钉住。
+
+    变异:`classify_termination` 不传 `lean_assessment=` ⇒ 第一段红;
+    `note_missing_assessment` 的 lean 闸里补上 `assessment_omitted` 写入 ⇒
+    第二段红。
+    """
+    from app.domain.retrieval_termination import TERMINATION_MODEL_PARTIAL
+    from app.services.reasoning_aspects import classify_termination
+
+    lean = _lean_ledger("问题一", "问题二")
+    assert lean.note_missing_assessment() is False      # L 的收尾:直接接受
+    term = classify_termination([_fake_model_end(True)], [], lean)
+    assert term.lean_assessment is True
+    # 模型自己的 `sufficient` 判读保留;reason 仍落既有闭集(拍板 Q7)。
+    assert term.model_assessed_sufficient is True
+    assert term.reason == TERMINATION_MODEL_PARTIAL
+    assert term.unresolved_aspect_ids == ("a1", "a2")
+
+    # `aspects_assessment_omitted` 的低一层读数:一格都没有。
+    assert sum(row.assessment_omitted for row in term.aspects) == 0
+    assert sum(row.model_assessed for row in term.aspects) == 0
+
+    # 对照:默认账本上那一格是 False,而两次沉默之后 omitted 照旧记满。
+    plain = _ledger("问题一", "问题二")
+    assert plain.note_missing_assessment() is True
+    assert plain.note_missing_assessment() is False
+    plain_term = classify_termination([_fake_model_end(True)], [], plain)
+    assert plain_term.lean_assessment is False
+    assert sum(row.assessment_omitted for row in plain_term.aspects) == 2

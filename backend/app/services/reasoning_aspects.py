@@ -104,6 +104,24 @@ ASPECT_BLOCK_NOTE = (
     "（上面的状态是此前某一轮模型自己的判断，不是服务端对语义支撑的证明；"
     "本轮请在同一份 JSON 的 assessment 里重新给出，省略的方面保留现状。）"
 )
+#: 同一句话的 `prefix_delta_lean`(L)版本,由 `render_aspect_status_block` 的
+#: `lean` 闸**二选一**替换上面那一份(不是追加)。
+#:
+#: 只差后半句,而那后半句正是 L 这条臂唯一改掉的东西:上面那一份要求模型「本轮
+#: 重新给出」全量自评,而 L 的系统段自评合同
+#: (`prompts._V2_LEAN_ASSESSMENT_INSTRUCTION`)明确说「省略的方面保留服务端已经
+#: 记着的状态、已支撑项不必重述、省略不花代价也不会被追问」。两句同时在场是最坏
+#: 形态——同一份 prompt 里一句要全量、一句要增量,模型只能猜哪一句算数,而 A/B
+#: 表会把由此产生的行为差异记到「布局」头上。所以两处都是替换,不是叠加。
+#:
+#: 前半句一个字不改:那句话说的是「这些状态的来源是模型自己,不是服务端的证明」
+#: ——L 下它比 `off` 更要紧,因为 L 里这个块是方面账**唯一**的完整落点,模型不再
+#: 每轮重述一遍。
+ASPECT_BLOCK_NOTE_LEAN = (
+    "（上面的状态是此前某一轮模型自己的判断，不是服务端对语义支撑的证明；"
+    "本轮只需在 assessment 里给出有变化的方面，省略的保留现状"
+    "（不必重述已支撑项）。）"
+)
 #: 收尾载荷缺 `assessment` 被退回之后,下一轮回喂的那一句。**指名道姓列出方面
 #: id**:上一轮那份载荷证明了泛泛一句「请填 assessment」不够——它在系统段里已经
 #: 说过一遍了。这里说的是「就这几个 id,一个都不能少」,并把再次省略的后果写在
@@ -391,12 +409,12 @@ class AspectLedger:
     __slots__ = (
         "_records", "_by_id", "source", "constraints",
         "assessment_prompts", "assessment_omitted", "nudge_pending",
-        "nudge_answered", "unknown_aspect_rejections",
+        "nudge_answered", "unknown_aspect_rejections", "lean_assessment",
     )
 
     def __init__(
         self, questions: Sequence[str], *, source: str,
-        constraints: Sequence[str] = (),
+        constraints: Sequence[str] = (), lean_assessment: bool = False,
     ) -> None:
         self._records: List[_AspectRecord] = [
             _AspectRecord(
@@ -430,6 +448,17 @@ class AspectLedger:
         #: `_AspectRecord.rejected` 同款)。只记条数、不记那个 id:它是模型的自由
         #: 文本,合法 id 就在同一个块里逐行列着,回显一遍不增加任何信息。
         self.unknown_aspect_rejections: int = 0
+        #: 这次 run 走的是 `prefix_delta_lean`(L)的**轻量自评合同**:模型每轮只
+        #: 报变化,收尾轮省略自评不再被退回追问(前缀复用设计 §6,PR-4 计划拍板
+        #: Q1)。**run 级、建账时冻结**——`build_aspect_ledger` 的关键字是唯一的
+        #: 写点,中途不重读策略位。中途翻位会让这次 run 的自评合同前后不一致
+        #: (前半程被追问过、后半程不追问),而那条臂在 A/B 表上仍标着一个名字,
+        #: 于是那张表上的差异归因是假的(拍板 Q2)。
+        #:
+        #: 它只被 `note_missing_assessment` 一处读到(那是追问链唯一的闸),另外
+        #: 由 `classify_termination` 原样带上终态 DTO 供合成侧披露。默认 `False`
+        #: 让 `off`/`prefix_snapshot`/`prefix_delta` 三臂逐字节落在既有语义上。
+        self.lean_assessment: bool = bool(lean_assessment)
 
     # --- 读 ---------------------------------------------------------------
     @property
@@ -499,7 +528,29 @@ class AspectLedger:
 
         没有方面的 run(兼容路径下问题原文为空)返回 False:没有清单可以逐个自评,
         追问一句"请对下列 0 个方面各给一条判断"只会烧掉一轮。
+
+        ``lean_assessment``(L 那条臂)= **这次 run 的自评合同本来就不要求收尾轮
+        补齐账目**(前缀复用设计 §6:「不为了补齐账目再专门退回一轮」)。系统段
+        已经把这件事写给模型看了,所以省略不是不合作,而是照合同办事;退回一轮去
+        追问一份合同里明说可以省的东西,买回来的只有那一轮的钱(实测约 40s)。
+        这条闸排在最前面,`may_prompt` 与追问额度都不再看——L 下这两格从头到尾
+        都是初值。
+
+        **三格分工**(拍板 Q5,别让它们互相冒充):
+
+        * ``_AspectRecord.model_assessed`` / ``AspectSnapshot.model_assessed``
+          为 False = 「这一格**没有**模型的判断」。它不解释为什么没有。
+        * ``assessment_omitted``(run 级与 per-row 两格)= 「服务端**问过之后**它
+          仍然不给」。判据里含着一次真实发生过的追问,所以 **L 下永不置位**——
+          那条臂一次都没问过,把没问过记成"问过了它不给"会让放量评估把一次照章
+          省略读成一次协议不合作。这也是为什么 L 不走下面 `may_prompt=False`
+          那两行:那两行的全部内容就是写这一格。
+        * ``RetrievalTermination.lean_assessment`` = 「这条臂**本来就不问**」。
+          run 级事实挂 run 级,合成侧据它决定要不要披露「尚未逐项核验」
+          (`render_termination_block`),而不是从 per-aspect 的沉默里反推。
         """
+        if self.lean_assessment:
+            return False
         if not self._records:
             return False
         if (not may_prompt
@@ -858,7 +909,9 @@ def assessment_is_empty(assessment: object) -> bool:
     return True
 
 
-def build_aspect_ledger(intent_detail: object, question: str) -> AspectLedger:
+def build_aspect_ledger(
+    intent_detail: object, question: str, *, lean: bool = False,
+) -> AspectLedger:
     """按 §7.1 的三条来源建账。**不新增任何模型调用、不做重规划。**
 
     1. Ask:冻结意图的 `mandatory_topics`(用户在确认门审阅过的那份原文);
@@ -869,6 +922,12 @@ def build_aspect_ledger(intent_detail: object, question: str) -> AspectLedger:
     带在账上一起渲染,但**不各自成为一个方面**:约束是"答案要满足什么",不是
     "还要去查什么",给它一个能被独立标成 supported 的 id 只会造出一批永远停在
     unknown 的方面。
+
+    `lean` = 这次 run 走 `prefix_delta_lean` 的轻量自评合同(见
+    `AspectLedger.lean_assessment`)。**建账时冻结一次**,所以它必须落在**全部
+    三个**返回点上:漏掉任一条来源,那条来源的 run 会在 L 臂标签下跑着 D 的
+    追问合同——一次假的臂标签比一次崩溃更贵,因为它只在 A/B 表上看得出来。
+    默认 `False` 让既有三臂与全部现有调用点逐字节不变。
     """
     detail = intent_detail if isinstance(intent_detail, Mapping) else {}
     constraints = tuple(
@@ -880,17 +939,17 @@ def build_aspect_ledger(intent_detail: object, question: str) -> AspectLedger:
     if topics:
         return AspectLedger(
             topics, source=ASPECT_SOURCE_INTENT_TOPICS,
-            constraints=constraints)
+            constraints=constraints, lean_assessment=lean)
     section_questions = _bounded_unique(
         _text(row) for row in (detail.get("intent_questions") or ()))
     if section_questions:
         return AspectLedger(
             section_questions, source=ASPECT_SOURCE_SECTION_QUESTIONS,
-            constraints=constraints)
+            constraints=constraints, lean_assessment=lean)
     whole = _text(question)
     return AspectLedger(
         [whole] if whole else [], source=ASPECT_SOURCE_WHOLE_QUESTION,
-        constraints=constraints)
+        constraints=constraints, lean_assessment=lean)
 
 
 def render_aspect_block(ledger: AspectLedger) -> str:
@@ -1006,7 +1065,9 @@ def render_aspect_contract_block(ledger: AspectLedger) -> str:
     return "\n".join(lines)
 
 
-def render_aspect_status_block(ledger: AspectLedger) -> str:
+def render_aspect_status_block(
+    ledger: AspectLedger, *, lean: bool = False,
+) -> str:
     """方面账的**状态半**:每轮变化的那一半(前缀复用设计 §4.5)。
 
     只在 `prefix_snapshot` 布局下被调用,落在 T(user 段末尾)。**方面原文不在
@@ -1019,6 +1080,16 @@ def render_aspect_status_block(ledger: AspectLedger) -> str:
     (`_reflect_v2_context` 按闸二选一),所以"渲染 = 已经说给模型听了"在这里同样
     准确;`_survive_reflect_failure` 那条重新置位的路径也照旧成立(它认的是同一
     格 `nudge_pending`)。
+
+    `lean` 只换**尾注那一句**(`ASPECT_BLOCK_NOTE` → `ASPECT_BLOCK_NOTE_LEAN`,
+    二选一替换),其余每一格逐字不动:全部方面照旧逐行列出、`（已支撑 n/N）`、
+    降级/未采纳/未知 id 披露、两处消费副作用。**状态半在 L 下刻意不收窄成"只列
+    未落定 + 计数"**:(a) 设计 §4.5 明写「其余方面不从状态列表消失」;(b) L 下
+    模型停止重述,这个块因此成了方面账**唯一**的完整落点——`demotion` 与
+    「服务端未采纳」都挂在那几行上;(c) L 与 D 除自评合同外任何一处差异都会毁掉
+    归因(拍板 Q4)。追问句那一段在 L 下恒不可达(`note_missing_assessment` 的
+    第一条闸从不置位 `nudge_pending`),但**不删**:这个函数四臂共用,`off` 与
+    P/D 照旧要它。
     """
     rows = ledger.snapshot()
     if not rows:
@@ -1045,7 +1116,7 @@ def render_aspect_status_block(ledger: AspectLedger) -> str:
         lines.append(
             f"（上一轮有 {unknown_rejections} 条自评的方面 id 不在上面的清单里，"
             "服务端未采纳；请只使用上面每行开头的那个 id。）")
-    lines.append(ASPECT_BLOCK_NOTE)
+    lines.append(ASPECT_BLOCK_NOTE_LEAN if lean else ASPECT_BLOCK_NOTE)
     if ledger.nudge_pending:
         lines.append(ASPECT_ASSESSMENT_NUDGE.format(
             ids="、".join(ledger.aspect_ids)))
@@ -1139,6 +1210,19 @@ _TERMINATION_PROMPT_FACTS: Mapping[str, str] = {
 _TERMINATION_BLOCK_MAX_ASPECTS = 6
 
 
+def _termination_aspect_list(questions: Sequence[str]) -> str:
+    """事实块里的一段方面列举:按 `_TERMINATION_BLOCK_MAX_ASPECTS` 截断,超出的
+    补一句 `(and N more)`。
+
+    两个调用点共用**同一个截断口径**(未解决那一行、L 的未评估那一行):两份手写
+    的截断会在下一次调上限时分叉,而它们说的是同一件事——"列举本身不是证据,
+    截断只损失枚举、不损失结论"。
+    """
+    shown = questions[:_TERMINATION_BLOCK_MAX_ASPECTS]
+    more = len(questions) - len(shown)
+    return "; ".join(shown) + (f" (and {more} more)" if more > 0 else "")
+
+
 def render_termination_block(
     termination: Optional[RetrievalTermination], *, directive: bool = True,
 ) -> str:
@@ -1168,6 +1252,24 @@ def render_termination_block(
     未解决方面带上**问题原文**(用户审阅过的必答清单),因为"哪一件事没查着"正是
     答案要说明的那句话;`gap` 是模型自己写的文本,不进这个块——把上一轮模型的
     自述当服务端事实喂回去,正是 §2 拒绝的"原始 reason 回放"。
+
+    ⚠ **L 专属的第四行:未评估不冒充缺失**(设计 §6 末段,拍板 Q6)。上面那一行
+    「Questions the retrieval did not resolve」在三臂下混着两种东西:模型查过、
+    确实没找到的方面,与模型压根没对它表过态的方面。`off`/P/D 下第二种是异常
+    (收尾缺自评会被退回追问),而 **L 下它是常态**——那条臂的自评合同明说未走到
+    的方面可以留着不评。于是同一行文本在 L 下的含义悄悄从"查过没有"漂成"没查
+    过",而合成读到的是前者,答案里就会出现一句"笔记本里没有这份材料"的假结论。
+    这一行把差额如实说出来:模型自己的结束判断(`model_assessed_sufficient`,与
+    `reason` 分开的那一格)、有几个方面没被逐项核验、是哪几个(复用
+    `_TERMINATION_BLOCK_MAX_ASPECTS` 的截断口径,超出的补一句 `and N more`),
+    最后钉一句这**不是**"资料不存在"。
+
+    判据挂在 `termination.lean_assessment`(run 级)而不是"有没有
+    `model_assessed=False` 的行":后者在三臂下同样能为真(run 早早被熔断、模型
+    没走到收尾),那时多出这一行会改掉 B/P/D 的合成字节,而三臂字节等价是本期
+    硬约束。**两个条件都要**:是 L,且这一份终态里真有未评估的未解决方面。
+    `directive` 尾句与上面三条硬边界一字不改——这一行是**披露**,不是新指令,
+    尾句那条「不许把这段读成"库里没有"」正好已经覆盖它。
     """
     if termination is None:
         return ""
@@ -1186,12 +1288,30 @@ def render_termination_block(
         f"- {fact}.",
     ]
     if open_questions:
-        shown = open_questions[:_TERMINATION_BLOCK_MAX_ASPECTS]
-        more = len(open_questions) - len(shown)
         lines.append(
             "- Questions the retrieval did not resolve: "
-            + "; ".join(shown)
-            + (f" (and {more} more)" if more > 0 else "")
+            + _termination_aspect_list(open_questions)
+        )
+    # L 专属的披露(见 docstring 的 ⚠ 段)。`unassessed` 是 `open_questions` 的
+    # 子集——同一份未解决清单再过一道「这一格根本没有模型判断」的闸,所以上面那
+    # 一行为空时这一行结构性也为空,不会出现"没有未解决方面却说有几个未核验"。
+    unassessed = [
+        _fold(by_id[aspect_id].question)
+        for aspect_id in termination.unresolved_aspect_ids
+        if aspect_id in by_id and by_id[aspect_id].question
+        and not by_id[aspect_id].model_assessed
+    ]
+    if termination.lean_assessment and unassessed:
+        lines.append(
+            "- The planner "
+            + ("reported" if termination.model_assessed_sufficient
+               else "did not report")
+            + " the evidence as sufficient when it stopped; "
+            + f"{len(unassessed)} mandatory aspects were never assessed item "
+            "by item: "
+            + _termination_aspect_list(unassessed)
+            + ". That only means THIS retrieval did not check them one by "
+            "one — it is NOT a finding that the notebook lacks the material."
         )
     if termination.unrecovered_channels:
         lines.append(
@@ -1477,6 +1597,12 @@ def classify_termination(
 
     取消与不可恢复的阶段错误从不走到这里:它们在 `run()` 里照常上抛,不会被
     包装成一份"成功生成的终态"(§7.2)。
+
+    `lean_assessment` 只是把账本上那一格 run 级事实**原样带上**终态 DTO,不参与
+    上面任何一条判据:终态 reason 闭集在 L 下一格不改(拍板 Q7)——改它会让四臂
+    的终态分布再也不能横向比。它服务的是合成侧那一行披露
+    (`render_termination_block`),那边需要知道"这条臂本来就不逐项问",而这件事
+    从 per-aspect 的沉默里反推不出来。
     """
     unresolved = ledger.unresolved_ids()
     marker = _terminal_marker(trace)
@@ -1501,4 +1627,5 @@ def classify_termination(
         model_assessed_sufficient=model_sufficient and not degraded,
         unrecovered_channels=_unrecovered_channels(observations),
         aspects=ledger.snapshot(),
+        lean_assessment=ledger.lean_assessment,
     )
