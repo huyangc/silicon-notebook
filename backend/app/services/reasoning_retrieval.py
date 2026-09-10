@@ -31,6 +31,7 @@ from app.core.llm import (
 )
 from app.core.config import (
     DEFAULT_REASONING_PER_QUERY_LIMIT,
+    DEFAULT_REFLECT_DELTA_CARDS_BY_EFFORT,
     DEFAULT_REFLECT_EVIDENCE_CHARS_BY_EFFORT,
     REFLECT_OPTIMIZATION_IMPLEMENTED,
     Settings,
@@ -81,11 +82,14 @@ from app.services.reasoning_aspects import (
     render_aspect_status_block, termination_summary,
 )
 from app.services.reasoning_context import (
-    TURN_CONTEXT_TITLE, ReflectContext, ReflectMeasurement,
-    build_evidence_block,
+    DELTA_BLOCK_TITLE, SUPPLEMENT_CARD_NOTE, TURN_CONTEXT_TITLE,
+    ReflectContext, ReflectDeltaState, ReflectMeasurement, build_delta_block,
+    build_delta_evidence_block, build_evidence_block, compose_snapshot,
+    render_pool_cards,
 )
 from app.services.reasoning_observation import (
-    ActionObservationLedger, render_observations,
+    ActionObservationLedger, fold_observation_counts, render_observation_row,
+    render_observations,
 )
 from app.services.retrieval_experience_block import (
     CONSULT_MEMORY_TOP_K, action_id_for, adopted_entry_ids, clip_rationale,
@@ -421,6 +425,52 @@ _MEASURE_CALL_KEYS: Dict[str, str] = {
     "attempts": _registered_measure_key("call_attempts"),
     "response_chars": _registered_measure_key("response_chars"),
 }
+#: `prefix_delta` 的三个**行为事实**键(拍板 Q7)。与上面那几个的区别:它们不是
+#: "量出来的",而是这条臂做过什么——重建过几次、有没有不可逆地回退、这一条消息里
+#: 有几块 D。所以它们在测量关时也写(载体见 `ReflectMeasurement.measures_messages`)。
+_MEASURE_CONTEXT_REBUILDS = _registered_measure_key("context_rebuilds")
+_MEASURE_CONTEXT_FALLBACK = _registered_measure_key("context_fallback")
+_MEASURE_DELTA_BLOCKS = _registered_measure_key("delta_blocks")
+
+#: 两条**前缀布局**臂。消息形状完全相同(`system(S)` + 一条 `user(C+K+D+T)`),
+#: 差别只在 K/D 两块的内容判据(PR-3 计划 §0),所以 `_reflect_prefix_layout` 的
+#: 分派一格不变、只多认一个取值,回退也不经过那里。
+_PREFIX_LAYOUTS = ("prefix_snapshot", "prefix_delta")
+
+#: **对账守卫**:放开一格策略位却忘了在这里接线 ⇒ 进程起不来。
+#:
+#: 少了它,故障形态是最难看见的那一种:`config.REFLECT_OPTIMIZATION_IMPLEMENTED`
+#: 多一格 ⇒ 校验器在启动期放行 ⇒ `reflect_optimization()` 如实返回那个取值 ⇒
+#: 而 `_reflect_prefix_layout` 认不出它,于是那条臂**能起来、却发 off 的布局**。
+#: 部署以为自己在跑新臂,每一条测量都被归到错误的臂上,rig 的
+#: `assert_optimization_matches_evidence` 也拦不住(它比的是投影标签与证据,两边
+#: 都如实说 off 的形状)。在导入期 `raise` 而不是 `assert`:`python -O` 会把断言
+#: 整条删掉,而这是唯一能把"放开了却没接线"变成可见故障的判据。
+if set(REFLECT_OPTIMIZATION_IMPLEMENTED) != {"off"} | set(_PREFIX_LAYOUTS):
+    raise RuntimeError(
+        "reflect optimization closed set drifted from the wired layouts: "
+        f"{sorted(REFLECT_OPTIMIZATION_IMPLEMENTED)} vs "
+        f"{sorted({'off', *_PREFIX_LAYOUTS})}")
+
+#: 一张补充卡相对**原卡**的字节上界(版本标记 + 它自己那一格分隔符)。
+#:
+#: 用途只有一个:`ReflectDeltaState.supplement_for` 的调用契约要求"非空返回值无
+#: 条件拼进本块",所以调用方必须在**调用之前**就确认装得下。但那串标记的长度只有
+#: 调用之后才知道——于是这里从**产地那一份字面量**算一个上界:版本号取
+#: 10**6(七位数,远高于任何一个 run 的轮数,所以是真上界),再加一格 `" | "`。
+#: 从常量本身算而不是手写一个数:措辞一改这里跟着改,而一个写死的数会在措辞变长
+#: 的那一天静默变成下界。它是**上界**,所以估多不估少——按它预留、按实际长度记账。
+_SUPPLEMENT_CARD_OVERHEAD = len(
+    SUPPLEMENT_CARD_NOTE.format(version=10 ** 6)) + len(" | ")
+
+#: 一块 D 的块头按每块一次计进证据池(口径见 `build_delta_evidence_block` 的
+#: docstring:`本块实际占用 = len(DELTA_BLOCK_TITLE) + 1 + len(卡片节)`)。
+_DELTA_HEAD_CHARS = len(DELTA_BLOCK_TITLE) + 1
+
+#: D 里"上一轮服务端已接受的方面更新"那一句(计划 §1 M2 的冲突 C1:方面的**当前
+#: 状态**整块仍在 T,这里只留"本轮接受了哪些 id"这条历史事实)。措辞点名它是模型
+#: 自己写的判断,不是原文——同 `reasoning_observation.HISTORY_NOTE` 的纪律。
+_DELTA_ACCEPTED_ASPECTS_NOTE = "本轮服务端已接受的方面更新：{ids}（模型判断，非原文）"
 
 
 def _common_prefix_bytes(left: bytes, right: bytes) -> int:
@@ -452,7 +502,11 @@ def _measure_reflect_messages(
     五块的口径**两条臂同形**(测量的意义就在于两条臂用同一把尺子):
 
     * `S` = 这一轮 system 段的全部字符,含严格调用方那句 run 级的"材料不可信"。
-    * `K` / `D` = 证据卡与观察账,取上下文里那两块的原文长度。
+    * `K` = 证据卡那一块。`D` = **位置口径**(PR-3 拍板 Q2):观察账那一块 + 本轮
+      消息里**全部**增量块。`prefix_delta` 之外 `context.delta` 恒为空串,所以这
+      一格逐字节回到接入前;delta 下 `d` 因此如实回答"K 之后、T 之前有多少字符",
+      而不是"上一块增量有多长"。池账(K + 各 D 的累计用量)是投影内部的判据,不是
+      给读表人的量——两条臂能直接比大小的前提就是这五格按**位置**定义。
     * `T` = 装配好的材料块减去 K 与 D:`off` 下是服务器状态摘要(它在 `off` 里
       排最前、在 P 里排最末,但**大小**是同一个量),P 下是本轮动作清单 + 状态半。
       块间那两个 `\\n\\n` 落在这一格里。
@@ -471,7 +525,7 @@ def _measure_reflect_messages(
     只在内存里过一遍,不进 llm.jsonl、不进 trace、不进投影。
     """
     chars_k = len(context.evidence)
-    chars_d = len(context.observations)
+    chars_d = len(context.observations) + len(context.delta)
     detail = measurement.detail
     keys = _MEASURE_CTX_KEYS
     detail[keys["s"]] = len(messages[0]["content"])
@@ -544,6 +598,150 @@ def _measure_reflect_call(
         value = stats.get(source)
         if isinstance(value, int) and not isinstance(value, bool):
             detail[key] = (detail.get(key) or 0) + value
+
+
+def _joined_chars(parts: "Sequence[str]") -> int:
+    """一节里若干行拼起来占多少字符(每行各算一个换行)。
+
+    比真实拼接**多算一个**分隔符(最后一行后面并没有换行)。刻意估多不估少:这个
+    数只用在"再追加这一节会不会超预算"的判断里,而估少的那一侧会让池子稳定超出
+    预算一点点,delta 下这一点点是**逐块累计**的。
+    """
+    return sum(len(part) + 1 for part in parts if part)
+
+
+def _delta_max_cards(settings, effort: str) -> int:
+    """`prefix_delta` 单块最多新展开几张卡(按档位)。
+
+    读法逐条镜像 `_reflect_v2_context` 里那四项既有预算:`getattr` 而不是直读、
+    缺档回默认档、缺字段回已登记默认值,**绝不因为少一个字段就当成 0**——0 会让
+    每一块 D 都装不下任何一张新卡,而那在字节上表现为"这条臂什么都没发",不是
+    一次响亮的失败。
+    """
+    caps = getattr(
+        settings, "reasoning_reflect_delta_cards_by_effort", None) or {}
+    return int(
+        caps.get(effort)
+        or DEFAULT_REFLECT_DELTA_CARDS_BY_EFFORT.get(effort)
+        or DEFAULT_REFLECT_DELTA_CARDS_BY_EFFORT[DEFAULT_RETRIEVAL_EFFORT])
+
+
+def _delta_target_ratio(settings) -> float:
+    """重建 K 时可压缩材料占对应池子的**目标**比例(设计 §5.1/§5.2)。
+
+    它是目标不是硬界:必要材料可以在硬预算内高于它(那一步由
+    `build_evidence_block` 自己的预算判断守着),而它的作用只有一个——给后续增量
+    留出空间,免得首轮把池子填满、第二轮立刻重建。
+
+    `bool` 显式排除:它是 `int` 的子类,一个把这一格写成 `True` 的 duck-typed 替身
+    会被折算成比例 1.0,于是首版 K 就把整份预算吃干净——正好是这一格要防的那件事。
+    """
+    ratio = getattr(settings, "reasoning_reflect_compaction_target_ratio", None)
+    if isinstance(ratio, (int, float)) and not isinstance(ratio, bool):
+        return float(ratio)
+    return 0.5
+
+
+def _delta_cards(
+    state, delta: "ReflectDeltaState", observer, *, bound_keys, fresh_keys,
+    budget: int, max_cards: int, excerpt_chars: int,
+):
+    """这一块 D 里**新展开**的那几张卡。纯读:一格投影都不改。
+
+    额度是 delta 的累计口径(设计 §5.1):证据池计 **K + 所有 D 的总和**,所以传
+    下去的是 `budget - evidence_chars`,不是每轮各拿一份满额。`already_shown` 传的
+    是**当前可见集**而不是冻结表,理由见 `build_delta_evidence_block`;`frozen_cards`
+    则让"曾展示、此刻不可见"的卡回来时复用原来那串字节。
+
+    它被调用**两次**(重建前一次当预算探针、重建后一次当真正要发的那一块)是刻意
+    的:探针只读不写,所以丢掉重算一次是安全的;把它的产出留到重建之后再用才是错
+    的——重建换了可见集与剩余额度,那一份产出回答的是重建**之前**的问题。
+
+    模块级函数而不是方法:它一格 `self` 都不读(settings 已经被调用方折算成几个
+    数了),而"纯读"这件事在一个不能碰实例的函数上是结构成立的,不靠注释。
+    """
+    return build_delta_evidence_block(
+        collected=state.collected, elements=state.elements,
+        chunks=state.chunks,
+        bound_keys=bound_keys, fresh_keys=fresh_keys,
+        already_shown=tuple(delta.visible_keys),
+        question=state.question, action_query=observer.last_query,
+        budget_chars=budget - delta.evidence_chars,
+        excerpt_chars=excerpt_chars, max_cards=max_cards,
+        frozen_cards=delta.frozen_cards)
+
+
+def _delta_supplements(
+    state, delta: "ReflectDeltaState", observer, *, fresh_keys,
+    max_cards: int, excerpt_chars: int, budget_left: int,
+) -> "Tuple[str, ...]":
+    """同 key 的摘录升级 ⇒ 几张标着版本的补充卡(拍板 Q3/Q8)。
+
+    检测范围按 Q8 收窄成「本轮 `fresh_result_ids()` ∩ 冻结表」的至多 `max_cards`
+    个键。全量比对是每轮 O(池) 次 `select_excerpt`——正是这条臂要省的那笔开销。
+
+    **先选后调**(`ReflectDeltaState.supplement_for` 的调用契约):这里先按
+    `max_cards` 与剩余额度定下要发哪几个键,再对它们调 `supplement_for`,非空返回值
+    **无条件**拼进本块。反过来(先调再按预算丢)会让那一份更好的摘录从此每轮命中
+    判重、恒返回空串,于是它永远到不了模型,而且没有任何一个计数会披露这件事。
+
+    额度按 `_SUPPLEMENT_CARD_OVERHEAD` 这个**上界**预留:版本标记的长度只有调用
+    之后才知道,而契约不允许"调了再丢"。装不下就 `continue` 而不是 `break` ——一张
+    塞不下的大卡不该把后面装得下的小卡一起挡掉,而候选本来就只有至多 `max_cards`
+    个,扫完它们的代价是有界的。
+
+    ⚠ **今天这个候选集恒为空,这条路径因此不可达**(T-PD5 交付说明里如实登记)。
+    `fresh_result_ids()` 的三个来源(trace detail 的 `result_ids`、
+    `note_fresh_ids` 侧信道、首轮播种)都只报**真的新进池子**的标识,而一个键第一
+    次进池子的那一轮要么还没有被冻结(它这一轮才第一次渲染),要么刚被同一轮的
+    K/D 用**同一批检索词**冻结(于是这里重算出来的字节与冻结的那一份逐字相同,
+    `supplement_for` 如实返回空串)。所以"既是本轮新增、又已经在冻结表里"在今天的
+    通道口径下不可能同时成立。机制按拍板落地并有单元用例钉住(`key=` 那一格逐字
+    不变、版本标记、同一段摘录不追加第二张),等某条通道开始上报"返回了但不是新
+    增"的标识,或者主 agent 拍板放宽候选集,它就地生效——**不**擅自把范围改宽:
+    Q8 收窄它的理由(每轮 O(池) 次全文摘录)一个字都没有失效。
+    """
+    candidates = [
+        key for key in dict.fromkeys(str(raw) for raw in fresh_keys)
+        if key in delta.frozen_cards][:max_cards]
+    if not candidates or budget_left <= 0:
+        return ()
+    lines: List[str] = []
+    used = 0
+    for key, text in render_pool_cards(
+            collected=state.collected, elements=state.elements,
+            chunks=state.chunks, keys=candidates,
+            question=state.question, action_query=observer.last_query,
+            excerpt_chars=excerpt_chars):
+        if used + len(text) + _SUPPLEMENT_CARD_OVERHEAD + 1 > budget_left:
+            continue
+        line = delta.supplement_for(key, text)
+        if line:
+            lines.append(line)
+            used += len(line) + 1
+    return tuple(lines)
+
+
+def _note_delta_measurement(
+    measurement: "ReflectMeasurement", delta: "ReflectDeltaState",
+) -> None:
+    """`prefix_delta` 的三个**行为事实**键(拍板 Q2/Q7)。测量关时同样写。
+
+    * `context_rebuilds` —— 本 run 到这一轮为止**累计**重建过几次。run 级单调累计
+      而不是"本轮重建了没有":读侧那一列是各 reflect 步的 max-over-present
+      (`reasoning_trace_stats._reflect_context_rebuilds`),喂逐轮布尔进去会让一条
+      重建过五次的 run 在表上显示成 1。
+    * `context_fallback` —— 有没有不可逆地退回 P 的有界选择(拍板 Q4)。一旦为真
+      此后每轮都为真,读侧那一列是"任一步为真 ⇒ 真"。
+    * `delta_blocks` —— **这一条消息里** D 的块数。它不是累计量:重建会清空已发出
+      的块,而这一格要回答的正是"这一轮模型看到几块增量"。
+
+    三个都是整数/布尔,请求正文一个字节都不进来(隐私守卫在读侧对新键同样只收
+    整数与布尔)。
+    """
+    measurement.detail[_MEASURE_CONTEXT_REBUILDS] = int(delta.rebuilds)
+    measurement.detail[_MEASURE_CONTEXT_FALLBACK] = bool(delta.fallback)
+    measurement.detail[_MEASURE_DELTA_BLOCKS] = len(delta.blocks)
 
 
 def _reflect_fallback(reason: str) -> "ReflectDecision":
@@ -3536,6 +3734,19 @@ class _ReasoningRunState:
     # (它拿不到 `state`,理由同 `static_prompt`)。
     reflect_measurement: "Optional[ReflectMeasurement]" = None
 
+    # —— 本 run 的 `prefix_delta` **渲染缓存**(T-PD5 / 计划 §1 M4)。
+    #
+    # 三条硬约束写在 `ReflectDeltaState` 的类 docstring 里,这里只重复最要紧的
+    # 那一条:它是渲染缓存/阶段信息,**不是第二个检索控制状态拥有者**——把它整个
+    # 删掉,除 K/D 的字节组织外一切逐字节不变(动作选取、绑定资格、配额、终止判据
+    # 一格都不读它)。
+    #
+    # 带默认值、留空即中性:只有 `reflect_optimization() == "prefix_delta"` 且本
+    # run 已经有静态目录时才构造(写点单一在 `_reflect_delta_context`),其余情况
+    # 恒为 None ——`_new_run_state` 因此一行都不用改,`off` / `prefix_snapshot` /
+    # 关闭态零新状态。
+    reflect_delta: "Optional[ReflectDeltaState]" = None
+
 
 class ReasoningRetriever:
     def __init__(
@@ -4244,19 +4455,26 @@ class ReasoningRetriever:
     def _reflect_prefix_layout(
         self, context: "Optional[ReflectContext]",
     ) -> bool:
-        """这一轮走不走 `prefix_snapshot` 的消息形状(T-PS8)。
+        """这一轮走不走**前缀布局**的消息形状(T-PS8;T-PD5 多认一格)。
 
-        两个条件缺一不可,且**两处判据同源**:策略单点说 `prefix_snapshot`,并且
-        上下文真的带着那条臂的载荷(`static_prompt` 由 `_reflect_v2_context` 在
-        同一个判据下填,空串 = 那边已经退回 off 的布局)。少了后半个条件,一个
-        直接调 `reflect(capabilities=..., context=...)` 的窄调用方会在策略开着时
-        拿到一份**没有工具目录**的 system 段——S 的动作清单在 P 下来自静态目录,
-        而窄调用方构造的上下文里没有它。
+        两个条件缺一不可,且**两处判据同源**:策略单点说的是两条前缀臂之一
+        (`_PREFIX_LAYOUTS`),并且上下文真的带着那条臂的载荷(`static_prompt` 由
+        `_reflect_v2_context` 在同一个判据下填,空串 = 那边已经退回 off 的布局)。
+        少了后半个条件,一个直接调 `reflect(capabilities=..., context=...)` 的窄
+        调用方会在策略开着时拿到一份**没有工具目录**的 system 段——S 的动作清单
+        在前缀布局下来自静态目录,而窄调用方构造的上下文里没有它。
+
+        ⚠ `prefix_delta` 在这里与 `prefix_snapshot` **完全同格**,不是第二种形状:
+        两条臂的消息形状逐块相同(`system(S)` + 一条 `user(C+K+D+T)`),差别只在
+        K/D 两块的内容判据(计划 §0)。所以 delta 的**回退**也不经过这里——它换的
+        是"K/D 怎么装",不是"消息长什么样",判据在 `_reflect_v2_context` 内部那格
+        `ReflectDeltaState.fallback` 上,而不是在这里第二次读策略位。多一处分派就
+        多一处"一轮里判两次策略、分歧就静默降级"的故障面(评审 P3-9)。
         """
         return (
             context is not None
             and bool(context.static_prompt)
-            and self.reflect_optimization() == "prefix_snapshot"
+            and self.reflect_optimization() in _PREFIX_LAYOUTS
         )
 
     def _reflect_v2_attempt(
@@ -4284,15 +4502,19 @@ class ReasoningRetriever:
 
         **上下文观测(T-PS3)与布局正交。** 测量开着时,这里额外算一份纯内存的
         块长度/消息字节/公共前缀(见 `_measure_reflect_messages`),两条臂同一把
-        尺子;测量关时那两处判据各只多一次 `is not None`。观测**不参与**这个
+        尺子;测量关时那两处判据各只多一次属性读。判据是
+        `measurement.measures_messages` 而不是"有没有这个对象":`prefix_delta` 无
+        条件构造一份载体来承接重建/回退那三个**行为事实**键(拍板 Q7),而那份载体
+        在测量关时一个字节都不许序列化。观测**不参与**这个
         方法的任何决定:消息、重试判据与返回的决定逐字节与测量关时相同。观测
         **自身失败**同样不参与——它关在自己的 `try` 里
         (`_measure_reflect_messages_safely`),失败只表现为那几个键缺席,绝不会
         落进下面那条 fail-open 的 `except` 变成一次假兜底。
         """
         stats: Dict[str, Any] = {}
-        # 上下文观测缓存(T-PS3)。测量关、关闭态与不带上下文的窄调用方一律
-        # `None` ⇒ 下面两处判据各只多一次 `is not None`,一个字节都不多序列化。
+        # 上下文观测缓存(T-PS3)。测量关(`prefix_delta` 之外)、关闭态与不带上下文
+        # 的窄调用方一律 `None`;delta 臂测量关时对象在、`measures_messages` 为假
+        # ⇒ 下面两处判据都不成立,一个字节都不多序列化。
         measurement = context.measurement if context is not None else None
         try:
             prefix_layout = self._reflect_prefix_layout(context)
@@ -4320,7 +4542,7 @@ class ReasoningRetriever:
                 {"role": "user", "content": user_text},
             ]
             schema_hint = reflect_v2_schema_hint(capabilities)
-            if measurement is not None:
+            if measurement is not None and measurement.measures_messages:
                 # 测在**发出之前**:量的是这一轮已经定型的那两条消息,与调用成功
                 # 与否无关。一次被兜底吃掉的调用照样有它的上下文规模,而那一轮在
                 # 轨迹上仍有自己的 reflect 步。
@@ -4362,7 +4584,7 @@ class ReasoningRetriever:
             # 三条出口(成功 / 取消上抛 / 兜底)都把这一次调用的观测累加进本轮:
             # 一次死掉的调用同样烧了墙钟、同样发出了请求,而它正是最不该在
             # run 级报告里静默消失的那一次(`_record_call_stats` 的同一条理由)。
-            if measurement is not None:
+            if measurement is not None and measurement.measures_messages:
                 _measure_reflect_call(measurement, stats)
 
     def _reflect_v2_context(
@@ -4390,16 +4612,31 @@ class ReasoningRetriever:
         个字段(镜像 `reflect_v2_active` 的既有写法),缺省一律回到已登记的默认值,
         绝不因为少一个字段就把预算当成 0。
 
-        **布局分派(T-PS8)。** `reflect_optimization()` 那个单点说 `prefix_snapshot`
-        时,同一批块按稳定性重排成 C/K/D/T(前缀复用设计 §4.1–4.5),并额外带上本轮
-        system 段的静态半;`off`(含总闸关闭态与未登记取值)走下面原来那一份,逐字节
-        不变。**三个预算与所有内容判据两条路径共用**:上面这段装配一个字都没有按
-        布局分叉,分派只发生在"块往哪儿放"这一步。
+        **布局分派(T-PS8)。** `reflect_optimization()` 那个单点说的是两条前缀臂之
+        一时,同一批块按稳定性重排成 C/K/D/T(前缀复用设计 §4.1–4.5),并额外带上本
+        轮 system 段的静态半;`off`(含总闸关闭态与未登记取值)走下面原来那一份,逐
+        字节不变。**三个预算与所有内容判据两条路径共用**:下面这段装配一个字都没有
+        按布局分叉,分派只发生在"块往哪儿放"这一步。
+
+        **`prefix_delta` 的分支排在装配之前**(T-PD5),这不是风格选择:delta 的全部
+        意义就是**不**每轮从整池重选重排、不按本轮检索词重算摘录,而
+        `build_evidence_block` 那一次调用正是这两笔开销;更要紧的是它下一行
+        `ever_shown_outline_keys.update(selection.shown_keys)` 会把一批**根本没发给
+        模型**的键登记成"曾真实展示",于是设计稿 §6.2 那条绑定资格判据在这条臂上
+        当场失效。所以 delta 分支必须在那次调用**之前**返回。
+
+        **回退**(拍板 Q4,不可逆)不在这里第二次读策略位:判据是投影上那格
+        `ReflectDeltaState.fallback`,为真时这个方法直接走下面 P 的有界选择那一支
+        ——消息形状一格不变(`_reflect_prefix_layout` 认的是同一批取值),换的只是
+        K/D 怎么装。已经发出去的每一块 D 原样跟着走(`state.reflect_delta.blocks`,
+        回退这一步一格不清),`static_prompt` 也仍然带 delta 那四句:模型上文里那些
+        标着"新增"的块还在,而解释它们怎么读的规则不能在同一条消息里消失。
 
         **上下文观测(T-PS3)**由 `_reflect_measurement` 挂在两条路径共同的那一格
         (`ReflectContext.measurement`)上,判据与布局**正交**;测量关(默认)时它
-        恒为 `None`,返回对象逐字段回到接入前。块长度不在这里算(那三块的最终字节
-        要等 `_reflect_v2_attempt`),这里只记它独有的那两个卡数。
+        恒为 `None`,返回对象逐字段回到接入前——`prefix_delta` 是拍板 Q7 登记的那条
+        例外,见 `_reflect_measurement`。块长度不在这里算(那三块的最终字节要等
+        `_reflect_v2_attempt`),这里只记它独有的那两个卡数。
         """
         settings = self.settings
         if state.aspects is None:
@@ -4421,6 +4658,24 @@ class ReasoningRetriever:
             or DEFAULT_REFLECT_EVIDENCE_CHARS_BY_EFFORT.get(effort)
             or DEFAULT_REFLECT_EVIDENCE_CHARS_BY_EFFORT[
                 DEFAULT_RETRIEVAL_EFFORT])
+        optimization = self.reflect_optimization()
+        # 目录由 `_prime_static_catalog` 在本 run 第一次能力投影时写下,而 reflect
+        # 循环里投影恒排在这个方法之前。真出现"策略开着却没有目录"的形态(总闸在
+        # 一次 run 中途被翻开,只可能发生在测试或热更配置里),两条前缀臂都退回
+        # off 的那一份布局,而不是发一份没有工具目录的 system 段——少一半指令比换
+        # 个顺序危险得多。
+        catalog = state.reflect_static_catalog
+        delta = state.reflect_delta
+        if (optimization == "prefix_delta" and catalog is not None
+                and (delta is None or not delta.fallback)):
+            context = self._reflect_delta_context(
+                state, summary, outline, observer,
+                budget=budget, effort=effort, catalog=catalog)
+            if context is not None:
+                return context
+            # `None` = 这一轮刚刚不可逆地回退(投影上那格已经置位)。落到下面 P
+            # 的有界选择,本 run 剩余轮此后都从这里走。
+            delta = state.reflect_delta
         selection = build_evidence_block(
             collected=state.collected, elements=state.elements,
             chunks=state.chunks, chains=state.chains,
@@ -4452,44 +4707,21 @@ class ReasoningRetriever:
                 settings, "reasoning_reflect_state_chars", 6000)),
         )
         measurement = self._reflect_measurement(state, selection)
-        catalog = state.reflect_static_catalog
-        if self.reflect_optimization() == "prefix_snapshot" and (
-                catalog is not None):
-            # `prefix_snapshot` 布局(T-PS8)。**只换块的位置,不换任何块的内容
-            # 判据**:证据卡与观察账是上面同一次装配的产出,`summary` 整块原样
-            # 搬到 T 的末尾(拍板 Q3),方面账拆成契约半(C)与状态半(T)。
-            #
-            # 判据带上 `catalog is not None`:目录由 `_prime_static_catalog` 在本
-            # run 第一次能力投影时写下,而 reflect 循环里投影恒排在这个方法之前。
-            # 真出现"策略开着却没有目录"的形态(总闸在一次 run 中途被翻开,只可能
-            # 发生在测试或热更配置里),这里退回 off 的那一份布局而不是发一份没有
-            # 工具目录的 system 段——少一半指令比换个顺序危险得多。
-            return ReflectContext(
-                # off 的那一块在 P 下不存在:它的内容已经按稳定性分到了 C 与 T。
-                # 留空而不是塞一份重复的文本——同一批事实在一条消息里出现两遍,
-                # 模型无从判断哪一份是此刻的。
-                server_state="",
-                evidence=selection.text,
-                observations=observations,
-                contract=render_aspect_contract_block(state.aspects),
-                # T 的两半,按「有没有排序权」分开(评审 P2-4)。前两块是服务端
-                # **执行限制**,T 的标题声明它们优先于上面过时的观察与证据卡;
-                # `summary` 那半改挂 `TURN_CONTEXT_TITLE`,因为 `run()` 已经把
-                # `profile_block`/`experience_block`/`consult_block_text` 拼进去
-                # 了——那几段是从库里文档归纳出来的文本,不该借 T 的标题取得压过
-                # 真实证据卡的排序权。`summary` 本身一个字都没改。
-                turn_state="\n\n".join(block for block in (
-                    render_aspect_status_block(state.aspects),
-                    render_collection_keys_note(state.enum_chains),
-                    f"{TURN_CONTEXT_TITLE}\n{summary}" if summary else "",
-                ) if block),
-                # 每轮按同一个冻结目录重渲染一次:纯字符串拼接、零 I/O,而同一个
-                # 输入必然给出同一串字节,所以 S 的稳定性不依赖任何缓存是否生效。
-                # T-PS3 的观测缓存**刻意不接**这一格:接了它就得在只开布局、不开
-                # 测量时也构造一份缓存,而"测量关不构造缓存"是那条任务的硬约束。
-                static_prompt=reflect_v2_static_prompt(catalog),
-                measurement=measurement,
-            )
+        if optimization in _PREFIX_LAYOUTS and catalog is not None:
+            # 两条前缀臂共用的那一支(T-PS8)。**只换块的位置,不换任何块的内容
+            # 判据**:证据卡与观察账是上面同一次装配的产出。走到这里的 delta 只
+            # 有一种形态——已经不可逆地回退(拍板 Q4),此后逐轮从这里出。
+            if delta is not None and measurement is not None:
+                _note_delta_measurement(measurement, delta)
+            return self._prefix_context(
+                state, summary, catalog,
+                evidence=selection.text, observations=observations,
+                # 回退**不清空已发出的 D**:上文那些标着"新增"的块是模型已经读过
+                # 的材料,抽掉它们等于让一整段上文凭空消失。回退只换"下一块怎么
+                # 装",不改"上面已经装过什么"。
+                delta=("\n\n".join(delta.blocks) if delta is not None else ""),
+                static_delta=(optimization == "prefix_delta"),
+                measurement=measurement)
         # 必答方面清单 + 已完整枚举的集合键,都接在服务器状态块的**尾部**,与它
         # 一起受"按现有输入/协议边界保留、不整体裁尾"的处理(§4):方面清单是用户
         # 确认过的必答清单,集合键是服务端签发的证据身份——两者都不属于
@@ -4517,6 +4749,14 @@ class ReasoningRetriever:
         `reflect_measures_context()` 那个单点,它与 `reflect_optimization()`
         **正交**——`off` 臂开着测量正是对照实验要的形态(拍板 Q2)。
 
+        ⚠ **`prefix_delta` 是那条口径唯一的例外(拍板 Q7,已登记偏离)。** 那条臂
+        无条件构造这个对象,因为重建次数与"有没有回退"是**行为事实**,与要不要量
+        字节无关:一个测量关着的生产 run 照样可能整段退回 P 的有界选择,而那件事
+        不出现在任何一个字节数里。`measures_messages` 因此接住原来那道判据的另一
+        半——它为假时,消息一个字节都不序列化(见 `_reflect_v2_attempt` 的两处),
+        卡数与块长那几个键如实缺席,detail 上只剩 `_note_delta_measurement` 写的
+        那三格。`off` / `prefix_snapshot` 两条臂在这里恒为 `True`,判据一个字没动。
+
         缓存本 run 只构造一次(第一次 reflect 那一轮),此后原样复用:它要跨轮
         持有的正是上一轮那串消息字节。构造的同一刻把它挂到记账器上——那是本轮
         测量键唯一的落账入口,而 `run()` 一条语句都不能加。
@@ -4524,17 +4764,247 @@ class ReasoningRetriever:
         卡数在这里记而不在 `_measure_reflect_messages` 里:证据卡的选取是这个
         方法独有的产出(`selection`),而那边只看得到已经渲染成字符串的块。
         `cards_shown` 只数**真的渲染出来**的键(与大纲绑定资格同一份口径),
-        `cards_omitted` 是被预算与逐条判据挤出窗口的候选数。
+        `cards_omitted` 是被预算与逐条判据挤出窗口的候选数。`selection is None`
+        (delta 臂**没有**重建 K 的那些轮)⇒ 这两格不写:那一轮压根没有"这一次选
+        卡"这件事,写上一轮的数就是把一个陈的量说成本轮的。
         """
         measurement = state.reflect_measurement
         if measurement is None:
-            if not self.reflect_measures_context():
+            measures = self.reflect_measures_context()
+            if not measures and self.reflect_optimization() != "prefix_delta":
                 return None
-            measurement = state.reflect_measurement = ReflectMeasurement()
+            measurement = state.reflect_measurement = ReflectMeasurement(
+                measures_messages=measures)
             state.record.measurement = measurement
-        measurement.detail[_MEASURE_CARDS_SHOWN] = len(selection.shown_keys)
-        measurement.detail[_MEASURE_CARDS_OMITTED] = int(selection.omitted)
+        if selection is not None and measurement.measures_messages:
+            measurement.detail[_MEASURE_CARDS_SHOWN] = len(selection.shown_keys)
+            measurement.detail[_MEASURE_CARDS_OMITTED] = int(selection.omitted)
         return measurement
+
+    def _prefix_context(
+        self, state: "_ReasoningRunState", summary: str, catalog, *,
+        evidence: str, observations: str, delta: str = "",
+        static_delta: bool = False,
+        measurement: "Optional[ReflectMeasurement]" = None,
+    ) -> "ReflectContext":
+        """两条前缀臂**唯一**的 `ReflectContext` 成型点(T-PS8;T-PD5 共用)。
+
+        块的位置与内容判据在这里一格不分叉:`summary` 整块原样搬到 T 的末尾(拍板
+        Q3),方面账拆成契约半(C)与状态半(T),K 与 D 由调用方按各自的口径算好
+        再交进来。两条臂共用一个成型点是硬要求——分成两处拼的话,"两臂除 K/D 外
+        逐块相同"这条对照实验的前提就只活在措辞里,而 §5 风险 7 点名要挡的正是
+        "顺手精简 T"那一族。
+
+        T 的两半按「有没有排序权」分开(评审 P2-4)。前两块是服务端**执行限制**,
+        T 的标题声明它们优先于上面过时的观察与证据卡;`summary` 那半改挂
+        `TURN_CONTEXT_TITLE`,因为 `run()` 已经把 `profile_block` /
+        `experience_block` / `consult_block_text` 拼进去了——那几段是从库里文档归纳
+        出来的文本,不该借 T 的标题取得压过真实证据卡的排序权。`summary` 本身一个
+        字都没改。
+
+        ⚠ `render_aspect_status_block` 带着两处**消费**副作用(追问句与未采纳披露),
+        所以这个方法一轮只许调用一次:delta 那一支在装完 D 之后调它一次,回退与
+        `prefix_snapshot` 各在自己那一支调一次,三者互斥。
+
+        `static_delta` 只选 S 的那四句 delta 规则(T-PD6),其余每一格两条臂共用;
+        `False` ⇒ `prefix_snapshot` 逐字节回到接入前。每轮按同一个冻结目录重渲染
+        一次:纯字符串拼接、零 I/O,而同一个输入必然给出同一串字节,所以 S 的稳
+        定性不依赖任何缓存是否生效。
+        """
+        return ReflectContext(
+            # off 的那一块在前缀布局下不存在:它的内容已经按稳定性分到了 C 与 T。
+            # 留空而不是塞一份重复的文本——同一批事实在一条消息里出现两遍,模型
+            # 无从判断哪一份是此刻的。
+            server_state="",
+            evidence=evidence,
+            observations=observations,
+            contract=render_aspect_contract_block(state.aspects),
+            turn_state="\n\n".join(block for block in (
+                render_aspect_status_block(state.aspects),
+                render_collection_keys_note(state.enum_chains),
+                f"{TURN_CONTEXT_TITLE}\n{summary}" if summary else "",
+            ) if block),
+            delta=delta,
+            static_prompt=reflect_v2_static_prompt(catalog, delta=static_delta),
+            measurement=measurement,
+        )
+
+    def _reflect_delta_context(
+        self, state: "_ReasoningRunState", summary: str, outline, observer, *,
+        budget: int, effort: str, catalog,
+    ) -> "Optional[ReflectContext]":
+        """`prefix_delta` 的一轮装配(计划 §3 T-PD5;顺序 = 设计 §5.2 七步)。
+
+        ① 取/建投影 → ② 形成待追加事件 → ③ 检查预算 → ④ 必要时重建 K →
+        ⑤ 装不下最小有效新证据就不可逆回退 → ⑥ 追加 D、更新冻结表与两个累计计数
+        → ⑦ 成型。这条顺序**天然就是** `run()` 循环里这个方法的位置(每轮一次、
+        排在 `self.reflect(...)` 之前、排在上一轮动作执行与记账之后),所以 `run()`
+        一行不动、也不需要在别处再摆一次顺序。
+
+        **零 LLM、零 I/O、零额外配额。** 重建复用同一个 `build_evidence_block` +
+        `render_observations` + `fold_observation_counts`,全是纯函数;这个方法不
+        碰任何一格配额、不读库、不发请求——它只决定这一轮的输入长什么样。
+
+        返回 `None` = **这一轮刚刚不可逆地回退**(拍板 Q4)。用返回值而不是在这里
+        自己再拼一份 P 的装配:那样"回退之后与 `prefix_snapshot` 走同一支"就成了
+        两处代码今天恰好一致,而调用方那一支本来就在,少一次重复就少一处会漂开的
+        地方。回退**不清空**已发出的 D、不清空候选池、不清空
+        `ever_shown_outline_keys`、不重置任何配额,也不多一次模型调用或轨迹步。
+        """
+        settings = self.settings
+        delta = state.reflect_delta
+        excerpt_chars = int(getattr(
+            settings, "reasoning_reflect_excerpt_chars", 240))
+        state_chars = int(getattr(
+            settings, "reasoning_reflect_state_chars", 6000))
+        max_cards = _delta_max_cards(settings, effort)
+        bound_keys = evidence_bound_keys(
+            state.aspects,
+            [key for section in outline for key in section.evidence_keys])
+        fresh_keys = observer.fresh_result_ids()
+        # ① 首轮:按目标比例建第一版 K,给后续增量留出空间(设计 §5.2 首句)。
+        #    `generation=1`、`rebuilds` 不加——这不是一次重建。
+        snapshot = None
+        if delta is None:
+            delta = state.reflect_delta = ReflectDeltaState()
+            snapshot = self._build_delta_snapshot(
+                state, delta, observer, bound_keys=bound_keys,
+                fresh_keys=fresh_keys, budget=budget, state_chars=state_chars,
+                excerpt_chars=excerpt_chars)
+        # ② 待追加事件(全是纯读:这里一格都还没改投影)。
+        pending_rows = observer.rows[delta.observation_cursor:]
+        history_add = _joined_chars(
+            [render_observation_row(row) for row in pending_rows])
+        cards = _delta_cards(
+            state, delta, observer, bound_keys=bound_keys,
+            fresh_keys=fresh_keys, budget=budget, max_cards=max_cards,
+            excerpt_chars=excerpt_chars)
+        # ③ 只有"待追加的 D 装不下"才重建(设计 §5.2:短循环不按固定轮数压缩)。
+        #    刚建过 K 的那一轮不重建:那一版是这一刻能给出的最紧的一版,再压一次
+        #    是纯空转,而 §5 风险 5 点名要挡的就是这种震荡。
+        if snapshot is None and (
+                delta.history_chars + history_add > state_chars
+                or (cards.omitted and not cards.shown_keys)):
+            # ④ 重建:零 LLM、零 I/O。`blocks` 整体清空、两个累计计数重置、游标
+            #    推到账本末尾(那些待追加的观察行由新 K 的近期窗接过去)。
+            snapshot = self._build_delta_snapshot(
+                state, delta, observer, bound_keys=bound_keys,
+                fresh_keys=fresh_keys, budget=budget, state_chars=state_chars,
+                excerpt_chars=excerpt_chars)
+            delta.generation += 1
+            delta.rebuilds += 1
+            pending_rows = observer.rows[delta.observation_cursor:]
+            cards = _delta_cards(
+                state, delta, observer, bound_keys=bound_keys,
+                fresh_keys=fresh_keys, budget=budget, max_cards=max_cards,
+                excerpt_chars=excerpt_chars)
+            # ⑤ 重建之后仍装不下**最小有效新证据**(至少一张新卡或一行新观察)
+            #    ⇒ 不能每轮反复压缩空转,本 run 剩余部分回退(拍板 Q4,不可逆)。
+            if not pending_rows and cards.omitted and not cards.shown_keys:
+                delta.fallback = True
+                return None
+        # ⑥ 追加。补充卡按拍板 Q8 用**新卡之后剩下的**那点预算:新证据优先于同一
+        #    条证据的更好摘录,而 `supplement_for` 的调用契约要求"先选定要发的键、
+        #    非空返回值无条件拼进本块",所以剩余额度必须在调用之前就算清楚。
+        supplements = _delta_supplements(
+            state, delta, observer, fresh_keys=fresh_keys, max_cards=max_cards,
+            excerpt_chars=excerpt_chars,
+            budget_left=(budget - delta.evidence_chars - _DELTA_HEAD_CHARS
+                         - len(cards.text)))
+        cards_text = "\n".join(
+            part for part in (*supplements, cards.text) if part)
+        notes = tuple(delta.pending_aspect_notes)
+        block = build_delta_block(
+            cards_text, [render_observation_row(row) for row in pending_rows],
+            notes, generation=delta.generation)
+        if block:
+            delta.blocks.append(block)
+            delta.pending_aspect_notes.clear()
+            delta.observation_cursor = len(observer.rows)
+            # 记账口径:块头按每块一次计进**证据池**(与 K 把
+            # `EVIDENCE_BLOCK_TITLE` 算进 `used` 同一条);动作观察行与"已接受的
+            # 方面更新"那一句计进**历史池**(设计 §5.1:历史池计 K 的可压缩历史
+            # 摘要与各 D 的动作/历史判断)。判断在追加**之前**做,记账在之后。
+            delta.evidence_chars += _DELTA_HEAD_CHARS + len(cards_text)
+            delta.history_chars += history_add + _joined_chars(notes)
+            # **只登记真的渲染出来的键**(设计稿 §6.2):被预算或 `max_cards` 挤
+            # 出这一块的候选一个都不登记,模型没见过它就不该取得绑定资格。
+            for key, text in cards.cards:
+                delta.note_shown(key, text)
+                delta.visible_keys.add(key)
+            state.ever_shown_outline_keys.update(cards.shown_keys)
+        measurement = self._reflect_measurement(state, snapshot)
+        if measurement is not None:
+            _note_delta_measurement(measurement, delta)
+        # ⑦ 成型。K 的两块取投影上那两串**已经发出去过**的字节,不重新渲染:
+        #    "存了 A 发了 B"这种分叉不会有任何一条断言看得见。
+        return self._prefix_context(
+            state, summary, catalog,
+            evidence=delta.snapshot_evidence,
+            observations=delta.snapshot_history,
+            delta="\n\n".join(delta.blocks),
+            static_delta=True, measurement=measurement)
+
+    def _build_delta_snapshot(
+        self, state: "_ReasoningRunState", delta: "ReflectDeltaState", observer,
+        *, bound_keys, fresh_keys, budget: int, state_chars: int,
+        excerpt_chars: int,
+    ):
+        """建/重建一版 K,并把投影上的累计账**整体清零**(设计 §5.2 第 1–4 条)。
+
+        首次构造与重建走**同一份**代码:两者的区别只有调用方那边的 `generation` /
+        `rebuilds` 加不加,而"第一版按目标比例建、后面每一版也按目标比例建"正是
+        §5.2 首句要的东西(不先把池子填满、第二轮立刻重建)。写成两份的话,首版与
+        重建版的选卡判据迟早会漂开,而那种漂移在字节上看着完全正常。
+
+        **冻结表只增不减,`visible_keys` 随 K 收缩**(拍板存疑 1)。两者在第一次
+        重建之前恰好相等,之后就不再相等:`build_evidence_block` 读冻结表,所以一张
+        曾展示过的卡进新 K 时复用的仍是它第一次发出去的那串字节(§4.4「展示后保持
+        不变」);而离开新 K 的那些键不再"可见",以后经增量档序回到某一块 D 时同样
+        复用冻结字节(§4.4「可从已有内存池恢复」)。拿冻结表当可见集用的话,这批卡
+        会被"曾展示"口径永久挡在增量之外,而且不进任何一个 `omitted` ——它对模型从
+        此不可见,却没有一个计数披露这件事。
+
+        **两个观察切片不相交**(拍板存疑 2):`render_observations` 只吃近期窗、
+        `fold_observation_counts` 只吃窗外,于是"更早的 N 条未列出"与"总计已尝试 M
+        次"各指自己那一段,恒等式是 `窗内已列 + 窗内 dropped + 窗外总计 ==
+        len(rows)`。喂全量行给前者的话,它自己那圈收敛循环会按整份账写省略数,两句
+        话于是各自成立却互相矛盾。
+
+        游标推到账本末尾:那些还没进过任何一块 D 的观察行由这一版 K 的近期窗与折算
+        计数接过去,一条都没有被静默丢掉。纯计算、零 I/O、零 LLM、零配额。
+        """
+        settings = self.settings
+        ratio = _delta_target_ratio(settings)
+        recent = int(getattr(
+            settings, "reasoning_reflect_recent_observations", 6))
+        rows = observer.rows
+        selection = build_evidence_block(
+            collected=state.collected, elements=state.elements,
+            chunks=state.chunks, chains=state.chains,
+            bound_keys=bound_keys, fresh_keys=fresh_keys,
+            question=state.question, action_query=observer.last_query,
+            budget_chars=int(budget * ratio), excerpt_chars=excerpt_chars,
+            frozen_cards=delta.frozen_cards)
+        window = rows[-recent:] if recent > 0 else ()
+        earlier = rows[:len(rows) - len(window)]
+        evidence, history = compose_snapshot(
+            selection.text,
+            render_observations(
+                window, recent=recent,
+                state_chars=int(state_chars * ratio)),
+            fold_observation_counts(earlier))
+        delta.snapshot_evidence = evidence
+        delta.snapshot_history = history
+        delta.blocks.clear()
+        delta.visible_keys = {str(key) for key in selection.shown_keys}
+        for key, text in selection.cards:
+            delta.note_shown(key, text)
+        delta.evidence_chars = len(evidence)
+        delta.history_chars = len(history)
+        delta.observation_cursor = len(rows)
+        state.ever_shown_outline_keys.update(selection.shown_keys)
+        return selection
 
     def _absorb_assessment(
         self, state: "_ReasoningRunState", decision: "ReflectDecision",
@@ -4602,6 +5072,18 @@ class ReasoningRetriever:
         if not outcome.error:
             # 逐方面被拒的那几条:合法动作照常执行,只记披露与 skip 步。
             self._note_assessment_rejections(state, outcome.rejections)
+            if outcome.accepted and state.reflect_delta is not None:
+                # `prefix_delta` 的 D 里那一节"上一轮已接受的方面更新"(设计 §4.4)。
+                # 写点只能在 `if not outcome.error:` 内(§5 风险 6):整份 assessment
+                # 越界时它已经被折成一条 invalid,一格都没落账——在外面写就会让 D
+                # 里出现一句"服务端已接受 a2",而账本上 a2 根本没动过。
+                #
+                # 只记"接受了哪些 id"这条历史事实,方面的**当前状态**整块仍在 T
+                # (计划 §1 M2 的冲突 C1:那个渲染函数带着两处消费副作用,搬进一块
+                # 再也不重渲染的 D 里就永远消费不掉了)。
+                state.reflect_delta.pending_aspect_notes.append(
+                    _DELTA_ACCEPTED_ASPECTS_NOTE.format(
+                        ids="、".join(outcome.accepted)))
             # `accepted` 传下去:收尾轮的判据是「这一轮**实际落账**为空」,不是
             # 「载荷里有没有行」(评审 P1,见 `_nudge_missing_assessment`)。
             return self._nudge_missing_assessment(
