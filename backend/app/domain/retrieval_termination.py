@@ -86,6 +86,15 @@ REFLECT_ASPECT_MAX_EVIDENCE_KEYS = 8
 #: 一个方面的 `gap`(模型写的"还缺什么")最多多少字符。
 REFLECT_ASPECT_GAP_MAX_CHARS = 240
 
+#: 一组自评(`supported`/`unresolved`)的行数上限:相对方面数的倍率,与它并行的
+#: 绝对行数上限,取**较小**的那一个当上限(`reasoning_aspects._group_row_cap`)。
+#: 方面少的时候按倍率收紧,方面多的时候由绝对值兜住;这道闸只防"载荷大得不像
+#: 一次自评",组内条数早已不再与方面总数逐一比对(T-BF7 评审 P1)。与上面两个
+#: 常量同样的理由住在这里:prompt(T-PL3 lean 自评段)与校验
+#: (`reasoning_aspects._group_row_cap`)都要读同一份数字,不能各写一份字面量。
+REFLECT_ASPECT_GROUP_ROWS_FACTOR = 4
+REFLECT_ASPECT_GROUP_ROWS_HARD_MAX = 64
+
 #: 一条 assessment **逐方面**被拒时的稳定原因码(闭集,§6「动作与 assessment
 #: 独立校验」)。每一条都只说明「**这一个方面**的这次更新不成立」:模型写了一个
 #: 不在清单里的 id、同一个方面给了互相冲突的两条判断、某个方面的证据键或 gap

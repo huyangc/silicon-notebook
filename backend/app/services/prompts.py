@@ -19,7 +19,8 @@ from typing import List, Optional, Sequence
 from app.core.query_syntax import quoted_phrases
 from app.domain.retrieval_termination import (
     ASPECT_UNRESOLVED_STATUSES,
-    REFLECT_ASPECT_GAP_MAX_CHARS, REFLECT_ASPECT_MAX_EVIDENCE_KEYS,
+    REFLECT_ASPECT_GAP_MAX_CHARS, REFLECT_ASPECT_GROUP_ROWS_FACTOR,
+    REFLECT_ASPECT_GROUP_ROWS_HARD_MAX, REFLECT_ASPECT_MAX_EVIDENCE_KEYS,
 )
 from app.services.prompt_layers import fragment_text
 
@@ -1184,6 +1185,15 @@ def _v2_param_line(spec) -> str:
 #: drift — the schema hint advertises ``assessment`` as an OPEN object (its
 #: shape is validated by ``AspectLedger.apply``, not by the transport gate), so
 #: this paragraph is the only place the model learns the legal status values.
+#:
+#: ⚠ Q3 (reflect prefix-delta-lean plan §1 M9, §2): this paragraph has been
+#: stale since T4-A (``331f32d4d``) and PR-1's T-BF7 decoupling never synced
+#: it back — "rejected WHOLE" / "costs you a step" and the "neither list may
+#: be longer than the aspect list" bound no longer describe how ``apply``
+#: actually validates a payload (per-aspect rejection, ``_group_row_cap``).
+#: Fixing it would change the off/prefix_snapshot/prefix_delta byte-equivalence
+#: this plan is required to preserve, so it is left untouched here —
+#: 登记待办见计划 §2 Q3(T-PL8 落 fangan_todo)。
 _V2_ASSESSMENT_INSTRUCTION = (
     "The user's MANDATORY ASPECTS are listed in the user message, each with a "
     "stable id. In every turn — in the same JSON as your action, never as a "
@@ -1210,17 +1220,6 @@ _V2_ASSESSMENT_INSTRUCTION = (
     "costs you a step.\n"
 )
 
-#: ⚠ Q3 (reflect prefix-delta-lean plan §1 M9, §2): this paragraph has been
-#: stale since T4-A (``331f32d4d``) and PR-1's T-BF7 decoupling never synced
-#: it back — "rejected WHOLE" / "costs you a step" and the "neither list may
-#: be longer than the aspect list" bound no longer describe how ``apply``
-#: actually validates a payload (per-aspect rejection, ``_group_row_cap``).
-#: Fixing it would change the off/prefix_snapshot/prefix_delta byte-equivalence
-#: this plan is required to preserve, so it is left untouched here and tracked
-#: as an independent follow-up in ``fangan_todo.md``. ``_V2_LEAN_ASSESSMENT_
-#: INSTRUCTION`` below is the version written correctly from the start — it
-#: does not inherit this drift.
-#:
 #: The lean twin of ``_V2_ASSESSMENT_INSTRUCTION`` (prefix-delta-lean plan
 #: §3 T-PL3): same protocol, a different reporting CONTRACT. Where the shared
 #: paragraph above asks for a full restatement every turn, this one asks only
@@ -1232,36 +1231,58 @@ _V2_ASSESSMENT_INSTRUCTION = (
 #: Selected by ``reflect_v2_static_prompt(..., lean=True)``, which REPLACES
 #: ``_V2_ASSESSMENT_INSTRUCTION`` with this constant rather than appending it
 #: — the two must never both be present in the same turn's system prompt.
+#:
+#: 按现行校验器写(``AspectLedger.apply`` / ``_plan_row`` / ``_group_row_cap``,
+#: T-PL3 评审修正轮核对过逐句对号);改校验器必须同 diff 改这里与两组
+#: ``_PL3_STATIC_LEAN_*`` golden,否则又会重演上面那份旧段的漂移。
+#:
+#: L 臂的 S 比 D 恒多约 1246 字符(即 ``len(_V2_LEAN_ASSESSMENT_INSTRUCTION) -
+#: len(_V2_ASSESSMENT_INSTRUCTION)``,评审修正轮实测;这段自评文本比旧段多说
+#: 了非法键剔除、重复方面、组内行数上限等旧段本来就有、评审修正轮补回来的
+#: 规则,不是新增语义),不是布局差——读 ``ctx_chars_s`` 对照表的人据此排除
+#: "L 更贵是因为多发了内容"的误读。改这段文本必须同 diff 核对并更新这个数。
 _V2_LEAN_ASSESSMENT_INSTRUCTION = (
     "The user's MANDATORY ASPECTS are listed in the user message, each with a "
-    "stable id, and the server remembers, turn to turn, what you last judged "
-    "about each of them. In this turn's `assessment` — in the same JSON as "
-    "your action, never as a separate message — report only what CHANGED "
-    "since your last judgement:\n"
+    "stable id. In this turn's `assessment` — in the same JSON as your "
+    "action, never as a separate message — report only what CHANGED since "
+    "your last judgement:\n"
     "- `supported`: aspect_id plus the `evidence_keys` that support it, "
     "copied EXACTLY as printed on the evidence cards (`key=...`).\n"
     "- `unresolved`: aspect_id, a `status` of "
     f"`{'|'.join(ASPECT_UNRESOLVED_STATUSES)}`, any `evidence_keys` found so "
     "far, and a short `gap` naming what is still missing.\n"
-    "An aspect you leave out keeps the status the server already has for it. "
-    "An aspect you already reported as supported does not need restating — "
-    "omitting it costs nothing and will not be chased with a follow-up "
-    "question.\n"
+    "The server remembers, turn to turn, what you last judged: an aspect "
+    "you omit keeps its recorded status, an aspect you already marked "
+    "supported does not need restating, and omitting it costs nothing and "
+    "will not be chased with a follow-up question. On the turn where you "
+    "have not judged anything yet, everything you can judge now counts as a "
+    "change. Listing an aspect REPLACES its whole row, keys included — "
+    "resend the keys you still stand behind.\n"
     "On a closing turn (next_action is answer, or sufficient is true), give, "
     "in that same JSON, the final changes and gaps you can judge as of this "
     "turn. An aspect you never got to stays unassessed; the server will not "
     "send you back for another turn just to square the ledger.\n"
-    "Fields and bounds are unchanged: the `status` enum above, evidence keys "
-    "copied verbatim from a card, and per-aspect limits of "
-    f"{REFLECT_ASPECT_MAX_EVIDENCE_KEYS} evidence keys and "
-    f"{REFLECT_ASPECT_GAP_MAX_CHARS} characters of gap.\n"
-    "Your action and your assessment are validated independently: a row that "
-    "breaks one of the rules above invalidates only THAT aspect — it keeps "
-    "its prior status and next turn's status block tells you why — while "
-    "every other aspect in the same payload, and this turn's retrieval "
-    "action, still go through as normal. Only a payload the server cannot "
-    "attribute at all (not an object, a group that is not a list, or a row "
-    "that is not an object) invalidates the whole turn.\n"
+    "Fields and bounds: status is one of "
+    f"`{'|'.join(ASPECT_UNRESOLVED_STATUSES)}` plus `supported`; evidence "
+    "keys are copied verbatim from the cards — never a document title, a "
+    "source id or a collection name; keys the server never showed you are "
+    "dropped, and an aspect left with none of them stops counting as "
+    "supported; at most "
+    f"{REFLECT_ASPECT_MAX_EVIDENCE_KEYS} keys and "
+    f"{REFLECT_ASPECT_GAP_MAX_CHARS} characters of gap per aspect; the same "
+    "aspect appears at most once across both lists; each list holds at most "
+    f"{REFLECT_ASPECT_GROUP_ROWS_FACTOR} rows per aspect, capped at "
+    f"{REFLECT_ASPECT_GROUP_ROWS_HARD_MAX}.\n"
+    "Your action and your assessment are validated independently. A row the "
+    "server can attribute but cannot accept — an unknown aspect, an illegal "
+    "status, a bound exceeded, the same aspect listed twice — invalidates "
+    "only THAT aspect: it keeps its prior status and the next turn's status "
+    "block tells you why, while this turn's retrieval action still goes "
+    "through as normal. A row whose keys were dropped is accepted with the "
+    "keys that remain and may lose its supported status. Beyond that, a "
+    "payload the server cannot attribute at all — not an object, a group "
+    "that is not a list, a row that is not an object, or a list over its "
+    "row cap — invalidates the whole turn.\n"
     "You cannot add, rename, merge or drop an aspect — that list comes from "
     "the user and only the user changes it. Omitting an aspect means you are "
     "not reporting on it this turn, never that the evidence for it does not "

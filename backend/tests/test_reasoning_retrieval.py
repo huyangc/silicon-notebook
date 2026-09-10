@@ -10158,6 +10158,76 @@ def test_conflicting_duplicate_aspect_rows_reject_that_aspect_only():
     assert rows[1].status == "supported"
 
 
+def test_lean_assessment_instruction_sentences_3_and_4_match_apply(rrepo):
+    """T-PL3 评审修正轮:`_V2_LEAN_ASSESSMENT_INSTRUCTION` 第 (3)(4) 句教给模型
+    的每条后果,必须与 `AspectLedger.apply` 的真实行为逐一对上——**改 `apply`
+    必须同 diff 改这两句 prompt(以及 `tests/test_prompts.py` 的两组
+    `_PL3_STATIC_LEAN_*` golden)**,否则 prompt 又会重演旧段那种"说的和做的
+    不一样"的漂移(T-PL3 评审 F1/F2/F3,P1-1/P2-1/P2-2)。
+
+    四条对号:
+    * (3)(4) "each list holds at most N rows per aspect" ⇒ 单方面账本
+      (cap=4)收到 5 行未整理的 `unresolved` ⇒ 整份 `unresolved_overflow`。
+    * (3) "the same aspect appears at most once across both lists" ⇒ 同一个
+      方面跨 `supported`/`unresolved` 两表同时出现 ⇒ `duplicate_aspect`,
+      保留旧状态。
+    * (3)/(4) "keys the server never showed you are dropped ... may lose its
+      supported status" ⇒ 非法证据键**不是拒绝**,是接受 + 降级
+      `evidence_keys_rejected`。
+    * (1) "Listing an aspect REPLACES its whole row" ⇒ 第二次报同一个方面、
+      只带新键 ⇒ 旧键从账本上整格消失(全量替换,不是并集)。
+
+    变异:把 `_group_row_cap` 改成恒真(永不 overflow)⇒ 第一段红;把
+    `duplicate_aspect` 从 `ASPECT_REJECTION_REASONS` 删掉⇒第二段红(冲突重复项
+    会落进 `error` 而不是逐方面拒绝);去掉 `_plan_row` 里的降级⇒第三段红;把
+    `_commit` 改成 `record.evidence_keys = record.evidence_keys + update.keys`
+    (并集)⇒第四段红。
+    """
+    from app.domain.retrieval_termination import DEMOTION_KEYS_REJECTED
+
+    # -- (3)(4) 组内行数上限:单方面 ⇒ cap = min(1 * 4, 64) = 4。--------------
+    capped = _ledger("问题一")
+    outcome = capped.apply(
+        {"unresolved": [{"aspect_id": "a1", "status": "partial"}] * 5},
+        allowed_keys=set())
+    assert outcome.error == "unresolved_overflow"
+    assert capped.snapshot()[0].status == "unknown"  # 整份不改,账本原样
+
+    # -- (3) 同一方面不得跨两个列表各出现一次:保留旧状态。-------------------
+    crossed = _ledger("问题一")
+    crossed.apply({"supported": [{"aspect_id": "a1", "evidence_keys": ["k1"]}]},
+                  allowed_keys={"k1", "k2"})
+    outcome = crossed.apply({
+        "supported": [{"aspect_id": "a1", "evidence_keys": ["k2"]}],
+        "unresolved": [{"aspect_id": "a1", "status": "partial"}],
+    }, allowed_keys={"k1", "k2"})
+    assert outcome.rejections == (("a1", "duplicate_aspect"),)
+    row = crossed.snapshot()[0]
+    assert row.status == "supported" and row.evidence_keys == ("k1",)
+
+    # -- (3)/(4) 非法键剔除:接受 + 降级,不是"保留旧状态"的拒绝。------------
+    demoted = _ledger("问题一")
+    demoted.apply({"supported": [{"aspect_id": "a1", "evidence_keys": ["k1"]}]},
+                  allowed_keys={"k1"})
+    outcome = demoted.apply(
+        {"supported": [{"aspect_id": "a1", "evidence_keys": ["合同法总则"]}]},
+        allowed_keys={"k1"})
+    assert outcome.rejections == ()  # 不是拒绝
+    row = demoted.snapshot()[0]
+    assert row.status == "partial" and row.evidence_keys == ()
+    assert row.demotion == DEMOTION_KEYS_REJECTED
+
+    # -- (1) 报一次就整格替换,不是并集。--------------------------------------
+    replaced = _ledger("问题一")
+    replaced.apply(
+        {"supported": [{"aspect_id": "a1", "evidence_keys": ["k1", "k2"]}]},
+        allowed_keys={"k1", "k2", "k3"})
+    replaced.apply(
+        {"supported": [{"aspect_id": "a1", "evidence_keys": ["k3"]}]},
+        allowed_keys={"k1", "k2", "k3"})
+    assert replaced.snapshot()[0].evidence_keys == ("k3",)
+
+
 def test_a_rejected_aspect_does_not_swallow_the_turns_retrieval(rrepo):
     """run 级(T-BF7):一个越界方面 + 一个合法 `search_chunks`。
 
