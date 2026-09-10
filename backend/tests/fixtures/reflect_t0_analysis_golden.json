@@ -1,0 +1,903 @@
+{
+  "group_by": [
+    "consumer",
+    "mode",
+    "effort",
+    "kg_in_scope",
+    "policy_version",
+    "optimization"
+  ],
+  "groups": [
+    {
+      "key": [
+        "ask_single",
+        "reasoning",
+        "standard",
+        "True",
+        "legacy",
+        "unknown"
+      ],
+      "summary": {
+        "boolean": {
+          "assessment_observed": {
+            "n_missing": 3,
+            "n_observed": 0,
+            "n_true": 0
+          },
+          "attempts_observed": {
+            "n_missing": 3,
+            "n_observed": 0,
+            "n_true": 0
+          },
+          "context_fallback": {
+            "n_missing": 3,
+            "n_observed": 0,
+            "n_true": 0
+          },
+          "failed": {
+            "n_missing": 3,
+            "n_observed": 0,
+            "n_true": 0
+          },
+          "grounded": {
+            "n_missing": 3,
+            "n_observed": 0,
+            "n_true": 0
+          },
+          "has_intent_contract": {
+            "n_missing": 3,
+            "n_observed": 0,
+            "n_true": 0
+          },
+          "scope_narrowed": {
+            "n_missing": 3,
+            "n_observed": 0,
+            "n_true": 0
+          },
+          "stale_breaker": {
+            "n_missing": 0,
+            "n_observed": 3,
+            "n_true": 0
+          },
+          "trace_truncated": {
+            "n_missing": 0,
+            "n_observed": 3,
+            "n_true": 0
+          }
+        },
+        "categorical": {
+          "status": {
+            "done": 3
+          },
+          "termination_inferred": {
+            "True": 3
+          },
+          "termination_reason": {
+            "model_end": 3
+          }
+        },
+        "citation_contribution": {
+          "ppr": {
+            "cited_hits": 3,
+            "runs_observed": 3,
+            "steps": 3,
+            "steps_with_ids": 3,
+            "unknown_steps": 0
+          }
+        },
+        "counters": {
+          "actions_by_type": {
+            "ppr": 3
+          },
+          "skip_reasons": {
+            "kg_unavailable": 3
+          }
+        },
+        "n_runs": 3,
+        "numeric": {
+          "anchors": {
+            "n_missing": 3,
+            "n_observed": 0
+          },
+          "aspects_pending": {
+            "n_missing": 3,
+            "n_observed": 0
+          },
+          "aspects_total": {
+            "n_missing": 3,
+            "n_observed": 0
+          },
+          "aspects_unassessed": {
+            "n_missing": 3,
+            "n_observed": 0
+          },
+          "aspects_undelivered": {
+            "n_missing": 3,
+            "n_observed": 0
+          },
+          "assessment_rejections": {
+            "n_missing": 3,
+            "n_observed": 0
+          },
+          "assessment_rows_total": {
+            "n_missing": 3,
+            "n_observed": 0
+          },
+          "attempted": {
+            "n_missing": 3,
+            "n_observed": 0
+          },
+          "attempted_failed": {
+            "n_missing": 3,
+            "n_observed": 0
+          },
+          "candidates_chunks": {
+            "n_missing": 3,
+            "n_observed": 0
+          },
+          "candidates_elements": {
+            "n_missing": 3,
+            "n_observed": 0
+          },
+          "candidates_kg": {
+            "n_missing": 3,
+            "n_observed": 0
+          },
+          "context_rebuilds": {
+            "n_missing": 3,
+            "n_observed": 0
+          },
+          "fallback_count": {
+            "n_missing": 3,
+            "n_observed": 0
+          },
+          "included_chunks": {
+            "n_missing": 3,
+            "n_observed": 0
+          },
+          "included_elements": {
+            "n_missing": 3,
+            "n_observed": 0
+          },
+          "included_kg": {
+            "n_missing": 3,
+            "n_observed": 0
+          },
+          "model_calls_real": {
+            "n_missing": 3,
+            "n_observed": 0
+          },
+          "prefix_bytes_median": {
+            "n_missing": 3,
+            "n_observed": 0
+          },
+          "prefix_bytes_min": {
+            "n_missing": 3,
+            "n_observed": 0
+          },
+          "prefix_turns": {
+            "n_missing": 3,
+            "n_observed": 0
+          },
+          "reflect_turns": {
+            "mean": 2.0,
+            "n_missing": 0,
+            "n_observed": 3
+          },
+          "report_depth": {
+            "n_missing": 3,
+            "n_observed": 0
+          },
+          "response_chars_total": {
+            "n_missing": 3,
+            "n_observed": 0
+          },
+          "run_wall_ms": {
+            "n_missing": 3,
+            "n_observed": 0
+          },
+          "section_total": {
+            "n_missing": 3,
+            "n_observed": 0
+          },
+          "shared_hits": {
+            "n_missing": 3,
+            "n_observed": 0
+          },
+          "stale_max": {
+            "n_missing": 3,
+            "n_observed": 0
+          },
+          "top_relevance": {
+            "n_missing": 3,
+            "n_observed": 0
+          },
+          "total_ms": {
+            "mean": 1001.333,
+            "n_missing": 0,
+            "n_observed": 3
+          },
+          "trace_steps": {
+            "mean": 4.0,
+            "n_missing": 0,
+            "n_observed": 3
+          },
+          "unrecovered_channels_count": {
+            "n_missing": 3,
+            "n_observed": 0
+          }
+        }
+      }
+    },
+    {
+      "key": [
+        "ask_single",
+        "reasoning",
+        "standard",
+        "True",
+        "v2",
+        "off"
+      ],
+      "summary": {
+        "boolean": {
+          "assessment_observed": {
+            "n_missing": 6,
+            "n_observed": 0,
+            "n_true": 0
+          },
+          "attempts_observed": {
+            "n_missing": 0,
+            "n_observed": 6,
+            "n_true": 6
+          },
+          "context_fallback": {
+            "n_missing": 6,
+            "n_observed": 0,
+            "n_true": 0
+          },
+          "failed": {
+            "n_missing": 6,
+            "n_observed": 0,
+            "n_true": 0
+          },
+          "grounded": {
+            "n_missing": 6,
+            "n_observed": 0,
+            "n_true": 0
+          },
+          "has_intent_contract": {
+            "n_missing": 6,
+            "n_observed": 0,
+            "n_true": 0
+          },
+          "scope_narrowed": {
+            "n_missing": 6,
+            "n_observed": 0,
+            "n_true": 0
+          },
+          "stale_breaker": {
+            "n_missing": 0,
+            "n_observed": 6,
+            "n_true": 0
+          },
+          "trace_truncated": {
+            "n_missing": 0,
+            "n_observed": 6,
+            "n_true": 0
+          }
+        },
+        "categorical": {
+          "optimization": {
+            "off": 6
+          },
+          "status": {
+            "done": 6
+          },
+          "termination_inferred": {
+            "False": 6
+          },
+          "termination_reason": {
+            "model_sufficient": 6
+          }
+        },
+        "citation_contribution": {
+          "ppr": {
+            "cited_hits": 12,
+            "runs_observed": 6,
+            "steps": 6,
+            "steps_with_ids": 6,
+            "unknown_steps": 0
+          }
+        },
+        "counters": {
+          "actions_by_type": {
+            "ppr": 6
+          },
+          "context_chars": {
+            "bytes_total": 57600
+          },
+          "skip_reasons": {
+            "kg_unavailable": 6
+          }
+        },
+        "n_runs": 6,
+        "numeric": {
+          "anchors": {
+            "n_missing": 6,
+            "n_observed": 0
+          },
+          "aspects_pending": {
+            "n_missing": 6,
+            "n_observed": 0
+          },
+          "aspects_total": {
+            "n_missing": 6,
+            "n_observed": 0
+          },
+          "aspects_unassessed": {
+            "n_missing": 6,
+            "n_observed": 0
+          },
+          "aspects_undelivered": {
+            "n_missing": 6,
+            "n_observed": 0
+          },
+          "assessment_rejections": {
+            "n_missing": 6,
+            "n_observed": 0
+          },
+          "assessment_rows_total": {
+            "n_missing": 6,
+            "n_observed": 0
+          },
+          "attempted": {
+            "n_missing": 6,
+            "n_observed": 0
+          },
+          "attempted_failed": {
+            "n_missing": 6,
+            "n_observed": 0
+          },
+          "candidates_chunks": {
+            "n_missing": 6,
+            "n_observed": 0
+          },
+          "candidates_elements": {
+            "n_missing": 6,
+            "n_observed": 0
+          },
+          "candidates_kg": {
+            "n_missing": 6,
+            "n_observed": 0
+          },
+          "context_rebuilds": {
+            "n_missing": 6,
+            "n_observed": 0
+          },
+          "fallback_count": {
+            "n_missing": 6,
+            "n_observed": 0
+          },
+          "included_chunks": {
+            "n_missing": 6,
+            "n_observed": 0
+          },
+          "included_elements": {
+            "n_missing": 6,
+            "n_observed": 0
+          },
+          "included_kg": {
+            "n_missing": 6,
+            "n_observed": 0
+          },
+          "model_calls_real": {
+            "mean": 4.0,
+            "n_missing": 0,
+            "n_observed": 6,
+            "p50": 4.0,
+            "p95": 4.0
+          },
+          "prefix_bytes_median": {
+            "mean": 720.0,
+            "n_missing": 0,
+            "n_observed": 6,
+            "p50": 720.0,
+            "p95": 720.0
+          },
+          "prefix_bytes_min": {
+            "n_missing": 6,
+            "n_observed": 0
+          },
+          "prefix_turns": {
+            "mean": 3.0,
+            "n_missing": 0,
+            "n_observed": 6,
+            "p50": 3.0,
+            "p95": 3.0
+          },
+          "reflect_turns": {
+            "mean": 3.667,
+            "n_missing": 0,
+            "n_observed": 6,
+            "p50": 3.0,
+            "p95": 5.0
+          },
+          "report_depth": {
+            "n_missing": 6,
+            "n_observed": 0
+          },
+          "response_chars_total": {
+            "n_missing": 6,
+            "n_observed": 0
+          },
+          "run_wall_ms": {
+            "mean": 9007.167,
+            "n_missing": 0,
+            "n_observed": 6,
+            "p50": 9003.0,
+            "p95": 9017.0
+          },
+          "section_total": {
+            "n_missing": 6,
+            "n_observed": 0
+          },
+          "shared_hits": {
+            "n_missing": 6,
+            "n_observed": 0
+          },
+          "stale_max": {
+            "n_missing": 6,
+            "n_observed": 0
+          },
+          "top_relevance": {
+            "n_missing": 6,
+            "n_observed": 0
+          },
+          "total_ms": {
+            "mean": 1007.167,
+            "n_missing": 0,
+            "n_observed": 6,
+            "p50": 1003.0,
+            "p95": 1017.0
+          },
+          "trace_steps": {
+            "mean": 9.0,
+            "n_missing": 0,
+            "n_observed": 6,
+            "p50": 9.0,
+            "p95": 9.0
+          },
+          "unrecovered_channels_count": {
+            "n_missing": 6,
+            "n_observed": 0
+          }
+        }
+      }
+    },
+    {
+      "key": [
+        "ask_single",
+        "reasoning",
+        "standard",
+        "True",
+        "v2",
+        "prefix_snapshot"
+      ],
+      "summary": {
+        "boolean": {
+          "assessment_observed": {
+            "n_missing": 1,
+            "n_observed": 0,
+            "n_true": 0
+          },
+          "attempts_observed": {
+            "n_missing": 0,
+            "n_observed": 1,
+            "n_true": 1
+          },
+          "context_fallback": {
+            "n_missing": 1,
+            "n_observed": 0,
+            "n_true": 0
+          },
+          "failed": {
+            "n_missing": 1,
+            "n_observed": 0,
+            "n_true": 0
+          },
+          "grounded": {
+            "n_missing": 1,
+            "n_observed": 0,
+            "n_true": 0
+          },
+          "has_intent_contract": {
+            "n_missing": 1,
+            "n_observed": 0,
+            "n_true": 0
+          },
+          "scope_narrowed": {
+            "n_missing": 1,
+            "n_observed": 0,
+            "n_true": 0
+          },
+          "stale_breaker": {
+            "n_missing": 0,
+            "n_observed": 1,
+            "n_true": 0
+          },
+          "trace_truncated": {
+            "n_missing": 0,
+            "n_observed": 1,
+            "n_true": 0
+          }
+        },
+        "categorical": {
+          "optimization": {
+            "prefix_snapshot": 1
+          },
+          "status": {
+            "done": 1
+          },
+          "termination_inferred": {
+            "False": 1
+          },
+          "termination_reason": {
+            "model_sufficient": 1
+          }
+        },
+        "citation_contribution": {
+          "ppr": {
+            "cited_hits": 2,
+            "runs_observed": 1,
+            "steps": 1,
+            "steps_with_ids": 1,
+            "unknown_steps": 0
+          }
+        },
+        "counters": {
+          "actions_by_type": {
+            "ppr": 1
+          },
+          "context_chars": {
+            "bytes_total": 8800
+          },
+          "skip_reasons": {
+            "kg_unavailable": 1
+          }
+        },
+        "n_runs": 1,
+        "numeric": {
+          "anchors": {
+            "n_missing": 1,
+            "n_observed": 0
+          },
+          "aspects_pending": {
+            "n_missing": 1,
+            "n_observed": 0
+          },
+          "aspects_total": {
+            "n_missing": 1,
+            "n_observed": 0
+          },
+          "aspects_unassessed": {
+            "n_missing": 1,
+            "n_observed": 0
+          },
+          "aspects_undelivered": {
+            "n_missing": 1,
+            "n_observed": 0
+          },
+          "assessment_rejections": {
+            "n_missing": 1,
+            "n_observed": 0
+          },
+          "assessment_rows_total": {
+            "n_missing": 1,
+            "n_observed": 0
+          },
+          "attempted": {
+            "n_missing": 1,
+            "n_observed": 0
+          },
+          "attempted_failed": {
+            "n_missing": 1,
+            "n_observed": 0
+          },
+          "candidates_chunks": {
+            "n_missing": 1,
+            "n_observed": 0
+          },
+          "candidates_elements": {
+            "n_missing": 1,
+            "n_observed": 0
+          },
+          "candidates_kg": {
+            "n_missing": 1,
+            "n_observed": 0
+          },
+          "context_rebuilds": {
+            "n_missing": 1,
+            "n_observed": 0
+          },
+          "fallback_count": {
+            "n_missing": 1,
+            "n_observed": 0
+          },
+          "included_chunks": {
+            "n_missing": 1,
+            "n_observed": 0
+          },
+          "included_elements": {
+            "n_missing": 1,
+            "n_observed": 0
+          },
+          "included_kg": {
+            "n_missing": 1,
+            "n_observed": 0
+          },
+          "model_calls_real": {
+            "mean": 3.0,
+            "n_missing": 0,
+            "n_observed": 1
+          },
+          "prefix_bytes_median": {
+            "mean": 700.0,
+            "n_missing": 0,
+            "n_observed": 1
+          },
+          "prefix_bytes_min": {
+            "n_missing": 1,
+            "n_observed": 0
+          },
+          "prefix_turns": {
+            "mean": 3.0,
+            "n_missing": 0,
+            "n_observed": 1
+          },
+          "reflect_turns": {
+            "mean": 3.0,
+            "n_missing": 0,
+            "n_observed": 1
+          },
+          "report_depth": {
+            "n_missing": 1,
+            "n_observed": 0
+          },
+          "response_chars_total": {
+            "n_missing": 1,
+            "n_observed": 0
+          },
+          "run_wall_ms": {
+            "mean": 6000.0,
+            "n_missing": 0,
+            "n_observed": 1
+          },
+          "section_total": {
+            "n_missing": 1,
+            "n_observed": 0
+          },
+          "shared_hits": {
+            "n_missing": 1,
+            "n_observed": 0
+          },
+          "stale_max": {
+            "n_missing": 1,
+            "n_observed": 0
+          },
+          "top_relevance": {
+            "n_missing": 1,
+            "n_observed": 0
+          },
+          "total_ms": {
+            "mean": 900.0,
+            "n_missing": 0,
+            "n_observed": 1
+          },
+          "trace_steps": {
+            "mean": 9.0,
+            "n_missing": 0,
+            "n_observed": 1
+          },
+          "unrecovered_channels_count": {
+            "n_missing": 1,
+            "n_observed": 0
+          }
+        }
+      }
+    }
+  ],
+  "min_samples": 5,
+  "n_rows": 10,
+  "optimization_pairs": [
+    {
+      "arm_dimension": "optimization",
+      "baseline": {
+        "anchors": null,
+        "assessment_rows_total": null,
+        "context_rebuilds": null,
+        "model_calls_real": 4.0,
+        "n_measured": {
+          "assessment_rows_total": 0,
+          "context_rebuilds": 0,
+          "model_calls_real": 6,
+          "prefix_bytes_median": 6,
+          "prefix_turns": 6,
+          "run_wall_ms": 6
+        },
+        "n_runs": 6,
+        "optimization": {
+          "off": 6
+        },
+        "prefix_bytes_median": 720.0,
+        "prefix_turns": 3.0,
+        "reflect_turns": 3.667,
+        "run_wall_ms": 9007.167,
+        "termination_reason": {
+          "model_sufficient": 6
+        },
+        "total_ms": 1007.167
+      },
+      "consumer": "ask_single",
+      "corpus_cell": "B_kg",
+      "effort": "standard",
+      "has_intent_contract": "unknown",
+      "mode": "reasoning",
+      "policy_version": "v2",
+      "question_key": "B-q01",
+      "trace_source": "unknown",
+      "variant": {
+        "anchors": null,
+        "assessment_rows_total": null,
+        "context_rebuilds": null,
+        "model_calls_real": 3.0,
+        "n_measured": {
+          "assessment_rows_total": 0,
+          "context_rebuilds": 0,
+          "model_calls_real": 1,
+          "prefix_bytes_median": 1,
+          "prefix_turns": 1,
+          "run_wall_ms": 1
+        },
+        "n_runs": 1,
+        "optimization": {
+          "prefix_snapshot": 1
+        },
+        "prefix_bytes_median": 700.0,
+        "prefix_turns": 3.0,
+        "reflect_turns": 3.0,
+        "run_wall_ms": 6000.0,
+        "termination_reason": {
+          "model_sufficient": 1
+        },
+        "total_ms": 900.0
+      },
+      "variant_arm": "prefix_snapshot"
+    }
+  ],
+  "pairs": [
+    {
+      "arm_dimension": "policy_version",
+      "consumer": "ask_single",
+      "corpus_cell": "B_kg",
+      "effort": "standard",
+      "has_intent_contract": "unknown",
+      "legacy": {
+        "anchors": null,
+        "assessment_rows_total": null,
+        "context_rebuilds": null,
+        "model_calls_real": null,
+        "n_measured": {
+          "assessment_rows_total": 0,
+          "context_rebuilds": 0,
+          "model_calls_real": 0,
+          "prefix_bytes_median": 0,
+          "prefix_turns": 0,
+          "run_wall_ms": 0
+        },
+        "n_runs": 3,
+        "optimization": {
+          "unknown": 3
+        },
+        "prefix_bytes_median": null,
+        "prefix_turns": null,
+        "reflect_turns": 2.0,
+        "run_wall_ms": null,
+        "termination_reason": {
+          "model_end": 3
+        },
+        "total_ms": 1001.333
+      },
+      "mode": "reasoning",
+      "question_key": "B-q01",
+      "trace_source": "unknown",
+      "v2": {
+        "anchors": null,
+        "assessment_rows_total": null,
+        "context_rebuilds": null,
+        "model_calls_real": 4.0,
+        "n_measured": {
+          "assessment_rows_total": 0,
+          "context_rebuilds": 0,
+          "model_calls_real": 6,
+          "prefix_bytes_median": 6,
+          "prefix_turns": 6,
+          "run_wall_ms": 6
+        },
+        "n_runs": 6,
+        "optimization": {
+          "off": 6
+        },
+        "prefix_bytes_median": 720.0,
+        "prefix_turns": 3.0,
+        "reflect_turns": 3.667,
+        "run_wall_ms": 9007.167,
+        "termination_reason": {
+          "model_sufficient": 6
+        },
+        "total_ms": 1007.167
+      }
+    },
+    {
+      "arm_dimension": "policy_version",
+      "consumer": "ask_single",
+      "corpus_cell": "B_kg",
+      "effort": "standard",
+      "has_intent_contract": "unknown",
+      "legacy": {
+        "anchors": null,
+        "assessment_rows_total": null,
+        "context_rebuilds": null,
+        "model_calls_real": null,
+        "n_measured": {
+          "assessment_rows_total": 0,
+          "context_rebuilds": 0,
+          "model_calls_real": 0,
+          "prefix_bytes_median": 0,
+          "prefix_turns": 0,
+          "run_wall_ms": 0
+        },
+        "n_runs": 3,
+        "optimization": {
+          "unknown": 3
+        },
+        "prefix_bytes_median": null,
+        "prefix_turns": null,
+        "reflect_turns": 2.0,
+        "run_wall_ms": null,
+        "termination_reason": {
+          "model_end": 3
+        },
+        "total_ms": 1001.333
+      },
+      "mode": "reasoning",
+      "question_key": "B-q01",
+      "trace_source": "unknown",
+      "v2": {
+        "anchors": null,
+        "assessment_rows_total": null,
+        "context_rebuilds": null,
+        "model_calls_real": 3.0,
+        "n_measured": {
+          "assessment_rows_total": 0,
+          "context_rebuilds": 0,
+          "model_calls_real": 1,
+          "prefix_bytes_median": 1,
+          "prefix_turns": 1,
+          "run_wall_ms": 1
+        },
+        "n_runs": 1,
+        "optimization": {
+          "prefix_snapshot": 1
+        },
+        "prefix_bytes_median": 700.0,
+        "prefix_turns": 3.0,
+        "reflect_turns": 3.0,
+        "run_wall_ms": 6000.0,
+        "termination_reason": {
+          "model_sufficient": 1
+        },
+        "total_ms": 900.0
+      }
+    }
+  ]
+}

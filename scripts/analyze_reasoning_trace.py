@@ -560,19 +560,39 @@ def _mean(rows: Sequence[dict], metric: str) -> float | None:
 
 # --- 逐题配对差值表(`--pair-rows`,§10.1 的主指标)-------------------------
 
-#: 逐题配对差值量的指标。两个都是**墙钟毫秒**,所以 `delta_ms` 的单位是 ms、
+#: 逐题配对差值量的指标。两项都是**毫秒量**,所以 `delta_ms` 的单位是 ms、
 #: `ratio` 无量纲——把一个非时间列摆进来,那两个名字就都成了假话。
 #:
-#: `run_wall_ms` 只有 rig 写,`total_ms` 从轨迹本身来:两个都在,一批只有线上
-#: 导出行(没有 `run_wall_ms`)的输入才不至于配出一张列全是 unknown 的表。
+#: 但两项的口径**不同**,不是「两个墙钟毫秒」(质量评审 P3-2):`run_wall_ms` 是
+#: rig 量的整次 run 墙钟;`total_ms` 是轨迹里**各步耗时之和**(口径见
+#: `reasoning_trace_stats` 里 `total_ms` 自己的说明),漏掉排队与步间空隙,所以它
+#: 是墙钟的下界而不是墙钟本身。两列各自成对比较,不互相顶替。
+#:
+#: 留着 `total_ms` 的理由不是「线上导出行也能配对」——那种行的 `question_key` 与
+#: `optimization` 都是 unknown,压根进不了格。真正的场景是**导出 rig 打过标的
+#: job**:那一批带 `question_key` + `optimization`(配得出格),而导出侧不写
+#: `run_wall_ms`(恒 `None`),只有 `total_ms` 可读。少了它,那种输入会配出一张列
+#: 全是 unknown 的表。
 PAIR_ROW_METRICS: tuple[str, ...] = ("run_wall_ms", "total_ms")
 
-#: 删失与失败的口径(§10.1)。`cancelled` 是**删失观察**:它是被整批墙钟预算或
-#: 用户取消掐断的那一刻,不是这条 run 真实的完成耗时,所以把它当成一个耗时数
-#: 读进中位数,等于「把超时值说成真实完成耗时」。`failed` 压根没跑完。
+#: 成功 / 删失 / 失败 / 未完成四格的口径(§10.1)。
 #:
-#: 两者都不进中位数,但**各自单列计数**:「不把失败丢掉后只比较成功者」是 §10.1
-#: 逐字点名不许做的事,所以这张成功配对表只有在两列计数摆在同一行时才读得懂。
+#: 成功是**白名单**:只有 `status == "done"` 才贡献中位数。黑名单(「不是
+#: `cancelled` 也不是 `failed`」)会把 `JOB_STATUSES` 的第四格 `running`——以及
+#: 将来任何新状态——当成跑成的 run 读走(规格评审 P2-1),而一条卡在 `running` 的
+#: job 的 `total_ms` 只是**已跑步骤的部分和**:把它读进中位数就是「把没跑完的时间
+#: 说成真实完成耗时」。这条路径不是构造的:`export_reasoning_traces.py` 不按
+#: `status` 过滤,而崩掉/放弃的 job 会永久停在 `running`。
+#:
+#: `cancelled` 是**删失观察**:它是被整批墙钟预算或用户取消掐断的那一刻,不是这条
+#: run 真实的完成耗时。`failed` 压根没跑完。两者都不进中位数,但**各自单列计数**:
+#: 「不把失败丢掉后只比较成功者」是 §10.1 逐字点名不许做的事,所以这张成功配对表
+#: 只有在几列计数摆在同一行时才读得懂。
+#:
+#: 四格计数**可加**:`n_runs == n_success + n_censored + n_failed +
+#: n_unfinished`。可加性是这几格能被读懂的前提——任何一条 run 都必须落在某一格
+#: 里,否则一批 run 会在四个计数全是 0 的同时悄悄影响中位数。
+SUCCESS_STATUS = "done"
 CENSORED_STATUS = "cancelled"
 FAILED_STATUS = "failed"
 
@@ -585,21 +605,27 @@ def _pair_row_side(rows: Sequence[dict]) -> dict:
     题型/有图无图/档位比较」)。这边取中位数,于是同一格的三次重复只贡献**一个**
     配对观测,而不是三个独立观测。
 
-    中位数只从**成功**的 run 上取(见 `CENSORED_STATUS` / `FAILED_STATUS`),
-    删失与失败各自单列计数。`n_measured` 沿用 `_fmt_pair_metric` 认的那个形状,
-    好让 markdown 那一格照旧是 `中位数(n=观测数)`。
+    中位数只从**成功**(`status == "done"`)的 run 上取,删失与失败各自单列计数,
+    余下的(`running`,以及任何将来新增的状态)进 `n_unfinished` —— 四格可加,
+    见 `SUCCESS_STATUS`。`n_measured` 沿用 `_fmt_pair_metric` 认的那个形状,好让
+    markdown 那一格照旧是 `中位数(n=观测数)`。
     """
     statuses = Counter(str(row.get("status") or UNKNOWN) for row in rows)
     success = [
         row for row in rows
-        if str(row.get("status") or UNKNOWN)
-        not in (CENSORED_STATUS, FAILED_STATUS)
+        if str(row.get("status") or UNKNOWN) == SUCCESS_STATUS
     ]
     side: dict[str, Any] = {
         "n_runs": len(rows),
         "n_success": len(success),
         "n_censored": statuses[CENSORED_STATUS],
         "n_failed": statuses[FAILED_STATUS],
+        # 减出来而不是再数一遍:这样它与前三格的可加性是**结构性**的,而不是一条
+        # 要靠「状态闭集有没有被扩过」来维持的巧合。
+        "n_unfinished": (
+            len(rows) - len(success)
+            - statuses[CENSORED_STATUS] - statuses[FAILED_STATUS]
+        ),
         "optimization": _distribution(rows, "optimization"),
     }
     measured: dict[str, int] = {}
@@ -665,11 +691,43 @@ def optimization_pair_rows(
                 for metric in PAIR_ROW_METRICS
             }
             cells.append(entry)
-    return {"cells": cells, "rollup": _pair_row_rollup(cells, min_samples)}
+    return {
+        "cells": cells,
+        "rollup": _pair_row_rollup(cells, min_samples),
+        "rollup_by": {
+            facet: _pair_row_rollup(cells, min_samples, facet=facet)
+            for facet in ROLLUP_FACETS
+        },
+    }
 
 
-def _pair_row_rollup(cells: Sequence[dict], min_samples: int) -> list[dict]:
+#: rollup 除了那层全局桶,再按这几条维度各出一层桶(规格评审 P2-4)。
+#:
+#: §10.2-3 那条采用门读的是「各主要题型/档位的系统性慢化超过 10% 需逐题解释」,
+#: 而全局 `ratio_p50` 会把两档相反的偏离抵消掉:一批里 `deep` 慢三成、`standard`
+#: 快两成,逐格比值抵消后全局中位比能正好落在 1.0 附近。逐格数据本来就在 `cells`
+#: 里(`effort` / `corpus_cell` 都在 `PAIR_DIMENSIONS`),缺的只是聚合口径——否则
+#: 报告里唯一的按档位数字是**分组概览**里两组独立 P50,而 §10.1 逐字禁止拿它当
+#: 配对比值,操作者要么误用被禁的数,要么手工分拆 JSONL 重跑。
+ROLLUP_FACETS: tuple[str, ...] = ("effort", "corpus_cell")
+
+#: rollup 上**分两侧**印的那几个计数(质量评审 P3-1)。
+#:
+#: 两侧相加会同时丢掉两件事:哪一侧更容易崩(那正是 §10.2-2 那条稳定性门要读
+#: 的),以及基线那一侧在同格的多个变体行上被重复计了几次。逐格表那几列本来就标着
+#: `(基线/变体)`,rollup 跟上同一口径。
+ROLLUP_SIDE_COUNTS: tuple[str, ...] = (
+    "n_censored", "n_failed", "n_unfinished",
+)
+
+
+def _pair_row_rollup(
+    cells: Sequence[dict], min_samples: int, *, facet: str | None = None,
+) -> list[dict]:
     """把逐格配对按 `(policy_version, variant_arm)` 汇总成一行。
+
+    `facet` 非空时再加一维分桶(见 `ROLLUP_FACETS`):同一批 cells 换一个更细的
+    桶键读一遍,不重算任何逐格数——桶只决定哪些格摆在一行里。
 
     `n_pairs` 数的是**出得来配对差值的格数**,不是 run 数:一格里三次重复只
     贡献一个配对观测(见 `_pair_row_side`)。分位数受 `min_samples` 约束,并与
@@ -681,26 +739,24 @@ def _pair_row_rollup(cells: Sequence[dict], min_samples: int) -> list[dict]:
 
     `n_ratio_pairs` 单独报:基线中位数为 0 的格子出得来 `delta_ms` 而出不来
     `ratio`,两个分母不同,合成一个数会让某一侧的样本量看着比实际大。
+
+    删失/失败/未完成三个计数**分基线与变体两侧**印(见 `ROLLUP_SIDE_COUNTS`)。
     """
-    buckets: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    bucket_keys = ("policy_version", "variant_arm",
+                   *((facet,) if facet else ()))
+    buckets: dict[tuple[str, ...], list[dict]] = defaultdict(list)
     for cell in cells:
-        buckets[(cell["policy_version"], cell["variant_arm"])].append(cell)
+        buckets[tuple(cell[key] for key in bucket_keys)].append(cell)
 
     rollup: list[dict] = []
-    for (policy, arm), members in sorted(buckets.items()):
-        entry: dict[str, Any] = {
-            "policy_version": policy,
-            "variant_arm": arm,
-            "n_cells": len(members),
-            "n_censored": sum(
-                member[side]["n_censored"]
-                for member in members for side in ("baseline", "variant")
-            ),
-            "n_failed": sum(
-                member[side]["n_failed"]
-                for member in members for side in ("baseline", "variant")
-            ),
-        }
+    for bucket_key, members in sorted(buckets.items()):
+        entry: dict[str, Any] = dict(zip(bucket_keys, bucket_key))
+        entry["n_cells"] = len(members)
+        for field in ROLLUP_SIDE_COUNTS:
+            for side in ("baseline", "variant"):
+                entry[f"{field}_{side}"] = sum(
+                    member[side][field] for member in members
+                )
         entry["metrics"] = {
             metric: _rollup_metric(members, metric, min_samples)
             for metric in PAIR_ROW_METRICS
@@ -739,34 +795,76 @@ def _rollup_metric(
 
 # --- §10.2-1 质量门有没有证据 -----------------------------------------------
 
-#: 质量门(§10.2-1)的证据列。前一个是 gold 命中的分母,后三个是人工盲审的记录。
-#: 它们全都是 `AB_PROJECTION_KEYS` 专属,而且 T-AB1/T-AB3 一格未动 ⇒ 今天恒
-#: `None`(见 A/B 设计 §12 与本期计划 M6)。
-QUALITY_EVIDENCE_KEYS: tuple[str, ...] = (
+#: §10.2-1 里**确定性**那半边的计数列(计划 M5 的对账表:这几列 **T-AB2 已
+#: 实现**,不是待做项)。三列各报「有几条 run 量到了」与**总和**:门 1 问的是
+#: 「有没有新增越范围引用 / 解析不到的锚点」,而那是一个数,不是一个存在位。
+#:
+#: 总和在零观测时是 `None` 而不是 0——「一条都没量到」与「量了、一条都没有」在这
+#: 一节上是两句不同的话,后者才是门 1 的通过条件。
+QUALITY_COUNT_KEYS: tuple[str, ...] = (
+    "citations_out_of_scope", "anchors_unresolved", "anchors_on_gold",
+)
+
+#: 确定性那半边里**不是计数**的两列:完整性声明是短码枚举(门 1 的「虚报完整性」
+#: 读它),空答案是布尔。各报自己的取值分布(含 unknown 一格),不折成一个比率。
+QUALITY_LABEL_KEYS: tuple[str, ...] = ("completeness_claim", "answer_empty")
+
+#: 判分模型与人工盲审那半边的证据列。第一个是 gold 命中的分母,后三个是人工盲审
+#: 的记录。它们全都恒 `None`(T-AB1/T-AB3 一格未动,见 A/B 设计 §12 与本期计划
+#: M6),所以 `verdict` **只**看这几列:确定性那几列在 ab 批上恒有观测,把它们算进
+#: 结论会让每一批都自称「有记录」。
+QUALITY_JUDGED_KEYS: tuple[str, ...] = (
     "gold_facts_total",
     "human_factual_error",
     "human_completeness_false",
     "human_citation_bad",
 )
 
+#: 质量门这一节读的**全部**列。它同时是这一节出不出的判据(见 `build_report`):
+#: 这几列全是 `AB_PROJECTION_KEYS` 专属,T0 键集结构上一列都没有。
+#:
+#: **不新增任何投影列**(本期硬纪律):这几个名字都已经在
+#: `AB_PROJECTION_KEYS` 里,这里只是把它们接上读侧。
+QUALITY_EVIDENCE_KEYS: tuple[str, ...] = (
+    *QUALITY_COUNT_KEYS, *QUALITY_LABEL_KEYS, *QUALITY_JUDGED_KEYS,
+)
+
 
 def quality_evidence(rows: Sequence[dict]) -> dict:
-    """这一批有没有 §10.2-1 要的质量证据。
+    """这一批有没有 §10.2-1 要的质量证据,以及确定性那半边到底是几。
 
     §10.2 明说**未验证 ≠ 通过**,而一份只有时间列漂亮的报告最容易被读成通过
     (本期计划 §5 风险 6)。所以缺证据的时候要印一行显式的「未验证」,而不是把
     那一节留空——空白会被读成「这一条没问题」。
 
-    结论只有两格短码,不产出任何比率:`unverified`(gold 与盲审记录都没有)与
-    `records_present`(至少有一列有观测,仍要由人工盲审下结论)。
+    但「未验证」只对**判分与人工**那半边成立(见 `QUALITY_JUDGED_KEYS`)。确定性
+    那半边 T-AB2 已经实现,数据集里就有观测:一批 D 臂新增三条越范围引用、还虚报
+    了完整性,报告要是既不列它、又断言「这一批读不出质量那一条」,那句话就把关于
+    **工具**的事实说成了关于**这一批**的事实(规格评审 P2-3)。所以这里把那几列
+    的计数/分布一起报出来。
+
+    `verdict` 只有两格短码,不产出任何比率:`unverified`(gold 与盲审记录都没有)
+    与 `records_present`(至少有一列有观测,仍要由人工盲审下结论)。
     """
     observed = {
         key: sum(1 for row in rows if row.get(key) is not None)
         for key in QUALITY_EVIDENCE_KEYS
     }
+    totals: dict[str, Any] = {}
+    for key in QUALITY_COUNT_KEYS:
+        values = _numeric(row.get(key) for row in rows)
+        totals[key] = {
+            "n_observed": len(values),
+            "total": round(sum(values), 3) if values else None,
+        }
     return {
         "observed": observed,
-        "verdict": ("records_present" if any(observed.values())
+        "deterministic_totals": totals,
+        "deterministic_distributions": {
+            key: _distribution(rows, key) for key in QUALITY_LABEL_KEYS
+        },
+        "verdict": ("records_present"
+                    if any(observed[key] for key in QUALITY_JUDGED_KEYS)
                     else "unverified"),
     }
 
@@ -915,16 +1013,29 @@ def render_markdown(
 
 
 def _render_quality(evidence: dict) -> list[str]:
-    """§10.2-1 质量门那一节。见 `quality_evidence` 的口径。"""
+    """§10.2-1 质量门那一节。见 `quality_evidence` 的口径。
+
+    确定性那几列先印,再印判分/人工那半边的结论:那句结论的作用域只到「判分与
+    人工」为止,不能顺手把已经读出来的确定性列也说成读不出(规格评审 P2-3)。
+    """
     lines = ["## 质量门(§10.2-1)", ""]
+    lines.append("- 确定性列(T-AB2 已实现):" + ", ".join(
+        f"{key}={_fmt_unknown(stat['total'])}(n={stat['n_observed']})"
+        for key, stat in evidence["deterministic_totals"].items()
+    ))
+    lines.append("- 确定性分布:" + " ; ".join(
+        f"{key}: " + ", ".join(f"{value}={count}"
+                               for value, count in distribution.items())
+        for key, distribution in evidence["deterministic_distributions"].items()
+    ))
     if evidence["verdict"] == "unverified":
         lines.append(
-            "- 质量:未验证(无 gold / 无盲审记录)。§10.2 明说未验证 ≠ 通过:"
-            "这一批读得出时间与稳定性两条门,读不出质量那一条,不足以据它宣布采用。"
+            "- 质量:无 gold / 无盲审记录 ⇒ **判分与人工那半边未验证**"
+            "(确定性列见上)。§10.2 明说未验证 ≠ 通过:这一批不足以据它宣布采用。"
         )
     else:
         rendered = ", ".join(
-            f"{key}={count}" for key, count in evidence["observed"].items()
+            f"{key}={evidence['observed'][key]}" for key in QUALITY_JUDGED_KEYS
         )
         lines.append(
             f"- 质量:有记录({rendered})。结论仍按 §10.2-1 由人工盲审下,"
@@ -936,27 +1047,38 @@ def _render_quality(evidence: dict) -> list[str]:
 def _render_pair_rows(payload: dict, baseline_arm: str) -> list[str]:
     """逐题配对差值那一节(`--pair-rows`)。
 
-    两张表:逐格的 `delta_ms` / `ratio`,以及按 `(policy_version, variant_arm)`
-    的 rollup。节头那两句是 §10.1 的原话,不是装饰——成功配对表可单列,但不能
-    独自决定上线,所以删失与失败两列必须先被读到。
+    逐格表 + 全局 rollup + 每条 `ROLLUP_FACETS` 各一张 rollup。节头那两句是
+    §10.1 的原话,不是装饰——成功配对表可单列,但不能独自决定上线,所以删失、
+    失败与未完成三列必须先被读到。
+
+    零配对时印一句话而不是几张只有表头的空表:与隔壁 `optimization_pairs` 同
+    口径(质量评审 P3-4),空表会被读成「配出来了,只是数都没量到」。
     """
-    lines = ["", f"## 逐题配对差值(基线 `{baseline_arm}`)", "",
-             "> 格内**先对重复取中位数**,再出 `Δms` 与 `ratio`;rollup 的"
-             " `ratio p50` 是逐格配对比值的中位数,**不是**两组独立 P50 的比值"
-             "(§10.1)。",
-             "> 成功配对表可单列,但**不能独自决定上线**(§10.1):先读"
-             " `n_censored`(删失,`cancelled`——那是被截止时长掐断的一刻,不是"
-             "真实完成耗时)与 `n_failed`,再读 Δ。", ""]
+    lines = ["", f"## 逐题配对差值(基线 `{baseline_arm}`)", ""]
+    if not payload["cells"]:
+        return [*lines,
+                "(没有成对样本:输入里没有同题同格、`optimization` 一侧为"
+                f" `{baseline_arm}` 另一侧为变体的 run)"]
+    lines += ["> 格内**先对重复取中位数**,再出 `Δms` 与 `ratio`;rollup 的"
+              " `ratio p50` 是逐格配对比值的中位数,**不是**两组独立 P50 的比值"
+              "(§10.1)。",
+              "> 成功配对表可单列,但**不能独自决定上线**(§10.1):先读"
+              " `n_censored`(删失,`cancelled`——那是被截止时长掐断的一刻,不是"
+              "真实完成耗时)、`n_failed` 与 `n_unfinished`(`running` 等没跑完的"
+              "状态,它们的耗时是部分和,不进中位数),再读 Δ。", ""]
     lines += _md_table(
         [*OPTIMIZATION_CELL_DIMENSIONS, "variant",
          *(
              column
              for metric in PAIR_ROW_METRICS
-             for column in (f"{baseline_arm} {metric}(n)",
-                            f"variant {metric}(n)",
+             # 表头逐字说出这一格是**中位数**:`optimization_pair_table` 那张表的
+             # 同名列给的是 `_mean` 的均值,两张表用同一个表头印两个不同的统计量
+             # 时,读的人没有任何列名能分开它们(规格评审 P2-2)。
+             for column in (f"{baseline_arm} {metric} P50(n)",
+                            f"variant {metric} P50(n)",
                             f"{metric} Δms", f"{metric} ratio")
          ),
-         "n_censored(基线/变体)", "n_failed(基线/变体)"],
+         *(f"{field}(基线/变体)" for field in ROLLUP_SIDE_COUNTS)],
         [
             [*(cell[dim] for dim in OPTIMIZATION_CELL_DIMENSIONS),
              cell["variant_arm"],
@@ -970,34 +1092,56 @@ def _render_pair_rows(payload: dict, baseline_arm: str) -> list[str]:
                      _fmt_unknown(cell["metrics"][metric]["ratio"]),
                  )
              ),
-             _fmt_sides(cell, "n_censored"), _fmt_sides(cell, "n_failed")]
+             *(_fmt_sides(cell, field) for field in ROLLUP_SIDE_COUNTS)]
             for cell in payload["cells"]
         ],
     )
     lines += ["", "配对汇总(分位数受 `min_samples` 约束,与 `n_pairs` 同格):",
               ""]
-    lines += _md_table(
-        ["policy_version", "variant", "metric", "n_pairs", "n_ratio_pairs",
+    lines += _rollup_table(payload["rollup"], None)
+    for facet in ROLLUP_FACETS:
+        lines += ["", f"按 `{facet}` 分桶(§10.2-3:各主要题型/档位各读自己的配对"
+                      "中位比——全局那一行会把两档相反的偏离抵消掉):", ""]
+        lines += _rollup_table(payload["rollup_by"][facet], facet)
+    return lines
+
+
+def _rollup_table(rollup: Sequence[dict], facet: str | None) -> list[str]:
+    """一张 rollup 表。`facet` 非空时多印一列桶维度(见 `ROLLUP_FACETS`)。"""
+    return _md_table(
+        ["policy_version", "variant", *((facet,) if facet else ()),
+         "metric", "n_pairs", "n_ratio_pairs",
          "Δms p50", "Δms p95", "Δms max", "ratio p50", "ratio p95",
-         "ratio max", "n_censored", "n_failed"],
+         "ratio max",
+         *(f"{field}(基线/变体)" for field in ROLLUP_SIDE_COUNTS)],
         [
-            [entry["policy_version"], entry["variant_arm"], metric,
-             stat["n_pairs"], stat["n_ratio_pairs"],
+            [entry["policy_version"], entry["variant_arm"],
+             *((entry[facet],) if facet else ()),
+             metric, stat["n_pairs"], stat["n_ratio_pairs"],
              *(_fmt_unknown(stat.get(field)) for field in (
                  "delta_ms_p50", "delta_ms_p95", "delta_ms_max",
                  "ratio_p50", "ratio_p95", "ratio_max")),
-             entry["n_censored"], entry["n_failed"]]
-            for entry in payload["rollup"]
+             *(_fmt_rollup_sides(entry, field)
+               for field in ROLLUP_SIDE_COUNTS)]
+            for entry in rollup
             for metric, stat in ((m, entry["metrics"][m])
                                  for m in PAIR_ROW_METRICS)
         ],
     )
-    return lines
 
 
 def _fmt_sides(cell: dict, field: str) -> str:
     """一格里两侧的同一个计数,印成 `基线/变体`。见 `_render_pair_rows` 的表头。"""
     return f"{cell['baseline'][field]}/{cell['variant'][field]}"
+
+
+def _fmt_rollup_sides(entry: dict, field: str) -> str:
+    """一条 rollup 行上两侧的同一个计数,印成 `基线/变体`(质量评审 P3-1)。
+
+    与 `_fmt_sides` 读的是两种形状:逐格表那一层两侧各是一个子 dict,rollup 这一层
+    已经跨格求过和,两侧摊成 `<field>_baseline` / `<field>_variant` 两个键。
+    """
+    return f"{entry[f'{field}_baseline']}/{entry[f'{field}_variant']}"
 
 
 def _fmt_unknown(value: Any) -> str:
@@ -1011,9 +1155,14 @@ def _fmt_unknown(value: Any) -> str:
 
 
 def _fmt_pair_metric(side: dict, metric: str) -> str:
-    """一侧一个**稀疏**指标的单元格:`均值(n=观测数)`。
+    """一侧一个**稀疏**指标的单元格:`值(n=观测数)`。
 
-    n 必须和均值同格出现(评审 P2)。`run_wall_ms=6000.0` 这一格,底下是三条 run
+    值是哪个统计量由调用方定,并且**由列名说出来**:`optimization_pair_table` 那
+    张表给的是 `_mean` 的均值(列名 `… {metric}(n)`),逐题配对表给的是格内先对
+    重复取的中位数(列名 `… {metric} P50(n)`)。两张表曾经用逐字相同的表头印这
+    两个不同的统计量(规格评审 P2-2),所以这里不再自称「均值」。
+
+    n 必须和值同格出现(评审 P2)。`run_wall_ms=6000.0` 这一格,底下是三条 run
     都量到了、还是三条里只有一条量到了,决定的是这个差值有没有意义;把 n 丢在
     JSON 里而 markdown 只印均值,等于让最容易被引用的那份输出恰好少了判断依据。
     没有任何观测时印 `unknown(n=0)` 而不是空格——空格会被读成「这一列不适用」。
