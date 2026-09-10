@@ -16147,7 +16147,10 @@ def _keep_blocks_run(rrepo, **extra):
              "arguments": {"query": markers[2]}, "reason": "第三轮",
              "assessment": {"supported": [
                  {"aspect_id": "a2", "evidence_keys": ["ck-1"]}]}},
-            _answer(),
+            # 收尾轮再交一份**会被接受**的自评:回退之后那一格该不该继续增长,靠
+            # 它才有得看(见 `test_delta_fallback_stops_collecting_aspect_notes`)。
+            _answer(assessment={"unresolved": [
+                {"aspect_id": "a1", "status": "partial", "gap": "还缺乙"}]}),
         ],
         chunk_results={
             markers[0]: [_multi_marker_hit("ck-0")],
@@ -16209,6 +16212,96 @@ def test_delta_fallback_keeps_every_block_it_already_sent(rrepo):
     assert survivors, (sorted(in_d), sorted(in_k))
     for key in survivors:
         assert in_k[key] == in_d[key], key
+
+
+def test_delta_fallback_stops_collecting_aspect_notes(rrepo):
+    """回退之后 `pending_aspect_notes` 清空,而且此后一条都不再攒。
+
+    那一格的唯一消费者是"追加下一块 D",而回退之后再也没有下一块。继续往里 append
+    就是一个**只增不减、永不消费**的 list:量级微小,但它挂在 `_ReasoningRunState`
+    上、装的是方面 id,而"永不消费的增长"本身就是这条臂最不该有的形状。
+
+    脚本在回退**之前**真的攒下过一条(第三轮那份被接受的自评),回退**之后**又交了
+    一份会被接受的自评——两侧各一条,所以两个变异分得开。
+
+    变异:回退分支里那句 `pending_aspect_notes.clear()` 删掉 ⇒ 回退轮那条红;
+    `_absorb_assessment` 的写点去掉 `not ...fallback` 那半 ⇒ 末轮那条红。
+    """
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    rows: list = []
+    seen: list = []
+    original = ReasoningRetriever._reflect_v2_context
+
+    def _wrapped(self, state, summary, outline):
+        context = original(self, state, summary, outline)
+        delta = state.reflect_delta
+        seen.append(state)
+        rows.append((delta.fallback, tuple(delta.pending_aspect_notes)))
+        return context
+
+    ReasoningRetriever._reflect_v2_context = _wrapped
+    try:
+        llm, _result = _keep_blocks_run(rrepo)
+    finally:
+        ReasoningRetriever._reflect_v2_context = original
+
+    flags = [flag for flag, _notes in rows]
+    assert True in flags, rows
+    first = flags.index(True)
+    # 前提:回退之前真的有过"上一轮已接受的方面更新"那一节(否则下面是空断言)。
+    assert any("已接受的方面更新" in block
+               for turn in range(first)
+               for block in llm.delta_blocks(turn)), llm.delta_blocks(first - 1)
+    for turn in range(first, len(rows)):
+        assert rows[turn][1] == (), (turn, rows)
+    # 收尾之后再看一次:回退轮之后那份**被接受**的自评一条都没有攒进去(它是本
+    # run 最后一次落账,没有下一轮的装配会去看它)。
+    assert seen[-1].reflect_delta.pending_aspect_notes == [], (
+        seen[-1].reflect_delta.pending_aspect_notes)
+    assert any(record.model_assessed
+               for record in seen[-1].aspects._records), (
+        "末轮那份自评必须真的落过账,否则这条断言是空的")
+
+
+def test_delta_static_prompt_keeps_the_rules_while_any_block_is_still_sent(
+    rrepo,
+):
+    """S 里那四句 delta 规则的判据与 `delta=` **同源**:只要 D 还在消息里就必须在。
+
+    两处各读一次(一处读投影上的 D、一处再读策略位)的后果是它们可以分歧:策略位在
+    一次 run 中途被翻回 `prefix_snapshot`(热更配置或窄测试路径)时,消息里那几块标着
+    "新增"的 D 还在,而解释它们怎么读的规则从 S 里消失了——上文里出现了一段模型没有
+    读法的材料,而 S 本该在一个 run 内逐字节不变。
+
+    变异:把 `static_delta` 的判据从 `delta is not None` 改回
+    `optimization == "prefix_delta"` ⇒ 翻回去那一轮 S 掉了那四句,两条都红。
+    """
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    original = ReasoningRetriever._reflect_v2_context
+    turns: list = []
+
+    def _wrapped(self, state, summary, outline):
+        if len(turns) >= 2:
+            # 中途翻回 `prefix_snapshot`:投影上已经有两块 D 了。
+            self.settings.reasoning_reflect_optimization = _PREFIX
+        turns.append(1)
+        return original(self, state, summary, outline)
+
+    ReasoningRetriever._reflect_v2_context = _wrapped
+    try:
+        llm, _result = _four_turn_run(rrepo)
+    finally:
+        ReasoningRetriever._reflect_v2_context = original
+
+    count = len(llm.user_prompts)
+    # 前提:翻回去之后那几块 D 真的还在消息里。
+    assert llm.delta_blocks(count - 1), llm.delta_blocks(count - 1)
+    # S 在整个 run 内逐字节不变,而且始终带着那四句(它们解释的正是 D 怎么读)。
+    assert len(set(llm.system_prompts)) == 1, [
+        len(prompt) for prompt in llm.system_prompts]
+    assert "APPENDED after everything" in llm.system_prompt(count - 1)
 
 
 def test_delta_fallback_registers_no_key_from_the_snapshot_it_threw_away(rrepo):
