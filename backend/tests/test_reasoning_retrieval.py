@@ -5553,6 +5553,8 @@ def test_reflect_v2_settings_env_roundtrip(monkeypatch):
     ('overview=4000', "不是合法 JSON"),
     # 不是对象
     ('[4000,6000,8000,12000,16000]', "必须是 JSON 对象"),
+    # 空串
+    ('', "不能为空"),
 ])
 def test_reflect_evidence_chars_rejects_bad_mappings(monkeypatch, raw, needle):
     from app.core.config import Settings
@@ -5584,14 +5586,15 @@ def test_reflect_scalar_budgets_are_bounded(monkeypatch, name, value):
 
 
 def test_reflect_delta_cards_settings_defaults():
-    """新增映射的默认值:按档位 2/4/6/8/10,与 `DEFAULT_REFLECT_DELTA_CARDS_BY_EFFORT`
-    同源——本期不改变任何生产行为。"""
-    from app.core.config import (
-        DEFAULT_REFLECT_DELTA_CARDS_BY_EFFORT, Settings,
-    )
+    """新增映射的默认值:按档位 2/4/6/8/10(前缀复用最终设计 §5.1)——本期不改变
+    任何生产行为。断字面量而不是与常量自比,防止常量本身漂移时测试跟着一起漂移。
+    """
+    from app.core.config import Settings
     s = Settings(_env_file=None)
-    assert (s.reasoning_reflect_delta_cards_by_effort
-            == DEFAULT_REFLECT_DELTA_CARDS_BY_EFFORT)
+    assert s.reasoning_reflect_delta_cards_by_effort == {
+        "overview": 2, "standard": 4, "deep": 6, "thorough": 8,
+        "exhaustive": 10,
+    }
     assert s.reasoning_reflect_compaction_target_ratio == 0.5
 
 
@@ -5630,6 +5633,12 @@ def test_reflect_delta_cards_env_roundtrip(monkeypatch):
      '"exhaustive":17}', "越界"),
     # 不是 JSON
     ('overview=2', "不是合法 JSON"),
+    # 合法 JSON 但不是对象(数组)
+    ('[2,4,6,8,10]', "必须是 JSON 对象"),
+    # 合法 JSON 但不是对象(标量)
+    ('5', "必须是 JSON 对象"),
+    # 空串
+    ('', "不能为空"),
 ])
 def test_reflect_delta_cards_rejects_bad_mappings(monkeypatch, raw, needle):
     """校验器逐条镜像 `validate_reflect_evidence_chars`(报错口径同款)。
@@ -5737,7 +5746,9 @@ def test_reflect_optimization_rejects_the_unimplemented_values(
     里既断言运行期的整句,也断言两份文档引的是同一串字节。
 
     变异:把 `validate_reflect_optimization` 的 `raise` 换成 `return "off"`
-    (或整个校验器删掉)⇒ 这条红;把句中的半角逗号改成全角 ⇒ 这条也红。
+    (或整个校验器删掉)⇒ 这条红;把句中的半角逗号改成全角 ⇒ 这条也红;把文档里
+    引用这句的位置从 `REASONING_REFLECT_OPTIMIZATION` 那一行挪到文末的其他地方
+    (哪怕字节不变)⇒ 这条也红——按行定位,不是"文件里某处出现过"。
     """
     import pathlib
     from app.core.config import Settings
@@ -5748,12 +5759,20 @@ def test_reflect_optimization_rejects_the_unimplemented_values(
     sentence = (f"REASONING_REFLECT_OPTIMIZATION={value} 该取值将在后续 PR 实现,"
                 "当前请用 off 或 prefix_snapshot 或 prefix_delta")
     assert sentence in text, text
-    # 文档引用的是同一串字节(占位符之后的部分逐字相同)。
+    # 文档引用的是同一串字节(占位符之后的部分逐字相同),且引在
+    # `REASONING_REFLECT_OPTIMIZATION` 那一行本身——挪到文档别处不算数。
     root = pathlib.Path(__file__).resolve().parents[2]
     quoted = sentence.split(" ", 1)[1]
     for name in ("docs/deployment-and-configuration.md",
                  "docs/deployment-and-configuration_zh.md"):
-        assert quoted in (root / name).read_text(encoding="utf-8"), name
+        doc_path = root / name
+        lines = doc_path.read_text(encoding="utf-8").splitlines()
+        matching = [
+            line for line in lines
+            if line.startswith("REASONING_REFLECT_OPTIMIZATION")
+            and quoted in line
+        ]
+        assert matching, name
 
 
 def test_reflect_optimization_rejects_a_value_outside_the_closed_set(
@@ -5777,8 +5796,8 @@ def test_reflect_optimization_is_gated_by_the_v2_master_switch(
     """四取值 × v2 开/关矩阵:总闸关着时恒 `off`,配了什么都不看。
 
     这一项**叠在** v2 之上而不是与它并列:总闸关着走的是 legacy 协议,那条路径
-    上根本没有"前缀"可谈。四格全测(包括本期未实现的两格)是刻意的:已实现的两格
-    钉住"门开着时如实带过",未实现的两格钉住"门关着时也一样回 `off`"——它们在
+    上根本没有"前缀"可谈。四格全测(包括本期未实现的一格)是刻意的:已实现的三格
+    钉住"门开着时如实带过",未实现的一格钉住"门关着时也一样回 `off`"——它在
     v2 开着时由下面那条折回守卫接管,这里只钉门。
 
     变异:把 `reflect_optimization()` 里的 `if not self.reflect_v2_active()`
