@@ -154,10 +154,10 @@ def _walk(node: Any, path: str = "") -> Iterator[tuple[str, Any]]:
 
 
 def test_the_case_set_has_exactly_the_twelve_planned_cases():
-    """12 例、八种形态逐格对上计划 T-EX6 的表。
+    """12 例、九种形态逐格对上计划 T-EX6 的表。
 
     变异:删掉一例(或把两例的 `probe_shape` 改成同一个)⇒ 这条红。只断言
-    「每种形态至少一例」的话,一个 8 例的 case 集照样绿,而 §9.2 要的矩阵是
+    「每种形态至少一例」的话,一个 9 例的 case 集照样绿,而 §9.2 要的矩阵是
     12 例 × 3 状态点 × 2 重复 × 3 臂 = 216 次逻辑调用。
     """
     cases = _load_cases_raw()
@@ -546,12 +546,21 @@ def test_the_case_set_spreads_over_distinct_questions():
 
 def test_the_case_set_ships_next_to_the_question_set_it_references():
     """两份 fixture 同目录、同一个包。`state_probes.json` 的路径由
-    `QUESTIONS_PATH` 派生而不是自己再拼一遍 —— 题集搬家时这条会红,而不是留下
-    一个指向空气的常量。"""
+    `QUESTIONS_PATH` 派生而不是自己再拼一遍 —— 题集搬家时 `.exists()` 会先红,
+    而不是留下一个指向空气的常量。
+
+    「同目录」这一半独立求值:从 `app.eval.reflect_t0` 包自己的 `__file__` 重算
+    一遍包目录再比,不是拿 `STATE_PROBES_PATH.parent == QUESTIONS_PATH.parent`
+    ——那条式子由 `STATE_PROBES_PATH = QUESTIONS_PATH.parent / "state_probes.json"`
+    的定义本身保证恒成立,是个不可能变红的重言式。
+    """
+    import app.eval.reflect_t0 as reflect_t0_package
+
     assert STATE_PROBES_PATH.exists()
-    assert STATE_PROBES_PATH.parent == QUESTIONS_PATH.parent
     assert STATE_PROBES_PATH.name == "state_probes.json"
-    assert Path(STATE_PROBES_PATH).is_file()
+    package_dir = Path(reflect_t0_package.__file__).resolve().parent
+    assert STATE_PROBES_PATH.parent == package_dir, STATE_PROBES_PATH
+    assert QUESTIONS_PATH.parent == package_dir, QUESTIONS_PATH
 
 
 # --- (e) 剧本步真的解析成它声明的那个动作 -------------------------------------
@@ -566,36 +575,129 @@ SCRIPT_STEP_REQUIRED_KEYS = frozenset({"next_action", "sufficient", "arguments"}
 SCRIPT_STEP_OPTIONAL_KEYS = frozenset({"reason", "assessment"})
 
 
-def _full_house_capability_facts(*, kg_in_scope: bool) -> "ReflectCapabilityFacts":
-    """按语料格(kg / 无图)构造满额度事实,预算给到不可能被剧本吃穿的量。
+#: 剧本动作 → 它在 `_reflect_capabilities` 里真实扣减的那个 `*_left` 字段
+#: (`app.services.reasoning_retrieval._reflect_capabilities`:
+#: `max(0, 上限 - 已用)`)。`add_subquery` 不在这张表里——它的可用性只看通道
+#: 接线(图在范围内,或 `chunk_search_active`),不消耗任何配额
+#: (`build_reflect_capabilities` 的 `ADD_SUBQUERY_ACTION` 判据)。枚举的两个
+#: 动作合用同一个 `enum_pages_left` 池(per-RUN 共享,`ask_retrieval_policy`
+#: 的文档字符串)。
+_QUOTA_FIELD_BY_ACTION: dict[str, str] = {
+    "search_elements": "element_searches_left",
+    "search_chunks": "chunk_searches_left",
+    "exact_lookup": "exact_lookups_left",
+    "enumerate_elements": "enum_pages_left",
+    "enumerate_kg_objects": "enum_pages_left",
+}
 
-    与 `test_reasoning_retrieval._full_house_facts` 同构造(全部通道开着、预算
-    远超剧本长度),只按 `corpus_cell` 切一个变量。(c) 那条用例已经钉死剧本长度
-    ≤ `min(standard, deep).max_reasoning_steps == 8`,所以任何 `*_left` 给到
-    两位数就不可能因为预算耗尽把一次合法请求判成不可用——这里刻意**不**建模
-    `settings_overrides`(比如 `tool_exhausted` 例的元素额度=1):那是 run() 的
-    执行期状态机要管的事,这一节只回答"标签对了、剧本每一步是否也解析成模型
-    该看到的那个动作"。
+#: 生产默认额度,与 `test_reasoning_retrieval._full_house_facts` 同一组数:
+#: `Settings` 的 `reasoning_max_element_searches` / `reasoning_max_chunk_searches`
+#: / `reasoning_max_exact_lookups`,加 `ask_retrieval_limits("standard")` 的
+#: `enum_pages_per_run`。只列剧本会真的碰到的三个检索上限 + 一个枚举页池——
+#: ppr / follow_chain / consult / outline / enum_rows / enum_payload 这份
+#: case 集里没有一步用得到它们把着的动作(`expand_graph` / `follow_chain` /
+#: `ppr_retrieve` 明令不进剧本,`consult_memory` / `update_outline` 不是
+#: reflect 的检索动作),给多大都不改变任何一例的判定,仍按满额度填。
+_PRODUCTION_CAPABILITY_QUOTAS: dict[str, int] = {
+    "element_searches_left": 5,
+    "chunk_searches_left": 3,
+    "exact_lookups_left": 3,
+    "enum_pages_left": 4,
+}
+
+
+def _capability_facts_before_turn(
+    case: dict, turn_index: int,
+) -> "ReflectCapabilityFacts":
+    """第 `turn_index` 轮(1-based)决策前的能力事实。
+
+    生产默认额度按 `case["script"][:turn_index - 1]` 里同类动作出现的**次数**
+    跨轮累加消耗——与生产 `_reflect_capabilities` 同一条减法
+    (`max(0, 上限 - 已用)`),不是满额度不扣减。`settings_overrides` 里的
+    `reasoning_max_element_searches` / `reasoning_max_chunk_searches` 覆盖对应
+    的**上限**而不是剩余量,与 `Settings` 的覆盖语义一致。
+
+    按语料格(`corpus_cell == "B_kg"`)切 `kg_in_scope`,其余通道全部接通、
+    `has_candidates=True`,让每一步唯一可能不可用的原因就是配额耗尽——这一节
+    只回答"标签对了、剧本每一步是否也解析成模型该看到的那个动作,以及会不会
+    在本 run 没钉住的那几个 per-run 池子里撞上配额上限"。
     """
     from app.services.collection_catalog import (
         ENUMERABLE_ELEMENT_KINDS, ENUMERABLE_KG_OBJECT_TYPES,
     )
     from app.services.reasoning_actions import ReflectCapabilityFacts
 
+    overrides = case.get("settings_overrides") or {}
+    quotas = dict(_PRODUCTION_CAPABILITY_QUOTAS)
+    if "reasoning_max_element_searches" in overrides:
+        quotas["element_searches_left"] = overrides[
+            "reasoning_max_element_searches"]
+    if "reasoning_max_chunk_searches" in overrides:
+        quotas["chunk_searches_left"] = overrides[
+            "reasoning_max_chunk_searches"]
+
+    used = {field: 0 for field in quotas}
+    for step in case["script"][: turn_index - 1]:
+        field = _QUOTA_FIELD_BY_ACTION.get(step["next_action"])
+        if field in used:
+            used[field] += 1
+
     return ReflectCapabilityFacts(
-        kg_in_scope=kg_in_scope, scope_restricted=False, has_candidates=True,
+        kg_in_scope=case["corpus_cell"] == "B_kg",
+        scope_restricted=False, has_candidates=True,
         chunk_search_active=True, exact_lookup_active=True, ppr_active=True,
         community_active=True, enumeration_active=True,
         consult_memory_active=True, outline_active=True,
-        element_searches_left=20, chunk_searches_left=20,
-        exact_lookups_left=20, ppr_left=20, follow_chain_left=20,
-        consult_left=20, outline_updates_left=20, enum_rows_left=2_000,
-        enum_pages_left=40, enum_payload_left=2_560_000,
+        element_searches_left=max(
+            0,
+            quotas["element_searches_left"] - used["element_searches_left"]),
+        chunk_searches_left=max(
+            0, quotas["chunk_searches_left"] - used["chunk_searches_left"]),
+        exact_lookups_left=max(
+            0, quotas["exact_lookups_left"] - used["exact_lookups_left"]),
+        ppr_left=3, follow_chain_left=3, consult_left=2,
+        outline_updates_left=6, enum_rows_left=200,
+        enum_pages_left=max(
+            0, quotas["enum_pages_left"] - used["enum_pages_left"]),
+        enum_payload_left=256_000,
         element_kinds=tuple(ENUMERABLE_ELEMENT_KINDS),
         object_types=tuple(ENUMERABLE_KG_OBJECT_TYPES),
         last_turn=False, outline_repair_available=False,
         terminal_overflow_repair=False,
     )
+
+
+#: 期望的「本轮不可用」轮号集合——按生产默认额度 + `settings_overrides` 跨轮
+#: 消耗算出来的**结果**,不是随手挑的输入。10 例全在额度内(空集,最紧的是
+#: `lc-b-cost-survey` 3/4 枚举页与 `zh-a-latent-cot` 2/3 精确查找);两个
+#: `tool_exhausted` 例的元素检索额度被 `settings_overrides` 收到 1,剧本第二次
+#: 硬选 `search_elements` 时(以及此后每一次)额度已耗尽——原因固定是
+#: `unavailable_action:element_search_cap`(`app.services.reasoning_actions`
+#: 的 `REASON_ELEMENT_CAP`)。
+EXPECTED_UNAVAILABLE_TURNS: dict[str, frozenset] = {
+    "sf-a-gsm8k": frozenset(),
+    "sf-b-jamba-ratio": frozenset(),
+    "cc-a-macro-arch": frozenset(),
+    "cc-b-kv-criteria": frozenset(),
+    "gr-b-mla-vs-kivi": frozenset(),
+    "ng-a-recurrent-depth": frozenset(),
+    "ro-b-source-roster": frozenset(),
+    "lc-b-cost-survey": frozenset(),
+    "zh-a-latent-cot": frozenset(),
+    "rp-b-duplicate-sources": frozenset(),
+    "te-a-benchmarks": frozenset({2, 4}),
+    "te-b-kivi-bits": frozenset({2, 5}),
+}
+
+
+def test_the_expected_unavailable_turns_cover_exactly_the_twelve_cases():
+    """`EXPECTED_UNAVAILABLE_TURNS` 与 case 集逐把 key 对上,不多不少。
+
+    这条只钉字典本身的覆盖面——各轮号是否真的解析成 `unavailable_action:*`
+    由 `test_each_case_script_step_really_parses_into_its_declared_action`
+    逐轮核实,这里不重复。
+    """
+    assert set(EXPECTED_UNAVAILABLE_TURNS) == set(_cases_by_key())
 
 
 @pytest.mark.parametrize("case_key", sorted(_cases_by_key()))
@@ -621,14 +723,17 @@ def test_each_case_script_step_only_uses_the_keys_parse_reflect_v2_reads(
 def test_each_case_script_step_really_parses_into_its_declared_action(
     case_key: str,
 ):
-    """剧本每一轮真的过 `parse_reflect_v2`,解出的动作与那一轮声明的一致。
+    """剧本每一轮真的过 `parse_reflect_v2`,解出的动作与那一轮声明的一致——
+    除了 `EXPECTED_UNAVAILABLE_TURNS` 点名的那几轮,那几轮**必须**解析成
+    `unavailable_action:element_search_cap`。
 
     此前的用例只校 `next_action ∈ 闭集`、`sufficient is False`、`arguments`
     是 dict,止步于键的类型——一个 case 声明 `next_action: "search_elements"`
     却因为参数本身不合法而被解析成 `__reflect_invalid__` 伪动作,那些用例照样
-    绿。这条按语料格(kg / 无图)构造满额度 `ReflectCapabilityFacts`,把每一步
-    的原始字典喂给真 `parse_reflect_v2`,断言解出来的 `next_action` 就是那一步
-    声明的那个、且不是 `__reflect_invalid__`。
+    绿。这条按语料格(kg / 无图)+ `settings_overrides` + 剧本前序动作的真实
+    累计消耗逐轮构造 `ReflectCapabilityFacts`(`_capability_facts_before_turn`,
+    生产默认额度,不是充到吃不穿的满额度),把每一步的原始字典喂给真
+    `parse_reflect_v2`。
 
     变异(均已手工验证按预期变红,未落盘):
     - `sf-a-gsm8k` 第 3 轮的 `arguments.prefer` 从 `"balanced"` 改成
@@ -639,7 +744,10 @@ def test_each_case_script_step_really_parses_into_its_declared_action(
       改成 `"method"`(不在 `ENUMERABLE_KG_OBJECT_TYPES` 白名单里)⇒
       `invalid_argument:object_type`;
     - `ro-b-source-roster` 第一步的 `arguments.collection` 从 `"sources"`
-      改成 `"kg_objects"` ⇒ `invalid_argument:collection`。
+      改成 `"kg_objects"` ⇒ `invalid_argument:collection`;
+    - `sf-a-gsm8k` 追加两轮 `search_chunks`(第 4 次,默认上限 3)⇒ 第 4 次
+      那一轮 `unavailable_action:chunk_search_cap`,不是先前满额度写法漏掉的
+      那种"标签对了、通道其实已经耗尽"(评审 P2-1)。
     """
     from app.services.reasoning_actions import build_reflect_capabilities
     from app.services.reasoning_retrieval import (
@@ -647,11 +755,18 @@ def test_each_case_script_step_really_parses_into_its_declared_action(
     )
 
     case = _cases_by_key()[case_key]
-    facts = _full_house_capability_facts(
-        kg_in_scope=case["corpus_cell"] == "B_kg")
-    caps = build_reflect_capabilities(facts)
+    expected_unavailable = EXPECTED_UNAVAILABLE_TURNS[case_key]
     for index, step in enumerate(case["script"], 1):
+        facts = _capability_facts_before_turn(case, index)
+        caps = build_reflect_capabilities(facts)
         decision = parse_reflect_v2(step, caps)
+        if index in expected_unavailable:
+            assert decision.next_action == REFLECT_INVALID_ACTION, (
+                case_key, index, decision.invalid_reason)
+            assert decision.invalid_reason == (
+                "unavailable_action:element_search_cap"), (
+                case_key, index, decision.invalid_reason)
+            continue
         assert decision.next_action != REFLECT_INVALID_ACTION, (
             case_key, index, decision.invalid_reason)
         assert decision.next_action == step["next_action"], (case_key, index)
@@ -691,3 +806,57 @@ def test_each_case_assessment_only_references_its_own_aspects(case_key: str):
                 if statuses is not None:
                     assert row.get("status") in statuses, (
                         case_key, index, group, row)
+
+
+# --- (f) 必答主题问句不会被下游折回 objective ---------------------------------
+
+
+@pytest.mark.parametrize("case_key", sorted(_cases_by_key()))
+def test_each_mandatory_topic_question_avoids_the_unresolved_reference_closed_set(
+    case_key: str,
+):
+    """`mandatory_topics[].question` 一个都不许命中
+    `query_intent._UNRESOLVED_REFERENCE` / `_GENERIC_REQUEST`。
+
+    两个闭集直接从 `app.services.query_intent` import,不在这里重写一份——那
+    才是 `confirmed_research_question` 真正会跑的判据。命中任何一个,那一条
+    主题问句会被整条替换成 `objective`/`resolved_question`(下一条用例核实这
+    件事的可观测后果),多个必答方面从此在渲染出的「必须覆盖的问题」里塌成
+    重复的同一行,而 E2 要比较的正是 A/B 两格这段稳定前缀的字节数(评审
+    P2-2)。
+
+    变异:把任意一条问句改回含「这个」/「那个」等闭集词 ⇒ 这条红。
+    """
+    from app.services.query_intent import _GENERIC_REQUEST, _UNRESOLVED_REFERENCE
+
+    case = _cases_by_key()[case_key]
+    for topic in case["intent_contract"]["mandatory_topics"]:
+        question = topic["question"]
+        assert not _GENERIC_REQUEST.fullmatch(question), (case_key, question)
+        assert not _UNRESOLVED_REFERENCE.search(question), (case_key, question)
+
+
+@pytest.mark.parametrize("case_key", sorted(_cases_by_key()))
+def test_each_case_confirmed_research_question_keeps_every_mandatory_topic(
+    case_key: str,
+):
+    """真调一次 `confirmed_research_question`:渲染出的必答行数必须等于
+    `mandatory_topics` 的条数。
+
+    上一条用例只核了输入(问句不落在闭集正则里);这一条核实那件事真正要保证
+    的可观测后果——`confirmed_research_question` 一旦把某条主题问句判成
+    "指代不明"或"泛泛请求",就会把它整条换成 `base`(objective 或
+    resolved_question)再去重,「必须覆盖的问题」那一段就会比 `mandatory_topics`
+    短。三个必答方面塌成一行、且与首行逐字重复,正是评审 P2-2 在
+    `cc-a-macro-arch` 上实测到的失败场景。
+    """
+    from app.services.query_intent import confirmed_research_question
+
+    case = _cases_by_key()[case_key]
+    contract = case["intent_contract"]
+    combined = confirmed_research_question(contract, case["question"])
+    topic_lines = [
+        line for line in combined.splitlines() if line.startswith("- ")
+    ]
+    assert len(topic_lines) == len(contract["mandatory_topics"]), (
+        case_key, combined)
