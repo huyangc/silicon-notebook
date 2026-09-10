@@ -2806,9 +2806,13 @@ def test_a_sparse_pair_side_reports_its_observation_count(tmp_path, capsys):
     # 均值一样重,n 不一样:三条观测 vs 一条观测。
     assert pair["baseline"]["n_measured"]["run_wall_ms"] == 3
     assert pair["variant"]["n_measured"]["run_wall_ms"] == 1
-    # 稀疏五项各有自己的 n,不共用一个。
-    assert set(pair["variant"]["n_measured"]) == set(
-        analyze.SPARSE_PAIR_SIDE_METRICS)
+    # 稀疏那几项各有自己的 n,不共用一个。清单写**字面量**而不是回读
+    # `SPARSE_PAIR_SIDE_METRICS`:拿被守的同一个常量当期望值,从那个常量里砍掉一
+    # 项时报告与期望一起变小,这条断言照样绿(质量评审 P2-3 那类自指断言)。
+    assert set(pair["variant"]["n_measured"]) == {
+        "run_wall_ms", "model_calls_real", "prefix_bytes_median",
+        "prefix_turns", "context_rebuilds", "assessment_rows_total",
+    }
     assert pair["variant"]["n_measured"]["prefix_bytes_median"] == 3
     # markdown 也带上 n,而不是只把它留在 JSON 里。
     rendered = md.read_text("utf-8")
@@ -3043,6 +3047,19 @@ GOLDEN_INPUT = GOLDEN_DIR / "reflect_t0_analysis_golden.jsonl"
 GOLDEN_MD = GOLDEN_DIR / "reflect_t0_analysis_golden.md"
 GOLDEN_JSON = GOLDEN_DIR / "reflect_t0_analysis_golden.json"
 
+#: `--pair-rows` 那条路径**自己的** golden(质量评审 P3-4)。
+#:
+#: 不与默认 golden 共用一份输入:默认 golden 的每一个数都是整数,而这条路径上有三
+#: 处独立的舍入(格内中位数 3 位、`ratio` 4 位、rollup 的 `ratio_p50` 4 位),整数
+#: 输入下把 `round(…, 3)` 改成 `round(…, 1)` 一个字节都不动。所以这份输入刻意带
+#: **非整**的墙钟(3000.25 / 5000.125 / 400.125)与**非整比值**(1234/3000.25 ⇒
+#: 0.4113、6250.5/5000.125 ⇒ 1.2501),再加一条 `cancelled` 让删失那一列非零。
+#:
+#: 默认 golden 那份输入与产物一个字节都不动——重签它是另一件要单独说明的事。
+PAIR_ROWS_GOLDEN_INPUT = GOLDEN_DIR / "reflect_t0_pair_rows_golden.jsonl"
+PAIR_ROWS_GOLDEN_MD = GOLDEN_DIR / "reflect_t0_pair_rows_golden.md"
+PAIR_ROWS_GOLDEN_JSON = GOLDEN_DIR / "reflect_t0_pair_rows_golden.json"
+
 
 def _ab_row(**overrides) -> dict:
     """一行 `ab-runs.jsonl` 形状:T0 测量行 + A/B 专属键(§7.1)。
@@ -3184,6 +3201,48 @@ def test_the_default_report_matches_the_golden_fixture(tmp_path, capsys):
     capsys.readouterr()
     assert md.read_bytes() == GOLDEN_MD.read_bytes()
     assert js.read_bytes() == GOLDEN_JSON.read_bytes()
+
+
+def test_the_pair_rows_output_matches_the_golden_fixture(tmp_path, capsys):
+    """`--pair-rows --min-samples 1` 的 md 与 json 与它**自己**那份 golden 逐字节
+    相同——包括三处独立舍入的每一位(质量评审 P3-4)。
+
+    默认 golden 盯不住这条路径:它的输入全是整数,而这条路径上的三处舍入
+    (`_pair_row_side` 的中位数 3 位、`_paired_delta` 的 `ratio` 4 位、
+    `_rollup_metric` 的 `ratio_p50`/`ratio_p95` 4 位)在整数输入上把位数改小也不动
+    一个字节。§10.2-4 那道「配对中位收益差不足 5% 则选 P」的采用门读的正是
+    `ratio`:4 位降到 1 位就把 1.05 与 1.049 抹平了。
+
+    产物变了而且是**有意**变的时候,重新签一次:
+
+        python3 scripts/analyze_reasoning_trace.py \\
+            backend/tests/fixtures/reflect_t0_pair_rows_golden.jsonl \\
+            --pair-rows --min-samples 1 \\
+            --out-md backend/tests/fixtures/reflect_t0_pair_rows_golden.md \\
+            --out-json backend/tests/fixtures/reflect_t0_pair_rows_golden.json
+
+    ——重签是一个要在 PR 里说明理由的动作,不是让这条用例变绿的手段。
+
+    变异:`_paired_delta` 的 `ratio` 由 `round(…, 4)` 改 1 位、`_pair_row_side` 的
+    中位数由 3 位改 1 位、`_rollup_metric` 的 `ratio_*` 由 4 位改 1 位 ⇒ 三组各自
+    当场红。
+    """
+    md, js = tmp_path / "pair_rows.md", tmp_path / "pair_rows.json"
+    assert analyze.main([
+        str(PAIR_ROWS_GOLDEN_INPUT), "--pair-rows", "--min-samples", "1",
+        "--out-md", str(md), "--out-json", str(js),
+    ]) == 0
+    capsys.readouterr()
+    assert md.read_bytes() == PAIR_ROWS_GOLDEN_MD.read_bytes()
+    assert js.read_bytes() == PAIR_ROWS_GOLDEN_JSON.read_bytes()
+    # 三处舍入真的在这份产物里落到了非整位上(否则上面那两句逐字节比对对舍入
+    # 位数一无所知)。
+    payload = json.loads(js.read_text("utf-8"))["optimization_pair_rows"]
+    cells = {cell["question_key"]: cell for cell in payload["cells"]}
+    assert cells["B-q01"]["baseline"]["run_wall_ms"] == 3000.25
+    assert cells["B-q01"]["metrics"]["run_wall_ms"]["ratio"] == 0.4113
+    assert cells["B-q02"]["metrics"]["run_wall_ms"]["ratio"] == 1.2501
+    assert payload["rollup"][0]["metrics"]["run_wall_ms"]["ratio_p50"] == 0.4113
 
 
 def test_baseline_arm_pairs_the_delta_and_lean_arms(tmp_path, capsys):
@@ -3485,12 +3544,21 @@ def test_pair_row_cells_align_with_their_header(tmp_path, capsys):
 
     两个指标各配四格互不相同的值,再按**表头文本**取单元格逐一核对。
 
+    `n_success(基线/变体)` 与那四格摆在同一行:一格「6 条 run 全 `done`、只有 1 条
+    量到了 `run_wall_ms`」印出来是 `1000.0(n=1)`,而删失/失败/未完成三列全是 `0`
+    ——少了 `n_success`,它与一格真的只有 1 条 run 的格长得一模一样(质量评审
+    P3-5)。基线那一侧正是这个形状:6 条成功、1 条量到。
+
     变异:把 `_render_pair_rows` 里拼这四格的元组从
     `(基线, 变体, Δ, ratio)` 调成 `(基线, 变体, ratio, Δ)`(表头不动,单纯调
-    序)⇒ 这条红。
+    序)⇒ 这条红;把逐格表的计数列改回 `ROLLUP_SIDE_COUNTS`(丢掉 `n_success`)
+    ⇒ 这条红。
     """
     source = _write_rows(tmp_path / "rows.jsonl", [
         _pair_row_fixture("B-q01", "off", run_wall_ms=1000, total_ms=100),
+        # 另外 5 条也跑成了,只是 rig 没给它们写测量列:`n=1` 底下是 6 条 run。
+        *[_pair_row_fixture("B-q01", "off", run_wall_ms=None, total_ms=None)
+          for _ in range(5)],
         _pair_row_fixture("B-q01", "prefix_delta_lean", run_wall_ms=3000,
                           total_ms=700),
     ])
@@ -3498,6 +3566,9 @@ def test_pair_row_cells_align_with_their_header(tmp_path, capsys):
     analyze.main([str(source), "--pair-rows", "--out-md", str(md)])
     capsys.readouterr()
     cells = _pair_row_cells(md)
+    # 「6 条里只有 1 条进了中位数」在 md 上看得见,而不是只留在 JSON 里。
+    assert cells["n_success(基线/变体)"] == "6/1"
+    assert cells["n_censored(基线/变体)"] == "0/0"
     assert cells["off run_wall_ms P50(n)"] == "1000.0(n=1)"
     assert cells["variant run_wall_ms P50(n)"] == "3000.0(n=1)"
     assert cells["run_wall_ms Δms"] == "2000.0"
@@ -3635,6 +3706,180 @@ def test_pair_rows_say_so_when_nothing_pairs(tmp_path, capsys):
     assert [line for line in section.splitlines() if line.startswith("|")] == []
 
 
+def test_unpaired_rows_never_enter_the_paired_delta(tmp_path, capsys):
+    """写侧标了 `paired=false` 的行**不进配对差值表**,而且被挡掉几条要有一列具名
+    的数(质量评审 P1;A/B 设计 §7.1/§8.1 与 `reflect_ab.mark_paired` 的原话)。
+
+    失败场景是实测到的:老批两臂各跑 repeat 1–2(`mark_paired` 落 `True`),之后
+    用单臂 `--arms` 补跑 L 臂 repeat 3–5(落 `False`,而且新构建快 40×),两份
+    `ab-runs.jsonl` 拼起来读。读侧要是不看 `paired`,基线侧 2 个观测就会去对变体侧
+    5 个:`ratio` 从 1.0 变成 0.025 —— 计划 §5 风险 6 说的「一份只有时间列漂亮的
+    报告最容易被读成通过」,0.025 正是那种漂亮。
+
+    `paired` 是 `None`(`mark_paired` 还没跑过)时仍然入格:那种批里每一行都是
+    `None`,把它们也排除等于整张表凭空空掉。
+
+    变异:把 `_optimization_cells` 里那条 `row.get(PAIRED_KEY) is False` 的入格资格
+    去掉 ⇒ 这条红(`ratio` 变 0.025、`Δ` 变 -3900、`n_unpaired` 全 0)。
+    """
+    source = _write_rows(tmp_path / "rows.jsonl", [
+        *[_ab_row(arm="v2:off", optimization="off", repeat=repeat,
+                  paired=True, run_wall_ms=4000) for repeat in (1, 2)],
+        *[_ab_row(arm="v2:prefix_delta_lean", optimization="prefix_delta_lean",
+                  repeat=repeat, paired=True, run_wall_ms=4000)
+          for repeat in (1, 2)],
+        # 单臂补跑:同题同格同档,但那一轮只有 L 一侧在场。
+        *[_ab_row(arm="v2:prefix_delta_lean", optimization="prefix_delta_lean",
+                  repeat=repeat, paired=False, run_wall_ms=100)
+          for repeat in (3, 4, 5)],
+    ])
+    js, md = tmp_path / "t0.json", tmp_path / "t0.md"
+    assert analyze.main([str(source), "--key-set", "ab", "--pair-rows",
+                         "--out-json", str(js), "--out-md", str(md)]) == 0
+    capsys.readouterr()
+    payload = json.loads(js.read_text("utf-8"))["optimization_pair_rows"]
+    assert len(payload["cells"]) == 1
+    cell = payload["cells"][0]
+    # 两侧各留下 repeat 1–2 那两条:同一个中位数,所以这一对的结论是「没差别」。
+    assert cell["baseline"]["n_runs"] == 2
+    assert cell["variant"]["n_runs"] == 2
+    assert cell["baseline"]["run_wall_ms"] == 4000.0
+    assert cell["variant"]["run_wall_ms"] == 4000.0
+    assert cell["metrics"]["run_wall_ms"] == {"delta_ms": 0.0, "ratio": 1.0}
+    # 排除不是静默的:被挡掉几条,两侧各报一个具名的数。
+    assert cell["baseline"]["n_unpaired"] == 0
+    assert cell["variant"]["n_unpaired"] == 3
+    # `n_unpaired` 不参与那四格的可加性——那些行压根没进 `n_runs`。
+    assert (cell["variant"]["n_success"] + cell["variant"]["n_censored"]
+            + cell["variant"]["n_failed"] + cell["variant"]["n_unfinished"]
+            == cell["variant"]["n_runs"] == 2)
+    rollup = payload["rollup"][0]
+    assert rollup["n_unpaired_baseline"] == 0
+    assert rollup["n_unpaired_variant"] == 3
+    # 不平衡在最容易被引用的那份输出上也看得见。
+    assert _pair_row_cells(md)["n_unpaired(基线/变体)"] == "0/3"
+    # 沿 `optimization` 的另一张表共用同一份分格,所以它也只看得见配对的那两条
+    # (它在默认参数下就出,所以不加 `n_unpaired` 那一列——见
+    # `optimization_pair_table` 的口径说明)。
+    pairs = json.loads(js.read_text("utf-8"))["optimization_pairs"]
+    assert [pair["baseline"]["n_runs"] for pair in pairs] == [2]
+    assert [pair["variant"]["n_runs"] for pair in pairs] == [2]
+
+
+def test_a_paired_none_batch_still_pairs(tmp_path, capsys):
+    """`paired` 全是 `None`(`mark_paired` 还没跑过)的一批照旧配得出来。
+
+    这是上一条那道准入的**边界**:判据是 `is False`,不是 `not row.get(...)`。
+    后者会让一批还没回填过 `paired` 的行整张表凭空空掉,而那比一个偏斜的差值更难
+    被发现(报告只印一句「没有成对样本」)。
+
+    变异:把入格资格写成 `if not row.get(PAIRED_KEY)` ⇒ 这条红。
+    """
+    source = _write_rows(tmp_path / "rows.jsonl", [
+        _ab_row(arm="v2:off", optimization="off", paired=None,
+                run_wall_ms=4000),
+        _ab_row(arm="v2:prefix_delta_lean", optimization="prefix_delta_lean",
+                paired=None, run_wall_ms=2000),
+    ])
+    js = tmp_path / "t0.json"
+    assert analyze.main([str(source), "--key-set", "ab", "--pair-rows",
+                         "--out-json", str(js)]) == 0
+    capsys.readouterr()
+    payload = json.loads(js.read_text("utf-8"))["optimization_pair_rows"]
+    assert len(payload["cells"]) == 1
+    assert payload["cells"][0]["metrics"]["run_wall_ms"] == {
+        "delta_ms": -2000.0, "ratio": 0.5}
+    assert payload["cells"][0]["variant"]["n_unpaired"] == 0
+
+
+def test_pair_rows_follow_the_declared_baseline_arm(tmp_path, capsys):
+    """`--pair-rows --baseline-arm prefix_delta` 在只有 D/L 两臂的一批上真的按 D
+    配对,而且节标题与每一个列名都说出这份报告用的基线是谁(质量评审 P2-2)。
+
+    这是 `--baseline-arm` 存在的理由与 §10.1 的主指标撞在一起的那一格:
+    `OPTIMIZATION_BASELINE` 的口径说明写着,加这个开关就是为了「只有 D 与 L 两臂时
+    §10.2-4 那条采用门要读 D↔L 这一对」,而 §10.1 说逐题配对差值表是主指标。
+
+    变异:`optimization_pair_rows` 忽略 `baseline` 形参、硬编码
+    `OPTIMIZATION_BASELINE` ⇒ 前半段红(`cells` 静默空掉,采用门读不出任何数);
+    `_render_pair_rows` 把节标题与列名硬编码成 `off` ⇒ 后半段红(一份 D 基线的
+    报告顶着 `off` 的表头)。
+    """
+    source = _write_rows(tmp_path / "rows.jsonl", [
+        _pair_row_fixture("B-q01", "prefix_delta", run_wall_ms=9000),
+        _pair_row_fixture("B-q01", "prefix_delta_lean", run_wall_ms=7000),
+    ])
+    js, md = tmp_path / "t0.json", tmp_path / "t0.md"
+    assert analyze.main([
+        str(source), "--pair-rows", "--baseline-arm", "prefix_delta",
+        "--min-samples", "1", "--out-json", str(js), "--out-md", str(md),
+    ]) == 0
+    capsys.readouterr()
+    payload = json.loads(js.read_text("utf-8"))["optimization_pair_rows"]
+    assert len(payload["cells"]) == 1
+    cell = payload["cells"][0]
+    assert cell["variant_arm"] == "prefix_delta_lean"
+    # 基线侧自证身份:JSON 里没有「我用的基线是谁」这个字段。
+    assert cell["baseline"]["optimization"] == {"prefix_delta": 1}
+    assert cell["variant"]["optimization"] == {"prefix_delta_lean": 1}
+    assert cell["metrics"]["run_wall_ms"] == {
+        "delta_ms": -2000.0, "ratio": 0.7778}
+    assert payload["rollup"][0]["metrics"]["run_wall_ms"]["n_pairs"] == 1
+
+    rendered = md.read_text("utf-8")
+    assert "## 逐题配对差值(基线 `prefix_delta`)" in rendered
+    headers = set(_pair_row_cells(md))
+    assert "prefix_delta run_wall_ms P50(n)" in headers
+    assert "off run_wall_ms P50(n)" not in headers
+    # 默认基线在这一批上一对都配不出来——这正是这个开关存在的理由。
+    assert analyze.main([str(source), "--pair-rows",
+                         "--out-json", str(js)]) == 0
+    capsys.readouterr()
+    assert json.loads(
+        js.read_text("utf-8"))["optimization_pair_rows"]["cells"] == []
+
+
+def test_a_false_boolean_dimension_never_pairs_with_a_missing_one(
+    tmp_path, capsys,
+):
+    """布尔分格维度上的 `False` 不是 unknown:`--no-intent` 的 run
+    (`has_intent_contract=False`)与压根没记这一列的 run 不配对(质量评审 P3-6)。
+
+    `PAIR_DIMENSIONS` 的原话是它们不能配对——`--no-intent` 的 run 没有冻结契约,
+    首轮查询规划与 v2 的方面账都不同。`str(row.get(dim) or UNKNOWN)` 把 `False` 与
+    `None` 折进同一格,于是它们配出一格 `has_intent_contract='unknown'` 的对照。
+
+    变异:把 `_optimization_cells`(或 `pair_table`)的格键改回
+    `str(row.get(dim) or UNKNOWN)` ⇒ 这条红。
+    """
+    source = _write_rows(tmp_path / "rows.jsonl", [
+        _pair_row_fixture("B-q01", "off", has_intent_contract=False,
+                          run_wall_ms=1000),
+        _pair_row_fixture("B-q01", "prefix_delta_lean", run_wall_ms=2000),
+    ])
+    js = tmp_path / "t0.json"
+    assert analyze.main([str(source), "--pair-rows",
+                         "--out-json", str(js)]) == 0
+    capsys.readouterr()
+    report = json.loads(js.read_text("utf-8"))
+    assert report["optimization_pair_rows"]["cells"] == []
+    assert report["optimization_pairs"] == []
+
+    # 两侧都是 `False` 时照旧配得出来,而且那一格如实印 `False` 而不是 `unknown`。
+    same = _write_rows(tmp_path / "same.jsonl", [
+        _pair_row_fixture("B-q01", "off", has_intent_contract=False,
+                          run_wall_ms=1000),
+        _pair_row_fixture("B-q01", "prefix_delta_lean",
+                          has_intent_contract=False, run_wall_ms=2000),
+    ])
+    assert analyze.main([str(same), "--pair-rows",
+                         "--out-json", str(js)]) == 0
+    capsys.readouterr()
+    cells = json.loads(js.read_text("utf-8"))["optimization_pair_rows"]["cells"]
+    assert len(cells) == 1
+    assert cells[0]["has_intent_contract"] == "False"
+
+
 def test_key_set_ab_admits_ab_rows_and_t0_still_refuses_them(tmp_path, capsys):
     """`--key-set ab` 让 `ab-runs.jsonl` 直接喂得进来;`t0`(默认)仍**整批
     拒绝**(计划 M5 缺件 3、Q8:显式选键集是知情声明,不是自动嗅探)。
@@ -3697,7 +3942,15 @@ def test_the_quality_gate_prints_unverified_without_gold_or_review(
     capsys.readouterr()
     evidence = json.loads(js.read_text("utf-8"))["quality_evidence"]
     assert evidence["verdict"] == "unverified"
-    assert set(evidence["observed"]) == set(analyze.QUALITY_EVIDENCE_KEYS)
+    # 这一节读的**九列**写字面量,不回读 `QUALITY_EVIDENCE_KEYS`:拿被守的同一个
+    # 常量当期望值,从它里面砍掉一列时报告与期望一起变小,断言照样绿
+    # (质量评审 P2-3)。
+    assert set(evidence["observed"]) == {
+        "citations_out_of_scope", "anchors_unresolved", "anchors_on_gold",
+        "completeness_claim", "answer_empty",
+        "gold_facts_total", "human_factual_error",
+        "human_completeness_false", "human_citation_bad",
+    }
     assert all(count == 0 for count in evidence["observed"].values())
     rendered = md.read_text("utf-8")
     assert "## 质量门(§10.2-1)" in rendered
@@ -3784,6 +4037,77 @@ def test_the_quality_gate_reports_records_when_gold_or_review_exists(
     assert "由人工盲审下" in rendered
 
 
+@pytest.mark.parametrize("column, value", [
+    ("gold_facts_total", 3),
+    ("human_factual_error", False),
+    ("human_completeness_false", True),
+    ("human_citation_bad", True),
+])
+def test_each_judged_column_alone_counts_as_a_record(
+    tmp_path, capsys, column, value,
+):
+    """判分/人工那半边的**四列各自**足以把 `verdict` 从 `unverified` 翻成
+    `records_present`(质量评审 P2-3)。
+
+    失败场景(已实测):盲审员只填了完整性虚报与引用问题两列
+    (`human_completeness_false` / `human_citation_bad`),gold 与
+    `human_factual_error` 留空。`QUALITY_JUDGED_KEYS` 少了后两列时,报告会对一批
+    **已经有人工记录**的数据印「无 gold / 无盲审记录 ⇒ 未验证」,而 §10.2 那句
+    「未验证 ≠ 通过」会被用来挡掉一份其实有证据的批。
+
+    每一列各喂一次而不是只喂前两列:只喂 gold 与 `human_factual_error` 的话,从
+    `QUALITY_JUDGED_KEYS` 里砍掉后两列一个字节都不动。
+
+    变异:从 `QUALITY_JUDGED_KEYS` 里摘掉任意一列 ⇒ 对应那一格红。
+    """
+    source = _write_rows(tmp_path / "rows.jsonl", [
+        _ab_row(**{column: value}), _ab_row(),
+    ])
+    js, md = tmp_path / "t0.json", tmp_path / "t0.md"
+    assert analyze.main([str(source), "--key-set", "ab", "--out-json", str(js),
+                         "--out-md", str(md)]) == 0
+    capsys.readouterr()
+    evidence = json.loads(js.read_text("utf-8"))["quality_evidence"]
+    assert evidence["verdict"] == "records_present"
+    assert evidence["observed"][column] == 1
+    # 那一列的观测数在 md 上也点了名,而不是只落一句「有记录」。
+    assert f"{column}=1" in md.read_text("utf-8")
+
+
+def test_the_quality_gate_needs_the_columns_in_the_data_not_the_key_set_name(
+    tmp_path, capsys,
+):
+    """质量门那一节按**数据**出,不按键集名出:一批 T0 行喂 `--key-set ab`,这一节
+    压根不该出现(质量评审 P3-7)。
+
+    `AB_PROJECTION_KEYS ⊃ RUN_PROJECTION_KEYS`,所以只看键集名的闸会放行这种输入
+    ——而触发路径不牵强:操作者为了 `--group-by arm` 才选 `ab`,手滑喂了
+    `search-*.jsonl`。`build_report` 的原话是「对一份压根没有质量列的数据集印一句
+    质量结论,本身就是一句假话」,这个分支恰好会那么做。
+
+    判据是**键在不在**,不是值非 None:今天真跑出来的 A/B 行那几列恒 `None`,而
+    那种批正是 `verdict` 要报 `unverified` 的(见上面那条),不能被这道闸挡掉。
+
+    变异:把 `_has_quality_columns` 的第二条(行里真有那几列)去掉 ⇒ 这条红。
+    """
+    t0_rows = _write_rows(tmp_path / "t0.jsonl", [_measured_row(), _row()])
+    js, md = tmp_path / "t0.json", tmp_path / "t0.md"
+    assert analyze.main([str(t0_rows), "--key-set", "ab", "--out-json", str(js),
+                         "--out-md", str(md)]) == 0
+    capsys.readouterr()
+    assert "quality_evidence" not in json.loads(js.read_text("utf-8"))
+    assert "## 质量门" not in md.read_text("utf-8")
+
+    # 同一条闸对真的 A/B 行照旧放行(那几列全 `None` 也算「有这几列」)。
+    ab_rows = _write_rows(tmp_path / "ab.jsonl", [_ab_row()])
+    assert analyze.main([str(ab_rows), "--key-set", "ab", "--out-json", str(js),
+                         "--out-md", str(md)]) == 0
+    capsys.readouterr()
+    assert json.loads(js.read_text("utf-8"))["quality_evidence"][
+        "verdict"] == "unverified"
+    assert "## 质量门(§10.2-1)" in md.read_text("utf-8")
+
+
 def test_no_analysis_name_mentions_a_hit_rate():
     """命名红线:分析侧的常量、报告键与表头一律不出现 `cache_hit` / 命中率 /
     hit rate 形状的名字(前缀复用最终设计 review 调整第 4 条)。
@@ -3800,6 +4124,7 @@ def test_no_analysis_name_mentions_a_hit_rate():
         *analyze.QUALITY_COUNT_KEYS, *analyze.QUALITY_LABEL_KEYS,
         *analyze.QUALITY_JUDGED_KEYS,
         *analyze.ROLLUP_FACETS, *analyze.ROLLUP_SIDE_COUNTS,
+        *analyze.PAIR_ROW_SIDE_COUNTS, analyze.PAIRED_KEY,
         *analyze.PAIR_SIDE_METRICS, *analyze.SPARSE_PAIR_SIDE_METRICS,
         *analyze.NUMERIC_METRICS, *analyze.BOOLEAN_METRICS,
         *analyze.CATEGORICAL_METRICS, *analyze.COUNTER_METRICS,
