@@ -484,7 +484,10 @@ analyze_reasoning_trace.py`)直接给出——这条已知限制已解除(PR-5 T
 `--baseline-arm`(默认仍是 `off`)把基线从硬编码换成参数,
 `--arms v2:prefix_delta,v2:prefix_delta_lean --baseline-arm prefix_delta`
 就能在只有 D/L 两条臂的一批上直接出配对表,不必再把 `off` 也跑进各自的批次
-自己相减。默认参数下 `analyze` 的输出与今天逐字节相同(既有用例全绿即证)。
+自己相减。默认参数下这份报告 dict 的**键集**与接入前逐字节相同(golden 用例
+全绿即证);唯一的默认路径偏离(预存缺陷修复,评审 P3-6):布尔维度的 `False`
+不再折成 `unknown`——只在输入真带 `has_intent_contract=False` 这类行时才可见,
+`pairs`/`optimization_pairs` 会跟着变,golden fixture 未重签。
 另外 `ab-runs.jsonl` 的每一行带 ab 专属键(`paired`、`pair_id` 等),
 `analyze_reasoning_trace.py` 的 `load_rows` **默认**仍整批拒绝它们——这条既有
 纪律(T-PS4 起)不变,要吃 A/B 键就显式传 `--key-set ab`(见下)。
@@ -499,16 +502,23 @@ analyze_reasoning_trace.py`)直接给出——这条已知限制已解除(PR-5 T
 **manifest**:收尾写 `<out-dir>/manifest.json`(最新,覆盖)+
 `<out-dir>/manifests.jsonl`(历史,追加)——三条实验通道(E1/E2/E3)共用同一
 处写点与同一套 **18 键**闭集(`backend/app/eval/reflect_manifest.py` 的
-`build_manifest`/`MANIFEST_KEYS`)。`ab` 这条通道必填 `code_sha`
-(`git rev-parse HEAD`,工作树不干净时带 `-dirty` 后缀)、`arms`、
-`optimization_by_arm`、`common_baseline`、`corpus_signature_by_cell`、
-`intent_contract_digest_by_question`、`model_contract`、`arm_order_seed`
-(本期 `ab` 的臂序按 run 无种子,恒 `null`,但键本身必须在场)、`order`、
-`matrix`(额外子键 `planned_runs` = 这批**计划**的 run 数;`questions`/
-`efforts`/`arms`/`repeats` 四个维度基数)、`budgets`(`reasoning_timeout_seconds`/
+`build_manifest`/`MANIFEST_KEYS`)。`ab`(E3)这条通道的**必填**键 = 三条通道
+共同必填(`REQUIRED_KEYS_ALL_CHANNELS`:`code_sha`——`git rev-parse HEAD`,
+工作树不干净时带 `-dirty` 后缀,`git status` 本身失败时带 `-dirty_unknown`
+——、`started_at`、`finished_at`、`stopped_by_budget`,如实写,预算没触发就是
+`false`)并上 `REQUIRED_KEYS_BY_CHANNEL["e3"]`(`intent_contract_digest_by_question`、
+`arm_order_seed`——本期 `ab` 的臂序按 run 无种子,恒 `null`,但键本身必须
+在场——、`matrix`、`corpus_signature_by_cell`);`channel` 单独校验,不在这两张
+表里但同样必须在场。`matrix` 必填子键是**五个**维度基数
+(`REQUIRED_MATRIX_KEYS_BY_CHANNEL["e3"]`):`questions`/`cells`/`efforts`/
+`arms`/`repeats`——**`cells` 不是乘数**,各语料格的题集不相交,总 run 数 =
+`questions × efforts × arms × repeats`,`cells` 只记「这批横跨几个格」;另有
+额外子键 `planned_runs` 直接给出这批**计划**的 run 数上界,不必自己相乘对账。
+`ab` 本 PR 也写但**非必填**的键:`arms`、`optimization_by_arm`、
+`common_baseline`、`model_contract`、`budgets`(`reasoning_timeout_seconds`/
 `reasoning_attempt_budget`/`max_wall_minutes`/`batch_deadline_seconds` 四个
-子键)、`started_at`/`finished_at`/`stopped_by_budget`(如实写,预算没触发就是
-`false`)。值只许是短码字符串、数值、`bool`、`null`,或以短码为键、值同样合法
+子键)——E3 本期不写 `order`/`seed`/`case_set_digest`/`sample_digest`。值只许
+是短码字符串、数值、`bool`、`null`,或以短码为键、值同样合法
 的字典——**不含**题面原文、答案正文、URL、`postgresql://` 连接串、生产凭据,
 一处污染(哪怕落在字典**键**上)都会被隐私断言当场拒绝。
 
@@ -714,6 +724,15 @@ TraceStep(含 `summary` 人话摘要)与 termination DTO 的逐字落盘,**含�
 任务上的两臂标记差异,结论词面因此永远限定在「有 / 无可辨认 / 不确定的时间
 收益」三格,不产出任何比率型结论。
 
+**`verdict` 判据(实现自定,spec 沉默——design §9.1 与计划 T-EX3 都只给了
+「有/无/不确定」三格词面,没给具体阈值)**:① 可配对的区组数(同一
+`(tier, block_index)` 里两臂都有观测)< 2 ⇒ `undetermined`——连一次跨区组的
+一致性都算不出来;② 否则若区组间中位差的**符号**一致率 ≥ 0.75 且
+`disturbed` 中位墙钟比 `stable` 慢 ⇒ `time_benefit`,方向不一致或
+`disturbed` 不慢 ⇒ `no_discernible_benefit`;③ 过半非预热行不是 `"ok"`
+(失败与本地缓存出口都不算数)⇒ 不看上面两条,直接 `undetermined`——样本已
+经被污染到不足以支撑任何结论。
+
 ```bash
 python scripts/reflect_shadow_rig.py --dry-run --seed 1 prefix-probe
 python scripts/reflect_shadow_rig.py --dry-run --seed 1 --smoke prefix-probe
@@ -732,7 +751,7 @@ python scripts/reflect_shadow_rig.py --dry-run --seed 1 --smoke prefix-probe
 **规模**:默认 96 次全量(3 档 × 4 区组 × 2 臂 × 4 次),`--smoke` 走 48 次
 冒烟(区组数砍半)——**可先冒烟,但不凭它直接定论**(design §9.1 / U4)。
 `--seed` **必填**(缺它退 2:`ERROR: prefix-probe 需要 --seed`)——区组内的
-臂序平衡随机与批次可复现都靠它(design M4)。
+臂序平衡随机与批次可复现都靠它(计划 §1 M4)。
 
 **预热单列**:整批开头一次连接预热,正文与标记均**与主批不同**,单列
 `is_warmup=True` 行,不进任何统计(design §9.1「预热成本单列」)。
@@ -741,7 +760,7 @@ python scripts/reflect_shadow_rig.py --dry-run --seed 1 --smoke prefix-probe
 上界,乘数是重试预算,静默 fallback 另计、不留日志行):
 
 ```
-[dry-run] 004 model calls (estimate)  97 次逻辑调用(96 格计划 + 1 预热);请求上界 ≤ 194
+[dry-run] 004 model calls (estimate)  97 次逻辑调用(96 格计划 + 1 预热);请求上界 ≤ 194(……)
 ```
 
 `--smoke` 时是 `49 次逻辑调用(48 格计划 + 1 预热);请求上界 ≤ 98`。单次
@@ -810,11 +829,15 @@ i 格。预算到点提前停批时 per-call 表的行数按实发调用数收�
 再向 `run()` 返回一条脚本化的停止决定——**模型选出的动作只记录不执行,这批
 数据测的是固定观察下的策略,不是它自洽的真实轨迹**(design §9.2)。
 
+**归因边界(design §5 风险 5,与摘要头部同一措辞,只读 README 也要能抄
+到)**:P↔B 的差里混着指令/工具说明的布局改动,不能宣称纯缓存因果;D↔L
+在固定状态点上只看得见净增的那一侧(省的那一侧结构上看不见)。
+
 ```bash
 python scripts/reflect_shadow_rig.py --dry-run --database-url postgresql://h/db_test state-probe
 ```
 
-**三条前置硬断言**(真跑与 `--dry-run` 下都拦,不放过任何一条):
+**两条前置硬断言**(真跑与 `--dry-run` 下都拦,不放过任何一条):
 
 1. `--database-url` **必须显式给出**——不读 `.env` 猜、不落回 `search`/`ab`
    的默认库(Q7:E2 结构上就不该跑在测试库之外的任何库上)。
@@ -824,8 +847,15 @@ python scripts/reflect_shadow_rig.py --dry-run --database-url postgresql://h/db_
    拒(库名 `prod`,`endswith` 会被这串 query 骗过去连生产库)。这与 `ab` 的
    `AB_TEST_DB_SUFFIX.endswith` 判据在这四行上**分叉**(`ab` 刻意不动,是
    既有资产),分叉本身是已知限制,不是漏洞。
-3. `assert_optimization_matches_evidence(声明, probe.reflect_optimization())`
-   逐臂当场对号(复用 `reflect_ab` 的既有函数)。
+
+**外加一条逐格运行期断言,不在前置、也不在 `--dry-run` 路径上**:
+`assert_optimization_matches_evidence(声明, probe.reflect_optimization())`
+在 `run_state_probe_point`(`backend/app/eval/reflect_state_probe.py:1589`)
+内部、真实调用模型之前逐臂当场对号(复用 `reflect_ab` 的既有函数)。
+`cmd_state_probe` 在 `--dry-run` 下于 `run_state_probe_point` 之前就已返回
+(`dry_run: return 0`),这条断言因此**碰不到 `--dry-run` 自检**——只有真实
+跑批、真的走到第一格才会触发。上机前想靠 `--dry-run` 排掉「臂声明与
+`.env` 实际生效值不符」这一类错配,拦不住,只能等真实调用炸出来。
 
 跑前跑后各点一次测试库自己的只读证据(与 `search`/`ab` 同一把
 `_assert_readonly_on_exit`,文案按 `command="state-probe"` 说库)。
@@ -874,7 +904,8 @@ timeout (per call)  90s
 
 **产物**(逐字):`<out-dir>/state-probe-<arm>.jsonl`(逐格投影行)+
 `state-probe-summary.{md,json}`(分档摘要)+ `calls-<arm>.jsonl`(per-call
-表,标签是 `question_key`/`arm`/`repeat`——E2 恒串行,臂这一维可信;
+表,标签是 `CALL_TAG_KEYS` 六列——`arm`/`optimization`/`question_key`/
+`corpus_cell`/`effort`/`repeat`,E2 全部填了值——E2 恒串行,臂这一维可信;
 `question_key` 与 case 一一对应,case 那一维不丢,但**状态点这一维在这张表
 里表达不出来**,格内三个状态点只能靠文件里的**行序**区分)+
 `manifest.json`(最新,覆盖)+ `manifests.jsonl`(历史,追加——与 E1/E3
@@ -894,11 +925,15 @@ timeout (per call)  90s
 `initial`/`follow_up`/`compaction_boundary` 三档,轮号在 12 例间不可比,
 要轮号用 `case.state_point_turn(i)` 另取。
 
-**摘要顶层三个键单列、不混进主统计**:`failed_rows`(取自
+**摘要顶层除 `by_state_point`(按档分格的主统计)外还有六个键**:
+`rows_total`(总行数)、`failed_rows`(取自
 `PROBE_FAILED_STATUSES={cancelled,error}`)、`local_cache_exit_rows`
 (本地响应缓存出口——转发时显式 `bypass_cache=True`,结构上该是 0,字段名
-**不叫** `cache_hit`,命名红线)、`compaction_boundary_not_reached_rows`
-(第三个状态点确实没越过压缩边界的格数,如实标、不调剧本去凑)。
+**不叫** `cache_hit`,命名红线)、`status_unknown_rows`(`status` 本身缺席
+的行数)、`compaction_boundary_not_reached_rows`(第三个状态点确实没越过
+压缩边界的格数,如实标、不调剧本去凑)、`compaction_boundary_unknown_rows`
+(`compaction_boundary_reached` 三值里 `None` 那一格的计数,unknown ≠
+`False`)——这五个计数键都**不混进 `by_state_point` 的主统计**。
 `by_state_point` **按 `initial`/`follow_up`/`compaction_boundary` 三档分别
 报告**(按 `STATE_POINT_LABELS` 顺序而非字母序),每档再逐臂给一份 cell 级
 计数与中位数(零比率):`n_rows`/`n_ok`/`n_failed`/`n_local_cache_exit`/
