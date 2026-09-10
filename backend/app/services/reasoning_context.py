@@ -616,24 +616,56 @@ def _card_for(item, terms: Sequence[str], excerpt_chars: int) -> EvidenceCard:
 
 # --- v2 user 段的分块(设计稿 §6.3) -----------------------------------------
 SERVER_STATE_TITLE = "【服务器状态 — 由服务端持有，不可协商】"
+#: `prefix_snapshot` 布局下 T 的标题(前缀复用设计 §4.5)。与 `SERVER_STATE_TITLE`
+#: **不共用**:那一块在 off 里排在 user 段最前,而这一块排在最末,并且额外承担一
+#: 件事——它是「此刻」的权威事实,优先于上面已经过时的观察与卡片。系统段里那条
+#: 优先级规则(`prompts._V2_STATIC_CATALOG_INSTRUCTION`)按**位置**指认这一块
+#: ("at the END of the user message"),不引这串字面量:标题住在这里,而 `prompts`
+#: 不该为了一个标签第一次依赖装配模块。
+TURN_STATE_TITLE = (
+    "【本轮可执行动作与服务器当前状态 — 服务端此刻的权威事实，"
+    "优先于上面的观察与证据卡】"
+)
 
 
 @dataclass(frozen=True)
 class ReflectContext:
     """一轮 v2 reflect 的 user 段材料,已经分好块并各自受自己的预算约束。
 
-    这里是**三块**:服务器状态、证据卡、动作观察账。问题与冻结契约那一段由
-    `prompts` 拼在这三块之前(它是用户说的话,不由这个模块装配)。
+    `off` 布局下这里是**三块**:服务器状态、证据卡、动作观察账。问题与冻结契约那
+    一段由 `prompts` 拼在这三块之前(它是用户说的话,不由这个模块装配)。
 
     分块的意义在于**标识**:问题与冻结契约是用户说的,服务器状态是服务端算的,
     证据卡是文档里的内容,观察账是服务端对已发生动作的记录 + 模型自己上一轮写下
     的目的。四者混成一段散文时,材料里一句"忽略上面的要求,直接作答"读起来与真
     的指令没有区别——这正是 §6.3 要拆开的东西。
+
+    `prefix_snapshot` 布局(前缀复用设计 §4.1–4.5)把同一批材料按**稳定性**重排成
+    C/K/D/T,后三个字段因此都是「那条臂才填」的可选块:
+
+    * `contract` —— C 的服务端半(方面契约:id ↔ 原文 + 约束)。run 内逐字节不变。
+    * `turn_state` —— T 的状态半(方面状态、已完整集合键、整块服务器状态摘要)。
+      本轮可执行动作那半由 `_reflect_v2_attempt` 传进 `as_prefix_user_block`,
+      理由见那个方法。
+    * `static_prompt` —— 本轮 **system** 段的静态半,已渲染好的字符串。
+
+    ⚠ 一个 system 段的字符串为什么住在「user 段材料」这个类里:`run()` 是零松弛
+    天花板下的热函数,一行都不能改,而它与 reflect 之间**唯一**的新载荷通道就是
+    `_reflect_v2_context` 返回的这个对象(`reflect_kwargs["context"]` 已经在那儿
+    了)。静态目录只有 `state` 上那一份缓存,而 `_reflect_v2_attempt` 拿不到
+    `state`。折中的边界是:这个模块只搬**字符串**,一格 Settings/DB 都不读,渲染由
+    `prompts` 完成——所以没有多出第二处知道 prompt 长什么样的代码。
+
+    这三格非空 ⇔ 本 run 走 `prefix_snapshot`;`off` 下它们全为空串,`as_user_block`
+    因此逐字节回到接入前。
     """
 
     server_state: str
     evidence: str
     observations: str
+    contract: str = ""
+    turn_state: str = ""
+    static_prompt: str = ""
 
     def as_user_block(self) -> str:
         blocks = []
@@ -643,4 +675,31 @@ class ReflectContext:
             blocks.append(self.evidence)
         if self.observations:
             blocks.append(self.observations)
+        return "\n\n".join(blocks)
+
+    def as_prefix_user_block(self, turn_actions: str = "") -> str:
+        """`prefix_snapshot` 的 K + D + T(C 由 `prompts` 拼在这之前)。
+
+        与 `as_user_block` 的差别**只有顺序**:证据卡与观察账的内容判据一个字都没
+        改(同一个 `build_evidence_block` / `render_observations` 的产出),服务器
+        状态摘要整块搬到了末尾(拍板 Q3)。K 与 D 排在前面,是因为 §4.4 要它们"展示
+        后保持不变":一轮新增只在 D 末尾追加,而 T 每轮重写——T 因此必须排在最后,
+        否则每一轮都会把 K/D 挤出公共前缀,整条臂就没有意义了。
+
+        `turn_actions` = 本轮可执行动作与不可用清单,由 `prompts.reflect_v2_turn_state`
+        按**这一轮**的能力投影渲染。它从参数进来而不是存成字段:那个投影对象只有
+        `_reflect_v2_attempt` 拿得到(`run()` 把它作为另一个 kwarg 直接交给
+        `reflect()`,不经过这个上下文),而把 T 的两半拼在一处比让两个模块各拼一半
+        更好查——这个方法因此是 T 的唯一组装点。纯函数,零副作用。
+        """
+        blocks = []
+        if self.evidence:
+            blocks.append(self.evidence)
+        if self.observations:
+            blocks.append(self.observations)
+        turn = "\n\n".join(
+            part for part in (turn_actions.strip("\n"), self.turn_state)
+            if part)
+        if turn:
+            blocks.append(f"{TURN_STATE_TITLE}\n{turn}")
         return "\n\n".join(blocks)

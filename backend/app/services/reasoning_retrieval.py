@@ -29,6 +29,7 @@ from app.core.llm import CALL_STATS_KWARG, budget_kwargs
 from app.core.config import (
     DEFAULT_REASONING_PER_QUERY_LIMIT,
     DEFAULT_REFLECT_EVIDENCE_CHARS_BY_EFFORT,
+    REFLECT_OPTIMIZATION_IMPLEMENTED,
     Settings,
 )
 from app.domain.cancellation import CoreCancellation
@@ -53,14 +54,15 @@ from app.services.collection_enumeration import (
     TRUNCATED_OVERSIZE_SAMPLE, EnumerationBudget, SourceNotInScopeError,
 )
 from app.services.prompts import (
-    reflect_prompt, reflect_schema_hint, reflect_v2_schema_hint,
-    reflect_v2_system_prompt, reflect_v2_user_prompt,
+    reflect_prompt, reflect_schema_hint, reflect_v2_prefix_user_prompt,
+    reflect_v2_schema_hint, reflect_v2_static_prompt,
+    reflect_v2_system_prompt, reflect_v2_turn_state, reflect_v2_user_prompt,
 )
 from app.services.reasoning_actions import (
     ACTION_DEFINITIONS, ENUMERATE_SCOPE_ALL, ENUMERATE_SCOPE_CURRENT_NOTEBOOK,
     ENUMERATE_SCOPES, EXACT_TERM_SHAPE_NOTE, REFLECT_INVALID_ACTION,
     UNAVAILABLE_DISCLOSE_MAX, ActionParam, ReflectCapabilities,
-    ReflectCapabilityFacts, build_reflect_capabilities,
+    ReflectCapabilityFacts, build_reflect_capabilities, static_catalog_facts,
 )
 from app.domain.retrieval_termination import (
     ASPECT_COLLECTION_KEY_PREFIX, ASSESSMENT_SKIP_REASON_PREFIX,
@@ -69,7 +71,8 @@ from app.domain.retrieval_termination import (
 from app.services.reasoning_aspects import (
     AspectLedger, TERMINATION_SKIP_REASON, assessment_is_empty,
     build_aspect_ledger, classify_termination, evidence_bound_keys,
-    render_aspect_block, termination_summary,
+    render_aspect_block, render_aspect_contract_block,
+    render_aspect_status_block, termination_summary,
 )
 from app.services.reasoning_context import ReflectContext, build_evidence_block
 from app.services.reasoning_observation import (
@@ -3311,6 +3314,18 @@ class _ReasoningRunState:
     # 局部名,读写一律走 `state`。
     reflect_failures: int = 0
 
+    # —— 本 run 的**静态工具目录**(T-PS7 / 前缀复用设计 §4.2)。
+    #
+    # 带默认值、留空即中性:只有前缀复用策略不是 `off` 时才构造(判据见
+    # `_prime_static_catalog`;纯测量臂**不**构造——目录是布局的输入,不是测量的),
+    # 其余情况恒为 None ——`_new_run_state` 因此一行都不用改,关闭态零新状态。
+    #
+    # 写点单一且只写一次:本 run **第一次** reflect 那一轮,用那轮已经算好的 facts
+    # 生成。刻意**不**在 run 起点算——那里没有现成的 facts,重算一份要额外付一次
+    # `_unsafe_scope_restricted()`(「全选」形状下两次库读),而这个目录本来就是
+    # 用来省成本的。
+    reflect_static_catalog: "Optional[ReflectCapabilities]" = None
+
 
 class ReasoningRetriever:
     def __init__(
@@ -3498,6 +3513,55 @@ class ReasoningRetriever:
             and self.allow_reflect_v2
         )
 
+    def reflect_optimization(self) -> str:
+        """本 run 的 reflect 用哪一档上下文前缀复用策略(前缀复用最终设计 §5.1)。
+
+        **全仓唯一读点**:settings 上那个策略字段除这里之外没有第二处会读。理由与
+        上面那把闸同款——各处自己读一次 settings 的写法,关掉之后总会剩下一处还
+        在跑(枚举闸与 chunk 闸都栽过)。
+
+        它**叠在** `reflect_v2_active()` 之上,不是与它并列:v2 关着时反思走的是
+        legacy 协议,那条路径上根本没有"前缀"这个概念,所以总闸关(以及 Knowhow 用
+        `allow_reflect_v2=False` 单独否决时)一律返回 `off`,配置里写了什么都不看。
+        这样 `off` 与关闭态是同一条字节路径,不需要在下游再判一次"现在是不是
+        legacy"。
+
+        `getattr` 而不是直读:窄测试替身与离线工具里的 duck-typed settings 适配器
+        并不带这个字段(镜像 `reflect_v2_active` 的既有写法),缺省必须是 `off`
+        ——认不出这个开关的调用方绝不该被静默切到新布局上。
+
+        **已实现闭集之外的取值一律折回 `off`。** 这不是把启动期校验器的活儿抢过来
+        ——真实部署的非法/未实现取值仍由 `validate_reflect_optimization` 在启动期
+        响亮拒绝,那条路径一格没动。这里兜的是**压根不过校验器**的那类 settings:
+        duck-typed 适配器、离线工具与窄替身可以带上任意一个 `None` / `""` / `0` /
+        未知串,而下游按取值分派布局时,一个认不出的取值只会走到"既不是 off 也不是
+        任何已实现臂"的第三种形态上——那才是真正的静默漂移。折回 `off` 是这里唯一
+        fail-closed 的选择:未知 ⇒ 走实施基线,与关闭态同一条字节路径。
+        """
+        if not self.reflect_v2_active():
+            return "off"
+        configured = getattr(self.settings, "reasoning_reflect_optimization", "off")
+        if configured not in REFLECT_OPTIMIZATION_IMPLEMENTED:
+            return "off"
+        return str(configured)
+
+    def reflect_measures_context(self) -> bool:
+        """本 run 要不要多算那份纯内存的上下文块长/前缀观测(拍板 Q2)。
+
+        与 `reflect_optimization()` **正交**:`off` 臂也能开着它,对照实验要的正是
+        两条臂用同一把尺子量。但同样叠在 v2 总闸之上——legacy 路径上没有可测的
+        块结构,关闭态一个字节都不多付。
+
+        它的消费者是测量本身(T-PS3),**不**包括静态工具目录:目录是布局的输入,
+        判据只看 `reflect_optimization()`(见 `_prime_static_catalog`)。测量对
+        `off` 臂原样的那份消息取尺,给它构造一份没有消费者的目录只会污染它要测的
+        东西。
+        """
+        if not self.reflect_v2_active():
+            return False
+        return bool(
+            getattr(self.settings, "reasoning_reflect_measure_context", False))
+
     def _scope_probe_matters(
         self,
         state: "_ReasoningRunState",
@@ -3609,7 +3673,37 @@ class ReasoningRetriever:
                 outline_overflow and not outline_cap_repair_used),
             terminal_overflow_repair=terminal_overflow_repair,
         )
+        self._prime_static_catalog(state, facts)
         return build_reflect_capabilities(facts)
+
+    def _prime_static_catalog(
+        self, state: "_ReasoningRunState", facts: ReflectCapabilityFacts,
+    ) -> None:
+        """本 run 第一次 reflect 时生成一次静态工具目录并缓存(T-PS7)。
+
+        为什么写点在这里而不是 run 起点:目录要的那份 facts 正是这一轮刚算完的
+        那份,而重新算一份就要再付一次 `_unsafe_scope_restricted()`——它按契约禁止
+        memo,「全选」形状下每次两次库读。用现成的那份是零额外 I/O。
+
+        为什么只在第一次:目录是本 run 的**稳定前缀**,一旦生成就逐字节不变。第二
+        轮开始 facts 已经带上了本轮的额度与形态,拿它重算会让"静态"这个词失效
+        ——那正是前缀复用要消除的逐轮漂移。代价按拍板 Q4 接受:首轮之后范围收窄
+        或通道关闭时,目录里会留着已经不可用的动作,由每轮的当前状态如实说明。
+
+        为什么判据只看策略、不看测量开关(评审后修正):目录是**布局**的输入——
+        只有把工具清单挪进稳定前缀的那条臂才会读它。测量量的是消息字节,它对
+        `off` 臂原样的那份消息取尺,不需要也不该拿到一份目录:`off` + 只开测量时
+        构造一份没有任何消费者的对象,只会让纯测量臂比它要测量的那条路径多付一笔
+        开销——那正好污染它要测的东西。所以判据是单一的
+        `reflect_optimization() != "off"`,走那一个单点,不在这里第二次读 settings;
+        `reflect_measures_context()` 由测量本身(T-PS3)消费。
+        """
+        if state.reflect_static_catalog is not None:
+            return
+        if self.reflect_optimization() == "off":
+            return
+        state.reflect_static_catalog = build_reflect_capabilities(
+            static_catalog_facts(facts))
 
     # --- 集合枚举工具的总闸 ---
     def enumeration_active(self) -> bool:
@@ -3895,6 +3989,7 @@ class ReasoningRetriever:
     def _reflect_v2(
         self, question, candidates_summary,
         capabilities: "ReflectCapabilities", client,
+        context: "Optional[ReflectContext]" = None,
     ) -> "ReflectDecision":
         """一轮 v2 reflect:能力投影 → system/user 两段 → 类型化校验(设计稿 §5.2)。
 
@@ -3914,19 +4009,42 @@ class ReasoningRetriever:
         另找一个字面量:一次部署把反思预算调高的决定,重试要跟着走,而不是撞上
         一堵单独钉死的墙。全局配置一个字都不改——只有这一次调用带更高的上限。
         仍失败才走兜底(随后由 `_survive_reflect_failure` 决定是继续还是收尾)。
+
+        ``context`` 只为布局分派往下传(见 `_reflect_v2_attempt`):两次尝试用同
+        一份上下文,加预算重试因此不会顺手换掉消息形状。
         """
         decision = self._reflect_v2_attempt(
-            question, candidates_summary, capabilities, client)
+            question, candidates_summary, capabilities, client, context=context)
         if (decision.fallback
                 and decision.fallback_reason == REFLECT_OUTPUT_BUDGET_EXHAUSTED):
             decision = self._reflect_v2_attempt(
                 question, candidates_summary, capabilities, client,
+                context=context,
                 budget_multiplier=REFLECT_RETRY_BUDGET_MULTIPLIER)
         return decision
+
+    def _reflect_prefix_layout(
+        self, context: "Optional[ReflectContext]",
+    ) -> bool:
+        """这一轮走不走 `prefix_snapshot` 的消息形状(T-PS8)。
+
+        两个条件缺一不可,且**两处判据同源**:策略单点说 `prefix_snapshot`,并且
+        上下文真的带着那条臂的载荷(`static_prompt` 由 `_reflect_v2_context` 在
+        同一个判据下填,空串 = 那边已经退回 off 的布局)。少了后半个条件,一个
+        直接调 `reflect(capabilities=..., context=...)` 的窄调用方会在策略开着时
+        拿到一份**没有工具目录**的 system 段——S 的动作清单在 P 下来自静态目录,
+        而窄调用方构造的上下文里没有它。
+        """
+        return (
+            context is not None
+            and bool(context.static_prompt)
+            and self.reflect_optimization() == "prefix_snapshot"
+        )
 
     def _reflect_v2_attempt(
         self, question, candidates_summary,
         capabilities: "ReflectCapabilities", client,
+        context: "Optional[ReflectContext]" = None,
         *, budget_multiplier: int = 1,
     ) -> "ReflectDecision":
         """`_reflect_v2` 的一次调用尝试。``budget_multiplier`` 只放大这一次的
@@ -3937,22 +4055,42 @@ class ReasoningRetriever:
         才传(`_call_stats_kwargs`),所以既有的 duck-typed 替身与插件绑定的客户端
         一个签名都不用改;拿不到 finish_reason 的调用方退回接入前的行为(空正文
         一律记 `empty`,不触发上面那次加预算重试)。
+
+        **两种消息形状,由 `_reflect_prefix_layout` 一处分派。** `off`:
+        `system(UNTRUSTED? + 本轮动作清单在内的固定指令)` + `user(问题 + 三块)`,
+        逐字节回到接入前。`prefix_snapshot`:`system(UNTRUSTED? + S)` +
+        `user(C + K + D + T)`,其中本轮可执行动作与不可用清单从 S 挪到 T 的开头
+        ——那是 S 里**唯一**两处逐轮变化的内容(计划 X1),挪走之后整个 system 段在
+        一个 run 内逐字节不变。`chat_json` 自己在最前面插的那段 wrapper 与
+        `reflect_v2_schema_hint` 两条路径共用、两处都已经逐轮稳定,一个字都不动。
         """
         stats: Dict[str, Any] = {}
         try:
-            system_text = reflect_v2_system_prompt(
-                capabilities, UNAVAILABLE_DISCLOSE_MAX)
+            prefix_layout = self._reflect_prefix_layout(context)
+            if prefix_layout:
+                system_text = context.static_prompt
+                user_text = reflect_v2_prefix_user_prompt(
+                    question, context.contract,
+                    context.as_prefix_user_block(reflect_v2_turn_state(
+                        capabilities, UNAVAILABLE_DISCLOSE_MAX)))
+            else:
+                system_text = reflect_v2_system_prompt(
+                    capabilities, UNAVAILABLE_DISCLOSE_MAX)
+                user_text = reflect_v2_user_prompt(
+                    question,
+                    context.as_user_block() if context is not None
+                    else candidates_summary)
             if self.untrusted_evidence:
                 # 严格调用方的额外一句"材料不可信"接在固定指令**之前**:v2 的
                 # system 段本身已经讲了这件事,这一句是那条更严格的既有合同,
-                # 两者同向叠加,不互相覆盖。
+                # 两者同向叠加,不互相覆盖。**它是 run 级的**,所以叠在 P 的 S
+                # 前面同样不破坏 system 段的逐轮稳定性。
                 system_text = (
                     f"{UNTRUSTED_EVIDENCE_SYSTEM_INSTRUCTION}\n\n{system_text}")
             raw = client.chat_json(
                 [
                     {"role": "system", "content": system_text},
-                    {"role": "user", "content": reflect_v2_user_prompt(
-                        question, candidates_summary)},
+                    {"role": "user", "content": user_text},
                 ],
                 reflect_v2_schema_hint(capabilities),
                 timeout=self.settings.reasoning_timeout_seconds,
@@ -4009,6 +4147,12 @@ class ReasoningRetriever:
         `getattr` 读 settings:窄测试替身与离线工具的 duck-typed 适配器不带这四
         个字段(镜像 `reflect_v2_active` 的既有写法),缺省一律回到已登记的默认值,
         绝不因为少一个字段就把预算当成 0。
+
+        **布局分派(T-PS8)。** `reflect_optimization()` 那个单点说 `prefix_snapshot`
+        时,同一批块按稳定性重排成 C/K/D/T(前缀复用设计 §4.1–4.5),并额外带上本轮
+        system 段的静态半;`off`(含总闸关闭态与未登记取值)走下面原来那一份,逐字节
+        不变。**三个预算与所有内容判据两条路径共用**:上面这段装配一个字都没有按
+        布局分叉,分派只发生在"块往哪儿放"这一步。
         """
         settings = self.settings
         if state.aspects is None:
@@ -4053,6 +4197,43 @@ class ReasoningRetriever:
         # **只登记真的渲染出来的键。**被预算挤出窗口的候选一个都不登记——模型没
         # 见过它,就不该因为"它在池子里"取得大纲绑定资格(设计稿 §6.2)。
         state.ever_shown_outline_keys.update(selection.shown_keys)
+        observations = render_observations(
+            observer.rows,
+            recent=int(getattr(
+                settings, "reasoning_reflect_recent_observations", 6)),
+            state_chars=int(getattr(
+                settings, "reasoning_reflect_state_chars", 6000)),
+        )
+        catalog = state.reflect_static_catalog
+        if self.reflect_optimization() == "prefix_snapshot" and (
+                catalog is not None):
+            # `prefix_snapshot` 布局(T-PS8)。**只换块的位置,不换任何块的内容
+            # 判据**:证据卡与观察账是上面同一次装配的产出,`summary` 整块原样
+            # 搬到 T 的末尾(拍板 Q3),方面账拆成契约半(C)与状态半(T)。
+            #
+            # 判据带上 `catalog is not None`:目录由 `_prime_static_catalog` 在本
+            # run 第一次能力投影时写下,而 reflect 循环里投影恒排在这个方法之前。
+            # 真出现"策略开着却没有目录"的形态(总闸在一次 run 中途被翻开,只可能
+            # 发生在测试或热更配置里),这里退回 off 的那一份布局而不是发一份没有
+            # 工具目录的 system 段——少一半指令比换个顺序危险得多。
+            return ReflectContext(
+                # off 的那一块在 P 下不存在:它的内容已经按稳定性分到了 C 与 T。
+                # 留空而不是塞一份重复的文本——同一批事实在一条消息里出现两遍,
+                # 模型无从判断哪一份是此刻的。
+                server_state="",
+                evidence=selection.text,
+                observations=observations,
+                contract=render_aspect_contract_block(state.aspects),
+                turn_state="\n\n".join(block for block in (
+                    render_aspect_status_block(state.aspects),
+                    render_collection_keys_note(state.enum_chains),
+                    summary,
+                ) if block),
+                # 每轮按同一个冻结目录重渲染一次:纯字符串拼接、零 I/O,而同一个
+                # 输入必然给出同一串字节,所以 S 的稳定性不依赖任何缓存是否生效。
+                # (渲染缓存留给 T-PS3 的测量,那里本来就要一个只读缓存字段。)
+                static_prompt=reflect_v2_static_prompt(catalog),
+            )
         # 必答方面清单 + 已完整枚举的集合键,都接在服务器状态块的**尾部**,与它
         # 一起受"按现有输入/协议边界保留、不整体裁尾"的处理(§4):方面清单是用户
         # 确认过的必答清单,集合键是服务端签发的证据身份——两者都不属于
@@ -4066,13 +4247,7 @@ class ReasoningRetriever:
         return ReflectContext(
             server_state="\n\n".join(block for block in blocks if block),
             evidence=selection.text,
-            observations=render_observations(
-                observer.rows,
-                recent=int(getattr(
-                    settings, "reasoning_reflect_recent_observations", 6)),
-                state_chars=int(getattr(
-                    settings, "reasoning_reflect_state_chars", 6000)),
-            ),
+            observations=observations,
         )
 
     def _absorb_assessment(
@@ -4494,11 +4669,14 @@ class ReasoningRetriever:
             # `context` 非空 = run() 已经把 user 段分好块(问题/服务器状态/证据卡/
             # 观察账)。为空时退回"整段候选摘要"——T2 的窄用例与任何直接调
             # `reflect(capabilities=...)` 的调用方因此不必改签名。
+            #
+            # 两个布局要的是同一批块的**不同顺序**,所以对象本身往下传一层,由
+            # `_reflect_v2_attempt` 二选一地拼(而不是在这里先拼好一份 off 的、
+            # 在 P 下白扔掉)。`candidates_summary` 仍然是 `context is None` 那条
+            # 既有回退路径的入参。
             return self._reflect_v2(
-                question,
-                (context.as_user_block() if context is not None
-                 else candidates_summary),
-                capabilities, client)
+                question, candidates_summary, capabilities, client,
+                context=context)
         enumeration = self.enumeration_active()
         # `search_chunks` 的闸是部署级 kill switch,所以在这里现算而不是像
         # outline/consult_memory 那样从调用处传进来:它不看档位、不看请求,

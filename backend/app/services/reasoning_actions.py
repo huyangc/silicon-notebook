@@ -23,7 +23,7 @@ trace,所以必须是稳定机器码,不是自由文本。取值复用执行处�
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import MappingProxyType
 from typing import Dict, Mapping, Optional, Tuple
 
@@ -634,6 +634,74 @@ def build_reflect_capabilities(
         actions=tuple(available),
         unavailable=tuple(unavailable),
         params=MappingProxyType(params),
+    )
+
+
+def static_catalog_facts(
+    facts: ReflectCapabilityFacts,
+) -> ReflectCapabilityFacts:
+    """把某一轮的事实折成本 run **静态工具目录**的输入(前缀复用设计 §4.2)。
+
+    目录与逐轮动作面是两件不同的东西:
+
+    * **目录**回答"这次 run 在当前部署、调用方策略、图与范围条件下**可能**执行
+      哪些工具,它们的参数长什么样"。它一个 run 只算一次,此后逐字节不变——这正是
+      前缀复用要的那段稳定文本。
+    * **`build_reflect_capabilities(facts)` 的原值**回答"这一轮**现在**可以调用
+      哪些",它每轮都在变(额度、末轮、候选池、终态纠错轮)。
+
+    所以这里只把**逐轮波动**的那几项归一成"还能做"的形态,其余原样保留:
+
+    * 所有 ``*_left`` 归 **1** 而不是一个大数:目录只需要跨过"还剩 ≥1 次"这道门槛
+      就会保留说明与参数分支,填多大都是同一份文本,而 1 是唯一不会让人误读成
+      "这里配了个上限"的取值。
+    * ``last_turn`` / ``terminal_overflow_repair`` 归 False:这两个是"本轮的形态"
+      而不是"本 run 的能力"——末轮与终态纠错轮都会把大片动作摘掉,拿它们生成目录
+      等于让目录随轮数漂移。
+    * ``has_candidates`` 归 True:候选池空只是**此刻**没有合法起点,后续任何一次
+      检索都可能给 ``follow_chain`` 补上起点(计划 T-PS7 的验收形态之一)。
+    * ``outline_repair_available`` 归 False:它是"本轮还剩不剩那一次溢出纠错"的形
+      态,与 ``last_turn`` 同类。归一后投影结果一格不变(``*_left`` 已经是 1,那条
+      ``or`` 的另一半怎么取值都不改结果),这里图的是**分类**上别留活扣:逐轮项一律
+      归一,哪天投影开始拿它做别的判断,目录不会跟着悄悄按轮漂移。
+    * ``scope_restricted`` 归 **False**(评审后修正,原先按通道位原样带过)。它是
+      通道位里**唯一**不属于"部署 ∧ 调用方策略"的一格:来源勾选上限是**请求级**的,
+      而且它那个判据按契约禁止 memo、每轮现算。原样带过会让范围收窄的 run 里目录
+      **少掉**五个动作——那时它已经不是超集,模型压根不知道这几个工具存在;而目录
+      一个 run 只定型一次,上限之后放宽也补不回来。归一为 False 后目录在任何情况下
+      都是纯超集,收窄与放宽一律由每轮当前状态如实说明(``source_scope_unsafe_channel``
+      每一轮都照报),这与"目录不授予资格"是同一条原则的两半。
+
+    **部署与调用方的通道位一格不动**:``kg_in_scope`` / 各 ``*_active`` / 枚举白名单
+    都原样带过。它们是 run 级的部署与调用方条件,无图 run 的五个图动作、调用方关掉
+    的通道"始终不适用",按 §4.2 不该留在目录里——留着只会让模型反复选一条必然 skip
+    的路。
+
+    **取舍(§4.2):目录是「可能执行」的超集,它不授予任何调用资格。** 唯一的执行
+    资格来源仍是逐轮的 ``ReflectCapabilities``——prompt 的本轮清单、
+    ``parse_reflect_v2`` 的白名单、执行处的纵深防御三处共用那一个对象。目录里留着
+    一个本轮不可用的动作是**刻意**的形态(拍板 Q4):模型据此知道这个工具存在、
+    参数怎么填,而"本轮能不能用、为什么不能"由当前状态如实说明。
+
+    纯函数、零 I/O:与本模块其余部分同一档纪律,不读 settings、不认识检索器。
+    """
+    return replace(
+        facts,
+        element_searches_left=1,
+        chunk_searches_left=1,
+        exact_lookups_left=1,
+        ppr_left=1,
+        follow_chain_left=1,
+        consult_left=1,
+        outline_updates_left=1,
+        enum_rows_left=1,
+        enum_pages_left=1,
+        enum_payload_left=1,
+        has_candidates=True,
+        last_turn=False,
+        terminal_overflow_repair=False,
+        outline_repair_available=False,
+        scope_restricted=False,
     )
 
 
