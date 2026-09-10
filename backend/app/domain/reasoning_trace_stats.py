@@ -147,9 +147,21 @@ RUN_PROJECTION_KEYS: frozenset[str] = frozenset({
     # 各 reflect 步「本轮实际落账的方面自评行数」之和(拍板 Q8/Q9)。门是测量
     # 开关(`measures_messages`),**四臂通写**——`off`/`prefix_snapshot`/
     # `prefix_delta` 下模型仍会重述全量,这一列同样有意义,不是
-    # `prefix_delta_lean` 专属的行为计数。任一 reflect 步缺这个观测 ⇒ 整列
-    # unknown(`_reflect_sum` 口径,同 `response_chars_total`)。
+    # `prefix_delta_lean` 专属的行为计数。**sum-over-present**(质量评审修正
+    # P2-2,`_reflect_assessment` 口径),不是 `_reflect_sum` 的「任一步缺 ⇒
+    # 整列 unknown」:provider fail-open 的那一轮不进 `_absorb_assessment`,
+    # 该轮的 reflect 步压根不带这个键,但它仍是一条正常记的 reflect 步——沿用
+    # 全或无口径会让一次偶发 provider 抖动把整条 run 读成 unknown。全部步都缺
+    # ⇒ `None`。这一列的"全不全"由下面的 `assessment_observed` 单独披露。
     "assessment_rows_total",
+    # 上面那个和「全不全」。`True` = 每一条 reflect 步都带 `assessment_rows`;
+    # `False` = 只带了一部分(此时和是**真实**的部分和,不是下界——见
+    # `_reflect_assessment` 的口径说明,这一点与 `attempts_observed` 不同);
+    # `None` = 一条都没带(旧轨迹 / 测量关)。照
+    # `attempts_observed`(`_reflect_attempts`)的先例登记:一次 provider
+    # fail-open 抖动会让这一轮缺席,用这一列披露"缺了一轮"而不是让
+    # `assessment_rows_total` 整列 unknown。
+    "assessment_observed",
     # v2 终态 skip 步 detail 上的「模型自己收尾时,还有几个方面它一次都没判断
     # 过」(拍板 Q5/Q9)。v2 全部四臂无条件写(拍板 Q10 已知偏离:这是本期唯一
     # 允许偏离三臂字节等价的字段,写在终态 detail 上,不改共用 prompt 字节;
@@ -794,6 +806,37 @@ def _reflect_context_fallback(reflects: Sequence[Mapping]) -> bool | None:
     return any(values) if values else None
 
 
+def _reflect_assessment(
+    reflects: Sequence[Mapping],
+) -> tuple[int | None, bool | None]:
+    """→ (`assessment_rows_total`, `assessment_observed`)(PR-4 计划 §3 T-PL2
+    质量评审修正:P2-2)。
+
+    **sum-over-present**,同 `_reflect_context_rebuilds` 的口径,**不是**
+    `_reflect_sum` 的「任一步缺 ⇒ 整列 unknown」。理由是写侧的一个真实缺口:
+    provider fail-open 的那一轮不进 `_absorb_assessment`
+    (`reasoning_retrieval.py` 的 `if not decision.fallback: decision =
+    self._absorb_assessment(...)`),所以该轮的 reflect 步 detail 压根不带
+    `assessment_rows` 这个键——但它仍然是一条正常记的 reflect 步,不是「轨迹缺了
+    一轮」。若沿用 `_reflect_sum`,一次偶发的 provider 抖动(生产实测 118 次调用
+    24 次正文为空,不是边角)就会把整条 run 的这一列读成 unknown,把它从 D↔L
+    「省了多少重述」的配对样本里整条挤出去。所以改成过滤掉缺席的步之后求和;
+    `assessment_observed` 是那一件"全不全"的伴生披露,用它披露不全,而不是让
+    整列 unknown——照 `attempts_observed`(`_reflect_attempts`)的先例:
+
+    1. 一步都没带 ⇒ `(None, None)`——没有这个观测,不是零。
+    2. 部分带 ⇒ `(sum(present), False)`——和是**真实**的、不是下界:
+       `assessment_rows` 是逐步各自贡献的一段(这一轮落账了几行),不是运行期
+       单调计数,present 的那些值本身就是真值,只是没有覆盖到全部轮次。
+    3. 全带齐 ⇒ `(sum(present), True)`。
+    """
+    values = [_int(step["detail"].get("assessment_rows")) for step in reflects]
+    present = [value for value in values if value is not None]
+    if not present:
+        return None, None
+    return sum(present), len(present) == len(values)
+
+
 def _aspects_unassessed(steps: Sequence[Mapping]) -> int | None:
     """→ `aspects_unassessed`:终态 skip 步 detail 上「模型收尾时一次都没判断
     过的方面数」(计划 PR-4 T-PL2 拍板 Q5/Q9)。
@@ -1065,6 +1108,7 @@ def project_run(
     truncated = _truncated(normalized)
     reflects = _reflect_steps(normalized)
     model_calls_real, attempts_observed = _reflect_attempts(reflects)
+    assessment_rows_total, assessment_observed = _reflect_assessment(reflects)
     prefix_median, prefix_min, prefix_turns = _prefix_bytes(reflects)
 
     row: dict[str, Any] = {
@@ -1138,7 +1182,8 @@ def project_run(
         "context_rebuilds": _reflect_context_rebuilds(reflects),
         "context_fallback": _reflect_context_fallback(reflects),
         # --- reflect 前缀复用测量(PR-4 T-PL2) ---
-        "assessment_rows_total": _reflect_sum(reflects, "assessment_rows"),
+        "assessment_rows_total": assessment_rows_total,
+        "assessment_observed": assessment_observed,
         "aspects_unassessed": _aspects_unassessed(normalized),
     }
     row.update(counters)

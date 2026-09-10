@@ -102,6 +102,13 @@ BOOLEAN_METRICS: tuple[str, ...] = (
     # 带这个观测(非 delta 臂/未测量),与「量到了、答案是没回退」的 `False`
     # 分得开。
     "context_fallback",
+    # T-PL2 质量评审修正 P2-2:`assessment_rows_total` 那个和「全不全」。
+    # `True` = 每一条 reflect 步都带 `assessment_rows`;`False` = 只带了一部分
+    # (此时那个和**是**真实的部分和,不是下界,与 `attempts_observed=False`
+    # 那一格的语义不同——见 `_reflect_assessment` 的口径说明);`None` = 一条
+    # 都没带。provider fail-open 的那一轮不进 `_absorb_assessment`,靠这一列
+    # 披露"缺了一轮",而不是让 `assessment_rows_total` 整列 unknown。
+    "assessment_observed",
 )
 #: 枚举指标:报取值分布(含 unknown 一格)。
 CATEGORICAL_METRICS: tuple[str, ...] = (
@@ -415,11 +422,14 @@ PAIR_SIDE_METRICS: tuple[str, ...] = (
 )
 
 
-#: 上面那几项里**稀疏**的那五个:只有 rig 写侧(`run_wall_ms`)、开了测量的 run
-#: (其余三个)、或 `prefix_delta` 臂(`context_rebuilds`)才有值,所以它们必须
-#: 额外报出各自的观测数(评审 P2)。一侧三条 run 里只有一条量到了 `run_wall_ms`
-#: 时,`_mean` 报的就是那一条的值,而它在表里长得和「三条都量到的均值」一模
-#: 一样;`n_runs` 也救不了——那一格数的是 run,不是观测。于是「1 条比 3 条」这种
+#: 上面那几项里**稀疏**的那几个(见下面 `SPARSE_PAIR_SIDE_METRICS` 的成员):
+#: 只有 rig 写侧(`run_wall_ms`)、开了测量的 run(其余几个),或 `prefix_delta`
+#: 臂(`context_rebuilds`)才有值,所以它们必须额外报出各自的观测数(评审 P2)。
+#: 不在这里数具体几个——`SPARSE_PAIR_SIDE_METRICS` 本身就是那份清单,数字写在
+#: 散文里只会在下一次加键时变成一句过期的话(质量评审 P3-2)。一侧三条 run 里
+#: 只有一条量到了 `run_wall_ms` 时,`_mean` 报的就是那一条的值,而它在表里长得
+#: 和「三条都量到的均值」一模一样;`n_runs` 也救不了——那一格数的是 run,不是
+#: 观测。于是「1 条比 3 条」这种
 #: 对照会被当成同等重量的差值读走。`off` 基线臂结构上不带 `context_rebuilds`
 #: (它是 `prefix_delta` 专属的行为计数,不是「off 也测了、只是恰好没量到」),
 #: 所以基线那一侧这一格恒 `n_measured=0`——这不是缺陷,是「这个问题对 `off` 臂
@@ -446,7 +456,7 @@ def _pair_side(rows: Sequence[dict]) -> dict:
     (那就是这一行的 v2 臂身份),legacy 侧不拆,有几个键就报几个。空着它,读表
     的人没法从这一行自证自己在看哪一臂。
 
-    `n_measured` 给稀疏那五项各报一个观测数,见 `SPARSE_PAIR_SIDE_METRICS`。
+    `n_measured` 给 `SPARSE_PAIR_SIDE_METRICS` 里那几项各报一个观测数。
     """
     side: dict[str, Any] = {"n_runs": len(rows)}
     for metric in PAIR_SIDE_METRICS:
