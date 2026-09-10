@@ -93,6 +93,12 @@ _STATUS_LABELS: Mapping[str, str] = {
 }
 
 ASPECT_BLOCK_TITLE = "【必答方面 — 用户确认过的必答清单，服务端记账】"
+#: 同一份账在 `prefix_snapshot` 布局下拆成的两半的标题(前缀复用设计 §4.3/§4.5)。
+#: 契约半住在 C(问题之后、run 内逐字节不变),状态半住在 T(user 段末尾、每轮
+#: 重渲染)。标题各自成句而不是共用 `ASPECT_BLOCK_TITLE`:两块在同一条消息里
+#: 相距很远,共用一个标题读起来像同一份清单被贴了两遍。
+ASPECT_CONTRACT_BLOCK_TITLE = "【必答方面 — 用户确认过的必答清单，原文与约束】"
+ASPECT_STATUS_BLOCK_TITLE = "【必答方面的服务端记账 — 本轮当前状态】"
 ASPECT_BLOCK_NOTE = (
     "（上面的状态是此前某一轮模型自己的判断，不是服务端对语义支撑的证明；"
     "本轮请在同一份 JSON 的 assessment 里重新给出，省略的方面保留现状。）"
@@ -886,6 +892,12 @@ def render_aspect_block(ledger: AspectLedger) -> str:
     所以"渲染 = 已经说给模型听了"在这里是准确的;真要加第二个调用点(诊断、
     预览),那一个必须先想清楚它算不算"说过了"。
 
+    ⚠ **这是 `off` 布局的那一份,逐字节冻结。** `prefix_snapshot` 布局把同一份账
+    拆成 `render_aspect_contract_block`(C,run 内不变)+ `render_aspect_status_block`
+    (T,每轮重渲染),`_reflect_v2_context` 按闸二选一——两条路径**互斥**,所以那
+    一处消费仍然是每轮恰好一次。这个函数不由两半组装:off 的行把原文与状态排在
+    同一行,拆开之后拼不回同一串字节,而关闭态字节等价是硬约束。
+
     ⚠ **开闸前成本表项(不改行为)**:这个块**每一轮逐字重渲染**并整块进 prompt,
     没有增量。契约上界 ≈ 20KB/轮:16 个方面 × (方面原文 ≤ 冻结契约的单条上限
     + `gap` ≤ 240 字符 + 固定前后缀),再加约束行。它不受 `state_chars` 约束
@@ -937,6 +949,84 @@ def render_aspect_block(ledger: AspectLedger) -> str:
         # 它就是一句假话;二是模型已经照办之后仍每轮收到同一句斥责,而它下一步该
         # 做的是继续检索,不是再交一遍同一份自评。模型给出非空自评时 `apply` 那边
         # 同样清掉这一格,两处同向。
+        lines.append(ASPECT_ASSESSMENT_NUDGE.format(
+            ids="、".join(ledger.aspect_ids)))
+        ledger.nudge_pending = False
+    return "\n".join(lines)
+
+
+def render_aspect_contract_block(ledger: AspectLedger) -> str:
+    """方面账的**契约半**:id ↔ 原文,加上约束条件(前缀复用设计 §4.3)。
+
+    只在 `prefix_snapshot` 布局下被调用,落在 C(问题之后)。`render_aspect_block`
+    是 `off` 的那一份,一个字节都没动——两半合起来**不重建**那一份:off 的行把
+    原文与状态排在同一行(`- a1 | 已支撑 | 已绑定证据 2 条 | 原文`),按块拆开
+    之后拼不回同一串字节,所以 off 走的仍是原来那个函数,而不是"由两半组装"。
+
+    这个函数**读到的每一样都是 run 级不变量**,于是 C 在一个 run 内逐字节稳定:
+    方面 id 与原文由用户确认过的契约定型(`AspectLedger` 不许增删改名,见
+    `_V2_ASSESSMENT_INSTRUCTION`),`constraints` 同样在建账时冻结。状态、已绑定
+    证据数、缺口、降级、未采纳、追问句一格都不在这里——它们逐轮变化,全在状态半。
+
+    **零副作用**:不消费 `nudge_pending`、不消费未采纳披露。那两处消费随状态半走
+    (`render_aspect_status_block`),仍然是全仓单一调用点。
+
+    不受 `state_chars` 约束,理由同 `render_aspect_block`:用户确认过的必答清单与
+    约束不属于可压缩区,只折叠(`_fold`)不截长。
+    """
+    rows = ledger.snapshot()
+    if not rows:
+        return ""
+    lines = [ASPECT_CONTRACT_BLOCK_TITLE]
+    for row in rows:
+        lines.append(f"- {row.aspect_id} | {_fold(row.question)}")
+    if ledger.constraints:
+        lines.append(
+            "约束条件: " + "、".join(_fold(item) for item in ledger.constraints))
+    return "\n".join(lines)
+
+
+def render_aspect_status_block(ledger: AspectLedger) -> str:
+    """方面账的**状态半**:每轮变化的那一半(前缀复用设计 §4.5)。
+
+    只在 `prefix_snapshot` 布局下被调用,落在 T(user 段末尾)。**方面原文不在
+    这里**——它在 C 里说过一遍了,T 只按 id 报当前状态,这正是 §4.3 「完整任务只
+    表达一次」的那一半。
+
+    ⚠ **这个函数有两处写**,与 `render_aspect_block` 里那两处逐字同款:渲染未采纳
+    披露的同时消费掉它(`consume_rejection_notes`),渲染追问句的同时消费掉
+    `nudge_pending`。两个布局各自只有一个调用点、每轮一次
+    (`_reflect_v2_context` 按闸二选一),所以"渲染 = 已经说给模型听了"在这里同样
+    准确;`_survive_reflect_failure` 那条重新置位的路径也照旧成立(它认的是同一
+    格 `nudge_pending`)。
+    """
+    rows = ledger.snapshot()
+    if not rows:
+        return ""
+    rejections, unknown_rejections = ledger.consume_rejection_notes()
+    lines = [
+        f"{ASPECT_STATUS_BLOCK_TITLE}"
+        f"（已支撑 {ledger.supported_count()}/{len(rows)}）"
+    ]
+    for row in rows:
+        parts = [
+            f"- {row.aspect_id}",
+            _STATUS_LABELS.get(row.status, row.status),
+            f"已绑定证据 {len(row.evidence_keys)} 条",
+        ]
+        if row.gap:
+            parts.append(f"缺口: {row.gap}")
+        if row.demotion:
+            parts.append(f"服务端降级: {row.demotion}")
+        if row.aspect_id in rejections:
+            parts.append(f"服务端未采纳: {rejections[row.aspect_id]}")
+        lines.append(" | ".join(parts))
+    if unknown_rejections:
+        lines.append(
+            f"（上一轮有 {unknown_rejections} 条自评的方面 id 不在上面的清单里，"
+            "服务端未采纳；请只使用上面每行开头的那个 id。）")
+    lines.append(ASPECT_BLOCK_NOTE)
+    if ledger.nudge_pending:
         lines.append(ASPECT_ASSESSMENT_NUDGE.format(
             ids="、".join(ledger.aspect_ids)))
         ledger.nudge_pending = False
