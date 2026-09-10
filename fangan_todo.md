@@ -237,12 +237,44 @@
         把两者并到同一目录，是对计划字面的偏离。
       * **`prefix_snapshot` 相对 `off` 每轮 +1–3KB 输入**（缓存未命中时）：目录恒为超集，
         所以 `off` 的 system 段随额度收缩变短、这条臂不会。按设计接受，见部署文档那两条。
-      * **`prefix_delta` / `prefix_delta_lean` 由启动期校验器响亮拒绝**：PR-3/PR-4 各放开
-        一格，`REASONING_REFLECT_RECENT_OBSERVATIONS` 在那两格的含义随之改变（部署文档已
-        预告）。PR-5 是生产策略的实验标记接缝（E1），本期刻意不做。
+      * **PR-2 收尾时 `prefix_delta` / `prefix_delta_lean` 都由启动期校验器响亮拒绝**
+        ——**已被 PR-3 部分解除**（见下面 (k)）：`prefix_delta` 现在能起来并有自己的布局，
+        `REASONING_REFLECT_RECENT_OBSERVATIONS` 在它上面已经是「重建 K 时保留几条近期详细
+        观察」的当前行为（不再是预告）；只剩 `prefix_delta_lean` 仍被拒绝，等 PR-4。PR-5 是
+        生产策略的实验标记接缝（E1），仍刻意不做。
       * **A/B 采用与开闸的拍板点仍在用户手上**（设计 §13）：默认 `off`，选定策略后逐步
         验证、由用户决定开启；任一质量或稳定性回归立即回 `off`，不做数据迁移。E1 的机制
         结果只能支持「稳定前缀的时间收益」，**不得**报告成估算命中率。
+
+      (k) **PR-3「`prefix_delta` 增量上下文」已落地**（计划真源
+      `docs/superpowers/specs/2026-09-10-reflect-prefix-delta-plan_zh.md`，上游设计同 (j)）：
+      两个新配置（`REASONING_REFLECT_DELTA_CARDS_BY_EFFORT` / `_COMPACTION_TARGET_RATIO`，
+      只在这条臂下被消费、每个字段恰一个读点）、`REFLECT_OPTIMIZATION_IMPLEMENTED` 放开第三格、
+      run 级渲染缓存 `ReflectDeltaState`（冻结卡表 / 当前可见集 / 两笔累计账 / 重建迟滞位 /
+      补充卡轮转游标）、`_reflect_delta_context` 七步（`run()` 零改动）、历史折算纯函数
+      `fold_observation_counts`、增量块与补充卡（同 key 逐字不变 + 版本标记）、S 的四句 delta
+      读法规则、三个新 detail 键与投影新增两列、rig 第二维第四格。**仍未做的是拿它跑对照
+      实验**：真实模型的 E1/E2/E3 与首份报告不进 CI，`prefix_delta` 的实际收益**一个数都
+      还没量**（文档只宣称结构与可观测性交付，字节账两侧哪一侧更大取决于题型与轮数）；
+      **开闸仍是此之后的独立决定**，默认 `off` 不变。
+
+      PR-3 的**已知限制**（知情接受，不改代码；首份报告要照抄）：
+
+      * **回退不可逆**（拍板 Q4）：一个 run 里一旦装不下最小有效新证据，剩余轮全部走
+        `prefix_snapshot` 的有界证据选择，不会再回到增量装配。统计上必须按 `context_fallback`
+        分开看，**不能**把这样的 run 混算成「始终在用 D」的结果（设计 §13）。回退那一轮的
+        证据字节还可以**高于档位证据池**（保留的旧 D 块 + 按整份硬预算重选的 K），越出的部分
+        就是那些旧块；回退之后两笔累计账停用（P 那一支不读它们）。
+      * **`search` 子命令的投影 `optimization` 仍恒 unknown**：同 (j) 那一条，第二维只接在
+        `ab` 臂上，本期一格未动。
+      * **`prefix_delta_lean` 仍由启动期校验器响亮拒绝**：`REFLECT_OPTIMIZATION_PLANNED` 收窄
+        成一格，PR-4 放开它（轻量 assessment 是**另一条**实验臂，不能把收益归到缓存上）。
+        PR-5 是生产策略的实验标记接缝（E1），本期同样刻意不做。
+      * **增量块的观察节不带 `HISTORY_NOTE`**：「目的是模型当时写下的判断、不是原文」这句
+        免责由块头里「观察行的含义同上方观察账」一次性接过去，K 的观察账里那一份仍在。这是
+        为省下每块上百字节的重复；两处**措辞同源**的要求由用例对账，不靠每块各付一份。
+      * **`delta_blocks` 只在 reflect 步 detail 里，不出顶层投影列**：它不是累计量（重建会
+        清空已发出的块），一个 run 一格装不下它。要按轮看增量块数就读那几步的 detail。
 - [ ] **深度报告一侧的方面送达复核补上簇折叠表**：Ask 侧 `_answer_context` 已经把
       `knowledge_context` 的 `fold_sink`（同 canonical 簇被折叠掉的成员 → 代表）折进
       `admitted_evidence_keys`；报告侧 `_draft_section` 走 `knowledge_context_with_outline`，
