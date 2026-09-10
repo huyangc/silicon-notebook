@@ -30,11 +30,10 @@ from typing import Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 from app.core.query_syntax import quoted_phrases, strip_accepted_quote_markers
 from app.repositories.lexical_query import lexical_recall_terms
-# 增量块里的观察行与 K 的那一块用**同一句**历史免责(见 `build_delta_block`):
-# 「目的是模型当时写下的判断」这件事在两处必须是同一串字节,否则同一件事在一条
-# 消息里有两种说法。方向是单向的(`reasoning_observation` 不认识这个模块),两边
-# 都是纯数据 + 纯函数,零 I/O。
-from app.services.reasoning_observation import HISTORY_NOTE
+# 刻意**不**从 `reasoning_observation` 引任何东西:增量块里的观察行原来各带一份
+# `HISTORY_NOTE`,改成由 `DELTA_BLOCK_TITLE` 里那句"观察行的含义同上方观察账"
+# 一次性接过去(见 `build_delta_block`)——同一句免责在一条消息里重复二十遍是纯
+# 字节浪费。这个模块因此仍然只认识 `query_syntax` / `lexical_query` 两处。
 
 # --- 卡片种类 ---------------------------------------------------------------
 KIND_KG = "kg"
@@ -470,7 +469,13 @@ def _with_version_marker(line: str, version: int) -> str:
     `render_card` 的字段分隔符 `" | "` 在这一行里是**唯一**的:所有文档字段都过
     `_collapse`,`|`/`｜` 已经被归一成全角逗号。所以按它切分是准确的,不是近似。
     形状真漂移了(`key=` 不在第二格)就响亮抛——静默插错格会让绑定校验读到一个
-    根本不是键的东西。
+    根本不是键的东西。今天真会走到这条 `raise` 的是**无 key 的推导链卡**
+    (`_inference_card` 的 `key=""`),而增量块按设计不装推导链卡。
+
+    这是版本标记的**唯一**接缝:`ReflectDeltaState.supplement_for` 直接调它。刻意
+    不另提供一个"从 `EvidenceCard` 现渲染一张补充卡"的入口——两个入口串起来用会把
+    标记插两遍(`… | 补充摘录 v3 | 补充摘录 v3 | …`),而带标记的那串文本一旦进了
+    `card_variants`,同一段摘录的判重从此失效。
     """
     head, sep, rest = line.partition("\n")
     fields = head.split(" | ")
@@ -480,17 +485,6 @@ def _with_version_marker(line: str, version: int) -> str:
             "the pool key; render_card() no longer produces that shape")
     fields.insert(2, SUPPLEMENT_CARD_NOTE.format(version=int(version)))
     return " | ".join(fields) + sep + rest
-
-
-def render_supplement_card(card: EvidenceCard, version: int) -> str:
-    """同一条证据的**补充卡**:同 key、标着版本、不改写上文那一张(设计 §4.4)。
-
-    §4.4 的"以后遇到更好的摘录"在代码里就是同一条 chunk 在两轮里给出两段不同摘录
-    (`select_excerpt` 的检索词来自**那一轮**的 `action_query`)。就地改写旧卡会让
-    已经发出去的那一段字节变掉,整条前缀从那里断开;所以改成追加一张新卡,而旧卡
-    "仍然有效"是这条设计的字面要求。
-    """
-    return _with_version_marker(render_card(card), version)
 
 
 # --- 确定性选取 -------------------------------------------------------------
@@ -518,6 +512,12 @@ class EvidenceSelection:
 #: 而不是 `{}`:默认参数是模块级共享对象,可变的那一份被调用方改一格就串到所有
 #: 后续调用。
 _NO_FROZEN_CARDS: Mapping[str, str] = MappingProxyType({})
+
+#: 省略披露。`build_evidence_block` 把它挂在块头后面,`build_delta_evidence_block`
+#: 让它单独成行(增量的卡片不自带块头,块头由 `build_delta_block` 拼)——但**必须是
+#: 同一串字面**:两块的省略是同一件事,换个说法只会让模型以为它们是两件事。
+#: 一个常量而不是两处各写一遍 f-string:两处硬编码今天恰好一致,不等于以后还一致。
+_OMISSION_NOTE = "（另有 {omitted} 条候选证据本轮未展开）"
 
 
 def build_evidence_block(
@@ -622,15 +622,32 @@ def build_evidence_block(
         return EvidenceSelection("", (), omitted)
     head = EVIDENCE_BLOCK_TITLE
     if omitted:
-        head = f"{head}（另有 {omitted} 条候选证据本轮未展开）"
+        head = head + _OMISSION_NOTE.format(omitted=omitted)
     return EvidenceSelection(
         "\n".join([head, *lines]), tuple(shown), omitted, tuple(rendered))
 
 
-#: 增量块里的省略披露。与 `build_evidence_block` 挂在块头上的那一句**同一串
-#: 字面**:两块的省略是同一件事,换个说法只会让模型以为它们是两件事。这里单独
-#: 成行,因为增量的卡片不自带块头(块头由 `build_delta_block` 拼)。
-_OMISSION_NOTE = "（另有 {omitted} 条候选证据本轮未展开）"
+#: `prefix_delta` 的一块增量(拍板 Q1:一轮一块,块内三节)。定义在这里而不是与
+#: `TURN_STATE_TITLE` 那几条放在一起,是因为 `build_delta_evidence_block` 的预算
+#: 记账要读它的长度(块头按每块一次计进证据池)——常量得排在第一个读它的人之前。
+#:
+#: 措辞承担三件事,而且**只有**这三件:(1) 这一块是**追加**的,上文已经发出去的块
+#: 与卡片不会被改写——模型因此不必去猜"上面那张卡是不是已经过时了";(2) 同一个
+#: `key` 可能有多张卡,后来那张是同一条证据的**新摘录**,旧的那张仍然有效、绑定用
+#: 同一个键(设计 §4.4 的补充卡);(3) 块里的观察行按上方那一块观察账的读法读——
+#: 那些行里的"目的"是模型当时写下的判断,不是证据。第 (3) 件在这里说**一次**,
+#: 而不是每一块 D 的观察节各带一份 `HISTORY_NOTE`:同一句免责在一条消息里重复
+#: 二十遍是纯字节浪费,而"两处必须同源"要的是措辞一致,不是每块各付一份。
+#:
+#: ⚠ 它**不承担排序权**。`TURN_STATE_TITLE` 那一句"优先于上面的观察与证据卡"是
+#: 给 T 里那四类服务端执行限制的;增量块装的是证据卡与已发生动作的记录,给它一句
+#: 排序权就等于让"后来的材料压过先前的材料",而两者本来就都是材料。同理也不与
+#: `TURN_STATE_TITLE`/`TURN_CONTEXT_TITLE` 共用标题:三块的读法各不相同。
+DELTA_BLOCK_TITLE = (
+    "【本轮新增 — 追加在上文之后；上面已经发出的块与卡片不会被改写，"
+    "同一个 key 的新卡是同一条证据的新摘录，旧卡仍然有效；"
+    "观察行的含义同上方观察账】"
+)
 
 
 def build_delta_evidence_block(
@@ -658,8 +675,16 @@ def build_delta_evidence_block(
        原样躺着,再追加一张同样的只是重复付费。所以已绑定那一档在这里只剩"绑上了
        却从没真的展示过"的那些(它们今天靠 `outline_binding_keys` 的资格链取得绑定
        资格,模型却还没见过卡面)。
-    2. **排除 `already_shown`**:整个冻结表都被挡在门外。同一条证据在一条消息里
-       出现两遍,模型无从判断哪一份是此刻的。
+    2. **排除 `already_shown`**:此刻还在消息里的卡都被挡在门外。同一条证据在一条
+       消息里出现两遍,模型无从判断哪一份是此刻的。
+
+       `already_shown` 要的是**当前可见集**(`ReflectDeltaState.visible_keys` =
+       当前 K 的键 ∪ 当前所有 D 块的键),**不是** `frozen_cards` 那份"曾展示"的
+       字节表。两者在第一次重建之前恰好相等,之后就不再相等:重建会清空 `blocks`
+       并按新预算收缩 K,于是一批曾经展示过的卡既不在消息里了、又会被"曾展示"口径
+       永久挡在增量之外——它对模型从此不可见,而且不进任何一个 `omitted`(它被记成
+       "已展示")。传当前可见集之后,这些卡会经正常档序回到某一块 D,复用
+       `frozen_cards` 里那串已经发出去过的字节(设计 §4.4"可从已有内存池恢复")。
 
     两道硬上限**先到先止**:`max_cards`(单块最多新展开几张,按档位取自
     `REASONING_REFLECT_DELTA_CARDS_BY_EFFORT`)与 `budget_chars`(本块能占多少字)。
@@ -670,6 +695,18 @@ def build_delta_evidence_block(
     先装行、最后拼披露的话,那句话的长度不在任何一次预算判断里,整块因此可以稳定
     超出预算十几个字符——而 delta 下的证据预算是 **K + 所有 D 的总和**,每块超一点
     会一路累计下去。
+
+    **块头按每块一次计入证据池**,与 K 把 `EVIDENCE_BLOCK_TITLE` 算进 `used` 是
+    同一口径。这个函数只返回卡片那一节的字节(块头由 `build_delta_block` 拼),
+    但 `DELTA_BLOCK_TITLE` 每块都要真的发出去,不计就等于每块白送六十多个字符,
+    二十轮下来正好是上一段点名要挡的那种累计——只是量级大一个数量级。所以调用方
+    的记账口径是:
+
+        本块实际占用 = len(DELTA_BLOCK_TITLE) + 1 + len(selection.text)
+
+    (那个 `+1` 是块头与第一节之间的换行,与 K 里每行 `len(text) + 1` 同源。)
+    传进来的 `budget_chars` 因此是**含块头**的额度:块头装不下时这个函数直接返回
+    空块,而不是发一个注定超预算的块。
 
     推导链卡不进增量块:它们没有 `key`,冻结表因此认不出"这一条已经发过了",每轮
     追加一份就是同一段字节反复付费。它们仍由 K 那一块按原逻辑在末尾各取最后两条。
@@ -689,7 +726,10 @@ def build_delta_evidence_block(
     lines: List[str] = []
     shown: List[str] = []
     rendered: List[Tuple[str, str]] = []
-    used = 0
+    # 块头先记上(它由 `build_delta_block` 拼,但每块都真的发出去)。K 里 `used`
+    # 从 `len(EVIDENCE_BLOCK_TITLE)` 起算是同一件事。
+    head_chars = len(DELTA_BLOCK_TITLE) + 1
+    used = head_chars
     omitted = 0
     seen_min = 0
     for position, key in enumerate(ordered):
@@ -714,7 +754,7 @@ def build_delta_evidence_block(
         text = "\n".join(lines)
         if omitted:
             text = f"{text}\n{_OMISSION_NOTE.format(omitted=omitted)}"
-        if len(text) <= budget_chars:
+        if head_chars + len(text) <= budget_chars:
             return EvidenceSelection(
                 text, tuple(shown), omitted, tuple(rendered))
         lines.pop()
@@ -818,21 +858,6 @@ TURN_CONTEXT_TITLE = (
     "【服务端为你装配的上下文 — 与上面的执行限制不同，它按材料读，"
     "不优先于任何证据卡】"
 )
-#: `prefix_delta` 的一块增量(拍板 Q1:一轮一块,块内三节)。
-#:
-#: 措辞承担两件事,而且**只有**这两件:(1) 这一块是**追加**的,上文已经发出去的块
-#: 与卡片不会被改写——模型因此不必去猜"上面那张卡是不是已经过时了";(2) 同一个
-#: `key` 可能有多张卡,后来那张是同一条证据的**新摘录**,旧的那张仍然有效、绑定用
-#: 同一个键(设计 §4.4 的补充卡)。
-#:
-#: ⚠ 它**不承担排序权**。`TURN_STATE_TITLE` 那一句"优先于上面的观察与证据卡"是
-#: 给 T 里那四类服务端执行限制的;增量块装的是证据卡与已发生动作的记录,给它一句
-#: 排序权就等于让"后来的材料压过先前的材料",而两者本来就都是材料。同理也不与
-#: `TURN_STATE_TITLE`/`TURN_CONTEXT_TITLE` 共用标题:三块的读法各不相同。
-DELTA_BLOCK_TITLE = (
-    "【本轮新增 — 追加在上文之后；上面已经发出的块与卡片不会被改写，"
-    "同一个 key 的新卡是同一条证据的新摘录，旧卡仍然有效】"
-)
 #: 重建 K 时,更早那批观察折成的计数块的标题(`fold_observation_counts` 出正文)。
 #: 措辞的全部作用是挡住一种误读:计数**不是**"没发生"。一块只剩数字的历史很容易
 #: 被读成"这些方向没试过",于是模型把刚刚失败过的问法原样再问一遍。
@@ -854,9 +879,16 @@ def build_delta_block(
     接受的方面更新。三节各带一个块头会让每一轮多付上百字节,而它们的顺序在一块
     之内天然稳定,所以合成一块(拍板 Q1)。
 
-    观察那一节后面跟的是 `render_observations` 用的**同一句** `HISTORY_NOTE`:
-    那些行里的"目的"是模型当时写下的判断,不是证据。同一件事在 K 与 D 两处必须
-    是同一串字节。
+    **三节之间隔一个空行**(`\\n\\n`,与 `as_prefix_user_block` 的块间同一个分隔)。
+    单个 `\\n` 会让证据卡的 `- [chunk] | key=…` 与观察行的 `- #3 [action] …` 连成
+    同一份 bullet 列表:两者是两类完全不同的材料(一类是文档里的内容,一类是服务端
+    对已发生动作的记录),而分块的全部意义就是这个标识不糊在一起。块头与第一节之间
+    仍是单个 `\\n`,与 K 那一块的块头贴着第一行同一种写法。
+
+    观察那一节**不再各带一份** `HISTORY_NOTE`:那句免责在 K 的观察账里已经有一份,
+    而"目的是模型当时写下的判断"这件事由 `DELTA_BLOCK_TITLE` 里的"观察行的含义同
+    上方观察账"一次性接过去。同一句话每块重复一遍,二十轮就是上千字节的纯重复——
+    设计 §5.2 要的是两处**措辞同源**,不是每块各付一份。
 
     `generation` = 这批增量挂在第几版快照之后(首版 1)。重建会清空已发出的块并把
     它 +1,所以同一条消息里的每一块 generation 必然相同;首版不渲染这一格,重建
@@ -872,7 +904,7 @@ def build_delta_block(
         sections.append(cards)
     rows = [line for line in observation_lines if line]
     if rows:
-        sections.append("\n".join([*rows, HISTORY_NOTE]))
+        sections.append("\n".join(rows))
     notes = [note for note in aspect_notes if note]
     if notes:
         sections.append("\n".join(notes))
@@ -881,7 +913,7 @@ def build_delta_block(
     head = DELTA_BLOCK_TITLE
     if generation > 1:
         head = f"{head}（第 {generation} 版快照之后的新增）"
-    return "\n".join([head, *sections])
+    return head + "\n" + "\n\n".join(sections)
 
 
 def compose_snapshot(
@@ -897,6 +929,18 @@ def compose_snapshot(
     证据那一半原样返回:重建的两半在同一处成型,调用方存进投影的与发出去的因此
     必然是同一串字节——分两处拼的话,"存了 A 发了 B"这种分叉不会有任何一条断言
     看得见。纯函数、零副作用。
+
+    **两个输入的切片口径(调用方按这一条算,T-PD5 落点)**:一次重建把观察账的行按
+    近期窗切成不相交的两段,`history_text` 与 `folded_counts` **各只吃自己那一段**——
+
+        history_text  = render_observations(rows[-recent:], recent, …)
+        folded_counts = fold_observation_counts(rows[:-recent])
+
+    近期窗喂全量行是不行的:`render_observations` 自己那圈收敛循环会在字符预算不够
+    时继续把行丢出去并写成"(更早的 N 条未列出)",而折算那一行的"总计已尝试 M 次"
+    只按传进去的切片算。两句话于是各自成立却互相矛盾——同一条消息里同时出现"更早的
+    9 条未列出"和"总计已尝试 6 次",而这两个数说的是同一批行。切成两段之后,每一句
+    各指自己的那一段,恒等式是 `窗内已列 + 窗内 dropped + 窗外总计 == len(rows)`。
     """
     if not folded_counts:
         return evidence_text, history_text
@@ -976,16 +1020,33 @@ class ReflectDeltaState:
     `eq=False` 与 `ReflectMeasurement` 同理:它的语义是身份而不是取值(整个 run 里
     必须是同一个对象),而按字段比较一份可变缓存没有任何调用方需要。
 
-    装文本的那几格 `repr=False`:`snapshot_evidence`/`snapshot_history`/`blocks`/
-    `frozen_cards`/`card_variants`/`pending_aspect_notes` 里全是**文档正文与用户
-    问题的派生物**(证据卡的摘录就是原文片段),而这个对象被 `_ReasoningRunState`
-    持有——默认 `repr` 一开,任何一次 `repr(state)`、日志占位符或异常里的对象转写
-    都会把它们带出去。几个整数留着 `repr`:它们正是出问题时最该看得见的东西。
+    装文本的那七格 `repr=False`:`snapshot_evidence`/`snapshot_history`/`blocks`/
+    `frozen_cards`/`card_variants`/`card_versions`/`pending_aspect_notes` 里全是
+    **文档正文与用户问题的派生物**(证据卡的摘录就是原文片段),而这个对象被
+    `_ReasoningRunState` 持有——默认 `repr` 一开,任何一次 `repr(state)`、日志占位符
+    或异常里的对象转写都会把它们带出去。`card_versions` 的**值**只是整数,但它的
+    **键**是池键,而池键会与 `frozen_cards` 一样把"这一轮到底给模型看了哪些对象"
+    整份抖出来;遮它遮的是那份键集,不是那几个版本号。
+
+    其余几格留着 `repr`:`observation_cursor`/`evidence_chars`/`history_chars`/
+    `rebuilds`/`fallback`/`generation` 都是纯计数与开关,正是出问题时最该看得见的
+    东西;`visible_keys` 也留着——它只有池键、没有任何正文,而"此刻消息里还剩哪些
+    卡"恰恰是 delta 出问题时第一个要看的东西。
 
     * `snapshot_evidence` / `snapshot_history` —— 当前这一版 K 的两块字节。
     * `blocks` —— 已经发出去的每一块 D,**按发出顺序**。只追加;重建时整体清空。
     * `frozen_cards` —— 键 → 那张卡第一次展示时的字节。`build_evidence_block` 的
       `frozen_cards` 参数读它,补充卡的版本号也从它这里判断"这个键展示过没有"。
+      **它是"曾展示"的字节表,只增不减**:一张卡离开 K 之后以后再经增量档序回到某
+      一块 D 时,复用的就是表里这串字节(设计 §4.4 的"可从已有内存池恢复",而且不
+      违反"展示后保持不变")。
+    * `visible_keys` —— **此刻还在消息里**的那些键 = 当前 K 的键 ∪ 当前**所有**已
+      发出的 D 块的键。`build_delta_evidence_block(already_shown=…)` 要的是这一格,
+      不是 `frozen_cards`:那一格是"曾展示",拿它当"当前可见"用,一次重建之后
+      (`blocks` 清空、K 收缩)就会有一批卡既不在消息里、又被永久挡在增量之外。重建
+      时这一格随 K 收缩(与 `blocks` 同时清账),`frozen_cards` 不动——模块 docstring
+      里"在池子里 / 曾经展示过 / 此刻还在消息里"是三件事,这里就是那三件事各占一格
+      的落点(池子本身不在这个对象里,见硬约束 b)。
     * `card_variants` —— 键 → 这个键已经发出去过的**每一份卡片渲染**。同一段摘录
       不追加第二张补充卡(设计 §4.4),判据就是这一格。
     * `card_versions` —— 键 → 已经发到第几版(原卡是 1)。
@@ -1004,6 +1065,7 @@ class ReflectDeltaState:
     snapshot_history: str = field(default="", repr=False)
     blocks: List[str] = field(default_factory=list, repr=False)
     frozen_cards: Dict[str, str] = field(default_factory=dict, repr=False)
+    visible_keys: Set[str] = field(default_factory=set)
     card_variants: Dict[str, Set[str]] = field(
         default_factory=dict, repr=False)
     card_versions: Dict[str, int] = field(default_factory=dict, repr=False)
@@ -1043,6 +1105,15 @@ class ReflectDeltaState:
         登记与渲染在**同一处**:分开的话,调用方可以渲染却忘了登记,于是同一段摘录
         每轮追加一张新卡——正是 §4.4 点名禁止的那件事,而且它每轮都在涨字节,没有
         任何一条"块字节不变"的断言会红。
+
+        **调用契约(硬的,调用方与它的评审都按这一条判)**:非空返回值必须**无条件**
+        拼进本块。这个方法在返回之前就把 `text` 记进了 `card_variants` 并把版本号
+        往前推了一格——调用方拿到之后因为 `max_cards` 或预算把它丢掉的话,那一份
+        (更好的)摘录以后每一轮都会命中判重、恒返回空串,于是它永远到不了模型,而且
+        没有任何一个计数会披露这件事。所以正确的调用顺序是**先选后调**:调用方先按
+        `max_cards` / 剩余预算定下这一块要发哪几个键,再只对这些键调它。刻意不提供
+        "没采纳就回滚"的入口——一个可以撤销的登记等于把"渲染了却忘了登记"那道缝原样
+        搬回来,只是换了个名字。
         """
         key = str(key)
         if not text or key not in self.frozen_cards:
