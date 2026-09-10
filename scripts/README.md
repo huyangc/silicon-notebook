@@ -479,6 +479,16 @@ python scripts/reflect_shadow_rig.py \
 前缀缓存本身,那笔账已经在 D↔P 那一对上算过了。`--arms` 与 `--only-policy`
 **互斥**(后者是一维时代按 policy 过滤默认两臂的写法)。
 
+**D↔L 这一对的差值不由 `optimization_pair_table`(`scripts/
+analyze_reasoning_trace.py`)直接给出**:那张表的基线硬编码 `off`
+(`OPTIMIZATION_BASELINE`),一批只有 D 和 L 两条臂时两侧配对表都是空。要读出
+这道差值,要么把 `off` 也跑进各自那一批(`v2:off,v2:prefix_delta` 与
+`v2:off,v2:prefix_delta_lean` 分两批——「一次只收一对」不允许三格挤进一批),
+各自对 `off` 做差之后自己再相减;要么把两批合喂 `analyze` 之后在读表口径上
+做差的差。另外 `ab-runs.jsonl` 的每一行带 ab 专属键(`paired`、`pair_id` 等),
+`analyze_reasoning_trace.py` 的 `load_rows` 会整批拒绝——先把行降到 T0 键集
+才能喂进 `analyze`(这是 T-PS4 起就有的既有结构,不是这一格新引入的限制)。
+
 **`--arms` 一次只收一对臂**,超过两条在跑批之前拒绝。配对差值表按**对**出:三条
 臂的批次里每个配对单元落三行,`mark_paired` 判不出配对,整批 `paired` 全 `False`
 ——数据集、日志、投影一切正常,只是一个配对结论都出不来,而这批已经烧掉了几百次

@@ -3947,8 +3947,8 @@ def run_ab_once(
     轨迹形状逐字相同,产物里反推不出它——差别全在发给 provider 的消息怎么分块
     (见 `reflect_ab.assert_optimization_matches_evidence`)。所以这里读的
     `probe.reflect_optimization()` 是**全仓唯一读点**的直接读数,而不是从
-    settings 字段自己再判一次:v2 总闸关、Knowhow 否决、未实现取值折回 `off`
-    这三条降级路径都只在那个方法里,绕过它等于把降级本身漏掉。
+    settings 字段自己再判一次:v2 总闸关、Knowhow 否决、已实现闭集之外的取值
+    折回 `off` 这三条降级路径都只在那个方法里,绕过它等于把降级本身漏掉。
     """
     from app.eval.reflect_ab import assert_optimization_matches_evidence
     from app.models.ask import AskRequest

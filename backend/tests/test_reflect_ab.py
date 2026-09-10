@@ -30,6 +30,7 @@ from typing import Any, Sequence
 
 import pytest
 
+from app.core.config import REFLECT_OPTIMIZATION_IMPLEMENTED
 from app.domain.reasoning_trace_stats import (
     OPTIMIZATIONS,
     RUN_PROJECTION_KEYS,
@@ -1459,7 +1460,7 @@ def test_parse_arms_reads_both_the_one_and_two_dimensional_spellings():
     ("v2,v2", "重复臂"),
 ])
 def test_parse_arms_refuses_every_spelling_that_would_produce_fake_data(spec, why):
-    """七种写错法各自被拒。每一种不拒都会安静地产出一批假数据(见 `parse_arms`)。
+    """每一种写错法各自被拒。每一种不拒都会安静地产出一批假数据(见 `parse_arms`)。
 
     PR-3(T-PD7)把 `("v2","prefix_delta")` 放进 `ARMS` 之后,`v2:prefix_delta`
     不再是这条用例的素材——它现在是合法臂(见
@@ -1496,18 +1497,31 @@ def test_parse_arms_reads_the_new_prefix_delta_lean_spellings():
         ("v2", "prefix_delta"), ("v2", "prefix_delta_lean")]
 
 
-def test_legacy_prefix_delta_lean_error_lists_all_five_arms():
-    """`legacy:prefix_delta_lean` 仍是合法值的非法组合;错误文案现在列出五格。
+@pytest.mark.parametrize("optimization", ["prefix_delta", "prefix_delta_lean"])
+def test_legacy_prefix_delta_error_lists_all_five_arms(optimization):
+    """`legacy:prefix_delta`/`legacy:prefix_delta_lean` 仍是合法值的非法组合;
+    错误文案现在列出五格。
+
+    参数化到两个非 off 取值,恢复 legacy × 三个非 off 取值(`prefix_snapshot`
+    见 `test_parse_arms_refuses_every_spelling_that_would_produce_fake_data`)
+    的全交叉——T-PL6 把素材从 `legacy:prefix_delta` 换成 `legacy:prefix_delta_lean`
+    之后,前者一度没有任何用例再点名;`_parse_one_arm` 的组合闸如果按取值放行
+    (例如误写成 `optimization != "prefix_delta" and (policy, optimization)
+    not in ARMS`),只测 lean 那一格看不出来。
 
     变异:往 `ARMS` 加一行却漏了这条用例 ⇒ 断言的臂数与 `ARMS` 实际长度分叉时,
     这条会先红(而不是被动等 `len(ARMS)` 悄悄变化)。
     """
     with pytest.raises(ArmSpecError) as excinfo:
-        parse_arms("legacy:prefix_delta_lean")
+        parse_arms(f"legacy:{optimization}")
     text = str(excinfo.value)
     assert len(ARMS) == 5
     for arm in ARMS:
         assert format_arm(*arm) in text
+    # 过期文案不许回潮:`prefix_delta_lean` 已经在 `ARMS` 里,不该再被说成
+    # "不在这份 ARMS 闭集里,T-PL6 起放开"。
+    assert "起放开" not in text
+    assert "不在这份 ARMS 闭集里" not in text
 
 
 def test_the_arm_label_keeps_the_two_v2_arms_in_different_directories():
@@ -1556,20 +1570,31 @@ def test_a_legacy_arm_may_never_declare_an_optimization():
 
 
 def test_arms_v2_side_covers_every_implemented_optimization():
-    """`ARMS` 的 v2 侧必须与投影闭集 `OPTIMIZATIONS` 逐个对上号(T-PL6)。
+    """`ARMS` 的 v2 侧必须与**已实现**闭集 `REFLECT_OPTIMIZATION_IMPLEMENTED`
+    逐个对上号(T-PL6)。
 
-    `OPTIMIZATIONS`(读侧闭集,`app.domain.reasoning_trace_stats`)与
+    `REFLECT_OPTIMIZATION_IMPLEMENTED`(`app.core.config`,今天与
+    `OPTIMIZATIONS` 逐字相同,因为 `REFLECT_OPTIMIZATION_PLANNED` 现在是空)与
     `ARMS`(rig 能跑的臂,`reflect_ab`)是两处独立登记——`config` 的 `Literal`
     放开一格不会自动让 rig 收它。这条断言防的是那道题在 T-PL1 已经出现过一次
-    的分叉:`prefix_delta_lean` 在 `OPTIMIZATIONS` 里有位置却迟迟没进 `ARMS`。
+    的分叉:`prefix_delta_lean` 在闭集里有位置却迟迟没进 `ARMS`。
+
+    右边刻意不取 `OPTIMIZATIONS`:后者是 `IMPLEMENTED + PLANNED`,合法的
+    staging 态(先把下一格登记进 `PLANNED` + `Literal` + domain 闭集,`ARMS`
+    还没跟上)会让 `OPTIMIZATIONS` 先长一格,而那一格根本还跑不起来
+    (`Settings()` 构造时会被校验器拒绝)——等号右边取 `OPTIMIZATIONS` 会在这
+    个合法中间态上误红,把作者引向往 `ARMS` 里塞一条实际上会构造失败的臂。
+    另加一条方向断言:`REFLECT_OPTIMIZATION_IMPLEMENTED` 必须是 `OPTIMIZATIONS`
+    的子集——已实现的必须先被登记,顺序不能反。
 
     变异:从 `ARMS` 删掉 `("v2","prefix_delta_lean")` 这一行 ⇒ 五格闭集与四值
-    `OPTIMIZATIONS` 不再一一对应,这条先红。
+    `REFLECT_OPTIMIZATION_IMPLEMENTED` 不再一一对应,这条先红。
     """
     assert len(ARMS) == 5
     v2_optimizations = {optimization for policy, optimization in ARMS
                          if policy == "v2"}
-    assert v2_optimizations == set(OPTIMIZATIONS)
+    assert v2_optimizations == set(REFLECT_OPTIMIZATION_IMPLEMENTED)
+    assert set(REFLECT_OPTIMIZATION_IMPLEMENTED) <= set(OPTIMIZATIONS)
 
 
 def test_the_arm_lives_on_the_repository_not_on_a_settings_argument(rrepo):
@@ -3222,6 +3247,11 @@ def test_dry_run_ab_enumerates_the_newly_opened_prefix_delta_lean_arm(capsys):
     与前两条同款断言,证据换成最后一格(D↔L 那一对配对臂)——`ARMS` 放开一格
     不需要 dry-run 枚举那半改一行代码,这条钉住的正是那件事,顺带覆盖 D↔L 这
     一对合法组合的请求上界打印。
+
+    上界数字逐字钉死(而不是只断子串存在):`--arms` 换成哪一对合法组合都不该
+    改变这条估算——臂对里换成 lean 不该让上界打折。变异:把上界估算改成按臂
+    身份打折(例如 lean 少算轮数)会让这条先红,而不是留到真跑时才发现规划
+    的调用预算算少了一倍。
     """
     assert rig.main([
         "--dry-run", "--limit", "1", "--repeats", "1",
@@ -3233,7 +3263,8 @@ def test_dry_run_ab_enumerates_the_newly_opened_prefix_delta_lean_arm(capsys):
     printed = capsys.readouterr().out
     assert "v2:prefix_delta, v2:prefix_delta_lean" in printed
     assert "REASONING_REFLECT_MEASURE_CONTEXT=true" in printed
-    assert "次逻辑调用" in printed and "请求上界 ≤" in printed
+    assert "intent 2 + plan 0 + reflect ≤ 96 + synthesis 8" in printed
+    assert "≤ 106 次逻辑调用;请求上界 ≤ 212" in printed
     assert "calls-v2-prefix_delta.jsonl" in printed
     assert "calls-v2-prefix_delta_lean.jsonl" in printed
 
