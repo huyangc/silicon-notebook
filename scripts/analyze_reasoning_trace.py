@@ -393,24 +393,31 @@ def optimization_pair_table(rows: Sequence[dict]) -> list[dict]:
 
 
 #: 每一侧都报的那几个数。前缀三格与 `model_calls_real` 在这里而不是只在分组表
-#: 里:配对差值表是 T-PS4 唯一要回答的那个问题(「前缀复用换到了什么」)的落点。
+#: 里:配对差值表是 T-PS4 唯一要回答的那个问题(「前缀复用换到了什么」)的落点;
+#: `context_rebuilds`(T-PD2)同理——它是 `prefix_delta` 臂的核心代价量,对这一
+#: 臂来说那个问题就是「重建次数换到了什么」(评审 P3-2)。
 PAIR_SIDE_METRICS: tuple[str, ...] = (
     "reflect_turns", "total_ms", "anchors", "run_wall_ms", "model_calls_real",
-    "prefix_bytes_median", "prefix_turns",
+    "prefix_bytes_median", "prefix_turns", "context_rebuilds",
 )
 
 
-#: 上面那几项里**稀疏**的那四个:只有 rig 写侧(`run_wall_ms`)或开了测量的 run
-#: (其余三个)才有值,所以它们必须额外报出各自的观测数(评审 P2)。一侧三条 run
-#: 里只有一条量到了 `run_wall_ms` 时,`_mean` 报的就是那一条的值,而它在表里长得
-#: 和「三条都量到的均值」一模一样;`n_runs` 也救不了——那一格数的是 run,不是观测。
-#: 于是「1 条比 3 条」这种对照会被当成同等重量的差值读走。
+#: 上面那几项里**稀疏**的那五个:只有 rig 写侧(`run_wall_ms`)、开了测量的 run
+#: (其余三个)、或 `prefix_delta` 臂(`context_rebuilds`)才有值,所以它们必须
+#: 额外报出各自的观测数(评审 P2)。一侧三条 run 里只有一条量到了 `run_wall_ms`
+#: 时,`_mean` 报的就是那一条的值,而它在表里长得和「三条都量到的均值」一模
+#: 一样;`n_runs` 也救不了——那一格数的是 run,不是观测。于是「1 条比 3 条」这种
+#: 对照会被当成同等重量的差值读走。`off` 基线臂结构上不带 `context_rebuilds`
+#: (它是 `prefix_delta` 专属的行为计数,不是「off 也测了、只是恰好没量到」),
+#: 所以基线那一侧这一格恒 `n_measured=0`——这不是缺陷,是「这个问题对 `off` 臂
+#: 不成立」的如实呈现,不需要为它命一个「命中率」之类的名字。
 #:
 #: `reflect_turns` / `total_ms` / `anchors` 不在这里:它们从轨迹本身来,一条跑成
 #: 的 run 必有(`anchors` 在只检索不合成的 run 上缺,但那种 run 由 `trace_source`
 #: 单独分格、整侧一起缺,不是同一侧内部的参差)。
 SPARSE_PAIR_SIDE_METRICS: tuple[str, ...] = (
     "run_wall_ms", "model_calls_real", "prefix_bytes_median", "prefix_turns",
+    "context_rebuilds",
 )
 
 
@@ -421,7 +428,7 @@ def _pair_side(rows: Sequence[dict]) -> dict:
     (那就是这一行的 v2 臂身份),legacy 侧不拆,有几个键就报几个。空着它,读表
     的人没法从这一行自证自己在看哪一臂。
 
-    `n_measured` 给稀疏那四项各报一个观测数,见 `SPARSE_PAIR_SIDE_METRICS`。
+    `n_measured` 给稀疏那五项各报一个观测数,见 `SPARSE_PAIR_SIDE_METRICS`。
     """
     side: dict[str, Any] = {"n_runs": len(rows)}
     for metric in PAIR_SIDE_METRICS:
@@ -538,6 +545,12 @@ def render_markdown(report: dict) -> str:
              "variant run_wall_ms(n)",
              f"{OPTIMIZATION_BASELINE} model_calls_real(n)",
              "variant model_calls_real(n)",
+             # `context_rebuilds`(T-PD2):`off` 臂结构上不带这个观测,所以这一
+             # 列的基线格恒走 `_fmt_pair_metric` 既有的缺值显示(`unknown(n=0)`)
+             # ——两侧都印,而不是像 `prefix_bytes_median` 那样只印 variant 侧,
+             # 好让「off 上这件事压根不成立」在表面上看得见(评审 P3-2)。
+             f"{OPTIMIZATION_BASELINE} context_rebuilds(n)",
+             "variant context_rebuilds(n)",
              "variant prefix_bytes_median(n)"],
             [
                 [*(pair[dim] for dim in PAIR_DIMENSIONS),
@@ -545,7 +558,8 @@ def render_markdown(report: dict) -> str:
                  pair["baseline"]["n_runs"], pair["variant"]["n_runs"],
                  *(
                      _fmt_pair_metric(pair[label], metric)
-                     for metric in ("run_wall_ms", "model_calls_real")
+                     for metric in ("run_wall_ms", "model_calls_real",
+                                    "context_rebuilds")
                      for label in ("baseline", "variant")
                  ),
                  _fmt_pair_metric(pair["variant"], "prefix_bytes_median")]
