@@ -47,10 +47,14 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping, Sequence
 
-from app.domain.reasoning_trace_stats import assert_projection_values
+from app.domain.reasoning_trace_stats import (
+    REFLECT_CONTEXT_DETAIL_KEYS,
+    assert_projection_values,
+)
 from app.domain.retrieval_termination import ASPECT_UNKNOWN
 
 # --- 常量与闭集 ---------------------------------------------------------------
@@ -124,11 +128,27 @@ FORBIDDEN_ID_KEYS: frozenset[str] = frozenset({
     "notebook_id", "notebook", "chunk_id", "element_id", "id_",
 })
 
-#: 值里不许出现的 id / 连接串片段。三个 id 前缀是仓库里真实在用的
-#: (`nb-…` / `src-…` / `ko-…`),后面几个挡住凭据与生产 URL(§8.2)。
+#: 三个 id 前缀(仓库里真实在用的 `nb-…` / `src-…` / `ko-…`)需要**词首锚**:
+#: 不锚的话两三个字母的短前缀会在一段普通词中间意外命中("gecko-3" 这类词的
+#: 中段就含 `ko-`),把一句正常题面误判成带 id 片段。锚点放宽到「串首,或紧跟在
+#: 空白/左括号/左方括号之后」,`"ko-deadbeef01 的邻居"`(合法阳性用例)仍然
+#: 命中在串首。
+_ID_PREFIX_FRAGMENTS: tuple[str, ...] = ("nb-", "src-", "ko-")
+_ID_PREFIX_PATTERN: re.Pattern[str] = re.compile(
+    r"(?:^|[\s(\[])(?:" + "|".join(re.escape(p) for p in _ID_PREFIX_FRAGMENTS)
+    + ")"
+)
+
+#: 凭据与生产 URL 片段(§8.2)。这几个自带足够长的强特征串(`://`),不需要
+#: 词首锚——它们不会在普通中文/英文题面里意外出现。
+_UNANCHORED_VALUE_FRAGMENTS: tuple[str, ...] = (
+    "postgresql://", "postgres://", "http://", "https://",
+)
+
+#: 值里不许出现的 id / 连接串片段(供文档与外部读者查阅的**闭集**;实际匹配
+#: 分两条尺子,见 `_ID_PREFIX_PATTERN` / `_UNANCHORED_VALUE_FRAGMENTS`)。
 FORBIDDEN_VALUE_FRAGMENTS: tuple[str, ...] = (
-    "nb-", "src-", "ko-", "postgresql://", "postgres://",
-    "http://", "https://",
+    *_ID_PREFIX_FRAGMENTS, *_UNANCHORED_VALUE_FRAGMENTS,
 )
 
 #: 语料格闭集。E2 只用这两格:「有图 / 无图」由格承载而不由图动作承载
@@ -228,7 +248,12 @@ def _assert_no_database_ids(case_key: str, case: Mapping) -> None:
             _reject(case_key, f"carries a database id slot at {path}")
         if isinstance(value, str):
             lowered = value.lower()
-            for fragment in FORBIDDEN_VALUE_FRAGMENTS:
+            if _ID_PREFIX_PATTERN.search(lowered):
+                _reject(
+                    case_key,
+                    f"carries a forbidden id-prefix fragment at {path}",
+                )
+            for fragment in _UNANCHORED_VALUE_FRAGMENTS:
                 if fragment in lowered:
                     _reject(
                         case_key,
@@ -355,11 +380,24 @@ def _assert_settings_overrides(case_key: str, overrides: object) -> Mapping:
             "settings_overrides may never touch the rendering budget key(s): "
             + ", ".join(sorted(hit)),
         )
-    for key in overrides:
+    for key, value in overrides.items():
         if key not in SETTINGS_OVERRIDE_WHITELIST:
             _reject(case_key, f"settings_overrides key {key!r} is not whitelisted")
         if key not in Settings.model_fields:
             _reject(case_key, f"settings_overrides key {key!r} is not a Settings field")
+        # 两个白名单键都是检索上限计数,不是任意整数:`model_copy(update=...)`
+        # 不跑校验器,而 `reasoning_max_element_searches` 这类字段在 `Settings`
+        # 上连 `ge=0` 都没有,所以一个 JSON 里的 `"1"` 字符串或一个 `-1`/`0` 能
+        # 一路混到真跑——前者在 `reasoning_retrieval` 里炸一个裸 `TypeError`,
+        # 后者让那一例的检索通道整轮悄悄跑在「额度已耗尽」这个它没声明的状态上,
+        # 五道事后核一条都不管值合不合法。`bool` 单独挡:`isinstance(True, int)`
+        # 为真,不挡的话 `True` 会被当 1 用。
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            _reject(
+                case_key,
+                f"settings_overrides value {key}={value!r} must be an int "
+                ">= 1 (both whitelisted keys are retrieval caps)",
+            )
     return dict(overrides)
 
 
@@ -404,6 +442,16 @@ def load_state_probe_cases(raw: Mapping) -> list[StateProbeCase]:
         case_key = case.get("case_key")
         if not isinstance(case_key, str) or not case_key:
             raise ValueError(f"state probe case #{position} has no case_key")
+        # `case_key` 是 `PROBE_ROW_KEYS` 成员,要过 `assert_probe_row_closed` 的
+        # 短码闸(≤64 字符、无空白、`[A-Za-z0-9_:\-.+]`)——它是这份闭集里**唯一**
+        # 会真的进行的一格,加载器却此前只校了「非空串」。不在这里提前拦住的话,
+        # 一个形状不合的 case_key 要等到 `build_probe_row` 才被
+        # `assert_probe_row_closed` 拒:那时那一次真模型调用与那一轮 embedding
+        # 已经烧掉了。
+        try:
+            assert_projection_values({"case_key": case_key})
+        except ValueError as exc:
+            _reject(case_key, f"case_key is not a short code: {exc}")
         if case_key in seen:
             _reject(case_key, "case_key is used twice")
         seen.add(case_key)
@@ -734,9 +782,11 @@ class ProbeModelClients:
 
     `_construct_reasoning_retriever` 把整个 repository 当 `model_clients` 用,
     同时还从它取 `retrieval` / `collection_catalog` / `collection_enumeration`
-    / `settings`。所以这个代理走 `__getattr__` **全量委托**,只在 `chat()` 上
-    分一次岔:`reasoning_agent` 给驱动器,其余(embedding / rerank / 合成)原样
-    透传给真 repo。
+    (`settings` **不在这份清单里**——它是 `_construct_reasoning_retriever` 的
+    显式参数,这里传的是 `_settings_with_case_overrides` 套出的那份臂配置
+    副本,不经 `model_clients`/`repository` 取)。所以这个代理走 `__getattr__`
+    **全量委托**,只在 `chat()` 上分一次岔:`reasoning_agent` 给驱动器,其余
+    (embedding / rerank / 合成)原样透传给真 repo。
 
     截住全部 workload 是一条很容易顺手写下的「简化」,而它会静默毁掉这批数据:
     检索必须的 `retrieval_query_embedding` 是 E2 剩下的唯一一处真实模型消耗
@@ -771,6 +821,25 @@ class ProbeModelClients:
 
 
 # --- 闭集记录面 ---------------------------------------------------------------
+
+#: `build_probe_row` 五块字符数 + 总字节数所读的六个 reflect 步 detail 键。
+#: 写侧真源是 `REFLECT_CONTEXT_DETAIL_KEYS`(`app/domain/reasoning_trace_stats.py`,
+#: 其 docstring 明写「要改短码就同 diff 改掉读侧全部消费点」)——这里在**导入期**
+#: 对一次值域,写侧某天把某个短码的落点改名而这份读键清单没跟上,当场
+#: `AssertionError`,而不是让那一格在 12 例的产物上静默变成 `None`(读表人会把
+#: 「没量到」错读成「没有」;§9.2 的 D↔L 块规模比较全靠这几列)。
+_CTX_CHAR_DETAIL_READ_KEYS: frozenset[str] = frozenset({
+    "ctx_chars_s", "ctx_chars_c", "ctx_chars_k", "ctx_chars_d", "ctx_chars_t",
+    "ctx_bytes_total",
+})
+_missing_ctx_detail_keys = _CTX_CHAR_DETAIL_READ_KEYS - frozenset(
+    REFLECT_CONTEXT_DETAIL_KEYS.values())
+if _missing_ctx_detail_keys:
+    raise AssertionError(
+        "reflect_state_probe's context-char read keys drifted from "
+        "REFLECT_CONTEXT_DETAIL_KEYS: " + ", ".join(sorted(_missing_ctx_detail_keys))
+    )
+del _missing_ctx_detail_keys
 
 #: E2 逐格投影行的**全部**顶层键(Q6 原文)。隐私守卫按它断言
 #: `set(row) ⊆` 这个集合,所以往行里加一个 `decision_reason` 原文会直接把用例
@@ -1054,8 +1123,16 @@ def _summarize_cell(rows: Sequence[Mapping]) -> dict[str, Any]:
         "n_local_cache_exit": sum(
             1 for value in statuses if value == PROBE_LOCAL_CACHE_EXIT_STATUS),
         "n_status_unknown": sum(1 for value in statuses if value is None),
-        "n_decision_unreadable": sum(
+        # 「压根没有载荷可读」(转发失败 / 非 JSON 对象,`_decision_facts` 的
+        # `None` 口径,已被 `n_failed` 数过一遍)与「模型给了个决定、但
+        # `next_action` 读不成短码」(`PROBE_UNREADABLE_ACTION`)是两件事,§9.2
+        # 「失败/格式不符单列」的「格式不符」专指后者——共用一格会让报告的作者
+        # 分不清 108 行里 30 行 prose action 与转发失败混在一起。
+        "n_decision_absent": sum(
             1 for row in rows if row.get("decision_action") is None),
+        "n_decision_unreadable_action": sum(
+            1 for row in rows
+            if row.get("decision_action") == PROBE_UNREADABLE_ACTION),
         "n_boundary_reached": sum(
             1 for row in rows if row.get("compaction_boundary_reached") is True),
         "n_boundary_not_reached": sum(
