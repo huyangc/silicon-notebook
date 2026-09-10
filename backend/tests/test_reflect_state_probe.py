@@ -4,12 +4,24 @@
 §2 Q5/Q6 与 §3 T-EX5 / T-EX6;设计真源
 `docs/superpowers/specs/2026-09-09-reflect-prefix-cache-final-design_zh.md` §9.2。
 
-本文件分两节。**形态覆盖对账 + 逐例形状校验**(T-EX6)在下面这一节里,它刻意
-**不**经过 T-EX5 的 `load_state_probe_cases`:那个加载器是「畸形当场响亮失败」
-的实现,拿它来对账等于让被测者自己出考题——加载器哪天把一条约束松掉,这一节
-照样绿。所以这里用自己的 `_load_cases_raw()` 直接读 JSON,判据逐条从计划的
-Q5/T-EX6 抄下来。驱动器与代理那一节(T-EX5)自带 `load_state_probe_cases` 的
-用例族,两节各自守自己的那一半。
+本文件目前只有**形态覆盖对账 + 逐例形状校验**(T-EX6)这一节;它刻意**不**经过
+T-EX5 的 `load_state_probe_cases`:那个加载器是「畸形当场响亮失败」的实现,拿它
+来对账等于让被测者自己出考题——加载器哪天把一条约束松掉,这一节照样绿。所以
+这里用自己的 `_load_cases_raw()` 直接读 JSON,判据逐条从计划的 Q5/T-EX6 抄下来。
+T-EX5 落地后,驱动器与代理那一节(自带 `load_state_probe_cases` 的用例族)会并入
+本文件,两节各自守自己的那一半。
+
+## 汇合义务(T-EX6 评审留档,T-EX5 落地时对齐)
+
+1. `state_probes.json` 每例的两个新键 `question_key` / `probe_shape`;
+2. 剧本步的可选键 `assessment`(值形状见 `test_each_case_assessment_only_references_its_own_aspects`);
+3. `settings_overrides` 白名单收窄到两个检索上限键
+   (`reasoning_max_element_searches` / `reasoning_max_chunk_searches`),
+   渲染预算键(`reasoning_reflect_state_chars` /
+   `reasoning_reflect_evidence_chars_by_effort`)任何 case 都不得覆盖;
+4. `zero_hit` 形态的哨兵前缀 `absent_probe.`;
+5. `STATE_PROBES_PATH` 归 `app.eval.reflect_t0` 包导出,与 `QUESTIONS_PATH`
+   同处——不要在 T-EX5 的加载器模块里另起一份。
 """
 from __future__ import annotations
 
@@ -19,15 +31,13 @@ from typing import Any, Iterator
 
 import pytest
 
-from app.eval.reflect_t0 import QUESTIONS_PATH, load_questions
-
-STATE_PROBES_PATH = QUESTIONS_PATH.parent / "state_probes.json"
+from app.eval.reflect_t0 import QUESTIONS_PATH, STATE_PROBES_PATH, load_questions
 
 #: 期望的例数(计划 T-EX6 的形态表)。写死是判据的一半:少一例的 case 集照样
 #: 能过「每种形态至少一例」,而 §9.2 要的是 12 例。
 EXPECTED_CASE_COUNT = 12
 
-#: 形态 → 期望例数。八种形态、12 例,逐格与计划 T-EX6 的表对齐。
+#: 形态 → 期望例数。九种形态、12 例,逐格与计划 T-EX6 的表对齐。
 EXPECTED_SHAPE_COUNTS: dict[str, int] = {
     "single_fact": 2,
     "complex_condition": 2,
@@ -68,11 +78,22 @@ FORBIDDEN_VALUE_FRAGMENTS = (
 
 #: `settings_overrides` 的白名单(Q5 第三条)。字段名逐字来自
 #: `app.core.config.Settings`,拼错会被下面的用例当场抓住。
+#:
+#: 只收两个**检索上限**键——Q5 只点名三种造形态用法(元素额度=1 / 同查询两轮 /
+#: 必然零命中),从未授权动渲染预算旋钮。渲染预算键单独关进
+#: `FORBIDDEN_OVERRIDE_KEYS`,两处判据独立存在:白名单万一哪天被放宽,下面那条
+#: 显式断言仍单独兜底。
 SETTINGS_OVERRIDE_WHITELIST = frozenset({
     "reasoning_max_element_searches",
     "reasoning_max_chunk_searches",
-    "reasoning_reflect_evidence_chars_by_effort",
+})
+
+#: 渲染预算键——它们是四臂(P/D/L 与既有 legacy)对照的默认前提。任何 case 都
+#: 不许覆盖它们:调小它们去逼出压缩边界,与调剧本去凑是同一件事的两种写法,
+#: 还会让被改的那一例跑在与其余十一例不可比的预算上(§9.2「缺数据不补造」)。
+FORBIDDEN_OVERRIDE_KEYS = frozenset({
     "reasoning_reflect_state_chars",
+    "reasoning_reflect_evidence_chars_by_effort",
 })
 
 #: 语料格闭集。E2 只用这两格:「有图 / 无图」由格承载而不由图动作承载
@@ -149,7 +170,7 @@ def test_the_case_set_has_exactly_the_twelve_planned_cases():
 
 @pytest.mark.parametrize("shape", sorted(EXPECTED_SHAPE_COUNTS))
 def test_every_planned_shape_has_at_least_one_case(shape: str):
-    """§9.2 点名的八种形态逐格有例。与上面那条**不是**重复:那条钉总数与分布,
+    """§9.2 点名的九种形态逐格有例。与上面那条**不是**重复:那条钉总数与分布,
     这条是逐形态参数化的,红的时候直接说出是哪一种形态丢了。"""
     assert _cases_by_shape(shape), shape
 
@@ -380,7 +401,8 @@ def test_each_case_freezes_a_usable_intent_contract(case_key: str):
 
 @pytest.mark.parametrize("case_key", sorted(_cases_by_key()))
 def test_each_case_settings_override_stays_inside_the_whitelist(case_key: str):
-    """Q5 第三条:覆盖只许落在白名单四个键上,而且必须是 `Settings` 真有的字段。
+    """Q5 第三条:覆盖只许落在白名单两个检索上限键上,而且必须是 `Settings`
+    真有的字段。
 
     白名单是字面量,`Settings` 是真源——两边对不上时(比如哪天字段改名)这条
     红,而不是让一份永远不生效的覆盖静静躺在 fixture 里。
@@ -394,6 +416,19 @@ def test_each_case_settings_override_stays_inside_the_whitelist(case_key: str):
     for key in overrides:
         assert key in SETTINGS_OVERRIDE_WHITELIST, f"{case_key}: {key}"
         assert key in Settings.model_fields, f"{case_key}: {key}"
+
+
+@pytest.mark.parametrize("case_key", sorted(_cases_by_key()))
+def test_no_case_overrides_the_rendering_budget_keys(case_key: str):
+    """独立于白名单的显式断言:即便白名单哪天被放宽,这条红线单独兜底。
+
+    变异:给 `sf-a-gsm8k` 加 `{"reasoning_reflect_state_chars": 200}`(企图借
+    调小渲染预算逼出 `context_rebuilds` 而不是让剧本自然跑到压缩边界)⇒ 这条
+    红——这正是三处收窄之一被否掉的那一招(§9.2「缺数据不补造」)。
+    """
+    overrides = _cases_by_key()[case_key].get("settings_overrides") or {}
+    hit = set(overrides) & FORBIDDEN_OVERRIDE_KEYS
+    assert not hit, (case_key, hit)
 
 
 def test_the_override_whitelist_matches_the_settings_fields_it_names():
@@ -517,3 +552,142 @@ def test_the_case_set_ships_next_to_the_question_set_it_references():
     assert STATE_PROBES_PATH.parent == QUESTIONS_PATH.parent
     assert STATE_PROBES_PATH.name == "state_probes.json"
     assert Path(STATE_PROBES_PATH).is_file()
+
+
+# --- (e) 剧本步真的解析成它声明的那个动作 -------------------------------------
+
+
+#: 剧本步的键闭集,按 `parse_reflect_v2` 实际读的键定(`app.services.
+#: reasoning_retrieval.parse_reflect_v2`):`next_action`/`sufficient`/
+#: `arguments` 是必填,`reason`/`assessment` 是它认但可以缺省的两个可选键。
+#: 闭集外的键(比如拼错的 `assesment`)不会报错——它只是被 `dict.get` 静默
+#: 忽略——所以形状判据要在 fixture 这一侧堵。
+SCRIPT_STEP_REQUIRED_KEYS = frozenset({"next_action", "sufficient", "arguments"})
+SCRIPT_STEP_OPTIONAL_KEYS = frozenset({"reason", "assessment"})
+
+
+def _full_house_capability_facts(*, kg_in_scope: bool) -> "ReflectCapabilityFacts":
+    """按语料格(kg / 无图)构造满额度事实,预算给到不可能被剧本吃穿的量。
+
+    与 `test_reasoning_retrieval._full_house_facts` 同构造(全部通道开着、预算
+    远超剧本长度),只按 `corpus_cell` 切一个变量。(c) 那条用例已经钉死剧本长度
+    ≤ `min(standard, deep).max_reasoning_steps == 8`,所以任何 `*_left` 给到
+    两位数就不可能因为预算耗尽把一次合法请求判成不可用——这里刻意**不**建模
+    `settings_overrides`(比如 `tool_exhausted` 例的元素额度=1):那是 run() 的
+    执行期状态机要管的事,这一节只回答"标签对了、剧本每一步是否也解析成模型
+    该看到的那个动作"。
+    """
+    from app.services.collection_catalog import (
+        ENUMERABLE_ELEMENT_KINDS, ENUMERABLE_KG_OBJECT_TYPES,
+    )
+    from app.services.reasoning_actions import ReflectCapabilityFacts
+
+    return ReflectCapabilityFacts(
+        kg_in_scope=kg_in_scope, scope_restricted=False, has_candidates=True,
+        chunk_search_active=True, exact_lookup_active=True, ppr_active=True,
+        community_active=True, enumeration_active=True,
+        consult_memory_active=True, outline_active=True,
+        element_searches_left=20, chunk_searches_left=20,
+        exact_lookups_left=20, ppr_left=20, follow_chain_left=20,
+        consult_left=20, outline_updates_left=20, enum_rows_left=2_000,
+        enum_pages_left=40, enum_payload_left=2_560_000,
+        element_kinds=tuple(ENUMERABLE_ELEMENT_KINDS),
+        object_types=tuple(ENUMERABLE_KG_OBJECT_TYPES),
+        last_turn=False, outline_repair_available=False,
+        terminal_overflow_repair=False,
+    )
+
+
+@pytest.mark.parametrize("case_key", sorted(_cases_by_key()))
+def test_each_case_script_step_only_uses_the_keys_parse_reflect_v2_reads(
+    case_key: str,
+):
+    """剧本步的键纳入闭集:必填三键齐全,闭集外的键一律拒。
+
+    变异:把某一步的 `assessment` 拼成 `assesment` ⇒ 这条红。拼错的键不会让
+    `parse_reflect_v2` 报错(它只是被 `dict.get` 静默忽略),所以那份自评会在
+    生产里悄悄失踪而不留任何痕迹——这条测的正是"闭集外有没有多余的键",不是
+    "解析会不会崩"。
+    """
+    case = _cases_by_key()[case_key]
+    for index, step in enumerate(case["script"], 1):
+        keys = set(step)
+        assert SCRIPT_STEP_REQUIRED_KEYS <= keys, (case_key, index, keys)
+        allowed = SCRIPT_STEP_REQUIRED_KEYS | SCRIPT_STEP_OPTIONAL_KEYS
+        assert keys <= allowed, (case_key, index, keys - allowed)
+
+
+@pytest.mark.parametrize("case_key", sorted(_cases_by_key()))
+def test_each_case_script_step_really_parses_into_its_declared_action(
+    case_key: str,
+):
+    """剧本每一轮真的过 `parse_reflect_v2`,解出的动作与那一轮声明的一致。
+
+    此前的用例只校 `next_action ∈ 闭集`、`sufficient is False`、`arguments`
+    是 dict,止步于键的类型——一个 case 声明 `next_action: "search_elements"`
+    却因为参数本身不合法而被解析成 `__reflect_invalid__` 伪动作,那些用例照样
+    绿。这条按语料格(kg / 无图)构造满额度 `ReflectCapabilityFacts`,把每一步
+    的原始字典喂给真 `parse_reflect_v2`,断言解出来的 `next_action` 就是那一步
+    声明的那个、且不是 `__reflect_invalid__`。
+
+    变异(均已手工验证按预期变红,未落盘):
+    - `sf-a-gsm8k` 第 3 轮的 `arguments.prefer` 从 `"balanced"` 改成
+      `"bogus"` ⇒ `invalid_argument:prefer`;
+    - `sf-b-jamba-ratio` 第 3 轮的 `arguments.types` 从 `["claim"]` 改成字符串
+      `"claim"` ⇒ `invalid_argument:types`;
+    - `lc-b-cost-survey` 第一步的 `arguments.object_type` 从 `"procedure"`
+      改成 `"method"`(不在 `ENUMERABLE_KG_OBJECT_TYPES` 白名单里)⇒
+      `invalid_argument:object_type`;
+    - `ro-b-source-roster` 第一步的 `arguments.collection` 从 `"sources"`
+      改成 `"kg_objects"` ⇒ `invalid_argument:collection`。
+    """
+    from app.services.reasoning_actions import build_reflect_capabilities
+    from app.services.reasoning_retrieval import (
+        REFLECT_INVALID_ACTION, parse_reflect_v2,
+    )
+
+    case = _cases_by_key()[case_key]
+    facts = _full_house_capability_facts(
+        kg_in_scope=case["corpus_cell"] == "B_kg")
+    caps = build_reflect_capabilities(facts)
+    for index, step in enumerate(case["script"], 1):
+        decision = parse_reflect_v2(step, caps)
+        assert decision.next_action != REFLECT_INVALID_ACTION, (
+            case_key, index, decision.invalid_reason)
+        assert decision.next_action == step["next_action"], (case_key, index)
+
+
+@pytest.mark.parametrize("case_key", sorted(_cases_by_key()))
+def test_each_case_assessment_only_references_its_own_aspects(case_key: str):
+    """剧本里出现的 `assessment`,只能引用**该例自己的契约**推出的方面 id。
+
+    方面 id 由 `build_aspect_ledger(intent_contract, question)` 按契约的
+    `mandatory_topics` 顺序确定性生成(`a1..aN`),不是 fixture 自己声明的
+    字面量——这条用真账本推出合法 id 集合,而不是重写一份形状判据。
+    `unresolved` 组的 `status` 还要落在 `ASPECT_UNRESOLVED_STATUSES` 闭集里。
+
+    变异:把 `cc-a-macro-arch` 第 5 轮的 `aspect_id` 从 `"a3"` 改成 `"a9"`
+    (该例契约只有 3 个必答方面,合法 id 顶多到 `a3`)⇒ 这条红。
+    """
+    from app.domain.retrieval_termination import ASPECT_UNRESOLVED_STATUSES
+    from app.services.reasoning_aspects import build_aspect_ledger
+
+    case = _cases_by_key()[case_key]
+    ledger = build_aspect_ledger(case["intent_contract"], case["question"])
+    valid_ids = {row.aspect_id for row in ledger.snapshot()}
+    assert valid_ids, case_key
+    for index, step in enumerate(case["script"], 1):
+        assessment = step.get("assessment")
+        if assessment is None:
+            continue
+        assert isinstance(assessment, dict), (case_key, index)
+        for group, statuses in (
+            ("supported", None), ("unresolved", ASPECT_UNRESOLVED_STATUSES),
+        ):
+            for row in assessment.get(group, []):
+                assert isinstance(row, dict), (case_key, index, group, row)
+                assert row.get("aspect_id") in valid_ids, (
+                    case_key, index, group, row)
+                if statuses is not None:
+                    assert row.get("status") in statuses, (
+                        case_key, index, group, row)

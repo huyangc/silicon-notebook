@@ -10,6 +10,8 @@ import json
 from pathlib import Path
 
 QUESTIONS_PATH = Path(__file__).resolve().parent / "questions.json"
+#: E2(固定状态真实决策,T-EX6)的 12 例自包含 case 集,与题集同目录、同一个包。
+STATE_PROBES_PATH = QUESTIONS_PATH.parent / "state_probes.json"
 
 
 def load_questions() -> dict:
