@@ -348,9 +348,14 @@
         + `manifest.json`(+ `manifests.jsonl`)+ `calls-e1.jsonl`。详见 `scripts/README.md` 的
         `prefix-probe` 小节。
       * **E2「固定状态的真实 reflect 对照」**（驱动器 `backend/app/eval/reflect_state_probe.py`
-        与 12 例 case 集 `backend/app/eval/reflect_t0/state_probes.json` 已落地；rig 子命令
-        `state-probe` **尚未合入本轮**）：详见 T-EX11b（合入后补 `scripts/README.md` 的
-        `state-probe` 小节与本条已知限制）。
+        与 12 例 case 集 `backend/app/eval/reflect_t0/state_probes.json`；rig 子命令
+        `state-probe`，`scripts/reflect_shadow_rig.py`，已落地）：驱动器把前 k 轮按剧本
+        重放（零真实调用，四臂逐格相同），只在第 k+1 轮把两条消息原样转发给真客户端调
+        一次并留存决定，四臂在同一状态点上按 `initial`/`follow_up`/`compaction_boundary`
+        三档分别报告；产物 `state-probe-<arm>.jsonl`/`state-probe-summary.{md,json}`/
+        `calls-<arm>.jsonl`/`manifest.json`(+ `manifests.jsonl`)/
+        `raw/<case>-<point>-<arm>-<repeat>.json`。详见 `scripts/README.md` 的
+        `state-probe` 小节。
       * **E3「真实自主循环」**：在既有 `ab` 上补整批墙钟预算（`--max-wall-minutes`，到点停止派发、
         保留未完成/不成对标记，不补跑到矩阵齐全）+ manifest 收尾。
       * **manifest 纯构造**（`backend/app/eval/reflect_manifest.py`）：三条通道共用 18 键闭集 +
@@ -385,8 +390,13 @@
         `ab` 臂上，本期一格未动。
       * **E3 的臂序按 run 无种子**：`arm_order_seed` 恒 `null`（M4），键本身必须在场，是否要给
         E2/E3 加臂序种子交用户拍板。
-      * **E2 的图动作缺口、`message_prefix_bytes` 恒 `None`、`compaction_boundary_reached` 三值
-        报告等 state-probe 专属限制**：详见 T-EX11b（rig 子命令合入之后补齐）。
+      * **E2 的图动作缺口、臂序按重复轮号奇偶交替（非随机）、无整批墙钟预算、per-call 表
+        无 `state_point` 标签、`_test` 判据与 `ab` 分叉**：剧本里不允许出现
+        `expand_graph`/`follow_chain`/`ppr_retrieve`（必填参数是候选池里的 `object_id`，
+        驱动器只看得见渲染后的文本，给不出真实候选 id）；`message_prefix_bytes` 恒
+        `None`、`compaction_boundary_reached` 三值（`None`=该臂无此观测，`unknown≠False`）
+        是结构性的（非缺陷）。逐条细节与归因边界见 `scripts/README.md` 的
+        `state-probe` 小节。
       * **gold 与 judge 仍未做**（U1 拍板走 (b) 人工盲审替代，不补 T-AB1/T-AB3）：§10.2-1 在没有
         人工盲审记录时只能记「未验证」，不能读成「通过」。
       * **三条通道的实际收益一个数都还没量**：本期交付的是可重跑命令、产物形状与 manifest，不是
