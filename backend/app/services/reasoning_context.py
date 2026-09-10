@@ -688,9 +688,9 @@ def build_delta_evidence_block(
     2. **排除 `already_shown`**:此刻还在消息里的卡都被挡在门外。同一条证据在一条
        消息里出现两遍,模型无从判断哪一份是此刻的。
 
-       `already_shown` 要的是**当前可见集**(`ReflectDeltaState.visible_keys` =
-       当前 K 的键 ∪ 当前所有 D 块的键),**不是** `frozen_cards` 那份"曾展示"的
-       字节表。两者在第一次重建之前恰好相等,之后就不再相等:重建会清空 `blocks`
+       `already_shown` 要的是**当前可见集**(`ReflectDeltaState.snapshot_keys ∪
+       block_keys` = 当前 K 的键 ∪ 当前所有 D 块的键),**不是** `frozen_cards` 那份
+       "曾展示"的字节表。两者在第一次重建之前恰好相等,之后就不再相等:重建会清空 `blocks`
        并按新预算收缩 K,于是一批曾经展示过的卡既不在消息里了、又会被"曾展示"口径
        永久挡在增量之外——它对模型从此不可见,而且不进任何一个 `omitted`(它被记成
        "已展示")。传当前可见集之后,这些卡会经正常档序回到某一块 D,复用
@@ -1100,8 +1100,8 @@ class ReflectDeltaState:
     整份抖出来;遮它遮的是那份键集,不是那几个版本号。
 
     其余几格留着 `repr`:`observation_cursor`/`evidence_chars`/`history_chars`/
-    `rebuilds`/`fallback`/`generation`/`rebuilt_last_turn`/`supplement_cursor` 都是
-    纯计数与开关,正是出问题时最该看得见的东西;`visible_keys` 也留着——它只有池键、
+    `rebuilds`/`fallback`/`generation`/`rebuilt_last_turn`/`supplement_last_key` 都
+    是纯计数、开关与一个池键;`snapshot_keys`/`block_keys` 也留着——它们只有池键、
     没有任何正文,而"此刻消息里还剩哪些卡"恰恰是 delta 出问题时第一个要看的东西。
 
     * `snapshot_evidence` / `snapshot_history` —— 当前这一版 K 的两块字节。
@@ -1111,13 +1111,19 @@ class ReflectDeltaState:
       **它是"曾展示"的字节表,只增不减**:一张卡离开 K 之后以后再经增量档序回到某
       一块 D 时,复用的就是表里这串字节(设计 §4.4 的"可从已有内存池恢复",而且不
       违反"展示后保持不变")。
-    * `visible_keys` —— **此刻还在消息里**的那些键 = 当前 K 的键 ∪ 当前**所有**已
-      发出的 D 块的键。`build_delta_evidence_block(already_shown=…)` 要的是这一格,
-      不是 `frozen_cards`:那一格是"曾展示",拿它当"当前可见"用,一次重建之后
-      (`blocks` 清空、K 收缩)就会有一批卡既不在消息里、又被永久挡在增量之外。重建
-      时这一格随 K 收缩(与 `blocks` 同时清账),`frozen_cards` 不动——模块 docstring
-      里"在池子里 / 曾经展示过 / 此刻还在消息里"是三件事,这里就是那三件事各占一格
-      的落点(池子本身不在这个对象里,见硬约束 b)。
+    * `snapshot_keys` / `block_keys` —— **此刻还在消息里**的那些键,按"在哪一块里"
+      分成两格:当前这一版 K 渲染出来的键,与当前**所有**已发出 D 块里的键。
+      `build_delta_evidence_block(already_shown=…)` 要的是这两格的并集,不是
+      `frozen_cards`:那一格是"曾展示",拿它当"当前可见"用,一次重建之后(`blocks`
+      清空、K 收缩)就会有一批卡既不在消息里、又被永久挡在增量之外。重建时前一格
+      随 K 整体替换、后一格随 `blocks` 清空,`frozen_cards` 不动——模块 docstring 里
+      "在池子里 / 曾经展示过 / 此刻还在消息里"是三件事,这里就是第三件事的落点
+      (池子本身不在这个对象里,见硬约束 b)。
+      **分两格而不是存一份并集**:回退之后 K 由 P 的有界选择每轮重建,而上文里那几
+      块 D 原样留着(拍板 Q4),于是那一支要问的问题是"**保留 D 里**已经可见的是哪
+      些键"——它必须把它们排除在新 K 之外,否则同一条证据在一条消息里出现两遍、两遍
+      都不带版本标记(§5 风险 4)。存一份并集的话这个问题答不出来:里面还混着那一版
+      被替换掉的 K 的键,而那些键已经不在消息里了,排除它们等于让它们此后永不可见。
     * `card_variants` —— 键 → 这个键已经发出去过的**每一份卡片渲染**。同一段摘录
       不追加第二张补充卡(设计 §4.4),判据就是这一格。
     * `card_versions` —— 键 → 已经发到第几版(原卡是 1)。
@@ -1128,6 +1134,9 @@ class ReflectDeltaState:
       函数带着两处消费副作用,搬进一块再也不重渲染的 D 里就永远消费不掉了)。
     * `evidence_chars` / `history_chars` —— delta 下两个池子的**累计**用量
       (K + 所有 D),不是每轮各拿一份满额(设计 §5.1)。判断在追加**之前**做。
+      回退时这两格**收缩成保留 D 那一半**(减去那一版 K 的两块字节):回退之后 K 由
+      P 的有界选择每轮重建,而它要的正是"上文里那几块 D 已经占掉多少",剩下的才是
+      这一轮 K 的额度。留着"K + D"的旧值会把一版已经不在消息里的 K 算进去。
     * `rebuilds` / `fallback` / `generation` —— 重建过几次、是否已经不可逆地退回
       P 的有界选择(拍板 Q4)、当前是第几版快照。
     * `rebuilt_last_turn` —— 上一轮是不是刚重建过。重建的**迟滞**判据就这一格:
@@ -1135,16 +1144,20 @@ class ReflectDeltaState:
       一次是纯空转(每轮 1 次全池 `build_evidence_block` + K 重写 ⇒ 公共前缀塌回
       只剩 C,这条臂在它自己要改进的两个轴上反而比 `prefix_snapshot` 更贵)。那时
       走回退而不是第二次重建。
-    * `supplement_cursor` —— 补充卡候选的**轮转起点**,单调只增。候选集是"本轮已
-      绑定 ∩ 曾展示",而每轮只取前 `max_cards` 个:不轮转的话队首那几个键每轮被重
-      算一遍摘录,队尾的键永远等不到自己那一轮。
+    * `supplement_last_key` —— 补充卡**上一轮服务的最后一个键**,轮转的续接点。候选
+      集是"本轮已绑定 ∩ 曾展示",而每轮只取 `max_cards` 个:不轮转的话队首那几个键
+      每轮被重算一遍摘录,队尾的键永远等不到自己那一轮。存**键**而不是位置:候选序
+      的长度与顺序每轮都会变(方面新绑一个键就整段移位),按位置续接时"每轮左旋一
+      格"这种形态下同一批键会被反复取到,而队尾那个键一轮都轮不到。这个键不在候选
+      序里了(离开绑定或离开池子)⇒ 从头开始。
     """
 
     snapshot_evidence: str = field(default="", repr=False)
     snapshot_history: str = field(default="", repr=False)
     blocks: List[str] = field(default_factory=list, repr=False)
     frozen_cards: Dict[str, str] = field(default_factory=dict, repr=False)
-    visible_keys: Set[str] = field(default_factory=set)
+    snapshot_keys: Set[str] = field(default_factory=set)
+    block_keys: Set[str] = field(default_factory=set)
     card_variants: Dict[str, Set[str]] = field(
         default_factory=dict, repr=False)
     card_versions: Dict[str, int] = field(default_factory=dict, repr=False)
@@ -1156,7 +1169,7 @@ class ReflectDeltaState:
     fallback: bool = False
     generation: int = 1
     rebuilt_last_turn: bool = False
-    supplement_cursor: int = 0
+    supplement_last_key: str = ""
 
     def note_shown(self, key: str, text: str) -> None:
         """一张**真的渲染出去**的卡:第一次见到就冻结它的字节。
@@ -1274,7 +1287,7 @@ class ReflectContext:
         carried = [
             name for name in self._PREFIX_ONLY_FIELDS if getattr(self, name)]
         if carried:
-            # 生产不可达(`off` 分支这三格恒为空串,legacy/Knowhow 传 None),可达
+            # 生产不可达(`off` 分支这四格恒为空串,legacy/Knowhow 传 None),可达
             # 的只有「策略位在一轮中途翻了」与窄调用方手搓上下文两种形态。抛而不
             # 是丢:普通 Ask 的 fail-open 合同会把它记成一条降级观察,fail_closed
             # 调用方照抛——两种都比"这一轮少了一半事实、轨迹上看不出来"好。
