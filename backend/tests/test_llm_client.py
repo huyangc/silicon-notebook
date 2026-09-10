@@ -1,8 +1,10 @@
 """Regression tests for the LLM client's fail-fast behavior: a stalled
 connection must NOT be amplified into a ~6-minute block by SDK auto-retries or
 by the JSON-mode -> plain-mode fallback."""
+import ast
 import json
 import threading
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
@@ -477,7 +479,11 @@ def test_serialize_provider_messages_rejects_a_non_mapping_element():
 #   * open seam   => head at index 0, tail appended, caller mappings unmutated;
 #   * both markers reach `llm_key`, so a probe arm is never served a local
 #     cached reply it believes it timed;
-#   * exactly one `.set()` point, and no business layer can reach it.
+#   * exactly one `.set()` point, and nothing under `backend/app` except
+#     `app/core/llm.py` itself (where the seam lives) and `app/eval/` (the
+#     probe harness) may name either the context var or the context manager —
+#     by import, bare reference, attribute access or the raw string
+#     `"_EXPERIMENT_MARKERS"` handed to `getattr`.
 
 #: Byte transcription of the wrapper as of the pre-seam baseline. Spelled here
 #: rather than imported from the module under test so that a reworded wrapper
@@ -488,12 +494,6 @@ _PRE_SEAM_WRAPPER = (
     "silicon-notebook. Return valid JSON only, no markdown fences. "
     "Schema hint: "
 )
-
-#: The pre-seam baseline commit, whose `llm.py` the parallel-load test below
-#: loads and compares against. It is the branch point of the change that added
-#: the seam, so it stays reachable in any full clone.
-_PRE_SEAM_BASELINE_SHA = "a61e81bb5fb7d3e9338348a25b713b89a39519ff"
-
 
 def _pre_seam_provider_messages(messages, response_schema_hint):
     """`provider_messages` as it read before the marker seam existed."""
@@ -617,60 +617,36 @@ def test_chat_json_sends_the_pre_seam_bytes_while_the_seam_is_closed(monkeypatch
         ]
 
 
-def test_provider_messages_matches_the_baseline_commits_own_module(tmp_path):
-    """(T-EX2-a) Belt-and-braces: load the PRE-SEAM module and compare.
+def test_provider_messages_matches_the_pre_seam_fixture_module():
+    """(T-EX2-a) Belt-and-braces: compare against a checked-in pre-seam copy.
 
-    The transcription in this file is an independent copy of one expression;
-    this test compares against the real thing, by loading the baseline commit's
-    `llm.py` under a second module name and running both implementations over
-    the same groups. It answers the objection that a transcription could be
-    wrong in the same direction as the change.
+    The transcription in this file (`_pre_seam_provider_messages`) is an
+    independent copy of one expression; this test compares against a SECOND
+    independent copy — `tests/fixtures/llm_provider_messages_pre_seam.py` — so
+    a transcription error here cannot silently agree with a transcription
+    error there.
 
-    It needs the baseline blob, so it SKIPS where history is not available —
-    notably CI, which checks out at depth 1. That is why it is the second
-    guard and not the only one: the two tests above carry this property in
-    every environment, and this one strengthens it wherever the repository is
-    a full clone (i.e. on the machine that wrote the change).
+    That fixture is a hand-written file checked into the repo, not a git blob
+    loaded by SHA: an earlier version of this guard loaded the pre-seam
+    commit's own `llm.py` via `git show <sha>:...`, which SKIPPED wherever
+    that commit was unreachable — always true in CI's depth-1 checkout, and,
+    once this feature branch merges (a squash merge in particular), true
+    everywhere else too, turning the guard into a permanent no-op. A file has
+    no such expiry.
     """
-    import importlib.util
-    import subprocess
-    from pathlib import Path
-
-    root = Path(__file__).resolve().parents[2]
-    try:
-        blob = subprocess.run(
-            [
-                "git",
-                "-C",
-                str(root),
-                "show",
-                f"{_PRE_SEAM_BASELINE_SHA}:backend/app/core/llm.py",
-            ],
-            capture_output=True,
-            check=True,
-        ).stdout
-    except (OSError, subprocess.CalledProcessError) as exc:
-        pytest.skip(f"pre-seam baseline module unavailable: {exc!r}")
-
-    source = tmp_path / "llm_pre_seam.py"
-    source.write_bytes(blob)
-    spec = importlib.util.spec_from_file_location("llm_pre_seam", source)
-    baseline = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(baseline)
-
-    # The loaded module really is the pre-seam one: it has no seam to read.
-    assert not hasattr(baseline, "experiment_message_markers")
-    assert not hasattr(baseline, "_EXPERIMENT_MARKERS")
+    from tests.fixtures.llm_provider_messages_pre_seam import (
+        provider_messages as pre_seam_provider_messages,
+    )
 
     groups = _equivalence_groups()
     assert len(groups) >= 200
     for messages, hint in groups:
-        was = baseline.provider_messages(messages, hint)
+        was = pre_seam_provider_messages(messages, hint)
         assert provider_messages(messages, hint) == was
         assert provider_messages(messages, hint, markers=None) == was
         assert serialize_provider_messages(
             provider_messages(messages, hint)
-        ) == baseline.serialize_provider_messages(was)
+        ) == serialize_provider_messages(was)
 
 
 def test_marker_head_is_the_first_message_ahead_of_the_wrapper():
@@ -767,6 +743,52 @@ def test_marker_tail_appends_to_a_copy_and_leaves_the_caller_alone():
     ]
 
 
+@pytest.mark.parametrize("head,tail", [(None, "TL-0000"), (0, "TL-0000"),
+                                        (b"HD-0000", "TL-0000"),
+                                        ("HD-0000", None), ("HD-0000", 0),
+                                        ("HD-0000", b"TL-0000")])
+def test_experiment_message_markers_rejects_non_str_markers(head, tail):
+    """(T-EX2-c2) A non-``str`` marker raises loudly instead of coercing.
+
+    The seam used to call ``str(head)``/``str(tail)`` on whatever it was
+    given, so a probe bug that passed ``0`` or ``None`` would silently arm
+    the seam with the STRING ``"0"``/``"None"`` — a value nobody chose and a
+    request nobody could tell apart from an intentional marker. Failing at
+    the ``with`` statement instead means the bug surfaces where it was made.
+
+    Mutation: reinstate ``str(head)``/``str(tail)`` in the setter and this
+    stops raising (a `TypeError`/`AttributeError` from elsewhere is not the
+    same failure and does not satisfy `pytest.raises(ValueError)`).
+    """
+    assert llm_mod._EXPERIMENT_MARKERS.get() is None
+    with pytest.raises(ValueError):
+        with experiment_message_markers(head, tail):
+            pass
+    # A rejected open must not leave anything armed for what runs next.
+    assert llm_mod._EXPERIMENT_MARKERS.get() is None
+
+
+@pytest.mark.parametrize("head,tail", [("", "TL-0000"), ("HD-0000", "")])
+def test_experiment_message_markers_rejects_empty_markers(head, tail):
+    """(T-EX2-c3) An empty-string marker is not a quieter way to say "closed".
+
+    The control-arm / disturbed-arm contrast a probe measures can only be
+    expressed by which end is INSIDE this block versus outside it, never by a
+    marker's own value — so ``("", "TL-0000")`` must not be treated as "head
+    is off": it still arms the seam, still costs a ContextVar read on every
+    call inside the block, and still collides every such call onto one
+    `llm_key` regardless of what the caller thought it was varying.
+
+    Mutation: drop the ``not head`` / ``not tail`` half of either check
+    (keeping only the `isinstance` half) and this stops raising.
+    """
+    assert llm_mod._EXPERIMENT_MARKERS.get() is None
+    with pytest.raises(ValueError):
+        with experiment_message_markers(head, tail):
+            pass
+    assert llm_mod._EXPERIMENT_MARKERS.get() is None
+
+
 def test_experiment_marker_scope_resets_on_every_exit():
     """(T-EX2-d) The scope resets after a normal exit AND after a raise.
 
@@ -806,6 +828,21 @@ def test_experiment_marker_scope_resets_on_every_exit():
     assert markers.get() is None
 
 
+#: Shared by the two seam-AST guards below (T-EX2-e/f): both walk every
+#: `.py` file under `app/`, and re-parsing the same tree twice per test run
+#: buys nothing. Keyed by resolved path so a mutation test pointed at its own
+#: synthetic `tmp_path` tree never collides with the real repo's entries.
+_SEAM_GUARD_AST_CACHE: dict[Path, ast.AST] = {}
+
+
+def _cached_ast(path: Path) -> ast.AST:
+    tree = _SEAM_GUARD_AST_CACHE.get(path)
+    if tree is None:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=path.name)
+        _SEAM_GUARD_AST_CACHE[path] = tree
+    return tree
+
+
 def test_experiment_markers_are_set_in_exactly_one_place():
     """(T-EX2-e) AST guard: `_EXPERIMENT_MARKERS.set(` has ONE holder.
 
@@ -819,14 +856,11 @@ def test_experiment_markers_are_set_in_exactly_one_place():
     Mutation: arm the ContextVar anywhere else under ``backend/app`` — inside
     another function, or at module level — and this fires.
     """
-    import ast
-    from pathlib import Path
-
     app_root = Path(__file__).resolve().parents[1] / "app"
     holders: list[tuple[str, str]] = []
     total = 0
     for path in sorted(app_root.rglob("*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=path.name)
+        tree = _cached_ast(path)
         relative = path.relative_to(app_root.parents[1]).as_posix()
 
         def _arms(node):
@@ -856,49 +890,166 @@ def test_experiment_markers_are_set_in_exactly_one_place():
     assert total == len(holders), total
 
 
+#: Names that must appear NOWHERE outside `core/llm.py` (the seam's home) and
+#: `eval/` (the probe harness that is meant to open it).
+_FORBIDDEN_SEAM_NAMES = frozenset({"experiment_message_markers", "_EXPERIMENT_MARKERS"})
+
+
+def _experiment_seam_offenders(app_root: Path) -> list[str]:
+    """AST-scan every ``.py`` file under ``app_root`` — except
+    ``core/llm.py`` itself and everything under ``eval/`` — for any way of
+    naming the E1 experiment seam: an import, a bare ``Name`` reference, a
+    dotted ``Attribute`` access (``mod._EXPERIMENT_MARKERS``), or the raw
+    string handed to a ``getattr(...)`` bypass. Returns one
+    ``"<relative path>: <what>"`` entry per hit.
+
+    Parameterised on ``app_root`` rather than hard-coded to the real tree so
+    the production guard below and its mutation-verification counterpart run
+    the exact same scan and can never drift into checking different things.
+    """
+    app_root = app_root.resolve()
+    llm_module = app_root / "core" / "llm.py"
+    eval_root = app_root / "eval"
+    offenders: list[str] = []
+    for path in sorted(app_root.rglob("*.py")):
+        path = path.resolve()
+        if path == llm_module or path.is_relative_to(eval_root):
+            continue
+        tree = _cached_ast(path)
+        relative = path.relative_to(app_root.parents[1]).as_posix()
+        for node in ast.walk(tree):
+            named = (
+                node.attr
+                if isinstance(node, ast.Attribute)
+                else node.id
+                if isinstance(node, ast.Name)
+                else None
+            )
+            if named in _FORBIDDEN_SEAM_NAMES:
+                offenders.append(f"{relative}: {named}")
+            if (
+                isinstance(node, ast.Constant)
+                and isinstance(node.value, str)
+                and node.value in _FORBIDDEN_SEAM_NAMES
+            ):
+                offenders.append(f"{relative}: string {node.value!r}")
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                offenders += [
+                    f"{relative}: import {alias.name}"
+                    for alias in node.names
+                    if alias.name in _FORBIDDEN_SEAM_NAMES
+                ]
+    return offenders
+
+
 def test_no_business_layer_can_reach_the_experiment_seam():
-    """(T-EX2-f) Negative assertion: services/application never name the seam.
+    """(T-EX2-f) Negative assertion: nothing outside the seam's home reaches it.
 
     Design §9.1 refuses random markers in a production policy and refuses
     public request-level injection. The seam being a module-private ContextVar
     makes that easy to honour and impossible to verify by reading one file, so
-    the check is mechanical: no module under ``app/services`` or
-    ``app/application`` may import, reference or attribute-access either name.
+    the check is mechanical — and it must cover the WHOLE of ``backend/app``,
+    not a layer whitelist: a prior version of this guard only scanned
+    ``app/services`` and ``app/application``, so a leak written into
+    ``app/api``, ``app/domain`` or anywhere else would have passed silently.
+    Only ``core/llm.py`` (where the seam is defined) and ``eval/`` (the probe
+    harness meant to open it) are exempt.
 
     This is the risk register's item 1. The bad state does not crash: it just
     appends two meaningless segments to every request on that path and makes
     `llm_key` differ per call. Nothing in a log would look wrong.
     """
-    import ast
-    from pathlib import Path
-
-    forbidden = {"experiment_message_markers", "_EXPERIMENT_MARKERS"}
     app_root = Path(__file__).resolve().parents[1] / "app"
-    offenders: list[str] = []
-    for layer in ("services", "application"):
-        layer_root = app_root / layer
-        assert layer_root.is_dir(), layer
-        for path in sorted(layer_root.rglob("*.py")):
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=path.name)
-            relative = path.relative_to(app_root.parents[1]).as_posix()
-            for node in ast.walk(tree):
-                named = (
-                    node.attr
-                    if isinstance(node, ast.Attribute)
-                    else node.id
-                    if isinstance(node, ast.Name)
-                    else None
-                )
-                if named in forbidden:
-                    offenders.append(f"{relative}: {named}")
-                if isinstance(node, (ast.Import, ast.ImportFrom)):
-                    offenders += [
-                        f"{relative}: import {alias.name}"
-                        for alias in node.names
-                        if alias.name in forbidden
-                    ]
+    assert (app_root / "eval").is_dir()
+    assert (app_root / "core" / "llm.py").is_file()
 
-    assert offenders == [], offenders
+    assert _experiment_seam_offenders(app_root) == []
+
+
+def test_experiment_seam_guard_catches_every_bypass_style(tmp_path):
+    """(T-EX2-f mutation check) The scan above actually fires, five ways.
+
+    A negative-import assertion is only as strong as its coverage of HOW a
+    forbidden name can be spelled. Builds a synthetic ``backend/app`` tree
+    exercising five bypass shapes raised in review — attribute access (M7),
+    an aliased import (M8), the ``getattr(mod, "...")`` string bypass (M16),
+    the plainest possible ``with experiment_message_markers(...)`` (M17), and
+    a renamed import (M19) — spread across ``api/``, ``services/`` and
+    ``domain/`` so the OLD services/application whitelist would have missed
+    the ``api/`` and ``domain/`` ones. Also plants the two legitimate
+    exemptions (``core/llm.py``, ``eval/``) and one innocuous file, and checks
+    they do NOT get flagged.
+
+    Runs ``_experiment_seam_offenders`` — the identical function the
+    production guard calls — so this and that guard cannot silently diverge.
+    """
+    app_root = tmp_path / "backend" / "app"
+    for sub in ("core", "eval", "api", "services", "domain"):
+        (app_root / sub).mkdir(parents=True)
+
+    (app_root / "core" / "llm.py").write_text(
+        "import contextvars\n"
+        "_EXPERIMENT_MARKERS = contextvars.ContextVar('x', default=None)\n"
+        "def experiment_message_markers(head, tail):\n"
+        "    return _EXPERIMENT_MARKERS.set((head, tail))\n",
+        encoding="utf-8",
+    )
+    (app_root / "eval" / "probe.py").write_text(
+        "from app.core.llm import experiment_message_markers\n"
+        "with experiment_message_markers('h', 't'):\n"
+        "    pass\n",
+        encoding="utf-8",
+    )
+    (app_root / "api" / "clean.py").write_text(
+        '"""A normal API module that never touches the experiment seam."""\n'
+        "def handler():\n"
+        "    return {'ok': True}\n",
+        encoding="utf-8",
+    )
+    # M7: attribute access through an imported module alias.
+    (app_root / "api" / "attr_access.py").write_text(
+        "import app.core.llm as llm_mod\n"
+        "def peek():\n"
+        "    return llm_mod._EXPERIMENT_MARKERS.get()\n",
+        encoding="utf-8",
+    )
+    # M17: the plainest possible `with experiment_message_markers(...)`.
+    (app_root / "api" / "plain_with.py").write_text(
+        "from app.core.llm import experiment_message_markers\n"
+        "def run_probe():\n"
+        "    with experiment_message_markers('h', 't'):\n"
+        "        pass\n",
+        encoding="utf-8",
+    )
+    # M8: import, then a local alias name.
+    (app_root / "services" / "alias.py").write_text(
+        "from app.core.llm import _EXPERIMENT_MARKERS\n"
+        "_m = _EXPERIMENT_MARKERS\n",
+        encoding="utf-8",
+    )
+    # M19: a renamed import still names the ORIGINAL, not the alias.
+    (app_root / "domain" / "bare_import.py").write_text(
+        "from app.core.llm import _EXPERIMENT_MARKERS as _seam\n",
+        encoding="utf-8",
+    )
+    # M16: the getattr(mod, "string") bypass has no Name/Attribute node at all.
+    (app_root / "domain" / "getattr_bypass.py").write_text(
+        "import app.core.llm as llm_mod\n"
+        "def peek():\n"
+        "    return getattr(llm_mod, '_EXPERIMENT_MARKERS')\n",
+        encoding="utf-8",
+    )
+
+    offenders = _experiment_seam_offenders(app_root)
+    flagged = {entry.split(":", 1)[0] for entry in offenders}
+
+    assert flagged == {
+        "backend/app/api/attr_access.py",
+        "backend/app/api/plain_with.py",
+        "backend/app/services/alias.py",
+        "backend/app/domain/bare_import.py",
+        "backend/app/domain/getattr_bypass.py",
+    }, offenders
 
 
 def test_two_arm_marker_layouts_differ_only_in_which_end_is_stable():
