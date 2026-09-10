@@ -3849,8 +3849,13 @@ def test_a_false_boolean_dimension_never_pairs_with_a_missing_one(
     首轮查询规划与 v2 的方面账都不同。`str(row.get(dim) or UNKNOWN)` 把 `False` 与
     `None` 折进同一格,于是它们配出一格 `has_intent_contract='unknown'` 的对照。
 
-    变异:把 `_optimization_cells`(或 `pair_table`)的格键改回
-    `str(row.get(dim) or UNKNOWN)` ⇒ 这条红。
+    两处格键各断一段:`_optimization_cells`(沿 `optimization` 的两张表)与
+    `pair_table`(legacy / v2 那张)。后者是**默认路径**上的表,所以那一段单独立
+    在这里——`test_pair_table_does_not_pair_across_workloads` 那条比的是
+    `True` ↔ `False`,两个值在折叠前后都不相等,它对这次折叠一无所知。
+
+    变异:把 `_optimization_cells` 或 `pair_table` 的格键改回
+    `str(row.get(dim) or UNKNOWN)` ⇒ 对应那一段红。
     """
     source = _write_rows(tmp_path / "rows.jsonl", [
         _pair_row_fixture("B-q01", "off", has_intent_contract=False,
@@ -3878,6 +3883,25 @@ def test_a_false_boolean_dimension_never_pairs_with_a_missing_one(
     cells = json.loads(js.read_text("utf-8"))["optimization_pair_rows"]["cells"]
     assert len(cells) == 1
     assert cells[0]["has_intent_contract"] == "False"
+
+    # legacy / v2 那张表(**默认路径**)同一条口径:`--no-intent` 的 legacy run 与
+    # 压根没记这一列的 v2 run 不配对。
+    policy_mixed = _write_rows(tmp_path / "policy.jsonl", [
+        _row(has_intent_contract=False),
+        _row(policy_version="v2"),
+    ])
+    assert analyze.main([str(policy_mixed), "--out-json", str(js)]) == 0
+    capsys.readouterr()
+    assert json.loads(js.read_text("utf-8"))["pairs"] == []
+    policy_same = _write_rows(tmp_path / "policy_same.jsonl", [
+        _row(has_intent_contract=False),
+        _row(policy_version="v2", has_intent_contract=False),
+    ])
+    assert analyze.main([str(policy_same), "--out-json", str(js)]) == 0
+    capsys.readouterr()
+    pairs = json.loads(js.read_text("utf-8"))["pairs"]
+    assert len(pairs) == 1
+    assert pairs[0]["has_intent_contract"] == "False"
 
 
 def test_key_set_ab_admits_ab_rows_and_t0_still_refuses_them(tmp_path, capsys):
