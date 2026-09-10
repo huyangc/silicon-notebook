@@ -1427,8 +1427,50 @@ _V2_STATIC_CATALOG_INSTRUCTION = (
 )
 
 
-def reflect_v2_static_prompt(catalog) -> str:
-    """The RUN-STABLE instruction half of a ``prefix_snapshot`` reflect turn.
+#: The four extra rules a ``prefix_delta`` turn needs on top of
+#: ``_V2_STATIC_CATALOG_INSTRUCTION`` (prefix-delta plan §3 T-PD6). ``off`` and
+#: ``prefix_snapshot`` never see this text — it is appended only when
+#: ``reflect_v2_static_prompt`` is called with ``delta=True`` — so its wording
+#: has no bearing on the two-arm byte equivalence the static instruction above
+#: still has to hold.
+#:
+#: 1. this run's history block only ever grows: a line that has appeared in it
+#:    is never rewritten or removed, only appended after;
+#: 2. the same evidence ``key`` can carry more than one card, because an
+#:    excerpt gets upgraded by appending a new, versioned card rather than by
+#:    rewriting the old one in place — the later card is a fresh excerpt of
+#:    the SAME evidence, not new evidence, the earlier card under that key is
+#:    still valid, and both are bound or cited through that one shared key;
+#: 3. a folded count or an "N not expanded" line is a disclosure of how much
+#:    MORE there is, not a report that nothing was found;
+#: 4. the closing block's execution limits keep the exact precedence
+#:    ``_V2_STATIC_CATALOG_INSTRUCTION`` already gives them — outranking any
+#:    observation or evidence card earlier in the message, appended or not —
+#:    and that precedence still does not reach past those four classes into
+#:    the rest of the block.
+_V2_DELTA_INSTRUCTION = (
+    "This run's history block is APPEND-ONLY: once a line has appeared in it, "
+    "the server never rewrites or removes it — it only appends after it. "
+    "Treat every line already there as still standing unless a later line or "
+    "an evidence card says otherwise.\n"
+    "The same evidence `key` can carry more than one card. A later card that "
+    "opens with a version marker is a fresh excerpt of the SAME evidence, not "
+    "new evidence — the earlier card under that key is still valid. Bind or "
+    "cite that evidence using the one key both cards share.\n"
+    "A folded count or an \"N not expanded\" line discloses HOW MANY items "
+    "remain there, not that none were found.\n"
+    "The closing block's execution limits — this turn's callable actions, the "
+    "tools withheld and why, the current status of every mandatory aspect, "
+    "and the keys of collections enumerated to completion — still outrank any "
+    "observation or evidence card earlier in this message, whether or not it "
+    "arrived through an append. That precedence still does not reach the rest "
+    "of that block.\n"
+)
+
+
+def reflect_v2_static_prompt(catalog, *, delta: bool = False) -> str:
+    """The RUN-STABLE instruction half of a ``prefix_snapshot``/``prefix_delta``
+    reflect turn.
 
     ``catalog`` is the run's static tool catalog (``static_catalog_facts`` →
     ``build_reflect_capabilities``, cached once per run on the run state), NOT
@@ -1438,6 +1480,13 @@ def reflect_v2_static_prompt(catalog) -> str:
     count, candidate counts — lives at the END of the user message and NOWHERE
     in here (design §4.2's "本轮余额、stale 数、时间、trace 标识、候选总数等不得
     插入 S/C/K 前部").
+
+    ``delta`` selects the ``prefix_delta`` layout's extra four rules
+    (``_V2_DELTA_INSTRUCTION``, prefix-delta plan §3 T-PD6), appended right
+    after ``_V2_STATIC_CATALOG_INSTRUCTION`` and before the action lines.
+    Defaults to ``False`` so ``prefix_snapshot`` (and any other caller that
+    does not pass it) gets back the exact same bytes as before this parameter
+    existed — the two layouts otherwise share every other piece of S.
 
     ``UNTRUSTED_EVIDENCE_SYSTEM_INSTRUCTION`` still stacks in FRONT of this for
     strict callers (``_reflect_v2_attempt``); that one is run-level too, so the
@@ -1449,6 +1498,7 @@ def reflect_v2_static_prompt(catalog) -> str:
     return (
         _V2_TASK_FRAMING
         + _V2_STATIC_CATALOG_INSTRUCTION
+        + (_V2_DELTA_INSTRUCTION if delta else "")
         + _v2_action_lines(catalog)
         + "\n"
         + _V2_STOPPING_RULE

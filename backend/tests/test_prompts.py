@@ -316,3 +316,119 @@ def test_plan_prompt_neutral_opening_matches_expand_query_prompts_framing():
     assert "retrieve a knowledge graph" not in plan_prompt(
         "q", kg_available=False)
     assert "retrieve a knowledge graph" in plan_prompt("q")
+
+
+# ---------------------------------------------------------------------------
+# T-PD6:``reflect_v2_static_prompt`` 的 ``prefix_delta`` 四句(reflect 前缀复用
+# PR-3 计划 §3 T-PD6)。``off``/``prefix_snapshot`` 从不传 ``delta=True``,所以
+# 这里的判据只有一条:``delta`` 省略或显式 ``False`` 时,返回值必须与这个形参
+# 加入之前逐字节相同——风险 §5.1 点名的两臂字节等价面之一。
+# ---------------------------------------------------------------------------
+
+def _pd6_catalog():
+    from app.services.reasoning_actions import (
+        ReflectCapabilityFacts, build_reflect_capabilities,
+    )
+    return build_reflect_capabilities(ReflectCapabilityFacts())
+
+
+def test_reflect_v2_static_prompt_delta_false_is_byte_identical_to_omitting_it():
+    """``delta`` 省略 == 显式传 `False`,且与该形参加入前的实现逐字节相同(独立
+    的 ≥200 组随机 ``ReflectCapabilityFacts`` 对 HEAD(38fc400f3)的比对见任务
+    报告——仓库没有 `git show` 型用例先例,这里只钉一个能在 CI 里跑的不变量)。
+
+    变异:去掉 `(_V2_DELTA_INSTRUCTION if delta else "")` 的短路,让它恒为真
+    ⇒ 这条红。
+    """
+    from app.services.prompts import reflect_v2_static_prompt
+
+    catalog = _pd6_catalog()
+    omitted = reflect_v2_static_prompt(catalog)
+    explicit = reflect_v2_static_prompt(catalog, delta=False)
+    assert omitted == explicit
+    assert omitted                                # 反面:真的渲染出了内容
+
+
+def test_reflect_v2_static_prompt_delta_instruction_appears_only_when_requested():
+    """四句关键短语只在 `delta=True` 出现,且紧跟在 `_V2_STATIC_CATALOG_INSTRUCTION`
+    之后、动作清单之前——不是散落在别处或与目录段之间夹了别的文本。
+
+    变异:删第 (2) 句(同一 `key` 多张卡的说明)⇒ 对应短语的正向断言红;把
+    `_V2_DELTA_INSTRUCTION` 塞到 `_v2_action_lines` 之后 ⇒ 拼接位置断言红。
+    """
+    from app.services.prompts import (
+        _V2_DELTA_INSTRUCTION, _V2_STATIC_CATALOG_INSTRUCTION,
+        reflect_v2_static_prompt,
+    )
+
+    catalog = _pd6_catalog()
+    off = reflect_v2_static_prompt(catalog)
+    on = reflect_v2_static_prompt(catalog, delta=True)
+
+    # (1) append-only 历史块。
+    assert "APPEND-ONLY" in _V2_DELTA_INSTRUCTION
+    # (2) 同一 key 多张卡 = 同一条证据的新摘录,不是新证据。
+    assert "fresh excerpt of the SAME evidence" in _V2_DELTA_INSTRUCTION
+    # (3) 折算计数/「N 条未展开」是披露还有多少,不是没找到。
+    assert "discloses HOW MANY items" in _V2_DELTA_INSTRUCTION
+    # (4) 末尾块的执行限制依旧优先,且不扩大到该块其余部分——四类措辞与
+    # `_V2_STATIC_CATALOG_INSTRUCTION` 同一口径,不得扩大。
+    assert ("this turn's callable actions, the tools withheld and why, the "
+            "current status of every mandatory aspect, and the keys of "
+            "collections enumerated to completion") in _V2_STATIC_CATALOG_INSTRUCTION
+    assert ("this turn's callable actions, the tools withheld and why, the "
+            "current status of every mandatory aspect, and the keys of "
+            "collections enumerated to completion") in _V2_DELTA_INSTRUCTION
+    assert "does not reach the rest of that block" in _V2_DELTA_INSTRUCTION
+
+    for phrase in ("APPEND-ONLY", "fresh excerpt of the SAME evidence",
+                   "discloses HOW MANY items",
+                   "does not reach the rest of that block"):
+        assert phrase not in off, phrase
+        assert phrase in on, phrase
+
+    # 位置:紧跟 catalog 段之后、其余部分(动作清单起)逐字节不动。
+    assert _V2_STATIC_CATALOG_INSTRUCTION + _V2_DELTA_INSTRUCTION in on
+    assert on.replace(_V2_DELTA_INSTRUCTION, "", 1) == off
+
+
+def test_reflect_v2_static_prompt_delta_true_is_stable_across_repeated_calls():
+    """T-PD5(重建/接线)未落地,这里过不了一次完整多轮 run;但
+    `reflect_v2_static_prompt` 是纯函数,同一份 `catalog` 反复调用必须逐字节
+    相同——这正是"S 在 run 内不随轮数变"要成立的前提,真正的多轮 run 级验收
+    (`system_prompt(turn)` 全等)留给 T-PD5。
+    """
+    from app.services.prompts import reflect_v2_static_prompt
+
+    catalog = _pd6_catalog()
+    calls = [reflect_v2_static_prompt(catalog, delta=True) for _ in range(5)]
+    assert len(set(calls)) == 1
+
+
+def test_reflect_v2_static_prompt_delta_survives_provider_serialization_stably():
+    """T-PD6 用例 (c) 的可行版本:`_GatedV2LLM` 一次完整 delta run 本任务不可行
+    (T-PD1 的 `prefix_delta` 枚举、T-PD5 的接线都还没落地),改为直接构造
+    `catalog`、渲染 `delta=True` 的 S,经生产 `provider_messages()` /
+    `serialize_provider_messages()` 走一遍真实序列化,断多次调用逐字节稳定。
+    端到端(经真实 `_GatedV2LLM` run)留给 T-PD5。
+
+    变异:让 `reflect_v2_static_prompt` 在 `delta=True` 时插入任何非确定量
+    (例如时间戳)⇒ `len(set(serialized))` 变成 3,这条红。
+    """
+    from app.core.llm import provider_messages, serialize_provider_messages
+    from app.services.prompts import reflect_v2_static_prompt
+
+    catalog = _pd6_catalog()
+    system_text = reflect_v2_static_prompt(catalog, delta=True)
+    messages = [
+        {"role": "system", "content": system_text},
+        {"role": "user", "content": "[Question]\nq?\n\nReturn JSON only."},
+    ]
+    schema_hint = '{"next_action": ""}'
+
+    serialized = [
+        serialize_provider_messages(provider_messages(messages, schema_hint))
+        for _ in range(3)
+    ]
+    assert len(set(serialized)) == 1
+    assert system_text.encode("utf-8") in serialized[0]
