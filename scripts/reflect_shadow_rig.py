@@ -1752,10 +1752,11 @@ def _settings_by_arm(
     两条断言都是「不断言就会安静跑出一批臂对不上号的数据」:
 
     * v2 总闸按 policy 对号(与 `_settings_by_policy` 逐字同一条);
-    * optimization 按声明对号。`prefix_delta_lean` 这类未实现取值由
-      `config.validate_reflect_optimization` 在**构造期**抛,所以那条路径不会走到
-      这里;这条断言挡的是**别名或接线漂移**——`Settings` 的字段别名改了名、
-      `--arms` 的取值与配置枚举分了叉、或者这个函数哪天不再逐臂设那个环境变量。
+    * optimization 按声明对号。不在 `Literal` 四格里的拼写(比如手滑写成
+      `prefix_delta_leen`)由 pydantic 在**构造期**就抛 `ValidationError`,所以
+      那条路径不会走到这里;这条断言挡的是**别名或接线漂移**——`Settings` 的
+      字段别名改了名、`--arms` 的取值与配置枚举分了叉、或者这个函数哪天不再
+      逐臂设那个环境变量。
       它挡不住的是「被 `--env-file` 盖住」:pydantic-settings 默认 env > dotenv,
       而 `--arms` 那几行是显式环境变量,`--env-file` 盖不过它(实测确认)。
     * 测量开关按 `_ab_process_env` 的约定核一次:两臂都必须是开的,否则差值表
