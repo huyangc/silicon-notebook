@@ -6050,35 +6050,73 @@ def _static_catalog(**overrides):
         static_catalog_facts(_full_house_facts(**overrides)))
 
 
+#: `static_catalog_facts` 归一的每一项 → 它的目标常量。逐轮波动的一切都在这里。
+_CATALOG_NORMALISED = {
+    "element_searches_left": 1, "chunk_searches_left": 1,
+    "exact_lookups_left": 1, "ppr_left": 1, "follow_chain_left": 1,
+    "consult_left": 1, "outline_updates_left": 1, "enum_rows_left": 1,
+    "enum_pages_left": 1, "enum_payload_left": 1,
+    "has_candidates": True,
+    "last_turn": False,
+    "terminal_overflow_repair": False,
+    "outline_repair_available": False,
+    # 评审后修正:来源勾选上限是请求级的,原样带过会让目录不再是超集(见
+    # `static_catalog_facts` 的取舍说明与计划 §5 Q4)。
+    "scope_restricted": False,
+}
+#: 原样带过的那几项:run 级的部署 ∧ 调用方条件,加枚举白名单。
+_CATALOG_PASSED_THROUGH = (
+    "kg_in_scope", "chunk_search_active", "exact_lookup_active", "ppr_active",
+    "community_active", "enumeration_active", "consult_memory_active",
+    "outline_active", "element_kinds", "object_types",
+)
+
+
 def test_static_catalog_facts_normalise_every_per_turn_fluctuation():
-    """逐轮波动项全部归一,通道位一格不动(纯函数逐字段口径)。
+    """逐轮波动项全部归一,run 级通道位一格不动,而且**字段全貌穷尽**。
 
-    这条是 `static_catalog_facts` 的**字段全貌**守卫:哪几项该归一、哪几项必须
-    原样带过,写死在这里。新增一个逐轮字段却忘了归一,它就会红。
+    这条是 `static_catalog_facts` 的字段全貌守卫,关键在那条穷尽性断言:
+    「归一集合 ∪ 原样带过集合」必须等于 `ReflectCapabilityFacts` 的全部字段名。
+    少了它,给这个 dataclass 加一个新的逐轮字段(投影会读它、目录却拿它按轮漂移)
+    完全不会红——旧写法只逐个检查了两份**手列**的名单,新字段两份都不在,于是
+    两份都不管它。
 
-    变异:把 `has_candidates=True`(或任何一格 `*_left=1`)从 `replace(...)` 里
-    删掉 ⇒ 这条红。
+    变异:给 `ReflectCapabilityFacts` 加一个未归类的新字段 ⇒ 这条红;把
+    `has_candidates=True` / 任何一格 `*_left=1` / `scope_restricted=False` 从
+    `replace(...)` 里删掉 ⇒ 这条也红。
     """
     from dataclasses import fields
-    from app.services.reasoning_actions import static_catalog_facts
-    turn = _full_house_facts(
-        element_searches_left=0, chunk_searches_left=0, exact_lookups_left=0,
-        ppr_left=0, follow_chain_left=0, consult_left=0,
-        outline_updates_left=0, enum_rows_left=0, enum_pages_left=0,
-        enum_payload_left=0,
-        has_candidates=False, last_turn=True, terminal_overflow_repair=True)
+    from app.services.reasoning_actions import (
+        ReflectCapabilityFacts, static_catalog_facts,
+    )
+    every = {f.name for f in fields(ReflectCapabilityFacts)}
+    assert not (set(_CATALOG_NORMALISED) & set(_CATALOG_PASSED_THROUGH))
+    assert set(_CATALOG_NORMALISED) | set(_CATALOG_PASSED_THROUGH) == every, (
+        "ReflectCapabilityFacts 有字段没被显式归类:"
+        f"{sorted(every - set(_CATALOG_NORMALISED) - set(_CATALOG_PASSED_THROUGH))}"
+        " —— 新增的逐轮字段必须要么归一、要么明确登记为 run 级条件")
+
+    # 归一项:每一格都从"与目标不同"的取值出发,所以等式成立即证明被归一。
+    turn = _full_house_facts(**{
+        name: (0 if isinstance(target, int) and not isinstance(target, bool)
+               else not target)
+        for name, target in _CATALOG_NORMALISED.items()
+    })
     static = static_catalog_facts(turn)
-    for name in [f.name for f in fields(turn) if f.name.endswith("_left")]:
-        assert getattr(static, name) == 1, name
-    assert (static.has_candidates, static.last_turn,
-            static.terminal_overflow_repair) == (True, False, False)
-    # 通道位与枚举白名单原样带过(逐字段比对,不靠抽样)。
-    for name in ("kg_in_scope", "scope_restricted", "chunk_search_active",
-                 "exact_lookup_active", "ppr_active", "community_active",
-                 "enumeration_active", "consult_memory_active",
-                 "outline_active", "element_kinds", "object_types",
-                 "outline_repair_available"):
-        assert getattr(static, name) == getattr(turn, name), name
+    for name, target in _CATALOG_NORMALISED.items():
+        assert getattr(turn, name) != target, f"{name} 的起点没有偏离目标值"
+        assert getattr(static, name) == target, name
+
+    # 原样带过项:两个方向都比一次,免得"一律归 True/False"也能全绿。
+    for source in (turn, _full_house_facts(
+        kg_in_scope=False, chunk_search_active=False,
+        exact_lookup_active=False, ppr_active=False, community_active=False,
+        enumeration_active=False, consult_memory_active=False,
+        outline_active=False, element_kinds=(), object_types=(),
+    )):
+        folded = static_catalog_facts(source)
+        for name in _CATALOG_PASSED_THROUGH:
+            assert getattr(folded, name) == getattr(source, name), name
 
 
 def test_static_catalog_facts_are_idempotent_across_turns():
@@ -6119,14 +6157,11 @@ def test_static_catalog_comes_from_the_one_action_definition_table():
     ({"consult_memory_active": False}, ("consult_memory",)),
     ({"outline_active": False}, ("update_outline",)),
     ({"ppr_active": False}, ("ppr_retrieve",)),
-    ({"scope_restricted": True},
-     ("expand_graph", "ppr_retrieve", "expand_community", "follow_chain",
-      "exact_lookup")),
 ])
 def test_static_catalog_drops_the_channels_this_run_can_never_use(
     overrides, gone
 ):
-    """通道位一格不动:始终不适用的工具**不进**目录(设计 §4.2)。
+    """部署 ∧ 调用方通道位一格不动:始终不适用的工具**不进**目录(设计 §4.2)。
 
     无图 run 把五个图动作摆进目录,只会让模型反复选一条必然 skip 的路——那与
     "额度耗尽但通道还在"是两回事,后者才该留在目录里。
@@ -6137,6 +6172,30 @@ def test_static_catalog_drops_the_channels_this_run_can_never_use(
     catalog = _static_catalog(**overrides)
     for action in gone:
         assert not catalog.has(action), action
+
+
+def test_static_catalog_keeps_scope_sensitive_actions_when_the_scope_narrows():
+    """范围收窄:目录**仍含**范围敏感动作,当轮 `capabilities.actions` 不含。
+
+    评审后修正的那一格(计划 §5 Q4)。来源勾选上限是**请求级**的,判据按契约禁止
+    memo、每轮现算;把它当通道位原样带过,目录就会在收窄的 run 里少掉这五个动作
+    ——那时它不再是超集,模型压根不知道这几个工具存在,而目录一个 run 只定型一次,
+    上限之后放宽也补不回来。所以目录恒为纯超集,可用性一律由每轮当前状态说明。
+
+    变异:把 `scope_restricted=False` 从 `static_catalog_facts` 里删掉 ⇒ 这条红。
+    """
+    from app.services.reasoning_actions import build_reflect_capabilities
+    scoped = ("expand_graph", "ppr_retrieve", "expand_community",
+              "follow_chain", "exact_lookup")
+    catalog = _static_catalog(scope_restricted=True)
+    # 目录逐字节等于范围没收窄时的那一份(收窄不进目录,连原因码都不进)。
+    assert catalog == _static_catalog()
+    for action in scoped:
+        assert catalog.has(action), action
+    turn = build_reflect_capabilities(_full_house_facts(scope_restricted=True))
+    for action in scoped:
+        assert not turn.has(action), action
+        assert turn.reason_for(action) == "source_scope_unsafe_channel"
 
 
 def test_static_catalog_keeps_a_tool_whose_budget_ran_out():

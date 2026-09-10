@@ -90,5 +90,7 @@
 - **Q2** 公共前缀内存口径接受(一轮消息字节);**独立测量开关** `REASONING_REFLECT_MEASURE_CONTEXT`(默认 false),与 `optimization` 正交,`off` 臂也能出 `message_prefix_bytes`。
 - **Q3** `summary` **整块搬到 T(末尾)**,按设计 §4.5;P 与 B 的差异包含布局这一点在报告里写明(§9.2 已承认)。
 - **Q4** 静态目录在本 run 第一次 reflect 时生成并缓存,接受「范围收窄后目录留着不可用动作」的形态,T 每轮如实说明;验证多覆盖这一形态。
+  - **评审后修正(T-PS6/T-PS7 评审,2026-09-10)**:`scope_restricted` 由「按通道位原样带过」改为**归一为 False**,目录因此**恒为超集**。原写法在范围收窄的 run 里会让目录**少掉**五个范围敏感动作:那时它不再是超集,模型压根不知道这几个工具存在;而来源勾选上限是**请求级**的、判据按契约禁止 memo,目录一个 run 只定型一次,上限之后放宽也补不回来。收窄与放宽一律由每轮当前状态说明(`source_scope_unsafe_channel` 每轮照报),与「目录不授予资格」是同一条原则的两半。`outline_repair_available` 同期一并归一为 False(逐轮项一律归一;投影结果一格不变,只为分类上不留活扣)。
+  - **评审后修正(同上)**:静态目录只在 `reflect_optimization() != "off"` 时构造。纯测量臂(`off` + 测量开)不需要目录——测量量的是消息字节,目录是布局的输入,给它构造一份是没有消费者的开销。`reflect_measures_context()` 保留给 T-PS3。
 - **Q5** 归因口径优先级:`support_id` 关联优先;无 events 文件时退时间窗;并发 > 1 且只能时间窗 ⇒ unknown。每行记 `attribution`(`support_id|window|unknown`)。
 - **Q6** 逐轮前缀字节不进闭集投影,退成 `prefix_bytes_median/min/turns` 三格;逐轮细节只在 rig per-call 表。

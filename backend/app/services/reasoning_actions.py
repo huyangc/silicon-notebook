@@ -660,12 +660,22 @@ def static_catalog_facts(
       等于让目录随轮数漂移。
     * ``has_candidates`` 归 True:候选池空只是**此刻**没有合法起点,后续任何一次
       检索都可能给 ``follow_chain`` 补上起点(计划 T-PS7 的验收形态之一)。
+    * ``outline_repair_available`` 归 False:它是"本轮还剩不剩那一次溢出纠错"的形
+      态,与 ``last_turn`` 同类。归一后投影结果一格不变(``*_left`` 已经是 1,那条
+      ``or`` 的另一半怎么取值都不改结果),这里图的是**分类**上别留活扣:逐轮项一律
+      归一,哪天投影开始拿它做别的判断,目录不会跟着悄悄按轮漂移。
+    * ``scope_restricted`` 归 **False**(评审后修正,原先按通道位原样带过)。它是
+      通道位里**唯一**不属于"部署 ∧ 调用方策略"的一格:来源勾选上限是**请求级**的,
+      而且它那个判据按契约禁止 memo、每轮现算。原样带过会让范围收窄的 run 里目录
+      **少掉**五个动作——那时它已经不是超集,模型压根不知道这几个工具存在;而目录
+      一个 run 只定型一次,上限之后放宽也补不回来。归一为 False 后目录在任何情况下
+      都是纯超集,收窄与放宽一律由每轮当前状态如实说明(``source_scope_unsafe_channel``
+      每一轮都照报),这与"目录不授予资格"是同一条原则的两半。
 
-    **通道位一格不动**:``kg_in_scope`` / ``scope_restricted`` / 各 ``*_active`` /
-    枚举白名单都原样带过。它们是 run 级的部署与调用方条件,无图 run 的五个图动作、
-    调用方关掉的通道"始终不适用",按 §4.2 不该留在目录里——留着只会让模型反复选
-    一条必然 skip 的路。``outline_repair_available`` 同样原样带过:``*_left`` 已经
-    归 1,那条 ``or`` 的另一半怎么取值都不改投影结果。
+    **部署与调用方的通道位一格不动**:``kg_in_scope`` / 各 ``*_active`` / 枚举白名单
+    都原样带过。它们是 run 级的部署与调用方条件,无图 run 的五个图动作、调用方关掉
+    的通道"始终不适用",按 §4.2 不该留在目录里——留着只会让模型反复选一条必然 skip
+    的路。
 
     **取舍(§4.2):目录是「可能执行」的超集,它不授予任何调用资格。** 唯一的执行
     资格来源仍是逐轮的 ``ReflectCapabilities``——prompt 的本轮清单、
@@ -690,6 +700,8 @@ def static_catalog_facts(
         has_candidates=True,
         last_turn=False,
         terminal_overflow_repair=False,
+        outline_repair_available=False,
+        scope_restricted=False,
     )
 
 
