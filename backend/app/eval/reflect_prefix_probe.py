@@ -212,6 +212,13 @@ def probe_plan(
         raise ValueError(f"probe_plan: tiers must be unique, got {list(tiers)!r}")
     if blocks < 1:
         raise ValueError(f"probe_plan: blocks must be >= 1, got {blocks!r}")
+    if blocks % 2 != 0:
+        # 奇数区组让 `_stable_first_flags` 多出来的那一个恒分给 disturbed
+        # 先(design 的「余数」没有轮转规则),三档之间同向叠加成一个系统性
+        # 顺序偏置——这正是"区组内臂序平衡随机"要消掉的东西。E1 实际只跑
+        # `SMOKE_BLOCKS`(2)与 `DEFAULT_BLOCKS`(4)两个规模,两者都是偶数,
+        # 拒绝奇数不影响任何既有调用方(codex #T-EX3 review P3-8)。
+        raise ValueError(f"probe_plan: blocks must be even, got {blocks!r}")
     if calls_per_series < 1:
         raise ValueError(
             f"probe_plan: calls_per_series must be >= 1, got {calls_per_series!r}"
@@ -266,7 +273,14 @@ PROBE_SCHEMA_HINT = (
 
 
 def sample_tier_chars(sample: Mapping) -> dict[str, int]:
-    """`sample["tier_chars"]` 的校验过副本:三档各一个正整数目标字符数。"""
+    """`sample["tier_chars"]` 的校验过副本:三档各一个正整数目标字符数,且按
+    `DEFAULT_TIERS` 的顺序(short < medium < long)严格递增。
+
+    严格递增是 design §9.1「三个长度档」这句话的字面要求,不只是这份 fixture
+    碰巧满足的取值——`render_sample` 的三档单调递增用例(T-EX3-g)只检查渲染
+    *之后*的正文长度,换一份 `tier_chars` 声明本身就倒序或打平的样本时,那条
+    用例挡不住(codex #T-EX3 R… P2-1);这里在读取阶段就把顺序钉死。
+    """
     tier_chars = sample.get("tier_chars")
     if not isinstance(tier_chars, Mapping) or not tier_chars:
         raise ValueError(
@@ -280,6 +294,14 @@ def sample_tier_chars(sample: Mapping) -> dict[str, int]:
                 f"char target: {chars!r}"
             )
         result[tier] = chars
+    ordered_present = [tier for tier in DEFAULT_TIERS if tier in result]
+    for earlier, later in zip(ordered_present, ordered_present[1:]):
+        if result[earlier] >= result[later]:
+            raise ValueError(
+                "sample_tier_chars: tier_chars must be strictly increasing "
+                f"in DEFAULT_TIERS order, got {earlier!r}={result[earlier]!r} "
+                f">= {later!r}={result[later]!r}"
+            )
     return result
 
 
@@ -304,18 +326,24 @@ def _fill_to_length(seed_text: str, target_chars: int) -> str:
     子串的裸重复(那种文本对某些 provider 端的规范化/去重策略太友好,会
     干扰而不是隔离要测的东西)。这不是在向 provider 的 cache 行为讨好或
     对抗——只是让「确定性地填满一个目标长度」这件事有一个可读的实现。
+
+    长度账目前直接对**已 join 好**的字符串取 `len()` 再比较,不预先估算
+    "加入分隔符的账"——旧实现按 `len(piece) + 1` 逐片预估 `total`,但最后
+    一片之后并没有真的追加分隔符,预估值因此恒比实际 `"\n".join(...)` 的
+    长度多 1;当 `target_chars` 恰好等于这份多算出的账时,循环提前一轮退出,
+    结果比 `target_chars` 短 1 个字符,`[:target_chars]` 这句切片对"太短"
+    无能为力,只能截断"太长"。改成先 join 再比长度,不会有这一位的偏差。
     """
     if target_chars <= 0:
         return ""
     pieces: list[str] = []
-    total = 0
     index = 0
-    while total < target_chars:
-        piece = f"[{index:04d}] {seed_text}"
-        pieces.append(piece)
-        total += len(piece) + 1  # 加入下面 "\n".join 的分隔符
+    joined = ""
+    while len(joined) < target_chars:
+        pieces.append(f"[{index:04d}] {seed_text}")
+        joined = "\n".join(pieces)
         index += 1
-    return "\n".join(pieces)[:target_chars]
+    return joined[:target_chars]
 
 
 def render_sample(tier: str, sample: Mapping) -> list[dict]:
@@ -355,9 +383,20 @@ def render_sample(tier: str, sample: Mapping) -> list[dict]:
     # 固定任务指令的字节悄悄从 K 的预算里"偷"走一部分。
     separator_len = 2 * 5
     target = tier_chars[tier]
-    growing_target = max(
-        0, target - fixed_len - separator_len - len(PROBE_OUTPUT_INSTRUCTION)
-    )
+    floor = fixed_len + separator_len + len(PROBE_OUTPUT_INSTRUCTION)
+    # 响亮拒绝,不是 `max(0, …)` 静默把 K 块砍成空:一旦某档声明的目标字符数
+    # 不超过四个固定块 + 分隔符 + 输出指令这条地板,`max(0, …)` 会让 K 块
+    # 的目标长度直接归零,三档因此可能渲染出**逐字相同**的正文——E1 的
+    # 「长度档」这一整个维度会塌成一格,而且没有任何一条既有用例挡得住
+    # (codex #T-EX3 review P2-1)。消息只带地板值,不带任何正文片段。
+    if target <= floor:
+        raise ValueError(
+            f"render_sample: tier {tier!r} target={target} chars does not "
+            f"exceed the fixed-block floor of {floor} chars "
+            f"(fixed_len={fixed_len}, separator_len={separator_len}, "
+            f"instruction_len={len(PROBE_OUTPUT_INSTRUCTION)})"
+        )
+    growing_target = target - floor
     growing_block = _fill_to_length(paragraphs[GROWING_BLOCK_KEY], growing_target)
 
     ordered = [
@@ -378,9 +417,20 @@ def load_prefix_probe_sample(path: "str | Path") -> dict:
     默认样本落在 `backend/app/eval/reflect_t0/prefix_probe_sample.json`;
     `--sample-file` 让操作者指向 `.local` 下的真实样本时,走的还是这一个
     函数,不是另开一条读法。
+
+    `-> dict` 曾经是一句不成立的类型声明:一份 JSON 数组的 `--sample-file`
+    会原样返回 `list`,随后在 `sample_tier_chars` 撞一个不带上下文的
+    `AttributeError`。这里在返回前补一句响亮拒绝——消息只带实际的类型名,
+    不带任何已加载的正文内容(校验失败时更不该把整份样本回显进异常)。
     """
     with open(path, "r", encoding="utf-8") as fh:
-        return json.load(fh)
+        loaded = json.load(fh)
+    if not isinstance(loaded, dict):
+        raise ValueError(
+            "load_prefix_probe_sample: expected a JSON object at top level, "
+            f"got {type(loaded).__name__}"
+        )
+    return loaded
 
 
 # --- 行闭集 --------------------------------------------------------------------
@@ -463,10 +513,12 @@ def _summarize_region_pairs(rows: Sequence[Mapping]) -> dict:
         key = (_region_key(row), row.get("arm"))
         by_region_arm.setdefault(key, []).append(wall)
 
-    regions = sorted(
-        {region for (region, _arm) in by_region_arm},
-        key=lambda r: (str(r[0]), r[1] if r[1] is not None else -1),
-    )
+    # 排序对结果没有任何影响——下面只取 `deltas`/`ratios` 的中位数与符号
+    # 一致率,两者都与遍历顺序无关;之前那句 `sorted(..., key=...)` 是惰性
+    # 装饰,还带一个真实的类型崩溃面(同一批行里 `block_index` 混了 `int`
+    # 与 `str` 时,`r[1] if r[1] is not None else -1` 这个键会在比较阶段
+    # 抛 `TypeError`)。直接遍历集合,不再排序。
+    regions = {region for (region, _arm) in by_region_arm}
     deltas: list[float] = []
     ratios: list[float] = []
     for region in regions:
@@ -681,6 +733,20 @@ def probe_manifest_facts(
     `reflect_manifest.build_manifest`——那才是**全量**必填键校验的地方,这个
     函数本身不知道、也不需要知道 `reflect_manifest` 的必填键表。
 
+    `matrix["arms"]`/`matrix["calls_per_series"]` 从 `plan` 里实际出现的
+    行反推(`{row["arm"] for row in plan}` 的元素数、`max(call_index)+1`),
+    不再直接抄 `arms`/`calls_per_series` 这两个关键字参数——`matrix` 存在
+    的全部理由就是"让读者用四个基数相乘把总格数对出来",两个基数如果来自
+    调用方各自维护的参数而不校验,manifest 冻结的矩阵可以与 `probe-*.jsonl`
+    的实跑行数对不上账。这两个关键字参数仍然保留,只是改做**交叉校验**:
+    与 `plan` 反推出的值不一致就响亮拒绝(codex #T-EX3 review P2-3)——
+    调用方给 CLI 加 `--calls-per-series`/`--arms` 而忘了把同一个值传进
+    `probe_plan` 时,这里先炸,不是让 manifest 悄悄写错。
+
+    `plan` 为空、或 `plan` 里出现了 `sample` 没声明字符数的档位,都会响亮
+    拒绝(`ValueError`,不是裸 `KeyError`——见 `all_tier_chars[tier]` 那一行
+    此前的样子)。
+
     `optimization_by_arm` 与 `common_baseline` 在 E1 里恒是
     `"not_applicable"`:E1 不跑 reflect,两臂的"策略"是同一个 reflect 协议
     (`REASONING_REFLECT_V2_ENABLED` 与 `reasoning_reflect_optimization` 这
@@ -691,14 +757,35 @@ def probe_manifest_facts(
     没有意义",而不是怀疑遗漏。`arm_order_seed` 在 E1 里就是 `seed` 本身
     (design M4:「E1 的区组随机则必须有种子」，与 E3 的"无种子"是两回事)。
     """
+    if not plan:
+        raise ValueError("probe_manifest_facts: plan must be non-empty")
     tiers = sorted({row["tier"] for row in plan})
     blocks = len({row["block_index"] for row in plan})
+    plan_arms = {row["arm"] for row in plan}
+    if plan_arms != set(arms):
+        raise ValueError(
+            f"probe_manifest_facts: arms={list(arms)!r} does not match the "
+            f"arms actually present in plan: {sorted(plan_arms)!r}"
+        )
+    plan_calls_per_series = max(row["call_index"] for row in plan) + 1
+    if plan_calls_per_series != calls_per_series:
+        raise ValueError(
+            f"probe_manifest_facts: calls_per_series={calls_per_series!r} "
+            "does not match plan (derived from max(call_index)+1="
+            f"{plan_calls_per_series!r})"
+        )
     all_tier_chars = sample_tier_chars(sample)
+    missing_tiers = sorted(tier for tier in tiers if tier not in all_tier_chars)
+    if missing_tiers:
+        raise ValueError(
+            "probe_manifest_facts: plan has tier(s) not declared in "
+            "sample's tier_chars: " + ", ".join(missing_tiers)
+        )
     matrix = {
         "tiers": len(tiers),
         "blocks": blocks,
-        "arms": len(arms),
-        "calls_per_series": calls_per_series,
+        "arms": len(plan_arms),
+        "calls_per_series": plan_calls_per_series,
         # codex #T-EX3 F13: 只写 `plan` 实际跑过的档位,不是样本声明的全部
         # 档位——`matrix["tiers"]` 数的是前者,`tier_chars` 曾经报后者,一份
         # `probe_plan(tiers=("short",))` 的计划会让这两个数字对不上账。
