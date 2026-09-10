@@ -4344,6 +4344,11 @@ class ReasoningRetriever:
         system 段的静态半;`off`(含总闸关闭态与未登记取值)走下面原来那一份,逐字节
         不变。**三个预算与所有内容判据两条路径共用**:上面这段装配一个字都没有按
         布局分叉,分派只发生在"块往哪儿放"这一步。
+
+        **上下文观测(T-PS3)**由 `_reflect_measurement` 挂在两条路径共同的那一格
+        (`ReflectContext.measurement`)上,判据与布局**正交**;测量关(默认)时它
+        恒为 `None`,返回对象逐字段回到接入前。块长度不在这里算(那三块的最终字节
+        要等 `_reflect_v2_attempt`),这里只记它独有的那两个卡数。
         """
         settings = self.settings
         if state.aspects is None:
@@ -4423,7 +4428,8 @@ class ReasoningRetriever:
                 ) if block),
                 # 每轮按同一个冻结目录重渲染一次:纯字符串拼接、零 I/O,而同一个
                 # 输入必然给出同一串字节,所以 S 的稳定性不依赖任何缓存是否生效。
-                # (渲染缓存留给 T-PS3 的测量,那里本来就要一个只读缓存字段。)
+                # T-PS3 的观测缓存**刻意不接**这一格:接了它就得在只开布局、不开
+                # 测量时也构造一份缓存,而"测量关不构造缓存"是那条任务的硬约束。
                 static_prompt=reflect_v2_static_prompt(catalog),
                 measurement=measurement,
             )
