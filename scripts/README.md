@@ -445,10 +445,102 @@ python scripts/reflect_shadow_rig.py \
   --source-notebook-a nb-<无图单篇> --source-notebook-b nb-<有图多篇> \
   --owner <主库用户名> --only-question B-q03 --only-cell B_kg \
   --keep-raw-trace --out-dir .local/t0-search search
+
+# 5) ab:在 `seed` 建的一次性测试库上跑**完整 Ask**(意图契约 + 检索 + 合成 +
+#    引用绑定),同题同档两条臂背靠背。臂是 `(policy, optimization)` 这一**对**
+#    ——`--arms` 不给就是既有的一维两臂 `legacy,v2`(第二维恒 off):
+python scripts/reflect_shadow_rig.py --dry-run \
+  --database-url postgresql://127.0.0.1:5432/<库名>_test \
+  --source-db-url postgresql://127.0.0.1:5432/<主库名> ab
+
+#    前缀复用实验换成**第二维**:同一条 v2 协议,只翻
+#    REASONING_REFLECT_OPTIMIZATION。`legacy:prefix_snapshot` 这类合法值的非法
+#    组合、`prefix_delta`(本期未实现)、重复臂、空段都在跑批之前响亮拒绝:
+python scripts/reflect_shadow_rig.py \
+  --database-url postgresql://127.0.0.1:5432/<库名>_test \
+  --source-db-url postgresql://127.0.0.1:5432/<主库名> \
+  --env-file /path/to/main-checkout/.env \
+  --arms v2:off,v2:prefix_snapshot --repeats 3 \
+  --out-dir .local/ab-prefix ab
 ```
 
+**`ab` 的臂是二维的**(前缀复用最终设计 §11)。`--arms` 收两种写法,产出同一种
+结构:一维 `legacy,v2`(省略的第二维一律补 `off`,不跟随进程默认——那会让同一条
+命令在两台机器上跑出两批数据)、二维 `v2:off,v2:prefix_snapshot`。合法组合只有
+`legacy:off` / `v2:off` / `v2:prefix_snapshot`:v2 总闸关时 `reflect_optimization()`
+恒返回 `off`,所以 legacy 那一维上没有「前缀」这个概念;`prefix_delta` /
+`prefix_delta_lean` 由 `config` 的校验器在启动期拒绝,rig 同期收窄,PR-3/PR-4 各
+放开一格。`--arms` 与 `--only-policy` **互斥**(后者是一维时代按 policy 过滤默认
+两臂的写法)。
+
+**`--arms` 一次只收一对臂**,超过两条在跑批之前拒绝。配对差值表按**对**出:三条
+臂的批次里每个配对单元落三行,`mark_paired` 判不出配对,整批 `paired` 全 `False`
+——数据集、日志、投影一切正常,只是一个配对结论都出不来,而这批已经烧掉了几百次
+模型调用。要跑三格就分两批,每批一对。`--arms ""`(空写法,常见于脚本里
+`--arms "$ARMS"` 而变量恰好为空)同样响亮拒绝,**不**退化成默认两臂。
+
+两条臂的 `REASONING_REFLECT_MEASURE_CONTEXT` **都是 `true`**:测量开关与
+`optimization` 正交,对照要的正是两条臂用同一把尺子;只给一侧开会让差值表只剩一
+侧有数,而每一行看起来都很正常。每条臂各自的 `REASONING_REFLECT_OPTIMIZATION` 在
+构造那一份 `Settings` 时逐臂设(进程环境只能有一个值)。声明与实际跑起来的那一个
+在**第一次调用模型之前**当场对号(`reflect_optimization()` 的直接读数),不符就
+整批停——两条 v2 臂的轨迹形状逐字相同,事后从产物里反推不出第二维。
+
+`arm` 与 `optimization` 在投影行里是**两列**,都是 rig 的声明;`policy_version`
+是从轨迹反推的证据。产物路径按 `arm_label` 分:`off` 那一格落回光秃秃的 policy
+(`raw/v2/`、`calls-v2.jsonl`,与二维化之前逐字相同),非 `off` 带上第二维
+(`raw/v2-prefix_snapshot/`)——否则两条 v2 臂的存档会撞进同一个路径。
+
+**日志隔离**:rig 的两条进程内路径(`search` / `ab`)与它起的临时后端都把
+`LLM_LOG_PATH` 与 `EVENT_LOG_DIR` 圈进本次 `--out-dir`(`<out-dir>/llm/llm.jsonl`
+与 `<out-dir>/events/`),**不往机器共用的 `.local/logs/` 写一个字节**。两个默认
+落点都是整台机器共用的:同一天里别的后端、别的冒烟、别的 rig 会话都往同一份
+`llm-*.jsonl` / `events-*.jsonl` 追加,在共用日志上按时间窗切片会把**别的进程**的
+模型调用记到本 run 头上。副作用是启动时会打一行「LLM_LOG_PATH 的目录与
+EVENT_LOG_DIR 不一致」的告警——那条告警说的是日志查看器读不到 per-user 的 llm
+日志,rig 的产物没有查看器要读,两串日志各按自己的 glob 读。
+
+**per-call 表 `calls-<arm>.jsonl`**:一次模型调用一行,由 `llm.jsonl` ⋈
+`events.jsonl` 按 `support_id` 对号得来(核心纯分析在
+`backend/app/eval/reflect_context_bench.py`,rig 只做薄适配)。列只有数值与短码:
+`call_wall_ms` / `attempts` / `response_chars` / 各 token 计数(传输侧,来自
+`app/core/llm.py` 写的那一行)与 `queue_latency_ms` / `execution_latency_ms` /
+`workload_id`(调度侧,来自 `model_scheduler` 事件);请求正文、响应片段、模型名、
+时间戳与 id 一个都不进。`join` 那一列如实说出归因质量:`joined` / `log_only`
+(缺事件)/ `event_only`(缺**终态**日志行)/ `ambiguous`(同号多行,跨侧列一律
+unknown,**不按顺序猜配对**)/ `unattributed`(这一行没有相关号)/ `retry`(这一
+行是一次没跑完的尝试,不是一次调用的结果)。
+
+**重试行不占格子**。`app/core/llm.py` 每次瞬时错误重试都再写一条 `status="retry"`
+的日志行,它与终态行**同号**,而调度事件只有一条。这几行单列成 `retry`:不参与
+扇出判定(否则每一次重试过的调用都会落成 `ambiguous`,排队/执行时长与 workload
+全线 unknown,而那批恰是最慢、最该被看见的调用),`call_index` 是 `null`。**数这
+一批跑了多少次调用要数 `call_index` 有值的行,不要数行数**,否则重试过的调用会被
+数成两次。这几列的闭集(以及每一行写出去之前那两道自检)在
+`backend/app/eval/reflect_context_bench.py`。
+
+⚠ **并发跑批时 run 级标签是 unknown**。`support_id` 只把日志行与它自己的调度事件
+对上号,它不知道这次调用属于哪个 run;`--concurrency > 1` 时那一批的 per-call 行
+落进 `calls-unknown.jsonl`,`arm` / `optimization` / `question_key` / `corpus_cell`
+/ `effort` / `repeat` 六列全是 `null`(与并发下成本三键强制 unknown 同一条口径:
+硬塞一条臂进去比不出表更坏)。要按臂读 per-call 表就跑 `--concurrency 1`。
+
+**`run_wall_ms`**:一次 run 的墙钟,产地只有 rig(轨迹里的 `total_ms` 是各步耗时
+之和,漏掉排队与步与步之间的空隙)。**失败的 run 也写**——它崩在半路,但确实占了
+这么久,而「哪一侧更容易崩、崩之前烧了多少时间」正是要量的东西之一;只有**压根
+没开跑**的行(范围解析失败)是 `null`,写 0 会被读成「零耗时跑完了」并真的进
+P50/P95 的分位数。
+
+**dry-run 打两个数**:`次逻辑调用`(llm.jsonl 的行数、`model_calls` 的口径)与
+`请求上界`(真正发出去的请求数、行上 `attempts` 的口径)。两者的乘数是配置里的
+重试预算;静默 fallback(`response_format` / `stream_options` 被拒后的重发)另计
+——它多发一次请求却不留任何日志行,配置里查不出来。混用这两个数会把一次静默
+fallback 记成一次额外的推理,反过来则会低报端点负载。
+
 **隐私口径(三个脚本同一份)**:每个 run 输出一行,键取自
-`app.domain.reasoning_trace_stats.RUN_PROJECTION_KEYS` 这个闭集,值只能是闭集字符串、
+`app.domain.reasoning_trace_stats.RUN_PROJECTION_KEYS` 这个闭集(**闭集与短码形状
+的真源是 `backend/app/domain/reasoning_trace_stats.py` 那一个模块**,这份 README 与
+任何设计稿都只是它的转述;两处对不上时以模块为准),值只能是闭集字符串、
 bool、数值、`None`,短码的列表(`action_seq`),或以短码为键、数值为叶的字典
 (`skip_reasons` 是一层,`citation_contribution` 是两层)。其中 `skip_reasons` /
 `fallback_reasons` 的**键是服务端原因码的透传**,不另过闭集校验。**问题原文、答案正文、来源标题、证据

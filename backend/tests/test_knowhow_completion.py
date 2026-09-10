@@ -1131,3 +1131,53 @@ def test_completion_enters_the_retrieval_loop_on_the_legacy_reflect(monkeypatch)
     # 开关对谁都没生效。
     probe = _ProbeRetriever(repo.settings)
     assert probe.reflect_v2_active() is True
+
+
+def test_completion_ignores_the_reflect_prefix_optimization(monkeypatch):
+    """补全进入 `run()` 时前缀复用策略恒 `off`、恒不测量(前缀复用设计 §5.1)。
+
+    与上一条同一种守法(在真实补全路径上拦住 retriever 工厂,交回一个生产实现的
+    子类),钉的是**新增**的那一项:即使部署把 `REASONING_REFLECT_OPTIMIZATION`
+    配成 `prefix_snapshot`、把测量也打开,Knowhow 补全仍然一格都不受影响——它的
+    `allow_reflect_v2=False` 是这两个判定的共同门。
+
+    变异:把 `reflect_optimization()`(或 `reflect_measures_context()`)的门从
+    `reflect_v2_active()` 换成直读那个总闸字段 ⇒ 这条红。
+    """
+    from app.services import reasoning_retrieval
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    seen: list = []
+
+    class _ProbeRetriever(ReasoningRetriever):
+        def __init__(self, settings):
+            self.settings = settings
+            self.allow_reflect_v2 = True   # 缺省 = 跟随总闸
+
+        def run(self, *_args, **_kwargs):
+            seen.append((self.reflect_optimization(),
+                         self.reflect_measures_context()))
+            return SimpleNamespace(
+                top_hits=[], elements=[], chunks=[], chains=[], trace=[]
+            )
+
+    repo, _errors = _repo_with_client(_CompletionClient({"suggestions": []}))
+    repo.settings.reasoning_reflect_v2_enabled = True
+    repo.settings.reasoning_reflect_optimization = "prefix_snapshot"
+    repo.settings.reasoning_reflect_measure_context = True
+
+    def _factory(_repo, settings, **_kwargs):
+        return _ProbeRetriever(settings)
+
+    monkeypatch.setattr(
+        reasoning_retrieval, "reasoning_retriever_from_repository", _factory
+    )
+    knowhow_api.complete_row(repo, "nb", _table(), "current", ["cause"])
+
+    assert seen == [("off", False)]
+
+    # 同一份 settings 在缺省调用方身上确实是开着的——否则上面那格 `off` 可能只是
+    # 因为这两个开关对谁都没生效。
+    probe = _ProbeRetriever(repo.settings)
+    assert probe.reflect_optimization() == "prefix_snapshot"
+    assert probe.reflect_measures_context() is True

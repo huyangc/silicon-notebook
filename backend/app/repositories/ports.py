@@ -343,13 +343,35 @@ class JsonChatClientPort(Protocol):
         thinking_mode: Optional[Literal["enabled", "disabled"]] = None,
         # Optional OUT-parameter (``app.core.llm.CALL_STATS_KWARG``): a
         # caller-owned mapping the implementation fills with this call's
-        # provider-side outcome (``finish_reason``). It belongs on the port
-        # because the reflect layer forwards it through the scheduled adapter
-        # down to the physical client — without it, an empty completion and one
-        # the server cut off at ``max_tokens`` are the same empty string
-        # everywhere downstream. Callers that omit it are unaffected;
-        # implementations that cannot fill it declare
-        # ``supports_call_stats = False``.
+        # provider-side outcome. It belongs on the port because the reflect layer
+        # forwards it through the scheduled adapter down to the physical client —
+        # without it, an empty completion and one the server cut off at
+        # ``max_tokens`` are the same empty string everywhere downstream. Callers
+        # that omit it are unaffected; implementations that cannot fill it declare
+        # ``supports_call_stats = False`` and leave the mapping untouched.
+        #
+        # Keys an implementation writes on every exit it reports at all:
+        #   ``status``            — ``ok`` | ``cancelled`` | ``error`` |
+        #                           ``cache_hit`` (served from the implementation's
+        #                           own process-side response cache; says nothing
+        #                           about any provider-side prefix reuse).
+        #   ``call_wall_ms``      — int, monotonic duration of this one call.
+        #   ``attempts``          — int, provider requests ISSUED for this ONE
+        #                           logical call. Above 1 whenever a retry or a
+        #                           silent fallback fired; 0 on a cache hit.
+        #   ``attempts_observed`` — True, meaning that count was taken at the
+        #                           transport. Its ABSENCE (an untouched mapping)
+        #                           is the signal that the request count is
+        #                           unknown, and must never be read as zero.
+        # Written only when they exist; an absent key means "not observed":
+        #   ``finish_reason``     — str. ``""`` means the provider did not report
+        #                           one; the key being absent means no completion
+        #                           was produced at all.
+        #   ``response_chars``    — int, length of the text handed back to the
+        #                           caller (not of any clipped log copy).
+        #   ``usage``             — dict of plain token counters; a counter the
+        #                           provider did not report is an absent key,
+        #                           never a fabricated 0.
         call_stats: Optional[Dict[str, Any]] = None,
     ) -> str: ...
 

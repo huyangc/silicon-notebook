@@ -25,13 +25,20 @@ from app.core.ask_retrieval_policy import (
     DEFAULT_RETRIEVAL_EFFORT, EXHAUSTIVE_RETRIEVAL_EFFORT, AskRetrievalLimits,
     ask_retrieval_limits,
 )
-from app.core.llm import CALL_STATS_KWARG, budget_kwargs
+from app.core.llm import (
+    CALL_STATS_KWARG, budget_kwargs, provider_messages,
+    serialize_provider_messages,
+)
 from app.core.config import (
     DEFAULT_REASONING_PER_QUERY_LIMIT,
     DEFAULT_REFLECT_EVIDENCE_CHARS_BY_EFFORT,
+    REFLECT_OPTIMIZATION_IMPLEMENTED,
     Settings,
 )
 from app.domain.cancellation import CoreCancellation
+from app.domain.reasoning_trace_stats import (
+    REFLECT_CONTEXT_DETAIL_KEYS, REFLECT_MEASUREMENT_DETAIL_KEYS,
+)
 from app.models.ask import TRACE_RESULT_IDS_MAX, TraceStep
 from app.repositories.lexical_query import (
     MAX_EXACT_PHRASE_CHARS, MAX_QUOTED_PHRASES, exact_probe_query,
@@ -53,14 +60,15 @@ from app.services.collection_enumeration import (
     TRUNCATED_OVERSIZE_SAMPLE, EnumerationBudget, SourceNotInScopeError,
 )
 from app.services.prompts import (
-    reflect_prompt, reflect_schema_hint, reflect_v2_schema_hint,
-    reflect_v2_system_prompt, reflect_v2_user_prompt,
+    reflect_prompt, reflect_schema_hint, reflect_v2_prefix_user_prompt,
+    reflect_v2_schema_hint, reflect_v2_static_prompt,
+    reflect_v2_system_prompt, reflect_v2_turn_state, reflect_v2_user_prompt,
 )
 from app.services.reasoning_actions import (
     ACTION_DEFINITIONS, ENUMERATE_SCOPE_ALL, ENUMERATE_SCOPE_CURRENT_NOTEBOOK,
     ENUMERATE_SCOPES, EXACT_TERM_SHAPE_NOTE, REFLECT_INVALID_ACTION,
     UNAVAILABLE_DISCLOSE_MAX, ActionParam, ReflectCapabilities,
-    ReflectCapabilityFacts, build_reflect_capabilities,
+    ReflectCapabilityFacts, build_reflect_capabilities, static_catalog_facts,
 )
 from app.domain.retrieval_termination import (
     ASPECT_COLLECTION_KEY_PREFIX, ASSESSMENT_SKIP_REASON_PREFIX,
@@ -69,9 +77,13 @@ from app.domain.retrieval_termination import (
 from app.services.reasoning_aspects import (
     AspectLedger, TERMINATION_SKIP_REASON, assessment_is_empty,
     build_aspect_ledger, classify_termination, evidence_bound_keys,
-    render_aspect_block, termination_summary,
+    render_aspect_block, render_aspect_contract_block,
+    render_aspect_status_block, termination_summary,
 )
-from app.services.reasoning_context import ReflectContext, build_evidence_block
+from app.services.reasoning_context import (
+    TURN_CONTEXT_TITLE, ReflectContext, ReflectMeasurement,
+    build_evidence_block,
+)
 from app.services.reasoning_observation import (
     ActionObservationLedger, render_observations,
 )
@@ -371,6 +383,167 @@ def _call_stats_kwargs(client, sink: "Dict[str, Any]") -> "Dict[str, Any]":
     """
     return {CALL_STATS_KWARG: sink} if getattr(
         client, "supports_call_stats", False) else {}
+
+
+def _registered_measure_key(name: str) -> str:
+    """把一个 reflect 步 detail 的测量键名对着读侧的登记清单兑一次再用(T-PS3)。
+
+    写侧不许自己抄一份字面量:`REFLECT_MEASUREMENT_DETAIL_KEYS` 是读侧
+    (`app.domain.reasoning_trace_stats` 的投影)认得的那一份闭集,写侧多写一个
+    读侧不认的键,后果是**那一列静默缺席**——投影照样出整行,只是那一格恒为
+    `None`,而没有任何一条用例会红。所以这里在**导入期**就把每个键名兑一遍:
+    读侧改名或删键,进程起不来,而不是数据悄悄变空。
+
+    在导入期抛而不是 `assert`:`python -O` 会把断言整条删掉,而这一道是唯一能
+    把「读写两侧对不上」变成可见故障的判据。逐轮那道 `⊆` 判据(见
+    `_TraceRecorder.__call__`,同样是 `raise` 而不是 `assert`)是它的第二重保险,
+    防的是"键名合法但走错了写点"。
+    """
+    if name not in REFLECT_MEASUREMENT_DETAIL_KEYS:
+        raise RuntimeError(
+            "reflect measurement detail key is not registered in "
+            f"app.domain.reasoning_trace_stats: {name}")
+    return name
+
+
+#: 上下文块短码 → detail 键。产地是读侧那张表,这里只兑一次,不重排也不改名。
+_MEASURE_CTX_KEYS: Dict[str, str] = {
+    code: _registered_measure_key(key)
+    for code, key in REFLECT_CONTEXT_DETAIL_KEYS.items()
+}
+_MEASURE_PREFIX_BYTES = _registered_measure_key("message_prefix_bytes")
+_MEASURE_CARDS_SHOWN = _registered_measure_key("cards_shown")
+_MEASURE_CARDS_OMITTED = _registered_measure_key("cards_omitted")
+#: `call_stats` 出参上的键 → reflect 步 detail 上的键。两侧名字不同的只有
+#: `attempts`(detail 里叫 `call_attempts`,因为那一层还有别的 attempts)。
+_MEASURE_CALL_KEYS: Dict[str, str] = {
+    "call_wall_ms": _registered_measure_key("call_wall_ms"),
+    "attempts": _registered_measure_key("call_attempts"),
+    "response_chars": _registered_measure_key("response_chars"),
+}
+
+
+def _common_prefix_bytes(left: bytes, right: bytes) -> int:
+    """两串字节的公共前缀长度。纯函数,零分配。
+
+    朴素逐字节循环:这条路只在测量开着时走,一轮一次,而它量的那次模型调用是
+    三个数量级更贵的东西——为了几微秒换一个二分 + 切片比较(每次比较都要
+    复制一份切片)不划算,也更难看出对不对。
+    """
+    limit = min(len(left), len(right))
+    index = 0
+    while index < limit and left[index] == right[index]:
+        index += 1
+    return index
+
+
+def _measure_reflect_messages(
+    measurement: "ReflectMeasurement", context: "ReflectContext",
+    messages: "List[Dict[str, str]]", schema_hint: str, material: str,
+) -> None:
+    """本轮的块长度、消息字节总数与公共前缀(T-PS3;计划 §3、拍板 Q2)。
+
+    落在 `_reflect_v2_attempt` 而不是 `_reflect_v2_context`,是因为五块里有三块
+    的**最终**字节只有这里才有:`off` 的 S 是那一轮现渲染的动态 system 段、C 由
+    `prompts` 把问题拼进去之后才成形、`prefix_snapshot` 的 T 还差一半(本轮可执行
+    动作)要等这一轮的能力投影。谁产出那个值,谁记那个值——`_reflect_v2_context`
+    只记它自己独有的那两个(展示/省略卡数)。
+
+    五块的口径**两条臂同形**(测量的意义就在于两条臂用同一把尺子):
+
+    * `S` = 这一轮 system 段的全部字符,含严格调用方那句 run 级的"材料不可信"。
+    * `K` / `D` = 证据卡与观察账,取上下文里那两块的原文长度。
+    * `T` = 装配好的材料块减去 K 与 D:`off` 下是服务器状态摘要(它在 `off` 里
+      排最前、在 P 里排最末,但**大小**是同一个量),P 下是本轮动作清单 + 状态半。
+      块间那两个 `\\n\\n` 落在这一格里。
+    * `C` = user 段减去整个材料块:问题原文、引号规则、方面契约(只有 P 有)与
+      收尾那句。
+
+    于是 `S + C + K + D + T` 恰好等于两条消息正文的字符数之和——一格字符都不
+    丢、不重复计。这条恒等式是这五个数唯一的自洽判据,有用例钉住。
+
+    `ctx_bytes_total` 是**这一轮最终消息的全部字节**(含 wrapper 与帧开销),因为
+    公共前缀正是在同一串字节上算的——分子分母同口径,那道除法才成立(计划 §3
+    T-PS3 与读侧 `REFLECT_CONTEXT_DETAIL_KEYS` 的说明互为合同)。字符数与字节数
+    在中文上差三倍,所以它既不是上面五格之和、也不该拿去和它们比大小。
+
+    首轮 `message_prefix_bytes` 如实为 `None`:那时没有可比的上一轮。请求文本
+    只在内存里过一遍,不进 llm.jsonl、不进 trace、不进投影。
+    """
+    chars_k = len(context.evidence)
+    chars_d = len(context.observations)
+    detail = measurement.detail
+    keys = _MEASURE_CTX_KEYS
+    detail[keys["s"]] = len(messages[0]["content"])
+    detail[keys["c"]] = len(messages[1]["content"]) - len(material)
+    detail[keys["k"]] = chars_k
+    detail[keys["d"]] = chars_d
+    detail[keys["t"]] = len(material) - chars_k - chars_d
+    final = serialize_provider_messages(
+        provider_messages(messages, schema_hint))
+    detail[keys["bytes_total"]] = len(final)
+    detail[_MEASURE_PREFIX_BYTES] = (
+        None if measurement.previous is None
+        else _common_prefix_bytes(measurement.previous, final))
+    # 升为「上一轮」的时机不在这里,而在这一轮真的记了 reflect 步的那一刻
+    # (`ReflectMeasurement.take`):同一轮的两次尝试因此都和上一轮比。
+    measurement.current = final
+
+
+def _measure_reflect_messages_safely(
+    measurement: "ReflectMeasurement", context: "ReflectContext",
+    messages: "List[Dict[str, str]]", schema_hint: str, material: str,
+) -> None:
+    """把上面那次测量**关进它自己的 try**(T-PS3 评审 P1)。
+
+    测量排在 `client.chat_json` 之前、而那整段又住在 `_reflect_v2_attempt` 的
+    fail-open `try` 里。少了这一层,一次观测故障会被那条 `except Exception` 洗成
+    一次**假的模型兜底**:那一轮的请求根本没发出去,轨迹上却多出一条
+    `__reflect_invalid__`,`fail_closed` 调用方(knowhow 补全)则整次死掉——测量
+    因此改变了它本该只旁观的那件事,而对照实验会把这次分叉记到「臂」头上。
+
+    纪律与同文件 `_TraceRecorder.__call__` 对 observer 投影那段逐字相同:它读的是
+    模型可以影响形状的东西(消息正文来自上一轮的动作参数),所以「它永远不会抛」
+    不是一个可以假设的性质。既然如此,失败的表现只许是**键缺席**——与
+    `_measure_reflect_call` 的「客户端不报就缺键、绝不写 0」同一条口径,读侧把缺
+    席读成 unknown。日志只留异常**类名**:请求文本一个字节都不许进日志(`exc_info`
+    会把出问题的那段正文带进 traceback,所以这里也不给)。
+
+    连 `previous` 一起清掉,而不只是不写本轮的键:下一轮若拿一个**隔了一轮**的
+    基准去算公共前缀,量出来的数看着完全正常,却回答了另一个问题。丢掉基准后
+    下一轮的 `message_prefix_bytes` 如实缺席,与首轮同义。
+    """
+    try:
+        _measure_reflect_messages(
+            measurement, context, messages, schema_hint, material)
+    except Exception as exc:  # noqa: BLE001 — 观测绝不参与业务决定
+        measurement.current = None
+        measurement.previous = None
+        logging.getLogger(__name__).debug(
+            "reflect context measurement failed: %s", type(exc).__name__)
+
+
+def _measure_reflect_call(
+    measurement: "ReflectMeasurement", stats: "Mapping[str, Any]",
+) -> None:
+    """把一次调用的 `call_stats` 观测**累加**进本轮的测量键(T-PS3)。
+
+    累加而不是覆盖:v2 在正文被 `max_tokens` 切断时会同轮再调一次(加预算重试),
+    而读侧 `model_calls_real` 是各 reflect 步 `call_attempts` 之和——一轮只报最后
+    一次的请求数,整 run 的真实请求数就偏低,而那一列本来就是用来判「日志里的
+    请求数是真值还是下界」的。墙钟与正文字符数同一条口径:它们回答的是"这一轮
+    reflect 在模型上花了多少",而不是"最后那一次花了多少"。
+
+    缺键 ⇒ **不写**。空 sink 有两种成因(客户端不声明 `supports_call_stats`、或
+    调用在做任何事之前就被拒),两种都是"没有观测",不是 0——写 0 会让读侧把
+    一次没量到的 run 读成"一次模型都没调"。`bool` 显式排除:它是 `int` 的子类,
+    一个把 `attempts` 写成 `True` 的替身会被求和成 1。
+    """
+    detail = measurement.detail
+    for source, key in _MEASURE_CALL_KEYS.items():
+        value = stats.get(source)
+        if isinstance(value, int) and not isinstance(value, bool):
+            detail[key] = (detail.get(key) or 0) + value
 
 
 def _reflect_fallback(reason: str) -> "ReflectDecision":
@@ -3020,7 +3193,7 @@ class _TraceRecorder:
     """
 
     __slots__ = ("_trace", "_cancel_event", "_on_step", "_last_ts", "observer",
-                 "_deferred")
+                 "_deferred", "measurement")
 
     def __init__(self, trace: List[TraceStep], cancel_event: CancelEvent,
                  on_step) -> None:
@@ -3038,12 +3211,36 @@ class _TraceRecorder:
         # 首轮与循环唯一共用的那个把手,挂在这里首轮 seed 与循环动作就自动共用
         # 同一次转换(设计稿要求),不必在十几条动作分支里各抄一句。
         self.observer = None
+        # reflect 上下文观测缓存(T-PS3)。同 `observer` 一档纪律:默认 None ⇒
+        # **关闭态与测量关零新状态**,`__call__` 只多一次 `is not None`。
+        #
+        # 为什么测量的落账点在这个记账器上:那几个稀疏键要进的是 `run()` 里现拼
+        # 的那份 reflect detail,而 `run()` 在零松弛长度天花板下、一条语句都不能
+        # 加(同 `defer` 的理由)。这个记账器是那条 reflect 步**唯一**的入口,
+        # 在这里合并因此既不改 `run()`、也不需要第二个写点。挂它的人是
+        # `_reflect_v2_context`(测量开着的第一轮),owner 是
+        # `_ReasoningRunState.reflect_measurement`。
+        self.measurement = None
 
     def __call__(self, step: TraceStep) -> None:
         raise_if_cancelled(self._cancel_event)
         now = time.perf_counter()
         step.duration_ms = round((now - self._last_ts) * 1000)
         self._last_ts = now
+        if self.measurement is not None and step.step_type == "reflect":
+            # 合并排在 `observer` / `_on_step` **之前**:上屏的那一份与最终落库
+            # 的那一份因此是同一个 detail,不会一份带测量、一份不带。
+            pending = self.measurement.take()
+            unknown = set(pending) - REFLECT_MEASUREMENT_DETAIL_KEYS
+            if unknown:
+                # `raise` 而不是 `assert`,与 `_registered_measure_key` 那道导入期
+                # 判据同档:`python -O` 会把断言整条删掉,而这一道恰恰是「键名合法
+                # 但走错了写点」唯一的判据——删掉之后那一列静默恒 `None`,没有任何
+                # 一条用例会红(评审 P2-1 的变异 M26 就是这么逃掉的)。
+                raise RuntimeError(
+                    "reflect measurement wrote a detail key the projection does "
+                    f"not read: {sorted(unknown)}")
+            step.detail.update(pending)
         self._trace.append(step)
         if self.observer is not None:
             try:
@@ -3311,6 +3508,34 @@ class _ReasoningRunState:
     # 局部名,读写一律走 `state`。
     reflect_failures: int = 0
 
+    # —— 本 run 的**静态工具目录**(T-PS7 / 前缀复用设计 §4.2)。
+    #
+    # 带默认值、留空即中性:只有前缀复用策略不是 `off` 时才构造(判据见
+    # `_prime_static_catalog`;纯测量臂**不**构造——目录是布局的输入,不是测量的),
+    # 其余情况恒为 None ——`_new_run_state` 因此一行都不用改,关闭态零新状态。
+    #
+    # 写点单一且只写一次:本 run **第一次** reflect 那一轮,用那轮已经算好的 facts
+    # 生成。刻意**不**在 run 起点算——那里没有现成的 facts,重算一份要额外付一次
+    # `_unsafe_scope_restricted()`(「全选」形状下两次库读),而这个目录本来就是
+    # 用来省成本的。
+    reflect_static_catalog: "Optional[ReflectCapabilities]" = None
+
+    # —— 本 run 的 reflect **上下文观测缓存**(T-PS3 / 拍板 Q2)。
+    #
+    # 只读渲染缓存:它存的是上一轮已记账的 provider-facing 消息字节串与本轮那几
+    # 个整数观测,一格都不参与决策——把它整个删掉,发出去的消息、模型的决定与
+    # 轨迹上除那几个稀疏键之外的一切逐字节不变。
+    #
+    # 带默认值、留空即中性:只有 `reflect_measures_context()` 为真时才构造(写点
+    # 单一在 `_reflect_v2_context`,本 run 第一次 reflect 那一轮),其余情况恒为
+    # None ——`_new_run_state` 因此一行都不用改,关闭态与测量关零新状态。
+    #
+    # 同一个对象有三个把手,各有各的必要(不是三份数据):这里是 owner;
+    # `state.record.measurement` 是记账器合并 detail 用的把手(`run()` 不能加语句);
+    # `ReflectContext.measurement` 是每轮交给 `_reflect_v2_attempt` 的那一格
+    # (它拿不到 `state`,理由同 `static_prompt`)。
+    reflect_measurement: "Optional[ReflectMeasurement]" = None
+
 
 class ReasoningRetriever:
     def __init__(
@@ -3498,6 +3723,55 @@ class ReasoningRetriever:
             and self.allow_reflect_v2
         )
 
+    def reflect_optimization(self) -> str:
+        """本 run 的 reflect 用哪一档上下文前缀复用策略(前缀复用最终设计 §5.1)。
+
+        **全仓唯一读点**:settings 上那个策略字段除这里之外没有第二处会读。理由与
+        上面那把闸同款——各处自己读一次 settings 的写法,关掉之后总会剩下一处还
+        在跑(枚举闸与 chunk 闸都栽过)。
+
+        它**叠在** `reflect_v2_active()` 之上,不是与它并列:v2 关着时反思走的是
+        legacy 协议,那条路径上根本没有"前缀"这个概念,所以总闸关(以及 Knowhow 用
+        `allow_reflect_v2=False` 单独否决时)一律返回 `off`,配置里写了什么都不看。
+        这样 `off` 与关闭态是同一条字节路径,不需要在下游再判一次"现在是不是
+        legacy"。
+
+        `getattr` 而不是直读:窄测试替身与离线工具里的 duck-typed settings 适配器
+        并不带这个字段(镜像 `reflect_v2_active` 的既有写法),缺省必须是 `off`
+        ——认不出这个开关的调用方绝不该被静默切到新布局上。
+
+        **已实现闭集之外的取值一律折回 `off`。** 这不是把启动期校验器的活儿抢过来
+        ——真实部署的非法/未实现取值仍由 `validate_reflect_optimization` 在启动期
+        响亮拒绝,那条路径一格没动。这里兜的是**压根不过校验器**的那类 settings:
+        duck-typed 适配器、离线工具与窄替身可以带上任意一个 `None` / `""` / `0` /
+        未知串,而下游按取值分派布局时,一个认不出的取值只会走到"既不是 off 也不是
+        任何已实现臂"的第三种形态上——那才是真正的静默漂移。折回 `off` 是这里唯一
+        fail-closed 的选择:未知 ⇒ 走实施基线,与关闭态同一条字节路径。
+        """
+        if not self.reflect_v2_active():
+            return "off"
+        configured = getattr(self.settings, "reasoning_reflect_optimization", "off")
+        if configured not in REFLECT_OPTIMIZATION_IMPLEMENTED:
+            return "off"
+        return str(configured)
+
+    def reflect_measures_context(self) -> bool:
+        """本 run 要不要多算那份纯内存的上下文块长/前缀观测(拍板 Q2)。
+
+        与 `reflect_optimization()` **正交**:`off` 臂也能开着它,对照实验要的正是
+        两条臂用同一把尺子量。但同样叠在 v2 总闸之上——legacy 路径上没有可测的
+        块结构,关闭态一个字节都不多付。
+
+        它的消费者是测量本身(T-PS3),**不**包括静态工具目录:目录是布局的输入,
+        判据只看 `reflect_optimization()`(见 `_prime_static_catalog`)。测量对
+        `off` 臂原样的那份消息取尺,给它构造一份没有消费者的目录只会污染它要测的
+        东西。
+        """
+        if not self.reflect_v2_active():
+            return False
+        return bool(
+            getattr(self.settings, "reasoning_reflect_measure_context", False))
+
     def _scope_probe_matters(
         self,
         state: "_ReasoningRunState",
@@ -3551,6 +3825,14 @@ class ReasoningRetriever:
         成了局部名,`state` 上那几个是**陈旧值**(见 `_ReasoningRunState` 的纪律
         说明)。`ppr_searches`/`chunk_searches`/枚举三池是那条纪律的既有例外,
         它们仍以 `state` 为权威,所以这里直读。
+
+        ⚠ **不是纯函数:它有一处副作用。** 返回投影之前调用
+        `_prime_static_catalog(state, facts)`,在本 run **第一次** reflect 时把
+        `prefix_snapshot` 的静态工具目录写进 `state.reflect_static_catalog`(T-PS7)。
+        写点挂在这里而不是 run 起点,是为了复用这一轮刚算完的 facts、不再付一次
+        `_unsafe_scope_restricted()` 的库读——理由与幂等判据都在那个方法的
+        docstring 里。所以"只算一个投影"的读法是不准确的:同一次调用还决定了这
+        条臂整个 run 的 system 段长什么样。
 
         这个方法只做加减法与布尔合并,唯一的两个请求级判定是
         `chunk_search_active()`(纯 settings/策略位)与 `_unsafe_scope_restricted()`。
@@ -3609,7 +3891,37 @@ class ReasoningRetriever:
                 outline_overflow and not outline_cap_repair_used),
             terminal_overflow_repair=terminal_overflow_repair,
         )
+        self._prime_static_catalog(state, facts)
         return build_reflect_capabilities(facts)
+
+    def _prime_static_catalog(
+        self, state: "_ReasoningRunState", facts: ReflectCapabilityFacts,
+    ) -> None:
+        """本 run 第一次 reflect 时生成一次静态工具目录并缓存(T-PS7)。
+
+        为什么写点在这里而不是 run 起点:目录要的那份 facts 正是这一轮刚算完的
+        那份,而重新算一份就要再付一次 `_unsafe_scope_restricted()`——它按契约禁止
+        memo,「全选」形状下每次两次库读。用现成的那份是零额外 I/O。
+
+        为什么只在第一次:目录是本 run 的**稳定前缀**,一旦生成就逐字节不变。第二
+        轮开始 facts 已经带上了本轮的额度与形态,拿它重算会让"静态"这个词失效
+        ——那正是前缀复用要消除的逐轮漂移。代价按拍板 Q4 接受:首轮之后范围收窄
+        或通道关闭时,目录里会留着已经不可用的动作,由每轮的当前状态如实说明。
+
+        为什么判据只看策略、不看测量开关(评审后修正):目录是**布局**的输入——
+        只有把工具清单挪进稳定前缀的那条臂才会读它。测量量的是消息字节,它对
+        `off` 臂原样的那份消息取尺,不需要也不该拿到一份目录:`off` + 只开测量时
+        构造一份没有任何消费者的对象,只会让纯测量臂比它要测量的那条路径多付一笔
+        开销——那正好污染它要测的东西。所以判据是单一的
+        `reflect_optimization() != "off"`,走那一个单点,不在这里第二次读 settings;
+        `reflect_measures_context()` 由测量本身(T-PS3)消费。
+        """
+        if state.reflect_static_catalog is not None:
+            return
+        if self.reflect_optimization() == "off":
+            return
+        state.reflect_static_catalog = build_reflect_capabilities(
+            static_catalog_facts(facts))
 
     # --- 集合枚举工具的总闸 ---
     def enumeration_active(self) -> bool:
@@ -3895,6 +4207,7 @@ class ReasoningRetriever:
     def _reflect_v2(
         self, question, candidates_summary,
         capabilities: "ReflectCapabilities", client,
+        context: "Optional[ReflectContext]" = None,
     ) -> "ReflectDecision":
         """一轮 v2 reflect:能力投影 → system/user 两段 → 类型化校验(设计稿 §5.2)。
 
@@ -3914,19 +4227,42 @@ class ReasoningRetriever:
         另找一个字面量:一次部署把反思预算调高的决定,重试要跟着走,而不是撞上
         一堵单独钉死的墙。全局配置一个字都不改——只有这一次调用带更高的上限。
         仍失败才走兜底(随后由 `_survive_reflect_failure` 决定是继续还是收尾)。
+
+        ``context`` 只为布局分派往下传(见 `_reflect_v2_attempt`):两次尝试用同
+        一份上下文,加预算重试因此不会顺手换掉消息形状。
         """
         decision = self._reflect_v2_attempt(
-            question, candidates_summary, capabilities, client)
+            question, candidates_summary, capabilities, client, context=context)
         if (decision.fallback
                 and decision.fallback_reason == REFLECT_OUTPUT_BUDGET_EXHAUSTED):
             decision = self._reflect_v2_attempt(
                 question, candidates_summary, capabilities, client,
+                context=context,
                 budget_multiplier=REFLECT_RETRY_BUDGET_MULTIPLIER)
         return decision
+
+    def _reflect_prefix_layout(
+        self, context: "Optional[ReflectContext]",
+    ) -> bool:
+        """这一轮走不走 `prefix_snapshot` 的消息形状(T-PS8)。
+
+        两个条件缺一不可,且**两处判据同源**:策略单点说 `prefix_snapshot`,并且
+        上下文真的带着那条臂的载荷(`static_prompt` 由 `_reflect_v2_context` 在
+        同一个判据下填,空串 = 那边已经退回 off 的布局)。少了后半个条件,一个
+        直接调 `reflect(capabilities=..., context=...)` 的窄调用方会在策略开着时
+        拿到一份**没有工具目录**的 system 段——S 的动作清单在 P 下来自静态目录,
+        而窄调用方构造的上下文里没有它。
+        """
+        return (
+            context is not None
+            and bool(context.static_prompt)
+            and self.reflect_optimization() == "prefix_snapshot"
+        )
 
     def _reflect_v2_attempt(
         self, question, candidates_summary,
         capabilities: "ReflectCapabilities", client,
+        context: "Optional[ReflectContext]" = None,
         *, budget_multiplier: int = 1,
     ) -> "ReflectDecision":
         """`_reflect_v2` 的一次调用尝试。``budget_multiplier`` 只放大这一次的
@@ -3937,24 +4273,62 @@ class ReasoningRetriever:
         才传(`_call_stats_kwargs`),所以既有的 duck-typed 替身与插件绑定的客户端
         一个签名都不用改;拿不到 finish_reason 的调用方退回接入前的行为(空正文
         一律记 `empty`,不触发上面那次加预算重试)。
+
+        **两种消息形状,由 `_reflect_prefix_layout` 一处分派。** `off`:
+        `system(UNTRUSTED? + 本轮动作清单在内的固定指令)` + `user(问题 + 三块)`,
+        逐字节回到接入前。`prefix_snapshot`:`system(UNTRUSTED? + S)` +
+        `user(C + K + D + T)`,其中本轮可执行动作与不可用清单从 S 挪到 T 的开头
+        ——那是 S 里**唯一**两处逐轮变化的内容(计划 X1),挪走之后整个 system 段在
+        一个 run 内逐字节不变。`chat_json` 自己在最前面插的那段 wrapper 与
+        `reflect_v2_schema_hint` 两条路径共用、两处都已经逐轮稳定,一个字都不动。
+
+        **上下文观测(T-PS3)与布局正交。** 测量开着时,这里额外算一份纯内存的
+        块长度/消息字节/公共前缀(见 `_measure_reflect_messages`),两条臂同一把
+        尺子;测量关时那两处判据各只多一次 `is not None`。观测**不参与**这个
+        方法的任何决定:消息、重试判据与返回的决定逐字节与测量关时相同。观测
+        **自身失败**同样不参与——它关在自己的 `try` 里
+        (`_measure_reflect_messages_safely`),失败只表现为那几个键缺席,绝不会
+        落进下面那条 fail-open 的 `except` 变成一次假兜底。
         """
         stats: Dict[str, Any] = {}
+        # 上下文观测缓存(T-PS3)。测量关、关闭态与不带上下文的窄调用方一律
+        # `None` ⇒ 下面两处判据各只多一次 `is not None`,一个字节都不多序列化。
+        measurement = context.measurement if context is not None else None
         try:
-            system_text = reflect_v2_system_prompt(
-                capabilities, UNAVAILABLE_DISCLOSE_MAX)
+            prefix_layout = self._reflect_prefix_layout(context)
+            if prefix_layout:
+                system_text = context.static_prompt
+                material = context.as_prefix_user_block(reflect_v2_turn_state(
+                    capabilities, UNAVAILABLE_DISCLOSE_MAX))
+                user_text = reflect_v2_prefix_user_prompt(
+                    question, context.contract, material)
+            else:
+                system_text = reflect_v2_system_prompt(
+                    capabilities, UNAVAILABLE_DISCLOSE_MAX)
+                material = (context.as_user_block() if context is not None
+                            else candidates_summary)
+                user_text = reflect_v2_user_prompt(question, material)
             if self.untrusted_evidence:
                 # 严格调用方的额外一句"材料不可信"接在固定指令**之前**:v2 的
                 # system 段本身已经讲了这件事,这一句是那条更严格的既有合同,
-                # 两者同向叠加,不互相覆盖。
+                # 两者同向叠加,不互相覆盖。**它是 run 级的**,所以叠在 P 的 S
+                # 前面同样不破坏 system 段的逐轮稳定性。
                 system_text = (
                     f"{UNTRUSTED_EVIDENCE_SYSTEM_INSTRUCTION}\n\n{system_text}")
+            messages = [
+                {"role": "system", "content": system_text},
+                {"role": "user", "content": user_text},
+            ]
+            schema_hint = reflect_v2_schema_hint(capabilities)
+            if measurement is not None:
+                # 测在**发出之前**:量的是这一轮已经定型的那两条消息,与调用成功
+                # 与否无关。一次被兜底吃掉的调用照样有它的上下文规模,而那一轮在
+                # 轨迹上仍有自己的 reflect 步。
+                _measure_reflect_messages_safely(
+                    measurement, context, messages, schema_hint, material)
             raw = client.chat_json(
-                [
-                    {"role": "system", "content": system_text},
-                    {"role": "user", "content": reflect_v2_user_prompt(
-                        question, candidates_summary)},
-                ],
-                reflect_v2_schema_hint(capabilities),
+                messages,
+                schema_hint,
                 timeout=self.settings.reasoning_timeout_seconds,
                 max_retries=self.settings.reasoning_max_retries,
                 cancel_event=self.cancel_event,
@@ -3984,6 +4358,12 @@ class ReasoningRetriever:
                 raise
             return _reflect_fallback(_reflect_fallback_reason(
                 exc, str(stats.get("finish_reason") or "")))
+        finally:
+            # 三条出口(成功 / 取消上抛 / 兜底)都把这一次调用的观测累加进本轮:
+            # 一次死掉的调用同样烧了墙钟、同样发出了请求,而它正是最不该在
+            # run 级报告里静默消失的那一次(`_record_call_stats` 的同一条理由)。
+            if measurement is not None:
+                _measure_reflect_call(measurement, stats)
 
     def _reflect_v2_context(
         self, state: "_ReasoningRunState", summary: str, outline,
@@ -4009,6 +4389,17 @@ class ReasoningRetriever:
         `getattr` 读 settings:窄测试替身与离线工具的 duck-typed 适配器不带这四
         个字段(镜像 `reflect_v2_active` 的既有写法),缺省一律回到已登记的默认值,
         绝不因为少一个字段就把预算当成 0。
+
+        **布局分派(T-PS8)。** `reflect_optimization()` 那个单点说 `prefix_snapshot`
+        时,同一批块按稳定性重排成 C/K/D/T(前缀复用设计 §4.1–4.5),并额外带上本轮
+        system 段的静态半;`off`(含总闸关闭态与未登记取值)走下面原来那一份,逐字节
+        不变。**三个预算与所有内容判据两条路径共用**:上面这段装配一个字都没有按
+        布局分叉,分派只发生在"块往哪儿放"这一步。
+
+        **上下文观测(T-PS3)**由 `_reflect_measurement` 挂在两条路径共同的那一格
+        (`ReflectContext.measurement`)上,判据与布局**正交**;测量关(默认)时它
+        恒为 `None`,返回对象逐字段回到接入前。块长度不在这里算(那三块的最终字节
+        要等 `_reflect_v2_attempt`),这里只记它独有的那两个卡数。
         """
         settings = self.settings
         if state.aspects is None:
@@ -4053,6 +4444,52 @@ class ReasoningRetriever:
         # **只登记真的渲染出来的键。**被预算挤出窗口的候选一个都不登记——模型没
         # 见过它,就不该因为"它在池子里"取得大纲绑定资格(设计稿 §6.2)。
         state.ever_shown_outline_keys.update(selection.shown_keys)
+        observations = render_observations(
+            observer.rows,
+            recent=int(getattr(
+                settings, "reasoning_reflect_recent_observations", 6)),
+            state_chars=int(getattr(
+                settings, "reasoning_reflect_state_chars", 6000)),
+        )
+        measurement = self._reflect_measurement(state, selection)
+        catalog = state.reflect_static_catalog
+        if self.reflect_optimization() == "prefix_snapshot" and (
+                catalog is not None):
+            # `prefix_snapshot` 布局(T-PS8)。**只换块的位置,不换任何块的内容
+            # 判据**:证据卡与观察账是上面同一次装配的产出,`summary` 整块原样
+            # 搬到 T 的末尾(拍板 Q3),方面账拆成契约半(C)与状态半(T)。
+            #
+            # 判据带上 `catalog is not None`:目录由 `_prime_static_catalog` 在本
+            # run 第一次能力投影时写下,而 reflect 循环里投影恒排在这个方法之前。
+            # 真出现"策略开着却没有目录"的形态(总闸在一次 run 中途被翻开,只可能
+            # 发生在测试或热更配置里),这里退回 off 的那一份布局而不是发一份没有
+            # 工具目录的 system 段——少一半指令比换个顺序危险得多。
+            return ReflectContext(
+                # off 的那一块在 P 下不存在:它的内容已经按稳定性分到了 C 与 T。
+                # 留空而不是塞一份重复的文本——同一批事实在一条消息里出现两遍,
+                # 模型无从判断哪一份是此刻的。
+                server_state="",
+                evidence=selection.text,
+                observations=observations,
+                contract=render_aspect_contract_block(state.aspects),
+                # T 的两半,按「有没有排序权」分开(评审 P2-4)。前两块是服务端
+                # **执行限制**,T 的标题声明它们优先于上面过时的观察与证据卡;
+                # `summary` 那半改挂 `TURN_CONTEXT_TITLE`,因为 `run()` 已经把
+                # `profile_block`/`experience_block`/`consult_block_text` 拼进去
+                # 了——那几段是从库里文档归纳出来的文本,不该借 T 的标题取得压过
+                # 真实证据卡的排序权。`summary` 本身一个字都没改。
+                turn_state="\n\n".join(block for block in (
+                    render_aspect_status_block(state.aspects),
+                    render_collection_keys_note(state.enum_chains),
+                    f"{TURN_CONTEXT_TITLE}\n{summary}" if summary else "",
+                ) if block),
+                # 每轮按同一个冻结目录重渲染一次:纯字符串拼接、零 I/O,而同一个
+                # 输入必然给出同一串字节,所以 S 的稳定性不依赖任何缓存是否生效。
+                # T-PS3 的观测缓存**刻意不接**这一格:接了它就得在只开布局、不开
+                # 测量时也构造一份缓存,而"测量关不构造缓存"是那条任务的硬约束。
+                static_prompt=reflect_v2_static_prompt(catalog),
+                measurement=measurement,
+            )
         # 必答方面清单 + 已完整枚举的集合键,都接在服务器状态块的**尾部**,与它
         # 一起受"按现有输入/协议边界保留、不整体裁尾"的处理(§4):方面清单是用户
         # 确认过的必答清单,集合键是服务端签发的证据身份——两者都不属于
@@ -4066,14 +4503,38 @@ class ReasoningRetriever:
         return ReflectContext(
             server_state="\n\n".join(block for block in blocks if block),
             evidence=selection.text,
-            observations=render_observations(
-                observer.rows,
-                recent=int(getattr(
-                    settings, "reasoning_reflect_recent_observations", 6)),
-                state_chars=int(getattr(
-                    settings, "reasoning_reflect_state_chars", 6000)),
-            ),
+            observations=observations,
+            measurement=measurement,
         )
+
+    def _reflect_measurement(
+        self, state: "_ReasoningRunState", selection,
+    ) -> "Optional[ReflectMeasurement]":
+        """本 run 的上下文观测缓存,并记下这一轮的证据卡账(T-PS3;拍板 Q2)。
+
+        测量关(默认)与 v2 总闸关 ⇒ 恒 `None`,调用方一格都不多付:不构造缓存、
+        不序列化任何消息、`ReflectContext` 逐字段回到接入前。判据走
+        `reflect_measures_context()` 那个单点,它与 `reflect_optimization()`
+        **正交**——`off` 臂开着测量正是对照实验要的形态(拍板 Q2)。
+
+        缓存本 run 只构造一次(第一次 reflect 那一轮),此后原样复用:它要跨轮
+        持有的正是上一轮那串消息字节。构造的同一刻把它挂到记账器上——那是本轮
+        测量键唯一的落账入口,而 `run()` 一条语句都不能加。
+
+        卡数在这里记而不在 `_measure_reflect_messages` 里:证据卡的选取是这个
+        方法独有的产出(`selection`),而那边只看得到已经渲染成字符串的块。
+        `cards_shown` 只数**真的渲染出来**的键(与大纲绑定资格同一份口径),
+        `cards_omitted` 是被预算与逐条判据挤出窗口的候选数。
+        """
+        measurement = state.reflect_measurement
+        if measurement is None:
+            if not self.reflect_measures_context():
+                return None
+            measurement = state.reflect_measurement = ReflectMeasurement()
+            state.record.measurement = measurement
+        measurement.detail[_MEASURE_CARDS_SHOWN] = len(selection.shown_keys)
+        measurement.detail[_MEASURE_CARDS_OMITTED] = int(selection.omitted)
+        return measurement
 
     def _absorb_assessment(
         self, state: "_ReasoningRunState", decision: "ReflectDecision",
@@ -4387,8 +4848,11 @@ class ReasoningRetriever:
         # 观察行上那句「原因=model_degraded:output_budget_exhausted」是给模型看
         # 的:它据此知道下一轮该缩短输出,而不是只看到一句"上一轮没成"。
         if state.aspects is not None:
-            # 这一轮的 prompt 已经渲染过了,追问那一句因此被 `render_aspect_block`
-            # 消费掉——可这次调用根本没成交,模型一个字都没读到。重新置位,否则
+            # 这一轮的 prompt 已经渲染过了,追问那一句因此被本轮布局的那个渲染点
+            # (`off` 的 `render_aspect_block` / `prefix_snapshot` 的
+            # `render_aspect_status_block`,互斥)消费掉——可这次调用根本没成交,
+            # 模型一个字都没读到。两条臂认的是同一格 `nudge_pending`,所以这里不
+            # 分布局。重新置位,否则
             # 服务端退回一整轮换来的是一句谁都没看见的话(两道闸在那个方法里)。
             state.aspects.restore_pending_nudge()
         return folded
@@ -4494,11 +4958,14 @@ class ReasoningRetriever:
             # `context` 非空 = run() 已经把 user 段分好块(问题/服务器状态/证据卡/
             # 观察账)。为空时退回"整段候选摘要"——T2 的窄用例与任何直接调
             # `reflect(capabilities=...)` 的调用方因此不必改签名。
+            #
+            # 两个布局要的是同一批块的**不同顺序**,所以对象本身往下传一层,由
+            # `_reflect_v2_attempt` 二选一地拼(而不是在这里先拼好一份 off 的、
+            # 在 P 下白扔掉)。`candidates_summary` 仍然是 `context is None` 那条
+            # 既有回退路径的入参。
             return self._reflect_v2(
-                question,
-                (context.as_user_block() if context is not None
-                 else candidates_summary),
-                capabilities, client)
+                question, candidates_summary, capabilities, client,
+                context=context)
         enumeration = self.enumeration_active()
         # `search_chunks` 的闸是部署级 kill switch,所以在这里现算而不是像
         # outline/consult_memory 那样从调用处传进来:它不看档位、不看请求,

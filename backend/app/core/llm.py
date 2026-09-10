@@ -66,23 +66,51 @@ def _is_stream_usage_rejection(exc: Exception) -> bool:
     )
 
 
-def _usage_dict(response: Any) -> Optional[Dict[str, int]]:
-    usage = (
-        response.get("usage")
-        if isinstance(response, dict)
-        else getattr(response, "usage", None)
+def _usage_field(source: Any, key: str) -> Any:
+    """Read ``key`` off a usage payload that may be a mapping OR an SDK object."""
+    return (
+        source.get(key)
+        if isinstance(source, dict)
+        else getattr(source, key, None)
     )
+
+
+#: Nested usage counters worth flattening: ``(container field, leaf field)``.
+#: ``cached_tokens`` is the provider's own name for the share of the prompt it
+#: served from ITS prefix cache, and ``reasoning_tokens`` the billed-but-hidden
+#: thinking. Both live one level down in the OpenAI-compatible schema and are
+#: optional: plenty of compatible servers never send the details object at all.
+_USAGE_DETAIL_FIELDS = (
+    ("prompt_tokens_details", "cached_tokens"),
+    ("completion_tokens_details", "reasoning_tokens"),
+)
+
+
+def _usage_dict(response: Any) -> Optional[Dict[str, int]]:
+    """Flatten a provider usage payload into plain counters, or None.
+
+    A missing counter is an ABSENT KEY, never a zero (design §8.2): a provider
+    that does not report ``cached_tokens`` is telling us nothing, while a 0 would
+    read downstream as "measured, and it was none" — the single most misleading
+    value this dict can carry, because the whole prefix-reuse experiment is a
+    comparison of those numbers. A provider that genuinely reports 0 still gets
+    its 0 through: this only refuses to INVENT one.
+    """
+    usage = _usage_field(response, "usage")
     if usage is None:
         return None
     out: Dict[str, int] = {}
     for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
-        value = (
-            usage.get(key)
-            if isinstance(usage, dict)
-            else getattr(usage, key, None)
-        )
+        value = _usage_field(usage, key)
         if value is not None:
             out[key] = value
+    for container_key, leaf_key in _USAGE_DETAIL_FIELDS:
+        container = _usage_field(usage, container_key)
+        if container is None:
+            continue
+        value = _usage_field(container, leaf_key)
+        if value is not None:
+            out[leaf_key] = value
     return out or None
 
 
@@ -182,20 +210,232 @@ def cap_kwargs(client: Any, attr: str) -> Dict[str, Any]:
     return budget_kwargs(getattr(client, "settings", None), attr)
 
 
+#: The wrapper system message this client puts in front of every caller's
+#: messages. Spelled once, here, because two places must agree on it byte for
+#: byte: what actually goes on the wire, and what any measurement of the
+#: provider-facing message sequence reconstructs.
+_PROVIDER_WRAPPER_PREFIX = (
+    "You are the extraction and reasoning engine for "
+    "silicon-notebook. Return valid JSON only, no markdown fences. "
+    "Schema hint: "
+)
+
+
+def provider_messages(
+    messages: List[Dict[str, str]], response_schema_hint: str
+) -> List[Dict[str, str]]:
+    """The exact message list this client sends to the provider: the wrapper
+    system message (role brief + schema hint) followed by the caller's own
+    messages.
+
+    Pulled out of ``chat_json`` as a module-level PURE function — no I/O, no
+    client state, no ``self`` — so a measurement layer can reconstruct what a
+    call would put on the wire without issuing it, and, more importantly, so
+    there is exactly ONE assembly: ``chat_json`` calls this rather than keeping
+    a second copy in sync with it. A duplicated wrapper would drift silently and
+    every prefix/cache-key number computed off the copy would be measuring a
+    message sequence that was never sent.
+
+    Returns a fresh list; the caller's own message mappings are passed through by
+    reference (this function never mutates them).
+
+    Scope: this is THIS client's wrapper. ``app/services/kg/client.py`` keeps a
+    second, hand-written copy of the same system message for the KG extraction
+    transport, which does not go through ``OpenAICompatibleClient`` at all and is
+    not covered by this function or by anything measured on top of it. That copy
+    is a known duplicate, deliberately left where it is; a measurement of the KG
+    path would have to account for it separately rather than assume this one.
+    """
+    return [
+        {
+            "role": "system",
+            "content": f"{_PROVIDER_WRAPPER_PREFIX}{response_schema_hint}",
+        },
+        *messages,
+    ]
+
+
+def serialize_provider_messages(messages: List[Dict[str, str]]) -> bytes:
+    """Deterministic UTF-8 serialization of a provider-facing message list,
+    for byte-level structural comparison (e.g. how much of turn N's request is a
+    literal prefix of turn N+1's).
+
+    Framing is length-SUFFIXED — each field goes out as ``<bytes>:<byte
+    length>:`` — rather than delimiter-separated, because the payload is
+    untrusted model input: any separator drawn from the text alphabet can be
+    written INTO a message body, and a body that forges a boundary would move the
+    apparent field split and silently corrupt the numbers computed on top of
+    this. A decimal length cannot be forged from inside the bytes it counts,
+    because it is only ever read from a position fixed by the parse, not searched
+    for in the text.
+
+    The length trails its field rather than leading it, and that ordering is the
+    whole point of this shape. The measured question is "how much of turn N's
+    request is a literal prefix of turn N+1's", and under the layout this client
+    actually sends (one system message plus ONE long user message whose tail is
+    the only part that changes per turn) a LEADING length would put a header
+    that depends on the tail in front of the thousands of identical bytes it
+    counts: change the tail's length by one byte and the common prefix collapses
+    at that header, reporting ~0 shared bytes for two requests that share nearly
+    all of them.
+    With the length behind its field, divergence can only land where the bytes
+    themselves first differ.
+
+    Injectivity is preserved (nothing is lost by moving the length): the byte
+    string is uniquely decodable RIGHT to LEFT. The stream ends with ``:``;
+    scanning backwards over the decimal digits before it yields ``n``, the ``:``
+    before those digits closes the field, and the ``n`` bytes before that ARE the
+    field — then the same step repeats for the field to its left. Every
+    structural byte is located by counting from an end, never by searching the
+    payload, so no content can move a boundary.
+
+    Only ``role`` and ``content`` participate, in that order, in list order; a
+    missing field serializes as empty. The result is a plain concatenation of
+    per-message frames, so the serialization of any leading slice of ``messages``
+    is a literal byte prefix of the whole — which is what makes a common-prefix
+    length meaningful. Per message the framing costs a fixed
+    ``len(role) + len(str(len(role))) + len(str(len(content))) + 4`` bytes on top
+    of the payload; all of it precedes ``content`` except that content's own
+    length and the two colons around it, which trail it. This is a client-side
+    structural metric only: it is NOT a provider cache key and says nothing about
+    what the provider actually reused.
+
+    A non-mapping element raises rather than serializing as empty: for a
+    measurement function, silently emitting plausible-looking bytes for input it
+    did not understand is worse than failing.
+
+    Encoding uses ``surrogatepass``, which makes this ruler TOTAL over ``str``.
+    Strict UTF-8 is not: ``json.loads`` accepts ``"\\ud800"`` and hands back a
+    Python ``str`` holding a LONE SURROGATE, so a model response can carry one
+    into the next turn's message body, where a strict ``.encode("utf-8")`` would
+    raise. Raising there would let a measurement decide whether a request gets
+    made at all — the one thing a measurement must never be able to do.
+    ``surrogatepass`` emits such a code point as its three-byte WTF-8 form, which
+    keeps this serialization deterministic, injective and length-consistent (the
+    trailing length counts the bytes actually emitted) for exactly the same
+    reasons the rest of the framing holds. It changes nothing a provider ever
+    sees: this byte string exists only to be measured, and nothing sends it.
+    """
+    out = bytearray()
+    for message in messages:
+        for field in ("role", "content"):
+            raw = message.get(field, "")
+            blob = ("" if raw is None else str(raw)).encode(
+                "utf-8", errors="surrogatepass")
+            out += blob
+            out += b":"
+            out += str(len(blob)).encode("ascii")
+            out += b":"
+    return bytes(out)
+
+
 #: Name of the optional OUT-parameter a caller may pass to ``chat_json`` to get
 #: this call's provider-side outcome back. The value is a caller-owned mutable
-#: mapping; ``chat_json`` writes ``finish_reason`` into it before returning.
+#: mapping which ``chat_json`` fills in before returning or raising; see
+#: ``_record_call_stats`` for the exact keys (``status``, ``call_wall_ms``,
+#: ``attempts``, ``attempts_observed`` on every exit that reaches the sink;
+#: ``finish_reason``, ``response_chars`` and ``usage`` when they exist).
+#:
+#: ``status`` is one of ``ok`` / ``cancelled`` / ``error`` / ``cache_hit``. An
+#: EMPTY sink after a call is itself information, and has exactly two causes:
+#: either the client did not declare ``supports_call_stats`` (a duck-typed double
+#: or a plugin-bound transport — the caller must then treat every field as
+#: unknown, NOT as zero), or ``chat_json`` refused the call before doing any work
+#: at all (unconfigured settings, or a cancellation already pending on entry) and
+#: there is genuinely nothing to report. Both raise or return before any
+#: measurement exists; neither is a dropped observation.
 #:
 #: It exists because ``chat_json`` returns a plain ``str``: an empty completion
 #: and a completion the server cut off at ``max_tokens`` arrive as the SAME empty
 #: string, and the only thing that tells them apart — ``finish_reason`` — dies
 #: inside this function. Downstream that difference decides the remedy (retry
 #: with a larger budget vs. treat the model as having produced nothing), so a
-#: caller that wants to act on it needs the value, not just a log line.
+#: caller that wants to act on it needs the value, not just a log line. The same
+#: argument extends to the measurement fields: duration, real request count and
+#: response size are all knowable ONLY here, and a caller that must report per
+#: call (an offline experiment rig) cannot recover them from a log file it does
+#: not own — while a caller that passes nothing pays for none of it.
 #:
 #: Spelled as a constant so the reflect layer's splat helper and this signature
 #: cannot drift. Callers that do not pass it are byte-for-byte unaffected.
 CALL_STATS_KWARG = "call_stats"
+
+
+class _RequestCount:
+    """Real provider requests issued for ONE ``chat_json`` call.
+
+    A counter object rather than a local int because the request sites live in
+    two functions: the retry loop in ``chat_json`` and the two ``create()`` calls
+    inside ``_stream_chat_content`` (the second one being the ``stream_options``
+    rebuild, which today leaves no trace anywhere). ``chat_json`` owns the
+    instance and hands it down, so ``attempts`` counts requests ISSUED instead of
+    the number of loop iterations — those differ by exactly the silent fallbacks,
+    which is the difference the experiment is trying to see. "Issued", not
+    "delivered": see ``_create`` for the one request that is counted without
+    reaching the network.
+    """
+
+    __slots__ = ("value",)
+
+    def __init__(self) -> None:
+        self.value = 0
+
+    def record(self) -> None:
+        self.value += 1
+
+
+def _record_call_stats(
+    sink: Optional[Dict[str, Any]],
+    *,
+    status: str,
+    wall_ms: int,
+    attempts: int,
+    usage: Optional[Dict[str, int]] = None,
+    finish_reason: Optional[str] = None,
+    response_chars: Optional[int] = None,
+) -> None:
+    """Fill a caller's ``call_stats`` out-parameter (see ``CALL_STATS_KWARG``).
+
+    ``sink is None`` — the overwhelmingly common case — returns immediately, so a
+    caller that never asked for stats is byte-for-byte unaffected by everything
+    below.
+
+    ``status`` / ``call_wall_ms`` / ``attempts`` / ``attempts_observed`` are
+    written by every exit that gets here — the four being success, cancellation,
+    error and a response-cache hit. Cancellation and error are the ones worth
+    naming: a call that died is exactly the one whose duration and request count a
+    run-level report must not silently drop (it still consumed wall clock and
+    still hit the endpoint). The two exits that never reach this function are the
+    pre-flight refusals at the top of ``chat_json`` (unconfigured settings, and a
+    cancellation already pending on entry): both raise before any work, so there
+    is no duration, no request and nothing to report — see ``CALL_STATS_KWARG``
+    for how a consumer reads an empty sink.
+
+    Everything else is written only when it exists: an absent key means "no
+    observation", never zero. ``finish_reason`` is the standing exception — the
+    ok exit passes ``finish_reason or ""``, so an empty STRING there means "the
+    provider did not say", mirroring what llm.jsonl has always recorded. Absent
+    and empty therefore differ for that one key: absent means the call never
+    produced a completion at all (it was cancelled or it failed).
+
+    ``attempts_observed`` is True because this client counts requests at the
+    transport itself. It is not decoration: a duck-typed client that does not
+    declare ``supports_call_stats`` leaves the sink empty, and a consumer must
+    then treat the request count as unknown rather than as the logical call
+    count — the two differ precisely when a silent fallback fired.
+    """
+    if sink is None:
+        return
+    sink["status"] = status
+    sink["call_wall_ms"] = wall_ms
+    sink["attempts"] = attempts
+    sink["attempts_observed"] = True
+    if finish_reason is not None:
+        sink["finish_reason"] = finish_reason
+    if response_chars is not None:
+        sink["response_chars"] = response_chars
+    if usage:
+        sink["usage"] = usage
 
 
 class OpenAICompatibleClient:
@@ -272,6 +512,37 @@ class OpenAICompatibleClient:
             )
         return self._client
 
+    def _create(
+        self, requests: _RequestCount, /, **call_kwargs: Any
+    ) -> Any:
+        """Issue ONE provider request and count it as ATTEMPTED.
+
+        The single choke point for every ``chat.completions.create`` in this
+        class, so a request cannot be added without being counted. The client is
+        resolved BEFORE the tally: a configuration error raised by ``client()``
+        means nothing was sent, and counting it would inflate the request count
+        with a call that never left the process.
+
+        The tally is deliberately "issued/attempted", not "went on the wire", and
+        one case makes the two differ: a client-side ``response_format``
+        rejection. The SDK can refuse that parameter locally — ``ValueError``,
+        see ``_is_non_http_response_format_rejection`` — after this counter has
+        already ticked, so the plain-mode fallback that follows is recorded as
+        the second of two attempts when only one request truly left the process.
+        Registered rather than fixed: the tally exists to bound the load a
+        deployment places on its endpoint, an over-count of at most one per call
+        is the safe direction for that, and the alternative — counting after
+        ``create`` returns — would UNDER-count every request that was sent and
+        then failed, which is the case the number is most needed for.
+
+        ``requests`` is positional-only so that a provider parameter that happens
+        to be named ``requests`` cannot bind to it instead of travelling in
+        ``call_kwargs``.
+        """
+        create = self.client().chat.completions.create
+        requests.record()
+        return create(**call_kwargs)
+
     def _stream_chat_content(
         self,
         kwargs: Dict[str, Any],
@@ -279,6 +550,7 @@ class OpenAICompatibleClient:
         *,
         json_mode: bool,
         cancel_event: CancelEvent,
+        requests: _RequestCount,
     ) -> tuple[str, Optional[str], Optional[Dict[str, int]]]:
         """Return ``(content, finish_reason, usage)``.
 
@@ -289,6 +561,11 @@ class OpenAICompatibleClient:
         gets back to chat_json the stream is already closed. OpenAI-compatible
         usage has the same lifetime and normally arrives on a final chunk whose
         ``choices`` is empty, so it must be captured before that chunk is skipped.
+
+        ``requests`` is ``chat_json``'s per-call request tally, handed down
+        because the ``stream_options`` rebuild below is a second real request
+        that leaves no log record of its own; it is a required argument so a new
+        request site here cannot forget to be counted.
         """
         raise_if_cancelled(cancel_event)
         call_kwargs: Dict[str, Any] = {**kwargs, **req_kwargs, "stream": True}
@@ -298,14 +575,14 @@ class OpenAICompatibleClient:
         if request_usage:
             call_kwargs["stream_options"] = {"include_usage": True}
         try:
-            stream = self.client().chat.completions.create(**call_kwargs)
+            stream = self._create(requests, **call_kwargs)
         except Exception as exc:
             if not request_usage or not _is_stream_usage_rejection(exc):
                 raise
             self._stream_usage_options_supported = False
             call_kwargs.pop("stream_options", None)
             raise_if_cancelled(cancel_event)
-            stream = self.client().chat.completions.create(**call_kwargs)
+            stream = self._create(requests, **call_kwargs)
         parts: List[str] = []
         finish_reason: Optional[str] = None
         usage: Optional[Dict[str, int]] = None
@@ -357,17 +634,10 @@ class OpenAICompatibleClient:
         if not self.configured:
             raise RuntimeError("OpenAI-compatible LLM settings are not configured")
         raise_if_cancelled(cancel_event)
-        full_messages = [
-            {
-                "role": "system",
-                "content": (
-                    "You are the extraction and reasoning engine for "
-                    "silicon-notebook. Return valid JSON only, no markdown fences. "
-                    f"Schema hint: {response_schema_hint}"
-                ),
-            },
-            *messages,
-        ]
+        # Single assembly point (see provider_messages): what goes on the wire,
+        # what feeds the cache key, and what a measurement layer reconstructs are
+        # the same list, produced by the same pure function.
+        full_messages = provider_messages(messages, response_schema_hint)
         model = self.model
         # Some OpenAI-compatible models accept only one provider-defined
         # nucleus-sampling value (for example top_p=0.95).  A physical-service
@@ -387,6 +657,14 @@ class OpenAICompatibleClient:
         # — the documented truncation remedy — correctly lands on a different key.
         _mt = max_tokens if max_tokens is not None else self.settings.openai_compat_max_tokens
         effective_max_tokens = _mt if isinstance(_mt, int) and _mt > 0 else None
+        # Started BEFORE the cache lookup, not after it, because the lookup is on
+        # the clock too: the whole point of measuring a served-from-cache call is
+        # to compare its cost against a real one, and a timer that starts after
+        # the store has already answered would report the one exit that costs
+        # almost nothing as costing exactly nothing. Every later exit reads the
+        # same `start`, so the cache probe is inside all of their durations as
+        # well — which is correct: the caller waited for it either way.
+        start = time.perf_counter()
         # Best-effort cache lookup: a cache fault must never break the call.
         # The response cache is OPT-IN (Codex round 6 / user decision): a caller
         # participates ONLY by supplying a response_validator. cache/ckey are
@@ -434,6 +712,27 @@ class OpenAICompatibleClient:
                     if cached is not None and _response_validator_allows(
                         response_validator, cached
                     ):
+                        # The fourth exit, and the only one that reaches no
+                        # provider at all. It writes no llm.jsonl row (it never
+                        # did — there was no interaction to log), but a caller
+                        # holding a sink must still be able to tell "served from
+                        # the local store" apart from "never called", which an
+                        # empty sink cannot express. `attempts=0` is a MEASURED
+                        # zero, not an absent one: this exit is exactly the case
+                        # where the true request count is known to be none.
+                        #
+                        # `status="cache_hit"` names THIS application-level
+                        # response cache — a reply this process stored earlier
+                        # under `llm_key`. It says nothing whatsoever about the
+                        # provider's own prefix cache, whose reuse is reported
+                        # only by `usage.cached_tokens` on the real exits; the two
+                        # must never be read as the same measurement.
+                        _record_call_stats(
+                            call_stats,
+                            status="cache_hit",
+                            wall_ms=round((time.perf_counter() - start) * 1000),
+                            attempts=0,
+                        )
                         return cached
             except Exception:
                 cache, ckey = None, ""
@@ -478,16 +777,26 @@ class OpenAICompatibleClient:
                 ),
             },
         }
-        start = time.perf_counter()
+        # Owned here, incremented at the transport (see _create): every exit
+        # below reports how many requests this ONE logical call really issued.
+        requests = _RequestCount()
         # Per-call overrides (interactive reasoning uses a shorter timeout / fewer
         # retries than the batch-extraction global defaults). When not supplied,
-        # behavior is byte-for-byte identical to before: attempts uses the global
-        # setting and no `timeout` is passed to .create() (client default applies).
+        # behavior is byte-for-byte identical to before: the retry budget uses the
+        # global setting and no `timeout` is passed to .create() (client default
+        # applies).
         req_kwargs: Dict[str, Any] = {}
         if timeout is not None:
             req_kwargs["timeout"] = timeout
         try:
-            attempts = 1 + (
+            # NOT the reported `attempts`. This is the CEILING on transient-error
+            # retries — a loop bound, decided before anything is sent — while the
+            # reported `attempts` (`requests.value`) is how many requests actually
+            # went out, which is larger whenever a silent fallback fires and
+            # smaller whenever the loop exits early. Two different quantities that
+            # shared a name here until the review; the reader who conflates them
+            # gets a request count that is really a configuration constant.
+            attempt_budget = 1 + (
                 max_retries if max_retries is not None
                 else self.max_retries
             )
@@ -495,7 +804,7 @@ class OpenAICompatibleClient:
             streamed: Optional[
                 tuple[str, Optional[str], Optional[Dict[str, int]]]
             ] = None
-            for attempt in range(attempts):
+            for attempt in range(attempt_budget):
                 raise_if_cancelled(cancel_event)
                 try:
                     # Prefer native JSON mode; fall back if the server rejects
@@ -503,9 +812,11 @@ class OpenAICompatibleClient:
                     try:
                         if cancel_event is not None:
                             streamed = self._stream_chat_content(
-                                kwargs, req_kwargs, json_mode=True, cancel_event=cancel_event)
+                                kwargs, req_kwargs, json_mode=True,
+                                cancel_event=cancel_event, requests=requests)
                         else:
-                            response = self.client().chat.completions.create(
+                            response = self._create(
+                                requests,
                                 **kwargs, **req_kwargs, response_format={"type": "json_object"}
                             )
                     except AskCancelled:
@@ -521,20 +832,28 @@ class OpenAICompatibleClient:
                             raise
                         if cancel_event is not None:
                             streamed = self._stream_chat_content(
-                                kwargs, req_kwargs, json_mode=False, cancel_event=cancel_event)
+                                kwargs, req_kwargs, json_mode=False,
+                                cancel_event=cancel_event, requests=requests)
                         else:
-                            response = self.client().chat.completions.create(**kwargs, **req_kwargs)
+                            response = self._create(requests, **kwargs, **req_kwargs)
                     break
                 except AskCancelled:
                     raise
                 except Exception as exc:
                     if (
                         not is_transient_llm_error(exc)
-                        or attempt + 1 >= attempts
+                        or attempt + 1 >= attempt_budget
                     ):
                         # Exhausted: propagate so the outer handler logs an error.
                         raise
-                    # Visible retry record so blips show up in llm.jsonl.
+                    # Visible retry record so blips show up in llm.jsonl. Its
+                    # `attempt` is this loop's ZERO-BASED index, a third quantity
+                    # again distinct from both the budget and the request count —
+                    # kept singular on purpose so it cannot be read as the plural
+                    # `attempts` the terminal row carries. A retry row deliberately
+                    # has NO `attempts`: the tally is still climbing at that point,
+                    # and a per-row count would invite summing rows that all
+                    # describe the same logical call.
                     logger.log({
                         **record,
                         "status": "retry",
@@ -558,14 +877,12 @@ class OpenAICompatibleClient:
                 finish_reason = getattr(choice, "finish_reason", None)
                 content = strip_json_fences(choice.message.content or "")
                 usage = _usage_dict(response)
-            # Hand the provider-side outcome back to a caller that asked for it
-            # (see CALL_STATS_KWARG), and record it either way. Without it an
-            # empty completion and one the server cut off at max_tokens are the
-            # same empty string everywhere downstream, and llm.jsonl cannot tell
-            # a token-budget truncation from a model that returned nothing.
+            # Recorded either way, and handed back to a caller that asked for it
+            # at the exit below (see CALL_STATS_KWARG). Without it an empty
+            # completion and one the server cut off at max_tokens are the same
+            # empty string everywhere downstream, and llm.jsonl cannot tell a
+            # token-budget truncation from a model that returned nothing.
             record["finish_reason"] = finish_reason or ""
-            if call_stats is not None:
-                call_stats["finish_reason"] = finish_reason or ""
             # Best-effort write, and only of a reply that is actually usable —
             # the empty "{}" fallback, unparseable JSON and budget-truncated
             # completions are all excluded (see is_cacheable_llm_response for
@@ -610,24 +927,75 @@ class OpenAICompatibleClient:
                 except Exception:
                     pass
             record["status"] = "ok"
-            record["latency_ms"] = round((time.perf_counter() - start) * 1000)
+            # ONE perf_counter difference per exit, shared by the log record and
+            # the out-parameter: two readings of the same call must never
+            # disagree, and this is already the monotonic clock the log used.
+            wall_ms = round((time.perf_counter() - start) * 1000)
+            record["latency_ms"] = wall_ms
+            record["attempts"] = requests.value
+            # Length of the content the caller actually receives, NOT of the
+            # clipped copy below: llm.jsonl truncates its body at
+            # `llm_log_max_chars`, so a reply read back out of the log understates
+            # every long completion. Numbers only — the body itself never leaves
+            # the clip.
+            record["response_chars"] = len(content)
             if usage:
                 record["usage"] = usage
             record["response"] = {"content": logger.clip(content)}
+            _record_call_stats(
+                call_stats,
+                status="ok",
+                wall_ms=wall_ms,
+                attempts=requests.value,
+                usage=usage,
+                finish_reason=finish_reason or "",
+                response_chars=len(content),
+            )
             logger.log(record)
             return content
         except AskCancelled as exc:
             record["status"] = "cancelled"
-            record["latency_ms"] = round((time.perf_counter() - start) * 1000)
-            usage = _usage_dict(exc)
+            wall_ms = round((time.perf_counter() - start) * 1000)
+            record["latency_ms"] = wall_ms
+            record["attempts"] = requests.value
+            # A stream that already delivered its billed usage trailer before the
+            # cancellation landed carries it on the exception; that spend is real
+            # and must be reported even though no content comes back.
+            #
+            # Read straight off the exception, NOT through _usage_dict: what
+            # _StreamingAskCancelled carries is the ALREADY-FLATTENED dict this
+            # module produced from the trailer. Re-flattening it looks harmless
+            # and silently drops `cached_tokens`/`reasoning_tokens` — the nested
+            # containers those were lifted out of no longer exist by then, so the
+            # second pass finds nothing and writes nothing. Those two counters are
+            # the entire point of the prefix-reuse measurement, and a cancelled
+            # call is a normal outcome for it (the user hit Stop), so the loss
+            # would be routine and invisible. A plain AskCancelled has no `usage`
+            # at all and yields None.
+            usage = getattr(exc, "usage", None)
             if usage:
                 record["usage"] = usage
+            _record_call_stats(
+                call_stats,
+                status="cancelled",
+                wall_ms=wall_ms,
+                attempts=requests.value,
+                usage=usage,
+            )
             logger.log(record)
             raise
         except Exception as exc:
             record["status"] = "error"
-            record["latency_ms"] = round((time.perf_counter() - start) * 1000)
+            wall_ms = round((time.perf_counter() - start) * 1000)
+            record["latency_ms"] = wall_ms
+            record["attempts"] = requests.value
             record["error"] = f"{type(exc).__name__}: {exc}"
+            _record_call_stats(
+                call_stats,
+                status="error",
+                wall_ms=wall_ms,
+                attempts=requests.value,
+            )
             logger.log(record)
             raise
 

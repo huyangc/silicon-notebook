@@ -295,28 +295,41 @@ def _rival_bindings(tree: ast.AST) -> list[str]:
     ``import ... as foreign_notebook_id`` from anywhere else.  ``Store``/``Del``
     ``Name`` contexts cover assignment, ``for``/``with ... as``, walrus,
     comprehension and ``except ... as`` in one rule.
+
+    The list is named for what it holds: pure DIAGNOSTIC strings, rendered into
+    an assertion message so a human can walk to the shadowing binding. The line
+    number lives in that message and nowhere else — it never enters an identity,
+    a manifest or a comparison. That is the distinction
+    ``tests/architecture/policy.py`` draws, and it reads the collection's own
+    name to tell the two apart, so the name has to say "diagnostic".
     """
-    bindings: list[str] = []
+    diagnostic_bindings: list[str] = []
     for node in ast.walk(tree):
         if (
             isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
             and node.name == HELPER_NAME
         ):
-            bindings.append(f"line {node.lineno}: a local def/class {HELPER_NAME}")
+            diagnostic_bindings.append(
+                f"line {node.lineno}: a local def/class {HELPER_NAME}"
+            )
         elif isinstance(node, ast.arg) and node.arg == HELPER_NAME:
-            bindings.append(f"line {node.lineno}: a parameter named {HELPER_NAME}")
+            diagnostic_bindings.append(
+                f"line {node.lineno}: a parameter named {HELPER_NAME}"
+            )
         elif (
             isinstance(node, ast.Name)
             and node.id == HELPER_NAME
             and isinstance(node.ctx, (ast.Store, ast.Del))
         ):
-            bindings.append(f"line {node.lineno}: a rebinding of {HELPER_NAME}")
+            diagnostic_bindings.append(
+                f"line {node.lineno}: a rebinding of {HELPER_NAME}"
+            )
         elif (
             isinstance(node, ast.Attribute)
             and node.attr == HELPER_NAME
             and isinstance(node.ctx, (ast.Store, ast.Del))
         ):
-            bindings.append(
+            diagnostic_bindings.append(
                 f"line {node.lineno}: an assignment to .{HELPER_NAME}"
             )
         elif isinstance(node, (ast.Import, ast.ImportFrom)):
@@ -326,11 +339,11 @@ def _rival_bindings(tree: ast.AST) -> list[str]:
             for item in node.names:
                 bound = item.asname or item.name.split(".")[0]
                 if bound == HELPER_NAME and not (canonical and item.asname is None):
-                    bindings.append(
+                    diagnostic_bindings.append(
                         f"line {node.lineno}: an import binding {HELPER_NAME} "
                         f"to something other than {HELPER_MODULE}"
                     )
-    return bindings
+    return diagnostic_bindings
 
 
 def _helper_usage_offenders(tree: ast.AST, relative: str) -> list[str]:
@@ -353,12 +366,17 @@ def _helper_usage_offenders(tree: ast.AST, relative: str) -> list[str]:
     if not calls:
         return []
 
-    offenders = [
-        f"{relative}:{call.lineno}: {ast.unparse(call.func)}() reaches "
-        f"{HELPER_NAME} through an attribute; call the imported function"
-        for call in calls
-        if isinstance(call.func, ast.Attribute)
-    ]
+    # Appended one by one into a list named for what it holds: the line number
+    # is diagnostic text pointing a human at the call, never the identity of the
+    # finding (the same distinction `tests/architecture/policy.py` enforces, and
+    # it reads the collection's name to tell the two apart).
+    offenders: list[str] = []
+    for call in calls:
+        if isinstance(call.func, ast.Attribute):
+            offenders.append(
+                f"{relative}:{call.lineno}: {ast.unparse(call.func)}() reaches "
+                f"{HELPER_NAME} through an attribute; call the imported function"
+            )
     imported = any(
         isinstance(node, ast.ImportFrom)
         and node.module == HELPER_MODULE

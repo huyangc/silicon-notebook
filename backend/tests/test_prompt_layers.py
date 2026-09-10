@@ -242,7 +242,8 @@ def _public_prompt_functions() -> dict:
 def test_l2_blocks_forward_every_listed_prompt_really_has_the_parameter():
     """Forward direction: every (block, prompt) pair L2_BLOCKS claims must be
     real — the named function exists in prompts.py and its signature
-    actually declares a parameter named after the block_id."""
+    actually declares a parameter named after the block_id (or after one of
+    the block's registered ``param_aliases``)."""
     for block in L2_BLOCKS:
         for prompt_name in block.prompts:
             func = getattr(prompts, prompt_name, None)
@@ -251,28 +252,61 @@ def test_l2_blocks_forward_every_listed_prompt_really_has_the_parameter():
                 "not a real function in app.services.prompts"
             )
             params = inspect.signature(func).parameters
-            assert block.block_id in params, (
+            assert any(name in params for name in block.param_names), (
                 f"L2Block {block.block_id!r} lists {prompt_name!r}, but "
-                f"{prompt_name!r}'s signature has no {block.block_id!r} "
-                f"parameter (actual params: {sorted(params)!r})"
+                f"{prompt_name!r}'s signature has none of "
+                f"{list(block.param_names)!r} "
+                f"(actual params: {sorted(params)!r})"
             )
 
 
 def test_l2_blocks_backward_every_matching_parameter_is_declared():
     """Backward direction: any public ``*_prompt`` function that has a
-    parameter named after a REGISTERED block_id must be listed in that
-    block's ``prompts`` tuple — a function cannot silently gain (or keep) a
-    data-injection parameter that L2_BLOCKS does not know about."""
-    registered_blocks = {block.block_id: block for block in L2_BLOCKS}
+    parameter named after a REGISTERED block_id — or after one of that
+    block's ``param_aliases`` — must be listed in that block's ``prompts``
+    tuple, so a function cannot silently gain (or keep) a data-injection
+    parameter that L2_BLOCKS does not know about.
+
+    Aliases are what make this guard reach ``reflect_v2_prefix_user_prompt``,
+    whose data seam is named ``material`` (review P3-8): matching on
+    ``block_id`` alone left that whole function — and any injection slot
+    later added to it — outside every mechanical check, registered in prose
+    only.
+
+    Mutation: drop ``"material"`` from ``candidates_summary``'s
+    ``param_aliases``, or drop ``reflect_v2_prefix_user_prompt`` from its
+    ``prompts``, and this test goes red.
+    """
     for name, func in _public_prompt_functions().items():
         params = inspect.signature(func).parameters
-        for block_id, block in registered_blocks.items():
-            if block_id in params:
+        for block in L2_BLOCKS:
+            matched = [
+                param for param in block.param_names if param in params]
+            if matched:
                 assert name in block.prompts, (
-                    f"{name!r} has a {block_id!r} parameter but is not "
-                    f"listed in L2_BLOCKS[{block_id!r}].prompts "
+                    f"{name!r} has a {matched!r} parameter (registered to "
+                    f"L2 block {block.block_id!r}) but is not listed in "
+                    f"L2_BLOCKS[{block.block_id!r}].prompts "
                     f"(currently {block.prompts!r})"
                 )
+
+
+def test_l2_block_param_names_do_not_collide_across_blocks():
+    """No parameter name may be claimed by two blocks.
+
+    An alias is a second name for ONE block; two blocks answering to the same
+    parameter name would make both guards ambiguous (a function would satisfy
+    whichever block happened to be checked first) and is a sign the alias
+    should have been its own ``L2Block`` instead.
+    """
+    seen: dict = {}
+    for block in L2_BLOCKS:
+        for param in block.param_names:
+            assert param not in seen, (
+                f"parameter {param!r} is claimed by both "
+                f"{seen[param]!r} and {block.block_id!r}"
+            )
+            seen[param] = block.block_id
 
 
 # --------------------------------------------------------------------------- #

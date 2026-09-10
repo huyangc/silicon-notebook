@@ -1103,6 +1103,37 @@ def test_dry_run_search_charges_a_plan_call_per_run_without_intent(capsys):
     assert "intent 0 + plan 8 + reflect ≤" in printed
 
 
+def test_dry_run_prints_both_the_call_count_and_the_request_ceiling(capsys):
+    """计划 §3 T-PS5:dry-run 打**两个**数,不是一个。
+
+    上面那个数的是**逻辑调用**(llm.jsonl 的行数、`model_calls` 的口径),下面
+    那个数的是**真正发出去的请求**(行上 `attempts` 的口径)。只打一个数会让读
+    的人拿逻辑调用去估端点负载——而静默 fallback 与重试都发生在那之下,两个数
+    在最坏情况下差一倍以上。
+    """
+    assert rig.main(["--dry-run", "--limit", "1", "--no-intent", "search"]) == 0
+    printed = capsys.readouterr().out
+    assert "次逻辑调用" in printed
+    assert "请求上界 ≤" in printed
+    assert "静默 fallback 另计" in printed
+    # 上界不是预测:它恒 ≥ 逻辑调用数,乘数是配置里的重试预算。
+    assert rig.REASONING_ATTEMPT_BUDGET >= 2
+
+
+def test_the_attempt_budget_tracks_the_config_default_it_hardcodes():
+    """rig 那个 `1 + 1` 抄的是 `REASONING_MAX_RETRIES` 的默认值,得钉住。
+
+    不钉的失败场景:有人把配置默认改成 3,rig 打的「请求上界 ≤ 212」比真实上界
+    低一倍——而那个数正是用来估端点负载、决定这批跑不跑得起的。
+
+    **只有用例 import config**:dry-run 本身不 import 它是另一条约束(起一份
+    Settings 要读 .env、连不上的库还会拖慢预演),由别的用例管,这里不碰。
+    """
+    from app.core.config import Settings
+
+    assert rig.REASONING_ATTEMPT_BUDGET == 1 + Settings().reasoning_max_retries
+
+
 def test_search_plan_pairs_the_two_policies_and_carries_no_idempotency_key():
     questions = rig.load_questions()
     plan = rig.search_plan(
@@ -1138,15 +1169,51 @@ def test_search_preflight_requires_the_main_database_url_and_both_notebooks():
     assert "不在 search 的范围里" in rig._search_preflight(args, [], {})
 
 
+#: `_rig_process_env` 的**全部**键(`--env-file` 那一项另算)。写成一份清单而
+#: 不是逐条 assert:漏加一项在数据上看不出任何区别(codex 质量评审 P2-9),而
+#: 多加一项(比如哪天有人往里塞一个进程级的 optimization)会当场打红。
+RIG_PROCESS_ENV_KEYS = {
+    "DATABASE_URL",
+    "RETRIEVAL_EXPERIENCE_INJECT_ENABLED",
+    "REASONING_CONSULT_MEMORY_ENABLED",
+    "AGENT_PROFILE_ENABLED",
+    "LLM_LOG_PATH",
+    "EVENT_LOG_DIR",
+}
+
+
 def test_search_process_env_forces_every_injection_switch_off():
     """主库只读不许依赖「那三个端口恰好没接线」这个会随重构漂移的前提。"""
     args = rig.build_parser().parse_args(
         ["--database-url", "postgresql://127.0.0.1:5432/main", "search"])
     env = rig._search_process_env(args)
+    assert set(env) == RIG_PROCESS_ENV_KEYS
     assert env["DATABASE_URL"] == "postgresql://127.0.0.1:5432/main"
     assert env["RETRIEVAL_EXPERIENCE_INJECT_ENABLED"] == "false"
     assert env["REASONING_CONSULT_MEMORY_ENABLED"] == "false"
     assert env["AGENT_PROFILE_ENABLED"] == "false"
+
+
+def test_rig_never_writes_to_the_machine_wide_log_directory(tmp_path):
+    """计划 §3 T-PS5 G5:两串日志都圈进本次 out-dir,`.local/logs` 一个字节不写。
+
+    默认落点是**整台机器共用**的:同一天里别的后端、别的冒烟、别的 rig 会话都
+    往同一份 `llm-*.jsonl` / `events-*.jsonl` 追加。共用日志上做时间窗切片会把
+    别的进程的调用记到本 run 头上(成本三键),per-call 表的右表里也会混进别人
+    的调度事件。
+    """
+    out = tmp_path / "rig-out"
+    args = rig.build_parser().parse_args(
+        ["--database-url", "postgresql://127.0.0.1:5432/main",
+         "--out-dir", str(out), "search"])
+    env = rig._search_process_env(args)
+    assert env["LLM_LOG_PATH"] == str((out / "llm" / "llm.jsonl").resolve())
+    assert env["EVENT_LOG_DIR"] == str((out / "events").resolve())
+    for value in env.values():
+        assert ".local/logs" not in value
+    # 临时后端那一份同理:`seed` / `restart` 起的 uvicorn 也是 rig 的进程。
+    backend = rig.backend_env(args, "legacy")
+    assert backend["EVENT_LOG_DIR"] == str((out / "events").resolve())
 
 
 def _search_item(policy: str) -> dict:
@@ -1405,6 +1472,9 @@ def test_search_loop_marks_unresolved_scope_failed_without_calling_run_search_on
     assert row["status"] == "failed"
     assert row["scope_narrowed"] is None
     assert row["question_key"] == "A-q01"
+    # **没开跑的 run 没有墙钟**:`run_wall_ms` 是 `None`,不是 0(计划 §3 T-PS5)。
+    # 0 会被读成「这个 run 零耗时跑完了」,而且它会真的进 P50/P95 的分位数。
+    assert row["run_wall_ms"] is None
 
 
 def test_backend_env_forces_kg_auto_extract_off():
@@ -1456,6 +1526,10 @@ def test_search_loop_serial_writes_a_failed_row_and_counts_it(
     by_key = {r["question_key"]: r for r in rows}
     assert by_key["A-q01"]["status"] == "failed"
     assert by_key["A-q01"]["reflect_turns"] == 1, "失败前捕获的轨迹步不该被丢成 0"
+    # 失败 run 也有 run 墙钟(计划 §3 T-PS5 验收):它崩在半路,但确实占了这么
+    # 久,而「哪一侧更容易崩、崩之前烧了多少时间」正是要量的东西之一。
+    assert isinstance(by_key["A-q01"]["run_wall_ms"], int)
+    assert isinstance(by_key["A-q02"]["run_wall_ms"], int)
     assert by_key["A-q02"]["status"] != "failed"
     log_text = (out_dir / "search-runs.log").read_text("utf-8")
     assert "A-q01 A_nokg legacy standard FAILED ValueError" in log_text
@@ -1801,6 +1875,10 @@ def test_search_loop_concurrent_writes_a_failed_row_and_reports_failures(
     assert by_key["Q02"]["effort"] == "standard"
     assert by_key["Q02"]["corpus_cell"] == "A_nokg"
     assert all(by_key[k]["status"] != "failed" for k in ("Q00", "Q01", "Q03"))
+    # 并发路径的 run 墙钟:成功与失败的 run **都**有(计划 §3 T-PS5 验收)。
+    # 轨迹里没有这件事实(`total_ms` 是各步耗时之和,漏掉排队与步间空隙),
+    # 只有 rig 手上有。
+    assert all(isinstance(row["run_wall_ms"], int) for row in rows)
     log_text = (tmp_path / "search-runs.log").read_text("utf-8")
     assert "Q02" in log_text and "status=failed reason=ValueError" in log_text
     assert "秘密原文" not in log_text
@@ -2395,3 +2473,338 @@ def test_prepare_search_intent_authoritative_only_without_submitted_answers():
     prepared_clear = rig._prepare_search_intent(clear, question, "standard")
     assert prepared_clear["research_question"].startswith(question)
     assert prepared_clear["intent_queries"][0].startswith(question)
+
+
+# --- T-PS4 聚合器的第二维臂与测量列 ------------------------------------------
+
+
+def _measured_row(**overrides) -> dict:
+    """带 T-PS4 测量列的一行。默认是 `v2` + `off` 那一臂。"""
+    base = _row(
+        policy_version="v2", termination_inferred=False,
+        termination_reason="model_sufficient",
+        optimization="off", run_wall_ms=9000, model_calls_real=4,
+        attempts_observed=True, response_chars_total=500,
+        prefix_bytes_median=720, prefix_bytes_min=700, prefix_turns=3,
+        context_chars={"s": 800, "c": 1200, "bytes_total": 9600},
+    )
+    base.update(overrides)
+    return base
+
+
+def test_every_measurement_column_reaches_the_report(tmp_path, capsys):
+    """九个新列各自被某一组指标消费掉,并且真的出现在 JSON 报告里。
+
+    变异:把 `run_wall_ms` 从 `NUMERIC_METRICS`、或 `attempts_observed` 从
+    `BOOLEAN_METRICS`、或 `optimization` 从 `CATEGORICAL_METRICS`、或
+    `context_chars` 从 `COUNTER_METRICS` 里删掉 ⇒ 这条红(也会让
+    `test_analysis_consumes_every_scalar_projection_key` 红)。
+    """
+    source = _write_rows(tmp_path / "rows.jsonl",
+                         [_measured_row() for _ in range(5)])
+    js = tmp_path / "t0.json"
+    analyze.main([str(source), "--out-json", str(js)])
+    capsys.readouterr()
+    summary = json.loads(js.read_text("utf-8"))["groups"][0]["summary"]
+    for metric in ("run_wall_ms", "model_calls_real", "prefix_bytes_median",
+                   "prefix_bytes_min", "prefix_turns", "response_chars_total"):
+        assert summary["numeric"][metric]["n_observed"] == 5, metric
+    assert summary["boolean"]["attempts_observed"] == {
+        "n_observed": 5, "n_missing": 0, "n_true": 5}
+    assert summary["categorical"]["optimization"] == {"off": 5}
+    # 跨 run 求和:五条 run 各 9600 字节。
+    assert summary["counters"]["context_chars"]["bytes_total"] == 48000
+
+
+def test_optimization_is_a_default_grouping_dimension(tmp_path, capsys):
+    """不按 `optimization` 分格,两臂会被摊进同一格的均值里。
+
+    变异:把 `optimization` 从 `DEFAULT_GROUP_BY` 里删掉 ⇒ 只剩一格,这条红。
+    """
+    source = _write_rows(tmp_path / "rows.jsonl", [
+        _measured_row(run_wall_ms=10000),
+        _measured_row(optimization="prefix_snapshot", run_wall_ms=6000),
+    ])
+    js = tmp_path / "t0.json"
+    analyze.main([str(source), "--out-json", str(js)])
+    capsys.readouterr()
+    groups = json.loads(js.read_text("utf-8"))["groups"]
+    assert len(groups) == 2
+    walls = sorted(
+        group["summary"]["numeric"]["run_wall_ms"]["mean"] for group in groups
+    )
+    assert walls == [6000.0, 10000.0]
+    assert "optimization" in analyze.DEFAULT_GROUP_BY
+
+
+def test_unknown_measurements_are_missing_not_zero(tmp_path, capsys):
+    """没开测量的 run 在新列上是 `n_missing`,不是 0。
+
+    变异:把投影侧任何一个新列的缺失折成 0 ⇒ 这条红。
+    """
+    source = _write_rows(tmp_path / "rows.jsonl", [
+        _measured_row(),
+        _row(run_wall_ms=None, model_calls_real=None, attempts_observed=None,
+             prefix_turns=None),
+    ])
+    js = tmp_path / "t0.json"
+    analyze.main([str(source), "--group-by", "policy_version", "--out-json",
+                  str(js)])
+    capsys.readouterr()
+    report = json.loads(js.read_text("utf-8"))
+    merged = {}
+    for group in report["groups"]:
+        for metric, entry in group["summary"]["numeric"].items():
+            bucket = merged.setdefault(metric, {"n_observed": 0, "n_missing": 0})
+            bucket["n_observed"] += entry["n_observed"]
+            bucket["n_missing"] += entry["n_missing"]
+    assert merged["run_wall_ms"] == {"n_observed": 1, "n_missing": 1}
+    assert merged["prefix_turns"] == {"n_observed": 1, "n_missing": 1}
+
+
+def test_optimization_pairs_hold_the_policy_version_fixed(tmp_path, capsys):
+    """沿 `optimization` 配对时 `policy_version` 固定:拿 legacy 的 `off` 去比
+    v2 的 `prefix_snapshot`,差值里混着两处改动,谁也归因不了。
+
+    变异:把 `optimization_pair_table` 的格依据里的 `policy_version` 去掉 ⇒
+    第二段的 `pairs == []` 断言红。
+    """
+    js = tmp_path / "t0.json"
+    same_policy = _write_rows(tmp_path / "a.jsonl", [
+        _measured_row(run_wall_ms=10000, model_calls_real=4),
+        _measured_row(optimization="prefix_snapshot", run_wall_ms=6000,
+                      model_calls_real=4, prefix_bytes_median=3134),
+    ])
+    analyze.main([str(same_policy), "--out-json", str(js)])
+    capsys.readouterr()
+    pairs = json.loads(js.read_text("utf-8"))["optimization_pairs"]
+    assert len(pairs) == 1
+    assert pairs[0]["arm_dimension"] == "optimization"
+    assert pairs[0]["policy_version"] == "v2"
+    assert pairs[0]["variant_arm"] == "prefix_snapshot"
+    # 两侧键名对称:`baseline`/`variant` 说的是「哪一侧」,臂身份另有
+    # `variant_arm` 与侧内的 `optimization` 分布。基线臂名不当键名——那会让读的人
+    # 先知道基线是谁才取得到那一格。
+    assert pairs[0]["baseline"]["optimization"] == {"off": 1}
+    assert "off" not in pairs[0]
+    assert pairs[0]["baseline"]["run_wall_ms"] == 10000.0
+    assert pairs[0]["variant"]["run_wall_ms"] == 6000.0
+    assert pairs[0]["variant"]["prefix_bytes_median"] == 3134.0
+
+    cross_policy = _write_rows(tmp_path / "b.jsonl", [
+        _row(optimization="off"),
+        _measured_row(optimization="prefix_snapshot"),
+    ])
+    analyze.main([str(cross_policy), "--out-json", str(js)])
+    capsys.readouterr()
+    assert json.loads(js.read_text("utf-8"))["optimization_pairs"] == []
+
+
+def test_optimization_pairs_need_the_off_baseline_and_a_declared_arm(
+    tmp_path, capsys,
+):
+    """`unknown` 不当臂,基线必须是 `off`。
+
+    一条没声明 optimization 的 run 在这条轴上没有身份;拿它当一臂等于给差值找了
+    个不知道是什么的对照面。
+
+    变异:把 `optimization_pair_table` 里跳过 `unknown` 的那两行删掉 ⇒ 第一段红
+    (`unknown` 会被当成一个变体,和 `off` 配成一对)。
+    """
+    js = tmp_path / "t0.json"
+    undeclared = _write_rows(tmp_path / "a.jsonl", [
+        _measured_row(optimization="off"),
+        _measured_row(optimization="unknown"),
+    ])
+    analyze.main([str(undeclared), "--out-json", str(js)])
+    capsys.readouterr()
+    assert json.loads(js.read_text("utf-8"))["optimization_pairs"] == []
+
+    # 两个变体、没有 `off`:一对都配不出来(不许拿其中一个变体当基线)。
+    no_baseline = _write_rows(tmp_path / "b.jsonl", [
+        _measured_row(optimization="prefix_snapshot"),
+        _measured_row(optimization="prefix_delta"),
+    ])
+    analyze.main([str(no_baseline), "--out-json", str(js)])
+    capsys.readouterr()
+    assert json.loads(js.read_text("utf-8"))["optimization_pairs"] == []
+
+    # 同一格里两个变体 + `off`:两行,各自与 `off` 比。
+    both = _write_rows(tmp_path / "c.jsonl", [
+        _measured_row(),
+        _measured_row(optimization="prefix_snapshot"),
+        _measured_row(optimization="prefix_delta"),
+    ])
+    analyze.main([str(both), "--out-json", str(js)])
+    capsys.readouterr()
+    pairs = json.loads(js.read_text("utf-8"))["optimization_pairs"]
+    assert [pair["variant_arm"] for pair in pairs] == [
+        "prefix_delta", "prefix_snapshot"]
+
+
+def test_policy_pairs_split_the_v2_side_by_optimization(tmp_path, capsys):
+    """legacy vs v2 **不**要求两侧 `optimization` 相同——`optimization` 对
+    legacy 结构上不成立(v2 总闸关时恒 `off`),要求相同就永远配不出
+    「legacy vs v2+prefix_snapshot」这一对,而那正是最终要看的对照。
+
+    但 v2 那一侧必须按 `optimization` **拆行**(legacy 侧整批重复):同题同格里
+    一条 v2/`off`(10000ms)与一条 v2/`prefix_snapshot`(6000ms)摊进同一个均值
+    是 8000ms,那个数不描述任何一臂。
+
+    变异:把 `pair_table` 改回单行(v2 侧不拆、`_pair_side(sides["v2"])` 一次
+    汇总)⇒ `len(pairs) == 2` 与两条 `run_wall_ms` 断言一起红;给格依据加上
+    `optimization` ⇒ legacy 侧那格里没有变体、一对都配不出来,第一条也红。
+    """
+    js = tmp_path / "t0.json"
+    source = _write_rows(tmp_path / "a.jsonl", [
+        _row(optimization="off"),
+        _measured_row(optimization="prefix_snapshot", run_wall_ms=6000),
+        _measured_row(optimization="off", run_wall_ms=10000),
+    ])
+    analyze.main([str(source), "--out-json", str(js)])
+    capsys.readouterr()
+    pairs = json.loads(js.read_text("utf-8"))["pairs"]
+    assert len(pairs) == 2
+    assert [pair["v2"]["optimization"] for pair in pairs] == [
+        {"off": 1}, {"prefix_snapshot": 1}]
+    assert [pair["v2"]["run_wall_ms"] for pair in pairs] == [10000.0, 6000.0]
+    assert [pair["v2"]["n_runs"] for pair in pairs] == [1, 1]
+    # legacy 侧不拆:同一批 run 的同一份汇总,在两行里重复。
+    assert pairs[0]["arm_dimension"] == "policy_version"
+    assert pairs[0]["legacy"] == pairs[1]["legacy"]
+    assert pairs[0]["legacy"]["optimization"] == {"off": 1}
+
+
+#: 一批**没有任何 optimization 声明**的 run(= 线上导出)配出来的 `pairs` 行。
+#: 手写而不是从代码里算:v2 侧按 optimization 拆行这件事,对这批数据必须逐格
+#: 无差别——只有一个臂(`unknown`),行数与拆行前相同,均值也相同。
+FROZEN_ANONYMOUS_PAIR = {
+    "arm_dimension": "policy_version",
+    "consumer": "ask_single",
+    "corpus_cell": "B_kg",
+    "effort": "standard",
+    "has_intent_contract": "unknown",
+    "mode": "reasoning",
+    "question_key": "B-q01",
+    "trace_source": "unknown",
+    "legacy": {
+        "anchors": None,
+        "model_calls_real": None,
+        "n_measured": {"model_calls_real": 0, "prefix_bytes_median": 0,
+                       "prefix_turns": 0, "run_wall_ms": 0},
+        "n_runs": 1,
+        "optimization": {"unknown": 1},
+        "prefix_bytes_median": None,
+        "prefix_turns": None,
+        "reflect_turns": 3.0,
+        "run_wall_ms": None,
+        "termination_reason": {"model_end": 1},
+        "total_ms": 1000.0,
+    },
+    "v2": {
+        "anchors": None,
+        "model_calls_real": None,
+        "n_measured": {"model_calls_real": 0, "prefix_bytes_median": 0,
+                       "prefix_turns": 0, "run_wall_ms": 0},
+        "n_runs": 1,
+        "optimization": {"unknown": 1},
+        "prefix_bytes_median": None,
+        "prefix_turns": None,
+        "reflect_turns": 3.0,
+        "run_wall_ms": None,
+        "termination_reason": {"model_end": 1},
+        "total_ms": 1000.0,
+    },
+}
+
+
+def test_pairs_on_an_undeclared_batch_match_the_frozen_shape(tmp_path, capsys):
+    """线上导出那批(`optimization` 全缺)的 `pairs` 逐键与冻结基线相同。
+
+    这是「按 optimization 拆 v2 侧」这次改动的回归闸:那批数据在这条轴上只有
+    一个臂,所以拆与不拆必须给出同一份输出——多出一行、多出一个键、或者哪个均值
+    动了,都在这里当场红。
+
+    变异:给 `pair_table` 的每行加一个 `entry["optimization"] = _arm` 字段(把臂
+    写进 JSON 而不是从侧内分布读)⇒ 这条红。
+    """
+    js = tmp_path / "t0.json"
+    source = _write_rows(tmp_path / "a.jsonl", [
+        _row(), _row(policy_version="v2"),
+    ])
+    analyze.main([str(source), "--out-json", str(js)])
+    capsys.readouterr()
+    assert json.loads(js.read_text("utf-8"))["pairs"] == [FROZEN_ANONYMOUS_PAIR]
+
+
+def test_a_sparse_pair_side_reports_its_observation_count(tmp_path, capsys):
+    """稀疏指标的均值必须带着自己的 n:一侧三条全带、另一侧三条只一条带,两侧
+    的均值在表里长得一样重,只有 n 能把「1 条比 3 条」揭出来(评审 P2)。
+
+    `n_runs` 顶不了这件事——它数的是 run,不是观测数。
+
+    变异:把 `_pair_side` 里的 `n_measured` 删掉 ⇒ 前两段红;把
+    `_fmt_pair_metric` 换回直接印均值 ⇒ 最后那段 markdown 断言红。
+    """
+    js, md = tmp_path / "t0.json", tmp_path / "t0.md"
+    source = _write_rows(tmp_path / "a.jsonl", [
+        # `off` 三条都量到了墙钟,`prefix_snapshot` 三条里只有一条量到。
+        *[_measured_row(run_wall_ms=9000) for _ in range(3)],
+        _measured_row(optimization="prefix_snapshot", run_wall_ms=6000),
+        _measured_row(optimization="prefix_snapshot", run_wall_ms=None),
+        _measured_row(optimization="prefix_snapshot", run_wall_ms=None),
+    ])
+    analyze.main([str(source), "--out-json", str(js), "--out-md", str(md)])
+    capsys.readouterr()
+    pair = json.loads(js.read_text("utf-8"))["optimization_pairs"][0]
+    assert pair["baseline"]["n_runs"] == pair["variant"]["n_runs"] == 3
+    assert pair["baseline"]["run_wall_ms"] == 9000.0
+    assert pair["variant"]["run_wall_ms"] == 6000.0
+    # 均值一样重,n 不一样:三条观测 vs 一条观测。
+    assert pair["baseline"]["n_measured"]["run_wall_ms"] == 3
+    assert pair["variant"]["n_measured"]["run_wall_ms"] == 1
+    # 稀疏四项各有自己的 n,不共用一个。
+    assert set(pair["variant"]["n_measured"]) == set(
+        analyze.SPARSE_PAIR_SIDE_METRICS)
+    assert pair["variant"]["n_measured"]["prefix_bytes_median"] == 3
+    # markdown 也带上 n,而不是只把它留在 JSON 里。
+    rendered = md.read_text("utf-8")
+    assert "9000.0(n=3)" in rendered
+    assert "6000.0(n=1)" in rendered
+
+
+def test_the_markdown_report_renders_both_arm_axes(tmp_path, capsys):
+    """两张成对表都在,且 legacy/v2 那张把 v2 侧的臂写在自己的一列里。
+
+    变异:把 `v2 optimization` 列从 `render_markdown` 里删掉 ⇒ 表头断言红;把
+    `_pair_arm` 改成恒返回第一个键(而不是把多臂拼出来)⇒
+    `test_pair_arm_labels_a_mixed_side_as_mixed` 红。
+    """
+    source = _write_rows(tmp_path / "rows.jsonl", [
+        _measured_row(),
+        _measured_row(optimization="prefix_snapshot"),
+        _row(optimization="off"),
+    ])
+    md = tmp_path / "t0.md"
+    analyze.main([str(source), "--out-md", str(md)])
+    capsys.readouterr()
+    rendered = md.read_text("utf-8")
+    assert "## legacy / v2 对照(成对)" in rendered
+    assert "## off / 优化变体对照(成对,同 policy_version)" in rendered
+    assert "prefix_snapshot" in rendered
+    assert "v2 optimization" in rendered
+    # 拆行后 legacy/v2 那张表是两行,各自的 v2 臂写在那一列里。
+    section = rendered.split("## legacy / v2 对照(成对)")[1].split("## off /")[0]
+    pair_rows = [line for line in section.splitlines()
+                 if line.startswith("| B-q01 |")]
+    assert len(pair_rows) == 2
+    assert sum("prefix_snapshot" in line for line in pair_rows) == 1
+
+
+def test_pair_arm_labels_a_mixed_side_as_mixed():
+    """一侧混了两臂时,标签必须把两个都写出来,不许挑一个盖住混合。"""
+    assert analyze._pair_arm({"optimization": {"off": 2}}) == "off"
+    assert analyze._pair_arm(
+        {"optimization": {"off": 1, "prefix_snapshot": 1}}
+    ) == "off+prefix_snapshot"
+    assert analyze._pair_arm({}) == "unknown"
