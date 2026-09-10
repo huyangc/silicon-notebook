@@ -14439,3 +14439,141 @@ def test_reflect_context_refuses_the_wrong_layout_payload():
         server_state="", evidence="K", observations="D",
         contract="C", turn_state="T", static_prompt="S",
     ).as_prefix_user_block("本轮动作")
+
+
+# ---------------------------------------------------------------------------
+# T-PD3 历史折算的纯函数(PR-3 计划 §3 T-PD3;上游设计 §5.2 第 3 条)
+#
+# `prefix_delta` 重建 K 时,近期若干条观察仍走 `render_observations` 逐条列出,
+# 更早的那些折成一行计数。这一节只钉这个纯函数:零 I/O、零 settings,
+# `render_observations`/`render_observation_row`/`ActionObservationLedger`
+# 一个字节不动。
+# ---------------------------------------------------------------------------
+
+def _obs(status, *, seq=1, truncated=False, new=0):
+    from app.services.reasoning_observation import ActionObservation
+    return ActionObservation(
+        seq=seq, phase="action", action_id="search_chunks", request="q",
+        purpose="", status=status, returned=new, new=new, upgraded=0,
+        truncated=truncated, reason="", budget_left="")
+
+
+def test_fold_observation_counts_lists_every_status_once():
+    """七种状态各一条 ⇒ 七格计数逐项,顺序按 `OBSERVATION_STATUSES`,
+    末尾那格与行数恒等。
+
+    变异:把闭集遍历换成 `counts` 的插入序 ⇒ 顺序断言红;把末尾那格改成只数
+    闭集里那几档 ⇒ 下面的兜底用例红。
+    """
+    from app.services.reasoning_observation import (
+        OBSERVATION_STATUSES, _STATUS_LABELS, fold_observation_counts,
+    )
+    # 刻意**逆着**闭集喂进去:顺序若跟着输入走(而不是跟着 `OBSERVATION_STATUSES`
+    # 走),同一批动作换个发生次序就换一份读法,两次 run 的折算行没法比对。
+    rows = [_obs(status, seq=i + 1)
+            for i, status in enumerate(reversed(OBSERVATION_STATUSES))]
+    line = fold_observation_counts(rows)
+    assert "\n" not in line                       # 一行,不是一块
+    positions = []
+    for status in OBSERVATION_STATUSES:
+        part = f"{_STATUS_LABELS[status]} 1 条"
+        assert part in line, status
+        positions.append(line.index(part))
+    assert positions == sorted(positions)         # 闭集顺序,不是插入序
+    assert line.endswith(f"总计已尝试 {len(rows)} 次")
+
+
+def test_fold_observation_counts_is_empty_for_no_rows():
+    """空输入 ⇒ 空串,而不是一行「总计已尝试 0 次」。
+
+    调用方(T-PD4 的 `compose_snapshot`)据此决定要不要拼那个块头;返回一句
+    「0 次」会在没有任何历史被折算时也拼出一块折算披露。
+    """
+    from app.services.reasoning_observation import fold_observation_counts
+    assert fold_observation_counts([]) == ""
+
+
+def test_fold_observation_counts_renders_no_zero_valued_bucket():
+    """全 success ⇒ 只出那一格 + 总计。零值不渲染。
+
+    「本轮没有失败」与「失败 0 次」在模型眼里不是同一句话,而前者本来就不必说;
+    七档全列出来只会让这一行长成半屏。
+
+    变异:把零值那道判据去掉(七档全列)⇒ 这条红。
+    """
+    from app.services.reasoning_observation import (
+        STATUS_SUCCESS, _STATUS_LABELS, fold_observation_counts,
+    )
+    line = fold_observation_counts(
+        [_obs(STATUS_SUCCESS, seq=i) for i in (1, 2, 3)])
+    assert line == f"{_STATUS_LABELS[STATUS_SUCCESS]} 3 条；总计已尝试 3 次"
+
+
+def test_fold_observation_counts_never_stacks_truncated_onto_failed():
+    """`truncated ∧ failed` 只计一次:那一条只进「执行失败」,不再叠一格
+    「已知截断」——判据与 `render_observation_row` 逐字相同。
+
+    `failed` 说的是「根本没查成」,而「已知截断」说的是「这条路是通的,只是被上限
+    切了一刀」。两句同时落在同一份折算里,模型无从判断这条通道下一轮还值不值得
+    走。
+
+    变异:把折算里的 `row.status != STATUS_FAILED` 去掉 ⇒ 这条红。
+    """
+    from app.services.reasoning_observation import (
+        STATUS_FAILED, STATUS_PARTIAL, _STATUS_LABELS,
+        fold_observation_counts, render_observation_row,
+    )
+    failed = _obs(STATUS_FAILED, seq=1, truncated=True)
+    assert fold_observation_counts([failed]) == (
+        f"{_STATUS_LABELS[STATUS_FAILED]} 1 条；总计已尝试 1 次")
+    # 真正该计的那一族照样计,而且用的是逐条渲染里同一串字面。
+    partial = _obs(STATUS_PARTIAL, seq=2, truncated=True, new=3)
+    line = fold_observation_counts([failed, partial])
+    assert "已知截断 1 条" in line
+    assert "已知截断" in render_observation_row(partial)
+    assert "已知截断" not in render_observation_row(failed)
+    assert line.endswith("总计已尝试 2 次")
+
+
+def test_fold_observation_counts_reuses_the_row_vocabulary_verbatim():
+    """折算的词表与逐条渲染同源:每一档的字面逐字取自 `_STATUS_LABELS`,
+    不为折算另造一套同义词。
+
+    同一件事在两处用两种说法,模型会把它们读成两件事——而这一行的全部作用就是
+    告诉它「上面逐条列出的行之外,还发生过这些」。
+
+    变异:在折算里把任意一档换成自造的近义词 ⇒ 这条红。
+    """
+    from app.services.reasoning_observation import (
+        OBSERVATION_STATUSES, _STATUS_LABELS, fold_observation_counts,
+    )
+    # 两份闭集同源:新增一个状态却忘了配字面,这条当场红(否则折算会拿状态码
+    # 当字面渲染出去)。
+    assert set(_STATUS_LABELS) == set(OBSERVATION_STATUSES)
+    rows = [_obs(status, seq=i + 1, truncated=True)
+            for i, status in enumerate(OBSERVATION_STATUSES)]
+    labels = {part.rsplit(" ", 2)[0]
+              for part in fold_observation_counts(rows).split("；")}
+    assert labels == set(_STATUS_LABELS.values()) | {"已知截断", "总计已尝试"}
+
+
+def test_fold_observation_counts_keeps_an_unknown_status_in_the_total():
+    """闭集之外的状态照 `render_observation_row` 的同一条兜底:拿原始状态码当
+    字面,排在闭集之后,**不丢行**。
+
+    `ActionObservation.status` 这一格自己不校验,而折算末尾那句「总计已尝试 N
+    次」是对整批行的承诺。悄悄跳过一行会让那句话与实际计数对不上——那正是这份账
+    存在的理由的反面。
+
+    变异:把计数换成只遍历 `OBSERVATION_STATUSES` 的预置字典 ⇒ 这条红。
+    """
+    from app.services.reasoning_observation import (
+        STATUS_SUCCESS, _STATUS_LABELS, fold_observation_counts,
+    )
+    line = fold_observation_counts(
+        [_obs(STATUS_SUCCESS, seq=1), _obs("未来才有的状态", seq=2)])
+    assert f"{_STATUS_LABELS[STATUS_SUCCESS]} 1 条" in line
+    assert "未来才有的状态 1 条" in line
+    assert line.index("未来才有的状态") > line.index(
+        _STATUS_LABELS[STATUS_SUCCESS])
+    assert line.endswith("总计已尝试 2 次")

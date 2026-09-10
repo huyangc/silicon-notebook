@@ -34,7 +34,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import List, Mapping, Optional, Sequence, Tuple
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 from app.domain.retrieval_termination import (
     ASPECT_REJECTION_REASONS, ASSESSMENT_SKIP_REASON_PREFIX,
@@ -730,3 +730,49 @@ def render_observations(
     if len(newest) > floor:
         newest = newest[:floor - 1] + "…"
     return "\n".join([head, newest, HISTORY_NOTE])
+
+
+def fold_observation_counts(rows: Sequence[ActionObservation]) -> str:
+    """把一批观察折成**一行**计数披露(前缀复用设计 §5.2 第 3 条)。
+
+    `prefix_delta` 重建快照时,近期若干条观察仍逐条列出(`render_observations`
+    那一块),更早的那些折成这一行。它是**披露**而不是省略:每一条折进来的观察都
+    在某个计数里出现过一次,末尾那格 `总计已尝试 N 次` 与 `len(rows)` 恒等——模型
+    因此不会把「明细没写」读成「这些动作没发生过」。
+
+    三条口径:
+
+    * **词表只用现有。**每一档的字面直接取自 `_STATUS_LABELS`(与逐条渲染的那一
+      行同源),不为折算另造一套同义词:同一件事在两处用两种说法,模型会把它们读
+      成两件事。闭集之外的状态(`ActionObservation` 自己不校验这一格)按
+      `render_observation_row` 的同一条兜底——用原始状态码当字面,排在闭集之后。
+      悄悄丢掉这样一行会让上面那条恒等式当场变成谎报,而谎报正是这份账要避免的
+      那件事。
+    * **零值不渲染。**「本轮没有失败」与「失败 0 次」在模型眼里不是同一句话,而
+      前者本来就不必说;七档全列出来只会让这一行长成半屏。
+    * **`truncated ∧ failed` 只计一次。**判据与 `render_observation_row` 那一格
+      逐字相同(`row.truncated and row.status != STATUS_FAILED`):`failed` 说的是
+      「根本没查成」,再叠一句「已知截断」(=「这条路是通的,只是被上限切了一刀」)
+      会让同一行里两句互相矛盾的话同时成立。
+
+    空输入 ⇒ 空串(调用方据此决定要不要拼那个块头)。纯函数、零 I/O,同一份输入
+    永远给出同一串字节。
+    """
+    if not rows:
+        return ""
+    counts: Dict[str, int] = {}
+    truncated = 0
+    for row in rows:
+        counts[row.status] = counts.get(row.status, 0) + 1
+        if row.truncated and row.status != STATUS_FAILED:
+            truncated += 1
+    # 闭集按 `OBSERVATION_STATUSES` 的顺序,表外的按首次出现序接在后面:两段都只
+    # 依赖输入,所以同一批行的折算结果是可重复的。
+    ordered = [status for status in OBSERVATION_STATUSES if counts.get(status)]
+    ordered.extend(status for status in counts if status not in _STATUS_LABELS)
+    parts = [f"{_STATUS_LABELS.get(status, status)} {counts[status]} 条"
+             for status in ordered]
+    if truncated:
+        parts.append(f"已知截断 {truncated} 条")
+    parts.append(f"总计已尝试 {len(rows)} 次")
+    return "；".join(parts)
