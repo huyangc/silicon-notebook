@@ -5,13 +5,15 @@
 `docs/superpowers/specs/2026-09-08-reflect-t0-trace-analysis-design_zh.md`
 
 零 DB、零模型、零网络:它只吃 `scripts/export_reasoning_traces.py` 与
-`scripts/reflect_shadow_rig.py` 写出的 JSONL。除标准库外只 import
-`app.domain.reasoning_trace_stats` 的闭集常量(用来把非法键挡在聚合之外)。
+`scripts/reflect_shadow_rig.py` 写出的 JSONL。除标准库外只 import 两处**闭集
+常量**(用来把非法键挡在聚合之外):`app.domain.reasoning_trace_stats` 的 T0
+键集与词表,以及 `app.eval.reflect_ab` 的 `AB_PROJECTION_KEYS`(那个模块自己也
+是纯逻辑、零 I/O、零模型)。
 
     python scripts/analyze_reasoning_trace.py a.jsonl b.jsonl \
         --group-by consumer,policy_version,effort --out-md t0.md --out-json t0.json
 
-三条纪律,和导出侧同源:
+四条纪律,和导出侧同源:
 
 * **unknown 是一等值**:每个指标各报自己的 `n_observed`,缺失不折成 0。
 * **小样本不出分位数**:`n_observed < --min-samples` 的格子只报计数。
@@ -19,6 +21,9 @@
   三者相同时配对(§4.2);线上导出的 legacy 没有 `question_key`,只进基线表。
   臂有**两条轴**(`ARM_DIMENSIONS`):`policy_version`(legacy/v2)与
   `optimization`(`off` / 前缀复用各变体),各出一张成对表,不合成四象限。
+* **默认参数下的输出是一份合同**:`--baseline-arm` / `--pair-rows` /
+  `--key-set` 三个开关(PR-5 T-EX9)各自的默认值逐字保持接入前的行为——同一份
+  行喂进来,JSON 与 markdown 逐字节相同。存档过的报告因此仍与新报告可 diff。
 """
 from __future__ import annotations
 
@@ -34,9 +39,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
 
 from app.domain.reasoning_trace_stats import (  # noqa: E402
+    OPTIMIZATIONS,
     RUN_PROJECTION_KEYS,
     UNKNOWN,
 )
+from app.eval.reflect_ab import AB_PROJECTION_KEYS  # noqa: E402
 
 # `optimization` 在默认分组里,而不是只当一个可选维度:一条 run 的身份是
 # `(policy_version, optimization)` 这一对(T-PS4)。不按它分格,`off` 与
@@ -165,18 +172,56 @@ PAIR_DIMENSIONS: tuple[str, ...] = (
 #:   `prefix_snapshot`,差值里混着两处改动,谁也归因不了。
 ARM_DIMENSIONS: tuple[str, ...] = ("policy_version", "optimization")
 
-#: 沿 `optimization` 配对时的基线臂。`off` 是「测量开着但一处优化都没上」的那一
-#: 臂(计划 §5 Q2:测量开关与 `optimization` 正交),所有变体都与它比。
+#: 沿 `optimization` 配对时的**默认**基线臂。`off` 是「测量开着但一处优化都没上」
+#: 的那一臂(计划 §5 Q2:测量开关与 `optimization` 正交)。
+#:
+#: 它是 `--baseline-arm` 的默认值,而不再是一处硬编码(PR-5 T-EX9)。硬编码的代价
+#: 是实测到的:一批里只有 D(`prefix_delta`)与 L(`prefix_delta_lean`)两臂时
+#: `off` 那一格空着 ⇒ 整张配对表全空,而 §10.2-4「若 P 与 D/L 的配对中位收益差
+#: 不足 5% 则选 P」这条采用门恰恰要读 D↔L 这一对。
+#:
+#: 基线换成谁由操作者显式声明,报告的 JSON 里**不另存**一个「我用的基线是谁」的
+#: 字段:基线那一侧已经如实报出自己的 `optimization` 分布(见 `_pair_side`),它
+#: 就是这一行基线臂身份的自证;markdown 的节标题与列名从参数拼(见
+#: `render_markdown`),所以换了基线的报告不会还印着 `off`。
 OPTIMIZATION_BASELINE = "off"
 
+#: `load_rows` 拿哪一份闭集当判据。两份都是**别处已经闭上**的键集,这里只挑一份:
+#:
+#: * `t0` = `RUN_PROJECTION_KEYS`,`export_reasoning_traces.py` 与 rig 的
+#:   `search-*.jsonl` 写的形状;
+#: * `ab` = `AB_PROJECTION_KEYS`,rig 的 `ab-runs.jsonl` 形状(T0 键集 + A/B
+#:   设计 §7.1 那一批完整 Ask 专属键)。
+#:
+#: 默认**不**自动放行 `ab`:「多出来的键必须让人看见」是 `load_rows` 的原话,把它
+#: 换成按行自动嗅探等于取消它。显式 `--key-set ab` 是操作者的知情声明——他知道这
+#: 一批是完整 Ask 的 A/B 行,而不是把两种形状不小心拌在了一起。
+#:
+#: 放行**不等于**聚合:A/B 专属列(`answer_chars` / `latency_ms_total` /
+#: `gold_facts_*` / `human_*` …)进得来,但四组标量指标一个都不吃它们。把它们加
+#: 进 `NUMERIC_METRICS` 会让每一份 T0 报告都多出一批恒 `n_observed=0` 的格子,
+#: 默认输出就不再逐字节稳定了。§10.2-1 质量门要的那几列由 `quality_evidence`
+#: 直接读;其余几列本期只过闸不入表,是登记在案的已知缺口。
+KEY_SETS: dict[str, frozenset[str]] = {
+    "t0": RUN_PROJECTION_KEYS,
+    "ab": AB_PROJECTION_KEYS,
+}
+DEFAULT_KEY_SET = "t0"
 
-def load_rows(paths: Sequence[str]) -> list[dict]:
+
+def load_rows(
+    paths: Sequence[str], *, key_set: str = DEFAULT_KEY_SET,
+) -> list[dict]:
     """读 JSONL,并在入口就把闭集外的键挡掉。
 
     输入可能来自更老/更新的一次导出。多出来的键**不是**「向前兼容地忽略」,而
     是一个必须让人看见的事实:聚合器不知道它的口径,更不该把它印进表里。所以
     直接拒绝整次运行,而不是安静地丢掉那一列。
+
+    `key_set` 只换判据用的**那一份**闭集(见 `KEY_SETS`),不放宽上面这条纪律:
+    选了 `t0` 的一批里混进一行 A/B 行,照旧整批拒绝。
     """
+    allowed = KEY_SETS[key_set]
     rows: list[dict] = []
     for path in paths:
         for number, line in enumerate(Path(path).read_text("utf-8").splitlines(), 1):
@@ -184,10 +229,11 @@ def load_rows(paths: Sequence[str]) -> list[dict]:
             if not line:
                 continue
             row = json.loads(line)
-            extra = set(row) - RUN_PROJECTION_KEYS
+            extra = set(row) - allowed
             if extra:
                 raise SystemExit(
-                    f"{path}:{number} 带闭集外的键: {', '.join(sorted(extra))}"
+                    f"{path}:{number} 带 `{key_set}` 闭集外的键: "
+                    + ", ".join(sorted(extra))
                 )
             rows.append(row)
     return rows
@@ -357,22 +403,28 @@ def pair_table(rows: Sequence[dict]) -> list[dict]:
     return table
 
 
-def optimization_pair_table(rows: Sequence[dict]) -> list[dict]:
-    """`off` / 各优化变体的成对对照(T-PS4 的第二维臂)。
+#: 沿 `optimization` 配对的两张表共用的**格键**:`PAIR_DIMENSIONS` 再加
+#: `policy_version`(见 `optimization_pair_table` 的口径说明)。
+OPTIMIZATION_CELL_DIMENSIONS: tuple[str, ...] = (
+    *PAIR_DIMENSIONS, "policy_version",
+)
 
-    与 `pair_table` 的分工见 `ARM_DIMENSIONS`:这一张沿 `optimization` 配,
-    `policy_version` **固定**——所以格的依据是 `PAIR_DIMENSIONS` 再加
-    `policy_version`,而 `optimization` 是臂。
 
-    `unknown` 不当臂:一条没声明 optimization 的 run(线上导出、或 rig 忘了传)
-    在这条轴上没有身份,拿它当一臂等于给差值找了个不知道是什么的对照面。基线恒
-    为 `off`,每个变体各出一行;同一格里出现两个变体就是两行,各自与 `off` 比。
+def _optimization_cells(
+    rows: Sequence[dict],
+) -> dict[tuple, dict[str, list[dict]]]:
+    """按 `OPTIMIZATION_CELL_DIMENSIONS` 分格、格内按 `optimization` 分臂。
 
-    两侧在 JSON 里的键名是**对称**的 `baseline` / `variant`,而不是
-    `off` / `variant`:这两格的语义是「哪一侧」,不是「哪一臂」——臂已经由
-    `variant_arm` 与侧内的 `optimization` 分布各说了一遍,再把基线臂名当键名,
-    读的人就得先知道基线是谁才能取到那一格。基线那一侧的汇总在同一格里只算
-    一次,不在变体循环里重复计算。
+    两张沿 `optimization` 配对的表——`optimization_pair_table`(每侧一个均值)
+    与 `optimization_pair_rows`(格内先对重复取中位数再出配对差值)——共用这一份
+    分格。分开各写一遍的代价不是重复代码,而是**两张表在同一批输入上可能配出不
+    同的对照面**:它们本该是同一批配对的两种读法,格的依据一旦分叉,读的人没有
+    任何办法从报告里看出来。
+
+    两条入格资格与 `pair_table` 同源:`question_key` 是 unknown 的 run 没资格
+    配对(线上导出的 legacy 没有题号);`optimization` 是 unknown 的 run 在这条
+    轴上没有身份(线上导出、或 rig 忘了传),拿它当一臂等于给差值找了个不知道是
+    什么的对照面。
     """
     cells: dict[tuple, dict[str, list[dict]]] = defaultdict(
         lambda: defaultdict(list)
@@ -385,21 +437,45 @@ def optimization_pair_table(rows: Sequence[dict]) -> list[dict]:
             continue
         key = tuple(
             str(row.get(dim) or UNKNOWN)
-            for dim in (*PAIR_DIMENSIONS, "policy_version")
+            for dim in OPTIMIZATION_CELL_DIMENSIONS
         )
         cells[key][optimization].append(row)
+    return cells
 
+
+def optimization_pair_table(
+    rows: Sequence[dict], *, baseline: str = OPTIMIZATION_BASELINE,
+) -> list[dict]:
+    """基线臂 / 各优化变体的成对对照(T-PS4 的第二维臂)。
+
+    与 `pair_table` 的分工见 `ARM_DIMENSIONS`:这一张沿 `optimization` 配,
+    `policy_version` **固定**——所以格的依据是 `PAIR_DIMENSIONS` 再加
+    `policy_version`,而 `optimization` 是臂。
+
+    `baseline` 默认 `off`(见 `OPTIMIZATION_BASELINE`),由 `--baseline-arm` 改。
+    换基线不改这张表的任何一条别的口径:`unknown` 仍然不当臂,基线那一格空着就
+    一对都配不出来,每个非基线变体各出一行;同一格里出现两个变体就是两行,各自
+    与基线比。
+
+    两侧在 JSON 里的键名是**对称**的 `baseline` / `variant`,而不是
+    `off` / `variant`:这两格的语义是「哪一侧」,不是「哪一臂」——臂已经由
+    `variant_arm` 与侧内的 `optimization` 分布各说了一遍,再把基线臂名当键名,
+    读的人就得先知道基线是谁才能取到那一格。基线可配之后这一条从「读起来别扭」
+    升级成「必须如此」:键名跟着参数变的话,同一份脚本两次运行出来的 JSON 就没
+    法用同一段代码读。基线那一侧的汇总在同一格里只算一次,不在变体循环里重复
+    计算。
+    """
     table: list[dict] = []
-    for key, arms in sorted(cells.items()):
-        baseline = arms.get(OPTIMIZATION_BASELINE)
-        if not baseline:
+    for key, arms in sorted(_optimization_cells(rows).items()):
+        baseline_rows = arms.get(baseline)
+        if not baseline_rows:
             continue
-        baseline_side = _pair_side(baseline)
+        baseline_side = _pair_side(baseline_rows)
         for label, side in sorted(arms.items()):
-            if label == OPTIMIZATION_BASELINE:
+            if label == baseline:
                 continue
             entry: dict[str, Any] = dict(
-                zip((*PAIR_DIMENSIONS, "policy_version"), key)
+                zip(OPTIMIZATION_CELL_DIMENSIONS, key)
             )
             entry["arm_dimension"] = "optimization"
             entry["variant_arm"] = label
@@ -482,6 +558,219 @@ def _mean(rows: Sequence[dict], metric: str) -> float | None:
     return round(sum(values) / len(values), 3) if values else None
 
 
+# --- 逐题配对差值表(`--pair-rows`,§10.1 的主指标)-------------------------
+
+#: 逐题配对差值量的指标。两个都是**墙钟毫秒**,所以 `delta_ms` 的单位是 ms、
+#: `ratio` 无量纲——把一个非时间列摆进来,那两个名字就都成了假话。
+#:
+#: `run_wall_ms` 只有 rig 写,`total_ms` 从轨迹本身来:两个都在,一批只有线上
+#: 导出行(没有 `run_wall_ms`)的输入才不至于配出一张列全是 unknown 的表。
+PAIR_ROW_METRICS: tuple[str, ...] = ("run_wall_ms", "total_ms")
+
+#: 删失与失败的口径(§10.1)。`cancelled` 是**删失观察**:它是被整批墙钟预算或
+#: 用户取消掐断的那一刻,不是这条 run 真实的完成耗时,所以把它当成一个耗时数
+#: 读进中位数,等于「把超时值说成真实完成耗时」。`failed` 压根没跑完。
+#:
+#: 两者都不进中位数,但**各自单列计数**:「不把失败丢掉后只比较成功者」是 §10.1
+#: 逐字点名不许做的事,所以这张成功配对表只有在两列计数摆在同一行时才读得懂。
+CENSORED_STATUS = "cancelled"
+FAILED_STATUS = "failed"
+
+
+def _pair_row_side(rows: Sequence[dict]) -> dict:
+    """一侧(一条臂)在一格里的配对读数:**先对重复取中位数**。
+
+    这是这张表与 `_pair_side` 的唯一实质分工:那边每一项走 `_mean`,格内的重复
+    被摊成一个均值之后,配对身份就丢了(§10.1「先对同题同档的重复汇总,再按
+    题型/有图无图/档位比较」)。这边取中位数,于是同一格的三次重复只贡献**一个**
+    配对观测,而不是三个独立观测。
+
+    中位数只从**成功**的 run 上取(见 `CENSORED_STATUS` / `FAILED_STATUS`),
+    删失与失败各自单列计数。`n_measured` 沿用 `_fmt_pair_metric` 认的那个形状,
+    好让 markdown 那一格照旧是 `中位数(n=观测数)`。
+    """
+    statuses = Counter(str(row.get("status") or UNKNOWN) for row in rows)
+    success = [
+        row for row in rows
+        if str(row.get("status") or UNKNOWN)
+        not in (CENSORED_STATUS, FAILED_STATUS)
+    ]
+    side: dict[str, Any] = {
+        "n_runs": len(rows),
+        "n_success": len(success),
+        "n_censored": statuses[CENSORED_STATUS],
+        "n_failed": statuses[FAILED_STATUS],
+        "optimization": _distribution(rows, "optimization"),
+    }
+    measured: dict[str, int] = {}
+    for metric in PAIR_ROW_METRICS:
+        values = _numeric(row.get(metric) for row in success)
+        side[metric] = round(_nearest(values, 0.50), 3) if values else None
+        measured[metric] = len(values)
+    side["n_measured"] = measured
+    return side
+
+
+def _paired_delta(baseline: dict, variant: dict, metric: str) -> dict:
+    """一格一个指标的配对差值与比值。
+
+    两侧中位数**任一**缺席 ⇒ 两格都是 `None`(unknown),不折 0:「没量到」和
+    「差值恰好是 0」是两句不同的话,而后者在这张表上是一条结论。
+
+    基线中位数为 0 时 `ratio` 同样 `None`——除以 0 得不到一个可报告的比值,而
+    `delta_ms` 仍然成立,所以只把 `ratio` 那一格记 unknown,不连坐差值。
+    """
+    base_value, variant_value = baseline.get(metric), variant.get(metric)
+    if base_value is None or variant_value is None:
+        return {"delta_ms": None, "ratio": None}
+    return {
+        "delta_ms": round(variant_value - base_value, 3),
+        "ratio": (round(variant_value / base_value, 4)
+                  if base_value else None),
+    }
+
+
+def optimization_pair_rows(
+    rows: Sequence[dict], *,
+    baseline: str = OPTIMIZATION_BASELINE, min_samples: int,
+) -> dict:
+    """逐题配对差值表(§10.1 的主指标),`--pair-rows` 才出。
+
+    与 `optimization_pair_table` 是同一批配对的两种读法(格的依据共用
+    `_optimization_cells`),差别只在格内怎么汇总:那边一个均值,这边**先对重复
+    取中位数、再出 `delta_ms` 与 `ratio`**。
+
+    `rollup` 里的 `ratio_p50` 是**逐格配对比值的中位数**,不是两组独立 P50 的
+    比值。这两个数在「一半题变慢一倍、另一半不动」这种输入上会给出完全相反的
+    结论,而 §10.1 逐字点名:不用两组独立 P50 的比值冒充配对比值。
+    """
+    cells: list[dict] = []
+    for key, arms in sorted(_optimization_cells(rows).items()):
+        baseline_rows = arms.get(baseline)
+        if not baseline_rows:
+            continue
+        baseline_side = _pair_row_side(baseline_rows)
+        for label, side in sorted(arms.items()):
+            if label == baseline:
+                continue
+            entry: dict[str, Any] = dict(
+                zip(OPTIMIZATION_CELL_DIMENSIONS, key)
+            )
+            entry["arm_dimension"] = "optimization"
+            entry["variant_arm"] = label
+            entry["baseline"] = baseline_side
+            entry["variant"] = _pair_row_side(side)
+            entry["metrics"] = {
+                metric: _paired_delta(baseline_side, entry["variant"], metric)
+                for metric in PAIR_ROW_METRICS
+            }
+            cells.append(entry)
+    return {"cells": cells, "rollup": _pair_row_rollup(cells, min_samples)}
+
+
+def _pair_row_rollup(cells: Sequence[dict], min_samples: int) -> list[dict]:
+    """把逐格配对按 `(policy_version, variant_arm)` 汇总成一行。
+
+    `n_pairs` 数的是**出得来配对差值的格数**,不是 run 数:一格里三次重复只
+    贡献一个配对观测(见 `_pair_row_side`)。分位数受 `min_samples` 约束,并与
+    `n_pairs` 摆在同一格里——「尾部分位数标明样本数」(§10.1)。
+
+    `*_max` 不受那道门约束:§10.1 要求小样本仍展示逐题差值、中位数和最大值,而
+    最大值不是分位数。取的是**最大**(最慢)那一格,不是绝对值最大的那一格:
+    这一列读的是「尾部有没有可重复的恶化」。
+
+    `n_ratio_pairs` 单独报:基线中位数为 0 的格子出得来 `delta_ms` 而出不来
+    `ratio`,两个分母不同,合成一个数会让某一侧的样本量看着比实际大。
+    """
+    buckets: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    for cell in cells:
+        buckets[(cell["policy_version"], cell["variant_arm"])].append(cell)
+
+    rollup: list[dict] = []
+    for (policy, arm), members in sorted(buckets.items()):
+        entry: dict[str, Any] = {
+            "policy_version": policy,
+            "variant_arm": arm,
+            "n_cells": len(members),
+            "n_censored": sum(
+                member[side]["n_censored"]
+                for member in members for side in ("baseline", "variant")
+            ),
+            "n_failed": sum(
+                member[side]["n_failed"]
+                for member in members for side in ("baseline", "variant")
+            ),
+        }
+        entry["metrics"] = {
+            metric: _rollup_metric(members, metric, min_samples)
+            for metric in PAIR_ROW_METRICS
+        }
+        rollup.append(entry)
+    return rollup
+
+
+def _rollup_metric(
+    members: Sequence[dict], metric: str, min_samples: int,
+) -> dict:
+    """一条 rollup 行上一个指标的分位数与极值。见 `_pair_row_rollup` 的口径。"""
+    deltas = [
+        member["metrics"][metric]["delta_ms"] for member in members
+        if member["metrics"][metric]["delta_ms"] is not None
+    ]
+    ratios = [
+        member["metrics"][metric]["ratio"] for member in members
+        if member["metrics"][metric]["ratio"] is not None
+    ]
+    stat: dict[str, Any] = {
+        "n_pairs": len(deltas), "n_ratio_pairs": len(ratios),
+    }
+    if deltas:
+        stat["delta_ms_max"] = round(max(deltas), 3)
+    if ratios:
+        stat["ratio_max"] = round(max(ratios), 4)
+    if len(deltas) >= min_samples:
+        stat["delta_ms_p50"] = round(_nearest(deltas, 0.50), 3)
+        stat["delta_ms_p95"] = round(_nearest(deltas, 0.95), 3)
+    if len(ratios) >= min_samples:
+        stat["ratio_p50"] = round(_nearest(ratios, 0.50), 4)
+        stat["ratio_p95"] = round(_nearest(ratios, 0.95), 4)
+    return stat
+
+
+# --- §10.2-1 质量门有没有证据 -----------------------------------------------
+
+#: 质量门(§10.2-1)的证据列。前一个是 gold 命中的分母,后三个是人工盲审的记录。
+#: 它们全都是 `AB_PROJECTION_KEYS` 专属,而且 T-AB1/T-AB3 一格未动 ⇒ 今天恒
+#: `None`(见 A/B 设计 §12 与本期计划 M6)。
+QUALITY_EVIDENCE_KEYS: tuple[str, ...] = (
+    "gold_facts_total",
+    "human_factual_error",
+    "human_completeness_false",
+    "human_citation_bad",
+)
+
+
+def quality_evidence(rows: Sequence[dict]) -> dict:
+    """这一批有没有 §10.2-1 要的质量证据。
+
+    §10.2 明说**未验证 ≠ 通过**,而一份只有时间列漂亮的报告最容易被读成通过
+    (本期计划 §5 风险 6)。所以缺证据的时候要印一行显式的「未验证」,而不是把
+    那一节留空——空白会被读成「这一条没问题」。
+
+    结论只有两格短码,不产出任何比率:`unverified`(gold 与盲审记录都没有)与
+    `records_present`(至少有一列有观测,仍要由人工盲审下结论)。
+    """
+    observed = {
+        key: sum(1 for row in rows if row.get(key) is not None)
+        for key in QUALITY_EVIDENCE_KEYS
+    }
+    return {
+        "observed": observed,
+        "verdict": ("records_present" if any(observed.values())
+                    else "unverified"),
+    }
+
+
 def _md_table(header: Sequence[str], body: Sequence[Sequence[Any]]) -> list[str]:
     lines = ["| " + " | ".join(header) + " |",
              "| " + " | ".join("---" for _ in header) + " |"]
@@ -492,12 +781,25 @@ def _md_table(header: Sequence[str], body: Sequence[Sequence[Any]]) -> list[str]
     return lines
 
 
-def render_markdown(report: dict) -> str:
+def render_markdown(
+    report: dict, *, baseline_arm: str = OPTIMIZATION_BASELINE,
+) -> str:
+    """把报告渲染成 markdown。
+
+    `baseline_arm` 只影响**标题与列名**——那两处必须说出这一份报告真正用的基线
+    是谁,否则一份 `--baseline-arm prefix_delta` 的报告会顶着 `off` 的表头被人
+    引用。数据本身在 `report` 里已经定型,这里一个数都不重算。
+
+    质量门那一节与逐题配对那一节都只在 `report` 里有对应键时才渲染(见
+    `build_report`),所以默认参数下这份 markdown 与接入前逐字节相同。
+    """
     dimensions = report["group_by"]
     lines = ["# reflect T0 轨迹聚合", "",
              f"- 输入行数:{report['n_rows']}",
              f"- 分组维度:`{','.join(dimensions)}`",
              f"- 分位数门槛:`min_samples={report['min_samples']}`", ""]
+    if report.get("quality_evidence"):
+        lines += _render_quality(report["quality_evidence"])
 
     lines += ["## 分组概览", ""]
     lines += _md_table(
@@ -562,27 +864,28 @@ def render_markdown(report: dict) -> str:
     else:
         lines.append("(没有成对样本:输入里没有同时带 `question_key` 的两侧 run)")
 
-    lines += ["", "## off / 优化变体对照(成对,同 policy_version)", ""]
+    lines += ["", f"## {baseline_arm} / 优化变体对照(成对,同 policy_version)",
+              ""]
     if report["optimization_pairs"]:
         lines += _md_table(
-            # 表头用基线臂的名字(读表的人认 `off`,不认 `baseline`),但从常量
-            # 拼,免得基线臂哪天换了而表头还写着 `off`。
+            # 表头用基线臂的名字(读表的人认 `off`,不认 `baseline`),但从参数
+            # 拼,免得换了基线而表头还写着 `off`。
             [*PAIR_DIMENSIONS, "policy_version", "variant",
-             f"{OPTIMIZATION_BASELINE} n", "variant n",
-             f"{OPTIMIZATION_BASELINE} run_wall_ms(n)",
+             f"{baseline_arm} n", "variant n",
+             f"{baseline_arm} run_wall_ms(n)",
              "variant run_wall_ms(n)",
-             f"{OPTIMIZATION_BASELINE} model_calls_real(n)",
+             f"{baseline_arm} model_calls_real(n)",
              "variant model_calls_real(n)",
              # `context_rebuilds`(T-PD2):`off` 臂结构上不带这个观测,所以这一
              # 列的基线格恒走 `_fmt_pair_metric` 既有的缺值显示(`unknown(n=0)`)
              # ——两侧都印,而不是像 `prefix_bytes_median` 那样只印 variant 侧,
              # 好让「off 上这件事压根不成立」在表面上看得见(评审 P3-2)。
-             f"{OPTIMIZATION_BASELINE} context_rebuilds(n)",
+             f"{baseline_arm} context_rebuilds(n)",
              "variant context_rebuilds(n)",
              # `assessment_rows_total`(T-PL2):四臂通写(拍板 Q8),`off` 基线
              # 侧这一格是**真实观测**,不是结构性缺席——两侧都印才回答得出
              # D↔L 这一对「省了多少重述」这个问题(同 T-PD2 修正轮的双列范式)。
-             f"{OPTIMIZATION_BASELINE} assessment_rows_total(n)",
+             f"{baseline_arm} assessment_rows_total(n)",
              "variant assessment_rows_total(n)",
              "variant prefix_bytes_median(n)"],
             [
@@ -601,10 +904,110 @@ def render_markdown(report: dict) -> str:
         )
     else:
         lines.append(
-            "(没有成对样本:输入里没有同题同格、`optimization` 一侧为 `off`"
-            " 另一侧为变体的 run)"
+            "(没有成对样本:输入里没有同题同格、`optimization` 一侧为"
+            f" `{baseline_arm}` 另一侧为变体的 run)"
+        )
+    if report.get("optimization_pair_rows"):
+        lines += _render_pair_rows(
+            report["optimization_pair_rows"], baseline_arm,
         )
     return "\n".join(lines) + "\n"
+
+
+def _render_quality(evidence: dict) -> list[str]:
+    """§10.2-1 质量门那一节。见 `quality_evidence` 的口径。"""
+    lines = ["## 质量门(§10.2-1)", ""]
+    if evidence["verdict"] == "unverified":
+        lines.append(
+            "- 质量:未验证(无 gold / 无盲审记录)。§10.2 明说未验证 ≠ 通过:"
+            "这一批读得出时间与稳定性两条门,读不出质量那一条,不足以据它宣布采用。"
+        )
+    else:
+        rendered = ", ".join(
+            f"{key}={count}" for key, count in evidence["observed"].items()
+        )
+        lines.append(
+            f"- 质量:有记录({rendered})。结论仍按 §10.2-1 由人工盲审下,"
+            "这几列只说明证据在不在,不代替它。"
+        )
+    return [*lines, ""]
+
+
+def _render_pair_rows(payload: dict, baseline_arm: str) -> list[str]:
+    """逐题配对差值那一节(`--pair-rows`)。
+
+    两张表:逐格的 `delta_ms` / `ratio`,以及按 `(policy_version, variant_arm)`
+    的 rollup。节头那两句是 §10.1 的原话,不是装饰——成功配对表可单列,但不能
+    独自决定上线,所以删失与失败两列必须先被读到。
+    """
+    lines = ["", f"## 逐题配对差值(基线 `{baseline_arm}`)", "",
+             "> 格内**先对重复取中位数**,再出 `Δms` 与 `ratio`;rollup 的"
+             " `ratio p50` 是逐格配对比值的中位数,**不是**两组独立 P50 的比值"
+             "(§10.1)。",
+             "> 成功配对表可单列,但**不能独自决定上线**(§10.1):先读"
+             " `n_censored`(删失,`cancelled`——那是被截止时长掐断的一刻,不是"
+             "真实完成耗时)与 `n_failed`,再读 Δ。", ""]
+    lines += _md_table(
+        [*OPTIMIZATION_CELL_DIMENSIONS, "variant",
+         *(
+             column
+             for metric in PAIR_ROW_METRICS
+             for column in (f"{baseline_arm} {metric}(n)",
+                            f"variant {metric}(n)",
+                            f"{metric} Δms", f"{metric} ratio")
+         ),
+         "n_censored(基线/变体)", "n_failed(基线/变体)"],
+        [
+            [*(cell[dim] for dim in OPTIMIZATION_CELL_DIMENSIONS),
+             cell["variant_arm"],
+             *(
+                 value
+                 for metric in PAIR_ROW_METRICS
+                 for value in (
+                     _fmt_pair_metric(cell["baseline"], metric),
+                     _fmt_pair_metric(cell["variant"], metric),
+                     _fmt_unknown(cell["metrics"][metric]["delta_ms"]),
+                     _fmt_unknown(cell["metrics"][metric]["ratio"]),
+                 )
+             ),
+             _fmt_sides(cell, "n_censored"), _fmt_sides(cell, "n_failed")]
+            for cell in payload["cells"]
+        ],
+    )
+    lines += ["", "配对汇总(分位数受 `min_samples` 约束,与 `n_pairs` 同格):",
+              ""]
+    lines += _md_table(
+        ["policy_version", "variant", "metric", "n_pairs", "n_ratio_pairs",
+         "Δms p50", "Δms p95", "Δms max", "ratio p50", "ratio p95",
+         "ratio max", "n_censored", "n_failed"],
+        [
+            [entry["policy_version"], entry["variant_arm"], metric,
+             stat["n_pairs"], stat["n_ratio_pairs"],
+             *(_fmt_unknown(stat.get(field)) for field in (
+                 "delta_ms_p50", "delta_ms_p95", "delta_ms_max",
+                 "ratio_p50", "ratio_p95", "ratio_max")),
+             entry["n_censored"], entry["n_failed"]]
+            for entry in payload["rollup"]
+            for metric, stat in ((m, entry["metrics"][m])
+                                 for m in PAIR_ROW_METRICS)
+        ],
+    )
+    return lines
+
+
+def _fmt_sides(cell: dict, field: str) -> str:
+    """一格里两侧的同一个计数,印成 `基线/变体`。见 `_render_pair_rows` 的表头。"""
+    return f"{cell['baseline'][field]}/{cell['variant'][field]}"
+
+
+def _fmt_unknown(value: Any) -> str:
+    """`None` 印 `unknown` 而不是空格。
+
+    理由与 `_fmt_pair_metric` 那条相同:空格会被读成「这一列不适用」,而这里的
+    `None` 说的是「两侧有一侧没量到」或「基线中位数是 0,比值算不出来」——两句
+    都是关于这一格的确切事实,不该长得像一个排版空白。
+    """
+    return UNKNOWN if value is None else str(value)
 
 
 def _fmt_pair_metric(side: dict, metric: str) -> str:
@@ -652,9 +1055,24 @@ def _fmt_boolean(summary: dict, metric: str) -> str:
 
 def build_report(
     rows: Sequence[dict], *, group_by: Sequence[str], min_samples: int,
+    baseline_arm: str = OPTIMIZATION_BASELINE,
+    pair_rows: bool = False,
+    key_set: str = DEFAULT_KEY_SET,
 ) -> dict:
+    """聚合成一份报告。
+
+    三个 PR-5 开关的默认值让这份 dict 的**键集**与接入前逐字节相同:
+    `optimization_pair_rows` 只在 `--pair-rows` 下出现,`quality_evidence` 只在
+    键集里真有那几列时出现(T0 键集结构上没有 `gold_facts_total`,对一份压根没
+    有质量列的数据集印一句质量结论,本身就是一句假话)。`baseline_arm` 一个新键
+    都不加:基线那一侧已经如实报出自己的 `optimization` 分布(见
+    `OPTIMIZATION_BASELINE`)。
+
+    这条形状纪律不是为了好看:存档过的报告要能与新报告直接 diff,而无条件多一个
+    键会让每一份旧报告都变成「有差异」。
+    """
     grouped = group_rows(rows, group_by)
-    return {
+    report: dict[str, Any] = {
         "n_rows": len(rows),
         "group_by": list(group_by),
         "min_samples": min_samples,
@@ -663,8 +1081,17 @@ def build_report(
             for key, members in grouped.items()
         ],
         "pairs": pair_table(rows),
-        "optimization_pairs": optimization_pair_table(rows),
+        "optimization_pairs": optimization_pair_table(
+            rows, baseline=baseline_arm,
+        ),
     }
+    if set(QUALITY_EVIDENCE_KEYS) <= KEY_SETS[key_set]:
+        report["quality_evidence"] = quality_evidence(rows)
+    if pair_rows:
+        report["optimization_pair_rows"] = optimization_pair_rows(
+            rows, baseline=baseline_arm, min_samples=min_samples,
+        )
+    return report
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -675,23 +1102,43 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("inputs", nargs="+", help="一个或多个投影 JSONL")
     parser.add_argument("--group-by", default=DEFAULT_GROUP_BY)
     parser.add_argument("--min-samples", type=_positive_int, default=5)
+    # `unknown` 不在 `OPTIMIZATIONS` 里,所以「拿一条没声明 optimization 的 run
+    # 当基线」在命令行这一层就被挡住了(见 `_optimization_cells`)。
+    parser.add_argument(
+        "--baseline-arm", default=OPTIMIZATION_BASELINE, choices=OPTIMIZATIONS,
+        help="沿 `optimization` 配对时的基线臂(默认 off);只有 D/L 两臂的一批"
+             "要显式指定,否则配对表全空",
+    )
+    parser.add_argument(
+        "--pair-rows", action="store_true",
+        help="额外出一张逐题配对差值表(格内先对重复取中位数,再出 Δms 与 ratio)",
+    )
+    parser.add_argument(
+        "--key-set", default=DEFAULT_KEY_SET, choices=tuple(KEY_SETS),
+        help="行的闭集判据:t0(默认,投影/search 行)或 ab(完整 Ask 的"
+             " ab-runs.jsonl)。选 ab 是知情声明,不是自动嗅探",
+    )
     parser.add_argument("--out-md")
     parser.add_argument("--out-json")
     args = parser.parse_args(argv)
 
     dimensions = [part.strip() for part in args.group_by.split(",") if part.strip()]
-    unknown_dimensions = set(dimensions) - RUN_PROJECTION_KEYS
+    # 分格维度跟着键集走:`--key-set ab` 下 `arm` / `repeat` 也是合法维度,而
+    # `t0` 下它们仍然是未知维度(那份行里压根没有这两列)。
+    unknown_dimensions = set(dimensions) - KEY_SETS[args.key_set]
     if unknown_dimensions:
         parser.error(
             "--group-by 只接受投影闭集里的键,未知维度: "
             + ", ".join(sorted(unknown_dimensions))
         )
 
-    rows = load_rows(args.inputs)
+    rows = load_rows(args.inputs, key_set=args.key_set)
     report = build_report(
         rows, group_by=dimensions, min_samples=args.min_samples,
+        baseline_arm=args.baseline_arm, pair_rows=args.pair_rows,
+        key_set=args.key_set,
     )
-    markdown = render_markdown(report)
+    markdown = render_markdown(report, baseline_arm=args.baseline_arm)
     if args.out_md:
         Path(args.out_md).parent.mkdir(parents=True, exist_ok=True)
         Path(args.out_md).write_text(markdown, encoding="utf-8")
