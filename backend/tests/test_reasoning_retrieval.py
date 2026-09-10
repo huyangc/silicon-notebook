@@ -13733,9 +13733,11 @@ def _lone_surrogate_script():
 def _comparable_trace(result) -> list:
     """整条轨迹里与测量无关的那一份:步类型、summary 与去掉测量键的 detail。
 
-    `duration_ms` 是墙钟,不进比较;除此之外一格不放过——"测量不改任何决定"这条
-    只断 `next_action` 是不够的,那样一次多出来的兜底轮里 `next_action` 反而看着
-    很正常(`answer`)。
+    墙钟不进比较:`step.duration_ms`,以及 detail 里一律以 `_ms` 结尾的那几格
+    (`researched_ms` 之类)——它们两条臂之间差一毫秒是常态,断它们等于给这条
+    用例装一个必然会响的闹钟。除此之外一格不放过:"测量不改任何决定"这条只断
+    `next_action` 是不够的,那样一次多出来的兜底轮里 `next_action` 反而看着很
+    正常(`answer`)。
     """
     from app.domain.reasoning_trace_stats import (
         REFLECT_MEASUREMENT_DETAIL_KEYS,
@@ -13743,7 +13745,8 @@ def _comparable_trace(result) -> list:
     return [
         (step.step_type, step.summary,
          {key: value for key, value in step.detail.items()
-          if key not in REFLECT_MEASUREMENT_DETAIL_KEYS})
+          if key not in REFLECT_MEASUREMENT_DETAIL_KEYS
+          and not key.endswith("_ms")})
         for step in result.trace
     ]
 
