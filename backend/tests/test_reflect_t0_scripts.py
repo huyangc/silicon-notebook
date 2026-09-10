@@ -4215,7 +4215,8 @@ class _FakePrefixProbeClient:
     def __init__(self, *, raise_at: set[int] | None = None,
                  cache_hit_at: set[int] | None = None,
                  raise_everything: bool = False,
-                 finish_reason: str | None = "stop"):
+                 finish_reason: str | None = "stop",
+                 invalid_output_at: dict[int, str] | None = None):
         self.calls: list[dict] = []
         self._raise_at = raise_at or set()
         self._cache_hit_at = cache_hit_at or set()
@@ -4224,6 +4225,12 @@ class _FakePrefixProbeClient:
         # (`app/core/llm.py` 的注释明写 “servers may omit finish_reason
         # entirely”),空串是一类真实 OpenAI 兼容端点的**正常返回**。
         self._finish_reason = finish_reason
+        # index → 这一格 `chat_json` 该原样返回的畸形内容(codex #709 R2
+        # P2-1):传输层照样记 `call_stats["status"]="ok"`(provider 没有
+        # 抛异常),只是这次返回没有通过固定输出任务的形状校验——用来验证
+        # rig 的 `_prefix_probe_output_valid` 真的读了返回内容,不是只看
+        # `call_stats`。
+        self._invalid_output_at = invalid_output_at or {}
 
     def chat_json(self, messages, schema_hint, *, timeout=None,
                   max_retries=None, bypass_cache=False, call_stats=None,
@@ -4256,6 +4263,8 @@ class _FakePrefixProbeClient:
                     "usage": {"prompt_tokens": 10, "completion_tokens": 2,
                               "cached_tokens": 0},
                 })
+        if index in self._invalid_output_at:
+            return self._invalid_output_at[index]
         return '{"ok": true}'
 
 
@@ -4602,6 +4611,44 @@ def test_prefix_probe_fake_client_run_sends_provider_messages_shaped_calls(
     assert "命中率" not in summary_md.replace("不得报告命中率", "")
 
 
+def test_prefix_probe_writes_its_calls_table_in_overwrite_mode(
+    tmp_path, monkeypatch,
+):
+    """(codex #709 R2 P2-2)`cmd_prefix_probe` 的落盘调用点必须给
+    `_write_call_rows` 传 `mode="w"`——`calls-e1.jsonl` 与 `probe-*.jsonl`/
+    `probe-summary.*` 同寿命(每次运行覆盖),不是 `ab` 那种多单元并发追加。
+
+    这里不靠真实 `llm.jsonl`/事件日志重建 per-call 行(假客户端整条替身跳过了
+    真实的 `interaction_logger`,`_rig_call_rows` 在这条测试路径上恒返回空
+    列表——`mode="w"`/`"a"` 在**零行**上的行为差异已经由 `test_reflect_ab.py`
+    的 `test_write_call_rows_mode_w_truncates_stale_file_on_zero_rows` 等
+    单元用例钉死),这条用例只钉「调用点真的传了 `mode="w"`」这一件事——直接
+    在 `cmd_prefix_probe` 的调用点上做行为验证,不重新发明一遍
+    `_write_call_rows` 自己的单元用例。
+
+    变异:把调用点的 `_write_call_rows(runner.out_dir, "e1", calls_rows,
+    mode="w")` 改回不传 `mode`(退回默认的 `"a"`)⇒ 这里录到的
+    `recorded["mode"]` 变成 `"a"`,这条用例必须翻红。
+    """
+    client = _FakePrefixProbeClient()
+    _install_prefix_probe_fake(monkeypatch, client)
+
+    recorded: dict[str, Any] = {}
+    real_write_call_rows = rig._write_call_rows
+
+    def _spy(out_dir, label, rows, *, mode="a"):
+        if label == "e1":
+            recorded["mode"] = mode
+        return real_write_call_rows(out_dir, label, rows, mode=mode)
+
+    monkeypatch.setattr(rig, "_write_call_rows", _spy)
+
+    args = _prefix_probe_args(tmp_path, "--smoke")
+    runner = rig.Runner(dry_run=False, out_dir=Path(args.out_dir))
+    assert rig.cmd_prefix_probe(args, runner) == 0
+    assert recorded == {"mode": "w"}
+
+
 def test_prefix_probe_seam_resets_after_exit_even_on_a_raising_call(
     tmp_path, monkeypatch,
 ):
@@ -4657,6 +4704,54 @@ def test_prefix_probe_cache_hit_row_is_recorded_and_flagged_non_zero(
     # 而 stderr 那句话宣称两者是同一个数,却没有任何守卫钉它们相等)。
     err = capsys.readouterr().err
     assert "1 格(另有 0 个预热格)命中本地响应缓存出口" in err
+
+    plan = rig._prefix_probe_plan(args)
+    assert len(client.calls) == len(plan) + 1  # 批没有因此中止
+
+
+def test_prefix_probe_flags_malformed_outputs_without_a_nonzero_exit(
+    tmp_path, monkeypatch, capsys,
+):
+    """(codex #709 R2 P2-1)传输层报 `status=ok`,但返回内容没通过固定输出
+    任务的形状校验 ⇒ 行 `status == "invalid_output"`、摘要
+    `invalid_output_rows == 3`、`failed_row_count` 不含它们、`probe-summary.md`
+    有那一行、退出码**不**因此单独非零、stderr 有一句单独提示。
+
+    变异:去掉 `_call_row` 里对返回内容的校验(只信 `call_stats`)⇒ 这三行
+    会落进 `ok_rows`,`invalid_output_rows` 变 0、`failed_row_count` 不变、
+    但这三格的墙钟混进了统计——这条用例断言的 `invalid_output_rows == 3`
+    与 `failed_row_count == 0` 会失去意义(前者恒为 0),必须翻红。
+    """
+    client = _FakePrefixProbeClient(invalid_output_at={
+        1: '{"ok": false}',  # 合法 JSON,`ok` 不是 `True`
+        2: "not json",        # 压根不是 JSON
+        3: "{}",              # 合法 JSON 对象,缺 `ok` 键
+    })
+    _install_prefix_probe_fake(monkeypatch, client)
+
+    args = _prefix_probe_args(tmp_path, "--smoke")
+    runner = rig.Runner(dry_run=False, out_dir=Path(args.out_dir))
+    exit_code = rig.cmd_prefix_probe(args, runner)
+    assert exit_code == 0  # 单独因为 invalid_output 不应该非零
+
+    summary = json.loads(
+        (Path(args.out_dir) / "probe-summary.json").read_text("utf-8"))
+    assert summary["invalid_output_rows"] == 3
+    assert summary["failed_row_count"] == 0
+
+    all_rows = [
+        row for rows in _prefix_probe_rows(Path(args.out_dir)).values()
+        for row in rows
+    ]
+    invalid_rows = [row for row in all_rows if row["status"] == "invalid_output"]
+    assert len(invalid_rows) == 3
+
+    summary_md = (Path(args.out_dir) / "probe-summary.md").read_text("utf-8")
+    assert f"- invalid_output_rows: {summary['invalid_output_rows']}" in summary_md
+
+    err = capsys.readouterr().err
+    assert "3 格传输层报 status=ok" in err
+    assert "invalid_output" in err
 
     plan = rig._prefix_probe_plan(args)
     assert len(client.calls) == len(plan) + 1  # 批没有因此中止
@@ -4850,6 +4945,25 @@ def test_prefix_probe_finish_reason_folds_free_text_to_unknown():
         "head_chars": 12, "tail_chars": 12, "message_bytes_total": 9,
         "is_warmup": False, "gap_ms": None,
     })
+
+
+def test_prefix_probe_output_valid_accepts_only_the_fixed_shape():
+    """(codex #709 R2 P2-1)`_prefix_probe_output_valid` 的判据:必须是能
+    `json.loads` 成 `dict`、含 `"ok"` 键且值恰好是 `True`;多余的键放行。
+    """
+    assert rig._prefix_probe_output_valid('{"ok": true}') is True
+    # 多余的键放行——固定任务只锁 `ok`。
+    assert rig._prefix_probe_output_valid('{"ok": true, "note": "x"}') is True
+    # 非法/不成形的返回:非 JSON、非对象、缺键、`ok` 非 `True`。
+    assert rig._prefix_probe_output_valid("not json") is False
+    assert rig._prefix_probe_output_valid("") is False
+    assert rig._prefix_probe_output_valid("[1, 2]") is False
+    assert rig._prefix_probe_output_valid("true") is False
+    assert rig._prefix_probe_output_valid("{}") is False
+    assert rig._prefix_probe_output_valid('{"ok": false}') is False
+    assert rig._prefix_probe_output_valid('{"ok": 1}') is False
+    assert rig._prefix_probe_output_valid('{"ok": "true"}') is False
+    assert rig._prefix_probe_output_valid(None) is False
 
 
 def _raise_render_sample_at(monkeypatch, client, *, nth_cell: int, exc):

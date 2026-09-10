@@ -2888,6 +2888,37 @@ def test_call_rows_accumulate_across_units_instead_of_truncating(tmp_path):
     ]
 
 
+def test_write_call_rows_mode_w_overwrites_instead_of_appending(tmp_path):
+    """(codex #709 R2 P2-2)`mode="w"`(`prefix-probe`/E1 专用)覆盖,不追加
+    ——同一个 out-dir 第二次写只留第二次的行,不会把第一次的行留在开头。
+    默认 `mode="a"`(`ab` 的既有调用)不受影响,上面两条用例逐字保留通过。
+    """
+    rig._write_call_rows(tmp_path, "e1", [{"support_id": "run1-a"},
+                                          {"support_id": "run1-b"}], mode="w")
+    rig._write_call_rows(tmp_path, "e1", [{"support_id": "run2-a"}], mode="w")
+    lines = (tmp_path / "calls-e1.jsonl").read_text("utf-8").splitlines()
+    assert len(lines) == 1
+    assert json.loads(lines[0])["support_id"] == "run2-a"
+
+
+def test_write_call_rows_mode_w_truncates_stale_file_on_zero_rows(tmp_path):
+    """(codex #709 R2 P2-2)覆盖模式下,即使这次运行零行也要把旧文件砍掉——
+    否则 `probe-*.jsonl` 已经如实变成空文件,`calls-e1.jsonl` 却还留着上一次
+    的调用行,与 `probe-*.jsonl` 的对齐契约错位。`mode="a"`(默认)下零行
+    不动文件,是既有行为,逐字保留。
+    """
+    rig._write_call_rows(tmp_path, "e1", [{"support_id": "run1-a"}], mode="w")
+    assert (tmp_path / "calls-e1.jsonl").exists()
+    rig._write_call_rows(tmp_path, "e1", [], mode="w")
+    assert not (tmp_path / "calls-e1.jsonl").exists()
+
+    # `mode="a"`(默认)下零行不动文件——与 `test_writing_zero_call_rows_
+    # creates_no_file` 同一条纪律,这里只是再钉一遍「传了旧文件也不动」。
+    rig._write_call_rows(tmp_path, "v2", [{"support_id": "mdl-a"}])
+    rig._write_call_rows(tmp_path, "v2", [])
+    assert (tmp_path / "calls-v2.jsonl").exists()
+
+
 def test_a_serial_batch_attributes_its_calls_to_the_arm_that_made_them(
     tmp_path, monkeypatch, capsys,
 ):

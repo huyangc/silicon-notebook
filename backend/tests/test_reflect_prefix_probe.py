@@ -525,6 +525,49 @@ def test_summarize_probe_singles_out_local_cache_exit_rows():
     assert summary["repeat_observation_row_count"] == 1
 
 
+def test_summarize_probe_singles_out_invalid_output_rows():
+    """(codex #709 R2 P2-1)`status == "invalid_output"` 单列
+    `invalid_output_rows`,不进 `failed_row_count`(它不是传输失败),也不进
+    `first_observation`/`repeat_observation`(它没有完成固定输出任务,墙钟不能
+    当成一次已验证的计时观测)——三桶必须互斥。
+
+    变异:去掉 `summarize_probe` 里的 `invalid_output_rows` 过滤(把
+    `after_cache_exit` 直接当 `remaining` 用)会让这三行全部落进
+    `failed_row_count`/`ok_rows`,这条用例必须翻红。
+    """
+    rows = [
+        _make_row(status="invalid_output", call_wall_ms=1, call_index=1),
+        _make_row(status="invalid_output", call_wall_ms=1, call_index=0),
+        _make_row(status="ok", call_index=1),
+    ]
+    summary = summarize_probe(rows)
+    assert summary["invalid_output_rows"] == 2
+    assert summary["failed_row_count"] == 0
+    assert summary["first_observation_row_count"] == 0
+    assert summary["repeat_observation_row_count"] == 1
+    assert summary["row_count_total"] == 3
+
+
+def test_summarize_probe_invalid_output_rows_do_not_pair_into_regions():
+    """(codex #709 R2 P2-1)`invalid_output` 行被排除在 `ok_rows`/重复观测之外
+    ——一个区组的某条臂**只剩** `invalid_output` 观测时,那个区组配不出
+    `n_regions_paired`(「主统计 n_regions_paired 不含那些格」)。
+
+    变异:同上一条,去掉 `invalid_output_rows` 的过滤会让这一行重新混进
+    `ok_rows`,`block_index=0` 也会配出一对,`n_regions_paired` 变成 2。
+    """
+    rows = [
+        _make_row(block_index=0, arm=ARM_STABLE, call_index=1, call_wall_ms=1000),
+        _make_row(block_index=0, arm=ARM_DISTURBED, call_index=1,
+                  status="invalid_output", call_wall_ms=1),
+        _make_row(block_index=1, arm=ARM_STABLE, call_index=1, call_wall_ms=1000),
+        _make_row(block_index=1, arm=ARM_DISTURBED, call_index=1, call_wall_ms=1500),
+    ]
+    summary = summarize_probe(rows)
+    assert summary["invalid_output_rows"] == 1
+    assert summary["overall"]["n_regions_paired"] == 1
+
+
 def test_summarize_probe_singles_out_warmup_rows():
     rows = [
         _make_row(is_warmup=True, call_wall_ms=999999, status="ok"),
@@ -569,7 +612,7 @@ def test_summarize_probe_returns_pinned_top_level_and_nested_key_set():
     summary = summarize_probe(_paired_rows(stable_ms=1000, disturbed_ms=1500))
     assert set(summary) == {
         "row_count_total", "warmup_row_count", "local_cache_exit_rows",
-        "failed_row_count", "first_observation_row_count",
+        "invalid_output_rows", "failed_row_count", "first_observation_row_count",
         "repeat_observation_row_count", "cached_tokens_observed",
         "by_tier", "overall", "verdict",
     }
