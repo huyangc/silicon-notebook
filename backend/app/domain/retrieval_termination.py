@@ -191,6 +191,14 @@ class RetrievalTermination:
     #: "哪条路没走通"与"这次检索有没有正常收尾"互相冒充(§7.2)。
     unrecovered_channels: Tuple[str, ...] = ()
     aspects: Tuple[AspectSnapshot, ...] = field(default_factory=tuple)
+    #: 本次 run 是否以 lean 自评合同收尾(PR-4 计划 §2 拍板 Q5)。run 级冻结,
+    #: 唯一写点是 `_v2_build_aspect_ledger`(计划 T-PL5,由 `AspectLedger.
+    #: lean_assessment` 传下来)——这里只是承接同一个事实,不重新判断。默认
+    #: `False` 是安全默认:既有全部构造点(`app.services.reasoning_aspects` 与
+    #: 现有测试)零改动,继续落在 `off`/`prefix_snapshot`/`prefix_delta` 三臂
+    #: 的既有语义上。`__post_init__` 的闭集守卫只管 `reason`/`status`,不涉及
+    #: 这个布尔——它没有闭集,只有真假两值。
+    lean_assessment: bool = False
 
     def __post_init__(self) -> None:
         """闭集守卫:`reason` 与每个方面的 `status` 都必须在各自的闭集里。

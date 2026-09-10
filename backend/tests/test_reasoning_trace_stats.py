@@ -801,6 +801,30 @@ def test_search_run_reads_the_termination_dto_not_the_trace_step():
     assert row["unrecovered_channels_count"] == 2
 
 
+def test_retrieval_termination_lean_assessment_defaults_to_false():
+    """(i) `RetrievalTermination.lean_assessment` 默认 `False`,既有全部构造点
+    (未传这个关键字的调用)零改动仍能构造成功——这是本任务(T-PL2)对
+    `app.services.reasoning_aspects` 与其它既有测试的兼容承诺。
+
+    `__post_init__` 的闭集守卫只管 `reason`/`status`,不校验这个布尔——它没有
+    闭集,构造期不会因为这个新字段多出任何一种失败模式。
+
+    变异:把默认值改成 `True`,或让 `__post_init__` 校验它必须在某个闭集里
+    ⇒ 第一条断言,或既有全部零改动的构造点(例如上面
+    `test_search_run_reads_the_termination_dto_not_the_trace_step` 那条没传
+    这个关键字的构造)会红。
+    """
+    from app.domain.retrieval_termination import RetrievalTermination
+
+    termination = RetrievalTermination(reason="model_sufficient")
+    assert termination.lean_assessment is False
+
+    lean_termination = RetrievalTermination(
+        reason="model_sufficient", lean_assessment=True,
+    )
+    assert lean_termination.lean_assessment is True
+
+
 def test_search_run_leaves_every_synthesis_only_metric_unknown():
     """没跑合成 ⇒ 锚点/进 prompt 的证据数/每动作引用贡献一律 unknown。
 
@@ -914,7 +938,8 @@ def measured_reflect(next_action="ppr", **measurements):
     return reflect(next_action, **measurements)
 
 
-#: T-PS4 + T-PD2 在闭集上新增的**顶层**键。冻结基线用例按它把新旧两半切开。
+#: T-PS4 + T-PD2 + T-PL2 在闭集上新增的**顶层**键。冻结基线用例按它把新旧两半
+#: 切开。
 NEW_MEASUREMENT_KEYS = frozenset({
     "run_wall_ms", "model_calls_real", "attempts_observed", "optimization",
     "context_chars", "prefix_bytes_median", "prefix_bytes_min", "prefix_turns",
@@ -922,6 +947,9 @@ NEW_MEASUREMENT_KEYS = frozenset({
     # T-PD2:`prefix_delta` 专属的两个测量列,冻结基线(`off`/legacy)下同样恒
     # `None`——这两键在这批 run 上从未被写侧观测过。
     "context_rebuilds", "context_fallback",
+    # T-PL2(计划 §3):两个新顶层列,冻结基线(`off`/legacy)下同样恒 `None`
+    # ——写侧(T-PL5)在本任务里还没落地。
+    "assessment_rows_total", "aspects_unassessed",
 })
 
 #: 一条 `off`(v2 跑成、测量关)轨迹在 T-PS4 **接入之前**投影出来的逐键快照。
@@ -1379,6 +1407,140 @@ def test_context_rebuilds_and_fallback_project_alongside_the_other_nine_keys():
     assert_projection_values(row)
 
 
+# --- T-PL2 assessment_rows_total / aspects_unassessed -----------------------
+
+
+def test_assessment_rows_total_and_aspects_unassessed_are_unknown_without_any_observation():
+    """(a) 两键一条观测都没出现过 ⇒ 两列 `None`,不是 0。"""
+    row = project_run(JOB, [reflect("answer", sufficient=True)], PAYLOAD)
+    assert row["assessment_rows_total"] is None
+    assert row["aspects_unassessed"] is None
+
+
+def test_assessment_rows_total_sums_across_reflect_steps_when_all_present():
+    """(b) 三步 2/0/1 ⇒ `assessment_rows_total == 3`;一步缺该键 ⇒ `None`。
+
+    与 `response_chars_total` 同一条 `_reflect_sum` 口径:全带齐才敢求和,不是
+    像 `context_rebuilds` 那样取 max-over-present——`assessment_rows` 是逐步
+    各自独立贡献的一段(这一轮落账了几行),不是运行期单调计数。
+
+    变异:把 `_reflect_sum(reflects, "assessment_rows")` 换成
+    `_reflect_context_rebuilds` 的 max-over-present 口径 ⇒ 第一条断言仍为 3
+    (三值恰好无法区分 sum/max),但把中间步改成 0/0/1 就能拆开——第二组用例
+    (缺一步 ⇒ None)才是真正钉住"全带齐"这条口径的断言。
+    """
+    row = project_run(
+        JOB,
+        [
+            measured_reflect("ppr", assessment_rows=2),
+            measured_reflect("ppr", assessment_rows=0),
+            measured_reflect("answer", assessment_rows=1),
+        ],
+        PAYLOAD,
+    )
+    assert row["assessment_rows_total"] == 3
+
+    missing_one_row = project_run(
+        JOB,
+        [
+            measured_reflect("ppr", assessment_rows=2),
+            measured_reflect("answer"),
+        ],
+        PAYLOAD,
+    )
+    assert missing_one_row["assessment_rows_total"] is None
+
+
+def test_assessment_rows_total_zero_is_distinct_from_unknown():
+    """(c) 全部步的 `assessment_rows` 都是 0(每轮都省略自评)⇒ 和是 0,不是
+    `None`——「量到了,答案是零」与「没量」必须分得开。
+    """
+    row = project_run(
+        JOB, [measured_reflect("answer", assessment_rows=0)], PAYLOAD,
+    )
+    assert row["assessment_rows_total"] == 0
+    assert row["assessment_rows_total"] is not None
+
+
+def test_assessment_rows_total_rejects_free_form_and_type_confused_values():
+    """(d) 隐私守卫只收 int:自由文本与布尔值被 `_int` 吞成 `None`(不是抛错、
+    不是透传);`assert_projection_values` 对写坏的行仍然拒绝。
+
+    变异:把 `_reflect_sum` 的读取器换成宽松的 `int(raw)` ⇒ 第一条断言红
+    (字符串会被强转成数字)。
+    """
+    row = project_run(
+        JOB, [measured_reflect("answer", assessment_rows="很多行")], PAYLOAD,
+    )
+    assert row["assessment_rows_total"] is None
+
+    bool_row = project_run(
+        JOB, [measured_reflect("answer", assessment_rows=True)], PAYLOAD,
+    )
+    assert bool_row["assessment_rows_total"] is None
+
+    bad_row = dict(off_row(optimization="off"))
+    bad_row["assessment_rows_total"] = "很多行"
+    with pytest.raises(ValueError, match="assessment_rows_total"):
+        assert_projection_values(bad_row)
+
+
+def test_aspects_unassessed_reads_the_termination_skip_step_not_any_step():
+    """(e) `aspects_unassessed` 只读**终态** skip 步(`reason ==
+    TERMINATION_SKIP_REASON`)的 detail,`0` 与缺席分得开。
+
+    变异:把 `_aspects_unassessed` 改成读任意一条 skip 步 ⇒ 第一条断言会被
+    熔断步(`stale_circuit_breaker`)上误挂的同名键污染而红。
+    """
+    steps = [
+        reflect("ppr"),
+        step("skip", {"reason": "stale_circuit_breaker",
+                      "aspects_unassessed": 9}),
+        step("skip", {"reason": TERMINATION_SKIP_REASON,
+                      "termination": "model_sufficient",
+                      "aspects_unassessed": 0}),
+    ]
+    row = project_run(JOB, steps, PAYLOAD)
+    assert row["aspects_unassessed"] == 0
+    assert row["aspects_unassessed"] is not None
+
+    unassessed_row = project_run(
+        JOB,
+        [
+            reflect("answer", sufficient=True),
+            step("skip", {"reason": TERMINATION_SKIP_REASON,
+                          "termination": "model_sufficient",
+                          "aspects_unassessed": 3}),
+        ],
+        PAYLOAD,
+    )
+    assert unassessed_row["aspects_unassessed"] == 3
+
+    no_termination_row = project_run(
+        JOB, [reflect("answer", sufficient=True)], PAYLOAD,
+    )
+    assert no_termination_row["aspects_unassessed"] is None
+
+
+def test_aspects_unassessed_rejects_free_form_values():
+    """(d) `aspects_unassessed` 的隐私守卫孪生断言:自由文本被 `_int` 吞成
+    `None`,写坏的行仍被 `assert_projection_values` 拒绝。
+    """
+    row = project_run(
+        JOB,
+        [step("skip", {"reason": TERMINATION_SKIP_REASON,
+                       "termination": "model_sufficient",
+                       "aspects_unassessed": "很多个"})],
+        PAYLOAD,
+    )
+    assert row["aspects_unassessed"] is None
+
+    bad_row = dict(off_row(optimization="off"))
+    bad_row["aspects_unassessed"] = "很多个"
+    with pytest.raises(ValueError, match="aspects_unassessed"):
+        assert_projection_values(bad_row)
+
+
 def test_a_reflect_step_without_usage_or_finish_reason_still_yields_a_full_row():
     """写侧缺 usage / finish_reason / cached 时,`call_attempts` 与
     `response_chars` 照样在(它们不从 usage 来,见计划 §3 T-PS2),整行照出。
@@ -1506,6 +1668,10 @@ def test_the_sparse_detail_key_registry_matches_the_plan():
         # T-PD2(计划 §2 拍板 Q7):`prefix_delta` 下无条件随 `ReflectMeasurement`
         # 出现的两个行为事实,登记且进投影(见 `NEW_MEASUREMENT_KEYS`)。
         "context_rebuilds", "context_fallback",
+        # T-PL2(计划 §2 拍板 Q8):普通稀疏键,门是测量开关、四臂通写,登记且
+        # 进投影(`assessment_rows_total` 在 `NEW_MEASUREMENT_KEYS`;
+        # `assessment_absent` 登记但不进顶层投影)。
+        "assessment_rows", "assessment_absent",
     })
     assert set(REFLECT_CONTEXT_DETAIL_KEYS.values()) <= (
         REFLECT_MEASUREMENT_DETAIL_KEYS)

@@ -72,6 +72,16 @@ NUMERIC_METRICS: tuple[str, ...] = (
     # 最大值。`0` 是「跑了 delta、一次都没重建」的真观测,不是 unknown——投影侧
     # 已经把两者分开,这里只是接上聚合的 n_observed/均值/分位数。
     "context_rebuilds",
+    # --- reflect 前缀复用测量(T-PL2) ---
+    # 各 reflect 步「本轮实际落账的方面自评行数」之和(拍板 Q8),四臂通写:
+    # `off`/`prefix_snapshot`/`prefix_delta` 下模型仍在重述全量,`0` 只在
+    # `prefix_delta_lean` 下才常态出现——把它摆在同一组数值指标里,才看得出
+    # D↔L 这一对「省了多少重述」。
+    "assessment_rows_total",
+    # v2 终态 skip 步 detail 上的「模型收尾时还剩几个方面没被它判断过」
+    # (拍板 Q5/Q9)。四臂无条件写(Q10 已知偏离),`0` 是「问过了、没有遗漏」的
+    # 真观测,legacy 恒 unknown ⇒ 落进 n_missing。
+    "aspects_unassessed",
 )
 #: 布尔指标:报 n_observed 与 true 占比。
 BOOLEAN_METRICS: tuple[str, ...] = (
@@ -395,10 +405,13 @@ def optimization_pair_table(rows: Sequence[dict]) -> list[dict]:
 #: 每一侧都报的那几个数。前缀三格与 `model_calls_real` 在这里而不是只在分组表
 #: 里:配对差值表是 T-PS4 唯一要回答的那个问题(「前缀复用换到了什么」)的落点;
 #: `context_rebuilds`(T-PD2)同理——它是 `prefix_delta` 臂的核心代价量,对这一
-#: 臂来说那个问题就是「重建次数换到了什么」(评审 P3-2)。
+#: 臂来说那个问题就是「重建次数换到了什么」(评审 P3-2)。`assessment_rows_total`
+#: (T-PL2)同理落在这里:它是 D↔L 这一对**唯一只差自评合同**的臂上的机制读数
+#: ——「省了多少重述」这件事只有把两侧摆在一起才看得出来。
 PAIR_SIDE_METRICS: tuple[str, ...] = (
     "reflect_turns", "total_ms", "anchors", "run_wall_ms", "model_calls_real",
     "prefix_bytes_median", "prefix_turns", "context_rebuilds",
+    "assessment_rows_total",
 )
 
 
@@ -415,9 +428,14 @@ PAIR_SIDE_METRICS: tuple[str, ...] = (
 #: `reflect_turns` / `total_ms` / `anchors` 不在这里:它们从轨迹本身来,一条跑成
 #: 的 run 必有(`anchors` 在只检索不合成的 run 上缺,但那种 run 由 `trace_source`
 #: 单独分格、整侧一起缺,不是同一侧内部的参差)。
+#:
+#: `assessment_rows_total`(T-PL2)同样稀疏(只有开了测量的 run 才有值),但与
+#: `context_rebuilds` 那道"基线臂结构上没有"的分工不同:它**四臂通写**(拍板
+#: Q8),`off` 基线侧这一格恒有真实观测,不是恒 `n_measured=0`——两侧都报
+#: `n_measured` 才能看出"这一批基线/变体分别有多少条 run 真的量到了"。
 SPARSE_PAIR_SIDE_METRICS: tuple[str, ...] = (
     "run_wall_ms", "model_calls_real", "prefix_bytes_median", "prefix_turns",
-    "context_rebuilds",
+    "context_rebuilds", "assessment_rows_total",
 )
 
 
@@ -551,6 +569,11 @@ def render_markdown(report: dict) -> str:
              # 好让「off 上这件事压根不成立」在表面上看得见(评审 P3-2)。
              f"{OPTIMIZATION_BASELINE} context_rebuilds(n)",
              "variant context_rebuilds(n)",
+             # `assessment_rows_total`(T-PL2):四臂通写(拍板 Q8),`off` 基线
+             # 侧这一格是**真实观测**,不是结构性缺席——两侧都印才回答得出
+             # D↔L 这一对「省了多少重述」这个问题(同 T-PD2 修正轮的双列范式)。
+             f"{OPTIMIZATION_BASELINE} assessment_rows_total(n)",
+             "variant assessment_rows_total(n)",
              "variant prefix_bytes_median(n)"],
             [
                 [*(pair[dim] for dim in PAIR_DIMENSIONS),
@@ -559,7 +582,7 @@ def render_markdown(report: dict) -> str:
                  *(
                      _fmt_pair_metric(pair[label], metric)
                      for metric in ("run_wall_ms", "model_calls_real",
-                                    "context_rebuilds")
+                                    "context_rebuilds", "assessment_rows_total")
                      for label in ("baseline", "variant")
                  ),
                  _fmt_pair_metric(pair["variant"], "prefix_bytes_median")]
