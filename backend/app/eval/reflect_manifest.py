@@ -6,10 +6,9 @@
 与落点)、T-EX1(本模块的要点与验收)。**评审后修正(二轮)**:闭集扩到 18 键
 (+`case_set_digest`、+`sample_digest`)、`matrix` 子键契约收进本模块、加一张
 全通道共同必填表、E3 补 `corpus_signature_by_cell` 为必填——见下文三处常量
-各自的说明。计划文档 Q9 今天仍写着 16 键、没有 `sample_digest`,把 Q9 本身
-改成这份 18 键闭集是 T-EX11 的活,不在这一轮里做;T-EX11 落地前谁读 Q9 都会
-看到一份落后于本模块实现的键集,这是已知的、有意留到 T-EX11 一次性回填的
-不一致。
+各自的说明。**T-EX11 已回填计划文档的 Q9**(2026-09-11):计划里的 Q9 现在
+与这份 18 键闭集、`REQUIRED_MATRIX_KEYS_BY_CHANNEL`、
+`REQUIRED_KEYS_ALL_CHANNELS` 一致,不再是落后于本模块实现的旧键集。
 
 **这个模块纯逻辑、零 I/O、零 `git`、零 `Settings`**:`code_sha` / 时间戳 / 语料签名
 全部由调用方(`scripts/reflect_shadow_rig.py` 三条通道各自的收尾处)算好后当关键
