@@ -4173,3 +4173,285 @@ def test_no_analysis_name_mentions_a_hit_rate():
     )
     for name in names:
         assert not any(token in name.lower() for token in forbidden), name
+
+
+# --- `prefix-probe`(E1 前缀敏感性探针;计划 §3 T-EX4)------------------------
+
+
+class _FakePrefixProbeClient:
+    """替身 `reasoning_agent` workload 返回的那个客户端。
+
+    `.chat_json` 自己按真实 `OpenAICompatibleClient` 同一条装配纪律读
+    `_EXPERIMENT_MARKERS` 并调 `provider_messages`——这不是重复造轮子,是
+    唯一能让用例断言「rig 传给 `.chat_json` 的 `messages` 经过标记装配后确实
+    长成 `provider_messages(...)` 的形状」的办法(rig 自身只传未装配的
+    `messages`,装配发生在真实客户端内部,替身要如实模拟这一步)。
+    """
+
+    def __init__(self, *, raise_at: set[int] | None = None,
+                 cache_hit_at: set[int] | None = None):
+        self.calls: list[dict] = []
+        self._raise_at = raise_at or set()
+        self._cache_hit_at = cache_hit_at or set()
+
+    def chat_json(self, messages, schema_hint, *, timeout=None,
+                  max_retries=None, bypass_cache=False, call_stats=None,
+                  **_ignored):
+        from app.core.llm import _EXPERIMENT_MARKERS, provider_messages
+
+        index = len(self.calls)
+        markers = _EXPERIMENT_MARKERS.get()
+        full_messages = provider_messages(messages, schema_hint, markers=markers)
+        self.calls.append({
+            "messages": messages, "full_messages": full_messages,
+            "schema_hint": schema_hint, "timeout": timeout,
+            "max_retries": max_retries, "bypass_cache": bypass_cache,
+            "markers": markers,
+        })
+        if index in self._raise_at:
+            if call_stats is not None:
+                call_stats["status"] = "error"
+            raise RuntimeError("fake transient failure")
+        if call_stats is not None:
+            if index in self._cache_hit_at:
+                call_stats.update({"status": "cache_hit", "call_wall_ms": 0,
+                                    "attempts": 0})
+            else:
+                call_stats.update({
+                    "status": "ok", "call_wall_ms": 5, "attempts": 1,
+                    "attempts_observed": True, "finish_reason": "stop",
+                    "response_chars": 12,
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 2,
+                              "cached_tokens": 0},
+                })
+        return '{"ok": true}'
+
+
+class _FakePrefixProbeProvider:
+    def __init__(self, client: _FakePrefixProbeClient):
+        self._client = client
+        self.closed = False
+
+    def configured(self, workload_id: str) -> bool:
+        return True
+
+    def chat(self, workload_id: str):
+        return self._client
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _prefix_probe_args(tmp_path, *extra: str) -> Any:
+    out_dir = tmp_path / "e1"
+    args = rig.build_parser().parse_args(
+        ["--out-dir", str(out_dir), "--seed", "7", *extra, "prefix-probe"])
+    args.database_url_explicit = False
+    return args
+
+
+def test_dry_run_prefix_probe_prints_default_scale_and_ceiling(tmp_path, capsys):
+    """(a)T-EX4 用例 a:逐字钉住 96 / 上界 192 / 产物落点 / 限定语一句。"""
+    args = _prefix_probe_args(tmp_path)
+    runner = rig.Runner(dry_run=True, out_dir=Path(args.out_dir))
+    assert rig.cmd_prefix_probe(args, runner) == 0
+    printed = capsys.readouterr().out
+    assert "96 次逻辑调用" in printed
+    assert "请求上界 ≤ 192" in printed
+    assert "probe-stable.jsonl" in printed and "probe-disturbed.jsonl" in printed
+    assert "probe-warmup.jsonl" in printed
+    assert "manifest.json" in printed and "manifests.jsonl" in printed
+    assert (
+        "这批只能支持『稳定前缀的时间收益』,不得报告命中率、不得报告省了多少 "
+        "token、不得报告 provider 是否关闭了缓存" in printed
+    )
+
+
+def test_dry_run_prefix_probe_smoke_scale(tmp_path, capsys):
+    """(a)`--smoke` 走 48 / 上界 96(U4 拍板的另一个规模)。"""
+    args = _prefix_probe_args(tmp_path, "--smoke")
+    runner = rig.Runner(dry_run=True, out_dir=Path(args.out_dir))
+    assert rig.cmd_prefix_probe(args, runner) == 0
+    printed = capsys.readouterr().out
+    assert "48 次逻辑调用" in printed
+    assert "请求上界 ≤ 96" in printed
+
+
+def test_prefix_probe_refuses_an_explicit_database_url(tmp_path):
+    """(b)显式给 `--database-url` ⇒ 退 2,不连库(计划红线)。"""
+    out_dir = tmp_path / "e1"
+    args = rig.build_parser().parse_args([
+        "--out-dir", str(out_dir), "--seed", "7",
+        "--database-url", "postgresql://127.0.0.1:5432/x", "prefix-probe",
+    ])
+    args.database_url_explicit = True
+    runner = rig.Runner(dry_run=True, out_dir=Path(args.out_dir))
+    assert rig.cmd_prefix_probe(args, runner) == 2
+
+
+def test_prefix_probe_requires_a_seed(tmp_path):
+    out_dir = tmp_path / "e1"
+    args = rig.build_parser().parse_args(
+        ["--out-dir", str(out_dir), "prefix-probe"])
+    args.database_url_explicit = False
+    runner = rig.Runner(dry_run=True, out_dir=Path(args.out_dir))
+    assert rig.cmd_prefix_probe(args, runner) == 2
+
+
+def test_prefix_probe_row_closed_set_guard_catches_a_leaked_key():
+    """(c)行闭集守卫:往行里加一个 `prompt` 键 ⇒ 红;去掉又恢复合法。"""
+    from app.eval.reflect_prefix_probe import assert_probe_row_closed
+
+    row = {
+        "tier": "short", "block_index": 0, "arm": "stable", "call_index": 0,
+        "series_index": 0, "status": "ok", "call_wall_ms": 10, "attempts": 1,
+        "head_chars": 12, "tail_chars": 12, "message_bytes_total": 999,
+        "is_warmup": False, "gap_ms": None,
+    }
+    assert_probe_row_closed(row)  # 合法行本身不抛
+    row["prompt"] = "泄露的题面原文"
+    with pytest.raises(ValueError, match="prompt"):
+        assert_probe_row_closed(row)
+    row.pop("prompt")
+    assert_probe_row_closed(row)  # 去掉闭集外的键就恢复合法
+
+
+def test_prefix_probe_fake_client_run_sends_provider_messages_shaped_calls(
+    tmp_path, monkeypatch,
+):
+    """(d)进程内假客户端跑通全部格(--smoke 缩批),断言两臂剧本与消息形状。"""
+    from app.eval.reflect_manifest import assert_manifest
+    from app.eval.reflect_prefix_probe import (
+        ARM_DISTURBED, ARM_STABLE, PROBE_SCHEMA_HINT,
+        load_prefix_probe_sample, render_sample,
+    )
+
+    client = _FakePrefixProbeClient()
+    provider = _FakePrefixProbeProvider(client)
+    monkeypatch.setattr(
+        rig, "_prefix_probe_client", lambda settings: (provider, client))
+
+    args = _prefix_probe_args(tmp_path, "--smoke")
+    runner = rig.Runner(dry_run=False, out_dir=Path(args.out_dir))
+    exit_code = rig.cmd_prefix_probe(args, runner)
+    assert exit_code == 0
+    assert provider.closed is True
+
+    plan = rig._prefix_probe_plan(args)
+    assert len(client.calls) == len(plan) + 1  # +1 for warmup
+
+    sample = load_prefix_probe_sample(rig._prefix_probe_sample_path(args))
+    seen_arms: set[str] = set()
+    for call, entry in zip(client.calls[1:], plan):
+        expected_messages = render_sample(entry["tier"], sample)
+        assert call["messages"] == expected_messages
+        assert call["schema_hint"] == PROBE_SCHEMA_HINT
+        assert call["bypass_cache"] is True
+        assert call["markers"] == (entry["head"], entry["tail"])
+        assert call["full_messages"][0] == {
+            "role": "system", "content": entry["head"],
+        }
+        assert call["full_messages"][-1]["content"].endswith(entry["tail"])
+        seen_arms.add(entry["arm"])
+    assert seen_arms == {ARM_STABLE, ARM_DISTURBED}
+
+    # 预热格:正文与标记都与主批不相交。
+    warmup_call = client.calls[0]
+    assert warmup_call["bypass_cache"] is True
+    assert warmup_call["markers"] not in {
+        (row["head"], row["tail"]) for row in plan
+    }
+
+    out_dir = Path(args.out_dir)
+    assert (out_dir / "probe-stable.jsonl").exists()
+    assert (out_dir / "probe-disturbed.jsonl").exists()
+    assert (out_dir / "probe-warmup.jsonl").exists()
+    assert (out_dir / "probe-summary.md").exists()
+    assert (out_dir / "probe-summary.json").exists()
+    manifest = json.loads((out_dir / "manifest.json").read_text("utf-8"))
+    assert_manifest(manifest)  # 不抛就是过
+    assert manifest["channel"] == "e1"
+    assert manifest["seed"] == 7
+    assert manifest["stopped_by_budget"] is False
+    history = (out_dir / "manifests.jsonl").read_text("utf-8").splitlines()
+    assert len(history) == 1
+    assert json.loads(history[0]) == manifest
+
+    summary = json.loads((out_dir / "probe-summary.json").read_text("utf-8"))
+    assert summary["warmup_row_count"] == 1
+    assert summary["local_cache_exit_rows"] == 0
+    assert summary["row_count_total"] == len(plan) + 1
+
+
+def test_prefix_probe_seam_resets_after_exit_even_on_a_raising_call(
+    tmp_path, monkeypatch,
+):
+    """(e)命令退出后 `_EXPERIMENT_MARKERS.get() is None`,含假客户端抛异常。
+
+    「失败格照记不中止」也在这条用例里一并核实:第 2 格(0-based index 2,
+    跳过 warmup 后是 plan 的第 2 格)抛异常,批不应中止,行照样落盘。
+    """
+    from app.core.llm import _EXPERIMENT_MARKERS
+
+    client = _FakePrefixProbeClient(raise_at={2})
+    provider = _FakePrefixProbeProvider(client)
+    monkeypatch.setattr(
+        rig, "_prefix_probe_client", lambda settings: (provider, client))
+
+    args = _prefix_probe_args(tmp_path, "--smoke")
+    runner = rig.Runner(dry_run=False, out_dir=Path(args.out_dir))
+    exit_code = rig.cmd_prefix_probe(args, runner)
+
+    assert _EXPERIMENT_MARKERS.get() is None
+    plan = rig._prefix_probe_plan(args)
+    assert len(client.calls) == len(plan) + 1  # 批没有中止
+
+    all_rows = []
+    for label in ("stable", "disturbed", "warmup"):
+        path = Path(args.out_dir) / f"probe-{label}.jsonl"
+        all_rows.extend(json.loads(line) for line in path.read_text("utf-8").splitlines())
+    error_rows = [row for row in all_rows if row["status"] == "error"]
+    assert len(error_rows) == 1  # 抛异常的那一格照记
+    assert exit_code == 0  # 一次普通失败不算命中本地缓存,也没到预算
+
+
+def test_prefix_probe_cache_hit_row_is_recorded_and_flagged_non_zero(
+    tmp_path, monkeypatch,
+):
+    """(f)一格 status="cache_hit" ⇒ 行照记、摘要 local_cache_exit_rows==1、
+    退出非零(pr5-followups.md「T-EX2 quality → 拍板」P3-3)。
+    """
+    client = _FakePrefixProbeClient(cache_hit_at={1})
+    provider = _FakePrefixProbeProvider(client)
+    monkeypatch.setattr(
+        rig, "_prefix_probe_client", lambda settings: (provider, client))
+
+    args = _prefix_probe_args(tmp_path, "--smoke")
+    runner = rig.Runner(dry_run=False, out_dir=Path(args.out_dir))
+    exit_code = rig.cmd_prefix_probe(args, runner)
+
+    assert exit_code != 0
+    summary = json.loads(
+        (Path(args.out_dir) / "probe-summary.json").read_text("utf-8"))
+    assert summary["local_cache_exit_rows"] == 1
+
+    plan = rig._prefix_probe_plan(args)
+    assert len(client.calls) == len(plan) + 1  # 批没有因此中止
+
+
+def test_prefix_probe_expired_budget_dispatches_nothing(tmp_path, monkeypatch):
+    """(g)`--max-wall-minutes` 已过期 ⇒ 零派发、非零、stopped_by_budget=True。"""
+    client = _FakePrefixProbeClient()
+    provider = _FakePrefixProbeProvider(client)
+    monkeypatch.setattr(
+        rig, "_prefix_probe_client", lambda settings: (provider, client))
+
+    args = _prefix_probe_args(tmp_path, "--smoke", "--max-wall-minutes", "0")
+    runner = rig.Runner(dry_run=False, out_dir=Path(args.out_dir))
+    exit_code = rig.cmd_prefix_probe(args, runner)
+
+    assert exit_code != 0
+    assert client.calls == []  # 零派发,连预热都没打
+    manifest = json.loads(
+        (Path(args.out_dir) / "manifest.json").read_text("utf-8"))
+    assert manifest["stopped_by_budget"] is True
