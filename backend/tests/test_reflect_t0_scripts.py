@@ -1103,6 +1103,37 @@ def test_dry_run_search_charges_a_plan_call_per_run_without_intent(capsys):
     assert "intent 0 + plan 8 + reflect ≤" in printed
 
 
+def test_dry_run_prints_both_the_call_count_and_the_request_ceiling(capsys):
+    """计划 §3 T-PS5:dry-run 打**两个**数,不是一个。
+
+    上面那个数的是**逻辑调用**(llm.jsonl 的行数、`model_calls` 的口径),下面
+    那个数的是**真正发出去的请求**(行上 `attempts` 的口径)。只打一个数会让读
+    的人拿逻辑调用去估端点负载——而静默 fallback 与重试都发生在那之下,两个数
+    在最坏情况下差一倍以上。
+    """
+    assert rig.main(["--dry-run", "--limit", "1", "--no-intent", "search"]) == 0
+    printed = capsys.readouterr().out
+    assert "次逻辑调用" in printed
+    assert "请求上界 ≤" in printed
+    assert "静默 fallback 另计" in printed
+    # 上界不是预测:它恒 ≥ 逻辑调用数,乘数是配置里的重试预算。
+    assert rig.REASONING_ATTEMPT_BUDGET >= 2
+
+
+def test_the_attempt_budget_tracks_the_config_default_it_hardcodes():
+    """rig 那个 `1 + 1` 抄的是 `REASONING_MAX_RETRIES` 的默认值,得钉住。
+
+    不钉的失败场景:有人把配置默认改成 3,rig 打的「请求上界 ≤ 212」比真实上界
+    低一倍——而那个数正是用来估端点负载、决定这批跑不跑得起的。
+
+    **只有用例 import config**:dry-run 本身不 import 它是另一条约束(起一份
+    Settings 要读 .env、连不上的库还会拖慢预演),由别的用例管,这里不碰。
+    """
+    from app.core.config import Settings
+
+    assert rig.REASONING_ATTEMPT_BUDGET == 1 + Settings().reasoning_max_retries
+
+
 def test_search_plan_pairs_the_two_policies_and_carries_no_idempotency_key():
     questions = rig.load_questions()
     plan = rig.search_plan(
@@ -1138,15 +1169,51 @@ def test_search_preflight_requires_the_main_database_url_and_both_notebooks():
     assert "不在 search 的范围里" in rig._search_preflight(args, [], {})
 
 
+#: `_rig_process_env` 的**全部**键(`--env-file` 那一项另算)。写成一份清单而
+#: 不是逐条 assert:漏加一项在数据上看不出任何区别(codex 质量评审 P2-9),而
+#: 多加一项(比如哪天有人往里塞一个进程级的 optimization)会当场打红。
+RIG_PROCESS_ENV_KEYS = {
+    "DATABASE_URL",
+    "RETRIEVAL_EXPERIENCE_INJECT_ENABLED",
+    "REASONING_CONSULT_MEMORY_ENABLED",
+    "AGENT_PROFILE_ENABLED",
+    "LLM_LOG_PATH",
+    "EVENT_LOG_DIR",
+}
+
+
 def test_search_process_env_forces_every_injection_switch_off():
     """主库只读不许依赖「那三个端口恰好没接线」这个会随重构漂移的前提。"""
     args = rig.build_parser().parse_args(
         ["--database-url", "postgresql://127.0.0.1:5432/main", "search"])
     env = rig._search_process_env(args)
+    assert set(env) == RIG_PROCESS_ENV_KEYS
     assert env["DATABASE_URL"] == "postgresql://127.0.0.1:5432/main"
     assert env["RETRIEVAL_EXPERIENCE_INJECT_ENABLED"] == "false"
     assert env["REASONING_CONSULT_MEMORY_ENABLED"] == "false"
     assert env["AGENT_PROFILE_ENABLED"] == "false"
+
+
+def test_rig_never_writes_to_the_machine_wide_log_directory(tmp_path):
+    """计划 §3 T-PS5 G5:两串日志都圈进本次 out-dir,`.local/logs` 一个字节不写。
+
+    默认落点是**整台机器共用**的:同一天里别的后端、别的冒烟、别的 rig 会话都
+    往同一份 `llm-*.jsonl` / `events-*.jsonl` 追加。共用日志上做时间窗切片会把
+    别的进程的调用记到本 run 头上(成本三键),per-call 表的右表里也会混进别人
+    的调度事件。
+    """
+    out = tmp_path / "rig-out"
+    args = rig.build_parser().parse_args(
+        ["--database-url", "postgresql://127.0.0.1:5432/main",
+         "--out-dir", str(out), "search"])
+    env = rig._search_process_env(args)
+    assert env["LLM_LOG_PATH"] == str((out / "llm" / "llm.jsonl").resolve())
+    assert env["EVENT_LOG_DIR"] == str((out / "events").resolve())
+    for value in env.values():
+        assert ".local/logs" not in value
+    # 临时后端那一份同理:`seed` / `restart` 起的 uvicorn 也是 rig 的进程。
+    backend = rig.backend_env(args, "legacy")
+    assert backend["EVENT_LOG_DIR"] == str((out / "events").resolve())
 
 
 def _search_item(policy: str) -> dict:
@@ -1405,6 +1472,9 @@ def test_search_loop_marks_unresolved_scope_failed_without_calling_run_search_on
     assert row["status"] == "failed"
     assert row["scope_narrowed"] is None
     assert row["question_key"] == "A-q01"
+    # **没开跑的 run 没有墙钟**:`run_wall_ms` 是 `None`,不是 0(计划 §3 T-PS5)。
+    # 0 会被读成「这个 run 零耗时跑完了」,而且它会真的进 P50/P95 的分位数。
+    assert row["run_wall_ms"] is None
 
 
 def test_backend_env_forces_kg_auto_extract_off():
@@ -1456,6 +1526,10 @@ def test_search_loop_serial_writes_a_failed_row_and_counts_it(
     by_key = {r["question_key"]: r for r in rows}
     assert by_key["A-q01"]["status"] == "failed"
     assert by_key["A-q01"]["reflect_turns"] == 1, "失败前捕获的轨迹步不该被丢成 0"
+    # 失败 run 也有 run 墙钟(计划 §3 T-PS5 验收):它崩在半路,但确实占了这么
+    # 久,而「哪一侧更容易崩、崩之前烧了多少时间」正是要量的东西之一。
+    assert isinstance(by_key["A-q01"]["run_wall_ms"], int)
+    assert isinstance(by_key["A-q02"]["run_wall_ms"], int)
     assert by_key["A-q02"]["status"] != "failed"
     log_text = (out_dir / "search-runs.log").read_text("utf-8")
     assert "A-q01 A_nokg legacy standard FAILED ValueError" in log_text
@@ -1801,6 +1875,10 @@ def test_search_loop_concurrent_writes_a_failed_row_and_reports_failures(
     assert by_key["Q02"]["effort"] == "standard"
     assert by_key["Q02"]["corpus_cell"] == "A_nokg"
     assert all(by_key[k]["status"] != "failed" for k in ("Q00", "Q01", "Q03"))
+    # 并发路径的 run 墙钟:成功与失败的 run **都**有(计划 §3 T-PS5 验收)。
+    # 轨迹里没有这件事实(`total_ms` 是各步耗时之和,漏掉排队与步间空隙),
+    # 只有 rig 手上有。
+    assert all(isinstance(row["run_wall_ms"], int) for row in rows)
     log_text = (tmp_path / "search-runs.log").read_text("utf-8")
     assert "Q02" in log_text and "status=failed reason=ValueError" in log_text
     assert "秘密原文" not in log_text

@@ -26,7 +26,7 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Sequence
 
 import pytest
 
@@ -34,13 +34,21 @@ from app.domain.reasoning_trace_stats import RUN_PROJECTION_KEYS, assert_project
 from app.eval.reflect_ab import (
     AB_ONLY_KEYS,
     AB_PROJECTION_KEYS,
+    ARM_POLICIES,
+    ARMS,
     DEFERRED_JUDGED_KEYS,
+    PAIR_ARM_COUNT,
     UNKNOWN_USAGE,
     AbGold,
+    ArmSpecError,
     GoldError,
+    arm_label,
     assert_ab_closed,
     assert_arm_matches_evidence,
+    assert_optimization_matches_evidence,
     base_question_key,
+    format_arm,
+    parse_arms,
     completeness_claim_candidate,
     count_anchors_on_gold,
     count_citations_out_of_scope,
@@ -1009,6 +1017,31 @@ def test_run_ab_once_refuses_a_settings_that_disagrees_with_the_arm(rrepo):
         )
 
 
+def test_run_ab_once_refuses_a_repo_whose_optimization_disagrees(rrepo, monkeypatch):
+    """声明 `prefix_snapshot`、repo 那份 Settings 却跑 `off` ⇒ 当场报错。
+
+    臂的第二维**只有这一次**核对机会:两条 v2 臂的轨迹形状逐字相同,事后从产物
+    里反推不出来。最常见的一种不符是静默降级——v2 总闸没开或 Knowhow 否决时
+    `reflect_optimization()` 恒返回 `off`,配置里写了什么都不看,那时两条臂在跑
+    同一件事而数据看起来完全正常。
+
+    这里把 v2 总闸打开(否则先撞上 `reflect_v2_active` 那条断言),只让第二维
+    对不上:错的那一条断言必须是关于 optimization 的。
+    """
+    notebook = _seed_two_nodes(rrepo)
+    # 改**实例**字段(pydantic 的字段住在实例上,不在类上);monkeypatch 负责
+    # 还原,否则同一个 `rrepo` 的后续用例会跑在一份它没要的策略上。
+    monkeypatch.setattr(rrepo.settings, "reasoning_reflect_v2_enabled", True)
+    with pytest.raises(RuntimeError, match="optimization"):
+        rig.run_ab_once(
+            rrepo, notebook=notebook.id,
+            item={"question": "RTL到GDSII流程", "effort": "standard"},
+            arm="v2", optimization="prefix_snapshot", contract=None,
+            on_trace=None, cancel_event=threading.Event(),
+            actor_id="ab-owner",
+        )
+
+
 def test_knowhow_keeps_reflect_v2_off_even_when_the_switch_is_on(rrepo):
     """§5.5-5:Knowhow 不设臂,两条臂对它逐字相同。"""
     v2_settings = rrepo.settings.model_copy()
@@ -1051,17 +1084,26 @@ def _unit(**overrides: Any) -> dict:
     return unit
 
 
-def _repos_by_arm() -> dict[str, Any]:
-    """两条臂各一个 repo(编排层只按 `arm` 取用,不读它们的任何字段)。
+def _repos_by_arm(
+    arms: Sequence[tuple[str, str]] = rig.AB_DEFAULT_ARMS,
+) -> dict[tuple[str, str], Any]:
+    """每条臂各一个 repo(编排层只按 `arm` 取用,不读它们的任何字段)。
 
     真跑时它们是两个 `create_repository(settings, migrate=False, seed=False)`
     ——臂由 repo 承载,因为 `AskService._build_reasoning_retriever` 读的是构造
     这个 repo 的那一份 Settings,`ask_reasoning` 没有别的入口(见 `run_ab_once`
     的说明)。用一个 repo 加一个 settings 参数,两条臂会双双跑 legacy。
+
+    键是 `(policy, optimization)` 这一对(T-PS5 的二维臂):只按 policy 索引的
+    话,`v2:off` 与 `v2:prefix_snapshot` 会取到同一个 repo,于是两条臂双双跑同
+    一档 optimization——而数据从形状上完全看不出这件事。
     """
     return {
-        arm: SimpleNamespace(name=f"{arm}-repo", settings=SimpleNamespace(arm=arm))
-        for arm in ("legacy", "v2")
+        arm: SimpleNamespace(
+            name=f"{format_arm(*arm)}-repo",
+            settings=SimpleNamespace(arm=format_arm(*arm)),
+        )
+        for arm in arms
     }
 
 
@@ -1169,7 +1211,8 @@ def test_a_pair_unit_runs_both_arms_back_to_back_and_writes_two_paired_rows(
     seen: list[str] = []
 
     def _fake_run(repo, *, notebook, item, arm, contract, on_trace,
-                  cancel_event, actor_id, scope_source_ids=None):
+                  cancel_event, actor_id, scope_source_ids=None,
+                  optimization="off"):
         seen.append(arm)
         for step in _steps(arm):
             on_trace(SimpleNamespace(
@@ -1221,7 +1264,8 @@ def test_the_written_dataset_carries_no_free_text(tmp_path, monkeypatch, capsys)
     secret_answer = "它们各自这样处理图像输入 [k1]。"
 
     def _fake_run(repo, *, notebook, item, arm, contract, on_trace,
-                  cancel_event, actor_id, scope_source_ids=None):
+                  cancel_event, actor_id, scope_source_ids=None,
+                  optimization="off"):
         for step in _steps(arm):
             on_trace(SimpleNamespace(
                 step_type=step["step_type"], summary=secret_question,
@@ -1279,7 +1323,8 @@ def test_a_first_run_whose_evidence_disagrees_with_the_arm_stops_the_batch(
 ):
     """声明 v2、轨迹里却一个 termination 都没有 ⇒ 整批停(§5.5-1 的事后那一半)。"""
     def _fake_run(repo, *, notebook, item, arm, contract, on_trace,
-                  cancel_event, actor_id, scope_source_ids=None):
+                  cancel_event, actor_id, scope_source_ids=None,
+                  optimization="off"):
         # legacy 形状的轨迹:没有终态披露步。
         on_trace(SimpleNamespace(step_type="reflect", summary="",
                                  detail={"next_action": "answer"}, duration_ms=1))
@@ -1330,7 +1375,8 @@ def test_ab_loop_keeps_the_two_arms_together_even_when_units_run_concurrently(
     order: list[int] = []
 
     def _fake_run(repo, *, notebook, item, arm, contract, on_trace,
-                  cancel_event, actor_id, scope_source_ids=None):
+                  cancel_event, actor_id, scope_source_ids=None,
+                  optimization="off"):
         key = (item["question_key"], item["repeat"])
         threads_by_unit.setdefault(key, set()).add(threading.current_thread().name)
         order.append(int(item["repeat"]))
@@ -1374,16 +1420,89 @@ def test_ab_loop_keeps_the_two_arms_together_even_when_units_run_concurrently(
     assert all(set(row) <= AB_PROJECTION_KEYS for row in rows)
 
 
-def test_the_rig_and_the_projection_agree_on_what_the_two_arms_are():
-    """臂的词表在两处出现(rig 声明侧、投影侧),必须逐字相同。
+def test_the_rig_and_the_projection_agree_on_what_the_arms_are():
+    """臂的词表在两处出现(rig 声明侧、投影侧),必须同一份。
 
-    分叉不会当场报错,而是安静地伤到 `mark_paired`:它按 `len(ARMS)` 判「两臂
-    都在场」,词表少一项就会把每一行标成未配对,整张差值表凭空空掉。
+    分叉不会当场报错,而是安静地伤到 `mark_paired`:它按臂身份判「两条臂都在
+    场」,词表少一项就会把每一行标成未配对,整张差值表凭空空掉。
+
+    二维化之后 rig 侧不再自己写一份词表——`AB_DEFAULT_ARMS` 只是**默认值**,
+    合法组合的闭集只有 `reflect_ab.ARMS` 一处。这条断言因此改成钉三件事:
+    默认臂全部合法、policy 那一维与 `POLICIES` 同源、闭集里 legacy 只有 `off`。
     """
-    from app.eval.reflect_ab import ARMS
+    assert set(rig.AB_DEFAULT_ARMS) <= set(ARMS)
+    assert set(ARM_POLICIES) == set(rig.POLICIES)
+    assert [arm for arm in ARMS if arm[0] == "legacy"] == [("legacy", "off")]
 
-    assert rig.AB_ARMS == ARMS
-    assert set(ARMS) == set(rig.POLICIES)
+
+def test_parse_arms_reads_both_the_one_and_two_dimensional_spellings():
+    """`--arms` 的两种写法产出同一种结构;省略第二维一律补 `off`。"""
+    assert parse_arms("legacy,v2") == [("legacy", "off"), ("v2", "off")]
+    assert parse_arms("v2:off,v2:prefix_snapshot") == [
+        ("v2", "off"), ("v2", "prefix_snapshot")]
+    # 一条臂也收:`--only-policy` 的二维版(重跑被打废的一侧)。
+    assert parse_arms(" v2:prefix_snapshot ") == [("v2", "prefix_snapshot")]
+
+
+@pytest.mark.parametrize("spec, why", [
+    ("", "空写法"),
+    ("v2,", "空段"),
+    ("shadow", "未知 policy"),
+    ("v2:prefix_delta", "本期未实现的取值"),
+    ("v2:snapshot", "未知 optimization"),
+    ("legacy:prefix_snapshot", "合法值的非法组合"),
+    ("v2:off:extra", "不是 policy[:optimization] 的形状"),
+    ("v2,v2", "重复臂"),
+])
+def test_parse_arms_refuses_every_spelling_that_would_produce_fake_data(spec, why):
+    """八种写错法各自被拒。每一种不拒都会安静地产出一批假数据(见 `parse_arms`)。"""
+    with pytest.raises(ArmSpecError):
+        parse_arms(spec)
+
+
+def test_the_arm_label_keeps_the_two_v2_arms_in_different_directories():
+    """`raw/<label>/` 与 `calls-<label>.jsonl` 的短码。
+
+    `off` 落回光秃秃的 policy(既有产物路径一个字节没变);非 `off` 必须带上第
+    二维,否则两条 v2 臂的存档会撞进同一个路径,后跑的静默覆盖前一条。
+    """
+    assert arm_label("legacy", "off") == "legacy"
+    assert arm_label("v2", "off") == "v2"
+    assert arm_label("v2", "prefix_snapshot") == "v2-prefix_snapshot"
+    labels = {arm_label(*arm) for arm in ARMS}
+    assert len(labels) == len(ARMS)
+
+
+def test_the_declared_optimization_must_match_the_runtime_reading():
+    """臂的第二维只有运行时直接读数这一份证据(轨迹里反推不出来)。"""
+    assert_optimization_matches_evidence("prefix_snapshot", "prefix_snapshot")
+    assert_optimization_matches_evidence("off", "off")
+    with pytest.raises(RuntimeError, match="prefix_snapshot"):
+        # 最常见的一种不符:v2 总闸没开 / Knowhow 否决 ⇒
+        # `reflect_optimization()` 恒返回 `off`,两条臂于是在跑同一件事。
+        assert_optimization_matches_evidence("prefix_snapshot", "off")
+    with pytest.raises(ValueError, match="unknown optimization"):
+        assert_optimization_matches_evidence("snapshot", "snapshot")
+
+
+def test_pairing_is_two_dimensional_and_a_single_arm_is_never_paired():
+    """`mark_paired` 的判据二维化:两条 v2 臂不能被当成同一条。"""
+    off = _project(arm="v2", optimization="off")
+    snapshot = _project(arm="v2", optimization="prefix_snapshot")
+    mark_paired([off, snapshot])
+    assert off["paired"] is True and snapshot["paired"] is True
+    # 只跑一臂 ⇒ `paired=False`,进单臂基线表而不是配对差值表。
+    lonely = _project(arm="v2", optimization="prefix_snapshot")
+    mark_paired([lonely])
+    assert lonely["paired"] is False
+    # 判据是「这一批的两条臂」,不是 `len(ARMS)`(合法组合闭集有三格)。
+    assert PAIR_ARM_COUNT == 2 and len(ARMS) > PAIR_ARM_COUNT
+
+
+def test_a_legacy_arm_may_never_declare_an_optimization():
+    """`legacy:prefix_snapshot` 在投影侧也拒:两个字段各自合法,只有这一对不成立。"""
+    with pytest.raises(ValueError, match="unknown arm"):
+        _project(arm="legacy", optimization="prefix_snapshot")
 
 
 def test_the_arm_lives_on_the_repository_not_on_a_settings_argument(rrepo):
@@ -1488,8 +1607,8 @@ def _ab_run_harness(monkeypatch, tmp_path, *, counts, loop):
     )
     # `os.environ.update(...)` 不受 monkeypatch 管辖,会漏进同进程的别的用例。
     monkeypatch.setattr(rig, "_ab_process_env", lambda args: {})
-    monkeypatch.setattr(rig, "_settings_by_policy",
-                        lambda: {"legacy": settings, "v2": settings})
+    monkeypatch.setattr(rig, "_settings_by_arm",
+                        lambda arms: {arm: settings for arm in arms})
     monkeypatch.setattr(rig, "_search_repository", lambda s: repo)
     monkeypatch.setattr(rig, "assert_knowhow_reflect_v2_off", lambda r, s: None)
     monkeypatch.setattr(rig, "_ab_notebook_ids",
@@ -1584,16 +1703,104 @@ def test_the_readonly_violation_message_names_the_command(tmp_path, capsys):
 # ---------------------------------------------------------------------------
 
 
+#: `ab` 在共用清单之上**多的那一项**(T-PS5 / 拍板 Q2)。写成一个常量而不是
+#: 在断言里内联一个字面量:下面那条「除此之外逐字相同」的守卫要能一眼看出它
+#: 允许的差集恰好是这一个键,而不是「差集不为空就放行」。
+AB_ONLY_ENV_KEYS = {"REASONING_REFLECT_MEASURE_CONTEXT"}
+
+
 def test_both_process_envs_carry_exactly_the_same_keys():
     """注入三闸此前在两处逐字重复;漏一项在数据上看不出任何区别。
 
-    键集相同这条断言是那份清单只有一份的证据(codex 质量评审 P2-9)。
+    键集只差 `ab` 那一项测量开关,其余逐字相同——这条断言是那份清单只有一份的
+    证据(codex 质量评审 P2-9)。差集**按名字**钉住:允许「不为空」会让下一个
+    往 `_ab_process_env` 里加的任何一项都免检。
     """
     args = _ab_args(env_file="/tmp/does-not-matter.env")
-    assert set(rig._search_process_env(args)) == set(rig._ab_process_env(args))
+    assert (set(rig._ab_process_env(args)) - set(rig._search_process_env(args))
+            == AB_ONLY_ENV_KEYS)
+    assert set(rig._search_process_env(args)) - set(rig._ab_process_env(args)) == set()
     without = _ab_args(env_file=None)
-    assert set(rig._search_process_env(without)) == set(rig._ab_process_env(without))
+    assert (set(rig._ab_process_env(without))
+            - set(rig._search_process_env(without)) == AB_ONLY_ENV_KEYS)
     assert "SILICON_NOTEBOOK_ENV_FILE" not in rig._ab_process_env(without)
+
+
+def _isolate_arm_env(monkeypatch) -> None:
+    """`_settings_by_arm` 直接写 `os.environ`(它要的正是「像后端那样起来」)。
+
+    先用 `monkeypatch.setenv` 把这三项各设一次:monkeypatch 在**这一刻**记下原值,
+    teardown 时无条件还原/删除,不管中间被谁直接改过。不做这一步,这几条用例会
+    把 `REASONING_REFLECT_V2_ENABLED=true` 漏给同一个 worker 里后面的用例——
+    `search` 那条路的接线用例于是跑在一份它没要的策略上。
+    """
+    monkeypatch.setenv("REASONING_REFLECT_V2_ENABLED", "false")
+    monkeypatch.setenv("REASONING_REFLECT_OPTIMIZATION", "off")
+    monkeypatch.setenv("REASONING_REFLECT_MEASURE_CONTEXT", "true")
+
+
+def test_each_arm_gets_a_settings_built_with_its_own_optimization(monkeypatch):
+    """每条臂的 `Settings` 是**按那条臂的环境构造出来**的,不是热改一个字段。
+
+    `Settings` 带跨字段校验与别名解析,绕过构造器改一个值不会重跑它们;而这里要
+    的正是「像后端那样按这两个开关起来的一份配置」。臂由 repo 承载
+    (`AskService._build_reasoning_retriever` 读构造期的 Settings),所以这一份
+    构造错了,那条臂整批跑的就是另一件事,而数据从形状上看不出来。
+    """
+    _isolate_arm_env(monkeypatch)
+    arms = [("legacy", "off"), ("v2", "prefix_snapshot")]
+    built = rig._settings_by_arm(arms)
+    assert set(built) == set(arms)
+    assert built[("legacy", "off")].reasoning_reflect_v2_enabled is False
+    assert built[("legacy", "off")].reasoning_reflect_optimization == "off"
+    assert built[("v2", "prefix_snapshot")].reasoning_reflect_v2_enabled is True
+    assert (built[("v2", "prefix_snapshot")].reasoning_reflect_optimization
+            == "prefix_snapshot")
+    assert all(s.reasoning_reflect_measure_context for s in built.values())
+
+
+def test_an_env_file_that_pins_the_optimization_stops_the_batch(monkeypatch):
+    """显式环境变量被盖住 ⇒ 响亮失败,不静默跑出一批臂对不上号的数据。
+
+    `--env-file` 指向主 checkout 的 `.env`,那里写死一个
+    `REASONING_REFLECT_OPTIMIZATION` 是完全可能的;盖住之后两条臂会双双跑同一
+    档,差值表恒等于噪声。
+    """
+    _isolate_arm_env(monkeypatch)
+
+    class _Pinned:
+        """构造出来的那一份恒是 `off`,不管环境里设了什么。"""
+
+        reasoning_reflect_v2_enabled = True
+        reasoning_reflect_optimization = "off"
+        reasoning_reflect_measure_context = True
+
+    import app.core.config as config
+
+    monkeypatch.setattr(config, "Settings", _Pinned)
+    with pytest.raises(RuntimeError, match="REASONING_REFLECT_OPTIMIZATION"):
+        rig._settings_by_arm([("v2", "prefix_snapshot")])
+
+
+def test_an_arm_whose_measurement_switch_is_off_stops_the_batch(monkeypatch):
+    """一把尺子那条约束也是硬断言,不是一行告警(拍板 Q2)。"""
+    _isolate_arm_env(monkeypatch)
+    monkeypatch.setenv("REASONING_REFLECT_MEASURE_CONTEXT", "false")
+    with pytest.raises(RuntimeError, match="MEASURE_CONTEXT"):
+        rig._settings_by_arm([("v2", "off")])
+
+
+def test_the_ab_arms_share_one_measurement_ruler():
+    """拍板 Q2:测量开关与 `optimization` 正交,**两臂都开**。
+
+    只给 `prefix_snapshot` 那一臂开,`off` 臂的测量列会整列缺失,差值表于是只
+    剩一侧有数——而每一行看起来都很正常。
+    """
+    args = _ab_args()
+    assert rig._ab_process_env(args)["REASONING_REFLECT_MEASURE_CONTEXT"] == "true"
+    # 每条臂各自的 optimization **不在**进程环境里:进程环境只能有一个值,而
+    # 一批有两条臂(`_settings_by_arm` 在构造每一份 Settings 时逐臂设)。
+    assert "REASONING_REFLECT_OPTIMIZATION" not in rig._ab_process_env(args)
 
 
 def test_the_two_process_envs_still_point_at_different_databases():
@@ -2045,7 +2252,8 @@ def test_an_arm_that_blows_up_lands_a_failed_row_without_losing_the_other_arm(
     「v2 的样本更少」这种看不出来的偏差(codex 质量评审 P2-4)。
     """
     def _fake_run(repo, *, notebook, item, arm, contract, on_trace,
-                  cancel_event, actor_id, scope_source_ids=None):
+                  cancel_event, actor_id, scope_source_ids=None,
+                  optimization="off"):
         for step in _steps(arm):
             on_trace(SimpleNamespace(step_type=step["step_type"], summary="",
                                      detail=step["detail"], duration_ms=3))
@@ -2073,8 +2281,17 @@ def test_an_arm_that_blows_up_lands_a_failed_row_without_losing_the_other_arm(
     # `reflect_turns` 记成 0,失败多的那一侧看起来「反思轮更少」。
     assert by_arm["v2"]["reflect_turns"] == by_arm["legacy"]["reflect_turns"]
     assert state["failed"] == 1
-    # 崩掉的那条臂不消费「第一个样本」的名额——它没有协议证据可对。
-    assert state["verified"] == {"legacy"}
+    # 崩掉的那条臂不消费「第一个样本」的名额——它没有协议证据可对。名额按
+    # `(policy, optimization)` 记(二维臂)。
+    assert state["verified"] == {("legacy", "off")}
+    # 崩在半路的 run 照样有墙钟:它确实占了这么久(计划 §3 T-PS5 验收)。
+    assert isinstance(by_arm["v2"]["run_wall_ms"], int)
+    assert by_arm["v2"]["latency_ms_total"] is None
+    # 跑成的那一条也要有——E1 的头条结论正是这一列的臂间差。只钉失败行的话,
+    # 日后重排 `_run_ab_arm` 尾部会让成功 run 的墙钟全线落 `None`,而数据看起来
+    # 完整、配对差值表那一格恒空,一个用例都不红(codex 质量评审 P2-2)。
+    assert isinstance(by_arm["legacy"]["run_wall_ms"], int)
+    assert by_arm["legacy"]["run_wall_ms"] == by_arm["legacy"]["latency_ms_total"]
     log_text = (tmp_path / "ab" / "ab-runs.log").read_text(encoding="utf-8")
     assert "status=failed reason=RuntimeError" in log_text
     assert "provider 502" not in log_text  # 只记类名,不记异常正文
@@ -2099,7 +2316,8 @@ def test_the_contract_digest_is_taken_fresh_inside_the_arm_loop(
         return contracts[min(len(fetched) - 1, len(contracts) - 1)]
 
     def _fake_run(repo, *, notebook, item, arm, contract, on_trace,
-                  cancel_event, actor_id, scope_source_ids=None):
+                  cancel_event, actor_id, scope_source_ids=None,
+                  optimization="off"):
         handed.append(contract)
         for step in _steps(arm):
             on_trace(SimpleNamespace(step_type=step["step_type"], summary="",
@@ -2186,7 +2404,8 @@ def test_a_concurrent_batch_cancels_the_remaining_units_after_the_first_abort(
     lock = threading.Lock()
 
     def _fake_run(repo, *, notebook, item, arm, contract, on_trace,
-                  cancel_event, actor_id, scope_source_ids=None):
+                  cancel_event, actor_id, scope_source_ids=None,
+                  optimization="off"):
         with lock:
             executed.append(item["question_key"])
         if item["question_key"] == "Q00":
@@ -2248,7 +2467,8 @@ def test_a_concurrent_abort_logs_only_the_exception_class_not_its_text(
     lock = threading.Lock()
 
     def _fake_run(repo, *, notebook, item, arm, contract, on_trace,
-                  cancel_event, actor_id, scope_source_ids=None):
+                  cancel_event, actor_id, scope_source_ids=None,
+                  optimization="off"):
         with lock:
             executed.append(item["question_key"])
         if item["question_key"] == "Q00":
@@ -2326,13 +2546,17 @@ def test_the_privacy_guard_still_holds_after_the_measurement_columns():
 
 
 def test_an_ab_row_without_measurements_carries_them_as_unknown():
-    """没开测量的 A/B run:新列全 `None`,`optimization` 无人声明 ⇒ unknown。
+    """没开测量的 A/B run:新列全 `None`,`optimization` 落 rig 声明的那一格。
+
+    T-PS5 之后 `optimization` **恒有声明**(`project_ab_run` 的默认值 `off` =
+    一维写法),所以这一列不再是 unknown;线上导出那条路仍然是 unknown,由
+    `test_reasoning_trace_stats` 的 `_optimization` 用例钉住。
 
     `model_calls`(日志行数)与 `model_calls_real`(真正发出的请求数)是两套口径,
     一个有值不代表另一个有值——这里正好把两者的独立性钉住。
     """
     row = _project()
-    assert row["optimization"] == "unknown"
+    assert row["optimization"] == "off"
     for key in ("run_wall_ms", "model_calls_real", "attempts_observed",
                 "context_chars", "prefix_bytes_median", "prefix_bytes_min",
                 "prefix_turns", "response_chars_total"):
@@ -2377,3 +2601,521 @@ def test_free_text_in_a_measurement_key_is_refused_on_an_ab_row():
     row["context_chars"] = {"note": "把摘要整块搬到了末尾"}
     with pytest.raises(ValueError, match="context_chars"):
         assert_projection_values(row)
+
+
+# ---------------------------------------------------------------------------
+# per-call 表的 rig 侧薄适配(计划 §3 T-PS5)
+# ---------------------------------------------------------------------------
+
+
+def _write_jsonl(path: Path, rows: Sequence[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def _call_dirs(tmp_path: Path) -> tuple[Path, Path]:
+    """rig 真跑时的两个并列目录(`rig_llm_log_path` / `rig_event_log_dir`)。"""
+    return tmp_path / "llm", tmp_path / "events"
+
+
+def test_the_per_call_adapter_reads_both_logs_and_joins_them(tmp_path):
+    """薄适配把两个目录按各自的 glob 铺开,归因逻辑全在纯函数里。
+
+    两串日志落在**两个并列目录**,glob 因此互不相交:llm 目录里多一份
+    `events-*.jsonl`(或反过来)也不会被当成对面那一串读进来。
+    """
+    log_dir, event_dir = _call_dirs(tmp_path)
+    _write_jsonl(log_dir / "u1" / "llm-2026-09-10.jsonl", [
+        {"kind": "chat", "status": "ok", "support_id": "mdl-a",
+         "latency_ms": 900, "attempts": 1, "response_chars": 30},
+    ])
+    _write_jsonl(event_dir / "u1" / "events-2026-09-10.jsonl", [
+        {"kind": "model_scheduler", "status": "ok", "support_id": "mdl-a",
+         "workload_id": "reasoning_reflect", "queue_latency_ms": 4,
+         "execution_latency_ms": 880},
+        # 同一份事件日志里还躺着别的 kind:它们不是 per-call 的调度事实。
+        {"kind": "http_request", "status": "ok", "path": "/api/ask"},
+    ])
+    rows = rig._rig_call_rows(
+        log_dir, event_dir, llm_offsets={}, event_offsets={},
+        tags={"arm": "v2", "optimization": "prefix_snapshot",
+              "question_key": "A-q08", "corpus_cell": "A_nokg",
+              "effort": "standard", "repeat": 1},
+    )
+    assert len(rows) == 1
+    assert rows[0]["join"] == "joined"
+    assert rows[0]["queue_latency_ms"] == 4
+    assert rows[0]["optimization"] == "prefix_snapshot"
+
+
+def test_the_per_call_adapter_only_reads_the_increment_after_the_offsets(tmp_path):
+    """偏移与成本三键那条路同源:一个 run 只读它自己那一段,不重读整天日志。"""
+    log_dir, event_dir = _call_dirs(tmp_path)
+    llm_path = log_dir / "u1" / "llm-2026-09-10.jsonl"
+    event_path = event_dir / "u1" / "events-2026-09-10.jsonl"
+    _write_jsonl(llm_path, [{"kind": "chat", "support_id": "mdl-old"}])
+    _write_jsonl(event_path, [{"kind": "model_scheduler", "support_id": "mdl-old"}])
+    llm_offsets = rig._ab_llm_offsets(log_dir)
+    event_offsets = rig._ab_llm_offsets(event_dir, glob=rig.RIG_EVENT_LOG_GLOB)
+    _write_jsonl(llm_path, [{"kind": "chat", "support_id": "mdl-new"}])
+    _write_jsonl(event_path, [{"kind": "model_scheduler", "support_id": "mdl-new"}])
+    rows = rig._rig_call_rows(
+        log_dir, event_dir, llm_offsets=llm_offsets,
+        event_offsets=event_offsets, tags=None,
+    )
+    assert [row["support_id"] for row in rows] == ["mdl-new"]
+
+
+def test_the_per_call_adapter_survives_a_value_error_from_the_join(
+    tmp_path, monkeypatch,
+):
+    """归因抛 `ValueError` ⇒ 空列表,不是让整批在第 N 个单元中止。
+
+    这是**第二层**:第一层在 `reflect_context_bench._short_code`,它把不合形状
+    的 provider 串收成 unknown,那一行别的列照样是真的。这一层保住的只是「整批
+    不会白烧」——串行路这张表在 `_run_ab_arm` 的 `return` 表达式里求值,并发路
+    它在 `_ab_loop` 的 `finally` 里(抛出去还会顶掉在途异常并跳过失败计数)。
+    """
+    log_dir, event_dir = _call_dirs(tmp_path)
+    _write_jsonl(log_dir / "u1" / "llm-2026-09-10.jsonl",
+                 [{"kind": "chat", "support_id": "mdl-a"}])
+    import app.eval.reflect_context_bench as bench
+
+    def _boom(*a, **kw):
+        raise ValueError("projection value at 'finish_reason' ...")
+
+    monkeypatch.setattr(bench, "join_calls", _boom)
+    assert rig._rig_call_rows(
+        log_dir, event_dir, llm_offsets={}, event_offsets={}, tags=None,
+    ) == []
+
+
+def test_the_per_call_adapter_survives_a_directory_that_does_not_exist(tmp_path):
+    """第一个 run 之前两个目录都还不存在:空列表,不是异常。
+
+    per-call 表是诊断产物,读不到它不该让一个跑成了的 run 整体作废。
+    """
+    log_dir, event_dir = _call_dirs(tmp_path)
+    assert rig._rig_call_rows(
+        log_dir, event_dir, llm_offsets={}, event_offsets={}, tags=None,
+    ) == []
+
+
+def test_a_concurrent_batch_writes_its_calls_table_without_an_arm(tmp_path):
+    """并发那一批:run 级标签(含 `arm`)全 unknown,文件名跟着叫 unknown。
+
+    `support_id` 只把日志行与它自己的调度事件对上号,它不知道这次调用属于哪个
+    run;硬塞一条臂进去比不出表更坏——那是一批看起来精确、实则一半记错了臂的
+    行(与并发下成本三键强制 unknown 同一条口径)。
+    """
+    tags = rig._rig_call_tags(_unit(), ("v2", "prefix_snapshot"),
+                              attributed=False)
+    assert tags is None
+    attributed = rig._rig_call_tags(_unit(), ("v2", "prefix_snapshot"),
+                                    attributed=True)
+    assert attributed["arm"] == "v2"
+    assert attributed["optimization"] == "prefix_snapshot"
+    assert rig.CALLS_UNATTRIBUTED_LABEL == "unknown"
+
+
+def test_writing_zero_call_rows_creates_no_file(tmp_path):
+    """一个 run 一次模型都没调(或日志关着)⇒ 不建一个空文件。"""
+    rig._write_call_rows(tmp_path, "v2", [])
+    assert not (tmp_path / "calls-v2.jsonl").exists()
+    rig._write_call_rows(tmp_path, "v2", [{"support_id": "mdl-a"}])
+    assert (tmp_path / "calls-v2.jsonl").read_text("utf-8").strip()
+
+
+def test_call_rows_accumulate_across_units_instead_of_truncating(tmp_path):
+    """这个文件是**追加**的:串行下每个单元每条臂都往同一份表里写一次。
+
+    翻成截断的代价看不出来:文件在、非空、`ab-runs.jsonl` 完全正常,只是
+    `calls-<arm>.jsonl` 里只剩最后一个单元的调用行,前面几十个单元的账没了。
+    """
+    rig._write_call_rows(tmp_path, "v2", [{"support_id": "mdl-a"},
+                                          {"support_id": "mdl-b"}])
+    rig._write_call_rows(tmp_path, "v2", [{"support_id": "mdl-c"}])
+    lines = (tmp_path / "calls-v2.jsonl").read_text("utf-8").splitlines()
+    assert len(lines) == 3
+    assert [json.loads(line)["support_id"] for line in lines] == [
+        "mdl-a", "mdl-b", "mdl-c",
+    ]
+
+
+def test_a_serial_batch_attributes_its_calls_to_the_arm_that_made_them(
+    tmp_path, monkeypatch, capsys,
+):
+    """串行跑批:per-call 行落进 `calls-<arm>.jsonl`,带全 run 级标签。
+
+    串行下窗口是**独占**的(偏移 → EOF 恰好是这一个 run 写的那几行),所以
+    run→call 的归因成立;并发下不成立,由下一条用例钉住。
+    """
+    out_dir = tmp_path / "ab"
+    log_dir, event_dir = _call_dirs(out_dir)
+
+    def _fake_run(repo, *, notebook, item, arm, contract, on_trace,
+                  cancel_event, actor_id, scope_source_ids=None,
+                  optimization="off"):
+        # run 期间模型调用真的写进这两串日志(生产由 `app/core/llm.py` 与
+        # `model_provider._emit` 写;这里直接造那两行)。
+        support = f"mdl-{arm}-{optimization}"
+        _write_jsonl(log_dir / "u1" / "llm-2026-09-10.jsonl", [
+            {"kind": "chat", "status": "ok", "support_id": support,
+             "latency_ms": 700, "attempts": 1, "response_chars": 12},
+        ])
+        _write_jsonl(event_dir / "u1" / "events-2026-09-10.jsonl", [
+            {"kind": "model_scheduler", "status": "ok", "support_id": support,
+             "workload_id": "reasoning_reflect", "queue_latency_ms": 3,
+             "execution_latency_ms": 690},
+        ])
+        for step in _steps(arm):
+            on_trace(SimpleNamespace(
+                step_type=step["step_type"], summary="人话摘要",
+                detail=step["detail"], duration_ms=7,
+            ))
+        return _FakeResponse()
+
+    monkeypatch.setattr(rig, "run_ab_once", _fake_run)
+    monkeypatch.setattr(rig, "_ab_element_sections", lambda url, ids: {})
+    monkeypatch.setattr(rig, "_ab_chunk_sections", lambda url, ids: {})
+    monkeypatch.setattr(rig, "_ab_usage_for_window",
+                        lambda *a, **kw: UNKNOWN_USAGE)
+    _fixed_intents(monkeypatch)
+    runner = rig.Runner(dry_run=False, out_dir=out_dir)
+    args = _ab_args(only_policy=[], out_dir=str(out_dir), dry_run=False)
+    arms = [("v2", "off"), ("v2", "prefix_snapshot")]
+    rig._ab_loop(
+        args, runner, [_unit(question_key="A-q08")], {"A_nokg": _fact()},
+        _repos_by_arm(arms), actor_id="ab-owner", profile=None, concurrency=1,
+        gold_by_key=load_ab_gold(load_questions()),
+        model_contract="0123456789abcdef", log_dir=log_dir,
+        event_dir=event_dir, arms=arms, reference_arm=arms[0],
+        clock=datetime.now,
+    )
+    capsys.readouterr()
+    for arm in arms:
+        path = out_dir / f"calls-{arm_label(*arm)}.jsonl"
+        rows = [json.loads(line)
+                for line in path.read_text("utf-8").splitlines()]
+        assert [row["join"] for row in rows] == ["joined"]
+        assert rows[0]["arm"] == arm[0]
+        assert rows[0]["optimization"] == arm[1]
+        assert rows[0]["question_key"] == "A-q08"
+        assert rows[0]["queue_latency_ms"] == 3
+    # 两条臂的表分开:一条臂的调用不会出现在另一条臂的文件里。
+    assert not (out_dir / f"calls-{rig.CALLS_UNATTRIBUTED_LABEL}.jsonl").exists()
+
+
+def test_a_concurrent_batch_joins_by_support_id_but_claims_no_arm(
+    tmp_path, monkeypatch, capsys,
+):
+    """并发跑批:⋈ 照做(`support_id` 不受窗口影响),run 级标签全 unknown。
+
+    这正是计划 §3 T-PS5 验收那句「并发下按 `support_id` 归因,切不干净仍
+    unknown」的两半:对得上号的行照样两侧齐全,而**这次调用属于哪个 run** 是
+    时间窗才能回答的问题,并发下它切不干净,所以那几列一律 unknown。
+    """
+    out_dir = tmp_path / "ab"
+    log_dir, event_dir = _call_dirs(out_dir)
+    lock = threading.Lock()
+
+    def _fake_run(repo, *, notebook, item, arm, contract, on_trace,
+                  cancel_event, actor_id, scope_source_ids=None,
+                  optimization="off"):
+        support = f"mdl-{item['question_key']}-{arm}"
+        with lock:
+            _write_jsonl(log_dir / "u1" / "llm-2026-09-10.jsonl", [
+                {"kind": "chat", "status": "ok", "support_id": support,
+                 "latency_ms": 700, "attempts": 1},
+            ])
+            _write_jsonl(event_dir / "u1" / "events-2026-09-10.jsonl", [
+                {"kind": "model_scheduler", "status": "ok",
+                 "support_id": support, "queue_latency_ms": 3},
+            ])
+        for step in _steps(arm):
+            on_trace(SimpleNamespace(
+                step_type=step["step_type"], summary="",
+                detail=step["detail"], duration_ms=7,
+            ))
+        return _FakeResponse()
+
+    monkeypatch.setattr(rig, "run_ab_once", _fake_run)
+    monkeypatch.setattr(rig, "_ab_element_sections", lambda url, ids: {})
+    monkeypatch.setattr(rig, "_ab_chunk_sections", lambda url, ids: {})
+    monkeypatch.setattr(rig, "_ab_usage_for_window",
+                        lambda *a, **kw: UNKNOWN_USAGE)
+    _fixed_intents(monkeypatch)
+    runner = rig.Runner(dry_run=False, out_dir=out_dir)
+    args = _ab_args(only_policy=[], out_dir=str(out_dir), dry_run=False,
+                    no_intent=True)
+    units = [_unit(question_key="A-q08"), _unit(question_key="A-q14")]
+    rig._ab_loop(
+        args, runner, units, {"A_nokg": _fact()}, _repos_by_arm(),
+        actor_id="ab-owner", profile=None, concurrency=2,
+        gold_by_key=load_ab_gold(load_questions()),
+        model_contract="0123456789abcdef", log_dir=log_dir,
+        event_dir=event_dir, clock=datetime.now,
+    )
+    capsys.readouterr()
+    # 逐臂的表**不出**:那一维在并发下不成立。
+    for arm in rig.AB_DEFAULT_ARMS:
+        assert not (out_dir / f"calls-{arm_label(*arm)}.jsonl").exists()
+    path = out_dir / f"calls-{rig.CALLS_UNATTRIBUTED_LABEL}.jsonl"
+    rows = [json.loads(line) for line in path.read_text("utf-8").splitlines()]
+    assert len(rows) == 4                       # 2 题 × 2 臂
+    assert all(row["join"] == "joined" for row in rows)   # ⋈ 照样对得上号
+    assert all(row["queue_latency_ms"] == 3 for row in rows)
+    for row in rows:
+        for key in ("arm", "optimization", "question_key", "repeat"):
+            assert row[key] is None, key
+
+
+def test_a_second_concurrent_batch_does_not_eat_the_first_batch_events_again(
+    tmp_path, monkeypatch, capsys,
+):
+    """往同一个 `--out-dir` 追跑第二批:事件偏移按**事件的 glob** 取。
+
+    整批偏移那两行是两串日志各取各的(`RIG_EVENT_LOG_GLOB`)。事件那一串若按
+    llm 的默认 glob 取偏移,`events-*.jsonl` 一份都匹配不上 ⇒ offsets 恒空 ⇒ 每
+    一批都从字节 0 把事件重读一遍,第二批的 `calls-unknown.jsonl` 里于是躺着上
+    一批事件的副本(`event_only` 行),而 llm 那一侧偏移正常、行数看起来只多不
+    少,没有任何一处会报错。
+    """
+    out_dir = tmp_path / "ab"
+    log_dir, event_dir = _call_dirs(out_dir)
+    lock = threading.Lock()
+
+    def _fake_run(repo, *, notebook, item, arm, contract, on_trace,
+                  cancel_event, actor_id, scope_source_ids=None,
+                  optimization="off"):
+        support = f"mdl-{item['question_key']}-{arm}"
+        with lock:
+            _write_jsonl(log_dir / "u1" / "llm-2026-09-10.jsonl", [
+                {"kind": "chat", "status": "ok", "support_id": support,
+                 "latency_ms": 700, "attempts": 1},
+            ])
+            _write_jsonl(event_dir / "u1" / "events-2026-09-10.jsonl", [
+                {"kind": "model_scheduler", "status": "ok",
+                 "support_id": support, "queue_latency_ms": 3},
+            ])
+        for step in _steps(arm):
+            on_trace(SimpleNamespace(
+                step_type=step["step_type"], summary="",
+                detail=step["detail"], duration_ms=7,
+            ))
+        return _FakeResponse()
+
+    monkeypatch.setattr(rig, "run_ab_once", _fake_run)
+    monkeypatch.setattr(rig, "_ab_element_sections", lambda url, ids: {})
+    monkeypatch.setattr(rig, "_ab_chunk_sections", lambda url, ids: {})
+    monkeypatch.setattr(rig, "_ab_usage_for_window",
+                        lambda *a, **kw: UNKNOWN_USAGE)
+    _fixed_intents(monkeypatch)
+    runner = rig.Runner(dry_run=False, out_dir=out_dir)
+    args = _ab_args(only_policy=[], out_dir=str(out_dir), dry_run=False,
+                    no_intent=True)
+    path = out_dir / f"calls-{rig.CALLS_UNATTRIBUTED_LABEL}.jsonl"
+
+    def _run_batch(question_key: str) -> list[dict]:
+        before = (len(path.read_text("utf-8").splitlines())
+                  if path.exists() else 0)
+        rig._ab_loop(
+            args, runner, [_unit(question_key=question_key)],
+            {"A_nokg": _fact()}, _repos_by_arm(), actor_id="ab-owner",
+            profile=None, concurrency=2,
+            gold_by_key=load_ab_gold(load_questions()),
+            model_contract="0123456789abcdef", log_dir=log_dir,
+            event_dir=event_dir, clock=datetime.now,
+        )
+        capsys.readouterr()
+        lines = path.read_text("utf-8").splitlines()[before:]
+        return [json.loads(line) for line in lines]
+
+    first = _run_batch("A-q08")
+    assert len(first) == 2                                  # 1 题 × 2 臂
+    second = _run_batch("A-q14")
+    # 第二批只认自己那两次调用:上一批的事件不再被吃第二遍。
+    assert len(second) == 2
+    assert all(row["join"] == "joined" for row in second)
+    assert {row["support_id"] for row in second} == {
+        "mdl-A-q14-legacy", "mdl-A-q14-v2"}
+    assert not ({row["support_id"] for row in first}
+                & {row["support_id"] for row in second})
+
+
+def test_the_two_v2_arms_write_to_different_call_tables_and_raw_dirs(tmp_path):
+    """两条 v2 臂的产物路径必须分开,否则后跑的静默覆盖前一条。"""
+    off = rig.arm_label("v2", "off")
+    snapshot = rig.arm_label("v2", "prefix_snapshot")
+    assert off != snapshot
+    rig._write_call_rows(tmp_path, off, [{"support_id": "mdl-a"}])
+    rig._write_call_rows(tmp_path, snapshot, [{"support_id": "mdl-b"}])
+    assert (tmp_path / f"calls-{off}.jsonl").exists()
+    assert (tmp_path / f"calls-{snapshot}.jsonl").exists()
+    assert rig._ab_raw_path(tmp_path, off, _unit()) != rig._ab_raw_path(
+        tmp_path, snapshot, _unit())
+
+
+def test_the_raw_archive_splits_the_two_v2_arms_through_the_production_writer(
+    tmp_path,
+):
+    """存档分目录这件事要**经生产调用点**钉住,不是只钉 `_ab_raw_path`。
+
+    直接给 `_ab_raw_path` 传 label 的那条断言够不到 `_write_ab_raw` 里的接线:
+    哪天有人在那里退回一维(`arm[0]`),两条 v2 臂会写进同一个
+    `raw/v2/<key>_<cell>_<effort>_r<n>.json`,后跑的静默覆盖先跑的,存档只剩一
+    半——而 `ab-runs.jsonl` 完全正常,没有任何一处会报错。
+    """
+    unit = _unit()
+    for arm in (("v2", "off"), ("v2", "prefix_snapshot")):
+        rig._write_ab_raw(tmp_path, arm, unit, _FakeResponse(), [], None)
+    written = sorted(
+        path.relative_to(tmp_path).as_posix()
+        for path in (tmp_path / "raw").rglob("*.json")
+    )
+    # 两份存档,路径逐字如下(`off` 那一格落回光秃秃的 policy 目录)。
+    stem = "A-q08_A_nokg_standard_r1.json"
+    assert written == [f"raw/v2-prefix_snapshot/{stem}", f"raw/v2/{stem}"]
+    # 存档正文里的 `arm` 仍是**命令行写法**,人工抽样时与 `--arms` 逐字相同。
+    payload = json.loads(
+        (tmp_path / "raw" / "v2-prefix_snapshot" / stem).read_text("utf-8"))
+    assert payload["arm"] == rig.format_arm("v2", "prefix_snapshot")
+
+
+# ---------------------------------------------------------------------------
+# `--arms` 在 CLI 上的两端(预检与 dry-run 枚举)
+# ---------------------------------------------------------------------------
+
+
+def test_the_preflight_refuses_arms_and_only_policy_together():
+    """矛盾指令不猜:「只跑 v2」在二维 `--arms` 下有两种读法,数据集不一样。"""
+    args = _ab_args(arms="v2:off,v2:prefix_snapshot", only_policy=["v2"])
+    assert "不能同时给" in rig._ab_preflight(args, ["A_nokg"])
+
+
+def test_the_preflight_rejects_an_illegal_arm_before_anything_runs():
+    args = _ab_args(arms="legacy:prefix_snapshot")
+    assert "非法组合" in rig._ab_preflight(args, ["A_nokg"])
+    ok = _ab_args(arms="v2:off,v2:prefix_snapshot")
+    assert rig._ab_preflight(ok, ["A_nokg"]) == ""
+
+
+def test_the_preflight_refuses_a_filter_that_leaves_no_arm():
+    """零臂的计划长得完全像一次正常的预演,连 dry-run 都看不出来。
+
+    这一格**今天在 CLI 上到不了**:`--only-policy` 的 `choices` 就是 `POLICIES`,
+    两个值都在 `AB_DEFAULT_ARMS` 里,过滤永远非空。守卫留着是防两个集合日后分叉
+    (往 `POLICIES` 加了第三种协议、却没往 `AB_DEFAULT_ARMS` 加对应臂),所以这
+    条用例只能手搓 Namespace 才走得到。
+    """
+    args = _ab_args(only_policy=["legacy"])
+    assert rig._ab_preflight(args, ["A_nokg"]) == ""
+    assert rig.ab_arms(args) == [("legacy", "off")]
+    assert set(rig.POLICIES) <= {arm[0] for arm in rig.AB_DEFAULT_ARMS}
+    # `--arms v2:prefix_snapshot --only-policy legacy` 已经被上一条互斥挡住;
+    # 这里造的是「默认臂里没有这个 policy」那一种(CLI 上不可达,见 docstring)。
+    empty = _ab_args(only_policy=["nonsense"])
+    assert "一条臂都不剩" in rig._ab_preflight(empty, ["A_nokg"])
+
+
+def test_the_preflight_refuses_a_three_armed_batch():
+    """一次一对。三条臂的批次每一行看起来都正常,而配对差值表整批为空。
+
+    每个配对单元落三行,`mark_paired` 的门槛是 `PAIR_ARM_COUNT`,于是 12 行
+    `paired` 全 False——数据集、日志、投影一切正常,只是一个配对结论都出不来,
+    而这批已经烧掉了几百次模型调用(codex 规格评审 P2-1 / 质量评审 P3-4)。
+    """
+    args = _ab_args(arms="legacy,v2:off,v2:prefix_snapshot")
+    problem = rig._ab_preflight(args, ["A_nokg"])
+    assert "一次只收一对臂" in problem
+    assert "分两批跑" in problem
+    # 一对照旧放行(一维与二维两种写法都是一对)。
+    assert rig._ab_preflight(_ab_args(arms="legacy,v2"), ["A_nokg"]) == ""
+    assert rig._ab_preflight(
+        _ab_args(arms="v2:off,v2:prefix_snapshot"), ["A_nokg"]) == ""
+    # 只跑一条臂仍然合法(`--only-policy` 的二维版:重跑被打废的一侧)。
+    assert rig._ab_preflight(_ab_args(arms="v2:prefix_snapshot"),
+                             ["A_nokg"]) == ""
+
+
+def test_the_three_armed_batch_really_would_have_lost_every_pair():
+    """上一条拦的不是一个假想:三条臂真的会让 `paired` 全线 False。"""
+    arms = rig.parse_arms("legacy,v2:off,v2:prefix_snapshot")
+    assert len(arms) > rig.PAIR_ARM_COUNT
+    rows = [{"arm": arm[0], "optimization": arm[1], "question_key": "A-q08",
+             "corpus_cell": "A_nokg", "effort": "standard", "repeat": 1}
+            for arm in arms]
+    mark_paired(rows)
+    assert [row["paired"] for row in rows] == [False, False, False]
+
+
+def test_an_empty_arms_string_is_refused_instead_of_running_the_default():
+    """`--arms ""` 是**给了一个空写法**,不是「没给」。
+
+    脚本里写 `--arms "$ARMS"` 而变量恰好为空时,静默退化会让整批(上百次调用)
+    安静地跑成 legacy-vs-v2,而那不是要做的实验——数据看起来完美,只是答非所问。
+    """
+    args = _ab_args(arms="")
+    problem = rig._ab_preflight(args, ["A_nokg"])
+    assert "为空或有空段" in problem
+    with pytest.raises(ArmSpecError):
+        rig.ab_arms(args)
+    # 真的**不给**时照旧是默认两臂(既有一维用法一个字节没变)。
+    assert rig.ab_arms(_ab_args()) == list(rig.AB_DEFAULT_ARMS)
+    assert rig.build_parser().parse_args([
+        "--database-url", "postgresql://127.0.0.1:5432/nb_t0_test", "ab",
+    ]).arms is None
+
+
+def test_dry_run_ab_enumerates_the_second_dimension_and_the_shared_ruler(capsys):
+    """dry-run 说清这一批的臂、两臂共用的那把尺子、调用数与请求上界。"""
+    assert rig.main([
+        "--dry-run", "--limit", "1", "--repeats", "1",
+        "--arms", "v2:off,v2:prefix_snapshot",
+        "--database-url", "postgresql://127.0.0.1:5432/nb_t0_test",
+        "--source-db-url", "postgresql://127.0.0.1:5432/nb_main",
+        "ab",
+    ]) == 0
+    printed = capsys.readouterr().out
+    assert "v2:off, v2:prefix_snapshot" in printed
+    assert "REASONING_REFLECT_MEASURE_CONTEXT=true" in printed
+    assert "次逻辑调用" in printed and "请求上界 ≤" in printed
+    # per-call 表与两串隔离日志的落点都在计划里说清楚。
+    assert "calls-v2.jsonl" in printed
+    assert "calls-v2-prefix_snapshot.jsonl" in printed
+    assert "EVENT_LOG_DIR=" in printed
+
+
+def test_the_one_dimensional_spelling_keeps_its_artifact_paths_byte_identical(
+    tmp_path, capsys,
+):
+    """不给 `--arms` 的既有命令:**产物路径**一个字节没变。
+
+    逐字不变的是路径,不是 dry-run 的输出字节:那一行的臂名现在打成
+    `legacy:off, v2:off`,另外多打了测量、隔离日志与 per-call 表三行,而计划也
+    没要求 dry-run 输出不变。会让既有数据接不上的是路径——`raw/<arm>/` 与
+    `calls-<arm>.jsonl` 里的 `<arm>` 必须仍是光秃秃的 policy(`arm_label` 对
+    `off` 那一格的约定),否则二维化之前跑的那批存档与新批对不上号。
+    """
+    for arm in rig.AB_DEFAULT_ARMS:
+        assert rig.arm_label(*arm) == arm[0]
+        assert rig._ab_raw_path(tmp_path, rig.arm_label(*arm), _unit()) == (
+            tmp_path / "raw" / arm[0] / "A-q08_A_nokg_standard_r1.json"
+        )
+    rig._write_call_rows(tmp_path, rig.arm_label(*rig.AB_DEFAULT_ARMS[0]),
+                         [{"support_id": "mdl-a"}])
+    assert (tmp_path / "calls-legacy.jsonl").exists()
+    assert rig.AB_DEFAULT_ARMS == (("legacy", "off"), ("v2", "off"))
+    # 枚举本身也没变:不给 `--arms` 就是既有的一维两臂。
+    assert rig.main([
+        "--dry-run", "--limit", "1", "--repeats", "1",
+        "--database-url", "postgresql://127.0.0.1:5432/nb_t0_test",
+        "--source-db-url", "postgresql://127.0.0.1:5432/nb_main",
+        "ab",
+    ]) == 0
+    printed = capsys.readouterr().out
+    assert "legacy:off, v2:off" in printed
+    assert "calls-legacy.jsonl" in printed and "calls-v2.jsonl" in printed
+    assert "prefix_snapshot" not in printed

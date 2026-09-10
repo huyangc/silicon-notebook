@@ -84,6 +84,16 @@
 `_rig_process_env` 加 `EVENT_LOG_DIR=out_dir/events`(G5);`elapsed_ms` 写进 `run_wall_ms`(串行 `2489`、并发 `2723/2729`,失败 run 也写);新增 per-call 表 `calls-<arm>.jsonl`(llm.jsonl ⋈ events.jsonl on `support_id`),核心纯分析放 `backend/app/eval/reflect_context_bench.py`,rig 薄适配;`ab` 臂加第二维 `--arms v2:off,v2:prefix_snapshot`,`ARMS` 扩成 `(policy, optimization)`,投影加 `optimization` 并核对实际运行值(镜像 `assert_arm_matches_evidence`,`656-670`);`pair_id`(`788-793`)不变,`mark_paired` 的 `len(ARMS)` 判据二维化。
 验收:rig 不再写 `.local/logs/events.jsonl`;失败/取消 run 也有 `run_wall_ms`;并发下按 `support_id` 归因,切不干净仍 unknown;dry-run 打印调用数与请求上界。用例:`_rig_process_env` 键集;日志⋈事件三种残缺;只跑一臂 `paired=False`;声明 `prefix_snapshot` 证据 `off` ⇒ RuntimeError。
 
+**实施记录(2026-09-10)。** 验收里「取消 run 也有 `run_wall_ms`」这半句**没做**,其余全部兑现。与计划字面不同、或计划没说而下一个人必须知道的,都记在这里:
+
+- **取消的 run 一行都不落**,所以它没有墙钟。`ab`/`search` 三处 `except AskCancelled: raise`(rig `2591 / 2843 / 4786`)是**整批收摊**语义:取消是人按下的,那一刻的半份 run 不是一个观测。要给它造一行就得先改 abort 契约,超出 T-PS5,留待需要时单独决定。**已经覆盖的是另一条路**:取消位置起之后抛出的**非** `AskCancelled` 异常照常落 `status=failed` 的失败行,那一行有墙钟(用例钉住)。读这份计划核对进度的人:这一条验收**未完成**,不要当成四条全过。
+- **`search` 那条路的 `optimization` 恒 `unknown`。** 计划只给 `ab` 加第二维,`project_search_run` 不收它。分析侧 `scripts/analyze_reasoning_trace.py` 明确「unknown 不当臂」,所以不会串格,但按 optimization 分组时 `search` 的行整体落在 unknown 那一格,是预期的。
+- **per-call 表只在 `ab`。** `search` 不出 `calls-*.jsonl`(它不跑完整 Ask,也没有臂的第二维)。
+- **`--arms` 与 `--only-policy` 互斥,且 `--arms` 一次只收一对。** 前者:「只跑 v2」在二维写法下有两种读法,产出的数据集与 `paired` 都不一样,预检拦在跑批之前。后者:`ARMS` 是**合法组合的闭集**(三格),不是一批的臂数;三条臂的批次里每个配对单元落三行,`mark_paired` 的门槛 `PAIR_ARM_COUNT` 判不出配对,整批 `paired` 全 `False`、配对差值表凭空空掉,而每一行看起来完全正常。要跑三格就分两批,每批一对。`--arms ""`(空写法)同样响亮拒绝,不退化成默认两臂。
+- **`REASONING_ATTEMPT_BUDGET` 与 config 默认值是同 diff 约定。** rig 那个常量硬编码 `1 + REASONING_MAX_RETRIES` 的默认值(dry-run 不 import config,不能现读);改配置默认值要同 diff 改它,用例钉住两者相等。
+- **`EVENT_LOG_DIR` 与 `LLM_LOG_PATH` 目录不对齐的启动告警维持现状。** 每次构造 repo 打一行,内容是「日志查看器读不到 per-user 的 llm 日志」——rig 的产物没有查看器要读,两串日志各按自己的 glob 读,所以是噪声不是问题。要消噪最省的做法是两串都落 `<out-dir>/logs`(两个 glob `**/llm-*.jsonl` / `**/events-*.jsonl` 互不相交,合目录不会互相污染),属于对计划字面的小偏离,留待 T-PS9 一并拍板,别单独改。
+- **per-call 表里重试行单列一格 `join="retry"`。** `llm.py` 每次瞬时错误重试都再写一行,与终态行**同号**(重试循环整个在 `interaction_support_scope` 内),而调度事件只有一条。按行数判扇出会让**每一次重试过的调用**都落成两行 `ambiguous`、排队/执行时长与 workload 全线 unknown——而那批恰是最慢、最该被看见的调用。所以:重试行不参与扇出判定、单列一格进 `CALL_JOIN_STATES`,终态行照常与那条唯一事件配对(事件侧列不丢);「一次调用一格」按**终态行**计,重试行的 `call_index` 是 `None`,数调用数格子不数行。只剩重试行的号(重试到一半被掐),它那条事件仍以 `event_only` 落表。
+
 ### T-PS6 `REASONING_REFLECT_OPTIMIZATION` 配置与单点判定
 落点 `config.py:1007-1037` 之后;`reasoning_retrieval.py:3230-3245` 旁加 `reflect_optimization()`。
 `reasoning_reflect_optimization: Literal["off","prefix_snapshot","prefix_delta","prefix_delta_lean"]`,默认 `off`;**本 PR 对 `prefix_delta`/`prefix_delta_lean` 在校验器里响亮拒绝**(PR-3/PR-4 各放开一格)。`reflect_optimization()`:v2 总闸关 ⇒ `off`;Knowhow(`allow_reflect_v2=False`)⇒ `off`;duck-typed settings 缺字段 ⇒ `off`;全仓唯一读点。
