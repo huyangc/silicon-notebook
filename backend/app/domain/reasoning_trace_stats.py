@@ -143,6 +143,19 @@ RUN_PROJECTION_KEYS: frozenset[str] = frozenset({
     # reflect 步为真 ⇒ 整列真(回退按计划 §2 拍板 Q4 不可逆,发生过就不会撤销)。
     # 一步都没带这个观测 ⇒ `None`,不是 `False`。
     "context_fallback",
+    # --- reflect 前缀复用测量(计划 PR-4 T-PL2) ---
+    # 各 reflect 步「本轮实际落账的方面自评行数」之和(拍板 Q8/Q9)。门是测量
+    # 开关(`measures_messages`),**四臂通写**——`off`/`prefix_snapshot`/
+    # `prefix_delta` 下模型仍会重述全量,这一列同样有意义,不是
+    # `prefix_delta_lean` 专属的行为计数。任一 reflect 步缺这个观测 ⇒ 整列
+    # unknown(`_reflect_sum` 口径,同 `response_chars_total`)。
+    "assessment_rows_total",
+    # v2 终态 skip 步 detail 上的「模型自己收尾时,还有几个方面它一次都没判断
+    # 过」(拍板 Q5/Q9)。v2 全部四臂无条件写(拍板 Q10 已知偏离:这是本期唯一
+    # 允许偏离三臂字节等价的字段,写在终态 detail 上,不改共用 prompt 字节;
+    # legacy 没有方面账,恒 `None`)。`0`(问过了、没有遗漏)与缺席(没量到/
+    # legacy/未到终态)必须分得开。
+    "aspects_unassessed",
     # --- 报告段的结果级字段(consumer == "report_section") ---
     "section_index",
     "section_total",
@@ -332,6 +345,16 @@ REFLECT_CONTEXT_DETAIL_KEYS: Mapping[str, str] = {
 #: 的两个例外:稀疏键的通例是「只有 v2 且测量开关打开的 run 才会出现」,但按
 #: 计划 §2 拍板 Q7,这两键在 `prefix_delta` 臂下**无条件**随 `ReflectMeasurement`
 #: 出现——回退与重建是行为事实,测量关只关字节序列化那半,不关这两个计数本身。
+#:
+#: `assessment_rows` / `assessment_absent`(PR-4 计划 §3 T-PL2 拍板 Q8)回到
+#: 普通稀疏键的通例:门是测量开关(`measures_messages`),不是行为事实,所以
+#: 不享有上面那条"无条件"待遇。它们与 `context_rebuilds`/`context_fallback`
+#: 的另一处不同是**臂的宽窄**:这两个键**四臂通写**(`off`/`prefix_snapshot`/
+#: `prefix_delta`/`prefix_delta_lean`,只要测量打开就都有),不是
+#: `prefix_delta_lean` 专属——`assessment_rows` 是本轮实际落账的方面自评行数
+#: (`len(outcome.accepted)`,整份越界写 0),`assessment_absent` 是这一轮载荷
+#: 压根没带 `assessment` 键;四臂通写是为了让 D↔L 这一对在同一把尺子上比
+#: "省了多少重述"。
 REFLECT_MEASUREMENT_DETAIL_KEYS: frozenset[str] = frozenset({
     *REFLECT_CONTEXT_DETAIL_KEYS.values(),
     "message_prefix_bytes",
@@ -343,6 +366,8 @@ REFLECT_MEASUREMENT_DETAIL_KEYS: frozenset[str] = frozenset({
     "context_rebuilds",
     "context_fallback",
     "delta_blocks",
+    "assessment_rows",
+    "assessment_absent",
 })
 
 
@@ -769,6 +794,23 @@ def _reflect_context_fallback(reflects: Sequence[Mapping]) -> bool | None:
     return any(values) if values else None
 
 
+def _aspects_unassessed(steps: Sequence[Mapping]) -> int | None:
+    """→ `aspects_unassessed`:终态 skip 步 detail 上「模型收尾时一次都没判断
+    过的方面数」(计划 PR-4 T-PL2 拍板 Q5/Q9)。
+
+    读点与 `_v2_termination` 同一条 skip 步(`reason == TERMINATION_SKIP_REASON`
+    ——一次 run 只会记一条),不是任意一步:那是唯一记录终态事实的地方。v2 全部
+    四臂无条件写这个键(拍板 Q10 已知偏离,legacy 没有方面账,恒 `None`);用
+    `_int` 而不是 `bool`/`len` 兜底,是为了让 `0`(问过了、没有遗漏)与缺席
+    (没量到/legacy/未到终态)分得开——`0` 不能被读成"没有这个观测"。
+    """
+    for step in steps:
+        if (step["step_type"] == "skip"
+                and _reason(step["detail"]) == TERMINATION_SKIP_REASON):
+            return _int(step["detail"].get("aspects_unassessed"))
+    return None
+
+
 def _context_chars(reflects: Sequence[Mapping]) -> dict[str, int] | None:
     """各上下文块的**最后一轮**规模。一格都没有 ⇒ `None`(不是空字典)。
 
@@ -1095,6 +1137,9 @@ def project_run(
         # --- reflect 前缀复用测量(PR-3 T-PD2;`prefix_delta` 专属) ---
         "context_rebuilds": _reflect_context_rebuilds(reflects),
         "context_fallback": _reflect_context_fallback(reflects),
+        # --- reflect 前缀复用测量(PR-4 T-PL2) ---
+        "assessment_rows_total": _reflect_sum(reflects, "assessment_rows"),
+        "aspects_unassessed": _aspects_unassessed(normalized),
     }
     row.update(counters)
     assert_closed(row)

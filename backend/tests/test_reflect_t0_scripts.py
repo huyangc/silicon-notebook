@@ -2725,11 +2725,12 @@ FROZEN_ANONYMOUS_PAIR = {
     "trace_source": "unknown",
     "legacy": {
         "anchors": None,
+        "assessment_rows_total": None,
         "context_rebuilds": None,
         "model_calls_real": None,
-        "n_measured": {"context_rebuilds": 0, "model_calls_real": 0,
-                       "prefix_bytes_median": 0, "prefix_turns": 0,
-                       "run_wall_ms": 0},
+        "n_measured": {"assessment_rows_total": 0, "context_rebuilds": 0,
+                       "model_calls_real": 0, "prefix_bytes_median": 0,
+                       "prefix_turns": 0, "run_wall_ms": 0},
         "n_runs": 1,
         "optimization": {"unknown": 1},
         "prefix_bytes_median": None,
@@ -2741,11 +2742,12 @@ FROZEN_ANONYMOUS_PAIR = {
     },
     "v2": {
         "anchors": None,
+        "assessment_rows_total": None,
         "context_rebuilds": None,
         "model_calls_real": None,
-        "n_measured": {"context_rebuilds": 0, "model_calls_real": 0,
-                       "prefix_bytes_median": 0, "prefix_turns": 0,
-                       "run_wall_ms": 0},
+        "n_measured": {"assessment_rows_total": 0, "context_rebuilds": 0,
+                       "model_calls_real": 0, "prefix_bytes_median": 0,
+                       "prefix_turns": 0, "run_wall_ms": 0},
         "n_runs": 1,
         "optimization": {"unknown": 1},
         "prefix_bytes_median": None,
@@ -2847,6 +2849,68 @@ def test_context_rebuilds_appears_in_the_optimization_pair_table(tmp_path, capsy
     assert "variant context_rebuilds(n)" in rendered
     assert "2.0(n=2)" in rendered
     assert f"{analyze.UNKNOWN}(n=0)" in rendered
+
+
+def test_assessment_rows_total_and_aspects_unassessed_reach_the_numeric_table(
+    tmp_path, capsys,
+):
+    """T-PL2 的两个新列各自落进 `NUMERIC_METRICS`,真的出现在 JSON 报告里
+    (呼应 `test_analysis_consumes_every_scalar_projection_key` 的反向并集
+    守卫)。
+
+    变异:把 `assessment_rows_total` 或 `aspects_unassessed` 从
+    `NUMERIC_METRICS` 里删掉 ⇒ 这条红,且
+    `test_analysis_consumes_every_scalar_projection_key` 也跟着红。
+    """
+    source = _write_rows(tmp_path / "rows.jsonl", [
+        _measured_row(assessment_rows_total=3, aspects_unassessed=0),
+        _measured_row(assessment_rows_total=1, aspects_unassessed=2),
+    ])
+    js = tmp_path / "t0.json"
+    analyze.main([str(source), "--out-json", str(js)])
+    capsys.readouterr()
+    summary = json.loads(js.read_text("utf-8"))["groups"][0]["summary"]
+    assert summary["numeric"]["assessment_rows_total"]["n_observed"] == 2
+    assert summary["numeric"]["assessment_rows_total"]["mean"] == 2.0
+    assert summary["numeric"]["aspects_unassessed"]["n_observed"] == 2
+    assert summary["numeric"]["aspects_unassessed"]["mean"] == 1.0
+
+
+def test_assessment_rows_total_appears_in_the_optimization_pair_table(
+    tmp_path, capsys,
+):
+    """`assessment_rows_total`(T-PL2)四臂通写,配对差值表**两侧都是真实观测**
+    ——与 `context_rebuilds` 那道"基线臂结构上没有"的分工不同(评审要点见计划
+    §3 T-PL2):`off` 基线侧不是恒 `n_measured=0`,而是自己的均值+n。
+
+    变异:把 `assessment_rows_total` 从 `PAIR_SIDE_METRICS`/
+    `SPARSE_PAIR_SIDE_METRICS` 里删掉 ⇒ 这条红(JSON 侧该键消失或
+    n_measured 缺键;markdown 侧那两列跟着消失)。
+    """
+    source = _write_rows(tmp_path / "rows.jsonl", [
+        _measured_row(optimization="off", assessment_rows_total=4),
+        _measured_row(optimization="off", assessment_rows_total=6),
+        _measured_row(optimization="prefix_delta_lean",
+                      assessment_rows_total=1),
+        _measured_row(optimization="prefix_delta_lean",
+                      assessment_rows_total=3),
+    ])
+    js, md = tmp_path / "t0.json", tmp_path / "t0.md"
+    analyze.main([str(source), "--out-json", str(js), "--out-md", str(md)])
+    capsys.readouterr()
+    pair = json.loads(js.read_text("utf-8"))["optimization_pairs"][0]
+    assert pair["variant_arm"] == "prefix_delta_lean"
+    assert pair["variant"]["assessment_rows_total"] == 2.0
+    assert pair["variant"]["n_measured"]["assessment_rows_total"] == 2
+    # 四臂通写:`off` 基线侧同样是真实观测,不是恒缺席。
+    assert pair["baseline"]["assessment_rows_total"] == 5.0
+    assert pair["baseline"]["n_measured"]["assessment_rows_total"] == 2
+
+    rendered = md.read_text("utf-8")
+    assert "off assessment_rows_total(n)" in rendered
+    assert "variant assessment_rows_total(n)" in rendered
+    assert "5.0(n=2)" in rendered
+    assert "2.0(n=2)" in rendered
 
 
 def test_the_markdown_report_renders_both_arm_axes(tmp_path, capsys):
