@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "note": "合成、非敏感的 reflect 上下文样板,供 E1 前缀敏感性探针使用。五块内容全部虚构:static_instructions(S,静态指令与工具目录)、capability_catalog(C,动态能力清单)、evidence_cards(K,证据卡池,唯一随长度档伸缩的区块)、delta_notes(D,增量与阶段压缩提示)、task_target(T,用户任务与输出目标)。三档目标字符数派生自 backend/app/core/config.py 的 REASONING_REFLECT_EVIDENCE_CHARS_BY_EFFORT 默认值(短=overview 4000、中=deep 8000、长=exhaustive 16000; 见 docs/superpowers/specs/2026-09-11-reflect-prefix-experiments-plan_zh.md Q3)。K 块之外的四块字符数固定,不随档位变化。全部正文为本仓库编写的合成占位内容:零真实笔记内容、零 URL、零凭据、零真实题面。",
+  "tier_chars": {
+    "short": 4000,
+    "medium": 8000,
+    "long": 16000
+  },
+  "seed_paragraphs": {
+    "static_instructions": "你可以使用以下工具:定位来源、枚举目录、检索片段、检索知识图谱对象。当前任务不涉及写入操作,所有工具调用只读。请先判断已有证据是否足以回答问题,再决定是否继续检索。",
+    "capability_catalog": "当前可用动作:search_elements(按标题或路径查找来源)、search_chunks(按关键词检索片段)、enumerate_kg_objects(枚举知识图谱对象)、exact_lookup(精确匹配一个片段)。以上四个动作本轮额度充足。",
+    "evidence_cards": "证据卡示例:某虚构技术报告第三节提到,系统在负载升高时采用分阶段处理策略,以降低单次请求的等待时间。该证据卡编号为占位序列,内容为合成文本,不指向任何真实笔记或来源。",
+    "delta_notes": "自上一轮以来:新增零张证据卡,已支撑的方面无变化,尚未出现互相冲突的判断。历史投影保持不变,未触发阶段压缩。",
+    "task_target": "用户任务(合成):请判断当前证据是否足以回答“系统采用了哪种降低延迟的策略”这一问题,并按固定 schema 返回一个布尔结果,不需要给出解释文字。"
+  }
+}
