@@ -55,12 +55,16 @@ self-optimization machinery that must not vary per notebook:
 ``reflect_v2_system_prompt`` / ``reflect_v2_user_prompt`` /
 ``reflect_v2_schema_hint`` (an action space, a parameter contract and a
 stopping rule — control flow, not per-notebook wording) together with the
-two prefix layouts' spellings of the same two halves
+three prefix layouts' spellings of the same two halves
 (``reflect_v2_static_prompt`` / ``reflect_v2_turn_state`` /
-``reflect_v2_prefix_user_prompt`` — shared verbatim by ``prefix_snapshot``
-and ``prefix_delta``: a different BLOCK ORDER for the identical control-flow
-text, plus, on ``prefix_delta``, four more sentences saying how to read an
-append-only block; both chosen by a deployment策略位, never per notebook),
+``reflect_v2_prefix_user_prompt`` — shared verbatim by ``prefix_snapshot``,
+``prefix_delta`` and ``prefix_delta_lean``: a different BLOCK ORDER for the
+identical control-flow text, plus, on both delta layouts, four more
+sentences saying how to read an append-only block, and, on
+``prefix_delta_lean`` alone, a lean self-assessment paragraph REPLACING the
+shared one — a reporting contract the server's ledger and follow-up path
+are wired to, so it is control flow too; all three chosen by a deployment
+策略位, never per notebook),
 ``report_synthesis_prompt``,
 ``report_sufficiency_prompt``, the evidence-verification path
 (``evidence_refine_prompt``), ``followup_rewrite_prompt``, and the whole

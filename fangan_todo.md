@@ -237,11 +237,12 @@
         把两者并到同一目录，是对计划字面的偏离。
       * **`prefix_snapshot` 相对 `off` 每轮 +1–3KB 输入**（缓存未命中时）：目录恒为超集，
         所以 `off` 的 system 段随额度收缩变短、这条臂不会。按设计接受，见部署文档那两条。
-      * **PR-2 收尾时 `prefix_delta` / `prefix_delta_lean` 都由启动期校验器响亮拒绝**
-        ——**已被 PR-3 部分解除**（见下面 (k)）：`prefix_delta` 现在能起来并有自己的布局，
-        `REASONING_REFLECT_RECENT_OBSERVATIONS` 在它上面已经是「重建 K 时保留几条近期详细
-        观察」的当前行为（不再是预告）；只剩 `prefix_delta_lean` 仍被拒绝，等 PR-4。PR-5 是
-        生产策略的实验标记接缝（E1），仍刻意不做。
+      * ~~**PR-2 收尾时 `prefix_delta` / `prefix_delta_lean` 都由启动期校验器响亮拒绝**~~
+        ——**已被 PR-3 / PR-4 全部解除**（见下面 (k)/(l)）：`prefix_delta` 自 PR-3 起能起来并
+        有自己的布局，`REASONING_REFLECT_RECENT_OBSERVATIONS` 在它上面已经是「重建 K 时保留
+        几条近期详细观察」的当前行为（不再是预告）；`prefix_delta_lean` 自 PR-4 起也已放开，
+        `REFLECT_OPTIMIZATION_PLANNED` 因此收窄为空元组（校验器与「已登记但未实现即响亮拒绝」
+        这条机制保留，闭集为空时恒放行）。PR-5 是生产策略的实验标记接缝（E1），仍刻意不做。
       * **A/B 采用与开闸的拍板点仍在用户手上**（设计 §13）：默认 `off`，选定策略后逐步
         验证、由用户决定开启；任一质量或稳定性回归立即回 `off`，不做数据迁移。E1 的机制
         结果只能支持「稳定前缀的时间收益」，**不得**报告成估算命中率。
@@ -276,14 +277,61 @@
         历史池，常量与落账同一处 `_delta_pending_charges`），任一顶破 ⇒ 走重建。**留一条越界例外**：
         没有候选新卡、而块头/note 在重建之后仍装不下时那一块照发（观察行是本轮那次动作在上下文里
         的唯一记录），记账如实超出、下一轮必重建——这是唯一允许的越界形态。
-      * **`prefix_delta_lean` 仍由启动期校验器响亮拒绝**：`REFLECT_OPTIMIZATION_PLANNED` 收窄
-        成一格，PR-4 放开它（轻量 assessment 是**另一条**实验臂，不能把收益归到缓存上）。
-        PR-5 是生产策略的实验标记接缝（E1），本期同样刻意不做。
+      * ~~**`prefix_delta_lean` 仍由启动期校验器响亮拒绝**~~ **已由 PR-4 放开**（见下面 (l)）：
+        `REFLECT_OPTIMIZATION_PLANNED` 从此是空元组。轻量 assessment 仍是**另一条**实验臂，
+        D↔L 之间量出的收益不能归到缓存上。PR-5 是生产策略的实验标记接缝（E1），仍刻意不做。
       * **增量块的观察节不带 `HISTORY_NOTE`**：「目的是模型当时写下的判断、不是原文」这句
         免责由块头里「观察行的含义同上方观察账」一次性接过去，K 的观察账里那一份仍在。这是
         为省下每块上百字节的重复；两处**措辞同源**的要求由用例对账，不靠每块各付一份。
       * **`delta_blocks` 只在 reflect 步 detail 里，不出顶层投影列**：它不是累计量（重建会
         清空已发出的块），一个 run 一格装不下它。要按轮看增量块数就读那几步的 detail。
+
+      (l) **PR-4「`prefix_delta_lean` 轻量自评」已落地**（计划真源
+      `docs/superpowers/specs/2026-09-10-reflect-prefix-delta-lean-plan_zh.md`，上游设计同 (j)
+      的 §6/§12/§13）：`REFLECT_OPTIMIZATION_IMPLEMENTED` 放开第四格、`PLANNED` 收窄为空元组
+      （校验器保留）、`_DELTA_LAYOUTS` 派生 + 导入期对账守卫盖住第四格、`prompts` 的 lean 自评段
+      （`_V2_LEAN_ASSESSMENT_INSTRUCTION`，**替换**不追加共用那份）、`ASPECT_BLOCK_NOTE_LEAN`
+      （T 末尾那一句二选一）、`AspectLedger.lean_assessment` 一格 run 级冻结的只读开关（唯一产地
+      `_v2_build_aspect_ledger`，三处建账同源 + 「直调点数 == 1」AST 守卫）、`note_missing_assessment`
+      在 L 上最先返回 False（收尾不为记账退回一轮，`_absorb_assessment`/`_nudge_missing_assessment`/
+      `run()` 零改动）、`RetrievalTermination` 一格 run 级布尔 + 合成侧「未逐项核验」披露行、两个新
+      detail 键（`assessment_rows`/`assessment_absent`）与终态一格 `aspects_unassessed`、投影新增三列
+      （`assessment_rows_total` sum-over-present + 伴生 `assessment_observed` + `aspects_unassessed`）、
+      rig 第二维放开最后一格（`ARMS` 五格）。**仍未做的是拿它跑对照实验**：D↔L 的配对 A/B 与首份
+      报告不进 CI；**开闸仍是此之后的独立决定**，默认 `off` 不变。
+
+      PR-4 的**已知限制**（知情接受，不改代码；首份报告要照抄）：
+
+      * **L 的实际收益一个数都还没量**：文档只宣称结构与可观测性交付。**已实测的两个数都是
+        净增**——S 里那段自评合同换成 lean 版比 `prefix_delta` 多 1,246 字符，T 末尾那一句多
+        3 个字符；**省下来的那一侧一个数都没有**：每轮少的是模型自己重述已支撑项的那些行（在
+        模型的输出侧），省的主要是一次收尾轮（生产实测一轮 reflect 约 40s）。哪一侧更大取决于
+        题型与轮数，结论等 D↔L 的配对实验。
+      * **共用的 `_V2_ASSESSMENT_INSTRUCTION` 仍然过时（Q3 独立待办，本期一字节不改）**：那一段
+        自 T4-A（`331f32d4d`）之后就没跟上 PR-1 的 T-BF7 逐方面解耦，「rejected WHOLE / costs
+        you a step」与「neither list may be longer than the aspect list」教的是 T-BF7 **之前**
+        的「整轮报废」后果，现行校验器是逐方面拒绝、整轮照常执行，行数上限是
+        `min(REFLECT_ASPECT_GROUP_ROWS_FACTOR × 方面数, REFLECT_ASPECT_GROUP_ROWS_HARD_MAX)`。
+        没在本期修是因为它被 `off`/`prefix_snapshot`/`prefix_delta` 三臂共用，改它就改三臂的
+        prompt 字节，而三臂字节等价是四臂可比性的前提——**修它必须重设三臂的字节基线**（重烧三
+        组 golden、更新部署文档里 `prefix_snapshot`/`prefix_delta` 的字节账、以及 L 相对 D 的那个
+        1,246），所以它是一次独立立项，不是一次文案修正。lean 那一段已按现行校验器逐句写对。
+      * **L 下终态仍可能是 `model_partial`**：终态 `reason` 的七值闭集刻意不动（改它破坏四臂横向
+        可比），所以未评估的方面照旧可能把一次 run 归到「仍有方面没有完整支撑」。模型自己的结束
+        判断另存一格、与 `reason` 分开，合成侧那一行披露把两件事说清楚。
+      * **`assessment_absent` 不出顶层投影列**：它是逐轮布尔，一个 run 一格装不下；顶层要的那件
+        事已经由 `assessment_rows_total` + `assessment_observed` 表达。要按轮看就读那几步的 detail。
+      * **两键在「不是模型自己那份载荷」的轮次不写**：provider 故障的 fail-open 轮，以及服务端把
+        决定折成伪动作的那些轮（首次抖动降级、解析失败、参数越界）都不写——那不是「模型省了自评」。
+        代价是 `assessment_rows_total` 必须按 sum-over-present 读、由 `assessment_observed` 披露
+        「缺了几轮」，而不是一次偶发抖动把整条 run 读成 unknown。
+      * **`search` 子命令的投影 `optimization` 仍恒 unknown**：同 (j)/(k) 那一条，第二维只接在
+        `ab` 臂上，本期一格未动。
+      * **D↔L 的差值不由 `optimization_pairs` 表直接给出**：那张表的基线硬编码 `off`，一批只有 D
+        和 L 两条臂时两侧配对表都是空；要读这道差值得把 `off` 也跑进各自那一批（分两批，「一次只收
+        一对」不允许三格挤进一批）、各自对 `off` 做差之后再相减。另外 `ab-runs.jsonl` 每行带 ab 专属
+        键（`paired`/`pair_id` 等），`analyze_reasoning_trace.py` 的 `load_rows` 会整批拒绝——先把行
+        降到 T0 键集才喂得进 `analyze`。这是 T-PS4 起就有的既有结构，PR-5 的实验通道再定读出路径。
 - [ ] **深度报告一侧的方面送达复核补上簇折叠表**：Ask 侧 `_answer_context` 已经把
       `knowledge_context` 的 `fold_sink`（同 canonical 簇被折叠掉的成员 → 代表）折进
       `admitted_evidence_keys`；报告侧 `_draft_section` 走 `knowledge_context_with_outline`，
