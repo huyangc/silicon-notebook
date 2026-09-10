@@ -106,6 +106,10 @@ from app.eval.reflect_ab import (  # noqa: E402
     format_arm,
     parse_arms,
 )
+#: T-EX8 manifest:纯构造 + 闭集 + 隐私断言,与上面那两个 import 同一条
+#: 「零 I/O、零 Settings」理由——manifest 的形状校验是 dry-run 也够得到的
+#: 纯函数(dry-run 本身不写 manifest,但闭集/隐私守卫要能在标准门里被测)。
+from app.eval.reflect_manifest import assert_manifest, build_manifest  # noqa: E402
 from app.eval.reflect_t0 import load_questions  # noqa: E402
 from export_reasoning_traces import RIG_FIELDS, RIG_PREFIX  # noqa: E402
 
@@ -3147,6 +3151,14 @@ def ab_plan(
 #: 不由这里预测。改了 `REASONING_MAX_RETRIES` 要同 diff 改这里。
 REASONING_ATTEMPT_BUDGET = 1 + 1
 
+#: 与 `Settings.reasoning_timeout_seconds` 的**默认值**同步(`config.py`
+#: `REASONING_TIMEOUT_SECONDS`,默认 90)。`ab` 的 dry-run 不构造 `Settings`
+#: (零副作用承诺,理由见 `_resolve_concurrency`),T-EX8 的「单次超时」那一行
+#: 因此打这个镜像常量,不打真实配置;真跑时 manifest 的 `budgets.
+#: reasoning_timeout_seconds` 改读 `settings_by_arm[reference_arm]` 的真实值。
+#: 改了 config.py 那个默认值要同 diff 改这里。
+REASONING_TIMEOUT_SECONDS_DEFAULT = 90
+
 
 def _ab_call_estimate(
     units: Sequence[dict], question_count: int, *, no_intent: bool,
@@ -3320,6 +3332,30 @@ def cmd_ab(args: argparse.Namespace, runner: Runner) -> int:
     runner.say("model calls (estimate)",
                _ab_call_estimate(units, len(unique_questions),
                                  no_intent=args.no_intent, arms=arms))
+    # T-EX8 要点 3:三行新增文案(整批墙钟预算 / 单次超时 / 到点行为),
+    # dry-run 与真跑共用这段前缀,与上面几行同一条打印纪律。
+    runner.say(
+        "wall-clock budget",
+        (
+            f"--max-wall-minutes {args.max_wall_minutes}"
+            if args.max_wall_minutes is not None
+            else "未设置(--max-wall-minutes 不给,今天的行为逐字相同:"
+                 "不设上限、不早停)"
+        ),
+    )
+    runner.say(
+        "single-call timeout",
+        f"{REASONING_TIMEOUT_SECONDS_DEFAULT}s"
+        "(REASONING_TIMEOUT_SECONDS 的默认值;dry-run 不构造 Settings,"
+        "真跑按各臂 settings_by_arm 的实际值,见 manifest 的 budgets)",
+    )
+    runner.say(
+        "on budget",
+        "到点会停止派发新单元、cancel_event 唤醒在途、"
+        "shutdown(cancel_futures=True) 撤掉队列里未派发的;"
+        "在途未完成单元落 status=cancelled 行,保留未完成/不成对标记,"
+        "不偷偷补跑到矩阵齐全",
+    )
     runner.say("out", f"{runner.out_dir}/ab-runs.jsonl + ab-runs.log + "
                       + ", ".join(f"calls-{arm_label(*arm)}.jsonl"
                                   for arm in arms)
@@ -4094,6 +4130,14 @@ def _run_ab(
     5. **Knowhow 断言** —— `assert_knowhow_reflect_v2_off`,一次性。
     6. **gold 可解析** —— `resolve_gold_sources` 在跑批**之前**把每个短名解析
        成恰好一个 `source_id`,解析不到就整批不跑。
+
+    **T-EX8**:`--max-wall-minutes` 给了才计算 `deadline`(单调时钟,这里**一次**
+    算出绝对到点时刻,不在批里反复重算);不给 ⇒ `deadline=None`,`_ab_loop`/
+    `_ab_run_batch`/`_run_ab_arm` 的每一条新分支都先判 `is not None`,行为逐字
+    不变。收尾处写 `manifest.json`(`app.eval.reflect_manifest.build_manifest`
+    的 E3 通道),`stopped_by_budget` 如实记这批是不是因为预算到点提前收尾——
+    是的话即便 `failed == 0` 也以非零退出码收尾(§13「不偷偷补跑到矩阵齐全」
+    的另一半:也不能让预算掐断看起来像一次干净的成功跑批)。
     """
     from datetime import datetime
 
@@ -4104,6 +4148,12 @@ def _run_ab(
     from app.eval.reflect_ab import load_ab_gold, resolve_gold_sources
     from app.services.reasoning_retrieval import kg_in_scope_for
 
+    # 单调时钟,一次计算(T-EX8 要点 1)。`None` = 不给 `--max-wall-minutes`,
+    # 下游每一条新分支都先判 `is not None`,行为逐字不变。
+    deadline = (
+        None if args.max_wall_minutes is None
+        else time.monotonic() + float(args.max_wall_minutes) * 60.0
+    )
     arms = ab_arms(args)
     settings_by_arm = _settings_by_arm(arms)
     # **参照臂**:一批里那些与臂无关的事实(连接池容量、模型契约、`llm_log_enabled`、
@@ -4190,8 +4240,11 @@ def _run_ab(
         return 2
     context = set_request_user(profile)
     failed = 0
+    stopped_by_budget = False
+    intent_digests: dict[str, str] = {}
+    started_at = datetime.now().isoformat()
     try:
-        failed = _ab_loop(
+        failed, stopped_by_budget, intent_digests = _ab_loop(
             args, runner, units, facts, repos_by_arm,
             actor_id=actor_id, profile=profile, concurrency=concurrency,
             gold_by_key=gold_by_key, model_contract=contract_short,
@@ -4199,6 +4252,7 @@ def _run_ab(
             event_dir=Path(rig_event_log_dir(args.out_dir)),
             arms=arms, reference_arm=reference_arm,
             clock=datetime.now, llm_log_enabled=llm_log_enabled,
+            deadline=deadline,
         )
     finally:
         reset_request_user(context)
@@ -4207,6 +4261,24 @@ def _run_ab(
         # 上谁也说不清收尾走到了哪一步)。断言自己再抛的话会盖掉原始异常,所以
         # 这里只在没有别的异常在飞时才让它抛;有异常在飞时降级成一行告警。
         _assert_readonly_on_exit(runner, before, args.source_db_url)
+    finished_at = datetime.now().isoformat()
+    _write_ab_manifest(
+        runner, args, units=units, cells=cells, arms=arms, facts=facts,
+        model_contract=contract_short, settings=settings_by_arm[reference_arm],
+        intent_contract_digest_by_question=intent_digests,
+        started_at=started_at, finished_at=finished_at,
+        stopped_by_budget=stopped_by_budget,
+    )
+    if stopped_by_budget:
+        # 预算到点是这一批提前收尾的**理由**,即便 0 个 run 落成 failed 也不能
+        # 让它看起来像一次干净跑完的成功批次(T-EX8 要点 1「整批以预算到点为由
+        # 非零退出」)。
+        print(
+            "ERROR: 整批墙钟预算到点提前收尾"
+            f"(--max-wall-minutes={args.max_wall_minutes}),不补跑;"
+            "manifest.json 的 stopped_by_budget=true", file=sys.stderr,
+        )
+        return 1
     if failed:
         # 失败 run 已各自落成 `status=failed` 行;整批仍以非零退出码收尾,不能
         # 让「每个 run 都失败」看起来像一次成功的跑批(与 `search` 同口径)。
@@ -4322,16 +4394,27 @@ def _ab_loop(
     arms: Sequence[tuple[str, str]] | None = None,
     reference_arm: tuple[str, str] | None = None,
     llm_log_enabled: bool = True,
-) -> int:
+    deadline: float | None = None,
+) -> tuple[int, bool, dict[str, str]]:
     """整批配对单元。每个单元产出**两行**(两臂),一起写、一起标 `paired`。
 
-    返回落成 `status="failed"` 的行数——整批据此以非零退出码收尾(与 `search`
-    同口径):「每个 run 都失败」不能看起来像一次成功的跑批。
+    返回 `(failed, stopped_by_budget, intent_contract_digest_by_question)`:
+
+    * `failed` —— 落成 `status="failed"` 的行数(不含 `status="cancelled"`,
+      T-EX8 M5-4:预算掐断是删失观察,不是失败)。整批据此以非零退出码收尾
+      (与 `search` 同口径):「每个 run 都失败」不能看起来像一次成功的跑批。
+    * `stopped_by_budget` —— `deadline`(T-EX8 `--max-wall-minutes`)是否真的
+      让这一批提前收尾;`deadline is None`(不给)时恒 `False`。
+    * `intent_contract_digest_by_question` —— `question_key → ab_contract_
+      digest(...)`,manifest 的 `intent_contract_digest_by_question` 键直接
+      消费这份返回值,不重新遍历 `_IntentCache`。
 
     `--concurrency > 1` 时并发的是**单元**,不是臂:臂序随机与背靠背是 A/B 的
     立身之本(§4.2),把两条臂拆到不同线程会让「同题同档同时刻」这句话不再成
     立。重复轮之间加一道栅栏(逐轮 `_ab_round_units`),这样被截断的前缀仍然是
-    一份**完整轮**的数据集。
+    一份**完整轮**的数据集——预算到点提前收尾时这条性质仍然成立:一轮里被掐
+    掉的单元落 `cancelled` 行,后续轮次(`state["stopped_by_budget"]` 已真)整
+    个不再开始(见下面循环顶部的检查),已完成的前缀因此还是**完整轮**。
 
     并发时 per-call 表在**整批收尾**时一次出(见下面那段 `finally`):逐 run 的
     时间窗在并发下切不干净,而 `support_id` 的 ⋈ 不受窗口影响。
@@ -4352,6 +4435,10 @@ def _ab_loop(
     state = {
         "verified": set(), "index": 0, "total": len(units) * len(arms),
         "failed": 0, "lock": threading.Lock(),
+        # T-EX8:`deadline is None` 时这个键永远不会被翻成 `True`(见
+        # `_ab_run_batch`),下面 `return` 时恒 `False`——不给 `--max-wall-
+        # minutes` 的路径逐字相同。
+        "stopped_by_budget": False,
     }
     # 并发路径的整批窗口:批开跑之前记一次偏移,收尾时读到 EOF。
     batch_llm_offsets = _ab_llm_offsets(log_dir)
@@ -4369,6 +4456,14 @@ def _ab_loop(
         log.flush()
     try:
         for repeat, batch in _ab_round_units(units):
+            if state["stopped_by_budget"]:
+                # 预算已经在前一轮被掐断:后续轮次**整个不开始**——不偷偷补跑
+                # 到矩阵齐全(§13 原文),这些单元不落行、不发调用。冗余于
+                # `_ab_run_batch` 自己那道「已经过期直接零派发」的前置检查
+                # (变异验证已确认:去掉这一层,行为不变,`_ab_run_batch` 兜得
+                # 住),留着是为了不多打一行看起来要开始却什么也不做的
+                # `"repeat round rN: ..."` 日志。
+                break
             runner.say("repeat round", f"r{repeat}: {len(batch)} 个配对单元")
             _ab_run_batch(
                 batch, args=args, runner=runner, facts=facts,
@@ -4378,7 +4473,7 @@ def _ab_loop(
                 log_dir=log_dir, event_dir=event_dir, arms=arms,
                 reference_arm=reference_arm, clock=clock, state=state,
                 rows_handle=rows_handle, log=log,
-                llm_log_enabled=llm_log_enabled,
+                llm_log_enabled=llm_log_enabled, deadline=deadline,
             )
     finally:
         log.close()
@@ -4398,7 +4493,11 @@ def _ab_loop(
                                  event_offsets=batch_event_offsets,
                                  tags=None,
                              ))
-    return int(state["failed"])
+    intent_digests = {
+        key: ab_contract_digest(contract)
+        for key, contract in intents._rows.items()
+    }
+    return int(state["failed"]), bool(state["stopped_by_budget"]), intent_digests
 
 
 def _ab_round_units(units: Sequence[dict]) -> list[tuple[int, list[dict]]]:
@@ -4410,7 +4509,8 @@ def _ab_round_units(units: Sequence[dict]) -> list[tuple[int, list[dict]]]:
 
 
 def _ab_run_batch(
-    batch: Sequence[dict], *, concurrency: int, **kwargs: Any,
+    batch: Sequence[dict], *, concurrency: int, deadline: float | None = None,
+    **kwargs: Any,
 ) -> None:
     """一轮里的全部配对单元。**首个逃逸出来的异常 ⇒ 整轮收摊**。
 
@@ -4427,14 +4527,43 @@ def _ab_run_batch(
     * `shutdown(cancel_futures=True)` 撤掉**还在队列里**的。此前这里是
       `with ThreadPoolExecutor(...)` + `as_completed`,退出时走的是默认的
       `shutdown(wait=True)`:剩下的单元一个不少地照跑完,Ctrl-C 也停不下来。
+
+    **T-EX8 整批墙钟预算**(`deadline` 非 `None` 时才生效,`None` = 今天的行为
+    逐字相同,下面每条新分支都先判 `deadline is not None`):
+
+    * 到点后**停止派发**——串行路在 `for unit in batch` 循环顶部判(`kwargs
+      ["state"]["stopped_by_budget"] = True` 后 `break`,批里剩下的单元不落行、
+      不发调用);并发路在整批开跑前若已过点直接**零派发**返回,mid-batch 那半
+      靠一个 `threading.Timer` 在 `deadline` 那一刻触发,复用**既有**的
+      `abort()`(设 `aborted` ⇒ `worker()` 入口不再派发新单元;唤醒
+      `active_events` ⇒ 在途单元的 `cancel_event` 被设,`run_ab_once` 尽快抛
+      `AskCancelled`)。
+    * 在途单元的 `AskCancelled` 由 `_run_ab_arm` 按 `deadline` 转成一行
+      `status="cancelled"`(见该函数文档),**不**escaping 出 `worker()`,所以
+      这条预算路径不会触发 `except BaseException` 那条「先修再跑整批」的
+      `abort()`/`fatal` 级联——整批仍然干净地跑完,只是 `state
+      ["stopped_by_budget"]` 被标记为真,由 `_ab_loop`/`_run_ab` 读出并写进
+      manifest、决定退出码。
     """
+    state = kwargs["state"]
+    if deadline is not None and time.monotonic() >= deadline:
+        # 已经过期的 deadline(常见于：预算在上一轮结束时就已经耗尽,这一整
+        # 轮从第一个单元开始就不该派发)。
+        state["stopped_by_budget"] = True
+        return
     if concurrency <= 1:
         # **不经过线程池**:`--concurrency 1` 的行为必须与并发落地前逐字一致,
         # 包括「所有调用都在主线程里发生」这件事本身(与 `_search_loop` 同一条
         # 理由:`ThreadPoolExecutor(max_workers=1)` 也会把调用挪到另一个线程,
         # 单这一点就足以让 ContextVar 的可见性行为变掉)。
         for unit in batch:
-            _run_ab_unit(unit, concurrency=concurrency, **kwargs)
+            if deadline is not None and time.monotonic() >= deadline:
+                # 串行路没有「唤醒在途」这件事:检查点只在循环顶部,已经开跑的
+                # 单元此前从未被中途打断过,这里也不新引入这条能力(§13 只要求
+                # 「停止派发」,不要求串行路半路抢占)。
+                state["stopped_by_budget"] = True
+                break
+            _run_ab_unit(unit, concurrency=concurrency, deadline=deadline, **kwargs)
         return
     profile = kwargs["profile"]
     runner: Runner = kwargs["runner"]
@@ -4452,11 +4581,26 @@ def _ab_run_batch(
             event.set()
         runner.say("ab aborted", reason)
 
+    budget_timer: threading.Timer | None = None
+    if deadline is not None:
+        def _budget_hit() -> None:
+            state["stopped_by_budget"] = True
+            abort("--max-wall-minutes 预算到点:停止派发、唤醒在途单元")
+
+        budget_timer = threading.Timer(
+            max(0.0, deadline - time.monotonic()), _budget_hit,
+        )
+        budget_timer.daemon = True
+        budget_timer.start()
+
     def worker(unit: dict) -> None:
         from app.core.request_context import reset_request_user, set_request_user
 
         if aborted.is_set():
             # 已经决定收摊:还没真的开始跑的单元直接退出,不再发起模型调用。
+            # 预算到点(`_budget_hit` 调 `abort()`)与 §5.5 硬断言/
+            # `KeyboardInterrupt` 触发的收摊走的是同一个 `aborted` 标志,效果
+            # 相同——都是「不再派发新单元」。
             return
         cancel_event = threading.Event()
         with active_lock:
@@ -4465,7 +4609,7 @@ def _ab_run_batch(
         try:
             _run_ab_unit(
                 unit, concurrency=concurrency, cancel_event=cancel_event,
-                **kwargs,
+                deadline=deadline, **kwargs,
             )
         finally:
             reset_request_user(ctx)
@@ -4493,6 +4637,8 @@ def _ab_run_batch(
             abort("KeyboardInterrupt")
             fatal = exc
     finally:
+        if budget_timer is not None:
+            budget_timer.cancel()
         pool.shutdown(wait=True, cancel_futures=True)
     if fatal is not None:
         raise fatal
@@ -4509,6 +4655,97 @@ def ab_contract_digest(contract: object) -> str:
     """
     return merge_key(json.dumps(contract, ensure_ascii=False, sort_keys=True,
                                 default=str))
+
+
+def _ab_git_sha() -> str:
+    """`git rev-parse HEAD` 的短码,读不出来(浅克隆、非 git checkout、`git`
+    不在 PATH 上)⇒ `"unknown"`,**不抛**(T-EX8 要点 2)。
+
+    `code_sha` 是「冻结这一批跑在哪份代码上」的锚点,但它读不出来不该让一次
+    跑了几小时的批因为收尾时的一次诊断性 `git` 调用而报废——那不是这次跑批
+    要验的东西。`cwd=ROOT` 而不是当前工作目录:rig 可能被从任意目录调用。
+    """
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True,
+            text=True, check=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    sha = result.stdout.strip()
+    return sha or "unknown"
+
+
+def _write_ab_manifest(
+    runner: Runner, args: argparse.Namespace, *, units: Sequence[dict],
+    cells: Sequence[str], arms: Sequence[tuple[str, str]],
+    facts: Mapping[str, dict], model_contract: str | None, settings: Any,
+    intent_contract_digest_by_question: Mapping[str, str],
+    started_at: str, finished_at: str, stopped_by_budget: bool,
+) -> None:
+    """`ab` 收尾写 `<out-dir>/manifest.json`(T-EX8 要点 2;计划 Q9 · E3 通道)。
+
+    真正的闭集/隐私/`matrix` 子键契约全在 `app.eval.reflect_manifest`——这里
+    只把 `ab` 已经算好的事实翻成那份契约要的形状,不重新发明校验规则。
+
+    `matrix` 的五个基数子键(评审拍板,见 `reflect_manifest.
+    REQUIRED_MATRIX_KEYS_BY_CHANNEL["e3"]`)全部从 `units`/`arms` 直接数出来,
+    不借用 `cmd_ab` dry-run 那份 `unique_questions`(`(corpus_cell,
+    question_key)` 配对集合——按格去重会把「2 格 × 12 题」记成 24,这里要的是
+    12 道**真实**题)。`repeats` 是 `--round` 下的**这一轮**(等于 1),不是
+    `--repeats` 的总档位;轮号本身另记 `matrix["round_index"]`,不塞进
+    `repeats`。
+    """
+    matrix: dict[str, Any] = {
+        "questions": len({unit["question_key"] for unit in units}),
+        "cells": len(cells),
+        "efforts": len({unit["effort"] for unit in units}),
+        "arms": len(arms),
+        "repeats": 1 if args.round is not None else args.repeats,
+    }
+    if args.round is not None:
+        matrix["round_index"] = int(args.round)
+    budgets = {
+        "reasoning_timeout_seconds": int(
+            getattr(settings, "reasoning_timeout_seconds",
+                    REASONING_TIMEOUT_SECONDS_DEFAULT)
+        ),
+        "reasoning_attempt_budget": 1 + int(
+            getattr(settings, "reasoning_max_retries", 1)
+        ),
+        "max_wall_minutes": args.max_wall_minutes,
+        "batch_deadline_seconds": (
+            None if args.max_wall_minutes is None
+            else round(float(args.max_wall_minutes) * 60)
+        ),
+    }
+    row = build_manifest(
+        code_sha=_ab_git_sha(),
+        channel="e3",
+        arms=[format_arm(*arm) for arm in arms],
+        optimization_by_arm={format_arm(*arm): arm[1] for arm in arms},
+        common_baseline="off",
+        corpus_signature_by_cell={
+            cell: facts[cell]["corpus_signature"] for cell in cells
+        },
+        intent_contract_digest_by_question=dict(
+            intent_contract_digest_by_question),
+        model_contract=model_contract,
+        arm_order_seed=None,
+        matrix=matrix,
+        budgets=budgets,
+        started_at=started_at,
+        finished_at=finished_at,
+        stopped_by_budget=stopped_by_budget,
+    )
+    # 手改过的行(`build_manifest` 内部已经验过一遍)再验一遍才落盘:与
+    # `_ab_failed_row` 的「手改过再验一遍」同一条纪律。
+    assert_manifest(row)
+    (runner.out_dir / "manifest.json").write_text(
+        json.dumps(row, ensure_ascii=False, sort_keys=True, indent=2),
+        encoding="utf-8",
+    )
+    runner.say("manifest", str(runner.out_dir / "manifest.json"))
 
 
 #: 失败 run 那一行里必须落成 unknown 的答案级/成本级键。`answer_chars=0` 会被
@@ -4528,8 +4765,14 @@ def _ab_failed_row(
     unit: dict, *, arm: str, fact: dict, model_contract: str | None,
     steps: Sequence[dict] = (), has_intent_contract: bool = False,
     optimization: str = "off", run_wall_ms: int | None = None,
+    status: str = "failed",
 ) -> dict:
-    """没跑成的一条臂的那一行:`status="failed"`,键集与成功行**逐字相同**。
+    """没跑成的一条臂的那一行:键集与成功行**逐字相同**。
+
+    `status` 默认 `"failed"`(既有语义不变);T-EX8 的整批墙钟预算到点时,调用方
+    传 `status="cancelled"`——两者共用同一条「没有答案/没有成本三键」的落行
+    路径,唯一区别是 `JOB_STATUSES` 里那个闭集值,读侧据它把预算掐断的删失
+    观察与真实失败分开计(§10 M5-4)。
 
     `optimization` 与 `arm` 同一条口径:声明照常落,失败行才能和成功行放进同一
     张按臂分组的表。`run_wall_ms` 见 `stamp_run_wall_ms`——崩在半路的 run 有墙钟
@@ -4558,7 +4801,7 @@ def _ab_failed_row(
         notebook_id=fact["notebook"], gold=None,
         model_contract=model_contract,
         corpus_signature=fact["corpus_signature"],
-        status="failed",
+        status=status,
     )
     for key in AB_FAILED_UNKNOWN_KEYS:
         row[key] = None
@@ -4579,8 +4822,14 @@ def _run_ab_unit(
     arms: Sequence[tuple[str, str]] | None = None,
     reference_arm: tuple[str, str] | None = None,
     cancel_event: Any = None, llm_log_enabled: bool = True,
+    deadline: float | None = None,
 ) -> None:
     """一个配对单元:同题同档同轮,两条臂背靠背跑完,两行一起落。
+
+    `deadline`(T-EX8)只是原样转发给 `_run_ab_arm`——这一层不判断是否到点,
+    到点后是否还继续跑本单元由调用方(`_ab_run_batch`)在派发前决定;这里只
+    保证已经派发的单元把 `deadline` 带到位,好让 `_run_ab_arm` 分清「预算掐断
+    的取消」与「§5.5 硬断言/KeyboardInterrupt 触发的取消」。
 
     **臂序按 run 随机**(§4.2):provider 的排队与限流漂移对两臂等量,臂序本身
     不成为系统偏差。随机不带种子——它要的就是不可预测,而这批数据的可复现性由
@@ -4668,6 +4917,7 @@ def _run_ab_unit(
                 event_dir=event_dir, clock=clock,
                 out_dir=runner.out_dir, database_url=args.database_url,
                 cancel_event=cancel_event, llm_log_enabled=llm_log_enabled,
+                deadline=deadline,
             )
             rows.append(row)
             if calls:
@@ -4702,15 +4952,19 @@ def _run_ab_unit(
                 f"reflect_turns={row['reflect_turns']} "
                 f"termination={row['termination_reason']} "
                 f"answer_chars={row['answer_chars']} paired={row['paired']}"
-                + (f" status=failed reason={reason}" if reason else "")
+                + (f" status={row['status']} reason={reason}" if reason else "")
             )
             log.write(line + "\n")
             runner.say("ab done", line)
             if reason:
                 # 没跑成,没有协议证据可对——不参与「声明的臂 vs 轨迹证据」核对,
-                # 也不该消费掉这条臂的「第一个样本」名额;但要计进失败数,整批
-                # 因此以非零退出码收尾(codex #700 R9 P2 的同一条口径)。
-                state["failed"] += 1
+                # 也不该消费掉这条臂的「第一个样本」名额。`reason == "cancelled"`
+                # (T-EX8 整批墙钟预算掐断)**不**计进 `state["failed"]`:那是一次
+                # 删失观察,不是一次真实失败——混进失败率会让预算掐断看起来像
+                # 「这一批模型全崩了」(§10 M5-4)。真实失败仍计入,整批因此以
+                # 非零退出码收尾(codex #700 R9 P2 的同一条口径)。
+                if reason != "cancelled":
+                    state["failed"] += 1
                 continue
             if arm not in state["verified"]:
                 # **每条臂的第一个 run 之后**就把「声明的臂」与「轨迹里真的发生
@@ -4762,6 +5016,7 @@ def _run_ab_arm(
     log_dir: Path, event_dir: Path, clock: Any, out_dir: Path,
     database_url: str,
     cancel_event: Any = None, llm_log_enabled: bool = True,
+    deadline: float | None = None,
 ) -> tuple[dict, str, list[dict]]:
     """一条臂的一个 run。返回 `(投影行, 失败原因类名或空串, per-call 行)`。
 
@@ -4773,6 +5028,15 @@ def _run_ab_arm(
     `AskCancelled`——那是整批收摊的信号,不是这一个 run 的失败。失败前捕获到的
     轨迹步照常带进那一行(codex #700 R13 P2),`run_wall_ms` 也照常记:它崩在半
     路,但确实占了这么久的墙钟。
+
+    **例外(T-EX8)**:`deadline` 非空且已经到点时接住 `AskCancelled`,落一行
+    `status="cancelled"` 而不是继续往上抛。判据是墙钟(`time.monotonic() >=
+    deadline`),不是「谁调用了 `cancel_event.set()`」——同一个 `cancel_event`
+    也被 `_ab_run_batch` 的既有异常收摊路复用(§5.5 硬断言不成立 /
+    `KeyboardInterrupt`),那两条路**没有**给 `deadline`(`_run_ab_unit` 只在
+    T-EX8 的批预算路上传非 `None` 的 `deadline`),所以这条分支只在预算到点的
+    场景下成立,不改变既有的「先修再跑整批」级联(`--max-wall-minutes` 不给时
+    `deadline` 恒 `None`,这条分支永远走不到,行为逐字不变)。
 
     `clock` 是**墙钟**(`datetime.now`),不是 `time.monotonic`:成本三键靠 LLM
     日志的时间窗切片归因(§7.2),而日志里那个 `ts` 是
@@ -4823,6 +5087,19 @@ def _run_ab_arm(
             scope_source_ids=scope_ids,
         )
     except AskCancelled:
+        if deadline is not None and time.monotonic() >= deadline:
+            # T-EX8:预算到点唤醒的在途单元——落一行 `status="cancelled"`
+            # (删失观察),不往上抛。`reason="cancelled"` 让调用方(`_run_ab_unit`)
+            # 既跳过 `assert_arm_matches_evidence`(没有协议证据可对,与失败行同
+            # 口径),又不把它计进「N 个 run FAILED」——预算掐断是预期收尾,不是
+            # 一次真实失败(§10 M5-4「cancelled 单列成删失,不混进失败率」)。
+            return _ab_failed_row(
+                unit, arm=arm[0], optimization=arm[1], fact=fact,
+                model_contract=model_contract,
+                steps=steps, has_intent_contract=contract is not None,
+                run_wall_ms=round((time.monotonic() - started) * 1000),
+                status="cancelled",
+            ), "cancelled", _calls()
         raise
     except Exception as exc:  # noqa: BLE001 — 单个 run 失败要隔离
         return _ab_failed_row(
@@ -5397,6 +5674,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--round", type=int,
         help="`ab` 只跑第 N 轮(与 --repeats 配合:先跑第 1 轮看结论,再补"
              "第 2/3 轮)。不给就是 1..--repeats 全跑",
+    )
+    parser.add_argument(
+        "--max-wall-minutes", type=float, default=None,
+        help="`ab` 的整批墙钟预算(分钟,T-EX8)。**不给 = 今天的行为逐字相同**"
+             ":不设上限、不早停。到点后停止派发新单元、cancel_event 唤醒在途、"
+             "shutdown(cancel_futures=True) 撤掉队列里的;在途未完成单元落"
+             " status=cancelled 行(删失观察),不偷偷补跑到矩阵齐全;整批以"
+             "非零退出码收尾。写进 manifest.json 的 stopped_by_budget",
     )
     parser.add_argument(
         "--mode", choices=("reasoning", "chunk", "auto"), default="reasoning",
