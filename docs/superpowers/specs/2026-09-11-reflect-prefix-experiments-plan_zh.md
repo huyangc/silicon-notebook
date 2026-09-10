@@ -174,6 +174,25 @@ E2 的执行入口沿用 `run_search_once`(`:2151-2213`)的三层 scope 形状(`
 
 **Q9 · manifest 落点与形状**:`<out-dir>/manifest.json`,三条通道共用;纯构造函数在 `backend/app/eval/reflect_manifest.py`(闭集键 + 隐私断言 + 零 I/O),rig 只做 `git rev-parse` 与写文件。键集:`code_sha` / `channel`(e1|e2|e3)/ `arms` / `optimization_by_arm` / `common_baseline`(= PR-1 公共基线,固定短码)/ `corpus_signature_by_cell` / `intent_contract_digest_by_question` / `model_contract` / `seed` / `arm_order_seed`(E3 恒 `null` + 一句说明,见 M4)/ `order`(枚举顺序的声明)/ `matrix`(题/档/臂/轮/状态点各自的计数)/ `budgets`(单次超时、重试预算、整批墙钟预算、整批截止时长)/ `started_at` / `finished_at` / `stopped_by_budget`(bool)。隐私断言:值只许是闭集短码、数值、bool、`null`、以及它们的列表/以短码为键的字典 —— 与投影同一把尺子;**不含**生产凭据/URL(§8.2)、不含题面原文、不含标记值以外的任何文本。
 
+**Q9 评审后修正(T-EX11 回填,2026-09-11)**:实施与两轮评审把上面这份 16 键闭集扩到
+**18 键**——`+case_set_digest`(E2 必填:12 例 case JSON 的摘要短码)、
+`+sample_digest`(E1 必填:上下文样本的摘要短码,长度进 `matrix.tiers`)。`matrix`
+子键契约收进 `reflect_manifest.py` 模块常量
+`REQUIRED_MATRIX_KEYS_BY_CHANNEL`(评审后再收紧为**维度基数 int** 的形状):
+`e1={tiers,blocks,arms,calls_per_series}`、`e2={cases,state_points,arms,repeats}`、
+`e3={questions,cells,efforts,arms,repeats}`(`questions` 是本批真实题数、
+`repeats` 写 rounds;`--round` 时为 1,`round_index` 另记);`matrix` 必须是非空
+`Mapping`;
+三条通道各自的 `matrix` 之外还可以带额外 int 子键(`planned_runs` 三通道通用、
+E1 的 `marker_variant`),闭集不因此改动。新增**全通道共同必填表**
+`REQUIRED_KEYS_ALL_CHANNELS = {code_sha, started_at, finished_at,
+stopped_by_budget}`——本期 E1/E2 不实施掐停逻辑,`stopped_by_budget` 恒写
+`False`,键本身仍必须在场。落点见 `backend/app/eval/reflect_manifest.py` 的
+`MANIFEST_KEYS`/`REQUIRED_KEYS_ALL_CHANNELS`/`REQUIRED_MATRIX_KEYS_BY_CHANNEL`
+三个模块常量。三条通道 rig 侧的写点统一为 `manifest.json`(最新,走
+`Runner.write` 覆盖)+ `manifests.jsonl`(历史,追加)——这条规则本期由
+T-EX4/T-EX8 落地(E1/E3),`state-probe`(E2)见 T-EX11b。
+
 **Q10 · 不改 `docs/operations*.md`**。§12 写的是「必要时更新 operations 配对文档」,而那两份文档里今天一句 reflect / rig 都没有(实测 grep 只命中无关的「前缀」字样),E1/E2/E3 是评测工具而不是生产运维动作。落点全部收敛到 `scripts/README.md`。这是一条**如实收窄**,写进 §4。
 
 ## §3 任务拆分
@@ -192,6 +211,22 @@ E2 的执行入口沿用 `run_search_once`(`:2151-2213`)的三层 scope 形状(`
 
 **依赖** 无。**可与 T-EX2 / T-EX6 / T-EX9 完全并行。**
 
+**实施记录(2026-09-11)**:两轮评审把闭集从要点里写的 16 键扩到 **18 键**
+(`+case_set_digest`、`+sample_digest`),`matrix` 子键契约收进本模块常量
+`REQUIRED_MATRIX_KEYS_BY_CHANNEL`(见 Q9 评审后修正)并改成**维度基数 int**
+的形状;新增全通道共同必填表 `REQUIRED_KEYS_ALL_CHANNELS`
+(`code_sha`/`started_at`/`finished_at`/`stopped_by_budget`);隐私变异 (c) 组
+加「污染点在字典键」一格(`{"budgets": {"题面原文": 1}}` 同样被拒);
+命名红线正则同时扫子键表;导出 `assert_manifest(row)` 作为全量入口(内部
+`deepcopy` 后分别核闭集/必填/隐私三件事)。docstring 显式登记两处已知限制、
+不当成缺口:(1) 值形状闸只挡自由文本/URL/连接串,**不挡**短码字符集内的
+`sk-…` 形态凭据或裸 `host:port`——真正挡住凭据落地的是 18 键闭集里没有一个
+键是给凭据用的;(2) 标量分支复用 `bool`/`int`/`float` 的 `isinstance` 判据,
+`float("nan")`/`float("inf")` 会被放行,与兄弟模块 `_is_numeric_leaf` 共担
+同一把尺子。私有导入 `_is_short_code`(而非公开的
+`assert_projection_values`)维持——同一个短码判据,仓库内已有同形先例
+(`app/services/source_embedding.py`)。
+
 ### T-EX2 `llm.py` 的 E1 接缝 · **opus** · ~55 行生产码 + ~120 行用例
 
 **落点** `backend/app/core/llm.py:217-256`(`provider_messages` 加第三参数)、`:640` 附近(`chat_json` 读一次 ContextVar)、模块顶部(ContextVar + 上下文管理器);用例进 `backend/tests/test_llm_client.py`(`:169-330` 已有 `provider_messages` / `serialize_provider_messages` 的用例族,接在后面)。
@@ -205,6 +240,25 @@ E2 的执行入口沿用 `run_search_once`(`:2151-2213`)的三层 scope 形状(`
 **为什么 opus** 这是本期唯一动生产传输路径的一格,「零字节变化」的判据要自己想清楚(等价性、cache key、mutate、异步调度下的 ContextVar 传播)。
 
 **依赖** 无。
+
+**实施记录(2026-09-11)**:评审后修正三处。F1(负向断言的覆盖面)——AST 判据
+除了 `_EXPERIMENT_MARKERS.set(` 这个 Name 形写法,还认 Attribute 形
+(`x._EXPERIMENT_MARKERS.set(`)与导入别名;负向扫描从最初的
+`app/services/`/`app/application/` 扩到 `backend/app/**`,只豁免
+`app/core/llm.py` 自身与 `app/eval/`(只放纯函数,arming 只在 `scripts/`)。
+F2——生产路径上的 `_measure_reflect_messages` 用两参数 `provider_messages`
+重建消息,接缝开着时那次重建**保持无标记**(纯函数不动):`ctx_bytes_total`/
+`message_prefix_bytes` 两个 reflect 测量列因此对标记接缝**盲**,与实际发出去
+的字节不同;这是刻意拍板(见 T-EX11 已知限制),不是漏改。F3——两臂标记
+「等长等数」的判据半边(纯字符串层,不发请求)划给 T-EX3 的
+`build_marker_pair` 承担,本任务只钉「同一次调用两个标记都进 `llm_key`
+输入」。另加两条防御:空字符串标记、非 `str` 标记在
+`experiment_message_markers` 里响亮拒绝(用例各一格);`_EXPERIMENT_MARKERS`
+的接缝注释限定在「经 `copy_context`/`background_jobs.submit` 派发的路径」,
+`gap_consult` 私有线程是已登记的例外(不经这条派发路径,接缝在那条线程上打
+不开,登记进 E1 已知限制而非漏洞)。`_PRE_SEAM_BASELINE_SHA` 并列比对用例在
+合入集成分支后不可达,长期 skip,由两条不依赖 git 历史的等价用例承担 CI
+判据。
 
 ### T-EX3 E1 纯计划与纯分析 · sonnet · ~200 行
 
@@ -224,6 +278,22 @@ E2 的执行入口沿用 `run_search_once`(`:2151-2213`)的三层 scope 形状(`
 
 **依赖** T-EX1(manifest 的 E1 必填键)、T-EX2(标记构造的等价面)。
 
+**实施记录(2026-09-11)**:评审拍板序列身份 = `(tier, block_index, arm)`,
+`build_marker_pair` 签名回填为
+`build_marker_pair(seed, tier, block_index, arm, call_index, *,
+marker_variant=0)`(要点 1 的原始签名缺 `tier`,评审后补上)。行闭集加
+`gap_ms`(与上一次调用的间隔,首格 `None`,由 T-EX4 写值)。摘要新增
+`repeat_observation` 逐臂中位数,与 `first_observation` 对称报告(design
+§9.1「首次观测不是已验证冷缓存」)。命名红线正则扩到
+`cache_hit|hit_rate|命中|percent|_pct`,同时递归扫真实 `summarize_probe`
+输出的顶层键(不只扫 `probe_row_keys` 这张静态闭集)。`tier_chars` 只写计划
+里实跑到的那几个档位,不把样本声明的全部档位都塞进 manifest。阈值来源如实
+标注:`_verdict` 的判据是**实现自定阈值**,design 对具体数字沉默,不冒充原文
+——阈值本身写进 `scripts/README.md`(见 T-EX11)。质量评审二轮另修:
+`render_sample` 地板不足时 `ValueError`;`probe_manifest_facts` 的
+`arms`/`calls_per_series` 从 `plan` 推算,参数保留为交叉校验(不一致时
+`ValueError`,签名不变,T-EX4 已按现签名调用)。
+
 ### T-EX4 E1 rig 子命令 `prefix-probe` · sonnet · ~140 行
 
 **落点** `scripts/reflect_shadow_rig.py`(新增 `cmd_prefix_probe` + `build_parser` 的 command 闭集加一格 + 三四个 `--probe-*` 参数);用例进 `backend/tests/test_reflect_t0_scripts.py`。
@@ -237,6 +307,30 @@ dry-run 必须打印:逻辑调用数(96/48)、按重试预算算的**请求上�
 **用例** (a) dry-run 打印两个数与产物落点(逐字钉住 96 / 上界 / 48 三个数,照 T-PL6 修正轮把 `≤106`/`≤212` 钉死的做法);(b) 给了 `--database-url` ⇒ 退 2;(c) 行闭集守卫(往行里加一个 `prompt` 键 ⇒ 红);(d) 用一个进程内假客户端跑通 6 格的缩批,断言标记的头尾位置与两臂剧本;(e) 接缝在命令退出后已复位。
 
 **依赖** T-EX2、T-EX3。
+
+**实施记录(2026-09-11)**:`finish_reason` 空串折 `None`(非短码形状同样折
+`None`,行 docstring 写明「provider 没说」)。整批收尾(含预算到点/异常)统一
+走 `try/finally`:`provider.close()` 与已打的行落盘/摘要/manifest 写作
+salvage,`except BaseException` 也要落盘再重新抛出。删掉临时的
+`PREFIX_PROBE_TIMEOUT_SECONDS` 常量,改用 T-EX8 已经镜像好的
+`REASONING_TIMEOUT_SECONDS_DEFAULT=90`(与 `ab` 的单次超时读同一个常量);
+`_rig_git_sha` 与 `_ab_git_sha` 二选一,取 T-EX8 带 `-dirty` 后缀的那份并在
+本任务复用。`gap_ms` 口径钉死为「本格**发起** − 同序列上一格**返回**」
+(真实空闲),首格与跨序列一律 `None`。全局 `--max-wall-minutes` 的 help
+文案合成一条,同时描述 `ab` 与 `prefix-probe`(不是两条重复参数)。
+`--marker-variant`(`type=int, default=0`)落地,`matrix.marker_variant` 作为
+额外 int 子键随 manifest 写出。dry-run 八项(target/seed/scale/model
+calls/timeout/batch wall-clock budget/sample/marker
+variant/warmup/sequence/out/isolated logs/conclusion scope)逐项钉死,两个
+规模的数字精确为 `97 次逻辑调用(96 格计划 + 1 预热);请求上界 ≤ 194` 与
+`49 次逻辑调用(48 格计划 + 1 预热);请求上界 ≤ 98`。per-call 表
+(`calls-e1.jsonl`)的对齐规则写进 `cmd_prefix_probe` 的 docstring(见
+T-EX11 的 `scripts/README.md` 转述)。预热格若命中本地缓存单独计数、也让
+整批非零退出(接受,更严格);真跑显式传
+`timeout=settings.reasoning_timeout_seconds,
+max_retries=settings.reasoning_max_retries`;预算过期时预热本身也不打
+(比“预热不受预算约束”更严格,接受)。`_write_manifest`/`_wall_budget_problem`
+收敛为三通道共用的 rig 私有函数,`ab` 的收尾几行改调它们。
 
 ### T-EX5 E2 驱动器与代理 · **opus** · ~230 行
 
@@ -265,6 +359,28 @@ dry-run 必须打印:逻辑调用数(96/48)、按重试预算算的**请求上�
 
 **依赖** T-EX1。
 
+**实施记录(2026-09-11)**:`StateProbeError` 继承 `BaseException`(不是
+`Exception`)保留——否则 `_reflect_v2_attempt` 的 fail-open 会把「站错状态
+点」洗成假兜底;rig 的批处理 `except Exception` 因此**抓不到**它,要按格
+容错必须显式 `except StateProbeError`,默认语义是停批。`settings_overrides`
+在 `run_state_probe_point` 里套到 `settings_for_arm` 的副本上(建 retriever
+之前),覆盖值判据要求 int 且非 bool、`≥1`。`state_point` 行键是**序号**
+0/1/2,不是轮号——三档报告按序号分组(轮号在 12 例之间不可比),轮号用
+`case.state_point_turn(i)` 单独取。三层 scope
+(`model_work_scope`/`retrieval_run(event_log=None)`/`source_scope_context`)
+与臂对号 `assert_optimization_matches_evidence` 都已在 `run_state_probe_point`
+内部,rig(T-EX7)不必再包一层。`matrix` 四个基数(`cases`/`state_points`/
+`arms`/`repeats`)由 `state_probe_manifest_facts` 算好,rig 只补
+`code_sha`/时间/语料签名/`model_contract`/`budgets`。`assessment_rows` 读的
+是**模型那份决定**(`ForwardedTurn.raw`),不是驱动器自己发的停止决定那一轮
+trace(后者恒 1 行)。`n_decision_unreadable` 拆成
+`n_decision_absent`/`n_decision_unreadable_action` 两格(修正轮二)。
+`FORBIDDEN_VALUE_FRAGMENTS` 的 id 前缀判据加词首锚,`case_key` 过短码闸,
+override 值非 int/`<1` 一律拒绝。**登记的一处重复**:`prepare_frozen_intent`
+与 rig 的 `_prepare_search_intent` 是同一份逻辑两份实现;收敛办法是
+T-EX7 让 rig 改调前者(`contract=None` 那半留在 rig 侧)——本轮(不含 T-EX7)
+尚未合入,详见 T-EX11b。
+
 ### T-EX6 E2 的 12 例 case 集 · **opus** · ~300 行 JSON + ~60 行对账用例
 
 **落点** 新建 `backend/app/eval/reflect_t0/state_probes.json`;对账用例进 `backend/tests/test_reflect_state_probe.py`。
@@ -291,6 +407,24 @@ dry-run 必须打印:逻辑调用数(96/48)、按重试预算算的**请求上�
 
 **依赖** T-EX5 的 case schema(可先按 schema 草案并行写,汇合时对齐一次)。**可与 T-EX1/T-EX2/T-EX9 并行。**
 
+**实施记录(2026-09-11)**:「八种形态」回填为**九种**
+(`probe_shape` 闭集:`single_fact`/`complex_condition`/`graph_in_scope`/
+`no_graph`/`roster`/`large_collection`/`zero_hit`/`repeat_request`/
+`tool_exhausted`,原表格把「单事实」「复杂条件」「工具耗尽」各算一种、实际
+按承载方式数出九种独立形态)。原「单事实 2 轮剧本」回填为**≥4 轮**
+——三个状态点要求严格递增且第三点尽量落在压缩边界之后,2 轮剧本放不下三个
+状态点。case schema 在 Q5 基础上多两个键:`question_key`(与
+`reflect_t0/questions.json` 交叉引用)、`probe_shape`(形态对账用),闭集
+`REQUIRED_CASE_KEYS`/`OPTIONAL_CASE_KEYS` 落在 T-EX5 的加载器里(顶层键闭集
+因此归 T-EX5,不在本模块重复声明)。零命中形态用统一哨兵前缀
+`absent_probe.`(`ZERO_HIT_SENTINEL` 常量)过 `exact_lookup` 的 `term` 参数
+——过短码闸又保证真实为零命中。质量评审二轮再修两处:「满额度耗尽」形态
+改为**生产默认额度 + 逐例 `settings_overrides` 跨轮消耗**(逐例断言期望的
+不可用集合非空,如 `te-a-benchmarks` → `{2,4}`、`te-b-kivi-bits` → `{2,5}`);
+两条复杂条件例的 `mandatory_topics[].question` 改词避开
+`query_intent._UNRESOLVED_REFERENCE`(原文含「这个」会被折回 objective)。
+题面与语料沿用 `questions.json` 的 34 题,不另起一套。
+
 ### T-EX7 E2 rig 子命令 `state-probe` · sonnet · ~150 行
 
 **落点** `scripts/reflect_shadow_rig.py`(`cmd_state_probe` + command 闭集 + 参数);用例进 `backend/tests/test_reflect_t0_scripts.py`。
@@ -307,6 +441,11 @@ dry-run 打印:逻辑 chat 调用数(216 / 三臂;`--arms` 加 L 则 288;`--limi
 
 **依赖** T-EX5、T-EX6、T-EX1。
 
+**实施记录**:见 T-EX11b。本任务(ex7)已完成实现与两轮评审修正,但**尚未合入
+本轮(T-EX11a 所在)集成分支**;`state-probe` 子命令的行为细节、评审修正要点
+与 `scripts/README.md`/`fangan_todo.md` 对应落点由 T-EX11b 在 ex7 合入后
+一次性补齐。
+
 ### T-EX8 E3:整批墙钟预算 + manifest 接进 `ab` · sonnet · ~110 行
 
 **落点** `scripts/reflect_shadow_rig.py:4412-4500`(`_ab_run_batch` 加 deadline)、`:3268-3360`(`cmd_ab` 的 dry-run 多打三行)、`:4079-4200`(`_run_ab` 收尾写 manifest);用例进 `backend/tests/test_reflect_t0_scripts.py`。
@@ -322,6 +461,27 @@ dry-run 打印:逻辑 chat 调用数(216 / 三臂;`--arms` 加 L 则 288;`--limi
 **用例** (a) 不给 ⇒ 路径等价;(b) 给一个已经过期的 deadline ⇒ 零派发、退出码非零、manifest 里 `stopped_by_budget=true`;(c) 中途到点 ⇒ 在途单元落 `cancelled` 行、队列里的单元不落行也不发调用;(d) manifest 键集与隐私守卫;(e) dry-run 三行文案。
 
 **依赖** T-EX1。**与 T-EX3/T-EX5 并行。**
+
+**实施记录(2026-09-11)**:用例落点是 `backend/tests/test_reflect_ab.py`
+(计划要点原写 `test_reflect_t0_scripts.py`,以代码现状为准回填)。manifest
+`budgets` 子键为实现者自定的四个:`reasoning_timeout_seconds`/
+`reasoning_attempt_budget`/`max_wall_minutes`/`batch_deadline_seconds`;
+`reasoning_attempt_budget` 复用既有 `REASONING_ATTEMPT_BUDGET` 常量,
+`reasoning_timeout_seconds` 钉 `Settings().reasoning_timeout_seconds` 的默认值
+而不是硬编码 90(用例不硬写 90s)。`_ab_loop` 改为返回三元组、
+`_ab_failed_row` 收 `status=` 关键字参数,便于到点停批时按格标注
+`status="cancelled"`。到点判据照搬既有
+`_search_loop_concurrent` 的同锁复核模式,worker 入口另补一次 deadline 判据;
+`abort()` 内的置位在锁内完成。`_ab_git_sha` 加 `-dirty` 后缀
+(工作树不干净时),T-EX4 复用同一份函数(不再各写一份)。
+`manifest.json`(最新)+ `manifests.jsonl`(历史)三通道同规则由本任务定稿,
+T-EX4/T-EX7 照做。`planned_runs` 作为三条通道 manifest 的额外 int 子键
+(E3 = `len(units) * len(arms)`)。质量评审修正 `matrix` 对账:E3 各格题集
+**不相交**(`ask_plan` 按 corpus 过滤),因此 E3 总 run 数 =
+`questions × efforts × arms × repeats`,`cells` 不是乘数——这一点已回填进
+`reflect_manifest.py` 的 E3 注释。`code_sha` 记全 SHA(docstring 已改准);
+`intent_contract_digest_by_question` 只取本批 units 实跑的题(与磁盘缓存
+`_rows` 求交),不写续跑目录里没跑到的题(存疑项已拍板)。
 
 ### T-EX9 `analyze` 的三处读出口子 · **opus** · ~170 行
 
@@ -341,6 +501,26 @@ dry-run 打印:逻辑 chat 调用数(216 / 三臂;`--arms` 加 L 则 288;`--limi
 
 **依赖** 无(只碰 `analyze` 与它的用例)。**可与 T-EX1/T-EX2/T-EX6 并行。**
 
+**实施记录(2026-09-11)**:`--key-set ab` 放行 A/B 专属列之后,那些列**不进**
+四组标量指标的读出(登记已知缺口;要读需要一次「键集感知的指标元组」独立
+改动,本期未做)。基线 SHA 并列比对用例在 rebase 合入集成分支后 skip,长期
+由冻结常量与 golden fixture 守形状。`paired` 的读侧与写侧改成同一口径:
+`paired is False` 的行**不入**配对格(t0 行没有这个键,行为不变),两侧各报
+`n_unpaired` 进 `ROLLUP_SIDE_COUNTS`(`=("n_censored","n_failed",
+"n_unfinished","n_unpaired")`)与逐格表,不只写进散文。rollup 旧键
+`n_censored`/`n_failed` 改为按**基线/变体两侧**分别报(仅 `--pair-rows` 分支
+生效),新增 `n_unfinished`(同样分基线/变体);成功判据收拢成常量
+`SUCCESS_STATUS = "done"` 白名单。逐题配对表头带臂名 + `P50(n)`;
+`ROLLUP_FACETS = ("effort", "corpus_cell")`;golden fixture 落在
+`backend/tests/fixtures/reflect_t0_analysis_golden.*` 与
+`reflect_t0_pair_rows_golden.*`(重签命令写在用例 docstring 里)。质量评审
+二轮**动了一处默认路径**(有意,登记为预存缺陷修复):布尔维度 `False` 不再
+折成 `unknown`(`pair_table` 与 `_optimization_cells` 两处),只在输入真带
+`has_intent_contract=False` 的行时才改变 `pairs`/`optimization_pairs`,原有
+golden 未受影响不需重签。`backend/app/eval/reflect_ab.py:98-100` 那段
+「D↔L 差值不由 `optimization_pair_table` 直接给出」的过期 docstring 已随
+本任务的 `--baseline-arm` 落地一并改写(见 T-EX11 对该 docstring 的修正)。
+
 ### T-EX10 验证清单与变异复核 · **opus** · 纯验证,零代码
 
 **要点** 五处不可协商性质各做一次变异、确认报红、精确还原:
@@ -354,6 +534,17 @@ dry-run 打印:逻辑 chat 调用数(216 / 三臂;`--arms` 加 L 则 288;`--limi
 另复核 §12 逐条(见 §4 的映射表),以及**三条通道的 dry-run 在无库无模型机器上全部可跑**这一条(E1/E2 新增,E3 既有)。
 
 **依赖** T-EX2..T-EX9 全部。
+
+**实施记录(2026-09-11,已合入 `135acf2de`)**:五处变异全部实测报红并精确还原
+(a 5 例红/b-1 3 例红/c 26 例红/d 8 例红/e 2 例红),§12 十一条逐条落点核实,
+§13 交付物表逐行核实(E1/E3 真源确认;E2 三格标「待 ex7」)。发现并**已修补**
+一处守卫缺口:变异 (b) 只覆盖了 `summarize_probe` 返回**键**的命名红线
+(`_BANNED_NAME_PATTERN` 递归扫描),没有覆盖 `probe-summary.md` **正文渲染层**
+——`_render_probe_summary_markdown` 若单独在 md 里多写一行
+`- cache_hit_rate: …`,原有判据全绿而不报红(风险点在报告散文,计划 §5
+风险 4 已点名)。补测试(生产代码零改动)钉住 md 正文的命名红线扫描,变异复核
+后确认真红。三条通道的 dry-run 在无库无模型机器上全部可跑(E1/E2 新增,
+E3 既有)。
 
 ### T-EX11 T5 文档收官 · sonnet · 只改文档与注释
 
@@ -448,7 +639,7 @@ T-EX6 与 T-EX5 之间有一条**schema 契约**:先由 T-EX5 把 case schema �
 3. **不补造数据**(§9.2 原话)。三处具体形态:E2 的第三状态点没触到压缩边界 ⇒ 标 `false` 并单列,不调剧本去凑;E3 的预算到点 ⇒ 保留未完成/不成对标记,不补跑到矩阵齐全;`cached_tokens` / `usage` / `finish_reason` 缺失 ⇒ 缺席 = unknown,**绝不折 0**(既有 `_count` / `_measure_reflect_call` 的口径,新模块照抄)。
 4. **命名红线**。字段与表头一律不出现 `cache_hit` / 命中率 / hit rate 形状;E1 的结论词面限定在「有 / 无可辨认 / 不确定的时间收益」三格。T-EX3 (d)(f) 两条用例主动钉住,T-EX10 (b) 做一次变异。风险点在**报告散文**而不在代码:一篇写着「稳定前缀省了 30% token」的报告,代码层面一条用例都拦不住 —— 所以 `scripts/README.md` 那一节要把「不可下结论」的三句逐字写进去,让写报告的人抄得到。
 5. **E2 的归因边界最容易被越过**。它测的是「固定观察下的策略」,**不是**自洽真实轨迹;P↔B 的差里混着指令/工具说明的布局改动(§9.2 原文:「不能宣称纯缓存因果」);D↔L 在固定状态点上的差是**已知净增**的那一侧(省的那一侧结构上看不见,见 U2)。三句都要同时出现在 `state-probe` 的摘要头部与 README,而不只在设计稿里。
-6. **E3 的质量门在 gold 缺位下会被读成「通过」**。§10.2 明说未验证 ≠ 通过,而一份只有时间列漂亮的报告很容易被这样读。缓解:`analyze` 的报告在 `gold_facts_total` 全 `None` 时,那一节要**印一行显式的「质量:未验证(无 gold / 无盲审记录)」**,而不是留空。这是 T-EX9 的一条用例。
+6. **E3 的质量门在 gold 缺位下会被读成「通过」**。§10.2 明说未验证 ≠ 通过,而一份只有时间列漂亮的报告很容易被这样读。缓解:`analyze` 的报告在 `gold_facts_total` 全 `None` 时,那一节要**印一行显式的**质量提示,而不是留空。这是 T-EX9 的一条用例。**实况回填(2026-09-11)**:实现落地的措辞不是「质量:未验证(无 gold / 无盲审记录)」这一句,而是「无 gold / 无盲审记录 ⇒ **判分与人工那半边未验证**」(`scripts/analyze_reasoning_trace.py:1126`)——「未验证」只对判分与人工那半边成立(`QUALITY_JUDGED_KEYS`),不是整份质量结论的全称否定;对一份压根没有质量列的数据集印一句质量结论本身就该更谨慎地限定范围。
 7. **热函数与既有闭集零松弛**。本期落点里没有一处在 `reasoning_retrieval.py` / `prompts.py` / `reasoning_aspects.py` / `reasoning_context.py`;四个闭集(`RUN_PROJECTION_KEYS` / `AB_PROJECTION_KEYS` / `CALL_ROW_KEYS` / `JOB_STATUSES`)一格不动。任何一格被动了,就说明这一格的设计跑偏了 —— 停下来重新看 M5(§10 的门确实全部读得出来)。
 
 ---
