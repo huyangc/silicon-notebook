@@ -268,12 +268,31 @@ class L2Block:
     Purely descriptive: it does not read, render, or gate anything. It
     exists so the L1/L2 boundary is legible in one place instead of only in
     scattered per-parameter comments across ``app.services.prompts``.
+
+    ``param_aliases`` lists the OTHER parameter names that carry this same
+    block. It exists because the two mechanical guards in
+    ``tests/test_prompt_layers.py`` match a registered ``block_id`` against a
+    prompt function's parameter names, so a function that injects a registered
+    block under a different parameter name falls outside BOTH of them —
+    silently. ``reflect_v2_prefix_user_prompt(question, contract, material)``
+    was exactly that hole (review P3-8): its data seam is called ``material``,
+    the registration lived only in the prose above, and the backward guard
+    would never notice a new injection slot being added to it or the existing
+    one being renamed. Register an alias rather than splitting the block when
+    the two names really are one block rendered by two layouts; register a
+    separate ``L2Block`` when they are two different blocks.
     """
 
     block_id: str
     prompts: Tuple[str, ...]
     description: str
     source: str
+    param_aliases: Tuple[str, ...] = ()
+
+    @property
+    def param_names(self) -> Tuple[str, ...]:
+        """Every parameter name that counts as carrying this block."""
+        return (self.block_id, *self.param_aliases)
 
 
 L2_BLOCKS: Tuple[L2Block, ...] = (
@@ -285,17 +304,21 @@ L2_BLOCKS: Tuple[L2Block, ...] = (
     ),
     L2Block(
         "candidates_summary",
-        ("reflect_prompt", "reflect_v2_user_prompt"),
+        ("reflect_prompt", "reflect_v2_user_prompt",
+         "reflect_v2_prefix_user_prompt"),
         "reflect 循环当前已收集候选证据的摘要文本，驱动下一步检索动作的选择。"
         "（v2 协议把一轮 reflect 拆成 system/user 两段，这个块落在 user 段——"
         "指令与数据分离的整个意义就是它不能和固定指令混在一条消息里。v2 下这个"
         "形参承载的是三个**各自带标题**的子块：服务器状态、证据卡、动作观察账，"
         "由 app.services.reasoning_context.ReflectContext 装配；legacy 下仍是"
         "一整段候选摘要。prefix_snapshot 布局下同一批块换成 C/K/D/T 的顺序，"
-        "并由 reflect_v2_prefix_user_prompt 承载——那一份不叫 candidates_summary，"
-        "因为它接的已经是装配好的分块材料而不是一段摘要。）",
+        "由 reflect_v2_prefix_user_prompt 的 material 形参承载——同一个块、"
+        "两个布局各自一个渲染函数，所以它登记成 param_aliases 而不是另一个"
+        "L2Block；那一份的形参不叫 candidates_summary，因为它接的已经是装配好的"
+        "分块材料而不是一段摘要。）",
         "app.services.reasoning_retrieval（组装）；v2 分块在 "
         "app.services.reasoning_context / reasoning_observation",
+        param_aliases=("material",),
     ),
     L2Block(
         "history_block",
