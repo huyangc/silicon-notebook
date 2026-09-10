@@ -327,11 +327,70 @@
         「缺了几轮」，而不是一次偶发抖动把整条 run 读成 unknown。
       * **`search` 子命令的投影 `optimization` 仍恒 unknown**：同 (j)/(k) 那一条，第二维只接在
         `ab` 臂上，本期一格未动。
-      * **D↔L 的差值不由 `optimization_pairs` 表直接给出**：那张表的基线硬编码 `off`，一批只有 D
-        和 L 两条臂时两侧配对表都是空；要读这道差值得把 `off` 也跑进各自那一批（分两批，「一次只收
-        一对」不允许三格挤进一批）、各自对 `off` 做差之后再相减。另外 `ab-runs.jsonl` 每行带 ab 专属
-        键（`paired`/`pair_id` 等），`analyze_reasoning_trace.py` 的 `load_rows` 会整批拒绝——先把行
-        降到 T0 键集才喂得进 `analyze`。这是 T-PS4 起就有的既有结构，PR-5 的实验通道再定读出路径。
+      * ~~**D↔L 的差值不由 `optimization_pairs` 表直接给出**~~ **已由 PR-5（T-EX9）解除**：
+        `optimization_pair_table` 的基线从硬编码 `off` 换成 `--baseline-arm` 参数（默认仍是
+        `off`），`--arms v2:prefix_delta,v2:prefix_delta_lean --baseline-arm prefix_delta` 现在
+        就能在只有 D/L 两条臂的批次上直接出配对表，不必再把 `off` 也跑进各自的批次自己相减。
+        `ab-runs.jsonl` 每行带的 ab 专属键（`paired`/`pair_id` 等）仍需要显式 `--key-set ab` 才
+        放行（`load_rows` 默认拒绝的既有纪律不变，T-PS4 起）。读法见 `scripts/README.md` 的 `ab`
+        小节；PR-5 三条实验通道的入口与产物见下面 (m)。
+
+      (m) **PR-5「T4 实验通道(E1/E2/E3)+ T5 文档收官」已部分落地**（计划真源
+      `docs/superpowers/specs/2026-09-11-reflect-prefix-experiments-plan_zh.md`，上游设计同
+      (l) 的 §8/§9/§10/§11/§12/§13）：新增三条只读实验通道，一个都不改任何生产策略的默认行为
+      （`REASONING_REFLECT_OPTIMIZATION` 默认仍是 `off`）。
+
+      * **E1「前缀复用敏感性探针」**（`scripts/reflect_shadow_rig.py prefix-probe`，纯计划与
+        统计在 `backend/app/eval/reflect_prefix_probe.py`）：`app/core/llm.py` 上加了一道默认
+        关闭的实验标记接缝（`ContextVar` + `provider_messages` 第三参数 + `experiment_message_markers`
+        上下文管理器），三条判据钉死零字节变化、唯一 set 点、业务层不 import；产物
+        `probe-stable.jsonl`/`probe-disturbed.jsonl`/`probe-warmup.jsonl`/`probe-summary.{md,json}`
+        + `manifest.json`(+ `manifests.jsonl`)+ `calls-e1.jsonl`。详见 `scripts/README.md` 的
+        `prefix-probe` 小节。
+      * **E2「固定状态的真实 reflect 对照」**（驱动器 `backend/app/eval/reflect_state_probe.py`
+        与 12 例 case 集 `backend/app/eval/reflect_t0/state_probes.json` 已落地；rig 子命令
+        `state-probe` **尚未合入本轮**）：详见 T-EX11b（合入后补 `scripts/README.md` 的
+        `state-probe` 小节与本条已知限制）。
+      * **E3「真实自主循环」**：在既有 `ab` 上补整批墙钟预算（`--max-wall-minutes`，到点停止派发、
+        保留未完成/不成对标记，不补跑到矩阵齐全）+ manifest 收尾。
+      * **manifest 纯构造**（`backend/app/eval/reflect_manifest.py`）：三条通道共用 18 键闭集 +
+        隐私断言，`matrix` 子键契约按通道各自登记（E1 `tiers`；E2 `state_points`；E3
+        `questions`/`efforts`/`arms`/`repeats`），全通道共同必填 `code_sha`/`started_at`/
+        `finished_at`/`stopped_by_budget`。
+      * **`analyze` 新增三处读出口**（`scripts/analyze_reasoning_trace.py`）：`--baseline-arm`
+        （取代硬编码 `OPTIMIZATION_BASELINE`）、`--pair-rows`（逐题配对差值表）、
+        `--key-set {t0,ab}`（默认 `t0` 不变）。默认参数下行为与今天逐字节相同。
+
+      PR-5（T4 部分）的**已知限制**（知情接受，不改代码；首份报告要照抄）：
+
+      * **E1 的 AST 唯一 set 点判据只认 `_EXPERIMENT_MARKERS.set(` 这一种拼法**：别名/间接调用
+        绕过是同强度先例（PR-4 已有此形状），不逐一穷举写法。
+      * **E1 开着时,`_measure_reflect_messages` 的两参数重建消息保持无标记**（纯函数不动）：
+        `ctx_bytes_total`/`message_prefix_bytes` 这两个 reflect 测量列在标记接缝开着的期间对
+        标记**盲**，与实际上线字节不同——E1 本身不跑 reflect，分析侧要读单次调用的真实字节应
+        改读 per-call 表（`calls-e1.jsonl` 的 `usage`/`latency_ms`），不要读那两个测量列。
+      * **`_EXPERIMENT_MARKERS` 的接缝限定在经 `copy_context`/`background_jobs.submit` 派发的
+        路径**：`gap_consult` 私有线程是已登记的例外（不经这条派发路径，接缝在那条线程上打不
+        开），是已知限制不是漏洞。
+      * **HEAD 并列字节比对用例在 shallow clone 下 skip**：由两条不依赖 git 历史的等价用例承担
+        CI 判据，那条并列比对只在有完整历史的机器上跑一次额外交叉核对。
+      * **`--key-set ab` 放行的 A/B 专属列不进四组标量指标的读出**：要读需要一次「键集感知的
+        指标元组」独立改动，本期未做。
+      * **基线 SHA 并列比对用例在跨 PR rebase 合入后必 skip**：长期由冻结常量与 golden fixture
+        （`backend/tests/fixtures/reflect_t0_analysis_golden.*`）守住形状。
+      * **manifest 的标量分支复用 `bool`/`int`/`float` 的 `isinstance` 判据**：`float("nan")`/
+        `float("inf")` 会被放行，写出的 `manifest.json` 因此理论上可能不是严格 JSON——与兄弟模块
+        `reasoning_trace_stats._is_numeric_leaf` 共担的已知限制，不在本期单修。
+      * **`search` 子命令的投影 `optimization` 仍恒 unknown**：同 (j)/(k) 那一条，第二维只接在
+        `ab` 臂上，本期一格未动。
+      * **E3 的臂序按 run 无种子**：`arm_order_seed` 恒 `null`（M4），键本身必须在场，是否要给
+        E2/E3 加臂序种子交用户拍板。
+      * **E2 的图动作缺口、`message_prefix_bytes` 恒 `None`、`compaction_boundary_reached` 三值
+        报告等 state-probe 专属限制**：详见 T-EX11b（rig 子命令合入之后补齐）。
+      * **gold 与 judge 仍未做**（U1 拍板走 (b) 人工盲审替代，不补 T-AB1/T-AB3）：§10.2-1 在没有
+        人工盲审记录时只能记「未验证」，不能读成「通过」。
+      * **三条通道的实际收益一个数都还没量**：本期交付的是可重跑命令、产物形状与 manifest，不是
+        采用结论；**开闸仍是此之后的独立决定**，默认 `off` 不变。
 - [ ] **深度报告一侧的方面送达复核补上簇折叠表**：Ask 侧 `_answer_context` 已经把
       `knowledge_context` 的 `fold_sink`（同 canonical 簇被折叠掉的成员 → 代表）折进
       `admitted_evidence_keys`；报告侧 `_draft_section` 走 `knowledge_context_with_outline`，

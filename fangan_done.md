@@ -514,3 +514,51 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 - **退回判据的两条补丁（2026-09-09 评审后）**：`has_next_turn` 再并上**动作面**那一半——收尾动作是 `update_outline` 且大纲额度只剩最后一格时不退回（下一轮会在发出模型调用之前就以 `only_answer` 收尾，追问句送不到模型面前），按「第二次沉默」记 `assessment_omitted`；这是只看大纲额度的保守近似，宁可少问一次也不白折一轮。配套两处：run 收尾时追问若仍未被消费（发出过、却一次都没渲染）走同一个入口记 `assessment_omitted`；而被 §5.2 折成降级轮的那一次**不算送达**，`nudge_pending` 重新置位（两道闸：没发出过不置位、上一次已被回应不置位）。折叠路径不安排 overflow 纠错轮是知情取舍，溢出在终态里仍被如实披露。
 - **`finish_reason` 沿 `__cause__`/`__context__` 链读（2026-09-09 评审后）**：生产的 `ScheduledJsonChatClient` 把 `MalformedModelResponse` 重抛成 `ModelInvocationError`，而 `finish_reason` 只挂在被包住的那一层上——只读最外层的话生产里所有空正文都落回 `empty`，同轮翻倍重试结构性不生效。与 `.reason` 共用同一次遍历，出参 `call_stats` 仍然优先。
 - **`classify_provider_failure` 不再把畸形回复算作熔断信号（2026-09-09）**：本机并发实测里几次空正文/坏 JSON 一凑齐连续 3 次就把熔断器打开，之后同批 run 直接吃 `model_service_unavailable`——但空正文已经有上面那条逐调用重试与连续两轮才收尾的降级路径，熔断器不该为同一件事再收一次费。`MalformedModelResponse` 改判 `FailureKind.IGNORED`（真连接失败仍走 `ConnectionError`/`TimeoutError`/5xx，照常计入 TRANSIENT）；半开探测期间收到畸形回复视为「探测已证明服务可达」直接闭闸（而不是像其它 IGNORED 结果那样弹回 open、靠不重置的 `_opened_at` 换一次立即重试）——取舍与两条路径的注释都写在 `model_circuit_breaker.py` 里。**放弃了什么 / 保留了什么**（2026-09-09 评审后补齐）：放弃的是「畸形回复参与服务可用性判定」——不进熔断、不武装 `_needs_recovery`、不把面板状态改成 `error`；保留的是**可观测性**——`_apply_completion_locked` 仍为畸形回复记一条观测（`status="ok"` + `code="malformed_response"` + `trigger="observed_failure"`），管理页因此看得见这个真机上最常见的失败模式。状态之所以是 `ok` 而不是新加一档：面板那一列就是可用性字段，而 `error` 行只能靠 `_needs_recovery` 在下一次成功时写 `recovery_probe` 才治愈——不武装就永久钉住「不可用」，武装了又等于把模型行为放回可用性账；再加一档 `degraded` 则要动两个 store 的 CHECK 约束、公开 API 的 Literal 与前端白名单（一次 schema 迁移，换一个按定义不该影响可用性的诊断值）。另有一道闸：服务已被标记待恢复（standing `error` 行）时不写这条观测，畸形回复不是恢复信号。
+
+## 33. reflect 前缀复用 PR-1–PR-5 五期收官（2026-09-09～09-11）
+
+设计真源 `docs/superpowers/specs/2026-09-09-reflect-prefix-cache-final-design_zh.md`
+（§1 决策与适用范围、§8 测量合同、§9 三层实验、§13 交付物与回退）。承接 §32/§32.1 的
+v2 基线，以下五个 PR 依次交付「稳定前缀复用」候选布局及其测量/实验通道，**全部保持
+`REASONING_REFLECT_OPTIMIZATION` 默认 `off`，只在 v2 总闸（`REASONING_REFLECT_V2_ENABLED`，
+默认关）后面生效**。
+
+- **PR-1 公共基线修复**（计划 `docs/superpowers/specs/2026-09-09-reflect-v2-baseline-fixes_zh.md`）：
+  枚举侧规模守卫按集合泛化、参数与原因码前移到解析层、收尾计时归位（`_closing_rerank`）、
+  自评按方面拒绝解耦（`assessment_rejections`）。四项均只影响 v2 臂，legacy 逐字节不变；
+  已知限制见 `fangan_todo.md` (i)。
+- **PR-2「T0 测量 + `prefix_snapshot`」**（计划 `2026-09-09-reflect-prefix-snapshot-plan_zh.md`）：
+  `REASONING_REFLECT_OPTIMIZATION`（`off`/`prefix_snapshot`）与正交的
+  `REASONING_REFLECT_MEASURE_CONTEXT`、S/C/K/D/T 布局、静态工具目录恒超集、单次调用观测
+  （`call_wall_ms`/`status`/`attempts`/`response_chars`/`usage`）、闭集投影新增九列、rig 的
+  `EVENT_LOG_DIR` 隔离/`run_wall_ms`/`(policy, optimization)` 二维臂/per-call 表。已知限制见
+  `fangan_todo.md` (j)。
+- **PR-3「`prefix_delta` 增量上下文」**（计划 `2026-09-10-reflect-prefix-delta-plan_zh.md`）：
+  K/D 两块分工（K 是相位开局快照、D 是逐轮只追加的增量块）、卡片一经真发送即冻结字节、
+  补充卡追加而不覆写、双池累计预算在追加前核验、重建有迟滞、回退不可逆且只影响该 run。
+  已知限制见 `fangan_todo.md` (k)。
+- **PR-4「`prefix_delta_lean` 轻量自评」**（计划 `2026-09-10-reflect-prefix-delta-lean-plan_zh.md`）：
+  第四格布局——与 D 同一份消息装配，只差自评合同：普通轮只报变化、收尾轮沉默即接受不
+  追问、终态多一行「未逐项核验」披露；`AspectLedger.lean_assessment` 是一格 run 级冻结的
+  只读开关，唯一构造点由 AST 守卫钉住。已知限制见 `fangan_todo.md` (l)。
+- **PR-5「T4 实验通道（E1/E2/E3）+ T5 文档收官」**（计划
+  `2026-09-11-reflect-prefix-experiments-plan_zh.md`）：
+  - **E1「前缀复用敏感性探针」**（`scripts/reflect_shadow_rig.py prefix-probe`）：
+    `app/core/llm.py` 上默认关闭的实验标记接缝（模块级 `ContextVar` + `provider_messages`
+    第三参数 + `experiment_message_markers` 上下文管理器，三条判据钉死零字节变化）+ 纯
+    计划与统计（`backend/app/eval/reflect_prefix_probe.py`）。
+  - **E2「固定状态的真实 reflect 对照」**：驱动器与 `model_clients` 代理
+    （`backend/app/eval/reflect_state_probe.py`，`ProbeModelClients` 只截
+    `chat("reasoning_agent")`）+ 12 例 case 集（`reflect_t0/state_probes.json`）；rig 子命令
+    `state-probe` 详见 T-EX11b。
+  - **E3「真实自主循环」**：在既有 `ab` 上补整批墙钟预算（`--max-wall-minutes`，到点停止
+    派发、保留未完成/不成对标记，不补跑到矩阵齐全）+ manifest 收尾。
+  - 三条通道共用的 manifest 纯构造（`backend/app/eval/reflect_manifest.py`，18 键闭集 +
+    隐私断言）与 `analyze` 三处新读出口（`--baseline-arm`/`--pair-rows`/`--key-set`）。
+  已知限制见 `fangan_todo.md` (m)。
+
+**五期共同的验证口径**：每个 PR 落地时 `bash scripts/check.sh` 全绿（架构守卫热函数零松弛
+棘轮 `run`/`_new_run_state`/`_run_enumeration` 逐字未提高上限）；新增守卫均按「删掉这一行
+则这条红」逐条变异验证过。**真实模型 A/B 与生产收益测量仍未做**——PR-5 只交付实验通道、
+dry-run 输出与 manifest，不带任何采用结论；**开闸仍是此之后的独立决定，默认 `off` 不变**，
+任一质量或稳定性回归可立即回到 `off`，不做数据迁移。
