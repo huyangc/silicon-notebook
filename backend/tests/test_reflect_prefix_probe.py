@@ -27,6 +27,7 @@ from app.eval.reflect_prefix_probe import (
     DEFAULT_BLOCKS,
     DEFAULT_CALLS_PER_SERIES,
     DEFAULT_TIERS,
+    PROBE_OUTPUT_INSTRUCTION,
     PROBE_ROW_KEYS,
     SMOKE_BLOCKS,
     VERDICTS,
@@ -161,6 +162,15 @@ def test_probe_plan_rejects_bad_shapes():
         probe_plan(seed=1, calls_per_series=0)
 
 
+def test_probe_plan_rejects_odd_blocks():
+    """(P3-8)奇数区组让 `_stable_first_flags` 多出来的那一个恒分给
+    disturbed 先,三档之间同向叠加成一个系统性顺序偏置——E1 实际只跑
+    `SMOKE_BLOCKS`(2)与 `DEFAULT_BLOCKS`(4)两个规模,拒绝奇数不影响任何
+    既有调用方。"""
+    with pytest.raises(ValueError):
+        probe_plan(seed=1, blocks=3)
+
+
 # --- (b) 可复现性 --------------------------------------------------------------
 
 def test_probe_plan_same_seed_reproduces_different_seed_usually_differs():
@@ -196,6 +206,32 @@ def test_stable_first_flags_depends_on_seed_and_tier():
     assert len(set(per_tier.values())) > 1
 
 
+def test_stable_first_flags_are_pinned_for_seed_101():
+    """(P3-1)臂序种子的跨进程/跨版本可复现性此前没有金标钉住——
+    `test_stable_first_flags_depends_on_seed_and_tier` 只断言"存在差异",
+    把随机源换成 `random.Random(hash((seed, tier, "arm_order")))`(变异
+    Q2)后依然能凑出"至少两个不同分法",41 个用例照样全绿;而 `hash()`
+    每进程随机化,同一个 `arm_order_seed` 换一台机器就换一种分法,§13
+    「冻结 manifest 可复现」当场失真。这里把 `(seed=101, tier)` 的具体
+    flags 列表钉成字面量金标(自己跑一次 `_stable_first_flags` 取值写死)。
+    """
+    assert probe._stable_first_flags(4, 101, "short") == [False, True, False, True]
+    assert probe._stable_first_flags(4, 101, "medium") == [True, False, False, True]
+    assert probe._stable_first_flags(4, 101, "long") == [True, True, False, False]
+
+
+def test_series_index_is_globally_unique_and_non_decreasing():
+    """(P3-2)`series_index` 是整份计划里第几个序列(全局单调递增),用来在
+    分析侧把一个序列的四行认成一组。把 `series_index = block_index`(变异
+    Q19)后,三档 × 两臂的 24 个序列会共用 4 个编号,T-EX4 的分组会直接
+    错——这里直接钉住"24 个序列、24 个互不相同的编号、整条计划非降"。
+    """
+    plan = probe_plan(seed=13)
+    series_indices = [row["series_index"] for row in plan]
+    assert len(set(series_indices)) == len(DEFAULT_TIERS) * DEFAULT_BLOCKS * 2
+    assert series_indices == sorted(series_indices)
+
+
 def test_build_marker_pair_is_deterministic_per_call():
     for _ in range(3):
         assert build_marker_pair(5, "short", 2, ARM_STABLE, 3) == build_marker_pair(5, "short", 2, ARM_STABLE, 3)
@@ -226,6 +262,14 @@ def test_marker_pair_equal_length_and_count_across_arms():
 
 
 def test_marker_values_do_not_overlap_across_arms_and_ends():
+    """(P3-3)`head`/`tail` 各自恒以 `"H"`/`"T"` 开头,`stable_heads &
+    stable_tails` 这类跨端集合交集因此**不管 `_marker_code` 怎么写都恒空**
+    ——这两条曾是重言式断言,变异 Q23(payload 去掉 `component`)全绿。改成
+    去掉前缀字母、直接比较码体本身:同一 `(seed, tier, block_index, arm,
+    index, marker_variant)` 缺了 `component` 区分 head/tail 时,`call_index
+    == head_index`(如 stable 臂第 0 次调用)的那些行会让 head/tail 码体
+    撞在一起,这里才真的挡得住。
+    """
     plan = probe_plan(seed=17, blocks=2)
     stable_heads = {r["head"] for r in plan if r["arm"] == ARM_STABLE}
     stable_tails = {r["tail"] for r in plan if r["arm"] == ARM_STABLE}
@@ -233,8 +277,13 @@ def test_marker_values_do_not_overlap_across_arms_and_ends():
     disturbed_tails = {r["tail"] for r in plan if r["arm"] == ARM_DISTURBED}
     assert not (stable_heads & disturbed_heads)
     assert not (stable_tails & disturbed_tails)
-    assert not (stable_heads & stable_tails)
-    assert not (disturbed_heads & disturbed_tails)
+
+    stable_head_bodies = {h[1:] for h in stable_heads}
+    stable_tail_bodies = {t[1:] for t in stable_tails}
+    disturbed_head_bodies = {h[1:] for h in disturbed_heads}
+    disturbed_tail_bodies = {t[1:] for t in disturbed_tails}
+    assert not (stable_head_bodies & stable_tail_bodies)
+    assert not (disturbed_head_bodies & disturbed_tail_bodies)
 
 
 def test_marker_streams_do_not_overlap_across_series():
@@ -252,6 +301,35 @@ def test_marker_streams_do_not_overlap_across_series():
         series_tails.setdefault(key, set()).add(row["tail"])
 
     assert len(series_heads) == len(DEFAULT_TIERS) * DEFAULT_BLOCKS * 2
+
+    seen_heads: set[str] = set()
+    for key, heads in series_heads.items():
+        assert not (heads & seen_heads), f"{key} head collides with an earlier series"
+        seen_heads |= heads
+
+    seen_tails: set[str] = set()
+    for key, tails in series_tails.items():
+        assert not (tails & seen_tails), f"{key} tail collides with an earlier series"
+        seen_tails |= tails
+
+
+def test_marker_payload_separators_prevent_tier_field_boundary_collisions():
+    """(P3-11)`_marker_code` 的 payload 只有 `tier` 是自由字符串,字段之间靠
+    `:` 分隔符唯一定位边界——去掉全部分隔符(变异 Q1)后,`tier="a"` +
+    `block_index=11` 与 `tier="a1"` + `block_index=1` 这类组合会拼出逐字
+    相同的字符串(`"1a11..."` == `"1a11..."`),而当前实现是真的不会碰
+    (分隔符纪律真实生效)。用 `tiers=("a", "a1"), blocks=12` 直接构造这个
+    边界,按序列(而不是按逐行)比较——同一序列内 head(stable)/tail
+    (disturbed)本来就该在 `call_index` 之间恒定,只有跨序列的标记流才
+    要求两两不交。
+    """
+    plan = probe_plan(seed=1, tiers=("a", "a1"), blocks=12)
+    series_heads: dict[tuple, set[str]] = {}
+    series_tails: dict[tuple, set[str]] = {}
+    for row in plan:
+        key = (row["tier"], row["block_index"], row["arm"])
+        series_heads.setdefault(key, set()).add(row["head"])
+        series_tails.setdefault(key, set()).add(row["tail"])
 
     seen_heads: set[str] = set()
     for key, heads in series_heads.items():
@@ -482,6 +560,31 @@ def test_summarize_probe_empty_input():
     assert summary["verdict"] == "undetermined"
 
 
+def test_summarize_probe_returns_pinned_top_level_and_nested_key_set():
+    """(P3-7)`summarize_probe` 的返回键集合钉成字面量白名单——命名红线正则
+    (`_BANNED_NAME_PATTERN`)只挡红线词**形状**,挡不住悄悄新增一个合法但
+    未经审视的顶层键(变异 Q7 的姊妹场景:少键;多键同样值得挡)。任何新增
+    顶层键、或 `overall`/`by_tier` 内层键都必须先过这条用例。
+    """
+    summary = summarize_probe(_paired_rows(stable_ms=1000, disturbed_ms=1500))
+    assert set(summary) == {
+        "row_count_total", "warmup_row_count", "local_cache_exit_rows",
+        "failed_row_count", "first_observation_row_count",
+        "repeat_observation_row_count", "cached_tokens_observed",
+        "by_tier", "overall", "verdict",
+    }
+    scope_keys = {
+        "n_regions_paired", "median_wall_ms_delta", "median_wall_ms_ratio",
+        "consistency_ratio", "first_observation", "repeat_observation",
+    }
+    observation_keys = {"stable_median_wall_ms", "disturbed_median_wall_ms"}
+    assert set(summary["overall"]) == scope_keys
+    assert set(summary["overall"]["first_observation"]) == observation_keys
+    assert set(summary["overall"]["repeat_observation"]) == observation_keys
+    for tier_summary in summary["by_tier"].values():
+        assert set(tier_summary) == scope_keys
+
+
 # --- (f) 结论闭集三格 + 变异 ----------------------------------------------------
 
 def _paired_rows(*, stable_ms: int, disturbed_ms: int, n_blocks: int = 4) -> list[dict]:
@@ -579,20 +682,25 @@ def test_verdict_requires_consistency_not_just_positive_median_delta():
 
 
 def test_summarize_region_pairs_uses_median_not_mean():
-    """(T-EX3-f,codex #T-EX3 F8)design §9.1 明写「**中位**墙钟差与比值」;
-    换成 `statistics.mean`(M19)41 个用例全绿——这条用例构造一批
-    均值≠中位数的观测,精确锁定中位数。
+    """(T-EX3-f,codex #T-EX3 F8;P3-10)design §9.1 明写「**中位**墙钟差与
+    比值」;换成 `statistics.mean`(M19)41 个用例全绿——这条用例构造一批
+    均值≠中位数的观测,精确锁定中位数。离群值放在**首位**(不是末位):
+    换成"取区组内第一个样本"(变异 Q27,`stable_vals[0]`)时,末位离群值
+    版本恰好也等于中位数,挡不住这个变异;首位离群值能同时挡住 mean 与
+    `[0]` 这两种错误实现。
 
-    一个区组内,disturbed 的三次重复观测是 1000/1000/4000:中位数 1000、
-    均值 2000。stable 恒 1000。用中位数时 delta 应为 0,用均值时会是 1000。
+    一个区组内,disturbed 的三次重复观测是 4000/1000/1000(按 call_index
+    1/2/3 的顺序,离群值排第一):中位数 1000、均值 2000、`vals[0]` 是
+    4000。stable 恒 1000。用中位数时 delta 应为 0,用均值或"取第一个"时
+    都不是 0。
     """
     rows = [
         _make_row(block_index=0, arm=ARM_STABLE, call_index=1, call_wall_ms=1000),
         _make_row(block_index=0, arm=ARM_STABLE, call_index=2, call_wall_ms=1000),
         _make_row(block_index=0, arm=ARM_STABLE, call_index=3, call_wall_ms=1000),
-        _make_row(block_index=0, arm=ARM_DISTURBED, call_index=1, call_wall_ms=1000),
+        _make_row(block_index=0, arm=ARM_DISTURBED, call_index=1, call_wall_ms=4000),
         _make_row(block_index=0, arm=ARM_DISTURBED, call_index=2, call_wall_ms=1000),
-        _make_row(block_index=0, arm=ARM_DISTURBED, call_index=3, call_wall_ms=4000),
+        _make_row(block_index=0, arm=ARM_DISTURBED, call_index=3, call_wall_ms=1000),
     ]
     result = probe._summarize_region_pairs(rows)
     assert result["median_wall_ms_delta"] == 0
@@ -729,6 +837,20 @@ def test_render_sample_output_instruction_is_identical_across_tiers(sample):
     assert len(tails) == 1
 
 
+def test_render_sample_output_instruction_present_and_length_is_exact(sample):
+    """(P2-2)`render_sample` 三档正文都必须真的**含有**完整的输出指令,而且
+    正文总长度精确等于 `sample_tier_chars` 声明的目标——此前没有任何用例
+    断言这两件事:去掉整段输出指令(变异 Q25)、`growing_target` 不再扣
+    分隔符与指令长度(变异 Q4)、`_fill_to_length` 去掉 `[:target_chars]`
+    截断(变异 Q3)全部全绿。这里同时钉住"在场"与"精确长度"。
+    """
+    tier_chars = sample_tier_chars(sample)
+    for tier in DEFAULT_TIERS:
+        content = render_sample(tier, sample)[0]["content"]
+        assert PROBE_OUTPUT_INSTRUCTION in content, tier
+        assert len(content) == tier_chars[tier], tier
+
+
 def test_sample_digest_is_stable_and_sensitive_to_content(sample):
     assert sample_digest(sample) == sample_digest(sample)
     mutated = copy.deepcopy(sample)
@@ -742,6 +864,31 @@ def test_sample_tier_chars_matches_fixture(sample):
     assert chars["short"] < chars["medium"] < chars["long"]
     for value in chars.values():
         assert isinstance(value, int) and value > 0
+
+
+def test_sample_tier_chars_rejects_non_increasing_targets(sample):
+    """(P2-1)三档字符数必须严格递增(`short < medium < long`,按
+    `DEFAULT_TIERS` 顺序)——此前这条性质只由 fixture 自身恰好满足的取值
+    间接成立,换一份打平或倒序的 `tier_chars` 时没有任何守卫会挡住。"""
+    mutated = copy.deepcopy(sample)
+    mutated["tier_chars"] = {"short": 8000, "medium": 8000, "long": 16000}
+    with pytest.raises(ValueError):
+        sample_tier_chars(mutated)
+
+
+def test_render_sample_rejects_target_at_or_below_fixed_floor(sample):
+    """(P2-1)`render_sample` 在声明的档位字符数不超过"四个固定块 + 分隔符
+    + 输出指令"这条地板时必须响亮拒绝,而不是让 `max(0, …)` 静默把 K 块
+    砍成空正文——那样三档会渲染出**逐字相同**的正文,E1 的"长度档"这一整
+    个维度会塌成一格,而且没有任何一条既有用例(包括 `sample_tier_chars`
+    的正整数闸)挡得住,因为 100/200/300 本身就是合法的正整数且严格递增。
+    这份 fixture 的地板是 336(固定块)+10(分隔符)+38(输出指令)=384 字符;
+    这里把三档目标全部设在地板以下。
+    """
+    mutated = copy.deepcopy(sample)
+    mutated["tier_chars"] = {"short": 100, "medium": 200, "long": 300}
+    with pytest.raises(ValueError):
+        render_sample("short", mutated)
 
 
 def test_fixture_tier_chars_match_config_defaults(sample):
@@ -795,6 +942,68 @@ def test_probe_manifest_facts_tier_chars_only_includes_planned_tiers(sample):
     facts = probe_manifest_facts(plan, sample, 5)
     assert facts["matrix"]["tiers"] == 1
     assert set(facts["matrix"]["tier_chars"]) == {"short"}
+
+
+def test_probe_manifest_facts_rejects_calls_per_series_mismatch(sample):
+    """(P2-3)`matrix["calls_per_series"]` 从 `plan` 反推(`max(call_index)+1`),
+    关键字参数只做交叉校验——调用方给 CLI 加 `--calls-per-series` 却忘了
+    把同一个值传进 `probe_plan` 时,这里必须先炸,不能让冻结的 matrix 与
+    `probe-*.jsonl` 的实跑行数对不上账。
+    """
+    plan = probe_plan(seed=1, blocks=SMOKE_BLOCKS, calls_per_series=4)
+    with pytest.raises(ValueError):
+        probe_manifest_facts(plan, sample, 1, calls_per_series=99)
+
+
+def test_probe_manifest_facts_rejects_arms_mismatch(sample):
+    """(P2-3)`matrix["arms"]` 同样从 `plan` 反推;传一个与 plan 实际臂集合
+    不一致的 `arms` 关键字参数必须响亮拒绝。"""
+    plan = probe_plan(seed=1, blocks=SMOKE_BLOCKS)
+    with pytest.raises(ValueError):
+        probe_manifest_facts(plan, sample, 1, arms=("stable",))
+
+
+def test_probe_manifest_facts_rejects_empty_plan(sample):
+    """(P2-3)空 `plan`(调用方按 `--only-tier` 过滤后传进来)此前会得到
+    `matrix={'tiers': 0, 'blocks': 0, ...}` 且 `assert_manifest` 放行——
+    这条性质本身没有意义,必须在这里就响亮拒绝。"""
+    with pytest.raises(ValueError):
+        probe_manifest_facts([], sample, 1)
+
+
+def test_probe_manifest_facts_rejects_tier_not_declared_in_sample(sample):
+    """(P3-4)`plan` 里出现了 `sample` 没声明字符数的档位时,必须是带消息的
+    `ValueError`,不是裸 `KeyError`(`all_tier_chars[tier]` 此前的样子)。"""
+    plan = probe_plan(seed=1, tiers=("xl",), blocks=SMOKE_BLOCKS)
+    with pytest.raises(ValueError):
+        probe_manifest_facts(plan, sample, 1)
+
+
+def test_probe_manifest_facts_returns_pinned_key_set(sample):
+    """(Q7)`probe_manifest_facts` 的返回键集合钉字面量——把
+    `optimization_by_arm`/`common_baseline`/`order` 从返回值里删掉的变异
+    (Q7)在既有用例下全绿,因为这三个键在 E1 里不是 `assert_manifest` 的
+    必填集。这里直接钉住函数自己承诺产出的全部键。
+    """
+    plan = probe_plan(seed=5, blocks=SMOKE_BLOCKS)
+    facts = probe_manifest_facts(plan, sample, 5)
+    assert set(facts) == {
+        "seed", "sample_digest", "matrix", "arms", "order",
+        "optimization_by_arm", "common_baseline", "arm_order_seed",
+    }
+
+
+def test_load_prefix_probe_sample_rejects_non_dict_json(tmp_path):
+    """(P3-9)`load_prefix_probe_sample` 的 `-> dict` 曾经是一句不成立的类型
+    声明:一份 JSON 数组的 `--sample-file` 会原样返回 `list`,随后在
+    `sample_tier_chars` 撞一个不带上下文的 `AttributeError`。这里直接对
+    加载器本身断言:非 `dict` 顶层结构必须响亮拒绝,不把加载的内容带进
+    异常消息。
+    """
+    path = tmp_path / "not_a_dict.json"
+    path.write_text("[1, 2, 3]", encoding="utf-8")
+    with pytest.raises(ValueError):
+        load_prefix_probe_sample(path)
 
 
 # --- (i) fixture 隐私扫描 -------------------------------------------------------
