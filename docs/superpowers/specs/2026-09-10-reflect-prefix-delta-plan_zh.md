@@ -341,6 +341,42 @@ N 条未列出」与「总计已尝试 M 次」在同一条消息里互相矛盾
   set(_PREFIX_LAYOUTS)` 时 `raise`(quality 评审 P1),挡住「放开一格却忘接线 ⇒ 那条臂能起来、
   却发 off 布局」这种 rig 也拦不住的形态。
 
+**codex #707 第 1 轮的两条 P2(2026-09-10,PR #707 收尾)**
+
+- **保留 D 的键排除要覆盖 `build_evidence_block` 的全部三档。** 原来的落法是在 P 那一支自己
+  滤 `bound_keys`/`fresh_keys`,而第三档(历史代表 + 来源多样性)的键序是
+  `build_evidence_block` **自己**从池子里算的(`_diverse_order(index)`)——调用方手上没有那份
+  序,于是只挡住了三分之二:一张保留 D 里已经发过的卡照样能经第三档回到 K,一条消息里出现两
+  份都不带版本标记的同一张卡,还占掉本该给别的证据的额度(§5 风险 4)。改法:
+  `build_evidence_block(..., exclude_keys: Collection[str] = ())`,实现是**预置 `seen`** ——被
+  排除的键连候选序都进不去,因此也不计进 `omitted`(那个数说的是「候选里本轮没展开的」,而这些
+  键此刻在别的块里**可见**);调用点只留 `exclude_keys=carried.keys` 一处排除,不再逐档滤(同一
+  条判据的第二份实现改一处时另一处会静默变陈)。默认空 ⇒ off/P 逐字节不变。原来那条端到端用例
+  (`test_delta_fallback_turn_keeps_its_own_cards_out_of_the_kept_blocks`)在「只滤两档」这个变异
+  下**是绿的**(那条脚本的池子小、那张卡本轮同时在绑定档里),所以补了产地那条
+  `test_evidence_block_excludes_the_given_keys_from_every_tier`:fixture 里被排除的键**只可能
+  经第三档**被选中,两个变异各自实测红。
+- **准入要判「完整的待追加块」对两个池各要多少字节。** 原来的判据只有「有候选卡却一张都装不
+  下」(`crowded`)与「历史池被观察行顶破」,于是**只带观察行/方面 note、没有候选新卡**的那些轮
+  `crowded` 恒假 ⇒ 块头无条件追加,而历史那一笔也漏了 `pending_aspect_notes`;delta 的两笔账是
+  **逐块累计**的,一次放过就一路带下去(codex 复现:995/5990 用量、1000/6000 上限 ⇒ 追加后
+  1071/6017 且不重建;本地变异实测 6071 → 6147 → 6223 → 6299)。改法:新增
+  `_delta_pending_charges(cards_text, lines, notes)` 在准入之前算两笔费用——块头(`_DELTA_HEAD_CHARS`)
+  + 卡片节 → 证据池,观察行 + notes(各 `_joined_chars`)→ 历史池,**与落账同一处口径**(历史那
+  一笔的加数直接就是它,所以准入与记账不可能分歧);「这一块会不会是空的」由
+  `build_delta_block` 自己回答(空 ⇒ 两笔各 0,什么都不追加),不在第二处重写那条空判据。任一池
+  顶破 ⇒ 走重建路径,重建之后重算一次。⚠ **拍板:唯一允许越界的形态** = 本轮没有候选新卡、而
+  块头(或那句 note)在重建之后**仍然**装不下 ⇒ 那一块**照发**,记账如实记成超出。观察行是本轮
+  那次动作在上下文里的唯一记录,把它推到下一轮等于让模型看不见自己刚做过什么;而「有候选新卡
+  却装不下」仍走既有回退判据。既然记账如实,下一轮的准入必然仍在阈值之上 ⇒ **下一轮必重建**,
+  越界是一轮的事、不会一路带下去。两条新用例把边界 `pinch` 到 codex 那个形态上
+  (`test_delta_counts_the_block_head_of_an_observation_only_pending_block` /
+  `..._the_pending_aspect_notes_against_the_history_pool`);「准入与落账**一起**少算 notes」这个
+  变异在它们上是绿的(账面自洽),那一格由既有的「记账 == 真发出的字节」
+  (`test_delta_history_charge_counts_the_accepted_aspect_note`)接住,已实测红。
+- 两条改动之后 `off` / `prefix_snapshot` 仍**逐字节**回到 `663e05cf9`(完整 run 消息序列 +
+  schema hints + 全 detail,测量开/关四组比对通过),热函数零松弛。
+
 ### T-PD6 `prompts.py`:S 的 delta 段 · sonnet · ~45 行 · 过 `_GatedV2LLM`
 
 **落点** `backend/app/services/prompts.py:1401-1457`。

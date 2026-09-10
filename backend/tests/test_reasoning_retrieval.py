@@ -16111,6 +16111,13 @@ def _observation_only_run(rrepo, *, pinch, **extra):
     `pinch(delta, budget, state_chars, pending)` 在**每一轮装配之前**被调一次(拿到
     的是那一轮真实的投影与两个上限),由各条用例把某一个池顶到边界上——一条 run 里
     自然攒出 995/1000 这种用量要几十轮,而边界本身才是被断言的东西。
+
+    逐轮回一行 `(rebuilds, fallback, evidence_chars, history_chars)`。两个用量读的
+    是**投影上那两个累计数**(而不是从消息重算):边界本身就是 `pinch` 顶出来的,重
+    算出来的真实字节与它无关。"那两个数 == 真发出去的字节"由另一族用例守住
+    (`test_delta_keeps_the_cumulative_evidence_budget_across_blocks` /
+    `test_delta_history_charge_counts_the_accepted_aspect_note`),这里断的是**准入
+    读它们的方式**。
     """
     from app.services.reasoning_observation import render_observation_row
     from app.services.reasoning_retrieval import ReasoningRetriever
@@ -16158,10 +16165,12 @@ def test_delta_counts_the_block_head_of_an_observation_only_pending_block(rrepo)
     codex #707 R1 P2 的第二条:那种轮次 `cards.omitted` 为 0 ⇒ `crowded` 恒假,于是
     块头无条件追加,而 delta 的证据池是 **K + 每一块 D 的总和**——一次放过就一路带
     下去(复现用量 995/1000 ⇒ 追加后 1071)。这里把证据池顶到"只剩 5 个字符"上,断
-    的是两件事:那一轮真的**重建**了,而且发完块之后累计账仍然 ≤ 上限。
+    的是两件事:那一轮真的**重建**了(恰一次,而且不是靠回退绕过去的),而且发完块
+    之后累计账仍然 ≤ 上限。
 
     变异:准入判据去掉 `delta.evidence_chars + evidence_add > budget` 那一支(回到
-    只看 `crowded`)⇒ 不重建、`evidence_chars` 越过 `budget`,这条红。
+    只看 `crowded`)⇒ 不重建,`evidence_chars` 越过 `budget` 并**逐轮累计**
+    (实测 6071 → 6147 → 6223 → 6299,上限 6000),这条红。
     """
     pinched: list = []
 
@@ -16174,10 +16183,11 @@ def test_delta_counts_the_block_head_of_an_observation_only_pending_block(rrepo)
     _llm, _result, calls = _observation_only_run(rrepo, pinch=_pinch)
     assert pinched, calls
     budget = pinched[0]
-    hit = next(index for index, call in enumerate(calls) if call[0] >= 1)
-    assert calls[hit][0] == 1 and not calls[hit][1], calls
-    for rebuilds, fallback, evidence_chars, _history in calls:
+    # 顶到边界的那一轮**发完块之后**累计账仍然 ≤ 上限(每一轮都断,回退轮一并)。
+    for _rebuilds, _fallback, evidence_chars, _history in calls:
         assert evidence_chars <= budget, (calls, budget)
+    assert calls[-1][0] == 1, calls              # 恰好重建过一次
+    assert not any(call[1] for call in calls), calls   # 没有借回退绕过去
 
 
 def test_delta_counts_the_pending_aspect_notes_against_the_history_pool(rrepo):
@@ -16187,8 +16197,12 @@ def test_delta_counts_the_pending_aspect_notes_against_the_history_pool(rrepo):
     行一起落进同一个池、一起在同一块 D 里发出去。这里把历史池顶到"观察行刚好装得
     下、加上 note 就装不下"的那一点上——所以只有把 note 也算进去的判据才会重建。
 
-    变异:准入判据的历史那一笔改回只算观察行(`_joined_chars(pending_lines)`)⇒ 不
-    重建、`history_chars` 越过 `state_chars`,这条红。
+    变异:准入判据的历史那一笔改回只算观察行(`_joined_chars(pending_lines)`)、落账
+    仍加 notes,也就是接入前那个**不对称**形态 ⇒ 不重建、`history_chars` 越过
+    `state_chars`,这条红。另一种改法——准入与落账**一起**不算 notes(即
+    `_delta_pending_charges` 少那一项)——在这条上是绿的:两边一起少算时账面自洽,
+    那一格由"记账 == 真发出的字节"接住
+    (`test_delta_history_charge_counts_the_accepted_aspect_note`,已实测红)。
     """
     from app.services.reasoning_retrieval import _joined_chars
 
@@ -16206,10 +16220,10 @@ def test_delta_counts_the_pending_aspect_notes_against_the_history_pool(rrepo):
     assert pinched, calls
     state_chars, notes = pinched[0]
     assert _joined_chars(notes) > 0, pinched
-    hit = next(index for index, call in enumerate(calls) if call[0] >= 1)
-    assert calls[hit][0] == 1 and not calls[hit][1], calls
     for _rebuilds, _fallback, _evidence, history_chars in calls:
         assert history_chars <= state_chars, (calls, state_chars)
+    assert calls[-1][0] == 1, calls              # 恰好重建过一次
+    assert not any(call[1] for call in calls), calls   # 没有借回退绕过去
 
 
 # --- (d) 目标比例不满足仍守硬预算;回退不可逆 ----------------------------------
