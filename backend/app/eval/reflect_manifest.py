@@ -124,17 +124,30 @@ REQUIRED_KEYS_BY_CHANNEL: Mapping[str, frozenset[str]] = {
 #: 基数子键本身。T-EX4/T-EX7/T-EX8 写 `matrix` 时必须用这些名字与这个形状,
 #: 不能各写各的。
 #:
+#: **三条通道一律另写一个额外子键 `planned_runs`(int)= 这一批计划里的 run 数
+#: 上界**(T-EX8 评审 P1-2 拍板)。理由:基数相乘并不总是等于 run 数,而
+#: 「用五个基数相乘去对账」这条读法一旦对不上,读的人会把一份完整的数据集读成
+#: 「损坏 / 少跑了一半」——恰好是冻结 manifest 要消除的那种误读。写死一个真实
+#: 的 run 数比让每个读者自己推乘法可靠。
+#:
 #: * E1 —— `tiers`(长度档数)/ `blocks`(区组数)/ `arms`(臂数)/
 #:   `calls_per_series`(每个区组内一条 series 打几次调用)——四个都是基数,
 #:   相乘对总调用数的账;
 #: * E2 —— `cases`(剧本数)/ `state_points`(状态点数)/ `arms`(臂数)/
 #:   `repeats`(每格重复轮数)——四个基数相乘对总 run 数的账;
 #: * E3 —— `questions`(**真实题数**,不是 `(语料格, 题)` 配对数——按配对去重
-#:   会把「2 格 × 12 题」记成 24,这张表要的是 12)/ `cells`(语料格数)/
-#:   `efforts`(精力档数)/ `arms`(臂数)/ `repeats`(实际跑的轮数,等于
-#:   `rounds`——`--round` 指定单轮时这里恒是 1,不是 `args.repeats`;轮号本身
-#:   不在这张表里,要留痕就用 `matrix["round_index"]` 这个额外子键,不要塞进
-#:   `repeats`)——五个基数一起对总 run 数的账。
+#:   会把「2 格 × 12 题」记成 24,这张表要的是 12)/ `cells`(这一批**实际跑到
+#:   的**语料格数,不是 `--cell` 的声明格数)/ `efforts`(精力档数)/ `arms`
+#:   (臂数)/ `repeats`(实际跑的轮数,等于 `rounds`——`--round` 指定单轮时
+#:   这里恒是 1,不是 `args.repeats`;轮号本身不在这张表里,要留痕就用
+#:   `matrix["round_index"]` 这个额外子键,不要塞进 `repeats`)。
+#:
+#:   **E3 的 `cells` 不是乘数**:`ab` 的题集按语料格切分(`ask_plan` 按
+#:   `row["corpus"] == corpus` 过滤),各格的题**不相交**,所以总 run 数 =
+#:   `questions × efforts × arms × repeats`,与 `cells` 无关(`cells` 记的是
+#:   「这批横跨几个格」这个事实,不参与那道乘法)。五个基数一起相乘会比真实
+#:   run 数多出 `cells` 倍——默认双格 34 题 × 2 档 × 2 臂 × 3 轮 = 408 行,
+#:   相乘却给 816。要对账就读 `planned_runs`(上面那条通用规则)。
 REQUIRED_MATRIX_KEYS_BY_CHANNEL: Mapping[str, frozenset[str]] = {
     "e1": frozenset({"tiers", "blocks", "arms", "calls_per_series"}),
     "e2": frozenset({"cases", "state_points", "arms", "repeats"}),
