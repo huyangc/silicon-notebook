@@ -552,3 +552,222 @@ def test_reflect_v2_static_prompt_p_arm_delta_true_is_byte_frozen_against_a_gold
         "prefix_delta 的静态目录段(含四句)变了。实测长度="
         f"{len(text)} sha256={digest}"
     )
+
+
+# ---------------------------------------------------------------------------
+# T-PL3(reflect 前缀复用 PR-4 lean 计划 §3):``reflect_v2_static_prompt`` 加
+# ``lean``。``off``/``prefix_snapshot``/``prefix_delta`` 从不传 ``lean=True``,
+# 所以这里的第一条判据与 T-PD6 的 ``delta`` 完全同构:省略或显式 ``False`` 必须
+# 与这个形参加入之前逐字节相同——四臂字节等价面之一(计划 §5 风险 1)。
+# ---------------------------------------------------------------------------
+
+def test_reflect_v2_static_prompt_lean_false_is_byte_identical_to_omitting_it():
+    """``lean`` 省略 == 显式传 `False`,且与不传 ``lean`` 参数时完全相同——这是
+    「默认值中性」的直接证据(计划 §1 M4)。
+
+    变异:把签名改成 `lean: bool = True` ⇒ 省略调用会换上 lean 段、显式
+    `lean=False` 不会,两边不再相等,这条红。
+    """
+    from app.services.prompts import reflect_v2_static_prompt
+
+    catalog = _pd6_catalog()
+    for delta in (False, True):
+        omitted = reflect_v2_static_prompt(catalog, delta=delta)
+        explicit_false = reflect_v2_static_prompt(catalog, delta=delta, lean=False)
+        assert omitted == explicit_false
+        assert omitted
+
+
+def test_reflect_v2_static_prompt_lean_replaces_not_appends_the_assessment_paragraph():
+    """``lean=True`` **替换** `_V2_ASSESSMENT_INSTRUCTION`,不追加——两份自评
+    合同互相矛盾(整轮重述 vs 只报变化),同一份系统提示词里两句都在是最坏形态
+    (计划 §5 风险 2)。
+
+    变异:把 `reflect_v2_static_prompt` 的选择表达式从
+    `(_V2_LEAN_ASSESSMENT_INSTRUCTION if lean else _V2_ASSESSMENT_INSTRUCTION)`
+    改成 `_V2_ASSESSMENT_INSTRUCTION + (_V2_LEAN_ASSESSMENT_INSTRUCTION if lean
+    else "")`(追加式)⇒ 这条红:旧段的关键短语在 lean 输出里也会出现。
+    """
+    from app.services.prompts import (
+        _V2_ASSESSMENT_INSTRUCTION, _V2_LEAN_ASSESSMENT_INSTRUCTION,
+        reflect_v2_static_prompt,
+    )
+
+    catalog = _pd6_catalog()
+    off = reflect_v2_static_prompt(catalog)
+    on = reflect_v2_static_prompt(catalog, lean=True)
+
+    # 旧段的独有短语(整轮重述 + 整份 WHOLE 拒绝的恐吓句)必须只在 off 出现。
+    assert "fill `assessment` for the aspects you can judge now" in off
+    assert "fill `assessment` for the aspects you can judge now" not in on
+    assert "rejected WHOLE" in off
+    assert "rejected WHOLE" not in on
+    # lean 段的独有短语必须只在 lean 输出出现。
+    assert "report only what CHANGED" not in off
+    assert "report only what CHANGED" in on
+    # 两份合同互斥:旧段与新段不能同时出现在同一份文本里。
+    assert _V2_ASSESSMENT_INSTRUCTION not in on
+    assert _V2_LEAN_ASSESSMENT_INSTRUCTION not in off
+    # 替换发生在同一个槽位:除了这一段,其余部分逐字节不变。
+    assert on.replace(_V2_LEAN_ASSESSMENT_INSTRUCTION, "", 1) == off.replace(
+        _V2_ASSESSMENT_INSTRUCTION, "", 1)
+
+
+def test_reflect_v2_lean_assessment_instruction_states_the_five_rules():
+    """五句关键短语(计划 T-PL3 要点)逐条都在:(1) 只报变化/省略保留/不追问;
+    (2) 收尾轮同一份 JSON 给最终变化与缺口/不为记账退回一轮;(3) 字段与上界
+    照旧;(4) 独立校验/只作废那一个方面/整轮才作废的三个条件;(5) 方面清单
+    只能用户改/省略不等于证据不存在。
+
+    变异:删掉任意一句的关键短语 ⇒ 对应断言红。
+    """
+    from app.services.prompts import _V2_LEAN_ASSESSMENT_INSTRUCTION as lean
+
+    # (1) 只报本轮变化;省略的方面保留服务端记着的状态;已支撑项不必重述;
+    # 省略不花代价也不会被追问。
+    assert "report only what CHANGED" in lean
+    assert "keeps the status the server already has for it" in lean
+    assert "does not need restating" in lean
+    assert "costs nothing" in lean
+    assert "will not be chased with a follow-up question" in lean
+    # (2) 收尾轮(answer 或 sufficient=true)同一份 JSON 给出最终变化与缺口;
+    # 没走到的方面留着不评;服务端不会为补齐账目退回一轮。
+    assert "closing turn" in lean
+    assert "next_action is answer, or sufficient is true" in lean
+    assert "final changes and gaps you can judge as of this turn" in lean
+    assert "stays unassessed" in lean
+    assert "will not send you back for another turn just to square the ledger" in lean
+    # (3) 字段与上界照旧。
+    assert "Fields and bounds are unchanged" in lean
+    # (4) 独立校验;只作废那一个方面(保留旧状态、下一轮状态块告知原因);
+    # 检索动作照常执行;只有整份读不出归属才作废整轮。
+    assert "validated independently" in lean
+    assert "invalidates only THAT aspect" in lean
+    assert "keeps its prior status and next turn's status block tells you why" in lean
+    assert "this turn's retrieval action, still go through as normal" in lean
+    assert "cannot attribute at all" in lean
+    assert "invalidates the whole turn" in lean
+    # (5) 方面清单只能由用户改;省略不等于「这条证据不存在」。
+    assert "that list comes from the user and only the user changes it" in lean
+    assert "never that the evidence for it does not exist" in lean
+
+
+def test_reflect_v2_lean_assessment_instruction_bounds_share_the_protocol_constants():
+    """三个上界数字(status 枚举、每方面证据键数、gap 字符数上限)与协议常量
+    同源插值,不是手抄的字面量——改常量,文案跟着变(计划 T-PL3 要点)。
+
+    变异:把插值换成手写数字 ⇒ 改常量后这条红(字面量与常量不再一致)。
+    """
+    from app.domain.retrieval_termination import (
+        ASPECT_UNRESOLVED_STATUSES, REFLECT_ASPECT_GAP_MAX_CHARS,
+        REFLECT_ASPECT_MAX_EVIDENCE_KEYS,
+    )
+    from app.services.prompts import _V2_LEAN_ASSESSMENT_INSTRUCTION as lean
+
+    assert f"`{'|'.join(ASPECT_UNRESOLVED_STATUSES)}`" in lean
+    assert f"{REFLECT_ASPECT_MAX_EVIDENCE_KEYS} evidence keys" in lean
+    assert f"{REFLECT_ASPECT_GAP_MAX_CHARS} characters of gap" in lean
+
+
+def test_reflect_v2_static_prompt_lean_is_keyword_only():
+    """``lean``(``delta`` 同款)是 keyword-only:位置传参必须在签名层面就被拒绝。
+
+    变异:签名把 `lean: bool = False` 改成不带 `*` 的位置参数 ⇒ 不再抛
+    `TypeError`,这条红。
+    """
+    import pytest
+    from app.services.prompts import reflect_v2_static_prompt
+
+    catalog = _pd6_catalog()
+    with pytest.raises(TypeError):
+        reflect_v2_static_prompt(catalog, False, True)  # delta, lean 都位置传
+
+
+def test_reflect_v2_static_prompt_lean_true_is_stable_across_repeated_calls():
+    """``reflect_v2_static_prompt(..., lean=True, delta=True)`` 是纯函数:同一份
+    ``catalog`` 反复调用、经生产 ``provider_messages()`` /
+    ``serialize_provider_messages()`` 序列化后都必须逐字节相同——这是"S 在 run
+    内不随轮数变"要成立的前提。
+
+    这条覆盖用例 (d):过 `_GatedV2LLM` 一次完整 L run 需要 `prefix_delta_lean`
+    先放行(T-PL1,本分支未落地),这里改为直接构造 ``catalog`` 调
+    `reflect_v2_static_prompt(catalog, lean=True, delta=True)` 并经生产序列化
+    路径验证稳定性——完整端到端 run(经真实 `_GatedV2LLM`、四臂消息序列)留给
+    T-PL5。
+
+    变异:让 lean 段在渲染时插入任何非确定量 ⇒ `len(set(calls))` 与
+    `len(set(serialized))` 都变成 >1,这条红。
+    """
+    from app.core.llm import provider_messages, serialize_provider_messages
+    from app.services.prompts import reflect_v2_static_prompt
+
+    catalog = _pd6_catalog()
+    calls = [
+        reflect_v2_static_prompt(catalog, lean=True, delta=True)
+        for _ in range(5)
+    ]
+    assert len(set(calls)) == 1
+
+    system_text = calls[0]
+    messages = [
+        {"role": "system", "content": system_text},
+        {"role": "user", "content": "[Question]\nq?\n\nReturn JSON only."},
+    ]
+    schema_hint = '{"next_action": ""}'
+    serialized = [
+        serialize_provider_messages(provider_messages(messages, schema_hint))
+        for _ in range(3)
+    ]
+    assert len(set(serialized)) == 1
+    assert system_text.encode("utf-8") in serialized[0]
+
+
+#: `reflect_v2_static_prompt(full_house_catalog, delta=False, lean=True)` 的
+#: golden(用例 (f),照 P 臂 golden 先例)。
+_PL3_STATIC_LEAN_LEN = 11453
+_PL3_STATIC_LEAN_SHA256 = (
+    "01be5fcaa90c487223d895d8a8dbca7780a6244373b634cadea2462a85de12c4")
+
+#: `reflect_v2_static_prompt(full_house_catalog, delta=True, lean=True)` 的
+#: golden——生产唯一真实组合(`prefix_delta_lean` 是 `prefix_delta` + lean 段)。
+_PL3_STATIC_DELTA_LEAN_LEN = 12960
+_PL3_STATIC_DELTA_LEAN_SHA256 = (
+    "2deb65442492e7d8f5264dcd495fc2ac38c862cd5f7e7e5a44b40e07e8377af1")
+
+
+def test_reflect_v2_static_prompt_lean_arm_delta_false_is_byte_frozen_against_a_golden():
+    """L 臂 S(``delta=False``, ``lean=True``)= 这一串确定的字节。
+
+    变异:改 `_V2_LEAN_ASSESSMENT_INSTRUCTION` 一个词 ⇒ 这条红。
+    """
+    import hashlib
+    from app.services.prompts import reflect_v2_static_prompt
+
+    text = reflect_v2_static_prompt(
+        _pd6_full_house_catalog(), delta=False, lean=True)
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    assert (len(text), digest) == (
+        _PL3_STATIC_LEAN_LEN, _PL3_STATIC_LEAN_SHA256), (
+        "lean 自评段(delta=False 组合)变了。实测长度="
+        f"{len(text)} sha256={digest}"
+    )
+
+
+def test_reflect_v2_static_prompt_lean_arm_delta_true_is_byte_frozen_against_a_golden():
+    """``prefix_delta_lean`` 生产组合(``delta=True``, ``lean=True``)= 这一串
+    确定的字节——`_prefix_context` 建 S 时唯一会用到的一组参数(T-PL5)。
+
+    变异:改 `_V2_DELTA_INSTRUCTION` 或 `_V2_LEAN_ASSESSMENT_INSTRUCTION` 任一
+    句 ⇒ 这条红。
+    """
+    import hashlib
+    from app.services.prompts import reflect_v2_static_prompt
+
+    text = reflect_v2_static_prompt(
+        _pd6_full_house_catalog(), delta=True, lean=True)
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    assert (len(text), digest) == (
+        _PL3_STATIC_DELTA_LEAN_LEN, _PL3_STATIC_DELTA_LEAN_SHA256), (
+        "prefix_delta_lean 的静态目录段(含 delta 四句 + lean 自评段)变了。"
+        f"实测长度={len(text)} sha256={digest}"
+    )

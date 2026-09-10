@@ -1210,6 +1210,64 @@ _V2_ASSESSMENT_INSTRUCTION = (
     "costs you a step.\n"
 )
 
+#: ⚠ Q3 (reflect prefix-delta-lean plan §1 M9, §2): this paragraph has been
+#: stale since T4-A (``331f32d4d``) and PR-1's T-BF7 decoupling never synced
+#: it back — "rejected WHOLE" / "costs you a step" and the "neither list may
+#: be longer than the aspect list" bound no longer describe how ``apply``
+#: actually validates a payload (per-aspect rejection, ``_group_row_cap``).
+#: Fixing it would change the off/prefix_snapshot/prefix_delta byte-equivalence
+#: this plan is required to preserve, so it is left untouched here and tracked
+#: as an independent follow-up in ``fangan_todo.md``. ``_V2_LEAN_ASSESSMENT_
+#: INSTRUCTION`` below is the version written correctly from the start — it
+#: does not inherit this drift.
+#:
+#: The lean twin of ``_V2_ASSESSMENT_INSTRUCTION`` (prefix-delta-lean plan
+#: §3 T-PL3): same protocol, a different reporting CONTRACT. Where the shared
+#: paragraph above asks for a full restatement every turn, this one asks only
+#: for what changed — the server already remembers everything you reported
+#: before, so a turn that leaves an aspect out costs nothing and is never
+#: chased with a follow-up question. It shares the same interpolated protocol
+#: constants (the ``status`` enum, per-aspect evidence-key and gap limits) so
+#: the two instructions and the validator cannot drift apart from each other.
+#: Selected by ``reflect_v2_static_prompt(..., lean=True)``, which REPLACES
+#: ``_V2_ASSESSMENT_INSTRUCTION`` with this constant rather than appending it
+#: — the two must never both be present in the same turn's system prompt.
+_V2_LEAN_ASSESSMENT_INSTRUCTION = (
+    "The user's MANDATORY ASPECTS are listed in the user message, each with a "
+    "stable id, and the server remembers, turn to turn, what you last judged "
+    "about each of them. In this turn's `assessment` — in the same JSON as "
+    "your action, never as a separate message — report only what CHANGED "
+    "since your last judgement:\n"
+    "- `supported`: aspect_id plus the `evidence_keys` that support it, "
+    "copied EXACTLY as printed on the evidence cards (`key=...`).\n"
+    "- `unresolved`: aspect_id, a `status` of "
+    f"`{'|'.join(ASPECT_UNRESOLVED_STATUSES)}`, any `evidence_keys` found so "
+    "far, and a short `gap` naming what is still missing.\n"
+    "An aspect you leave out keeps the status the server already has for it. "
+    "An aspect you already reported as supported does not need restating — "
+    "omitting it costs nothing and will not be chased with a follow-up "
+    "question.\n"
+    "On a closing turn (next_action is answer, or sufficient is true), give, "
+    "in that same JSON, the final changes and gaps you can judge as of this "
+    "turn. An aspect you never got to stays unassessed; the server will not "
+    "send you back for another turn just to square the ledger.\n"
+    "Fields and bounds are unchanged: the `status` enum above, evidence keys "
+    "copied verbatim from a card, and per-aspect limits of "
+    f"{REFLECT_ASPECT_MAX_EVIDENCE_KEYS} evidence keys and "
+    f"{REFLECT_ASPECT_GAP_MAX_CHARS} characters of gap.\n"
+    "Your action and your assessment are validated independently: a row that "
+    "breaks one of the rules above invalidates only THAT aspect — it keeps "
+    "its prior status and next turn's status block tells you why — while "
+    "every other aspect in the same payload, and this turn's retrieval "
+    "action, still go through as normal. Only a payload the server cannot "
+    "attribute at all (not an object, a group that is not a list, or a row "
+    "that is not an object) invalidates the whole turn.\n"
+    "You cannot add, rename, merge or drop an aspect — that list comes from "
+    "the user and only the user changes it. Omitting an aspect means you are "
+    "not reporting on it this turn, never that the evidence for it does not "
+    "exist.\n"
+)
+
 
 def _v2_action_lines(capabilities) -> str:
     """The action space of one ``ReflectCapabilities`` projection, rendered.
@@ -1484,9 +1542,11 @@ _V2_DELTA_INSTRUCTION = (
 )
 
 
-def reflect_v2_static_prompt(catalog, *, delta: bool = False) -> str:
+def reflect_v2_static_prompt(
+    catalog, *, delta: bool = False, lean: bool = False,
+) -> str:
     """The RUN-STABLE instruction half of a ``prefix_snapshot``/``prefix_delta``
-    reflect turn.
+    (and, with ``lean=True``, ``prefix_delta_lean``) reflect turn.
 
     ``catalog`` is the run's static tool catalog (``static_catalog_facts`` →
     ``build_reflect_capabilities``, cached once per run on the run state), NOT
@@ -1504,6 +1564,18 @@ def reflect_v2_static_prompt(catalog, *, delta: bool = False) -> str:
     does not pass it) gets back the exact same bytes as before this parameter
     existed — the two layouts otherwise share every other piece of S.
 
+    ``lean`` selects the ``prefix_delta_lean`` layout's self-assessment
+    contract (``_V2_LEAN_ASSESSMENT_INSTRUCTION``, prefix-delta-lean plan §3
+    T-PL3): when true it REPLACES ``_V2_ASSESSMENT_INSTRUCTION`` in the
+    returned text rather than appending it — the two paragraphs state
+    contradictory reporting contracts (restate every turn vs. report only
+    what changed) and must never both be present in the same system prompt.
+    Defaults to ``False`` so every existing caller (``off`` never passes it;
+    ``prefix_snapshot``/``prefix_delta`` do not either) gets back the exact
+    same bytes as before this parameter existed. ``delta`` and ``lean`` are
+    independent: ``prefix_delta_lean`` is ``prefix_delta`` plus this one
+    substitution, not a fifth, orthogonal layout (design §6 / plan §0).
+
     ``UNTRUSTED_EVIDENCE_SYSTEM_INSTRUCTION`` still stacks in FRONT of this for
     strict callers (``_reflect_v2_attempt``); that one is run-level too, so the
     system message as a whole stays stable.
@@ -1518,7 +1590,8 @@ def reflect_v2_static_prompt(catalog, *, delta: bool = False) -> str:
         + _v2_action_lines(catalog)
         + "\n"
         + _V2_STOPPING_RULE
-        + _V2_ASSESSMENT_INSTRUCTION
+        + (_V2_LEAN_ASSESSMENT_INSTRUCTION if lean
+           else _V2_ASSESSMENT_INSTRUCTION)
         + _V2_REASON_RULE
     )
 
