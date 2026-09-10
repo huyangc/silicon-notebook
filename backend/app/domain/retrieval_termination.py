@@ -192,12 +192,14 @@ class RetrievalTermination:
     unrecovered_channels: Tuple[str, ...] = ()
     aspects: Tuple[AspectSnapshot, ...] = field(default_factory=tuple)
     #: 本次 run 是否以 lean 自评合同收尾(PR-4 计划 §2 拍板 Q5)。run 级冻结,
-    #: 唯一写点是 `_v2_build_aspect_ledger`(计划 T-PL5,由 `AspectLedger.
-    #: lean_assessment` 传下来)——这里只是承接同一个事实,不重新判断。默认
-    #: `False` 是安全默认:既有全部构造点(`app.services.reasoning_aspects` 与
-    #: 现有测试)零改动,继续落在 `off`/`prefix_snapshot`/`prefix_delta` 三臂
-    #: 的既有语义上。`__post_init__` 的闭集守卫只管 `reason`/`status`,不涉及
-    #: 这个布尔——它没有闭集,只有真假两值。
+    #: 写点分两跳:取值由 `_v2_build_aspect_ledger` 建的 `AspectLedger.
+    #: lean_assessment` 提供(计划 T-PL5),落进这个 **DTO** 字段的那一笔在
+    #: `reasoning_aspects.classify_termination`(全仓唯一的
+    #: `RetrievalTermination(...)` 构造点)——这里只是承接同一个事实,不重新
+    #: 判断。默认 `False` 是安全默认:既有全部构造点(`app.services.
+    #: reasoning_aspects` 与现有测试)零改动,继续落在 `off`/`prefix_snapshot`/
+    #: `prefix_delta` 三臂的既有语义上。`__post_init__` 的闭集守卫只管
+    #: `reason`/`status`,不涉及这个布尔——它没有闭集,只有真假两值。
     lean_assessment: bool = False
 
     def __post_init__(self) -> None:

@@ -825,6 +825,27 @@ def test_retrieval_termination_lean_assessment_defaults_to_false():
     assert lean_termination.lean_assessment is True
 
 
+def test_retrieval_termination_field_set_is_frozen():
+    """`RetrievalTermination` 的字段**名字**集合是闭集(pl2 修正轮,存疑项)。
+
+    这个 DTO 没有像 `reason`/`status` 那样的值闭集守卫,但字段名字本身也不该
+    被悄悄插一个:多一个字段意味着全仓唯一的构造点
+    (`reasoning_aspects.classify_termination`)漏接了一个事实,而 `__post_init__`
+    的闭集守卫管不到它——那条守卫只查 `reason`/`status` 的取值,不查字段名集。
+
+    变异:在 `aspects` 之前插一个多余的 `lean_assessment2: bool = False`
+    ⇒ 这条红(质量评审 M10 曾在没有这条守卫时逃逸)。
+    """
+    import dataclasses
+
+    from app.domain.retrieval_termination import RetrievalTermination
+
+    assert {f.name for f in dataclasses.fields(RetrievalTermination)} == {
+        "reason", "unresolved_aspect_ids", "model_assessed_sufficient",
+        "unrecovered_channels", "aspects", "lean_assessment",
+    }
+
+
 def test_search_run_leaves_every_synthesis_only_metric_unknown():
     """没跑合成 ⇒ 锚点/进 prompt 的证据数/每动作引用贡献一律 unknown。
 
@@ -947,9 +968,11 @@ NEW_MEASUREMENT_KEYS = frozenset({
     # T-PD2:`prefix_delta` 专属的两个测量列,冻结基线(`off`/legacy)下同样恒
     # `None`——这两键在这批 run 上从未被写侧观测过。
     "context_rebuilds", "context_fallback",
-    # T-PL2(计划 §3):两个新顶层列,冻结基线(`off`/legacy)下同样恒 `None`
-    # ——写侧(T-PL5)在本任务里还没落地。
-    "assessment_rows_total", "aspects_unassessed",
+    # T-PL2(计划 §3):三个新顶层列,冻结基线(`off`/legacy)下同样恒 `None`
+    # ——写侧(T-PL5)在本任务里还没落地。`assessment_observed` 是
+    # `assessment_rows_total` 的伴生披露列(质量评审修正 P2-2),照
+    # `attempts_observed` 与 `model_calls_real` 的先例挨着放。
+    "assessment_rows_total", "assessment_observed", "aspects_unassessed",
 })
 
 #: 一条 `off`(v2 跑成、测量关)轨迹在 T-PS4 **接入之前**投影出来的逐键快照。
@@ -1411,23 +1434,50 @@ def test_context_rebuilds_and_fallback_project_alongside_the_other_nine_keys():
 
 
 def test_assessment_rows_total_and_aspects_unassessed_are_unknown_without_any_observation():
-    """(a) 两键一条观测都没出现过 ⇒ 两列 `None`,不是 0。"""
+    """(a) 两键一条观测都没出现过 ⇒ 两列 `None`,不是 0;伴生的
+    `assessment_observed` 同样是 `None`——一条 reflect 步都没带这个观测,不是
+    "带了、答案是没有"。
+    """
     row = project_run(JOB, [reflect("answer", sufficient=True)], PAYLOAD)
     assert row["assessment_rows_total"] is None
+    assert row["assessment_observed"] is None
     assert row["aspects_unassessed"] is None
 
 
-def test_assessment_rows_total_sums_across_reflect_steps_when_all_present():
-    """(b) 三步 2/0/1 ⇒ `assessment_rows_total == 3`;一步缺该键 ⇒ `None`。
+def test_assessment_rows_total_sums_over_present_steps_when_one_is_missing():
+    """(b) 三步 2/缺/1(中间一步没有 `assessment_rows`,例如 provider
+    fail-open 的那一轮)⇒ `assessment_rows_total == 3`(**sum-over-present**,
+    过滤掉缺席的那步求和)、`assessment_observed is False`(观测不全,但和是
+    真实值,不是下界)。
 
-    与 `response_chars_total` 同一条 `_reflect_sum` 口径:全带齐才敢求和,不是
-    像 `context_rebuilds` 那样取 max-over-present——`assessment_rows` 是逐步
-    各自独立贡献的一段(这一轮落账了几行),不是运行期单调计数。
+    质量评审修正 P2-2:这一列**不再**走 `_reflect_sum` 的"任一步缺 ⇒ 整列
+    unknown"口径——provider fail-open 的那一轮不进 `_absorb_assessment`,该轮
+    压根不会带 `assessment_rows`,但它仍是一条正常记的 reflect 步;沿用全或无
+    口径会让一次偶发的 provider 抖动把整条 run 的这一列读成 unknown,把它从
+    D↔L「省了多少重述」的配对样本里整条挤出去。
 
-    变异:把 `_reflect_sum(reflects, "assessment_rows")` 换成
-    `_reflect_context_rebuilds` 的 max-over-present 口径 ⇒ 第一条断言仍为 3
-    (三值恰好无法区分 sum/max),但把中间步改成 0/0/1 就能拆开——第二组用例
-    (缺一步 ⇒ None)才是真正钉住"全带齐"这条口径的断言。
+    变异:把 `_reflect_assessment` 换成 `_reflect_context_rebuilds` 的
+    max-over-present 口径 ⇒ 这条红——present 的两个值是 `2` 和 `1`,
+    `max([2, 1]) == 2 != 3`,sum 与 max 在这组数据上本来就分得开(旧版这条
+    用例的变异注记声称"三值恰好无法区分 sum/max"并不成立,见质量评审 P3-1)。
+    """
+    row = project_run(
+        JOB,
+        [
+            measured_reflect("ppr", assessment_rows=2),
+            reflect("ppr"),
+            measured_reflect("answer", assessment_rows=1),
+        ],
+        PAYLOAD,
+    )
+    assert row["assessment_rows_total"] == 3
+    assert row["assessment_observed"] is False
+
+
+def test_assessment_rows_total_sums_all_present_steps_and_flags_full_observation():
+    """三步 2/0/1 全带齐 ⇒ `assessment_rows_total == 3`、
+    `assessment_observed is True`——`0` 是这一轮真实观测到的"省略了自评",照样
+    计入和,不是缺席。
     """
     row = project_run(
         JOB,
@@ -1439,45 +1489,42 @@ def test_assessment_rows_total_sums_across_reflect_steps_when_all_present():
         PAYLOAD,
     )
     assert row["assessment_rows_total"] == 3
-
-    missing_one_row = project_run(
-        JOB,
-        [
-            measured_reflect("ppr", assessment_rows=2),
-            measured_reflect("answer"),
-        ],
-        PAYLOAD,
-    )
-    assert missing_one_row["assessment_rows_total"] is None
+    assert row["assessment_observed"] is True
 
 
 def test_assessment_rows_total_zero_is_distinct_from_unknown():
     """(c) 全部步的 `assessment_rows` 都是 0(每轮都省略自评)⇒ 和是 0,不是
-    `None`——「量到了,答案是零」与「没量」必须分得开。
+    `None`——「量到了,答案是零」与「没量」必须分得开。这一步也带齐了观测,
+    `assessment_observed` 该是 `True`,不是 `None`。
     """
     row = project_run(
         JOB, [measured_reflect("answer", assessment_rows=0)], PAYLOAD,
     )
     assert row["assessment_rows_total"] == 0
     assert row["assessment_rows_total"] is not None
+    assert row["assessment_observed"] is True
 
 
 def test_assessment_rows_total_rejects_free_form_and_type_confused_values():
     """(d) 隐私守卫只收 int:自由文本与布尔值被 `_int` 吞成 `None`(不是抛错、
-    不是透传);`assert_projection_values` 对写坏的行仍然拒绝。
+    不是透传);`assert_projection_values` 对写坏的行仍然拒绝。两种情形下这一步
+    的值都被读成"缺席",所以 `assessment_observed` 也是 `None`,不是
+    `False`——它不是"带了、值不对",而是压根没有这个观测。
 
-    变异:把 `_reflect_sum` 的读取器换成宽松的 `int(raw)` ⇒ 第一条断言红
-    (字符串会被强转成数字)。
+    变异:把 `_reflect_assessment` 的读取器换成宽松的 `int(raw)` ⇒ 第一条断言
+    红(字符串会被强转成数字)。
     """
     row = project_run(
         JOB, [measured_reflect("answer", assessment_rows="很多行")], PAYLOAD,
     )
     assert row["assessment_rows_total"] is None
+    assert row["assessment_observed"] is None
 
     bool_row = project_run(
         JOB, [measured_reflect("answer", assessment_rows=True)], PAYLOAD,
     )
     assert bool_row["assessment_rows_total"] is None
+    assert bool_row["assessment_observed"] is None
 
     bad_row = dict(off_row(optimization="off"))
     bad_row["assessment_rows_total"] = "很多行"
@@ -1520,6 +1567,51 @@ def test_aspects_unassessed_reads_the_termination_skip_step_not_any_step():
         JOB, [reflect("answer", sufficient=True)], PAYLOAD,
     )
     assert no_termination_row["aspects_unassessed"] is None
+
+
+def test_aspects_unassessed_takes_the_first_terminal_skip_step_and_requires_skip_type():
+    """质量评审 P3-3(存疑,pl2 修正轮补齐):`_aspects_unassessed` 的判据是
+    「`step_type == "skip"` **且** `reason == TERMINATION_SKIP_REASON`」,取
+    **首条**命中的步。两半各补一条移动变异用例:
+
+    1. **取首条**:一条 run 理论上只会记一条终态 skip 步,但代码本身没有"只有
+       一条"这条断言撑腰——两条终态 skip 步、取值不同时必须是第一条赢。
+    2. **`step_type == "skip"` 这半合取**:一条非 skip 步(这里借用 `reflect`)
+       挂着终态原因码 `reason`(现实里不会发生,但代码没有拦它),必须被
+       `step_type` 那半挡在外面,不能只靠 `reason` 判定。
+
+    变异:`_aspects_unassessed` 改成取**末条**终态 skip 步(如
+    `reversed(steps)`)⇒ 第一段断言红(读到 2,不是 1);去掉
+    `step["step_type"] == "skip"` 只留 `reason` 判据 ⇒ 第二段断言红(读到那条
+    `reflect` 步上的 99,而不是真正终态 skip 步的 1)。
+    """
+    two_terminal_steps_row = project_run(
+        JOB,
+        [
+            reflect("answer", sufficient=True),
+            step("skip", {"reason": TERMINATION_SKIP_REASON,
+                          "termination": "model_sufficient",
+                          "aspects_unassessed": 1}),
+            step("skip", {"reason": TERMINATION_SKIP_REASON,
+                          "termination": "model_sufficient",
+                          "aspects_unassessed": 2}),
+        ],
+        PAYLOAD,
+    )
+    assert two_terminal_steps_row["aspects_unassessed"] == 1
+
+    non_skip_step_row = project_run(
+        JOB,
+        [
+            reflect("ppr", reason=TERMINATION_SKIP_REASON,
+                    aspects_unassessed=99),
+            step("skip", {"reason": TERMINATION_SKIP_REASON,
+                          "termination": "model_sufficient",
+                          "aspects_unassessed": 1}),
+        ],
+        PAYLOAD,
+    )
+    assert non_skip_step_row["aspects_unassessed"] == 1
 
 
 def test_aspects_unassessed_rejects_free_form_values():

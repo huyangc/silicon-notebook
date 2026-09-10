@@ -2913,6 +2913,54 @@ def test_assessment_rows_total_appears_in_the_optimization_pair_table(
     assert "2.0(n=2)" in rendered
 
 
+def test_optimization_pair_table_cells_align_with_their_header(tmp_path, capsys):
+    """8 个数值格必须落在**自己**的表头下面,不能靠子串猜(质量评审 P2-3)。
+
+    上面那条用例只断言 `"5.0(n=2)" in rendered` 这类子串在整份渲染文本里出现
+    过;子串挂在错列上同样能通过。这条用例给四个稀疏指标(`run_wall_ms` /
+    `model_calls_real` / `context_rebuilds` / `assessment_rows_total`)各配一对
+    互不相同的基线/变体均值,再按**表头文本**取出对应单元格逐一核对——8 个格子
+    的值两两不同,任何一次错位都会让某个断言拿到别的格子的值。
+
+    变异:把 `render_markdown` 里拼这 8 格的两层 `for`(`metric` 外层、`label`
+    内层)对调成 `label` 外层、`metric` 内层(不删任何东西,单纯调序)⇒ 表头
+    不变但单元格顺序变成"基线四项挨着、变体四项挨着",除了两侧首尾各一格,其
+    余全部错位,这条红。
+    """
+    source = _write_rows(tmp_path / "rows.jsonl", [
+        _measured_row(optimization="off", run_wall_ms=1000,
+                      model_calls_real=10, context_rebuilds=100,
+                      assessment_rows_total=1),
+        _measured_row(optimization="off", run_wall_ms=2000,
+                      model_calls_real=20, context_rebuilds=200,
+                      assessment_rows_total=2),
+        _measured_row(optimization="prefix_delta_lean", run_wall_ms=3000,
+                      model_calls_real=30, context_rebuilds=300,
+                      assessment_rows_total=3),
+        _measured_row(optimization="prefix_delta_lean", run_wall_ms=4000,
+                      model_calls_real=40, context_rebuilds=400,
+                      assessment_rows_total=4),
+    ])
+    md = tmp_path / "t0.md"
+    analyze.main([str(source), "--out-md", str(md)])
+    capsys.readouterr()
+    rendered = md.read_text("utf-8")
+    section = rendered.split("## off / 优化变体对照(成对,同 policy_version)")[1]
+    table_lines = [line for line in section.splitlines() if line.startswith("|")]
+    header = [cell.strip() for cell in table_lines[0].strip("|").split("|")]
+    body = [cell.strip() for cell in table_lines[2].strip("|").split("|")]
+    cells = dict(zip(header, body))
+    assert len(cells) == len(header), "表头有重复列名,取索引前先看一眼常量"
+    assert cells["off run_wall_ms(n)"] == "1500.0(n=2)"
+    assert cells["variant run_wall_ms(n)"] == "3500.0(n=2)"
+    assert cells["off model_calls_real(n)"] == "15.0(n=2)"
+    assert cells["variant model_calls_real(n)"] == "35.0(n=2)"
+    assert cells["off context_rebuilds(n)"] == "150.0(n=2)"
+    assert cells["variant context_rebuilds(n)"] == "350.0(n=2)"
+    assert cells["off assessment_rows_total(n)"] == "1.5(n=2)"
+    assert cells["variant assessment_rows_total(n)"] == "3.5(n=2)"
+
+
 def test_the_markdown_report_renders_both_arm_axes(tmp_path, capsys):
     """两张成对表都在,且 legacy/v2 那张把 v2 侧的臂写在自己的一列里。
 
