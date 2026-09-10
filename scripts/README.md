@@ -473,6 +473,12 @@ python scripts/reflect_shadow_rig.py \
 放开一格。`--arms` 与 `--only-policy` **互斥**(后者是一维时代按 policy 过滤默认
 两臂的写法)。
 
+**`--arms` 一次只收一对臂**,超过两条在跑批之前拒绝。配对差值表按**对**出:三条
+臂的批次里每个配对单元落三行,`mark_paired` 判不出配对,整批 `paired` 全 `False`
+——数据集、日志、投影一切正常,只是一个配对结论都出不来,而这批已经烧掉了几百次
+模型调用。要跑三格就分两批,每批一对。`--arms ""`(空写法,常见于脚本里
+`--arms "$ARMS"` 而变量恰好为空)同样响亮拒绝,**不**退化成默认两臂。
+
 两条臂的 `REASONING_REFLECT_MEASURE_CONTEXT` **都是 `true`**:测量开关与
 `optimization` 正交,对照要的正是两条臂用同一把尺子;只给一侧开会让差值表只剩一
 侧有数,而每一行看起来都很正常。每条臂各自的 `REASONING_REFLECT_OPTIMIZATION` 在
@@ -501,8 +507,17 @@ EVENT_LOG_DIR 不一致」的告警——那条告警说的是日志查看器读
 `app/core/llm.py` 写的那一行)与 `queue_latency_ms` / `execution_latency_ms` /
 `workload_id`(调度侧,来自 `model_scheduler` 事件);请求正文、响应片段、模型名、
 时间戳与 id 一个都不进。`join` 那一列如实说出归因质量:`joined` / `log_only`
-(缺事件)/ `event_only`(缺日志)/ `ambiguous`(同号多行,跨侧列一律 unknown,
-**不按顺序猜配对**)/ `unattributed`(这一行没有相关号)。
+(缺事件)/ `event_only`(缺**终态**日志行)/ `ambiguous`(同号多行,跨侧列一律
+unknown,**不按顺序猜配对**)/ `unattributed`(这一行没有相关号)/ `retry`(这一
+行是一次没跑完的尝试,不是一次调用的结果)。
+
+**重试行不占格子**。`app/core/llm.py` 每次瞬时错误重试都再写一条 `status="retry"`
+的日志行,它与终态行**同号**,而调度事件只有一条。这几行单列成 `retry`:不参与
+扇出判定(否则每一次重试过的调用都会落成 `ambiguous`,排队/执行时长与 workload
+全线 unknown,而那批恰是最慢、最该被看见的调用),`call_index` 是 `null`。**数这
+一批跑了多少次调用要数 `call_index` 有值的行,不要数行数**,否则重试过的调用会被
+数成两次。这几列的闭集(以及每一行写出去之前那两道自检)在
+`backend/app/eval/reflect_context_bench.py`。
 
 ⚠ **并发跑批时 run 级标签是 unknown**。`support_id` 只把日志行与它自己的调度事件
 对上号,它不知道这次调用属于哪个 run;`--concurrency > 1` 时那一批的 per-call 行
@@ -523,7 +538,9 @@ P50/P95 的分位数。
 fallback 记成一次额外的推理,反过来则会低报端点负载。
 
 **隐私口径(三个脚本同一份)**:每个 run 输出一行,键取自
-`app.domain.reasoning_trace_stats.RUN_PROJECTION_KEYS` 这个闭集,值只能是闭集字符串、
+`app.domain.reasoning_trace_stats.RUN_PROJECTION_KEYS` 这个闭集(**闭集与短码形状
+的真源是 `backend/app/domain/reasoning_trace_stats.py` 那一个模块**,这份 README 与
+任何设计稿都只是它的转述;两处对不上时以模块为准),值只能是闭集字符串、
 bool、数值、`None`,短码的列表(`action_seq`),或以短码为键、数值为叶的字典
 (`skip_reasons` 是一层,`citation_contribution` 是两层)。其中 `skip_reasons` /
 `fallback_reasons` 的**键是服务端原因码的透传**,不另过闭集校验。**问题原文、答案正文、来源标题、证据
