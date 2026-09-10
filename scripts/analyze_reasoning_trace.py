@@ -715,6 +715,11 @@ def optimization_pair_rows(
     `paired=False` 的行不入格(见 `_optimization_cells`),两侧各报自己被挡掉了
     几条(`n_unpaired`)——那一列在逐格表与 rollup 上都印(见
     `ROLLUP_SIDE_COUNTS`)。
+
+    一条臂在某一格里**全部**是 `paired=False` 时那一格没有行可挂,`n_unpaired`
+    也就无处可报:那种输入在这张表上的呈现与「这一臂压根没跑过这一格」相同,而
+    两者都读作「没有这一对」。分组概览里那一格的 `optimization` 分布会如实数到
+    这些 run(它不看 `paired`),两处对不上就是这种输入的信号。
     """
     cells: list[dict] = []
     grid, unpaired = _optimization_cells(rows)
