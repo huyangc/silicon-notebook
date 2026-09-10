@@ -4272,6 +4272,180 @@ def test_the_budget_timer_is_cancelled_before_the_batch_returns(
     assert timers[0].finished.is_set()
 
 
+class _StubTimer:
+    """建了不跑的 `threading.Timer` 替身,把回调交给用例自己在精确时刻调。
+
+    两条并发判据(worker 入口的墙钟判、登记处的同锁复核)防的都是「Timer 还没
+    跑到 / 恰好夹在两步之间」这种窗口——真跑里那是一场竞态,靠 sleep 撞不出确定
+    性。把 Timer 摘掉、由用例决定回调什么时候发生,那个窗口就变成一条确定的
+    时序(评审 F5 / P2-3 的两条修正各自因此有了单独会红的用例)。
+    """
+
+    instances: list[Any] = []
+
+    def __init__(self, interval, function, *a, **kw) -> None:
+        self.interval = interval
+        self.function = function
+        self.daemon = False
+        self.cancel_calls = 0
+        _StubTimer.instances.append(self)
+
+    def start(self) -> None:
+        pass
+
+    def cancel(self) -> None:
+        self.cancel_calls += 1
+
+
+@pytest.fixture
+def stub_timer(monkeypatch):
+    _StubTimer.instances = []
+    monkeypatch.setattr(rig.threading, "Timer", _StubTimer)
+    return _StubTimer
+
+
+def _fake_run_returning_ok(executed: list[str], lock: threading.Lock):
+    def _fake_run(repo, *, notebook, item, arm, contract, on_trace,
+                  cancel_event, actor_id, scope_source_ids=None,
+                  optimization="off"):
+        with lock:
+            executed.append(item["question_key"])
+        for step in _steps(arm):
+            on_trace(SimpleNamespace(
+                step_type=step["step_type"], summary="",
+                detail=step["detail"], duration_ms=1,
+            ))
+        return _FakeResponse()
+
+    return _fake_run
+
+
+def test_a_worker_that_wakes_up_after_the_deadline_never_dispatches(
+    tmp_path, monkeypatch, capsys, stub_timer,
+):
+    """评审 F5 之一:`worker()` 入口按**墙钟**自己判一次,不只判 `aborted`。
+
+    Timer 线程被 GIL/OS 延迟时 `aborted` 在到点后短暂仍为假,只判它的 worker 会
+    在那个窗口里又从队列取一个新单元、发出一次完整 Ask(默认最坏
+    `reasoning_timeout_seconds × attempt_budget` ≈ 3 分钟),`--max-wall-minutes`
+    因此被越过而那一行落的是 `status=done`。这里把 Timer 换成「建了不跑」的替身
+    (回调永不触发 ⇒ `aborted` 永远为假),预算线由假 `run_ab_once` 自己跨过:
+    前两个单元跑完时已经到点,后面的单元只能靠入口那道墙钟判拦住。
+    """
+    total = 4
+    concurrency = 2
+    units = [_unit(question_key=f"Q{i:02d}", repeat=1) for i in range(total)]
+    executed: list[str] = []
+    lock = threading.Lock()
+    deadline = time.monotonic() + 0.05
+
+    def _fake_run(repo, *, notebook, item, arm, contract, on_trace,
+                  cancel_event, actor_id, scope_source_ids=None,
+                  optimization="off"):
+        with lock:
+            executed.append(item["question_key"])
+        while time.monotonic() < deadline:
+            time.sleep(0.005)
+        for step in _steps(arm):
+            on_trace(SimpleNamespace(
+                step_type=step["step_type"], summary="",
+                detail=step["detail"], duration_ms=1,
+            ))
+        return _FakeResponse()
+
+    monkeypatch.setattr(rig, "run_ab_once", _fake_run)
+    monkeypatch.setattr(rig, "_ab_element_sections", lambda url, ids: {})
+    monkeypatch.setattr(rig, "_ab_chunk_sections", lambda url, ids: {})
+    monkeypatch.setattr(rig, "_ab_usage_for_window",
+                        lambda *a, **kw: UNKNOWN_USAGE)
+    _fixed_intents(monkeypatch)
+
+    out_dir = tmp_path / "ab"
+    runner = rig.Runner(dry_run=False, out_dir=out_dir)
+    args = _ab_args(only_policy=["v2"], out_dir=str(out_dir), dry_run=False)
+    _failed, stopped_by_budget, _digests = rig._ab_loop(
+        args, runner, units, {"A_nokg": _fact()}, _repos_by_arm(),
+        actor_id="ab-owner", profile=None, concurrency=concurrency,
+        gold_by_key=load_ab_gold(load_questions()),
+        model_contract="0123456789abcdef", log_dir=out_dir, clock=datetime.now,
+        deadline=deadline,
+    )
+    out = capsys.readouterr().out
+    # Timer 的回调一次都没跑过 ⇒ `aborted` 恒假,能拦住剩下两个单元的只有入口
+    # 那道墙钟判。
+    assert stub_timer.instances and "ab aborted" not in out
+    assert len(executed) == concurrency, executed
+    assert len(executed) < total
+    # 到点这件事仍然被如实记下来了(那半只有 worker 早退那条路能写)。
+    assert stopped_by_budget is True
+
+
+def test_a_worker_that_loses_the_abort_race_is_caught_by_the_lock_recheck(
+    tmp_path, monkeypatch, capsys, stub_timer,
+):
+    """评审 F5 之二 / P2-3:`aborted` 检查与 `cancel_event` 登记在同一把锁下复核。
+
+    与 codex #700 R21 P2 在 T0 rig(`_search_loop_concurrent`)上修过的是同一型
+    缺陷。窗口是「过了入口 `aborted` 检查」与「`active_events.append`」之间:
+    `abort()` 恰好在这里快照,这个单元的 `cancel_event` 就永远不会被设,它带着
+    一个不会被唤醒的取消事件发出一次完整 Ask,而 `shutdown(wait=True)` 只能等它
+    跑完——`--max-wall-minutes` 被越过,那一行还落 `status=done`。
+
+    确定性做法:窗口里只有两步——`threading.Event()` 与取锁,所以把
+    `threading.Event` 换成一个替身,在**第一个由 worker 线程构造的** Event
+    (那就是 `cancel_event`,`_run_ab_arm` 那一处被 `cancel_event or …` 短路)
+    上先替 Timer 发一次回调,窗口因此变成一条固定时序。
+
+    「由 worker 线程构造」这个判据不能换成「第 N 个 Event」:`threading.Thread.
+    __init__` 自己就建一个 `Event`(`self._started`),线程池扩容时由**提交
+    线程**建——按序号数会把回调发在任何 worker 起跑之前,那时两个 worker 都被
+    入口的 `aborted` 检查拦住,复核那道判压根不参与,变异照样全绿(实测过)。
+    """
+    units = [_unit(question_key=f"Q{i:02d}", repeat=1) for i in range(2)]
+    executed: list[str] = []
+    lock = threading.Lock()
+    real_event = threading.Event
+    caller = threading.current_thread()
+    fired: list[int] = []
+
+    def _event_factory():
+        event = real_event()
+        if (threading.current_thread() is not caller
+                and not fired and stub_timer.instances):
+            fired.append(1)
+            stub_timer.instances[0].function()
+        return event
+
+    monkeypatch.setattr(rig.threading, "Event", _event_factory)
+    monkeypatch.setattr(rig, "run_ab_once",
+                        _fake_run_returning_ok(executed, lock))
+    monkeypatch.setattr(rig, "_ab_element_sections", lambda url, ids: {})
+    monkeypatch.setattr(rig, "_ab_chunk_sections", lambda url, ids: {})
+    monkeypatch.setattr(rig, "_ab_usage_for_window",
+                        lambda *a, **kw: UNKNOWN_USAGE)
+    _fixed_intents(monkeypatch)
+
+    out_dir = tmp_path / "ab"
+    runner = rig.Runner(dry_run=False, out_dir=out_dir)
+    args = _ab_args(only_policy=["v2"], out_dir=str(out_dir), dry_run=False)
+    _failed, stopped_by_budget, _digests = rig._ab_loop(
+        args, runner, units, {"A_nokg": _fact()}, _repos_by_arm(),
+        actor_id="ab-owner", profile=None, concurrency=2,
+        gold_by_key=load_ab_gold(load_questions()),
+        model_contract="0123456789abcdef", log_dir=out_dir, clock=datetime.now,
+        # 远期 deadline:入口那道墙钟判在这条用例里恒假,要验的只有同锁复核。
+        deadline=time.monotonic() + 600.0,
+    )
+    capsys.readouterr()
+    assert fired == [1], "预算回调没在 worker 建 cancel_event 的那一刻发出"
+    assert stopped_by_budget is True
+    # 输掉这场竞态的 worker **一个模型调用都不发**:没有它,那个单元会带着一个
+    # 永不被设的 cancel_event 跑完一次完整 Ask。
+    assert executed == []
+    rows_path = out_dir / "ab-runs.jsonl"
+    assert not rows_path.exists() or rows_path.read_text() == ""
+
+
 # --- `--max-wall-minutes` 的 preflight(评审 F10 / P3-2)----------------------
 
 
