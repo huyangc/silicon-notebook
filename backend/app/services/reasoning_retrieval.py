@@ -81,7 +81,8 @@ from app.services.reasoning_aspects import (
     render_aspect_status_block, termination_summary,
 )
 from app.services.reasoning_context import (
-    ReflectContext, ReflectMeasurement, build_evidence_block,
+    TURN_CONTEXT_TITLE, ReflectContext, ReflectMeasurement,
+    build_evidence_block,
 )
 from app.services.reasoning_observation import (
     ActionObservationLedger, render_observations,
@@ -3786,6 +3787,14 @@ class ReasoningRetriever:
         说明)。`ppr_searches`/`chunk_searches`/枚举三池是那条纪律的既有例外,
         它们仍以 `state` 为权威,所以这里直读。
 
+        ⚠ **不是纯函数:它有一处副作用。** 返回投影之前调用
+        `_prime_static_catalog(state, facts)`,在本 run **第一次** reflect 时把
+        `prefix_snapshot` 的静态工具目录写进 `state.reflect_static_catalog`(T-PS7)。
+        写点挂在这里而不是 run 起点,是为了复用这一轮刚算完的 facts、不再付一次
+        `_unsafe_scope_restricted()` 的库读——理由与幂等判据都在那个方法的
+        docstring 里。所以"只算一个投影"的读法是不准确的:同一次调用还决定了这
+        条臂整个 run 的 system 段长什么样。
+
         这个方法只做加减法与布尔合并,唯一的两个请求级判定是
         `chunk_search_active()`(纯 settings/策略位)与 `_unsafe_scope_restricted()`。
         后者**不是**零成本:它按契约禁止 memo,「全选」形状下每次要两次库读,而
@@ -4421,10 +4430,16 @@ class ReasoningRetriever:
                 evidence=selection.text,
                 observations=observations,
                 contract=render_aspect_contract_block(state.aspects),
+                # T 的两半,按「有没有排序权」分开(评审 P2-4)。前两块是服务端
+                # **执行限制**,T 的标题声明它们优先于上面过时的观察与证据卡;
+                # `summary` 那半改挂 `TURN_CONTEXT_TITLE`,因为 `run()` 已经把
+                # `profile_block`/`experience_block`/`consult_block_text` 拼进去
+                # 了——那几段是从库里文档归纳出来的文本,不该借 T 的标题取得压过
+                # 真实证据卡的排序权。`summary` 本身一个字都没改。
                 turn_state="\n\n".join(block for block in (
                     render_aspect_status_block(state.aspects),
                     render_collection_keys_note(state.enum_chains),
-                    summary,
+                    f"{TURN_CONTEXT_TITLE}\n{summary}" if summary else "",
                 ) if block),
                 # 每轮按同一个冻结目录重渲染一次:纯字符串拼接、零 I/O,而同一个
                 # 输入必然给出同一串字节,所以 S 的稳定性不依赖任何缓存是否生效。
@@ -4791,8 +4806,11 @@ class ReasoningRetriever:
         # 观察行上那句「原因=model_degraded:output_budget_exhausted」是给模型看
         # 的:它据此知道下一轮该缩短输出,而不是只看到一句"上一轮没成"。
         if state.aspects is not None:
-            # 这一轮的 prompt 已经渲染过了,追问那一句因此被 `render_aspect_block`
-            # 消费掉——可这次调用根本没成交,模型一个字都没读到。重新置位,否则
+            # 这一轮的 prompt 已经渲染过了,追问那一句因此被本轮布局的那个渲染点
+            # (`off` 的 `render_aspect_block` / `prefix_snapshot` 的
+            # `render_aspect_status_block`,互斥)消费掉——可这次调用根本没成交,
+            # 模型一个字都没读到。两条臂认的是同一格 `nudge_pending`,所以这里不
+            # 分布局。重新置位,否则
             # 服务端退回一整轮换来的是一句谁都没看见的话(两道闸在那个方法里)。
             state.aspects.restore_pending_nudge()
         return folded

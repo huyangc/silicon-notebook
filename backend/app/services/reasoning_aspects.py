@@ -179,8 +179,10 @@ class _AspectRecord:
     demotion: str = ""
     assessment_omitted: bool = False
     #: 这个方面**最近一次**被服务端逐条拒绝的稳定原因码(闭集
-    #: `ASPECT_REJECTION_REASONS`)。**consume-on-render**:
-    #: `render_aspect_block` 渲染出「服务端未采纳」那一格的同时清掉它,与
+    #: `ASPECT_REJECTION_REASONS`)。**consume-on-render**:两个布局各自那一个渲染
+    #: 点(`off` 的 `render_aspect_block`、`prefix_snapshot` 的
+    #: `render_aspect_status_block`,`_reflect_v2_context` 按布局闸二选一、互斥)
+    #: 渲染出「服务端未采纳」那一格的同时清掉它,与
     #: `nudge_pending` 同款一次性语义。挂成一次性而不是常驻状态,是因为它讲的是
     #: 「你上一轮那条自评没被采纳」这件具体的事——每轮重复同一句斥责,模型读到的
     #: 是一句与它这一轮做了什么无关的话,而它这一轮很可能已经改对了。
@@ -409,7 +411,8 @@ class AspectLedger:
         #: 追问用完之后模型仍然没给自评 ⇒ 这次 run 的方面账是**模型没参与**的
         #: 那一种,不是"它判断还差东西"。
         self.assessment_omitted: bool = False
-        #: 追问句「还欠着」——被退回之后**只渲染一次**(见 `render_aspect_block`)。
+        #: 追问句「还欠着」——被退回之后**只渲染一次**(两个布局各自一个渲染点、
+        #: 互斥:`render_aspect_block` / `render_aspect_status_block`)。
         #: 与 `assessment_prompts` 分开:那一格是"一共退回过几次"的计数(判据是
         #: 它),这一格是"这一句现在还该不该出现"的一次性开关。
         self.nudge_pending: bool = False
@@ -420,8 +423,9 @@ class AspectLedger:
         #: 自评永久豁免掉后面所有的追问。
         self.nudge_answered: bool = False
         #: 上一轮有几条自评因为**方面 id 不在这份清单里**被拒。它挂不到任何一条
-        #: 记录上(那个 id 本来就不存在),所以单独计数,由
-        #: `render_aspect_block` 渲染成一行并同时清零(consume-on-render,与
+        #: 记录上(那个 id 本来就不存在),所以单独计数,由两个布局各自那一个渲染
+        #: 点(`render_aspect_block` / `render_aspect_status_block`,互斥)渲染成
+        #: 一行并同时清零(consume-on-render,与
         #: `_AspectRecord.rejected` 同款)。只记条数、不记那个 id:它是模型的自由
         #: 文本,合法 id 就在同一个块里逐行列着,回显一遍不增加任何信息。
         self.unknown_aspect_rejections: int = 0
@@ -512,7 +516,8 @@ class AspectLedger:
     def restore_pending_nudge(self) -> None:
         """追问那一句没送达就不算被消费,重新置位(§5.2 的降级轮)。
 
-        `render_aspect_block` 把「渲染 = 已经说给模型听了」当成消费点,而一轮
+        两个布局各自那一个渲染点(`render_aspect_block` / `render_aspect_status_block`)
+        都把「渲染 = 已经说给模型听了」当成消费点,而一轮
         降级说的正是**那一次模型调用没有成交**:prompt 渲染出来了,回来的却是
         provider 故障后的兜底,模型没读到这一句、更没机会照办。不重新置位的话,
         服务端花了一整轮把收尾退回去、追问额度也扣掉了,换回来的是一句谁都没
@@ -530,9 +535,15 @@ class AspectLedger:
         """「上一轮哪几条自评没被采纳」→ `({aspect_id: why}, 未知 id 条数)`。
 
         **一次性**:读完就清,与 `nudge_pending` 同款语义(见
-        `_AspectRecord.rejected`)。唯一的调用点是 `render_aspect_block`——
-        "渲染 = 已经说给模型听了"。分两格返回是因为两者挂的位置不同:前者是
-        某个方面那一行上的一格,后者挂不到任何一行上,只能单独说一句。
+        `_AspectRecord.rejected`)——"渲染 = 已经说给模型听了"。分两格返回是因为
+        两者挂的位置不同:前者是某个方面那一行上的一格,后者挂不到任何一行上,
+        只能单独说一句。
+
+        **调用点是两个布局各自那一个渲染点,一共两处、互斥**:`off` 的
+        `render_aspect_block` 与 `prefix_snapshot` 的 `render_aspect_status_block`,
+        由 `_reflect_v2_context` 按布局闸二选一,所以每轮仍然恰好消费一次。要找
+        全部消费点就是这两个——别只按 `render_aspect_block` 找,那样会漏掉 P 那
+        一半(T-PS8 之前这里确实只有一个调用点)。
 
         ⚠ **降级轮不重新置位**(知情取舍,与 `restore_pending_nudge` 刻意不同)。
         那一格要恢复,是因为服务端**退回了一整轮**去换一份自评:成本真的付出去
@@ -598,7 +609,8 @@ class AspectLedger:
         的判断也一起作废),剔完没有支撑的项按 §7.1 不得保持 supported。
 
         吸收到**非空**自评时顺手清掉 `nudge_pending`:追问已经被回应,那一句不该
-        再出现在后续任何一轮(渲染侧也会清,两处同向,见 `render_aspect_block`)。
+        再出现在后续任何一轮(渲染侧也会清,两处同向,见 `render_aspect_block` /
+        `render_aspect_status_block`)。
 
         **入口先经 `normalize_assessment_payload` 做形状归一**:按方面 id 的
         映射写法(2026-09-09 本机实测里占多数)与设计稿的列表写法在这里被当成
@@ -888,9 +900,11 @@ def render_aspect_block(ledger: AspectLedger) -> str:
     上限截过。
 
     ⚠ **这个函数有一处写:** 渲染追问句的同时消费掉 `ledger.nudge_pending`
-    (一次性,见下面的注释)。生产只有一个调用点、每轮一次(`_reflect_v2_context`),
-    所以"渲染 = 已经说给模型听了"在这里是准确的;真要加第二个调用点(诊断、
-    预览),那一个必须先想清楚它算不算"说过了"。
+    (一次性,见下面的注释)。**这个函数**在生产只有一个调用点、每轮至多一次
+    (`_reflect_v2_context` 的 `off` 分支;P 那条臂走
+    `render_aspect_status_block`,两者互斥),所以"渲染 = 已经说给模型听了"在这里
+    是准确的;真要加第二个调用点(诊断、预览),那一个必须先想清楚它算不算
+    "说过了"。
 
     ⚠ **这是 `off` 布局的那一份,逐字节冻结。** `prefix_snapshot` 布局把同一份账
     拆成 `render_aspect_contract_block`(C,run 内不变)+ `render_aspect_status_block`
@@ -969,7 +983,8 @@ def render_aspect_contract_block(ledger: AspectLedger) -> str:
     证据数、缺口、降级、未采纳、追问句一格都不在这里——它们逐轮变化,全在状态半。
 
     **零副作用**:不消费 `nudge_pending`、不消费未采纳披露。那两处消费随状态半走
-    (`render_aspect_status_block`),仍然是全仓单一调用点。
+    (`render_aspect_status_block`)。全仓因此是**两个消费点、互斥**——off 一个、
+    P 一个,`_reflect_v2_context` 按布局闸二选一,每轮仍恰好消费一次。
 
     不受 `state_chars` 约束,理由同 `render_aspect_block`:用户确认过的必答清单与
     约束不属于可压缩区,只折叠(`_fold`)不截长。
