@@ -79,12 +79,17 @@ REFLECT_DELTA_CARDS_MAX = 16
 # `Literal[...]` 注解按语法必须把四格再写一遍(注解位置吃不下一个 tuple 常量),
 # 两份部署文档也各用散文写了一遍;这三处的一致性由用例对账
 # (`test_reflect_optimization_closed_set_is_registered_once`),不靠"只有一份"。
-# 分成"已实现"与"已登记但未实现"两段,是因为最后一格要等下一个 PR 把实现补上
+# 分成"已实现"与"已登记但未实现"两段曾经是因为最后一格要等后续 PR 把实现补上
 # ——在那之前配上去必须**响亮**失败,而不是静默退回 `off`:一个以为自己在跑
-# delta lean 的部署,拿到的每一条测量都会被归到错误的臂上。PR-3(T-PD1)把
-# `prefix_delta` 从这里挪进已实现段,`prefix_delta_lean` 留在原地。
-REFLECT_OPTIMIZATION_IMPLEMENTED = ("off", "prefix_snapshot", "prefix_delta")
-REFLECT_OPTIMIZATION_PLANNED = ("prefix_delta_lean",)
+# delta lean 的部署,拿到的每一条测量都会被归到错误的臂上。PR-3(T-PD1)先把
+# `prefix_delta` 挪进已实现段;PR-4(T-PL1)把最后一格 `prefix_delta_lean` 也
+# 挪了进来,`REFLECT_OPTIMIZATION_PLANNED` 因此收窄为空元组——校验器与"已登记
+# 但未实现即响亮拒绝"这条机制**保留**,只是闭集为空时它对任何取值恒放行
+# (拍板 Q12):下一次再要挪入新格时,不需要动 `validate_reflect_optimization`
+# 一行,只需要在这里把新格从 `PLANNED` 挪到 `IMPLEMENTED`。
+REFLECT_OPTIMIZATION_IMPLEMENTED = (
+    "off", "prefix_snapshot", "prefix_delta", "prefix_delta_lean")
+REFLECT_OPTIMIZATION_PLANNED: "tuple[str, ...]" = ()
 REFLECT_OPTIMIZATIONS = REFLECT_OPTIMIZATION_IMPLEMENTED + REFLECT_OPTIMIZATION_PLANNED
 
 
@@ -1089,8 +1094,10 @@ class Settings(BaseSettings):
     # ——各处自己读一次 settings 正是"关掉之后总会剩下一处还在跑"的老形状。
     #
     # 它也**不是**前端检索档位,更不由档位推导:用户选的是检索深度,不是上下文
-    # 布局。取值闭集见 `REFLECT_OPTIMIZATIONS`;最后一格已登记但本期未实现,由下面
-    # 的校验器响亮拒绝(见 `validate_reflect_optimization`)。
+    # 布局。取值闭集见 `REFLECT_OPTIMIZATIONS`;四格现在全部已实现——闭集之外的
+    # 拼写由下面的 `Literal` 挡住,`validate_reflect_optimization` 的"已登记但
+    # 未实现即响亮拒绝"这条机制仍在,只是 `REFLECT_OPTIMIZATION_PLANNED` 收窄为
+    # 空之后对任何取值恒放行(拍板 Q12)。
     reasoning_reflect_optimization: Literal[
         "off", "prefix_snapshot", "prefix_delta", "prefix_delta_lean"
     ] = Field("off", validation_alias="REASONING_REFLECT_OPTIMIZATION")
@@ -1792,14 +1799,20 @@ class Settings(BaseSettings):
     def validate_reflect_optimization(cls, value):
         """已登记但**尚未实现**的取值必须在启动期就响亮拒绝。
 
-        闭集写全四格(而不是本期只列三格)是刻意的:`REFLECT_OPTIMIZATIONS` 同时
-        是文档数值表与轨迹投影的字面量来源,每放开一格就改一次枚举会让"这个部署
-        跑的是哪一格"在历史轨迹里失去可比性。但**登记 ≠ 可用**——静默把
-        `prefix_delta_lean` 退回 `off` 会让一个自以为在跑增量精简版的部署,把
-        每一条测量都归到错误的臂上;那比启动失败难查得多。
+        闭集写全四格(而不是逐 PR 只列已实现的那几格)是刻意的:
+        `REFLECT_OPTIMIZATIONS` 同时是文档数值表与轨迹投影的字面量来源,每放开
+        一格就改一次枚举会让"这个部署跑的是哪一格"在历史轨迹里失去可比性。但
+        **登记 ≠ 可用**——静默把一个已登记但未实现的取值退回 `off` 会让一个自以
+        为在跑那条臂的部署,把每一条测量都归到错误的臂上;那比启动失败难查
+        得多。
 
-        `mode="after"`(默认):Literal 先把四格之外的拼写挡掉,报的是取值不在闭集;
-        进到这里的一定是四格之一,所以这里只需要说"这一格还没实现"。
+        `mode="after"`(默认):Literal 先把四格之外的拼写挡掉,报的是取值不在闭
+        集;进到这里的一定是四格之一。PR-4(T-PL1)把最后一格 `prefix_delta_lean`
+        挪进 `REFLECT_OPTIMIZATION_IMPLEMENTED` 之后,`REFLECT_OPTIMIZATION_PLANNED`
+        收窄为空元组——这条校验器**保留**(下一次再要新开一格时不用碰它,只需要
+        在登记处把新格搬进 `PLANNED`),但闭集为空时 `value in
+        REFLECT_OPTIMIZATION_PLANNED` 恒为假,所以它对四格里的任何取值恒放行
+        (拍板 Q12)。
         """
         if value in REFLECT_OPTIMIZATION_PLANNED:
             raise ValueError(
