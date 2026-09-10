@@ -3541,14 +3541,28 @@ def test_an_expired_deadline_also_stops_a_concurrent_batch_with_zero_dispatch(
     """(b) 的并发变体:并发路在整批开跑前若已过点也是**零派发**,不靠
     `abort()`/Timer 唤醒——那条机制是给 mid-batch 到点准备的,已经过期的
     deadline 应该在提交任何 future 之前就被拦下。
+
+    「零派发」这一条**不足以**区分两道判据(评审 P3-4):删掉批入口那道前置判
+    之后,`max(0.0, deadline - now) == 0` 的 Timer 会抢在 worker 之前跑完
+    `abort()`,而 `worker()` 入口也自己按墙钟早退——`calls` 照样是空的,一场
+    竞态兜住了一条本该由前置判负责的性质。所以这里另钉两件只有前置判成立才
+    为真的事实:**线程池压根没被构造**,以及终端上**没有** `ab aborted` 那一行
+    (预算到点的收摊路与前置判是两回事,后者根本走不到收摊)。
     """
     calls: list[str] = []
+    pools: list[int] = []
+    real_pool = rig.ThreadPoolExecutor
 
     def _fake_run(repo, **kw):
         calls.append(kw.get("item", {}).get("question_key", "?"))
         return _FakeResponse()
 
+    def _recording_pool(*a, **kw):
+        pools.append(1)
+        return real_pool(*a, **kw)
+
     monkeypatch.setattr(rig, "run_ab_once", _fake_run)
+    monkeypatch.setattr(rig, "ThreadPoolExecutor", _recording_pool)
     _fixed_intents(monkeypatch)
 
     out_dir = tmp_path / "ab"
@@ -3562,10 +3576,12 @@ def test_an_expired_deadline_also_stops_a_concurrent_batch_with_zero_dispatch(
         model_contract="0123456789abcdef", log_dir=out_dir, clock=datetime.now,
         deadline=time.monotonic() - 1.0,
     )
-    capsys.readouterr()
+    out = capsys.readouterr().out
     assert calls == []
     assert failed == 0
     assert stopped_by_budget is True
+    assert pools == [], "批入口的前置判没成立:线程池被构造了"
+    assert "ab aborted" not in out
 
 
 def test_a_mid_batch_deadline_cancels_the_in_flight_units_and_skips_the_queue(
@@ -3616,7 +3632,7 @@ def test_a_mid_batch_deadline_cancels_the_in_flight_units_and_skips_the_queue(
         deadline=deadline,
     )
     elapsed = time.monotonic() - started
-    capsys.readouterr()
+    out = capsys.readouterr().out
     assert stopped_by_budget is True
     assert failed == 0                       # 删失,不是失败(§10 M5-4)
     assert elapsed < 3.0, f"budget timer 没有及时唤醒在途单元({elapsed:.1f}s)"
@@ -3631,6 +3647,17 @@ def test_a_mid_batch_deadline_cancels_the_in_flight_units_and_skips_the_queue(
     assert {row["question_key"] for row in rows} == in_flight
     assert all(row["status"] == "cancelled" for row in rows)
     assert len(rows) == concurrency
+    # 事后翻**日志**的人也要看到 `cancelled`(评审 F9):这一行此前把 `status`
+    # 硬编码成 `failed`,于是 JSONL 说删失、`.log` 说失败,读日志的人把预算掐断
+    # 读成「这一批模型全崩了」。
+    log_text = (out_dir / "ab-runs.log").read_text(encoding="utf-8")
+    assert "status=cancelled" in log_text
+    assert "status=failed" not in log_text
+    # 人看的那条 say 也不叫 FAILED(评审 P2-4):同一屏上「N 行 FAILED」紧接
+    # 一句「整批墙钟预算到点」是自相矛盾的。
+    assert "ab cancelled" in out
+    assert "ab failed" not in out
+    assert "CANCELLED 预算到点" in out
 
 
 def test_the_manifest_keys_pass_the_shared_contract_and_hide_the_url(tmp_path):
@@ -3666,8 +3693,8 @@ def test_the_manifest_keys_pass_the_shared_contract_and_hide_the_url(tmp_path):
     )
     text = (out_dir / "manifest.json").read_text(encoding="utf-8")
     row = json.loads(text)
-    # `assert_manifest` 已经在 `_write_ab_manifest` 内部跑过一遍(写盘前);这里
-    # 再对读回来的行跑一遍,钉住"写出去的就是过了闸的那一份"。
+    # `build_manifest` 已经在 `_write_ab_manifest` 内部验过一遍;这里对**读回来
+    # 的**行再跑一遍,钉住"写出去的就是过了闸的那一份"。
     assert_manifest(row)
     assert secret_url not in text
     assert "postgresql://" not in text
@@ -3678,9 +3705,30 @@ def test_the_manifest_keys_pass_the_shared_contract_and_hide_the_url(tmp_path):
     assert row["stopped_by_budget"] is False
     assert row["matrix"] == {
         "questions": 2, "cells": 1, "efforts": 2, "arms": 2, "repeats": 3,
+        # 额外子键:真实 run 数上界(评审 P1-2)。基数相乘对不上账——E3 各格
+        # 题集不相交,`cells` 不是乘数。
+        "planned_runs": 4,
     }
     assert row["budgets"]["max_wall_minutes"] is None
     assert row["budgets"]["reasoning_timeout_seconds"] == 90
+    # 重试预算复用那个镜像常量,不再第三次抄配置默认值(评审 P3-1);常量本身
+    # 由 `test_reflect_t0_scripts.py` 钉在 `Settings().reasoning_max_retries` 上。
+    assert row["budgets"]["reasoning_attempt_budget"] == rig.REASONING_ATTEMPT_BUDGET
+    # **按值**断言,不只查键在场(评审 P2-2):`assert_manifest` 的四道闸对空
+    # list / 空 dict 一律放行,所以「`facts[cell]["corpus_signature"]` 这一跳被
+    # 重构断了」这种事全部四道闸都拦不住,而「这批跑在哪份语料上」正是这个键
+    # 被列为 E3 必填的理由。
+    assert row["arms"] == ["legacy:off", "v2:off"]
+    assert row["optimization_by_arm"] == {"legacy:off": "off", "v2:off": "off"}
+    assert row["corpus_signature_by_cell"] == {
+        "A_nokg": _fact()["corpus_signature"],
+    }
+    assert set(row["intent_contract_digest_by_question"]) == {"A-q08", "A-q14"}
+    assert row["model_contract"] == "0123456789abcdef"
+    # 历史那一份也落了盘(评审 P3-7),内容与最新那份同一行。
+    history = (out_dir / "manifests.jsonl").read_text().splitlines()
+    assert len(history) == 1
+    assert json.loads(history[0]) == row
 
 
 def test_the_manifest_repeats_is_one_under_round_and_round_index_is_separate(
@@ -3709,33 +3757,130 @@ def test_the_manifest_repeats_is_one_under_round_and_round_index_is_separate(
     assert row["matrix"]["round_index"] == 2
 
 
-def test_the_manifest_question_count_does_not_double_count_a_shared_question(
-    tmp_path,
-):
-    """验收 (d) 之三:`matrix.questions` 是**真实题数**,不是 `(格,题)` 配对数
-    ——同一题在两个格里各跑一次(`B_kg`/`B_nokg` 共用 `B-q06`)只算一道题,不算
-    两道(拍板台账「T-EX1 quality 评审」;cmd_ab 里的 `unique_questions` 才是
-    配对集合,manifest 不能照抄那个 len)。
+def _default_ab_units(**plan_overrides: Any) -> list[dict]:
+    """真实 `ab_plan` 出来的默认矩阵(不手造 units)。
+
+    手造的 units 能拼出 `ab` 里**出不来**的形状——例如同一道题落在两个语料格
+    上:`ab_plan` 走 `ask_plan`,后者按 `row["corpus"] == corpus` 过滤,所以每
+    道题只属于一个格(评审 P1-2 实测)。manifest 的对账用例必须跑在真实形状上,
+    否则钉住的是一条生产上永远不成立的性质。
+    """
+    plan = {
+        "cells": list(rig.AB_DEFAULT_CELLS), "efforts": rig.EFFORTS,
+        "repeats": 3, "round_": None, "lang": "zh", "limit": None,
+    }
+    plan.update(plan_overrides)
+    return rig.ab_plan(load_questions(), **plan)
+
+
+def test_the_manifest_planned_runs_matches_the_real_default_matrix(tmp_path):
+    """验收 (d) 之三:`matrix` 的账要**对得上真实 run 数**(评审 P1-2)。
+
+    默认矩阵(两格、34 题、2 档、2 臂、3 轮)真实落 408 行,而五个基数相乘给
+    816——差的正好是 `cells`:`ab` 各格的题集**不相交**,`cells` 不是乘数。
+    读的人按「五个基数相乘」对账会看到 `ab-runs.jsonl` 只有一半、而
+    `stopped_by_budget=false`,结论变成「这份数据集损坏/少跑了一半」,恰好是
+    冻结 manifest 要消除的那种误读。所以另写一个 `planned_runs` 子键,并在这里
+    把「相乘 == 实际上界」这件事钉死。
+
+    `questions` 仍然是**真实题数**(不是 `(格,题)` 配对数)。这两个数在 `ab` 的
+    任何真实调用里恰好相等(题集不相交),所以那条去重在生产上是空操作——真正
+    需要守的账是下面这条乘法,不是一个造不出来的同题双格。
     """
     out_dir = tmp_path / "ab"
     out_dir.mkdir()
     runner = rig.Runner(dry_run=False, out_dir=out_dir)
-    args = _ab_args(only_policy=[], out_dir=str(out_dir), dry_run=False)
-    units = [
-        _unit(question_key="B-q06", corpus_cell="B_kg"),
-        _unit(question_key="B-q06", corpus_cell="B_nokg"),
-    ]
+    args = _ab_args(only_policy=[], out_dir=str(out_dir), dry_run=False,
+                    repeats=3)
+    units = _default_ab_units()
+    arms = rig.ab_arms(args)
+    cells = list(rig.AB_DEFAULT_CELLS)
     rig._write_ab_manifest(
-        runner, args, units=units, cells=["B_kg", "B_nokg"],
-        arms=rig.ab_arms(args),
-        facts={"B_kg": _fact(), "B_nokg": _fact()}, model_contract=None,
+        runner, args, units=units, cells=cells, arms=arms,
+        facts={cell: _fact() for cell in cells}, model_contract=None,
+        settings=SimpleNamespace(),
+        intent_contract_digest_by_question={},
+        started_at="t0", finished_at="t1", stopped_by_budget=False,
+    )
+    matrix = json.loads((out_dir / "manifest.json").read_text())["matrix"]
+    assert matrix["questions"] == 34
+    assert matrix["cells"] == 2
+    assert matrix["efforts"] == 2
+    assert matrix["arms"] == 2
+    assert matrix["repeats"] == 3
+    # 真实上界:34 题 × 2 档 × 2 臂 × 3 轮。
+    assert matrix["planned_runs"] == 34 * 2 * 2 * 3
+    assert matrix["planned_runs"] == len(units) * len(arms)
+    # 而五个基数相乘多出一个 `cells` 倍——这条断言就是「`cells` 不是乘数」这句
+    # 话本身,顺手挡住「哪天有人把 planned_runs 改成五键相乘」。
+    assert (matrix["questions"] * matrix["cells"] * matrix["efforts"]
+            * matrix["arms"] * matrix["repeats"]
+            == matrix["planned_runs"] * matrix["cells"])
+
+
+def test_the_manifest_only_records_the_cells_the_batch_really_ran(tmp_path):
+    """验收 (d) 之四:`cells` 与 `corpus_signature_by_cell` 从 **units 实跑格**
+    收窄,不数 `--cell` 的声明格数(评审 F4)。
+
+    `--only-question A-q08` 在默认两格下出 6 个单元、全在 `A_nokg`。此前
+    manifest 写 `cells: 2` 并带上一个这批压根没跑的 `B_kg` 签名——「冻结这批跑
+    在哪份语料上」这个事实当场变成假的,而五基数相乘也跟着差一倍。
+    """
+    out_dir = tmp_path / "ab"
+    out_dir.mkdir()
+    runner = rig.Runner(dry_run=False, out_dir=out_dir)
+    args = _ab_args(only_policy=[], out_dir=str(out_dir), dry_run=False,
+                    only_question=["A-q08"], repeats=3)
+    units = _default_ab_units(only_questions=["A-q08"])
+    assert {unit["corpus_cell"] for unit in units} == {"A_nokg"}
+    cells = list(rig.AB_DEFAULT_CELLS)
+    b_fact = dict(_fact(), corpus_signature="00112233445566aa")
+    rig._write_ab_manifest(
+        runner, args, units=units, cells=cells, arms=rig.ab_arms(args),
+        facts={"A_nokg": _fact(), "B_kg": b_fact}, model_contract=None,
         settings=SimpleNamespace(),
         intent_contract_digest_by_question={},
         started_at="t0", finished_at="t1", stopped_by_budget=False,
     )
     row = json.loads((out_dir / "manifest.json").read_text())
+    assert row["matrix"]["cells"] == 1
     assert row["matrix"]["questions"] == 1
-    assert row["matrix"]["cells"] == 2
+    assert row["matrix"]["planned_runs"] == len(units) * 2
+    # 没跑的那个格的签名**不进** manifest。
+    assert row["corpus_signature_by_cell"] == {
+        "A_nokg": _fact()["corpus_signature"],
+    }
+    assert b_fact["corpus_signature"] not in (out_dir / "manifest.json").read_text()
+
+
+def test_the_manifest_json_is_the_latest_and_the_jsonl_is_the_history(tmp_path):
+    """评审 P3-7:`manifest.json` 覆盖写(最新),`manifests.jsonl` 追加(历史)。
+
+    同一个 out-dir 里 `ab-runs.jsonl` 是 append 模式、默认 out-dir 又是固定的
+    `.local/t0`:只覆盖写的话,在 SHA a1 跑一批、改代码到 b2 再跑一批之后,数据
+    文件里两批的行都在、manifest 只剩 b2 ⇒ a1 那些行被归到 b2 的代码上,
+    `code_sha` 这个锚点反过来说了假话。
+    """
+    out_dir = tmp_path / "ab"
+    out_dir.mkdir()
+    runner = rig.Runner(dry_run=False, out_dir=out_dir)
+    args = _ab_args(only_policy=[], out_dir=str(out_dir), dry_run=False)
+    for started in ("t0", "t2"):
+        rig._write_ab_manifest(
+            runner, args, units=[_unit()], cells=["A_nokg"],
+            arms=rig.ab_arms(args), facts={"A_nokg": _fact()},
+            model_contract=None, settings=SimpleNamespace(),
+            intent_contract_digest_by_question={},
+            started_at=started, finished_at="t9", stopped_by_budget=False,
+        )
+    history = [
+        json.loads(line)
+        for line in (out_dir / "manifests.jsonl").read_text().splitlines()
+    ]
+    assert [row["started_at"] for row in history] == ["t0", "t2"]
+    latest = json.loads((out_dir / "manifest.json").read_text())
+    assert latest["started_at"] == "t2"
+    assert latest == history[-1]
 
 
 def test_dry_run_ab_prints_the_budget_lines(capsys):
@@ -3750,7 +3895,13 @@ def test_dry_run_ab_prints_the_budget_lines(capsys):
     assert "wall-clock budget" in out
     assert "未设置(--max-wall-minutes 不给,今天的行为逐字相同" in out
     assert "single-call timeout" in out
-    assert "90s" in out
+    # **不硬写 90s**(评审 F3 / P3-1):硬写的话,配置默认值哪天调到 120,rig 与
+    # 用例会**一致地**停在陈旧的 90 而全绿。这个数从 `Settings` 取——那也是
+    # `REASONING_TIMEOUT_SECONDS_DEFAULT` 这个镜像常量被钉住的那一个值(守卫在
+    # `test_reflect_t0_scripts.py`)。
+    from app.core.config import Settings
+
+    assert f"{Settings().reasoning_timeout_seconds}s" in out
     assert "on budget" in out
     assert "停止派发新单元" in out
     assert "status=cancelled" in out
@@ -3791,3 +3942,370 @@ def test_git_sha_falls_back_to_unknown_on_a_nonzero_exit(monkeypatch):
 
     monkeypatch.setattr(rig.subprocess, "run", _nonzero)
     assert rig._ab_git_sha() == "unknown"
+
+
+def _fake_git(monkeypatch, *, head="", status="", head_exc=None,
+              status_exc=None):
+    """按 argv 分派的假 `git`:`rev-parse` 与 `status --porcelain` 各一条出口。"""
+    def _run(cmd, **kw):
+        if cmd[1] == "rev-parse":
+            if head_exc is not None:
+                raise head_exc
+            return SimpleNamespace(stdout=head, returncode=0)
+        assert cmd[1:] == ["status", "--porcelain"], cmd
+        if status_exc is not None:
+            raise status_exc
+        return SimpleNamespace(stdout=status, returncode=0)
+
+    monkeypatch.setattr(rig.subprocess, "run", _run)
+
+
+_FULL_SHA = "6c2a6155f" + "0" * 31        # 40 位,形状与真实 HEAD 相同
+
+
+def test_git_sha_on_a_clean_tree_is_the_bare_full_sha(monkeypatch):
+    """干净工作树 ⇒ 40 位全 SHA,不带后缀(docstring 说的是「全 SHA」,不是短码
+    ——评审 P3-5 ①)。
+    """
+    _fake_git(monkeypatch, head=_FULL_SHA + "\n", status="")
+    assert rig._ab_git_sha() == _FULL_SHA
+
+
+def test_git_sha_marks_a_dirty_worktree(monkeypatch):
+    """有未提交改动 ⇒ 拼 `-dirty`(评审 P3-5 ②)。
+
+    rig 被 worktree 里的未提交改动驱动是这个程序的常态;一个光秃秃的 commit SHA
+    会把这批数据锚到一份**不含实际跑的代码**的提交上,而 `code_sha` 的全部意义
+    就是那条锚。
+    """
+    _fake_git(monkeypatch, head=_FULL_SHA + "\n",
+              status=" M scripts/reflect_shadow_rig.py\n")
+    assert rig._ab_git_sha() == _FULL_SHA + "-dirty"
+
+
+def test_git_sha_does_not_claim_clean_when_status_itself_fails(monkeypatch):
+    """`git status` 自己读不出来时**不默认干净**:拼 `-dirty_unknown`。
+
+    静默当干净会让 manifest 说一句它没验过的话——与 §5.5-2「未验证 ≠ 通过」
+    同一条纪律。
+    """
+    _fake_git(monkeypatch, head=_FULL_SHA + "\n",
+              status_exc=rig.subprocess.TimeoutExpired(["git", "status"], 5))
+    assert rig._ab_git_sha() == _FULL_SHA + "-dirty_unknown"
+
+
+def test_git_sha_is_unknown_when_rev_parse_times_out(monkeypatch):
+    """`timeout=5` 那一条守卫(评审 P3-5 ③):超时 ⇒ `unknown`,不抛、不挂死。
+
+    收尾时的一次诊断性 `git` 调用不该让一次跑了几小时的批报废——也不该让它
+    卡住不返回。
+    """
+    _fake_git(
+        monkeypatch,
+        head_exc=rig.subprocess.TimeoutExpired(["git", "rev-parse"], 5),
+    )
+    assert rig._ab_git_sha() == "unknown"
+
+
+def test_git_sha_is_unknown_on_empty_output(monkeypatch):
+    """退出码 0 但 stdout 是空的(见过的一种浅克隆形态)⇒ `unknown`,不落一个
+    空字符串 `code_sha`(评审 P3-5 ③)。
+    """
+    _fake_git(monkeypatch, head="\n")
+    assert rig._ab_git_sha() == "unknown"
+
+
+def test_the_manifest_code_sha_stays_a_short_code_even_when_dirty(tmp_path,
+                                                                 monkeypatch):
+    """`-dirty` 后缀不能把 `code_sha` 顶出 `_is_short_code` 的字符集/长度门槛。
+
+    40 位 SHA + 后缀仍在 64 字符内,`-`/`_` 都在短码字符集里——这一格让那件事
+    由 `assert_manifest` 真判一次,而不是靠人算。
+    """
+    _fake_git(monkeypatch, head=_FULL_SHA + "\n", status=" M a\n")
+    out_dir = tmp_path / "ab"
+    out_dir.mkdir()
+    runner = rig.Runner(dry_run=False, out_dir=out_dir)
+    args = _ab_args(only_policy=[], out_dir=str(out_dir), dry_run=False)
+    rig._write_ab_manifest(
+        runner, args, units=[_unit()], cells=["A_nokg"],
+        arms=rig.ab_arms(args), facts={"A_nokg": _fact()},
+        model_contract=None, settings=SimpleNamespace(),
+        intent_contract_digest_by_question={},
+        started_at="t0", finished_at="t1", stopped_by_budget=False,
+    )
+    row = json.loads((out_dir / "manifest.json").read_text())
+    assert row["code_sha"].endswith("-dirty")
+    assert_manifest(row)
+
+
+# --- 串行同轮中途到点 / 端到端退出码(评审 F1 / F2 / P1-1) -------------------
+
+
+def test_a_mid_round_deadline_stops_dispatching_the_rest_of_a_serial_batch(
+    tmp_path, monkeypatch, capsys,
+):
+    """评审 F1 / P1-1 / P3-4:**同一轮里**串行路中途到点 ⇒ 停止派发。
+
+    此前唯一涉及串行到点的用例把两个单元放在**不同重复轮**,第 2 轮被
+    `_ab_run_batch` 的批入口检查兜住,走不到 `for unit in batch` 循环顶部那道
+    判——删掉那五行(变异 M1)之后三份用例文件全绿。而 `--concurrency 1` 是
+    **默认值**(SQLite 下还是强制值),失败场景就是「一轮 24 个单元、预算在第 5
+    个之后到点,剩下 19 个照跑到底、整批远超预算」。
+
+    到点这件事**不靠竞态**:第一个单元的假 `run_ab_once` 一直等到
+    `time.monotonic() >= deadline` 才交卷,所以循环顶那道判必然看见到点,不依赖
+    sleep 的时长猜测。
+    """
+    total = 3
+    units = [_unit(question_key=f"Q{i:02d}", repeat=1) for i in range(total)]
+    calls: list[str] = []
+    deadline = time.monotonic() + 0.05
+
+    def _fake_run(repo, *, notebook, item, arm, contract, on_trace,
+                  cancel_event, actor_id, scope_source_ids=None,
+                  optimization="off"):
+        calls.append(item["question_key"])
+        while time.monotonic() < deadline:
+            time.sleep(0.005)
+        for step in _steps(arm):
+            on_trace(SimpleNamespace(
+                step_type=step["step_type"], summary="",
+                detail=step["detail"], duration_ms=1,
+            ))
+        return _FakeResponse()
+
+    monkeypatch.setattr(rig, "run_ab_once", _fake_run)
+    monkeypatch.setattr(rig, "_ab_element_sections", lambda url, ids: {})
+    monkeypatch.setattr(rig, "_ab_chunk_sections", lambda url, ids: {})
+    monkeypatch.setattr(rig, "_ab_usage_for_window",
+                        lambda *a, **kw: UNKNOWN_USAGE)
+    _fixed_intents(monkeypatch)
+
+    out_dir = tmp_path / "ab"
+    runner = rig.Runner(dry_run=False, out_dir=out_dir)
+    args = _ab_args(only_policy=["v2"], out_dir=str(out_dir), dry_run=False)
+    failed, stopped_by_budget, _digests = rig._ab_loop(
+        args, runner, units, {"A_nokg": _fact()}, _repos_by_arm(),
+        actor_id="ab-owner", profile=None, concurrency=1,
+        gold_by_key=load_ab_gold(load_questions()),
+        model_contract="0123456789abcdef", log_dir=out_dir, clock=datetime.now,
+        deadline=deadline,
+    )
+    capsys.readouterr()
+    # 派发数 < 单元数:第一个单元跑完就跨过了预算线。
+    assert calls == ["Q00"]
+    assert len(calls) < total
+    assert stopped_by_budget is True
+    assert failed == 0
+    rows = [
+        json.loads(line)
+        for line in (out_dir / "ab-runs.jsonl").read_text().splitlines()
+    ]
+    # 已跑的那个单元有行(`status=done`,它自己跑完了,不是删失);没派发的两个
+    # **一行都没有**——不落行、不发调用。
+    assert [row["question_key"] for row in rows] == ["Q00"]
+    assert rows[0]["status"] == "done"
+
+
+def test_a_budget_stopped_batch_exits_non_zero_and_freezes_it_in_the_manifest(
+    tmp_path, monkeypatch, capsys,
+):
+    """验收 (b) 的后两半(评审 F2 / P1-1):预算到点 ⇒ **退出码 1** +
+    manifest 的 `stopped_by_budget=true`。
+
+    此前两条 (b) 用例都直调 `_ab_loop`,压根不经过 `_run_ab`,于是退出码与
+    manifest 都没被看过:变异「删掉 `if stopped_by_budget: return 1`」全绿,而
+    `stopped_by_budget=True` 的 manifest 从来没有被端到端产出过一次。失败场景是
+    §13「不偷偷补跑」的另一半——一次被预算掐掉一半矩阵的批以退出码 0 收尾,
+    `&&` 串起来的后续 `analyze` 照常出一份「结论」。
+    """
+    _ab_run_harness(
+        monkeypatch, tmp_path,
+        counts={"ask_jobs": 3, "answers": 1, "conversations": 1},
+        loop=lambda *a, **kw: (0, True, {}),
+    )
+    args = _ab_args(dry_run=False, out_dir=str(tmp_path), max_wall_minutes=30.0)
+    runner = rig.Runner(dry_run=False, out_dir=tmp_path)
+    assert rig._run_ab(args, runner, [_unit()], ["A_nokg"]) == 1
+    err = capsys.readouterr().err
+    assert "整批墙钟预算到点" in err
+    assert "--max-wall-minutes=30.0" in err
+    row = json.loads((tmp_path / "manifest.json").read_text())
+    assert row["stopped_by_budget"] is True
+    assert row["budgets"]["max_wall_minutes"] == 30.0
+    assert row["budgets"]["batch_deadline_seconds"] == 1800
+
+
+def test_the_budget_exit_message_still_reports_the_failed_runs(
+    tmp_path, monkeypatch, capsys,
+):
+    """评审 P3-8:预算那条 `return` 在 `if failed:` **之前**,所以两件事同时成立
+    时只打一句——那一句得把 `failed` 数带上。
+
+    不带的话「预算到点」会盖掉「这一批里还有 2 个 run 真的崩了」:失败数不进
+    manifest 闭集(没有这个键),stderr 是它唯一的落点。
+    """
+    _ab_run_harness(
+        monkeypatch, tmp_path,
+        counts={"ask_jobs": 3, "answers": 1, "conversations": 1},
+        loop=lambda *a, **kw: (2, True, {}),
+    )
+    args = _ab_args(dry_run=False, out_dir=str(tmp_path), max_wall_minutes=5.0)
+    runner = rig.Runner(dry_run=False, out_dir=tmp_path)
+    assert rig._run_ab(args, runner, [_unit()], ["A_nokg"]) == 1
+    err = capsys.readouterr().err
+    assert "整批墙钟预算到点" in err
+    assert "2 个 run FAILED" in err
+
+
+def test_the_intent_digest_table_only_covers_the_questions_this_batch_ran(
+    tmp_path, monkeypatch, capsys,
+):
+    """评审 P2-1:`intent_contract_digest_by_question` 只写**这一批实跑的题**。
+
+    `_IntentCache.__init__` 会把 out-dir 上已有的 `intents.jsonl` 全部读进
+    `_rows`(那个文件存在的理由就是断点重跑不重付模型钱),而默认 out-dir 是
+    固定的 `.local/t0`。不求交的话「先跑一次全量、再跑 `--limit 1` 复现某题」
+    会让 manifest 声称一道题的批用了两道题的契约,`matrix.questions=1` 与这张表
+    当场自相矛盾。
+    """
+    def _fake_run(repo, *, notebook, item, arm, contract, on_trace,
+                  cancel_event, actor_id, scope_source_ids=None,
+                  optimization="off"):
+        for step in _steps(arm):
+            on_trace(SimpleNamespace(
+                step_type=step["step_type"], summary="",
+                detail=step["detail"], duration_ms=1,
+            ))
+        return _FakeResponse()
+
+    monkeypatch.setattr(rig, "run_ab_once", _fake_run)
+    monkeypatch.setattr(rig, "_ab_element_sections", lambda url, ids: {})
+    monkeypatch.setattr(rig, "_ab_chunk_sections", lambda url, ids: {})
+    monkeypatch.setattr(rig, "_ab_usage_for_window",
+                        lambda *a, **kw: UNKNOWN_USAGE)
+
+    out_dir = tmp_path / "ab"
+    out_dir.mkdir()
+    # 上一次跑批留下的缓存:两道题。这一批只跑其中一道。**不** monkeypatch
+    # `_IntentCache.get`——要验的正是那份从磁盘读回来的 `_rows`。
+    (out_dir / "intents.jsonl").write_text(
+        "".join(
+            json.dumps({"question_key": key, "contract": {"resolved": key}},
+                       ensure_ascii=False) + "\n"
+            for key in ("A-q08", "A-q14")
+        ),
+        encoding="utf-8",
+    )
+    runner = rig.Runner(dry_run=False, out_dir=out_dir)
+    args = _ab_args(only_policy=["v2"], out_dir=str(out_dir), dry_run=False)
+    _failed, _stopped, digests = rig._ab_loop(
+        args, runner, [_unit(question_key="A-q08")], {"A_nokg": _fact()},
+        _repos_by_arm(), actor_id="ab-owner", profile=None, concurrency=1,
+        gold_by_key=load_ab_gold(load_questions()),
+        model_contract="0123456789abcdef", log_dir=out_dir, clock=datetime.now,
+    )
+    capsys.readouterr()
+    assert set(digests) == {"A-q08"}
+    assert digests["A-q08"] == rig.ab_contract_digest({"resolved": "A-q08"})
+
+
+def test_the_budget_timer_is_cancelled_before_the_batch_returns(
+    tmp_path, monkeypatch, capsys,
+):
+    """评审 F6:`_ab_run_batch` 返回前必须 `cancel()` 掉那一轮的 Timer。
+
+    不 cancel 的失败场景(`--repeats 3 --max-wall-minutes 90 --concurrency 4`):
+    第 1、2 轮的陈旧 Timer 在第 3 轮里到点触发,`abort()` 关的是**第 1/2 轮
+    闭包的** `aborted`/`active_events`(早已空),于是第 3 轮在途单元不被唤醒、
+    也不停止派发,而 `state["stopped_by_budget"]` 已被翻真——另有一个窄窗口会让
+    一次跑满的批被误报成预算掐断、退 1。
+    """
+    timers: list[Any] = []
+    real_timer = threading.Timer
+
+    class _RecordingTimer(real_timer):          # type: ignore[misc, valid-type]
+        def __init__(self, interval, function, *a, **kw):
+            super().__init__(interval, function, *a, **kw)
+            self.cancel_calls = 0
+            timers.append(self)
+
+        def cancel(self):
+            self.cancel_calls += 1
+            super().cancel()
+
+    def _fake_run(repo, *, notebook, item, arm, contract, on_trace,
+                  cancel_event, actor_id, scope_source_ids=None,
+                  optimization="off"):
+        for step in _steps(arm):
+            on_trace(SimpleNamespace(
+                step_type=step["step_type"], summary="",
+                detail=step["detail"], duration_ms=1,
+            ))
+        return _FakeResponse()
+
+    monkeypatch.setattr(rig.threading, "Timer", _RecordingTimer)
+    monkeypatch.setattr(rig, "run_ab_once", _fake_run)
+    monkeypatch.setattr(rig, "_ab_element_sections", lambda url, ids: {})
+    monkeypatch.setattr(rig, "_ab_chunk_sections", lambda url, ids: {})
+    monkeypatch.setattr(rig, "_ab_usage_for_window",
+                        lambda *a, **kw: UNKNOWN_USAGE)
+    _fixed_intents(monkeypatch)
+
+    out_dir = tmp_path / "ab"
+    runner = rig.Runner(dry_run=False, out_dir=out_dir)
+    args = _ab_args(only_policy=["v2"], out_dir=str(out_dir), dry_run=False)
+    units = [_unit(question_key=f"Q{i:02d}", repeat=1) for i in range(2)]
+    _failed, stopped_by_budget, _digests = rig._ab_loop(
+        args, runner, units, {"A_nokg": _fact()}, _repos_by_arm(),
+        actor_id="ab-owner", profile=None, concurrency=2,
+        gold_by_key=load_ab_gold(load_questions()),
+        model_contract="0123456789abcdef", log_dir=out_dir, clock=datetime.now,
+        # 预算宽到跑不完:这一批**不该**因为预算收尾,Timer 该被原样撤掉。
+        deadline=time.monotonic() + 600.0,
+    )
+    capsys.readouterr()
+    assert stopped_by_budget is False
+    assert len(timers) == 1, "每轮一个 Timer"
+    assert timers[0].cancel_calls == 1
+    assert timers[0].finished.is_set()
+
+
+# --- `--max-wall-minutes` 的 preflight(评审 F10 / P3-2)----------------------
+
+
+@pytest.mark.parametrize("value", ["0", "-5", "nan"])
+def test_the_preflight_refuses_a_non_positive_or_nan_wall_budget(value, capsys):
+    """`_ab_preflight` 的地盘:「一份『零个 run』的计划看起来完全像一次正常的
+    预演」。`--max-wall-minutes` 的两种坏值各自的后果:
+
+    * `0` / `-5` ⇒ deadline 一开始就在过去:走完全部 preflight(含主库快照、
+      gold 解析)之后零派发、写一份 `stopped_by_budget=true` 的 manifest、退 1
+      ——读的人分不清是参数打错还是预算真用完;
+    * `nan` ⇒ 所有 `>= deadline` 比较**恒假**,预算永不生效(既不早停也不报
+      错),而 `budgets` 里落一个 `NaN` 让 `manifest.json` 不再是合法 JSON。
+
+    与 `--round` 越界同一条纪律:不 clamp、响亮报错(退 2),`--dry-run` 也拦。
+    """
+    assert rig.main([
+        "--dry-run", "--limit", "1", "--round", "1",
+        "--max-wall-minutes", value,
+        "--database-url", "postgresql://127.0.0.1:5432/nb_t0_test",
+        "--source-db-url", "postgresql://127.0.0.1:5432/nb_main",
+        "ab",
+    ]) == 2
+    err = capsys.readouterr().err
+    assert "--max-wall-minutes 必须是一个正数分钟数" in err
+
+
+def test_the_preflight_accepts_a_positive_wall_budget(capsys):
+    """正数照过(上面那道闸不能顺手把正常用法也拦掉)。"""
+    assert rig.main([
+        "--dry-run", "--limit", "1", "--round", "1",
+        "--max-wall-minutes", "45",
+        "--database-url", "postgresql://127.0.0.1:5432/nb_t0_test",
+        "--source-db-url", "postgresql://127.0.0.1:5432/nb_main",
+        "ab",
+    ]) == 0
+    capsys.readouterr()

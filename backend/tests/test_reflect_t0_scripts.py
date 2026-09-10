@@ -1135,6 +1135,23 @@ def test_the_attempt_budget_tracks_the_config_default_it_hardcodes():
     assert rig.REASONING_ATTEMPT_BUDGET == 1 + Settings().reasoning_max_retries
 
 
+def test_the_single_call_timeout_mirror_tracks_the_config_default():
+    """同一条纪律的第二格(T-EX8 评审 F3 / P3-1):`ab --dry-run` 打的「单次
+    超时」读的是 `REASONING_TIMEOUT_SECONDS_DEFAULT` 这个镜像常量(dry-run 不
+    构造 `Settings`,零副作用承诺),所以那个常量得钉在配置默认值上。
+
+    不钉的失败场景:有人把 `REASONING_TIMEOUT_SECONDS` 默认值调到 120(reflect
+    轮数变多之后是可预期的调参),`ab --dry-run` 继续打 `single-call timeout
+    90s`,操作者按 90s 估整批墙钟预算、把 `--max-wall-minutes` 定小了,整批被
+    自己掐断。更糟的是 rig 与用例会**一致地**停在陈旧的 90——这条断言是唯一
+    能让那件事报红的地方。
+    """
+    from app.core.config import Settings
+
+    assert (rig.REASONING_TIMEOUT_SECONDS_DEFAULT
+            == Settings().reasoning_timeout_seconds)
+
+
 def test_search_plan_pairs_the_two_policies_and_carries_no_idempotency_key():
     questions = rig.load_questions()
     plan = rig.search_plan(

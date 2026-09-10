@@ -296,6 +296,24 @@ def test_every_channel_has_at_least_one_required_matrix_key_declared():
         assert REQUIRED_MATRIX_KEYS_BY_CHANNEL[channel]
 
 
+@pytest.mark.parametrize("channel", CHANNELS)
+def test_the_planned_runs_extra_subkey_is_legal_on_every_channel(channel):
+    """`planned_runs` 是三条通道共同的**额外**子键(T-EX8 评审 P1-2 拍板):
+    基数相乘不总等于 run 数(E3 各格题集不相交 ⇒ `cells` 不是乘数),所以每条
+    通道另写一个真实的 run 数上界。它不进 `REQUIRED_MATRIX_KEYS_BY_CHANNEL`
+    (那张表钉的是维度基数),但必须过得了值形状闸——这一格钉住「`matrix` 允许
+    额外子键」这条性质对它成立,免得日后有人把 `matrix` 收成闭集之后三条通道
+    的对账键一起静默消失。
+    """
+    facts = _CHANNEL_BUILDERS[channel]()
+    matrix = dict(facts["matrix"])
+    matrix["planned_runs"] = 408
+    facts["matrix"] = matrix
+    row = build_manifest(**facts)
+    assert row["matrix"]["planned_runs"] == 408
+    assert_manifest(row)
+
+
 # --- 用例 (c):隐私变异 ------------------------------------------------------
 #
 # 三格 poison 参数化 + 独立的字典键测试,`match` 收紧到"unsupported
