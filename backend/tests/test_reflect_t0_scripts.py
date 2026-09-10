@@ -2516,6 +2516,42 @@ def test_every_measurement_column_reaches_the_report(tmp_path, capsys):
     assert summary["counters"]["context_chars"]["bytes_total"] == 48000
 
 
+def test_prefix_delta_columns_land_in_their_own_tables(tmp_path, capsys):
+    """`prefix_delta` 专属两列各落进各自那张表:`context_rebuilds` 是数值
+    (有 mean/p50/p95),`context_fallback` 是布尔(n_true/n_observed)——不能
+    只靠「两者都在某个元组里」的并集守卫钉住(评审 P2-1)。
+
+    变异:把 `context_fallback` 从 `BOOLEAN_METRICS` 挪进 `NUMERIC_METRICS`
+    (或反过来把 `context_rebuilds` 挪进 `CATEGORICAL_METRICS`)⇒ 这条红——
+    并集守卫(`test_every_scalar_projection_key_lands_somewhere` 那一类)看不见
+    这个移动,但这条用例会:该列从原来那张表里消失,`summary["boolean"]` 或
+    `summary["numeric"]` 直接 `KeyError`,或者(挪进 numeric 后)`_numeric`
+    把 bool 值全滤掉,报出「5 条一次都没量到回退」这种假话,而实际有 2 条。
+    """
+    source = _write_rows(tmp_path / "rows.jsonl", [
+        _measured_row(optimization="prefix_delta", context_rebuilds=0,
+                      context_fallback=False),
+        _measured_row(optimization="prefix_delta", context_rebuilds=1,
+                      context_fallback=False),
+        _measured_row(optimization="prefix_delta", context_rebuilds=2,
+                      context_fallback=True),
+        _measured_row(optimization="prefix_delta", context_rebuilds=0,
+                      context_fallback=False),
+        _measured_row(optimization="prefix_delta", context_rebuilds=1,
+                      context_fallback=True),
+    ])
+    js = tmp_path / "t0.json"
+    analyze.main([str(source), "--group-by", "optimization", "--out-json",
+                  str(js)])
+    capsys.readouterr()
+    summary = json.loads(js.read_text("utf-8"))["groups"][0]["summary"]
+    numeric = summary["numeric"]["context_rebuilds"]
+    assert numeric["n_observed"] == 5
+    assert {"mean", "p50", "p95"} <= numeric.keys()
+    assert summary["boolean"]["context_fallback"] == {
+        "n_observed": 5, "n_missing": 0, "n_true": 2}
+
+
 def test_optimization_is_a_default_grouping_dimension(tmp_path, capsys):
     """不按 `optimization` 分格,两臂会被摊进同一格的均值里。
 
@@ -2689,9 +2725,11 @@ FROZEN_ANONYMOUS_PAIR = {
     "trace_source": "unknown",
     "legacy": {
         "anchors": None,
+        "context_rebuilds": None,
         "model_calls_real": None,
-        "n_measured": {"model_calls_real": 0, "prefix_bytes_median": 0,
-                       "prefix_turns": 0, "run_wall_ms": 0},
+        "n_measured": {"context_rebuilds": 0, "model_calls_real": 0,
+                       "prefix_bytes_median": 0, "prefix_turns": 0,
+                       "run_wall_ms": 0},
         "n_runs": 1,
         "optimization": {"unknown": 1},
         "prefix_bytes_median": None,
@@ -2703,9 +2741,11 @@ FROZEN_ANONYMOUS_PAIR = {
     },
     "v2": {
         "anchors": None,
+        "context_rebuilds": None,
         "model_calls_real": None,
-        "n_measured": {"model_calls_real": 0, "prefix_bytes_median": 0,
-                       "prefix_turns": 0, "run_wall_ms": 0},
+        "n_measured": {"context_rebuilds": 0, "model_calls_real": 0,
+                       "prefix_bytes_median": 0, "prefix_turns": 0,
+                       "run_wall_ms": 0},
         "n_runs": 1,
         "optimization": {"unknown": 1},
         "prefix_bytes_median": None,
@@ -2763,7 +2803,7 @@ def test_a_sparse_pair_side_reports_its_observation_count(tmp_path, capsys):
     # 均值一样重,n 不一样:三条观测 vs 一条观测。
     assert pair["baseline"]["n_measured"]["run_wall_ms"] == 3
     assert pair["variant"]["n_measured"]["run_wall_ms"] == 1
-    # 稀疏四项各有自己的 n,不共用一个。
+    # 稀疏五项各有自己的 n,不共用一个。
     assert set(pair["variant"]["n_measured"]) == set(
         analyze.SPARSE_PAIR_SIDE_METRICS)
     assert pair["variant"]["n_measured"]["prefix_bytes_median"] == 3
@@ -2771,6 +2811,42 @@ def test_a_sparse_pair_side_reports_its_observation_count(tmp_path, capsys):
     rendered = md.read_text("utf-8")
     assert "9000.0(n=3)" in rendered
     assert "6000.0(n=1)" in rendered
+
+
+def test_context_rebuilds_appears_in_the_optimization_pair_table(tmp_path, capsys):
+    """`prefix_delta` 变体的重建次数进配对差值表:`variant` 臂印出真实的观测
+    (均值+n),`off` 基线臂走既有稀疏列的缺值显示(评审 P3-2)——两侧都印同一列,
+    而不是像 `prefix_bytes_median` 那样只印 variant 侧,好让「这件事对 `off`
+    臂压根不成立」在表面上看得见。
+
+    变异:把 `context_rebuilds` 从 `PAIR_SIDE_METRICS`/`SPARSE_PAIR_SIDE_METRICS`
+    里删掉 ⇒ 这条红(JSON 侧该键消失或 n_measured 缺键;markdown 侧那两列跟着
+    消失)。
+    """
+    source = _write_rows(tmp_path / "rows.jsonl", [
+        _measured_row(optimization="off"),
+        _measured_row(optimization="off"),
+        _measured_row(optimization="prefix_delta", context_rebuilds=1,
+                      context_fallback=False),
+        _measured_row(optimization="prefix_delta", context_rebuilds=3,
+                      context_fallback=True),
+    ])
+    js, md = tmp_path / "t0.json", tmp_path / "t0.md"
+    analyze.main([str(source), "--out-json", str(js), "--out-md", str(md)])
+    capsys.readouterr()
+    pair = json.loads(js.read_text("utf-8"))["optimization_pairs"][0]
+    assert pair["variant_arm"] == "prefix_delta"
+    assert pair["variant"]["context_rebuilds"] == 2.0
+    assert pair["variant"]["n_measured"]["context_rebuilds"] == 2
+    # `off` 臂结构上不带这个观测:均值缺失、n=0,而不是 0 或被静默丢弃这一列。
+    assert pair["baseline"]["context_rebuilds"] is None
+    assert pair["baseline"]["n_measured"]["context_rebuilds"] == 0
+
+    rendered = md.read_text("utf-8")
+    assert "off context_rebuilds(n)" in rendered
+    assert "variant context_rebuilds(n)" in rendered
+    assert "2.0(n=2)" in rendered
+    assert f"{analyze.UNKNOWN}(n=0)" in rendered
 
 
 def test_the_markdown_report_renders_both_arm_axes(tmp_path, capsys):

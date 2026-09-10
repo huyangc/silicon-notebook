@@ -1289,7 +1289,9 @@ def test_context_fallback_is_true_when_any_turn_carries_it():
 
 def test_context_rebuilds_and_fallback_reject_free_form_values():
     """detail 层的自由文本被 `_int`/`_bool` 吞成 `None`(不是抛错、不是透传);
-    `assert_projection_values` 层对自由文本仍然拒绝(隐私守卫的第二道闸)。
+    `assert_projection_values` 层对自由文本仍然拒绝(隐私守卫的第二道闸)——
+    两列各自都要过这一层,`_assert_projection_value` 对两者行为相同,所以这是
+    覆盖而不是缺陷(评审 P3-3)。
 
     变异:让 `_reflect_context_rebuilds`/`_reflect_context_fallback` 改用一个
     宽松的类型转换(如 `int(raw)`/`bool(raw)`)⇒ 第一组断言红(不再是 `None`,
@@ -1310,6 +1312,41 @@ def test_context_rebuilds_and_fallback_reject_free_form_values():
     bad_row["context_rebuilds"] = "很多次"
     with pytest.raises(ValueError, match="context_rebuilds"):
         assert_projection_values(bad_row)
+
+    bad_fallback_row = dict(off_row(optimization="off"))
+    bad_fallback_row["context_fallback"] = "是的"
+    with pytest.raises(ValueError, match="context_fallback"):
+        assert_projection_values(bad_fallback_row)
+
+
+def test_context_rebuilds_and_fallback_reject_type_confused_scalars():
+    """`_bool`/`_int` 的严格性不能只被自由文本钉住——两列互相串味的整数/布尔值
+    是更现实的写侧手滑(评审 P2-2):`context_fallback` 的孪生键
+    `context_rebuilds` 本来就是 int,写侧一旦手滑把 `context_rebuilds` 写成
+    `bool(...)`,或者把 `context_fallback` 写成 `0`/`1`,这两列必须继续读成
+    `None`,而不是悄悄把一次 unknown 变成一次「观测到了」。
+
+    `context_fallback=0` 单独钉一条:它与「量到了、答案是没回退」的 `False`
+    在报表上长得一模一样,`_bool` 一旦放宽收 `int` 就会把两者混成同一格。
+
+    变异:`_bool` 改成 `bool(raw) if isinstance(raw, (bool, int)) else None`
+    (收 int)⇒ 第二、三组断言红;`_reflect_context_rebuilds` 的读取器改成接受
+    `bool`(`True` → 1)⇒ 第一组断言红。
+    """
+    rebuilds_row = project_run(
+        JOB, [measured_reflect("answer", context_rebuilds=True)], PAYLOAD,
+    )
+    assert rebuilds_row["context_rebuilds"] is None
+
+    fallback_one_row = project_run(
+        JOB, [measured_reflect("answer", context_fallback=1)], PAYLOAD,
+    )
+    assert fallback_one_row["context_fallback"] is None
+
+    fallback_zero_row = project_run(
+        JOB, [measured_reflect("answer", context_fallback=0)], PAYLOAD,
+    )
+    assert fallback_zero_row["context_fallback"] is None
 
 
 def test_context_rebuilds_and_fallback_project_alongside_the_other_nine_keys():

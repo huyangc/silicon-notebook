@@ -387,8 +387,11 @@ def _float(raw: object) -> float | None:
 
 def _bool(raw: object) -> bool | None:
     """严格布尔读取器,`_int` 的孪生:只收 `bool`,其余(含 0/1、字符串)一律
-    `None`(= unknown)。`context_fallback` 是行为事实而不是计数,收 0/1 会让
-    「写侧手滑传了个整数」悄悄通过而不是被读侧的隐私守卫拦下。"""
+    `None`(= unknown)。收 0/1 不会被读侧的隐私守卫拦下——`_is_scalar_value`
+    本来就放行 `int`,`_reflect_context_fallback` 的 `any()` 也会把整数结果
+    归一成 `bool`,两道都拦不住写侧手滑传进来的整数。真正的风险是:一旦这里
+    宽松收 int,`context_fallback` 会把「没量到」(unknown)悄悄伪造成
+    「量到了、答案是 0/1」这一次观测,而不是被拦下报错。"""
     return raw if isinstance(raw, bool) else None
 
 
