@@ -66,7 +66,7 @@
 验收:v2 关 + `prefix_snapshot` ⇒ 与 `off` 逐字节相同;Knowhow 不受影响。用例:四取值 × v2 开/关矩阵;非法取值报错口径;Knowhow 恒 legacy。
 
 ### T-PS7 同源静态工具目录
-落点 `reasoning_actions.py` 新增纯函数 `static_catalog_facts(facts) -> ReflectCapabilityFacts`(`*_left` 归 1、`last_turn=False`、`terminal_overflow_repair=False`、`has_candidates=True`;保留 `kg_in_scope`/`scope_restricted`/各 `*_active`);目录 = `build_reflect_capabilities(static_catalog_facts(facts))`,同一份 `ACTION_DEFINITIONS`;`_reflect_capabilities`(`3280-3358`)旁在**本 run 第一次 reflect 时**用那轮 facts 生成并缓存(不在 run 起点算,避免 `_unsafe_scope_restricted()` 额外库读)。取舍写进注释:目录是「可能执行」的超集,不授予资格。
+落点 `reasoning_actions.py` 新增纯函数 `static_catalog_facts(facts) -> ReflectCapabilityFacts`(**逐轮项一律归一**:`*_left` 归 1、`last_turn=False`、`terminal_overflow_repair=False`、`has_candidates=True`、`outline_repair_available=False`、`scope_restricted=False`;只保留 run 级的部署与调用方通道位 `kg_in_scope`/各 `*_active`/枚举白名单——`scope_restricted` 与 `outline_repair_available` 两格按 §5 Q4 的**评审后修正**归一,不再「原样带过」,否则范围收窄的 run 里目录不再是超集);目录 = `build_reflect_capabilities(static_catalog_facts(facts))`,同一份 `ACTION_DEFINITIONS`;`_reflect_capabilities`(`3280-3358`)旁在**本 run 第一次 reflect 时**、且**仅当 `reflect_optimization() != "off"`** 时用那轮 facts 生成并缓存(不在 run 起点算,避免 `_unsafe_scope_restricted()` 额外库读;纯测量臂没有消费者,见 §5 Q4)。取舍写进注释:目录是「可能执行」的超集,不授予资格。
 验收:目录 run 内逐字节不变;额度耗尽说明仍在;`recognized_actions` 不改;`parse_reflect_v2` 仍读逐轮 `capabilities.actions`。用例:幂等;通道位不改(无图 run 图动作不在目录);额度 3→0 目录不变、actions 变;`follow_chain` 候选池空时在目录、不在 T。
 
 ### T-PS8 S/C/K/D/T 布局(P 模式本体)
