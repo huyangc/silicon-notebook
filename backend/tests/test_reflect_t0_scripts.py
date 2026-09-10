@@ -5752,13 +5752,20 @@ def test_state_probe_stops_the_batch_on_a_bare_value_or_type_error(
 
         out_root = tmp_path / type(error).__name__
         out_root.mkdir()
-        with pytest.raises(type(error)):
-            _run_state_probe_batch(
-                out_root, monkeypatch,
-                cases=[_probe_case("c1", "A_nokg")], run_point=_fake,
-                argv_extra=("--repeats", "1", "--arms", "off"),
-            )
+        tracker = _patch_state_probe_infra(
+            monkeypatch, cases=[_probe_case("c1", "A_nokg")], run_point=_fake)
         out_dir = out_root / "out"
+        with _preserved_environ():
+            with pytest.raises(type(error)):
+                rig.main([
+                    "--database-url", "sqlite:///" + str(out_root / "x_test"),
+                    "--out-dir", str(out_dir), "--repeats", "1",
+                    "--arms", "off", "state-probe",
+                ])
+        # 跑后只读核在异常穿出 `with` 时也退栈跑到(它在 `ExitStack` 里,不是
+        # 跑批循环之后的一句)——一批「测试库被写过」的数据不该因为停批就没有
+        # 只读证据。
+        assert tracker["n"] == 2
         # 第一格写下并 flush 了,第二格停批;manifest 不写(不是冻结完成的批)。
         assert len(_read_rows(out_dir, "off")) == 1
         assert not (out_dir / "manifest.json").exists()
@@ -6161,3 +6168,56 @@ def test_shared_concurrency_and_repeats_defaults_are_unchanged_for_ab():
     # `state-probe` 的「显式给了且 ≠ 1 ⇒ 退 2」靠它。
     assert given.concurrency == 1 and given.repeats == 1
     assert given.concurrency_given == 0 and given.repeats_given == 0
+
+
+def test_state_probe_binds_the_process_env_before_loading_the_case_set(
+    tmp_path, monkeypatch,
+):
+    """加载案例集**之前**装进程环境。
+
+    `load_state_probe_case_set()` 自己就 `from app.core.config import Settings`
+    (它按 `Settings.model_fields` 核 `settings_overrides`),而
+    `app.core.config` 在 **import 时**把 `SILICON_NOTEBOOK_ENV_FILE` 读成模块级
+    常量 —— 先加载再设环境的话,`--env-file` 静默失效,整批跑在当前 checkout 的
+    `.env`(以及 `.env` 里那个库)上,而产物看起来完全正常。
+    """
+    seen: list[dict] = []
+    tracker = _patch_state_probe_infra(
+        monkeypatch, cases=[_probe_case("c1", "A_nokg")],
+        run_point=_fake_probe_point,
+    )
+    assert tracker["n"] == 0
+    loader = rig.load_state_probe_case_set
+
+    def _recording_loader():
+        seen.append({
+            "DATABASE_URL": os.environ.get("DATABASE_URL"),
+            "SILICON_NOTEBOOK_ENV_FILE": os.environ.get(
+                "SILICON_NOTEBOOK_ENV_FILE"),
+        })
+        return loader()
+
+    monkeypatch.setattr(rig, "load_state_probe_case_set", _recording_loader)
+    env_file = tmp_path / "model.env"
+    env_file.write_text("", encoding="utf-8")
+    database_url = "sqlite:///" + str(tmp_path / "x_test")
+    with _preserved_environ():
+        code = rig.main([
+            "--database-url", database_url, "--env-file", str(env_file),
+            "--out-dir", str(tmp_path / "out"), "--repeats", "1",
+            "--arms", "off", "state-probe",
+        ])
+    assert code == 0
+    assert seen == [{
+        "DATABASE_URL": database_url,
+        "SILICON_NOTEBOOK_ENV_FILE": str(env_file),
+    }]
+
+    # `--dry-run` 不装环境(它零副作用,也不需要模型配置)。
+    seen.clear()
+    with _preserved_environ():
+        os.environ.pop("DATABASE_URL", None)
+        assert rig.main([
+            "--dry-run", "--database-url", database_url, "state-probe",
+        ]) == 0
+    assert seen == [{"DATABASE_URL": None, "SILICON_NOTEBOOK_ENV_FILE": None}]
