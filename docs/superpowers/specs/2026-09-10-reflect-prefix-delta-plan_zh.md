@@ -93,6 +93,29 @@
 | Q8 | 补充卡检测范围 | 只对**本轮 `fresh_result_ids()` 里、且已在冻结表中**的键重算摘录并比对(至多 `DELTA_CARDS` 张) | 全量比对是每轮 O(池) 次 `select_excerpt`,正是 delta 要省的开销 |
 | Q9 | `prefix_delta_lean` | 本期仍拒,`PLANNED` 收窄成一格 | 照 PR-2 Q1 |
 
+### Q8 的评审后修正(2026-09-10,T-PD5 实施后)
+
+上表 Q8 的候选集口径**被评审证伪并已改口径**,落地的是这一版:
+
+- 候选集 = **本轮已绑定证据的键(`evidence_bound_keys`)∩ 冻结表**,不是「本轮
+  `fresh_result_ids()` ∩ 冻结表」。原口径在生产上**恒空**:`fresh_result_ids()` 的三个来源
+  (trace detail 的 `result_ids`、`note_fresh_ids` 侧信道、首轮播种)都只报**真的新进池子**的
+  标识,而一个键第一次进池子的那一轮要么还没被冻结、要么刚被同一轮的 K/D 用同一批检索词
+  冻结——两种都不产生「同 key 的更好摘录」,整条补充卡路径因此不可达。绑定键正好是这一轮
+  模型要重新判断的那些方面所引的证据(设计 §4.4),而摘录窗口跟着本轮 `action_query` 走。
+- **轮转**(`ReflectDeltaState.supplement_cursor`):每轮从游标处取至多 `max_cards` 个候选,
+  游标随之前进。绑定键序是「大纲在前、方面轮转」的固定序,恒从队首取的话队首那几个键每轮
+  被重算一遍摘录、队尾的键永远等不到自己那一轮。
+- 重算的字节与冻结那一行**相同 ⇒ 一张都不发**(判重在 `supplement_for` 里,冻结字节在
+  `note_shown` 时就进了 `card_variants`)。所以「这一轮摘录没变」的常态代价只有一次重算。
+- **补充卡排在本轮新卡之后**,用新卡之后剩下的那点预算:新证据优先于同一条证据的更好摘录,
+  两处口径必须一致,否则「优先」只活在预算里、在模型眼里反而是补充卡先出现。
+- `max_cards` 上界不变(仍是 `REASONING_REFLECT_DELTA_CARDS_BY_EFFORT[档位]`),`_delta_supplements`
+  的形参因此叫 `candidate_keys` 而不是 `fresh_keys`。用例:`test_delta_supplement_pass_appends_a_versioned_card_for_a_frozen_key`、
+  `test_delta_run_puts_the_supplement_card_after_this_turn_new_cards`、
+  `test_delta_supplement_skips_a_candidate_that_left_the_pool`、
+  `test_delta_run_appends_no_supplement_card_it_should_not`。
+
 ## §3 任务
 
 统一硬约束(与 PR-2 §2 逐字相同):`REASONING_REFLECT_OPTIMIZATION=off` 与 v2 总闸关闭态**逐字节等价**;`prefix_snapshot` 的字节与 PR-2 合入时**逐字节等价**;`run`/`_new_run_state`/`_run_enumeration` 零松弛;prompt/schema 改动用例经 `_GatedV2LLM`(`test_reasoning_retrieval.py:7117`)/`_V2ContextLLM`(`:7994`);`reasoning_actions.py`/`reasoning_context.py`/`reasoning_observation.py` 不读 Settings/DB;新逻辑零 I/O、零 LLM;字段命名不出现 `cache_hit`/命中率。收尾 `bash scripts/check.sh`。
@@ -114,6 +137,17 @@
 
 **依赖** 无。
 
+**实施记录(2026-09-10)** 按计划落地,无偏离。两个新常量紧挨 `DEFAULT_REFLECT_EVIDENCE_CHARS_BY_EFFORT`,
+`validate_reflect_delta_cards` 逐条镜像 `validate_reflect_evidence_chars`(空串/非法 JSON/非
+JSON 对象/恰含五档/`bool` 显式排除/区间/单调不递减七格);比例那一格用 `mode="before"` 校验器
+显式拒 `bool`(它是 `int` 的子类,`True` 会被折算成 1.0,首版 K 就把整份预算吃干净——正是这一格
+要防的事)。`IMPLEMENTED` 放开第三格、`PLANNED` 收窄成一格,两处消费点(启动期校验器、运行期
+折回)一行未改,参数化用例按常量自动收窄。**评审修正轮**:启动期拒绝文案从两格变三格,两份
+部署文档逐字引用的那一串同 diff 同步——`test_reflect_optimization_rejects_a_planned_but_unimplemented_value`
+既断运行期整句、也断两份文档**在 `REASONING_REFLECT_OPTIMIZATION` 那一行本身**引了同一串字节
+(挪到文末不算);另修了同一行里「后两格未实现」的自相矛盾表述。`config.py` 自己一次都不读这
+两个新字段(唯一读点在 T-PD5,AST 判据)。
+
 ### T-PD2 domain 登记:三个新 detail 键 + 两列投影 · sonnet · ~70 行
 
 **落点** `backend/app/domain/reasoning_trace_stats.py:95-135`(`RUN_PROJECTION_KEYS`)、`:317-325`(`REFLECT_MEASUREMENT_DETAIL_KEYS`)、`:940-1035`(投影装配)。
@@ -126,6 +160,17 @@
 
 **依赖** 无。
 
+**实施记录(2026-09-10)** 按计划落地。三键进 `REFLECT_MEASUREMENT_DETAIL_KEYS`、不进
+`REFLECT_CONTEXT_DETAIL_KEYS`;顶层两列 `context_rebuilds`(max-over-present)与
+`context_fallback`(any),`delta_blocks` **刻意不出列**——它不是累计量(重建会清空已发出的块),
+一个 run 一格装不下它。两列的读法**刻意不同于** `_reflect_sum` 的「任一步缺 ⇒ 整列 unknown」:
+写侧 `context_rebuilds` 是 run 级单调累计,取最大值才是「总共重建了几次」。`0`/`False` 与
+`None` 必须分得开(`test_context_rebuilds_zero_is_distinct_from_unknown`)。**评审修正轮**:
+补了「键搬到另一列/整数与布尔类型混淆」两族变异守卫,并把 `context_rebuilds` 接进 rig
+`analyze` 的数值指标与配对差值表(`test_prefix_delta_columns_land_in_their_own_tables`、
+`test_context_rebuilds_appears_in_the_optimization_pair_table`);隐私守卫对新键只收整数与布尔。
+`OPTIMIZATIONS` 与冻结基线用例一格未动。
+
 ### T-PD3 `reasoning_observation.py`:历史折算的纯函数 · sonnet · ~60 行
 
 **落点** `backend/app/services/reasoning_observation.py:626-732` 之后。
@@ -136,6 +181,13 @@
 
 **依赖** 无。
 
+**实施记录(2026-09-10)** 按计划落地,无偏离。`fold_observation_counts(rows) -> str` 只用现有
+词表(`OBSERVATION_STATUSES` + `_STATUS_LABELS`,用例对账同源)、零值不渲染、空输入回空串;
+`render_observations` / `render_observation_row` / `ActionObservationLedger` 一个字节未改。
+它与 `render_observations` 的两个切片**刻意不相交**(口径定在 T-PD4 的 `compose_snapshot`
+docstring 与 T-PD5 的 `_build_delta_snapshot` 里):喂全量行给 `render_observations` 会让「更早的
+N 条未列出」与「总计已尝试 M 次」在同一条消息里互相矛盾。
+
 ### T-PD4 `reasoning_context.py`:冻结卡、增量块、快照重建(delta 本体) · **opus** · ~280 行
 
 **落点** `reasoning_context.py:423-547`、`:617-643`、`:700-812`。
@@ -143,7 +195,10 @@
 **要点**
 1. `build_evidence_block(..., frozen_cards: Mapping[str,str] = EMPTY)`:键在冻结表里时用冻结文本代替现渲染;其余逻辑一格不改;默认空 ⇒ off/P 逐字节不变。
 2. `build_delta_evidence_block(...) -> EvidenceSelection`:增量专用选取,共用 `_pool_index`/`excerpt_terms`/`_card_for`/`render_card`/`_diverse_order`;排除 `already_shown`;档序 **本轮新增 → 已绑定但从未展示 → 多样性补位**(与 `build_evidence_block` 相反,这是新写函数的全部理由);硬上限 `max_cards` 与 `budget_chars` 先到先止;省略数只报本块。
-3. `render_supplement_card(card, version)`:按 Q3。
+3. ~~`render_supplement_card(card, version)`:按 Q3。~~ **已按拍板删除**(T-PD3/4 spec 评审
+   P3-1,pd3 修正轮):它零消费者,而且与 `ReflectDeltaState.supplement_for` 构成同一件事的
+   两处标记——版本标记的**唯一接缝**是模块级 `_with_version_marker(line, version)`,由
+   `supplement_for` 在「登记与渲染同一处」的那一步调用。
 4. `ReflectDeltaState`(`@dataclass(slots=True, eq=False)`,大字符串 `repr=False`):`snapshot_evidence` / `snapshot_history` / `blocks` / `frozen_cards` / `card_variants` / `card_versions` / `observation_cursor` / `pending_aspect_notes` / `evidence_chars` / `history_chars` / `rebuilds` / `fallback` / `generation`。docstring 写明 M4 三条硬约束。
 5. 纯函数 `build_delta_block(cards_text, observation_lines, aspect_notes, *, generation) -> str`、`compose_snapshot(evidence_text, history_text, folded_counts) -> Tuple[str,str]`。只吃已算好的字符串。
 6. 块标题常量 `DELTA_BLOCK_TITLE`(追加不改写;同 key 补充卡是新版本,上一张仍有效)与 `SNAPSHOT_FOLD_TITLE`(折算计数不是"没发生");不与 `TURN_STATE_TITLE`/`TURN_CONTEXT_TITLE` 共用。
@@ -154,6 +209,39 @@
 **用例** (a) `frozen_cards` 空/非空,前者与 HEAD 逐字节比对;(b) 同 key 不同 `action_query` ⇒ 冻结生效 + v2 补充卡,`key=` 相同;(c) 同 key 相同摘录 ⇒ 不追加;(d) `max_cards=2` 候选 10 ⇒ 恰两张 + 省略 8;(e) `already_shown` 覆盖全池 ⇒ 空块;(f) `as_user_block` 遇非空 `delta` 抛;(g) `repr` 无请求正文;(h) 档序:fresh 在 bound-unshown 之前。
 
 **依赖** T-PD3。
+
+**实施记录(2026-09-10)** 落地时相对上面的要点有五处**刻意偏离**,均由评审裁定:
+
+- **`build_delta_evidence_block` 只有两档**(本轮新增 → 已绑定但从未展示),**没有第三档
+  「多样性补位」**(T-PD5 spec 评审存疑 2)。理由:D 只装「本轮新增或补充」(设计 §4.4),给
+  它补位档会在头两轮就把首版 K 按目标比例刻意留出的空档吃光——没有新证据的那些轮里池里
+  任意几张卡照样被填进 D,证据池一路涨满、第二三轮就触发重建,正是设计 §5.2 首句要挡的
+  形态。`_diverse_order` 因此**只服务 K**(顺带省掉每轮一次全池排序);池里既不新增也没绑定的
+  材料由 K 的第三档在**下一次重建**时按相关度带进来。
+- **`already_shown` 传的是「当前可见集」**(`ReflectDeltaState.visible_keys` = 当前 K 的键 ∪
+  当前全部 D 块的键),不是 `frozen_cards` 那份「曾展示」的字节表(spec 评审存疑 1)。两者在第
+  一次重建之前恰好相等,之后不再相等:重建清空 `blocks` 并按新预算收缩 K,拿冻结表当可见集
+  用会让一批卡既不在消息里、又被「曾展示」口径永久挡在增量之外,而且不进任何一个 `omitted`。
+  `frozen_cards` 仍是只增不减的字节表,离开 K 的卡以后经档序回到某一块 D 时**复用冻结字节**
+  (设计 §4.4「可从已有内存池恢复」,不违反「展示后保持不变」)。三件事——在池子里 / 曾经展示过 /
+  此刻还在消息里——在投影上各占一格。
+- **`render_supplement_card` 删掉**(见上面第 3 条),版本标记唯一接缝是 `_with_version_marker`;
+  省略披露改成共享的 `_OMISSION_NOTE`(输出字节不变);增量块三节之间用 `\n\n`(单个 `\n` 会让
+  证据卡的 `- [chunk] | key=…` 与观察行的 `- #3 [action] …` 连成同一份 bullet 列表)。
+- **D 的观察节不带 `HISTORY_NOTE`**:「目的是模型当时写下的判断」这句免责由
+  `DELTA_BLOCK_TITLE` 里「观察行的含义同上方观察账」一次性接过去,不再每块各付一份(二十轮
+  就是上千字节纯重复;设计 §5.2 要的是两处**措辞同源**)。因此 `reasoning_context` **不 import**
+  `reasoning_observation`(反之亦然),两个纯模块互不依赖,K 的历史半与折算计数在
+  `reasoning_retrieval._build_delta_snapshot` 里合成。
+- **预算口径**:`EvidenceSelection` 加 `cards`(键 → 真的进了那一块的**那一行字节**),
+  `note_shown` 从它取字节而不是重渲染——重渲染会在「冻结的字节」与「发出去的字节」之间开一道
+  缝,而这条臂的全部意义就是两者恒等。块头按每块一次计进证据池:**本块实际占用 =
+  `len(DELTA_BLOCK_TITLE) + 1 + len(text)`**,`budget_chars` 因此是**含块头**的额度,块头装不下
+  就返回空块;省略披露也算进硬预算(先装行、最后拼披露的话那句话不在任何一次判断里,而 delta
+  的预算是 K + 所有 D 的累计)。另新增 `render_pool_cards`(补充卡检测唯一的卡面产地:按给定
+  的几个键现渲染,不选卡、不看预算、池外键静默跳过)与 `ReflectContext.delta` +
+  `_PREFIX_ONLY_FIELDS` 的第四格。`generation` 只在 >1 时渲染;`as_user_block` 的异常文案统一
+  成 `prefix-layout payload`。
 
 ### T-PD5 `reasoning_retrieval.py`:接线、预算、重建与回退 · **opus** · ~220 行 · `run()` 零改动
 
@@ -174,6 +262,66 @@
 
 **依赖** T-PD1、T-PD2、T-PD4、T-PD6。
 
+**实施记录(2026-09-10)** `run()` 零改动、七步顺序与要点一致;下面这些是评审两轮之后的**最终
+落法**,与上面要点不同的地方都在这里:
+
+- **重建触发点维持「一张新卡都装不下」**(spec 评审 P3-2 的取舍,刻意):判据是
+  `cards.omitted and not cards.shown_keys`,不是「本轮某张卡塞不进剩余额度」。后者每有一张
+  超额大卡就压一次 K;前者只在「这一块什么新证据都发不出去」时动手,重建抖动少一个数量级。
+  代价如实登记:紧预算下一张新卡可能**晚几轮**才进上文——它有省略披露,下一次重建按同一档序
+  回得来。历史池那一侧的触发点仍是严格越界(`history_chars + history_add > state_chars`,
+  `>` 边界有自标定用例)。
+- **重建带迟滞**(quality 评审 P2-3,`ReflectDeltaState.rebuilt_last_turn`):上一轮刚压紧过
+  一版、这一轮又连一张新卡都装不下 ⇒ 这个预算下压缩已经无效,第二次重建是纯空转(每轮一次
+  全池 `build_evidence_block` + K 重写 ⇒ 公共前缀塌回只剩 C,这条臂在它自己要改进的两个轴上
+  反而比 `prefix_snapshot` 更贵),那时**直接走回退**。历史池溢出触发的重建**不受**迟滞约束
+  (账本真的又长了,压缩对它仍然有效)。用例:现实预算下 `rebuilds < turns`,连续两轮装不下 ⇒
+  `context_fallback=True`。
+- **回退保留已发出的 D**(spec P2-1(a) / quality P2-2):触发回退的那一步**本身就是**一次重建,
+  而重建第一件事就是清空 `blocks` ——所以重建前先存一份 `kept_blocks`,走到回退就原样还原。
+  回退轮的 K 也传 `frozen_cards`(spec P2-2):同一个键在上文的 D 里是冻结字节,在同一条消息的
+  K 里按本轮检索词重算的话,同一条证据就有了**两种都不带版本标记**的写法。`static_delta`
+  改成与 `delta=` **同源**的 `delta is not None`(P3-6),所以「发不发那四句读法规则」与「有没有
+  D 这条通道」不可能分歧。`pending_aspect_notes` 回退时清空、此后不再 append(那一格从此没有
+  消费者,P3-9)。
+- ⚠ **回退之后 `evidence_chars` / `history_chars` 两笔账停用**,注释点名。被丢弃那次重建已经把
+  它们重置成新 K 的长度,而还原回去的 `blocks` 是**旧** K 时代的块,两者对不上;P 的那一支一格
+  都不读这两个数(它每轮按硬预算重新选卡),所以不去修补一份此后没有读者的账。**由此:回退那
+  一轮的 K + 保留的 D 之和可以超过档位证据池**——K 由 P 的有界选择按**整份**硬预算重选,越出
+  的部分正是保留下来的旧块。这是刻意取舍(抽掉模型已经读过的上文比多付几千字符更糟),并在
+  部署/产品文档与 `fangan_todo.md` 的已知限制里如实登记。真正要守住的两件事各自成立:上文
+  已发出的 D 一个字节没变,`ever_shown_outline_keys` 只登记真发出去过的键。
+- **被丢弃那一版 K 一格都不登记**(spec 存疑 1):`ever_shown_outline_keys.update` 挪到「确认不
+  回退」之后。否则模型从没见过卡面的键会凭「它在某一版被选中过」取得绑定资格。
+- **回退判据 = 「本轮有候选新卡且重建后一张都装不下」**(spec P3-1 / quality P2-1),删掉结构性
+  恒真的 `not pending_rows` 合取项(重建已把游标推到账本末尾);**无候选新卡 ⇒ 不回退**(那是
+  「这一轮没有新证据」,不是「装不下新证据」,而 D 本来就允许为空)。
+- **历史记账在重建分支之后重算**(quality P1-1):重建把游标推到账本末尾,本轮 D 里一行观察都
+  没有,记账因此是 0。用重建之前那个 `history_add` 会让同一批行被计两遍(一遍在新 K 的
+  `snapshot_history` 里、一遍在这一笔追加里),而它最大可以接近整份 `state_chars` ——重建刚做完
+  就可能已经越过阈值,下一轮无条件再压一次。恒等式用例:`history_chars == len(snapshot_history)
+  + Σ(真进块的观察行 + notes)`。
+- **补充卡按 Q8 修正后的口径**(见 §2 后面那一节):候选集 `bound_keys ∩ frozen_cards`、
+  `supplement_cursor` 轮转、重算摘录与冻结行不同才发、排在本轮新卡**之后**、装不下就
+  `continue` 而不是 `break`。额度按 `_SUPPLEMENT_CARD_OVERHEAD` 这个**上界**预留(版本标记的
+  长度只有调用之后才知道,而 `supplement_for` 的调用契约不允许「调了再丢」——那一份更好的摘录
+  会从此每轮命中判重、恒返回空串,永远到不了模型,且没有任何计数披露)。上界从产地那一份
+  字面量算(版本号取 10**6),不手写数字。
+- **H 取舍(块头不双重预留)**:`_delta_cards` 传下去的 `budget_chars` 是 `budget -
+  evidence_chars`,而 `build_delta_evidence_block` 自己的硬界**已经含块头**
+  (`used` 从 `len(DELTA_BLOCK_TITLE) + 1` 起算);记账侧再加一次 `_DELTA_HEAD_CHARS` 是同一笔
+  的**记账**,不是第二次预留。两处同一个常量、同一口径,断言真把块头计进硬预算。
+- **每字段一个读点**(quality P3-5):六项预算的 AST 唯一读点守卫参数化扩到六项——四项既有的在
+  `_reflect_v2_context` 方法体内,两个新配置各在自己那个专用 helper(`_delta_max_cards` /
+  `_delta_target_ratio`,各只有一个调用点)。`optimization` 往 `_reflect_measurement` **下传**,
+  不再第三次读策略位(P3-8);待追加的观察行只渲染一次、记账与 `build_delta_block` 复用同一份
+  列表(P3-7)。
+- **测量载体**按拍板 Q7:`ReflectMeasurement.measures_messages`,`prefix_delta` 下无条件构造,
+  为假时一个字节都不序列化、只剩那三个行为事实键。`d` 按拍板 Q2 是**位置口径**(观察账块 +
+  本轮全部增量块)。另加**导入期对账守卫**:`set(REFLECT_OPTIMIZATION_IMPLEMENTED) != {"off"} |
+  set(_PREFIX_LAYOUTS)` 时 `raise`(quality 评审 P1),挡住「放开一格却忘接线 ⇒ 那条臂能起来、
+  却发 off 布局」这种 rig 也拦不住的形态。
+
 ### T-PD6 `prompts.py`:S 的 delta 段 · sonnet · ~45 行 · 过 `_GatedV2LLM`
 
 **落点** `backend/app/services/prompts.py:1401-1457`。
@@ -184,6 +332,13 @@
 
 **依赖** 无。
 
+**实施记录(2026-09-10)** 按计划落地。`reflect_v2_static_prompt(catalog, *, delta=False)`;
+`delta=True` 在 `_V2_STATIC_CATALOG_INSTRUCTION` 之后追加 `_V2_DELTA_INSTRUCTION`(1,507 字符,
+四句),`delta=False` 与接入前逐字节相同(对着 HEAD 比对的用例 + `off` golden 仍绿)。
+**评审修正轮**:四句里的「指对象」被收窄——那几句指的是**块**与**卡**的读法,不越界去声明排序权
+(排序权只由 T 的标题为服务端执行限制那四类声明),同轮把过宽的断言也收窄。过了 `_GatedV2LLM`
+一次完整 delta run。
+
 ### T-PD7 rig / A-B 第二维放开一格 · sonnet · ~20 行
 
 **落点** `backend/app/eval/reflect_ab.py:96-100`。`ARMS` 加 `("v2","prefix_delta")`;其余不动。
@@ -192,9 +347,26 @@
 
 **依赖** T-PD1。
 
+**实施记录(2026-09-10)** 按计划只动 `ARMS` 一行(加 `("v2","prefix_delta")`);`PAIR_ARM_COUNT`、
+`parse_arms`、`assert_optimization_matches_evidence`、`AB_DEFAULT_ARMS`、`_ab_preflight`、逐臂
+Settings 构造与 `analyze` 全部按常量自动覆盖,一格未改。**评审修正轮**:`_settings_by_arm` 的
+docstring 举例「未实现取值构造期抛」改举 `prefix_delta_lean`(原来举的 `prefix_delta` 已经能起来),
+并补齐用例缺的一格。`scripts/README.md` 的第二维散文同期收窄(T-PD9)。
+
 ### T-PD8 验证清单与聚焦测试 · sonnet(用例)+ opus(变异复核)
 
 见 §4。额外:对 T-PD5 的三处不可协商性质各补一次变异验证——(a) D 改成每轮重渲染 ⇒ 必须红;(b) 重建时去掉 `frozen_cards` ⇒ 必须红;(c) 回退改成可逆 ⇒ 必须红。
+
+**实施记录(2026-09-10)** 三处不可协商性质的变异各自验证为红,并入 T-PD5 的用例批。修正轮之后
+自己又跑了 33 组变异,**三组逃逸并各补一条用例**(补后逐条复跑为红):`static_delta` 回到「第二次
+读策略位」(补一条中途把策略位翻回 `prefix_snapshot` 的 run:消息里 D 还在、S 掉了那四句读法规则,
+`system_prompts` 于是在一个 run 内出现两种字节)、回退分支不清 `pending_aspect_notes`、回退之后
+继续 append(补一条按投影断的用例,收尾轮改交一份**会被接受**的自评,让「回退之后还攒不攒」有得看)。
+**仍然逃逸而刻意不补的两组**,均可证等价并在此登记理由:① 回退判据加回 `not pending_lines`
+——重建已把游标推到账本末尾,该合取项恒真;② 增量块选卡循环里 `used` 的起点——它只影响「何时
+停止构造」的启发式,返回值的硬保证由收敛循环的终判(`块头 + 正文 <= 预算`)给出,那一格去掉即红。
+另按 T-PD1/7 评审补了 `validate_reflect_delta_cards`「必须是 JSON 对象」分支的一格用例
+(`'[1,2,3]'` 与标量 `5`,镜像 `test_reflect_evidence_chars_rejects_bad_mappings` 第八格)。
 
 ### T-PD9 文档 · sonnet · 只改文档与注释
 
@@ -237,11 +409,21 @@ T-PD6 ──┘
 
 ### 文档落点
 
-- `docs/deployment-and-configuration{,_zh}.md`(`_zh:847-850` / `en:1046-1049`):① 新增两条配置;② `RECENT_OBSERVATIONS` 的"预告"改成当前行为;③ `REASONING_REFLECT_OPTIMIZATION` 三格已实现、`prefix_delta_lean` 仍拒,补"`prefix_delta` 做的事"与如实字节账(省的是重选重排那部分,补充卡与折算披露是净增,真实收益等实验);④ `MEASURE_CONTEXT` 按 Q7 改准。
-- `docs/product-and-api{,_zh}.md`(`_zh:1426-1436`):`prefix_delta` 的分块与稳定性口径(逐轮不变的是 wrapper、S、C 与全部已发出的 D);`context_chars` 在 delta 下的 `d` 口径;投影新增两列与"缺席 ≠ 0"。
-- `architecture.md:111`:`ReflectDeltaState` 的 owner/把手/三条硬约束、`_reflect_delta_context` 六步与 `run()` 零改动、`_PREFIX_LAYOUTS` 单点、回退判据不是第二次读策略位、`ReflectContext.delta` 第三处互斥守卫、`fold_observation_counts` 产地。
-- `scripts/README.md`:第二维臂多一格。
-- `fangan_todo.md` (j):PR-3 已交付、仍未做的是跑对照实验、开闸仍是独立决定;已知限制追加(回退不可逆、`search` 投影 `optimization` 仍恒 unknown、`prefix_delta_lean` 待 PR-4)。
+- `docs/deployment-and-configuration{,_zh}.md`(`_zh:847-850` / `en:1046-1049`):① 新增两条配置;② `RECENT_OBSERVATIONS` 的"预告"改成当前行为;③ `REASONING_REFLECT_OPTIMIZATION` 三格已实现、`prefix_delta_lean` 仍拒,补"`prefix_delta` 做的事"与如实字节账(S 相对 `prefix_snapshot` 多 1,507 字符、落在逐轮不变那一段;每块 D 一个 75 字符块头 + 换行,重建后的块再多约 14 字符版本标记;补充卡相对原卡约 +26 字符;省的是每轮一次全池重选重排与摘录重算,**哪一侧更大取决于题型与轮数,一个数都还没量**),并**删掉** T-PD1 修正轮留下的那句"T-PD5 落地前能起来但走 off 布局(T-PD9 收)";④ `MEASURE_CONTEXT` 按 Q7 改准(delta 下载体无条件构造、只为那三个行为事实键;序列化那半仍由本开关管,为假时 `serialize_provider_messages` 零调用),同时把 `OPTIMIZATION` 那句"本项自己一个数都不写"补上这条例外。
+- `docs/product-and-api{,_zh}.md`(`_zh:1426-1436`):`prefix_delta` 的分块与稳定性口径(逐轮不变的是 wrapper、S、C 与全部已发出的 D);`context_chars` 在 delta 下的 `d` 口径;`message_prefix_bytes` 在这条臂上的期望形状(随轮数增长、重建轮回落,回落不是缺陷);投影「九列」改**十一列**并写清新两列口径(`context_rebuilds` max-over-present、`context_fallback` any、`0`/`false` ≠ 缺值、两列与测量开关无关只与臂有关)、`delta_blocks` 已登记但不出顶层列。
+- `architecture.md:111`(实况,T-PD9 落地时按代码修正了两处计划字面):`ReflectDeltaState` 的
+  owner/把手/三条硬约束与「在池子里 / 曾经展示过 / 此刻还在消息里」三格、`rebuilt_last_turn`
+  与 `supplement_cursor` 的语义、`_reflect_delta_context` **七步**(计划原写六步)与 `run()` 零改动、
+  `_PREFIX_LAYOUTS` 单点**加导入期对账守卫**、回退判据不是第二次读策略位且回退**保留已发出的
+  D**、两笔累计账回退后停用、`ReflectContext.delta` 是 `_PREFIX_ONLY_FIELDS` 的**第四**格(计划
+  原写第三处)、**六项预算每字段一个读点**、`fold_observation_counts` 与 `render_pool_cards` 的
+  产地、两个纯模块互不 import。
+- `scripts/README.md`:第二维臂**四格**(`legacy:off` / `v2:off` / `v2:prefix_snapshot` /
+  `v2:prefix_delta`)、一次只收一对;过期举例(`prefix_delta` 未实现 / 两格被启动期拒绝)按实况改。
+- `fangan_todo.md` 新增 (k):PR-3 已交付、仍未做的是跑对照实验、开闸仍是独立决定;已知限制
+  (回退不可逆且回退轮字节可超档位池、`search` 投影 `optimization` 仍恒 unknown、
+  `prefix_delta_lean` 待 PR-4、D 观察节不带 `HISTORY_NOTE`、`delta_blocks` 不出顶层列);同时把
+  (j) 里「两格都被启动期拒绝」那条标成已被本期部分解除。
 - 不改 `AGENTS.md`/`CLAUDE.md`;不改带日期的设计稿本体,C1/C2 与九个拍板写在本计划。
 
 ## §5 风险
