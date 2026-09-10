@@ -96,10 +96,17 @@ CATEGORICAL_METRICS: tuple[str, ...] = (
 COUNTER_METRICS: tuple[str, ...] = (
     "actions_by_type", "seed_actions_by_type", "empty_actions_by_type",
     "skip_reasons", "fallback_reasons", "durations_ms",
-    # 最后一轮各上下文块的规模(T-PS4)。和 `durations_ms` 一样按格**跨 run 求
-    # 和**——想看每 run 平均就除这一格的 `n_runs`。两点提醒:短码 `total` 的单位
-    # 是**字节**(其余五个是字符,见 `REFLECT_CONTEXT_DETAIL_KEYS`);没开测量的
-    # run 一格都不带,所以这一项的和只覆盖开了测量的那些 run,不是整格。
+    # 最后一轮各上下文块的规模(T-PS4)。和 `durations_ms` 一样按格**跨 run 逐键
+    # 求和**。
+    #
+    # ⚠ **这一项的和不可以除 `n_runs`。** 它只覆盖开了测量的那几条 run(没开的
+    # 一格都不带),而 `n_runs` 数的是整格;两者分母不同,商是一个偏低到没有意义
+    # 的数。同格里「有几条 run 真的量到了」这个分母,四组标量指标里没有哪一格能
+    # 精确顶替(`prefix_turns` 的 `n_observed` 少算首轮就停的 run,
+    # `attempts_observed` 数的是另一个键),所以要看每 run 平均只有两条正路:按
+    # `optimization` 分格后只看确实开了测量的那一臂,或者去 rig 的 per-call 表按
+    # 轮取数。短码本身的单位另见 `REFLECT_CONTEXT_DETAIL_KEYS`(`total` 是字节,
+    # 其余五个是字符)。
     "context_chars",
 )
 # 配对还要按**工作负载**分格(codex #700 R11 P2):`search-*.jsonl` 是只跑检索的
