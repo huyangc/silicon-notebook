@@ -2287,6 +2287,11 @@ def test_an_arm_that_blows_up_lands_a_failed_row_without_losing_the_other_arm(
     # 崩在半路的 run 照样有墙钟:它确实占了这么久(计划 §3 T-PS5 验收)。
     assert isinstance(by_arm["v2"]["run_wall_ms"], int)
     assert by_arm["v2"]["latency_ms_total"] is None
+    # 跑成的那一条也要有——E1 的头条结论正是这一列的臂间差。只钉失败行的话,
+    # 日后重排 `_run_ab_arm` 尾部会让成功 run 的墙钟全线落 `None`,而数据看起来
+    # 完整、配对差值表那一格恒空,一个用例都不红(codex 质量评审 P2-2)。
+    assert isinstance(by_arm["legacy"]["run_wall_ms"], int)
+    assert by_arm["legacy"]["run_wall_ms"] == by_arm["legacy"]["latency_ms_total"]
     log_text = (tmp_path / "ab" / "ab-runs.log").read_text(encoding="utf-8")
     assert "status=failed reason=RuntimeError" in log_text
     assert "provider 502" not in log_text  # 只记类名,不记异常正文
@@ -2699,6 +2704,22 @@ def test_writing_zero_call_rows_creates_no_file(tmp_path):
     assert (tmp_path / "calls-v2.jsonl").read_text("utf-8").strip()
 
 
+def test_call_rows_accumulate_across_units_instead_of_truncating(tmp_path):
+    """这个文件是**追加**的:串行下每个单元每条臂都往同一份表里写一次。
+
+    翻成截断的代价看不出来:文件在、非空、`ab-runs.jsonl` 完全正常,只是
+    `calls-<arm>.jsonl` 里只剩最后一个单元的调用行,前面几十个单元的账没了。
+    """
+    rig._write_call_rows(tmp_path, "v2", [{"support_id": "mdl-a"},
+                                          {"support_id": "mdl-b"}])
+    rig._write_call_rows(tmp_path, "v2", [{"support_id": "mdl-c"}])
+    lines = (tmp_path / "calls-v2.jsonl").read_text("utf-8").splitlines()
+    assert len(lines) == 3
+    assert [json.loads(line)["support_id"] for line in lines] == [
+        "mdl-a", "mdl-b", "mdl-c",
+    ]
+
+
 def test_a_serial_batch_attributes_its_calls_to_the_arm_that_made_them(
     tmp_path, monkeypatch, capsys,
 ):
@@ -2827,6 +2848,79 @@ def test_a_concurrent_batch_joins_by_support_id_but_claims_no_arm(
             assert row[key] is None, key
 
 
+def test_a_second_concurrent_batch_does_not_eat_the_first_batch_events_again(
+    tmp_path, monkeypatch, capsys,
+):
+    """往同一个 `--out-dir` 追跑第二批:事件偏移按**事件的 glob** 取。
+
+    整批偏移那两行是两串日志各取各的(`RIG_EVENT_LOG_GLOB`)。事件那一串若按
+    llm 的默认 glob 取偏移,`events-*.jsonl` 一份都匹配不上 ⇒ offsets 恒空 ⇒ 每
+    一批都从字节 0 把事件重读一遍,第二批的 `calls-unknown.jsonl` 里于是躺着上
+    一批事件的副本(`event_only` 行),而 llm 那一侧偏移正常、行数看起来只多不
+    少,没有任何一处会报错。
+    """
+    out_dir = tmp_path / "ab"
+    log_dir, event_dir = _call_dirs(out_dir)
+    lock = threading.Lock()
+
+    def _fake_run(repo, *, notebook, item, arm, contract, on_trace,
+                  cancel_event, actor_id, scope_source_ids=None,
+                  optimization="off"):
+        support = f"mdl-{item['question_key']}-{arm}"
+        with lock:
+            _write_jsonl(log_dir / "u1" / "llm-2026-09-10.jsonl", [
+                {"kind": "chat", "status": "ok", "support_id": support,
+                 "latency_ms": 700, "attempts": 1},
+            ])
+            _write_jsonl(event_dir / "u1" / "events-2026-09-10.jsonl", [
+                {"kind": "model_scheduler", "status": "ok",
+                 "support_id": support, "queue_latency_ms": 3},
+            ])
+        for step in _steps(arm):
+            on_trace(SimpleNamespace(
+                step_type=step["step_type"], summary="",
+                detail=step["detail"], duration_ms=7,
+            ))
+        return _FakeResponse()
+
+    monkeypatch.setattr(rig, "run_ab_once", _fake_run)
+    monkeypatch.setattr(rig, "_ab_element_sections", lambda url, ids: {})
+    monkeypatch.setattr(rig, "_ab_chunk_sections", lambda url, ids: {})
+    monkeypatch.setattr(rig, "_ab_usage_for_window",
+                        lambda *a, **kw: UNKNOWN_USAGE)
+    _fixed_intents(monkeypatch)
+    runner = rig.Runner(dry_run=False, out_dir=out_dir)
+    args = _ab_args(only_policy=[], out_dir=str(out_dir), dry_run=False,
+                    no_intent=True)
+    path = out_dir / f"calls-{rig.CALLS_UNATTRIBUTED_LABEL}.jsonl"
+
+    def _run_batch(question_key: str) -> list[dict]:
+        before = (len(path.read_text("utf-8").splitlines())
+                  if path.exists() else 0)
+        rig._ab_loop(
+            args, runner, [_unit(question_key=question_key)],
+            {"A_nokg": _fact()}, _repos_by_arm(), actor_id="ab-owner",
+            profile=None, concurrency=2,
+            gold_by_key=load_ab_gold(load_questions()),
+            model_contract="0123456789abcdef", log_dir=log_dir,
+            event_dir=event_dir, clock=datetime.now,
+        )
+        capsys.readouterr()
+        lines = path.read_text("utf-8").splitlines()[before:]
+        return [json.loads(line) for line in lines]
+
+    first = _run_batch("A-q08")
+    assert len(first) == 2                                  # 1 题 × 2 臂
+    second = _run_batch("A-q14")
+    # 第二批只认自己那两次调用:上一批的事件不再被吃第二遍。
+    assert len(second) == 2
+    assert all(row["join"] == "joined" for row in second)
+    assert {row["support_id"] for row in second} == {
+        "mdl-A-q14-legacy", "mdl-A-q14-v2"}
+    assert not ({row["support_id"] for row in first}
+                & {row["support_id"] for row in second})
+
+
 def test_the_two_v2_arms_write_to_different_call_tables_and_raw_dirs(tmp_path):
     """两条 v2 臂的产物路径必须分开,否则后跑的静默覆盖前一条。"""
     off = rig.arm_label("v2", "off")
@@ -2838,6 +2932,32 @@ def test_the_two_v2_arms_write_to_different_call_tables_and_raw_dirs(tmp_path):
     assert (tmp_path / f"calls-{snapshot}.jsonl").exists()
     assert rig._ab_raw_path(tmp_path, off, _unit()) != rig._ab_raw_path(
         tmp_path, snapshot, _unit())
+
+
+def test_the_raw_archive_splits_the_two_v2_arms_through_the_production_writer(
+    tmp_path,
+):
+    """存档分目录这件事要**经生产调用点**钉住,不是只钉 `_ab_raw_path`。
+
+    直接给 `_ab_raw_path` 传 label 的那条断言够不到 `_write_ab_raw` 里的接线:
+    哪天有人在那里退回一维(`arm[0]`),两条 v2 臂会写进同一个
+    `raw/v2/<key>_<cell>_<effort>_r<n>.json`,后跑的静默覆盖先跑的,存档只剩一
+    半——而 `ab-runs.jsonl` 完全正常,没有任何一处会报错。
+    """
+    unit = _unit()
+    for arm in (("v2", "off"), ("v2", "prefix_snapshot")):
+        rig._write_ab_raw(tmp_path, arm, unit, _FakeResponse(), [], None)
+    written = sorted(
+        path.relative_to(tmp_path).as_posix()
+        for path in (tmp_path / "raw").rglob("*.json")
+    )
+    # 两份存档,路径逐字如下(`off` 那一格落回光秃秃的 policy 目录)。
+    stem = "A-q08_A_nokg_standard_r1.json"
+    assert written == [f"raw/v2-prefix_snapshot/{stem}", f"raw/v2/{stem}"]
+    # 存档正文里的 `arm` 仍是**命令行写法**,人工抽样时与 `--arms` 逐字相同。
+    payload = json.loads(
+        (tmp_path / "raw" / "v2-prefix_snapshot" / stem).read_text("utf-8"))
+    assert payload["arm"] == rig.format_arm("v2", "prefix_snapshot")
 
 
 # ---------------------------------------------------------------------------
@@ -2859,14 +2979,70 @@ def test_the_preflight_rejects_an_illegal_arm_before_anything_runs():
 
 
 def test_the_preflight_refuses_a_filter_that_leaves_no_arm():
-    """零臂的计划长得完全像一次正常的预演(argparse 的 choices 挡不住这一种)。"""
+    """零臂的计划长得完全像一次正常的预演,连 dry-run 都看不出来。
+
+    这一格**今天在 CLI 上到不了**:`--only-policy` 的 `choices` 就是 `POLICIES`,
+    两个值都在 `AB_DEFAULT_ARMS` 里,过滤永远非空。守卫留着是防两个集合日后分叉
+    (往 `POLICIES` 加了第三种协议、却没往 `AB_DEFAULT_ARMS` 加对应臂),所以这
+    条用例只能手搓 Namespace 才走得到。
+    """
     args = _ab_args(only_policy=["legacy"])
     assert rig._ab_preflight(args, ["A_nokg"]) == ""
     assert rig.ab_arms(args) == [("legacy", "off")]
+    assert set(rig.POLICIES) <= {arm[0] for arm in rig.AB_DEFAULT_ARMS}
     # `--arms v2:prefix_snapshot --only-policy legacy` 已经被上一条互斥挡住;
-    # 这里造的是「默认臂里没有这个 policy」那一种。
+    # 这里造的是「默认臂里没有这个 policy」那一种(CLI 上不可达,见 docstring)。
     empty = _ab_args(only_policy=["nonsense"])
     assert "一条臂都不剩" in rig._ab_preflight(empty, ["A_nokg"])
+
+
+def test_the_preflight_refuses_a_three_armed_batch():
+    """一次一对。三条臂的批次每一行看起来都正常,而配对差值表整批为空。
+
+    每个配对单元落三行,`mark_paired` 的门槛是 `PAIR_ARM_COUNT`,于是 12 行
+    `paired` 全 False——数据集、日志、投影一切正常,只是一个配对结论都出不来,
+    而这批已经烧掉了几百次模型调用(codex 规格评审 P2-1 / 质量评审 P3-4)。
+    """
+    args = _ab_args(arms="legacy,v2:off,v2:prefix_snapshot")
+    problem = rig._ab_preflight(args, ["A_nokg"])
+    assert "一次只收一对臂" in problem
+    assert "分两批跑" in problem
+    # 一对照旧放行(一维与二维两种写法都是一对)。
+    assert rig._ab_preflight(_ab_args(arms="legacy,v2"), ["A_nokg"]) == ""
+    assert rig._ab_preflight(
+        _ab_args(arms="v2:off,v2:prefix_snapshot"), ["A_nokg"]) == ""
+    # 只跑一条臂仍然合法(`--only-policy` 的二维版:重跑被打废的一侧)。
+    assert rig._ab_preflight(_ab_args(arms="v2:prefix_snapshot"),
+                             ["A_nokg"]) == ""
+
+
+def test_the_three_armed_batch_really_would_have_lost_every_pair():
+    """上一条拦的不是一个假想:三条臂真的会让 `paired` 全线 False。"""
+    arms = rig.parse_arms("legacy,v2:off,v2:prefix_snapshot")
+    assert len(arms) > rig.PAIR_ARM_COUNT
+    rows = [{"arm": arm[0], "optimization": arm[1], "question_key": "A-q08",
+             "corpus_cell": "A_nokg", "effort": "standard", "repeat": 1}
+            for arm in arms]
+    mark_paired(rows)
+    assert [row["paired"] for row in rows] == [False, False, False]
+
+
+def test_an_empty_arms_string_is_refused_instead_of_running_the_default():
+    """`--arms ""` 是**给了一个空写法**,不是「没给」。
+
+    脚本里写 `--arms "$ARMS"` 而变量恰好为空时,静默退化会让整批(上百次调用)
+    安静地跑成 legacy-vs-v2,而那不是要做的实验——数据看起来完美,只是答非所问。
+    """
+    args = _ab_args(arms="")
+    problem = rig._ab_preflight(args, ["A_nokg"])
+    assert "为空或有空段" in problem
+    with pytest.raises(ArmSpecError):
+        rig.ab_arms(args)
+    # 真的**不给**时照旧是默认两臂(既有一维用法一个字节没变)。
+    assert rig.ab_arms(_ab_args()) == list(rig.AB_DEFAULT_ARMS)
+    assert rig.build_parser().parse_args([
+        "--database-url", "postgresql://127.0.0.1:5432/nb_t0_test", "ab",
+    ]).arms is None
 
 
 def test_dry_run_ab_enumerates_the_second_dimension_and_the_shared_ruler(capsys):
@@ -2888,8 +3064,27 @@ def test_dry_run_ab_enumerates_the_second_dimension_and_the_shared_ruler(capsys)
     assert "EVENT_LOG_DIR=" in printed
 
 
-def test_dry_run_ab_keeps_the_one_dimensional_spelling_byte_identical(capsys):
-    """不给 `--arms` 的既有命令:枚举、臂名与产物路径一个字节没变。"""
+def test_the_one_dimensional_spelling_keeps_its_artifact_paths_byte_identical(
+    tmp_path, capsys,
+):
+    """不给 `--arms` 的既有命令:**产物路径**一个字节没变。
+
+    逐字不变的是路径,不是 dry-run 的输出字节:那一行的臂名现在打成
+    `legacy:off, v2:off`,另外多打了测量、隔离日志与 per-call 表三行,而计划也
+    没要求 dry-run 输出不变。会让既有数据接不上的是路径——`raw/<arm>/` 与
+    `calls-<arm>.jsonl` 里的 `<arm>` 必须仍是光秃秃的 policy(`arm_label` 对
+    `off` 那一格的约定),否则二维化之前跑的那批存档与新批对不上号。
+    """
+    for arm in rig.AB_DEFAULT_ARMS:
+        assert rig.arm_label(*arm) == arm[0]
+        assert rig._ab_raw_path(tmp_path, rig.arm_label(*arm), _unit()) == (
+            tmp_path / "raw" / arm[0] / "A-q08_A_nokg_standard_r1.json"
+        )
+    rig._write_call_rows(tmp_path, rig.arm_label(*rig.AB_DEFAULT_ARMS[0]),
+                         [{"support_id": "mdl-a"}])
+    assert (tmp_path / "calls-legacy.jsonl").exists()
+    assert rig.AB_DEFAULT_ARMS == (("legacy", "off"), ("v2", "off"))
+    # 枚举本身也没变:不给 `--arms` 就是既有的一维两臂。
     assert rig.main([
         "--dry-run", "--limit", "1", "--repeats", "1",
         "--database-url", "postgresql://127.0.0.1:5432/nb_t0_test",

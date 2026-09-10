@@ -1120,6 +1120,20 @@ def test_dry_run_prints_both_the_call_count_and_the_request_ceiling(capsys):
     assert rig.REASONING_ATTEMPT_BUDGET >= 2
 
 
+def test_the_attempt_budget_tracks_the_config_default_it_hardcodes():
+    """rig 那个 `1 + 1` 抄的是 `REASONING_MAX_RETRIES` 的默认值,得钉住。
+
+    不钉的失败场景:有人把配置默认改成 3,rig 打的「请求上界 ≤ 212」比真实上界
+    低一倍——而那个数正是用来估端点负载、决定这批跑不跑得起的。
+
+    **只有用例 import config**:dry-run 本身不 import 它是另一条约束(起一份
+    Settings 要读 .env、连不上的库还会拖慢预演),由别的用例管,这里不碰。
+    """
+    from app.core.config import Settings
+
+    assert rig.REASONING_ATTEMPT_BUDGET == 1 + Settings().reasoning_max_retries
+
+
 def test_search_plan_pairs_the_two_policies_and_carries_no_idempotency_key():
     questions = rig.load_questions()
     plan = rig.search_plan(

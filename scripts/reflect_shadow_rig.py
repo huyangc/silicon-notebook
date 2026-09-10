@@ -100,6 +100,7 @@ from app.domain.reasoning_trace_stats import (  # noqa: E402
 #: `citation_markers`,两者都零配置。
 from app.eval.reflect_ab import (  # noqa: E402
     ARMS,
+    PAIR_ARM_COUNT,
     ArmSpecError,
     arm_label,
     format_arm,
@@ -1753,7 +1754,10 @@ def _settings_by_arm(
     * v2 总闸按 policy 对号(与 `_settings_by_policy` 逐字同一条);
     * optimization 按声明对号。`prefix_delta` 这类未实现取值由
       `config.validate_reflect_optimization` 在**构造期**抛,所以那条路径不会走到
-      这里;这条断言挡的是「显式环境变量被 `--env-file` 盖住」那一种。
+      这里;这条断言挡的是**别名或接线漂移**——`Settings` 的字段别名改了名、
+      `--arms` 的取值与配置枚举分了叉、或者这个函数哪天不再逐臂设那个环境变量。
+      它挡不住的是「被 `--env-file` 盖住」:pydantic-settings 默认 env > dotenv,
+      而 `--arms` 那几行是显式环境变量,`--env-file` 盖不过它(实测确认)。
     * 测量开关按 `_ab_process_env` 的约定核一次:两臂都必须是开的,否则差值表
       只有一侧有数。
 
@@ -1781,8 +1785,9 @@ def _settings_by_arm(
             raise RuntimeError(
                 f"Settings 没有按 {label!r} 起来:"
                 "REASONING_REFLECT_OPTIMIZATION 实际是 "
-                f"{settings.reasoning_reflect_optimization!r}(被 --env-file 或"
-                "别处盖掉了)"
+                f"{settings.reasoning_reflect_optimization!r}。显式环境变量胜过 "
+                "--env-file,所以这不是被 .env 盖住——多半是字段别名或这里的接线"
+                "改了名,rig 设的那个环境变量已经没人读"
             )
         if not bool(settings.reasoning_reflect_measure_context):
             raise RuntimeError(
@@ -2501,6 +2506,13 @@ def stamp_run_wall_ms(row: dict, elapsed_ms: int | None) -> dict:
     和,漏掉排队、模型侧调度与步与步之间的空隙,而设计 §8.1 要的「检索 run ·
     `run_wall_ms`」正是含这些空隙的那个数。
 
+    **这条「轨迹里没有」只对 `search` 成立**:那条路的 `project_search_run` 压根
+    不收 latency。`ab` 那条路的 `latency_ms_total` 与这里的 `run_wall_ms` 是**同
+    一个**变量(`_run_ab_arm` 里那个 `latency_ms`,一次 `time.monotonic()` 差),
+    成功行上两列逐字相同,只在失败行分岔——`AB_FAILED_UNKNOWN_KEYS` 把
+    `latency_ms_total` 清成 `None`,而墙钟照写。两列同源不是 bug,但读这张表的
+    人别把它们当成两次独立的测量,改其中一处也要想到另一处。
+
     **失败的 run 也写**:它崩在半路,但它确实占了这么久的墙钟,而「哪一侧更容易
     崩、崩之前烧了多少时间」正是要量的东西之一。
 
@@ -3039,17 +3051,21 @@ def ab_arms(args: argparse.Namespace) -> list[tuple[str, str]]:
 
     三条口径:
 
-    * 不给 `--arms` ⇒ `AB_DEFAULT_ARMS`(一维两臂,与二维化之前逐字相同);
+    * **不给** `--arms` ⇒ `AB_DEFAULT_ARMS`(一维两臂,与二维化之前逐字相同)。
+      判据是 `is None`(argparse 的默认值)而不是真值:`--arms ""` 是**给了一个
+      空写法**,得走下面那条响亮拒绝,不能悄悄退化成默认两臂——脚本里写
+      `--arms "$ARMS"` 而变量恰好为空时,整批上百次调用会安静地跑成
+      legacy-vs-v2,而那不是要做的实验;
     * 给了 `--arms` ⇒ `reflect_ab.parse_arms` 的结果,非法写法当场抛
-      `ArmSpecError`(空段、未知取值、`legacy:prefix_snapshot` 这类合法值的非法
-      组合、重复臂);
+      `ArmSpecError`(空写法、空段、未知取值、`legacy:prefix_snapshot` 这类合法
+      值的非法组合、重复臂);
     * `--only-policy` 仍然按 policy 过滤**默认**臂(既有语义,用于一侧被网络故障
       整批打废后的重跑)。它与 `--arms` 同时给是**矛盾指令**,由 `_ab_preflight`
       挡在跑批之前:`--arms v2:off,v2:prefix_snapshot --only-policy v2` 里的
       「只跑 v2」既可以读成「两条都留」也可以读成「留一条」,而两种读法产出的
       数据集不一样,paired 也不一样。
     """
-    if getattr(args, "arms", ""):
+    if getattr(args, "arms", None) is not None:
         return parse_arms(args.arms)
     if args.only_policy:
         return [
@@ -3179,22 +3195,37 @@ def _ab_preflight(args: argparse.Namespace, cells: Sequence[str]) -> str:
     if not cells:
         return (f"--cell 选中的格子不在 ab 的范围里(可选 "
                 f"{', '.join(CORPUS_CELLS)};默认 {', '.join(AB_DEFAULT_CELLS)})")
-    if args.arms and args.only_policy:
+    if args.arms is not None and args.only_policy:
         # 矛盾指令,不猜(见 `ab_arms`):`--arms v2:off,v2:prefix_snapshot
         # --only-policy v2` 的「只跑 v2」既可以读成「两条都留」也可以读成「留
         # 一条」,两种读法产出的数据集与 `paired` 都不一样。
         return ("--arms 与 --only-policy 不能同时给:前者已经把这一批的臂点全了,"
                 "后者是一维时代按 policy 过滤默认两臂的写法。只跑一条臂就直接写 "
                 "`--arms v2:prefix_snapshot`")
-    if args.arms:
+    if args.arms is not None:
+        # `is not None`(不是真值):`--arms ""` 是给了一个空写法,由 `parse_arms`
+        # 的第 1 类响亮拒绝,不能悄悄跑成默认两臂(见 `ab_arms`)。
         try:
-            parse_arms(args.arms)
+            parsed = parse_arms(args.arms)
         except ArmSpecError as exc:
             return str(exc)
+        if len(parsed) > PAIR_ARM_COUNT:
+            # 一次一对。三条臂的批次里每个配对单元落三行,`mark_paired` 的门槛
+            # 是 `PAIR_ARM_COUNT`,于是整批 `paired` 全 False、配对差值表凭空
+            # 空掉——而每一行看起来完全正常,行数、投影、日志都对。这是「各自
+            # 正确的一半拼出错误整体」的那种失败,只能拦在跑批之前。
+            return (
+                f"--arms 一次只收一对臂(给了 {len(parsed)} 条:"
+                + ", ".join(format_arm(*arm) for arm in parsed)
+                + ")。配对差值表按**对**出:三条臂的单元里 `paired` 会全线 False,"
+                  "整批数据看起来正常却出不了任何配对结论。分两批跑,每批一对"
+            )
     if not ab_arms(args):
-        # `--only-policy` 给了个过滤不到任何默认臂的值(argparse 的 choices 挡不
-        # 住这一种:值合法,只是这一批的默认臂里没有它)。零臂的计划长得完全像
-        # 一次正常的预演。
+        # `--only-policy` 过滤之后零臂。**今天在 CLI 上到不了**:那个参数的
+        # `choices` 就是 `POLICIES`,两个值都在 `AB_DEFAULT_ARMS` 里,过滤永远
+        # 非空;与 `--arms` 同时给已被上一条拦掉。留着是防两个集合日后分叉
+        # (往 `POLICIES` 加了第三种协议、却没往 `AB_DEFAULT_ARMS` 加对应臂),
+        # 因为零臂的计划长得完全像一次正常的预演——连 dry-run 都看不出来。
         return (f"--only-policy {args.only_policy} 过滤之后一条臂都不剩(默认臂 "
                 + ", ".join(format_arm(*arm) for arm in AB_DEFAULT_ARMS) + ")")
     if not args.database_url_explicit:
@@ -3748,6 +3779,13 @@ def _rig_call_rows(
     表是诊断产物,读不到它不该让一个跑成了的 run 整体作废(与 `_ab_usage_for_window`
     把 `OSError` 折成 unknown 同一条口径,只是这里 unknown 的形态是「这一段没有
     行」而不是「有行但值是 None」)。
+
+    `ValueError` 一并折掉,是**第二层**而不是第一层:`join_calls` 里那几列已经
+    自己把不合形状的 provider 串收成 unknown(见 `reflect_context_bench._short_code`)
+    ——第一层保住的是「这一行的别的列照样是真的」,这一层保住的只是「整批不会
+    在第 N 个单元中止」。只留这一层会让一整段调用连着表一起消失(串行路这个
+    表达式在 `_run_ab_arm` 的 `return` 里求值,并发路它在 `_ab_loop` 的
+    `finally` 里,抛出去还会顶掉在途异常),那不是降级,那是丢账。
     """
     from app.eval.reflect_context_bench import join_calls
 
@@ -3756,9 +3794,9 @@ def _rig_call_rows(
         events = _ab_read_llm_records(
             event_dir, event_offsets, glob=RIG_EVENT_LOG_GLOB,
         )
-    except OSError:
+        return join_calls(llm_records, events, tags=tags)
+    except (OSError, ValueError):
         return []
-    return join_calls(llm_records, events, tags=tags)
 
 
 def _rig_call_tags(
@@ -5339,11 +5377,14 @@ def build_parser() -> argparse.ArgumentParser:
              "——它们的档位维度由 EFFORTS 定死",
     )
     parser.add_argument(
-        "--arms", default="",
-        help="`ab` 跑哪几条臂,逗号分隔。一维写法 `legacy,v2`(= 默认);二维写法 "
+        "--arms", default=None,
+        help="`ab` 跑哪几条臂,逗号分隔。**一次一对**(配对差值表按对出,三条臂"
+             "的批次会整批 paired=False,所以超过两条当场拒绝)。一维写法 "
+             "`legacy,v2`(= 不给时的默认);二维写法 "
              "`v2:off,v2:prefix_snapshot` 把 REASONING_REFLECT_OPTIMIZATION 当"
              "第二维(前缀复用最终设计 §11)。省略 `:优化` 一律补 `off`;"
-             "`legacy:prefix_snapshot` 这类合法值的非法组合当场拒绝。"
+             "`legacy:prefix_snapshot` 这类合法值的非法组合、重复臂与空写法"
+             "(`--arms \"\"`)都当场拒绝,不退化成默认两臂。"
              "与 --only-policy 互斥。`search`/`ask` 不读它",
     )
     parser.add_argument(
