@@ -77,6 +77,13 @@
 - K/D:内容判据不改,只改位置。消息形状 `system(UNTRUSTED? + S)` + `user(C + K + D + T)`。`off` 走原路径原顺序。
 验收(§12):同 run 额度耗尽/方面变化/轮数增长 ⇒ S、C 字节不变;最终消息检查覆盖 wrapper,S/C 开头无动态值;P 与 off 冻结输入下同一批证据事实与执行限制;T 的 `allowed_actions` 与 `parse_reflect_v2` 白名单同源;`unavailable_action:*` 计数两模式可读;off 与关闭态字节等价;Knowhow/legacy 不受影响。用例:(a) `_V2ContextLLM` 加 `system_prompt(turn)`/`turn_state_block(turn)` 取值器,额度耗尽多轮 run 断言 S、C 不变;(b) 方面 unresolved→supported ⇒ C 不变 T 变;(c) 还原 provider-facing 消息含 wrapper;(d) 冻结 fixture 上证据键集/可用动作/额度逐项相等;(e) 选目录有、T 无的动作 ⇒ `unavailable_action:<既有 reason>` 零 I/O 观察、循环继续(过 `_GatedV2LLM`);(f) `nudge_pending` 只消费一次且在 T。
 
+**实施记录(2026-09-10)。** 落地形态与上面一致,三处与计划字面不同的取舍,都记在这里:
+- 「T 里的服务端当前状态优先于 K/D 过时观察」那一句放在 **S**(§3 的 T 条目把它列在 T 里)。它是**指令**而不是状态,设计 §4.5 的原话也是「S 规定」;放在 S 里它每轮零成本、且读起来是规则而不是数据。
+- T **不新铸额度数字**。§4.2 要 T 带「相关剩余额度」,兑现方式是被搬过来的那几块自带:不可用行的原因词(`per-run budget spent` 等)、服务器状态摘要里的集合地图额度行、以及紧排在 T 之上的观察行 `余额=`。另铸一套会让「P 与 off 在冻结输入下执行限制逐项相等」这条验收失效,也会让同一笔预算有两处可以互相分叉的渲染。
+- C 的「范围语义」由既有的 `SCOPE_DEIXIS_GROUNDING`(在 S,run 级)与问题原文承担。拍板 Q3 把 `summary` 整块搬到 T,所以没有别的范围文本可以在不动内容判据的前提下挪进 C。
+- 新增守卫「块序 C→K→D→T 且 T 在最末」:验收 (a)–(f) 六条对「T 挪到 K/D 之前」全绿(S 与 C 仍在原处、字节仍不变),而那正是这条臂唯一不可协商的东西。变异验证补出来的。
+- `render_aspect_block` 一个字节未动(off 专用),两半**不组装**它:off 的行把原文与状态排在同一行,拆开后拼不回同一串字节。
+
 ### T-PS9 文档与门
 `docs/deployment-and-configuration_zh.md:848`/`.md:1047` 之后新增 `REASONING_REFLECT_OPTIMIZATION`(默认 off、四取值、本期两格、v2 关与 Knowhow 忽略、不是前端档位、预告 `REASONING_REFLECT_RECENT_OBSERVATIONS` 在 delta 模式 = 重建 K 时保留几条,以及独立测量开关);`docs/product-and-api_zh.md:1408/1422`、`.md:1947/1961` 补 P 模式分块与稳定性口径(合同不变);`architecture.md:111` 补静态目录产地与 `reflect_optimization()` 唯一读点、登记 `reflect_context_bench.py`;`scripts/README.md:488` 附近补第二维臂与 `EVENT_LOG_DIR` 隔离。不改 AGENTS/CLAUDE。
 
