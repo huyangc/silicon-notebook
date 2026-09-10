@@ -550,7 +550,8 @@ v2 基线，以下五个 PR 依次交付「稳定前缀复用」候选布局及�
   - **E2「固定状态的真实 reflect 对照」**：驱动器与 `model_clients` 代理
     （`backend/app/eval/reflect_state_probe.py`，`ProbeModelClients` 只截
     `chat("reasoning_agent")`）+ 12 例 case 集（`reflect_t0/state_probes.json`）；rig 子命令
-    `state-probe` 详见 T-EX11b。
+    `state-probe`（`scripts/reflect_shadow_rig.py`）已落地，见 `scripts/README.md` 的
+    `state-probe` 小节。
   - **E3「真实自主循环」**：在既有 `ab` 上补整批墙钟预算（`--max-wall-minutes`，到点停止
     派发、保留未完成/不成对标记，不补跑到矩阵齐全）+ manifest 收尾。
   - 三条通道共用的 manifest 纯构造（`backend/app/eval/reflect_manifest.py`，18 键闭集 +

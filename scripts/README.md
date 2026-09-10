@@ -783,9 +783,163 @@ i 格。预算到点提前停批时 per-call 表的行数按实发调用数收�
 `local_cache_exit_rows`,**不叫** `cache_hit`(命名红线:字段名不许含
 `cache_hit`/命中率),真出现时整批以非零退出收尾。
 
-**`state-probe`(E2)—— 见 T-EX11b**。E2 的 rig 子命令、驱动器行为、三个状态点
-的分档报告、`--arms` 与并发约束等文档尚未落地——PR-5 的 T-EX7 在本轮之后合入
-主分支,这一节由 T-EX11b 补全。
+**`state-probe`(E2)—— 固定状态的真实 reflect 对照**(设计
+`2026-09-09-reflect-prefix-cache-final-design_zh.md` §9.2;实施
+`2026-09-11-reflect-prefix-experiments-plan_zh.md` T-EX5–T-EX7)。它回答的是:
+同一份剧本重放到同一个状态点,四条臂在**这一轮真实转发**上分块方式不同,
+是否有可辨认的差异。驱动器把前 k 轮全部按剧本重放(零真实调用,四臂逐格相同),
+只在第 k+1 轮把两条消息原样转发给真客户端调一次、把回来的决定**留存**下来,
+再向 `run()` 返回一条脚本化的停止决定——**模型选出的动作只记录不执行,这批
+数据测的是固定观察下的策略,不是它自洽的真实轨迹**(design §9.2)。
+
+```bash
+python scripts/reflect_shadow_rig.py --dry-run --database-url postgresql://h/db_test state-probe
+```
+
+**三条前置硬断言**(真跑与 `--dry-run` 下都拦,不放过任何一条):
+
+1. `--database-url` **必须显式给出**——不读 `.env` 猜、不落回 `search`/`ab`
+   的默认库(Q7:E2 结构上就不该跑在测试库之外的任何库上)。
+2. 库名必须以 `_test` 结尾。库名按 **URL 结构**取(`urlsplit` 的 `path` 最后
+   一段,再去掉文件扩展名),不对整串 URL 做 `endswith`:`sqlite:///x_test.db`
+   收(库名 `x_test`),`postgresql://u:p@h/prod?application_name=rig_test`
+   拒(库名 `prod`,`endswith` 会被这串 query 骗过去连生产库)。这与 `ab` 的
+   `AB_TEST_DB_SUFFIX.endswith` 判据在这四行上**分叉**(`ab` 刻意不动,是
+   既有资产),分叉本身是已知限制,不是漏洞。
+3. `assert_optimization_matches_evidence(声明, probe.reflect_optimization())`
+   逐臂当场对号(复用 `reflect_ab` 的既有函数)。
+
+跑前跑后各点一次测试库自己的只读证据(与 `search`/`ab` 同一把
+`_assert_readonly_on_exit`,文案按 `command="state-probe"` 说库)。
+
+**默认三臂**(U2 拍板):`off, prefix_snapshot, prefix_delta`(policy 恒
+`v2`;`off` = design §9.2 的 B,当前 v2 snapshot)。`--arms` 给逗号分隔的
+`OPTIMIZATIONS` 子集可以再加 `prefix_delta_lean`(L)。**这是一维**——与
+`ab`/`reflect_ab.parse_arms` 那套 `policy:optimization` 两维解析器是同一个
+`--arms` 参数、两套读法,互不复用。
+
+**`--repeats` 默认 2**(design §9.2 的公式:12 例 × 3 状态点 × 3 臂 × 2 重复 =
+216),**与 `ab` 的默认 3 不同,是 E2 专属**。「有没有显式给」靠 argparse 的
+`None` 哨兵而不是扫 `sys.argv`(`--repeat 5` 这种无歧义前缀缩写也要生效)。
+
+**`--concurrency` 显式给且 ≠ 1 一律响亮拒绝、退出 2,不降级**:E2 每条 run
+只有一次真实调用,并发只会污染排队时长。
+
+**`--only-case`/`--limit` 先筛后限**(与 `search` 的既有口径同款):先按
+`case_key` 集合筛,再按数量截断。
+
+**枚举顺序 `case → state_point → repeat → arm`,臂在最内层**(design §9.2
+「四臂背靠背站在同一状态点上」,块内的 provider 状态差异最小)。**块内臂序
+按重复轮号奇偶交替正/反序**——固定臂序会把块内的单调漂移(预热、限流退避、
+连接池升温)整份压在最后一条臂上,交替是确定性的(没有随机、没有种子)。
+manifest 的 `order` 字段从真实计划里读出来,如实带一段
+`alt_by_repeat_parity`(观察到交替)或 `alt_unobserved`(只有一条臂或一轮
+重复,交替在这一批里观察不到)的后缀;`arm_order_seed` 恒 `None`。
+
+**dry-run 打印的数字**(clean env 实测,逐字):
+
+```
+model calls (real, total)  216(= 12 例 × 3 状态点 × 3 臂 × 2 重复;每格恰好一次真实转发,不是估计)
+embedding calls (separate, upper bound)  ≤ 1254(上界,含首轮种子检索:种子侧 612 + 剧本侧 642;……)
+request ceiling  ≤ 432(重试预算 ×2)
+timeout (per call)  90s
+```
+
+`--arms` 加 L(四臂)⇒ 288 次逻辑调用;`--limit 6`(默认三臂)⇒ 108 次逻辑
+调用、embedding 上界 ≤ 642(种子侧 306 + 剧本侧 336)。**embedding 调用单列
+一行且含首轮种子检索**——`run()` 拿到非空 `intent_queries` 先跑一轮种子检索
+(零模型调用,种子数从冻结契约确定性算出),这一轮与状态点无关、每格都要
+重跑一次,漏计它会在批跑到一半时 embedding 配额耗尽(E2 没有按格续跑的
+平衡机制)。三个数字都是**上界**而不是精确值:枚举/精确查找类动作未必真的
+触发 embedding,请求内相同查询串也只算一次。单次超时读
+`REASONING_TIMEOUT_SECONDS_DEFAULT=90s`,与 `ab`/`prefix-probe` 同一个常量。
+
+**产物**(逐字):`<out-dir>/state-probe-<arm>.jsonl`(逐格投影行)+
+`state-probe-summary.{md,json}`(分档摘要)+ `calls-<arm>.jsonl`(per-call
+表,标签是 `question_key`/`arm`/`repeat`——E2 恒串行,臂这一维可信;
+`question_key` 与 case 一一对应,case 那一维不丢,但**状态点这一维在这张表
+里表达不出来**,格内三个状态点只能靠文件里的**行序**区分)+
+`manifest.json`(最新,覆盖)+ `manifests.jsonl`(历史,追加——与 E1/E3
+共用同一个写点函数)+ `raw/<case>-<point>-<arm>-<repeat>.json`(**只进
+`.local/raw`,不进数据集/不进仓库**:转发轮与前 k 轮剧本轮的消息/
+`schema_hint`/模型决定原文全文、加 `forwarded.stats`)。
+
+**行闭集要点**:`message_prefix_bytes` **恒为 `None`**(`assert_probe_row_closed`
+硬断言这一格必须缺席或为 `None`)——它量的是「上一轮 → 这一轮」的公共前缀,
+而 E2 每条 run 只在一轮上调真实模型,拿它当基准算出来的字节数回答的是另一
+个问题,不是这条 run 的事实;更不能拿同 case 同臂内相邻状态点的差充当它,
+那是两条各自独立的 run。`compaction_boundary_reached` 是**三值**:`None`
+= 这条臂压根没有这个观测(`off`/`prefix_snapshot` 下 `context_rebuilds`
+缺席),`False` = 量到了、重建次数是 0(第三个状态点没有落在压缩边界之后,
+如实标、不调剧本去凑),`True` = 量到了、至少重建过一次;unknown ≠ False。
+`state_point` 存的是**序号 0/1/2**,不是轮号——三个状态点在报告里按序号对
+`initial`/`follow_up`/`compaction_boundary` 三档,轮号在 12 例间不可比,
+要轮号用 `case.state_point_turn(i)` 另取。
+
+**摘要顶层三个键单列、不混进主统计**:`failed_rows`(取自
+`PROBE_FAILED_STATUSES={cancelled,error}`)、`local_cache_exit_rows`
+(本地响应缓存出口——转发时显式 `bypass_cache=True`,结构上该是 0,字段名
+**不叫** `cache_hit`,命名红线)、`compaction_boundary_not_reached_rows`
+(第三个状态点确实没越过压缩边界的格数,如实标、不调剧本去凑)。
+`by_state_point` **按 `initial`/`follow_up`/`compaction_boundary` 三档分别
+报告**(按 `STATE_POINT_LABELS` 顺序而非字母序),每档再逐臂给一份 cell 级
+计数与中位数(零比率):`n_rows`/`n_ok`/`n_failed`/`n_local_cache_exit`/
+`n_status_unknown`/`n_boundary_reached`/`n_boundary_not_reached`/
+`n_boundary_unknown`,以及 `n_decision_absent`(转发失败或返回的不是 JSON
+对象,压根没载荷可读)与 `n_decision_unreadable_action`(载荷读出来了但
+`next_action` 读不成短码)——是两件不同的事,各自单列;数值列另附
+`{key}_p50`(中位数)与 `{key}_n`(参与中位数的样本数)。
+
+**失败语义**:格内一次真实调用失败(provider 报错/取消)落一行
+`status="error"` 并继续跑批,与成功行放进同一张按臂分组的表——这与「剧本
+没写对」是两件事。遇到 `StateProbeError`(继承 `BaseException`,「这一格的
+剧本/编排没对上『同一状态点』这句话」)或裸 `ValueError`/`TypeError`
+(键改名、参数形状不对,同样是「剧本没写对」而不是「这次调用失败」)一律
+**当场停批、非零退出、不写 manifest**——已经 flush 过的行仍留在
+`state-probe-<arm>.jsonl` 里,不因为进程终止而丢。其余 `Exception` 才按格
+隔离继续跑。
+
+**`settings_overrides` 由探针自己套**:在 `run_state_probe_point` 里对
+`settings_for_arm` 的一份**副本**生效(建检索器之前),白名单只收两个检索
+上限键(`reasoning_max_element_searches`/`reasoning_max_chunk_searches`),
+渲染预算键(`reasoning_reflect_state_chars` 等)任何 case 都不许覆盖——调小
+它们去逼出压缩边界与调剧本去凑是同一件事的两种写法。
+
+**`--env-file` 必须早于案例集加载生效**:`load_state_probe_case_set()` 自己
+要 `from app.core.config import Settings`,而 `app.core.config` 在
+**import 时**就把 `SILICON_NOTEBOOK_ENV_FILE` 读成模块级常量——真跑时 rig
+在加载案例集之前先把 `--env-file` 等环境变量装进本进程,否则整批会静默跑在
+当前 checkout 的 `.env` 上。
+
+**`STATE_PROBE_EFFORT="standard"` 固定**,并在跑批前核一次:每例最后一个
+状态点的「第 k+1 轮」不能越过这个档位 `ask_retrieval_limits` 的
+`max_reasoning_steps` 上限,越界的例子在第一个模型调用之前就说清是哪一例、
+差在哪。
+
+**12 例覆盖九种形态**(`probe_shape` 闭集:`single_fact`/`complex_condition`/
+`graph_in_scope`/`no_graph`/`roster`/`large_collection`/`zero_hit`/
+`repeat_request`/`tool_exhausted`,其中单事实/复杂条件/工具耗尽各有
+`A_nokg`/`B_kg` 两例)。
+
+**已知限制**:
+
+* **图动作缺口**:剧本里不允许出现 `expand_graph`/`follow_chain`/
+  `ppr_retrieve`——它们的必填参数是候选池里的 `object_id`,驱动器只看得见
+  渲染后的文本,给不出一个真实候选 id(§9.2 里点名的「图动作」形态因此只能
+  靠语料格承载「图在范围内」,不是真的执行一次图动作)。
+* **臂序按重复轮号奇偶交替,不是随机**:是对设计 §9.2「随机化」的实现口径
+  收窄,manifest `order` 如实带 `alt_by_repeat_parity`/`alt_unobserved`
+  后缀;归因边界写在 `state-probe-summary.md` 的「归因边界」段——单数轮的
+  批(`--repeats 1`)没有那一半抵消,`call_wall_ms_p50` 的臂间差里仍混着
+  块内漂移。是否要给 E2 加臂序种子交用户拍板。
+* **E2 没有整批墙钟预算**:manifest 的 `stopped_by_budget` 恒写 `False`
+  (E1/E2 本期都不实施掐停逻辑),这与 E3(`ab`)的 `--max-wall-minutes`
+  不是同一件事。
+* **per-call 表(`calls-<arm>.jsonl`)没有 `state_point` 标签**:格内三个
+  状态点只能靠行序对齐,一旦读表脚本改动写入顺序这条对齐规则就会失效。
+* **`_test` 判据与 `ab` 分叉**:`state-probe` 按 URL path 段(去扩展名)
+  判库名,`ab` 的 `AB_TEST_DB_SUFFIX.endswith` 判据不动——两条通道对同一个
+  `--database-url` 字符串可能给出不同的「是不是测试库」结论。
 
 **报告第一页只答四件事**(设计 §13,PR-5 T-EX11)。不论哪一条通道,聚合报告的
 **第一页**只回答这四件事:(1)最终候选是哪种模式;(2)完整 Ask 比基线快多少;

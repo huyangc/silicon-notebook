@@ -191,7 +191,9 @@ stopped_by_budget}`——本期 E1/E2 不实施掐停逻辑,`stopped_by_budget` 
 `MANIFEST_KEYS`/`REQUIRED_KEYS_ALL_CHANNELS`/`REQUIRED_MATRIX_KEYS_BY_CHANNEL`
 三个模块常量。三条通道 rig 侧的写点统一为 `manifest.json`(最新,走
 `Runner.write` 覆盖)+ `manifests.jsonl`(历史,追加)——这条规则本期由
-T-EX4/T-EX8 落地(E1/E3),`state-probe`(E2)见 T-EX11b。
+T-EX4/T-EX8 落地(E1/E3),`state-probe`(E2)由 T-EX7 落地——三条通道
+共用同一个 `_write_manifest` 函数(`scripts/reflect_shadow_rig.py`),不留
+第二份实现。
 
 **Q10 · 不改 `docs/operations*.md`**。§12 写的是「必要时更新 operations 配对文档」,而那两份文档里今天一句 reflect / rig 都没有(实测 grep 只命中无关的「前缀」字样),E1/E2/E3 是评测工具而不是生产运维动作。落点全部收敛到 `scripts/README.md`。这是一条**如实收窄**,写进 §4。
 
@@ -376,10 +378,10 @@ max_retries=settings.reasoning_max_retries`;预算过期时预热本身也不打
 trace(后者恒 1 行)。`n_decision_unreadable` 拆成
 `n_decision_absent`/`n_decision_unreadable_action` 两格(修正轮二)。
 `FORBIDDEN_VALUE_FRAGMENTS` 的 id 前缀判据加词首锚,`case_key` 过短码闸,
-override 值非 int/`<1` 一律拒绝。**登记的一处重复**:`prepare_frozen_intent`
-与 rig 的 `_prepare_search_intent` 是同一份逻辑两份实现;收敛办法是
-T-EX7 让 rig 改调前者(`contract=None` 那半留在 rig 侧)——本轮(不含 T-EX7)
-尚未合入,详见 T-EX11b。
+override 值非 int/`<1` 一律拒绝。**登记的一处重复,T-EX7 已收敛**:
+`prepare_frozen_intent` 与 rig 的 `_prepare_search_intent` 曾是同一份逻辑
+两份实现;T-EX7 落地时让 rig 的 `_prepare_search_intent` 改调前者
+(`contract=None` 那半留在 rig 侧),不再各自维护一份。
 
 ### T-EX6 E2 的 12 例 case 集 · **opus** · ~300 行 JSON + ~60 行对账用例
 
@@ -441,10 +443,56 @@ dry-run 打印:逻辑 chat 调用数(216 / 三臂;`--arms` 加 L 则 288;`--limi
 
 **依赖** T-EX5、T-EX6、T-EX1。
 
-**实施记录**:见 T-EX11b。本任务(ex7)已完成实现与两轮评审修正,但**尚未合入
-本轮(T-EX11a 所在)集成分支**;`state-probe` 子命令的行为细节、评审修正要点
-与 `scripts/README.md`/`fangan_todo.md` 对应落点由 T-EX11b 在 ex7 合入后
-一次性补齐。
+**实施记录(2026-09-11,T-EX11b 回填)**:已完成实现与两轮评审修正并合入
+集成分支。与计划字面的取舍点:
+
+* **失败行 `status` 取自 E2 自己的词表**(`PROBE_FAILED_STATUSES=
+  {"cancelled","error"}`,来源是 `app/core/llm.py` 的调用出口),不是 `ab`
+  的 `JOB_STATUSES`——写 `ab` 的 `"failed"` 会让 `summarize_state_probe`
+  一格都数不到它,退出码与摘要各说一套(spec F1)。词表漂移在**导入期**
+  就红(`assert STATE_PROBE_FAILED_ROW_STATUS in PROBE_FAILED_STATUSES`)。
+* **裸 `ValueError`/`TypeError` 与 `StateProbeError` 同等对待,一律停批**
+  (spec F2):这两类同样是「剧本没写对」(键改名、参数形状不对),不是
+  「这次模型调用失败了」——按格隔离继续跑只会让余下两百多格照跑几个小时,
+  产出一批某臂某状态点缺格的不平衡数据。
+* **embedding 上界含首轮种子检索**(spec F3):`run()` 拿到非空
+  `intent_queries` 先跑一轮零模型调用的种子检索,种子数从冻结契约
+  (`prepare_frozen_intent`)确定性算出,这一轮与状态点无关、每格都要重跑,
+  漏计它会在批跑到一半时 embedding 配额耗尽。
+* **补齐 per-call 表 `calls-<arm>.jsonl`**(spec F4):串行,每格窗口按
+  `_rig_call_rows` + 臂标签写;`.local/raw` 补 `forwarded.stats` 与
+  `scripted_turns`。
+* **`prepare_frozen_intent` 重复已收敛**(spec F5):rig 的
+  `_prepare_search_intent` 在 `contract=None` 早退后改调
+  `app.eval.reflect_state_probe.prepare_frozen_intent`,不再各自维护一份
+  逻辑。
+* **`--arms`/`--only-case`/`--limit` 与只读收尾复用既有函数**(spec F6–F8):
+  `_assert_readonly_on_exit` 按 `command="state-probe"` 说库;删掉 rig 侧
+  `matrix.planned_runs` 的死写(由 `state_probe_manifest_facts` 自己算)。
+* **`--concurrency`/`--repeats` 改成 `default=None` 哨兵**(spec/quality
+  合并 F8-5 / P2-2):`main()` 里 `None` 时才填旧默认(1/`ab` 的 3,E2 另有
+  自己的默认 2),显式性靠这个哨兵而不是扫 `sys.argv`——后者会被
+  `--repeat 5` 这种无歧义前缀缩写骗过,用户要 5 会静默拿到默认值。
+* **臂序按重复轮号奇偶交替**(quality P3-5,**取代**计划原文「臂序固定不
+  随机」):固定臂序会把块内的单调漂移(预热、限流退避、连接池升温)整份
+  压在最后一条臂上,交替是确定性的(没有随机、没有种子,`arm_order_seed`
+  仍如实写 `None`),manifest 的 `order` 从真实计划里读出来、带
+  `alt_by_repeat_parity`/`alt_unobserved` 后缀,是对设计 §9.2「随机化」的
+  实现口径收窄,不是它的等价物。
+* **`model_contract` 统一为裸短码**(与 E3/`ab` 同一口径,quality 拍板):
+  `state_probe_manifest_facts` 签名不变(仍接受一个 Mapping 用于计算),
+  rig 写 manifest 前把返回值里的 `model_contract` 覆盖成裸短码。
+* **`_test` 判据按 URL path 段(去扩展名)判库名**(quality P3-6),与 `ab`
+  的 `AB_TEST_DB_SUFFIX.endswith` 分叉——`ab` 刻意不动,分叉登记为已知
+  限制,不是漏洞。
+* **`--env-file` 必须早于 `load_state_probe_case_set()` 生效**
+  (ex7 自己发现并修复):后者要 `from app.core.config import Settings`,
+  而该模块在 import 时就把 `SILICON_NOTEBOOK_ENV_FILE` 读成模块级常量,
+  晚一步会让 `--env-file` 静默失效。
+
+`state-probe` 子命令的完整行为细节(前置断言、默认臂/重复次数、dry-run
+数字、产物、行闭集、失败语义、已知限制)见 `scripts/README.md` 的
+`state-probe` 小节;`fangan_todo.md` (m) 对应条目已回填为已落地状态。
 
 ### T-EX8 E3:整批墙钟预算 + manifest 接进 `ab` · sonnet · ~110 行
 
