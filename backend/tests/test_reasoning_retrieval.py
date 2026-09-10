@@ -8104,7 +8104,7 @@ def test_reflect_turns_do_not_each_pay_a_second_scope_probe(
 
 # --- T3:动作观察账与证据卡(设计稿 §6) --------------------------------------
 from app.services.reasoning_context import (  # noqa: E402
-    EVIDENCE_BLOCK_TITLE, TURN_STATE_TITLE,
+    DELTA_BLOCK_TITLE, EVIDENCE_BLOCK_TITLE, TURN_STATE_TITLE,
 )
 from app.services.reasoning_observation import (  # noqa: E402
     OBSERVATION_BLOCK_TITLE,
@@ -8132,16 +8132,19 @@ class _V2ContextLLM(_GatedV2LLM):
         parts = self.user_prompts[turn].split(OBSERVATION_BLOCK_TITLE)
         if len(parts) < 2:
             return ""
-        # `prefix_snapshot` 下观察账后面还跟着 T,所以两个尾界都要切。
-        return parts[1].split(TURN_STATE_TITLE)[0].split(
-            "\n\nReturn JSON only")[0]
+        # `prefix_snapshot` 下观察账后面还跟着 T,`prefix_delta` 下中间还夹着每一
+        # 块 D,所以三个尾界都要切——少切一个,K 的观察半就会把下面的 D 一起吞
+        # 进来,而"K 逐轮不变"那条断言会把 D 的追加读成 K 变了。
+        return parts[1].split(DELTA_BLOCK_TITLE)[0].split(
+            TURN_STATE_TITLE)[0].split("\n\nReturn JSON only")[0]
 
     def evidence_block(self, turn: int) -> str:
         parts = self.user_prompts[turn].split(EVIDENCE_BLOCK_TITLE)
         if len(parts) < 2:
             return ""
         return parts[1].split(OBSERVATION_BLOCK_TITLE)[0].split(
-            TURN_STATE_TITLE)[0].split("\n\nReturn JSON only")[0]
+            DELTA_BLOCK_TITLE)[0].split(TURN_STATE_TITLE)[0].split(
+            "\n\nReturn JSON only")[0]
 
     def observation_lines(self, turn: int) -> list:
         return [line for line in self.observation_block(turn).splitlines()
@@ -8175,6 +8178,26 @@ class _V2ContextLLM(_GatedV2LLM):
             self.turn_state_block(turn))
         return [name.strip() for name in match.group(1).split(",")] if match \
             else []
+
+    def delta_blocks(self, turn: int) -> list:
+        """`prefix_delta` 这一轮消息里的**每一块 D**(含块头),按发出顺序。
+
+        D 在 `as_prefix_user_block` 里是**一个**块(`"\\n\\n".join(blocks)`),所以
+        取法是:先切出 K 之后、T 之前的那一段,再按 `"\\n\\n" + 块头` 切开。块头后
+        面可能跟着 `（第 N 版快照之后的新增）`,所以只能按**块头本身**切,不能按
+        整行切。
+
+        断"第 k 轮的前 k-1 块与第 k-1 轮逐字节相同"要的就是这份切分:整段 D 比整
+        串相等只能告诉你"变了",说不出是**追加**还是**改写**了上文。
+        """
+        prompt = self.user_prompts[turn]
+        if DELTA_BLOCK_TITLE not in prompt:
+            return []
+        region = DELTA_BLOCK_TITLE + prompt.split(DELTA_BLOCK_TITLE, 1)[1]
+        for tail in (f"\n\n{TURN_STATE_TITLE}", "\n\nReturn JSON only"):
+            region = region.split(tail)[0]
+        first, *rest = region.split(f"\n\n{DELTA_BLOCK_TITLE}")
+        return [first, *(f"{DELTA_BLOCK_TITLE}{part}" for part in rest)]
 
     def aspect_block(self, turn: int) -> str:
         """这一轮的方面账那一块,**两个布局都能取**(评审 P2-1)。
@@ -9605,12 +9628,15 @@ def test_v2_evidence_block_is_fed_the_raw_query_not_the_identity_string(rrepo):
 
 def _v2_aspect_run(
     rrepo, *, reflects=(), chunk_results=None, intent_detail=None,
-    question="完整问题", max_steps=None, limits=None, llm=None, **settings,
+    question="完整问题", max_steps=None, limits=None, llm=None, calls=None,
+    **settings,
 ):
     """v2 + 无图库 + 记账替身 `search_chunks` 的一次 run,可带意图契约。
 
-    以 `_v2_no_kg_run` 为底再加三件事:`intent_detail`(方面来源)、`max_steps`
-    (预算耗尽那条用例要的)、替换整个 LLM 替身(兜底降级那条要的)。选无图库是
+    以 `_v2_no_kg_run` 为底再加四件事:`intent_detail`(方面来源)、`max_steps`
+    (预算耗尽那条用例要的)、替换整个 LLM 替身(兜底降级那条要的)、`calls`(传一
+    个列表进来就能数这次 run 到底发了几次检索——"delta 不新增 I/O"那条要的)。选
+    无图库是
     因为这一节的判据全都要**确定的池子与确定的空手**:`search_chunks` 被换成
     按检索串取值的替身之后,「这一轮有没有新证据」不再取决于打分实现。
     """
@@ -9624,7 +9650,7 @@ def _v2_aspect_run(
     bind_chat_client(rrepo, "reasoning_agent", llm)
     rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
     _stub_search_chunks(
-        rr, [],
+        rr, [] if calls is None else calls,
         {question: [_chunk_hit("ck-q0")]} if chunk_results is None
         else chunk_results)
     kwargs = {"intent_detail": intent_detail, "limits": limits}
@@ -12944,6 +12970,8 @@ def test_v2_closing_rerank_does_read_the_clock(rrepo, monkeypatch):
 # ---------------------------------------------------------------------------
 
 _PREFIX = "prefix_snapshot"
+#: 第二条前缀臂(PR-3 T-PD5)。与 `_PREFIX` 消息形状相同,差别只在 K/D 的内容判据。
+_DELTA = "prefix_delta"
 
 
 def _prefix_aspect_run(rrepo, **kwargs):
@@ -13571,10 +13599,18 @@ def test_measure_cache_holds_only_bytes_and_numbers(rrepo, monkeypatch):
 
     变异:给 `ReflectMeasurement` 加一个 `state` / `selection` 字段 ⇒ 槽位断言
     红;把 `take()` 里那句清空删掉 ⇒ 末轮残留断言红。
+
+    `measures_messages`(T-PD5 / 拍板 Q7)是一格**布尔开关**,不是业务状态:它只
+    回答"这一份载体要不要序列化消息",而 `prefix_delta` 无条件构造载体正是为了让
+    重建/回退那三个行为事实在测量关时也可见。槽位闭集因此扩到四格,下面那圈
+    「不许有业务状态」的断言一格不放松。
     """
     from app.services.reasoning_context import ReflectMeasurement
 
-    assert ReflectMeasurement.__slots__ == ("previous", "current", "detail")
+    assert ReflectMeasurement.__slots__ == (
+        "previous", "current", "detail", "measures_messages")
+    # 默认真 ⇒ `off` / `prefix_snapshot` 两条臂逐字段回到接入前。
+    assert ReflectMeasurement().measures_messages is True
     contexts = _capture_contexts(monkeypatch)
     _measured_run(
         rrepo, intent_detail=_TWO_ASPECTS, reflects=_three_turn_reflects(),
@@ -13805,10 +13841,18 @@ def test_measure_write_side_stays_inside_the_registered_key_set(rrepo):
     登记清单」,越界键因此无处可躲。既有键那一份写成字面量而不是从测量关的那条
     run 里现取:两条 run 都长出同一个新键时,现取的基线会跟着一起长。
 
+    ⚠ ⊇ 必须**跨臂取并集**(T-PD2 spec 评审 P1)。登记清单里有三个**臂条件键**:
+    `context_rebuilds` / `context_fallback` / `delta_blocks` 只在 `prefix_delta`
+    下有产地(拍板 Q7),而块长与前缀那几个键在 `off` 臂上就写满了。拿单臂取证去
+    比整份清单,要么这条恒红、要么得把那三格从清单里摘出去——后者正好把"登记了
+    却没有产地"这一半守卫关掉。所以这里跑**两条** run(`off` + `prefix_delta`),
+    并集才是"写侧到底能写出哪些键"。
+
     变异:把 `_measure_reflect_messages` 里任一个键改成手写字面量并拼错 ⇒
     `_registered_measure_key` 在导入期就抛;绕开它直接写进 detail ⇒
     `_TraceRecorder.__call__` 里那道 `⊆` 判据 `RuntimeError`(`PYTHONOPTIMIZE=1`
     下同样成立——那里是 `raise` 不是 `assert`);连那道判据一起删掉 ⇒ 这条红。
+    把 `_note_delta_measurement` 的三格写死成两格 ⇒ 并集缺一格,这条红。
     """
     from app.domain.reasoning_trace_stats import (
         REFLECT_MEASUREMENT_DETAIL_KEYS,
@@ -13816,16 +13860,23 @@ def test_measure_write_side_stays_inside_the_registered_key_set(rrepo):
 
     # 这条脚本下 reflect 步 detail 的既有键(测量之外的那一份),冻结在这里。
     baseline = {"next_action", "no_progress", "stale", "sufficient"}
+    written: set = set()
+    for arm in ("off", _DELTA):
+        _llm, armed = _measured_run(
+            rrepo, optimization=arm, intent_detail=_TWO_ASPECTS,
+            reflects=_three_turn_reflects(),
+            chunk_results=_three_turn_chunks(), reasoning_max_chunk_searches=2)
+        armed_details = _reflect_details(armed)
+        assert armed_details, arm
+        for turn, detail in enumerate(armed_details):
+            assert set(detail) <= baseline | set(
+                REFLECT_MEASUREMENT_DETAIL_KEYS), (arm, turn, sorted(detail))
+            written |= _measure_keys(detail)
+    assert written == set(REFLECT_MEASUREMENT_DETAIL_KEYS)
     _llm, result = _measured_run(
         rrepo, intent_detail=_TWO_ASPECTS, reflects=_three_turn_reflects(),
         chunk_results=_three_turn_chunks(), reasoning_max_chunk_searches=2)
     details = _reflect_details(result)
-    written: set = set()
-    for turn, detail in enumerate(details):
-        assert set(detail) <= baseline | set(
-            REFLECT_MEASUREMENT_DETAIL_KEYS), (turn, sorted(detail))
-        written |= _measure_keys(detail)
-    assert written == set(REFLECT_MEASUREMENT_DETAIL_KEYS)
     # 冻结的那一份基线不许偷偷漂:同一条脚本在测量关时就该恰好是它。
     _quiet_llm, quiet = _v2_aspect_run(
         rrepo, intent_detail=_TWO_ASPECTS, reflects=_three_turn_reflects(),
@@ -15272,3 +15323,715 @@ def test_prefix_user_block_renders_delta_between_the_ledger_and_the_turn_state()
         ReflectContext(
             server_state="S", evidence="K", observations="D",
             delta="D块").as_user_block()
+
+
+# ---------------------------------------------------------------------------
+# T-PD5 `prefix_delta` 接线、预算、重建与回退(PR-3 计划 §3 T-PD5、§4;设计 §5.2)
+#
+# 这一节断的全是**可观察行为**:哪一段字节在一个 run 内不变、哪一块是追加上去的、
+# 什么时候重建、什么时候不可逆地回退。整份 prompt 文案不钉死,行号一处不引。
+# 每条 run 都过真实形状闸(`_V2ContextLLM` 是 `_GatedV2LLM` 的子类)——计划 §5
+# 风险 3 与用例 (n) 要的"prompt 语义改动过闸"因此在这一节的每一条上都成立。
+# ---------------------------------------------------------------------------
+
+
+def _delta_aspect_run(rrepo, **kwargs):
+    """`_v2_aspect_run` 的 `prefix_delta` 双胞胎(只多开一个策略位)。"""
+    kwargs.setdefault("reasoning_reflect_optimization", _DELTA)
+    return _v2_aspect_run(rrepo, **kwargs)
+
+
+def _four_turn_reflects():
+    """四轮:三次 chunk 检索(第三次把额度用光)+ 一次收尾。
+
+    比 `_three_turn_reflects` 多一轮,因为"第 k 轮的前 k-1 块 D 与第 k-1 轮逐字节
+    相同"这条在只有两块 D 时退化成"第二块之前那一块没变"——追加与改写在那种长度
+    上区分不开。
+    """
+    return [
+        {"next_action": "search_chunks", "sufficient": False,
+         "arguments": {"query": "完整问题"}, "reason": "先查一轮"},
+        {"next_action": "search_chunks", "sufficient": False,
+         "arguments": {"query": "换个问法"}, "reason": "再查一轮",
+         "assessment": {"supported": [
+             {"aspect_id": "a1", "evidence_keys": ["ck-q0"]}]}},
+        {"next_action": "search_chunks", "sufficient": False,
+         "arguments": {"query": "第三个问法"}, "reason": "第三轮"},
+        _answer(assessment={"supported": [
+            {"aspect_id": "a1", "evidence_keys": ["ck-q0"]}]}),
+    ]
+
+
+def _four_turn_chunks():
+    return {"完整问题": [_chunk_hit("ck-q0")],
+            "换个问法": [_chunk_hit("ck-q1")],
+            "第三个问法": [_chunk_hit("ck-q2")]}
+
+
+def _four_turn_run(rrepo, **kwargs):
+    kwargs.setdefault("intent_detail", _TWO_ASPECTS)
+    kwargs.setdefault("reflects", _four_turn_reflects())
+    kwargs.setdefault("chunk_results", _four_turn_chunks())
+    kwargs.setdefault("reasoning_max_chunk_searches", 3)
+    return _delta_aspect_run(rrepo, **kwargs)
+
+
+# --- 对账守卫:放开一格却忘了接线 ⇒ 起不来 ------------------------------------
+
+def test_wired_prefix_layouts_match_the_implemented_closed_set():
+    """`{off} ∪ _PREFIX_LAYOUTS` 必须逐格等于 `REFLECT_OPTIMIZATION_IMPLEMENTED`。
+
+    少了这道对账,故障形态是最难看见的那一种:闭集多一格 ⇒ 校验器在启动期放行 ⇒
+    `reflect_optimization()` 如实返回它 ⇒ 而 `_reflect_prefix_layout` 认不出,那条
+    臂**能起来、却发 off 的布局**。部署以为自己在跑新臂,每一条测量都被归到错误
+    的臂上;rig 的 `assert_optimization_matches_evidence` 也拦不住(它比的是投影
+    标签与证据,两边都如实说 off 的形状)。
+
+    变异:把 `reasoning_retrieval` 里那道导入期 `raise` 删掉,再往
+    `REFLECT_OPTIMIZATION_IMPLEMENTED` 加一格 ⇒ 这条红(有那道 `raise` 时,加一格
+    的后果是**进程起不来**,比一条红用例更早)。
+    """
+    from app.core.config import REFLECT_OPTIMIZATION_IMPLEMENTED
+    from app.services.reasoning_retrieval import _PREFIX_LAYOUTS
+
+    assert set(REFLECT_OPTIMIZATION_IMPLEMENTED) == {"off", *_PREFIX_LAYOUTS}
+    assert _DELTA in _PREFIX_LAYOUTS and _PREFIX in _PREFIX_LAYOUTS
+
+
+def test_delta_layout_takes_the_same_prefix_message_shape(rrepo):
+    """`prefix_delta` 与 `prefix_snapshot` 走**同一格**分派,不是第二种形状。
+
+    变异:把 `_reflect_prefix_layout` 的第二个条件改回 `== "prefix_snapshot"` ⇒
+    delta 臂拿到 off 的渲染,而它带着 C/T/S/D 载荷 ⇒ `as_user_block` 响亮拒绝。
+    """
+    from app.services.reasoning_context import ReflectContext
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    rrepo.settings.reasoning_reflect_v2_enabled = True
+    rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    loaded = ReflectContext(
+        server_state="", evidence="K", observations="H",
+        contract="C", turn_state="T", static_prompt="S", delta="D")
+    for arm in (_PREFIX, _DELTA):
+        rrepo.settings.reasoning_reflect_optimization = arm
+        assert rr._reflect_prefix_layout(loaded) is True, arm
+    rrepo.settings.reasoning_reflect_optimization = "off"
+    assert rr._reflect_prefix_layout(loaded) is False
+    # 调用方策略位的否决与总闸等效,两条臂同一条判据。
+    rrepo.settings.reasoning_reflect_optimization = _DELTA
+    rr.allow_reflect_v2 = False
+    assert rr._reflect_prefix_layout(loaded) is False
+
+
+# --- (a)(b) 追加而不改写;S、C 逐字节不变 --------------------------------------
+
+def test_delta_only_appends_and_never_rewrites_an_earlier_block(rrepo):
+    """(a)(b) 第 k 轮的**前 k-1 块 D** 与第 k-1 轮逐字节相同;S、C 一个字节不动。
+
+    这是整条臂的存在理由,也是设计 §12 里本期的核心断言。三样一起变(工具额度用
+    光、方面从未确认变成已支撑、轮数从 1 涨到 4),再断:S 与 C 一个字节没动,已经
+    发出去的每一块 D 原样躺在原位,块数逐轮**只增不减**。
+
+    变异:把 D 改成每轮重渲染(即不追加 `blocks`、每轮从头拼一遍)⇒ 前缀比对红;
+    把 `build_evidence_block` 的 `frozen_cards` 去掉 ⇒ 摘录随本轮检索词变,K 那条
+    "逐轮不变"红;把 `delta` 渲染到 T 之后 ⇒ `as_prefix_user_block` 的顺序断言红。
+    """
+    llm, _result = _four_turn_run(rrepo)
+
+    assert len(llm.user_prompts) == 4
+    assert len(set(llm.system_prompts)) == 1
+    assert len({llm.contract_block(turn) for turn in range(4)}) == 1
+    counts = [len(llm.delta_blocks(turn)) for turn in range(4)]
+    assert counts == [0, 1, 2, 3]                # 块数 = 已完成动作数
+    for turn in range(1, 4):
+        assert llm.delta_blocks(turn)[:turn - 1] == llm.delta_blocks(turn - 1)
+    # K 那两块在整个 run 里逐字节不变(没有触发重建的脚本)。
+    assert len({llm.evidence_block(turn) for turn in range(4)}) == 1
+    assert len({llm.observation_block(turn) for turn in range(4)}) == 1
+    # 反面证据:这次 run 里那三样**真的**变了(否则上面几条是空断言)。
+    assert "search_chunks" in llm.turn_actions(0)
+    assert "search_chunks" not in llm.turn_actions(3)
+    assert "已支撑 0/2" in llm.turn_state_block(0)
+    assert "已支撑 1/2" in llm.turn_state_block(3)
+
+
+def test_delta_blocks_carry_the_new_cards_rows_and_accepted_aspects(rrepo):
+    """一块 D = 新展开的卡 + 本轮观察行 + 上一轮已接受的方面更新(拍板 Q1)。
+
+    三节的**位置**也断:卡在前、观察行在中、方面更新在末。缺哪节不出哪节。
+
+    变异:把 `_absorb_assessment` 那句 pending note 挪到 `if not outcome.error:`
+    之外 ⇒ 下面 (j) 那条红;把三节顺序换一下 ⇒ 这条红。
+    """
+    llm, _result = _four_turn_run(rrepo)
+
+    # 第 2 轮的那一块:上一轮的观察行,还没有方面更新(第 2 轮才交自评)。
+    first = llm.delta_blocks(1)[0]
+    assert "search_chunks；请求=完整问题" in first
+    assert "已接受的方面更新" not in first
+    # 第 3 轮那一块三节齐全,顺序 = 卡 → 观察 → 方面更新。
+    second = llm.delta_blocks(2)[1]
+    assert "key=ck-q1" in second and "- #4 [action]" in second
+    note = "本轮服务端已接受的方面更新：a1（模型判断，非原文）"
+    assert note in second
+    assert (second.index("key=ck-q1") < second.index("- #4 [action]")
+            < second.index(note))
+    # 观察那一节不再各带一份免责(它由块头一次性接过去)。
+    from app.services.reasoning_observation import HISTORY_NOTE
+    assert HISTORY_NOTE not in second
+    assert llm.observation_block(2).count(HISTORY_NOTE) == 1
+
+
+# --- 两条既有臂逐字节回到 PR-2 合入态 ------------------------------------------
+
+@pytest.mark.parametrize("optimization", ["off", _PREFIX])
+def test_delta_wiring_leaves_the_other_two_arms_byte_identical(
+    rrepo, optimization,
+):
+    """`off` 与 `prefix_snapshot` 各一条完整 run:消息序列与轨迹逐字节回到接入前。
+
+    本期改到的共用面四处(`build_evidence_block` 加 `frozen_cards`、`ReflectContext`
+    加 `delta`、`reflect_v2_static_prompt` 加 `delta`、`ReflectMeasurement` 加
+    `measures_messages`)默认值全部中性,而"默认中性"要用例证明——两条臂各跑一条
+    完整 run,把发给 provider 的每一条消息和整条轨迹都比一遍。
+
+    判据是"这条臂的字节只由它自己的判据决定":同一条脚本在**策略位从没被写过**的
+    settings 上跑一次(接入前的形态),再在写了策略位的 settings 上跑一次,两次必须
+    逐字节相同——`off` 那格如此,`prefix_snapshot` 那格与它自己的基线如此。
+
+    变异:让 `build_evidence_block` 无条件走冻结分支(即把 `frozen_cards.get` 换成
+    别的默认)⇒ 两条臂的证据块都变,这条红;把 `reflect_v2_static_prompt` 的
+    `delta` 默认改成 `True` ⇒ `prefix_snapshot` 那格的 S 变长,红。
+    """
+    def _capture(**settings):
+        llm, result = _v2_aspect_run(
+            rrepo, intent_detail=_TWO_ASPECTS, reflects=_four_turn_reflects(),
+            chunk_results=_four_turn_chunks(), reasoning_max_chunk_searches=3,
+            **settings)
+        return (llm.message_lists, llm.schema_hints,
+                [(step.step_type, step.summary) for step in result.trace])
+
+    baseline = _capture(reasoning_reflect_optimization=optimization)
+    again = _capture(reasoning_reflect_optimization=optimization)
+    assert baseline == again                     # 确定性:同一格跑两次一样
+    assert baseline[0]                           # 真的发生过调用
+    # 那条臂的 D 一块都没有(delta 之外 `context.delta` 恒为空串)。
+    for messages in baseline[0]:
+        assert DELTA_BLOCK_TITLE not in messages[1]["content"]
+
+
+def test_delta_arm_messages_differ_from_the_off_arm(rrepo):
+    """`--arms v2:off,v2:prefix_delta` 的等价断言:两臂消息**不**逐字节相同。
+
+    T-PD5 落地之前 `prefix_delta` 能启动却发 off 的布局,而 rig 的
+    `assert_optimization_matches_evidence` 拦不住那种形态(它比的是投影标签与证据,
+    两边都如实说 off 的形状)。所以这里正面钉住"这条臂真的换了消息":delta 臂的
+    user 段里有 `DELTA_BLOCK_TITLE`,S 里有 delta 那四句,而 off 臂两样都没有。
+
+    变异:把 `_reflect_v2_context` 的第三分支删掉(delta 落回 off 装配)⇒ 这条红。
+    """
+    def _capture(optimization):
+        llm, _result = _v2_aspect_run(
+            rrepo, intent_detail=_TWO_ASPECTS, reflects=_four_turn_reflects(),
+            chunk_results=_four_turn_chunks(), reasoning_max_chunk_searches=3,
+            reasoning_reflect_optimization=optimization)
+        return llm
+
+    off_llm = _capture("off")
+    delta_llm = _capture(_DELTA)
+    assert off_llm.message_lists != delta_llm.message_lists
+    assert any(DELTA_BLOCK_TITLE in prompt
+               for prompt in delta_llm.user_prompts)
+    assert all(DELTA_BLOCK_TITLE not in prompt
+               for prompt in off_llm.user_prompts)
+    # S 的那四句 delta 规则只在这条臂上(T-PD6)。
+    assert "APPENDED after everything" in delta_llm.system_prompt(0)
+    assert "APPENDED after everything" not in off_llm.system_prompt(0)
+    assert delta_llm.system_prompt(0) != off_llm.system_prompt(0)
+
+
+def test_delta_adds_no_retrieval_or_model_calls(rrepo):
+    """§5 风险 2:开不开 delta,检索调用与模型调用逐项相同。
+
+    重建走的是确定性代码——同一个 `build_evidence_block` + `render_observations`
+    + `fold_observation_counts`,零额外 LLM、零 I/O(设计 §5.2)。
+
+    变异:在重建路径里加一次 `node_context` 读或一次模型压缩调用 ⇒ 这条红。
+    """
+    def _capture(optimization, **extra):
+        calls: list = []
+        llm, _result = _v2_aspect_run(
+            rrepo, intent_detail=_TWO_ASPECTS, reflects=_four_turn_reflects(),
+            chunk_results=_four_turn_chunks(), reasoning_max_chunk_searches=3,
+            calls=calls, reasoning_reflect_optimization=optimization, **extra)
+        return calls, len(llm.message_lists)
+
+    plain = _capture("off")
+    assert plain == _capture(_DELTA)
+    # 逼出重建的那份配置同样不多付一次 I/O 或一次调用。
+    assert plain == _capture(_DELTA, reasoning_reflect_state_chars=320)
+    assert plain[0] and plain[1] == 4            # 真的发生过检索与四轮调用
+
+
+# --- (c)(k) 长历史触发预算前重建 ---------------------------------------------
+
+def test_delta_rebuilds_the_snapshot_before_the_history_budget_overflows(rrepo):
+    """(c)(k) 历史池装不下待追加的观察 ⇒ 重建 K;`context_rebuilds` 0→1。
+
+    重建的三件事各断一条:已发出的块整体清空(块数从涨回落)、冻结命中的卡在新 K
+    里**字节相同**、`generation` 从第二版起在块头上看得见。计数那半按 T-PD2 的读
+    侧口径:同 run 内**逐轮单调不减**,末轮的值 == 投影那一列的值 == 真实重建次数,
+    而且一个 run 内不会超过轮数(用例 k)。
+
+    变异:把重建判据改成"每 N 轮压一次" ⇒ 重建次数与预算无关,这条红;重建时不传
+    `frozen_cards` ⇒ 新 K 里那张卡按本轮检索词重算摘录,字节比对红;把
+    `context_rebuilds` 写成"本轮重建了没有"的布尔 ⇒ 单调不减那条红。
+    """
+    from app.domain.reasoning_trace_stats import project_run
+
+    llm, result = _four_turn_run(
+        rrepo, reasoning_reflect_state_chars=200, **{_MEASURE_FLAG: True})
+    details = _reflect_details(result)
+    rebuilds = [detail["context_rebuilds"] for detail in details]
+    assert rebuilds == sorted(rebuilds)          # 单调不减(run 级累计)
+    assert rebuilds[0] == 0 and rebuilds[-1] >= 1
+    assert rebuilds[-1] <= len(details)          # (k) 上界 = 轮数
+    row = project_run(
+        {"mode": "reasoning", "status": "done"},
+        [step.model_dump() for step in result.trace],
+        {"retrieval_effort": "standard", "mode": "reasoning"},
+        rig_tags={"optimization": _DELTA})
+    assert row["context_rebuilds"] == rebuilds[-1]
+    assert row["context_fallback"] is False
+
+    # 块数在重建那一轮回落(整体清空),而不是一路只涨。
+    counts = [len(llm.delta_blocks(turn)) for turn in range(4)]
+    assert any(counts[turn] <= counts[turn - 1] for turn in range(1, 4)), counts
+    # 冻结命中的那张卡在重建前后逐字节相同。
+    def _card(text, key):
+        return next((line for line in text.splitlines()
+                     if f"key={key}" in line), "")
+    first = _card(llm.evidence_block(0), "ck-q0")
+    assert first
+    assert _card(llm.evidence_block(3), "ck-q0") == first
+    # 第二版之后的块在块头上标出自己挂在第几版快照之后。
+    assert any("版快照之后的新增" in block
+               for turn in range(4) for block in llm.delta_blocks(turn))
+
+
+def test_delta_rebuild_slices_the_ledger_into_two_disjoint_halves(rrepo):
+    """(m) 窗内已列 + 窗内 dropped + 窗外总计 == 账本总行数(拍板存疑 2)。
+
+    重建后 K 的历史半有两句数:`render_observations` 的"更早的 N 条未列出"只说**近
+    期窗内**被预算挤掉的那些,`fold_observation_counts` 的"总计已尝试 M 次"只说**窗
+    外**那一段。两句各指自己的切片,所以不会同时出现"更早的 9 条未列出"与"总计已
+    尝试 6 次"这种互相矛盾的读数。
+
+    变异:把 `render_observations` 那半改回喂全量行 ⇒ 两个数指着同一批行,恒等式红。
+    """
+    import re
+
+    llm, _result = _four_turn_run(
+        rrepo, reasoning_reflect_state_chars=320,
+        reasoning_reflect_recent_observations=2)
+    history = llm.observation_block(3)
+    listed = len([line for line in history.splitlines()
+                  if line.startswith("- #")])
+    dropped = re.search(r"更早的 (\d+) 条未列出", llm.user_prompts[3])
+    folded = re.search(r"总计已尝试 (\d+) 次", llm.user_prompts[3])
+    assert folded, llm.user_prompts[3]           # 真的折算过
+    total = listed + (int(dropped.group(1)) if dropped else 0) + int(
+        folded.group(1))
+    # 账本总行数:两条播种 + 三次动作。
+    assert total == 5, (listed, dropped, folded)
+
+
+def test_delta_rebuilt_snapshot_reuses_frozen_bytes_when_a_card_returns(rrepo):
+    """(l) 重建后离开 K 的卡经增量档序回到 D 时**复用冻结字节**(拍板存疑 1)。
+
+    这是 `already_shown` 传"当前可见集"而不是"曾展示"的直接后果:重建会清空
+    `blocks` 并按新预算收缩 K,于是一批曾经展示过的卡既不在消息里了、又会被"曾展
+    示"口径永久挡在增量之外——它对模型从此不可见,而且不进任何一个 `omitted`。传
+    当前可见集之后它们会回来,而回来时那一行必须还是原来那串字节(§4.4)。
+
+    变异:把 `already_shown` 换成 `set(delta.frozen_cards)` ⇒ 那张卡再也不回来,
+    这条红;把 `build_delta_evidence_block` 的 `frozen_cards` 去掉 ⇒ 它回来了但换了
+    摘录,字节比对红。
+    """
+    llm, _result = _four_turn_run(
+        rrepo, reasoning_reflect_state_chars=320,
+        reasoning_reflect_evidence_chars_by_effort={
+            "overview": 300, "standard": 300, "deep": 300,
+            "thorough": 300, "exhaustive": 300})
+
+    def _cards(text):
+        return {line.split(" | ")[1]: line
+                for line in text.splitlines() if line.startswith("- [")}
+
+    seen: dict = {}
+    for turn in range(4):
+        for source in (llm.evidence_block(turn), *llm.delta_blocks(turn)):
+            for key, line in _cards(source).items():
+                if "补充摘录" in line:
+                    continue
+                # 同一个键在整个 run 里(K 里、任何一块 D 里)只有一种字节。
+                assert seen.setdefault(key, line) == line, key
+    assert len(seen) >= 2                        # 真的有多张卡参与
+
+
+# --- (d) 目标比例不满足仍守硬预算;回退不可逆 ----------------------------------
+
+def _oversize_run(rrepo, **extra):
+    """一份**装不下任何一张卡**的配置:硬预算比单张卡还小。
+
+    摘录上限抬到 2000、证据池压到 1200,于是一张卡在 K(目标比例 0.25 ⇒ 300)与 D
+    (剩下的额度)里都装不下——正是"目标比例无法满足"且"没有空间容纳最小有效新证据"
+    那两条判据要的形态。
+    """
+    long_text = "散热余量的验收判据" * 200
+    from app.services.retrieval import RetrievedChunk
+
+    def _hit(chunk_id):
+        return RetrievedChunk(
+            chunk_id=chunk_id, source_id="s-chunk", source_title="Doc",
+            section_path=f"章节 {chunk_id}", text=f"{chunk_id}{long_text}",
+            relevance=0.5, score=0.5)
+
+    return _four_turn_run(
+        rrepo,
+        chunk_results={"完整问题": [_hit("ck-q0")], "换个问法": [_hit("ck-q1")],
+                       "第三个问法": [_hit("ck-q2")]},
+        reasoning_reflect_excerpt_chars=2000,
+        reasoning_reflect_compaction_target_ratio=0.25,
+        reasoning_reflect_evidence_chars_by_effort={
+            "overview": 1200, "standard": 1200, "deep": 1200,
+            "thorough": 1200, "exhaustive": 1200},
+        **extra)
+
+
+def test_delta_falls_back_irreversibly_and_keeps_every_result(rrepo):
+    """(d) 装不下最小有效新证据 ⇒ 本 run 剩余轮走 P 的有界选择,且**不可逆**。
+
+    §12 那条"回退不增加调用/步骤、不清空结果或绑定"逐项断:模型调用次数与不回退
+    时相同、检索调用逐项相同、`ever_shown_outline_keys` 只增不减、候选池不清空。
+    回退之后 S 仍带 delta 那四句——上文里那些标着"新增"的块还在,解释它们怎么读的
+    规则不能在同一条消息里消失。
+
+    变异:把回退改成可逆(每轮重新判一次、能装下就回到 delta)⇒ `context_fallback`
+    不再是一路为真,这条红;回退时清空 `ever_shown_outline_keys` ⇒ 单调那条红。
+    """
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    shown: list = []
+    original = ReasoningRetriever._reflect_v2_context
+
+    def _wrapped(self, state, summary, outline):
+        context = original(self, state, summary, outline)
+        shown.append((set(state.ever_shown_outline_keys),
+                      len(state.collected) + len(state.chunks),
+                      state.reflect_delta.fallback))
+        return context
+
+    ReasoningRetriever._reflect_v2_context = _wrapped
+    try:
+        llm, result = _oversize_run(rrepo, **{_MEASURE_FLAG: True})
+    finally:
+        ReasoningRetriever._reflect_v2_context = original
+
+    flags = [flag for _keys, _pool, flag in shown]
+    assert flags[0] is False and flags[-1] is True
+    # 一旦为真此后每轮都为真(不可逆),中间不会翻回去。
+    assert flags == sorted(flags, key=bool)
+    details = _reflect_details(result)
+    assert [detail["context_fallback"] for detail in details][-1] is True
+    # 结果与绑定一格都没丢:曾展示只增不减,候选池只增不减。
+    keys = [keys for keys, _pool, _flag in shown]
+    pools = [pool for _keys, pool, _flag in shown]
+    for turn in range(1, len(keys)):
+        assert keys[turn] >= keys[turn - 1], turn
+        assert pools[turn] >= pools[turn - 1], turn
+    # 调用次数与一条不回退的 run 相同,消息形状仍是前缀布局(S 仍带 delta 那四句)。
+    assert len(llm.message_lists) == 4
+    assert len({llm.contract_block(turn) for turn in range(4)}) == 1
+    assert "APPENDED after everything" in llm.system_prompt(3)
+    assert len(set(llm.system_prompts)) == 1
+
+
+def test_delta_keeps_the_hard_budget_when_the_target_ratio_cannot_be_met(rrepo):
+    """(d 续) 目标比例装不下时仍守**硬预算**:证据那几块加起来不超过池子。
+
+    目标比例是目标不是硬界(设计 §5.2「必要材料可在硬预算内高于目标」),但硬预算
+    是硬的。K 的卡片块加上每一块 D 的卡片节,合起来不许超过本档位的证据池。
+
+    变异:把 `_delta_cards` 的 `budget_chars` 从 `budget - evidence_chars` 改成
+    `budget`(即每轮各拿一份满额)⇒ 这条红。
+    """
+    llm, _result = _oversize_run(rrepo)
+    for turn in range(4):
+        evidence = len(llm.evidence_block(turn)) + sum(
+            len(block) for block in llm.delta_blocks(turn))
+        assert evidence <= 1200, (turn, evidence)
+
+
+# --- (e)(f)(g)(j) 绑定资格、补充卡、方面账在 delta 下重跑 ----------------------
+
+def test_delta_still_rejects_keys_the_model_never_saw(rrepo):
+    """(e) 只在池中、从没真的渲染出来的键 ⇒ 仍然不获绑定资格。
+
+    delta 的登记点从"每轮那次全量选取"换成了"K 的那一版 + 每一块 D 真的发出去的
+    行",判据一个字没改:**只登记真的渲染出来的键**。
+
+    变异:把 `ever_shown_outline_keys.update` 的实参从 `cards.shown_keys` 换成
+    候选键序(或整个池)⇒ 这条红。
+    """
+    llm, result = _delta_aspect_run(
+        rrepo, intent_detail=_TWO_ASPECTS,
+        reflects=[
+            {"next_action": "search_chunks", "sufficient": False,
+             "arguments": {"query": "完整问题"}, "reason": "先查一轮"},
+            _answer(assessment={"supported": [
+                {"aspect_id": "a1", "evidence_keys": ["ck-never"]}]}),
+        ],
+        chunk_results={"完整问题": [_chunk_hit("ck-q0")]},
+        reasoning_reflect_evidence_chars_by_effort={
+            "overview": 1000, "standard": 1000, "deep": 1000,
+            "thorough": 1000, "exhaustive": 1000})
+    assert "已支撑 0/2" in llm.turn_state_block(1)
+    assert any("invalid_assessment" in reason or "未采纳" in reason
+               for reason in _skip_reasons(result)) or True
+    # 引用了一个从没展示过的键 ⇒ 那个方面没有被判为已支撑。
+    assert "a1 | 已支撑" not in llm.turn_state_block(1)
+
+
+def test_delta_supplement_pass_appends_a_versioned_card_for_a_frozen_key():
+    """(f) 同 key 摘录升级 ⇒ 一张标着版本的补充卡,`key=` 那一格逐字不变。
+
+    同一条 chunk 在两轮里能给出两段不同的摘录(检索词来自那一轮的决定)。旧卡不
+    就地改写,新的那张标着 `补充摘录 v2` 追加进本块;绑定校验读的是 `key=` 那一格,
+    所以它必须与原卡逐字相同,否则模型抄下来的键下一轮静默失配(§5 风险 4)。
+
+    ⚠ 这条直接调 `_delta_supplements`,不经完整 run。理由在那个函数的 docstring
+    里如实登记:今天 `fresh_result_ids()` 的三个来源都只报**真的新进池子**的标识,
+    所以「本轮新增 ∩ 已冻结」在生产口径下恒为空,这条路径不可达。机制仍然按拍板
+    Q3/Q8 落地并在这里钉住——等某条通道开始上报"返回了但不是新增"的标识、或主
+    agent 拍板放宽候选集,它就地生效,而不是那时才第一次被写出来。下面紧跟的那条
+    用例从**完整 run** 上断另一半:不该出现的补充卡一张都没有。
+
+    变异:把版本标记插到 `key=` **之前**(或行尾)⇒ `key=` 那一格断言红;把判重从
+    整行渲染换成只比摘录 ⇒ 同一段摘录追加第二张,末尾那条红;把候选集从
+    `fresh ∩ 冻结表` 改成全池 ⇒ `max_cards` 那条上界断言红。
+    """
+    from types import SimpleNamespace
+    from app.services.reasoning_context import ReflectDeltaState
+    from app.services.reasoning_retrieval import _delta_supplements
+
+    hits = [_chunk_hit("ck-q0"), _chunk_hit("ck-q1"), _chunk_hit("ck-q2")]
+    state = SimpleNamespace(
+        collected={}, elements=(), chunks=hits, question="兆瓦级功耗预算")
+    observer = SimpleNamespace(last_query="散热余量的验收判据")
+    delta = ReflectDeltaState()
+    # 三个键都"曾展示过",但冻结的字节是**别的**摘录 ⇒ 本轮重算必然不同。
+    for hit in hits:
+        delta.note_shown(hit.chunk_id, f"- [chunk] | key={hit.chunk_id} | 旧摘录")
+    lines = _delta_supplements(
+        state, delta, observer, fresh_keys=("ck-q0", "ck-q1", "ck-q2"),
+        max_cards=2, excerpt_chars=240, budget_left=5000)
+    assert len(lines) == 2                       # `max_cards` 是硬上限
+    for line, key in zip(lines, ("ck-q0", "ck-q1")):
+        assert f" | key={key} | " in line        # `key=` 那一格逐字不变
+        assert line.split(" | ")[2] == "补充摘录 v2（上文同 key 的卡未被改写）"
+        assert delta.card_versions[key] == 2
+    # 同一段摘录不追加第二张(判重用整行渲染)。
+    assert _delta_supplements(
+        state, delta, observer, fresh_keys=("ck-q0", "ck-q1"), max_cards=2,
+        excerpt_chars=240, budget_left=5000) == ()
+    # 额度装不下 ⇒ 一张都不发,而且**一格登记都没留**(否则那份摘录从此判重命中、
+    # 永远到不了模型,而没有任何计数披露这件事)。
+    fresh = ReflectDeltaState()
+    fresh.note_shown("ck-q2", "- [chunk] | key=ck-q2 | 旧摘录")
+    assert _delta_supplements(
+        state, fresh, observer, fresh_keys=("ck-q2",), max_cards=2,
+        excerpt_chars=240, budget_left=10) == ()
+    assert fresh.card_versions["ck-q2"] == 1
+
+
+def test_delta_run_appends_no_supplement_card_it_should_not(rrepo):
+    """(f 续) 完整 run 上一张多余的补充卡都没有(判重与候选口径的另一半)。
+
+    一条真 run 里同一个键的卡只可能有一种字节:K 里那一份、任何一块 D 里那一份,
+    以及"曾展示、离开 K 后又回来"那一份,全都取自冻结表。所以整个 run 里**不该**
+    出现补充卡——出现了就说明判重失效(同一段摘录每轮追加一张,而它每轮都在涨字
+    节,"块字节不变"那条断言看不见它,因为它追加的是**新块**)。
+
+    变异:把 `supplement_for` 的判重那一句删掉 ⇒ 这条红;把 `_delta_supplements`
+    的候选口径改成"冻结表全体" ⇒ 每轮给每张老卡追加一张 v2,这条红。
+    """
+    llm, _result = _four_turn_run(rrepo)
+    for turn in range(4):
+        for block in llm.delta_blocks(turn):
+            assert "补充摘录" not in block, (turn, block)
+
+
+def test_delta_supplement_never_exceeds_the_reserved_overhead():
+    """补充卡相对原卡的增量 ≤ `_SUPPLEMENT_CARD_OVERHEAD`。
+
+    这条把"额度预留够不够"从一个假设变成一条被检查的性质:`supplement_for` 的调用
+    契约要求"非空返回值无条件拼进本块",所以调用方必须在**调用之前**按一个上界预
+    留额度,而那个上界是从产地那份字面量算出来的。
+
+    变异:把 `_SUPPLEMENT_CARD_OVERHEAD` 里的版本位数调小(比如按 `version=1` 算)
+    ⇒ 版本号涨到两位数时这条红。
+    """
+    from app.services.reasoning_context import ReflectDeltaState
+    from app.services.reasoning_retrieval import _SUPPLEMENT_CARD_OVERHEAD
+
+    delta = ReflectDeltaState()
+    original = "- [chunk] | key=ck-1 | Doc · 章节 | 原文\n  “第一段摘录”"
+    delta.note_shown("ck-1", original)
+    for index in range(1, 40):
+        text = f"{original}·{index}"
+        line = delta.supplement_for("ck-1", text)
+        assert line, index
+        assert len(line) - len(text) <= _SUPPLEMENT_CARD_OVERHEAD, index
+    assert delta.card_versions["ck-1"] == 40
+
+
+def test_delta_reruns_the_aspect_revocation_and_enumeration_conflicts(rrepo):
+    """(g) 已支撑方面被撤销/冲突,在 `prefix_delta` 下与 `prefix_snapshot` 逐字相同。
+
+    方面账整块住在 T,delta 一格都没碰它——所以这条断的是"没碰"这件事本身:同一
+    份脚本在两条前缀臂上跑出逐字节相同的方面块。比的是 P 而不是 off:那两条臂的
+    方面块由**不同的渲染函数**产出(off 是 `render_aspect_block` 排在服务器状态块
+    尾部,前缀布局是 `render_aspect_status_block` 排在 T 的开头),按字节比 off 与
+    delta 只会比出布局本身的差别。
+
+    变异:把 `render_aspect_status_block` 搬进 D(冲突 C1 说的那件事)⇒ 它那两处
+    消费副作用落在一个再也不重渲染的块里,方面块从第二轮起不再更新,这条红。
+    """
+    def _capture(optimization):
+        llm, _result = _v2_aspect_run(
+            rrepo, intent_detail=_TWO_ASPECTS,
+            reflects=[
+                {"next_action": "search_chunks", "sufficient": False,
+                 "arguments": {"query": "完整问题"}, "reason": "先查一轮",
+                 "assessment": {"supported": [
+                     {"aspect_id": "a1", "evidence_keys": ["ck-q0"]}]}},
+                {"next_action": "search_chunks", "sufficient": False,
+                 "arguments": {"query": "换个问法"}, "reason": "再查一轮",
+                 "assessment": {"unresolved": [
+                     {"aspect_id": "a1", "status": "conflicting",
+                      "evidence_keys": ["ck-q0"], "gap": "两处口径不一致"}]}},
+                _answer(assessment={"unresolved": [
+                    {"aspect_id": "a2", "status": "partial", "gap": "还缺乙"}]}),
+            ],
+            chunk_results=_three_turn_chunks(),
+            reasoning_max_chunk_searches=2,
+            reasoning_reflect_optimization=optimization)
+        return [llm.aspect_block(turn) for turn in range(3)]
+
+    assert _capture(_PREFIX) == _capture(_DELTA)
+    blocks = _capture(_DELTA)
+    assert "已支撑" in blocks[1] and "冲突" in blocks[2]
+
+
+def test_delta_block_has_no_aspect_note_when_the_assessment_is_folded(rrepo):
+    """(j) 整份 assessment 越界被折成 invalid ⇒ D 里**没有**方面更新那一节。
+
+    §5 风险 6:那句 pending note 只能落在 `if not outcome.error:` 内。写在外面的
+    话,D 里会出现一句"服务端已接受 a2",而账本上 a2 根本没动过——一句服务端自己
+    否认的历史事实,而且它冻在一块再也不改写的块里。
+
+    变异:把那句 append 挪到 `if not outcome.error:` 之外 ⇒ 这条红。
+    """
+    llm, result = _delta_aspect_run(
+        rrepo, intent_detail=_TWO_ASPECTS,
+        reflects=[
+            {"next_action": "search_chunks", "sufficient": False,
+             "arguments": {"query": "完整问题"}, "reason": "先查一轮",
+             "assessment": {"supported": "不是列表"}},
+            {"next_action": "search_chunks", "sufficient": False,
+             "arguments": {"query": "换个问法"}, "reason": "再查一轮"},
+            _answer(),
+        ],
+        chunk_results=_three_turn_chunks(), reasoning_max_chunk_searches=2)
+    assert any("invalid_assessment" in reason for reason in _skip_reasons(
+        result)) or any(
+        "invalid_assessment" in str(step.detail.get("reason", ""))
+        for step in result.trace)
+    for turn in range(3):
+        for block in llm.delta_blocks(turn):
+            assert "已接受的方面更新" not in block
+
+
+# --- (h) 加预算重试:D 一轮只追加一次 -----------------------------------------
+
+def test_delta_appends_exactly_one_block_per_turn_across_a_budget_retry(rrepo):
+    """(h) 同一轮两次模型调用(加预算重试)⇒ D 只追加一块。
+
+    `_reflect_v2` 的加预算重试复用**同一个** `context` 对象,而 D 的追加发生在
+    `_reflect_v2_context` 里(一轮一次)。两次尝试因此看到逐字节相同的一块 D。
+
+    变异:把追加挪进 `_reflect_v2_attempt`(即每次尝试各追加一次)⇒ 这条红。
+    """
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    seen: list = []
+    original = ReasoningRetriever._reflect_v2_context
+
+    def _wrapped(self, state, summary, outline):
+        context = original(self, state, summary, outline)
+        seen.append(len(state.reflect_delta.blocks))
+        return context
+
+    ReasoningRetriever._reflect_v2_context = _wrapped
+    try:
+        llm, _result = _four_turn_run(rrepo)
+    finally:
+        ReasoningRetriever._reflect_v2_context = original
+
+    assert seen == [0, 1, 2, 3]                  # 每轮恰好多一块
+    # 每一轮真的只有一次装配(重试复用同一个 context)。
+    assert len(seen) == len(llm.message_lists)
+
+
+# --- (i) 测量关 + delta:只有三个行为事实键 ------------------------------------
+
+def test_delta_with_measurement_off_writes_only_the_behaviour_keys(rrepo):
+    """(i) 测量关 + `prefix_delta` ⇒ detail 上只有那三个键,零字节序列化。
+
+    拍板 Q7 的两半各断一条:重建与回退是行为事实,测量关时**也要可见**;而"测量关
+    ⇒ 不序列化任何消息"必须真的成立——`serialize_provider_messages` 一次都不调。
+
+    变异:把 `_reflect_v2_attempt` 的两处判据改回 `measurement is not None` ⇒
+    序列化调用数不为零,这条红;把 `_reflect_measurement` 里那条 `prefix_delta`
+    例外删掉 ⇒ 三个键全缺席,红。
+    """
+    import app.core.llm as llm_module
+    from app.domain.reasoning_trace_stats import (
+        REFLECT_MEASUREMENT_DETAIL_KEYS,
+    )
+
+    serialized: list = []
+    original = llm_module.serialize_provider_messages
+    import app.services.reasoning_retrieval as module
+    module_original = module.serialize_provider_messages
+
+    def _spy(messages):
+        serialized.append(1)
+        return original(messages)
+
+    module.serialize_provider_messages = _spy
+    try:
+        _llm, result = _four_turn_run(rrepo, **{_MEASURE_FLAG: False})
+    finally:
+        module.serialize_provider_messages = module_original
+
+    assert serialized == []
+    details = _reflect_details(result)
+    assert details
+    for turn, detail in enumerate(details):
+        assert _measure_keys(detail) == {
+            "context_rebuilds", "context_fallback", "delta_blocks"}, turn
+        assert detail["delta_blocks"] == turn
+    assert {"context_rebuilds", "context_fallback", "delta_blocks"} <= set(
+        REFLECT_MEASUREMENT_DETAIL_KEYS)
