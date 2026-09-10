@@ -380,6 +380,36 @@ def test_an_over_long_support_id_still_joins_but_projects_as_unknown():
     assert_projection_values(rows[0])
 
 
+def test_an_event_only_row_with_an_over_long_support_id_is_unknown_not_an_exception():
+    """event-only 行走的是另一条装配路,短码归一要与日志行同一口径(codex #706 R1)。
+
+    关掉 LLM 日志时整批都是 event-only 行;一个 84 字符的合法相关号若绕过
+    `_short_code`,`assert_projection_values` 会抛,`_rig_call_rows` 把整段窗口
+    连同无关的正常调用一起丢掉。
+    """
+    long_id = "mdl-" + "a" * 80
+    rows = join_calls([_log("mdl-ok")], [_event(long_id), _event("mdl-ok")])
+    by_join = {row["join"]: row for row in rows}
+    assert set(by_join) == {"joined", "event_only"}
+    assert by_join["event_only"]["support_id"] is None
+    assert by_join["event_only"]["queue_latency_ms"] == 35
+    for row in rows:
+        assert_projection_values(row)
+
+
+def test_an_unattributed_retry_row_takes_no_call_index():
+    """没有 `support_id` 的重试行同样不占格(codex #706 R1)。
+
+    旧日志/没走 `interaction_support_scope` 的直接调用没有相关号;它的重试行若
+    落成 `unattributed`,编号时会与终态行各占一格,一次调用被数成两次。
+    """
+    rows = join_calls(
+        [_log("", status="retry", attempts=None), _log("")], [])
+    assert [row["join"] for row in rows] == ["retry", "unattributed"]
+    assert [row["call_index"] for row in rows] == [None, 0]
+    assert rows[0]["support_id"] is None
+
+
 def test_every_row_is_self_checked_not_just_the_first_one(monkeypatch):
     """闭集/隐私自检是**逐行**的:脏的那一类行往往不是第 0 行。
 

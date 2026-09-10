@@ -51,7 +51,8 @@ CALL_EVENT_KIND = "model_scheduler"
 #: * `unattributed` —— 这一行压根没有 `support_id`(旧日志、或调用没走
 #:   `interaction_support_scope`)。它自己那一侧的数值仍然是真的,跨侧 unknown;
 #: * `retry` —— 这一行是一次**没跑完的尝试**(`RETRY_STATUS`),不是一次调用的
-#:   结果。它自己那一侧的数值(这次尝试烧掉的墙钟)是真的,跨侧列 unknown——那
+#:   结果;有没有 `support_id` 都算(没有号的重试行**不**退回 `unattributed`,
+#:   否则它会占一格)。它自己那一侧的数值(这次尝试烧掉的墙钟)是真的,跨侧列 unknown——那
 #:   条调度事件属于这个号的**终态**行。它**不占** `call_index`(见 `join_calls`
 #:   末尾的编号),所以「这一批有几次调用」照旧数格子,不数行。
 CALL_JOIN_STATES: tuple[str, ...] = (
@@ -291,8 +292,12 @@ def join_calls(
             else:
                 rows.append({**row, "join": "log_only", **_LOG_ONLY_UNKNOWN})
     for record in loose_logs:
+        # 没有相关号的重试行同样是一次调用**内部**的尝试(codex #706 R1 P2):
+        # 记成 `unattributed` 就会在下面的编号里占一格,一次带重试的调用被数成
+        # 两次。`retry` 的判定不依赖 `support_id`,所以这里同样按状态分。
+        state = "retry" if _is_retry(record) else "unattributed"
         rows.append({
-            **tag_columns, "support_id": None, "join": "unattributed",
+            **tag_columns, "support_id": None, "join": state,
             **_log_side(record), **_LOG_ONLY_UNKNOWN,
         })
     rows.extend(_event_only_rows(events_by_id, loose_events, terminal_ids,
@@ -364,8 +369,11 @@ def _event_only_rows(
             continue
         state = "ambiguous" if len(matched) > 1 else "event_only"
         for event in matched:
+            # 与日志行同一条口径(codex #706 R1 P2):键用原串,投影值过短码形状。
+            # 关掉 LLM 日志时整批都是 event-only 行,一个 84 字符的合法相关号若
+            # 不归一,会让 `assert_projection_values` 抛、整段窗口被丢。
             rows.append({
-                **tag_columns, "support_id": key, "join": state,
+                **tag_columns, "support_id": _short_code(key), "join": state,
                 **_EVENT_ONLY_UNKNOWN, **_event_side(event),
             })
     for event in loose_events:
