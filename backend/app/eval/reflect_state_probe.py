@@ -908,6 +908,15 @@ PROBE_SUMMARY_MEDIAN_KEYS: tuple[str, ...] = (
     "assessment_rows", "delta_blocks",
 )
 
+#: 只从 **成功格**(`status == PROBE_OK_STATUS`)取中位数的读数。失败/超时的
+#: 转发同样带数值 `call_wall_ms`(`OpenAICompatibleClient` 在错误出口照记墙钟),
+#: 不按状态过滤的话三格 90 秒超时会让 `n_ok=0` 而 `call_wall_ms_p50=90000`,
+#: 失败时长直接污染臂间比较(codex #709 R3 P2)。五块字符数等上下文读数在
+#: 调用之前就已定型,与调用成败无关,仍按全部行取。
+PROBE_SUMMARY_OK_ONLY_KEYS: frozenset[str] = frozenset({
+    "call_wall_ms", "response_chars",
+})
+
 #: 模型这一轮的 `next_action` 读不成短码时落的固定短码。**不是**把模型的自由
 #: 文本原样存进去(那就是一段模型可控的文本进了投影行);也不是 `None`
 #: ——`None` 已经被「压根解析不出这份载荷」占了,两件事必须分得开。
@@ -1142,8 +1151,12 @@ def _summarize_cell(rows: Sequence[Mapping]) -> dict[str, Any]:
             if row.get("compaction_boundary_reached") is None),
     }
     for key in PROBE_SUMMARY_MEDIAN_KEYS:
+        source = (
+            [row for row in rows if row.get("status") == PROBE_OK_STATUS]
+            if key in PROBE_SUMMARY_OK_ONLY_KEYS else rows
+        )
         observed = [
-            row[key] for row in rows
+            row[key] for row in source
             if isinstance(row.get(key), (int, float))
             and not isinstance(row.get(key), bool)
         ]

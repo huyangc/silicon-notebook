@@ -2719,3 +2719,35 @@ def test_the_summary_buckets_come_out_in_reading_order():
     # 一档没有行时不出空格子(而不是出一个 n_rows=0 的假格)。
     thin = summarize_state_probe([_fake_row(state_point=1)])
     assert list(thin["by_state_point"]) == ["follow_up"]
+
+
+def test_failed_call_durations_never_enter_the_latency_median():
+    """失败/超时格带数值墙钟,但主统计只从成功格取(codex #709 R3 P2)。
+
+    三格 90 秒超时 + 一格 20 ms 成功:`call_wall_ms_p50` 必须是 20、`_n` 是 1,
+    `n_failed` 仍数到 3;上下文读数(`ctx_chars_s`)在调用之前就定型,四行都算。
+    变异:把 `PROBE_SUMMARY_OK_ONLY_KEYS` 清空 ⇒ p50 变成 90000、n 变成 4 ⇒ 红。
+    """
+    from app.eval.reflect_state_probe import (
+        PROBE_OK_STATUS, PROBE_SUMMARY_OK_ONLY_KEYS, _summarize_cell,
+    )
+
+    def _row(status: str, wall: int) -> dict:
+        return {
+            "status": status, "call_wall_ms": wall, "response_chars": wall,
+            "ctx_chars_s": 100, "decision_action": None,
+            "compaction_boundary_reached": None,
+        }
+
+    rows = [_row("error", 90000), _row("error", 90000), _row("error", 90000),
+            _row(PROBE_OK_STATUS, 20)]
+    cell = _summarize_cell(rows)
+    assert cell["n_failed"] == 3 and cell["n_ok"] == 1
+    assert cell["call_wall_ms_p50"] == 20 and cell["call_wall_ms_n"] == 1
+    assert cell["response_chars_p50"] == 20 and cell["response_chars_n"] == 1
+    assert cell["ctx_chars_s_p50"] == 100 and cell["ctx_chars_s_n"] == 4
+    assert PROBE_SUMMARY_OK_ONLY_KEYS == frozenset({"call_wall_ms", "response_chars"})
+    # 全失败的格:主统计缺席而不是 90000。
+    all_failed = _summarize_cell(rows[:3])
+    assert all_failed["call_wall_ms_p50"] is None and all_failed["call_wall_ms_n"] == 0
+
