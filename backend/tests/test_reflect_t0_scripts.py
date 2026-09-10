@@ -5236,14 +5236,54 @@ def _preserved_environ():
         os.environ.update(snapshot)
 
 
-def _probe_case(case_key: str, corpus_cell: str) -> Any:
-    """`state-probe` 编排用例的最小 case 替身。真实 `StateProbeCase` 字段很多,
-    但这些用例里 `run_state_probe_point` 全被 monkeypatch 掉了——rig 自己的
-    编排代码(dry-run 枚举、`.local/raw/` 命名、语料格 → notebook 反查)只读
-    `case_key`/`corpus_cell`/`state_points` 这三个字段。
+def _probe_case(
+    case_key: str, corpus_cell: str, *, state_points: tuple[int, ...] = (1, 3, 5),
+) -> Any:
+    """`state-probe` 编排用例的 case 替身。`run_state_probe_point` 在这些用例里
+    全被 monkeypatch 掉,所以字段只需覆盖 rig 自己读的那些:标签三列
+    (`case_key`/`corpus_cell`/`question_key`)、`state_points`,以及 dry-run 的
+    embedding 上界要读的 `intent_contract`/`question`/`script`。
+
+    `intent_contract` 是一份**真能过** `QueryIntentContract` 的最小契约:那一行
+    上界的种子数由 `prepare_frozen_intent` 真算(零模型调用),假契约算不出来。
     """
+    contract = {
+        "objective": f"{case_key} 的目标句",
+        "resolved_question": f"{case_key} 的问题?",
+        "intent_type": "explain",
+        "result_scope": "ranked",
+        "completeness_required": False,
+        "entities": [],
+        "mandatory_topics": [
+            {
+                "id": "t1",
+                "title": f"{case_key} 唯一方面",
+                "question": f"{case_key} 的那一个必答方面?",
+                "retrieval_queries": [f"{case_key} seed query"],
+            },
+        ],
+        "constraints": [],
+        "expected_output": "一句话",
+        "confidence": 0.9,
+        "needs_clarification": False,
+        "confirmed": True,
+    }
+    script = [
+        {
+            "next_action": "search_elements",
+            "sufficient": False,
+            "reason": f"第 {turn} 轮",
+            "arguments": {"query": f"{case_key} turn {turn}"},
+        }
+        # 剧本要**多容一轮**:第 k 个状态点跑到第 k+1 轮转发(加载器的
+        # `_assert_state_points` 同一条口径)。
+        for turn in range(1, max(state_points) + 2)
+    ]
     return types.SimpleNamespace(
-        case_key=case_key, corpus_cell=corpus_cell, state_points=(1, 3, 5),
+        case_key=case_key, corpus_cell=corpus_cell,
+        question_key=f"Q-{case_key}", question=f"{case_key} 的问题?",
+        intent_contract=contract, script=script,
+        state_points=tuple(state_points),
     )
 
 
@@ -5305,9 +5345,14 @@ def _patch_state_probe_infra(
 def _fake_probe_point(repo, settings_for_arm, case, state_point_index,
                        real_client, **kwargs):
     """一格假成功。`row` 过 `PROBE_ROW_KEYS` 闭集,`driver` 只留
-    `_write_probe_raw` 与 `scripted_actions()` 要用的两个面。
+    `_write_probe_raw` 读的那几个面(`forwarded` / `scripted_turns` /
+    `scripted_actions()`)。
     """
-    from app.eval.reflect_state_probe import ForwardedTurn, StateProbePoint
+    from app.eval.reflect_state_probe import (
+        ForwardedTurn,
+        ScriptedTurn,
+        StateProbePoint,
+    )
 
     row = {key: None for key in rig.PROBE_ROW_KEYS}
     row.update({
@@ -5322,9 +5367,21 @@ def _fake_probe_point(repo, settings_for_arm, case, state_point_index,
         messages=({"role": "system", "content": "s"},
                   {"role": "user", "content": "u"}),
         schema_hint="hint", raw=json.dumps({"next_action": "answer"}),
+        stats={"status": "ok", "call_wall_ms": 10, "attempts": 1,
+               "cached_tokens": 7},
     )
+    scripted = [
+        ScriptedTurn(
+            turn=1,
+            messages=({"role": "system", "content": "s1"},
+                      {"role": "user", "content": "u1"}),
+            schema_hint="hint1",
+            payload={"next_action": "search_elements", "sufficient": False},
+        ),
+    ]
     driver = types.SimpleNamespace(
-        forwarded=forwarded, scripted_actions=lambda: ("search_elements",))
+        forwarded=forwarded, scripted_turns=scripted,
+        scripted_actions=lambda: ("search_elements",))
     return StateProbePoint(
         row=row, driver=driver, result=None, prepared={}, aspects_total=1)
 
@@ -5342,7 +5399,20 @@ def test_dry_run_state_probe_locks_the_three_scale_numbers(capsys):
     assert "216(= 12 例 × 3 状态点 × 3 臂 × 2 重复" in printed
     assert "≤ 432" in printed  # 请求上界 = 216 × REASONING_ATTEMPT_BUDGET(2)
     assert "不是它自洽的真实轨迹" in printed
-    assert "embedding calls" in printed and "上界" in printed
+    # 行标说的是**整批总数**,不是 per state point(那个数已经把三个状态点乘
+    # 进去了,评审 F8-6)。
+    assert "model calls (real, total)" in printed
+    # embedding 上界**含首轮种子检索**(评审 F3 / P2-3):种子侧 = Σ每例种子串数
+    # (`prepare_frozen_intent` 真算:12 例合计 34) × 3 状态点 × 3 臂 × 2 重复
+    # = 612;剧本侧 = Σ(每例每状态点重放的轮里的查询串数)(合计 107)× 3 × 2
+    # = 642;合计 1254。漏掉种子侧会把账少算约一半,而这三个数的用途正是真跑前
+    # 算钱。
+    assert "embedding calls" in printed
+    assert "≤ 1254(上界,含首轮种子检索:种子侧 612 + 剧本侧 642;" in printed
+    # 单次超时与 E1/E3 的 dry-run 同一行口径(评审 F8-7 存疑项按「打出来」收口)。
+    assert f"{rig.REASONING_TIMEOUT_SECONDS_DEFAULT}s(镜像 Settings()." in printed
+    # per-call 表进产物清单(评审 F4)。
+    assert "calls-<arm>.jsonl" in printed
 
     assert rig.main([
         "--dry-run", "--database-url", "sqlite:///x_test.db",
@@ -5358,6 +5428,8 @@ def test_dry_run_state_probe_locks_the_three_scale_numbers(capsys):
     ]) == 0
     printed = capsys.readouterr().out
     assert "108(= 6 例 × 3 状态点 × 3 臂 × 2 重复" in printed
+    # embedding 上界按**筛后**的 case 重算(前 6 例:种子 17 串、剧本 56 轮)。
+    assert "≤ 642(上界,含首轮种子检索:种子侧 306 + 剧本侧 336;" in printed
 
 
 def test_state_probe_refuses_a_database_url_without_the_test_suffix(capsys):
@@ -5421,6 +5493,11 @@ def test_state_probe_arm_pairs_still_trip_the_shared_settings_guard(
     `REASONING_REFLECT_OPTIMIZATION` 没起作用(`Settings()` 不管环境变量恒报
     `off`)模拟的是「设置被盖住」(比如被 `--env-file` 或者别的进程环境覆盖):
     必须当场报错,不能安静跑出一批臂对不上号的数据。
+
+    第二半(评审 F6):这一段自己重建 pair 列表,证明不了 `_run_state_probe`
+    真的按 `("v2", optimization)` 喂进去 —— 那一半由
+    `test_state_probe_always_pairs_v2_with_the_optimization_arm` 走
+    `rig.main([... state-probe])` 断言。
     """
     import app.core.config as config_module
 
@@ -5547,6 +5624,10 @@ def test_state_probe_reports_a_nonzero_result_when_the_test_db_changed(
 ):
     """T-EX7 (g):跑后只读证据与跑前不等 ⇒ 非零(Q7)。E2 结构上不该写测试库,
     这条断言是唯一能看见「结构事实被谁破坏了」的地方——未验证不等于通过。
+
+    文案按 `command` 说库(评审 P3-7):E2 量的是一次性测试库,报「主库变了」
+    会把读者送去查一个这次根本没连的库。这条路复用 `ab` 的
+    `_assert_readonly_on_exit`(多一个默认 `"ab"` 的关键字参数),不是它的复制版。
     """
     tracker = _patch_state_probe_infra(
         monkeypatch,
@@ -5556,7 +5637,9 @@ def test_state_probe_reports_a_nonzero_result_when_the_test_db_changed(
     )
     out_dir = tmp_path / "out"
     with _preserved_environ():
-        with pytest.raises(RuntimeError, match="变了"):
+        with pytest.raises(
+            RuntimeError, match="一次性测试库在这次 state-probe 之后变了",
+        ):
             rig.main([
                 "--database-url", "sqlite:///" + str(tmp_path / "x_test"),
                 "--out-dir", str(out_dir), "--repeats", "1",
@@ -5566,3 +5649,515 @@ def test_state_probe_reports_a_nonzero_result_when_the_test_db_changed(
     # 只读断言在 manifest 写盘**之前**的 `finally` 里抛出,manifest 因此不存在
     # ——一份「主库/测试库被写过」的批不该看起来像一份干净收尾的数据集。
     assert not (out_dir / "manifest.json").exists()
+
+
+# --- T-EX7 评审修正轮:失败行的账、停批语义、显式性、臂序、共用件 -------------
+
+
+def _run_state_probe_batch(
+    tmp_path, monkeypatch, *, cases, run_point, argv_extra=(),
+    readonly_before=None, readonly_after=None,
+):
+    """跑一批进程内假 state-probe,返回 `(退出码, out_dir, tracker)`。
+
+    七条新用例共用这一段:它们要断言的都是**行为**(写下的行、产物、退出码),
+    源码断言在这里不适用。
+    """
+    tracker = _patch_state_probe_infra(
+        monkeypatch, cases=cases, run_point=run_point,
+        readonly_before=readonly_before, readonly_after=readonly_after,
+    )
+    out_dir = tmp_path / "out"
+    with _preserved_environ():
+        code = rig.main([
+            "--database-url", "sqlite:///" + str(tmp_path / "x_test"),
+            "--out-dir", str(out_dir), *argv_extra, "state-probe",
+        ])
+    return code, out_dir, tracker
+
+
+def _read_rows(out_dir, arm: str) -> list[dict]:
+    path = out_dir / f"state-probe-{arm}.jsonl"
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text("utf-8").splitlines()]
+
+
+def test_state_probe_failed_cell_lands_in_the_summary_and_the_exit_code(
+    tmp_path, monkeypatch, capsys,
+):
+    """评审 F1 / P1:一格抛真实异常 ⇒ 行的 `status` 落在 **E2 自己的**失败词表
+    里、摘要的 `failed_rows` 数到它、退出码非零。
+
+    `ab` 的 `"failed"` 不在 `PROBE_FAILED_STATUSES` 里:抄那个词表会让一批真有
+    失败的数据在冻结产物上报「失败:0」,而 `n_rows` 把它们算了进去——读表人
+    得到的结论是「这批干净」。
+    """
+    from app.eval.reflect_state_probe import PROBE_FAILED_STATUSES
+
+    calls: list[int] = []
+
+    def _fake(repo, settings_for_arm, case, state_point_index, real_client,
+              **kwargs):
+        calls.append(1)
+        if len(calls) == 2:
+            raise TimeoutError("provider 死了")
+        return _fake_probe_point(
+            repo, settings_for_arm, case, state_point_index, real_client,
+            **kwargs)
+
+    code, out_dir, _ = _run_state_probe_batch(
+        tmp_path, monkeypatch, cases=[_probe_case("c1", "A_nokg")],
+        run_point=_fake, argv_extra=("--repeats", "1", "--arms", "off"),
+    )
+    assert code == 1
+    assert "1 个状态点 FAILED" in capsys.readouterr().err
+    rows = _read_rows(out_dir, "off")
+    statuses = [row["status"] for row in rows]
+    assert statuses == ["ok", rig.STATE_PROBE_FAILED_ROW_STATUS, "ok"]
+    assert rig.STATE_PROBE_FAILED_ROW_STATUS in PROBE_FAILED_STATUSES
+    summary = json.loads(
+        (out_dir / "state-probe-summary.json").read_text("utf-8"))
+    assert summary["rows_total"] == 3
+    assert summary["failed_rows"] == 1
+    assert summary["status_unknown_rows"] == 0
+    # 摘要 md 也要看得见那一格(顶层键 `[]` 取值,漂移会响亮 KeyError)。
+    assert "- 失败(取消/出错):1" in (
+        out_dir / "state-probe-summary.md").read_text("utf-8")
+
+
+def test_state_probe_stops_the_batch_on_a_bare_value_or_type_error(
+    tmp_path, monkeypatch,
+):
+    """评审 F2(拍板逐字):裸 `ValueError` / `TypeError` 也是「剧本没写对」,
+    **停批非零**,不当格失败。
+
+    按格失败继续跑会让余下两百多格照跑几个小时,产出一批某臂某状态点缺格的
+    不平衡数据,而根因本该在第一格就说清。
+
+    跑后只读核照样跑到(`tracker["n"] == 2`):它在 `ExitStack` 里,异常从
+    `with` 里穿出去时也会退栈——这一条同时钉住 P2-4 的第二条。
+    """
+    for error in (ValueError("键改名了"), TypeError("参数形状不对")):
+        calls: list[int] = []
+
+        def _fake(repo, settings_for_arm, case, state_point_index,
+                  real_client, _error=error, **kwargs):
+            calls.append(1)
+            if len(calls) == 2:
+                raise _error
+            return _fake_probe_point(
+                repo, settings_for_arm, case, state_point_index, real_client,
+                **kwargs)
+
+        out_root = tmp_path / type(error).__name__
+        out_root.mkdir()
+        with pytest.raises(type(error)):
+            _run_state_probe_batch(
+                out_root, monkeypatch,
+                cases=[_probe_case("c1", "A_nokg")], run_point=_fake,
+                argv_extra=("--repeats", "1", "--arms", "off"),
+            )
+        out_dir = out_root / "out"
+        # 第一格写下并 flush 了,第二格停批;manifest 不写(不是冻结完成的批)。
+        assert len(_read_rows(out_dir, "off")) == 1
+        assert not (out_dir / "manifest.json").exists()
+
+
+def test_state_probe_isolated_cell_still_runs_the_rest_of_the_batch(
+    tmp_path, monkeypatch,
+):
+    """评审 P2-4 第二条的另一半:非 `StateProbeError`/`ValueError`/`TypeError`
+    的异常按格隔离,批照跑完,跑前跑后两次只读证据都点到。
+    """
+    def _fake(repo, settings_for_arm, case, state_point_index, real_client,
+              **kwargs):
+        if state_point_index == 1:
+            raise RuntimeError("这一格的调用死了")
+        return _fake_probe_point(
+            repo, settings_for_arm, case, state_point_index, real_client,
+            **kwargs)
+
+    code, out_dir, tracker = _run_state_probe_batch(
+        tmp_path, monkeypatch, cases=[_probe_case("c1", "A_nokg")],
+        run_point=_fake, argv_extra=("--repeats", "1", "--arms", "off"),
+    )
+    assert code == 1
+    assert tracker["n"] == 2
+    assert len(_read_rows(out_dir, "off")) == rig.STATE_POINT_COUNT
+    assert (out_dir / "manifest.json").exists()
+
+
+def test_state_probe_alternates_the_arm_order_by_repeat_parity(
+    tmp_path, monkeypatch,
+):
+    """评审 P3-5 / P2-4 第三条:臂在**最内层**、臂序按重复轮号奇偶交替,
+    manifest 的 `order` 与真实顺序对上,`.local/raw/` 每格一份(文件名带
+    `repeat`,两轮不互相覆盖)。
+    """
+    seen: list[tuple[str, int, int, str]] = []
+
+    def _fake(repo, settings_for_arm, case, state_point_index, real_client,
+              **kwargs):
+        seen.append((case.case_key, state_point_index, kwargs["repeat"],
+                     kwargs["arm"]))
+        return _fake_probe_point(
+            repo, settings_for_arm, case, state_point_index, real_client,
+            **kwargs)
+
+    code, out_dir, _ = _run_state_probe_batch(
+        tmp_path, monkeypatch, cases=[_probe_case("c1", "A_nokg")],
+        run_point=_fake, argv_extra=("--repeats", "2"),
+    )
+    assert code == 0
+    arms = list(rig.STATE_PROBE_DEFAULT_ARMS)
+    expected = [
+        ("c1", point, repeat, arm)
+        for point in range(rig.STATE_POINT_COUNT)
+        for repeat in (1, 2)
+        for arm in (arms if repeat == 1 else list(reversed(arms)))
+    ]
+    assert seen == expected
+    # 单数轮正序、双数轮反序 —— 块内漂移因此在两轮之间抵消,而不是整份压在
+    # 最后一条臂上。
+    assert [cell[3] for cell in seen[:len(arms)]] == arms
+    assert [cell[3] for cell in seen[len(arms):2 * len(arms)]] == list(
+        reversed(arms))
+
+    rows = sum(len(_read_rows(out_dir, arm)) for arm in arms)
+    assert rows == len(expected)
+    assert len(list((out_dir / "raw").glob("*.json"))) == len(expected)
+
+    manifest = json.loads((out_dir / "manifest.json").read_text("utf-8"))
+    assert manifest["order"] == (
+        "case→state_point→repeat→arm:"
+        + rig.STATE_PROBE_ARM_ORDER_ALTERNATING
+    )
+    # 交替是确定性的,没有随机 ⇒ 没有种子,如实写 `None`。
+    assert manifest["arm_order_seed"] is None
+    # 单臂/单轮的批里交替**观察不到**,`order` 如实说 unobserved 而不是冒充
+    # 交替过。
+    single = _state_probe_order_for(["off"], 1)
+    assert single.endswith(rig.STATE_PROBE_ARM_ORDER_UNOBSERVED)
+
+
+def _state_probe_order_for(arms, repeats) -> str:
+    plan = rig._state_probe_plan([_probe_case("c1", "A_nokg")], arms, repeats)
+    return rig._state_probe_order_label(plan)
+
+
+def test_state_probe_order_label_reads_the_real_nesting_not_a_constant():
+    """评审 P2-4:`order` 是从**真实计划**里数出来的,不是手写常量。
+
+    这里直接把一份「臂在最外层」的计划递给它:串必须跟着变——否则那一键在
+    「四臂背靠背」这个核心设计被改掉之后照样说它成立。
+    """
+    cases = [_probe_case("c1", "A_nokg"), _probe_case("c2", "B_kg")]
+    arms = ["off", "prefix_snapshot"]
+    inner = rig._state_probe_plan(cases, arms, 2)
+    assert rig._state_probe_order_label(inner) == (
+        "case→state_point→repeat→arm:"
+        + rig.STATE_PROBE_ARM_ORDER_ALTERNATING
+    )
+    outer = [
+        (case, point, repeat, arm)
+        for arm in arms
+        for case in cases
+        for point in range(rig.STATE_POINT_COUNT)
+        for repeat in (1, 2)
+    ]
+    assert rig._state_probe_order_label(outer) == (
+        "arm→case→state_point→repeat:"
+        + rig.STATE_PROBE_ARM_ORDER_UNOBSERVED
+    )
+    # 只有一个取值的维度不带位置信息:单例批里 `case` 的嵌套位置**观察不到**,
+    # 于是按声明位置留在最外层,而不是因为「没换过值」被判成最内层。
+    single_case = rig._state_probe_plan(cases[:1], arms, 2)
+    assert rig._state_probe_order_label(single_case).startswith("case→")
+
+
+def test_state_probe_manifest_carries_the_bare_model_contract_short_code(
+    tmp_path, monkeypatch,
+):
+    """评审拍板:`model_contract` 统一为**裸短码**(E3 口径)。
+
+    两条通道写进的是同一个 `out_dir/manifests.jsonl`,同一键两种形状(这边
+    `{"model": short}`、那边裸短码)会让读侧必须分支。
+    """
+    code, out_dir, _ = _run_state_probe_batch(
+        tmp_path, monkeypatch, cases=[_probe_case("c1", "A_nokg")],
+        run_point=_fake_probe_point,
+        argv_extra=("--repeats", "1", "--arms", "off"),
+    )
+    assert code == 0
+    manifest = json.loads((out_dir / "manifest.json").read_text("utf-8"))
+    assert manifest["model_contract"] == "modelshort"
+    # `matrix.planned_runs` 由上游算(rig 那次同值覆盖是死写,已删)。
+    assert manifest["matrix"]["planned_runs"] == rig.STATE_POINT_COUNT
+
+
+def test_state_probe_writes_the_per_call_table_with_e2_tags(
+    tmp_path, monkeypatch,
+):
+    """评审 F4:每格一段窗口出 `calls-<arm>.jsonl`,run 级标签是**可信的**
+    (E2 恒串行,不像 `ab` 的并发路要整批 unknown)。
+    """
+    from app.eval.reflect_context_bench import CALL_TAG_KEYS
+
+    seen_tags: list[dict] = []
+
+    def _fake_call_rows(log_dir, event_dir, *, llm_offsets, event_offsets,
+                        tags):
+        seen_tags.append(dict(tags or {}))
+        return [{"support_id": f"s{len(seen_tags)}", "call_index": 0, **tags}]
+
+    monkeypatch.setattr(rig, "_rig_call_rows", _fake_call_rows)
+    code, out_dir, _ = _run_state_probe_batch(
+        tmp_path, monkeypatch, cases=[_probe_case("c1", "A_nokg")],
+        run_point=_fake_probe_point,
+        argv_extra=("--repeats", "1", "--arms", "off"),
+    )
+    assert code == 0
+    lines = (out_dir / "calls-off.jsonl").read_text("utf-8").splitlines()
+    assert len(lines) == rig.STATE_POINT_COUNT
+    assert json.loads(lines[0])["arm"] == "off"
+    # 标签键必须落在**共用**闭集里(闭集外的键会被 `join_calls` 静默丢掉,
+    # 写一个自以为在场的列比不写更糟)。
+    assert set(seen_tags[0]) <= set(CALL_TAG_KEYS)
+    assert seen_tags[0]["question_key"] == "Q-c1"
+    assert seen_tags[0]["effort"] == rig.STATE_PROBE_EFFORT
+    assert seen_tags[0]["repeat"] == 1
+
+
+def test_state_probe_raw_archive_keeps_the_call_stats_and_scripted_turns(
+    tmp_path, monkeypatch,
+):
+    """评审 F4 的另一半:`.local/raw/` 补 `forwarded.stats`(含
+    `cached_tokens` —— E2 的行闭集没有 `usage` 列,不存这里它在任何产物里都
+    不存在)与 `scripted_turns`(逐轮消息,不只是动作名串)。
+    """
+    code, out_dir, _ = _run_state_probe_batch(
+        tmp_path, monkeypatch, cases=[_probe_case("c1", "A_nokg")],
+        run_point=_fake_probe_point,
+        argv_extra=("--repeats", "1", "--arms", "off"),
+    )
+    assert code == 0
+    payload = json.loads(
+        (out_dir / "raw" / "c1-0-off-1.json").read_text("utf-8"))
+    assert payload["forwarded"]["stats"]["cached_tokens"] == 7
+    assert payload["scripted_turns"][0]["payload"]["next_action"] == (
+        "search_elements")
+    assert payload["scripted_turns"][0]["messages"][0]["content"] == "s1"
+    assert payload["scripted_actions"] == ["search_elements"]
+
+
+def test_state_probe_always_pairs_v2_with_the_optimization_arm(
+    tmp_path, monkeypatch,
+):
+    """评审 F6:走 `rig.main([... state-probe])` 断言 `_settings_by_arm` 收到的
+    pair 列表第一维恒 `"v2"`(E2 结构上只有 optimization 一维,`policy` 恒 v2)。
+    """
+    seen: list[list[tuple[str, str]]] = []
+    real_stub = None
+
+    def _record(pairs):
+        seen.append(list(pairs))
+        return real_stub(pairs)
+
+    tracker = _patch_state_probe_infra(
+        monkeypatch, cases=[_probe_case("c1", "A_nokg")],
+        run_point=_fake_probe_point,
+    )
+    assert tracker["n"] == 0
+    real_stub = rig._settings_by_arm
+    monkeypatch.setattr(rig, "_settings_by_arm", _record)
+    out_dir = tmp_path / "out"
+    with _preserved_environ():
+        code = rig.main([
+            "--database-url", "sqlite:///" + str(tmp_path / "x_test"),
+            "--out-dir", str(out_dir), "--repeats", "1", "state-probe",
+        ])
+    assert code == 0
+    assert seen and all(pair[0] == "v2" for pair in seen[0])
+    assert [pair[1] for pair in seen[0]] == list(rig.STATE_PROBE_DEFAULT_ARMS)
+
+
+def test_state_probe_only_case_filters_before_the_limit_slice(capsys):
+    """评审 F7:`--only-case` 有用例、且**先筛后限**。
+
+    先限后筛时 `--only-case te-b-kivi-bits --limit 3` 会筛出零个 case 并退 2
+    (那一例排在第 12 位),现在它筛出 1 个。
+    """
+    assert rig.main([
+        "--dry-run", "--database-url", "sqlite:///x_test.db",
+        "--only-case", "te-b-kivi-bits", "--limit", "3", "state-probe",
+    ]) == 0
+    printed = capsys.readouterr().out
+    assert "9(= 1 例 × 3 状态点 × 3 臂 × " not in printed  # repeats=2 ⇒ 18
+    assert "18(= 1 例 × 3 状态点 × 3 臂 × 2 重复" in printed
+    assert "state probe case  te-b-kivi-bits" in printed
+    assert printed.count("state probe case") == 1
+
+    # 一个都不认识的 case_key ⇒ 筛完零个 ⇒ 退 2(响亮,不是静默全量)。
+    assert rig.main([
+        "--dry-run", "--database-url", "sqlite:///x_test.db",
+        "--only-case", "no-such-case", "state-probe",
+    ]) == 2
+    assert "筛完" in capsys.readouterr().err
+
+
+def test_state_probe_arms_reject_values_outside_the_closed_set(capsys):
+    """评审 P2-4:`--arms` 的闭集与重复臂两条拒绝分支各一格。"""
+    assert rig.main([
+        "--dry-run", "--database-url", "sqlite:///x_test.db",
+        "--arms", "off,legacy", "state-probe",
+    ]) == 2
+    assert "不在 optimization 闭集里" in capsys.readouterr().err
+
+    assert rig.main([
+        "--dry-run", "--database-url", "sqlite:///x_test.db",
+        "--arms", "off,prefix_delta,off", "state-probe",
+    ]) == 2
+    assert "有重复的臂" in capsys.readouterr().err
+
+    assert rig.main([
+        "--dry-run", "--database-url", "sqlite:///x_test.db",
+        "--arms", "off,,prefix_delta", "state-probe",
+    ]) == 2
+    assert "写法为空或有空段" in capsys.readouterr().err
+
+
+def test_state_probe_refuses_state_points_the_effort_cannot_reach(
+    tmp_path, monkeypatch, capsys,
+):
+    """评审 P3-10:`max(state_points) + 1` 必须 ≤ 档位的 `max_reasoning_steps`,
+    否则真跑会在第 k+1 轮以一句与档位无关的话停批。`--dry-run` 下也拦。
+    """
+    from app.core.ask_retrieval_policy import ask_retrieval_limits
+
+    ceiling = ask_retrieval_limits(rig.STATE_PROBE_EFFORT).max_reasoning_steps
+    monkeypatch.setattr(
+        rig, "load_state_probe_case_set",
+        lambda: ([_probe_case("c1", "A_nokg", state_points=(1, 3, ceiling))],
+                 "digest"),
+    )
+    assert rig.main([
+        "--dry-run", "--database-url", "sqlite:///x_test.db", "state-probe",
+    ]) == 2
+    err = capsys.readouterr().err
+    assert f"只跑得到第 {ceiling} 轮" in err
+    assert "c1(最后一个状态点第 " in err
+
+
+def test_state_probe_summary_md_keeps_its_qualifiers_and_attribution_limits(
+    tmp_path, monkeypatch,
+):
+    """评审 P2-5 同型(md 内容守卫):限定语、归因边界、**臂序混淆项**都不许
+    悄悄消失;顶层键漂移要响亮而不是渲染成 `None`。
+    """
+    code, out_dir, _ = _run_state_probe_batch(
+        tmp_path, monkeypatch, cases=[_probe_case("c1", "A_nokg")],
+        run_point=_fake_probe_point,
+        argv_extra=("--repeats", "1", "--arms", "off"),
+    )
+    assert code == 0
+    text = (out_dir / "state-probe-summary.md").read_text("utf-8")
+    assert "模型选出的动作只记录不执行" in text
+    assert "不是它自洽的真实轨迹" in text
+    assert "归因边界" in text
+    assert "不能宣称纯缓存因果" in text
+    assert "臂序" in text and "奇偶交替" in text
+    assert "%" not in text  # 零比率:只有计数与中位数
+
+    # 顶层键改名 ⇒ `KeyError`,不是静默 `None`(`.get()` 会让这份被人当结论读
+    # 的产物在上游改键之后照样渲染出来)。
+    summary = json.loads(
+        (out_dir / "state-probe-summary.json").read_text("utf-8"))
+    drifted = {("total_rows" if key == "rows_total" else key): value
+               for key, value in summary.items()}
+    with pytest.raises(KeyError):
+        rig._render_state_probe_summary_md(drifted)
+
+
+def test_state_probe_test_db_predicate_reads_the_database_name_from_the_url():
+    """评审 P3-6:测试库判据按 URL 的 path 段库名判,不对整串 URL 做
+    `endswith` —— 后者会被一串 `?application_name=rig_test` 骗去连生产库。
+    """
+    assert rig._state_probe_looks_like_test_db("sqlite:///x_test.db")
+    assert not rig._state_probe_looks_like_test_db("sqlite:///x_testing.db")
+    assert rig._state_probe_looks_like_test_db(
+        "postgresql://h/db_test?sslmode=require")
+    assert not rig._state_probe_looks_like_test_db(
+        "postgresql://u:p@h/prod?application_name=rig_test")
+
+
+def test_prepare_search_intent_is_the_same_function_as_the_e2_one():
+    """评审 F5:rig 的 `_prepare_search_intent` 与
+    `reflect_state_probe.prepare_frozen_intent` 现在是**一份**逻辑。
+
+    两侧同输入逐键相等 —— 这条对照曾经被单侧改过一次(`authoritative` 判据,
+    codex #700 R2 P2),再分叉一次会让 `search`/`ab` 与 E2 拿到不同的首轮种子,
+    而四臂一致核/轮数核/「不执行」核全部照过。
+    """
+    from app.eval.reflect_state_probe import (
+        load_state_probe_case_set,
+        prepare_frozen_intent,
+    )
+
+    cases, _ = load_state_probe_case_set()
+    case = cases[0]
+    mine = rig._prepare_search_intent(
+        dict(case.intent_contract), case.question, rig.STATE_PROBE_EFFORT)
+    theirs = prepare_frozen_intent(
+        case.intent_contract, case.question, rig.STATE_PROBE_EFFORT)
+    assert mine is not None
+    assert set(mine) == set(theirs)
+    for key in theirs:
+        assert mine[key] == theirs[key], key
+    # `contract is None` 那半仍留在 rig 侧(`--no-intent` 与「这题没契约」)。
+    assert rig._prepare_search_intent(None, "q", "standard") is None
+
+
+def test_explicit_flags_survive_argparse_prefix_abbreviations(capsys):
+    """评审 F8-5 / P2-2:显式性靠 argparse 的 `None` 哨兵,不靠扫 argv。
+
+    argparse 接受任何无歧义前缀缩写,所以 `--repeat 5` 与 `--repeats=5` 必须
+    同样生效(此前扫 argv 的判据在缩写下答「没给」,用户要 5 静默拿到 2),
+    `--concurren 2` 也必须照样被响亮拒绝。
+    """
+    for argv in (["--repeat", "5"], ["--repeats=5"]):
+        assert rig.main([
+            "--dry-run", "--database-url", "sqlite:///x_test.db", *argv,
+            "state-probe",
+        ]) == 0
+        printed = capsys.readouterr().out
+        assert "540(= 12 例 × 3 状态点 × 3 臂 × 5 重复" in printed
+
+    for argv in (["--concurren", "2"], ["--concurrency", "2"],
+                 ["--concurrency", "0"]):
+        assert rig.main([
+            "--dry-run", "--database-url", "sqlite:///x_test.db", *argv,
+            "state-probe",
+        ]) == 2
+        assert "恒为 1" in capsys.readouterr().err
+
+
+def test_shared_concurrency_and_repeats_defaults_are_unchanged_for_ab():
+    """评审 P2-2 的另一半:哨兵默认值对 `ab`/`search` **行为逐字不变**。
+
+    `build_parser()` 给的是 `None` 哨兵,`main()`(以及共用同一步的
+    `apply_shared_arg_defaults`)把它填回旧默认值 1 / 3 再走同一条 clamp。
+    """
+    raw = rig.build_parser().parse_args(["ab"])
+    assert raw.concurrency is None and raw.repeats is None
+
+    filled = rig.apply_shared_arg_defaults(rig.build_parser().parse_args(["ab"]))
+    assert filled.concurrency == 1 and filled.repeats == 3
+    assert filled.concurrency_given is None and filled.repeats_given is None
+
+    given = rig.apply_shared_arg_defaults(rig.build_parser().parse_args(
+        ["--concurrency", "0", "--repeats", "0", "ab"]))
+    # clamp 逐字不变(`max(1, ...)`),而哨兵快照留着 clamp **之前**的原值——
+    # `state-probe` 的「显式给了且 ≠ 1 ⇒ 退 2」靠它。
+    assert given.concurrency == 1 and given.repeats == 1
+    assert given.concurrency_given == 0 and given.repeats_given == 0
