@@ -1164,9 +1164,16 @@ def state_probe_manifest_facts(
     值形状 / 通道必填 / `matrix` 子键校验。这里只负责一件事:把 E2 自己知道的
     维度基数算对。
 
-    `matrix` 的四个子键是**维度基数**(int),不是分格明细
+    `matrix` 的四个必填子键是**维度基数**(int),不是分格明细
     (`REQUIRED_MATRIX_KEYS_BY_CHANNEL["e2"]`):`cases × state_points × arms ×
     repeats` 相乘就是这一批的总 run 数,与 dry-run 逐字钉死的规模数同源。
+
+    第五个子键 `planned_runs` 就是那个乘积(T-EX8 质量评审拍板:所有通道一律
+    另写这个**额外**子键)。它不是第五个维度,而是把「读者自己做那次乘法」这一
+    步写进产物:一份 manifest 与一份 `state-probe-*.jsonl` 摆在一起时,
+    「计划跑几格」与「实际出了几行」的对账不该依赖读表人手算四个数的积。基数
+    子键一个都不动,所以这条口径与 `REQUIRED_MATRIX_KEYS_BY_CHANNEL` 的注释
+    (「分格明细另开子键,不要塞进基数子键本身」)不冲突。
 
     `state_points` 取 `STATE_POINT_COUNT` 而不是 `len(case.state_points)` 的
     最大值:加载器已经把每例的状态点个数钉成 3,取一个「实测最大值」只会在
@@ -1174,6 +1181,16 @@ def state_probe_manifest_facts(
     """
     if not cases:
         raise ValueError("state probe manifest needs at least one case")
+    matrix = {
+        "cases": len(cases),
+        "state_points": STATE_POINT_COUNT,
+        "arms": len(arms),
+        "repeats": int(repeats),
+    }
+    matrix["planned_runs"] = (
+        matrix["cases"] * matrix["state_points"]
+        * matrix["arms"] * matrix["repeats"]
+    )
     facts: dict[str, Any] = {
         "channel": "e2",
         "code_sha": code_sha,
@@ -1184,12 +1201,7 @@ def state_probe_manifest_facts(
         "case_set_digest": case_set_digest_code,
         "arm_order_seed": arm_order_seed,
         "order": order,
-        "matrix": {
-            "cases": len(cases),
-            "state_points": STATE_POINT_COUNT,
-            "arms": len(arms),
-            "repeats": int(repeats),
-        },
+        "matrix": matrix,
         "started_at": started_at,
         "finished_at": finished_at,
         # E2 不实施整批墙钟掐停(那是 E3 / T-EX8 的事),所以调用方恒写 False。
@@ -1222,8 +1234,9 @@ def prepare_frozen_intent(
     在检索器看到它们之前就丢掉靠后的方面。
 
     ⚠ **登记的一处重复**:这个函数与 `scripts/reflect_shadow_rig.py` 的
-    `_prepare_search_intent` 是同一份逻辑的两份实现。计划 T-EX5 允许「若必须
-    复制逻辑,单列说明」,这里就是那一处说明:E2 的编排住在 `app/eval/`
+    `_prepare_search_intent` 是同一份逻辑的两份实现。**计划对这一格是沉默的**
+    ——没有哪句话授权复制,也没有哪句话禁止;这条路是实现自选的,债务在这里
+    登记(收敛归 T-EX7,见下)。理由:E2 的编排住在 `app/eval/`
     (纯逻辑、进标准门),而 rig 是 CLI 适配层,方向只能是 rig → 这里;把 E2
     改成 `import scripts.reflect_shadow_rig` 会让实验模块依赖 CLI。收敛的办法
     是 T-EX7 落地时让 rig 的 `_prepare_search_intent` **改调这个函数**(签名与
@@ -1281,11 +1294,19 @@ def prepare_frozen_intent(
 #: 判的**:转发那一轮之后,trace 里不许再有这几种步。
 #:
 #: 逐格来自 `reasoning_retrieval` 的写点(注意 `search_elements` 落的是
-#: `fallback` 而不是 `retrieve`——那是它的历史步名)。这份闭集与「非动作步」
-#: 那一份合起来必须覆盖服务端全部 `step_type=` 字面量,用例
-#: `test_the_action_step_closed_set_covers_every_trace_step_type` 拿源码对号:
-#: 服务端哪天新增一个动作步而这里没跟上,「不执行」就会变成一条**只对旧动作
-#: 成立**的断言,而没有任何一条用例会红。
+#: `fallback` 而不是 `retrieve`——那是它的历史步名)。
+#:
+#: 两条守卫各管一半,缺哪一半都会让「不执行」变成一条**只对旧动作成立**的断言:
+#:
+#: * **覆盖面** —— 这份闭集与「非动作步」那一份合起来必须覆盖服务端全部
+#:   `step_type=` 字面量(`test_the_action_step_closed_set_covers_every_trace_
+#:   step_type` 拿源码双向对号)。服务端哪天新增一个动作步而这里没跟上,那个
+#:   新动作就不在判据里;
+#: * **分类** —— 覆盖面只核**并集**,把 `retrieve` 从这半挪到另一半照样过。
+#:   所以分类那一半按**动作面真源**对号:一条真 run 里剧本的 `add_subquery` /
+#:   `search_elements` 真的被执行,它们当场记下的步名(`retrieve` / `fallback`)
+#:   必须落在这一半(`test_the_executed_half_is_anchored_on_what_executing_an_
+#:   action_looks_like`)。
 EXECUTED_ACTION_STEP_TYPES: frozenset[str] = frozenset({
     "retrieve", "fallback", "search_chunks", "exact_lookup", "enumerate",
     "expand", "expand_community", "follow_chain", "ppr", "consult_memory",
@@ -1349,6 +1370,60 @@ def assert_no_action_executed_after_forward(result: Any) -> None:
         )
 
 
+def _settings_with_case_overrides(settings_for_arm: Any, case: StateProbeCase) -> Any:
+    """`settings_for_arm` 的一份**副本** + 这一例的 `settings_overrides`(Q5 第三条)。
+
+    Q5 允许每例带一小组覆盖去**造形态**(`reasoning_max_element_searches=1` 造
+    「工具耗尽」),并要求同一 case 的四条臂用**同一份**覆盖。两件事都由这里
+    兑现,且必须发生在建检索器**之前**:两个白名单键都是 `self.settings` 的读点
+    (`reasoning_max_element_searches` 直读、`reasoning_max_chunk_searches` 经
+    `reasoning_action_policy(self.settings)`),检索器一建好就把 settings 存住了。
+
+    **副本而不是原地改**:`settings_for_arm` 是调用方按臂构造的一份配置,同一份
+    对象要被这条臂的全部 12 例复用。就地 `setattr` 会让第一个带覆盖的 case 把
+    额度永久改小,后面每一例都跑在一个它没声明的额度上——而四臂一致、轮数核、
+    「不执行」三道核全部照过,产出的数据看起来完全正常。
+
+    没有覆盖的 case **原样返回**那份臂配置:一次无谓的复制只会多出一个「副本与
+    原件哪个才是这条臂」的问题。
+
+    事后两道核,不成立当场 `StateProbeError`:
+
+    * 每一个覆盖键在副本上**真的读出了声明的值** —— `model_copy(update=...)`
+      不跑校验器,一个拼错的键会静默变成一个没人读的多余字段(`Settings` 的
+      `extra="ignore"`);加载器已经按 `Settings.model_fields` 拒过一次,这里是
+      运行期的第二道,守的是「加载器哪天放宽」与「字段改名」;
+    * 副本**不是**原件 —— 一个返回 `self` 的 `model_copy` 实现会把上面那条
+      「不原地改」的纪律悄悄取消。
+    """
+    if not case.settings_overrides:
+        return settings_for_arm
+    overrides = dict(case.settings_overrides)
+    copier = getattr(settings_for_arm, "model_copy", None)
+    if not callable(copier):
+        raise StateProbeError(
+            f"{case.case_key}: settings_for_arm "
+            f"({type(settings_for_arm).__name__}) has no model_copy(), so this "
+            "case's settings_overrides cannot be applied without mutating the "
+            "settings this arm shares with every other case"
+        )
+    effective = copier(update=overrides)
+    if effective is settings_for_arm:
+        raise StateProbeError(
+            f"{case.case_key}: model_copy() returned the arm's own settings "
+            "object, so applying this case's settings_overrides would mutate "
+            "every other case on this arm"
+        )
+    for key, value in overrides.items():
+        if getattr(effective, key, None) != value:
+            raise StateProbeError(
+                f"{case.case_key}: settings override {key}={value!r} did not "
+                f"take on the copied settings (reads "
+                f"{getattr(effective, key, None)!r})"
+            )
+    return effective
+
+
 def run_state_probe_point(
     repo: Any,
     settings_for_arm: Any,
@@ -1368,6 +1443,11 @@ def run_state_probe_point(
 ) -> StateProbePoint:
     """跑**一个**状态点:代理 → 检索器 → 冻结意图 → 一条 run → 一行。
 
+    `settings_for_arm` 只需要**这条臂**那一份配置(v2 总闸 / 测量 / 策略位):
+    这一例的 `settings_overrides` 由这里在建检索器之前套上一份副本
+    (`_settings_with_case_overrides`),调用方**不必也不该**自己先套——两处都套
+    不会出错,但「谁负责」这件事只能有一个答案,否则总有一天两份覆盖对不上。
+
     形状与生产接线的差别只有一处:`model_clients` 换成了 `ProbeModelClients`。
     三层 scope 与生产 Ask 同形(rig 的 `run_search_once` 的逐字复刻),少哪一层
     都不是「少记一点日志」:
@@ -1378,16 +1458,25 @@ def run_state_probe_point(
       路上唯一会往库里写的旁路,E2 结构上就不该写测试库;
     * `source_scope_context` —— `scope_source_ids` 为空时是个 no-op。
 
-    事后四道核,任何一道不成立当场 `StateProbeError`——**不修行、不兜底**:
+    事后五道核,任何一道不成立当场 `StateProbeError`——**不修行、不兜底**:
 
     1. 声明的 optimization 与 `reflect_optimization()` 的直接读数逐臂对号
        (复用 `reflect_ab.assert_optimization_matches_evidence`,与
        `run_ab_once` 同一处纪律);
     2. 转发恰好发生**一次**;
-    3. reflect 轮数恰好是 `k + 1`(多一轮说明停止决定没被采用,少一轮说明这条
+    3. plan 的 LLM 一次都没被调到(`driver.plan_calls == 0`)。驱动器的 plan
+       分支自己就抛,但那条 `StateProbeError` 会经过
+       `query_rewrite.py` 的 `except Exception: return fallback` ——今天
+       `BaseException` 让它穿过去,而这道事后核让「plan 被调到」不再只由那一个
+       基类选择兜着:轮数核与「不执行」核对一次被洗成 fallback 的 plan 调用
+       **三道全过**,那一行看起来与正常行毫无区别,只是这条 run 的意图并没有
+       被冻住(计划 M3)、还白烧了一次 plan 预算;
+    4. reflect 轮数恰好是 `k + 1`(多一轮说明停止决定没被采用,少一轮说明这条
        run 在到达状态点之前就收尾了——两种情况下这一行都会被归到一个它没跑到的
-       状态点上);
-    4. 转发那一轮之后 trace 里没有动作步(`assert_no_action_executed_after_forward`)。
+       状态点上;`_reflect_v2` 的**同轮加预算重试**也在这里露头:那时
+       `driver.turns` 数的是尝试次数而 `details` 数的是 reflect 步数,转发因此
+       提前一个状态点发生);
+    5. 转发那一轮之后 trace 里没有动作步(`assert_no_action_executed_after_forward`)。
     """
     from app.core.ask_retrieval_policy import ask_retrieval_limits
     from app.eval.reflect_ab import assert_optimization_matches_evidence
@@ -1418,7 +1507,8 @@ def run_state_probe_point(
         case, state_point_index, real_client, stop_aspect_id=aspect_ids[0])
     proxy = ProbeModelClients(repo, driver)
     retriever = ReasoningRetriever.from_repository(
-        proxy, settings_for_arm, cancel_event)
+        proxy, _settings_with_case_overrides(settings_for_arm, case),
+        cancel_event)
     assert_optimization_matches_evidence(
         optimization, retriever.reflect_optimization())
 
@@ -1448,6 +1538,16 @@ def run_state_probe_point(
             f"{case.case_key} state point {state_point_index}: the real client "
             f"was forwarded {driver.forward_count} time(s), expected exactly 1 "
             f"(reflect turns observed: {driver.turns})"
+        )
+    if driver.plan_calls:
+        # 驱动器的 plan 分支自己就抛,可那条异常要穿过一整条 fail-open 的链才
+        # 回到这里(`query_rewrite.py` 的 `except Exception: return fallback`
+        # 是其中一处)。`StateProbeError` 继承 `BaseException` 正是为此,而这道
+        # 事后核让这件事不再只由那一个基类选择兜着:窄一格就静默产出一行。
+        raise StateProbeError(
+            f"{case.case_key} state point {state_point_index}: the plan LLM was "
+            f"called {driver.plan_calls} time(s), so this run's intent was not "
+            "frozen (see plan M3)"
         )
     details = _reflect_steps(result)
     expected_turns = case.state_point_turn(state_point_index) + 1
