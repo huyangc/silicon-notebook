@@ -14546,19 +14546,31 @@ def test_fold_observation_counts_reuses_the_row_vocabulary_verbatim():
     同一件事在两处用两种说法,模型会把它们读成两件事——而这一行的全部作用就是
     告诉它「上面逐条列出的行之外,还发生过这些」。
 
-    变异:在折算里把任意一档换成自造的近义词 ⇒ 这条红。
+    折算的两遍(闭集那一段、兜底那一段)读的是**同一个来源** `_STATUS_LABELS`:
+    两遍各读一份清单的话,两份一旦漂开(新增一档状态却忘了配字面),同一个状态会被
+    两遍各列一次——各分档之和于是大于末尾那句「总计已尝试 N 次」,而那条恒等式正是
+    这份账的全部作用。所以这里同时钉住「键序逐项相同」与「同一状态只出现一档」。
+
+    变异:在折算里把任意一档换成自造的近义词 ⇒ 词表断言红;把第一遍换回读
+    `OBSERVATION_STATUSES`(与兜底那一遍的 `_STATUS_LABELS` 不同源)⇒ 键序断言红。
     """
     from app.services.reasoning_observation import (
         OBSERVATION_STATUSES, _STATUS_LABELS, fold_observation_counts,
     )
-    # 两份闭集同源:新增一个状态却忘了配字面,这条当场红(否则折算会拿状态码
-    # 当字面渲染出去)。
-    assert set(_STATUS_LABELS) == set(OBSERVATION_STATUSES)
+    # 两份闭集同源,而且**逐项同序**:折算按 `_STATUS_LABELS` 的键序出档,所以这里
+    # 比的不能只是集合——集合相等下,两份清单换个顺序,折算行的读法就跟着变了。
+    assert tuple(_STATUS_LABELS) == OBSERVATION_STATUSES
     rows = [_obs(status, seq=i + 1, truncated=True)
             for i, status in enumerate(OBSERVATION_STATUSES)]
-    labels = {part.rsplit(" ", 2)[0]
-              for part in fold_observation_counts(rows).split("；")}
+    parts = fold_observation_counts(rows).split("；")
+    labels = {part.rsplit(" ", 2)[0] for part in parts}
     assert labels == set(_STATUS_LABELS.values()) | {"已知截断", "总计已尝试"}
+    # 同一状态只出现一档:分档数 == 出现过的状态数,而各分档之和 == 行数。分档被
+    # 双计时这两条同时红(而末尾那句「总计」照样按 `len(rows)` 说话,于是谎报)。
+    buckets = [part for part in parts
+               if not part.startswith(("已知截断", "总计已尝试"))]
+    assert len(buckets) == len(labels) - 2 == len(OBSERVATION_STATUSES)
+    assert sum(int(part.rsplit(" ", 2)[1]) for part in buckets) == len(rows)
 
 
 def test_fold_observation_counts_keeps_an_unknown_status_in_the_total():
@@ -14581,6 +14593,11 @@ def test_fold_observation_counts_keeps_an_unknown_status_in_the_total():
     assert line.index("未来才有的状态") > line.index(
         _STATUS_LABELS[STATUS_SUCCESS])
     assert line.endswith("总计已尝试 2 次")
+    # 只出现**一档**:闭集那一段与兜底那一段读同一个 `_STATUS_LABELS`,按定义不
+    # 相交。两遍各读一份清单时这里会数到两次,各分档之和随即与「总计」对不上。
+    assert line.count("未来才有的状态") == 1
+    assert line.split("；")[:-1] == [
+        f"{_STATUS_LABELS[STATUS_SUCCESS]} 1 条", "未来才有的状态 1 条"]
 
 
 # ---------------------------------------------------------------------------
@@ -14687,6 +14704,157 @@ def test_evidence_block_takes_the_frozen_bytes_instead_of_re_rendering():
     assert dict(frozen.cards)["c2"] == dict(base.cards)["c2"]
 
 
+def test_evidence_block_budgets_the_frozen_bytes_not_this_turn_s_render():
+    """预算按**冻结行**的长度记账,不按本轮重算那一版。
+
+    一张卡可以在 `excerpt_chars=240` 那一轮冻成很长的一行,而本轮档位降到 20——按
+    本轮那一版判断预算、却把冻结那一版发出去,整块就会稳定超预算几百个字符,而
+    delta 下的证据预算是 K + 所有 D 的总和,每块超一点会一路累计。
+
+    上一条用例的预算是 4000(谁都装得下),所以它证明不了这件事。
+
+    变异:把 `frozen_cards.get(key)` 那两行挪到 `seen_min`/`caps` 判断**之后**
+    (按本轮重算的字节记账、发冻结的字节)⇒ 这条红。
+    """
+    from app.services.reasoning_context import (
+        EVIDENCE_BLOCK_TITLE, build_evidence_block,
+    )
+    # c2 排在前面(相关度更高),所以 `seen_min` 先被一张短卡定住;c1 那一张的冻结
+    # 行更长,该在它自己那一步被预算挤掉。
+    chunks = [_delta_chunk("c1", relevance=0.5),
+              _delta_chunk("c2", text="很短的一段正文", relevance=0.9)]
+    kwargs = dict(
+        collected={}, elements=[], chunks=chunks, chains=[], bound_keys=[],
+        fresh_keys=[], question="", action_query="阈值设置", excerpt_chars=20)
+    frozen_line = _rendered_card(chunks[0], "阈值设置", excerpt_chars=240)
+    thin_line = _rendered_card(chunks[0], "阈值设置", excerpt_chars=20)
+    short_line = _rendered_card(chunks[1], "阈值设置", excerpt_chars=20)
+    assert len(frozen_line) > len(thin_line) + 100      # fixture 真的会漂
+
+    # 预算刚好卡在中间:本轮那一版装得下,冻结那一版装不下。
+    budget = len(EVIDENCE_BLOCK_TITLE) + len(short_line) + len(thin_line) + 2
+    assert budget < len(EVIDENCE_BLOCK_TITLE) + len(short_line) + 1 + len(
+        frozen_line) + 1
+
+    selection = build_evidence_block(
+        **kwargs, budget_chars=budget, frozen_cards={"c1": frozen_line})
+    assert len(selection.text) <= budget           # 整块没有超预算
+    assert frozen_line not in selection.text       # 那一张确实没发出去
+    assert selection.shown_keys == ("c2",)
+    assert selection.omitted == 1
+    assert selection.cards == (("c2", short_line),)
+    # 不冻结时同一份预算装得下它:被挤掉的原因是冻结行更长,不是这张卡本来就不行。
+    assert build_evidence_block(**kwargs, budget_chars=budget).shown_keys == (
+        "c2", "c1")
+
+
+def test_evidence_block_cards_track_exactly_what_it_rendered():
+    """`cards` 与 `shown_keys` 逐项对齐,而且每一行都真的在 `text` 里。
+
+    `ReflectDeltaState.note_shown` 的正确性整个押在这条不变量上:冻结表从 `cards`
+    取字节,而"曾展示"这件事从 `shown_keys` 算。两者一旦漂开——某一档的份额把一张
+    卡挤掉了、`cards` 里却还留着它——T-PD5 会冻下一串**从没发出去过**的字节,下一轮
+    这个键进 `already_shown`,增量块把它永久排除。这条证据从此对模型不可见,而且不
+    进任何一个 `omitted`(它被记成"已展示"):静默丢证据,没有任何断言会红。
+
+    fixture 真的走到那一档的份额判断(留底把第一档切窄),不是"全都装得下"的退化
+    形状。
+
+    变异:把 `rendered.append` 上移到 `caps[tier]` 判断**之前** ⇒ 这条红。
+    """
+    from app.services.reasoning_context import (
+        _FRESH_RESERVE_RATIO, EVIDENCE_BLOCK_TITLE, build_evidence_block,
+    )
+    # b1 是已绑定那一档、f1 是本轮新增那一档;留底存在 ⇒ caps[0] 只有 2/3 预算。
+    chunks = [_delta_chunk("b1", relevance=0.9),
+              _delta_chunk("f1", text="新证据一段", relevance=0.8),
+              _delta_chunk("d1", text="补位一段", relevance=0.1)]
+    bound_line = _rendered_card(chunks[0], "阈值设置", excerpt_chars=60)
+    # 预算让 b1 那一张越过第一档的份额、却仍在总预算之内:它必须走**渲染之后**
+    # 那道 `caps[tier]` 判断,而不是渲染之前那道 floor 判断。
+    needs = len(EVIDENCE_BLOCK_TITLE) + len(bound_line) + 1
+    budget = needs + needs // _FRESH_RESERVE_RATIO
+    assert needs > budget - budget // _FRESH_RESERVE_RATIO   # 越过 caps[0]
+    assert needs <= budget                                   # 但在总预算之内
+
+    selection = build_evidence_block(
+        collected={}, elements=[], chunks=chunks, chains=[],
+        bound_keys=["b1"], fresh_keys=["f1"], question="",
+        action_query="阈值设置", budget_chars=budget, excerpt_chars=60)
+    # 第一档的份额真的挤掉了一张(否则这条用例只证明了"全都装得下")。
+    assert "b1" not in selection.shown_keys
+    assert selection.omitted >= 1
+    assert selection.shown_keys                      # 但别的档照样出卡
+    _assert_cards_match_the_rendered_block(selection)
+
+
+def _assert_cards_match_the_rendered_block(selection):
+    """`cards` ↔ `shown_keys` ↔ `text` 三者对齐(两个 builder 共用)。"""
+    assert tuple(key for key, _ in selection.cards) == selection.shown_keys
+    assert all(text in selection.text for _, text in selection.cards)
+
+
+def test_delta_evidence_block_cards_track_exactly_what_it_rendered():
+    """增量块这一侧的同一条不变量,fixture 走到**收敛循环真的 pop 掉一行**。
+
+    披露算进硬预算的那圈循环 `lines.pop()` 时必须连 `rendered` 一起 pop:漏掉的话
+    `cards` 会比 `shown_keys` 多一张,而多出来的那一张正是被预算丢掉、从没发出去的
+    那一行。
+
+    变异:收敛循环 pop `lines`/`shown` 但不 pop `rendered` ⇒ 这条红。
+    """
+    from app.services.reasoning_context import (
+        DELTA_BLOCK_TITLE, _OMISSION_NOTE, build_delta_evidence_block,
+    )
+    chunks = [_delta_chunk(f"c{i}", text=f"段落{i}") for i in range(6)]
+    line = _rendered_card(chunks[0], "阈值设置")
+    # 六张卡的渲染逐字等长(键与正文各差一个字符),下面那笔账才算得准。
+    assert len({len(_rendered_card(c, "阈值设置")) for c in chunks}) == 1
+    head = len(DELTA_BLOCK_TITLE) + 1
+    note = len(_OMISSION_NOTE.format(omitted=3))
+    # 预算恰好让主循环装下三张、却装不下"三张 + 那句披露":于是收敛循环 pop 一次。
+    budget = head + 3 * (len(line) + 1) + note - 1
+    assert head + 3 * (len(line) + 1) - 1 <= budget      # 三张本身装得下
+    assert len(_OMISSION_NOTE.format(omitted=4)) == note  # pop 前后披露等长
+
+    selection = build_delta_evidence_block(
+        **_delta_kwargs(chunks, budget_chars=budget))
+    assert len(selection.shown_keys) == 2       # 装下三张之后又 pop 掉一张
+    assert selection.omitted == 4
+    assert head + len(selection.text) <= budget
+    _assert_cards_match_the_rendered_block(selection)
+
+
+def test_both_evidence_builders_skip_keys_that_left_the_pool():
+    """`bound_keys`/`fresh_keys` 里有一个已经被池投影裁掉的陈旧键 ⇒ **跳过**,
+    不是 `KeyError`。
+
+    这两格来自大纲的 `evidence_keys` 与观察账里那一轮的 `result_ids`,而候选池会被
+    投影裁剪:一个键留在账上、对象已经不在池里是常态。`index[key]` 直接炸的话,炸的
+    是整条 reflect 装配路径——一条陈旧引用换来一次全轮失败。
+
+    变异:把两个 builder 里的 `key in index` 存在性过滤删掉 ⇒ 这条红。
+    """
+    from app.services.reasoning_context import (
+        build_delta_evidence_block, build_evidence_block,
+    )
+    chunks = [_delta_chunk("c1", text="还在池里的一段")]
+    stale = ["已经被投影裁掉的键", "c1"]
+
+    block = build_evidence_block(
+        collected={}, elements=[], chunks=chunks, chains=[],
+        bound_keys=stale, fresh_keys=["另一个陈旧键"], question="",
+        action_query="阈值设置", budget_chars=4000, excerpt_chars=60)
+    assert block.shown_keys == ("c1",)
+    # 陈旧键不进 `omitted`:它不是"候选里没展开的一条",它根本不是候选。
+    assert block.omitted == 0
+
+    delta = build_delta_evidence_block(**_delta_kwargs(
+        chunks, bound_keys=stale, fresh_keys=["另一个陈旧键"]))
+    assert delta.shown_keys == ("c1",)
+    assert delta.omitted == 0
+
+
 def test_supplement_card_repeats_the_pool_key_verbatim():
     """同 key 摘录升级 ⇒ 追加一张标着版本的补充卡,`key=` 那一格与原卡逐字相同。
 
@@ -14718,6 +14886,41 @@ def test_supplement_card_repeats_the_pool_key_verbatim():
     # 变异:把 `note_shown` 的 `if key not in self.frozen_cards` 去掉 ⇒ 这条红。
     state.note_shown("c1", second)
     assert state.frozen_cards["c1"] == first
+
+
+def test_version_marker_refuses_a_line_whose_second_field_is_not_the_key():
+    """`key=` 不在第二格 ⇒ 响亮 `ValueError`,不是静默插错格。
+
+    这道 `raise` 是"卡片形状漂移"的唯一守卫:`render_card` 哪天换了字段次序、或者
+    有人把一张**无 key** 的卡(推导链卡的 `key` 就是 `""`)喂进来,静默插进第三格
+    会让绑定校验读到一个根本不是键的东西——模型抄下来的"键"下一轮必然失配,而且
+    没有任何一处会说出来。
+
+    变异:把那道 `raise` 整个删掉 ⇒ 这条红。
+    """
+    import pytest as _pytest
+    from app.services.reasoning_context import (
+        KIND_INFERENCE, EvidenceCard, ORIGIN_EXTRACTED, _with_version_marker,
+        render_card,
+    )
+    # 今天真会走到这里的那一种:无 key 的推导链卡(增量块按设计不装它们)。
+    chainless = render_card(EvidenceCard(
+        kind=KIND_INFERENCE, key="", locator="A --x--> B via C",
+        origin=ORIGIN_EXTRACTED, excerpt="query-time only", conditions="",
+        partial=False))
+    assert not chainless.split("\n")[0].split(" | ")[1].startswith("key=")
+    with _pytest.raises(ValueError, match="second field is"):
+        _with_version_marker(chainless, 2)
+    # 字段次序漂了(key 掉到第三格)同样响亮。
+    with _pytest.raises(ValueError, match="second field is"):
+        _with_version_marker("- [chunk] | Doc · 1.1 | key=c1 | 原文", 2)
+    # 只有一格的行也不行(切不出第二格就没有"逐字搬过来的 key")。
+    with _pytest.raises(ValueError, match="second field is"):
+        _with_version_marker("- [chunk]", 2)
+    # 正常形状照旧:守卫挡的是漂移,不是把好卡也拦下来。
+    assert _with_version_marker(
+        _rendered_card(_delta_chunk("c1"), "阈值设置"), 2).split(
+            "\n")[0].split(" | ")[1] == "key=c1"
 
 
 def test_supplement_is_not_appended_for_an_excerpt_already_sent():
@@ -14797,11 +15000,14 @@ def test_delta_evidence_block_stops_at_max_cards_and_discloses_the_rest():
 
     省略数**只报本块**:它说的是"这一块没展开几条",不是"整个池子还剩几条"。
 
+    披露**自成一行**:贴在最后一张卡的行尾的话,那句话读起来就是那张卡的一部分
+    (`  适用条件: xxx（另有 8 条…）`),而它说的是整块的事。
+
     变异:把 `max_cards` 那道上限拿掉 ⇒ 张数断言红;把披露改成另一种说法 ⇒
-    同源断言红。
+    同源断言红;把披露从独立成行改成贴在最后一行行尾 ⇒ 成行断言红。
     """
     from app.services.reasoning_context import (
-        build_delta_evidence_block, build_evidence_block,
+        _OMISSION_NOTE, build_delta_evidence_block, build_evidence_block,
     )
     chunks = [_delta_chunk(f"c{i}", text=f"段落{i}", relevance=1 - i / 20)
               for i in range(10)]
@@ -14810,34 +15016,64 @@ def test_delta_evidence_block_stops_at_max_cards_and_discloses_the_rest():
     assert len(selection.shown_keys) == 2
     assert selection.omitted == 8
     assert selection.text.count("\n- [") + 1 == 2      # 正文里就两张卡
-    # 与 K 那一块的省略披露逐字同源(两块的省略是同一件事)。
+    # 与 K 那一块的省略披露**同一个常量**(两块的省略是同一件事)。同一串字面在两处
+    # 各硬编码一遍,今天一致不等于以后还一致。
     squeezed = build_evidence_block(
         collected={}, elements=[], chunks=chunks, chains=[], bound_keys=[],
         fresh_keys=[], question="", action_query="", budget_chars=200,
         excerpt_chars=60)
-    note = f"（另有 {squeezed.omitted} 条候选证据本轮未展开）"
-    assert note in squeezed.text
-    assert "（另有 8 条候选证据本轮未展开）" in selection.text
+    assert squeezed.omitted > 0
+    assert _OMISSION_NOTE.format(omitted=squeezed.omitted) in squeezed.text
+    note = _OMISSION_NOTE.format(omitted=8)
+    assert note in selection.text
+    # 自成一行,不是贴在最后一张卡的行尾。
+    assert selection.text.splitlines()[-1] == note
+    # K 那一块相反:它的披露挂在**块头**上,块头本来就自成一行。
+    assert squeezed.text.splitlines()[0].endswith(
+        _OMISSION_NOTE.format(omitted=squeezed.omitted))
 
 
 def test_delta_evidence_block_keeps_the_disclosure_inside_the_budget():
-    """`budget_chars` 是硬界:省略披露本身也算进去。
+    """`budget_chars` 是硬界:省略披露与**块头**都算进去。
 
     先装行、最后再拼披露的话,那句话的长度不在任何一次预算判断里,整块因此可以稳定
     超出预算十几个字符——而 delta 下证据预算是 **K + 所有 D 的总和**,每块超一点会
-    一路累计。
+    一路累计。块头是同一件事,只是量级大一个数量级:`DELTA_BLOCK_TITLE` 六十多个
+    字符,由 `build_delta_block` 拼在这一节前面,每块都真的发出去。所以这里钉住的
+    是调用方那条记账口径:
 
-    变异:把末尾那圈收敛循环删掉(装完就返回)⇒ 这条红。
+        len(DELTA_BLOCK_TITLE) + 1 + len(selection.text) <= budget_chars
+
+    变异:把末尾那圈收敛循环删掉(装完就返回)⇒ 这条红;把 `used` 的起点改回 0
+    (块头不计)⇒ 含块头那条红。
     """
-    from app.services.reasoning_context import build_delta_evidence_block
+    from app.services.reasoning_context import (
+        DELTA_BLOCK_TITLE, build_delta_block, build_delta_evidence_block,
+    )
+    head_chars = len(DELTA_BLOCK_TITLE) + 1
     chunks = [_delta_chunk(f"c{i}", text=f"段落{i}" * 10) for i in range(6)]
     one = build_delta_evidence_block(**_delta_kwargs(chunks, budget_chars=1))
     assert one.text == "" and one.shown_keys == () and one.omitted == 6
-    for budget in range(40, 400, 17):
+    # 预算刚好卡在块头附近:装不下块头就一张卡都不发(发一个注定超预算的块没有任何
+    # 读法是对的),而披露数仍然如实等于候选数。
+    for budget in (head_chars - 1, head_chars, head_chars + 1):
+        edge = build_delta_evidence_block(
+            **_delta_kwargs(chunks, budget_chars=budget))
+        assert edge.text == "", budget
+        assert edge.shown_keys == () and edge.omitted == 6, budget
+    seen_nonempty = False
+    for budget in range(40, 700, 17):
         selection = build_delta_evidence_block(
             **_delta_kwargs(chunks, budget_chars=budget))
-        assert len(selection.text) <= budget, budget
+        # 真正的界是"块头 + 这一节",而不是只有这一节。
+        assert head_chars + len(selection.text) <= budget or not selection.text
         assert len(selection.shown_keys) + selection.omitted == 6, budget
+        if selection.text:
+            seen_nonempty = True
+            # 拼成整块之后仍在预算内——记账口径与实际发出的字节是同一件事。
+            block = build_delta_block(selection.text, [], [], generation=1)
+            assert len(block) <= budget, budget
+    assert seen_nonempty        # 这个区间里真的有装得下卡的形状
 
 
 def test_build_delta_block_drops_the_sections_it_has_nothing_for():
@@ -14846,8 +15082,16 @@ def test_build_delta_block_drops_the_sections_it_has_nothing_for():
     只有标题的空块在模型眼里与"这一轮什么都没发生"没有区别,而真相是这一轮确实
     什么都没追加——那就一块都不发。
 
-    变异:三节全空时仍返回标题 ⇒ 空串断言红;把观察那一节后面的 `HISTORY_NOTE`
-    去掉 ⇒ 同源断言红(那些行里的"目的"是模型当时写下的判断,不是证据)。
+    三节之间隔一个空行:单个 `\\n` 会把证据卡的 `- [chunk] | …` 与观察行的
+    `- #N [action] …` 连成同一份 bullet 列表,而这两类材料的标识本来就是分块要
+    保住的东西。块头与第一节之间仍是单个 `\\n`(与 K 那一块同一种写法)。
+
+    历史免责**不再每块各带一份**:那句话由 `DELTA_BLOCK_TITLE` 里"观察行的含义同
+    上方观察账"一次性接过去,K 的观察账里那一份仍然在。
+
+    变异:三节全空时仍返回标题 ⇒ 空串断言红;三节之间换回单个 `\\n` ⇒ 空行断言红;
+    把 `HISTORY_NOTE` 塞回观察那一节 ⇒ 不重复断言红;把标题里那句"观察行的含义同
+    上方观察账"删掉 ⇒ 接力断言红。
     """
     from app.services.reasoning_context import (
         DELTA_BLOCK_TITLE, build_delta_block,
@@ -14864,7 +15108,11 @@ def test_build_delta_block_drops_the_sections_it_has_nothing_for():
 
     rows_only = build_delta_block("", ["- #1 [action] search_chunks"], [],
                                   generation=1)
-    assert rows_only.endswith(HISTORY_NOTE)
+    assert rows_only == f"{DELTA_BLOCK_TITLE}\n- #1 [action] search_chunks"
+    # 那句免责不在块里,而"观察行怎么读"这件事由块头接过去(K 的观察账里仍有一份
+    # 完整的 `HISTORY_NOTE`,两处说的是同一件事)。
+    assert HISTORY_NOTE not in rows_only
+    assert "观察行的含义同上方观察账" in DELTA_BLOCK_TITLE
 
     whole = build_delta_block(
         "- [chunk] | key=c1 | 卡", ["- #1 [action] search_chunks"],
@@ -14872,7 +15120,17 @@ def test_build_delta_block_drops_the_sections_it_has_nothing_for():
     # 三节顺序:新增卡 → 本轮观察 → 已接受的方面更新。
     assert whole.index("key=c1") < whole.index("#1 [action]")
     assert whole.index("#1 [action]") < whole.index("已接受的方面更新")
-    assert whole.index(HISTORY_NOTE) < whole.index("已接受的方面更新")
+    # 三节之间隔一个空行,块头与第一节之间不隔。
+    assert whole == (
+        f"{DELTA_BLOCK_TITLE}\n- [chunk] | key=c1 | 卡"
+        "\n\n- #1 [action] search_chunks"
+        "\n\n本轮服务端已接受的方面更新：a2（模型判断，非原文）")
+    assert whole.count("\n\n") == 2
+    # 多行的一节内部仍然是单个 `\n`:空行只在节与节之间。
+    two_rows = build_delta_block(
+        "", ["- #1 [action] search_chunks", "- #2 [action] search_kg"], [],
+        generation=1)
+    assert "\n\n" not in two_rows
 
 
 def test_build_delta_block_marks_the_generation_only_after_a_rebuild():
@@ -14920,22 +15178,36 @@ def test_delta_state_holds_only_rendered_text_and_counters():
     靠这一格钉住——往里塞一个 `state` 或 `selection` 字段,它就从"渲染缓存"变成了
     "第二份会与真实状态分叉的账",而分叉之后先被相信的往往是这一份。
 
-    变异:给 `ReflectDeltaState` 加一格业务状态 ⇒ 这条红。
+    `frozen_cards`(曾展示的字节表,只增不减)与 `visible_keys`(此刻还在消息里的
+    键)是**两格**,而不是一格兼任两件事:模块 docstring 里"在池子里 / 曾经展示过 /
+    此刻还在消息里"是三件不同的事,一次重建之后后两件就不再相等。
+
+    变异:给 `ReflectDeltaState` 加一格业务状态 ⇒ 这条红;把 `visible_keys` 去掉、
+    让 `frozen_cards` 兼任"当前可见" ⇒ 这条红。
     """
     from app.services.reasoning_context import ReflectDeltaState
     assert ReflectDeltaState.__slots__ == (
         "snapshot_evidence", "snapshot_history", "blocks", "frozen_cards",
-        "card_variants", "card_versions", "observation_cursor",
+        "visible_keys", "card_variants", "card_versions", "observation_cursor",
         "pending_aspect_notes", "evidence_chars", "history_chars",
         "rebuilds", "fallback", "generation")
     fresh = ReflectDeltaState()
     assert (fresh.generation, fresh.rebuilds, fresh.fallback) == (1, 0, False)
     assert (fresh.evidence_chars, fresh.history_chars,
             fresh.observation_cursor) == (0, 0, 0)
+    assert fresh.visible_keys == set()
     # 两个实例不共享那几份可变默认值(`default_factory`,不是可变默认参数)。
     fresh.blocks.append("D1")
     fresh.frozen_cards["c1"] = "卡"
+    fresh.visible_keys.add("c1")
     assert ReflectDeltaState().blocks == [] and not ReflectDeltaState().frozen_cards
+    assert ReflectDeltaState().visible_keys == set()
+    # 两格互不改写:`note_shown` 只碰字节表,当前可见集由装配方按 K/D 的收缩维护
+    # (T-PD5)。这里钉住的是"冻结一张卡不等于宣布它此刻可见"。
+    later = ReflectDeltaState()
+    later.note_shown("c9", "- [chunk] | key=c9 | 卡")
+    assert later.frozen_cards == {"c9": "- [chunk] | key=c9 | 卡"}
+    assert later.visible_keys == set()
 
 
 def test_delta_state_repr_carries_no_document_text():
@@ -14953,7 +15225,10 @@ def test_delta_state_repr_carries_no_document_text():
     state = ReflectDeltaState(
         snapshot_evidence=secret, snapshot_history=secret,
         blocks=[secret], frozen_cards={"c1": secret},
-        card_variants={"c1": {secret}}, card_versions={"c1": 2},
+        visible_keys={"c1"},
+        # `card_versions` 的值只是整数,遮的是它的**键**——池键会把"这一轮给模型
+        # 看了哪些对象"整份抖出来,与 `frozen_cards` 的键集是同一份东西。
+        card_variants={"c1": {secret}}, card_versions={secret: 2},
         pending_aspect_notes=[secret], observation_cursor=7,
         evidence_chars=120, history_chars=80, rebuilds=1, generation=2)
     rendered = repr(state)
@@ -14962,6 +15237,9 @@ def test_delta_state_repr_carries_no_document_text():
     for number in ("observation_cursor=7", "evidence_chars=120",
                    "rebuilds=1", "generation=2"):
         assert number in rendered
+    # `visible_keys` 留着 `repr`:它只有池键、没有任何正文,而"此刻消息里还剩哪些
+    # 卡"是 delta 出问题时第一个要看的东西。
+    assert "visible_keys={'c1'}" in rendered
 
 
 def test_prefix_user_block_renders_delta_between_the_ledger_and_the_turn_state():

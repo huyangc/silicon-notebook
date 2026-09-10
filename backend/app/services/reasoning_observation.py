@@ -747,7 +747,8 @@ def fold_observation_counts(rows: Sequence[ActionObservation]) -> str:
       成两件事。闭集之外的状态(`ActionObservation` 自己不校验这一格)按
       `render_observation_row` 的同一条兜底——用原始状态码当字面,排在闭集之后。
       悄悄丢掉这样一行会让上面那条恒等式当场变成谎报,而谎报正是这份账要避免的
-      那件事。
+      那件事。**闭集的两遍读同一个来源**(`_STATUS_LABELS` 的键序),所以一个状态
+      不可能既进闭集那一段又进兜底那一段。
     * **零值不渲染。**「本轮没有失败」与「失败 0 次」在模型眼里不是同一句话,而
       前者本来就不必说;七档全列出来只会让这一行长成半屏。
     * **`truncated ∧ failed` 只计一次。**判据与 `render_observation_row` 那一格
@@ -766,9 +767,16 @@ def fold_observation_counts(rows: Sequence[ActionObservation]) -> str:
         counts[row.status] = counts.get(row.status, 0) + 1
         if row.truncated and row.status != STATUS_FAILED:
             truncated += 1
-    # 闭集按 `OBSERVATION_STATUSES` 的顺序,表外的按首次出现序接在后面:两段都只
-    # 依赖输入,所以同一批行的折算结果是可重复的。
-    ordered = [status for status in OBSERVATION_STATUSES if counts.get(status)]
+    # 闭集按 `_STATUS_LABELS` 的键序(它与 `OBSERVATION_STATUSES` 逐项同序,见
+    # `test_fold_observation_counts_reuses_the_row_vocabulary_verbatim`),表外的按
+    # 首次出现序接在后面:两段都只依赖输入,所以同一批行的折算结果是可重复的。
+    #
+    # 两遍**必须读同一个闭集**:第一遍读 `OBSERVATION_STATUSES`、第二遍用
+    # `not in _STATUS_LABELS` 兜底的话,两份清单一旦漂开(新增一档状态却忘了配
+    # 字面),同一个状态会被两遍各列一次——各分档之和于是大于「总计已尝试 N 次」,
+    # 而这份账的全部作用就是那条恒等式。同源之后「同一状态只出现一档」是结构上
+    # 成立的:`ordered` 的两段按定义不相交。
+    ordered = [status for status in _STATUS_LABELS if counts.get(status)]
     ordered.extend(status for status in counts if status not in _STATUS_LABELS)
     parts = [f"{_STATUS_LABELS.get(status, status)} {counts[status]} 条"
              for status in ordered]
