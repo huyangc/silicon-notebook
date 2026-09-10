@@ -207,6 +207,41 @@
         里的 `time.perf_counter()` 换成模块别名——`scripts/generate_repository_contract_fixtures.py`
         的 `fixed_perf` 正是靠全局 patch 才能得到确定性耗时，换别名会让 golden 漂移。若再
         复现，改用注入时钟（把取时函数做成 `_closing_rerank` 的可选形参）。
+      (j) **PR-2「T0 测量 + `prefix_snapshot`」已落地**（计划真源
+      `docs/superpowers/specs/2026-09-09-reflect-prefix-snapshot-plan_zh.md`，上游设计
+      `docs/superpowers/specs/2026-09-09-reflect-prefix-cache-final-design_zh.md`）：
+      `REASONING_REFLECT_OPTIMIZATION`（默认 `off`，本期只放开 `off`/`prefix_snapshot`）与
+      正交的 `REASONING_REFLECT_MEASURE_CONTEXT`（默认 false）、S/C/K/D/T 布局、同源静态
+      工具目录、单次调用观测（`call_wall_ms`/`status`/`attempts`/`response_chars`/`usage`）、
+      reflect 步的稀疏测量键与闭集投影新增九列、rig 的 `EVENT_LOG_DIR` 隔离 / `run_wall_ms` /
+      `(policy, optimization)` 二维臂 / per-call 表。**仍未做的是拿它跑对照实验**：真实模型
+      的 E1/E2/E3 与首份报告不进 CI，`prefix_snapshot` 的实际收益**一个数都还没量**（文档只
+      宣称结构与可观测性交付）；**开闸仍是此之后的独立决定**。
+
+      PR-2 的**已知限制**（知情接受，不改代码；首份报告要照抄）：
+
+      * **`search` 子命令的投影 `optimization` 恒 unknown**：第二维只接在 `ab` 臂上
+        （`_settings_by_arm` 逐臂设 `REASONING_REFLECT_OPTIMIZATION` 并核对实际运行值），
+        而 `project_search_run` 的 `rig_tags` 不带这一维。想让 `search` 也分格，要在 domain
+        侧单独加一格，属于独立立项。
+      * **`AskCancelled` 的 run 不产投影行**：`search` 与 `ab` 两条路上它都是**整批收摊的
+        信号**并按设计原样上抛，所以「取消的 run 也有 `run_wall_ms`」这条只对「取消事件已
+        置位、run 抛的却是非 `AskCancelled` 异常」那一路成立（走失败行、带墙钟）。真要给
+        取消的 run 落一行，需要先决定收摊语义。
+      * **`ab` 的 `--only-policy` 与 `--arms` 互斥**：既有一维用法逐字不变。要把
+        `--only-policy` 也二维化（如 `--only-arm`）是一次 CLI 决定，没做。
+      * **`EVENT_LOG_DIR` 与 `LLM_LOG_PATH` 目录不对齐会打一行启动告警**：rig 按计划把
+        事件落 `<out-dir>/events`、llm 日志落 `<out-dir>/llm`，`repository_runtime` 的对齐
+        检查因此每次真跑报一行。对 rig 无功能影响（两串日志各按自己的 glob 读），消掉它要
+        把两者并到同一目录，是对计划字面的偏离。
+      * **`prefix_snapshot` 相对 `off` 每轮 +1–3KB 输入**（缓存未命中时）：目录恒为超集，
+        所以 `off` 的 system 段随额度收缩变短、这条臂不会。按设计接受，见部署文档那两条。
+      * **`prefix_delta` / `prefix_delta_lean` 由启动期校验器响亮拒绝**：PR-3/PR-4 各放开
+        一格，`REASONING_REFLECT_RECENT_OBSERVATIONS` 在那两格的含义随之改变（部署文档已
+        预告）。PR-5 是生产策略的实验标记接缝（E1），本期刻意不做。
+      * **A/B 采用与开闸的拍板点仍在用户手上**（设计 §13）：默认 `off`，选定策略后逐步
+        验证、由用户决定开启；任一质量或稳定性回归立即回 `off`，不做数据迁移。E1 的机制
+        结果只能支持「稳定前缀的时间收益」，**不得**报告成估算命中率。
 - [ ] **深度报告一侧的方面送达复核补上簇折叠表**：Ask 侧 `_answer_context` 已经把
       `knowledge_context` 的 `fold_sink`（同 canonical 簇被折叠掉的成员 → 代表）折进
       `admitted_evidence_keys`；报告侧 `_draft_section` 走 `knowledge_context_with_outline`，

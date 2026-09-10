@@ -113,6 +113,14 @@
 
 **T-PS4 评审后追加(2026-09-10)。** 还要过一遍 `docs/superpowers/specs/2026-09-08-reflect-t0-trace-analysis-design_zh.md` 的**§键集**一节:T-PS4 在闭集上加了九个顶层键、`context_chars` 的短码含一个字节口径的 `bytes_total`,那份设计稿的键集清单因此已经落后。带日期的设计稿本身不改(它是当天的决定),在 T-PS9 里以「后续修正」的形式在**引用它的那一级**记清差异,别让下一个人拿旧清单当闭集真源。
 
+**实施记录(2026-09-10)。** 本任务只改文档与注释,不改任何 `.py`。落点与上面字面不同的地方,都记在这里:
+
+- **`docs/deployment-and-configuration{,_zh}.md`。** 两条配置在 T-PS6/T-PS3 已随代码写进数值表,本任务做的是**核对定稿 + 补两处**:① `REASONING_REFLECT_RECENT_OBSERVATIONS` 那一条补 delta 模式的预告(设计 §5.1 的原话:snapshot 保持旧含义,delta 用于重建 K 时保留多少条近期详细观察、不触发逐轮滑窗),并明写「那两格今天被启动期校验器拒绝,所以这是预告不是当前行为」——不然读的人会以为配了就有。② `REASONING_REFLECT_OPTIMIZATION` 里「**尚未落地的是测量**」那半句已经**过时**(T-PS3/T-PS4 落地之后写的),改成「测量要另开一格,尺子是下一条,两条臂共用同一次装配因此共用同一把尺子,本项自己一个数都不写」。其余定稿项(默认/四取值/本期两格/v2 关与 Knowhow 忽略/不是前端档位/正交/未命中 +1–3KB/峰值两轮/失败只表现为键缺席)逐条核对,与代码一致,未改。
+- **`docs/product-and-api{,_zh}.md`。** P 模式分块那一级 T-PS8 修正轮已写全(五个 `context_chars` 是稳定性类别、C/T 是差值、`off` 的 T 是排最前的服务器状态摘要、两臂同形同尺),本任务补两块:① `message_prefix_bytes` 的定义单列一条——量的是**整条最终序列**(含 wrapper 与帧开销)的 UTF-8 字节、同一轮的两次尝试都与上一轮比、首轮如实缺键、与同轮字节总数同口径,并写明它是**客户端结构指标**而非上游复用量(字段名里没有任何「命中」类词,与 §2 硬约束同源)。② 闭集投影新增九键的一句话说明,连同「没量到 = 缺值不是 0」与「`model_calls_real`/`response_chars_total` 任一步缺 ⇒ 整列 unknown」两条口径,并在同一段落末尾按上面那条追加记下**T0 设计稿键集的后续修正**(带日期的设计稿不动,闭集真源指向 `backend/app/domain/reasoning_trace_stats.py`)。**llm.jsonl 字段契约**那一级(`attempts` 只在终态行、`status="retry"` 行不带、按行累加会重复计入;`response_chars` 不经 `LLM_LOG_MAX_CHARS` 截断)T-PS2 已按本节要求写进中英两侧,本任务只核对,与 `llm.py` 935/941/944/853-859 一致,未改。
+- **`architecture.md`(reflect 那一段)。** 无 `_zh` 配对(全仓只有一份 `architecture.md`),所以只改这一处。补:两条判据的唯一读点与 AST 守卫的用例名、静态目录产地 `static_catalog_facts` 的归一清单与「恒为超集」的理由、`_prime_static_catalog` 的时机与 `!= "off"` 判据、`ReflectContext` 两个消费点**双向**互斥(各自对非空的对侧字段抛错)、测量落账点 `_TraceRecorder.__call__` 与越界键 `raise` 而不是 `assert` 的理由、以及登记 `backend/app/eval/reflect_context_bench.py`。⚠ 那个模块由 T-PS5 在 `claude/reflect-prefix-rig` 分支落地,本分支没有它;登记按 T-PS5 的交付描述写(纯分析、零 I/O、llm.jsonl ⋈ events.jsonl on `support_id`、闭集行键),**两条分支合并后要核对一次**。
+- **`fangan_todo.md`。** 在「reflect v2 开闸前待办」下新增子项 (j),体例同 (i):PR-2 已交付什么、仍未做的是拿它跑对照实验、开闸仍是独立决定,外加七条已知限制——`search` 投影 `optimization` 恒 unknown(第二维只接在 `ab`)、`AskCancelled` 整批收摊不产行、`--only-policy` 与 `--arms` 互斥、`EVENT_LOG_DIR`/`LLM_LOG_PATH` 目录不对齐的启动告警、`prefix_snapshot` 每轮 +1–3KB、PR-3/4/5 待做、A/B 采用与开闸的拍板点(设计 §13)仍在用户手上。前三条与第四条是 T-PS5 的实况,同样待合并后核对。
+- **`scripts/README*` 一个字未动**:T-PS5 已在 rig 那一节写了第二维臂、`EVENT_LOG_DIR` 隔离与 per-call 表,本任务不重复写以免合并冲突。
+
 依赖:T-PS1→T-PS2→T-PS3;T-PS6→T-PS7→T-PS8;T-PS4 依赖 T-PS3;T-PS5 依赖 T-PS2+T-PS4+T-PS6;T-PS9 收尾。两条链可并行,T-PS5 汇合。
 
 ## 4. 刻意不做
