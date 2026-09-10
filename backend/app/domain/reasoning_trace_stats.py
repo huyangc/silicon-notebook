@@ -95,6 +95,35 @@ RUN_PROJECTION_KEYS: frozenset[str] = frozenset({
     "total_ms",
     "trace_steps",
     "trace_truncated",
+    # --- reflect 前缀复用测量(T-PS4;稀疏,缺一律 None) ---
+    # 一次 run 的**墙钟**。轨迹里没有这件事实(`total_ms` 是各步耗时之和,漏掉
+    # 排队与步与步之间的空隙),只有 rig 手上有,所以导出侧恒 `None`、由 rig
+    # 就地写入(计划 §3 T-PS5)。
+    "run_wall_ms",
+    # 这次 run **真正发出去**的模型请求数(reflect 步 `call_attempts` 之和)。
+    # 与 A/B 的 `model_calls`(日志行数)不是同一个数:静默 fallback 会多发一次
+    # 请求却不留日志行(见 `app/core/llm.py` 的 `response_format` / `stream_options`
+    # 两处重建)。任一 reflect 步缺这个观测 ⇒ 整列 unknown,不按现有的几步求和。
+    "model_calls_real",
+    # 上面那个和「全不全」。`True` = 每条 reflect 步都带 `call_attempts` 且轨迹
+    # 没有截断标;`False` = 只带了一部分、或轨迹被截断(和是下界);`None` = 一条
+    # 都没带(旧轨迹 / 测量关)。
+    "attempts_observed",
+    # rig 声明的第二维实验臂(`OPTIMIZATIONS`)。与 `policy_version` 并列而不同
+    # 义:那个是从轨迹反推的证据,这个是声明——线上导出恒不写,于是恒 unknown。
+    "optimization",
+    # 「最后一轮」各上下文块的规模:短码 → 数值。`s/c/k/d/t` 是五个块的**字符**
+    # 数,`total` 是整条消息的**字节**数(来自 `ctx_bytes_total`)——两种单位挤
+    # 在同一张表里,见 `REFLECT_CONTEXT_DETAIL_KEYS` 的说明。
+    "context_chars",
+    # 逐轮公共前缀字节的三格聚合(计划 §5 Q6:逐轮细节只在 rig 的 per-call 表)。
+    # 首轮没有可比的上一轮,写侧记 `None`,这里不计入。
+    "prefix_bytes_median",
+    "prefix_bytes_min",
+    "prefix_turns",
+    # 各 reflect 步交还给调用方的正文字符数之和(不经日志截断)。与
+    # `model_calls_real` 同一条「任一步缺 ⇒ unknown」的口径。
+    "response_chars_total",
     # --- 报告段的结果级字段(consumer == "report_section") ---
     "section_index",
     "section_total",
@@ -111,6 +140,22 @@ RUN_PROJECTION_KEYS: frozenset[str] = frozenset({
 
 CONSUMERS: tuple[str, ...] = ("ask_single", "ask_sectioned", "report_section")
 POLICY_VERSIONS: tuple[str, ...] = ("legacy", "v2")
+#: reflect 前缀复用的实验第二维(`REASONING_REFLECT_OPTIMIZATION` 的取值域)。
+#: 与 `POLICY_VERSIONS` 并列:一条 run 的身份是 `(policy_version, optimization)`
+#: 这一对,不是其中任何一个。
+#:
+#: 这份词表**刻意在 domain 本地写死**,不 import `app.core.config`。架构守卫
+#: (`scripts/check_architecture_boundaries.py` 的 `FORBIDDEN_DOMAIN_PREFIXES`)
+#: 其实没禁 domain → core,但两条理由让本地定义更对:(1) 这个模块的硬约束是
+#: 「零 I/O、不读 Settings」,把整个 `config` 拉进来只为一个元组,等于把
+#: pydantic-settings 的加载面接进一份纯投影;(2) `config.py` 上的
+#: `reasoning_reflect_optimization` 由计划 §3 T-PS6 在另一条支线上落地,这里先
+#: 落地闭集会更早,两处都存在时由
+#: `test_reasoning_trace_stats.py::test_optimizations_match_the_settings_literal`
+#: 逐字对齐——分叉当场打红,而不是悄悄放宽一侧。
+OPTIMIZATIONS: tuple[str, ...] = (
+    "off", "prefix_snapshot", "prefix_delta", "prefix_delta_lean",
+)
 JOB_STATUSES: tuple[str, ...] = ("running", "done", "failed", "cancelled")
 CORPUS_CELLS: tuple[str, ...] = ("A_kg", "A_nokg", "B_kg", "B_nokg")
 TRACE_SOURCES: tuple[str, ...] = ("trace_steps", "legacy_column", "in_process")
@@ -215,6 +260,44 @@ MAX_REFLECT_STEPS: Mapping[str, int] = {
     effort: limits.max_reasoning_steps
     for effort, limits in ASK_RETRIEVAL_LIMITS.items()
 }
+
+#: `context_chars` 的短码 → reflect 步 detail 里的键名。
+#:
+#: ⚠ **`total` 的单位和另外五个不一样。** `s/c/k/d/t` 是五个上下文块各自的
+#: **字符**数(`ctx_chars_*`),`total` 是整条 provider-facing 消息的**字节**数
+#: (`ctx_bytes_total`)。字符数与字节数在中文上差三倍,所以 `total` 既不是前五
+#: 项之和、也不该拿去和它们比大小;它存在的意义是给 `prefix_bytes_*` 当分母
+#: (「这一轮 N 字节里有多少落进了公共前缀」),那道除法两边必须同为字节。
+#: 短码本身由计划 §3 T-PS4 钉住(`s/c/k/d/t/total`),这里不擅自改名。
+REFLECT_CONTEXT_DETAIL_KEYS: Mapping[str, str] = {
+    "s": "ctx_chars_s",
+    "c": "ctx_chars_c",
+    "k": "ctx_chars_k",
+    "d": "ctx_chars_d",
+    "t": "ctx_chars_t",
+    "total": "ctx_bytes_total",
+}
+
+#: reflect 步 detail 上的**稀疏**测量键全集(计划 §3 T-PS3 写入,T-PS4 读)。
+#:
+#: 稀疏 = 只有 v2 且 `REASONING_REFLECT_MEASURE_CONTEXT` 打开的 run 才会出现。
+#: `legacy` 与 `off`(测量关)的 reflect 步 detail 里一个都不该有——这一点由
+#: `test_reasoning_trace_stats.py` 的冻结基线用例从读侧钉住:它们全缺席时,本
+#: 模块新增的那几列必须逐个是 `None`,而不是 0。
+#:
+#: `cards_shown` / `cards_omitted` / `call_wall_ms` 登记在这里但**没有**对应的
+#: 顶层投影列:逐轮细节按计划 §5 Q6 只留在 rig 的 per-call 表里,投影这一层只
+#: 承接能压成一个 run 一格的量。登记它们是为了让「写侧有哪些键」在读侧也有一份
+#: 可查的清单,而不是让下一个人从 T-PS3 的代码里反推。
+REFLECT_MEASUREMENT_DETAIL_KEYS: frozenset[str] = frozenset({
+    *REFLECT_CONTEXT_DETAIL_KEYS.values(),
+    "message_prefix_bytes",
+    "cards_shown",
+    "cards_omitted",
+    "call_wall_ms",
+    "call_attempts",
+    "response_chars",
+})
 
 
 # --- 基础归一 ---------------------------------------------------------------
@@ -531,6 +614,119 @@ def _stale(steps: Sequence[Mapping]) -> tuple[bool, int | None]:
     return breaker, max(values) if values else None
 
 
+# --- reflect 前缀复用测量(计划 §3 T-PS4) ----------------------------------
+
+
+def _reflect_steps(steps: Sequence[Mapping]) -> list[Mapping]:
+    return [step for step in steps if step["step_type"] == "reflect"]
+
+
+def _reflect_attempts(
+    reflects: Sequence[Mapping], *, truncated: bool,
+) -> tuple[int | None, bool | None]:
+    """→ (`model_calls_real`, `attempts_observed`)。
+
+    三条口径,都是「不许把缺失读成一个数」的同一件事:
+
+    1. **一条 reflect 步都没带 `call_attempts`** ⇒ `(None, None)`。旧轨迹、
+       legacy run、测量关的 `off` run 全落这里;`0` 会被读成「一次模型都没调」,
+       而 legacy 明明调了。没有 reflect 步的 run(chunk 模式)同样落这里。
+    2. **只带了一部分** ⇒ `(None, False)`。手上的和是几步的部分和,不是这次
+       run 的真实请求数,报出去就是一句偏低的假话;但「观测不全」这件事本身
+       是真的,所以 `attempts_observed` 出 `False` 而不是跟着 unknown。
+    3. **全带了,但轨迹带截断标** ⇒ `(sum, False)`。截断**不掩盖**
+       `model_calls_real`——看得见的那几步确实各发了这么多次请求,和是一个真实
+       的**下界**;把它抹成 `None` 等于把已经量到的东西丢掉。不完整由
+       `attempts_observed=False` 标出来,与 `trace_truncated` 互相印证。
+    """
+    values = [_int(step["detail"].get("call_attempts")) for step in reflects]
+    present = [value for value in values if value is not None]
+    if not present:
+        return None, None
+    if len(present) != len(values):
+        return None, False
+    return sum(present), not truncated
+
+
+def _reflect_sum(reflects: Sequence[Mapping], key: str) -> int | None:
+    """全部 reflect 步都带 `key` 才求和,任一步缺 ⇒ unknown。
+
+    与 `_reflect_attempts` 同一条口径,只是不额外报「全不全」——截断下的部分和
+    仍然出数,读的人按同一行的 `trace_truncated` / `attempts_observed` 判它是不
+    是下界。
+    """
+    values = [_int(step["detail"].get(key)) for step in reflects]
+    if not values or any(value is None for value in values):
+        return None
+    return sum(values)
+
+
+def _context_chars(reflects: Sequence[Mapping]) -> dict[str, int] | None:
+    """各上下文块的**最后一轮**规模。一格都没有 ⇒ `None`(不是空字典)。
+
+    取最后一轮而不是求和或取均值:这几个数是「一次调用的上下文有多大」,跨轮
+    相加得到的是一个谁也没见过的数。逐码独立取:某一码在最后一轮缺席、在更早
+    的轮里有,就用那个更早的值——写侧一旦开了测量就每轮全写,真出现逐码参差
+    只可能是轨迹被切过,此时保住看得见的观测比对齐轮次更有用。
+    """
+    latest: dict[str, int] = {}
+    for step in reflects:
+        detail = step["detail"]
+        for code, key in REFLECT_CONTEXT_DETAIL_KEYS.items():
+            value = _int(detail.get(key))
+            if value is not None:
+                latest[code] = value
+    ordered = {
+        code: latest[code]
+        for code in REFLECT_CONTEXT_DETAIL_KEYS
+        if code in latest
+    }
+    return ordered or None
+
+
+def _prefix_bytes(
+    reflects: Sequence[Mapping],
+) -> tuple[int | None, int | None, int | None]:
+    """→ (`prefix_bytes_median`, `prefix_bytes_min`, `prefix_turns`)。
+
+    计划 §5 Q6:逐轮前缀字节**不进**闭集投影(一条 run 的轮数不定,进来就是一
+    个变长列表),退成中位数/最小值/轮数三格;逐轮细节留在 rig 的 per-call 表。
+
+    首轮没有可比的上一轮,写侧记 `None`,这里不计入 —— 所以 `prefix_turns` 是
+    「有前缀可算的轮数」= reflect 轮数 − 1(测量全程开着时),不是 reflect 轮数。
+    一格都没有 ⇒ 三个都 `None`,`prefix_turns` 尤其不折 0:0 会被读成「量过了,
+    一轮都没复用」。
+
+    中位数取**最近秩**(偶数条取偏小的那个),不取两数平均:平均出来的字节数不
+    是任何一轮真实的前缀长度。秩的算法与 `scripts/analyze_reasoning_trace.py`
+    的 `_nearest(values, 0.50)` 逐字等价(`ceil(0.5n) - 1 == (n - 1) // 2`),
+    两处对同一批数不会给出两个「中位数」。
+    """
+    values = sorted(
+        value for value in (
+            _int(step["detail"].get("message_prefix_bytes"))
+            for step in reflects
+        )
+        if value is not None
+    )
+    if not values:
+        return None, None, None
+    return values[(len(values) - 1) // 2], values[0], len(values)
+
+
+def _optimization(payload: Mapping, tags: Mapping) -> str:
+    """rig 声明的第二维臂。缺席 / 闭集外 ⇒ unknown。
+
+    `_closed_exact` 而不是 `closed_value`:后者会先 `lower()`,那会把一个大小写
+    写错的声明(`Prefix_Snapshot`)悄悄纠正成合法臂,于是「rig 传错了参数」这件
+    事在数据里看不出来。线上导出两处都不写 ⇒ 恒 unknown。
+    """
+    raw = tags.get("optimization")
+    if raw is None:
+        raw = payload.get("optimization")
+    return _closed_exact(raw, OPTIMIZATIONS)
+
+
 # --- run 级投影 -------------------------------------------------------------
 
 
@@ -671,7 +867,7 @@ def project_run(
     `mode` / `retrieval_effort` / `intent` / `kg_required`(有没有、是不是
     bool),问题原文、答案正文、引用卡一律不碰。`rig_tags` 是 rig 侧按
     `client_request_id` 解码出来的编号(`corpus_cell` / `question_key` /
-    `requested_mode`),线上导出传空 ⇒ 那几个维度恒为 unknown。
+    `requested_mode` / `optimization`),线上导出传空 ⇒ 那几个维度恒为 unknown。
     """
     tags = rig_tags or {}
     payload = _mapping(answer_payload) or {}
@@ -710,6 +906,12 @@ def project_run(
     counters = _counters(normalized)
     total_ms = sum(counters["durations_ms"].values())
     intent = payload.get("intent")
+    truncated = _truncated(normalized)
+    reflects = _reflect_steps(normalized)
+    model_calls_real, attempts_observed = _reflect_attempts(
+        reflects, truncated=truncated
+    )
+    prefix_median, prefix_min, prefix_turns = _prefix_bytes(reflects)
 
     row: dict[str, Any] = {
         # rig 的报告轨迹用同一条投影(逐节深挖跑的就是 `ReasoningRetriever.run`),
@@ -765,7 +967,19 @@ def project_run(
         "shared_hits": shared,
         "total_ms": total_ms if counters["durations_ms"] else None,
         "trace_steps": len(normalized),
-        "trace_truncated": _truncated(normalized),
+        "trace_truncated": truncated,
+        # --- reflect 前缀复用测量(T-PS4) ---
+        # 一次 run 的墙钟只有 rig 手上有(`total_ms` 是各步耗时之和,不含排队与
+        # 步间空隙),导出这条路上恒 unknown;rig 拿到 `elapsed_ms` 后就地覆写。
+        "run_wall_ms": None,
+        "model_calls_real": model_calls_real,
+        "attempts_observed": attempts_observed,
+        "optimization": _optimization(payload, tags),
+        "context_chars": _context_chars(reflects),
+        "prefix_bytes_median": prefix_median,
+        "prefix_bytes_min": prefix_min,
+        "prefix_turns": prefix_turns,
+        "response_chars_total": _reflect_sum(reflects, "response_chars"),
     }
     row.update(counters)
     assert_closed(row)

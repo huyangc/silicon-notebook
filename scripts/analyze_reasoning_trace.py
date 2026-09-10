@@ -36,7 +36,13 @@ from app.domain.reasoning_trace_stats import (  # noqa: E402
     UNKNOWN,
 )
 
-DEFAULT_GROUP_BY = "consumer,mode,effort,kg_in_scope,policy_version"
+# `optimization` 在默认分组里,而不是只当一个可选维度:一条 run 的身份是
+# `(policy_version, optimization)` 这一对(T-PS4)。不按它分格,`off` 与
+# `prefix_snapshot` 两臂会被摊进同一格的均值里——那个均值不描述任何一臂。
+# 线上导出恒不写这个键,那时整批都落在 `unknown` 一格,分组结果与从前逐字相同。
+DEFAULT_GROUP_BY = (
+    "consumer,mode,effort,kg_in_scope,policy_version,optimization"
+)
 
 #: 数值指标:报 n_observed / 均值 / P50 / P95。
 NUMERIC_METRICS: tuple[str, ...] = (
@@ -52,6 +58,14 @@ NUMERIC_METRICS: tuple[str, ...] = (
     "unrecovered_channels_count",
     "section_total", "report_depth", "attempted", "attempted_failed",
     "top_relevance",
+    # --- reflect 前缀复用测量(T-PS4) ---
+    # `run_wall_ms` 只有 rig 写(导出侧恒 unknown ⇒ 落进 n_missing);
+    # `model_calls_real` 与 `total_ms` 不是同一件事,前者数请求、后者数毫秒;
+    # 三格前缀聚合各报自己的 n_observed —— 一批里只有一部分 run 开了测量时,
+    # 「有几条 run 真的量到了前缀」本身就是要看的第一个数。
+    "run_wall_ms", "model_calls_real",
+    "prefix_bytes_median", "prefix_bytes_min", "prefix_turns",
+    "response_chars_total",
 )
 #: 布尔指标:报 n_observed 与 true 占比。
 BOOLEAN_METRICS: tuple[str, ...] = (
@@ -61,16 +75,27 @@ BOOLEAN_METRICS: tuple[str, ...] = (
     # 而不是被当成 False——「这道题没声明范围」与「声明了但解析不到」因此分得开。
     # 线上导出恒不写这个键,那时整组的 n_observed 是 0,不影响任何别的指标。
     "scope_narrowed",
+    # 三值同理:`True`=每轮都量到了、`False`=只量到一部分或轨迹被截断、
+    # `None`=压根没量。后两者分得开才能判 `model_calls_real` 是真值还是下界。
+    "attempts_observed",
 )
 #: 枚举指标:报取值分布(含 unknown 一格)。
 CATEGORICAL_METRICS: tuple[str, ...] = (
     "termination_reason", "termination_inferred", "evidence_level",
     "trace_source", "status",
+    # 同时也是默认分组维度:格子内恒定,但单臂重跑/混批时这一格的分布能立刻
+    # 看出「这批里到底有几条是哪个臂」。
+    "optimization",
 )
 #: 「闭集键 → 计数」的字典指标:跨 run 逐键求和。
 COUNTER_METRICS: tuple[str, ...] = (
     "actions_by_type", "seed_actions_by_type", "empty_actions_by_type",
     "skip_reasons", "fallback_reasons", "durations_ms",
+    # 最后一轮各上下文块的规模(T-PS4)。和 `durations_ms` 一样按格**跨 run 求
+    # 和**——想看每 run 平均就除这一格的 `n_runs`。两点提醒:短码 `total` 的单位
+    # 是**字节**(其余五个是字符,见 `REFLECT_CONTEXT_DETAIL_KEYS`);没开测量的
+    # run 一格都不带,所以这一项的和只覆盖开了测量的那些 run,不是整格。
+    "context_chars",
 )
 # 配对还要按**工作负载**分格(codex #700 R11 P2):`search-*.jsonl` 是只跑检索的
 # 进程内 run(`trace_source=in_process`),导出的 Ask run 是检索+合成的完整 run;
@@ -82,6 +107,7 @@ PAIR_DIMENSIONS: tuple[str, ...] = (
     "question_key", "corpus_cell", "effort", "consumer", "mode", "trace_source",
     "has_intent_contract",
 )
+
 
 
 def load_rows(paths: Sequence[str]) -> list[dict]:
@@ -343,6 +369,7 @@ def render_markdown(report: dict) -> str:
         )
     else:
         lines.append("(没有成对样本:输入里没有同时带 `question_key` 的两侧 run)")
+
     return "\n".join(lines) + "\n"
 
 

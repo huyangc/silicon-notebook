@@ -2395,3 +2395,90 @@ def test_prepare_search_intent_authoritative_only_without_submitted_answers():
     prepared_clear = rig._prepare_search_intent(clear, question, "standard")
     assert prepared_clear["research_question"].startswith(question)
     assert prepared_clear["intent_queries"][0].startswith(question)
+
+
+# --- T-PS4 聚合器的第二维臂与测量列 ------------------------------------------
+
+
+def _measured_row(**overrides) -> dict:
+    """带 T-PS4 测量列的一行。默认是 `v2` + `off` 那一臂。"""
+    base = _row(
+        policy_version="v2", termination_inferred=False,
+        termination_reason="model_sufficient",
+        optimization="off", run_wall_ms=9000, model_calls_real=4,
+        attempts_observed=True, response_chars_total=500,
+        prefix_bytes_median=720, prefix_bytes_min=700, prefix_turns=3,
+        context_chars={"s": 800, "c": 1200, "total": 9600},
+    )
+    base.update(overrides)
+    return base
+
+
+def test_every_measurement_column_reaches_the_report(tmp_path, capsys):
+    """九个新列各自被某一组指标消费掉,并且真的出现在 JSON 报告里。
+
+    变异:把 `run_wall_ms` 从 `NUMERIC_METRICS`、或 `attempts_observed` 从
+    `BOOLEAN_METRICS`、或 `optimization` 从 `CATEGORICAL_METRICS`、或
+    `context_chars` 从 `COUNTER_METRICS` 里删掉 ⇒ 这条红(也会让
+    `test_analysis_consumes_every_scalar_projection_key` 红)。
+    """
+    source = _write_rows(tmp_path / "rows.jsonl",
+                         [_measured_row() for _ in range(5)])
+    js = tmp_path / "t0.json"
+    analyze.main([str(source), "--out-json", str(js)])
+    capsys.readouterr()
+    summary = json.loads(js.read_text("utf-8"))["groups"][0]["summary"]
+    for metric in ("run_wall_ms", "model_calls_real", "prefix_bytes_median",
+                   "prefix_bytes_min", "prefix_turns", "response_chars_total"):
+        assert summary["numeric"][metric]["n_observed"] == 5, metric
+    assert summary["boolean"]["attempts_observed"] == {
+        "n_observed": 5, "n_missing": 0, "n_true": 5}
+    assert summary["categorical"]["optimization"] == {"off": 5}
+    # 跨 run 求和:五条 run 各 9600 字节。
+    assert summary["counters"]["context_chars"]["total"] == 48000
+
+
+def test_optimization_is_a_default_grouping_dimension(tmp_path, capsys):
+    """不按 `optimization` 分格,两臂会被摊进同一格的均值里。
+
+    变异:把 `optimization` 从 `DEFAULT_GROUP_BY` 里删掉 ⇒ 只剩一格,这条红。
+    """
+    source = _write_rows(tmp_path / "rows.jsonl", [
+        _measured_row(run_wall_ms=10000),
+        _measured_row(optimization="prefix_snapshot", run_wall_ms=6000),
+    ])
+    js = tmp_path / "t0.json"
+    analyze.main([str(source), "--out-json", str(js)])
+    capsys.readouterr()
+    groups = json.loads(js.read_text("utf-8"))["groups"]
+    assert len(groups) == 2
+    walls = sorted(
+        group["summary"]["numeric"]["run_wall_ms"]["mean"] for group in groups
+    )
+    assert walls == [6000.0, 10000.0]
+    assert "optimization" in analyze.DEFAULT_GROUP_BY
+
+
+def test_unknown_measurements_are_missing_not_zero(tmp_path, capsys):
+    """没开测量的 run 在新列上是 `n_missing`,不是 0。
+
+    变异:把投影侧任何一个新列的缺失折成 0 ⇒ 这条红。
+    """
+    source = _write_rows(tmp_path / "rows.jsonl", [
+        _measured_row(),
+        _row(run_wall_ms=None, model_calls_real=None, attempts_observed=None,
+             prefix_turns=None),
+    ])
+    js = tmp_path / "t0.json"
+    analyze.main([str(source), "--group-by", "policy_version", "--out-json",
+                  str(js)])
+    capsys.readouterr()
+    report = json.loads(js.read_text("utf-8"))
+    merged = {}
+    for group in report["groups"]:
+        for metric, entry in group["summary"]["numeric"].items():
+            bucket = merged.setdefault(metric, {"n_observed": 0, "n_missing": 0})
+            bucket["n_observed"] += entry["n_observed"]
+            bucket["n_missing"] += entry["n_missing"]
+    assert merged["run_wall_ms"] == {"n_observed": 1, "n_missing": 1}
+    assert merged["prefix_turns"] == {"n_observed": 1, "n_missing": 1}
