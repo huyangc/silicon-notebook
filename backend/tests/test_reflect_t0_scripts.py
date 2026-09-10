@@ -4453,6 +4453,23 @@ def test_prefix_probe_fake_client_run_sends_provider_messages_shaped_calls(
     client = _FakePrefixProbeClient()
     provider = _install_prefix_probe_fake(monkeypatch, client)
 
+    # rig 自己那次 `provider_messages` 的 `markers` 也要按序录下来(评审 P3-12):
+    # `message_bytes_total` 只是一个**长度**,而两个标记同宽,头尾互换后长度
+    # 逐字节相同 —— 只断言长度挡不住「rig 重建时把两端拼反了」。这里录的是
+    # 真实客户端(经接缝 contextvar)与 rig(显式 `markers=`)两次调用的入参,
+    # 两次都必须是同一个 `(head, tail)`,同一个顺序。
+    import app.core.llm as llm_mod
+
+    real_provider_messages = llm_mod.provider_messages
+    seen_markers: list[Any] = []
+
+    def _recording_provider_messages(messages, schema_hint, *, markers=None):
+        seen_markers.append(markers)
+        return real_provider_messages(messages, schema_hint, markers=markers)
+
+    monkeypatch.setattr(
+        llm_mod, "provider_messages", _recording_provider_messages)
+
     args = _prefix_probe_args(tmp_path, "--smoke")
     runner = rig.Runner(dry_run=False, out_dir=Path(args.out_dir))
     exit_code = rig.cmd_prefix_probe(args, runner)
@@ -4519,6 +4536,14 @@ def test_prefix_probe_fake_client_run_sends_provider_messages_shaped_calls(
             assert row["head_chars"] == len(head)
             assert row["tail_chars"] == len(tail)
             assert row["finish_reason"] == "stop"
+
+    # 每格恰好两次 `provider_messages`(客户端 + rig 重建),两次的 `markers`
+    # 都是同一个 `(head, tail)`,顺序不许反。
+    warmup_markers = client.calls[0]["markers"]
+    expected_markers = [warmup_markers, warmup_markers]
+    for entry in plan:
+        expected_markers += [(entry["head"], entry["tail"])] * 2
+    assert seen_markers == expected_markers
 
     # `gap_ms`(评审 F6 / P3-10):序列首格 `None`;其余格是数值;**跨序列不串**
     # ——每个 `series_index` 各自的首格都必须是 `None`,共用一个 `prev` 的写法
@@ -4622,6 +4647,10 @@ def test_prefix_probe_cache_hit_row_is_recorded_and_flagged_non_zero(
     summary = json.loads(
         (Path(args.out_dir) / "probe-summary.json").read_text("utf-8"))
     assert summary["local_cache_exit_rows"] == 1
+    # summary.md 的那一行必须与 json **同值**(评审 P2-5):非零场景才证明它不是
+    # 硬写的 0——用例 (d) 里真值恰好是 0,硬写 0 在那条用例里看不出区别。
+    summary_md = (Path(args.out_dir) / "probe-summary.md").read_text("utf-8")
+    assert "- local_cache_exit_rows: 1" in summary_md
     # 退出码判据读的就是这一列(评审 P3-16:此前是派发循环自己数的第二个数,
     # 而 stderr 那句话宣称两者是同一个数,却没有任何守卫钉它们相等)。
     err = capsys.readouterr().err
