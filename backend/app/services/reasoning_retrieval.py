@@ -29,6 +29,7 @@ from app.core.llm import CALL_STATS_KWARG, budget_kwargs
 from app.core.config import (
     DEFAULT_REASONING_PER_QUERY_LIMIT,
     DEFAULT_REFLECT_EVIDENCE_CHARS_BY_EFFORT,
+    REFLECT_OPTIMIZATION_IMPLEMENTED,
     Settings,
 )
 from app.domain.cancellation import CoreCancellation
@@ -3525,13 +3526,22 @@ class ReasoningRetriever:
 
         `getattr` 而不是直读:窄测试替身与离线工具里的 duck-typed settings 适配器
         并不带这个字段(镜像 `reflect_v2_active` 的既有写法),缺省必须是 `off`
-        ——认不出这个开关的调用方绝不该被静默切到新布局上。非法/未实现取值不在
-        这里兜底:那是启动期校验器的事(`validate_reflect_optimization`),运行期
-        再判一次只会把一个配置错误拖成一次静默降级。
+        ——认不出这个开关的调用方绝不该被静默切到新布局上。
+
+        **已实现闭集之外的取值一律折回 `off`。** 这不是把启动期校验器的活儿抢过来
+        ——真实部署的非法/未实现取值仍由 `validate_reflect_optimization` 在启动期
+        响亮拒绝,那条路径一格没动。这里兜的是**压根不过校验器**的那类 settings:
+        duck-typed 适配器、离线工具与窄替身可以带上任意一个 `None` / `""` / `0` /
+        未知串,而下游按取值分派布局时,一个认不出的取值只会走到"既不是 off 也不是
+        任何已实现臂"的第三种形态上——那才是真正的静默漂移。折回 `off` 是这里唯一
+        fail-closed 的选择:未知 ⇒ 走实施基线,与关闭态同一条字节路径。
         """
         if not self.reflect_v2_active():
             return "off"
-        return str(getattr(self.settings, "reasoning_reflect_optimization", "off"))
+        configured = getattr(self.settings, "reasoning_reflect_optimization", "off")
+        if configured not in REFLECT_OPTIMIZATION_IMPLEMENTED:
+            return "off"
+        return str(configured)
 
     def reflect_measures_context(self) -> bool:
         """本 run 要不要多算那份纯内存的上下文块长/前缀观测(拍板 Q2)。

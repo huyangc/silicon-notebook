@@ -60,10 +60,15 @@ REFLECT_EVIDENCE_CHARS_MIN = 1_000
 REFLECT_EVIDENCE_CHARS_MAX = 64_000
 
 # reflect 上下文前缀复用的部署策略取值(前缀复用最终设计 §5.1)。四格是这个字段
-# 的**最终**闭集,一次写全:它同时是 Literal 的枚举、文档数值表与轨迹投影闭集的
-# 唯一字面量来源。分成"已实现"与"已登记但未实现"两段,是因为后两格要各自等一个
-# 后续 PR 把实现补上——在那之前配上去必须**响亮**失败,而不是静默退回 `off`:
-# 一个以为自己在跑 delta 的部署,拿到的每一条测量都会被归到错误的臂上。
+# 的**最终**闭集,一次写全,这里是它的**登记处**:所有需要在运行期拿到这个闭集的
+# 代码都引用这三个常量,而不是各写一份字面量(T-PS4 的轨迹投影 `OPTIMIZATIONS`
+# 将直接引用它们)。说"登记处"而不是"唯一字面量来源"是如实措辞——下面那个字段的
+# `Literal[...]` 注解按语法必须把四格再写一遍(注解位置吃不下一个 tuple 常量),
+# 两份部署文档也各用散文写了一遍;这三处的一致性由用例对账
+# (`test_reflect_optimization_closed_set_is_registered_once`),不靠"只有一份"。
+# 分成"已实现"与"已登记但未实现"两段,是因为后两格要各自等一个后续 PR 把实现补
+# 上——在那之前配上去必须**响亮**失败,而不是静默退回 `off`:一个以为自己在跑
+# delta 的部署,拿到的每一条测量都会被归到错误的臂上。
 REFLECT_OPTIMIZATION_IMPLEMENTED = ("off", "prefix_snapshot")
 REFLECT_OPTIMIZATION_PLANNED = ("prefix_delta", "prefix_delta_lean")
 REFLECT_OPTIMIZATIONS = REFLECT_OPTIMIZATION_IMPLEMENTED + REFLECT_OPTIMIZATION_PLANNED

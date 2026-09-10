@@ -5676,13 +5676,14 @@ def test_reflect_optimization_is_gated_by_the_v2_master_switch(
     """四取值 × v2 开/关矩阵:总闸关着时恒 `off`,配了什么都不看。
 
     这一项**叠在** v2 之上而不是与它并列:总闸关着走的是 legacy 协议,那条路径
-    上根本没有"前缀"可谈。四格全测(包括本期未实现的两格)是刻意的:这条钉的是
-    **门**,不是取值合法性——未实现取值由启动期校验器拦(上面那条),运行期再兜
-    一次底只会把一个配置错误拖成静默降级。
+    上根本没有"前缀"可谈。四格全测(包括本期未实现的两格)是刻意的:已实现的两格
+    钉住"门开着时如实带过",未实现的两格钉住"门关着时也一样回 `off`"——它们在
+    v2 开着时由下面那条折回守卫接管,这里只钉门。
 
     变异:把 `reflect_optimization()` 里的 `if not self.reflect_v2_active()`
-    去掉 ⇒ v2 关的那四格全红。
+    去掉 ⇒ v2 关 + `prefix_snapshot` 那格红。
     """
+    from app.core.config import REFLECT_OPTIMIZATION_IMPLEMENTED
     from app.services.reasoning_retrieval import ReasoningRetriever
     rrepo.settings.reasoning_reflect_v2_enabled = v2_on
     # 未实现取值在生产里进不了 Settings(校验器拦着),这里直接赋值只为把「门」
@@ -5690,7 +5691,49 @@ def test_reflect_optimization_is_gated_by_the_v2_master_switch(
     rrepo.settings.reasoning_reflect_optimization = configured
     rr = ReasoningRetriever.from_repository(
         rrepo, rrepo.settings, fail_closed=True)
-    assert rr.reflect_optimization() == (configured if v2_on else "off")
+    live = v2_on and configured in REFLECT_OPTIMIZATION_IMPLEMENTED
+    assert rr.reflect_optimization() == (configured if live else "off")
+
+
+@pytest.mark.parametrize("configured", [
+    None, "", 0, "prefix_snapshoot", "prefix_delta", "prefix_delta_lean",
+])
+def test_reflect_optimization_folds_unregistered_values_back_to_off(
+    rrepo, configured
+):
+    """已实现闭集之外的任何取值 ⇒ 运行期折回 `off`(fail-closed)。
+
+    真实部署走不到这里——启动期校验器已经把未实现取值与拼写错误拦掉了,那条路径
+    一格没动。这条兜的是**压根不过校验器**的那类 settings:duck-typed 适配器、
+    离线工具与窄替身,它们可以带上 `None` / `""` / `0` / 任意未知串。下游按取值
+    分派布局时,一个认不出的取值会走到"既不是 off 也不是任何已实现臂"的第三种
+    形态上,那才是真正的静默漂移;折回 `off` = 走实施基线,与关闭态同一条字节路径。
+
+    变异:把 `reflect_optimization()` 里的 `if configured not in
+    REFLECT_OPTIMIZATION_IMPLEMENTED` 去掉 ⇒ 六格全红。
+    """
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    rrepo.settings.reasoning_reflect_v2_enabled = True
+    rrepo.settings.reasoning_reflect_optimization = configured
+    rr = ReasoningRetriever.from_repository(
+        rrepo, rrepo.settings, fail_closed=True)
+    assert rr.reflect_optimization() == "off"
+
+
+def test_reflect_optimization_passes_every_implemented_value_through(rrepo):
+    """反面:登记为**已实现**的那几格必须原样带过,折回守卫不能连它们一起吞掉。
+
+    与上一条成对:少了这条,把 `reflect_optimization()` 改成 `return "off"` 也能
+    全绿。闭集来自登记处而不是手写清单——PR-3 放开一格时这条自动跟着覆盖。
+    """
+    from app.core.config import REFLECT_OPTIMIZATION_IMPLEMENTED
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    rrepo.settings.reasoning_reflect_v2_enabled = True
+    for value in REFLECT_OPTIMIZATION_IMPLEMENTED:
+        rrepo.settings.reasoning_reflect_optimization = value
+        rr = ReasoningRetriever.from_repository(
+            rrepo, rrepo.settings, fail_closed=True)
+        assert rr.reflect_optimization() == value
 
 
 def test_reflect_optimization_policy_bit_can_veto_the_deployment_switch(rrepo):
