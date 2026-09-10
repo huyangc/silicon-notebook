@@ -3314,9 +3314,9 @@ class _ReasoningRunState:
 
     # —— 本 run 的**静态工具目录**(T-PS7 / 前缀复用设计 §4.2)。
     #
-    # 带默认值、留空即中性:只有前缀复用策略不是 `off`、或上下文测量开着时才构造
-    # (见 `_prime_static_catalog`),其余情况恒为 None ——`_new_run_state` 因此一行
-    # 都不用改,关闭态零新状态。
+    # 带默认值、留空即中性:只有前缀复用策略不是 `off` 时才构造(判据见
+    # `_prime_static_catalog`;纯测量臂**不**构造——目录是布局的输入,不是测量的),
+    # 其余情况恒为 None ——`_new_run_state` 因此一行都不用改,关闭态零新状态。
     #
     # 写点单一且只写一次:本 run **第一次** reflect 那一轮,用那轮已经算好的 facts
     # 生成。刻意**不**在 run 起点算——那里没有现成的 facts,重算一份要额外付一次
@@ -3549,6 +3549,11 @@ class ReasoningRetriever:
         与 `reflect_optimization()` **正交**:`off` 臂也能开着它,对照实验要的正是
         两条臂用同一把尺子量。但同样叠在 v2 总闸之上——legacy 路径上没有可测的
         块结构,关闭态一个字节都不多付。
+
+        它的消费者是测量本身(T-PS3),**不**包括静态工具目录:目录是布局的输入,
+        判据只看 `reflect_optimization()`(见 `_prime_static_catalog`)。测量对
+        `off` 臂原样的那份消息取尺,给它构造一份没有消费者的目录只会污染它要测的
+        东西。
         """
         if not self.reflect_v2_active():
             return False
@@ -3683,13 +3688,17 @@ class ReasoningRetriever:
         ——那正是前缀复用要消除的逐轮漂移。代价按拍板 Q4 接受:首轮之后范围收窄
         或通道关闭时,目录里会留着已经不可用的动作,由每轮的当前状态如实说明。
 
-        为什么关闭态什么都不做:`off` 且不测量时这份对象没有任何消费者,构造它就
-        是纯开销。判据走 `reflect_optimization()` / `reflect_measures_context()`
-        两个单点,不在这里第二次读 settings。
+        为什么判据只看策略、不看测量开关(评审后修正):目录是**布局**的输入——
+        只有把工具清单挪进稳定前缀的那条臂才会读它。测量量的是消息字节,它对
+        `off` 臂原样的那份消息取尺,不需要也不该拿到一份目录:`off` + 只开测量时
+        构造一份没有任何消费者的对象,只会让纯测量臂比它要测量的那条路径多付一笔
+        开销——那正好污染它要测的东西。所以判据是单一的
+        `reflect_optimization() != "off"`,走那一个单点,不在这里第二次读 settings;
+        `reflect_measures_context()` 由测量本身(T-PS3)消费。
         """
         if state.reflect_static_catalog is not None:
             return
-        if self.reflect_optimization() == "off" and not self.reflect_measures_context():
+        if self.reflect_optimization() == "off":
             return
         state.reflect_static_catalog = build_reflect_capabilities(
             static_catalog_facts(facts))

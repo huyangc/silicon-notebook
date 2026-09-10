@@ -6257,19 +6257,22 @@ def _run_state_for_catalog(rr, notebook_id):
 @pytest.mark.parametrize("optimization,measure,cached", [
     ("off", False, False),          # 关闭态:恒 None,一个对象都不构造
     ("prefix_snapshot", False, True),
-    ("off", True, True),            # 测量与策略正交:只开测量也要有目录
+    # 评审后修正:**纯测量臂不构造目录**。目录是布局的输入,只有把工具清单挪进
+    # 稳定前缀的那条臂才读它;测量对 `off` 臂原样的消息取尺,给它构造一份没有
+    # 消费者的对象,只会让纯测量臂比它要测量的那条路径多付一笔开销。
+    ("off", True, False),
     ("prefix_snapshot", True, True),
 ])
 def test_static_catalog_is_cached_only_when_someone_consumes_it(
     rrepo, optimization, measure, cached
 ):
-    """缓存构造的判据:`reflect_optimization() != "off"` 或测量开(T-PS7)。
+    """缓存构造的判据:**只看** `reflect_optimization() != "off"`(T-PS7)。
 
-    关闭态这份对象没有任何消费者,构造它就是纯开销——`_ReasoningRunState` 上那个
-    带默认值的字段因此恒为 None,`_new_run_state` 一行都不用改。
+    没有消费者的那两格里这份对象就是纯开销——`_ReasoningRunState` 上那个带默认值
+    的字段因此恒为 None,`_new_run_state` 一行都不用改。
 
-    变异:把 `_prime_static_catalog` 的两条判据(策略 / 测量)去掉任意一条 ⇒
-    对应那格红。
+    变异:把判据放宽成"策略非 off **或**测量开" ⇒ `("off", True)` 那格红;把判据
+    去掉 ⇒ `("off", False)` 那格红。
     """
     from app.services.reasoning_retrieval import ReasoningRetriever
     nb = _seed_two_nodes(rrepo)
@@ -6286,7 +6289,7 @@ def test_static_catalog_is_cached_only_when_someone_consumes_it(
 def test_static_catalog_is_never_cached_while_v2_is_off(rrepo):
     """v2 总闸关(以及调用方策略位关)⇒ 目录一次都不构造。
 
-    变异:把 `_prime_static_catalog` 的判据从两个单点换成直读 settings ⇒ 这条红。
+    变异:把 `_prime_static_catalog` 的判据从那个单点换成直读 settings ⇒ 这条红。
     """
     from app.services.reasoning_retrieval import ReasoningRetriever
     nb = _seed_two_nodes(rrepo)
