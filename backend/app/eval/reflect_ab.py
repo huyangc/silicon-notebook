@@ -25,6 +25,8 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from app.domain.reasoning_trace_stats import (
     ASSESSMENT_REJECTION_REASONS,
+    OPTIMIZATIONS,
+    POLICY_VERSIONS,
     RUN_PROJECTION_KEYS,
     assert_projection_values,
     project_run,
@@ -75,9 +77,36 @@ AB_ONLY_KEYS: frozenset[str] = frozenset({
 #: 里加一个 `answer` / `question` / `*_id` 键会直接把用例打红(§7.3、§10-2)。
 AB_PROJECTION_KEYS: frozenset[str] = RUN_PROJECTION_KEYS | AB_ONLY_KEYS
 
-#: 臂的闭集。与 T0 的 `POLICY_VERSIONS` 同值而**不同义**:`arm` 是 rig 的声明,
-#: `policy_version` 是从这次 run 自己的轨迹反推出来的证据(§7.1)。
-ARMS: tuple[str, ...] = ("legacy", "v2")
+#: 臂的第一维:反思协议。与 T0 的 `POLICY_VERSIONS` 同值而**不同义**——`arm` 是
+#: rig 的声明,`policy_version` 是从这次 run 自己的轨迹反推出来的证据(§7.1)。
+ARM_POLICIES: tuple[str, ...] = POLICY_VERSIONS
+
+#: **一条 run 的身份是 `(policy, optimization)` 这一对**(前缀复用最终设计 §11:
+#: `prefix_snapshot` 等优化模式单列,不把既有 `policy_version=legacy|v2` 偷换成
+#: 一个四值枚举)。这份元组是**合法组合**的闭集,不是「一批要跑几条臂」:
+#:
+#: * `legacy` 只有 `off` 一格。v2 总闸关着时 `reflect_optimization()` 恒返回
+#:   `off`(全仓唯一读点,见 `reasoning_retrieval.reflect_optimization`),所以
+#:   `legacy:prefix_snapshot` 不是「还没实现」,而是**结构上不存在**:声明它只会
+#:   得到一条 optimization 写着 `prefix_snapshot`、实际跑 `off` 的假数据。
+#: * v2 侧只列**本期已实现**的两格。`prefix_delta` / `prefix_delta_lean` 在
+#:   `OPTIMIZATIONS`(读侧闭集)里有位置,但 `config.validate_reflect_optimization`
+#:   在启动期就响亮拒绝它们——让 rig 排一批起不来的 run 是纯粹的浪费,所以这里
+#:   同期收窄。PR-3/PR-4 各放开一格时,同 diff 往这里加一行。
+ARMS: tuple[tuple[str, str], ...] = (
+    ("legacy", "off"),
+    ("v2", "off"),
+    ("v2", "prefix_snapshot"),
+)
+
+#: 一个**配对单元**里的臂数。二维化之前这个数恰好等于 `len(ARMS)`,现在不是了:
+#: `ARMS` 是合法组合的闭集(三格),而一个配对单元恒是 `--arms` 点名的那**两条**
+#: 臂(`legacy,v2` 或 `v2:off,v2:prefix_snapshot`)。`mark_paired` 判的是后者。
+PAIR_ARM_COUNT = 2
+
+#: `--arms` 里 `policy:optimization` 的分隔符。与 `client_request_id` 的字段分隔符
+#: 同为冒号是刻意的:两处都只允许短码,冒号在短码里非法。
+ARM_SPEC_SEP = ":"
 
 #: 本任务不实现、但键集已经闭上的那几个(§12 T-AB3)。投影一律写 `None`。
 DEFERRED_JUDGED_KEYS: tuple[str, ...] = (
@@ -101,6 +130,99 @@ def assert_ab_closed(row: Mapping) -> None:
             "ab projection row carries keys outside AB_PROJECTION_KEYS: "
             + ", ".join(sorted(extra))
         )
+
+
+# --- `--arms` 的解析与臂标签 -------------------------------------------------
+
+
+class ArmSpecError(ValueError):
+    """`--arms` 写法有问题。**跑批之前**响亮失败,不静默退化成默认两臂。"""
+
+
+def parse_arms(spec: str) -> list[tuple[str, str]]:
+    """`--arms` 的字面量 → `(policy, optimization)` 列表。纯函数,零 I/O。
+
+    两种写法都收,产出同一种结构:
+
+    * 一维(既有写法)`legacy,v2` ⇒ `[("legacy","off"), ("v2","off")]`。省略
+      optimization **一律补 `off`**,而不是「跟随进程默认」:rig 每条臂都显式设
+      `REASONING_REFLECT_OPTIMIZATION`,一个跟随环境的默认值会让同一条命令在两
+      台机器上跑出两批数据。
+    * 二维(本任务)`v2:off,v2:prefix_snapshot`。
+
+    响亮拒绝的四类,每一类都是「不拒就会安静地产出假数据」:
+
+    1. 空写法 / 空段(`""`、`"v2,"`)——一份零臂的计划长得完全像一次正常跑批;
+    2. 未知 policy 或未知 optimization——写错一个字母就落成 unknown 那一格;
+    3. `legacy:prefix_snapshot` 这类**合法值的非法组合**(见 `ARMS`):两个字段
+       各自都在闭集里,只有这一对不成立,所以必须按对校验,不能分开校验两次;
+    4. 重复臂(`v2,v2`)——`mark_paired` 会把它标成配对完整,而那一格其实只有
+       同一条臂跑了两遍。
+
+    臂数不限死为 2:只给一条臂是 `--only-policy` 的二维版(重跑被打废的一侧),
+    那批行的 `paired` 由 `mark_paired` 如实落成 `False`。
+    """
+    tokens = [token.strip() for token in str(spec or "").split(",")]
+    if not tokens or any(not token for token in tokens):
+        raise ArmSpecError(
+            f"--arms 写法为空或有空段: {spec!r}(合法写法 legacy,v2 或 "
+            "v2:off,v2:prefix_snapshot)"
+        )
+    arms: list[tuple[str, str]] = []
+    for token in tokens:
+        arms.append(_parse_one_arm(token))
+    duplicates = {arm for arm in arms if arms.count(arm) > 1}
+    if duplicates:
+        raise ArmSpecError(
+            "--arms 里有重复的臂: "
+            + ", ".join(sorted(format_arm(*arm) for arm in duplicates))
+        )
+    return arms
+
+
+def _parse_one_arm(token: str) -> tuple[str, str]:
+    """`--arms` 的一段。见 `parse_arms` 的四类拒绝。"""
+    parts = token.split(ARM_SPEC_SEP)
+    if len(parts) > 2 or any(not part.strip() for part in parts):
+        raise ArmSpecError(
+            f"臂 {token!r} 不是 `policy` 或 `policy:optimization` 的形状")
+    policy = parts[0].strip()
+    optimization = parts[1].strip() if len(parts) == 2 else "off"
+    if policy not in ARM_POLICIES:
+        raise ArmSpecError(
+            f"臂 {token!r} 的 policy 不在闭集里(可选 "
+            f"{', '.join(ARM_POLICIES)})")
+    if optimization not in OPTIMIZATIONS:
+        raise ArmSpecError(
+            f"臂 {token!r} 的 optimization 不在闭集里(可选 "
+            f"{', '.join(OPTIMIZATIONS)})")
+    if (policy, optimization) not in ARMS:
+        raise ArmSpecError(
+            f"臂 {token!r} 是一个**合法值的非法组合**:rig 能跑的臂只有 "
+            + ", ".join(format_arm(*arm) for arm in ARMS)
+            + "(legacy 路径上没有『前缀』这个概念,reflect_optimization() 在 v2 "
+              "总闸关时恒返回 off;prefix_delta/lean 由 config 的校验器在启动期"
+              "拒绝)")
+    return policy, optimization
+
+
+def format_arm(policy: str, optimization: str) -> str:
+    """一条臂的**命令行写法**(`parse_arms` 的逆)。只给报错与日志用。"""
+    return f"{policy}{ARM_SPEC_SEP}{optimization}"
+
+
+def arm_label(policy: str, optimization: str) -> str:
+    """一条臂的**文件名短码**:`raw/<label>/`、`calls-<label>.jsonl` 用它。
+
+    `off` 那一格落回**光秃秃的 policy**,于是既有产物路径(`raw/legacy/`、
+    `raw/v2/`)一个字节没变——一维写法跑出来的目录树与二维化之前逐字相同。
+
+    非 `off` 的臂必须带上第二维,否则 `v2:off` 与 `v2:prefix_snapshot` 两条臂的
+    `raw/v2/<题号>_<格>_<档>_r<n>.json` 会**撞到同一个路径**,后跑的那条臂静默
+    覆盖前一条——两条臂的存档只剩一份,而 `ab-runs.jsonl` 看起来完全正常。
+    分隔符用 `-` 而不是 `:`:后者在 Windows 与部分归档工具里不是合法文件名字符。
+    """
+    return policy if optimization == "off" else f"{policy}-{optimization}"
 
 
 # --- gold 的加载与校验(§3.2 / §5.5-6) --------------------------------------
@@ -688,13 +810,44 @@ def assert_arm_matches_evidence(arm: str, policy_version: object) -> None:
     口径)。整批跑完再发现 v2 那半其实跑的是 legacy,代价是几百次模型调用;
     这里的代价是一次比较。
     """
-    if arm not in ARMS:
+    if arm not in ARM_POLICIES:
         raise ValueError(f"unknown arm: {arm!r}")
     if policy_version != arm:
         raise RuntimeError(
             f"声明 arm={arm!r},但这个 run 的证据是 policy_version="
             f"{policy_version!r}(v2 的判据是 run 产出了 termination 事实)。"
             "先修再跑整批"
+        )
+
+
+def assert_optimization_matches_evidence(
+    optimization: str, observed: object,
+) -> None:
+    """臂的**第二维**:rig 声明的 optimization vs 这个 run 真的跑起来的那一个。
+
+    `assert_arm_matches_evidence` 的镜像,同一条理由、同一个代价账:整批跑完再
+    发现「声明 prefix_snapshot 的那半其实跑的是 off」,代价是几百次模型调用。
+
+    两者的**证据来源不同**,这一点不要抹平:policy 那一维能从轨迹反推(v2 会
+    产出 termination 事实),optimization 反推不出来——两条臂的轨迹形状逐字相同,
+    差别只在发给 provider 的消息怎么分块。所以这里的 `observed` 必须是**运行时
+    的直接读数**(`ReasoningRetriever.reflect_optimization()`,全仓唯一读点),
+    而不是从产物反推的猜测;投影行里那一列 `optimization` 是**声明**,不是证据
+    (见 `reasoning_trace_stats._optimization`:它只从 `rig_tags` 读),拿它来
+    对号等于自己跟自己比。
+
+    最常见的一种不符是**静默降级**:v2 总闸没开、或 Knowhow 用
+    `allow_reflect_v2=False` 单独否决,`reflect_optimization()` 于是恒返回 `off`,
+    配置里写了 `prefix_snapshot` 也不看。那时数据照样出得来,两条臂却在跑同一
+    件事,差值表恒等于噪声。
+    """
+    if optimization not in OPTIMIZATIONS:
+        raise ValueError(f"unknown optimization: {optimization!r}")
+    if observed != optimization:
+        raise RuntimeError(
+            f"声明 optimization={optimization!r},但这个 run 的证据是 "
+            f"{observed!r}(reflect_optimization() 的直接读数;v2 总闸关或 "
+            "Knowhow 否决时它恒返回 off)。先修再跑整批"
         )
 
 
@@ -707,6 +860,7 @@ def project_ab_run(
     arm: str,
     effort: str,
     repeat: int,
+    optimization: str = "off",
     question_key: str,
     corpus_cell: str,
     answer: str,
@@ -741,9 +895,16 @@ def project_ab_run(
     一个是 rig 的声明,一个是从轨迹反推的证据,两者不符恰恰是最该被看见的那
     件事;对号由调用方在每条臂的第一个 run 之后做
     (`assert_arm_matches_evidence`),不在这里悄悄抹平。
+
+    `optimization` 是臂的**第二维**(默认 `off`,一维写法与二维化之前逐字相同)。
+    它与 `arm` 一样是**声明**——`project_run` 的 `_optimization` 只从 `rig_tags`
+    读,不从任何产物反推;证据侧由调用方用
+    `assert_optimization_matches_evidence` 对号(理由见那个函数)。这里只按
+    `ARMS` 校验一次**组合**合法性:`legacy:prefix_snapshot` 两个字段各自都在闭
+    集里,只有这一对不成立。
     """
-    if arm not in ARMS:
-        raise ValueError(f"unknown arm: {arm!r}")
+    if (arm, optimization) not in ARMS:
+        raise ValueError(f"unknown arm: {(arm, optimization)!r}")
     row = project_run(
         {"mode": "reasoning", "status": status},
         list(steps),
@@ -764,6 +925,9 @@ def project_ab_run(
             # legacy,于是从 v2 那一列里消失、还给 legacy 那列添一笔。跑成的
             # run 仍以证据为准,声明盖不掉它。
             "policy": arm,
+            # 第二维**只有**声明这一个产地(`_optimization` 不看 payload、不看
+            # 轨迹),所以跑成的 run 与失败的 run 走同一条路,不分岔。
+            "optimization": optimization,
         },
     )
     row["kg_in_scope"] = kg_in_scope if isinstance(kg_in_scope, bool) else None
@@ -821,15 +985,30 @@ def pair_id(row: Mapping) -> tuple[Any, ...]:
     )
 
 
-def mark_paired(rows: Sequence[dict]) -> None:
-    """按 `pair_id` 就地回填 `paired`。两臂都在场才是 `True`。
+def row_arm(row: Mapping) -> tuple[Any, Any]:
+    """一行的**臂身份**:`(arm, optimization)` 这一对。
 
-    `--only-policy` 重跑出来的行只有一侧,`paired=False`,**不进配对差值表**,
-    只进单臂基线表(§4.2)。`ab` 的跑批顺序把两臂放在最内层背靠背,所以正常
-    情况下这个函数每次只看两行。
+    只取一维会让 `v2:off` 与 `v2:prefix_snapshot` 在 `mark_paired` 眼里是同一条
+    臂——那批数据于是每一格都只「有一条臂在场」,`paired` 全线落成 `False`,整张
+    配对差值表凭空空掉,而每一行看起来都完全正常。
     """
-    seen: dict[tuple[Any, ...], set[object]] = {}
+    return row.get("arm"), row.get("optimization")
+
+
+def mark_paired(rows: Sequence[dict]) -> None:
+    """按 `pair_id` 就地回填 `paired`。**两条臂**都在场才是 `True`。
+
+    `--only-policy` / 单臂 `--arms` 重跑出来的行只有一侧,`paired=False`,
+    **不进配对差值表**,只进单臂基线表(§4.2)。`ab` 的跑批顺序把两臂放在最内
+    层背靠背,所以正常情况下这个函数每次只看两行。
+
+    判据的两半各自二维化(前缀复用最终设计 §11):在场的臂按 `row_arm` 数
+    `(arm, optimization)` 这一对,门槛是 `PAIR_ARM_COUNT` 而**不再是**
+    `len(ARMS)`——后者现在是「合法组合的闭集」(三格),拿它当门槛会让每一批
+    两臂数据都差一条臂、`paired` 恒 `False`。
+    """
+    seen: dict[tuple[Any, ...], set[tuple[Any, Any]]] = {}
     for row in rows:
-        seen.setdefault(pair_id(row), set()).add(row.get("arm"))
+        seen.setdefault(pair_id(row), set()).add(row_arm(row))
     for row in rows:
-        row["paired"] = len(seen.get(pair_id(row), set())) == len(ARMS)
+        row["paired"] = len(seen.get(pair_id(row), set())) == PAIR_ARM_COUNT
