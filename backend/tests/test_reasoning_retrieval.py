@@ -5774,35 +5774,136 @@ def test_reflect_optimization_falls_back_to_off_on_duck_typed_settings():
     assert probe.reflect_measures_context() is False
 
 
-def test_reflect_optimization_has_exactly_one_settings_read_point():
-    """`reasoning_reflect_optimization` 的读点全仓只有一个。
+def _settings_field_shapes(tree, field_name: str):
+    """按 **AST 形状**把一棵语法树里对某个 settings 字段的引用分成两类。
+
+    读取形状只认两种:属性访问 `x.<field>` 与 `getattr(x, "<field>")`。声明形状
+    只认两种:带注解的字段定义 `<field>: T = Field(...)` 与
+    `@field_validator("<field>")` 的登记。剩下的一切(注释、docstring、日志文案、
+    错误串里提到这个名字)按定义就不是引用,不进任何一类——按行文本 grep 会把
+    它们全算成读点,那把守卫会在第一次写注释时误伤,然后被人放宽掉。
+    """
+    import ast
+    reads, declarations = [], []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and node.attr == field_name:
+            reads.append(("attribute", node.lineno))
+        elif isinstance(node, ast.AnnAssign) and isinstance(
+            node.target, ast.Name
+        ) and node.target.id == field_name:
+            declarations.append(("field", node.lineno))
+        elif isinstance(node, ast.Call):
+            func = node.func
+            named = (func.id if isinstance(func, ast.Name)
+                     else func.attr if isinstance(func, ast.Attribute) else "")
+            literal_args = [a for a in node.args
+                            if isinstance(a, ast.Constant) and a.value == field_name]
+            if named == "getattr" and len(node.args) >= 2 and isinstance(
+                node.args[1], ast.Constant
+            ) and node.args[1].value == field_name:
+                reads.append(("getattr", node.lineno))
+            elif named == "field_validator" and literal_args:
+                declarations.append(("validator", node.lineno))
+    return reads, declarations
+
+
+@pytest.mark.parametrize("field_name,reader,declared", [
+    ("reasoning_reflect_optimization", "reflect_optimization",
+     ("field", "validator")),
+    ("reasoning_reflect_measure_context", "reflect_measures_context",
+     ("field",)),
+])
+def test_reflect_optimization_has_exactly_one_settings_read_point(
+    field_name, reader, declared
+):
+    """这两个字段的**读点**全仓只有一个,`config.py` 里一次都不读。
 
     这条不是洁癖:各处自己读一次 settings 正是"关掉之后总会剩下一处还在跑"的
-    老形状(枚举闸与 chunk 闸都栽过)。测量开关同理。允许出现的地方只有
-    `config.py` 的字段定义与 `reasoning_retrieval.reflect_optimization()` /
-    `reflect_measures_context()` 各自那一行 `getattr`。
+    老形状(枚举闸与 chunk 闸都栽过)。判据走 AST 而不是行文本,因此:
+
+    * `config.py` 也**计数**——它本来最容易长出第二个读点(在 `Settings` 上加一个
+      `reflect_layout()` 之类的便利方法就够了,行文本判据看不见,因为那一行本来
+      就"允许出现在 config.py")。这里钉住 config.py 的引用只许是**声明**形状:
+      字段定义,加(仅策略位)一个 `@field_validator` 登记。
+    * 注释与 docstring 里提到字段名不误伤——它们不是任何一种引用形状。
+
+    变异:在 `Settings` 上加一个读 `self.<field>` 的方法 ⇒ 红;把唯一那处
+    `getattr` 搬出 `<reader>()` 或再加一处读点 ⇒ 红;在别的模块 docstring 里写上
+    这个字段名 ⇒ 不红(下面两条用例分别钉住这三种形状)。
     """
+    import ast
     import pathlib
     root = pathlib.Path(__file__).resolve().parents[1] / "app"
-    for field_name, reader in (
-        ("reasoning_reflect_optimization", "reflect_optimization"),
-        ("reasoning_reflect_measure_context", "reflect_measures_context"),
-    ):
-        hits = []
-        for path in root.rglob("*.py"):
-            for number, line in enumerate(
-                path.read_text(encoding="utf-8").splitlines(), 1
-            ):
-                if field_name in line and not line.lstrip().startswith("#"):
-                    hits.append((path.relative_to(root).as_posix(), number))
-        modules = {name for name, _ in hits}
-        assert modules <= {"core/config.py", "services/reasoning_retrieval.py"}, (
-            f"{field_name} 出现在了登记之外的模块:{sorted(modules)}")
-        retrieval_hits = [row for row in hits
-                          if row[0] == "services/reasoning_retrieval.py"]
-        assert len(retrieval_hits) == 1, (
-            f"{field_name} 在 reasoning_retrieval 里读了 {len(retrieval_hits)} "
-            f"次,唯一读点应当只在 {reader}()")
+    reads_by_module, declarations_by_module = {}, {}
+    for path in sorted(root.rglob("*.py")):
+        name = path.relative_to(root).as_posix()
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        reads, declarations = _settings_field_shapes(tree, field_name)
+        if reads:
+            reads_by_module[name] = reads
+        if declarations:
+            declarations_by_module[name] = declarations
+        if name == "services/reasoning_retrieval.py":
+            retrieval_tree = tree
+
+    # 读点:只许 reasoning_retrieval 一处(config.py 计入,因此必须为零)。
+    assert set(reads_by_module) == {"services/reasoning_retrieval.py"}, (
+        f"{field_name} 的读点出现在了唯一读点之外:"
+        f"{ {k: v for k, v in reads_by_module.items()} }")
+    retrieval_reads = reads_by_module["services/reasoning_retrieval.py"]
+    assert [shape for shape, _ in retrieval_reads] == ["getattr"], retrieval_reads
+
+    # 那一处读点必须就在单点判定函数体内(不是模块级、也不是别的方法)。
+    holders = sorted(
+        node.name for node in ast.walk(retrieval_tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and _settings_field_shapes(node, field_name)[0]
+    )
+    assert holders == [reader], holders
+
+    # 声明:只许 config.py,且形状恰好是登记的那几种。
+    assert set(declarations_by_module) == {"core/config.py"}, (
+        f"{field_name} 在 config.py 之外被声明:{sorted(declarations_by_module)}")
+    assert tuple(
+        shape for shape, _ in declarations_by_module["core/config.py"]
+    ) == declared
+
+
+def test_settings_field_shape_guard_sees_a_new_reader_in_config():
+    """守卫的**判据自检**:`Settings` 上多一个读者会被看见(变异 1 的自动化)。
+
+    行文本判据在这里是瞎的——`config.py` 本来就被允许出现这个字段名。AST 判据把
+    "属性读"与"字段声明"分开,所以一个便利方法藏不住。
+    """
+    import ast
+    tree = ast.parse(
+        "class Settings:\n"
+        "    reasoning_reflect_optimization: str = Field('off')\n"
+        "    def reflect_layout(self):\n"
+        "        return self.reasoning_reflect_optimization\n"
+    )
+    reads, declarations = _settings_field_shapes(
+        tree, "reasoning_reflect_optimization")
+    assert [shape for shape, _ in reads] == ["attribute"]
+    assert [shape for shape, _ in declarations] == ["field"]
+
+
+def test_settings_field_shape_guard_ignores_prose_mentions():
+    """反面:注释、docstring 与错误串里提到字段名一律不算引用(变异 2 的自动化)。
+
+    少了这条,守卫会在第一次写"这个开关叫什么"的注释时误伤,然后被人放宽成
+    行文本白名单——那就等于没有守卫。
+    """
+    import ast
+    tree = ast.parse(
+        '"""模块说明:reasoning_reflect_optimization 的读点只有一处。"""\n'
+        "# reasoning_reflect_optimization 由 reflect_optimization() 单点判定\n"
+        "def helper():\n"
+        '    """见 reasoning_reflect_optimization。"""\n'
+        '    raise ValueError("reasoning_reflect_optimization 配错了")\n'
+    )
+    assert _settings_field_shapes(tree, "reasoning_reflect_optimization") == (
+        [], [])
 
 
 def _full_house_facts(**overrides):
