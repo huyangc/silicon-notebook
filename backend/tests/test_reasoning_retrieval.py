@@ -13301,11 +13301,14 @@ def _measured_run(rrepo, *, optimization="off", fail_calls=(), **kwargs):
 
 
 def _reflect_details(result) -> list:
-    return [step.detail for step in result.trace if step.step_type == "reflect"]
+    return [step.detail for step in result.trace
+            if step.step_type == "reflect"]
 
 
 def _measure_keys(detail) -> set:
-    from app.domain.reasoning_trace_stats import REFLECT_MEASUREMENT_DETAIL_KEYS
+    from app.domain.reasoning_trace_stats import (
+        REFLECT_MEASUREMENT_DETAIL_KEYS,
+    )
     return set(detail) & REFLECT_MEASUREMENT_DETAIL_KEYS
 
 
@@ -13630,7 +13633,9 @@ def test_measure_write_side_stays_inside_the_registered_key_set(rrepo):
     `_registered_measure_key` 在导入期就抛;绕开它直接写进 detail ⇒
     `_TraceRecorder.__call__` 里那条 `⊆` 断言红。
     """
-    from app.domain.reasoning_trace_stats import REFLECT_MEASUREMENT_DETAIL_KEYS
+    from app.domain.reasoning_trace_stats import (
+        REFLECT_MEASUREMENT_DETAIL_KEYS,
+    )
 
     _llm, result = _measured_run(
         rrepo, intent_detail=_TWO_ASPECTS, reflects=_three_turn_reflects(),

@@ -3196,9 +3196,10 @@ class _TraceRecorder:
             # 合并排在 `observer` / `_on_step` **之前**:上屏的那一份与最终落库
             # 的那一份因此是同一个 detail,不会一份带测量、一份不带。
             pending = self.measurement.take()
-            assert set(pending) <= REFLECT_MEASUREMENT_DETAIL_KEYS, (
+            unknown = set(pending) - REFLECT_MEASUREMENT_DETAIL_KEYS
+            assert not unknown, (
                 "reflect measurement wrote a detail key the projection does "
-                f"not read: {sorted(set(pending) - REFLECT_MEASUREMENT_DETAIL_KEYS)}")
+                f"not read: {sorted(unknown)}")
             step.detail.update(pending)
         self._trace.append(step)
         if self.observer is not None:
