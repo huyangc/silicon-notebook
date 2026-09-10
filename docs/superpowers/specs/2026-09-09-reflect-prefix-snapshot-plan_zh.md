@@ -55,6 +55,17 @@
 
 **写侧与 T-PS4 的硬接缝(T-PS4 评审后补,2026-09-10)。** 写 detail 的那几个键**必须**用 `reasoning_trace_stats.REFLECT_CONTEXT_DETAIL_KEYS` 的值与 `REFLECT_MEASUREMENT_DETAIL_KEYS` 的成员来构键(两者都已从 domain 导出),不许在写侧另抄一份字面量;并加一条 `written_keys ⊆ REFLECT_MEASUREMENT_DETAIL_KEYS` 的断言——写侧多写一个读侧不认的键,那一列会静默缺席,而不是报错。另外 `ctx_bytes_total` **必须**等于 `len(serialize_provider_messages(provider_messages(...)))`(这一轮最终消息的全部字节,含 wrapper 与帧开销),它才能当 `message_prefix_bytes` 的分母(公共前缀是在同一串字节上算的);做不到就删掉「`bytes_total` 是 `prefix_bytes_*` 分母」这条说明,只留下它自己的绝对值,别让人做一道两边口径不同的除法。
 
+**实施记录(2026-09-10)。** 硬接缝两条都兑现(键名一律经 `_registered_measure_key` 在导入期对着登记清单兑过 + 落账点一条 `⊆` 断言;`ctx_bytes_total` 有等式用例)。与上面字面不同的五处取舍,都记在这里:
+
+- **块长度落在 `_reflect_v2_attempt`,不在 `_reflect_v2_context`。** 五块里有三块的最终字节只有那里才有:`off` 的 S 是那一轮**现渲染**的动态 system 段(`_reflect_v2_context` 拿不到 `capabilities`)、C 要等 `prompts` 把问题拼进去才成形、P 的 T 还差本轮动作面那一半。改成「谁产出那个值谁记」:`_reflect_v2_context` 只记它独有的 `cards_shown`/`cards_omitted`(产地是 `selection`,那边看不到)。
+- **C 与 T 是差值口径,两条臂同形。** `T = len(材料块) − K − D`(`off` 是服务器状态摘要、P 是动作清单 + 状态半,块间分隔符落在这一格),`C = len(user 正文) − len(材料块)`(问题、契约、引号规则、收尾那句)。于是 `S + C + K + D + T` 恰等于两条消息正文字符数之和——这条恒等式是这五个数唯一的自洽判据,有用例钉住。按块名各自直取会让分隔符与 `prompts` 的框架字节无人认领,五个数看起来都合理却对不上任何一条消息。
+- **压缩/回退次数不写。** 计划说本 PR 恒 0,而 T-PS4 的登记清单里没有它们的键;写侧键集必须 ⊆ 那份清单,所以「恒 0」的兑现方式是**这两个键不存在**,而不是写两个 0。
+- **落账点在 `_TraceRecorder.__call__`,缓存有三个把手。** 那几个键要进的是 `run()` 里现拼的 reflect detail,而 `run()` 在零松弛长度天花板下一条语句都不能加(同 `defer` 的既有理由)。记账器是那条 reflect 步唯一的入口,所以合并在那里,判据加 `step_type == "reflect"`;`_ReasoningRunState.reflect_measurement` 是 owner(计划要的那个默认 `None` 字段,`_new_run_state` 零改动),`state.record.measurement` 是记账器的把手,`ReflectContext.measurement` 是每轮交给 `_reflect_v2_attempt` 的那一格(它拿不到 `state`,理由同 `static_prompt`)。
+- **`previous` / `current` 分两格,晋升在记账时。** 同一轮可能调用两次模型(加预算重试),当场把本轮字节串升为 `previous` 会让第二次尝试拿第一次当基准,量出一个恒等于全长的假前缀(而那个数看起来更漂亮)。晋升因此由 `ReflectMeasurement.take()` 在真的记了 reflect 步的那一刻做,一轮一次。
+- **`call_wall_ms` / `call_attempts` / `response_chars` 同一轮内累加**(不是覆盖):读侧 `model_calls_real` 是各 reflect 步之和,一轮只报最后一次的请求数会让整 run 的真实请求数偏低,而那一列正是用来判「日志里的数是真值还是下界」的。
+- **验收 (c) 的形态要构造。** 真实 run 里 K(新卡)与 D(新观察行)每轮都在长,「只有末尾 T 变」不会自然出现;所以那一条取一轮真发出去的两条消息、只改 user 正文末尾,再用生产的 `serialize_provider_messages` / `_common_prefix_bytes` 量一次。真 run 上另有两条:P 的每一轮都越过整个 system 帧,`off` 至少有一轮越不过它(动作面一变就断在里面)——后者是「测量真的在量东西」的反向证据。
+- `T-PS8` 那个「静态目录渲染缓存留给 T-PS3」的注释保留原样:`static_prompt` **没有**挪到这个缓存对象上。挪了它就得在测量关、只开布局时也构造缓存,而「测量关不构造缓存」是本任务的硬约束;每轮重渲染一次是纯字符串拼接,S 的稳定性本来就不依赖缓存。
+
 ### T-PS4 trace 步与投影闭集扩展
 落点 `reasoning_trace_stats.py:43-103、594-634、637-751、786-866`。reflect 步 detail 稀疏键:`ctx_chars_s/c/k/d/t`、`ctx_bytes_total`、`message_prefix_bytes`、`cards_shown`、`cards_omitted`、`call_wall_ms`、`call_attempts`、`response_chars`。投影顶层:`run_wall_ms`、`model_calls_real`、`attempts_observed`、`optimization`(新闭集 `OPTIMIZATIONS`,与 `POLICY_VERSIONS` 并列)、`context_chars`(短码→数值)、`prefix_bytes_median`/`prefix_bytes_min`/`prefix_turns`(逐轮细节留 rig per-call 表)。新键缺失一律 `None`。
 验收:`assert_closed`/`assert_projection_values`(`923-1031`)全绿;旧行可读;`legacy`/`off` 行键集不变(稀疏键不出现)。用例:隐私守卫拦自由文本;缺 usage/finish_reason/cached 仍出整行;截断 trace 不掩盖 `model_calls_real`;`off` 行逐键比对。
