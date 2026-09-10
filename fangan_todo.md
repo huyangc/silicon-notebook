@@ -335,7 +335,7 @@
         放行（`load_rows` 默认拒绝的既有纪律不变，T-PS4 起）。读法见 `scripts/README.md` 的 `ab`
         小节；PR-5 三条实验通道的入口与产物见下面 (m)。
 
-      (m) **PR-5「T4 实验通道(E1/E2/E3)+ T5 文档收官」已部分落地**（计划真源
+      (m) **PR-5「T4 实验通道(E1/E2/E3)+ T5 文档收官」已落地**（计划真源
       `docs/superpowers/specs/2026-09-11-reflect-prefix-experiments-plan_zh.md`，上游设计同
       (l) 的 §8/§9/§10/§11/§12/§13）：新增三条只读实验通道，一个都不改任何生产策略的默认行为
       （`REASONING_REFLECT_OPTIMIZATION` 默认仍是 `off`）。
@@ -349,7 +349,7 @@
         `prefix-probe` 小节。
       * **E2「固定状态的真实 reflect 对照」**（驱动器 `backend/app/eval/reflect_state_probe.py`
         与 12 例 case 集 `backend/app/eval/reflect_t0/state_probes.json`；rig 子命令
-        `state-probe`，`scripts/reflect_shadow_rig.py`，已落地）：驱动器把前 k 轮按剧本
+        `state-probe`，`scripts/reflect_shadow_rig.py`）：驱动器把前 k 轮按剧本
         重放（零真实调用，四臂逐格相同），只在第 k+1 轮把两条消息原样转发给真客户端调
         一次并留存决定，四臂在同一状态点上按 `initial`/`follow_up`/`compaction_boundary`
         三档分别报告；产物 `state-probe-<arm>.jsonl`/`state-probe-summary.{md,json}`/
@@ -359,9 +359,12 @@
       * **E3「真实自主循环」**：在既有 `ab` 上补整批墙钟预算（`--max-wall-minutes`，到点停止派发、
         保留未完成/不成对标记，不补跑到矩阵齐全）+ manifest 收尾。
       * **manifest 纯构造**（`backend/app/eval/reflect_manifest.py`）：三条通道共用 18 键闭集 +
-        隐私断言，`matrix` 子键契约按通道各自登记（E1 `tiers`；E2 `state_points`；E3
-        `questions`/`efforts`/`arms`/`repeats`），全通道共同必填 `code_sha`/`started_at`/
-        `finished_at`/`stopped_by_budget`。
+        隐私断言，`matrix` 必填子键与 `REQUIRED_MATRIX_KEYS_BY_CHANNEL` 逐字一致（E1
+        `tiers`/`blocks`/`arms`/`calls_per_series`；E2 `cases`/`state_points`/`arms`/
+        `repeats`；E3 `questions`/`cells`/`efforts`/`arms`/`repeats`，`cells` 不是
+        乘数——各语料格题集不相交，总 run 数按 `questions × efforts × arms × repeats`
+        对账，`planned_runs` 额外子键直接给出这个上界），全通道共同必填 `code_sha`/
+        `started_at`/`finished_at`/`stopped_by_budget`。
       * **`analyze` 新增三处读出口**（`scripts/analyze_reasoning_trace.py`）：`--baseline-arm`
         （取代硬编码 `OPTIMIZATION_BASELINE`）、`--pair-rows`（逐题配对差值表）、
         `--key-set {t0,ab}`（默认 `t0` 不变）。默认参数下行为与今天逐字节相同。
@@ -390,6 +393,25 @@
         `ab` 臂上，本期一格未动。
       * **E3 的臂序按 run 无种子**：`arm_order_seed` 恒 `null`（M4），键本身必须在场，是否要给
         E2/E3 加臂序种子交用户拍板。
+      * **`budgets.reasoning_attempt_budget` 是镜像常量**：环境把 `REASONING_MAX_RETRIES`
+        显式调离默认值时，`ab` manifest 这个键仍写配置**默认值**算出的预算，不是这次真实生效
+        的值；真实请求数只能事后从 `llm.jsonl` 行上的 `attempts` 读（与 `_ab_call_estimate`
+        同一条口径）。
+      * **`_verdict` 的阈值实现自定**（`backend/app/eval/reflect_prefix_probe.py`）：
+        `_MIN_PAIRED_REGIONS_FOR_VERDICT=2`、`_CONSISTENCY_THRESHOLD=0.75` 与「过半非预热行
+        不 `ok` ⇒ undetermined」，design §9.1 与计划 T-EX3 都只给了三格结论词面，没有给出具体
+        阈值——是实现自定，不是原文引用，判据本体见 `scripts/README.md` 的 `prefix-probe`
+        小节。
+      * **参数化用例在生产常量被砍键时用例数会跟着缩**：既有 `FORBIDDEN_SCRIPT_ACTIONS` 同型
+        弱点在这批新增的参数化用例上原样存在，不是新引入的缺陷，本期不单修。
+      * **`scripts/` 侧没有接缝负向扫描**：`test_no_business_layer_can_reach_the_experiment_seam`
+        只扫 `backend/app` 全树，`scripts/reflect_shadow_rig.py` 里合法打开接缝的那两处调用点
+        （`prefix-probe` 命令内）不受这道机械守卫覆盖——今天全仓只有那两处，未来有人在
+        `cmd_ab`/`cmd_state_probe` 里 arming 不会被这道守卫拦下，是登记空白不是本期阻塞。
+      * **E1 dry-run 第 027 行没提 `manifests.jsonl`**：那一行只列了 `manifest.json`，而三条
+        通道其实共用 `_write_manifest` 同时写 `manifest.json`(最新，覆盖) + `manifests.jsonl`
+        (历史，追加)。`scripts/README.md` 的 `prefix-probe` 产物一段说法是对的，欠一句的是
+        dry-run 打印本身，本期不改 dry-run 输出。
       * **E2 的图动作缺口、臂序按重复轮号奇偶交替（非随机）、无整批墙钟预算、per-call 表
         无 `state_point` 标签、`_test` 判据与 `ab` 分叉**：剧本里不允许出现
         `expand_graph`/`follow_chain`/`ppr_retrieve`（必填参数是候选池里的 `object_id`，
