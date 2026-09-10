@@ -5578,6 +5578,103 @@ def test_reflect_scalar_budgets_are_bounded(monkeypatch, name, value):
 
 
 # ---------------------------------------------------------------------------
+# T-PD1 `prefix_delta` 的两个新配置(前缀复用最终设计 §5.1、计划拍板 Q9)。本任务
+# 只登记这两个字段——`config.py` 里一次都不读,首个消费点在 T-PD5。
+# ---------------------------------------------------------------------------
+
+
+def test_reflect_delta_cards_settings_defaults():
+    """新增映射的默认值:按档位 2/4/6/8/10,与 `DEFAULT_REFLECT_DELTA_CARDS_BY_EFFORT`
+    同源——本期不改变任何生产行为。"""
+    from app.core.config import (
+        DEFAULT_REFLECT_DELTA_CARDS_BY_EFFORT, Settings,
+    )
+    s = Settings(_env_file=None)
+    assert (s.reasoning_reflect_delta_cards_by_effort
+            == DEFAULT_REFLECT_DELTA_CARDS_BY_EFFORT)
+    assert s.reasoning_reflect_compaction_target_ratio == 0.5
+
+
+def test_reflect_delta_cards_env_roundtrip(monkeypatch):
+    """映射走 JSON 环境变量,与证据字符预算同一形状。"""
+    from app.core.config import Settings
+    monkeypatch.setenv(
+        "REASONING_REFLECT_DELTA_CARDS_BY_EFFORT",
+        '{"overview":1,"standard":1,"deep":3,'
+        '"thorough":3,"exhaustive":16}')
+    monkeypatch.setenv("REASONING_REFLECT_COMPACTION_TARGET_RATIO", "0.25")
+    s = Settings(_env_file=None)
+    assert s.reasoning_reflect_delta_cards_by_effort["exhaustive"] == 16
+    # 相等(不递减)是合法的,严格递增不是要求。
+    assert s.reasoning_reflect_delta_cards_by_effort["standard"] == 1
+    assert s.reasoning_reflect_compaction_target_ratio == 0.25
+
+
+@pytest.mark.parametrize("raw,needle", [
+    # 未知 key
+    ('{"overview":2,"standard":4,"deep":6,"thorough":8,'
+     '"exhaustive":10,"insane":10}', "未知档位"),
+    # 缺 key
+    ('{"overview":2,"standard":4,"deep":6,"thorough":8}', "缺少"),
+    # bool 冒充整数
+    ('{"overview":true,"standard":4,"deep":6,"thorough":8,'
+     '"exhaustive":10}', "必须是整数"),
+    # 非单调
+    ('{"overview":10,"standard":4,"deep":6,"thorough":8,'
+     '"exhaustive":10}', "不递减"),
+    # 越界(下界)
+    ('{"overview":0,"standard":4,"deep":6,"thorough":8,'
+     '"exhaustive":10}', "越界"),
+    # 越界(上界)
+    ('{"overview":2,"standard":4,"deep":6,"thorough":8,'
+     '"exhaustive":17}', "越界"),
+    # 不是 JSON
+    ('overview=2', "不是合法 JSON"),
+])
+def test_reflect_delta_cards_rejects_bad_mappings(monkeypatch, raw, needle):
+    """校验器逐条镜像 `validate_reflect_evidence_chars`(报错口径同款)。
+
+    变异:把 `validate_reflect_delta_cards` 里对应的一条检查删掉 ⇒ 对应那格红。
+    """
+    from app.core.config import Settings
+    monkeypatch.setenv("REASONING_REFLECT_DELTA_CARDS_BY_EFFORT", raw)
+    with pytest.raises(Exception) as excinfo:
+        Settings(_env_file=None)
+    assert needle in str(excinfo.value)
+
+
+@pytest.mark.parametrize("value,should_raise", [
+    ("0.25", False), ("0.75", False), ("0.24", True), ("0.76", True),
+])
+def test_reflect_compaction_target_ratio_boundaries(
+    monkeypatch, value, should_raise
+):
+    """目标比例的合法区间 0.25–0.75(设计稿 §5.2 step①④)。"""
+    from app.core.config import Settings
+    monkeypatch.setenv("REASONING_REFLECT_COMPACTION_TARGET_RATIO", value)
+    if should_raise:
+        with pytest.raises(Exception):
+            Settings(_env_file=None)
+    else:
+        s = Settings(_env_file=None)
+        assert s.reasoning_reflect_compaction_target_ratio == float(value)
+
+
+def test_reflect_compaction_target_ratio_rejects_bool():
+    """`bool` 显式拒绝,不靠区间巧合挡住(见 `validate_reflect_compaction_target_ratio`)。
+
+    变异:把该校验器整个删掉 ⇒ 这条仍可能因 `ge=0.25` 挡住 `True`(=1.0)而误绿,
+    所以这里直接构造实例而不经环境变量,绕开 pydantic-settings 的字符串转型,
+    逼校验器亲自看见一个 Python `bool`。
+    """
+    from app.core.config import Settings
+    with pytest.raises(Exception) as excinfo:
+        Settings(_env_file=None,
+                 reasoning_reflect_compaction_target_ratio=True)
+    assert "布尔值不算数字" in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
 # T-PS6 前缀复用策略位与它的单点判定(前缀复用最终设计 §5.1、计划拍板 Q1/Q2)
 # ---------------------------------------------------------------------------
 
@@ -5624,16 +5721,20 @@ def test_reflect_optimization_env_roundtrip(monkeypatch):
     assert s.reasoning_reflect_measure_context is True
 
 
-@pytest.mark.parametrize("value", ["prefix_delta", "prefix_delta_lean"])
+@pytest.mark.parametrize("value", ["prefix_delta_lean"])
 def test_reflect_optimization_rejects_the_unimplemented_values(
     monkeypatch, value
 ):
-    """已登记但未实现的两格:启动期**响亮**拒绝,不静默退回 `off`(拍板 Q1)。
+    """已登记但未实现的最后一格:启动期**响亮**拒绝,不静默退回 `off`(拍板 Q1)。
 
-    静默降级会让一个自以为在跑增量的部署把每一条测量都归到错误的臂上——那比
-    启动失败难查得多。措辞也钉住,而且钉的是**整句**:两份部署文档逐字引用了这
-    条错误,标点差一个全角逗号,运维照文档 grep 日志就搜不到——所以这里既断言
-    运行期的整句,也断言两份文档引的是同一串字节。
+    PR-3(T-PD1)把 `prefix_delta` 挪进已实现闭集,参数化因此收窄到只剩
+    `prefix_delta_lean` 这一格——`prefix_delta` 现在必须能起来,不再属于这条
+    用例覆盖的范围(见 `test_reflect_optimization_env_roundtrip` 的姊妹场景)。
+
+    静默降级会让一个自以为在跑增量精简版的部署把每一条测量都归到错误的臂上
+    ——那比启动失败难查得多。措辞也钉住,而且钉的是**整句**:两份部署文档逐字
+    引用了这条错误,标点差一个全角逗号,运维照文档 grep 日志就搜不到——所以这
+    里既断言运行期的整句,也断言两份文档引的是同一串字节。
 
     变异:把 `validate_reflect_optimization` 的 `raise` 换成 `return "off"`
     (或整个校验器删掉)⇒ 这条红;把句中的半角逗号改成全角 ⇒ 这条也红。
@@ -5645,7 +5746,7 @@ def test_reflect_optimization_rejects_the_unimplemented_values(
         Settings(_env_file=None)
     text = str(excinfo.value)
     sentence = (f"REASONING_REFLECT_OPTIMIZATION={value} 该取值将在后续 PR 实现,"
-                "当前请用 off 或 prefix_snapshot")
+                "当前请用 off 或 prefix_snapshot 或 prefix_delta")
     assert sentence in text, text
     # 文档引用的是同一串字节(占位符之后的部分逐字相同)。
     root = pathlib.Path(__file__).resolve().parents[2]
@@ -5696,7 +5797,7 @@ def test_reflect_optimization_is_gated_by_the_v2_master_switch(
 
 
 @pytest.mark.parametrize("configured", [
-    None, "", 0, "prefix_snapshoot", "prefix_delta", "prefix_delta_lean",
+    None, "", 0, "prefix_snapshoot", "prefix_delta_lean",
 ])
 def test_reflect_optimization_folds_unregistered_values_back_to_off(
     rrepo, configured
@@ -5709,8 +5810,13 @@ def test_reflect_optimization_folds_unregistered_values_back_to_off(
     分派布局时,一个认不出的取值会走到"既不是 off 也不是任何已实现臂"的第三种
     形态上,那才是真正的静默漂移;折回 `off` = 走实施基线,与关闭态同一条字节路径。
 
+    PR-3(T-PD1)把 `prefix_delta` 挪进已实现闭集之后,它不再是这条用例的
+    素材——`configured=prefix_delta` 现在应当原样带过而不是折回 `off`,那半
+    场景已经在 `test_reflect_optimization_passes_every_implemented_value_through`
+    里(参数来自 `REFLECT_OPTIMIZATION_IMPLEMENTED`,PR-3 起自动包含它)。
+
     变异:把 `reflect_optimization()` 里的 `if configured not in
-    REFLECT_OPTIMIZATION_IMPLEMENTED` 去掉 ⇒ 六格全红。
+    REFLECT_OPTIMIZATION_IMPLEMENTED` 去掉 ⇒ 五格全红。
     """
     from app.services.reasoning_retrieval import ReasoningRetriever
     rrepo.settings.reasoning_reflect_v2_enabled = True
