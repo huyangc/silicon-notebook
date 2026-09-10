@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import pytest
 
+import app.eval.reflect_context_bench as bench
 from app.domain.reasoning_trace_stats import assert_projection_values
 from app.eval.reflect_context_bench import (
     CALL_EVENT_KIND,
@@ -159,11 +160,64 @@ def test_a_support_id_with_fan_out_is_unknown_across_sides_never_guessed():
     assert all(row["workload_id"] is None for row in rows)
 
 
-def test_one_log_against_two_events_is_ambiguous_too():
-    """扇出在**任一侧**都算切不干净,不只是日志那一侧多行时。"""
+def test_one_log_against_two_events_is_ambiguous_and_drops_the_event_copies():
+    """扇出在**任一侧**都算切不干净,不只是日志那一侧多行时。
+
+    这一条同时钉住 docstring 里那句「哪些行会被刻意丢掉」:同号事件的副本**不**
+    各出一行。日志侧那一行已经带着这个号进表并标了 `ambiguous`,再把两条事件铺
+    开会让一次调用在表里变成三行,而多出来的两行连属不属于同一次调用都不知道。
+    """
     rows = join_calls([_log("mdl-dup")], [_event("mdl-dup"), _event("mdl-dup")])
     assert [row["join"] for row in rows] == ["ambiguous"]
     assert rows[0]["queue_latency_ms"] is None
+
+
+# ---------------------------------------------------------------------------
+# 重试行:同号、非终态(`RETRY_STATUS`)
+# ---------------------------------------------------------------------------
+
+
+def test_a_retry_row_does_not_make_its_terminal_call_ambiguous():
+    """重试过的调用照样两侧齐全——它正是最该被看见的那一批。
+
+    `app/core/llm.py` 每次瞬时错误重试都再写一行,与终态行**同号**(重试循环整
+    个在 `interaction_support_scope` 内),而调度事件只有一条。按行数判扇出会让
+    每一次重试过的调用都落成两行 `ambiguous`、排队/执行时长与 workload 全线
+    unknown,而下游按 `join == "joined"` 算分位数时被滤掉的恰好是最慢的那些。
+    """
+    retry = _log("mdl-abc", status="retry", latency_ms=300, attempt=0)
+    retry.pop("attempts")          # 重试行刻意不带 `attempts`(计数还在爬)
+    rows = join_calls([retry, _log("mdl-abc")], [_event("mdl-abc")])
+    by_join = {row["join"]: row for row in rows}
+    assert set(by_join) == {"retry", "joined"}
+    # 终态行:调度侧列一个都不丢。
+    assert by_join["joined"]["attempts"] == 2
+    assert by_join["joined"]["queue_latency_ms"] == 35
+    assert by_join["joined"]["execution_latency_ms"] == 2050
+    assert by_join["joined"]["workload_id"] == "reasoning_reflect"
+    # 重试行:自己那一侧的墙钟是真的,跨侧 unknown(事件属于终态行)。
+    assert by_join["retry"]["call_wall_ms"] == 300
+    assert by_join["retry"]["attempts"] is None
+    assert by_join["retry"]["queue_latency_ms"] is None
+    assert by_join["retry"]["workload_id"] is None
+    # 「一次调用一格」:重试行不占 `call_index`,数格子不会把调用数数成两次。
+    assert by_join["retry"]["call_index"] is None
+    assert by_join["joined"]["call_index"] == 0
+    assert "retry" in CALL_JOIN_STATES
+
+
+def test_a_call_that_only_ever_retried_still_lands_its_scheduler_event():
+    """只剩重试行的号(重试到一半整批被掐):那条事件仍然要落表。
+
+    判「有没有日志」若按「有没有任何日志行」,这个号会被当成已有日志而把唯一
+    一条调度事件整条丢掉,排队时长凭空消失。判据因此是「有没有**终态**行」。
+    """
+    retry = _log("mdl-gone", status="retry", latency_ms=120)
+    rows = join_calls([retry], [_event("mdl-gone")])
+    by_join = {row["join"]: row for row in rows}
+    assert set(by_join) == {"retry", "event_only"}
+    assert by_join["event_only"]["queue_latency_ms"] == 35
+    assert by_join["event_only"]["call_index"] == 0
 
 
 def test_a_row_without_a_support_id_is_unattributed_not_dropped():
@@ -289,6 +343,61 @@ def test_a_missing_usage_block_is_unknown_not_zero():
     for key in ("prompt_tokens", "completion_tokens", "cached_tokens",
                 "reasoning_tokens", "total_tokens"):
         assert rows[0][key] is None, key
+
+
+def test_a_wordy_provider_finish_reason_is_unknown_not_an_exception():
+    """provider 回一句人话 ⇒ 那一格 unknown,**不是**整批中止。
+
+    `finish_reason` 是 `app/core/llm.py` 把 provider 返回值原样存下的那一个,而
+    这个仓库明确要伺候 thin OpenAI-compatible servers。抛出去的代价不是丢一格:
+    串行路这张表在 `_run_ab_arm` 的 `return` 表达式里求值,整批会在第 N 个单元
+    中止、那个单元两行还没写盘就没了,前面几百次模型调用白烧。
+    """
+    rows = join_calls(
+        [_log("mdl-abc", finish_reason="max tokens reached")], [_event()],
+    )
+    assert rows[0]["finish_reason"] is None
+    assert rows[0]["join"] == "joined"
+    # 别的列一个都不受影响——降级只降那一格。
+    assert rows[0]["call_wall_ms"] == 2100
+    assert rows[0]["queue_latency_ms"] == 35
+    assert_projection_values(rows[0])
+
+
+def test_an_over_long_support_id_still_joins_but_projects_as_unknown():
+    """`support_id` 作 ⋈ 的**键**用原串,作投影**值**过短码形状。
+
+    `model_safety` 那侧允许到 84 字符,投影短码上限是 64:超长的号仍然要能把
+    日志行与它的调度事件对上号(归因不能因为它长而失效),只是那一格落 unknown。
+    """
+    long_id = "mdl-" + "a" * 80
+    assert len(long_id) > 64
+    rows = join_calls([_log(long_id)], [_event(long_id)])
+    assert len(rows) == 1
+    assert rows[0]["join"] == "joined"        # ⋈ 照做
+    assert rows[0]["support_id"] is None      # 投影值 unknown
+    assert rows[0]["queue_latency_ms"] == 35
+    assert_projection_values(rows[0])
+
+
+def test_every_row_is_self_checked_not_just_the_first_one(monkeypatch):
+    """闭集/隐私自检是**逐行**的:脏的那一类行往往不是第 0 行。
+
+    `_event_side` 哪天多带一个字段,只有 event-only 行会脏,而那类行恒排在日志
+    行后面(行序:先日志、后只有事件的那几组)。只验 `rows[0]` 的写法对这一整类
+    失败是瞎的——守卫本身也需要一层守卫。
+    """
+    clean = join_calls([_log("mdl-a")], [_event("mdl-only")])
+    assert [row["join"] for row in clean] == ["log_only", "event_only"]
+
+    original = bench._event_side
+    monkeypatch.setattr(
+        bench, "_event_side",
+        lambda event: {**original(event), "prompt": "问题原文"},
+    )
+    # 第 0 行(log_only)干净、第 1 行(event_only)脏 ⇒ 整批必须炸。
+    with pytest.raises(ValueError, match="CALL_ROW_KEYS"):
+        join_calls([_log("mdl-a")], [_event("mdl-only")])
 
 
 def test_a_boolean_never_becomes_a_count():

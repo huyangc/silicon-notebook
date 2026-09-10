@@ -1,4 +1,7 @@
-"""per-call 表:`llm.jsonl` ⋈ `events.jsonl`,一次模型调用一行。
+"""per-call 表:`llm.jsonl` ⋈ `events.jsonl`,一次模型调用一格(`call_index`)。
+
+一格通常就是一行;重试过的调用另有几行 `join="retry"` 的尝试行陪着它,那几行
+不占格子(见 `RETRY_STATUS` 与 `join_calls`)——数调用要数格子,不要数行。
 
 设计真源:`docs/superpowers/specs/2026-09-09-reflect-prefix-cache-final-design_zh.md`
 §8.1「单次调用」那一行(本地序号、所属臂/run、`call_wall_ms`、状态码、已知重试
@@ -26,7 +29,7 @@ CLI 保持薄适配」。
 """
 from __future__ import annotations
 
-from typing import Any, Mapping, Sequence
+from typing import Any, Collection, Mapping, Sequence
 
 from app.domain.reasoning_trace_stats import assert_projection_values
 
@@ -46,10 +49,25 @@ CALL_EVENT_KIND = "model_scheduler"
 #: * `ambiguous` —— 同一个 `support_id` 在某一侧不止一行。**不猜**该配哪一条:
 #:   跨侧的列一律 unknown(§8.1「取不到不猜」);
 #: * `unattributed` —— 这一行压根没有 `support_id`(旧日志、或调用没走
-#:   `interaction_support_scope`)。它自己那一侧的数值仍然是真的,跨侧 unknown。
+#:   `interaction_support_scope`)。它自己那一侧的数值仍然是真的,跨侧 unknown;
+#: * `retry` —— 这一行是一次**没跑完的尝试**(`RETRY_STATUS`),不是一次调用的
+#:   结果。它自己那一侧的数值(这次尝试烧掉的墙钟)是真的,跨侧列 unknown——那
+#:   条调度事件属于这个号的**终态**行。它**不占** `call_index`(见 `join_calls`
+#:   末尾的编号),所以「这一批有几次调用」照旧数格子,不数行。
 CALL_JOIN_STATES: tuple[str, ...] = (
-    "joined", "log_only", "event_only", "ambiguous", "unattributed",
+    "joined", "log_only", "event_only", "ambiguous", "unattributed", "retry",
 )
+
+#: 非终态日志行的 `status`。`app/core/llm.py` 每次瞬时错误重试都**再写一行**,
+#: 而整个重试循环都在 `interaction_support_scope` 内(`model_provider.py`)——
+#: 重试行与终态行**共享同一个 `support_id`**,而调度事件只有一条。
+#:
+#: 不把它摘出来的话,凡是重试过的逻辑调用都成了「同号两行」⇒ `ambiguous` ⇒
+#: `queue_latency_ms` / `execution_latency_ms` / `workload_id` 一律 unknown,而
+#: 那批恰恰是最慢、最该被看见的调用(下游按 `join == "joined"` 算分位数会因此
+#: 系统性偏乐观)。这不是「切不干净」:重试行由 `status="retry"` 唯一标出、且
+#: 刻意不带 `attempts`(见 `llm.py` 写那一行时的说明),归因是确定的,不用猜。
+RETRY_STATUS = "retry"
 
 #: 从日志行取的列(键 → llm.jsonl 上的字段名)。`latency_ms` 改名成
 #: `call_wall_ms` 是刻意的:设计 §8.1 的词表里这个量叫后者,而日志里那个名字是
@@ -123,10 +141,25 @@ def _short_code(raw: object) -> str | None:
     """闭集外的短码列(`kind` / `status` / `workload_id` …)的取值。
 
     这些字段的词表由写侧拥有(`app/core/llm.py` 与 `model_provider.py`),读侧
-    照抄一份只会分叉;所以这里不校验**词面**,只校验**形状**——非串、空串一律
-    `None`,值本身的短码性由 `assert_projection_values` 在写行之前统一兜住。
+    照抄一份只会分叉;所以这里不校验**词面**,只校验**形状**:非串、空串、以及
+    不合投影短码形状(带空白 / 超长 / 字符集外)的值一律 `None` = unknown。
+
+    形状判据不在这里重写一份——直接问 `assert_projection_values` 本人(短码的
+    闭集真源在 `app/domain/reasoning_trace_stats.py`),两处口径因此不会分叉。
+
+    **收成 unknown 而不是抛**,与 `_count` 挡 `bool` 是同一条口径:这几列的值来自
+    provider(`finish_reason` 是 `llm.py` 把 provider 返回串原样存下的那一个),
+    而这个仓库明确要伺候 thin OpenAI-compatible servers——端点回一句带空格的人话
+    是可能的。把它升级成异常会让一整批已经跑成的 run 连同 per-call 表一起作废,
+    而这张表是**诊断产物**(与 `_rig_call_rows` 的 docstring 同一条纪律)。
     """
-    return raw if isinstance(raw, str) and raw else None
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        assert_projection_values({"_": raw})
+    except ValueError:
+        return None
+    return raw
 
 
 def _log_side(record: Mapping) -> dict:
@@ -196,19 +229,30 @@ def join_calls(
     所以这条 ⋈ 在并发下照样成立;真正在并发下不成立的是 run 级标签,由调用方
     传空 `tags`(见 `CALL_TAG_KEYS`)。
 
-    三种残缺各有确定行为,都由 `join` 那一列如实说出来(见 `CALL_JOIN_STATES`),
-    **一条都不丢**:
+    **重试行先摘出去**(`RETRY_STATUS`):它与终态行同号,但它不是一次调用的结
+    果,所以既不参与下面的扇出判定,也不占一个 `call_index`。
+
+    三种残缺各有确定行为,都由 `join` 那一列如实说出来(见 `CALL_JOIN_STATES`):
 
     * **缺事件** ⇒ `log_only`,调度侧列 unknown;
-    * **缺日志** ⇒ `event_only`,传输侧列 unknown;
+    * **缺日志** ⇒ `event_only`,传输侧列 unknown。判据是「这个号没有**终态**日志
+      行」,不是「没有任何日志行」:只留下重试行的那个号(调用重试到一半整批被
+      掐)照样得让它那条调度事件落表,否则排队时长凭空消失;
     * **一对多**(任一侧同号多行)⇒ 每一行各出一行 `ambiguous`,**跨侧列全部
       unknown**。这里刻意不按出现顺序 zip:两侧的行序没有任何一条保证能对上
       (日志在调用返回后写、事件在调度完成后写,两者不同线程不同时刻),zip
       出来的配对看起来完整,却是一串猜测。
 
-    行序:先按日志行的原序铺开(`call_index` 就是这个序号),再把只有事件的那
-    几组按事件原序接在后面。`call_index` 因此在一批里唯一且稳定,可以当本地
-    序号用(§8.1「单次调用 · 本地序号」)。
+    **哪些行会被刻意丢掉**(所以这里不说「一条都不丢」):一个号既有终态日志行、
+    又有不止一条调度事件时,那几条事件**不各出一行**——日志侧那一行已经带着这个
+    号进表并标了 `ambiguous`,再把同号事件铺开会让「一次调用」在表里变成三四行,
+    而多出来的那几行连它们属不属于同一次调用都不知道。丢掉的只是**同号事件的副
+    本**,不是任何一个号:每一个出现过的 `support_id` 都至少有一行。
+
+    行序:先按日志行的原序铺开,再把只有事件的那几组按事件原序接在后面。
+    `call_index` 只发给终态形状的行(`join != "retry"`),在一批里**唯一、稠密、
+    稳定**,可以当本地序号用(§8.1「单次调用 · 本地序号」);数一批跑了多少次
+    调用就数这个格子有值的行,重试行因此不会让调用数翻倍。
     """
     logs_by_id: dict[str, list[Mapping]] = {}
     loose_logs: list[Mapping] = []
@@ -223,12 +267,24 @@ def join_calls(
     events_by_id, loose_events = _index_events(events)
     tag_columns = _tag_columns(tags)
     rows: list[dict] = []
+    terminal_ids: set[str] = set()
     for key, records in logs_by_id.items():
         matched = events_by_id.get(key, ())
-        ambiguous = len(records) > 1 or len(matched) > 1
+        # 扇出只按**终态**行判:一次重试过的调用是「1 终态 + N 重试 + 1 事件」,
+        # 按行数判会把它误读成同号多行,于是这次调用的调度侧列全线 unknown。
+        terminals = sum(1 for record in records if not _is_retry(record))
+        if terminals:
+            terminal_ids.add(key)
+        ambiguous = terminals > 1 or len(matched) > 1
         for record in records:
-            row = {**tag_columns, "support_id": key, **_log_side(record)}
-            if ambiguous:
+            # `support_id` 作 ⋈ 的**键**用原串(归因不能因为它长而失效),作这一
+            # 行的**投影值**过一次短码形状:`model_safety` 那侧允许到 84 字符,
+            # 而投影短码上限是 64,超长的落 unknown 而不是把整表打掉。
+            row = {**tag_columns, "support_id": _short_code(key),
+                   **_log_side(record)}
+            if _is_retry(record):
+                rows.append({**row, "join": "retry", **_LOG_ONLY_UNKNOWN})
+            elif ambiguous:
                 rows.append({**row, "join": "ambiguous", **_LOG_ONLY_UNKNOWN})
             elif matched:
                 rows.append({**row, "join": "joined", **_event_side(matched[0])})
@@ -239,13 +295,27 @@ def join_calls(
             **tag_columns, "support_id": None, "join": "unattributed",
             **_log_side(record), **_LOG_ONLY_UNKNOWN,
         })
-    rows.extend(_event_only_rows(events_by_id, loose_events, logs_by_id,
+    rows.extend(_event_only_rows(events_by_id, loose_events, terminal_ids,
                                  tag_columns))
-    for index, row in enumerate(rows):
-        row["call_index"] = index
+    next_index = 0
+    for row in rows:
+        # 重试行不占格子(见 docstring):它是一次调用**内部**的一次尝试,给它
+        # 编号就等于把同一次调用数成两次。
+        if row["join"] == "retry":
+            row["call_index"] = None
+        else:
+            row["call_index"] = next_index
+            next_index += 1
+        # 逐行自检,不是只验第一行:`_event_side` / `_log_side` 哪天多带一个字段,
+        # 脏的往往只有某一类行(event-only 行永远不是第 0 行)。
         assert_call_row_closed(row)
         assert_projection_values(row)
     return rows
+
+
+def _is_retry(record: Mapping) -> bool:
+    """这一行是一次没跑完的尝试吗(见 `RETRY_STATUS`)。"""
+    return record.get("status") == RETRY_STATUS
 
 
 def _index_events(
@@ -270,15 +340,19 @@ def _index_events(
 def _event_only_rows(
     events_by_id: Mapping[str, list[Mapping]],
     loose_events: Sequence[Mapping],
-    logs_by_id: Mapping[str, list[Mapping]],
+    terminal_ids: Collection[str],
     tag_columns: Mapping,
 ) -> list[dict]:
-    """没有对应日志行的那几组事件。同号多条仍然是 `ambiguous`。
+    """没有对应**终态**日志行的那几组事件。同号多条仍然是 `ambiguous`。
 
     「有事件没日志」不是异常:`LLM_LOG_ENABLED=false` 的整批、以及
     `app/core/llm.py` 那条本地响应缓存命中的出口(它 return 之前不写日志行)
     都落在这里。丢掉它们会让一批 run 的调用数凭空少掉一截,而少掉的恰好是最
     便宜的那些。
+
+    判据是 `terminal_ids` 而不是「所有出现过的号」:只留下重试行的那个号(调用
+    重试到一半整批被掐)在日志侧没有任何一行说得出这次调用的结果,它那条调度
+    事件因此仍然是这个号唯一的终态证据,得让它落表。
 
     事件侧那几列在 `ambiguous` 下**照样落值**:它们是这一条事件自己的事实,不
     是跨侧的猜测。`ambiguous` 标的是「这个号在某一侧不止一行,别把这几行当成
@@ -286,7 +360,7 @@ def _event_only_rows(
     """
     rows: list[dict] = []
     for key, matched in events_by_id.items():
-        if key in logs_by_id:
+        if key in terminal_ids:
             continue
         state = "ambiguous" if len(matched) > 1 else "event_only"
         for event in matched:
