@@ -432,10 +432,17 @@ _MEASURE_CONTEXT_REBUILDS = _registered_measure_key("context_rebuilds")
 _MEASURE_CONTEXT_FALLBACK = _registered_measure_key("context_fallback")
 _MEASURE_DELTA_BLOCKS = _registered_measure_key("delta_blocks")
 
-#: 两条**前缀布局**臂。消息形状完全相同(`system(S)` + 一条 `user(C+K+D+T)`),
-#: 差别只在 K/D 两块的内容判据(PR-3 计划 §0),所以 `_reflect_prefix_layout` 的
-#: 分派一格不变、只多认一个取值,回退也不经过那里。
-_PREFIX_LAYOUTS = ("prefix_snapshot", "prefix_delta")
+#: 两条**基于增量装配**的臂:消息形状与 `prefix_delta` 完全相同
+#: (`system(S)` + 一条 `user(C+K+D+T)`,K/D 两块同一套内容判据),
+#: `prefix_delta_lean` 在它之上只换自评合同(计划 §0「L = D + 自评合同」)。
+#: 两处历史上写字面量 `"prefix_delta"` 的字面相等(消息装配分派、测量构造门)
+#: 现在都改读这份成员判断,免得放开 `prefix_delta_lean` 时漏改一处、让它拿到
+#: `prefix_snapshot` 的装配却在文档/投影上自称 delta 臂。
+_DELTA_LAYOUTS = ("prefix_delta", "prefix_delta_lean")
+#: 三条**前缀布局**臂。消息形状完全相同(`system(S)` + 一条 `user(C+K+D+T)`),
+#: 差别只在 K/D 两块的内容判据(PR-3/PR-4 计划 §0),所以 `_reflect_prefix_layout`
+#: 的分派一格不变、只多认新取值,回退也不经过那里。
+_PREFIX_LAYOUTS = ("prefix_snapshot", *_DELTA_LAYOUTS)
 
 #: **对账守卫**:放开一格策略位却忘了在这里接线 ⇒ 进程起不来。
 #:
@@ -4867,7 +4874,7 @@ class ReasoningRetriever:
         # 个顺序危险得多。
         catalog = state.reflect_static_catalog
         delta = state.reflect_delta
-        if (optimization == "prefix_delta" and catalog is not None
+        if (optimization in _DELTA_LAYOUTS and catalog is not None
                 and (delta is None or not delta.fallback)):
             context = self._reflect_delta_context(
                 state, summary, outline, observer, catalog=catalog,
@@ -5005,7 +5012,7 @@ class ReasoningRetriever:
         measurement = state.reflect_measurement
         if measurement is None:
             measures = self.reflect_measures_context()
-            if not measures and optimization != "prefix_delta":
+            if not measures and optimization not in _DELTA_LAYOUTS:
                 return None
             measurement = state.reflect_measurement = ReflectMeasurement(
                 measures_messages=measures)

@@ -5730,39 +5730,50 @@ def test_reflect_optimization_env_roundtrip(monkeypatch):
     assert s.reasoning_reflect_measure_context is True
 
 
-@pytest.mark.parametrize("value", ["prefix_delta_lean"])
-def test_reflect_optimization_rejects_the_unimplemented_values(
-    monkeypatch, value
+def test_reflect_optimization_validator_allows_the_whole_closed_set_when_planned_is_empty(
+    monkeypatch
 ):
-    """已登记但未实现的最后一格:启动期**响亮**拒绝,不静默退回 `off`(拍板 Q1)。
+    """PR-4(T-PL1)把最后一格 `prefix_delta_lean` 挪进已实现闭集之后,
+    `REFLECT_OPTIMIZATION_PLANNED` 收窄为空元组(拍板 Q12)。
 
-    PR-3(T-PD1)把 `prefix_delta` 挪进已实现闭集,参数化因此收窄到只剩
-    `prefix_delta_lean` 这一格——`prefix_delta` 现在必须能起来,不再属于这条
-    用例覆盖的范围(见 `test_reflect_optimization_env_roundtrip` 的姊妹场景)。
+    这条取代了此前钉「最后一格启动期响亮拒绝」的
+    `test_reflect_optimization_rejects_the_unimplemented_values`——那条用例的
+    参数化(`["prefix_delta_lean"]`)现在为空,因为四格全部已实现,校验器不再有
+    任何值可拒。它保留的**机制**是「已登记但未实现即响亮拒绝」,只是闭集为空时
+    `value in REFLECT_OPTIMIZATION_PLANNED` 恒为假,所以对闭集里的任何取值都
+    应当恒放行——这条钉的正是这件事,而不是校验器被整个删掉。
 
-    静默降级会让一个自以为在跑增量精简版的部署把每一条测量都归到错误的臂上
-    ——那比启动失败难查得多。措辞也钉住,而且钉的是**整句**:两份部署文档逐字
-    引用了这条错误,标点差一个全角逗号,运维照文档 grep 日志就搜不到——所以这
-    里既断言运行期的整句,也断言两份文档引的是同一串字节。
+    闭集之外的拼写仍然被 `Literal` 挡在校验器之前,报的是「不在取值范围」而不是
+    「未实现」;这条留一个非法拼写的用例,断言错误文案逐字列出四格,并且与两份
+    部署文档那一行是同一串字节——运维照文档 grep 日志才搜得到。
 
-    变异:把 `validate_reflect_optimization` 的 `raise` 换成 `return "off"`
-    (或整个校验器删掉)⇒ 这条红;把句中的半角逗号改成全角 ⇒ 这条也红;把文档里
-    引用这句的位置从 `REASONING_REFLECT_OPTIMIZATION` 那一行挪到文末的其他地方
-    (哪怕字节不变)⇒ 这条也红——按行定位,不是"文件里某处出现过"。
+    变异:把 `REFLECT_OPTIMIZATION_PLANNED` 改回非空 ⇒ 上半段某个已实现取值会
+    被误拒而红;把文档里引用这句的位置从 `REASONING_REFLECT_OPTIMIZATION` 那
+    一行挪到文末(哪怕字节不变)⇒ 这条红——按行定位,不是"文件里某处出现过"。
     """
     import pathlib
-    from app.core.config import Settings
-    monkeypatch.setenv("REASONING_REFLECT_OPTIMIZATION", value)
+    from app.core.config import (
+        REFLECT_OPTIMIZATION_IMPLEMENTED, REFLECT_OPTIMIZATION_PLANNED,
+        Settings,
+    )
+    assert REFLECT_OPTIMIZATION_PLANNED == ()
+    for value in REFLECT_OPTIMIZATION_IMPLEMENTED:
+        monkeypatch.setenv("REASONING_REFLECT_OPTIMIZATION", value)
+        s = Settings(_env_file=None)
+        assert s.reasoning_reflect_optimization == value
+
+    # 闭集之外的拼写:由 `Literal` 挡在这条自定义校验器之前,文案逐字列出四格。
+    monkeypatch.setenv("REASONING_REFLECT_OPTIMIZATION", "prefix_snapshoot")
     with pytest.raises(Exception) as excinfo:
         Settings(_env_file=None)
     text = str(excinfo.value)
-    sentence = (f"REASONING_REFLECT_OPTIMIZATION={value} 该取值将在后续 PR 实现,"
-                "当前请用 off 或 prefix_snapshot 或 prefix_delta")
+    sentence = ("Input should be 'off', 'prefix_snapshot', 'prefix_delta' "
+                "or 'prefix_delta_lean'")
     assert sentence in text, text
-    # 文档引用的是同一串字节(占位符之后的部分逐字相同),且引在
-    # `REASONING_REFLECT_OPTIMIZATION` 那一行本身——挪到文档别处不算数。
+    assert "该取值将在后续 PR 实现" not in text
+    # 文档引用的是同一串字节,且引在 `REASONING_REFLECT_OPTIMIZATION` 那一行
+    # 本身——挪到文档别处不算数。
     root = pathlib.Path(__file__).resolve().parents[2]
-    quoted = sentence.split(" ", 1)[1]
     for name in ("docs/deployment-and-configuration.md",
                  "docs/deployment-and-configuration_zh.md"):
         doc_path = root / name
@@ -5770,7 +5781,7 @@ def test_reflect_optimization_rejects_the_unimplemented_values(
         matching = [
             line for line in lines
             if line.startswith("REASONING_REFLECT_OPTIMIZATION")
-            and quoted in line
+            and sentence in line
         ]
         assert matching, name
 
@@ -5816,7 +5827,7 @@ def test_reflect_optimization_is_gated_by_the_v2_master_switch(
 
 
 @pytest.mark.parametrize("configured", [
-    None, "", 0, "prefix_snapshoot", "prefix_delta_lean",
+    None, "", 0, "prefix_snapshoot",
 ])
 def test_reflect_optimization_folds_unregistered_values_back_to_off(
     rrepo, configured
@@ -5832,10 +5843,13 @@ def test_reflect_optimization_folds_unregistered_values_back_to_off(
     PR-3(T-PD1)把 `prefix_delta` 挪进已实现闭集之后,它不再是这条用例的
     素材——`configured=prefix_delta` 现在应当原样带过而不是折回 `off`,那半
     场景已经在 `test_reflect_optimization_passes_every_implemented_value_through`
-    里(参数来自 `REFLECT_OPTIMIZATION_IMPLEMENTED`,PR-3 起自动包含它)。
+    里(参数来自 `REFLECT_OPTIMIZATION_IMPLEMENTED`,PR-3 起自动包含它)。PR-4
+    (T-PL1)把最后一格 `prefix_delta_lean` 也挪了进去,同理从这条参数化里去掉
+    ——四格现在**全部**在 `test_reflect_optimization_passes_every_implemented_value_through`
+    的覆盖范围里,这条只剩压根不在闭集里的那几种形态。
 
     变异:把 `reflect_optimization()` 里的 `if configured not in
-    REFLECT_OPTIMIZATION_IMPLEMENTED` 去掉 ⇒ 五格全红。
+    REFLECT_OPTIMIZATION_IMPLEMENTED` 去掉 ⇒ 四格全红。
     """
     from app.services.reasoning_retrieval import ReasoningRetriever
     rrepo.settings.reasoning_reflect_v2_enabled = True
@@ -13087,6 +13101,9 @@ def test_v2_closing_rerank_does_read_the_clock(rrepo, monkeypatch):
 _PREFIX = "prefix_snapshot"
 #: 第二条前缀臂(PR-3 T-PD5)。与 `_PREFIX` 消息形状相同,差别只在 K/D 的内容判据。
 _DELTA = "prefix_delta"
+#: 第三条前缀臂(PR-4 T-PL1)。装配上是 `_DELTA` 的双胞胎——`_DELTA_LAYOUTS`
+#: 成员判断让它走同一支分派;两者的差别(自评合同)留给 T-PL3/T-PL4/T-PL5。
+_LEAN = "prefix_delta_lean"
 
 
 def _prefix_aspect_run(rrepo, **kwargs):
@@ -15639,7 +15656,54 @@ def test_wired_prefix_layouts_match_the_implemented_closed_set():
     from app.services.reasoning_retrieval import _PREFIX_LAYOUTS
 
     assert set(REFLECT_OPTIMIZATION_IMPLEMENTED) == {"off", *_PREFIX_LAYOUTS}
-    assert _DELTA in _PREFIX_LAYOUTS and _PREFIX in _PREFIX_LAYOUTS
+    assert (_DELTA in _PREFIX_LAYOUTS and _PREFIX in _PREFIX_LAYOUTS
+            and _LEAN in _PREFIX_LAYOUTS)
+
+
+def test_delta_layouts_cover_both_delta_backed_arms():
+    """`_DELTA_LAYOUTS` 是 `_PREFIX_LAYOUTS` 减去 `_PREFIX` 那一格(PR-4 T-PL1)。
+
+    这条钉的是**两个常量之间**的关系,不是它们各自与 `REFLECT_OPTIMIZATION_IMPLEMENTED`
+    的关系(那条是上面 `test_wired_prefix_layouts_match_the_implemented_closed_set`)。
+    单独钉住它,是因为"只放开 `_PREFIX_LAYOUTS` 却漏改 `_DELTA_LAYOUTS`"这种局部
+    改动完全可能在不碰导入期对账守卫的情况下发生——守卫只比 `_PREFIX_LAYOUTS`
+    与已实现闭集,认不出 `_DELTA_LAYOUTS` 单独少了一格。
+
+    变异:把 `_DELTA_LAYOUTS` 收窄回 `("prefix_delta",)`,同时把 `_PREFIX_LAYOUTS`
+    改写成不再从它派生的字面量(绕开对账守卫)⇒ 这条红;真正的运行期后果见下面
+    `test_prefix_delta_lean_reaches_delta_assembly_not_the_snapshot_fallback`。
+    """
+    from app.services.reasoning_retrieval import _DELTA_LAYOUTS, _PREFIX_LAYOUTS
+    assert set(_DELTA_LAYOUTS) == set(_PREFIX_LAYOUTS) - {_PREFIX}
+    assert _DELTA in _DELTA_LAYOUTS and _LEAN in _DELTA_LAYOUTS
+
+
+def test_prefix_delta_lean_reaches_delta_assembly_not_the_snapshot_fallback(rrepo):
+    """T-PL1 验收:`prefix_delta_lean` 起来之后真的拿到 delta 装配(计划 §3 T-PL1
+    验收「`prefix_delta_lean` 能起来且拿到 delta 装配」、用例 (c))。
+
+    本期(T-PL1)还没有 L 专属的自评合同(留给 T-PL3/T-PL4/T-PL5),`_prefix_context`
+    与 `_reflect_delta_context` 都还不认 `optimization` 的具体取值、只认
+    `_DELTA_LAYOUTS`/`_PREFIX_LAYOUTS` 的成员资格,所以同一剧本下 L 与 D 现在逐
+    字节相同——这正是这条用例要的证据:两条臂共用同一次装配,差别只应该出现在
+    后续任务补的自评合同上,不该现在就以任何字节差异的形式出现。
+
+    变异:把 `_DELTA_LAYOUTS` 缩回 `("prefix_delta",)`,同时把 `_PREFIX_LAYOUTS`
+    直接写成三格字面量绕开对它的派生(让导入期对账守卫看不出分歧)⇒ 这条红——
+    `optimization in _DELTA_LAYOUTS` 在 L 上落空,`_reflect_delta_context` 从此
+    不会被调用,一条 run 走到底也不会有任何一块 D(`lean_llm.delta_blocks(3)`
+    变成空列表),而消息形状仍然带着 S 的静态半(`_PREFIX_LAYOUTS` 认得 L)——
+    即 L 发出一条**不带 D 通道**的消息。
+    """
+    lean_llm, _lean_result = _four_turn_run(
+        rrepo, reasoning_reflect_optimization=_LEAN)
+    delta_llm, _delta_result = _four_turn_run(rrepo)
+    # L 真的走到了 delta 装配:D 块随轮数累加,不是恒为空。
+    assert [len(lean_llm.delta_blocks(turn)) for turn in range(4)] == [
+        0, 1, 2, 3]
+    # 本期两条臂共用同一次装配,理应逐字节相同(L 的自评合同留给后续任务)。
+    assert lean_llm.system_prompts == delta_llm.system_prompts
+    assert lean_llm.user_prompts == delta_llm.user_prompts
 
 
 def test_delta_layout_takes_the_same_prefix_message_shape(rrepo):
@@ -17593,15 +17657,22 @@ def test_delta_appends_exactly_one_block_per_turn_across_a_budget_retry(rrepo):
 
 # --- (i) 测量关 + delta:只有三个行为事实键 ------------------------------------
 
-def test_delta_with_measurement_off_writes_only_the_behaviour_keys(rrepo):
-    """(i) 测量关 + `prefix_delta` ⇒ detail 上只有那三个键,零字节序列化。
+@pytest.mark.parametrize("optimization", [_DELTA, _LEAN])
+def test_delta_with_measurement_off_writes_only_the_behaviour_keys(
+    rrepo, optimization,
+):
+    """(i) 测量关 + `_DELTA_LAYOUTS` 任一格 ⇒ detail 上只有那三个键,零字节序列化。
 
     拍板 Q7 的两半各断一条:重建与回退是行为事实,测量关时**也要可见**;而"测量关
     ⇒ 不序列化任何消息"必须真的成立——`serialize_provider_messages` 一次都不调。
+    参数化覆盖 `prefix_delta` 与 `prefix_delta_lean`(PR-4 T-PL1 用例 (d)「L 臂
+    测量关时 `ReflectMeasurement` 仍构造」)——两条臂共用同一处 `_reflect_measurement`
+    判据(`optimization not in _DELTA_LAYOUTS`,不是只认字面量 `"prefix_delta"`)。
 
     变异:把 `_reflect_v2_attempt` 的两处判据改回 `measurement is not None` ⇒
-    序列化调用数不为零,这条红;把 `_reflect_measurement` 里那条 `prefix_delta`
-    例外删掉 ⇒ 三个键全缺席,红。
+    序列化调用数不为零,这条红;把 `_reflect_measurement` 里那条 `_DELTA_LAYOUTS`
+    例外收窄回只认 `"prefix_delta"` ⇒ `optimization` 参数为 `_LEAN` 的那一份红
+    (三个键全缺席)。
     """
     import app.core.llm as llm_module
     from app.domain.reasoning_trace_stats import (
@@ -17619,7 +17690,9 @@ def test_delta_with_measurement_off_writes_only_the_behaviour_keys(rrepo):
 
     module.serialize_provider_messages = _spy
     try:
-        _llm, result = _four_turn_run(rrepo, **{_MEASURE_FLAG: False})
+        _llm, result = _four_turn_run(
+            rrepo, reasoning_reflect_optimization=optimization,
+            **{_MEASURE_FLAG: False})
     finally:
         module.serialize_provider_messages = module_original
 
