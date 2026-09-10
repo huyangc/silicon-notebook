@@ -214,20 +214,27 @@ def cap_kwargs(client: Any, attr: str) -> Dict[str, Any]:
 
 #: OFFLINE EXPERIMENT SEAM, default off. Holds ``(head, tail)`` marker strings
 #: for the E1 prefix-sensitivity probe (design §9.1), or ``None`` — which is
-#: what every production path reads, because nothing in ``app/services/`` or
-#: ``app/application/`` may import this or the scope below (there is a negative
-#: import assertion in ``backend/tests/test_llm_client.py`` saying so, and an
-#: AST assertion that ``.set()`` happens in exactly one place: the context
-#: manager underneath).
+#: what every production path reads, because nothing anywhere under
+#: ``backend/app`` except ``app/eval/`` (the probe harness) may import this or
+#: the scope below (there is a negative-import assertion in
+#: ``backend/tests/test_llm_client.py`` covering the WHOLE tree, not a layer
+#: whitelist, saying so, and an AST assertion that ``.set()`` happens in
+#: exactly one place: the context manager underneath).
 #:
 #: A ContextVar rather than a ``chat_json`` keyword because a public transport
 #: signature must not grow an "experiment injection slot": ``ScheduledJsonChat
 #: Client.chat_json`` enumerates its parameters item by item and would have to
 #: forward one, and design §9.1 refuses request-level injection outright. Being
-#: a ContextVar also means the value follows the call into the provider's
-#: scheduling thread, which copies the context (``model_provider`` runs the
-#: submission inside ``submission_context.run``), so the seam holds under async
-#: dispatch without anyone threading an argument through it.
+#: a ContextVar also means the value follows the call across any dispatch that
+#: EXPLICITLY copies the context — ``model_provider`` running the submission
+#: inside ``submission_context.run`` (built from ``contextvars.copy_context()``),
+#: or a job handed to ``app/services/background_jobs.py``'s ``submit`` (same
+#: mechanism) — so the seam holds under those two paths without anyone
+#: threading an argument through. That is a property of those call sites, not
+#: of ``chat_json`` in general: a private worker thread started WITHOUT
+#: ``copy_context()`` — ``app/extensions/gap_consult.py`` is the one that
+#: exists today — does not see whatever marker is armed on the thread that
+#: started it.
 #:
 #: The marker values are locally allocated fixed-width short codes with no
 #: semantics. They exist so a probe can vary WHICH part of a request is stable
@@ -248,6 +255,18 @@ def experiment_message_markers(head: str, tail: str) -> Iterator[None]:
     outside it, ``provider_messages`` returns byte-for-byte what it returned
     before this seam existed.
 
+    Both ``head`` and ``tail`` must be non-empty ``str``; anything else raises
+    ``ValueError`` before the seam is armed. The control-arm / disturbed-arm
+    contrast a probe measures can ONLY be expressed by which end is inside
+    this block versus outside it — never by a marker's own value — so an
+    empty string is not a quieter way to say "closed": it would still arm the
+    seam, still cost a ContextVar read on this path, and still make every
+    call inside the block collide on the SAME ``llm_key`` regardless of what
+    the caller thought it was varying. A caller that would otherwise pass
+    ``""`` or a non-``str`` has a bug in the probe script, and that should
+    fail loudly at the ``with`` statement rather than quietly send requests
+    that look marker-free to everything downstream.
+
     Reset happens in a ``finally``, so an exception inside the block cannot
     leave a marker armed for whatever runs next on this context — the failure
     mode that matters here, since a leaked marker does not crash anything: it
@@ -255,7 +274,11 @@ def experiment_message_markers(head: str, tail: str) -> Iterator[None]:
     makes ``llm_key`` differ on each one (defeating the local response cache
     wholesale) while every log line still looks entirely normal.
     """
-    token = _EXPERIMENT_MARKERS.set((str(head), str(tail)))
+    if not isinstance(head, str) or not head:
+        raise ValueError("experiment_message_markers: head must be a non-empty str")
+    if not isinstance(tail, str) or not tail:
+        raise ValueError("experiment_message_markers: tail must be a non-empty str")
+    token = _EXPERIMENT_MARKERS.set((head, tail))
     try:
         yield
     finally:
@@ -727,9 +750,19 @@ class OpenAICompatibleClient:
         if not self.configured:
             raise RuntimeError("OpenAI-compatible LLM settings are not configured")
         raise_if_cancelled(cancel_event)
-        # Single assembly point (see provider_messages): what goes on the wire,
-        # what feeds the cache key, and what a measurement layer reconstructs are
-        # the same list, produced by the same pure function.
+        # Single assembly point (see provider_messages). With the seam CLOSED
+        # (the default), what goes on the wire, what feeds the cache key, and
+        # what `reasoning_retrieval`'s measurement layer reconstructs
+        # (`provider_messages(messages, schema_hint)`, no `markers` kwarg) all
+        # agree — same list, same pure function.
+        #
+        # With the seam OPEN that agreement narrows to two: the measurement
+        # layer's call above still omits `markers`, so it still reconstructs
+        # the MARKER-FREE list rather than what actually went out. That is a
+        # deliberate choice, not a gap this file is meant to close — the E1
+        # probe reads its own per-call numbers off `call_stats` / the
+        # interaction log, never off a reconstruction, so the measurement
+        # layer never needed a `markers` parameter of its own.
         #
         # The ContextVar read is the whole cost of the E1 seam on this path, and
         # it resolves to None everywhere except inside an offline probe's
