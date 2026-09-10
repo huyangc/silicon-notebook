@@ -13245,3 +13245,483 @@ def test_prefix_layout_is_vetoed_by_the_caller_policy_bit(rrepo):
         ReflectContext(server_state="X", evidence="K", observations="D")
     ) is False
     assert rr._reflect_prefix_layout(None) is False
+
+
+# ---------------------------------------------------------------------------
+# T-PS3 v2 上下文观测与 `message_prefix_bytes`(计划 §3 T-PS3、拍板 Q2/Q6)
+#
+# 测量与布局**正交**:同一把尺子量 `off` 与 `prefix_snapshot` 两条臂,量出来的
+# 东西只进那一轮 reflect 步的稀疏 detail,不改任何一个字节的 prompt、不改任何
+# 一个决定。所以这一节的断言分两族:①「关闭态/测量关一格都不多付」;②「测量
+# 开着时那几个数自洽,并且真的贯通到闭集投影」。
+# ---------------------------------------------------------------------------
+
+_MEASURE_FLAG = "reasoning_reflect_measure_context"
+
+
+class _MeasuredV2LLM(_FlakyReflectLLM):
+    """`_V2ContextLLM` + 像生产客户端那样填 `call_stats` 出参(可选注入故障)。
+
+    T-PS3 的 `call_wall_ms` / `call_attempts` / `response_chars` 全部来自那个
+    出参,而反思层只对**自己声明支持**的客户端传 sink(`_call_stats_kwargs`)。
+    既有的 `_V2ContextLLM` 不声明,于是这三个键缺席、投影的 `model_calls_real`
+    恒 unknown ——「一条真实测量 run 能贯通到投影」正是要断的那件事,所以这里
+    需要一个会填 sink 的替身。
+
+    失败出口也填(墙钟与请求数各 1):生产的 `_record_call_stats` 同样在
+    cancelled/error 出口写这两格,而"同一轮两次尝试要累加"这条正需要那一次
+    死掉的调用也报数。
+    """
+
+    def chat_json(self, messages, schema_hint, **kwargs):
+        sink = kwargs.get("call_stats")
+        planning = "sub_queries" in schema_hint
+        try:
+            raw = super().chat_json(messages, schema_hint, **kwargs)
+        except Exception:
+            if sink is not None and not planning:
+                sink.update(status="error", call_wall_ms=3, attempts=1,
+                            attempts_observed=True)
+            raise
+        if sink is not None and not planning:
+            sink.update(status="ok", call_wall_ms=7, attempts=1,
+                        attempts_observed=True, finish_reason="stop",
+                        response_chars=len(raw))
+        return raw
+
+
+def _measured_run(rrepo, *, optimization="off", fail_calls=(), **kwargs):
+    """一次开着测量的 v2 run(默认 `off` 臂——拍板 Q2 要的正是它也能测)。"""
+    llm = _MeasuredV2LLM(
+        plan={"sub_queries": [{"query": kwargs.get("question", "完整问题")}]},
+        reflects=list(kwargs.pop("reflects", ())), fail_calls=fail_calls)
+    kwargs.setdefault(_MEASURE_FLAG, True)
+    kwargs.setdefault("reasoning_reflect_optimization", optimization)
+    return _v2_aspect_run(rrepo, llm=llm, **kwargs)
+
+
+def _reflect_details(result) -> list:
+    return [step.detail for step in result.trace if step.step_type == "reflect"]
+
+
+def _measure_keys(detail) -> set:
+    from app.domain.reasoning_trace_stats import REFLECT_MEASUREMENT_DETAIL_KEYS
+    return set(detail) & REFLECT_MEASUREMENT_DETAIL_KEYS
+
+
+def _capture_contexts(monkeypatch) -> list:
+    """每一轮 `_reflect_v2_context` 返回的那个对象,按轮序。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    original = ReasoningRetriever._reflect_v2_context
+    seen: list = []
+
+    def _wrapped(self, state, summary, outline):
+        context = original(self, state, summary, outline)
+        seen.append(context)
+        return context
+
+    monkeypatch.setattr(ReasoningRetriever, "_reflect_v2_context", _wrapped)
+    return seen
+
+
+def _capture_measure_calls(monkeypatch) -> list:
+    """每一次 `_measure_reflect_messages` **之后**的 detail 快照,按调用序。
+
+    按"调用"而不是按"轮"留存:同一轮可能调用两次模型(加预算重试),而"两次
+    尝试都和上一轮比"这条只有逐次快照才断得到。
+    """
+    import app.services.reasoning_retrieval as module
+    original = module._measure_reflect_messages
+    seen: list = []
+
+    def _spy(measurement, context, messages, schema_hint, material):
+        original(measurement, context, messages, schema_hint, material)
+        seen.append(dict(measurement.detail))
+
+    monkeypatch.setattr(module, "_measure_reflect_messages", _spy)
+    return seen
+
+
+# --- (a) 关闭态与测量关:一格都不多付 -----------------------------------------
+
+@pytest.mark.parametrize("optimization", ["off", _PREFIX])
+def test_measure_off_keeps_the_reflect_context_and_detail_untouched(
+    rrepo, monkeypatch, optimization,
+):
+    """(a) 测量关 ⇒ `_reflect_v2_context` 返回对象逐字段同前、detail 一个新键都没有。
+
+    两条臂都测:测量开关与布局正交,所以"关着它"必须在**两种**消息形状下都是
+    零成本。字段逐个比而不是只比 `measurement is None`——后者挡不住"顺手把某一
+    块的装配挪进了测量分支"。
+
+    变异:把 `_reflect_measurement` 里 `reflect_measures_context()` 那道判据删掉
+    (即无条件构造缓存)⇒ `measurement is None` 与 detail 键集两条都红。
+    """
+    from dataclasses import fields
+    from app.services.reasoning_context import ReflectContext
+
+    # 字段闭集:新增一格而不在这里登记 ⇒ 下面那圈逐字段比对会漏掉它。
+    assert [f.name for f in fields(ReflectContext)] == [
+        "server_state", "evidence", "observations", "contract", "turn_state",
+        "static_prompt", "measurement"]
+
+    quiet = _capture_contexts(monkeypatch)
+    _llm, quiet_result = _v2_aspect_run(
+        rrepo, intent_detail=_TWO_ASPECTS, reflects=_three_turn_reflects(),
+        chunk_results=_three_turn_chunks(), reasoning_max_chunk_searches=2,
+        reasoning_reflect_optimization=optimization)
+    assert len(quiet) == 3
+    for context in quiet:
+        assert context.measurement is None
+    for detail in _reflect_details(quiet_result):
+        assert _measure_keys(detail) == set()
+
+    loud = _capture_contexts(monkeypatch)
+    _measured_run(
+        rrepo, optimization=optimization, intent_detail=_TWO_ASPECTS,
+        reflects=_three_turn_reflects(), chunk_results=_three_turn_chunks(),
+        reasoning_max_chunk_searches=2)
+    assert len(loud) == 3
+    for turn, (before, after) in enumerate(zip(quiet, loud)):
+        for name in ("server_state", "evidence", "observations", "contract",
+                     "turn_state", "static_prompt"):
+            assert getattr(before, name) == getattr(after, name), (turn, name)
+        assert after.measurement is not None
+
+
+def test_measure_cache_holds_only_bytes_and_numbers(rrepo, monkeypatch):
+    """(d) 缓存对象的结构断言:只有字节串与整数,不持有任何业务状态。
+
+    这条是内存口径(拍板 Q2「一轮消息字节」)的唯一守卫:`__slots__` 一固定,
+    往里塞候选池、额度账或方面账就不再可能——而那正是"只读渲染缓存"与"第二份
+    会分叉的状态"之间的区别。
+
+    变异:给 `ReflectMeasurement` 加一个 `state` / `selection` 字段 ⇒ 槽位断言
+    红;把 `take()` 里那句清空删掉 ⇒ 末轮残留断言红。
+    """
+    from app.services.reasoning_context import ReflectMeasurement
+
+    assert ReflectMeasurement.__slots__ == ("previous", "current", "detail")
+    contexts = _capture_contexts(monkeypatch)
+    _measured_run(
+        rrepo, intent_detail=_TWO_ASPECTS, reflects=_three_turn_reflects(),
+        chunk_results=_three_turn_chunks(), reasoning_max_chunk_searches=2)
+
+    caches = {id(c.measurement) for c in contexts}
+    assert len(caches) == 1                      # 本 run 只构造一次
+    cache = contexts[0].measurement
+    assert isinstance(cache.previous, bytes) and cache.previous
+    # 每一轮记账时都升过一次,所以本 run 结束后没有未晋升的残留。
+    assert cache.current is None
+    assert cache.detail == {}
+    for name in ("state", "selection", "aspects", "capabilities"):
+        assert not hasattr(cache, name), name
+
+
+# --- (b) 同一轮两次尝试:同一个基准 -------------------------------------------
+
+def test_measure_compares_both_attempts_of_one_turn_against_the_previous(
+    rrepo, monkeypatch,
+):
+    """(b) 冻结输入下同一轮两次调用的 `message_prefix_bytes` 相同。
+
+    v2 在正文被 `max_tokens` 切断时会同轮再调一次。基准必须仍是**上一轮**:当场
+    把本轮字节串升为 `previous`,第二次尝试就会拿第一次当基准,量出一个恒等于
+    全长的假前缀——而那个数看起来完全正常(它甚至更大)。
+
+    `call_attempts` 同一轮**累加**:那一轮真的发出了两次请求,而投影的
+    `model_calls_real` 是各轮之和。
+
+    变异:把 `ReflectMeasurement.take()` 里的晋升挪进 `_measure_reflect_messages`
+    (即当场覆盖 `previous`)⇒ 两次尝试的前缀不再相等且第二次等于全长,这条红;
+    把 `_measure_reflect_call` 的累加改成覆盖 ⇒ `call_attempts` 变 1,这条红。
+    """
+    snapshots = _capture_measure_calls(monkeypatch)
+    _llm, result = _measured_run(
+        rrepo, intent_detail={"mandatory_topics": ["问题一"]},
+        fail_calls=(2,),                     # 第 2 轮的第一次尝试被判预算耗尽
+        reflects=[
+            {"next_action": "search_chunks", "sufficient": False,
+             "arguments": {"query": "换个问法"}, "reason": "先查一轮"},
+            _answer(assessment={"supported": [
+                {"aspect_id": "a1", "evidence_keys": ["ck-q0"]}]}),
+        ],
+        chunk_results=_three_turn_chunks())
+
+    # 三次调用:第 1 轮一次,第 2 轮两次(原值 + 翻倍)。
+    assert len(snapshots) == 3
+    assert snapshots[0]["message_prefix_bytes"] is None      # 首轮没有上一轮
+    second, retry = snapshots[1], snapshots[2]
+    assert second["message_prefix_bytes"] == retry["message_prefix_bytes"]
+    assert second["ctx_bytes_total"] == retry["ctx_bytes_total"]
+    # 反面:那个前缀不是"整条消息"(否则上面两条会被"拿自己当基准"蒙过去)。
+    assert 0 < retry["message_prefix_bytes"] < retry["ctx_bytes_total"]
+    details = _reflect_details(result)
+    assert len(details) == 2
+    assert details[1]["call_attempts"] == 2
+    assert details[1]["call_wall_ms"] == 3 + 7
+    assert details[0]["call_attempts"] == 1
+
+
+# --- (c) 前缀覆盖到哪儿 --------------------------------------------------------
+
+@pytest.mark.parametrize("optimization", ["off", _PREFIX])
+def test_measure_reports_prefix_bytes_on_both_arms(
+    rrepo, monkeypatch, optimization,
+):
+    """(c/Q2) 两条臂都出 `message_prefix_bytes`,而且量出了两条臂**本来的差别**。
+
+    `off` 臂也能测是拍板 Q2 的全部意义:对照实验的两条臂必须用同一把尺子,否则
+    "P 省了多少"没有分母。所以这里两条臂各断一个不同的界,而那个差别正是这条臂
+    想赚的钱:
+
+    * 两条臂都至少覆盖 `chat_json` 自己插的那段 wrapper 帧(schema hint 逐轮稳定);
+    * `prefix_snapshot` 的**每一轮**都越过整个 system 帧——S 在一个 run 内逐字节
+      不变;
+    * `off` 至少有一轮**越不过**它:动作面一变(这里是第 3 轮 chunk 额度用光),
+      前缀就断在 system 段里。动作面没变的那些轮它照样越得过,所以这条按"存在
+      一轮"断而不是"每一轮"——这个反向断言是"测量真的在量东西"的正面证据:一个
+      恒返回全长的实现会让两条臂都绿。
+
+    变异:把 `message_prefix_bytes` 改成拿本轮自己比 ⇒ `< ctx_bytes_total` 与
+    `off` 那条存在性断言双红;把 P 的 S 换回逐轮渲染 ⇒ P 那一半红。
+    """
+    contexts = _capture_contexts(monkeypatch)
+    llm, result = _measured_run(
+        rrepo, optimization=optimization, intent_detail=_TWO_ASPECTS,
+        reflects=_three_turn_reflects(), chunk_results=_three_turn_chunks(),
+        reasoning_max_chunk_searches=2)
+    details = _reflect_details(result)
+    assert len(details) == len(contexts) == 3
+
+    assert details[0]["message_prefix_bytes"] is None
+    stopped_inside_system = []
+    for turn in (1, 2):
+        wrapper = len(_serialize(_provider_messages(llm, turn)[:1]))
+        system_end = len(_serialize(_provider_messages(llm, turn)[:2]))
+        prefix = details[turn]["message_prefix_bytes"]
+        assert prefix >= wrapper, turn
+        assert prefix < details[turn]["ctx_bytes_total"], turn
+        stopped_inside_system.append(prefix < system_end)
+    if optimization == _PREFIX:
+        assert stopped_inside_system == [False, False]
+        assert len(set(llm.system_prompts)) == 1     # S 真的一份
+    else:
+        assert any(stopped_inside_system)
+        # 反面:那一轮的 system 段**确实**换了内容(额度用光,动作面收窄)。
+        assert llm.prompt_actions(1) != llm.prompt_actions(2)
+
+
+def test_measure_prefix_covers_c_k_d_when_only_the_tail_changes(rrepo):
+    """(c 续) P 布局下只有末尾 T 变化时,公共前缀 ≥ system 帧 + user 帧头 + C+K+D。
+
+    真实 run 里 K 与 D 每轮都在长(新卡、新观察行),所以"只有 T 变"这个形态要
+    在真消息上**构造**出来:取一轮真的发出去的那两条消息,只改 user 正文的末尾
+    (T 住在那里),再用生产的序列化与公共前缀函数量一次。断的是帧形状这件事
+    ——每条消息能进公共前缀的固定开销是 `len(role) + len(str(len(role))) + 2`
+    (system 段 `system:6:` 共 9 字节、user 段 `user:4:` 共 7 字节),content 自己
+    的长度头落在 content **之后**,所以它不会把 C+K+D 那几千个相同字节挡在
+    分叉点之外(T-PS1 评审后的帧尾长度头)。
+
+    变异:把长度头移回字段之前 ⇒ 前缀塌到 user 帧的开头,这条红;把 T 从 user 段
+    末尾挪走 ⇒ 改末尾不再只改 T,`c_k_d` 的下界不成立。
+    """
+    from app.core.llm import provider_messages, serialize_provider_messages
+    from app.services.reasoning_retrieval import _common_prefix_bytes
+
+    llm, _result = _prefix_aspect_run(
+        rrepo, intent_detail=_TWO_ASPECTS, reflects=_three_turn_reflects(),
+        chunk_results=_three_turn_chunks(), reasoning_max_chunk_searches=2)
+    hint = llm.schema_hints[2]
+    system_text, user_text = (row["content"] for row in llm.message_lists[2])
+    state = llm.turn_state_block(2)
+    assert state and user_text.endswith(
+        "\n\nReturn JSON only, matching the schema.")
+    # 只改 T:把状态半里的一个数字换掉,C/K/D 一个字节不动。
+    changed = user_text.replace(state, state + "\n- 又多了一行本轮状态")
+    assert changed != user_text
+
+    def _bytes(text):
+        return serialize_provider_messages(provider_messages(
+            [{"role": "system", "content": system_text},
+             {"role": "user", "content": text}], hint))
+
+    prefix = _common_prefix_bytes(_bytes(user_text), _bytes(changed))
+    c_k_d = user_text[:user_text.index(state)]
+    floor = len(_bytes(user_text)) - len(user_text.encode()) - len(
+        str(len(user_text.encode()))) - 2      # = wrapper 帧 + system 帧 + 7
+    assert prefix >= floor + len(c_k_d.encode())
+    # C+K+D 真的占了大头(否则上面那条是一句废话)。
+    assert len(c_k_d.encode()) > 1000
+
+
+# --- 块长度与字节总数的自洽 ---------------------------------------------------
+
+@pytest.mark.parametrize("optimization", ["off", _PREFIX])
+def test_measure_block_chars_account_for_every_character_once(
+    rrepo, monkeypatch, optimization,
+):
+    """S/C/K/D/T 之和恰好等于两条消息正文的字符数之和(一格不丢、不重复计)。
+
+    这五个数唯一的自洽判据。少了它,"C = user 段减去材料块"这类差值口径可以在
+    任何一次装配调整之后静默偏掉,而每一个数看起来都还是个合理的正整数。
+
+    `ctx_bytes_total` 与它们**不同单位**:它是整条 provider-facing 消息的字节数
+    (含 wrapper 与帧开销),中文上比字符数大三倍——所以这里只断它等于生产序列化
+    的长度,绝不把它并进上面那道等式(读侧 `REFLECT_CONTEXT_DETAIL_KEYS` 的说明
+    是同一条合同)。
+
+    变异:把 `_measure_reflect_messages` 里 `t` 的口径改成 `len(context.turn_state)`
+    (漏掉块标题与分隔符)⇒ 等式红;把 `bytes_total` 改成各块正文之和 ⇒ 第二条红。
+    """
+    from app.core.llm import provider_messages, serialize_provider_messages
+
+    contexts = _capture_contexts(monkeypatch)
+    llm, result = _measured_run(
+        rrepo, optimization=optimization, intent_detail=_TWO_ASPECTS,
+        reflects=_three_turn_reflects(), chunk_results=_three_turn_chunks(),
+        reasoning_max_chunk_searches=2)
+    details = _reflect_details(result)
+
+    for turn, detail in enumerate(details):
+        system_text, user_text = (
+            row["content"] for row in llm.message_lists[turn])
+        blocks = [detail[f"ctx_chars_{code}"] for code in "sckdt"]
+        assert sum(blocks) == len(system_text) + len(user_text), turn
+        assert all(value >= 0 for value in blocks), (turn, blocks)
+        assert detail["ctx_chars_s"] == len(system_text), turn
+        assert detail["ctx_chars_k"] == len(contexts[turn].evidence), turn
+        assert detail["ctx_chars_d"] == len(contexts[turn].observations), turn
+        assert detail["ctx_bytes_total"] == len(serialize_provider_messages(
+            provider_messages(llm.message_lists[turn],
+                              llm.schema_hints[turn]))), turn
+    # 反面:这次 run 里 T 真的每轮在变(否则"T 的口径"这条断得很虚)。
+    assert len({detail["ctx_chars_t"] for detail in details}) > 1
+
+
+def test_measure_counts_the_cards_the_model_actually_saw(rrepo):
+    """`cards_shown` 只数**真的渲染出来**的卡,`cards_omitted` 数被挤出窗口的。
+
+    与大纲绑定资格同一份口径(`selection.shown_keys`)——两处一旦分叉,"模型见过
+    它"这件事就有两个互相矛盾的答案。
+
+    变异:把 `cards_shown` 改成候选池大小 ⇒ 与渲染行数比对红。
+    """
+    llm, result = _measured_run(
+        rrepo, intent_detail=_TWO_ASPECTS, reflects=_three_turn_reflects(),
+        chunk_results=_three_turn_chunks(), reasoning_max_chunk_searches=2)
+    details = _reflect_details(result)
+    assert len(details) == 3
+    for turn, detail in enumerate(details):
+        assert detail["cards_shown"] == len(llm.evidence_lines(turn)), turn
+        assert detail["cards_omitted"] == 0, turn
+    assert details[-1]["cards_shown"] > 0        # 真的有卡可数
+
+
+# --- 写侧键集 ⊆ 读侧登记清单 --------------------------------------------------
+
+def test_measure_write_side_stays_inside_the_registered_key_set(rrepo):
+    """写侧只写读侧认得的键,而且把登记清单**写满**(计划 §3 的硬接缝)。
+
+    ⊆ 那一半防的是静默缺席:写侧多写一个投影不认的键,那一列恒为 `None` 而没有
+    任何用例会红。⊇ 那一半防的是反向静默:登记了却没有产地的键同样恒 `None`。
+
+    变异:把 `_measure_reflect_messages` 里任一个键改成手写字面量并拼错 ⇒
+    `_registered_measure_key` 在导入期就抛;绕开它直接写进 detail ⇒
+    `_TraceRecorder.__call__` 里那条 `⊆` 断言红。
+    """
+    from app.domain.reasoning_trace_stats import REFLECT_MEASUREMENT_DETAIL_KEYS
+
+    _llm, result = _measured_run(
+        rrepo, intent_detail=_TWO_ASPECTS, reflects=_three_turn_reflects(),
+        chunk_results=_three_turn_chunks(), reasoning_max_chunk_searches=2)
+    details = _reflect_details(result)
+    written: set = set()
+    for detail in details:
+        assert _measure_keys(detail) <= REFLECT_MEASUREMENT_DETAIL_KEYS
+        written |= _measure_keys(detail)
+    assert written == set(REFLECT_MEASUREMENT_DETAIL_KEYS)
+    # 稀疏键之外的那几个既有键一个都没被覆盖掉。
+    assert details[0]["next_action"] == "search_chunks"
+
+
+def test_measure_writes_no_call_keys_for_a_client_that_reports_nothing(rrepo):
+    """不声明 `supports_call_stats` 的客户端 ⇒ 三个调用键**缺席**,不是 0。
+
+    空 sink 是"没有观测",而 0 会被读侧读成"一次模型都没调"——那正是
+    `model_calls_real` 那一列要区分的两件事。块长度与前缀不受影响:它们不来自
+    出参。
+
+    变异:把 `_measure_reflect_call` 的缺键分支改成写 0 ⇒ 这条红。
+    """
+    _llm, result = _v2_aspect_run(               # 默认替身不声明支持
+        rrepo, intent_detail=_TWO_ASPECTS, reflects=_three_turn_reflects(),
+        chunk_results=_three_turn_chunks(), reasoning_max_chunk_searches=2,
+        **{_MEASURE_FLAG: True})
+    for detail in _reflect_details(result):
+        assert "call_attempts" not in detail
+        assert "call_wall_ms" not in detail
+        assert "response_chars" not in detail
+        assert detail["ctx_bytes_total"] > 0     # 另一半照样量到
+
+
+# --- 贯通到闭集投影(T-PS4 评审要的那条) --------------------------------------
+
+def test_measure_run_projects_the_new_closed_set_columns(rrepo):
+    """一条真实测量 run → `project_run` 的九个新列真的有值(T-PS4 评审要求)。
+
+    读写两侧各自的用例都绿、而中间那一段对不上,是这类"写侧登记 + 读侧投影"
+    改动最典型的失败形态:键名差一个字、或者写在了另一种步类型上,两边都不会
+    红。这一条从真 run(过 `_GatedV2LLM` 的形状闸)一路量到投影行。
+
+    变异:把测量落账点从 reflect 步换成任何别的步类型 ⇒ 这里全列 `None`,红;
+    把 `attempts` 改成只在最后一轮写 ⇒ `attempts_observed` 变 False,红。
+    """
+    from app.domain.reasoning_trace_stats import (
+        REFLECT_CONTEXT_DETAIL_KEYS, assert_closed, project_run,
+    )
+
+    _llm, result = _measured_run(
+        rrepo, optimization=_PREFIX, intent_detail=_TWO_ASPECTS,
+        reflects=_three_turn_reflects(), chunk_results=_three_turn_chunks(),
+        reasoning_max_chunk_searches=2)
+    row = project_run(
+        {"mode": "reasoning", "status": "done"},
+        [step.model_dump() for step in result.trace],
+        {"retrieval_effort": "standard", "mode": "reasoning"},
+        rig_tags={"optimization": _PREFIX})
+    assert_closed(row)
+
+    assert row["model_calls_real"] == 3          # 三轮各一次真实请求
+    assert row["attempts_observed"] is True
+    assert row["response_chars_total"] > 0
+    assert set(row["context_chars"]) == set(REFLECT_CONTEXT_DETAIL_KEYS)
+    assert row["prefix_turns"] == 2              # 首轮没有前缀可算
+    assert row["prefix_bytes_min"] > 0
+    assert row["prefix_bytes_median"] >= row["prefix_bytes_min"]
+    assert row["optimization"] == _PREFIX
+
+
+def test_unmeasured_run_leaves_every_new_projection_column_unknown(rrepo):
+    """测量关的 run ⇒ 那九列一律 `None`(不是 0),`off` 行键集因此不变。
+
+    "没量"与"量到 0"必须在数据里分得开:一条 legacy run 明明调了模型,
+    `model_calls_real == 0` 会把它读成一次都没调。
+
+    变异:把 `_reflect_measurement` 的判据换成 `reflect_optimization() != "off"`
+    ⇒ `prefix_snapshot` 的 run 会在测量关时也出数,这条红。
+    """
+    from app.domain.reasoning_trace_stats import project_run
+
+    _llm, result = _v2_aspect_run(
+        rrepo, intent_detail=_TWO_ASPECTS, reflects=_three_turn_reflects(),
+        chunk_results=_three_turn_chunks(), reasoning_max_chunk_searches=2,
+        reasoning_reflect_optimization=_PREFIX)
+    row = project_run(
+        {"mode": "reasoning", "status": "done"},
+        [step.model_dump() for step in result.trace],
+        {"retrieval_effort": "standard", "mode": "reasoning"})
+    for column in ("model_calls_real", "attempts_observed", "context_chars",
+                   "prefix_bytes_median", "prefix_bytes_min", "prefix_turns",
+                   "response_chars_total"):
+        assert row[column] is None, column

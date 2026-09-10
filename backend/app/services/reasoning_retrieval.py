@@ -25,7 +25,10 @@ from app.core.ask_retrieval_policy import (
     DEFAULT_RETRIEVAL_EFFORT, EXHAUSTIVE_RETRIEVAL_EFFORT, AskRetrievalLimits,
     ask_retrieval_limits,
 )
-from app.core.llm import CALL_STATS_KWARG, budget_kwargs
+from app.core.llm import (
+    CALL_STATS_KWARG, budget_kwargs, provider_messages,
+    serialize_provider_messages,
+)
 from app.core.config import (
     DEFAULT_REASONING_PER_QUERY_LIMIT,
     DEFAULT_REFLECT_EVIDENCE_CHARS_BY_EFFORT,
@@ -33,6 +36,9 @@ from app.core.config import (
     Settings,
 )
 from app.domain.cancellation import CoreCancellation
+from app.domain.reasoning_trace_stats import (
+    REFLECT_CONTEXT_DETAIL_KEYS, REFLECT_MEASUREMENT_DETAIL_KEYS,
+)
 from app.models.ask import TRACE_RESULT_IDS_MAX, TraceStep
 from app.repositories.lexical_query import (
     MAX_EXACT_PHRASE_CHARS, MAX_QUOTED_PHRASES, exact_probe_query,
@@ -74,7 +80,9 @@ from app.services.reasoning_aspects import (
     render_aspect_block, render_aspect_contract_block,
     render_aspect_status_block, termination_summary,
 )
-from app.services.reasoning_context import ReflectContext, build_evidence_block
+from app.services.reasoning_context import (
+    ReflectContext, ReflectMeasurement, build_evidence_block,
+)
 from app.services.reasoning_observation import (
     ActionObservationLedger, render_observations,
 )
@@ -374,6 +382,133 @@ def _call_stats_kwargs(client, sink: "Dict[str, Any]") -> "Dict[str, Any]":
     """
     return {CALL_STATS_KWARG: sink} if getattr(
         client, "supports_call_stats", False) else {}
+
+
+def _registered_measure_key(name: str) -> str:
+    """把一个 reflect 步 detail 的测量键名对着读侧的登记清单兑一次再用(T-PS3)。
+
+    写侧不许自己抄一份字面量:`REFLECT_MEASUREMENT_DETAIL_KEYS` 是读侧
+    (`app.domain.reasoning_trace_stats` 的投影)认得的那一份闭集,写侧多写一个
+    读侧不认的键,后果是**那一列静默缺席**——投影照样出整行,只是那一格恒为
+    `None`,而没有任何一条用例会红。所以这里在**导入期**就把每个键名兑一遍:
+    读侧改名或删键,进程起不来,而不是数据悄悄变空。
+
+    在导入期抛而不是 `assert`:`python -O` 会把断言整条删掉,而这一道是唯一能
+    把「读写两侧对不上」变成可见故障的判据。逐轮那道 `⊆` 断言(见
+    `_TraceRecorder.__call__`)是它的第二重保险,防的是"键名合法但走错了写点"。
+    """
+    if name not in REFLECT_MEASUREMENT_DETAIL_KEYS:
+        raise RuntimeError(
+            "reflect measurement detail key is not registered in "
+            f"app.domain.reasoning_trace_stats: {name}")
+    return name
+
+
+#: 上下文块短码 → detail 键。产地是读侧那张表,这里只兑一次,不重排也不改名。
+_MEASURE_CTX_KEYS: Dict[str, str] = {
+    code: _registered_measure_key(key)
+    for code, key in REFLECT_CONTEXT_DETAIL_KEYS.items()
+}
+_MEASURE_PREFIX_BYTES = _registered_measure_key("message_prefix_bytes")
+_MEASURE_CARDS_SHOWN = _registered_measure_key("cards_shown")
+_MEASURE_CARDS_OMITTED = _registered_measure_key("cards_omitted")
+#: `call_stats` 出参上的键 → reflect 步 detail 上的键。两侧名字不同的只有
+#: `attempts`(detail 里叫 `call_attempts`,因为那一层还有别的 attempts)。
+_MEASURE_CALL_KEYS: Dict[str, str] = {
+    "call_wall_ms": _registered_measure_key("call_wall_ms"),
+    "attempts": _registered_measure_key("call_attempts"),
+    "response_chars": _registered_measure_key("response_chars"),
+}
+
+
+def _common_prefix_bytes(left: bytes, right: bytes) -> int:
+    """两串字节的公共前缀长度。纯函数,零分配。
+
+    朴素逐字节循环:这条路只在测量开着时走,一轮一次,而它量的那次模型调用是
+    三个数量级更贵的东西——为了几微秒换一个二分 + 切片比较(每次比较都要
+    复制一份切片)不划算,也更难看出对不对。
+    """
+    limit = min(len(left), len(right))
+    index = 0
+    while index < limit and left[index] == right[index]:
+        index += 1
+    return index
+
+
+def _measure_reflect_messages(
+    measurement: "ReflectMeasurement", context: "ReflectContext",
+    messages: "List[Dict[str, str]]", schema_hint: str, material: str,
+) -> None:
+    """本轮的块长度、消息字节总数与公共前缀(T-PS3;计划 §3、拍板 Q2)。
+
+    落在 `_reflect_v2_attempt` 而不是 `_reflect_v2_context`,是因为五块里有三块
+    的**最终**字节只有这里才有:`off` 的 S 是那一轮现渲染的动态 system 段、C 由
+    `prompts` 把问题拼进去之后才成形、`prefix_snapshot` 的 T 还差一半(本轮可执行
+    动作)要等这一轮的能力投影。谁产出那个值,谁记那个值——`_reflect_v2_context`
+    只记它自己独有的那两个(展示/省略卡数)。
+
+    五块的口径**两条臂同形**(测量的意义就在于两条臂用同一把尺子):
+
+    * `S` = 这一轮 system 段的全部字符,含严格调用方那句 run 级的"材料不可信"。
+    * `K` / `D` = 证据卡与观察账,取上下文里那两块的原文长度。
+    * `T` = 装配好的材料块减去 K 与 D:`off` 下是服务器状态摘要(它在 `off` 里
+      排最前、在 P 里排最末,但**大小**是同一个量),P 下是本轮动作清单 + 状态半。
+      块间那两个 `\\n\\n` 落在这一格里。
+    * `C` = user 段减去整个材料块:问题原文、引号规则、方面契约(只有 P 有)与
+      收尾那句。
+
+    于是 `S + C + K + D + T` 恰好等于两条消息正文的字符数之和——一格字符都不
+    丢、不重复计。这条恒等式是这五个数唯一的自洽判据,有用例钉住。
+
+    `ctx_bytes_total` 是**这一轮最终消息的全部字节**(含 wrapper 与帧开销),因为
+    公共前缀正是在同一串字节上算的——分子分母同口径,那道除法才成立(计划 §3
+    T-PS3 与读侧 `REFLECT_CONTEXT_DETAIL_KEYS` 的说明互为合同)。字符数与字节数
+    在中文上差三倍,所以它既不是上面五格之和、也不该拿去和它们比大小。
+
+    首轮 `message_prefix_bytes` 如实为 `None`:那时没有可比的上一轮。请求文本
+    只在内存里过一遍,不进 llm.jsonl、不进 trace、不进投影。
+    """
+    chars_k = len(context.evidence)
+    chars_d = len(context.observations)
+    detail = measurement.detail
+    keys = _MEASURE_CTX_KEYS
+    detail[keys["s"]] = len(messages[0]["content"])
+    detail[keys["c"]] = len(messages[1]["content"]) - len(material)
+    detail[keys["k"]] = chars_k
+    detail[keys["d"]] = chars_d
+    detail[keys["t"]] = len(material) - chars_k - chars_d
+    final = serialize_provider_messages(
+        provider_messages(messages, schema_hint))
+    detail[keys["bytes_total"]] = len(final)
+    detail[_MEASURE_PREFIX_BYTES] = (
+        None if measurement.previous is None
+        else _common_prefix_bytes(measurement.previous, final))
+    # 升为「上一轮」的时机不在这里,而在这一轮真的记了 reflect 步的那一刻
+    # (`ReflectMeasurement.take`):同一轮的两次尝试因此都和上一轮比。
+    measurement.current = final
+
+
+def _measure_reflect_call(
+    measurement: "ReflectMeasurement", stats: "Mapping[str, Any]",
+) -> None:
+    """把一次调用的 `call_stats` 观测**累加**进本轮的测量键(T-PS3)。
+
+    累加而不是覆盖:v2 在正文被 `max_tokens` 切断时会同轮再调一次(加预算重试),
+    而读侧 `model_calls_real` 是各 reflect 步 `call_attempts` 之和——一轮只报最后
+    一次的请求数,整 run 的真实请求数就偏低,而那一列本来就是用来判「日志里的
+    请求数是真值还是下界」的。墙钟与正文字符数同一条口径:它们回答的是"这一轮
+    reflect 在模型上花了多少",而不是"最后那一次花了多少"。
+
+    缺键 ⇒ **不写**。空 sink 有两种成因(客户端不声明 `supports_call_stats`、或
+    调用在做任何事之前就被拒),两种都是"没有观测",不是 0——写 0 会让读侧把
+    一次没量到的 run 读成"一次模型都没调"。`bool` 显式排除:它是 `int` 的子类,
+    一个把 `attempts` 写成 `True` 的替身会被求和成 1。
+    """
+    detail = measurement.detail
+    for source, key in _MEASURE_CALL_KEYS.items():
+        value = stats.get(source)
+        if isinstance(value, int) and not isinstance(value, bool):
+            detail[key] = (detail.get(key) or 0) + value
 
 
 def _reflect_fallback(reason: str) -> "ReflectDecision":
@@ -3023,7 +3158,7 @@ class _TraceRecorder:
     """
 
     __slots__ = ("_trace", "_cancel_event", "_on_step", "_last_ts", "observer",
-                 "_deferred")
+                 "_deferred", "measurement")
 
     def __init__(self, trace: List[TraceStep], cancel_event: CancelEvent,
                  on_step) -> None:
@@ -3041,12 +3176,30 @@ class _TraceRecorder:
         # 首轮与循环唯一共用的那个把手,挂在这里首轮 seed 与循环动作就自动共用
         # 同一次转换(设计稿要求),不必在十几条动作分支里各抄一句。
         self.observer = None
+        # reflect 上下文观测缓存(T-PS3)。同 `observer` 一档纪律:默认 None ⇒
+        # **关闭态与测量关零新状态**,`__call__` 只多一次 `is not None`。
+        #
+        # 为什么测量的落账点在这个记账器上:那几个稀疏键要进的是 `run()` 里现拼
+        # 的那份 reflect detail,而 `run()` 在零松弛长度天花板下、一条语句都不能
+        # 加(同 `defer` 的理由)。这个记账器是那条 reflect 步**唯一**的入口,
+        # 在这里合并因此既不改 `run()`、也不需要第二个写点。挂它的人是
+        # `_reflect_v2_context`(测量开着的第一轮),owner 是
+        # `_ReasoningRunState.reflect_measurement`。
+        self.measurement = None
 
     def __call__(self, step: TraceStep) -> None:
         raise_if_cancelled(self._cancel_event)
         now = time.perf_counter()
         step.duration_ms = round((now - self._last_ts) * 1000)
         self._last_ts = now
+        if self.measurement is not None and step.step_type == "reflect":
+            # 合并排在 `observer` / `_on_step` **之前**:上屏的那一份与最终落库
+            # 的那一份因此是同一个 detail,不会一份带测量、一份不带。
+            pending = self.measurement.take()
+            assert set(pending) <= REFLECT_MEASUREMENT_DETAIL_KEYS, (
+                "reflect measurement wrote a detail key the projection does "
+                f"not read: {sorted(set(pending) - REFLECT_MEASUREMENT_DETAIL_KEYS)}")
+            step.detail.update(pending)
         self._trace.append(step)
         if self.observer is not None:
             try:
@@ -3325,6 +3478,22 @@ class _ReasoningRunState:
     # `_unsafe_scope_restricted()`(「全选」形状下两次库读),而这个目录本来就是
     # 用来省成本的。
     reflect_static_catalog: "Optional[ReflectCapabilities]" = None
+
+    # —— 本 run 的 reflect **上下文观测缓存**(T-PS3 / 拍板 Q2)。
+    #
+    # 只读渲染缓存:它存的是上一轮已记账的 provider-facing 消息字节串与本轮那几
+    # 个整数观测,一格都不参与决策——把它整个删掉,发出去的消息、模型的决定与
+    # 轨迹上除那几个稀疏键之外的一切逐字节不变。
+    #
+    # 带默认值、留空即中性:只有 `reflect_measures_context()` 为真时才构造(写点
+    # 单一在 `_reflect_v2_context`,本 run 第一次 reflect 那一轮),其余情况恒为
+    # None ——`_new_run_state` 因此一行都不用改,关闭态与测量关零新状态。
+    #
+    # 同一个对象有三个把手,各有各的必要(不是三份数据):这里是 owner;
+    # `state.record.measurement` 是记账器合并 detail 用的把手(`run()` 不能加语句);
+    # `ReflectContext.measurement` 是每轮交给 `_reflect_v2_attempt` 的那一格
+    # (它拿不到 `state`,理由同 `static_prompt`)。
+    reflect_measurement: "Optional[ReflectMeasurement]" = None
 
 
 class ReasoningRetriever:
@@ -4063,23 +4232,30 @@ class ReasoningRetriever:
         ——那是 S 里**唯一**两处逐轮变化的内容(计划 X1),挪走之后整个 system 段在
         一个 run 内逐字节不变。`chat_json` 自己在最前面插的那段 wrapper 与
         `reflect_v2_schema_hint` 两条路径共用、两处都已经逐轮稳定,一个字都不动。
+
+        **上下文观测(T-PS3)与布局正交。** 测量开着时,这里额外算一份纯内存的
+        块长度/消息字节/公共前缀(见 `_measure_reflect_messages`),两条臂同一把
+        尺子;测量关时那两处判据各只多一次 `is not None`。观测**不参与**这个
+        方法的任何决定:消息、重试判据与返回的决定逐字节与测量关时相同。
         """
         stats: Dict[str, Any] = {}
+        # 上下文观测缓存(T-PS3)。测量关、关闭态与不带上下文的窄调用方一律
+        # `None` ⇒ 下面两处判据各只多一次 `is not None`,一个字节都不多序列化。
+        measurement = context.measurement if context is not None else None
         try:
             prefix_layout = self._reflect_prefix_layout(context)
             if prefix_layout:
                 system_text = context.static_prompt
+                material = context.as_prefix_user_block(reflect_v2_turn_state(
+                    capabilities, UNAVAILABLE_DISCLOSE_MAX))
                 user_text = reflect_v2_prefix_user_prompt(
-                    question, context.contract,
-                    context.as_prefix_user_block(reflect_v2_turn_state(
-                        capabilities, UNAVAILABLE_DISCLOSE_MAX)))
+                    question, context.contract, material)
             else:
                 system_text = reflect_v2_system_prompt(
                     capabilities, UNAVAILABLE_DISCLOSE_MAX)
-                user_text = reflect_v2_user_prompt(
-                    question,
-                    context.as_user_block() if context is not None
-                    else candidates_summary)
+                material = (context.as_user_block() if context is not None
+                            else candidates_summary)
+                user_text = reflect_v2_user_prompt(question, material)
             if self.untrusted_evidence:
                 # 严格调用方的额外一句"材料不可信"接在固定指令**之前**:v2 的
                 # system 段本身已经讲了这件事,这一句是那条更严格的既有合同,
@@ -4087,12 +4263,20 @@ class ReasoningRetriever:
                 # 前面同样不破坏 system 段的逐轮稳定性。
                 system_text = (
                     f"{UNTRUSTED_EVIDENCE_SYSTEM_INSTRUCTION}\n\n{system_text}")
+            messages = [
+                {"role": "system", "content": system_text},
+                {"role": "user", "content": user_text},
+            ]
+            schema_hint = reflect_v2_schema_hint(capabilities)
+            if measurement is not None:
+                # 测在**发出之前**:量的是这一轮已经定型的那两条消息,与调用成功
+                # 与否无关。一次被兜底吃掉的调用照样有它的上下文规模,而那一轮在
+                # 轨迹上仍有自己的 reflect 步。
+                _measure_reflect_messages(
+                    measurement, context, messages, schema_hint, material)
             raw = client.chat_json(
-                [
-                    {"role": "system", "content": system_text},
-                    {"role": "user", "content": user_text},
-                ],
-                reflect_v2_schema_hint(capabilities),
+                messages,
+                schema_hint,
                 timeout=self.settings.reasoning_timeout_seconds,
                 max_retries=self.settings.reasoning_max_retries,
                 cancel_event=self.cancel_event,
@@ -4122,6 +4306,12 @@ class ReasoningRetriever:
                 raise
             return _reflect_fallback(_reflect_fallback_reason(
                 exc, str(stats.get("finish_reason") or "")))
+        finally:
+            # 三条出口(成功 / 取消上抛 / 兜底)都把这一次调用的观测累加进本轮:
+            # 一次死掉的调用同样烧了墙钟、同样发出了请求,而它正是最不该在
+            # run 级报告里静默消失的那一次(`_record_call_stats` 的同一条理由)。
+            if measurement is not None:
+                _measure_reflect_call(measurement, stats)
 
     def _reflect_v2_context(
         self, state: "_ReasoningRunState", summary: str, outline,
@@ -4204,6 +4394,7 @@ class ReasoningRetriever:
             state_chars=int(getattr(
                 settings, "reasoning_reflect_state_chars", 6000)),
         )
+        measurement = self._reflect_measurement(state, selection)
         catalog = state.reflect_static_catalog
         if self.reflect_optimization() == "prefix_snapshot" and (
                 catalog is not None):
@@ -4233,6 +4424,7 @@ class ReasoningRetriever:
                 # 输入必然给出同一串字节,所以 S 的稳定性不依赖任何缓存是否生效。
                 # (渲染缓存留给 T-PS3 的测量,那里本来就要一个只读缓存字段。)
                 static_prompt=reflect_v2_static_prompt(catalog),
+                measurement=measurement,
             )
         # 必答方面清单 + 已完整枚举的集合键,都接在服务器状态块的**尾部**,与它
         # 一起受"按现有输入/协议边界保留、不整体裁尾"的处理(§4):方面清单是用户
@@ -4248,7 +4440,37 @@ class ReasoningRetriever:
             server_state="\n\n".join(block for block in blocks if block),
             evidence=selection.text,
             observations=observations,
+            measurement=measurement,
         )
+
+    def _reflect_measurement(
+        self, state: "_ReasoningRunState", selection,
+    ) -> "Optional[ReflectMeasurement]":
+        """本 run 的上下文观测缓存,并记下这一轮的证据卡账(T-PS3;拍板 Q2)。
+
+        测量关(默认)与 v2 总闸关 ⇒ 恒 `None`,调用方一格都不多付:不构造缓存、
+        不序列化任何消息、`ReflectContext` 逐字段回到接入前。判据走
+        `reflect_measures_context()` 那个单点,它与 `reflect_optimization()`
+        **正交**——`off` 臂开着测量正是对照实验要的形态(拍板 Q2)。
+
+        缓存本 run 只构造一次(第一次 reflect 那一轮),此后原样复用:它要跨轮
+        持有的正是上一轮那串消息字节。构造的同一刻把它挂到记账器上——那是本轮
+        测量键唯一的落账入口,而 `run()` 一条语句都不能加。
+
+        卡数在这里记而不在 `_measure_reflect_messages` 里:证据卡的选取是这个
+        方法独有的产出(`selection`),而那边只看得到已经渲染成字符串的块。
+        `cards_shown` 只数**真的渲染出来**的键(与大纲绑定资格同一份口径),
+        `cards_omitted` 是被预算与逐条判据挤出窗口的候选数。
+        """
+        measurement = state.reflect_measurement
+        if measurement is None:
+            if not self.reflect_measures_context():
+                return None
+            measurement = state.reflect_measurement = ReflectMeasurement()
+            state.record.measurement = measurement
+        measurement.detail[_MEASURE_CARDS_SHOWN] = len(selection.shown_keys)
+        measurement.detail[_MEASURE_CARDS_OMITTED] = int(selection.omitted)
+        return measurement
 
     def _absorb_assessment(
         self, state: "_ReasoningRunState", decision: "ReflectDecision",

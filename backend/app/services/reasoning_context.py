@@ -19,7 +19,7 @@ definition 仍然是抽取物)。
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 from app.core.query_syntax import quoted_phrases, strip_accepted_quote_markers
@@ -628,6 +628,51 @@ TURN_STATE_TITLE = (
 )
 
 
+@dataclass(slots=True, eq=False)
+class ReflectMeasurement:
+    """一次 run 的 reflect 上下文观测缓存(T-PS3;拍板 Q2 的测量开关打开时才构造)。
+
+    **它只存两样东西**:上一轮已记账的 provider-facing 消息**字节串**,与本轮要
+    交给那条 reflect 轨迹步的几个**整数**。刻意不持有候选池、额度账、方面账或
+    任何一格可变业务状态——它是一份纯观测的载体,读它的人(投影、rig)因此不可能
+    从它这里拿到一个「与真实状态分叉了的第二份账」。内存上界也由此钉住:一轮消息
+    的字节数,与那轮真的发出去的请求同量级(拍板 Q2 接受的口径)。
+
+    `eq=False` 是刻意的:缓存的语义是身份而不是取值(两轮之间它必须是同一个
+    对象),而 `ReflectContext` 是 frozen dataclass——给这里加一份按字段比较的
+    `__eq__` 会顺手把那个可哈希的上下文对象变成不可哈希的。
+
+    * `previous` —— 上一轮**已记账**的消息字节串;首轮为 None(那时没有可比的
+      上一轮,`message_prefix_bytes` 因此如实为 None)。
+    * `current` —— 本轮算出来的字节串,在这一轮的 reflect 步记账时升为 `previous`。
+      分成两格而不是当场覆盖,是因为同一轮可能调用**两次**模型(v2 的加预算重
+      试):两次尝试必须都和**上一轮**比,否则第二次会拿第一次当基准,量出一个
+      恒等于全长的假前缀。
+    * `detail` —— 本轮的稀疏测量键,键名一律取自
+      `app.domain.reasoning_trace_stats` 的登记清单(构键在写侧,见
+      `reasoning_retrieval._MEASURE_KEYS`)。
+    """
+
+    previous: Optional[bytes] = None
+    current: Optional[bytes] = None
+    detail: Dict[str, Optional[int]] = field(default_factory=dict)
+
+    def take(self) -> Dict[str, Optional[int]]:
+        """交出本轮的测量键,并把本轮字节串升为「上一轮」。
+
+        由记这一轮 reflect 步的那一处调用(一轮一次),而不是由算测量的那一处:
+        「哪一轮算过了」与「哪一轮记过账了」不是同一件事——一次被兜底吃掉的调用
+        算过测量却没有自己的 reflect 步,当场晋升会让下一轮拿一个没进过轨迹的
+        基准去比前缀。
+        """
+        detail = self.detail
+        self.detail = {}
+        if self.current is not None:
+            self.previous = self.current
+            self.current = None
+        return detail
+
+
 @dataclass(frozen=True)
 class ReflectContext:
     """一轮 v2 reflect 的 user 段材料,已经分好块并各自受自己的预算约束。
@@ -658,6 +703,13 @@ class ReflectContext:
 
     这三格非空 ⇔ 本 run 走 `prefix_snapshot`;`off` 下它们全为空串,`as_user_block`
     因此逐字节回到接入前。
+
+    `measurement` 走的是同一条通道、同一条理由,只是方向相反:它是一个**出参**
+    (`ReflectMeasurement`,run 级的观测缓存),由 `_reflect_v2_attempt` 往里写这
+    一轮的块长与消息字节。它与上面三格**正交**——测量开关独立于布局(拍板 Q2),
+    `off` 臂开着测量时这一格非空而那三格仍是空串。默认 None ⇒ 测量关与关闭态下
+    这个类逐字段回到接入前,`as_user_block` / `as_prefix_user_block` 一个字节都
+    不多付(它们压根不读这一格)。
     """
 
     server_state: str
@@ -666,6 +718,7 @@ class ReflectContext:
     contract: str = ""
     turn_state: str = ""
     static_prompt: str = ""
+    measurement: Optional[ReflectMeasurement] = None
 
     def as_user_block(self) -> str:
         blocks = []
