@@ -5119,3 +5119,95 @@ def test_prefix_probe_process_env_only_carries_the_two_log_keys(tmp_path):
         _prefix_probe_args(tmp_path, "--env-file", "/tmp/x.env"))
     assert set(with_env_file) == (
         PREFIX_PROBE_PROCESS_ENV_KEYS | {"SILICON_NOTEBOOK_ENV_FILE"})
+
+
+#: E1 摘要 md 的命名红线正则,与 `test_reflect_prefix_probe.py` 的
+#: `_BANNED_NAME_PATTERN` 逐字同源(计划 §5 风险 4:「字段与**表头**一律不出现
+#: `cache_hit` / 命中率 / hit rate 形状」——`percent`/`_pct` 是同一条红线在
+#: codex #T-EX3 F5 里扩出来的两格)。两处各写一份而不是 import:那一份扫的是
+#: `summarize_probe` 的**键**,这一份扫的是渲染出来的**报告正文**,两条判据的
+#: 落点不同,合成一处只会让「改一处放行两处」成为可能。
+_SUMMARY_MD_BANNED_PATTERN = re.compile(
+    r"cache_hit|hit_rate|hitrate|命中|percent|_pct", re.IGNORECASE)
+
+#: 摘要头部那句限定语本身**必须**含「不得报告命中率」这五个字(它是给写报告的
+#: 人抄的那一句,见 `_render_probe_summary_markdown`),所以扫描前把它整句摘掉
+#: ——只摘这一句,不摘「命中」两个字:后者会让任何别处的「命中率」也一起消失。
+_SUMMARY_MD_DISCLAIMER = (
+    "**这批只能支持『稳定前缀的时间收益』,不得报告命中率、不得报告省了多少 "
+    "token、不得报告 provider 是否关闭了缓存**(design §0/§9.1)。"
+)
+
+
+def test_prefix_probe_summary_md_carries_no_hit_rate_shaped_line():
+    """(T-EX10 汇合补漏)`probe-summary.md` 的**正文**也要过命名红线。
+
+    此前只有 `summarize_probe` 的返回**键**被递归扫过
+    (`test_reflect_prefix_probe.py::test_probe_row_keys_has_no_banned_terms`),
+    而这份 md 上唯一的红线判据是一句 `"命中率" not in ...`——只挡中文那一种
+    拼法。T-EX10 的变异 (b) 因此走出了一条两侧都不红的路:给
+    `summarize_probe` 加一列 `cache_hit_rate`(键扫描红)**并且**在这里渲染同名
+    行时,只要把摘要那一侧改回去、把 md 这一行留下(值现算),整份门就全绿——
+    而人真正拿去读的是这份 md,那一行会让读者以为这批数据回答了一个它压根回答
+    不了的问题(设计 §0 review 调整第 4 条 / 计划 §5 风险 4)。
+
+    判据落在渲染函数上而不是一次假客户端真跑上:红线要挡的是**表头/行名**,而
+    那由渲染函数独占决定,一次真跑只会把同一件事跑得更慢。
+
+    变异:在 `_render_probe_summary_markdown` 的 `lines` 里加任意一行含
+    `cache_hit` / `hit_rate` / `命中率` / `percent` / `_pct` 的文字 ⇒ 这条红。
+    """
+    from app.eval.reflect_prefix_probe import summarize_probe
+
+    rows = [
+        {"tier": tier, "block_index": block, "arm": arm, "call_index": call,
+         "series_index": 0, "status": "ok", "is_warmup": False,
+         "call_wall_ms": 100 + call, "cached_tokens": None}
+        for tier in ("short", "medium")
+        for block in (0, 1)
+        for arm in ("stable", "disturbed")
+        for call in range(2)
+    ]
+    summary = summarize_probe(rows)
+    # 真值不为空:一份空摘要渲染出来的 md 天然过任何红线扫描。
+    assert summary["by_tier"] and summary["repeat_observation_row_count"] > 0
+
+    markdown = rig._render_probe_summary_markdown(
+        summary, seed=7, smoke=False, sample_path=Path("sample.json"),
+        marker_variant=0,
+    )
+    assert _SUMMARY_MD_DISCLAIMER in markdown
+    scanned = markdown.replace(_SUMMARY_MD_DISCLAIMER, "")
+    hits = [line for line in scanned.splitlines()
+            if _SUMMARY_MD_BANNED_PATTERN.search(line)]
+    assert hits == [], hits
+
+
+def test_the_summary_md_banned_pattern_really_catches_a_planted_line(
+    monkeypatch,
+):
+    """上一条的**真实变异**:让渲染函数多吐一行 `cache_hit_rate`,红线必须响。
+
+    没有这一格,上一条用例在一个正则写错(或摘除限定语时把整段 md 都摘掉)的
+    实现下会静静地通过。
+    """
+    from app.eval.reflect_prefix_probe import summarize_probe
+
+    real_render = rig._render_probe_summary_markdown
+
+    def _mutated(summary, **kwargs):
+        return real_render(summary, **kwargs) + "\n- cache_hit_rate: 0.31\n"
+
+    monkeypatch.setattr(rig, "_render_probe_summary_markdown", _mutated)
+    summary = summarize_probe([
+        {"tier": "short", "block_index": 0, "arm": "stable", "call_index": 1,
+         "series_index": 0, "status": "ok", "is_warmup": False,
+         "call_wall_ms": 100, "cached_tokens": None},
+    ])
+    markdown = rig._render_probe_summary_markdown(
+        summary, seed=7, smoke=False, sample_path=Path("sample.json"),
+        marker_variant=0,
+    )
+    scanned = markdown.replace(_SUMMARY_MD_DISCLAIMER, "")
+    assert [line for line in scanned.splitlines()
+            if _SUMMARY_MD_BANNED_PATTERN.search(line)]
