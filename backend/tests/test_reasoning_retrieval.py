@@ -5782,16 +5782,22 @@ def _settings_field_shapes(tree, field_name: str):
     `@field_validator("<field>")` 的登记。剩下的一切(注释、docstring、日志文案、
     错误串里提到这个名字)按定义就不是引用,不进任何一类——按行文本 grep 会把
     它们全算成读点,那把守卫会在第一次写注释时误伤,然后被人放宽掉。
+
+    两个返回值都是**类别串的列表**:身份只有"哪一类",数量由列表长度给出,**不带
+    行号**。判别力与带行号时逐条相同(下面的断言从来只比类别与条数,行号只是
+    随行的诊断),而行号进不了任何一份身份元组——`tests/architecture/policy.py`
+    的 `line-number-identity` 禁的正是这个形状:行号一旦成为身份的一部分,守卫就
+    会在插入一行注释之后误红,然后被人按行号改回来。
     """
     import ast
     reads, declarations = [], []
     for node in ast.walk(tree):
         if isinstance(node, ast.Attribute) and node.attr == field_name:
-            reads.append(("attribute", node.lineno))
+            reads.append("attribute")
         elif isinstance(node, ast.AnnAssign) and isinstance(
             node.target, ast.Name
         ) and node.target.id == field_name:
-            declarations.append(("field", node.lineno))
+            declarations.append("field")
         elif isinstance(node, ast.Call):
             func = node.func
             named = (func.id if isinstance(func, ast.Name)
@@ -5801,9 +5807,9 @@ def _settings_field_shapes(tree, field_name: str):
             if named == "getattr" and len(node.args) >= 2 and isinstance(
                 node.args[1], ast.Constant
             ) and node.args[1].value == field_name:
-                reads.append(("getattr", node.lineno))
+                reads.append("getattr")
             elif named == "field_validator" and literal_args:
-                declarations.append(("validator", node.lineno))
+                declarations.append("validator")
     return reads, declarations
 
 
@@ -5851,7 +5857,7 @@ def test_reflect_optimization_has_exactly_one_settings_read_point(
         f"{field_name} 的读点出现在了唯一读点之外:"
         f"{ {k: v for k, v in reads_by_module.items()} }")
     retrieval_reads = reads_by_module["services/reasoning_retrieval.py"]
-    assert [shape for shape, _ in retrieval_reads] == ["getattr"], retrieval_reads
+    assert retrieval_reads == ["getattr"], retrieval_reads
 
     # 那一处读点必须就在单点判定函数体内(不是模块级、也不是别的方法)。
     holders = sorted(
@@ -5864,9 +5870,7 @@ def test_reflect_optimization_has_exactly_one_settings_read_point(
     # 声明:只许 config.py,且形状恰好是登记的那几种。
     assert set(declarations_by_module) == {"core/config.py"}, (
         f"{field_name} 在 config.py 之外被声明:{sorted(declarations_by_module)}")
-    assert tuple(
-        shape for shape, _ in declarations_by_module["core/config.py"]
-    ) == declared
+    assert tuple(declarations_by_module["core/config.py"]) == declared
 
 
 def test_settings_field_shape_guard_sees_a_new_reader_in_config():
@@ -5884,8 +5888,8 @@ def test_settings_field_shape_guard_sees_a_new_reader_in_config():
     )
     reads, declarations = _settings_field_shapes(
         tree, "reasoning_reflect_optimization")
-    assert [shape for shape, _ in reads] == ["attribute"]
-    assert [shape for shape, _ in declarations] == ["field"]
+    assert reads == ["attribute"]
+    assert declarations == ["field"]
 
 
 def test_settings_field_shape_guard_ignores_prose_mentions():
