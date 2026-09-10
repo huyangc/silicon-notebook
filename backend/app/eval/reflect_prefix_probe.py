@@ -474,6 +474,16 @@ def assert_probe_row_closed(row: Mapping) -> None:
 _LOCAL_CACHE_EXIT_STATUS = "cache_hit"
 _SUCCESS_STATUS = "ok"
 
+#: 传输层报 `status="ok"`(provider 回了点什么、没有异常),但那次返回没有
+#: 通过固定输出任务的形状校验(`{"ok": true}`,校验规则见 `scripts/
+#: reflect_shadow_rig.py` 的 `_prefix_probe_output_valid`)时,rig 把这一格
+#: 的 `status` 改写成这个短码——它不是 `app/core/llm.py` 的既有事实字段值,
+#: 是本模块起的名字,专门用来跟真正的传输失败(`"error"`/`"cancelled"`)
+#: 区分开:传输层没报错不等于「这次调用真的完成了任务」,provider 返回畸形
+#: JSON、空响应,或者干脆没提到 `ok` 字段时,传输层照样记 `"ok"`——照单全收
+#: 会把一次没有完成任务的调用算进成功计时观测(codex #709 R2 P2-1)。
+_INVALID_OUTPUT_STATUS = "invalid_output"
+
 #: 结论词面闭集(design §9.1「可下结论:有、无可辨认或不确定的时间收益」）。
 #: `summarize_probe` 的 `verdict` 只能是这三格之一——它是**唯一**的结论字段,
 #: 与 `median_wall_ms_delta`/`median_wall_ms_ratio` 这类观测量分属两个键。
@@ -597,8 +607,9 @@ def _verdict(overall: Mapping, *, total_ok: int, total_expected: int) -> str:
     留给 T-EX11 写进 README,不在这里重复。
 
     * `total_expected == 0`(没有非预热行可看)或**过半**非预热行不是
-      `"ok"`(含失败与本地缓存出口都不算数,`_SUCCESS_STATUS` 之外的一切)⇒
-      `"undetermined"`——样本被污染到不足以支撑任何结论;
+      `"ok"`(含失败、本地缓存出口、`invalid_output` 都不算数,
+      `_SUCCESS_STATUS` 之外的一切)⇒ `"undetermined"`——样本被污染到不足以
+      支撑任何结论;
     * 可配对的区组数 < `_MIN_PAIRED_REGIONS_FOR_VERDICT`(两个)⇒
       `"undetermined"`——連一个跨区组的一致性都算不出来;
     * 否则:区组间中位差的**符号**一致(`consistency_ratio` ≥ 0.75)且
@@ -631,13 +642,19 @@ def summarize_probe(rows: Sequence[Mapping]) -> dict:
        (design §9.1「预热成本单列」);
     2. `status == "cache_hit"` ⇒ 本地缓存出口,单列 `local_cache_exit_rows`
        (P3-3 拍板:这是"不应出现"的计数,不是命中率,也不进主统计);
-    3. `status != "ok"`(含 `"error"`/`"cancelled"`/`None`/任何非 `"ok"` 的值)
+    3. `status == "invalid_output"` ⇒ 传输层报了 `"ok"`,但那次返回没有通过
+       固定输出任务的形状校验(rig 在 `chat_json` 返回后校验,见
+       `_INVALID_OUTPUT_STATUS`),单列 `invalid_output_rows`——**不算
+       `failed_row_count`**(它不是传输失败),也**不进** `ok_rows`/
+       `first_observation`/`repeat_observation`(它没有完成固定输出任务,
+       它的墙钟不能当成一次已验证的计时观测;codex #709 R2 P2-1);
+    4. `status != "ok"`(含 `"error"`/`"cancelled"`/`None`/任何非 `"ok"` 的值)
        ⇒ 失败或格式不符,单列 `failed_row_count`;
-    4. 其余(`status == "ok"`)按 `call_index == 0` 分「首次观测」与「重复
-       观测」——首次观测**不是**已验证冷缓存(§9.1),只在 `first_observation`
-       里单独报中位墙钟,不与重复观测混在一起算主统计。
+    5. 其余(`status == "ok"` 且通过输出校验)按 `call_index == 0` 分「首次
+       观测」与「重复观测」——首次观测**不是**已验证冷缓存(§9.1),只在
+       `first_observation` 里单独报中位墙钟,不与重复观测混在一起算主统计。
 
-    主统计(`overall`/`by_tier`)只用第 4 类里 `call_index >= 1` 的重复观测,
+    主统计(`overall`/`by_tier`)只用第 5 类里 `call_index >= 1` 的重复观测,
     按 `(tier, block_index)` 区组配对两臂——`by_tier` 是每个长度档各自的
     这份报告,`overall` 是把全部档位的行铺平后重新配对(区组因此变成
     `(tier, block_index)` 的笛卡尔积,不是把三档的中位数再取一次中位数）。
@@ -656,8 +673,14 @@ def summarize_probe(rows: Sequence[Mapping]) -> dict:
     local_cache_exit = [
         r for r in non_warmup if r.get("status") == _LOCAL_CACHE_EXIT_STATUS
     ]
-    remaining = [
+    after_cache_exit = [
         r for r in non_warmup if r.get("status") != _LOCAL_CACHE_EXIT_STATUS
+    ]
+    invalid_output_rows = [
+        r for r in after_cache_exit if r.get("status") == _INVALID_OUTPUT_STATUS
+    ]
+    remaining = [
+        r for r in after_cache_exit if r.get("status") != _INVALID_OUTPUT_STATUS
     ]
     ok_rows = [r for r in remaining if r.get("status") == _SUCCESS_STATUS]
     failed_rows = [r for r in remaining if r.get("status") != _SUCCESS_STATUS]
@@ -706,6 +729,7 @@ def summarize_probe(rows: Sequence[Mapping]) -> dict:
         "row_count_total": len(rows),
         "warmup_row_count": len(warmup_rows),
         "local_cache_exit_rows": len(local_cache_exit),
+        "invalid_output_rows": len(invalid_output_rows),
         "failed_row_count": len(failed_rows),
         "first_observation_row_count": len(first_obs),
         "repeat_observation_row_count": len(repeat_obs),

@@ -3940,17 +3940,35 @@ def _rig_call_tags(
     }
 
 
-def _write_call_rows(out_dir: Path, label: str, rows: Sequence[dict]) -> None:
-    """把 per-call 行追加进 `calls-<label>.jsonl`。零行就不建文件。
+def _write_call_rows(
+    out_dir: Path, label: str, rows: Sequence[dict], *, mode: str = "a",
+) -> None:
+    """把 per-call 行写进 `calls-<label>.jsonl`。
 
-    调用方负责串行化(`ab` 那条路在 `state["lock"]` 里调):同一条臂的这个文件
-    在并发下会被多个单元写,一行被另一个线程截断就再也解析不回来。
+    `mode="a"`(默认,`ab` 的既有调用一个字都不改):**追加**。调用方负责
+    串行化(`ab` 那条路在 `state["lock"]` 里调):同一条臂的这个文件在并发下
+    会被多个单元写,一行被另一个线程截断就再也解析不回来。零行不追加,也不
+    新建文件——这一段行为逐字保留。
+
+    `mode="w"`(`prefix-probe`/E1 专用):**每次运行覆盖**,与
+    `probe-*.jsonl`/`probe-summary.*` 同寿命(codex #709 R2 P2-2:E1 全程
+    串行、一个进程一次运行只写这一份表,不像 `ab` 那样有多单元并发写同一
+    文件的顾虑,追加语义在这里只会造成同一个 out-dir 换 `--marker-variant`
+    重跑时,旧一批的调用行排在这份**唯一按位置对齐**的 per-call 表开头,与
+    新一批的 `probe-*.jsonl` 错位,破坏 `scripts/README.md` 那条对齐契约)。
+    覆盖模式下即使这次运行零行也要把旧文件砍掉(`unlink`):不然同一个
+    out-dir 上一次跑了 96 格、这一次因为预算提前到期一格都没派发,
+    `probe-*.jsonl` 已经如实变成空文件,`calls-e1.jsonl` 却还留着上一次的
+    调用行——这与追加模式的错位是同一类账目,只是更隐蔽(`probe-*.jsonl`
+    明明显示零调用,per-call 表里却凭空多出一批对不上号的行)。
     """
-    if not rows:
-        return
     path = out_dir / f"calls-{label}.jsonl"
+    if not rows:
+        if mode == "w" and path.exists():
+            path.unlink()
+        return
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
+    with path.open(mode, encoding="utf-8") as handle:
         for row in rows:
             handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True)
                          + "\n")
@@ -6654,6 +6672,52 @@ def _prefix_probe_finish_reason(raw: object) -> str | None:
     return raw if _is_short_code(raw) else None
 
 
+#: `_prefix_probe_output_valid` 判合法要看的键——固定输出任务只锁这一个
+#: (`PROBE_OUTPUT_INSTRUCTION`/`PROBE_SCHEMA_HINT` 都只承诺 `{"ok": true}`,
+#: 两臂、三档共用同一份指令,见 `app/eval/reflect_prefix_probe.py`)。
+_PREFIX_PROBE_OUTPUT_KEY = "ok"
+
+
+def _prefix_probe_output_valid(content: object) -> bool:
+    """`chat_json` 这一格的返回是否真的完成了固定输出任务。
+
+    传输层报 `call_stats["status"] == "ok"` 只说「provider 回了点什么、没有
+    抛异常」,不说「回的是不是那个固定小 JSON」(`app/core/llm.py` 的
+    `chat_json` 把解析、校验响应形状的责任全部留给调用方——它自己只在
+    `strip_json_fences` 之后原样把 `content` 字符串递回来,从不检查里面是不是
+    一份合法 JSON,更不检查是不是长成调用方期待的 schema)。provider 端返回
+    畸形 JSON、空字符串、或压根没提到 `ok` 字段时,`chat_json` 的传输状态照样
+    是 `"ok"`——调用点如果只读 `call_stats`、丢掉返回内容,`summarize_probe`
+    就会把这些从没完成固定输出任务的调用悄悄算进成功计时观测(codex #709 R2
+    P2-1)。这个函数是 `_call_row` 用来把这两件事分开的唯一判据。
+
+    校验规则(拍板,宽松到只挡真正不成立的形状,不重新发明一遍 JSON Schema
+    校验器):
+
+    * `content` 必须是 `str`——`chat_json` 的真实返回类型就是 `str`(见
+      `app/core/llm.py` 的返回值),任何其它类型(比如异常路径上从没赋值、
+      仍是 `None`)直接判不合法;
+    * 必须能 `json.loads` 成功——解析失败(`"not json"` 这类自由文本、空
+      字符串)判不合法;
+    * 解析结果必须是 `dict`——`json.loads('[1,2]')`/`json.loads('true')` 这类
+      合法 JSON 但不是对象的返回同样判不合法;
+    * 必须含 `"ok"` 键,且值**恰好**是 `True`(`bool`,不接受任何其它
+      truthy 值,比如整数 `1` 或非空字符串——固定任务的指令原文就是
+      `{"ok": true}`,不是「随便一个真值」);
+    * **多余的键一律放行**——固定任务只锁 `ok` 这一个字段,不锁 provider
+      是否在同一个对象里多话(比如带了一个模型自己想加的 `note` 字段)。
+    """
+    if not isinstance(content, str):
+        return False
+    try:
+        parsed = json.loads(content)
+    except (json.JSONDecodeError, ValueError):
+        return False
+    if not isinstance(parsed, dict):
+        return False
+    return parsed.get(_PREFIX_PROBE_OUTPUT_KEY) is True
+
+
 def _prefix_probe_sample_path(args: argparse.Namespace) -> Path:
     if args.sample_file:
         return Path(args.sample_file).expanduser()
@@ -6778,6 +6842,7 @@ def _render_probe_summary_markdown(
         f"- row_count_total: {summary['row_count_total']}",
         f"- warmup_row_count: {summary['warmup_row_count']}",
         f"- local_cache_exit_rows: {summary['local_cache_exit_rows']}",
+        f"- invalid_output_rows: {summary['invalid_output_rows']}",
         f"- failed_row_count: {summary['failed_row_count']}",
         f"- cached_tokens_observed: {summary['cached_tokens_observed']}",
         "",
@@ -6986,9 +7051,9 @@ def _run_prefix_probe(
     )
     from app.eval.reflect_manifest import build_manifest
     from app.eval.reflect_prefix_probe import (
-        ARM_DISTURBED, ARM_STABLE, PROBE_SCHEMA_HINT, assert_probe_row_closed,
-        build_marker_pair, load_prefix_probe_sample, render_sample,
-        summarize_probe,
+        ARM_DISTURBED, ARM_STABLE, PROBE_SCHEMA_HINT, _INVALID_OUTPUT_STATUS,
+        _SUCCESS_STATUS, assert_probe_row_closed, build_marker_pair,
+        load_prefix_probe_sample, render_sample, summarize_probe,
     )
 
     sample = load_prefix_probe_sample(sample_path)
@@ -7047,20 +7112,30 @@ def _run_prefix_probe(
             max_retries: int,
         ) -> dict:
             sink: dict[str, Any] = {}
+            content: object = None
             try:
                 with experiment_message_markers(head, tail):
-                    client.chat_json(
+                    content = client.chat_json(
                         messages, PROBE_SCHEMA_HINT, timeout=timeout,
                         max_retries=max_retries, bypass_cache=True,
                         **{CALL_STATS_KWARG: sink},
                     )
             except Exception:
                 sink.setdefault("status", "error")
+            status = sink.get("status")
+            # 传输层报 `"ok"` 只说「provider 回了点什么、没有抛异常」——把
+            # `chat_json` 的返回内容读出来,按固定输出任务的形状(`{"ok":
+            # true}`)当场校验一遍,不通过就把这一格的 `status` 改写成
+            # `_INVALID_OUTPUT_STATUS`(codex #709 R2 P2-1)。只在传输层已经
+            # 报 `"ok"` 的格上做这件事:`"error"`/`"cancelled"`/`"cache_hit"`
+            # 这些状态各自已经说清楚了这一格发生了什么,不该被这条校验盖写。
+            if status == _SUCCESS_STATUS and not _prefix_probe_output_valid(content):
+                status = _INVALID_OUTPUT_STATUS
             full_messages = provider_messages(
                 messages, PROBE_SCHEMA_HINT, markers=(head, tail))
             usage = sink.get("usage") or {}
             return {
-                "status": sink.get("status"),
+                "status": status,
                 "call_wall_ms": sink.get("call_wall_ms"),
                 "attempts": sink.get("attempts"),
                 "finish_reason": _prefix_probe_finish_reason(
@@ -7126,11 +7201,17 @@ def _run_prefix_probe(
                 log_dir, event_dir, llm_offsets=start_llm_offsets,
                 event_offsets=start_event_offsets, tags=None,
             )
-            _write_call_rows(runner.out_dir, "e1", calls_rows)
+            _write_call_rows(runner.out_dir, "e1", calls_rows, mode="w")
 
             # 退出码的**三个**来源,stderr 上各写清一句(评审 P2-4):混成一句
             # 「非零」会让 `prefix-probe && analyze …` 的操作者分不清这批是被
             # 预算截断、命中了不该命中的缓存出口,还是整批全灭。
+            #
+            # `invalid_output_rows` 不是这三个来源之一(拍板,codex #709 R2
+            # P2-1):它已经被 `_verdict` 的「过半非-ok 行判 undetermined」判据
+            # 兜住(那些行本来就不算 `"ok"`),再单独让退出码非零是同一件事
+            # 判两次;但操作者仍然应该在 stderr 上一眼看到这个数,所以这里单独
+            # 打一句提示,**不**碰 `exit_status`。
             exit_status = 0
             if stopped_by_budget:
                 print(
@@ -7161,6 +7242,15 @@ def _run_prefix_probe(
                     file=sys.stderr,
                 )
                 exit_status = 1
+            if summary["invalid_output_rows"]:
+                print(
+                    f"NOTE: {summary['invalid_output_rows']} 格传输层报 "
+                    "status=ok,但返回内容没通过固定输出任务的形状校验"
+                    "(status 已改记为 invalid_output;不计入 failed_row_count,"
+                    "也不单独让这次退出码非零,但已被剔除出 first/repeat 观测"
+                    "与主统计——见 probe-summary 的 invalid_output_rows)",
+                    file=sys.stderr,
+                )
             return exit_status
 
         try:

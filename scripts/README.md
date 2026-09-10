@@ -764,6 +764,12 @@ python scripts/reflect_shadow_rig.py --dry-run --seed 1 --smoke prefix-probe
 i 格。预算到点提前停批时 per-call 表的行数按实发调用数收窄,前缀仍然对齐
 (停的是尾部)。**一旦 E1 改成并发派发,这条规则立刻失效**。
 
+**`calls-e1.jsonl` 每次运行覆盖**,与 `probe-*.jsonl`/`probe-summary.*` 同
+寿命(codex #709 R2 P2-2)——同一个 out-dir 换 `--marker-variant` 重跑一次,
+这份表只留这一次的调用行,不会把上一次的行留在开头。`ab` 的
+`calls-<arm>.jsonl` 不受影响,仍然是追加(并发多单元写同一份表,追加是
+唯一安全的写法)。
+
 **`--marker-variant`**(`type=int, default=0`,design §9.1「更换标记值重复
 验证」):同一组 `(seed, tier, block, arm, call_index)` 换一个 variant 就拿到
 一组全新的标记值,计划形状不变;manifest 的 `matrix.marker_variant` 子键如实
@@ -782,6 +788,18 @@ i 格。预算到点提前停批时 per-call 表的行数按实发调用数收�
 仍是一个「不应出现的计数」,不是一件好事——摘要与退出码走的字段叫
 `local_cache_exit_rows`,**不叫** `cache_hit`(命名红线:字段名不许含
 `cache_hit`/命中率),真出现时整批以非零退出收尾。
+
+**`invalid_output_rows`**(codex #709 R2 P2-1):`chat_json` 报传输状态
+`status="ok"` 只说「provider 回了点什么、没有抛异常」,不说「回的是不是
+固定输出任务承诺的那份 `{"ok": true}`」——它自己从不解析、也不校验返回
+内容的形状。rig 在每格 `chat_json` 返回后按这份固定形状当场校验一遍(必须
+是能 `json.loads` 成的 `dict`,含 `"ok"` 键且值恰好是 `True`;多余的键
+放行),不通过就把这一格的 `status` 改记成 `invalid_output`——单列
+`invalid_output_rows`,既不算 `failed_row_count`(它不是传输失败),也不
+进 `first_observation`/`repeat_observation`/主统计(它没有完成固定输出
+任务,墙钟不能当一次已验证的计时观测)。这个数不会单独让退出码非零(它已经
+被 `verdict` 的「过半非-ok 行判 undetermined」判据兜住),但非零时 stderr
+会单独提示一句。
 
 **`state-probe`(E2)—— 固定状态的真实 reflect 对照**(设计
 `2026-09-09-reflect-prefix-cache-final-design_zh.md` §9.2;实施
