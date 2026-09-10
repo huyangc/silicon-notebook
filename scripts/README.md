@@ -479,15 +479,47 @@ python scripts/reflect_shadow_rig.py \
 前缀缓存本身,那笔账已经在 D↔P 那一对上算过了。`--arms` 与 `--only-policy`
 **互斥**(后者是一维时代按 policy 过滤默认两臂的写法)。
 
-**D↔L 这一对的差值不由 `optimization_pair_table`(`scripts/
-analyze_reasoning_trace.py`)直接给出**:那张表的基线硬编码 `off`
-(`OPTIMIZATION_BASELINE`),一批只有 D 和 L 两条臂时两侧配对表都是空。要读出
-这道差值,要么把 `off` 也跑进各自那一批(`v2:off,v2:prefix_delta` 与
-`v2:off,v2:prefix_delta_lean` 分两批——「一次只收一对」不允许三格挤进一批),
-各自对 `off` 做差之后自己再相减;要么把两批合喂 `analyze` 之后在读表口径上
-做差的差。另外 `ab-runs.jsonl` 的每一行带 ab 专属键(`paired`、`pair_id` 等),
-`analyze_reasoning_trace.py` 的 `load_rows` 会整批拒绝——先把行降到 T0 键集
-才能喂进 `analyze`(这是 T-PS4 起就有的既有结构,不是这一格新引入的限制)。
+**D↔L 这一对的差值现在可以由 `optimization_pair_table`(`scripts/
+analyze_reasoning_trace.py`)直接给出——这条已知限制已解除(PR-5 T-EX9)**:
+`--baseline-arm`(默认仍是 `off`)把基线从硬编码换成参数,
+`--arms v2:prefix_delta,v2:prefix_delta_lean --baseline-arm prefix_delta`
+就能在只有 D/L 两条臂的一批上直接出配对表,不必再把 `off` 也跑进各自的批次
+自己相减。默认参数下 `analyze` 的输出与今天逐字节相同(既有用例全绿即证)。
+另外 `ab-runs.jsonl` 的每一行带 ab 专属键(`paired`、`pair_id` 等),
+`analyze_reasoning_trace.py` 的 `load_rows` **默认**仍整批拒绝它们——这条既有
+纪律(T-PS4 起)不变,要吃 A/B 键就显式传 `--key-set ab`(见下)。
+
+**整批墙钟预算**:`--max-wall-minutes`(默认不给 = 今天的行为逐字相同,不设
+上限、不早停)。到点后 `ab` **停止派发**新单元、`cancel_event.set()` 唤醒
+在途、`shutdown(cancel_futures=True)` 撤掉队列里未派发的;在途未完成单元落
+`status=cancelled` 行(删失观察),**不偷偷补跑到矩阵齐全**——整批以「预算
+到点」为由非零退出,已完成的前缀仍是一份配对完整的数据集(重复轮在最外层
+这条既有性质保住它)。
+
+**manifest**:收尾写 `<out-dir>/manifest.json`(最新,覆盖)+
+`<out-dir>/manifests.jsonl`(历史,追加)——三条实验通道(E1/E2/E3)共用同一
+处写点与同一套 **18 键**闭集(`backend/app/eval/reflect_manifest.py` 的
+`build_manifest`/`MANIFEST_KEYS`)。`ab` 这条通道必填 `code_sha`
+(`git rev-parse HEAD`,工作树不干净时带 `-dirty` 后缀)、`arms`、
+`optimization_by_arm`、`common_baseline`、`corpus_signature_by_cell`、
+`intent_contract_digest_by_question`、`model_contract`、`arm_order_seed`
+(本期 `ab` 的臂序按 run 无种子,恒 `null`,但键本身必须在场)、`order`、
+`matrix`(额外子键 `planned_runs` = 这批**计划**的 run 数;`questions`/
+`efforts`/`arms`/`repeats` 四个维度基数)、`budgets`(`reasoning_timeout_seconds`/
+`reasoning_attempt_budget`/`max_wall_minutes`/`batch_deadline_seconds` 四个
+子键)、`started_at`/`finished_at`/`stopped_by_budget`(如实写,预算没触发就是
+`false`)。值只许是短码字符串、数值、`bool`、`null`,或以短码为键、值同样合法
+的字典——**不含**题面原文、答案正文、URL、`postgresql://` 连接串、生产凭据,
+一处污染(哪怕落在字典**键**上)都会被隐私断言当场拒绝。
+
+**`analyze` 的三处新参数(PR-5 T-EX9)**:`--baseline-arm`(默认 `off`)如上;
+`--pair-rows`(默认关)额外出一张**逐题配对差值表**——同一格内先对 `repeat`
+取中位数、再出 `Δ` 与 `ratio`(**不是**两组独立 P50 的比值),分位数仍受
+`--min-samples` 约束并逐格标 `n_pairs`,超时/取消进删失一列(`n_censored`/
+`n_failed`/`n_unfinished` 分基线/变体两侧报);`--key-set {t0,ab}`(默认
+`t0`)让 `load_rows` 认 A/B 专属键——**默认不改**,多出来的键必须让人显式看见
+是 `load_rows` docstring 的原话,`--key-set ab` 直接吃 `ab-runs.jsonl` 而不必
+先把行降到 T0 键集。
 
 **`--arms` 一次只收一对臂**,超过两条在跑批之前拒绝。配对差值表按**对**出:三条
 臂的批次里每个配对单元落三行,`mark_paired` 判不出配对,整批 `paired` 全 `False`
@@ -563,6 +595,12 @@ bool、数值、`None`,短码的列表(`action_seq`),或以短码为键、数值
 文本、模型 reason、trace summary 和任何 id 都不会出现在输出里**;笔记本只以来源数分桶
 (`notebook_bucket`)出现,题目只以题号(`question_key`)出现。写每一行之前都过一次
 `assert_closed`,加错一个键会当场炸,而不是安静地把一列自由文本落进 JSONL。
+
+**M7 的精确说法(PR-5)**:这份隐私口径只覆盖**测量产物**——写进
+`probe-*.jsonl`/`state-probe-*.jsonl`/`ab-runs.jsonl`/`manifest.json` 的每一行
+零正文。`.local/<out-dir>/llm/` 下的交互日志(`LLM_LOG_PATH`)是另一回事:它
+含**截断正文**,是操作者私有的实验资产,不受这份闭集约束、不进数据集、不进
+仓库(`--out-dir` 默认在 `.local/` 下,已被 `.gitignore` 排除)。
 
 **`search` 的 `--keep-raw-trace` 不受这份闭集约束**:它写的
 `<out-dir>/raw/<policy>/<question_key>_<corpus_cell>_<effort>.json` 是原始
@@ -665,6 +703,98 @@ TraceStep(含 `summary` 人话摘要)与 termination DTO 的逐字落盘,**含�
 题集在 `backend/app/eval/reflect_t0/questions.json`(A 单篇 24 题带 gold、B 多篇 10 题、
 报告 4 题),语料是公开论文;A 语料的主库 notebook id 刻意不落仓库,由 `--source-notebook`
 传(B 语料的磁盘路径与文件名在题集里,那是本机 MinerU 产物的位置)。
+
+**`prefix-probe`(E1)—— 前缀复用敏感性探针**(设计
+`2026-09-09-reflect-prefix-cache-final-design_zh.md` §9.1;实施
+`2026-09-11-reflect-prefix-experiments-plan_zh.md` T-EX2–T-EX4)。它回答的是:
+同一个 `reasoning_agent` workload、同一段固定正文,两臂只在头/尾标记的
+**稳定性**上不同时,墙钟是否有可辨认的差异。**它不回答什么**——逐字:
+「不可下结论:命中率 X%、省掉 Y token、provider 已关闭缓存」(design §0/§9.1)。
+`prefix-probe` 剥掉了检索、合成、reflect 循环的全部意义,只留一段固定输出
+任务上的两臂标记差异,结论词面因此永远限定在「有 / 无可辨认 / 不确定的时间
+收益」三格,不产出任何比率型结论。
+
+```bash
+python scripts/reflect_shadow_rig.py --dry-run --seed 1 prefix-probe
+python scripts/reflect_shadow_rig.py --dry-run --seed 1 --smoke prefix-probe
+```
+
+**零数据库**:显式给 `--database-url` 会被响亮拒绝
+(`ERROR: prefix-probe 不连数据库,不接受 --database-url`)——这条路挂在
+`search`/`ab` 任何一条上都会多出一条与语料/范围/意图全无关的死分支。
+
+**标记接缝默认关闭,只在这条命令里打开且退出时必然复位**:`app/core/llm.py`
+的实验标记接缝(`ContextVar` + `experiment_message_markers`)在生产路径与
+`search`/`ab` 上永远是 `markers=None`,只有 `prefix-probe` 的真跑路径会
+`with experiment_message_markers(head, tail):` 包住那一次调用;命令退出后
+——不论正常收尾还是异常——接缝都已复位。
+
+**规模**:默认 96 次全量(3 档 × 4 区组 × 2 臂 × 4 次),`--smoke` 走 48 次
+冒烟(区组数砍半)——**可先冒烟,但不凭它直接定论**(design §9.1 / U4)。
+`--seed` **必填**(缺它退 2:`ERROR: prefix-probe 需要 --seed`)——区组内的
+臂序平衡随机与批次可复现都靠它(design M4)。
+
+**预热单列**:整批开头一次连接预热,正文与标记均**与主批不同**,单列
+`is_warmup=True` 行,不进任何统计(design §9.1「预热成本单列」)。
+
+**两个 dry-run 数字的口径**(与 `ab` 那两行同一套措辞:逻辑调用 vs 请求
+上界,乘数是重试预算,静默 fallback 另计、不留日志行):
+
+```
+[dry-run] 004 model calls (estimate)  97 次逻辑调用(96 格计划 + 1 预热);请求上界 ≤ 194
+```
+
+`--smoke` 时是 `49 次逻辑调用(48 格计划 + 1 预热);请求上界 ≤ 98`。单次
+超时读 `REASONING_TIMEOUT_SECONDS_DEFAULT=90s`,**与 `ab` 那一行同一个
+常量**(镜像 `Settings().reasoning_timeout_seconds` 的默认值,真跑读的是
+构造出来的那一份,可能被 `--env-file` 覆盖)。
+
+**产物文件名**(逐字):`<out-dir>/probe-stable.jsonl` + `probe-disturbed.jsonl`
++ `probe-warmup.jsonl` + `probe-summary.{md,json}` + `manifest.json`(+
+`manifests.jsonl` 历史)+ `calls-e1.jsonl`(per-call 表)。
+
+**`gap_ms` 口径**:本格**发起** − 同序列上一格**返回**(真实空闲),首格与
+跨序列一律 `None`。
+
+**per-call 表(`calls-e1.jsonl`)对齐规则**:这张表是**无标签**的
+(`question_key`/`corpus_cell`/`effort` 这三个 A/B 维度 E1 一个都没有),只能
+**按顺序**对齐:E1 全程串行,第 0 行是预热格,其后第 i 行对应
+`probe_plan(...)` 的第 `i - 1` 格,也就是 `probe-stable.jsonl`/
+`probe-disturbed.jsonl` 按 `series_index`/`call_index` 归并回计划序之后的第
+i 格。预算到点提前停批时 per-call 表的行数按实发调用数收窄,前缀仍然对齐
+(停的是尾部)。**一旦 E1 改成并发派发,这条规则立刻失效**。
+
+**`--marker-variant`**(`type=int, default=0`,design §9.1「更换标记值重复
+验证」):同一组 `(seed, tier, block, arm, call_index)` 换一个 variant 就拿到
+一组全新的标记值,计划形状不变;manifest 的 `matrix.marker_variant` 子键如实
+记录这批用的是哪个 variant,拿两批不同 variant 的产物对起来看能分辨一次差异
+是不是巧合标记造成的。
+
+**`--sample-file`** 默认指向仓库内合成、非敏感的固定样本
+(`backend/app/eval/reflect_t0/prefix_probe_sample.json`);指向操作者
+`.local` 下真实样本时用这个,manifest 只记样本的短码摘要(`sample_digest`)与
+长度,不记正文。
+
+**`bypass_cache=True`**:disturbed 臂每次标记都不同,`llm_key` 因此逐次不同,
+本地响应缓存的命中门本来就不放行(E1 不传 `response_validator`),显式
+`bypass_cache=True` 让「这批数一定不含本地缓存出口」成为一条**结构事实**,
+并避免 `status="cache_hit"` 这个第四出口污染 E1 的 `status` 分布。命中它
+仍是一个「不应出现的计数」,不是一件好事——摘要与退出码走的字段叫
+`local_cache_exit_rows`,**不叫** `cache_hit`(命名红线:字段名不许含
+`cache_hit`/命中率),真出现时整批以非零退出收尾。
+
+**`state-probe`(E2)—— 见 T-EX11b**。E2 的 rig 子命令、驱动器行为、三个状态点
+的分档报告、`--arms` 与并发约束等文档尚未落地——PR-5 的 T-EX7 在本轮之后合入
+主分支,这一节由 T-EX11b 补全。
+
+**报告第一页只答四件事**(设计 §13,PR-5 T-EX11)。不论哪一条通道,聚合报告的
+**第一页**只回答这四件事:(1)最终候选是哪种模式;(2)完整 Ask 比基线快多少;
+(3)质量/失败/尾部是否退化;(4)结论在哪些模型配置和题型上成立。E1 机制结果
+(`prefix-probe` 的摘要)**只作解释,不代替端到端结论**——它能说的最多是
+「稳定前缀有 / 无可辨认的时间收益」,不能替 E3(`ab`)的完整 Ask 配对下结论。
+默认 `REASONING_REFLECT_OPTIMIZATION=off` 与「任一质量或稳定性回归可立即回到
+`off`、不做数据迁移」这两条既有承诺不变;三条通道的实际收益**一个数都还没
+量**,本节交付的是可重跑命令与产物形状,不是采用结论。
 
 ### `kg_quality_audit.py` —— 「库里的节点都是些什么」
 
