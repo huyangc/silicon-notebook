@@ -90,10 +90,12 @@ ARM_POLICIES: tuple[str, ...] = POLICY_VERSIONS
 #:   `legacy:prefix_snapshot` 不是「还没实现」,而是**结构上不存在**:声明它只会
 #:   得到一条 optimization 写着 `prefix_snapshot`、实际跑 `off` 的假数据。
 #: * v2 侧只列**本期已实现**的三格。`prefix_delta_lean` 在 `OPTIMIZATIONS`
-#:   (读侧闭集)里有位置,但 `config.validate_reflect_optimization` 在启动期
-#:   就响亮拒绝它——让 rig 排一批起不来的 run 是纯粹的浪费,所以这里同期收窄。
-#:   PR-3(T-PD7)往这里加了 `("v2","prefix_delta")` 这一行;PR-4 放开最后一格
-#:   时,同 diff 再加一行。
+#:   (读侧闭集)里有位置,`config` 的校验器也已经放行它(PR-4 T-PL1)——它不在
+#:   这里,是**这份 rig 闭集自己**还没收它,不是 config 拒绝它:装配层今天还
+#:   没有它专属的自评合同(留给 T-PL3/T-PL4/T-PL5),字节上是 `prefix_delta` 的
+#:   双胞胎,现在就放它进来跑批,会让一批实际是 D 形状的 run 被投影标成 L,把
+#:   D 的噪声算成 L−D 的收益。PR-3(T-PD7)往这里加了 `("v2","prefix_delta")`
+#:   这一行;T-PL6(依赖自评合同落地)同 diff 再加最后一行。
 ARMS: tuple[tuple[str, str], ...] = (
     ("legacy", "off"),
     ("v2", "off"),
@@ -203,8 +205,8 @@ def _parse_one_arm(token: str) -> tuple[str, str]:
             f"臂 {token!r} 是一个**合法值的非法组合**:rig 能跑的臂只有 "
             + ", ".join(format_arm(*arm) for arm in ARMS)
             + "(legacy 路径上没有『前缀』这个概念,reflect_optimization() 在 v2 "
-              "总闸关时恒返回 off;prefix_delta_lean 由 config 的校验器在启动期"
-              "拒绝)")
+              "总闸关时恒返回 off;prefix_delta_lean 不在这份 ARMS 闭集里,"
+              "T-PL6 起放开)")
     return policy, optimization
 
 
