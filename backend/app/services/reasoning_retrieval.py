@@ -955,7 +955,10 @@ def _note_assessment_measurement(
 
     三条路各调一次,合成这一个写点(`_absorb_assessment` 因此净增三行):
 
-    * 载荷没带 `assessment` ⇒ `absent=True`、`rows=0`;
+    * 载荷没带 `assessment`,且这份决定**是模型自己的载荷**(`_absorb_assessment`
+      判据:`not decision.invalid_reason` ——`_reflect_invalid` 是
+      `REFLECT_INVALID_ACTION` 与 `invalid_reason` 的唯一产地,见该函数)⇒
+      `absent=True`、`rows=0`;
     * 逐方面校验通过(可能有逐方面被拒)⇒ `absent=False`、
       `rows=len(outcome.accepted)` ——口径是**实际落账**的方面数,不是载荷里有
       几行,与收尾追问那条闸同一份读数(`_nudge_missing_assessment` 的 `accepted`);
@@ -969,6 +972,16 @@ def _note_assessment_measurement(
     记成一次模型省略,而 L 的全部收益判据就建在"省略"这个读数上。整份
     `assessment_rows_total` 因此不是"全或无":读侧改成 sum-over-present + 伴生列
     `assessment_observed` 披露全不全(`reasoning_trace_stats._reflect_assessment`)。
+
+    ⚠ **折叠决定同样不到这里**(评审修正,质量评审 P2-1)。`_survive_reflect_failure`
+    (首次 provider 抖动降级)、`parse_reflect_v2` 的解析失败、以及参数越界
+    三条路都经 `_reflect_invalid` 把决定折成一条不可执行的伪动作——它们的
+    `assessment` 同样恒为 None,但那不是"模型省了自评",而是这一轮压根没有一份
+    模型的自评意图可言(伪动作是服务端替模型编的)。这三条路**不是** fail-open
+    (`decision.fallback` 为假),所以会照常进入 `_absorb_assessment`,判据落在
+    `decision.invalid_reason`(而不是 `decision.fallback`)上:非空 ⇒ 折叠决定,
+    两键都不写,该 reflect 步在读侧因此"未观测"(`assessment_observed` 如实变
+    False),不是"观测到了、省略了自评"。
 
     门取 `measures_messages` 而不是"对象在不在":delta 两条臂在测量关时**照样**
     构造 `ReflectMeasurement`(拍板 Q7 的三个行为事实键),这两格不是行为事实,
@@ -5407,16 +5420,19 @@ class ReasoningRetriever:
         按前缀放行。
 
         这三条路各带一格测量落账(`assessment_rows`/`assessment_absent`,四臂通
-        写、门是测量开关):口径、缺席语义与"为什么 provider fallback 轮不在这里
-        写"全部见 `_note_assessment_measurement`。校验与折叠逻辑一行没动——那三
-        句只往 `measurement.detail` 写整数与布尔,删掉它们这个方法的每一个决定
-        逐字节不变。
+        写、门是测量开关)——**除了**折叠决定(`decision.invalid_reason` 非空:
+        degraded/解析失败/参数越界)那一支,它落在"载荷没带 assessment"这条路里
+        却根本不写:口径、缺席语义与"为什么 provider fallback 轮不在这里写"全部
+        见 `_note_assessment_measurement`。校验与折叠逻辑一行没动——那几句只往
+        `measurement.detail` 写整数与布尔,删掉它们这个方法的每一个决定逐字节
+        不变。
         """
         if state.aspects is None:
             state.aspects = self._v2_build_aspect_ledger(state)
         nudge_args = (apply_outline, overflow_repair, more_turns, outline_left)
         if decision.assessment is None:
-            _note_assessment_measurement(state, rows=0, absent=True)
+            if not decision.invalid_reason:
+                _note_assessment_measurement(state, rows=0, absent=True)
             return self._nudge_missing_assessment(state, decision, *nudge_args)
         allowed = outline_binding_keys(
             state.collected, state.elements, state.chunks,
