@@ -13670,25 +13670,310 @@ def test_measure_write_side_stays_inside_the_registered_key_set(rrepo):
     ⊆ 那一半防的是静默缺席:写侧多写一个投影不认的键,那一列恒为 `None` 而没有
     任何用例会红。⊇ 那一半防的是反向静默:登记了却没有产地的键同样恒 `None`。
 
+    ⚠ ⊆ 必须断在**未掩码**的键集上(评审 P2-1)。`_measure_keys()` 先与登记清单
+    求交,所以 `_measure_keys(detail) <= 清单` 是 `X & R ⊆ R` ——恒真,任何越界键
+    都被那次交集掩掉了。这里改成拿**整个** detail 的键集去比「冻结的既有键 +
+    登记清单」,越界键因此无处可躲。既有键那一份写成字面量而不是从测量关的那条
+    run 里现取:两条 run 都长出同一个新键时,现取的基线会跟着一起长。
+
     变异:把 `_measure_reflect_messages` 里任一个键改成手写字面量并拼错 ⇒
     `_registered_measure_key` 在导入期就抛;绕开它直接写进 detail ⇒
-    `_TraceRecorder.__call__` 里那条 `⊆` 断言红。
+    `_TraceRecorder.__call__` 里那道 `⊆` 判据 `RuntimeError`(`PYTHONOPTIMIZE=1`
+    下同样成立——那里是 `raise` 不是 `assert`);连那道判据一起删掉 ⇒ 这条红。
     """
     from app.domain.reasoning_trace_stats import (
         REFLECT_MEASUREMENT_DETAIL_KEYS,
     )
 
+    # 这条脚本下 reflect 步 detail 的既有键(测量之外的那一份),冻结在这里。
+    baseline = {"next_action", "no_progress", "stale", "sufficient"}
     _llm, result = _measured_run(
         rrepo, intent_detail=_TWO_ASPECTS, reflects=_three_turn_reflects(),
         chunk_results=_three_turn_chunks(), reasoning_max_chunk_searches=2)
     details = _reflect_details(result)
     written: set = set()
-    for detail in details:
-        assert _measure_keys(detail) <= REFLECT_MEASUREMENT_DETAIL_KEYS
+    for turn, detail in enumerate(details):
+        assert set(detail) <= baseline | set(
+            REFLECT_MEASUREMENT_DETAIL_KEYS), (turn, sorted(detail))
         written |= _measure_keys(detail)
     assert written == set(REFLECT_MEASUREMENT_DETAIL_KEYS)
+    # 冻结的那一份基线不许偷偷漂:同一条脚本在测量关时就该恰好是它。
+    _quiet_llm, quiet = _v2_aspect_run(
+        rrepo, intent_detail=_TWO_ASPECTS, reflects=_three_turn_reflects(),
+        chunk_results=_three_turn_chunks(), reasoning_max_chunk_searches=2,
+        **{_MEASURE_FLAG: False})       # 同一个 rrepo:上面那条 run 已把它打开
+    for detail in _reflect_details(quiet):
+        assert set(detail) == baseline, sorted(detail)
     # 稀疏键之外的那几个既有键一个都没被覆盖掉。
     assert details[0]["next_action"] == "search_chunks"
+
+
+# --- 观测故障一格都不许改变业务(评审 P1) ------------------------------------
+
+#: 一个**孤立代理**。`json.loads` 接受 `"\ud800"` 并交回一个含它的 Python `str`,
+#: 所以它是模型可控的输入:经动作参数进观察账,下一轮就在 user 正文里。严格
+#: UTF-8 编码对它抛 `UnicodeEncodeError`,而 `json.dumps` 默认 `ensure_ascii`
+#: 不抛——这正是"测量关时一切正常、测量开时那一轮死掉"的成因。
+_LONE_SURROGATE = "\ud800"
+
+
+def _lone_surrogate_script():
+    """三轮脚本,第 2 轮的检索串带一个孤立代理(于是第 3 轮的观察账里有它)。"""
+    reflects = _three_turn_reflects()
+    bad_query = f"换个问法{_LONE_SURROGATE}尾巴"
+    reflects[1] = {**reflects[1], "arguments": {"query": bad_query}}
+    return reflects, {"完整问题": [_chunk_hit("ck-q0")],
+                      bad_query: [_chunk_hit("ck-q1")]}
+
+
+def _comparable_trace(result) -> list:
+    """整条轨迹里与测量无关的那一份:步类型、summary 与去掉测量键的 detail。
+
+    `duration_ms` 是墙钟,不进比较;除此之外一格不放过——"测量不改任何决定"这条
+    只断 `next_action` 是不够的,那样一次多出来的兜底轮里 `next_action` 反而看着
+    很正常(`answer`)。
+    """
+    from app.domain.reasoning_trace_stats import (
+        REFLECT_MEASUREMENT_DETAIL_KEYS,
+    )
+    return [
+        (step.step_type, step.summary,
+         {key: value for key, value in step.detail.items()
+          if key not in REFLECT_MEASUREMENT_DETAIL_KEYS})
+        for step in result.trace
+    ]
+
+
+def test_a_lone_surrogate_in_the_ledger_still_measures_and_decides_the_same(
+    rrepo,
+):
+    """观察账里带孤立代理 ⇒ 两条臂逐步同轨迹,且测量开的那一轮照样量到。
+
+    这是评审 P1 的回归:序列化那一格从前对孤立代理抛 `UnicodeEncodeError`,而它
+    住在 `_reflect_v2_attempt` 的 fail-open `try` 里,于是那一轮变成一次**假的
+    模型兜底**(`__reflect_invalid__` + `fallback_reason=UnicodeEncodeError`),
+    请求根本没发出去;`fail_closed` 调用方则整次死掉。测量因此改变了它本该只
+    旁观的东西,而对照实验会把这次分叉记到"臂"头上。
+
+    两条判据分别钉住两层修法:逐步同轨迹钉住"观测不参与决定"(`serialize` 换成
+    `surrogatepass` 之后不再抛,失败也被守卫关在自己的 `try` 里);第 3 轮
+    `ctx_bytes_total` 与三个 `call_*` 在场钉住"这把尺子对任意 `str` 全定义"
+    ——键缺席就说明那一轮没量到。
+
+    变异:把 `serialize_provider_messages` 的 `errors="surrogatepass"` 去掉 ⇒
+    两条断言都红。
+    """
+    reflects, chunks = _lone_surrogate_script()
+    _quiet_llm, quiet = _measured_run(
+        rrepo, reflects=reflects, chunk_results=chunks,
+        intent_detail=_TWO_ASPECTS, reasoning_max_chunk_searches=2,
+        **{_MEASURE_FLAG: False})
+    loud_llm, loud = _measured_run(
+        rrepo, reflects=reflects, chunk_results=chunks,
+        intent_detail=_TWO_ASPECTS, reasoning_max_chunk_searches=2)
+
+    assert _comparable_trace(loud) == _comparable_trace(quiet)
+    # 反面:那个孤立代理真的进了第 3 轮的 user 正文(否则上面断的是别的东西)。
+    assert _LONE_SURROGATE in loud_llm.user_prompts[2]
+    details = _reflect_details(loud)
+    assert len(details) == 3
+    for turn, detail in enumerate(details):
+        assert detail["ctx_bytes_total"] > 0, turn
+        assert detail["call_attempts"] == 1, turn
+        assert detail["call_wall_ms"] > 0, turn
+        assert detail["response_chars"] > 0, turn
+    assert details[2]["message_prefix_bytes"] > 0
+
+
+def test_a_failing_measurement_changes_neither_the_turn_nor_the_next_baseline(
+    rrepo, monkeypatch,
+):
+    """测量抛异常 ⇒ 那一轮的键缺席,轨迹与决定逐步不变,基准也不留残值。
+
+    孤立代理只是**一个**已知成因,而观测读的是模型能影响形状的东西,所以"它永远
+    不会抛"不是可以假设的性质(同 `_TraceRecorder.__call__` 对 observer 投影的
+    理由)。这里直接注入一次故障,断的是守卫本身而不是某一个成因。
+
+    第 3 轮 `message_prefix_bytes` 如实为 `None`:第 2 轮没量到,拿第 1 轮当基准
+    会量出一个"看着完全正常、却回答了另一个问题"的数。
+
+    变异:去掉 `_measure_reflect_messages_safely` 的 `try/except` ⇒ 那一轮变成
+    `__reflect_invalid__` 兜底,轨迹比对红;只去掉里面 `measurement.previous =
+    None` 那一行 ⇒ 第 3 轮的前缀变成一个非 `None` 的隔轮数,最后一条红。
+    """
+    import app.services.reasoning_retrieval as module
+
+    original = module._measure_reflect_messages
+    calls: list = []
+
+    def _fails_on_the_second_turn(measurement, context, messages, hint, mat):
+        calls.append(len(calls) + 1)
+        if len(calls) == 2:
+            raise UnicodeEncodeError("utf-8", "x", 0, 1, "injected")
+        original(measurement, context, messages, hint, mat)
+
+    _quiet_llm, quiet = _measured_run(
+        rrepo, intent_detail=_TWO_ASPECTS, reflects=_three_turn_reflects(),
+        chunk_results=_three_turn_chunks(), reasoning_max_chunk_searches=2,
+        **{_MEASURE_FLAG: False})
+    monkeypatch.setattr(
+        module, "_measure_reflect_messages", _fails_on_the_second_turn)
+    _loud_llm, loud = _measured_run(
+        rrepo, intent_detail=_TWO_ASPECTS, reflects=_three_turn_reflects(),
+        chunk_results=_three_turn_chunks(), reasoning_max_chunk_searches=2)
+
+    assert calls == [1, 2, 3]                    # 三轮都试过测量
+    assert _comparable_trace(loud) == _comparable_trace(quiet)
+    details = _reflect_details(loud)
+    # 失败那一轮:上下文键与前缀键**缺席**(unknown),不是 0。
+    assert "ctx_bytes_total" not in details[1]
+    assert "message_prefix_bytes" not in details[1]
+    assert "ctx_chars_s" not in details[1]
+    # 调用键不受影响:它们来自 `call_stats` 出参,与序列化无关。
+    assert details[1]["call_attempts"] == 1
+    # 下一轮量到了自己的字节,但没有可信基准 ⇒ 前缀如实为 None(同首轮)。
+    assert details[2]["ctx_bytes_total"] > 0
+    assert details[0]["message_prefix_bytes"] is None
+    assert details[2]["message_prefix_bytes"] is None
+
+
+def test_a_failing_measurement_logs_the_exception_class_and_no_request_text(
+    rrepo, monkeypatch, caplog,
+):
+    """故障日志只留异常**类名**:请求正文一个字节都不进日志。
+
+    `exc_info=True` 会把出问题的那段正文带进 traceback,所以这里刻意不给。少了这
+    条,一次"顺手加上 exc_info 好排查"的改动就把用户问题与文档证据写进了日志。
+    """
+    import logging as logging_module
+
+    import app.services.reasoning_retrieval as module
+
+    secret = "文档证据里的敏感原文"
+
+    def _always_fails(measurement, context, messages, hint, mat):
+        raise RuntimeError(f"boom {secret}")
+
+    monkeypatch.setattr(module, "_measure_reflect_messages", _always_fails)
+    with caplog.at_level(logging_module.DEBUG, logger=module.__name__):
+        _llm, result = _measured_run(
+            rrepo, intent_detail=_TWO_ASPECTS, reflects=_three_turn_reflects(),
+            chunk_results=_three_turn_chunks(), reasoning_max_chunk_searches=2)
+
+    assert len(_reflect_details(result)) == 3    # run 照常走完
+    logged = [record for record in caplog.records
+              if "measurement failed" in record.getMessage()]
+    assert len(logged) == 3
+    assert all("RuntimeError" in record.getMessage() for record in logged)
+    whole = caplog.text
+    assert secret not in whole
+    assert "完整问题" not in whole
+
+
+# --- 两条 docstring 声明为承重、此前无守卫的性质(评审 P3-1) ------------------
+
+class _BoolAttemptsLLM(_MeasuredV2LLM):
+    """把 `attempts` 报成 `True` 的替身。
+
+    `bool` 是 `int` 的子类,所以一个这样的替身在没有显式排除时会被求和成 1
+    ——读侧的 `model_calls_real` 于是把"没报"读成"报了一次"。
+    """
+
+    def chat_json(self, messages, schema_hint, **kwargs):
+        raw = super().chat_json(messages, schema_hint, **kwargs)
+        sink = kwargs.get("call_stats")
+        if sink is not None and "sub_queries" not in schema_hint:
+            sink["attempts"] = True
+        return raw
+
+
+def test_measure_call_keys_reject_a_bool_attempts(rrepo):
+    """客户端把 `attempts` 报成 `True` ⇒ `call_attempts` 缺席,不是 1。
+
+    变异:去掉 `_measure_reflect_call` 里的 `not isinstance(value, bool)` ⇒
+    这条红(那一列会静默变成"每轮一次请求")。
+    """
+    llm = _BoolAttemptsLLM(
+        plan={"sub_queries": [{"query": "完整问题"}]},
+        reflects=_three_turn_reflects())
+    _llm, result = _v2_aspect_run(
+        rrepo, llm=llm, intent_detail=_TWO_ASPECTS,
+        chunk_results=_three_turn_chunks(), reasoning_max_chunk_searches=2,
+        **{_MEASURE_FLAG: True})
+    details = _reflect_details(result)
+    assert len(details) == 3
+    for turn, detail in enumerate(details):
+        assert "call_attempts" not in detail, turn
+        # 同一次 sink 里的另外两格是正常的 int,照样记账。
+        assert detail["call_wall_ms"] > 0, turn
+        assert detail["response_chars"] > 0, turn
+
+
+def test_a_reflect_step_of_an_unmeasured_turn_keeps_the_previous_baseline():
+    """有 reflect 步、但那一轮没量到 ⇒ `take()` 保住上一轮的基准,不清空。
+
+    `current is None` 的意思是"这一轮没有可晋升的字节",而不是"从此没有基准"。
+    无条件晋升会把 `previous` 抹成 `None`,于是**再下一轮**的
+    `message_prefix_bytes` 无声变成 `None`——那一列少了一格,而没有任何一条别的
+    用例会红(评审 P3-1 的变异 M21)。
+
+    变异:把 `take()` 的 `if self.current is not None` 去掉 ⇒ 这条红。
+    """
+    from app.models.schemas import TraceStep
+    from app.services.reasoning_context import ReflectMeasurement
+    from app.services.reasoning_retrieval import _TraceRecorder
+
+    trace: list = []
+    recorder = _TraceRecorder(trace, None, None)
+    recorder.measurement = ReflectMeasurement(
+        previous=b"turn-1-bytes", current=None, detail={"cards_shown": 2})
+    recorder(TraceStep(step_type="reflect", summary="没量到的那一轮"))
+
+    assert [step.step_type for step in trace] == ["reflect"]
+    assert trace[0].detail["cards_shown"] == 2   # 量到的那一格照样交出去
+    assert recorder.measurement.previous == b"turn-1-bytes"
+    assert recorder.measurement.current is None
+    assert recorder.measurement.detail == {}
+
+
+def test_the_measurement_bytes_never_reach_a_repr(rrepo, monkeypatch):
+    """`repr` 里没有请求正文:两串字节 `repr=False`(评审 P3-2)。
+
+    `previous`/`current` 装的是整条 provider-facing 请求(用户问题 + 文档证据),
+    而这个对象被 `ReflectContext` 与 `_ReasoningRunState` 传递地持有。默认 `repr`
+    一开,任何一次 `repr(state)`、`%s` 占位符或异常里的对象转写都会把请求原文带
+    出去。「文本只在内存里过一遍」得是结构成立的,不能靠"今天恰好没人打印它"。
+
+    变异:把两格的 `repr=False` 去掉 ⇒ 这条红。
+    """
+    from app.services.reasoning_context import ReflectContext, ReflectMeasurement
+
+    secret = "SENTINEL-请求正文不许出现在 repr 里"
+    measurement = ReflectMeasurement(
+        previous=secret.encode(), current=secret.encode(),
+        detail={"cards_shown": 3})
+    assert secret not in repr(measurement)
+    assert "cards_shown" in repr(measurement)    # 整数那一格照样看得见
+
+    context = ReflectContext(
+        server_state="", evidence="", observations="", contract="",
+        turn_state="", static_prompt="", measurement=measurement)
+    assert secret not in repr(context)
+
+    # 真 run 上同一条:run 状态与上下文对象都转写一次,正文不许露出来。
+    contexts = _capture_contexts(monkeypatch)
+    _llm, _result = _measured_run(
+        rrepo, intent_detail=_TWO_ASPECTS, reflects=_three_turn_reflects(),
+        chunk_results=_three_turn_chunks(), reasoning_max_chunk_searches=2)
+    bytes_seen = [context.measurement.previous for context in contexts
+                  if context.measurement.previous]
+    assert bytes_seen                            # 真的量到过字节
+    for context in contexts:
+        rendered = repr(context.measurement)
+        assert "previous=" not in rendered
+        assert "current=" not in rendered
+        for blob in bytes_seen:
+            assert blob.decode(errors="replace")[:40] not in rendered
 
 
 def test_measure_writes_no_call_keys_for_a_client_that_reports_nothing(rrepo):

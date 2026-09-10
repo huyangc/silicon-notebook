@@ -650,12 +650,21 @@ class ReflectMeasurement:
     **它只存两样东西**:上一轮已记账的 provider-facing 消息**字节串**,与本轮要
     交给那条 reflect 轨迹步的几个**整数**。刻意不持有候选池、额度账、方面账或
     任何一格可变业务状态——它是一份纯观测的载体,读它的人(投影、rig)因此不可能
-    从它这里拿到一个「与真实状态分叉了的第二份账」。内存上界也由此钉住:一轮消息
-    的字节数,与那轮真的发出去的请求同量级(拍板 Q2 接受的口径)。
+    从它这里拿到一个「与真实状态分叉了的第二份账」。内存上界也由此钉住:**一轮
+    消息的量级**,与那轮真的发出去的请求同量级(拍板 Q2 接受的口径)。准确地说峰
+    值是**两轮**——`previous` 要留到本轮的 `current` 在记账时晋升为止,这中间横跨
+    整次模型调用,两串因此并存(评审 P3)。
 
     `eq=False` 是刻意的:缓存的语义是身份而不是取值(两轮之间它必须是同一个
     对象),而 `ReflectContext` 是 frozen dataclass——给这里加一份按字段比较的
     `__eq__` 会顺手把那个可哈希的上下文对象变成不可哈希的。
+
+    两串字节 `repr=False`:它们装的是整条 provider-facing 请求(用户问题 + 文档
+    证据),而这个对象被 `ReflectContext` 与 `_ReasoningRunState` 传递地持有——
+    默认 `repr` 一开,任何一次 `repr(state)`、日志占位符或异常里的对象转写都会把
+    请求原文带出去。「文本只在内存里过一遍」得是结构成立的性质,不能靠"今天恰好
+    没有人打印它"(评审 P3-2)。`detail` 留着 `repr`:那一格只有整数,而它正是
+    出问题时最该看得见的东西。
 
     * `previous` —— 上一轮**已记账**的消息字节串;首轮为 None(那时没有可比的
       上一轮,`message_prefix_bytes` 因此如实为 None)。
@@ -668,8 +677,8 @@ class ReflectMeasurement:
       `reasoning_retrieval._MEASURE_KEYS`)。
     """
 
-    previous: Optional[bytes] = None
-    current: Optional[bytes] = None
+    previous: Optional[bytes] = field(default=None, repr=False)
+    current: Optional[bytes] = field(default=None, repr=False)
     detail: Dict[str, Optional[int]] = field(default_factory=dict)
 
     def take(self) -> Dict[str, Optional[int]]:

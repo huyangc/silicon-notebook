@@ -1,6 +1,7 @@
 """Regression tests for the LLM client's fail-fast behavior: a stalled
 connection must NOT be amplified into a ~6-minute block by SDK auto-retries or
 by the JSON-mode -> plain-mode fallback."""
+import json
 import threading
 from types import SimpleNamespace
 
@@ -279,6 +280,37 @@ def test_serialize_provider_messages_is_deterministic_and_utf8():
     assert serialize_provider_messages([{"role": "user", "content": "x"}]) != (
         serialize_provider_messages([{"role": "assistant", "content": "x"}])
     )
+
+
+def test_serialize_provider_messages_is_total_over_str_including_surrogates():
+    """(T-PS3 review P1) A LONE SURROGATE serializes; it does not raise.
+
+    ``json.loads`` accepts ``"\\ud800"`` and hands back a Python ``str`` holding a
+    lone surrogate, so a model response can carry one into the next turn's
+    message body. Strict UTF-8 raises ``UnicodeEncodeError`` on it, and this
+    function is called from a MEASUREMENT: raising would let an observation
+    decide whether a request gets made at all (the reflect caller's fail-open
+    ``except`` washed it into a fabricated model fallback, and a fail-closed
+    caller died outright). So the encoding is ``surrogatepass`` and this ruler is
+    total over ``str``.
+
+    Mutation: drop ``errors="surrogatepass"`` and this raises.
+    """
+    lone = json.loads('"bad\\ud800tail"')
+    assert len(lone) == len("badtail") + 1
+
+    out = serialize_provider_messages([{"role": "user", "content": lone}])
+
+    # Deterministic, and the trailing length counts the bytes actually emitted
+    # (WTF-8: three bytes for the surrogate), so the frame stays decodable.
+    assert out == serialize_provider_messages(
+        [{"role": "user", "content": lone}])
+    payload = lone.encode("utf-8", errors="surrogatepass")
+    assert len(payload) == len("badtail") + 3
+    assert out == b"user:4:" + payload + b":" + str(len(payload)).encode() + b":"
+    # Still injective across bodies that differ only in the surrogate.
+    assert out != serialize_provider_messages(
+        [{"role": "user", "content": json.loads('"bad\\ud801tail"')}])
 
 
 def test_serialize_provider_messages_frames_cannot_be_forged_from_content():

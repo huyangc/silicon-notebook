@@ -395,8 +395,9 @@ def _registered_measure_key(name: str) -> str:
     读侧改名或删键,进程起不来,而不是数据悄悄变空。
 
     在导入期抛而不是 `assert`:`python -O` 会把断言整条删掉,而这一道是唯一能
-    把「读写两侧对不上」变成可见故障的判据。逐轮那道 `⊆` 断言(见
-    `_TraceRecorder.__call__`)是它的第二重保险,防的是"键名合法但走错了写点"。
+    把「读写两侧对不上」变成可见故障的判据。逐轮那道 `⊆` 判据(见
+    `_TraceRecorder.__call__`,同样是 `raise` 而不是 `assert`)是它的第二重保险,
+    防的是"键名合法但走错了写点"。
     """
     if name not in REFLECT_MEASUREMENT_DETAIL_KEYS:
         raise RuntimeError(
@@ -487,6 +488,39 @@ def _measure_reflect_messages(
     # 升为「上一轮」的时机不在这里,而在这一轮真的记了 reflect 步的那一刻
     # (`ReflectMeasurement.take`):同一轮的两次尝试因此都和上一轮比。
     measurement.current = final
+
+
+def _measure_reflect_messages_safely(
+    measurement: "ReflectMeasurement", context: "ReflectContext",
+    messages: "List[Dict[str, str]]", schema_hint: str, material: str,
+) -> None:
+    """把上面那次测量**关进它自己的 try**(T-PS3 评审 P1)。
+
+    测量排在 `client.chat_json` 之前、而那整段又住在 `_reflect_v2_attempt` 的
+    fail-open `try` 里。少了这一层,一次观测故障会被那条 `except Exception` 洗成
+    一次**假的模型兜底**:那一轮的请求根本没发出去,轨迹上却多出一条
+    `__reflect_invalid__`,`fail_closed` 调用方(knowhow 补全)则整次死掉——测量
+    因此改变了它本该只旁观的那件事,而对照实验会把这次分叉记到「臂」头上。
+
+    纪律与同文件 `_TraceRecorder.__call__` 对 observer 投影那段逐字相同:它读的是
+    模型可以影响形状的东西(消息正文来自上一轮的动作参数),所以「它永远不会抛」
+    不是一个可以假设的性质。既然如此,失败的表现只许是**键缺席**——与
+    `_measure_reflect_call` 的「客户端不报就缺键、绝不写 0」同一条口径,读侧把缺
+    席读成 unknown。日志只留异常**类名**:请求文本一个字节都不许进日志(`exc_info`
+    会把出问题的那段正文带进 traceback,所以这里也不给)。
+
+    连 `previous` 一起清掉,而不只是不写本轮的键:下一轮若拿一个**隔了一轮**的
+    基准去算公共前缀,量出来的数看着完全正常,却回答了另一个问题。丢掉基准后
+    下一轮的 `message_prefix_bytes` 如实缺席,与首轮同义。
+    """
+    try:
+        _measure_reflect_messages(
+            measurement, context, messages, schema_hint, material)
+    except Exception as exc:  # noqa: BLE001 — 观测绝不参与业务决定
+        measurement.current = None
+        measurement.previous = None
+        logging.getLogger(__name__).debug(
+            "reflect context measurement failed: %s", type(exc).__name__)
 
 
 def _measure_reflect_call(
@@ -3198,9 +3232,14 @@ class _TraceRecorder:
             # 的那一份因此是同一个 detail,不会一份带测量、一份不带。
             pending = self.measurement.take()
             unknown = set(pending) - REFLECT_MEASUREMENT_DETAIL_KEYS
-            assert not unknown, (
-                "reflect measurement wrote a detail key the projection does "
-                f"not read: {sorted(unknown)}")
+            if unknown:
+                # `raise` 而不是 `assert`,与 `_registered_measure_key` 那道导入期
+                # 判据同档:`python -O` 会把断言整条删掉,而这一道恰恰是「键名合法
+                # 但走错了写点」唯一的判据——删掉之后那一列静默恒 `None`,没有任何
+                # 一条用例会红(评审 P2-1 的变异 M26 就是这么逃掉的)。
+                raise RuntimeError(
+                    "reflect measurement wrote a detail key the projection does "
+                    f"not read: {sorted(unknown)}")
             step.detail.update(pending)
         self._trace.append(step)
         if self.observer is not None:
@@ -4246,7 +4285,10 @@ class ReasoningRetriever:
         **上下文观测(T-PS3)与布局正交。** 测量开着时,这里额外算一份纯内存的
         块长度/消息字节/公共前缀(见 `_measure_reflect_messages`),两条臂同一把
         尺子;测量关时那两处判据各只多一次 `is not None`。观测**不参与**这个
-        方法的任何决定:消息、重试判据与返回的决定逐字节与测量关时相同。
+        方法的任何决定:消息、重试判据与返回的决定逐字节与测量关时相同。观测
+        **自身失败**同样不参与——它关在自己的 `try` 里
+        (`_measure_reflect_messages_safely`),失败只表现为那几个键缺席,绝不会
+        落进下面那条 fail-open 的 `except` 变成一次假兜底。
         """
         stats: Dict[str, Any] = {}
         # 上下文观测缓存(T-PS3)。测量关、关闭态与不带上下文的窄调用方一律
@@ -4282,7 +4324,7 @@ class ReasoningRetriever:
                 # 测在**发出之前**:量的是这一轮已经定型的那两条消息,与调用成功
                 # 与否无关。一次被兜底吃掉的调用照样有它的上下文规模,而那一轮在
                 # 轨迹上仍有自己的 reflect 步。
-                _measure_reflect_messages(
+                _measure_reflect_messages_safely(
                     measurement, context, messages, schema_hint, material)
             raw = client.chat_json(
                 messages,

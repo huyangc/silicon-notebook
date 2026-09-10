@@ -303,12 +303,25 @@ def serialize_provider_messages(messages: List[Dict[str, str]]) -> bytes:
     A non-mapping element raises rather than serializing as empty: for a
     measurement function, silently emitting plausible-looking bytes for input it
     did not understand is worse than failing.
+
+    Encoding uses ``surrogatepass``, which makes this ruler TOTAL over ``str``.
+    Strict UTF-8 is not: ``json.loads`` accepts ``"\\ud800"`` and hands back a
+    Python ``str`` holding a LONE SURROGATE, so a model response can carry one
+    into the next turn's message body, where a strict ``.encode("utf-8")`` would
+    raise. Raising there would let a measurement decide whether a request gets
+    made at all — the one thing a measurement must never be able to do.
+    ``surrogatepass`` emits such a code point as its three-byte WTF-8 form, which
+    keeps this serialization deterministic, injective and length-consistent (the
+    trailing length counts the bytes actually emitted) for exactly the same
+    reasons the rest of the framing holds. It changes nothing a provider ever
+    sees: this byte string exists only to be measured, and nothing sends it.
     """
     out = bytearray()
     for message in messages:
         for field in ("role", "content"):
             raw = message.get(field, "")
-            blob = ("" if raw is None else str(raw)).encode("utf-8")
+            blob = ("" if raw is None else str(raw)).encode(
+                "utf-8", errors="surrogatepass")
             out += blob
             out += b":"
             out += str(len(blob)).encode("ascii")
