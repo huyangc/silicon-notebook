@@ -432,6 +432,20 @@ _MEASURE_CALL_KEYS: Dict[str, str] = {
 _MEASURE_CONTEXT_REBUILDS = _registered_measure_key("context_rebuilds")
 _MEASURE_CONTEXT_FALLBACK = _registered_measure_key("context_fallback")
 _MEASURE_DELTA_BLOCKS = _registered_measure_key("delta_blocks")
+#: 本轮自评的两个落账键(PR-4 拍板 Q8)。与上面那三个不同:它们**不是**行为事实,
+#: 门是普通的测量开关(`ReflectMeasurement.measures_messages`),而且**四臂通写**
+#: ——`assessment_rows` 是这一轮实际落账的方面数、`assessment_absent` 是载荷压根
+#: 没带 `assessment`。只在 L 写的话,D↔L 这一对就没有共同基线,「L 到底省了多少
+#: 重述」永远只能靠 prompt 字节反推。写点见 `_note_assessment_measurement`。
+_MEASURE_ASSESSMENT_ROWS = _registered_measure_key("assessment_rows")
+_MEASURE_ASSESSMENT_ABSENT = _registered_measure_key("assessment_absent")
+
+#: 第三条前缀布局臂的取值,**具名一次**(PR-4 T-PL5)。三个判据读它:账本的
+#: lean 开关(`_v2_build_aspect_ledger`)与 S/T 两处 lean 文本
+#: (`_prefix_context` 的两个调用点)。三处各抄一份字面量的后果是最难看见的
+#: 那一种——抄错一处不会崩,只会让那条路上的 run 在 L 的臂标签下跑着 D 的合同,
+#: 而这件事只在 A/B 表上看得出来(`build_aspect_ledger` 的 docstring 同款理由)。
+_LEAN_LAYOUT = "prefix_delta_lean"
 
 #: 两条**基于增量装配**的臂:消息形状与 `prefix_delta` 完全相同
 #: (`system(S)` + 一条 `user(C+K+D+T)`,K/D 两块同一套内容判据),
@@ -439,7 +453,7 @@ _MEASURE_DELTA_BLOCKS = _registered_measure_key("delta_blocks")
 #: 两处历史上写字面量 `"prefix_delta"` 的字面相等(消息装配分派、测量构造门)
 #: 现在都改读这份成员判断,免得放开 `prefix_delta_lean` 时漏改一处、让它拿到
 #: `prefix_snapshot` 的装配却在文档/投影上自称 delta 臂。
-_DELTA_LAYOUTS = ("prefix_delta", "prefix_delta_lean")
+_DELTA_LAYOUTS = ("prefix_delta", _LEAN_LAYOUT)
 #: 三条**前缀布局**臂。消息形状完全相同(`system(S)` + 一条 `user(C+K+D+T)`),
 #: 差别只在 K/D 两块的内容判据(PR-3/PR-4 计划 §0),所以 `_reflect_prefix_layout`
 #: 的分派一格不变、只多认新取值,回退也不经过那里。
@@ -932,6 +946,42 @@ def _note_delta_measurement(
     measurement.detail[_MEASURE_CONTEXT_REBUILDS] = int(delta.rebuilds)
     measurement.detail[_MEASURE_CONTEXT_FALLBACK] = bool(delta.fallback)
     measurement.detail[_MEASURE_DELTA_BLOCKS] = len(delta.blocks)
+
+
+def _note_assessment_measurement(
+    state: "_ReasoningRunState", *, rows: int, absent: bool,
+) -> None:
+    """这一轮自评的两格落账(拍板 Q8)。**四臂通写,门是测量开关。**
+
+    三条路各调一次,合成这一个写点(`_absorb_assessment` 因此净增三行):
+
+    * 载荷没带 `assessment` ⇒ `absent=True`、`rows=0`;
+    * 逐方面校验通过(可能有逐方面被拒)⇒ `absent=False`、
+      `rows=len(outcome.accepted)` ——口径是**实际落账**的方面数,不是载荷里有
+      几行,与收尾追问那条闸同一份读数(`_nudge_missing_assessment` 的 `accepted`);
+    * 整份形状越界被折成一条 invalid ⇒ `absent=False`、`rows=0`:载荷带了自评、
+      一格都没落账,这两件事都得说出去。
+
+    ⚠ **provider fallback 轮不到这里**(评审拍板)。那种轮次的 `assessment` 恒为
+    None,可它不是"模型没带自评",而是根本没有模型决定可言
+    (`_v2_note_turn` 的 `if not decision.fallback` 把它挡在
+    `_absorb_assessment` 之外)。在那里补写 `absent=True` 会把一次 provider 故障
+    记成一次模型省略,而 L 的全部收益判据就建在"省略"这个读数上。整份
+    `assessment_rows_total` 因此不是"全或无":读侧改成 sum-over-present + 伴生列
+    `assessment_observed` 披露全不全(`reasoning_trace_stats._reflect_assessment`)。
+
+    门取 `measures_messages` 而不是"对象在不在":delta 两条臂在测量关时**照样**
+    构造 `ReflectMeasurement`(拍板 Q7 的三个行为事实键),这两格不是行为事实,
+    测量关就该如实缺席——否则 `off` 臂测量关时无键、D/L 臂测量关时有键,同一列
+    在四臂之间不是同一把尺子。
+
+    两个值都是 int/bool,请求正文一个字节都不进来(读侧隐私守卫对新键同样只收
+    整数与布尔)。
+    """
+    measurement = state.reflect_measurement
+    if measurement is not None and measurement.measures_messages:
+        measurement.detail.update({_MEASURE_ASSESSMENT_ROWS: int(rows),
+                                   _MEASURE_ASSESSMENT_ABSENT: bool(absent)})
 
 
 def _reflect_fallback(reason: str) -> "ReflectDecision":
@@ -4836,9 +4886,9 @@ class ReasoningRetriever:
         settings = self.settings
         if state.aspects is None:
             # 同 `observer` 那条:总闸在一次 run 的中途被翻开时,账从这一轮起
-            # 建,而不是让整次检索崩在一个 None 上。
-            state.aspects = build_aspect_ledger(
-                state.intent_detail, state.question)
+            # 建,而不是让整次检索崩在一个 None 上。走那个**唯一产地**(它带着
+            # run 级 lean 开关,三处防御重建漏一处就是一个假的臂标签)。
+            state.aspects = self._v2_build_aspect_ledger(state)
         observer = state.record.observer
         if observer is None:
             # 总闸在**一次 run 的中途**被翻开(只可能发生在测试或热更配置里):
@@ -4959,6 +5009,12 @@ class ReasoningRetriever:
                 # 位在一次 run 中途翻回 `prefix_snapshot`(热更/测试)就会发出一条
                 # 带 D 块、而 S 已经不解释它的消息。
                 static_delta=(delta is not None),
+                # L 的自评合同**不随回退消失**(拍板 Q11 / 设计 §5.2「保留轻量
+                # 自评与否的原设置」):回退换的是 K/D 怎么装,不是模型该提交
+                # 什么。判据取本方法已经算好的 `optimization`,与账本那一格 run
+                # 级开关同源(`_v2_build_aspect_ledger`),所以"S 里 lean 段在、
+                # 账本仍不追问"这两件事在回退之后仍然一致。
+                static_lean=(optimization == _LEAN_LAYOUT),
                 measurement=measurement)
         # 必答方面清单 + 已完整枚举的集合键,都接在服务器状态块的**尾部**,与它
         # 一起受"按现有输入/协议边界保留、不整体裁尾"的处理(§4):方面清单是用户
@@ -5027,7 +5083,7 @@ class ReasoningRetriever:
     def _prefix_context(
         self, state: "_ReasoningRunState", summary: str, catalog, *,
         evidence: str, observations: str, delta: str = "",
-        static_delta: bool = False,
+        static_delta: bool = False, static_lean: bool = False,
         measurement: "Optional[ReflectMeasurement]" = None,
     ) -> "ReflectContext":
         """两条前缀臂**唯一**的 `ReflectContext` 成型点(T-PS8;T-PD5 共用)。
@@ -5053,6 +5109,22 @@ class ReasoningRetriever:
         `False` ⇒ `prefix_snapshot` 逐字节回到接入前。每轮按同一个冻结目录重渲染
         一次:纯字符串拼接、零 I/O,而同一个输入必然给出同一串字节,所以 S 的稳
         定性不依赖任何缓存是否生效。
+
+        `static_lean` 是 L 那条臂的**自评合同**(T-PL5),一格布尔选中两处 lean
+        双胞胎文本:S 里的 `_V2_LEAN_ASSESSMENT_INSTRUCTION`(替换、不追加)与 T
+        的状态半尾注 `ASPECT_BLOCK_NOTE_LEAN`。**两处必须同一格判据**——一处说
+        「本轮只报变化」、另一处说「本轮请重新给出全量」是这条臂最坏的形态,模型
+        只能猜哪一句算数,而 A/B 表会把由此产生的行为差异记到"布局"头上。
+        `False` ⇒ P/D 两条臂与关闭态逐字节回到接入前。
+
+        ⚠ **调用方传值,这里不第二次读策略位**(拍板 Q2,与 `static_delta` 同款
+        纪律)。判据是 `_reflect_v2_context` 已经算好的那个 `optimization` 局部值
+        (delta 支经 `_reflect_delta_context` 的同名参数传下来),而不是再问一次
+        `reflect_optimization()`:同一轮里判两次策略,两次之间可以分歧——热更或
+        测试在一次 run 中途把策略位翻回 `prefix_delta`,就会发出一条 S 说「只报
+        变化」而 T 说「重新给出」的消息。账本那一格 lean 开关是**另一条**路
+        (`_v2_build_aspect_ledger`,建账时冻结一次):中途翻位改得动 prompt 字节,
+        改不动这次 run 的追问合同,所以臂标签不会变成假的。
         """
         return ReflectContext(
             # off 的那一块在前缀布局下不存在:它的内容已经按稳定性分到了 C 与 T。
@@ -5063,12 +5135,13 @@ class ReasoningRetriever:
             observations=observations,
             contract=render_aspect_contract_block(state.aspects),
             turn_state="\n\n".join(block for block in (
-                render_aspect_status_block(state.aspects),
+                render_aspect_status_block(state.aspects, lean=static_lean),
                 render_collection_keys_note(state.enum_chains),
                 f"{TURN_CONTEXT_TITLE}\n{summary}" if summary else "",
             ) if block),
             delta=delta,
-            static_prompt=reflect_v2_static_prompt(catalog, delta=static_delta),
+            static_prompt=reflect_v2_static_prompt(
+                catalog, delta=static_delta, lean=static_lean),
             measurement=measurement,
         )
 
@@ -5275,7 +5348,11 @@ class ReasoningRetriever:
             evidence=delta.snapshot_evidence,
             observations=delta.snapshot_history,
             delta="\n\n".join(delta.blocks),
-            static_delta=True, measurement=measurement)
+            static_delta=True,
+            # L = D + 自评合同(计划 §0)。判据用调用方传下来的 `optimization`,
+            # 不第二次读策略位——理由见 `_prefix_context` 的 `static_lean`。
+            static_lean=(optimization == _LEAN_LAYOUT),
+            measurement=measurement)
 
     def _absorb_assessment(
         self, state: "_ReasoningRunState", decision: "ReflectDecision",
@@ -5328,12 +5405,18 @@ class ReasoningRetriever:
         未完整(`open`/`conflict`)的枚举链**不签发键**,所以它照旧不可能冒充。
         模型自己拼一个 `enum:…` 出来同样被剔:合法集是服务端算出来的那一份,不是
         按前缀放行。
+
+        这三条路各带一格测量落账(`assessment_rows`/`assessment_absent`,四臂通
+        写、门是测量开关):口径、缺席语义与"为什么 provider fallback 轮不在这里
+        写"全部见 `_note_assessment_measurement`。校验与折叠逻辑一行没动——那三
+        句只往 `measurement.detail` 写整数与布尔,删掉它们这个方法的每一个决定
+        逐字节不变。
         """
         if state.aspects is None:
-            state.aspects = build_aspect_ledger(
-                state.intent_detail, state.question)
+            state.aspects = self._v2_build_aspect_ledger(state)
         nudge_args = (apply_outline, overflow_repair, more_turns, outline_left)
         if decision.assessment is None:
+            _note_assessment_measurement(state, rows=0, absent=True)
             return self._nudge_missing_assessment(state, decision, *nudge_args)
         allowed = outline_binding_keys(
             state.collected, state.elements, state.chunks,
@@ -5341,6 +5424,8 @@ class ReasoningRetriever:
         allowed |= complete_enumeration_keys(state.enum_chains)
         outcome = state.aspects.apply(decision.assessment, allowed_keys=allowed)
         if not outcome.error:
+            _note_assessment_measurement(
+                state, rows=len(outcome.accepted), absent=False)
             # 逐方面被拒的那几条:合法动作照常执行,只记披露与 skip 步。
             self._note_assessment_rejections(state, outcome.rejections)
             if (outcome.accepted and state.reflect_delta is not None
@@ -5364,6 +5449,7 @@ class ReasoningRetriever:
             # 「载荷里有没有行」(评审 P1,见 `_nudge_missing_assessment`)。
             return self._nudge_missing_assessment(
                 state, decision, *nudge_args, accepted=outcome.accepted)
+        _note_assessment_measurement(state, rows=0, absent=False)
         folded = _reflect_invalid(
             f"{_V2_INVALID_ASSESSMENT_PREFIX}{outcome.error}",
             decision.invalid_requested_action or decision.next_action)
@@ -5530,7 +5616,35 @@ class ReasoningRetriever:
         关闭态(`reflect_v2_active()` 为假)一次都不进来,不构造任何新状态。
         """
         state.record.observer = ActionObservationLedger()
-        state.aspects = build_aspect_ledger(state.intent_detail, state.question)
+        state.aspects = self._v2_build_aspect_ledger(state)
+
+    def _v2_build_aspect_ledger(
+        self, state: "_ReasoningRunState",
+    ) -> "AspectLedger":
+        """本 run 方面账的**唯一**产地(PR-4 计划 §3 T-PL5;拍板 Q1/Q2)。
+
+        存在的理由只有一个:`AspectLedger.lean_assessment` 是一格 **run 级冻结**
+        的自评合同开关(L 那条臂上「收尾缺自评不追问」的唯一闸,见
+        `AspectLedger.note_missing_assessment`),而这个模块里建账的地方有**三处**
+        ——首轮的 `_open_v2_ledgers`,以及总闸在一次 run 中途被翻开时
+        `_reflect_v2_context` / `_absorb_assessment` 各自那条防御重建。三处各写一
+        遍 `lean=` 的后果是最难看见的那一种:漏掉的那一条路上,run 在 L 的臂标签
+        下跑着 D 的追问合同,不崩、不报错,只在 A/B 表上比出一个假的差异。所以
+        `build_aspect_ledger(` 在本模块**只允许有这一个直调点**(守卫在
+        `test_the_aspect_ledger_has_exactly_one_construction_point`,AST 判据)。
+
+        策略位在这里读**一次**,建账那一刻定型(拍板 Q2):中途翻位不改这次 run
+        的追问合同,`lean_assessment` 也没有 setter 挡着(它是只读 property)。
+        prompt 侧那两处 lean 文本走的是另一条路——`_reflect_v2_context` 已经算好
+        的 `optimization` 局部值传下来,不在这里第二次读(理由见 `_prefix_context`
+        的 `static_lean`)。
+
+        `off` / `prefix_snapshot` / `prefix_delta` 与关闭态一律拿到
+        `lean=False`,即 `build_aspect_ledger` 的默认值 ⇒ 三臂逐字节回到接入前。
+        """
+        return build_aspect_ledger(
+            state.intent_detail, state.question,
+            lean=self.reflect_optimization() == _LEAN_LAYOUT)
 
     def _v2_note_turn(
         self, state: "_ReasoningRunState", decision: "ReflectDecision",
@@ -5669,6 +5783,20 @@ class ReasoningRetriever:
                 # 正常的中途收尾分开,否则两者在终态上完全同形。
                 "aspects_assessment_omitted": sum(
                     1 for row in termination.aspects if row.assessment_omitted),
+                # 「模型一次都没判断过」的方面数(拍板 Q10)。与上面那一格是
+                # 拍板 Q5 的三格分工里的另外两格:`assessment_omitted` 判据里含
+                # 着一次真实发生过的追问(**L 下永不置位**),而这一格只说"这一
+                # 格没有模型的判断",不解释为什么没有。L 下它是这条臂的**主要
+                # 质量读数**——收尾不再被退回追问,于是省略成了常态,而一次
+                # "全部方面都没核验过就收尾"与一次"逐项核验后仍有缺口"在别的
+                # 每一格上完全同形。
+                #
+                # **v2 四臂无条件写**,不按臂分叉(已登记偏离,拍板 Q10):只在 L
+                # 写的话,D↔L 的配对表上这一列恒缺一半,而"L 少核验了几个方面"
+                # 正是它要回答的问题。`0` 与缺席分得开(读侧 `_aspects_unassessed`
+                # 缺席给 None),三臂的 prompt 字节一个都没动。
+                "aspects_unassessed": sum(
+                    1 for row in termination.aspects if not row.model_assessed),
                 # 纯披露(§7.2):这次 run 里最后一次执行仍是失败的通道。它不参与
                 # `reason`,但必须说出去——"KG 那条路今天没走通"是用户重试/换问法
                 # 时唯一有用的那条线索,只留在服务器内存里等于没记。动作 id 是内部
