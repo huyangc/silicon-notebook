@@ -718,8 +718,11 @@ def _project(**overrides: Any) -> dict:
         usage=UNKNOWN_USAGE, latency_ms_total=4200,
         model_contract="0123456789abcdef", corpus_signature="fedcba9876543210",
     )
+    # `steps` 不是 `project_ab_run` 的关键字参数(它是第一个位置参数),所以从
+    # overrides 里单独摘出来:要换一条轨迹的用例不必把上面这一整串再抄一遍。
+    steps = overrides.pop("steps", None)
     kwargs.update(overrides)
-    return project_ab_run(_steps(), **kwargs)
+    return project_ab_run(_steps() if steps is None else steps, **kwargs)
 
 
 def test_projection_carries_the_t0_half_untouched():
@@ -2286,3 +2289,91 @@ def test_a_concurrent_abort_logs_only_the_exception_class_not_its_text(
     assert "/Users/secret/path" not in out
     assert "/Users/secret/path" not in log_text
     assert "PermissionError" in out
+
+
+# --- T-PS4 测量列在 A/B 侧的继承 ---------------------------------------------
+
+
+def test_ab_keys_inherit_the_measurement_columns_automatically():
+    """`AB_PROJECTION_KEYS = RUN_PROJECTION_KEYS | AB_ONLY_KEYS`,所以 T0 侧新增
+    的九个测量列**自动**进 A/B 闭集,不需要在这边再登记一遍。
+
+    这条钉的是「不要在 A/B 侧另抄一份键集」:抄一份就会在下一次 T0 扩集时分叉,
+    两批数据从此进不了同一张表。
+
+    变异:把 `AB_PROJECTION_KEYS` 改成手写的字面量集合 ⇒ 这条红。
+    """
+    measurement_keys = {
+        "run_wall_ms", "model_calls_real", "attempts_observed", "optimization",
+        "context_chars", "prefix_bytes_median", "prefix_bytes_min",
+        "prefix_turns", "response_chars_total",
+    }
+    assert measurement_keys <= RUN_PROJECTION_KEYS
+    assert measurement_keys <= AB_PROJECTION_KEYS
+    # 它们属于 T0 那一半,不该被复制进 A/B 自己的增量键集。
+    assert not (measurement_keys & AB_ONLY_KEYS)
+
+
+def test_the_privacy_guard_still_holds_after_the_measurement_columns():
+    """键名层的第一道闸对新键照样成立(`*_id` / 自由文本词根)。"""
+    for key in ("run_wall_ms", "model_calls_real", "attempts_observed",
+                "optimization", "context_chars", "prefix_bytes_median",
+                "prefix_bytes_min", "prefix_turns", "response_chars_total"):
+        assert not key.endswith("_id"), key
+        assert not (set(key.split("_")) & set(FORBIDDEN_KEY_MARKERS)), key
+        # 统一硬约束 §2:字段命名不出现 `cache_hit` / 命中率。
+        assert "cache_hit" not in key, key
+
+
+def test_an_ab_row_without_measurements_carries_them_as_unknown():
+    """没开测量的 A/B run:新列全 `None`,`optimization` 无人声明 ⇒ unknown。
+
+    `model_calls`(日志行数)与 `model_calls_real`(真正发出的请求数)是两套口径,
+    一个有值不代表另一个有值——这里正好把两者的独立性钉住。
+    """
+    row = _project()
+    assert row["optimization"] == "unknown"
+    for key in ("run_wall_ms", "model_calls_real", "attempts_observed",
+                "context_chars", "prefix_bytes_median", "prefix_bytes_min",
+                "prefix_turns", "response_chars_total"):
+        assert row[key] is None, key
+    assert_ab_closed(row)
+    assert_projection_values(row)
+
+
+def test_an_ab_row_with_measurements_passes_both_ab_guards():
+    """测量开着时,整行仍然过 `assert_ab_closed` + `assert_projection_values`。
+
+    这是 T-PS4 对 A/B 侧唯一的验收:新列的**值形状**(数值 / 短码 → 数值字典)
+    过得了那道不看键名的闸。
+    """
+    steps = _steps()
+    steps[1] = {"step_type": "reflect", "detail": {
+        "next_action": "answer", "sufficient": True,
+        "ctx_chars_s": 800, "ctx_chars_c": 1200, "ctx_bytes_total": 9600,
+        "message_prefix_bytes": 3134, "call_attempts": 2, "response_chars": 90,
+        "cards_shown": 6, "cards_omitted": 1, "call_wall_ms": 2100,
+    }}
+    row = _project(steps=steps)
+    assert row["model_calls_real"] == 2
+    assert row["attempts_observed"] is True
+    assert row["context_chars"] == {"s": 800, "c": 1200, "total": 9600}
+    # 首轮没有可比的上一轮,但这条轨迹只有一轮 reflect 且写侧给了值,于是三格齐。
+    assert row["prefix_bytes_median"] == 3134
+    assert row["prefix_turns"] == 1
+    assert row["response_chars_total"] == 90
+    assert set(row) <= AB_PROJECTION_KEYS
+    assert_ab_closed(row)
+    assert_projection_values(row)
+
+
+def test_free_text_in_a_measurement_key_is_refused_on_an_ab_row():
+    """隐私守卫的变异形态:往新列里塞自由文本,A/B 侧照样被拦。
+
+    这道闸不看键名,所以不需要在 A/B 侧为新键再写一份规则——这条用例就是在证明
+    那一点。
+    """
+    row = dict(_project())
+    row["context_chars"] = {"note": "把摘要整块搬到了末尾"}
+    with pytest.raises(ValueError, match="context_chars"):
+        assert_projection_values(row)
