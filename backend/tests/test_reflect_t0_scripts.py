@@ -6214,9 +6214,12 @@ def test_state_probe_binds_the_process_env_before_loading_the_case_set(
     }]
 
     # `--dry-run` 不装环境(它零副作用,也不需要模型配置)。
+    # `check.sh` 把 `SILICON_NOTEBOOK_ENV_FILE` export 成空串而不是不设,这里
+    # 两个键都先摘掉,判据才与运行环境无关。
     seen.clear()
     with _preserved_environ():
         os.environ.pop("DATABASE_URL", None)
+        os.environ.pop("SILICON_NOTEBOOK_ENV_FILE", None)
         assert rig.main([
             "--dry-run", "--database-url", database_url, "state-probe",
         ]) == 0
