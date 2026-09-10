@@ -341,6 +341,12 @@ def optimization_pair_table(rows: Sequence[dict]) -> list[dict]:
     `unknown` 不当臂:一条没声明 optimization 的 run(线上导出、或 rig 忘了传)
     在这条轴上没有身份,拿它当一臂等于给差值找了个不知道是什么的对照面。基线恒
     为 `off`,每个变体各出一行;同一格里出现两个变体就是两行,各自与 `off` 比。
+
+    两侧在 JSON 里的键名是**对称**的 `baseline` / `variant`,而不是
+    `off` / `variant`:这两格的语义是「哪一侧」,不是「哪一臂」——臂已经由
+    `variant_arm` 与侧内的 `optimization` 分布各说了一遍,再把基线臂名当键名,
+    读的人就得先知道基线是谁才能取到那一格。基线那一侧的汇总在同一格里只算
+    一次,不在变体循环里重复计算。
     """
     cells: dict[tuple, dict[str, list[dict]]] = defaultdict(
         lambda: defaultdict(list)
@@ -362,6 +368,7 @@ def optimization_pair_table(rows: Sequence[dict]) -> list[dict]:
         baseline = arms.get(OPTIMIZATION_BASELINE)
         if not baseline:
             continue
+        baseline_side = _pair_side(baseline)
         for label, side in sorted(arms.items()):
             if label == OPTIMIZATION_BASELINE:
                 continue
@@ -370,7 +377,7 @@ def optimization_pair_table(rows: Sequence[dict]) -> list[dict]:
             )
             entry["arm_dimension"] = "optimization"
             entry["variant_arm"] = label
-            entry[OPTIMIZATION_BASELINE] = _pair_side(baseline)
+            entry["baseline"] = baseline_side
             entry["variant"] = _pair_side(side)
             table.append(entry)
     return table
@@ -514,20 +521,23 @@ def render_markdown(report: dict) -> str:
     lines += ["", "## off / 优化变体对照(成对,同 policy_version)", ""]
     if report["optimization_pairs"]:
         lines += _md_table(
+            # 表头用基线臂的名字(读表的人认 `off`,不认 `baseline`),但从常量
+            # 拼,免得基线臂哪天换了而表头还写着 `off`。
             [*PAIR_DIMENSIONS, "policy_version", "variant",
-             "off n", "variant n",
-             "off run_wall_ms(n)", "variant run_wall_ms(n)",
-             "off model_calls_real(n)", "variant model_calls_real(n)",
+             f"{OPTIMIZATION_BASELINE} n", "variant n",
+             f"{OPTIMIZATION_BASELINE} run_wall_ms(n)",
+             "variant run_wall_ms(n)",
+             f"{OPTIMIZATION_BASELINE} model_calls_real(n)",
+             "variant model_calls_real(n)",
              "variant prefix_bytes_median(n)"],
             [
                 [*(pair[dim] for dim in PAIR_DIMENSIONS),
                  pair["policy_version"], pair["variant_arm"],
-                 pair[OPTIMIZATION_BASELINE]["n_runs"],
-                 pair["variant"]["n_runs"],
+                 pair["baseline"]["n_runs"], pair["variant"]["n_runs"],
                  *(
                      _fmt_pair_metric(pair[label], metric)
                      for metric in ("run_wall_ms", "model_calls_real")
-                     for label in (OPTIMIZATION_BASELINE, "variant")
+                     for label in ("baseline", "variant")
                  ),
                  _fmt_pair_metric(pair["variant"], "prefix_bytes_median")]
                 for pair in report["optimization_pairs"]

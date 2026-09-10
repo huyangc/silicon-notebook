@@ -903,9 +903,14 @@ def test_a_trace_without_a_rerank_step_still_projects():
 # --- T-PS4 reflect 前缀复用测量 ---------------------------------------------
 
 
-#: 这一批稀疏键**只**在 v2 且测量开的 run 上出现,由计划 §3 T-PS3 写进 reflect
-#: 步的 detail。用例这边自己拼,不 import 写侧:两处分叉正是要被看见的东西。
 def measured_reflect(next_action="ppr", **measurements):
+    """`reflect(...)` 的纯别名,只为在用例里点明「这一步带着测量键」。
+
+    它一个字都不加工:稀疏键就是 `**measurements` 原样进 detail。用例这边自己拼
+    键名、不 import 写侧的清单——写侧(计划 §3 T-PS3)与读侧对「有哪些稀疏键」
+    分叉了,正是要被看见的东西(那件事由
+    `test_the_sparse_detail_key_registry_matches_the_plan` 单独钉住)。
+    """
     return reflect(next_action, **measurements)
 
 
@@ -1228,6 +1233,46 @@ def test_a_reflect_step_without_usage_or_finish_reason_still_yields_a_full_row()
     assert row["context_chars"] == {"bytes_total": 8000}
     assert_closed(row)
     assert_projection_values(row)
+
+
+def test_optimization_comes_only_from_the_rig_tags():
+    """`answer_payload` 里的同名字段**不**算声明。
+
+    那条兜底分支没有写侧(`AskResponse` 从来不带这个字段),留着只会把「tags 里
+    给了个空串」这种传参错误遮蔽成「去 payload 找找」。
+
+    变异:把 `_optimization` 的 payload 兜底分支加回来 ⇒ 第一条断言红。
+    """
+    row = project_run(
+        JOB, [reflect("answer", sufficient=True)],
+        {**PAYLOAD, "optimization": "prefix_snapshot"},
+    )
+    assert row["optimization"] == UNKNOWN
+    # 空串声明照样是 unknown,而不是掉进另一个来源。
+    assert off_row(optimization="")["optimization"] == UNKNOWN
+
+
+def test_a_negative_measurement_is_missing_not_a_value():
+    """负数一律当缺失。这个模块读的每个整数都是计数/字节数/毫秒数,定义域不含
+    负值;写侧真给出 `-1`(哨兵、减法算反、时钟回拨)是一次观测**失败**,把它放
+    进去会让 `sum`/`min`/中位数得出物理上不可能的数并一路进报表。
+
+    变异:把 `_int` 里 `raw < 0` 那两行删掉 ⇒ `model_calls_real` 变 -1、
+    `prefix_bytes_min` 变 -5、`context_chars` 变 `{"bytes_total": -1}`,四条断言
+    一起红。
+    """
+    row = project_run(
+        JOB,
+        [measured_reflect("answer", call_attempts=-1, message_prefix_bytes=-5,
+                          ctx_bytes_total=-1)],
+        PAYLOAD,
+    )
+    assert row["model_calls_real"] is None
+    assert row["attempts_observed"] is None
+    assert row["prefix_bytes_min"] is None
+    assert row["context_chars"] is None
+    # 来源数分桶从前自己判一次负数,现在那道判据在 `_int` 里,结论不变。
+    assert source_bucket(-3) == UNKNOWN
 
 
 def test_optimization_is_a_case_sensitive_closed_set():

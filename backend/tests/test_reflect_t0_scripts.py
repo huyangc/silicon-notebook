@@ -2504,7 +2504,12 @@ def test_optimization_pairs_hold_the_policy_version_fixed(tmp_path, capsys):
     assert pairs[0]["arm_dimension"] == "optimization"
     assert pairs[0]["policy_version"] == "v2"
     assert pairs[0]["variant_arm"] == "prefix_snapshot"
-    assert pairs[0]["off"]["run_wall_ms"] == 10000.0
+    # 两侧键名对称:`baseline`/`variant` 说的是「哪一侧」,臂身份另有
+    # `variant_arm` 与侧内的 `optimization` 分布。基线臂名不当键名——那会让读的人
+    # 先知道基线是谁才取得到那一格。
+    assert pairs[0]["baseline"]["optimization"] == {"off": 1}
+    assert "off" not in pairs[0]
+    assert pairs[0]["baseline"]["run_wall_ms"] == 10000.0
     assert pairs[0]["variant"]["run_wall_ms"] == 6000.0
     assert pairs[0]["variant"]["prefix_bytes_median"] == 3134.0
 
@@ -2674,11 +2679,11 @@ def test_a_sparse_pair_side_reports_its_observation_count(tmp_path, capsys):
     analyze.main([str(source), "--out-json", str(js), "--out-md", str(md)])
     capsys.readouterr()
     pair = json.loads(js.read_text("utf-8"))["optimization_pairs"][0]
-    assert pair["off"]["n_runs"] == pair["variant"]["n_runs"] == 3
-    assert pair["off"]["run_wall_ms"] == 9000.0
+    assert pair["baseline"]["n_runs"] == pair["variant"]["n_runs"] == 3
+    assert pair["baseline"]["run_wall_ms"] == 9000.0
     assert pair["variant"]["run_wall_ms"] == 6000.0
     # 均值一样重,n 不一样:三条观测 vs 一条观测。
-    assert pair["off"]["n_measured"]["run_wall_ms"] == 3
+    assert pair["baseline"]["n_measured"]["run_wall_ms"] == 3
     assert pair["variant"]["n_measured"]["run_wall_ms"] == 1
     # 稀疏四项各有自己的 n,不共用一个。
     assert set(pair["variant"]["n_measured"]) == set(

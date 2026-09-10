@@ -86,6 +86,8 @@
 ### T-PS9 文档与门
 `docs/deployment-and-configuration_zh.md:848`/`.md:1047` 之后新增 `REASONING_REFLECT_OPTIMIZATION`(默认 off、四取值、本期两格、v2 关与 Knowhow 忽略、不是前端档位、预告 `REASONING_REFLECT_RECENT_OBSERVATIONS` 在 delta 模式 = 重建 K 时保留几条,以及独立测量开关);`docs/product-and-api_zh.md:1408/1422`、`.md:1947/1961` 补 P 模式分块与稳定性口径(合同不变);**llm.jsonl 字段契约**——在「`finish_reason` 无条件写进 LLM 调用日志」那一级(`_zh.md:1452`/`.md:1991`)补 `attempts`(这一次逻辑调用真正发出的请求数,只在终态行,`status="retry"` 行不带,按行累加会重复计入同一次调用)与 `response_chars`(交还给调用方的正文长度,不经 `LLM_LOG_MAX_CHARS` 截断),中英成对,只加数值键;`architecture.md:111` 补静态目录产地与 `reflect_optimization()` 唯一读点、登记 `reflect_context_bench.py`;`scripts/README.md:488` 附近补第二维臂与 `EVENT_LOG_DIR` 隔离。不改 AGENTS/CLAUDE。
 
+**T-PS4 评审后追加(2026-09-10)。** 还要过一遍 `docs/superpowers/specs/2026-09-08-reflect-t0-trace-analysis-design_zh.md` 的**§键集**一节:T-PS4 在闭集上加了九个顶层键、`context_chars` 的短码含一个字节口径的 `bytes_total`,那份设计稿的键集清单因此已经落后。带日期的设计稿本身不改(它是当天的决定),在 T-PS9 里以「后续修正」的形式在**引用它的那一级**记清差异,别让下一个人拿旧清单当闭集真源。
+
 依赖:T-PS1→T-PS2→T-PS3;T-PS6→T-PS7→T-PS8;T-PS4 依赖 T-PS3;T-PS5 依赖 T-PS2+T-PS4+T-PS6;T-PS9 收尾。两条链可并行,T-PS5 汇合。
 
 ## 4. 刻意不做

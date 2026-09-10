@@ -336,7 +336,16 @@ def _detail(step: Mapping) -> Mapping:
 
 
 def _int(raw: object) -> int | None:
+    """数值 → `int`;非数、`bool`、**负数**一律 `None`(= unknown)。
+
+    负数当缺失,是因为这个模块读的每一个整数都是计数、字节数或毫秒数,没有一个的
+    定义域含负值。写侧真给出一个 `-1`(哨兵值、减法算反了、时钟回拨),那是一次
+    观测**失败**而不是一个观测:放它进去,`sum` / `min` / 中位数会得出一个物理上
+    不可能的数并一路进报表;当缺失至少会在那一列的 `n_observed` 上如实少一格。
+    """
     if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return None
+    if raw < 0:
         return None
     return int(raw)
 
@@ -369,9 +378,12 @@ def _closed_exact(raw: object, vocabulary: tuple[str, ...]) -> str:
 
 
 def source_bucket(count: object) -> str:
-    """来源数 → 闭集桶。`None` / 非数 → unknown(不是 `1`)。"""
+    """来源数 → 闭集桶。`None` / 非数 / 负数 → unknown(不是 `1`)。
+
+    负数由 `_int` 统一折成 `None`,这里不再单独判一次。
+    """
     value = _int(count)
-    if value is None or value < 0:
+    if value is None:
         return UNKNOWN
     for ceiling, label in _SOURCE_BUCKETS:
         if value <= ceiling:
@@ -738,17 +750,20 @@ def _prefix_bytes(
     return values[(len(values) - 1) // 2], values[0], len(values)
 
 
-def _optimization(payload: Mapping, tags: Mapping) -> str:
+def _optimization(tags: Mapping) -> str:
     """rig 声明的第二维臂。缺席 / 闭集外 ⇒ unknown。
+
+    **只从 `rig_tags` 读。** 曾经还有一条 `answer_payload` 兜底分支,那是一个没有
+    写侧、也没有用例的猜测:`AskResponse` 从来不带这个字段,线上导出永远走不到它;
+    而它顺手把「tags 里给了个空串」这种传参错误遮蔽成「那就去 payload 找找」,于是
+    一次错误的声明会静默落成 unknown 而看不出是谁的错。删掉之后这一列只有一个
+    产地:rig 从 `client_request_id` 解码出来的标签。
 
     `_closed_exact` 而不是 `closed_value`:后者会先 `lower()`,那会把一个大小写
     写错的声明(`Prefix_Snapshot`)悄悄纠正成合法臂,于是「rig 传错了参数」这件
-    事在数据里看不出来。线上导出两处都不写 ⇒ 恒 unknown。
+    事在数据里看不出来。线上导出不写这个标签 ⇒ 恒 unknown。
     """
-    raw = tags.get("optimization")
-    if raw is None:
-        raw = payload.get("optimization")
-    return _closed_exact(raw, OPTIMIZATIONS)
+    return _closed_exact(tags.get("optimization"), OPTIMIZATIONS)
 
 
 # --- run 级投影 -------------------------------------------------------------
@@ -889,9 +904,12 @@ def project_run(
 
     `job_row` 只被读 `mode` / `status`;`answer_payload` 只被读
     `mode` / `retrieval_effort` / `intent` / `kg_required`(有没有、是不是
-    bool),问题原文、答案正文、引用卡一律不碰。`rig_tags` 是 rig 侧按
-    `client_request_id` 解码出来的编号(`corpus_cell` / `question_key` /
-    `requested_mode` / `optimization`),线上导出传空 ⇒ 那几个维度恒为 unknown。
+    bool)——这四个字段就是这一层碰过的全部 payload 面,问题原文、答案正文、引用卡
+    一律不碰,`optimization` 也**不**从 payload 读(见 `_optimization`)。
+    `rig_tags` 是 rig 侧按 `client_request_id` 解码出来的编号(`corpus_cell` /
+    `question_key` / `requested_mode` / `consumer` / `effort` / `trace_source` /
+    `policy`(或 `policy_version`)/ `optimization`),线上导出传空 ⇒ 那几个维度
+    恒为 unknown。
     """
     tags = rig_tags or {}
     payload = _mapping(answer_payload) or {}
@@ -959,9 +977,9 @@ def project_run(
         "trace_source": closed_value(
             tags.get("trace_source") or "trace_steps", TRACE_SOURCES
         ),
-        "reflect_turns": sum(
-            1 for step in normalized if step["step_type"] == "reflect"
-        ),
+        # `_reflect_steps` 已经把这一批筛出来了(前缀三格与 `call_attempts` 都读
+        # 它),再数一遍就是两份「什么算一轮 reflect」的判据。
+        "reflect_turns": len(reflects),
         "termination_reason": termination,
         "termination_inferred": inferred,
         "stale_breaker": breaker,
@@ -996,7 +1014,7 @@ def project_run(
         "run_wall_ms": None,
         "model_calls_real": model_calls_real,
         "attempts_observed": attempts_observed,
-        "optimization": _optimization(payload, tags),
+        "optimization": _optimization(tags),
         "context_chars": _context_chars(reflects),
         "prefix_bytes_median": prefix_median,
         "prefix_bytes_min": prefix_min,
