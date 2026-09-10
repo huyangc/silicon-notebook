@@ -228,8 +228,9 @@
         信号**并按设计原样上抛，所以「取消的 run 也有 `run_wall_ms`」这条只对「取消事件已
         置位、run 抛的却是非 `AskCancelled` 异常」那一路成立（走失败行、带墙钟）。真要给
         取消的 run 落一行，需要先决定收摊语义。
-      * **`ab` 的 `--only-policy` 与 `--arms` 互斥**：既有一维用法逐字不变。要把
-        `--only-policy` 也二维化（如 `--only-arm`）是一次 CLI 决定，没做。
+      * **`ab` 的 `--only-policy` 与 `--arms` 互斥，`--arms` 一次只收一对臂**（三臂批次
+        与空写法都在预检响亮拒绝；`paired` 的门槛因此是常量 2）：既有一维用法逐字不变。要把
+        `--only-policy` 也二维化（如 `--only-arm`）、或让一批跑多对臂，都是一次 CLI 决定，没做。
       * **`EVENT_LOG_DIR` 与 `LLM_LOG_PATH` 目录不对齐会打一行启动告警**：rig 按计划把
         事件落 `<out-dir>/events`、llm 日志落 `<out-dir>/llm`，`repository_runtime` 的对齐
         检查因此每次真跑报一行。对 rig 无功能影响（两串日志各按自己的 glob 读），消掉它要
