@@ -94,6 +94,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from app.domain.reasoning_trace_stats import (  # noqa: E402
     CORPUS_CELLS,
     MAX_REFLECT_STEPS,
+    OPTIMIZATIONS,
     assert_closed,
     assert_projection_values,
     merge_key,
@@ -117,6 +118,25 @@ from app.eval.reflect_ab import (  # noqa: E402
 #: 「零 I/O、零 Settings」理由——manifest 的形状校验是 dry-run 也够得到的
 #: 纯函数(dry-run 本身不写 manifest,但闭集/隐私守卫要能在标准门里被测)。
 from app.eval.reflect_manifest import build_manifest  # noqa: E402
+#: T-EX7:E2 的驱动器/代理/记录面全在这个模块(纯逻辑,`app.services.*` 都是
+#: 函数内导入,见该模块 docstring),rig 只做薄适配。这份列表与 dry-run 要用到
+#: 的纯函数/常量同一条「零 I/O」理由放在顶部——`load_state_probe_case_set` 本身
+#: 有一次文件读(读 `state_probes.json`,不是模型/数据库),dry-run 需要它来打
+#: 印真实的 12 例枚举,与 `load_questions()` 同一条口径。
+from app.eval.reflect_state_probe import (  # noqa: E402
+    ALLOWED_CORPUS_CELLS,
+    PROBE_ROW_KEYS,
+    REFLECT_CHAT_WORKLOAD,
+    STATE_POINT_COUNT,
+    STATE_POINT_LABELS,
+    StateProbeCase,
+    StateProbeError,
+    assert_probe_row_closed,
+    load_state_probe_case_set,
+    run_state_probe_point,
+    state_probe_manifest_facts,
+    summarize_state_probe,
+)
 from app.eval.reflect_t0 import load_questions  # noqa: E402
 from export_reasoning_traces import RIG_FIELDS, RIG_PREFIX  # noqa: E402
 
@@ -124,6 +144,20 @@ DEFAULT_TEST_DB = "silicon_notebook_t0_test"
 DEFAULT_PORT = 8001
 EFFORTS: tuple[str, ...] = ("standard", "deep")
 POLICIES: tuple[str, ...] = ("legacy", "v2")
+#: `state-probe`(E2)默认三臂(计划 U2 拍板:off/prefix_snapshot/prefix_delta;
+#: `prefix_delta_lean` 由 `--arms` 显式加入)。**这三格是** `OPTIMIZATIONS`
+#: **的一个有序子集**,不是 `ab` 的 `(policy, optimization)` 两维臂:design
+#: §9.2 的 B 本来就是「当前 v2 snapshot」(`("v2","off")`),E2 结构上只有
+#: `reflect_optimization()` 这一维,`policy` 恒 `v2`——所以这里不复用
+#: `reflect_ab.ARMS`/`parse_arms`(两维臂的合法组合闭集与非法组合校验,拿来读
+#: 一维输入没有意义)。
+STATE_PROBE_DEFAULT_ARMS: tuple[str, ...] = ("off", "prefix_snapshot", "prefix_delta")
+#: E2 的固定精力档。case 集里没有 `effort` 这一维(`state_probe_manifest_facts`
+#: 的 `matrix` 子键契约里也没有 `efforts`——三个状态点的轮号已经把每例的剧本
+#: 长度钉死,档位只影响 `ask_retrieval_limits` 的首轮宽度与 `max_reasoning_steps`
+#: 上限),所以只固定一档而不是像 `ab` 那样再开一维:`standard` 的
+#: `max_reasoning_steps=8`,覆盖案例集里最长的状态点(第 6 轮 + 1 轮转发)。
+STATE_PROBE_EFFORT = "standard"
 #: 测试库要装的扩展(与 memory `local-pg-test-db` 同一份清单)。
 PG_EXTENSIONS: tuple[str, ...] = ("pg_trgm", "btree_gin")
 #: fixture 用户名。**必须过 `app.domain.auth_utils.USERNAME_RE`(单个小写字母 +
@@ -4909,6 +4943,548 @@ def _write_ab_manifest(
     _write_manifest(row, runner=runner)
 
 
+# --- `state-probe`(E2:固定状态的真实 reflect 对照,T-EX7) -------------------
+#
+# 真正的驱动器/代理/记录面全在 `app.eval.reflect_state_probe`(纯逻辑,进标准
+# 门);这里只做薄适配:CLI 参数、臂枚举、跑前跑后只读证据、串行枚举
+# `(case, state_point, repeat, arm)`、写 `state-probe-<arm>.jsonl` 与
+# `.local/raw/`、收尾摘要与 manifest。与 `ab` 的关系:同样在 `seed` 建好的
+# 一次性测试库上进程内跑,但 E2 不合成、不落库(Q7)——**并发恒 1**:一条 run
+# 只有一次真实调用,并发只会污染排队时长,不像 `ab` 那样需要线程池。
+
+
+def state_probe_arms(args: argparse.Namespace) -> list[str]:
+    """`state-probe` 跑哪几条臂。**不给** ⇒ `STATE_PROBE_DEFAULT_ARMS`(U2 拍板
+    的默认三臂);给了就是逗号分隔的 `OPTIMIZATIONS` 词表子集,加
+    `prefix_delta_lean`(L)即可。
+
+    与 `ab_arms`/`reflect_ab.parse_arms` 是**同一个 `--arms` 参数、两套读法**:
+    那一套解析的是 `policy:optimization` 两维、且只认 `ARMS` 里五个合法组合;
+    E2 结构上只有一维(`policy` 恒 `v2`,design §9.2 的 B 就是「当前 v2
+    snapshot」),拿两维的解析器读一维输入只会把 `off,prefix_snapshot` 错读成
+    `[("off","off"), ("prefix_snapshot","off")]` 这种没有意义的东西,所以这里
+    另开一份、不碰 `ab_arms`/`parse_arms` 本身一个字节。
+    """
+    if getattr(args, "arms", None) is None:
+        return list(STATE_PROBE_DEFAULT_ARMS)
+    tokens = [token.strip() for token in str(args.arms).split(",")]
+    if not tokens or any(not token for token in tokens):
+        raise ArmSpecError(
+            f"--arms 写法为空或有空段: {args.arms!r}(state-probe 是一维:逗号"
+            f"分隔的 {', '.join(OPTIMIZATIONS)} 子集,例如 "
+            "off,prefix_snapshot,prefix_delta)"
+        )
+    for token in tokens:
+        if token not in OPTIMIZATIONS:
+            raise ArmSpecError(
+                f"--arms 里的 {token!r} 不在 optimization 闭集里(可选 "
+                f"{', '.join(OPTIMIZATIONS)})"
+            )
+    duplicates = {token for token in tokens if tokens.count(token) > 1}
+    if duplicates:
+        raise ArmSpecError(
+            "--arms 里有重复的臂: " + ", ".join(sorted(duplicates)))
+    return tokens
+
+
+def _state_probe_looks_like_test_db(database_url: str) -> bool:
+    """`--database-url` 的名字部分是不是以 `_test` 结尾。**只在这里**多容一种
+    形状:sqlite 路径常带一个文件扩展名(`.../foo_test.db`),`ab` 的
+    `AB_TEST_DB_SUFFIX` 判据是给 PostgreSQL 库名(没有扩展名)写的——直接照抄
+    会把 `sqlite:///foo_test.db` 这个合法的一次性测试库路径当场拒掉。这里只
+    去掉最后一段路径里的扩展名再比,不改 `AB_TEST_DB_SUFFIX`/`ab` 的判据本身
+    一个字节。
+    """
+    trimmed = str(database_url).rstrip("/")
+    last_segment = trimmed.rsplit("/", 1)[-1]
+    stem = last_segment.rsplit(".", 1)[0] if "." in last_segment else last_segment
+    return stem.endswith(AB_TEST_DB_SUFFIX)
+
+
+def _state_probe_preflight(args: argparse.Namespace) -> str:
+    """真跑前(**`--dry-run` 下也拦**,同 `_ab_preflight` 的纪律)的硬前提。
+    返回空串 = 通过,否则是要打给用户的那句话。
+    """
+    if not args.database_url_explicit:
+        return ("state-probe 必须显式给 --database-url(计划 Q7:沿用 `seed` "
+                 "建好的一次性测试库,不读 .env 猜)")
+    if not _state_probe_looks_like_test_db(args.database_url):
+        return (f"state-probe 的 --database-url 必须指向名字以 "
+                 f"{AB_TEST_DB_SUFFIX!r} 结尾的一次性测试库(Q7:E2 结构上就"
+                 "不该跑在测试库之外的任何库上)")
+    try:
+        arms = state_probe_arms(args)
+    except ArmSpecError as exc:
+        return str(exc)
+    if not arms:
+        return "state-probe 至少要跑一条臂"
+    if args.concurrency_explicit and args.concurrency_raw != 1:
+        return (f"state-probe 的 --concurrency 恒为 1(给了 "
+                 f"{args.concurrency_raw!r}):E2 每条 run 只有一次真实调用,"
+                 "并发只会污染排队时长——响亮拒绝,不降级")
+    return ""
+
+
+def _state_probe_repeats(args: argparse.Namespace) -> int:
+    """`--repeats` 的默认值 E2 与 `ab` 不同(2 次重复,design §9.2:12 例 ×
+    3 状态点 × 3 臂 × 2 重复 = 216 次逻辑调用),所以**不吃** `argparse` 那份
+    共享默认值(`ab` 的 3)——`args.repeats_explicit` 由 `main()` 按原始 argv
+    算出,显式给了才用 `args.repeats`(已经过 `max(1, ...)` 的既有 clamp)。
+    """
+    if args.repeats_explicit:
+        return args.repeats
+    return 2
+
+
+def _state_probe_call_estimate(
+    cases: Sequence[StateProbeCase], arms: Sequence[str], repeats: int,
+) -> tuple[str, str, str]:
+    """dry-run 打印的三个数(计划 T-EX7 要点):逻辑调用数(真实上界,不是估计
+    ——每格恰好一次真实转发,§9.2)、embedding 调用**上界**、请求上界。
+
+    embedding 那一行**不是精确值**:剧本步的动作类型(`search_elements` /
+    `enumerate_kg_objects` / `exact_lookup` …)决定它是否真的触发
+    `retrieval_query_embedding`,这里按「每个被重放的剧本轮都可能触发一次」
+    算上界(Σ状态点轮号 × 臂数 × 重复轮数),不去为每种动作各自建模——写成
+    上界比装作精确更诚实(计划原文「写成上界」)。
+    """
+    runs = len(cases) * STATE_POINT_COUNT * len(arms) * repeats
+    turn_sum = sum(sum(case.state_points) for case in cases)
+    embedding_ceiling = turn_sum * len(arms) * repeats
+    calls_line = (
+        f"{runs}(= {len(cases)} 例 × {STATE_POINT_COUNT} 状态点 × "
+        f"{len(arms)} 臂 × {repeats} 重复;每格恰好一次真实转发,不是估计)"
+    )
+    embedding_line = (
+        f"≤ {embedding_ceiling}(上界,按剧本动作数估:Σ状态点轮号 {turn_sum} "
+        f"× {len(arms)} 臂 × {repeats} 重复;不计进上面的逻辑调用数,"
+        "也不是精确值——枚举/精确查找类动作未必触发 embedding)"
+    )
+    request_line = (
+        f"≤ {runs * REASONING_ATTEMPT_BUDGET}(重试预算 ×"
+        f"{REASONING_ATTEMPT_BUDGET})"
+    )
+    return calls_line, embedding_line, request_line
+
+
+def cmd_state_probe(args: argparse.Namespace, runner: Runner) -> int:
+    """E2:固定状态的真实 reflect 对照(计划 T-EX7)。薄适配——真正的驱动器/
+    代理/记录面全在 `app.eval.reflect_state_probe`。
+
+    `--dry-run` 与真跑读**同一份**枚举(`load_state_probe_case_set()` +
+    `state_probe_arms(args)` + `_state_probe_repeats(args)`),先筛(`--only-case`)
+    后限(`--limit`),与 `search` 的既有口径同款。
+    """
+    problem = _state_probe_preflight(args)
+    if problem:
+        print("ERROR: " + problem, file=sys.stderr)
+        return 2
+    arms = state_probe_arms(args)
+    repeats = _state_probe_repeats(args)
+    cases, digest = load_state_probe_case_set()
+    if args.only_case:
+        wanted = set(args.only_case)
+        cases = [case for case in cases if case.case_key in wanted]
+    if args.limit is not None:
+        cases = cases[: args.limit]
+    if not cases:
+        print("ERROR: state-probe 筛完(--only-case/--limit)之后零个 case",
+              file=sys.stderr)
+        return 2
+
+    runner.say("target", "一次性测试库(Q7):只跑检索、不合成、不落库")
+    runner.say("database-url", f"<given>(测试库,以 {AB_TEST_DB_SUFFIX} 结尾)")
+    runner.say(
+        "arms",
+        ", ".join(arms) + "(policy 恒 v2;off = design §9.2 的 B,"
+        "当前 v2 snapshot;并发恒 1)",
+    )
+    runner.say(
+        "measurement",
+        "REASONING_REFLECT_MEASURE_CONTEXT=true(全部臂都开,同 `ab` 拍板 Q2)",
+    )
+    runner.say("effort", STATE_PROBE_EFFORT)
+    runner.say("repeats", str(repeats))
+    runner.say("cases", f"{len(cases)} 例"
+               + (f"(digest={digest})" if not runner.dry_run else ""))
+    for index, label in enumerate(STATE_POINT_LABELS):
+        runner.say("state point", f"{index}={label}")
+    calls_line, embedding_line, request_line = _state_probe_call_estimate(
+        cases, arms, repeats)
+    runner.say("model calls (real, per state point)", calls_line)
+    runner.say("embedding calls (separate, upper bound)", embedding_line)
+    runner.say("request ceiling", request_line)
+    for case in cases:
+        runner.say(
+            "state probe case",
+            f"{case.case_key} corpus_cell={case.corpus_cell} "
+            f"turns={list(case.state_points)}",
+        )
+    runner.say(
+        "out",
+        f"{runner.out_dir}/state-probe-<arm>.jsonl + "
+        f"{runner.out_dir}/state-probe-summary.{{md,json}} + "
+        f"{runner.out_dir}/manifest.json",
+    )
+    runner.say(
+        "local only",
+        f"{runner.out_dir}/raw/<case>-<point>-<arm>-<repeat>.json"
+        "(转发轮的消息/schema_hint/模型决定原文——不进数据集/不进仓库)",
+    )
+    runner.say(
+        "not a real trajectory",
+        "模型选出的动作只记录不执行——这批数据测的是固定观察下的策略,"
+        "不是它自洽的真实轨迹(design §9.2)",
+    )
+    if runner.dry_run:
+        return 0
+    return _run_state_probe(args, runner, cases, arms, repeats, digest)
+
+
+def _state_probe_notebook_ids(
+    database_url: str, cases: Sequence[StateProbeCase],
+) -> dict[str, str]:
+    """这一批实际用到的语料格 → 测试库里的 notebook id。**从跑批的 case 集
+    收窄**(与 `ab` 的 `cells`→`ran_cells` 同一条纪律),不是
+    `ALLOWED_CORPUS_CELLS` 的全量——`--only-case`/`--limit` 筛完可能只剩一格。
+    """
+    cells = sorted({case.corpus_cell for case in cases})
+    return _ab_notebook_ids(database_url, cells)
+
+
+def _probe_failed_row(
+    *, case: StateProbeCase, state_point_index: int, repeat: int, arm: str,
+) -> dict[str, Any]:
+    """一格没跑成的状态点。`PROBE_ROW_KEYS` 没有专门的失败形状,复用同一张
+    闭集表——失败行要能和成功行放进同一张按臂/按状态点分组的摘要
+    (与 `_ab_failed_row` 同一条纪律):除了标签四列与 `status`,其余全 `None`
+    (`_count`/`_flag`/`_short_code` 的「缺席=unknown」口径,不折成 0/False)。
+    """
+    row: dict[str, Any] = {key: None for key in PROBE_ROW_KEYS}
+    row.update({
+        "case_key": case.case_key,
+        "state_point": state_point_index,
+        "repeat": repeat,
+        "arm": arm,
+        "optimization": arm,
+        "status": "failed",
+    })
+    assert_probe_row_closed(row)
+    return row
+
+
+def _write_probe_raw(
+    runner: Runner, case: StateProbeCase, state_point_index: int, arm: str,
+    repeat: int, driver: Any,
+) -> None:
+    """转发轮的消息/schema_hint/模型决定原文的存档。**只进 `.local/raw/`**
+    (Q6:决定 JSON 全文与四臂各自的消息正文一个字都不进数据集)。
+    """
+    forwarded = driver.forwarded
+    payload = {
+        "case_key": case.case_key,
+        "state_point": state_point_index,
+        "arm": arm,
+        "repeat": repeat,
+        "scripted_actions": list(driver.scripted_actions()),
+        "forwarded": (
+            None if forwarded is None else {
+                "turn": forwarded.turn,
+                "messages": [dict(message) for message in forwarded.messages],
+                "schema_hint": forwarded.schema_hint,
+                "raw": forwarded.raw,
+                "error": forwarded.error,
+            }
+        ),
+    }
+    path = (
+        runner.out_dir / "raw" /
+        f"{case.case_key}-{state_point_index}-{arm}-{repeat}.json"
+    )
+    runner.write(path, json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def _run_one_state_probe_point(
+    runner: Runner, case: StateProbeCase, state_point_index: int, repeat: int,
+    optimization: str, *, settings_by_arm: Mapping[str, Any],
+    repos_by_arm: Mapping[str, Any], notebooks: Mapping[str, str],
+    actor_id: str,
+) -> dict[str, Any]:
+    """一格 `(case, state_point, repeat, arm)`。`StateProbeError`(继承
+    `BaseException`)原样向上抛——它意味着「这一格的剧本/编排没对上『同一状态
+    点』这句话」,要停批而不是记成一行失败(见该类型的 docstring);其余
+    `Exception` 是这一格真实失败,落一行 `status=failed` 并继续跑批(与 `ab`
+    的 `_run_ab_arm` 同一条隔离纪律)。
+    """
+    notebook_id = notebooks[case.corpus_cell]
+    repo = repos_by_arm[optimization]
+    real_client = repo.chat(REFLECT_CHAT_WORKLOAD)
+    try:
+        point = run_state_probe_point(
+            repo, settings_by_arm[optimization], case, state_point_index,
+            real_client, notebook_id=notebook_id, arm=optimization,
+            optimization=optimization, repeat=repeat,
+            effort=STATE_PROBE_EFFORT, cancel_event=None, actor_id=actor_id,
+        )
+    except StateProbeError:
+        raise
+    except Exception as exc:  # noqa: BLE001 — 单格失败要隔离,不作废整批
+        runner.say(
+            "state probe failed",
+            f"{case.case_key} point={state_point_index} arm={optimization} "
+            f"r{repeat} FAILED {type(exc).__name__}",
+        )
+        return _probe_failed_row(
+            case=case, state_point_index=state_point_index, repeat=repeat,
+            arm=optimization,
+        )
+    _write_probe_raw(
+        runner, case, state_point_index, optimization, repeat, point.driver)
+    runner.say(
+        "state probe done",
+        f"{case.case_key} point={state_point_index} arm={optimization} "
+        f"r{repeat} call_wall_ms={point.row.get('call_wall_ms')} "
+        f"decision_action={point.row.get('decision_action')}",
+    )
+    return point.row
+
+
+def _state_probe_assert_readonly_on_exit(
+    runner: Runner, before: dict[str, int | str | None], database_url: str,
+) -> None:
+    """收尾那次「测试库结构上不该被 E2 写」的核对(Q7)。**不掩盖正在飞的异常**
+    ——与 `ab` 的 `_assert_readonly_on_exit` 同一条纪律,量的是测试库自己
+    (E2 没有 `ab` 那半「主库零接触」的问题,`search`/`ab` 各自的函数一个字节
+    不碰,这里另起一份同形的)。
+    """
+    in_flight = sys.exc_info()[0] is not None
+    try:
+        _assert_readonly(
+            runner, before, _readonly_counts(database_url),
+            command="state-probe",
+        )
+    except Exception:  # noqa: BLE001 — 见 docstring
+        if not in_flight:
+            raise
+        print("\033[31m[READ-ONLY VIOLATION]\033[0m "
+              "(另有异常正在向上抛,见下方 traceback)", file=sys.stderr)
+
+
+def _render_state_probe_summary_md(summary: Mapping[str, Any]) -> str:
+    """`summarize_state_probe` 的产出 → 一份人读的 markdown。零比率,只有计数
+    与中位数(与该函数本身「不产出任何比率型结论」同一条纪律)。
+    """
+    lines = [
+        "# state-probe 摘要(E2)",
+        "",
+        "**模型选出的动作只记录不执行——这批数据测的是固定观察下的策略,"
+        "不是它自洽的真实轨迹(design §9.2)。**",
+        "",
+        f"- 总行数:{summary.get('rows_total')}",
+        f"- 失败(取消/出错):{summary.get('failed_rows')}",
+        f"- 本地响应缓存出口(结构上该是 0,`bypass_cache=True`):"
+        f"{summary.get('local_cache_exit_rows')}",
+        f"- status 缺失:{summary.get('status_unknown_rows')}",
+        f"- 第三个状态点未越过压缩边界(如实标 False,不调剧本去凑):"
+        f"{summary.get('compaction_boundary_not_reached_rows')}",
+        f"- 压缩边界读数缺失(该臂无此观测,unknown ≠ False):"
+        f"{summary.get('compaction_boundary_unknown_rows')}",
+        "",
+    ]
+    for label, arms in (summary.get("by_state_point") or {}).items():
+        lines.append(f"## {label}")
+        lines.append("")
+        lines.append(
+            "| arm | n_rows | n_ok | n_failed | call_wall_ms_p50 | "
+            "response_chars_p50 |")
+        lines.append("| --- | --- | --- | --- | --- | --- |")
+        for arm, cell in arms.items():
+            lines.append(
+                f"| {arm} | {cell.get('n_rows')} | {cell.get('n_ok')} | "
+                f"{cell.get('n_failed')} | {cell.get('call_wall_ms_p50')} | "
+                f"{cell.get('response_chars_p50')} |"
+            )
+        lines.append("")
+    lines.append(
+        "**归因边界(design §5 风险 5)**:P↔B 的差里混着指令/工具说明的布局"
+        "改动,不能宣称纯缓存因果;D↔L 在固定状态点上只看得见净增的那一侧"
+        "(省的那一侧结构上看不见)。"
+    )
+    return "\n".join(lines) + "\n"
+
+
+def _run_state_probe(
+    args: argparse.Namespace, runner: Runner,
+    cases: Sequence[StateProbeCase], arms: Sequence[str], repeats: int,
+    case_set_digest_code: str,
+) -> int:
+    """`state-probe` 的真跑路径。与 `_run_ab` 同形的几件事:每臂一个 repo
+    (`_search_repository`,而不是一个 repo 加一个 settings 参数——理由与 `ab`
+    逐字相同,`from_repository` 读的是传进去的那份 Settings,但臂由代理决定
+    这一半这里成立,而 `notebook_id` 与 `actor_id` 仍需要参照臂一份);跑前
+    跑后各点一次**测试库自己**的只读证据(Q7);收尾写摘要与 manifest。
+
+    **并发恒 1**——没有线程池、没有 `deadline`/`cancel_event` 之外的花样:E2
+    每格只有一次真实调用,`_state_probe_preflight` 已经把
+    `--concurrency != 1` 挡在门外。
+    """
+    from datetime import datetime
+
+    # 必须在 import `app.core.config` 之前(与 `_ab_process_env` 同一条理由)。
+    env = _rig_process_env(args, database_url=args.database_url)
+    env["REASONING_REFLECT_MEASURE_CONTEXT"] = "true"
+    os.environ.update(env)
+
+    from app.core.request_context import reset_request_user, set_request_user
+    from app.services.reasoning_retrieval import kg_in_scope_for
+
+    pair_arms = [("v2", optimization) for optimization in arms]
+    settings_by_pair = _settings_by_arm(pair_arms)
+    settings_by_arm = {
+        optimization: settings_by_pair[("v2", optimization)]
+        for optimization in arms
+    }
+    reference_arm = arms[0]
+    repos_by_arm = {
+        optimization: _search_repository(settings_by_arm[optimization])
+        for optimization in arms
+    }
+    reference_repo = repos_by_arm[reference_arm]
+    runner.say(
+        "arm repositories",
+        f"{len(arms)} 条臂各一个 repo(与 `ab` 同一条理由:Ask 读构造期的 "
+        "Settings,换不了)",
+    )
+    profile = reference_repo.maintenance.resolve_owner_profile(args.user)
+    if profile is None:
+        print(f"ERROR: 测试库里找不到 fixture 用户: {args.user}", file=sys.stderr)
+        return 2
+    actor_id = str(getattr(profile, "id", "") or "")
+
+    notebooks = _state_probe_notebook_ids(args.database_url, cases)
+    needed_cells = sorted(notebooks)
+    corpus_facts = _ab_corpus_facts(
+        args, runner, reference_repo, needed_cells, notebooks, kg_in_scope_for,
+    )
+    corpus_signature_by_cell = {
+        cell: corpus_facts[cell]["corpus_signature"] for cell in needed_cells
+    }
+    contract_short, contract_readable = _ab_model_contract(
+        settings_by_arm[reference_arm])
+    runner.say("model contract", f"{contract_short}  ({contract_readable})")
+
+    before = _readonly_counts(args.database_url)
+    runner.say("readonly baseline (test db)", _format_counts(before))
+
+    context = set_request_user(profile)
+    started_at = datetime.now().isoformat()
+    # `_run_state_probe` 只在真跑(非 `--dry-run`)时被调用(见 `cmd_state_probe`
+    # 的短路),所以这里直接开文件——不复用 `Runner.write`(那一层是「整份内容
+    # 一次写」,这里要的是逐行追加 + 显式 flush,好让中途 `StateProbeError`
+    # 停批时已经写下的行不因为进程终止而卡在缓冲区里,T-EX7 用例 (f) 的
+    # 「已写行保留」直接靠这个)。
+    runner.out_dir.mkdir(parents=True, exist_ok=True)
+    handles: dict[str, Any] = {
+        optimization: (
+            runner.out_dir / f"state-probe-{optimization}.jsonl"
+        ).open("a", encoding="utf-8")
+        for optimization in arms
+    }
+    all_rows: list[dict[str, Any]] = []
+    failed_count = 0
+    stopped_by_error: StateProbeError | None = None
+    try:
+        try:
+            for case in cases:
+                for state_point_index in range(STATE_POINT_COUNT):
+                    for repeat in range(1, repeats + 1):
+                        for optimization in arms:
+                            row = _run_one_state_probe_point(
+                                runner, case, state_point_index, repeat,
+                                optimization, settings_by_arm=settings_by_arm,
+                                repos_by_arm=repos_by_arm, notebooks=notebooks,
+                                actor_id=actor_id,
+                            )
+                            all_rows.append(row)
+                            if row.get("status") == "failed":
+                                failed_count += 1
+                            handle = handles[optimization]
+                            handle.write(
+                                json.dumps(row, ensure_ascii=False,
+                                           sort_keys=True) + "\n")
+                            handle.flush()
+        except StateProbeError as exc:
+            print(f"ERROR: state-probe 停批: {exc}", file=sys.stderr)
+            stopped_by_error = exc
+    finally:
+        reset_request_user(context)
+        for handle in handles.values():
+            if handle is not None:
+                handle.close()
+        _state_probe_assert_readonly_on_exit(runner, before, args.database_url)
+    finished_at = datetime.now().isoformat()
+
+    if stopped_by_error is not None:
+        return 1
+
+    summary = summarize_state_probe(all_rows)
+    runner.write(
+        runner.out_dir / "state-probe-summary.json",
+        json.dumps(summary, ensure_ascii=False, sort_keys=True, indent=2),
+    )
+    runner.write(
+        runner.out_dir / "state-probe-summary.md",
+        _render_state_probe_summary_md(summary),
+    )
+
+    facts = state_probe_manifest_facts(
+        cases=cases, arms=arms, repeats=repeats,
+        case_set_digest_code=case_set_digest_code,
+        optimization_by_arm={optimization: optimization for optimization in arms},
+        corpus_signature_by_cell=corpus_signature_by_cell,
+        common_baseline="off",
+        order="case→state_point→repeat→arm",
+        code_sha=_ab_git_sha(),
+        started_at=started_at, finished_at=finished_at,
+        # `state_probe_manifest_facts` 要一个 Mapping(它对 `model_contract` 做
+        # `dict(...)`),不是 `_ab_model_contract` 返回的裸短码字符串——与 `ab`
+        # 的 `_write_ab_manifest`(直接把裸短码传给 `build_manifest`,那条路没有
+        # 中间这层 `dict()`)不同,这里包一层。读不出来时(`contract_short`
+        # 为 `None`)整个不传这个键,让它落回「这次没有」而不是塞一个只有
+        # `None` 值的假字典。
+        model_contract=(
+            None if contract_short is None else {"model": contract_short}
+        ),
+        budgets={
+            "reasoning_timeout_seconds": int(getattr(
+                settings_by_arm[reference_arm], "reasoning_timeout_seconds",
+                REASONING_TIMEOUT_SECONDS_DEFAULT)),
+            "reasoning_attempt_budget": REASONING_ATTEMPT_BUDGET,
+            "concurrency": 1,
+        },
+        stopped_by_budget=False,
+    )
+    # `planned_runs`(评审拍板,三条通道同规则,见 `reflect_manifest` 模块
+    # docstring):E2 没有 E3 那种「格与格题集不相交」的问题,四个基数直接相乘
+    # 就是真实 run 数上界,与上面 dry-run 逐字钉死的那个数同源。
+    facts["matrix"]["planned_runs"] = (
+        len(cases) * STATE_POINT_COUNT * len(arms) * repeats
+    )
+    manifest = build_manifest(**facts)
+    text = json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=2)
+    runner.write(runner.out_dir / "manifest.json", text)
+    with (runner.out_dir / "manifests.jsonl").open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(manifest, ensure_ascii=False, sort_keys=True) + "\n")
+    runner.say("manifest", f"{runner.out_dir}/manifest.json(最新)+ "
+                           f"{runner.out_dir}/manifests.jsonl(历史,追加)")
+
+    if failed_count:
+        print(f"ERROR: {failed_count} 个状态点 FAILED,见 "
+              f"state-probe-<arm>.jsonl", file=sys.stderr)
+        return 1
+    return 0
+
+
 #: 失败 run 那一行里必须落成 unknown 的答案级/成本级键。`answer_chars=0` 会被
 #: 读成「模型答了个空字符串」,而真相是「这个 run 没跑到有答案的那一步」;成本
 #: 三键同理——崩在半路的 run,时间窗切到的是半截账。T0 那一半(轨迹派生的
@@ -6435,7 +7011,9 @@ def build_parser() -> argparse.ArgumentParser:
              "一致)。两阶段:先按同一并发度并发算意图契约,再把全部 run 提交"
              "给一个线程池。SQLite 主库真跑时强制 clamp 到 1;PG 主库按"
              "POSTGRES_POOL_MAX_SIZE clamp——跑之前先确认模型服务的并发限流"
-             "与连接池都吃得下这个数,否则要么被限流打回、要么在拿连接时死等",
+             "与连接池都吃得下这个数,否则要么被限流打回、要么在拿连接时死等。"
+             "`state-probe`(E2)恒 1:显式给且不等于 1 当场响亮拒绝(退 2),"
+             "不降级——E2 每条 run 只有一次真实调用,并发只会污染排队时长",
     )
     parser.add_argument(
         "--keep-raw-trace", action="store_true",
@@ -6522,12 +7100,25 @@ def build_parser() -> argparse.ArgumentParser:
              "第二维(前缀复用最终设计 §11)。省略 `:优化` 一律补 `off`;"
              "`legacy:prefix_snapshot` 这类合法值的非法组合、重复臂与空写法"
              "(`--arms \"\"`)都当场拒绝,不退化成默认两臂。"
-             "与 --only-policy 互斥。`search`/`ask` 不读它",
+             "与 --only-policy 互斥。`search`/`ask` 不读它。"
+             "**`state-probe`(E2)读法不同**:一维,逗号分隔的 off/"
+             "prefix_snapshot/prefix_delta/prefix_delta_lean 子集(不给 = "
+             "默认三臂 off,prefix_snapshot,prefix_delta,U2 拍板;加"
+             "prefix_delta_lean 即可跑四臂),没有『一次一对』或『:优化』写法",
     )
     parser.add_argument(
         "--repeats", type=int, default=3,
         help="`ab` 的重复轮数(§4.1 默认 3)。重复轮是**最外层**循环,所以任何"
-             "被预算或故障截断的前缀都是一份配对完整、平衡的数据集",
+             "被预算或故障截断的前缀都是一份配对完整、平衡的数据集。"
+             "`state-probe`(E2)不吃这份默认值——不给时另有自己的默认 2"
+             "(design §9.2:12 例 × 3 状态点 × 3 臂 × 2 重复 = 216 次逻辑调用),"
+             "给了就照用(经过下面同一条 clamp)",
+    )
+    parser.add_argument(
+        "--only-case", action="append", default=[],
+        help="`state-probe`(E2)只跑这些 case_key(可多次)。筛选发生在 "
+             "--limit 切片之前(先筛后限),与 --only-question 同一条口径。"
+             "默认不筛,全量参与 --limit",
     )
     parser.add_argument(
         "--round", type=int,
@@ -6573,14 +7164,35 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "command",
-        choices=("seed", "ask", "report", "search", "ab", "restart", "export",
-                 "teardown", "prefix-probe"),
+        choices=("seed", "ask", "report", "search", "ab", "state-probe",
+                 "restart", "export", "teardown", "prefix-probe"),
     )
     return parser
 
 
+def _explicit_flag_given(argv: Sequence[str], flag: str) -> bool:
+    """`flag` 是否真的出现在这次命令行里(`--flag value` 或 `--flag=value`
+    两种写法都算)。
+
+    `state-probe` 的 `--concurrency`/`--repeats` 需要「用户到底有没有给」这个
+    可判定的事实,而不是「值是不是等于共享默认值」——后者分不清用户显式敲了
+    一遍默认值,还是压根没敲(与 `--database-url` 的 `database_url_explicit`
+    同一条理由,只是那边靠 argparse 的 `None` 哨兵,这两个参数的默认值是
+    `ab`/`search` 已经在读的非 `None` 字面量,不能改)。
+    """
+    return any(token == flag or token.startswith(flag + "=") for token in argv)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
+    raw_argv = list(argv) if argv is not None else list(sys.argv[1:])
     args = build_parser().parse_args(argv)
+    # `state-probe`(T-EX7)专用的显式性哨兵:必须在下面的 `max(1, ...)` clamp
+    # **之前**取,否则 `--concurrency 0` 会被 clamp 成 1、看起来和没给一样。
+    # 这两行只新增属性,不改 `args.concurrency`/`args.repeats` 本身任何一条既有
+    # 赋值,`ab`/`search` 读的还是同一份值、同一条 clamp。
+    args.concurrency_explicit = _explicit_flag_given(raw_argv, "--concurrency")
+    args.concurrency_raw = args.concurrency
+    args.repeats_explicit = _explicit_flag_given(raw_argv, "--repeats")
     # `--port` 与 `--base-url` 曾是两个各自独立的默认值:只改端口的人会拿到一台
     # 起在 8011、却被对着 8001 轮询的后端。端口是真源,base-url 只在显式给出时
     # 才覆盖(比如后端起在容器里)。
@@ -6605,8 +7217,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     runner = Runner(dry_run=args.dry_run, out_dir=Path(args.out_dir))
     handlers = {
         "seed": cmd_seed, "ask": cmd_ask, "report": cmd_report,
-        "search": cmd_search, "ab": cmd_ab, "restart": cmd_restart,
-        "export": cmd_export, "teardown": cmd_teardown,
+        "search": cmd_search, "ab": cmd_ab, "state-probe": cmd_state_probe,
+        "restart": cmd_restart, "export": cmd_export, "teardown": cmd_teardown,
         "prefix-probe": cmd_prefix_probe,
     }
     return handlers[args.command](args, runner)
