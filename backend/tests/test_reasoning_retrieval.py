@@ -5721,7 +5721,7 @@ def test_reflect_optimization_closed_set_is_registered_once():
 
 
 def test_reflect_optimization_env_roundtrip(monkeypatch):
-    """本期真正可用的那一格,以及与它正交的测量开关。"""
+    """四格之一(`prefix_snapshot`)的环境变量往返,以及与它正交的测量开关。"""
     from app.core.config import Settings
     monkeypatch.setenv("REASONING_REFLECT_OPTIMIZATION", "prefix_snapshot")
     monkeypatch.setenv("REASONING_REFLECT_MEASURE_CONTEXT", "true")
@@ -5746,6 +5746,12 @@ def test_reflect_optimization_validator_allows_the_whole_closed_set_when_planned
     闭集之外的拼写仍然被 `Literal` 挡在校验器之前,报的是「不在取值范围」而不是
     「未实现」;这条留一个非法拼写的用例,断言错误文案逐字列出四格,并且与两份
     部署文档那一行是同一串字节——运维照文档 grep 日志才搜得到。
+
+    ⚠ **`sentence` 这串字节的产地是 pydantic,不是本仓库**(`Input should be
+    ...` 是 pydantic-core 给 `Literal` 校验失败拼的原句)。`backend/requirements.txt`
+    精确钉了 `pydantic` 版本,所以这条只会在**升级 pydantic 的那个 PR**里变红,
+    且红在改依赖的同一个 diff 里——升版时这条与两份部署文档那一行要同 diff 改,
+    不是这条测试本身出了问题。
 
     变异:把 `REFLECT_OPTIMIZATION_PLANNED` 改回非空 ⇒ 上半段某个已实现取值会
     被误拒而红;把文档里引用这句的位置从 `REASONING_REFLECT_OPTIMIZATION` 那
@@ -5786,15 +5792,37 @@ def test_reflect_optimization_validator_allows_the_whole_closed_set_when_planned
         assert matching, name
 
 
-def test_reflect_optimization_rejects_a_value_outside_the_closed_set(
-    monkeypatch
+def test_reflect_optimization_validator_still_rejects_a_planned_value(
+    monkeypatch,
 ):
-    """闭集之外的拼写由 Literal 挡住:报的是"不在取值范围",不是"未实现"。"""
-    from app.core.config import Settings
-    monkeypatch.setenv("REASONING_REFLECT_OPTIMIZATION", "prefix_snapshoot")
+    """闭集为空时校验器恒放行(上一条钉的是这半),但机制本身没有被拆掉。
+
+    上一条用例的"闭集为空 ⇒ 恒放行"只覆盖了 `if value in
+    REFLECT_OPTIMIZATION_PLANNED` 这个条件**为假**的那一半;条件为**真**时那条
+    `raise` 在生产配置(`REFLECT_OPTIMIZATION_PLANNED == ()`)下永远不会被执行到
+    ——这半覆盖率完全来自"闭集恰好为空"这个巧合,校验器条件被整个改成
+    `if False:` 也不会有任何用例发现(评审 质量 P1-1)。这条把
+    `REFLECT_OPTIMIZATION_PLANNED` 打回非空,直接执行那条 `raise`,同时钉住拒绝
+    文案确实由 `REFLECT_OPTIMIZATION_IMPLEMENTED` 拼出——Q12「文案读四格」的
+    那半此前也只在恒不执行的分支里,等于没测。
+
+    变异:把 `validate_reflect_optimization` 的判断条件改成 `if False:`(方法体
+    其余不动)⇒ 这条红——`pytest.raises` 处 `Settings(...)` 不再抛。
+    """
+    from app.core import config
+
+    monkeypatch.setattr(
+        config, "REFLECT_OPTIMIZATION_PLANNED", ("prefix_delta_lean",))
+    monkeypatch.setenv(
+        "REASONING_REFLECT_OPTIMIZATION", "prefix_delta_lean")
     with pytest.raises(Exception) as excinfo:
-        Settings(_env_file=None)
-    assert "该取值将在后续 PR 实现" not in str(excinfo.value)
+        config.Settings(_env_file=None)
+    text = str(excinfo.value)
+    expected = (
+        "REASONING_REFLECT_OPTIMIZATION=prefix_delta_lean 该取值将在后续 PR 实现,"
+        "当前请用 " + " 或 ".join(config.REFLECT_OPTIMIZATION_IMPLEMENTED)
+    )
+    assert expected in text, text
 
 
 @pytest.mark.parametrize("configured", [
@@ -5807,9 +5835,9 @@ def test_reflect_optimization_is_gated_by_the_v2_master_switch(
     """四取值 × v2 开/关矩阵:总闸关着时恒 `off`,配了什么都不看。
 
     这一项**叠在** v2 之上而不是与它并列:总闸关着走的是 legacy 协议,那条路径
-    上根本没有"前缀"可谈。四格全测(包括本期未实现的一格)是刻意的:已实现的三格
-    钉住"门开着时如实带过",未实现的一格钉住"门关着时也一样回 `off`"——它在
-    v2 开着时由下面那条折回守卫接管,这里只钉门。
+    上根本没有"前缀"可谈。四格现在都已实现(`REFLECT_OPTIMIZATION_IMPLEMENTED`),
+    四格全测钉的是"门开着时四格各自如实带过、门关着时四格一样回 `off`"这件事,
+    不依赖闭集里哪一格还没实现。
 
     变异:把 `reflect_optimization()` 里的 `if not self.reflect_v2_active()`
     去掉 ⇒ v2 关 + `prefix_snapshot` 那格红。
@@ -5817,8 +5845,10 @@ def test_reflect_optimization_is_gated_by_the_v2_master_switch(
     from app.core.config import REFLECT_OPTIMIZATION_IMPLEMENTED
     from app.services.reasoning_retrieval import ReasoningRetriever
     rrepo.settings.reasoning_reflect_v2_enabled = v2_on
-    # 未实现取值在生产里进不了 Settings(校验器拦着),这里直接赋值只为把「门」
-    # 与「取值合法性」两件事分开测。
+    # 直接给 rrepo.settings 赋值,不走 `Settings()` 的环境变量校验,是为了把
+    # 「门」与「取值合法性」两件事分开测——取值合法性(四格放行、闭集之外拒绝)
+    # 由 `test_reflect_optimization_validator_allows_the_whole_closed_set_when_planned_is_empty`
+    # 钉,这里只钉总闸这道门。
     rrepo.settings.reasoning_reflect_optimization = configured
     rr = ReasoningRetriever.from_repository(
         rrepo, rrepo.settings, fail_closed=True)
@@ -15678,6 +15708,20 @@ def test_delta_layouts_cover_both_delta_backed_arms():
     assert _DELTA in _DELTA_LAYOUTS and _LEAN in _DELTA_LAYOUTS
 
 
+# T-PL1 中间态:L 与 D 今天共用同一次装配,除方面账那一块(`aspect_block`)之外
+# S/user 段理应逐字节相同。这个白名单登记"允许两条臂出现字节差异的字面量标
+# 记"——今天是空集。T-PL5 落地 lean 专属自评合同之后,预期在这里补两条:S 的
+# 自评段那几句、以及方面账那一块里宣布"这是 lean 臂"的那一句;届时在这个元组
+# 上补,不要删掉下面测试里的差分断言(评审 存疑2/P2-2 拍板)。
+_LEAN_VS_DELTA_ALLOWED_DIFF_MARKERS: "tuple[str, ...]" = ()
+
+
+def _without_lean_diff_markers(text: str) -> str:
+    for marker in _LEAN_VS_DELTA_ALLOWED_DIFF_MARKERS:
+        text = text.replace(marker, "")
+    return text
+
+
 def test_prefix_delta_lean_reaches_delta_assembly_not_the_snapshot_fallback(rrepo):
     """T-PL1 验收:`prefix_delta_lean` 起来之后真的拿到 delta 装配(计划 §3 T-PL1
     验收「`prefix_delta_lean` 能起来且拿到 delta 装配」、用例 (c))。
@@ -15687,6 +15731,12 @@ def test_prefix_delta_lean_reaches_delta_assembly_not_the_snapshot_fallback(rrep
     `_DELTA_LAYOUTS`/`_PREFIX_LAYOUTS` 的成员资格,所以同一剧本下 L 与 D 现在逐
     字节相同——这正是这条用例要的证据:两条臂共用同一次装配,差别只应该出现在
     后续任务补的自评合同上,不该现在就以任何字节差异的形式出现。
+
+    这条断言是**差分形式**,不是整串相等(评审 存疑2/P2-2 拍板):整串相等必然
+    在 T-PL3(S 的自评段)/T-PL5(T 里那一句)变红,而红了之后最省力的修法是把
+    两行整段删掉,连 D 通道到位这条有价值的守卫一起丢。差分形式把"允许出现差
+    异的面"收进 `_LEAN_VS_DELTA_ALLOWED_DIFF_MARKERS`(今天为空),后续任务只
+    需要往里面补标记,这条测试的骨架不必重写。
 
     变异:把 `_DELTA_LAYOUTS` 缩回 `("prefix_delta",)`,同时把 `_PREFIX_LAYOUTS`
     直接写成三格字面量绕开对它的派生(让导入期对账守卫看不出分歧)⇒ 这条红——
@@ -15701,16 +15751,32 @@ def test_prefix_delta_lean_reaches_delta_assembly_not_the_snapshot_fallback(rrep
     # L 真的走到了 delta 装配:D 块随轮数累加,不是恒为空。
     assert [len(lean_llm.delta_blocks(turn)) for turn in range(4)] == [
         0, 1, 2, 3]
-    # 本期两条臂共用同一次装配,理应逐字节相同(L 的自评合同留给后续任务)。
-    assert lean_llm.system_prompts == delta_llm.system_prompts
-    assert lean_llm.user_prompts == delta_llm.user_prompts
+    # D 通道逐块字节相同——载荷本身两条臂今天完全一致,这条在 T-PL5 之后仍应
+    # 成立(自评合同改的是方面账,不是 D 块本身)。
+    for turn in range(4):
+        assert lean_llm.delta_blocks(turn) == delta_llm.delta_blocks(turn), turn
+    # S 不在白名单里,理应逐字节相同。
+    assert ([_without_lean_diff_markers(p) for p in lean_llm.system_prompts]
+            == [_without_lean_diff_markers(p) for p in delta_llm.system_prompts])
+    # user 段除方面账那一块(T-PL5 起会长出 lean 专属自评合同)之外逐字节相同。
+    for turn in range(4):
+        lean_user = _without_lean_diff_markers(
+            lean_llm.user_prompts[turn].replace(
+                lean_llm.aspect_block(turn), "", 1))
+        delta_user = _without_lean_diff_markers(
+            delta_llm.user_prompts[turn].replace(
+                delta_llm.aspect_block(turn), "", 1))
+        assert lean_user == delta_user, turn
 
 
 def test_delta_layout_takes_the_same_prefix_message_shape(rrepo):
-    """`prefix_delta` 与 `prefix_snapshot` 走**同一格**分派,不是第二种形状。
+    """`prefix_delta`/`prefix_delta_lean` 与 `prefix_snapshot` 走**同一格**分派,
+    不是第二种形状——`_reflect_prefix_layout` 只认 `_PREFIX_LAYOUTS` 成员资格,
+    三格(P/D/L)一视同仁。
 
     变异:把 `_reflect_prefix_layout` 的第二个条件改回 `== "prefix_snapshot"` ⇒
-    delta 臂拿到 off 的渲染,而它带着 C/T/S/D 载荷 ⇒ `as_user_block` 响亮拒绝。
+    delta/lean 臂拿到 off 的渲染,而它们带着 C/T/S/D 载荷 ⇒ `as_user_block` 响亮
+    拒绝。
     """
     from app.services.reasoning_context import ReflectContext
     from app.services.reasoning_retrieval import ReasoningRetriever
@@ -15720,7 +15786,7 @@ def test_delta_layout_takes_the_same_prefix_message_shape(rrepo):
     loaded = ReflectContext(
         server_state="", evidence="K", observations="H",
         contract="C", turn_state="T", static_prompt="S", delta="D")
-    for arm in (_PREFIX, _DELTA):
+    for arm in (_PREFIX, _DELTA, _LEAN):
         rrepo.settings.reasoning_reflect_optimization = arm
         assert rr._reflect_prefix_layout(loaded) is True, arm
     rrepo.settings.reasoning_reflect_optimization = "off"

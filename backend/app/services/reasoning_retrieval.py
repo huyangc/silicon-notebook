@@ -425,7 +425,8 @@ _MEASURE_CALL_KEYS: Dict[str, str] = {
     "attempts": _registered_measure_key("call_attempts"),
     "response_chars": _registered_measure_key("response_chars"),
 }
-#: `prefix_delta` 的三个**行为事实**键(拍板 Q7)。与上面那几个的区别:它们不是
+#: `_DELTA_LAYOUTS`(`prefix_delta`/`prefix_delta_lean`)的三个**行为事实**键
+#: (拍板 Q7)。与上面那几个的区别:它们不是
 #: "量出来的",而是这条臂做过什么——重建过几次、有没有不可逆地回退、这一条消息里
 #: 有几块 D。所以它们在测量关时也写(载体见 `ReflectMeasurement.measures_messages`)。
 _MEASURE_CONTEXT_REBUILDS = _registered_measure_key("context_rebuilds")
@@ -3930,10 +3931,10 @@ class _ReasoningRunState:
     # 删掉,除 K/D 的字节组织外一切逐字节不变(动作选取、绑定资格、配额、终止判据
     # 一格都不读它)。
     #
-    # 带默认值、留空即中性:只有 `reflect_optimization() == "prefix_delta"` 且本
-    # run 已经有静态目录时才构造(写点单一在 `_reflect_delta_context`),其余情况
-    # 恒为 None ——`_new_run_state` 因此一行都不用改,`off` / `prefix_snapshot` /
-    # 关闭态零新状态。
+    # 带默认值、留空即中性:只有 `reflect_optimization() in _DELTA_LAYOUTS`
+    # (`prefix_delta`/`prefix_delta_lean`)且本 run 已经有静态目录时才构造(写点
+    # 单一在 `_reflect_delta_context`),其余情况恒为 None ——`_new_run_state`
+    # 因此一行都不用改,`off` / `prefix_snapshot` / 关闭态零新状态。
     reflect_delta: "Optional[ReflectDeltaState]" = None
 
 
@@ -4986,7 +4987,8 @@ class ReasoningRetriever:
         `reflect_measures_context()` 那个单点,它与 `reflect_optimization()`
         **正交**——`off` 臂开着测量正是对照实验要的形态(拍板 Q2)。
 
-        ⚠ **`prefix_delta` 是那条口径唯一的例外(拍板 Q7,已登记偏离)。** 那条臂
+        ⚠ **`_DELTA_LAYOUTS`(`prefix_delta`/`prefix_delta_lean`)是那条口径唯一
+        的例外(拍板 Q7,已登记偏离)。** 这两条臂
         无条件构造这个对象,因为重建次数与"有没有回退"是**行为事实**,与要不要量
         字节无关:一个测量关着的生产 run 照样可能整段退回 P 的有界选择,而那件事
         不出现在任何一个字节数里。`measures_messages` 因此接住原来那道判据的另一
