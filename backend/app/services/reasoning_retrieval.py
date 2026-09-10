@@ -654,10 +654,10 @@ def _build_delta_snapshot(
     首句要的东西(不先把池子填满、第二轮立刻重建)。写成两份的话,首版与重建版的
     选卡判据迟早会漂开,而那种漂移在字节上看着完全正常。
 
-    **冻结表只增不减,`visible_keys` 随 K 收缩**(拍板存疑 1)。两者在第一次重建之
-    前恰好相等,之后就不再相等:`build_evidence_block` 读冻结表,所以一张曾展示过的
-    卡进新 K 时复用的仍是它第一次发出去的那串字节(§4.4「展示后保持不变」);而离开
-    新 K 的那些键不再"可见",以后经增量档序回到某一块 D 时同样复用冻结字节
+    **冻结表只增不减,当前可见集随 K 收缩**(拍板存疑 1)。两者在第一次重建之前恰好
+    相等,之后就不再相等:`build_evidence_block` 读冻结表,所以一张曾展示过的卡进新
+    K 时复用的仍是它第一次发出去的那串字节(§4.4「展示后保持不变」);而离开新 K 的
+    那些键不再"可见",以后经增量档序回到某一块 D 时同样复用冻结字节
     (§4.4「可从已有内存池恢复」)。拿冻结表当可见集用的话,这批卡会被"曾展示"口径
     永久挡在增量之外,而且不进任何一个 `omitted` ——它对模型从此不可见,却没有一个
     计数披露这件事。
@@ -698,7 +698,10 @@ def _build_delta_snapshot(
     delta.snapshot_evidence = evidence
     delta.snapshot_history = history
     delta.blocks.clear()
-    delta.visible_keys = {str(key) for key in selection.shown_keys}
+    # 可见集的两格与它们各自对应的那一块同时清账:K 的那格整体换成这一版真的渲染
+    # 出来的键,D 的那格随 `blocks` 清空(`frozen_cards` 不动,理由见上)。
+    delta.snapshot_keys = {str(key) for key in selection.shown_keys}
+    delta.block_keys.clear()
     for key, text in selection.cards:
         delta.note_shown(key, text)
     delta.evidence_chars = len(evidence)
@@ -715,8 +718,9 @@ def _delta_cards(
 
     额度是 delta 的累计口径(设计 §5.1):证据池计 **K + 所有 D 的总和**,所以传
     下去的是 `budget - evidence_chars`,不是每轮各拿一份满额。`already_shown` 传的
-    是**当前可见集**而不是冻结表,理由见 `build_delta_evidence_block`;`frozen_cards`
-    则让"曾展示、此刻不可见"的卡回来时复用原来那串字节。
+    是**当前可见集**(K 那一版的键 ∪ 已发出 D 块的键)而不是冻结表,理由见
+    `build_delta_evidence_block`;`frozen_cards` 则让"曾展示、此刻不可见"的卡回来时
+    复用原来那串字节。
 
     它被调用**两次**(重建前一次当预算探针、重建后一次当真正要发的那一块)是刻意
     的:探针只读不写,所以丢掉重算一次是安全的;把它的产出留到重建之后再用才是错
@@ -729,7 +733,7 @@ def _delta_cards(
         collected=state.collected, elements=state.elements,
         chunks=state.chunks,
         bound_keys=bound_keys, fresh_keys=fresh_keys,
-        already_shown=tuple(delta.visible_keys),
+        already_shown=(*delta.snapshot_keys, *delta.block_keys),
         question=state.question, action_query=observer.last_query,
         budget_chars=budget - delta.evidence_chars,
         excerpt_chars=excerpt_chars, max_cards=max_cards,
@@ -753,9 +757,17 @@ def _delta_supplements(
     新进池子**的标识,而一个键第一次进池子的那一轮要么还没被冻结,要么刚被同一轮的
     K/D 用同一批检索词冻结——于是这个交集在生产口径下恒空,整条路径不可达。
 
-    **轮转**(`ReflectDeltaState.supplement_cursor`):每轮从游标处取至多 `max_cards`
-    个候选,游标随之前进。绑定键序是"大纲在前、方面轮转"的固定序,恒从队首取的话
-    队首那几个键每轮被重算一遍摘录、队尾的键永远等不到自己那一轮。
+    **候选集的收窄只在这里做一次**:调用方给的是那一轮的绑定键序,`∩ 冻结表` 这道
+    口径留在这里(调用点再滤一遍是同一条判据的第二份实现,改这里的口径时那一份会
+    静默变成陈的)。
+
+    **轮转**(`ReflectDeltaState.supplement_last_key`):从上一轮服务的最后一个键在
+    **本轮候选序**里的位置往后接,取至多 `max_cards` 个,末尾绕回队首;那个键已经
+    不在候选序里(离开绑定或离开池子)⇒ 从头开始。绑定键序是"大纲在前、方面轮转"的
+    序,恒从队首取的话队首那几个键每轮被重算一遍摘录、队尾的键永远等不到自己那一
+    轮。续接点存**键**而不是位置:候选序的长度与顺序每轮都会变(方面新绑一个键就整
+    段移位),而位置游标在"每轮左旋一格"这种形态下会稳定取到同一批键——三个候选、
+    `max_cards=2`、每轮左旋一格时第三个键一轮都轮不到,正是这一格要修的那件事。
 
     **先选后调**(`ReflectDeltaState.supplement_for` 的调用契约):这里先按
     `max_cards` 与剩余额度定下要发哪几个键,再对它们调 `supplement_for`,非空返回值
@@ -776,9 +788,10 @@ def _delta_supplements(
         if key in delta.frozen_cards]
     if not candidates or budget_left <= 0:
         return ()
-    start = delta.supplement_cursor % len(candidates)
+    start = (candidates.index(delta.supplement_last_key) + 1
+             if delta.supplement_last_key in candidates else 0)
     ordered = (candidates[start:] + candidates[:start])[:max_cards]
-    delta.supplement_cursor += len(ordered)
+    delta.supplement_last_key = ordered[-1]
     lines: List[str] = []
     used = 0
     for key, text in render_pool_cards(
@@ -793,6 +806,75 @@ def _delta_supplements(
             lines.append(line)
             used += len(line) + 1
     return tuple(lines)
+
+
+@dataclass(frozen=True, slots=True)
+class _CarriedDelta:
+    """回退时**上文里留着的那几块 D**:块字节、块里的键,和它们占掉的两笔账。
+
+    回退不清空已发出的 D(拍板 Q4),而回退之后 K 由 P 的有界选择每轮重建——于是那
+    一支必须知道三件事:留下来的是哪几块(还原 `blocks`)、里面已经可见的是哪些键
+    (排除在新 K 之外,否则同一条证据在一条消息里出现两遍、两遍都不带版本标记),以
+    及它们已经占掉多少证据池与历史池(剩下的才是这一轮 K 的额度,否则一条消息的证
+    据池实测可以涨到档位的两倍并**持续到 run 结束**)。
+
+    两笔账按 delta 自己的口径拆(设计 §5.1):块头与卡片节计证据池,观察行与"已接受
+    的方面更新"那一句计历史池。所以这里各减一次那一版 K 的对应半——`evidence_chars`
+    恒等于 `len(snapshot_evidence) + Σ(块头 + 卡片节)`,`history_chars` 恒等于
+    `len(snapshot_history) + Σ(观察行 + notes)`(两条恒等式各有用例)。
+    """
+
+    blocks: "Tuple[str, ...]"
+    keys: "Set[str]"
+    evidence_chars: int
+    history_chars: int
+
+
+def _carried_delta(delta: "Optional[ReflectDeltaState]") -> "_CarriedDelta":
+    """此刻上文里那几块 D 的四件事,**一处口径**。纯读:一格投影都不改。
+
+    两个调用点各要它一次:重建**之前**存一份(重建的第一件事就是清空 `blocks`、把
+    两笔账重置成新 K 的长度、并把 D 那格可见集清掉),以及回退之后 P 的那一支每轮读
+    一次"保留 D 还占着多少"。同一条减法写在两处的话,改一处口径时另一处会静默变成
+    陈的(那正是这一族最难看见的故障)。
+
+    `delta is None`(`off` / `prefix_snapshot`,以及 v2 总闸关)⇒ 全中性的四格,两条
+    臂逐字节回到接入前。回退时 `_delta_fallback` 会把 K 的两块字节清空,所以这条减
+    法在回退**之后**照样给出"只剩 D"那一半,而不是负数。
+    """
+    if delta is None:
+        return _CarriedDelta((), set(), 0, 0)
+    return _CarriedDelta(
+        blocks=tuple(delta.blocks),
+        keys=set(delta.block_keys),
+        evidence_chars=delta.evidence_chars - len(delta.snapshot_evidence),
+        history_chars=delta.history_chars - len(delta.snapshot_history))
+
+
+def _delta_fallback(
+    delta: "ReflectDeltaState", carried: "_CarriedDelta",
+) -> None:
+    """不可逆回退:保留 D 原样,两笔账收缩成**只剩 D 那一半**。
+
+    两条回退判据(迟滞与"重建之后仍装不下")共用这一处,所以"保留哪几块、留哪些键、
+    两笔账怎么收、notes 清不清"在两条支上不可能分歧——它们过去是两段各写一遍的代码,
+    而其中一条支漏一句的后果(比如迟滞那支不清 `pending_aspect_notes`)是一个只增不
+    减、永不消费的 list。
+
+    K 的两块字节**清空**:回退之后那一支每轮自己按剩下的额度重选一版 K,这两串再没
+    有任何读者;留着一份陈的 K 只会让下一个读者把它当成此刻的 K,而 `_carried_delta`
+    的那条减法也正好因此在回退之后仍然成立。
+
+    `blocks` 用整体赋值而不是重新绑定:调用方与投影持有的是同一个 list 对象。
+    """
+    delta.fallback = True
+    delta.blocks[:] = carried.blocks
+    delta.block_keys = carried.keys
+    delta.snapshot_evidence = ""
+    delta.snapshot_history = ""
+    delta.evidence_chars = carried.evidence_chars
+    delta.history_chars = carried.history_chars
+    delta.pending_aspect_notes.clear()
 
 
 def _note_delta_measurement(
@@ -4772,6 +4854,14 @@ class ReasoningRetriever:
             # `None` = 这一轮刚刚不可逆地回退(投影上那格已经置位)。落到下面 P
             # 的有界选择,本 run 剩余轮此后都从这里走。
             delta = state.reflect_delta
+        # 回退之后上文里仍留着那几块 D(拍板 Q4),而这一支每轮自己重选一版 K。所以
+        # **回退轮及此后每一轮**都要按保留 D 已经占掉的那两半收窄:证据池给 K 的额度
+        # 是「档位池 − 保留 D 的证据半」、近期观察窗是「`state_chars` − 保留 D 的历史
+        # 半」,而保留 D 里已经可见的那些键排除在 K 的候选之外。少了这三格,一条消息
+        # 里会有两份都不带版本标记的同一张卡(§5 风险 4),两个池子各涨到档位的两倍,
+        # 而且回退不可逆 ⇒ 保留块永不清,这不是一轮的尖峰。`delta is None`
+        # (`off` / `prefix_snapshot`)⇒ 四格全中性,两条臂逐字节回到接入前。
+        carried = _carried_delta(delta)
         selection = build_evidence_block(
             collected=state.collected, elements=state.elements,
             chunks=state.chunks, chains=state.chains,
@@ -4781,14 +4871,16 @@ class ReasoningRetriever:
             # 不会被方面代表挤出去(理由见 `evidence_bound_keys` 的 docstring)。
             # `build_evidence_block` 一个字都没改:它当初就把这一档定义成"一份
             # 键序",T4 只是把方面那半并进来。
-            bound_keys=evidence_bound_keys(
+            bound_keys=[key for key in evidence_bound_keys(
                 state.aspects,
-                [key for section in outline for key in section.evidence_keys]),
-            fresh_keys=observer.fresh_result_ids(),
+                [key for section in outline for key in section.evidence_keys])
+                if str(key) not in carried.keys],
+            fresh_keys=[key for key in observer.fresh_result_ids()
+                        if str(key) not in carried.keys],
             # 摘录检索词取**原始查询文本**,不是规范化身份串(见
             # `v2_request_query_text`)。
             question=state.question, action_query=observer.last_query,
-            budget_chars=budget,
+            budget_chars=max(0, budget - carried.evidence_chars),
             excerpt_chars=excerpt_chars,
             # 回退轮的 K 也**复用冻结字节**:上文里那些 D 卡是冻结的那串字节,同
             # 一个键在本轮 K 里按新检索词重算的话,同一条证据就在一条消息里出现两
@@ -4801,7 +4893,8 @@ class ReasoningRetriever:
         # 见过它,就不该因为"它在池子里"取得大纲绑定资格(设计稿 §6.2)。
         state.ever_shown_outline_keys.update(selection.shown_keys)
         observations = render_observations(
-            observer.rows, recent=recent, state_chars=state_chars)
+            observer.rows, recent=recent,
+            state_chars=max(0, state_chars - carried.history_chars))
         measurement = self._reflect_measurement(
             state, selection, optimization)
         if optimization in _PREFIX_LAYOUTS and catalog is not None:
@@ -4963,7 +5056,10 @@ class ReasoningRetriever:
         这一轮又连一张新卡都装不下 ⇒ 这个预算下压缩已经无效,再压一次是纯空转(每
         轮一次全池 `build_evidence_block` + K 重写 ⇒ 公共前缀塌回只剩 C,这条臂在它
         自己要改进的两个轴上反而比 `prefix_snapshot` 更贵)。那时直接走回退。历史池
-        溢出触发的重建不受迟滞约束——那是账本真的又长了,压缩对它仍然有效。
+        溢出触发的重建**只在本轮不拥挤时**不受迟滞约束(判据是
+        `crowded and rebuilt_last_turn`):账本真的又长了、而新证据还装得下时,压缩
+        对它仍然有效;同一轮里既历史溢出、又连一张新卡都装不下的话,迟滞照样赢——
+        那时压缩已经证明无效,再压一次仍然是空转。
 
         返回 `None` = **这一轮刚刚不可逆地回退**(拍板 Q4)。用返回值而不是在这里
         自己再拼一份 P 的装配:那样"回退之后与 `prefix_snapshot` 走同一支"就成了
@@ -4972,12 +5068,16 @@ class ReasoningRetriever:
         原)、不清空候选池、不清空 `ever_shown_outline_keys`、不重置任何配额,也不多
         一次模型调用或轨迹步。
 
-        ⚠ **回退之后 `evidence_chars` / `history_chars` 两笔账停用。** 那一次被丢弃
-        的重建已经把它们重置成新 K 的长度,而还原回去的 `blocks` 是**旧** K 时代的
-        块——两者对不上。P 的那一支一格都不读这两个数(它每轮按硬预算重新选卡),
-        所以不去修补一份此后没有读者的账;真正要守住的两件事各自成立:上文里已经
-        发出的 D 一个字节都没变,而 `ever_shown_outline_keys` 只登记真发出去过的键
-        (被丢弃那一版 K 的选取一格都不登记)。
+        ⚠ **回退之后两笔账收缩成「保留 D 那一半」,而不是停用。** 被丢弃的那次重建
+        已经把它们重置成新 K 的长度,而还原回去的 `blocks` 是**旧** K 时代的块——所以
+        `_delta_fallback` 把两格各减掉那一版 K 的对应半,只留下保留 D 真的占掉的字
+        节。P 的那一支每轮读它们两次:K 的额度是「档位证据池 − 保留 D 的证据半」、
+        近期观察窗的额度是「`state_chars` − 保留 D 的历史半」,而保留 D 里已经可见
+        的键(`block_keys`)被排除在 K 之外。少了这三格,回退轮及其**此后每一轮**的
+        一条消息里会有两份都不带版本标记的同一张卡,而两个池子各涨到档位的两倍
+        (回退不可逆 ⇒ 保留块永不清,这不是一轮的尖峰)。另外两件事各自成立:上文里
+        已经发出的 D 一个字节都没变,而 `ever_shown_outline_keys` 只登记真发出去过的
+        键(被丢弃那一版 K 的选取一格都不登记)。
         """
         delta = state.reflect_delta
         bound_keys = evidence_bound_keys(
@@ -5011,19 +5111,20 @@ class ReasoningRetriever:
         rebuilt = False
         if snapshot is None and (
                 delta.history_chars + history_add > state_chars or crowded):
+            # **先存一份此刻的 D**:这一支的两条判据都可能走到回退,而重建的第一件
+            # 事就是清空 `blocks`、把两笔账重置成新 K 的长度。上文里那些标着"新增"
+            # 的块是模型已经读过的材料,抽掉它们等于让一整段上文凭空消失(拍板 Q4
+            # 「回退不清空已发出的 D」);而回退之后 P 那一支要按"档位池 − 保留 D"
+            # 给 K 定额度、并把保留 D 里已可见的键排除掉,所以键与两笔账一起存。
+            carried = _carried_delta(delta)
             if crowded and delta.rebuilt_last_turn:
                 # ④ 迟滞:上一轮刚压紧过一版,这一轮又连一张新卡都装不下 ⇒ 这个
                 #    预算下压缩已经无效,第二次重建是纯空转。直接回退(不可逆),
                 #    已发出的 D 一格未动(这一支还没碰 `blocks`)。
-                delta.fallback = True
-                delta.pending_aspect_notes.clear()
+                _delta_fallback(delta, carried)
                 return None
             # ④ 重建:零 LLM、零 I/O。`blocks` 整体清空、两个累计计数重置、游标
-            #    推到账本末尾(那些待追加的观察行由新 K 的近期窗接过去)。**先存一
-            #    份 `blocks`**:这一次重建可能在下一句判据上被整个丢弃,而那时上文
-            #    里那些标着"新增"的块是模型已经读过的材料,抽掉它们等于让一整段上
-            #    文凭空消失(拍板 Q4「回退不清空已发出的 D」)。
-            kept_blocks = list(delta.blocks)
+            #    推到账本末尾(那些待追加的观察行由新 K 的近期窗接过去)。
             rebuilt = True
             snapshot = _build_delta_snapshot(
                 state, delta, observer, bound_keys=bound_keys,
@@ -5050,9 +5151,7 @@ class ReasoningRetriever:
             #    (不再合取"没有待追加的观察行":重建刚把游标推到账本末尾,那一格
             #    在这个位置恒真,写上去只是让判据看起来比实际宽。)
             if cards.omitted and not cards.shown_keys:
-                delta.fallback = True
-                delta.blocks[:] = kept_blocks
-                delta.pending_aspect_notes.clear()
+                _delta_fallback(delta, carried)
                 return None
         # 只登记**真发出去**的那一版 K 的键(设计 §4.4:绑定资格在最终渲染之后才
         # 登记)。被丢弃那一次重建的选取在上面两条回退分支里已经 `return`,一格都
@@ -5066,9 +5165,7 @@ class ReasoningRetriever:
         #    求"先选定要发的键、非空返回值无条件拼进本块",所以剩余额度必须在调用
         #    之前就算清楚。
         supplements = _delta_supplements(
-            state, delta, observer,
-            candidate_keys=[key for key in bound_keys
-                            if str(key) in delta.frozen_cards],
+            state, delta, observer, candidate_keys=bound_keys,
             max_cards=max_cards, excerpt_chars=excerpt_chars,
             budget_left=(budget - delta.evidence_chars - _DELTA_HEAD_CHARS
                          - len(cards.text)))
@@ -5091,7 +5188,7 @@ class ReasoningRetriever:
             # 出这一块的候选一个都不登记,模型没见过它就不该取得绑定资格。
             for key, text in cards.cards:
                 delta.note_shown(key, text)
-                delta.visible_keys.add(key)
+                delta.block_keys.add(key)
             state.ever_shown_outline_keys.update(cards.shown_keys)
         measurement = self._reflect_measurement(
             state, snapshot, optimization)
