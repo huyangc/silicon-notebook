@@ -5631,19 +5631,28 @@ def test_reflect_optimization_rejects_the_unimplemented_values(
     """已登记但未实现的两格:启动期**响亮**拒绝,不静默退回 `off`(拍板 Q1)。
 
     静默降级会让一个自以为在跑增量的部署把每一条测量都归到错误的臂上——那比
-    启动失败难查得多。措辞也钉住:错误里必须说出"该用哪两格",否则运维只知道
-    配错了、不知道配什么。
+    启动失败难查得多。措辞也钉住,而且钉的是**整句**:两份部署文档逐字引用了这
+    条错误,标点差一个全角逗号,运维照文档 grep 日志就搜不到——所以这里既断言
+    运行期的整句,也断言两份文档引的是同一串字节。
 
     变异:把 `validate_reflect_optimization` 的 `raise` 换成 `return "off"`
-    (或整个校验器删掉)⇒ 这条红。
+    (或整个校验器删掉)⇒ 这条红;把句中的半角逗号改成全角 ⇒ 这条也红。
     """
+    import pathlib
     from app.core.config import Settings
     monkeypatch.setenv("REASONING_REFLECT_OPTIMIZATION", value)
     with pytest.raises(Exception) as excinfo:
         Settings(_env_file=None)
     text = str(excinfo.value)
-    assert "该取值将在后续 PR 实现" in text
-    assert "off 或 prefix_snapshot" in text
+    sentence = (f"REASONING_REFLECT_OPTIMIZATION={value} 该取值将在后续 PR 实现,"
+                "当前请用 off 或 prefix_snapshot")
+    assert sentence in text, text
+    # 文档引用的是同一串字节(占位符之后的部分逐字相同)。
+    root = pathlib.Path(__file__).resolve().parents[2]
+    quoted = sentence.split(" ", 1)[1]
+    for name in ("docs/deployment-and-configuration.md",
+                 "docs/deployment-and-configuration_zh.md"):
+        assert quoted in (root / name).read_text(encoding="utf-8"), name
 
 
 def test_reflect_optimization_rejects_a_value_outside_the_closed_set(
