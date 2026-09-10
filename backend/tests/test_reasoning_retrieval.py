@@ -14016,14 +14016,22 @@ def test_measure_write_side_stays_inside_the_registered_key_set(rrepo):
     `context_rebuilds` / `context_fallback` / `delta_blocks` 只在 `prefix_delta`
     下有产地(拍板 Q7),而块长与前缀那几个键在 `off` 臂上就写满了。拿单臂取证去
     比整份清单,要么这条恒红、要么得把那三格从清单里摘出去——后者正好把"登记了
-    却没有产地"这一半守卫关掉。所以这里跑**两条** run(`off` + `prefix_delta`),
-    并集才是"写侧到底能写出哪些键"。
+    却没有产地"这一半守卫关掉。所以这里跑**四条** run(四格策略位各一条),并集
+    才是"写侧到底能写出哪些键"。
+
+    四格全跑而不是只跑两格(T-PL5):`assessment_rows` / `assessment_absent` 按
+    拍板 Q8 是**四臂通写**的,而"通写"这件事只有逐臂取证才断得到——只跑 `off` 与
+    `prefix_delta` 的话,把写点挪进某个只有 delta 臂走得到的分支仍然全绿,而
+    D↔L 那一对的共同基线已经没了。逐臂的 `written_by_arm` 因此单独断一次。
 
     变异:把 `_measure_reflect_messages` 里任一个键改成手写字面量并拼错 ⇒
     `_registered_measure_key` 在导入期就抛;绕开它直接写进 detail ⇒
     `_TraceRecorder.__call__` 里那道 `⊆` 判据 `RuntimeError`(`PYTHONOPTIMIZE=1`
     下同样成立——那里是 `raise` 不是 `assert`);连那道判据一起删掉 ⇒ 这条红。
-    把 `_note_delta_measurement` 的三格写死成两格 ⇒ 并集缺一格,这条红。
+    把 `_note_delta_measurement` 的三格写死成两格 ⇒ 并集缺一格,这条红。把
+    `_note_assessment_measurement` 的门从 `measures_messages` 改成
+    `optimization in _DELTA_LAYOUTS` ⇒ `off`/`prefix_snapshot` 两臂缺那两格,
+    逐臂那一条红。
     """
     from app.domain.reasoning_trace_stats import (
         REFLECT_MEASUREMENT_DETAIL_KEYS,
@@ -14032,18 +14040,24 @@ def test_measure_write_side_stays_inside_the_registered_key_set(rrepo):
     # 这条脚本下 reflect 步 detail 的既有键(测量之外的那一份),冻结在这里。
     baseline = {"next_action", "no_progress", "stale", "sufficient"}
     written: set = set()
-    for arm in ("off", _DELTA):
+    written_by_arm: dict = {}
+    for arm in ("off", _PREFIX, _DELTA, _LEAN):
         _llm, armed = _measured_run(
             rrepo, optimization=arm, intent_detail=_TWO_ASPECTS,
             reflects=_three_turn_reflects(),
             chunk_results=_three_turn_chunks(), reasoning_max_chunk_searches=2)
         armed_details = _reflect_details(armed)
         assert armed_details, arm
+        written_by_arm[arm] = set()
         for turn, detail in enumerate(armed_details):
             assert set(detail) <= baseline | set(
                 REFLECT_MEASUREMENT_DETAIL_KEYS), (arm, turn, sorted(detail))
             written |= _measure_keys(detail)
+            written_by_arm[arm] |= _measure_keys(detail)
     assert written == set(REFLECT_MEASUREMENT_DETAIL_KEYS)
+    # 两个自评键**每一格策略位都有产地**(拍板 Q8「四臂通写」)。
+    for arm, keys in written_by_arm.items():
+        assert {"assessment_rows", "assessment_absent"} <= keys, arm
     _llm, result = _measured_run(
         rrepo, intent_detail=_TWO_ASPECTS, reflects=_three_turn_reflects(),
         chunk_results=_three_turn_chunks(), reasoning_max_chunk_searches=2)
@@ -15708,12 +15722,28 @@ def test_delta_layouts_cover_both_delta_backed_arms():
     assert _DELTA in _DELTA_LAYOUTS and _LEAN in _DELTA_LAYOUTS
 
 
-# T-PL1 中间态:L 与 D 今天共用同一次装配,除方面账那一块(`aspect_block`)之外
-# S/user 段理应逐字节相同。这个白名单登记"允许两条臂出现字节差异的字面量标
-# 记"——今天是空集。T-PL5 落地 lean 专属自评合同之后,预期在这里补两条:S 的
-# 自评段那几句、以及方面账那一块里宣布"这是 lean 臂"的那一句;届时在这个元组
-# 上补,不要删掉下面测试里的差分断言(评审 存疑2/P2-2 拍板)。
-_LEAN_VS_DELTA_ALLOWED_DIFF_MARKERS: "tuple[str, ...]" = ()
+from app.services.prompts import (  # noqa: E402
+    _V2_ASSESSMENT_INSTRUCTION, _V2_LEAN_ASSESSMENT_INSTRUCTION,
+)
+from app.services.reasoning_aspects import (  # noqa: E402
+    ASPECT_BLOCK_NOTE, ASPECT_BLOCK_NOTE_LEAN,
+)
+
+# L 与 D 共用同一次装配,差异**只允许**出现在自评合同的两处双胞胎上。这个白名单
+# 登记那两处的四个字面量(每处一对孪生常量:L 那一份与它替换掉的三臂那一份),
+# 下面的差分断言把两条臂的字节各自去掉这四段之后**逐字节比**——所以"L 顺手精简了
+# T"、"L 的 D 块与 D 不同"、"L 的 S 里多了一句别的"这一族都会红,而两处自评合同的
+# 替换本身不会(计划 §5 风险 6;评审 存疑2/P2-2 拍板)。
+#
+# ⚠ 四个都要在,不能只登记 L 那两份:去标记是 `str.replace`,两条臂各自去掉自己那
+# 一份之后才在同一个位置留下同一个空档。只登记 L 的话,D 那一侧还留着旧段,比对
+# 恒红,而"最省力的修法"又会变成删掉整条断言。
+_LEAN_VS_DELTA_ALLOWED_DIFF_MARKERS: "tuple[str, ...]" = (
+    _V2_LEAN_ASSESSMENT_INSTRUCTION,        # S:L 的自评段
+    _V2_ASSESSMENT_INSTRUCTION,             # S:它替换掉的三臂那一段
+    ASPECT_BLOCK_NOTE_LEAN,                 # T:状态半尾注的 lean 双胞胎
+    ASPECT_BLOCK_NOTE,                      # T:它替换掉的三臂那一句
+)
 
 
 def _without_lean_diff_markers(text: str) -> str:
@@ -15723,27 +15753,30 @@ def _without_lean_diff_markers(text: str) -> str:
 
 
 def test_prefix_delta_lean_reaches_delta_assembly_not_the_snapshot_fallback(rrepo):
-    """T-PL1 验收:`prefix_delta_lean` 起来之后真的拿到 delta 装配(计划 §3 T-PL1
-    验收「`prefix_delta_lean` 能起来且拿到 delta 装配」、用例 (c))。
+    """T-PL1 验收 + T-PL5 用例 (j):L 拿到 delta 装配,而**与 D 的差异恰好是
+    自评合同那两处**(计划 §3 T-PL1 验收、T-PL5 用例 (j);评审 存疑2/P2-2 拍板)。
 
-    本期(T-PL1)还没有 L 专属的自评合同(留给 T-PL3/T-PL4/T-PL5),`_prefix_context`
-    与 `_reflect_delta_context` 都还不认 `optimization` 的具体取值、只认
-    `_DELTA_LAYOUTS`/`_PREFIX_LAYOUTS` 的成员资格,所以同一剧本下 L 与 D 现在逐
-    字节相同——这正是这条用例要的证据:两条臂共用同一次装配,差别只应该出现在
-    后续任务补的自评合同上,不该现在就以任何字节差异的形式出现。
+    T-PL1 落地时两条臂逐字节相同(还没有 L 专属的自评合同);T-PL5 接线之后差异
+    出现了,而这条测试的骨架一格不动——差异面收在
+    `_LEAN_VS_DELTA_ALLOWED_DIFF_MARKERS` 那四个字面量里,两条臂各自去掉自己那
+    一份之后仍然**逐字节相同**。这正是计划 §5 风险 6 要的那条守卫:「除自评合同
+    外任何差异都毁归因」,所以"顺手精简 T"、"L 的 D 块与 D 不同"、"S 里多了一句
+    别的"这一族全都红,而两处双胞胎替换本身不红。
 
-    这条断言是**差分形式**,不是整串相等(评审 存疑2/P2-2 拍板):整串相等必然
-    在 T-PL3(S 的自评段)/T-PL5(T 里那一句)变红,而红了之后最省力的修法是把
-    两行整段删掉,连 D 通道到位这条有价值的守卫一起丢。差分形式把"允许出现差
-    异的面"收进 `_LEAN_VS_DELTA_ALLOWED_DIFF_MARKERS`(今天为空),后续任务只
-    需要往里面补标记,这条测试的骨架不必重写。
+    整串相等被刻意换成差分形式:整串相等在这一步必然变红,而红了之后最省力的
+    修法是把两行整段删掉,连 D 通道到位这条有价值的守卫一起丢。
+
+    末尾两组是**反面证据**:白名单不许是空转的(两条臂在去标记之前真的不同),
+    而且差异真的落在那两处(L 的 S 里有 lean 段没有旧段、T 的尾注同理)。
 
     变异:把 `_DELTA_LAYOUTS` 缩回 `("prefix_delta",)`,同时把 `_PREFIX_LAYOUTS`
     直接写成三格字面量绕开对它的派生(让导入期对账守卫看不出分歧)⇒ 这条红——
     `optimization in _DELTA_LAYOUTS` 在 L 上落空,`_reflect_delta_context` 从此
     不会被调用,一条 run 走到底也不会有任何一块 D(`lean_llm.delta_blocks(3)`
     变成空列表),而消息形状仍然带着 S 的静态半(`_PREFIX_LAYOUTS` 认得 L)——
-    即 L 发出一条**不带 D 通道**的消息。
+    即 L 发出一条**不带 D 通道**的消息。把 `_prefix_context` 的 `static_lean`
+    改成只在 delta 支传、P/回退支不传 ⇒ 这条仍绿(这条脚本不回退),但
+    `test_a_lean_run_that_falls_back_keeps_the_lean_contract` 红。
     """
     lean_llm, _lean_result = _four_turn_run(
         rrepo, reasoning_reflect_optimization=_LEAN)
@@ -15751,22 +15784,34 @@ def test_prefix_delta_lean_reaches_delta_assembly_not_the_snapshot_fallback(rrep
     # L 真的走到了 delta 装配:D 块随轮数累加,不是恒为空。
     assert [len(lean_llm.delta_blocks(turn)) for turn in range(4)] == [
         0, 1, 2, 3]
-    # D 通道逐块字节相同——载荷本身两条臂今天完全一致,这条在 T-PL5 之后仍应
-    # 成立(自评合同改的是方面账,不是 D 块本身)。
+    # D 通道逐块字节相同——自评合同改的是 S 与方面账,不是 D 块本身。
     for turn in range(4):
         assert lean_llm.delta_blocks(turn) == delta_llm.delta_blocks(turn), turn
-    # S 不在白名单里,理应逐字节相同。
+    # S 去掉那一对自评段之后逐字节相同(差异恰好是那一段)。
     assert ([_without_lean_diff_markers(p) for p in lean_llm.system_prompts]
             == [_without_lean_diff_markers(p) for p in delta_llm.system_prompts])
-    # user 段除方面账那一块(T-PL5 起会长出 lean 专属自评合同)之外逐字节相同。
+    # 方面账那一块去掉那一对尾注之后也逐字节相同——T 的差异恰好是一句话,不是
+    # "L 下这个块被收窄了"(拍板 Q4)。
     for turn in range(4):
-        lean_user = _without_lean_diff_markers(
-            lean_llm.user_prompts[turn].replace(
-                lean_llm.aspect_block(turn), "", 1))
-        delta_user = _without_lean_diff_markers(
-            delta_llm.user_prompts[turn].replace(
-                delta_llm.aspect_block(turn), "", 1))
-        assert lean_user == delta_user, turn
+        assert (_without_lean_diff_markers(lean_llm.aspect_block(turn))
+                == _without_lean_diff_markers(
+                    delta_llm.aspect_block(turn))), turn
+    # user 段整段(含方面账那一块)去标记之后逐字节相同。
+    for turn in range(4):
+        assert (_without_lean_diff_markers(lean_llm.user_prompts[turn])
+                == _without_lean_diff_markers(
+                    delta_llm.user_prompts[turn])), turn
+    # 反面 1:白名单不是空转的——去标记之前两条臂真的不同。
+    assert lean_llm.system_prompts[0] != delta_llm.system_prompts[0]
+    assert lean_llm.aspect_block(0) != delta_llm.aspect_block(0)
+    # 反面 2:差异真的落在那两处双胞胎上,而且两句从不同时在场。
+    for turn in range(4):
+        assert _V2_LEAN_ASSESSMENT_INSTRUCTION in lean_llm.system_prompts[turn]
+        assert _V2_ASSESSMENT_INSTRUCTION not in lean_llm.system_prompts[turn]
+        assert _V2_ASSESSMENT_INSTRUCTION in delta_llm.system_prompts[turn]
+        assert ASPECT_BLOCK_NOTE_LEAN in lean_llm.aspect_block(turn)
+        assert ASPECT_BLOCK_NOTE not in lean_llm.aspect_block(turn)
+        assert ASPECT_BLOCK_NOTE in delta_llm.aspect_block(turn)
 
 
 def test_delta_layout_takes_the_same_prefix_message_shape(rrepo):
@@ -16529,8 +16574,12 @@ def test_delta_keeps_the_hard_budget_when_the_target_ratio_cannot_be_met(rrepo):
         assert evidence <= 1200, (turn, evidence)
 
 
-def _keep_blocks_run(rrepo, **extra):
+def _keep_blocks_run(rrepo, closing=None, **extra):
     """一条**先发出两块 D、再在重建之后回退**的 run(评审 P2-1/存疑 1)。
+
+    `closing` 换掉收尾那一轮的载荷(默认那一份见下面):T-PL5 用例 (m) 要的是
+    「回退**之后**的收尾轮省略自评」,而这条脚本的三个数是标定过的,复制一份只为
+    了换最后一格会多出一处需要同步的标定。
 
     数值是算准的,不是碰出来的:摘录上限 240 ⇒ 一张卡约 374 字;证据池 1300、目标
     比例 0.9 ⇒ 重建那一版 K 能装下三张(约 1068),而剩下的 232 字装不下第四张。头
@@ -16554,8 +16603,10 @@ def _keep_blocks_run(rrepo, **extra):
                  {"aspect_id": "a2", "evidence_keys": ["ck-1"]}]}},
             # 收尾轮再交一份**会被接受**的自评:回退之后那一格该不该继续增长,靠
             # 它才有得看(见 `test_delta_fallback_stops_collecting_aspect_notes`)。
-            _answer(assessment={"unresolved": [
-                {"aspect_id": "a1", "status": "partial", "gap": "还缺乙"}]}),
+            closing if closing is not None else _answer(
+                assessment={"unresolved": [
+                    {"aspect_id": "a1", "status": "partial",
+                     "gap": "还缺乙"}]}),
         ],
         chunk_results={
             markers[0]: [_multi_marker_hit("ck-0")],
@@ -18258,3 +18309,616 @@ def test_classify_termination_carries_the_lean_switch_onto_the_dto():
     plain_term = classify_termination([_fake_model_end(True)], [], plain)
     assert plain_term.lean_assessment is False
     assert sum(row.assessment_omitted for row in plain_term.aspects) == 2
+
+
+# ---------------------------------------------------------------------------
+# T-PL5 `prefix_delta_lean` 的接线:账本开关、S/T 两处 lean 文本、两个 detail 键
+# (PR-4 计划 §3 T-PL5;设计 §6/§12)
+#
+# 上一节断的是 `reasoning_aspects.py` 的纯函数;这一节断的是**策略位怎么传下来**,
+# 全部走完整 run(过 `_GatedV2LLM` 的形状闸,计划用例 (l))。每一条 L 断言都配一条
+# **同剧本的 D 对照**:D↔L 是唯一只差自评合同的配对臂,而"L 省了一轮"这件事只有
+# 在同一份脚本上比才说得清(计划 §5 风险 3/6)。
+# ---------------------------------------------------------------------------
+
+#: 三个方面:让「模型评过其中两个、第三个从头到尾没评过」在一条 run 里成立,
+#: `aspects_unassessed` 因此有一个**非零且非全量**的读数——0 与 N 两个端点都可能
+#: 被一个写错的实现(恒 0 / 恒等于方面数)碰对。
+_THREE_ASPECTS = {
+    "mandatory_topics": ["兆瓦级功耗预算怎么定", "散热余量的验收判据",
+                         "封装返修的判据"],
+    "constraints": ["只看 7nm 工艺"],
+}
+
+
+def _lean_aspect_run(rrepo, **kwargs):
+    """`_v2_aspect_run` 的 `prefix_delta_lean` 双胞胎(只多开一个策略位)。"""
+    kwargs.setdefault("reasoning_reflect_optimization", _LEAN)
+    return _v2_aspect_run(rrepo, **kwargs)
+
+
+def _silent_closing_reflects():
+    """全量 → 省略 → **沉默收尾**,再多一轮给 D 臂被折之后补自评用。
+
+    第 1 轮就把 a1/a2 报成 `partial`(`unresolved` 行不需要证据键,所以首轮也报得
+    出来),a3 从头到尾没人评过;第 2 轮什么都不报(常规轮省略在四臂下今天就已经
+    放行);第 3 轮沉默收尾——这是 D 与 L 唯一分叉的那一格。第 4 轮只有 D 臂走得到
+    (被折之后的追问轮)。
+    """
+    return [
+        {"next_action": "search_chunks", "sufficient": False,
+         "arguments": {"query": "完整问题"}, "reason": "先查一轮",
+         "assessment": {"unresolved": [
+             {"aspect_id": "a1", "status": "partial", "gap": "还缺功耗上限"},
+             {"aspect_id": "a2", "status": "partial", "gap": "还缺散热判据"}]}},
+        {"next_action": "search_chunks", "sufficient": False,
+         "arguments": {"query": "换个问法"}, "reason": "再查一轮"},
+        _answer(),                                   # 沉默收尾
+        _answer(assessment={"unresolved": [          # 只有 D 臂用得到
+            {"aspect_id": "a1", "status": "partial", "gap": "补齐账目"}]}),
+    ]
+
+
+def _lean_pair(rrepo, *, reflects, **extra):
+    """同一份脚本在 L 与 D 上各跑一次(测量开着)。
+
+    → `{arm: (llm, result, calls)}`,`calls` 是那条 run 真的发出去的检索串序列
+    (`_stub_search_chunks` 的记账口径)——「L 与 D 只差收尾那一次**模型**调用」
+    这条断言需要它的反面:检索次数两条臂**相同**,L 省的不是一次核验。
+    """
+    runs = {}
+    for arm in (_LEAN, _DELTA):
+        calls: list = []
+        llm, result = _measured_run(
+            rrepo, optimization=arm, intent_detail=_THREE_ASPECTS,
+            reflects=[dict(row) for row in reflects],
+            chunk_results=_three_turn_chunks(), calls=calls,
+            reasoning_max_chunk_searches=2, **extra)
+        runs[arm] = (llm, result, calls)
+    return runs
+
+
+def _project(result, optimization):
+    from app.domain.reasoning_trace_stats import project_run
+    return project_run(
+        {"mode": "reasoning", "status": "done"},
+        [step.model_dump() for step in result.trace],
+        {"retrieval_effort": "standard", "mode": "reasoning"},
+        rig_tags={"optimization": optimization})
+
+
+def test_a_lean_silent_closing_turn_costs_no_extra_model_call(rrepo):
+    """(a)(b)(k)(l) L 的沉默收尾当场被接受;配对的 D run 多一次模型调用。
+
+    这是本期**收益的主要来源**,也是设计 §12 的核心断言「省略自评不追加专门
+    调用」。今天收尾缺自评会被 `_reflect_invalid` 折成伪动作、扣一步、下一轮追问
+    (生产实测约 40s/轮);L 的自评合同明说未走到的方面留着不评、服务端不为补齐
+    账目退回一轮,所以这一轮不发。
+
+    接线只有一格:账本建账时冻结的 `lean_assessment`(`_v2_build_aspect_ledger`),
+    由 `note_missing_assessment` 自己短路 ——`_absorb_assessment` /
+    `_nudge_missing_assessment` / `run()` 一行未改(拍板 Q1)。
+
+    差额**恰为一次**:两条臂的 `model_calls_real` 差 1、`skip_reasons` 的差恰是
+    `missing_assessment`(计划 §5 风险 3)。而 `aspects_unassessed` 在两条臂上
+    **相同**——a3 在哪条臂上都没人评过,L 省掉的是那一轮记账,不是一次核验。
+
+    变异:`_open_v2_ledgers` 不走 `_v2_build_aspect_ledger`(即建账时不带
+    `lean=`)⇒ L 臂退回 D 的行为,第一组全红;把 `_v2_build_aspect_ledger` 的判据
+    写成 `!= "off"` ⇒ D 臂也不追问,`missing_assessment` 那条对照红;终态那一步
+    不写 `aspects_unassessed` ⇒ 第四组读到 `None`,红。
+    """
+    from collections import Counter
+
+    from app.domain.retrieval_termination import TERMINATION_MODEL_PARTIAL
+
+    runs = _lean_pair(rrepo, reflects=_silent_closing_reflects())
+    lean_llm, lean, lean_calls = runs[_LEAN]
+    delta_llm, delta, delta_calls = runs[_DELTA]
+
+    # 1) L:沉默收尾当场收下 —— 三轮,没有追问那一格。
+    assert len(lean_llm.user_prompts) == 3
+    assert "missing_assessment" not in _skip_reasons(lean)
+    assert lean.termination.model_assessed_sufficient is True
+    assert lean.termination.reason == TERMINATION_MODEL_PARTIAL
+    # 2) D 对照:同一份脚本被折一轮、多发一次调用。
+    assert len(delta_llm.user_prompts) == 4
+    assert _skip_reasons(delta).count("missing_assessment") == 1
+    # 3) 差额恰为一次,而且 skip 的差就是那一个原因码。
+    assert (len(delta_llm.user_prompts) - len(lean_llm.user_prompts)) == 1
+    assert (Counter(_skip_reasons(delta)) - Counter(_skip_reasons(lean))) == (
+        Counter({"missing_assessment": 1}))
+    lean_row = _project(lean, _LEAN)
+    delta_row = _project(delta, _DELTA)
+    assert (lean_row["model_calls_real"], delta_row["model_calls_real"]) == (
+        3, 4)
+    # 反面:**检索**次数两条臂逐条相同。省下的是那一次模型调用(纯记账轮),
+    # 不是一次核验——被折的那一轮本来就是零 I/O 的。
+    assert lean_calls == delta_calls
+    assert len(lean_calls) == 3          # 一次播种 + 两轮动作,真的检索过
+    # 4) `aspects_unassessed` 如实:a3 一次都没被评过,两条臂同一个读数。
+    assert lean_row["aspects_unassessed"] == 1
+    assert delta_row["aspects_unassessed"] == 1
+    assert _termination_skip(lean)["aspects_unassessed"] == 1
+    # 5) (拍板 Q5)L 下 `assessment_omitted` 一格都不置位:那一格的语义是
+    #    「问过之后它仍然不给」,而 L 一次都没问过。
+    assert _termination_skip(lean)["aspects_assessment_omitted"] == 0
+    assert [row.assessment_omitted for row in lean.termination.aspects] == [
+        False] * 3
+    # 6) (k)run 级那格开关只在 L 上到终态 DTO。
+    assert lean.termination.lean_assessment is True
+    assert delta.termination.lean_assessment is False
+
+
+def test_a_lean_closing_turn_that_reports_one_change_is_taken_as_final(rrepo):
+    """(a 后半)收尾**只报一个变化** ⇒ 照样不折轮,而这一形态两条臂同形。
+
+    反面证据:L 的省下来的那一轮**只**来自沉默收尾,不是"L 随便就早收一轮"。
+    收尾载荷真的落了账(`accepted` 非空)时,D 今天也不折——两条臂的轮数、
+    `skip_reasons` 与终态因此逐格相同,唯一的差别仍然只是自评合同那两处字节。
+
+    变异:把 `_nudge_missing_assessment` 的判据从 `accepted == ()` 改成"载荷里
+    有没有行" ⇒ D 那半的轮数变化,这条红。
+    """
+    reflects = _silent_closing_reflects()
+    reflects[2] = _answer(assessment={"supported": [
+        {"aspect_id": "a1", "evidence_keys": ["ck-q0"]}]})
+    runs = _lean_pair(rrepo, reflects=reflects)
+    lean_llm, lean, lean_calls = runs[_LEAN]
+    delta_llm, delta, delta_calls = runs[_DELTA]
+
+    assert len(lean_llm.user_prompts) == len(delta_llm.user_prompts) == 3
+    assert "missing_assessment" not in _skip_reasons(lean)
+    assert "missing_assessment" not in _skip_reasons(delta)
+    assert _skip_reasons(lean) == _skip_reasons(delta)
+    # 收尾那一轮真的落了账:a1 变成已支撑,而 a3 仍然没人评过。
+    assert lean.termination.aspects[0].status == "supported"
+    assert _termination_skip(lean)["aspects_unassessed"] == 1
+    assert _termination_skip(delta)["aspects_unassessed"] == 1
+    # 那一轮的落账行数如实记到测量键上(三条路里的第二条)。
+    assert _reflect_details(lean)[2]["assessment_rows"] == 1
+    assert _reflect_details(lean)[2]["assessment_absent"] is False
+
+
+def test_a_lean_closing_turn_whose_assessment_lands_nothing_is_still_taken(rrepo):
+    """(c) L 下**逐方面全被拒**的收尾:不折轮、仍记 skip、中途那一轮照旧披露。
+
+    三件事各自成立,不许互相顶替:
+
+    * 「不为记账追加一轮」是 L 的合同,与"这一轮的自评合规吗"无关 ⇒ 收尾不折;
+    * 逐方面被拒仍然如实记一条 `invalid_assessment:<why>` skip(那是模型写错了,
+      不是服务端省事)⇒ 放量评估按原因码统计的口径一格不动;
+    * 中途那一轮被拒的披露照旧在**下一轮**的状态半里渲染出来(「服务端未采纳」),
+      所以模型仍然知道自己哪里写错了。
+
+    D 对照:同一份脚本的收尾被折成伪动作、多一轮追问(既有
+    `test_a_closing_turn_whose_assessment_lands_nothing_is_pushed_back` 的双胞胎)。
+
+    变异:把 lean 闸从 `note_missing_assessment` 挪到 `_absorb_assessment` 的
+    `assessment is None` 那条路上(即"只有彻底沉默才不追问")⇒ L 那半的轮数变 4、
+    第一组红。
+    """
+    reflects = _silent_closing_reflects()
+    # 第 1 轮:白名单外的 status ⇒ a1 被逐方面拒,`accepted` 为空。
+    reflects[0] = {**reflects[0], "assessment": {"unresolved": [
+        {"aspect_id": "a1", "status": "yes"}]}}
+    # 收尾轮:两行都被拒 ⇒ 与彻底沉默在账本上读数相同。
+    reflects[2] = _answer(assessment={"unresolved": [
+        {"aspect_id": "a1", "status": "nope"},
+        {"aspect_id": "a2", "status": "nope"}]})
+    runs = _lean_pair(rrepo, reflects=reflects)
+    lean_llm, lean, lean_calls = runs[_LEAN]
+    delta_llm, delta, delta_calls = runs[_DELTA]
+
+    # 1) L 不折轮;D 折了。
+    assert len(lean_llm.user_prompts) == 3
+    assert len(delta_llm.user_prompts) == 4
+    assert "missing_assessment" not in _skip_reasons(lean)
+    assert "missing_assessment" in _skip_reasons(delta)
+    # 2) 逐方面被拒照旧各记一条(两轮各一条,口径 = 每轮一条)。
+    assert _skip_reasons(lean).count("invalid_assessment:invalid_status") == 2
+    # 3) 中途那一轮的披露落在下一轮的状态半里。
+    assert "服务端未采纳: invalid_status" in lean_llm.aspect_block(1)
+    assert "服务端未采纳" not in lean_llm.aspect_block(0)
+    # 4) 一格都没落账 ⇒ 载荷带了自评但 rows 为 0(三条路里的第二条,另一个方向)。
+    details = _reflect_details(lean)
+    assert [detail["assessment_rows"] for detail in details] == [0, 0, 0]
+    assert [detail["assessment_absent"] for detail in details] == [
+        False, True, False]
+    # 5) 一个方面都没落账 ⇒ 三个都没被评过。
+    assert _termination_skip(lean)["aspects_unassessed"] == 3
+
+
+def test_a_malformed_assessment_still_folds_the_whole_turn_under_lean(rrepo):
+    """(d) 整份形状越界 ⇒ **照旧**折并扣步,L 一格都没放宽(计划「刻意不做」)。
+
+    L 改的是"模型每轮该提交什么",不是"服务端接受什么形状"。`item_not_object`
+    这类载荷里"模型到底怎么判的"没有可明确解释的读法,所以照旧走 T2 那条路:
+    伪动作决定、零 I/O、扣一步、原因码带上是哪一条边界。
+
+    变异:让 lean 闸也短路整份形状错误(比如把 `_absorb_assessment` 的
+    `if not outcome.error:` 改成 `if not outcome.error or lean:`)⇒ 这条红。
+    """
+    reflects = _silent_closing_reflects()
+    reflects[1] = {**reflects[1], "arguments": {"query": "本不该被执行"},
+                   "assessment": {"supported": ["a1"]}}   # item_not_object
+    lean_llm, lean = _measured_run(
+        rrepo, optimization=_LEAN, intent_detail=_THREE_ASPECTS,
+        reflects=reflects,
+        chunk_results={"完整问题": [_chunk_hit("ck-q0")],
+                       "本不该被执行": [_chunk_hit("ck-x1")]},
+        reasoning_max_chunk_searches=2)
+
+    assert "invalid_assessment:item_not_object" in _skip_reasons(lean)
+    # 零 I/O:那次检索一次都没发。
+    assert all(chunk.chunk_id != "ck-x1" for chunk in lean.chunks)
+    # 账本没被那份被折的载荷改动(a1/a2 仍是第 1 轮那份 partial)。
+    assert [row.status for row in lean.termination.aspects] == [
+        "partial", "partial", "unknown"]
+    # 三条路里的第三条:载荷带了自评、整份被折 ⇒ absent=False、rows=0。
+    folded = _reflect_details(lean)[1]
+    assert (folded["assessment_rows"], folded["assessment_absent"]) == (
+        0, False)
+    # 折了之后仍然多走一轮(扣步的可观察面):收尾在第 3 轮,不是第 2 轮。
+    assert len(lean_llm.user_prompts) == 3
+
+
+def test_the_two_assessment_keys_cover_all_three_paths_in_one_run(rrepo):
+    """(e 上半)两个自评键的**三条路各一格**,而且 `0` 与缺席分得开。
+
+    一条 run 走完三种形态:落账 → 沉默 → 整份被折 → 沉默收尾。三条路的读数各不
+    相同,所以"把三条合成一句"的实现(比如恒写 `rows=len(payload)`)在这条脚本
+    上必红。顶层两列的口径同时钉住:`assessment_rows_total` 是 sum-over-present、
+    `assessment_observed` 在全带齐时为 True(拍板 Q9 + T-PL2 质量评审 P2-2)。
+
+    变异:把 `assessment is None` 那条路的 `absent` 写成 False ⇒ 第二组红;把
+    `rows` 从 `len(outcome.accepted)` 改成载荷行数 ⇒ 第一组红(被拒那一行会被
+    数进去);把整份被折那一路的写点删掉 ⇒ `assessment_observed` 变 False,红。
+    """
+    reflects = [
+        {"next_action": "search_chunks", "sufficient": False,
+         "arguments": {"query": "完整问题"}, "reason": "先查一轮",
+         # 两行:a1 合法、a9 未知 id 被逐方面拒 ⇒ 落账恰好一行。
+         "assessment": {"unresolved": [
+             {"aspect_id": "a1", "status": "partial", "gap": "还缺功耗"},
+             {"aspect_id": "a9", "status": "partial", "gap": "没有这个方面"}]}},
+        {"next_action": "search_chunks", "sufficient": False,
+         "arguments": {"query": "换个问法"}, "reason": "再查一轮"},
+        {"next_action": "search_chunks", "sufficient": False,
+         "arguments": {"query": "第三次"}, "reason": "形状不合",
+         "assessment": {"supported": ["a1"]}},        # item_not_object
+        _answer(),                                    # 沉默收尾
+    ]
+    # 额度给到 3:第 3 轮那个动作必须**通过解析期校验**,折叠才是自评那一族的
+    # (额度用尽的话 `search_chunks` 压根不在可执行集里,那一轮会先被判
+    # `invalid_action`,`decision.assessment` 于是根本到不了这个写点)。
+    _llm, result = _measured_run(
+        rrepo, optimization=_LEAN, intent_detail=_THREE_ASPECTS,
+        reflects=reflects, chunk_results=_three_turn_chunks(),
+        reasoning_max_chunk_searches=3)
+    details = _reflect_details(result)
+    assert len(details) == 4
+    # 1) 落账那一轮:恰好一行(被拒的 a9 不算)。
+    assert (details[0]["assessment_rows"], details[0]["assessment_absent"]) == (
+        1, False)
+    # 2) 沉默那两轮:absent 为真、rows 为 0(**不是缺席**)。
+    for turn in (1, 3):
+        assert details[turn]["assessment_rows"] == 0, turn
+        assert details[turn]["assessment_absent"] is True, turn
+    # 3) 整份被折那一轮:带了自评、一格没落账。
+    assert (details[2]["assessment_rows"], details[2]["assessment_absent"]) == (
+        0, False)
+    # 4) 顶层两列:sum-over-present,而且这条 run 全带齐。
+    row = _project(result, _LEAN)
+    assert row["assessment_rows_total"] == 1
+    assert row["assessment_observed"] is True
+
+
+def test_the_two_assessment_keys_are_absent_when_measurement_is_off(rrepo):
+    """(e 中)测量关 ⇒ 两键如实缺席,顶层两列 `None`,detail 键集回到基线。
+
+    门取 `measures_messages` 而不是"测量对象在不在":delta 两条臂在测量关时
+    **照样**构造 `ReflectMeasurement`(拍板 Q7 的三个行为事实键),而这两格不是
+    行为事实。少了这条,`off` 臂测量关时无键、D/L 臂测量关时有键,同一列在四臂
+    之间就不是同一把尺子了。
+
+    变异:把门改成 `measurement is not None` ⇒ L 那半红(键出现了);改成
+    `optimization in _DELTA_LAYOUTS` ⇒ `off` 那半的四臂通写断言(见
+    `test_measure_write_side_stays_inside_the_registered_key_set`)红。
+    """
+    for arm in ("off", _LEAN):
+        _llm, result = _lean_aspect_run(
+            rrepo, intent_detail=_THREE_ASPECTS,
+            reflects=_silent_closing_reflects(),
+            chunk_results=_three_turn_chunks(), reasoning_max_chunk_searches=2,
+            reasoning_reflect_optimization=arm, **{_MEASURE_FLAG: False})
+        for turn, detail in enumerate(_reflect_details(result)):
+            assert "assessment_rows" not in detail, (arm, turn)
+            assert "assessment_absent" not in detail, (arm, turn)
+        row = _project(result, arm)
+        assert row["assessment_rows_total"] is None, arm
+        assert row["assessment_observed"] is None, arm
+        # 终态那一格与它们**不同**:四臂无条件写(拍板 Q10),测量关也在。
+        assert row["aspects_unassessed"] is not None, arm
+
+
+def test_a_provider_fallback_turn_writes_neither_assessment_key(rrepo):
+    """(e 下半)provider fail-open 的那一轮**不写**两键,由 `assessment_observed`
+    披露不全(T-PL2 质量评审 P2-2 改拍板)。
+
+    那一轮的 `assessment` 恒为 None,但它不是"模型没带自评"——`next_action` /
+    `sufficient` / `assessment` 三格都不是模型填的。在那里补写 `absent=True` 会
+    把一次 provider 故障读成一次模型省略,而 L 的全部收益判据就建在"省略"这个
+    读数上。所以写点留在 `_absorb_assessment` 内,而 `_v2_note_turn` 的
+    `if not decision.fallback` 天然把那一轮挡在外面。
+
+    连带钉住 `assessment_rows_total` 不是"全或无":一次偶发抖动不该把整条 run 从
+    D↔L 的配对样本里挤出去(生产实测 118 次调用 24 次正文为空,不是边角)。
+
+    ⚠ **第一次失败那一轮仍然写**(登记的已知口径):它被折成 `model_degraded:` 的
+    invalid 伪动作、`fallback` 为 False,于是照常进 `_absorb_assessment`。那一轮
+    落账确实是 0 行,所以 `rows=0` 如实;`absent=True` 是"这份载荷里没有自评"的
+    字面读数,而它不出顶层投影(拍板 Q9)。要把它与模型自己的省略分开,读侧看的
+    是同一条 reflect 步上的 `next_action == __reflect_invalid__` 与那条降级观察行。
+
+    `fail_calls` 按**调用**计数而不是按轮:一轮失败会触发一次加预算重试,所以
+    "连续两轮都失败"要四次调用(第 2 轮的两次 + 第 3 轮的两次)。
+    """
+    from app.services.reasoning_retrieval import REFLECT_INVALID_ACTION
+
+    _llm, result = _measured_run(
+        rrepo, optimization=_LEAN, fail_calls=(2, 3, 4, 5),
+        intent_detail=_THREE_ASPECTS, reflects=_silent_closing_reflects(),
+        chunk_results=_three_turn_chunks(), reasoning_max_chunk_searches=2)
+    details = _reflect_details(result)
+    assert len(details) == 3
+    # 第 1 轮正常:落了两行。
+    assert details[0]["assessment_rows"] == 2
+    # 第 2 轮是**第一次**失败 ⇒ 折成降级伪动作,照常进吸收路径(见 ⚠)。
+    assert details[1]["next_action"] == REFLECT_INVALID_ACTION
+    assert details[1]["assessment_absent"] is True
+    assert details[1]["assessment_rows"] == 0
+    # 第 3 轮是连续第二次 ⇒ 兜底决定原样交回,不进吸收路径 ⇒ 两键缺席。
+    assert "assessment_rows" not in details[2]
+    assert "assessment_absent" not in details[2]
+    assert details[2]["fallback_reason"]
+    # 顶层:和仍然是真值,伴生列如实说"不全"。
+    row = _project(result, _LEAN)
+    assert row["assessment_rows_total"] == 2
+    assert row["assessment_observed"] is False
+
+
+def test_flipping_the_policy_bit_mid_run_cannot_change_the_ledger_contract(rrepo):
+    """(f) 中途翻位:S/T 两种字节都看得见,而**账本合同一格不变**(拍板 Q2)。
+
+    两条路刻意不同源,这一条把差别钉死:
+
+    * prompt 侧每轮按 `_reflect_v2_context` 当轮那个 `optimization` 局部值渲染
+      ——策略位在一次 run 中途被翻回 D(热更/测试),下一轮的 S 与 T 就是 D 的
+      字节。这是如实的:那一轮发出去的确实是那份文本。
+    * 账本那一格 **run 开始时冻结一次**(`_v2_build_aspect_ledger`),此后不再
+      重读,也没有 setter 改得动它。所以这次 run 的追问合同前后一致:沉默收尾仍
+      然当场被接受,`termination.lean_assessment` 仍然是 True。
+
+    反过来(账本每轮重读策略位)的后果是:一次 run 前半程不追问、后半程追问,而
+    A/B 表上它仍然只有一个臂标签,于是差异归因是假的。
+
+    变异:把 `_v2_build_aspect_ledger` 的 `lean=` 改成在
+    `note_missing_assessment` 里现读策略位 ⇒ 第三组红(收尾被折、多一轮);把
+    `AspectLedger.lean_assessment` 改回可写 slot 并在 `_reflect_v2_context` 里
+    逐轮回写 ⇒ 同样红(而那条赋值今天被只读 property 结构性拦住,见
+    `test_the_lean_switch_cannot_be_reassigned_after_construction`)。
+    """
+    class _FlipAfterFirstReflect(_V2ContextLLM):
+        """第 1 轮反思之后把策略位从 L 翻回 D。"""
+
+        def __init__(self, plan, reflects, *, settings):
+            super().__init__(plan, reflects)
+            self._settings = settings
+            self._seen = 0
+
+        def chat_json(self, messages, schema_hint, **kwargs):
+            raw = super().chat_json(messages, schema_hint, **kwargs)
+            if "sub_queries" not in schema_hint:
+                self._seen += 1
+                if self._seen == 1:
+                    self._settings.reasoning_reflect_optimization = _DELTA
+            return raw
+
+    llm = _FlipAfterFirstReflect(
+        plan={"sub_queries": [{"query": "完整问题"}]},
+        reflects=_silent_closing_reflects(), settings=rrepo.settings)
+    llm, result = _lean_aspect_run(
+        rrepo, llm=llm, intent_detail=_THREE_ASPECTS,
+        chunk_results=_three_turn_chunks(), reasoning_max_chunk_searches=2)
+
+    # 1) 真的翻位了:S 的两种字节在同一条 run 里各出现过。
+    assert _V2_LEAN_ASSESSMENT_INSTRUCTION in llm.system_prompts[0]
+    assert _V2_ASSESSMENT_INSTRUCTION not in llm.system_prompts[0]
+    assert _V2_ASSESSMENT_INSTRUCTION in llm.system_prompts[1]
+    assert _V2_LEAN_ASSESSMENT_INSTRUCTION not in llm.system_prompts[1]
+    # 2) T 的尾注同一格判据,所以它跟着一起翻(两处从不分歧)。
+    assert ASPECT_BLOCK_NOTE_LEAN in llm.aspect_block(0)
+    assert ASPECT_BLOCK_NOTE in llm.aspect_block(1)
+    # 3) 账本合同没跟着翻:沉默收尾仍然当场接受,三轮结束、没有追问。
+    assert len(llm.user_prompts) == 3
+    assert "missing_assessment" not in _skip_reasons(result)
+    assert result.termination.lean_assessment is True
+    assert _termination_skip(result)["aspects_assessment_omitted"] == 0
+
+
+def test_a_lean_run_that_falls_back_keeps_the_lean_contract(rrepo):
+    """(m) 回退之后**仍然是 L**:S 里 lean 段在、T 的尾注在、账本仍不追问(Q11)。
+
+    设计 §5.2 明写「保留轻量自评与否的原设置」。回退换的是"下一块 K/D 怎么装",
+    不是"模型该提交什么"——而回退轮及其此后每一轮走的是 `_reflect_v2_context`
+    里 P 的那一支,即 `_prefix_context` 的**另一个**调用点。两个调用点里只给
+    delta 支传 `static_lean` 的话,一条回退过的 L run 会在回退那一轮之后悄悄
+    换回 D 的自评合同:S 说「本轮请重新给出全量」,而服务端仍然不追问。
+
+    变异:`_reflect_v2_context` 里 P/回退那一支不传 `static_lean` ⇒ 第一/二组红;
+    只给它传、delta 支不传 ⇒ 回退**之前**那几轮红。
+    """
+    llm, result = _keep_blocks_run(
+        rrepo, closing=_answer(),                # 沉默收尾(默认那份会落账)
+        reasoning_reflect_optimization=_LEAN, **{_MEASURE_FLAG: True})
+    details = _reflect_details(result)
+    fallbacks = [detail["context_fallback"] for detail in details]
+    assert True in fallbacks, fallbacks
+    first = fallbacks.index(True)
+    assert first >= 1 and fallbacks[-1] is True   # 前提:回退真的发生过、不可逆
+
+    turns = len(llm.user_prompts)
+    # 1) 回退前后每一轮的 S 都带 lean 段,一次都没换回旧段。
+    for turn in range(turns):
+        assert _V2_LEAN_ASSESSMENT_INSTRUCTION in llm.system_prompts[turn], turn
+        assert _V2_ASSESSMENT_INSTRUCTION not in llm.system_prompts[turn], turn
+    # 2) T 的尾注同理(回退轮及其之后那几轮走的是另一个调用点)。
+    for turn in range(turns):
+        assert ASPECT_BLOCK_NOTE_LEAN in llm.aspect_block(turn), turn
+        assert ASPECT_BLOCK_NOTE not in llm.aspect_block(turn), turn
+    # 3) 账本合同不受回退影响:沉默收尾当场接受,没有追问那一格。
+    assert "missing_assessment" not in _skip_reasons(result)
+    assert result.termination.lean_assessment is True
+    # 4) 回退轮之后的 S 是同一串字节(它本来就该在 run 内不变)。
+    assert len(set(llm.system_prompts)) == 1
+
+
+@pytest.mark.parametrize("optimization", ["off", _PREFIX, _DELTA])
+def test_the_lean_wiring_leaves_the_other_three_arms_untouched(
+    rrepo, optimization,
+):
+    """(g) 三臂:lean 的字节一个都没漏进去,detail 键集只多 Q10 登记的那一个。
+
+    本期改到的共用面全部"默认值中性"(`reflect_v2_static_prompt` 的 `lean`、
+    `render_aspect_status_block` 的 `lean`、`build_aspect_ledger` 的 `lean`、
+    `_prefix_context` 的 `static_lean`),而"默认中性"要用例证明。
+
+    ⚠ **唯一允许的偏离**是终态那一步多一个 `aspects_unassessed`(拍板 Q10,已
+    登记):它四臂无条件写,只在 L 写的话 D↔L 的配对表上这一列恒缺一半。三臂的
+    **prompt 字节**因此一个都不许变,这里连同确定性一起断。
+
+    "与 #707 合入态逐字节相同"那一半由既有的冻结基线钉住(off 的 S golden、
+    `test_prefix_snapshot_with_v2_off_is_byte_identical_to_the_baseline` 等),
+    不在这里重造一份。
+
+    变异:`reflect_v2_static_prompt` 的 `lean` 默认改成 `True` ⇒ 第一组红;
+    `render_aspect_status_block` 的 `lean` 默认改成 `True` ⇒ 第二组红;
+    `build_aspect_ledger` 的 `lean` 默认改成 `True` ⇒ 第四组红(三臂也不追问);
+    `aspects_unassessed` 改成只在 L 写 ⇒ 第三组红。
+    """
+    def _capture():
+        llm, result = _measured_run(
+            rrepo, optimization=optimization, intent_detail=_THREE_ASPECTS,
+            reflects=_silent_closing_reflects(),
+            chunk_results=_three_turn_chunks(), reasoning_max_chunk_searches=2)
+        return llm, result
+
+    llm, result = _capture()
+    again_llm, again = _capture()
+    # 确定性:同一条脚本跑两次,**消息**逐字节相同、轨迹的步序与终态那一步的
+    # detail 相同。墙钟那几格(`duration_ms`、`researched_ms`、`call_wall_ms`)
+    # 刻意不进比对:它们每次都不同,而这条要断的是"内容确定"。
+    assert llm.message_lists == again_llm.message_lists
+    assert llm.schema_hints == again_llm.schema_hints
+    assert ([(step.step_type, step.summary) for step in result.trace]
+            == [(step.step_type, step.summary) for step in again.trace])
+    assert _termination_skip(result) == _termination_skip(again)
+    # 1)(2)L 的两处文本一个字节都没漏进这三条臂。
+    for messages in llm.message_lists:
+        joined = "".join(row["content"] for row in messages)
+        assert _V2_LEAN_ASSESSMENT_INSTRUCTION not in joined
+        assert ASPECT_BLOCK_NOTE_LEAN not in joined
+        assert _V2_ASSESSMENT_INSTRUCTION in joined
+    # 3) 终态那一步的 detail 键集 = 冻结的既有八格 + Q10 那一个。
+    assert set(_termination_skip(result)) == {
+        "reason", "termination", "aspects", "unresolved_aspects",
+        "model_assessed_sufficient", "aspect_source",
+        "aspects_assessment_omitted", "unrecovered_channels",
+        "aspects_unassessed"}
+    # 4) 三臂的追问合同一格没动:沉默收尾照旧被折、多一轮。
+    assert _skip_reasons(result).count("missing_assessment") == 1
+    assert len(llm.user_prompts) == 4
+    assert result.termination.lean_assessment is False
+
+
+def test_the_aspect_ledger_has_exactly_one_construction_point(rrepo):
+    """(h) 变异守卫:`build_aspect_ledger(` 在本模块只许有**一个**直调点。
+
+    `AspectLedger.lean_assessment` 是 run 级冻结的自评合同开关,而这个模块里"账
+    本可能为 None"的地方有**三处**:`_open_v2_ledgers`(首轮)、
+    `_reflect_v2_context` 与 `_absorb_assessment` 各自那条"总闸在一次 run 中途被
+    翻开"的防御重建。三处各写一遍 `lean=` 的后果是最难看见的那一种——漏掉的那条
+    路上,run 在 L 的臂标签下跑着 D 的追问合同,不崩、不报错,只在 A/B 表上比出
+    一个假的差异,而那张表正是这次实验的全部产出(T-PL4 spec 评审)。
+
+    所以判据不是"三处都记得传",而是"只有一个地方构造得出账本":直调点计数为 1、
+    且它就在 `_v2_build_aspect_ledger` 里,另外三处全部走那个 helper。判据走 AST
+    而不是行文本:注释与 docstring 里提到函数名不误伤。
+
+    变异:三条防御分支里任一条改回直调 `build_aspect_ledger(...)` ⇒ 计数变 2,
+    这条红(而"漏传 `lean=`"那一族因此在结构上不再可能发生)。
+    """
+    import ast
+    import inspect
+    from app.services import reasoning_retrieval
+
+    tree = ast.parse(inspect.getsource(reasoning_retrieval))
+    holders = [
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        for call in ast.walk(node)
+        if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+        and call.func.id == "build_aspect_ledger"
+    ]
+    assert holders == ["_v2_build_aspect_ledger"], holders
+    # 三处消费点都在(否则上面那条会在"一处都没有"时也绿)。
+    users = sorted(
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        for call in ast.walk(node)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Attribute)
+        and call.func.attr == "_v2_build_aspect_ledger"
+    )
+    assert users == ["_absorb_assessment", "_open_v2_ledgers",
+                     "_reflect_v2_context"], users
+
+
+def test_the_prefix_context_never_reads_the_policy_bit_a_second_time(rrepo):
+    """(i) 变异守卫:S/T 的 lean 判据**只能**由调用方传值,不许现读策略位。
+
+    一轮里判两次策略,两次之间就可以分歧(`_reflect_prefix_layout` 的 docstring
+    反对的正是这件事)。这里的后果尤其难看见:`static_lean` 选的是 S 的自评段与
+    T 的尾注两处,而它们必须同一格判据——一处说「只报变化」、另一处说「请重新给
+    出全量」是这条臂最坏的形态,模型只能猜哪一句算数,而 A/B 表会把由此产生的
+    行为差异记到"布局"头上。
+
+    判据走 AST:这两个方法体内不许出现 `self.reflect_optimization()`,而
+    `optimization` 必须真的作为参数/局部值传进 `_prefix_context`。
+    上面那条 (f) 断的是账本侧的冻结;这一条断的是 prompt 侧的单次读。
+
+    变异:把 `static_lean=(optimization == _LEAN_LAYOUT)` 换成在 `_prefix_context`
+    里现读 `self.reflect_optimization()` ⇒ 这条红。
+    """
+    import ast
+    import inspect
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    for method in ("_prefix_context", "_reflect_delta_context"):
+        tree = ast.parse(inspect.getsource(
+            getattr(ReasoningRetriever, method)).lstrip())
+        reads = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "reflect_optimization"
+        ]
+        assert reads == [], method
+    # 两个调用点都真的传了那一格(漏一处 ⇒ 用例 (m) 或 (j) 红,这里先钉形状)。
+    source = inspect.getsource(ReasoningRetriever._reflect_v2_context)
+    assert source.count("static_lean=") == 1
+    assert inspect.getsource(
+        ReasoningRetriever._reflect_delta_context).count("static_lean=") == 1
