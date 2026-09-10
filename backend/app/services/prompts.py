@@ -1434,31 +1434,47 @@ _V2_STATIC_CATALOG_INSTRUCTION = (
 #: has no bearing on the two-arm byte equivalence the static instruction above
 #: still has to hold.
 #:
-#: 1. this run's history block only ever grows: a line that has appeared in it
-#:    is never rewritten or removed, only appended after;
+#: 1. this run's history only grows by appending blocks marked as this turn's
+#:    additions after everything already there — the server never rewrites a
+#:    line in place, but it may replace the whole history with a shorter
+#:    snapshot that keeps the counts; a line no longer visible still
+#:    happened, it was not withdrawn, and only a later server line or the
+#:    closing block's execution limits can supersede an earlier one, never an
+#:    evidence card;
 #: 2. the same evidence ``key`` can carry more than one card, because an
 #:    excerpt gets upgraded by appending a new, versioned card rather than by
-#:    rewriting the old one in place — the later card is a fresh excerpt of
-#:    the SAME evidence, not new evidence, the earlier card under that key is
-#:    still valid, and both are bound or cited through that one shared key;
-#: 3. a folded count or an "N not expanded" line is a disclosure of how much
-#:    MORE there is, not a report that nothing was found;
+#:    rewriting the old one in place — a later card that repeats a key
+#:    already seen and carries the server's supplement marker right after
+#:    that key is a fresh excerpt of the SAME evidence, not new evidence, the
+#:    earlier card under that key is still valid, and both are bound or
+#:    cited through that one shared key;
+#: 3. two kinds of disclosure appear in these blocks: a line saying how many
+#:    candidates were not expanded this turn discloses how many remain
+#:    unshown, and a folded count of earlier actions discloses what already
+#:    happened before the snapshot — neither means nothing was found or done;
 #: 4. the closing block's execution limits keep the exact precedence
 #:    ``_V2_STATIC_CATALOG_INSTRUCTION`` already gives them — outranking any
 #:    observation or evidence card earlier in the message, appended or not —
 #:    and that precedence still does not reach past those four classes into
 #:    the rest of the block.
 _V2_DELTA_INSTRUCTION = (
-    "This run's history block is APPEND-ONLY: once a line has appeared in it, "
-    "the server never rewrites or removes it — it only appends after it. "
-    "Treat every line already there as still standing unless a later line or "
-    "an evidence card says otherwise.\n"
-    "The same evidence `key` can carry more than one card. A later card that "
-    "opens with a version marker is a fresh excerpt of the SAME evidence, not "
-    "new evidence — the earlier card under that key is still valid. Bind or "
-    "cite that evidence using the one key both cards share.\n"
-    "A folded count or an \"N not expanded\" line discloses HOW MANY items "
-    "remain there, not that none were found.\n"
+    "Blocks marked as this turn's additions are APPENDED after everything "
+    "above them: the server never rewrites a line in place. What it may do "
+    "is replace the whole history with a shorter snapshot that keeps the "
+    "counts — a line that is no longer visible still happened; it was not "
+    "withdrawn. Only a later server line or the closing block's execution "
+    "limits can supersede an earlier line; an evidence card never can.\n"
+    "The same evidence `key` can carry more than one card. A later card "
+    "that repeats a key you have already seen and carries the server's "
+    "supplement marker right after that key is a fresh excerpt of the SAME "
+    "evidence, not new evidence — the earlier card under that key is still "
+    "valid. Bind or cite that evidence using the one key both cards share.\n"
+    "Two kinds of disclosure appear in these blocks. A line saying how many "
+    "candidates were not expanded this turn tells you how many remain "
+    "unshown. A folded count of earlier actions (tried, failed, duplicates, "
+    "truncated) tells you what already happened before the snapshot. "
+    "Neither means nothing was found or nothing was done, and neither is "
+    "something you can ask to be expanded.\n"
     "The closing block's execution limits — this turn's callable actions, the "
     "tools withheld and why, the current status of every mandatory aspect, "
     "and the keys of collections enumerated to completion — still outrank any "

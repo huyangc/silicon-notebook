@@ -332,13 +332,44 @@ def _pd6_catalog():
     return build_reflect_capabilities(ReflectCapabilityFacts())
 
 
-def test_reflect_v2_static_prompt_delta_false_is_byte_identical_to_omitting_it():
-    """``delta`` 省略 == 显式传 `False`,且与该形参加入前的实现逐字节相同(独立
-    的 ≥200 组随机 ``ReflectCapabilityFacts`` 对 HEAD(38fc400f3)的比对见任务
-    报告——仓库没有 `git show` 型用例先例,这里只钉一个能在 CI 里跑的不变量)。
+def _pd6_full_house_catalog():
+    """P 臂 S golden 用的 full-house 目录:与
+    ``test_reasoning_retrieval._full_house_facts`` 同构造(什么都开着、预算
+    都还有),这里独立复制一份,避免跨测试文件引用另一个模块的私有 helper。
+    """
+    from app.services.collection_catalog import (
+        ENUMERABLE_ELEMENT_KINDS, ENUMERABLE_KG_OBJECT_TYPES,
+    )
+    from app.services.reasoning_actions import (
+        ReflectCapabilityFacts, build_reflect_capabilities,
+    )
+    facts = ReflectCapabilityFacts(
+        kg_in_scope=True, scope_restricted=False, has_candidates=True,
+        chunk_search_active=True, exact_lookup_active=True, ppr_active=True,
+        community_active=True, enumeration_active=True,
+        consult_memory_active=True, outline_active=True,
+        element_searches_left=5, chunk_searches_left=3, exact_lookups_left=3,
+        ppr_left=3, follow_chain_left=3, consult_left=2,
+        outline_updates_left=6, enum_rows_left=200, enum_pages_left=4,
+        enum_payload_left=256_000,
+        element_kinds=tuple(ENUMERABLE_ELEMENT_KINDS),
+        object_types=tuple(ENUMERABLE_KG_OBJECT_TYPES),
+        last_turn=False, outline_repair_available=False,
+        terminal_overflow_repair=False,
+    )
+    return build_reflect_capabilities(facts)
 
-    变异:去掉 `(_V2_DELTA_INSTRUCTION if delta else "")` 的短路,让它恒为真
-    ⇒ 这条红。
+
+def test_reflect_v2_static_prompt_delta_false_is_byte_identical_to_omitting_it():
+    """``delta`` 省略 == 显式传 `False`(独立的 ≥200 组随机
+    ``ReflectCapabilityFacts`` 对 HEAD(38fc400f3)的比对见任务报告——仓库没有
+    `git show` 型用例先例,这里只钉一个能在 CI 里跑的不变量)。
+
+    这条抓的是**默认值**:变异把签名改成 `delta: bool = True` ⇒ 省略调用会带
+    上 delta 文本、显式 `delta=False` 不会,两边不再相等,这条红(已实测)。
+    去掉 `(_V2_DELTA_INSTRUCTION if delta else "")` 短路让它恒为真,是下一条
+    `..._appears_only_when_requested` 抓的——那个变异下 `omitted`/`explicit`
+    仍然相等(两边都恒定带上 delta 文本),这条不会红。
     """
     from app.services.prompts import reflect_v2_static_prompt
 
@@ -353,7 +384,9 @@ def test_reflect_v2_static_prompt_delta_instruction_appears_only_when_requested(
     """四句关键短语只在 `delta=True` 出现,且紧跟在 `_V2_STATIC_CATALOG_INSTRUCTION`
     之后、动作清单之前——不是散落在别处或与目录段之间夹了别的文本。
 
-    变异:删第 (2) 句(同一 `key` 多张卡的说明)⇒ 对应短语的正向断言红;把
+    变异:去掉 `(_V2_DELTA_INSTRUCTION if delta else "")` 的短路,让它恒为真
+    ⇒ 这条红(`off` 也会带上 delta 文本,`phrase not in off` 先炸)。删第 (2)
+    句(同一 `key` 多张卡的说明)⇒ 对应短语的正向断言红;把
     `_V2_DELTA_INSTRUCTION` 塞到 `_v2_action_lines` 之后 ⇒ 拼接位置断言红。
     """
     from app.services.prompts import (
@@ -365,14 +398,22 @@ def test_reflect_v2_static_prompt_delta_instruction_appears_only_when_requested(
     off = reflect_v2_static_prompt(catalog)
     on = reflect_v2_static_prompt(catalog, delta=True)
 
-    # (1) append-only 历史块。
-    assert "APPEND-ONLY" in _V2_DELTA_INSTRUCTION
-    # (2) 同一 key 多张卡 = 同一条证据的新摘录,不是新证据。
+    # (1) 追加式历史:不会就地改写一行,折叠成快照后那一行仍然发生过,推翻
+    # 一行的权限只交给后来的服务端行 / 末尾块,证据卡永远没有这个权限。
+    assert "never rewrites a line in place" in _V2_DELTA_INSTRUCTION
+    assert "never removes" not in _V2_DELTA_INSTRUCTION
+    assert "evidence card says otherwise" not in _V2_DELTA_INSTRUCTION
+    # (2) 同一 key 多张卡 = 同一条证据的新摘录,不是新证据;版本标记紧跟在
+    # key 那一格之后(与 Q3 的渲染位置对齐),前一张仍然有效。
     assert "fresh excerpt of the SAME evidence" in _V2_DELTA_INSTRUCTION
-    # (3) 折算计数/「N 条未展开」是披露还有多少,不是没找到。
-    assert "discloses HOW MANY items" in _V2_DELTA_INSTRUCTION
+    assert "right after that key" in _V2_DELTA_INSTRUCTION
+    assert "still valid" in _V2_DELTA_INSTRUCTION
+    # (3) 两种披露分开说:未展开是"还剩多少",折算计数是"已经发生过什么"。
+    assert "remain unshown" in _V2_DELTA_INSTRUCTION
+    assert "already happened" in _V2_DELTA_INSTRUCTION
     # (4) 末尾块的执行限制依旧优先,且不扩大到该块其余部分——四类措辞与
-    # `_V2_STATIC_CATALOG_INSTRUCTION` 同一口径,不得扩大。
+    # `_V2_STATIC_CATALOG_INSTRUCTION` 同一口径,不得扩大;授予优先级的表述
+    # 只出现一次,不能被追加的第五句悄悄放宽到整块。
     assert ("this turn's callable actions, the tools withheld and why, the "
             "current status of every mandatory aspect, and the keys of "
             "collections enumerated to completion") in _V2_STATIC_CATALOG_INSTRUCTION
@@ -380,9 +421,11 @@ def test_reflect_v2_static_prompt_delta_instruction_appears_only_when_requested(
             "current status of every mandatory aspect, and the keys of "
             "collections enumerated to completion") in _V2_DELTA_INSTRUCTION
     assert "does not reach the rest of that block" in _V2_DELTA_INSTRUCTION
+    assert _V2_DELTA_INSTRUCTION.count("outrank") == 1
 
-    for phrase in ("APPEND-ONLY", "fresh excerpt of the SAME evidence",
-                   "discloses HOW MANY items",
+    for phrase in ("never rewrites a line in place",
+                   "fresh excerpt of the SAME evidence",
+                   "remain unshown", "already happened",
                    "does not reach the rest of that block"):
         assert phrase not in off, phrase
         assert phrase in on, phrase
@@ -392,43 +435,120 @@ def test_reflect_v2_static_prompt_delta_instruction_appears_only_when_requested(
     assert on.replace(_V2_DELTA_INSTRUCTION, "", 1) == off
 
 
-def test_reflect_v2_static_prompt_delta_true_is_stable_across_repeated_calls():
-    """T-PD5(重建/接线)未落地,这里过不了一次完整多轮 run;但
-    `reflect_v2_static_prompt` 是纯函数,同一份 `catalog` 反复调用必须逐字节
-    相同——这正是"S 在 run 内不随轮数变"要成立的前提,真正的多轮 run 级验收
-    (`system_prompt(turn)` 全等)留给 T-PD5。
+def test_reflect_v2_static_prompt_delta_instruction_rejects_semantic_regressions():
+    """第 (2) 句的"前一张仍然有效"是绑定资格能继续成立的那半句,必须真的抓住
+    语义反转,不能只断"提到了版本标记"。
+
+    变异:把 `the earlier card under that key is still valid` 改成
+    `…is superseded` ⇒ 这条红。
     """
+    from app.services.prompts import _V2_DELTA_INSTRUCTION
+
+    assert "the earlier card under that key is still valid" in (
+        _V2_DELTA_INSTRUCTION)
+    assert "superseded" not in _V2_DELTA_INSTRUCTION
+
+
+def test_reflect_v2_static_prompt_delta_is_keyword_only():
+    """``delta`` 是 keyword-only:生产唯一调用点也是按关键字传,位置传参必须
+    在签名层面就被拒绝。
+
+    变异:签名把 `*, delta: bool = False` 改成 `delta: bool = False`(去掉
+    keyword-only 标记)⇒ 不再抛 `TypeError`,这条红。
+    """
+    import pytest
+    from app.services.prompts import reflect_v2_static_prompt
+
+    catalog = _pd6_catalog()
+    with pytest.raises(TypeError):
+        reflect_v2_static_prompt(catalog, True)
+
+
+def test_reflect_v2_static_prompt_delta_true_is_stable_across_repeated_calls():
+    """``reflect_v2_static_prompt`` 是纯函数:同一份 `catalog` 反复调用、经
+    生产 `provider_messages()` / `serialize_provider_messages()` 序列化后都
+    必须逐字节相同——这是"S 在 run 内不随轮数变"要成立的前提,真正的多轮
+    run 级验收(`system_prompt(turn)` 全等)留给 T-PD5;端到端(经真实
+    `_GatedV2LLM` run)同样留给 T-PD5。
+
+    变异:让 `reflect_v2_static_prompt` 在 `delta=True` 时插入任何非确定量
+    (例如时间戳)⇒ `len(set(calls))` 与 `len(set(serialized))` 都变成 >1,
+    这条红。
+    """
+    from app.core.llm import provider_messages, serialize_provider_messages
     from app.services.prompts import reflect_v2_static_prompt
 
     catalog = _pd6_catalog()
     calls = [reflect_v2_static_prompt(catalog, delta=True) for _ in range(5)]
     assert len(set(calls)) == 1
 
-
-def test_reflect_v2_static_prompt_delta_survives_provider_serialization_stably():
-    """T-PD6 用例 (c) 的可行版本:`_GatedV2LLM` 一次完整 delta run 本任务不可行
-    (T-PD1 的 `prefix_delta` 枚举、T-PD5 的接线都还没落地),改为直接构造
-    `catalog`、渲染 `delta=True` 的 S,经生产 `provider_messages()` /
-    `serialize_provider_messages()` 走一遍真实序列化,断多次调用逐字节稳定。
-    端到端(经真实 `_GatedV2LLM` run)留给 T-PD5。
-
-    变异:让 `reflect_v2_static_prompt` 在 `delta=True` 时插入任何非确定量
-    (例如时间戳)⇒ `len(set(serialized))` 变成 3,这条红。
-    """
-    from app.core.llm import provider_messages, serialize_provider_messages
-    from app.services.prompts import reflect_v2_static_prompt
-
-    catalog = _pd6_catalog()
-    system_text = reflect_v2_static_prompt(catalog, delta=True)
+    system_text = calls[0]
     messages = [
         {"role": "system", "content": system_text},
         {"role": "user", "content": "[Question]\nq?\n\nReturn JSON only."},
     ]
     schema_hint = '{"next_action": ""}'
-
     serialized = [
         serialize_provider_messages(provider_messages(messages, schema_hint))
         for _ in range(3)
     ]
     assert len(set(serialized)) == 1
+    # 经生产序列化(长度前缀原文帧)后,em-dash、弯引号、反引号都没有被转义
+    # 打散——这是这条用例唯一不被前一半覆盖的断言。
     assert system_text.encode("utf-8") in serialized[0]
+
+
+# ---------------------------------------------------------------------------
+# 质量评审 P3-1:P 臂 S(``prefix_snapshot``/``prefix_delta`` 共用的静态目录
+# 段)至今没有字节 golden——`test_reasoning_retrieval.py` 里 `off` 臂的那条
+# golden(`test_off_v2_system_prompt_is_byte_frozen_against_a_golden`)不覆盖
+# `_V2_STATIC_CATALOG_INSTRUCTION`,它是 P 臂独有的。改这段措辞、或改
+# `_V2_DELTA_INSTRUCTION`,必须在同一个 diff 里改下面对应的 golden。
+# ---------------------------------------------------------------------------
+
+#: `reflect_v2_static_prompt(full_house_catalog, delta=False)` 的 golden。
+_PD6_STATIC_P_LEN = 10851
+_PD6_STATIC_P_SHA256 = (
+    "c0186cad0daef780103a58739622e0f62cf78770d7799ca3e8550df7d4bb12ee")
+
+#: `reflect_v2_static_prompt(full_house_catalog, delta=True)` 的 golden——
+#: `delta=False` 的输出之后紧跟 `_V2_DELTA_INSTRUCTION`。
+_PD6_STATIC_DELTA_LEN = 12358
+_PD6_STATIC_DELTA_SHA256 = (
+    "cf53d6ad1b2f545a2b6aee5bf30163cc878d2c52cf3c45c7ab3a8a1c50bf8ead")
+
+
+def test_reflect_v2_static_prompt_p_arm_delta_false_is_byte_frozen_against_a_golden():
+    """P 臂 S(``delta=False``)= 这一串确定的字节(质量评审 P3-1)。
+
+    变异:改 `_V2_STATIC_CATALOG_INSTRUCTION` 一个词 ⇒ 这条红。
+    """
+    import hashlib
+    from app.services.prompts import reflect_v2_static_prompt
+
+    text = reflect_v2_static_prompt(_pd6_full_house_catalog(), delta=False)
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    assert (len(text), digest) == (_PD6_STATIC_P_LEN, _PD6_STATIC_P_SHA256), (
+        "P 臂(prefix_snapshot/prefix_delta 共用)的静态目录段变了。改动 "
+        "`_V2_STATIC_CATALOG_INSTRUCTION` 必须在同一个 diff 里改这里的 "
+        f"golden。实测长度={len(text)} sha256={digest}"
+    )
+
+
+def test_reflect_v2_static_prompt_p_arm_delta_true_is_byte_frozen_against_a_golden():
+    """P 臂 S(``delta=True``)钉住 `delta=False` 的 golden 之后紧跟
+    `_V2_DELTA_INSTRUCTION` 那份完整拼接——同一份 golden 机制,另外钉住
+    delta 臂独有的四句。
+
+    变异:改 `_V2_DELTA_INSTRUCTION` 任意一句 ⇒ 这条红。
+    """
+    import hashlib
+    from app.services.prompts import reflect_v2_static_prompt
+
+    text = reflect_v2_static_prompt(_pd6_full_house_catalog(), delta=True)
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    assert (len(text), digest) == (
+        _PD6_STATIC_DELTA_LEN, _PD6_STATIC_DELTA_SHA256), (
+        "prefix_delta 的静态目录段(含四句)变了。实测长度="
+        f"{len(text)} sha256={digest}"
+    )
