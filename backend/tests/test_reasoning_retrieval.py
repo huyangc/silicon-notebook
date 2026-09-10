@@ -13536,7 +13536,7 @@ def test_measure_off_keeps_the_reflect_context_and_detail_untouched(
     # 字段闭集:新增一格而不在这里登记 ⇒ 下面那圈逐字段比对会漏掉它。
     assert [f.name for f in fields(ReflectContext)] == [
         "server_state", "evidence", "observations", "contract", "turn_state",
-        "static_prompt", "measurement"]
+        "static_prompt", "delta", "measurement"]
 
     quiet = _capture_contexts(monkeypatch)
     _llm, quiet_result = _v2_aspect_run(
@@ -13557,7 +13557,7 @@ def test_measure_off_keeps_the_reflect_context_and_detail_untouched(
     assert len(loud) == 3
     for turn, (before, after) in enumerate(zip(quiet, loud)):
         for name in ("server_state", "evidence", "observations", "contract",
-                     "turn_state", "static_prompt"):
+                     "turn_state", "static_prompt", "delta"):
             assert getattr(before, name) == getattr(after, name), (turn, name)
         assert after.measurement is not None
 
@@ -14419,12 +14419,16 @@ def test_reflect_context_refuses_the_wrong_layout_payload():
     import pytest
     from app.services.reasoning_context import ReflectContext
 
-    # 1. 带 P 载荷的上下文走 off 的渲染 ⇒ 抛,而不是悄悄丢掉 C/T。
-    for field in ("contract", "turn_state", "static_prompt"):
+    # 1. 带前缀臂载荷的上下文走 off 的渲染 ⇒ 抛,而不是悄悄丢掉 C/T/D。逐格遍历
+    #    `_PREFIX_ONLY_FIELDS` 而不是抄一份名字:新增一格却忘了在这里登记,过去只
+    #    表现为"这条用例没覆盖它"(`delta` 就是这么加进来的)。
+    assert ReflectContext._PREFIX_ONLY_FIELDS == (
+        "contract", "turn_state", "static_prompt", "delta")
+    for field in ReflectContext._PREFIX_ONLY_FIELDS:
         loaded = ReflectContext(
             server_state="", evidence="K", observations="D",
             **{field: "payload"})
-        with pytest.raises(ValueError, match="prefix_snapshot payload"):
+        with pytest.raises(ValueError, match="prefix-layout payload"):
             loaded.as_user_block()
     # 2. 带 off 载荷的上下文走 P 的渲染 ⇒ 抛,而不是静默丢掉 server_state。
     with pytest.raises(ValueError, match="server_state must be empty"):
@@ -14577,3 +14581,416 @@ def test_fold_observation_counts_keeps_an_unknown_status_in_the_total():
     assert line.index("未来才有的状态") > line.index(
         _STATUS_LABELS[STATUS_SUCCESS])
     assert line.endswith("总计已尝试 2 次")
+
+
+# ---------------------------------------------------------------------------
+# T-PD4 冻结卡、增量块与快照重建(PR-3 计划 §3 T-PD4;上游设计 §4.4 / §5.2)
+#
+# 这一节全部是**纯函数与一份渲染缓存**:零 I/O、零 settings、零 LLM。接线(什么时候
+# 重建、什么时候回退、预算怎么累计)在 T-PD5,不在这里。
+# ---------------------------------------------------------------------------
+
+#: 同一段正文里两个相距很远的答案区。换一个 `action_query`,`select_excerpt` 就会
+#: 挑另一个窗口——§4.4 说的"以后遇到更好的摘录"在代码里就是这件事,也是冻结表存在
+#: 的直接原因。
+_DELTA_BODY = ("甲" * 200) + "阈值设置是 3" + ("乙" * 200) + "延迟预算是 7" + ("丙" * 200)
+
+
+def _delta_chunk(key="c1", text=None, relevance=0.9, title="Doc"):
+    return _card(key, relevance=relevance,
+                 text=_DELTA_BODY if text is None else text, title=title)
+
+
+def _rendered_card(chunk, action_query, excerpt_chars=60):
+    """池里那一条 → 这一轮它那一行的字节(与选取循环里同一条渲染)。"""
+    from app.services.reasoning_context import (
+        _card_for, excerpt_terms, render_card,
+    )
+    return render_card(_card_for(
+        chunk, excerpt_terms("", action_query, excerpt_chars), excerpt_chars))
+
+
+def _key_field(line):
+    """一张卡的 `key=` 那一格(第一行的第二个字段)。"""
+    return line.split("\n")[0].split(" | ")[1]
+
+
+def _delta_kwargs(chunks, **over):
+    kwargs = dict(
+        collected={}, elements=[], chunks=chunks, bound_keys=[], fresh_keys=[],
+        already_shown=[], question="", action_query="阈值设置",
+        budget_chars=4000, excerpt_chars=60, max_cards=8)
+    kwargs.update(over)
+    return kwargs
+
+
+def test_evidence_block_ignores_a_frozen_table_that_matches_nothing():
+    """空冻结表 / 只装无关键的冻结表 ⇒ 与不传这个参数**逐字节相同**。
+
+    这是风险 1 的守卫:`off` 与 `prefix_snapshot` 两条臂的字节等价靠"默认中性",
+    而"默认中性"必须被证明,不能只写在签名里。除正文外,`shown_keys`/`omitted`/
+    `cards` 三格也一起比——它们不进消息,却决定绑定资格与冻结表的下一版。
+
+    (对着接入前那一版实现的 ≥200 组随机 fixture 比对见 PR 说明;这条是它留在仓库
+    里的不变量形式。)
+
+    变异:把冻结查表写成"表非空就整块换掉"之类的形态 ⇒ 这条红。
+    """
+    from app.services.reasoning_context import build_evidence_block
+    chunks = [_delta_chunk(f"c{i}", text=f"布局布线{i}" * 20, relevance=1 - i / 10)
+              for i in range(4)]
+    kwargs = dict(
+        collected={}, elements=[], chunks=chunks, chains=[],
+        bound_keys=["c1"], fresh_keys=["c2"], question="布局",
+        action_query="布线", budget_chars=260, excerpt_chars=60)
+    base = build_evidence_block(**kwargs)
+    for table in ({}, {"不在池里的键": "- 伪造的一行", "": "空键"}):
+        other = build_evidence_block(**kwargs, frozen_cards=table)
+        assert other.text == base.text
+        assert other.shown_keys == base.shown_keys
+        assert other.omitted == base.omitted
+        assert other.cards == base.cards
+    # 真的切掉过卡(否则这条用例只证明了"全都装得下"这一种形状)。
+    assert base.omitted > 0
+
+
+def test_evidence_block_takes_the_frozen_bytes_instead_of_re_rendering():
+    """键在冻结表里 ⇒ 用表里那串字节,不按**本轮**的 `action_query` 重算摘录。
+
+    同一条 chunk 在两轮里能给出两段不同的摘录(检索词来自那一轮的决定),而一张
+    变了字节的卡会让整条前缀从它那里断开——`prefix_delta` 的全部意义就是这件事
+    不发生。选取顺序、`shown_keys`、`omitted` 一格不改:冻结的是"这张卡长什么样",
+    不是"要不要选它"。
+
+    变异(硬约束 1):把 `frozen_cards.get(key)` 那两行拿掉(恒现渲染)⇒ 这条红。
+    """
+    from app.services.reasoning_context import build_evidence_block
+    chunks = [_delta_chunk("c1"), _delta_chunk("c2", relevance=0.5)]
+    kwargs = dict(
+        collected={}, elements=[], chunks=chunks, chains=[], bound_keys=[],
+        fresh_keys=[], question="", action_query="延迟预算",
+        budget_chars=4000, excerpt_chars=60)
+    first_turn = _rendered_card(chunks[0], "阈值设置")
+    this_turn = _rendered_card(chunks[0], "延迟预算")
+    assert first_turn != this_turn          # fixture 真的会漂
+
+    base = build_evidence_block(**kwargs)
+    assert this_turn in base.text and first_turn not in base.text
+
+    frozen = build_evidence_block(**kwargs, frozen_cards={"c1": first_turn})
+    assert first_turn in frozen.text        # 上一轮那串字节原样回来
+    assert this_turn not in frozen.text     # 本轮重算的那一版没有发出去
+    assert dict(frozen.cards)["c1"] == first_turn
+    # 只换了那一张卡的字节:别的卡、顺序、登记与省略数都不动。
+    assert frozen.shown_keys == base.shown_keys
+    assert frozen.omitted == base.omitted
+    assert dict(frozen.cards)["c2"] == dict(base.cards)["c2"]
+
+
+def test_supplement_card_repeats_the_pool_key_verbatim():
+    """同 key 摘录升级 ⇒ 追加一张标着版本的补充卡,`key=` 那一格与原卡逐字相同。
+
+    风险 4:补充卡的 `key=` 被归一改写一次,`outline_binding_keys` 的绑定校验就会
+    在下一轮静默失配——模型从卡上抄下来的键不再是池子里的那一把。版本标记因此插在
+    `key=` **之后**(拍板 Q3),而且是从原卡的字节里原样搬过来的。
+
+    变异:把版本标记插到 `key=` **之前**(或另写一个渲染器重新拼 key)⇒ 这条红。
+    """
+    from app.services.reasoning_context import ReflectDeltaState
+    chunk = _delta_chunk("c1")
+    first = _rendered_card(chunk, "阈值设置")
+    second = _rendered_card(chunk, "延迟预算")
+
+    state = ReflectDeltaState()
+    state.note_shown("c1", first)
+    supplement = state.supplement_for("c1", second)
+
+    assert supplement
+    assert "补充摘录 v2" in supplement
+    assert _key_field(first) == _key_field(supplement) == "key=c1"
+    # 版本标记紧跟在 key 那一格之后,而不是行尾或行首。
+    assert supplement.split("\n")[0].split(" | ")[2].startswith("补充摘录 v2")
+    # 旧卡**不被改写**:冻结表里还是第一次发出去的那串字节。
+    assert state.frozen_cards["c1"] == first
+    assert state.card_versions["c1"] == 2
+    # 同一个键再展示一次(重建后的 K 里那一张)照样不改写它:冻结表一旦记下就是
+    # "已经发出去的那串字节",而重建那一次本来就该从表里取字节。
+    # 变异:把 `note_shown` 的 `if key not in self.frozen_cards` 去掉 ⇒ 这条红。
+    state.note_shown("c1", second)
+    assert state.frozen_cards["c1"] == first
+
+
+def test_supplement_is_not_appended_for_an_excerpt_already_sent():
+    """相同摘录不重复追加(设计 §4.4)。
+
+    这一格没有守卫的话,同一段摘录每轮都会追加一张新卡:每一轮都在涨字节、每一轮
+    都把同一条证据说成"新增",而"已发出的块字节不变"那条断言照样绿(旧块确实没
+    变,只是后面一直在长)。
+
+    变异(硬约束 2):把 `supplement_for` 里 `if text in variants` 那道判据拿掉
+    ⇒ 这条红。
+    """
+    from app.services.reasoning_context import ReflectDeltaState
+    chunk = _delta_chunk("c1")
+    first = _rendered_card(chunk, "阈值设置")
+    second = _rendered_card(chunk, "延迟预算")
+
+    state = ReflectDeltaState()
+    state.note_shown("c1", first)
+    assert state.supplement_for("c1", first) == ""      # 就是上文那一张
+    assert state.supplement_for("c1", second)           # v2
+    assert state.supplement_for("c1", second) == ""     # v2 也只发一次
+    assert state.supplement_for("c1", first) == ""      # v1 还在上文里
+    assert state.card_versions["c1"] == 2
+    # 从没展示过的键不是"补充卡",它该走增量块的新增档。
+    assert ReflectDeltaState().supplement_for("c1", first) == ""
+
+
+def test_delta_evidence_block_orders_fresh_before_bound_but_unshown():
+    """增量的档序是 本轮新增 → 已绑定但从未展示 → 多样性补位,与 K **相反**。
+
+    K 那一块要当一份完整的当前视图,所以已绑定的代表排第一档;增量块回答的是另一
+    个问题——"上一次动作之后多了什么"。两个档序写在同一个函数里就只能二选一,这正
+    是另写一个函数的全部理由。
+
+    变异:把两档换回 K 的顺序 ⇒ 这条红。
+    """
+    from app.services.reasoning_context import (
+        build_delta_evidence_block, build_evidence_block,
+    )
+    chunks = [_delta_chunk(f"c{i}", text=f"段落{i}", relevance=i / 10)
+              for i in range(4)]
+    selection = build_delta_evidence_block(**_delta_kwargs(
+        chunks, bound_keys=["c1"], fresh_keys=["c2"]))
+    assert selection.shown_keys[:2] == ("c2", "c1")
+    # 同一批输入交给 K 那一块 ⇒ 正好相反,两个档序不是同一件事。
+    assert build_evidence_block(
+        collected={}, elements=[], chunks=chunks, chains=[],
+        bound_keys=["c1"], fresh_keys=["c2"], question="", action_query="",
+        budget_chars=4000, excerpt_chars=60).shown_keys[:2] == ("c1", "c2")
+
+
+def test_delta_evidence_block_excludes_everything_already_shown():
+    """`already_shown` 覆盖全池 ⇒ 空块,而不是把上文那些卡再发一遍。
+
+    同一条证据在一条消息里出现两遍,模型无从判断哪一份是此刻的。
+
+    变异:把 `key not in blocked` 那道判据拿掉 ⇒ 这条红。
+    """
+    from app.services.reasoning_context import build_delta_evidence_block
+    chunks = [_delta_chunk(f"c{i}", text=f"段落{i}") for i in range(3)]
+    selection = build_delta_evidence_block(**_delta_kwargs(
+        chunks, fresh_keys=["c0", "c1", "c2"],
+        already_shown=["c0", "c1", "c2"]))
+    assert selection.text == ""
+    assert selection.shown_keys == ()
+    assert selection.omitted == 0        # 一条都没被"挤掉",是本来就不该再发
+    # 挡掉一半 ⇒ 只出另一半。
+    half = build_delta_evidence_block(**_delta_kwargs(
+        chunks, fresh_keys=["c0", "c1", "c2"], already_shown=["c0"]))
+    assert set(half.shown_keys) == {"c1", "c2"}
+
+
+def test_delta_evidence_block_stops_at_max_cards_and_discloses_the_rest():
+    """`max_cards=2`、候选 10 ⇒ 恰两张 + 省略 8,而且省略披露与 K 那一块同一串
+    字面。
+
+    省略数**只报本块**:它说的是"这一块没展开几条",不是"整个池子还剩几条"。
+
+    变异:把 `max_cards` 那道上限拿掉 ⇒ 张数断言红;把披露改成另一种说法 ⇒
+    同源断言红。
+    """
+    from app.services.reasoning_context import (
+        build_delta_evidence_block, build_evidence_block,
+    )
+    chunks = [_delta_chunk(f"c{i}", text=f"段落{i}", relevance=1 - i / 20)
+              for i in range(10)]
+    selection = build_delta_evidence_block(**_delta_kwargs(
+        chunks, max_cards=2, budget_chars=4000))
+    assert len(selection.shown_keys) == 2
+    assert selection.omitted == 8
+    assert selection.text.count("\n- [") + 1 == 2      # 正文里就两张卡
+    # 与 K 那一块的省略披露逐字同源(两块的省略是同一件事)。
+    squeezed = build_evidence_block(
+        collected={}, elements=[], chunks=chunks, chains=[], bound_keys=[],
+        fresh_keys=[], question="", action_query="", budget_chars=200,
+        excerpt_chars=60)
+    note = f"（另有 {squeezed.omitted} 条候选证据本轮未展开）"
+    assert note in squeezed.text
+    assert "（另有 8 条候选证据本轮未展开）" in selection.text
+
+
+def test_delta_evidence_block_keeps_the_disclosure_inside_the_budget():
+    """`budget_chars` 是硬界:省略披露本身也算进去。
+
+    先装行、最后再拼披露的话,那句话的长度不在任何一次预算判断里,整块因此可以稳定
+    超出预算十几个字符——而 delta 下证据预算是 **K + 所有 D 的总和**,每块超一点会
+    一路累计。
+
+    变异:把末尾那圈收敛循环删掉(装完就返回)⇒ 这条红。
+    """
+    from app.services.reasoning_context import build_delta_evidence_block
+    chunks = [_delta_chunk(f"c{i}", text=f"段落{i}" * 10) for i in range(6)]
+    one = build_delta_evidence_block(**_delta_kwargs(chunks, budget_chars=1))
+    assert one.text == "" and one.shown_keys == () and one.omitted == 6
+    for budget in range(40, 400, 17):
+        selection = build_delta_evidence_block(
+            **_delta_kwargs(chunks, budget_chars=budget))
+        assert len(selection.text) <= budget, budget
+        assert len(selection.shown_keys) + selection.omitted == 6, budget
+
+
+def test_build_delta_block_drops_the_sections_it_has_nothing_for():
+    """一轮一块,块内三节,缺哪节不出哪节(拍板 Q1);三节全空 ⇒ 空串。
+
+    只有标题的空块在模型眼里与"这一轮什么都没发生"没有区别,而真相是这一轮确实
+    什么都没追加——那就一块都不发。
+
+    变异:三节全空时仍返回标题 ⇒ 空串断言红;把观察那一节后面的 `HISTORY_NOTE`
+    去掉 ⇒ 同源断言红(那些行里的"目的"是模型当时写下的判断,不是证据)。
+    """
+    from app.services.reasoning_context import (
+        DELTA_BLOCK_TITLE, build_delta_block,
+    )
+    from app.services.reasoning_observation import HISTORY_NOTE
+
+    assert build_delta_block("", [], [], generation=1) == ""
+    assert build_delta_block("", [""], [""], generation=1) == ""
+
+    cards_only = build_delta_block("- [chunk] | key=c1 | 卡", [], [],
+                                   generation=1)
+    assert cards_only == f"{DELTA_BLOCK_TITLE}\n- [chunk] | key=c1 | 卡"
+    assert HISTORY_NOTE not in cards_only
+
+    rows_only = build_delta_block("", ["- #1 [action] search_chunks"], [],
+                                  generation=1)
+    assert rows_only.endswith(HISTORY_NOTE)
+
+    whole = build_delta_block(
+        "- [chunk] | key=c1 | 卡", ["- #1 [action] search_chunks"],
+        ["本轮服务端已接受的方面更新：a2（模型判断，非原文）"], generation=1)
+    # 三节顺序:新增卡 → 本轮观察 → 已接受的方面更新。
+    assert whole.index("key=c1") < whole.index("#1 [action]")
+    assert whole.index("#1 [action]") < whole.index("已接受的方面更新")
+    assert whole.index(HISTORY_NOTE) < whole.index("已接受的方面更新")
+
+
+def test_build_delta_block_marks_the_generation_only_after_a_rebuild():
+    """首版不渲染 generation(它恒等于 1,每轮为它付字节没有读者);重建之后的块
+    才带上"第 N 版快照之后的新增"。
+
+    变异:无条件渲染 generation ⇒ 首版断言红(每一块都多付一格)。
+    """
+    from app.services.reasoning_context import (
+        DELTA_BLOCK_TITLE, build_delta_block,
+    )
+    first = build_delta_block("- [chunk] | key=c1 | 卡", [], [], generation=1)
+    assert first.startswith(f"{DELTA_BLOCK_TITLE}\n")
+    later = build_delta_block("- [chunk] | key=c1 | 卡", [], [], generation=2)
+    assert later.startswith(f"{DELTA_BLOCK_TITLE}（第 2 版快照之后的新增）")
+    assert later.endswith("- [chunk] | key=c1 | 卡")
+
+
+def test_compose_snapshot_appends_the_fold_only_when_there_is_one():
+    """折算计数挂在**历史**那一半的末尾;没有更早的行 ⇒ 两半逐字节等于传进来的
+    那两串。
+
+    折算块的标题要挡住一种误读:计数**不是**"没发生"。一块只剩数字的历史很容易被
+    读成"这些方向没试过",于是模型把刚失败过的问法原样再问一遍。
+
+    变异:`folded_counts` 为空时也拼一个空块头 ⇒ 恒等断言红;把折算挂到证据那一
+    半 ⇒ 证据恒等断言红。
+    """
+    from app.services.reasoning_context import (
+        SNAPSHOT_FOLD_TITLE, compose_snapshot,
+    )
+    assert compose_snapshot("K证据", "K历史", "") == ("K证据", "K历史")
+    evidence, history = compose_snapshot("K证据", "K历史", "有新证据 3 条")
+    assert evidence == "K证据"
+    assert history == f"K历史\n\n{SNAPSHOT_FOLD_TITLE}\n有新证据 3 条"
+    # 历史那一半本来就是空的(近期观察一条都没留下)⇒ 折算块自己成块,不带空行。
+    assert compose_snapshot("K证据", "", "有新证据 3 条")[1] == (
+        f"{SNAPSHOT_FOLD_TITLE}\n有新证据 3 条")
+
+
+def test_delta_state_holds_only_rendered_text_and_counters():
+    """投影的槽位闭集:只有已渲染的字符串、一张卡片文本表和几个整数/布尔。
+
+    计划 §1 M4 的三条硬约束里,(b)「不持有候选池、额度账、方面账的任何引用」只能
+    靠这一格钉住——往里塞一个 `state` 或 `selection` 字段,它就从"渲染缓存"变成了
+    "第二份会与真实状态分叉的账",而分叉之后先被相信的往往是这一份。
+
+    变异:给 `ReflectDeltaState` 加一格业务状态 ⇒ 这条红。
+    """
+    from app.services.reasoning_context import ReflectDeltaState
+    assert ReflectDeltaState.__slots__ == (
+        "snapshot_evidence", "snapshot_history", "blocks", "frozen_cards",
+        "card_variants", "card_versions", "observation_cursor",
+        "pending_aspect_notes", "evidence_chars", "history_chars",
+        "rebuilds", "fallback", "generation")
+    fresh = ReflectDeltaState()
+    assert (fresh.generation, fresh.rebuilds, fresh.fallback) == (1, 0, False)
+    assert (fresh.evidence_chars, fresh.history_chars,
+            fresh.observation_cursor) == (0, 0, 0)
+    # 两个实例不共享那几份可变默认值(`default_factory`,不是可变默认参数)。
+    fresh.blocks.append("D1")
+    fresh.frozen_cards["c1"] = "卡"
+    assert ReflectDeltaState().blocks == [] and not ReflectDeltaState().frozen_cards
+
+
+def test_delta_state_repr_carries_no_document_text():
+    """`repr` 里没有文档正文:装文本的那几格 `repr=False`(与 `ReflectMeasurement`
+    同一条理由)。
+
+    这个对象被 `_ReasoningRunState` 持有,而它装的每一格文本都是文档正文与用户
+    问题的派生物(证据卡的摘录就是原文片段)。默认 `repr` 一开,任何一次
+    `repr(state)`、`%s` 占位符或异常里的对象转写都会把它们带出去。
+
+    变异:去掉任意一格的 `repr=False` ⇒ 这条红。
+    """
+    from app.services.reasoning_context import ReflectDeltaState
+    secret = "SENTINEL-文档正文不许出现在 repr 里"
+    state = ReflectDeltaState(
+        snapshot_evidence=secret, snapshot_history=secret,
+        blocks=[secret], frozen_cards={"c1": secret},
+        card_variants={"c1": {secret}}, card_versions={"c1": 2},
+        pending_aspect_notes=[secret], observation_cursor=7,
+        evidence_chars=120, history_chars=80, rebuilds=1, generation=2)
+    rendered = repr(state)
+    assert secret not in rendered
+    # 几个整数照样看得见:它们正是出问题时最该看的东西。
+    for number in ("observation_cursor=7", "evidence_chars=120",
+                   "rebuilds=1", "generation=2"):
+        assert number in rendered
+
+
+def test_prefix_user_block_renders_delta_between_the_ledger_and_the_turn_state():
+    """D 排在观察账之后、T 之前;`delta` 为空 ⇒ 渲染逐字节回到接入前。
+
+    T 每轮重写,夹在中间就会把它下面的每一块 D 每轮挤出公共前缀,整条臂随之失去
+    意义。
+
+    变异:把 `delta` 渲染到 T 之后(或 K 之前)⇒ 顺序断言红;把那一格从
+    `_PREFIX_ONLY_FIELDS` 里拿掉 ⇒ 下面 `as_user_block` 那条红(硬约束 3)。
+    """
+    import pytest
+    from app.services.reasoning_context import ReflectContext, TURN_STATE_TITLE
+
+    base = ReflectContext(
+        server_state="", evidence="K证据", observations="K历史",
+        contract="C", turn_state="T状态", static_prompt="S")
+    assert base.as_prefix_user_block("本轮动作") == ReflectContext(
+        server_state="", evidence="K证据", observations="K历史",
+        contract="C", turn_state="T状态", static_prompt="S", delta="",
+    ).as_prefix_user_block("本轮动作")
+
+    loaded = ReflectContext(
+        server_state="", evidence="K证据", observations="K历史",
+        contract="C", turn_state="T状态", static_prompt="S", delta="D块")
+    rendered = loaded.as_prefix_user_block("本轮动作")
+    assert rendered == f"K证据\n\nK历史\n\nD块\n\n{TURN_STATE_TITLE}\n本轮动作\n\nT状态"
+    # off 的渲染拒收这份载荷(与 C/T/S 同一道守卫)。
+    with pytest.raises(ValueError, match="prefix-layout payload"):
+        ReflectContext(
+            server_state="S", evidence="K", observations="D",
+            delta="D块").as_user_block()
