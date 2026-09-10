@@ -17825,6 +17825,14 @@ def test_a_lean_run_accepts_a_silent_closing_turn_without_a_follow_up():
     红(返回 True、扣掉额度、挂上追问位);闸里补上 `may_prompt=False` 那两行的
     `assessment_omitted` 写入 ⇒ 第三组红(用例 (g) 的那次变异);把闸改成读
     `may_prompt` 而不是 `lean_assessment` ⇒ (b) 的对照半红。
+
+    第四组守的是**闸的位置**:这条闸必须排在 `may_prompt`/`MAX_PROMPTS` 那个分支
+    **之前**,不是之后。T-PL5 接线之后,`_absorb_assessment` 会在 run 的最后一步
+    传 `may_prompt=False`(见 `reasoning_retrieval.py` 的 `_absorb_assessment`)——
+    这时如果闸被挪到那个分支之后,L 臂会一路走进"第二次沉默"那两行,把
+    `assessment_omitted` 在 run 级与逐行都置上,而这正是拍板 Q5 要挡的假归因。
+    变异:把 `if self.lean_assessment: return False` 移到
+    `if (not may_prompt or ...)` 分支之后(不删、只移位)⇒ 这一组红。
     """
     lean = _lean_ledger("问题一", "问题二")
     # 1) 不退回,而且这不是"一次额度用完了"——再来一次仍然接受。
@@ -17842,6 +17850,13 @@ def test_a_lean_run_accepts_a_silent_closing_turn_without_a_follow_up():
     # 但模型自己的那份读数照旧如实:没有判断、状态仍是 unknown。
     assert [row.model_assessed for row in lean.snapshot()] == [False] * 2
     assert [row.status for row in lean.snapshot()] == ["unknown"] * 2
+
+    # 4) 闸排在最前面:哪怕调用方已经知道"这一轮之后不会再有下一轮"
+    # (`may_prompt=False`,T-PL5 接线后即可达),L 下仍然当场接受,两格
+    # `assessment_omitted` 依旧全 False——不会被这条分支冒充成"问过它不给"。
+    assert lean.note_missing_assessment(may_prompt=False) is False
+    assert lean.assessment_omitted is False
+    assert [row.assessment_omitted for row in lean.snapshot()] == [False] * 2
 
     # (b) 对照:同一份构造在默认(off/P/D)下照旧退回一次、追问一次。
     plain = _ledger("问题一", "问题二")
@@ -17885,6 +17900,28 @@ def test_the_lean_switch_is_frozen_on_every_ledger_source():
         for detail in sources}) == 3
 
 
+def test_the_lean_switch_cannot_be_reassigned_after_construction():
+    """`lean_assessment` 建账之后**结构性**冻结,不是约定性的(评审 P3-2)。
+
+    「run 级、建账时冻结」原来只是 docstring 里的一句话,`lean_assessment` 是个
+    普通 slot——中途赋值不会被任何东西拦下来。这一条把它钉成结构:
+    `AspectLedger.lean_assessment` 是只读 property,没有 setter,私有槽
+    `_lean_assessment` 只在 `__init__` 被写一次。中途翻位会让这次 run 的自评
+    合同前后不一致(前半程被追问过、后半程不追问),而那条臂在 A/B 表上仍标着
+    一个名字,于是差异归因是假的(拍板 Q2)——这条测试要的是"翻位这件事本身做
+    不到",不是"翻位之后某个下游断言会红"。
+
+    变异:给 `lean_assessment` 加一个 setter(或把它改回普通 slot)⇒ 赋值不再
+    抛异常,这一条红。
+    """
+    lean = _lean_ledger("问题一", "问题二")
+    assert lean.lean_assessment is True
+    with pytest.raises(AttributeError):
+        lean.lean_assessment = False
+    # 拦下来的赋值没有副作用:那一格读数原样不变。
+    assert lean.lean_assessment is True
+
+
 def test_the_lean_status_block_differs_only_in_the_closing_note():
     """(c) 状态半在 L 下**只差尾注那一句**,全部方面行一行不少。
 
@@ -17899,6 +17936,11 @@ def test_the_lean_status_block_differs_only_in_the_closing_note():
     变异:`render_aspect_status_block` 里把 lean 分支改成**追加**而不是替换
     ⇒ 第一/二组红(两句矛盾合同同时在场);L 下过滤掉已支撑的方面行 ⇒ 第三组
     红;把 `lean` 的默认值改成 `True` ⇒ 默认那一份变成 lean 文本,第一组红。
+
+    第五组守**行序**(评审 P3-6):没有追问句要挂的这一轮,尾注是状态半的
+    **最后一行**——它是"这次省略是合同允许的"那句收尾话,排到降级/未采纳披露
+    前面会让读者先看到一句"可以少说"、再看到"服务端不认这次自评"的矛盾顺序。
+    变异:把尾注那一句挪到方面行列举之前 ⇒ 这一组红。
     """
     from app.services.reasoning_aspects import (
         ASPECT_BLOCK_NOTE, ASPECT_BLOCK_NOTE_LEAN, render_aspect_status_block,
@@ -17931,6 +17973,8 @@ def test_the_lean_status_block_differs_only_in_the_closing_note():
     assert "不必重述已支撑项" in ASPECT_BLOCK_NOTE_LEAN
     # 反面:它没有把「本轮请重新给出」那半句抄过来(两句合同互斥)。
     assert "重新给出" not in ASPECT_BLOCK_NOTE_LEAN
+    # 5) 这一轮没有追问句要挂 ⇒ 尾注是状态半的最后一行。
+    assert lean.splitlines()[-1] == ASPECT_BLOCK_NOTE_LEAN
 
 
 def test_a_lean_turn_that_reports_one_aspect_leaves_the_others_verbatim():
@@ -17992,14 +18036,20 @@ def test_a_lean_termination_discloses_what_was_never_assessed():
     的含义悄悄从"查过没有"漂成"没查过",而合成读到的是前者——答案里就会出现一句
     「笔记本里没有这份材料」的假结论。
 
-    这一行把差额如实说出来:模型自己的结束判断(`model_assessed_sufficient`,与
-    `reason` 分开的那一格)、有几个方面没被逐项核验、是哪几个,最后钉一句这
-    **不是**"资料不存在"。终态 reason 闭集一格不改(拍板 Q7),`directive` 尾句
-    与三条硬边界一字不改。
+    这一行把差额如实说出来,**先事实、后自报**:有几个方面没被逐项核验、是哪几个,
+    再带上模型自己的结束判断(`model_assessed_sufficient`,与 `reason` 分开的
+    那一格),最后钉一句这**不是**"资料不存在"。终态 reason 闭集一格不改
+    (拍板 Q7),`directive` 尾句与三条硬边界一字不改。单复数按计数走:
+    `1 mandatory aspect` / `N mandatory aspects`。
 
     变异:去掉行里的计数 ⇒ 第一组红(计划 T-PL7 (c) 的那次变异);判据改成只看
     `not model_assessed` 而不看 `lean_assessment` ⇒ 下一条(B/P/D 恒不出)红;
-    把 `model_assessed_sufficient` 那半写死成一个方向 ⇒ 第一/二组各红一半。
+    把 `model_assessed_sufficient` 那半写死成一个方向 ⇒ 第一/二组各红一半;
+    把「never assessed」的判据从 `not model_assessed` 换成
+    `status == ASPECT_UNKNOWN`(评审 P2-2)⇒ 第 6 组红——`unknown` 是
+    `ASPECT_UNRESOLVED_STATUSES` 里的合法自评结果,模型显式报过 `unknown` 与
+    模型压根没表过态在这两个判据下会被混同;`_termination_aspect_list` 的
+    `more > 0` 改成 `more > 1`(评审 P3-1)⇒ 第 7 组的边界用例红。
     """
     from app.domain.retrieval_termination import (
         TERMINATION_MODEL_PARTIAL, TERMINATION_MODEL_SUFFICIENT,
@@ -18009,17 +18059,32 @@ def test_a_lean_termination_discloses_what_was_never_assessed():
         _TERMINATION_BLOCK_MAX_ASPECTS, render_termination_block,
     )
 
-    def _lean_term(reason, *, sufficient, assessed_ids=(), count=3):
-        rows = tuple(
-            AspectSnapshot(
-                aspect_id=f"a{n}", question=f"问题{n}",
-                status="partial" if f"a{n}" in assessed_ids else "unknown",
-                model_assessed=f"a{n}" in assessed_ids)
-            for n in range(1, count + 1))
+    def _lean_term(
+        reason, *, sufficient, assessed_ids=(), assessed_unknown_ids=(),
+        count=3, unrecovered_channels=(),
+    ):
+        def _row(n):
+            aspect_id = f"a{n}"
+            if aspect_id in assessed_ids:
+                return AspectSnapshot(
+                    aspect_id=aspect_id, question=f"问题{n}",
+                    status="partial", model_assessed=True)
+            if aspect_id in assessed_unknown_ids:
+                # 模型显式给过判断,只是判断结果仍是 unknown——与"压根没表过态"
+                # 的 unknown 状态相同、但 `model_assessed` 不同,专测 P2-2。
+                return AspectSnapshot(
+                    aspect_id=aspect_id, question=f"问题{n}",
+                    status="unknown", model_assessed=True)
+            return AspectSnapshot(
+                aspect_id=aspect_id, question=f"问题{n}",
+                status="unknown", model_assessed=False)
+
+        rows = tuple(_row(n) for n in range(1, count + 1))
         return RetrievalTermination(
             reason=reason,
             unresolved_aspect_ids=tuple(row.aspect_id for row in rows),
             model_assessed_sufficient=sufficient,
+            unrecovered_channels=unrecovered_channels,
             aspects=rows, lean_assessment=True)
 
     # 1) 计数只数没被评过的那几个:a1 评过 ⇒ 2 个未核验,且只列那两个。
@@ -18037,6 +18102,25 @@ def test_a_lean_termination_discloses_what_was_never_assessed():
     # 上面那一行照旧列全部未解决方面 —— 这一行是**补充披露**,不是替换。
     assert "Questions the retrieval did not resolve: 问题1; 问题2; 问题3" in (
         partial)
+    # 行序(评审 P3-6):L 披露行紧跟 `open_questions` 那一行之后,不许被其他
+    # 披露(未恢复通道等)插到中间。这条必须在**同时有**未恢复通道的载荷上断,
+    # 否则"插到中间"这件事在空的 `unrecovered_channels` 上根本无处插入,变异
+    # 会全绿逃逸。
+    with_channel = render_termination_block(
+        _lean_term(TERMINATION_MODEL_PARTIAL, sufficient=True,
+                   assessed_ids=("a1",),
+                   unrecovered_channels=("search_chunks",)))
+    channel_lines = with_channel.splitlines()
+    open_idx = next(
+        i for i, line in enumerate(channel_lines)
+        if line.startswith("- Questions the retrieval did not resolve"))
+    never_idx = next(
+        i for i, line in enumerate(channel_lines) if "never assessed" in line)
+    channel_idx = next(
+        i for i, line in enumerate(channel_lines)
+        if line.startswith("- Retrieval channels that failed"))
+    assert never_idx == open_idx + 1
+    assert channel_idx > never_idx
 
     # 2) 模型没自报充分的那一版:同一行的另一个方向。
     not_sufficient = render_termination_block(
@@ -18065,6 +18149,28 @@ def test_a_lean_termination_discloses_what_was_never_assessed():
     assert f"{many} mandatory aspects were never assessed" in flood
     assert f"问题{_TERMINATION_BLOCK_MAX_ASPECTS}" in flood
     assert flood.count("(and 2 more)") == 2     # 两行各截一次,各自补数
+
+    # 6) 显式自评为 unknown 的行(a2)≠ 从未被评估:模型确实表过态,只是判断
+    # 仍是 unknown。判据必须看 `model_assessed`,不能看 `status == unknown`
+    # ——否则 a2 会被两个判据都算成"未解决"(它俩在这一半上不分叉),但只有
+    # 用错误判据时才会被错记进"从未评估"那一句(评审 P2-2)。
+    assessed_unknown = render_termination_block(
+        _lean_term(TERMINATION_MODEL_PARTIAL, sufficient=True,
+                   assessed_ids=("a1",), assessed_unknown_ids=("a2",)))
+    assert "Questions the retrieval did not resolve: 问题1; 问题2; 问题3" in (
+        assessed_unknown)
+    assert "1 mandatory aspect was never assessed item by item: 问题3" in (
+        assessed_unknown)
+    assert "问题2" not in assessed_unknown.split("never assessed")[1]
+
+    # 7) `more == 1` 边界(评审 P3-1):恰好比截断上限多一个未核验方面 ⇒
+    # `(and 1 more)`,不能被 `more > 1` 那种变体悄悄吞掉(那样两行都会只列
+    # `_TERMINATION_BLOCK_MAX_ASPECTS` 条、却不声明还有一条剩余)。
+    one_more = _TERMINATION_BLOCK_MAX_ASPECTS + 1
+    boundary = render_termination_block(
+        _lean_term(TERMINATION_MODEL_PARTIAL, sufficient=False,
+                   count=one_more))
+    assert boundary.count("(and 1 more)") == 2  # 两行各截一次,各自补数
 
 
 def test_the_unassessed_disclosure_never_reaches_the_other_three_arms():

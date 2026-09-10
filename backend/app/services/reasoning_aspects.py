@@ -409,7 +409,7 @@ class AspectLedger:
     __slots__ = (
         "_records", "_by_id", "source", "constraints",
         "assessment_prompts", "assessment_omitted", "nudge_pending",
-        "nudge_answered", "unknown_aspect_rejections", "lean_assessment",
+        "nudge_answered", "unknown_aspect_rejections", "_lean_assessment",
     )
 
     def __init__(
@@ -450,17 +450,29 @@ class AspectLedger:
         self.unknown_aspect_rejections: int = 0
         #: 这次 run 走的是 `prefix_delta_lean`(L)的**轻量自评合同**:模型每轮只
         #: 报变化,收尾轮省略自评不再被退回追问(前缀复用设计 §6,PR-4 计划拍板
-        #: Q1)。**run 级、建账时冻结**——`build_aspect_ledger` 的关键字是唯一的
-        #: 写点,中途不重读策略位。中途翻位会让这次 run 的自评合同前后不一致
-        #: (前半程被追问过、后半程不追问),而那条臂在 A/B 表上仍标着一个名字,
-        #: 于是那张表上的差异归因是假的(拍板 Q2)。
+        #: Q1)。**run 级、建账时冻结**——这是**结构性**的,不只是约定:私有槽
+        #: `_lean_assessment` 只在这里(`__init__`)被写一次,`lean_assessment`
+        #: 对外只读(下面的只读 property,没有 setter),中途翻位会被 Python 当场
+        #: 拒成 `AttributeError`,不是"没人这么写"的君子协定。中途翻位会让这次
+        #: run 的自评合同前后不一致(前半程被追问过、后半程不追问),而那条臂在
+        #: A/B 表上仍标着一个名字,于是那张表上的差异归因是假的(拍板 Q2)。
         #:
         #: 它只被 `note_missing_assessment` 一处读到(那是追问链唯一的闸),另外
         #: 由 `classify_termination` 原样带上终态 DTO 供合成侧披露。默认 `False`
         #: 让 `off`/`prefix_snapshot`/`prefix_delta` 三臂逐字节落在既有语义上。
-        self.lean_assessment: bool = bool(lean_assessment)
+        self._lean_assessment: bool = bool(lean_assessment)
 
     # --- 读 ---------------------------------------------------------------
+    @property
+    def lean_assessment(self) -> bool:
+        """`prefix_delta_lean`(L)那条臂的轻量自评合同开关,**只读**。
+
+        唯一写点是 `__init__`(见 `_lean_assessment` 那格的注释)——没有 setter,
+        `ledger.lean_assessment = ...` 结构性地拒成 `AttributeError`,建账之后
+        这次 run 的自评合同不可能中途翻位。
+        """
+        return self._lean_assessment
+
     @property
     def aspect_ids(self) -> Tuple[str, ...]:
         return tuple(row.aspect_id for row in self._records)
@@ -1070,9 +1082,9 @@ def render_aspect_status_block(
 ) -> str:
     """方面账的**状态半**:每轮变化的那一半(前缀复用设计 §4.5)。
 
-    只在 `prefix_snapshot` 布局下被调用,落在 T(user 段末尾)。**方面原文不在
-    这里**——它在 C 里说过一遍了,T 只按 id 报当前状态,这正是 §4.3 「完整任务只
-    表达一次」的那一半。
+    P 与 D(含 L)的共用成型点 `_prefix_context`(`reasoning_retrieval.py`)在这里
+    调用,落在 T(user 段末尾)。**方面原文不在这里**——它在 C 里说过一遍了,T 只
+    按 id 报当前状态,这正是 §4.3 「完整任务只表达一次」的那一半。
 
     ⚠ **这个函数有两处写**,与 `render_aspect_block` 里那两处逐字同款:渲染未采纳
     披露的同时消费掉它(`consume_rejection_notes`),渲染追问句的同时消费掉
@@ -1088,8 +1100,9 @@ def render_aspect_status_block(
     模型停止重述,这个块因此成了方面账**唯一**的完整落点——`demotion` 与
     「服务端未采纳」都挂在那几行上;(c) L 与 D 除自评合同外任何一处差异都会毁掉
     归因(拍板 Q4)。追问句那一段在 L 下恒不可达(`note_missing_assessment` 的
-    第一条闸从不置位 `nudge_pending`),但**不删**:这个函数四臂共用,`off` 与
-    P/D 照旧要它。
+    第一条闸从不置位 `nudge_pending`),但**不删**:`off` 走的是
+    `render_aspect_block`,不是这一个函数;这个函数由 P/D(含 L)共用,三条臂都
+    要它。
     """
     rows = ledger.snapshot()
     if not rows:
@@ -1259,10 +1272,12 @@ def render_termination_block(
     (收尾缺自评会被退回追问),而 **L 下它是常态**——那条臂的自评合同明说未走到
     的方面可以留着不评。于是同一行文本在 L 下的含义悄悄从"查过没有"漂成"没查
     过",而合成读到的是前者,答案里就会出现一句"笔记本里没有这份材料"的假结论。
-    这一行把差额如实说出来:模型自己的结束判断(`model_assessed_sufficient`,与
-    `reason` 分开的那一格)、有几个方面没被逐项核验、是哪几个(复用
-    `_TERMINATION_BLOCK_MAX_ASPECTS` 的截断口径,超出的补一句 `and N more`),
-    最后钉一句这**不是**"资料不存在"。
+    这一行把差额如实说出来,**先事实、后自报**:有几个方面没被逐项核验、是哪几个
+    (复用 `_TERMINATION_BLOCK_MAX_ASPECTS` 的截断口径,超出的补一句
+    `and N more`),再带上模型自己的结束判断(`model_assessed_sufficient`,与
+    `reason` 分开的那一格)——那半句更宽松的自报判读放在计数与列举之后,不放句首,
+    免得给合成模型留一句可以援引来跳过缺口说明的话,最后钉一句这**不是**
+    "资料不存在"。
 
     判据挂在 `termination.lean_assessment`(run 级)而不是"有没有
     `model_assessed=False` 的行":后者在三臂下同样能为真(run 早早被熔断、模型
@@ -1295,24 +1310,28 @@ def render_termination_block(
     # L 专属的披露(见 docstring 的 ⚠ 段)。`unassessed` 是 `open_questions` 的
     # 子集——同一份未解决清单再过一道「这一格根本没有模型判断」的闸,所以上面那
     # 一行为空时这一行结构性也为空,不会出现"没有未解决方面却说有几个未核验"。
-    unassessed = [
-        _fold(by_id[aspect_id].question)
-        for aspect_id in termination.unresolved_aspect_ids
-        if aspect_id in by_id and by_id[aspect_id].question
-        and not by_id[aspect_id].model_assessed
-    ]
-    if termination.lean_assessment and unassessed:
-        lines.append(
-            "- The planner "
-            + ("reported" if termination.model_assessed_sufficient
-               else "did not report")
-            + " the evidence as sufficient when it stopped; "
-            + f"{len(unassessed)} mandatory aspects were never assessed item "
-            "by item: "
-            + _termination_aspect_list(unassessed)
-            + ". That only means THIS retrieval did not check them one by "
-            "one — it is NOT a finding that the notebook lacks the material."
-        )
+    # 三臂(off/P/D)在这里白付零工作:计算挪进闸里,不是 L 就不算这笔账。
+    if termination.lean_assessment:
+        unassessed = [
+            _fold(by_id[aspect_id].question)
+            for aspect_id in termination.unresolved_aspect_ids
+            if aspect_id in by_id and by_id[aspect_id].question
+            and not by_id[aspect_id].model_assessed
+        ]
+        if unassessed:
+            count = len(unassessed)
+            lines.append(
+                f"- {count} mandatory aspect{'s' if count != 1 else ''} "
+                + ("were" if count != 1 else "was")
+                + " never assessed item by item: "
+                + _termination_aspect_list(unassessed)
+                + ". The planner "
+                + ("reported" if termination.model_assessed_sufficient
+                   else "did not report")
+                + " the evidence as sufficient when it stopped; that only "
+                "means THIS retrieval did not check them one by one — it is "
+                "NOT a finding that the notebook lacks the material."
+            )
     if termination.unrecovered_channels:
         lines.append(
             "- Retrieval channels that failed and never recovered in this run: "
