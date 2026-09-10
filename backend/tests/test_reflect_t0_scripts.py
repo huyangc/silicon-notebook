@@ -2559,36 +2559,104 @@ def test_optimization_pairs_need_the_off_baseline_and_a_declared_arm(
         "prefix_delta", "prefix_snapshot"]
 
 
-def test_policy_pairs_do_not_require_a_matching_optimization_but_report_it(
-    tmp_path, capsys,
-):
+def test_policy_pairs_split_the_v2_side_by_optimization(tmp_path, capsys):
     """legacy vs v2 **不**要求两侧 `optimization` 相同——`optimization` 对
     legacy 结构上不成立(v2 总闸关时恒 `off`),要求相同就永远配不出
     「legacy vs v2+prefix_snapshot」这一对,而那正是最终要看的对照。
 
-    代价是 v2 那侧可能混着两个 optimization,所以每一侧都如实报出自己的分布。
+    但 v2 那一侧必须按 `optimization` **拆行**(legacy 侧整批重复):同题同格里
+    一条 v2/`off`(10000ms)与一条 v2/`prefix_snapshot`(6000ms)摊进同一个均值
+    是 8000ms,那个数不描述任何一臂。
 
-    变异:给 `pair_table` 的格依据加上 `optimization` ⇒ 第一段的 `len(pairs)==1`
-    红;把 `_pair_side` 里的 `optimization` 分布删掉 ⇒ 最后两条断言红。
+    变异:把 `pair_table` 改回单行(v2 侧不拆、`_pair_side(sides["v2"])` 一次
+    汇总)⇒ `len(pairs) == 2` 与两条 `run_wall_ms` 断言一起红;给格依据加上
+    `optimization` ⇒ legacy 侧那格里没有变体、一对都配不出来,第一条也红。
     """
     js = tmp_path / "t0.json"
     source = _write_rows(tmp_path / "a.jsonl", [
         _row(optimization="off"),
-        _measured_row(optimization="prefix_snapshot"),
-        _measured_row(optimization="off"),
+        _measured_row(optimization="prefix_snapshot", run_wall_ms=6000),
+        _measured_row(optimization="off", run_wall_ms=10000),
     ])
     analyze.main([str(source), "--out-json", str(js)])
     capsys.readouterr()
     pairs = json.loads(js.read_text("utf-8"))["pairs"]
-    assert len(pairs) == 1
+    assert len(pairs) == 2
+    assert [pair["v2"]["optimization"] for pair in pairs] == [
+        {"off": 1}, {"prefix_snapshot": 1}]
+    assert [pair["v2"]["run_wall_ms"] for pair in pairs] == [10000.0, 6000.0]
+    assert [pair["v2"]["n_runs"] for pair in pairs] == [1, 1]
+    # legacy 侧不拆:同一批 run 的同一份汇总,在两行里重复。
     assert pairs[0]["arm_dimension"] == "policy_version"
+    assert pairs[0]["legacy"] == pairs[1]["legacy"]
     assert pairs[0]["legacy"]["optimization"] == {"off": 1}
-    # 混合可见:v2 那侧两批 run 装在一起,均值是混合值。
-    assert pairs[0]["v2"]["optimization"] == {"off": 1, "prefix_snapshot": 1}
-    assert pairs[0]["v2"]["n_runs"] == 2
+
+
+#: 一批**没有任何 optimization 声明**的 run(= 线上导出)配出来的 `pairs` 行。
+#: 手写而不是从代码里算:v2 侧按 optimization 拆行这件事,对这批数据必须逐格
+#: 无差别——只有一个臂(`unknown`),行数与拆行前相同,均值也相同。
+FROZEN_ANONYMOUS_PAIR = {
+    "arm_dimension": "policy_version",
+    "consumer": "ask_single",
+    "corpus_cell": "B_kg",
+    "effort": "standard",
+    "has_intent_contract": "unknown",
+    "mode": "reasoning",
+    "question_key": "B-q01",
+    "trace_source": "unknown",
+    "legacy": {
+        "anchors": None,
+        "model_calls_real": None,
+        "n_runs": 1,
+        "optimization": {"unknown": 1},
+        "prefix_bytes_median": None,
+        "prefix_turns": None,
+        "reflect_turns": 3.0,
+        "run_wall_ms": None,
+        "termination_reason": {"model_end": 1},
+        "total_ms": 1000.0,
+    },
+    "v2": {
+        "anchors": None,
+        "model_calls_real": None,
+        "n_runs": 1,
+        "optimization": {"unknown": 1},
+        "prefix_bytes_median": None,
+        "prefix_turns": None,
+        "reflect_turns": 3.0,
+        "run_wall_ms": None,
+        "termination_reason": {"model_end": 1},
+        "total_ms": 1000.0,
+    },
+}
+
+
+def test_pairs_on_an_undeclared_batch_match_the_frozen_shape(tmp_path, capsys):
+    """线上导出那批(`optimization` 全缺)的 `pairs` 逐键与冻结基线相同。
+
+    这是「按 optimization 拆 v2 侧」这次改动的回归闸:那批数据在这条轴上只有
+    一个臂,所以拆与不拆必须给出同一份输出——多出一行、多出一个键、或者哪个均值
+    动了,都在这里当场红。
+
+    变异:给 `pair_table` 的每行加一个 `entry["optimization"] = _arm` 字段(把臂
+    写进 JSON 而不是从侧内分布读)⇒ 这条红。
+    """
+    js = tmp_path / "t0.json"
+    source = _write_rows(tmp_path / "a.jsonl", [
+        _row(), _row(policy_version="v2"),
+    ])
+    analyze.main([str(source), "--out-json", str(js)])
+    capsys.readouterr()
+    assert json.loads(js.read_text("utf-8"))["pairs"] == [FROZEN_ANONYMOUS_PAIR]
 
 
 def test_the_markdown_report_renders_both_arm_axes(tmp_path, capsys):
+    """两张成对表都在,且 legacy/v2 那张把 v2 侧的臂写在自己的一列里。
+
+    变异:把 `v2 optimization` 列从 `render_markdown` 里删掉 ⇒ 表头断言红;把
+    `_pair_arm` 改成恒返回第一个键(而不是把多臂拼出来)⇒
+    `test_pair_arm_labels_a_mixed_side_as_mixed` 红。
+    """
     source = _write_rows(tmp_path / "rows.jsonl", [
         _measured_row(),
         _measured_row(optimization="prefix_snapshot"),
@@ -2601,3 +2669,19 @@ def test_the_markdown_report_renders_both_arm_axes(tmp_path, capsys):
     assert "## legacy / v2 对照(成对)" in rendered
     assert "## off / 优化变体对照(成对,同 policy_version)" in rendered
     assert "prefix_snapshot" in rendered
+    assert "v2 optimization" in rendered
+    # 拆行后 legacy/v2 那张表是两行,各自的 v2 臂写在那一列里。
+    section = rendered.split("## legacy / v2 对照(成对)")[1].split("## off /")[0]
+    pair_rows = [line for line in section.splitlines()
+                 if line.startswith("| B-q01 |")]
+    assert len(pair_rows) == 2
+    assert sum("prefix_snapshot" in line for line in pair_rows) == 1
+
+
+def test_pair_arm_labels_a_mixed_side_as_mixed():
+    """一侧混了两臂时,标签必须把两个都写出来,不许挑一个盖住混合。"""
+    assert analyze._pair_arm({"optimization": {"off": 2}}) == "off"
+    assert analyze._pair_arm(
+        {"optimization": {"off": 1, "prefix_snapshot": 1}}
+    ) == "off+prefix_snapshot"
+    assert analyze._pair_arm({}) == "unknown"

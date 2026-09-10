@@ -123,9 +123,10 @@ PAIR_DIMENSIONS: tuple[str, ...] = (
 #:   `optimization` 相同——`optimization` 对 legacy 结构上不成立(v2 总闸关时
 #:   `reflect_optimization()` 恒 `off`),要求相同就等于永远配不出
 #:   「legacy vs v2+prefix_snapshot」这一对,而那恰恰是最终要看的那个对照。
-#:   代价是 v2 那一侧可能同时装着两个 optimization 的 run,于是均值是个混合值;
-#:   所以每一侧都**如实报出自己的 `optimization` 分布**(见 `_pair_side`),让
-#:   混合可见,而不是让它悄悄进均值。
+#:   但 v2 那一侧**按 `optimization` 拆行**(legacy 侧整批重复):不拆就会把
+#:   `off` 与 `prefix_snapshot` 两批 run 摊进同一个均值,那个均值不描述任何一
+#:   臂。每一侧仍**如实报出自己的 `optimization` 分布**(见 `_pair_side`)——
+#:   拆行后 v2 侧那一格恒只有一个键,即这一行的 v2 臂身份。
 #: * `optimization_pair_table` 沿 `optimization` 配(`off` vs 各变体),此时
 #:   `policy_version` 是**固定**的:拿 legacy 的 `off` 去比 v2 的
 #:   `prefix_snapshot`,差值里混着两处改动,谁也归因不了。
@@ -279,9 +280,21 @@ def pair_table(rows: Sequence[dict]) -> list[dict]:
 
     只有 `question_key` 不是 unknown 的 run 才有资格配对——线上导出的 legacy
     轨迹没有题号,把它和一条 v2 影子 run 摆在同一行是无中生有的对照。
+
+    v2 那一侧按 `optimization` **拆行**,legacy 侧整批对每个 v2 臂重复一次
+    (与 `optimization_pair_table` 的基线重复写法同构)。不拆的代价是实测到的:
+    一格里同时有 `off` 与 `prefix_snapshot` 两批 v2 run 时,那一侧的每个均值都
+    是两臂的混合值——它不描述任何一臂,而这张表的每一行本该是「同一格里两条只
+    在臂上不同的 run」。侧内的 `optimization` 分布仍照报(见 `_pair_side`),
+    拆行后它恒只有一格,正好也是这一行 v2 臂身份的自证。
+
+    拆行**不**改「两侧 optimization 不必相同」这条(见 `ARM_DIMENSIONS`):
+    legacy 在这条轴上结构性地没有身份,所以它整批与每个 v2 臂各配一行,而不是
+    也跟着拆。一批 run 全没声明 optimization(线上导出)时 v2 侧只有一个臂,
+    行数与拆行前逐行相同。
     """
-    cells: dict[tuple, dict[str, list[dict]]] = defaultdict(
-        lambda: {"legacy": [], "v2": []}
+    cells: dict[tuple, dict[str, Any]] = defaultdict(
+        lambda: {"legacy": [], "v2": defaultdict(list)}
     )
     for row in rows:
         if str(row.get("question_key") or UNKNOWN) == UNKNOWN:
@@ -290,17 +303,24 @@ def pair_table(rows: Sequence[dict]) -> list[dict]:
         if policy not in ("legacy", "v2"):
             continue
         key = tuple(str(row.get(dim) or UNKNOWN) for dim in PAIR_DIMENSIONS)
-        cells[key][policy].append(row)
+        if policy == "legacy":
+            cells[key]["legacy"].append(row)
+        else:
+            cells[key]["v2"][str(row.get("optimization") or UNKNOWN)].append(row)
 
     table: list[dict] = []
     for key, sides in sorted(cells.items()):
-        if not (sides["legacy"] and sides["v2"]):
+        arms = sides["v2"]
+        if not (sides["legacy"] and arms):
             continue
-        entry: dict[str, Any] = dict(zip(PAIR_DIMENSIONS, key))
-        entry["arm_dimension"] = "policy_version"
-        for policy in ("legacy", "v2"):
-            entry[policy] = _pair_side(sides[policy])
-        table.append(entry)
+        # legacy 侧每行都是同一批 run,只算一次(每个变体重复一次那份汇总)。
+        legacy_side = _pair_side(sides["legacy"])
+        for _arm, v2_rows in sorted(arms.items()):
+            entry: dict[str, Any] = dict(zip(PAIR_DIMENSIONS, key))
+            entry["arm_dimension"] = "policy_version"
+            entry["legacy"] = legacy_side
+            entry["v2"] = _pair_side(v2_rows)
+            table.append(entry)
     return table
 
 
@@ -449,10 +469,12 @@ def render_markdown(report: dict) -> str:
     lines += ["", "## legacy / v2 对照(成对)", ""]
     if report["pairs"]:
         lines += _md_table(
-            [*PAIR_DIMENSIONS, "legacy n", "v2 n", "legacy reflect_turns",
-             "v2 reflect_turns", "legacy total_ms", "v2 total_ms"],
+            [*PAIR_DIMENSIONS, "v2 optimization", "legacy n", "v2 n",
+             "legacy reflect_turns", "v2 reflect_turns",
+             "legacy total_ms", "v2 total_ms"],
             [
                 [*(pair[dim] for dim in PAIR_DIMENSIONS),
+                 _pair_arm(pair["v2"]),
                  pair["legacy"]["n_runs"], pair["v2"]["n_runs"],
                  pair["legacy"]["reflect_turns"], pair["v2"]["reflect_turns"],
                  pair["legacy"]["total_ms"], pair["v2"]["total_ms"]]
@@ -488,6 +510,19 @@ def render_markdown(report: dict) -> str:
             " 另一侧为变体的 run)"
         )
     return "\n".join(lines) + "\n"
+
+
+def _pair_arm(side: dict) -> str:
+    """一侧的 `optimization` 臂标签,给 markdown 表用。
+
+    读的是 `_pair_side` 已经报出来的那份分布,不另存一个字段:`pair_table` 把
+    v2 侧按 `optimization` 拆行之后,那一格恒只有一个键,它就是这一行的臂。多于
+    一个键就是**没**拆干净(或读的是不拆的 legacy 侧),此时把几个键都拼出来而
+    不是挑一个——一格里混了两臂这件事必须在表面上看得见,而不是被一个看着单一
+    的标签盖住。
+    """
+    distribution = side.get("optimization") or {}
+    return "+".join(distribution) or UNKNOWN
 
 
 def _fmt_numeric_short(summary: dict, metric: str) -> str:
