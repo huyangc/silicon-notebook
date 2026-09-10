@@ -886,17 +886,21 @@ import copy  # noqa: E402
 import re  # noqa: E402
 
 from app.core.config import Settings  # noqa: E402
+from app.eval import reflect_state_probe as state_probe  # noqa: E402
 from app.eval.reflect_manifest import assert_manifest  # noqa: E402
 from app.eval.reflect_state_probe import (  # noqa: E402
     EXECUTED_ACTION_STEP_TYPES,
     NON_ACTION_STEP_TYPES,
     PROBE_ROW_ALWAYS_NONE,
     PROBE_ROW_KEYS,
+    PROBE_UNREADABLE_ACTION,
     REFLECT_CHAT_WORKLOAD,
     STATE_POINT_LABELS,
     ProbeModelClients,
     ScriptedReflectDriver,
     StateProbeError,
+    _settings_with_case_overrides,
+    assert_no_action_executed_after_forward,
     assert_probe_row_closed,
     case_set_digest,
     load_state_probe_case_set,
@@ -1323,6 +1327,150 @@ def test_the_scripted_turns_carry_no_call_stats_of_their_own(probe_repo):
         False, False, False, True]
 
 
+# --- (a2) case 的 settings_overrides 真的接线 ---------------------------------
+
+#: 「元素检索额度 = 1」的合成剧本:第 1 轮 `search_elements` 用掉唯一那一格额度,
+#: 第 2 轮再硬选同一个动作 ⇒ 能力面上它已经不可用。与 12 例里两个
+#: `tool_exhausted` 例(`te-a-benchmarks` / `te-b-kivi-bits`)同一条造法。
+_EXHAUSTED_SCRIPT: list[dict] = [
+    {"next_action": "search_elements", "sufficient": False,
+     "reason": "先查原文", "arguments": {"query": "GSM8K 得分表"}},
+    {"next_action": "search_elements", "sufficient": False,
+     "reason": "再查一次原文", "arguments": {"query": "GSM8K 得分按任务拆分"}},
+    {"next_action": "add_subquery", "sufficient": False,
+     "reason": "补一条", "arguments": {"query": "GSM8K 得分表概述"}},
+    {"next_action": "add_subquery", "sufficient": False,
+     "reason": "再补一条", "arguments": {"query": "循环次数设置步骤"}},
+]
+
+#: 元素检索额度被 `settings_overrides` 收到 1 之后,第 2 轮那次
+#: `search_elements` 在能力面上的固定原因码(`reasoning_actions.
+#: REASON_ELEMENT_CAP`,经 `parse_reflect_v2` 折成 `unavailable_action:*`)。
+ELEMENT_CAP_REASON = "unavailable_action:element_search_cap"
+
+
+def _exhausted_case(**over: Any):
+    return _synthetic_case(
+        script=copy.deepcopy(_EXHAUSTED_SCRIPT), state_points=[1, 2, 3], **over)
+
+
+def _skip_reasons_in(result) -> list:
+    return [
+        (step.detail or {}).get("reason") for step in result.trace
+        if step.step_type == "skip"
+    ]
+
+
+def test_a_case_settings_override_really_bites_on_a_real_run(probe_repo):
+    """Q5 第三条:一例带 `reasoning_max_element_searches=1` ⇒ 额度**真的**咬住。
+
+    这条守的是「加载了、冻结了、运行路径一次都不读」那一格:`settings_overrides`
+    是 12 例里两个 `tool_exhausted` 例(`te-a-benchmarks` / `te-b-kivi-bits`)
+    造形态的**唯一**手段,不接线的话它们测的不是「工具耗尽」——那两例的剧本第 2
+    轮那次 `search_elements` 会照常执行,而 T-EX6 逐例钉住的「期望不可用轮号」
+    在运行期压根不成立,同时四臂一致、轮数核、「不执行」三道核全部照过。
+
+    对照那一半是载重的:同一份剧本**不带**覆盖时(生产默认 5 次额度)第 2 轮
+    照样可用、两次 `search_elements` 都执行。所以「`run_state_probe_point` 不套
+    覆盖」这个变异会让上半红、下半照绿——两半合起来才钉住「覆盖只在带覆盖的
+    那一例上生效」。
+    """
+    case = _exhausted_case(
+        settings_overrides={"reasoning_max_element_searches": 1})
+    assert case.settings_overrides == {"reasoning_max_element_searches": 1}
+    point = _run_point(probe_repo, case, 1,
+                       _FakeRealClient(MODEL_SEARCH_DECISION))
+    step_types = [step.step_type for step in point.result.trace]
+    assert ELEMENT_CAP_REASON in _skip_reasons_in(point.result), [
+        (step.step_type, step.detail) for step in point.result.trace]
+    # 第 1 轮那次**执行过**(`search_elements` 落的是 `fallback`),否则「额度被
+    # 用掉了」这句话就不成立,第 2 轮的不可用只是通道压根没接通。
+    assert step_types.count("fallback") == 1, step_types
+
+    plain = _run_point(probe_repo, _exhausted_case(), 1,
+                       _FakeRealClient(MODEL_SEARCH_DECISION))
+    plain_types = [step.step_type for step in plain.result.trace]
+    assert ELEMENT_CAP_REASON not in _skip_reasons_in(plain.result), plain_types
+    assert plain_types.count("fallback") == 2, plain_types
+
+
+def test_the_four_arms_get_one_and_the_same_case_override(probe_repo):
+    """同一 case 的四条臂用**同一份**覆盖,且臂配置的原件不被就地改。
+
+    三格判据:
+
+    * 每条臂拿到的都是那一例声明的额度;
+    * 四份有效配置除 `reasoning_reflect_optimization` 之外**逐字段相同**——
+      覆盖是 case 维的,不许在某条臂上多套/少套一格;
+    * 传进来的那份臂配置**没被改**:它是调用方按臂构造一次、给这条臂全部 12 例
+      复用的对象,就地 `setattr` 会让第一个带覆盖的 case 把额度永久改小。
+    """
+    case = _exhausted_case(
+        settings_overrides={"reasoning_max_element_searches": 1})
+    shapes: set[str] = set()
+    for arm, optimization in PROBE_ARMS:
+        base = _probe_settings(optimization)
+        effective = _settings_with_case_overrides(base, case)
+        assert effective is not base
+        assert base.reasoning_max_element_searches == 5
+        assert effective.reasoning_max_element_searches == 1
+        dumped = effective.model_dump()
+        assert dumped.pop("reasoning_reflect_optimization") == optimization
+        shapes.add(json.dumps(dumped, sort_keys=True, default=str))
+    assert len(shapes) == 1, len(shapes)
+    # 没有覆盖的 case 原样拿到那份臂配置(不做无谓的复制)。
+    plain_base = _probe_settings("off")
+    assert _settings_with_case_overrides(
+        plain_base, _synthetic_case()) is plain_base
+
+
+def test_a_settings_object_that_cannot_be_copied_is_refused():
+    """副本拿不到 ⇒ 抛,而不是退回去就地改那份臂配置。"""
+    case = _exhausted_case(
+        settings_overrides={"reasoning_max_element_searches": 1})
+
+    class _Plain:
+        reasoning_max_element_searches = 5
+
+    with pytest.raises(StateProbeError, match="model_copy"):
+        _settings_with_case_overrides(_Plain(), case)
+
+
+def test_a_settings_copy_that_returns_itself_is_refused():
+    """`model_copy` 返回自己 ⇒ 抛:那等于把「不就地改」这条纪律悄悄取消。"""
+    case = _exhausted_case(
+        settings_overrides={"reasoning_max_element_searches": 1})
+
+    class _Selfish:
+        reasoning_max_element_searches = 5
+
+        def model_copy(self, update=None):
+            return self
+
+    with pytest.raises(StateProbeError, match="own settings object"):
+        _settings_with_case_overrides(_Selfish(), case)
+
+
+def test_a_settings_override_that_does_not_take_is_refused():
+    """副本上读不出声明的值 ⇒ 抛。
+
+    `model_copy(update=...)` 不跑校验器,而 `Settings` 是 `extra="ignore"`:
+    一个字段改了名之后,覆盖会静默变成一个没人读的多余字段,而这一格的数据
+    看起来与正常数据毫无区别。
+    """
+    case = _exhausted_case(
+        settings_overrides={"reasoning_max_element_searches": 1})
+
+    class _Deaf:
+        reasoning_max_element_searches = 5
+
+        def model_copy(self, update=None):
+            return _Deaf()
+
+    with pytest.raises(StateProbeError, match="did not take"):
+        _settings_with_case_overrides(_Deaf(), case)
+
+
 # --- (b) 不执行 ---------------------------------------------------------------
 
 
@@ -1371,6 +1519,109 @@ def test_the_scripted_turns_do_advance_the_state(probe_repo):
     for step in case.script[:case.state_points[2]]:
         query = step["arguments"]["query"]
         assert query in attempted, (query, attempted)
+
+
+class _FakeStep:
+    """最小 trace 步替身:`assert_no_action_executed_after_forward` 只读
+    `step_type`。"""
+
+    def __init__(self, step_type: str):
+        self.step_type = step_type
+        self.detail: dict = {}
+
+
+class _FakeResult:
+    def __init__(self, *step_types: str):
+        self.trace = tuple(_FakeStep(name) for name in step_types)
+
+
+def test_an_action_step_after_the_forwarded_turn_is_refused():
+    """(b) 「验收的核心断言」自己的负向用例。
+
+    这条守的是那个函数**整段被删掉也没人发现**的那一格:它此前零直接用例,
+    删掉调用点、函数体首行改 `return`、或把 `retrieve` 挪到「非动作」那一半,
+    261 例全绿。判据形状是 `reflect → 动作步` ——转发那一轮之后出现任何一个
+    动作步,就意味着模型选的动作被执行了,整格作废。
+    """
+    with pytest.raises(StateProbeError, match="was executed after"):
+        assert_no_action_executed_after_forward(
+            _FakeResult("reflect", "retrieve", "answer"))
+    # 收尾步不是动作:`answer` / `rerank` 落在转发轮之后是**正常**终态。
+    assert_no_action_executed_after_forward(
+        _FakeResult("reflect", "answer", "rerank"))
+    # 前 k 轮的动作步在最后一个 reflect **之前**,一个都不算违规。
+    assert_no_action_executed_after_forward(
+        _FakeResult("reflect", "retrieve", "reflect", "answer"))
+    # 一条 reflect 步都没有 ⇒ 判据压根无从成立,同样响亮拒。
+    with pytest.raises(StateProbeError, match="no reflect step"):
+        assert_no_action_executed_after_forward(_FakeResult("plan", "retrieve"))
+
+
+def test_the_no_action_guard_really_runs_on_the_real_probe_path(
+    probe_repo, monkeypatch,
+):
+    """(b) 那道守卫在 `run_state_probe_point` 的路上**真的被调到**。
+
+    上一条测的是判据本身,这条测的是接线:把守卫换成一个抛哨兵的函数,整格必须
+    抛出那个哨兵。少了它,「删掉调用点」这个变异只让一句 docstring 变成谎话,
+    而每一条用例照绿。
+    """
+
+    class _Sentinel(Exception):
+        pass
+
+    def boom(result):
+        raise _Sentinel("guard ran")
+
+    monkeypatch.setattr(
+        state_probe, "assert_no_action_executed_after_forward", boom)
+    with pytest.raises(_Sentinel):
+        _run_point(probe_repo, _synthetic_case(), 1,
+                   _FakeRealClient(MODEL_SEARCH_DECISION))
+
+
+def test_the_executed_half_is_anchored_on_what_executing_an_action_looks_like(
+    probe_repo,
+):
+    """(b) 闭集的**分类**那一半按动作面真源对号,不只核并集。
+
+    `test_the_action_step_closed_set_covers_every_trace_step_type` 双向核的是
+    `EXECUTED ∪ NON_ACTION` 与源码字面量相等——它挡不住「把 `retrieve` 从
+    EXECUTED 挪到 NON_ACTION」:并集一个字没变,而「不执行」这条验收从此对
+    `add_subquery` 结构性失效。
+
+    所以这条拿**执行本身**当真源:一条真 run 里剧本第 1 轮的 `add_subquery`
+    与第 2 轮的 `search_elements` 都是模型可选的检索动作,它们被执行时当场记下
+    的步名(`retrieve` / `fallback`——后者是 `search_elements` 的历史步名)就是
+    「一个动作真的执行了」在 trace 上的样子,必须落在 EXECUTED 那一半。
+    """
+    case = _synthetic_case(script=[
+        {"next_action": "add_subquery", "sufficient": False,
+         "reason": "先补一条", "arguments": {"query": "GSM8K 得分表概述"}},
+        {"next_action": "search_elements", "sufficient": False,
+         "reason": "降级查原文", "arguments": {"query": "GSM8K 得分"}},
+        {"next_action": "add_subquery", "sufficient": False,
+         "reason": "第三条", "arguments": {"query": "循环次数设置步骤"}},
+        {"next_action": "add_subquery", "sufficient": False,
+         "reason": "第四条", "arguments": {"query": "得分与循环次数的关系"}},
+    ], state_points=[1, 2, 3])
+    point = _run_point(probe_repo, case, 1,
+                       _FakeRealClient(MODEL_SEARCH_DECISION))
+    steps = list(point.result.trace)
+    reflect_at = [index for index, step in enumerate(steps)
+                  if step.step_type == "reflect"]
+    assert len(reflect_at) == 3, [step.step_type for step in steps]
+    emitted = [
+        {step.step_type for step in steps[reflect_at[i] + 1:reflect_at[i + 1]]}
+        for i in range(len(reflect_at) - 1)
+    ]
+    assert "retrieve" in emitted[0], emitted
+    assert "fallback" in emitted[1], emitted
+    for step_type in ("retrieve", "fallback"):
+        assert step_type in EXECUTED_ACTION_STEP_TYPES, step_type
+        assert step_type not in NON_ACTION_STEP_TYPES, step_type
+    # 而这条 run 的终态仍然干净:模型选的那个动作一次都没执行。
+    assert_no_action_executed_after_forward(point.result)
 
 
 def test_the_test_database_gains_no_rows_from_a_probe_point(probe_repo):
@@ -1671,6 +1922,76 @@ def test_the_orchestrator_refuses_a_run_that_never_reached_the_state_point(
                    _FakeRealClient(MODEL_SEARCH_DECISION))
 
 
+def test_a_laundered_plan_call_is_refused_after_the_run(probe_repo, monkeypatch):
+    """plan 的 LLM 被调到 ⇒ 事后核抛,**哪怕那条异常在路上被洗掉了**。
+
+    驱动器的 plan 分支自己就抛,可那条异常要穿过一整条 fail-open 的链才回到编排
+    层(`app/services/query_rewrite.py:151` 的 `except Exception: return fallback`
+    是其中一处)。今天靠 `StateProbeError` 继承 `BaseException` 穿过去——而那是
+    **单点**:窄成 `Exception` 之后,一次被洗成 `fallback` 的 plan 调用会让转发
+    次数、reflect 轮数、「不执行」三道核**全部照过**,产出一行看起来完全正常的
+    数据,只是这条 run 的意图并没有被冻住(计划 M3)、还白烧了一次 plan 预算。
+
+    这里直接留下那次调用**唯一的痕迹**(计数),不复现整条洗白链:要测的是
+    「这个计数有没有人读」,而 `:569` 此前记了它却没有任何读点。
+    """
+    original = ScriptedReflectDriver.chat_json
+
+    def bumping(self, messages, schema_hint, **kwargs):
+        self.plan_calls = 1
+        return original(self, messages, schema_hint, **kwargs)
+
+    monkeypatch.setattr(ScriptedReflectDriver, "chat_json", bumping)
+    with pytest.raises(StateProbeError, match="plan LLM was called"):
+        _run_point(probe_repo, _synthetic_case(), 1,
+                   _FakeRealClient(MODEL_SEARCH_DECISION))
+
+
+def test_a_same_round_reflect_retry_makes_the_turn_count_check_fail_loudly(
+    probe_repo, monkeypatch,
+):
+    """reflect 轮数核守的是**重试漂移**,这条把那件事真跑出来。
+
+    `_reflect_v2` 在首次尝试兜底且原因是 `output_budget_exhausted` 时会原样再调
+    一次(`reasoning_retrieval:4698`/`:4702`)。那时驱动器数的是**尝试次数**、
+    trace 上的 reflect 步数才是**轮数**:第一轮吃掉两步剧本,于是转发提前一个
+    状态点发生——这一行会被归到一个它没跑到的状态点上,而转发次数仍然恰好是 1、
+    「不执行」照样成立。唯一看得见它的就是轮数核。
+
+    故障形状照抄生产与 `test_reasoning_retrieval._FlakyReflectLLM`:传输层解析
+    空正文抛 `MalformedModelResponse(finish_reason="length") from
+    ModelJsonRepairError`。**先调一次原方法再抛**是刻意的——那一步剧本与
+    `driver.turns` 都已经被这次尝试消耗掉了,这正是漂移的来源。
+    """
+    from app.core.model_json import (
+        ModelJsonRepairError, parse_model_json_object,
+    )
+    from app.services.model_work import MalformedModelResponse
+
+    original = ScriptedReflectDriver.chat_json
+    failed_at: list[int] = []
+
+    def flaky(self, messages, schema_hint, **kwargs):
+        payload = original(self, messages, schema_hint, **kwargs)
+        if not failed_at:
+            failed_at.append(self.turns)
+            stats = kwargs.get("call_stats")
+            if isinstance(stats, dict):
+                stats["finish_reason"] = "length"
+            try:
+                parse_model_json_object("", schema_hint, allow_repair=True)
+            except ModelJsonRepairError as exc:
+                raise MalformedModelResponse(finish_reason="length") from exc
+            raise AssertionError("空正文必须被传输层判 empty")
+        return payload
+
+    monkeypatch.setattr(ScriptedReflectDriver, "chat_json", flaky)
+    with pytest.raises(StateProbeError, match="reflect step"):
+        _run_point(probe_repo, _synthetic_case(), 1,
+                   _FakeRealClient(MODEL_SEARCH_DECISION))
+    assert failed_at == [1]
+
+
 # --- (g) 闭集与隐私 -----------------------------------------------------------
 
 
@@ -1702,6 +2023,106 @@ def test_planting_the_decision_reason_text_in_a_row_is_red(probe_repo):
             {**row, "decision_reason": "模型想再查一次元素"})
     with pytest.raises(ValueError, match="unsupported shape"):
         assert_probe_row_closed({**row, "status": "模型说 够了"})
+
+
+#: 模型在状态点上回的一份**带自评**的检索决定。三格产地判据全靠它:
+#: `assessment` 两组合计 3 行,而这一例的方面账本只有 1 个必答方面、驱动器自己
+#: 那条停止决定恒 1 行——三个数两两不同,所以「读的是模型那一份」是可复核的。
+MODEL_ASSESSED_DECISION = {
+    "next_action": "search_elements",
+    "sufficient": False,
+    "arguments": {"query": MODEL_PICKED_QUERY},
+    "reason": "模型想再查一次元素",
+    "assessment": {
+        "supported": [
+            {"aspect_id": "a1", "evidence_keys": ["ck-1"]},
+            {"aspect_id": "a2", "evidence_keys": ["ck-2"]},
+        ],
+        "unresolved": [
+            {"aspect_id": "a3", "status": "unknown", "gap": "还没看到得分表"},
+        ],
+    },
+}
+
+
+def test_the_decision_columns_read_the_model_payload_not_the_trace(probe_repo):
+    """(g) Q6 的三格「模型那份决定」列:短码 / bool / 行数各有一条真 run 判据。
+
+    此前这三格在成功路径上零断言:`assessment_rows` 写死 1、只数 `supported`
+    一半、`decision_action` 写死 `"answer"` —— 三个变异全绿。而这三列正是设计
+    §9.2 要人工核的「动作可执行性 / 是否正确停止 / 方面绑定」的**全部**读数,
+    退化成常量之后报告的作者无从分辨。
+
+    三个数两两不同,所以产地是可复核的而不是重言式:
+
+    * 模型那一份自评 **3** 行(`supported` 2 + `unresolved` 1);
+    * trace 上那一轮量的是**驱动器自己发的停止决定**,恒 **1** 行;
+    * 这一例的方面账本只有 **1** 个必答方面(`aspects_total`)。
+    """
+    point = _run_point(probe_repo, _synthetic_case(), 1,
+                       _FakeRealClient(MODEL_ASSESSED_DECISION))
+    assert point.row["decision_action"] == "search_elements"
+    assert point.row["decision_sufficient"] is False
+    assert point.row["assessment_rows"] == 3
+    reflects = [step for step in point.result.trace
+                if step.step_type == "reflect"]
+    assert reflects[-1].detail.get("assessment_rows") == 1
+    assert point.row["aspects_total"] == 1
+    # 决定正文(`reason` / `gap` 原文)一个字都不进行。
+    assert_probe_row_closed(point.row)
+
+
+def test_a_next_action_in_plain_prose_lands_on_the_unreadable_short_code(
+    probe_repo,
+):
+    """(g) `next_action` 读不成短码 ⇒ 固定短码,既不是原文也不是 `None`。
+
+    `None` 已经被「压根解析不出这份载荷」占了(转发失败那一格),两件事必须分得
+    开:一个是「模型选了个读不出来的动作」,另一个是「没有决定可读」。原文更不
+    行——那就是一段模型可控的自由文本进了投影行。
+    """
+    point = _run_point(probe_repo, _synthetic_case(), 1, _FakeRealClient({
+        "next_action": "我觉得还得再查一次元素",
+        "sufficient": True,
+        "arguments": {},
+    }))
+    assert point.row["decision_action"] == PROBE_UNREADABLE_ACTION
+    assert point.row["decision_sufficient"] is True
+    # 载荷读出来了、只是没带 `assessment` ⇒ 0 行是一句真话,不是 unknown。
+    assert point.row["assessment_rows"] == 0
+    assert_probe_row_closed(point.row)
+
+
+def test_the_row_state_point_is_the_index_not_the_turn(probe_repo):
+    """(g) `state_point` 行键是**序号** 0/1/2,不是轮号。
+
+    12 例的真实轮号是 `[1,3,5]` / `[1,3,6]` / `[1,2,5]`。写成轮号之后
+    `_bucket_label` 只认得 0/1/2,§9.2 那三档报告会静默塌成「一档 + 一堆
+    未分档」,而 `by_state_point` 照样出表、每一格的数都对——没有任何一条断言
+    会红。所以这一例的状态点刻意取 `[1,3,4]`:序号与轮号逐格不同。
+    """
+    case = _synthetic_case(script=[
+        {"next_action": "add_subquery", "sufficient": False,
+         "reason": "第一条", "arguments": {"query": "GSM8K 得分表概述"}},
+        {"next_action": "add_subquery", "sufficient": False,
+         "reason": "第二条", "arguments": {"query": "循环次数设置步骤"}},
+        {"next_action": "add_subquery", "sufficient": False,
+         "reason": "第三条", "arguments": {"query": "得分与循环次数的关系"}},
+        {"next_action": "add_subquery", "sufficient": False,
+         "reason": "第四条", "arguments": {"query": "测试时循环的口径"}},
+        {"next_action": "add_subquery", "sufficient": False,
+         "reason": "第五条", "arguments": {"query": "得分表的脚注口径"}},
+    ], state_points=[1, 3, 4])
+    rows = []
+    for index in (0, 1, 2):
+        point = _run_point(probe_repo, case, index,
+                           _FakeRealClient(MODEL_SEARCH_DECISION))
+        assert point.row["state_point"] == index
+        assert case.state_point_turn(index) == (1, 3, 4)[index]
+        rows.append(point.row)
+    # 三档因此按序号对号(轮号 1/3/4 里有两个压根不是合法序号)。
+    summary = summarize_state_probe(rows)
+    assert list(summary["by_state_point"]) == list(STATE_POINT_LABELS)
 
 
 def test_no_probe_row_or_summary_key_is_cache_hit_shaped(probe_repo):
@@ -1928,17 +2349,11 @@ def test_the_summary_survives_a_batch_where_every_call_failed():
 # --- (i) manifest 事实 --------------------------------------------------------
 
 
-def test_the_manifest_facts_pass_every_manifest_gate():
-    """(i) E2 的 manifest 事实过 `assert_manifest` 的四道闸。
-
-    `matrix` 的四个子键是**维度基数**(int):`cases × state_points × arms ×
-    repeats` 相乘就是这一批的总 run 数,与 dry-run 逐字钉死的规模数同源
-    (`REQUIRED_MATRIX_KEYS_BY_CHANNEL["e2"]`)。
-    """
-    cases, digest = load_state_probe_case_set()
-    facts = state_probe_manifest_facts(
+def _e2_facts(cases, **over):
+    """一份过闸的 E2 manifest 事实,只让调用方换它关心的那几格。"""
+    kwargs = dict(
         cases=cases, arms=["B", "P", "D"], repeats=2,
-        case_set_digest_code=digest,
+        case_set_digest_code="0" * 16,
         optimization_by_arm={"B": "off", "P": "prefix_snapshot",
                              "D": "prefix_delta"},
         corpus_signature_by_cell={"A_nokg": "a1b2c3d4e5f60718",
@@ -1952,17 +2367,57 @@ def test_the_manifest_facts_pass_every_manifest_gate():
         model_contract={"workload": "reasoning_agent"},
         budgets={"reasoning_timeout_seconds": 90},
     )
+    kwargs.update(over)
+    return state_probe_manifest_facts(**kwargs)
+
+
+def test_the_manifest_facts_pass_every_manifest_gate():
+    """(i) E2 的 manifest 事实过 `assert_manifest` 的四道闸。
+
+    `matrix` 的四个必填子键是**维度基数**(int):`cases × state_points × arms ×
+    repeats` 相乘就是这一批的总 run 数,与 dry-run 逐字钉死的规模数同源
+    (`REQUIRED_MATRIX_KEYS_BY_CHANNEL["e2"]`);第五个子键 `planned_runs` 就是
+    那个乘积本身。
+    """
+    cases, digest = load_state_probe_case_set()
+    facts = _e2_facts(cases, case_set_digest_code=digest)
     assert_manifest(facts)
     assert facts["channel"] == "e2"
     assert facts["matrix"] == {
-        "cases": 12, "state_points": 3, "arms": 3, "repeats": 2}
-    # 12 × 3 × 3 × 2 = 216 —— 设计 §9.2 的三臂规模。
+        "cases": 12, "state_points": 3, "arms": 3, "repeats": 2,
+        "planned_runs": 216}
+    # 12 × 3 × 3 × 2 = 216 —— 设计 §9.2 的三臂规模。`planned_runs` 是那个乘积
+    # 本身(T-EX8 质量评审拍板的额外子键),不是第五个维度:它让 manifest 与
+    # `state-probe-*.jsonl` 的行数对账不必靠读表人手算四个数的积。
     matrix = facts["matrix"]
     assert (matrix["cases"] * matrix["state_points"]
             * matrix["arms"] * matrix["repeats"]) == 216
+    assert matrix["planned_runs"] == 216
+    assert isinstance(matrix["planned_runs"], int)
+    assert not isinstance(matrix["planned_runs"], bool)
     assert facts["stopped_by_budget"] is False
     # E1 专属的 `sample_digest` 不该出现在 E2 的 manifest 里。
     assert "sample_digest" not in facts
+
+
+def test_the_planned_runs_subkey_tracks_the_four_cardinalities():
+    """`planned_runs` 是四个基数的**乘积**,不是一个写死的规模数。
+
+    写死 216 在三臂那一批上完全看不出来——而四臂那一批(计划里 B/P/D/L 的
+    完整矩阵)是 288。这条换两个维度各验一次:臂数与重复轮数。
+    """
+    cases, _ = load_state_probe_case_set()
+    four_arms = _e2_facts(
+        cases, arms=["B", "P", "D", "L"],
+        optimization_by_arm={"B": "off", "P": "prefix_snapshot",
+                             "D": "prefix_delta", "L": "prefix_delta_lean"})
+    assert_manifest(four_arms)
+    assert four_arms["matrix"]["arms"] == 4
+    assert four_arms["matrix"]["planned_runs"] == 288
+    single = _e2_facts(cases, arms=["B"], repeats=1,
+                       optimization_by_arm={"B": "off"})
+    assert_manifest(single)
+    assert single["matrix"]["planned_runs"] == 36
 
 
 def test_the_manifest_facts_refuse_an_empty_case_set():
