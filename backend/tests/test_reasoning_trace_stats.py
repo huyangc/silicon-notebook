@@ -914,11 +914,14 @@ def measured_reflect(next_action="ppr", **measurements):
     return reflect(next_action, **measurements)
 
 
-#: T-PS4 在闭集上新增的**顶层**键。冻结基线用例按它把新旧两半切开。
+#: T-PS4 + T-PD2 在闭集上新增的**顶层**键。冻结基线用例按它把新旧两半切开。
 NEW_MEASUREMENT_KEYS = frozenset({
     "run_wall_ms", "model_calls_real", "attempts_observed", "optimization",
     "context_chars", "prefix_bytes_median", "prefix_bytes_min", "prefix_turns",
     "response_chars_total",
+    # T-PD2:`prefix_delta` 专属的两个测量列,冻结基线(`off`/legacy)下同样恒
+    # `None`——这两键在这批 run 上从未被写侧观测过。
+    "context_rebuilds", "context_fallback",
 })
 
 #: 一条 `off`(v2 跑成、测量关)轨迹在 T-PS4 **接入之前**投影出来的逐键快照。
@@ -1214,6 +1217,131 @@ def test_response_chars_total_is_unknown_when_one_turn_lacks_it():
     assert row["response_chars_total"] is None
 
 
+# --- T-PD2 context_rebuilds / context_fallback ------------------------------
+
+
+def test_context_rebuilds_and_fallback_are_unknown_without_any_observation():
+    """三键(`context_rebuilds`/`context_fallback`/`delta_blocks`)一条都没出现
+    过的旧轨迹(`legacy`/`off`/`prefix_snapshot`)⇒ 两列 `None`,不是 0/`False`。
+    """
+    row = project_run(JOB, [reflect("answer", sufficient=True)], PAYLOAD)
+    assert row["context_rebuilds"] is None
+    assert row["context_fallback"] is None
+
+
+def test_context_rebuilds_takes_the_max_over_present_turns():
+    """`context_rebuilds` 是**最大值**(max-over-present),不是求和——它是一次
+    run 内单调不减的运行期计数,三步各带 0/1/2 ⇒ 出 2。
+
+    变异:把 `_reflect_context_rebuilds` 改成 `sum` ⇒ 这条红(应为 2,`sum` 会
+    给 3)。
+    """
+    row = project_run(
+        JOB,
+        [
+            measured_reflect("ppr", context_rebuilds=0),
+            measured_reflect("ppr", context_rebuilds=1),
+            measured_reflect("answer", context_rebuilds=2),
+        ],
+        PAYLOAD,
+    )
+    assert row["context_rebuilds"] == 2
+
+
+def test_context_rebuilds_zero_is_distinct_from_unknown():
+    """`context_rebuilds == 0`(跑了 delta、一次都没重建)必须能与 `None`(非
+    delta 臂/未测量)分得开——两者都不是「假」,但含义完全不同。
+    """
+    row = project_run(
+        JOB, [measured_reflect("answer", context_rebuilds=0)], PAYLOAD,
+    )
+    assert row["context_rebuilds"] == 0
+    assert row["context_rebuilds"] is not None
+
+
+def test_context_fallback_is_true_when_any_turn_carries_it():
+    """只有中间一步 `context_fallback=True`(回退按拍板 Q4 不可逆,发生一次即
+    整 run 真)⇒ 整列 `True`;有键但全为假 ⇒ `False`。
+
+    变异:把 `_reflect_context_fallback` 改成 `all()` ⇒ 第一条断言红。
+    """
+    row = project_run(
+        JOB,
+        [
+            measured_reflect("ppr", context_fallback=False),
+            measured_reflect("ppr", context_fallback=True),
+            measured_reflect("answer", context_fallback=False),
+        ],
+        PAYLOAD,
+    )
+    assert row["context_fallback"] is True
+
+    all_false_row = project_run(
+        JOB,
+        [
+            measured_reflect("ppr", context_fallback=False),
+            measured_reflect("answer", context_fallback=False),
+        ],
+        PAYLOAD,
+    )
+    assert all_false_row["context_fallback"] is False
+
+
+def test_context_rebuilds_and_fallback_reject_free_form_values():
+    """detail 层的自由文本被 `_int`/`_bool` 吞成 `None`(不是抛错、不是透传);
+    `assert_projection_values` 层对自由文本仍然拒绝(隐私守卫的第二道闸)。
+
+    变异:让 `_reflect_context_rebuilds`/`_reflect_context_fallback` 改用一个
+    宽松的类型转换(如 `int(raw)`/`bool(raw)`)⇒ 第一组断言红(不再是 `None`,
+    而是把字符串强转成了数字/真值)。
+    """
+    row = project_run(
+        JOB,
+        [
+            measured_reflect("answer", context_rebuilds="很多次",
+                             context_fallback="是的"),
+        ],
+        PAYLOAD,
+    )
+    assert row["context_rebuilds"] is None
+    assert row["context_fallback"] is None
+
+    bad_row = dict(off_row(optimization="off"))
+    bad_row["context_rebuilds"] = "很多次"
+    with pytest.raises(ValueError, match="context_rebuilds"):
+        assert_projection_values(bad_row)
+
+
+def test_context_rebuilds_and_fallback_project_alongside_the_other_nine_keys():
+    """测量开着、`prefix_delta` 声明下,两个新列与既有九个测量列一起出齐。"""
+    row = project_run(
+        JOB,
+        [
+            measured_reflect(
+                "ppr", ctx_chars_s=800, ctx_chars_c=1200, ctx_chars_k=400,
+                ctx_chars_d=300, ctx_chars_t=200, ctx_bytes_total=8400,
+                call_attempts=1, response_chars=310,
+                context_rebuilds=0, context_fallback=False, delta_blocks=1,
+            ),
+            measured_reflect(
+                "answer", ctx_chars_s=800, ctx_chars_c=1200, ctx_chars_k=400,
+                ctx_chars_d=520, ctx_chars_t=260, ctx_bytes_total=9600,
+                call_attempts=1, response_chars=90,
+                context_rebuilds=1, context_fallback=False, delta_blocks=2,
+            ),
+        ],
+        PAYLOAD,
+        rig_tags={"optimization": "prefix_delta"},
+    )
+    assert row["optimization"] == "prefix_delta"
+    assert row["context_rebuilds"] == 1
+    assert row["context_fallback"] is False
+    # `delta_blocks` 登记但不进顶层投影。
+    assert "delta_blocks" not in row
+    assert_closed(row)
+    assert_projection_values(row)
+
+
 def test_a_reflect_step_without_usage_or_finish_reason_still_yields_a_full_row():
     """写侧缺 usage / finish_reason / cached 时,`call_attempts` 与
     `response_chars` 照样在(它们不从 usage 来,见计划 §3 T-PS2),整行照出。
@@ -1336,6 +1464,11 @@ def test_the_sparse_detail_key_registry_matches_the_plan():
         "ctx_chars_t", "ctx_bytes_total", "message_prefix_bytes",
         "cards_shown", "cards_omitted", "call_wall_ms", "call_attempts",
         "response_chars",
+        # T-PD2(计划 §2 拍板 Q2):本轮消息里 D 的块数,登记但不进投影。
+        "delta_blocks",
+        # T-PD2(计划 §2 拍板 Q7):`prefix_delta` 下无条件随 `ReflectMeasurement`
+        # 出现的两个行为事实,登记且进投影(见 `NEW_MEASUREMENT_KEYS`)。
+        "context_rebuilds", "context_fallback",
     })
     assert set(REFLECT_CONTEXT_DETAIL_KEYS.values()) <= (
         REFLECT_MEASUREMENT_DETAIL_KEYS)

@@ -68,6 +68,10 @@ NUMERIC_METRICS: tuple[str, ...] = (
     "run_wall_ms", "model_calls_real",
     "prefix_bytes_median", "prefix_bytes_min", "prefix_turns",
     "response_chars_total",
+    # `prefix_delta` 专属(T-PD2):一次 run 里各 reflect 步「重建了几次 K」的
+    # 最大值。`0` 是「跑了 delta、一次都没重建」的真观测,不是 unknown——投影侧
+    # 已经把两者分开,这里只是接上聚合的 n_observed/均值/分位数。
+    "context_rebuilds",
 )
 #: 布尔指标:报 n_observed 与 true 占比。
 BOOLEAN_METRICS: tuple[str, ...] = (
@@ -83,6 +87,11 @@ BOOLEAN_METRICS: tuple[str, ...] = (
     # 报 n_missing。它**不**含「轨迹有没有被截断」——那是 `trace_truncated` 单独
     # 回答的另一件事(截的是某一步的 id 列表,不是轮数)。
     "attempts_observed",
+    # `prefix_delta` 专属(T-PD2):本 run 是否曾回退到 P 的有界选择——回退不可
+    # 逆(计划 §2 拍板 Q4),`True` 就是「发生过」。`None` = 一条 reflect 步都没
+    # 带这个观测(非 delta 臂/未测量),与「量到了、答案是没回退」的 `False`
+    # 分得开。
+    "context_fallback",
 )
 #: 枚举指标:报取值分布(含 unknown 一格)。
 CATEGORICAL_METRICS: tuple[str, ...] = (

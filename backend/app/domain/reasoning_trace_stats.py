@@ -131,6 +131,18 @@ RUN_PROJECTION_KEYS: frozenset[str] = frozenset({
     # 各 reflect 步交还给调用方的正文字符数之和(不经日志截断)。与
     # `model_calls_real` 同一条「任一步缺 ⇒ unknown」的口径。
     "response_chars_total",
+    # --- reflect 前缀复用测量(计划 PR-3 T-PD2;`prefix_delta` 专属) ---
+    # 一次 run 里各 reflect 步「重建了几次 K」的**最大值**(max-over-present,
+    # 同 `_stale` 的口径,不是 `_reflect_sum` 的「任一步缺 ⇒ unknown」):重建
+    # 次数是单调不减的运行期计数,不是逐步各自独立的观测量,取最大值才是「这次
+    # run 总共重建了几次」。全部 reflect 步都缺这个观测 ⇒ `None`。⚠
+    # `context_rebuilds == 0`(跑了 delta、一次都没重建)与 `None`(非 delta 臂,
+    # 或测量口径不适用)必须分得开:前者是「量到了,答案是零」,后者是「没量」。
+    "context_rebuilds",
+    # 一次 run 里「本 run 剩余轮回退到 P 的有界选择」这件事是否发生过——任一
+    # reflect 步为真 ⇒ 整列真(回退按计划 §2 拍板 Q4 不可逆,发生过就不会撤销)。
+    # 一步都没带这个观测 ⇒ `None`,不是 `False`。
+    "context_fallback",
     # --- 报告段的结果级字段(consumer == "report_section") ---
     "section_index",
     "section_total",
@@ -313,7 +325,13 @@ REFLECT_CONTEXT_DETAIL_KEYS: Mapping[str, str] = {
 #: `cards_shown` / `cards_omitted` / `call_wall_ms` 登记在这里但**没有**对应的
 #: 顶层投影列:逐轮细节按计划 §5 Q6 只留在 rig 的 per-call 表里,投影这一层只
 #: 承接能压成一个 run 一格的量。登记它们是为了让「写侧有哪些键」在读侧也有一份
-#: 可查的清单,而不是让下一个人从 T-PS3 的代码里反推。
+#: 可查的清单,而不是让下一个人从 T-PS3 的代码里反推。`delta_blocks`(本轮消息
+#: 里 D 的块数,PR-3 计划 §2 拍板 Q2)同组:登记但不进 `RUN_PROJECTION_KEYS`。
+#:
+#: `context_rebuilds` / `context_fallback`(PR-3 计划 §3 T-PD2)是这批稀疏键里
+#: 的两个例外:稀疏键的通例是「只有 v2 且测量开关打开的 run 才会出现」,但按
+#: 计划 §2 拍板 Q7,这两键在 `prefix_delta` 臂下**无条件**随 `ReflectMeasurement`
+#: 出现——回退与重建是行为事实,测量关只关字节序列化那半,不关这两个计数本身。
 REFLECT_MEASUREMENT_DETAIL_KEYS: frozenset[str] = frozenset({
     *REFLECT_CONTEXT_DETAIL_KEYS.values(),
     "message_prefix_bytes",
@@ -322,6 +340,9 @@ REFLECT_MEASUREMENT_DETAIL_KEYS: frozenset[str] = frozenset({
     "call_wall_ms",
     "call_attempts",
     "response_chars",
+    "context_rebuilds",
+    "context_fallback",
+    "delta_blocks",
 })
 
 
@@ -362,6 +383,13 @@ def _float(raw: object) -> float | None:
     if isinstance(raw, bool) or not isinstance(raw, (int, float)):
         return None
     return float(raw)
+
+
+def _bool(raw: object) -> bool | None:
+    """严格布尔读取器,`_int` 的孪生:只收 `bool`,其余(含 0/1、字符串)一律
+    `None`(= unknown)。`context_fallback` 是行为事实而不是计数,收 0/1 会让
+    「写侧手滑传了个整数」悄悄通过而不是被读侧的隐私守卫拦下。"""
+    return raw if isinstance(raw, bool) else None
 
 
 def _reason(detail: Mapping) -> str:
@@ -705,6 +733,39 @@ def _reflect_sum(reflects: Sequence[Mapping], key: str) -> int | None:
     return sum(values)
 
 
+def _reflect_context_rebuilds(reflects: Sequence[Mapping]) -> int | None:
+    """→ `context_rebuilds`:各 reflect 步 `context_rebuilds` 的**最大值**。
+
+    max-over-present,同 `_stale` 的口径——`context_rebuilds` 是一次 run 内单调
+    不减的运行期计数,不是每步各自独立、要求全带齐才敢求和的观测量(那是
+    `_reflect_sum` 的口径,`response_chars_total` 那类「逐步各自贡献一段」才适
+    用)。过滤掉缺席的步之后取最大值;全部步都缺 ⇒ `None`(= unknown,不是 0)。
+    """
+    values = [
+        value for value in (
+            _int(step["detail"].get("context_rebuilds")) for step in reflects
+        )
+        if value is not None
+    ]
+    return max(values) if values else None
+
+
+def _reflect_context_fallback(reflects: Sequence[Mapping]) -> bool | None:
+    """→ `context_fallback`:任一 reflect 步为真 ⇒ 真。
+
+    回退按计划 §2 拍板 Q4 不可逆——本 run 剩余轮全部回退,所以「发生过一次」
+    与「一直在发生」是同一件事,`any()` 就是全部信息。带这个观测的步一步都
+    没有 ⇒ `None`,不是 `False`:那是「没量」,不是「量到了、答案是没回退」。
+    """
+    values = [
+        value for value in (
+            _bool(step["detail"].get("context_fallback")) for step in reflects
+        )
+        if value is not None
+    ]
+    return any(values) if values else None
+
+
 def _context_chars(reflects: Sequence[Mapping]) -> dict[str, int] | None:
     """各上下文块的**最后一轮**规模。一格都没有 ⇒ `None`(不是空字典)。
 
@@ -1028,6 +1089,9 @@ def project_run(
         "prefix_bytes_min": prefix_min,
         "prefix_turns": prefix_turns,
         "response_chars_total": _reflect_sum(reflects, "response_chars"),
+        # --- reflect 前缀复用测量(PR-3 T-PD2;`prefix_delta` 专属) ---
+        "context_rebuilds": _reflect_context_rebuilds(reflects),
+        "context_fallback": _reflect_context_fallback(reflects),
     }
     row.update(counters)
     assert_closed(row)
