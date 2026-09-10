@@ -2607,6 +2607,8 @@ FROZEN_ANONYMOUS_PAIR = {
     "legacy": {
         "anchors": None,
         "model_calls_real": None,
+        "n_measured": {"model_calls_real": 0, "prefix_bytes_median": 0,
+                       "prefix_turns": 0, "run_wall_ms": 0},
         "n_runs": 1,
         "optimization": {"unknown": 1},
         "prefix_bytes_median": None,
@@ -2619,6 +2621,8 @@ FROZEN_ANONYMOUS_PAIR = {
     "v2": {
         "anchors": None,
         "model_calls_real": None,
+        "n_measured": {"model_calls_real": 0, "prefix_bytes_median": 0,
+                       "prefix_turns": 0, "run_wall_ms": 0},
         "n_runs": 1,
         "optimization": {"unknown": 1},
         "prefix_bytes_median": None,
@@ -2648,6 +2652,42 @@ def test_pairs_on_an_undeclared_batch_match_the_frozen_shape(tmp_path, capsys):
     analyze.main([str(source), "--out-json", str(js)])
     capsys.readouterr()
     assert json.loads(js.read_text("utf-8"))["pairs"] == [FROZEN_ANONYMOUS_PAIR]
+
+
+def test_a_sparse_pair_side_reports_its_observation_count(tmp_path, capsys):
+    """稀疏指标的均值必须带着自己的 n:一侧三条全带、另一侧三条只一条带,两侧
+    的均值在表里长得一样重,只有 n 能把「1 条比 3 条」揭出来(评审 P2)。
+
+    `n_runs` 顶不了这件事——它数的是 run,不是观测数。
+
+    变异:把 `_pair_side` 里的 `n_measured` 删掉 ⇒ 前两段红;把
+    `_fmt_pair_metric` 换回直接印均值 ⇒ 最后那段 markdown 断言红。
+    """
+    js, md = tmp_path / "t0.json", tmp_path / "t0.md"
+    source = _write_rows(tmp_path / "a.jsonl", [
+        # `off` 三条都量到了墙钟,`prefix_snapshot` 三条里只有一条量到。
+        *[_measured_row(run_wall_ms=9000) for _ in range(3)],
+        _measured_row(optimization="prefix_snapshot", run_wall_ms=6000),
+        _measured_row(optimization="prefix_snapshot", run_wall_ms=None),
+        _measured_row(optimization="prefix_snapshot", run_wall_ms=None),
+    ])
+    analyze.main([str(source), "--out-json", str(js), "--out-md", str(md)])
+    capsys.readouterr()
+    pair = json.loads(js.read_text("utf-8"))["optimization_pairs"][0]
+    assert pair["off"]["n_runs"] == pair["variant"]["n_runs"] == 3
+    assert pair["off"]["run_wall_ms"] == 9000.0
+    assert pair["variant"]["run_wall_ms"] == 6000.0
+    # 均值一样重,n 不一样:三条观测 vs 一条观测。
+    assert pair["off"]["n_measured"]["run_wall_ms"] == 3
+    assert pair["variant"]["n_measured"]["run_wall_ms"] == 1
+    # 稀疏四项各有自己的 n,不共用一个。
+    assert set(pair["variant"]["n_measured"]) == set(
+        analyze.SPARSE_PAIR_SIDE_METRICS)
+    assert pair["variant"]["n_measured"]["prefix_bytes_median"] == 3
+    # markdown 也带上 n,而不是只把它留在 JSON 里。
+    rendered = md.read_text("utf-8")
+    assert "9000.0(n=3)" in rendered
+    assert "6000.0(n=1)" in rendered
 
 
 def test_the_markdown_report_renders_both_arm_axes(tmp_path, capsys):

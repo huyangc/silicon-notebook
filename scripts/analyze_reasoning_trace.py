@@ -377,16 +377,36 @@ PAIR_SIDE_METRICS: tuple[str, ...] = (
 )
 
 
+#: 上面那几项里**稀疏**的那四个:只有 rig 写侧(`run_wall_ms`)或开了测量的 run
+#: (其余三个)才有值,所以它们必须额外报出各自的观测数(评审 P2)。一侧三条 run
+#: 里只有一条量到了 `run_wall_ms` 时,`_mean` 报的就是那一条的值,而它在表里长得
+#: 和「三条都量到的均值」一模一样;`n_runs` 也救不了——那一格数的是 run,不是观测。
+#: 于是「1 条比 3 条」这种对照会被当成同等重量的差值读走。
+#:
+#: `reflect_turns` / `total_ms` / `anchors` 不在这里:它们从轨迹本身来,一条跑成
+#: 的 run 必有(`anchors` 在只检索不合成的 run 上缺,但那种 run 由 `trace_source`
+#: 单独分格、整侧一起缺,不是同一侧内部的参差)。
+SPARSE_PAIR_SIDE_METRICS: tuple[str, ...] = (
+    "run_wall_ms", "model_calls_real", "prefix_bytes_median", "prefix_turns",
+)
+
+
 def _pair_side(rows: Sequence[dict]) -> dict:
     """一侧(一条臂)的汇总。
 
-    `optimization` 的分布**如实报出**:沿 `policy_version` 配对时,v2 那一侧可
-    能同时装着 `off` 与 `prefix_snapshot` 两批 run,于是每个均值都是混合值。这
-    一格让混合当场可见——空着它,读表的人会以为自己在看单一臂。
+    `optimization` 的分布**如实报出**:`pair_table` 拆行后 v2 侧恒只有一个键
+    (那就是这一行的 v2 臂身份),legacy 侧不拆,有几个键就报几个。空着它,读表
+    的人没法从这一行自证自己在看哪一臂。
+
+    `n_measured` 给稀疏那四项各报一个观测数,见 `SPARSE_PAIR_SIDE_METRICS`。
     """
     side: dict[str, Any] = {"n_runs": len(rows)}
     for metric in PAIR_SIDE_METRICS:
         side[metric] = _mean(rows, metric)
+    side["n_measured"] = {
+        metric: len(_numeric(row.get(metric) for row in rows))
+        for metric in SPARSE_PAIR_SIDE_METRICS
+    }
     side["termination_reason"] = _distribution(rows, "termination_reason")
     side["optimization"] = _distribution(rows, "optimization")
     return side
@@ -488,19 +508,21 @@ def render_markdown(report: dict) -> str:
     if report["optimization_pairs"]:
         lines += _md_table(
             [*PAIR_DIMENSIONS, "policy_version", "variant",
-             "off n", "variant n", "off run_wall_ms", "variant run_wall_ms",
-             "off model_calls_real", "variant model_calls_real",
-             "variant prefix_bytes_median"],
+             "off n", "variant n",
+             "off run_wall_ms(n)", "variant run_wall_ms(n)",
+             "off model_calls_real(n)", "variant model_calls_real(n)",
+             "variant prefix_bytes_median(n)"],
             [
                 [*(pair[dim] for dim in PAIR_DIMENSIONS),
                  pair["policy_version"], pair["variant_arm"],
                  pair[OPTIMIZATION_BASELINE]["n_runs"],
                  pair["variant"]["n_runs"],
-                 pair[OPTIMIZATION_BASELINE]["run_wall_ms"],
-                 pair["variant"]["run_wall_ms"],
-                 pair[OPTIMIZATION_BASELINE]["model_calls_real"],
-                 pair["variant"]["model_calls_real"],
-                 pair["variant"]["prefix_bytes_median"]]
+                 *(
+                     _fmt_pair_metric(pair[label], metric)
+                     for metric in ("run_wall_ms", "model_calls_real")
+                     for label in (OPTIMIZATION_BASELINE, "variant")
+                 ),
+                 _fmt_pair_metric(pair["variant"], "prefix_bytes_median")]
                 for pair in report["optimization_pairs"]
             ],
         )
@@ -510,6 +532,19 @@ def render_markdown(report: dict) -> str:
             " 另一侧为变体的 run)"
         )
     return "\n".join(lines) + "\n"
+
+
+def _fmt_pair_metric(side: dict, metric: str) -> str:
+    """一侧一个**稀疏**指标的单元格:`均值(n=观测数)`。
+
+    n 必须和均值同格出现(评审 P2)。`run_wall_ms=6000.0` 这一格,底下是三条 run
+    都量到了、还是三条里只有一条量到了,决定的是这个差值有没有意义;把 n 丢在
+    JSON 里而 markdown 只印均值,等于让最容易被引用的那份输出恰好少了判断依据。
+    没有任何观测时印 `unknown(n=0)` 而不是空格——空格会被读成「这一列不适用」。
+    """
+    value = side.get(metric)
+    observed = (side.get("n_measured") or {}).get(metric, 0)
+    return f"{UNKNOWN if value is None else value}(n={observed})"
 
 
 def _pair_arm(side: dict) -> str:
