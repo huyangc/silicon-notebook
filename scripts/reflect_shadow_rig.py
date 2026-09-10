@@ -23,9 +23,16 @@
     python scripts/reflect_shadow_rig.py --dry-run --limit 2 \
         --database-url postgresql://127.0.0.1:5432/silicon_notebook_t0_test \
         --source-db-url postgresql://127.0.0.1:5432/silicon_notebook ab
+    python scripts/reflect_shadow_rig.py --dry-run --seed 7 prefix-probe
 
 子命令:`seed` / `ask` / `report` / `search` / `ab` / `restart` / `export` /
-`teardown`。
+`teardown` / `prefix-probe`。
+
+第四条路是 `prefix-probe`(E1,前缀敏感性探针,实施规格
+`2026-09-11-reflect-prefix-experiments-plan_zh.md` §3 T-EX4):**零数据库、零
+检索、零 reflect**,只在同一个 `reasoning_agent` workload 上跑一段固定正文,
+两臂只在头/尾标记的稳定性上不同,量的是「稳定前缀有没有可重复的墙钟收益」这
+一件事,不回答命中率/token 节省/provider 是否关闭缓存。
 **`--dry-run` 打印将要做的每一步与每个 `client_request_id` 的编码,不连库、不
 起后端、不发任何请求**——它是唯一进标准门的路径(rig 本体要网络与真实模型)。
 
@@ -5649,6 +5656,520 @@ def cmd_teardown(args: argparse.Namespace, runner: Runner) -> int:
     return 0
 
 
+# --- `prefix-probe`(E1 前缀敏感性探针;计划 §3 T-EX4)------------------------
+
+#: E1 单次调用的超时秒数,镜像 `Settings().reasoning_timeout_seconds` 的默认值
+#: 90——dry-run 不能构造 `Settings()`(与 `REASONING_ATTEMPT_BUDGET` 同一条纪律,
+#: 见 `test_the_attempt_budget_tracks_the_config_default_it_hardcodes`),所以
+#: 这里也留一个镜像常量,由用例钉住与真实默认值一致。真跑时读的是**构造出来的
+#: 那一份** `settings.reasoning_timeout_seconds`(可能被 `--env-file` 覆盖),
+#: 这个常量只用于 dry-run 展示。T-EX8(尚未合入本分支)大概率也要写一份同名
+#: 镜像常量(pr5-followups.md「T-EX8 报告」提到 `REASONING_TIMEOUT_SECONDS_
+#: DEFAULT=90`),两条分支汇合时二选一,不留两份重复实现。
+PREFIX_PROBE_TIMEOUT_SECONDS = 90
+
+#: 预热调用的正文与标记(design Q4:「用不同正文与不同前缀」)。`tier="__warmup__"`
+#: 与 `block_index=-1` 不会与 `probe_plan` 产出的任何真实序列的
+#: `(tier, block_index)` 撞上,`build_marker_pair` 的输入因此天然与主批不相交。
+_PREFIX_PROBE_WARMUP_TIER = "__warmup__"
+
+
+def _prefix_probe_warmup_messages() -> list[dict]:
+    from app.eval.reflect_prefix_probe import PROBE_OUTPUT_INSTRUCTION
+
+    return [{
+        "role": "user",
+        "content": (
+            "[warmup] 连接预热,正文与后续探针格无关,不参与任何统计。\n\n"
+            + PROBE_OUTPUT_INSTRUCTION
+        ),
+    }]
+
+
+def _prefix_probe_process_env(args: argparse.Namespace) -> dict[str, str]:
+    """E1 的进程环境:只圈日志隔离,**不碰 `DATABASE_URL`**。
+
+    这条命令结构上不连库(见 `cmd_prefix_probe` 对显式 `--database-url` 的响亮
+    拒绝),往 `DATABASE_URL` 里写任何占位值都只是徒增一次 `Settings()` 校验
+    失败的风险,没有任何收益(`normalize_database_url("")` 直接抛)。与
+    `_rig_process_env` 共用同一对日志隔离助手(`rig_llm_log_path`/
+    `rig_event_log_dir`),不复用它本身——那个函数的 `database_url` 是必填
+    参数。
+    """
+    env = {
+        "LLM_LOG_PATH": rig_llm_log_path(args.out_dir),
+        "EVENT_LOG_DIR": rig_event_log_dir(args.out_dir),
+    }
+    if args.env_file:
+        env["SILICON_NOTEBOOK_ENV_FILE"] = str(Path(args.env_file).expanduser())
+    return env
+
+
+def _prefix_probe_sample_path(args: argparse.Namespace) -> Path:
+    if args.sample_file:
+        return Path(args.sample_file).expanduser()
+    return ROOT / "backend" / "app" / "eval" / "reflect_t0" / "prefix_probe_sample.json"
+
+
+def _prefix_probe_plan(args: argparse.Namespace) -> list[dict]:
+    """这次要跑的**全部**探针调用,dry-run 与真跑共读同一份(与 `ab_plan`/
+    `search_plan` 同一条纪律)。
+
+    `--marker-variant` **不是** `probe_plan` 自己的参数(它只接受 `seed`)——
+    非零 variant 时,在这里用 `build_marker_pair` 按同一组
+    `(seed, tier, block_index, arm, call_index)` 重算一遍 head/tail 并原地
+    替换。这是一个可以商榷的取舍:更干净的做法是让 `probe_plan` 自己接一个
+    `marker_variant` 参数,把这段重算逻辑收回模块内部——本任务的红线是不改
+    `backend/app/**`,所以重算逻辑留在这一层,见任务报告「上游接口不够用」。
+    """
+    from app.eval.reflect_prefix_probe import (
+        DEFAULT_BLOCKS, SMOKE_BLOCKS, build_marker_pair, probe_plan,
+    )
+
+    blocks = SMOKE_BLOCKS if args.smoke else DEFAULT_BLOCKS
+    plan = probe_plan(seed=args.seed, blocks=blocks)
+    if args.marker_variant:
+        for row in plan:
+            head, tail = build_marker_pair(
+                args.seed, row["tier"], row["block_index"], row["arm"],
+                row["call_index"], marker_variant=args.marker_variant,
+            )
+            row["head"], row["tail"] = head, tail
+    return plan
+
+
+def _prefix_probe_call_estimate(total_calls: int) -> str:
+    """与 `_search_call_estimate`/`_ab_call_estimate` 同一口径的那一句:
+    逻辑调用数与**请求上界**是两个数,不要混用(见两者各自的说明)。
+    """
+    return (
+        f"{total_calls} 次逻辑调用;请求上界 ≤ "
+        f"{total_calls * REASONING_ATTEMPT_BUDGET}"
+        f"(重试预算 ×{REASONING_ATTEMPT_BUDGET};静默 fallback 另计,不留日志行)"
+    )
+
+
+def _prefix_probe_say_sequence(runner: Runner, plan: Sequence[Mapping]) -> None:
+    """dry-run 的「序列顺序与区组」:计划前几行 + 每个 `(tier, block)` 的臂序。
+
+    design §9.1「各序列内部保持连续,不插入并发负载」——这里打的顺序就是真跑
+    会打的顺序,不是另一份摘要。
+    """
+    preview = list(plan[:4])
+    for row in preview:
+        runner.say(
+            "plan row",
+            f"tier={row['tier']} block={row['block_index']} arm={row['arm']} "
+            f"call_index={row['call_index']} series={row['series_index']}",
+        )
+    if len(plan) > len(preview):
+        runner.say("plan row", f"...(其余 {len(plan) - len(preview)} 行同形状)")
+    order: dict[tuple[str, int], list[str]] = {}
+    for row in plan:
+        key = (row["tier"], row["block_index"])
+        if row["call_index"] == 0:
+            order.setdefault(key, []).append(row["arm"])
+    for key in sorted(order, key=lambda k: (str(k[0]), k[1])):
+        tier, block_index = key
+        runner.say(
+            "block arm order",
+            f"tier={tier} block={block_index} order={'/'.join(order[key])}",
+        )
+
+
+def _prefix_probe_client(settings: Any) -> tuple[Any, Any]:
+    """`(provider, client)`。拆成单独一个函数只是为了让用例能整体替身它
+    (T-EX4 用例 (d)/(e)/(f)/(g))——真实构造照抄 `mrl_truncation.run_gold_eval`
+    (计划 §1 M2):`RuntimeModelProvider(settings, EventLogger(settings,
+    channel="events", per_user=True))`,取 `.chat("reasoning_agent")`(与
+    reflect 同一个 workload/端点/thinking 配置)。
+    """
+    from app.core.event_logging import EventLogger
+    from app.services.model_provider import RuntimeModelProvider
+
+    provider = RuntimeModelProvider(
+        settings, EventLogger(settings, channel="events", per_user=True))
+    return provider, provider.chat("reasoning_agent")
+
+
+def _rig_git_sha() -> str | None:
+    """一次 `git rev-parse HEAD`。读不出来(非 git checkout、命令缺失)⇒
+    `None` = unknown,与 `_ab_model_contract` 同一条「读不出来就是 unknown,
+    不是硬失败」的先例——manifest 的 `code_sha` 允许 `None`。
+
+    T-EX8(尚未合入本分支)大概率也要写一份同名函数(`_ab_git_sha`,见
+    pr5-followups.md「T-EX8 报告」);两条分支汇合时二选一,不留两份重复
+    实现。
+    """
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True,
+            text=True, timeout=5, check=True,
+        )
+    except Exception:
+        return None
+    sha = result.stdout.strip()
+    return sha or None
+
+
+def _prefix_probe_now() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _write_manifest(out_dir: Path, manifest: Mapping, *, runner: Runner) -> None:
+    """`manifest.json`(最新,覆盖)+ `manifests.jsonl`(历史,追加)——三条通道
+    同一规则(pr5-followups.md「T-EX8 quality 评审 → 拍板」P3-7:T-EX4/T-EX7
+    照做,T-EX11 回填 Q9)。
+    """
+    text = json.dumps(dict(manifest), ensure_ascii=False, sort_keys=True, indent=2)
+    runner.write(out_dir / "manifest.json", text)
+    if runner.dry_run:
+        return
+    history_path = out_dir / "manifests.jsonl"
+    history_path.parent.mkdir(parents=True, exist_ok=True)
+    with history_path.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(dict(manifest), ensure_ascii=False, sort_keys=True) + "\n"
+        )
+
+
+def _render_probe_summary_markdown(
+    summary: Mapping, *, seed: int, smoke: bool, sample_path: Path,
+    marker_variant: int,
+) -> str:
+    lines = [
+        "# E1 前缀敏感性探针 · 摘要",
+        "",
+        "**这批只能支持『稳定前缀的时间收益』,不得报告命中率、不得报告省了多少 "
+        "token、不得报告 provider 是否关闭了缓存**(design §0/§9.1)。",
+        "",
+        f"- seed: {seed}",
+        f"- scale: {'smoke(48)' if smoke else 'full(96)'}",
+        f"- sample: {sample_path}",
+        f"- marker_variant: {marker_variant}",
+        f"- verdict: **{summary['verdict']}**",
+        f"- row_count_total: {summary['row_count_total']}",
+        f"- warmup_row_count: {summary['warmup_row_count']}",
+        f"- local_cache_exit_rows: {summary['local_cache_exit_rows']}",
+        f"- failed_row_count: {summary['failed_row_count']}",
+        f"- cached_tokens_observed: {summary['cached_tokens_observed']}",
+        "",
+        "## overall",
+        f"- n_regions_paired: {summary['overall']['n_regions_paired']}",
+        f"- median_wall_ms_delta: {summary['overall']['median_wall_ms_delta']}",
+        f"- median_wall_ms_ratio: {summary['overall']['median_wall_ms_ratio']}",
+        f"- consistency_ratio: {summary['overall']['consistency_ratio']}",
+        f"- first_observation: {summary['overall']['first_observation']}",
+        f"- repeat_observation: {summary['overall']['repeat_observation']}",
+        "",
+        "## by_tier",
+    ]
+    for tier in sorted(summary["by_tier"]):
+        scope = summary["by_tier"][tier]
+        lines.append(f"### {tier}")
+        lines.append(f"- n_regions_paired: {scope['n_regions_paired']}")
+        lines.append(f"- median_wall_ms_delta: {scope['median_wall_ms_delta']}")
+        lines.append(f"- median_wall_ms_ratio: {scope['median_wall_ms_ratio']}")
+        lines.append(f"- consistency_ratio: {scope['consistency_ratio']}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def cmd_prefix_probe(args: argparse.Namespace, runner: Runner) -> int:
+    """E1(前缀敏感性探针):**零数据库、零检索、零 reflect**,只调
+    `reasoning_agent` workload 本身,量两臂标记稳定性的墙钟差(design §9.1)。
+
+    与 `search`/`ab` 的分工:那两条命令的全部意义建在检索/合成上;E1 剥掉这
+    一切,只留「同一个 workload、同一个端点、同一个 thinking 配置」上的一段
+    固定正文,两臂只在头/尾标记的稳定性上不同(计划 M1/M2)。**新子命令**而
+    不是 `search`/`ab` 上的开关:E1 不跑检索、不连库、不建 repo,挂进任何一条
+    既有路都会让那条路多一条与语料/范围/意图全部无关的死分支(计划 M2)。
+    """
+    if args.database_url_explicit:
+        print(
+            "ERROR: prefix-probe 不连数据库,不接受 --database-url"
+            "(它照抄的多半是 ab/search 的命令行)",
+            file=sys.stderr,
+        )
+        return 2
+    if args.seed is None:
+        print(
+            "ERROR: prefix-probe 需要 --seed"
+            "(design M4:E1 的区组随机必须有种子)",
+            file=sys.stderr,
+        )
+        return 2
+
+    plan = _prefix_probe_plan(args)
+    total_calls = len(plan)
+    sample_path = _prefix_probe_sample_path(args)
+
+    runner.say(
+        "target",
+        "E1 前缀敏感性探针:零数据库、零检索、零 reflect,只调 reasoning_agent "
+        "workload 本身(计划 M1/M2)",
+    )
+    runner.say("seed", str(args.seed))
+    runner.say("scale", "smoke(48)" if args.smoke else "full(96)")
+    runner.say("model calls (estimate)", _prefix_probe_call_estimate(total_calls))
+    runner.say(
+        "timeout (per call)",
+        f"{PREFIX_PROBE_TIMEOUT_SECONDS}s(镜像 Settings().reasoning_timeout_"
+        "seconds 的默认值;真跑读的是构造出来的那一份,可能被 --env-file 覆盖)",
+    )
+    runner.say(
+        "batch wall-clock budget",
+        f"{args.max_wall_minutes} 分钟(到点停止派发,不补跑到矩阵齐全)"
+        if args.max_wall_minutes is not None
+        else "未设(默认行为:跑到计划结束)",
+    )
+    runner.say(
+        "sample",
+        f"{sample_path}"
+        + ("(--sample-file)" if args.sample_file else "(仓库内默认 fixture)"),
+    )
+    runner.say("marker variant", str(args.marker_variant))
+    runner.say(
+        "warmup",
+        "整批开头一次连接预热,正文与标记均与主批不同,单列 is_warmup=True 行,"
+        "不进任何统计(design §9.1)",
+    )
+    _prefix_probe_say_sequence(runner, plan)
+    runner.say(
+        "out",
+        f"{runner.out_dir}/probe-stable.jsonl + probe-disturbed.jsonl + "
+        "probe-warmup.jsonl + probe-summary.{md,json} + manifest.json"
+        "(+ manifests.jsonl 历史)+ calls-e1.jsonl(per-call 表)",
+    )
+    runner.say(
+        "isolated logs",
+        f"LLM_LOG_PATH={runner.out_dir}/llm/llm.jsonl、"
+        f"EVENT_LOG_DIR={runner.out_dir}/events"
+        "——不往机器共用的 .local/logs 写一个字节",
+    )
+    runner.say(
+        "conclusion scope",
+        "这批只能支持『稳定前缀的时间收益』,不得报告命中率、不得报告省了多少 "
+        "token、不得报告 provider 是否关闭了缓存(design §0/§9.1)",
+    )
+    if runner.dry_run:
+        return 0
+    return _run_prefix_probe(args, runner, plan, sample_path)
+
+
+def _run_prefix_probe(
+    args: argparse.Namespace, runner: Runner, plan: Sequence[dict],
+    sample_path: Path,
+) -> int:
+    os.environ.update(_prefix_probe_process_env(args))
+    from app.core.config import Settings
+    from app.core.llm import (
+        CALL_STATS_KWARG, experiment_message_markers, provider_messages,
+        serialize_provider_messages,
+    )
+    from app.eval.reflect_manifest import build_manifest
+    from app.eval.reflect_prefix_probe import (
+        ARM_STABLE, PROBE_SCHEMA_HINT, assert_probe_row_closed,
+        build_marker_pair, load_prefix_probe_sample, probe_manifest_facts,
+        render_sample, summarize_probe,
+    )
+
+    sample = load_prefix_probe_sample(sample_path)
+    settings = Settings()
+    provider, client = _prefix_probe_client(settings)
+    if not provider.configured("reasoning_agent"):
+        provider.close()
+        print(
+            "ERROR: reasoning_agent workload 没有配置模型服务;prefix-probe "
+            "需要一份真实模型配置(--env-file 或 .env)才能真跑",
+            file=sys.stderr,
+        )
+        return 2
+
+    contract_short, contract_readable = _ab_model_contract(settings)
+    runner.say("model contract", f"{contract_short}  ({contract_readable})")
+
+    log_dir = _ab_llm_log_dir(settings)
+    event_dir = Path(rig_event_log_dir(args.out_dir))
+    start_llm_offsets = _ab_llm_offsets(log_dir)
+    start_event_offsets = _ab_llm_offsets(event_dir, glob=RIG_EVENT_LOG_GLOB)
+
+    started_at = _prefix_probe_now()
+    deadline = (
+        time.monotonic() + args.max_wall_minutes * 60.0
+        if args.max_wall_minutes is not None else None
+    )
+
+    def _budget_expired() -> bool:
+        return deadline is not None and time.monotonic() >= deadline
+
+    rows_by_label: dict[str, list[dict]] = {}
+    local_cache_exit_count = 0
+    stopped_by_budget = False
+    prev_call_monotonic: dict[int, float] = {}
+
+    def _record_row(label: str, row: dict) -> None:
+        assert_probe_row_closed(row)
+        rows_by_label.setdefault(label, []).append(row)
+
+    def _call_row(
+        *, head: str, tail: str, messages: list[dict], timeout: float,
+        max_retries: int,
+    ) -> dict:
+        sink: dict[str, Any] = {}
+        try:
+            with experiment_message_markers(head, tail):
+                client.chat_json(
+                    messages, PROBE_SCHEMA_HINT, timeout=timeout,
+                    max_retries=max_retries, bypass_cache=True,
+                    **{CALL_STATS_KWARG: sink},
+                )
+        except Exception:
+            sink.setdefault("status", "error")
+        full_messages = provider_messages(
+            messages, PROBE_SCHEMA_HINT, markers=(head, tail))
+        usage = sink.get("usage") or {}
+        return {
+            "status": sink.get("status"),
+            "call_wall_ms": sink.get("call_wall_ms"),
+            "attempts": sink.get("attempts"),
+            "finish_reason": sink.get("finish_reason"),
+            "response_chars": sink.get("response_chars"),
+            "head_chars": len(head),
+            "tail_chars": len(tail),
+            "message_bytes_total": len(serialize_provider_messages(full_messages)),
+            "prompt_tokens": usage.get("prompt_tokens"),
+            "cached_tokens": usage.get("cached_tokens"),
+            "completion_tokens": usage.get("completion_tokens"),
+        }
+
+    if not _budget_expired():
+        warmup_head, warmup_tail = build_marker_pair(
+            args.seed, _PREFIX_PROBE_WARMUP_TIER, -1, ARM_STABLE, 0,
+            marker_variant=args.marker_variant,
+        )
+        warmup_row = _call_row(
+            head=warmup_head, tail=warmup_tail,
+            messages=_prefix_probe_warmup_messages(),
+            timeout=settings.reasoning_timeout_seconds,
+            max_retries=settings.reasoning_max_retries,
+        )
+        warmup_row.update({
+            "tier": None, "block_index": None, "arm": None, "call_index": None,
+            "series_index": None, "is_warmup": True, "gap_ms": None,
+        })
+        _record_row("warmup", warmup_row)
+        runner.say(
+            "warmup done",
+            f"status={warmup_row['status']} wall_ms={warmup_row['call_wall_ms']}",
+        )
+
+        dispatched = 0
+        for entry in plan:
+            if _budget_expired():
+                stopped_by_budget = True
+                break
+            tier, block_index, arm = entry["tier"], entry["block_index"], entry["arm"]
+            call_index, series_index = entry["call_index"], entry["series_index"]
+
+            now = time.monotonic()
+            gap_ms = None
+            prev = prev_call_monotonic.get(series_index)
+            if prev is not None:
+                gap_ms = round((now - prev) * 1000)
+            prev_call_monotonic[series_index] = now
+
+            row = _call_row(
+                head=entry["head"], tail=entry["tail"],
+                messages=render_sample(tier, sample),
+                timeout=settings.reasoning_timeout_seconds,
+                max_retries=settings.reasoning_max_retries,
+            )
+            row.update({
+                "tier": tier, "block_index": block_index, "arm": arm,
+                "call_index": call_index, "series_index": series_index,
+                "is_warmup": False, "gap_ms": gap_ms,
+            })
+            if row["status"] == "cache_hit":
+                local_cache_exit_count += 1
+            _record_row(arm, row)
+            dispatched += 1
+        runner.say(
+            "dispatched",
+            f"{dispatched}/{len(plan)} 次调用"
+            + ("(整批墙钟预算到点,提前停止派发)" if stopped_by_budget else ""),
+        )
+    else:
+        stopped_by_budget = True
+        runner.say("dispatched", "0(整批墙钟预算在开跑前就已到点)")
+
+    provider.close()
+    finished_at = _prefix_probe_now()
+
+    all_rows = [row for rows in rows_by_label.values() for row in rows]
+    summary = summarize_probe(all_rows)
+
+    for label, rows in rows_by_label.items():
+        text = "".join(
+            json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n"
+            for row in rows
+        )
+        runner.write(runner.out_dir / f"probe-{label}.jsonl", text)
+
+    summary_md = _render_probe_summary_markdown(
+        summary, seed=args.seed, smoke=args.smoke, sample_path=sample_path,
+        marker_variant=args.marker_variant,
+    )
+    runner.write(runner.out_dir / "probe-summary.md", summary_md)
+    runner.write(
+        runner.out_dir / "probe-summary.json",
+        json.dumps(summary, ensure_ascii=False, sort_keys=True, indent=2),
+    )
+
+    facts = probe_manifest_facts(plan, sample, args.seed)
+    manifest = build_manifest(
+        channel="e1",
+        code_sha=_rig_git_sha(),
+        started_at=started_at,
+        finished_at=finished_at,
+        stopped_by_budget=stopped_by_budget,
+        model_contract=contract_short,
+        budgets={
+            "call_timeout_seconds": int(settings.reasoning_timeout_seconds),
+            "attempt_budget": REASONING_ATTEMPT_BUDGET,
+            "max_wall_minutes": args.max_wall_minutes,
+        },
+        **facts,
+    )
+    _write_manifest(runner.out_dir, manifest, runner=runner)
+
+    calls_rows = _rig_call_rows(
+        log_dir, event_dir, llm_offsets=start_llm_offsets,
+        event_offsets=start_event_offsets, tags=None,
+    )
+    _write_call_rows(runner.out_dir, "e1", calls_rows)
+
+    exit_status = 0
+    if stopped_by_budget:
+        print(
+            "ERROR: 整批墙钟预算到点,提前停止派发(未完成/不成对标记见 "
+            "manifest.stopped_by_budget)",
+            file=sys.stderr,
+        )
+        exit_status = 1
+    if local_cache_exit_count:
+        print(
+            f"WARNING: {local_cache_exit_count} 格命中本地响应缓存出口"
+            "(status=cache_hit),bypass_cache=True 下不应出现;"
+            "该计数已单列进 probe-summary 的 local_cache_exit_rows",
+            file=sys.stderr,
+        )
+        exit_status = exit_status or 1
+    return exit_status
+
+
 # --- CLI --------------------------------------------------------------------
 
 
@@ -5821,10 +6342,39 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--mode", choices=("reasoning", "chunk", "auto"), default="reasoning",
     )
+    # --- `prefix-probe` 专属(E1,计划 §3 T-EX4)---
+    parser.add_argument(
+        "--seed", type=int, default=None,
+        help="`prefix-probe` 必填:区组内的臂序平衡随机与可复现都靠它"
+             "(design M4)。别的子命令不读它",
+    )
+    parser.add_argument(
+        "--smoke", action="store_true",
+        help="`prefix-probe` 走 48 次冒烟规模(区组数砍半),而不是默认的 96 次"
+             "全量。U4 拍板:可先冒烟,但不凭它直接定论",
+    )
+    parser.add_argument(
+        "--sample-file",
+        help="`prefix-probe` 用哪一份上下文样本 JSON。默认仓库内 fixture "
+             "(backend/app/eval/reflect_t0/prefix_probe_sample.json);"
+             "指向 --out-dir 之外、操作者 .local 下的真实样本时用这个",
+    )
+    parser.add_argument(
+        "--marker-variant", type=int, default=0,
+        help="`prefix-probe` 的标记版本号(design §9.1「更换标记值重复验证」);"
+             "同一组 (seed, tier, block, arm, call_index) 换一个 variant 就拿到"
+             "一组全新的标记值,计划形状不变",
+    )
+    parser.add_argument(
+        "--max-wall-minutes", type=float, default=None,
+        help="`prefix-probe` 的整批墙钟预算(分钟)。到点停止派发**未开始**的"
+             "调用,不补跑到矩阵齐全;manifest 如实记 stopped_by_budget。默认"
+             "不设 = 跑到计划结束",
+    )
     parser.add_argument(
         "command",
         choices=("seed", "ask", "report", "search", "ab", "restart", "export",
-                 "teardown"),
+                 "teardown", "prefix-probe"),
     )
     return parser
 
@@ -5857,6 +6407,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "seed": cmd_seed, "ask": cmd_ask, "report": cmd_report,
         "search": cmd_search, "ab": cmd_ab, "restart": cmd_restart,
         "export": cmd_export, "teardown": cmd_teardown,
+        "prefix-probe": cmd_prefix_probe,
     }
     return handlers[args.command](args, runner)
 
