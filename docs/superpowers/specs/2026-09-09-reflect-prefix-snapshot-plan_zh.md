@@ -53,9 +53,13 @@
 `_reflect_v2_context` 返回各块字符数(S/C/K/D/T)、总字符、总字节、卡数、省略数、压缩/回退次数(本 PR 恒 0);`_reflect_v2_attempt` 用 T-PS1 纯函数算本轮最终消息字节串,与缓存的上一轮比公共前缀 ⇒ `message_prefix_bytes`,首轮 `None`;请求文本只在内存。
 验收:`off` 且测量关时不构造缓存不序列化;缓存只存字节串与块长度;内存上界一轮消息。用例:(a) `off` 下返回对象逐字段同前;(b) 冻结输入两次调用相同;(c) 只末尾 T 变 ⇒ prefix = S+C+K+D 字节;(d) 缓存对象结构断言。
 
+**写侧与 T-PS4 的硬接缝(T-PS4 评审后补,2026-09-10)。** 写 detail 的那几个键**必须**用 `reasoning_trace_stats.REFLECT_CONTEXT_DETAIL_KEYS` 的值与 `REFLECT_MEASUREMENT_DETAIL_KEYS` 的成员来构键(两者都已从 domain 导出),不许在写侧另抄一份字面量;并加一条 `written_keys ⊆ REFLECT_MEASUREMENT_DETAIL_KEYS` 的断言——写侧多写一个读侧不认的键,那一列会静默缺席,而不是报错。另外 `ctx_bytes_total` **必须**等于 `len(serialize_provider_messages(provider_messages(...)))`(这一轮最终消息的全部字节,含 wrapper 与帧开销),它才能当 `message_prefix_bytes` 的分母(公共前缀是在同一串字节上算的);做不到就删掉「`bytes_total` 是 `prefix_bytes_*` 分母」这条说明,只留下它自己的绝对值,别让人做一道两边口径不同的除法。
+
 ### T-PS4 trace 步与投影闭集扩展
 落点 `reasoning_trace_stats.py:43-103、594-634、637-751、786-866`。reflect 步 detail 稀疏键:`ctx_chars_s/c/k/d/t`、`ctx_bytes_total`、`message_prefix_bytes`、`cards_shown`、`cards_omitted`、`call_wall_ms`、`call_attempts`、`response_chars`。投影顶层:`run_wall_ms`、`model_calls_real`、`attempts_observed`、`optimization`(新闭集 `OPTIMIZATIONS`,与 `POLICY_VERSIONS` 并列)、`context_chars`(短码→数值)、`prefix_bytes_median`/`prefix_bytes_min`/`prefix_turns`(逐轮细节留 rig per-call 表)。新键缺失一律 `None`。
 验收:`assert_closed`/`assert_projection_values`(`923-1031`)全绿;旧行可读;`legacy`/`off` 行键集不变(稀疏键不出现)。用例:隐私守卫拦自由文本;缺 usage/finish_reason/cached 仍出整行;截断 trace 不掩盖 `model_calls_real`;`off` 行逐键比对。
+
+**评审后修正(2026-09-10)。** ① `context_chars` 的短码是 `s/c/k/d/t/bytes_total`,不是本段初稿写的 `total`——短码集合由 `reasoning_trace_stats` 本模块定义(计划钉住的只是 detail 侧的 `ctx_chars_*`/`ctx_bytes_total` 键名),而一个叫 `total` 的短码会被顺手读成「总字符数」,它其实是字节数。② 投影顶层实际是**九**列:本段列出的八列之外,显式新增 `response_chars_total`(各 reflect 步交还给调用方的正文字符数之和,与 `model_calls_real` 同一条「任一步缺 ⇒ unknown」口径)。③ `attempts_observed` 只表达「每一条 reflect 步都带了 `call_attempts` 吗」,与 `trace_truncated` 解耦:后者判的是某一步的 id 列表被 `TRACE_RESULT_IDS_MAX` 截了,不是轨迹缺轮。
 
 ### T-PS5 rig:隔离、run 墙钟、optimization 第二维
 落点 rig `1614-1663`、`2411-2547`、`2609+`、`ab` 臂与 `_report_rows`(`1399-1470`);`reflect_ab.py:40-86、79、595-641`。

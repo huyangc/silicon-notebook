@@ -120,8 +120,8 @@ RUN_PROJECTION_KEYS: frozenset[str] = frozenset({
     # 义:那个是从轨迹反推的证据,这个是声明——线上导出恒不写,于是恒 unknown。
     "optimization",
     # 「最后一轮」各上下文块的规模:短码 → 数值。`s/c/k/d/t` 是五个块的**字符**
-    # 数,`total` 是整条消息的**字节**数(来自 `ctx_bytes_total`)——两种单位挤
-    # 在同一张表里,见 `REFLECT_CONTEXT_DETAIL_KEYS` 的说明。
+    # 数,`bytes_total` 是整条消息的**字节**数(来自 `ctx_bytes_total`)——两种
+    # 单位挤在同一张表里,见 `REFLECT_CONTEXT_DETAIL_KEYS` 的说明。
     "context_chars",
     # 逐轮公共前缀字节的三格聚合(计划 §5 Q6:逐轮细节只在 rig 的 per-call 表)。
     # 首轮没有可比的上一轮,写侧记 `None`,这里不计入。
@@ -270,19 +270,29 @@ MAX_REFLECT_STEPS: Mapping[str, int] = {
 
 #: `context_chars` 的短码 → reflect 步 detail 里的键名。
 #:
-#: ⚠ **`total` 的单位和另外五个不一样。** `s/c/k/d/t` 是五个上下文块各自的
-#: **字符**数(`ctx_chars_*`),`total` 是整条 provider-facing 消息的**字节**数
-#: (`ctx_bytes_total`)。字符数与字节数在中文上差三倍,所以 `total` 既不是前五
-#: 项之和、也不该拿去和它们比大小;它存在的意义是给 `prefix_bytes_*` 当分母
-#: (「这一轮 N 字节里有多少落进了公共前缀」),那道除法两边必须同为字节。
-#: 短码本身由计划 §3 T-PS4 钉住(`s/c/k/d/t/total`),这里不擅自改名。
+#: ⚠ **`bytes_total` 的单位和另外五个不一样。** `s/c/k/d/t` 是五个上下文块各自的
+#: **字符**数(`ctx_chars_*`),`bytes_total` 是整条 provider-facing 消息的**字节**
+#: 数(`ctx_bytes_total`)。字符数与字节数在中文上差三倍,所以它既不是前五项之
+#: 和、也不该拿去和它们比大小。短码里带上 `bytes_` 就是为了让这件事在读表时不必
+#: 回来查注释——原名 `total` 会被顺手读成「总字符数」(评审后改名)。
+#:
+#: 它**能不能**当 `prefix_bytes_*` 的分母(「这一轮 N 字节里有多少落进了公共
+#: 前缀」),取决于写侧让 `ctx_bytes_total` 等于什么:只有它等于
+#: `len(serialize_provider_messages(provider_messages(...)))`——即这一轮最终消息
+#: 的全部字节,含 wrapper 与帧开销——那道除法两边才同为字节、同一个口径。写侧只
+#: 统计各块正文之和(漏掉 wrapper 与帧)的话,分子里的公共前缀含着分母没算的
+#: 字节,比例甚至可能大于 1;那时这个分母不成立,别做那道除法。这条等式记在计划
+#: §3 T-PS3 里,由写侧负责。
+#:
+#: 短码集合由**本模块**定义,计划 §3 T-PS4 钉住的只是 detail 侧那几个键名
+#: (`ctx_chars_*` / `ctx_bytes_total`)。要改短码就同 diff 改掉读侧全部消费点。
 REFLECT_CONTEXT_DETAIL_KEYS: Mapping[str, str] = {
     "s": "ctx_chars_s",
     "c": "ctx_chars_c",
     "k": "ctx_chars_k",
     "d": "ctx_chars_d",
     "t": "ctx_chars_t",
-    "total": "ctx_bytes_total",
+    "bytes_total": "ctx_bytes_total",
 }
 
 #: reflect 步 detail 上的**稀疏**测量键全集(计划 §3 T-PS3 写入,T-PS4 读)。

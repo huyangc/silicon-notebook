@@ -105,8 +105,8 @@ COUNTER_METRICS: tuple[str, ...] = (
     # 精确顶替(`prefix_turns` 的 `n_observed` 少算首轮就停的 run,
     # `attempts_observed` 数的是另一个键),所以要看每 run 平均只有两条正路:按
     # `optimization` 分格后只看确实开了测量的那一臂,或者去 rig 的 per-call 表按
-    # 轮取数。短码本身的单位另见 `REFLECT_CONTEXT_DETAIL_KEYS`(`total` 是字节,
-    # 其余五个是字符)。
+    # 轮取数。短码本身的单位另见 `REFLECT_CONTEXT_DETAIL_KEYS`(`bytes_total` 是
+    # 字节,其余五个是字符)。
     "context_chars",
 )
 # 配对还要按**工作负载**分格(codex #700 R11 P2):`search-*.jsonl` 是只跑检索的

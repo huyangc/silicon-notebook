@@ -2357,7 +2357,7 @@ def test_an_ab_row_with_measurements_passes_both_ab_guards():
     row = _project(steps=steps)
     assert row["model_calls_real"] == 2
     assert row["attempts_observed"] is True
-    assert row["context_chars"] == {"s": 800, "c": 1200, "total": 9600}
+    assert row["context_chars"] == {"s": 800, "c": 1200, "bytes_total": 9600}
     # 首轮没有可比的上一轮,但这条轨迹只有一轮 reflect 且写侧给了值,于是三格齐。
     assert row["prefix_bytes_median"] == 3134
     assert row["prefix_turns"] == 1

@@ -2408,7 +2408,7 @@ def _measured_row(**overrides) -> dict:
         optimization="off", run_wall_ms=9000, model_calls_real=4,
         attempts_observed=True, response_chars_total=500,
         prefix_bytes_median=720, prefix_bytes_min=700, prefix_turns=3,
-        context_chars={"s": 800, "c": 1200, "total": 9600},
+        context_chars={"s": 800, "c": 1200, "bytes_total": 9600},
     )
     base.update(overrides)
     return base
@@ -2435,7 +2435,7 @@ def test_every_measurement_column_reaches_the_report(tmp_path, capsys):
         "n_observed": 5, "n_missing": 0, "n_true": 5}
     assert summary["categorical"]["optimization"] == {"off": 5}
     # 跨 run 求和:五条 run 各 9600 字节。
-    assert summary["counters"]["context_chars"]["total"] == 48000
+    assert summary["counters"]["context_chars"]["bytes_total"] == 48000
 
 
 def test_optimization_is_a_default_grouping_dimension(tmp_path, capsys):

@@ -1073,21 +1073,23 @@ def test_context_chars_takes_the_last_turn_per_short_code():
         ],
         PAYLOAD,
     )
-    assert row["context_chars"] == {"s": 800, "k": 700, "total": 9600}
+    assert row["context_chars"] == {"s": 800, "k": 700, "bytes_total": 9600}
 
 
 def test_context_chars_total_is_the_byte_total_not_the_sum_of_the_char_blocks():
-    """`total` 的单位是**字节**(`ctx_bytes_total`),另外五个是**字符**。
+    """`bytes_total` 的单位是**字节**(`ctx_bytes_total`),另外五个是**字符**。
 
-    中文一个字三字节,所以 `total` 恒大于五块字符数之和,而不等于它。写死这条
-    是因为键名 `context_chars` 会诱人把 `total` 读成「总字符数」——那会让
-    `prefix_bytes_*` ÷ `context_chars["total"]` 这道「复用了几成」的除法两边单位
-    不一致,算出一个大得离谱的比例。
+    中文一个字三字节,所以它恒大于五块字符数之和,而不等于它。短码里带上
+    `bytes_` 就是为了把这件事写在名字上:键名 `context_chars` 会诱人把一个叫
+    `total` 的短码读成「总字符数」,那会让 `prefix_bytes_*` ÷
+    `context_chars["bytes_total"]` 这道「复用了几成」的除法两边单位不一致,算出
+    一个大得离谱的比例。
 
-    变异:把 `REFLECT_CONTEXT_DETAIL_KEYS["total"]` 改成任何一个 `ctx_chars_*`
-    ⇒ 这条红。
+    变异:把 `REFLECT_CONTEXT_DETAIL_KEYS["bytes_total"]` 改成任何一个
+    `ctx_chars_*` ⇒ 这条红;把短码改回 `total` ⇒ 第一条 KeyError。
     """
-    assert REFLECT_CONTEXT_DETAIL_KEYS["total"] == "ctx_bytes_total"
+    assert REFLECT_CONTEXT_DETAIL_KEYS["bytes_total"] == "ctx_bytes_total"
+    assert "total" not in REFLECT_CONTEXT_DETAIL_KEYS
     row = project_run(
         JOB,
         [measured_reflect("answer", ctx_chars_s=10, ctx_chars_c=10,
@@ -1096,8 +1098,8 @@ def test_context_chars_total_is_the_byte_total_not_the_sum_of_the_char_blocks():
         PAYLOAD,
     )
     blocks = row["context_chars"]
-    assert blocks["total"] == 150
-    assert blocks["total"] != sum(
+    assert blocks["bytes_total"] == 150
+    assert blocks["bytes_total"] != sum(
         blocks[code] for code in ("s", "c", "k", "d", "t")
     )
 
@@ -1223,7 +1225,7 @@ def test_a_reflect_step_without_usage_or_finish_reason_still_yields_a_full_row()
     assert set(row) <= RUN_PROJECTION_KEYS
     assert row["model_calls_real"] == 1
     assert row["response_chars_total"] == 42
-    assert row["context_chars"] == {"total": 8000}
+    assert row["context_chars"] == {"bytes_total": 8000}
     assert_closed(row)
     assert_projection_values(row)
 
