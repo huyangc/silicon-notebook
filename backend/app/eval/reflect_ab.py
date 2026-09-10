@@ -95,9 +95,12 @@ ARM_POLICIES: tuple[str, ...] = POLICY_VERSIONS
 #:   里唯一一对只差自评合同的配对臂**:两者之间量出的任何差异都该记在「模型要不要
 #:   每轮重述全量自评」上,不得归因到前缀缓存本身——那笔账已经在 D↔P 那一对上
 #:   算过了。PR-3(T-PD7)往这里加了 `("v2","prefix_delta")` 这一行;
-#:   PR-4(T-PL6)同 PR 再加最后一行 `("v2","prefix_delta_lean")`。D↔L 的差值不
-#:   由 `optimization_pair_table`(`scripts/analyze_reasoning_trace.py`)直接
-#:   给出——那张表的基线恒 `off`,读法见 `scripts/README.md` 的 `ab` 小节。
+#:   PR-4(T-PL6)同 PR 再加最后一行 `("v2","prefix_delta_lean")`。D↔L 的差值
+#:   **现在可以**由 `optimization_pair_table`(`scripts/
+#:   analyze_reasoning_trace.py`)直接给出——PR-5(T-EX9)把那张表的基线从硬
+#:   编码 `off` 换成 `--baseline-arm` 参数,`--baseline-arm prefix_delta` 即可
+#:   在只有 D/L 两条臂的一批上出配对表,读法见 `scripts/README.md` 的 `ab`
+#:   小节。
 ARMS: tuple[tuple[str, str], ...] = (
     ("legacy", "off"),
     ("v2", "off"),
