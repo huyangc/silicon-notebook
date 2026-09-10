@@ -59,6 +59,19 @@ DEFAULT_REFLECT_EVIDENCE_CHARS_BY_EFFORT: "dict[str, int]" = {
 REFLECT_EVIDENCE_CHARS_MIN = 1_000
 REFLECT_EVIDENCE_CHARS_MAX = 64_000
 
+# reflect `prefix_delta` 每轮追加的证据卡数上限(按档位;前缀复用最终设计
+# §5.1)。字面量只在这里出现一次,校验逐条镜像上面那份证据字符预算。PR-3
+# T-PD1 只登记这个配置——`config.py` 里一次都不读它,首个消费点在 T-PD5。
+DEFAULT_REFLECT_DELTA_CARDS_BY_EFFORT: "dict[str, int]" = {
+    "overview": 2,
+    "standard": 4,
+    "deep": 6,
+    "thorough": 8,
+    "exhaustive": 10,
+}
+REFLECT_DELTA_CARDS_MIN = 1
+REFLECT_DELTA_CARDS_MAX = 16
+
 # reflect 上下文前缀复用的部署策略取值(前缀复用最终设计 §5.1)。四格是这个字段
 # 的**最终**闭集,一次写全,这里是它的**登记处**:所有需要在运行期拿到这个闭集的
 # 代码都引用这三个常量,而不是各写一份字面量(T-PS4 的轨迹投影 `OPTIMIZATIONS`
@@ -66,11 +79,12 @@ REFLECT_EVIDENCE_CHARS_MAX = 64_000
 # `Literal[...]` 注解按语法必须把四格再写一遍(注解位置吃不下一个 tuple 常量),
 # 两份部署文档也各用散文写了一遍;这三处的一致性由用例对账
 # (`test_reflect_optimization_closed_set_is_registered_once`),不靠"只有一份"。
-# 分成"已实现"与"已登记但未实现"两段,是因为后两格要各自等一个后续 PR 把实现补
-# 上——在那之前配上去必须**响亮**失败,而不是静默退回 `off`:一个以为自己在跑
-# delta 的部署,拿到的每一条测量都会被归到错误的臂上。
-REFLECT_OPTIMIZATION_IMPLEMENTED = ("off", "prefix_snapshot")
-REFLECT_OPTIMIZATION_PLANNED = ("prefix_delta", "prefix_delta_lean")
+# 分成"已实现"与"已登记但未实现"两段,是因为最后一格要等下一个 PR 把实现补上
+# ——在那之前配上去必须**响亮**失败,而不是静默退回 `off`:一个以为自己在跑
+# delta lean 的部署,拿到的每一条测量都会被归到错误的臂上。PR-3(T-PD1)把
+# `prefix_delta` 从这里挪进已实现段,`prefix_delta_lean` 留在原地。
+REFLECT_OPTIMIZATION_IMPLEMENTED = ("off", "prefix_snapshot", "prefix_delta")
+REFLECT_OPTIMIZATION_PLANNED = ("prefix_delta_lean",)
 REFLECT_OPTIMIZATIONS = REFLECT_OPTIMIZATION_IMPLEMENTED + REFLECT_OPTIMIZATION_PLANNED
 
 
@@ -1049,6 +1063,24 @@ class Settings(BaseSettings):
     reasoning_reflect_recent_observations: int = Field(
         6, ge=1, le=20,
         validation_alias="REASONING_REFLECT_RECENT_OBSERVATIONS")
+    # reflect `prefix_delta` 每轮追加的证据卡数上限(按档位;前缀复用最终设计
+    # §5.1)。PR-3 T-PD1 只登记这个配置——`_reflect_v2_context` 在 `prefix_delta`
+    # 分支落地之前(T-PD5)一次都不读它。校验见 `validate_reflect_delta_cards`,
+    # 逐条镜像 `validate_reflect_evidence_chars`:必须恰含五个 effort、每个值是
+    # `REFLECT_DELTA_CARDS_MIN`–`REFLECT_DELTA_CARDS_MAX` 的整数(bool 不算整数)、
+    # 且随档位不递减。
+    reasoning_reflect_delta_cards_by_effort: Annotated[
+        Dict[str, int], NoDecode
+    ] = Field(
+        default_factory=lambda: dict(DEFAULT_REFLECT_DELTA_CARDS_BY_EFFORT),
+        validation_alias="REASONING_REFLECT_DELTA_CARDS_BY_EFFORT",
+    )
+    # reflect `prefix_delta` 重建证据池/历史池时的目标预算比例(前缀复用最终设计
+    # §5.2)。同样只登记:两处消费点(首次建 K、超预算后重建 K)都在 T-PD5。
+    # 0.25–0.75 之外要么留不出重建余量,要么把首轮预算压缩到没意义。
+    reasoning_reflect_compaction_target_ratio: float = Field(
+        0.5, ge=0.25, le=0.75,
+        validation_alias="REASONING_REFLECT_COMPACTION_TARGET_RATIO")
     # reflect 上下文的**前缀复用策略**(前缀复用最终设计 §5.1),默认 `off` =
     # 实施基线的 v2 原行为,逐字节不变。它**叠在** `REASONING_REFLECT_V2_ENABLED`
     # 之上而不是与它并列:v2 总闸关着时反思走的是 legacy 协议,压根没有"前缀"这个
@@ -1057,7 +1089,7 @@ class Settings(BaseSettings):
     # ——各处自己读一次 settings 正是"关掉之后总会剩下一处还在跑"的老形状。
     #
     # 它也**不是**前端检索档位,更不由档位推导:用户选的是检索深度,不是上下文
-    # 布局。取值闭集见 `REFLECT_OPTIMIZATIONS`;后两格已登记但本期未实现,由下面
+    # 布局。取值闭集见 `REFLECT_OPTIMIZATIONS`;最后一格已登记但本期未实现,由下面
     # 的校验器响亮拒绝(见 `validate_reflect_optimization`)。
     reasoning_reflect_optimization: Literal[
         "off", "prefix_snapshot", "prefix_delta", "prefix_delta_lean"
@@ -1666,16 +1698,105 @@ class Settings(BaseSettings):
             resolved[effort] = raw
         return resolved
 
+    @field_validator(
+        "reasoning_reflect_delta_cards_by_effort", mode="before"
+    )
+    @classmethod
+    def validate_reflect_delta_cards(cls, value):
+        """reflect `prefix_delta` 每轮追加证据卡数上限的唯一校验点。
+
+        逐条镜像 `validate_reflect_evidence_chars` 的四条硬约束与报错口径
+        (那份 docstring 的理由原样适用,这里不复述):恰含五个 effort、值是
+        `REFLECT_DELTA_CARDS_MIN`–`REFLECT_DELTA_CARDS_MAX` 的整数(bool 不算
+        整数)、随档位不递减。`NoDecode` + 自己 `json.loads` 的理由同上。
+        """
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                raise ValueError(
+                    "REASONING_REFLECT_DELTA_CARDS_BY_EFFORT 不能为空;"
+                    "需要一个恰含五个档位的 JSON 映射"
+                )
+            try:
+                value = json.loads(text)
+            except ValueError as exc:
+                raise ValueError(
+                    "REASONING_REFLECT_DELTA_CARDS_BY_EFFORT 不是合法 JSON:"
+                    f"{exc}"
+                ) from exc
+        if not isinstance(value, dict):
+            raise ValueError(
+                "REASONING_REFLECT_DELTA_CARDS_BY_EFFORT 必须是 JSON 对象"
+            )
+        expected = set(RETRIEVAL_EFFORTS)
+        actual = set(value)
+        if actual != expected:
+            missing = sorted(expected - actual)
+            unknown = sorted(actual - expected)
+            raise ValueError(
+                "REASONING_REFLECT_DELTA_CARDS_BY_EFFORT 必须恰含五个档位 "
+                f"{sorted(expected)}"
+                + (f";缺少 {missing}" if missing else "")
+                + (f";出现未知档位 {unknown}" if unknown else "")
+            )
+        resolved: "dict[str, int]" = {}
+        previous = 0
+        for effort in RETRIEVAL_EFFORTS:
+            raw = value[effort]
+            if isinstance(raw, bool) or not isinstance(raw, int):
+                raise ValueError(
+                    "REASONING_REFLECT_DELTA_CARDS_BY_EFFORT["
+                    f"{effort}] 必须是整数(布尔值不算整数)"
+                )
+            if not (
+                REFLECT_DELTA_CARDS_MIN <= raw <= REFLECT_DELTA_CARDS_MAX
+            ):
+                raise ValueError(
+                    "REASONING_REFLECT_DELTA_CARDS_BY_EFFORT["
+                    f"{effort}]={raw} 越界(须在 "
+                    f"{REFLECT_DELTA_CARDS_MIN}–"
+                    f"{REFLECT_DELTA_CARDS_MAX} 之间)"
+                )
+            if raw < previous:
+                raise ValueError(
+                    "REASONING_REFLECT_DELTA_CARDS_BY_EFFORT 必须随档位不递减:"
+                    f"{effort}={raw} 小于上一档的 {previous}"
+                )
+            previous = raw
+            resolved[effort] = raw
+        return resolved
+
+    @field_validator(
+        "reasoning_reflect_compaction_target_ratio", mode="before"
+    )
+    @classmethod
+    def validate_reflect_compaction_target_ratio(cls, value):
+        """显式拒 `bool`(mode="before",在 `ge`/`le` 之前跑)。
+
+        `bool` 是 `int` 的子类,`True`/`False` 会被 pydantic 静默接成
+        `1.0`/`0.0` 再交给下面的区间校验——`False`(=0.0)恰好落在下界之外能被
+        `ge=0.25` 挡住,但那是**区间**恰好覆盖住了这个错误,不是这里在拦它;
+        换一个更宽的区间就会让 `bool` 悄悄漏过去。显式排除让这条校验不依赖
+        区间取值的巧合,镜像 `validate_reflect_evidence_chars` 里同款的 bool
+        排除写法。
+        """
+        if isinstance(value, bool):
+            raise ValueError(
+                "REASONING_REFLECT_COMPACTION_TARGET_RATIO 必须是数字"
+                "(布尔值不算数字)"
+            )
+        return value
+
     @field_validator("reasoning_reflect_optimization")
     @classmethod
     def validate_reflect_optimization(cls, value):
         """已登记但**尚未实现**的取值必须在启动期就响亮拒绝。
 
-        闭集写全四格(而不是本期只列两格)是刻意的:`REFLECT_OPTIMIZATIONS` 同时
+        闭集写全四格(而不是本期只列三格)是刻意的:`REFLECT_OPTIMIZATIONS` 同时
         是文档数值表与轨迹投影的字面量来源,每放开一格就改一次枚举会让"这个部署
         跑的是哪一格"在历史轨迹里失去可比性。但**登记 ≠ 可用**——静默把
-        `prefix_delta` 退回 `off` 会让一个自以为在跑增量的部署,把每一条测量都归到
-        错误的臂上;那比启动失败难查得多。
+        `prefix_delta_lean` 退回 `off` 会让一个自以为在跑增量精简版的部署,把
+        每一条测量都归到错误的臂上;那比启动失败难查得多。
 
         `mode="after"`(默认):Literal 先把四格之外的拼写挡掉,报的是取值不在闭集;
         进到这里的一定是四格之一,所以这里只需要说"这一格还没实现"。
