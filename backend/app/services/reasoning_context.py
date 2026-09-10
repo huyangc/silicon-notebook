@@ -663,6 +663,7 @@ def build_delta_evidence_block(
     budget_chars: int,
     excerpt_chars: int,
     max_cards: int,
+    frozen_cards: Mapping[str, str] = _NO_FROZEN_CARDS,
 ) -> EvidenceSelection:
     """一块增量里**新展开**的那几张卡(计划 §3 T-PD4 第 2 条)。
 
@@ -710,6 +711,15 @@ def build_delta_evidence_block(
 
     推导链卡不进增量块:它们没有 `key`,冻结表因此认不出"这一条已经发过了",每轮
     追加一份就是同一段字节反复付费。它们仍由 K 那一块按原逻辑在末尾各取最后两条。
+
+    `frozen_cards` 与 `build_evidence_block` 那一格**同一条口径、同一个理由**:键在
+    表里时直接用表里那串已经发出去过的字节,不按本轮的 `action_query` 重算摘录。这
+    一格在增量上服务的是拍板存疑 1 的后半句——一次重建会清空 `blocks` 并按新预算
+    收缩 K,于是一批**曾展示、此刻不可见**的卡会经正常档序回到某一块 D;它们回来时
+    必须还是原来那串字节(设计 §4.4「可从已有内存池恢复」),否则同一条证据在一个
+    run 里出现两种没有版本标记的写法。**此刻可见**的键由 `already_shown` 挡在门外,
+    所以这一格只会命中"曾展示但已不可见"那一批。默认空映射 ⇒ 与接入这一格之前逐
+    字节相同。
     """
     index = _pool_index(collected, elements, chunks)
     terms = excerpt_terms(question, action_query, excerpt_chars)
@@ -739,7 +749,9 @@ def build_delta_evidence_block(
             # 部分开销——`select_excerpt` 是按正文长度算的)。
             omitted += len(ordered) - position
             break
-        text = render_card(_card_for(index[key], terms, excerpt_chars))
+        text = frozen_cards.get(key)
+        if text is None:
+            text = render_card(_card_for(index[key], terms, excerpt_chars))
         seen_min = min(seen_min, len(text) + 1) if seen_min else len(text) + 1
         if used + len(text) + 1 > budget_chars:
             omitted += 1
@@ -829,6 +841,40 @@ def _card_for(item, terms: Sequence[str], excerpt_chars: int) -> EvidenceCard:
     if hasattr(item, "element_id"):
         return _element_card(item, terms, excerpt_chars)
     return _chunk_card(item, terms, excerpt_chars)
+
+
+def render_pool_cards(
+    *,
+    collected: Mapping,
+    elements: Sequence,
+    chunks: Sequence,
+    keys: Sequence[str],
+    question: str,
+    action_query: str,
+    excerpt_chars: int,
+) -> Tuple[Tuple[str, str], ...]:
+    """按**给定的几个键**现渲染卡片:`((键, 那一行的字节), …)`。
+
+    补充卡检测(拍板 Q8)唯一需要的东西:同一个键按**本轮**的 `action_query` 重算
+    一次摘录,拿去和冻结表里那份比。它**不选卡**——不看档序、不看预算、不看
+    `already_shown`,也因此不付 `_diverse_order` 那一次全池排序;调用方已经按
+    `fresh_result_ids() ∩ 冻结表`、`max_cards` 把键选完了,这里只负责把它们渲染成
+    与 `build_evidence_block` / `build_delta_evidence_block` **逐字节同一种**卡面。
+
+    为什么是这里的一个公开函数,而不是调用方自己按池子取对象:池键的约定有三种
+    形状(`collected` 的 key、元素的 `element_id`、块的 `chunk_id`,见 `_pool_index`),
+    卡片构造还要按对象类型分派(`_card_for`)。在装配侧复制一份等于凭空造出第二套
+    约定,而两套约定漂开的表现是"补充卡的 `key=` 与池键对不上"——正是风险 4 点名
+    的那种静默失配。池里没有的键**静默跳过**(它已经不是可展示的材料),不抛:调用
+    方给的是上一轮观察账里的 `result_ids`,而池子可以在两轮之间被过滤器收窄。
+
+    纯函数、零 I/O,同一份输入永远给出同一串字节。
+    """
+    index = _pool_index(collected, elements, chunks)
+    terms = excerpt_terms(question, action_query, excerpt_chars)
+    return tuple(
+        (key, render_card(_card_for(index[key], terms, excerpt_chars)))
+        for key in (str(raw) for raw in keys) if key in index)
 
 
 # --- v2 user 段的分块(设计稿 §6.3) -----------------------------------------
@@ -981,11 +1027,24 @@ class ReflectMeasurement:
     * `detail` —— 本轮的稀疏测量键,键名一律取自
       `app.domain.reasoning_trace_stats` 的登记清单(构键在写侧,见
       `reasoning_retrieval._MEASURE_KEYS`)。
+    * `measures_messages` —— 这一份载体要不要**序列化消息**。默认 `True` ⇒ 接入
+      这一格之前的行为逐字段不变(那时它只在 `REASONING_REFLECT_MEASURE_CONTEXT`
+      打开时才被构造,而那正是"要序列化"的意思)。
+
+    ⚠ `measures_messages=False` 是 `prefix_delta` 才有的形态(PR-3 拍板 Q7,已登记
+    偏离)。那条臂**无条件**构造这个对象,因为 `context_rebuilds` / `context_fallback`
+    / `delta_blocks` 是**行为事实**——上下文被重建过几次、有没有不可逆地退回 P 的
+    有界选择,与"要不要量字节"无关,测量关时同样必须可见。于是 T-PS3 那条"测量关
+    ⇒ 不构造缓存"的硬约束在这条臂上改写成"测量关 ⇒ **不序列化任何消息**":两串
+    字节恒为 None、`previous`/`current` 一格不写、`serialize_provider_messages` 一次
+    都不调,块长与公共前缀那几个键如实缺席。`off` 与 `prefix_snapshot` 两条臂的判
+    据一个字没动(见 `_reflect_measurement`),那里这一格恒为 `True`。
     """
 
     previous: Optional[bytes] = field(default=None, repr=False)
     current: Optional[bytes] = field(default=None, repr=False)
     detail: Dict[str, Optional[int]] = field(default_factory=dict)
+    measures_messages: bool = True
 
     def take(self) -> Dict[str, Optional[int]]:
         """交出本轮的测量键,并把本轮字节串升为「上一轮」。
