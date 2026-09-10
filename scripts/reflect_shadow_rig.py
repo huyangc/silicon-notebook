@@ -3211,6 +3211,39 @@ def _ab_call_estimate(
     )
 
 
+def _wall_budget_problem(max_wall_minutes: float | None) -> str:
+    """`--max-wall-minutes` 的取值判据。空串 = 通过,否则是要打给用户的那句话。
+
+    **`ab` 与 `prefix-probe` 共用这一处**(评审 F8 / P2-3):那两条命令读的是
+    同一个全局参数,判据分成两份的失败场景是「`ab` 拒了、`prefix-probe` 照跑」
+    ——而后者产出的坏数据集看起来和一次正常的跑批一模一样。
+
+    与 `--round` 同一条纪律(不 clamp、越界响亮报错),两种坏值各自的后果都是
+    「一份看起来正常的计划产出一份不能用的数据集」(评审 F10 / P3-2):
+
+    * `<= 0` ⇒ deadline 一开始就在过去:走完全部 preflight(含主库快照、gold
+      解析)之后零派发、写一份 `stopped_by_budget=true` 的 manifest、退 1——读
+      的人分不清是参数打错还是预算真用完;
+    * `nan` ⇒ 所有 `>= deadline` 比较**恒假**,预算从此永不生效(既不早停也不
+      报错),同时 `budgets` 里落一个 `NaN`,写出的 `manifest.json` 不再是合法
+      JSON(`reflect_manifest` 模块 docstring 已登记这条与兄弟模块共担的限制)。
+
+    `budget != budget` 是 NaN 的判据(不 import math:这个模块的 dry-run 路径
+    刻意只用标准库里已经在用的那几个名字)。`inf` 不拦——它的语义「不设上限」
+    与不给这个参数一致,而且 `>= deadline` 恒假不会产出坏数据。
+    """
+    if max_wall_minutes is None:
+        return ""
+    budget = float(max_wall_minutes)
+    if budget != budget or budget <= 0:
+        return (f"--max-wall-minutes 必须是一个正数分钟数,拿到 {budget}。"
+                "不 clamp:0/负数会让整批走完全部 preflight 之后零派发、"
+                "留下一份空数据集 + stopped_by_budget=true 的 manifest;"
+                "nan 会让预算判据恒假(永不早停)且 manifest.json 不再是"
+                "合法 JSON。不想设上限就干脆不给这个参数")
+    return ""
+
+
 def _ab_preflight(args: argparse.Namespace, cells: Sequence[str]) -> str:
     """真跑前的硬前提。返回空串 = 通过,否则是要打给用户的那句话。
 
@@ -3286,30 +3319,7 @@ def _ab_preflight(args: argparse.Namespace, cells: Sequence[str]) -> str:
         # `--round 4 --repeats 3` 安静地重跑第 3 轮,把两轮数据混进一格。
         return (f"--round 必须落在 1..{args.repeats} 之间(--repeats="
                 f"{args.repeats}),拿到 {args.round}")
-    if args.max_wall_minutes is not None:
-        budget = float(args.max_wall_minutes)
-        # 与 `--round` 同一条纪律(不 clamp、越界响亮报错),两种坏值各自的
-        # 后果都是「一份看起来正常的计划产出一份不能用的数据集」(评审 F10 /
-        # P3-2):
-        #
-        # * `<= 0` ⇒ deadline 一开始就在过去:走完全部 preflight(含主库快照、
-        #   gold 解析)之后零派发、写一份 `stopped_by_budget=true` 的 manifest、
-        #   退 1——读的人分不清是参数打错还是预算真用完;
-        # * `nan` ⇒ 所有 `>= deadline` 比较**恒假**,预算从此永不生效(既不早停
-        #   也不报错),同时 `budgets` 里落一个 `NaN`,写出的 `manifest.json`
-        #   不再是合法 JSON(`reflect_manifest` 模块 docstring 已登记这条与兄弟
-        #   模块共担的限制)。
-        #
-        # `budget != budget` 是 NaN 的判据(不 import math:这个模块的 dry-run
-        # 路径刻意只用标准库里已经在用的那几个名字)。`inf` 不拦——它的语义
-        # 「不设上限」与不给这个参数一致,而且 `>= deadline` 恒假不会产出坏数据。
-        if budget != budget or budget <= 0:
-            return (f"--max-wall-minutes 必须是一个正数分钟数,拿到 {budget}。"
-                    "不 clamp:0/负数会让整批走完全部 preflight 之后零派发、"
-                    "留下一份空数据集 + stopped_by_budget=true 的 manifest;"
-                    "nan 会让预算判据恒假(永不早停)且 manifest.json 不再是"
-                    "合法 JSON。不想设上限就干脆不给这个参数")
-    return ""
+    return _wall_budget_problem(args.max_wall_minutes)
 
 
 def cmd_ab(args: argparse.Namespace, runner: Runner) -> int:
@@ -3825,6 +3835,34 @@ def _ab_usage_for_window(
         # 文件打不开/读不出来就是 unknown,不当成「这个 run 一次模型都没调」。
         return UNKNOWN_USAGE
     return slice_llm_usage(records, start=started, end=ended)
+
+
+def _write_manifest(manifest: Mapping, *, runner: Runner) -> None:
+    """`manifest.json`(最新,覆盖)+ `manifests.jsonl`(历史,追加)——**三条
+    通道共用这一个函数**(pr5-followups.md「T-EX8 quality 评审 → 拍板」P3-7:
+    T-EX4/T-EX7 照做,T-EX11 回填 Q9;T-EX4 评审 P3-18:E3 那一份内联实现改调
+    这里,不留第二份)。
+
+    两份都要的理由:同一个 out-dir 里 `ab-runs.jsonl` / `probe-*.jsonl` 本来就
+    是 append 模式、默认 out-dir 又是固定的 `.local/t0`。只覆盖写的话,在 SHA
+    a1 跑一批、改代码到 b2 再跑一批之后,数据文件里两批的行都在,manifest 只剩
+    b2 ⇒ a1 那些行被归到 b2 的代码上,`code_sha` 这个锚点反过来说了假话。
+
+    `manifest.json` 走 `Runner.write` 而不是自己 `write_text`:那一层自带
+    `dry_run` 短路、`mkdir(parents=True)` 与一行 `write` 日志(评审 P3-6)。
+    追加那一份没有 `dry_run` 短路——两条调用方都只在非 dry-run 路径上到这里
+    (那条短路是死分支,评审 P3-17),`mkdir` 保证 `Runner.write` 之后目录一定
+    在,不靠调用顺序。
+    """
+    payload = dict(manifest)
+    text = json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2)
+    runner.write(runner.out_dir / "manifest.json", text)
+    history_path = runner.out_dir / "manifests.jsonl"
+    history_path.parent.mkdir(parents=True, exist_ok=True)
+    with history_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
+    runner.say("manifest", f"{runner.out_dir}/manifest.json(最新)+ "
+                           f"{runner.out_dir}/manifests.jsonl(历史,追加)")
 
 
 # --- per-call 表(`calls-<arm>.jsonl`;计划 §3 T-PS5) ------------------------
@@ -4865,19 +4903,10 @@ def _write_ab_manifest(
     # 这一行**没有任何手改**——所以这里不再复验一次(评审 F7 / P3-6:那是一行
     # 死守卫,而它引的「与 `_ab_failed_row` 同一条纪律」也不成立:那边是先构造
     # 再逐键覆写 `AB_FAILED_UNKNOWN_KEYS` 才复验,这里没有对应动作)。
-    text = json.dumps(row, ensure_ascii=False, sort_keys=True, indent=2)
-    # `manifest.json` 是**最新的那一份**(覆盖写),`manifests.jsonl` 是**历史**
-    # (追加一行)——评审 P3-7,三条通道同规则。同一个 out-dir 里
-    # `ab-runs.jsonl` 本来就是 append 模式、默认 out-dir 又是固定的 `.local/t0`:
-    # 只覆盖写的话,在 SHA a1 跑一批、改代码到 b2 再跑一批之后,数据文件里两批
-    # 的行都在,manifest 只剩 b2 ⇒ a1 那些行被归到 b2 的代码上,`code_sha` 这个
-    # 锚点反过来说了假话。走 `Runner.write` 而不是自己 `write_text`:那一层自带
-    # `dry_run` 短路、`mkdir(parents=True)` 与一行 `write` 日志(评审 P3-6)。
-    runner.write(runner.out_dir / "manifest.json", text)
-    with (runner.out_dir / "manifests.jsonl").open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
-    runner.say("manifest", f"{runner.out_dir}/manifest.json(最新)+ "
-                           f"{runner.out_dir}/manifests.jsonl(历史,追加)")
+    # 落盘那两份走 `_write_manifest`——三条通道共用同一个写法(评审 P3-7 /
+    # T-EX4 P2 汇合项:E1/E2/E3 各内联一份的话,「最新 + 历史」这条规则会在
+    # 三处各自漂移)。
+    _write_manifest(row, runner=runner)
 
 
 #: 失败 run 那一行里必须落成 unknown 的答案级/成本级键。`answer_chars=0` 会被
@@ -5658,20 +5687,20 @@ def cmd_teardown(args: argparse.Namespace, runner: Runner) -> int:
 
 # --- `prefix-probe`(E1 前缀敏感性探针;计划 §3 T-EX4)------------------------
 
-#: E1 单次调用的超时秒数,镜像 `Settings().reasoning_timeout_seconds` 的默认值
-#: 90——dry-run 不能构造 `Settings()`(与 `REASONING_ATTEMPT_BUDGET` 同一条纪律,
-#: 见 `test_the_attempt_budget_tracks_the_config_default_it_hardcodes`),所以
-#: 这里也留一个镜像常量,由用例钉住与真实默认值一致。真跑时读的是**构造出来的
-#: 那一份** `settings.reasoning_timeout_seconds`(可能被 `--env-file` 覆盖),
-#: 这个常量只用于 dry-run 展示。T-EX8(尚未合入本分支)大概率也要写一份同名
-#: 镜像常量(pr5-followups.md「T-EX8 报告」提到 `REASONING_TIMEOUT_SECONDS_
-#: DEFAULT=90`),两条分支汇合时二选一,不留两份重复实现。
-PREFIX_PROBE_TIMEOUT_SECONDS = 90
-
 #: 预热调用的正文与标记(design Q4:「用不同正文与不同前缀」)。`tier="__warmup__"`
 #: 与 `block_index=-1` 不会与 `probe_plan` 产出的任何真实序列的
 #: `(tier, block_index)` 撞上,`build_marker_pair` 的输入因此天然与主批不相交。
 _PREFIX_PROBE_WARMUP_TIER = "__warmup__"
+
+#: 整批开头的预热调用次数(design Q4 原文就是**一次**)。写成常量而不是字面
+#: `+ 1`:dry-run 的调用数估计、`is_warmup` 单列的行数、以及请求上界三处读的
+#: 必须是同一个数(评审 P3-14)。
+PREFIX_PROBE_WARMUP_CALLS = 1
+
+#: 预热行落哪一份 jsonl(`probe-warmup.jsonl`)。**不是一条臂**:它与
+#: `ARM_STABLE`/`ARM_DISTURBED` 并列做 `rows_by_label` 的键,只是为了让「预热
+#: 单列、不进任何统计」这条 design §9.1 的要求在落盘这一层也成立。
+_PREFIX_PROBE_WARMUP_LABEL = "warmup"
 
 
 def _prefix_probe_warmup_messages() -> list[dict]:
@@ -5703,6 +5732,43 @@ def _prefix_probe_process_env(args: argparse.Namespace) -> dict[str, str]:
     if args.env_file:
         env["SILICON_NOTEBOOK_ENV_FILE"] = str(Path(args.env_file).expanduser())
     return env
+
+
+def _prefix_probe_set_env(env: Mapping[str, str]) -> None:
+    """把 E1 的进程环境写进 `os.environ`。
+
+    单独一个函数**只为可注入**(评审 P2-8):`os.environ.update` 写下去的值在
+    进程里是永久的,而 pytest 的 worker 就是那个进程——四条非 dry-run 用例跑完
+    之后 `LLM_LOG_PATH` / `EVENT_LOG_DIR` 仍指向已被清掉的 `tmp_path`,同 worker
+    里后续任何构造 `Settings()` 并写日志的用例都被牵着走,`-n 4` 下受影响的是
+    哪几条还随分片漂。用例把这一步换成 `monkeypatch.setenv`,自带还原。
+    """
+    os.environ.update(env)
+
+
+def _prefix_probe_finish_reason(raw: object) -> str | None:
+    """`call_stats["finish_reason"]` → 行上那一列,收成短码或 `None`。
+
+    `None` 的语义是「**provider 没说**」,与 `app/core/llm.py` ok 出口传的
+    `finish_reason or ""`(那句注释明写 “servers may omit finish_reason
+    entirely”)同口径。
+
+    两条都必须折(评审 F1 / P1-1):
+
+    * **空串**——`_is_short_code("")` 为 False,原样写进行会让
+      `assert_probe_row_closed` 抛 `ValueError`。这不是操作失误,是一类真实
+      OpenAI 兼容端点的**正常返回**:一整批 96 格会在第一格(预热格)全灭,
+      连一行都产不出来;
+    * **非短码形状**——厂商自定义的 `finish_reason` 带空格、中文或超过 64
+      字符时同样抛。一次跑批不该因为一列诊断性的自由文本而报废,而把自由文本
+      原样落进 JSONL 又正是这份闭集要挡的事,所以折 `None`。
+    """
+    if not isinstance(raw, str):
+        # `None` 与任何非字符串(provider 回了个 dict/int)一律 unknown。
+        return None
+    from app.domain.reasoning_trace_stats import _is_short_code
+
+    return raw if _is_short_code(raw) else None
 
 
 def _prefix_probe_sample_path(args: argparse.Namespace) -> Path:
@@ -5738,12 +5804,19 @@ def _prefix_probe_plan(args: argparse.Namespace) -> list[dict]:
     return plan
 
 
-def _prefix_probe_call_estimate(total_calls: int) -> str:
+def _prefix_probe_call_estimate(plan_calls: int) -> str:
     """与 `_search_call_estimate`/`_ab_call_estimate` 同一口径的那一句:
     逻辑调用数与**请求上界**是两个数,不要混用(见两者各自的说明)。
+
+    **预热那一格算进这两个数**(评审 P3-14):它是一次真实的、要付钱的
+    `reasoning_agent` 调用,只是不进统计。少算它的后果是按配额规划的人拿到的
+    上界比真实请求数小 `1 × REASONING_ATTEMPT_BUDGET`——全量批实发 97 次而不是
+    96 次,上界 ≤194 而不是 ≤192。
     """
+    total_calls = plan_calls + PREFIX_PROBE_WARMUP_CALLS
     return (
-        f"{total_calls} 次逻辑调用;请求上界 ≤ "
+        f"{total_calls} 次逻辑调用({plan_calls} 格计划 + "
+        f"{PREFIX_PROBE_WARMUP_CALLS} 预热);请求上界 ≤ "
         f"{total_calls * REASONING_ATTEMPT_BUDGET}"
         f"(重试预算 ×{REASONING_ATTEMPT_BUDGET};静默 fallback 另计,不留日志行)"
     )
@@ -5754,6 +5827,12 @@ def _prefix_probe_say_sequence(runner: Runner, plan: Sequence[Mapping]) -> None:
 
     design §9.1「各序列内部保持连续,不插入并发负载」——这里打的顺序就是真跑
     会打的顺序,不是另一份摘要。
+
+    臂序那几行按 `plan` 里 `(tier, block)` 的**首次出现顺序**打,不排序(评审
+    P3-13):`sorted(...)` 会按 tier 的字典序打成 `long / medium / short`,而真跑
+    按 `DEFAULT_TIERS` 走 `short / medium / long`——操作者拿这几行去对
+    `probe-*.jsonl` 的前几行会对不上,而紧邻上方的 `plan row` 预览又是真顺序,
+    同一段输出自相矛盾。首次出现顺序**就是**派发顺序,不是它的一份近似。
     """
     preview = list(plan[:4])
     for row in preview:
@@ -5769,7 +5848,7 @@ def _prefix_probe_say_sequence(runner: Runner, plan: Sequence[Mapping]) -> None:
         key = (row["tier"], row["block_index"])
         if row["call_index"] == 0:
             order.setdefault(key, []).append(row["arm"])
-    for key in sorted(order, key=lambda k: (str(k[0]), k[1])):
+    for key in order:
         tier, block_index = key
         runner.say(
             "block arm order",
@@ -5792,47 +5871,10 @@ def _prefix_probe_client(settings: Any) -> tuple[Any, Any]:
     return provider, provider.chat("reasoning_agent")
 
 
-def _rig_git_sha() -> str | None:
-    """一次 `git rev-parse HEAD`。读不出来(非 git checkout、命令缺失)⇒
-    `None` = unknown,与 `_ab_model_contract` 同一条「读不出来就是 unknown,
-    不是硬失败」的先例——manifest 的 `code_sha` 允许 `None`。
-
-    T-EX8(尚未合入本分支)大概率也要写一份同名函数(`_ab_git_sha`,见
-    pr5-followups.md「T-EX8 报告」);两条分支汇合时二选一,不留两份重复
-    实现。
-    """
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True,
-            text=True, timeout=5, check=True,
-        )
-    except Exception:
-        return None
-    sha = result.stdout.strip()
-    return sha or None
-
-
 def _prefix_probe_now() -> str:
     from datetime import datetime, timezone
 
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _write_manifest(out_dir: Path, manifest: Mapping, *, runner: Runner) -> None:
-    """`manifest.json`(最新,覆盖)+ `manifests.jsonl`(历史,追加)——三条通道
-    同一规则(pr5-followups.md「T-EX8 quality 评审 → 拍板」P3-7:T-EX4/T-EX7
-    照做,T-EX11 回填 Q9)。
-    """
-    text = json.dumps(dict(manifest), ensure_ascii=False, sort_keys=True, indent=2)
-    runner.write(out_dir / "manifest.json", text)
-    if runner.dry_run:
-        return
-    history_path = out_dir / "manifests.jsonl"
-    history_path.parent.mkdir(parents=True, exist_ok=True)
-    with history_path.open("a", encoding="utf-8") as handle:
-        handle.write(
-            json.dumps(dict(manifest), ensure_ascii=False, sort_keys=True) + "\n"
-        )
 
 
 def _render_probe_summary_markdown(
@@ -5886,6 +5928,18 @@ def cmd_prefix_probe(args: argparse.Namespace, runner: Runner) -> int:
     固定正文,两臂只在头/尾标记的稳定性上不同(计划 M1/M2)。**新子命令**而
     不是 `search`/`ab` 上的开关:E1 不跑检索、不连库、不建 repo,挂进任何一条
     既有路都会让那条路多一条与语料/范围/意图全部无关的死分支(计划 M2)。
+
+    **per-call 表(`calls-e1.jsonl`)与探针行的对齐规则**(评审 F13):这张表
+    是**无标签**的(`tags=None`)——`CALL_TAG_KEYS` 是 A/B 的维度
+    (`question_key`/`corpus_cell`/`effort`),E1 一个都没有,硬塞会写出三列
+    恒 `None`。于是它与 `probe-*.jsonl` 没有共享键,只能**按顺序**对齐,而这条
+    对齐今天是成立的:E1 全程串行(一次一格,不并发),`join_calls` 给出的
+    `call_index` 稠密有序,所以第 0 行是**预热格**,其后第 i 行对应
+    `_prefix_probe_plan(args)[i - PREFIX_PROBE_WARMUP_CALLS]`,也就是
+    `probe-stable.jsonl` 与 `probe-disturbed.jsonl` 两份按 `series_index` /
+    `call_index` 归并回计划序之后的第 i 格。预算到点提前停批时,per-call 表的
+    行数按实发调用数收窄,前缀仍然对齐(停的是尾部)。**一旦 E1 改成并发派发,
+    这条规则立刻失效**——那时要么给这张表加维度,要么把对齐写进行里。
     """
     if args.database_url_explicit:
         print(
@@ -5901,9 +5955,14 @@ def cmd_prefix_probe(args: argparse.Namespace, runner: Runner) -> int:
             file=sys.stderr,
         )
         return 2
+    problem = _wall_budget_problem(args.max_wall_minutes)
+    if problem:
+        # **dry-run 也拦**(与 `_ab_preflight` 同一条纪律):一份 `nan` 预算的
+        # 计划预演出来看起来完全像一次正常的预演。
+        print("ERROR: " + problem, file=sys.stderr)
+        return 2
 
     plan = _prefix_probe_plan(args)
-    total_calls = len(plan)
     sample_path = _prefix_probe_sample_path(args)
 
     runner.say(
@@ -5913,11 +5972,12 @@ def cmd_prefix_probe(args: argparse.Namespace, runner: Runner) -> int:
     )
     runner.say("seed", str(args.seed))
     runner.say("scale", "smoke(48)" if args.smoke else "full(96)")
-    runner.say("model calls (estimate)", _prefix_probe_call_estimate(total_calls))
+    runner.say("model calls (estimate)", _prefix_probe_call_estimate(len(plan)))
     runner.say(
         "timeout (per call)",
-        f"{PREFIX_PROBE_TIMEOUT_SECONDS}s(镜像 Settings().reasoning_timeout_"
-        "seconds 的默认值;真跑读的是构造出来的那一份,可能被 --env-file 覆盖)",
+        f"{REASONING_TIMEOUT_SECONDS_DEFAULT}s(镜像 Settings()."
+        "reasoning_timeout_seconds 的默认值,与 `ab` 那一行读同一个常量;"
+        "真跑读的是构造出来的那一份,可能被 --env-file 覆盖)",
     )
     runner.say(
         "batch wall-clock budget",
@@ -5959,11 +6019,83 @@ def cmd_prefix_probe(args: argparse.Namespace, runner: Runner) -> int:
     return _run_prefix_probe(args, runner, plan, sample_path)
 
 
+def _prefix_probe_preflight(
+    plan: Sequence[Mapping], sample: Mapping, args: argparse.Namespace,
+) -> dict:
+    """**首格之前**把这批要用到的纯计算全跑一遍,返回 manifest 事实。
+
+    存在的理由是钱(评审 P1-1 第 3 条):`render_sample` 与
+    `probe_manifest_facts` 各有一组响亮拒绝路径(样本地板不足、`tier_chars`
+    非严格递增、样本档位缺失、`--sample-file` 指了一份形状不对的 JSON),它们
+    全部只依赖参数与样本,与模型无关。不先算的话第一个抛出点在**预热格之后**
+    ——那一格已经付过钱了,而一整批 96 格连一行都产不出来。
+
+    三档正文按 `plan` 里 `(tier)` 的首次出现顺序各渲染一次(不是样本声明的
+    全部档位:`plan` 没跑的档位不该让这批跑不起来)。返回值就是收尾要写的
+    `facts`,不重算第二遍。
+
+    `matrix` 补两个**额外 int 子键**(`reflect_manifest` 的 `matrix` 允许额外
+    子键,`MANIFEST_KEYS` 闭集不用改):
+
+    * `planned_runs`(评审 F3;三条通道同规则)—— 这批**计划**的格数。读
+      manifest 的人不必自己把四个基数乘一遍,而一旦 `probe_plan` 的枚举维度
+      变化(比如某档不满跑),乘法就对不上账,这一列正是为对账设的;
+    * `marker_variant`(评审 F11)—— 不写的话,`--marker-variant 0` 与 `1` 跑
+      出来的两批 manifest 逐字节相同(seed / `sample_digest` / 四个基数全一致),
+      事后无法分辨哪批是哪个 variant,而 design §9.1「更换标记值重复验证」的
+      全部意义就是把这两批对起来看。
+    """
+    from app.eval.reflect_prefix_probe import probe_manifest_facts, render_sample
+
+    for tier in dict.fromkeys(row["tier"] for row in plan):
+        render_sample(tier, sample)
+    facts = dict(probe_manifest_facts(plan, sample, args.seed))
+    matrix = dict(facts["matrix"])
+    matrix["planned_runs"] = len(plan)
+    matrix["marker_variant"] = int(args.marker_variant)
+    facts["matrix"] = matrix
+    return facts
+
+
+def _prefix_probe_local_cache_exits(
+    summary: Mapping, rows_by_label: Mapping[str, Sequence[Mapping]],
+) -> tuple[int, int]:
+    """`(主批, 预热)` 两个本地缓存出口计数。
+
+    主批那个数**直接读 `summary["local_cache_exit_rows"]`**,不再由派发循环自己
+    数一遍(评审 P3-16):两个独立算出来的数没有任何守卫钉它们相等,而 stderr
+    上那句话恰恰宣称「该计数已单列进 probe-summary」。
+
+    预热那一格要单独数:`summarize_probe` 的分桶第一步就把 `is_warmup` 行整块
+    摘出去(design §9.1「预热成本单列」),所以它**不在**那一列里。而预热同样
+    走 `bypass_cache=True`,它命中本地缓存出口一样是「结构上不应出现」的事实,
+    一样要让整批以非零退出码收尾——不然一次预热就命中的批会静静地退 0。
+    """
+    from app.eval.reflect_prefix_probe import _LOCAL_CACHE_EXIT_STATUS
+
+    batch_exits = int(summary["local_cache_exit_rows"])
+    warmup_exits = sum(
+        1 for row in rows_by_label.get(_PREFIX_PROBE_WARMUP_LABEL, ())
+        if row.get("status") == _LOCAL_CACHE_EXIT_STATUS
+    )
+    return batch_exits, warmup_exits
+
+
 def _run_prefix_probe(
     args: argparse.Namespace, runner: Runner, plan: Sequence[dict],
     sample_path: Path,
 ) -> int:
-    os.environ.update(_prefix_probe_process_env(args))
+    """E1 的真跑半边。**产物落盘与 `provider.close()` 都在 `finally` 上**。
+
+    那条 `try/finally` 不是防御性编程,是对已经花掉的钱负责(评审 F2 / P1-1):
+    循环体里 `render_sample` 的拒绝路径、行闭集自检、以及任何一次 `Ctrl-C`,都
+    会从循环里逃出去。裸语句版本下 `close()` 与全部落盘(三份 jsonl / 摘要 /
+    manifest / per-call 表)一个都不执行——真跑时等于「打完 60 个真实模型调用,
+    第 61 格一个 `ValueError` 把这 60 格的数据全部作废」,而 out-dir 连目录都
+    没建。`except BaseException` 也走这条 salvage(`KeyboardInterrupt` 不是
+    `Exception`,96 格 × 数十秒在第 80 分钟被 Ctrl-C 时最需要的正是这一条)。
+    """
+    _prefix_probe_set_env(_prefix_probe_process_env(args))
     from app.core.config import Settings
     from app.core.llm import (
         CALL_STATS_KWARG, experiment_message_markers, provider_messages,
@@ -5971,204 +6103,275 @@ def _run_prefix_probe(
     )
     from app.eval.reflect_manifest import build_manifest
     from app.eval.reflect_prefix_probe import (
-        ARM_STABLE, PROBE_SCHEMA_HINT, assert_probe_row_closed,
-        build_marker_pair, load_prefix_probe_sample, probe_manifest_facts,
-        render_sample, summarize_probe,
+        ARM_DISTURBED, ARM_STABLE, PROBE_SCHEMA_HINT, assert_probe_row_closed,
+        build_marker_pair, load_prefix_probe_sample, render_sample,
+        summarize_probe,
     )
 
     sample = load_prefix_probe_sample(sample_path)
     settings = Settings()
-    provider, client = _prefix_probe_client(settings)
-    if not provider.configured("reasoning_agent"):
-        provider.close()
+    # 首格之前:三档正文 + manifest 事实各算一遍,坏样本不烧真调用。
+    try:
+        facts = _prefix_probe_preflight(plan, sample, args)
+    except (ValueError, KeyError, TypeError) as exc:
         print(
-            "ERROR: reasoning_agent workload 没有配置模型服务;prefix-probe "
-            "需要一份真实模型配置(--env-file 或 .env)才能真跑",
+            "ERROR: prefix-probe preflight 不通过(样本或计划的纯计算就已经"
+            f"不成立,一次模型调用都没打):{exc}",
             file=sys.stderr,
         )
         return 2
 
-    contract_short, contract_readable = _ab_model_contract(settings)
-    runner.say("model contract", f"{contract_short}  ({contract_readable})")
-
-    log_dir = _ab_llm_log_dir(settings)
-    event_dir = Path(rig_event_log_dir(args.out_dir))
-    start_llm_offsets = _ab_llm_offsets(log_dir)
-    start_event_offsets = _ab_llm_offsets(event_dir, glob=RIG_EVENT_LOG_GLOB)
-
-    started_at = _prefix_probe_now()
-    deadline = (
-        time.monotonic() + args.max_wall_minutes * 60.0
-        if args.max_wall_minutes is not None else None
-    )
-
-    def _budget_expired() -> bool:
-        return deadline is not None and time.monotonic() >= deadline
-
-    rows_by_label: dict[str, list[dict]] = {}
-    local_cache_exit_count = 0
-    stopped_by_budget = False
-    prev_call_monotonic: dict[int, float] = {}
-
-    def _record_row(label: str, row: dict) -> None:
-        assert_probe_row_closed(row)
-        rows_by_label.setdefault(label, []).append(row)
-
-    def _call_row(
-        *, head: str, tail: str, messages: list[dict], timeout: float,
-        max_retries: int,
-    ) -> dict:
-        sink: dict[str, Any] = {}
-        try:
-            with experiment_message_markers(head, tail):
-                client.chat_json(
-                    messages, PROBE_SCHEMA_HINT, timeout=timeout,
-                    max_retries=max_retries, bypass_cache=True,
-                    **{CALL_STATS_KWARG: sink},
-                )
-        except Exception:
-            sink.setdefault("status", "error")
-        full_messages = provider_messages(
-            messages, PROBE_SCHEMA_HINT, markers=(head, tail))
-        usage = sink.get("usage") or {}
-        return {
-            "status": sink.get("status"),
-            "call_wall_ms": sink.get("call_wall_ms"),
-            "attempts": sink.get("attempts"),
-            "finish_reason": sink.get("finish_reason"),
-            "response_chars": sink.get("response_chars"),
-            "head_chars": len(head),
-            "tail_chars": len(tail),
-            "message_bytes_total": len(serialize_provider_messages(full_messages)),
-            "prompt_tokens": usage.get("prompt_tokens"),
-            "cached_tokens": usage.get("cached_tokens"),
-            "completion_tokens": usage.get("completion_tokens"),
-        }
-
-    if not _budget_expired():
-        warmup_head, warmup_tail = build_marker_pair(
-            args.seed, _PREFIX_PROBE_WARMUP_TIER, -1, ARM_STABLE, 0,
-            marker_variant=args.marker_variant,
-        )
-        warmup_row = _call_row(
-            head=warmup_head, tail=warmup_tail,
-            messages=_prefix_probe_warmup_messages(),
-            timeout=settings.reasoning_timeout_seconds,
-            max_retries=settings.reasoning_max_retries,
-        )
-        warmup_row.update({
-            "tier": None, "block_index": None, "arm": None, "call_index": None,
-            "series_index": None, "is_warmup": True, "gap_ms": None,
-        })
-        _record_row("warmup", warmup_row)
-        runner.say(
-            "warmup done",
-            f"status={warmup_row['status']} wall_ms={warmup_row['call_wall_ms']}",
-        )
-
-        dispatched = 0
-        for entry in plan:
-            if _budget_expired():
-                stopped_by_budget = True
-                break
-            tier, block_index, arm = entry["tier"], entry["block_index"], entry["arm"]
-            call_index, series_index = entry["call_index"], entry["series_index"]
-
-            now = time.monotonic()
-            gap_ms = None
-            prev = prev_call_monotonic.get(series_index)
-            if prev is not None:
-                gap_ms = round((now - prev) * 1000)
-            prev_call_monotonic[series_index] = now
-
-            row = _call_row(
-                head=entry["head"], tail=entry["tail"],
-                messages=render_sample(tier, sample),
-                timeout=settings.reasoning_timeout_seconds,
-                max_retries=settings.reasoning_max_retries,
+    provider, client = _prefix_probe_client(settings)
+    try:
+        if not provider.configured("reasoning_agent"):
+            print(
+                "ERROR: reasoning_agent workload 没有配置模型服务;prefix-probe "
+                "需要一份真实模型配置(--env-file 或 .env)才能真跑",
+                file=sys.stderr,
             )
-            row.update({
-                "tier": tier, "block_index": block_index, "arm": arm,
-                "call_index": call_index, "series_index": series_index,
-                "is_warmup": False, "gap_ms": gap_ms,
-            })
-            if row["status"] == "cache_hit":
-                local_cache_exit_count += 1
-            _record_row(arm, row)
-            dispatched += 1
-        runner.say(
-            "dispatched",
-            f"{dispatched}/{len(plan)} 次调用"
-            + ("(整批墙钟预算到点,提前停止派发)" if stopped_by_budget else ""),
+            return 2
+
+        contract_short, contract_readable = _ab_model_contract(settings)
+        runner.say("model contract", f"{contract_short}  ({contract_readable})")
+
+        log_dir = _ab_llm_log_dir(settings)
+        event_dir = Path(rig_event_log_dir(args.out_dir))
+        start_llm_offsets = _ab_llm_offsets(log_dir)
+        start_event_offsets = _ab_llm_offsets(event_dir, glob=RIG_EVENT_LOG_GLOB)
+
+        started_at = _prefix_probe_now()
+        deadline = (
+            time.monotonic() + args.max_wall_minutes * 60.0
+            if args.max_wall_minutes is not None else None
         )
-    else:
-        stopped_by_budget = True
-        runner.say("dispatched", "0(整批墙钟预算在开跑前就已到点)")
 
-    provider.close()
-    finished_at = _prefix_probe_now()
+        def _budget_expired() -> bool:
+            return deadline is not None and time.monotonic() >= deadline
 
-    all_rows = [row for rows in rows_by_label.values() for row in rows]
-    summary = summarize_probe(all_rows)
+        rows_by_label: dict[str, list[dict]] = {
+            ARM_STABLE: [], ARM_DISTURBED: [], _PREFIX_PROBE_WARMUP_LABEL: [],
+        }
+        stopped_by_budget = False
+        # `series_index` → 上一格**返回**的单调时刻(不是发起时刻)。
+        prev_return_monotonic: dict[int, float] = {}
 
-    for label, rows in rows_by_label.items():
-        text = "".join(
-            json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n"
-            for row in rows
-        )
-        runner.write(runner.out_dir / f"probe-{label}.jsonl", text)
+        def _record_row(label: str, row: dict) -> None:
+            assert_probe_row_closed(row)
+            rows_by_label.setdefault(label, []).append(row)
 
-    summary_md = _render_probe_summary_markdown(
-        summary, seed=args.seed, smoke=args.smoke, sample_path=sample_path,
-        marker_variant=args.marker_variant,
-    )
-    runner.write(runner.out_dir / "probe-summary.md", summary_md)
-    runner.write(
-        runner.out_dir / "probe-summary.json",
-        json.dumps(summary, ensure_ascii=False, sort_keys=True, indent=2),
-    )
+        def _call_row(
+            *, head: str, tail: str, messages: list[dict], timeout: float,
+            max_retries: int,
+        ) -> dict:
+            sink: dict[str, Any] = {}
+            try:
+                with experiment_message_markers(head, tail):
+                    client.chat_json(
+                        messages, PROBE_SCHEMA_HINT, timeout=timeout,
+                        max_retries=max_retries, bypass_cache=True,
+                        **{CALL_STATS_KWARG: sink},
+                    )
+            except Exception:
+                sink.setdefault("status", "error")
+            full_messages = provider_messages(
+                messages, PROBE_SCHEMA_HINT, markers=(head, tail))
+            usage = sink.get("usage") or {}
+            return {
+                "status": sink.get("status"),
+                "call_wall_ms": sink.get("call_wall_ms"),
+                "attempts": sink.get("attempts"),
+                "finish_reason": _prefix_probe_finish_reason(
+                    sink.get("finish_reason")),
+                "response_chars": sink.get("response_chars"),
+                "head_chars": len(head),
+                "tail_chars": len(tail),
+                "message_bytes_total": len(
+                    serialize_provider_messages(full_messages)),
+                "prompt_tokens": usage.get("prompt_tokens"),
+                "cached_tokens": usage.get("cached_tokens"),
+                "completion_tokens": usage.get("completion_tokens"),
+            }
 
-    facts = probe_manifest_facts(plan, sample, args.seed)
-    manifest = build_manifest(
-        channel="e1",
-        code_sha=_rig_git_sha(),
-        started_at=started_at,
-        finished_at=finished_at,
-        stopped_by_budget=stopped_by_budget,
-        model_contract=contract_short,
-        budgets={
-            "call_timeout_seconds": int(settings.reasoning_timeout_seconds),
-            "attempt_budget": REASONING_ATTEMPT_BUDGET,
-            "max_wall_minutes": args.max_wall_minutes,
-        },
-        **facts,
-    )
-    _write_manifest(runner.out_dir, manifest, runner=runner)
+        def _finish() -> int:
+            """落盘 + 摘要 + manifest + per-call 表 + 退出码。
 
-    calls_rows = _rig_call_rows(
-        log_dir, event_dir, llm_offsets=start_llm_offsets,
-        event_offsets=start_event_offsets, tags=None,
-    )
-    _write_call_rows(runner.out_dir, "e1", calls_rows)
+            正常路径与 salvage 路径共用这一个函数——两条路各写一份的话,异常
+            那条(正是最需要产物的那条)会长期与正常那条分叉。
+            """
+            finished_at = _prefix_probe_now()
+            all_rows = [row for rows in rows_by_label.values() for row in rows]
+            summary = summarize_probe(all_rows)
 
-    exit_status = 0
-    if stopped_by_budget:
-        print(
-            "ERROR: 整批墙钟预算到点,提前停止派发(未完成/不成对标记见 "
-            "manifest.stopped_by_budget)",
-            file=sys.stderr,
-        )
-        exit_status = 1
-    if local_cache_exit_count:
-        print(
-            f"WARNING: {local_cache_exit_count} 格命中本地响应缓存出口"
-            "(status=cache_hit),bypass_cache=True 下不应出现;"
-            "该计数已单列进 probe-summary 的 local_cache_exit_rows",
-            file=sys.stderr,
-        )
-        exit_status = exit_status or 1
-    return exit_status
+            # 三份 jsonl **一律出表**,零派发时是三个空文件(评审 P3-15):
+            # dry-run 的 `out` 行承诺了这三个落点,按固定名读的下游拿到
+            # `FileNotFoundError` 分不清「这批没跑起来」与「路径写错了」。
+            for label, rows in rows_by_label.items():
+                text = "".join(
+                    json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n"
+                    for row in rows
+                )
+                runner.write(runner.out_dir / f"probe-{label}.jsonl", text)
 
+            summary_md = _render_probe_summary_markdown(
+                summary, seed=args.seed, smoke=args.smoke,
+                sample_path=sample_path, marker_variant=args.marker_variant,
+            )
+            runner.write(runner.out_dir / "probe-summary.md", summary_md)
+            runner.write(
+                runner.out_dir / "probe-summary.json",
+                json.dumps(summary, ensure_ascii=False, sort_keys=True, indent=2),
+            )
+
+            manifest = build_manifest(
+                channel="e1",
+                code_sha=_ab_git_sha(),
+                started_at=started_at,
+                finished_at=finished_at,
+                stopped_by_budget=stopped_by_budget,
+                model_contract=contract_short,
+                budgets={
+                    "call_timeout_seconds": int(
+                        settings.reasoning_timeout_seconds),
+                    "attempt_budget": REASONING_ATTEMPT_BUDGET,
+                    "max_wall_minutes": args.max_wall_minutes,
+                },
+                **facts,
+            )
+            _write_manifest(manifest, runner=runner)
+
+            calls_rows = _rig_call_rows(
+                log_dir, event_dir, llm_offsets=start_llm_offsets,
+                event_offsets=start_event_offsets, tags=None,
+            )
+            _write_call_rows(runner.out_dir, "e1", calls_rows)
+
+            # 退出码的**三个**来源,stderr 上各写清一句(评审 P2-4):混成一句
+            # 「非零」会让 `prefix-probe && analyze …` 的操作者分不清这批是被
+            # 预算截断、命中了不该命中的缓存出口,还是整批全灭。
+            exit_status = 0
+            if stopped_by_budget:
+                print(
+                    "ERROR: 整批墙钟预算到点,提前停止派发(未完成/不成对标记见 "
+                    "manifest.stopped_by_budget)",
+                    file=sys.stderr,
+                )
+                exit_status = 1
+            batch_exits, warmup_exits = _prefix_probe_local_cache_exits(
+                summary, rows_by_label)
+            if batch_exits or warmup_exits:
+                print(
+                    f"ERROR: {batch_exits} 格(另有 {warmup_exits} 个预热格)"
+                    "命中本地响应缓存出口(status=cache_hit),bypass_cache=True "
+                    "下不应出现;主批那个数就是 probe-summary 的 "
+                    "local_cache_exit_rows(预热行按 design §9.1 不进任何统计,"
+                    "单独数)",
+                    file=sys.stderr,
+                )
+                exit_status = 1
+            ok_rows = (summary["first_observation_row_count"]
+                       + summary["repeat_observation_row_count"])
+            if ok_rows == 0:
+                print(
+                    "ERROR: 一格成功观测都没有(status=ok 的非预热行为 0;"
+                    f"failed_row_count={summary['failed_row_count']})。"
+                    "这批数据出不了任何结论,不要往 analyze 传",
+                    file=sys.stderr,
+                )
+                exit_status = 1
+            return exit_status
+
+        try:
+            if not _budget_expired():
+                warmup_head, warmup_tail = build_marker_pair(
+                    args.seed, _PREFIX_PROBE_WARMUP_TIER, -1, ARM_STABLE, 0,
+                    marker_variant=args.marker_variant,
+                )
+                warmup_row = _call_row(
+                    head=warmup_head, tail=warmup_tail,
+                    messages=_prefix_probe_warmup_messages(),
+                    timeout=settings.reasoning_timeout_seconds,
+                    max_retries=settings.reasoning_max_retries,
+                )
+                warmup_row.update({
+                    "tier": None, "block_index": None, "arm": None,
+                    "call_index": None, "series_index": None,
+                    "is_warmup": True, "gap_ms": None,
+                })
+                _record_row(_PREFIX_PROBE_WARMUP_LABEL, warmup_row)
+                runner.say(
+                    "warmup done",
+                    f"status={warmup_row['status']} "
+                    f"wall_ms={warmup_row['call_wall_ms']}",
+                )
+
+                dispatched = 0
+                for entry in plan:
+                    if _budget_expired():
+                        stopped_by_budget = True
+                        break
+                    tier = entry["tier"]
+                    block_index, arm = entry["block_index"], entry["arm"]
+                    call_index = entry["call_index"]
+                    series_index = entry["series_index"]
+
+                    # `gap_ms` = 本格**发起** − 同序列上一格**返回**(评审 F6:
+                    # 「与上一次调用的间隔」是真实空闲,不是周期)。start-to-start
+                    # 的差值恰好等于上一格的整段墙钟,而在 E1 里那是数量级最大的
+                    # 一项:连续派发时它会记成 8000ms,而真实空闲接近 0——拿这个数
+                    # 去和 provider 前缀缓存的 TTL 比较,结论方向可以完全反过来。
+                    prev_return = prev_return_monotonic.get(series_index)
+                    call_started = time.monotonic()
+                    gap_ms = (
+                        None if prev_return is None
+                        else round((call_started - prev_return) * 1000)
+                    )
+
+                    row = _call_row(
+                        head=entry["head"], tail=entry["tail"],
+                        messages=render_sample(tier, sample),
+                        timeout=settings.reasoning_timeout_seconds,
+                        max_retries=settings.reasoning_max_retries,
+                    )
+                    # 返回时刻才是下一格 `gap_ms` 的起点。写在 `_record_row`
+                    # 之前:行闭集自检抛出去时这一格的返回时刻已经是事实。
+                    prev_return_monotonic[series_index] = time.monotonic()
+                    row.update({
+                        "tier": tier, "block_index": block_index, "arm": arm,
+                        "call_index": call_index, "series_index": series_index,
+                        "is_warmup": False, "gap_ms": gap_ms,
+                    })
+                    _record_row(arm, row)
+                    dispatched += 1
+                runner.say(
+                    "dispatched",
+                    f"{dispatched}/{len(plan)} 次调用"
+                    + ("(整批墙钟预算到点,提前停止派发)"
+                       if stopped_by_budget else ""),
+                )
+            else:
+                stopped_by_budget = True
+                runner.say("dispatched", "0(整批墙钟预算在开跑前就已到点)")
+        except BaseException:
+            # 已经打过的格是花了真钱的观测,不该跟着异常一起消失。salvage 自己
+            # 再抛的话会把原始异常盖掉(读的人拿到的是「写盘失败」而不是「样本
+            # 地板不足」),所以它单独兜一层,只打一句。
+            try:
+                _finish()
+            except BaseException as salvage_exc:  # noqa: BLE001
+                print(
+                    f"ERROR: 异常收尾时抢救产物也失败了:{salvage_exc!r}",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    "ERROR: 派发中断,已把此前打完的格落盘到 "
+                    f"{runner.out_dir}(产物不完整,manifest 如实记录)",
+                    file=sys.stderr,
+                )
+            raise
+        return _finish()
+    finally:
+        provider.close()
 
 # --- CLI --------------------------------------------------------------------
 
@@ -6333,11 +6536,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--max-wall-minutes", type=float, default=None,
-        help="`ab` 的整批墙钟预算(分钟,T-EX8)。**不给 = 今天的行为逐字相同**"
-             ":不设上限、不早停。到点后停止派发新单元、cancel_event 唤醒在途、"
-             "shutdown(cancel_futures=True) 撤掉队列里的;在途未完成单元落"
-             " status=cancelled 行(删失观察),不偷偷补跑到矩阵齐全;整批以"
-             "非零退出码收尾。写进 manifest.json 的 stopped_by_budget",
+        help="`ab` 与 `prefix-probe` 共用的整批墙钟预算(分钟,T-EX8/T-EX4)。"
+             "**不给 = 今天的行为逐字相同**:不设上限、不早停。`ab` 到点后停止"
+             "派发新单元、cancel_event 唤醒在途、shutdown(cancel_futures=True) "
+             "撤掉队列里的;在途未完成单元落 status=cancelled 行(删失观察),不"
+             "偷偷补跑到矩阵齐全。`prefix-probe` 是串行的,到点停止派发**未开始"
+             "**的调用,同样不补跑到矩阵齐全。两者都以非零退出码收尾,并把"
+             " stopped_by_budget 如实写进 manifest.json。≤0 与 NaN 两条命令"
+             "共用同一处判据当场拒绝(`_wall_budget_problem`)",
     )
     parser.add_argument(
         "--mode", choices=("reasoning", "chunk", "auto"), default="reasoning",
@@ -6364,12 +6570,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="`prefix-probe` 的标记版本号(design §9.1「更换标记值重复验证」);"
              "同一组 (seed, tier, block, arm, call_index) 换一个 variant 就拿到"
              "一组全新的标记值,计划形状不变",
-    )
-    parser.add_argument(
-        "--max-wall-minutes", type=float, default=None,
-        help="`prefix-probe` 的整批墙钟预算(分钟)。到点停止派发**未开始**的"
-             "调用,不补跑到矩阵齐全;manifest 如实记 stopped_by_budget。默认"
-             "不设 = 跑到计划结束",
     )
     parser.add_argument(
         "command",

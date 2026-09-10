@@ -1199,6 +1199,15 @@ RIG_PROCESS_ENV_KEYS = {
     "EVENT_LOG_DIR",
 }
 
+#: `_prefix_probe_process_env` 的**全部**键(`--env-file` 那一项另算)。E1 刻意
+#: **不写 `DATABASE_URL`**:那条命令结构上不连库,写任何占位值只是徒增一次
+#: `Settings()` 校验失败的风险(`normalize_database_url("")` 直接抛)。三把注入
+#: 闸也不写:E1 不建 repo、不接那三个端口。
+PREFIX_PROBE_PROCESS_ENV_KEYS = {
+    "LLM_LOG_PATH",
+    "EVENT_LOG_DIR",
+}
+
 
 def test_search_process_env_forces_every_injection_switch_off():
     """主库只读不许依赖「那三个端口恰好没接线」这个会随重构漂移的前提。"""
@@ -1232,6 +1241,19 @@ def test_rig_never_writes_to_the_machine_wide_log_directory(tmp_path):
     # 临时后端那一份同理:`seed` / `restart` 起的 uvicorn 也是 rig 的进程。
     backend = rig.backend_env(args, "legacy")
     assert backend["EVENT_LOG_DIR"] == str((out / "events").resolve())
+    # `prefix-probe` 那一份同理(评审 F5 / P2-6):E1 也是 rig 的进程,`.local/logs`
+    # 一个字节不写。它自己写一份只有两键的 env(`_rig_process_env` 的
+    # `database_url` 是必填参数,而 E1 结构上不连库),所以要单独进这条守卫——
+    # 漏加在数据上看不出任何区别,键集在 `PREFIX_PROBE_PROCESS_ENV_KEYS`。
+    probe_args = rig.build_parser().parse_args(
+        ["--out-dir", str(out), "--seed", "7", "prefix-probe"])
+    probe_args.database_url_explicit = False
+    probe_env = rig._prefix_probe_process_env(probe_args)
+    assert set(probe_env) == PREFIX_PROBE_PROCESS_ENV_KEYS
+    assert probe_env["LLM_LOG_PATH"] == str((out / "llm" / "llm.jsonl").resolve())
+    assert probe_env["EVENT_LOG_DIR"] == str((out / "events").resolve())
+    for value in probe_env.values():
+        assert ".local/logs" not in value
 
 
 def _search_item(policy: str) -> dict:
@@ -4189,10 +4211,17 @@ class _FakePrefixProbeClient:
     """
 
     def __init__(self, *, raise_at: set[int] | None = None,
-                 cache_hit_at: set[int] | None = None):
+                 cache_hit_at: set[int] | None = None,
+                 raise_everything: bool = False,
+                 finish_reason: str | None = "stop"):
         self.calls: list[dict] = []
         self._raise_at = raise_at or set()
         self._cache_hit_at = cache_hit_at or set()
+        self._raise_everything = raise_everything
+        # `finish_reason` 可注入的理由:真实 ok 出口传的是 `finish_reason or ""`
+        # (`app/core/llm.py` 的注释明写 “servers may omit finish_reason
+        # entirely”),空串是一类真实 OpenAI 兼容端点的**正常返回**。
+        self._finish_reason = finish_reason
 
     def chat_json(self, messages, schema_hint, *, timeout=None,
                   max_retries=None, bypass_cache=False, call_stats=None,
@@ -4208,7 +4237,7 @@ class _FakePrefixProbeClient:
             "max_retries": max_retries, "bypass_cache": bypass_cache,
             "markers": markers,
         })
-        if index in self._raise_at:
+        if self._raise_everything or index in self._raise_at:
             if call_stats is not None:
                 call_stats["status"] = "error"
             raise RuntimeError("fake transient failure")
@@ -4219,7 +4248,8 @@ class _FakePrefixProbeClient:
             else:
                 call_stats.update({
                     "status": "ok", "call_wall_ms": 5, "attempts": 1,
-                    "attempts_observed": True, "finish_reason": "stop",
+                    "attempts_observed": True,
+                    "finish_reason": self._finish_reason,
                     "response_chars": 12,
                     "usage": {"prompt_tokens": 10, "completion_tokens": 2,
                               "cached_tokens": 0},
@@ -4250,31 +4280,124 @@ def _prefix_probe_args(tmp_path, *extra: str) -> Any:
     return args
 
 
+def _install_prefix_probe_fake(monkeypatch, client) -> _FakePrefixProbeProvider:
+    """替身 provider + **不泄漏**的进程环境写入。
+
+    `_prefix_probe_set_env` 换成 `monkeypatch.setenv`(评审 P2-8):真实那一步
+    是 `os.environ.update`,而 pytest 的 worker 就是那个进程——四条非 dry-run
+    用例跑完之后 `LLM_LOG_PATH`/`EVENT_LOG_DIR` 会一直指向已被清掉的 `tmp_path`,
+    同 worker 里后续任何构造 `Settings()` 并写日志的用例都被牵着走,`-n 4` 下
+    受影响的是哪几条还随分片漂。
+    """
+    provider = _FakePrefixProbeProvider(client)
+    monkeypatch.setattr(
+        rig, "_prefix_probe_client", lambda settings: (provider, client))
+
+    def _set_env(env):
+        for key, value in env.items():
+            monkeypatch.setenv(key, value)
+
+    monkeypatch.setattr(rig, "_prefix_probe_set_env", _set_env)
+    return provider
+
+
+def _install_prefix_probe_clock(monkeypatch, *, step: float = 1.0) -> None:
+    """一台每读一次就走 `step` 秒的假单调时钟,**只换 rig 模块的 `time`**。
+
+    换模块属性而不是 `time.monotonic` 本身:后者是进程全局的,一次用例里任何
+    第三方代码读到的时间都会跟着跳。rig 只用 `time.monotonic`/`time.sleep`
+    (全仓 grep 过),所以这个命名空间是完备的。
+    """
+    clock = {"now": 0.0}
+
+    def _monotonic() -> float:
+        clock["now"] += step
+        return clock["now"]
+
+    monkeypatch.setattr(
+        rig, "time",
+        types.SimpleNamespace(monotonic=_monotonic, sleep=time.sleep))
+
+
+def _prefix_probe_rows(out_dir: Path) -> dict[str, list[dict]]:
+    """三份 jsonl 读回来(缺文件 = 断言失败,不是空列表:`probe-*.jsonl` 一律
+    出表是 P3-15 钉住的契约)。"""
+    rows: dict[str, list[dict]] = {}
+    for label in ("stable", "disturbed", "warmup"):
+        path = out_dir / f"probe-{label}.jsonl"
+        assert path.exists(), f"{path} 没有出表"
+        rows[label] = [
+            json.loads(line) for line in path.read_text("utf-8").splitlines()
+        ]
+    return rows
+
+
 def test_dry_run_prefix_probe_prints_default_scale_and_ceiling(tmp_path, capsys):
-    """(a)T-EX4 用例 a:逐字钉住 96 / 上界 192 / 产物落点 / 限定语一句。"""
+    """(a)T-EX4 用例 a:dry-run **八项**逐字钉死(评审 F12 / P3-14)。
+
+    八项 = 逻辑调用数 / 请求上界 / 单次超时 / 整批墙钟预算 / 序列顺序与区组 /
+    预热单列 / 产物落点 / 限定语一句。此前只有三项进了断言,剩下四项删掉不红
+    ——而计划 §5 那条要求是「各一条用例逐字钉死」。
+
+    调用数含**预热**:96 格计划 + 1 次预热 = 97 次逻辑调用,上界 ≤ 194。少算
+    预热的后果是按配额规划的人拿到的上界比真实请求数小一整个重试预算。
+    """
+    from app.eval.reflect_prefix_probe import DEFAULT_TIERS
+
     args = _prefix_probe_args(tmp_path)
     runner = rig.Runner(dry_run=True, out_dir=Path(args.out_dir))
     assert rig.cmd_prefix_probe(args, runner) == 0
     printed = capsys.readouterr().out
-    assert "96 次逻辑调用" in printed
-    assert "请求上界 ≤ 192" in printed
+    # (1)(2) 逻辑调用数与请求上界。
+    assert "97 次逻辑调用(96 格计划 + 1 预热)" in printed
+    assert "请求上界 ≤ 194" in printed
+    # (3) 单次超时——读的是与 `ab` 同一个镜像常量(不是第二份 90)。
+    assert f"{rig.REASONING_TIMEOUT_SECONDS_DEFAULT}s(镜像 Settings()." in printed
+    # (4) 整批墙钟预算(不给时那句「未设」)。
+    assert "batch wall-clock budget" in printed
+    assert "未设(默认行为:跑到计划结束)" in printed
+    # (5) 序列顺序与区组:计划前几行 + 每个 (tier, block) 的臂序,顺序按
+    # `DEFAULT_TIERS`(short/medium/long),不是 tier 的字典序。
+    assert "plan row" in printed and "block arm order" in printed
+    tier_positions = [
+        printed.index(f"block arm order  tier={tier} block=0") for tier in DEFAULT_TIERS
+    ]
+    assert tier_positions == sorted(tier_positions), (
+        "臂序几行必须按 DEFAULT_TIERS 的派发顺序打,不是 long/medium/short 的字典序"
+    )
+    # (6) 预热单列。
+    assert "单列 is_warmup=True 行,不进任何统计" in printed
+    # (7) 产物落点。
     assert "probe-stable.jsonl" in printed and "probe-disturbed.jsonl" in printed
     assert "probe-warmup.jsonl" in printed
     assert "manifest.json" in printed and "manifests.jsonl" in printed
+    assert "calls-e1.jsonl" in printed
+    # (8) 限定语一句。
     assert (
         "这批只能支持『稳定前缀的时间收益』,不得报告命中率、不得报告省了多少 "
         "token、不得报告 provider 是否关闭了缓存" in printed
     )
+    # dry-run 零写盘:out-dir 连目录都不建。
+    assert not Path(args.out_dir).exists()
 
 
 def test_dry_run_prefix_probe_smoke_scale(tmp_path, capsys):
-    """(a)`--smoke` 走 48 / 上界 96(U4 拍板的另一个规模)。"""
+    """(a)`--smoke` 走 48 格 + 1 预热 = 49 / 上界 ≤ 98(U4 拍板的另一个规模)。"""
     args = _prefix_probe_args(tmp_path, "--smoke")
     runner = rig.Runner(dry_run=True, out_dir=Path(args.out_dir))
     assert rig.cmd_prefix_probe(args, runner) == 0
     printed = capsys.readouterr().out
-    assert "48 次逻辑调用" in printed
-    assert "请求上界 ≤ 96" in printed
+    assert "49 次逻辑调用(48 格计划 + 1 预热)" in printed
+    assert "请求上界 ≤ 98" in printed
+
+
+def test_dry_run_prefix_probe_prints_the_given_wall_clock_budget(tmp_path, capsys):
+    """(a-4)给了 `--max-wall-minutes` 时那一行打的是真值。"""
+    args = _prefix_probe_args(tmp_path, "--smoke", "--max-wall-minutes", "12")
+    runner = rig.Runner(dry_run=True, out_dir=Path(args.out_dir))
+    assert rig.cmd_prefix_probe(args, runner) == 0
+    printed = capsys.readouterr().out
+    assert "12.0 分钟(到点停止派发,不补跑到矩阵齐全)" in printed
 
 
 def test_prefix_probe_refuses_an_explicit_database_url(tmp_path):
@@ -4320,6 +4443,7 @@ def test_prefix_probe_fake_client_run_sends_provider_messages_shaped_calls(
     tmp_path, monkeypatch,
 ):
     """(d)进程内假客户端跑通全部格(--smoke 缩批),断言两臂剧本与消息形状。"""
+    from app.core.llm import provider_messages, serialize_provider_messages
     from app.eval.reflect_manifest import assert_manifest
     from app.eval.reflect_prefix_probe import (
         ARM_DISTURBED, ARM_STABLE, PROBE_SCHEMA_HINT,
@@ -4327,9 +4451,7 @@ def test_prefix_probe_fake_client_run_sends_provider_messages_shaped_calls(
     )
 
     client = _FakePrefixProbeClient()
-    provider = _FakePrefixProbeProvider(client)
-    monkeypatch.setattr(
-        rig, "_prefix_probe_client", lambda settings: (provider, client))
+    provider = _install_prefix_probe_fake(monkeypatch, client)
 
     args = _prefix_probe_args(tmp_path, "--smoke")
     runner = rig.Runner(dry_run=False, out_dir=Path(args.out_dir))
@@ -4362,17 +4484,68 @@ def test_prefix_probe_fake_client_run_sends_provider_messages_shaped_calls(
         (row["head"], row["tail"]) for row in plan
     }
 
+    # 预热正文与主批**不同**(design Q4「用不同正文与不同前缀」)。此前只有
+    # 「不同前缀」那半边有守卫,正文那半边改成主批正文不打红(评审 F10 / M14)。
+    warmup_body = warmup_call["messages"][0]["content"]
+    main_bodies = {call["messages"][0]["content"] for call in client.calls[1:]}
+    assert warmup_body not in main_bodies
+    assert "[warmup]" in warmup_body
+
     out_dir = Path(args.out_dir)
-    assert (out_dir / "probe-stable.jsonl").exists()
-    assert (out_dir / "probe-disturbed.jsonl").exists()
-    assert (out_dir / "probe-warmup.jsonl").exists()
     assert (out_dir / "probe-summary.md").exists()
     assert (out_dir / "probe-summary.json").exists()
+    rows_by_label = _prefix_probe_rows(out_dir)
+    assert len(rows_by_label["warmup"]) == 1
+
+    # 三列字节口径(评审 F10 / P3-12):`message_bytes_total` 是 rig 在 `with`
+    # 块外**重建**的一份,不是观测值。少算头标记 13 字符、或两端各少 13,今天
+    # 都不打红——而 T-EX2 拍板「E1 分析侧禁读 reflect 的 `ctx_bytes_total`/
+    # `message_prefix_bytes`」之后,这三列是唯一的字节来源。
+    plan_by_series = {
+        (row["tier"], row["block_index"], row["arm"], row["call_index"]): row
+        for row in plan
+    }
+    for label in (ARM_STABLE, ARM_DISTURBED):
+        for row in rows_by_label[label]:
+            entry = plan_by_series[
+                (row["tier"], row["block_index"], row["arm"], row["call_index"])
+            ]
+            head, tail = entry["head"], entry["tail"]
+            expected_bytes = len(serialize_provider_messages(provider_messages(
+                render_sample(row["tier"], sample), PROBE_SCHEMA_HINT,
+                markers=(head, tail),
+            )))
+            assert row["message_bytes_total"] == expected_bytes
+            assert row["head_chars"] == len(head)
+            assert row["tail_chars"] == len(tail)
+            assert row["finish_reason"] == "stop"
+
+    # `gap_ms`(评审 F6 / P3-10):序列首格 `None`;其余格是数值;**跨序列不串**
+    # ——每个 `series_index` 各自的首格都必须是 `None`,共用一个 `prev` 的写法
+    # 下第二个序列的首格会拿到上一序列尾格的差值。
+    main_rows = rows_by_label[ARM_STABLE] + rows_by_label[ARM_DISTURBED]
+    by_series: dict[int, list[dict]] = {}
+    for row in main_rows:
+        by_series.setdefault(row["series_index"], []).append(row)
+    assert len(by_series) > 1  # 不然「跨序列」这半边证明不了任何事
+    for series_rows in by_series.values():
+        series_rows.sort(key=lambda r: r["call_index"])
+        assert series_rows[0]["call_index"] == 0
+        assert series_rows[0]["gap_ms"] is None
+        for row in series_rows[1:]:
+            assert isinstance(row["gap_ms"], int)
+
     manifest = json.loads((out_dir / "manifest.json").read_text("utf-8"))
     assert_manifest(manifest)  # 不抛就是过
     assert manifest["channel"] == "e1"
     assert manifest["seed"] == 7
     assert manifest["stopped_by_budget"] is False
+    # `planned_runs`(评审 F3)与 `marker_variant`(评审 F11)两个额外 int 子键。
+    # `planned_runs == len(plan) == 行数上界`:读 manifest 的人不必自己把四个
+    # 基数乘一遍,而枚举维度一变(某档不满跑)乘法就对不上账。
+    assert manifest["matrix"]["planned_runs"] == len(plan)
+    assert manifest["matrix"]["planned_runs"] == len(main_rows)
+    assert manifest["matrix"]["marker_variant"] == 0
     history = (out_dir / "manifests.jsonl").read_text("utf-8").splitlines()
     assert len(history) == 1
     assert json.loads(history[0]) == manifest
@@ -4381,6 +4554,25 @@ def test_prefix_probe_fake_client_run_sends_provider_messages_shaped_calls(
     assert summary["warmup_row_count"] == 1
     assert summary["local_cache_exit_rows"] == 0
     assert summary["row_count_total"] == len(plan) + 1
+
+    # summary.md 的**内容**守卫(评审 P2-5):此前只断言 `.exists()`,于是删掉
+    # 限定语、把 `verdict` 硬写成 `time_benefit`、把 `local_cache_exit_rows`
+    # 硬写成 0、让 `by_tier` 一行不出——四种都不打红。dry-run 的那句限定语钉住
+    # 了,而真正被人拿去读的那份报告没钉,而这正是本期整份计划要守的那条线。
+    summary_md = (out_dir / "probe-summary.md").read_text("utf-8")
+    assert (
+        "**这批只能支持『稳定前缀的时间收益』,不得报告命中率、不得报告省了多少 "
+        "token、不得报告 provider 是否关闭了缓存**(design §0/§9.1)。"
+        in summary_md
+    )
+    assert f"- verdict: **{summary['verdict']}**" in summary_md
+    assert (f"- local_cache_exit_rows: {summary['local_cache_exit_rows']}"
+            in summary_md)
+    assert f"- failed_row_count: {summary['failed_row_count']}" in summary_md
+    for tier in summary["by_tier"]:
+        assert f"### {tier}" in summary_md
+    assert summary_md.count("### ") == len(summary["by_tier"])
+    assert "命中率" not in summary_md.replace("不得报告命中率", "")
 
 
 def test_prefix_probe_seam_resets_after_exit_even_on_a_raising_call(
@@ -4394,9 +4586,7 @@ def test_prefix_probe_seam_resets_after_exit_even_on_a_raising_call(
     from app.core.llm import _EXPERIMENT_MARKERS
 
     client = _FakePrefixProbeClient(raise_at={2})
-    provider = _FakePrefixProbeProvider(client)
-    monkeypatch.setattr(
-        rig, "_prefix_probe_client", lambda settings: (provider, client))
+    _install_prefix_probe_fake(monkeypatch, client)
 
     args = _prefix_probe_args(tmp_path, "--smoke")
     runner = rig.Runner(dry_run=False, out_dir=Path(args.out_dir))
@@ -4406,25 +4596,23 @@ def test_prefix_probe_seam_resets_after_exit_even_on_a_raising_call(
     plan = rig._prefix_probe_plan(args)
     assert len(client.calls) == len(plan) + 1  # 批没有中止
 
-    all_rows = []
-    for label in ("stable", "disturbed", "warmup"):
-        path = Path(args.out_dir) / f"probe-{label}.jsonl"
-        all_rows.extend(json.loads(line) for line in path.read_text("utf-8").splitlines())
+    all_rows = [
+        row for rows in _prefix_probe_rows(Path(args.out_dir)).values()
+        for row in rows
+    ]
     error_rows = [row for row in all_rows if row["status"] == "error"]
     assert len(error_rows) == 1  # 抛异常的那一格照记
     assert exit_code == 0  # 一次普通失败不算命中本地缓存,也没到预算
 
 
 def test_prefix_probe_cache_hit_row_is_recorded_and_flagged_non_zero(
-    tmp_path, monkeypatch,
+    tmp_path, monkeypatch, capsys,
 ):
     """(f)一格 status="cache_hit" ⇒ 行照记、摘要 local_cache_exit_rows==1、
     退出非零(pr5-followups.md「T-EX2 quality → 拍板」P3-3)。
     """
     client = _FakePrefixProbeClient(cache_hit_at={1})
-    provider = _FakePrefixProbeProvider(client)
-    monkeypatch.setattr(
-        rig, "_prefix_probe_client", lambda settings: (provider, client))
+    _install_prefix_probe_fake(monkeypatch, client)
 
     args = _prefix_probe_args(tmp_path, "--smoke")
     runner = rig.Runner(dry_run=False, out_dir=Path(args.out_dir))
@@ -4434,19 +4622,49 @@ def test_prefix_probe_cache_hit_row_is_recorded_and_flagged_non_zero(
     summary = json.loads(
         (Path(args.out_dir) / "probe-summary.json").read_text("utf-8"))
     assert summary["local_cache_exit_rows"] == 1
+    # 退出码判据读的就是这一列(评审 P3-16:此前是派发循环自己数的第二个数,
+    # 而 stderr 那句话宣称两者是同一个数,却没有任何守卫钉它们相等)。
+    err = capsys.readouterr().err
+    assert "1 格(另有 0 个预热格)命中本地响应缓存出口" in err
 
     plan = rig._prefix_probe_plan(args)
     assert len(client.calls) == len(plan) + 1  # 批没有因此中止
 
 
-def test_prefix_probe_expired_budget_dispatches_nothing(tmp_path, monkeypatch):
-    """(g)`--max-wall-minutes` 已过期 ⇒ 零派发、非零、stopped_by_budget=True。"""
-    client = _FakePrefixProbeClient()
-    provider = _FakePrefixProbeProvider(client)
-    monkeypatch.setattr(
-        rig, "_prefix_probe_client", lambda settings: (provider, client))
+def test_prefix_probe_counts_a_warmup_cache_exit_too(tmp_path, monkeypatch, capsys):
+    """(f-2)**预热格**命中本地缓存出口也要非零(评审 P3-16)。
 
-    args = _prefix_probe_args(tmp_path, "--smoke", "--max-wall-minutes", "0")
+    `summarize_probe` 的分桶第一步就把 `is_warmup` 行整块摘出去(design §9.1
+    「预热成本单列」),所以它不在 `local_cache_exit_rows` 里。而预热同样走
+    `bypass_cache=True`,它命中一样是「结构上不应出现」的事实——只读那一列的
+    话,一次预热就命中的批会静静地退 0。
+    """
+    client = _FakePrefixProbeClient(cache_hit_at={0})  # 0 = 预热格
+    _install_prefix_probe_fake(monkeypatch, client)
+
+    args = _prefix_probe_args(tmp_path, "--smoke")
+    runner = rig.Runner(dry_run=False, out_dir=Path(args.out_dir))
+    assert rig.cmd_prefix_probe(args, runner) != 0
+
+    summary = json.loads(
+        (Path(args.out_dir) / "probe-summary.json").read_text("utf-8"))
+    assert summary["local_cache_exit_rows"] == 0  # 主批一格都没命中
+    assert "0 格(另有 1 个预热格)命中本地响应缓存出口" in capsys.readouterr().err
+
+
+def test_prefix_probe_expired_budget_dispatches_nothing(tmp_path, monkeypatch):
+    """(g)预算**已过期** ⇒ 零派发、非零、`stopped_by_budget=True`,三份 jsonl
+    仍然出表(空文件)。
+
+    过期状态用**假时钟**注入,不再靠 `--max-wall-minutes 0`(评审 F8 / P2-3:
+    那个值现在与 `ab` 共用同一处判据当场拒绝,见下一条用例)。假时钟每读一次
+    走 1e9 秒:第一次读算 deadline,第二次读就已经在 deadline 之后。
+    """
+    client = _FakePrefixProbeClient()
+    _install_prefix_probe_fake(monkeypatch, client)
+    _install_prefix_probe_clock(monkeypatch, step=1e9)
+
+    args = _prefix_probe_args(tmp_path, "--smoke", "--max-wall-minutes", "1")
     runner = rig.Runner(dry_run=False, out_dir=Path(args.out_dir))
     exit_code = rig.cmd_prefix_probe(args, runner)
 
@@ -4455,3 +4673,420 @@ def test_prefix_probe_expired_budget_dispatches_nothing(tmp_path, monkeypatch):
     manifest = json.loads(
         (Path(args.out_dir) / "manifest.json").read_text("utf-8"))
     assert manifest["stopped_by_budget"] is True
+    # 评审 P3-15:零派发时三份 jsonl 也要出表(空文件)。dry-run 的 `out` 行
+    # 承诺了这三个落点,按固定名读的下游拿到 FileNotFoundError 分不清「这批
+    # 没跑起来」与「路径写错了」。
+    rows_by_label = _prefix_probe_rows(Path(args.out_dir))
+    assert all(rows == [] for rows in rows_by_label.values())
+
+
+def test_prefix_probe_and_ab_share_one_wall_budget_judge(tmp_path, capsys):
+    """(h)`--max-wall-minutes` 的 ≤0 / NaN 判据 **`ab` 与 `prefix-probe` 共用**
+    (评审 F8 / P2-2 / P2-3)。
+
+    判据分成两份的失败场景是「`ab` 拒了、`prefix-probe` 照跑」:`0`/负数让整批
+    零派发、留下一份空数据集 + `stopped_by_budget=true` 的 manifest,读的人分不
+    清是参数打错还是预算真用完;`nan` 更坏——所有 `>= deadline` 比较恒假,预算
+    从此永不生效,同时 `budgets` 里落一个 `NaN`,写出的 `manifest.json` 不再是
+    合法 JSON。
+
+    汇合项也在这条里钉住:`--max-wall-minutes` 在 `build_parser()` 里**只有一
+    条**。ex4 与 ex8 各加一条同名全局选项时 `argparse` 直接抛
+    `conflicting option string`,整个 rig 与全部 rig 用例一起死。
+    """
+    # 只有一条:重复 `add_argument` 会在 `build_parser()` 里当场抛。
+    parser = rig.build_parser()
+    matching = [
+        action for action in parser._actions
+        if "--max-wall-minutes" in (action.option_strings or [])
+    ]
+    assert len(matching) == 1
+    assert "prefix-probe" in matching[0].help and "ab" in matching[0].help
+
+    for bad in ("0", "-5", "nan"):
+        args = _prefix_probe_args(tmp_path, "--smoke", "--max-wall-minutes", bad)
+        runner = rig.Runner(dry_run=False, out_dir=Path(args.out_dir))
+        assert rig.cmd_prefix_probe(args, runner) == 2, bad
+        assert "--max-wall-minutes 必须是一个正数分钟数" in capsys.readouterr().err
+        # 真跑路径一个字节都没写(preflight 在建 provider 之前)。
+        assert not Path(args.out_dir).exists(), bad
+
+    # dry-run 也拦:一份 `nan` 预算的计划预演出来看起来完全像一次正常的预演。
+    args = _prefix_probe_args(tmp_path, "--smoke", "--max-wall-minutes", "nan")
+    assert rig.cmd_prefix_probe(
+        args, rig.Runner(dry_run=True, out_dir=Path(args.out_dir))) == 2
+    capsys.readouterr()
+
+    # 同一处判据:`ab` 的 preflight 与 prefix-probe 读的是同一个函数。
+    assert rig._wall_budget_problem(None) == ""
+    assert rig._wall_budget_problem(1.5) == ""
+    assert "正数分钟数" in rig._wall_budget_problem(0.0)
+    assert "正数分钟数" in rig._wall_budget_problem(float("nan"))
+
+
+def test_prefix_probe_stops_dispatching_when_the_budget_expires_mid_batch(
+    tmp_path, monkeypatch, capsys,
+):
+    """(i)**中途**到点(评审 F7 / P3):派发到第 k 格停、`stopped_by_budget=true`、
+    退出非零,已打的格全部落盘。
+
+    删掉循环顶部那三行 deadline 判据时,此前 9 条用例全绿——此后
+    `--max-wall-minutes` 对已经开跑的批完全失效(只在开跑前生效),而
+    `stopped_by_budget` 恒 False、退出码恒 0,操作者拿到一份「跑超了预算但看不
+    出来」的数据。
+
+    假时钟每读一次走 1 秒。读的次序是:1 次算 deadline、1 次开跑前判据,然后
+    每格 3 次(循环顶部判据 / 发起时刻 / 返回时刻)。`--max-wall-minutes 0.15`
+    ⇒ deadline = 1 + 9 = 10s,第 4 格的顶部判据读到 12s ⇒ 停在 3 格。
+    """
+    client = _FakePrefixProbeClient()
+    provider = _install_prefix_probe_fake(monkeypatch, client)
+    _install_prefix_probe_clock(monkeypatch, step=1.0)
+
+    args = _prefix_probe_args(tmp_path, "--smoke", "--max-wall-minutes", "0.15")
+    runner = rig.Runner(dry_run=False, out_dir=Path(args.out_dir))
+    exit_code = rig.cmd_prefix_probe(args, runner)
+
+    assert exit_code != 0
+    assert provider.closed is True
+    plan = rig._prefix_probe_plan(args)
+    assert 0 < len(client.calls) - 1 < len(plan)  # 派发了一部分,不是全部
+    dispatched = len(client.calls) - 1
+    assert dispatched == 3
+
+    manifest = json.loads(
+        (Path(args.out_dir) / "manifest.json").read_text("utf-8"))
+    assert manifest["stopped_by_budget"] is True
+    # `planned_runs` 仍是**计划**的格数(不随截断收窄):它就是那条对账列。
+    assert manifest["matrix"]["planned_runs"] == len(plan)
+
+    rows_by_label = _prefix_probe_rows(Path(args.out_dir))
+    main_rows = rows_by_label["stable"] + rows_by_label["disturbed"]
+    assert len(main_rows) == dispatched
+    assert len(rows_by_label["warmup"]) == 1
+    assert "整批墙钟预算到点,提前停止派发" in capsys.readouterr().err
+
+
+def test_prefix_probe_folds_an_empty_finish_reason_to_unknown(
+    tmp_path, monkeypatch,
+):
+    """(j)`finish_reason == ""` ⇒ 行照落,那一列写 `None`(评审 F1 / P1-1)。
+
+    这是本任务唯一一条**真实 provider 正常返回就触发**的硬失败:`app/core/llm.py`
+    的 ok 出口传的是 `finish_reason or ""`(注释明写 “servers may omit
+    finish_reason entirely”),而空串不是短码 ⇒ `assert_probe_row_closed` 抛
+    `ValueError`。修之前一整批 96 格会在**预热格**全灭,out-dir 连目录都没建。
+    """
+    client = _FakePrefixProbeClient(finish_reason="")
+    provider = _install_prefix_probe_fake(monkeypatch, client)
+
+    args = _prefix_probe_args(tmp_path, "--smoke")
+    runner = rig.Runner(dry_run=False, out_dir=Path(args.out_dir))
+    assert rig.cmd_prefix_probe(args, runner) == 0
+    assert provider.closed is True
+
+    plan = rig._prefix_probe_plan(args)
+    assert len(client.calls) == len(plan) + 1
+    rows_by_label = _prefix_probe_rows(Path(args.out_dir))
+    all_rows = [row for rows in rows_by_label.values() for row in rows]
+    assert len(all_rows) == len(plan) + 1
+    assert all(row["finish_reason"] is None for row in all_rows)
+    assert all(row["status"] == "ok" for row in all_rows)
+
+
+def test_prefix_probe_finish_reason_folds_free_text_to_unknown():
+    """(j-2)`_prefix_probe_finish_reason` 的闭集:短码留、其余折 `None`。
+
+    厂商自定义的 `finish_reason` 带空格 / 中文 / 超 64 字符时,原样落进 JSONL
+    既会被行闭集拒绝(整批报废),也正是那份闭集要挡的自由文本——折 `None`
+    (= 「provider 没说」)是唯一两边都成立的读法。
+    """
+    assert rig._prefix_probe_finish_reason("stop") == "stop"
+    assert rig._prefix_probe_finish_reason("tool_calls") == "tool_calls"
+    assert rig._prefix_probe_finish_reason("") is None
+    assert rig._prefix_probe_finish_reason(None) is None
+    assert rig._prefix_probe_finish_reason("content filter triggered") is None
+    assert rig._prefix_probe_finish_reason("模型自己停了") is None
+    assert rig._prefix_probe_finish_reason("x" * 65) is None
+    assert rig._prefix_probe_finish_reason({"reason": "stop"}) is None
+    # 落进行里之后照样过闭集自检(这才是这条折叠的目的)。
+    from app.eval.reflect_prefix_probe import assert_probe_row_closed
+
+    assert_probe_row_closed({
+        "tier": "short", "block_index": 0, "arm": "stable", "call_index": 0,
+        "series_index": 0, "status": "ok", "call_wall_ms": 10, "attempts": 1,
+        "finish_reason": rig._prefix_probe_finish_reason(""),
+        "head_chars": 12, "tail_chars": 12, "message_bytes_total": 9,
+        "is_warmup": False, "gap_ms": None,
+    })
+
+
+def _raise_render_sample_at(monkeypatch, client, *, nth_cell: int, exc):
+    """让第 `nth_cell` 个**主批**格的 `render_sample` 抛 `exc`。
+
+    判据用 `len(client.calls)`(= 预热 + 已打完的主批格数),不是调用计数:
+    `_prefix_probe_preflight` 在首格之前也会渲染三档各一次,而那三次发生在
+    `client.calls` 还是空的时候。
+    """
+    from app.eval import reflect_prefix_probe as probe_mod
+
+    real_render = probe_mod.render_sample
+
+    def _render(tier, sample):
+        if len(client.calls) == nth_cell:
+            raise exc
+        return real_render(tier, sample)
+
+    monkeypatch.setattr(probe_mod, "render_sample", _render)
+
+
+def test_prefix_probe_salvages_rows_when_a_mid_batch_render_raises(
+    tmp_path, monkeypatch, capsys,
+):
+    """(k)第 3 格 `render_sample` 抛 ⇒ provider 已 close、**已打的格全部落盘**
+    (评审 F2 / P1-1)。
+
+    `render_sample(tier, sample)` 是 `_call_row` 的**实参**,在它的 `try` 之外
+    求值,而 ex3 第二修正轮给它新加了两条拒绝路径(样本地板不足、`tier_chars`
+    非严格递增)。裸语句版本下 `close()` 与全部落盘一个都不执行——真跑时等于
+    「打完 60 个真实模型调用,第 61 格一个 `ValueError` 把这 60 格的数据全部
+    作废」,而 out-dir 连目录都没建。
+    """
+    client = _FakePrefixProbeClient()
+    provider = _install_prefix_probe_fake(monkeypatch, client)
+    # nth_cell=3 ⇒ 预热 + 2 格已打完,这是第 3 格。
+    _raise_render_sample_at(
+        monkeypatch, client, nth_cell=3,
+        exc=ValueError("render_sample: injected floor failure"))
+
+    args = _prefix_probe_args(tmp_path, "--smoke")
+    runner = rig.Runner(dry_run=False, out_dir=Path(args.out_dir))
+    with pytest.raises(ValueError, match="injected floor failure"):
+        rig.cmd_prefix_probe(args, runner)
+
+    assert provider.closed is True
+    assert len(client.calls) == 3  # 预热 + 2 格
+    rows_by_label = _prefix_probe_rows(Path(args.out_dir))
+    main_rows = rows_by_label["stable"] + rows_by_label["disturbed"]
+    assert len(main_rows) == 2
+    assert len(rows_by_label["warmup"]) == 1
+    # 摘要与 manifest 也落了盘(不齐也比全丢好);`stopped_by_budget` 如实写 False
+    # ——这批不是被预算截断的。
+    summary = json.loads(
+        (Path(args.out_dir) / "probe-summary.json").read_text("utf-8"))
+    assert summary["row_count_total"] == 3
+    manifest = json.loads(
+        (Path(args.out_dir) / "manifest.json").read_text("utf-8"))
+    assert manifest["stopped_by_budget"] is False
+    assert manifest["matrix"]["planned_runs"] == len(rig._prefix_probe_plan(args))
+    assert "派发中断,已把此前打完的格落盘" in capsys.readouterr().err
+
+
+def test_prefix_probe_salvages_rows_on_keyboard_interrupt(
+    tmp_path, monkeypatch,
+):
+    """(k-2)`KeyboardInterrupt` 同样 salvage(评审 P1-1 (c))。
+
+    `except Exception` 不接 `BaseException`:真机 96 格 × 数十秒/格 = 15–90
+    分钟,Ctrl-C 在第 80 分钟等于全部白跑。
+    """
+    client = _FakePrefixProbeClient()
+    provider = _install_prefix_probe_fake(monkeypatch, client)
+    _raise_render_sample_at(
+        monkeypatch, client, nth_cell=5, exc=KeyboardInterrupt())
+
+    args = _prefix_probe_args(tmp_path, "--smoke")
+    runner = rig.Runner(dry_run=False, out_dir=Path(args.out_dir))
+    with pytest.raises(KeyboardInterrupt):
+        rig.cmd_prefix_probe(args, runner)
+
+    assert provider.closed is True
+    rows_by_label = _prefix_probe_rows(Path(args.out_dir))
+    main_rows = rows_by_label["stable"] + rows_by_label["disturbed"]
+    assert len(main_rows) == 4
+    assert (Path(args.out_dir) / "manifest.json").exists()
+
+
+def test_prefix_probe_preflight_rejects_a_bad_sample_before_spending_a_call(
+    tmp_path, monkeypatch, capsys,
+):
+    """(l)坏 `--sample-file` ⇒ 退 2,**一次模型调用都没打**(评审 P1-1 第 3 条)。
+
+    `load_prefix_probe_sample` 只做 `json.load` + 顶层是 dict 的检查;正文形状
+    要到 `render_sample` 才拒。preflight 之前,第一个抛出点在**预热格之后**——
+    那一格已经付过钱了。
+    """
+    bad_sample = tmp_path / "bad-sample.json"
+    bad_sample.write_text(json.dumps({
+        "tier_chars": {"short": 4000, "medium": 8000, "long": 16000},
+        "seed_paragraphs": {"static_instructions": "只有一块,缺其余四块"},
+    }), encoding="utf-8")
+
+    client = _FakePrefixProbeClient()
+    provider = _install_prefix_probe_fake(monkeypatch, client)
+
+    args = _prefix_probe_args(
+        tmp_path, "--smoke", "--sample-file", str(bad_sample))
+    runner = rig.Runner(dry_run=False, out_dir=Path(args.out_dir))
+    assert rig.cmd_prefix_probe(args, runner) == 2
+
+    assert client.calls == []  # 零调用
+    assert provider.closed is False  # provider 还没构造过
+    assert not Path(args.out_dir).exists()
+    err = capsys.readouterr().err
+    assert "preflight 不通过" in err
+    assert "一次模型调用都没打" in err
+
+
+def test_prefix_probe_exits_non_zero_when_every_row_failed(
+    tmp_path, monkeypatch, capsys,
+):
+    """(m)全批失败 ⇒ 非零(评审 P2-4)。
+
+    此前非零只有预算与缓存出口两个来源,`failed_row_count` 不进退出码:48 格
+    全 401 时 `EXIT CODE: 0`,而 `prefix-probe && analyze ...` 的操作脚本会把
+    一份全灭的数据集当成功往下传。仓库对退出码是当一等事实的。
+    """
+    client = _FakePrefixProbeClient(raise_everything=True)
+    _install_prefix_probe_fake(monkeypatch, client)
+
+    args = _prefix_probe_args(tmp_path, "--smoke")
+    runner = rig.Runner(dry_run=False, out_dir=Path(args.out_dir))
+    assert rig.cmd_prefix_probe(args, runner) != 0
+
+    plan = rig._prefix_probe_plan(args)
+    assert len(client.calls) == len(plan) + 1  # 批没有中止,失败格照记
+    summary = json.loads(
+        (Path(args.out_dir) / "probe-summary.json").read_text("utf-8"))
+    assert summary["failed_row_count"] == len(plan)
+    assert summary["first_observation_row_count"] == 0
+    assert summary["repeat_observation_row_count"] == 0
+    err = capsys.readouterr().err
+    assert "一格成功观测都没有" in err
+    assert "不要往 analyze 传" in err
+
+
+def test_prefix_probe_record_row_runs_the_closed_set_guard(
+    tmp_path, monkeypatch,
+):
+    """(n)`_record_row` 真的调了 `assert_probe_row_closed`(评审 P3-11)。
+
+    用例 (c) 直接调模块函数,证明的是上游守卫成立,不是 rig 真的调了它——把
+    那一句删掉此前不打红。这里换一个哨兵实现:守卫被调 ⇒ 哨兵抛 ⇒ 传出来。
+    """
+    from app.eval import reflect_prefix_probe as probe_mod
+
+    class _GuardCalled(Exception):
+        pass
+
+    seen: list[dict] = []
+
+    def _sentinel(row):
+        seen.append(dict(row))
+        raise _GuardCalled()
+
+    client = _FakePrefixProbeClient()
+    _install_prefix_probe_fake(monkeypatch, client)
+    monkeypatch.setattr(probe_mod, "assert_probe_row_closed", _sentinel)
+
+    args = _prefix_probe_args(tmp_path, "--smoke")
+    runner = rig.Runner(dry_run=False, out_dir=Path(args.out_dir))
+    with pytest.raises(_GuardCalled):
+        rig.cmd_prefix_probe(args, runner)
+
+    # 第一行就是预热行——守卫在**每一行**落进 `rows_by_label` 之前跑。
+    assert len(seen) == 1
+    assert seen[0]["is_warmup"] is True
+
+
+def test_prefix_probe_plan_matches_probe_plan_verbatim_at_variant_zero(tmp_path):
+    """(o-1)`--marker-variant 0` ⇒ `_prefix_probe_plan` 与 `probe_plan` **逐字
+    相等**,且顺序一致(评审 P2-9 / P3-19)。
+
+    用例 (d) 的 `call["markers"] == (entry["head"], entry["tail"])` 两侧都来自
+    同一个 `_prefix_probe_plan(args)`,对 variant 与顺序都是重言式。
+    """
+    from app.eval.reflect_prefix_probe import DEFAULT_BLOCKS, probe_plan
+
+    args = _prefix_probe_args(tmp_path)
+    plan = rig._prefix_probe_plan(args)
+    expected = probe_plan(seed=7, blocks=DEFAULT_BLOCKS)
+    assert plan == expected  # 顺序 + 每一行的每一个键
+    # 顺序单独钉一次(`==` 已经含它,写清是为了让打乱顺序的变异有话可说)。
+    assert [row["series_index"] for row in plan] == [
+        row["series_index"] for row in expected
+    ]
+    assert [(row["tier"], row["block_index"], row["arm"], row["call_index"])
+            for row in plan] == [
+        (row["tier"], row["block_index"], row["arm"], row["call_index"])
+        for row in expected
+    ]
+
+
+def test_prefix_probe_marker_variant_swaps_both_ends_across_every_tier(tmp_path):
+    """(o-2)`--marker-variant 1` ⇒ 头**和**尾都换、与 variant 0 全不相交、三档
+    不共用同一条标记流,计划形状不变(评审 P2-9 / F11)。
+
+    失败场景:`--marker-variant 1` 跑完 96 格,disturbed 臂的 tail 其实没换
+    (或三档共用同一条标记流)⇒ 两臂差被系统性压平,数据看起来完全正常。
+    """
+    base = rig._prefix_probe_plan(_prefix_probe_args(tmp_path))
+    variant = rig._prefix_probe_plan(
+        _prefix_probe_args(tmp_path, "--marker-variant", "1"))
+
+    # 形状不变:除 head/tail 之外逐字相同(哪端固定、序列身份、顺序)。
+    shape_keys = ("tier", "block_index", "arm", "call_index", "series_index")
+    assert [tuple(row[k] for k in shape_keys) for row in variant] == [
+        tuple(row[k] for k in shape_keys) for row in base
+    ]
+
+    # 头尾**都**换:两端各自与 variant 0 全不相交。
+    assert {row["head"] for row in variant}.isdisjoint(
+        {row["head"] for row in base})
+    assert {row["tail"] for row in variant}.isdisjoint(
+        {row["tail"] for row in base})
+    for row_base, row_variant in zip(base, variant):
+        assert row_variant["head"] != row_base["head"]
+        assert row_variant["tail"] != row_base["tail"]
+
+    # 三档不共用同一条标记流:任意两档的标记集合互不相交。
+    markers_by_tier: dict[str, set[tuple[str, str]]] = {}
+    for row in variant:
+        markers_by_tier.setdefault(row["tier"], set()).add(
+            (row["head"], row["tail"]))
+    tiers = sorted(markers_by_tier)
+    assert len(tiers) == 3
+    for i, left in enumerate(tiers):
+        for right in tiers[i + 1:]:
+            assert markers_by_tier[left].isdisjoint(markers_by_tier[right])
+
+    # `stable` 臂的 head 在一个序列里恒定(variant 换的是值,不是形状)。
+    stable_heads: dict[int, set[str]] = {}
+    for row in variant:
+        if row["arm"] == "stable":
+            stable_heads.setdefault(row["series_index"], set()).add(row["head"])
+    assert all(len(heads) == 1 for heads in stable_heads.values())
+
+
+def test_prefix_probe_process_env_only_carries_the_two_log_keys(tmp_path):
+    """(p)`_prefix_probe_process_env` 的键集与日志隔离(评审 F5 / P2-6)。
+
+    把这个 env 改成 `{}` 时此前 9 条用例全绿——此后 E1 往整台机器共用的
+    `.local/logs/llm-*.jsonl` / `events-*.jsonl` 写,`calls-e1.jsonl` 混进同机
+    别的进程的调用行,正是这份文件里已经修过一次的 P1-2 缺陷。
+    """
+    out = tmp_path / "e1"
+    args = _prefix_probe_args(tmp_path)
+    env = rig._prefix_probe_process_env(args)
+    # **不含** `DATABASE_URL`:E1 结构上不连库(`normalize_database_url("")` 抛)。
+    assert set(env) == PREFIX_PROBE_PROCESS_ENV_KEYS
+    assert env["LLM_LOG_PATH"] == str((out / "llm" / "llm.jsonl").resolve())
+    assert env["EVENT_LOG_DIR"] == str((out / "events").resolve())
+    for value in env.values():
+        assert ".local/logs" not in value
+
+    # `--env-file` 那一项另算(与 `_rig_process_env` 同一条惯例)。
+    with_env_file = rig._prefix_probe_process_env(
+        _prefix_probe_args(tmp_path, "--env-file", "/tmp/x.env"))
+    assert set(with_env_file) == (
+        PREFIX_PROBE_PROCESS_ENV_KEYS | {"SILICON_NOTEBOOK_ENV_FILE"})
