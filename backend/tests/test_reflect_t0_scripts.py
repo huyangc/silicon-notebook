@@ -6,8 +6,10 @@ rig 本体要网络与真实模型,**不进标准门**;进门的只有它的 `--
 """
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import json
+import os
 import re
 import sqlite3
 import subprocess
@@ -5211,3 +5213,356 @@ def test_the_summary_md_banned_pattern_really_catches_a_planted_line(
     scanned = markdown.replace(_SUMMARY_MD_DISCLAIMER, "")
     assert [line for line in scanned.splitlines()
             if _SUMMARY_MD_BANNED_PATTERN.search(line)]
+
+# --- `state-probe`(E2:固定状态的真实 reflect 对照,T-EX7) -------------------
+#
+# 真正的驱动器/代理/记录面全在 `app.eval.reflect_state_probe`(用例见
+# `test_reflect_state_probe.py`);这里只测 rig 的薄适配:CLI 参数/preflight、
+# dry-run 的三个规模数字、真跑编排(枚举/写行/manifest)与响亮失败路径。
+
+
+@contextlib.contextmanager
+def _preserved_environ():
+    """`_run_state_probe` 会往 `os.environ` 里写测试库连接与几把注入闸
+    (`_rig_process_env`),真跑用例结束后原样还原——不用 `monkeypatch.setenv`
+    是因为那几行写在 rig 代码内部的 `os.environ.update(...)` 上,不经过
+    monkeypatch 的追踪,得自己截一份快照。
+    """
+    snapshot = dict(os.environ)
+    try:
+        yield
+    finally:
+        os.environ.clear()
+        os.environ.update(snapshot)
+
+
+def _probe_case(case_key: str, corpus_cell: str) -> Any:
+    """`state-probe` 编排用例的最小 case 替身。真实 `StateProbeCase` 字段很多,
+    但这些用例里 `run_state_probe_point` 全被 monkeypatch 掉了——rig 自己的
+    编排代码(dry-run 枚举、`.local/raw/` 命名、语料格 → notebook 反查)只读
+    `case_key`/`corpus_cell`/`state_points` 这三个字段。
+    """
+    return types.SimpleNamespace(
+        case_key=case_key, corpus_cell=corpus_cell, state_points=(1, 3, 5),
+    )
+
+
+def _patch_state_probe_infra(
+    monkeypatch, *, cases, run_point,
+    readonly_before: dict | None = None, readonly_after: dict | None = None,
+):
+    """真跑要连库/连模型的那几段(仓储构造、语料签名、模型契约、只读证据)统一
+    假掉,只留 rig 自己的编排代码(枚举 → 调用 → 写行 → 摘要 → manifest)受测。
+
+    返回一个 `{"n": 调用次数}` 的字典,供用例断言 `_readonly_counts` 跑前跑后
+    各被调了几次(计划要点:「跑前 `_readonly_counts` → … → 跑后
+    `_readonly_counts` 对比相等否则非零退出」)。
+    """
+    readonly_before = readonly_before if readonly_before is not None else {}
+    readonly_after = (
+        readonly_before if readonly_after is None else readonly_after
+    )
+    tracker = {"n": 0}
+
+    def _fake_readonly(database_url):
+        tracker["n"] += 1
+        return readonly_before if tracker["n"] == 1 else readonly_after
+
+    fake_repo = types.SimpleNamespace(
+        maintenance=types.SimpleNamespace(
+            resolve_owner_profile=lambda user: types.SimpleNamespace(id="u1")),
+        chat=lambda workload: object(),
+    )
+    monkeypatch.setattr(
+        rig, "load_state_probe_case_set", lambda: (list(cases), "digest"))
+    monkeypatch.setattr(
+        rig, "_settings_by_arm",
+        lambda pairs: {
+            pair: types.SimpleNamespace(reasoning_timeout_seconds=90)
+            for pair in pairs
+        },
+    )
+    monkeypatch.setattr(rig, "_search_repository", lambda settings: fake_repo)
+    monkeypatch.setattr(
+        rig, "_ab_notebook_ids",
+        lambda database_url, cells: {cell: f"nb-{cell}" for cell in cells},
+    )
+    monkeypatch.setattr(
+        rig, "_ab_corpus_facts",
+        lambda args, runner, repo, cells, notebooks, kg_in_scope_for: {
+            cell: {"corpus_signature": f"sig-{cell}"} for cell in cells
+        },
+    )
+    monkeypatch.setattr(
+        rig, "_ab_model_contract",
+        lambda settings: ("modelshort", "model readable"),
+    )
+    monkeypatch.setattr(rig, "_readonly_counts", _fake_readonly)
+    monkeypatch.setattr(rig, "run_state_probe_point", run_point)
+    return tracker
+
+
+def _fake_probe_point(repo, settings_for_arm, case, state_point_index,
+                       real_client, **kwargs):
+    """一格假成功。`row` 过 `PROBE_ROW_KEYS` 闭集,`driver` 只留
+    `_write_probe_raw` 与 `scripted_actions()` 要用的两个面。
+    """
+    from app.eval.reflect_state_probe import ForwardedTurn, StateProbePoint
+
+    row = {key: None for key in rig.PROBE_ROW_KEYS}
+    row.update({
+        "case_key": case.case_key, "state_point": state_point_index,
+        "repeat": kwargs["repeat"], "arm": kwargs["arm"],
+        "optimization": kwargs["arm"], "status": "ok",
+        "call_wall_ms": 10, "decision_action": "answer",
+        "decision_sufficient": True, "assessment_rows": 1,
+    })
+    forwarded = ForwardedTurn(
+        turn=state_point_index + 2,
+        messages=({"role": "system", "content": "s"},
+                  {"role": "user", "content": "u"}),
+        schema_hint="hint", raw=json.dumps({"next_action": "answer"}),
+    )
+    driver = types.SimpleNamespace(
+        forwarded=forwarded, scripted_actions=lambda: ("search_elements",))
+    return StateProbePoint(
+        row=row, driver=driver, result=None, prepared={}, aspects_total=1)
+
+
+def test_dry_run_state_probe_locks_the_three_scale_numbers(capsys):
+    """T-EX7 (a):dry-run 的三个规模数字逐字钉死(design §9.2 的公式:12 例 ×
+    3 状态点 × 臂数 × 重复轮数)。**E2 自己的 `--repeats` 默认是 2**,不是 `ab`
+    的 3——12 × 3 × 3 × 2 = 216(默认三臂),加 `prefix_delta_lean` 是
+    12 × 3 × 4 × 2 = 288,`--limit 6` 缩到 6 × 3 × 3 × 2 = 108。
+    """
+    assert rig.main([
+        "--dry-run", "--database-url", "sqlite:///x_test.db", "state-probe",
+    ]) == 0
+    printed = capsys.readouterr().out
+    assert "216(= 12 例 × 3 状态点 × 3 臂 × 2 重复" in printed
+    assert "≤ 432" in printed  # 请求上界 = 216 × REASONING_ATTEMPT_BUDGET(2)
+    assert "不是它自洽的真实轨迹" in printed
+    assert "embedding calls" in printed and "上界" in printed
+
+    assert rig.main([
+        "--dry-run", "--database-url", "sqlite:///x_test.db",
+        "--arms", "off,prefix_snapshot,prefix_delta,prefix_delta_lean",
+        "state-probe",
+    ]) == 0
+    printed = capsys.readouterr().out
+    assert "288(= 12 例 × 3 状态点 × 4 臂 × 2 重复" in printed
+
+    assert rig.main([
+        "--dry-run", "--database-url", "sqlite:///x_test.db", "--limit", "6",
+        "state-probe",
+    ]) == 0
+    printed = capsys.readouterr().out
+    assert "108(= 6 例 × 3 状态点 × 3 臂 × 2 重复" in printed
+
+
+def test_state_probe_refuses_a_database_url_without_the_test_suffix(capsys):
+    """T-EX7 (b) 前半:非 `_test` 库 ⇒ 退 2,`--dry-run` 下也拦(Q7)。"""
+    assert rig.main([
+        "--dry-run", "--database-url", "sqlite:///x_main.db", "state-probe",
+    ]) == 2
+    assert "必须指向名字以" in capsys.readouterr().err
+
+
+def test_state_probe_accepts_a_sqlite_path_ending_in_test_before_the_extension(
+    capsys,
+):
+    """`_state_probe_looks_like_test_db` 的存在理由:sqlite 路径常带扩展名
+    (`foo_test.db`),`ab` 的判据是给不带扩展名的 PostgreSQL 库名写的——照抄会把
+    这个合法的一次性测试库路径也拒掉。
+    """
+    assert rig.main([
+        "--dry-run", "--database-url", "sqlite:///x_test.db", "state-probe",
+    ]) == 0
+
+
+def test_state_probe_refuses_a_missing_database_url(capsys):
+    """T-EX7 (b) 后半:缺 `--database-url` ⇒ 退 2。"""
+    assert rig.main(["--dry-run", "state-probe"]) == 2
+    assert "必须显式给 --database-url" in capsys.readouterr().err
+
+
+def test_state_probe_refuses_concurrency_other_than_one(capsys):
+    """T-EX7 (e):`--concurrency` 显式给且 ≠ 1 ⇒ 响亮拒绝(退 2),不是降级。
+    `0` 会被共享的 `max(1, ...)` clamp 成 1——这里用它验证拒绝判据读的是
+    **clamp 之前**的原始值(`args.concurrency_raw`),不是 clamp 之后看起来
+    和默认值一样的 `1`。
+    """
+    assert rig.main([
+        "--dry-run", "--database-url", "sqlite:///x_test.db",
+        "--concurrency", "2", "state-probe",
+    ]) == 2
+    assert "恒为 1" in capsys.readouterr().err
+
+    assert rig.main([
+        "--dry-run", "--database-url", "sqlite:///x_test.db",
+        "--concurrency", "0", "state-probe",
+    ]) == 2
+    assert "恒为 1" in capsys.readouterr().err
+
+    # 不给 --concurrency 时(共享默认值 1)照常放行。
+    assert rig.main([
+        "--dry-run", "--database-url", "sqlite:///x_test.db", "state-probe",
+    ]) == 0
+
+
+def test_state_probe_arm_pairs_still_trip_the_shared_settings_guard(
+    monkeypatch,
+):
+    """T-EX7 (c):state-probe 把一维臂(`off`/`prefix_snapshot`/…)转成
+    `[("v2", optimization), ...]` 喂给**复用**的 `_settings_by_arm`——这里验证
+    那份转换喂出去的还是一份 `_settings_by_arm` 认得出「被盖住」的形状,而不是
+    绕开了它自己的三条回读断言之一。
+
+    `REASONING_REFLECT_OPTIMIZATION` 没起作用(`Settings()` 不管环境变量恒报
+    `off`)模拟的是「设置被盖住」(比如被 `--env-file` 或者别的进程环境覆盖):
+    必须当场报错,不能安静跑出一批臂对不上号的数据。
+    """
+    import app.core.config as config_module
+
+    class _StuckOffSettings:
+        def __init__(self, *_a, **_kw):
+            self.reasoning_reflect_v2_enabled = True
+            self.reasoning_reflect_optimization = "off"
+            self.reasoning_reflect_measure_context = True
+
+    monkeypatch.setattr(config_module, "Settings", _StuckOffSettings)
+    pair_arms = [
+        ("v2", optimization)
+        for optimization in rig.state_probe_arms(types.SimpleNamespace(arms=None))
+    ]
+    # `_settings_by_arm` 逐臂写 `os.environ["REASONING_REFLECT_OPTIMIZATION"]`
+    # 且**故意不清理**(它的既有纪律,`ab` 也是这样用它的)——这里抛出的那一格
+    # 会把这个环境变量留在 `prefix_snapshot` 上,污染同一 worker 进程里后跑的
+    # `test_reflect_ab.py` 用例(实测:不还原时 `-n 4` 并发跑会让
+    # `test_run_ab_once_refuses_a_settings_that_disagrees_with_the_arm` 假红)。
+    with _preserved_environ():
+        with pytest.raises(RuntimeError, match="REASONING_REFLECT_OPTIMIZATION"):
+            rig._settings_by_arm(pair_arms)
+
+
+def test_state_probe_runs_a_scaled_batch_and_writes_the_expected_artifacts(
+    tmp_path, monkeypatch,
+):
+    """T-EX7 (d):进程内 fake 跑通 2 例 × 3 状态点(design §9.2 的结构常量,不能
+    通过参数缩小)× 3 臂 × 1 重复,断言产物形状:三份 `state-probe-<arm>.jsonl`
+    各 6 行、`.local/raw/` 下 18 个文件、summary 的键集、manifest 过
+    `assert_manifest`、`manifests.jsonl` 恰好一行、`_readonly_counts` 跑前跑后
+    各被调一次。
+    """
+    from app.eval.reflect_manifest import assert_manifest
+
+    tracker = _patch_state_probe_infra(
+        monkeypatch,
+        cases=[_probe_case("c1", "A_nokg"), _probe_case("c2", "B_kg")],
+        run_point=_fake_probe_point,
+    )
+    out_dir = tmp_path / "out"
+    with _preserved_environ():
+        code = rig.main([
+            "--database-url", "sqlite:///" + str(tmp_path / "x_test"),
+            "--out-dir", str(out_dir), "--repeats", "1", "state-probe",
+        ])
+    assert code == 0
+    assert tracker["n"] == 2
+
+    rows_per_arm = 2 * rig.STATE_POINT_COUNT  # 2 例 × 3 状态点 × 1 重复
+    for arm in rig.STATE_PROBE_DEFAULT_ARMS:
+        lines = (out_dir / f"state-probe-{arm}.jsonl").read_text(
+            "utf-8").splitlines()
+        assert len(lines) == rows_per_arm
+        for line in lines:
+            row = json.loads(line)
+            rig.assert_probe_row_closed(row)
+
+    raw_files = list((out_dir / "raw").glob("*.json"))
+    assert len(raw_files) == rows_per_arm * len(rig.STATE_PROBE_DEFAULT_ARMS)
+
+    summary = json.loads(
+        (out_dir / "state-probe-summary.json").read_text("utf-8"))
+    assert summary["rows_total"] == rows_per_arm * len(
+        rig.STATE_PROBE_DEFAULT_ARMS)
+    assert "by_state_point" in summary
+    assert "local_cache_exit_rows" in summary
+    assert (out_dir / "state-probe-summary.md").read_text("utf-8").startswith(
+        "# state-probe 摘要")
+
+    manifest = json.loads((out_dir / "manifest.json").read_text("utf-8"))
+    assert_manifest(manifest)
+    assert manifest["channel"] == "e2"
+    assert manifest["case_set_digest"] == "digest"
+    assert manifest["matrix"]["planned_runs"] == (
+        rows_per_arm * len(rig.STATE_PROBE_DEFAULT_ARMS)
+    )
+
+    manifests_lines = (out_dir / "manifests.jsonl").read_text(
+        "utf-8").splitlines()
+    assert len(manifests_lines) == 1
+
+
+def test_state_probe_stops_the_whole_batch_on_a_state_probe_error(
+    tmp_path, monkeypatch,
+):
+    """T-EX7 (f):`StateProbeError`(继承 `BaseException`)中途抛出 ⇒ 停批、
+    非零退出、已经写下的行原样保留在 `state-probe-<arm>.jsonl` 里(每行写完
+    立即 flush,不因为批次中止就卡在缓冲区)。manifest 不写——一份被
+    `StateProbeError` 中断的批不是 §13 意义上「冻结完成的数据集」。
+    """
+    calls: list[Any] = []
+
+    def _fake(repo, settings_for_arm, case, state_point_index, real_client,
+              **kwargs):
+        calls.append(1)
+        if len(calls) == 2:
+            raise rig.StateProbeError("boom: 状态点没对上")
+        return _fake_probe_point(
+            repo, settings_for_arm, case, state_point_index, real_client,
+            **kwargs)
+
+    _patch_state_probe_infra(
+        monkeypatch,
+        cases=[_probe_case("c1", "A_nokg"), _probe_case("c2", "A_nokg")],
+        run_point=_fake,
+    )
+    out_dir = tmp_path / "out"
+    with _preserved_environ():
+        code = rig.main([
+            "--database-url", "sqlite:///" + str(tmp_path / "x_test"),
+            "--out-dir", str(out_dir), "--repeats", "1", "--arms", "off",
+            "state-probe",
+        ])
+    assert code == 1
+    lines = (out_dir / "state-probe-off.jsonl").read_text(
+        "utf-8").splitlines()
+    assert len(lines) == 1  # 第一格成功写下并 flush,第二格抛错停批
+    assert not (out_dir / "manifest.json").exists()
+
+
+def test_state_probe_reports_a_nonzero_result_when_the_test_db_changed(
+    tmp_path, monkeypatch,
+):
+    """T-EX7 (g):跑后只读证据与跑前不等 ⇒ 非零(Q7)。E2 结构上不该写测试库,
+    这条断言是唯一能看见「结构事实被谁破坏了」的地方——未验证不等于通过。
+    """
+    tracker = _patch_state_probe_infra(
+        monkeypatch,
+        cases=[_probe_case("c1", "A_nokg")],
+        run_point=_fake_probe_point,
+        readonly_before={"ask_jobs": 0}, readonly_after={"ask_jobs": 1},
+    )
+    out_dir = tmp_path / "out"
+    with _preserved_environ():
+        with pytest.raises(RuntimeError, match="变了"):
+            rig.main([
+                "--database-url", "sqlite:///" + str(tmp_path / "x_test"),
+                "--out-dir", str(out_dir), "--repeats", "1",
+                "--arms", "off", "state-probe",
+            ])
+    assert tracker["n"] == 2
+    # 只读断言在 manifest 写盘**之前**的 `finally` 里抛出,manifest 因此不存在
+    # ——一份「主库/测试库被写过」的批不该看起来像一份干净收尾的数据集。
+    assert not (out_dir / "manifest.json").exists()
