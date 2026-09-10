@@ -16271,6 +16271,34 @@ def test_delta_fallback_keeps_every_block_it_already_sent(rrepo):
         assert charged <= 1300, (turn, charged)
 
 
+def test_delta_fallback_keeps_the_history_pool_inside_its_budget(rrepo):
+    """回退之后**历史池**同样按「`state_chars` − 保留 D 的历史半」给近期观察窗定额。
+
+    证据池那一半由上一条断(K 的额度)。历史池是同一件事的另一半:保留下来的那几块 D
+    里的观察行已经在消息里了,而 P 那一支每轮按整份 `state_chars` 重渲染一遍完整的近
+    期观察窗——不先扣掉那一半的话,一条消息里的历史材料同样可以涨到接近档位的两倍,
+    而且回退不可逆 ⇒ 保留块永不清,这不是一轮的尖峰。
+
+    `state_chars=400` 是标定过的:干净实现在回退轮把近期窗压到 192 字(加上保留 D 里
+    那 126 字观察行仍在 400 之内),不扣的那一版会按整份 400 渲染出 366 字、合计 492。
+
+    变异:P 那一支的 `state_chars - carried.history_chars` 改回 `state_chars` ⇒ 这条红。
+    """
+    llm, result = _keep_blocks_run(
+        rrepo, reasoning_reflect_state_chars=400, **{_MEASURE_FLAG: True})
+    fallbacks = [detail["context_fallback"]
+                 for detail in _reflect_details(result)]
+    assert True in fallbacks, fallbacks
+    for turn in range(fallbacks.index(True), len(llm.user_prompts)):
+        carried = sum(
+            len(line) + 1
+            for block in llm.delta_blocks(turn)
+            for line in block.splitlines() if line.startswith("- #"))
+        assert carried, (turn, llm.delta_blocks(turn))   # 前提:保留 D 真的带着观察行
+        assert len(llm.observation_block(turn)) + carried <= 400, (
+            turn, len(llm.observation_block(turn)), carried)
+
+
 def test_delta_fallback_stops_collecting_aspect_notes(rrepo):
     """回退之后 `pending_aspect_notes` 清空,而且此后一条都不再攒。
 
