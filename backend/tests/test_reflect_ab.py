@@ -2668,6 +2668,30 @@ def test_the_per_call_adapter_only_reads_the_increment_after_the_offsets(tmp_pat
     assert [row["support_id"] for row in rows] == ["mdl-new"]
 
 
+def test_the_per_call_adapter_survives_a_value_error_from_the_join(
+    tmp_path, monkeypatch,
+):
+    """归因抛 `ValueError` ⇒ 空列表,不是让整批在第 N 个单元中止。
+
+    这是**第二层**:第一层在 `reflect_context_bench._short_code`,它把不合形状
+    的 provider 串收成 unknown,那一行别的列照样是真的。这一层保住的只是「整批
+    不会白烧」——串行路这张表在 `_run_ab_arm` 的 `return` 表达式里求值,并发路
+    它在 `_ab_loop` 的 `finally` 里(抛出去还会顶掉在途异常并跳过失败计数)。
+    """
+    log_dir, event_dir = _call_dirs(tmp_path)
+    _write_jsonl(log_dir / "u1" / "llm-2026-09-10.jsonl",
+                 [{"kind": "chat", "support_id": "mdl-a"}])
+    import app.eval.reflect_context_bench as bench
+
+    def _boom(*a, **kw):
+        raise ValueError("projection value at 'finish_reason' ...")
+
+    monkeypatch.setattr(bench, "join_calls", _boom)
+    assert rig._rig_call_rows(
+        log_dir, event_dir, llm_offsets={}, event_offsets={}, tags=None,
+    ) == []
+
+
 def test_the_per_call_adapter_survives_a_directory_that_does_not_exist(tmp_path):
     """第一个 run 之前两个目录都还不存在:空列表,不是异常。
 
