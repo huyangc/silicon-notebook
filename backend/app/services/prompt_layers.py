@@ -55,10 +55,12 @@ self-optimization machinery that must not vary per notebook:
 ``reflect_v2_system_prompt`` / ``reflect_v2_user_prompt`` /
 ``reflect_v2_schema_hint`` (an action space, a parameter contract and a
 stopping rule — control flow, not per-notebook wording) together with the
-``prefix_snapshot`` layout's spellings of the same two halves
+two prefix layouts' spellings of the same two halves
 (``reflect_v2_static_prompt`` / ``reflect_v2_turn_state`` /
-``reflect_v2_prefix_user_prompt`` — a different BLOCK ORDER for the identical
-control-flow text, chosen by a deployment策略位, never per notebook),
+``reflect_v2_prefix_user_prompt`` — shared verbatim by ``prefix_snapshot``
+and ``prefix_delta``: a different BLOCK ORDER for the identical control-flow
+text, plus, on ``prefix_delta``, four more sentences saying how to read an
+append-only block; both chosen by a deployment策略位, never per notebook),
 ``report_synthesis_prompt``,
 ``report_sufficiency_prompt``, the evidence-verification path
 (``evidence_refine_prompt``), ``followup_rewrite_prompt``, and the whole
@@ -311,7 +313,8 @@ L2_BLOCKS: Tuple[L2Block, ...] = (
         "指令与数据分离的整个意义就是它不能和固定指令混在一条消息里。v2 下这个"
         "形参承载的是三个**各自带标题**的子块：服务器状态、证据卡、动作观察账，"
         "由 app.services.reasoning_context.ReflectContext 装配；legacy 下仍是"
-        "一整段候选摘要。prefix_snapshot 布局下同一批块换成 C/K/D/T 的顺序，"
+        "一整段候选摘要。两条前缀布局（prefix_snapshot / prefix_delta）下"
+        "同一批块换成 C/K/D/T 的顺序，"
         "由 reflect_v2_prefix_user_prompt 的 material 形参承载——同一个块、"
         "两个布局各自一个渲染函数，所以它登记成 param_aliases 而不是另一个"
         "L2Block；那一份的形参不叫 candidates_summary，因为它接的已经是装配好的"
