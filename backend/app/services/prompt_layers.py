@@ -54,7 +54,12 @@ self-optimization machinery that must not vary per notebook:
 ``reflect_prompt`` (and ``reflect_schema_hint``), their v2 counterparts
 ``reflect_v2_system_prompt`` / ``reflect_v2_user_prompt`` /
 ``reflect_v2_schema_hint`` (an action space, a parameter contract and a
-stopping rule — control flow, not per-notebook wording), ``report_synthesis_prompt``,
+stopping rule — control flow, not per-notebook wording) together with the
+``prefix_snapshot`` layout's spellings of the same two halves
+(``reflect_v2_static_prompt`` / ``reflect_v2_turn_state`` /
+``reflect_v2_prefix_user_prompt`` — a different BLOCK ORDER for the identical
+control-flow text, chosen by a deployment策略位, never per notebook),
+``report_synthesis_prompt``,
 ``report_sufficiency_prompt``, the evidence-verification path
 (``evidence_refine_prompt``), ``followup_rewrite_prompt``, and the whole
 Agentic Memory group (``agent_profile_base_prompt``,
@@ -286,7 +291,9 @@ L2_BLOCKS: Tuple[L2Block, ...] = (
         "指令与数据分离的整个意义就是它不能和固定指令混在一条消息里。v2 下这个"
         "形参承载的是三个**各自带标题**的子块：服务器状态、证据卡、动作观察账，"
         "由 app.services.reasoning_context.ReflectContext 装配；legacy 下仍是"
-        "一整段候选摘要。）",
+        "一整段候选摘要。prefix_snapshot 布局下同一批块换成 C/K/D/T 的顺序，"
+        "并由 reflect_v2_prefix_user_prompt 承载——那一份不叫 candidates_summary，"
+        "因为它接的已经是装配好的分块材料而不是一段摘要。）",
         "app.services.reasoning_retrieval（组装）；v2 分块在 "
         "app.services.reasoning_context / reasoning_observation",
     ),
