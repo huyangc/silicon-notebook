@@ -66,6 +66,13 @@
 - **验收 (c) 的形态要构造。** 真实 run 里 K(新卡)与 D(新观察行)每轮都在长,「只有末尾 T 变」不会自然出现;所以那一条取一轮真发出去的两条消息、只改 user 正文末尾,再用生产的 `serialize_provider_messages` / `_common_prefix_bytes` 量一次。真 run 上另有两条:P 的每一轮都越过整个 system 帧,`off` 至少有一轮越不过它(动作面一变就断在里面)——后者是「测量真的在量东西」的反向证据。
 - `T-PS8` 那个「静态目录渲染缓存留给 T-PS3」的注释保留原样:`static_prompt` **没有**挪到这个缓存对象上。挪了它就得在测量关、只开布局时也构造缓存,而「测量关不构造缓存」是本任务的硬约束;每轮重渲染一次是纯字符串拼接,S 的稳定性本来就不依赖缓存。
 
+**评审修正轮(2026-09-10,规格 + 质量两份评审)。**
+
+- **P1:观测故障曾能改变业务决定(两份评审同一条)。** `_measure_reflect_messages` 排在 `client.chat_json` 之前、而整段住在 `_reflect_v2_attempt` 的 fail-open `try` 里,于是一次序列化故障被洗成一次**假的模型兜底**:那一轮的请求根本没发出去,轨迹上却多出 `__reflect_invalid__` + `fallback_reason=UnicodeEncodeError`,`fail_closed` 调用方(knowhow 补全)整次死掉。入口是模型可控的:`json.loads` 接受 `"\ud800"`,孤立代理经动作参数进观察账,下一轮就在 user 正文里,而严格 UTF-8 对它抛。两层都修:(a) 新增 `_measure_reflect_messages_safely`,把测量关进它自己的 `try/except`(纪律同 `_TraceRecorder.__call__` 对 observer 投影那段),失败只表现为**键缺席**(读作 unknown,同「客户端不报就缺键、绝不写 0」),日志只记异常**类名**——`exc_info` 会把正文带进 traceback;失败时连 `previous` 一起丢掉,免得下一轮拿一个**隔了一轮**的基准量出一个「看着正常、却回答了另一个问题」的前缀。(b) `serialize_provider_messages` 改 `errors="surrogatepass"`,让这把尺子对任意 `str` **全定义**;它只被测量消费(llm.jsonl 与真实发送都不走它),所以对既有行为零影响。
+- **质量 P2-1:`⊆` 那道守卫从 `assert` 改 `raise`。** `python -O` 会把断言整条删掉,而这一道是「键名合法但走错写点」唯一的判据——与同文件 `_registered_measure_key` 自己给出的「在导入期 raise 而不是 assert」的理由自相矛盾。用例侧同步:原来的 `_measure_keys(detail) <= 清单` 是 `X & R ⊆ R`(恒真,越界键被交集掩掉),改成拿**未掩码**的整份 detail 键集去比「冻结的既有键 ∪ 登记清单」,并另断一条「测量关时的既有键集恰好是那份冻结值」防基线漂移。
+- **质量 P3-1/P3-2 的覆盖缺口。** 补 `attempts=True` 替身(bool 排除)、「有 reflect 步但那一轮没量到 ⇒ `take()` 保住基准」两条;`ReflectMeasurement.previous/current` 加 `repr=False` 并补一条「repr 里没有请求正文」的用例——那句「文本只在内存里过一遍」此前是偶然成立(没人打印它),现在是结构成立。
+- **两处文档口径。** ① 内存上界改成「**一轮消息的量级,峰值两轮**」:晋升前 `previous` 与 `current` 并存,而这中间横跨整次模型调用(`reasoning_context.py` 的类 docstring 与部署文档中英三处)。② `off` 臂 `ctx_chars_c/t` 的口径写进读侧(`reasoning_trace_stats.REFLECT_CONTEXT_DETAIL_KEYS` 的注释)与 `docs/product-and-api*.md` 的 P 模式分块那一级:五个数是**稳定性类别**不是块标题,C/T 是差值,`off` 的 T 量的是那块排最前的服务器状态摘要,两条臂同形同尺、可直接比。部署文档里「把测量整个关掉…逐字节相同」那句同步改准:测量**永不**改变发出的消息与决定,成功如此、失败亦然;测量自身失败只表现为键缺席。
+
 ### T-PS4 trace 步与投影闭集扩展
 落点 `reasoning_trace_stats.py:43-103、594-634、637-751、786-866`。reflect 步 detail 稀疏键:`ctx_chars_s/c/k/d/t`、`ctx_bytes_total`、`message_prefix_bytes`、`cards_shown`、`cards_omitted`、`call_wall_ms`、`call_attempts`、`response_chars`。投影顶层:`run_wall_ms`、`model_calls_real`、`attempts_observed`、`optimization`(新闭集 `OPTIMIZATIONS`,与 `POLICY_VERSIONS` 并列)、`context_chars`(短码→数值)、`prefix_bytes_median`/`prefix_bytes_min`/`prefix_turns`(逐轮细节留 rig per-call 表)。新键缺失一律 `None`。
 验收:`assert_closed`/`assert_projection_values`(`923-1031`)全绿;旧行可读;`legacy`/`off` 行键集不变(稀疏键不出现)。用例:隐私守卫拦自由文本;缺 usage/finish_reason/cached 仍出整行;截断 trace 不掩盖 `model_calls_real`;`off` 行逐键比对。
