@@ -886,6 +886,10 @@ import copy  # noqa: E402
 import re  # noqa: E402
 
 from app.core.config import Settings  # noqa: E402
+from app.domain.reasoning_trace_stats import (  # noqa: E402
+    REFLECT_CONTEXT_DETAIL_KEYS,
+    assert_projection_values,
+)
 from app.eval import reflect_state_probe as state_probe  # noqa: E402
 from app.eval.reflect_manifest import assert_manifest  # noqa: E402
 from app.eval.reflect_state_probe import (  # noqa: E402
@@ -896,12 +900,17 @@ from app.eval.reflect_state_probe import (  # noqa: E402
     PROBE_UNREADABLE_ACTION,
     REFLECT_CHAT_WORKLOAD,
     STATE_POINT_LABELS,
+    STOP_DECISION_GAP,
+    STOP_DECISION_REASON,
+    ForwardedTurn,
     ProbeModelClients,
     ScriptedReflectDriver,
     StateProbeError,
+    _count,
     _settings_with_case_overrides,
     assert_no_action_executed_after_forward,
     assert_probe_row_closed,
+    build_probe_row,
     case_set_digest,
     load_state_probe_case_set,
     load_state_probe_cases,
@@ -1130,34 +1139,83 @@ def test_the_loader_rejects_an_unknown_case_set_version():
         load_state_probe_cases(raw)
 
 
-@pytest.mark.parametrize("planted", [
-    # 键名那一半:一个 `object_id` 参数。
-    {"script": [
+def _script_planting(**leaf: Any) -> list[dict]:
+    """一份四步剧本,第一步的 `arguments` 额外带 `leaf`。"""
+    return [
         {"next_action": "add_subquery", "sufficient": False,
-         "arguments": {"query": "x", "object_id": "abc"}},
-        {"next_action": "add_subquery", "sufficient": False,
-         "arguments": {"query": "y"}},
-        {"next_action": "add_subquery", "sufficient": False,
-         "arguments": {"query": "z"}},
-        {"next_action": "add_subquery", "sufficient": False,
-         "arguments": {"query": "w"}},
-    ]},
-    # 值那一半:一个 `ko-…` 串塞进查询里。
-    {"script": [
-        {"next_action": "add_subquery", "sufficient": False,
-         "arguments": {"query": "ko-deadbeef01 的邻居"}},
+         "arguments": {"query": "x", **leaf}},
         {"next_action": "add_subquery", "sufficient": False,
          "arguments": {"query": "y"}},
         {"next_action": "add_subquery", "sufficient": False,
          "arguments": {"query": "z"}},
         {"next_action": "add_subquery", "sufficient": False,
          "arguments": {"query": "w"}},
-    ]},
-])
-def test_the_loader_rejects_a_planted_database_id(planted):
-    """Q5 第一条:一例都不含数据库 id。键名与值用同一把尺子递归量。"""
+    ]
+
+
+def test_this_files_forbidden_keys_copy_matches_the_loaders_closed_set():
+    """本文件顶部的 `FORBIDDEN_KEYS`(section (b) 形态对账用的那份字面量副本)
+    与加载器的 `FORBIDDEN_ID_KEYS` 必须逐字相同。
+
+    下面那条参数化用例刻意不拿生产常量算参数列表(见其 docstring),而是用这份
+    独立副本——这条兑账断言补上那样做丢掉的另一半:两份闭集分道扬镳时,这里
+    响亮说出来,而不是让本文件的覆盖悄悄漏掉生产新增的某个键。
+    """
+    assert FORBIDDEN_KEYS == state_probe.FORBIDDEN_ID_KEYS
+
+
+@pytest.mark.parametrize("forbidden_key", sorted(FORBIDDEN_KEYS))
+def test_the_loader_rejects_a_planted_database_id(forbidden_key):
+    """Q5 第一条,**逐键**版:每一个已知的数据库 id 键名单独植一次
+    (T-EX5 评审 P3#9)。
+
+    此前只有 `object_id` 被这条用例植过——砍掉加载器 `FORBIDDEN_ID_KEYS` 里的
+    `source_id` / `source_ids`,全部十一个键里的其余十个,347 例照绿。这里刻意
+    按**本文件自己的** `FORBIDDEN_KEYS`(模块顶部,section (b) 的同一份闭集)
+    参数化,不导入生产 `FORBIDDEN_ID_KEYS` 来算参数列表:若参数直接来自生产
+    常量,生产那边哪天把整个键**移出**闭集,`sorted(...)` 会跟着变短,少了的
+    那几个参数化用例根本不会被收集——测试数量悄悄减少却全绿,看起来像是通过。
+    两份闭集同源但不互相 import,与加载器 docstring 里「形态对账不经过加载器」
+    的同一条纪律。
+
+    `aspect_id` 刻意不在这份闭集里(剧本的 `assessment` 要用它,已核),
+    `arguments` / `intent_contract` 这两块自由 Mapping 上的驼峰变体(如
+    `sourceId`)不在覆盖范围内,今天靠 `FORBIDDEN_VALUE_FRAGMENTS` 的 `src-`
+    值判据兜底——这层兜底成立的前提是仓库的 source id 一直带 `src-` 前缀,
+    登记为已知缺口。
+    """
     with pytest.raises(ValueError, match="syn-b-scores"):
-        load_state_probe_cases(_synthetic_raw(**planted))
+        load_state_probe_cases(_synthetic_raw(
+            script=_script_planting(**{forbidden_key: "abc"})))
+
+
+def test_the_loader_rejects_a_planted_id_value_fragment():
+    """Q5 第一条,值那一半:一个 `ko-…` 串塞进查询里,不需要落在某个特定键名上
+    ——`FORBIDDEN_VALUE_FRAGMENTS` 按叶子值扫,与键名判据独立。"""
+    with pytest.raises(ValueError, match="syn-b-scores"):
+        load_state_probe_cases(_synthetic_raw(
+            script=_script_planting(query="ko-deadbeef01 的邻居")))
+
+
+def test_the_id_prefix_fragment_check_has_a_word_boundary_anchor():
+    """T-EX5 评审 P3#13:三个 id 前缀(`nb-`/`src-`/`ko-`)要过**词首锚**,不是
+    无边界子串匹配。
+
+    不锚的话,一个普通英文词中段恰好含 `ko-` 的题面(比如提到 "Gecko-3" 这个
+    真实存在的模型名)会被误判成带 id 片段;而合法阳性用例(`ko-` 真的作为
+    id 前缀出现在串首或紧跟空白/括号)仍然要被拦住,不能借锚点松绑真正的红线。
+    """
+    # 阴性:`ko-` 出现在词中段,不在词首,也不紧跟空白/括号——放行。
+    load_state_probe_cases(_synthetic_raw(
+        script=_script_planting(query="关于 Gecko-3 型号的说明")))
+    # 阳性:`ko-` 在串首——仍然拒。
+    with pytest.raises(ValueError, match="id-prefix"):
+        load_state_probe_cases(_synthetic_raw(
+            script=_script_planting(query="ko-deadbeef01 的邻居")))
+    # 阳性:`ko-` 紧跟在左括号之后——仍然拒。
+    with pytest.raises(ValueError, match="id-prefix"):
+        load_state_probe_cases(_synthetic_raw(
+            script=_script_planting(query="参见(ko-deadbeef01)的记录")))
 
 
 def test_the_loader_rejects_a_case_without_the_frozen_contract():
@@ -1203,6 +1261,23 @@ def test_the_loader_accepts_the_two_whitelisted_retrieval_caps():
     case = _synthetic_case(
         settings_overrides={"reasoning_max_element_searches": 1})
     assert case.settings_overrides == {"reasoning_max_element_searches": 1}
+
+
+@pytest.mark.parametrize("bad_value", ["1", -1, 0, True])
+def test_the_loader_rejects_a_malformed_settings_override_value(bad_value):
+    """`settings_overrides` 此前只校了三遍**键**,一次都没校验**值**
+    (T-EX5 评审 P2#3)。
+
+    `model_copy(update=...)` 不跑校验器,而白名单两个键在 `Settings` 上连
+    `ge=0` 都没有,所以一个 JSON 里的 `"1"`(字符串)会一路混到
+    `reasoning_retrieval` 里炸一个裸 `TypeError`;`-1` / `0` 会让那一例的检索
+    通道整轮悄悄跑在「额度已耗尽」这个它没声明的状态上,五道运行期事后核一条
+    都不管值合不合法;`True` 当 1 用,同样不是这份 case 想表达的整数。四种都要
+    在加载这一步就响亮拒。
+    """
+    with pytest.raises(ValueError, match="must be an int"):
+        load_state_probe_cases(_synthetic_raw(
+            settings_overrides={"reasoning_max_element_searches": bad_value}))
 
 
 @pytest.mark.parametrize("points,why", [
@@ -1264,6 +1339,22 @@ def test_the_loader_rejects_a_duplicate_case_key():
         load_state_probe_cases(raw)
 
 
+@pytest.mark.parametrize("case_key", [
+    "sf a gsm8k",  # 带空格,不是短码
+    "a" * 70,  # 超过 64 字符
+])
+def test_the_loader_rejects_a_case_key_that_is_not_a_short_code(case_key):
+    """`case_key` 是 `PROBE_ROW_KEYS` 成员,要过短码闸(≤64 字符、无空白、
+    `[A-Za-z0-9_:\\-.+]`)——加载器此前只校验「非空串」(T-EX5 评审 P2#5)。
+
+    不在这里提前拦住的话,一个形状不合的 `case_key` 要等到 `build_probe_row`
+    才被 `assert_probe_row_closed` 拒:那时一次真模型调用与一轮 embedding
+    已经烧掉了。
+    """
+    with pytest.raises(ValueError, match="short code"):
+        load_state_probe_cases(_synthetic_raw(case_key=case_key))
+
+
 # --- (a) 推进到第 k 轮后转发恰一次 --------------------------------------------
 
 
@@ -1312,6 +1403,23 @@ def test_the_driver_forwards_exactly_once_and_the_call_stats_are_read(
     assert "call_wall_ms" not in reflects[0].detail
 
 
+def test_the_mirrored_stats_keys_match_the_measure_call_keys_source():
+    """`_MIRRORED_STATS_KEYS` 是反思层 `_MEASURE_CALL_KEYS`(`call_stats` 出参
+    的三个源键)的抄本(T-EX5 评审 P3#8)。
+
+    单独把其中一个键(比如 `attempts`)改名 ⇒ 347 例照绿——只有
+    `call_wall_ms` 被上面那条真 run 用例断言。写侧源键改名而这份抄本没跟上,
+    转发那一轮的 reflect detail 会静默缺那一格,`.local/raw` 之外的读表人
+    (`model_calls_real` / `response_chars_total` 这类 run 级投影)会把它读成
+    unknown 而不留任何痕迹——E2 自己的行不受影响,因为它读的是驱动器自己的
+    sink,不经这份镜像。
+    """
+    from app.services.reasoning_retrieval import _MEASURE_CALL_KEYS
+
+    assert set(ScriptedReflectDriver._MIRRORED_STATS_KEYS) == set(
+        _MEASURE_CALL_KEYS)
+
+
 def test_the_scripted_turns_carry_no_call_stats_of_their_own(probe_repo):
     """剧本轮不调任何客户端,所以它们在 trace 上**没有**墙钟。
 
@@ -1325,6 +1433,18 @@ def test_the_scripted_turns_carry_no_call_stats_of_their_own(probe_repo):
     assert len(reflects) == 4
     assert [("call_wall_ms" in step.detail) for step in reflects] == [
         False, False, False, True]
+
+
+def test_the_stop_decision_short_codes_stay_short_codes():
+    """`STOP_DECISION_GAP` / `STOP_DECISION_REASON` 是要进方面账与轨迹的定宽
+    短码,不是人话(T-EX5 评审 P3#7)。
+
+    这两个常量同时改成人话(含空格/CJK)此前 347 例照绿——E2 的 run 恰好在
+    这一轮结束,没有「后续渲染」去暴露它,但模块 docstring 自己写的是「这条
+    纪律不因此松开」。
+    """
+    for value in (STOP_DECISION_GAP, STOP_DECISION_REASON):
+        assert_projection_values({"_": value})
 
 
 # --- (a2) case 的 settings_overrides 真的接线 ---------------------------------
@@ -1580,6 +1700,34 @@ def test_the_no_action_guard_really_runs_on_the_real_probe_path(
                    _FakeRealClient(MODEL_SEARCH_DECISION))
 
 
+def test_the_arm_evidence_guard_really_runs_on_the_real_probe_path(
+    probe_repo, monkeypatch,
+):
+    """臂标签对号(事后核 #1,`assert_optimization_matches_evidence`)在
+    `run_state_probe_point` 的路上**真的被调到**(T-EX5 评审 P2#1)。
+
+    删掉这个调用点(变异 Q27)347 例全绿:转发次数、`plan_calls`、轮数、
+    「不执行」四道核全过,`test_the_four_arms_differ_in_how_the_forwarded_turn_is_blocked`
+    也不会红——那条比的是四条**真配置**臂之间的差,不是标签与证据的一致性。
+    这条守的是接线,不是判据本身。`assert_optimization_matches_evidence` 是
+    `run_state_probe_point` 里的一处**函数内**导入(源自 `app.eval.reflect_ab`),
+    所以哨兵要打在源模块上,monkeypatch 打在 `state_probe` 自己身上不会生效。
+    """
+    import app.eval.reflect_ab as reflect_ab
+
+    class _Sentinel(Exception):
+        pass
+
+    def boom(optimization, observed):
+        raise _Sentinel("guard ran")
+
+    monkeypatch.setattr(
+        reflect_ab, "assert_optimization_matches_evidence", boom)
+    with pytest.raises(_Sentinel):
+        _run_point(probe_repo, _synthetic_case(), 1,
+                   _FakeRealClient(MODEL_SEARCH_DECISION))
+
+
 def test_the_executed_half_is_anchored_on_what_executing_an_action_looks_like(
     probe_repo,
 ):
@@ -1711,6 +1859,41 @@ def test_the_four_arms_differ_in_how_the_forwarded_turn_is_blocked(probe_repo):
     assert len(set(byte_totals)) == len(byte_totals), byte_totals
 
 
+def test_the_five_context_char_columns_each_read_their_own_detail_key():
+    """(c) 五格字符数 + 总字节数各读**自己**的 reflect 步 detail 键,不是邻居的
+    (T-EX5 评审 P2#2)。
+
+    `REFLECT_CONTEXT_DETAIL_KEYS`(`app/domain/reasoning_trace_stats.py`)是
+    写侧真源。此前只有 `ctx_chars_s` / `ctx_bytes_total` 被上面那条四臂差分
+    用例咬住,`c`/`k`/`d`/`t` 四格在成功路径上零断言——单独把
+    `reflect_detail.get("ctx_chars_c")` 改成 `get("chars_c")` 347 例照绿。这里
+    给六个真实键名各喂一个互不相同的值,直接调 `build_probe_row`,任何一格读
+    错邻居的键都会在这条用例上现出原形。
+    """
+    case = _synthetic_case()
+    driver = ScriptedReflectDriver(
+        case, 0, _FakeRealClient({}), stop_aspect_id="a1")
+    driver.forwarded = ForwardedTurn(
+        turn=1, messages=(), schema_hint="", raw=None, stats={"status": "ok"})
+    reflect_detail = {
+        key: 100 + index
+        for index, key in enumerate(REFLECT_CONTEXT_DETAIL_KEYS.values())
+    }
+    assert len(set(reflect_detail.values())) == len(reflect_detail), (
+        "sentinel values must be pairwise distinct for this test to mean "
+        "anything")
+    row = build_probe_row(
+        case=case, state_point_index=0, repeat=0, arm="B", optimization="off",
+        driver=driver, reflect_detail=reflect_detail, aspects_total=1,
+    )
+    for code, key in REFLECT_CONTEXT_DETAIL_KEYS.items():
+        expected = reflect_detail[key]
+        if code == "bytes_total":
+            assert row["message_bytes_total"] == expected, code
+        else:
+            assert row[f"ctx_chars_{code}"] == expected, code
+
+
 # --- (d) 代理只截 reasoning_agent ---------------------------------------------
 
 
@@ -1759,8 +1942,11 @@ def test_the_proxy_only_intercepts_the_reflect_workload():
     assert proxy.rerank("retrieval_rerank") == "rerank:retrieval_rerank"
     assert delegate.embedding_calls == ["retrieval_query_embedding"]
     assert delegate.rerank_calls == ["retrieval_rerank"]
-    # 非方法属性同样委托(`_construct_reasoning_retriever` 要 `settings` /
-    # `retrieval` / 两个集合服务)。
+    # 非方法属性同样委托:`retrieval` 与两个集合服务是
+    # `_construct_reasoning_retriever` 真的会从 `model_clients`/`repository`
+    # 取的;`settings` 只是借来验证委托本身对任意非方法属性都成立——生产路径上
+    # 它是 `_construct_reasoning_retriever` 的**显式参数**,不经这条委托取
+    # (T-EX5 评审 P3#12)。
     assert proxy.settings == "sentinel-settings"
     with pytest.raises(AttributeError):
         proxy.no_such_attribute  # noqa: B018
@@ -2072,6 +2258,33 @@ def test_the_decision_columns_read_the_model_payload_not_the_trace(probe_repo):
     assert_probe_row_closed(point.row)
 
 
+def _three_topic_case(**over: Any):
+    contract = copy.deepcopy(_synthetic_raw()["cases"][0]["intent_contract"])
+    contract["mandatory_topics"] = [
+        {"id": "t1", "title": "循环次数", "question": "循环次数是多少?",
+         "retrieval_queries": ["循环次数"]},
+        {"id": "t2", "title": "得分表", "question": "得分表长什么样?",
+         "retrieval_queries": ["得分表"]},
+        {"id": "t3", "title": "评测集口径", "question": "评测集口径是什么?",
+         "retrieval_queries": ["评测集口径"]},
+    ]
+    return _synthetic_case(intent_contract=contract, **over)
+
+
+def test_aspects_total_reflects_the_ledger_size_not_a_constant(probe_repo):
+    """(g) `aspects_total` 是这条 run 的方面账本大小,不是写死的常量
+    (T-EX5 评审 P2#6)。
+
+    `aspects_total=1` 写死 ⇒ 347 例照绿(变异 Q20):唯一断言它的
+    `test_the_decision_columns_read_the_model_payload_not_the_trace` 恰好用的
+    是 1 方面的合成例。这一例冻 3 个必答方面,分母必须如实报 3——这一列正是
+    §9.2「方面绑定」人工核的分母,12 例里有 7 例是 2–3 方面。
+    """
+    point = _run_point(probe_repo, _three_topic_case(), 1,
+                       _FakeRealClient(MODEL_SEARCH_DECISION))
+    assert point.row["aspects_total"] == 3
+
+
 def test_a_next_action_in_plain_prose_lands_on_the_unreadable_short_code(
     probe_repo,
 ):
@@ -2236,12 +2449,15 @@ def test_the_compaction_boundary_is_false_when_nothing_was_rebuilt(probe_repo):
 
 
 def test_a_non_delta_arm_reports_unknown_not_false_for_the_boundary(probe_repo):
-    """`off` / `prefix_snapshot` 压根没有 `context_rebuilds` 这个观测 ⇒ 这一格
-    是 `None`,**不是** `False`。
+    """`off` / `prefix_snapshot` 压根没有 `context_rebuilds` / `context_fallback`
+    这两个观测 ⇒ 这两格是 `None`,**不是** `False`。
 
     unknown ≠ False 是这个仓库的一条既有纪律:`False` 是「量到了,答案是没有」,
     `None` 是「没量」。折成 `False` 会让 off/P 两条臂在摘要里凭空多出一批
-    「没越过压缩边界」的格子,而它们从来没被问过这个问题。
+    「没越过压缩边界」/「没有不可逆回退过」的格子,而它们从来没被问过这个问题
+    ——`context_fallback` 这一半此前零断言,`_flag` 退化成 `return bool(raw)`
+    照绿(T-EX5 评审 P3#10)。P 压根没有回退机制,`context_fallback` 折成
+    `False` 尤其容易被误读成「P 从没不可逆回退过」这一句它没资格说的话。
     """
     for arm, optimization in (("B", "off"), ("P", "prefix_snapshot")):
         point = _run_point(probe_repo, _synthetic_case(), 2,
@@ -2249,6 +2465,7 @@ def test_a_non_delta_arm_reports_unknown_not_false_for_the_boundary(probe_repo):
                            arm=arm, optimization=optimization)
         assert point.row["context_rebuilds"] is None
         assert point.row["compaction_boundary_reached"] is None
+        assert point.row["context_fallback"] is None
 
 
 def _fake_row(**over) -> dict:
@@ -2320,6 +2537,29 @@ def test_the_summary_lists_failures_cache_exits_and_unreached_boundaries():
     assert cell["n_boundary_unknown"] == 1
 
 
+def test_the_summary_tells_absent_decisions_from_unreadable_ones():
+    """(j) `n_decision_absent`(压根没有载荷可读)与
+    `n_decision_unreadable_action`(载荷读出来了、但 `next_action` 不是短码)是
+    两件事,不共用一个格子(T-EX5 评审 P2#4)。
+
+    转发失败 / 非 JSON 落 `decision_action=None`,已经被 `n_failed` 数过一遍;
+    模型给了个读不出来的动作落 `decision_action=PROBE_UNREADABLE_ACTION`,
+    §9.2「格式不符」单指后者。此前两者共用一格 `n_decision_unreadable`、判据是
+    `decision_action is None`——数 `PROBE_UNREADABLE_ACTION` 那一半反而全绿。
+    """
+    rows = [
+        _fake_row(decision_action=None),
+        _fake_row(decision_action=None),
+        _fake_row(decision_action=PROBE_UNREADABLE_ACTION),
+        _fake_row(decision_action="answer"),
+    ]
+    cell = summarize_state_probe(rows)["by_state_point"]["initial"]["D"]
+    # 两格计数刻意不同(2 对 1),这样把两个判据互换的变异也会被这条用例咬住
+    # ——两格计数若碰巧相同,一次判据互换会悄悄绿过去。
+    assert cell["n_decision_absent"] == 2
+    assert cell["n_decision_unreadable_action"] == 1
+
+
 def test_the_summary_medians_use_nearest_rank_and_count_their_samples():
     """中位数取**最近秩**(偶数条取偏小的那个),不取两数平均——平均出来的
     毫秒数不是任何一次真实调用的墙钟。缺席的观测不折 0,只是不进样本。"""
@@ -2344,6 +2584,17 @@ def test_the_summary_survives_a_batch_where_every_call_failed():
     cell = summary["by_state_point"]["initial"]["D"]
     assert cell["call_wall_ms_p50"] is None
     assert cell["call_wall_ms_n"] == 0
+
+
+def test_count_excludes_bool_even_though_bool_is_an_int_subclass():
+    """`isinstance(True, int)` 为真,`_count` 必须单独挡掉 `bool`——不挡的话
+    一个写错类型的字段会静默落成 `1`(T-EX5 评审 P3#11)。"""
+    assert _count(True) is None
+    assert _count(False) is None
+    assert _count(1) == 1
+    assert _count(0) == 0
+    assert _count(None) is None
+    assert _count("1") is None
 
 
 # --- (i) manifest 事实 --------------------------------------------------------
