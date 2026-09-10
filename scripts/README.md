@@ -455,9 +455,11 @@ python scripts/reflect_shadow_rig.py --dry-run \
 
 #    前缀复用实验换成**第二维**:同一条 v2 协议,只翻
 #    REASONING_REFLECT_OPTIMIZATION。`legacy:prefix_snapshot` 这类合法值的非法
-#    组合、`prefix_delta_lean`(尚未实现)、重复臂、空段都在跑批之前响亮拒绝。
+#    组合、重复臂、空段都在跑批之前响亮拒绝。
 #    第二维要跑 `prefix_delta` 就把 `--arms` 换成 `v2:off,v2:prefix_delta`
-#    (或 `v2:prefix_snapshot,v2:prefix_delta`)——一次只收一对:
+#    (或 `v2:prefix_snapshot,v2:prefix_delta`);跑 `prefix_delta_lean`(D↔L 是
+#    本设计里唯一一对只差自评合同的配对臂,收益不得归因到缓存本身)就换成
+#    `v2:prefix_delta,v2:prefix_delta_lean`——一次只收一对:
 python scripts/reflect_shadow_rig.py \
   --database-url postgresql://127.0.0.1:5432/<库名>_test \
   --source-db-url postgresql://127.0.0.1:5432/<主库名> \
@@ -469,12 +471,13 @@ python scripts/reflect_shadow_rig.py \
 **`ab` 的臂是二维的**(前缀复用最终设计 §11)。`--arms` 收两种写法,产出同一种
 结构:一维 `legacy,v2`(省略的第二维一律补 `off`,不跟随进程默认——那会让同一条
 命令在两台机器上跑出两批数据)、二维 `v2:off,v2:prefix_snapshot`。合法组合是
-**四格**——`legacy:off` / `v2:off` / `v2:prefix_snapshot` / `v2:prefix_delta`
-(`reflect_ab.ARMS`):v2 总闸关时 `reflect_optimization()` 恒返回 `off`,所以
-legacy 那一维上没有「前缀」这个概念;`prefix_delta_lean` 由 `config` 的校验器在
-启动期拒绝,rig 同期收窄——PR-3(T-PD7)已把 `v2:prefix_delta` 放开进这份闭集,
-PR-4 放开最后一格时同 diff 再加一行。`--arms` 与 `--only-policy` **互斥**(后者是
-一维时代按 policy 过滤默认两臂的写法)。
+**五格**——`legacy:off` / `v2:off` / `v2:prefix_snapshot` / `v2:prefix_delta` /
+`v2:prefix_delta_lean`(`reflect_ab.ARMS`):v2 总闸关时 `reflect_optimization()`
+恒返回 `off`,所以 legacy 那一维上没有「前缀」这个概念。`prefix_delta_lean`
+(简称 L)字节上是 `prefix_delta`(D)的双胞胎,唯一差别是自评合同——**D↔L 是
+这份设计里唯一一对只差自评合同的配对臂**,两者之间量出的任何收益都不得归因到
+前缀缓存本身,那笔账已经在 D↔P 那一对上算过了。`--arms` 与 `--only-policy`
+**互斥**(后者是一维时代按 policy 过滤默认两臂的写法)。
 
 **`--arms` 一次只收一对臂**,超过两条在跑批之前拒绝。配对差值表按**对**出:三条
 臂的批次里每个配对单元落三行,`mark_paired` 判不出配对,整批 `paired` 全 `False`

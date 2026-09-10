@@ -89,22 +89,23 @@ ARM_POLICIES: tuple[str, ...] = POLICY_VERSIONS
 #:   `off`(全仓唯一读点,见 `reasoning_retrieval.reflect_optimization`),所以
 #:   `legacy:prefix_snapshot` 不是「还没实现」,而是**结构上不存在**:声明它只会
 #:   得到一条 optimization 写着 `prefix_snapshot`、实际跑 `off` 的假数据。
-#: * v2 侧只列**本期已实现**的三格。`prefix_delta_lean` 在 `OPTIMIZATIONS`
-#:   (读侧闭集)里有位置,`config` 的校验器也已经放行它(PR-4 T-PL1)——它不在
-#:   这里,是**这份 rig 闭集自己**还没收它,不是 config 拒绝它:装配层今天还
-#:   没有它专属的自评合同(留给 T-PL3/T-PL4/T-PL5),字节上是 `prefix_delta` 的
-#:   双胞胎,现在就放它进来跑批,会让一批实际是 D 形状的 run 被投影标成 L,把
-#:   D 的噪声算成 L−D 的收益。PR-3(T-PD7)往这里加了 `("v2","prefix_delta")`
-#:   这一行;T-PL6(依赖自评合同落地)同 diff 再加最后一行。
+#: * v2 侧列**本期已实现的全部四格**,`legacy` 侧只有 `off`,合计五格。
+#:   `prefix_delta_lean`(简称 L)字节上是 `prefix_delta`(D)的双胞胎——同一份
+#:   消息装配,唯一差别是自评合同(PR-4 T-PL3/T-PL4/T-PL5)。**D↔L 是这份设计
+#:   里唯一一对只差自评合同的配对臂**:两者之间量出的任何差异都该记在「模型要不要
+#:   每轮重述全量自评」上,不得归因到前缀缓存本身——那笔账已经在 D↔P 那一对上
+#:   算过了。PR-3(T-PD7)往这里加了 `("v2","prefix_delta")` 这一行;
+#:   PR-4(T-PL6)同 diff 再加最后一行 `("v2","prefix_delta_lean")`。
 ARMS: tuple[tuple[str, str], ...] = (
     ("legacy", "off"),
     ("v2", "off"),
     ("v2", "prefix_snapshot"),
     ("v2", "prefix_delta"),
+    ("v2", "prefix_delta_lean"),
 )
 
 #: 一个**配对单元**里的臂数。二维化之前这个数恰好等于 `len(ARMS)`,现在不是了:
-#: `ARMS` 是合法组合的闭集(四格),而一个配对单元恒是 `--arms` 点名的那**两条**
+#: `ARMS` 是合法组合的闭集(五格),而一个配对单元恒是 `--arms` 点名的那**两条**
 #: 臂(`legacy,v2` 或 `v2:off,v2:prefix_snapshot`)。`mark_paired` 判的是后者。
 PAIR_ARM_COUNT = 2
 
@@ -205,8 +206,7 @@ def _parse_one_arm(token: str) -> tuple[str, str]:
             f"臂 {token!r} 是一个**合法值的非法组合**:rig 能跑的臂只有 "
             + ", ".join(format_arm(*arm) for arm in ARMS)
             + "(legacy 路径上没有『前缀』这个概念,reflect_optimization() 在 v2 "
-              "总闸关时恒返回 off;prefix_delta_lean 不在这份 ARMS 闭集里,"
-              "T-PL6 起放开)")
+              "总闸关时恒返回 off)")
     return policy, optimization
 
 
@@ -1008,7 +1008,7 @@ def mark_paired(rows: Sequence[dict]) -> None:
 
     判据的两半各自二维化(前缀复用最终设计 §11):在场的臂按 `row_arm` 数
     `(arm, optimization)` 这一对,门槛是 `PAIR_ARM_COUNT` 而**不再是**
-    `len(ARMS)`——后者现在是「合法组合的闭集」(四格),拿它当门槛会让每一批
+    `len(ARMS)`——后者现在是「合法组合的闭集」(五格),拿它当门槛会让每一批
     两臂数据都差一条臂、`paired` 恒 `False`。
     """
     seen: dict[tuple[Any, ...], set[tuple[Any, Any]]] = {}
