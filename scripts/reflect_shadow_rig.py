@@ -1752,7 +1752,7 @@ def _settings_by_arm(
     两条断言都是「不断言就会安静跑出一批臂对不上号的数据」:
 
     * v2 总闸按 policy 对号(与 `_settings_by_policy` 逐字同一条);
-    * optimization 按声明对号。`prefix_delta` 这类未实现取值由
+    * optimization 按声明对号。`prefix_delta_lean` 这类未实现取值由
       `config.validate_reflect_optimization` 在**构造期**抛,所以那条路径不会走到
       这里;这条断言挡的是**别名或接线漂移**——`Settings` 的字段别名改了名、
       `--arms` 的取值与配置枚举分了叉、或者这个函数哪天不再逐臂设那个环境变量。

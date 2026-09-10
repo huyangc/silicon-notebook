@@ -467,7 +467,7 @@ python scripts/reflect_shadow_rig.py \
 **`ab` 的臂是二维的**(前缀复用最终设计 §11)。`--arms` 收两种写法,产出同一种
 结构:一维 `legacy,v2`(省略的第二维一律补 `off`,不跟随进程默认——那会让同一条
 命令在两台机器上跑出两批数据)、二维 `v2:off,v2:prefix_snapshot`。合法组合只有
-`legacy:off` / `v2:off` / `v2:prefix_snapshot`:v2 总闸关时 `reflect_optimization()`
+`legacy:off` / `v2:off` / `v2:prefix_snapshot` / `v2:prefix_delta`:v2 总闸关时 `reflect_optimization()`
 恒返回 `off`,所以 legacy 那一维上没有「前缀」这个概念;`prefix_delta` /
 `prefix_delta_lean` 由 `config` 的校验器在启动期拒绝,rig 同期收窄,PR-3/PR-4 各
 放开一格。`--arms` 与 `--only-policy` **互斥**(后者是一维时代按 policy 过滤默认
