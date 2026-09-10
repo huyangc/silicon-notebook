@@ -827,8 +827,9 @@ def _ab_args(**overrides: Any):
         "--source-db-url", "postgresql://127.0.0.1:5432/nb_main",
         "ab",
     ])
-    args.base_url = f"http://127.0.0.1:{args.port}"
-    args.database_url_explicit = True
+    # 与 `main()` 逐字同一步:哨兵默认值(`--database-url` / `--concurrency` /
+    # `--repeats`)由 `apply_shared_arg_defaults` 填,不在这里手抄一半。
+    rig.apply_shared_arg_defaults(args)
     for key, value in overrides.items():
         setattr(args, key, value)
     return args
