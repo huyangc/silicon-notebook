@@ -15488,20 +15488,26 @@ def test_delta_blocks_carry_the_new_cards_rows_and_accepted_aspects(rrepo):
 def test_delta_wiring_leaves_the_other_two_arms_byte_identical(
     rrepo, optimization,
 ):
-    """`off` 与 `prefix_snapshot` 各一条完整 run:消息序列与轨迹逐字节回到接入前。
+    """`off` 与 `prefix_snapshot` 各一条完整 run:D 一块都没有,而且结果确定。
 
     本期改到的共用面四处(`build_evidence_block` 加 `frozen_cards`、`ReflectContext`
     加 `delta`、`reflect_v2_static_prompt` 加 `delta`、`ReflectMeasurement` 加
-    `measures_messages`)默认值全部中性,而"默认中性"要用例证明——两条臂各跑一条
-    完整 run,把发给 provider 的每一条消息和整条轨迹都比一遍。
+    `measures_messages`)默认值全部中性,而"默认中性"要用例证明。
 
-    判据是"这条臂的字节只由它自己的判据决定":同一条脚本在**策略位从没被写过**的
-    settings 上跑一次(接入前的形态),再在写了策略位的 settings 上跑一次,两次必须
-    逐字节相同——`off` 那格如此,`prefix_snapshot` 那格与它自己的基线如此。
+    ⚠ 这条断的是**这两半**:(1) delta 的那一格一个字节都没漏进这两条臂(整份消息里
+    连 `DELTA_BLOCK_TITLE` 都不出现);(2) 同一条脚本跑两次逐字节相同(确定性——四处
+    新参数都没有把任何一格 run 内状态带进这两条路径)。
+
+    "与 PR-2 合入态逐字节相同"那一半由**既有的**冻结基线钉住,不在这里重造一份:
+    `test_prefix_snapshot_with_v2_off_is_byte_identical_to_the_baseline`(整份消息
+    序列)、`_OFF_V2_SYSTEM_LEN` / `_OFF_V2_SYSTEM_SHA256` 那两条 golden(off 的 S)、
+    以及 `test_measure_off_keeps_the_reflect_context_and_detail_untouched`(逐字段)。
+    在这里再写一份"跟上一版一样"的字面量,只会多一处需要同步的基线。
 
     变异:让 `build_evidence_block` 无条件走冻结分支(即把 `frozen_cards.get` 换成
-    别的默认)⇒ 两条臂的证据块都变,这条红;把 `reflect_v2_static_prompt` 的
-    `delta` 默认改成 `True` ⇒ `prefix_snapshot` 那格的 S 变长,红。
+    别的默认)⇒ 既有的 S/K golden 红;把 `reflect_v2_static_prompt` 的 `delta` 默认
+    改成 `True` ⇒ `prefix_snapshot` 那格的 S 变长,S 的 golden 红;把 `delta` 那一格
+    在这两条臂上填成非空 ⇒ 这条的 `DELTA_BLOCK_TITLE` 断言红。
     """
     def _capture(**settings):
         llm, result = _v2_aspect_run(
@@ -15575,8 +15581,34 @@ def test_delta_adds_no_retrieval_or_model_calls(rrepo):
 
 # --- (c)(k) 长历史触发预算前重建 ---------------------------------------------
 
-def test_delta_rebuilds_the_snapshot_before_the_history_budget_overflows(rrepo):
-    """(c)(k) 历史池装不下待追加的观察 ⇒ 重建 K;`context_rebuilds` 0→1。
+def _history_pressure_run(rrepo, **extra):
+    """一条**历史池**装不下、而证据池宽裕的长 run(与 `_crowded_run` 互补)。
+
+    证据宽裕 ⇒ 已经展示过的卡在每一版 K 里都还留得住,所以"重建时冻结命中的卡字节
+    不变"这条在这里才有对象可断:`_crowded_run` 那份配置下 K 每次只放得下一张新卡,
+    重建前后的 K 压根没有交集,那条断言会退化成空断言。
+
+    正文四段都能被检索词命中(见 `_multi_marker_hit`),所以去掉重建那一处
+    `frozen_cards` 之后同一张卡真的会按本轮检索词重算出另一段摘录(实测会分叉)。
+    """
+    reflects = [
+        {"next_action": "search_chunks", "sufficient": False,
+         "arguments": {"query": marker}, "reason": marker}
+        for marker in _DELTA_MARKERS
+    ] + [_answer()]
+    return _delta_aspect_run(
+        rrepo, intent_detail=_TWO_ASPECTS, reflects=reflects,
+        chunk_results={marker: [_multi_marker_hit(f"ck-{index}")]
+                       for index, marker in enumerate(_DELTA_MARKERS)},
+        reasoning_max_chunk_searches=4,
+        reasoning_reflect_excerpt_chars=240,
+        reasoning_reflect_state_chars=200, **extra)
+
+
+def test_delta_rebuilds_the_snapshot_before_the_history_budget_overflows(
+    rrepo, monkeypatch,
+):
+    """(c)(k) 历史池装不下待追加的观察 ⇒ 重建 K;`context_rebuilds` 逐轮累计。
 
     重建的三件事各断一条:已发出的块整体清空(块数从涨回落)、冻结命中的卡在新 K
     里**字节相同**、`generation` 从第二版起在块头上看得见。计数那半按 T-PD2 的读
@@ -15584,18 +15616,33 @@ def test_delta_rebuilds_the_snapshot_before_the_history_budget_overflows(rrepo):
     而且一个 run 内不会超过轮数(用例 k)。
 
     变异:把重建判据改成"每 N 轮压一次" ⇒ 重建次数与预算无关,这条红;重建时不传
-    `frozen_cards` ⇒ 新 K 里那张卡按本轮检索词重算摘录,字节比对红;把
-    `context_rebuilds` 写成"本轮重建了没有"的布尔 ⇒ 单调不减那条红。
+    `frozen_cards` ⇒ 新 K 里那几张卡按本轮检索词重算摘录,字节比对红;把
+    `context_rebuilds` 写成"本轮重建了没有"的布尔 ⇒ 累计那条红。
     """
     from app.domain.reasoning_trace_stats import project_run
+    from app.services.reasoning_retrieval import ReasoningRetriever
 
-    llm, result = _four_turn_run(
-        rrepo, reasoning_reflect_state_chars=200, **{_MEASURE_FLAG: True})
+    truth: list = []
+    original = ReasoningRetriever._reflect_v2_context
+
+    def _wrapped(self, state, summary, outline):
+        context = original(self, state, summary, outline)
+        truth.append(state.reflect_delta.rebuilds)
+        return context
+
+    monkeypatch.setattr(ReasoningRetriever, "_reflect_v2_context", _wrapped)
+    llm, result = _history_pressure_run(rrepo, **{_MEASURE_FLAG: True})
+    turns = len(llm.user_prompts)
     details = _reflect_details(result)
     rebuilds = [detail["context_rebuilds"] for detail in details]
     assert rebuilds == sorted(rebuilds)          # 单调不减(run 级累计)
     assert rebuilds[0] == 0 and rebuilds[-1] >= 1
     assert rebuilds[-1] <= len(details)          # (k) 上界 = 轮数
+    # **累计而不是布尔**:这条脚本真的重建了不止一次,所以逐轮布尔与累计计数在这里
+    # 分得开(读侧那一列是 max-over-present,喂布尔进去会把一条重建过五次的 run 在
+    # 表上显示成 1)。逐轮值也与投影上那格真值逐项相等。
+    assert rebuilds == truth, (rebuilds, truth)
+    assert rebuilds[-1] >= 2
     row = project_run(
         {"mode": "reasoning", "status": "done"},
         [step.model_dump() for step in result.trace],
@@ -15605,18 +15652,20 @@ def test_delta_rebuilds_the_snapshot_before_the_history_budget_overflows(rrepo):
     assert row["context_fallback"] is False
 
     # 块数在重建那一轮回落(整体清空),而不是一路只涨。
-    counts = [len(llm.delta_blocks(turn)) for turn in range(4)]
-    assert any(counts[turn] <= counts[turn - 1] for turn in range(1, 4)), counts
-    # 冻结命中的那张卡在重建前后逐字节相同。
-    def _card(text, key):
-        return next((line for line in text.splitlines()
-                     if f"key={key}" in line), "")
-    first = _card(llm.evidence_block(0), "ck-q0")
-    assert first
-    assert _card(llm.evidence_block(3), "ck-q0") == first
+    counts = [len(llm.delta_blocks(turn)) for turn in range(turns)]
+    assert any(counts[turn] <= counts[turn - 1]
+               for turn in range(1, turns)), counts
+    # **重建前后都留在 K 里**的那些卡逐字节相同(这一条要求证据池宽裕,见上面那个
+    # 辅助函数的说明)。取重建之前的最后一轮与末轮比。
+    before = _delta_cards_by_key(llm.evidence_block(rebuilds.index(1)))
+    after = _delta_cards_by_key(llm.evidence_block(turns - 1))
+    survivors = set(before) & set(after)
+    assert survivors, (sorted(before), sorted(after))
+    for key in survivors:
+        assert after[key] == before[key], key
     # 第二版之后的块在块头上标出自己挂在第几版快照之后。
     assert any("版快照之后的新增" in block
-               for turn in range(4) for block in llm.delta_blocks(turn))
+               for turn in range(turns) for block in llm.delta_blocks(turn))
 
 
 def test_delta_rebuild_slices_the_ledger_into_two_disjoint_halves(rrepo):
@@ -15646,37 +15695,159 @@ def test_delta_rebuild_slices_the_ledger_into_two_disjoint_halves(rrepo):
     assert total == 5, (listed, dropped, folded)
 
 
+#: 四个检索方向的标记词。每一条 chunk 的正文里**四段都有**,所以同一个键在不同
+#: 轮次(不同检索词)下的摘录窗口真的会落到不同的段——"冻结的是这张卡长什么样"
+#: 因此不是一句空话,而是一条可以被证伪的性质。
+_DELTA_MARKERS = ("甲方向", "乙方向", "丙方向", "丁方向")
+
+
+def _multi_marker_hit(chunk_id):
+    from app.services.retrieval import RetrievedChunk
+    body = f"{chunk_id} 起头。" + "".join(
+        "".join(f"{marker}的判据是第 {index} 条口径。" for index in range(1, 22))
+        for marker in _DELTA_MARKERS)
+    return RetrievedChunk(
+        chunk_id=chunk_id, source_id=f"s-{chunk_id}",
+        source_title=f"Doc-{chunk_id}", section_path=f"章节 {chunk_id}",
+        text=body, relevance=0.5, score=0.5)
+
+
+def _crowded_run(rrepo, **extra):
+    """一条**证据池装不下四张卡**的长 run:每轮换一个检索方向。
+
+    证据池 900、摘录上限 240 ⇒ 目标比例下的 K 只放得下一张卡,而四轮各带回一条新
+    chunk。于是这条 run 会走完 delta 的全部有意思的状态:D 一路追加 → 证据池装不下
+    下一块 ⇒ 重建 → 一批卡离开 K → 它们经增量档序回到某一块 D。
+
+    每条 chunk 的正文里四个方向段都有,所以"同一个键在不同轮次会拿到不同摘录"是
+    真的(这份脚本在去掉 `frozen_cards` 之后确实会分叉,已实测)。
+    """
+    reflects = [
+        {"next_action": "search_chunks", "sufficient": False,
+         "arguments": {"query": marker}, "reason": marker}
+        for marker in _DELTA_MARKERS
+    ] + [_answer()]
+    return _delta_aspect_run(
+        rrepo, intent_detail=_TWO_ASPECTS, reflects=reflects,
+        chunk_results={marker: [_multi_marker_hit(f"ck-{index}")]
+                       for index, marker in enumerate(_DELTA_MARKERS)},
+        reasoning_max_chunk_searches=4,
+        reasoning_reflect_excerpt_chars=240,
+        reasoning_reflect_evidence_chars_by_effort={
+            effort: 900 for effort in (
+                "overview", "standard", "deep", "thorough", "exhaustive")},
+        **extra)
+
+
+def _delta_cards_by_key(text: str) -> dict:
+    """一块文本里的证据卡:`键 → 整张卡(含续行)`。"""
+    out: dict = {}
+    key = None
+    for line in text.splitlines():
+        if line.startswith("- ["):
+            key = line.split(" | ")[1][len("key="):]
+            out[key] = line
+        elif key and line.startswith("  "):
+            out[key] += "\n" + line
+        else:
+            key = None
+    return out
+
+
 def test_delta_rebuilt_snapshot_reuses_frozen_bytes_when_a_card_returns(rrepo):
     """(l) 重建后离开 K 的卡经增量档序回到 D 时**复用冻结字节**(拍板存疑 1)。
 
-    这是 `already_shown` 传"当前可见集"而不是"曾展示"的直接后果:重建会清空
-    `blocks` 并按新预算收缩 K,于是一批曾经展示过的卡既不在消息里了、又会被"曾展
-    示"口径永久挡在增量之外——它对模型从此不可见,而且不进任何一个 `omitted`。传
-    当前可见集之后它们会回来,而回来时那一行必须还是原来那串字节(§4.4)。
+    两半都断,缺一半这条就成了空断言:
 
-    变异:把 `already_shown` 换成 `set(delta.frozen_cards)` ⇒ 那张卡再也不回来,
-    这条红;把 `build_delta_evidence_block` 的 `frozen_cards` 去掉 ⇒ 它回来了但换了
-    摘录,字节比对红。
+    * **正面**——那张卡真的回来了。这是 `already_shown` 传"当前可见集"而不是"曾展
+      示"的直接后果:重建会清空 `blocks` 并按新预算收缩 K,于是一批曾经展示过的卡
+      既不在消息里了、又会被"曾展示"口径永久挡在增量之外,而且不进任何一个
+      `omitted` ——它对模型从此不可见,却没有一个计数披露这件事。
+    * **字节**——回来那一行还是原来那串。这份脚本的正文四段都能被检索词命中,所以
+      去掉 `frozen_cards` 之后同一个键真的会给出两种摘录(实测会分叉)。
+
+    变异:把 `already_shown` 换成 `tuple(delta.frozen_cards)` ⇒ 那张卡再也不回来,
+    正面那半红;把 `build_evidence_block` 或 `build_delta_evidence_block` 的
+    `frozen_cards` 去掉 ⇒ 它回来了但换了摘录,字节那半红。
     """
-    llm, _result = _four_turn_run(
-        rrepo, reasoning_reflect_state_chars=320,
-        reasoning_reflect_evidence_chars_by_effort={
-            "overview": 300, "standard": 300, "deep": 300,
-            "thorough": 300, "exhaustive": 300})
-
-    def _cards(text):
-        return {line.split(" | ")[1]: line
-                for line in text.splitlines() if line.startswith("- [")}
+    llm, result = _crowded_run(rrepo, **{_MEASURE_FLAG: True})
+    turns = len(llm.user_prompts)
+    assert [detail["context_rebuilds"]
+            for detail in _reflect_details(result)][-1] >= 1
 
     seen: dict = {}
-    for turn in range(4):
-        for source in (llm.evidence_block(turn), *llm.delta_blocks(turn)):
-            for key, line in _cards(source).items():
-                if "补充摘录" in line:
-                    continue
+    visible: list = []
+    for turn in range(turns):
+        blocks = llm.delta_blocks(turn)
+        in_k = _delta_cards_by_key(llm.evidence_block(turn))
+        in_d = [_delta_cards_by_key(block) for block in blocks]
+        visible.append((set(in_k), [set(part) for part in in_d]))
+        for source in (in_k, *in_d):
+            for key, card in source.items():
                 # 同一个键在整个 run 里(K 里、任何一块 D 里)只有一种字节。
-                assert seen.setdefault(key, line) == line, key
-    assert len(seen) >= 2                        # 真的有多张卡参与
+                assert seen.setdefault(key, card) == card, key
+    assert len(seen) >= 3                        # 真的有好几张卡参与
+
+    # 正面证据:某个键在某一轮**完全不可见**,而在更晚的一轮又出现在一块 D 里。
+    def _all_visible(turn):
+        keys, blocks = visible[turn]
+        return set(keys).union(*blocks) if blocks else set(keys)
+
+    returned = {
+        key
+        for turn in range(1, turns)
+        for key in set().union(*visible[turn][1]) if visible[turn][1]
+        if key not in _all_visible(turn - 1)
+        and any(key in _all_visible(before) for before in range(turn - 1))
+    }
+    assert returned, [(_all_visible(t), visible[t][1]) for t in range(turns)]
+
+
+def test_delta_measures_the_ledger_and_every_block_in_the_d_slot(
+    rrepo, monkeypatch,
+):
+    """拍板 Q2 的位置口径:`ctx_chars_d` = 观察账那一块 + 本轮**全部**增量块。
+
+    池账(K + 各 D 的累计用量)是投影内部的判据,不是给读表人的量。五格按位置定义,
+    两条臂才能直接比大小;而恒等式 `S+C+K+D+T` 是**残差**算出来的,所以它挡不住
+    "delta 那几块被算进 T"这种口径漂移——必须正面断这一格。
+
+    变异:把 `_measure_reflect_messages` 的 `chars_d` 改回只算 `context.observations`
+    ⇒ 这条红(而恒等式那条仍然绿,正是它挡不住的那一族)。
+    """
+    contexts = _capture_contexts(monkeypatch)
+    _llm, result = _four_turn_run(rrepo, **{_MEASURE_FLAG: True})
+    details = _reflect_details(result)
+    assert len(details) == len(contexts) == 4
+    for turn, (detail, context) in enumerate(zip(details, contexts)):
+        assert detail["ctx_chars_d"] == (
+            len(context.observations) + len(context.delta)), turn
+        assert detail["ctx_chars_k"] == len(context.evidence), turn
+    # 反面证据:后面几轮 D 真的非空(否则上面那条与旧口径无从区分)。
+    assert contexts[0].delta == "" and contexts[-1].delta
+
+
+def test_delta_keeps_the_cumulative_evidence_budget_across_blocks(rrepo):
+    """delta 的证据池是 **K + 所有 D 的总和**,不是每轮各拿一份满额(设计 §5.1)。
+
+    这条脚本每轮都装得下新卡(与 `_oversize_run` 那条互补:那一条一张都装不下,于
+    是累计口径根本没有机会被违反)。
+
+    变异:把 `_delta_cards` 的 `budget_chars` 从 `budget - evidence_chars` 改成
+    `budget` ⇒ 每一块 D 各拿一份满额,累计和越界,这条红。
+    """
+    llm, _result = _crowded_run(rrepo)
+    turns = len(llm.user_prompts)
+    charged = []
+    for turn in range(turns):
+        blocks = llm.delta_blocks(turn)
+        cards = sum(
+            len(card) + 1
+            for block in blocks
+            for card in _delta_cards_by_key(block).values())
+        charged.append(len(llm.evidence_block(turn)) + cards)
+        assert charged[-1] <= 900, (turn, charged)
+    assert max(charged) > 450                    # 真的用到过目标比例之上
 
 
 # --- (d) 目标比例不满足仍守硬预算;回退不可逆 ----------------------------------
@@ -15717,8 +15888,9 @@ def test_delta_falls_back_irreversibly_and_keeps_every_result(rrepo):
     回退之后 S 仍带 delta 那四句——上文里那些标着"新增"的块还在,解释它们怎么读的
     规则不能在同一条消息里消失。
 
-    变异:把回退改成可逆(每轮重新判一次、能装下就回到 delta)⇒ `context_fallback`
-    不再是一路为真,这条红;回退时清空 `ever_shown_outline_keys` ⇒ 单调那条红。
+    变异:把回退改成可逆(判据里去掉 `not delta.fallback`,于是每轮重新走一次
+    delta 装配)⇒ 回退之后还会继续重建,`context_rebuilds` 不再停住,这条红;回退时
+    清空 `ever_shown_outline_keys` ⇒ 单调那条红。
     """
     from app.services.reasoning_retrieval import ReasoningRetriever
 
@@ -15743,7 +15915,15 @@ def test_delta_falls_back_irreversibly_and_keeps_every_result(rrepo):
     # 一旦为真此后每轮都为真(不可逆),中间不会翻回去。
     assert flags == sorted(flags, key=bool)
     details = _reflect_details(result)
-    assert [detail["context_fallback"] for detail in details][-1] is True
+    fallbacks = [detail["context_fallback"] for detail in details]
+    assert fallbacks[-1] is True
+    # **不可逆的可观察后果**:回退之后那条臂再也不装配 delta,所以重建次数从回退
+    # 那一轮起停住。可逆的实现会继续每轮压一次(而"不能每轮反复压缩空转"正是设计
+    # §5.2 让它不可逆的理由),那时这个序列会一路往上走。
+    rebuilds = [detail["context_rebuilds"] for detail in details]
+    settled = rebuilds[fallbacks.index(True):]
+    assert len(set(settled)) == 1, rebuilds
+    assert len(settled) >= 2                     # 回退之后真的还有轮次
     # 结果与绑定一格都没丢:曾展示只增不减,候选池只增不减。
     keys = [keys for keys, _pool, _flag in shown]
     pools = [pool for _keys, pool, _flag in shown]
@@ -15796,11 +15976,17 @@ def test_delta_still_rejects_keys_the_model_never_saw(rrepo):
         reasoning_reflect_evidence_chars_by_effort={
             "overview": 1000, "standard": 1000, "deep": 1000,
             "thorough": 1000, "exhaustive": 1000})
-    assert "已支撑 0/2" in llm.turn_state_block(1)
-    assert any("invalid_assessment" in reason or "未采纳" in reason
-               for reason in _skip_reasons(result)) or True
     # 引用了一个从没展示过的键 ⇒ 那个方面没有被判为已支撑。
+    assert "已支撑 0/2" in llm.turn_state_block(1)
     assert "a1 | 已支撑" not in llm.turn_state_block(1)
+    # 那个键真的不在这一轮的消息里(否则上面两条断的是别的原因)。
+    assert "ck-never" not in llm.user_prompts[0]
+    # 而这一轮**真的**渲染出来过一张卡 —— 登记口径是"真渲染",不是"整个池子空"。
+    shown = {key for turn in range(2)
+             for source in (llm.evidence_block(turn), *llm.delta_blocks(turn))
+             for key in _delta_cards_by_key(source)}
+    assert shown == {"ck-q0"}, shown
+    assert "invalid_assessment" not in "".join(_skip_reasons(result))
 
 
 def test_delta_supplement_pass_appends_a_versioned_card_for_a_frozen_key():
@@ -15825,18 +16011,25 @@ def test_delta_supplement_pass_appends_a_versioned_card_for_a_frozen_key():
     from app.services.reasoning_context import ReflectDeltaState
     from app.services.reasoning_retrieval import _delta_supplements
 
-    hits = [_chunk_hit("ck-q0"), _chunk_hit("ck-q1"), _chunk_hit("ck-q2")]
+    hits = [_chunk_hit("ck-old"), _chunk_hit("ck-q0"), _chunk_hit("ck-q1"),
+            _chunk_hit("ck-q2")]
     state = SimpleNamespace(
         collected={}, elements=(), chunks=hits, question="兆瓦级功耗预算")
     observer = SimpleNamespace(last_query="散热余量的验收判据")
     delta = ReflectDeltaState()
-    # 三个键都"曾展示过",但冻结的字节是**别的**摘录 ⇒ 本轮重算必然不同。
+    # 四个键都"曾展示过",但冻结的字节是**别的**摘录 ⇒ 本轮重算必然不同。
+    # `ck-old` 刻意冻结在**最前面**:候选口径一旦漂成"冻结表全体",它就会占掉
+    # `max_cards` 的第一格,下面那两条断言因此真的分得开两种口径。
     for hit in hits:
         delta.note_shown(hit.chunk_id, f"- [chunk] | key={hit.chunk_id} | 旧摘录")
     lines = _delta_supplements(
         state, delta, observer, fresh_keys=("ck-q0", "ck-q1", "ck-q2"),
         max_cards=2, excerpt_chars=240, budget_left=5000)
     assert len(lines) == 2                       # `max_cards` 是硬上限
+    # 候选口径是"本轮新增 ∩ 冻结表",不是冻结表全体:`ck-old` 曾展示过、这一轮没被
+    # 动过,所以它一轮都不该被重算摘录(Q8 收窄范围要省的正是每轮 O(池) 次全文摘录)。
+    assert all("ck-old" not in line for line in lines)
+    assert delta.card_versions["ck-old"] == 1
     for line, key in zip(lines, ("ck-q0", "ck-q1")):
         assert f" | key={key} | " in line        # `key=` 那一格逐字不变
         assert line.split(" | ")[2] == "补充摘录 v2（上文同 key 的卡未被改写）"

@@ -642,6 +642,67 @@ def _delta_target_ratio(settings) -> float:
     return 0.5
 
 
+def _build_delta_snapshot(
+    state, delta: "ReflectDeltaState", observer, *, bound_keys, fresh_keys,
+    budget: int, state_chars: int, excerpt_chars: int, recent: int,
+    ratio: float,
+):
+    """建/重建一版 K,并把投影上的累计账**整体清零**(设计 §5.2 第 1–4 条)。
+
+    首次构造与重建走**同一份**代码:两者的区别只有调用方那边的 `generation` /
+    `rebuilds` 加不加,而"第一版按目标比例建、后面每一版也按目标比例建"正是 §5.2
+    首句要的东西(不先把池子填满、第二轮立刻重建)。写成两份的话,首版与重建版的
+    选卡判据迟早会漂开,而那种漂移在字节上看着完全正常。
+
+    **冻结表只增不减,`visible_keys` 随 K 收缩**(拍板存疑 1)。两者在第一次重建之
+    前恰好相等,之后就不再相等:`build_evidence_block` 读冻结表,所以一张曾展示过的
+    卡进新 K 时复用的仍是它第一次发出去的那串字节(§4.4「展示后保持不变」);而离开
+    新 K 的那些键不再"可见",以后经增量档序回到某一块 D 时同样复用冻结字节
+    (§4.4「可从已有内存池恢复」)。拿冻结表当可见集用的话,这批卡会被"曾展示"口径
+    永久挡在增量之外,而且不进任何一个 `omitted` ——它对模型从此不可见,却没有一个
+    计数披露这件事。
+
+    **两个观察切片不相交**(拍板存疑 2):`render_observations` 只吃近期窗、
+    `fold_observation_counts` 只吃窗外,于是"更早的 N 条未列出"与"总计已尝试 M 次"
+    各指自己那一段,恒等式是 `窗内已列 + 窗内 dropped + 窗外总计 == len(rows)`。喂
+    全量行给前者的话,它自己那圈收敛循环会按整份账写省略数,两句话于是各自成立却
+    互相矛盾。
+
+    游标推到账本末尾:那些还没进过任何一块 D 的观察行由这一版 K 的近期窗与折算计数
+    接过去,一条都没有被静默丢掉。纯计算、零 I/O、零 LLM、零配额。
+
+    模块级函数而不是方法:五项预算全部由 `_reflect_v2_context` 一处读完再传下来
+    (计划 §1 M5 的「全仓唯一读点」),所以这里一格 `self` 都不需要——「不会自己再读
+    一次 settings」这件事因此是结构成立的,不靠注释。
+    """
+    rows = observer.rows
+    selection = build_evidence_block(
+        collected=state.collected, elements=state.elements,
+        chunks=state.chunks, chains=state.chains,
+        bound_keys=bound_keys, fresh_keys=fresh_keys,
+        question=state.question, action_query=observer.last_query,
+        budget_chars=int(budget * ratio), excerpt_chars=excerpt_chars,
+        frozen_cards=delta.frozen_cards)
+    window = rows[-recent:] if recent > 0 else ()
+    earlier = rows[:len(rows) - len(window)]
+    evidence, history = compose_snapshot(
+        selection.text,
+        render_observations(
+            window, recent=recent, state_chars=int(state_chars * ratio)),
+        fold_observation_counts(earlier))
+    delta.snapshot_evidence = evidence
+    delta.snapshot_history = history
+    delta.blocks.clear()
+    delta.visible_keys = {str(key) for key in selection.shown_keys}
+    for key, text in selection.cards:
+        delta.note_shown(key, text)
+    delta.evidence_chars = len(evidence)
+    delta.history_chars = len(history)
+    delta.observation_cursor = len(rows)
+    state.ever_shown_outline_keys.update(selection.shown_keys)
+    return selection
+
+
 def _delta_cards(
     state, delta: "ReflectDeltaState", observer, *, bound_keys, fresh_keys,
     budget: int, max_cards: int, excerpt_chars: int,
@@ -4608,9 +4669,12 @@ class ReasoningRetriever:
         `outline` 从 `run()` 传进来而不是读 `state.outline`:那个局部名在应用大纲
         时被重新绑定过(`bind_outline_evidence` 返回新对象),`state` 上的是旧值。
 
-        `getattr` 读 settings:窄测试替身与离线工具的 duck-typed 适配器不带这四
+        `getattr` 读 settings:窄测试替身与离线工具的 duck-typed 适配器不带这几
         个字段(镜像 `reflect_v2_active` 的既有写法),缺省一律回到已登记的默认值,
-        绝不因为少一个字段就把预算当成 0。
+        绝不因为少一个字段就把预算当成 0。**六项预算在这一处读完**(四项既有 + 两个
+        PR-3 新增,计划 §1 M5):这个方法是它们的全仓唯一读点,`prefix_delta` 那一支
+        拿到的是这里算好的几个数,不是第二处 `getattr` ——同一个字段有两个读点时,
+        「两条臂用了不同的预算」在字节上看着完全正常。
 
         **布局分派(T-PS8)。** `reflect_optimization()` 那个单点说的是两条前缀臂之
         一时,同一批块按稳定性重排成 C/K/D/T(前缀复用设计 §4.1–4.5),并额外带上本
@@ -4658,6 +4722,17 @@ class ReasoningRetriever:
             or DEFAULT_REFLECT_EVIDENCE_CHARS_BY_EFFORT.get(effort)
             or DEFAULT_REFLECT_EVIDENCE_CHARS_BY_EFFORT[
                 DEFAULT_RETRIEVAL_EFFORT])
+        # 剩下三项既有预算与两个新配置(计划 §1 M5)。全部在**这一处**读完:那四项
+        # 的全仓唯一读点是这个方法(architecture.md 已登记),而两个新配置按同一条
+        # 先例落在同一处 —— delta 那一支拿到的是**这里算好的几个数**,不是第二处
+        # `getattr`。少了这一条,同一个字段会有两个读点,而关掉/改掉其中一处的后果
+        # 是「两条臂用了不同的预算」,在字节上看着完全正常。
+        excerpt_chars = int(getattr(
+            settings, "reasoning_reflect_excerpt_chars", 240))
+        recent = int(getattr(
+            settings, "reasoning_reflect_recent_observations", 6))
+        state_chars = int(getattr(
+            settings, "reasoning_reflect_state_chars", 6000))
         optimization = self.reflect_optimization()
         # 目录由 `_prime_static_catalog` 在本 run 第一次能力投影时写下,而 reflect
         # 循环里投影恒排在这个方法之前。真出现"策略开着却没有目录"的形态(总闸在
@@ -4669,8 +4744,11 @@ class ReasoningRetriever:
         if (optimization == "prefix_delta" and catalog is not None
                 and (delta is None or not delta.fallback)):
             context = self._reflect_delta_context(
-                state, summary, outline, observer,
-                budget=budget, effort=effort, catalog=catalog)
+                state, summary, outline, observer, catalog=catalog,
+                budget=budget, excerpt_chars=excerpt_chars,
+                state_chars=state_chars, recent=recent,
+                ratio=_delta_target_ratio(settings),
+                max_cards=_delta_max_cards(settings, effort))
             if context is not None:
                 return context
             # `None` = 这一轮刚刚不可逆地回退(投影上那格已经置位)。落到下面 P
@@ -4693,19 +4771,13 @@ class ReasoningRetriever:
             # `v2_request_query_text`)。
             question=state.question, action_query=observer.last_query,
             budget_chars=budget,
-            excerpt_chars=int(getattr(
-                settings, "reasoning_reflect_excerpt_chars", 240)),
+            excerpt_chars=excerpt_chars,
         )
         # **只登记真的渲染出来的键。**被预算挤出窗口的候选一个都不登记——模型没
         # 见过它,就不该因为"它在池子里"取得大纲绑定资格(设计稿 §6.2)。
         state.ever_shown_outline_keys.update(selection.shown_keys)
         observations = render_observations(
-            observer.rows,
-            recent=int(getattr(
-                settings, "reasoning_reflect_recent_observations", 6)),
-            state_chars=int(getattr(
-                settings, "reasoning_reflect_state_chars", 6000)),
-        )
+            observer.rows, recent=recent, state_chars=state_chars)
         measurement = self._reflect_measurement(state, selection)
         if optimization in _PREFIX_LAYOUTS and catalog is not None:
             # 两条前缀臂共用的那一支(T-PS8)。**只换块的位置,不换任何块的内容
@@ -4831,7 +4903,8 @@ class ReasoningRetriever:
 
     def _reflect_delta_context(
         self, state: "_ReasoningRunState", summary: str, outline, observer, *,
-        budget: int, effort: str, catalog,
+        catalog, budget: int, excerpt_chars: int, state_chars: int,
+        recent: int, ratio: float, max_cards: int,
     ) -> "Optional[ReflectContext]":
         """`prefix_delta` 的一轮装配(计划 §3 T-PD5;顺序 = 设计 §5.2 七步)。
 
@@ -4851,13 +4924,7 @@ class ReasoningRetriever:
         地方。回退**不清空**已发出的 D、不清空候选池、不清空
         `ever_shown_outline_keys`、不重置任何配额,也不多一次模型调用或轨迹步。
         """
-        settings = self.settings
         delta = state.reflect_delta
-        excerpt_chars = int(getattr(
-            settings, "reasoning_reflect_excerpt_chars", 240))
-        state_chars = int(getattr(
-            settings, "reasoning_reflect_state_chars", 6000))
-        max_cards = _delta_max_cards(settings, effort)
         bound_keys = evidence_bound_keys(
             state.aspects,
             [key for section in outline for key in section.evidence_keys])
@@ -4867,10 +4934,10 @@ class ReasoningRetriever:
         snapshot = None
         if delta is None:
             delta = state.reflect_delta = ReflectDeltaState()
-            snapshot = self._build_delta_snapshot(
+            snapshot = _build_delta_snapshot(
                 state, delta, observer, bound_keys=bound_keys,
                 fresh_keys=fresh_keys, budget=budget, state_chars=state_chars,
-                excerpt_chars=excerpt_chars)
+                excerpt_chars=excerpt_chars, recent=recent, ratio=ratio)
         # ② 待追加事件(全是纯读:这里一格都还没改投影)。
         pending_rows = observer.rows[delta.observation_cursor:]
         history_add = _joined_chars(
@@ -4887,10 +4954,10 @@ class ReasoningRetriever:
                 or (cards.omitted and not cards.shown_keys)):
             # ④ 重建:零 LLM、零 I/O。`blocks` 整体清空、两个累计计数重置、游标
             #    推到账本末尾(那些待追加的观察行由新 K 的近期窗接过去)。
-            snapshot = self._build_delta_snapshot(
+            snapshot = _build_delta_snapshot(
                 state, delta, observer, bound_keys=bound_keys,
                 fresh_keys=fresh_keys, budget=budget, state_chars=state_chars,
-                excerpt_chars=excerpt_chars)
+                excerpt_chars=excerpt_chars, recent=recent, ratio=ratio)
             delta.generation += 1
             delta.rebuilds += 1
             pending_rows = observer.rows[delta.observation_cursor:]
@@ -4944,67 +5011,6 @@ class ReasoningRetriever:
             observations=delta.snapshot_history,
             delta="\n\n".join(delta.blocks),
             static_delta=True, measurement=measurement)
-
-    def _build_delta_snapshot(
-        self, state: "_ReasoningRunState", delta: "ReflectDeltaState", observer,
-        *, bound_keys, fresh_keys, budget: int, state_chars: int,
-        excerpt_chars: int,
-    ):
-        """建/重建一版 K,并把投影上的累计账**整体清零**(设计 §5.2 第 1–4 条)。
-
-        首次构造与重建走**同一份**代码:两者的区别只有调用方那边的 `generation` /
-        `rebuilds` 加不加,而"第一版按目标比例建、后面每一版也按目标比例建"正是
-        §5.2 首句要的东西(不先把池子填满、第二轮立刻重建)。写成两份的话,首版与
-        重建版的选卡判据迟早会漂开,而那种漂移在字节上看着完全正常。
-
-        **冻结表只增不减,`visible_keys` 随 K 收缩**(拍板存疑 1)。两者在第一次
-        重建之前恰好相等,之后就不再相等:`build_evidence_block` 读冻结表,所以一张
-        曾展示过的卡进新 K 时复用的仍是它第一次发出去的那串字节(§4.4「展示后保持
-        不变」);而离开新 K 的那些键不再"可见",以后经增量档序回到某一块 D 时同样
-        复用冻结字节(§4.4「可从已有内存池恢复」)。拿冻结表当可见集用的话,这批卡
-        会被"曾展示"口径永久挡在增量之外,而且不进任何一个 `omitted` ——它对模型从
-        此不可见,却没有一个计数披露这件事。
-
-        **两个观察切片不相交**(拍板存疑 2):`render_observations` 只吃近期窗、
-        `fold_observation_counts` 只吃窗外,于是"更早的 N 条未列出"与"总计已尝试 M
-        次"各指自己那一段,恒等式是 `窗内已列 + 窗内 dropped + 窗外总计 ==
-        len(rows)`。喂全量行给前者的话,它自己那圈收敛循环会按整份账写省略数,两句
-        话于是各自成立却互相矛盾。
-
-        游标推到账本末尾:那些还没进过任何一块 D 的观察行由这一版 K 的近期窗与折算
-        计数接过去,一条都没有被静默丢掉。纯计算、零 I/O、零 LLM、零配额。
-        """
-        settings = self.settings
-        ratio = _delta_target_ratio(settings)
-        recent = int(getattr(
-            settings, "reasoning_reflect_recent_observations", 6))
-        rows = observer.rows
-        selection = build_evidence_block(
-            collected=state.collected, elements=state.elements,
-            chunks=state.chunks, chains=state.chains,
-            bound_keys=bound_keys, fresh_keys=fresh_keys,
-            question=state.question, action_query=observer.last_query,
-            budget_chars=int(budget * ratio), excerpt_chars=excerpt_chars,
-            frozen_cards=delta.frozen_cards)
-        window = rows[-recent:] if recent > 0 else ()
-        earlier = rows[:len(rows) - len(window)]
-        evidence, history = compose_snapshot(
-            selection.text,
-            render_observations(
-                window, recent=recent,
-                state_chars=int(state_chars * ratio)),
-            fold_observation_counts(earlier))
-        delta.snapshot_evidence = evidence
-        delta.snapshot_history = history
-        delta.blocks.clear()
-        delta.visible_keys = {str(key) for key in selection.shown_keys}
-        for key, text in selection.cards:
-            delta.note_shown(key, text)
-        delta.evidence_chars = len(evidence)
-        delta.history_chars = len(history)
-        delta.observation_cursor = len(rows)
-        state.ever_shown_outline_keys.update(selection.shown_keys)
-        return selection
 
     def _absorb_assessment(
         self, state: "_ReasoningRunState", decision: "ReflectDecision",
