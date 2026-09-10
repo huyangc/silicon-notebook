@@ -18529,6 +18529,36 @@ def test_a_lean_closing_turn_whose_assessment_lands_nothing_is_still_taken(rrepo
     assert _termination_skip(lean)["aspects_unassessed"] == 3
 
 
+def test_a_closing_turn_that_assesses_every_aspect_writes_a_real_zero(rrepo):
+    """(评审补充,质量评审 P3-2)三个方面**全部**被收尾轮评过 ⇒ 终态那一格是
+    真的 `0`,不是缺席。
+
+    `_THREE_ASPECTS` 那份夹注刻意点名"0 与 N 两个端点都可能被一个写错的实现碰
+    对":既有用例只覆盖了"评过两个、漏一个"(读数为 1)与"一个都没评"(读数为
+    N)这两种中间/满量形态,唯独没有"全评过"这个 0 端点——`sum(...)` 在计数为 0
+    时与"这一格没被写过"在 Python 里长得一样容易混淆(`0 or None` 就会把它揉成
+    `None`),这条补上那个端点。
+
+    变异:把 `_absorb_assessment` 收尾那条 `"aspects_unassessed": sum(...)` 改成
+    `sum(...) or None` ⇒ 这条红(读数从 `0` 变 `None`)。
+    """
+    reflects = _silent_closing_reflects()[:3]
+    reflects[2] = _answer(assessment={"unresolved": [
+        {"aspect_id": "a1", "status": "partial", "gap": "还缺功耗上限"},
+        {"aspect_id": "a2", "status": "partial", "gap": "还缺散热判据"},
+        {"aspect_id": "a3", "status": "partial", "gap": "还缺封装返修判据"}]})
+    _llm, lean = _measured_run(
+        rrepo, optimization=_LEAN, intent_detail=_THREE_ASPECTS,
+        reflects=reflects, chunk_results=_three_turn_chunks(),
+        reasoning_max_chunk_searches=2)
+    detail = _termination_skip(lean)
+    assert "aspects_unassessed" in detail
+    assert detail["aspects_unassessed"] == 0
+    # 贯通到顶层投影:读侧 `_int` 把真 `0` 与缺席分得开,不是 `sum` 的副作用。
+    row = _project(lean, _LEAN)
+    assert row["aspects_unassessed"] == 0
+
+
 def test_a_malformed_assessment_still_folds_the_whole_turn_under_lean(rrepo):
     """(d) 整份形状越界 ⇒ **照旧**折并扣步,L 一格都没放宽(计划「刻意不做」)。
 
@@ -18655,11 +18685,15 @@ def test_a_provider_fallback_turn_writes_neither_assessment_key(rrepo):
     连带钉住 `assessment_rows_total` 不是"全或无":一次偶发抖动不该把整条 run 从
     D↔L 的配对样本里挤出去(生产实测 118 次调用 24 次正文为空,不是边角)。
 
-    ⚠ **第一次失败那一轮仍然写**(登记的已知口径):它被折成 `model_degraded:` 的
-    invalid 伪动作、`fallback` 为 False,于是照常进 `_absorb_assessment`。那一轮
-    落账确实是 0 行,所以 `rows=0` 如实;`absent=True` 是"这份载荷里没有自评"的
-    字面读数,而它不出顶层投影(拍板 Q9)。要把它与模型自己的省略分开,读侧看的
-    是同一条 reflect 步上的 `next_action == __reflect_invalid__` 与那条降级观察行。
+    ⚠ **第一次失败那一轮也不写**(评审修正,质量评审 P2-1;推翻本函数早前登记的
+    "仍然写"口径)。它被折成 `model_degraded:` 的 invalid 伪动作、`fallback` 为
+    False,于是照常进 `_absorb_assessment`——但 `_absorb_assessment` 判的不是
+    `decision.fallback`,而是 `decision.assessment is None` 这条路上
+    `not decision.invalid_reason`:`_reflect_invalid` 是 `invalid_reason` 的唯一
+    产地,这一轮的决定正是它折出来的,不是模型自己的载荷,写 `absent=True` 会把
+    "服务端替模型编的伪动作"记成"模型省了自评"。所以两键都不写,该轮的
+    `assessment_observed` 如实变"未观测",与连续第二次失败(兜底决定原样交回、
+    同样不进吸收路径)结构上是同一件事,只是折叠的位置不同。
 
     `fail_calls` 按**调用**计数而不是按轮:一轮失败会触发一次加预算重试,所以
     "连续两轮都失败"要四次调用(第 2 轮的两次 + 第 3 轮的两次)。
@@ -18674,15 +18708,112 @@ def test_a_provider_fallback_turn_writes_neither_assessment_key(rrepo):
     assert len(details) == 3
     # 第 1 轮正常:落了两行。
     assert details[0]["assessment_rows"] == 2
-    # 第 2 轮是**第一次**失败 ⇒ 折成降级伪动作,照常进吸收路径(见 ⚠)。
+    # 第 2 轮是**第一次**失败 ⇒ 折成降级伪动作,照常进吸收路径,但那是折叠决定
+    # 而非模型载荷 ⇒ 两键都不写(见 ⚠)。
     assert details[1]["next_action"] == REFLECT_INVALID_ACTION
-    assert details[1]["assessment_absent"] is True
-    assert details[1]["assessment_rows"] == 0
-    # 第 3 轮是连续第二次 ⇒ 兜底决定原样交回,不进吸收路径 ⇒ 两键缺席。
+    assert "assessment_rows" not in details[1]
+    assert "assessment_absent" not in details[1]
+    # 第 3 轮是连续第二次 ⇒ 兜底决定原样交回,不进吸收路径 ⇒ 两键同样缺席。
     assert "assessment_rows" not in details[2]
     assert "assessment_absent" not in details[2]
     assert details[2]["fallback_reason"]
-    # 顶层:和仍然是真值,伴生列如实说"不全"。
+    # 顶层:和仍然是真值(只有第 1 轮落账),伴生列如实说"不全"。
+    row = _project(result, _LEAN)
+    assert row["assessment_rows_total"] == 2
+    assert row["assessment_observed"] is False
+
+
+def test_a_single_recovered_provider_failure_writes_neither_assessment_key(rrepo):
+    """(评审修正,质量评审 P2-1)单次 provider 空正文、随后恢复 ⇒ 那一步同样不写
+    两键,其余轮如常,`assessment_rows_total` 仍是真值。
+
+    与上一条(`..._provider_fallback_turn_writes_neither_assessment_key`)分工:
+    那条钉的是"连续两次失败、最终 fail-open"的完整链条,里面第二次失败的兜底
+    决定根本不进 `_absorb_assessment`(`decision.fallback` 挡在外面),不能单独
+    证明"第一次失败的折叠决定"这条路本身不写。这条只让通道抖一次就恢复——折叠
+    决定(`_reflect_invalid` 产的 `model_degraded:` 伪动作)`fallback` 为 False,
+    照常进 `_absorb_assessment`,判据是 `decision.invalid_reason` 而不是
+    `decision.fallback`。
+
+    变异:把 `_absorb_assessment` 的判据从 `not decision.invalid_reason` 退回
+    `assessment is None` ⇒ 第 2 轮多出 `assessment_absent=True`,这条红。
+    """
+    from app.services.reasoning_retrieval import REFLECT_INVALID_ACTION
+
+    # 三份模型载荷:落账两行 → 沉默(无自评)→ 沉默收尾。`fail_calls=(2, 3)` 在
+    # 第 2 份载荷成交**之前**插入一次单轮失败(两次尝试都打满预算,算作那一轮
+    # 唯一的一次失败),所以折叠会在 reflect 轨迹上单独多出一步——四步而不是三
+    # 步(与 `_silent_closing_reflects()` 里的三份模型载荷一一对应,只是中间
+    # 插了一步没有消费任何载荷的折叠)。
+    reflects = _silent_closing_reflects()[:3]
+    _llm, result = _measured_run(
+        rrepo, optimization=_LEAN, fail_calls=(2, 3),
+        intent_detail=_THREE_ASPECTS, reflects=reflects,
+        chunk_results=_three_turn_chunks(), reasoning_max_chunk_searches=2)
+    details = _reflect_details(result)
+    assert len(details) == 4
+    # 第 1 轮正常:落了两行。
+    assert details[0]["assessment_rows"] == 2
+    # 第 2 轮单次失败(两次尝试都打满预算,随后恢复)⇒ 折成降级伪动作,两键都
+    # 不写——它不是模型自己的载荷,没有消费任何一份模型载荷。
+    assert details[1]["next_action"] == REFLECT_INVALID_ACTION
+    assert "assessment_rows" not in details[1]
+    assert "assessment_absent" not in details[1]
+    # 第 3 轮真的恢复了:沉默(无自评),照常记 absent=True(模型自己的载荷)。
+    assert details[2]["assessment_rows"] == 0
+    assert details[2]["assessment_absent"] is True
+    # 第 4 轮:沉默收尾,同样是模型自己的载荷。
+    assert details[3]["assessment_rows"] == 0
+    assert details[3]["assessment_absent"] is True
+    # 顶层:和仍是真值,伴生列说"不全"(第 2 轮那一步缺席)。
+    row = _project(result, _LEAN)
+    assert row["assessment_rows_total"] == 2
+    assert row["assessment_observed"] is False
+
+
+def test_an_out_of_bounds_argument_folds_the_turn_without_writing_assessment_keys(
+    rrepo,
+):
+    """(评审修正,质量评审 P2-1)参数越界(而不是自评越界)折叠的那一轮同样不写
+    两键,即便载荷里带着一份合法的 `assessment`。
+
+    折叠发生在 `parse_reflect_v2` 里(`_v2_apply_arguments` 抛
+    `_V2ArgumentError`),那次返回的是 `_reflect_invalid(...)` 全新构造的决定
+    ——原始载荷里那份 `assessment` 根本没被搬上去,`decision.assessment` 恒为
+    None。这条与"自评本身越界"(`test_a_malformed_assessment_still_folds_the_whole_turn_under_lean`)
+    是两条不同的折叠路径,但落在 `_absorb_assessment` 里是同一条分支
+    (`decision.assessment is None`),判据同样是 `decision.invalid_reason`。
+
+    变异:把判据从 `not decision.invalid_reason` 退回 `assessment is None` ⇒
+    被折的那一轮多出 `assessment_absent=True`,这条红。
+    """
+    from app.services.reasoning_retrieval import REFLECT_INVALID_ACTION
+
+    reflects = _silent_closing_reflects()[:3]
+    reflects[1] = {
+        "next_action": "search_chunks", "sufficient": False,
+        "arguments": {"query": 123}, "reason": "参数越界",
+        "assessment": {"unresolved": [
+            {"aspect_id": "a1", "status": "partial", "gap": "还缺某某"}]},
+    }
+    _llm, result = _measured_run(
+        rrepo, optimization=_LEAN,
+        intent_detail=_THREE_ASPECTS, reflects=reflects,
+        chunk_results=_three_turn_chunks(), reasoning_max_chunk_searches=2)
+    details = _reflect_details(result)
+    assert len(details) == 3
+    # 第 1 轮正常:落了两行。
+    assert details[0]["assessment_rows"] == 2
+    # 第 2 轮参数越界 ⇒ 折成 invalid 伪动作,`assessment` 字段根本没搬上来,
+    # 两键都不写(即便原始载荷带了一份合法的自评)。
+    assert details[1]["next_action"] == REFLECT_INVALID_ACTION
+    assert "invalid_argument:query" in _skip_reasons(result)
+    assert "assessment_rows" not in details[1]
+    assert "assessment_absent" not in details[1]
+    # 第 3 轮:沉默收尾,照常记 absent=True。
+    assert details[2]["assessment_rows"] == 0
+    assert details[2]["assessment_absent"] is True
+    # 顶层:和仍是真值,伴生列说"不全"。
     row = _project(result, _LEAN)
     assert row["assessment_rows_total"] == 2
     assert row["assessment_observed"] is False
@@ -18790,9 +18921,14 @@ def test_the_lean_wiring_leaves_the_other_three_arms_untouched(
 ):
     """(g) 三臂:lean 的字节一个都没漏进去,detail 键集只多 Q10 登记的那一个。
 
-    本期改到的共用面全部"默认值中性"(`reflect_v2_static_prompt` 的 `lean`、
-    `render_aspect_status_block` 的 `lean`、`build_aspect_ledger` 的 `lean`、
-    `_prefix_context` 的 `static_lean`),而"默认中性"要用例证明。
+    本期改到的共用面里,`reflect_v2_static_prompt` 的 `lean`、
+    `render_aspect_status_block` 的 `lean`、`build_aspect_ledger` 的 `lean`
+    三处"默认值中性"由这条用例逐字断出(见下面的变异清单)。`_prefix_context`
+    的 `static_lean` 不在这条用例的证明范围内(评审修正,质量评审 P3-3):它的
+    两个调用点(`_reflect_v2_context` 的 D 支、`_reflect_delta_context`)各自
+    都显式传了 `static_lean=`,参数默认值在生产代码里没有任何一条活路径会用
+    到——三臂跑这条脚本因此测不出"默认值是不是中性",只是顺带确认了显式传值
+    那条路径本身没有泄漏 lean 字节(与上面三处属于不同的证明形状)。
 
     ⚠ **唯一允许的偏离**是终态那一步多一个 `aspects_unassessed`(拍板 Q10,已
     登记):它四臂无条件写,只在 L 写的话 D↔L 的配对表上这一列恒缺一半。三臂的
@@ -18885,6 +19021,62 @@ def test_the_aspect_ledger_has_exactly_one_construction_point(rrepo):
     )
     assert users == ["_absorb_assessment", "_open_v2_ledgers",
                      "_reflect_v2_context"], users
+
+
+def test_the_aspect_ledger_construction_reads_the_policy_bit_exactly_once(
+    rrepo, monkeypatch,
+):
+    """(h 续)运行期变异守卫(评审补充,质量评审 P3-1):一次账本构造内部,
+    `reflect_optimization()` 只准被读**一次**。
+
+    上一条 AST 守卫钉的是"`build_aspect_ledger(` 这个自由函数在模块里只有一个
+    直调点"(`_v2_build_aspect_ledger`)——它管得住"重新长出第二个直调点"这类
+    复制粘贴式回归,但管不住"直调点本身没变、内部却把策略位读了不止一次"这类
+    移动变异:比如把 `lean=self.reflect_optimization() == _LEAN_LAYOUT` 那一句
+    挪进一个新写的 helper,而那个 helper 自己不小心又读了一次
+    `self.reflect_optimization()`(两次读之间理论上可以撞见热更分歧,`lean=`
+    最终取到的是哪一次读的结果就变成未定义行为)。AST 判据看到的仍然是"只有一处
+    调 `build_aspect_ledger(`",这条红不了。
+
+    所以这里换一把运行期的尺子:包一层计数器在 `reflect_optimization` 上,再包
+    一层在 `_v2_build_aspect_ledger` 上记录"这次调用期间计数器走了几格",跑一条
+    多轮的 lean run,断言每一次账本构造的那一格增量都恰好是 1(而且本 run 只
+    构造一次账本——`_open_v2_ledgers` 在首轮 reflect 之前就把账本建好了,循环
+    本体的每一轮都不会重新触发构造)。两把守卫分工不同、都要留着。
+
+    变异:在 `_v2_build_aspect_ledger` 内部(比如 `lean=` 那一行之外)再加一次
+    `self.reflect_optimization()`(哪怕结果丢弃不用)⇒ 这条红。
+    """
+    from app.services.reasoning_retrieval import ReasoningRetriever
+
+    reads: list = []
+    original_read = ReasoningRetriever.reflect_optimization
+
+    def _counting_read(self):
+        reads.append(1)
+        return original_read(self)
+
+    monkeypatch.setattr(ReasoningRetriever, "reflect_optimization", _counting_read)
+
+    deltas: list = []
+    original_build = ReasoningRetriever._v2_build_aspect_ledger
+
+    def _counting_build(self, state):
+        before = len(reads)
+        ledger = original_build(self, state)
+        deltas.append(len(reads) - before)
+        return ledger
+
+    monkeypatch.setattr(
+        ReasoningRetriever, "_v2_build_aspect_ledger", _counting_build)
+
+    _llm, result = _lean_aspect_run(
+        rrepo, intent_detail=_THREE_ASPECTS,
+        reflects=_silent_closing_reflects()[:3],
+        chunk_results=_three_turn_chunks(), reasoning_max_chunk_searches=2)
+    assert len(_reflect_details(result)) == 3   # 脚本真的跑完了三轮,不是空转
+    # 本 run 只建一次账本(首轮 reflect 之前),那一次内部只读一次策略位。
+    assert deltas == [1], deltas
 
 
 def test_the_prefix_context_never_reads_the_policy_bit_a_second_time(rrepo):
