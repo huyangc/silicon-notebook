@@ -1,9 +1,11 @@
+import contextvars
 import httpx
 import random
 import re
 import time
+from contextlib import contextmanager
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Literal, Optional
+from typing import Any, Callable, Dict, Iterator, List, Literal, Optional
 
 from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI
 
@@ -210,6 +212,56 @@ def cap_kwargs(client: Any, attr: str) -> Dict[str, Any]:
     return budget_kwargs(getattr(client, "settings", None), attr)
 
 
+#: OFFLINE EXPERIMENT SEAM, default off. Holds ``(head, tail)`` marker strings
+#: for the E1 prefix-sensitivity probe (design §9.1), or ``None`` — which is
+#: what every production path reads, because nothing in ``app/services/`` or
+#: ``app/application/`` may import this or the scope below (there is a negative
+#: import assertion in ``backend/tests/test_llm_client.py`` saying so, and an
+#: AST assertion that ``.set()`` happens in exactly one place: the context
+#: manager underneath).
+#:
+#: A ContextVar rather than a ``chat_json`` keyword because a public transport
+#: signature must not grow an "experiment injection slot": ``ScheduledJsonChat
+#: Client.chat_json`` enumerates its parameters item by item and would have to
+#: forward one, and design §9.1 refuses request-level injection outright. Being
+#: a ContextVar also means the value follows the call into the provider's
+#: scheduling thread, which copies the context (``model_provider`` runs the
+#: submission inside ``submission_context.run``), so the seam holds under async
+#: dispatch without anyone threading an argument through it.
+#:
+#: The marker values are locally allocated fixed-width short codes with no
+#: semantics. They exist so a probe can vary WHICH part of a request is stable
+#: between consecutive calls while the body and the output task stay identical;
+#: nothing here observes, reports or infers provider cache behaviour.
+_EXPERIMENT_MARKERS: "contextvars.ContextVar[Optional[tuple[str, str]]]" = (
+    contextvars.ContextVar("llm_experiment_message_markers", default=None)
+)
+
+
+@contextmanager
+def experiment_message_markers(head: str, tail: str) -> Iterator[None]:
+    """Open the E1 marker seam for the duration of the block (offline only).
+
+    The ONLY place ``_EXPERIMENT_MARKERS`` is set. Inside the block every
+    ``chat_json`` on this context sends ``head`` as its own system message
+    ahead of the wrapper and ``tail`` appended to the last message's content;
+    outside it, ``provider_messages`` returns byte-for-byte what it returned
+    before this seam existed.
+
+    Reset happens in a ``finally``, so an exception inside the block cannot
+    leave a marker armed for whatever runs next on this context — the failure
+    mode that matters here, since a leaked marker does not crash anything: it
+    silently appends two meaningless segments to every subsequent request and
+    makes ``llm_key`` differ on each one (defeating the local response cache
+    wholesale) while every log line still looks entirely normal.
+    """
+    token = _EXPERIMENT_MARKERS.set((str(head), str(tail)))
+    try:
+        yield
+    finally:
+        _EXPERIMENT_MARKERS.reset(token)
+
+
 #: The wrapper system message this client puts in front of every caller's
 #: messages. Spelled once, here, because two places must agree on it byte for
 #: byte: what actually goes on the wire, and what any measurement of the
@@ -222,7 +274,9 @@ _PROVIDER_WRAPPER_PREFIX = (
 
 
 def provider_messages(
-    messages: List[Dict[str, str]], response_schema_hint: str
+    messages: List[Dict[str, str]],
+    response_schema_hint: str,
+    markers: Optional[tuple[str, str]] = None,
 ) -> List[Dict[str, str]]:
     """The exact message list this client sends to the provider: the wrapper
     system message (role brief + schema hint) followed by the caller's own
@@ -245,14 +299,53 @@ def provider_messages(
     not covered by this function or by anything measured on top of it. That copy
     is a known duplicate, deliberately left where it is; a measurement of the KG
     path would have to account for it separately rather than assume this one.
+
+    ``markers`` is the offline E1 seam (see ``_EXPERIMENT_MARKERS``) and is
+    ``None`` on every production path, where the first branch below returns the
+    same expression this function has always returned. That is a contract, not
+    a hopeful description: ``provider_messages(m, h)`` and
+    ``provider_messages(m, h, markers=None)`` are byte-identical to each other
+    and to the pre-seam function, and the tests keep an independent
+    transcription of that expression so a drift here cannot pass.
+
+    With markers supplied, ``head`` becomes its own system message at index 0
+    — AHEAD of the wrapper, so the wrapper and everything behind it keep their
+    byte offsets across a series — and ``tail`` is appended to the LAST
+    message's content. The tail lands on a COPY of that mapping, so the
+    never-mutates promise above covers the marker path too: the probe reuses
+    ONE fixed body across a whole series, and mutating it would accumulate
+    markers into that body, turning "same body, different marker" (the only
+    thing the probe varies) into "a body that grows every call". Every other
+    message is still passed through by reference.
+
+    Appending rather than starting a second message keeps the message COUNT at
+    the marker-free count plus exactly one (the head), so "one extra tail
+    message" cannot become a variable of its own (design §9.1). With an empty
+    ``messages`` the wrapper IS the last message and takes the tail; that
+    degenerate input does not arise in the probe, and appending to the
+    genuinely-last message is the honest reading of it either way.
     """
-    return [
+    if markers is None:
+        return [
+            {
+                "role": "system",
+                "content": f"{_PROVIDER_WRAPPER_PREFIX}{response_schema_hint}",
+            },
+            *messages,
+        ]
+    head, tail = markers
+    marked = [
+        {"role": "system", "content": head},
         {
             "role": "system",
             "content": f"{_PROVIDER_WRAPPER_PREFIX}{response_schema_hint}",
         },
         *messages,
     ]
+    last = dict(marked[-1])
+    last["content"] = f"{last.get('content') or ''}{tail}"
+    marked[-1] = last
+    return marked
 
 
 def serialize_provider_messages(messages: List[Dict[str, str]]) -> bytes:
@@ -637,7 +730,19 @@ class OpenAICompatibleClient:
         # Single assembly point (see provider_messages): what goes on the wire,
         # what feeds the cache key, and what a measurement layer reconstructs are
         # the same list, produced by the same pure function.
-        full_messages = provider_messages(messages, response_schema_hint)
+        #
+        # The ContextVar read is the whole cost of the E1 seam on this path, and
+        # it resolves to None everywhere except inside an offline probe's
+        # `experiment_message_markers` block; `provider_messages` then returns
+        # its pre-seam expression. Read HERE, at the one assembly point, so both
+        # markers land in `full_messages` and therefore in all three of its
+        # consumers below — the cache key, the interaction log and `.create()`.
+        # The cache key matters most: a probe arm that varies its head marker
+        # per call must get a different `llm_key` each time, or the local
+        # response store could answer a call the probe believes it timed.
+        full_messages = provider_messages(
+            messages, response_schema_hint, markers=_EXPERIMENT_MARKERS.get()
+        )
         model = self.model
         # Some OpenAI-compatible models accept only one provider-defined
         # nucleus-sampling value (for example top_p=0.95).  A physical-service
