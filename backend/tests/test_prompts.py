@@ -614,22 +614,28 @@ def test_reflect_v2_static_prompt_lean_replaces_not_appends_the_assessment_parag
 
 
 def test_reflect_v2_lean_assessment_instruction_states_the_five_rules():
-    """五句关键短语(计划 T-PL3 要点)逐条都在:(1) 只报变化/省略保留/不追问;
-    (2) 收尾轮同一份 JSON 给最终变化与缺口/不为记账退回一轮;(3) 字段与上界
-    照旧;(4) 独立校验/只作废那一个方面/整轮才作废的三个条件;(5) 方面清单
-    只能用户改/省略不等于证据不存在。
+    """五句关键短语(T-PL3 评审修正轮定稿文本)逐条都在:(1) 只报变化/省略保留/
+    已支撑不必重述/不追问/首轮全量算变化/listing 整格替换;(2) 收尾轮同一份
+    JSON 给最终变化与缺口/不为记账退回一轮;(3) 字段与上界(含非法键剔除降级、
+    同方面不得跨表重复、组内行数上限);(4) 独立校验/只作废那一个方面/键被剔
+    仍接受但可能掉档/只有整份读不出归属才作废整轮(含行数超限那一条)。(5) 方面
+    清单只能用户改/省略不等于证据不存在。
 
     变异:删掉任意一句的关键短语 ⇒ 对应断言红。
     """
     from app.services.prompts import _V2_LEAN_ASSESSMENT_INSTRUCTION as lean
 
     # (1) 只报本轮变化;省略的方面保留服务端记着的状态;已支撑项不必重述;
-    # 省略不花代价也不会被追问。
+    # 省略不花代价也不会被追问;首轮(还没判断过任何东西)全量都算变化;
+    # 报一次就整格替换,想保留的键要一并带上(评审 F3/P1-1)。
     assert "report only what CHANGED" in lean
-    assert "keeps the status the server already has for it" in lean
+    assert "an aspect you omit keeps its recorded status" in lean
     assert "does not need restating" in lean
     assert "costs nothing" in lean
     assert "will not be chased with a follow-up question" in lean
+    assert "everything you can judge now counts as a change" in lean
+    assert "REPLACES its whole row" in lean
+    assert "resend the keys you still stand behind" in lean
     # (2) 收尾轮(answer 或 sufficient=true)同一份 JSON 给出最终变化与缺口;
     # 没走到的方面留着不评;服务端不会为补齐账目退回一轮。
     assert "closing turn" in lean
@@ -637,15 +643,24 @@ def test_reflect_v2_lean_assessment_instruction_states_the_five_rules():
     assert "final changes and gaps you can judge as of this turn" in lean
     assert "stays unassessed" in lean
     assert "will not send you back for another turn just to square the ledger" in lean
-    # (3) 字段与上界照旧。
-    assert "Fields and bounds are unchanged" in lean
+    # (3) 字段与上界:非法证据键剔除并可能掉档(评审 F2/P2-2)、同一方面不得跨
+    # 两个列表各出现一次(评审 P2-2)、组内行数上限(评审 F1/P2-1)。
+    assert "Fields and bounds:" in lean
+    assert "never a document title, a source id or a collection name" in lean
+    assert "keys the server never showed you are dropped" in lean
+    assert "stops counting as supported" in lean
+    assert "the same aspect appears at most once across both lists" in lean
     # (4) 独立校验;只作废那一个方面(保留旧状态、下一轮状态块告知原因);
-    # 检索动作照常执行;只有整份读不出归属才作废整轮。
+    # 检索动作照常执行;键被剔的行被接受但可能掉档(不是"保留旧状态",评审
+    # F2/P2-2);只有整份读不出归属(含行数超限,评审 F1/P2-1)才作废整轮。
     assert "validated independently" in lean
     assert "invalidates only THAT aspect" in lean
-    assert "keeps its prior status and next turn's status block tells you why" in lean
-    assert "this turn's retrieval action, still go through as normal" in lean
+    assert "keeps its prior status and the next turn's status block tells you why" in lean
+    assert "this turn's retrieval action still goes through as normal" in lean
+    assert "A row whose keys were dropped is accepted with the keys that remain" in lean
+    assert "may lose its supported status" in lean
     assert "cannot attribute at all" in lean
+    assert "a list over its row cap" in lean
     assert "invalidates the whole turn" in lean
     # (5) 方面清单只能由用户改;省略不等于「这条证据不存在」。
     assert "that list comes from the user and only the user changes it" in lean
@@ -653,20 +668,26 @@ def test_reflect_v2_lean_assessment_instruction_states_the_five_rules():
 
 
 def test_reflect_v2_lean_assessment_instruction_bounds_share_the_protocol_constants():
-    """三个上界数字(status 枚举、每方面证据键数、gap 字符数上限)与协议常量
-    同源插值,不是手抄的字面量——改常量,文案跟着变(计划 T-PL3 要点)。
+    """四个上界数字(status 枚举、每方面证据键数、gap 字符数上限、组内行数上限)
+    与协议常量同源插值,不是手抄的字面量——改常量,文案跟着变(T-PL3 评审修正轮)。
 
-    变异:把插值换成手写数字 ⇒ 改常量后这条红(字面量与常量不再一致)。
+    变异:把任一处插值换成手写数字 ⇒ 改对应常量后这条红(字面量与常量不再
+    一致)。
     """
     from app.domain.retrieval_termination import (
         ASPECT_UNRESOLVED_STATUSES, REFLECT_ASPECT_GAP_MAX_CHARS,
+        REFLECT_ASPECT_GROUP_ROWS_FACTOR, REFLECT_ASPECT_GROUP_ROWS_HARD_MAX,
         REFLECT_ASPECT_MAX_EVIDENCE_KEYS,
     )
     from app.services.prompts import _V2_LEAN_ASSESSMENT_INSTRUCTION as lean
 
     assert f"`{'|'.join(ASPECT_UNRESOLVED_STATUSES)}`" in lean
-    assert f"{REFLECT_ASPECT_MAX_EVIDENCE_KEYS} evidence keys" in lean
+    assert f"at most {REFLECT_ASPECT_MAX_EVIDENCE_KEYS} keys" in lean
     assert f"{REFLECT_ASPECT_GAP_MAX_CHARS} characters of gap" in lean
+    assert (
+        f"at most {REFLECT_ASPECT_GROUP_ROWS_FACTOR} rows per aspect, capped "
+        f"at {REFLECT_ASPECT_GROUP_ROWS_HARD_MAX}" in lean
+    )
 
 
 def test_reflect_v2_static_prompt_lean_is_keyword_only():
@@ -724,15 +745,15 @@ def test_reflect_v2_static_prompt_lean_true_is_stable_across_repeated_calls():
 
 #: `reflect_v2_static_prompt(full_house_catalog, delta=False, lean=True)` 的
 #: golden(用例 (f),照 P 臂 golden 先例)。
-_PL3_STATIC_LEAN_LEN = 11453
+_PL3_STATIC_LEAN_LEN = 12097
 _PL3_STATIC_LEAN_SHA256 = (
-    "01be5fcaa90c487223d895d8a8dbca7780a6244373b634cadea2462a85de12c4")
+    "032fb6b3bf2f22ac935207598a566c0a30b8fb88c3717fa6ac37ea54544fb0a9")
 
 #: `reflect_v2_static_prompt(full_house_catalog, delta=True, lean=True)` 的
 #: golden——生产唯一真实组合(`prefix_delta_lean` 是 `prefix_delta` + lean 段)。
-_PL3_STATIC_DELTA_LEAN_LEN = 12960
+_PL3_STATIC_DELTA_LEAN_LEN = 13604
 _PL3_STATIC_DELTA_LEAN_SHA256 = (
-    "2deb65442492e7d8f5264dcd495fc2ac38c862cd5f7e7e5a44b40e07e8377af1")
+    "88b11b290043881e9a39df2eaf32eb1359e891325c2adda0e1816a69041bb1c3")
 
 
 def test_reflect_v2_static_prompt_lean_arm_delta_false_is_byte_frozen_against_a_golden():

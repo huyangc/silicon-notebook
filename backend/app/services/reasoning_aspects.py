@@ -37,7 +37,8 @@ from app.domain.retrieval_termination import (
     ASPECT_SUPPORTED, ASPECT_UNKNOWN,
     ASPECT_UNRESOLVED_STATUSES, AspectDelivery, AspectSnapshot,
     DEMOTION_KEYS_MISSING, DEMOTION_KEYS_REJECTED,
-    REFLECT_ASPECT_GAP_MAX_CHARS, REFLECT_ASPECT_MAX_EVIDENCE_KEYS,
+    REFLECT_ASPECT_GAP_MAX_CHARS, REFLECT_ASPECT_GROUP_ROWS_FACTOR,
+    REFLECT_ASPECT_GROUP_ROWS_HARD_MAX, REFLECT_ASPECT_MAX_EVIDENCE_KEYS,
     RetrievalTermination,
     TERMINATION_MODEL_DEGRADED, TERMINATION_MODEL_PARTIAL,
     TERMINATION_MODEL_SUFFICIENT, TERMINATION_NO_EXECUTABLE_ACTION,
@@ -763,11 +764,10 @@ class AspectLedger:
             demotion=demotion), ""
 
 
-#: 一组自评的行数相对方面数的倍率,与它并行的绝对行数上限。两者取**较小**的那
-#: 一个当上限:方面少的时候按倍率收紧(1 个方面不该收到 20 行),方面多的时候
-#: 由绝对值兜住(16 个方面 × 4 = 64 恰好压在绝对值上)。
-_GROUP_ROWS_FACTOR = 4
-_GROUP_ROWS_HARD_MAX = 64
+#: `REFLECT_ASPECT_GROUP_ROWS_FACTOR` / `REFLECT_ASPECT_GROUP_ROWS_HARD_MAX`
+#: (倍率与并行的绝对行数上限)住在 `app.domain.retrieval_termination`:T-PL3
+#: 的 lean 自评段要把这两个数插值进 prompt,而 prompts 不能 import 这个服务
+#: 模块——理由与上面那两个常量相同。
 
 
 def _group_row_cap(aspect_count: int) -> int:
@@ -782,9 +782,14 @@ def _group_row_cap(aspect_count: int) -> int:
     不超过方面总数;真正会重复的那一族由 `duplicate_aspect`(冲突)与
     `_Update.content` 去重(完全相同)各自处理,一格都不多占。
     留下来的只是一道"这份载荷大得不像一次自评"的闸:它不表达任何语义判断,只
-    避免服务端为一份几万行的数组白跑一遍规划。
+    避免服务端为一份几万行的数组白跑一遍规划。方面少的时候按倍率收紧(1 个
+    方面不该收到 20 行),方面多的时候由绝对值兜住(16 个方面 × 4 = 64 恰好
+    压在绝对值上)。
     """
-    return min(aspect_count * _GROUP_ROWS_FACTOR, _GROUP_ROWS_HARD_MAX)
+    return min(
+        aspect_count * REFLECT_ASPECT_GROUP_ROWS_FACTOR,
+        REFLECT_ASPECT_GROUP_ROWS_HARD_MAX,
+    )
 
 
 def _mark_rejected(
