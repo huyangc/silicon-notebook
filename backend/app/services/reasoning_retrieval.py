@@ -610,6 +610,33 @@ def _joined_chars(parts: "Sequence[str]") -> int:
     return sum(len(part) + 1 for part in parts if part)
 
 
+def _delta_pending_charges(
+    cards_text: str, lines: "Sequence[str]", notes: "Sequence[str]",
+) -> "Tuple[int, int]":
+    """待追加的这一块要向两个池各要多少字节:`(证据池, 历史池)`。纯计算。
+
+    准入判断与落账**同一处口径**(设计 §5.1):块头与卡片节计证据池,动作观察行与
+    "已接受的方面更新"那一句计历史池。这个函数的返回值就是后面那两条 `+=` 的加数
+    ——`_DELTA_HEAD_CHARS` 与 `_joined_chars` 都是产地那两个,不是第二份等价实现。
+    (块头按 `_DELTA_HEAD_CHARS` 计,`generation > 1` 那个后缀两侧同样都不计:准入
+    与落账用同一个常量才是这里要的性质,而不是各自更精确一点。)
+
+    **块会不会是空的**由 `build_delta_block` 自己回答(三节全空 ⇒ 空串 ⇒ 什么都不追
+    加 ⇒ 两笔账各 0)。`generation=1` 只是为了问这一句而给的哑值:那一格只改块头的
+    文字,不参与"有没有内容"的判据。空判据在这里第二次实现的后果是它与产地漂开——
+    那时准入会为一块根本不会发出去的块去算两笔费用,或者反过来放过一块真会发出去
+    的块,而两种都在字节上看着完全正常。
+
+    codex #707 R1 P2:少了这一处,只带观察行/方面 note、没有候选新卡的那些轮
+    (`crowded` 为假)会**无条件**追加,即使块头已经顶破剩余证据池、或那句 note 顶
+    破历史池——而 delta 的两笔账是逐块累计的,一次放过就一路带下去。
+    """
+    if not build_delta_block(cards_text, lines, notes, generation=1):
+        return 0, 0
+    return (_DELTA_HEAD_CHARS + len(cards_text),
+            _joined_chars(lines) + _joined_chars(notes))
+
+
 def _delta_max_cards(settings, effort: str) -> int:
     """`prefix_delta` 单块最多新展开几张卡(按档位)。
 
@@ -4857,9 +4884,12 @@ class ReasoningRetriever:
         # 回退之后上文里仍留着那几块 D(拍板 Q4),而这一支每轮自己重选一版 K。所以
         # **回退轮及此后每一轮**都要按保留 D 已经占掉的那两半收窄:证据池给 K 的额度
         # 是「档位池 − 保留 D 的证据半」、近期观察窗是「`state_chars` − 保留 D 的历史
-        # 半」,而保留 D 里已经可见的那些键排除在 K 的候选之外。少了这三格,一条消息
-        # 里会有两份都不带版本标记的同一张卡(§5 风险 4),两个池子各涨到档位的两倍,
-        # 而且回退不可逆 ⇒ 保留块永不清,这不是一轮的尖峰。`delta is None`
+        # 半」,而保留 D 里已经可见的那些键排除在 K 的候选之外(`exclude_keys`,对
+        # **全部三档**生效——第三档的键序由 `build_evidence_block` 自己从池子里算,
+        # 在这里滤 `bound_keys`/`fresh_keys` 只挡住了三分之二,codex #707 R1 P2 的
+        # 复现正是"两档都不含它、它仍从第三档进 K")。少了这三格,一条消息里会有两
+        # 份都不带版本标记的同一张卡(§5 风险 4),两个池子各涨到档位的两倍,而且回
+        # 退不可逆 ⇒ 保留块永不清,这不是一轮的尖峰。`delta is None`
         # (`off` / `prefix_snapshot`)⇒ 四格全中性,两条臂逐字节回到接入前。
         carried = _carried_delta(delta)
         selection = build_evidence_block(
@@ -4871,12 +4901,15 @@ class ReasoningRetriever:
             # 不会被方面代表挤出去(理由见 `evidence_bound_keys` 的 docstring)。
             # `build_evidence_block` 一个字都没改:它当初就把这一档定义成"一份
             # 键序",T4 只是把方面那半并进来。
-            bound_keys=[key for key in evidence_bound_keys(
+            bound_keys=evidence_bound_keys(
                 state.aspects,
-                [key for section in outline for key in section.evidence_keys])
-                if str(key) not in carried.keys],
-            fresh_keys=[key for key in observer.fresh_result_ids()
-                        if str(key) not in carried.keys],
+                [key for section in outline for key in section.evidence_keys]),
+            fresh_keys=observer.fresh_result_ids(),
+            # 保留 D 里已经可见的键**一处排除、三档同时生效**(上面那段注释)。
+            # 排除写在这一个参数上而不是逐档滤:同一条判据的第二份实现改一处时另
+            # 一处会静默变成陈的,而"第三档的候选序调用方看不见"让那份陈的实现从
+            # 一开始就只对两档有效。空集(`off` / `prefix_snapshot`)⇒ 逐字节不变。
+            exclude_keys=carried.keys,
             # 摘录检索词取**原始查询文本**,不是规范化身份串(见
             # `v2_request_query_text`)。
             question=state.question, action_query=observer.last_query,
@@ -5052,13 +5085,20 @@ class ReasoningRetriever:
         下一次重建时按同一档序回得来;前者只在"这一块什么新证据都发不出去"时动手,
         重建抖动因此少一个数量级。代价如实登记:紧预算下一张新卡可能晚几轮才进上文。
 
+        **准入判的是「完整的待追加块」对两个池各要多少字节**,不只是那几张卡
+        (`_delta_pending_charges`,与落账同一处口径;codex #707 R1 P2)。一块 D 里
+        除了卡片节还有块头、观察行和方面 note 三样,而只带观察行的那些轮"有候选卡却
+        一张都装不下"这条判据恒假——于是块头(与那句 note)会**无条件**追加,而这两笔
+        账是逐块累计的:995/5990 的用量在 1000/6000 的上限下追加成 1071/6017,一次放
+        过就一路带下去。任一池顶破 ⇒ 走重建。
+
         **重建有迟滞**(`ReflectDeltaState.rebuilt_last_turn`):上一轮刚压紧过一版、
         这一轮又连一张新卡都装不下 ⇒ 这个预算下压缩已经无效,再压一次是纯空转(每
         轮一次全池 `build_evidence_block` + K 重写 ⇒ 公共前缀塌回只剩 C,这条臂在它
-        自己要改进的两个轴上反而比 `prefix_snapshot` 更贵)。那时直接走回退。历史池
+        自己要改进的两个轴上反而比 `prefix_snapshot` 更贵)。那时直接走回退。两个池
         溢出触发的重建**只在本轮不拥挤时**不受迟滞约束(判据是
         `crowded and rebuilt_last_turn`):账本真的又长了、而新证据还装得下时,压缩
-        对它仍然有效;同一轮里既历史溢出、又连一张新卡都装不下的话,迟滞照样赢——
+        对它仍然有效;同一轮里既池子溢出、又连一张新卡都装不下的话,迟滞照样赢——
         那时压缩已经证明无效,再压一次仍然是空转。
 
         返回 `None` = **这一轮刚刚不可逆地回退**(拍板 Q4)。用返回值而不是在这里
@@ -5078,6 +5118,14 @@ class ReasoningRetriever:
         (回退不可逆 ⇒ 保留块永不清,这不是一轮的尖峰)。另外两件事各自成立:上文里
         已经发出的 D 一个字节都没变,而 `ever_shown_outline_keys` 只登记真发出去过的
         键(被丢弃那一版 K 的选取一格都不登记)。
+
+        ⚠ **唯一允许越界的形态**(拍板,codex #707 R1 P2):本轮**没有候选新卡**、
+        而块头 + 观察行(+ 方面 note)重建之后**仍然**顶破证据池或历史池 ⇒ 这一块
+        照发,记账如实记成超出。理由是观察行是本轮那次动作在上下文里的**唯一**记录,
+        把它推到下一轮就等于让模型看不见自己刚做过什么;而"有候选新卡却装不下"那条
+        形态仍然走既有回退判据(⑤)。既然记账如实,`delta.evidence_chars` /
+        `history_chars` 下一轮必然仍在阈值之上 ⇒ **下一轮必重建**,越界因此是一轮的
+        事,不是一路带下去。
         """
         delta = state.reflect_delta
         bound_keys = evidence_bound_keys(
@@ -5095,22 +5143,34 @@ class ReasoningRetriever:
                 excerpt_chars=excerpt_chars, recent=recent, ratio=ratio)
         # ② 待追加事件(全是纯读:这里一格都还没改投影)。观察行只渲染一次,下面
         #    的记账与 `build_delta_block` 复用同一份列表(同一个输入渲染三遍是这条
-        #    臂本来就要省的那类开销)。
+        #    臂本来就要省的那类开销)。方面 note 也在这里定下来:它同样是**这一块
+        #    的内容**,所以准入要算它的费用(codex #707 R1 P2),而它一直到追加之后
+        #    才被消费,中间的重建不碰它。
         pending_lines = [
             render_observation_row(row)
             for row in observer.rows[delta.observation_cursor:]]
-        history_add = _joined_chars(pending_lines)
+        notes = tuple(delta.pending_aspect_notes)
         cards = _delta_cards(
             state, delta, observer, bound_keys=bound_keys,
             fresh_keys=fresh_keys, budget=budget, max_cards=max_cards,
             excerpt_chars=excerpt_chars)
+        evidence_add, history_add = _delta_pending_charges(
+            cards.text, pending_lines, notes)
         # ③ 只有"待追加的 D 装不下"才重建(设计 §5.2:短循环不按固定轮数压缩)。
+        #    判据是**完整的待追加块**对两个池各要多少字节(`_delta_pending_charges`,
+        #    与落账同一处口径):块头 + 卡片节顶破证据池、或观察行 + 方面 note 顶破
+        #    历史池,任一成立就走重建。只看"有候选卡却一张都装不下"的话,只带观察行
+        #    的那些轮 `crowded` 恒假、于是块头无条件追加,而这两笔账是**逐块累计**的
+        #    (codex #707 R1 P2 的复现:995/5990 用量、1000/6000 上限 ⇒ 追加后
+        #    1071/6017 而不重建)。
         #    刚建过 K 的那一轮不重建:那一版是这一刻能给出的最紧的一版,再压一次
         #    是纯空转,而 §5 风险 5 点名要挡的就是这种震荡。
         crowded = bool(cards.omitted and not cards.shown_keys)
         rebuilt = False
-        if snapshot is None and (
-                delta.history_chars + history_add > state_chars or crowded):
+        if snapshot is None and (crowded
+                                 or delta.evidence_chars + evidence_add > budget
+                                 or delta.history_chars + history_add
+                                 > state_chars):
             # **先存一份此刻的 D**:这一支的两条判据都可能走到回退,而重建的第一件
             # 事就是清空 `blocks`、把两笔账重置成新 K 的长度。上文里那些标着"新增"
             # 的块是模型已经读过的材料,抽掉它们等于让一整段上文凭空消失(拍板 Q4
@@ -5140,16 +5200,19 @@ class ReasoningRetriever:
             pending_lines = [
                 render_observation_row(row)
                 for row in observer.rows[delta.observation_cursor:]]
-            history_add = _joined_chars(pending_lines)
             cards = _delta_cards(
                 state, delta, observer, bound_keys=bound_keys,
                 fresh_keys=fresh_keys, budget=budget, max_cards=max_cards,
                 excerpt_chars=excerpt_chars)
+            evidence_add, history_add = _delta_pending_charges(
+                cards.text, pending_lines, notes)
             # ⑤ 本轮**有候选新卡、重建之后一张都装不下** ⇒ 压缩已经无效,本 run
             #    剩余部分回退(拍板 Q4,不可逆)。没有候选新卡的那些轮不回退:那
             #    是"这一轮没有新证据",不是"装不下新证据",而 D 本来就允许为空。
             #    (不再合取"没有待追加的观察行":重建刚把游标推到账本末尾,那一格
             #    在这个位置恒真,写上去只是让判据看起来比实际宽。)
+            #    重建之后两笔费用**重算一次**,但没有候选新卡时它们不再是回退判据
+            #    (拍板:那一形态照发,见这个方法 docstring 最后一段)。
             if cards.omitted and not cards.shown_keys:
                 _delta_fallback(delta, carried)
                 return None
@@ -5171,7 +5234,6 @@ class ReasoningRetriever:
                          - len(cards.text)))
         cards_text = "\n".join(
             part for part in (cards.text, *supplements) if part)
-        notes = tuple(delta.pending_aspect_notes)
         block = build_delta_block(
             cards_text, pending_lines, notes, generation=delta.generation)
         if block:
@@ -5181,9 +5243,12 @@ class ReasoningRetriever:
             # 记账口径:块头按每块一次计进**证据池**(与 K 把
             # `EVIDENCE_BLOCK_TITLE` 算进 `used` 同一条);动作观察行与"已接受的
             # 方面更新"那一句计进**历史池**(设计 §5.1:历史池计 K 的可压缩历史
-            # 摘要与各 D 的动作/历史判断)。判断在追加**之前**做,记账在之后。
+            # 摘要与各 D 的动作/历史判断)。判断在追加**之前**做,记账在之后,而
+            # 两处的加数由 `_delta_pending_charges` 一处给出——历史那一笔直接就是
+            # 它算的 `history_add`(观察行 + note 一起),证据那一笔要把补充卡也算
+            # 进去,而补充卡的额度上面已经按 `budget_left` 从同一份剩余里切过。
             delta.evidence_chars += _DELTA_HEAD_CHARS + len(cards_text)
-            delta.history_chars += history_add + _joined_chars(notes)
+            delta.history_chars += history_add
             # **只登记真的渲染出来的键**(设计稿 §6.2):被预算或 `max_cards` 挤
             # 出这一块的候选一个都不登记,模型没见过它就不该取得绑定资格。
             for key, text in cards.cards:
