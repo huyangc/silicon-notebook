@@ -28,6 +28,7 @@ from app.eval.reflect_prefix_probe import (
     DEFAULT_CALLS_PER_SERIES,
     DEFAULT_TIERS,
     PROBE_OUTPUT_INSTRUCTION,
+    PROBE_SCHEMA_HINT,
     PROBE_ROW_KEYS,
     SMOKE_BLOCKS,
     VERDICTS,
@@ -1058,3 +1059,25 @@ def test_fixture_sample_has_no_urls_credentials_or_real_question_text():
         assert banned not in lowered, banned
     parsed = json.loads(raw)
     assert set(parsed) == {"version", "note", "tier_chars", "seed_paragraphs"}
+
+
+
+def test_probe_schema_hint_is_in_the_repository_example_dialect():
+    """E1 的 schema hint 必须过 `ScheduledJsonChatClient` 真实那道校验。
+
+    真机上 `reasoning_agent` 是 JSON-repair 工作负载,每格响应都经
+    `parse_model_json_object` + `validate_model_json_shape(content, hint)`;
+    hint 写成 JSON-Schema 方言时,合法的 `{"ok": true}` 与 hint 顶层键零交集,
+    整批 97 格全部 `missing_expected_key`(2026-09-11 本机实跑)。
+    """
+    from app.core.model_json import (
+        ModelJsonRepairError, parse_model_json_object, validate_model_json_shape,
+    )
+
+    for content in ('{"ok": true}', '{"ok": false}'):
+        parsed = parse_model_json_object(content, PROBE_SCHEMA_HINT, allow_repair=False)
+        validate_model_json_shape(parsed.content, PROBE_SCHEMA_HINT)
+    with pytest.raises(ModelJsonRepairError):
+        validate_model_json_shape('{"type": "object"}', PROBE_SCHEMA_HINT)
+    with pytest.raises(ModelJsonRepairError):
+        validate_model_json_shape("{}", PROBE_SCHEMA_HINT)

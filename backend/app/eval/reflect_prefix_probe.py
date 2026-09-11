@@ -266,10 +266,13 @@ GROWING_BLOCK_KEY = "evidence_cards"
 PROBE_OUTPUT_INSTRUCTION = (
     '仅返回如下 JSON,不要输出其它文字或代码块标记:{"ok": true}'
 )
-PROBE_SCHEMA_HINT = (
-    '{"type":"object","properties":{"ok":{"type":"boolean"}},'
-    '"required":["ok"],"additionalProperties":false}'
-)
+#: 仓库的 schema hint 是**示例形**(`{"key": example}`),不是 JSON Schema:
+#: `app.core.model_json.validate_model_json_shape` 把 hint 顶层键当作期望键,
+#: 响应与之零交集就以 `missing_expected_key` 拒收。此前这里写成 JSON-Schema
+#: 方言(`{"type":"object","properties":…}`),`ScheduledJsonChatClient` 对
+#: `reasoning_agent` 这个 JSON-repair 工作负载逐格校验,于是真机上每一格合法
+#: 的 `{"ok": true}` 都被判 malformed——测试里的假客户端不走这道校验,没抓到。
+PROBE_SCHEMA_HINT = '{"ok": true}'
 
 
 def sample_tier_chars(sample: Mapping) -> dict[str, int]:
