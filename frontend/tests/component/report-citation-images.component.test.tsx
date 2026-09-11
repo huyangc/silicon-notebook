@@ -148,7 +148,7 @@ test("正文图片的 caption 只作为 alt，不在正文重复显示", async (
   renderBody("结论 [k1]。", referenceWithImage());
 
   const imageRegion = await screen.findByRole("complementary", { name: "引用图片 [1]" });
-  expect(within(imageRegion).getByRole("img", { name: "图 1：时钟树收敛示意" })).toBeInTheDocument();
+  expect(await within(imageRegion).findByRole("img", { name: "图 1：时钟树收敛示意" })).toBeInTheDocument();
   expect(imageRegion.textContent).not.toContain("图 1：时钟树收敛示意");
 });
 

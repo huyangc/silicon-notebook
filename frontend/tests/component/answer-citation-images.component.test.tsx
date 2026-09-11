@@ -144,7 +144,7 @@ test("caption 只作为图片 alt，不在正文或引用浮层重复显示", as
   const { container } = renderAnswer(anchorAnswerWithImages());
 
   const imageRegion = await screen.findByRole("complementary", { name: "引用图片 [1]" });
-  expect(within(imageRegion).getByRole("img", { name: "图 1：示意图" })).toBeInTheDocument();
+  expect(await within(imageRegion).findByRole("img", { name: "图 1：示意图" })).toBeInTheDocument();
   expect(imageRegion.textContent).not.toContain("图 1：示意图");
 
   await user.click(screen.getByRole("button", { name: "[1]" }));
@@ -460,7 +460,7 @@ test("citation 回退编号携带 images 时也在正文引用位置插图", asy
   renderAnswer(answer);
 
   const region = await screen.findByRole("complementary", { name: "引用图片 [1]" });
-  expect(within(region).getByRole("img", { name: "图 2" })).toBeInTheDocument();
+  expect(await within(region).findByRole("img", { name: "图 2" })).toBeInTheDocument();
   expect(region.textContent).not.toContain("图 2");
 });
 
