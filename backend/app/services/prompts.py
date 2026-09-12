@@ -1397,7 +1397,9 @@ _V2_REASON_RULE = (
 )
 
 
-def reflect_v2_system_prompt(capabilities, unavailable_max: int = 6) -> str:
+def reflect_v2_system_prompt(
+    capabilities, unavailable_max: int = 6, *, assessment: bool = True,
+) -> str:
     """The FIXED instruction half of a v2 reflect turn (design doc §6.3).
 
     Task, untrusted-material framing, scope rules, the action space with its
@@ -1428,7 +1430,7 @@ def reflect_v2_system_prompt(capabilities, unavailable_max: int = 6) -> str:
         + _v2_unavailable_block(capabilities, unavailable_max)
         + "\n"
         + _V2_STOPPING_RULE
-        + _V2_ASSESSMENT_INSTRUCTION
+        + (_V2_ASSESSMENT_INSTRUCTION if assessment else "")
         + _V2_REASON_RULE
     )
 
@@ -1565,6 +1567,7 @@ _V2_DELTA_INSTRUCTION = (
 
 def reflect_v2_static_prompt(
     catalog, *, delta: bool = False, lean: bool = False,
+    assessment: bool = True,
 ) -> str:
     """The RUN-STABLE instruction half of a ``prefix_snapshot``/``prefix_delta``
     (and, with ``lean=True``, ``prefix_delta_lean``) reflect turn.
@@ -1604,15 +1607,23 @@ def reflect_v2_static_prompt(
     Deliberately a separate function rather than a flag on
     ``reflect_v2_system_prompt``: see that function's docstring.
     """
+    catalog_instruction = _V2_STATIC_CATALOG_INSTRUCTION
+    delta_instruction = _V2_DELTA_INSTRUCTION if delta else ""
+    if not assessment:
+        # These execution limits no longer contain model-authored aspect state.
+        aspect_limit = ", the current status of every mandatory aspect"
+        catalog_instruction = catalog_instruction.replace(
+            aspect_limit, "").replace("Those four win", "Those limits win")
+        delta_instruction = delta_instruction.replace(aspect_limit, "")
     return (
         _V2_TASK_FRAMING
-        + _V2_STATIC_CATALOG_INSTRUCTION
-        + (_V2_DELTA_INSTRUCTION if delta else "")
+        + catalog_instruction
+        + delta_instruction
         + _v2_action_lines(catalog)
         + "\n"
         + _V2_STOPPING_RULE
-        + (_V2_LEAN_ASSESSMENT_INSTRUCTION if lean
-           else _V2_ASSESSMENT_INSTRUCTION)
+        + ((_V2_LEAN_ASSESSMENT_INSTRUCTION if lean
+            else _V2_ASSESSMENT_INSTRUCTION) if assessment else "")
         + _V2_REASON_RULE
     )
 
@@ -1673,7 +1684,7 @@ def reflect_v2_prefix_user_prompt(
     )
 
 
-def reflect_v2_schema_hint(capabilities) -> str:
+def reflect_v2_schema_hint(capabilities, *, assessment: bool = True) -> str:
     """The v2 response schema: one ``arguments`` object, no branch fields.
 
     ``next_action`` lists every RECOGNISABLE action, not this turn's available
@@ -1722,8 +1733,8 @@ def reflect_v2_schema_hint(capabilities) -> str:
         '{"next_action":"' + "|".join(capabilities.recognized_actions) + '",'
         '"sufficient":false,'
         '"arguments":{},'
-        '"assessment":{},'
-        '"reason":""}'
+        + ('"assessment":{},' if assessment else "")
+        + '"reason":""}'
     )
 
 

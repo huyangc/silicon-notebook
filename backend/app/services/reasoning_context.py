@@ -1286,6 +1286,8 @@ class ReflectContext:
     static_prompt: str = ""
     delta: str = ""
     measurement: Optional[ReflectMeasurement] = None
+    #: Frozen run contract, also used by the model-output schema.
+    assessment_enabled: bool = True
 
     #: 两条前缀臂**独有**的四格(`delta` 只有 `prefix_delta` 会填,其余三格两条臂
     #: 共用)。两个渲染方法各自据此拒绝对面那条臂的载荷:布局在
