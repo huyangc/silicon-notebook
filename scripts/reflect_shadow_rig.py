@@ -1798,7 +1798,7 @@ def _settings_by_arm(
     两条断言都是「不断言就会安静跑出一批臂对不上号的数据」:
 
     * v2 总闸按 policy 对号(与 `_settings_by_policy` 逐字同一条);
-    * optimization 按声明对号。不在 `Literal` 四格里的拼写(比如手滑写成
+    * optimization 按声明对号。不在 `Literal` 闭集里的拼写(比如手滑写成
       `prefix_delta_leen`)由 pydantic 在**构造期**就抛 `ValidationError`,所以
       那条路径不会走到这里;这条断言挡的是**别名或接线漂移**——`Settings` 的
       字段别名改了名、`--arms` 的取值与配置枚举分了叉、或者这个函数哪天不再
@@ -4960,7 +4960,7 @@ def state_probe_arms(args: argparse.Namespace) -> list[str]:
     `prefix_delta_lean`(L)即可。
 
     与 `ab_arms`/`reflect_ab.parse_arms` 是**同一个 `--arms` 参数、两套读法**:
-    那一套解析的是 `policy:optimization` 两维、且只认 `ARMS` 里五个合法组合;
+    那一套解析的是 `policy:optimization` 两维、且只认 `ARMS` 里的合法组合;
     E2 结构上只有一维(`policy` 恒 `v2`,design §9.2 的 B 就是「当前 v2
     snapshot」),拿两维的解析器读一维输入只会把 `off,prefix_snapshot` 错读成
     `[("off","off"), ("prefix_snapshot","off")]` 这种没有意义的东西,所以这里
@@ -7504,8 +7504,11 @@ def build_parser() -> argparse.ArgumentParser:
              "`legacy:prefix_snapshot` 这类合法值的非法组合、重复臂与空写法"
              "(`--arms \"\"`)都当场拒绝,不退化成默认两臂。"
              "与 --only-policy 互斥。`search`/`ask` 不读它。"
+             "证据展示与缓存布局新档显式写 `legacy,v2:prefix_delta_evidence`，"
+             "或 `v2:prefix_delta,v2:prefix_delta_evidence` 对照逐项自评。"
              "**`state-probe`(E2)读法不同**:一维,逗号分隔的 off/"
-             "prefix_snapshot/prefix_delta/prefix_delta_lean 子集(不给 = "
+             "prefix_snapshot/prefix_delta/prefix_delta_lean/prefix_delta_evidence "
+             "子集(不给 = "
              "默认三臂 off,prefix_snapshot,prefix_delta,U2 拍板;加"
              "prefix_delta_lean 即可跑四臂),没有『一次一对』或『:优化』写法",
     )

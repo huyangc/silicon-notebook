@@ -88,7 +88,8 @@ REFLECT_DELTA_CARDS_MAX = 16
 # (拍板 Q12):下一次再要挪入新格时,不需要动 `validate_reflect_optimization`
 # 一行,只需要在这里把新格从 `PLANNED` 挪到 `IMPLEMENTED`。
 REFLECT_OPTIMIZATION_IMPLEMENTED = (
-    "off", "prefix_snapshot", "prefix_delta", "prefix_delta_lean")
+    "off", "prefix_snapshot", "prefix_delta", "prefix_delta_lean",
+    "prefix_delta_evidence")
 REFLECT_OPTIMIZATION_PLANNED: "tuple[str, ...]" = ()
 REFLECT_OPTIMIZATIONS = REFLECT_OPTIMIZATION_IMPLEMENTED + REFLECT_OPTIMIZATION_PLANNED
 
@@ -1094,12 +1095,13 @@ class Settings(BaseSettings):
     # ——各处自己读一次 settings 正是"关掉之后总会剩下一处还在跑"的老形状。
     #
     # 它也**不是**前端检索档位,更不由档位推导:用户选的是检索深度,不是上下文
-    # 布局。取值闭集见 `REFLECT_OPTIMIZATIONS`;四格现在全部已实现——闭集之外的
+    # 布局。取值闭集见 `REFLECT_OPTIMIZATIONS`;五格现在全部已实现——闭集之外的
     # 拼写由下面的 `Literal` 挡住,`validate_reflect_optimization` 的"已登记但
     # 未实现即响亮拒绝"这条机制仍在,只是 `REFLECT_OPTIMIZATION_PLANNED` 收窄为
     # 空之后对任何取值恒放行(拍板 Q12)。
     reasoning_reflect_optimization: Literal[
-        "off", "prefix_snapshot", "prefix_delta", "prefix_delta_lean"
+        "off", "prefix_snapshot", "prefix_delta", "prefix_delta_lean",
+        "prefix_delta_evidence"
     ] = Field("off", validation_alias="REASONING_REFLECT_OPTIMIZATION")
     # 上下文测量开关,与上面那格**正交**:开着时 reflect 每轮多算一份纯内存的
     # 块长/字节/公共前缀观测,`off` 臂因此也能出 `message_prefix_bytes`——对照实验
@@ -1799,19 +1801,19 @@ class Settings(BaseSettings):
     def validate_reflect_optimization(cls, value):
         """已登记但**尚未实现**的取值必须在启动期就响亮拒绝。
 
-        闭集写全四格(而不是逐 PR 只列已实现的那几格)是刻意的:
+        闭集包括已实现与已登记待实现的取值:
         `REFLECT_OPTIMIZATIONS` 同时是文档数值表与轨迹投影的字面量来源,每放开
         一格就改一次枚举会让"这个部署跑的是哪一格"在历史轨迹里失去可比性。但
         **登记 ≠ 可用**——静默把一个已登记但未实现的取值退回 `off` 会让一个自以
         为在跑那条臂的部署,把每一条测量都归到错误的臂上;那比启动失败难查
         得多。
 
-        `mode="after"`(默认):Literal 先把四格之外的拼写挡掉,报的是取值不在闭
-        集;进到这里的一定是四格之一。PR-4(T-PL1)把最后一格 `prefix_delta_lean`
+        `mode="after"`(默认):Literal 先把闭集之外的拼写挡掉,报的是取值不在闭
+        集;进到这里的一定是已登记取值。PR-4(T-PL1)把 `prefix_delta_lean`
         挪进 `REFLECT_OPTIMIZATION_IMPLEMENTED` 之后,`REFLECT_OPTIMIZATION_PLANNED`
         收窄为空元组——这条校验器**保留**(下一次再要新开一格时不用碰它,只需要
         在登记处把新格搬进 `PLANNED`),但闭集为空时 `value in
-        REFLECT_OPTIMIZATION_PLANNED` 恒为假,所以它对四格里的任何取值恒放行
+        REFLECT_OPTIMIZATION_PLANNED` 恒为假,所以它对已登记的任何取值恒放行
         (拍板 Q12)。
         """
         if value in REFLECT_OPTIMIZATION_PLANNED:

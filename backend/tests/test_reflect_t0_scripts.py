@@ -3336,6 +3336,28 @@ def test_an_undeclared_baseline_arm_is_refused_at_the_command_line(tmp_path):
         analyze.main([str(source), "--baseline-arm", "prefix_dleta"])
 
 
+def test_pair_rows_keep_the_evidence_only_arm_in_the_delta_comparison(
+    tmp_path, capsys,
+):
+    source = _write_rows(tmp_path / "rows.jsonl", [
+        _pair_row_fixture("B-q01", "prefix_delta", run_wall_ms=9000),
+        _pair_row_fixture("B-q01", "prefix_delta_evidence", run_wall_ms=6000),
+    ])
+    output = tmp_path / "comparison.json"
+    assert analyze.main([
+        str(source), "--pair-rows", "--baseline-arm", "prefix_delta",
+        "--min-samples", "1", "--out-json", str(output),
+    ]) == 0
+    capsys.readouterr()
+    pairs = json.loads(output.read_text("utf-8"))["optimization_pair_rows"]
+    assert len(pairs["cells"]) == 1
+    cell = pairs["cells"][0]
+    assert cell["variant_arm"] == "prefix_delta_evidence"
+    assert cell["variant"]["optimization"] == {"prefix_delta_evidence": 1}
+    assert cell["metrics"]["run_wall_ms"] == {
+        "delta_ms": -3000.0, "ratio": 0.6667}
+
+
 def test_pair_rows_take_the_median_over_repeats_before_comparing(
     tmp_path, capsys,
 ):
