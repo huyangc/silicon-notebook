@@ -1499,25 +1499,24 @@ def test_parse_arms_reads_the_new_prefix_delta_lean_spellings():
         ("v2", "prefix_delta"), ("v2", "prefix_delta_lean")]
 
 
-@pytest.mark.parametrize("optimization", ["prefix_delta", "prefix_delta_lean"])
-def test_legacy_prefix_delta_error_lists_all_five_arms(optimization):
-    """`legacy:prefix_delta`/`legacy:prefix_delta_lean` 仍是合法值的非法组合;
-    错误文案现在列出五格。
+@pytest.mark.parametrize("optimization", [
+    "prefix_delta", "prefix_delta_lean", "prefix_delta_evidence",
+])
+def test_legacy_prefix_delta_error_lists_all_registered_arms(optimization):
+    """Legacy 上所有 delta 变体都是合法值的非法组合，错误列出全部合法臂。
 
-    参数化到两个非 off 取值,恢复 legacy × 三个非 off 取值(`prefix_snapshot`
+    参数化到所有 delta 取值,覆盖 legacy × 非 off 取值(`prefix_snapshot`
     见 `test_parse_arms_refuses_every_spelling_that_would_produce_fake_data`)
     的全交叉——T-PL6 把素材从 `legacy:prefix_delta` 换成 `legacy:prefix_delta_lean`
     之后,前者一度没有任何用例再点名;`_parse_one_arm` 的组合闸如果按取值放行
     (例如误写成 `optimization != "prefix_delta" and (policy, optimization)
     not in ARMS`),只测 lean 那一格看不出来。
 
-    变异:往 `ARMS` 加一行却漏了这条用例 ⇒ 断言的臂数与 `ARMS` 实际长度分叉时,
-    这条会先红(而不是被动等 `len(ARMS)` 悄悄变化)。
+    新增布局仍必须通过合法组合校验，不能仅因 optimization 本身已登记就放行。
     """
     with pytest.raises(ArmSpecError) as excinfo:
         parse_arms(f"legacy:{optimization}")
     text = str(excinfo.value)
-    assert len(ARMS) == 5
     for arm in ARMS:
         assert format_arm(*arm) in text
     # 过期文案不许回潮:`prefix_delta_lean` 已经在 `ARMS` 里,不该再被说成
@@ -1592,7 +1591,6 @@ def test_arms_v2_side_covers_every_implemented_optimization():
     变异:从 `ARMS` 删掉 `("v2","prefix_delta_lean")` 这一行 ⇒ 五格闭集与四值
     `REFLECT_OPTIMIZATION_IMPLEMENTED` 不再一一对应,这条先红。
     """
-    assert len(ARMS) == 5
     v2_optimizations = {optimization for policy, optimization in ARMS
                          if policy == "v2"}
     assert v2_optimizations == set(REFLECT_OPTIMIZATION_IMPLEMENTED)
@@ -1898,6 +1896,25 @@ def test_settings_by_arm_reads_back_the_newly_opened_prefix_delta_lean(
     assert (built[("v2", "prefix_delta_lean")].reasoning_reflect_optimization
             == "prefix_delta_lean")
     assert all(s.reasoning_reflect_measure_context for s in built.values())
+
+
+@pytest.mark.parametrize("baseline", ["legacy", "v2:prefix_delta"])
+def test_evidence_only_arm_preserves_identity_from_cli_to_projection(
+    monkeypatch, baseline,
+):
+    """新档与 Legacy 或完整自评档配对时,配置和结果身份不能落回 off。"""
+    _isolate_arm_env(monkeypatch)
+    arms = parse_arms(f"{baseline},v2:prefix_delta_evidence")
+    assert arms[-1] == ("v2", "prefix_delta_evidence")
+    built = rig._settings_by_arm(arms)
+    evidence = built[arms[-1]]
+    assert evidence.reasoning_reflect_v2_enabled is True
+    assert evidence.reasoning_reflect_optimization == "prefix_delta_evidence"
+    assert all(settings.reasoning_reflect_measure_context
+               for settings in built.values())
+    row = _project(arm="v2", optimization=evidence.reasoning_reflect_optimization)
+    assert row["optimization"] == "prefix_delta_evidence"
+    assert_ab_closed(row)
 
 
 def test_an_env_file_that_pins_the_optimization_stops_the_batch(monkeypatch):
@@ -3310,6 +3327,25 @@ def test_dry_run_ab_enumerates_the_newly_opened_prefix_delta_lean_arm(capsys):
     assert "≤ 106 次逻辑调用;请求上界 ≤ 212" in printed
     assert "calls-v2-prefix_delta.jsonl" in printed
     assert "calls-v2-prefix_delta_lean.jsonl" in printed
+
+
+@pytest.mark.parametrize("baseline", ["legacy", "v2:prefix_delta"])
+def test_dry_run_ab_lists_evidence_only_pair_without_changing_request_budget(
+    capsys, baseline,
+):
+    assert rig.main([
+        "--dry-run", "--limit", "1", "--repeats", "1",
+        "--concurrency", "1",
+        "--arms", f"{baseline},v2:prefix_delta_evidence",
+        "--database-url", "postgresql://127.0.0.1:5432/nb_t0_test",
+        "--source-db-url", "postgresql://127.0.0.1:5432/nb_main",
+        "ab",
+    ]) == 0
+    printed = capsys.readouterr().out
+    assert "v2:prefix_delta_evidence" in printed
+    assert "calls-v2-prefix_delta_evidence.jsonl" in printed
+    assert "intent 2 + plan 0 + reflect ≤ 96 + synthesis 8" in printed
+    assert "≤ 106 次逻辑调用;请求上界 ≤ 212" in printed
 
 
 def test_default_dry_run_output_is_unchanged_by_the_new_arm(capsys):

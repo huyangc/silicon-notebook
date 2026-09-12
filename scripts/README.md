@@ -457,8 +457,8 @@ python scripts/reflect_shadow_rig.py --dry-run \
 #    REASONING_REFLECT_OPTIMIZATION。`legacy:prefix_snapshot` 这类合法值的非法
 #    组合、重复臂、空段都在跑批之前响亮拒绝。
 #    第二维要跑 `prefix_delta` 就把 `--arms` 换成 `v2:off,v2:prefix_delta`
-#    (或 `v2:prefix_snapshot,v2:prefix_delta`);跑 `prefix_delta_lean`(D↔L 是
-#    本设计里唯一一对只差自评合同的配对臂,收益不得归因到缓存本身)就换成
+#    (或 `v2:prefix_snapshot,v2:prefix_delta`);跑 `prefix_delta_lean`(D↔L
+#    对照自评合同,收益不得归因到缓存本身)就换成
 #    `v2:prefix_delta,v2:prefix_delta_lean`——一次只收一对:
 python scripts/reflect_shadow_rig.py \
   --database-url postgresql://127.0.0.1:5432/<库名>_test \
@@ -471,13 +471,54 @@ python scripts/reflect_shadow_rig.py \
 **`ab` 的臂是二维的**(前缀复用最终设计 §11)。`--arms` 收两种写法,产出同一种
 结构:一维 `legacy,v2`(省略的第二维一律补 `off`,不跟随进程默认——那会让同一条
 命令在两台机器上跑出两批数据)、二维 `v2:off,v2:prefix_snapshot`。合法组合是
-**五格**——`legacy:off` / `v2:off` / `v2:prefix_snapshot` / `v2:prefix_delta` /
-`v2:prefix_delta_lean`(`reflect_ab.ARMS`):v2 总闸关时 `reflect_optimization()`
+**六格**——`legacy:off` / `v2:off` / `v2:prefix_snapshot` / `v2:prefix_delta` /
+`v2:prefix_delta_lean` / `v2:prefix_delta_evidence`(`reflect_ab.ARMS`):v2 总闸关时 `reflect_optimization()`
 恒返回 `off`,所以 legacy 那一维上没有「前缀」这个概念。`prefix_delta_lean`
-(简称 L)字节上是 `prefix_delta`(D)的双胞胎,唯一差别是自评合同——**D↔L 是
-这份设计里唯一一对只差自评合同的配对臂**,两者之间量出的任何收益都不得归因到
+(简称 L)与 `prefix_delta`(D)共用消息装配,差别是自评合同——**D↔L 是
+比较自评合同的配对臂**,两者之间量出的任何收益都不得归因到
 前缀缓存本身,那笔账已经在 D↔P 那一对上算过了。`--arms` 与 `--only-policy`
 **互斥**(后者是一维时代按 policy 过滤默认两臂的写法)。
+
+**证据展示与缓存布局实验：`prefix_delta_evidence`。** 本档保留 `prefix_delta`
+的证据卡、稳定前缀、快照与增量观察，移除逐项自评指令、输出、自评追问和自评缺口
+对合成的影响；用户的必答主题和约束继续保留。它与 `prefix_delta_lean` 不同，
+后者仍然维护逐项自评。默认配置和不带 `--arms` 的命令均不启用新档。
+
+复用同一份已准备好的测试语料，固定模型、thinking/输出预算、题集、检索档位和
+其他设置；先串行跑下面两批，各批 `--concurrency 1`，避免多批并行增加端点负载。
+两条命令使用不同输出目录，不能覆盖上一批证据。以下变量分别指测试库 URL、主库
+只读核对 URL 和固定的配置文件；先加 `--dry-run` 核对计划，再去掉它开始实际调用。
+
+```bash
+# 新版本整体相对 Legacy 的效果。
+python scripts/reflect_shadow_rig.py \
+  --database-url "$REFLECT_TEST_DB_URL" --source-db-url "$REFLECT_SOURCE_DB_URL" \
+  --env-file "$REFLECT_ENV_FILE" --concurrency 1 --repeats 3 \
+  --efforts standard --efforts deep \
+  --arms legacy,v2:prefix_delta_evidence --keep-raw-trace \
+  --out-dir .local/ab-evidence-vs-legacy ab
+
+# 相同 delta 布局下，关闭逐项自评的端到端影响。
+python scripts/reflect_shadow_rig.py \
+  --database-url "$REFLECT_TEST_DB_URL" --source-db-url "$REFLECT_SOURCE_DB_URL" \
+  --env-file "$REFLECT_ENV_FILE" --concurrency 1 --repeats 3 \
+  --efforts standard --efforts deep \
+  --arms v2:prefix_delta,v2:prefix_delta_evidence --keep-raw-trace \
+  --out-dir .local/ab-evidence-vs-delta ab
+
+python scripts/analyze_reasoning_trace.py \
+  .local/ab-evidence-vs-delta/ab-runs.jsonl --key-set ab \
+  --pair-rows --baseline-arm prefix_delta \
+  --out-json .local/ab-evidence-vs-delta/comparison.json \
+  --out-md .local/ab-evidence-vs-delta/comparison.md
+```
+
+两批各自做题目、语料格和档位内的配对，不能把不同批次的独立 P50 相除。
+先读完整问答耗时、反思轮数、输入/输出量及失败/空答案，再结合 `calls-<arm>.jsonl`
+拆分调用耗时和重试，并盲评关键事实、任务完成度和引用。未知的缓存读数保持未知，
+公共前缀长度只说明可复用的结构，最终是否加速用实测时间判断。新档不输出逐项自评，
+因此方面计数与自评测量应读作未测/不适用；缺失自评追问次数归零是协议变化，不能当作质量提升。原始轨迹含内容，
+只保存在本地实验目录，不提交到仓库。
 
 **D↔L 这一对的差值现在可以由 `optimization_pair_table`(`scripts/
 analyze_reasoning_trace.py`)直接给出——这条已知限制已解除(PR-5 T-EX9)**:
@@ -862,7 +903,8 @@ python scripts/reflect_shadow_rig.py --dry-run --database-url postgresql://h/db_
 
 **默认三臂**(U2 拍板):`off, prefix_snapshot, prefix_delta`(policy 恒
 `v2`;`off` = design §9.2 的 B,当前 v2 snapshot)。`--arms` 给逗号分隔的
-`OPTIMIZATIONS` 子集可以再加 `prefix_delta_lean`(L)。**这是一维**——与
+`OPTIMIZATIONS` 子集可以再加 `prefix_delta_lean`(L)或 `prefix_delta_evidence`。
+**这是一维**——与
 `ab`/`reflect_ab.parse_arms` 那套 `policy:optimization` 两维解析器是同一个
 `--arms` 参数、两套读法,互不复用。
 

@@ -89,28 +89,22 @@ ARM_POLICIES: tuple[str, ...] = POLICY_VERSIONS
 #:   `off`(全仓唯一读点,见 `reasoning_retrieval.reflect_optimization`),所以
 #:   `legacy:prefix_snapshot` 不是「还没实现」,而是**结构上不存在**:声明它只会
 #:   得到一条 optimization 写着 `prefix_snapshot`、实际跑 `off` 的假数据。
-#: * v2 侧列**本期已实现的全部四格**,`legacy` 侧只有 `off`,合计五格。
-#:   `prefix_delta_lean`(简称 L)字节上是 `prefix_delta`(D)的双胞胎——同一份
-#:   消息装配,唯一差别是自评合同(PR-4 T-PL3/T-PL4/T-PL5)。**D↔L 是这份设计
-#:   里唯一一对只差自评合同的配对臂**:两者之间量出的任何差异都该记在「模型要不要
-#:   每轮重述全量自评」上,不得归因到前缀缓存本身——那笔账已经在 D↔P 那一对上
-#:   算过了。PR-3(T-PD7)往这里加了 `("v2","prefix_delta")` 这一行;
-#:   PR-4(T-PL6)同 PR 再加最后一行 `("v2","prefix_delta_lean")`。D↔L 的差值
-#:   **现在可以**由 `optimization_pair_table`(`scripts/
-#:   analyze_reasoning_trace.py`)直接给出——PR-5(T-EX9)把那张表的基线从硬
-#:   编码 `off` 换成 `--baseline-arm` 参数,`--baseline-arm prefix_delta` 即可
-#:   在只有 D/L 两条臂的一批上出配对表,读法见 `scripts/README.md` 的 `ab`
-#:   小节。
+#: * v2 侧列已实现的全部布局。`prefix_delta_lean` 与 `prefix_delta` 共用
+#:   消息装配,仍保留自评;`prefix_delta_evidence` 复用 delta 证据/缓存布局，
+#:   完全关闭逐项自评及其缺口注入。两者相对 delta 的差异都不能归因到缓存。
+#:   `--baseline-arm prefix_delta` 可直接给出这些配对的差值表,详见
+#:   `scripts/README.md`。新档必须显式选择,默认臂由 rig 的 AB_DEFAULT_ARMS 定义。
 ARMS: tuple[tuple[str, str], ...] = (
     ("legacy", "off"),
     ("v2", "off"),
     ("v2", "prefix_snapshot"),
     ("v2", "prefix_delta"),
     ("v2", "prefix_delta_lean"),
+    ("v2", "prefix_delta_evidence"),
 )
 
 #: 一个**配对单元**里的臂数。二维化之前这个数恰好等于 `len(ARMS)`,现在不是了:
-#: `ARMS` 是合法组合的闭集(五格),而一个配对单元恒是 `--arms` 点名的那**两条**
+#: `ARMS` 是合法组合的闭集,而一个配对单元恒是 `--arms` 点名的那**两条**
 #: 臂(`legacy,v2` 或 `v2:off,v2:prefix_snapshot`)。`mark_paired` 判的是后者。
 PAIR_ARM_COUNT = 2
 

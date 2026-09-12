@@ -410,11 +410,13 @@ class AspectLedger:
         "_records", "_by_id", "source", "constraints",
         "assessment_prompts", "assessment_omitted", "nudge_pending",
         "nudge_answered", "unknown_aspect_rejections", "_lean_assessment",
+        "_assessment_enabled",
     )
 
     def __init__(
         self, questions: Sequence[str], *, source: str,
         constraints: Sequence[str] = (), lean_assessment: bool = False,
+        assessment_enabled: bool = True,
     ) -> None:
         self._records: List[_AspectRecord] = [
             _AspectRecord(
@@ -461,8 +463,14 @@ class AspectLedger:
         #: 由 `classify_termination` 原样带上终态 DTO 供合成侧披露。默认 `False`
         #: 让 `off`/`prefix_snapshot`/`prefix_delta` 三臂逐字节落在既有语义上。
         self._lean_assessment: bool = bool(lean_assessment)
+        self._assessment_enabled = bool(assessment_enabled)
 
     # --- 读 ---------------------------------------------------------------
+    @property
+    def assessment_enabled(self) -> bool:
+        """Frozen per run; disabling assessment retains the user contract."""
+        return self._assessment_enabled
+
     @property
     def lean_assessment(self) -> bool:
         """`prefix_delta_lean`(L)那条臂的轻量自评合同开关,**只读**。
@@ -561,7 +569,7 @@ class AspectLedger:
           run 级事实挂 run 级,合成侧据它决定要不要披露「尚未逐项核验」
           (`render_termination_block`),而不是从 per-aspect 的沉默里反推。
         """
-        if self.lean_assessment:
+        if not self.assessment_enabled or self.lean_assessment:
             return False
         if not self._records:
             return False
@@ -680,6 +688,8 @@ class AspectLedger:
         映射写法(2026-09-09 本机实测里占多数)与设计稿的列表写法在这里被当成
         同一件事,下面的校验只认归一之后的形状。
         """
+        if not self.assessment_enabled:
+            return AssessmentOutcome()
         assessment = normalize_assessment_payload(assessment)
         if not isinstance(assessment, Mapping):
             return AssessmentOutcome(error="not_object")
@@ -923,6 +933,7 @@ def assessment_is_empty(assessment: object) -> bool:
 
 def build_aspect_ledger(
     intent_detail: object, question: str, *, lean: bool = False,
+    assessment_enabled: bool = True,
 ) -> AspectLedger:
     """按 §7.1 的三条来源建账。**不新增任何模型调用、不做重规划。**
 
@@ -951,17 +962,20 @@ def build_aspect_ledger(
     if topics:
         return AspectLedger(
             topics, source=ASPECT_SOURCE_INTENT_TOPICS,
-            constraints=constraints, lean_assessment=lean)
+            constraints=constraints, lean_assessment=lean,
+            assessment_enabled=assessment_enabled)
     section_questions = _bounded_unique(
         _text(row) for row in (detail.get("intent_questions") or ()))
     if section_questions:
         return AspectLedger(
             section_questions, source=ASPECT_SOURCE_SECTION_QUESTIONS,
-            constraints=constraints, lean_assessment=lean)
+            constraints=constraints, lean_assessment=lean,
+            assessment_enabled=assessment_enabled)
     whole = _text(question)
     return AspectLedger(
         [whole] if whole else [], source=ASPECT_SOURCE_WHOLE_QUESTION,
-        constraints=constraints, lean_assessment=lean)
+        constraints=constraints, lean_assessment=lean,
+        assessment_enabled=assessment_enabled)
 
 
 def render_aspect_block(ledger: AspectLedger) -> str:
@@ -1193,7 +1207,10 @@ _TERMINATION_SUMMARIES: Mapping[str, str] = {
 }
 
 
-def termination_summary(reason: str) -> str:
+def termination_summary(reason: str, *, assessment_enabled: bool = True) -> str:
+    if not assessment_enabled and reason in (
+            TERMINATION_MODEL_SUFFICIENT, TERMINATION_MODEL_PARTIAL):
+        return "检索结束：模型决定作答"
     return _TERMINATION_SUMMARIES.get(reason, "检索结束")
 
 
@@ -1288,7 +1305,15 @@ def render_termination_block(
     """
     if termination is None:
         return ""
+    if (not termination.assessment_enabled
+            and termination.reason in (
+                TERMINATION_MODEL_SUFFICIENT, TERMINATION_MODEL_PARTIAL)
+            and not termination.unrecovered_channels):
+        return ""
     fact = _TERMINATION_PROMPT_FACTS.get(termination.reason, "")
+    if (not termination.assessment_enabled and termination.reason in (
+            TERMINATION_MODEL_SUFFICIENT, TERMINATION_MODEL_PARTIAL)):
+        fact = "the planner chose to stop retrieval"
     if not fact:
         return ""
     by_id = {row.aspect_id: row for row in termination.aspects}
@@ -1342,7 +1367,7 @@ def render_termination_block(
         and not open_questions
         and not termination.unrecovered_channels
     )
-    if directive and not nothing_open:
+    if directive and not nothing_open and termination.assessment_enabled:
         lines.append(
             "Say plainly in the answer which of those points the evidence below "
             "does not cover, and do not present a partial result as complete. Do "
@@ -1423,6 +1448,13 @@ def termination_synthesis_detail(
     """
     if termination is None:
         return {}
+    if not termination.assessment_enabled:
+        return {
+            "termination_reason": termination.reason,
+            "termination_summary": termination_summary(
+                termination.reason, assessment_enabled=False),
+            "unrecovered_channels": list(termination.unrecovered_channels),
+        }
     delivery = review_aspect_delivery(
         termination, admitted_keys=admitted_keys, cited_keys=cited_keys)
     return {
@@ -1623,7 +1655,7 @@ def classify_termination(
     (`render_termination_block`),那边需要知道"这条臂本来就不逐项问",而这件事
     从 per-aspect 的沉默里反推不出来。
     """
-    unresolved = ledger.unresolved_ids()
+    unresolved = ledger.unresolved_ids() if ledger.assessment_enabled else ()
     marker = _terminal_marker(trace)
     kind, model_sufficient, degraded = marker or (
         TERMINATION_STEP_BUDGET, False, False)
@@ -1645,6 +1677,7 @@ def classify_termination(
         unresolved_aspect_ids=unresolved,
         model_assessed_sufficient=model_sufficient and not degraded,
         unrecovered_channels=_unrecovered_channels(observations),
-        aspects=ledger.snapshot(),
+        aspects=ledger.snapshot() if ledger.assessment_enabled else (),
         lean_assessment=ledger.lean_assessment,
+        assessment_enabled=ledger.assessment_enabled,
     )

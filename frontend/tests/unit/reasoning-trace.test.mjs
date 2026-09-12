@@ -893,6 +893,22 @@ test("结束事实的计数缺失时不编造零:未送达/通道两项直接不
     }),
     "1 处引用 · 检索结束：步骤预算用完",
   );
+  // Evidence-only reflect has no aspect measurement; show only its real stop.
+  assert.equal(
+    getTraceStepDetail({
+      step_type: "synthesis",
+      detail: { anchors: 1, termination_summary: "检索结束：模型决定作答" },
+    }),
+    "1 处引用 · 检索结束：模型决定作答",
+  );
+  assert.equal(
+    getTraceStepDetail({
+      step_type: "skip",
+      detail: { reason: "retrieval_termination", aspects: null,
+                unresolved_aspects: null, unrecovered_channels: [] },
+    }),
+    "",
+  );
   // 计数为 0 时同样不占格(「0 项未送达」是噪音,不是信息)。
   assert.equal(
     getTraceStepDetail({

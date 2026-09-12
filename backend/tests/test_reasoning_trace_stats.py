@@ -768,6 +768,23 @@ def test_search_run_without_a_termination_fact_infers_legacy():
     assert row["unrecovered_channels_count"] is None
 
 
+def test_search_run_disabled_assessment_is_unmeasured_not_zero():
+    from types import SimpleNamespace
+    from app.domain.retrieval_termination import RetrievalTermination
+
+    term = RetrievalTermination(
+        reason="model_sufficient", model_assessed_sufficient=True,
+        assessment_enabled=False)
+    row = _search_row(
+        _search_steps(reflect("answer", True)),
+        result=SimpleNamespace(termination=term), policy="v2")
+    assert row["policy_version"] == "v2"
+    assert row["termination_reason"] == "model_sufficient"
+    assert row["aspects_total"] is None
+    assert row["aspects_pending"] is None
+    assert row["unrecovered_channels_count"] == 0
+
+
 def test_search_run_reads_the_termination_dto_not_the_trace_step():
     """v2 的权威是 `RetrievalTermination` 这个 DTO,不是它在轨迹里的那份渲染。
 
@@ -842,7 +859,7 @@ def test_retrieval_termination_field_set_is_frozen():
 
     assert {f.name for f in dataclasses.fields(RetrievalTermination)} == {
         "reason", "unresolved_aspect_ids", "model_assessed_sufficient",
-        "unrecovered_channels", "aspects", "lean_assessment",
+        "unrecovered_channels", "aspects", "lean_assessment", "assessment_enabled",
     }
 
 
@@ -1707,7 +1724,8 @@ def test_optimization_is_a_case_sensitive_closed_set():
     assert off_row(optimization="turbo")["optimization"] == UNKNOWN
     assert off_row()["optimization"] == UNKNOWN
     assert OPTIMIZATIONS == (
-        "off", "prefix_snapshot", "prefix_delta", "prefix_delta_lean")
+        "off", "prefix_snapshot", "prefix_delta", "prefix_delta_lean",
+        "prefix_delta_evidence")
 
 
 def test_optimizations_match_the_settings_literal():

@@ -446,6 +446,7 @@ _MEASURE_ASSESSMENT_ABSENT = _registered_measure_key("assessment_absent")
 #: 那一种——抄错一处不会崩,只会让那条路上的 run 在 L 的臂标签下跑着 D 的合同,
 #: 而这件事只在 A/B 表上看得出来(`build_aspect_ledger` 的 docstring 同款理由)。
 _LEAN_LAYOUT = "prefix_delta_lean"
+_EVIDENCE_LAYOUT = "prefix_delta_evidence"
 
 #: 两条**基于增量装配**的臂:消息形状与 `prefix_delta` 完全相同
 #: (`system(S)` + 一条 `user(C+K+D+T)`,K/D 两块同一套内容判据),
@@ -453,7 +454,7 @@ _LEAN_LAYOUT = "prefix_delta_lean"
 #: 两处历史上写字面量 `"prefix_delta"` 的字面相等(消息装配分派、测量构造门)
 #: 现在都改读这份成员判断,免得放开 `prefix_delta_lean` 时漏改一处、让它拿到
 #: `prefix_snapshot` 的装配却在文档/投影上自称 delta 臂。
-_DELTA_LAYOUTS = ("prefix_delta", _LEAN_LAYOUT)
+_DELTA_LAYOUTS = ("prefix_delta", _LEAN_LAYOUT, _EVIDENCE_LAYOUT)
 #: 三条**前缀布局**臂。消息形状完全相同(`system(S)` + 一条 `user(C+K+D+T)`),
 #: 差别只在 K/D 两块的内容判据(PR-3/PR-4 计划 §0),所以 `_reflect_prefix_layout`
 #: 的分派一格不变、只多认新取值,回退也不经过那里。
@@ -2212,7 +2213,7 @@ def complete_enumeration_keys(enum_chains) -> Set[str]:
     }
 
 
-def render_collection_keys_note(enum_chains) -> str:
+def render_collection_keys_note(enum_chains, *, assessment: bool = True) -> str:
     """已完整枚举的集合 → 一段**可引用的键**清单。v2-only,零 I/O。
 
     刻意不并进 `_enumeration_note`:那段账目在关闭态也逐字进 prompt,而这里是
@@ -2235,7 +2236,8 @@ def render_collection_keys_note(enum_chains) -> str:
     if not lines:
         return ""
     return "\n".join([COLLECTION_KEYS_NOTE_TITLE, *lines,
-                      COLLECTION_KEYS_NOTE_TAIL])
+                      (COLLECTION_KEYS_NOTE_TAIL if assessment else
+                       "（只有已完整列出的集合才能证明该集合的枚举完整性。）")])
 
 
 # --------------------------------------------------------- 大纲便签(outline)
@@ -4769,6 +4771,8 @@ class ReasoningRetriever:
         # 的窄调用方一律 `None`;delta 臂测量关时对象在、`measures_messages` 为假
         # ⇒ 下面两处判据都不成立,一个字节都不多序列化。
         measurement = context.measurement if context is not None else None
+        assessment = (context.assessment_enabled if context is not None
+                      else self.reflect_optimization() != _EVIDENCE_LAYOUT)
         try:
             prefix_layout = self._reflect_prefix_layout(context)
             if prefix_layout:
@@ -4779,7 +4783,8 @@ class ReasoningRetriever:
                     question, context.contract, material)
             else:
                 system_text = reflect_v2_system_prompt(
-                    capabilities, UNAVAILABLE_DISCLOSE_MAX)
+                    capabilities, UNAVAILABLE_DISCLOSE_MAX,
+                    assessment=assessment)
                 material = (context.as_user_block() if context is not None
                             else candidates_summary)
                 user_text = reflect_v2_user_prompt(question, material)
@@ -4794,7 +4799,8 @@ class ReasoningRetriever:
                 {"role": "system", "content": system_text},
                 {"role": "user", "content": user_text},
             ]
-            schema_hint = reflect_v2_schema_hint(capabilities)
+            schema_hint = reflect_v2_schema_hint(
+                capabilities, assessment=assessment)
             if measurement is not None and measurement.measures_messages:
                 # 测在**发出之前**:量的是这一轮已经定型的那两条消息,与调用成功
                 # 与否无关。一次被兜底吃掉的调用照样有它的上下文规模,而那一轮在
@@ -5036,14 +5042,18 @@ class ReasoningRetriever:
         # 读到"a2 还没支撑"、再去找"有什么键能支撑它"。
         blocks = [
             summary,
-            render_aspect_block(state.aspects),
-            render_collection_keys_note(state.enum_chains),
+            (render_aspect_block(state.aspects)
+             if state.aspects.assessment_enabled
+             else render_aspect_contract_block(state.aspects)),
+            render_collection_keys_note(
+                state.enum_chains, assessment=state.aspects.assessment_enabled),
         ]
         return ReflectContext(
             server_state="\n\n".join(block for block in blocks if block),
             evidence=selection.text,
             observations=observations,
             measurement=measurement,
+            assessment_enabled=state.aspects.assessment_enabled,
         )
 
     def _reflect_measurement(
@@ -5148,14 +5158,19 @@ class ReasoningRetriever:
             observations=observations,
             contract=render_aspect_contract_block(state.aspects),
             turn_state="\n\n".join(block for block in (
-                render_aspect_status_block(state.aspects, lean=static_lean),
-                render_collection_keys_note(state.enum_chains),
+                (render_aspect_status_block(state.aspects, lean=static_lean)
+                 if state.aspects.assessment_enabled else ""),
+                render_collection_keys_note(
+                    state.enum_chains,
+                    assessment=state.aspects.assessment_enabled),
                 f"{TURN_CONTEXT_TITLE}\n{summary}" if summary else "",
             ) if block),
             delta=delta,
             static_prompt=reflect_v2_static_prompt(
-                catalog, delta=static_delta, lean=static_lean),
+                catalog, delta=static_delta, lean=static_lean,
+                assessment=state.aspects.assessment_enabled),
             measurement=measurement,
+            assessment_enabled=state.aspects.assessment_enabled,
         )
 
     def _reflect_delta_context(
@@ -5429,6 +5444,9 @@ class ReasoningRetriever:
         """
         if state.aspects is None:
             state.aspects = self._v2_build_aspect_ledger(state)
+        if not state.aspects.assessment_enabled:
+            decision.assessment = None
+            return decision
         nudge_args = (apply_outline, overflow_repair, more_turns, outline_left)
         if decision.assessment is None:
             if not decision.invalid_reason:
@@ -5658,9 +5676,11 @@ class ReasoningRetriever:
         `off` / `prefix_snapshot` / `prefix_delta` 与关闭态一律拿到
         `lean=False`,即 `build_aspect_ledger` 的默认值 ⇒ 三臂逐字节回到接入前。
         """
+        optimization = self.reflect_optimization()
         return build_aspect_ledger(
             state.intent_detail, state.question,
-            lean=self.reflect_optimization() == _LEAN_LAYOUT)
+            lean=optimization == _LEAN_LAYOUT,
+            assessment_enabled=optimization != _EVIDENCE_LAYOUT)
 
     def _v2_note_turn(
         self, state: "_ReasoningRunState", decision: "ReflectDecision",
@@ -5784,12 +5804,16 @@ class ReasoningRetriever:
         )
         state.record(TraceStep(
             step_type="skip",
-            summary=termination_summary(termination.reason),
+            summary=termination_summary(
+                termination.reason,
+                assessment_enabled=termination.assessment_enabled),
             detail={
                 "reason": TERMINATION_SKIP_REASON,
                 "termination": termination.reason,
-                "aspects": len(termination.aspects),
-                "unresolved_aspects": len(termination.unresolved_aspect_ids),
+                "aspects": (len(termination.aspects)
+                            if termination.assessment_enabled else None),
+                "unresolved_aspects": (len(termination.unresolved_aspect_ids)
+                                       if termination.assessment_enabled else None),
                 "model_assessed_sufficient":
                     termination.model_assessed_sufficient,
                 "aspect_source": state.aspects.source,
@@ -5797,8 +5821,9 @@ class ReasoningRetriever:
                 # `unresolved_aspects` 分开:后者数的是"还没有支撑",而这一格数
                 # 的是"模型根本没参与判断"——放量评估要能把一次协议不合作与一次
                 # 正常的中途收尾分开,否则两者在终态上完全同形。
-                "aspects_assessment_omitted": sum(
-                    1 for row in termination.aspects if row.assessment_omitted),
+                "aspects_assessment_omitted": (sum(
+                    1 for row in termination.aspects if row.assessment_omitted)
+                    if termination.assessment_enabled else None),
                 # 「模型一次都没判断过」的方面数(拍板 Q10)。与上面那一格是
                 # 拍板 Q5 的三格分工里的另外两格:`assessment_omitted` 判据里含
                 # 着一次真实发生过的追问(**L 下永不置位**),而这一格只说"这一
@@ -5811,8 +5836,9 @@ class ReasoningRetriever:
                 # 写的话,D↔L 的配对表上这一列恒缺一半,而"L 少核验了几个方面"
                 # 正是它要回答的问题。`0` 与缺席分得开(读侧 `_aspects_unassessed`
                 # 缺席给 None),三臂的 prompt 字节一个都没动。
-                "aspects_unassessed": sum(
-                    1 for row in termination.aspects if not row.model_assessed),
+                "aspects_unassessed": (sum(
+                    1 for row in termination.aspects if not row.model_assessed)
+                    if termination.assessment_enabled else None),
                 # 纯披露(§7.2):这次 run 里最后一次执行仍是失败的通道。它不参与
                 # `reason`,但必须说出去——"KG 那条路今天没走通"是用户重试/换问法
                 # 时唯一有用的那条线索,只留在服务器内存里等于没记。动作 id 是内部

@@ -199,6 +199,7 @@ POLICY_VERSIONS: tuple[str, ...] = ("legacy", "v2")
 #: 逐字对齐——分叉当场打红,而不是悄悄放宽一侧。
 OPTIMIZATIONS: tuple[str, ...] = (
     "off", "prefix_snapshot", "prefix_delta", "prefix_delta_lean",
+    "prefix_delta_evidence",
 )
 JOB_STATUSES: tuple[str, ...] = ("running", "done", "failed", "cancelled")
 CORPUS_CELLS: tuple[str, ...] = ("A_kg", "A_nokg", "B_kg", "B_nokg")
@@ -1329,10 +1330,13 @@ def project_search_run(
             getattr(termination, "reason", ""), TERMINATION_REASON_VALUES
         )
         row["termination_inferred"] = False
-        row["aspects_total"] = len(getattr(termination, "aspects", ()) or ())
-        row["aspects_pending"] = len(
-            getattr(termination, "unresolved_aspect_ids", ()) or ()
-        )
+        if getattr(termination, "assessment_enabled", True):
+            row["aspects_total"] = len(getattr(termination, "aspects", ()) or ())
+            row["aspects_pending"] = len(
+                getattr(termination, "unresolved_aspect_ids", ()) or ()
+            )
+        else:
+            row["aspects_total"] = row["aspects_pending"] = None
         row["unrecovered_channels_count"] = len(
             getattr(termination, "unrecovered_channels", ()) or ()
         )

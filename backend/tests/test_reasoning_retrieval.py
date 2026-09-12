@@ -5773,8 +5773,8 @@ def test_reflect_optimization_validator_allows_the_whole_closed_set_when_planned
     with pytest.raises(Exception) as excinfo:
         Settings(_env_file=None)
     text = str(excinfo.value)
-    sentence = ("Input should be 'off', 'prefix_snapshot', 'prefix_delta' "
-                "or 'prefix_delta_lean'")
+    sentence = ("Input should be 'off', 'prefix_snapshot', 'prefix_delta', "
+                "'prefix_delta_lean' or 'prefix_delta_evidence'")
     assert sentence in text, text
     assert "该取值将在后续 PR 实现" not in text
     # 文档引用的是同一串字节,且引在 `REASONING_REFLECT_OPTIMIZATION` 那一行
@@ -13735,7 +13735,7 @@ def test_measure_off_keeps_the_reflect_context_and_detail_untouched(
     # 字段闭集:新增一格而不在这里登记 ⇒ 下面那圈逐字段比对会漏掉它。
     assert [f.name for f in fields(ReflectContext)] == [
         "server_state", "evidence", "observations", "contract", "turn_state",
-        "static_prompt", "delta", "measurement"]
+        "static_prompt", "delta", "measurement", "assessment_enabled"]
 
     quiet = _capture_contexts(monkeypatch)
     _llm, quiet_result = _v2_aspect_run(

@@ -201,6 +201,8 @@ class RetrievalTermination:
     #: `prefix_delta` 三臂的既有语义上。`__post_init__` 的闭集守卫只管
     #: `reason`/`status`,不涉及这个布尔——它没有闭集,只有真假两值。
     lean_assessment: bool = False
+    #: False means aspect coverage was not measured in this run.
+    assessment_enabled: bool = True
 
     def __post_init__(self) -> None:
         """闭集守卫:`reason` 与每个方面的 `status` 都必须在各自的闭集里。
