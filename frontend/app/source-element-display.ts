@@ -108,3 +108,54 @@ export function elementLocationNote(element: ElementLike): string | null {
   const table = positiveInt(metadata.table_index);
   return table !== null ? `表 ${table} 第 ${row} 行` : `第 ${row} 行`;
 }
+
+export type DescriptionBlock =
+  | { kind: "paragraph"; text: string }
+  | { kind: "code"; text: string; lang: string };
+
+// 以 ``` 开头(允许前导空白)、后面只跟一个可选语言标记(如 ```spice)的行才算开栏;
+// 关闭栏必须是只含 ``` 的独立一行。
+const FENCE_OPEN = /^\s*```(\S*)\s*$/;
+
+// CRLF / 纯 CR / 纯 LF 三种行尾都要能切开:插件描述文本来源不定,不能假设是
+// 统一 LF。顺序让 \r\n 先于单独的 \r 匹配,避免把一个 CRLF 断成两行。
+const LINE_BREAK = /\r\n|\r|\n/;
+
+/**
+ * 把 image 元素 `metadata.description`(插件写入的描述,例如电路网表)按行拆成
+ * 段落 / 代码块。这是给插件描述文本用的最小围栏语法,不是 markdown 渲染:只认识
+ * 三个反引号开合的围栏本身,围栏内原文(含空行与缩进,但不含行尾的 \r)原样保留;
+ * 围栏外每个非空行(trim 后)是一条独立 paragraph。围栏没有闭合时,代码块一直延伸
+ * 到文本末尾。空文本的代码块(孤立的 ``` ,或开合之间没有任何内容)直接丢弃,不
+ * 产生空 `<pre>`。
+ */
+export function descriptionBlocks(description: string): DescriptionBlock[] {
+  if (!description) return [];
+  const lines = description.split(LINE_BREAK);
+  const blocks: DescriptionBlock[] = [];
+  let i = 0;
+  while (i < lines.length) {
+    const openMatch = lines[i].match(FENCE_OPEN);
+    if (openMatch) {
+      const lang = openMatch[1] ?? "";
+      const codeLines: string[] = [];
+      i += 1;
+      while (i < lines.length && lines[i].trim() !== "```") {
+        codeLines.push(lines[i]);
+        i += 1;
+      }
+      i += 1; // 跳过闭合行;未闭合时 i 已越界,多加 1 不影响外层循环条件
+      const isEmpty = codeLines.every((line) => line.trim() === "");
+      if (!isEmpty) {
+        blocks.push({ kind: "code", text: codeLines.join("\n"), lang });
+      }
+      continue;
+    }
+    const trimmed = lines[i].trim();
+    if (trimmed !== "") {
+      blocks.push({ kind: "paragraph", text: trimmed });
+    }
+    i += 1;
+  }
+  return blocks;
+}

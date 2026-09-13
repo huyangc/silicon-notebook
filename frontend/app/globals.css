@@ -9015,6 +9015,38 @@ button.tag:hover {
   margin: 0;
 }
 
+/* 插件写入的描述里用 ``` 围栏标出的代码块(如电路网表)。取值与 .answer-code
+   刻意不同(更小的字号/内边距,匹配来源详情窗其余元素的密度),角标形状照抄
+   .answer-code[data-language]::before(见上文约 4300 行)。 */
+.element-image-description pre.element-image-code {
+  position: relative;
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid #e3e7ed;
+  border-radius: 6px;
+  background: #f5f7fa;
+  color: #374151;
+  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  white-space: pre;
+  overflow: auto hidden;
+  max-width: 100%;
+}
+
+.element-image-description pre.element-image-code[data-language]::before {
+  content: attr(data-language);
+  position: absolute;
+  top: 6px;
+  right: 9px;
+  color: #7a8595;
+  font-size: 11px;
+}
+
+.element-image-description pre.element-image-code code {
+  font: inherit;
+  color: inherit;
+}
+
 .toast {
   position: fixed;
   right: 24px;

@@ -227,6 +227,7 @@ import { WorkspaceExtensionOutlet } from "../features/extension-sdk/host";
 import { WORKSPACE_UI_CONTRIBUTIONS } from "../features/extension-sdk/workspace-registry";
 import { sourceElementDomId } from "./source-detail-state";
 import {
+  descriptionBlocks,
   elementHeadingLevel,
   elementLocationNote,
   elementTypeTag,
@@ -7785,17 +7786,28 @@ function ElementBody({ element, notebookId }: { element: SourceElement; notebook
     const description = typeof element.metadata?.description === "string"
       ? element.metadata.description
       : "";
-    const descriptionLines = description.split("\n").filter((line) => line.trim() !== "");
-    const descriptionNode = descriptionLines.length > 0 ? (
+    const descriptionBlockList = descriptionBlocks(description);
+    const descriptionNode = descriptionBlockList.length > 0 ? (
       <div className="element-image-description">
-        {descriptionLines.map((line, index) => <p key={index}>{line}</p>)}
+        {descriptionBlockList.map((block, index) =>
+          block.kind === "code" ? (
+            <pre key={index} className="element-image-code" data-language={block.lang || undefined}>
+              <code>{block.text}</code>
+            </pre>
+          ) : (
+            <p key={index}>{block.text}</p>
+          )
+        )}
       </div>
     ) : null;
+    // 无 caption 时的图片 alt 只取描述里的第一段正文(paragraph),不把围栏代码块
+    // (如电路网表)原样念给屏幕阅读器。
+    const descriptionAlt = descriptionBlockList.find((block) => block.kind === "paragraph")?.text ?? "";
     const url = sourceImageAssetUrl(API_BASE, notebookId, assetId);
     if (url) {
       return (
         <figure className="element-image-figure">
-          <AuthedImage url={url} alt={caption || description || "figure"} />
+          <AuthedImage url={url} alt={caption || descriptionAlt || "figure"} />
           {caption ? <figcaption>{caption}</figcaption> : null}
           {descriptionNode}
         </figure>
