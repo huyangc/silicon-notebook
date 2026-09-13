@@ -6,6 +6,7 @@ import hashlib
 import json
 import threading
 import time
+from collections.abc import Mapping
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,7 +23,12 @@ from app.domain.indexing_pipeline import (
     IndexingPipelineUnavailableError,
 )
 from app.core.llm import cap_kwargs
-from app.domain.extensions import ParserProviderChainHostPort
+from app.domain.cancellation import CoreCancellation
+from app.domain.extensions import (
+    ElementAssetLocation,
+    ElementEnricherHostPort,
+    ParserProviderChainHostPort,
+)
 from app.models.sources import (
     AddUrlSourcesResult,
     HIDDEN_SYNTHETIC_SOURCE_TYPES,
@@ -66,6 +72,7 @@ from app.services.parser_chain_execution import (
 from app.services.prompts import NOTEBOOK_META_SCHEMA_HINT, notebook_meta_prompt
 from app.services.source_chunking import SourceChunkingService
 from app.services.source_embedding import SourceEmbeddingService
+from app.services.source_element_enrichment import enrich_source_elements
 from app.services.source_element_selection import (
     deduplicate_repeated_page_boundaries,
 )
@@ -202,6 +209,16 @@ class SourceIngestionService:
         parser_connection_probe: Any,
         make_persist_image: Callable[[str, str, str], Any],
         delete_source_images: Callable[[str], None],
+        # ``source.element_enricher``: the frozen host, plus the facade-side
+        # lookup that turns this source's asset ids into on-disk locations.
+        # Both default to absent for the same reason every other optional host
+        # seat here does — a library or narrow-test construction composes this
+        # service with no extension runtime at all, and "no enrichment" is a
+        # complete, correct behaviour rather than a half-wired one.
+        element_enrichers: ElementEnricherHostPort | None = None,
+        resolve_element_assets: (
+            Callable[[str, List[str]], Mapping[str, ElementAssetLocation]] | None
+        ) = None,
         mineru_client: Callable[[], Any],
         mineru_cloud_client: Callable[[], Any],
         model_clients: Any,
@@ -266,6 +283,8 @@ class SourceIngestionService:
         self.parser_connection_probe = parser_connection_probe
         self.make_persist_image = make_persist_image
         self.delete_source_images = delete_source_images
+        self.element_enrichers = element_enrichers
+        self.resolve_element_assets = resolve_element_assets
         self.mineru_client = mineru_client
         self.mineru_cloud_client = mineru_cloud_client
         self.model_clients = model_clients
@@ -1463,6 +1482,111 @@ class SourceIngestionService:
         ):
             return self._process_source_scoped(source, hooks)
 
+    def _enrich_parsed_elements(self, source, elements: list, stage) -> list:
+        """Run ``source.element_enricher`` over the parsed elements.
+
+        Called with exactly one statement from ``_process_source_scoped``,
+        between parse and the write transaction, so whatever a plugin adds
+        lands in the SAME element generation the chunk pipeline then reads —
+        a description written here satisfies the image/figure chunk gate and
+        reaches retrieval through the element's own ``text``.
+
+        ``stage`` is the caller's own pipeline-event closure, passed in rather
+        than re-created here: it already carries this source's id, notebook and
+        file name, and an event emitted directly through ``event_log`` would
+        either duplicate that assembly or emit a differently-shaped pipeline
+        record for one stage out of several. Nothing is emitted at all when no
+        host is registered — a deployment without enrichers must not pay a
+        stage in every parse's event stream for a point that never runs.
+
+        Fail-open in both directions: ``enrich_source_elements`` already
+        returns the original elements for any plugin-side problem, and a
+        failure on THIS side (an unreadable asset row, a broken settings read)
+        is logged by exception class name only — never a path, an id or a
+        settings value — and ingests the source exactly as it parsed.
+
+        Failing open is not the same as failing silently, though: a refused
+        batch returns a stable ``rejected`` code, which the ``done`` stage
+        carries beside ``patched``. Without it an operator cannot tell a
+        plugin that proposed nothing from one whose whole batch was thrown
+        away, and both look like "the feature does nothing".
+        """
+        host = self.element_enrichers
+        try:
+            if host is None or host.has_contributions() is not True:
+                return elements
+        except CoreCancellation:
+            raise
+        except Exception:  # noqa: BLE001 — an unreadable host runs nothing
+            return elements
+        started = time.perf_counter()
+        stage("enrich", "start", started)
+        try:
+            enriched, rejected = enrich_source_elements(
+                elements,
+                host=host,
+                asset_locations=self._element_asset_locations(source, elements),
+                connection_probe=self.parser_connection_probe,
+                max_proposals=(
+                    self.settings.source_element_enricher_max_proposals
+                ),
+                max_metadata_bytes=(
+                    self.settings.source_element_enricher_max_metadata_bytes
+                ),
+                max_description_chars=(
+                    self.settings.source_element_enricher_max_description_chars
+                ),
+                max_asset_bytes=self.settings.mineru_max_image_bytes,
+                timeout_seconds=(
+                    self.settings.source_element_enricher_timeout_seconds
+                ),
+                event_sink=self.event_log.emit,
+            )
+        except CoreCancellation:
+            raise
+        except Exception as exc:  # noqa: BLE001 — best-effort, never a parse
+            stage("enrich", "error", started, error=type(exc).__name__)
+            self.event_log.logger.warning(
+                "element enrichment failed for a source: %s", type(exc).__name__
+            )
+            return elements
+        patched = sum(
+            1
+            for before, after in zip(elements, enriched)
+            if before is not after
+        )
+        stage("enrich", "done", started, patched=patched, rejected=rejected)
+        return enriched
+
+    def _element_asset_locations(self, source, elements: list) -> Mapping:
+        """Resolve this source's image assets to on-disk locations, here.
+
+        On the calling thread, before any contributor starts: the host serves
+        image bytes to a worker thread that must perform no database access,
+        so the row lookups have to be finished by the time it takes over.
+
+        Ids are de-duplicated while keeping first-appearance order: the same
+        image can legitimately appear more than once in a parsed source (a
+        repeated figure, a bundle that inlines one file twice), and the
+        resolver answers a mapping — one row lookup and one ``stat`` per
+        distinct asset is the whole cost, so paying it per occurrence buys
+        nothing.  Order is kept so the work is deterministic per source.
+        """
+        resolver = self.resolve_element_assets
+        if resolver is None:
+            return {}
+        asset_ids = list(
+            dict.fromkeys(
+                element.metadata["asset_id"]
+                for element in elements
+                if element.element_type == "image"
+                and type(element.metadata) is dict
+                and type(element.metadata.get("asset_id")) is str
+                and element.metadata["asset_id"]
+            )
+        )
+        return resolver(source.notebook_id, asset_ids) if asset_ids else {}
+
     def _process_source_scoped(
         self,
         source,
@@ -1559,6 +1683,7 @@ class SourceIngestionService:
                 actual_parsers=element_parsers,
                 mineru_error=mineru_error[:500],
             )
+            elements = self._enrich_parsed_elements(source, elements, stage)
             # per-source 分块串行锁:把「换 elements → 建 chunks + 置 marker」整段串起来
             # (见 __init__ 说明)。锁必须从 replace_elements 一直持到 build_chunks 之后,
             # 否则并发同源 reparse 会交错出「B 代 elements + A 代 chunks + marker 已置」的

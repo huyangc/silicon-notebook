@@ -5,6 +5,7 @@ from app.core.config import Settings
 from app.core.database_url import database_identity
 from app.domain.extensions import (
     AskCompletedObserverHostPort,
+    ElementEnricherHostPort,
     ReportCompletedObserverHostPort,
     ParserProviderChainHostPort,
     RetrievalContributorHostPort,
@@ -30,6 +31,7 @@ def create_repository(
     ask_engine_host: AskEngineHostPort | None = None,
     indexing_pipeline_host: IndexingPipelineHostPort | None = None,
     gap_consult_host: GapConsultHostPort | None = None,
+    element_enricher_host: ElementEnricherHostPort | None = None,
     migrate: bool = True,
     seed: bool = True,
 ) -> NotebookRepository:
@@ -65,6 +67,8 @@ def create_repository(
         host_kwargs["indexing_pipeline_host"] = indexing_pipeline_host
     if gap_consult_host is not None:
         host_kwargs["gap_consult_host"] = gap_consult_host
+    if element_enricher_host is not None:
+        host_kwargs["element_enricher_host"] = element_enricher_host
     scheme = database_identity(settings.database_url).scheme
     if scheme == "sqlite":
         return SQLiteRepository(settings, **host_kwargs)

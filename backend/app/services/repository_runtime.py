@@ -16,6 +16,7 @@ from app.domain.extensions import (
     AskCompletedObserverHostPort,
     CompletedAskNotification,
     CompletedReportNotification,
+    ElementEnricherHostPort,
     ReportCompletedObserverCallContext,
     ReportCompletedObserverHostPort,
     ParserProviderChainHostPort,
@@ -177,6 +178,10 @@ class _ProcessFoundation:
     # Gap consultation is the one host with no built-in contribution at all:
     # an empty seat here is the shipped shape, not an unwired deployment.
     gap_consult: GapConsultHostPort | None
+    # Element enrichment shares gap consultation's shape: no built-in
+    # contribution exists, so an empty seat is the shipped deployment and the
+    # ingestion service short-circuits on it without any cost.
+    element_enrichers: ElementEnricherHostPort | None
     parser_provider_chain: ParserProviderChainHostPort
     models: Any
 
@@ -195,6 +200,7 @@ def _build_process_foundation(
     ask_engine_host: AskEngineHostPort | None,
     indexing_pipeline_host: IndexingPipelineHostPort | None,
     gap_consult_host: GapConsultHostPort | None,
+    element_enricher_host: ElementEnricherHostPort | None,
     parser_provider_chain_host: ParserProviderChainHostPort | None,
 ) -> _ProcessFoundation:
     """Domain 1 — depends on nothing but the constructor arguments.
@@ -232,6 +238,7 @@ def _build_process_foundation(
         ask_engines=ask_engine_host,
         indexing_pipelines=indexing_pipeline_host,
         gap_consult=gap_consult_host,
+        element_enrichers=element_enricher_host,
         parser_provider_chain=(
             parser_provider_chain_host or BuiltinParserChainHost()
         ),
@@ -1004,6 +1011,7 @@ class RepositoryRuntime:
         ask_engine_host: AskEngineHostPort | None = None,
         indexing_pipeline_host: IndexingPipelineHostPort | None = None,
         gap_consult_host: GapConsultHostPort | None = None,
+        element_enricher_host: ElementEnricherHostPort | None = None,
     ) -> None:
         """Call domain builders in order; their call order is the dependency topology."""
         foundation = _build_process_foundation(
@@ -1014,6 +1022,7 @@ class RepositoryRuntime:
             ask_engine_host=ask_engine_host,
             indexing_pipeline_host=indexing_pipeline_host,
             gap_consult_host=gap_consult_host,
+            element_enricher_host=element_enricher_host,
             parser_provider_chain_host=parser_provider_chain_host,
         )
         self.settings = foundation.settings
@@ -1026,6 +1035,7 @@ class RepositoryRuntime:
         self.ask_engines = foundation.ask_engines
         self.indexing_pipelines = foundation.indexing_pipelines
         self.gap_consult = foundation.gap_consult
+        self.element_enrichers = foundation.element_enrichers
         self.parser_provider_chain = foundation.parser_provider_chain
         self.models = foundation.models
         self._closed = False
@@ -1508,6 +1518,7 @@ class RepositoryRuntime:
         apply_notebook_meta: Callable[..., None],
         make_persist_image: Callable[..., Any],
         delete_source_images: Callable[..., Any],
+        resolve_element_assets: Callable[..., Any],
     ) -> SourceIngestionService:
         """Compose the source ingestion orchestration (Task 12) once the
         facade-bound seams exist.  ``write`` is the facade's ``_write``
@@ -1519,7 +1530,11 @@ class RepositoryRuntime:
         calls use explicit workloads on the process-owned provider;
         ``make_persist_image``/``delete_source_images`` are the per-source
         image-persistence factory and the per-source image cascade-delete
-        seam (embedded-image retention); the remaining callables are
+        seam (embedded-image retention); ``resolve_element_assets`` is the
+        facade-side lookup that turns an element's asset ids into on-disk
+        locations for the element-enrichment point (resolved on the calling
+        thread so plugin workers never touch the database); the remaining
+        callables are
         TEMPORARY facade-owned KG/catalog callbacks —
         Task 16+ move them with their domains.  The Gate-4 KG hooks are gone
         (Task 15): extraction persists through the runtime-owned
@@ -1578,6 +1593,8 @@ class RepositoryRuntime:
             ),
             make_persist_image=make_persist_image,
             delete_source_images=delete_source_images,
+            element_enrichers=self.element_enrichers,
+            resolve_element_assets=resolve_element_assets,
             invalidate_knowledge_counts=self.queries.invalidate_knowledge_counts,
             # copy-stats memo 是 runtime-owned 的(codex PR#634 R2 P2-2),所以
             # 摄取路径的失效走注入回调,与上面那条同一形态。

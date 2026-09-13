@@ -159,17 +159,26 @@ class ElementEnricherHostPort(Protocol):
   `AssetService(repo).path_for(asset)`；只返回 `notebook_id` 匹配且文件存在的项。
 - 挂点：`backend/app/services/source_ingestion.py::_process_source_scoped`，在
   `deduplicate_repeated_page_boundaries(parsed.elements)` 之后、`with self.write()` 之前，
-  **一条语句** `elements = self._enrich_parsed_elements(source, elements)`（热函数天花板 364 零松弛；
-  若仍超一行，同 diff 改基线并在 PR 说明）。`stage("enrich", "start"/"done"/"skipped", ...)` 记
-  `patches=` 数量。服务层适配器 `backend/app/services/source_element_enrichment.py::enrich_source_elements`
-  做：宿主短路、封装 envelope、调用宿主、把 patch 合成回 `SourceElement`。
+  **一条语句** `elements = self._enrich_parsed_elements(source, elements, stage)`（热函数天花板 364 零松弛；
+  若仍超一行，同 diff 改基线并在 PR 说明）。`stage` 是 `_process_source_scoped` 的事件闭包，按参数传入
+  （它已带 source/notebook/file_name，不另造一套同形事件）。stage 只记三态：`start`、
+  `done`（`patched=<变更元素数>`、`rejected=<稳定码或空串>`）、`error`（`error=<异常类名>`）；
+  **无宿主或 `has_contributions()` 非真时不记任何 stage**，零拓扑的部署不为一个从不运行的点付事件。
+  服务层适配器 `backend/app/services/source_element_enrichment.py::enrich_source_elements`
+  做：宿主短路、封装 envelope、调用宿主、把 patch 合成回 `SourceElement`，并返回
+  `(elements, reason_code)`——整批驳回的原因是稳定码（`invalid_patch`/`invalid_owner`/
+  `invalid_description`/`ordinal_out_of_range`/`duplicate_contribution`/`budget_exceeded`/
+  `invalid_budget`/`invalid_element`/`host_failed`），空串表示未驳回。
 - 合成规则（服务层）：
   - `metadata["extensions"][contribution_id] = {"plugin_id", "plugin_version", "metadata"}`；同一
     contribution 已存在 → 整批拒绝。
   - `description` 非空时：`metadata["description"]` = 既有描述 + `"\n\n"` + 新描述（既有为空则直接置）；
-    `text` = 既有 `text` + `" "` + 压平空白后的描述（`" ".join(description.split())`），因 image 类型
-    `text` 落库是单行（`parsers._element`）。这样 chunk 门（caption/description）与检索文本（`text`）同时满足。
-  - 任何一处不合规 → 返回原 `elements`（整批 fail-open），不抛。
+    同一元素被两个 contribution 补全时，按 patch 顺序照同一规则继续追加。
+  - `text` 的追加形态按元素类型分两支，与 `parsers._element` 对齐（那是同一决定的另一半）：
+    `code_block`/`table` 保结构，用 `"\n"` + 描述原文追加（不压平，否则围栏代码块会被压成一行）；
+    其余类型（`image` 为主）落库是单行，用 `" "` + `" ".join(description.split())` 追加。
+    这样 chunk 门（caption/description）与检索文本（`text`）同时满足。
+  - 任何一处不合规 → 返回原 `elements`（整批 fail-open），不抛，并给出上面的 `reason_code`。
 - 取消：解析作业无取消令牌，传 `_NeverCancelled`；SDK 面仍提供 `raise_if_cancelled`。
 - Settings（`backend/app/core/config.py`，登记于部署文档对）：
   - `SOURCE_ELEMENT_ENRICHER_TIMEOUT_SECONDS` 默认 120.0，`0 < x ≤ 900`（整点硬截止；解析作业非交互延迟）

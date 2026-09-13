@@ -69,6 +69,7 @@ RUNTIME_ATTRIBUTES = [
     "command_catalog",
     "content_tools",
     "database",
+    "element_enrichers",
     "embedding_store",
     "event_log",
     "evidence_context",
@@ -422,6 +423,43 @@ def test_the_lazy_seats_are_left_empty_by_their_builders():
         assert missing == [], (
             f"{builder_name} no longer leaves these seats empty: {missing}"
         )
+
+
+def test_the_element_enricher_seat_reaches_the_runtime_and_the_ingestion_service(
+    tmp_path, monkeypatch
+):
+    """``application_repository_hosts`` is the single host list every
+    application repository is composed from — the server and the offline
+    scale-build CLI both take it from there — so a seat missing from it is a
+    deployment where the point silently never runs.  This walks the whole
+    chain for ``source.element_enricher``: extension runtime -> that host
+    list -> ``create_repository`` -> facade -> runtime attribute -> the
+    ingestion service that actually calls it, asserting the SAME object
+    arrives at the end rather than merely something truthy."""
+
+    from app.bootstrap import application_repository_hosts
+    from app.extensions import default_extension_runtime
+
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'hosts.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "hosts"))
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    monkeypatch.setenv("EMBED_DIM", "16")
+
+    extension_runtime = default_extension_runtime()
+    hosts = application_repository_hosts(extension_runtime)
+    assert hosts["element_enricher_host"] is extension_runtime.element_enrichers
+
+    repository = SQLiteRepository(
+        Settings(_env_file=None),
+        element_enricher_host=hosts["element_enricher_host"],
+    )
+    runtime = repository._runtime
+    assert runtime.element_enrichers is extension_runtime.element_enrichers
+    assert (
+        runtime.source_ingestion.element_enrichers
+        is extension_runtime.element_enrichers
+    )
+    assert runtime.source_ingestion.resolve_element_assets is not None
 
 
 def test_the_current_user_accessor_is_late_bound(runtime):

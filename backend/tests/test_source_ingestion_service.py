@@ -1725,3 +1725,462 @@ def test_cloud_workbook_output_that_covers_the_workbook_is_kept(tmp_path, monkey
     assert len(asset_ids) == 1
     image_el = next(e for e in elements if e.element_type == "image")
     assert image_el.metadata.get("asset_id") == asset_ids[0]
+
+
+# --- source.element_enricher: parse-time element enrichment (T2) ----------
+
+_ENRICHER_PLUGIN = "examples.circuit_diagram"
+_ENRICHER_CONTRIBUTION = "examples.circuit_diagram.enricher"
+# A real 1x1 PNG: the markdown data-URI path validates the bytes before it
+# persists an asset row, so a placeholder would never reach the enricher.
+_PNG_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk"
+    "+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)
+# Deliberately caption-free: an image element with neither caption nor
+# description is excluded from chunking, so "it has a chunk afterwards" is
+# evidence the enrichment actually reached the retrieval corpus.
+_ENRICHER_MD = f"# Board\n\n![](data:image/png;base64,{_PNG_B64})\n"
+
+
+class _RecordingEnricherHost:
+    """Stand-in for the frozen host: patches every image element it is shown."""
+
+    def __init__(self, *, description="电路功能：分压", raises=None, plugin_id=None):
+        self._description = description
+        self._raises = raises
+        self._plugin_id = plugin_id or _ENRICHER_PLUGIN
+        self.calls = []
+
+    def has_contributions(self) -> bool:
+        return True
+
+    def enrich_application(self, call_context, *, event_sink=None):
+        from app.domain.extensions import ElementEnrichmentPatch
+
+        self.calls.append(call_context)
+        if self._raises is not None:
+            raise self._raises
+        return tuple(
+            ElementEnrichmentPatch(
+                envelope.ordinal,
+                self._plugin_id,
+                "0.1.0",
+                _ENRICHER_CONTRIBUTION,
+                {"is_circuit": True, "netlist": "R1 1 0 1k"},
+                self._description,
+            )
+            for envelope in call_context.elements
+            if envelope.element_type == "image"
+        )
+
+
+class _CircuitEnricherPlugin:
+    """A real SDK-shaped contributor, for the end-to-end host test below."""
+
+    def enrich(self, context):
+        from app.extension_sdk import ContributorResult, ExtensionResultStatus
+        from app.extension_sdk.element_enrichment import ElementEnrichmentCandidate
+
+        return ContributorResult(
+            tuple(
+                ElementEnrichmentCandidate(
+                    view.ref,
+                    {"is_circuit": True, "netlist": "R1 1 0 1k"},
+                    "电路功能：分压\n\n```spice\nR1 1 0 1k\n```",
+                )
+                for view in context.elements
+                if view.element_type == "image" and view.asset_id
+            ),
+            ExtensionResultStatus.AVAILABLE,
+            None,
+        )
+
+
+def _frozen_enricher_host(implementation, plugin_id=_ENRICHER_PLUGIN):
+    """Build the REAL ``SourceElementEnricherHost`` over a frozen registry.
+
+    Same construction as ``test_source_element_enricher_host.py``: a typed
+    bundle registering one contributor at ``SOURCE_ELEMENT_ENRICHER_POINT``,
+    handed to ``build_extension_runtime``.  The stand-in host above is the
+    right tool for the service-layer rules; this one is what proves the two
+    halves actually meet — ref minting, availability, admission, the byte and
+    description rails, and the service's composition, in one parse.
+    """
+    from dataclasses import dataclass as _dataclass
+
+    from app.extension_sdk import (
+        EXTENSION_API_VERSION,
+        SOURCE_ELEMENT_ENRICHER_POINT,
+        ContributionDeclaration,
+        ContributionKind,
+        ExtensionContribution,
+        ExtensionManifest,
+        ExtensionRegistrar,
+    )
+    from app.extensions.bootstrap import build_extension_runtime
+
+    declaration = ContributionDeclaration(
+        _ENRICHER_CONTRIBUTION,
+        SOURCE_ELEMENT_ENRICHER_POINT,
+        ContributionKind.CONTRIBUTOR,
+    )
+
+    @_dataclass(frozen=True)
+    class _Bundle:
+        manifest: ExtensionManifest
+        contribution: ExtensionContribution
+
+        def register(self, registrar: ExtensionRegistrar) -> None:
+            registrar.add_contributor(self.contribution)
+
+    bundle = _Bundle(
+        ExtensionManifest(
+            id=plugin_id,
+            version="0.1.0",
+            api_version=EXTENSION_API_VERSION,
+            display_name=plugin_id,
+            trust="deployment",
+            contributions=(declaration,),
+        ),
+        ExtensionContribution(declaration, implementation, None),
+    )
+    return build_extension_runtime((bundle,)).element_enrichers
+
+
+def _enricher_repo(tmp_path, monkeypatch, host) -> SQLiteRepository:
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
+    monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    return SQLiteRepository(
+        Settings(),
+        parser_provider_chain_host=default_extension_runtime().parser_chain,
+        element_enricher_host=host,
+    )
+
+
+def _upload_markdown_with_image(repo, name="board.md"):
+    notebook = repo.create_notebook(NotebookCreate(name="enrich"))
+    [created] = repo.upload_sources(
+        notebook.id,
+        [UploadedSourceFile(
+            file_name=name,
+            content_type="text/markdown",
+            content=_ENRICHER_MD.encode("utf-8"),
+        )],
+        scheduler=None,
+    )
+    return notebook, created
+
+
+def _chunk_element_ids(repo, source_id):
+    with repo._connect() as db:
+        rows = db.execute(
+            "SELECT element_ids FROM chunks WHERE source_id=?", (source_id,)
+        ).fetchall()
+    return {
+        element_id
+        for row in rows
+        for element_id in json.loads(row["element_ids"] or "[]")
+    }
+
+
+def test_enricher_patch_lands_on_the_persisted_element_and_reaches_chunking(
+    tmp_path, monkeypatch
+):
+    host = _RecordingEnricherHost()
+    repo = _enricher_repo(tmp_path, monkeypatch, host)
+
+    _, created = _upload_markdown_with_image(repo)
+
+    source = repo.get_source(created.id)
+    assert source.parse_status == "extracted"
+    image = next(
+        element
+        for element in repo.source_elements(created.id)
+        if element.element_type == "image"
+    )
+    assert image.metadata["extensions"] == {
+        _ENRICHER_CONTRIBUTION: {
+            "plugin_id": _ENRICHER_PLUGIN,
+            "plugin_version": "0.1.0",
+            "metadata": {"is_circuit": True, "netlist": "R1 1 0 1k"},
+        }
+    }
+    assert image.metadata["description"] == "电路功能：分压"
+    assert image.text.endswith("电路功能：分压")
+    # The caption-free image had no chunk of its own before enrichment; the
+    # description is what put it into the retrieval corpus.
+    assert image.id in _chunk_element_ids(repo, created.id)
+
+
+def test_enricher_receives_this_sources_image_asset_ids(tmp_path, monkeypatch):
+    host = _RecordingEnricherHost()
+    repo = _enricher_repo(tmp_path, monkeypatch, host)
+
+    _, created = _upload_markdown_with_image(repo)
+
+    [asset_id] = repo.source_asset_ids(created.id)
+    [call] = host.calls
+    assert set(call.asset_locations) == {asset_id}
+    location = call.asset_locations[asset_id]
+    assert location.mime == "image/png"
+    assert Path(location.path).is_file()
+    image_envelopes = [
+        envelope for envelope in call.elements if envelope.element_type == "image"
+    ]
+    assert [envelope.asset_id for envelope in image_envelopes] == [asset_id]
+    # Non-image elements travel too (the plugin filters), and every envelope
+    # is positional 1-based so a patch's ordinal addresses it.
+    assert [envelope.ordinal for envelope in call.elements] == list(
+        range(1, len(call.elements) + 1)
+    )
+
+
+def test_a_raising_enricher_ingests_the_source_exactly_as_without_one(
+    tmp_path, monkeypatch
+):
+    raising = _enricher_repo(
+        tmp_path / "raising",
+        monkeypatch,
+        _RecordingEnricherHost(raises=RuntimeError("plugin exploded")),
+    )
+    _, with_host = _upload_markdown_with_image(raising)
+    raised_elements = [
+        (element.element_type, element.text, sorted(element.metadata))
+        for element in raising.source_elements(with_host.id)
+    ]
+
+    without = _enricher_repo(tmp_path / "none", monkeypatch, None)
+    _, no_host = _upload_markdown_with_image(without)
+    baseline = [
+        (element.element_type, element.text, sorted(element.metadata))
+        for element in without.source_elements(no_host.id)
+    ]
+
+    assert raised_elements == baseline
+    assert raising.get_source(with_host.id).parse_status == "extracted"
+
+
+def test_without_a_host_the_pipeline_emits_no_enrich_stage(tmp_path, monkeypatch):
+    repo = _enricher_repo(tmp_path, monkeypatch, None)
+    emitted = []
+    monkeypatch.setattr(
+        repo._runtime.event_log,
+        "emit",
+        lambda record: emitted.append(record),
+    )
+
+    _, created = _upload_markdown_with_image(repo)
+
+    assert repo.get_source(created.id).parse_status == "extracted"
+    assert not [
+        record for record in emitted if record.get("stage") == "enrich"
+    ]
+    image = next(
+        element
+        for element in repo.source_elements(created.id)
+        if element.element_type == "image"
+    )
+    assert "extensions" not in image.metadata
+
+
+def _enrich_stages(emitted):
+    return [
+        (record["status"], record)
+        for record in emitted
+        if record.get("kind") == "pipeline" and record.get("stage") == "enrich"
+    ]
+
+
+def test_a_contributing_host_emits_exactly_one_enrich_start_done_pair(
+    tmp_path, monkeypatch
+):
+    repo = _enricher_repo(tmp_path, monkeypatch, _RecordingEnricherHost())
+    emitted = []
+    monkeypatch.setattr(
+        repo._runtime.event_log, "emit", lambda record: emitted.append(record)
+    )
+
+    _, created = _upload_markdown_with_image(repo)
+
+    assert repo.get_source(created.id).parse_status == "extracted"
+    stages = _enrich_stages(emitted)
+    assert [status for status, _ in stages] == ["start", "done"]
+    done = stages[1][1]
+    # One image element in this source, and only it was patched.
+    assert (done["patched"], done["rejected"]) == (1, "")
+
+
+def test_a_refused_batch_names_its_reason_on_the_done_stage(tmp_path, monkeypatch):
+    """Failing open must not be indistinguishable from proposing nothing: the
+    stable reject code is the only signal an operator gets."""
+    from app.services.source_element_enrichment import REJECT_INVALID_OWNER
+
+    host = _RecordingEnricherHost(plugin_id="Examples.Not-A-Stable-Id")
+    repo = _enricher_repo(tmp_path, monkeypatch, host)
+    emitted = []
+    monkeypatch.setattr(
+        repo._runtime.event_log, "emit", lambda record: emitted.append(record)
+    )
+
+    _, created = _upload_markdown_with_image(repo)
+
+    stages = _enrich_stages(emitted)
+    assert [status for status, _ in stages] == ["start", "done"]
+    done = stages[1][1]
+    assert (done["patched"], done["rejected"]) == (0, REJECT_INVALID_OWNER)
+    image = next(
+        element
+        for element in repo.source_elements(created.id)
+        if element.element_type == "image"
+    )
+    assert "extensions" not in image.metadata
+
+
+def test_the_real_frozen_host_enriches_a_parsed_image_end_to_end(
+    tmp_path, monkeypatch
+):
+    """No stand-in anywhere: a real contributor behind the real
+    ``SourceElementEnricherHost``, through the real parse pipeline."""
+    host = _frozen_enricher_host(_CircuitEnricherPlugin())
+    repo = _enricher_repo(tmp_path, monkeypatch, host)
+
+    _, created = _upload_markdown_with_image(repo)
+
+    assert repo.get_source(created.id).parse_status == "extracted"
+    image = next(
+        element
+        for element in repo.source_elements(created.id)
+        if element.element_type == "image"
+    )
+    owned = image.metadata["extensions"][_ENRICHER_CONTRIBUTION]
+    assert owned["plugin_id"] == _ENRICHER_PLUGIN
+    assert owned["plugin_version"] == "0.1.0"
+    assert owned["metadata"] == {"is_circuit": True, "netlist": "R1 1 0 1k"}
+    # The fenced block survives into the detail view verbatim, and the
+    # flattened copy is what retrieval sees.
+    assert image.metadata["description"].endswith("```spice\nR1 1 0 1k\n```")
+    assert "```spice R1 1 0 1k ```" in image.text
+    assert image.id in _chunk_element_ids(repo, created.id)
+
+
+# --- the facade-side asset resolver ---------------------------------------
+
+
+def _asset_repo(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'assets.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
+    monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    return _repository(Settings())
+
+
+def _saved_asset(repo, notebook_id):
+    from app.services.knowhow.assets import AssetService
+
+    png = b"\x89PNG\r\n\x1a\n" + b"0" * 32
+    asset = AssetService(repo).save(notebook_id, "a.png", "image/png", png, "u")
+    return asset["id"]
+
+
+def test_resolve_element_assets_returns_only_this_notebooks_live_files(
+    tmp_path, monkeypatch
+):
+    from app.services.repository_facade import _resolve_element_assets
+
+    repo = _asset_repo(tmp_path, monkeypatch)
+    mine = repo.create_notebook(NotebookCreate(name="mine"))
+    theirs = repo.create_notebook(NotebookCreate(name="theirs"))
+    my_asset = _saved_asset(repo, mine.id)
+    their_asset = _saved_asset(repo, theirs.id)
+
+    located = _resolve_element_assets(
+        repo, mine.id, [my_asset, their_asset, "asset-unknown", "", None]
+    )
+
+    # A cross-notebook row is a boundary violation, not a miss; an unknown id
+    # and a malformed entry are simply skipped.
+    assert set(located) == {my_asset}
+    assert located[my_asset].mime == "image/png"
+    assert Path(located[my_asset].path).is_file()
+
+
+def test_resolve_element_assets_skips_a_row_whose_file_is_gone(
+    tmp_path, monkeypatch
+):
+    from app.services.knowhow.assets import AssetService
+    from app.services.repository_facade import _resolve_element_assets
+
+    repo = _asset_repo(tmp_path, monkeypatch)
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    asset_id = _saved_asset(repo, notebook.id)
+    path = AssetService(repo).path_for(repo.get_notebook_asset(asset_id))
+    path.unlink()
+
+    # "Non-empty asset id" has to mean "there ARE bytes": a row whose file
+    # never landed (or was swept) must not be offered to a contributor.
+    assert _resolve_element_assets(repo, notebook.id, [asset_id]) == {}
+
+
+def test_resolve_element_assets_skips_one_failing_row_and_keeps_the_rest(
+    tmp_path, monkeypatch
+):
+    from app.services.repository_facade import _resolve_element_assets
+
+    repo = _asset_repo(tmp_path, monkeypatch)
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    good = _saved_asset(repo, notebook.id)
+    real_lookup = repo.get_notebook_asset
+
+    def flaky(asset_id):
+        if asset_id == "asset-explodes":
+            raise RuntimeError("row read blew up")
+        return real_lookup(asset_id)
+
+    monkeypatch.setattr(repo, "get_notebook_asset", flaky)
+
+    located = _resolve_element_assets(
+        repo, notebook.id, ["asset-explodes", good]
+    )
+
+    assert set(located) == {good}
+
+
+def test_element_asset_locations_deduplicates_ids_and_keeps_their_order():
+    """The resolver answers a mapping, so the same image twice costs one row
+    read and one stat — not one per occurrence. Order stays first-appearance
+    so the work a parse does is deterministic."""
+    service = object.__new__(SourceIngestionService)
+    asked = []
+    service.resolve_element_assets = lambda notebook_id, asset_ids: (
+        asked.append((notebook_id, list(asset_ids))) or {}
+    )
+    elements = [
+        types.SimpleNamespace(element_type="image", metadata={"asset_id": "b"}),
+        # Only image elements carry an asset; a stray id elsewhere is not one.
+        types.SimpleNamespace(element_type="paragraph", metadata={"asset_id": "z"}),
+        types.SimpleNamespace(element_type="image", metadata={"asset_id": "a"}),
+        types.SimpleNamespace(element_type="image", metadata={"asset_id": "b"}),
+        types.SimpleNamespace(element_type="image", metadata={}),
+        types.SimpleNamespace(element_type="image", metadata={"asset_id": 7}),
+    ]
+
+    service._element_asset_locations(
+        types.SimpleNamespace(notebook_id="nb-1"), elements
+    )
+
+    assert asked == [("nb-1", ["b", "a"])]
+
+
+def test_element_asset_locations_without_a_resolver_is_an_empty_mapping():
+    service = object.__new__(SourceIngestionService)
+    service.resolve_element_assets = None
+
+    located = service._element_asset_locations(
+        types.SimpleNamespace(notebook_id="nb-1"),
+        [types.SimpleNamespace(element_type="image", metadata={"asset_id": "a"})],
+    )
+
+    assert located == {}
