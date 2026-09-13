@@ -1059,6 +1059,11 @@ class Settings(BaseSettings):
     reasoning_reflect_excerpt_chars: int = Field(
         240, ge=80, le=1000,
         validation_alias="REASONING_REFLECT_EXCERPT_CHARS")
+    # Evidence-only experiment: complete table rows plus their header, still
+    # charged to the existing effort-level evidence pool. Other arms ignore it.
+    reasoning_reflect_table_excerpt_chars: int = Field(
+        1200, ge=240, le=4000,
+        validation_alias="REASONING_REFLECT_TABLE_EXCERPT_CHARS")
     # **可压缩区**(观察账目与历史建议)的投影预算。它不是"整个 prompt 只有这么
     # 多字符":用户完整问题、冻结约束、当前合法动作与额度、完整大纲/枚举覆盖等
     # 必要状态各按自己的边界保留,不进这个池子、也不许被整体裁尾。

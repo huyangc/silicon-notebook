@@ -168,6 +168,22 @@ def test_query_intent_prompt_single_topic_rules_unchanged():
         assert literal in p, f"既有规则文本被改动: {literal!r}"
 
 
+def test_query_intent_prompt_preserves_requested_granularity_and_real_clarification():
+    from app.services.prompts import query_intent_prompt
+
+    p = query_intent_prompt("Compare the mechanisms of two compression methods.")
+
+    assert "Keep the user's requested level of detail" in p
+    assert "requirements from the user's wording" in p
+    assert "Do not add mandatory formulas" in p
+    assert "Preserve those details when the user explicitly asks for them" in p
+    assert "Retrieval query variants are search aids" in p
+    assert "Normalize phrasing without adding facts" in p
+    assert "retain the original wording and ask for it in ambiguities" in p
+    assert "options must be actual choices" in p
+    assert "use an empty options list when a free-text answer is required" in p
+
+
 def test_extract_prompt_excludes_enumerated_values_and_meta_claims():
     from app.services.kg.extract import _prompt
     p = _prompt("[1] sample text", "Section 1", "textbook")
