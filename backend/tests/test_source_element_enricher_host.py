@@ -22,6 +22,7 @@ from app.domain.cancellation import CoreCancellation
 from app.domain.element_enrichment import (
     ELEMENT_ENRICHMENT_METADATA_MAX_DEPTH,
     persisted_element_enrichment_size,
+    thaw_element_enrichment_metadata,
     valid_element_enrichment_owner,
 )
 from app.domain.extensions import (
@@ -533,6 +534,55 @@ def test_malformed_metadata_discards_the_whole_batch(metadata):
     assert host.enrich_application(_call()) == ()
     assert events[0]["status"] == "invalid"
     assert events[0]["reason_code"] == "invalid_enrichment_metadata"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "a\x00b",
+        {"blob": "a\x00b"},
+        {"outer": {"inner": "a\x00b"}},
+        {"items": ["fine", "a\x00b"]},
+        {"items": [{"deep": ["a\x00b"]}]},
+        "\x00",
+    ],
+)
+def test_a_nul_in_any_string_is_refused_by_the_domain_walk(payload):
+    # PostgreSQL's jsonb refuses a NUL character, so one admitted here would
+    # raise inside replace_elements() — past this feature's fail-open boundary,
+    # taking the whole source's ingestion with it.  SQLite would have stored
+    # it, which is why the rule is in the shared walk and not in a backend.
+    with pytest.raises(ValueError):
+        thaw_element_enrichment_metadata(payload)
+
+
+def test_strings_without_a_nul_still_pass_the_domain_walk():
+    # The rail is the NUL specifically, not control characters in general:
+    # metadata is not rendered prose, and jsonb stores the rest happily.
+    assert thaw_element_enrichment_metadata(
+        {"netlist": "R1 1 0 1k\n* note\ttab"}
+    ) == {"netlist": "R1 1 0 1k\n* note\ttab"}
+
+
+def test_a_nul_in_candidate_metadata_discards_only_that_contribution():
+    events: list[dict[str, object]] = []
+    first = _Plugin(None)
+    first.enrich = lambda context: _result(
+        _candidate(context, 0, metadata={"blob": "a\x00b"})
+    )
+    second = _Plugin(None)
+    second.enrich = lambda context: _result(_candidate(context, 1))
+    host = _host(
+        _bundle("corp.first", first),
+        _bundle("corp.second", second),
+        event_sink=events.append,
+    )
+
+    patches = host.enrich_application(_call())
+
+    assert events[0]["status"] == "invalid"
+    assert events[0]["reason_code"] == "invalid_enrichment_metadata"
+    assert [patch.plugin_id for patch in patches] == ["corp.second"]
 
 
 def _nested(levels: int) -> object:
