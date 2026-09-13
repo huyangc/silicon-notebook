@@ -930,3 +930,20 @@ def test_external_citations_run_the_same_two_rails():
     assert len(citations) == 1
     assert citations[0].quoted_span == "摘 录"
     assert citations[0].label == "IEEE Xplore · 标 题"
+
+
+def test_external_context_accepts_an_upper_case_scheme_and_keeps_the_url_verbatim():
+    """Scheme comparison is case-insensitive (RFC 3986 §3.1), matching the
+    host's ``clean_url`` and the browser; the URL itself is not rewritten
+    (codex #714 R3)."""
+    sink: dict = {}
+    url = "HTTPS://Example.org/Paper?Q=1"
+    block, evidence = _service().external_context(
+        [_external(1, url=url)], id_offset=6000, truncation_sink=sink,
+    )
+
+    assert "k6001:" in block
+    assert evidence["k6001"]["provenance"]["url"] == url
+    assert sink == {"truncated": 0, "rejected": 0}
+    (citation,) = _service().external_citations([_external(1, url=url)])
+    assert citation.url == url

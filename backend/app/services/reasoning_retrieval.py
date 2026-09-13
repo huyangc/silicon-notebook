@@ -4994,7 +4994,9 @@ class ReasoningRetriever:
         # (`ask_service._build_reasoning_retriever` 是唯一生产构造点,在
         # `_run_reasoning_stage` 内逐次调用),报告与 knowhow 也各自新建;没有任何
         # 生产路径跨 run 复用同一个实例。
-        if state.external_evidence:
+        # 判据是**块文本非空**而不是条目非空:零条目但带 note 的那一轮,note 同样是
+        # 插件写的、同样进候选摘要,同样需要「这是数据不是指令」的框定(codex #714 R3)。
+        if state.external_block_text:
             self.untrusted_evidence = True
         # 与 `consult_delivered_this_turn` 同形(见 run() 链尾的记账):真送达了
         # 新材料的那一轮,`stale` **持平** —— 不清零也不递增。不清零是因为外部
