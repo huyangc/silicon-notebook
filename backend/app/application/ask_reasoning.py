@@ -178,6 +178,11 @@ class ReasoningEvidenceSnapshot:
     outline: tuple[object, ...]
     outline_evidence: tuple[object, ...]
     baseline_manifest: object | None
+    # ``domain.reflect_action.ExternalEvidence`` a plugin reflect action
+    # admitted during the run.  Defaulted so the field is additive for every
+    # existing construction site (this envelope is built by ``from_result`` in
+    # production and by hand in the stage-contract tests).
+    external_evidence: tuple[object, ...] = ()
 
     @classmethod
     def from_result(cls, result: object) -> "ReasoningEvidenceSnapshot":
@@ -198,6 +203,9 @@ class ReasoningEvidenceSnapshot:
             outline=tuple(getattr(result, "outline", ())),
             outline_evidence=tuple(getattr(result, "outline_evidence", ())),
             baseline_manifest=getattr(result, "baseline_manifest", None),
+            external_evidence=tuple(
+                getattr(result, "external_evidence", ()) or ()
+            ),
         )
 
 
@@ -244,6 +252,19 @@ class ResponseDraftInput:
     kg_required: bool
     candidate_manifest: object | None
     spreadsheet_results: tuple[object, ...] = ()
+    # ``domain.reflect_action.ExternalEvidence`` items a plugin reflect action
+    # brought back during retrieval (design document
+    # ``2026-09-13-reflect-plugin-action-design_zh.md`` §6.1).  Typed as
+    # ``object`` like every other evidence tuple on this envelope — the
+    # application layer transfers ownership, it does not read the shape.
+    #
+    # This is the deliberate OPPOSITE of the gap-consult suggestions, which are
+    # filled after the draft stage returns precisely so synthesis cannot see
+    # them: external evidence must be inside the drafted answer, because it is
+    # citable.  Defaulted to empty so every existing construction site — the
+    # orchestrator's is the only production one, but tests build this envelope
+    # directly — stays valid and produces the pre-feature answer unchanged.
+    external_evidence: tuple[object, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

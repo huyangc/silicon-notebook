@@ -23,6 +23,7 @@ from app.domain.extensions import (
     RetrievalContributorHostPort,
 )
 from app.domain.gap_consult import GapConsultHostPort
+from app.domain.reflect_action import ReflectActionHostPort
 from app.domain.ask_engine import AskEngineHostPort
 from app.domain.indexing_pipeline import IndexingPipelineHostPort
 from app.core.event_logging import EventLogger, llm_log_dir_aligned
@@ -182,6 +183,7 @@ class _ProcessFoundation:
     # contribution exists, so an empty seat is the shipped deployment and the
     # ingestion service short-circuits on it without any cost.
     element_enrichers: ElementEnricherHostPort | None
+    reflect_actions: ReflectActionHostPort | None
     parser_provider_chain: ParserProviderChainHostPort
     models: Any
 
@@ -201,6 +203,7 @@ def _build_process_foundation(
     indexing_pipeline_host: IndexingPipelineHostPort | None,
     gap_consult_host: GapConsultHostPort | None,
     element_enricher_host: ElementEnricherHostPort | None,
+    reflect_action_host: ReflectActionHostPort | None,
     parser_provider_chain_host: ParserProviderChainHostPort | None,
 ) -> _ProcessFoundation:
     """Domain 1 — depends on nothing but the constructor arguments.
@@ -239,6 +242,7 @@ def _build_process_foundation(
         indexing_pipelines=indexing_pipeline_host,
         gap_consult=gap_consult_host,
         element_enrichers=element_enricher_host,
+        reflect_actions=reflect_action_host,
         parser_provider_chain=(
             parser_provider_chain_host or BuiltinParserChainHost()
         ),
@@ -1012,6 +1016,7 @@ class RepositoryRuntime:
         indexing_pipeline_host: IndexingPipelineHostPort | None = None,
         gap_consult_host: GapConsultHostPort | None = None,
         element_enricher_host: ElementEnricherHostPort | None = None,
+        reflect_action_host: ReflectActionHostPort | None = None,
     ) -> None:
         """Call domain builders in order; their call order is the dependency topology."""
         foundation = _build_process_foundation(
@@ -1023,6 +1028,7 @@ class RepositoryRuntime:
             indexing_pipeline_host=indexing_pipeline_host,
             gap_consult_host=gap_consult_host,
             element_enricher_host=element_enricher_host,
+            reflect_action_host=reflect_action_host,
             parser_provider_chain_host=parser_provider_chain_host,
         )
         self.settings = foundation.settings
@@ -1036,6 +1042,7 @@ class RepositoryRuntime:
         self.indexing_pipelines = foundation.indexing_pipelines
         self.gap_consult = foundation.gap_consult
         self.element_enrichers = foundation.element_enrichers
+        self.reflect_actions = foundation.reflect_actions
         self.parser_provider_chain = foundation.parser_provider_chain
         self.models = foundation.models
         self._closed = False
@@ -2399,6 +2406,10 @@ class RepositoryRuntime:
                 # plugin sees a bounded question and nothing about who asked
                 # it or which notebook it came from.
                 gap_consult_host=self.gap_consult,
+                # Design document §3.1: only the Ask path seats this.
+                # Report and knowhow completion build their own
+                # ``ReasoningRetriever`` and deliberately do not.
+                reflect_action_host=self.reflect_actions,
                 ask_engine_host=self.ask_engines,
                 ask_engine_participant_notebooks=(
                     self.notebook_store.participant_notebook_ids

@@ -218,6 +218,20 @@ def _validate_reflect_parameter_values(
             f"reflect action {locator} parameter {parameter.name!r} "
             "declares a duplicate enum value"
         )
+    # TWO values minimum, checked last so the more specific failures above keep
+    # naming themselves. A one-value enum renders as a schema example with no
+    # ``|`` in it -- and ``model_json._validate_against_example`` decides "this
+    # is an enum" by looking for exactly that character. So a single-value
+    # parameter would be advertised to the model as a closed choice while the
+    # validation layer treated it as free text and accepted anything, which is
+    # the one shape the projection's schema comment promises cannot happen. A
+    # parameter with only one legal value is also not a choice: it belongs in
+    # the action description, or the plugin should not ask for it at all.
+    if len(parameter.values) < 2:
+        raise ExtensionRegistryError(
+            f"reflect action {locator} parameter {parameter.name!r} "
+            "is an enum with fewer than two values"
+        )
 
 
 def _validate_reflect_descriptor(

@@ -12,6 +12,9 @@ from typing import Any, Iterable, Mapping, MutableMapping, Sequence
 
 from app.core.config import Settings
 from app.domain.citation_origin import foreign_notebook_id
+from app.domain.reflect_action import (
+    EXTERNAL_EVIDENCE_CONTEXT_CHARS, fold_control_characters,
+)
 from app.models.ask import (
     AnswerAnchor, Citation, CitationImage, CitationKnowhowRef,
 )
@@ -25,6 +28,32 @@ from app.services.citation_markers import MARKER_RE, marker_keys
 from app.services.source_display import source_display_title
 from app.services.source_element_selection import deduplicate_source_chunks_in_order
 from app.services.source_scope import notebook_in_scope
+
+
+def _fold(value: object) -> str:
+    """One external field, safe to put on one line of an evidence block.
+
+    Folds every control character / line separator / bidi override run to a
+    single space (the shared class in ``domain.reflect_action``) and trims the
+    ends, so a plugin excerpt can never open a second ``k<n>:`` line — see
+    ``EvidenceContextService.external_context`` for what that would forge.
+    """
+
+    return fold_control_characters(str(value or "")).strip()
+
+
+def _openable_url(item: object) -> bool:
+    """True when this external item carries a URL a browser can open.
+
+    Fail-closed half of design-document §九 invariant 3: an external item
+    without an ``http(s)`` URL cannot satisfy "external tier ⇔ non-empty url ⇔
+    no library ids", so it is not rendered and not cited at all rather than
+    becoming a card with a dead — or ``javascript:`` — link.
+    """
+
+    return str(getattr(item, "url", "") or "").startswith(
+        ("http://", "https://")
+    )
 
 
 def _knowhow_ref(element_row: Mapping[str, Any] | None) -> CitationKnowhowRef | None:
@@ -575,6 +604,171 @@ class EvidenceContextService:
                 value["knowhow"] = refs.get(value["element_id"])
         return ("\n".join(lines) if lines else "(none)"), evidence_by_id
 
+    def external_context(
+        self,
+        items: Sequence[Any],
+        *,
+        id_offset: int,
+        budget_chars: int | None = None,
+        truncation_sink: MutableMapping[str, Any] | None = None,
+    ) -> tuple[str, dict[str, dict[str, Any]]]:
+        """Render ``ExternalEvidence`` as first-class ``[k]``-citable evidence.
+
+        The one context builder in this service that performs **no store read
+        at all**: an ``ExternalEvidence`` is already the finished, host-
+        sanitised record (``domain/reflect_action.py``), so every field below
+        is a straight copy.  There is nothing to tier-map (the tier IS
+        ``"external"``), no source metadata to resolve (``source_id`` is
+        structurally empty) and no knowhow to locate.  Design document
+        ``docs/superpowers/specs/2026-09-13-reflect-plugin-action-design_zh.md``
+        §6.2.
+
+        The budget is spent **per item, never mid-item**, unlike
+        ``chunk_context``/``element_context``, which clip the last admitted
+        text and mark it with an ellipsis.  Both of those clip material the
+        user can still open in the notebook; an external excerpt is the only
+        copy of that text anyone will ever see — the citation card shows
+        exactly this string — and half of a quotation attributed to a named
+        outside source is a misquotation, not a shortened quotation.  Items
+        that do not fit are dropped whole and counted in
+        ``truncation_sink["truncated"]``; items refused outright by the two
+        render-contract rails below are counted in
+        ``truncation_sink["rejected"]``.  ``len(items)`` always equals
+        ``len(evidence_by_id) + truncated + rejected``, so the caller can
+        disclose the gap without recounting.
+
+        **Two rails, both belonging to the render contract rather than to the
+        host** (the host has its own; these must hold even if it is replaced):
+
+        * Every rendered field is folded through
+          ``domain.reflect_action.fold_control_characters``.  A block is one
+          item per line and the reverse binding is read back off that shape, so
+          an excerpt carrying a newline followed by ``k1: [chunk][personal] …``
+          would otherwise render a SECOND evidence line the core never wrote —
+          a fabricated notebook citation sitting inside the model's own
+          evidence.
+        * An item whose ``url`` is empty or does not begin ``http://`` /
+          ``https://`` is skipped ENTIRELY.  Design document §九 invariant 3
+          makes ``tier="external"``, a non-empty URL and empty library ids one
+          fact; an item that cannot satisfy it must not become half of one.
+          Rendering it anyway would produce a citation card whose "open link"
+          goes nowhere — or, for a ``javascript:`` URL, somewhere worse.
+
+        ``id_offset`` mirrors the sibling builders: keys are
+        ``k{id_offset + n}``, so the caller owns the numbering segment.  ``n``
+        counts ADMITTED items only, so the block is always
+        ``k{offset+1}..k{offset+len(evidence_by_id)}`` with no holes.
+        """
+        budget = (
+            EXTERNAL_EVIDENCE_CONTEXT_CHARS
+            if budget_chars is None else max(0, int(budget_chars))
+        )
+        lines: list[str] = []
+        evidence_by_id: dict[str, dict[str, Any]] = {}
+        truncated = 0
+        rejected = 0
+        used = 0
+        for index, item in enumerate(items, 1):
+            if not _openable_url(item):
+                rejected += 1
+                continue
+            key = f"k{id_offset + len(evidence_by_id) + 1}"
+            title = _fold(getattr(item, "title", ""))
+            excerpt = _fold(getattr(item, "excerpt", ""))
+            source_label = _fold(getattr(item, "source_label", ""))
+            location_label = _fold(getattr(item, "location_label", ""))
+            where = f" ({location_label})" if location_label else ""
+            line = (
+                f"{key}: [external · {source_label}] {title}{where} — {excerpt}"
+            )
+            separator = 1 if lines else 0
+            if used + separator + len(line) > budget:
+                # Whole-item admission: a later, shorter item is NOT admitted
+                # after a longer one was refused.  Order is the host's
+                # admission order (relevance as the plugin ranked it), and
+                # skipping ahead would silently reorder the evidence the model
+                # sees relative to the trace the user reads.
+                #
+                # The unseen tail is still split by the same two reasons, so
+                # ``admitted + truncated + rejected == len(items)`` holds
+                # whatever the tail contains — the caller discloses one number
+                # per reason and neither may quietly absorb the other.
+                tail = items[index - 1:]
+                truncated += sum(1 for row in tail if _openable_url(row))
+                rejected += sum(1 for row in tail if not _openable_url(row))
+                break
+            lines.append(line)
+            used += separator + len(line)
+            evidence_by_id[key] = {
+                "object_id": str(getattr(item, "key", "") or ""),
+                "object_type": "external",
+                "name": title,
+                "definition": None,
+                "snippet": excerpt,
+                "source_title": title,
+                "location_label": location_label,
+                # Structurally empty, not "unknown": external material has no
+                # row in this notebook's source/element tables, and a citation
+                # guard (test_citation_notebook_id_guard) pins that an
+                # external anchor never carries either id.
+                "source_id": "",
+                "element_id": "",
+                "tier": "external",
+                "notebook_id": "",
+                "provenance": {
+                    "kind": "external",
+                    "plugin_id": str(getattr(item, "plugin_id", "") or ""),
+                    "action": str(getattr(item, "action", "") or ""),
+                    "url": str(getattr(item, "url", "") or ""),
+                    "source_label": source_label,
+                },
+                "knowhow": None,
+            }
+        if truncation_sink is not None:
+            truncation_sink["truncated"] = truncated
+            truncation_sink["rejected"] = rejected
+        return ("\n".join(lines) if lines else "(none)"), evidence_by_id
+
+    def external_citations(self, items: Sequence[Any]) -> list[Citation]:
+        """Fallback-list rows for external evidence.
+
+        ``citations_from`` only eats ``top_hits``; these are appended to the
+        tail of the citation list instead (design document §6.3).  Empty input
+        gives an empty list, so a run without a plugin action leaves the
+        citation list byte-identical.
+
+        **Callers must pass only items that actually entered a prompt.**  A
+        citation is a claim that the answer could have been written from this
+        material; an item the budget dropped was never shown to the model, and
+        listing it puts a source under an answer that never saw it.  The
+        caller owns that filter because only it knows which keys the assembler
+        admitted (``AskService._answer_reasoning``'s ``external_sink``) — a
+        second, independent re-derivation here would be a second thing to keep
+        in sync.
+
+        The same two render-contract rails as ``external_context`` apply: text
+        is folded (a citation card renders it too), and an item without an
+        openable ``http(s)`` URL is skipped — which is also why this cannot
+        simply trust its input: the two producers must agree on which items
+        exist, and they agree by running the same rails.
+        """
+        citations: list[Citation] = []
+        for item in items:
+            if not _openable_url(item):
+                continue
+            source_label = _fold(getattr(item, "source_label", ""))
+            title = _fold(getattr(item, "title", ""))
+            citations.append(Citation(
+                label=f"{source_label} · {title}".strip(" ·"),
+                source_id="",
+                element_id="",
+                location_label=_fold(getattr(item, "location_label", "")),
+                quoted_span=_fold(getattr(item, "excerpt", "")),
+                tier="external",
+                url=str(getattr(item, "url", "") or ""),
+            ))
+        return citations
+
     def knowledge_context(
         self,
         notebook_id: str,
@@ -896,6 +1090,14 @@ class EvidenceContextService:
                     # 空串,不崩不猜。本读取点在 test_citation_notebook_id_guard
                     # 的登记清单里。
                     notebook_id=str(context.get("notebook_id", "")),
+                    # 外部证据(``external_context``)是唯一在 provenance 里写
+                    # ``url`` 的 builder,所以这一行对其它每一种证据都解出空串、
+                    # 被 ``exclude_if`` 整体挡在 payload 之外 —— 接入这个特性前
+                    # 写下的锚点逐字节不变。刻意从 provenance 抄而不是让
+                    # ``external_context`` 另开一个顶层键:provenance 已经是
+                    # 「这条证据从哪来」的那一格,一个只有一种 builder 会填的
+                    # 顶层键会让另外四个 builder 都欠一句「为什么不填」。
+                    url=str((context.get("provenance") or {}).get("url") or ""),
                     provenance=dict(context.get("provenance") or {}),
                     # Task 12b: 只有 knowledge_context 建的 evidence_by_id 才带
                     # "knowhow" 键；chunk_context/记忆上下文没有这个键，`.get`

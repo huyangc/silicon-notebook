@@ -335,3 +335,65 @@ def test_plan_prompt_neutral_opening_matches_expand_query_prompts_framing():
 
 
 # ---------------------------------------------------------------------------
+# T4(reflect 插件动作):`external_rules` 两态。设计文档
+# docs/superpowers/specs/2026-09-13-reflect-plugin-action-design_zh.md §6.2。
+
+
+def test_answer_prompt_is_byte_identical_without_external_evidence():
+    """闸关着时 `answer_prompt` 与接入这个特性之前逐字节相等——缺省值与显式
+    False 都是同一份字符串,history/style/按节三种形状各钉一次(任一分支把规则
+    句无条件拼进去就会红)。"""
+    from app.services.prompts import answer_prompt
+
+    for kwargs in (
+        {},
+        {"history_block": "User: 上一问\nAssistant: 上一答"},
+        {"style_block": "[风格] 先给结论"},
+        {"sectioned": True, "section_title": "第一节",
+         "section_index": 1, "section_total": 3},
+    ):
+        default = answer_prompt("q?", "k1: [concept] X", **kwargs)
+        explicit = answer_prompt(
+            "q?", "k1: [concept] X", external_rules=False, **kwargs)
+        assert default == explicit
+        assert "[external · " not in default
+
+
+def test_answer_prompt_appends_the_external_rule_only_when_asked():
+    """开着时规则 14 落在规则 13 之后、history/Question 之前,并且它说的正是
+    「可以像其它条目一样 [k] 引用,但不得表述为笔记本内容」。"""
+    from app.services.prompts import answer_prompt
+
+    off = answer_prompt("q?", "k6001: [external · IEEE Xplore] T — E")
+    on = answer_prompt(
+        "q?", "k6001: [external · IEEE Xplore] T — E", external_rules=True)
+
+    assert "14. Items tagged [external · <source>]" in on
+    assert "14. Items tagged" not in off
+    # 承重的两半:可引用,且不得冒充笔记本内容。
+    assert "Cite them with their [k] marker exactly like any other item" in on
+    assert "never describe them as notebook/library content" in on
+
+    rule_13_idx = on.index("13. Inference status propagates")
+    rule_14_idx = on.index("14. Items tagged [external · <source>]")
+    question_idx = on.index("Question: q?")
+    assert rule_13_idx < rule_14_idx < question_idx
+
+    # 开关只多这一条规则,别的什么都没动。
+    assert off == on.replace(
+        on[rule_14_idx:on.index("\n\n", rule_14_idx) + 1], "", 1
+    )
+
+
+def test_answer_prompt_external_rule_survives_history_and_style_blocks():
+    from app.services.prompts import answer_prompt
+
+    prompt = answer_prompt(
+        "q?", "k6001: [external · X] T — E",
+        history_block="User: 上一问",
+        style_block="[风格] 先给结论",
+        external_rules=True,
+    )
+    rule_14_idx = prompt.index("14. Items tagged [external · <source>]")
+    assert rule_14_idx < prompt.index("User: 上一问")
+    assert rule_14_idx < prompt.index("[风格] 先给结论")

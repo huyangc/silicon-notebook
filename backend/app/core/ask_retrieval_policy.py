@@ -76,7 +76,16 @@ class AskRetrievalLimits:
     ``kg_context_chars`` limits KG objects/relations, confirmed Memory, and
     query-time chains. ``chunk_context_chars`` limits structured preview, chunks,
     and direct source elements; their combined prompt evidence cannot exceed the
-    sum. Structured rows stay pageable outside
+    sum.  The ONE evidence block outside that sum is external evidence (material
+    a ``ask.reflect_action`` plugin brought back from outside the library): it is
+    appended after the combined budget is spent and is bounded separately by
+    ``EXTERNAL_EVIDENCE_CONTEXT_CHARS``, so the ceiling on one synthesis prompt's
+    evidence is ``kg_context_chars + chunk_context_chars`` plus, only on a run
+    that actually called a plugin action, whatever that block really occupied.
+    It is deliberately outside: it competes with nothing, because it is the only
+    material in the prompt that cannot be re-retrieved from the notebook, and
+    inside the shared budget it would be the first thing squeezed out precisely
+    on the runs that went looking for it.  Structured rows stay pageable outside
     that prompt; ``structured_payload_chars`` bounds their transport payload and
     ``inline_answer_rows`` bounds only the inline prose/list preview.  Neither
     limit may silently reduce collection completeness.  A single structured cell

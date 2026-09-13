@@ -533,7 +533,7 @@ async def test_ask_notebook_projects_precise_anchor_and_citation_fields(
                     label="Anchor label", source_title="Source A",
                     location_label="1.1", source_id="anchor-source-1",
                     element_id="anchor-element-1", tier="personal",
-                    provenance={},
+                    provenance={}, url="",
                     knowhow=SimpleNamespace(table_id="tbl-1", row_id="row-1"),
                 ),
                 SimpleNamespace(
@@ -541,7 +541,7 @@ async def test_ask_notebook_projects_precise_anchor_and_citation_fields(
                     label="Anchor label 2", source_title="Source B",
                     location_label="1.2", source_id="anchor-source-2",
                     element_id="anchor-element-2", tier="personal",
-                    provenance={}, knowhow=None,
+                    provenance={}, knowhow=None, url="",
                 ),
             ],
             citations=[
@@ -549,14 +549,14 @@ async def test_ask_notebook_projects_precise_anchor_and_citation_fields(
                     label="Citation A", source_id="citation-source-1",
                     element_id="citation-element-1", location_label="1.1",
                     quoted_span=long_quoted_span, source_file_name=long_file_name,
-                    tier="personal", notebook_id="", memory_id="",
+                    tier="personal", notebook_id="", memory_id="", url="",
                     knowhow=SimpleNamespace(table_id="tbl-2", row_id="row-2"),
                 ),
                 SimpleNamespace(
                     label="Citation B", source_id="citation-source-2",
                     element_id="citation-element-2", location_label="1.2",
                     quoted_span="short span", source_file_name="short.md",
-                    tier="personal", notebook_id="", memory_id="",
+                    tier="personal", notebook_id="", memory_id="", url="",
                     knowhow=None,
                 ),
             ],
@@ -597,6 +597,139 @@ async def test_ask_notebook_projects_precise_anchor_and_citation_fields(
 
 
 @pytest.mark.anyio
+async def test_ask_notebook_passes_the_external_evidence_url_through(
+    mcp_env, monkeypatch
+):
+    """T4(reflect 插件动作,设计文档 §七):已认证的 Agent 面看得到外部证据的
+    ``url``——它是外部条目**唯一**可解析的句柄(``source_id``/``element_id``
+    结构上为空),投影把它丢掉,Agent 就拿到一条既查不到来源、也打不开原文的
+    引用。库内条目仍然一个字节都不多带:空 ``url`` 整键省略,与
+    ``notebook_id``/``memory_id`` 同一条规则。
+
+    (与之相对的是**匿名**公开分享页,它刻意只给 ``is_external`` 标记、不给
+    链接——见 ``test_conversation_public_view``。)"""
+    service = mcp_env["service"]
+    notebook_id = mcp_env["notebook"].id
+    monkeypatch.setattr(service, "get_notebook", lambda _id: _fake_notebook_summary(mcp_env))
+
+    monkeypatch.setattr(
+        service,
+        "ask",
+        lambda *a, **k: SimpleNamespace(
+            answer_id="ans-external",
+            answer="库外资料 [k6001],库内证据 [k1]。",
+            conclusion="Answer.",
+            grounded=True,
+            evidence_level="grounded",
+            mode="reasoning",
+            conversation_id="conv-external",
+            anchors=[
+                SimpleNamespace(
+                    key="k6001", object_id="ext:acme:1", object_type="external",
+                    label="外部论文", source_title="外部论文",
+                    location_label="§1", source_id="", element_id="",
+                    tier="external", provenance={"kind": "external"},
+                    knowhow=None, url="https://example.org/paper/1",
+                ),
+                SimpleNamespace(
+                    key="k1", object_id="obj-1", object_type="concept",
+                    label="库内对象", source_title="Source A",
+                    location_label="1.1", source_id="s1", element_id="e1",
+                    tier="personal", provenance={}, knowhow=None, url="",
+                ),
+            ],
+            citations=[
+                SimpleNamespace(
+                    label="IEEE Xplore · 外部论文", source_id="", element_id="",
+                    location_label="§1", quoted_span="外部摘录",
+                    source_file_name="", tier="external", notebook_id="",
+                    memory_id="", knowhow=None,
+                    url="https://example.org/paper/1",
+                ),
+                SimpleNamespace(
+                    label="库内引用", source_id="s1", element_id="e1",
+                    location_label="1.1", quoted_span="库内摘录",
+                    source_file_name="doc.md", tier="personal", notebook_id="",
+                    memory_id="", knowhow=None, url="",
+                ),
+            ],
+        ),
+    )
+    async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
+        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+        answer = _payload(await client.call(
+            "ask_notebook", {"question": "external passthrough", "mode": "reasoning"}
+        ))
+
+    external_anchor, library_anchor = answer["anchors"]
+    assert external_anchor["tier"] == "external"
+    assert external_anchor["url"] == "https://example.org/paper/1"
+    assert "url" not in library_anchor
+
+    external_citation, library_citation = answer["citations"]
+    assert external_citation["tier"] == "external"
+    assert external_citation["url"] == "https://example.org/paper/1"
+    assert "url" not in library_citation
+
+
+@pytest.mark.anyio
+async def test_a_url_is_dropped_whole_rather_than_clipped_under_budget(
+    mcp_env, monkeypatch
+):
+    """P2(评审):被截断的 URL 比缺失的 URL 更坏。
+
+    一条被砍半的摘录以「…」自报是片段,Agent 当片段用;一条被砍半的 URL
+    ``https://example.org/papers/2401.0123…`` 仍然是一个语法完好的链接,Agent
+    (或它转述给的人)会去打开它,落在另一个页面或什么都没有,全程没有任何信号
+    说这里丢过东西。所以预算要么花得起整条 URL,要么整条不发。
+
+    把 ``citations_budget_chars`` 收紧到必然触发裁剪,断言输出里**没有**任何
+    以「…」结尾的 url、也没有 url 的任何真前缀。"""
+    service = mcp_env["service"]
+    notebook_id = mcp_env["notebook"].id
+    monkeypatch.setattr(service, "get_notebook", lambda _id: _fake_notebook_summary(mcp_env))
+    from app.api.mcp_tools import memory_context
+
+    monkeypatch.setattr(memory_context, "CITATIONS_BUDGET_CHARS", 400)
+
+    urls = [
+        f"https://example.org/papers/{index}/" + ("segment/" * 20)
+        for index in range(12)
+    ]
+    monkeypatch.setattr(
+        service,
+        "ask",
+        lambda *a, **k: SimpleNamespace(
+            answer_id="ans-urlbudget", answer="外部证据很多。",
+            conclusion="Answer.", grounded=True, evidence_level="grounded",
+            mode="reasoning", conversation_id="conv-urlbudget", anchors=[],
+            citations=[
+                SimpleNamespace(
+                    label=f"IEEE Xplore · 外部论文-{index}",
+                    source_id="", element_id="", location_label=f"§{index}",
+                    quoted_span="外部摘录" * 20, source_file_name="",
+                    tier="external", notebook_id="", memory_id="",
+                    knowhow=None, url=url,
+                )
+                for index, url in enumerate(urls)
+            ],
+        ),
+    )
+    async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
+        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+        answer = _payload(await client.call(
+            "ask_notebook", {"question": "url budget", "mode": "reasoning"}
+        ))
+
+    emitted = [row["url"] for row in answer["citations"] if "url" in row]
+    # 预算确实咬到了(否则这条用例是空转)。
+    assert len(emitted) < len(urls)
+    for value in emitted:
+        assert value in urls, f"emitted a url that is not one of the originals: {value}"
+        assert not value.endswith("…")
+
+
+@pytest.mark.anyio
 async def test_ask_notebook_preserves_answer_text_under_realistic_citation_load(
     mcp_env, monkeypatch
 ):
@@ -630,7 +763,7 @@ async def test_ask_notebook_preserves_answer_text_under_realistic_citation_load(
             label=zh_text(20), source_title=zh_text(15),
             location_label=f"2.{i}", source_id=f"source-{i}",
             element_id=f"element-{i}", tier="personal", provenance={},
-            knowhow=None,
+            knowhow=None, url="",
         )
         for i in range(8)
     ]
@@ -640,6 +773,7 @@ async def test_ask_notebook_preserves_answer_text_under_realistic_citation_load(
             element_id=f"element-{i}", location_label=f"2.{i}",
             quoted_span=zh_text(200), source_file_name=f"doc-{i}.md",
             tier="personal", notebook_id="", memory_id="", knowhow=None,
+            url="",
         )
         for i in range(16)
     ]
@@ -1230,13 +1364,13 @@ async def test_ask_notebook_filters_memory_citations_without_memory_read_scope(
                     label="Memory hit", source_id="", element_id="",
                     location_label="", quoted_span="memory content",
                     source_file_name="", tier="personal", notebook_id="",
-                    memory_id="mem-1", knowhow=None,
+                    memory_id="mem-1", knowhow=None, url="",
                 ),
                 SimpleNamespace(
                     label="Source hit", source_id="source-1", element_id="element-1",
                     location_label="1", quoted_span="source content",
                     source_file_name="doc.md", tier="personal", notebook_id="",
-                    memory_id="", knowhow=None,
+                    memory_id="", knowhow=None, url="",
                 ),
             ],
         )
@@ -1334,7 +1468,7 @@ async def test_ask_notebook_memory_citation_count_is_not_recoverable_from_omitte
                     location_label="1", quoted_span="q", source_file_name="d.md",
                     tier="personal", notebook_id="",
                     memory_id=f"mem-{index}" if index in memory_positions else "",
-                    knowhow=None,
+                    knowhow=None, url="",
                 )
                 for index in range(25)
             ],
@@ -1602,6 +1736,7 @@ async def test_all_seven_official_client_tool_responses_have_strict_serialized_b
                     source_id=f"anchor-source-{index}",
                     element_id=f"anchor-element-{index}",
                     tier="personal",
+                    url="",
                     provenance={"nested": [sentinel * 100 for _ in range(100)]},
                     knowhow=(
                         SimpleNamespace(table_id="anchor-table-0", row_id="anchor-row-0")
@@ -1621,6 +1756,7 @@ async def test_all_seven_official_client_tool_responses_have_strict_serialized_b
                     tier="personal",
                     notebook_id=f"citation-notebook-{index}",
                     memory_id="",
+                    url="",
                     knowhow=(
                         SimpleNamespace(table_id="citation-table-0", row_id="citation-row-0")
                         if index == 0 else None
@@ -4872,3 +5008,36 @@ async def test_a_lookup_that_finds_nothing_still_leaves_a_ledger_row(mcp_env):
         notebook_id, mcp_env["alice"].id, limit=50
     )
     assert [row["capability"] for row in calls] == ["knowledge:read"]
+
+
+def test_the_whole_or_nothing_rule_is_enforced_by_both_shrink_mechanisms():
+    """Unit pin for the two places a string can be shortened, so the e2e above
+    cannot go green just because ``_drop_list_item`` happened to remove the
+    row first.
+
+    ``url`` must survive the ordinary pass untouched (like an identifier) and,
+    when the identifier pass finally has to act, disappear ENTIRELY — never
+    reappear as a shorter, still-openable link. Same rule in
+    ``_sanitize_output``'s per-field limit."""
+    from app.api.mcp_tools._shared import (
+        WHOLE_OR_NOTHING_FIELDS, _sanitize_output, _shrink_longest_string,
+    )
+
+    assert "url" in WHOLE_OR_NOTHING_FIELDS
+    url = "https://example.org/papers/" + "segment/" * 30
+    stats = {"truncated": False, "omitted_characters": 0, "omitted_fields": 0,
+             "omitted_items": 0, "omitted_map_entries": 0}
+
+    row = {"citations": [{"label": "x", "url": url}]}
+    # Ordinary pass: nothing here is shrinkable, so it reports no progress and
+    # leaves the url byte-identical.
+    assert _shrink_longest_string(row, stats) is False
+    assert row["citations"][0]["url"] == url
+    # Identifier pass: the key is gone, not halved.
+    assert _shrink_longest_string(row, stats, identifiers=True) is True
+    assert row["citations"][0] == {"label": "x"}
+
+    # Field limit: same rule, so a long url never reaches the wire clipped.
+    assert _sanitize_output(
+        {"url": url, "label": "y"}, stats, field_limits={"url": 40},
+    ) == {"label": "y"}

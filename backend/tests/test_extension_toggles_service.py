@@ -525,6 +525,7 @@ def _extension_runtime_double():
         indexing_pipelines=object(),
         gap_consult=object(),
         element_enrichers=object(),
+        reflect_actions=object(),
     )
 
 

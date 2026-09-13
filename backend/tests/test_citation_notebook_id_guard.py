@@ -56,6 +56,15 @@ a dict built by ``dict(...)`` or ``update()``, a write in a function that is not
 a registered builder, or a value laundered through an attribute assignment.
 Those paths are covered by the behavioural tests (``test_evidence_context_service``,
 ``test_cross_tier_reasoning``, ``test_knowhow_graph_anchor``), not here.
+
+A second static guard of the same shape lives at the bottom of this module:
+the external-evidence invariant (design document
+``2026-09-13-reflect-plugin-action-design_zh.md`` §九 invariant 3), which pins
+that ``tier="external"``, a non-empty ``url`` and empty ``source_id``/
+``element_id`` are three faces of one fact and may never be written apart.  It
+shares this module because it shares the *failure mode* — a new construction
+point with no reminder — and the same two shapes (constructor keyword, id_map
+dict write) it has to inspect to see one.
 """
 from __future__ import annotations
 
@@ -161,6 +170,15 @@ BUILDER_SITES: Registry = {
         "Single-notebook by construction: it tier-maps exactly the active "
         "notebook, so the constant empty string IS the normalised value.  "
         "Pinned because parse_anchors' registration leans on this claim.",
+    ),
+    (EVIDENCE_CONTEXT, "EvidenceContextService.external_context"): (
+        ("''",),
+        "External evidence has NO owning notebook at all — it never came out "
+        "of a library — so the constant empty string is not a normalisation "
+        "of an active id but the absence of one.  Filling it would badge "
+        "out-of-library material as coming from a notebook.  Its own three-way "
+        "contract (tier/url/no library ids) is guarded separately at the "
+        "bottom of this module.",
     ),
 }
 
@@ -756,3 +774,269 @@ def test_helper_is_idempotent() -> None:
     assert foreign_notebook_id(once, "nb-active") == once
     other = foreign_notebook_id("nb-base", "nb-active")
     assert foreign_notebook_id(other, "nb-active") == other
+
+
+# ===========================================================================
+# 不变量 3 的静态守卫:外部证据的三个字段是一体的
+# ===========================================================================
+#
+# 设计文档 ``docs/superpowers/specs/2026-09-13-reflect-plugin-action-design_zh.md``
+# §九 不变量 3:「外部证据永远带 ``tier="external"`` 与非空 ``url``,永远没有
+# ``source_id``/``element_id``」。三者是同一个事实的三面——库外材料没有本库的
+# 行可指,却有一个可打开的地址——所以任何一面单独成立都是错的:
+#
+#   * 有 ``tier="external"`` 却没有 ``url`` → 前端引用卡按 external 分支渲染,
+#     但「打开链接」按钮没有目的地,读者拿到一张既不能在库里查看、也不能打开
+#     原文的死卡;
+#   * 有 ``tier="external"`` 却带 ``source_id``/``element_id`` → 那两个 id 是
+#     本库的句柄,前端会拿它们去请求一个不存在的来源,更糟的是公开分享页的
+#     ``is_external`` 与「来源查看」会同时出现,把库外材料说成用户自己的笔记。
+#
+# 与上面 notebook_id 那套守卫同一形状(登记清单 + 精确源文本 + 变异用例),因为
+# 失败模式也同一个:一个新的构造点没有任何提醒。同样覆盖两种写法——直接
+# ``Citation(tier="external", ...)``,以及 ``external_context`` 那种先写进
+# id_map 、由 ``parse_anchors`` 再抄进锚点的字典写法。
+
+EXTERNAL_TIER = "external"
+TIER_KEY = "tier"
+URL_KEY = "url"
+EMPTY_ID_KEYS = ("source_id", "element_id")
+
+
+def _constant_text(node: ast.expr | None) -> str | None:
+    """The literal string a node spells, or None when it is an expression."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    return None
+
+
+def _site_label(relative: str, node: ast.AST) -> str:
+    """``file:line`` for a DIAGNOSTIC message only, never for identity.
+
+    Wrapped in a function on purpose: the repository's test-architecture
+    policy (``tests/architecture/policy.py``) flags a ``node.lineno`` that
+    lands in an assignment/collection, because that is how a line number
+    becomes a key that rots on the next edit above the site.  Every registry
+    in this module is keyed by (file, qualname); the line only ever reaches a
+    human reading a failure message.
+    """
+
+    return f"{relative}:{node.lineno}"
+
+
+def _external_constructor_offenders(tree: ast.AST, relative: str) -> list[str]:
+    """Every ``Citation``/``AnswerAnchor`` call that declares itself external.
+
+    Only literal ``tier="external"`` is examined: a site whose tier is an
+    expression (``parse_anchors``' ``str(context.get("tier", ...))``) is
+    hydrating from an id_map, and the dict-write rule below is what holds
+    *that* path — checking an opaque expression here would be a guess.
+    """
+
+    offenders: list[str] = []
+    collector = _SiteCollector(_model_aliases(tree))
+    collector.visit(tree)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        model = collector._model_name(node.func)
+        if not model:
+            continue
+        keywords = {
+            keyword.arg: keyword.value
+            for keyword in node.keywords if keyword.arg
+        }
+        if _constant_text(keywords.get(TIER_KEY)) != EXTERNAL_TIER:
+            continue
+        where = f"{_site_label(relative, node)}: {model}(tier=external)"
+        url = keywords.get(URL_KEY)
+        if url is None or _constant_text(url) == "":
+            offenders.append(f"{where} carries no non-empty url=")
+        for key in EMPTY_ID_KEYS:
+            if key in keywords and _constant_text(keywords[key]) != "":
+                offenders.append(
+                    f"{where} passes {key}="
+                    f"{ast.unparse(keywords[key])}, which must be empty"
+                )
+    return offenders
+
+
+def _external_id_map_offenders(tree: ast.AST, relative: str) -> list[str]:
+    """Every id_map entry that declares ``"tier": "external"``.
+
+    ``parse_anchors`` hydrates an ``AnswerAnchor`` straight out of one of these
+    dicts, so the dict IS the construction point for that path.  ``url`` lives
+    under ``provenance`` there (the anchor's ``url`` is copied from
+    ``provenance["url"]``), so that is where it is required.
+    """
+
+    offenders: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Dict):
+            continue
+        entries = {
+            key.value: value
+            for key, value in zip(node.keys, node.values)
+            if isinstance(key, ast.Constant) and isinstance(key.value, str)
+        }
+        if _constant_text(entries.get(TIER_KEY)) != EXTERNAL_TIER:
+            continue
+        where = (
+            f'{_site_label(relative, node)}: id_map entry "tier": "external"'
+        )
+        provenance = entries.get("provenance")
+        keys = (
+            [_constant_text(key) for key in provenance.keys]
+            if isinstance(provenance, ast.Dict) else []
+        )
+        if URL_KEY not in keys:
+            offenders.append(f'{where} has no provenance["{URL_KEY}"]')
+        for key in EMPTY_ID_KEYS:
+            if key not in entries or _constant_text(entries[key]) != "":
+                offenders.append(
+                    f'{where} must write "{key}": "" (found '
+                    f"{ast.unparse(entries[key]) if key in entries else 'nothing'})"
+                )
+    return offenders
+
+
+def _scan_external() -> tuple[list[str], list[str]]:
+    """(offenders, sites) over the whole app tree."""
+    offenders: list[str] = []
+    sites: list[str] = []
+    for path in sorted(APP.rglob("*.py")):
+        if "__pycache__" in path.parts:
+            continue
+        source = path.read_text(encoding="utf-8")
+        if f'"{EXTERNAL_TIER}"' not in source and f"'{EXTERNAL_TIER}'" not in source:
+            continue
+        relative = path.relative_to(ROOT).as_posix()
+        tree = ast.parse(source, filename=relative)
+        found = (
+            _external_constructor_offenders(tree, relative)
+            + _external_id_map_offenders(tree, relative)
+        )
+        offenders.extend(found)
+        for node in ast.walk(tree):
+            declares_external = (
+                isinstance(node, ast.Call)
+                and any(
+                    keyword.arg == TIER_KEY
+                    and _constant_text(keyword.value) == EXTERNAL_TIER
+                    for keyword in node.keywords
+                )
+            ) or (
+                isinstance(node, ast.Dict)
+                and any(
+                    isinstance(key, ast.Constant) and key.value == TIER_KEY
+                    and _constant_text(value) == EXTERNAL_TIER
+                    for key, value in zip(node.keys, node.values)
+                )
+            )
+            if declares_external:
+                sites.append(_site_label(relative, node))
+    return offenders, sites
+
+
+def test_every_external_evidence_site_carries_url_and_no_library_ids() -> None:
+    offenders, _sites = _scan_external()
+
+    assert not offenders, (
+        'tier="external" evidence must carry a non-empty url and empty '
+        "source_id/element_id (design document §九 invariant 3):\n  "
+        + "\n  ".join(sorted(offenders))
+    )
+
+
+def test_the_external_guard_is_not_vacuous() -> None:
+    """The producers really are in the tree, so a green run above means the
+    rule held rather than that nothing was scanned."""
+    _offenders, sites = _scan_external()
+
+    assert len(sites) >= 2, (
+        "expected at least the external_citations constructor and the "
+        f"external_context id_map entry to be scanned; found {sites}"
+    )
+
+
+@pytest.mark.parametrize(
+    "source,expected",
+    [
+        (
+            'Citation(tier="external", url="", source_id="", element_id="")',
+            "carries no non-empty url=",
+        ),
+        (
+            'Citation(tier="external", source_id="", element_id="")',
+            "carries no non-empty url=",
+        ),
+        (
+            'AnswerAnchor(tier="external", url=item.url, source_id=hit.source_id,'
+            ' element_id="")',
+            "passes source_id=",
+        ),
+        (
+            'AnswerAnchor(tier="external", url=item.url, source_id="",'
+            " element_id=item.element_id)",
+            "passes element_id=",
+        ),
+    ],
+)
+def test_the_external_guard_flags_a_partial_constructor(source, expected) -> None:
+    tree = ast.parse(source)
+    offenders = _external_constructor_offenders(tree, "m.py")
+
+    assert any(expected in offender for offender in offenders), offenders
+
+
+def test_the_external_guard_accepts_a_complete_constructor() -> None:
+    tree = ast.parse(
+        'Citation(label=l, tier="external", url=item.url, source_id="",'
+        ' element_id="", quoted_span=e)'
+    )
+    assert _external_constructor_offenders(tree, "m.py") == []
+
+
+@pytest.mark.parametrize(
+    "source,expected",
+    [
+        (
+            '{"tier": "external", "source_id": "", "element_id": "",'
+            ' "provenance": {"kind": "external"}}',
+            'has no provenance["url"]',
+        ),
+        (
+            '{"tier": "external", "source_id": hit.source_id, "element_id": "",'
+            ' "provenance": {"url": u}}',
+            'must write "source_id": ""',
+        ),
+        (
+            '{"tier": "external", "source_id": "", "provenance": {"url": u}}',
+            'must write "element_id": ""',
+        ),
+    ],
+)
+def test_the_external_guard_flags_a_partial_id_map_entry(source, expected) -> None:
+    offenders = _external_id_map_offenders(ast.parse(source), "m.py")
+
+    assert any(expected in offender for offender in offenders), offenders
+
+
+def test_the_external_guard_accepts_a_complete_id_map_entry() -> None:
+    tree = ast.parse(
+        '{"object_type": "external", "tier": "external", "source_id": "",'
+        ' "element_id": "", "provenance": {"kind": "external", "url": u}}'
+    )
+    assert _external_id_map_offenders(tree, "m.py") == []
+
+
+def test_the_external_guard_ignores_a_non_external_tier() -> None:
+    """A ``tier="base"`` citation has no url and DOES carry library ids; the
+    guard must not reach beyond the external contract."""
+    tree = ast.parse('Citation(tier="base", source_id="s1", element_id="e1")')
+
+    assert _external_constructor_offenders(tree, "m.py") == []
+    assert _external_id_map_offenders(
+        ast.parse('{"tier": "base", "source_id": "s1", "element_id": "e1"}'),
+        "m.py",
+    ) == []

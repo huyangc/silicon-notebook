@@ -82,6 +82,7 @@ def application_repository_hosts(
         "indexing_pipeline_host": runtime.indexing_pipelines,
         "gap_consult_host": runtime.gap_consult,
         "element_enricher_host": runtime.element_enrichers,
+        "reflect_action_host": runtime.reflect_actions,
     }
 
 

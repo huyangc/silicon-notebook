@@ -29,6 +29,7 @@ from app.domain.extensions import (
     RetrievalContributorHostPort,
 )
 from app.domain.gap_consult import GapConsultHostPort
+from app.domain.reflect_action import ReflectActionHostPort
 from app.domain.ask_engine import AskEngineHostPort
 from app.domain.knowledge_contracts import CONCEPT_DETAIL_PAGE_MAX
 from app.domain.indexing_pipeline import (
@@ -352,6 +353,7 @@ class RepositoryFacade:
         indexing_pipeline_host: IndexingPipelineHostPort | None = None,
         gap_consult_host: GapConsultHostPort | None = None,
         element_enricher_host: ElementEnricherHostPort | None = None,
+        reflect_action_host: ReflectActionHostPort | None = None,
     ) -> None:
         self.settings = settings
         self.root_dir = Path(__file__).resolve().parents[3]
@@ -389,6 +391,7 @@ class RepositoryFacade:
             indexing_pipeline_host=indexing_pipeline_host,
             gap_consult_host=gap_consult_host,
             element_enricher_host=element_enricher_host,
+            reflect_action_host=reflect_action_host,
         )
         # Task 26: the resolved storage root has ONE owner — the runtime's
         # SourceFileStore.  The facade attribute is the SAME Path object (the

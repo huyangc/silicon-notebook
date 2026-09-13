@@ -148,7 +148,10 @@ def classify_evidence(
     """Relevance-aware grounding. Returns (evidence_level, top_relevance).
 
     - grounded : an answer-CITED ranked hit is strongly relevant (>= tau_high),
-                 or the cited key came from a source-backed exact enumeration,
+                 or the cited key came from DETERMINISTIC, non-ranked evidence
+                 (``exact_evidence_keys``: a source-backed exact enumeration
+                 row, or an external item a reflect plugin action brought back
+                 — neither has a retrieval score to compare against tau),
                  AND the LLM self-reported grounded.
     - overview : some relevant hit exists (top relevance >= tau_low) but the
                  answer is largely extrapolated from thin evidence.

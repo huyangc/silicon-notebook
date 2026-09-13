@@ -122,6 +122,12 @@ _NO_RETRIEVAL_EVIDENCE_MESSAGE = (
     "但本次没有命中；请尝试补充文章标题、关键词或原文中的术语后重试。"
 )
 
+# 外部证据段的块头,与它在 ``_bounded_context_append`` 里占掉的字符数。数出来
+# 而不是写死一个宽松的常数:那个预算的作用只是「别把已经算好的块再切一刀」,
+# 写宽了看不出来,写窄了会静默切掉最后一条外部摘录的后半句。
+_EXTERNAL_CONTEXT_HEADING = "External evidence"
+_EXTERNAL_CONTEXT_PREFIX_CHARS = len(f"\n\n[{_EXTERNAL_CONTEXT_HEADING}]\n")
+
 
 def _merge_multi_direct_chunk_hits(collected: dict, direct_hits) -> None:
     """Fold historical direct hits into a multi-query candidate mapping.
@@ -306,7 +312,15 @@ def _egress_phrase(value: object, limit: int) -> str:
 
 
 def _egress_question(prepared: object) -> str:
-    """The single question string a gap-consult plugin gets to see.
+    """The single question string a deployment plugin gets to see.
+
+    TWO consumers now, one rule.  ``_consult_gap_sources`` sends it to
+    ``ask.gap_consult`` after the draft; ``_build_reasoning_retriever`` hands
+    it to the retriever as ``plugin_egress_question``, which is the only
+    wording an ``ask.reflect_action`` plugin can be given mid-run (design
+    document 2026-09-13 §九 invariant 1).  Both points egress the same string
+    under the same bound, which is the whole reason this is one function and
+    not two: a second copy would be a second privacy rail to keep in step.
 
     Exactly two candidates, in order, and both of them are wording the user
     has actually SEEN: the reviewed final question, but only when a human
@@ -484,6 +498,20 @@ def _synthesis_step_detail(
         "included_chunks": counts.get("included_chunks", 0),
         "included_elements": counts.get("included_elements", 0),
         "included_collections": counts.get("included_collections", 0),
+        # 外部证据(reflect 插件动作带回的库外材料)的装入/丢弃披露。丢弃有两
+        # 个理由——外部段自己的字符预算装不下、以及没有可打开的 http(s) URL 被
+        # 渲染契约拒收——都算在这一个数里:对读者而言「检索器带回来了、模型没
+        # 看到」是同一件事,而两个理由的区分属于插件侧的 plugin_action 轨迹步。
+        #
+        # **稀疏**:``counts`` 只在这一轮真的有外部证据时才带这两个键
+        # (``_append_external_context``),所以没有插件动作的答案的 detail 与
+        # 接入这个特性之前逐键相等 —— 恒零地写进去会改掉每一条既有答案的持久化
+        # payload(golden oracle 正是这样红的)。
+        **{
+            key: counts[key]
+            for key in ("external_included", "external_dropped")
+            if key in counts
+        },
         # 本轮产生的类型化集合清单数(诊断字段,不上屏)。清单本身
         # 进合成 prompt / 结果卡由 T5 接管;在这里露一个数,是为了
         # 让「工具跑了但答案没体现」这种情况在轨迹里可查。
@@ -577,6 +605,13 @@ class AskService:
     _MEMORY_KEY_BASE = 3000
     _ELEMENT_KEY_BASE = 4000
     _COLLECTION_KEY_BASE = 5000
+    # 外部证据(``ask.reflect_action`` 插件动作带回的库外材料)的独立号段。
+    # **不是** 5000:那个号段已经归确定性集合清单预览所有
+    # (``collection_enumeration_answer.COLLECTION_KEY_BASE``,同一次合成里两者
+    # 可以同时出现),共用会让两边的 ``[k5001]`` 在 id_map 合并时无声互相覆盖。
+    # 上界仍留在按节合成的 ``OUTLINE_SECTION_KEY_STRIDE``(10000)之内,所以节
+    # 偏移照样把各节的号段隔开。
+    _EXTERNAL_KEY_BASE = 6000
 
     def __init__(
         self,
@@ -615,6 +650,7 @@ class AskService:
         selected_graph_hydrate: Callable[[Any], Any] = lambda _ids: (),
         response_draft_stage: "ResponseDraftStage | None" = None,
         gap_consult_host=None,
+        reflect_action_host=None,
         ask_engine_host=None,
         ask_engine_participant_notebooks: Callable[[str], Sequence[str]] = (
             lambda notebook_id: (notebook_id,)
@@ -689,6 +725,12 @@ class AskService:
         # with no deployment plugin behind it) means this run is byte-identical
         # to the one before the point existed — see ``_consult_gap_sources``.
         self.gap_consult_host = gap_consult_host
+        # The frozen ``ask.reflect_action`` host, seated ONLY here: the report
+        # engine and knowhow completion build their own ``ReasoningRetriever``
+        # and pass nothing, so ``None`` there keeps their runs byte-identical
+        # (design document §一 non-goals).  ``None`` here likewise means every
+        # reflect turn renders exactly as it did before the point existed.
+        self.reflect_action_host = reflect_action_host
         self.ask_engine_host = ask_engine_host
         self.ask_engine_participant_notebooks = ask_engine_participant_notebooks
         self.ask_engine_visible_sources = ask_engine_visible_sources
@@ -1271,6 +1313,121 @@ class AskService:
             if re.search(rf"(?m)^{re.escape(str(key))}:", rendered):
                 merged[key] = value
         return context_block + rendered, merged
+
+    def _append_external_context(
+        self, context_block: str, id_map: dict, items, *, key_offset: int
+    ) -> tuple[str, dict, set, dict]:
+        """外部证据段:在库内各段**之后**拼接,自带独立预算。
+
+        它是唯一在总预算截断(``context_block[:total_context_budget]``)与证据
+        精炼之后才拼的段,两条理由都硬:①精炼是一次模型调用,把外部材料交给它
+        重写等于让模型转述一段带出处的引文,而引用卡承诺显示的是插件原文;
+        ②外部证据是本轮唯一「库里查不到」的材料,把它排在库内证据后面按同一
+        个总预算竞争,等于让最容易被挤掉的那一段恰好是不可替代的那一段。
+        于是它拿 ``EXTERNAL_EVIDENCE_CONTEXT_CHARS`` 这一份独立的、有上限的
+        额外预算(``external_context`` 自己按条丢弃,绝不切半条)。
+
+        零外部证据时返回**原对象**:``external_context`` 给出 ``"(none)"``,
+        ``_bounded_context_append`` 对它是恒等,所以 context_block / id_map /
+        进而 prompt 逐字节不变。
+
+        返回 ``(context_block, id_map, admitted_keys, counts)``。
+        ``admitted_keys`` 是**真的进了这次 prompt** 的那批 ``ExternalEvidence
+        .key``,它是引用侧唯一的准绳:引用是「答案可能引自这条材料」的声明,
+        被预算丢掉的那条模型从没见过,把它列进引用就是给一份没看过它的答案挂
+        来源(设计文档 §6.3)。``counts`` 是给轨迹披露的
+        ``external_included``/``external_dropped``,由 ``external_context`` 的
+        两个理由(预算丢弃 / 无可打开 URL 被拒)相加而来。
+        """
+        sink: dict = {}
+        block, block_map = self.evidence_context.external_context(
+            items, id_offset=key_offset + self._EXTERNAL_KEY_BASE,
+            truncation_sink=sink,
+        )
+        context_block, merged = self._bounded_context_append(
+            context_block, id_map, block, block_map,
+            # 预算按「已用 + 本段前缀 + 本段」给足:真正的上限已经由
+            # ``external_context`` 自己花掉了,这里再夹一次只会把最后一条切成
+            # 半句(见那里为什么外部摘录不许切半条)。
+            budget_chars=(
+                len(context_block) + _EXTERNAL_CONTEXT_PREFIX_CHARS + len(block)
+            ),
+            heading=_EXTERNAL_CONTEXT_HEADING,
+        )
+        # 按**合并后**的 id_map 反查,而不是照抄 block_map:
+        # ``_bounded_context_append`` 会把没能留在渲染文本里的 key 过滤掉,
+        # 照抄等于宣称一条其实没进 prompt 的证据进了。
+        admitted = {
+            str(value.get("object_id") or "")
+            for key, value in block_map.items() if key in merged
+        }
+        # **稀疏**:没有外部证据的一轮一个键都不写。这两个数是给「检索器带回了
+        # N 条、模型只看到 M 条」这件事做披露的,而一次没调过插件动作的问答里
+        # 那句话没有内容;恒零地写进去会让每一条既有答案的持久化 payload 与
+        # synthesis 轨迹 detail 都多两个键(golden oracle 正是这样红的),
+        # 而「无外部证据时逐键不变」是这个特性自己许下的承诺。
+        counts = {} if not items else {
+            "external_included": len(admitted),
+            "external_dropped": (
+                int(sink.get("truncated") or 0) + int(sink.get("rejected") or 0)
+            ),
+        }
+        return context_block, merged, admitted, counts
+
+    @staticmethod
+    def _external_exact_keys(anchors) -> set:
+        """The ``[k]`` keys of the external anchors, for ``classify_evidence``.
+
+        External evidence reaches grounding through the *deterministic,
+        non-ranked* door (``exact_evidence_keys`` — the one a source-backed
+        exact enumeration row already uses) rather than through
+        ``evidence_pool``.  The alternative — appending a
+        ``SimpleNamespace(object_id=…, relevance=1.0)`` per item, the way
+        chains and elements do — would work for the grounding decision and lie
+        about everything else: ``classify_evidence`` also returns
+        ``top_relevance`` as ``max(h.relevance for h in top_hits)``, so a run
+        that found NOTHING in the library and answered purely from a plugin
+        would report a perfect retrieval score.  There is no retrieval score
+        for external material; inventing one to move a different decision is
+        how a metric stops meaning anything.
+
+        Read off the anchors rather than off ``external_evidence``, and that
+        is the load-bearing part: an ``object_type == "external"`` anchor can
+        only have been minted by ``external_context`` AND bound by
+        ``parse_anchors``, so it already carries both facts this needs — the
+        item really entered the prompt, and the answer really cited it.
+        """
+
+        return {
+            anchor.key for anchor in anchors
+            if anchor.object_type == "external"
+        }
+
+    def _append_external_citations(self, citations, items, admitted) -> None:
+        """Append fallback citations for the external items that were USED.
+
+        ``admitted`` is the set of ``ExternalEvidence.key`` values that
+        actually entered a synthesis prompt (filled by ``_answer_reasoning``'s
+        ``external_sink``; in sectioned synthesis it is the union over every
+        section).  Everything else the retriever brought back — items the
+        block's own budget dropped, items refused for having no openable URL —
+        is silently absent from the answer the model saw, and a citation is a
+        claim that the answer could have been written from that material.
+        Listing all of them would put a source under an answer that never had
+        it, which is precisely the failure the citation list exists to make
+        impossible.
+
+        The append lands at the TAIL, after the spreadsheet receipts and after
+        the enumeration branch may have cleared the list, because that is the
+        design's stated position (§6.3) and because an enumeration answer with
+        no bound marker has no verifiable attribution for library evidence
+        *or* for external evidence.
+        """
+
+        citations.extend(self.evidence_context.external_citations([
+            item for item in items
+            if str(getattr(item, "key", "") or "") in admitted
+        ]))
 
     @staticmethod
     def _memory_citations(anchors, hits) -> list[Citation]:
@@ -2150,6 +2307,8 @@ class AskService:
         section_index: int = 0,
         section_total: int = 0,
         style_block: str = "",
+        external_evidence=(),
+        external_sink: set | None = None,
     ):
         """Synthesise the reasoning-mode answer. When PPR chunks are present they
         become first-class [k]-citable evidence: chunk segment k1..N + KG reasoning
@@ -2175,6 +2334,20 @@ class AskService:
         调用方只传该节绑定的证据,Memory / 推导链 / 集合地图 / 结构化预览一律不传
         ——它们不可被大纲绑定,留在回退路径上(v1 刻意的边界)。``style_block``:
         见 ``_answer_chunks`` 同名参数,单次合成与按节合成共用调用方传入的同一份。
+
+        ``external_evidence``: 插件 reflect 动作带回的库外材料
+        (``domain.reflect_action.ExternalEvidence``,设计文档
+        ``2026-09-13-reflect-plugin-action-design_zh.md`` §6.2)。缺省空元组,
+        此时上下文块、id_map 与 prompt 与接入这个特性之前逐字节相等。与 Memory /
+        推导链**不**同的一条边界:按节合成每一节都装同一份外部块(见
+        ``_answer_reasoning_sections``)——外部材料不属于任何一节的大纲绑定,
+        但它恰恰是本轮唯一库里查不到的东西,只喂给某一节等于让别的节在同一篇
+        答案里对着一个自己看不见的 ``[k]`` 号写作。号段由 ``key_offset``
+        隔开,各节的外部键互不相交。
+
+        ``external_sink``:调用方传入的集合,本次**真的装进了 prompt** 的那批
+        ``ExternalEvidence.key`` 会被 update 进去。引用侧据此过滤——被预算丢掉
+        的条目模型从没见过,不给它发引用(设计文档 §6.3)。
 
         """
         raise_if_cancelled(cancel_event)
@@ -2302,6 +2475,18 @@ class AskService:
                 budget_chars=total_context_budget,
             )
         context_block = context_block[:total_context_budget]
+        # 外部证据段拼在最后,自带独立预算——理由见 ``_append_external_context``。
+        # ``has_external`` 是 answer_prompt 那条规则唯一的闸:块真的进了上下文
+        # 才追加规则句(设计文档 §九 不变量 9 的另一半在 reflect 侧)。
+        pre_external_block = context_block
+        context_block, id_map, admitted_external, external_counts = (
+            self._append_external_context(
+                context_block, id_map, external_evidence, key_offset=key_offset,
+            )
+        )
+        has_external = context_block != pre_external_block
+        if external_sink is not None:
+            external_sink.update(admitted_external)
         # Partition the merged *source* map (structured preview + chunks +
         # elements) by numeric key range rather than trusting chunk_id_map /
         # element_id_map's sizes from before the append: _bounded_context_append
@@ -2334,6 +2519,10 @@ class AskService:
             "included_chunks": included_chunks,
             "included_elements": included_elements,
             "included_collections": included_collections,
+            # 外部证据的装入/丢弃披露,**稀疏**:没有外部证据的一轮这里什么都不
+            # 加,counts 与接入这个特性之前逐键相等(理由见
+            # ``_append_external_context``)。
+            **external_counts,
         }
         # Fill the sink BEFORE the model call: when the answer client raises
         # or returns malformed JSON, the synthesis trace must still report the
@@ -2348,7 +2537,18 @@ class AskService:
                 "context_block": context_block,
                 "id_map": dict(id_map),
                 "ordered_handles": tuple(id_map),
-                "budget_chars": total_context_budget,
+                # 上界含外部段:``budget_chars`` 的合同是「这段上下文不会超过它」
+                # (``test_answer_quality_contract`` 直接断言
+                # ``len(context_block) <= budget_chars``),而外部段是在总预算
+                # 截断之后另加的一份独立预算。记成总预算本身会让这条不变量在
+                # 有外部证据的一轮上假红;记成「总预算 + 本次外部段实际占用」
+                # 才是真实上界——而且是**实际**占用而不是名义上限
+                # ``EXTERNAL_EVIDENCE_CONTEXT_CHARS``,否则零外部证据的一轮会
+                # 报出一个从来没打算花的额度。
+                "budget_chars": (
+                    total_context_budget
+                    + len(context_block) - len(pre_external_block)
+                ),
                 "capture_error_count": int(
                     baseline_admission.get("ambiguous_truncations") or 0
                 ),
@@ -2361,6 +2561,7 @@ class AskService:
                 section_index=section_index,
                 section_total=section_total,
                 style_block=style_block,
+                external_rules=has_external,
             )}],
             ANSWER_SCHEMA_HINT,
             timeout=self.settings.reasoning_timeout_seconds,
@@ -2406,6 +2607,8 @@ class AskService:
         cancel_event: CancelEvent = None,
         on_section=None,
         style_block: str = "",
+        external_evidence=(),
+        external_sink: set | None = None,
     ):
         """按节合成(设计文档 §3.1):每节一次合成调用,只喂该节绑定的证据。
 
@@ -2427,6 +2630,15 @@ class AskService:
         ``style_block``:见 ``_answer_chunks`` 同名参数,原样转发给每一节的
         ``_answer_reasoning`` 调用——同一份风格提示对全篇一致,不按节重新点读。
 
+        ``external_evidence``:**每一节都装**同一份外部块(与只属于回退路径的
+        Memory / 推导链 / 集合地图刻意相反)。理由:外部材料不由大纲绑定,却是
+        本轮唯一「库里查不到」的东西;只给某一节,别的节在同一篇答案里就会对着
+        一个自己没见过的 ``[k]`` 号写作,而合并后的引用表却认得它——正是号段
+        隔离要防的那种误绑。各节的外部键落在自己 ``key_offset`` 的号段里
+        (``_EXTERNAL_KEY_BASE`` + 至多 ``EXTERNAL_EVIDENCE_MAX_PER_RUN`` 条
+        ≪ ``OUTLINE_SECTION_KEY_STRIDE``),互不相交。``external_sink`` 收各节
+        装入键的**并集**——同一条材料进了三节仍然只发一条引用。
+
         """
         from app.services.outline_synthesis import outline_answer_text
 
@@ -2437,6 +2649,10 @@ class AskService:
             "included_kg": 0, "included_chunks": 0,
             "included_elements": 0, "included_collections": 0,
         }
+        # 外部装入是**并集**,不是逐节求和:同一条材料进了三节还是一条材料,
+        # 求和会在轨迹上报出「装入 6 条」而 run 里总共只有 2 条。丢弃数由并集
+        # 反算,同一条口径(见循环之后)。
+        admitted_external: set = set()
         grounded = False
         section_grounding_detail: list = []
         baseline_assemblies: list[dict] = []
@@ -2466,6 +2682,8 @@ class AskService:
                     section_index=item.index + 1,
                     section_total=total,
                     style_block=style_block,
+                    external_evidence=external_evidence,
+                    external_sink=admitted_external,
                 )
                 return text_, grounded_, anchors_
 
@@ -2524,6 +2742,8 @@ class AskService:
                 ))
             for key in merged_counts:
                 merged_counts[key] += int(section_counts.get(key, 0) or 0)
+            # 外部计数不参与上面那圈求和(``merged_counts`` 的键里没有它们);
+            # 见循环之后的并集口径。
             rendered.append((item, text))
             grounded = grounded or section_llm_grounded
             # 号段互不相交,所以跨节不可能撞 key;去重只防同一节内重复标记(
@@ -2533,6 +2753,13 @@ class AskService:
                     continue
                 seen_anchor_keys.add(anchor.key)
                 merged_anchors.append(anchor)
+        if external_sink is not None:
+            external_sink.update(admitted_external)
+        if external_evidence:  # 稀疏,同单次合成路径
+            merged_counts["external_included"] = len(admitted_external)
+            merged_counts["external_dropped"] = max(
+                0, len(external_evidence) - len(admitted_external)
+            )
         return _SectionedSynthesis(
             answer=outline_answer_text(rendered),
             # 这里仅汇总模型自报供全局 classify_evidence 使用;真正的逐节判定已经
@@ -3627,7 +3854,9 @@ class AskService:
             )
             return []
 
-    def _build_reasoning_retriever(self, *, cancel_event, user_id: str):
+    def _build_reasoning_retriever(
+        self, *, cancel_event, user_id: str, egress_question: str = "",
+    ):
         """The one production ``ReasoningRetriever`` construction for Ask.
 
         端口化构造(与冻结的 ``from_repository`` 工厂逐字段同源):检索/模型/社区
@@ -3635,6 +3864,10 @@ class AskService:
 
         单独成方法只为把这段固定接线移出 ``_run_reasoning_stage`` 的零松弛长度
         天花板;字段与顺序逐字未改,调用点仍然只有那一处。
+
+        ``egress_question`` 是插件 reflect 动作**唯一**会被送出部署的用户措辞
+        (由 ``_egress_question(prepared)`` 算出,与 gap consultation 同一把
+        privacy 闸)。缺省空串是 fail-closed:没传就一条插件动作都不提供。
         """
         from app.services.reasoning_retrieval import ReasoningRetriever
 
@@ -3660,6 +3893,17 @@ class AskService:
             # 各自 fail-open,不共享一次读取(见 _search_profile_style_block
             # 的模块注释)。
             identity_store=self.identity_store,
+            # 插件借给检索 Agent 的 reflect 动作(`ask.reflect_action`)。缺省
+            # None ⇒ 报告与 knowhow 补全那两条自建 retriever 的路径不提供插件
+            # 动作(设计文档 §一 非目标)。
+            reflect_action_host=self.reflect_action_host,
+            # ⚠ 外泄面的那一个串。**刻意不是** `run(question=...)` 收到的
+            # `research_question` —— 那是已确认意图契约的合成串(目标 + 必答主题
+            # + 约束 + 假设),`_egress_question` 的 docstring 逐条说明了它为什么
+            # 永远不出站。这里为空 ⇒ 本 run 一条插件动作都不提供(闸在
+            # `_plugin_actions_offered`),所以「没接线」的失败方向是关闭而不是
+            # 拿一个不该出站的串去顶。
+            plugin_egress_question=egress_question,
         )
 
     def _run_reasoning_stage(self, prepared, runtime):
@@ -4036,7 +4280,8 @@ class AskService:
                 )
 
                 retriever = self._build_reasoning_retriever(
-                    cancel_event=cancel_event, user_id=user_id)
+                    cancel_event=cancel_event, user_id=user_id,
+                    egress_question=_egress_question(prepared))
                 retrieval_runtime = ReasoningRetrievalRuntime(
                     scope=runtime.scope,
                     retrieval_run=runtime.retrieval_run,
@@ -4140,6 +4385,10 @@ class AskService:
                     # getattr 语义,只是把它算在编排侧、不让整个检索结果对象
                     # 跨过边界。
                     candidate_manifest=getattr(result, "baseline_manifest", None),
+                    # 同上一句的 getattr 降级语义:插件动作失败/检索降级的
+                    # 一轮拿到的是「零条外部证据」,而不是异常。
+                    external_evidence=tuple(
+                        getattr(result, "external_evidence", ()) or ()),
                     spreadsheet_results=tuple(spreadsheet_results),
                 ),
                 runtime,
@@ -4358,6 +4607,7 @@ class AskService:
         # captures counts as a side effect instead of widening that contract.
         reasoning_counts: dict = {}
         reasoning_baseline: dict = {}
+        admitted_external: set = set()
         raise_if_cancelled(cancel_event)
         answer_client = self.model_clients.chat("ask_answer")
         # 地图块:确定性服务端小块,不依赖 enumerations 是否为空——「集合太大
@@ -4481,6 +4731,8 @@ class AskService:
                 collection_map_block=collection_map_prompt_block,
                 counts_sink=reasoning_counts,
                 baseline_sink=reasoning_baseline,
+                external_evidence=stage.external_evidence,
+                external_sink=admitted_external,
                 style_block=style_block)
             return ans, llm_grounded_, anchors_
 
@@ -4540,6 +4792,8 @@ class AskService:
                         answer_client=answer_client, cancel_event=cancel_event,
                         on_section=record_section_step,
                         style_block=style_block,
+                        external_evidence=stage.external_evidence,
+                        external_sink=admitted_external,
                     )
         # 按节合成失败(某一节两次都吐不出内容)→ 整体回退单次合成,已经产出
         # 的分节文本全部丢弃。多付一次合成调用是 fail-open 的价钱。
@@ -4580,11 +4834,12 @@ class AskService:
         # 一条证据都没检索到,而正确答案就是那个计数——没有这一项,合成压根
         # 不跑,用户拿到的是空答案(codex 第 4 轮 P2)。地图非空意味着枚举
         # 工具接线成功且作用域里有可数的东西(空库在更早的早退里就返回了),
-        # 所以这不是给空库额外加一次模型调用。
+        # 所以这不是给空库额外加一次模型调用。外部证据同理且更强:模型正是在
+        # 库内反复空手之后才去调插件动作的,漏掉它就是让唯一有材料的那轮没合成。
         elif answer_client.configured and (
                 top_hits or elements or chunks or chains or memory_hits
                 or structured_batch is not None or enumerations
-                or collection_map_prompt_block):
+                or collection_map_prompt_block or stage.external_evidence):
             # 空 content 有界重试 + 诚实降级 + 可观测,统一走 _answer_with_retry(见其 docstring)。
             fallback_err_mark = len(_err_sink)
             answer, llm_grounded, anchors, _ok = self._answer_with_retry(
@@ -4723,7 +4978,7 @@ class AskService:
             key
             for key, context in structured_map.items()
             if context.get("source_id") and context.get("element_id")
-        }
+        } | self._external_exact_keys(anchors)
         evidence_level, top_relevance = classify_evidence(
             evidence_pool, anchors, llm_grounded,
             self.settings.evidence_tau_low, self.settings.evidence_tau_high,
@@ -4749,6 +5004,8 @@ class AskService:
             citations = []
 
         self._append_spreadsheet_citations(citations, spreadsheet_results)
+        self._append_external_citations(
+            citations, stage.external_evidence, admitted_external)
 
         # 本段附图: 统一挂在**锚点最终确定之后**——按节合成(sectioned)会整体
         # 换掉 anchors,在它之前富化等于富化一批被丢弃的对象;citations 也要等

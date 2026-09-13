@@ -96,8 +96,10 @@ class Citation(BaseModel):
     # uploaded file the evidence came from.  MinerU output paths/names never
     # populate this field.
     source_file_name: str = Field(default="", exclude_if=lambda value: not value)
-    # Source tier: 'base' (authoritative reference KG) or 'personal' (default,
-    # user notes). Mirrors AnswerAnchor.tier — lets the "来源分布" badge count
+    # Source tier: 'base' (authoritative reference KG), 'external' (material a
+    # plugin reflect action brought back from outside the library, see
+    # ``domain/reflect_action.ExternalEvidence``) or 'personal' (default, user
+    # notes). Mirrors AnswerAnchor.tier — lets the "来源分布" badge count
     # citations, not just anchors.
     tier: str = "personal"
     # 多领域基准库(Task 14): 证据的真实来源 notebook id —— 只在跨库命中(federated
@@ -107,6 +109,14 @@ class Citation(BaseModel):
     # 的 JSON payload 不多带这个键。
     notebook_id: str = Field(default="", exclude_if=lambda value: not value)
     memory_id: str = Field(default="", exclude_if=lambda value: not value)
+    # 外部证据(``ask.reflect_action`` 插件动作带回的库外材料)的可打开地址,
+    # 与 ``tier == "external"`` 同生共死:库内证据没有 URL,这个键整体从它们的
+    # JSON 里缺席(同 notebook_id/knowhow 的 exclude_if 惯例),所以接入这个特性
+    # 之前写下的每一份 payload 逐字节不变。只允许 http/https —— 净化在宿主侧
+    # (设计文档 §九 不变量 8),这里不是第二道校验,而是那道校验的产物落点。
+    # 公开分享页**不**投影这个字段(``conversation_public_view.public_reference``
+    # 只给出 ``is_external`` 标记),见同一份设计文档 §七。
+    url: str = Field(default="", exclude_if=lambda value: not value)
     provenance: Dict[str, Any] = Field(
         default_factory=dict, exclude_if=lambda value: not value
     )
@@ -389,12 +399,19 @@ class AnswerAnchor(BaseModel):
     # both whenever their bounded evidence reference still exists.
     source_id: str = Field(default="", exclude_if=lambda value: not value)
     element_id: str = Field(default="", exclude_if=lambda value: not value)
-    # Source tier: 'base' (authoritative reference KG) or 'personal' (default,
-    # user notes). Lets the UI surface authority + supports conflict precedence.
+    # Source tier: 'base' (authoritative reference KG), 'external' (a plugin
+    # reflect action's out-of-library material — see Citation.tier) or
+    # 'personal' (default, user notes). Lets the UI surface authority +
+    # supports conflict precedence.
     tier: str = "personal"
     # 多领域基准库(Task 14): 与 Citation.notebook_id 同一惯例——只在跨库命中时
     # 非空,供前端引用徽章标来源库名。见 Citation.notebook_id 的完整注释。
     notebook_id: str = Field(default="", exclude_if=lambda value: not value)
+    # 外部证据的可打开地址,与 ``Citation.url`` 逐字同一合同(见那里的完整注释)。
+    # 字段必须同时活在锚点上:reasoning 模式的权威显示路径是 ``[k]`` 锚点(前端
+    # ``buildAnswerReferences`` 是 anchor 优先的全有全无),只加在 Citation 上就
+    # 只覆盖到「模型一个锚点都没吐出来」的回退列表,主路径永远拿不到链接。
+    url: str = Field(default="", exclude_if=lambda value: not value)
     provenance: Dict[str, Any] = Field(
         default_factory=dict, exclude_if=lambda value: not value
     )
@@ -956,6 +973,11 @@ class PublicReference(BaseModel):
     # itself one of the attached images, so anonymous UI can hide the parser's
     # duplicated caption/description without receiving either internal id.
     is_image_reference: bool = False
+    # Reflect plugin actions: the item came from outside the notebook (its
+    # ``tier`` was ``"external"``).  A marker, never the destination — the
+    # ``url`` on the authenticated ``Citation``/``AnswerAnchor`` is
+    # deliberately absent from this shape, same rule as every other handle.
+    is_external: bool = False
 
 
 class PublicImage(BaseModel):

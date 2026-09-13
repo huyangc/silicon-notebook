@@ -14,9 +14,11 @@ today's only L1 extraction points; every other piece of text here is L0.
 
 from __future__ import annotations
 
-from typing import List, Optional, Sequence
+from dataclasses import dataclass
+from typing import List, Optional, Sequence, Tuple
 
 from app.core.query_syntax import quoted_phrases
+from app.domain.reflect_action import ReflectActionSpec
 from app.services.prompt_layers import fragment_text
 
 
@@ -298,6 +300,7 @@ def answer_prompt(
     section_index: int = 0,
     section_total: int = 0,
     style_block: str = "",
+    external_rules: bool = False,
 ) -> str:
     """按节合成的四个形参是 **keyword-only**:三个既有位置参数(question/context/
     history)是所有调用方的形状,把模式开关也做成位置参数,只会让「第四个位置传了
@@ -307,6 +310,12 @@ def answer_prompt(
     the block's own preamble states that boundary), empty string when the
     feature/switch is off or the user has no profile set, which reproduces
     this function's pre-feature output byte for byte.
+
+    ``external_rules`` (设计文档 2026-09-13-reflect-plugin-action-design_zh §6.2)
+    是同一条纪律的第三个例子:只有当合成上下文里**真的**有 ``[external · …]``
+    条目时才为真,追加规则 14;为假时(没有插件动作、动作没带回条目、或整块被
+    预算挤掉)输出与接入这个特性之前逐字节相等 —— 一条谈论「库外材料」的规则,
+    在一份没有库外材料的证据表面前只会教模型去找一个不存在的标签。
 
     """
     history_section = (
@@ -323,6 +332,15 @@ def answer_prompt(
     # binding or relaxing rule 2's grounding requirement) and must not be
     # mistaken for part of the question itself.
     style_section = f"{style_block}\n\n" if style_block else ""
+    external_section = (
+        "14. Items tagged [external · <source>] come from OUTSIDE this "
+        "notebook: they were fetched by a retrieval extension, not read out "
+        "of the user's library. Cite them with their [k] marker exactly like "
+        "any other item, but never describe them as notebook/library content, "
+        "and when an external item disagrees with a notebook item say which "
+        "side is which rather than merging them.\n"
+        if external_rules else ""
+    )
     return (
         "You answer an engineer's question using the notebook knowledge below, "
         "and you may reason beyond it.\n"
@@ -396,7 +414,9 @@ def answer_prompt(
         "(or 'Likely,' in an English answer) and attach NO "
         "[k]. Only a conclusion whose every premise is a [k]-cited sentence "
         "may be stated without the marker. Never let a closing section state "
-        "as established fact what the body only inferred.\n\n"
+        "as established fact what the body only inferred.\n"
+        f"{external_section}"
+        "\n"
         f"{history_section}"
         f"{section_section}"
         f"{style_section}"
@@ -520,6 +540,137 @@ def plan_prompt(
     )
 
 
+# --- Plugin-contributed reflect actions (design doc §3.2 / §3.3) ------------
+#
+# The four sentences a plugin CANNOT edit.  A descriptor contributes the action
+# name, its one-paragraph description and its parameter descriptions; that the
+# material is external, that it is citable, when to reach for it, and that the
+# arguments must not be copied out of the candidates are core template text —
+# so a deployment cannot quietly turn its plugin into "the preferred first
+# channel" or into "library content" by wording its own description that way.
+#
+# Registration already refuses a descriptor string carrying a newline or any
+# other control character (``domain.reflect_action.contains_control_characters``),
+# which is what keeps plugin prose from ending this line and starting what
+# reads like another core rule.
+_PLUGIN_ACTION_FIXED_SENTENCES = (
+    "Returns EXTERNAL material from outside the library, labelled [external] "
+    "in the candidates; it is citable with [k] but must never be presented as "
+    "library content. Use it only for an aspect that library actions have "
+    "already come back empty on; derive the arguments from the question and "
+    "the missing aspect, never copy candidate text into them.\n"
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ReflectActionProjection:
+    """One run's plugin actions, rendered into every face reflect needs.
+
+    ``prompt_lines`` splices into ``reflect_prompt``, ``schema_branches`` and
+    ``next_action_words`` into ``reflect_schema_hint``, and ``action_names``
+    into ``reasoning_retrieval.reflect``'s whitelist.  All four are empty (the
+    tuple empty, the strings ``""``) for an empty spec sequence, which is what
+    makes the closed state byte-for-byte identical to the prompt, the schema
+    and the whitelist from before this extension point existed.
+    """
+
+    prompt_lines: str
+    schema_branches: str
+    next_action_words: str
+    action_names: Tuple[str, ...]
+
+
+def project_reflect_actions(
+    plugin_actions: Sequence[ReflectActionSpec] = (),
+) -> ReflectActionProjection:
+    """Render plugin action specs into prompt text, schema text and whitelist.
+
+    ONE function emits all four faces on purpose.  The reflect loop's standing
+    discipline is that the prompt description, the schema branch and the
+    ``allowed_actions`` entry are three views of a single action definition —
+    the ``kg_actions`` gate's comment in ``reflect`` spells out the failure
+    mode when any one of them drifts: the model is either offered an action the
+    whitelist will reject, or it calls one it was never told about.  For core
+    actions that discipline is enforced by review; for an action whose text
+    arrives from a deployment plugin it has to be enforced by construction, or
+    every plugin is one careless edit away from the drift.
+
+    Pure: no I/O, no registry, no clock.  ``plugin_id`` and ``contribution_id``
+    are deliberately never read here — design document §九 invariant 7 is that
+    the model sees only action names, descriptions, parameter names/descriptions
+    and enum values.
+
+    Ordering is the caller's (registration order, frozen by the registry), so
+    the rendered enum and the rendered branches are stable across runs.
+    """
+
+    lines: List[str] = []
+    branches: List[str] = []
+    names: List[str] = []
+    for spec in plugin_actions:
+        descriptor = spec.descriptor
+        name = descriptor.name
+        names.append(name)
+        clauses: List[str] = []
+        fields: List[str] = []
+        for parameter in descriptor.parameters:
+            # Only optionality is annotated: a parameter with no marker is one
+            # the action needs, which is the reading a model already applies.
+            optional = "" if parameter.required else ", optional"
+            if parameter.kind == "enum":
+                values = "|".join(parameter.values)
+                clauses.append(
+                    f"{name}.{parameter.name} is one of {values} "
+                    f"({parameter.description}{optional})"
+                )
+                # Spelled as the ``a|b`` example string, never as a boolean and
+                # never as a closed-looking single value: that is what buys the
+                # validation layer's empty-string tolerance while still making a
+                # non-empty value outside the set an ``invalid_enum``
+                # (``model_json._validate_against_example``).
+                fields.append(f'"{parameter.name}":"{values}"')
+            else:
+                clauses.append(
+                    f"{name}.{parameter.name} "
+                    f"({parameter.description}{optional})"
+                )
+                fields.append(f'"{parameter.name}":""')
+        # ``Takes no parameters.`` mirrors ``consult_memory``'s own line: with
+        # no schema branch to look at, silence would leave the model guessing
+        # whether it owes the action an argument object.
+        #
+        # The "write every key" sentence is not politeness, it is what keeps an
+        # ALL-OPTIONAL action usable at all. ``model_json`` requires a described
+        # nested object to share at least one key with its example
+        # (``missing_expected_key``), so a model that reads "(…, optional)" and
+        # answers ``"ask_web":{}`` loses the whole reflect turn to the fail-open
+        # fallback. Empty strings are always accepted by the same layer, so
+        # "write the key, leave it empty" is the one instruction that is safe
+        # for every parameter. Core text: a plugin cannot edit it away.
+        arguments = (
+            "Set " + "; ".join(clauses) + ". Always write every key of the "
+            f"{name} object; leave an unused parameter as an empty string. "
+            if clauses else "Takes no parameters. "
+        )
+        lines.append(
+            f"- {name}: {descriptor.description} {arguments}"
+            + _PLUGIN_ACTION_FIXED_SENTENCES
+        )
+        if fields:
+            # Nested under the ACTION NAME, which is why registration refuses a
+            # name colliding with any core action id or any top-level schema
+            # field (``domain.reflect_action.RESERVED_REFLECT_KEYS``): a
+            # collision would have the model write its arguments into a core
+            # slot.
+            branches.append('"' + name + '":{' + ",".join(fields) + '},')
+    return ReflectActionProjection(
+        prompt_lines="".join(lines),
+        schema_branches="".join(branches),
+        next_action_words="".join(f"|{name}" for name in names),
+        action_names=tuple(names),
+    )
+
+
 def reflect_schema_hint(
     element_kinds: Sequence[str] = (),
     object_types: Sequence[str] = (),
@@ -527,6 +678,8 @@ def reflect_schema_hint(
     consult_memory: bool = False,
     search_chunks: bool = False,
     kg_actions: bool = True,
+    *,
+    plugin_actions: Sequence[ReflectActionSpec] = (),
 ) -> str:
     """The reflect response schema, with the enumeration branch iff offered.
 
@@ -567,6 +720,17 @@ def reflect_schema_hint(
     the same precedent as the enumeration/outline/consult_memory gates. True
     (the default, and every pre-existing caller) is byte-for-byte the schema
     from before the gate existed.
+
+    ``plugin_actions`` is the one parameter here that is NOT a gate: it is
+    external injection. Each spec is one function a deployment plugin lends the
+    retrieval agent (``ask.reflect_action``), and it contributes one word to the
+    ``next_action`` enum plus — only when the action declares parameters — one
+    nested object keyed by the action name, spliced in after the enumerate
+    branch. Keyword-only and defaulting to the empty tuple, so every existing
+    caller (and every closed state: no plugin, plugin unavailable, effort or
+    budget switching it off) reassembles this schema byte for byte. Rendering
+    lives in ``project_reflect_actions`` because the prompt line, this branch
+    and ``reflect``'s whitelist must come out of one description.
     """
     actions = (
         "answer|expand_graph|add_subquery|"
@@ -646,6 +810,11 @@ def reflect_schema_hint(
             '"outline":{"sections":[{"id":"","title":"","parent":"",'
             '"evidence":[""],"remove_evidence":[""]}]},'
         )
+    # Appended LAST to the enum so every core word keeps the position (and the
+    # bytes) it had before the extension point existed; empty projection = no
+    # word, no branch, no change.
+    plugin_projection = project_reflect_actions(plugin_actions)
+    actions += plugin_projection.next_action_words
     # The four graph-shaped parameter branches. Each is spelled in the exact
     # position (and with the exact bytes) it occupied before the gate existed,
     # so ``kg_actions=True`` reassembles the previous string character for
@@ -668,7 +837,9 @@ def reflect_schema_hint(
         '"new_sub_query":{"query":"","types":[],'
         '"prefer":"balanced","reason":""},'
         + chain_branch
-        + enumerate_branch + outline_branch
+        + enumerate_branch
+        + plugin_projection.schema_branches
+        + outline_branch
         + community_focal_field
         + '"elements_query":"",'
         + ppr_query_field
@@ -690,6 +861,8 @@ def reflect_prompt(
     consult_memory: bool = False,
     search_chunks: bool = False,
     kg_actions: bool = True,
+    *,
+    plugin_actions: Sequence[ReflectActionSpec] = (),
 ) -> str:
     """Next-step decision prompt.
 
@@ -720,6 +893,18 @@ def reflect_prompt(
     ``ppr_retrieve``, or to fill ``ppr_query`` carefully, is a prompt that
     advertises actions the schema and the whitelist will both reject. True (the
     default) is byte-for-byte the prompt from before this gate existed.
+
+    ``plugin_actions`` is not a gate but external injection: one spec per
+    function a deployment plugin lends the retrieval agent
+    (``ask.reflect_action``). Each renders one action line after
+    ``consult_memory`` and before the scope-grounding paragraph — last in the
+    action list because it is the only channel that leaves the library, so the
+    model reads every in-library option first. Keyword-only, empty by default,
+    and an empty sequence renders nothing at all, so every existing caller and
+    every closed state gets this prompt byte for byte as it was before the
+    extension point existed. Only the plugin's own ``description`` and
+    parameter descriptions come from the plugin; see
+    ``project_reflect_actions``.
     """
     enumeration_tools = bool(element_kinds or object_types)
     # Placed right after ``add_subquery`` so the three passage-shaped channels
@@ -933,6 +1118,10 @@ def reflect_prompt(
         "when genuinely unsure what to try next.\n"
         if consult_memory else ""
     )
+    # Plugin-contributed actions (design doc §3.2). Rendered by the same pure
+    # function that produces the schema branch and the whitelist entry, so the
+    # three can never disagree about what this run offers.
+    plugin_action_lines = project_reflect_actions(plugin_actions).prompt_lines
     completeness_rule = (
         "In reason, you may call a collection completely retrieved ONLY when "
         "an enumerate action has reported its coverage as complete for that "
@@ -1010,6 +1199,7 @@ def reflect_prompt(
         f"{enumerate_actions}"
         f"{outline_action}"
         f"{consult_memory_action}"
+        f"{plugin_action_lines}"
         f"{SCOPE_DEIXIS_GROUNDING}"
         f"{scope_fields_rule}"
         "Before choosing answer, check aspect by aspect that every part the "
@@ -1709,12 +1899,14 @@ AGENT_PROFILE_OVERLAY_SCHEMA_HINT = (
 #: precedes the ``user`` prompt whenever this member has at least one
 #: recorded observation (see ``agent_profile_job._consolidate_overlay``).
 #: Deliberately NOT the same string as ``reasoning_retrieval.
-#: UNTRUSTED_EVIDENCE_SYSTEM_INSTRUCTION``: that one is bound to a specific
-#: completion task ("the stated empty-cell completion task") this
-#: consolidation run has never heard of, and reusing it verbatim would either
-#: confuse the model with a task that is not this one, or need editing here
-#: every time that instruction's own wording changes for an unrelated
-#: feature. This instruction says exactly what THIS task needs: an
+#: UNTRUSTED_EVIDENCE_SYSTEM_INSTRUCTION``: that one marks retrieved evidence
+#: inside a retrieval run, a framing this consolidation is not doing, and
+#: reusing it verbatim would need editing here every time that instruction's
+#: own wording changes for an unrelated feature. (That constant used to end
+#: with a fourth sentence naming knowhow completion's empty cells; the
+#: task-specific sentence has since moved to its own consumer, but the
+#: separation this comment argues for is unchanged.) This instruction says
+#: exactly what THIS task needs: an
 #: observation is data about an external Agent's OWN retrieval behaviour,
 #: never an instruction — and, the rule this task adds beyond the shared
 #: pattern, it can only ground a claim where it AGREES with this member's own

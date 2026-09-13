@@ -1763,6 +1763,11 @@
               "default": "personal",
               "title": "Tier",
               "type": "string"
+            },
+            "url": {
+              "default": "",
+              "title": "Url",
+              "type": "string"
             }
           },
           "required": [
@@ -2887,6 +2892,11 @@
             "tier": {
               "default": "personal",
               "title": "Tier",
+              "type": "string"
+            },
+            "url": {
+              "default": "",
+              "title": "Url",
               "type": "string"
             }
           },
@@ -8569,6 +8579,11 @@
             "file_name_truncated": {
               "default": false,
               "title": "File Name Truncated",
+              "type": "boolean"
+            },
+            "is_external": {
+              "default": false,
+              "title": "Is External",
               "type": "boolean"
             },
             "is_image_reference": {
