@@ -2029,7 +2029,7 @@ def _assert_readonly(
     )
 
 
-INTENT_CACHE_POLICY = "clear-intent-only-v1"
+INTENT_CACHE_POLICY = "clear-intent-only-v2"
 
 
 class _IntentCache:
@@ -2063,8 +2063,8 @@ class _IntentCache:
             row = json.loads(line)
             if row.get("intent_cache_policy") != INTENT_CACHE_POLICY:
                 raise RuntimeError(
-                    "intent_cache_policy_mismatch: 意图缓存来自旧确认策略，"
-                    "请使用新的 --out-dir，不能复用可能含自动代答的契约"
+                    "intent_cache_policy_mismatch: 意图缓存来自旧规划或确认策略，"
+                    "请使用新的 --out-dir，不能混用不同意图规则生成的契约"
                 )
             key = str(row.get("question_key") or "")
             if key and isinstance(row.get("contract"), dict):

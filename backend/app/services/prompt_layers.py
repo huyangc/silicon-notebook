@@ -143,9 +143,23 @@ L1_FRAGMENTS: Dict[str, PromptFragment] = {
         _fragment(
             "answer.style_language",
             "answer_prompt",
-            "回答语言与具体性风格；不得授权新的引用绑定。"
+            "回答语言、用户要求的粒度与具体性风格；不得授权新的引用绑定或放宽覆盖披露。"
             "起始序号「4. 」与结尾换行符属于契约，覆盖值必须保留两者。",
-            "4. Answer in the question's language. Be concrete.\n",
+            "4. Answer in the question's language and at its requested level of "
+            "detail. Evidence volume and retrieval effort do not ask for a longer "
+            "answer. If a structured output schema assigns prose slots to you and "
+            "titles/citations to a renderer, fill only those slots as instructed. "
+            "Otherwise, for a title-only inventory, give every supplied matching source "
+            "record's title and citation, preserving separate records with the same "
+            "title and adding only the qualifier needed to distinguish them. Do not "
+            "add article summaries, configuration values, or unrelated system "
+            "explanations. State any required coverage limitation once, in plain "
+            "language. For an overview, explain the main point, approach and supported "
+            "conclusions; for a mechanism comparison, explain each mechanism and "
+            "their meaningful differences. Include formulas, detailed settings or "
+            "additional benchmarks only when requested or necessary to explain the "
+            "answer. Do not shorten away a requested item, essential reasoning, "
+            "supporting numeric comparison or an important exception.\n",
         ),
         _fragment(
             "answer.mechanism_organization",
@@ -157,7 +171,12 @@ L1_FRAGMENTS: Dict[str, PromptFragment] = {
             "physics -> statistical/solid-state physics -> quantum/lattice origin -> "
             "engineering practice) and keep the derivation chain complete within each "
             "layer; where the knowledge items lack a link of the chain, bridge it "
-            "explicitly as （推断）.\n",
+            "explicitly as （推断）. In mechanism explanations, preserve which "
+            "components are shared versus independent. Distinguish an unchanged "
+            "architecture from unchanged numerical results or implementation; "
+            "approximation can change the latter without redesigning the former. "
+            "A theoretical combination of mechanisms does not establish that their "
+            "specific implementations are compatible or tested together.\n",
         ),
         _fragment(
             "answer.domain_conventions",
@@ -173,11 +192,24 @@ L1_FRAGMENTS: Dict[str, PromptFragment] = {
         _fragment(
             "answer.numeric_attribution",
             "answer_prompt",
-            "数值呈现与归因风格；grounding 底线由 L0 规则 1/2 兜底。"
+            "数值呈现、逐条件比较与归因风格；grounding 底线由 L0 规则 1/2 兜底。"
             "起始序号「10. 」与结尾换行符属于契约，覆盖值必须保留两者。",
             "10. When a specific numeric value comes from a single source, attribute "
-            "it as that source's stated value; you may add the typical engineering "
-            "range or the factors that shift it, marked as （推断）.\n",
+            "it as that source's stated value. For numeric comparisons, keep each "
+            "value paired with its metric, unit, model/version, configuration and "
+            "evaluation protocol (including strict versus flexible scoring and "
+            "prompting conditions). Read the column headers and notes; do not move "
+            "a value to another row or silently combine different conditions. "
+            "Compare each relevant pair before summarizing: state the two values "
+            "and the correct higher/lower/equal direction, respecting whether higher "
+            "or lower is better; if direction or comparability is unknown, say so. "
+            "Keep mixed results and exceptions visible by metric AND version: a "
+            "win on one benchmark or against one version cannot establish a win "
+            "across a whole family. Separate a source's qualitative claim from "
+            "your comparison of its table values; when they conflict, report the "
+            "difference instead of letting the broad claim override the numbers. "
+            "Any computed difference or synthesis remains subject to the inference "
+            "rules; cite the source values, not an unsupported conclusion.\n",
         ),
         _fragment(
             "expand_query.decomposition_guidance",

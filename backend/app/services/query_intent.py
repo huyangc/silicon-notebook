@@ -42,15 +42,15 @@ _GENERIC_REQUEST = re.compile(
 _INTENT_TYPES = {"explain", "compare", "diagnose", "design", "review", "other"}
 _COMPLETE_REQUEST = re.compile(
     r"(?:全部|所有(?!权|制)|全量|全套|"
-    r"完整(?:地)?(?:列出|罗列|枚举|读取|覆盖)|完整(?:的)?(?:清单|列表|集合)|逐一|逐项|"
+    r"完整(?:地)?(?:列出|罗列|枚举|读取|覆盖)|完整(?:的)?(?:清单|列表|集合)|逐一|逐项|逐篇|"
     r"每(?:一)?种|每一项|每一个|列全|无遗漏|穷举)"
     r"|\b(?:all|every|each|entire|exhaustive(?:ly)?|complete\s+list|"
     r"without\s+omission)\b",
     re.IGNORECASE,
 )
 _COMPLETE_NEGATION = re.compile(
-    r"(?:不(?:用|必|需要|要求|是)?|无需|并非(?:必须|需要)?|非)"
-    r"(?:列出|包含|覆盖|枚举)?(?:全部|所有|完整|逐一|逐项)"
+    r"(?:不(?:用|必|需要|要求|是|要|需)?|无需|并非(?:必须|需要)?|非)"
+    r"(?:列出|包含|覆盖|枚举)?(?:全部|所有|完整|逐一|逐项|逐篇)"
     r"|\b(?:not|do\s+not|don't|no\s+need\s+to)\s+"
     r"(?:need(?:\s+to)?\s+|list\s+)?(?:all|every|each)\b",
     re.IGNORECASE,
@@ -90,6 +90,9 @@ _ANALYSIS_REQUEST = re.compile(
     r"(?:全部|所有|完整|逐项)"
     r"|\b(?:compare|analyse|analyze|trade-?offs?|pros\s+and\s+cons)\b",
     re.IGNORECASE,
+)
+_PER_DOCUMENT_ANALYSIS_REQUEST = re.compile(
+    r"逐篇(?=[^，,。；;!?！？]*(?:分析|比较|对比|优缺点|差异|趋势|原因|建议))"
 )
 
 
@@ -158,6 +161,15 @@ def _has_unnegated_complete_request(question: str) -> bool:
     return False
 
 
+def _has_per_document_analysis(question: str) -> bool:
+    # This new completeness spelling must not inherit an analysis request from
+    # a rejected clause, e.g. "不用逐篇分析，逐一列出标题" is a title list only.
+    return any(
+        not _complete_match_is_negated(question, match)
+        for match in _PER_DOCUMENT_ANALYSIS_REQUEST.finditer(question)
+    )
+
+
 def _aggregate_match_is_negated(question: str, match: re.Match) -> bool:
     prefix = question[max(0, match.start() - 16):match.start()]
     prefix = re.split(r"[，,。；;!?！？]", prefix)[-1]
@@ -213,7 +225,7 @@ def _result_scope(data: dict, question: str) -> tuple[str, bool]:
     scope = raw_scope if raw_scope in RESULT_SCOPES else "ranked"
     wants_complete = _has_unnegated_complete_request(question)
     wants_aggregate = _has_unnegated_aggregate_request(question)
-    wants_analysis = bool(_ANALYSIS_REQUEST.search(question))
+    wants_analysis = bool(_ANALYSIS_REQUEST.search(question)) or _has_per_document_analysis(question)
     if wants_aggregate:
         # "列出所有方法并比较优缺点" remains hybrid; a plain exact count/group
         # is aggregate.  Both still require complete collection coverage.
