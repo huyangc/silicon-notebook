@@ -1,0 +1,83 @@
+# Sample EXTENSIONS_CONFIG for the circuit-diagram sample plugin.
+#
+# Copy this file somewhere outside the checkout, edit it, and point the backend
+# at it:
+#
+#     EXTENSIONS_CONFIG=/etc/silicon-notebook/extensions.toml \
+#     DEEPSEEK_API_KEY=sk-... npm run start
+#
+# Nothing loads this file by itself. The plugin is off unless a deployment
+# names it here, and this repository ships no default that does.
+#
+# The plugin's `src/` must be importable by the backend's own interpreter —
+# either `pip install -e examples/extensions/circuit-diagram` into
+# `PYTHON_BIN`'s environment, or that directory on `PYTHONPATH`.
+#
+# ⚠ Enabling this plugin takes TWO steps, and the second one is not in this
+# file. Naming the plugin here loads it; it stays unavailable — visible in
+# `/admin/extensions`, contributing nothing — until the environment variable
+# named by `api_key_env` below carries a non-blank value. That is deliberate:
+# the credential belongs in the deployment's own secret handling, never in a
+# TOML file that `/admin/extensions` reads back.
+
+[extensions."examples.circuit_diagram"]
+# Note the module path: the package's `__init__` deliberately does not
+# re-export `BUNDLE`, so this must name `bundle` itself.
+bundle = "silicon_notebook_circuit_diagram.bundle:BUNDLE"
+enabled = true
+
+[extensions."examples.circuit_diagram".settings]
+# Every key below is optional; the values shown are the defaults. Core computes
+# the accepted key set from the settings model itself, so a misspelled key is a
+# startup failure rather than a silently ignored line.
+
+# The OpenAI-compatible endpoint root. Must be an absolute http(s) URL with no
+# query string and no fragment; a trailing slash is stripped. The plugin
+# appends `/chat/completions` to it, so point it at an internal gateway rather
+# than at the completions path itself.
+base_url = "https://api.deepseek.com"
+
+# The vision model to ask. Sent verbatim in the request body and persisted into
+# each enriched element's metadata, so a later reader can tell which model
+# produced a netlist.
+model = "deepseek-flash"
+
+# The NAME of the environment variable carrying the API key — not the key. The
+# plugin reads it at the moment it dials and never stores the value.
+api_key_env = "DEEPSEEK_API_KEY"
+
+# Per-request read timeout in seconds, 0 < x ≤ 120. See the note below on how
+# this interacts with core's own deadline.
+timeout_seconds = 30.0
+
+# At most this many images per source are sent, in the order the parser
+# produced them, 1–64. A 300-page PDF of screenshots would otherwise cost one
+# request per screenshot.
+max_images_per_source = 8
+
+# Images larger than this (bytes) are skipped rather than sent, 1024 –
+# 33554432. DeepSeek's own per-image ceiling is 32 MiB; core applies
+# `MINERU_MAX_IMAGE_BYTES` before this plugin ever sees the bytes, so the
+# smaller of the two wins.
+max_image_bytes = 4194304
+
+# "zh" or "en": the language the model is asked to describe the circuit in, and
+# the language of the heading written into the element description.
+prompt_language = "zh"
+
+# ---------------------------------------------------------------------------
+# Budget interaction — worth reading once
+# ---------------------------------------------------------------------------
+# Core gives the whole `source.element_enricher` point a hard deadline,
+# `SOURCE_ELEMENT_ENRICHER_TIMEOUT_SECONDS` (default 120.0, accepted range
+# 0 < x ≤ 900). This plugin refuses to START an image it cannot finish inside
+# that deadline: it needs `timeout_seconds` plus a 0.25s return margin left on
+# the clock, and reports the images it did not reach as a partial result.
+#
+# With the defaults above (8 images × 30s worst case = 240s against a 120s
+# deadline) a source full of large schematics can therefore be classified only
+# in part. That is the intended behaviour rather than a limitation to work
+# around — being abandoned by the host loses everything, including the images
+# already classified — but a deployment that wants the whole source covered
+# should raise `SOURCE_ELEMENT_ENRICHER_TIMEOUT_SECONDS`, lower
+# `max_images_per_source`, or lower `timeout_seconds`.
