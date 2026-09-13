@@ -104,6 +104,8 @@ created_at, id)` 索引，供有界、按类型的集合枚举（公式/表格/�
 
 ### 2.3 API、模型与领域服务
 
+证据实验档的保留/恢复选序归 `reasoning_context.py`：只读取当前候选池和有界已发卡片，以固定问题相关性保留 K 中的旧证据，并让匹配当前查询的不可见旧键重新进入 D；`reasoning_retrieval.py` 选择原卡/最新已发视图。它们保持真实绑定、新证据预留与原预算，不修改 observer 的 fresh 命中语义，也不赋予池外缓存键访问资格。
+
 `reasoning_table_excerpt.py` 拥有纯内存的表格行选择与有界渲染，由 `reasoning_context.py` 的证据卡装配调用，且仅 `prefix_delta_evidence` 启用。它不新增检索、不判定问题覆盖；表格单卡额度仍服从总证据池。该档的无绑定补充候选来自当前可见 K/D，版本化追加与压缩后最新已发卡片的恢复属于缓存投影，不改变权威证据、检索状态或配额。
 
 - `prefix_delta_evidence` 是 reflect v2 的显式实验档：复用既有 delta 上下文装配，关闭逐项自评。`AspectLedger.assessment_enabled` 在建账时冻结；账本仅保留用户必答主题/约束供 C 渲染，不接受状态更新。`ReflectContext.assessment_enabled` 将同一合同传到消息/schema，`RetrievalTermination.assessment_enabled` 将其传到 Ask/Report 合成与轨迹，避免空方面账被当成已验证覆盖。下面关于方面状态、自评绑定和追问的说明仍适用于原有四种 v2 模式；新档不走这些路径。缓存仍是渲染投影，不拥有检索配额、权限、枚举覆盖或大纲状态。默认策略和默认实验档不变，具体可见行为由产品/API 配对文档拥有。
