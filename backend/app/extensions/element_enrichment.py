@@ -42,6 +42,7 @@ from typing import Callable
 
 from app.domain.cancellation import CoreCancellation
 from app.domain.element_enrichment import (
+    ElementEnrichmentTooLarge,
     persisted_element_enrichment_size,
     thaw_element_enrichment_metadata,
     valid_element_enrichment_owner,
@@ -136,11 +137,15 @@ class _MaterializedCandidate:
     ``element`` is kept as the bare object the plugin returned, and *only* to
     be compared by identity later: nothing is ever called on it.  ``metadata``
     is a plain ``dict`` built by core's own walk, not the plugin's mapping.
+    ``persisted_bytes`` is what this candidate would cost the element it
+    enriches, measured on the worker so the calling thread never has to
+    serialize plugin-sized data to find out.
     """
 
     element: object
     description: str
     metadata: dict[str, object]
+    persisted_bytes: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -558,7 +563,9 @@ class SourceElementEnricherHost:
                     # whole host exists to enforce, blocking the parse and
                     # holding its per-source lock indefinitely.
                     try:
-                        cell.result = _materialize(answer, call, remaining)
+                        cell.result = _materialize(
+                            answer, item, call, remaining
+                        )
                     except _Rejected as rejected:
                         cell.invalid = rejected.code
                     except BaseException:  # noqa: BLE001 — unusable, not fatal
@@ -612,8 +619,11 @@ class SourceElementEnricherHost:
         """Core-owned admission for one contribution: all of it, or none of it.
 
         Runs on the calling thread, after the deadline has been honoured, and
-        therefore touches **no plugin object**: every value it reads was copied
-        into core-owned form by ``_materialize`` on the worker.  The one
+        therefore touches **no plugin object and no serializer**: every value
+        it reads was copied into core-owned form by ``_materialize`` on the
+        worker, and each candidate's persisted size was measured there too.
+        Everything left here is a pointer comparison, a set lookup or an
+        integer add — all O(1) in the size of what the plugin sent.  The one
         plugin-supplied reference that survives is ``candidate.element``, and
         it is only ever compared by identity — never called, hashed or
         iterated.
@@ -626,8 +636,9 @@ class SourceElementEnricherHost:
         plugin actually produced.
         """
 
-        # Materialization already enforced this, on core-owned data it built
-        # itself; re-asserting costs one comparison and keeps this step total.
+        # Both budgets were already enforced by materialization, on core-owned
+        # data it built itself; re-asserting them here costs two integer
+        # comparisons and keeps this step total on its own inputs.
         if len(candidates) > remaining:
             return None, _REASON_BUDGET
         by_identity = {id(ref): index for index, ref in enumerate(refs, start=1)}
@@ -643,16 +654,7 @@ class SourceElementEnricherHost:
                 return None, _REASON_REF
             if ordinal in seen:
                 return None, _REASON_DUPLICATE
-            try:
-                byte_count += persisted_element_enrichment_size(
-                    plugin_id=item.plugin_id,
-                    plugin_version=item.plugin_version,
-                    contribution_id=item.contribution_id,
-                    metadata=candidate.metadata,
-                    description=candidate.description,
-                )
-            except Exception:  # noqa: BLE001 — unencodable metadata is a drop
-                return None, _REASON_METADATA
+            byte_count += candidate.persisted_bytes
             if byte_count > call.max_metadata_bytes:
                 return None, _REASON_BUDGET
             seen.add(ordinal)
@@ -671,19 +673,32 @@ class SourceElementEnricherHost:
 
 def _materialize(
     answer: object,
+    item: _Registration,
     call: ElementEnrichmentCallContext,
     remaining: int,
 ) -> _MaterializedResult:
-    """Copy a contributor's answer into values core owns, on the worker thread.
+    """Copy and measure a contributor's answer, on the worker thread.
 
-    This is the boundary the rest of the host relies on.  Everything a
-    contributor can hand back that requires *running plugin code to read* is
-    read exactly here, inside the deadline: the candidate tuple, each
-    candidate's ``description``, and — the one that actually matters —
-    ``metadata``, which the SDK types as ``Mapping`` and which a plugin may
-    therefore implement lazily, slowly, or not at all.  Reading it on the
-    calling thread would mean an arbitrary amount of plugin execution *after*
-    the deadline had been honoured, which is the same as having no deadline.
+    This is the boundary the rest of the host relies on, and it covers both
+    halves of "reading what a plugin sent":
+
+    *Running plugin code.*  The candidate tuple, each candidate's
+    ``description``, and — the one that actually matters — ``metadata``, which
+    the SDK types as ``Mapping`` and which a plugin may therefore implement
+    lazily, slowly, or not at all.  Reading one on the calling thread would
+    mean an arbitrary amount of plugin execution *after* the deadline had been
+    honoured, which is the same as having no deadline.
+
+    *Work proportional to what a plugin sent.*  Measuring the persisted size
+    encodes the whole subtree, so a 32 MiB string costs a 32 MiB encode even
+    though it is about to be rejected.  That measurement belongs on this side
+    of the deadline too, and it is preceded by a cheap character bound so the
+    obvious cases never reach the encoder at all.
+
+    The running byte budget is carried across candidates here rather than
+    recomputed later: the first candidate that pushes the contribution past
+    ``max_metadata_bytes`` ends the copy, so nothing behind it is walked,
+    encoded or allocated.
 
     Raises ``_Rejected`` with the stable code for the receipt.  The caller
     treats any other exception as an unusable answer, and a raise from the
@@ -703,28 +718,60 @@ def _materialize(
     if len(answer.items) > remaining:
         raise _Rejected(_REASON_BUDGET)
     candidates: list[_MaterializedCandidate] = []
+    budget_left = call.max_metadata_bytes
     for candidate in answer.items:
         if type(candidate) is not ElementEnrichmentCandidate:
             raise _Rejected(_REASON_SHAPE)
+        if budget_left <= 0:
+            raise _Rejected(_REASON_BUDGET)
         description = _normalized_description(
             candidate.description, call.max_description_chars
         )
         if description is None:
             raise _Rejected(_REASON_DESCRIPTION)
+        # A description is charged twice when persisted, and every character
+        # costs at least one UTF-8 byte, so this is an O(1) rejection of a
+        # description that cannot possibly fit what is left.
+        if 2 * len(description) > budget_left:
+            raise _Rejected(_REASON_BUDGET)
         try:
             metadata = thaw_element_enrichment_metadata(
                 candidate.metadata,
-                # Every persisted node costs at least one byte, so the byte
-                # budget is also an upper bound on how many nodes could
-                # possibly fit — which makes it a bound on this walk.
-                max_nodes=call.max_metadata_bytes,
+                # Every node and every character costs at least one byte once
+                # encoded, so what is left of the byte budget bounds both —
+                # and bounds them BEFORE anything is encoded.  Passing the
+                # remaining budget rather than the whole one keeps a later
+                # candidate from being walked on a budget its predecessors
+                # already spent.
+                max_nodes=budget_left,
+                max_chars=budget_left,
             )
+        except ElementEnrichmentTooLarge:
+            # "Cannot fit the budget" is a different verdict from "is not
+            # valid metadata", and the walk reports it with its own type
+            # precisely so this does not have to guess.
+            raise _Rejected(_REASON_BUDGET) from None
         except Exception:  # noqa: BLE001 — malformed metadata is a drop
             raise _Rejected(_REASON_METADATA) from None
         if type(metadata) is not dict:
             raise _Rejected(_REASON_METADATA)
+        try:
+            size = persisted_element_enrichment_size(
+                plugin_id=item.plugin_id,
+                plugin_version=item.plugin_version,
+                contribution_id=item.contribution_id,
+                metadata=metadata,
+                description=description,
+            )
+        except Exception:  # noqa: BLE001 — unencodable metadata is a drop
+            raise _Rejected(_REASON_METADATA) from None
+        budget_left -= size
+        if budget_left < 0:
+            raise _Rejected(_REASON_BUDGET)
         candidates.append(
-            _MaterializedCandidate(candidate.element, description, metadata)
+            _MaterializedCandidate(
+                candidate.element, description, metadata, size
+            )
         )
     return _MaterializedResult(status, failure_code, tuple(candidates))
 
