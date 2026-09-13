@@ -62,6 +62,7 @@ import {
 } from "./model-services.ts";
 import {
   formatDuration,
+  getPluginActionArguments,
   getReasoningTraceSummary,
   getTraceStepDetail,
   getTraceStepLabel,
@@ -1222,6 +1223,37 @@ function CitationPopover({
 }
 
 
+// plugin_action(ask.reflect_action)展开态的**完整**参数披露:每个参数一行
+// 「参数名: 值」,值一个字都不夹,长值换行铺开。
+//
+// 折叠行那份摘要夹到 120 字符(reasoning-trace.ts 的
+// PLUGIN_ACTION_ARGUMENTS_MAX_CHARS),而后端单个参数最长放行 300 字符
+// (REFLECT_ACTION_ARGUMENT_MAX_CHARS)。两态若共用同一个夹过的格式化器,被夹掉的
+// 那一截在整个界面上就无处可看,而 docs/product-and-api.md「Reflect plugin actions」
+// 的 What leaves the deployment 段承诺的正是相反的事:提问的人始终看得见替他发出去
+// 的原文——那是这个特性代替内容过滤器的**全部**依仗。所以夹断留给折叠态,展开态
+// 逐项铺开。零参数(全空串或畸形 payload)不渲染任何容器,不给一个空框。
+function PluginActionArguments({ step }: { step: ReasoningTraceStep }) {
+  const argumentRows = getPluginActionArguments(step);
+  if (argumentRows.length === 0) return null;
+  return (
+    <div className="reasoning-trace-arguments">
+      <div className="reasoning-trace-arguments-title">替你发出的参数</div>
+      {argumentRows.map(({ name, value }) => (
+        <div className="reasoning-trace-argument" key={name}>
+          {/* ⚠ 这两个必须是 div 不能是 span:`.reasoning-trace-list li span` 是个
+              后代选择器,它把步骤那一列的圆角徽章样式(22px 定高、nowrap、
+              overflow:hidden)加给 li 里的**每一个** span——参数值套进去会被截成一
+              行看不全,正好废掉这一块存在的理由。 */}
+          <div className="reasoning-trace-argument-name">{name}:</div>
+          <div className="reasoning-trace-argument-value">{value}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+
 export function ReasoningTracePanel({
   steps,
   live = false,
@@ -1273,6 +1305,7 @@ export function ReasoningTracePanel({
                     )}
                   </div>
                 )}
+                <PluginActionArguments step={step} />
               </li>
             );
           })}

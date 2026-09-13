@@ -1420,3 +1420,41 @@ def test_a_rejected_external_item_reaches_no_section_and_no_citation(
     # 「带回 1 条、模型看到 0 条」正是这里必须说出来的那句话。
     assert detail["external_included"] == 0
     assert detail["external_dropped"] == 1
+
+
+def test_a_section_grounded_only_in_external_evidence_is_not_capped(
+    repo, monkeypatch
+):
+    """节级 grounding 也要走外部证据那道**非排序**门(codex PR#714 R1 P2)。
+
+    外部条目没有检索分,所以它只能经 ``exact_evidence_keys`` 进 grounding;节级
+    分类器少传这个参数时,一个只引站外材料的节被判 ungrounded,再由节级封顶把
+    **整篇**答案从 grounded 压到 overview——而那一节其实引的是服务端亲手喂给它、
+    并且真的绑成了锚点的材料。第一节引库内元素、第二节只引外部,两节都必须
+    grounded,整体也不许被降级。
+    """
+    notebook = _notebook(repo)
+    _stub_run(monkeypatch, _reasoning_result(
+        external_evidence=[_external_item(1)],
+    ))
+    library_key = f"k{AskService._ELEMENT_KEY_BASE + 1}"
+    external_key = (
+        f"k{OUTLINE_SECTION_KEY_STRIDE + AskService._EXTERNAL_KEY_BASE + 1}"
+    )
+    llm = _CaptureAnswerLLM(answers=[
+        {"answer": f"第一节引库内 [{library_key}]。", "grounded": True},
+        {"answer": f"第二节只引站外 [{external_key}]。", "grounded": True},
+    ])
+    response = _ask(repo, notebook, llm)
+
+    detail = _synthesis_detail(response)
+    # 第二节的锚点集合里**只有**外部那一条 —— 断言不是空转的。
+    assert {anchor.key for anchor in response.anchors} == {
+        library_key, external_key,
+    }
+    assert [item["grounded"] for item in detail["section_grounded"]] == [
+        True, True]
+    assert [item["evidence_level"] for item in detail["section_grounded"]] == [
+        "grounded", "grounded"]
+    assert detail["ungrounded_sections"] == []
+    assert response.evidence_level == "grounded"
