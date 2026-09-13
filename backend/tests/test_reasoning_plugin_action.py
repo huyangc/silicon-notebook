@@ -438,6 +438,41 @@ def test_a_host_failure_is_one_skip_step_carrying_its_code(repo):
     assert result.external_evidence == []
 
 
+@pytest.mark.parametrize("failure_code", [
+    "plugin_action_timeout",           # the contributor never came back
+    "plugin_action_invalid_result",    # it raised, or answered nonsense
+])
+def test_a_failed_call_still_discloses_what_it_sent(repo, failure_code):
+    """The egress already happened; the audit trail may not go quiet.
+
+    A timeout or a raising contributor says nothing about whether the request
+    left the deployment — it did, before the failure was observable — so the
+    question "what was sent on my behalf?" has the same answer as on the happy
+    path and must be answerable from the trace alone (§九 invariant 1).
+    ``attempted`` is what keeps the two apart: the successful ``plugin_action``
+    step means delivered, this one means only attempted.
+    """
+    llm = _ValidatingLLM([DRY_TURN, _plugin_action(query="shaping loss",
+                                                   venue="journal")])
+    host = _FakeHost(ReflectActionOutcome(failure_code=failure_code))
+    retriever, limits = _retriever(repo, llm, host=host)
+
+    result = _run(retriever, _seed(repo), limits)
+
+    skip = _skips(result)["plugin_action_failed"]
+    assert skip.detail["code"] == failure_code
+    # Verbatim, exactly the mapping the host was handed a moment earlier.
+    assert skip.detail["arguments"] == {"query": "shaping loss",
+                                        "venue": "journal"}
+    assert dict(host.calls[0][1].arguments) == skip.detail["arguments"]
+    assert skip.detail["attempted"] is True
+    # A snapshot, not the live object the call carried.
+    assert type(skip.detail["arguments"]) is dict
+    # ... and the success step stays distinguishable: it never says
+    # "attempted", because it means something stronger.
+    assert _steps(result, "plugin_action") == []
+
+
 # --- a successful call ------------------------------------------------------
 
 def test_a_successful_call_mints_keys_feeds_the_summary_and_reaches_the_result(
@@ -860,3 +895,141 @@ def test_the_reflect_block_drops_whole_entries_rather_than_halves():
     assert len(block) <= EXTERNAL_EVIDENCE_REFLECT_BLOCK_CHARS + 200
     assert "…(+" in block
     assert _external_block_text([], "") == ""
+
+
+# --- the real host, end to end (codex PR#714 R1 P1) -------------------------
+#
+# Everything above drives ``_action_plugin`` through a **fake** host, on
+# purpose (see the module docstring).  That is exactly why a contract mismatch
+# between the loop and the real host could ship: the loop hands
+# ``ReflectActionCall.arguments`` as a ``MappingProxyType`` (a read-only view
+# over a private copy, so a plugin cannot edit the very dict the trace step
+# discloses), while the host's egress re-check accepted only an exact ``dict``
+# — so in production EVERY plugin action, zero-argument ones included, was
+# refused as ``plugin_action_invalid_result`` before the contributor was ever
+# reached, after having already spent a budget slot.  No fake could see it.
+#
+# So this one test wires the production pieces together: a real
+# ``ExtensionRegistry`` built from real bundles, the real
+# ``ReflectActionHost``, the real ``ReasoningRetriever``, and every reflect
+# turn still through ``_ValidatingLLM``'s production shape gate.
+
+from app.extension_sdk import (  # noqa: E402 — grouped with the section it serves
+    EXTENSION_API_VERSION,
+    ContributionDeclaration,
+    ContributionKind,
+    ExtensionContribution,
+    ExtensionManifest,
+    ExtensionResultStatus,
+)
+from app.extension_sdk.reflect_action import (  # noqa: E402
+    ASK_REFLECT_ACTION_POINT,
+    ReflectActionResult,
+)
+from app.extensions.bootstrap import build_extension_runtime  # noqa: E402
+
+
+#: A second, deliberately **parameterless** action: the host's egress re-check
+#: compares the declared parameter set against the mapping's key set, so a
+#: zero-parameter action exercises the same frame with an empty mapping — the
+#: shape most likely to be waved through by a laxer check that only looked at
+#: the values.
+FEED_DESCRIPTOR = ReflectActionDescriptor(
+    name="latest_briefs",
+    description="Return the newest external briefs, no parameters.",
+    source_label="ACME Feed",
+    parameters=(),
+    max_calls_per_run=1,
+)
+
+
+class _RealPlugin:
+    """A contributor that records the SDK context it really received."""
+
+    def __init__(self, descriptor, items):
+        self.descriptor = descriptor
+        self._items = tuple(items)
+        self.contexts: list = []
+
+    def invoke(self, context):
+        self.contexts.append(context)
+        return ReflectActionResult(
+            self._items, "", ExtensionResultStatus.AVAILABLE
+        )
+
+
+class _RealBundle:
+    def __init__(self, manifest, contribution):
+        self.manifest = manifest
+        self.contribution = contribution
+
+    def register(self, registrar):
+        registrar.add_contributor(self.contribution)
+
+
+def _real_bundle(contribution_id, implementation):
+    declaration = ContributionDeclaration(
+        contribution_id, ASK_REFLECT_ACTION_POINT, ContributionKind.CONTRIBUTOR
+    )
+    return _RealBundle(
+        ExtensionManifest(
+            id=contribution_id,
+            version="1.0.0",
+            api_version=EXTENSION_API_VERSION,
+            display_name=contribution_id,
+            trust="deployment",
+            contributions=(declaration,),
+        ),
+        ExtensionContribution(declaration, implementation, None),
+    )
+
+
+def _real_host(*plugins):
+    return build_extension_runtime(
+        [
+            _real_bundle(plugin.descriptor.name.replace("_", "-"), plugin)
+            for plugin in plugins
+        ]
+    ).reflect_actions
+
+
+def test_the_real_host_receives_the_loop_s_call_and_reaches_the_contributor(
+    repo,
+):
+    """One run, two real dispatches, no fakes between loop and plugin.
+
+    Red before the host accepted a read-only mapping: both turns collapsed to
+    a ``plugin_action_failed`` skip carrying ``plugin_action_invalid_result``,
+    the contributors were never entered, and no external evidence existed.
+    """
+    papers = _RealPlugin(DESCRIPTOR, [_item(1)])
+    feed = _RealPlugin(FEED_DESCRIPTOR, [_item(2)])
+    host = _real_host(papers, feed)
+    llm = _ValidatingLLM([
+        DRY_TURN,
+        _plugin_action(query="shaping loss", venue="journal"),
+        {"next_action": "latest_briefs", "reason": "再试一条外部通道",
+         "latest_briefs": {}},
+    ])
+    retriever, limits = _retriever(repo, llm, host=host)
+
+    result = _run(retriever, _seed(repo), limits)
+
+    # The contributors were really entered, with the arguments the loop wrote.
+    assert len(papers.contexts) == 1
+    assert dict(papers.contexts[0].arguments) == {
+        "query": "shaping loss", "venue": "journal"}
+    assert papers.contexts[0].question == EGRESS_QUESTION
+    assert len(feed.contexts) == 1
+    assert dict(feed.contexts[0].arguments) == {}
+    # A read-only view, still: the plugin cannot edit what the trace discloses.
+    with pytest.raises(TypeError):
+        papers.contexts[0].arguments["query"] = "something else"
+    # ... and the material really came back out the other side.
+    assert [evidence.action for evidence in result.external_evidence] == [
+        "search_papers", "latest_briefs"]
+    assert [evidence.source_label for evidence in result.external_evidence] == [
+        "IEEE Xplore", "ACME Feed"]
+    assert [step.detail["found"] for step in _steps(result, "plugin_action")] \
+        == [1, 1]
+    assert "plugin_action_failed" not in _skips(result)

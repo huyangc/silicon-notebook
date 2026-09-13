@@ -4206,6 +4206,46 @@ button.chat-session-card {
   white-space: nowrap;
 }
 
+/* plugin_action 步展开态的完整参数披露:自成一行、跨满三列(48px 徽章列容不下
+   一段自由文本),值一个字不夹,所以必须允许在任意位置断行——单个参数后端放行
+   300 字符,不断行会把整块撑出面板。折叠行那份摘要仍然夹到 120 字符并标 …。 */
+.reasoning-trace-list li .reasoning-trace-arguments {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  margin-top: 2px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: rgba(148, 163, 184, 0.1);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.reasoning-trace-arguments-title {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.reasoning-trace-argument {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-width: 0;
+}
+
+.reasoning-trace-argument-name {
+  color: #64748b;
+  font-weight: 600;
+}
+
+.reasoning-trace-argument-value {
+  min-width: 0;
+  /* 参数是模型写的自由文本(可含无空格长串/URL),按字符断行,绝不横向溢出。 */
+  overflow-wrap: anywhere;
+  color: #20242a;
+}
+
 .reasoning-trace-time {
   color: #64748b;
   font-weight: 600;

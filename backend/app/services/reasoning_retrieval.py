@@ -4920,11 +4920,18 @@ class ReasoningRetriever:
         # **自己**的令牌:取消仍在第一时间终止整个 run,判据却留在核心手里。
         raise_if_cancelled(self.cancel_event)
         if outcome.failure_code:
+            # 参数在失败步里同样**逐字**披露,理由与成功步一致:外泄已经发生
+            # ——请求在超时/抛错/不可用之前就已经离开部署——而审计问的是「有
+            # 什么替我发出去了」,不是「那次发得成不成功」。`attempted` 把这条
+            # 步与成功的 `plugin_action` 步区分成「尝试过」与「送达了」:失败
+            # 时没有人能保证对端真的收到了,记成送达是在替插件担保。快照用
+            # `dict(...)`:轨迹保存的必须是调用**发起时**的那份。
             record(TraceStep(
                 step_type="skip",
                 summary=f"跳过扩展检索「{name}」(这次没能取回材料)",
                 detail={"reason": "plugin_action_failed", "action": name,
-                        "code": outcome.failure_code}))
+                        "code": outcome.failure_code,
+                        "arguments": dict(arguments), "attempted": True}))
             return
         state.plugin_seen_arguments.add(seen_key)
         self._admit_external_evidence(state, spec, arguments, outcome)

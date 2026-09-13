@@ -131,22 +131,48 @@ function totalDurationMs(steps: ReasoningTraceStep[]): number {
 
 // 插件动作(ask.reflect_action)参数摘要的**显示**上限。参数逐字进轨迹是这个特性
 // 的外泄透明合同(设计文档 §九 不变量 1:发出去的只有问题与模型写的参数,而后者
-// 用户必须看得见),但折叠态那一行装不下一段自由文本——超出就夹断并标 …,完整
-// 参数照旧原样留在 detail 里供排查。夹的是**拼好的整串**而不是每个参数:两个参数
-// 各夹一半会读成两句半截话,不如老实说「后面还有」。
+// 用户必须看得见),但折叠态那一行装不下一段自由文本——超出就夹断并标 …。夹的是
+// **拼好的整串**而不是每个参数:两个参数各夹一半会读成两句半截话,不如老实说
+// 「后面还有」。⚠ 这个夹断只对折叠态成立:被夹掉的那一截必须在展开态有地方看得
+// 到,否则合同承诺的「看得见」在界面上无处兑现——见下面 getPluginActionArguments。
 const PLUGIN_ACTION_ARGUMENTS_MAX_CHARS = 120;
 
-// `arguments` 是 `Record<string, string>`(后端只允许字符串与字符串枚举,见设计
-// 文档 §一 非目标第三条)。这里仍逐个查类型:轨迹 detail 是 `Record<string,
-// unknown>`,畸形 payload 不该把 "[object Object]" 送上屏。空串参数(模型没填的
-// 可选参数,后端补空串)不显示——列一串 `venue=` 只是噪音。
-function pluginActionArgumentsText(value: unknown): string {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return "";
-  const parts: string[] = [];
+export type PluginActionArgument = { name: string; value: string };
+
+// 展开态用的**完整**参数逐项列表。`arguments` 是 `Record<string, string>`(后端只
+// 允许字符串与字符串枚举,见设计文档 §一 非目标第三条)。这里仍逐个查类型:轨迹
+// detail 是 `Record<string, unknown>`,畸形 payload 不该把 "[object Object]" 送上屏。
+// 空串参数(模型没填的可选参数,后端补空串)不产生行——列一串 `venue:` 只是噪音。
+function pluginActionArgumentRows(value: unknown): PluginActionArgument[] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+  const rows: PluginActionArgument[] = [];
   for (const [name, argument] of Object.entries(value as Record<string, unknown>)) {
-    if (typeof argument === "string" && argument) parts.push(`${name}=${argument}`);
+    if (typeof argument === "string" && argument) rows.push({ name, value: argument });
   }
-  const text = parts.join(" · ");
+  return rows;
+}
+
+// 展开态的逐项参数:一个字都不夹。外泄透明合同(设计文档 §九 不变量 1,
+// docs/product-and-api.md「Reflect plugin actions」的 What leaves the deployment 段)
+// 承诺的是提问的人**始终**看得见替他发出去的原文,而单个参数后端最长放行
+// REFLECT_ACTION_ARGUMENT_MAX_CHARS = 300 字符。折叠行的 120 字符摘要装不下那么长
+// 的自由文本,所以展开态必须装得下:两处若共用同一个夹过的格式化器,被夹掉的那一
+// 截在整个界面上就无处可看,合同只剩纸面。过滤规则与折叠摘要严格一致(畸形
+// arguments、空串参数都不上屏),两处看到的是同一组参数、只是详略不同。
+export function getPluginActionArguments(step: ReasoningTraceStep): PluginActionArgument[] {
+  const detail = step.detail ?? {};
+  // 成功的 plugin_action 步，以及「已经发出请求但失败」的 skip 步
+  // （后端在 plugin_action_failed 上写 attempted:true 与逐字 arguments）：
+  // 外泄已经发生，审计披露不能只在成功时出现。
+  const attemptedFailure = step.step_type === "skip" && detail.attempted === true;
+  if (step.step_type !== "plugin_action" && !attemptedFailure) return [];
+  return pluginActionArgumentRows(detail.arguments);
+}
+
+function pluginActionArgumentsText(value: unknown): string {
+  const text = pluginActionArgumentRows(value)
+    .map(({ name, value: argument }) => `${name}=${argument}`)
+    .join(" · ");
   return text.length > PLUGIN_ACTION_ARGUMENTS_MAX_CHARS
     ? `${text.slice(0, PLUGIN_ACTION_ARGUMENTS_MAX_CHARS)}…`
     : text;

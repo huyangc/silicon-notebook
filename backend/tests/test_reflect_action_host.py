@@ -17,6 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 import threading
 import time
+from types import MappingProxyType
 
 import pytest
 
@@ -584,6 +585,55 @@ def test_the_host_does_not_trust_its_caller_either(call):
     host = _host(_bundle("papers", plugin))
 
     outcome = host.invoke(_spec(host), call)
+
+    assert outcome.failure_code == INVALID_RESULT
+    assert plugin.contexts == []
+
+
+def test_the_production_read_only_mapping_is_accepted_at_the_egress_check():
+    """The reflect loop hands a ``MappingProxyType``, not a ``dict``.
+
+    Every other test in this file builds the call with a plain ``dict``, which
+    is exactly how an egress re-check that admitted only ``dict`` shipped: in
+    production it refused EVERY plugin action before the contributor was
+    reached (codex PR#714 R1 P1).  ``test_reasoning_plugin_action.py`` pins the
+    loop-to-plugin path end to end; this pins the accepted type at the frame
+    that decides it.
+    """
+    plugin = _Plugin(_result(_item()))
+    host = _host(_bundle("papers", plugin))
+
+    outcome = host.invoke(
+        _spec(host),
+        _call(arguments=MappingProxyType({"query": "shaping loss"})),
+    )
+
+    assert outcome.failure_code == ""
+    assert len(plugin.contexts) == 1
+    assert dict(plugin.contexts[0].arguments) == {"query": "shaping loss"}
+
+
+def test_a_dict_subclass_is_still_refused_at_the_egress_check():
+    """Widening to a read-only mapping must not widen to ``isinstance``.
+
+    A ``dict`` subclass can answer the validation walk with one thing and the
+    copy taken for the plugin with another, so the frame that decides what
+    leaves the deployment keeps refusing it outright.
+    """
+
+    class _TwoFaced(dict):
+        def __init__(self) -> None:
+            super().__init__({"query": "shaping loss"})
+            self._reads = 0
+
+        def values(self):  # pragma: no cover - refused before it is walked
+            self._reads += 1
+            return super().values()
+
+    plugin = _Plugin(_result(_item()))
+    host = _host(_bundle("papers", plugin))
+
+    outcome = host.invoke(_spec(host), _call(arguments=_TwoFaced()))
 
     assert outcome.failure_code == INVALID_RESULT
     assert plugin.contexts == []

@@ -506,8 +506,23 @@ def _valid_arguments(spec: ReflectActionSpec, arguments: object) -> bool:
     value that is not a string.  ``spec`` is therefore always the caller's
     ``_spec_of`` lookup into the frozen topology, never the object the caller
     passed in.
+
+    Two exact types are admitted, not one: ``dict`` and ``MappingProxyType``.
+    The reflect loop hands a ``MappingProxyType`` on purpose — the trace step
+    discloses verbatim what left the deployment, so the mapping the call
+    carries must not be editable from underneath it — and a check that took
+    only ``dict`` refused every real production call, zero-argument actions
+    included, before the contributor was ever reached (codex PR#714 R1 P1).
+    Still ``type(...) in``, never ``isinstance``: a ``dict`` SUBCLASS is what
+    this frame must keep refusing, because its ``keys``/``values`` can be
+    overridden to answer this check with one thing and the plugin with
+    another, and the copy taken below would then send text nobody validated.
+    ``MappingProxyType`` cannot be subclassed at all, so admitting it exactly
+    widens nothing.  Whatever comes in, ``_execute`` re-wraps it as a fresh
+    ``MappingProxyType(dict(...))`` — the validated snapshot is what the SDK
+    context gets, never the caller's object.
     """
-    if type(arguments) is not dict:
+    if type(arguments) not in (dict, MappingProxyType):
         return False
     declared = {parameter.name for parameter in spec.descriptor.parameters}
     return declared == set(arguments) and all(

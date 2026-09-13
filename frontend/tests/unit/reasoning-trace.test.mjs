@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   TRACE_STEP_LABELS,
   formatDuration,
+  getPluginActionArguments,
   getReasoningTraceSummary,
   getTraceStepDetail,
   getTraceStepLabel,
@@ -919,6 +920,65 @@ test("plugin_action 的超长参数夹断并标 …，不把折叠行撑爆", ()
   assert.ok(detail.length < long.length);
 });
 
+// 上面那条夹断只对**折叠态**成立。外泄透明合同（docs/product-and-api.md「Reflect
+// plugin actions」的 What leaves the deployment 段）承诺提问的人始终看得见替他发出
+// 去的原文，而后端单个参数放行到 REFLECT_ACTION_ARGUMENT_MAX_CHARS = 300 字符——
+// 若展开态复用同一个夹过的格式化器，被夹掉的那一截在整个界面上就无处可看。这一组
+// 断言钉住「折叠夹、展开全」这个两态分工。
+test("plugin_action 展开态给出完整参数，折叠摘要被夹断而它不被夹", () => {
+  const long = "字".repeat(300);   // 后端单参数上限，折叠行的 120 字符装不下
+  const step = {
+    step_type: "plugin_action",
+    summary: "",
+    detail: { action: "search_ieee", arguments: { query: long, venue: "journal" }, found: 1 },
+  };
+  // 折叠摘要：夹断并标 …，完整值确实进不去。
+  const collapsed = getTraceStepDetail(step);
+  assert.ok(collapsed.includes("…"));
+  assert.ok(!collapsed.includes(long));
+  // 展开态：逐项、原样、一个字不夹。
+  assert.deepEqual(getPluginActionArguments(step), [
+    { name: "query", value: long },
+    { name: "venue", value: "journal" },
+  ]);
+  assert.equal(getPluginActionArguments(step)[0].value.length, 300);
+});
+
+test("展开态的参数披露与折叠摘要过滤规则一致（空串不列、畸形不列、非本步不列）", () => {
+  assert.deepEqual(
+    getPluginActionArguments({
+      step_type: "plugin_action",
+      summary: "",
+      detail: { action: "search_ieee", arguments: { query: "q", venue: "" }, found: 1 },
+    }),
+    [{ name: "query", value: "q" }],
+  );
+  for (const bogus of [null, "query=q", ["query"], 7, { query: { nested: 1 } }]) {
+    assert.deepEqual(
+      getPluginActionArguments({
+        step_type: "plugin_action",
+        summary: "",
+        detail: { action: "search_ieee", arguments: bogus, found: 0 },
+      }),
+      [],
+      `bogus=${JSON.stringify(bogus)}`,
+    );
+  }
+  // 别的步即便 detail 里恰好有个 arguments 键，也不走这条披露。
+  assert.deepEqual(
+    getPluginActionArguments({
+      step_type: "plugin",
+      summary: "",
+      detail: { arguments: { query: "q" } },
+    }),
+    [],
+  );
+  assert.deepEqual(
+    getPluginActionArguments({ step_type: "plugin_action", summary: "", detail: {} }),
+    [],
+  );
+});
+
 test("plugin_action 的 truncated 必须说出来（否则「新增 N 条」读成插件只找到 N 条）", () => {
   assert.equal(
     getTraceStepDetail({
@@ -967,4 +1027,30 @@ test("插件动作被跳过时走既有 skip 步，前端不另造一份 reason 
     assert.equal(getTraceStepDetail(step), "");
     assert.equal(getReasoningTraceSummary([step]).latestSummary, step.summary);
   }
+});
+
+test("已发出请求但失败的 skip 步（attempted:true）同样在展开态逐项披露参数", () => {
+  const failed = {
+    step_type: "skip",
+    summary: "扩展检索 search_ieee 未取回材料",
+    detail: {
+      reason: "plugin_action_failed",
+      code: "plugin_action_timeout",
+      action: "search_ieee",
+      arguments: { query: "bandgap reference drift", venue: "" },
+      attempted: true,
+    },
+  };
+  assert.deepEqual(getPluginActionArguments(failed), [
+    { name: "query", value: "bandgap reference drift" },
+  ]);
+  // 没有 attempted 标记的普通 skip 步（预算/重复/末轮）不披露：那些调用从未发出。
+  assert.deepEqual(
+    getPluginActionArguments({
+      step_type: "skip",
+      summary: "",
+      detail: { reason: "plugin_action_cap", action: "search_ieee", arguments: { query: "q" } },
+    }),
+    [],
+  );
 });

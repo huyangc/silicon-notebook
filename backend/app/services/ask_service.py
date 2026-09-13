@@ -2704,12 +2704,18 @@ class AskService:
                 )
                 for element in item.elements
             ]
+            # 外部证据走的是**非排序**那道门(`exact_evidence_keys`),库内命中
+            # 走 `evidence_pool`——两道门缺一道,一个只引站外材料的节就会被判成
+            # 「引了不存在的东西」而 ungrounded,再由下面的节级封顶把整篇答案压到
+            # overview(codex PR#714 R1 P2)。键从**本节自己**的锚点上读,与
+            # `section_evidence` 同口径:另一节引到的外部条目不借给本节。
             section_level, _ = classify_evidence(
                 section_evidence,
                 section_anchors,
                 section_llm_grounded,
                 self.settings.evidence_tau_low,
                 self.settings.evidence_tau_high,
+                exact_evidence_keys=self._external_exact_keys(section_anchors),
             )
             section_is_grounded = section_level == "grounded"
             section_grounding_detail.append({
