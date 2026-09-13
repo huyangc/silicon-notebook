@@ -48,11 +48,6 @@ from app.core.llm import cap_kwargs
 from app.domain.extensions import RetrievalContributorHostPort
 from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
 from app.services.citation_markers import MARKER_RE, marker_keys
-from app.services.reasoning_aspects import (
-    admitted_evidence_keys,
-    render_termination_block,
-    termination_synthesis_detail,
-)
 from app.services.report_execution import REPORT_CANCELLATIONS
 from app.services.report_corpus_profile import (
     PROFILE_FAILED,
@@ -1936,18 +1931,6 @@ class ReportEngine:
                       "result_scope"),
                   "completeness_required": (section.get("intent_contract") or {}).get(
                       "completeness_required"),
-                  # T4 §7.1:本节的必答方面。来源是 ``intent_questions`` ——
-                  # ``_bind_outline_to_intent`` 在大纲阶段按用户确认过的意图
-                  # 契约写进这一节的那份清单(与上面两个键同源、同样已持久化),
-                  # 不是节内模型现场重规划出来的东西。零新增查询、零新增模型
-                  # 调用:只是把已经在手上的 ``intent_questions`` 也传下去。
-                  #
-                  # **稀疏键**(同本仓库其它 detail 的口径):没有这份清单的节
-                  # 一个多余的键都不带,检索器于是照常回落到「整条节问题作为唯一
-                  # 方面」的兼容路径,而不是收到一个空列表还要去猜它什么意思。
-                  # reflect v2 关闭时这个键根本不被读,关闭态无差别。
-                  **({"intent_questions": intent_questions}
-                     if intent_questions else {}),
               })
 
         # The outline's approved retrieval directions are execution requirements,
@@ -2170,11 +2153,6 @@ class ReportEngine:
         # 本节深挖整理出的子大纲(仅穷尽档非空)。它有三个消费点,顺序不能倒:先决定
         # 谁进来源分区、再决定谁进 KG 上下文,最后才据装配好的 id_map 渲染结构块。
         sub_outline = list(getattr(result, "outline", None) or [])
-        # 本节深挖 run 的结束事实(设计稿 §7.2)。取法与 `sub_outline` 同款
-        # getattr 兜底:窄测试替身与冻结调用点的 `result` 没有这个属性,而
-        # reflect v2 关闭(默认)时它本来就是 None —— 两种情况都退回空块,
-        # `report_section_prompt` 与本节结果逐字节回到接入前。
-        termination = getattr(result, "termination", None)
         bound_keys = (outline_bound_evidence_keys(sub_outline)
                       if limits is not None else set())
         # 来源分区(chunk + 直接原文段)同样要给大纲绑定留位置(codex PR#418 R4):
@@ -2398,7 +2376,6 @@ class ReportEngine:
                         )[:1000],
                         report_frame=frame_block,
                         synthesis_commitment=synthesis_block,
-                        termination_block=render_termination_block(termination),
                     )}],
                     REPORT_SECTION_SCHEMA_HINT, cancel_event=self.cancel_event,
                     **cap_kwargs(client, "report_section_max_tokens"))
@@ -2457,16 +2434,6 @@ class ReportEngine:
                 "intent_ids": list(section.get("intent_ids") or []),
                 "id_map": id_map,      # 节内 k -> ctx;仅供 _assemble 全局重编号,不入库
                 "attempted": list(getattr(result, "attempted", []) or [])}
-        # 结束事实 + 最终装配之后的方面复核(设计稿 §7.2)。**v2-only 稀疏键**:
-        # 关闭态 update 一个空 dict,本节结果的键集逐字节不变。复核用实际进了 prompt
-        # 的证据身份(`id_map`)与正文解析回来的锚点,与 Ask 侧同一份纯函数;⚠ 这一侧
-        # **不带簇折叠表**,是保守口径(可能多报未送达,见 `admitted_evidence_keys`)。
-        # 走报告已有的私有持久路径(section 行);公开投影按白名单照旧不带它。
-        base.update(termination_synthesis_detail(
-            termination,
-            admitted_keys=admitted_evidence_keys(id_map),
-            cited_keys={str(anchor.object_id) for anchor in anchors},
-        ))
         if not markdown:
             try:
                 deps.model_errors.note_model_error(

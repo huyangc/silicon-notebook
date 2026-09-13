@@ -122,56 +122,6 @@ function totalDurationMs(steps: ReasoningTraceStep[]): number {
   );
 }
 
-// 检索结束事实的摘要片段(设计稿 2026-09-07 §7.2)。
-//
-// **结束原因的中文短句由服务端给**(`termination_summary`),前端只渲染字段、不
-// 自造一份 reason 码 → 文案的映射:那份映射与后端的闭集会各自演化,而先分叉的
-// 一定是"新加了一个原因码,前端静默显示成兜底文案"这一种——用户看到的是"检索
-// 结束",真正发生的事一个字都没说。收尾那条 skip 步不带这个字段,因为它的
-// `summary` 本身就是同一句话(轨迹已经把它显示在标题位)。
-//
-// 计数一律按 `typeof === "number"` 防御:历史 trace 没有这些键,`?? 0` 会把
-// "这条记录没有这个字段"渲染成"0 项未送达",而那是一句假话。
-//
-// 方面计数有**两种拼法**,因为写它们的是两个不同的步:检索收尾那条 skip 步记
-// `aspects` / `unresolved_aspects`(reasoning_retrieval 的 `_run_termination`),
-// 合成终步记 `aspects_total` / `aspects_pending`(ask_service / report_engine 经
-// `reasoning_aspects.termination_synthesis_detail`)。后者的键带前缀是因为它与
-// `aspects_undelivered` 等几个口径同处一个 detail,裸 `aspects` 在那里读不出是
-// 哪一个口径。这里按序取第一个是数字的,而不是在后端改名——那两个键已经在
-// T4-A 的用例里,改名会让"关闭态与历史 trace 逐字不变"这条红线失效。
-function firstNumber(
-  detail: Record<string, unknown>, ...keys: string[]
-): number | undefined {
-  for (const key of keys) {
-    if (typeof detail[key] === "number") return detail[key] as number;
-  }
-  return undefined;
-}
-
-function terminationParts(detail: Record<string, unknown>): string[] {
-  const parts: string[] = [];
-  const total = firstNumber(detail, "aspects_total", "aspects");
-  const pending = firstNumber(detail, "aspects_pending", "unresolved_aspects");
-  if (typeof total === "number" && typeof pending === "number" && total > 0) {
-    parts.push(`已处理 ${Math.max(0, total - pending)}/${total} 方面`);
-  }
-  const undelivered = detail.aspects_undelivered;
-  if (typeof undelivered === "number" && undelivered > 0) {
-    // 「未送达」= 模型说这个方面有支撑,但那些证据全被最终装配的预算/过滤挡在
-    // 了合成之外(§7.2)。它与「未处理」是两件事,所以另占一格而不是并进上面
-    // 那个分数——合起来说会让"模型判断"与"服务端送了什么"再也分不开。
-    parts.push(`${undelivered} 项未送达`);
-  }
-  const channels = detail.unrecovered_channels;
-  if (Array.isArray(channels) && channels.length) {
-    // 只报条数:通道名(add_subquery / ppr_retrieve …)是内部动作词,上屏只会
-    // 让用户去猜一个他们没有词汇表的东西;要排查的人在 detail 原文里读得到。
-    parts.push(`${channels.length} 条通道未恢复`);
-  }
-  return parts;
-}
-
 export function getTraceStepDetail(step: ReasoningTraceStep): string {
   const detail = step.detail ?? {};
   if (step.step_type === "plugin") {
@@ -268,13 +218,6 @@ export function getTraceStepDetail(step: ReasoningTraceStep): string {
     if (skipped.length) parts.push(`证据不足略过 ${skipped.length} 节: ${nameSections(skipped)}`);
     const ungrounded = sectionTitles(detail.ungrounded_sections);
     if (ungrounded.length) parts.push(`${ungrounded.length} 节依据不足: ${nameSections(ungrounded)}`);
-    // 检索结束事实(设计稿 §7.2)。**接在既有 parts 之后**:上面几项说的是这次
-    // 合成本身,这几项说的是"喂给它的检索是怎么结束的"——顺序即因果。reflect v2
-    // 关闭(默认)与所有历史 trace 都没有这些键,parts 一个都不追加,输出逐字
-    // 回到接入前。这里刻意不加横幅、不改布局:一次部分完成的检索不是错误。
-    const summary = detail.termination_summary;
-    if (typeof summary === "string" && summary) parts.push(summary);
-    parts.push(...terminationParts(detail));
     return parts.join(" · ");
   }
   if (step.step_type === "exact_lookup") {
@@ -299,16 +242,6 @@ export function getTraceStepDetail(step: ReasoningTraceStep): string {
     if (typeof detail.query === "string" && detail.query) parts.push(detail.query);
     if (typeof detail.found === "number") parts.push(`新增 ${detail.found} 段`);
     return parts.join(" · ");
-  }
-  // 检索收尾那条 skip 步(reflect v2,设计稿 §7.2)。它复用既有的 `skip` 类型 +
-  // 一个稳定原因码,不新增 step_type。**排在下面 `detail.pending` 那条之前是防御性
-  // 的**:两条分支的 detail 形状眼下不相交(收尾步不带 `pending`),所以现在换个
-  // 顺序也不会改变任何一次渲染;之所以仍然写在前面,是因为哪天收尾步的 detail 多
-  // 出一个 pending 键,靠后就会被那条按 `pending` 判的分支静默渲染成"N 个方向未
-  // 执行"——一句关于另一件事的假话。
-  // 结束原因本身不在这里复述——它已经是这一步的 `summary`(标题位)。
-  if (step.step_type === "skip" && detail.reason === "retrieval_termination") {
-    return terminationParts(detail).join(" · ");
   }
   if (step.step_type === "skip" && typeof detail.pending === "number") {
     // 步骤预算不足时未能执行的已确认检索方向数。summary 已逐条列出(有界),
@@ -346,20 +279,7 @@ export function getTraceStepDetail(step: ReasoningTraceStep): string {
   return "";
 }
 
-// 一条轨迹步的界面标签。默认就是 `TRACE_STEP_LABELS` 那张表,**唯一的例外**是
-// 检索收尾那条步(设计稿 §7.2):它复用 `skip` 这个 step_type,但「跳过」说的是
-// "这一步没做",而它恰恰是这次检索**做完了**的那一刻——标签得说「结束」。
-//
-// `TRACE_STEP_LABELS.skip` 一个字不动:真正被跳过的那些步(重复子查询、达次数
-// 上限、范围不允许)仍然叫「跳过」。共用一个 step_type 不等于共用一个标签,而
-// 给收尾步单开一个 step_type 会改后端的既有键集(关闭态与历史轨迹的红线)。
-// 判据(`detail.reason === "retrieval_termination"`)与 `getTraceStepDetail` 里
-// 那条完全同源,不另立第二份口径。
 export function getTraceStepLabel(step: ReasoningTraceStep): string {
-  const detail = step.detail ?? {};
-  if (step.step_type === "skip" && detail.reason === "retrieval_termination") {
-    return "结束";
-  }
   return label(TRACE_STEP_LABELS, step.step_type, "处理中");
 }
 

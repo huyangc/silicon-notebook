@@ -267,15 +267,6 @@ def test_l2_blocks_backward_every_matching_parameter_is_declared():
     tuple, so a function cannot silently gain (or keep) a data-injection
     parameter that L2_BLOCKS does not know about.
 
-    Aliases are what make this guard reach ``reflect_v2_prefix_user_prompt``,
-    whose data seam is named ``material`` (review P3-8): matching on
-    ``block_id`` alone left that whole function — and any injection slot
-    later added to it — outside every mechanical check, registered in prose
-    only.
-
-    Mutation: drop ``"material"`` from ``candidates_summary``'s
-    ``param_aliases``, or drop ``reflect_v2_prefix_user_prompt`` from its
-    ``prompts``, and this test goes red.
     """
     for name, func in _public_prompt_functions().items():
         params = inspect.signature(func).parameters

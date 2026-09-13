@@ -3,20 +3,8 @@
 一格通常就是一行;重试过的调用另有几行 `join="retry"` 的尝试行陪着它,那几行
 不占格子(见 `RETRY_STATUS` 与 `join_calls`)——数调用要数格子,不要数行。
 
-设计真源:`docs/superpowers/specs/2026-09-09-reflect-prefix-cache-final-design_zh.md`
-§8.1「单次调用」那一行(本地序号、所属臂/run、`call_wall_ms`、状态码、已知重试
-次数、响应字符数)与 §11「核心纯分析放 `backend/app/eval/reflect_context_bench.py`,
-CLI 保持薄适配」。
-
-**这个模块纯逻辑、零 I/O、零模型**:输入是两串已经解析好的记录(行列表),输出
-是一串行。文件怎么找、按天分了几份、偏移读到哪里,全是 `scripts/reflect_shadow_rig.py`
-的事;分开之后「日志 ⋈ 事件」这件唯一容易写错的事能在标准门里用 fixture 钉住,
-而不必起一台真实模型服务。
-
-分工与 `reflect_ab.slice_llm_usage` 的边界:那一个按**时间窗**把一批日志行压成
-一个 run 的成本三键(run 粒度、聚合);这一个按 `support_id` 把日志行与调度事件
-**对上号**(call 粒度、不聚合)。两者读的是同一批文件,回答的不是同一个问题,
-不要互相代入。
+This module is pure: it joins already parsed provider logs and scheduler
+records by support_id. File discovery and JSONL writing belong to the CLI.
 
 **`None` 是一等值**(沿用 T0 §4.1):对不上号、日志缺字段、provider 不回 usage,
 一律 `None` = unknown,**绝不折成 0**——0 会被读成「这次调用没有重试 / 没有缓存
@@ -90,16 +78,16 @@ USAGE_INT_FIELDS: tuple[str, ...] = (
 #: 从调度事件取的整数列。
 EVENT_INT_FIELDS: tuple[str, str] = ("queue_latency_ms", "execution_latency_ms")
 
-#: 调用方按 run 打的标签列(实验控制维度,§8.1 最后一行)。缺一律 `None`
+#: 调用方按 run 打的诊断标签列。缺一律 `None`
 #: ——并发跑批时 run→call 的归因不成立,那时这几列**必须**是 unknown 而不是
-#: 某个看起来合理的臂名。
+#: 某个猜测的 run。
 CALL_TAG_KEYS: tuple[str, ...] = (
-    "arm", "optimization", "question_key", "corpus_cell", "effort", "repeat",
+    "question_key", "corpus_cell", "effort", "repeat",
 )
 
-#: `calls-<arm>.jsonl` 每一行允许出现的**全部**顶层键。隐私守卫按它断言
+#: `calls.jsonl` 每一行允许出现的**全部**顶层键。隐私守卫按它断言
 #: `set(row) ⊆` 这个集合,所以往行里加一个 prompt / response 片段会直接把用例
-#: 打红(与 `reflect_ab.AB_PROJECTION_KEYS` 同一条纪律)。
+#: 打红(遵循通用投影闭集纪律)。
 CALL_ROW_KEYS: frozenset[str] = frozenset({
     "call_index", "support_id", "join",
     "kind", "status", "finish_reason",
@@ -211,7 +199,7 @@ _EVENT_ONLY_UNKNOWN = {
 
 
 def _tag_columns(tags: Mapping | None) -> dict:
-    """实验控制维度那几列。给了什么就是什么,没给就是 unknown。"""
+    """Run labels supplied by the caller; absent labels stay unknown."""
     given = tags or {}
     return {key: given.get(key) for key in CALL_TAG_KEYS}
 

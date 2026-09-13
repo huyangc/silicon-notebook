@@ -708,48 +708,8 @@ def test_payload_reason_gets_its_own_label():
     assert "partial: payload limit" in preview.text
 
 
-def test_oversize_sample_reason_never_reads_as_a_spent_run_budget():
-    """规模守卫的第四个原因码在合成 prompt 里必须与「额度用光」区分开。
-
-    这两句对写答案的模型意味着完全不同的下一步:额度用光 ⇒ 这一轮没地方了;
-    远超额度 ⇒ 再翻也没用,该按计数 + 样本作答并建议收窄。落回 `run budget`
-    (或落回兜底的原始 token)都会把后者说成前者。
-
-    变异:把 `_REASON_LABELS` 里的 `oversize_sample` 那一项删掉 ⇒ 措辞退回
-    裸代号 `partial: oversize_sample`,这条红。
-    """
-    from app.services.collection_enumeration import TRUNCATED_OVERSIZE_SAMPLE
-
-    outcome = _outcome(
-        collection="sources", kind="", items=[_source_item()],
-        coverage=_coverage(returned=50, returned_total=50, scanned=50,
-                           total=48_839, complete=False,
-                           truncated_reason=TRUNCATED_OVERSIZE_SAMPLE))
-    preview = enumeration_prompt_block([outcome], inline_rows=100,
-                                       budget_chars=10_000)
-    assert "listed 50/48839, partial: collection far larger than the run " \
-           "allowance; one sample page only" in preview.text
-    assert "run budget" not in preview.text
-    assert "oversize_sample" not in preview.text     # 内部代号不上 prompt
 
 
-def test_oversize_sample_reason_travels_onto_the_result_card():
-    """结果卡读的是 wire 模型上的那一格,原因码必须原样送到前端。
-
-    变异:`_typed_coverage` 漏抄 `truncated_reason` ⇒ 卡上退回泛化的「部分结果」,
-    这条红。
-    """
-    from app.services.collection_enumeration import TRUNCATED_OVERSIZE_SAMPLE
-
-    outcome = _outcome(
-        collection="sources", kind="", items=[_source_item()],
-        coverage=_coverage(returned=50, returned_total=50, scanned=50,
-                           total=48_839, complete=False,
-                           truncated_reason=TRUNCATED_OVERSIZE_SAMPLE))
-    [result] = typed_collection_results([outcome], payload_chars=PAYLOAD_LIMIT)
-    assert result.coverage.truncated_reason == TRUNCATED_OVERSIZE_SAMPLE
-    assert result.coverage.complete is False
-    assert result.coverage.total == 48_839
 
 
 def test_denominator_unknown_never_renders_as_slash_zero():

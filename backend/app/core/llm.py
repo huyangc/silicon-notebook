@@ -1,11 +1,9 @@
-import contextvars
 import httpx
 import random
 import re
 import time
-from contextlib import contextmanager
 from datetime import datetime
-from typing import Any, Callable, Dict, Iterator, List, Literal, Optional
+from typing import Any, Callable, Dict, List, Literal, Optional
 
 from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI
 
@@ -212,79 +210,6 @@ def cap_kwargs(client: Any, attr: str) -> Dict[str, Any]:
     return budget_kwargs(getattr(client, "settings", None), attr)
 
 
-#: OFFLINE EXPERIMENT SEAM, default off. Holds ``(head, tail)`` marker strings
-#: for the E1 prefix-sensitivity probe (design §9.1), or ``None`` — which is
-#: what every production path reads, because nothing anywhere under
-#: ``backend/app`` except ``app/eval/`` (the probe harness) may import this or
-#: the scope below (there is a negative-import assertion in
-#: ``backend/tests/test_llm_client.py`` covering the WHOLE tree, not a layer
-#: whitelist, saying so, and an AST assertion that ``.set()`` happens in
-#: exactly one place: the context manager underneath).
-#:
-#: A ContextVar rather than a ``chat_json`` keyword because a public transport
-#: signature must not grow an "experiment injection slot": ``ScheduledJsonChat
-#: Client.chat_json`` enumerates its parameters item by item and would have to
-#: forward one, and design §9.1 refuses request-level injection outright. Being
-#: a ContextVar also means the value follows the call across any dispatch that
-#: EXPLICITLY copies the context — ``model_provider`` running the submission
-#: inside ``submission_context.run`` (built from ``contextvars.copy_context()``),
-#: or a job handed to ``app/services/background_jobs.py``'s ``submit`` (same
-#: mechanism) — so the seam holds under those two paths without anyone
-#: threading an argument through. That is a property of those call sites, not
-#: of ``chat_json`` in general: a private worker thread started WITHOUT
-#: ``copy_context()`` — ``app/extensions/gap_consult.py`` is the one that
-#: exists today — does not see whatever marker is armed on the thread that
-#: started it.
-#:
-#: The marker values are locally allocated fixed-width short codes with no
-#: semantics. They exist so a probe can vary WHICH part of a request is stable
-#: between consecutive calls while the body and the output task stay identical;
-#: nothing here observes, reports or infers provider cache behaviour.
-_EXPERIMENT_MARKERS: "contextvars.ContextVar[Optional[tuple[str, str]]]" = (
-    contextvars.ContextVar("llm_experiment_message_markers", default=None)
-)
-
-
-@contextmanager
-def experiment_message_markers(head: str, tail: str) -> Iterator[None]:
-    """Open the E1 marker seam for the duration of the block (offline only).
-
-    The ONLY place ``_EXPERIMENT_MARKERS`` is set. Inside the block every
-    ``chat_json`` on this context sends ``head`` as its own system message
-    ahead of the wrapper and ``tail`` appended to the last message's content;
-    outside it, ``provider_messages`` returns byte-for-byte what it returned
-    before this seam existed.
-
-    Both ``head`` and ``tail`` must be non-empty ``str``; anything else raises
-    ``ValueError`` before the seam is armed. The control-arm / disturbed-arm
-    contrast a probe measures can ONLY be expressed by which end is inside
-    this block versus outside it — never by a marker's own value — so an
-    empty string is not a quieter way to say "closed": it would still arm the
-    seam, still cost a ContextVar read on this path, and still make every
-    call inside the block collide on the SAME ``llm_key`` regardless of what
-    the caller thought it was varying. A caller that would otherwise pass
-    ``""`` or a non-``str`` has a bug in the probe script, and that should
-    fail loudly at the ``with`` statement rather than quietly send requests
-    that look marker-free to everything downstream.
-
-    Reset happens in a ``finally``, so an exception inside the block cannot
-    leave a marker armed for whatever runs next on this context — the failure
-    mode that matters here, since a leaked marker does not crash anything: it
-    silently appends two meaningless segments to every subsequent request and
-    makes ``llm_key`` differ on each one (defeating the local response cache
-    wholesale) while every log line still looks entirely normal.
-    """
-    if not isinstance(head, str) or not head:
-        raise ValueError("experiment_message_markers: head must be a non-empty str")
-    if not isinstance(tail, str) or not tail:
-        raise ValueError("experiment_message_markers: tail must be a non-empty str")
-    token = _EXPERIMENT_MARKERS.set((head, tail))
-    try:
-        yield
-    finally:
-        _EXPERIMENT_MARKERS.reset(token)
-
-
 #: The wrapper system message this client puts in front of every caller's
 #: messages. Spelled once, here, because two places must agree on it byte for
 #: byte: what actually goes on the wire, and what any measurement of the
@@ -299,150 +224,20 @@ _PROVIDER_WRAPPER_PREFIX = (
 def provider_messages(
     messages: List[Dict[str, str]],
     response_schema_hint: str,
-    markers: Optional[tuple[str, str]] = None,
 ) -> List[Dict[str, str]]:
-    """The exact message list this client sends to the provider: the wrapper
-    system message (role brief + schema hint) followed by the caller's own
-    messages.
+    """Assemble the exact provider message list without changing caller data.
 
-    Pulled out of ``chat_json`` as a module-level PURE function — no I/O, no
-    client state, no ``self`` — so a measurement layer can reconstruct what a
-    call would put on the wire without issuing it, and, more importantly, so
-    there is exactly ONE assembly: ``chat_json`` calls this rather than keeping
-    a second copy in sync with it. A duplicated wrapper would drift silently and
-    every prefix/cache-key number computed off the copy would be measuring a
-    message sequence that was never sent.
-
-    Returns a fresh list; the caller's own message mappings are passed through by
-    reference (this function never mutates them).
-
-    Scope: this is THIS client's wrapper. ``app/services/kg/client.py`` keeps a
-    second, hand-written copy of the same system message for the KG extraction
-    transport, which does not go through ``OpenAICompatibleClient`` at all and is
-    not covered by this function or by anything measured on top of it. That copy
-    is a known duplicate, deliberately left where it is; a measurement of the KG
-    path would have to account for it separately rather than assume this one.
-
-    ``markers`` is the offline E1 seam (see ``_EXPERIMENT_MARKERS``) and is
-    ``None`` on every production path, where the first branch below returns the
-    same expression this function has always returned. That is a contract, not
-    a hopeful description: ``provider_messages(m, h)`` and
-    ``provider_messages(m, h, markers=None)`` are byte-identical to each other
-    and to the pre-seam function, and the tests keep an independent
-    transcription of that expression so a drift here cannot pass.
-
-    With markers supplied, ``head`` becomes its own system message at index 0
-    — AHEAD of the wrapper, so the wrapper and everything behind it keep their
-    byte offsets across a series — and ``tail`` is appended to the LAST
-    message's content. The tail lands on a COPY of that mapping, so the
-    never-mutates promise above covers the marker path too: the probe reuses
-    ONE fixed body across a whole series, and mutating it would accumulate
-    markers into that body, turning "same body, different marker" (the only
-    thing the probe varies) into "a body that grows every call". Every other
-    message is still passed through by reference.
-
-    Appending rather than starting a second message keeps the message COUNT at
-    the marker-free count plus exactly one (the head), so "one extra tail
-    message" cannot become a variable of its own (design §9.1). With an empty
-    ``messages`` the wrapper IS the last message and takes the tail; that
-    degenerate input does not arise in the probe, and appending to the
-    genuinely-last message is the honest reading of it either way.
+    The fixed JSON wrapper and schema precede the caller's messages. Cache
+    keys, interaction logs and transport share this assembly; caller message
+    mappings pass through by reference and are never mutated here.
     """
-    if markers is None:
-        return [
-            {
-                "role": "system",
-                "content": f"{_PROVIDER_WRAPPER_PREFIX}{response_schema_hint}",
-            },
-            *messages,
-        ]
-    head, tail = markers
-    marked = [
-        {"role": "system", "content": head},
+    return [
         {
             "role": "system",
             "content": f"{_PROVIDER_WRAPPER_PREFIX}{response_schema_hint}",
         },
         *messages,
     ]
-    last = dict(marked[-1])
-    last["content"] = f"{last.get('content') or ''}{tail}"
-    marked[-1] = last
-    return marked
-
-
-def serialize_provider_messages(messages: List[Dict[str, str]]) -> bytes:
-    """Deterministic UTF-8 serialization of a provider-facing message list,
-    for byte-level structural comparison (e.g. how much of turn N's request is a
-    literal prefix of turn N+1's).
-
-    Framing is length-SUFFIXED — each field goes out as ``<bytes>:<byte
-    length>:`` — rather than delimiter-separated, because the payload is
-    untrusted model input: any separator drawn from the text alphabet can be
-    written INTO a message body, and a body that forges a boundary would move the
-    apparent field split and silently corrupt the numbers computed on top of
-    this. A decimal length cannot be forged from inside the bytes it counts,
-    because it is only ever read from a position fixed by the parse, not searched
-    for in the text.
-
-    The length trails its field rather than leading it, and that ordering is the
-    whole point of this shape. The measured question is "how much of turn N's
-    request is a literal prefix of turn N+1's", and under the layout this client
-    actually sends (one system message plus ONE long user message whose tail is
-    the only part that changes per turn) a LEADING length would put a header
-    that depends on the tail in front of the thousands of identical bytes it
-    counts: change the tail's length by one byte and the common prefix collapses
-    at that header, reporting ~0 shared bytes for two requests that share nearly
-    all of them.
-    With the length behind its field, divergence can only land where the bytes
-    themselves first differ.
-
-    Injectivity is preserved (nothing is lost by moving the length): the byte
-    string is uniquely decodable RIGHT to LEFT. The stream ends with ``:``;
-    scanning backwards over the decimal digits before it yields ``n``, the ``:``
-    before those digits closes the field, and the ``n`` bytes before that ARE the
-    field — then the same step repeats for the field to its left. Every
-    structural byte is located by counting from an end, never by searching the
-    payload, so no content can move a boundary.
-
-    Only ``role`` and ``content`` participate, in that order, in list order; a
-    missing field serializes as empty. The result is a plain concatenation of
-    per-message frames, so the serialization of any leading slice of ``messages``
-    is a literal byte prefix of the whole — which is what makes a common-prefix
-    length meaningful. Per message the framing costs a fixed
-    ``len(role) + len(str(len(role))) + len(str(len(content))) + 4`` bytes on top
-    of the payload; all of it precedes ``content`` except that content's own
-    length and the two colons around it, which trail it. This is a client-side
-    structural metric only: it is NOT a provider cache key and says nothing about
-    what the provider actually reused.
-
-    A non-mapping element raises rather than serializing as empty: for a
-    measurement function, silently emitting plausible-looking bytes for input it
-    did not understand is worse than failing.
-
-    Encoding uses ``surrogatepass``, which makes this ruler TOTAL over ``str``.
-    Strict UTF-8 is not: ``json.loads`` accepts ``"\\ud800"`` and hands back a
-    Python ``str`` holding a LONE SURROGATE, so a model response can carry one
-    into the next turn's message body, where a strict ``.encode("utf-8")`` would
-    raise. Raising there would let a measurement decide whether a request gets
-    made at all — the one thing a measurement must never be able to do.
-    ``surrogatepass`` emits such a code point as its three-byte WTF-8 form, which
-    keeps this serialization deterministic, injective and length-consistent (the
-    trailing length counts the bytes actually emitted) for exactly the same
-    reasons the rest of the framing holds. It changes nothing a provider ever
-    sees: this byte string exists only to be measured, and nothing sends it.
-    """
-    out = bytearray()
-    for message in messages:
-        for field in ("role", "content"):
-            raw = message.get(field, "")
-            blob = ("" if raw is None else str(raw)).encode(
-                "utf-8", errors="surrogatepass")
-            out += blob
-            out += b":"
-            out += str(len(blob)).encode("ascii")
-            out += b":"
-    return bytes(out)
 
 
 #: Name of the optional OUT-parameter a caller may pass to ``chat_json`` to get
@@ -750,32 +545,8 @@ class OpenAICompatibleClient:
         if not self.configured:
             raise RuntimeError("OpenAI-compatible LLM settings are not configured")
         raise_if_cancelled(cancel_event)
-        # Single assembly point (see provider_messages). With the seam CLOSED
-        # (the default), what goes on the wire, what feeds the cache key, and
-        # what `reasoning_retrieval`'s measurement layer reconstructs
-        # (`provider_messages(messages, schema_hint)`, no `markers` kwarg) all
-        # agree — same list, same pure function.
-        #
-        # With the seam OPEN that agreement narrows to two: the measurement
-        # layer's call above still omits `markers`, so it still reconstructs
-        # the MARKER-FREE list rather than what actually went out. That is a
-        # deliberate choice, not a gap this file is meant to close — the E1
-        # probe reads its own per-call numbers off `call_stats` / the
-        # interaction log, never off a reconstruction, so the measurement
-        # layer never needed a `markers` parameter of its own.
-        #
-        # The ContextVar read is the whole cost of the E1 seam on this path, and
-        # it resolves to None everywhere except inside an offline probe's
-        # `experiment_message_markers` block; `provider_messages` then returns
-        # its pre-seam expression. Read HERE, at the one assembly point, so both
-        # markers land in `full_messages` and therefore in all three of its
-        # consumers below — the cache key, the interaction log and `.create()`.
-        # The cache key matters most: a probe arm that varies its head marker
-        # per call must get a different `llm_key` each time, or the local
-        # response store could answer a call the probe believes it timed.
-        full_messages = provider_messages(
-            messages, response_schema_hint, markers=_EXPERIMENT_MARKERS.get()
-        )
+        # Cache keys, logging and transport use the same message assembly.
+        full_messages = provider_messages(messages, response_schema_hint)
         model = self.model
         # Some OpenAI-compatible models accept only one provider-defined
         # nucleus-sampling value (for example top_p=0.95).  A physical-service

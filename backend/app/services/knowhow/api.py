@@ -2112,17 +2112,6 @@ def complete_row(
         #      failure inside the seed pass propagates and escalates into a
         #      failure of the whole completion instead of a missing channel.
         reasoning_retriever.allow_search_chunks = False
-        # The reflect v2 protocol (design doc 2026-09-07) is deliberately NOT
-        # extended to completion in this phase. Spelling it out here rather
-        # than relying on a coincidence is the point: completion happens to
-        # turn off half the action space already, and one might argue that
-        # makes the new capability projection harmless — but "harmless by
-        # accident" is exactly how a channel gets switched on by a later,
-        # unrelated edit. The v2 payload and its stopping rule were never
-        # validated against this profile's JSON-envelope query, and completion
-        # runs `fail_closed=True`, where a rejected reflection escalates into a
-        # failed completion rather than a lost turn.
-        reasoning_retriever.allow_reflect_v2 = False
         reasoning_retriever.untrusted_evidence = True
         reasoning_result = reasoning_retriever.run(
             notebook_id,
