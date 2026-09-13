@@ -2031,6 +2031,26 @@ frame、blueprint 或 claims 账本缺失/畸形时会丢弃新增结构，回�
 
 数值上限：插件可观测事件白名单恰好 4 个字段（`event`/`outcome`/`count`/`elapsed_ms`）；`count`/`elapsed_ms` 必须是 `0..1e9` 区间的整数；稳定码（事件名、outcome，或发现/挂载拒绝 reason）最长 64 字符；每个插件最多声明 1 个 HTTP 路由贡献。新插件接入 SOP——写后端 bundle 与构建期 UI 包、本地联调、打包、安装、启动校验、升级/回滚，以及完整拒绝码表：[部署插件 SOP](./deployment-extensions-sop_zh.md)。
 
+### 来源元素补全（`source.element_enricher`）
+
+新增生产扩展点，让部署插件在一份来源刚解析出的元素落库之前，给它们加上机器判断出的细节——任意结构化 metadata，外加一段可选的说明文字。与 `ask.gap_consult`（用笔记本从不拥有的资料给答案添砖加瓦）不同，这个点补全的是笔记本自己已有的持久化元素：schema 归 core 所有（`metadata.extensions[<contribution_id>]`，外加追加进 `description`/`text`），插件只负责往里填值。
+
+**挂点**：宿主挂在 `SourceIngestionService` 每来源流水线内，排在页边界去重之后、写事务开启之前——正是 chunk 流水线接下来要读的那一代元素，不是晚一拍的补丁，所以插件写的说明文字既满足图片/图表元素的 chunk 准入门，又在同一次提交里经元素自己的 `text` 进入全文检索。没有注册任何 `source.element_enricher` 插件的部署是严格 no-op：零时钟读取、零探测调用、零事件。
+
+**贡献能看到什么、能写回什么**：每个 contribution 拿到这份来源全部解析元素的只读视图——`element_type`、`location_label`、`text`、`caption`、`description`，以及已经落盘一张图片的元素额外带的 `asset_id`/`asset_mime`——绝不给解析器内部 metadata 映射、repository 或 settings。图片字节按需经一个只在**该 contribution 本轮**内有效的 reader 读取：它只持有调用线程在任何插件跑之前就解析好的文件路径，因此 worker 线程零数据库访问，单张图片绝不会超过与 MinerU 共用的单图字节上限（`MINERU_MAX_IMAGE_BYTES`），超过该上限、未知元素或本轮已结束之后的读取一律答 `None`、绝不抛异常。一条候选指名一个已展示过的元素，携带 `metadata`（JSON 形状，键匹配 `^[a-z][a-z0-9_]{0,63}$`，嵌套深度受 `ELEMENT_ENRICHMENT_METADATA_MAX_DEPTH` 约束）与可选的 `description`。准入后，`metadata` 写进被补全元素的 `metadata.extensions[<contribution_id>] = {"plugin_id", "plugin_version", "metadata"}`；非空 `description` 追加进元素既有的 `description`（已有则用 `"\n\n"` 拼接）；写进可检索 `text` 的方式按元素类型分支——非结构化元素（首先是 image，这正是这个点真正要补全的类型）把说明文字压平空白后以空格拼接进既有 `text`；`code_block`/`table` 元素保留自己的行结构，说明文字换行后**原文**追加、不压平。两个 contribution 补全同一元素时各写各的 key，按到达顺序依次追加。旧契约（已退役）的 `caption` 改写没有复活——插件绝不写 `caption`。
+
+**预算与 fail-open**：Contribution kind 为 `CONTRIBUTOR`。宿主把一次已注册 contribution 的可用性探测与它的 `enrich()` 调用一起放进一条私有 daemon 线程——不用线程池，也不 `contextvars.copy_context()`——受一个覆盖整次调用的硬墙钟 deadline（`SOURCE_ELEMENT_ENRICHER_TIMEOUT_SECONDS`）约束；因为这个点跑在解析作业内而不是交互式请求内，默认值与上限是分钟级而不是秒级。花光预算的 contribution 会被放弃并**结束整个扩展点**——后续 contribution 不再启动；抛异常的 contribution 则是 fail-open、被跳过，下一个照常运行。准入（元素身份、metadata 形状与深度、说明文字字符数、候选条数、每 contribution 落库字节）只在 contribution 返回之后才检查；任一违规都会丢弃**该 contribution 整批**，不影响其它 contribution 的产出。服务层里，宿主抛异常或补丁畸形同样会丢弃整批，来源的元素保持解析原样，同时在摄取流水线自己的事件流上记一个稳定的拒绝码（绝不带 settings 值、路径或 id），让运维分得清「没有任何提案」和「整批被丢弃」的区别；settings 值读取失败，或组装这次调用时抛出的其它任何异常，走的不是拒绝码，而是 `enrich` 这一阶段自己的 `error` 状态外加异常类名（绝不带异常原文）——同样让元素保持解析原样。
+
+| 上限 | 取值 |
+| --- | ---: |
+| `SOURCE_ELEMENT_ENRICHER_TIMEOUT_SECONDS`（默认值；部署可配，`0 < x ≤ 900`） | 120.0 |
+| `SOURCE_ELEMENT_ENRICHER_MAX_PROPOSALS`（默认值；部署可配，`1..25,000`） | 2,048 |
+| `SOURCE_ELEMENT_ENRICHER_MAX_METADATA_BYTES`（默认值；部署可配，`1,024..16,777,216`） | 1,048,576 |
+| `SOURCE_ELEMENT_ENRICHER_MAX_DESCRIPTION_CHARS`（默认值；部署可配，`1..65,536`） | 8,192 |
+| `EXTENSION_OWNER_ID_MAX_CHARS`（结构常量，非部署可配） | 128 |
+| `EXTENSION_OWNER_VERSION_MAX_CHARS`（结构常量，非部署可配） | 64 |
+| `ELEMENT_ENRICHMENT_METADATA_MAX_DEPTH`（结构常量，非部署可配） | 12 |
+
 ### 部署问答引擎（`ask.engine`）
 
 结果准入产生的降级步骤必须经同一个 core-owned 轨迹回调追加并实时发送，且不带
