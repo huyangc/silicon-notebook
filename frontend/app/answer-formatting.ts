@@ -22,7 +22,14 @@ export type AnswerAnchorLike = {
   location_label?: string;
   source_id?: string;
   element_id?: string;
+  // `personal` | `base` | `external`。第三个取值是 reflect 插件动作
+  // (`ask.reflect_action`) 带回的库外材料。
   tier?: string;
+  // 外部证据(`ask.reflect_action`)的原文链接。后端 exclude_if 惯例:空串整键缺席,
+  // 所以库内证据的 payload 一个字节都不多。非空当且仅当 object_type/tier 都是
+  // "external"(设计文档 §九 不变量 3),此时 source_id/element_id 恒为空。渲染层
+  // 只对 http/https 渲染成可点链接(同 §九 不变量 8)。
+  url?: string;
   // 检索结果带图(T1/T2)：与 CitationLike.images 同一惯例——只在绑定证据含带图注
   // 图片元素时非空,旧答案/无图引用整体缺席这个字段。渲染层(SelectedReferenceDetail)
   // 二选一读取,与 knowhow/notebook_id 的 anchor 优先、citation 兜底顺序一致。
@@ -48,7 +55,10 @@ export type CitationLike = {
   location_label: string;
   quoted_span: string;
   source_file_name?: string;
+  // `personal` | `base` | `external`，见 AnswerAnchorLike.tier。
   tier?: string;
+  // 外部证据的原文链接，惯例与不变量见 AnswerAnchorLike.url。
+  url?: string;
   // 检索结果带图(T1/T2)：命中的引用才有此字段，非命中/旧答案整体缺席，见
   // AnswerAnchorLike.images 的完整注释。
   images?: CitationImageLike[];
@@ -124,22 +134,31 @@ export function buildAnswerReferences(
 
 // Source-tier distribution for this answer's badge. Partitions the SAME references the
 // user actually sees (the `[k]` list from `buildAnswerReferences`) by tier, so
-// `personal + base` ALWAYS equals the reference count — it can never exceed what's shown.
+// `personal + base + external` ALWAYS equals the reference count — it can never exceed
+// what's shown.
 // (The previous impl summed `anchors ∪ citations` — two overlapping views of the same
 // chunks keyed on different id spaces, object_id vs source_id — so a source present in
 // both got counted twice, inflating base and producing totals above the visible count,
 // e.g. "个人 15 · 基准库 7 = 22" for a 15-reference answer.) Unset/unknown tier counts as
 // "personal" (matches the backend's `Citation.tier` / `AnswerAnchor.tier` default),
 // mirroring the report-mode badge whose `personal = total − base` can never over-count.
+//
+// `external` 是第三个桶（`ask.reflect_action` 带回的库外材料，设计文档 §6.3）：它
+// **必须**从 personal 里减出去，否则库外条目会被算成「个人知识库」——那是把库外
+// 内容说成笔记本内容，正是 §九 不变量 3 要挡的那件事。`personal` 仍写成减法而不是
+// 第三个计数器，「未知 tier 当 personal」这条兜底才继续成立（后端新增第四个 tier
+// 时最坏是少一个桶，不会错桶，见 §6.3 末段）。
 export function computeSourceTierCounts(
   references: AnswerReference[],
-): { personal: number; base: number } {
+): { personal: number; base: number; external: number } {
   let base = 0;
+  let external = 0;
   for (const reference of references) {
     const tier = reference.anchor?.tier ?? reference.citation?.tier;
     if (tier === "base") base += 1;
+    else if (tier === "external") external += 1;
   }
-  return { personal: references.length - base, base };
+  return { personal: references.length - base - external, base, external };
 }
 
 export function referenceByAnchorKey(references: AnswerReference[]): Record<string, AnswerReference> {

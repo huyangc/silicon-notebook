@@ -51,3 +51,33 @@ test("未知 tier 值即便带库名,tier 一段仍走兜底,不拼出裸枚举�
   const text = tierBadgeVisibleText("nonsense-tier", "某个库");
   assert.equal(text, "来自「某个库」（未知来源）");
 });
+
+// ——— 外部证据（ask.reflect_action，设计文档 §6.3：tier 取值集扩为
+// personal|base|external）———
+//
+// 引用卡本身**不**给外部证据渲染这枚 tier 徽章（头上那枚类型标记已经写着「外部」，
+// 两枚并排会读成两个不同的事实）。这里钉的是词表这一侧：TIER 少这一行，所有
+// `label(TIER, …)` 调用点都会把一条来路明确的引用兜底成「未知来源」——那句话读起来
+// 像出了故障。CrossLibraryBadge / knowhow-complete-logic 也读同一份表。
+test("external tier 有自己的界面词,不落到「未知来源」兜底", () => {
+  assert.equal(label(TIER, "external", "未知来源"), "外部来源");
+  assert.notEqual(TIER.external, TIER.personal);
+  assert.notEqual(TIER.external, TIER.base);
+});
+
+test("external tier 的可见文字不把库外材料说成个人/公共知识库", () => {
+  const text = tierBadgeVisibleText("external", undefined);
+  assert.equal(text, "外部来源");
+  assert.ok(!text.includes("个人知识库"));
+  assert.ok(!text.includes("公共知识库"));
+});
+
+// tier 徽章的 **title**（hover 提示）此前是就地写死的
+// `tier === "base" ? "公共知识库" : "个人知识库"` 三元式，对第三个取值会拼出
+// 「来自个人知识库」这句**反向错误**的话（库外材料被说成本人笔记本内容，正是
+// §九 不变量 3 要挡的那件事）。它现在改走同一份 TIER 词表。
+//
+// ⚠ 那条断言**不在这里**：在这个文件里重写一份 title 表达式再断言它，等于测试自己
+// 造了一份产品逻辑——把产品代码退回三元式，这里照样绿。真正的判据在
+// `tests/component/answer-external-reference.component.test.tsx`，从真实渲染出来的
+// DOM 上读 `title` 属性。这个文件只负责词表本身（label/TIER）。

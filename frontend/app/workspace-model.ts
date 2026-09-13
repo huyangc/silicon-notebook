@@ -418,8 +418,17 @@ export type AnswerAnchor = {
   location_label: string;
   source_id?: string;
   element_id?: string;
+  /** `personal` | `base` | `external`。第三个取值来自 reflect 插件动作
+   *  (`ask.reflect_action`) 带回的库外材料。 */
   tier?: string;
   notebook_id?: string;
+  /** 外部证据(`ask.reflect_action`，设计文档 §6.3)的原文链接。后端同 exclude_if
+   *  惯例（`Field(default="", exclude_if=lambda v: not v)`）——空串整键缺席，库内
+   *  证据的 payload 因此一个字节都不多。非空**当且仅当**
+   *  `object_type === "external"` 且 `tier === "external"`（§九 不变量 3），此时
+   *  `source_id`/`element_id` 恒为空。前端只对 http/https 渲染成可点链接
+   *  （§九 不变量 8）。 */
+  url?: string;
   /** 空数组同 exclude_if 惯例整体缺席；旧持久化答案缺这个键时按「无附图」回退。 */
   images?: CitationImage[];
 };
@@ -431,8 +440,14 @@ export type Citation = {
   location_label: string;
   quoted_span: string;
   source_file_name?: string;
+  /** `personal` | `base` | `external`。第三个取值来自 reflect 插件动作
+   *  (`ask.reflect_action`) 带回的库外材料。 */
   tier?: string;
   notebook_id?: string;
+  /** 外部证据(`ask.reflect_action`，设计文档 §6.3)的原文链接。惯例与不变量同
+   *  `AnswerAnchor.url`（exclude_if 空串整键缺席；非空 ⇔ `tier === "external"`
+   *  ⇔ `source_id`/`element_id` 为空）。 */
+  url?: string;
   /** 引用到的个人记忆(Memory)id；非空即代表这条引用来自私有记忆。后端同 exclude_if
    *  惯例只在非空时下发。会话分享弹窗据它统计"包含 K 条个人记忆摘录"的披露。 */
   memory_id?: string;

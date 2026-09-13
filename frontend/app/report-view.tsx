@@ -800,18 +800,33 @@ export function ReportCredibilitySummary({ report }: { report: ReportDetailT }) 
 /** 资料集中度与个人/公共来源口径共用 Ask 的显示引用统计。 */
 export function ReportCitationDistribution({ report }: { report: ReportDetailT }) {
   const summary = citationSummary(report);
-  const { personal, base } = computeSourceTierCounts(
+  // external 桶在报告里恒为 0：reflect 插件动作 v1 不接报告（设计文档 §一 非目标
+  // 第一条——报告逐节深挖一节一 run，外部调用次数会随节数放大，需要单独的预算
+  // 合同）。仍然显式解构并计进总数，是因为「总数 = 可见引用数」这条不变量属于
+  // computeSourceTierCounts 本身；漏掉一个桶会让某天真接上报告时这里静默少算。
+  const { personal, base, external } = computeSourceTierCounts(
     reportReferencesAsAnswerReferences(report.references || []),
   );
-  if (summary.independent == null && !summary.top1 && personal + base === 0) return null;
+  const cited = personal + base + external;
+  if (summary.independent == null && !summary.top1 && cited === 0) return null;
   return (
     <div className="report-source-dist" title="报告引证的资料数量与个人/公共来源分布">
       {summary.independent != null && <>可区分资料 {summary.independent}</>}
       {summary.top1 && <><span aria-hidden> · </span>最集中资料占 {summary.top1}</>}
-      {personal + base > 0 && (
-        <span className="tag source-dist" title="本次引用的来源分布（个人知识库 / 公共知识库）">
+      {cited > 0 && (
+        <span
+          className="tag source-dist"
+          // 与 answer-panel.tsx 的同一枚徽章逐字同形：title 只在真有库外引用时才
+          // 提「笔记本之外」。报告侧 external 恒为 0（v1 不接插件动作），所以这个
+          // 三元式实际总走后半——但两处徽章必须同形，否则哪天报告接上了，这里就是
+          // 一句与文案对不上的 hover 提示。
+          title={external > 0
+            ? "本次引用的来源分布（个人知识库 / 公共知识库 / 笔记本之外）"
+            : "本次引用的来源分布（个人知识库 / 公共知识库）"}
+        >
           来源 · 个人 {personal}
           {base > 0 && <> · <strong className="source-dist-base">公共 {base}</strong></>}
+          {external > 0 && <> · <strong className="source-dist-external">外部 {external}</strong></>}
         </span>
       )}
     </div>

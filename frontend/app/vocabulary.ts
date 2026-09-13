@@ -10,6 +10,10 @@
 export const TIER: Record<string, string> = {
   base: "公共知识库",
   personal: "个人知识库",
+  // external = reflect 插件动作(`ask.reflect_action`)带回的库外材料。它既不是
+  // 个人库也不是公共库,缺这一行会让所有 label(TIER, …) 调用点对它兜底成
+  // 「未知来源」——那句话读起来像出了故障,而这条引用的来路其实是确定的。
+  external: "外部来源",
 };
 
 export const PARSE_STATUS: Record<string, string> = {

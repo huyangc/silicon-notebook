@@ -141,7 +141,7 @@ test("computeSourceTierCounts partitions the displayed references by tier", () =
     { id: "a:k2", displayLabel: "[2]", anchor: { key: "k2", object_id: "ko-2", object_type: "chunk", label: "B", tier: "personal" } },
     { id: "c:1", displayLabel: "[3]", citation: { label: "C", source_id: "src-1", element_id: "e1", location_label: "p.1", quoted_span: "q", tier: "base" } },
   ];
-  assert.deepEqual(computeSourceTierCounts(references), { personal: 1, base: 2 });
+  assert.deepEqual(computeSourceTierCounts(references), { personal: 1, base: 2, external: 0 });
 });
 
 test("computeSourceTierCounts never sums above the reference count (regression: 个人15+基准库7=22>15)", () => {
@@ -161,8 +161,8 @@ test("computeSourceTierCounts never sums above the reference count (regression: 
     ],
   );
   const counts = computeSourceTierCounts(references);
-  assert.equal(counts.personal + counts.base, references.length); // 3, never 3+2
-  assert.deepEqual(counts, { personal: 2, base: 1 });
+  assert.equal(counts.personal + counts.base + counts.external, references.length); // 3, never 3+2
+  assert.deepEqual(counts, { personal: 2, base: 1, external: 0 });
 });
 
 test("computeSourceTierCounts treats missing/unknown tier as personal", () => {
@@ -170,11 +170,11 @@ test("computeSourceTierCounts treats missing/unknown tier as personal", () => {
     { id: "a:k1", displayLabel: "[1]", anchor: { key: "k1", object_id: "ko-1", object_type: "chunk", label: "A" } },
     { id: "c:1", displayLabel: "[2]", citation: { label: "C", source_id: "src-1", element_id: "e1", location_label: "p.1", quoted_span: "q" } },
   ];
-  assert.deepEqual(computeSourceTierCounts(references), { personal: 2, base: 0 });
+  assert.deepEqual(computeSourceTierCounts(references), { personal: 2, base: 0, external: 0 });
 });
 
 test("computeSourceTierCounts returns all zeros for empty input", () => {
-  assert.deepEqual(computeSourceTierCounts([]), { personal: 0, base: 0 });
+  assert.deepEqual(computeSourceTierCounts([]), { personal: 0, base: 0, external: 0 });
 });
 
 test("computeSourceTierCounts handles all-personal references", () => {
@@ -182,7 +182,46 @@ test("computeSourceTierCounts handles all-personal references", () => {
     { id: "a:k1", displayLabel: "[1]", anchor: { key: "k1", object_id: "ko-1", object_type: "chunk", label: "A", tier: "personal" } },
     { id: "a:k2", displayLabel: "[2]", anchor: { key: "k2", object_id: "ko-2", object_type: "chunk", label: "B", tier: "personal" } },
   ];
-  assert.deepEqual(computeSourceTierCounts(references), { personal: 2, base: 0 });
+  assert.deepEqual(computeSourceTierCounts(references), { personal: 2, base: 0, external: 0 });
+});
+
+// 外部证据（ask.reflect_action，设计文档 §6.3）：第三个桶。承重点是它**从 personal
+// 里减出去**——库外条目被算成「个人知识库」就是把库外内容说成笔记本内容，正是
+// §九 不变量 3 要挡的那件事。
+test("computeSourceTierCounts 把 external 单列一桶，不再混进 personal", () => {
+  const references = [
+    { id: "a:k1", displayLabel: "[1]", anchor: { key: "k1", object_id: "ko-1", object_type: "chunk", label: "A", tier: "personal" } },
+    { id: "a:k2", displayLabel: "[2]", anchor: { key: "k2", object_id: "ext:demo:1", object_type: "external", label: "B", tier: "external", url: "https://example.com/a" } },
+    { id: "a:k3", displayLabel: "[3]", anchor: { key: "k3", object_id: "ext:demo:2", object_type: "external", label: "C", tier: "external", url: "https://example.com/b" } },
+    { id: "a:k4", displayLabel: "[4]", anchor: { key: "k4", object_id: "ko-4", object_type: "chunk", label: "D", tier: "base" } },
+  ];
+  assert.deepEqual(computeSourceTierCounts(references), { personal: 1, base: 1, external: 2 });
+});
+
+test("computeSourceTierCounts 的三桶之和恒等于可见引用数（含 external）", () => {
+  const references = [
+    { id: "a:k1", displayLabel: "[1]", anchor: { key: "k1", object_id: "ko-1", object_type: "chunk", label: "A", tier: "external" } },
+    { id: "c:1", displayLabel: "[2]", citation: { label: "C", source_id: "", element_id: "", location_label: "", quoted_span: "q", tier: "external", url: "https://example.com/c" } },
+    { id: "c:2", displayLabel: "[3]", citation: { label: "D", source_id: "s", element_id: "e", location_label: "", quoted_span: "q" } },
+  ];
+  const counts = computeSourceTierCounts(references);
+  assert.equal(counts.personal + counts.base + counts.external, references.length);
+  assert.deepEqual(counts, { personal: 1, base: 0, external: 2 });
+});
+
+// citation 回退列表（答案里一个 [k] 标记都没有）同样要认出 external —— 引用卡的
+// 「外部」标记与打开链接都吊在这条上。
+test("computeSourceTierCounts 在 citation 回退路径上同样认 external tier", () => {
+  const references = buildAnswerReferences(
+    "没有任何 [kN] 标记的答案。",
+    [],
+    [
+      { label: "IEEE Xplore · 某篇论文", source_id: "", element_id: "", location_label: "", quoted_span: "摘录", tier: "external", url: "https://example.org/paper" },
+      { label: "本地资料", source_id: "s1", element_id: "e1", location_label: "p.1", quoted_span: "摘录" },
+    ],
+  );
+  assert.deepEqual(computeSourceTierCounts(references), { personal: 1, base: 0, external: 1 });
+  assert.equal(references[0].citation?.url, "https://example.org/paper");
 });
 
 test("maps display citation numbers to references for numeric model citations", () => {

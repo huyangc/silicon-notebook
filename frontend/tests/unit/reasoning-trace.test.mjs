@@ -840,3 +840,127 @@ test("labels the closing rerank step apart from every other step (T-BF6)", () =>
   // 「N 个候选」——一句关于另一件事的假话。
   assert.equal(getTraceStepDetail(step), "");
 });
+
+// ——— 插件提供的 reflect 动作（ask.reflect_action，设计文档 §五/§七）———
+//
+// 这一步是模型在 reflect 循环里**自己选调**的一个插件检索函数，产出以外部证据
+// 进合成、可被 [k] 引用。它与既有的两步都不同，三者的标签不能重名（同 rerank/
+// answer/synthesis 那条的理由：轨迹里出现两条读起来一样、说的却是两回事的步）。
+test("plugin_action 步有自己的标签，且与 plugin / gap_consult 分得开", () => {
+  const step = {
+    step_type: "plugin_action",
+    summary: "调用扩展检索 search_ieee：sic mosfet 阈值漂移，新增 2 条外部材料",
+    detail: {
+      plugin_id: "acme.ieee",
+      action: "search_ieee",
+      arguments: { query: "sic mosfet threshold drift", venue: "journal" },
+      found: 2,
+      result_keys: ["ext:acme.ieee:1", "ext:acme.ieee:2"],
+    },
+  };
+  assert.equal(getTraceStepLabel(step), "扩展检索");
+  assert.equal(getReasoningTraceSummary([step], true).latestLabel, "扩展检索");
+  assert.notEqual(TRACE_STEP_LABELS.plugin_action, TRACE_STEP_LABELS.plugin);
+  assert.notEqual(TRACE_STEP_LABELS.plugin_action, TRACE_STEP_LABELS.gap_consult);
+  assert.notEqual(TRACE_STEP_LABELS.plugin_action, TRACE_STEP_LABELS.retrieve);
+});
+
+// §九 不变量 1 的界面落点：外泄面 = 问题 + 模型写的参数，而参数必须逐字摆给用户
+// 看。落到通用 `detail.found` 分支会只剩「新增 2」，把动作名与发出去的参数一起
+// 吞掉——那正是这条断言要挡的回归。
+test("plugin_action 的 detail 逐字披露动作名与参数，再报新增条数", () => {
+  assert.equal(
+    getTraceStepDetail({
+      step_type: "plugin_action",
+      summary: "",
+      detail: {
+        plugin_id: "acme.ieee",
+        action: "search_ieee",
+        arguments: { query: "sic mosfet threshold drift", venue: "journal" },
+        found: 2,
+      },
+    }),
+    "search_ieee · query=sic mosfet threshold drift · venue=journal · 新增 2 条",
+  );
+});
+
+test("plugin_action 不把 plugin_id 摆上屏（§九 不变量 7 的同一侧）", () => {
+  const detail = getTraceStepDetail({
+    step_type: "plugin_action",
+    summary: "",
+    detail: { plugin_id: "acme.ieee", action: "search_ieee", arguments: { query: "q" }, found: 0 },
+  });
+  assert.ok(!detail.includes("acme.ieee"));
+  assert.equal(detail, "search_ieee · query=q · 新增 0 条");
+});
+
+test("plugin_action 的空串参数不上屏（模型没填的可选参数只是噪音）", () => {
+  assert.equal(
+    getTraceStepDetail({
+      step_type: "plugin_action",
+      summary: "",
+      detail: { action: "search_ieee", arguments: { query: "q", venue: "" }, found: 1 },
+    }),
+    "search_ieee · query=q · 新增 1 条",
+  );
+});
+
+test("plugin_action 的超长参数夹断并标 …，不把折叠行撑爆", () => {
+  const long = "字".repeat(400);
+  const detail = getTraceStepDetail({
+    step_type: "plugin_action",
+    summary: "",
+    detail: { action: "search_ieee", arguments: { query: long }, found: 1 },
+  });
+  assert.ok(detail.startsWith("search_ieee · query=字"));
+  assert.ok(detail.includes("…"));
+  // 夹的是参数摘要本身，条数那一段照常拼在后面（否则用户连「找到几条」都看不到）。
+  assert.ok(detail.endsWith("· 新增 1 条"));
+  assert.ok(detail.length < long.length);
+});
+
+test("plugin_action 的 truncated 必须说出来（否则「新增 N 条」读成插件只找到 N 条）", () => {
+  assert.equal(
+    getTraceStepDetail({
+      step_type: "plugin_action",
+      summary: "",
+      detail: { action: "search_ieee", arguments: { query: "q" }, found: 5, truncated: true },
+    }),
+    "search_ieee · query=q · 新增 5 条 · 结果已截断",
+  );
+});
+
+test("plugin_action 的畸形 arguments 不把 [object Object] 送上屏", () => {
+  for (const bogus of [null, "query=q", ["query"], 7, { query: { nested: 1 } }]) {
+    const detail = getTraceStepDetail({
+      step_type: "plugin_action",
+      summary: "",
+      detail: { action: "search_ieee", arguments: bogus, found: 0 },
+    });
+    assert.ok(!detail.includes("[object Object]"), `bogus=${JSON.stringify(bogus)}`);
+    assert.equal(detail, "search_ieee · 新增 0 条");
+  }
+});
+
+// 插件动作被跳过时后端落的是 step_type="skip" + detail.reason（五个取值见设计文档
+// §五）。前端**没有** reason→文案映射表：skip 步的解释逐字来自后端写好的 summary，
+// 前端原样渲染（同 check_ui_vocabulary.py 把 trace summary 当界面词扫描的那条理由）。
+// 这条测试钉住的正是「不要在前端另编一份」：detail 给不出数就返回空串，summary 照旧。
+test("插件动作被跳过时走既有 skip 步，前端不另造一份 reason 文案", () => {
+  for (const reason of [
+    "plugin_action_disabled",
+    "plugin_action_missing_argument",
+    "plugin_action_cap",
+    "duplicate_plugin_action",
+    "plugin_action_last_turn",
+  ]) {
+    const step = {
+      step_type: "skip",
+      summary: `跳过扩展检索：${reason}`,
+      detail: { reason, action: "search_ieee", plugin_id: "acme.ieee" },
+    };
+    assert.equal(getTraceStepLabel(step), "跳过");
+    assert.equal(getTraceStepDetail(step), "");
+    assert.equal(getReasoningTraceSummary([step]).latestSummary, step.summary);
+  }
+});

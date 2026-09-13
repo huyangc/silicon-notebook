@@ -489,6 +489,15 @@ function PublicTurnView({
                 </span>
                 <div className="public-report-refbody">
                   <strong>{reference.title || reference.file_name || "(未命名资料)"}</strong>
+                  {/* 外部证据（`ask.reflect_action`）：这条引用来自笔记本之外，
+                      匿名读者必须一眼看得出来，不能与库内资料混在一张清单里。
+                      ⚠ 只有标记，没有链接——公开投影刻意不带 url（设计文档 §七 /
+                      §九 不变量 4），别在这里「顺手」渲染成 <a>。 */}
+                  {reference.is_external && (
+                    <span className="public-report-external" title="这条引用来自笔记本之外">
+                      外部
+                    </span>
+                  )}
                   {reference.title_truncated && (
                     <small className="public-report-truncated">（标题过长，已截断）</small>
                   )}

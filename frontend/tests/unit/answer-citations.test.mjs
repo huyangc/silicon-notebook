@@ -168,3 +168,19 @@ test("容器内未闭合 fence 不吞掉容器结束后的 display 公式", () =
     assert.doesNotMatch(html, /katex-error/);
   }
 });
+
+// 外部证据（ask.reflect_action，设计文档 §6.3）：库外条目「可像其它条目一样用 [k]
+// 引用」。正文这一层刻意**不认识** tier/object_type——引用标记的渲染只吃 refsByKey，
+// 外部与库内因此逐字节同形；区分只发生在引用卡与来源分布徽章上（§七）。这条钉住
+// 的是「别在正文里给外部引用另开一条渲染路径」。
+test("绑定到外部证据的 [k] 与库内引用渲染成同一形状的 cite 链接", () => {
+  const refs = {
+    k1: { id: "anchor:k1", displayLabel: "[1]" },
+    k2: { id: "anchor:k2", displayLabel: "[2]" },
+  };
+  const html = render("库内依据 [k1]，库外材料 [k2]。", refs);
+  assert.match(html, /href="cite:k1"/);
+  assert.match(html, /href="cite:k2"/);
+  assert.match(html, />\[1\]</);
+  assert.match(html, />\[2\]</);
+});

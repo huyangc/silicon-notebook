@@ -1,4 +1,4 @@
-// 站外来源建议「导入」（ask.gap_consult，X9 PR-A T3）走的是**核心** URL 来源端点，
+// 「把一个库外链接导入成本笔记本的一条来源」走的是**核心** URL 来源端点，
 // 绝不能悄悄改道插件路由。
 //
 // 背景：`GapConsultHostPort` 是给插件的建议入口——插件只负责说"这个 URL 值得看"，
@@ -65,52 +65,88 @@ test("page.tsx 的 importGapSuggestion 调用核心 importUrlSources，不触达
   );
 });
 
-test("answer-gap-suggestions.tsx 不含任何插件路由字符串，也不 import 插件端口", async () => {
-  const module = await parseModule("answer-gap-suggestions.tsx");
+// 组件侧的扫描面。**必须是一张显式清单而不是一个写死的文件名**：这条守卫最初只盯
+// `answer-gap-suggestions.tsx`，而后来「点击 → 回调」的接线被抽进
+// `import-row-state.tsx`（站外来源建议与外部证据引用卡共用同一份逐行状态机），
+// 第二个消费方是 `answer-panel.tsx` —— 两个新文件都不在原扫描面里，把导入悄悄改道
+// `/api/extensions/*` 不会被抓到（评审 P1）。
+//
+// `scanImports`：只有**纯展示/纯状态**的那两个文件才断言「不 import 任何 API 客户端」。
+// `answer-panel.tsx` 是整块答案视图，本就合法地 import 了 `./api-config`（附图资产 URL
+// 要 `API_BASE`），把它纳入 import 扫描等于给这条规则开一个必然要放行的例外；它只进
+// 字面量那半——真打插件路由的写法是 `fetch("/api/extensions/…")`，字面量扫描抓得到。
+const COMPONENT_SCAN = [
+  {
+    file: "answer-gap-suggestions.tsx",
+    scanImports: true,
+    why: "站外来源建议清单：只从外部拿 onImport 一个回调",
+  },
+  {
+    file: "import-row-state.tsx",
+    scanImports: true,
+    why: "共享的逐行导入状态机：点击 → 回调的接线住在这里，它才是真正的改道落点",
+  },
+  {
+    file: "answer-panel.tsx",
+    scanImports: false,
+    why: "外部证据引用卡的「导入为来源」调用点（合法 import api-config，只扫字面量）",
+  },
+];
 
-  const literals = stringLiterals(module);
-  // 空转保护同上一条：这个文件本身就有不少字符串字面量（className、按钮文案、
-  // aria 属性…），先确认扫描面非空，再断言其中没有一条命中插件路由。
-  assert.ok(
-    literals.length > 0,
-    "answer-gap-suggestions.tsx 没有扫到任何字符串字面量——parseModule 可能解析失败，"
-      + "导致下面的路由字符串检查是一次空转",
-  );
-  const offendingLiteral = literals.find((value) => value.includes("/api/extensions"));
-  assert.equal(
-    offendingLiteral,
-    undefined,
-    `组件本身不该拼接插件路由，命中了字符串字面量：${offendingLiteral}`,
-  );
-
-  const importSpecifiers = [];
+function importSpecifiersOf(module) {
+  const specifiers = [];
   function visit(node) {
     if (
       ts.isImportDeclaration(node)
       && node.moduleSpecifier
       && ts.isStringLiteral(node.moduleSpecifier)
     ) {
-      importSpecifiers.push(node.moduleSpecifier.text);
+      specifiers.push(node.moduleSpecifier.text);
     }
     ts.forEachChild(node, visit);
   }
   visit(module);
+  return specifiers;
+}
 
-  // 空转保护同上：这个文件至少 import 了 react/lucide-react/workspace-model，
-  // 先确认扫描面非空，再断言其中没有一条命中 API 客户端/插件端口。
-  assert.ok(
-    importSpecifiers.length > 0,
-    "answer-gap-suggestions.tsx 没有扫到任何 import 声明——parseModule 可能解析失败，"
-      + "导致下面的插件端口检查是一次空转",
-  );
+for (const entry of COMPONENT_SCAN) {
+  test(`${entry.file} 不含任何插件路由字符串${entry.scanImports ? "，也不 import 插件端口" : ""}`, async () => {
+    const module = await parseModule(entry.file);
 
-  // 组件只应该从外部拿到 onImport 这一个回调，绝不该自己 import 任何 API 客户端
-  // 或插件端口——真正打网络请求的地方是调用方（page.tsx::importGapSuggestion），
-  // 不是这个纯展示组件自己。
-  const apiImport = importSpecifiers.find((specifier) => /api-client|extension-sdk\/api/.test(specifier));
-  assert.equal(
-    apiImport,
-    undefined,
-    `组件不该自己 import API 客户端/插件端口，命中了：${apiImport}`,
-  );
-});
+    const literals = stringLiterals(module);
+    // 空转保护同上一条：这些文件本身就有不少字符串字面量（className、按钮文案、
+    // aria 属性…），先确认扫描面非空，再断言其中没有一条命中插件路由。
+    assert.ok(
+      literals.length > 0,
+      `${entry.file} 没有扫到任何字符串字面量——parseModule 可能解析失败，`
+        + "导致下面的路由字符串检查是一次空转",
+    );
+    const offendingLiteral = literals.find((value) => value.includes("/api/extensions"));
+    assert.equal(
+      offendingLiteral,
+      undefined,
+      `${entry.file}（${entry.why}）不该拼接插件路由，命中了字符串字面量：${offendingLiteral}`,
+    );
+
+    if (!entry.scanImports) return;
+
+    const importSpecifiers = importSpecifiersOf(module);
+    // 空转保护同上：这些文件至少 import 了 react/lucide-react/workspace-model，
+    // 先确认扫描面非空，再断言其中没有一条命中 API 客户端/插件端口。
+    assert.ok(
+      importSpecifiers.length > 0,
+      `${entry.file} 没有扫到任何 import 声明——parseModule 可能解析失败，`
+        + "导致下面的插件端口检查是一次空转",
+    );
+
+    // 这两个文件只应该从外部拿到 onImport 这一个回调，绝不该自己 import 任何 API
+    // 客户端或插件端口——真正打网络请求的地方是调用方
+    // （page.tsx::importGapSuggestion），不是纯展示组件/纯状态机自己。
+    const apiImport = importSpecifiers.find((specifier) => /api-client|extension-sdk\/api/.test(specifier));
+    assert.equal(
+      apiImport,
+      undefined,
+      `${entry.file}（${entry.why}）不该自己 import API 客户端/插件端口，命中了：${apiImport}`,
+    );
+  });
+}

@@ -36,6 +36,11 @@ import { placeCitationPopover } from "./citation-popover";
 import { copyTextSafely } from "./copy-text";
 import { FormulaView } from "./formula-view";
 import {
+  ImportRowButton,
+  useImportRowController,
+  type ImportRowController,
+} from "./import-row-state";
+import {
   InlineCitationImages,
   referenceImages,
   resolveCitationImageRows,
@@ -408,6 +413,10 @@ function CrossLibraryBadge({
 const NON_KG_REFERENCE_LABELS: Record<string, string> = {
   source: "来源",
   element: "原文",
+  // external = reflect 插件动作(`ask.reflect_action`,设计文档 §6.3)带回的**库外**
+  // 材料。它同样不是知识对象:没有图谱节点、没有 source_id/element_id,能做的只有
+  // 打开原链接或把它导入成本笔记本的一条来源(见 SelectedReferenceDetail)。
+  external: "外部",
 };
 
 
@@ -890,6 +899,7 @@ function SelectedReferenceDetail({
   onOpenKnowhowRow,
   onOpenSource,
   onPreviewImage,
+  importController,
 }: {
   reference: AnswerReference;
   /** 检索结果带图(T1/T2)：本段附图的资产 URL 恒用**当前 active notebook**——同
@@ -909,8 +919,17 @@ function SelectedReferenceDetail({
   /** 点开这一张附图。左右切换用的画册由 AnswerView 统一定位（见其 imageGallery）,
    *  所以这里只报「点的是哪一张」。没有承接方时图片仍显示但不可点击。 */
   onPreviewImage?: (image: AnswerImagePreviewItem) => void;
+  /** 外部证据（`ask.reflect_action`）的「导入为来源」逐行状态机。缺省即那颗按钮
+   *  不渲染（只读工作区）。状态住在 AnswerView 而不是这张卡片里——这张卡是会被
+   *  反复开合的浮层，详见 import-row-state.tsx 顶部注释。 */
+  importController?: ImportRowController;
 }) {
-  const objectType = reference.anchor?.object_type || "";
+  // 外部证据(`ask.reflect_action`,设计文档 §6.3)走 citation 回退列表时没有
+  // anchor,也就没有 object_type——用 tier 把它补齐,「外部」这个类型标记两条路
+  // 都出得来。后端保证 object_type==="external" ⇔ tier==="external"(§九 不变量
+  // 3),所以这里补出来的值不可能与真实类型冲突。
+  const objectType = reference.anchor?.object_type
+    || (reference.citation?.tier === "external" ? "external" : "");
   const title = referenceTitle(reference);
   // When the evidence row itself is the image element, its snippet/quoted_span
   // is parser-generated caption + image description. The image already carries
@@ -935,7 +954,19 @@ function SelectedReferenceDetail({
   // 图谱节点,所以都不摆那个按钮——文档尤其:它的 object_id 本来就是空的,留着按钮
   // 只会是一个永远禁用、且解释起来还得绕一圈的控件。
   const isSourceElementReference = objectType === "element" || objectType === "source";
+  // 外部证据同样不是知识对象,但它**有** object_id(核心铸的 `ext:{plugin_id}:{n}`,
+  // 见设计文档 §6.1),所以不能靠 canLocateInGraph 自动禁用——那个 id 在图谱里根本
+  // 不存在,按钮会渲染成可点、点了定位到空。必须显式排除。同理它的 source_id 恒为
+  // 空(§九 不变量 3),「查看原文」本就出不来,但仍显式排除:守住的是不变量而不是
+  // 当前 payload 的形状,后端哪天多填一个字段也不该让库外条目冒出一个来源入口。
+  const isExternalReference = objectType === "external" || tier === "external";
   const canLocateInGraph = Boolean(reference.anchor?.object_id) && !isRelationReference;
+  // 外部证据的原文链接(§6.3)。只认 http/https,且必须是**串首**——`javascript:`
+  // 一类在宿主净化期就该丢掉整条(§九 不变量 8),这里是前端这一侧的同一把闸,不
+  // 依赖后端净化过。不合格就整个不渲染链接(而不是渲染一个点不动的按钮):这条
+  // 引用的其余内容照常可读。
+  const externalUrl = reference.anchor?.url || reference.citation?.url || "";
+  const externalHref = isExternalReference && /^https?:\/\//i.test(externalUrl) ? externalUrl : "";
   // Task 12b（引用跳转扩面）：citation 优先，anchor 兜底——两者理论上不会同时
   // 出现在同一条 reference 上（buildAnswerReferences 二选一），但顺序仍按
   // "更具体的赢"的既有惯例书写，与 knowhow-citation.test.mjs 的显式断言一致。
@@ -953,13 +984,19 @@ function SelectedReferenceDetail({
             ? <span>{NON_KG_REFERENCE_LABELS[objectType]}</span>
             : <span><KgTypeMark type={objectType} />{kgTypeLabel(objectType)}</span>
         )}
-        {tier && (
+        {/* 外部证据不再叠一枚 tier 徽章:上面那枚类型标记已经写着「外部」,两枚
+            并排会读成两个不同的事实(「外部」+「外部来源」),而它们说的是同一件
+            事。tier 桶本身照常统计(来源分布徽章的第三格),这里省的只是重复展示。 */}
+        {tier && !isExternalReference && (
           <span
             className={`tier-badge tier-${tier}`}
             title={
+              // 泛化 tier 文案统一走 TIER 词表(与下面可见文字同一份真源),不再
+              // 就地写 base/personal 二选一的三元式——那个写法对第三个取值
+              // (external)会拼出「来自个人知识库」这种反向错误的话。
               sourceName
-                ? `来自「${sourceName}」（${tier === "base" ? "公共知识库" : "个人知识库"}）`
-                : (tier === "base" ? "来自公共知识库" : "来自个人知识库")
+                ? `来自「${sourceName}」（${label(TIER, tier, "未知来源")}）`
+                : `来自${label(TIER, tier, "未知来源")}`
             }
           >
             {sourceName ? (
@@ -974,7 +1011,7 @@ function SelectedReferenceDetail({
             )}
           </span>
         )}
-        {onOpenKnowledgeGraph && !isSourceElementReference && (
+        {onOpenKnowledgeGraph && !isSourceElementReference && !isExternalReference && (
           <button
             type="button"
             onClick={() => onOpenKnowledgeGraph(
@@ -1007,7 +1044,7 @@ function SelectedReferenceDetail({
             在表格中查看
           </button>
         )}
-        {onOpenSource && sourceId && (
+        {onOpenSource && sourceId && !isExternalReference && (
           <button
             type="button"
             onClick={() => onOpenSource(sourceId, elementId || undefined)}
@@ -1016,6 +1053,33 @@ function SelectedReferenceDetail({
             <ExternalLink size={14} />
             查看原文
           </button>
+        )}
+        {/* 外部证据的两个出口(设计文档 §七)。库外材料在这个笔记本里没有原文可
+            「查看」——能做的只有去它自己那里看,或者把它收进来变成真正的来源。 */}
+        {externalHref && (
+          <a
+            className="cite-detail-external-link"
+            href={externalHref}
+            target="_blank"
+            rel="noopener noreferrer"
+            title="在新标签页打开这条库外材料的原文"
+          >
+            <ExternalLink size={14} />
+            打开链接
+          </a>
+        )}
+        {/* 导入走的是核心 URL 来源端点(page.tsx 的 importGapSuggestion,与站外来源
+            建议同一条通道),不打任何插件路由;没有链接就没有可导入的东西,所以与
+            「打开链接」同一个判据。只读工作区不传 controller ⇒ 按钮不渲染。 */}
+        {externalHref && (
+          <ImportRowButton
+            controller={importController}
+            rowKey={externalHref}
+            url={externalHref}
+            className="cite-detail-import"
+            errorClassName="cite-detail-import-error"
+            idleLabel="导入为来源"
+          />
         )}
       </div>
       <h4><LatexText text={title} isFormula={objectType === "formula"} /></h4>
@@ -1076,6 +1140,7 @@ function CitationPopover({
   onOpenKnowhowRow,
   onOpenSource,
   onPreviewImage,
+  importController,
   dismissSuspended = false,
 }: {
   reference: AnswerReference;
@@ -1091,6 +1156,10 @@ function CitationPopover({
   /** 点开这一张附图。左右切换用的画册由 AnswerView 统一定位（见其 imageGallery）,
    *  所以这里只报「点的是哪一张」。没有承接方时图片仍显示但不可点击。 */
   onPreviewImage?: (image: AnswerImagePreviewItem) => void;
+  /** 外部证据「导入为来源」的逐行状态机，原样透传给 SelectedReferenceDetail。
+   *  ⚠ 它由 AnswerView 持有：这张浮层随点外部/滚动/Esc 卸载，状态住在里面的话
+   *  「已导入」会在关掉浮层的一瞬间蒸发（详见 import-row-state.tsx 顶部）。 */
+  importController?: ImportRowController;
   /** Keep the thumbnail trigger mounted while its page-level preview is open,
    * so the modal coordinator can return focus to a live element. */
   dismissSuspended?: boolean;
@@ -1146,6 +1215,7 @@ function CitationPopover({
         onOpenKnowhowRow={onOpenKnowhowRow}
         onOpenSource={onOpenSource}
         onPreviewImage={onPreviewImage}
+        importController={importController}
       />
     </div>
   );
@@ -1372,7 +1442,11 @@ export function AnswerView({
   /** 站外来源建议的「导入」按钮（``ask.gap_consult``）：把这个 URL 当一次普通
    *  链接来源添加进当前笔记本。可选——没有承接方（只读排障视图）时导入按钮
    *  一颗都不渲染，同 onSaveMemory 的既有惯例。返回值供该条目内联展示成功/
-   *  失败，绝不用 toast（长任务按钮红线：失败文案必须持久可见）。 */
+   *  失败，绝不用 toast（长任务按钮红线：失败文案必须持久可见）。
+   *  ⚠ 同一条回调也是**外部证据引用卡**「导入为来源」的通道
+   *  （``ask.reflect_action``，设计文档 §七）：两处导入的都是一个库外 URL，走的
+   *  都是核心 URL 来源端点，共用一个回调才不会出现「一个入口有容量单飞、另一个
+   *  没有」这种半套。 */
   onImportGapSuggestion?: (url: string) => Promise<{ ok: boolean; message?: string }>;
   /** 非空时每一条站外来源建议的导入按钮都渲染为禁用态，`title` 提示这句话
    *  ——「可写但已达文档数量上限」（红线：确认上传前必须把批次计入上限，
@@ -1400,6 +1474,19 @@ export function AnswerView({
   const referencesByCitationKey = useMemo(
     () => referenceByCitationKey(references),
     [references],
+  );
+  // 「把一个库外链接导入成本笔记本的一条来源」的逐行状态机。**一份，两个面共用**：
+  // 站外来源建议清单（``ask.gap_consult``）与外部证据引用卡（``ask.reflect_action``，
+  // 设计文档 §七）。键是 URL，所以同一个链接在两处只有一格状态——任一处导入完成，
+  // 另一处立刻显示「已导入」，不会重复排入同一个链接来源（后端导入端点既无单飞、
+  // 也不按 URL 去重）。
+  // ⚠ 住在这里而不是引用卡里:引用卡是随点外部/滚动/Esc 卸载的浮层,状态跟着它
+  // 走的话「已导入」会在关掉浮层的一瞬间蒸发,用户重新点开同一条引用看到的又是
+  // 可点的「导入为来源」——于是导入第二次。完整论证与跨轮去重的登记见
+  // import-row-state.tsx 顶部。
+  const importController = useImportRowController(
+    onImportGapSuggestion,
+    importGapSuggestionDisabledReason,
   );
   // 本条回答里可以左右切换的全部附图。顺序不在这里推导——渲染管线一边把图片区块
   // 插进正文一边记账(citationImageOrder),这里读的就是那本账,所以左右切换走的必然
@@ -1481,12 +1568,21 @@ export function AnswerView({
         return <span className={`tag ${meta.cls}`}>{meta.label}</span>;
       })()}
       {(() => {
-        const { personal, base } = computeSourceTierCounts(references);
-        if (personal + base === 0) return null;
+        const { personal, base, external } = computeSourceTierCounts(references);
+        if (personal + base + external === 0) return null;
         return (
-          <span className="tag source-dist" title="本次引用的来源分布（个人知识库 / 公共知识库）">
+          <span
+            className="tag source-dist"
+            title={external > 0
+              // 第三格只在真有库外引用时出现,文案与 title 都是:没有外部证据的
+              // 回答,这枚徽章逐字等于接入前(设计文档 §九 不变量 6 的界面侧同款
+              // 纪律——关闭态零差异)。
+              ? "本次引用的来源分布（个人知识库 / 公共知识库 / 笔记本之外）"
+              : "本次引用的来源分布（个人知识库 / 公共知识库）"}
+          >
             来源 · 个人 {personal}
             {base > 0 && <> · <strong className="source-dist-base">公共 {base}</strong></>}
+            {external > 0 && <> · <strong className="source-dist-external">外部 {external}</strong></>}
           </span>
         );
       })()}
@@ -1552,8 +1648,7 @@ export function AnswerView({
       />
       <GapSuggestionsPanel
         suggestions={answer.gap_suggestions ?? []}
-        onImport={onImportGapSuggestion}
-        importDisabledReason={importGapSuggestionDisabledReason}
+        controller={importController}
       />
       {answer.reasoning_trace && answer.reasoning_trace.length > 0 && (
         <ReasoningTracePanel steps={answer.reasoning_trace} />
@@ -1583,6 +1678,7 @@ export function AnswerView({
             onOpenSource(sourceId, elementId);
           } : undefined}
           onPreviewImage={previewImage}
+          importController={importController}
           dismissSuspended={imagePreviewOpen}
         />
       )}

@@ -298,3 +298,45 @@ test("没被截断的引用不挂假提示", async () => {
   expect(screen.queryByText("（原始文件名过长，已截断）")).toBeNull();
   expect(screen.queryByText("（摘录过长，已截断）")).toBeNull();
 });
+
+// 外部证据（`ask.reflect_action`，设计文档 §七 / §九 不变量 4）：库外引用在公开页
+// 必须一眼分得出来，但**只有标记、没有链接**——公开投影刻意不下发 url（匿名读者
+// 能不能跟随部署外链是另一件事，见 §十一 第 7 条）。
+test("is_external 的引用带「外部」标记，且公开页不给它渲染任何链接", async () => {
+  mocks.fetchPublicConversation.mockResolvedValue({
+    ...CONVERSATION,
+    turns: [{
+      ...CONVERSATION.turns[0],
+      references: [
+        { key: "k1", title: "库内甲文", file_name: "jia.pdf", location: "p. 2", snippet: "甲摘录" },
+        {
+          key: "k7",
+          title: "库外乙文",
+          file_name: "",
+          location: "§3.2",
+          snippet: "库外摘录",
+          is_external: true,
+        },
+      ],
+    }],
+  });
+  render(<PublicConversationPage />);
+
+  const external = (await screen.findByText("库外乙文")).closest("li");
+  expect(external).not.toBeNull();
+  expect(within(external!).getByText("外部")).toBeInTheDocument();
+  // 标记归标记，摘录照常显示（它不是 is_image_reference 那种要压掉正文的情形）。
+  expect(within(external!).getByText("库外摘录")).toBeInTheDocument();
+
+  // 不渲染链接：整条引用清单里一个 <a> 都不该有（后端根本没下发 url，
+  // 别让哪天有人「顺手」补一个）。
+  const list = external!.closest("ol");
+  expect(within(list!).queryAllByRole("link")).toHaveLength(0);
+});
+
+test("库内引用不挂「外部」标记（空转保护）", async () => {
+  render(<PublicConversationPage />);
+
+  await screen.findByText("甲文");
+  expect(screen.queryByText("外部")).toBeNull();
+});
