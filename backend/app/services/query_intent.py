@@ -23,6 +23,15 @@ _UNRESOLVED_REFERENCE = re.compile(
     r"|\b(?:this|that|these|those|it|they|above|previous|former|latter)\b",
     re.IGNORECASE,
 )
+# The active retrieval container is supplied by the request, not discovered in
+# corpus text. Mask only that deictic noun phrase; another "it/this" in the same
+# question must still pass the ordinary referent check.
+_CURRENT_CONTAINER_REFERENCE = re.compile(
+    r"这个\s*(?:笔记本|知识库|参考库|notebook|库)"
+    r"(?=里|中|内|的|有|包含|包括|收录|[，。！？?\s]|$)"
+    r"|\bthis\s+(?:notebook|library|knowledge\s+base)\b",
+    re.IGNORECASE,
+)
 _GENERIC_REQUEST = re.compile(
     r"^(?:(?:帮我)?(?:分析|研究|介绍|讲讲|说说|看看|总结|比较|对比|优化)(?:一下|下)?"
     r"(?:这个|那个|它|问题|方案|内容|东西)?|"
@@ -82,6 +91,12 @@ _ANALYSIS_REQUEST = re.compile(
     r"|\b(?:compare|analyse|analyze|trade-?offs?|pros\s+and\s+cons)\b",
     re.IGNORECASE,
 )
+
+
+def _has_unresolved_reference(text: str) -> bool:
+    return bool(_UNRESOLVED_REFERENCE.search(
+        _CURRENT_CONTAINER_REFERENCE.sub("", text)
+    ))
 
 
 def _understanding_response_is_valid(data: object) -> bool:
@@ -317,10 +332,10 @@ def plan_query_intent(
     deterministic_question = ""
     deterministic_reason = ""
     if (
-        _UNRESOLVED_REFERENCE.search(question)
+        _has_unresolved_reference(question)
         and (
             not normalized_candidate
-            or _UNRESOLVED_REFERENCE.search(normalized_candidate)
+            or _has_unresolved_reference(normalized_candidate)
             or not has_verified_referent
         )
     ):

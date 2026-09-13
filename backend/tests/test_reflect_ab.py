@@ -1787,6 +1787,49 @@ def test_a_failed_batch_exits_non_zero(tmp_path, monkeypatch, capsys):
     assert (tmp_path / "manifest.json").exists()
 
 
+@pytest.mark.parametrize("concurrency", [1, 2])
+def test_clarification_failure_records_each_arm_and_finishes_manifest(
+    tmp_path, monkeypatch, capsys, concurrency,
+):
+    calls = []
+
+    def blocked_intent(*args, **kwargs):
+        calls.append(1)
+        raise rig.ClarificationRequiredError("clarification_required")
+
+    _ab_run_harness(
+        monkeypatch, tmp_path,
+        counts={"ask_jobs": 3, "answers": 1, "conversations": 1},
+        loop=rig._ab_loop,
+    )
+    monkeypatch.setattr(rig, "_plan_intent", blocked_intent)
+    monkeypatch.setattr(
+        rig, "run_ab_once",
+        lambda *a, **kw: pytest.fail("unconfirmed request must not start Ask"),
+    )
+    args = _ab_args(dry_run=False, out_dir=str(tmp_path), concurrency=concurrency)
+    runner = rig.Runner(dry_run=False, out_dir=tmp_path)
+
+    assert rig._run_ab(args, runner, [_unit()], ["A_nokg"]) == 1
+
+    rows = [json.loads(line) for line in (tmp_path / "ab-runs.jsonl").read_text().splitlines()]
+    assert len(rows) == 2
+    assert {row["arm"] for row in rows} == {"legacy", "v2"}
+    for row in rows:
+        assert row["status"] == "failed"
+        assert row["has_intent_contract"] is False
+        assert row["run_wall_ms"] is None
+        assert row["latency_ms_total"] is None
+        assert row["model_calls"] is None
+        assert row["reflect_turns"] == 0
+    assert calls == [1]
+    assert "reason=clarification_required" in (tmp_path / "ab-runs.log").read_text()
+    manifest = json.loads((tmp_path / "manifest.json").read_text())
+    assert manifest["finished_at"]
+    assert manifest["intent_contract_digest_by_question"] == {}
+    assert "2 个 run FAILED" in capsys.readouterr().err
+
+
 def test_the_readonly_violation_message_names_the_command(tmp_path, capsys):
     """文案不写死「search」:`ab` 的读者不该以为报错来自另一条没跑的命令。"""
     runner = rig.Runner(dry_run=False, out_dir=tmp_path)
@@ -4260,7 +4303,8 @@ def test_the_intent_digest_table_only_covers_the_questions_this_batch_ran(
     # `_IntentCache.get`——要验的正是那份从磁盘读回来的 `_rows`。
     (out_dir / "intents.jsonl").write_text(
         "".join(
-            json.dumps({"question_key": key, "contract": {"resolved": key}},
+            json.dumps({"question_key": key, "contract": {"resolved": key},
+                        "intent_cache_policy": rig.INTENT_CACHE_POLICY},
                        ensure_ascii=False) + "\n"
             for key in ("A-q08", "A-q14")
         ),

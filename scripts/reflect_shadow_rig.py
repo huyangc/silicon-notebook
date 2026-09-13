@@ -1152,15 +1152,23 @@ def cmd_ask(args: argparse.Namespace, runner: Runner) -> int:
         if source_scope_body is not None:
             body["source_scope"] = source_scope_body
         if contract is not None:
-            # `answers=[]` 会被 `finalize_query_intent` 的门拒掉,只要契约带
-            # 必填澄清项(`auto_clarification_answers` 那条确定性代答规则同
-            # `_plan_intent`,见其上方注释;codex #700 R1 P2)——没有人在场
-            # 回答,但整批 `ask` 也不能因为一道题目的契约带了必填项就起不来。
+            # 无真实用户回答时只确认清晰契约。模型提供的首选项或占位提示
+            # 都不是确认；阻断题记失败，不启动检索或创建持久问答。
+            try:
+                answers = auto_clarification_answers(contract)
+            except ClarificationRequiredError:
+                failed += 1
+                runner.say(
+                    "ask failed",
+                    f"crid={item['client_request_id']} "
+                    "reason=clarification_required，缺少真实澄清答案，跳过提交",
+                )
+                continue
             body["intent"] = {
                 "contract": contract,
                 "resolved_question": contract.get("resolved_question")
                 or item["question"],
-                "answers": auto_clarification_answers(contract),
+                "answers": answers,
             }
         # **必须走 /ask/stream,不是 /ask**:同步端点经 `begin_durable_job` 建
         # 行,而那条路 `client_request_id=None` 是写死的
@@ -1380,14 +1388,13 @@ def _generate_report(
     澄清项时,没有人在场回答,`run()` 就原地停在 `intent_ready`(其 docstring
     「Confirm a *clear* intent... or fail open」)。没有这一步的话,报告的
     `sections` 恒空,调用方会把它当成「已完成、只是没写什么」悄悄放过
-    (codex #700 R2 P2)。这里代为确认——不是新写一套编排,而是走与
+    (codex #700 R2 P2)。这里仅为清晰契约重试确认，走与
     `POST .../reports/{id}/intent` 手工确认端点**同一条入口**
     (`confirmed_understanding` + `claim_report_intent`,两者都是
     `app.services.reports.intent_confirmation` / repo 上已有的公开函数),
-    答案取 `auto_clarification_answers` 那条与 `/ask/intent` 同款的确定性
-    规则,确保两侧策略、两次重跑拿到同一份确认。只有这条确认入口本身也走
-    不通(代答后仍有必填项没被覆盖,或 CAS 输给了别的写者)时才返回非空的
-    `gate_reason`,交给调用方记 `status=failed`。
+    必填歧义没有真实用户答案时不自动代答，返回 `clarification_gate`；
+    清晰契约的确认入口失败或 CAS 输给别的写者时也返回门控失败，交给调用方
+    记 `status=failed`，不能把没有生成任何章节的报告算作成功。
     """
     from app.services.reports.intent_confirmation import (
         ReportIntentConfirmationError,
@@ -1434,7 +1441,7 @@ def _generate_report(
                         ),
                         answers=auto_clarification_answers(contract),
                     )
-                except ReportIntentConfirmationError:
+                except (ReportIntentConfirmationError, ClarificationRequiredError):
                     frozen = None
                 claimed = bool(
                     frozen is not None
@@ -2022,6 +2029,9 @@ def _assert_readonly(
     )
 
 
+INTENT_CACHE_POLICY = "clear-intent-only-v1"
+
+
 class _IntentCache:
     """每题只算一次意图契约,落 `intents.jsonl` 复用。
 
@@ -2033,16 +2043,16 @@ class _IntentCache:
     键取 `question_key`,不带语料格:契约是 **corpus-blind** 的
     (`plan_query_intent` 一个字的语料都不读),而 A/B 两格的题号本来就不同。
 
-    **`_lock` 只保护「查缓存 / 落缓存 / 写文件」这三步,不盖住模型调用那一段**:
-    并发预算的意义就在于让多题的模型调用真的并行,锁只用来防两件事——同一题被
-    两个线程各算一次(双重检查:锁内确认仍然缺失才去算),以及并发写
-    `intents.jsonl` 在磁盘层面交错成半行。
+    每题单独 single-flight，同题所有臂/档位共享一次规划的终态，包括阻断。
+    全局 `_lock` 只保护缓存与写文件，不盖住模型调用；不同题仍可并发规划。
     """
 
     def __init__(self, path: Path, *, enabled: bool) -> None:
         self.path = path
         self.enabled = enabled
         self._rows: dict[str, dict] = {}
+        self._clarification_failures: set[str] = set()
+        self._question_locks: dict[str, threading.Lock] = {}
         self._lock = threading.Lock()
         if not (enabled and path.exists()):
             return
@@ -2051,6 +2061,11 @@ class _IntentCache:
             if not line:
                 continue
             row = json.loads(line)
+            if row.get("intent_cache_policy") != INTENT_CACHE_POLICY:
+                raise RuntimeError(
+                    "intent_cache_policy_mismatch: 意图缓存来自旧确认策略，"
+                    "请使用新的 --out-dir，不能复用可能含自动代答的契约"
+                )
             key = str(row.get("question_key") or "")
             if key and isinstance(row.get("contract"), dict):
                 self._rows[key] = row["contract"]
@@ -2063,22 +2078,34 @@ class _IntentCache:
             return None
         key = item["question_key"]
         with self._lock:
-            if key in self._rows:
-                return self._rows[key]
-        contract = _plan_intent(
-            repo, settings, item["question"], actor_id=actor_id,
-            notebook=notebook,
-        )
-        with self._lock:
-            if key not in self._rows:
+            question_lock = self._question_locks.setdefault(key, threading.Lock())
+        with question_lock:
+            with self._lock:
+                if key in self._clarification_failures:
+                    raise ClarificationRequiredError("clarification_required")
+                if key in self._rows:
+                    return self._rows[key]
+            try:
+                contract = _plan_intent(
+                    repo, settings, item["question"], actor_id=actor_id,
+                    notebook=notebook,
+                )
+            except ClarificationRequiredError:
+                # The same question cannot acquire both a successful contract
+                # and a blocking failure from competing model completions.
+                with self._lock:
+                    self._clarification_failures.add(key)
+                raise
+            with self._lock:
                 self._rows[key] = contract
                 self.path.parent.mkdir(parents=True, exist_ok=True)
                 with self.path.open("a", encoding="utf-8") as handle:
                     handle.write(json.dumps(
-                        {"question_key": key, "contract": contract},
+                        {"question_key": key, "contract": contract,
+                         "intent_cache_policy": INTENT_CACHE_POLICY},
                         ensure_ascii=False,
                     ) + "\n")
-            return self._rows[key]
+                return self._rows[key]
 
 
 def _plan_intent(
@@ -2114,31 +2141,25 @@ def _plan_intent(
     )
 
 
-# 无人在场时替用户回答必填澄清项的**确定性**规则:有选项取第一个,没有就用一句
-# 「不额外限定」。首跑实测 8 题里有题目的契约带必填澄清项,`answers=[]` 会被
-# `finalize_query_intent` 的门拒掉、整批 run 起不来。规则写死是为了两侧策略、两次
-# 重跑拿到**同一份**契约;答案本身只影响 `clarification_answers` 与范围信号,不进
-# 数据集。
-AUTO_CLARIFICATION_ANSWER = "按问题原意理解，不额外限定"
+class ClarificationRequiredError(ValueError):
+    """A benchmark cannot manufacture a user's answer to a blocking ambiguity."""
 
 
 def auto_clarification_answers(seed: dict) -> list[dict]:
-    """`finalize_query_intent(answers=...)` 的确定性代答:只答必填项。"""
-    answers: list[dict] = []
+    """Only clear intents may auto-confirm; model options are not user answers."""
     for row in seed.get("ambiguities") or []:
-        if not isinstance(row, dict) or not row.get("id"):
+        if not isinstance(row, dict):
             continue
         if row.get("required") is False:
             continue
-        options = [
-            str(option).strip() for option in (row.get("options") or [])
-            if str(option).strip()
-        ]
-        answers.append({
-            "id": str(row["id"]),
-            "answer": options[0] if options else AUTO_CLARIFICATION_ANSWER,
-        })
-    return answers
+        raise ClarificationRequiredError(
+            "clarification_required: 缺少真实澄清答案，请补充题目背景后重新测试"
+        )
+    if seed.get("needs_clarification") is True:
+        raise ClarificationRequiredError(
+            "clarification_required: 问题理解尚未清晰，请补充题目背景后重新测试"
+        )
+    return []
 
 
 def _prepare_search_intent(
@@ -2587,6 +2608,17 @@ def _search_loop(
             policy = item["policy"]
             settings = settings_by_policy[policy]
             scope_ids, scope_failed = _resolve_item_scope(args, item, fact)
+            clarification_failed = False
+            prepared = None
+            if not scope_failed:
+                try:
+                    prepared = _prepare_search_intent(
+                        intents.get(repo, settings, item, actor_id=actor_id,
+                                    notebook=fact["notebook"]),
+                        item["question"], item["effort"],
+                    )
+                except ClarificationRequiredError:
+                    clarification_failed = True
             if scope_failed:
                 # 没开跑 ⇒ `run_wall_ms` 是 `None`,不是 0(见 `stamp_run_wall_ms`)。
                 row = stamp_run_wall_ms(_scope_unresolved_row(item, fact), None)
@@ -2597,12 +2629,18 @@ def _search_loop(
                     f"titles={list(item.get('scope_source_titles') or ())}"
                     " -> status=failed reason=scope_unresolved",
                 )
-            else:
-                prepared = _prepare_search_intent(
-                    intents.get(repo, settings, item, actor_id=actor_id,
-                                notebook=fact["notebook"]),
-                    item["question"], item["effort"],
+            elif clarification_failed:
+                row = stamp_run_wall_ms(_failed_run_row(item, fact), None)
+                elapsed_ms = None
+                reason_line = (
+                    f"{item['question_key']} {item['corpus_cell']} "
+                    f"{policy} {item['effort']} FAILED "
+                    "reason=clarification_required run_not_started"
                 )
+                log.write(reason_line + "\n")
+                log.flush()
+                runner.say("search failed", reason_line)
+            else:
                 steps: list[dict] = []
                 raw_steps: list[dict] = []
 
@@ -2758,10 +2796,12 @@ def _precompute_intents(
     with ThreadPoolExecutor(max_workers=concurrency) as pool:
         futures = [pool.submit(worker, item) for item in pending]
         for future in as_completed(futures):
-            # 意图算不出来是硬失败:先修再跑正式检索,不把一批坏契约悄悄地
-            # 传给 `run_search_once`(它会拿一份 `contract=None` 继续跑,而
-            # 那看起来完全像"这题没有意图契约"而不是"算它的时候炸了")。
-            future.result()
+            # Expected clarification stays cached as a blocked outcome so each
+            # planned run gets a failure row. Other exceptions still abort.
+            try:
+                future.result()
+            except ClarificationRequiredError:
+                continue
     return intents
 
 
@@ -2827,7 +2867,7 @@ def _search_loop_concurrent(
             event.set()
         runner.say("search aborted", reason)
 
-    def worker(item: dict) -> tuple[dict, float, list[dict] | None, Any] | None:
+    def worker(item: dict) -> tuple[dict, float | None, list[dict] | None, Any] | None:
         if aborted.is_set():
             # 已经决定收摊:还没真的开始跑的任务(`executor.shutdown(
             # cancel_futures=True)` 撤不掉已经被 worker 线程取出来的这一个)
@@ -2853,11 +2893,15 @@ def _search_loop_concurrent(
         try:
             policy = item["policy"]
             settings = settings_by_policy[policy]
-            prepared = _prepare_search_intent(
-                intents.get(repo, settings, item, actor_id=actor_id,
-                            notebook=fact["notebook"]),
-                item["question"], item["effort"],
-            )
+            try:
+                prepared = _prepare_search_intent(
+                    intents.get(repo, settings, item, actor_id=actor_id,
+                                notebook=fact["notebook"]),
+                    item["question"], item["effort"],
+                )
+            except ClarificationRequiredError as exc:
+                row = stamp_run_wall_ms(_failed_run_row(item, fact), None)
+                return row, None, None, exc
             steps: list[dict] = []
             raw_steps: list[dict] = []
 
@@ -2986,19 +3030,25 @@ def _search_loop_concurrent(
                         failed += 1
                     done_n = completed
                     reason = (
-                        type(result).__name__ if isinstance(result, BaseException)
+                        "clarification_required run_not_started"
+                        if isinstance(result, ClarificationRequiredError)
+                        else type(result).__name__ if isinstance(result, BaseException)
                         else "scope_unresolved"
                     )
                     status_suffix = (
                         "" if row.get("status") != "failed"
                         else f" status=failed reason={reason}"
                     )
+                    elapsed_label = (
+                        "unknown" if elapsed_ms is None
+                        else f"{elapsed_ms / 1000:.1f}s"
+                    )
                     line = (
                         f"done {done_n}/{total}  {item['question_key']} "
                         f"{item['corpus_cell']} {policy} {item['effort']} "
                         f"reflect={row['reflect_turns']} "
                         f"term={row['termination_reason']} "
-                        f"{elapsed_ms / 1000:.1f}s{status_suffix}"
+                        f"{elapsed_label}{status_suffix}"
                     )
                     log.write(line + "\n")
                     log.flush()
@@ -5933,21 +5983,29 @@ def _run_ab_unit(
             notebook=fact["notebook"],
         )
 
-    digest = ab_contract_digest(_contract())
-    scope_ids, scope_failed = _resolve_item_scope(args, unit, fact)
+    clarification_failed = False
+    try:
+        digest = ab_contract_digest(_contract())
+    except ClarificationRequiredError:
+        digest = None
+        clarification_failed = True
+    scope_ids, scope_failed = (
+        (None, False) if clarification_failed
+        else _resolve_item_scope(args, unit, fact)
+    )
     rows: list[dict] = []
     reasons: dict[tuple[str, str], str] = {}
     call_rows: dict[str, list[dict]] = {}
-    if scope_failed:
+    if scope_failed or clarification_failed:
         # 声明了范围却解析不到唯一匹配:整个单元作废,不退化成一次不设限的全库
         # 检索(codex #700 R3 P2 的同一条口径)。两臂都不跑,但**每条臂各落一行
         # `status=failed`**——直接 `return` 会让这个单元从数据集里凭空消失
         # (codex 质量评审 P2-4)。
+        reason = "clarification_required" if clarification_failed else "scope_unresolved"
         runner.say(
-            "ab scope unresolved",
+            "ab not started",
             f"{unit['question_key']} {unit['corpus_cell']} "
-            f"titles={list(unit.get('scope_source_titles') or ())}"
-            " -> 两臂各落一行 status=failed reason=scope_unresolved",
+            f"-> 每臂各落一行 status=failed reason={reason} run_not_started",
         )
         for arm in unit_arms:
             rows.append(_ab_failed_row(
@@ -5957,7 +6015,7 @@ def _run_ab_unit(
                 # (见 `stamp_run_wall_ms`)。
                 run_wall_ms=None,
             ))
-            reasons[arm] = "scope_unresolved"
+            reasons[arm] = reason
     else:
         for arm in unit_arms:
             # **在臂的循环里各自取一次再比**(codex 规格评审 P2-3):在循环外

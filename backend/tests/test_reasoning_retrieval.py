@@ -5993,6 +5993,7 @@ def _settings_field_shapes(tree, field_name: str):
     ("reasoning_reflect_evidence_chars_by_effort", "_reflect_v2_context",
      ("field", "validator")),
     ("reasoning_reflect_excerpt_chars", "_reflect_v2_context", ("field",)),
+    ("reasoning_reflect_table_excerpt_chars", "_table_excerpt_chars", ("field",)),
     ("reasoning_reflect_recent_observations", "_reflect_v2_context",
      ("field",)),
     ("reasoning_reflect_state_chars", "_reflect_v2_context", ("field",)),
@@ -15481,7 +15482,8 @@ def test_delta_state_holds_only_rendered_text_and_counters():
         "observation_cursor",
         "pending_aspect_notes", "evidence_chars", "history_chars",
         "rebuilds", "fallback", "generation", "rebuilt_last_turn",
-        "supplement_last_key")
+        "supplement_last_key", "supplement_query", "supplement_checked_keys",
+        "supplement_latest_cards")
     fresh = ReflectDeltaState()
     assert (fresh.generation, fresh.rebuilds, fresh.fallback) == (1, 0, False)
     assert (fresh.evidence_chars, fresh.history_chars,

@@ -693,15 +693,13 @@ def test_readonly_counts_include_users_updated_at_max_and_catch_its_drift(
     assert "READ-ONLY VIOLATION" in capsys.readouterr().err
 
 
-# --- ask 的必填澄清项代答(codex #700 R1 P2) ---------------------------------
+# --- ask 的必填澄清门 ------------------------------------------------------
 
 
-def test_ask_answers_required_ambiguities_before_streaming(tmp_path, monkeypatch):
-    """`/ask/intent` 返回带必填澄清项的契约时,提交给 `/ask/stream` 的
-    `intent.answers` 不能是 `[]`——那会被 `finalize_query_intent` 的门拒掉,
-    整批 `ask` 起不来(`_plan_intent` 已经踩过同一个坑,`auto_clarification_
-    answers` 是同一条确定性代答规则)。
-    """
+def test_ask_does_not_submit_required_ambiguities_without_real_answers(
+    tmp_path, monkeypatch, capsys,
+):
+    """Model options are not user confirmation; a blocked run stays observable."""
     out_dir = tmp_path / "t0"
     out_dir.mkdir()
     (out_dir / "rig-state.json").write_text(json.dumps({
@@ -732,10 +730,9 @@ def test_ask_answers_required_ambiguities_before_streaming(tmp_path, monkeypatch
 
     assert rig.main([
         "--out-dir", str(out_dir), "--limit", "1", "--cell", "A_nokg", "ask",
-    ]) == 0
-    assert submitted, "没有提交任何 /ask/stream 请求"
-    for body in submitted:
-        assert body["intent"]["answers"] == [{"id": "scope", "answer": "7nm"}]
+    ]) == 1
+    assert submitted == []
+    assert "reason=clarification_required" in capsys.readouterr().out
 
 
 # --- 导出(SQLite 侧) ------------------------------------------------------
@@ -2211,24 +2208,228 @@ def test_search_loop_concurrent_writes_raw_trace_under_the_write_lock(
         assert payload["trace_steps"][0]["summary"] == "人话"
 
 
-def test_auto_clarification_answers_only_required_rows_and_prefer_first_option():
-    """无人在场时 rig 替用户答必填澄清项(首跑实测契约带必填项时 `answers=[]`
-    被 `finalize_query_intent` 拒掉、整批起不来):有选项取第一个、无选项用固定
-    句、非必填不答;两次调用同一份 seed 得到逐字相同的答案(确定性)。"""
-    seed = {"ambiguities": [
-        {"id": "a1", "question": "范围?", "required": True,
-         "options": [" 全部来源 ", "仅本库"]},
-        {"id": "a2", "question": "口径?", "required": True, "options": []},
-        {"id": "a3", "question": "可选项", "required": False},
-        {"question": "无 id 的坏行", "required": True},
-    ]}
-    answers = rig.auto_clarification_answers(seed)
-    assert answers == [
-        {"id": "a1", "answer": "全部来源"},
-        {"id": "a2", "answer": rig.AUTO_CLARIFICATION_ANSWER},
-    ]
-    assert rig.auto_clarification_answers(seed) == answers
+@pytest.mark.parametrize("ambiguity", [
+    {"id": "a1", "required": True, "options": ["全部来源", "仅本库"]},
+    {"id": "a2", "required": True, "options": ["（请补充模型名称）"]},
+    {"id": "a3", "required": True, "options": []},
+    {"id": "a4", "options": ["默认选项"]},
+    {"question": "缺少 id 的阻断项", "required": True},
+])
+def test_auto_clarification_answers_refuses_to_invent_required_answers(ambiguity):
+    with pytest.raises(rig.ClarificationRequiredError, match="clarification_required"):
+        rig.auto_clarification_answers({"ambiguities": [ambiguity]})
+
+
+def test_auto_clarification_answers_only_auto_confirms_clear_intents():
     assert rig.auto_clarification_answers({}) == []
+    assert rig.auto_clarification_answers({"ambiguities": [
+        {"id": "optional", "required": False, "options": ["简述", "详述"]},
+    ]}) == []
+    with pytest.raises(rig.ClarificationRequiredError, match="clarification_required"):
+        rig.auto_clarification_answers({"needs_clarification": True})
+
+
+def test_plan_intent_does_not_freeze_a_model_placeholder_as_a_user_answer():
+    class _AmbiguousClient:
+        configured = True
+
+        def chat_json(self, *args, **kwargs):
+            return json.dumps({
+                "normalized_question": "比较两个系统的性能。",
+                "ambiguities": [{
+                    "question": "比较哪个系统？",
+                    "required": True,
+                    "options": ["请填写系统名称"],
+                }],
+                "needs_clarification": True,
+            })
+
+    repo = types.SimpleNamespace(chat=lambda _: _AmbiguousClient())
+    settings = types.SimpleNamespace(reasoning_max_subqueries=3)
+    with pytest.raises(rig.ClarificationRequiredError, match="clarification_required"):
+        rig._plan_intent(
+            repo, settings, "性能与基准方案相比如何？",
+            actor_id="fixture-owner", notebook="fixture-notebook",
+        )
+
+
+def test_intent_cache_rejects_old_confirmation_policy_without_rewriting_it(tmp_path):
+    path = tmp_path / "intents.jsonl"
+    old = json.dumps({
+        "question_key": "A-q01", "contract": {
+            "confirmed": True,
+            "clarification_answers": [{"id": "a1", "answer": "请补充系统名称"}],
+        },
+    }) + "\n"
+    path.write_text(old, encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="intent_cache_policy_mismatch"):
+        rig._IntentCache(path, enabled=True)
+
+    assert path.read_text(encoding="utf-8") == old
+
+
+def test_intent_cache_reuses_only_the_current_confirmation_policy(tmp_path, monkeypatch):
+    calls = []
+    contract = {"resolved_question": "question", "confirmed": True}
+    monkeypatch.setattr(
+        rig, "_plan_intent", lambda *a, **kw: calls.append(1) or contract,
+    )
+    path = tmp_path / "intents.jsonl"
+    item = {"question_key": "A-q01", "question": "question"}
+    for _ in range(2):
+        assert rig._IntentCache(path, enabled=True).get(
+            None, None, item, actor_id="owner", notebook="nb",
+        ) == contract
+    assert calls == [1]
+    assert json.loads(path.read_text())["intent_cache_policy"] == rig.INTENT_CACHE_POLICY
+
+
+@pytest.mark.parametrize("blocked", [False, True])
+def test_intent_cache_same_question_shares_one_terminal_outcome(
+    tmp_path, monkeypatch, blocked,
+):
+    from concurrent.futures import TimeoutError
+
+    entered = threading.Event()
+    release = threading.Event()
+    second_started = threading.Event()
+    calls = []
+    contract = {"resolved_question": "question", "confirmed": True}
+
+    def plan(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            entered.set()
+            assert release.wait(3)
+            if blocked:
+                raise rig.ClarificationRequiredError("clarification_required")
+            return contract
+        # A second independent completion would disagree with the first. It
+        # must never run while another effort of this question is being planned.
+        if not blocked:
+            raise rig.ClarificationRequiredError("clarification_required")
+        return contract
+
+    monkeypatch.setattr(rig, "_plan_intent", plan)
+    cache = rig._IntentCache(tmp_path / "intents.jsonl", enabled=True)
+
+    def get(second=False):
+        if second:
+            second_started.set()
+        return cache.get(
+            None, None, {"question_key": "A-q01", "question": "question"},
+            actor_id="owner", notebook="nb",
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(get)
+        assert entered.wait(3)
+        second = pool.submit(get, True)
+        try:
+            assert second_started.wait(3)
+            with pytest.raises(TimeoutError):
+                second.result(timeout=0.1)
+        finally:
+            release.set()
+        for result in (first, second):
+            if blocked:
+                with pytest.raises(rig.ClarificationRequiredError):
+                    result.result(timeout=3)
+            else:
+                assert result.result(timeout=3) == contract
+    assert calls == [1]
+    if blocked:
+        with pytest.raises(rig.ClarificationRequiredError):
+            get()
+    else:
+        assert get() == contract
+
+
+def test_intent_cache_different_questions_still_plan_concurrently(tmp_path, monkeypatch):
+    barrier = threading.Barrier(2)
+
+    def plan(repo, settings, question, **kwargs):
+        barrier.wait(timeout=3)
+        return {"resolved_question": question, "confirmed": True}
+
+    monkeypatch.setattr(rig, "_plan_intent", plan)
+    cache = rig._IntentCache(tmp_path / "intents.jsonl", enabled=True)
+
+    def get(key):
+        return cache.get(
+            None, None, {"question_key": key, "question": key},
+            actor_id="owner", notebook="nb",
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(get, ["A-q01", "B-q01"]))
+    assert {row["resolved_question"] for row in results} == {"A-q01", "B-q01"}
+
+
+@pytest.mark.parametrize("concurrency", [1, 2])
+def test_search_clarification_failure_lands_each_policy_without_starting_retrieval(
+    tmp_path, monkeypatch, concurrency,
+):
+    calls = []
+
+    def blocked_intent(*args, **kwargs):
+        calls.append(1)
+        raise rig.ClarificationRequiredError("clarification_required")
+
+    monkeypatch.setattr(rig, "_plan_intent", blocked_intent)
+    monkeypatch.setattr(
+        rig, "run_search_once",
+        lambda *a, **kw: pytest.fail("unconfirmed request must not start retrieval"),
+    )
+    args = _concurrent_search_args(no_intent=False)
+    plan = [_search_item("legacy"), _search_item("v2")]
+    facts = {"A_nokg": {"notebook": "nb", "sources": 1, "kg_in_scope": False}}
+    runner = rig.Runner(dry_run=False, out_dir=tmp_path)
+    common = (args, runner, plan, facts, None, {"legacy": None, "v2": None})
+    if concurrency == 1:
+        failed = rig._search_loop(
+            *common, actor_id="owner", cancel_event=threading.Event(),
+        )
+    else:
+        failed = rig._search_loop_concurrent(
+            *common, actor_id="owner", profile=types.SimpleNamespace(id="owner"),
+            concurrency=concurrency,
+        )
+
+    assert failed == 2
+    assert calls == [1], "blocked intent is shared across policies"
+    for policy in ("legacy", "v2"):
+        row = json.loads((tmp_path / f"search-{policy}.jsonl").read_text())
+        assert row["status"] == "failed"
+        assert row["has_intent_contract"] is False
+        assert row["run_wall_ms"] is None
+        assert row["reflect_turns"] == 0
+    assert "reason=clarification_required" in (tmp_path / "search-runs.log").read_text()
+
+
+@pytest.mark.parametrize("concurrency", [1, 2])
+def test_search_unexpected_intent_failure_still_propagates(
+    tmp_path, monkeypatch, concurrency,
+):
+    def invalid_intent(*args, **kwargs):
+        raise AssertionError("intent invariant")
+
+    monkeypatch.setattr(rig, "_plan_intent", invalid_intent)
+    common = (
+        _concurrent_search_args(no_intent=False),
+        rig.Runner(dry_run=False, out_dir=tmp_path), [_search_item("legacy")],
+        {"A_nokg": {"notebook": "nb", "sources": 1, "kg_in_scope": False}},
+        None, {"legacy": None, "v2": None},
+    )
+    with pytest.raises(AssertionError, match="intent invariant"):
+        if concurrency == 1:
+            rig._search_loop(*common, actor_id="owner", cancel_event=threading.Event())
+        else:
+            rig._search_loop_concurrent(
+                *common, actor_id="owner", profile=types.SimpleNamespace(id="owner"),
+                concurrency=concurrency,
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -2297,7 +2498,7 @@ def test_export_merge_keeps_a_report_row_with_no_matching_trace_file(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# report:澄清门代答 + 门控失败可观测(codex #700 R2 P2)
+# report:清晰契约确认重试 + 门控失败可观测
 # ---------------------------------------------------------------------------
 
 
@@ -2328,14 +2529,9 @@ def _stub_report_generation_at_class_level(monkeypatch):
 def test_report_generate_recovers_when_auto_confirm_intent_returns_none(
     rrepo, monkeypatch,
 ):
-    """替身:强制 `ReportEngine._auto_confirm_intent` 一律 fail-open 返回
-    `None`(其 docstring 承诺的行为——契约带必填澄清项、范围重验不过、CAS 输
-    给别人时都会这样)。修复前 `_generate_report`/`_run_reports` 对此一无所
-    知:报告原地停在 `intent_ready`,`sections` 恒空,调用方照样打『report
-    done』——看起来完全像成功(codex #700 R2 P2)。修复后:rig 用与
-    `POST .../reports/{id}/intent` 手工确认端点同一条入口
-    (`confirmed_understanding` + `claim_report_intent`)代为确认,答案走
-    `auto_clarification_answers` 那条确定性规则,报告应该正常跑到 `done`。"""
+    """A clear contract can retry the confirmation entry when auto-confirm fails
+    open. No required ambiguity or invented clarification answer is involved.
+    """
     from types import SimpleNamespace
 
     from app.services.model_work import ModelPriority, model_work_scope
@@ -2362,19 +2558,53 @@ def test_report_generate_recovers_when_auto_confirm_intent_returns_none(
         source_scope_context=source_scope_context,
     )
 
-    assert gate_reason is None, "代答应该已经把报告解开,不该再判门控失败"
+    assert gate_reason is None, "清晰契约确认重试成功，不该再判门控失败"
     detail = rrepo.get_report(nb.id, report_id)
     assert detail["status"] == "done", detail.get("error")
 
     rows = list(rig._report_rows(
         rrepo, nb.id, report_id, item, captured, gate_reason=gate_reason,
     ))
-    assert rows, "代答成功后应该有真实的节可对"
+    assert rows, "确认成功后应该有真实的节可对"
     assert all(row.get("status") != "failed" for row in rows)
     # 报告的投影要带真实上下文,不是 None payload 投出来的 unknown/false
     # (codex #700 R6 P2):depth=1 ⇒ 生产映射 overview;契约已确认 ⇒ True。
     assert all(row["effort"] == "overview" for row in rows)
     assert all(row["has_intent_contract"] is True for row in rows)
+
+
+def test_report_generate_keeps_required_clarification_blocked(rrepo, monkeypatch):
+    from app.services.model_work import ModelPriority, model_work_scope
+    from app.services.report_engine import ReportEngine
+    from app.services.source_scope import source_scope_context
+    from tests.test_report_engine import _AutoRunLLM, _bind_report_llm, _mk_nb
+
+    nb = _mk_nb(rrepo)
+    _bind_report_llm(rrepo, _AutoRunLLM(ambiguities=[{
+        "id": "load", "question": "使用哪种负载？", "required": True,
+        "options": ["请填写负载值"],
+    }]))
+    _stub_report_generation_at_class_level(monkeypatch)
+    monkeypatch.setattr(rrepo.retrieval, "federated_retrieve", lambda a, q: [])
+    question = "分析 PLL 稳定性"
+    report_id = rrepo.create_report(nb.id, question, depth=1)
+    item = _report_item(question)
+
+    captured, gate_reason = rig._generate_report(
+        rrepo, ReportEngine, types.SimpleNamespace(id="rig-owner"),
+        nb.id, report_id, item,
+        model_work_scope=model_work_scope, model_priority=ModelPriority.REPORT,
+        source_scope_context=source_scope_context,
+    )
+
+    assert gate_reason == "clarification_gate"
+    detail = rrepo.get_report(nb.id, report_id)
+    assert detail["status"] == "intent_ready"
+    assert not detail.get("sections")
+    rows = list(rig._report_rows(
+        rrepo, nb.id, report_id, item, captured, gate_reason=gate_reason,
+    ))
+    assert rows and all(row["status"] == "failed" for row in rows)
 
 
 def test_report_generate_marks_clarification_gate_failed_when_the_claim_is_lost(
