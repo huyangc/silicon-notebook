@@ -95,11 +95,17 @@ def thaw_element_enrichment_metadata(
     * keys match ``^[a-z][a-z0-9_]{0,63}$``;
     * values are ``None``/``bool``/``int``/``str``, finite ``float``, a
       sequence, or a mapping;
-    * nesting is at most ``ELEMENT_ENRICHMENT_METADATA_MAX_DEPTH`` deep.
+    * nesting is at most ``ELEMENT_ENRICHMENT_METADATA_MAX_DEPTH`` deep;
+    * no string, at any depth, contains ``\\x00`` — PostgreSQL's ``jsonb``
+      refuses that character, so admitting one here would not produce ugly
+      metadata, it would raise at persistence time, past the point where this
+      feature can still fail open.  SQLite would accept it, which is why the
+      rule lives here rather than in either backend: both must admit exactly
+      the same metadata.
 
     Raises ``TypeError`` for a value of a type that is not JSON at all and
     ``ValueError`` for a structural violation (depth, key shape, a non-finite
-    float, or exhausting ``max_nodes``/``max_chars``).
+    float, a NUL in a string, or exhausting ``max_nodes``/``max_chars``).
 
     ``max_nodes`` and ``max_chars`` bound the walk itself, and both are meant
     to be fed the caller's persisted-byte budget.  Every node costs at least
@@ -143,6 +149,16 @@ def _thawed(value: object, *, budget: list[int | None], depth: int) -> object:
         _spend(
             budget, 1, len(value), "element enrichment metadata is too large"
         )
+        # A persistence constraint, not a taste one: PostgreSQL's `jsonb`
+        # rejects a NUL character inside a string outright, so one that got
+        # past here would not be admitted-and-ugly, it would raise inside
+        # ``replace_elements()`` — on the far side of this feature's fail-open
+        # boundary, taking the whole source's ingestion down with it.  SQLite
+        # would store it happily, which is exactly why it is refused here
+        # instead: the two backends must admit the same metadata, or a
+        # deployment's parse succeeds or fails depending on its database.
+        if "\x00" in value:
+            raise ValueError("element enrichment metadata string contains NUL")
         return value
     if type(value) is float:
         # NaN and the infinities are not JSON; every consumer of this subtree
