@@ -1064,6 +1064,16 @@ class Settings(BaseSettings):
     reasoning_reflect_table_excerpt_chars: int = Field(
         1200, ge=240, le=4000,
         validation_alias="REASONING_REFLECT_TABLE_EXCERPT_CHARS")
+    # Only the explicit evidence arm expands a few relevant prose cards and
+    # reports actual excerpt visibility. False reproduces its prior layout.
+    reasoning_reflect_prose_detail_enabled: bool = Field(
+        True, validation_alias="REASONING_REFLECT_PROSE_DETAIL_ENABLED")
+    reasoning_reflect_prose_detail_chars: int = Field(
+        1000, ge=240, le=4000,
+        validation_alias="REASONING_REFLECT_PROSE_DETAIL_CHARS")
+    reasoning_reflect_prose_detail_cards: int = Field(
+        2, ge=1, le=4,
+        validation_alias="REASONING_REFLECT_PROSE_DETAIL_CARDS")
     # **可压缩区**(观察账目与历史建议)的投影预算。它不是"整个 prompt 只有这么
     # 多字符":用户完整问题、冻结约束、当前合法动作与额度、完整大纲/枚举覆盖等
     # 必要状态各按自己的边界保留,不进这个池子、也不许被整体裁尾。
