@@ -1,3 +1,5 @@
+> 历史档案（2026-09-13）：V2 实验已退役，本文不再是实施或启用指引。当前仅保留 Legacy；参见 [当前状态](../../../fangan_done.md#32-reflect-实验退役与-legacy-保留2026-09-13) 和 [产品/API 合同](../../product-and-api_zh.md)。
+
 # reflect 前缀复用 · PR-2 实施计划:T0 测量 + T1 `prefix_snapshot`
 
 日期:2026-09-09。上游设计:[reflect 上下文与前缀复用最终设计](2026-09-09-reflect-prefix-cache-final-design_zh.md)§3、§4.1–4.3、§4.5、§5.1、§8、§11(T0/T1)、§12。前置:PR-1 公共基线修复(另一份计划)先合入。

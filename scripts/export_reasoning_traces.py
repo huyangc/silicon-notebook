@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-"""reflect v2 开闸前 T0 · 只读导出:Ask 轨迹 / 报告段 → 闭集投影 JSONL。
+"""只读导出:Ask 轨迹 / 报告段 → 闭集投影 JSONL。
 
-设计真源 §2.1:
-`docs/superpowers/specs/2026-09-08-reflect-t0-trace-analysis-design_zh.md`
+命令参考: `scripts/README.md`。
 
 用法(`--database-url` **必填**,脚本不读 `.env`、不隐式连库):
 

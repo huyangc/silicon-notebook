@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "note": "reflect v2 开闸前 T0 的 rig 题集(设计规格 2026-09-08 §5)。语料是公开 LLM 论文,题面本身不含任何私有数据;gold 只对 A 语料保留,供后续 §9.2 的真实决策 A/B 使用,T0 本身只用题号(key)。key 里不许出现半角冒号——它是 client_request_id 的字段分隔符。",
+  "note": "公开论文检索诊断题集。Legacy rig 使用题号、题面和来源范围；gold 保留为人工核对参考。key 不许包含半角冒号，它是 client_request_id 的字段分隔符。",
   "corpus": {
     "A": {
       "kind": "single_paper",

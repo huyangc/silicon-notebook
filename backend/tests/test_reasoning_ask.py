@@ -341,46 +341,11 @@ def _synthesis_detail(resp):
     return steps[-1].detail if steps else {}
 
 
-def test_v2_termination_reaches_the_synthesis_prompt_and_trace(arepo):
-    """开启态:合成 prompt 多一段服务端事实,合成终步多一组稀疏键。
-
-    事实块是**指令**不是证据:它进规则之后、Question 之前那一段,不进证据区、
-    不占 `[k]` 号段,所以 `included_*` 计数与引用绑定一个字都不变。
-    """
-    nb = _seed(arepo)
-    arepo.settings.reasoning_reflect_v2_enabled = True
-    llm = _RecordingSeqLLM(
-        plan={"sub_queries": [{"query": "RTL到GDSII流程"}]},
-        # 模型自报充分但一个方面都没报告 ⇒ model_partial(§7.2)。
-        reflects=[{"next_action": "answer", "sufficient": True}],
-        answer={"answer": "RTL到GDSII是标准流程。", "grounded": False})
-    _bind_reasoning(arepo, llm)
-    resp = arepo.ask(nb.id, AskRequest(question="RTL到GDSII流程", mode="reasoning"))
-
-    prompt = llm.answer_prompts[-1]
-    assert "Retrieval status (server fact" in prompt
-    assert "must NEVER be cited" in prompt
-    assert "retrieval stopped while some mandatory aspects were still open" in prompt
-    # 服务端事实排在 Question 之前:它不是问题的一部分,也不是一条知识条目。
-    assert prompt.index("Retrieval status") < prompt.index("Question:")
-    assert prompt.index("Retrieval status") < prompt.index("Knowledge items")
-
-    detail = _synthesis_detail(resp)
-    assert detail["termination_reason"] == "model_partial"
-    assert detail["termination_summary"] == "检索结束：仍有方面没有完整支撑"
-    assert detail["aspects_total"] == 1 and detail["aspects_pending"] == 1
-    assert detail["aspects_model_supported"] == 0
-    assert detail["aspects_undelivered"] == 0
-    assert detail["unrecovered_channels"] == []
-    # 收尾那条 skip 步也在轨迹里(前端按 reason 码渲染同款摘要)。
-    assert any(step.detail.get("reason") == "retrieval_termination"
-               for step in resp.reasoning_trace)
 
 
 def test_flag_off_leaves_the_synthesis_prompt_and_detail_byte_identical(arepo):
     """关闭态(默认):prompt 没有那一段,合成终步一个新键都没有。"""
     nb = _seed(arepo)
-    assert arepo.settings.reasoning_reflect_v2_enabled is False
     llm = _RecordingSeqLLM(
         plan={"sub_queries": [{"query": "RTL到GDSII流程"}]},
         reflects=[{"next_action": "answer", "sufficient": True}],
@@ -396,49 +361,3 @@ def test_flag_off_leaves_the_synthesis_prompt_and_detail_byte_identical(arepo):
                 or key == "unrecovered_channels"]
     assert not any(step.detail.get("reason") == "retrieval_termination"
                    for step in (resp.reasoning_trace or []))
-
-
-def test_supported_aspect_whose_evidence_never_entered_the_prompt_is_undelivered(
-    arepo, monkeypatch,
-):
-    """模型说"已支撑"、但那条证据一个字都没进合成 prompt ⇒ 记未送达(§7.2)。
-
-    场景是真实的那一种:候选池里有两个对象,模型在证据卡上**都看见过**,并据其中
-    一个宣布方面已支撑;最终选集按档位的 ranked 上限只留一个,另一个连同它的支撑
-    一起被挡在合成之外。方面账那条 supported 在池子口径上完全合法——两本账的差
-    正是这条用例要钉的东西:"进了池子"不等于"进了 prompt",屏幕上只显示后者才诚实。
-
-    变异:复核时不把"全部被移除"降为未送达 ⇒ aspects_undelivered 变 0,这条红。
-    """
-    import dataclasses
-    from app.core.ask_retrieval_policy import ask_retrieval_limits
-
-    def _one_ranked_seat(effort):
-        return dataclasses.replace(
-            ask_retrieval_limits(effort), ranked_final_floor=1,
-            ranked_per_aspect=1, ranked_final_cap=1)
-
-    monkeypatch.setattr(
-        "app.services.ask_service.ask_retrieval_limits", _one_ranked_seat)
-    nb = _seed_graph(arepo)
-    hits = arepo._retrieve_scored(nb.id, "RTL到GDSII流程")
-    assert len(hits) >= 2
-    dropped = hits[-1]
-    arepo.settings.reasoning_reflect_v2_enabled = True
-    llm = _RecordingSeqLLM(
-        plan={"sub_queries": [{"query": "RTL到GDSII流程"}]},
-        reflects=[{"next_action": "answer", "sufficient": True,
-                   "assessment": {"supported": [
-                       {"aspect_id": "a1",
-                        "evidence_keys": [dropped.object_id]}]}}],
-        answer={"answer": "RTL到GDSII是标准流程。", "grounded": False})
-    _bind_reasoning(arepo, llm)
-    resp = arepo.ask(nb.id, AskRequest(question="RTL到GDSII流程", mode="reasoning"))
-
-    # 前提成立:那条证据真的被最终选集挡在了合成之外。
-    assert len(resp.related_knowledge) == 1
-    detail = _synthesis_detail(resp)
-    assert detail["aspects_model_supported"] == 1      # 模型说的
-    assert detail["aspects_synthesis_admitted"] == 0   # 真的进 prompt 的
-    assert detail["aspects_answer_cited"] == 0         # 答案真的引的
-    assert detail["aspects_undelivered"] == 1

@@ -1,10 +1,6 @@
 """per-call 表的纯分析(`app/eval/reflect_context_bench.py`)。
 
-计划真源:`docs/superpowers/specs/2026-09-09-reflect-prefix-snapshot-plan_zh.md`
-§3 T-PS5 的验收「日志⋈事件三种残缺」;设计 §8.1「单次调用」那一行。
-
-这里一次 I/O 都不做:输入是两串已经解析好的记录,输出是一串行。rig 那一侧的
-薄适配(找文件、按偏移读增量)由 `test_reflect_t0_scripts.py` 覆盖。
+输入是解析好的日志与事件；文件入口由 test_reflect_t0_scripts.py 覆盖。
 """
 from __future__ import annotations
 
@@ -287,7 +283,7 @@ def test_only_scheduler_events_are_joined():
 
 def test_run_tags_are_stamped_on_every_row():
     tags = {
-        "arm": "v2", "optimization": "prefix_snapshot", "question_key": "A-q08",
+        "question_key": "A-q08",
         "corpus_cell": "A_nokg", "effort": "standard", "repeat": 2,
     }
     rows = join_calls([_log(), _log("mdl-two")], [_event()], tags=tags)
@@ -350,7 +346,7 @@ def test_a_wordy_provider_finish_reason_is_unknown_not_an_exception():
 
     `finish_reason` 是 `app/core/llm.py` 把 provider 返回值原样存下的那一个,而
     这个仓库明确要伺候 thin OpenAI-compatible servers。抛出去的代价不是丢一格:
-    串行路这张表在 `_run_ab_arm` 的 `return` 表达式里求值,整批会在第 N 个单元
+    这张表由离线日志分析入口求值,整批会在第 N 个单元
     中止、那个单元两行还没写盘就没了,前面几百次模型调用白烧。
     """
     rows = join_calls(

@@ -51,21 +51,7 @@ L0-ONLY PROMPTS
 The following prompt-building functions in ``app.services.prompts`` carry NO
 L1 fragment at all — every word of their text is control-flow or
 self-optimization machinery that must not vary per notebook:
-``reflect_prompt`` (and ``reflect_schema_hint``), their v2 counterparts
-``reflect_v2_system_prompt`` / ``reflect_v2_user_prompt`` /
-``reflect_v2_schema_hint`` (an action space, a parameter contract and a
-stopping rule — control flow, not per-notebook wording) together with the
-three prefix layouts' spellings of the same two halves
-(``reflect_v2_static_prompt`` / ``reflect_v2_turn_state`` /
-``reflect_v2_prefix_user_prompt`` — shared verbatim by ``prefix_snapshot``,
-``prefix_delta`` and ``prefix_delta_lean``: a different BLOCK ORDER for the
-identical control-flow text, plus, on both delta layouts, four more
-sentences saying how to read an append-only block, and, on
-``prefix_delta_lean`` alone, a lean self-assessment paragraph REPLACING the
-shared one — a reporting contract the server's ledger and follow-up path
-are wired to, so it is control flow too; all three chosen by a deployment
-策略位, never per notebook),
-``report_synthesis_prompt``,
+``reflect_prompt`` (and ``reflect_schema_hint``), ``report_synthesis_prompt``,
 ``report_sufficiency_prompt``, the evidence-verification path
 (``evidence_refine_prompt``), ``followup_rewrite_prompt``, and the whole
 Agentic Memory group (``agent_profile_base_prompt``,
@@ -143,9 +129,23 @@ L1_FRAGMENTS: Dict[str, PromptFragment] = {
         _fragment(
             "answer.style_language",
             "answer_prompt",
-            "回答语言与具体性风格；不得授权新的引用绑定。"
+            "回答语言、用户要求的粒度与具体性风格；不得授权新的引用绑定或放宽覆盖披露。"
             "起始序号「4. 」与结尾换行符属于契约，覆盖值必须保留两者。",
-            "4. Answer in the question's language. Be concrete.\n",
+            "4. Answer in the question's language and at its requested level of "
+            "detail. Evidence volume and retrieval effort do not ask for a longer "
+            "answer. If a structured output schema assigns prose slots to you and "
+            "titles/citations to a renderer, fill only those slots as instructed. "
+            "Otherwise, for a title-only inventory, give every supplied matching source "
+            "record's title and citation, preserving separate records with the same "
+            "title and adding only the qualifier needed to distinguish them. Do not "
+            "add article summaries, configuration values, or unrelated system "
+            "explanations. State any required coverage limitation once, in plain "
+            "language. For an overview, explain the main point, approach and supported "
+            "conclusions; for a mechanism comparison, explain each mechanism and "
+            "their meaningful differences. Include formulas, detailed settings or "
+            "additional benchmarks only when requested or necessary to explain the "
+            "answer. Do not shorten away a requested item, essential reasoning, "
+            "supporting numeric comparison or an important exception.\n",
         ),
         _fragment(
             "answer.mechanism_organization",
@@ -157,7 +157,12 @@ L1_FRAGMENTS: Dict[str, PromptFragment] = {
             "physics -> statistical/solid-state physics -> quantum/lattice origin -> "
             "engineering practice) and keep the derivation chain complete within each "
             "layer; where the knowledge items lack a link of the chain, bridge it "
-            "explicitly as （推断）.\n",
+            "explicitly as （推断）. In mechanism explanations, preserve which "
+            "components are shared versus independent. Distinguish an unchanged "
+            "architecture from unchanged numerical results or implementation; "
+            "approximation can change the latter without redesigning the former. "
+            "A theoretical combination of mechanisms does not establish that their "
+            "specific implementations are compatible or tested together.\n",
         ),
         _fragment(
             "answer.domain_conventions",
@@ -173,11 +178,31 @@ L1_FRAGMENTS: Dict[str, PromptFragment] = {
         _fragment(
             "answer.numeric_attribution",
             "answer_prompt",
-            "数值呈现与归因风格；grounding 底线由 L0 规则 1/2 兜底。"
+            "数值呈现、逐条件比较与归因风格；grounding 底线由 L0 规则 1/2 兜底。"
             "起始序号「10. 」与结尾换行符属于契约，覆盖值必须保留两者。",
             "10. When a specific numeric value comes from a single source, attribute "
-            "it as that source's stated value; you may add the typical engineering "
-            "range or the factors that shift it, marked as （推断）.\n",
+            "it as that source's stated value. Choose comparison pairs needed to "
+            "support the requested conclusion and its decisive exceptions, including "
+            "configurations that could change it. For these pairs, the unit is ONE "
+            "metric × ONE model/version × ONE configuration and evaluation protocol "
+            "(e.g. strict/flexible scoring, with/without a system prompt). Read "
+            "headers and notes, retain units, and verify higher/lower/equal for each "
+            "unit separately, respecting which direction is better. Different "
+            "configurations in a slash-separated group must not share one direction "
+            "claim. Map slash values to labels only when the source establishes the "
+            "order; otherwise state that mapping or comparability is unknown. Never "
+            "guess or transfer a value between conditions. Preserve mixed results "
+            "and exceptions by metric, version AND configuration; a local win is "
+            "not a family-wide win. Unless a full matrix or item-by-item comparison "
+            "is requested, lead with the overall judgment, then give the necessary "
+            "paired numbers and decisive counterexamples. Do not copy both full "
+            "tables and then repeat them as comparisons. An explicit full-table "
+            "request takes precedence; never omit required dimensions, conditions "
+            "or important exceptions for brevity. Separate a source's qualitative "
+            "claim from its table values and report conflicts instead of letting "
+            "the claim override the numbers. Computed differences and syntheses "
+            "remain subject to the inference rules; cite source values, not an "
+            "unsupported conclusion.\n",
         ),
         _fragment(
             "expand_query.decomposition_guidance",
@@ -280,13 +305,7 @@ class L2Block:
     ``tests/test_prompt_layers.py`` match a registered ``block_id`` against a
     prompt function's parameter names, so a function that injects a registered
     block under a different parameter name falls outside BOTH of them —
-    silently. ``reflect_v2_prefix_user_prompt(question, contract, material)``
-    was exactly that hole (review P3-8): its data seam is called ``material``,
-    the registration lived only in the prose above, and the backward guard
-    would never notice a new injection slot being added to it or the existing
-    one being renamed. Register an alias rather than splitting the block when
-    the two names really are one block rendered by two layouts; register a
-    separate ``L2Block`` when they are two different blocks.
+    silently. Register aliases when one data block uses several parameter names.
     """
 
     block_id: str
@@ -310,22 +329,9 @@ L2_BLOCKS: Tuple[L2Block, ...] = (
     ),
     L2Block(
         "candidates_summary",
-        ("reflect_prompt", "reflect_v2_user_prompt",
-         "reflect_v2_prefix_user_prompt"),
-        "reflect 循环当前已收集候选证据的摘要文本，驱动下一步检索动作的选择。"
-        "（v2 协议把一轮 reflect 拆成 system/user 两段，这个块落在 user 段——"
-        "指令与数据分离的整个意义就是它不能和固定指令混在一条消息里。v2 下这个"
-        "形参承载的是三个**各自带标题**的子块：服务器状态、证据卡、动作观察账，"
-        "由 app.services.reasoning_context.ReflectContext 装配；legacy 下仍是"
-        "一整段候选摘要。两条前缀布局（prefix_snapshot / prefix_delta）下"
-        "同一批块换成 C/K/D/T 的顺序，"
-        "由 reflect_v2_prefix_user_prompt 的 material 形参承载——同一个块、"
-        "两个布局各自一个渲染函数，所以它登记成 param_aliases 而不是另一个"
-        "L2Block；那一份的形参不叫 candidates_summary，因为它接的已经是装配好的"
-        "分块材料而不是一段摘要。）",
-        "app.services.reasoning_retrieval（组装）；v2 分块在 "
-        "app.services.reasoning_context / reasoning_observation",
-        param_aliases=("material",),
+        ("reflect_prompt",),
+        "reflect 循环当前已收集候选证据的摘要文本，驱动下一步检索动作的选择。",
+        "app.services.reasoning_retrieval（组装）",
     ),
     L2Block(
         "history_block",
@@ -415,17 +421,5 @@ L2_BLOCKS: Tuple[L2Block, ...] = (
         "语料库实际内容的摘要（该库真正包含什么），供大纲跨专家视角规划参考。",
         "app.services.report_engine",
     ),
-    L2Block(
-        "termination_block",
-        ("answer_prompt", "report_section_prompt"),
-        "检索 run 的结束事实（设计稿 §7.2）：为什么停下来、哪些必答问题没解决、"
-        "哪些检索通道全程没恢复。标为**服务端事实**：不带 [k] id、不可引用、"
-        "不得被读成「库里没有这些内容」。reflect v2 总闸关闭（默认）时为空串，"
-        "两个 prompt 逐字回到接入前。"
-        "（刻意做成 L2 数据块而不是 L1 文本槽位：它每轮的内容由服务端事实决定，"
-        "可被定制的是「要不要注入」这件事本身，不是这段措辞——改措辞会直接改"
-        "答案对缺口的表述，而那是 L0 完整性披露合同的一部分。）",
-        "app.services.reasoning_aspects.render_termination_block；"
-        "装配点 app.services.ask_service / app.services.report_engine",
-    ),
+
 )

@@ -1,4 +1,4 @@
-"""T0 闭集投影的形态与隐私守卫(设计规格 2026-09-08 §2.4)。
+"""检索轨迹闭集投影的语义与隐私回归。
 
 合成 fixture,不碰数据库、不碰模型。每个用例钉住一条**口径**,而不是一个当前
 输出值:改了口径就该看见这里红,而不是「顺手把断言改成新值」。
@@ -11,14 +11,9 @@ import pytest
 
 from app.core.ask_retrieval_policy import ASK_RETRIEVAL_LIMITS
 from app.domain.reasoning_trace_stats import (
-    ASSESSMENT_REJECTION_REASONS,
-    OPTIMIZATIONS,
-    REFLECT_CONTEXT_DETAIL_KEYS,
-    REFLECT_MEASUREMENT_DETAIL_KEYS,
     RUN_PROJECTION_KEYS,
     TERMINATION_MODEL_DEGRADED,
     TERMINATION_MODEL_END,
-    TERMINATION_SKIP_REASON,
     UNKNOWN,
     assert_closed,
     assert_projection_values,
@@ -158,17 +153,6 @@ def test_projection_never_carries_trace_summaries():
     assert "模型写的一句话" not in json.dumps(row, ensure_ascii=False)
 
 
-def test_termination_skip_reason_matches_the_service_constant():
-    """domain 不许 import services,所以这个码在两处各写了一份字面量。
-
-    分叉了就当场红:v2 的终态步会被读成一个普通 skip,整批 v2 run 会被误判成
-    legacy 并进入反推分支。
-    """
-    from app.services.reasoning_aspects import TERMINATION_SKIP_REASON as service
-
-    assert TERMINATION_SKIP_REASON == service
-
-
 # --- legacy 缺字段 ----------------------------------------------------------
 
 
@@ -187,7 +171,6 @@ def test_missing_termination_step_is_inferred_and_flagged():
     )
     assert row["termination_reason"] == TERMINATION_MODEL_END
     assert row["termination_inferred"] is True
-    assert row["policy_version"] == "legacy"
 
 
 def test_empty_trace_leaves_every_metric_unknown():
@@ -236,26 +219,16 @@ def test_explicit_step_ceiling_overrides_the_effort_table_for_reports():
     assert project_run(JOB, steps, PAYLOAD, step_ceiling=3)["termination_reason"] is None
 
 
-def test_failed_run_without_evidence_keeps_the_declared_rig_labels():
-    """v2 的 Ask 在发出 termination 步、落答案之前就失败:没有协议证据、没有
-    payload,按证据判会记成 legacy/unknown,失败从 v2 对照列里消失(codex #700 R10
-    P2)。失败/取消的 run 用 rig 声明的标签;跑成的 run 仍以证据为准。"""
-    tags = {"policy": "v2", "effort": "deep", "question_key": "A-q01",
-            "corpus_cell": "A_nokg"}
-    failed = project_run({"mode": "reasoning", "status": "failed"}, [], None,
-                         rig_tags=tags)
-    assert failed["policy_version"] == "v2"
-    assert failed["effort"] == "deep"
-    assert failed["status"] == "failed"
-    # 跑成的 run:声明 v2 但轨迹里没有 termination 事实 ⇒ 证据说 legacy,声明不改证据。
-    done = project_run(JOB, [reflect("ppr")], PAYLOAD, rig_tags=tags)
-    assert done["policy_version"] == "legacy"
-    assert done["effort"] == PAYLOAD["retrieval_effort"]
-    # 声明不过闭集就还是 unknown/legacy,不猜。
-    junk = project_run({"mode": "reasoning", "status": "failed"}, [], None,
-                       rig_tags={"policy": "V2", "effort": "ultra"})
-    assert junk["policy_version"] == "legacy"
-    assert junk["effort"] == "unknown"
+def test_failed_run_keeps_workload_labels_without_zeroing_metrics():
+    tags = {"effort": "deep", "question_key": "A-q01", "corpus_cell": "A_nokg"}
+    row = project_run({"mode": "reasoning", "status": "failed"}, [], None,
+                      rig_tags=tags)
+    assert row["effort"] == "deep"
+    assert row["question_key"] == "A-q01"
+    assert row["corpus_cell"] == "A_nokg"
+    assert row["status"] == "failed"
+    assert row["total_ms"] is None
+    assert row["anchors"] is None
 
 
 def test_intent_presence_is_recovered_from_the_trace_when_payload_is_missing():
@@ -282,110 +255,6 @@ def test_stale_breaker_wins_over_the_budget_inference():
     assert row["termination_reason"] == "stale"
     assert row["stale_breaker"] is True
     assert row["stale_max"] == 3
-
-
-# --- v2 与 legacy 不重复计数 ------------------------------------------------
-
-
-def test_v2_termination_step_is_read_not_inferred():
-    steps = [
-        reflect("ppr"),
-        step("skip", {"reason": "stale_circuit_breaker", "stale": 3}),
-        step("skip", {
-            "reason": TERMINATION_SKIP_REASON, "termination": "model_partial",
-            "aspects": 4, "unresolved_aspects": 2,
-            "unrecovered_channels": ["ppr", "expand"],
-        }),
-    ]
-    row = project_run(JOB, steps, PAYLOAD)
-    # 同一条 run 上熔断步与终态步同时存在:结果只能有一个,而且必须是 v2 读到
-    # 的那个,不是反推出来的 "stale"。
-    assert row["termination_reason"] == "model_partial"
-    assert row["termination_inferred"] is False
-    assert row["policy_version"] == "v2"
-    assert row["unrecovered_channels_count"] == 2
-
-
-def test_v2_synthesis_keys_are_projected():
-    steps = [step("synthesis", {
-        "anchors": 3, "anchor_evidence_ids": ["a", "b", "c"],
-        "termination_reason": "model_sufficient",
-        "aspects_total": 5, "aspects_pending": 1, "aspects_undelivered": 2,
-        "included_kg": 4, "included_chunks": 9, "included_elements": 1,
-    })]
-    row = project_run(JOB, steps, PAYLOAD)
-    assert row["policy_version"] == "v2"
-    assert row["termination_reason"] == "model_sufficient"
-    assert (row["aspects_total"], row["aspects_pending"],
-            row["aspects_undelivered"]) == (5, 1, 2)
-    assert row["anchors"] == 3
-    # v2 却一条都没被拒 ⇒ 0(而不是 unknown):这条 run 真的数过。
-    assert row["assessment_rejections"] == 0
-
-
-def test_assessment_rejections_counts_aspects_not_voided_turns():
-    """`assessment_rejections` 只数**逐方面**被拒的那一族(T-BF7),按 `count` 累加。
-
-    ⚠ 两列数的东西不同,**不要相加**:逐方面拒绝每轮只记一条 skip 步(条数在
-    detail 的 `count` 里),所以 `skip_reasons` 那几项数的是**轮**,这一列数的是
-    **方面**;因为自评而整轮作废了几次 = 全部 `invalid_assessment:*` 之和 − 逐方面
-    那几项之和。
-
-    变异:把整份形状那一族也计进来 ⇒ 这条红;`_rejection_count` 改回恒 1
-    ⇒ 也红(会数成 2)。
-    """
-    steps = [
-        step("skip", {"reason": "invalid_assessment:unknown_aspect",
-                      "rejections": {"unknown_aspect": 1}, "count": 1,
-                      "aspect_ids": []}),
-        step("skip", {"reason": "invalid_assessment:gap_overflow",
-                      "rejections": {"gap_overflow": 2, "invalid_status": 1},
-                      "count": 3, "aspect_ids": ["a2", "a3", "a4"]}),
-        # 整份形状不成立 ⇒ 那一轮真的整轮作废,不计进这一列。
-        step("skip", {"reason": "invalid_assessment:item_not_object"}),
-        step("synthesis", {"termination_reason": "model_partial"}),
-    ]
-    row = project_run(JOB, steps, PAYLOAD)
-    assert row["policy_version"] == "v2"
-    assert row["assessment_rejections"] == 4        # 1 + 3 个方面
-    per_aspect_turns = sum(
-        count for reason, count in row["skip_reasons"].items()
-        if reason in ASSESSMENT_REJECTION_REASONS)
-    assert per_aspect_turns == 2                    # 逐方面拒过 2 轮
-    assert sum(
-        count for reason, count in row["skip_reasons"].items()
-        if reason.startswith("invalid_assessment:")
-    ) - per_aspect_turns == 1                       # 整轮作废了 1 次
-
-
-def test_assessment_rejections_reads_pre_merge_traces_as_one_aspect_each():
-    """T-BF7 与「每轮一条」之间落盘的旧轨迹(无 `count`)按一条一个方面计。
-
-    那时确实是「一个方面一条 skip」,所以按 1 计恰好等价——旧数据不必重投影就能
-    和新数据摆在同一列里读。
-
-    ⚠ 但 `skip_reasons` 那一列不等价:旧轨迹里它数的是方面,新轨迹里数的是轮。
-    A/B 取样不得跨越这次改动的日期(已登记进 `fangan_todo.md`)。
-
-    变异:`_rejection_count` 对缺席的 `count` 返回 0 ⇒ 这条红。
-    """
-    steps = [
-        step("skip", {"reason": "invalid_assessment:unknown_aspect"}),
-        step("skip", {"reason": "invalid_assessment:gap_overflow",
-                      "aspect_id": "a2"}),
-        step("synthesis", {"termination_reason": "model_partial"}),
-    ]
-    assert project_run(JOB, steps, PAYLOAD)["assessment_rejections"] == 2
-
-
-def test_assessment_rejections_is_unknown_on_a_legacy_run():
-    """legacy 没有这本账:恒 unknown,不折成 0。
-
-    0 会被 A/B 读成「legacy 这一列表现更好」,而它其实**结构上**不可能有值。
-    """
-    row = project_run(JOB, [step("ppr", {"found": 1})], PAYLOAD)
-    assert row["policy_version"] == "legacy"
-    assert row["assessment_rejections"] is None
 
 
 # --- 引用贡献(§4.4) --------------------------------------------------------
@@ -728,11 +597,9 @@ def _search_steps(*extra):
     ]
 
 
-def _search_row(steps, *, result=None, policy="legacy", **overrides):
+def _search_row(steps, **overrides):
     kwargs = {
-        "result": result,
         "effort": "standard",
-        "policy": policy,
         "question_key": "B-q03",
         "corpus_cell": "B_kg",
         "kg_in_scope": True,
@@ -754,96 +621,9 @@ def test_search_run_declares_its_consumer_and_trace_source():
 
 
 def test_search_run_without_a_termination_fact_infers_legacy():
-    """`result.termination` 是 **v2-only**,`None` 就是 legacy。
-
-    此时结束原因走 `project_run` 已经做过的那次反推,`termination_inferred`
-    必须是 True —— 「反推出来的」和「run 自己记下来的」不是同一个可信度。
-    """
     row = _search_row(_search_steps(reflect("answer", True)))
-    assert row["policy_version"] == "legacy"
     assert row["termination_reason"] == TERMINATION_MODEL_END
     assert row["termination_inferred"] is True
-    # 方面账是 v2 的东西,legacy 一条都读不出来 —— unknown,不是 0。
-    assert row["aspects_total"] is None and row["aspects_pending"] is None
-    assert row["unrecovered_channels_count"] is None
-
-
-def test_search_run_reads_the_termination_dto_not_the_trace_step():
-    """v2 的权威是 `RetrievalTermination` 这个 DTO,不是它在轨迹里的那份渲染。
-
-    所以这条用例的轨迹里**一条 v2 终态步都没有**:只看轨迹的话
-    `project_run` 会判成 legacy。DTO 在场就必须翻过来——它是构造期就过了闭集
-    守卫的事实,而轨迹步只是它的一次渲染,可能被截尾、可能还没写。
-    """
-    from app.domain.retrieval_termination import (
-        AspectSnapshot,
-        RetrievalTermination,
-    )
-
-    termination = RetrievalTermination(
-        reason="model_partial",
-        unresolved_aspect_ids=("a2",),
-        unrecovered_channels=("search_chunks", "add_subquery"),
-        aspects=(
-            AspectSnapshot(aspect_id="a1", question="Q1", status="supported"),
-            AspectSnapshot(aspect_id="a2", question="Q2", status="partial"),
-        ),
-    )
-    row = _search_row(
-        _search_steps(reflect("answer", True)),
-        result=type("_Result", (), {"termination": termination})(),
-        policy="v2",
-    )
-    assert row["policy_version"] == "v2"
-    assert row["termination_reason"] == "model_partial"
-    assert row["termination_inferred"] is False
-    assert row["aspects_total"] == 2 and row["aspects_pending"] == 1
-    assert row["unrecovered_channels_count"] == 2
-
-
-def test_retrieval_termination_lean_assessment_defaults_to_false():
-    """(i) `RetrievalTermination.lean_assessment` 默认 `False`,既有全部构造点
-    (未传这个关键字的调用)零改动仍能构造成功——这是本任务(T-PL2)对
-    `app.services.reasoning_aspects` 与其它既有测试的兼容承诺。
-
-    `__post_init__` 的闭集守卫只管 `reason`/`status`,不校验这个布尔——它没有
-    闭集,构造期不会因为这个新字段多出任何一种失败模式。
-
-    变异:把默认值改成 `True`,或让 `__post_init__` 校验它必须在某个闭集里
-    ⇒ 第一条断言,或既有全部零改动的构造点(例如上面
-    `test_search_run_reads_the_termination_dto_not_the_trace_step` 那条没传
-    这个关键字的构造)会红。
-    """
-    from app.domain.retrieval_termination import RetrievalTermination
-
-    termination = RetrievalTermination(reason="model_sufficient")
-    assert termination.lean_assessment is False
-
-    lean_termination = RetrievalTermination(
-        reason="model_sufficient", lean_assessment=True,
-    )
-    assert lean_termination.lean_assessment is True
-
-
-def test_retrieval_termination_field_set_is_frozen():
-    """`RetrievalTermination` 的字段**名字**集合是闭集(pl2 修正轮,存疑项)。
-
-    这个 DTO 没有像 `reason`/`status` 那样的值闭集守卫,但字段名字本身也不该
-    被悄悄插一个:多一个字段意味着全仓唯一的构造点
-    (`reasoning_aspects.classify_termination`)漏接了一个事实,而 `__post_init__`
-    的闭集守卫管不到它——那条守卫只查 `reason`/`status` 的取值,不查字段名集。
-
-    变异:在 `aspects` 之前插一个多余的 `lean_assessment2: bool = False`
-    ⇒ 这条红(质量评审 M10 曾在没有这条守卫时逃逸)。
-    """
-    import dataclasses
-
-    from app.domain.retrieval_termination import RetrievalTermination
-
-    assert {f.name for f in dataclasses.fields(RetrievalTermination)} == {
-        "reason", "unresolved_aspect_ids", "model_assessed_sufficient",
-        "unrecovered_channels", "aspects", "lean_assessment",
-    }
 
 
 def test_search_run_leaves_every_synthesis_only_metric_unknown():
@@ -877,11 +657,6 @@ def test_search_run_keeps_synthesis_metrics_when_a_synthesis_step_exists():
     assert isinstance(row["citation_contribution"], dict)
 
 
-def test_search_run_rejects_a_policy_outside_the_closed_set():
-    with pytest.raises(ValueError, match="unknown policy"):
-        _search_row(_search_steps(), policy="reflect-v3")
-
-
 def test_search_run_marks_kg_out_of_scope_when_the_caller_says_so():
     """`kg_in_scope` 由调用方的直接判定(一次 EXISTS)决定,盖掉轨迹反推。
 
@@ -908,7 +683,7 @@ def test_rerank_step_lands_in_durations_but_not_in_the_action_tallies():
     """`rerank`(T-BF6 收尾重排)只交代耗时:进 `durations_ms`,不进动作账。
 
     它是服务端每次收尾都会做的一段记账,不是模型选的一次检索动作——进
-    `action_seq` 会给每条 v2 轨迹尾巴上挂一个恒定项,把「模型挑了哪些动作」这份
+    `action_seq` 会给每条历史轨迹尾巴上挂一个恒定项,把「模型挑了哪些动作」这份
     序列稀释掉。
 
     变异 1:把 `rerank` 从 `STEP_TYPES` 里删掉 ⇒ 它被折成 `other`,第一条断言红。
@@ -945,828 +720,63 @@ def test_a_trace_without_a_rerank_step_still_projects():
     assert row["total_ms"] == 195030
 
 
-# --- T-PS4 reflect 前缀复用测量 ---------------------------------------------
-
-
-def measured_reflect(next_action="ppr", **measurements):
-    """`reflect(...)` 的纯别名,只为在用例里点明「这一步带着测量键」。
-
-    它一个字都不加工:稀疏键就是 `**measurements` 原样进 detail。用例这边自己拼
-    键名、不 import 写侧的清单——写侧(计划 §3 T-PS3)与读侧对「有哪些稀疏键」
-    分叉了,正是要被看见的东西(那件事由
-    `test_the_sparse_detail_key_registry_matches_the_plan` 单独钉住)。
-    """
-    return reflect(next_action, **measurements)
-
-
-#: T-PS4 + T-PD2 + T-PL2 在闭集上新增的**顶层**键。冻结基线用例按它把新旧两半
-#: 切开。
-NEW_MEASUREMENT_KEYS = frozenset({
-    "run_wall_ms", "model_calls_real", "attempts_observed", "optimization",
-    "context_chars", "prefix_bytes_median", "prefix_bytes_min", "prefix_turns",
-    "response_chars_total",
-    # T-PD2:`prefix_delta` 专属的两个测量列,冻结基线(`off`/legacy)下同样恒
-    # `None`——这两键在这批 run 上从未被写侧观测过。
-    "context_rebuilds", "context_fallback",
-    # T-PL2(计划 §3):三个新顶层列,冻结基线(`off`/legacy)下同样恒 `None`
-    # ——写侧(T-PL5)在本任务里还没落地。`assessment_observed` 是
-    # `assessment_rows_total` 的伴生披露列(质量评审修正 P2-2),照
-    # `attempts_observed` 与 `model_calls_real` 的先例挨着放。
-    "assessment_rows_total", "assessment_observed", "aspects_unassessed",
-})
-
-#: 一条 `off`(v2 跑成、测量关)轨迹在 T-PS4 **接入之前**投影出来的逐键快照。
-#: 手写而不是从代码里算,正是为了让「接入测量把某个旧列算法改了」当场红。
-FROZEN_OFF_ROW = {
-    "action_seq": ["seed:ppr", "search_chunks"],
-    "actions_by_type": {"search_chunks": 1},
-    "anchors": 2,
-    "aspects_pending": None,
-    "aspects_total": None,
-    "aspects_undelivered": None,
-    "assessment_rejections": 0,
-    "candidates_chunks": None,
-    "candidates_elements": None,
-    "candidates_kg": None,
-    "citation_contribution": {
-        "search_chunks": {"cited_hits": 1, "steps": 1, "steps_with_ids": 1,
-                          "unknown_steps": 0},
-        "seed:ppr": {"cited_hits": 1, "steps": 1, "steps_with_ids": 1,
-                     "unknown_steps": 0},
-    },
-    "consumer": "ask_single",
-    "corpus_cell": "B_kg",
-    "durations_ms": {"ppr": 40, "reflect": 1700, "search_chunks": 30,
-                     "synthesis": 500},
-    "effort": "standard",
-    "empty_actions_by_type": {},
-    "fallback_count": 0,
-    "fallback_reasons": {},
-    "has_intent_contract": False,
-    "included_chunks": 1,
-    "included_elements": 0,
-    "included_kg": 1,
-    "kg_in_scope": True,
-    "mode": "reasoning",
-    "notebook_bucket": "2-5",
-    "policy_version": "v2",
-    "question_key": "B-q01",
-    "reflect_turns": 2,
-    "seed_actions_by_type": {"ppr": 1},
-    "shared_hits": 0,
-    "skip_reasons": {"retrieval_termination": 1},
-    "stale_breaker": False,
-    "stale_max": None,
-    "status": "done",
-    "termination_inferred": False,
-    "termination_reason": "model_sufficient",
-    "total_ms": 2270,
-    "trace_source": "trace_steps",
-    "trace_steps": 6,
-    "trace_truncated": False,
-    "unrecovered_channels_count": None,
-}
-
-
-def off_steps():
-    """一条 `off` 轨迹:v2 跑成、reflect 步 detail 里一个测量键都没有。"""
-    return [
-        step("ppr", {"phase": "seed", "found": 2,
-                     "result_ids": ["e1", "e2"]}, duration_ms=40),
-        step("reflect", {"next_action": "search_chunks", "sufficient": False},
-             duration_ms=900),
-        step("search_chunks", {"count": 1, "result_ids": ["e3"]},
-             duration_ms=30),
-        step("reflect", {"next_action": "answer", "sufficient": True},
-             duration_ms=800),
-        step("skip", {"reason": TERMINATION_SKIP_REASON,
-                      "termination": "model_sufficient"}),
-        step("synthesis", {"anchors": 2, "anchor_evidence_ids": ["e1", "e3"],
-                           "included_kg": 1, "included_chunks": 1,
-                           "included_elements": 0}, duration_ms=500),
+def test_recorded_retrieval_failure_wins_over_stale_inference():
+    rows = [
+        reflect("search_elements"),
+        step("skip", {"reason": "stale_circuit_breaker", "stale": 3}),
+        step("skip", {"reason": "retrieval_termination",
+                      "termination": "retrieval_degraded"}),
     ]
-
-
-def off_row(**tags):
-    return project_run(
-        JOB, off_steps(), PAYLOAD, sources_count=3,
-        rig_tags={"corpus_cell": "B_kg", "question_key": "B-q01", **tags},
-    )
-
-
-def test_off_row_matches_the_frozen_baseline_key_by_key():
-    """`off` 行的**旧**那一半逐键与冻结基线相同,新那一半全是 unknown。
-
-    这是 T-PS4 的核心验收:往闭集里加九个键,不许顺手改动任何一个既有列的算法。
-    键集是闭集,所以「键集不变」的正确说法是「新键的值全为 `None`」,而不是
-    「新键不出现」——`optimization` 是唯一的例外(它是**声明**,rig 说 `off`
-    就是 `off`,没人声明才是 unknown)。
-
-    变异:把 `trace_truncated` 改成读别的键、或让 `_reflect_attempts` 在没有观测
-    时返回 0 ⇒ 这条红。
-    """
-    row = off_row(optimization="off")
-    legacy_half = {key: value for key, value in row.items()
-                   if key not in NEW_MEASUREMENT_KEYS}
-    assert legacy_half == FROZEN_OFF_ROW
-    assert row["optimization"] == "off"
-    for key in NEW_MEASUREMENT_KEYS - {"optimization"}:
-        assert row[key] is None, key
-
-
-def test_a_legacy_row_carries_the_new_keys_as_unknown_not_zero():
-    """`legacy` 行同样:新列全 `None`,`optimization` 无人声明 ⇒ unknown。
-
-    0 会被读成「量过了,结果是零」——legacy 明明每轮都调了模型。
-    """
-    row = project_run(JOB, [reflect("answer", sufficient=True)], PAYLOAD)
-    assert row["policy_version"] == "legacy"
-    assert row["optimization"] == UNKNOWN
-    for key in NEW_MEASUREMENT_KEYS - {"optimization"}:
-        assert row[key] is None, key
-
-
-def test_measurement_keys_project_from_the_reflect_step_details():
-    """测量开着时,九个新列一次性出齐。"""
-    row = project_run(
-        JOB,
-        [
-            measured_reflect(
-                "ppr", ctx_chars_s=800, ctx_chars_c=1200, ctx_chars_k=400,
-                ctx_chars_d=300, ctx_chars_t=200, ctx_bytes_total=8400,
-                message_prefix_bytes=None, cards_shown=6, cards_omitted=1,
-                call_wall_ms=1900, call_attempts=1, response_chars=310,
-            ),
-            measured_reflect(
-                "answer", ctx_chars_s=800, ctx_chars_c=1200, ctx_chars_k=700,
-                ctx_chars_d=300, ctx_chars_t=260, ctx_bytes_total=9600,
-                message_prefix_bytes=3134, cards_shown=8, cards_omitted=0,
-                call_wall_ms=2100, call_attempts=2, response_chars=90,
-            ),
-        ],
-        PAYLOAD,
-        rig_tags={"optimization": "prefix_snapshot"},
-    )
-    assert row["optimization"] == "prefix_snapshot"
-    assert row["model_calls_real"] == 3
-    assert row["attempts_observed"] is True
-    assert row["response_chars_total"] == 400
-    assert row["prefix_bytes_median"] == 3134
-    assert row["prefix_bytes_min"] == 3134
-    assert row["prefix_turns"] == 1
-    # 导出这条路上没人知道 run 的墙钟(rig 才有),恒 unknown。
-    assert row["run_wall_ms"] is None
-    assert_closed(row)
-    assert_projection_values(row)
-
-
-def test_context_chars_takes_the_last_turn_per_short_code():
-    """`context_chars` 取**最后一轮**,不求和、不取均值。"""
-    row = project_run(
-        JOB,
-        [
-            measured_reflect("ppr", ctx_chars_s=800, ctx_chars_k=400,
-                             ctx_bytes_total=8400),
-            measured_reflect("answer", ctx_chars_s=800, ctx_chars_k=700,
-                             ctx_bytes_total=9600),
-        ],
-        PAYLOAD,
-    )
-    assert row["context_chars"] == {"s": 800, "k": 700, "bytes_total": 9600}
-
-
-def test_context_chars_total_is_the_byte_total_not_the_sum_of_the_char_blocks():
-    """`bytes_total` 的单位是**字节**(`ctx_bytes_total`),另外五个是**字符**。
-
-    中文一个字三字节,所以它恒大于五块字符数之和,而不等于它。短码里带上
-    `bytes_` 就是为了把这件事写在名字上:键名 `context_chars` 会诱人把一个叫
-    `total` 的短码读成「总字符数」,那会让 `prefix_bytes_*` ÷
-    `context_chars["bytes_total"]` 这道「复用了几成」的除法两边单位不一致,算出
-    一个大得离谱的比例。
-
-    变异:把 `REFLECT_CONTEXT_DETAIL_KEYS["bytes_total"]` 改成任何一个
-    `ctx_chars_*` ⇒ 这条红;把短码改回 `total` ⇒ 第一条 KeyError。
-    """
-    assert REFLECT_CONTEXT_DETAIL_KEYS["bytes_total"] == "ctx_bytes_total"
-    assert "total" not in REFLECT_CONTEXT_DETAIL_KEYS
-    row = project_run(
-        JOB,
-        [measured_reflect("answer", ctx_chars_s=10, ctx_chars_c=10,
-                          ctx_chars_k=10, ctx_chars_d=10, ctx_chars_t=10,
-                          ctx_bytes_total=150)],
-        PAYLOAD,
-    )
-    blocks = row["context_chars"]
-    assert blocks["bytes_total"] == 150
-    assert blocks["bytes_total"] != sum(
-        blocks[code] for code in ("s", "c", "k", "d", "t")
-    )
-
-
-def test_context_chars_is_unknown_not_an_empty_dict_without_measurements():
-    row = project_run(JOB, [reflect("answer", sufficient=True)], PAYLOAD)
-    assert row["context_chars"] is None
-
-
-def test_model_calls_real_is_unknown_when_one_turn_lacks_attempts():
-    """部分带 ⇒ 和是几步的部分和,不出数;但「观测不全」本身是真的。
-
-    变异:把 `_reflect_attempts` 的「部分带」分支改成 `sum(present)` ⇒ 这条红。
-    """
-    row = project_run(
-        JOB,
-        [
-            measured_reflect("ppr", call_attempts=2),
-            reflect("answer", sufficient=True),
-        ],
-        PAYLOAD,
-    )
-    assert row["model_calls_real"] is None
-    assert row["attempts_observed"] is False
-
-
-def test_attempts_observed_is_unknown_when_no_turn_carries_it():
-    """一条都没带(旧轨迹 / 测量关)⇒ `None`,不是 `False`。
-
-    `False` 是「量到了一半」,与「压根没量」不是同一件事:聚合侧对前者会去看
-    `model_calls_real` 的下界,对后者只该报 n_missing。
-    """
-    assert project_run(JOB, [reflect("answer")], PAYLOAD)[
-        "attempts_observed"] is None
-    # 一条 reflect 步都没有的 run(chunk 模式)同样是「没量」,不是「零次调用」。
-    chunk_row = project_run(JOB, [step("search_chunks", {"count": 3})], PAYLOAD)
-    assert chunk_row["attempts_observed"] is None
-    assert chunk_row["model_calls_real"] is None
-
-
-def test_a_truncated_trace_does_not_mask_model_calls_real():
-    """截断标**既不掩盖** `model_calls_real`,**也不改** `attempts_observed`。
-
-    `trace_truncated` 判的是某一步自己的 `result_ids`/`anchor_evidence_ids` 被
-    `TRACE_RESULT_IDS_MAX` 那条 20 条上限截了,不是「轨迹少了几轮」——两条读路
-    都整步读、整步给。所以这条 run 的每一轮 reflect 都确实带了 `call_attempts`,
-    `attempts_observed` 就该是 `True`,和是全量而不是下界;拿一步内部的 id 列表
-    太长去否证「每轮都量到了」,是把两件事混成一列(评审 P1)。
-
-    变异:把 `_reflect_attempts` 改回读 `truncated`(全带了但轨迹带截断标 ⇒
-    `False`)⇒ 最后一条断言红。
-    """
-    row = project_run(
-        JOB,
-        [
-            measured_reflect("ppr", call_attempts=1),
-            measured_reflect("answer", call_attempts=1),
-            step("synthesis", {"anchors": 1, "anchor_evidence_ids": ["e1"],
-                               "anchor_evidence_ids_truncated": True}),
-        ],
-        PAYLOAD,
-    )
-    assert row["trace_truncated"] is True
-    assert row["model_calls_real"] == 2
-    assert row["attempts_observed"] is True
-
-
-def test_prefix_aggregate_skips_the_first_turn_and_takes_the_nearest_rank_median():
-    """首轮没有可比的上一轮(写侧记 `None`),不计进三格聚合。
-
-    中位数取最近秩、偶数条取偏小的那个:平均出来的字节数不是任何一轮真实的前缀
-    长度。四条 [700, 900, 1100, 1300] ⇒ 中位数 900(第 2 个),不是 1000。
-
-    变异:把 `_prefix_bytes` 的中位数改成两数平均 ⇒ 这条红;把首轮的 `None` 折成
-    0 ⇒ `prefix_bytes_min` 变 0,这条也红。
-    """
-    row = project_run(
-        JOB,
-        [
-            measured_reflect("ppr", message_prefix_bytes=None),
-            measured_reflect("ppr", message_prefix_bytes=1300),
-            measured_reflect("ppr", message_prefix_bytes=700),
-            measured_reflect("ppr", message_prefix_bytes=1100),
-            measured_reflect("answer", message_prefix_bytes=900),
-        ],
-        PAYLOAD,
-    )
-    assert row["prefix_turns"] == 4
-    assert row["prefix_bytes_median"] == 900
-    assert row["prefix_bytes_min"] == 700
-
-
-def test_prefix_turns_is_unknown_not_zero_without_measurements():
-    """0 会被读成「量过了,一轮都没复用」。"""
-    row = project_run(JOB, [reflect("answer"), reflect("answer")], PAYLOAD)
-    assert row["prefix_turns"] is None
-    assert row["prefix_bytes_median"] is None
-    assert row["prefix_bytes_min"] is None
-
-
-def test_response_chars_total_is_unknown_when_one_turn_lacks_it():
-    row = project_run(
-        JOB,
-        [measured_reflect("ppr", response_chars=10), reflect("answer")],
-        PAYLOAD,
-    )
-    assert row["response_chars_total"] is None
-
-
-# --- T-PD2 context_rebuilds / context_fallback ------------------------------
-
-
-def test_context_rebuilds_and_fallback_are_unknown_without_any_observation():
-    """三键(`context_rebuilds`/`context_fallback`/`delta_blocks`)一条都没出现
-    过的旧轨迹(`legacy`/`off`/`prefix_snapshot`)⇒ 两列 `None`,不是 0/`False`。
-    """
-    row = project_run(JOB, [reflect("answer", sufficient=True)], PAYLOAD)
-    assert row["context_rebuilds"] is None
-    assert row["context_fallback"] is None
-
-
-def test_context_rebuilds_takes_the_max_over_present_turns():
-    """`context_rebuilds` 是**最大值**(max-over-present),不是求和——它是一次
-    run 内单调不减的运行期计数,三步各带 0/1/2 ⇒ 出 2。
-
-    变异:把 `_reflect_context_rebuilds` 改成 `sum` ⇒ 这条红(应为 2,`sum` 会
-    给 3)。
-    """
-    row = project_run(
-        JOB,
-        [
-            measured_reflect("ppr", context_rebuilds=0),
-            measured_reflect("ppr", context_rebuilds=1),
-            measured_reflect("answer", context_rebuilds=2),
-        ],
-        PAYLOAD,
-    )
-    assert row["context_rebuilds"] == 2
-
-
-def test_context_rebuilds_zero_is_distinct_from_unknown():
-    """`context_rebuilds == 0`(跑了 delta、一次都没重建)必须能与 `None`(非
-    delta 臂/未测量)分得开——两者都不是「假」,但含义完全不同。
-    """
-    row = project_run(
-        JOB, [measured_reflect("answer", context_rebuilds=0)], PAYLOAD,
-    )
-    assert row["context_rebuilds"] == 0
-    assert row["context_rebuilds"] is not None
-
-
-def test_context_fallback_is_true_when_any_turn_carries_it():
-    """只有中间一步 `context_fallback=True`(回退按拍板 Q4 不可逆,发生一次即
-    整 run 真)⇒ 整列 `True`;有键但全为假 ⇒ `False`。
-
-    变异:把 `_reflect_context_fallback` 改成 `all()` ⇒ 第一条断言红。
-    """
-    row = project_run(
-        JOB,
-        [
-            measured_reflect("ppr", context_fallback=False),
-            measured_reflect("ppr", context_fallback=True),
-            measured_reflect("answer", context_fallback=False),
-        ],
-        PAYLOAD,
-    )
-    assert row["context_fallback"] is True
-
-    all_false_row = project_run(
-        JOB,
-        [
-            measured_reflect("ppr", context_fallback=False),
-            measured_reflect("answer", context_fallback=False),
-        ],
-        PAYLOAD,
-    )
-    assert all_false_row["context_fallback"] is False
-
-
-def test_context_rebuilds_and_fallback_reject_free_form_values():
-    """detail 层的自由文本被 `_int`/`_bool` 吞成 `None`(不是抛错、不是透传);
-    `assert_projection_values` 层对自由文本仍然拒绝(隐私守卫的第二道闸)——
-    两列各自都要过这一层,`_assert_projection_value` 对两者行为相同,所以这是
-    覆盖而不是缺陷(评审 P3-3)。
-
-    变异:让 `_reflect_context_rebuilds`/`_reflect_context_fallback` 改用一个
-    宽松的类型转换(如 `int(raw)`/`bool(raw)`)⇒ 第一组断言红(不再是 `None`,
-    而是把字符串强转成了数字/真值)。
-    """
-    row = project_run(
-        JOB,
-        [
-            measured_reflect("answer", context_rebuilds="很多次",
-                             context_fallback="是的"),
-        ],
-        PAYLOAD,
-    )
-    assert row["context_rebuilds"] is None
-    assert row["context_fallback"] is None
-
-    bad_row = dict(off_row(optimization="off"))
-    bad_row["context_rebuilds"] = "很多次"
-    with pytest.raises(ValueError, match="context_rebuilds"):
-        assert_projection_values(bad_row)
-
-    bad_fallback_row = dict(off_row(optimization="off"))
-    bad_fallback_row["context_fallback"] = "是的"
-    with pytest.raises(ValueError, match="context_fallback"):
-        assert_projection_values(bad_fallback_row)
-
-
-def test_context_rebuilds_and_fallback_reject_type_confused_scalars():
-    """`_bool`/`_int` 的严格性不能只被自由文本钉住——两列互相串味的整数/布尔值
-    是更现实的写侧手滑(评审 P2-2):`context_fallback` 的孪生键
-    `context_rebuilds` 本来就是 int,写侧一旦手滑把 `context_rebuilds` 写成
-    `bool(...)`,或者把 `context_fallback` 写成 `0`/`1`,这两列必须继续读成
-    `None`,而不是悄悄把一次 unknown 变成一次「观测到了」。
-
-    `context_fallback=0` 单独钉一条:它与「量到了、答案是没回退」的 `False`
-    在报表上长得一模一样,`_bool` 一旦放宽收 `int` 就会把两者混成同一格。
-
-    变异:`_bool` 改成 `bool(raw) if isinstance(raw, (bool, int)) else None`
-    (收 int)⇒ 第二、三组断言红;`_reflect_context_rebuilds` 的读取器改成接受
-    `bool`(`True` → 1)⇒ 第一组断言红。
-    """
-    rebuilds_row = project_run(
-        JOB, [measured_reflect("answer", context_rebuilds=True)], PAYLOAD,
-    )
-    assert rebuilds_row["context_rebuilds"] is None
-
-    fallback_one_row = project_run(
-        JOB, [measured_reflect("answer", context_fallback=1)], PAYLOAD,
-    )
-    assert fallback_one_row["context_fallback"] is None
-
-    fallback_zero_row = project_run(
-        JOB, [measured_reflect("answer", context_fallback=0)], PAYLOAD,
-    )
-    assert fallback_zero_row["context_fallback"] is None
-
-
-def test_context_rebuilds_and_fallback_project_alongside_the_other_nine_keys():
-    """测量开着、`prefix_delta` 声明下,两个新列与既有九个测量列一起出齐。"""
-    row = project_run(
-        JOB,
-        [
-            measured_reflect(
-                "ppr", ctx_chars_s=800, ctx_chars_c=1200, ctx_chars_k=400,
-                ctx_chars_d=300, ctx_chars_t=200, ctx_bytes_total=8400,
-                call_attempts=1, response_chars=310,
-                context_rebuilds=0, context_fallback=False, delta_blocks=1,
-            ),
-            measured_reflect(
-                "answer", ctx_chars_s=800, ctx_chars_c=1200, ctx_chars_k=400,
-                ctx_chars_d=520, ctx_chars_t=260, ctx_bytes_total=9600,
-                call_attempts=1, response_chars=90,
-                context_rebuilds=1, context_fallback=False, delta_blocks=2,
-            ),
-        ],
-        PAYLOAD,
-        rig_tags={"optimization": "prefix_delta"},
-    )
-    assert row["optimization"] == "prefix_delta"
-    assert row["context_rebuilds"] == 1
-    assert row["context_fallback"] is False
-    # `delta_blocks` 登记但不进顶层投影。
-    assert "delta_blocks" not in row
-    assert_closed(row)
-    assert_projection_values(row)
-
-
-# --- T-PL2 assessment_rows_total / aspects_unassessed -----------------------
-
-
-def test_assessment_rows_total_and_aspects_unassessed_are_unknown_without_any_observation():
-    """(a) 两键一条观测都没出现过 ⇒ 两列 `None`,不是 0;伴生的
-    `assessment_observed` 同样是 `None`——一条 reflect 步都没带这个观测,不是
-    "带了、答案是没有"。
-    """
-    row = project_run(JOB, [reflect("answer", sufficient=True)], PAYLOAD)
-    assert row["assessment_rows_total"] is None
-    assert row["assessment_observed"] is None
-    assert row["aspects_unassessed"] is None
-
-
-def test_assessment_rows_total_sums_over_present_steps_when_one_is_missing():
-    """(b) 三步 2/缺/1(中间一步没有 `assessment_rows`,例如 provider
-    fail-open 的那一轮)⇒ `assessment_rows_total == 3`(**sum-over-present**,
-    过滤掉缺席的那步求和)、`assessment_observed is False`(观测不全,但和是
-    真实值,不是下界)。
-
-    质量评审修正 P2-2:这一列**不再**走 `_reflect_sum` 的"任一步缺 ⇒ 整列
-    unknown"口径——provider fail-open 的那一轮不进 `_absorb_assessment`,该轮
-    压根不会带 `assessment_rows`,但它仍是一条正常记的 reflect 步;沿用全或无
-    口径会让一次偶发的 provider 抖动把整条 run 的这一列读成 unknown,把它从
-    D↔L「省了多少重述」的配对样本里整条挤出去。
-
-    变异:把 `_reflect_assessment` 换成 `_reflect_context_rebuilds` 的
-    max-over-present 口径 ⇒ 这条红——present 的两个值是 `2` 和 `1`,
-    `max([2, 1]) == 2 != 3`,sum 与 max 在这组数据上本来就分得开(旧版这条
-    用例的变异注记声称"三值恰好无法区分 sum/max"并不成立,见质量评审 P3-1)。
-    """
-    row = project_run(
-        JOB,
-        [
-            measured_reflect("ppr", assessment_rows=2),
-            reflect("ppr"),
-            measured_reflect("answer", assessment_rows=1),
-        ],
-        PAYLOAD,
-    )
-    assert row["assessment_rows_total"] == 3
-    assert row["assessment_observed"] is False
-
-
-def test_assessment_rows_total_sums_all_present_steps_and_flags_full_observation():
-    """三步 2/0/1 全带齐 ⇒ `assessment_rows_total == 3`、
-    `assessment_observed is True`——`0` 是这一轮真实观测到的"省略了自评",照样
-    计入和,不是缺席。
-    """
-    row = project_run(
-        JOB,
-        [
-            measured_reflect("ppr", assessment_rows=2),
-            measured_reflect("ppr", assessment_rows=0),
-            measured_reflect("answer", assessment_rows=1),
-        ],
-        PAYLOAD,
-    )
-    assert row["assessment_rows_total"] == 3
-    assert row["assessment_observed"] is True
-
-
-def test_assessment_rows_total_zero_is_distinct_from_unknown():
-    """(c) 全部步的 `assessment_rows` 都是 0(每轮都省略自评)⇒ 和是 0,不是
-    `None`——「量到了,答案是零」与「没量」必须分得开。这一步也带齐了观测,
-    `assessment_observed` 该是 `True`,不是 `None`。
-    """
-    row = project_run(
-        JOB, [measured_reflect("answer", assessment_rows=0)], PAYLOAD,
-    )
-    assert row["assessment_rows_total"] == 0
-    assert row["assessment_rows_total"] is not None
-    assert row["assessment_observed"] is True
-
-
-def test_assessment_rows_total_rejects_free_form_and_type_confused_values():
-    """(d) 隐私守卫只收 int:自由文本与布尔值被 `_int` 吞成 `None`(不是抛错、
-    不是透传);`assert_projection_values` 对写坏的行仍然拒绝。两种情形下这一步
-    的值都被读成"缺席",所以 `assessment_observed` 也是 `None`,不是
-    `False`——它不是"带了、值不对",而是压根没有这个观测。
-
-    变异:把 `_reflect_assessment` 的读取器换成宽松的 `int(raw)` ⇒ 第一条断言
-    红(字符串会被强转成数字)。
-    """
-    row = project_run(
-        JOB, [measured_reflect("answer", assessment_rows="很多行")], PAYLOAD,
-    )
-    assert row["assessment_rows_total"] is None
-    assert row["assessment_observed"] is None
-
-    bool_row = project_run(
-        JOB, [measured_reflect("answer", assessment_rows=True)], PAYLOAD,
-    )
-    assert bool_row["assessment_rows_total"] is None
-    assert bool_row["assessment_observed"] is None
-
-    bad_row = dict(off_row(optimization="off"))
-    bad_row["assessment_rows_total"] = "很多行"
-    with pytest.raises(ValueError, match="assessment_rows_total"):
-        assert_projection_values(bad_row)
-
-
-def test_aspects_unassessed_reads_the_termination_skip_step_not_any_step():
-    """(e) `aspects_unassessed` 只读**终态** skip 步(`reason ==
-    TERMINATION_SKIP_REASON`)的 detail,`0` 与缺席分得开。
-
-    变异:把 `_aspects_unassessed` 改成读任意一条 skip 步 ⇒ 第一条断言会被
-    熔断步(`stale_circuit_breaker`)上误挂的同名键污染而红。
-    """
-    steps = [
-        reflect("ppr"),
-        step("skip", {"reason": "stale_circuit_breaker",
-                      "aspects_unassessed": 9}),
-        step("skip", {"reason": TERMINATION_SKIP_REASON,
-                      "termination": "model_sufficient",
-                      "aspects_unassessed": 0}),
+    row = project_run(JOB, rows, PAYLOAD)
+    assert row["termination_reason"] == "retrieval_degraded"
+    assert row["termination_inferred"] is False
+    assert row["stale_breaker"] is True
+
+
+def test_recorded_terminal_fact_is_not_overwritten_by_model_end_inference():
+    rows = [reflect("answer", True), step("skip", {
+        "reason": "retrieval_termination", "termination": "model_partial",
+    })]
+    row = project_run(JOB, rows, PAYLOAD)
+    assert row["termination_reason"] == "model_partial"
+    assert row["termination_inferred"] is False
+
+
+@pytest.mark.parametrize("kind", ["answer", "synthesis"])
+def test_persisted_answer_terminal_fact_survives_export(kind):
+    rows = [reflect("answer", True), step(kind, {
+        "termination_reason": "model_degraded", "anchors": 2,
+    })]
+    row = project_run(JOB, rows, PAYLOAD)
+    assert row["termination_reason"] == "model_degraded"
+    assert row["termination_inferred"] is False
+
+
+def test_terminal_skip_fact_takes_precedence_over_synthesis_projection():
+    rows = [
+        step("skip", {"reason": "retrieval_termination",
+                      "termination": "retrieval_degraded"}),
+        step("synthesis", {"termination_reason": "model_sufficient"}),
     ]
-    row = project_run(JOB, steps, PAYLOAD)
-    assert row["aspects_unassessed"] == 0
-    assert row["aspects_unassessed"] is not None
-
-    unassessed_row = project_run(
-        JOB,
-        [
-            reflect("answer", sufficient=True),
-            step("skip", {"reason": TERMINATION_SKIP_REASON,
-                          "termination": "model_sufficient",
-                          "aspects_unassessed": 3}),
-        ],
-        PAYLOAD,
-    )
-    assert unassessed_row["aspects_unassessed"] == 3
-
-    no_termination_row = project_run(
-        JOB, [reflect("answer", sufficient=True)], PAYLOAD,
-    )
-    assert no_termination_row["aspects_unassessed"] is None
+    row = project_run(JOB, rows, PAYLOAD)
+    assert row["termination_reason"] == "retrieval_degraded"
+    assert row["termination_inferred"] is False
 
 
-def test_aspects_unassessed_takes_the_first_terminal_skip_step_and_requires_skip_type():
-    """质量评审 P3-3(存疑,pl2 修正轮补齐):`_aspects_unassessed` 的判据是
-    「`step_type == "skip"` **且** `reason == TERMINATION_SKIP_REASON`」,取
-    **首条**命中的步。两半各补一条移动变异用例:
-
-    1. **取首条**:一条 run 理论上只会记一条终态 skip 步,但代码本身没有"只有
-       一条"这条断言撑腰——两条终态 skip 步、取值不同时必须是第一条赢。
-    2. **`step_type == "skip"` 这半合取**:一条非 skip 步(这里借用 `reflect`)
-       挂着终态原因码 `reason`(现实里不会发生,但代码没有拦它),必须被
-       `step_type` 那半挡在外面,不能只靠 `reason` 判定。
-
-    变异:`_aspects_unassessed` 改成取**末条**终态 skip 步(如
-    `reversed(steps)`)⇒ 第一段断言红(读到 2,不是 1);去掉
-    `step["step_type"] == "skip"` 只留 `reason` 判据 ⇒ 第二段断言红(读到那条
-    `reflect` 步上的 99,而不是真正终态 skip 步的 1)。
-    """
-    two_terminal_steps_row = project_run(
-        JOB,
-        [
-            reflect("answer", sufficient=True),
-            step("skip", {"reason": TERMINATION_SKIP_REASON,
-                          "termination": "model_sufficient",
-                          "aspects_unassessed": 1}),
-            step("skip", {"reason": TERMINATION_SKIP_REASON,
-                          "termination": "model_sufficient",
-                          "aspects_unassessed": 2}),
-        ],
-        PAYLOAD,
-    )
-    assert two_terminal_steps_row["aspects_unassessed"] == 1
-
-    non_skip_step_row = project_run(
-        JOB,
-        [
-            reflect("ppr", reason=TERMINATION_SKIP_REASON,
-                    aspects_unassessed=99),
-            step("skip", {"reason": TERMINATION_SKIP_REASON,
-                          "termination": "model_sufficient",
-                          "aspects_unassessed": 1}),
-        ],
-        PAYLOAD,
-    )
-    assert non_skip_step_row["aspects_unassessed"] == 1
+@pytest.mark.parametrize("value", [None, "", "unsupported", "private source content", True, {}])
+def test_invalid_recorded_terminal_fact_stays_unknown(value):
+    rows = [reflect("answer", True), step("skip", {
+        "reason": "retrieval_termination", "termination": value,
+    })]
+    row = project_run(JOB, rows, PAYLOAD)
+    assert row["termination_reason"] == UNKNOWN
+    assert row["termination_inferred"] is False
+    assert "private source content" not in json.dumps(row)
 
 
-def test_aspects_unassessed_rejects_free_form_values():
-    """(d) `aspects_unassessed` 的隐私守卫孪生断言:自由文本被 `_int` 吞成
-    `None`,写坏的行仍被 `assert_projection_values` 拒绝。
-    """
-    row = project_run(
-        JOB,
-        [step("skip", {"reason": TERMINATION_SKIP_REASON,
-                       "termination": "model_sufficient",
-                       "aspects_unassessed": "很多个"})],
-        PAYLOAD,
-    )
-    assert row["aspects_unassessed"] is None
-
-    bad_row = dict(off_row(optimization="off"))
-    bad_row["aspects_unassessed"] = "很多个"
-    with pytest.raises(ValueError, match="aspects_unassessed"):
-        assert_projection_values(bad_row)
-
-
-def test_a_reflect_step_without_usage_or_finish_reason_still_yields_a_full_row():
-    """写侧缺 usage / finish_reason / cached 时,`call_attempts` 与
-    `response_chars` 照样在(它们不从 usage 来,见计划 §3 T-PS2),整行照出。
-
-    「缺一格就整行不出」是最容易犯的错:那会让 provider 不回 usage 的那批 run
-    从数据集里整条消失,而它们恰恰是最该看的。
-    """
-    row = project_run(
-        JOB,
-        [measured_reflect("answer", call_attempts=1, response_chars=42,
-                          ctx_bytes_total=8000)],
-        PAYLOAD,
-    )
-    assert set(row) <= RUN_PROJECTION_KEYS
-    assert row["model_calls_real"] == 1
-    assert row["response_chars_total"] == 42
-    assert row["context_chars"] == {"bytes_total": 8000}
-    assert_closed(row)
-    assert_projection_values(row)
-
-
-def test_optimization_comes_only_from_the_rig_tags():
-    """`answer_payload` 里的同名字段**不**算声明。
-
-    那条兜底分支没有写侧(`AskResponse` 从来不带这个字段),留着只会把「tags 里
-    给了个空串」这种传参错误遮蔽成「去 payload 找找」。
-
-    变异:把 `_optimization` 的 payload 兜底分支加回来 ⇒ 第一条断言红。
-    """
-    row = project_run(
-        JOB, [reflect("answer", sufficient=True)],
-        {**PAYLOAD, "optimization": "prefix_snapshot"},
-    )
-    assert row["optimization"] == UNKNOWN
-    # 空串声明照样是 unknown,而不是掉进另一个来源。
-    assert off_row(optimization="")["optimization"] == UNKNOWN
-
-
-def test_a_negative_measurement_is_missing_not_a_value():
-    """负数一律当缺失。这个模块读的每个整数都是计数/字节数/毫秒数,定义域不含
-    负值;写侧真给出 `-1`(哨兵、减法算反、时钟回拨)是一次观测**失败**,把它放
-    进去会让 `sum`/`min`/中位数得出物理上不可能的数并一路进报表。
-
-    变异:把 `_int` 里 `raw < 0` 那两行删掉 ⇒ `model_calls_real` 变 -1、
-    `prefix_bytes_min` 变 -5、`context_chars` 变 `{"bytes_total": -1}`,四条断言
-    一起红。
-    """
-    row = project_run(
-        JOB,
-        [measured_reflect("answer", call_attempts=-1, message_prefix_bytes=-5,
-                          ctx_bytes_total=-1)],
-        PAYLOAD,
-    )
-    assert row["model_calls_real"] is None
-    assert row["attempts_observed"] is None
-    assert row["prefix_bytes_min"] is None
-    assert row["context_chars"] is None
-    # 来源数分桶从前自己判一次负数,现在那道判据在 `_int` 里,结论不变。
-    assert source_bucket(-3) == UNKNOWN
-
-
-def test_optimization_is_a_case_sensitive_closed_set():
-    """大小写敏感:一个写错大小写的声明必须落成 unknown,而不是被悄悄纠正。
-
-    变异:把 `_optimization` 改成 `closed_value`(它先 `lower()`)⇒ 第二条断言红。
-    """
-    assert off_row(optimization="prefix_snapshot")[
-        "optimization"] == "prefix_snapshot"
-    assert off_row(optimization="Prefix_Snapshot")["optimization"] == UNKNOWN
-    assert off_row(optimization="prefix_delta_lean")[
-        "optimization"] == "prefix_delta_lean"
-    assert off_row(optimization="turbo")["optimization"] == UNKNOWN
-    assert off_row()["optimization"] == UNKNOWN
-    assert OPTIMIZATIONS == (
-        "off", "prefix_snapshot", "prefix_delta", "prefix_delta_lean")
-
-
-def test_optimizations_match_the_settings_literal():
-    """domain 本地的闭集必须与 `Settings.reasoning_reflect_optimization` 的
-    `Literal` 逐字相同(计划 §3 T-PS6)。
-
-    本地定义而不是 import:这个模块的硬约束是「零 I/O、不读 Settings」,为一个
-    元组把 pydantic-settings 的加载面接进纯投影不划算(架构守卫本身并不禁
-    domain → core)。代价是两处可能分叉,所以这条用例把它们钉在一起。T-PS6 落地
-    之前配置侧还没有这个字段,此时 skip 并说明;字段一出现,这条自动变成硬闸。
-    """
-    import typing
-
-    from app.core.config import Settings
-
-    field = Settings.model_fields.get("reasoning_reflect_optimization")
-    if field is None:
-        pytest.skip("T-PS6 尚未落地 REASONING_REFLECT_OPTIMIZATION 配置项")
-    assert typing.get_args(field.annotation) == OPTIMIZATIONS
-
-
-def test_free_text_in_a_measurement_key_is_still_refused():
-    """隐私守卫的变异形态:往新键里塞一段自由文本必须被拦。
-
-    新键都是数值/短码,所以这道闸对它们照样成立——它不看键名。
-    """
-    row = dict(off_row(optimization="off"))
-    row["context_chars"] = {"note": "这一轮把摘要整块搬到了末尾"}
-    with pytest.raises(ValueError, match="context_chars"):
-        assert_projection_values(row)
-    row = dict(off_row(optimization="off"))
-    row["prefix_bytes_median"] = "大约三千字节"
-    with pytest.raises(ValueError, match="prefix_bytes_median"):
-        assert_projection_values(row)
-
-
-def test_the_sparse_detail_key_registry_matches_the_plan():
-    """写侧(T-PS3)与读侧(这里)对「有哪些稀疏键」的清单必须一致。
-
-    `cards_shown` / `cards_omitted` / `call_wall_ms` 登记但不进投影:逐轮细节按
-    计划 §5 Q6 只留在 rig 的 per-call 表。登记是为了让清单可查,不是为了投影。
-    """
-    assert REFLECT_MEASUREMENT_DETAIL_KEYS == frozenset({
-        "ctx_chars_s", "ctx_chars_c", "ctx_chars_k", "ctx_chars_d",
-        "ctx_chars_t", "ctx_bytes_total", "message_prefix_bytes",
-        "cards_shown", "cards_omitted", "call_wall_ms", "call_attempts",
-        "response_chars",
-        # T-PD2(计划 §2 拍板 Q2):本轮消息里 D 的块数,登记但不进投影。
-        "delta_blocks",
-        # T-PD2(计划 §2 拍板 Q7):`prefix_delta` 下无条件随 `ReflectMeasurement`
-        # 出现的两个行为事实,登记且进投影(见 `NEW_MEASUREMENT_KEYS`)。
-        "context_rebuilds", "context_fallback",
-        # T-PL2(计划 §2 拍板 Q8):普通稀疏键,门是测量开关、四臂通写,登记且
-        # 进投影(`assessment_rows_total` 在 `NEW_MEASUREMENT_KEYS`;
-        # `assessment_absent` 登记但不进顶层投影)。
-        "assessment_rows", "assessment_absent",
-    })
-    assert set(REFLECT_CONTEXT_DETAIL_KEYS.values()) <= (
-        REFLECT_MEASUREMENT_DETAIL_KEYS)
-    # 命名纪律:这一批键里不许出现 `cache_hit` / 命中率(统一硬约束 §2)。
-    for key in REFLECT_MEASUREMENT_DETAIL_KEYS:
-        assert "cache_hit" not in key, key
+def test_unrelated_step_cannot_claim_a_terminal_fact():
+    rows = [step("retrieve", {"termination_reason": "model_partial"}),
+            reflect("answer", True)]
+    row = project_run(JOB, rows, PAYLOAD)
+    assert row["termination_reason"] == TERMINATION_MODEL_END
+    assert row["termination_inferred"] is True

@@ -808,134 +808,15 @@ test("profile 步计入可见步数与总耗时", () => {
   assert.equal(summary.totalLabel, "1.0s");
 });
 
-// T4-B(设计稿 2026-09-07 §7.2):检索结束事实上屏。两处入口——检索收尾那条
-// `skip` 步(reason=retrieval_termination)与合成终步——渲染同一组摘要:结束原因
-// 中文短句(服务端给,前端不自造映射)、已处理/待补方面、未送达、未恢复通道。
-test("检索收尾 skip 步:渲染方面进度与未恢复通道,不落到 pending 分支", () => {
+test("historical extra trace details preserve the recorded summary without inventing counts", () => {
   const step = {
     step_type: "skip",
-    summary: "检索结束：检索通道异常，证据收集未正常完成",
-    detail: {
-      reason: "retrieval_termination",
-      termination: "retrieval_degraded",
-      aspects: 4,
-      unresolved_aspects: 1,
-      model_assessed_sufficient: false,
-      aspect_source: "intent_topics",
-      unrecovered_channels: ["search_elements", "ppr_retrieve"],
-    },
+    summary: "检索结束：步骤预算用完",
+    detail: { reason: "retired_protocol", unsupported_count: 4 },
   };
-  assert.equal(getTraceStepDetail(step), "已处理 3/4 方面 · 2 条通道未恢复");
-  // 结束原因本身在 summary(标题位),detail 不复述。
-  assert.equal(getReasoningTraceSummary([step], false).latestSummary,
-    "检索结束：检索通道异常，证据收集未正常完成");
-  // 标签是「结束」不是「跳过」:这一步不是跳过了什么,它就是这次检索的结束。
-  assert.equal(getReasoningTraceSummary([step], false).latestLabel, "结束");
-  // 通道名是内部动作词,只报条数不上屏。
-  assert.ok(!getTraceStepDetail(step).includes("search_elements"));
-  // 全部解决、无故障通道时只剩那一句进度。
-  assert.equal(
-    getTraceStepDetail({
-      step_type: "skip",
-      detail: { reason: "retrieval_termination", aspects: 2,
-                unresolved_aspects: 0, unrecovered_channels: [] },
-    }),
-    "已处理 2/2 方面",
-  );
-});
-
-test("合成终步:结束事实接在既有 parts 之后,历史 trace 逐字不变", () => {
-  assert.equal(
-    getTraceStepDetail({
-      step_type: "synthesis",
-      detail: {
-        citations: 9, anchors: 3, evidence_level: "grounded",
-        outline_skipped: ["空节甲"],
-        termination_reason: "model_partial",
-        termination_summary: "检索结束：仍有方面没有完整支撑",
-        aspects_total: 3,
-        aspects_pending: 1,
-        aspects_model_supported: 2,
-        aspects_synthesis_admitted: 1,
-        aspects_answer_cited: 1,
-        aspects_undelivered: 1,
-        unrecovered_channels: ["add_subquery"],
-      },
-    }),
-    "3 处引用 · 证据不足略过 1 节: 空节甲 · 检索结束：仍有方面没有完整支撑"
-    + " · 已处理 2/3 方面 · 1 项未送达 · 1 条通道未恢复",
-  );
-  // 关闭态 / 历史 trace:一个新键都没有 ⇒ 输出与接入前逐字相同。
-  assert.equal(
-    getTraceStepDetail({
-      step_type: "synthesis",
-      detail: { citations: 12, anchors: 5, evidence_level: "grounded" },
-    }),
-    "5 处引用",
-  );
-  // 按节进度步(只有 section_index/section_total)照旧走它自己的分支。
-  assert.equal(
-    getTraceStepDetail({
-      step_type: "synthesis",
-      detail: { section_index: 2, section_total: 3 },
-    }),
-    "第 2/共 3 节",
-  );
-});
-
-test("结束事实的计数缺失时不编造零:未送达/通道两项直接不出现", () => {
-  // 一条**没有**这些键的历史 synthesis 记录:`?? 0` 会渲染出「0 项未送达」,
-  // 那是一句假话——那条记录不知道这件事,不是知道它是 0。
-  assert.equal(
-    getTraceStepDetail({
-      step_type: "synthesis",
-      detail: { anchors: 1, termination_summary: "检索结束：步骤预算用完" },
-    }),
-    "1 处引用 · 检索结束：步骤预算用完",
-  );
-  // 计数为 0 时同样不占格(「0 项未送达」是噪音,不是信息)。
-  assert.equal(
-    getTraceStepDetail({
-      step_type: "synthesis",
-      detail: { anchors: 1, aspects_total: 2, aspects_pending: 0,
-                aspects_undelivered: 0, unrecovered_channels: [] },
-    }),
-    "1 处引用 · 已处理 2/2 方面",
-  );
-  // 畸形 detail(数字位置放了字符串/对象)不上屏、不抛。
-  assert.equal(
-    getTraceStepDetail({
-      step_type: "skip",
-      detail: { reason: "retrieval_termination", aspects: "四",
-                unresolved_aspects: null, unrecovered_channels: "两条" },
-    }),
-    "",
-  );
-});
-
-test("收尾那条 skip 步的标签是「结束」,别的 skip 步仍是「跳过」", () => {
-  // T4-B 复审 P3-7:收尾步复用 `skip` 这个 step_type(不新增后端键),但「跳过」
-  // 说的是"这一步没做",而它恰恰是这次检索**做完了**的那一刻。判据与 detail 那条
-  // 分支同源(`detail.reason`),`TRACE_STEP_LABELS.skip` 一个字不动。
-  assert.equal(
-    getTraceStepLabel({
-      step_type: "skip",
-      summary: "检索结束：步骤预算用完",
-      detail: { reason: "retrieval_termination", aspects: 2, unresolved_aspects: 1 },
-    }),
-    "结束",
-  );
-  // 真正被跳过的步:逐字回到既有标签。
-  assert.equal(TRACE_STEP_LABELS.skip, "跳过");
-  for (const step of [
-    { step_type: "skip", summary: "跳过重复子查询: 甲", detail: { reason: "duplicate_subquery" } },
-    { step_type: "skip", summary: "预算不足", detail: { pending: 2 } },
-    { step_type: "skip", summary: "无 detail 的历史记录" },
-  ]) {
-    assert.equal(getTraceStepLabel(step), "跳过");
-  }
-  // 其余 step_type 与未知 step_type 走原来的表与兜底,一个字不变。
-  assert.equal(getTraceStepLabel({ step_type: "synthesis", detail: {} }), "作答");
+  assert.equal(getTraceStepDetail(step), "");
+  assert.equal(getReasoningTraceSummary([step]).latestSummary, step.summary);
+  assert.equal(getTraceStepLabel(step), "跳过");
   assert.equal(getTraceStepLabel({ step_type: "brand_new", detail: {} }), "处理中");
 });
 

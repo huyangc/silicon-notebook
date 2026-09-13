@@ -584,7 +584,6 @@ class EvidenceContextService:
         budget_chars: int | None = None,
         priority_object_ids: Sequence[str] = (),
         priority_budget_chars: int | None = None,
-        fold_sink: dict[str, str] | None = None,
     ) -> tuple[str, dict[str, dict[str, Any]]]:
         """``priority_object_ids`` 先于其余命中装配,并可另有一份更紧的子预算。
 
@@ -596,13 +595,6 @@ class EvidenceContextService:
         渲染出两行 `relations:` 并各自记一次预算;cluster 去重同理。缺省(空 priority)
         时这个函数与接入前逐字相同。
 
-        ``fold_sink``(设计稿 2026-09-07 §7.2):给它一个 dict,本次装配里**因为同
-        canonical 簇已被收录而折叠掉**的每条命中会写下一行「成员 object_id → 代表
-        object_id」。零新增查询——折叠关系是 ``_canonical()`` 本来就要算的,这里只是
-        把已经算出的对应关系交出去。用途只有一个:``reasoning_aspects
-        .admitted_evidence_keys`` 判断"这个方面绑的证据到底进没进 prompt"时,绑在
-        被折叠成员上的键不该被误判成没送达(它的内容随代表一起进去了)。缺省
-        ``None`` ⇒ 一个字都不记,函数行为与接入前逐字相同。
         """
         budget = (
             self.settings.answer_context_budget_chars
@@ -610,10 +602,7 @@ class EvidenceContextService:
         )
         lines: list[str] = []
         evidence_by_id: dict[str, dict[str, Any]] = {}
-        # canonical 簇 id → **第一个认领它的**命中的 object_id。过去这里是一个
-        # `seen_clusters` 集合;换成 dict 只是把"谁是代表"这个已经确定的事实留下来
-        # (``fold_sink`` 要它),去重判据、顺序与命中语义一个字都没变。
-        cluster_owner: dict[str, str] = {}
+        seen_clusters: set[str] = set()
         # 刻意不按当前 base_scope 收窄 participants(仍是本 notebook 的全部参与库,
         # 含被取消勾选的)——T3(B2 有界化,批 1)之后,下面每个参与库对本次命中
         # 集合各查一次有界 cluster_fold(),不再是整表 cluster_map()(大库可达数
@@ -662,12 +651,9 @@ class EvidenceContextService:
             nonlocal used, next_id
             for hit in group:
                 cluster_id = _canonical(hit.object_id)
-                owner = cluster_owner.get(cluster_id)
-                if owner is not None:
-                    if fold_sink is not None and str(hit.object_id) != owner:
-                        fold_sink[str(hit.object_id)] = owner
+                if cluster_id in seen_clusters:
                     continue
-                cluster_owner[cluster_id] = str(hit.object_id)
+                seen_clusters.add(cluster_id)
                 # origin: hit.notebook_id 回退本次 ask 的 notebook_id,供
                 # node_context 查询用(同库命中也要查得到详情)。raw_origin 是写进
                 # id_map 的徽章口径——"真正跨库才非空"——由 foreign_notebook_id
