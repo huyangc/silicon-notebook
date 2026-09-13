@@ -15483,7 +15483,7 @@ def test_delta_state_holds_only_rendered_text_and_counters():
         "pending_aspect_notes", "evidence_chars", "history_chars",
         "rebuilds", "fallback", "generation", "rebuilt_last_turn",
         "supplement_last_key", "supplement_query", "supplement_checked_keys",
-        "supplement_latest_cards", "visible_excerpt_fingerprints")
+        "supplement_latest_cards", "visible_excerpt_fingerprints", "prose_detail_fingerprints")
     fresh = ReflectDeltaState()
     assert (fresh.generation, fresh.rebuilds, fresh.fallback) == (1, 0, False)
     assert (fresh.evidence_chars, fresh.history_chars,
