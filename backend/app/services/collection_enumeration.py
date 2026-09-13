@@ -130,24 +130,6 @@ from app.services.source_scope import scoped_participants
 TRUNCATED_BUDGET = "budget"
 TRUNCATED_PAYLOAD = "payload"
 TRUNCATED_CONCURRENT_CHANGE = "concurrent_change"
-# The fourth value, added with the oversize-listing guard (计划 T-BF2).  It is a
-# DIFFERENT statement from "budget", which is why it is not folded into it: the
-# run's allowance was NOT spent — the caller deliberately asked for one sample
-# page because the collection is far larger than anything this run could list,
-# and MORE than that page is still in the pool for the next action.  Reporting
-# that as "ran out of allowance" would be a lie in both directions: it tells
-# the reader the run is out of room (it is not) and it hides the only fact that
-# makes the short list defensible (paging further would not have helped).
-# Set by the CALLER through ``EnumerationBudget.oversize_sample`` — this module
-# never decides that a collection is too big, it only reports honestly which
-# ceiling it was handed.  Which means the caller owns the "still in the pool"
-# half of that claim too: it must NOT set the flag when the pool holds no more
-# than the single page it is asking for, because there the two reasons describe
-# the same fact and "the allowance was not spent" is simply false.  That is
-# ``ReasoningRetriever._enum_budget``'s ``rows_left > enum_page_size`` guard
-# condition, and it is why a shrinking pool falls back to ``TRUNCATED_BUDGET``
-# on its own.
-TRUNCATED_OVERSIZE_SAMPLE = "oversize_sample"
 
 # 「这个数是从多大的一片资料里数出来的」——``local_only`` 清单的范围后缀,**唯一
 # 定义点**。同一个 run 现在可以同时产出 ``scope:"current_notebook"`` 与
@@ -243,19 +225,6 @@ class EnumerationBudget:
     indistinguishable from a real truncation.  A caller whose run budget is
     exhausted must skip the action, not request zero rows.
 
-    ``oversize_sample`` changes NO ceiling.  It only says what ``max_rows``
-    MEANS for this call: not "all the rows this run has left" but "one sample
-    page, deliberately, because the collection dwarfs anything this run could
-    list".  The row ceiling then reports ``TRUNCATED_OVERSIZE_SAMPLE`` instead
-    of ``TRUNCATED_BUDGET`` — the two are different facts about the same short
-    list, and only the caller knows which one it just created.  Every other
-    ceiling keeps its own reason: a payload or page stop is still that stop
-    even on a sampling call.
-
-    Setting it when ``max_rows`` is everything the run had left is a caller
-    bug this class cannot detect (see ``TRUNCATED_OVERSIZE_SAMPLE``): the two
-    reasons would then be the same fact, and the one the flag picks would be
-    the false one.
     """
 
     page_size: int
@@ -263,7 +232,6 @@ class EnumerationBudget:
     max_pages: int
     max_payload_chars: int
     excerpt_chars: int = DEFAULT_EXCERPT_CHARS
-    oversize_sample: bool = False
 
     def __post_init__(self) -> None:
         for name in ("page_size", "max_rows", "max_pages", "max_payload_chars"):
@@ -596,24 +564,6 @@ class EnumerationInvariantError(RuntimeError):
     """
 
 
-class SourceNotInScopeError(ValueError):
-    """An explicitly named ``source_id`` does not belong to this run's scope.
-
-    A ``ValueError`` subclass rather than a new exception family: every caller
-    that already fails open on ``ValueError`` keeps doing exactly that, and no
-    call site has to learn a second name to stay correct.  The subclass exists
-    so the reflect loop can tell this ONE case apart from the other things the
-    same ``except`` catches (an unknown kind, a mis-set budget) WITHOUT parsing
-    the message string — the id is out of scope, which is the one case where
-    the model can fix its own request by naming the source instead of guessing
-    an internal id it was never shown.
-
-    Deliberately NOT raised for the Memory-synthetic case below: "not
-    enumerable" is a property of the source, not of the request, and telling
-    the model to re-ask by title there would just buy a second rejection.
-    """
-
-
 class _Stop(Exception):
     """Internal: a budget ceiling fired mid-traversal."""
 
@@ -682,13 +632,7 @@ class _Walk:
             raise _Stop(TRUNCATED_BUDGET)
         remaining = self.budget.max_rows - self.returned
         if remaining <= 0:
-            # The ROW ceiling is the only one the caller can mean as "one
-            # sample page"; the page ceiling above and the payload ceiling in
-            # ``admit`` are transport rails it never sets on purpose.
-            raise _Stop(
-                TRUNCATED_OVERSIZE_SAMPLE if self.budget.oversize_sample
-                else TRUNCATED_BUDGET
-            )
+            raise _Stop(TRUNCATED_BUDGET)
         return max(1, min(int(self.budget.page_size), remaining))
 
     def take_page(
@@ -1594,12 +1538,7 @@ class CollectionEnumerationService:
         exists, that it belongs to a participant notebook, and that it is not a
         private Memory synthetic row.  An out-of-scope id raises rather than
         returning another notebook's rows, and rather than being answered with
-        a silent empty list; a Memory row raises for the same reason.  The two
-        raise the same FAMILY (``ValueError``, so every fail-open caller is
-        unchanged) but not the same class: an out-of-scope id is a request the
-        asker can fix by naming the source instead, and
-        ``SourceNotInScopeError`` is how the caller tells that case apart
-        without reading the message.
+        a silent empty list; a Memory row raises ValueError for the same reason.
 
         The Memory check is defence in depth rather than a reachable path
         today: the only producer of a ``source_id`` here is
@@ -1622,7 +1561,7 @@ class CollectionEnumerationService:
         rows = self._source_display(db, [source_id])
         row = rows.get(source_id)
         if row is None or str(row["notebook_id"]) not in set(notebook_ids):
-            raise SourceNotInScopeError(
+            raise ValueError(
                 f"source is not in scope: {source_id!r}")
         owner_notebook_id = str(row["notebook_id"])
         if source_id in set(

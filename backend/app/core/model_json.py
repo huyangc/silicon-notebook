@@ -206,56 +206,19 @@ def _validate_repair_surface(raw: str, value: dict[str, Any]) -> None:
         raise ModelJsonRepairError("unsupported_syntax")
 
 
-#: Keys a domain parser may receive without the hint advertising them, at the
-#: TOP LEVEL of the response object only (see the ``is_root`` guard below).
-#
-# The repair branch below otherwise rejects every unadvertised key
-# (``unknown_key``), while the strict branch tolerates extras.  That asymmetry
-# is deliberate for keys a repair could have INVENTED, but it must not decide
-# the fate of a field the product knowingly accepts and merely does not ask the
-# model for yet: reflect v2's ``assessment`` was parsed and stored before its
-# own hint advertised it, so with a stray trailing comma the same payload would
-# be rejected while its strict twin passes.  Named, bounded, and — no other
-# hint describes a key by this name — inert for every other workload.
-#
-# T4 advertises ``assessment`` in ``reflect_v2_schema_hint``, which makes this
-# exemption INERT for reflect v2 (an advertised key needs none).  It stays
-# because the LEGACY reflect hint still does not advertise it and legacy is a
-# frozen byte-for-byte baseline: removing the entry would TIGHTEN the
-# closed-state gate, which is a behaviour change in the rejecting direction.
-_TOLERATED_UNADVERTISED_KEYS = frozenset({"assessment"})
-
-
 def _is_open_object(example: Any) -> bool:
     """Whether an example describes an object whose KEYS it does not describe.
 
-    An empty object example (``"arguments":{}``) is the only way a hint can say
-    "an object goes here, and its fields are specified elsewhere".  Reflect v2
-    uses it because the per-action field contract lives in the system prompt
-    and the typed validation lives in the reasoning layer; advertising a
-    non-empty example instead would make the legal ``"arguments": {}`` that
-    ``answer`` sends fail ``missing_expected_key``.
-
-    Both validation paths share this one rule.  The strict path already behaved
-    this way implicitly (it only ever descends into keys the example names);
-    the repair path did not, so a non-empty ``arguments`` object plus one
-    trailing comma was rejected as ``unknown_key`` — a real retrieval action
-    losing its repair net over a syntax fault the layer exists to absorb.
-
-    JSON ``null`` counts as such an object on both paths (see the two call
-    sites).  A hint that says "the fields are specified elsewhere" is in no
-    position to insist the object be present at all: the domain parser that
-    owns those fields is the one that knows whether absence is legal, and for
-    every current open object it is (``arguments`` and ``assessment`` both
-    normalise ``None`` to "not sent").  Rejecting it here would spend the
-    retries and drop the whole call into its fail-open fallback over a value
-    the parser one layer down accepts.
+    Empty object examples permit caller-defined keys; JSON null is also
+    accepted. Required fields and semantic validity remain the downstream
+    domain parser's responsibility. Both strict and repaired JSON use this
+    same object-shape rule.
     """
     return isinstance(example, dict) and not example
 
 
 def _validate_against_example(
-    value: Any, example: Any, *, is_root: bool = True,
+    value: Any, example: Any,
 ) -> None:
     """Validate repaired JSON against the example-shaped schema hint.
 
@@ -281,11 +244,6 @@ def _validate_against_example(
     "answer" fallback — so the document-roster and ``enumerate_kg_objects``
     actions were dead in production.
 
-    ``is_root`` gates ``_TOLERATED_UNADVERTISED_KEYS``: the top-level response
-    object may carry a tolerated key the hint does not advertise, but a nested
-    object at any depth may not smuggle the same key past ``unknown_key`` — the
-    tolerance is for one named, product-known top-level field, not a general
-    escape hatch that follows the key name into every dict in the payload.
     """
     if example is None:
         # Hints use null for optional scalar fields whose concrete value may be
@@ -320,7 +278,7 @@ def _validate_against_example(
             raise ModelJsonRepairError("invalid_type")
         if example:
             for item in value:
-                _validate_against_example(item, example[0], is_root=False)
+                _validate_against_example(item, example[0])
         return
     if isinstance(example, dict):
         if _is_open_object(example):
@@ -331,13 +289,11 @@ def _validate_against_example(
             raise ModelJsonRepairError("invalid_type")
         if not isinstance(value, dict):
             raise ModelJsonRepairError("invalid_type")
-        tolerated = _TOLERATED_UNADVERTISED_KEYS if is_root else frozenset()
-        extra = set(value) - tolerated
-        if not extra.issubset(example):
+        if not set(value).issubset(example):
             raise ModelJsonRepairError("unknown_key")
         for key, item in value.items():
             if key in example:
-                _validate_against_example(item, example[key], is_root=False)
+                _validate_against_example(item, example[key])
         return
     raise ModelJsonRepairError("invalid_type")
 
@@ -392,8 +348,6 @@ def _validate_known_shape(
         # These named nested objects have entirely optional children in their
         # downstream contracts. Other described nested objects still need at
         # least one usable field, so an empty plan item remains a mismatch.
-        # (Reflect v2's ``assessment`` needs no entry here: its hint advertises
-        # an OPEN object, which returns above.)
         if example and not shared_keys and not (
             field_name in {"frame", "validity_scope"} and not value
         ):

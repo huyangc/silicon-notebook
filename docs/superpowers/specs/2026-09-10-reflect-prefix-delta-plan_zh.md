@@ -1,3 +1,5 @@
+> 历史档案（2026-09-13）：V2 实验已退役，本文不再是实施或启用指引。当前仅保留 Legacy；参见 [当前状态](../../../fangan_done.md#32-reflect-实验退役与-legacy-保留2026-09-13) 和 [产品/API 合同](../../product-and-api_zh.md)。
+
 # reflect 前缀复用 · PR-3 实施计划:T2 `prefix_delta` 增量上下文
 
 日期:2026-09-10。上游设计:[reflect 上下文与前缀复用最终设计](2026-09-09-reflect-prefix-cache-final-design_zh.md) §4.1、§4.4、§4.5、§5、§8.1(上下文层)、§11(T2)、§12。前置:PR-2([T0 测量 + T1 `prefix_snapshot`](2026-09-09-reflect-prefix-snapshot-plan_zh.md),#706 已合入),其九个任务的实施记录即本计划的现实基线。主 agent review 调整第 5 条(`REASONING_REFLECT_RECENT_OBSERVATIONS` 在 delta 模式改义)在本期兑现。机制核实由 Plan 代理(opus)对 master @ `f49461be6`(= `f4e509fa2` 合入后)完成;行号以该基线为准。

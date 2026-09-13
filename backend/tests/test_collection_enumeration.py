@@ -30,7 +30,6 @@ from app.services.collection_enumeration import (
     MAX_EVIDENCE_REFS,
     TRUNCATED_BUDGET,
     TRUNCATED_CONCURRENT_CHANGE,
-    TRUNCATED_OVERSIZE_SAMPLE,
     TRUNCATED_PAYLOAD,
     EnumerationBudget,
 )
@@ -654,61 +653,8 @@ def test_row_ceiling_reports_budget(repo):
     assert result.cursor is not None
 
 
-def test_an_oversize_sample_budget_says_so_instead_of_run_budget(repo):
-    """`oversize_sample=True` 只改**行**上限的原因码,不改任何上限。
-
-    行池并没有被用光——调用方是有意只要了一页,所以报 `budget` 会同时骗两边:
-    告诉读的人这一轮没地方了(不是),又藏起唯一能为这份短清单辩护的事实
-    (再翻也没用)。清单其他一切照旧:计数照报、部分结果照报、游标照给。
-
-    变异:`emit_allowance` 的行上限分支恒抛 `TRUNCATED_BUDGET` ⇒ 第一段红;
-    把 `oversize_sample` 做成「所有上限都换原因码」⇒ 第二、三段红。
-    """
-    notebook = repo.create_notebook(NotebookCreate(name="nb"))
-    _add_source(repo, notebook.id, "s-a", [("formula", 10)])
-
-    sampled = _enum(repo).enumerate_elements(
-        notebook.id, "formula",
-        budget=_budget(max_rows=3, page_size=10, oversize_sample=True),
-    )
-    assert sampled.coverage.returned == 3
-    assert sampled.coverage.total == 10
-    assert sampled.coverage.complete is False
-    assert sampled.coverage.truncated_reason == TRUNCATED_OVERSIZE_SAMPLE
-    assert sampled.coverage.overflow_semantics == EXPLICIT_PARTIAL_OVERFLOW
-    assert sampled.cursor is not None                # 与其他部分结果一样可续
-
-    # 页上限是传输护栏,不是调用方「只要一页」的表达 —— 原因码不跟着改。
-    paged = _enum(repo).enumerate_elements(
-        notebook.id, "formula",
-        budget=_budget(page_size=2, max_pages=2, max_rows=1_000,
-                       oversize_sample=True),
-    )
-    assert paged.coverage.returned == 6
-    assert paged.coverage.truncated_reason == TRUNCATED_BUDGET
-
-    # 载荷上限同理。
-    two_items = sum(
-        collection_enumeration._payload_chars(item)
-        for item in _enum(repo).enumerate_elements(
-            notebook.id, "formula", budget=_budget()).items[:2]
-    )
-    payload_stopped = _enum(repo).enumerate_elements(
-        notebook.id, "formula",
-        budget=_budget(page_size=10, max_payload_chars=two_items,
-                       oversize_sample=True),
-    )
-    assert payload_stopped.coverage.returned == 2
-    assert payload_stopped.coverage.truncated_reason == TRUNCATED_PAYLOAD
 
 
-def test_an_ordinary_budget_defaults_to_the_run_budget_reason(repo):
-    """默认值必须是「关」:认不出这个字段的调用方绝不该被静默换掉原因码。"""
-    from app.services.collection_enumeration import EnumerationBudget
-
-    assert EnumerationBudget(
-        page_size=1, max_rows=1, max_pages=1, max_payload_chars=1,
-    ).oversize_sample is False
 
 
 def test_page_ceiling_counts_only_extra_round_trips(repo):

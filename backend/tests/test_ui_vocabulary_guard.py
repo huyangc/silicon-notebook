@@ -458,10 +458,7 @@ def trace_sites(tmp_path: pathlib.Path, code: str) -> int:
     "code",
     [
         # 真实回归样本:接入时这两句就是这么写的。
-        '_TERMINATION_SUMMARIES = {"model_sufficient": "检索结束：每个必答方面都已找到支撑"}',
         'record(TraceStep(step_type="skip", summary="跳过必答方面复核"))',
-        # 带类型注解的表(AnnAssign)同样要认。
-        '_TERMINATION_SUMMARIES: Mapping[str, str] = {"a": "已抽取 3 个必答方面"}',
         # f-string:字面量部分照查,插值剥掉(同 user_error 规则)。
         'TraceStep(step_type="skip", summary=f"跳过 {n} 个必答方面")',
     ],
@@ -514,22 +511,6 @@ def test_真实轨迹摘要扫描面非空且登记的模块都在(tmp_path):
     )
 
 
-def test_结束原因短句表真的在扫描面里(tmp_path):
-    """变异验证:把界面词「方面」改回服务端记账名「必答方面」,守卫必须红。
-
-    没有这条,「守卫扫了这张表」与「扫了但规则对它不生效」在绿灯下分不开。
-    """
-    module = next(p for p in guard.TRACE_SUMMARY_MODULES
-                  if p.name == "reasoning_aspects.py")
-    src = module.read_text(encoding="utf-8")
-    assert "检索结束：仍有方面没有完整支撑" in src, "文案漂了,本变异样本需同步"
-    mutated = tmp_path / "aspects_mutated.py"
-    mutated.write_text(
-        src.replace("检索结束：仍有方面没有完整支撑", "检索结束：仍有必答方面没有完整支撑"),
-        encoding="utf-8",
-    )
-    hits = [term for _line, term, _text in guard.scan_trace_summaries(mutated)[1]]
-    assert "必答方面" in hits, "改回记账名后守卫仍不报——规则没作用到这张表"
 
 
 # --------------------------------------------------------------------------

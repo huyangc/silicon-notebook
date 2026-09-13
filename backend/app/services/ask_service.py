@@ -77,15 +77,7 @@ from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancel
 from app.services.citation_markers import LOOSE_MARKER_RE, MARKER_RE, marker_keys
 from app.services.evidence_context import anchor_image_targets
 from app.services.model_work import ModelNotConfiguredError
-# 必答方面/结束事实的纯函数(设计稿 §7.2)。零 I/O、只依赖
-# ``app.domain.retrieval_termination`` 与 ``reasoning_observation``,不 import
-# 回本模块,所以模块级 import 不构成 import SCC(与上面 evidence_context 同款);
-# ``reasoning_retrieval`` 那几处的惰性 import 是为了那条真实存在的环,不适用这里。
-from app.services.reasoning_aspects import (
-    admitted_evidence_keys,
-    render_termination_block,
-    termination_synthesis_detail,
-)
+
 # 待确认中心「进行中的提问」的推送入口(同步 Ask 路径)。``pending_bus`` 是叶子
 # 模块,模块级 import 不构成 import SCC。
 from app.services.pending_bus import publish_snapshot
@@ -471,9 +463,6 @@ def _synthesis_step_detail(
     sectioned: Any,
     outline_fallback: bool,
     outline_skipped: Sequence[str],
-    termination: Any,
-    id_map: Mapping[str, Any],
-    cluster_fold: Mapping[str, str] | None = None,
 ) -> dict:
     """The terminal ``synthesis`` trace step's ``detail`` — a pure builder.
 
@@ -552,23 +541,6 @@ def _synthesis_step_detail(
                 if sectioned is not None else []
             ),
         })
-    # 结束事实 + 最终装配之后的方面复核(设计稿 §7.2)。**v2-only 稀疏键**:
-    # `termination is None`(legacy / 关闭态 / 历史输入)时 update 一个空 dict,
-    # 上面那份 detail 的键集逐字节不变。
-    #
-    # 复核用的是**实际进入 prompt 的证据身份**(最终 `id_map` 的 object_id),
-    # 不是候选池:一个方面绑的证据全被预算截掉时,"已支撑"在屏幕上与真有支撑
-    # 长得一样,而它其实没送达。锚点(`anchors`)另给第三个口径——进了 prompt
-    # 不等于答案引用了它。三个口径分开记,谁都不许替谁作证。
-    #
-    # `cluster_fold`:KG 证据按 canonical 簇去重后,进 prompt 的是代表那条命中的
-    # `object_id`;被折叠掉的成员的内容一并送达了,只是身份换成了代表的。不带上
-    # 这张表,绑在成员 id 上的方面会被误报「未送达」(多参考库常态)。
-    detail.update(termination_synthesis_detail(
-        termination,
-        admitted_keys=admitted_evidence_keys(id_map, cluster_fold),
-        cited_keys={str(anchor.object_id) for anchor in anchors},
-    ))
     return detail
 
 
@@ -1157,13 +1129,10 @@ class AskService:
             budget_chars=budget_chars)
 
     def _answer_context(self, notebook_id: str, top_hits: List[RetrievedKnowledge],
-                        id_offset: int = 0, budget_chars: int | None = None,
-                        fold_sink: dict | None = None) -> tuple:
-        # ``fold_sink``:见 EvidenceContextService.knowledge_context 的同名参数
-        # (被 canonical 簇折叠掉的成员 → 代表)。缺省 None ⇒ 逐字不变。
+                        id_offset: int = 0, budget_chars: int | None = None) -> tuple:
         return self.evidence_context.knowledge_context(
             notebook_id, top_hits, id_offset=id_offset,
-            budget_chars=budget_chars, fold_sink=fold_sink)
+            budget_chars=budget_chars)
 
     def _parse_answer_anchors(self, answer: str, id_map: dict) -> list:
         return self.evidence_context.parse_anchors(answer, id_map)
@@ -2181,7 +2150,6 @@ class AskService:
         section_index: int = 0,
         section_total: int = 0,
         style_block: str = "",
-        termination_block: str = "",
     ):
         """Synthesise the reasoning-mode answer. When PPR chunks are present they
         become first-class [k]-citable evidence: chunk segment k1..N + KG reasoning
@@ -2208,13 +2176,7 @@ class AskService:
         ——它们不可被大纲绑定,留在回退路径上(v1 刻意的边界)。``style_block``:
         见 ``_answer_chunks`` 同名参数,单次合成与按节合成共用调用方传入的同一份。
 
-        ``termination_block``(设计稿 §7.2):本次检索 run 的结束事实,**服务端事实、
-        非证据、不可引用**(块自带这句说明,见
-        ``reasoning_aspects.render_termination_block``)。它不进 ``id_map``、不占
-        ``[k]`` 号段、不参与 ``counts``——所以合成计数与引用绑定一个字都不变。
-        reflect v2 关闭(默认)时为空串,``answer_prompt`` 的输出逐字节回到接入前。
-        按节合成给每一节同一份**事实**(结束事实是整次 run 的,不按节重算),但块尾
-        那条祈使句只随最后一节给——见 ``_answer_reasoning_sections``。"""
+        """
         raise_if_cancelled(cancel_event)
         chunks = chunks or []
         chains = chains or []
@@ -2291,15 +2253,10 @@ class AskService:
         # Reserve the inter-partition separator inside the KG budget so the
         # final evidence block never exceeds kg_context_chars+chunk_context_chars.
         effective_kg_budget = max(0, kg_budget - (2 if source_context else 0))
-        # canonical 簇折叠表(成员 → 代表),零新增查询地随装配记下,经 baseline_sink
-        # 交给 §7.2 的方面送达复核:绑在被折叠成员上的证据键随代表一起进了 prompt,
-        # 不折进 admitted 集会把它误报成「未送达」(多参考库场景常态)。
-        cluster_fold: dict = {}
         kg_context, kg_map = self._answer_context(
             notebook_id, top_hits,
             id_offset=key_offset + (self._MIX_KG_KEY_BASE if chunks else 0),
             budget_chars=effective_kg_budget,
-            fold_sink=cluster_fold,
         )
         if kg_context == "(none)":
             kg_context, kg_map = "", {}
@@ -2390,7 +2347,6 @@ class AskService:
             baseline_sink.update({
                 "context_block": context_block,
                 "id_map": dict(id_map),
-                "cluster_fold": dict(cluster_fold),
                 "ordered_handles": tuple(id_map),
                 "budget_chars": total_context_budget,
                 "capture_error_count": int(
@@ -2405,7 +2361,6 @@ class AskService:
                 section_index=section_index,
                 section_total=section_total,
                 style_block=style_block,
-                termination_block=termination_block,
             )}],
             ANSWER_SCHEMA_HINT,
             timeout=self.settings.reasoning_timeout_seconds,
@@ -2451,7 +2406,6 @@ class AskService:
         cancel_event: CancelEvent = None,
         on_section=None,
         style_block: str = "",
-        termination: Any = None,
     ):
         """按节合成(设计文档 §3.1):每节一次合成调用,只喂该节绑定的证据。
 
@@ -2473,13 +2427,6 @@ class AskService:
         ``style_block``:见 ``_answer_chunks`` 同名参数,原样转发给每一节的
         ``_answer_reasoning`` 调用——同一份风格提示对全篇一致,不按节重新点读。
 
-        ``termination``(设计稿 §7.2)= 整次 run 的结束事实**对象**,由本方法逐节
-        渲染成服务端事实块。**事实每节都给**:一节的合成模型只看得见自己那份证据,
-        不给它就无从知道自己写的这一段落在一次没查完的检索上。**祈使句只给最后
-        一节**(见 ``render_termination_block`` 的 ``directive``):每节都被要求"说清
-        哪些点没被覆盖",读者会在每一节末尾各读到一段免责声明,而缺口本来只需要
-        在全篇说一次。结束事实本身不按节**重算**——那会让同一次 run 的结束原因在
-        不同节里长得不一样。``None``(legacy / v2 关闭)⇒ 每节都是空串。
         """
         from app.services.outline_synthesis import outline_answer_text
 
@@ -2519,11 +2466,6 @@ class AskService:
                     section_index=item.index + 1,
                     section_total=total,
                     style_block=style_block,
-                    # 祈使句只随最后一节:按**切片序**判(`item is slices[-1]`),
-                    # 不按 `item.index` —— 那是大纲里的位置,空节被跳过时它与切片
-                    # 序不是同一个数,拿它判会让"最后一节"落在一个不存在的节上。
-                    termination_block=render_termination_block(
-                        termination, directive=item is slices[-1]),
                 )
                 return text_, grounded_, anchors_
 
@@ -2535,7 +2477,7 @@ class AskService:
             baseline_assemblies.append(dict(section_baseline))
             # 分节判定必须在本节自己的证据池与锚点上完成。只留模型自报会绕过
             # classify_evidence 这道真实门;拿合并后的锚点回算又会把另一节的高分
-            # 证据借给本节。这个逐节结果既驱动全局确定性降级,也给 v2 留下可测信号。
+            # 证据借给本节。这个逐节结果驱动全局确定性降级。
             from types import SimpleNamespace
             section_evidence = list(item.hits) + list(item.chunks) + [
                 SimpleNamespace(
@@ -4199,12 +4141,6 @@ class AskService:
                     # 跨过边界。
                     candidate_manifest=getattr(result, "baseline_manifest", None),
                     spreadsheet_results=tuple(spreadsheet_results),
-                    # 结束事实的最后一跳(设计稿 §7.2)。与 candidate_manifest
-                    # 同款 getattr 语义:broad-except 降级时 ``result`` 仍是进入
-                    # 这一轮时的那个对象,取不到就是 None。降级路径上证据被清空
-                    # 而终态留着,恰好是对的——最终装配复核会照实把每个方面记成
-                    # 未送达,而不是让「模型说已支撑」独自留在屏幕上。
-                    termination=getattr(result, "termination", None),
                 ),
                 runtime,
             )
@@ -4348,9 +4284,6 @@ class AskService:
         conversation_id = prepared.conversation_id
         reasoning_history = prepared.history
         style_block = prepared.style_block
-        # 本次 run 的结束事实 → 合成 prompt 的服务端事实段(设计稿 §7.2)。
-        # ``termination is None``(legacy / v2 关闭)⇒ 空串 ⇒ prompt 逐字节不变。
-        termination_block = render_termination_block(stage.termination)
         research_question = prepared.research_question
         limits = prepared.limits
         retrieval_effort = prepared.retrieval_effort
@@ -4548,8 +4481,7 @@ class AskService:
                 collection_map_block=collection_map_prompt_block,
                 counts_sink=reasoning_counts,
                 baseline_sink=reasoning_baseline,
-                style_block=style_block,
-                termination_block=termination_block)
+                style_block=style_block)
             return ans, llm_grounded_, anchors_
 
         # ---------------------------------------------- 按节合成(设计文档 §3.1)
@@ -4608,7 +4540,6 @@ class AskService:
                         answer_client=answer_client, cancel_event=cancel_event,
                         on_section=record_section_step,
                         style_block=style_block,
-                        termination=stage.termination,
                     )
         # 按节合成失败(某一节两次都吐不出内容)→ 整体回退单次合成,已经产出
         # 的分节文本全部丢弃。多付一次合成调用是 fail-open 的价钱。
@@ -4629,13 +4560,6 @@ class AskService:
                     key: value
                     for row in sectioned.baseline_assemblies
                     for key, value in dict(row.get("id_map") or {}).items()
-                },
-                # 各节的簇折叠表并起来:一个成员在某一节被折叠、代表在另一节进了
-                # prompt 也算送达(合成看到的是同一份内容)。§7.2 的送达复核读它。
-                "cluster_fold": {
-                    member: owner
-                    for row in sectioned.baseline_assemblies
-                    for member, owner in dict(row.get("cluster_fold") or {}).items()
                 },
                 "ordered_handles": tuple(
                     handle
@@ -4871,9 +4795,6 @@ class AskService:
                     outline_planned=outline_planned, sectioned=sectioned,
                     outline_fallback=outline_fallback,
                     outline_skipped=outline_skipped,
-                    termination=stage.termination,
-                    id_map=reasoning_baseline.get("id_map") or {},
-                    cluster_fold=reasoning_baseline.get("cluster_fold") or {},
                 ),
                 duration_ms=round((time.perf_counter() - synthesis_started) * 1000),
             )

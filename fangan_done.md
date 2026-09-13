@@ -474,94 +474,29 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 
 - 已完成（2026-08-24，§6.4 / §9.1）：KG 起始探活复用统一短输出预算，不再以探测专用小上限截断推理型模型的可见 JSON；探活和正式抽取复用共享流式 JSON 传输，持续收到 chunk 的长输出不再受请求总墙钟误伤，任务熔断能合作式停止兄弟流；流式传输请求并采集 provider 最终 usage trailer，恢复按用户 prompt/completion/total token 精确统计，明确不支持该可选参数的 provider 只探测一次后回退且不本地猜数；HTTP 成功但空白、截断或无效 JSON 的响应落成 `model_response_invalid`，界面明确显示“模型响应不可用”并保留继续分析入口，不再泛化为人工“分析已中断”。
 
-## 32. 检索 Agent reflect 优化 T1–T4（2026-09-07/08）
+## 32. Reflect 实验退役与 Legacy 保留（2026-09-13）
 
-设计真源 `docs/superpowers/specs/2026-09-07-retrieval-reflect-final-design_zh.md`（§1 七条交付）。分支基线 `00bbeff51`，自 `69d8fb932` 起共 20 个提交（T1 一条、T2 五条、T3 四条、T4 六条、T5 对账一条 + 文档与台账两条；不写终点 SHA，因为最后一条就是本节自己）。**总闸 `REASONING_REFLECT_V2_ENABLED` 默认关闭**，关闭态是接入前的逐字节等价：legacy 的 prompt、schema、白名单、模型调用次数与轨迹键集合完全不变，不构造能力投影、不构造观察账与方面账、不多付任何 I/O 或转换。Knowhow 智能补全按设计显式留在 legacy 协议上，与这把闸无关。
+用户在多轮实验后决定只保留 Legacy，并删除 V2 实现及其开关，不再等待开闸。
+先前 T1–T4、鲁棒性迭代及前缀复用 PR-1–PR-5 的 V2 交付已退役；历史设计与
+实验过程保留在 Git 历史及 `docs/superpowers/`，不再作为可启用功能或待办。
 
-- **§1.2 被禁动作不再终止整个循环（T1，`9af6a035e`→`69d8fb932`）**：被调用方策略关掉的 `expand_community` 原先让整个 reflect 循环收尾；改为记一条零 I/O 的 skip，走链尾统一的 no_progress / stale 记账，后续合法检索照常可达，重复提交非法动作仍被既有熔断兜住。这是本期唯一在**关闭态**也生效的行为修复（legacy 路径上的真 bug），其余六条都在 v2 闸后。
-- **§1.3 每轮统一的可执行动作视图 + 按所选动作校验参数 + 统一观察账（T2、T3-A）**：新增 `services/reasoning_actions.py`——纯数据的 13 个动作 id / 参数形状 / 是否产生证据 / 预算类别 / 重复身份 / 依赖条件，加一次纯内存的 `build_reflect_capabilities`。模型看到的动作说明、schema 的 `next_action` 枚举与解析白名单三处共用**同一个不可变对象**，128 种能力组合逐格断言 prompt 清单 ≡ 解析白名单。响应改用单一 `arguments` 对象取代逐动作分支字段，按所选动作逐字段类型校验。**schema 的 `next_action` 枚举刻意不随可用性收窄**：通用形状闸把含 `|` 的示例串当闭集，收窄会让「可识别但本轮不可用」的选择在**传输层**被判 `invalid_enum`，重试耗尽后终止的是整个循环——比 legacy 还差，正是 T1 刚修掉的形状。可用性因此只由 prompt 与解析白名单承担，它们能说清原因并把这一轮变成可继续的观察。新增 `services/reasoning_observation.py`：观察由 `_TraceRecorder` 上的账本在**每次轨迹记账时**从那一步的结构化 detail 折出，所以首轮播种与循环动作共用同一次转换，`run` 的十几条动作分支一行未改；一份 `TRACE_OBSERVATION_CONTRACT` 把「每个 step_type 读哪些键」写成可断言的表，AST 守卫扫 `reasoning_retrieval` 里全部 `TraceStep(step_type=...)` 与其 detail 字面量，任何漂移当场报红。**观察是投影不是第二份权威**：判重仍属 `attempted`/`visited`/`exact_terms_done`/`follow_chain_done`/`enum_chains` 的 cursor 覆盖，观察账一个都不写。
-- **§1.4 有界证据卡与指令/数据分层（T3-B）**：新增 `services/reasoning_context.py`——证据卡只用候选池内材料（零 LLM、零查库、零补 hydrate），user 段装配成「服务器状态 → 证据卡 → 动作观察账」三个各自带标题的块，system 段固定不变（任务、不可信材料框定、范围规则、动作契约、停机规则）。四项预算 `REASONING_REFLECT_EVIDENCE_CHARS_BY_EFFORT` / `_EXCERPT_CHARS` / `_STATE_CHARS` / `_RECENT_OBSERVATIONS` 只在 v2 下被消费。**只回喂近期动作意图，不回放完整思考过程**；「曾真实展示」的键只登记真的渲染出来的证据卡，被预算挤出窗口的候选一个都不登记——大纲绑定的合法集因此是事实而不是意图。分块渲染逐条做了伪造防御：文档字段折成一行并归一分隔符（`；;|｜`），带换行的 name / section_path / reason 在结构上再也开不出第二张卡、第二个块头或第二个「余额=」字段。
-- **§1.5 轻量必答方面记录（T4-A）**：新增 `services/reasoning_aspects.py` + `domain/retrieval_termination.py`。方面来自**用户冻结的契约**，模型在同一轮 JSON 里回传 `assessment`（`supported` / `unresolved`），唯一写入口 `AspectLedger.apply` 是全量替换（省略即保持、列出即替换，这是模型撤回旧判断的唯一方式），非法证据键剔除后不得保持 supported。三个口径分开记：`model_supported`（模型判断有支撑）/ `synthesis_admitted`（进入合成）/ `answer_cited`（最终引用），加上执行层本来就有的「查询执行」，正是设计稿要区分的四件事。**不可增删改方面**：那份清单来自用户。越界载荷（方面 id 不合法、同一方面重复、每方面超 8 个证据键或 gap 超 240 字符）整份折成零 I/O 的 invalid 观察，绝不用来裁剪用户的主题、问题或约束。
-- **§1.6 明确结束原因贯通（T4-B）**：`RetrievalTermination` 是七个 reason 的闭集，贯通链 `ReasoningResult.termination → ReasoningEvidenceSnapshot.termination → ResponseDraftInput.termination`（每一跳 `getattr` 兜底、缺省 None）。Ask 在 `_draft_reasoning_response` 里读它两次——合成**之前**渲染服务端事实块（登记在 `prompt_layers.L2_BLOCKS`），合成**之后**用最终 `id_map` 与解析回来的锚点做方面送达复核；Report 侧 `_draft_section` 用同一份纯函数、同一套口径。前端 `reasoning-trace.ts` 展示结束事实，`answer-panel.tsx` 同步。公开分享面不变（两条匿名投影本来就是白名单，不带推理面）。
-- **§1.7 默认关闭（T2 起，全程保持）**：`REASONING_REFLECT_V2_ENABLED` 默认 `false`，不是用户可见档位、也不由档位派生；四项 v2 预算在关闭态没有任何读取方（仍在启动期校验）。生产开闸是**独立决定**，待 §1.1 的离线统计与真实模型 A/B 之后。
-- **§1.1 离线轨迹统计与 A/B 通道（T0）：本期未做**，用户决定另行规划。已登记在 `fangan_todo.md`「reflect v2 开闸前待办」(a)。
+保留的通用改动包括：被禁动作跳过后继续合法检索、推理单次输出预算、模型失败
+分类与调用观测、意图限定词保真、答案 JSON 和数值比较指导，以及 Legacy 的权限、
+取消、枚举覆盖与大纲规则。Legacy 的前缀调整只移动固定指令，不追加证据历史或
+逐项自评；输入布局的结构验证不代表服务端缓存命中或实际耗时收益。
 
-**用户裁决与取舍记录：**
+决策依据是有限样本中的实际表现，而不是认定所有题型上 V2 都更差：
 
-- **冻结的 constraints 不构成方面**：约束是对答案的限定，不是「必须被证据覆盖的一块内容」；把它折成方面会让一个「只看 2024 年之后」的限定条件变成一个永远拿不到证据的未解决项，从而无限期阻止收尾。
-- **`retrieval_degraded` 要两个前件**：「本轮没有 model_end 标记」且「时间线上最后一次真实执行是 failed」。只看「有没有失败过」会把一次中途失败、后来恢复并正常收尾的 run 也判成降级；没恢复的通道另走纯披露的 `unrecovered_channels`，不与结束原因混。
-- **`assessment` 在 schema 里是开放对象**：闭合写法会把拒绝权交给**传输层**——那里的拒绝是不可生还的（烧完重试后整个 run 掉进 fail-open 的 answer），而 `AspectLedger.apply` 的拒绝是可生还的（折成零 I/O 观察，循环继续）。T4-A 最初的闭合写法正是这个陷阱：`"assessment": null`（JSON 序列化器给「没有内容」的常见产物）会 `invalid_type`，`supported` 项多一个 `gap` 键会在修复路径上 `unknown_key`。合法状态值经 system prompt 传达，与解析白名单读同一个常量。
-- **本期明确不做**：多动作并发、`read_evidence`、原文段落联邦化、原生 tool-use / provider 改造、独立 critic、自动改写 prompt 的 self-evo、低档位完整大纲、固定直答档位、先合成再检索。重新进入条件见设计稿 §11 与 `fangan_todo.md` 的 (f)。
+- 直接 Legacy/V2 对照：4 题 × 2 次重复，两臂各 8 次；累计耗时
+  265,913 ms → 367,397 ms（V2 增加 38.2%），reflect 总轮数 17 → 36。
+  V2 有 5/8 配对更快，但递归 KV 共享题的长尾抵消了收益，未显示稳定质量优势。
+- 后续按需展开原文的 V2 内部对照：4 题 × 两臂各 1 次；累计耗时
+  156,086 ms → 158,793 ms（增加 1.7%），reflect 轮数均为 13。
+  这组只比较两种 V2 正文布局，不能读成新的 Legacy 对照。
+- 样本规模不足以估计生产 P95 或普遍质量提升；没有模型服务端的缓存命中计数，
+  公共前缀长度也不能换算成命中率。
 
-**验证口径：**
-
-- **标准门**：`scripts/check.sh` 全绿（架构守卫含热函数零松弛棘轮：`run` 1359、`_run_enumeration` 267、`_new_run_state` 201、`_run_reasoning_stage` 530、`_draft_reasoning_response` 697、`_draft_section` 333，均为实测值，新增代码全部下沉为纯 helper，**没有提高任何一条上限**）；前端 `node --test tests/unit/reasoning-trace.test.mjs` 与 `tsc --noEmit`。矩阵覆盖 legacy / 无图 / 有图 / 受限来源范围 / Report / Knowhow。
-- **变异验证**：新增守卫按「删掉这一行则这条红」逐条注明并实跑过（能力三处同源、观察账 detail 键漂移、证据卡伪造边界、分隔符归一、方面越界的可生还拒绝、终态时间线判据、请求身份含范围）。
-- **真实模型 A/B：未做**。仓库没有问答质量评测台，本期不宣称检索质量提升，只宣称上述结构性与可观测性交付。开闸前的待办见 `fangan_todo.md`。
-
-### 32.1 v2 反思鲁棒性（2026-09-08/09，同一设计稿 §5.2 / §7.1）
-
-2026-09-08 用本机 deepseek-v4-flash 真跑 16 个 v2 run 之后加的三条合同。动机是实测数据而不是推演：16 个 run **全部**终于 `model_partial`，其中 14 个的直接原因是同一件事；同一批 run 的 118 次反思调用有 24 次正文为空。三条本身仍然全部在 v2 闸后，但**关闭态并非逐字节等价**，共有三处例外，都在下面各自的条目里写明：(1) `REASONING_MAX_TOKENS` —— legacy 反思同样按它要输出预算；(2) `classify_provider_failure` 把畸形回复改判 IGNORED —— 熔断与健康观测是共享的调度器基础设施，legacy 与所有 workload 同受益；(3) `app/core/llm.py` 给每条 llm 日志记录新增了 `finish_reason` 字段 —— 那是 `chat_json` 的公共出口，**所有 workload**（不止反思）的 `llm.jsonl` 都多了这一格。前两处是行为变化，第三处只是多一格可观测字段。
-
-- **收尾必须自评（§7.1）**：判据是 `run()` 的收尾条件本身——`next_action == "answer"`，或**任何带 `sufficient=true` 的动作**（`update_outline` / `consult_memory` 不产证据，与 `sufficient=true` 并存合法；穷尽档真机上最常见的收尾恰恰是 `update_outline` + `sufficient=true`）。这样的载荷若一个方面都没自评，整轮退回成零 I/O 的 `missing_assessment` 观察，下一轮逐个列出方面 id 追问。三条配套约束：同轮的 `update_outline` 载荷**先应用再退回**（折成 invalid 之后 `run()` 走 REFLECT_INVALID 那条 skip 分支，收尾分支里的应用不会再发生，退回的代价会变成丢掉模型这一轮真正做成的绑定；用的是与分发链**同一个** `apply_outline_update`，预算/校验/trace 语义不可能分叉）；**没有下一轮时不退回**（步数用尽，或这一轮是服务端强制的大纲溢出纠错轮）——直接按「第二次沉默」接受收尾，终态保持模型自己的判读而不是 `step_budget`；追问句**只挂被退回的下一轮那一次**（`nudge_pending`），措辞不回述上一轮发生过什么（那种句子第三轮之后就是假话）。追问最多一次（`REFLECT_ASSESSMENT_MAX_PROMPTS = 1`），第二次仍空着就接受并标 `assessment_omitted`（快照字段 + 终态 `aspects_assessment_omitted` 计数）。
-- **集合完整性键（§7.1 边界收窄）**：枚举条目按合同不进候选池、条目 id 对模型不可见，于是一个 coverage 报了 complete 的目录方面**结构上**永远拿不到 supported。服务端改为给本 run 内 `state == complete` 的每条枚举链签发确定性身份键（`enum:<collection>[:<kind>][:src=<id>][:local]`，与续跑身份一一对应、不含用户内容），在**服务器状态块**里紧接方面清单之后展示，并并进 `assessment` 的合法键集。原来那条「集合/来源身份不能冒充细粒度证据」因此收窄成「**未完整**枚举的集合身份不能冒充」。取舍：集合键**没有 epoch**，「先 complete、后同 run 内资料变化」这个窗口知情接受——最危险的一半（枚举期间就变）已被 `conflict` 从不签发键挡住。它也带来一处例外，两处「内部 source id 从不上屏」的注释已同步：限定来源的键会带 `src=<id>` 展示给模型，但那是**证据身份**，只能进 `evidence_keys`，不是枚举动作的检索参数。
-- **单轮反思失败降级、连续两轮才收尾（§5.2）**：接入前一次抖动就把整次检索砍掉，**已经到手的证据与刚播下的方向全部作废**，而结果与「模型看着证据决定停下」在终态上无法区分。现在第一次失败折成一条零 I/O 的 `model_degraded:<code>` 观察、当没有进展的 stale 轮继续走（既有熔断照常兜底），**连续第二次**才按 fail-open 收尾（终态 `model_degraded`）；首轮同样适用，任何一轮成功都清零。失败原因码逐字进观察账那一行。配套：`chat_json` 新增可选出参 `call_stats` 交回 `finish_reason`（**每一跳都要声明 `supports_call_stats`**——适配器声明的是「我会转发」，不是「我后面那个 duck-typed 客户端会填」，无条件转发会在老传输上抛 TypeError）；空正文 + `finish_reason=length` 折成 `output_budget_exhausted` 并在同一轮原样重试一次、预算翻倍；出参空着时退回读 `MalformedModelResponse` 自己带的那一格，两条来源都空才记 `empty`。
-- **`REASONING_MAX_TOKENS`（默认 16384，ge=1）**：规划（`expand_query`）与反思都按它要输出预算，不再吃全局 `OPENAI_COMPAT_MAX_TOKENS` 的 8192（思考模式能把 8192 吃光 ⇒ 空正文 + `finish_reason=length`）。⚠ 这是**部署配置不是策略**，legacy 与 v2 都用——总闸关着时 legacy 反思同样带上它，这是关闭态唯一改变的行为；那条路径的 prompt / schema / trace 仍逐字未动。同轮翻倍重试就是在这个数之上再乘 2，不另钉字面量。
-- **验证**：`scripts/check.sh` 全绿；热函数棘轮一条都没提高（`run` 仍 1359，新增语句用注释收缩抵掉）。变异实跑：收尾判据改回只认 `answer`、去掉「剩余步数 ≥ 1」、去掉追问一次性标志清除、去掉折叠前的大纲应用、无条件转发 `call_stats`、去掉 `finish_reason` 的异常兜底——六条各有对应用例先红。
-- **一处已撤销的旧豁免**：接入时 `answer` + `sufficient=false` 被整个放过（理由是「它本来就说了还差东西」）。2026-09-09 评审后撤销：那一刻服务端拿到的仍然是一张空账，而模型分得清哪个方面拿到了什么——追问一轮换回的正是这份逐方面读数。对应用例已按新合同改写。
-- **assessment 形状归一（`c415f5a6a`，2026-09-09 起）**：本机 deepseek-v4-flash 关思考实测里 55 次收尾自评有 41 次不是设计稿的列表形，而是按方面 id 直接映射——被 `apply()` 当成两组都没给的空载荷，「模型不填 assessment」的大多数其实是**形状不合**。`normalize_assessment_payload` 在校验前做纯形状归一（不碰语义）：顶层出现 `supported`/`unresolved` 任一键即按列表形（陌生顶层键忽略，与归一前 `apply()` 只遍历两组的语义一致；判据一度写成「顶层键是闭集子集」，那会把带一句 note 的列表形整份推进映射形分支读成两条 unknown，2026-09-09 评审后改成交集），否则按映射形；映射形里 `supported`(布尔) 与 `status`(字面量) 冲突时**取保守一边**（`supported is True` 且 status 缺省或就是 supported 才算已支撑，status 明确给了别的值以 status 为准，`status == "supported"` 而 `supported is False` 归到 unknown）；列表形 item 的 `id` 别名同样认作 `aspect_id`。归一之后走同一套既有校验，越权/超限仍然被拒。
-- **`missing_assessment` 退回轮对 stale 持平（`364d88314`）**：这一轮是纯记账动作而不是空转，与送达了内容的 consult 轮同款判据。追问上限已由 `REFLECT_ASSESSMENT_MAX_PROMPTS=1` 兜住，递增 stale 只会让「退回一次换一份自评」更容易撞上熔断，而它换回的读数与真的空转背道而驰。
-- **退回判据的两条补丁（2026-09-09 评审后）**：`has_next_turn` 再并上**动作面**那一半——收尾动作是 `update_outline` 且大纲额度只剩最后一格时不退回（下一轮会在发出模型调用之前就以 `only_answer` 收尾，追问句送不到模型面前），按「第二次沉默」记 `assessment_omitted`；这是只看大纲额度的保守近似，宁可少问一次也不白折一轮。配套两处：run 收尾时追问若仍未被消费（发出过、却一次都没渲染）走同一个入口记 `assessment_omitted`；而被 §5.2 折成降级轮的那一次**不算送达**，`nudge_pending` 重新置位（两道闸：没发出过不置位、上一次已被回应不置位）。折叠路径不安排 overflow 纠错轮是知情取舍，溢出在终态里仍被如实披露。
-- **`finish_reason` 沿 `__cause__`/`__context__` 链读（2026-09-09 评审后）**：生产的 `ScheduledJsonChatClient` 把 `MalformedModelResponse` 重抛成 `ModelInvocationError`，而 `finish_reason` 只挂在被包住的那一层上——只读最外层的话生产里所有空正文都落回 `empty`，同轮翻倍重试结构性不生效。与 `.reason` 共用同一次遍历，出参 `call_stats` 仍然优先。
-- **`classify_provider_failure` 不再把畸形回复算作熔断信号（2026-09-09）**：本机并发实测里几次空正文/坏 JSON 一凑齐连续 3 次就把熔断器打开，之后同批 run 直接吃 `model_service_unavailable`——但空正文已经有上面那条逐调用重试与连续两轮才收尾的降级路径，熔断器不该为同一件事再收一次费。`MalformedModelResponse` 改判 `FailureKind.IGNORED`（真连接失败仍走 `ConnectionError`/`TimeoutError`/5xx，照常计入 TRANSIENT）；半开探测期间收到畸形回复视为「探测已证明服务可达」直接闭闸（而不是像其它 IGNORED 结果那样弹回 open、靠不重置的 `_opened_at` 换一次立即重试）——取舍与两条路径的注释都写在 `model_circuit_breaker.py` 里。**放弃了什么 / 保留了什么**（2026-09-09 评审后补齐）：放弃的是「畸形回复参与服务可用性判定」——不进熔断、不武装 `_needs_recovery`、不把面板状态改成 `error`；保留的是**可观测性**——`_apply_completion_locked` 仍为畸形回复记一条观测（`status="ok"` + `code="malformed_response"` + `trigger="observed_failure"`），管理页因此看得见这个真机上最常见的失败模式。状态之所以是 `ok` 而不是新加一档：面板那一列就是可用性字段，而 `error` 行只能靠 `_needs_recovery` 在下一次成功时写 `recovery_probe` 才治愈——不武装就永久钉住「不可用」，武装了又等于把模型行为放回可用性账；再加一档 `degraded` 则要动两个 store 的 CHECK 约束、公开 API 的 Literal 与前端白名单（一次 schema 迁移，换一个按定义不该影响可用性的诊断值）。另有一道闸：服务已被标记待恢复（standing `error` 行）时不写这条观测，畸形回复不是恢复信号。
-
-## 33. reflect 前缀复用 PR-1–PR-5 五期收官（2026-09-09～09-11）
-
-设计真源 `docs/superpowers/specs/2026-09-09-reflect-prefix-cache-final-design_zh.md`
-（§1 决策与适用范围、§8 测量合同、§9 三层实验、§13 交付物与回退）。承接 §32/§32.1 的
-v2 基线，以下五个 PR 依次交付「稳定前缀复用」候选布局及其测量/实验通道，**全部保持
-`REASONING_REFLECT_OPTIMIZATION` 默认 `off`，只在 v2 总闸（`REASONING_REFLECT_V2_ENABLED`，
-默认关）后面生效**。
-
-- **PR-1 公共基线修复**（计划 `docs/superpowers/specs/2026-09-09-reflect-v2-baseline-fixes_zh.md`）：
-  枚举侧规模守卫按集合泛化、参数与原因码前移到解析层、收尾计时归位（`_closing_rerank`）、
-  自评按方面拒绝解耦（`assessment_rejections`）。四项均只影响 v2 臂，legacy 逐字节不变；
-  已知限制见 `fangan_todo.md` (i)。
-- **PR-2「T0 测量 + `prefix_snapshot`」**（计划 `2026-09-09-reflect-prefix-snapshot-plan_zh.md`）：
-  `REASONING_REFLECT_OPTIMIZATION`（`off`/`prefix_snapshot`）与正交的
-  `REASONING_REFLECT_MEASURE_CONTEXT`、S/C/K/D/T 布局、静态工具目录恒超集、单次调用观测
-  （`call_wall_ms`/`status`/`attempts`/`response_chars`/`usage`）、闭集投影新增九列、rig 的
-  `EVENT_LOG_DIR` 隔离/`run_wall_ms`/`(policy, optimization)` 二维臂/per-call 表。已知限制见
-  `fangan_todo.md` (j)。
-- **PR-3「`prefix_delta` 增量上下文」**（计划 `2026-09-10-reflect-prefix-delta-plan_zh.md`）：
-  K/D 两块分工（K 是相位开局快照、D 是逐轮只追加的增量块）、卡片一经真发送即冻结字节、
-  补充卡追加而不覆写、双池累计预算在追加前核验、重建有迟滞、回退不可逆且只影响该 run。
-  已知限制见 `fangan_todo.md` (k)。
-- **PR-4「`prefix_delta_lean` 轻量自评」**（计划 `2026-09-10-reflect-prefix-delta-lean-plan_zh.md`）：
-  第四格布局——与 D 同一份消息装配，只差自评合同：普通轮只报变化、收尾轮沉默即接受不
-  追问、终态多一行「未逐项核验」披露；`AspectLedger.lean_assessment` 是一格 run 级冻结的
-  只读开关，唯一构造点由 AST 守卫钉住。已知限制见 `fangan_todo.md` (l)。
-- **PR-5「T4 实验通道（E1/E2/E3）+ T5 文档收官」**（计划
-  `2026-09-11-reflect-prefix-experiments-plan_zh.md`）：
-  - **E1「前缀复用敏感性探针」**（`scripts/reflect_shadow_rig.py prefix-probe`）：
-    `app/core/llm.py` 上默认关闭的实验标记接缝（模块级 `ContextVar` + `provider_messages`
-    第三参数 + `experiment_message_markers` 上下文管理器，三条判据钉死零字节变化）+ 纯
-    计划与统计（`backend/app/eval/reflect_prefix_probe.py`）。
-  - **E2「固定状态的真实 reflect 对照」**：驱动器与 `model_clients` 代理
-    （`backend/app/eval/reflect_state_probe.py`，`ProbeModelClients` 只截
-    `chat("reasoning_agent")`）+ 12 例 case 集（`reflect_t0/state_probes.json`）；rig 子命令
-    `state-probe`（`scripts/reflect_shadow_rig.py`）已落地，见 `scripts/README.md` 的
-    `state-probe` 小节。
-  - **E3「真实自主循环」**：在既有 `ab` 上补整批墙钟预算（`--max-wall-minutes`，到点停止
-    派发、保留未完成/不成对标记，不补跑到矩阵齐全）+ manifest 收尾。
-  - 三条通道共用的 manifest 纯构造（`backend/app/eval/reflect_manifest.py`，18 键闭集 +
-    隐私断言）与 `analyze` 三处新读出口（`--baseline-arm`/`--pair-rows`/`--key-set`）。
-  已知限制见 `fangan_todo.md` (m)。
-
-**五期共同的验证口径**：每个 PR 落地时 `bash scripts/check.sh` 全绿（架构守卫热函数零松弛
-棘轮 `run`/`_new_run_state`/`_run_enumeration` 逐字未提高上限）；T-EX10 对五处不可协商性质
-各做了一次「删掉这一行则这条红」的变异（a–e 全红）+ 一处补测（md 渲染层漏网后补齐），不是
-对每一条新增守卫都逐条变异过。各任务的修正轮另有各自的逐条变异复验，登记在各自的实施记录
-里。**真实模型 A/B 与生产收益测量仍未做**——PR-5 只交付实验通道、
-dry-run 输出与 manifest，不带任何采用结论；**开闸仍是此之后的独立决定，默认 `off` 不变**，
-任一质量或稳定性回归可立即回到 `off`，不做数据迁移。
+V2 专用代码、配置、自评/终态消费及多臂探针随此次清理删除；普通轨迹导出、
+模型/事件日志关联、Legacy 影子检索与测试库的 Ask/Report 工具继续保留。
+既有持久化轨迹不迁移，导出保留其显式历史终态，不能重推为正常结束。
+本次清理的验证结果以 PR 对应提交的验证记录为准。

@@ -1,3 +1,5 @@
+> 历史档案（2026-09-13）：V2 实验已退役，本文不再是实施或启用指引。当前仅保留 Legacy；参见 [当前状态](../../../fangan_done.md#32-reflect-实验退役与-legacy-保留2026-09-13) 和 [产品/API 合同](../../product-and-api_zh.md)。
+
 # reflect v2 · PR-1 公共基线修复实施计划
 
 日期:2026-09-09。上游:[reflect 上下文与前缀复用最终设计](2026-09-09-reflect-prefix-cache-final-design_zh.md)§7(公共基线采纳项)与主 agent review 调整 1/2;生产证据(GLM-5.3,136 run search-only)见会话 scratchpad `prod-glm53-evidence.md`。本计划是 B/P/D/L 四臂共用的执行基线;合入后旧批次数据只作历史参考。
