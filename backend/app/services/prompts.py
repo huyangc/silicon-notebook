@@ -428,7 +428,14 @@ def answer_prompt(
         f"{termination_section}"
         f"Question: {question}\n\n"
         f"Knowledge items (id: [type][tier] name — context):\n{context_block}\n\n"
-        'Return JSON only: {"answer":"<text with [k] markers>","grounded":true|false}'
+        'Return exactly one JSON object with both "answer" (a string) and '
+        '"grounded" (a boolean, true or false) at the same root. Do not emit '
+        'a second object or text outside it. JSON-escape the answer string: '
+        'write line and paragraph breaks as \\n, double quotes as \\", and '
+        'each LaTeX backslash as \\\\. Do not put raw line breaks inside '
+        'the string. Example (format only):\n'
+        '{"answer":"First paragraph [k1].\\n\\nA \\"quoted\\" word and '
+        'inline math $\\\\alpha$.","grounded":true}'
     )
 
 
@@ -1909,6 +1916,16 @@ def query_intent_prompt(question: str, max_topics: int = 6,
         "1-4 retrieval queries. Preserve requested comparisons, constraints, scope, "
         "time range and output form. excluded_topics lists plausible but out-of-scope "
         "directions. Do not answer the question and do not mention corpus coverage.\n"
+        "Keep the user's requested level of detail. mandatory_topics, comparison_axes, "
+        "constraints and expected_output must express requirements from the user's "
+        "wording, not an ideal exhaustive report. An overview needs the main point; "
+        "a comparison of mechanisms needs the mechanisms and their difference. Do not "
+        "add mandatory formulas, implementation details, benchmark suites, exact "
+        "scores, every model scale, or whole-library coverage unless requested. "
+        "Preserve those details when the user explicitly asks for them. Retrieval "
+        "query variants are search aids, not additional questions that must be answered. "
+        "Leave optional dimensions out of mandatory fields; safe assumptions must "
+        "not expand the requested task.\n"
         f"{fragment_text('intent.cross_tool_mapping')}"
         "normalized_question is a standalone, precise formulation in the user's "
         "language. intent_type classifies the requested operation. entities lists "
@@ -1918,6 +1935,14 @@ def query_intent_prompt(question: str, max_topics: int = 6,
         "for an exact count/grouping over the whole collection, or hybrid for a "
         "full list plus analysis. Set completeness_required=true for complete, "
         "aggregate, and hybrid; a relevance top-N can never satisfy those scopes.\n"
+        "Normalize phrasing without adding facts or replacing a document-relative "
+        "subject with an invented identity or a placeholder such as 'unspecified "
+        "model'. Preserve a subject explicitly anchored to the current document or "
+        "library for later retrieval; do not infer which sources are in scope. If "
+        "a genuinely missing comparison side could change the topic, retain the "
+        "original wording and ask for it in ambiguities. Clarification options must "
+        "be actual choices, never instructions such as 'please provide a name'; "
+        "use an empty options list when a free-text answer is required.\n"
         f"{SCOPE_DEIXIS_GROUNDING}"
         f"{quoted_phrase_grounding(question)}"
         "A request scoped to the whole open library ('当前notebook有哪几篇文章', "

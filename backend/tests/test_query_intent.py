@@ -347,6 +347,60 @@ def test_generic_reasoning_question_requires_clarification_before_retrieval():
     assert incomplete_model_resolution["needs_clarification"] is True
 
 
+@pytest.mark.parametrize("question", [
+    "这个笔记本包含哪些文章？请逐一列出标题。",
+    "介绍这个知识库中的主要主题。",
+    "这个库里的文章讨论了什么？",
+    "Which articles are in this notebook?",
+    "Summarize the main themes in this knowledge base.",
+])
+def test_current_container_reference_is_not_a_missing_research_object(question):
+    # No corpus, model or guessed source identity is needed to identify the
+    # active container that the request already supplies.
+    contract = plan_query_intent(None, question)
+
+    assert contract["needs_clarification"] is False
+    assert contract["resolved_question"] == question
+    assert finalize_query_intent(contract)["clarification_answers"] == []
+
+
+@pytest.mark.parametrize("question", [
+    "这个笔记本里，它的锁定时间是多少？",
+    "Which article in this notebook supports that?",
+    "那个笔记本包含哪些文章？",
+    "介绍这个库存方案的局限。",
+    "这个笔记本电脑怎么样？",
+    "这个知识库系统的缓存如何实现？",
+])
+def test_container_reference_does_not_clear_another_missing_referent(question):
+    contract = plan_query_intent(None, question)
+
+    assert contract["needs_clarification"] is True
+    with pytest.raises(ValueError, match="必填澄清"):
+        finalize_query_intent(contract)
+
+
+def test_model_reported_missing_comparison_side_still_requires_an_answer():
+    class _AmbiguousComparisonClient(_IntentClient):
+        def chat_json(self, *args, **kwargs):
+            data = json.loads(super().chat_json(*args, **kwargs))
+            data["ambiguities"] = [{
+                "question": "要与基准方案比较的是哪个系统？",
+                "required": True,
+                "options": [],
+            }]
+            data["needs_clarification"] = True
+            return json.dumps(data)
+
+    contract = plan_query_intent(
+        _AmbiguousComparisonClient(), "基准测试结果与参考方案相比如何？",
+    )
+
+    assert contract["needs_clarification"] is True
+    with pytest.raises(ValueError, match="必填澄清"):
+        finalize_query_intent(contract)
+
+
 def test_confirmed_answers_are_frozen_into_authoritative_research_question():
     seed = plan_query_intent(None, "帮我分析一下这个问题")
     seed["assumptions"] = ["环路已正常上电"]
