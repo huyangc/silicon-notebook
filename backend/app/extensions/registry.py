@@ -8,8 +8,25 @@ import re
 from types import MappingProxyType
 from typing import Callable, Iterable, Mapping
 
+from app.domain.reflect_action import (
+    EXTERNAL_EVIDENCE_SOURCE_LABEL_MAX_CHARS,
+    REFLECT_ACTION_DESCRIPTION_MAX_CHARS,
+    REFLECT_ACTION_ENUM_VALUES_MAX,
+    REFLECT_ACTION_ENUM_VALUE_RE,
+    REFLECT_ACTION_NAME_RE,
+    REFLECT_ACTION_PARAM_DESCRIPTION_MAX_CHARS,
+    REFLECT_ACTION_PARAMETER_NAME_RE,
+    REFLECT_ACTION_PARAMETERS_MAX,
+    RESERVED_REFLECT_KEYS,
+    RESERVED_REFLECT_PARAMETER_NAMES,
+    ReflectActionDescriptor,
+    ReflectActionParameter,
+    ReflectActionSpec,
+    contains_control_characters,
+)
 from app.extension_sdk import (
     ASK_ENGINE_POINT,
+    ASK_REFLECT_ACTION_POINT,
     EXTENSION_API_VERSION,
     Availability,
     AvailabilityStatus,
@@ -51,6 +68,199 @@ _ADMIN_DISABLED = Availability(
 class RegisteredContribution:
     plugin_id: str
     contribution: ExtensionContribution
+
+
+def _reject_reflect_text(
+    locator: str, field_name: str, value: object, limit: int
+) -> None:
+    """Loudly reject a descriptor string that is not one bounded, non-empty line.
+
+    Empty, over-length and control characters are all startup FAILURES, not
+    clamps or strips.  A descriptor is deployment configuration, not user data:
+    silently trimming it would show the model a different description than the
+    operator wrote, a surviving ``\\n`` would let plugin text pose as another
+    rule in core's own prompt template, and an empty one would put a bare action
+    name in front of the model with nothing saying what it does — a tool the
+    model can only guess at is worse than a tool it does not have.
+
+    Blank-after-strip counts as empty: ``"   "`` renders exactly as ``""`` does.
+
+    The message names only ``locator`` (contribution id and plugin id, both
+    core-validated stable identifiers) and the field name — never the offending
+    text, which on a deployment plugin may carry an API key or an internal
+    hostname.
+    """
+
+    if type(value) is not str:
+        raise ExtensionRegistryError(
+            f"reflect action {locator} has a non-string {field_name}"
+        )
+    if not value.strip():
+        raise ExtensionRegistryError(
+            f"reflect action {locator} has an empty {field_name}"
+        )
+    if len(value) > limit:
+        raise ExtensionRegistryError(
+            f"reflect action {locator} has a {field_name} longer than "
+            f"{limit} characters"
+        )
+    if contains_control_characters(value):
+        raise ExtensionRegistryError(
+            f"reflect action {locator} has a {field_name} containing "
+            "control characters"
+        )
+
+
+def _validate_reflect_parameters(
+    locator: str, descriptor: ReflectActionDescriptor
+) -> None:
+    if type(descriptor.parameters) is not tuple:
+        raise ExtensionRegistryError(
+            f"reflect action {locator} must declare parameters as a tuple"
+        )
+    if len(descriptor.parameters) > REFLECT_ACTION_PARAMETERS_MAX:
+        raise ExtensionRegistryError(
+            f"reflect action {locator} declares more than "
+            f"{REFLECT_ACTION_PARAMETERS_MAX} parameters"
+        )
+    seen: set[str] = set()
+    for parameter in descriptor.parameters:
+        if type(parameter) is not ReflectActionParameter:
+            raise ExtensionRegistryError(
+                f"reflect action {locator} declares a parameter that is "
+                "not a ReflectActionParameter"
+            )
+        if (
+            type(parameter.name) is not str
+            or not REFLECT_ACTION_PARAMETER_NAME_RE.fullmatch(parameter.name)
+        ):
+            raise ExtensionRegistryError(
+                f"reflect action {locator} declares a parameter whose "
+                "name is not a stable lowercase identifier"
+            )
+        # Safe to quote from here on: the name matched the identifier pattern.
+        if parameter.name in RESERVED_REFLECT_PARAMETER_NAMES:
+            raise ExtensionRegistryError(
+                f"reflect action {locator} declares reserved parameter "
+                f"name {parameter.name!r}"
+            )
+        if parameter.name in seen:
+            raise ExtensionRegistryError(
+                f"reflect action {locator} declares parameter "
+                f"{parameter.name!r} twice"
+            )
+        seen.add(parameter.name)
+        # Exact ``bool``, not truthiness: ``required="false"`` is a plugin bug
+        # that reads as *required* everywhere it is tested, so the run would
+        # fail closed on a missing argument the author believed was optional.
+        if type(parameter.required) is not bool:
+            raise ExtensionRegistryError(
+                f"reflect action {locator} parameter {parameter.name!r} "
+                "declares a non-boolean required flag"
+            )
+        _reject_reflect_text(
+            locator,
+            f"parameter {parameter.name!r} description",
+            parameter.description,
+            REFLECT_ACTION_PARAM_DESCRIPTION_MAX_CHARS,
+        )
+        _validate_reflect_parameter_values(locator, parameter)
+
+
+def _validate_reflect_parameter_values(
+    locator: str, parameter: ReflectActionParameter
+) -> None:
+    """The kind/values pairing: an enum needs values, text must not carry any.
+
+    A text parameter with values would render as a free-text slot in the prompt
+    line and as an ``a|b`` template in the schema hint — two projections of one
+    descriptor disagreeing, which is precisely the failure the "one description,
+    three places" discipline exists to prevent.
+    """
+
+    if type(parameter.values) is not tuple:
+        raise ExtensionRegistryError(
+            f"reflect action {locator} parameter {parameter.name!r} "
+            "must declare values as a tuple"
+        )
+    if parameter.kind == "text":
+        if parameter.values:
+            raise ExtensionRegistryError(
+                f"reflect action {locator} parameter "
+                f"{parameter.name!r} is text but declares enum values"
+            )
+        return
+    if parameter.kind != "enum":
+        raise ExtensionRegistryError(
+            f"reflect action {locator} parameter {parameter.name!r} "
+            "has a kind other than 'text' or 'enum'"
+        )
+    if not parameter.values:
+        raise ExtensionRegistryError(
+            f"reflect action {locator} parameter {parameter.name!r} "
+            "is an enum with no values"
+        )
+    if len(parameter.values) > REFLECT_ACTION_ENUM_VALUES_MAX:
+        raise ExtensionRegistryError(
+            f"reflect action {locator} parameter {parameter.name!r} "
+            f"declares more than {REFLECT_ACTION_ENUM_VALUES_MAX} enum values"
+        )
+    if any(
+        type(value) is not str or not REFLECT_ACTION_ENUM_VALUE_RE.fullmatch(value)
+        for value in parameter.values
+    ):
+        raise ExtensionRegistryError(
+            f"reflect action {locator} parameter {parameter.name!r} "
+            "declares an enum value that is not a stable lowercase identifier"
+        )
+    if len(set(parameter.values)) != len(parameter.values):
+        raise ExtensionRegistryError(
+            f"reflect action {locator} parameter {parameter.name!r} "
+            "declares a duplicate enum value"
+        )
+
+
+def _validate_reflect_descriptor(
+    locator: str, descriptor: ReflectActionDescriptor
+) -> None:
+    if (
+        type(descriptor.name) is not str
+        or not REFLECT_ACTION_NAME_RE.fullmatch(descriptor.name)
+    ):
+        raise ExtensionRegistryError(
+            f"reflect action {locator} has a name that is not a stable "
+            "lowercase identifier"
+        )
+    # Both halves of the reserved set matter. Colliding with a CORE ACTION ID
+    # would shadow a built-in action in the whitelist; colliding with a SCHEMA
+    # FIELD name would make the model write this action's arguments into a core
+    # slot, because a plugin action's parameters arrive as one nested object
+    # keyed by the action name.
+    if descriptor.name in RESERVED_REFLECT_KEYS:
+        raise ExtensionRegistryError(
+            f"reflect action {locator} uses reserved reflect key "
+            f"{descriptor.name!r}"
+        )
+    # All three plugin-authored strings go through the one rail, so "empty",
+    # "too long" and "carries a control character" cannot mean different things
+    # depending on which field they happen to be in.
+    _reject_reflect_text(
+        locator,
+        "description",
+        descriptor.description,
+        REFLECT_ACTION_DESCRIPTION_MAX_CHARS,
+    )
+    _reject_reflect_text(
+        locator,
+        "source_label",
+        descriptor.source_label,
+        EXTERNAL_EVIDENCE_SOURCE_LABEL_MAX_CHARS,
+    )
+    if type(descriptor.max_calls_per_run) is not int or descriptor.max_calls_per_run < 1:
+        raise ExtensionRegistryError(
+            f"reflect action {locator} must allow at least one call per run"
+        )
+    _validate_reflect_parameters(locator, descriptor)
 
 
 class _BundleRegistrar:
@@ -119,6 +329,10 @@ class ExtensionRegistry:
         self._gateable_capability_owners: Mapping[str, frozenset[str]] = (
             MappingProxyType({})
         )
+        # Also filled by ``freeze``. Empty for every deployment with no
+        # ``ask.reflect_action`` contribution, which is the byte-for-byte
+        # "reflect never heard of plugin actions" state.
+        self._reflect_action_specs: tuple[ReflectActionSpec, ...] = ()
 
     @property
     def frozen(self) -> bool:
@@ -354,6 +568,9 @@ class ExtensionRegistry:
                 registrations.sort(
                     key=lambda item: item.contribution.declaration.id
                 )
+        # After the ordering loop, so the spec tuple is in exactly the order
+        # ``contributions(ASK_REFLECT_ACTION_POINT)`` reports.
+        self._validate_reflect_actions()
         self._freeze_admission_scope()
         self._manifests = MappingProxyType(dict(self._manifests))  # type: ignore[assignment]
         self._contributions = MappingProxyType(  # type: ignore[assignment]
@@ -367,6 +584,70 @@ class ExtensionRegistry:
         )
         self._frozen = True
         return self
+
+    def _validate_reflect_actions(self) -> None:
+        """Settle the ``ask.reflect_action`` topology, once, at freeze.
+
+        Every rule here is a STARTUP failure rather than a runtime skip: a
+        reflect action is explicit deployment configuration, frozen at boot
+        (SOP §9.1), and a descriptor the model would be shown wrongly — or not
+        at all — is not something to discover on the first question of the day.
+
+        Action-name uniqueness is global across plugins, not per plugin. The
+        model types a bare name, so two plugins offering ``search_papers`` are
+        one ambiguous action, and namespacing them would mean showing the model
+        a plugin id it must never see (design document §九 invariant 7).
+
+        Every rejection here names the contribution id AND the plugin id. Both
+        are stable metadata identifiers this class already validated — never
+        plugin-authored text — and on a deployment running several plugins the
+        contribution id alone does not say whose package to go and fix. The
+        model never sees either; this is an operator-facing startup log.
+        """
+
+        specs: list[ReflectActionSpec] = []
+        claimed: dict[str, str] = {}
+        for registered in self._points.get(ASK_REFLECT_ACTION_POINT, ()):
+            declaration = registered.contribution.declaration
+            locator = f"{declaration.id!r} (plugin {registered.plugin_id!r})"
+            if declaration.kind is not ContributionKind.CONTRIBUTOR:
+                raise ExtensionRegistryError(
+                    f"reflect action {locator} must be registered as "
+                    f"{ContributionKind.CONTRIBUTOR.value}"
+                )
+            descriptor = getattr(
+                registered.contribution.implementation, "descriptor", None
+            )
+            if type(descriptor) is not ReflectActionDescriptor:
+                raise ExtensionRegistryError(
+                    f"reflect action {locator} does not expose a "
+                    "ReflectActionDescriptor"
+                )
+            _validate_reflect_descriptor(locator, descriptor)
+            owner = claimed.get(descriptor.name)
+            if owner is not None:
+                raise ExtensionRegistryError(
+                    f"reflect action name {descriptor.name!r} is claimed by both "
+                    f"{owner} and {locator}"
+                )
+            claimed[descriptor.name] = locator
+            specs.append(
+                ReflectActionSpec(
+                    declaration.id, registered.plugin_id, descriptor
+                )
+            )
+        self._reflect_action_specs = tuple(specs)
+
+    def reflect_action_specs(self) -> tuple[ReflectActionSpec, ...]:
+        """The validated reflect-action topology, in frozen registration order.
+
+        Descriptors only — no availability, no admin gate, no budget. Deciding
+        which of these a given run may actually offer belongs to the host
+        (design document §3.1), which re-reads the live probes every run.
+        """
+
+        self._require_frozen()
+        return self._reflect_action_specs
 
     def _freeze_admission_scope(self) -> None:
         """Settle *what the admission gate is allowed to reach*, once.

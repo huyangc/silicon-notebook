@@ -25,6 +25,7 @@ from app.core.ask_retrieval_policy import (
 )
 from app.core.llm import budget_kwargs
 from app.core.config import DEFAULT_REASONING_PER_QUERY_LIMIT, Settings
+from app.domain.reflect_action import ExternalEvidence
 from app.models.ask import TRACE_RESULT_IDS_MAX, TraceStep
 from app.repositories.lexical_query import (
     MAX_EXACT_PHRASE_CHARS, MAX_QUOTED_PHRASES, exact_probe_query,
@@ -2162,6 +2163,9 @@ class ReasoningResult:
     # `outline_truncated_kg_evidence`)。它是 `top_hits` 的**补集**,不重复其中
     # 已有的对象;按节合成把两者合起来解析绑定键,别的路径不消费它。
     outline_evidence: List[RetrievedKnowledge] = field(default_factory=list)
+    # 插件 reflect 动作带回的外部证据(设计文档 §6.1)。与 gap 建议相反:它必须在
+    # 草稿阶段之内可见,否则就无法被 `[k]` 引用。空列表 = 没有插件动作参与本 run。
+    external_evidence: List[ExternalEvidence] = field(default_factory=list)
     # Internal selected-source regression oracle.  It is never serialized into
     # Ask/report responses; callers may emit only its redacted event payload.
     baseline_manifest: object | None = None
