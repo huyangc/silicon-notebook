@@ -94,6 +94,17 @@ from app.extension_sdk.ask import (
     EngineTraceSink,
     RetrievalAccessPort,
 )
+from app.extension_sdk.element_enrichment import (
+    SOURCE_ELEMENT_ENRICHER_POINT,
+    ElementAssetReader,
+    ElementEnricher,
+    ElementEnrichmentAvailabilityContext,
+    ElementEnrichmentBudget,
+    ElementEnrichmentCandidate,
+    ElementEnrichmentContext,
+    ElementRef,
+    ElementView,
+)
 from app.extension_sdk.gap_consult import (
     ASK_GAP_CONSULT_POINT,
     GAP_CONSULT_MAX_GAP_PHRASES,
@@ -249,6 +260,15 @@ __all__ = [
     "EngineModelPort",
     "EngineTraceSink",
     "RetrievalAccessPort",
+    "SOURCE_ELEMENT_ENRICHER_POINT",
+    "ElementAssetReader",
+    "ElementEnricher",
+    "ElementEnrichmentAvailabilityContext",
+    "ElementEnrichmentBudget",
+    "ElementEnrichmentCandidate",
+    "ElementEnrichmentContext",
+    "ElementRef",
+    "ElementView",
     "ASK_GAP_CONSULT_POINT",
     "GAP_CONSULT_MAX_GAP_PHRASES",
     "GAP_CONSULT_MAX_SUGGESTIONS",
