@@ -359,9 +359,9 @@
     "backend/app/services/reasoning_retrieval.py::ReasoningRetriever.run": 1278,
     "backend/app/services/report_engine.py::ReportEngine._assemble": 457,
     "backend/app/services/report_engine.py::ReportEngine._draft_section": 317,
-    "backend/app/services/repository_facade.py::RepositoryFacade.__init__": 474,
-    "backend/app/services/repository_runtime.py::RepositoryRuntime.__init__": 139,
-    "backend/app/services/source_ingestion.py::SourceIngestionService._process_source_scoped": 364,
+    "backend/app/services/repository_facade.py::RepositoryFacade.__init__": 477,
+    "backend/app/services/repository_runtime.py::RepositoryRuntime.__init__": 142,
+    "backend/app/services/source_ingestion.py::SourceIngestionService._process_source_scoped": 365,
     "backend/app/services/source_ingestion.py::SourceIngestionService.process_source": 17
   }
 }

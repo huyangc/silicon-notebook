@@ -13,13 +13,17 @@ import time
 import weakref
 from contextlib import contextmanager
 from datetime import datetime, timedelta
+from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 from uuid import uuid4
 
 from app.core.config import Settings
+from app.domain.cancellation import CoreCancellation
 from app.domain.extensions import (
     AskCompletedObserverHostPort,
+    ElementAssetLocation,
+    ElementEnricherHostPort,
     ReportCompletedObserverHostPort,
     ParserProviderChainHostPort,
     RetrievalContributorHostPort,
@@ -285,6 +289,54 @@ def _make_persist_image(
     )(notebook_id, source_id, created_by)
 
 
+def _resolve_element_assets(
+    repo: "RepositoryFacade", notebook_id: str, asset_ids
+) -> dict[str, ElementAssetLocation]:
+    """The ``resolve_element_assets`` seam ``wire_source_ingestion`` hands to
+    ``SourceIngestionService`` — a module-level function (not a facade method)
+    for exactly the reason ``_make_persist_image`` above is one: the
+    one-hop-delegate facade-body contract (``test_repository_facade_
+    contract.py``) forbids a NAMED facade method whose body does real work
+    (a loop over ids, an ``AssetService`` construction, a filesystem stat)
+    rather than delegating to a single owning component.
+
+    This resolution runs on the CALLING thread, before any plugin starts, and
+    that is the whole point: the extension host serves image bytes to a worker
+    thread that must perform no database access, so the row lookup and the
+    path derivation have to be finished by the time it is handed over.
+
+    Only assets that belong to ``notebook_id`` and whose file is actually on
+    disk are returned.  A cross-notebook row is not "missing", it is a
+    boundary violation, and a row whose file never landed would make the
+    SDK's "non-empty asset id means there ARE bytes" promise false.  Every
+    per-asset failure — an unknown id, a malformed row, an unreadable path —
+    skips that one asset rather than failing the parse: the enrichment point
+    is best-effort in every other direction too.  Cancellation is the sole
+    exception: the parse job is being torn down, and swallowing that into
+    "this asset has no image" would keep the point running past it.
+    """
+    located: dict[str, ElementAssetLocation] = {}
+    if not notebook_id:
+        return located
+    assets = AssetService(repo)
+    for asset_id in asset_ids:
+        if type(asset_id) is not str or not asset_id or asset_id in located:
+            continue
+        try:
+            asset = repo.get_notebook_asset(asset_id)
+            if asset is None or asset["notebook_id"] != notebook_id:
+                continue
+            path = assets.path_for(asset)
+            if not path.is_file():
+                continue
+            located[asset_id] = ElementAssetLocation(str(path), str(asset["mime"]))
+        except CoreCancellation:
+            raise
+        except Exception:  # noqa: BLE001 — one unresolvable asset, not a parse
+            continue
+    return located
+
+
 class RepositoryFacade:
     def __init__(
         self,
@@ -299,6 +351,7 @@ class RepositoryFacade:
         ask_engine_host: AskEngineHostPort | None = None,
         indexing_pipeline_host: IndexingPipelineHostPort | None = None,
         gap_consult_host: GapConsultHostPort | None = None,
+        element_enricher_host: ElementEnricherHostPort | None = None,
     ) -> None:
         self.settings = settings
         self.root_dir = Path(__file__).resolve().parents[3]
@@ -335,6 +388,7 @@ class RepositoryFacade:
             ask_engine_host=ask_engine_host,
             indexing_pipeline_host=indexing_pipeline_host,
             gap_consult_host=gap_consult_host,
+            element_enricher_host=element_enricher_host,
         )
         # Task 26: the resolved storage root has ONE owner — the runtime's
         # SourceFileStore.  The facade attribute is the SAME Path object (the
@@ -742,6 +796,7 @@ class RepositoryFacade:
                 _make_persist_image(self, notebook_id, source_id, created_by)
             ),
             delete_source_images=lambda sid: AssetService(self).delete_source_images(sid),
+            resolve_element_assets=partial(_resolve_element_assets, self),
         )
         # WS2a: 在途 ask 的 {job_id: cancel_event} 进程内注册表本体在 runtime-owned
         # AskCancellationRegistry(Task 23;流式执行编排在 AskExecutionCoordinator,

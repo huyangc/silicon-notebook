@@ -203,6 +203,46 @@ class Settings(BaseSettings):
         le=30,
         validation_alias="ASK_GAP_CONSULT_TIMEOUT_SECONDS",
     )
+    # ``source.element_enricher`` budgets.  The mirror image of the gap-consult
+    # one above: element enrichment runs inside a parse job, where nobody is
+    # waiting on a streamed answer, so the point-wide hard deadline is minutes
+    # rather than seconds.  It still covers a contribution's availability probe
+    # as well as its ``enrich`` call, for the same reason — a plugin supplies
+    # both halves and either can hang — and spending it ends the whole point.
+    source_element_enricher_timeout_seconds: float = Field(
+        120.0,
+        gt=0,
+        le=900,
+        validation_alias="SOURCE_ELEMENT_ENRICHER_TIMEOUT_SECONDS",
+    )
+    # How many elements one parse may have enriched, across every
+    # contribution.  A parsed source can carry tens of thousands of elements,
+    # so this is a cap on the point's total output, not a per-plugin courtesy.
+    source_element_enricher_max_proposals: int = Field(
+        2048,
+        ge=1,
+        le=25_000,
+        validation_alias="SOURCE_ELEMENT_ENRICHER_MAX_PROPOSALS",
+    )
+    # Bytes ONE contribution may add to this source's persisted element
+    # metadata — the ``extensions`` subtree it owns, provenance envelope
+    # included, plus the retrievable description.  This is the only bound on
+    # how much a plugin can grow a notebook's own rows.
+    source_element_enricher_max_metadata_bytes: int = Field(
+        1_048_576,
+        ge=1024,
+        le=16_777_216,
+        validation_alias="SOURCE_ELEMENT_ENRICHER_MAX_METADATA_BYTES",
+    )
+    # Characters in one candidate's description.  Separate from the byte
+    # budget because the description is also appended to the element's ``text``
+    # and therefore reaches the retrieval corpus, not just the detail view.
+    source_element_enricher_max_description_chars: int = Field(
+        8192,
+        ge=1,
+        le=65_536,
+        validation_alias="SOURCE_ELEMENT_ENRICHER_MAX_DESCRIPTION_CHARS",
+    )
     # Deployment Ask engines receive only bounded core-owned ports. These
     # values govern result-changing retrieval/model budgets and plugin-authored
     # trace egress, so none of their call sites may substitute literals.

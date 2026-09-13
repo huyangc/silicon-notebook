@@ -6,6 +6,7 @@ from typing import Any
 from app.core.config import Settings
 from app.domain.extensions import (
     AskCompletedObserverHostPort,
+    ElementEnricherHostPort,
     ReportCompletedObserverHostPort,
     ParserProviderChainHostPort,
     RetrievalContributorHostPort,
@@ -30,6 +31,7 @@ class PostgresRepository(RepositoryFacade):
         ask_engine_host: AskEngineHostPort | None = None,
         indexing_pipeline_host: IndexingPipelineHostPort | None = None,
         gap_consult_host: GapConsultHostPort | None = None,
+        element_enricher_host: ElementEnricherHostPort | None = None,
         migrate: bool = True,
         seed: bool = True,
     ) -> None:
@@ -53,6 +55,7 @@ class PostgresRepository(RepositoryFacade):
                 ask_engine_host=ask_engine_host,
                 indexing_pipeline_host=indexing_pipeline_host,
                 gap_consult_host=gap_consult_host,
+                element_enricher_host=element_enricher_host,
             )
         except BaseException:
             # Covers failures after bundle creation but before the facade has a

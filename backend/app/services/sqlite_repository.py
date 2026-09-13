@@ -10,6 +10,7 @@ from app.core.config import Settings
 from app.domain.repository import remap_json_ids as _remap_json_ids
 from app.domain.extensions import (
     AskCompletedObserverHostPort,
+    ElementEnricherHostPort,
     ReportCompletedObserverHostPort,
     ParserProviderChainHostPort,
     RetrievalContributorHostPort,
@@ -64,6 +65,7 @@ class SQLiteRepository(RepositoryFacade):
         ask_engine_host: AskEngineHostPort | None = None,
         indexing_pipeline_host: IndexingPipelineHostPort | None = None,
         gap_consult_host: GapConsultHostPort | None = None,
+        element_enricher_host: ElementEnricherHostPort | None = None,
         migrate: bool = True,
         seed: bool = True,
     ) -> None:
@@ -85,6 +87,7 @@ class SQLiteRepository(RepositoryFacade):
             ask_engine_host=ask_engine_host,
             indexing_pipeline_host=indexing_pipeline_host,
             gap_consult_host=gap_consult_host,
+            element_enricher_host=element_enricher_host,
         )
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._migrator = SqliteMigrator(self._runtime.database, self.settings)

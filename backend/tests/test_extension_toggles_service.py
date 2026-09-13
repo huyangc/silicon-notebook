@@ -512,7 +512,7 @@ def test_start_rejects_a_non_positive_interval():
 
 
 def _extension_runtime_double():
-    """The seven hosts ``create_application_repository`` forwards, as opaque
+    """The eight hosts ``create_application_repository`` forwards, as opaque
     objects: this test is about the prime, not about the host wiring (which
     ``test_retrieval_contributor_wiring`` freezes)."""
 
@@ -524,6 +524,7 @@ def _extension_runtime_double():
         ask_engines=object(),
         indexing_pipelines=object(),
         gap_consult=object(),
+        element_enrichers=object(),
     )
 
 
