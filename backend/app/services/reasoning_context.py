@@ -1045,6 +1045,12 @@ def _rank_score(item: object) -> float:
     return 0.0
 
 
+def prose_source_keys(collected: Mapping, elements: Sequence, chunks: Sequence) -> Set[str]:
+    """Source identities use the same current-pool precedence as card admission."""
+    return {key for key, item in _pool_index(collected, elements, chunks).items()
+            if not hasattr(item, "payload")}
+
+
 def _diverse_order(index: Mapping) -> List[str]:
     """第三档:历史高相关代表 + 来源多样性补位。
 
@@ -1145,7 +1151,14 @@ def select_prose_detail_cards(
         excerpt, partial = select_prose_excerpt(
             _collapse(getattr(item, "text", "")), terms, detail_chars,
             select_window=select_excerpt)
-        selected[key] = render_card(replace(card, excerpt=excerpt, partial=partial))
+        detail = render_card(replace(card, excerpt=excerpt, partial=partial))
+        # A boundary-only notice or a smaller view already covered by the normal
+        # card does not justify enabling the optional prose path.
+        if (not excerpt.strip("…")
+                or excerpt.strip("…") not in _collapse(getattr(item, "text", ""))
+                or excerpt_already_visible(detail, render_card(card))):
+            continue
+        selected[key] = detail
         if len(selected) >= max_cards:
             break
     return selected
@@ -1477,6 +1490,8 @@ class ReflectDeltaState:
     supplement_checked_keys: Set[str] = field(default_factory=set, repr=False)
     supplement_latest_cards: Dict[str, str] = field(default_factory=dict, repr=False)
     visible_excerpt_fingerprints: Set[Tuple[str, str]] = field(
+        default_factory=set, repr=False)
+    prose_detail_fingerprints: Set[Tuple[str, str]] = field(
         default_factory=set, repr=False)
 
     def note_shown(self, key: str, text: str) -> None:

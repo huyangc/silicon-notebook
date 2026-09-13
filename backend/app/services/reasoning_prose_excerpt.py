@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from typing import Callable, Sequence
+from typing import Callable, Collection, Mapping, Sequence
 
 
 _MATH = re.compile(r"\$\$.*?\$\$|(?<!\\)\$(?:\\.|[^$])*?(?<!\\)\$|\\\(.*?\\\)|\\\[.*?\\\]", re.DOTALL)
@@ -112,14 +112,33 @@ _VISIBLE_PROGRESS_TEXT = (
 )
 
 
-def visible_progress_reserve(evidence_budget: int) -> int:
-    """Each excerpt needs characters, so these digit widths bound both counts."""
-    return len(_VISIBLE_PROGRESS_TEXT.format(
-        added=evidence_budget, current=evidence_budget))
-
-
 def render_visible_progress(seen: set[tuple[str, str]], material: str) -> str:
     current = visible_excerpt_identities(material)
     added = len(current - seen)
     seen.update(current)
     return _VISIBLE_PROGRESS_TEXT.format(added=added, current=len(current))
+
+
+def render_prose_progress(
+    seen: set[tuple[str, str]], detail_seen: set[tuple[str, str]], material: str,
+    detail_cards: Mapping[str, str] | None, source_keys: Collection[str],
+    history_left: int,
+) -> str:
+    """Track final excerpts even when the optional feedback cannot be emitted.
+
+    Candidate selection or version allocation is not visibility. Only a detail
+    body surviving final K/D admission can activate this note, and its key must
+    still be authorized by the current source pool. The note uses unused history
+    space; it never asks a caller to compact or replace previously sent history.
+    """
+    current = visible_excerpt_identities(material)
+    added = len(current - seen)
+    seen.update(current)
+    if detail_cards is None:
+        return ""
+    proposed = visible_excerpt_identities("\n".join(detail_cards.values()))
+    detail_seen.update(current & proposed)
+    if not any(key in source_keys for key, _ in current & detail_seen):
+        return ""
+    note = _VISIBLE_PROGRESS_TEXT.format(added=added, current=len(current))
+    return note if len(note) + len("\n\n") <= history_left else ""
