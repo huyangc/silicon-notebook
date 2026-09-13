@@ -391,6 +391,15 @@ def public_reference(key: str, reference: Any) -> dict[str, Any]:
         # This boolean carries the rendering fact without exposing either side
         # of the internal element-id comparison to the public response.
         "is_image_reference": is_image_reference,
+        # Reflect plugin actions (design document
+        # ``2026-09-13-reflect-plugin-action-design_zh.md`` §七): an anonymous
+        # reader is told that an item came from OUTSIDE the library, because
+        # the alternative is presenting fetched third-party material as the
+        # author's own notes.  The ``url`` beside it is deliberately NOT
+        # projected: a link is an addressable handle, and "nothing
+        # addressable" is this projection's whole rule — the marker plus the
+        # title and excerpt is the disclosure, not the destination.
+        "is_external": str(row.get("tier") or "") == "external",
     }
 
 

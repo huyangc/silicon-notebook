@@ -43,9 +43,10 @@ This module must keep importing nothing from ``app.*`` and nothing third-party.
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 import re
-from typing import Literal
+from typing import Any, Literal, Protocol
 
 
 # --- Descriptor-side rails (what a plugin may DECLARE) ----------------------
@@ -110,6 +111,11 @@ _CONTROL_CHARACTERS_RE = re.compile(
     "⁦-⁩"    # bidi isolates
     "]"
 )
+
+# The same class as one or more consecutive characters, for the folding
+# counterpart below.  Derived from the pattern above rather than re-typed, so
+# "what must never reach the prompt" has exactly one definition.
+_CONTROL_CHARACTER_RUN_RE = re.compile(_CONTROL_CHARACTERS_RE.pattern + "+")
 
 # Every action id the core itself offers in the reflect loop, with every gate
 # open.  A plugin action that took one of these names would be shadowed by (or
@@ -191,6 +197,34 @@ def contains_control_characters(value: str) -> bool:
     return _CONTROL_CHARACTERS_RE.search(value) is not None
 
 
+def fold_control_characters(value: str) -> str:
+    """Collapse every run of the characters above into a single space.
+
+    The *runtime-data* counterpart of :func:`contains_control_characters`, and
+    the reason the two live side by side rather than one calling the other: a
+    descriptor is deployment configuration reviewed at boot, so a control
+    character there is a refusal; a plugin's **result** arrives mid-question
+    from outside, and refusing a live answer over a stray newline in someone
+    else's abstract would be the wrong trade.
+
+    The threat is different too, and sharper.  Evidence blocks are rendered one
+    item per line, ``k7: [external · …] …``, and the reverse binding is read
+    back off exactly that shape.  An excerpt carrying ``\\nk1: [chunk][personal]
+    …`` would therefore render as a SECOND evidence line the core never wrote —
+    a fabricated notebook citation, attributed to the user's own library, sitting
+    in the middle of the model's evidence.  Folding is done once here, at the
+    render contract, and independently of whatever the host already rejected:
+    the invariant is a property of the block format, so it belongs to whoever
+    owns the format.
+
+    A run of several such characters folds to ONE space (``"a\\r\\n\\r\\nb"`` ->
+    ``"a b"``) rather than one space each: the point is a single readable line,
+    not a faithful byte count of what was stripped.
+    """
+
+    return _CONTROL_CHARACTER_RUN_RE.sub(" ", value)
+
+
 @dataclass(frozen=True, slots=True)
 class ReflectActionParameter:
     """One argument the model may write for a plugin action.
@@ -256,6 +290,80 @@ class ReflectActionSpec:
 
 
 @dataclass(frozen=True, slots=True)
+class ReflectActionCall:
+    """Core-only call state for one plugin action invocation.
+
+    The CORE-facing half of the pair, exactly as ``GapConsultCallContext`` is
+    to ``GapConsultExtensionContext``: the reflect loop builds this, the host
+    translates it into the SDK's ``ReflectActionCallContext`` on the worker
+    thread.  Two types rather than one because ``app.services`` may not import
+    the Extension SDK at all (``scripts/check_architecture_boundaries.py``
+    keeps SDK imports inside the composition roots and the plugins), so the
+    loop needs a shape that lives in a layer it is allowed to read.
+
+    Note what is absent, as at ``ask.gap_consult``: no notebook, actor, source,
+    candidate text, sub-query, gap phrase, retrieval scope or core port.
+    ``question`` is wording the user actually saw — never the synthesized
+    ``research_question`` (design document §九 invariant 1) — and ``arguments``
+    are the model's own, already checked against the descriptor.
+    """
+
+    question: str
+    arguments: Mapping[str, str]
+    cancellation: Any
+    deadline_monotonic: float
+    max_items: int
+
+
+@dataclass(frozen=True, slots=True)
+class ReflectActionOutcome:
+    """What the host answers the reflect loop for one attempted call.
+
+    The host's product, not the plugin's: ``items`` have already been
+    type-checked, length-clamped, scheme-checked and de-duplicated.
+    ``failure_code`` non-empty means nothing was admitted and the loop records
+    a skip step carrying it.  It is USUALLY a core-minted code
+    (``plugin_action_failed``/``_timeout``/``_cancelled``/``_invalid_result``/
+    ``_unavailable``); the one exception is a contributor that declared itself
+    UNAVAILABLE and supplied its own failure code, which is passed through
+    after the same shape gate every plugin string goes through (lower-case
+    ``^[a-z][a-z0-9_]*$``, length-bounded).  Either way it is a stable code
+    safe to put in a trace detail — never free text.
+
+    ``truncated`` says the plugin offered more than this call's remaining
+    admission slots — the loop discloses it in the trace so "the plugin found
+    two things" and "the plugin found forty and we took two" are not the same
+    line.  Keys are deliberately absent: minting ``ext:{plugin_id}:{n}`` is
+    run-scoped, so only the loop can do it (design document §6.1).
+    """
+
+    items: tuple[ReflectActionItem, ...] = ()
+    note: str = ""
+    failure_code: str = ""
+    truncated: bool = False
+
+
+class ReflectActionHostPort(Protocol):
+    """The seat ``ReasoningRetriever`` is given, if any.
+
+    Both halves take core types only: :class:`ReflectActionCall` in, and
+    :class:`ReflectActionOutcome` out.  The SDK-facing shapes never cross this
+    seam, which is what lets ``app.services`` hold the seat at all.
+    """
+
+    def specs(
+        self,
+        deadline_monotonic: float,
+        *,
+        cancellation: Any = None,
+    ) -> tuple["ReflectActionSpec", ...]: ...
+
+    def invoke(
+        self, spec: "ReflectActionSpec", call: ReflectActionCall
+    ) -> ReflectActionOutcome: ...
+
+
+@dataclass(frozen=True, slots=True)
 class ExternalEvidence:
     """One admitted external item, keyed by the core.
 
@@ -297,9 +405,13 @@ __all__ = [
     "REFLECT_SCHEMA_TOP_LEVEL_FIELDS",
     "RESERVED_REFLECT_KEYS",
     "RESERVED_REFLECT_PARAMETER_NAMES",
+    "ReflectActionCall",
     "ReflectActionDescriptor",
+    "ReflectActionHostPort",
     "ReflectActionItem",
+    "ReflectActionOutcome",
     "ReflectActionParameter",
     "ReflectActionSpec",
     "contains_control_characters",
+    "fold_control_characters",
 ]

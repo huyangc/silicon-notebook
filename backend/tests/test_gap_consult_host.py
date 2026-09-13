@@ -285,10 +285,12 @@ def test_a_plugin_authored_failure_code_is_length_bounded():
     a multi-megabyte code is refused outright (the whole result is invalid,
     so nothing is admitted).
     """
-    from app.extensions.gap_consult import (
-        _STABLE_CODE_MAX_CHARS,
-        _stable_code,
-        _valid_failure,
+    from app.extensions.gap_consult import _stable_code, _valid_failure
+    # The bound itself lives in the shared host plumbing now (the reflect
+    # action host runs the same rail), so read it from there rather than keep
+    # a re-export in that module which nothing but this test ever used.
+    from app.extensions.host_admission import (
+        STABLE_CODE_MAX_CHARS as _STABLE_CODE_MAX_CHARS,
     )
 
     assert _stable_code("a" * _STABLE_CODE_MAX_CHARS) is True

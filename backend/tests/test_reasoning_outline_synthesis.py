@@ -125,17 +125,29 @@ def test_the_stride_clears_every_existing_key_base():
     落进第 i+1 节的号段里,而合并锚点时**不会报错**——只会把一处引用悄悄指到
     另一节的证据上。
     """
+    from app.core.config import DEFAULT_EXTERNAL_EVIDENCE_MAX_PER_RUN
+
     bases = (
         AskService._MIX_KG_KEY_BASE,
         AskService._MEMORY_KEY_BASE,
         AskService._ELEMENT_KEY_BASE,
         AskService._COLLECTION_KEY_BASE,
+        AskService._EXTERNAL_KEY_BASE,
         2000,   # follow_chain 的推导链段
     )
     assert max(bases) < OUTLINE_SECTION_KEY_STRIDE
     # 单节内部的号段上限 = 最大基址 + 单节证据上限。上限从 O1 的常量 import,不写
     # 字面量:那个数改大时,本断言必须跟着变紧,而不是继续对着一个过期的 8 报绿。
     assert max(bases) + _OUTLINE_MAX_EVIDENCE < OUTLINE_SECTION_KEY_STRIDE
+    # 外部证据段(T4)按**每节都装**一份,所以它自己的上限也要在步长之内:
+    # 号段是 _EXTERNAL_KEY_BASE + 1..N,N 至多是 run 级接纳上限。
+    assert (
+        AskService._EXTERNAL_KEY_BASE + DEFAULT_EXTERNAL_EVIDENCE_MAX_PER_RUN
+        < OUTLINE_SECTION_KEY_STRIDE
+    )
+    # 而且它必须跟集合清单段分开:同一次合成里两者可以同时出现,共用基址会让
+    # 两边的 k5001 在 id_map 合并时无声互相覆盖。
+    assert AskService._EXTERNAL_KEY_BASE != AskService._COLLECTION_KEY_BASE
 
 
 def test_each_planned_section_gets_a_disjoint_offset():
@@ -1309,3 +1321,102 @@ def test_an_enumerating_run_keeps_the_one_shot_path(repo, monkeypatch):
     detail = _synthesis_detail(response)
     assert detail["outline_sections"] == 0
     assert detail["outline_fallback"] is False
+
+
+# ------------------------------------- T4 评审修复:外部证据在按节合成里的位置
+#
+# 设计文档 2026-09-13-reflect-plugin-action-design_zh §6.2/§6.3。外部材料不由
+# 大纲绑定,却是本轮唯一「库里查不到」的东西:只喂给某一节,别的节就会在同一篇
+# 答案里对着一个自己没见过的 [k] 号写作,而合并后的引用表偏偏认得它。
+
+
+def _external_item(index: int, url: str | None = None):
+    from app.domain.reflect_action import ExternalEvidence
+
+    return ExternalEvidence(
+        key=f"ext:acme:{index}", plugin_id="acme", action="web_search",
+        source_label="IEEE Xplore", title=f"外部论文-{index}",
+        excerpt=f"外部摘录-{index}",
+        url=f"https://example.org/{index}" if url is None else url,
+        location_label=f"§{index}",
+    )
+
+
+def test_every_section_receives_the_external_block_in_its_own_segment(
+    repo, monkeypatch
+):
+    notebook = _notebook(repo)
+    _stub_run(monkeypatch, _reasoning_result(
+        external_evidence=[_external_item(1)],
+    ))
+    llm = _CaptureAnswerLLM()
+    response = _ask(repo, notebook, llm)
+
+    assert len(llm.prompts) == 2
+    first, second = llm.prompts
+    # 每节都看得见同一条外部材料,各自用自己号段里的号。
+    first_key = f"k{AskService._EXTERNAL_KEY_BASE + 1}"
+    second_key = (
+        f"k{OUTLINE_SECTION_KEY_STRIDE + AskService._EXTERNAL_KEY_BASE + 1}"
+    )
+    assert f"{first_key}: [external · IEEE Xplore] 外部论文-1" in first
+    assert f"{second_key}: [external · IEEE Xplore] 外部论文-1" in second
+    # 号段隔离:第一节的号不会出现在第二节的 prompt 里。
+    assert first_key not in second
+    # 规则句只随块出现,两节都有。
+    assert first.count("14. Items tagged [external · <source>]") == 1
+    assert second.count("14. Items tagged [external · <source>]") == 1
+
+
+def test_one_external_item_cited_by_two_sections_yields_one_citation(
+    repo, monkeypatch
+):
+    """装入集合是**并集**:同一条材料进了两节还是一条材料,引用列表不许重复,
+    轨迹上的 ``external_included`` 也不许报 2。"""
+    notebook = _notebook(repo)
+    _stub_run(monkeypatch, _reasoning_result(
+        external_evidence=[_external_item(1)],
+    ))
+    external_key = f"k{AskService._EXTERNAL_KEY_BASE + 1}"
+    second_key = (
+        f"k{OUTLINE_SECTION_KEY_STRIDE + AskService._EXTERNAL_KEY_BASE + 1}"
+    )
+    llm = _CaptureAnswerLLM(answers=[
+        {"answer": f"第一节引外部 [{external_key}]。", "grounded": True},
+        {"answer": f"第二节也引外部 [{second_key}]。", "grounded": True},
+    ])
+    response = _ask(repo, notebook, llm)
+
+    external_citations = [c for c in response.citations if c.tier == "external"]
+    assert [c.label for c in external_citations] == ["IEEE Xplore · 外部论文-1"]
+    assert external_citations[0].url == "https://example.org/1"
+    detail = _synthesis_detail(response)
+    assert detail["external_included"] == 1
+    assert detail["external_dropped"] == 0
+    # 两节各自绑上了自己号段里的外部锚点。
+    assert {anchor.key for anchor in response.anchors} == {
+        external_key, second_key,
+    }
+    assert all(anchor.url == "https://example.org/1"
+               for anchor in response.anchors)
+
+
+def test_a_rejected_external_item_reaches_no_section_and_no_citation(
+    repo, monkeypatch
+):
+    """fail-closed 在按节路径上同样成立,并如实计入 ``external_dropped``。"""
+    notebook = _notebook(repo)
+    _stub_run(monkeypatch, _reasoning_result(
+        external_evidence=[_external_item(1, url="javascript:alert(1)")],
+    ))
+    llm = _CaptureAnswerLLM()
+    response = _ask(repo, notebook, llm)
+
+    assert all("外部论文-1" not in prompt for prompt in llm.prompts)
+    assert all("javascript:" not in prompt for prompt in llm.prompts)
+    assert [c for c in response.citations if c.tier == "external"] == []
+    detail = _synthesis_detail(response)
+    # 检索器**确实**带回了一条,所以两个键在(稀疏只对「一条都没有」成立):
+    # 「带回 1 条、模型看到 0 条」正是这里必须说出来的那句话。
+    assert detail["external_included"] == 0
+    assert detail["external_dropped"] == 1

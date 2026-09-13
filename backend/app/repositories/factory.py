@@ -11,6 +11,7 @@ from app.domain.extensions import (
     RetrievalContributorHostPort,
 )
 from app.domain.gap_consult import GapConsultHostPort
+from app.domain.reflect_action import ReflectActionHostPort
 from app.domain.ask_engine import AskEngineHostPort
 from app.domain.indexing_pipeline import IndexingPipelineHostPort
 from app.repositories.ports import NotebookRepository
@@ -32,6 +33,7 @@ def create_repository(
     indexing_pipeline_host: IndexingPipelineHostPort | None = None,
     gap_consult_host: GapConsultHostPort | None = None,
     element_enricher_host: ElementEnricherHostPort | None = None,
+    reflect_action_host: ReflectActionHostPort | None = None,
     migrate: bool = True,
     seed: bool = True,
 ) -> NotebookRepository:
@@ -69,6 +71,8 @@ def create_repository(
         host_kwargs["gap_consult_host"] = gap_consult_host
     if element_enricher_host is not None:
         host_kwargs["element_enricher_host"] = element_enricher_host
+    if reflect_action_host is not None:
+        host_kwargs["reflect_action_host"] = reflect_action_host
     scheme = database_identity(settings.database_url).scheme
     if scheme == "sqlite":
         return SQLiteRepository(settings, **host_kwargs)

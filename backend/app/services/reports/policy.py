@@ -19,6 +19,11 @@ DEFAULT_REASONING_COMMUNITY_PEERS_CAP_FACTOR = 2
 DEFAULT_REASONING_MAX_OUTLINE_UPDATES = 6
 # Agentic Memory P4 (T5).
 DEFAULT_REASONING_MAX_CONSULT_MEMORY = 2
+# ``ask.reflect_action`` (design document §八).  Mirrored from
+# ``core.config.DEFAULT_REASONING_MAX_PLUGIN_ACTIONS`` the same way every
+# other rail here mirrors its Settings field: this module is the fallback a
+# duck-typed settings stand-in falls back to, not a second source of truth.
+DEFAULT_REASONING_MAX_PLUGIN_ACTIONS = 2
 
 # Structural protocol bounds are invariant rather than deployment tuning.
 OUTLINE_MAX_SECTIONS = 12
@@ -66,6 +71,11 @@ class ReasoningActionPolicy:
     max_outline_updates: int
     max_consult_memory: int
     max_chunk_searches: int
+    # Run-level total for plugin reflect actions, across every action.  The
+    # effective per-action cap is ``min(descriptor.max_calls_per_run, this)``
+    # — a descriptor may ask for less than the deployment allows, never more.
+    # ``0`` takes the whole point away for this run.
+    max_plugin_actions: int
 
     @property
     def max_pending_outline_evidence(self) -> int:
@@ -134,6 +144,11 @@ def reasoning_action_policy(settings) -> ReasoningActionPolicy:
             "reasoning_max_chunk_searches",
             DEFAULT_REASONING_MAX_CHUNK_SEARCHES,
         )),
+        max_plugin_actions=int(getattr(
+            settings,
+            "reasoning_max_plugin_actions",
+            DEFAULT_REASONING_MAX_PLUGIN_ACTIONS,
+        )),
     )
 
 
@@ -144,6 +159,7 @@ __all__ = [
     "DEFAULT_REASONING_MAX_EXACT_LOOKUPS",
     "DEFAULT_REASONING_MAX_FOLLOW_CHAIN_ACTIONS",
     "DEFAULT_REASONING_MAX_OUTLINE_UPDATES",
+    "DEFAULT_REASONING_MAX_PLUGIN_ACTIONS",
     "DEFAULT_REASONING_MAX_PPR_RETRIEVES",
     "OUTLINE_EVIDENCE_KEY_CHARS",
     "OUTLINE_ID_CHARS",

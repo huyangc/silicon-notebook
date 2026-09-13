@@ -942,9 +942,10 @@ test("plugin_action 的畸形 arguments 不把 [object Object] 送上屏", () =>
   }
 });
 
-// 插件动作被跳过时后端落的是 step_type="skip" + detail.reason（五个取值见设计文档
-// §五）。前端**没有** reason→文案映射表：skip 步的解释逐字来自后端写好的 summary，
-// 前端原样渲染（同 check_ui_vocabulary.py 把 trace summary 当界面词扫描的那条理由）。
+// 插件动作被跳过时后端落的是 step_type="skip" + detail.reason（六个取值见设计文档
+// §五：五道判据各一个，加上宿主真的调用失败/超时/被取消的那一个）。前端**没有**
+// reason→文案映射表：skip 步的解释逐字来自后端写好的 summary，前端原样渲染（同
+// check_ui_vocabulary.py 把 trace summary 当界面词扫描的那条理由）。
 // 这条测试钉住的正是「不要在前端另编一份」：detail 给不出数就返回空串，summary 照旧。
 test("插件动作被跳过时走既有 skip 步，前端不另造一份 reason 文案", () => {
   for (const reason of [
@@ -953,6 +954,9 @@ test("插件动作被跳过时走既有 skip 步，前端不另造一份 reason 
     "plugin_action_cap",
     "duplicate_plugin_action",
     "plugin_action_last_turn",
+    // 第六个：宿主侧真的调用过但没能取回材料（失败/超时/取消/畸形返回）。它比
+    // 前五个多一个 detail.code，仍然走同一条「后端写 summary、前端不解释」的路。
+    "plugin_action_failed",
   ]) {
     const step = {
       step_type: "skip",

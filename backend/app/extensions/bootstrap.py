@@ -71,6 +71,7 @@ from app.extensions.ask_engine import AskEngineHost
 from app.extensions.indexing import IndexingPipelineHost
 from app.extensions.element_enrichment import SourceElementEnricherHost
 from app.extensions.gap_consult import GapConsultHost
+from app.extensions.reflect_action import ReflectActionHost
 from app.extensions.report import ReportCompletedObserverHost
 from app.extensions.report_export import ReportExporterHost
 
@@ -106,6 +107,13 @@ class ExtensionRuntime:
     # single image location, so a deployment without enrichers parses exactly
     # as it did before this point existed.
     element_enrichers: SourceElementEnricherHost
+    # ``ask.reflect_action`` has no built-in contribution and no core capability
+    # decision either, for the same reason gap consultation has none: it exists
+    # purely so a deployment plugin can lend the retrieval agent a function.
+    # With no plugin configured the host is dormant, ``specs()`` answers the
+    # empty tuple, and every reflect turn is byte-identical to one before the
+    # point existed.
+    reflect_actions: ReflectActionHost
     # Validated settings instance per deployment plugin, keyed by plugin id.
     # Built-in bundles never appear here.  The mapping is read-only so a later
     # consumer (the plugin route host) cannot mutate the frozen composition.
@@ -188,6 +196,10 @@ def build_extension_runtime(
             event_sink=event_sink,
         ),
         element_enrichers=SourceElementEnricherHost(
+            registry,
+            event_sink=event_sink,
+        ),
+        reflect_actions=ReflectActionHost(
             registry,
             event_sink=event_sink,
         ),

@@ -2020,7 +2020,10 @@ def complete_row(
     from app.core.llm import cap_kwargs
     from app.services.cancellation import AskCancelled
     from app.services.model_work import ModelNotConfiguredError
-    from app.services.reasoning_retrieval import reasoning_retriever_from_repository
+    from app.services.reasoning_retrieval import (
+        KNOWHOW_UNTRUSTED_EVIDENCE_SYSTEM_INSTRUCTION,
+        reasoning_retriever_from_repository,
+    )
 
     current_row, target_columns, known_columns = resolve_completion_request(
         table, row_id, target_column_ids
@@ -2113,6 +2116,13 @@ def complete_row(
         #      failure of the whole completion instead of a missing channel.
         reasoning_retriever.allow_search_chunks = False
         reasoning_retriever.untrusted_evidence = True
+        # 显式带上补全专用的收束句。通用主体是缺省值,只翻开关会少掉「只围绕
+        # 这次空格补全来规划与反思」那一句 —— 那句话对 Ask 是错的(它不在做
+        # 空格补全),对这里却是合同的一部分,所以它由消费点自己拼上。整串与
+        # 拆分之前逐字节相同,由 `test_knowhow_completion.py` 钉住。
+        reasoning_retriever.untrusted_evidence_instruction = (
+            KNOWHOW_UNTRUSTED_EVIDENCE_SYSTEM_INSTRUCTION
+        )
         reasoning_result = reasoning_retriever.run(
             notebook_id,
             _completion_retrieval_query(

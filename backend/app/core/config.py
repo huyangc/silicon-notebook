@@ -43,6 +43,11 @@ DEFAULT_CHUNK_KG_MAX_DEPTH = 1
 DEFAULT_CHUNK_KG_FAN_OUT = 8
 DEFAULT_REPORT_RETRIEVAL_FANOUT = 8
 DEFAULT_REPORT_PROBE_CHANNEL_CONCURRENCY = 2
+# ``ask.reflect_action`` budgets (design document §八).  ``0`` plugin actions is
+# the deployment-level kill switch; there is deliberately no separate boolean.
+DEFAULT_REASONING_MAX_PLUGIN_ACTIONS = 2
+DEFAULT_REASONING_PLUGIN_ACTION_TIMEOUT_SECONDS = 8.0
+DEFAULT_EXTERNAL_EVIDENCE_MAX_PER_RUN = 10
 
 
 
@@ -962,6 +967,31 @@ class Settings(BaseSettings):
     )
     reasoning_max_consult_memory: int = Field(
         2, ge=0, validation_alias="REASONING_MAX_CONSULT_MEMORY"
+    )
+    # 插件 reflect 动作(``ask.reflect_action``)的 run 级预算。
+    #
+    # 刻意**没有**独立的 ``*_ENABLED`` 布尔:插件本身已经是显式配置(启动期冻结)
+    # 加管理页运行时开关(#635 三闸口),``0`` 就是部署级 kill switch —— 它一到
+    # 零,prompt 动作行、schema 分支与 ``allowed_actions`` 三处同时消失,逐字节
+    # 回到接入这个扩展点之前。再加一把只是多一处必须同步的地方。
+    reasoning_max_plugin_actions: int = Field(
+        DEFAULT_REASONING_MAX_PLUGIN_ACTIONS,
+        ge=0,
+        validation_alias="REASONING_MAX_PLUGIN_ACTIONS",
+    )
+    # 单次插件调用的硬 deadline(秒),可用性探针与 ``invoke`` 共用同一份预算。
+    reasoning_plugin_action_timeout_seconds: float = Field(
+        DEFAULT_REASONING_PLUGIN_ACTION_TIMEOUT_SECONDS,
+        gt=0,
+        validation_alias="REASONING_PLUGIN_ACTION_TIMEOUT_SECONDS",
+    )
+    # 一个 run 最多接纳多少条外部证据,**跨动作累计**。与
+    # ``EXTERNAL_EVIDENCE_MAX_ITEMS_PER_CALL``(单次调用的领域常量)是两本账:
+    # 前者是合成上下文里外部材料的总量闸,后者只管一次调用别一口气灌满。
+    external_evidence_max_per_run: int = Field(
+        DEFAULT_EXTERNAL_EVIDENCE_MAX_PER_RUN,
+        ge=0,
+        validation_alias="EXTERNAL_EVIDENCE_MAX_PER_RUN",
     )
     reasoning_community_peers_cap_factor: int = Field(
         2, ge=1, validation_alias="REASONING_COMMUNITY_PEERS_CAP_FACTOR"

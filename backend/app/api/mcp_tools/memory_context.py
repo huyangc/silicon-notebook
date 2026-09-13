@@ -507,6 +507,13 @@ def register_memory_context_tools(
                 "tier": anchor.tier,
                 "provenance": anchor.provenance,
             }
+            # External evidence (a reflect plugin action's out-of-library
+            # material) is the only anchor carrying a URL, and that URL is its
+            # ONLY handle: source_id/element_id are structurally empty there,
+            # so without this the Agent gets a citation no other tool can
+            # resolve. Omitted when empty, same rule as the keys below.
+            if anchor.url:
+                row["url"] = anchor.url
             if anchor.knowhow is not None:
                 row["knowhow"] = {
                     "table_id": anchor.knowhow.table_id,
@@ -553,6 +560,8 @@ def register_memory_context_tools(
                 row["notebook_id"] = citation.notebook_id
             if citation.memory_id:
                 row["memory_id"] = citation.memory_id
+            if citation.url:  # 见锚点那一段:外部引用唯一可解析的句柄
+                row["url"] = citation.url
             if citation.knowhow is not None:
                 row["knowhow"] = {
                     "table_id": citation.knowhow.table_id,

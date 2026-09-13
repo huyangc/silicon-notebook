@@ -211,6 +211,7 @@ def test_application_bootstrap_injects_process_shared_retrieval_host(monkeypatch
     parser_host = object()
     observer_host = object()
     gap_host = object()
+    reflect_action_host = object()
     ask_engine_host = object()
     indexing_pipeline_host = object()
     element_enricher_host = object()
@@ -223,6 +224,7 @@ def test_application_bootstrap_injects_process_shared_retrieval_host(monkeypatch
         indexing_pipelines=indexing_pipeline_host,
         gap_consult=gap_host,
         element_enrichers=element_enricher_host,
+        reflect_actions=reflect_action_host,
     )
     captured = {}
 
@@ -260,6 +262,7 @@ def test_application_bootstrap_injects_process_shared_retrieval_host(monkeypatch
         "indexing_pipeline_host": indexing_pipeline_host,
         "gap_consult_host": gap_host,
         "element_enricher_host": element_enricher_host,
+        "reflect_action_host": reflect_action_host,
     }
 
 

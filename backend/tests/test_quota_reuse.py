@@ -96,7 +96,8 @@ def _run(reuse: bool):
     repo = _StubRepo()
     r = _retriever(repo, s)
     r.plan = lambda question, history="": [SubQuery(query="问题A"), SubQuery(query="问题B")]
-    r.reflect = lambda question, sm: ReflectDecision(sufficient=True, next_action="answer")
+    r.reflect = lambda question, sm, **kwargs: ReflectDecision(
+        sufficient=True, next_action="answer")
     res = r.run("nb1", "总问题")
     return res, repo.retrieval.calls
 
@@ -180,7 +181,8 @@ def _run_prefer(reuse: bool):
         SubQuery(query="问题A", prefer="balanced"),
         SubQuery(query="问题B", prefer="keyword"),
     ]
-    r.reflect = lambda question, sm: ReflectDecision(sufficient=True, next_action="answer")
+    r.reflect = lambda question, sm, **kwargs: ReflectDecision(
+        sufficient=True, next_action="answer")
     res = r.run("nb1", "总问题")
     return res
 

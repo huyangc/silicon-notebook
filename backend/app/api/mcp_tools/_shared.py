@@ -39,6 +39,18 @@ OUTPUT_KEY_LIMIT = 120
 OUTPUT_MAPPING_LIMIT = 20
 OUTPUT_DEPTH_LIMIT = 5
 OUTPUT_INTEGER_LIMIT = 9_999_999_999_999_999
+# Fields whose value is only meaningful WHOLE, and which are therefore dropped
+# entirely rather than clipped anywhere in this module.
+#
+# The distinction from an ordinary long string is that a clipped one announces
+# itself: an excerpt ending in "…" is visibly a fragment and an Agent treats it
+# as one.  A clipped URL does not — "https://example.org/papers/2401.0123…" is
+# still a syntactically fine link, and an Agent (or a user the Agent quotes it
+# to) will try to open it, landing on a different page or on nothing, with no
+# signal that anything was lost.  A URL that is absent is a citation you cannot
+# follow; a URL that is wrong is a citation that leads somewhere else.  Only the
+# second one can mislead, so the budget spends the whole field or none of it.
+WHOLE_OR_NOTHING_FIELDS = frozenset({"url"})
 # Heartbeat interval for the MCP progress notifications emitted while a tool's
 # blocking body runs. See `_run_with_progress` for why they exist at all; the
 # value only has to be comfortably under the SHORTEST idle timeout any client
@@ -240,6 +252,15 @@ def _sanitize_output(
             if key in result:
                 _mark_truncated(stats, map_entries=1)
                 continue
+            if key in WHOLE_OR_NOTHING_FIELDS and isinstance(child, str) and (
+                len(child) > max(
+                    1, int((field_limits or {}).get(key, OUTPUT_SCALAR_LIMIT))
+                )
+            ):
+                # Over its limit: drop the key rather than hand back a shorter,
+                # still-plausible value. See WHOLE_OR_NOTHING_FIELDS.
+                _mark_truncated(stats, fields=1)
+                continue
             result[key] = _sanitize_output(
                 child,
                 stats,
@@ -289,7 +310,7 @@ def _shrink_longest_string(
     identifier_fields = {
         "notebook_id", "selected_notebook_id", "memory_id", "answer_id",
         "object_id", "source_id", "element_id", "key",
-    }
+    } | WHOLE_OR_NOTHING_FIELDS
     # Preserve ordinary identifiers exactly. They become shrinkable only if a
     # compromised downstream producer supplied an identifier large enough to
     # make the response otherwise impossible to serialize within the budget.
@@ -303,7 +324,15 @@ def _shrink_longest_string(
     ]
     if not pool:
         return False
-    parent, key, current, _field = max(pool, key=lambda item: len(item[2]))
+    parent, key, current, field = max(pool, key=lambda item: len(item[2]))
+    if field in WHOLE_OR_NOTHING_FIELDS:
+        # Reached only in the identifiers pass (the ordinary pass excludes
+        # these along with the ids): the response cannot be serialized within
+        # budget any other way, so this field goes away completely instead of
+        # being halved into a link that points somewhere else.
+        del parent[key]
+        _mark_truncated(stats, characters=len(current), fields=1)
+        return True
     minimum = 8 if identifiers else 32
     if len(current) <= minimum:
         return False

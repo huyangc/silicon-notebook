@@ -107,6 +107,7 @@ RUNTIME_ATTRIBUTES = [
     "parser_provider_chain",
     "pending_actions_service",
     "queries",
+    "reflect_actions",
     "report_application",
     "report_cancellations",
     "report_completed_observers",

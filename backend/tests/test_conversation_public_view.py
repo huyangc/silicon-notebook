@@ -250,7 +250,7 @@ def test_projection_keys_are_exactly_the_allowlist():
     assert set(turn["references"][0]) == {
         "key", "title", "file_name", "location", "snippet",
         "title_truncated", "snippet_truncated", "file_name_truncated",
-        "is_image_reference",
+        "is_image_reference", "is_external",
     }
     # And the turn itself exposes no reasoning/id surface. ``images`` is the
     # only T4 addition; it carries aliases + captions, never addressable ids.
@@ -285,6 +285,54 @@ def test_memory_citation_keeps_excerpt_but_strips_memory_id():
     # Stripped:
     assert "MEM-SECRET-7" not in _all_strings(turn)
     assert "memory_id" not in turn["references"][0]
+
+
+# ---- 承重 ②b:外部证据只外发「外部」标记,绝不外发 url --------------------
+
+
+def test_external_reference_is_marked_but_its_url_never_crosses():
+    """Reflect 插件动作(设计文档 2026-09-13 §七)带回的库外材料:匿名读者拿到
+    ``is_external`` 标记 + 标题 + 摘录,**拿不到** ``url``——链接是可寻址句柄,
+    与本投影「nothing addressable」的规则同款。把 ``url`` 放进 allowlist 会让
+    这条用例红。"""
+    payload = {
+        "answer": "外部材料 [k1]。",
+        "anchors": [_anchor(
+            "k1", tier="external", url="https://leaked.example/paper",
+            source_title="外部论文标题", snippet="外部摘录",
+        )],
+        "citations": [],
+    }
+    turn = public_turn(_turn("q", payload))
+
+    assert turn["references"][0]["is_external"] is True
+    assert turn["references"][0]["title"] == "外部论文标题"
+    assert turn["references"][0]["snippet"] == "外部摘录"
+    assert "url" not in turn["references"][0]
+    assert "https://leaked.example/paper" not in _all_strings(turn)
+    assert "leaked.example" not in _all_strings(turn)
+
+
+def test_library_reference_is_not_marked_external():
+    """真/假各一例:tier 不是 "external" 的引用一律 False,别把用户自己的笔记
+    标成库外材料。"""
+    turn = public_turn(_turn("q", {
+        "answer": "笔记 [k1]。", "anchors": [_anchor("k1")], "citations": [],
+    }))
+    assert turn["references"][0]["is_external"] is False
+
+    # 回退列表(citations)那条腿同样判 tier,不是只有锚点腿会判。
+    citation_turn = public_turn(_turn("q", {
+        "answer": "无锚点。", "anchors": [],
+        "citations": [
+            _citation(1, tier="external", url="https://leaked.example/x"),
+            _citation(2),
+        ],
+    }))
+    assert [ref["is_external"] for ref in citation_turn["references"]] == [
+        True, False,
+    ]
+    assert "leaked.example" not in _all_strings(citation_turn)
 
 
 # ---- 承重 ③ (T4):附图作为 token 别名外发,绝不泄露 asset_id/element_id -----

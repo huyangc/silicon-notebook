@@ -226,6 +226,19 @@ class _MinimalEvidence:
     def citations_from(self, hits, element_ids, label, notebook_id=""):
         return []
 
+    def external_context(self, items, *, id_offset, budget_chars=None,
+                         truncation_sink=None):
+        # T4（reflect 插件动作）: the reasoning assembler now asks for the
+        # external-evidence block on every run. Mirrors the two entries below
+        # — a newly-declared port call this minimal boundary fixture must
+        # implement to stay reachable. "(none)" is what the real builder
+        # returns for zero items, and it is what the caller's
+        # `_bounded_context_append` treats as "append nothing".
+        return "(none)", {}
+
+    def external_citations(self, items):
+        return []
+
     def truncate_kg_block(self, block, max_tokens):
         return block
 

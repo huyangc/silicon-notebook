@@ -674,4 +674,7 @@ def test_answer_reasoning_fills_counts_sink_before_model_call(repo):
         "included_chunks": 0,
         "included_elements": 1,
         "included_collections": 0,
+        # T4(reflect 插件动作)的 external_included/external_dropped 刻意**不**
+        # 在这里:没有插件动作的一轮一个键都不写(稀疏),counts 与接入那个特性
+        # 之前逐键相等。这条 == 断言就是那句承诺的守卫。
     }

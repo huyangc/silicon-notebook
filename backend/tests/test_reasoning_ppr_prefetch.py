@@ -84,7 +84,8 @@ def _mk(settings=None):
     )
     # plan/reflect 固定:1 个子查询,反思立即 answer
     r.plan = lambda question, history="": [SubQuery(query=question)]
-    r.reflect = lambda question, s: ReflectDecision(sufficient=True, next_action="answer")
+    r.reflect = lambda question, sm, **kwargs: ReflectDecision(
+        sufficient=True, next_action="answer")
     return repo, r
 
 

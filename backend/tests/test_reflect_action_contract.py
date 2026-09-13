@@ -308,6 +308,22 @@ def test_an_enum_parameter_without_values_is_refused():
     )
 
 
+def test_a_single_value_enum_parameter_is_refused():
+    """One value renders without a ``|``, and that character IS the enum rule.
+
+    ``model_json._validate_against_example`` decides a string example is an
+    enum by finding ``|`` in it. A one-value parameter would therefore be shown
+    to the model as a closed choice while the validation layer waved through
+    any string at all -- exactly the disagreement between the prompt and the
+    validator that the projection is written to make impossible.
+    """
+    parameters = (ReflectActionParameter("venue", "d", "enum", ("journal",)),)
+
+    assert "fewer than two values" in _rejects(
+        _bundle("p", replace(_DESCRIPTOR, parameters=parameters))
+    )
+
+
 def test_more_enum_values_than_the_rail_allows_is_refused():
     values = tuple(f"v{index}" for index in range(REFLECT_ACTION_ENUM_VALUES_MAX + 1))
     parameters = (ReflectActionParameter("venue", "d", "enum", values),)
@@ -492,6 +508,19 @@ _REFLECT_SCHEMA_SEQUENCE_GATES = {
     "element_kinds": ENUMERABLE_ELEMENT_KINDS,
     "object_types": ENUMERABLE_KG_OBJECT_TYPES,
 }
+# Parameters of ``reflect_schema_hint`` that are NOT gates on core surface, and
+# are therefore held EMPTY while the gates are opened.
+#
+# ``plugin_actions`` is external injection: it carries the actions a deployment
+# plugin lends this run, and those are exactly what the reserved set has to stay
+# free of. Opening it here would feed a fixture action name into
+# ``next_action`` and make the equality below "reserved keys == core surface +
+# whatever this file happened to register", which is the opposite of what the
+# guard is for -- the reserved set is the CORE words a plugin may not claim.
+# It is listed (rather than skipped by shape) so a future non-gate parameter
+# still has to be classified deliberately instead of defaulting into either
+# bucket.
+_REFLECT_SCHEMA_NON_GATE_PARAMETERS = frozenset({"plugin_actions"})
 
 
 def _all_gates_open_kwargs() -> dict[str, object]:
@@ -512,7 +541,9 @@ def _all_gates_open_kwargs() -> dict[str, object]:
 
     kwargs: dict[str, object] = {}
     for name, parameter in inspect.signature(reflect_schema_hint).parameters.items():
-        if name in _REFLECT_SCHEMA_SEQUENCE_GATES:
+        if name in _REFLECT_SCHEMA_NON_GATE_PARAMETERS:
+            kwargs[name] = ()
+        elif name in _REFLECT_SCHEMA_SEQUENCE_GATES:
             kwargs[name] = _REFLECT_SCHEMA_SEQUENCE_GATES[name]
         elif type(parameter.default) is bool:
             kwargs[name] = True
@@ -534,7 +565,9 @@ def test_the_reflect_schema_gate_set_is_pinned():
 
     gates = set(inspect.signature(reflect_schema_hint).parameters)
 
-    assert gates == set(_KNOWN_REFLECT_SCHEMA_GATES)
+    assert gates == set(
+        _KNOWN_REFLECT_SCHEMA_GATES | _REFLECT_SCHEMA_NON_GATE_PARAMETERS
+    )
 
 
 def test_reserved_keys_are_exactly_what_an_all_gates_open_reflect_schema_offers():

@@ -16,6 +16,7 @@ from app.domain.extensions import (
     RetrievalContributorHostPort,
 )
 from app.domain.gap_consult import GapConsultHostPort
+from app.domain.reflect_action import ReflectActionHostPort
 from app.domain.ask_engine import AskEngineHostPort
 from app.domain.indexing_pipeline import IndexingPipelineHostPort
 from app.core.request_context import (
@@ -66,6 +67,7 @@ class SQLiteRepository(RepositoryFacade):
         indexing_pipeline_host: IndexingPipelineHostPort | None = None,
         gap_consult_host: GapConsultHostPort | None = None,
         element_enricher_host: ElementEnricherHostPort | None = None,
+        reflect_action_host: ReflectActionHostPort | None = None,
         migrate: bool = True,
         seed: bool = True,
     ) -> None:
@@ -88,6 +90,7 @@ class SQLiteRepository(RepositoryFacade):
             indexing_pipeline_host=indexing_pipeline_host,
             gap_consult_host=gap_consult_host,
             element_enricher_host=element_enricher_host,
+            reflect_action_host=reflect_action_host,
         )
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._migrator = SqliteMigrator(self._runtime.database, self.settings)
