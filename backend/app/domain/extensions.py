@@ -1,7 +1,7 @@
 """Stable application ports for consuming extension hosts without a registry."""
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol, TypeVar, runtime_checkable
 
@@ -313,3 +313,76 @@ class ReportCompletedObserverHostPort(Protocol):
         *,
         event_sink: Callable[[dict[str, object]], None] | None = None,
     ) -> None: ...
+
+
+# Source element enrichment sits below the SDK for the same reason the two
+# observer ports above do: the ingestion service composes a call context and
+# reads patches back without importing the Extension SDK or the registry, and
+# a library/test construction with no host at all short-circuits on ``None``.
+@dataclass(frozen=True)
+class ParsedElementEnvelope:
+    """One parsed element as core hands it to the host.
+
+    ``ordinal`` is 1-based and positional within the parsed source: it is the
+    only identity a patch carries back, so the caller must pass elements in
+    their final order and apply patches against that same sequence.
+    """
+
+    ordinal: int
+    element_type: str
+    location_label: str
+    text: str
+    caption: str
+    description: str
+    asset_id: str
+    asset_mime: str
+
+
+@dataclass(frozen=True)
+class ElementAssetLocation:
+    """An already-resolved on-disk image, keyed by asset id by the caller.
+
+    Resolution happens on the calling thread, before any plugin runs, so the
+    worker thread that serves a contributor performs no database access.
+    """
+
+    path: str
+    mime: str
+
+
+@dataclass(frozen=True)
+class ElementEnrichmentPatch:
+    """One admitted candidate, already shape-validated by the host."""
+
+    ordinal: int
+    plugin_id: str
+    plugin_version: str
+    contribution_id: str
+    metadata: Mapping[str, Any]
+    description: str = ""
+
+
+@dataclass(frozen=True)
+class ElementEnrichmentCallContext:
+    """Core-only inputs from the ingestion workflow to the enricher host."""
+
+    elements: tuple[ParsedElementEnvelope, ...]
+    asset_locations: Mapping[str, ElementAssetLocation]
+    cancellation: Any
+    connection_probe: Any
+    max_proposals: int
+    max_metadata_bytes: int
+    max_description_chars: int
+    max_asset_bytes: int
+    deadline_monotonic: float
+
+
+class ElementEnricherHostPort(Protocol):
+    def has_contributions(self) -> bool: ...
+
+    def enrich_application(
+        self,
+        call_context: ElementEnrichmentCallContext,
+        *,
+        event_sink: Callable[[dict[str, object]], None] | None = None,
+    ) -> tuple[ElementEnrichmentPatch, ...]: ...

@@ -69,6 +69,7 @@ from app.extensions.retrieval import RetrievalContributorHost
 from app.extensions.ask import AskCompletedObserverHost
 from app.extensions.ask_engine import AskEngineHost
 from app.extensions.indexing import IndexingPipelineHost
+from app.extensions.element_enrichment import SourceElementEnricherHost
 from app.extensions.gap_consult import GapConsultHost
 from app.extensions.report import ReportCompletedObserverHost
 from app.extensions.report_export import ReportExporterHost
@@ -99,6 +100,12 @@ class ExtensionRuntime:
     # outside this notebook".  With no plugin configured the host is dormant
     # and every consumer short-circuits before building a call context.
     gap_consult: GapConsultHost
+    # Source element enrichment is likewise plugin-only: no built-in
+    # contribution, no core capability decision.  With nothing registered the
+    # host is dormant and source ingestion short-circuits before resolving a
+    # single image location, so a deployment without enrichers parses exactly
+    # as it did before this point existed.
+    element_enrichers: SourceElementEnricherHost
     # Validated settings instance per deployment plugin, keyed by plugin id.
     # Built-in bundles never appear here.  The mapping is read-only so a later
     # consumer (the plugin route host) cannot mutate the frozen composition.
@@ -177,6 +184,10 @@ def build_extension_runtime(
             trusted_plugin_ids=trusted_report_exporter_plugins,
         ),
         gap_consult=GapConsultHost(
+            registry,
+            event_sink=event_sink,
+        ),
+        element_enrichers=SourceElementEnricherHost(
             registry,
             event_sink=event_sink,
         ),
