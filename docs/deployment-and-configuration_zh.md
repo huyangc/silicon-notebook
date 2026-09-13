@@ -935,6 +935,19 @@ MINERU_MAX_IMAGE_BYTES  # 单张内嵌图片大小上限（默认 5MB，超出�
 MINERU_MAX_IMAGES_PER_SOURCE # 每个来源最多保留的内嵌图片张数（默认 200）
 ```
 
+**来源元素补全（`source.element_enricher`，部署插件扩展点）：**
+
+```text
+SOURCE_ELEMENT_ENRICHER_TIMEOUT_SECONDS       # 每份解析来源、整个扩展点的硬墙钟 deadline（默认 120.0，0 < x ≤ 900）
+SOURCE_ELEMENT_ENRICHER_MAX_PROPOSALS         # 每份解析来源、跨全部 contribution 的补全提案上限（默认 2048，1..25000）
+SOURCE_ELEMENT_ENRICHER_MAX_METADATA_BYTES    # 单个 contribution 给一份来源元素追加落库字节的上限（默认 1048576，1024..16777216）
+SOURCE_ELEMENT_ENRICHER_MAX_DESCRIPTION_CHARS # 单条候选说明文字的字符上限（默认 8192，1..65536）
+```
+
+图片单图字节上限复用上面的 `MINERU_MAX_IMAGE_BYTES`，不新增独立设置。挂点、fail-open
+语义与另外三个结构常量（非部署可配）见
+[product-and-api_zh.md § 来源元素补全](./product-and-api_zh.md#来源元素补全sourceelement_enricher)。
+
 解析路由由后端唯一注册表声明，并经登录后的系统配置响应投影。顺序固定为：优先已配置的
 自托管 MinerU；只有没有自托管路径时才允许公共云；内置解析器保留为按格式兜底。浏览器只会
 收到能力、执行边界、可用状态与固定原因枚举，绝不收到 endpoint 或凭证。

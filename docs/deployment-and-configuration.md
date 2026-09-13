@@ -1141,6 +1141,20 @@ MINERU_MAX_IMAGE_BYTES  # max size per embedded image (default 5MB; larger image
 MINERU_MAX_IMAGES_PER_SOURCE # max embedded images per source (default 200)
 ```
 
+**Source element enrichment (`source.element_enricher`, deployment plugin point):**
+
+```text
+SOURCE_ELEMENT_ENRICHER_TIMEOUT_SECONDS       # hard wall-clock deadline for the whole point, per parsed source (default 120.0, 0 < x <= 900)
+SOURCE_ELEMENT_ENRICHER_MAX_PROPOSALS         # cap on enrichment proposals across every contribution, per parsed source (default 2048, 1..25000)
+SOURCE_ELEMENT_ENRICHER_MAX_METADATA_BYTES    # cap on persisted bytes one contribution may add to one source's elements (default 1048576, 1024..16777216)
+SOURCE_ELEMENT_ENRICHER_MAX_DESCRIPTION_CHARS # cap on one candidate's description length (default 8192, 1..65536)
+```
+
+Reuses `MINERU_MAX_IMAGE_BYTES` above as the per-image read cap for a contribution's asset
+reader; there is no separate setting for it. See
+[product-and-api.md § Source element enrichment](./product-and-api.md#source-element-enrichment-sourceelement_enricher)
+for the mount point, fail-open semantics, and the three additional structural (non-deployment-configurable) bounds.
+
 Parser routing is declared by one backend registry and projected through the authenticated
 system-configuration response. It always prefers a configured self-hosted MinerU path,
 then permits public cloud only when no self-hosted path is configured, and retains the

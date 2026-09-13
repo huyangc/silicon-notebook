@@ -293,6 +293,8 @@ def build_router(context: PluginRouteContext) -> APIRouter:
 
 `indexing.pipeline` contribution 可以在自己插件 id 命名空间下登记一个或多个按笔记本选择的 pipeline 描述符，并从不可变 source-element 视图返回有界 chunk proposal。PR-1 只把 chunking 策略权交给插件；parser 路由、schema 权、持久化与新 `(pipeline_id, pipeline_version)` 身份的发布仍归 core。浏览器里的笔记本设置按权限拆面：owner 与组内容管理员都可切换当前管线，并必须看到“将重建全库索引”的明确确认；参考库挂载配置仍是 owner-only；纯 reader 只有只读的当前管线/状态视图。选中的插件缺席或不可用时，响应只能退化成净化后的 `missing` / `available=false` 状态，并提供“切回内建”的恢复路径；普通读取继续使用最后一次已发布产物，而新的索引写入会在重建发布前被阻止。
 
+`source.element_enricher` contribution 登记一个单一职责的 `ElementEnricher`，跑在一份来源的元素解析完成之后、落库之前——正是 chunk 流水线接下来要读的那一代元素，不是晚一拍的补丁。它拿到 core 自己的每个解析元素只读视图（绝不是解析器 metadata 映射），外加按需、只在本轮内有效的图片 reader（服务于已经落盘图片的元素），返回指名已展示元素、带结构化 `metadata` 与可选 `description` 的有界候选。这次写入的 schema 归 core 所有（`metadata.extensions[<contribution_id>]`，外加追加进 `description`/`text`）；插件绝不改写 `caption`，也拿不到 repository、settings 或数据库连接。精确契约细节、挂点与护栏表：[product-and-api_zh.md § 来源元素补全](./product-and-api_zh.md#来源元素补全sourceelement_enricher)。
+
 部署插件是在后端进程里运行的受信代码。窄 Protocol 是受支持的能力面，避免普通插件实现依赖核心内部；它不是用来抵御 Python introspection 的恶意代码沙箱。只安装经过审查的包。未来若要支持不受信插件，必须采用进程隔离与 IPC，而不是继续扩大同进程包装层。
 
 ### 3.6 后端红线
@@ -305,6 +307,7 @@ def build_router(context: PluginRouteContext) -> APIRouter:
 - 绝不在 `register()` 里 `raise ExtensionRegistryError`。它不在 SDK 公开面上，但 import 得到，而 core **刻意不脱敏**它——你写在那里的消息会逐字进运维日志。`register()` 抛出的其它任何异常都会被转成 `plugin_registration_failed`，只留类名。
 - `GapConsultContributor` 的可用性探测与 `consult` 调用一起跑在一条私有 worker 线程上、受一个硬 deadline 约束（见[缺口外扩检索](./product-and-api_zh.md#缺口外扩检索)）：不要依赖 `contextvars`、线程局部状态，或任何指望核心 ContextVar 能带进那条线程——按设计，一个都带不进去。宿主会等你到 `ASK_GAP_CONSULT_TIMEOUT_SECONDS` 的 deadline 为止、期内返回即被采纳；超出即放弃这个 contribution——它最终的返回值不会被任何人读取，直接丢弃，绝不会迟到生效。只返回 `http`/`https` URL，且必须是**直接**指向一份 PDF 的链接——导入端点只探测你给的那个精确 URL，不会替你到落地页或摘要页里去找。
 - `AskEngineProvider` 只能引用自己那次 `retrieval` 端口返回的证据句柄。伪造、过期或跨 run 的句柄都会拒绝整份答案；不得捕获该拒绝并以无接地正文重试。
+- `ElementEnricher` 的可用性探测与 `enrich()` 调用一起跑在一条私有 worker 线程上、受一个硬 deadline 约束，与 `GapConsultContributor` 完全同形：不要依赖 `contextvars` 或任何指望核心 ContextVar 能带进那条线程——按设计一个都带不进去。`context.assets.read(ref)` 只在同一次调用期间返回字节：你的 `enrich()` 一旦返回、超时或被放弃，之后的读取恒为 `None`，绝不要把 ref 或 reader 本身留到那之后再用。返回的 `description` 不得含 `\n`/`\t` 之外的控制字符；settings 值绝不能写进候选的 `metadata`。
 
 ## 4. 第二步：写前端包
 
