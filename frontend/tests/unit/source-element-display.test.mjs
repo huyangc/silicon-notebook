@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  descriptionBlocks,
   elementHeadingLevel,
   elementLocationNote,
   elementSection,
@@ -95,6 +96,85 @@ test("elementLocationNote only annotates table rows, with the docx table index w
   assert.equal(elementLocationNote(el("paragraph", { row_index: 7 })), null);
 });
 
+test("descriptionBlocks turns unfenced multi-line text into one paragraph per non-empty line", () => {
+  assert.deepEqual(descriptionBlocks("line one\n\nline two\n  line three  "), [
+    { kind: "paragraph", text: "line one" },
+    { kind: "paragraph", text: "line two" },
+    { kind: "paragraph", text: "line three" },
+  ]);
+});
+
+test("descriptionBlocks reads a single fenced block with a language marker", () => {
+  assert.deepEqual(descriptionBlocks("```spice\nR1 1 0 1k\nC1 1 0 1u\n```"), [
+    { kind: "code", text: "R1 1 0 1k\nC1 1 0 1u", lang: "spice" },
+  ]);
+});
+
+test("descriptionBlocks preserves blank lines and indentation inside a fence", () => {
+  assert.deepEqual(descriptionBlocks("```\n  foo\n\n  bar\n```"), [
+    { kind: "code", text: "  foo\n\n  bar", lang: "" },
+  ]);
+});
+
+test("descriptionBlocks extends an unclosed fence to the end of the text", () => {
+  assert.deepEqual(descriptionBlocks("```netlist\nR1 1 0 1k\nC1 1 0 1u"), [
+    { kind: "code", text: "R1 1 0 1k\nC1 1 0 1u", lang: "netlist" },
+  ]);
+});
+
+test("descriptionBlocks mixes paragraphs before and after a fence", () => {
+  assert.deepEqual(descriptionBlocks("intro\n```\ncode\n```\noutro"), [
+    { kind: "paragraph", text: "intro" },
+    { kind: "code", text: "code", lang: "" },
+    { kind: "paragraph", text: "outro" },
+  ]);
+});
+
+test("descriptionBlocks returns an empty list for empty input", () => {
+  assert.deepEqual(descriptionBlocks(""), []);
+});
+
+test("descriptionBlocks splits CRLF input and keeps \\r out of the code text", () => {
+  assert.deepEqual(
+    descriptionBlocks("intro\r\n```spice\r\nR1 1 0 1k\r\nC1 1 0 1u\r\n```\r\noutro"),
+    [
+      { kind: "paragraph", text: "intro" },
+      { kind: "code", text: "R1 1 0 1k\nC1 1 0 1u", lang: "spice" },
+      { kind: "paragraph", text: "outro" },
+    ],
+  );
+});
+
+test("descriptionBlocks opens a fence with leading indentation before the backticks", () => {
+  assert.deepEqual(descriptionBlocks("  ```spice\ncode1\n```"), [
+    { kind: "code", text: "code1", lang: "spice" },
+  ]);
+});
+
+test("descriptionBlocks closes on a fence line with trailing spaces and keeps reading after it", () => {
+  assert.deepEqual(descriptionBlocks("```\ncode\n```  \nafter"), [
+    { kind: "code", text: "code", lang: "" },
+    { kind: "paragraph", text: "after" },
+  ]);
+});
+
+test("descriptionBlocks drops an empty code block instead of emitting an empty <pre>", () => {
+  assert.deepEqual(descriptionBlocks("```\n```"), []);
+  assert.deepEqual(descriptionBlocks("```"), []);
+  assert.deepEqual(descriptionBlocks("before\n```\n```\nafter"), [
+    { kind: "paragraph", text: "before" },
+    { kind: "paragraph", text: "after" },
+  ]);
+});
+
+test("descriptionBlocks splits on bare CR line endings", () => {
+  assert.deepEqual(descriptionBlocks("line one\rline two\r```\rcode\r```"), [
+    { kind: "paragraph", text: "line one" },
+    { kind: "paragraph", text: "line two" },
+    { kind: "code", text: "code", lang: "" },
+  ]);
+});
+
 test("source detail renders elements through the display module, not location_label", async () => {
   const page = await parseModule("page.tsx");
   const cards = jsxElements(page, "SourceElementCard");
@@ -106,4 +186,22 @@ test("source detail renders elements through the display module, not location_la
   const stack = source.slice(stackStart, stackEnd);
   assert.ok(stack.includes("withSectionDividers("), "dividers come from withSectionDividers");
   assert.ok(!stack.includes("location_label"), "the parser location label is not rendered in the reading view");
+});
+
+test("the image element branch renders a fenced description as a <pre class=\"element-image-code\">", async () => {
+  // ElementBody/SourceElementCard 都不对外导出(page.tsx 是巨型客户端组件,导出
+  // 内部渲染函数会扩大它们的公开面),这里改用源码断言。锚点定在
+  // `element.element_type === "image"` 分支的起止之间(下一个顶层函数
+  // `EvidenceLine` 之前),不用无界通配符,不会误吃到其它分支的文本。
+  const page = await parseModule("page.tsx");
+  const source = page.getFullText();
+  const imageBranchStart = source.indexOf('element.element_type === "image"');
+  assert.ok(imageBranchStart > 0, "ElementBody still has an image branch");
+  const imageBranchEnd = source.indexOf("function EvidenceLine", imageBranchStart);
+  assert.ok(imageBranchEnd > imageBranchStart, "image branch is bounded before the next top-level function");
+  const imageBranch = source.slice(imageBranchStart, imageBranchEnd);
+  assert.ok(imageBranch.includes("descriptionBlocks("), "description is parsed through descriptionBlocks");
+  assert.ok(imageBranch.includes('className="element-image-code"'), "fenced code renders through .element-image-code");
+  assert.ok(imageBranch.includes("data-language={block.lang"), "the fence language is exposed as data-language");
+  assert.ok(!imageBranch.includes("data-lang="), "the old data-lang attribute name is gone");
 });
