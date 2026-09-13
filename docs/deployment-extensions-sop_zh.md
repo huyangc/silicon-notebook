@@ -273,7 +273,7 @@ def build_router(context: PluginRouteContext) -> APIRouter:
 
 ### 3.5 其它 contribution 类型
 
-其余九个生产扩展点在 SDK 里是 Protocol；实现该 Protocol、声明匹配的 `ContributionKind`、经对应的 `add_*` 注册即可。
+其余十个生产扩展点在 SDK 里是 Protocol；实现该 Protocol、声明匹配的 `ContributionKind`、经对应的 `add_*` 注册即可。
 
 | 扩展点常量 | kind | Protocol | 模块 |
 | --- | --- | --- | --- |
@@ -286,6 +286,7 @@ def build_router(context: PluginRouteContext) -> APIRouter:
 | `ASK_ENGINE_POINT`（`ask.engine`） | `PROVIDER` | `AskEngineProvider` | `app/extension_sdk/ask.py` |
 | `INDEXING_PIPELINE_POINT`（`indexing.pipeline`） | `CONTRIBUTOR` | `IndexingPipelineProvider` | `app/extension_sdk/indexing.py` |
 | `SOURCE_ELEMENT_ENRICHER_POINT`（`source.element_enricher`） | `CONTRIBUTOR` | `ElementEnricher` | `app/extension_sdk/element_enrichment.py` |
+| `ASK_REFLECT_ACTION_POINT`（`ask.reflect_action`） | `CONTRIBUTOR` | `ReflectActionContributor` | `app/extension_sdk/reflect_action.py` |
 
 每个扩展点给的是窄的、point-specific 的 context——绝不是万能 service locator——并各自声明了 contribution 必须 `require` 哪些 capability 才拿得到访问端口。动手前先读那份 Protocol 与它的模块 docstring：该扩展点的 fail-open 与取消规则写在那里。
 

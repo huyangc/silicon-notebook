@@ -87,24 +87,30 @@ class ReflectActionItem:
     location_label: str = ""  # 可选位置词（"§3.2" / "p.4"），≤ 60 字符
 
 @dataclass(frozen=True, slots=True)
-class ReflectActionResult:
+class ReflectActionResult:            # 住 extension_sdk/reflect_action.py（要 import SDK 的 status/failure）
     items: tuple[ReflectActionItem, ...]
     note: str = ""            # 给模型看的一句话观察（"仅找到综述，无原始数据"），≤ NOTE_MAX_CHARS
+    status: ExtensionResultStatus = ExtensionResultStatus.AVAILABLE
+    failure: ExtensionFailure | None = None
 
 class ReflectActionContributor(Protocol):
     descriptor: ReflectActionDescriptor
-    def invoke(self, context: ReflectActionCallContext) -> ContributorResult[ReflectActionItem]: ...
+    def invoke(self, context: ReflectActionCallContext) -> ReflectActionResult: ...
 ```
+
+`ReflectActionParameter`/`ReflectActionDescriptor`/`ReflectActionItem` 三个值类型与常量一起定义
+在 `domain/reflect_action.py`，SDK 模块原名再导出（插件的导入路径与名字不变）。
 
 要点：
 
 - 数值上限全部定义在 `backend/app/domain/reflect_action.py`（`REFLECT_ACTION_*` 描述符
   侧、`EXTERNAL_EVIDENCE_*` 结果侧），SDK 只再导出；docs guard 照
   `test_gap_consult_docs_contract.py` 的形状反射这两组常量（§十）。
-- `ContributorResult.items` 即 `ReflectActionItem` 元组；`note` 通过 `ContributorResult`
-  的既有 `status`/`failure` 之外的扩展位承载——实现时若 `ContributorResult` 不便加字段，
-  改为 `invoke()` 返回 `ReflectActionResult` 并由宿主包成 `ContributorResult`，二选一在
-  T1 定死，不留两种返回形状。
+- **T1 已定死（裁决）**：`invoke()` 直接返回 `ReflectActionResult`，该类型自带
+  `items`/`note` 与 `ContributorResult` 的 `status`/`failure` 两个字段；宿主**不再**外包
+  一层 `ContributorResult`。只有一种返回形状。`ReflectActionResult` 因此定义在
+  `extension_sdk/reflect_action.py` 而非 domain：`ExtensionResultStatus`/`ExtensionFailure`
+  住在 `extension_sdk/contracts.py`，而 `app.domain` 不得 import SDK（架构边界守卫）。
 - `excerpt` 是**插件自己声明可被引用的文本**：宿主原样展示、原样进合成，不做二次摘要。
   插件应放页面原文片段；放自己写的摘要也允许，但引用卡显示的就是它。
 
@@ -146,8 +152,9 @@ class ReflectActionContributor(Protocol):
 
 - 插件只贡献 `description` 与各参数的 `description`；「返回外部材料 / 可引用 / 何时用 /
   参数不得抄候选」四句由核心模板固定，插件改不了。
-- 描述文本在注册期净化：去换行与控制字符、夹到上限；prompt 行里不允许出现 `\n`，防止
-  插件文本伪装成模板里的新规则。
+- 描述文本在注册期**超限或含控制字符即注册失败**（`ExtensionRegistryError`，启动失败），
+  不夹取、不净化：插件描述符是部署配置，不是用户数据，静默夹取会让模型看到与部署方写的
+  不一样的说明。prompt 行里因此不可能出现 `\n`，插件文本也就无法伪装成模板里的新规则。
 
 ### 3.3 schema hint（`prompts.reflect_schema_hint` 新增 `plugin_actions=()`）
 
@@ -192,8 +199,10 @@ x2 · …
 ## 四、注册与冲突规则（`extensions/registry.py` freeze 期校验）
 
 - 动作名正则 `^[a-z][a-z0-9_]{2,31}$`。
-- **保留字集** `RESERVED_REFLECT_KEYS`（导出自 `services/reasoning_actions.py`，唯一字面量
-  定义点）= 核心动作 id 全集 ∪ schema 顶层字段名全集：
+- **保留字集** `RESERVED_REFLECT_KEYS`（唯一字面量定义点在 `domain/reflect_action.py`，
+  不是 `services/reasoning_actions.py`：校验发生在 `extensions/registry.py`，而
+  `extensions/` 不得 import `services/`（架构边界守卫），domain 是两边都能读的那一层）
+  = 核心动作 id 全集 ∪ schema 顶层字段名全集：
   `answer add_subquery search_elements exact_lookup expand_graph ppr_retrieve expand_community
   follow_chain search_chunks enumerate_elements enumerate_kg_objects update_outline
   consult_memory` ∪ `sufficient next_action reason expand new_sub_query enumerate outline
@@ -204,8 +213,14 @@ x2 · …
 - 参数名不得为 `name`/`reason`（防与动作对象外的字段混淆），数量 ≤
   `REFLECT_ACTION_PARAMETERS_MAX`；enum 值数量 ≤ `REFLECT_ACTION_ENUM_VALUES_MAX`。
 - `max_calls_per_run ≥ 1`；实际生效值 = `min(descriptor, policy.max_plugin_actions)`。
-- 描述符所有字符串在 freeze 期做一次净化与限长，之后不再动。校验失败是启动失败，不是
-  运行期跳过——插件是显式配置、启动冻结的（SOP §9.1）。
+- 描述符所有字符串在 freeze 期只校验、不改写：**空串、超限或含控制字符即注册失败**。
+  控制字符类按「不能出现在一行提示词里的字符」定义，比 ASCII 控制符更宽：C0
+  （U+0000–U+001F，含换行与回车）、DEL 与 C1（U+007F–U+009F，含 NEL）、
+  U+2028/U+2029（多数渲染器与分词器当换行）、以及 bidi 控制符 U+202A–U+202E 与
+  U+2066–U+2069（未闭合的覆盖会让整行视觉反转，运维审到的与人看到的可以不是一句话）。
+  理由同 §3.2——插件描述符是部署配置，不是用户数据，静默夹取会让模型看到与部署方写的
+  不一样的说明。校验失败是启动失败，不是运行期跳过——插件是显式配置、启动冻结的
+  （SOP §9.1）。
 
 ## 五、执行宿主（新文件 `extensions/reflect_action.py`）
 
@@ -245,7 +260,8 @@ self._action_plugin(state, decision)`。`run` 是零松弛天花板的热函数�
 ### 6.1 载体
 
 - `ExternalEvidence(key, plugin_id, action, source_label, title, excerpt, url, location_label)`
-  是服务层结构，`key` 由核心按 run 内序号铸造（`ext:{plugin_id}:{n}`，用作 `object_id`）。
+  定义在 `domain/reflect_action.py`（`reasoning_retrieval` 与合成侧都要读，domain 是两边共同的
+  下层；不从 SDK 导出，插件永远不构造它），`key` 由核心按 run 内序号铸造（`ext:{plugin_id}:{n}`，用作 `object_id`）。
 - `ReasoningResult.external_evidence: List[ExternalEvidence]`；
   `ResponseDraftInput.external_evidence: tuple[...]`（新字段，缺省空元组，既有构造方不改）。
   这是与 gap_consult **相反**的选择：gap 建议刻意在草稿阶段之后填、合成看不见；外部证据
@@ -331,6 +347,7 @@ self._action_plugin(state, decision)`。`run` 是零松弛天花板的热函数�
 | `EXTERNAL_EVIDENCE_EXCERPT_MAX_CHARS` | 800 |
 | `EXTERNAL_EVIDENCE_URL_MAX_CHARS` | 2048 |
 | `EXTERNAL_EVIDENCE_SOURCE_LABEL_MAX_CHARS` | 40 |
+| `EXTERNAL_EVIDENCE_LOCATION_LABEL_MAX_CHARS` | 60 |
 | `EXTERNAL_EVIDENCE_REFLECT_BLOCK_CHARS` | 1600 |
 | `EXTERNAL_EVIDENCE_CONTEXT_CHARS` | 4000 |
 
@@ -362,9 +379,10 @@ self._action_plugin(state, decision)`。`run` 是零松弛天花板的热函数�
 
 按 CLAUDE.md 的逐任务委托：每个 T 一个实现子代理，完成后 spec-review + code-quality-review。
 
-- **T1 契约与注册**：`domain/reflect_action.py`、`extension_sdk/reflect_action.py`、
-  `reasoning_actions.RESERVED_REFLECT_KEYS`、registry freeze 校验与错误码。测试：正则、
-  保留字冲突、跨插件重名、上限。
+- **T1 契约与注册**：`domain/reflect_action.py`（含 `RESERVED_REFLECT_KEYS`）、
+  `extension_sdk/reflect_action.py`、registry freeze 校验与错误码、
+  `registry.reflect_action_specs()`、`ReasoningResult.external_evidence`。测试：正则、
+  保留字冲突（含反射式重导保留字集）、跨插件重名、上限、控制字符与超长响亮失败。
 - **T2 投影**：`reflect_prompt`/`reflect_schema_hint` 的 `plugin_actions` 参数与渲染纯函数；
   `reflect()` 白名单与解析；`ReflectDecision` 新字段。测试全部经
   `test_reasoning_enumeration_tools._ValidatingLLM` 真实形状闸：合法参数落地、枚举非法值
@@ -380,9 +398,10 @@ self._action_plugin(state, decision)`。`run` 是零松弛天花板的热函数�
 - **T5 前端**：类型、引用卡三个按钮分支、导入通道复用、tier 徽章第三桶、轨迹标签与
   detail。node 测试覆盖 `buildAnswerReferences`/`computeSourceTierCounts`/引用卡渲染。
 - **T6 文档与守卫**：`docs/product-and-api*.md` 新节「Reflect plugin actions
-  (`ask.reflect_action`)」+ 引用字段条目；`docs/deployment-extensions-sop*.md` §3.5 表加一
-  行、数词 six/六 → seven/七；`architecture.md` 一句；`test_reflect_action_docs_contract.py`
-  照 gap_consult guard 反射两组常量与表行。
+  (`ask.reflect_action`)」+ 引用字段条目；`architecture.md` 一句；
+  `test_reflect_action_docs_contract.py` 照 gap_consult guard 反射两组常量与表行。
+  （`docs/deployment-extensions-sop*.md` §3.5 的表行与数词 eight/八 → nine/九 已在 T1 完成：
+  导出新 `*_POINT` 的同一提交必须过既有 docs guard，拆不到 T6。）
 - **PR-B（独立 PR）**：`examples/extensions/arxiv-search/` 新增 `examples.arxiv_search.search`
   动作（参数 `query` text 必填；复用 `client`/`atom`/节流与 egress 策略层），G1 零网络 e2e
   + G2 `scripts/check_sample_plugin.sh` 通过，零补丁验收照 #596 的机器测试。这是 X6 要求

@@ -274,7 +274,7 @@ Choose output shape by lifecycle. Short validation/CRUD/list/status routes stay 
 
 ### 3.5 Other contribution kinds
 
-The nine remaining production extension points are Protocols in the SDK; implement the Protocol, declare the matching `ContributionKind`, and register through the typed `add_*` helper.
+The ten remaining production extension points are Protocols in the SDK; implement the Protocol, declare the matching `ContributionKind`, and register through the typed `add_*` helper.
 
 | Point constant | Kind | Protocol | Module |
 | --- | --- | --- | --- |
@@ -287,6 +287,7 @@ The nine remaining production extension points are Protocols in the SDK; impleme
 | `ASK_ENGINE_POINT` (`ask.engine`) | `PROVIDER` | `AskEngineProvider` | `app/extension_sdk/ask.py` |
 | `INDEXING_PIPELINE_POINT` (`indexing.pipeline`) | `CONTRIBUTOR` | `IndexingPipelineProvider` | `app/extension_sdk/indexing.py` |
 | `SOURCE_ELEMENT_ENRICHER_POINT` (`source.element_enricher`) | `CONTRIBUTOR` | `ElementEnricher` | `app/extension_sdk/element_enrichment.py` |
+| `ASK_REFLECT_ACTION_POINT` (`ask.reflect_action`) | `CONTRIBUTOR` | `ReflectActionContributor` | `app/extension_sdk/reflect_action.py` |
 
 Each point hands a narrow, point-specific context — never a universal service locator — and each declares the capabilities a contribution must `require` to receive its access port. Read the Protocol and its module docstring before writing against it; they carry the fail-open and cancellation rules for that point.
 
