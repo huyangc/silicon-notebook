@@ -28,38 +28,42 @@
  * that one row immediately and swap in progress wording; success freezes it
  * into a terminal "已导入" state; failure surfaces the message persistently
  * under that row (never a toast) and leaves the button clickable again for a
- * retry. State is per-item, keyed by array **index**, not by `url`: url
- * de-duplication happens inside `GapConsultHost.consult()`'s `seen_urls` set
- * (backend/app/extensions/gap_consult.py) — an injected seat this component
- * cannot see the internals of — and the core code that hands the host's
- * tuple straight into `AskResponse.gap_suggestions`
- * (`ask_service.py::draft.response.gap_suggestions = list(gap_suggestions)`)
- * never re-verifies that invariant. Keying UI state on a value whose
- * uniqueness this component cannot itself prove is exactly the kind of
- * assumption that quietly breaks when the host changes; keying on index is
- * unconditionally safe regardless of what the host does or doesn't guarantee.
+ * retry. That state machine itself now lives in `./import-row-state`, shared
+ * verbatim with the external-evidence citation card
+ * (`answer-panel.tsx`, `ask.reflect_action` 的 `object_type === "external"`)
+ * — same red line, one implementation.
+ *
+ * 逐行状态**按 URL 分格，且与引用卡共用同一个 controller**（生产调用点 AnswerView
+ * 建一份传进来）。这是对早先「按数组下标分格」的一次有意反转，理由变了：那时下标
+ * 是更安全的键——url 的唯一性由 `GapConsultHost.consult()` 的 `seen_urls`
+ * (backend/app/extensions/gap_consult.py) 保证，是这个组件证明不了的假设，而把两条
+ * 同 url 的建议算成一行会是个 bug。现在恰恰相反：同一个库外链接可能同时出现在这份
+ * 建议清单和引用卡里，导入的又是**同一件东西**，所以「同 url 即同一格」正是要的语义
+ * ——一处导入完，另一处立刻显示「已导入」，不会重复排入同一个链接来源。真出现两条
+ * 同 url 的建议时它们一起冻结，也是对的：第二次导入本来就是一次重复。
  */
-import { useState } from "react";
 import { ChevronRight, ExternalLink } from "lucide-react";
 
+import {
+  ImportRowButton,
+  useImportRowController,
+  type ImportOutcome,
+  type ImportRowController,
+} from "./import-row-state";
 import type { GapSuggestion } from "./workspace-model";
-
-type ImportOutcome = { ok: boolean; message?: string };
-
-type ImportState =
-  | { status: "idle" }
-  | { status: "busy" }
-  | { status: "done" }
-  | { status: "failed"; message: string };
-
-const IDLE: ImportState = { status: "idle" };
 
 export function GapSuggestionsPanel({
   suggestions,
+  controller,
   onImport,
   importDisabledReason,
 }: {
   suggestions: GapSuggestion[];
+  /** 生产调用点（AnswerView）传的**共享** controller：同一个 URL 在这份清单与外部
+   *  证据引用卡之间共用一格「已导入」终态（见 import-row-state.tsx 顶部）。传了它
+   *  就以它为准，`onImport`/`importDisabledReason` 不再参与——那两个是给独立渲染
+   *  这个组件的调用方（组件测试、未来别的入口）用的自建路径。 */
+  controller?: ImportRowController;
   /** 缺省即不渲染导入按钮（onSaveMemory 的既有惯例：写回服务端的动作没有回调
    *  就不出按钮）——只读排障视图传不了这个回调，也就没有导入入口。 */
   onImport?: (url: string) => Promise<ImportOutcome>;
@@ -72,26 +76,12 @@ export function GapSuggestionsPanel({
    *  本身。 */
   importDisabledReason?: string;
 }) {
-  const [states, setStates] = useState<Record<number, ImportState>>({});
+  // hook 无条件调用（`controller` 传了它也照跑，只是结果不被采用）——条件调用 hook
+  // 会在 prop 出现/消失的那一次渲染上炸掉 hook 顺序。
+  const ownController = useImportRowController(onImport, importDisabledReason);
+  const importController = controller ?? ownController;
 
   if (suggestions.length === 0) return null;
-
-  async function handleImport(index: number, url: string) {
-    if (!onImport) return;
-    setStates((previous) => ({ ...previous, [index]: { status: "busy" } }));
-    let outcome: ImportOutcome;
-    try {
-      outcome = await onImport(url);
-    } catch {
-      outcome = { ok: false, message: "未能添加这个链接" };
-    }
-    setStates((previous) => ({
-      ...previous,
-      [index]: outcome.ok
-        ? { status: "done" }
-        : { status: "failed", message: outcome.message || "未能添加这个链接" },
-    }));
-  }
 
   return (
     <details className="answer-gap-consult">
@@ -103,47 +93,30 @@ export function GapSuggestionsPanel({
         以下结果来自笔记本之外，没有参与本次回答，也不会被引用。导入后才会进入这个笔记本。
       </p>
       <ul className="answer-gap-consult-list">
-        {suggestions.map((suggestion, index) => {
-          const state = states[index] ?? IDLE;
-          return (
-            <li className="answer-gap-consult-item" key={`${suggestion.url}#${index}`}>
-              <div className="answer-gap-consult-item-head">
-                <a href={suggestion.url} target="_blank" rel="noopener noreferrer">
-                  {suggestion.title}
-                  <ExternalLink size={12} aria-hidden="true" />
-                </a>
-                {suggestion.source_label && (
-                  <span className="answer-gap-consult-source">{suggestion.source_label}</span>
-                )}
-              </div>
-              {suggestion.summary && (
-                <p className="answer-gap-consult-summary">{suggestion.summary}</p>
+        {suggestions.map((suggestion, index) => (
+          <li className="answer-gap-consult-item" key={`${suggestion.url}#${index}`}>
+            <div className="answer-gap-consult-item-head">
+              <a href={suggestion.url} target="_blank" rel="noopener noreferrer">
+                {suggestion.title}
+                <ExternalLink size={12} aria-hidden="true" />
+              </a>
+              {suggestion.source_label && (
+                <span className="answer-gap-consult-source">{suggestion.source_label}</span>
               )}
-              {onImport && (
-                <button
-                  type="button"
-                  className={`answer-gap-consult-import ${state.status === "done" ? "is-done" : ""}`}
-                  disabled={state.status === "busy" || state.status === "done" || Boolean(importDisabledReason)}
-                  title={
-                    importDisabledReason && state.status !== "busy" && state.status !== "done"
-                      ? importDisabledReason
-                      : undefined
-                  }
-                  onClick={() => handleImport(index, suggestion.url)}
-                >
-                  {state.status === "busy"
-                    ? "导入中…"
-                    : state.status === "done"
-                      ? "已导入"
-                      : "导入"}
-                </button>
-              )}
-              {state.status === "failed" && (
-                <p className="answer-gap-consult-error">{state.message}</p>
-              )}
-            </li>
-          );
-        })}
+            </div>
+            {suggestion.summary && (
+              <p className="answer-gap-consult-summary">{suggestion.summary}</p>
+            )}
+            <ImportRowButton
+              controller={importController}
+              rowKey={suggestion.url}
+              url={suggestion.url}
+              className="answer-gap-consult-import"
+              errorClassName="answer-gap-consult-error"
+              idleLabel="导入"
+            />
+          </li>
+        ))}
       </ul>
     </details>
   );

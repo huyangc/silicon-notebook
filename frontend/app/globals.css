@@ -7159,6 +7159,60 @@ button.tag:hover {
   opacity: 0.5;
 }
 
+/* 外部证据引用卡（`ask.reflect_action`）头部的两个出口。
+   「打开链接」必须是真 <a>（中键/右键「在新标签页打开」、复制链接地址都要能用），
+   但视觉上与同排的「知识图谱」/「查看原文」按钮同款——否则同一排会出现两种形状的
+   动作控件。⚠ 不把 `a` 并进 `.cite-detail-head button` 那条选择器：`span` 那条通用
+   规则（display:inline-flex + 12px/700）不覆盖 <a>，`:disabled` 那条对链接又没有
+   意义，就地写全反而说得清。 */
+.cite-detail-head .cite-detail-external-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: auto;
+  min-height: 28px;
+  border: 1px solid #d8dee8;
+  border-radius: 999px;
+  padding: 0 9px;
+  background: #fff;
+  color: #475569;
+  font-size: 12px;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+/* 按下态。全局那条 `button:not(:disabled)…:active` 只认 <button>，这颗出口是真
+   <a>（中键/右键要能用），不补的话它是这一排里唯一一个按下去没有任何视觉变化的
+   控件。声明逐字照抄那条 base 规则（globals.css 顶部「按下必须有可见变化、松手
+   还原」），同样刻意不加 transition。 */
+.cite-detail-head .cite-detail-external-link:active {
+  opacity: 0.7;
+  filter: brightness(0.88);
+}
+
+/* 「导入为来源」与站外来源建议清单里的「导入」是同一个动作（同一条核心 URL 来源
+   端点、同一份状态机），所以用同一套配色：蓝＝可点，绿＝已冻结的「已导入」终态。 */
+.cite-detail-head .cite-detail-import {
+  color: var(--blue);
+}
+
+.cite-detail-head .cite-detail-import.is-done {
+  color: var(--green);
+  border-color: var(--green);
+}
+
+/* 失败原因持久留在按钮**紧邻处**（AGENTS.md「Interactive feedback」：动作结果落在
+   按钮自身或紧邻处，不能只发页面顶部横幅）。头部是 flex-wrap 的一行，flex-basis
+   100% 让这句话独占换行后的整行、正好落在按钮下方；不给的话它会被塞进同一行的
+   剩余宽度里压成一列单字。特异性 (0,2,0) 压过 `.cite-detail-card p` 的 (0,1,1)。 */
+.cite-detail-head .cite-detail-import-error {
+  flex-basis: 100%;
+  margin: 0;
+  color: var(--danger);
+  font-size: 12px;
+  font-weight: 400;
+}
+
 .cite-detail-card h4 {
   margin: 0;
   font-size: 14px;
@@ -10996,6 +11050,13 @@ button.tag:hover {
   color: var(--blue);
   font-weight: 600;
 }
+/* 第三格「外部 K」（`ask.reflect_action` 的库外证据）。刻意与「公共 M」不同色：
+   这两格说的是完全不同的两件事——一个是别的笔记本，一个是笔记本之外，同色会让
+   它们读成同一类。 */
+.source-dist-external {
+  color: #7a6a3f;
+  font-weight: 600;
+}
 .report-source-dist {
   display: flex;
   flex-wrap: wrap;
@@ -11902,6 +11963,23 @@ button.tag:hover {
 .public-report-locus {
   color: #5e6a79;
   font-size: 12px;
+}
+
+/* 「外部」标记（`ask.reflect_action` 的库外证据）。公开页的引用清单里库内与库外
+   条目并排，匿名读者必须一眼分得开——所以用实心徽章而不是与 .public-report-locus
+   同色的一段小字。只有标记，没有链接：公开投影刻意不带 url（设计文档 §九 不变量 4）。 */
+.public-report-external {
+  /* `.public-report-refbody` 是单列 grid：要收住徽章宽度得用 justify-self，
+     align-self 在这里只管纵向、徽章仍会拉满整行。 */
+  justify-self: start;
+  border: 1px solid #c9b78a;
+  border-radius: 999px;
+  padding: 0 7px;
+  background: #fdf7e6;
+  color: #7a6a3f;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 18px;
 }
 
 .public-report-references small {

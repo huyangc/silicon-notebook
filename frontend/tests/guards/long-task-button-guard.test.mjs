@@ -21,7 +21,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { jsxElements, parseModule, variableInitializersIn } from "../../test-support/semantic-source.mjs";
+import { findFunction, jsxElements, parseModule, variableInitializersIn } from "../../test-support/semantic-source.mjs";
 import { CHECKUP_FIX, CHECKUP_FIX_BUSY } from "../../app/vocabulary.ts";
 
 // onClick 源码文本里能唯一认出这个入口的片段 → 这个入口是什么、为什么必须禁用。
@@ -177,22 +177,64 @@ test("page.tsx 的长任务 file input 也带非平凡的 disabled，且表达�
   assert.deepEqual(offenders, []);
 });
 
-// 站外来源建议的「导入」按钮(ask.gap_consult,X9 PR-A T3)不在 page.tsx 里——它是
-// answer-gap-suggestions.tsx 里独立组件的按钮,上面那两条测试按文件名钉死解析
-// page.tsx,天生看不到它。同一条理由(后端 POST /sources/url 没有单飞守卫,点完不
-// 禁用就是重复排入同一个链接),同一套判据(TRIVIALLY_FALSE),只是换一个要解析的
-// 文件。
-test("answer-gap-suggestions.tsx 的导入按钮同样带非平凡的 disabled(点完不能再点)", async () => {
-  const module = await parseModule("answer-gap-suggestions.tsx");
-  const buttons = jsxElements(module, "button");
-  const importButtons = buttonsMatching(buttons, "handleImport(");
+// 「把一个库外链接导入成本笔记本的一条来源」这颗按钮不在 page.tsx 里——它住在
+// import-row-state.tsx 的共享组件 ImportRowButton 里,由站外来源建议清单
+// (ask.gap_consult,X9 PR-A T3)与外部证据引用卡(ask.reflect_action,设计文档 §七)
+// 共用同一份实现;上面那两条测试按文件名钉死解析 page.tsx,天生看不到它。同一条
+// 理由(后端 POST /sources/url 没有单飞守卫,点完不禁用就是重复排入同一个链接),
+// 同一套判据(TRIVIALLY_FALSE),只是换一个要解析的文件。
+//
+// ⚠ 钉在共享组件上而不是两个调用方上是有意的:两个面共用一颗按钮,禁用语义就只有
+// 一处可退化——反过来说,哪天有人为了「引用卡上不需要」把它拆回两份,这条守卫会
+// 因为两个调用方各自的 button 不再存在而报红,而不是静默放过其中一份。
+const IMPORT_ROW_BUTTON = {
+  module: "import-row-state.tsx",
+  component: "ImportRowButton",
+  match: "controller.start(",
+  why: "库外链接导入(站外来源建议 / 外部证据引用卡):后端无单飞守卫,重复点=重复排入同一个链接来源",
+  // requires 同上面 LONG_TASK_BUTTONS 的加固理由:光断言「disabled 非平凡」拦不住
+  // 「保留了别的条件、只把在飞标志摘掉」这类改动——比如把
+  // `disabled={frozen || Boolean(controller.disabledReason)}` 改成只剩后半,disabled
+  // 表达式依旧非平凡,「非平凡即通过」那条照样绿,但按钮在请求还没返回的这段网络
+  // 往返期间会重新可点,用户能在同一次导入进行中反复点、重复排入同一个链接。
+  //
+  // ⚠ 带引号的 `"busy"` 而不是裸 `busy`:这个模块里有一个 `busyLabel` prop(进行中
+  // 的按钮文案),裸子串会被它满足——`disabled={Boolean(busyLabel) && …}` 这种把在飞
+  // 判据换成「文案 prop 传没传」的写法就能骗过守卫。只有真的比 `status === "busy"`
+  // 才算数,而那个比较里的 "busy" 一定带引号。
+  requires: '"busy"',
+};
+
+async function importRowButtons() {
+  const module = await parseModule(IMPORT_ROW_BUTTON.module);
+  // ⚠ `jsxElements` 只吃 SourceFile（它把第一个参数原样当 sourceFile 传给
+  // `getText(sourceFile)`），所以扫全模块、再按它自己记的 `scope` 收敛到组件函数体。
+  // 按 scope 而不是「第 N 个 button」:这个文件哪天多出别的按钮也不会让判据错位。
+  const scope = `<module>.${IMPORT_ROW_BUTTON.component}`;
+  const matched = buttonsMatching(jsxElements(module, "button"), IMPORT_ROW_BUTTON.match)
+    .filter((element) => element.scope === scope);
   // 匹配为 0 说明入口被改名/删了——同上面几条一样,必须响亮失败。
   assert.ok(
-    importButtons.length > 0,
-    "没找到导入按钮（handleImport(...) 入口被改名或删除？守卫失效）",
+    matched.length > 0,
+    `${IMPORT_ROW_BUTTON.match}：在 ${scope} 里没找到导入按钮（入口被改名或删除？守卫失效）`,
   );
+  return {
+    matched,
+    // disabled 绑的是派生常量(frozen)而不是内联表达式,与 page.tsx 那两条测试同款
+    // 处理:解一层变量引用再找在飞标志。**解析范围收到组件函数体内**——模块级或
+    // 别的函数里的同名变量不该被拿来「解释」这颗按钮的 disabled(与上面那条
+    // LONG_TASK_BUTTONS 给键加模块名前缀是同一个顾虑,这里靠缩小范围解决)。
+    initializers: new Map(
+      variableInitializersIn(findFunction(module, IMPORT_ROW_BUTTON.component))
+        .map((item) => [item.name, item.initializer]),
+    ),
+  };
+}
+
+test("import-row-state.tsx 的导入按钮同样带非平凡的 disabled(点完不能再点)", async () => {
+  const { matched } = await importRowButtons();
   const offenders = [];
-  for (const element of importButtons) {
+  for (const element of matched) {
     const disabled = element.bindings?.disabled ?? element.attributes?.disabled;
     if (disabled === undefined) {
       offenders.push("导入按钮缺 disabled —— 后端无单飞守卫，重复点=重复排入同一个链接来源");
@@ -203,35 +245,27 @@ test("answer-gap-suggestions.tsx 的导入按钮同样带非平凡的 disabled(�
   assert.deepEqual(offenders, []);
 });
 
-// requires 字段同上面 LONG_TASK_BUTTONS 的加固理由:光断言「disabled 非平凡」拦不住
-// 「保留了别的条件、只把在飞标志摘掉」这类改动——比如把
-// `disabled={state.status === "busy" || state.status === "done"}` 改成
-// `disabled={state.status === "done"}`,disabled 表达式依旧非平凡(遗留了"已导入"
-// 那半的条件),上面那条"非平凡即通过"的测试照样绿,但按钮在请求还没返回的这段
-// 网络往返期间会重新可点,用户能在同一次导入进行中反复点、重复排入同一个链接。
-const GAP_CONSULT_IMPORT_BUTTON = {
-  match: "handleImport(",
-  why: "站外来源建议导入:后端无单飞守卫,重复点=重复排入同一个链接来源",
-  requires: "busy",
-};
-
-test("answer-gap-suggestions.tsx 的导入按钮 disabled 表达式必须含在飞判据(busy)", async () => {
-  const module = await parseModule("answer-gap-suggestions.tsx");
-  const buttons = jsxElements(module, "button");
-  const matched = buttonsMatching(buttons, GAP_CONSULT_IMPORT_BUTTON.match);
-  assert.ok(
-    matched.length > 0,
-    `${GAP_CONSULT_IMPORT_BUTTON.match}：没找到任何按钮（入口被改名或删除？守卫失效）`,
-  );
+test("import-row-state.tsx 的导入按钮 disabled 表达式必须含在飞判据(busy)", async () => {
+  const { matched, initializers } = await importRowButtons();
   const offenders = [];
   for (const element of matched) {
     const disabled = element.bindings?.disabled ?? element.attributes?.disabled;
     if (disabled === undefined) {
-      offenders.push(`${GAP_CONSULT_IMPORT_BUTTON.match}：缺 disabled —— ${GAP_CONSULT_IMPORT_BUTTON.why}`);
-    } else if (!String(disabled).includes(GAP_CONSULT_IMPORT_BUTTON.requires)) {
+      offenders.push(`${IMPORT_ROW_BUTTON.match}：缺 disabled —— ${IMPORT_ROW_BUTTON.why}`);
+      continue;
+    }
+    const expression = String(disabled).trim();
+    // 逐个标识符解一层,而不是像 page.tsx 那两条那样只解「整条表达式恰好是一个
+    // 变量名」的情形:这里的 disabled 是复合表达式(`frozen || Boolean(...)`),在飞
+    // 标志藏在其中一个派生常量的初始化式里。
+    const resolved = [
+      expression,
+      ...[...expression.matchAll(/[A-Za-z_$][\w$]*/g)].map(([name]) => initializers.get(name) ?? ""),
+    ].join(" ");
+    if (!resolved.includes(IMPORT_ROW_BUTTON.requires)) {
       offenders.push(
-        `${GAP_CONSULT_IMPORT_BUTTON.match}：disabled=${disabled} 里没有在飞标志 `
-          + `${GAP_CONSULT_IMPORT_BUTTON.requires} —— ${GAP_CONSULT_IMPORT_BUTTON.why}`,
+        `${IMPORT_ROW_BUTTON.match}：disabled=${expression}（解一层后=${resolved}）`
+          + ` 里没有在飞标志 ${IMPORT_ROW_BUTTON.requires} —— ${IMPORT_ROW_BUTTON.why}`,
       );
     }
   }

@@ -35,6 +35,12 @@ export type PublicReferenceT = {
   /** The reference itself is an image element; its snippet is parser-generated
    * caption/description and must not be repeated as visible prose. */
   is_image_reference?: boolean;
+  /** 这条引用来自笔记本**之外**（reflect 插件动作 `ask.reflect_action` 带回的
+   *  外部证据，后端由 `tier == "external"` 得出）。公开页据此加一枚「外部」标记。
+   *  ⚠ 公开投影**刻意不带 `url`**（设计文档 §七 / §九 不变量 4）：匿名读者只看到
+   *  标记、标题与摘录，与公开页「nothing addressable」的既有原则一致，所以这里
+   *  也没有可渲染成链接的东西——不要「补齐」一个 url 字段。 */
+  is_external?: boolean;
 };
 
 /** 一张「本段附图」的公开投影。只带**按链接口令派生的不透明别名**，没有 asset_id。 */

@@ -309,8 +309,8 @@ self._action_plugin(state, decision)`。`run` 是零松弛天花板的热函数�
   与「导入为来源」；后者复用 `onImportGapSuggestion` 通道与 `answer-gap-suggestions.tsx` 的
   逐行状态机（按下即禁用该行、进行中文案、成功冻结为「已导入」、失败原地持久显示，不发
   toast）。只读工作区不传导入回调 ⇒ 按钮不出现。
-- 来源分布徽章：`computeSourceTierCounts` 增加 `external` 桶，文案「个人 N · 基准库 M ·
-  外部 K」；总数恒等于可见引用数的不变量保持。
+- 来源分布徽章：`computeSourceTierCounts` 增加 `external` 桶，文案「来源 · 个人 N ·
+  公共 M · 外部 K」（前两段是既有实现的逐字文案）；总数恒等于可见引用数的不变量保持。
 - 轨迹标签：`TRACE_STEP_LABELS.plugin_action = "扩展检索"`；`getTraceStepDetail` 对该
   步显示「<action> · <arguments 摘要> · 新增 N 条」，skip 步沿用既有 reason 文案渲染。
 - 公开分享 `conversation_public_view.public_reference`：新增 `is_external: bool`（由

@@ -57,6 +57,13 @@ export const TRACE_STEP_LABELS: Record<string, string> = {
   // 这一步问的是"这个库以外还有什么"。零插件部署一步都不产生(见宿主 no-op)。
   gap_consult: "外扩",
   plugin: "扩展",
+  // plugin_action = 模型在 reflect 循环里自己选调的一个**插件提供的检索函数**
+  // (ask.reflect_action,设计文档 §五)。⚠ 与上面两步都不同,三者不能同名:
+  //   plugin「扩展」   = 插件在别处挂的通用步(step_type="plugin");
+  //   gap_consult「外扩」= 确定性触发、草稿之后调一次、产出**不进**答案;
+  //   plugin_action    = 模型自己决定调、循环之内调、产出**进**答案且可 [k] 引用。
+  // step_type 是核心拥有的**一个**值,不随插件数量增长(插件名只进 detail)。
+  plugin_action: "扩展检索",
 };
 
 // next_action 取值来自 backend/app/services/prompts.py 的状态机决策(reflect 步骤
@@ -120,6 +127,29 @@ function totalDurationMs(steps: ReasoningTraceStep[]): number {
     (sum, step) => sum + (typeof step.duration_ms === "number" ? step.duration_ms : 0),
     0,
   );
+}
+
+// 插件动作(ask.reflect_action)参数摘要的**显示**上限。参数逐字进轨迹是这个特性
+// 的外泄透明合同(设计文档 §九 不变量 1:发出去的只有问题与模型写的参数,而后者
+// 用户必须看得见),但折叠态那一行装不下一段自由文本——超出就夹断并标 …,完整
+// 参数照旧原样留在 detail 里供排查。夹的是**拼好的整串**而不是每个参数:两个参数
+// 各夹一半会读成两句半截话,不如老实说「后面还有」。
+const PLUGIN_ACTION_ARGUMENTS_MAX_CHARS = 120;
+
+// `arguments` 是 `Record<string, string>`(后端只允许字符串与字符串枚举,见设计
+// 文档 §一 非目标第三条)。这里仍逐个查类型:轨迹 detail 是 `Record<string,
+// unknown>`,畸形 payload 不该把 "[object Object]" 送上屏。空串参数(模型没填的
+// 可选参数,后端补空串)不显示——列一串 `venue=` 只是噪音。
+function pluginActionArgumentsText(value: unknown): string {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return "";
+  const parts: string[] = [];
+  for (const [name, argument] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof argument === "string" && argument) parts.push(`${name}=${argument}`);
+  }
+  const text = parts.join(" · ");
+  return text.length > PLUGIN_ACTION_ARGUMENTS_MAX_CHARS
+    ? `${text.slice(0, PLUGIN_ACTION_ARGUMENTS_MAX_CHARS)}…`
+    : text;
 }
 
 export function getTraceStepDetail(step: ReasoningTraceStep): string {
@@ -241,6 +271,24 @@ export function getTraceStepDetail(step: ReasoningTraceStep): string {
     const parts: string[] = [];
     if (typeof detail.query === "string" && detail.query) parts.push(detail.query);
     if (typeof detail.found === "number") parts.push(`新增 ${detail.found} 段`);
+    return parts.join(" · ");
+  }
+  // plugin_action(ask.reflect_action,设计文档 §五/§七):模型在 reflect 循环里
+  // 自己选调的插件检索动作。⚠ 必须排在下面的通用分支之前——它的 detail 带
+  // found,落到 `typeof detail.found === "number"` 那条会只剩「新增 N」,把动作名
+  // 与**发出去的参数**一起吞掉。而那两样正是本特性的透明合同(§九 不变量 1):
+  // 核心无法证明模型写的参数里没有库内片段,v1 的对策就是把它逐字摆给用户看。
+  // plugin_id 刻意不上屏(§九 不变量 7 的同一侧):模型看不到它,用户看动作名就够,
+  // 内部 id 留在 detail 里供排查。
+  if (step.step_type === "plugin_action") {
+    const parts: string[] = [];
+    if (typeof detail.action === "string" && detail.action) parts.push(detail.action);
+    const argumentsText = pluginActionArgumentsText(detail.arguments);
+    if (argumentsText) parts.push(argumentsText);
+    if (typeof detail.found === "number") parts.push(`新增 ${detail.found} 条`);
+    // 宿主按 EXTERNAL_EVIDENCE_MAX_ITEMS_PER_CALL / 本 run 剩余名额截过条目时置真。
+    // 必须说出来:不说的话「新增 3 条」读起来像插件只找到 3 条。
+    if (detail.truncated) parts.push("结果已截断");
     return parts.join(" · ");
   }
   if (step.step_type === "skip" && typeof detail.pending === "number") {

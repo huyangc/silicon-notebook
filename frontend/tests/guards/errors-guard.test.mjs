@@ -40,26 +40,29 @@ const APPROVED_MESSAGE_READS = Object.freeze({
     count: 1,
     reason: "the password-reset catch reads only the forbidden control-flow sentinel",
   },
-  "answer-gap-suggestions.tsx|<module>.GapSuggestionsPanel|property|message": {
+  "dev/logs/activity/ActivityView.tsx|<module>.isForbidden|property|message": {
     count: 1,
-    reason: "renders the per-item ImportState.message the panel itself constructed: a fixed "
-      + "Chinese fallback the panel writes on its own catch, or the ImportOutcome.message an "
+    reason: "the activity view's shared predicate reads only the forbidden control-flow sentinel",
+  },
+  // 这两条从 answer-gap-suggestions.tsx 原样搬来:那份逐行导入状态机现在住在
+  // import-row-state.tsx,由站外来源建议清单与外部证据引用卡(ask.reflect_action)
+  // 共用。读的还是同一个 ImportOutcome.message / ImportRowState.message,只是搬了家。
+  "import-row-state.tsx|<module>.ImportRowButton|property|message": {
+    count: 1,
+    reason: "renders the per-row ImportRowState.message the hook itself constructed: a fixed "
+      + "Chinese fallback the hook writes on its own catch, or the ImportOutcome.message an "
       + "onImport caller resolved with — which is either a caught exception already run "
       + "through toUserMessage, or the backend's own rejected[0].reason string shown verbatim "
       + "(same posture as the existing URL-import rejected-list box at page.tsx's urlRejected "
       + "rendering) — never a raw caught exception read directly by this component",
   },
-  "answer-gap-suggestions.tsx|<module>.GapSuggestionsPanel.handleImport|property|message": {
+  "import-row-state.tsx|<module>.useImportRowController|property|message": {
     count: 1,
     reason: "reads the typed ImportOutcome.message an onImport callback resolved with — "
       + "page.tsx's importGapSuggestion returns either a caught exception already run through "
       + "toUserMessage, or the backend's own rejected[0].reason string shown verbatim (same "
       + "posture as the existing URL-import rejected-list box at page.tsx's urlRejected "
       + "rendering), never a raw caught exception itself",
-  },
-  "dev/logs/activity/ActivityView.tsx|<module>.isForbidden|property|message": {
-    count: 1,
-    reason: "the activity view's shared predicate reads only the forbidden control-flow sentinel",
   },
   "knowhow-cell-editor.tsx|<module>.KnowhowCellEditor|property|message": {
     count: 2,
