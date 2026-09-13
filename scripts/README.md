@@ -488,6 +488,14 @@ python scripts/reflect_shadow_rig.py \
 新版摘录；总证据池不变，单表额度由 `REASONING_REFLECT_TABLE_EXCERPT_CHARS` 控制，
 具体边界见产品/API 文档。既有 K/D 不逐轮改写，服务端缓存收益仍须实测。
 
+本档可通过 `REASONING_REFLECT_PROSE_DETAIL_ENABLED` 对照有界普通原文详情与首次
+可见摘录反馈；单卡额度和每轮详情键数分别由 `REASONING_REFLECT_PROSE_DETAIL_CHARS`
+及 `REASONING_REFLECT_PROSE_DETAIL_CARDS` 控制，默认值与边界见产品/API 文档。
+关闭该开关保留本档此前的普通摘录行为；开启时仍共用原证据/历史预算，不增加模型
+或检索调用，也不改变 hard stale 或恢复逐项自评。同档开关对照必须分别构造承载
+对应 Settings 的 repo，不能只给 Ask 另传一份 Settings；结果另记开关状态，不能
+将两侧伪标为不同的 `--arms`。固定意图、语料和其他配置，平衡顺序并保留所有失败。
+
 意图规划仅自动冻结无需澄清的契约；必填歧义必须有真实答案，不能把第一项选项或
 “请补充名称”之类占位内容当成用户确认。缺少答案时该测试应记录为未启动的澄清
 失败，不能计入成功或延迟样本。修改题目背景时保留原题，给变体独立标识，两臂共享
