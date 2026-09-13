@@ -463,6 +463,9 @@ _EXTERNAL_BLOCK_HEADER = (
     "[External evidence] (outside the library; citable, "
     "labelled [external · <source>])"
 )
+# 零条目、只有插件 note 时的块头:不能沿用上面那句「citable」——这一轮没有任何
+# 可引用的东西,块里只有插件对空手的解释。
+_EXTERNAL_BLOCK_EMPTY_HEADER = "[External evidence] (nothing admitted so far)"
 
 
 def _external_block_text(items: "Sequence[ExternalEvidence]", note: str) -> str:
@@ -478,10 +481,14 @@ def _external_block_text(items: "Sequence[ExternalEvidence]", note: str) -> str:
 
     `x{n}` 只是 reflect 阶段的显示编号,不是合成时的 `[k]` 号 —— 合成阶段按
     `id_offset` 统一重编(§六),与 chunk/element 段的做法一致。
+
+    **零条目但有 note 也要渲染**(codex #714 R2):插件对一次空手检索的解释
+    (「外面只有综述,没有原始数据」「换个关键词试试」)正是模型下一轮最需要的
+    反馈;只在两者都空时才返回空串,关闭态的逐字节等价不受影响。
     """
-    if not items:
+    if not items and not note:
         return ""
-    lines = [_EXTERNAL_BLOCK_HEADER]
+    lines = [_EXTERNAL_BLOCK_HEADER if items else _EXTERNAL_BLOCK_EMPTY_HEADER]
     used = len(_EXTERNAL_BLOCK_HEADER)
     dropped = 0
     for index, item in enumerate(items, start=1):

@@ -438,6 +438,20 @@ class ReflectActionHost:
                 )
                 if availability.status is not AvailabilityStatus.AVAILABLE:
                     cell.reason = UNAVAILABLE
+                elif (
+                    cell.abandoned
+                    or is_cancelled(call.cancellation)
+                    or not deadline_open(safe_clock(self._clock), deadline)
+                ):
+                    # The probe itself may have eaten the budget, or the run
+                    # may have been cancelled while it ran.  Once the main
+                    # thread has moved on (or is about to, on its next slice)
+                    # nothing reads this cell — but ``invoke`` is the frame
+                    # that sends the question OUTWARD and spends the plugin's
+                    # own quota, and an abandoned call must not do that
+                    # (codex #714 R2).  Re-checking here is what makes
+                    # "abandoned" mean "never sent", not just "never read".
+                    cell.reason = TIMEOUT
                 else:
                     cell.result = implementation.invoke(
                         ReflectActionCallContext(
