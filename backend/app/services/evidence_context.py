@@ -51,7 +51,11 @@ def _openable_url(item: object) -> bool:
     becoming a card with a dead — or ``javascript:`` — link.
     """
 
-    return str(getattr(item, "url", "") or "").startswith(
+    # Scheme comparison is case-insensitive (RFC 3986 §3.1; the host's
+    # ``clean_url`` and the browser both accept ``HTTPS://``), while the URL
+    # itself is stored and rendered untouched — path and query stay
+    # case-sensitive (codex #714 R3).
+    return str(getattr(item, "url", "") or "").lower().startswith(
         ("http://", "https://")
     )
 

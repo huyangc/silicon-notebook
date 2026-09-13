@@ -1049,3 +1049,23 @@ def test_a_note_only_outcome_still_reaches_the_next_reflect_turn():
     assert "Note: 只找到综述,没有原始数据" in block
     assert "citable" not in block
     assert _external_block_text([], "") == ""
+
+
+def test_a_note_only_outcome_still_arms_the_untrusted_framing(repo):
+    """Zero items + a note: the note is plugin-authored text entering the
+    candidate summary, so the untrusted-content system message must be armed
+    for the following turn exactly as it is for item-bearing results
+    (codex #714 R3)."""
+    llm = _ValidatingLLM([DRY_TURN, _plugin_action(venue="journal"), DRY_TURN])
+    host = _FakeHost(_outcome(note="只找到综述,换个关键词"))
+    retriever, limits = _retriever(repo, llm, host=host)
+
+    result = _run(retriever, _seed(repo), limits)
+
+    assert result.external_evidence == []
+    third = llm.reflect_prompts[2]
+    assert "[External evidence] (nothing admitted so far)" in third
+    assert "Note: 只找到综述,换个关键词" in third
+    assert llm.reflect_messages[1][0]["role"] == "user"
+    assert llm.reflect_messages[2][0] == {
+        "role": "system", "content": UNTRUSTED_EVIDENCE_SYSTEM_INSTRUCTION}
