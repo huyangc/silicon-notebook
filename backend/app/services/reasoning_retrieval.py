@@ -84,8 +84,14 @@ from app.services.reasoning_aspects import (
 from app.services.reasoning_context import (
     DELTA_BLOCK_TITLE, SUPPLEMENT_CARD_NOTE, TURN_CONTEXT_TITLE,
     ReflectContext, ReflectDeltaState, ReflectMeasurement, build_delta_block,
+    accept_fallback_detail_cards, prepare_fallback_detail_cards,
     build_delta_evidence_block, build_evidence_block, compose_snapshot,
     excerpt_terms, render_pool_cards, select_frozen_card_views,
+    select_prose_detail_cards,
+)
+from app.services.reasoning_prose_excerpt import (
+    excerpt_already_visible, render_visible_progress,
+    visible_progress_reserve,
 )
 from app.services.reasoning_observation import (
     ActionObservationLedger, fold_observation_counts, render_observation_row,
@@ -698,6 +704,19 @@ def _table_excerpt_chars(settings, optimization: str) -> int:
     return int(getattr(settings, "reasoning_reflect_table_excerpt_chars", 1200))
 
 
+def _prose_detail_cards(settings, optimization, state, observer, excerpt_chars, table_chars, budget):
+    if optimization != _EVIDENCE_LAYOUT or not bool(getattr(
+            settings, "reasoning_reflect_prose_detail_enabled", True)):
+        return None
+    return select_prose_detail_cards(
+        collected=state.collected, elements=state.elements, chunks=state.chunks,
+        question=state.question, action_query=observer.last_query,
+        excerpt_chars=excerpt_chars, table_excerpt_chars=table_chars,
+        budget_chars=budget,
+        detail_chars=int(getattr(settings, "reasoning_reflect_prose_detail_chars", 1000)),
+        max_cards=int(getattr(settings, "reasoning_reflect_prose_detail_cards", 2)))
+
+
 def _delta_frozen_cards(delta, table_excerpt_chars: int, terms=()):
     if delta is None:
         return {}
@@ -710,7 +729,7 @@ def _delta_frozen_cards(delta, table_excerpt_chars: int, terms=()):
 def _build_delta_snapshot(
     state, delta: "ReflectDeltaState", observer, *, bound_keys, fresh_keys,
     budget: int, state_chars: int, excerpt_chars: int, recent: int,
-    ratio: float, table_excerpt_chars: int = 0,
+    ratio: float, table_excerpt_chars: int = 0, detail_cards=None,
 ):
     """建/重建一版 K,并把投影上的累计账**整体清零**(设计 §5.2 第 1–4 条)。
 
@@ -755,7 +774,7 @@ def _build_delta_snapshot(
         frozen_cards=_delta_frozen_cards(
             delta, table_excerpt_chars,
             excerpt_terms(state.question, "", excerpt_chars) if table_excerpt_chars else ()),
-        table_excerpt_chars=table_excerpt_chars)
+        table_excerpt_chars=table_excerpt_chars, detail_cards=detail_cards)
     window = rows[-recent:] if recent > 0 else ()
     earlier = rows[:len(rows) - len(window)]
     evidence, history = compose_snapshot(
@@ -784,6 +803,7 @@ def _build_delta_snapshot(
 def _delta_cards(
     state, delta: "ReflectDeltaState", observer, *, bound_keys, fresh_keys,
     budget: int, max_cards: int, excerpt_chars: int, table_excerpt_chars: int = 0,
+    detail_cards=None,
 ):
     """这一块 D 里**新展开**的那几张卡。纯读:一格投影都不改。
 
@@ -811,7 +831,7 @@ def _delta_cards(
         frozen_cards=_delta_frozen_cards(
             delta, table_excerpt_chars,
             excerpt_terms("", observer.last_query, excerpt_chars) if table_excerpt_chars else ()),
-        table_excerpt_chars=table_excerpt_chars)
+        table_excerpt_chars=table_excerpt_chars, detail_cards=detail_cards)
 
 
 def _visible_supplement_candidates(delta, query: str) -> List[str]:
@@ -828,6 +848,7 @@ def _delta_supplements(
     state, delta: "ReflectDeltaState", observer, *, candidate_keys,
     max_cards: int, excerpt_chars: int, budget_left: int,
     table_excerpt_chars: int = 0, visible_fallback: bool = False,
+    detail_cards=None,
 ) -> "Tuple[str, ...]":
     """同 key 的摘录升级 ⇒ 几张标着版本的补充卡(拍板 Q3/Q8,评审后修正)。
 
@@ -868,27 +889,54 @@ def _delta_supplements(
     塞不下的大卡不该把后面装得下的小卡一起挡掉,而候选本来就只有至多 `max_cards`
     个,扫完它们的代价是有界的。
     """
-    use_visible = visible_fallback and not candidate_keys
+    actual_bound = tuple(candidate_keys)
+    use_visible = visible_fallback and not actual_bound
     if use_visible:
         candidate_keys = _visible_supplement_candidates(delta, observer.last_query)
+    current_material = "\n".join([delta.snapshot_evidence, *delta.blocks]) if visible_fallback else None
+    # Detail upgrades of already-visible paragraphs are append-only. A fully
+    # shown detail must not take the rotation slot again on an unchanged query.
+    detail_keys = []
+    if detail_cards and visible_fallback:
+        visible = delta.snapshot_keys | delta.block_keys
+        # Check the bytes that can actually fit, not an oversized proposal that
+        # would fall back to the same short card and steal a scan slot forever.
+        detail_keys = [key for key, text in render_pool_cards(
+            collected=state.collected, elements=state.elements,
+            chunks=state.chunks, keys=[key for key in detail_cards if key in visible],
+            question=state.question, action_query=observer.last_query,
+            excerpt_chars=excerpt_chars, table_excerpt_chars=table_excerpt_chars,
+            detail_cards=detail_cards,
+            budget_chars=budget_left - _SUPPLEMENT_CARD_OVERHEAD - 1)
+            if len(text) + _SUPPLEMENT_CARD_OVERHEAD + 1 <= budget_left
+            and not excerpt_already_visible(text, current_material or "")]
+        candidate_keys = (*candidate_keys, *detail_keys)
     candidates = [
         key for key in dict.fromkeys(str(raw) for raw in candidate_keys)
-        if key in delta.frozen_cards]
+        if key in delta.frozen_cards
+        and (detail_cards is None or key not in detail_cards
+             or key in detail_keys or key in actual_bound)]
     if not candidates or budget_left <= 0:
         return ()
     start = (candidates.index(delta.supplement_last_key) + 1
              if delta.supplement_last_key in candidates else 0)
-    ordered = (candidates[start:] + candidates[:start])[:max_cards]
+    rotated = candidates[start:] + candidates[:start]
+    bound_first = [key for key in rotated if key in actual_bound] if detail_cards is not None else []
+    ordered = list(dict.fromkeys((*bound_first, *detail_keys, *rotated)))[:max_cards]
     delta.supplement_last_key = ordered[-1]
     lines: List[str] = []
     used = 0
-    current_material = "\n".join([delta.snapshot_evidence, *delta.blocks]) if visible_fallback else None
     for key, text in render_pool_cards(
             collected=state.collected, elements=state.elements,
             chunks=state.chunks, keys=ordered,
             question=state.question, action_query=observer.last_query,
             excerpt_chars=excerpt_chars, table_excerpt_chars=table_excerpt_chars,
+            detail_cards=detail_cards,
             budget_chars=budget_left - _SUPPLEMENT_CARD_OVERHEAD - 1):
+        if detail_cards is not None and excerpt_already_visible(text, current_material or ""):
+            if use_visible:
+                delta.supplement_checked_keys.add(key)
+            continue
         if used + len(text) + _SUPPLEMENT_CARD_OVERHEAD + 1 > budget_left:
             continue
         line = delta.supplement_for(key, text, current_material=current_material)
@@ -4982,6 +5030,10 @@ class ReasoningRetriever:
             settings, "reasoning_reflect_state_chars", 6000))
         optimization = self.reflect_optimization()
         table_chars = _table_excerpt_chars(settings, optimization)
+        detail_cards = _prose_detail_cards(
+            settings, optimization, state, observer, excerpt_chars, table_chars, budget)
+        if detail_cards is not None:
+            state_chars = max(0, state_chars - visible_progress_reserve(budget))
         # 目录由 `_prime_static_catalog` 在本 run 第一次能力投影时写下,而 reflect
         # 循环里投影恒排在这个方法之前。真出现"策略开着却没有目录"的形态(总闸在
         # 一次 run 中途被翻开,只可能发生在测试或热更配置里),两条前缀臂都退回
@@ -4998,7 +5050,7 @@ class ReasoningRetriever:
                 state_chars=state_chars, recent=recent,
                 ratio=_delta_target_ratio(settings),
                 max_cards=_delta_max_cards(settings, effort),
-                table_excerpt_chars=table_chars)
+                table_excerpt_chars=table_chars, detail_cards=detail_cards)
             if context is not None:
                 return context
             # `None` = 这一轮刚刚不可逆地回退(投影上那格已经置位)。落到下面 P
@@ -5015,6 +5067,11 @@ class ReasoningRetriever:
         # 退不可逆 ⇒ 保留块永不清,这不是一轮的尖峰。`delta is None`
         # (`off` / `prefix_snapshot`)⇒ 四格全中性,两条臂逐字节回到接入前。
         carried = _carried_delta(delta)
+        fallback_cards, fallback_pending, carried_upgrades = prepare_fallback_detail_cards(
+            delta, _delta_frozen_cards(
+                delta, table_chars,
+                excerpt_terms(state.question, "", excerpt_chars) if table_chars else ()),
+            detail_cards, carried.keys, "\n\n".join(carried.blocks))
         selection = build_evidence_block(
             collected=state.collected, elements=state.elements,
             chunks=state.chunks, chains=state.chains,
@@ -5032,7 +5089,7 @@ class ReasoningRetriever:
             # 排除写在这一个参数上而不是逐档滤:同一条判据的第二份实现改一处时另
             # 一处会静默变成陈的,而"第三档的候选序调用方看不见"让那份陈的实现从
             # 一开始就只对两档有效。空集(`off` / `prefix_snapshot`)⇒ 逐字节不变。
-            exclude_keys=carried.keys,
+            exclude_keys=carried.keys - carried_upgrades,
             # 摘录检索词取**原始查询文本**,不是规范化身份串(见
             # `v2_request_query_text`)。
             question=state.question, action_query=observer.last_query,
@@ -5043,11 +5100,15 @@ class ReasoningRetriever:
             # 种**都不带版本标记**的写法(设计 §4.4「不就地改写旧卡」/§5 风险 4),
             # 而 S 仍然带着"后来那张标着版本"这句规则。`off` 与 `prefix_snapshot`
             # 走到这里时 `delta is None` ⇒ 空映射,两条臂逐字节回到接入前。
-            frozen_cards=_delta_frozen_cards(
-                delta, table_chars,
-                excerpt_terms(state.question, "", excerpt_chars) if table_chars else ()),
+            frozen_cards=fallback_cards,
             table_excerpt_chars=table_chars,
+            detail_cards=detail_cards,
+            frozen_fallback_cards=(
+                {key: text for key, text in delta.frozen_cards.items()
+                 if key not in carried.keys}
+                if detail_cards is not None and delta is not None and delta.fallback else {}),
         )
+        accept_fallback_detail_cards(delta, selection, fallback_pending)
         # **只登记真的渲染出来的键。**被预算挤出窗口的候选一个都不登记——模型没
         # 见过它,就不该因为"它在池子里"取得大纲绑定资格(设计稿 §6.2)。
         state.ever_shown_outline_keys.update(selection.shown_keys)
@@ -5083,6 +5144,7 @@ class ReasoningRetriever:
                 # 级开关同源(`_v2_build_aspect_ledger`),所以"S 里 lean 段在、
                 # 账本仍不追问"这两件事在回退之后仍然一致。
                 static_lean=(optimization == _LEAN_LAYOUT),
+                prose_detail_enabled=(detail_cards is not None),
                 measurement=measurement)
         # 必答方面清单 + 已完整枚举的集合键,都接在服务器状态块的**尾部**,与它
         # 一起受"按现有输入/协议边界保留、不整体裁尾"的处理(§4):方面清单是用户
@@ -5156,6 +5218,7 @@ class ReasoningRetriever:
         self, state: "_ReasoningRunState", summary: str, catalog, *,
         evidence: str, observations: str, delta: str = "",
         static_delta: bool = False, static_lean: bool = False,
+        prose_detail_enabled: bool = False,
         measurement: "Optional[ReflectMeasurement]" = None,
     ) -> "ReflectContext":
         """两条前缀臂**唯一**的 `ReflectContext` 成型点(T-PS8;T-PD5 共用)。
@@ -5213,6 +5276,10 @@ class ReasoningRetriever:
                     state.enum_chains,
                     assessment=state.aspects.assessment_enabled),
                 f"{TURN_CONTEXT_TITLE}\n{summary}" if summary else "",
+                (render_visible_progress(
+                    state.reflect_delta.visible_excerpt_fingerprints,
+                    "\n\n".join((evidence, delta)))
+                 if prose_detail_enabled and state.reflect_delta is not None else ""),
             ) if block),
             delta=delta,
             static_prompt=reflect_v2_static_prompt(
@@ -5227,6 +5294,7 @@ class ReasoningRetriever:
         catalog, optimization: str, budget: int, excerpt_chars: int,
         state_chars: int, recent: int, ratio: float, max_cards: int,
         table_excerpt_chars: int = 0,
+        detail_cards=None,
     ) -> "Optional[ReflectContext]":
         """`prefix_delta` 的一轮装配(计划 §3 T-PD5;顺序 = 设计 §5.2 七步)。
 
@@ -5301,7 +5369,7 @@ class ReasoningRetriever:
                 state, delta, observer, bound_keys=bound_keys,
                 fresh_keys=fresh_keys, budget=budget, state_chars=state_chars,
                 excerpt_chars=excerpt_chars, recent=recent, ratio=ratio,
-                table_excerpt_chars=table_excerpt_chars)
+                table_excerpt_chars=table_excerpt_chars, detail_cards=detail_cards)
         # ② 待追加事件(全是纯读:这里一格都还没改投影)。观察行只渲染一次,下面
         #    的记账与 `build_delta_block` 复用同一份列表(同一个输入渲染三遍是这条
         #    臂本来就要省的那类开销)。方面 note 也在这里定下来:它同样是**这一块
@@ -5314,7 +5382,8 @@ class ReasoningRetriever:
         cards = _delta_cards(
             state, delta, observer, bound_keys=bound_keys,
             fresh_keys=fresh_keys, budget=budget, max_cards=max_cards,
-            excerpt_chars=excerpt_chars, table_excerpt_chars=table_excerpt_chars)
+            excerpt_chars=excerpt_chars, table_excerpt_chars=table_excerpt_chars,
+            detail_cards=detail_cards)
         evidence_add, history_add = _delta_pending_charges(
             cards.text, pending_lines, notes)
         # ③ 只有"待追加的 D 装不下"才重建(设计 §5.2:短循环不按固定轮数压缩)。
@@ -5351,7 +5420,7 @@ class ReasoningRetriever:
                 state, delta, observer, bound_keys=bound_keys,
                 fresh_keys=fresh_keys, budget=budget, state_chars=state_chars,
                 excerpt_chars=excerpt_chars, recent=recent, ratio=ratio,
-                table_excerpt_chars=table_excerpt_chars)
+                table_excerpt_chars=table_excerpt_chars, detail_cards=detail_cards)
             delta.generation += 1
             delta.rebuilds += 1
             # 重建把游标推到了账本末尾,所以这两个量必须**重算**:待追加的观察行
@@ -5365,7 +5434,8 @@ class ReasoningRetriever:
             cards = _delta_cards(
                 state, delta, observer, bound_keys=bound_keys,
                 fresh_keys=fresh_keys, budget=budget, max_cards=max_cards,
-                excerpt_chars=excerpt_chars, table_excerpt_chars=table_excerpt_chars)
+                excerpt_chars=excerpt_chars, table_excerpt_chars=table_excerpt_chars,
+                detail_cards=detail_cards)
             evidence_add, history_add = _delta_pending_charges(
                 cards.text, pending_lines, notes)
             # ⑤ 本轮**有候选新卡、重建之后一张都装不下** ⇒ 压缩已经无效,本 run
@@ -5393,6 +5463,7 @@ class ReasoningRetriever:
             state, delta, observer, candidate_keys=bound_keys,
             max_cards=max_cards, excerpt_chars=excerpt_chars,
             table_excerpt_chars=table_excerpt_chars,
+            detail_cards=detail_cards,
             visible_fallback=(optimization == _EVIDENCE_LAYOUT),
             budget_left=(budget - delta.evidence_chars - _DELTA_HEAD_CHARS
                          - len(cards.text)))
@@ -5434,6 +5505,7 @@ class ReasoningRetriever:
             # L = D + 自评合同(计划 §0)。判据用调用方传下来的 `optimization`,
             # 不第二次读策略位——理由见 `_prefix_context` 的 `static_lean`。
             static_lean=(optimization == _LEAN_LAYOUT),
+            prose_detail_enabled=(detail_cards is not None),
             measurement=measurement)
 
     def _absorb_assessment(

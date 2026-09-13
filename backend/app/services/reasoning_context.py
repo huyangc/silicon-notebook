@@ -33,6 +33,9 @@ from typing import (
 from app.core.query_syntax import quoted_phrases, strip_accepted_quote_markers
 from app.repositories.lexical_query import lexical_recall_terms
 from app.services.reasoning_table_excerpt import select_table_excerpt
+from app.services.reasoning_prose_excerpt import (
+    excerpt_already_visible, select_prose_excerpt,
+)
 # 刻意**不**从 `reasoning_observation` 引任何东西:增量块里的观察行原来各带一份
 # `HISTORY_NOTE`,改成由 `DELTA_BLOCK_TITLE` 里那句"观察行的含义同上方观察账"
 # 一次性接过去(见 `build_delta_block`)——同一句免责在一条消息里重复二十遍是纯
@@ -539,7 +542,9 @@ _NO_FROZEN_CARDS: Mapping[str, str] = MappingProxyType({})
 _OMISSION_NOTE = "（另有 {omitted} 条候选证据本轮未展开）"
 
 
-def _bounded_snapshot_selection(lines, shown, rendered, omitted, budget):
+def _bounded_snapshot_selection(
+    lines, shown, rendered, omitted, budget, frozen_fallback_cards=_NO_FROZEN_CARDS,
+):
     """The evidence arm charges disclosure as well as whole card bodies."""
     while lines:
         head = EVIDENCE_BLOCK_TITLE
@@ -548,6 +553,20 @@ def _bounded_snapshot_selection(lines, shown, rendered, omitted, budget):
         text = "\n".join([head, *lines])
         if len(text) <= budget:
             return EvidenceSelection(text, tuple(shown), omitted, tuple(rendered))
+        if rendered and rendered[-1][1] == lines[-1]:
+            reduced = False
+            for position in range(len(rendered) - 1, -1, -1):
+                key, card = rendered[position]
+                fallback = frozen_fallback_cards.get(key, "")
+                if fallback and len(fallback) < len(card):
+                    # Before removing any selected key, use an optional detail's
+                    # original view, even when the detail precedes a short card.
+                    lines[position] = fallback
+                    rendered[position] = (key, fallback)
+                    reduced = True
+                    break
+            if reduced:
+                continue
         removed = lines.pop()
         omitted += 1
         if rendered and rendered[-1][1] == removed:
@@ -590,6 +609,49 @@ def select_frozen_card_views(frozen_cards, latest_cards, terms):
                 term in original.casefold() for term in terms):
             chosen[key] = latest
     return chosen
+
+
+def prepare_fallback_detail_cards(
+    delta, frozen_cards, detail_cards, carried_keys, carried_material,
+):
+    """Preview fallback K upgrades without mutating any emitted cache bytes.
+
+    D remains immutable. Only a different, versioned view may bypass D's key
+    exclusion; normal K admission still owns authority, binding/fresh priority
+    and the remaining global budget. A rejected preview acquires no version.
+    """
+    if delta is None or not delta.fallback or detail_cards is None:
+        return frozen_cards, {}, set()
+    views, pending, carried_upgrades = dict(frozen_cards), {}, set()
+    for key, text in detail_cards.items():
+        if key not in frozen_cards or excerpt_already_visible(text, carried_material):
+            continue
+        latest = delta.supplement_latest_cards.get(key, "")
+        if excerpt_already_visible(text, latest):
+            views[key] = latest
+        elif not excerpt_already_visible(text, views[key]):
+            views[key] = _with_version_marker(text, delta.card_versions.get(key, 1) + 1)
+            pending[key] = text
+        if key in carried_keys:
+            carried_upgrades.add(key)
+    return views, pending, carried_upgrades
+
+
+def accept_fallback_detail_cards(delta, selection, pending_cards):
+    """Commit only the preview versions actually admitted to final fallback K."""
+    for key, emitted in selection.cards:
+        if key not in pending_cards:
+            continue
+        preview = _with_version_marker(
+            pending_cards[key], delta.card_versions.get(key, 1) + 1)
+        if emitted != preview:
+            # K may have kept the original short card when the detail did not
+            # fit this tier's remaining allowance. That is not a new version.
+            continue
+        registered = delta.supplement_for(key, pending_cards[key], current_material="")
+        if registered != emitted:
+            raise ValueError("fallback detail preview changed before admission")
+        delta.supplement_latest_cards[key] = emitted
 
 
 def _interleave_card_groups(first, second):
@@ -636,6 +698,8 @@ def build_evidence_block(
     frozen_cards: Mapping[str, str] = _NO_FROZEN_CARDS,
     exclude_keys: Collection[str] = (),
     table_excerpt_chars: int = 0,
+    detail_cards: Mapping[str, str] | None = None,
+    frozen_fallback_cards: Mapping[str, str] = _NO_FROZEN_CARDS,
 ) -> EvidenceSelection:
     """按 §6.2 的三档确定性顺序选卡,受 `budget_chars` 约束。
 
@@ -676,6 +740,7 @@ def build_evidence_block(
     """
     index = _pool_index(collected, elements, chunks)
     terms = excerpt_terms(question, action_query, excerpt_chars)
+    actual_bound_keys = {str(key) for key in bound_keys}
     if table_excerpt_chars and frozen_cards:
         # Rebuilds retain the strongest already-read evidence for the fixed
         # question. The existing first-tier cap still reserves space for fresh
@@ -698,6 +763,9 @@ def build_evidence_block(
         if any(tier == 1 for _, tier in ordered) else 0
     )
     caps = (budget_chars - reserve, budget_chars, budget_chars)
+    bound_growth_left = max(0, caps[0] - len(EVIDENCE_BLOCK_TITLE) - sum(
+        len(frozen_fallback_cards[key]) + 1 for key, _ in ordered
+        if key in actual_bound_keys and key in frozen_fallback_cards))
     lines: List[str] = []
     shown: List[str] = []
     used = len(EVIDENCE_BLOCK_TITLE)
@@ -707,7 +775,8 @@ def build_evidence_block(
     # 于是几千条候选每一轮都要各做一次全文 `select_excerpt`,只为把它丢掉。
     # 用观察到的最短卡当界会漏掉"后面某张特别短的卡本来装得下",而那张卡照样
     # 计进 `omitted` 并被明确披露——与预算切掉它是同一种结果,不是静默丢失。
-    seen_min = 0
+    seen_min = min((len(frozen_fallback_cards[key]) + 1
+                    for key, _ in ordered if key in frozen_fallback_cards), default=0)
     rendered: List[Tuple[str, str]] = []
     for position, (key, tier) in enumerate(ordered):
         floor = seen_min or _MIN_CARD_CHARS
@@ -723,12 +792,26 @@ def build_evidence_block(
         if text is None:
             text = _render_selected_card(
                 index[key], terms, excerpt_chars, table_excerpt_chars,
-                caps[tier] - used - 1)
+                caps[tier] - used - 1, (detail_cards or {}).get(key, ""))
+        if len(text) + used + 1 > caps[tier]:
+            # A fallback detail is optional. Preserve the already-read short
+            # card when it fits; carried D keys deliberately have no backup.
+            text = frozen_fallback_cards.get(key, text)
+        growth = 0
+        if frozen_fallback_cards and key in actual_bound_keys and key in frozen_cards:
+            original = frozen_fallback_cards.get(key, "")
+            growth = max(0, len(text) + 1 - (len(original) + 1 if original else 0))
+            if growth > bound_growth_left:
+                if not original:
+                    omitted += 1  # the existing short view remains in D
+                    continue
+                text, growth = original, 0
         seen_min = min(seen_min, len(text) + 1) if seen_min else len(text) + 1
         if used + len(text) + 1 > caps[tier]:
             omitted += 1
             continue
         used += len(text) + 1
+        bound_growth_left -= growth
         lines.append(text)
         # 登记发生在**这一行真的进了 lines 之后**,不在构造卡的时候。
         shown.append(key)
@@ -747,7 +830,7 @@ def build_evidence_block(
         return EvidenceSelection("", (), omitted)
     if table_excerpt_chars:
         return _bounded_snapshot_selection(
-            lines, shown, rendered, omitted, budget_chars)
+            lines, shown, rendered, omitted, budget_chars, frozen_fallback_cards)
     head = EVIDENCE_BLOCK_TITLE
     if omitted:
         head = head + _OMISSION_NOTE.format(omitted=omitted)
@@ -793,6 +876,7 @@ def build_delta_evidence_block(
     max_cards: int,
     frozen_cards: Mapping[str, str] = _NO_FROZEN_CARDS,
     table_excerpt_chars: int = 0,
+    detail_cards: Mapping[str, str] | None = None,
 ) -> EvidenceSelection:
     """一块增量里**新展开**的那几张卡(计划 §3 T-PD4 第 2 条)。
 
@@ -904,7 +988,7 @@ def build_delta_evidence_block(
         if text is None:
             text = _render_selected_card(
                 index[key], terms, excerpt_chars, table_excerpt_chars,
-                budget_chars - used - 1)
+                budget_chars - used - 1, (detail_cards or {}).get(key, ""))
         seen_min = min(seen_min, len(text) + 1) if seen_min else len(text) + 1
         if used + len(text) + 1 > budget_chars:
             omitted += 1
@@ -998,7 +1082,7 @@ def _card_for(item, terms: Sequence[str], excerpt_chars: int) -> EvidenceCard:
 
 def _render_selected_card(
     item, terms: Sequence[str], excerpt_chars: int, table_excerpt_chars: int,
-    budget_chars: int | None,
+    budget_chars: int | None, detail_text: str = "",
 ) -> str:
     card = _card_for(item, terms, excerpt_chars)
     if table_excerpt_chars and not hasattr(item, "payload"):
@@ -1008,7 +1092,63 @@ def _render_selected_card(
             table_card = render_card(replace(card, excerpt=view, partial=True))
             if budget_chars is None or len(table_card) <= budget_chars:
                 return table_card
+    if detail_text and (budget_chars is None or len(detail_text) <= budget_chars):
+        return detail_text
     return render_card(card)
+
+
+def select_prose_detail_cards(
+    *, collected: Mapping, elements: Sequence, chunks: Sequence,
+    question: str, action_query: str, excerpt_chars: int,
+    detail_chars: int, max_cards: int, table_excerpt_chars: int, budget_chars: int,
+) -> Dict[str, str]:
+    """Choose a few source-backed detail views, without changing card admission.
+
+    Rank current pool text by query term coverage, retrieval score and stable
+    order. Reserve one turn per source before a second paragraph from the same
+    source. KG summaries and recognizable tables keep their existing renderer.
+    All returned cards still pass the caller's binding/fresh and budget gates.
+    """
+    # Share the existing reserve ratio instead of allowing a large detail to
+    # consume a small evidence pool. Ordinary cards still use the rest.
+    detail_chars = min(detail_chars, budget_chars // _FRESH_RESERVE_RATIO // max_cards)
+    if detail_chars <= excerpt_chars:
+        return {}
+    index = _pool_index(collected, elements, chunks)
+    terms = excerpt_terms(question, action_query, excerpt_chars)
+    ranked = []
+    for position, (key, item) in enumerate(index.items()):
+        if hasattr(item, "payload"):
+            continue
+        body = _collapse(getattr(item, "text", ""))
+        if len(body) <= excerpt_chars:
+            continue
+        text = " ".join((body, str(getattr(item, "section_path", "")),
+                         str(getattr(item, "location_label", "")))).casefold()
+        matches = sum(term.casefold() in text for term in terms)
+        if not matches:
+            continue
+        ranked.append((-matches, -_rank_score(item), position, key))
+    ordered = [row[-1] for row in sorted(ranked)]
+    diverse, remainder, sources = [], [], set()
+    for key in ordered:
+        source = str(getattr(index[key], "source_id", ""))
+        (remainder if source in sources else diverse).append(key)
+        sources.add(source)
+    selected: Dict[str, str] = {}
+    for key in (*diverse, *remainder):
+        item = index[key]
+        if select_table_excerpt(getattr(item, "text", ""), terms,
+                                table_excerpt_chars, clean=_collapse):
+            continue
+        card = _card_for(item, terms, excerpt_chars)
+        excerpt, partial = select_prose_excerpt(
+            _collapse(getattr(item, "text", "")), terms, detail_chars,
+            select_window=select_excerpt)
+        selected[key] = render_card(replace(card, excerpt=excerpt, partial=partial))
+        if len(selected) >= max_cards:
+            break
+    return selected
 
 
 def render_pool_cards(
@@ -1022,6 +1162,7 @@ def render_pool_cards(
     excerpt_chars: int,
     table_excerpt_chars: int = 0,
     budget_chars: int | None = None,
+    detail_cards: Mapping[str, str] | None = None,
 ) -> Tuple[Tuple[str, str], ...]:
     """按**给定的几个键**现渲染卡片:`((键, 那一行的字节), …)`。
 
@@ -1044,7 +1185,8 @@ def render_pool_cards(
     terms = excerpt_terms(question, action_query, excerpt_chars)
     return tuple(
         (key, _render_selected_card(
-            index[key], terms, excerpt_chars, table_excerpt_chars, budget_chars))
+            index[key], terms, excerpt_chars, table_excerpt_chars, budget_chars,
+            (detail_cards or {}).get(key, "")))
         for key in (str(raw) for raw in keys) if key in index)
 
 
@@ -1334,6 +1476,8 @@ class ReflectDeltaState:
     supplement_query: str = field(default="", repr=False)
     supplement_checked_keys: Set[str] = field(default_factory=set, repr=False)
     supplement_latest_cards: Dict[str, str] = field(default_factory=dict, repr=False)
+    visible_excerpt_fingerprints: Set[Tuple[str, str]] = field(
+        default_factory=set, repr=False)
 
     def note_shown(self, key: str, text: str) -> None:
         """一张**真的渲染出去**的卡:第一次见到就冻结它的字节。
