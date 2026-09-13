@@ -556,6 +556,71 @@ def _bounded_snapshot_selection(lines, shown, rendered, omitted, budget):
     return EvidenceSelection("", (), omitted)
 
 
+def _rank_frozen_keys(index, frozen_cards, terms, *, matches_only=False):
+    """Rank already displayed, still admitted cards without reading more source.
+
+    Term coverage reads bounded frozen card text, never a model's judgement or
+    an unbounded source body. Retrieval score breaks ties, followed by stable
+    pool order. A removed pool key is ineligible even if its bytes are cached.
+    """
+    terms = tuple(dict.fromkeys(term.casefold() for term in terms if term))
+    ranked = []
+    for position, (key, item) in enumerate(index.items()):
+        if key not in frozen_cards:
+            continue
+        text = frozen_cards[key].casefold()
+        matches = sum(term in text for term in terms)
+        if not matches_only or matches:
+            ranked.append((-matches, -_rank_score(item), position, key))
+    return tuple(row[-1] for row in sorted(ranked))
+
+
+def select_frozen_card_views(frozen_cards, latest_cards, terms):
+    """Reuse the previously emitted view covering the current reading need.
+
+    Prefer the latest on equal coverage. A later excerpt about another query
+    must not replace an earlier comparison table during compaction/recovery.
+    The returned bytes, including any version marker, are never regenerated.
+    """
+    terms = tuple(dict.fromkeys(term.casefold() for term in terms if term))
+    chosen = dict(frozen_cards)
+    for key, latest in latest_cards.items():
+        original = frozen_cards.get(key, "")
+        if sum(term in latest.casefold() for term in terms) >= sum(
+                term in original.casefold() for term in terms):
+            chosen[key] = latest
+    return chosen
+
+
+def _interleave_card_groups(first, second):
+    """Give both old relevant evidence and newly retrieved evidence a turn."""
+    ordered = []
+    for position in range(max(len(first), len(second))):
+        for group in (first, second):
+            if position < len(group):
+                ordered.append(group[position])
+    return ordered
+
+
+def _recovery_admission_order(index, frozen_cards, blocked, bound, fresh, terms):
+    eligible_bound = [str(key) for key in bound
+                      if str(key) in index and str(key) not in blocked]
+    eligible_fresh = list(dict.fromkeys(
+        str(key) for key in fresh
+        if str(key) in index and str(key) not in blocked))
+    recovery = [key for key in _rank_frozen_keys(
+        index, frozen_cards, terms, matches_only=True)
+        if key not in blocked and key not in eligible_bound
+        and key not in eligible_fresh]
+    # Preserve the fresh-first rule even with one slot, then respect actual
+    # bindings before heuristic recovery. Remaining slots alternate classes.
+    ordered = [eligible_fresh.pop(0)] if eligible_fresh else []
+    ordered.extend(eligible_bound)
+    ordered.extend(_interleave_card_groups(
+        recovery, [key for key in eligible_fresh if key not in eligible_bound]))
+    return ordered
+
+
 def build_evidence_block(
     *,
     collected: Mapping,
@@ -578,6 +643,9 @@ def build_evidence_block(
     T4 的必答方面接进来时只需要把它算出的方面代表键**并进** `bound_keys`,
     这个函数一个字都不用改;(2) 本轮新增或升级(`fresh_keys` 来自观察账里那一
     轮的 `result_ids`,即真实执行结果);(3) 历史代表 + 来源多样性补位。
+
+    仅证据实验档在第一档的真实绑定之后保留曾展示卡，按固定原问题词项覆盖与
+    既有检索分排序，仍遵守同一份 fresh 留底；不把保留决定写入绑定资格或自评。
 
     优先级**不等于**每档无限独占预算:三档共用同一个 `budget_chars`,装不下的
     一律计进省略数并明确披露。同一条证据只渲染一次(`seen` 跨三档生效)——同一
@@ -608,6 +676,13 @@ def build_evidence_block(
     """
     index = _pool_index(collected, elements, chunks)
     terms = excerpt_terms(question, action_query, excerpt_chars)
+    if table_excerpt_chars and frozen_cards:
+        # Rebuilds retain the strongest already-read evidence for the fixed
+        # question. The existing first-tier cap still reserves space for fresh
+        # material; a newly retrieved batch cannot evict every comparison card.
+        retained = _rank_frozen_keys(
+            index, frozen_cards, excerpt_terms(question, "", excerpt_chars))
+        bound_keys = (*bound_keys, *retained)
     # (键, 档序)。一个键只属于**一档**:被留底挡在第一档外的键不会在第三档
     # 借尸还魂,省略数因此也只数一次。
     ordered: List[Tuple[str, int]] = []
@@ -755,6 +830,9 @@ def build_delta_evidence_block(
     省略数**只报本块**——它说的是"这一块没展开几条",不是"整个池子还剩几条";后者
     是 K 那一块的口径,两个数混在一起没有任何一个读法是真的。
 
+    仅证据实验档还允许匹配当前查询、曾展示但当前不可见的卡从池内恢复，与
+    fresh 交错入选。它们不成为 trace 的新增命中，不增加卡数或字符额度。
+
     省略披露本身也算进 `budget_chars`(与 `render_observations` 同款的收敛写法):
     先装行、最后拼披露的话,那句话的长度不在任何一次预算判断里,整块因此可以稳定
     超出预算十几个字符——而 delta 下的证据预算是 **K + 所有 D 的总和**,每块超一点
@@ -787,11 +865,18 @@ def build_delta_evidence_block(
     index = _pool_index(collected, elements, chunks)
     terms = excerpt_terms(question, action_query, excerpt_chars)
     blocked = {str(key) for key in already_shown}
+    if table_excerpt_chars and action_query.strip():
+        # A repeat hit has no fresh result id. Relevant previously displayed
+        # cards may therefore re-enter from the current pool without another
+        # retrieval; interleaving avoids starving either admission class.
+        fresh_keys = _recovery_admission_order(
+            index, frozen_cards, blocked, bound_keys, fresh_keys,
+            excerpt_terms("", action_query, excerpt_chars))
     ordered: List[str] = []
     seen: Set[str] = set()
-    # 两档,没有第三档(理由见 docstring 第 1 条):池里既不新增、也没绑定的材料
-    # 不进 D。`_diverse_order` 仍然是 K 那一块的第三档,这里刻意不调它——顺带也省
-    # 掉每轮一次全池排序。
+    # Existing modes retain their two admission tiers. The evidence arm merges
+    # only relevant previously shown recovery cards above, never arbitrary
+    # pool-diversity filler.
     for group in (fresh_keys, bound_keys):
         for key in group:
             key = str(key)

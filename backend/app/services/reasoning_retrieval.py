@@ -85,7 +85,7 @@ from app.services.reasoning_context import (
     DELTA_BLOCK_TITLE, SUPPLEMENT_CARD_NOTE, TURN_CONTEXT_TITLE,
     ReflectContext, ReflectDeltaState, ReflectMeasurement, build_delta_block,
     build_delta_evidence_block, build_evidence_block, compose_snapshot,
-    render_pool_cards,
+    excerpt_terms, render_pool_cards, select_frozen_card_views,
 )
 from app.services.reasoning_observation import (
     ActionObservationLedger, fold_observation_counts, render_observation_row,
@@ -698,12 +698,13 @@ def _table_excerpt_chars(settings, optimization: str) -> int:
     return int(getattr(settings, "reasoning_reflect_table_excerpt_chars", 1200))
 
 
-def _delta_frozen_cards(delta, table_excerpt_chars: int):
+def _delta_frozen_cards(delta, table_excerpt_chars: int, terms=()):
     if delta is None:
         return {}
     if not table_excerpt_chars or not delta.supplement_latest_cards:
         return delta.frozen_cards
-    return {**delta.frozen_cards, **delta.supplement_latest_cards}
+    return select_frozen_card_views(
+        delta.frozen_cards, delta.supplement_latest_cards, terms)
 
 
 def _build_delta_snapshot(
@@ -751,7 +752,9 @@ def _build_delta_snapshot(
         bound_keys=bound_keys, fresh_keys=fresh_keys,
         question=state.question, action_query=observer.last_query,
         budget_chars=int(budget * ratio), excerpt_chars=excerpt_chars,
-        frozen_cards=_delta_frozen_cards(delta, table_excerpt_chars),
+        frozen_cards=_delta_frozen_cards(
+            delta, table_excerpt_chars,
+            excerpt_terms(state.question, "", excerpt_chars) if table_excerpt_chars else ()),
         table_excerpt_chars=table_excerpt_chars)
     window = rows[-recent:] if recent > 0 else ()
     earlier = rows[:len(rows) - len(window)]
@@ -805,7 +808,9 @@ def _delta_cards(
         question=state.question, action_query=observer.last_query,
         budget_chars=budget - delta.evidence_chars,
         excerpt_chars=excerpt_chars, max_cards=max_cards,
-        frozen_cards=_delta_frozen_cards(delta, table_excerpt_chars),
+        frozen_cards=_delta_frozen_cards(
+            delta, table_excerpt_chars,
+            excerpt_terms("", observer.last_query, excerpt_chars) if table_excerpt_chars else ()),
         table_excerpt_chars=table_excerpt_chars)
 
 
@@ -5038,7 +5043,9 @@ class ReasoningRetriever:
             # 种**都不带版本标记**的写法(设计 §4.4「不就地改写旧卡」/§5 风险 4),
             # 而 S 仍然带着"后来那张标着版本"这句规则。`off` 与 `prefix_snapshot`
             # 走到这里时 `delta is None` ⇒ 空映射,两条臂逐字节回到接入前。
-            frozen_cards=_delta_frozen_cards(delta, table_chars),
+            frozen_cards=_delta_frozen_cards(
+                delta, table_chars,
+                excerpt_terms(state.question, "", excerpt_chars) if table_chars else ()),
             table_excerpt_chars=table_chars,
         )
         # **只登记真的渲染出来的键。**被预算挤出窗口的候选一个都不登记——模型没
