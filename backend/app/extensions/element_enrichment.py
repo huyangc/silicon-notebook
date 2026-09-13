@@ -20,7 +20,12 @@ core-visible, and it owns four things no contributor can influence:
    characters, proposal count and persisted bytes are all decided here, after
    the plugin returns.  A single violation discards that contribution's whole
    batch: a partially validated contribution is never persisted, and every
-   other contribution is unaffected.
+   other contribution is unaffected.  Admission splits across the deadline on
+   purpose: everything that requires *running plugin code to read* — a
+   ``Mapping`` a contributor implemented itself, above all — is copied into
+   core-owned values on the worker, and the calling thread then decides on
+   that copy alone.  Reading a plugin's mapping after the deadline had been
+   honoured would be the same as having no deadline.
 
 Everything else fails open: a raising, hanging, or malformed contributor
 enriches nothing and the source it was consulted for is ingested unchanged.
@@ -110,6 +115,43 @@ class _Registration:
     implementation: object
 
 
+class _Rejected(Exception):
+    """Core-owned signal that a contributor's answer cannot be admitted.
+
+    Carries the stable reason code for the receipt, so materialization can
+    distinguish "not a candidate" from "metadata is not JSON" without the
+    admission step having to re-derive it from plugin objects it must no
+    longer touch.
+    """
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+@dataclass(frozen=True, slots=True)
+class _MaterializedCandidate:
+    """One candidate, copied into values core owns outright.
+
+    ``element`` is kept as the bare object the plugin returned, and *only* to
+    be compared by identity later: nothing is ever called on it.  ``metadata``
+    is a plain ``dict`` built by core's own walk, not the plugin's mapping.
+    """
+
+    element: object
+    description: str
+    metadata: dict[str, object]
+
+
+@dataclass(frozen=True, slots=True)
+class _MaterializedResult:
+    """A contributor's whole answer, with no plugin object left inside it."""
+
+    status: ExtensionResultStatus
+    failure_code: str
+    candidates: tuple[_MaterializedCandidate, ...]
+
+
 @dataclass
 class _WorkerCell:
     """Private mailbox for one contributor attempt.
@@ -122,6 +164,7 @@ class _WorkerCell:
     done: bool = False
     failed: bool = False
     reason: str | None = None
+    invalid: str | None = None
     ends_budget: bool = False
     result: object = None
 
@@ -130,16 +173,19 @@ class _WorkerCell:
 class _Attempt:
     """What one contributor attempt produced.
 
-    ``reason`` is ``None`` exactly when the contributor ran to completion; its
-    (still unvalidated) return value is then in ``result``.  ``ends_budget`` is
-    core-owned and never derived from a plugin-supplied reason string, so a
-    plugin cannot cut the remaining contributors' turns short by naming its own
-    unavailability reason ``element_enricher_timeout``.
+    ``reason`` and ``invalid`` are both ``None`` exactly when the contributor
+    ran to completion *and* its answer materialized cleanly; the resulting
+    ``_MaterializedResult`` is then in ``result``.  ``reason`` is the
+    contributor being unavailable, ``invalid`` its answer being unusable.
+    ``ends_budget`` is core-owned and never derived from a plugin-supplied
+    reason string, so a plugin cannot cut the remaining contributors' turns
+    short by naming its own unavailability reason ``element_enricher_timeout``.
     """
 
     reason: str | None = None
     result: object = None
     ends_budget: bool = False
+    invalid: str | None = None
 
 
 class _SdkCancellation:
@@ -373,9 +419,23 @@ class SourceElementEnricherHost:
                 ),
             )
             try:
-                attempt = self._execute(item, call, context, image_count)
+                attempt = self._execute(
+                    item, call, context, image_count, remaining
+                )
             finally:
                 reader.close()
+            # Second deadline check, on this thread, after the worker is done
+            # with: the first one lives inside the join loop and answers "did
+            # the worker finish in time", this one answers "is the budget
+            # still open now that we are about to admit its answer".  Both
+            # spell the same verdict, because a batch whose budget is spent is
+            # abandoned whether the clock moved during the call or just after.
+            if attempt.reason is None and not _deadline_open(
+                _safe_clock(self._clock), call.deadline_monotonic
+            ):
+                attempt = _Attempt(
+                    "element_enricher_timeout", ends_budget=True
+                )
             if attempt.reason is not None:
                 _emit(
                     sink,
@@ -393,19 +453,22 @@ class SourceElementEnricherHost:
                 continue
             result = attempt.result
             admitted: tuple[ElementEnrichmentPatch, ...] | None = None
-            reason = _REASON_SHAPE
-            if _valid_result(result):
+            reason = attempt.invalid if attempt.invalid else _REASON_SHAPE
+            if attempt.invalid is None and type(result) is _MaterializedResult:
+                # Everything from here on reads core-owned values only — the
+                # worker already copied the contributor's answer out of the
+                # plugin's own objects.
                 if result.status is ExtensionResultStatus.UNAVAILABLE:
-                    # An UNAVAILABLE result contributes nothing, items or not:
-                    # that status is the contributor's own statement that it
-                    # could not serve this call, so persisting the payload it
-                    # disclaimed would put material into the notebook the
+                    # An UNAVAILABLE result contributes nothing, candidates or
+                    # not: that status is the contributor's own statement that
+                    # it could not serve this call, so persisting the payload
+                    # it disclaimed would put material into the notebook the
                     # plugin itself says is not an answer.  PARTIAL stays
                     # admitted — it means "some of it", not "none of it".
                     admitted, reason = (), ""
                 else:
                     admitted, reason = self._admitted(
-                        result.items, item, refs, remaining, call
+                        result.candidates, item, refs, remaining, call
                     )
             if admitted is None:
                 _emit(
@@ -424,7 +487,7 @@ class SourceElementEnricherHost:
                 plugin_id=item.plugin_id,
                 contribution_id=item.contribution_id,
                 status=result.status.value,
-                reason_code=_failure_code(result),
+                reason_code=result.failure_code,
                 duration_ms=_elapsed_ms(self._clock, started),
                 count=len(admitted),
             )
@@ -436,8 +499,15 @@ class SourceElementEnricherHost:
         call: ElementEnrichmentCallContext,
         context: ElementEnrichmentContext,
         image_count: int,
+        remaining: int,
     ) -> _Attempt:
-        """Decide availability and run one contributor on one daemon thread.
+        """Decide availability, run one contributor, and copy what it answered.
+
+        All three happen on one daemon thread, under one deadline.  The copy
+        belongs there with the other two: a contributor's ``metadata`` may be
+        any ``Mapping``, and walking one executes plugin code, so materializing
+        on the calling thread would put an unbounded amount of plugin execution
+        *after* the deadline had already been honoured.
 
         The availability decision runs on the worker, inside the deadline, for
         the same reason ``enrich`` does: a plugin at this point supplies its
@@ -479,7 +549,20 @@ class SourceElementEnricherHost:
                 elif availability.status is not AvailabilityStatus.AVAILABLE:
                     cell.reason = availability.reason_code
                 else:
-                    cell.result = item.implementation.enrich(context)
+                    answer = item.implementation.enrich(context)
+                    # Materialize HERE, on the worker, still inside the
+                    # deadline.  A contributor may answer with its own
+                    # ``Mapping``, and reading one runs the plugin's code:
+                    # doing that on the ingestion thread would let a lazy or
+                    # hung mapping walk straight past the hard deadline this
+                    # whole host exists to enforce, blocking the parse and
+                    # holding its per-source lock indefinitely.
+                    try:
+                        cell.result = _materialize(answer, call, remaining)
+                    except _Rejected as rejected:
+                        cell.invalid = rejected.code
+                    except BaseException:  # noqa: BLE001 — unusable, not fatal
+                        cell.invalid = _REASON_SHAPE
             except BaseException:  # noqa: BLE001 — a plugin fault is fail-open
                 cell.failed = True
             finally:
@@ -514,17 +597,26 @@ class SourceElementEnricherHost:
             return _Attempt("element_enricher_failed")
         if cell.reason is not None:
             return _Attempt(cell.reason, ends_budget=cell.ends_budget)
+        if cell.invalid is not None:
+            return _Attempt(invalid=cell.invalid)
         return _Attempt(result=cell.result)
 
     def _admitted(
         self,
-        items: tuple[object, ...],
+        candidates: tuple[_MaterializedCandidate, ...],
         item: _Registration,
         refs: tuple[ElementRef, ...],
         remaining: int,
         call: ElementEnrichmentCallContext,
     ) -> tuple[tuple[ElementEnrichmentPatch, ...] | None, str]:
         """Core-owned admission for one contribution: all of it, or none of it.
+
+        Runs on the calling thread, after the deadline has been honoured, and
+        therefore touches **no plugin object**: every value it reads was copied
+        into core-owned form by ``_materialize`` on the worker.  The one
+        plugin-supplied reference that survives is ``candidate.element``, and
+        it is only ever compared by identity — never called, hashed or
+        iterated.
 
         Returns ``(patches, "")`` or ``(None, reason_code)``.  ``None`` means
         "discard this contribution's whole batch".  Unlike the gap-consult
@@ -534,7 +626,9 @@ class SourceElementEnricherHost:
         plugin actually produced.
         """
 
-        if len(items) > remaining:
+        # Materialization already enforced this, on core-owned data it built
+        # itself; re-asserting costs one comparison and keeps this step total.
+        if len(candidates) > remaining:
             return None, _REASON_BUDGET
         by_identity = {id(ref): index for index, ref in enumerate(refs, start=1)}
         seen: set[int] = set()
@@ -543,37 +637,21 @@ class SourceElementEnricherHost:
         # THIS contribution add to this source", which is also what the plugin
         # was told in its own ``ElementEnrichmentBudget``.
         byte_count = 0
-        for candidate in items:
-            if type(candidate) is not ElementEnrichmentCandidate:
-                return None, _REASON_SHAPE
+        for candidate in candidates:
             ordinal = by_identity.get(id(candidate.element))
             if ordinal is None or refs[ordinal - 1] is not candidate.element:
                 return None, _REASON_REF
             if ordinal in seen:
                 return None, _REASON_DUPLICATE
-            description = _normalized_description(
-                candidate.description, call.max_description_chars
-            )
-            if description is None:
-                return None, _REASON_DESCRIPTION
             try:
-                metadata = thaw_element_enrichment_metadata(
-                    candidate.metadata,
-                    # Every persisted node costs at least one byte, so the byte
-                    # budget is also an upper bound on how many nodes could
-                    # possibly fit — which makes it a bound on that walk.
-                    max_nodes=call.max_metadata_bytes,
-                )
-                if type(metadata) is not dict:
-                    raise TypeError("element enrichment metadata is not a mapping")
                 byte_count += persisted_element_enrichment_size(
                     plugin_id=item.plugin_id,
                     plugin_version=item.plugin_version,
                     contribution_id=item.contribution_id,
-                    metadata=metadata,
-                    description=description,
+                    metadata=candidate.metadata,
+                    description=candidate.description,
                 )
-            except Exception:  # noqa: BLE001 — malformed metadata is a drop
+            except Exception:  # noqa: BLE001 — unencodable metadata is a drop
                 return None, _REASON_METADATA
             if byte_count > call.max_metadata_bytes:
                 return None, _REASON_BUDGET
@@ -584,11 +662,71 @@ class SourceElementEnricherHost:
                     item.plugin_id,
                     item.plugin_version,
                     item.contribution_id,
-                    metadata,
-                    description,
+                    candidate.metadata,
+                    candidate.description,
                 )
             )
         return tuple(patches), ""
+
+
+def _materialize(
+    answer: object,
+    call: ElementEnrichmentCallContext,
+    remaining: int,
+) -> _MaterializedResult:
+    """Copy a contributor's answer into values core owns, on the worker thread.
+
+    This is the boundary the rest of the host relies on.  Everything a
+    contributor can hand back that requires *running plugin code to read* is
+    read exactly here, inside the deadline: the candidate tuple, each
+    candidate's ``description``, and — the one that actually matters —
+    ``metadata``, which the SDK types as ``Mapping`` and which a plugin may
+    therefore implement lazily, slowly, or not at all.  Reading it on the
+    calling thread would mean an arbitrary amount of plugin execution *after*
+    the deadline had been honoured, which is the same as having no deadline.
+
+    Raises ``_Rejected`` with the stable code for the receipt.  The caller
+    treats any other exception as an unusable answer, and a raise from the
+    contributor itself (rather than from this copy) as a plugin failure.
+    """
+
+    if not _valid_result(answer):
+        raise _Rejected(_REASON_SHAPE)
+    status = answer.status
+    failure_code = _failure_code(answer)
+    if status is ExtensionResultStatus.UNAVAILABLE:
+        # Discarded whole, so its payload is never read at all — the cheapest
+        # possible handling of an answer the contributor itself disclaimed.
+        return _MaterializedResult(status, failure_code, ())
+    # Before the per-candidate walk, not after: an over-budget batch is
+    # rejected whole anyway, and checking first denies an unbounded copy.
+    if len(answer.items) > remaining:
+        raise _Rejected(_REASON_BUDGET)
+    candidates: list[_MaterializedCandidate] = []
+    for candidate in answer.items:
+        if type(candidate) is not ElementEnrichmentCandidate:
+            raise _Rejected(_REASON_SHAPE)
+        description = _normalized_description(
+            candidate.description, call.max_description_chars
+        )
+        if description is None:
+            raise _Rejected(_REASON_DESCRIPTION)
+        try:
+            metadata = thaw_element_enrichment_metadata(
+                candidate.metadata,
+                # Every persisted node costs at least one byte, so the byte
+                # budget is also an upper bound on how many nodes could
+                # possibly fit — which makes it a bound on this walk.
+                max_nodes=call.max_metadata_bytes,
+            )
+        except Exception:  # noqa: BLE001 — malformed metadata is a drop
+            raise _Rejected(_REASON_METADATA) from None
+        if type(metadata) is not dict:
+            raise _Rejected(_REASON_METADATA)
+        candidates.append(
+            _MaterializedCandidate(candidate.element, description, metadata)
+        )
+    return _MaterializedResult(status, failure_code, tuple(candidates))
 
 
 def _prepare(

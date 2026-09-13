@@ -8,6 +8,7 @@ so no test in this file waits longer than one 50ms join slice.
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
 import contextvars
 from dataclasses import dataclass
 import json
@@ -740,6 +741,133 @@ def test_a_hung_contributor_times_out_and_ends_the_point():
     # The point ended: the second contributor was never started, so it never
     # saw a context at all.
     assert second.contexts == []
+
+
+class _RecordingMapping(Mapping):
+    """A plugin-authored mapping that records which thread reads it.
+
+    A contributor is free to answer with its own ``Mapping`` implementation,
+    and reading one runs that plugin's code.  Every such read must therefore
+    happen on the deadline-bound worker, never on the ingestion thread.
+    """
+
+    def __init__(self, payload: dict, *, on_read=None) -> None:
+        self._payload = payload
+        self._on_read = on_read
+        self.reader_threads: list[int] = []
+
+    def _observe(self) -> None:
+        self.reader_threads.append(threading.get_ident())
+        if self._on_read is not None:
+            self._on_read()
+
+    def __getitem__(self, key):
+        self._observe()
+        return self._payload[key]
+
+    def __iter__(self):
+        self._observe()
+        return iter(self._payload)
+
+    def __len__(self):
+        return len(self._payload)
+
+    def items(self):
+        self._observe()
+        return self._payload.items()
+
+
+def test_a_plugin_mapping_is_only_ever_read_on_the_worker_thread():
+    # Reading it on the ingestion thread would put unbounded plugin execution
+    # *after* the deadline was honoured — the same as having no deadline.
+    ingestion_thread = threading.get_ident()
+    worker_threads: list[int] = []
+    payload = _RecordingMapping({"netlist": "R1 1 0 1k"})
+
+    def enrich(context):
+        worker_threads.append(threading.get_ident())
+        return _result(_candidate(context, 0, metadata=payload))
+
+    plugin = _Plugin(None)
+    plugin.enrich = enrich
+    host = _host(_bundle("corp.enricher", plugin))
+
+    patches = host.enrich_application(_call())
+
+    assert patches[0].metadata == {"netlist": "R1 1 0 1k"}
+    assert payload.reader_threads, "the mapping was never read at all"
+    assert set(payload.reader_threads) == set(worker_threads)
+    assert ingestion_thread not in payload.reader_threads
+    # And the patch owns its own copy: reading it back cannot re-enter the
+    # plugin's mapping.
+    before = len(payload.reader_threads)
+    assert dict(patches[0].metadata) == {"netlist": "R1 1 0 1k"}
+    assert len(payload.reader_threads) == before
+
+
+def test_a_mapping_that_burns_the_deadline_while_being_read_is_abandoned():
+    clock = _TrippableClock()
+    second = _Plugin(_result())
+    payload = _RecordingMapping({"netlist": "R1 1 0 1k"}, on_read=clock.trip)
+    events: list[dict[str, object]] = []
+
+    first = _Plugin(None)
+    first.enrich = lambda context: _result(
+        _candidate(context, 0, metadata=payload)
+    )
+    host = _host(
+        _bundle("corp.first", first),
+        _bundle("corp.second", second),
+        event_sink=events.append,
+        clock=clock,
+    )
+
+    patches = host.enrich_application(_call(deadline=clock.DEADLINE))
+
+    # The clock moved past the deadline *inside* the mapping read, which is
+    # exactly the window a materialization done on the ingestion thread would
+    # have let through.
+    assert patches == ()
+    assert [event["reason_code"] for event in events] == [
+        "element_enricher_timeout"
+    ]
+    assert second.contexts == []
+
+
+def test_a_mapping_that_hangs_while_being_read_cannot_block_ingestion():
+    clock = _TrippableClock()
+    released = threading.Event()
+    payload = _RecordingMapping(
+        {"netlist": "R1 1 0 1k"},
+        on_read=lambda: (clock.trip(), released.wait(5.0)),
+    )
+    events: list[dict[str, object]] = []
+
+    plugin = _Plugin(None)
+    plugin.enrich = lambda context: _result(
+        _candidate(context, 0, metadata=payload)
+    )
+    host = _host(
+        _bundle("corp.enricher", plugin), event_sink=events.append, clock=clock
+    )
+
+    started = time.perf_counter()
+    try:
+        # Returns on the deadline rather than on the mapping: the ingestion
+        # thread is never the one stuck inside the plugin's ``items()``.
+        patches = host.enrich_application(_call(deadline=clock.DEADLINE))
+    finally:
+        elapsed = time.perf_counter() - started
+        released.set()
+
+    assert patches == ()
+    assert [event["reason_code"] for event in events] == [
+        "element_enricher_timeout"
+    ]
+    # The wall-clock assertion is the one that actually pins the fix: with the
+    # copy done on the ingestion thread this call sits inside the plugin's
+    # mapping for the whole 5s hang before noticing anything.
+    assert elapsed < 2.0, elapsed
 
 
 def test_a_result_that_arrives_after_the_deadline_is_still_a_timeout():
