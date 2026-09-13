@@ -14,7 +14,6 @@ from app.services.reasoning_context import (
 )
 from app.services.reasoning_prose_excerpt import (
     render_visible_progress, select_prose_excerpt, visible_excerpt_identities,
-    visible_progress_reserve,
 )
 from app.services.reasoning_retrieval import (
     ReasoningRetriever, _build_delta_snapshot, _carried_delta, _delta_cards,
@@ -428,7 +427,6 @@ def test_visible_progress_ignores_metadata_versions_recovery_and_unshown_candida
     assert "首次展示的摘录视图：0" in render_visible_progress(seen, "")
     restored = render_visible_progress(seen, expanded)
     assert "首次展示的摘录视图：0" in restored and "零新增不等于问题已解决" in restored
-    assert len(restored) <= visible_progress_reserve(8000)
     assert visible_excerpt_identities(short + "\n工具新增 50 个候选") == before
     # Source-controlled Unicode cannot turn this projection into model fallback.
     assert visible_excerpt_identities(short.replace("State", "State\ud800"))
@@ -471,9 +469,11 @@ def test_real_run_reads_mechanism_once_without_extra_calls_or_assessment(rrepo, 
     assert not result.termination.assessment_enabled
     assert all("assessment" not in json.loads(hint) for hint in llm.schema_hints)
     if enabled:
-        assert "i modulo k" in contexts[0].evidence + contexts[0].delta
-        assert "首次展示的摘录视图：1" in contexts[0].turn_state
-        assert "首次展示的摘录视图：0" in contexts[1].turn_state
+        assert "i modulo k" not in contexts[0].evidence + contexts[0].delta
+        assert "可见证据变化" not in contexts[0].turn_state
+        assert "i modulo k" in contexts[1].delta
+        assert "补充摘录 v2" in contexts[1].delta
+        assert "首次展示的摘录视图：1" in contexts[1].turn_state
     else:
         assert all("i modulo k" not in context.evidence for context in contexts)
         assert all("可见证据变化" not in context.turn_state for context in contexts)

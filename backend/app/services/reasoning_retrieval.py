@@ -87,11 +87,10 @@ from app.services.reasoning_context import (
     accept_fallback_detail_cards, prepare_fallback_detail_cards,
     build_delta_evidence_block, build_evidence_block, compose_snapshot,
     excerpt_terms, render_pool_cards, select_frozen_card_views,
-    select_prose_detail_cards,
+    prose_source_keys, select_prose_detail_cards,
 )
 from app.services.reasoning_prose_excerpt import (
-    excerpt_already_visible, render_visible_progress,
-    visible_progress_reserve,
+    excerpt_already_visible, render_prose_progress, visible_excerpt_identities,
 )
 from app.services.reasoning_observation import (
     ActionObservationLedger, fold_observation_counts, render_observation_row,
@@ -704,17 +703,60 @@ def _table_excerpt_chars(settings, optimization: str) -> int:
     return int(getattr(settings, "reasoning_reflect_table_excerpt_chars", 1200))
 
 
+def _has_continued_retrieval(trace) -> bool:
+    """Only a validated model continuation arms prose reading, never seed I/O."""
+    for step in trace:
+        if step.step_type != "reflect":
+            continue
+        detail = step.detail
+        action = ACTION_DEFINITIONS.get(detail.get("next_action"))
+        if (action is not None and action.produces_evidence
+                and detail.get("sufficient") is False
+                and "fallback_reason" not in detail):
+            return True
+    return False
+
+
+def _retained_prose_details(state) -> bool:
+    delta = state.reflect_delta
+    if delta is None or not delta.prose_detail_fingerprints:
+        return False
+    allowed = prose_source_keys(state.collected, state.elements, state.chunks)
+    material = "\n".join((delta.snapshot_evidence, *delta.blocks,
+                          *delta.frozen_cards.values(), *delta.supplement_latest_cards.values()))
+    return any(key in allowed for key, _ in
+               visible_excerpt_identities(material) & delta.prose_detail_fingerprints)
+
+
 def _prose_detail_cards(settings, optimization, state, observer, excerpt_chars, table_chars, budget):
     if optimization != _EVIDENCE_LAYOUT or not bool(getattr(
             settings, "reasoning_reflect_prose_detail_enabled", True)):
         return None
-    return select_prose_detail_cards(
+    if not _has_continued_retrieval(state.trace):
+        return None
+    selected = select_prose_detail_cards(
         collected=state.collected, elements=state.elements, chunks=state.chunks,
         question=state.question, action_query=observer.last_query,
         excerpt_chars=excerpt_chars, table_excerpt_chars=table_chars,
         budget_chars=budget,
         detail_chars=int(getattr(settings, "reasoning_reflect_prose_detail_chars", 1000)),
         max_cards=int(getattr(settings, "reasoning_reflect_prose_detail_cards", 2)))
+    return selected if selected or _retained_prose_details(state) else None
+
+
+def _prose_visibility_note(state, evidence, delta, observations, detail_cards, history_budget):
+    projection = state.reflect_delta
+    if history_budget is None or projection is None:
+        return ""
+    # Both normal and fallback K have their own observation slice. Retained D
+    # has the same history charge in either path; no budget is deducted early.
+    history_left = max(0, history_budget - len(observations)
+                       - _carried_delta(projection).history_chars)
+    return render_prose_progress(
+        projection.visible_excerpt_fingerprints, projection.prose_detail_fingerprints,
+        "\n\n".join((evidence, delta)), detail_cards,
+        prose_source_keys(state.collected, state.elements, state.chunks)
+        if detail_cards is not None else (), history_left)
 
 
 def _delta_frozen_cards(delta, table_excerpt_chars: int, terms=()):
@@ -5032,8 +5074,6 @@ class ReasoningRetriever:
         table_chars = _table_excerpt_chars(settings, optimization)
         detail_cards = _prose_detail_cards(
             settings, optimization, state, observer, excerpt_chars, table_chars, budget)
-        if detail_cards is not None:
-            state_chars = max(0, state_chars - visible_progress_reserve(budget))
         # 目录由 `_prime_static_catalog` 在本 run 第一次能力投影时写下,而 reflect
         # 循环里投影恒排在这个方法之前。真出现"策略开着却没有目录"的形态(总闸在
         # 一次 run 中途被翻开,只可能发生在测试或热更配置里),两条前缀臂都退回
@@ -5144,7 +5184,8 @@ class ReasoningRetriever:
                 # 级开关同源(`_v2_build_aspect_ledger`),所以"S 里 lean 段在、
                 # 账本仍不追问"这两件事在回退之后仍然一致。
                 static_lean=(optimization == _LEAN_LAYOUT),
-                prose_detail_enabled=(detail_cards is not None),
+                detail_cards=detail_cards,
+                prose_history_budget=(state_chars if optimization == _EVIDENCE_LAYOUT else None),
                 measurement=measurement)
         # 必答方面清单 + 已完整枚举的集合键,都接在服务器状态块的**尾部**,与它
         # 一起受"按现有输入/协议边界保留、不整体裁尾"的处理(§4):方面清单是用户
@@ -5218,7 +5259,7 @@ class ReasoningRetriever:
         self, state: "_ReasoningRunState", summary: str, catalog, *,
         evidence: str, observations: str, delta: str = "",
         static_delta: bool = False, static_lean: bool = False,
-        prose_detail_enabled: bool = False,
+        detail_cards=None, prose_history_budget: int | None = None,
         measurement: "Optional[ReflectMeasurement]" = None,
     ) -> "ReflectContext":
         """两条前缀臂**唯一**的 `ReflectContext` 成型点(T-PS8;T-PD5 共用)。
@@ -5276,10 +5317,8 @@ class ReasoningRetriever:
                     state.enum_chains,
                     assessment=state.aspects.assessment_enabled),
                 f"{TURN_CONTEXT_TITLE}\n{summary}" if summary else "",
-                (render_visible_progress(
-                    state.reflect_delta.visible_excerpt_fingerprints,
-                    "\n\n".join((evidence, delta)))
-                 if prose_detail_enabled and state.reflect_delta is not None else ""),
+                _prose_visibility_note(
+                    state, evidence, delta, observations, detail_cards, prose_history_budget),
             ) if block),
             delta=delta,
             static_prompt=reflect_v2_static_prompt(
@@ -5505,7 +5544,8 @@ class ReasoningRetriever:
             # L = D + 自评合同(计划 §0)。判据用调用方传下来的 `optimization`,
             # 不第二次读策略位——理由见 `_prefix_context` 的 `static_lean`。
             static_lean=(optimization == _LEAN_LAYOUT),
-            prose_detail_enabled=(detail_cards is not None),
+            detail_cards=detail_cards,
+            prose_history_budget=(state_chars if optimization == _EVIDENCE_LAYOUT else None),
             measurement=measurement)
 
     def _absorb_assessment(

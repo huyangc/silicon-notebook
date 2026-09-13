@@ -491,8 +491,9 @@ python scripts/reflect_shadow_rig.py \
 本档可通过 `REASONING_REFLECT_PROSE_DETAIL_ENABLED` 对照有界普通原文详情与首次
 可见摘录反馈；单卡额度和每轮详情键数分别由 `REASONING_REFLECT_PROSE_DETAIL_CHARS`
 及 `REASONING_REFLECT_PROSE_DETAIL_CARDS` 控制，默认值与边界见产品/API 文档。
-关闭该开关保留本档此前的普通摘录行为；开启时仍共用原证据/历史预算，不增加模型
-或检索调用，也不改变 hard stale 或恢复逐项自评。同档开关对照必须分别构造承载
+关闭该开关保留本档此前的普通摘录行为；开启时首轮及无可展开原文的路径保持中性，
+合法继续检索后才按需展开，反馈仅用剩余历史空间。仍共用原证据/历史预算，不增加
+模型或检索调用，也不改变 hard stale 或恢复逐项自评。同档开关对照必须分别构造承载
 对应 Settings 的 repo，不能只给 Ask 另传一份 Settings；结果另记开关状态，不能
 将两侧伪标为不同的 `--arms`。固定意图、语料和其他配置，平衡顺序并保留所有失败。
 

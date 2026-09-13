@@ -845,7 +845,7 @@ REASONING_REFLECT_V2_ENABLED # 逐步推理 Ask 与深度报告的 reflect v2 �
 REASONING_REFLECT_EVIDENCE_CHARS_BY_EFFORT # v2 证据卡的按档位字符预算，JSON 对象（默认 `{"overview":4000,"standard":6000,"deep":8000,"thorough":12000,"exhaustive":16000}`）。启动期校验：必须**恰含**五个档位 id，每个值是 1,000–64,000 的整数（JSON 布尔值会被拒绝，而不是被静默读成 0/1），且随档位不递减。刻意独立于最终合成的 `kg_context_chars`/`chunk_context_chars`——判断下一步与写答案要的信息粒度不同，因此不从它们按比例换算
 REASONING_REFLECT_EXCERPT_CHARS # v2 证据卡里单条证据的原文摘录上限（默认 240；80–1,000）
 REASONING_REFLECT_TABLE_EXCERPT_CHARS # 仅 prefix_delta_evidence 使用的表格整行摘录额度，仍受共用分档总证据预算约束；默认值与校验边界由 docs/product-and-api_zh.md 的“证据展示与前缀缓存实验”拥有
-REASONING_REFLECT_PROSE_DETAIL_ENABLED # 仅 prefix_delta_evidence 启用的高相关原文有界详情与首次可见摘录反馈；false 恢复本档之前的正文投影，不自动打开 v2 或选择优化档
+REASONING_REFLECT_PROSE_DETAIL_ENABLED # 仅 prefix_delta_evidence 在合法继续检索后按需展开原文，并在历史余量内提供可选可见性反馈；首轮与无普通原文路径中性，false 恢复本档之前的正文投影，不自动打开 v2 或选择优化档
 REASONING_REFLECT_PROSE_DETAIL_CHARS # 既有总证据预算内，所选原文的单卡详情额度；默认值与校验边界由 docs/product-and-api_zh.md 的“证据展示与前缀缓存实验”拥有
 REASONING_REFLECT_PROSE_DETAIL_CARDS # 每次 reflect 的详情候选键上限，K/D/补充共用，不是所有历史卡片的上限；默认值与校验边界由同一产品/API 章节拥有
 REASONING_REFLECT_STATE_CHARS # 只界定**可压缩区**（近期动作观察与历史建议）的投影预算（默认 6,000；1,000–32,000）。它不是整个 prompt 的上限：用户完整问题、冻结约束、当前合法动作与额度、完整大纲/溢出与枚举覆盖各自按自己的边界保留，绝不会为了塞进这个池子被裁尾
