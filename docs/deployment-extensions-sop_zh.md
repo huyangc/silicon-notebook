@@ -307,7 +307,7 @@ def build_router(context: PluginRouteContext) -> APIRouter:
 - 绝不在 `register()` 里 `raise ExtensionRegistryError`。它不在 SDK 公开面上，但 import 得到，而 core **刻意不脱敏**它——你写在那里的消息会逐字进运维日志。`register()` 抛出的其它任何异常都会被转成 `plugin_registration_failed`，只留类名。
 - `GapConsultContributor` 的可用性探测与 `consult` 调用一起跑在一条私有 worker 线程上、受一个硬 deadline 约束（见[缺口外扩检索](./product-and-api_zh.md#缺口外扩检索)）：不要依赖 `contextvars`、线程局部状态，或任何指望核心 ContextVar 能带进那条线程——按设计，一个都带不进去。宿主会等你到 `ASK_GAP_CONSULT_TIMEOUT_SECONDS` 的 deadline 为止、期内返回即被采纳；超出即放弃这个 contribution——它最终的返回值不会被任何人读取，直接丢弃，绝不会迟到生效。只返回 `http`/`https` URL，且必须是**直接**指向一份 PDF 的链接——导入端点只探测你给的那个精确 URL，不会替你到落地页或摘要页里去找。
 - `AskEngineProvider` 只能引用自己那次 `retrieval` 端口返回的证据句柄。伪造、过期或跨 run 的句柄都会拒绝整份答案；不得捕获该拒绝并以无接地正文重试。
-- `ElementEnricher` 的可用性探测与 `enrich()` 调用一起跑在一条私有 worker 线程上、受一个硬 deadline 约束，与 `GapConsultContributor` 完全同形：不要依赖 `contextvars` 或任何指望核心 ContextVar 能带进那条线程——按设计一个都带不进去。`context.assets.read(ref)` 只在同一次调用期间返回字节：你的 `enrich()` 一旦返回、超时或被放弃，之后的读取恒为 `None`，绝不要把 ref 或 reader 本身留到那之后再用。返回的 `description` 不得含 `\n`/`\t` 之外的控制字符；settings 值绝不能写进候选的 `metadata`。
+- `ElementEnricher` 的可用性探测与 `enrich()` 调用一起跑在一条私有 worker 线程上、受一个硬 deadline 约束，与 `GapConsultContributor` 完全同形：不要依赖 `contextvars` 或任何指望核心 ContextVar 能带进那条线程——按设计一个都带不进去。`context.assets.read(ref)` 只在同一次调用期间返回字节：你的 `enrich()` 一旦返回、超时或被放弃，之后的读取恒为 `None`，绝不要把 ref 或 reader 本身留到那之后再用。返回的 `description` 不得含 `\n`/`\t` 之外的控制字符；凭据或端点类设置（API key、其环境变量名、base URL）绝不能写进候选的 `metadata`——模型 id 这类非机密的来源信息可以写，样板记录的正是它。
 
 ## 4. 第二步：写前端包
 
