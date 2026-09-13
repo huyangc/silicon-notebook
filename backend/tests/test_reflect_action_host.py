@@ -736,3 +736,42 @@ def test_a_per_call_probe_decline_is_reported_as_unavailable():
     outcome = host.invoke(spec, _call())
 
     assert outcome.failure_code == UNAVAILABLE
+
+
+def test_an_abandoned_call_never_reaches_invoke_after_a_late_probe():
+    """A probe that outlives the deadline must not be followed by ``invoke``.
+
+    The main thread has already answered ``plugin_action_timeout``; nothing
+    reads the worker's cell again.  But ``invoke`` is the frame that sends the
+    question outward and spends the plugin's own quota, so "abandoned" has to
+    mean "never sent", not merely "never read" (codex #714 R2).
+    """
+    clock = _TrippableClock()
+    release = threading.Event()
+    invoked = threading.Event()
+    slow = _SwitchableProbe()
+
+    class _Recording:
+        descriptor = DESCRIPTOR
+
+        def invoke(self, _context):
+            invoked.set()
+            return _result(_item())
+
+    def _slow(_context):
+        clock.tripped = True
+        release.wait(30)
+        return Availability.available()
+
+    host = _host(_bundle("papers", _Recording(), availability=slow))
+    spec = _spec(host)
+    slow.answer = _slow
+    host._clock = clock
+    try:
+        outcome = host.invoke(spec, _call(deadline=clock.deadline))
+    finally:
+        release.set()
+
+    assert outcome.failure_code == TIMEOUT
+    # The worker resumes after ``release`` and must skip the contributor.
+    assert not invoked.wait(0.5)

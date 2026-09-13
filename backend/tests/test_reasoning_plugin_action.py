@@ -1033,3 +1033,19 @@ def test_the_real_host_receives_the_loop_s_call_and_reaches_the_contributor(
     assert [step.detail["found"] for step in _steps(result, "plugin_action")] \
         == [1, 1]
     assert "plugin_action_failed" not in _skips(result)
+
+
+def test_a_note_only_outcome_still_reaches_the_next_reflect_turn():
+    """Zero items plus a note renders a note-only block (codex #714 R2).
+
+    The plugin's explanation of an empty search is exactly the feedback the
+    model needs before deciding whether to try again; only when BOTH inputs
+    are empty does the block vanish, which keeps the closed state byte-identical.
+    """
+    from app.services.reasoning_retrieval import _external_block_text
+
+    block = _external_block_text([], "只找到综述,没有原始数据")
+    assert block.startswith("\n\n[External evidence] (nothing admitted so far)")
+    assert "Note: 只找到综述,没有原始数据" in block
+    assert "citable" not in block
+    assert _external_block_text([], "") == ""
