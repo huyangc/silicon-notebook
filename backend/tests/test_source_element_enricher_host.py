@@ -46,6 +46,7 @@ from app.extension_sdk import (
     ExtensionRegistrar,
     ExtensionResultStatus,
 )
+from app.extensions import element_enrichment as element_enrichment_host
 from app.extensions.bootstrap import build_extension_runtime
 from app.extensions.element_enrichment import _AssetReader
 from app.extensions.registry import ExtensionRegistryError
@@ -582,6 +583,110 @@ def test_the_persisted_byte_budget_is_per_contribution_and_cumulative():
     assert host.enrich_application(_call(max_metadata_bytes=one + 10)) == ()
     assert events[0]["reason_code"] == "enrichment_budget_exceeded"
     assert len(host.enrich_application(_call(max_metadata_bytes=2 * one))) == 2
+
+
+def _recording_sizer(monkeypatch) -> list[int]:
+    """Replace the host's sizer with one that records its calling thread.
+
+    Rebinding the module global works because the host calls it by name at
+    call time; the returned list is the thread id of every call.
+    """
+
+    calls: list[int] = []
+    real = element_enrichment_host.persisted_element_enrichment_size
+
+    def _wrapped(**kwargs):
+        calls.append(threading.get_ident())
+        return real(**kwargs)
+
+    monkeypatch.setattr(
+        element_enrichment_host, "persisted_element_enrichment_size", _wrapped
+    )
+    return calls
+
+
+def test_persisted_sizing_happens_on_the_worker_not_the_ingestion_thread(
+    monkeypatch,
+):
+    # Measuring a candidate encodes its whole subtree, so the work is
+    # proportional to what the plugin sent.  That belongs inside the deadline
+    # with every other read of plugin-sized data.
+    calls = _recording_sizer(monkeypatch)
+    ingestion_thread = threading.get_ident()
+    worker_threads: list[int] = []
+
+    def enrich(context):
+        worker_threads.append(threading.get_ident())
+        return _result(_candidate(context, 0, metadata={"netlist": "R1"}))
+
+    plugin = _Plugin(None)
+    plugin.enrich = enrich
+    host = _host(_bundle("corp.enricher", plugin))
+
+    assert len(host.enrich_application(_call())) == 1
+    assert calls, "the sizer was never called at all"
+    assert set(calls) == set(worker_threads)
+    assert ingestion_thread not in calls
+
+
+def test_a_giant_string_is_rejected_without_ever_being_encoded(monkeypatch):
+    # 32 MiB of metadata against a 4 KiB budget and a 10ms deadline.  The
+    # character bound settles it from ``len()`` alone: nothing encodes the
+    # string, nothing copies it, and the ingestion thread does no work
+    # proportional to its size.
+    calls = _recording_sizer(monkeypatch)
+    giant = "x" * (32 * 1024 * 1024)
+    events: list[dict[str, object]] = []
+    plugin = _Plugin(None)
+    plugin.enrich = lambda context: _result(
+        _candidate(context, 0, metadata={"blob": giant})
+    )
+    host = _host(_bundle("corp.enricher", plugin), event_sink=events.append)
+
+    started = time.perf_counter()
+    patches = host.enrich_application(
+        _call(
+            max_metadata_bytes=4096,
+            deadline=time.monotonic() + 0.01,
+        )
+    )
+    elapsed = time.perf_counter() - started
+
+    assert patches == ()
+    assert events[0]["reason_code"] in (
+        "enrichment_budget_exceeded",
+        "element_enricher_timeout",
+    )
+    assert calls == [], "the doomed candidate reached the encoder anyway"
+    assert elapsed < 0.5, elapsed
+
+
+def test_a_later_candidate_is_not_walked_once_the_budget_is_gone(monkeypatch):
+    # The running budget is carried across candidates inside materialization,
+    # so the first one that overruns ends the copy — nothing behind it is
+    # walked, encoded or allocated.
+    calls = _recording_sizer(monkeypatch)
+    events: list[dict[str, object]] = []
+    second_read = threading.Event()
+
+    plugin = _Plugin(None)
+    plugin.enrich = lambda context: _result(
+        _candidate(context, 0, metadata={"blob": "x" * 4000}),
+        _candidate(
+            context,
+            1,
+            metadata=_RecordingMapping(
+                {"blob": "y"}, on_read=second_read.set
+            ),
+        ),
+    )
+    host = _host(_bundle("corp.enricher", plugin), event_sink=events.append)
+
+    assert host.enrich_application(_call(max_metadata_bytes=4096)) == ()
+    assert events[0]["reason_code"] == "enrichment_budget_exceeded"
+    # The first candidate was measured; the second was never even read.
+    assert len(calls) == 1
+    assert not second_read.is_set()
 
 
 def test_a_description_is_charged_twice_because_it_is_persisted_twice():

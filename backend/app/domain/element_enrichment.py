@@ -30,6 +30,16 @@ _STABLE_ID = re.compile(r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$")
 _METADATA_KEY = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 
 
+class ElementEnrichmentTooLarge(ValueError):
+    """Proposed metadata exceeded a bound the caller set on the walk.
+
+    A distinct type, and a ``ValueError`` subclass so nothing that already
+    catches structural rejections changes behaviour: "this cannot fit the
+    budget" and "this is malformed" are different verdicts to report, and a
+    caller that wants to tell them apart should not have to parse a message.
+    """
+
+
 def valid_element_enrichment_owner(
     plugin_id: object,
     plugin_version: object,
@@ -69,7 +79,10 @@ def valid_element_enrichment_version(plugin_version: object) -> bool:
 
 
 def thaw_element_enrichment_metadata(
-    value: object, *, max_nodes: int | None = None
+    value: object,
+    *,
+    max_nodes: int | None = None,
+    max_chars: int | None = None,
 ) -> object:
     """Validate plugin metadata into a plain, JSON-encodable structure.
 
@@ -86,28 +99,50 @@ def thaw_element_enrichment_metadata(
 
     Raises ``TypeError`` for a value of a type that is not JSON at all and
     ``ValueError`` for a structural violation (depth, key shape, a non-finite
-    float, or more than ``max_nodes`` nodes).  ``max_nodes`` bounds the walk
-    itself: callers pass their persisted-byte budget, since every node costs
-    at least one byte once encoded, so a structure with more nodes than that
-    could never fit regardless of what the walk would find.
+    float, or exhausting ``max_nodes``/``max_chars``).
+
+    ``max_nodes`` and ``max_chars`` bound the walk itself, and both are meant
+    to be fed the caller's persisted-byte budget.  Every node costs at least
+    one byte once encoded, and so does every character of every key and string
+    — UTF-8 never encodes a character in less than one byte — so a structure
+    that exceeds either count could not fit the budget regardless of what the
+    rest of the walk would find.  ``max_chars`` is what makes a single huge
+    string cheap to reject: its length is known in O(1), long before anything
+    tries to encode it.  Rejecting early is never a false rejection, only an
+    earlier one.
     """
 
     return _thawed(
         value,
-        budget=[max_nodes if type(max_nodes) is int else None],
+        budget=[
+            max_nodes if type(max_nodes) is int else None,
+            max_chars if type(max_chars) is int else None,
+        ],
         depth=0,
     )
+
+
+def _spend(budget: list[int | None], index: int, amount: int, message: str) -> None:
+    remaining = budget[index]
+    if remaining is None:
+        return
+    if remaining < amount:
+        raise ElementEnrichmentTooLarge(message)
+    budget[index] = remaining - amount
 
 
 def _thawed(value: object, *, budget: list[int | None], depth: int) -> object:
     if depth > ELEMENT_ENRICHMENT_METADATA_MAX_DEPTH:
         raise ValueError("element enrichment metadata nests too deeply")
-    remaining = budget[0]
-    if remaining is not None:
-        if remaining <= 0:
-            raise ValueError("element enrichment metadata has too many nodes")
-        budget[0] = remaining - 1
-    if value is None or type(value) in {bool, int, str}:
+    _spend(budget, 0, 1, "element enrichment metadata has too many nodes")
+    if value is None or type(value) in {bool, int}:
+        return value
+    if type(value) is str:
+        # Charged before the value is used for anything, so a 32 MiB string
+        # costs one length read rather than a full encode further down.
+        _spend(
+            budget, 1, len(value), "element enrichment metadata is too large"
+        )
         return value
     if type(value) is float:
         # NaN and the infinities are not JSON; every consumer of this subtree
@@ -124,6 +159,9 @@ def _thawed(value: object, *, budget: list[int | None], depth: int) -> object:
         for key, entry in value.items():
             if type(key) is not str or not _METADATA_KEY.fullmatch(key):
                 raise ValueError("element enrichment metadata key is not stable")
+            _spend(
+                budget, 1, len(key), "element enrichment metadata is too large"
+            )
             thawed[key] = _thawed(entry, budget=budget, depth=depth + 1)
         return thawed
     raise TypeError("element enrichment metadata must be strict JSON")
@@ -175,6 +213,7 @@ __all__ = [
     "ELEMENT_ENRICHMENT_METADATA_MAX_DEPTH",
     "EXTENSION_OWNER_ID_MAX_CHARS",
     "EXTENSION_OWNER_VERSION_MAX_CHARS",
+    "ElementEnrichmentTooLarge",
     "persisted_element_enrichment_size",
     "thaw_element_enrichment_metadata",
     "valid_element_enrichment_owner",
