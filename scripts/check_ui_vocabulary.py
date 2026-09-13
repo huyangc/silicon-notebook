@@ -15,13 +15,8 @@ a user's screen, and all three are scanned:
   3. backend **reasoning-trace summaries** — the server writes them, the front end
      renders them **verbatim** (`answer-panel.tsx` prints `step.summary` with no
      mapping of its own), so they are user copy that never passes through
-     `frontend/app`. Two shapes are scanned, in `TRACE_SUMMARY_MODULES`:
-     `TraceStep(..., summary=<literal>)` calls, and the module-level termination
-     copy table `reasoning_aspects._TERMINATION_SUMMARIES` (its values reach the
-     screen twice — as the closing skip step's `summary` and as the terminal
-     synthesis step's `termination_summary` field). This channel is what catches
-     「必答方面」: it is the server-side ledger name, the UI word is 「方面」, and both
-     sentences carrying it were rendered verbatim while this guard stayed green.
+     `frontend/app`. `TraceStep(..., summary=<literal>)` calls in
+     `TRACE_SUMMARY_MODULES` are scanned as user-facing copy.
 
   Bare `HTTPException(detail=str(exc))` is deliberately **not** scanned: it is never
   displayed (the front end falls back to a generic message by status code) and its
@@ -107,21 +102,13 @@ MIN_USER_ERROR_SITES = 15
 #
 # 路径按 `ROOT` 直接写死,**刻意不经过 `BACKEND_APP`**:那个常量是可被重定向的
 # (`--extra-root` 的仓库外插件自检、以及把它指向 tmp 目录的几条自检用例),而这条
-# 通道的扫描面是本仓库里这三个具名模块,与插件自检面没有任何关系。跟着一个会被
+# 通道的扫描面是本仓库里具名模块,与插件自检面没有任何关系。跟着一个会被
 # 重定向的根走,只会让"把后端根指到别处"的那几种调用顺带把这条通道也一起关掉。
 TRACE_SUMMARY_MODULES = (
-    ROOT / "backend" / "app" / "services" / "reasoning_aspects.py",
-    ROOT / "backend" / "app" / "services" / "reasoning_observation.py",
     ROOT / "backend" / "app" / "services" / "reasoning_retrieval.py",
 )
 TRACE_STEP = "TraceStep"
-# 模块级的「结束原因 → 上屏中文短句」表。它不经 `TraceStep(...)` 的字面量参数上屏
-# (值先进 dict、再由 `termination_summary()` 取出),所以按名字直接扫这张表:一处
-# 是收尾 skip 步的 `summary`,一处是合成终步 detail 里的 `termination_summary` 字段,
-# 两处都逐字渲染。
-TRACE_SUMMARY_TABLES = ("_TERMINATION_SUMMARIES",)
-# 非空性下限,同 MIN_USER_ERROR_SITES 的理由(当前实际 71 处:64 个字面量 summary
-# + 7 条结束短句)。`TraceStep` 改名或摘要全改成变量拼装都会让它掉下来。
+# Non-vacuity floor: keep the existing guard while removing retired modules.
 MIN_TRACE_SUMMARY_SITES = 50
 
 # 这条通道开通**之前**就已存在的一条违规,登记为例外而不是静默放行:
@@ -439,9 +426,7 @@ def scan_user_error(path: Path) -> tuple[int, list[tuple[int, str, str]]]:
 def scan_trace_summaries(path: Path) -> tuple[int, list[tuple[int, str, str]]]:
     """Blacklisted jargon in this module's server-written trace summaries.
 
-    Two shapes, both rendered verbatim by the front end (see docstring channel 3):
-    ``TraceStep(..., summary=<literal>)`` and the values of the module-level
-    termination copy tables named in ``TRACE_SUMMARY_TABLES``.
+    Scan literal ``TraceStep(..., summary=...)`` values rendered by the front end.
 
     Summaries built from a variable or a helper call are *not* statically
     checkable and are skipped, exactly as ``_message_literal`` skips a computed
@@ -471,23 +456,6 @@ def scan_trace_summaries(path: Path) -> tuple[int, list[tuple[int, str, str]]]:
                 if text is not None:
                     check(node.lineno, text)
             continue
-        # 模块级 `_TERMINATION_SUMMARIES: Mapping[str, str] = {...}` —— 带注解的
-        # 赋值是 AnnAssign,不是 Assign,两种写法都要认(只认一种就会在有人补上
-        # 类型注解的那天静默失去这半个扫描面)。
-        targets = (
-            list(node.targets) if isinstance(node, ast.Assign)
-            else [node.target] if isinstance(node, ast.AnnAssign) else []
-        )
-        if not any(
-            isinstance(target, ast.Name) and target.id in TRACE_SUMMARY_TABLES
-            for target in targets
-        ):
-            continue
-        if isinstance(node.value, ast.Dict):
-            for value in node.value.values:
-                text = _message_literal(value)
-                if text is not None:
-                    check(getattr(value, "lineno", node.lineno), text)
     return sites, sorted(hits)
 
 

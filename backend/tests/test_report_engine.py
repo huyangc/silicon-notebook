@@ -3513,130 +3513,32 @@ def test_auto_generate_off_still_stops_at_intent_ready(repo, monkeypatch):
     assert llm.outline_calls == 0
 
 
-def test_deep_dive_passes_the_sections_intent_questions(repo, monkeypatch):
-    """T4 §7.1:`_deep_dive` 把本节 `intent_questions` 传进 `run(intent_detail=)`。
-
-    这份清单是 `_bind_outline_to_intent` 在大纲阶段按用户确认过的意图契约写进
-    每一节、随 ``reports.outline_json`` 一起持久化的东西(与上面那条用例读的
-    ``intent_contract`` 同源),检索器据它建必答方面账——**零新增查询、零新增模型
-    调用**,只是把已经在手上的东西也传下去。
-
-    没有这份清单的节保持**稀疏**:一个多余的键都不带(所以上面那条断言精确
-    字典相等的用例不受影响),检索器照常回落到"整条节问题作为唯一方面"。
-    """
+def test_deep_dive_keeps_mandatory_questions_in_the_authoritative_question(repo, monkeypatch):
+    from app.services.reasoning_retrieval import ReasoningResult
     from app.services.report_engine import ReportEngine
 
-    captured: list = []
-
-    class _Capturing:
+    captured = []
+    class CaptureRetriever:
         def __init__(self, **kwargs):
             pass
-
-        def run(self, *args, **kwargs):
-            from app.services.reasoning_retrieval import ReasoningResult
-
-            captured.append(kwargs.get("intent_detail"))
+        def run(self, notebook_id, question, **kwargs):
+            captured.append(question)
             return ReasoningResult()
 
     monkeypatch.setattr(
-        "app.services.reasoning_retrieval.ReasoningRetriever", _Capturing,
+        "app.services.reasoning_retrieval.ReasoningRetriever", CaptureRetriever,
     )
-    eng = ReportEngine.from_repository(repo, repo.settings)
-    nb = _mk_nb(repo)
-    eng._deep_dive(nb.id, {
-        "title": "一节", "scope": "范围",
-        "intent_questions": ["本节问题一", "本节问题二"]}, "问题")
-    eng._deep_dive(nb.id, {"title": "二节", "scope": "范围"}, "问题")
+    engine = ReportEngine.from_repository(repo, repo.settings)
+    notebook = _mk_nb(repo)
+    engine._deep_dive(notebook.id, {
+        "title": "机制", "scope": "工作机制范围",
+        "intent_questions": ["如何共享缓存", "何时停止迭代"],
+    }, "完整研究问题")
+    engine._deep_dive(notebook.id, {
+        "title": "边界", "scope": "适用边界范围",
+    }, "完整研究问题")
 
-    assert captured[0]["intent_questions"] == ["本节问题一", "本节问题二"]
-    assert "intent_questions" not in captured[1]
-
-
-# ------------------------------------------ T4-B:终态贯通到报告的节撰写
-# 设计稿 2026-09-07 §7.2:Report 节撰写与 Ask 合成拿同一份事实说明、走同一套
-# 复核口径与同一份纯函数——报告不另立一本账。
-
-def _termination_for_report(reason, aspects, unresolved=(), channels=()):
-    from app.domain.retrieval_termination import (
-        AspectSnapshot, RetrievalTermination,
-    )
-    return RetrievalTermination(
-        reason=reason, unresolved_aspect_ids=tuple(unresolved),
-        unrecovered_channels=tuple(channels),
-        aspects=tuple(
-            AspectSnapshot(aspect_id=aspect_id, question=question,
-                           status=status, evidence_keys=tuple(keys))
-            for aspect_id, question, status, keys in aspects),
-    )
-
-
-class _SectionPromptLLM:
-    configured = True
-    model = "m"
-
-    def __init__(self):
-        self.prompts = []
-
-    def chat_json(self, messages, schema_hint, **kwargs):
-        self.prompts.append(messages[-1]["content"])
-        return json.dumps({"markdown": "## A\nbody", "grounded": False,
-                           "claims": []})
-
-
-def test_report_section_gets_the_termination_facts_and_delivery_review(repo):
-    """节撰写 prompt 多一段服务端事实,节结果多一组同款稀疏字段(§7.2)。
-
-    这一节的复核用的是**本节自己**的 `id_map` 与正文解析回来的锚点:节内 `[k]`
-    只解析本节证据,所以"进没进 prompt"在这里天然是按节回答的。这一节的证据
-    没有一条被绑定过(`id_map` 为空),于是那条自报 supported 记未送达。
-    """
-    from app.services.reasoning_retrieval import ReasoningResult
-
-    stub = _SectionPromptLLM()
-    eng = _mk_engine(repo, stub)
-    nb = _mk_nb(repo)
-    result = ReasoningResult()
-    result.termination = _termination_for_report(
-        "model_partial",
-        (("a1", "本节必须回答的那件事", "supported", ("ko-missing",)),
-         ("a2", "没查着的那件事", "unknown", ())),
-        unresolved=("a2",), channels=("ppr_retrieve",))
-    out = eng._draft_section(
-        nb.id, {"title": "A", "scope": "s"}, "q", result)
-
-    prompt = stub.prompts[-1]
-    assert "Retrieval status (server fact" in prompt
-    assert "没查着的那件事" in prompt
-    assert "ppr_retrieve" in prompt
-    # 服务端事实排在编号规则之前:它不是规则,也不是一条知识条目。
-    assert prompt.index("Retrieval status") < prompt.index("Rules:")
-
-    assert out["termination_reason"] == "model_partial"
-    assert out["termination_summary"] == "检索结束：仍有方面没有完整支撑"
-    assert out["aspects_total"] == 2 and out["aspects_pending"] == 1
-    assert out["aspects_model_supported"] == 1
-    assert out["aspects_synthesis_admitted"] == 0
-    assert out["aspects_undelivered"] == 1
-    assert out["unrecovered_channels"] == ["ppr_retrieve"]
-
-
-def test_report_section_without_termination_is_byte_identical(repo):
-    """关闭态 / 历史 result:prompt 无新块,节结果无新键。"""
-    from app.services.reasoning_retrieval import ReasoningResult
-
-    stub = _SectionPromptLLM()
-    eng = _mk_engine(repo, stub)
-    nb = _mk_nb(repo)
-    out = eng._draft_section(
-        nb.id, {"title": "A", "scope": "s"}, "q", ReasoningResult())
-    assert "Retrieval status (server fact" not in stub.prompts[-1]
-    assert not [key for key in out
-                if key.startswith(("termination_", "aspects_"))
-                or key == "unrecovered_channels"]
-    # 连 `termination` 属性都没有的窄替身(冻结调用点)照常工作:getattr 兜底。
-    from types import SimpleNamespace
-    out_narrow = eng._draft_section(
-        nb.id, {"title": "A", "scope": "s"}, "q",
-        SimpleNamespace(top_hits=[], elements=[], chunks=[], attempted=[],
-                        trace=[]))
-    assert "termination_reason" not in out_narrow
+    assert "完整研究问题" in captured[0]
+    assert "如何共享缓存" in captured[0] and "何时停止迭代" in captured[0]
+    assert "适用边界范围" in captured[1]
+    assert "如何共享缓存" not in captured[1]

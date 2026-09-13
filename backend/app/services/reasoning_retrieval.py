@@ -8,16 +8,14 @@ from __future__ import annotations
 
 import contextvars
 import json
-import logging
 import math
-import re
 import threading
 import time
 import weakref
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from typing import (
-    Any, Dict, List, Mapping, Optional, Protocol, Sequence, Set, Tuple,
+    Any, Dict, List, Mapping, Optional, Protocol, Sequence, Tuple,
     TYPE_CHECKING,
 )
 
@@ -25,21 +23,8 @@ from app.core.ask_retrieval_policy import (
     DEFAULT_RETRIEVAL_EFFORT, EXHAUSTIVE_RETRIEVAL_EFFORT, AskRetrievalLimits,
     ask_retrieval_limits,
 )
-from app.core.llm import (
-    CALL_STATS_KWARG, budget_kwargs, provider_messages,
-    serialize_provider_messages,
-)
-from app.core.config import (
-    DEFAULT_REASONING_PER_QUERY_LIMIT,
-    DEFAULT_REFLECT_DELTA_CARDS_BY_EFFORT,
-    DEFAULT_REFLECT_EVIDENCE_CHARS_BY_EFFORT,
-    REFLECT_OPTIMIZATION_IMPLEMENTED,
-    Settings,
-)
-from app.domain.cancellation import CoreCancellation
-from app.domain.reasoning_trace_stats import (
-    REFLECT_CONTEXT_DETAIL_KEYS, REFLECT_MEASUREMENT_DETAIL_KEYS,
-)
+from app.core.llm import budget_kwargs
+from app.core.config import DEFAULT_REASONING_PER_QUERY_LIMIT, Settings
 from app.models.ask import TRACE_RESULT_IDS_MAX, TraceStep
 from app.repositories.lexical_query import (
     MAX_EXACT_PHRASE_CHARS, MAX_QUOTED_PHRASES, exact_probe_query,
@@ -53,48 +38,17 @@ from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancel
 from app.services.citation_markers import LOOSE_MARKER_RE
 from app.services.model_work import MalformedModelResponse
 from app.services.collection_catalog import (
-    ENUMERABLE_ELEMENT_KINDS, ENUMERABLE_KG_OBJECT_TYPES, CollectionMap,
+    ENUMERABLE_ELEMENT_KINDS, ENUMERABLE_KG_OBJECT_TYPES,
     render_collection_map,
 )
 from app.services.collection_enumeration import (
     LOCAL_ONLY_SCOPE_SUFFIX, TRUNCATED_CONCURRENT_CHANGE,
-    TRUNCATED_OVERSIZE_SAMPLE, EnumerationBudget, SourceNotInScopeError,
+    EnumerationBudget,
 )
-from app.services.prompts import (
-    reflect_prompt, reflect_schema_hint, reflect_v2_prefix_user_prompt,
-    reflect_v2_schema_hint, reflect_v2_static_prompt,
-    reflect_v2_system_prompt, reflect_v2_turn_state, reflect_v2_user_prompt,
-)
+from app.services.prompts import reflect_prompt, reflect_schema_hint
 from app.services.reasoning_actions import (
-    ACTION_DEFINITIONS, ENUMERATE_SCOPE_ALL, ENUMERATE_SCOPE_CURRENT_NOTEBOOK,
-    ENUMERATE_SCOPES, EXACT_TERM_SHAPE_NOTE, REFLECT_INVALID_ACTION,
-    UNAVAILABLE_DISCLOSE_MAX, ActionParam, ReflectCapabilities,
-    ReflectCapabilityFacts, build_reflect_capabilities, static_catalog_facts,
-)
-from app.domain.retrieval_termination import (
-    ASPECT_COLLECTION_KEY_PREFIX, ASSESSMENT_SKIP_REASON_PREFIX,
-    RetrievalTermination,
-)
-from app.services.reasoning_aspects import (
-    AspectLedger, TERMINATION_SKIP_REASON, assessment_is_empty,
-    build_aspect_ledger, classify_termination, evidence_bound_keys,
-    render_aspect_block, render_aspect_contract_block,
-    render_aspect_status_block, termination_summary,
-)
-from app.services.reasoning_context import (
-    DELTA_BLOCK_TITLE, SUPPLEMENT_CARD_NOTE, TURN_CONTEXT_TITLE,
-    ReflectContext, ReflectDeltaState, ReflectMeasurement, build_delta_block,
-    accept_fallback_detail_cards, prepare_fallback_detail_cards,
-    build_delta_evidence_block, build_evidence_block, compose_snapshot,
-    excerpt_terms, render_pool_cards, select_frozen_card_views,
-    prose_source_keys, select_prose_detail_cards,
-)
-from app.services.reasoning_prose_excerpt import (
-    excerpt_already_visible, render_prose_progress, visible_excerpt_identities,
-)
-from app.services.reasoning_observation import (
-    ActionObservationLedger, fold_observation_counts, render_observation_row,
-    render_observations,
+    ENUMERATE_SCOPE_ALL, ENUMERATE_SCOPE_CURRENT_NOTEBOOK, ENUMERATE_SCOPES,
+    EXACT_TERM_SHAPE_NOTE,
 )
 from app.services.retrieval_experience_block import (
     CONSULT_MEMORY_TOP_K, action_id_for, adopted_entry_ids, clip_rationale,
@@ -185,10 +139,7 @@ _MAX_EXACT_LOOKUPS = DEFAULT_REASONING_MAX_EXACT_LOOKUPS
 _EXACT_TERM_WRAPPERS = " \t\r\n\"'`“”‘’「」『』《》()（）[]【】<>,，。:：;；!！?？"
 # 名称形状闸拒绝时回喂给模型(并上屏)的措辞。写成「该给什么」而不是「你给错了」:
 # 只说非法,模型下一轮往往换一个同样非法的普通词再试一次,白烧一轮反思。
-# 括号里那半句与 v2 的 `exact_lookup.term` 参数说明**共用一份字面**
-# (`EXACT_TERM_SHAPE_NOTE`,唯一定义点在 reasoning_actions):事前说的"该给什么"
-# 与事后说的"该给什么"分成两份文案,就一定会分叉成两套判据。拼接结果与接入前
-# 逐字节相同 —— legacy 的回喂与 trace summary 因此一个字都没变。
+# 名称形状说明与执行层教学回喂共用一个定义。
 _NOT_A_NAME_NOTE = (
     "「{term}」不是可精确查找的名称"
     f"({EXACT_TERM_SHAPE_NOTE})"
@@ -244,17 +195,7 @@ def legacy_action_ledger_note(
     visited, collected, neighbor_truncated, neighbor_expand_limit,
     attempted, exact_lookup_log,
 ) -> str:
-    """legacy reflect 每轮拼在候选摘要之后的**四段散文账目**,原样搬出来。
-
-    这是一次纯粹的位置变更:四段的判据、措辞、拼接顺序与前缀 ``\\n\\n`` 逐字节
-    与它们当初写在 `run()` 里时相同,调用处 `summary = f"{summary}{...}"` 与
-    原来的四次逐段追加等价(空账目返回空串,一个字符都不加)。搬出来的理由有两
-    个:`run()` 是零松弛长度天花板下的热函数,而 v2 用**动作观察账**取代这四段
-    重复回喂(设计稿 §6.1),两条协议因此需要一个能整体切换的边界——把这四段留在
-    循环里、只在外面套一个 `if`,等于把这个天花板的额度花在缩进上。
-
-    `tests/test_reasoning_retrieval.py` 有一条逐字节等价用例钉住这次搬迁。
-    """
+    """把已执行动作的四段账目拼到候选摘要之后。"""
     note = ""
     # 已展开过的节点回喂 reflect, 提示模型勿重复请求(治"反复 expand 同节点"根源)。
     if visited:
@@ -354,782 +295,13 @@ _REFLECT_EMPTY_BODY_REASON = "empty"
 REFLECT_OUTPUT_BUDGET_EXHAUSTED = "output_budget_exhausted"
 #: provider 报「输出被 max_tokens 截断」的那个 finish_reason 字面(OpenAI 兼容)。
 _FINISH_REASON_LENGTH = "length"
-#: 反思调用**连续**失败几轮之后才按 fail-open 收尾(见 `_survive_reflect_failure`)。
-#: 2 是刻意的:一次失败在实测里几乎总能在下一轮恢复(24 次空正文分散在 118 次调用
-#: 里,没有一次是连着两轮的),而它砍掉的是整次检索已经到手的全部证据;连着两轮
-#: 失败说明的则是通道本身出了问题,再多试几轮只是在一条塌了的路上花步数。
-REFLECT_MAX_CONSECUTIVE_FAILURES = 2
-#: 输出预算打满之后那一次重试要的倍数(见 `_reflect_v2`)。取"同一个配置数 × 2"
-#: 而不是另一个字面量:一次部署把 `REASONING_MAX_TOKENS` 调高的决定,重试要跟着
-#: 走,而不是撞上一堵单独钉死的墙。
-REFLECT_RETRY_BUDGET_MULTIPLIER = 2
 #: 逐步推理(规划 + 每一轮反思)的单次输出上限所在的 Settings 属性名。
 REASONING_BUDGET_ATTR = "reasoning_max_tokens"
 
 
-def reasoning_budget_kwargs(settings, *, multiplier: int = 1) -> "Dict[str, Any]":
-    """规划/反思这一次调用的 `max_tokens` splat。**legacy 与 v2 共用。**
-
-    这是部署配置不是策略:同一个工种(逐步推理)在两条路径上要的是同一个输出上限,
-    所以 `REASONING_REFLECT_V2_ENABLED` 关着时这个数照样生效——关闭态的「逐字节
-    等价」说的是 prompt / schema / trace,不含这一格预算。
-
-    预算从 `self.settings` 取而不是从客户端取(`cap_kwargs`):检索器自己持有权威
-    的 `Settings`,而它拿到的反思客户端可能是一个没有 settings 的离线桩——那时
-    "读不到预算"应该是配置缺失,不该由客户端身份决定。
-    """
-    return budget_kwargs(settings, REASONING_BUDGET_ATTR, multiplier=multiplier)
-
-
-def _call_stats_kwargs(client, sink: "Dict[str, Any]") -> "Dict[str, Any]":
-    """只对**自己声明支持**的客户端传 `call_stats` 出参。
-
-    同 `cap_kwargs` 的处世方式:一个 duck-typed 的测试替身或插件绑定的客户端不该
-    因为反思层想多要一格诊断信息就被迫改签名。判据用一个显式的类属性
-    (`supports_call_stats`)而不是 `inspect.signature`——签名反射会把一个写了
-    `**kwargs` 的替身认成"支持",于是 sink 恒为空、上面那次加预算重试永远不触发,
-    而没有任何一条用例会红。
-    """
-    return {CALL_STATS_KWARG: sink} if getattr(
-        client, "supports_call_stats", False) else {}
-
-
-def _registered_measure_key(name: str) -> str:
-    """把一个 reflect 步 detail 的测量键名对着读侧的登记清单兑一次再用(T-PS3)。
-
-    写侧不许自己抄一份字面量:`REFLECT_MEASUREMENT_DETAIL_KEYS` 是读侧
-    (`app.domain.reasoning_trace_stats` 的投影)认得的那一份闭集,写侧多写一个
-    读侧不认的键,后果是**那一列静默缺席**——投影照样出整行,只是那一格恒为
-    `None`,而没有任何一条用例会红。所以这里在**导入期**就把每个键名兑一遍:
-    读侧改名或删键,进程起不来,而不是数据悄悄变空。
-
-    在导入期抛而不是 `assert`:`python -O` 会把断言整条删掉,而这一道是唯一能
-    把「读写两侧对不上」变成可见故障的判据。逐轮那道 `⊆` 判据(见
-    `_TraceRecorder.__call__`,同样是 `raise` 而不是 `assert`)是它的第二重保险,
-    防的是"键名合法但走错了写点"。
-    """
-    if name not in REFLECT_MEASUREMENT_DETAIL_KEYS:
-        raise RuntimeError(
-            "reflect measurement detail key is not registered in "
-            f"app.domain.reasoning_trace_stats: {name}")
-    return name
-
-
-#: 上下文块短码 → detail 键。产地是读侧那张表,这里只兑一次,不重排也不改名。
-_MEASURE_CTX_KEYS: Dict[str, str] = {
-    code: _registered_measure_key(key)
-    for code, key in REFLECT_CONTEXT_DETAIL_KEYS.items()
-}
-_MEASURE_PREFIX_BYTES = _registered_measure_key("message_prefix_bytes")
-_MEASURE_CARDS_SHOWN = _registered_measure_key("cards_shown")
-_MEASURE_CARDS_OMITTED = _registered_measure_key("cards_omitted")
-#: `call_stats` 出参上的键 → reflect 步 detail 上的键。两侧名字不同的只有
-#: `attempts`(detail 里叫 `call_attempts`,因为那一层还有别的 attempts)。
-_MEASURE_CALL_KEYS: Dict[str, str] = {
-    "call_wall_ms": _registered_measure_key("call_wall_ms"),
-    "attempts": _registered_measure_key("call_attempts"),
-    "response_chars": _registered_measure_key("response_chars"),
-}
-#: `_DELTA_LAYOUTS`(`prefix_delta`/`prefix_delta_lean`)的三个**行为事实**键
-#: (拍板 Q7)。与上面那几个的区别:它们不是
-#: "量出来的",而是这条臂做过什么——重建过几次、有没有不可逆地回退、这一条消息里
-#: 有几块 D。所以它们在测量关时也写(载体见 `ReflectMeasurement.measures_messages`)。
-_MEASURE_CONTEXT_REBUILDS = _registered_measure_key("context_rebuilds")
-_MEASURE_CONTEXT_FALLBACK = _registered_measure_key("context_fallback")
-_MEASURE_DELTA_BLOCKS = _registered_measure_key("delta_blocks")
-#: 本轮自评的两个落账键(PR-4 拍板 Q8)。与上面那三个不同:它们**不是**行为事实,
-#: 门是普通的测量开关(`ReflectMeasurement.measures_messages`),而且**四臂通写**
-#: ——`assessment_rows` 是这一轮实际落账的方面数、`assessment_absent` 是载荷压根
-#: 没带 `assessment`。只在 L 写的话,D↔L 这一对就没有共同基线,「L 到底省了多少
-#: 重述」永远只能靠 prompt 字节反推。写点见 `_note_assessment_measurement`。
-_MEASURE_ASSESSMENT_ROWS = _registered_measure_key("assessment_rows")
-_MEASURE_ASSESSMENT_ABSENT = _registered_measure_key("assessment_absent")
-
-#: 第三条前缀布局臂的取值,**具名一次**(PR-4 T-PL5)。三个判据读它:账本的
-#: lean 开关(`_v2_build_aspect_ledger`)与 S/T 两处 lean 文本
-#: (`_prefix_context` 的两个调用点)。三处各抄一份字面量的后果是最难看见的
-#: 那一种——抄错一处不会崩,只会让那条路上的 run 在 L 的臂标签下跑着 D 的合同,
-#: 而这件事只在 A/B 表上看得出来(`build_aspect_ledger` 的 docstring 同款理由)。
-_LEAN_LAYOUT = "prefix_delta_lean"
-_EVIDENCE_LAYOUT = "prefix_delta_evidence"
-
-#: 两条**基于增量装配**的臂:消息形状与 `prefix_delta` 完全相同
-#: (`system(S)` + 一条 `user(C+K+D+T)`,K/D 两块同一套内容判据),
-#: `prefix_delta_lean` 在它之上只换自评合同(计划 §0「L = D + 自评合同」)。
-#: 两处历史上写字面量 `"prefix_delta"` 的字面相等(消息装配分派、测量构造门)
-#: 现在都改读这份成员判断,免得放开 `prefix_delta_lean` 时漏改一处、让它拿到
-#: `prefix_snapshot` 的装配却在文档/投影上自称 delta 臂。
-_DELTA_LAYOUTS = ("prefix_delta", _LEAN_LAYOUT, _EVIDENCE_LAYOUT)
-#: 三条**前缀布局**臂。消息形状完全相同(`system(S)` + 一条 `user(C+K+D+T)`),
-#: 差别只在 K/D 两块的内容判据(PR-3/PR-4 计划 §0),所以 `_reflect_prefix_layout`
-#: 的分派一格不变、只多认新取值,回退也不经过那里。
-_PREFIX_LAYOUTS = ("prefix_snapshot", *_DELTA_LAYOUTS)
-
-#: **对账守卫**:放开一格策略位却忘了在这里接线 ⇒ 进程起不来。
-#:
-#: 少了它,故障形态是最难看见的那一种:`config.REFLECT_OPTIMIZATION_IMPLEMENTED`
-#: 多一格 ⇒ 校验器在启动期放行 ⇒ `reflect_optimization()` 如实返回那个取值 ⇒
-#: 而 `_reflect_prefix_layout` 认不出它,于是那条臂**能起来、却发 off 的布局**。
-#: 部署以为自己在跑新臂,每一条测量都被归到错误的臂上,rig 的
-#: `assert_optimization_matches_evidence` 也拦不住(它比的是投影标签与证据,两边
-#: 都如实说 off 的形状)。在导入期 `raise` 而不是 `assert`:`python -O` 会把断言
-#: 整条删掉,而这是唯一能把"放开了却没接线"变成可见故障的判据。
-if set(REFLECT_OPTIMIZATION_IMPLEMENTED) != {"off"} | set(_PREFIX_LAYOUTS):
-    raise RuntimeError(
-        "reflect optimization closed set drifted from the wired layouts: "
-        f"{sorted(REFLECT_OPTIMIZATION_IMPLEMENTED)} vs "
-        f"{sorted({'off', *_PREFIX_LAYOUTS})}")
-
-#: 一张补充卡相对**原卡**的字节上界(版本标记 + 它自己那一格分隔符)。
-#:
-#: 用途只有一个:`ReflectDeltaState.supplement_for` 的调用契约要求"非空返回值无
-#: 条件拼进本块",所以调用方必须在**调用之前**就确认装得下。但那串标记的长度只有
-#: 调用之后才知道——于是这里从**产地那一份字面量**算一个上界:版本号取
-#: 10**6(七位数,远高于任何一个 run 的轮数,所以是真上界),再加一格 `" | "`。
-#: 从常量本身算而不是手写一个数:措辞一改这里跟着改,而一个写死的数会在措辞变长
-#: 的那一天静默变成下界。它是**上界**,所以估多不估少——按它预留、按实际长度记账。
-_SUPPLEMENT_CARD_OVERHEAD = len(
-    SUPPLEMENT_CARD_NOTE.format(version=10 ** 6)) + len(" | ")
-
-#: 一块 D 的块头按每块一次计进证据池(口径见 `build_delta_evidence_block` 的
-#: docstring:`本块实际占用 = len(DELTA_BLOCK_TITLE) + 1 + len(卡片节)`)。
-_DELTA_HEAD_CHARS = len(DELTA_BLOCK_TITLE) + 1
-
-#: D 里"上一轮服务端已接受的方面更新"那一句(计划 §1 M2 的冲突 C1:方面的**当前
-#: 状态**整块仍在 T,这里只留"本轮接受了哪些 id"这条历史事实)。措辞点名它是模型
-#: 自己写的判断,不是原文——同 `reasoning_observation.HISTORY_NOTE` 的纪律。
-_DELTA_ACCEPTED_ASPECTS_NOTE = "本轮服务端已接受的方面更新：{ids}（模型判断，非原文）"
-
-
-def _common_prefix_bytes(left: bytes, right: bytes) -> int:
-    """两串字节的公共前缀长度。纯函数,零分配。
-
-    朴素逐字节循环:这条路只在测量开着时走,一轮一次,而它量的那次模型调用是
-    三个数量级更贵的东西——为了几微秒换一个二分 + 切片比较(每次比较都要
-    复制一份切片)不划算,也更难看出对不对。
-    """
-    limit = min(len(left), len(right))
-    index = 0
-    while index < limit and left[index] == right[index]:
-        index += 1
-    return index
-
-
-def _measure_reflect_messages(
-    measurement: "ReflectMeasurement", context: "ReflectContext",
-    messages: "List[Dict[str, str]]", schema_hint: str, material: str,
-) -> None:
-    """本轮的块长度、消息字节总数与公共前缀(T-PS3;计划 §3、拍板 Q2)。
-
-    落在 `_reflect_v2_attempt` 而不是 `_reflect_v2_context`,是因为五块里有三块
-    的**最终**字节只有这里才有:`off` 的 S 是那一轮现渲染的动态 system 段、C 由
-    `prompts` 把问题拼进去之后才成形、`prefix_snapshot` 的 T 还差一半(本轮可执行
-    动作)要等这一轮的能力投影。谁产出那个值,谁记那个值——`_reflect_v2_context`
-    只记它自己独有的那两个(展示/省略卡数)。
-
-    五块的口径**两条臂同形**(测量的意义就在于两条臂用同一把尺子):
-
-    * `S` = 这一轮 system 段的全部字符,含严格调用方那句 run 级的"材料不可信"。
-    * `K` = 证据卡那一块。`D` = **位置口径**(PR-3 拍板 Q2):观察账那一块 + 本轮
-      消息里**全部**增量块。`prefix_delta` 之外 `context.delta` 恒为空串,所以这
-      一格逐字节回到接入前;delta 下 `d` 因此如实回答"K 之后、T 之前有多少字符",
-      而不是"上一块增量有多长"。池账(K + 各 D 的累计用量)是投影内部的判据,不是
-      给读表人的量——两条臂能直接比大小的前提就是这五格按**位置**定义。
-    * `T` = 装配好的材料块减去 K 与 D:`off` 下是服务器状态摘要(它在 `off` 里
-      排最前、在 P 里排最末,但**大小**是同一个量),P 下是本轮动作清单 + 状态半。
-      块间那两个 `\\n\\n` 落在这一格里。
-    * `C` = user 段减去整个材料块:问题原文、引号规则、方面契约(只有 P 有)与
-      收尾那句。
-
-    于是 `S + C + K + D + T` 恰好等于两条消息正文的字符数之和——一格字符都不
-    丢、不重复计。这条恒等式是这五个数唯一的自洽判据,有用例钉住。
-
-    `ctx_bytes_total` 是**这一轮最终消息的全部字节**(含 wrapper 与帧开销),因为
-    公共前缀正是在同一串字节上算的——分子分母同口径,那道除法才成立(计划 §3
-    T-PS3 与读侧 `REFLECT_CONTEXT_DETAIL_KEYS` 的说明互为合同)。字符数与字节数
-    在中文上差三倍,所以它既不是上面五格之和、也不该拿去和它们比大小。
-
-    首轮 `message_prefix_bytes` 如实为 `None`:那时没有可比的上一轮。请求文本
-    只在内存里过一遍,不进 llm.jsonl、不进 trace、不进投影。
-    """
-    chars_k = len(context.evidence)
-    chars_d = len(context.observations) + len(context.delta)
-    detail = measurement.detail
-    keys = _MEASURE_CTX_KEYS
-    detail[keys["s"]] = len(messages[0]["content"])
-    detail[keys["c"]] = len(messages[1]["content"]) - len(material)
-    detail[keys["k"]] = chars_k
-    detail[keys["d"]] = chars_d
-    detail[keys["t"]] = len(material) - chars_k - chars_d
-    final = serialize_provider_messages(
-        provider_messages(messages, schema_hint))
-    detail[keys["bytes_total"]] = len(final)
-    detail[_MEASURE_PREFIX_BYTES] = (
-        None if measurement.previous is None
-        else _common_prefix_bytes(measurement.previous, final))
-    # 升为「上一轮」的时机不在这里,而在这一轮真的记了 reflect 步的那一刻
-    # (`ReflectMeasurement.take`):同一轮的两次尝试因此都和上一轮比。
-    measurement.current = final
-
-
-def _measure_reflect_messages_safely(
-    measurement: "ReflectMeasurement", context: "ReflectContext",
-    messages: "List[Dict[str, str]]", schema_hint: str, material: str,
-) -> None:
-    """把上面那次测量**关进它自己的 try**(T-PS3 评审 P1)。
-
-    测量排在 `client.chat_json` 之前、而那整段又住在 `_reflect_v2_attempt` 的
-    fail-open `try` 里。少了这一层,一次观测故障会被那条 `except Exception` 洗成
-    一次**假的模型兜底**:那一轮的请求根本没发出去,轨迹上却多出一条
-    `__reflect_invalid__`,`fail_closed` 调用方(knowhow 补全)则整次死掉——测量
-    因此改变了它本该只旁观的那件事,而对照实验会把这次分叉记到「臂」头上。
-
-    纪律与同文件 `_TraceRecorder.__call__` 对 observer 投影那段逐字相同:它读的是
-    模型可以影响形状的东西(消息正文来自上一轮的动作参数),所以「它永远不会抛」
-    不是一个可以假设的性质。既然如此,失败的表现只许是**键缺席**——与
-    `_measure_reflect_call` 的「客户端不报就缺键、绝不写 0」同一条口径,读侧把缺
-    席读成 unknown。日志只留异常**类名**:请求文本一个字节都不许进日志(`exc_info`
-    会把出问题的那段正文带进 traceback,所以这里也不给)。
-
-    连 `previous` 一起清掉,而不只是不写本轮的键:下一轮若拿一个**隔了一轮**的
-    基准去算公共前缀,量出来的数看着完全正常,却回答了另一个问题。丢掉基准后
-    下一轮的 `message_prefix_bytes` 如实缺席,与首轮同义。
-    """
-    try:
-        _measure_reflect_messages(
-            measurement, context, messages, schema_hint, material)
-    except Exception as exc:  # noqa: BLE001 — 观测绝不参与业务决定
-        measurement.current = None
-        measurement.previous = None
-        logging.getLogger(__name__).debug(
-            "reflect context measurement failed: %s", type(exc).__name__)
-
-
-def _measure_reflect_call(
-    measurement: "ReflectMeasurement", stats: "Mapping[str, Any]",
-) -> None:
-    """把一次调用的 `call_stats` 观测**累加**进本轮的测量键(T-PS3)。
-
-    累加而不是覆盖:v2 在正文被 `max_tokens` 切断时会同轮再调一次(加预算重试),
-    而读侧 `model_calls_real` 是各 reflect 步 `call_attempts` 之和——一轮只报最后
-    一次的请求数,整 run 的真实请求数就偏低,而那一列本来就是用来判「日志里的
-    请求数是真值还是下界」的。墙钟与正文字符数同一条口径:它们回答的是"这一轮
-    reflect 在模型上花了多少",而不是"最后那一次花了多少"。
-
-    缺键 ⇒ **不写**。空 sink 有两种成因(客户端不声明 `supports_call_stats`、或
-    调用在做任何事之前就被拒),两种都是"没有观测",不是 0——写 0 会让读侧把
-    一次没量到的 run 读成"一次模型都没调"。`bool` 显式排除:它是 `int` 的子类,
-    一个把 `attempts` 写成 `True` 的替身会被求和成 1。
-    """
-    detail = measurement.detail
-    for source, key in _MEASURE_CALL_KEYS.items():
-        value = stats.get(source)
-        if isinstance(value, int) and not isinstance(value, bool):
-            detail[key] = (detail.get(key) or 0) + value
-
-
-def _joined_chars(parts: "Sequence[str]") -> int:
-    """一节里若干行拼起来占多少字符(每行各算一个换行)。
-
-    比真实拼接**多算一个**分隔符(最后一行后面并没有换行)。刻意估多不估少:这个
-    数只用在"再追加这一节会不会超预算"的判断里,而估少的那一侧会让池子稳定超出
-    预算一点点,delta 下这一点点是**逐块累计**的。
-    """
-    return sum(len(part) + 1 for part in parts if part)
-
-
-def _delta_pending_charges(
-    cards_text: str, lines: "Sequence[str]", notes: "Sequence[str]",
-) -> "Tuple[int, int]":
-    """待追加的这一块要向两个池各要多少字节:`(证据池, 历史池)`。纯计算。
-
-    准入判断与落账**同一处口径**(设计 §5.1):块头与卡片节计证据池,动作观察行与
-    "已接受的方面更新"那一句计历史池。这个函数的返回值就是后面那两条 `+=` 的加数
-    ——`_DELTA_HEAD_CHARS` 与 `_joined_chars` 都是产地那两个,不是第二份等价实现。
-    (块头按 `_DELTA_HEAD_CHARS` 计,`generation > 1` 那个后缀两侧同样都不计:准入
-    与落账用同一个常量才是这里要的性质,而不是各自更精确一点。)
-
-    **块会不会是空的**由 `build_delta_block` 自己回答(三节全空 ⇒ 空串 ⇒ 什么都不追
-    加 ⇒ 两笔账各 0)。`generation=1` 只是为了问这一句而给的哑值:那一格只改块头的
-    文字,不参与"有没有内容"的判据。空判据在这里第二次实现的后果是它与产地漂开——
-    那时准入会为一块根本不会发出去的块去算两笔费用,或者反过来放过一块真会发出去
-    的块,而两种都在字节上看着完全正常。
-
-    codex #707 R1 P2:少了这一处,只带观察行/方面 note、没有候选新卡的那些轮
-    (`crowded` 为假)会**无条件**追加,即使块头已经顶破剩余证据池、或那句 note 顶
-    破历史池——而 delta 的两笔账是逐块累计的,一次放过就一路带下去。
-    """
-    if not build_delta_block(cards_text, lines, notes, generation=1):
-        return 0, 0
-    return (_DELTA_HEAD_CHARS + len(cards_text),
-            _joined_chars(lines) + _joined_chars(notes))
-
-
-def _delta_max_cards(settings, effort: str) -> int:
-    """`prefix_delta` 单块最多新展开几张卡(按档位)。
-
-    读法逐条镜像 `_reflect_v2_context` 里那四项既有预算:`getattr` 而不是直读、
-    缺档回默认档、缺字段回已登记默认值,**绝不因为少一个字段就当成 0**——0 会让
-    每一块 D 都装不下任何一张新卡,而那在字节上表现为"这条臂什么都没发",不是
-    一次响亮的失败。
-    """
-    caps = getattr(
-        settings, "reasoning_reflect_delta_cards_by_effort", None) or {}
-    return int(
-        caps.get(effort)
-        or DEFAULT_REFLECT_DELTA_CARDS_BY_EFFORT.get(effort)
-        or DEFAULT_REFLECT_DELTA_CARDS_BY_EFFORT[DEFAULT_RETRIEVAL_EFFORT])
-
-
-def _delta_target_ratio(settings) -> float:
-    """重建 K 时可压缩材料占对应池子的**目标**比例(设计 §5.1/§5.2)。
-
-    它是目标不是硬界:必要材料可以在硬预算内高于它(那一步由
-    `build_evidence_block` 自己的预算判断守着),而它的作用只有一个——给后续增量
-    留出空间,免得首轮把池子填满、第二轮立刻重建。
-
-    `bool` 显式排除:它是 `int` 的子类,一个把这一格写成 `True` 的 duck-typed 替身
-    会被折算成比例 1.0,于是首版 K 就把整份预算吃干净——正好是这一格要防的那件事。
-    """
-    ratio = getattr(settings, "reasoning_reflect_compaction_target_ratio", None)
-    if isinstance(ratio, (int, float)) and not isinstance(ratio, bool):
-        return float(ratio)
-    return 0.5
-
-
-def _table_excerpt_chars(settings, optimization: str) -> int:
-    if optimization != _EVIDENCE_LAYOUT:
-        return 0
-    return int(getattr(settings, "reasoning_reflect_table_excerpt_chars", 1200))
-
-
-def _has_continued_retrieval(trace) -> bool:
-    """Only a validated model continuation arms prose reading, never seed I/O."""
-    for step in trace:
-        if step.step_type != "reflect":
-            continue
-        detail = step.detail
-        action = ACTION_DEFINITIONS.get(detail.get("next_action"))
-        if (action is not None and action.produces_evidence
-                and detail.get("sufficient") is False
-                and "fallback_reason" not in detail):
-            return True
-    return False
-
-
-def _retained_prose_details(state) -> bool:
-    delta = state.reflect_delta
-    if delta is None or not delta.prose_detail_fingerprints:
-        return False
-    allowed = prose_source_keys(state.collected, state.elements, state.chunks)
-    material = "\n".join((delta.snapshot_evidence, *delta.blocks,
-                          *delta.frozen_cards.values(), *delta.supplement_latest_cards.values()))
-    return any(key in allowed for key, _ in
-               visible_excerpt_identities(material) & delta.prose_detail_fingerprints)
-
-
-def _prose_detail_cards(settings, optimization, state, observer, excerpt_chars, table_chars, budget):
-    if optimization != _EVIDENCE_LAYOUT or not bool(getattr(
-            settings, "reasoning_reflect_prose_detail_enabled", True)):
-        return None
-    if not _has_continued_retrieval(state.trace):
-        return None
-    selected = select_prose_detail_cards(
-        collected=state.collected, elements=state.elements, chunks=state.chunks,
-        question=state.question, action_query=observer.last_query,
-        excerpt_chars=excerpt_chars, table_excerpt_chars=table_chars,
-        budget_chars=budget,
-        detail_chars=int(getattr(settings, "reasoning_reflect_prose_detail_chars", 1000)),
-        max_cards=int(getattr(settings, "reasoning_reflect_prose_detail_cards", 2)))
-    return selected if selected or _retained_prose_details(state) else None
-
-
-def _prose_visibility_note(state, evidence, delta, observations, detail_cards, history_budget):
-    projection = state.reflect_delta
-    if history_budget is None or projection is None:
-        return ""
-    # Both normal and fallback K have their own observation slice. Retained D
-    # has the same history charge in either path; no budget is deducted early.
-    history_left = max(0, history_budget - len(observations)
-                       - _carried_delta(projection).history_chars)
-    return render_prose_progress(
-        projection.visible_excerpt_fingerprints, projection.prose_detail_fingerprints,
-        "\n\n".join((evidence, delta)), detail_cards,
-        prose_source_keys(state.collected, state.elements, state.chunks)
-        if detail_cards is not None else (), history_left)
-
-
-def _delta_frozen_cards(delta, table_excerpt_chars: int, terms=()):
-    if delta is None:
-        return {}
-    if not table_excerpt_chars or not delta.supplement_latest_cards:
-        return delta.frozen_cards
-    return select_frozen_card_views(
-        delta.frozen_cards, delta.supplement_latest_cards, terms)
-
-
-def _build_delta_snapshot(
-    state, delta: "ReflectDeltaState", observer, *, bound_keys, fresh_keys,
-    budget: int, state_chars: int, excerpt_chars: int, recent: int,
-    ratio: float, table_excerpt_chars: int = 0, detail_cards=None,
-):
-    """建/重建一版 K,并把投影上的累计账**整体清零**(设计 §5.2 第 1–4 条)。
-
-    首次构造与重建走**同一份**代码:两者的区别只有调用方那边的 `generation` /
-    `rebuilds` 加不加,而"第一版按目标比例建、后面每一版也按目标比例建"正是 §5.2
-    首句要的东西(不先把池子填满、第二轮立刻重建)。写成两份的话,首版与重建版的
-    选卡判据迟早会漂开,而那种漂移在字节上看着完全正常。
-
-    **冻结表只增不减,当前可见集随 K 收缩**(拍板存疑 1)。两者在第一次重建之前恰好
-    相等,之后就不再相等:`build_evidence_block` 读冻结表,所以一张曾展示过的卡进新
-    K 时复用的仍是它第一次发出去的那串字节(§4.4「展示后保持不变」);而离开新 K 的
-    那些键不再"可见",以后经增量档序回到某一块 D 时同样复用冻结字节
-    (§4.4「可从已有内存池恢复」)。拿冻结表当可见集用的话,这批卡会被"曾展示"口径
-    永久挡在增量之外,而且不进任何一个 `omitted` ——它对模型从此不可见,却没有一个
-    计数披露这件事。
-
-    **两个观察切片不相交**(拍板存疑 2):`render_observations` 只吃近期窗、
-    `fold_observation_counts` 只吃窗外,于是"更早的 N 条未列出"与"总计已尝试 M 次"
-    各指自己那一段,恒等式是 `窗内已列 + 窗内 dropped + 窗外总计 == len(rows)`。喂
-    全量行给前者的话,它自己那圈收敛循环会按整份账写省略数,两句话于是各自成立却
-    互相矛盾。
-
-    游标推到账本末尾:那些还没进过任何一块 D 的观察行由这一版 K 的近期窗与折算计数
-    接过去,一条都没有被静默丢掉。纯计算、零 I/O、零 LLM、零配额。
-
-    **绑定资格的登记不在这里**:`ever_shown_outline_keys.update` 由调用方在"确认这
-    一版 K 真的会发出去"之后做。这一次重建可能在紧跟的回退判据上被整个丢弃,而在
-    这里登记就等于让一版从未发出的 K 里的键取得绑定资格——模型没见过卡面,却能引证
-    它(设计 §4.4/§6.2)。返回值就是那一版的选取,调用方据此登记。
-
-    模块级函数而不是方法:五项预算由 `_reflect_v2_context` 与它那两个专用 helper
-    (每个字段恰一个读点,计划 §1 M5)读完再传下来,所以这里一格 `self` 都不需要
-    ——「不会自己再读一次 settings」这件事因此是结构成立的,不靠注释。
-    """
-    rows = observer.rows
-    selection = build_evidence_block(
-        collected=state.collected, elements=state.elements,
-        chunks=state.chunks, chains=state.chains,
-        bound_keys=bound_keys, fresh_keys=fresh_keys,
-        question=state.question, action_query=observer.last_query,
-        budget_chars=int(budget * ratio), excerpt_chars=excerpt_chars,
-        frozen_cards=_delta_frozen_cards(
-            delta, table_excerpt_chars,
-            excerpt_terms(state.question, "", excerpt_chars) if table_excerpt_chars else ()),
-        table_excerpt_chars=table_excerpt_chars, detail_cards=detail_cards)
-    window = rows[-recent:] if recent > 0 else ()
-    earlier = rows[:len(rows) - len(window)]
-    evidence, history = compose_snapshot(
-        selection.text,
-        render_observations(
-            window, recent=recent, state_chars=int(state_chars * ratio)),
-        fold_observation_counts(earlier))
-    delta.snapshot_evidence = evidence
-    delta.snapshot_history = history
-    delta.blocks.clear()
-    # 可见集的两格与它们各自对应的那一块同时清账:K 的那格整体换成这一版真的渲染
-    # 出来的键,D 的那格随 `blocks` 清空(`frozen_cards` 不动,理由见上)。
-    delta.snapshot_keys = {str(key) for key in selection.shown_keys}
-    delta.block_keys.clear()
-    if table_excerpt_chars:
-        # A previously checked view may have disappeared with the old K/D.
-        delta.supplement_checked_keys.clear()
-    for key, text in selection.cards:
-        delta.note_shown(key, text)
-    delta.evidence_chars = len(evidence)
-    delta.history_chars = len(history)
-    delta.observation_cursor = len(rows)
-    return selection
-
-
-def _delta_cards(
-    state, delta: "ReflectDeltaState", observer, *, bound_keys, fresh_keys,
-    budget: int, max_cards: int, excerpt_chars: int, table_excerpt_chars: int = 0,
-    detail_cards=None,
-):
-    """这一块 D 里**新展开**的那几张卡。纯读:一格投影都不改。
-
-    额度是 delta 的累计口径(设计 §5.1):证据池计 **K + 所有 D 的总和**,所以传
-    下去的是 `budget - evidence_chars`,不是每轮各拿一份满额。`already_shown` 传的
-    是**当前可见集**(K 那一版的键 ∪ 已发出 D 块的键)而不是冻结表,理由见
-    `build_delta_evidence_block`;`frozen_cards` 则让"曾展示、此刻不可见"的卡回来时
-    复用原来那串字节。
-
-    它被调用**两次**(重建前一次当预算探针、重建后一次当真正要发的那一块)是刻意
-    的:探针只读不写,所以丢掉重算一次是安全的;把它的产出留到重建之后再用才是错
-    的——重建换了可见集与剩余额度,那一份产出回答的是重建**之前**的问题。
-
-    模块级函数而不是方法:它一格 `self` 都不读(settings 已经被调用方折算成几个
-    数了),而"纯读"这件事在一个不能碰实例的函数上是结构成立的,不靠注释。
-    """
-    return build_delta_evidence_block(
-        collected=state.collected, elements=state.elements,
-        chunks=state.chunks,
-        bound_keys=bound_keys, fresh_keys=fresh_keys,
-        already_shown=(*delta.snapshot_keys, *delta.block_keys),
-        question=state.question, action_query=observer.last_query,
-        budget_chars=budget - delta.evidence_chars,
-        excerpt_chars=excerpt_chars, max_cards=max_cards,
-        frozen_cards=_delta_frozen_cards(
-            delta, table_excerpt_chars,
-            excerpt_terms("", observer.last_query, excerpt_chars) if table_excerpt_chars else ()),
-        table_excerpt_chars=table_excerpt_chars, detail_cards=detail_cards)
-
-
-def _visible_supplement_candidates(delta, query: str) -> List[str]:
-    if query != delta.supplement_query:
-        delta.supplement_query = query
-        delta.supplement_checked_keys.clear()
-    visible = delta.snapshot_keys | delta.block_keys
-    # Frozen insertion order remains stable when the K/D sets are rebuilt.
-    return [key for key in delta.frozen_cards
-            if key in visible and key not in delta.supplement_checked_keys]
-
-
-def _delta_supplements(
-    state, delta: "ReflectDeltaState", observer, *, candidate_keys,
-    max_cards: int, excerpt_chars: int, budget_left: int,
-    table_excerpt_chars: int = 0, visible_fallback: bool = False,
-    detail_cards=None,
-) -> "Tuple[str, ...]":
-    """同 key 的摘录升级 ⇒ 几张标着版本的补充卡(拍板 Q3/Q8,评审后修正)。
-
-    候选集由调用方给,口径是「**本轮已绑定证据的键** ∩ 冻结表」:绑定键正是这一轮
-    模型要重新判断的那些方面所引的证据,而摘录窗口跟着本轮的 `action_query` 走——
-    同一条证据在这一轮可能真的该给出另一段原文。检测范围仍然是收窄的(至多
-    `max_cards` 个键),因为全量比对是每轮 O(池) 次 `select_excerpt`,正是这条臂要
-    省的那笔开销。
-
-    原先那一版口径是「本轮 `fresh_result_ids()` ∩ 冻结表」,评审证伪:那三个来源
-    (trace detail 的 `result_ids`、`note_fresh_ids` 侧信道、首轮播种)都只报**真的
-    新进池子**的标识,而一个键第一次进池子的那一轮要么还没被冻结,要么刚被同一轮的
-    K/D 用同一批检索词冻结——于是这个交集在生产口径下恒空,整条路径不可达。
-
-    **候选集的收窄只在这里做一次**:调用方给的是那一轮的绑定键序,`∩ 冻结表` 这道
-    口径留在这里(调用点再滤一遍是同一条判据的第二份实现,改这里的口径时那一份会
-    静默变成陈的)。
-
-    **轮转**(`ReflectDeltaState.supplement_last_key`):从上一轮服务的最后一个键在
-    **本轮候选序**里的位置往后接,取至多 `max_cards` 个,末尾绕回队首;那个键已经
-    不在候选序里(离开绑定或离开池子)⇒ 从头开始。绑定键序是"大纲在前、方面轮转"的
-    序,恒从队首取的话队首那几个键每轮被重算一遍摘录、队尾的键永远等不到自己那一
-    轮。续接点存**键**而不是位置:候选序的长度与顺序每轮都会变(方面新绑一个键就整
-    段移位),而位置游标在"每轮左旋一格"这种形态下会稳定取到同一批键——三个候选、
-    `max_cards=2`、每轮左旋一格时第三个键一轮都轮不到,正是这一格要修的那件事。
-
-    **先选后调**(`ReflectDeltaState.supplement_for` 的调用契约):这里先按
-    `max_cards` 与剩余额度定下要发哪几个键,再对它们调 `supplement_for`,非空返回值
-    **无条件**拼进本块。反过来(先调再按预算丢)会让那一份更好的摘录从此每轮命中
-    判重、恒返回空串,于是它永远到不了模型,而且没有任何一个计数会披露这件事。
-
-    **重算的字节与冻结那一行相同 ⇒ 一张都不发**:那一格由 `supplement_for` 的判重
-    做(冻结的那串字节在 `note_shown` 里就进了 `card_variants`),返回空串即不追加。
-    所以"这一轮摘录没变"的常态代价只有一次重算,不产生任何字节。
-
-    额度按 `_SUPPLEMENT_CARD_OVERHEAD` 这个**上界**预留:版本标记的长度只有调用
-    之后才知道,而契约不允许"调了再丢"。装不下就 `continue` 而不是 `break` ——一张
-    塞不下的大卡不该把后面装得下的小卡一起挡掉,而候选本来就只有至多 `max_cards`
-    个,扫完它们的代价是有界的。
-    """
-    actual_bound = tuple(candidate_keys)
-    use_visible = visible_fallback and not actual_bound
-    if use_visible:
-        candidate_keys = _visible_supplement_candidates(delta, observer.last_query)
-    current_material = "\n".join([delta.snapshot_evidence, *delta.blocks]) if visible_fallback else None
-    # Detail upgrades of already-visible paragraphs are append-only. A fully
-    # shown detail must not take the rotation slot again on an unchanged query.
-    detail_keys = []
-    if detail_cards and visible_fallback:
-        visible = delta.snapshot_keys | delta.block_keys
-        # Check the bytes that can actually fit, not an oversized proposal that
-        # would fall back to the same short card and steal a scan slot forever.
-        detail_keys = [key for key, text in render_pool_cards(
-            collected=state.collected, elements=state.elements,
-            chunks=state.chunks, keys=[key for key in detail_cards if key in visible],
-            question=state.question, action_query=observer.last_query,
-            excerpt_chars=excerpt_chars, table_excerpt_chars=table_excerpt_chars,
-            detail_cards=detail_cards,
-            budget_chars=budget_left - _SUPPLEMENT_CARD_OVERHEAD - 1)
-            if len(text) + _SUPPLEMENT_CARD_OVERHEAD + 1 <= budget_left
-            and not excerpt_already_visible(text, current_material or "")]
-        candidate_keys = (*candidate_keys, *detail_keys)
-    candidates = [
-        key for key in dict.fromkeys(str(raw) for raw in candidate_keys)
-        if key in delta.frozen_cards
-        and (detail_cards is None or key not in detail_cards
-             or key in detail_keys or key in actual_bound)]
-    if not candidates or budget_left <= 0:
-        return ()
-    start = (candidates.index(delta.supplement_last_key) + 1
-             if delta.supplement_last_key in candidates else 0)
-    rotated = candidates[start:] + candidates[:start]
-    bound_first = [key for key in rotated if key in actual_bound] if detail_cards is not None else []
-    ordered = list(dict.fromkeys((*bound_first, *detail_keys, *rotated)))[:max_cards]
-    delta.supplement_last_key = ordered[-1]
-    lines: List[str] = []
-    used = 0
-    for key, text in render_pool_cards(
-            collected=state.collected, elements=state.elements,
-            chunks=state.chunks, keys=ordered,
-            question=state.question, action_query=observer.last_query,
-            excerpt_chars=excerpt_chars, table_excerpt_chars=table_excerpt_chars,
-            detail_cards=detail_cards,
-            budget_chars=budget_left - _SUPPLEMENT_CARD_OVERHEAD - 1):
-        if detail_cards is not None and excerpt_already_visible(text, current_material or ""):
-            if use_visible:
-                delta.supplement_checked_keys.add(key)
-            continue
-        if used + len(text) + _SUPPLEMENT_CARD_OVERHEAD + 1 > budget_left:
-            continue
-        line = delta.supplement_for(key, text, current_material=current_material)
-        if use_visible:
-            delta.supplement_checked_keys.add(key)
-        if line:
-            if visible_fallback:
-                delta.supplement_latest_cards[key] = line
-            lines.append(line)
-            used += len(line) + 1
-    return tuple(lines)
-
-
-@dataclass(frozen=True, slots=True)
-class _CarriedDelta:
-    """回退时**上文里留着的那几块 D**:块字节、块里的键,和它们占掉的两笔账。
-
-    回退不清空已发出的 D(拍板 Q4),而回退之后 K 由 P 的有界选择每轮重建——于是那
-    一支必须知道三件事:留下来的是哪几块(还原 `blocks`)、里面已经可见的是哪些键
-    (排除在新 K 之外,否则同一条证据在一条消息里出现两遍、两遍都不带版本标记),以
-    及它们已经占掉多少证据池与历史池(剩下的才是这一轮 K 的额度,否则一条消息的证
-    据池实测可以涨到档位的两倍并**持续到 run 结束**)。
-
-    两笔账按 delta 自己的口径拆(设计 §5.1):块头与卡片节计证据池,观察行与"已接受
-    的方面更新"那一句计历史池。所以这里各减一次那一版 K 的对应半——`evidence_chars`
-    恒等于 `len(snapshot_evidence) + Σ(块头 + 卡片节)`,`history_chars` 恒等于
-    `len(snapshot_history) + Σ(观察行 + notes)`(两条恒等式各有用例)。
-    """
-
-    blocks: "Tuple[str, ...]"
-    keys: "Set[str]"
-    evidence_chars: int
-    history_chars: int
-
-
-def _carried_delta(delta: "Optional[ReflectDeltaState]") -> "_CarriedDelta":
-    """此刻上文里那几块 D 的四件事,**一处口径**。纯读:一格投影都不改。
-
-    两个调用点各要它一次:重建**之前**存一份(重建的第一件事就是清空 `blocks`、把
-    两笔账重置成新 K 的长度、并把 D 那格可见集清掉),以及回退之后 P 的那一支每轮读
-    一次"保留 D 还占着多少"。同一条减法写在两处的话,改一处口径时另一处会静默变成
-    陈的(那正是这一族最难看见的故障)。
-
-    `delta is None`(`off` / `prefix_snapshot`,以及 v2 总闸关)⇒ 全中性的四格,两条
-    臂逐字节回到接入前。回退时 `_delta_fallback` 会把 K 的两块字节清空,所以这条减
-    法在回退**之后**照样给出"只剩 D"那一半,而不是负数。
-    """
-    if delta is None:
-        return _CarriedDelta((), set(), 0, 0)
-    return _CarriedDelta(
-        blocks=tuple(delta.blocks),
-        keys=set(delta.block_keys),
-        evidence_chars=delta.evidence_chars - len(delta.snapshot_evidence),
-        history_chars=delta.history_chars - len(delta.snapshot_history))
-
-
-def _delta_fallback(
-    delta: "ReflectDeltaState", carried: "_CarriedDelta",
-) -> None:
-    """不可逆回退:保留 D 原样,两笔账收缩成**只剩 D 那一半**。
-
-    两条回退判据(迟滞与"重建之后仍装不下")共用这一处,所以"保留哪几块、留哪些键、
-    两笔账怎么收、notes 清不清"在两条支上不可能分歧——它们过去是两段各写一遍的代码,
-    而其中一条支漏一句的后果(比如迟滞那支不清 `pending_aspect_notes`)是一个只增不
-    减、永不消费的 list。
-
-    K 的两块字节**清空**:回退之后那一支每轮自己按剩下的额度重选一版 K,这两串再没
-    有任何读者;留着一份陈的 K 只会让下一个读者把它当成此刻的 K,而 `_carried_delta`
-    的那条减法也正好因此在回退之后仍然成立。
-
-    `blocks` 用整体赋值而不是重新绑定:调用方与投影持有的是同一个 list 对象。
-    """
-    delta.fallback = True
-    delta.blocks[:] = carried.blocks
-    delta.block_keys = carried.keys
-    delta.snapshot_evidence = ""
-    delta.snapshot_history = ""
-    delta.evidence_chars = carried.evidence_chars
-    delta.history_chars = carried.history_chars
-    delta.pending_aspect_notes.clear()
-
-
-def _note_delta_measurement(
-    measurement: "ReflectMeasurement", delta: "ReflectDeltaState",
-) -> None:
-    """`prefix_delta` 的三个**行为事实**键(拍板 Q2/Q7)。测量关时同样写。
-
-    * `context_rebuilds` —— 本 run 到这一轮为止**累计**重建过几次。run 级单调累计
-      而不是"本轮重建了没有":读侧那一列是各 reflect 步的 max-over-present
-      (`reasoning_trace_stats._reflect_context_rebuilds`),喂逐轮布尔进去会让一条
-      重建过五次的 run 在表上显示成 1。
-    * `context_fallback` —— 有没有不可逆地退回 P 的有界选择(拍板 Q4)。一旦为真
-      此后每轮都为真,读侧那一列是"任一步为真 ⇒ 真"。
-    * `delta_blocks` —— **这一条消息里** D 的块数。它不是累计量:重建会清空已发出
-      的块,而这一格要回答的正是"这一轮模型看到几块增量"。
-
-    三个都是整数/布尔,请求正文一个字节都不进来(隐私守卫在读侧对新键同样只收
-    整数与布尔)。
-    """
-    measurement.detail[_MEASURE_CONTEXT_REBUILDS] = int(delta.rebuilds)
-    measurement.detail[_MEASURE_CONTEXT_FALLBACK] = bool(delta.fallback)
-    measurement.detail[_MEASURE_DELTA_BLOCKS] = len(delta.blocks)
-
-
-def _note_assessment_measurement(
-    state: "_ReasoningRunState", *, rows: int, absent: bool,
-) -> None:
-    """这一轮自评的两格落账(拍板 Q8)。**四臂通写,门是测量开关。**
-
-    三条路各调一次,合成这一个写点(`_absorb_assessment` 因此净增三行):
-
-    * 载荷没带 `assessment`,且这份决定**是模型自己的载荷**(`_absorb_assessment`
-      判据:`not decision.invalid_reason` ——`_reflect_invalid` 是
-      `REFLECT_INVALID_ACTION` 与 `invalid_reason` 的唯一产地,见该函数)⇒
-      `absent=True`、`rows=0`;
-    * 逐方面校验通过(可能有逐方面被拒)⇒ `absent=False`、
-      `rows=len(outcome.accepted)` ——口径是**实际落账**的方面数,不是载荷里有
-      几行,与收尾追问那条闸同一份读数(`_nudge_missing_assessment` 的 `accepted`);
-    * 整份形状越界被折成一条 invalid ⇒ `absent=False`、`rows=0`:载荷带了自评、
-      一格都没落账,这两件事都得说出去。
-
-    ⚠ **provider fallback 轮不到这里**(评审拍板)。那种轮次的 `assessment` 恒为
-    None,可它不是"模型没带自评",而是根本没有模型决定可言
-    (`_v2_note_turn` 的 `if not decision.fallback` 把它挡在
-    `_absorb_assessment` 之外)。在那里补写 `absent=True` 会把一次 provider 故障
-    记成一次模型省略,而 L 的全部收益判据就建在"省略"这个读数上。整份
-    `assessment_rows_total` 因此不是"全或无":读侧改成 sum-over-present + 伴生列
-    `assessment_observed` 披露全不全(`reasoning_trace_stats._reflect_assessment`)。
-
-    ⚠ **折叠决定同样不到这里**(评审修正,质量评审 P2-1)。`_survive_reflect_failure`
-    (首次 provider 抖动降级)、`parse_reflect_v2` 的解析失败、以及参数越界
-    三条路都经 `_reflect_invalid` 把决定折成一条不可执行的伪动作——它们的
-    `assessment` 同样恒为 None,但那不是"模型省了自评",而是这一轮压根没有一份
-    模型的自评意图可言(伪动作是服务端替模型编的)。这三条路**不是** fail-open
-    (`decision.fallback` 为假),所以会照常进入 `_absorb_assessment`,判据落在
-    `decision.invalid_reason`(而不是 `decision.fallback`)上:非空 ⇒ 折叠决定,
-    两键都不写,该 reflect 步在读侧因此"未观测"(`assessment_observed` 如实变
-    False),不是"观测到了、省略了自评"。
-
-    门取 `measures_messages` 而不是"对象在不在":delta 两条臂在测量关时**照样**
-    构造 `ReflectMeasurement`(拍板 Q7 的三个行为事实键),这两格不是行为事实,
-    测量关就该如实缺席——否则 `off` 臂测量关时无键、D/L 臂测量关时有键,同一列
-    在四臂之间不是同一把尺子。
-
-    两个值都是 int/bool,请求正文一个字节都不进来(读侧隐私守卫对新键同样只收
-    整数与布尔)。
-    """
-    measurement = state.reflect_measurement
-    if measurement is not None and measurement.measures_messages:
-        measurement.detail.update({_MEASURE_ASSESSMENT_ROWS: int(rows),
-                                   _MEASURE_ASSESSMENT_ABSENT: bool(absent)})
+def reasoning_budget_kwargs(settings) -> "Dict[str, Any]":
+    """从部署配置读取规划与反思调用的输出预算。"""
+    return budget_kwargs(settings, REASONING_BUDGET_ATTR)
 
 
 def _reflect_fallback(reason: str) -> "ReflectDecision":
@@ -1150,11 +322,7 @@ def _reflect_fallback(reason: str) -> "ReflectDecision":
 def _reflect_fallback_reason(exc: BaseException, finish_reason: str = "") -> str:
     """把一次模型调用失败折成一个稳定的兜底原因码。
 
-    ``finish_reason``(v2 才传,legacy 调用处一个字都没改)是这一次 provider 调用
-    的结束原因。它只在**空正文**这一档上改变结论:`empty` + `length` 说的是"这次
-    的输出预算被吃光了,最终正文没轮到",而 `empty` + 别的(或未知)说的是"模型
-    交了白卷"。两者共用一个 `empty` 码,harness 就分不出该加预算还是该重试——
-    这正是 §5.2 兜底原因码存在的理由:它不是给人读的一句话,是下一步的依据。
+    空正文与输出预算耗尽使用不同的稳定原因码，供诊断区分。
 
     **按 `.code` 分支,不按异常类型。**生产的 reflect client 是
     `ScheduledJsonChatClient`,它的 `_resolve` 把一切异常重抛成
@@ -1170,11 +338,8 @@ def _reflect_fallback_reason(exc: BaseException, finish_reason: str = "") -> str
     `__cause__`/`__context__` 链向下找第一个带非空 `.reason` 的异常,而不是只看
     一层。
 
-    ``finish_reason`` 有**两条来源**,出参优先、异常兜底。出参(`call_stats`)只
-    在客户端两端都声明支持时才被填,而 `MalformedModelResponse` 自己就带一格
-    `finish_reason`——一个直接抛它、却不声明 `supports_call_stats` 的物理客户端
-    (插件绑定的传输、测试替身)填的是后者。不读它的话,这类调用方的空正文一律
-    落回 `empty`,§5.2 里那条「预算打满就同轮翻倍重试」对它们结构性不生效。
+    ``finish_reason`` 优先采用显式值，再从异常取得。生产反思调用读取异常所带
+    的结束原因；它只用于诊断，不改变既有 fail-open 收尾策略。
 
     异常兜底那条同样**沿链走**,而且与 `.reason` 共用上面那一次遍历:生产的
     `ScheduledJsonChatClient` 把 `MalformedModelResponse` 重抛成
@@ -1219,546 +384,12 @@ def _reflect_fallback_reason(exc: BaseException, finish_reason: str = "") -> str
             else type(exc).__name__)
 
 
-# --- v2 协议的解析层(设计稿 §5.2) ------------------------------------------
-# 稳定的 invalid 原因码。前缀式的两个(`missing_argument:` / `invalid_argument:`)
-# 带上字段名:模型下一轮要知道的是「哪一个参数」,只说「参数不对」它多半换一个
-# 同样不对的值再试一次(exact_lookup 的那条教训)。
-_V2_UNKNOWN_ACTION = "unknown_action"
-_V2_UNAVAILABLE_PREFIX = "unavailable_action:"
-_V2_MISSING_ARGUMENT_PREFIX = "missing_argument:"
-_V2_INVALID_ARGUMENT_PREFIX = "invalid_argument:"
-_V2_INVALID_SUFFICIENT = "invalid_sufficient"
-_V2_INVALID_ARGUMENTS_OBJECT = "invalid_arguments_object"
-_V2_UNEXPECTED_ARGUMENTS = "unexpected_arguments"
-_V2_SUFFICIENT_CONTRADICTION = "sufficient_with_retrieval_action"
-#: T4:方面自评越界。后缀是 `AspectLedger.apply` 返回的稳定 why 码
-#: (`unknown_aspect` / `duplicate_aspect` / `gap_overflow` …),同样带上"哪一条
-#: 边界"——只说"评估不合法"模型下一轮多半原样再报一遍。
-#:
-#: T-BF7 起这个前缀服务**两件事**(词面刻意不分叉,评估口径因此延续):整份形状
-#: 不成立 ⇒ 照旧整轮折成 invalid;单个方面越界 ⇒ 只记一条 skip 步、动作照常执行
-#: (后缀属于 `ASPECT_REJECTION_REASONS`,那条 skip 不产生动作观察)。
-_V2_INVALID_ASSESSMENT_PREFIX = ASSESSMENT_SKIP_REASON_PREFIX
-#: 收尾载荷(`answer` + `sufficient=true`)一个方面都没自评。整份决定退回一次,
-#: 下一轮的 user 段带上逐个 id 的追问(见 `AspectLedger.note_missing_assessment`)。
-_V2_MISSING_ASSESSMENT = "missing_assessment"
-#: 反思调用本身失败、但这次**不收尾**(连续失败还没到两轮)。后缀是
-#: `_reflect_fallback_reason` 给出的稳定码,所以模型在观察账上看到的是
-#: 「原因=model_degraded:output_budget_exhausted」——它据此知道该缩短输出,
-#: 而不是只看到一句泛泛的"上一轮没成"(§5.2 / 交付 3d)。
-_V2_MODEL_DEGRADED_PREFIX = "model_degraded:"
-
-#: v2 下 invalid 观察在 skip 步上屏的短文案。reflect 步已经用
-#: `reflect_invalid_summary` 说过这一轮为什么不成立,两步再重复同一句只是把同
-#: 一件事上屏两次;稳定原因码在 skip 步的 detail 里,那才是排查读的地方。
-_REFLECT_INVALID_SKIP_SUMMARY = "未执行任何检索"
-
-#: 逐方面被拒的自评在 skip 步上屏的短文案。刻意**不说**"未执行任何检索"——同一
-#: 轮那个动作真的执行了,它自己另有一步;这里被跳过的只是那几条自评。
-#: 一轮合并成一条(见 `_note_assessment_rejections`),所以条数写进文案:少了它,
-#: 「一个方面写错」与「16 个方面全写错」在上屏那行完全同形。
-_ASSESSMENT_REJECTED_SKIP_SUMMARY = "未采纳 {count} 条方面自评（本轮动作照常执行）"
-
-
-class _V2ArgumentError(Exception):
-    """一次参数校验失败。``code`` 直接进 `ReflectDecision.invalid_reason`。
-
-    ``term`` 只有 `exact_lookup` 的形状闸填:被拒的那个名称原文。原因码
-    (`invalid_argument:term`)只说"哪个参数不合法",而模型下一轮要改的是**那个
-    词**。`parse_reflect_v2` 把它写进 `invalid_request_identity`,于是它经
-    `v2_request_identity` 落进动作观察账的「请求」那一格,与原因码并排上屏——v2
-    下那是模型唯一读得到的账。**不记进** `exact_lookup_log`:那份 legacy 的散文
-    账目只由 `legacy_action_ledger_note` 渲染,而那一句在 v2 下根本不拼(判据是
-    `capabilities is None`),写进去就是写给没人读的地方。"该给什么"那半在 v2 由
-    参数说明常驻承担(`EXACT_TERM_SHAPE_NOTE` + 追加从句,每轮都在 system 段)。
-    """
-
-    def __init__(self, code: str, term: str = ""):
-        super().__init__(code)
-        self.code = code
-        self.term = term
-
-
-def _reflect_invalid(reason: str, requested: str = "") -> "ReflectDecision":
-    """invalid/unavailable 决定的唯一产地。
-
-    `sufficient` 恒为 False:一份被判定不可执行的载荷里,那一格与其它字段一样是
-    给那个做不成的动作填的,照单收下就会让 run() 的 `or decision.sufficient`
-    短路把它当成一次「模型说够了」直接收尾——一个非法动作因此可以终止检索。
-
-    ``requested`` = 模型**本来想选的**那个动作 id(能认出来时)。`next_action`
-    已经被换成伪动作,这一格是唯一还记得"它想干什么"的地方;动作观察账拿它写
-    那一行,否则一条 `missing_argument:term` 的观察会显示成
-    `__reflect_invalid__`,模型下一轮既不知道是哪个动作缺参数,也无从改。
-    """
-    return ReflectDecision(
-        sufficient=False,
-        next_action=REFLECT_INVALID_ACTION,
-        invalid_reason=reason,
-        invalid_requested_action=requested,
-    )
-
-
-def _v2_text(arguments: dict, name: str, *, required: bool) -> str:
-    value = arguments.get(name, "")
-    if value is None:
-        value = ""
-    if not isinstance(value, str):
-        raise _V2ArgumentError(f"{_V2_INVALID_ARGUMENT_PREFIX}{name}")
-    value = value.strip()
-    if required and not value:
-        raise _V2ArgumentError(f"{_V2_MISSING_ARGUMENT_PREFIX}{name}")
-    return value
-
-
-def _v2_enum(
-    arguments: dict, spec: "Optional[ActionParam]", *, default: str = "",
-) -> str:
-    """枚举参数:非白名单值是 invalid,**不**静默清成空串。
-
-    legacy 在这里清成空串、让执行处记一条 skip;v2 明确把它折成 invalid 观察,
-    原因码带上字段名。差别是刻意的:清空之后模型收到的信号是「这个动作没做
-    成」,而它需要知道的是「kind 这个值不在允许集里」。
-
-    `spec` 为 None = 这一轮的投影里没有这个参数分支(能力收窄把它摘掉了)。此时
-    取默认值而不是抛类型错误:一个模型看不到的槽位,它填了什么都不该改变分派。
-    """
-    if spec is None:
-        return default
-    value = arguments.get(spec.name, "")
-    if value is None or value == "":
-        return default
-    if not isinstance(value, str):
-        raise _V2ArgumentError(f"{_V2_INVALID_ARGUMENT_PREFIX}{spec.name}")
-    value = value.strip()
-    if not value:
-        return default
-    if spec.choices and value not in spec.choices:
-        raise _V2ArgumentError(f"{_V2_INVALID_ARGUMENT_PREFIX}{spec.name}")
-    return value
-
-
-def _v2_enumerate_scope(
-    arguments: dict, spec: "Optional[ActionParam]",
-) -> str:
-    """``enumerate.scope`` 的适配。**这一个枚举参数不折 invalid**,与 legacy 的
-    解析层同口径。
-
-    它是 `_v2_enum` 那条纪律(非白名单值 ⇒ `invalid_argument:<字段>`)唯一的例
-    外,理由与 legacy 在同一处写下的一样:**范围不是动作合法性问题**。一个
-    `scope="notebook"` 的目录请求仍然是一次成立的目录请求,只是范围按默认走;把
-    它折成零 I/O 的 invalid,等于让一个拼错的可选旋钮吃掉模型的一整步,而那一步
-    本来能把目录列出来。kind/object_type/direction/prefer 折 invalid 是因为它们
-    一错,执行出来的**就是另一件事**(列错了类型、走错了方向);scope 错了执行出
-    来的是同一件事的**超集**,而且上游 013a62ba4 已经把实际范围写进了结果卡与
-    合成分区标题——模型下一轮看得见自己拿到的是哪一档。
-
-    `spec is None` = 这一轮的投影里没有这个参数(与 `_v2_enum` 同形):模型看不
-    到的槽位,它填了什么都不该改变分派。
-    """
-    if spec is None:
-        return ENUMERATE_SCOPE_ALL
-    value = arguments.get(spec.name, "")
-    value = value.strip() if isinstance(value, str) else ""
-    return value if value in ENUMERATE_SCOPES else ENUMERATE_SCOPE_ALL
-
-
-def _v2_normalize_outline_sections(raw: object) -> object:
-    """把 v2 载荷里 ``sections`` 每节的证据字段别名归一到 legacy 字段名。
-
-    ``parse_outline_sections`` 认的字段名是 ``evidence`` / ``remove_evidence``
-    (legacy schema 与 ``reasoning_actions.py`` 的 ``sections`` 参数 note 写的都
-    是这两个);但 v2 的 ``arguments`` 在 schema hint 里是一个开放对象
-    ``{}``,传输闸不校验它的键名,而同一轮 prompt 里 ``_V2_ASSESSMENT_INSTRUCTION``
-    教模型另一处证据字段偏偏叫 ``evidence_keys``。模型套用那个拼法时,
-    ``parse_outline_sections`` 只会把 ``evidence_keys`` 当未知键静默丢弃,产出
-    一个"节建成了、绑定却是空的"的假成功。
-
-    只在**进 legacy 解析之前**接一层键名别名,不改 ``parse_outline_sections``
-    一个字节:canonical 字段(``evidence`` / ``remove_evidence``)只要出现就
-    是权威值,不被别名覆盖;别名只在 canonical 字段缺席时补上。形状/边界夹取
-    一律仍由 ``parse_outline_sections`` 一处判定。
-    """
-    if not isinstance(raw, list):
-        return raw
-    normalized: List[object] = []
-    for entry in raw:
-        if not isinstance(entry, dict):
-            normalized.append(entry)
-            continue
-        entry = dict(entry)
-        if "evidence" not in entry and "evidence_keys" in entry:
-            entry["evidence"] = entry["evidence_keys"]
-        if "remove_evidence" not in entry and "remove_evidence_keys" in entry:
-            entry["remove_evidence"] = entry["remove_evidence_keys"]
-        normalized.append(entry)
-    return normalized
-
-
-def _v2_apply_arguments(
-    action: str,
-    arguments: dict,
-    capabilities: "ReflectCapabilities",
-    decision: "ReflectDecision",
-) -> None:
-    """把 v2 的 `arguments` 适配到既有 `ReflectDecision` 的字段上。
-
-    **只做适配,不做第二套执行**:每个动作的执行体、预算、trace 与 legacy 完全
-    共用 —— 两条协议在 `run()` 之后走的是同一份代码。这里的每一行都只是把
-    「单一 arguments 对象里的某个键」搬到「decision 上那个动作的既有字段」。
-    """
-    if not ACTION_DEFINITIONS[action].params:
-        # `answer` / `consult_memory` 的载荷**必须**是空对象(设计稿 §5.2)。带着
-        # 一个 query 的 answer 不是"多余字段",而是模型把两件事混在了一轮里;静默
-        # 忽略等于把它当成一次干净的收尾,那条检索意图就此消失且无处可查。记
-        # invalid 后模型下一轮可以正经选那个检索动作;反复非法照样被 stale 熔断兜住。
-        if arguments:
-            raise _V2ArgumentError(_V2_UNEXPECTED_ARGUMENTS)
-        return
-    if action == "add_subquery":
-        query = _v2_text(arguments, "query", required=True)
-        types: List[str] = []
-        if capabilities.param(action, "types") is not None:
-            # 无图 run 的投影把 `types` 整个摘掉了(没有知识对象类型这个概念)。
-            # 那种情况下**连读都不读**:一个模型从没被告知的槽位,既不该改变
-            # 检索,也不该成为一条它无从理解的参数错误。
-            raw_types = arguments.get("types")
-            if raw_types is not None and not isinstance(raw_types, list):
-                raise _V2ArgumentError(f"{_V2_INVALID_ARGUMENT_PREFIX}types")
-            types = [
-                t for t in (raw_types or [])
-                if isinstance(t, str) and t in KG_TYPES
-            ]
-        prefer_spec = capabilities.param(action, "prefer")
-        prefer = (
-            _v2_enum(arguments, prefer_spec, default="balanced")
-            if prefer_spec is not None else "balanced"
-        )
-        decision.new_sub_query = SubQuery(
-            query=query, types=types, prefer=prefer, reason=decision.reason)
-    elif action == "search_elements":
-        decision.elements_query = _v2_text(arguments, "query", required=False)
-    elif action == "search_chunks":
-        decision.chunks_query = _v2_text(arguments, "query", required=False)
-    elif action == "ppr_retrieve":
-        decision.ppr_query = _v2_text(arguments, "query", required=False)
-    elif action == "exact_lookup":
-        # 清洗与 legacy 共用 `clean_exact_term`(去包裹标点、不截长);"缺名称"
-        # 在清洗**之后**判,否则一个只有引号的 term 会被当成给了名称。
-        term = clean_exact_term(_v2_text(arguments, "term", required=True))
-        if not term:
-            raise _V2ArgumentError(f"{_V2_MISSING_ARGUMENT_PREFIX}term")
-        # 形状判据前移到解析层(计划 T-BF4)。判据本身仍是执行层那把闸的**同一个
-        # 纯函数**(`exact_probe_terms`,零 I/O),只是判得早一轮:模型的参数说明里
-        # 已经写着形状要求,再让它先烧一整轮反思才从回喂里学到同一句话,是白花一
-        # 步。两个细节与执行层逐项对齐,否则同一份输入会在两层得出不同结论:
-        # `honor_quotes=False`(名称来自模型不是用户——用户的引号由 seed 通道兑现,
-        # 模型不能用 `x "的方法" y` 夹带引号绕开这把按实测定标的低选择度子串闸)、
-        # 先截到词法层的精确短语上界再判(超长标识符只有截断后才进得了
-        # `identifier_terms`);被拒时带下去的也是这份截断后的名称,它要被原样拼
-        # 进观察账的「请求」列,长度必须有界。执行层还多一步**切片**
-        # (`_exact_lookup_terms` 按 `exact_lookup_max_identifiers` 取前 N 个),
-        # 这一层刻意不跟:它是"探测几个"的预算,不是"这个词算不算名称"的判据。
-        # 两层因此只在一种配置下会分叉——N ≤ 0 时执行层的非空集合被切成空集、
-        # 解析层放行的输入在执行层仍被判 `exact_term_not_identifier`。那个分叉由
-        # 配置约束堵死(`config.py::exact_lookup_max_identifiers` 的 `ge=1`),
-        # 而不是在这里复制一份切片。
-        # legacy 的执行层分支(`elif not probed`)原样保留:关闭态逐字节不变。
-        probe_term = term[:MAX_EXACT_PHRASE_CHARS]
-        if not exact_probe_terms(probe_term, honor_quotes=False):
-            raise _V2ArgumentError(
-                f"{_V2_INVALID_ARGUMENT_PREFIX}term", probe_term)
-        decision.exact_term = term
-    elif action == "expand_graph":
-        decision.expand_object_id = _v2_text(
-            arguments, "object_id", required=True)
-        edge = _v2_text(arguments, "edge_type", required=False)
-        decision.expand_edge_type = edge or None
-        decision.expand_direction = _v2_enum(
-            arguments, capabilities.param(action, "direction"), default="both")
-    elif action == "expand_community":
-        decision.community_focal = _v2_text(
-            arguments, "focal", required=False)
-    elif action == "follow_chain":
-        decision.chain_start_object_id = _v2_text(
-            arguments, "start_object_id", required=True)
-        decision.chain_target_object_id = _v2_text(
-            arguments, "target_object_id", required=False)
-        edge = _v2_text(arguments, "edge_type", required=False)
-        decision.chain_edge_type = edge or None
-        decision.chain_direction = _v2_enum(
-            arguments, capabilities.param(action, "direction"), default="out")
-    elif action in (ENUMERATE_ELEMENTS_ACTION, ENUMERATE_KG_OBJECTS_ACTION):
-        _v2_apply_enumerate(action, arguments, capabilities, decision)
-    elif action == OUTLINE_ACTION:
-        decision.outline_sections = parse_outline_sections(
-            _v2_normalize_outline_sections(arguments.get("sections")))
-        if not decision.outline_sections:
-            raise _V2ArgumentError(f"{_V2_MISSING_ARGUMENT_PREFIX}sections")
-
-
-def _v2_apply_enumerate(
-    action: str,
-    arguments: dict,
-    capabilities: "ReflectCapabilities",
-    decision: "ReflectDecision",
-) -> None:
-    """枚举分支的 arguments 适配。
-
-    `collection="sources"` 与 kind/object_type 是一个 required_group:两者都空
-    才是缺参数。这条正是既有 fail_closed 校验必须放行的那一条(文档目录请求本
-    来就没有子类型),所以 v2 也按同一条规则判,不是各写一份。
-    """
-    subtype_name = (
-        "kind" if action == ENUMERATE_ELEMENTS_ACTION else "object_type")
-    subtype = _v2_enum(arguments, capabilities.param(action, subtype_name))
-    collection = _v2_enum(arguments, capabilities.param(action, "collection"))
-    if not subtype and not collection:
-        raise _V2ArgumentError(
-            f"{_V2_MISSING_ARGUMENT_PREFIX}{subtype_name}")
-    decision.enumerate_collection = collection
-    decision.enumerate_scope = _v2_enumerate_scope(
-        arguments, capabilities.param(action, "scope"))
-    if action == ENUMERATE_ELEMENTS_ACTION:
-        decision.enumerate_kind = subtype
-        # T-BF5 之后 `source_id` 已不在 v2 的参数表里(投影摘掉了它),但这里**仍
-        # 然读**它——与 `_v2_enum`/`_v2_enumerate_scope` 对"模型看不到的槽位"取默认
-        # 值的纪律不同,而这个不同是刻意的:那两处的默认值执行出来是**同一件事**
-        # (同一份清单的超集/默认档),这里的默认值却是"那就把整个集合列出来",等
-        # 于把一个被限定到单一来源的请求悄悄换成另一个问题的答案(`_run_enumeration`
-        # 对解析失败也是同一条纪律:绝不退成枚举整个库)。模型硬塞一个猜来的 id,
-        # 就在执行层的作用域校验上被拦下并被告知改用 source_title
-        # (`enumeration_source_not_in_scope`),而不是收到一份它没请求过的清单。
-        #
-        # 但两个都给的时候(v2 下 `source_id` 只可能是猜的,`source_title` 才是投
-        # 影出去的那个槽),要走**名字**那一条:分派处的优先级是 id 压过 title
-        # (`_run_enumeration` 的 `not source_id and source_title` 才做解析),于是
-        # 一个猜来的 id 会把模型如实给出的书名整段吃掉——请求本可以成立,却拿回一
-        # 条"来源不在检索范围内"。仍然调 `_v2_text` 是为了保住类型校验:一个非字
-        # 符串的 `source_id` 照旧报 `invalid_argument:source_id`,不因为这一层的
-        # 取舍而被静默放过。legacy 与 `_run_enumeration` 的分派逐字节不变。
-        guessed_id = _v2_text(arguments, "source_id", required=False)
-        decision.enumerate_source_title = _v2_text(
-            arguments, "source_title", required=False)
-        if not decision.enumerate_source_title:
-            decision.enumerate_source_id = guessed_id
-    else:
-        decision.enumerate_object_type = subtype
-
-
-def v2_request_identity(decision: "ReflectDecision") -> str:
-    """一次动作请求的**规范化身份**,给动作观察账当"请求"那一格用。
-
-    构成与 `ACTION_DEFINITIONS[...].identity_fields` 声明的一致:自由检索带
-    types/prefer,图动作带 edge_type/direction,枚举带 collection/子类型/范围/
-    来源。这些参数参与身份,是因为"同一个 query 换一组 types"根本不是同一次
-    请求——枚举的 `scope` 同理,它换一档就是另一条续跑链。
-
-    ⚠ **它不是判重的判据。**真正拦下重复请求的仍然是各自的既有权威 ——
-    `attempted`(子查询)、`visited`(节点)、`exact_terms_done`(名称)、
-    `follow_chain_done`(链)、`enum_chains` 的 cursor 覆盖。这个串只被渲染,
-    从不被比较:一旦拿它去做判重,就等于凭空造出第二份可以与那些状态分叉的账,
-    而分叉的那一天没有任何测试会红(设计稿 §6.1)。
-    """
-    action = decision.next_action
-    if action == REFLECT_INVALID_ACTION:
-        # 伪动作没有自己的参数,这一格因此由折叠处直接填,有两个产地:方面自评
-        # 越界折下来的那族(`_absorb_assessment`)填**合法**动作的完整身份串——
-        # 那个请求真实存在过,观察行该显示它而不是一句"(无请求)";形状闸折下来
-        # 的 `invalid_argument:term` 填被拒的那个名称(`_V2ArgumentError.term`),
-        # 因为"哪个词被拒了"正是模型下一轮唯一要改的东西。其余解析期错误仍是空
-        # 串:它们的参数根本没通过校验,没有可展示的请求。
-        return decision.invalid_request_identity
-    if action == "add_subquery":
-        sub = decision.new_sub_query
-        if sub is None:
-            return ""
-        extras = (
-            ([f"types={','.join(sorted(sub.types))}"] if sub.types else [])
-            + ([f"prefer={sub.prefer}"] if sub.prefer else [])
-        )
-        return " ".join([sub.query, *extras])
-    if action == "search_elements":
-        return decision.elements_query
-    if action == "search_chunks":
-        return decision.chunks_query
-    if action == "ppr_retrieve":
-        return decision.ppr_query
-    if action == "exact_lookup":
-        return decision.exact_term
-    if action == "expand_graph":
-        return " ".join(part for part in (
-            decision.expand_object_id, decision.expand_edge_type or "",
-            f"dir={decision.expand_direction}") if part)
-    if action == "expand_community":
-        return decision.community_focal
-    if action == "follow_chain":
-        return " ".join(part for part in (
-            decision.chain_start_object_id, decision.chain_target_object_id,
-            decision.chain_edge_type or "",
-            f"dir={decision.chain_direction}") if part)
-    if action in (ENUMERATE_ELEMENTS_ACTION, ENUMERATE_KG_OBJECTS_ACTION):
-        # `scope=` 与 `dir=` 同形:**恒渲染**,不做「默认值就省掉」。续跑链的键
-        # 里含范围(见 `_EnumChain`),所以同一份目录的两个范围是**两条链**;
-        # 身份串省掉默认档,观察账上两条链就长得一模一样,模型读到的是"我刚才
-        # 已经列过这个了"——恰恰与既有覆盖账目相反。
-        return " ".join(part for part in (
-            decision.enumerate_collection, decision.enumerate_kind,
-            decision.enumerate_object_type,
-            f"scope={decision.enumerate_scope}",
-            decision.enumerate_source_id,
-            decision.enumerate_source_title) if part)
-    return ""
-
-
-def v2_request_query_text(decision: "ReflectDecision") -> str:
-    """这一次请求里那段**自然语言查询文本**,给证据卡的摘录窗口当检索词来源。
-
-    与 `v2_request_identity` 刻意分家。身份串为了判两次请求算不算同一次,把
-    `types=…`、`prefer=balanced`、`dir=both` 这些参数折了进来,还包含 `ko-…`
-    这类内部标识——拿它去正文里挑摘录窗口,等于让摘录去找一批在任何文档里都不
-    会出现的词,于是每个窗口同分、退化成取前缀。摘录要的是"这一步在找什么",
-    身份要的是"这一步是不是刚才那一步",两个问题的答案不该是同一个串。
-
-    以对象 id 为主的两个动作(`expand_graph` / `follow_chain`)返回空串:它们的
-    参数里没有任何自然语言,摘录只能退回问题本身的检索词——那是如实的。
-    """
-    action = decision.next_action
-    if action == "add_subquery":
-        return decision.new_sub_query.query if decision.new_sub_query else ""
-    if action == "search_elements":
-        return decision.elements_query
-    if action == "search_chunks":
-        return decision.chunks_query
-    if action == "ppr_retrieve":
-        return decision.ppr_query
-    if action == "exact_lookup":
-        return decision.exact_term
-    if action == "expand_community":
-        return decision.community_focal
-    if action in (ENUMERATE_ELEMENTS_ACTION, ENUMERATE_KG_OBJECTS_ACTION):
-        # 来源标题是文档名(用户看得到的那个),kind/object_type 是白名单里的
-        # 子类型词——两者都可能逐字出现在正文里,内部 source id 不会。
-        return " ".join(part for part in (
-            decision.enumerate_source_title, decision.enumerate_kind,
-            decision.enumerate_object_type) if part)
-    return ""
-
-
-def parse_reflect_v2(
-    data: dict, capabilities: "ReflectCapabilities",
-) -> "ReflectDecision":
-    """v2 载荷 → `ReflectDecision`(或一条 invalid/unavailable 决定)。
-
-    校验顺序即诊断价值顺序:**先**说清「你选的这个动作本轮存在吗」,再说
-    「布尔值是不是真布尔」,最后才是参数。反过来的话,一个选了被禁动作又填错
-    参数的载荷会被报成参数问题,而模型要改的其实是通道。
-
-    白名单直接读 `capabilities.actions` —— 与 prompt 的动作列表、schema 的
-    `next_action` 枚举同一个对象,三处不可能不同步。
-    """
-    action = data.get("next_action", "")
-    action = action if isinstance(action, str) else ""
-    action = action.strip()
-    if not capabilities.has(action):
-        if action in ACTION_DEFINITIONS:
-            reason = capabilities.reason_for(action) or "action_unavailable"
-            return _reflect_invalid(
-                f"{_V2_UNAVAILABLE_PREFIX}{reason}", action)
-        # 生产不可达:schema hint 的 `next_action` 枚举只列 13 个合法 id,传输层
-        # `validate_model_json_shape`/`_validate_repaired_shape` 先以
-        # `invalid_enum` 拒绝一切不在枚举里的值,重试耗尽后走既有 fail-open
-        # (`_reflect_fallback`),从不会把畸形值带到这里。保留这一支只为纵深
-        # 防御——测试替身与 fail_closed 调用方仍可能直接构造这样的 dict 调用
-        # `parse_reflect_v2`。
-        return _reflect_invalid(_V2_UNKNOWN_ACTION)
-    sufficient = data.get("sufficient", False)
-    if not isinstance(sufficient, bool):
-        # 真 boolean 校验(设计稿 §5.2)。`"true"` / `1` 不算——一个把字符串当真
-        # 值用的协议里,`"false"` 也是真。生产不可达:hint 写的
-        # `"sufficient":false` 让传输层先以 `invalid_boolean` 拒绝非 bool 值并
-        # 走 fail-open;这里同 `_V2_UNKNOWN_ACTION` 一样只为纵深防御。
-        return _reflect_invalid(_V2_INVALID_SUFFICIENT, action)
-    if sufficient and ACTION_DEFINITIONS[action].produces_evidence:
-        # 「再检索一次」与「证据已经够了」不能在同一轮同时成立。绝不静默地先跑
-        # 那次检索再宣称充分:那会把一次没被看过的检索结果算进"已充分"的依据。
-        return _reflect_invalid(_V2_SUFFICIENT_CONTRADICTION, action)
-    arguments = data.get("arguments", {})
-    if arguments is None:
-        arguments = {}
-    if not isinstance(arguments, dict):
-        # 生产不可达:hint 写的 `"arguments":{}` 是开放对象,但类型仍是
-        # object——传输层先以 `invalid_type` 拒绝非 dict 值并走 fail-open;
-        # 同上,只为纵深防御。
-        return _reflect_invalid(_V2_INVALID_ARGUMENTS_OBJECT, action)
-    decision = ReflectDecision(
-        sufficient=sufficient, next_action=action,
-        reason=str(data.get("reason", "")),
-    )
-    raw_assessment = data.get("assessment")
-    if isinstance(raw_assessment, dict):
-        # 只留存,消费在 `_absorb_assessment`。JSON `null` 在这里归一为**缺省**
-        # (走不进这一支):schema hint 把 `assessment` 写成开放对象之后,传输层
-        # 放行 null,而协议里"这一轮我没有新判断"与"我没带这个字段"是同一件事。
-        # 把 null 当越界载荷处理,会让一个常见的序列化产物白扣一步。
-        decision.assessment = raw_assessment
-    try:
-        _v2_apply_arguments(action, arguments, capabilities, decision)
-    except _V2ArgumentError as exc:
-        invalid = _reflect_invalid(exc.code, action)
-        # 被形状闸拒掉的名称就是这一次请求的身份(其余参数错误这一格仍是空串:
-        # 它们的载荷根本没通过校验,没有可展示的请求)。写进观察账的「请求」列,
-        # 模型下一轮才看得到"被拒的是哪个词",而不是只有一个裸原因码
-        # `invalid_argument:term`——那句话对"换哪个词"没有任何信息量。
-        # 长度两道界:形状闸判的已是 `MAX_EXACT_PHRASE_CHARS` 截断后的那份,
-        # `note_decision` 再按 `REQUEST_CHARS` 截一次(模型自由文本止步于此,
-        # 不进日志、不进 trace summary)。
-        invalid.invalid_request_identity = exc.term
-        return invalid
-    return decision
-
-
-def reflect_invalid_summary(decision: "ReflectDecision") -> str:
-    """v2 下一条 invalid/unavailable 观察的上屏文案。
-
-    分三档说人话:通道本轮不可用 / 参数缺失或不合法 / 其它协议问题。措辞按
-    「这一步没做成什么」写而不是抄机器码——机器码进 detail,那才是给排查用的。
-    """
-    reason = decision.invalid_reason
-    if reason.startswith(_V2_UNAVAILABLE_PREFIX):
-        return "本轮不提供模型选择的这个动作,未执行任何检索"
-    if reason == _V2_UNEXPECTED_ARGUMENTS:
-        return "模型给收尾/回想动作附了检索参数,本轮不予执行"
-    if reason.startswith(
-        (_V2_MISSING_ARGUMENT_PREFIX, _V2_INVALID_ARGUMENT_PREFIX)
-    ):
-        return "模型给出的动作参数不完整或不合法,未执行任何检索"
-    if reason == _V2_SUFFICIENT_CONTRADICTION:
-        return "模型同时要求继续检索又声称证据已足,本轮不予执行"
-    if reason.startswith(_V2_INVALID_ASSESSMENT_PREFIX):
-        return "模型对必答方面的自评越界,整轮决定不予执行"
-    if reason == _V2_MISSING_ASSESSMENT:
-        return "模型宣布证据已足却没有逐个自评必答方面,本轮退回并要求补齐"
-    if reason.startswith(_V2_MODEL_DEGRADED_PREFIX):
-        code = reason[len(_V2_MODEL_DEGRADED_PREFIX):]
-        return (
-            "本轮反思调用失败（输出预算打满），未执行任何检索,继续下一轮"
-            if code == REFLECT_OUTPUT_BUDGET_EXHAUSTED
-            else "本轮反思调用失败,未执行任何检索,继续下一轮")
-    return "模型这一轮的决定无法执行,未执行任何检索"
-
-
 def _reflect_step_summary(decision: "ReflectDecision") -> str:
     """reflect 步上屏的那一行。兜底轮说人话,正常轮维持原样。
 
     上屏文案是给人读的,机器原因只进 `detail.fallback_reason`——前端
     (`reasoning-trace.ts`)因此一个字都不用改。
     """
-    if decision.invalid_reason:
-        # v2 专用:模型给了合规 JSON,但它选的动作本轮做不了(或参数不合法)。
-        # 上屏说人话,机器码只进下面那条 skip 步的 detail。legacy 决定的
-        # `invalid_reason` 恒为空串,所以这条分支对关闭态不可达。
-        return reflect_invalid_summary(decision)
     if not decision.fallback:
         return decision.reason or decision.next_action
     reason = decision.fallback_reason
@@ -1786,11 +417,7 @@ ENUMERATE_KG_OBJECTS_ACTION = "enumerate_kg_objects"
 # kind/object_type 分派(fail-open,与本分支其他非白名单值的处理同形)。
 ENUMERATE_SOURCES_COLLECTION = "sources"
 
-# ``enumerate.scope`` 的三个名字在 T5 对账时搬到了 ``reasoning_actions``(动作
-# 参数的取值集属于动作契约,legacy schema hint、v2 能力投影与两条协议的解析层读
-# 的必须是同一份);这里**原样 re-export**,历史导入点
-# (`from app.services.reasoning_retrieval import ENUMERATE_SCOPES`)照旧成立。
-# 取值、默认与 fail-open 规则的说明都在那边的定义处。
+# 枚举范围常量从动作契约导入并原样 re-export，供历史调用方使用。
 
 
 def enumeration_wiring_active(settings, catalog, enumeration) -> bool:
@@ -2017,43 +644,13 @@ def _collection_label(collection: str, kind: str) -> str:
 
 
 def _enumeration_rejection(
-    exc: ValueError, label: str, collection: str, kind: str, reflect_v2: bool,
+    exc: ValueError, label: str, collection: str, kind: str,
 ) -> TraceStep:
-    """执行器拒绝一次枚举 → 那一条完整的 skip 轨迹步。
-
-    整条步而不是「原因码 + 文案」两元组:那条 skip 的 detail 形状
-    (`reason`/`collection`/`kind`/截到 120 字的 `error`)与原因码是同一个决定的
-    两半,分成两处写就要让调用点(登记在案的热函数 `_run_enumeration`)多背一份
-    只为它存在的字典字面。拆细的判据与它的 v2 门也都在这里一处判。
-
-    同一条 `except ValueError` 收的是三件事:未知 kind、被点名的 source_id 不成
-    立、以及被改坏的档位值让 `EnumerationBudget` 拒绝构造。其中**只有**「id 不在
-    检索范围内」是模型自己改得动的——内部来源 id 从不上屏,它填进那个槽的只可能
-    是猜的,而限定单一来源本来就只有一种表达方式(按名称给 `source_title`,服务端
-    做一次确定性解析)。所以这一类拆出自己的原因码,措辞点名那唯一的表达方式;
-    `not enumerable`(memory 合成源)保留原码:那是来源本身的属性,让模型改用名字
-    再问一次只会换回第二次拒绝。
-
-    **假设**(计划 T-BF5,本地无复现样本):生产那 12 次 `enumeration_rejected` 都
-    是「模型猜 source_id」这个形状。待生产 raw `detail.error` 字符串确认;若实为
-    memory 合成源的 not enumerable,该改成解析器侧过滤,而不是换一份措辞。
-
-    `reflect_v2` 门与规模守卫同款,理由也同款:关闭态的 prompt/schema/trace 逐字节
-    不变。legacy 那一臂与 v2 各臂共用同一份基线做 A/B,legacy 的 `skip_reasons`
-    分布不该被这次改动挪动;而 v2 才是那 12 次的产地(它的投影曾把 `source_id`
-    这个槽摆给模型看)。
-    """
-    if isinstance(exc, SourceNotInScopeError) and reflect_v2:
-        reason = "enumeration_source_not_in_scope"
-        summary = (f"跳过枚举{label}(请求的来源不在检索范围内,"
-                   "请按名称给出(source_title))")
-    else:
-        reason = "enumeration_rejected"
-        summary = f"跳过枚举{label}(请求的范围不可用)"
+    """执行器拒绝本次枚举时，只跳过当前动作并保留诊断。"""
     return TraceStep(
-        step_type="skip", summary=summary,
-        detail={"reason": reason, "collection": collection, "kind": kind,
-                "error": str(exc)[:120]})
+        step_type="skip", summary=f"跳过枚举{label}(请求的范围不可用)",
+        detail={"reason": "enumeration_rejected", "collection": collection,
+                "kind": kind, "error": str(exc)[:120]})
 
 
 # 每轮拼在集合地图行末尾的剩余额度。prompt 让模型「按额度判断值不值得全量」,
@@ -2063,83 +660,11 @@ def _allowance_suffix(rows_left: int) -> str:
     return f" | listing allowance left: {max(0, int(rows_left))} rows"
 
 
-#: 「这份清单大到翻页没有意义」的倍数。生产上 48 839 篇 / 本轮 300 行额度的
-#: run 里,模型一次动作就把整 run 的行池吃光,换回 300 条无序前缀、`complete=False`
-#: 与一个再也用不上的游标——三个池全空之后什么都做不了。4 是**常量而不是配置项**
-#: (计划 §7 拍板 2):它不是一个要按部署调的阈值,而是「一页 50 行的清单最多值得
-#: 翻到额度用尽」这句话的算术形式——total 已经超过整轮额度的 4 倍时,把额度花光也
-#: 只能看到不足四分之一,那不是一份清单,是一段随机前缀。
-#:
-#: 用例改这个数用 monkeypatch(它是模块全局,守卫每次调用现读),不再走形参:
-#: 一个只有测试会传的 `factor` 参数等于把常量做成两份,生产上永远是这一份。
-OVERSIZE_LISTING_FACTOR = 4
-
-
-def enumeration_map_count(
-    collection_map: Optional[CollectionMap], *, collection: str, kind: str,
-    local_only: bool, source_id: str,
-) -> Optional[int]:
-    """本次枚举请求的**分母**:集合地图里与它同集合、同 kind、同范围的那个计数。
-
-    规模守卫的判据是「这一次动作要列的那份清单有多大」,所以分母必须与请求逐项
-    对齐——拿联邦 `sources` 去判一份元素清单,一个只有 3 条公式的库也会被砍成
-    一页样本。四种对齐关系:
-
-    * `sources` + 默认范围 ⇒ `CollectionMap.sources`(prompt 里
-      `sources: N (current notebook: M)` 的 N);
-    * `sources` + `current_notebook` ⇒ `active_sources`(括号里的 M);
-    * `elements` + kind ⇒ 地图里该 kind 的元素计数;
-    * `kg_objects` + object_type ⇒ 地图里该类型的知识对象计数。
-
-    `None` = 「不知道有多大」,守卫一律不触发。三种来源:地图整个建不出来
-    (fail-open)、请求被 `source_id` 收窄到一篇(地图没有「某一篇里有多少条」
-    这个数,拿全库计数去判它会把一份小清单砍成样本)、以及 kind/object_type
-    不在地图给出的那份计数里。刻意**不**复用 `CollectionMap.element_count`:
-    它对缺席的 kind 返回 0,而这里必须把「已知是 0」与「地图没这一项」分开——
-    前者是可判定的(0 不触发),后者只能弃权。
-
-    纯函数、零 I/O、零新增查询:读的全是集合地图**已经算过**的字段。
-    """
-    if collection_map is None or source_id:
-        return None
-    if collection == "sources":
-        return (collection_map.active_sources if local_only
-                else collection_map.sources)
-    if collection == "elements":
-        for item in collection_map.elements:
-            if item.kind == kind:
-                return item.count
-        return None
-    for object_type, count in collection_map.kg_objects:
-        if object_type == kind:
-            return count
-    return None
-
-
-def oversize_listing(map_count: Optional[int], rows_left: int) -> bool:
-    """这一次枚举该不该只取一页样本?纯函数、零 I/O。
-
-    `map_count` 是**集合地图已经算过的那个数**(见 `enumeration_map_count`),
-    不是这里再查一次库得来的:守卫的全部成本必须是这一次比较。它是 `None` 时
-    —— 判据是「已知远超额度」,不是「不知道有多大」——一律不触发:宁可照旧翻页,
-    也不要凭猜测把一份本来能列全的清单砍成样本。
-
-    `rows_left` ≤ 0 同样不触发:那是「预算耗尽」,由调用方的 skip 分支处理,
-    在这里返回 True 会把它变成一次 `max_rows=0` 的非法预算构造。
-    """
-    if map_count is None or rows_left < 1:
-        return False
-    return int(map_count) > rows_left * max(1, int(OVERSIZE_LISTING_FACTOR))
-
-
 def _enumeration_step_summary(label: str, coverage, source_id: str, *,
                               local_only: bool = False) -> str:
     """enumerate 步的上屏摘要。
 
-    四种结局说四句不同的话,因为它们对用户意味着四件不同的事:列全了 / 到本轮
-    上限了(还能继续) / 资料变了(既不能续也不能声称完整) / 这个集合远大于一轮
-    能列的量,只取了一页样本(额度**没有**用光,再来一轮也列不全 —— 说成「已达
-    本轮上限」会同时骗两边,与结果卡上那句「内容太多」也对不上)。数字一律用
+    三种结局分别披露：已列全、达到本轮上限、资料变动而无法确认完整。数字一律用
     **链上累计** ``returned_total``——用户看的是「这个清单目前列了多少」,不是
     「刚刚那一次调用返回了多少」。分母未知时省略,绝不写成 /0。
 
@@ -2161,13 +686,6 @@ def _enumeration_step_summary(label: str, coverage, source_id: str, *,
         return (
             f"枚举{label}: 资料在检索期间有变动,已列出 "
             f"{coverage.returned_total} 条{total},无法确认是否完整{scope}"
-        )
-    if coverage.truncated_reason == TRUNCATED_OVERSIZE_SAMPLE:
-        # 与结果卡的标签同口径(`answer-panel.tsx` 的 `oversize_sample`):
-        # 「内容太多,本轮只列出其中一页」。
-        return (
-            f"枚举{label}: 内容太多,本轮只列出其中一页,已列 "
-            f"{coverage.returned_total} 条{total}{scope}"
         )
     return (
         f"枚举{label}: 部分结果,已达本轮上限,累计 "
@@ -2290,88 +808,6 @@ def _enumeration_note(chains) -> str:
         "(换一个 scope 的来源清单不算同一份清单),"
         "改用其他动作或直接作答。)"
     )
-
-
-# --- 集合完整性证据键(v2-only,设计稿 §7.1) --------------------------------
-#: 一条枚举链**已列全**的那个状态字面(见 `_EnumChain.state`)。
-_ENUM_CHAIN_COMPLETE = "complete"
-
-COLLECTION_KEYS_NOTE_TITLE = (
-    "【集合完整性证据键 — 服务端签发，只有已完整列出的清单才有】")
-COLLECTION_KEYS_NOTE_TAIL = (
-    "（这些键可以直接写进 assessment 的 evidence_keys，用来支撑「本库有哪些…」"
-    "这一类必须靠清单本身回答的方面。没有列在上面的集合没有键：一份没列完的"
-    "清单不能证明任何完整性。）"
-)
-
-
-def enum_evidence_key(outcome) -> str:
-    """一条枚举链的**集合身份**→ 它的证据键。确定性,同一条链永远同一个键。
-
-    构成与续跑键 `(collection, kind, source_id, local_only)` 一一对应,一个字段
-    都不省:换了范围的来源清单本来就不是同一份目录(见 `_EnumChain`),两条链共用
-    一个键会让「只列了本库」的那份完整性给「全部范围」那个方面作证。
-
-    键里不含用户内容,只含白名单里的集合名/子类型与内部 source id——它会被模型
-    抄回来,让它承载文档标题等于又开一条自由文本槽位。
-    """
-    parts = [str(getattr(outcome, "collection", "") or "")]
-    kind = str(getattr(outcome, "kind", "") or "")
-    if kind:
-        parts.append(kind)
-    source_id = str(getattr(outcome, "source_id", "") or "")
-    if source_id:
-        parts.append(f"src={source_id}")
-    if getattr(outcome, "local_only", False):
-        parts.append("local")
-    return ASPECT_COLLECTION_KEY_PREFIX + ":".join(part for part in parts if part)
-
-
-def complete_enumeration_keys(enum_chains) -> Set[str]:
-    """本 run 里 **coverage 完整**的那些集合的证据键(§7.1)。
-
-    `state == "complete"` 是硬判据,与 `_collection_map_note` 那条「列过就算」的
-    放宽刻意不同:半份清单证明不了完整性,而这批键存在的全部理由就是"这个集合
-    已经被列全了"。`open`(还能续)与 `conflict`(枚举期间资料变了,既不能续也不
-    能当作完整)都不签发。
-
-    没有它,目录题在 v2 下结构上无解:枚举条目按合同不进候选池、条目 id 对模型
-    不可见(见 `outline_binding_keys`),于是模型把一个覆盖完整的目录方面标成
-    supported 时,引什么键都会被剔掉、按 §7.1 降级——服务端一边报告"已全部列出
-    84 条",一边告诉合成侧"这个方面没有支撑"。
-    """
-    return {
-        enum_evidence_key(chain.outcome)
-        for chain in (enum_chains or {}).values()
-        if getattr(chain, "state", "") == _ENUM_CHAIN_COMPLETE
-    }
-
-
-def render_collection_keys_note(enum_chains, *, assessment: bool = True) -> str:
-    """已完整枚举的集合 → 一段**可引用的键**清单。v2-only,零 I/O。
-
-    刻意不并进 `_enumeration_note`:那段账目在关闭态也逐字进 prompt,而这里是
-    v2 专有的协议内容。分开写,关闭态因此一个字都不变。
-
-    展示是 §7.1 的硬前提:合法集合由服务端算出,但模型只能引用**服务端真的给过
-    它**的标识——一个算得出却从没印出来的键,与让模型猜 id 没有区别。
-    """
-    lines = []
-    for chain in (enum_chains or {}).values():
-        if getattr(chain, "state", "") != _ENUM_CHAIN_COMPLETE:
-            continue
-        outcome = chain.outcome
-        label = _collection_label(outcome.collection, outcome.kind)
-        scope = LOCAL_ONLY_SCOPE_SUFFIX if outcome.local_only else ""
-        returned = getattr(getattr(outcome, "coverage", None), "returned_total", 0)
-        lines.append(
-            f"- {enum_evidence_key(outcome)} | 「{label}」已完整列出 "
-            f"{returned} 条{scope}")
-    if not lines:
-        return ""
-    return "\n".join([COLLECTION_KEYS_NOTE_TITLE, *lines,
-                      (COLLECTION_KEYS_NOTE_TAIL if assessment else
-                       "（只有已完整列出的集合才能证明该集合的枚举完整性。）")])
 
 
 # --------------------------------------------------------- 大纲便签(outline)
@@ -3609,9 +2045,7 @@ class ReflectDecision:
     # search_chunks 的检索串。与 elements_query/ppr_query 同款「空则回退到原
     # 问题」,解析处不做必填校验。
     chunks_query: str = ""
-    # 要按名称精确查找的那个名称。v2 下它还有第二个(且唯一的另一个)填法:形状闸
-    # 在解析期拒掉的名称原文,此时 `next_action` 是 `REFLECT_INVALID_ACTION`
-    # 伪动作,这一格只被 run() 的 invalid 分支读去记教学回喂,不触发任何检索。
+    # 要按名称精确查找的名称，执行层统一校验其形状。
     exact_term: str = ""
     chain_start_object_id: str = ""
     chain_target_object_id: str = ""
@@ -3650,29 +2084,6 @@ class ReflectDecision:
     # run() 据它在 reflect 步 detail 上写稀疏键、并把上屏那行换成中文整句。
     fallback: bool = False
     fallback_reason: str = ""
-    # --- v2 协议专用(设计稿 §5.2)。legacy 路径永不写这两个字段,所以关闭态的
-    # 决定与接入前逐字段相同。 ---
-    # 一份「可识别但本轮不可执行 / 缺参数 / 字段矛盾」的载荷被折成的稳定原因码。
-    # 非空 ⇒ `next_action` 是 `REFLECT_INVALID_ACTION` 这个伪动作,`run()` 据它记
-    # 一条零 I/O 的观察并走链尾统一记账。它**不是** `fallback`:那一族说的是
-    # 「模型没能给出可用响应」(provider/JSON 失败),这一族说的是「模型给了一个
-    # 合规 JSON,但它选的事这一轮做不了」——两者对排查是完全不同的两件事。
-    invalid_reason: str = ""
-    # 被折成 invalid/unavailable 之前,模型本来选的那个动作 id(认得出来时)。
-    # `next_action` 此时是伪动作,所以这是观察账唯一能说清"它想干什么"的一格。
-    # 空串 = 连动作名都认不出来(`unknown_action`),那时观察账如实不写动作名。
-    invalid_requested_action: str = ""
-    # 被折成 invalid 之前,这一次请求里还值得给模型看的那一格。两个产地:
-    # `_absorb_assessment`(方面自评越界)写**合法动作**的完整身份串——那时动作
-    # 参数已经全部通过校验,观察行显示"(无请求)"是失真的;`parse_reflect_v2`
-    # 的形状闸(`invalid_argument:term`)写被拒的那个名称。其余解析期 invalid
-    # 留空,行为与接入前逐字相同。
-    invalid_request_identity: str = ""
-    # 模型对必答方面的自评(设计稿 §7)。解析期**只留存**;消费在
-    # `ReasoningRetriever._absorb_assessment`(T4-A),它把这份载荷落进方面账或
-    # 把整份决定折成 invalid。解析器从 T2 起就允许载荷携带它而不报错——一个
-    # 「有它就崩」的解析器会逼 T4 去改协议版本。
-    assessment: Optional[dict] = None
 
 
 @dataclass
@@ -3754,10 +2165,6 @@ class ReasoningResult:
     # Internal selected-source regression oracle.  It is never serialized into
     # Ask/report responses; callers may emit only its redacted event payload.
     baseline_manifest: object | None = None
-    # 这次检索**为什么停下来**,以及停下来那一刻每个必答方面的状态(设计稿 §7.2)。
-    # **v2-only**:总闸关着时恒为 None,关闭态因此逐字段与接入前相同,既有消费者
-    # (它们一个都不读这个字段)零改动。合成层的实际使用由 T4-B 接。
-    termination: "Optional[RetrievalTermination]" = None
 
 
 class _TraceRecorder:
@@ -3779,8 +2186,7 @@ class _TraceRecorder:
     不会中途重新构造或替换 `cancel_event`。
     """
 
-    __slots__ = ("_trace", "_cancel_event", "_on_step", "_last_ts", "observer",
-                 "_deferred", "measurement")
+    __slots__ = ("_trace", "_cancel_event", "_on_step", "_last_ts")
 
     def __init__(self, trace: List[TraceStep], cancel_event: CancelEvent,
                  on_step) -> None:
@@ -3788,109 +2194,15 @@ class _TraceRecorder:
         self._cancel_event = cancel_event
         self._on_step = on_step
         self._last_ts = time.perf_counter()
-        # 「排在下一条**指定类型**的记账之后」的步(见 `defer`),每项是
-        # `(after_step_type, step)`。默认空列表 ⇒ 关闭态每次记账只多一次空 list
-        # 的真值判断,轨迹逐字节不变。
-        self._deferred: List[Tuple[str, TraceStep]] = []
-        # reflect v2 的动作观察账(设计稿 §6.1)。默认 None ⇒ **关闭态零新状态**:
-        # 没有账本对象、没有转换、没有多余分配,`__call__` 只多一次 `is not None`。
-        # 由 `run()` 在总闸开着时挂上——观察是 run 级的东西,而这个记账器是
-        # 首轮与循环唯一共用的那个把手,挂在这里首轮 seed 与循环动作就自动共用
-        # 同一次转换(设计稿要求),不必在十几条动作分支里各抄一句。
-        self.observer = None
-        # reflect 上下文观测缓存(T-PS3)。同 `observer` 一档纪律:默认 None ⇒
-        # **关闭态与测量关零新状态**,`__call__` 只多一次 `is not None`。
-        #
-        # 为什么测量的落账点在这个记账器上:那几个稀疏键要进的是 `run()` 里现拼
-        # 的那份 reflect detail,而 `run()` 在零松弛长度天花板下、一条语句都不能
-        # 加(同 `defer` 的理由)。这个记账器是那条 reflect 步**唯一**的入口,
-        # 在这里合并因此既不改 `run()`、也不需要第二个写点。挂它的人是
-        # `_reflect_v2_context`(测量开着的第一轮),owner 是
-        # `_ReasoningRunState.reflect_measurement`。
-        self.measurement = None
 
     def __call__(self, step: TraceStep) -> None:
         raise_if_cancelled(self._cancel_event)
         now = time.perf_counter()
         step.duration_ms = round((now - self._last_ts) * 1000)
         self._last_ts = now
-        if self.measurement is not None and step.step_type == "reflect":
-            # 合并排在 `observer` / `_on_step` **之前**:上屏的那一份与最终落库
-            # 的那一份因此是同一个 detail,不会一份带测量、一份不带。
-            pending = self.measurement.take()
-            unknown = set(pending) - REFLECT_MEASUREMENT_DETAIL_KEYS
-            if unknown:
-                # `raise` 而不是 `assert`,与 `_registered_measure_key` 那道导入期
-                # 判据同档:`python -O` 会把断言整条删掉,而这一道恰恰是「键名合法
-                # 但走错了写点」唯一的判据——删掉之后那一列静默恒 `None`,没有任何
-                # 一条用例会红(评审 P2-1 的变异 M26 就是这么逃掉的)。
-                raise RuntimeError(
-                    "reflect measurement wrote a detail key the projection does "
-                    f"not read: {sorted(unknown)}")
-            step.detail.update(pending)
         self._trace.append(step)
-        if self.observer is not None:
-            try:
-                self.observer.observe(step)
-            except CoreCancellation:
-                # 放行整个取消基类,不只是 `AskCancelled` 这一个子类:任何取消
-                # 语义都必须穿过这个转换往上传,不能被下面那句 `except Exception`
-                # 吞掉当成"观察折不出来"。
-                raise
-            except Exception:  # noqa: BLE001
-                # 观察账是**投影**:它折不出这一条,代价是账上少一行;它把异常放
-                # 出去,代价是整次检索死在一个纯展示的转换上。转换读的是模型可以
-                # 影响形状的 detail(枚举 kind、子查询 query…),所以"它永远不会
-                # 抛"不是一个可以假设的性质。轨迹本身在上一行就已经落定,人仍然
-                # 看得到这一步真的发生过——这里只留一条 debug 日志,让"折不出来"
-                # 这件事至少在日志里可查,而不是彻底静默。
-                logging.getLogger(__name__).debug(
-                    "reflect v2 observation conversion failed for step_type=%s",
-                    step.step_type, exc_info=True)
         if self._on_step:
             self._on_step(step)
-        if self._deferred:
-            # 只有**它等的那种步**能放行(见 `defer` 的 `after`):`_v2_note_turn`
-            # 与那条 reflect 步之间会不会记账,不是这个记账器管得住的事——收尾
-            # `update_outline` 那条路上 `_nudge_missing_assessment` 就先记了一条
-            # outline 步。按类型判之后,中间的记账照常入账、但不触发放行。
-            ready = [item for after, item in self._deferred
-                     if after == step.step_type]
-            if ready:
-                self._deferred = [(after, item)
-                                  for after, item in self._deferred
-                                  if after != step.step_type]
-                for item in ready:
-                    self(item)
-
-    def defer(self, step: TraceStep, *, after: str = "reflect") -> None:
-        """把这一步排到**下一条 `after` 类型的记账之后**。v2-only,今天只有一个
-        调用点。
-
-        `_absorb_assessment` 在 `run()` 调 `reflect()` 之后、记 `reflect` 步
-        **之前**跑(`_v2_note_turn` 的位置),而它要记的那条 skip 讲的正是刚回来
-        的这份载荷。当场记账有两个具体代价,都不是风格问题:
-
-        1. **顺序**:那条 skip 会排在它所解释的 `reflect` 步前面;
-        2. **计时**:每步耗时是相邻两次记账的墙钟差,所以当场记账会让这条零成本
-           的记账步吞掉整次反思调用的时间,而 `reflect` 步显示 0ms —— 一次真实
-           的成本被记到了错误的那一行上。
-
-        排队解决两者,而且**不往 `run()` 里加语句**(它在零松弛的长度天花板下)。
-
-        ⚠ **放行判据是「下一条 `after` 类型的记账」,不是「下一条记账」**
-        (codex #705 R1 P2)。「中间不会有别的记账」曾经是这里的全部安全性论证,
-        而它在收尾 `update_outline` 这条路上不成立:`_absorb_assessment` 排完队
-        之后紧接着调 `_nudge_missing_assessment`,后者为了不丢掉这一轮真正做成的
-        事,会先 `apply_outline(...)` —— 那里记的 outline/skip 步就成了「下一条
-        记账」,排队的披露于是落在它所解释的 reflect 步**前面**,正是上面第 1 条
-        要消灭的东西。按类型判之后,中间记多少步都不影响落点:排队的步始终紧跟
-        下一条 `after` 步,而中间那些步照常按自己的墙钟差入账。
-
-        取消/异常路径下还没放行的排队步随这次 run 一起丢弃(既有取舍不变):它们
-        讲的是一轮被折掉的自评,而那次 run 本身已经没有结果可交。
-        """
-        self._deferred.append((after, step))
 
 
 @dataclass(slots=True)
@@ -4015,15 +2327,6 @@ class _ReasoningRunState:
     profile_raw_blocks: List = field(default_factory=list)
     experience_block: str = ""
     experience_entries: List = field(default_factory=list)
-    # `_first_round_prompt_blocks` 也写:集合地图渲染成 prompt 行**之前**的那个
-    # 对象。同一次构建的产物,不是第二次查询——`collection_map_text` 以前把它渲染
-    # 完就丢了,于是「本轮范围里各个集合有多少条」这些已经算出来的数,在执行层
-    # 只剩一句人读的英文。规模守卫(`enumeration_map_count` / `oversize_listing`)
-    # 要的就是它。
-    #
-    # 带默认值、留空即中性:地图没建(枚举关闭态、或构建失败的 fail-open 分支)
-    # 时恒为 None,守卫恒不触发,`_new_run_state` 因此一行都不用改。
-    collection_map: Optional[CollectionMap] = None
     # 本 run 里 reflect **主动选中**的动作(经 ADOPTION_ACTIONS 折回存储词表)。
     # 只在真的注入过条目时才积累——没注入就没有「采用」可言。reflect 循环写、
     # 收尾的采用回写读。
@@ -4081,60 +2384,6 @@ class _ReasoningRunState:
     follow_chain_searches: int = 0
     exact_lookups: int = 0
 
-    # —— 必答方面账(T4 / 设计稿 §7):**只在 reflect v2 下构造**,关闭态恒为
-    # None(零新状态)。与上面三个枚举预算池同一档纪律:不解包成局部名,读写一律
-    # 走 `state.aspects`——它的写点在 `_absorb_assessment`(每轮一次)而收尾的
-    # `_run_termination` 要读到那些写入。
-    aspects: "Optional[AspectLedger]" = None
-
-    # —— 反思调用**连续**失败的轮数(v2-only,写点单一在 `_v2_note_turn`)。
-    # 一次 provider 失败不再直接终止整次检索:那一轮折成零 I/O 的降级观察继续
-    # 走,连着两轮都失败才按既有 fail-open 收尾(终态 `model_degraded`)。所以它
-    # 必须是**连续**计数——中间任何一轮成功都清零,否则一次 run 里两次相隔很远、
-    # 各自都恢复了的抖动会被读成"这条模型通道塌了"。同上一档纪律:不解包成
-    # 局部名,读写一律走 `state`。
-    reflect_failures: int = 0
-
-    # —— 本 run 的**静态工具目录**(T-PS7 / 前缀复用设计 §4.2)。
-    #
-    # 带默认值、留空即中性:只有前缀复用策略不是 `off` 时才构造(判据见
-    # `_prime_static_catalog`;纯测量臂**不**构造——目录是布局的输入,不是测量的),
-    # 其余情况恒为 None ——`_new_run_state` 因此一行都不用改,关闭态零新状态。
-    #
-    # 写点单一且只写一次:本 run **第一次** reflect 那一轮,用那轮已经算好的 facts
-    # 生成。刻意**不**在 run 起点算——那里没有现成的 facts,重算一份要额外付一次
-    # `_unsafe_scope_restricted()`(「全选」形状下两次库读),而这个目录本来就是
-    # 用来省成本的。
-    reflect_static_catalog: "Optional[ReflectCapabilities]" = None
-
-    # —— 本 run 的 reflect **上下文观测缓存**(T-PS3 / 拍板 Q2)。
-    #
-    # 只读渲染缓存:它存的是上一轮已记账的 provider-facing 消息字节串与本轮那几
-    # 个整数观测,一格都不参与决策——把它整个删掉,发出去的消息、模型的决定与
-    # 轨迹上除那几个稀疏键之外的一切逐字节不变。
-    #
-    # 带默认值、留空即中性:只有 `reflect_measures_context()` 为真时才构造(写点
-    # 单一在 `_reflect_v2_context`,本 run 第一次 reflect 那一轮),其余情况恒为
-    # None ——`_new_run_state` 因此一行都不用改,关闭态与测量关零新状态。
-    #
-    # 同一个对象有三个把手,各有各的必要(不是三份数据):这里是 owner;
-    # `state.record.measurement` 是记账器合并 detail 用的把手(`run()` 不能加语句);
-    # `ReflectContext.measurement` 是每轮交给 `_reflect_v2_attempt` 的那一格
-    # (它拿不到 `state`,理由同 `static_prompt`)。
-    reflect_measurement: "Optional[ReflectMeasurement]" = None
-
-    # —— 本 run 的 `prefix_delta` **渲染缓存**(T-PD5 / 计划 §1 M4)。
-    #
-    # 三条硬约束写在 `ReflectDeltaState` 的类 docstring 里,这里只重复最要紧的
-    # 那一条:它是渲染缓存/阶段信息,**不是第二个检索控制状态拥有者**——把它整个
-    # 删掉,除 K/D 的字节组织外一切逐字节不变(动作选取、绑定资格、配额、终止判据
-    # 一格都不读它)。
-    #
-    # 带默认值、留空即中性:只有 `reflect_optimization() in _DELTA_LAYOUTS`
-    # (`prefix_delta`/`prefix_delta_lean`)且本 run 已经有静态目录时才构造(写点
-    # 单一在 `_reflect_delta_context`),其余情况恒为 None ——`_new_run_state`
-    # 因此一行都不用改,`off` / `prefix_snapshot` / 关闭态零新状态。
-    reflect_delta: "Optional[ReflectDeltaState]" = None
 
 
 class ReasoningRetriever:
@@ -4229,12 +2478,6 @@ class ReasoningRetriever:
         # keys (knowhow completion) turn this off: an enumerated list would
         # spend the run's budget on items their prompt cannot cite.
         self.allow_enumeration = True
-        # reflect v2 协议的**调用方**策略位(设计稿 §4)。部署总闸
-        # ``REASONING_REFLECT_V2_ENABLED`` 之上再叠一层,理由与
-        # ``allow_consult_memory`` 那条完全一样:knowhow 补全显式留在 legacy,
-        # 而"它恰好没传 limits / 恰好关掉了半数通道"这类偶然性不是策略。
-        # Ask 与深度报告保持 True,总闸打开时两者一起换协议。
-        self.allow_reflect_v2 = True
         self.untrusted_evidence = False
         # P1-B: 留存 search() 调用的全量打分(norm_key → {oid: (relevance, score)}),
         # 供收尾 _quota_rerank 复用而非重跑 federated_retrieve。见 search()/_quota_rerank。
@@ -4305,225 +2548,6 @@ class ReasoningRetriever:
         """本 run 的检索范围内有没有知识图谱。判据单点在 `kg_in_scope_for`。"""
         return kg_in_scope_for(self.retrieval, notebook_id)
 
-    # --- reflect v2 协议 ---
-    def reflect_v2_active(self) -> bool:
-        """本 run 的 reflect 用不用 v2 协议(设计稿 §4)。
-
-        与其它几把闸同款单点判定:**同一个**判据决定构不构造能力投影、
-        prompt/schema 走哪一套、解析走哪一套。关闭态因此逐字节回到接入前——
-        不构造任何新状态、不多付一次探测,`run()` 里除了这一个判断之外没有第二
-        处会问"现在是 v1 还是 v2"。
-
-        `getattr` 而不是直读:窄测试替身与离线工具里的 duck-typed settings 适配器
-        并不带这个字段(镜像 `reasoning_quota_reuse_enabled` 的既有写法),而缺省
-        必须是**关**——一个认不出这个开关的调用方绝不该被静默切到新协议上。
-        """
-        return (
-            bool(getattr(self.settings, "reasoning_reflect_v2_enabled", False))
-            and self.allow_reflect_v2
-        )
-
-    def reflect_optimization(self) -> str:
-        """本 run 的 reflect 用哪一档上下文前缀复用策略(前缀复用最终设计 §5.1)。
-
-        **全仓唯一读点**:settings 上那个策略字段除这里之外没有第二处会读。理由与
-        上面那把闸同款——各处自己读一次 settings 的写法,关掉之后总会剩下一处还
-        在跑(枚举闸与 chunk 闸都栽过)。
-
-        它**叠在** `reflect_v2_active()` 之上,不是与它并列:v2 关着时反思走的是
-        legacy 协议,那条路径上根本没有"前缀"这个概念,所以总闸关(以及 Knowhow 用
-        `allow_reflect_v2=False` 单独否决时)一律返回 `off`,配置里写了什么都不看。
-        这样 `off` 与关闭态是同一条字节路径,不需要在下游再判一次"现在是不是
-        legacy"。
-
-        `getattr` 而不是直读:窄测试替身与离线工具里的 duck-typed settings 适配器
-        并不带这个字段(镜像 `reflect_v2_active` 的既有写法),缺省必须是 `off`
-        ——认不出这个开关的调用方绝不该被静默切到新布局上。
-
-        **已实现闭集之外的取值一律折回 `off`。** 这不是把启动期校验器的活儿抢过来
-        ——真实部署的非法/未实现取值仍由 `validate_reflect_optimization` 在启动期
-        响亮拒绝,那条路径一格没动。这里兜的是**压根不过校验器**的那类 settings:
-        duck-typed 适配器、离线工具与窄替身可以带上任意一个 `None` / `""` / `0` /
-        未知串,而下游按取值分派布局时,一个认不出的取值只会走到"既不是 off 也不是
-        任何已实现臂"的第三种形态上——那才是真正的静默漂移。折回 `off` 是这里唯一
-        fail-closed 的选择:未知 ⇒ 走实施基线,与关闭态同一条字节路径。
-        """
-        if not self.reflect_v2_active():
-            return "off"
-        configured = getattr(self.settings, "reasoning_reflect_optimization", "off")
-        if configured not in REFLECT_OPTIMIZATION_IMPLEMENTED:
-            return "off"
-        return str(configured)
-
-    def reflect_measures_context(self) -> bool:
-        """本 run 要不要多算那份纯内存的上下文块长/前缀观测(拍板 Q2)。
-
-        与 `reflect_optimization()` **正交**:`off` 臂也能开着它,对照实验要的正是
-        两条臂用同一把尺子量。但同样叠在 v2 总闸之上——legacy 路径上没有可测的
-        块结构,关闭态一个字节都不多付。
-
-        它的消费者是测量本身(T-PS3),**不**包括静态工具目录:目录是布局的输入,
-        判据只看 `reflect_optimization()`(见 `_prime_static_catalog`)。测量对
-        `off` 臂原样的那份消息取尺,给它构造一份没有消费者的目录只会污染它要测的
-        东西。
-        """
-        if not self.reflect_v2_active():
-            return False
-        return bool(
-            getattr(self.settings, "reasoning_reflect_measure_context", False))
-
-    def _scope_probe_matters(
-        self,
-        state: "_ReasoningRunState",
-        *,
-        exact_lookup_available: bool,
-        terminal_overflow_repair: bool,
-    ) -> bool:
-        """本轮的来源范围探针会不会改变动作面(否则不必付那两次库读)。
-
-        六个范围敏感动作里,只要有**一个**在其它条件下仍然可用,范围就是它可用性
-        的最后一道判据,必须现探:
-        * `expand_graph` 除范围外只差「范围内有图」——所以 `kg_in_scope` 一条就
-          覆盖了 ppr/community/follow_chain/expand_graph 四个;
-        * `exact_lookup` 由调用方传进来的那个合取判据决定;
-        * 两个枚举动作的接线位(总闸 ∧ `allow_enumeration`)——注意这里读的是
-          **未折入范围**的接线,`state.enumeration_active` 已经把范围折进去了,拿它
-          判会自证其成:范围一收窄它就是 False,于是永不探测,于是永远报
-          `enumeration_disabled` 而不是真正的原因 `source_scope_unsafe_channel`。
-
-        不探时投影按「未受限」算。此时这些动作已经因为**别的**条件不可用,报出来
-        的是那一条其它原因——两条同时为真,而少付一次库读。终态大纲纠错轮除
-        `update_outline` 外什么都不提供,范围因此完全无关。
-        """
-        if terminal_overflow_repair:
-            return False
-        return bool(
-            state.kg_in_scope
-            or exact_lookup_available
-            or (self.allow_enumeration and enumeration_wiring_active(
-                self.settings, self.collection_catalog,
-                self.collection_enumeration))
-        )
-
-    def _reflect_capabilities(
-        self,
-        state: "_ReasoningRunState",
-        *,
-        steps: int,
-        elements_searches: int,
-        exact_lookups: int,
-        follow_chain_searches: int,
-        consult_used: int,
-        outline_updates: int,
-        outline_overflow: bool,
-        outline_cap_repair_used: bool,
-        terminal_overflow_repair: bool,
-    ) -> "ReflectCapabilities":
-        """把这一轮的运行时事实折成一次不可变的能力投影。
-
-        计数器从 `run()` 传进来而不是从 `state` 读:reflect 循环把大部分标量解包
-        成了局部名,`state` 上那几个是**陈旧值**(见 `_ReasoningRunState` 的纪律
-        说明)。`ppr_searches`/`chunk_searches`/枚举三池是那条纪律的既有例外,
-        它们仍以 `state` 为权威,所以这里直读。
-
-        ⚠ **不是纯函数:它有一处副作用。** 返回投影之前调用
-        `_prime_static_catalog(state, facts)`,在本 run **第一次** reflect 时把
-        `prefix_snapshot` 的静态工具目录写进 `state.reflect_static_catalog`(T-PS7)。
-        写点挂在这里而不是 run 起点,是为了复用这一轮刚算完的 facts、不再付一次
-        `_unsafe_scope_restricted()` 的库读——理由与幂等判据都在那个方法的
-        docstring 里。所以"只算一个投影"的读法是不准确的:同一次调用还决定了这
-        条臂整个 run 的 system 段长什么样。
-
-        这个方法只做加减法与布尔合并,唯一的两个请求级判定是
-        `chunk_search_active()`(纯 settings/策略位)与 `_unsafe_scope_restricted()`。
-        后者**不是**零成本:它按契约禁止 memo,「全选」形状下每次要两次库读,而
-        reflect 循环每轮都会走到这里(exhaustive 档 16 轮 ⇒ 约 32 次)。所以它只在
-        **可能改变本轮动作面**时才探——见下面 `scope_probe_matters` 的判据。
-        """
-        policy = state.action_policy
-        enumeration = state.enumeration_active
-        limits = state.enum_limits
-        exact_lookup_active = bool(
-            self.settings.exact_lookup_enabled and self.allow_exact_lookup)
-        exact_lookups_left = max(0, policy.max_exact_lookups - exact_lookups)
-        facts = ReflectCapabilityFacts(
-            kg_in_scope=state.kg_in_scope,
-            scope_restricted=self._scope_probe_matters(
-                state,
-                exact_lookup_available=(
-                    exact_lookup_active and exact_lookups_left >= 1),
-                terminal_overflow_repair=terminal_overflow_repair,
-            ) and self._unsafe_scope_restricted(),
-            has_candidates=bool(state.collected),
-            chunk_search_active=self.chunk_search_active(),
-            exact_lookup_active=exact_lookup_active,
-            ppr_active=bool(self.allow_ppr and self.settings.graph_ppr_enabled),
-            community_active=bool(self.allow_community_expansion),
-            enumeration_active=enumeration,
-            consult_memory_active=bool(
-                state.consult_memory_flag and self.allow_consult_memory),
-            outline_active=state.outline_active,
-            element_searches_left=max(
-                0,
-                self.settings.reasoning_max_element_searches
-                - elements_searches),
-            chunk_searches_left=max(
-                0, policy.max_chunk_searches - state.chunk_searches),
-            exact_lookups_left=exact_lookups_left,
-            ppr_left=max(0, policy.max_ppr_retrieves - state.ppr_searches),
-            follow_chain_left=max(
-                0, policy.max_follow_chain_actions - follow_chain_searches),
-            consult_left=max(0, policy.max_consult_memory - consult_used),
-            outline_updates_left=max(
-                0, state.max_outline_updates - outline_updates),
-            enum_rows_left=limits.enum_rows_per_run - state.enum_rows_used,
-            enum_pages_left=limits.enum_pages_per_run - state.enum_pages_used,
-            enum_payload_left=(
-                limits.structured_payload_chars - state.enum_payload_used),
-            element_kinds=(
-                tuple(ENUMERABLE_ELEMENT_KINDS) if enumeration else ()),
-            object_types=(
-                tuple(ENUMERABLE_KG_OBJECT_TYPES) if enumeration else ()),
-            # 回想的产出只进**下一轮**上下文,末轮执行等于白花一步(既有的
-            # consult_memory_last_turn 判据,这里只是把它提前到能力投影上)。
-            last_turn=steps >= state.max_steps,
-            outline_repair_available=(
-                outline_overflow and not outline_cap_repair_used),
-            terminal_overflow_repair=terminal_overflow_repair,
-        )
-        self._prime_static_catalog(state, facts)
-        return build_reflect_capabilities(facts)
-
-    def _prime_static_catalog(
-        self, state: "_ReasoningRunState", facts: ReflectCapabilityFacts,
-    ) -> None:
-        """本 run 第一次 reflect 时生成一次静态工具目录并缓存(T-PS7)。
-
-        为什么写点在这里而不是 run 起点:目录要的那份 facts 正是这一轮刚算完的
-        那份,而重新算一份就要再付一次 `_unsafe_scope_restricted()`——它按契约禁止
-        memo,「全选」形状下每次两次库读。用现成的那份是零额外 I/O。
-
-        为什么只在第一次:目录是本 run 的**稳定前缀**,一旦生成就逐字节不变。第二
-        轮开始 facts 已经带上了本轮的额度与形态,拿它重算会让"静态"这个词失效
-        ——那正是前缀复用要消除的逐轮漂移。代价按拍板 Q4 接受:首轮之后范围收窄
-        或通道关闭时,目录里会留着已经不可用的动作,由每轮的当前状态如实说明。
-
-        为什么判据只看策略、不看测量开关(评审后修正):目录是**布局**的输入——
-        只有把工具清单挪进稳定前缀的那条臂才会读它。测量量的是消息字节,它对
-        `off` 臂原样的那份消息取尺,不需要也不该拿到一份目录:`off` + 只开测量时
-        构造一份没有任何消费者的对象,只会让纯测量臂比它要测量的那条路径多付一笔
-        开销——那正好污染它要测的东西。所以判据是单一的
-        `reflect_optimization() != "off"`,走那一个单点,不在这里第二次读 settings;
-        `reflect_measures_context()` 由测量本身(T-PS3)消费。
-        """
-        if state.reflect_static_catalog is not None:
-            return
-        if self.reflect_optimization() == "off":
-            return
-        state.reflect_static_catalog = build_reflect_capabilities(
-            static_catalog_facts(facts))
-
-    # --- 集合枚举工具的总闸 ---
     def enumeration_active(self) -> bool:
         """本 run 是否提供类型化集合枚举工具。
 
@@ -4804,1224 +2828,9 @@ class ReasoningRetriever:
                for s in ex.sub_queries]
         return out or fallback
 
-    def _reflect_v2(
-        self, question, candidates_summary,
-        capabilities: "ReflectCapabilities", client,
-        context: "Optional[ReflectContext]" = None,
-    ) -> "ReflectDecision":
-        """一轮 v2 reflect:能力投影 → system/user 两段 → 类型化校验(设计稿 §5.2)。
-
-        与 legacy 的唯一共同点是传输(`chat_json`)与产出(`ReflectDecision`),
-        中间三件事都换了:动作面由 `capabilities` 一处生成、指令与数据分成
-        system/user 两条消息、参数由 reasoning 层按所选动作类型化校验。校验之后
-        **不复制第二套执行代码**——`run()` 的动作分发链原样消费同一个决定。
-
-        失败合同与 legacy 逐字一致:provider/JSON 在既有重试之后仍失败走
-        `_reflect_fallback`(`fail_closed` 下照抛),`AskCancelled` 始终上抛。
-        一次兜底**不是**"模型认为证据够了",两者在轨迹上由 `fallback_reason`
-        分开(见 `_reflect_fallback` 的说明)。
-
-        **v2 多一次同轮重试**:兜底原因是 `output_budget_exhausted`(正文为空且
-        provider 说这次被 `max_tokens` 切断)时,原样再调一次、把这一次的输出
-        预算翻倍(`REASONING_MAX_TOKENS × 2`)。倍数落在**同一个配置数**上而不是
-        另找一个字面量:一次部署把反思预算调高的决定,重试要跟着走,而不是撞上
-        一堵单独钉死的墙。全局配置一个字都不改——只有这一次调用带更高的上限。
-        仍失败才走兜底(随后由 `_survive_reflect_failure` 决定是继续还是收尾)。
-
-        ``context`` 只为布局分派往下传(见 `_reflect_v2_attempt`):两次尝试用同
-        一份上下文,加预算重试因此不会顺手换掉消息形状。
-        """
-        decision = self._reflect_v2_attempt(
-            question, candidates_summary, capabilities, client, context=context)
-        if (decision.fallback
-                and decision.fallback_reason == REFLECT_OUTPUT_BUDGET_EXHAUSTED):
-            decision = self._reflect_v2_attempt(
-                question, candidates_summary, capabilities, client,
-                context=context,
-                budget_multiplier=REFLECT_RETRY_BUDGET_MULTIPLIER)
-        return decision
-
-    def _reflect_prefix_layout(
-        self, context: "Optional[ReflectContext]",
-    ) -> bool:
-        """这一轮走不走**前缀布局**的消息形状(T-PS8;T-PD5 多认一格)。
-
-        两个条件缺一不可,且**两处判据同源**:策略单点说的是两条前缀臂之一
-        (`_PREFIX_LAYOUTS`),并且上下文真的带着那条臂的载荷(`static_prompt` 由
-        `_reflect_v2_context` 在同一个判据下填,空串 = 那边已经退回 off 的布局)。
-        少了后半个条件,一个直接调 `reflect(capabilities=..., context=...)` 的窄
-        调用方会在策略开着时拿到一份**没有工具目录**的 system 段——S 的动作清单
-        在前缀布局下来自静态目录,而窄调用方构造的上下文里没有它。
-
-        ⚠ `prefix_delta` 在这里与 `prefix_snapshot` **完全同格**,不是第二种形状:
-        两条臂的消息形状逐块相同(`system(S)` + 一条 `user(C+K+D+T)`),差别只在
-        K/D 两块的内容判据(计划 §0)。所以 delta 的**回退**也不经过这里——它换的
-        是"K/D 怎么装",不是"消息长什么样",判据在 `_reflect_v2_context` 内部那格
-        `ReflectDeltaState.fallback` 上,而不是在这里第二次读策略位。多一处分派就
-        多一处"一轮里判两次策略、分歧就静默降级"的故障面(评审 P3-9)。
-        """
-        return (
-            context is not None
-            and bool(context.static_prompt)
-            and self.reflect_optimization() in _PREFIX_LAYOUTS
-        )
-
-    def _reflect_v2_attempt(
-        self, question, candidates_summary,
-        capabilities: "ReflectCapabilities", client,
-        context: "Optional[ReflectContext]" = None,
-        *, budget_multiplier: int = 1,
-    ) -> "ReflectDecision":
-        """`_reflect_v2` 的一次调用尝试。``budget_multiplier`` 只放大这一次的
-        `max_tokens`(1 = 配置里的原值)。
-
-        `call_stats` 是一个**出参**:`chat_json` 在返回之前把这次调用的
-        `finish_reason` 写进去(见 `app.core.llm`)。它只在客户端自己声明支持时
-        才传(`_call_stats_kwargs`),所以既有的 duck-typed 替身与插件绑定的客户端
-        一个签名都不用改;拿不到 finish_reason 的调用方退回接入前的行为(空正文
-        一律记 `empty`,不触发上面那次加预算重试)。
-
-        **两种消息形状,由 `_reflect_prefix_layout` 一处分派。** `off`:
-        `system(UNTRUSTED? + 本轮动作清单在内的固定指令)` + `user(问题 + 三块)`,
-        逐字节回到接入前。`prefix_snapshot`:`system(UNTRUSTED? + S)` +
-        `user(C + K + D + T)`,其中本轮可执行动作与不可用清单从 S 挪到 T 的开头
-        ——那是 S 里**唯一**两处逐轮变化的内容(计划 X1),挪走之后整个 system 段在
-        一个 run 内逐字节不变。`chat_json` 自己在最前面插的那段 wrapper 与
-        `reflect_v2_schema_hint` 两条路径共用、两处都已经逐轮稳定,一个字都不动。
-
-        **上下文观测(T-PS3)与布局正交。** 测量开着时,这里额外算一份纯内存的
-        块长度/消息字节/公共前缀(见 `_measure_reflect_messages`),两条臂同一把
-        尺子;测量关时那两处判据各只多一次属性读。判据是
-        `measurement.measures_messages` 而不是"有没有这个对象":`prefix_delta` 无
-        条件构造一份载体来承接重建/回退那三个**行为事实**键(拍板 Q7),而那份载体
-        在测量关时一个字节都不许序列化。观测**不参与**这个
-        方法的任何决定:消息、重试判据与返回的决定逐字节与测量关时相同。观测
-        **自身失败**同样不参与——它关在自己的 `try` 里
-        (`_measure_reflect_messages_safely`),失败只表现为那几个键缺席,绝不会
-        落进下面那条 fail-open 的 `except` 变成一次假兜底。
-        """
-        stats: Dict[str, Any] = {}
-        # 上下文观测缓存(T-PS3)。测量关(`prefix_delta` 之外)、关闭态与不带上下文
-        # 的窄调用方一律 `None`;delta 臂测量关时对象在、`measures_messages` 为假
-        # ⇒ 下面两处判据都不成立,一个字节都不多序列化。
-        measurement = context.measurement if context is not None else None
-        assessment = (context.assessment_enabled if context is not None
-                      else self.reflect_optimization() != _EVIDENCE_LAYOUT)
-        try:
-            prefix_layout = self._reflect_prefix_layout(context)
-            if prefix_layout:
-                system_text = context.static_prompt
-                material = context.as_prefix_user_block(reflect_v2_turn_state(
-                    capabilities, UNAVAILABLE_DISCLOSE_MAX))
-                user_text = reflect_v2_prefix_user_prompt(
-                    question, context.contract, material)
-            else:
-                system_text = reflect_v2_system_prompt(
-                    capabilities, UNAVAILABLE_DISCLOSE_MAX,
-                    assessment=assessment)
-                material = (context.as_user_block() if context is not None
-                            else candidates_summary)
-                user_text = reflect_v2_user_prompt(question, material)
-            if self.untrusted_evidence:
-                # 严格调用方的额外一句"材料不可信"接在固定指令**之前**:v2 的
-                # system 段本身已经讲了这件事,这一句是那条更严格的既有合同,
-                # 两者同向叠加,不互相覆盖。**它是 run 级的**,所以叠在 P 的 S
-                # 前面同样不破坏 system 段的逐轮稳定性。
-                system_text = (
-                    f"{UNTRUSTED_EVIDENCE_SYSTEM_INSTRUCTION}\n\n{system_text}")
-            messages = [
-                {"role": "system", "content": system_text},
-                {"role": "user", "content": user_text},
-            ]
-            schema_hint = reflect_v2_schema_hint(
-                capabilities, assessment=assessment)
-            if measurement is not None and measurement.measures_messages:
-                # 测在**发出之前**:量的是这一轮已经定型的那两条消息,与调用成功
-                # 与否无关。一次被兜底吃掉的调用照样有它的上下文规模,而那一轮在
-                # 轨迹上仍有自己的 reflect 步。
-                _measure_reflect_messages_safely(
-                    measurement, context, messages, schema_hint, material)
-            raw = client.chat_json(
-                messages,
-                schema_hint,
-                timeout=self.settings.reasoning_timeout_seconds,
-                max_retries=self.settings.reasoning_max_retries,
-                cancel_event=self.cancel_event,
-                **reasoning_budget_kwargs(
-                    self.settings, multiplier=budget_multiplier),
-                **_call_stats_kwargs(client, stats))
-            data = json.loads(raw)
-            if not isinstance(data, dict):
-                if self.fail_closed:
-                    raise ValueError(
-                        "reasoning model returned a non-object reflection")
-                return _reflect_fallback("non_object")
-            decision = parse_reflect_v2(data, capabilities)
-            if decision.invalid_reason and self.fail_closed:
-                # `fail_closed` 调用方(knowhow 补全)刻意把一条 invalid 观察**升级**
-                # 成异常,而不是走 §5.2 的「记一条观察、继续下一轮」统一记账:那些
-                # 流程只接受服务端签发的证据键,一轮说不清的决定在那里不是可以吸收
-                # 的损失。普通 Ask/Report 仍然走统一记账。
-                raise ValueError(
-                    "reasoning model returned an unusable reflection: "
-                    f"{decision.invalid_reason}")
-            return decision
-        except AskCancelled:
-            raise
-        except Exception as exc:  # noqa: BLE001 — fail-open 合同,同 legacy
-            if self.fail_closed:
-                raise
-            return _reflect_fallback(_reflect_fallback_reason(
-                exc, str(stats.get("finish_reason") or "")))
-        finally:
-            # 三条出口(成功 / 取消上抛 / 兜底)都把这一次调用的观测累加进本轮:
-            # 一次死掉的调用同样烧了墙钟、同样发出了请求,而它正是最不该在
-            # run 级报告里静默消失的那一次(`_record_call_stats` 的同一条理由)。
-            if measurement is not None and measurement.measures_messages:
-                _measure_reflect_call(measurement, stats)
-
-    def _reflect_v2_context(
-        self, state: "_ReasoningRunState", summary: str, outline,
-    ) -> "ReflectContext":
-        """一轮 v2 reflect 的 user 段材料:服务器状态 + 证据卡 + 观察账。
-
-        三块各有自己的**具名**预算,谁也不许为了塞进别人的池子被裁尾(设计稿 §4):
-
-        * 服务器状态 = 调用方已经拼好的 `summary`(候选摘要、枚举覆盖、大纲便签、
-          集合地图、理解/打法/consult 块…)。它按各自既有的边界保留,这里一个字
-          都不动。
-        * 证据卡 ← `reasoning_reflect_evidence_chars_by_effort[本 run 档位]` 与
-          `reasoning_reflect_excerpt_chars`。
-        * 观察账 ← `reasoning_reflect_recent_observations` 与
-          `reasoning_reflect_state_chars`(只界定这一块可压缩区)。
-
-        没用满的证据预算**不换**工具次数:这个方法不碰任何配额,它只决定这一轮
-        的输入长什么样。
-
-        `outline` 从 `run()` 传进来而不是读 `state.outline`:那个局部名在应用大纲
-        时被重新绑定过(`bind_outline_evidence` 返回新对象),`state` 上的是旧值。
-
-        `getattr` 读 settings:窄测试替身与离线工具的 duck-typed 适配器不带这几
-        个字段(镜像 `reflect_v2_active` 的既有写法),缺省一律回到已登记的默认值,
-        绝不因为少一个字段就把预算当成 0。**六项预算每个字段恰一个读点**(四项既有 +
-        两个 PR-3 新增,计划 §1 M5):四项在这个方法体内、两个新配置各在自己那个专
-        用 helper(`_delta_max_cards` / `_delta_target_ratio`,各只有一个调用点、就在
-        这个方法里)。`prefix_delta` 那一支拿到的是这里算好的几个数,不是第二处
-        `getattr` ——同一个字段有两个读点时,「两条臂用了不同的预算」在字节上看着完
-        全正常。
-
-        **布局分派(T-PS8)。** `reflect_optimization()` 那个单点说的是两条前缀臂之
-        一时,同一批块按稳定性重排成 C/K/D/T(前缀复用设计 §4.1–4.5),并额外带上本
-        轮 system 段的静态半;`off`(含总闸关闭态与未登记取值)走下面原来那一份,逐
-        字节不变。**三个预算与所有内容判据两条路径共用**:下面这段装配一个字都没有
-        按布局分叉,分派只发生在"块往哪儿放"这一步。
-
-        **`prefix_delta` 的分支排在装配之前**(T-PD5),这不是风格选择:delta 的全部
-        意义就是**不**每轮从整池重选重排、不按本轮检索词重算摘录,而
-        `build_evidence_block` 那一次调用正是这两笔开销;更要紧的是它下一行
-        `ever_shown_outline_keys.update(selection.shown_keys)` 会把一批**根本没发给
-        模型**的键登记成"曾真实展示",于是设计稿 §6.2 那条绑定资格判据在这条臂上
-        当场失效。所以 delta 分支必须在那次调用**之前**返回。
-
-        **回退**(拍板 Q4,不可逆)不在这里第二次读策略位:判据是投影上那格
-        `ReflectDeltaState.fallback`,为真时这个方法直接走下面 P 的有界选择那一支
-        ——消息形状一格不变(`_reflect_prefix_layout` 认的是同一批取值),换的只是
-        K/D 怎么装。已经发出去的每一块 D 原样跟着走(`state.reflect_delta.blocks`,
-        回退这一步一格不清),`static_prompt` 也仍然带 delta 那四句:模型上文里那些
-        标着"新增"的块还在,而解释它们怎么读的规则不能在同一条消息里消失。
-
-        **上下文观测(T-PS3)**由 `_reflect_measurement` 挂在两条路径共同的那一格
-        (`ReflectContext.measurement`)上,判据与布局**正交**;测量关(默认)时它
-        恒为 `None`,返回对象逐字段回到接入前——`prefix_delta` 是拍板 Q7 登记的那条
-        例外,见 `_reflect_measurement`。块长度不在这里算(那三块的最终字节要等
-        `_reflect_v2_attempt`),这里只记它独有的那两个卡数。
-        """
-        settings = self.settings
-        if state.aspects is None:
-            # 同 `observer` 那条:总闸在一次 run 的中途被翻开时,账从这一轮起
-            # 建,而不是让整次检索崩在一个 None 上。走那个**唯一产地**(它带着
-            # run 级 lean 开关,三处防御重建漏一处就是一个假的臂标签)。
-            state.aspects = self._v2_build_aspect_ledger(state)
-        observer = state.record.observer
-        if observer is None:
-            # 总闸在**一次 run 的中途**被翻开(只可能发生在测试或热更配置里):
-            # 账本从这一轮起开始记,而不是让整次检索崩在一个 None 上。首轮那几条
-            # 观察就此缺席,这是如实的——那时还没有账本。
-            observer = state.record.observer = ActionObservationLedger()
-        effort = str(getattr(state.enum_limits, "effort", "") or "")
-        budgets = getattr(
-            settings, "reasoning_reflect_evidence_chars_by_effort", None) or {}
-        budget = int(
-            budgets.get(effort)
-            or DEFAULT_REFLECT_EVIDENCE_CHARS_BY_EFFORT.get(effort)
-            or DEFAULT_REFLECT_EVIDENCE_CHARS_BY_EFFORT[
-                DEFAULT_RETRIEVAL_EFFORT])
-        # 剩下三项既有预算与两个新配置(计划 §1 M5)。纪律是**每个字段恰好一个读
-        # 点**:四项既有预算与它们的默认值都在这个方法体内读完,两个新配置各在自己
-        # 那个专用 helper(`_delta_max_cards` / `_delta_target_ratio`)里读一次、而那
-        # 两个 helper 又各只有一个调用点,就在下面几行。少了这一条,同一个字段会有
-        # 两个读点,而关掉/改掉其中一处的后果是「两条臂用了不同的预算」,在字节上
-        # 看着完全正常。守卫在
-        # `test_reflect_optimization_has_exactly_one_settings_read_point`(六项预算
-        # 逐项参数化,AST 判据)。
-        excerpt_chars = int(getattr(
-            settings, "reasoning_reflect_excerpt_chars", 240))
-        recent = int(getattr(
-            settings, "reasoning_reflect_recent_observations", 6))
-        state_chars = int(getattr(
-            settings, "reasoning_reflect_state_chars", 6000))
-        optimization = self.reflect_optimization()
-        table_chars = _table_excerpt_chars(settings, optimization)
-        detail_cards = _prose_detail_cards(
-            settings, optimization, state, observer, excerpt_chars, table_chars, budget)
-        # 目录由 `_prime_static_catalog` 在本 run 第一次能力投影时写下,而 reflect
-        # 循环里投影恒排在这个方法之前。真出现"策略开着却没有目录"的形态(总闸在
-        # 一次 run 中途被翻开,只可能发生在测试或热更配置里),两条前缀臂都退回
-        # off 的那一份布局,而不是发一份没有工具目录的 system 段——少一半指令比换
-        # 个顺序危险得多。
-        catalog = state.reflect_static_catalog
-        delta = state.reflect_delta
-        if (optimization in _DELTA_LAYOUTS and catalog is not None
-                and (delta is None or not delta.fallback)):
-            context = self._reflect_delta_context(
-                state, summary, outline, observer, catalog=catalog,
-                optimization=optimization,
-                budget=budget, excerpt_chars=excerpt_chars,
-                state_chars=state_chars, recent=recent,
-                ratio=_delta_target_ratio(settings),
-                max_cards=_delta_max_cards(settings, effort),
-                table_excerpt_chars=table_chars, detail_cards=detail_cards)
-            if context is not None:
-                return context
-            # `None` = 这一轮刚刚不可逆地回退(投影上那格已经置位)。落到下面 P
-            # 的有界选择,本 run 剩余轮此后都从这里走。
-            delta = state.reflect_delta
-        # 回退之后上文里仍留着那几块 D(拍板 Q4),而这一支每轮自己重选一版 K。所以
-        # **回退轮及此后每一轮**都要按保留 D 已经占掉的那两半收窄:证据池给 K 的额度
-        # 是「档位池 − 保留 D 的证据半」、近期观察窗是「`state_chars` − 保留 D 的历史
-        # 半」,而保留 D 里已经可见的那些键排除在 K 的候选之外(`exclude_keys`,对
-        # **全部三档**生效——第三档的键序由 `build_evidence_block` 自己从池子里算,
-        # 在这里滤 `bound_keys`/`fresh_keys` 只挡住了三分之二,codex #707 R1 P2 的
-        # 复现正是"两档都不含它、它仍从第三档进 K")。少了这三格,一条消息里会有两
-        # 份都不带版本标记的同一张卡(§5 风险 4),两个池子各涨到档位的两倍,而且回
-        # 退不可逆 ⇒ 保留块永不清,这不是一轮的尖峰。`delta is None`
-        # (`off` / `prefix_snapshot`)⇒ 四格全中性,两条臂逐字节回到接入前。
-        carried = _carried_delta(delta)
-        fallback_cards, fallback_pending, carried_upgrades = prepare_fallback_detail_cards(
-            delta, _delta_frozen_cards(
-                delta, table_chars,
-                excerpt_terms(state.question, "", excerpt_chars) if table_chars else ()),
-            detail_cards, carried.keys, "\n\n".join(carried.blocks))
-        selection = build_evidence_block(
-            collected=state.collected, elements=state.elements,
-            chunks=state.chunks, chains=state.chains,
-            # 当前"已绑定证据的代表"(§6.2 第一档)= **大纲在前、方面补位**:
-            # 大纲真正持有的那些键排在最前,各必答方面已绑定的键(按方面轮转)
-            # 补在后面。紧预算下被截掉的是队尾,所以上一轮刚绑进结构的大纲证据
-            # 不会被方面代表挤出去(理由见 `evidence_bound_keys` 的 docstring)。
-            # `build_evidence_block` 一个字都没改:它当初就把这一档定义成"一份
-            # 键序",T4 只是把方面那半并进来。
-            bound_keys=evidence_bound_keys(
-                state.aspects,
-                [key for section in outline for key in section.evidence_keys]),
-            fresh_keys=observer.fresh_result_ids(),
-            # 保留 D 里已经可见的键**一处排除、三档同时生效**(上面那段注释)。
-            # 排除写在这一个参数上而不是逐档滤:同一条判据的第二份实现改一处时另
-            # 一处会静默变成陈的,而"第三档的候选序调用方看不见"让那份陈的实现从
-            # 一开始就只对两档有效。空集(`off` / `prefix_snapshot`)⇒ 逐字节不变。
-            exclude_keys=carried.keys - carried_upgrades,
-            # 摘录检索词取**原始查询文本**,不是规范化身份串(见
-            # `v2_request_query_text`)。
-            question=state.question, action_query=observer.last_query,
-            budget_chars=max(0, budget - carried.evidence_chars),
-            excerpt_chars=excerpt_chars,
-            # 回退轮的 K 也**复用冻结字节**:上文里那些 D 卡是冻结的那串字节,同
-            # 一个键在本轮 K 里按新检索词重算的话,同一条证据就在一条消息里出现两
-            # 种**都不带版本标记**的写法(设计 §4.4「不就地改写旧卡」/§5 风险 4),
-            # 而 S 仍然带着"后来那张标着版本"这句规则。`off` 与 `prefix_snapshot`
-            # 走到这里时 `delta is None` ⇒ 空映射,两条臂逐字节回到接入前。
-            frozen_cards=fallback_cards,
-            table_excerpt_chars=table_chars,
-            detail_cards=detail_cards,
-            frozen_fallback_cards=(
-                {key: text for key, text in delta.frozen_cards.items()
-                 if key not in carried.keys}
-                if detail_cards is not None and delta is not None and delta.fallback else {}),
-        )
-        accept_fallback_detail_cards(delta, selection, fallback_pending)
-        # **只登记真的渲染出来的键。**被预算挤出窗口的候选一个都不登记——模型没
-        # 见过它,就不该因为"它在池子里"取得大纲绑定资格(设计稿 §6.2)。
-        state.ever_shown_outline_keys.update(selection.shown_keys)
-        observations = render_observations(
-            observer.rows, recent=recent,
-            state_chars=max(0, state_chars - carried.history_chars))
-        measurement = self._reflect_measurement(
-            state, selection, optimization)
-        if optimization in _PREFIX_LAYOUTS and catalog is not None:
-            # 两条前缀臂共用的那一支(T-PS8)。**只换块的位置,不换任何块的内容
-            # 判据**:证据卡与观察账是上面同一次装配的产出。走到这里的 delta 只
-            # 有一种形态——已经不可逆地回退(拍板 Q4),此后逐轮从这里出。
-            if delta is not None and measurement is not None:
-                _note_delta_measurement(measurement, delta)
-            return self._prefix_context(
-                state, summary, catalog,
-                evidence=selection.text, observations=observations,
-                # 回退**不清空已发出的 D**:上文那些标着"新增"的块是模型已经读过
-                # 的材料,抽掉它们等于让一整段上文凭空消失。回退只换"下一块怎么
-                # 装",不改"上面已经装过什么"——触发回退的那一次重建清掉的 `blocks`
-                # 由 `_reflect_delta_context` 在置位之前原样还原,所以这里读到的就
-                # 是回退**之前**最后一轮发出去的那几块,逐字节不变。
-                delta=("\n\n".join(delta.blocks) if delta is not None else ""),
-                # 判据与上面那一格**同源**:S 里那四句 delta 规则解释的正是 D 怎么
-                # 读,所以"发不发规则"必须与"有没有 D 这条通道"是同一个条件。分成
-                # 两处读(一处读投影、一处再读策略位)的后果是它们可以分歧——策略
-                # 位在一次 run 中途翻回 `prefix_snapshot`(热更/测试)就会发出一条
-                # 带 D 块、而 S 已经不解释它的消息。
-                static_delta=(delta is not None),
-                # L 的自评合同**不随回退消失**(拍板 Q11 / 设计 §5.2「保留轻量
-                # 自评与否的原设置」):回退换的是 K/D 怎么装,不是模型该提交
-                # 什么。判据取本方法已经算好的 `optimization`,与账本那一格 run
-                # 级开关同源(`_v2_build_aspect_ledger`),所以"S 里 lean 段在、
-                # 账本仍不追问"这两件事在回退之后仍然一致。
-                static_lean=(optimization == _LEAN_LAYOUT),
-                detail_cards=detail_cards,
-                prose_history_budget=(state_chars if optimization == _EVIDENCE_LAYOUT else None),
-                measurement=measurement)
-        # 必答方面清单 + 已完整枚举的集合键,都接在服务器状态块的**尾部**,与它
-        # 一起受"按现有输入/协议边界保留、不整体裁尾"的处理(§4):方面清单是用户
-        # 确认过的必答清单,集合键是服务端签发的证据身份——两者都不属于
-        # `state_chars` 界定的那块可压缩区。集合键排在方面清单**之后**:模型是先
-        # 读到"a2 还没支撑"、再去找"有什么键能支撑它"。
-        blocks = [
-            summary,
-            (render_aspect_block(state.aspects)
-             if state.aspects.assessment_enabled
-             else render_aspect_contract_block(state.aspects)),
-            render_collection_keys_note(
-                state.enum_chains, assessment=state.aspects.assessment_enabled),
-        ]
-        return ReflectContext(
-            server_state="\n\n".join(block for block in blocks if block),
-            evidence=selection.text,
-            observations=observations,
-            measurement=measurement,
-            assessment_enabled=state.aspects.assessment_enabled,
-        )
-
-    def _reflect_measurement(
-        self, state: "_ReasoningRunState", selection, optimization: str,
-    ) -> "Optional[ReflectMeasurement]":
-        """本 run 的上下文观测缓存,并记下这一轮的证据卡账(T-PS3;拍板 Q2)。
-
-        测量关(默认)与 v2 总闸关 ⇒ 恒 `None`,调用方一格都不多付:不构造缓存、
-        不序列化任何消息、`ReflectContext` 逐字段回到接入前。判据走
-        `reflect_measures_context()` 那个单点,它与 `reflect_optimization()`
-        **正交**——`off` 臂开着测量正是对照实验要的形态(拍板 Q2)。
-
-        ⚠ **`_DELTA_LAYOUTS`(`prefix_delta`/`prefix_delta_lean`)是那条口径唯一
-        的例外(拍板 Q7,已登记偏离)。** 这两条臂
-        无条件构造这个对象,因为重建次数与"有没有回退"是**行为事实**,与要不要量
-        字节无关:一个测量关着的生产 run 照样可能整段退回 P 的有界选择,而那件事
-        不出现在任何一个字节数里。`measures_messages` 因此接住原来那道判据的另一
-        半——它为假时,消息一个字节都不序列化(见 `_reflect_v2_attempt` 的两处),
-        卡数与块长那几个键如实缺席,detail 上只剩 `_note_delta_measurement` 写的
-        那三格。`off` / `prefix_snapshot` 两条臂在这里恒为 `True`,判据一个字没动。
-
-        缓存本 run 只构造一次(第一次 reflect 那一轮),此后原样复用:它要跨轮
-        持有的正是上一轮那串消息字节。构造的同一刻把它挂到记账器上——那是本轮
-        测量键唯一的落账入口,而 `run()` 一条语句都不能加。
-
-        卡数在这里记而不在 `_measure_reflect_messages` 里:证据卡的选取是这个
-        方法独有的产出(`selection`),而那边只看得到已经渲染成字符串的块。
-        `cards_shown` 只数**真的渲染出来**的键(与大纲绑定资格同一份口径),
-        `cards_omitted` 是被预算与逐条判据挤出窗口的候选数。`selection is None`
-        (delta 臂**没有**重建 K 的那些轮)⇒ 这两格不写:那一轮压根没有"这一次选
-        卡"这件事,写上一轮的数就是把一个陈的量说成本轮的。
-
-        ``optimization`` 由调用方**传值**,不在这里第二次问 `reflect_optimization()`
-        ——那已经是同一轮里对同一个决定的第三次读(`_reflect_prefix_layout` 的
-        docstring 反对的正是这件事:一轮里判两次策略,分歧就静默降级)。
-        """
-        measurement = state.reflect_measurement
-        if measurement is None:
-            measures = self.reflect_measures_context()
-            if not measures and optimization not in _DELTA_LAYOUTS:
-                return None
-            measurement = state.reflect_measurement = ReflectMeasurement(
-                measures_messages=measures)
-            state.record.measurement = measurement
-        if selection is not None and measurement.measures_messages:
-            measurement.detail[_MEASURE_CARDS_SHOWN] = len(selection.shown_keys)
-            measurement.detail[_MEASURE_CARDS_OMITTED] = int(selection.omitted)
-        return measurement
-
-    def _prefix_context(
-        self, state: "_ReasoningRunState", summary: str, catalog, *,
-        evidence: str, observations: str, delta: str = "",
-        static_delta: bool = False, static_lean: bool = False,
-        detail_cards=None, prose_history_budget: int | None = None,
-        measurement: "Optional[ReflectMeasurement]" = None,
-    ) -> "ReflectContext":
-        """两条前缀臂**唯一**的 `ReflectContext` 成型点(T-PS8;T-PD5 共用)。
-
-        块的位置与内容判据在这里一格不分叉:`summary` 整块原样搬到 T 的末尾(拍板
-        Q3),方面账拆成契约半(C)与状态半(T),K 与 D 由调用方按各自的口径算好
-        再交进来。两条臂共用一个成型点是硬要求——分成两处拼的话,"两臂除 K/D 外
-        逐块相同"这条对照实验的前提就只活在措辞里,而 §5 风险 7 点名要挡的正是
-        "顺手精简 T"那一族。
-
-        T 的两半按「有没有排序权」分开(评审 P2-4)。前两块是服务端**执行限制**,
-        T 的标题声明它们优先于上面过时的观察与证据卡;`summary` 那半改挂
-        `TURN_CONTEXT_TITLE`,因为 `run()` 已经把 `profile_block` /
-        `experience_block` / `consult_block_text` 拼进去了——那几段是从库里文档归纳
-        出来的文本,不该借 T 的标题取得压过真实证据卡的排序权。`summary` 本身一个
-        字都没改。
-
-        ⚠ `render_aspect_status_block` 带着两处**消费**副作用(追问句与未采纳披露),
-        所以这个方法一轮只许调用一次:delta 那一支在装完 D 之后调它一次,回退与
-        `prefix_snapshot` 各在自己那一支调一次,三者互斥。
-
-        `static_delta` 只选 S 的那四句 delta 规则(T-PD6),其余每一格两条臂共用;
-        `False` ⇒ `prefix_snapshot` 逐字节回到接入前。每轮按同一个冻结目录重渲染
-        一次:纯字符串拼接、零 I/O,而同一个输入必然给出同一串字节,所以 S 的稳
-        定性不依赖任何缓存是否生效。
-
-        `static_lean` 是 L 那条臂的**自评合同**(T-PL5),一格布尔选中两处 lean
-        双胞胎文本:S 里的 `_V2_LEAN_ASSESSMENT_INSTRUCTION`(替换、不追加)与 T
-        的状态半尾注 `ASPECT_BLOCK_NOTE_LEAN`。**两处必须同一格判据**——一处说
-        「本轮只报变化」、另一处说「本轮请重新给出全量」是这条臂最坏的形态,模型
-        只能猜哪一句算数,而 A/B 表会把由此产生的行为差异记到"布局"头上。
-        `False` ⇒ P/D 两条臂与关闭态逐字节回到接入前。
-
-        ⚠ **调用方传值,这里不第二次读策略位**(拍板 Q2,与 `static_delta` 同款
-        纪律)。判据是 `_reflect_v2_context` 已经算好的那个 `optimization` 局部值
-        (delta 支经 `_reflect_delta_context` 的同名参数传下来),而不是再问一次
-        `reflect_optimization()`:同一轮里判两次策略,两次之间可以分歧——热更或
-        测试在一次 run 中途把策略位翻回 `prefix_delta`,就会发出一条 S 说「只报
-        变化」而 T 说「重新给出」的消息。账本那一格 lean 开关是**另一条**路
-        (`_v2_build_aspect_ledger`,建账时冻结一次):中途翻位改得动 prompt 字节,
-        改不动这次 run 的追问合同,所以臂标签不会变成假的。
-        """
-        return ReflectContext(
-            # off 的那一块在前缀布局下不存在:它的内容已经按稳定性分到了 C 与 T。
-            # 留空而不是塞一份重复的文本——同一批事实在一条消息里出现两遍,模型
-            # 无从判断哪一份是此刻的。
-            server_state="",
-            evidence=evidence,
-            observations=observations,
-            contract=render_aspect_contract_block(state.aspects),
-            turn_state="\n\n".join(block for block in (
-                (render_aspect_status_block(state.aspects, lean=static_lean)
-                 if state.aspects.assessment_enabled else ""),
-                render_collection_keys_note(
-                    state.enum_chains,
-                    assessment=state.aspects.assessment_enabled),
-                f"{TURN_CONTEXT_TITLE}\n{summary}" if summary else "",
-                _prose_visibility_note(
-                    state, evidence, delta, observations, detail_cards, prose_history_budget),
-            ) if block),
-            delta=delta,
-            static_prompt=reflect_v2_static_prompt(
-                catalog, delta=static_delta, lean=static_lean,
-                assessment=state.aspects.assessment_enabled),
-            measurement=measurement,
-            assessment_enabled=state.aspects.assessment_enabled,
-        )
-
-    def _reflect_delta_context(
-        self, state: "_ReasoningRunState", summary: str, outline, observer, *,
-        catalog, optimization: str, budget: int, excerpt_chars: int,
-        state_chars: int, recent: int, ratio: float, max_cards: int,
-        table_excerpt_chars: int = 0,
-        detail_cards=None,
-    ) -> "Optional[ReflectContext]":
-        """`prefix_delta` 的一轮装配(计划 §3 T-PD5;顺序 = 设计 §5.2 七步)。
-
-        ① 取/建投影 → ② 形成待追加事件 → ③ 检查预算 → ④ 必要时重建 K →
-        ⑤ 装不下最小有效新证据就不可逆回退 → ⑥ 追加 D、更新冻结表与两个累计计数
-        → ⑦ 成型。这条顺序**天然就是** `run()` 循环里这个方法的位置(每轮一次、
-        排在 `self.reflect(...)` 之前、排在上一轮动作执行与记账之后),所以 `run()`
-        一行不动、也不需要在别处再摆一次顺序。
-
-        **零 LLM、零 I/O、零额外配额。** 重建复用同一个 `build_evidence_block` +
-        `render_observations` + `fold_observation_counts`,全是纯函数;这个方法不
-        碰任何一格配额、不读库、不发请求——它只决定这一轮的输入长什么样。
-
-        **重建触发点是「一张新卡都装不下」,不是「本轮新卡塞不进剩余额度」**(评审
-        取舍,刻意)。后者每次有一张超出剩余额度的卡就压一次 K,而那张卡有省略披露、
-        下一次重建时按同一档序回得来;前者只在"这一块什么新证据都发不出去"时动手,
-        重建抖动因此少一个数量级。代价如实登记:紧预算下一张新卡可能晚几轮才进上文。
-
-        **准入判的是「完整的待追加块」对两个池各要多少字节**,不只是那几张卡
-        (`_delta_pending_charges`,与落账同一处口径;codex #707 R1 P2)。一块 D 里
-        除了卡片节还有块头、观察行和方面 note 三样,而只带观察行的那些轮"有候选卡却
-        一张都装不下"这条判据恒假——于是块头(与那句 note)会**无条件**追加,而这两笔
-        账是逐块累计的:995/5990 的用量在 1000/6000 的上限下追加成 1071/6017,一次放
-        过就一路带下去。任一池顶破 ⇒ 走重建。
-
-        **重建有迟滞**(`ReflectDeltaState.rebuilt_last_turn`):上一轮刚压紧过一版、
-        这一轮又连一张新卡都装不下 ⇒ 这个预算下压缩已经无效,再压一次是纯空转(每
-        轮一次全池 `build_evidence_block` + K 重写 ⇒ 公共前缀塌回只剩 C,这条臂在它
-        自己要改进的两个轴上反而比 `prefix_snapshot` 更贵)。那时直接走回退。两个池
-        溢出触发的重建**只在本轮不拥挤时**不受迟滞约束(判据是
-        `crowded and rebuilt_last_turn`):账本真的又长了、而新证据还装得下时,压缩
-        对它仍然有效;同一轮里既池子溢出、又连一张新卡都装不下的话,迟滞照样赢——
-        那时压缩已经证明无效,再压一次仍然是空转。
-
-        返回 `None` = **这一轮刚刚不可逆地回退**(拍板 Q4)。用返回值而不是在这里
-        自己再拼一份 P 的装配:那样"回退之后与 `prefix_snapshot` 走同一支"就成了
-        两处代码今天恰好一致,而调用方那一支本来就在,少一次重复就少一处会漂开的
-        地方。回退**不清空已发出的 D**(重建那一步清掉的 `blocks` 由回退分支原样还
-        原)、不清空候选池、不清空 `ever_shown_outline_keys`、不重置任何配额,也不多
-        一次模型调用或轨迹步。
-
-        ⚠ **回退之后两笔账收缩成「保留 D 那一半」,而不是停用。** 被丢弃的那次重建
-        已经把它们重置成新 K 的长度,而还原回去的 `blocks` 是**旧** K 时代的块——所以
-        `_delta_fallback` 把两格各减掉那一版 K 的对应半,只留下保留 D 真的占掉的字
-        节。P 的那一支每轮读它们两次:K 的额度是「档位证据池 − 保留 D 的证据半」、
-        近期观察窗的额度是「`state_chars` − 保留 D 的历史半」,而保留 D 里已经可见
-        的键(`block_keys`)被排除在 K 之外。少了这三格,回退轮及其**此后每一轮**的
-        一条消息里会有两份都不带版本标记的同一张卡,而两个池子各涨到档位的两倍
-        (回退不可逆 ⇒ 保留块永不清,这不是一轮的尖峰)。另外两件事各自成立:上文里
-        已经发出的 D 一个字节都没变,而 `ever_shown_outline_keys` 只登记真发出去过的
-        键(被丢弃那一版 K 的选取一格都不登记)。
-
-        ⚠ **唯一允许越界的形态**(拍板,codex #707 R1 P2):本轮**没有候选新卡**、
-        而块头 + 观察行(+ 方面 note)重建之后**仍然**顶破证据池或历史池 ⇒ 这一块
-        照发,记账如实记成超出。理由是观察行是本轮那次动作在上下文里的**唯一**记录,
-        把它推到下一轮就等于让模型看不见自己刚做过什么;而"有候选新卡却装不下"那条
-        形态仍然走既有回退判据(⑤)。既然记账如实,`delta.evidence_chars` /
-        `history_chars` 下一轮必然仍在阈值之上 ⇒ **下一轮必重建**,越界因此是一轮的
-        事,不是一路带下去。
-        """
-        delta = state.reflect_delta
-        bound_keys = evidence_bound_keys(
-            state.aspects,
-            [key for section in outline for key in section.evidence_keys])
-        fresh_keys = observer.fresh_result_ids()
-        # ① 首轮:按目标比例建第一版 K,给后续增量留出空间(设计 §5.2 首句)。
-        #    `generation=1`、`rebuilds` 不加——这不是一次重建。
-        snapshot = None
-        if delta is None:
-            delta = state.reflect_delta = ReflectDeltaState()
-            snapshot = _build_delta_snapshot(
-                state, delta, observer, bound_keys=bound_keys,
-                fresh_keys=fresh_keys, budget=budget, state_chars=state_chars,
-                excerpt_chars=excerpt_chars, recent=recent, ratio=ratio,
-                table_excerpt_chars=table_excerpt_chars, detail_cards=detail_cards)
-        # ② 待追加事件(全是纯读:这里一格都还没改投影)。观察行只渲染一次,下面
-        #    的记账与 `build_delta_block` 复用同一份列表(同一个输入渲染三遍是这条
-        #    臂本来就要省的那类开销)。方面 note 也在这里定下来:它同样是**这一块
-        #    的内容**,所以准入要算它的费用(codex #707 R1 P2),而它一直到追加之后
-        #    才被消费,中间的重建不碰它。
-        pending_lines = [
-            render_observation_row(row)
-            for row in observer.rows[delta.observation_cursor:]]
-        notes = tuple(delta.pending_aspect_notes)
-        cards = _delta_cards(
-            state, delta, observer, bound_keys=bound_keys,
-            fresh_keys=fresh_keys, budget=budget, max_cards=max_cards,
-            excerpt_chars=excerpt_chars, table_excerpt_chars=table_excerpt_chars,
-            detail_cards=detail_cards)
-        evidence_add, history_add = _delta_pending_charges(
-            cards.text, pending_lines, notes)
-        # ③ 只有"待追加的 D 装不下"才重建(设计 §5.2:短循环不按固定轮数压缩)。
-        #    判据是**完整的待追加块**对两个池各要多少字节(`_delta_pending_charges`,
-        #    与落账同一处口径):块头 + 卡片节顶破证据池、或观察行 + 方面 note 顶破
-        #    历史池,任一成立就走重建。只看"有候选卡却一张都装不下"的话,只带观察行
-        #    的那些轮 `crowded` 恒假、于是块头无条件追加,而这两笔账是**逐块累计**的
-        #    (codex #707 R1 P2 的复现:995/5990 用量、1000/6000 上限 ⇒ 追加后
-        #    1071/6017 而不重建)。
-        #    刚建过 K 的那一轮不重建:那一版是这一刻能给出的最紧的一版,再压一次
-        #    是纯空转,而 §5 风险 5 点名要挡的就是这种震荡。
-        crowded = bool(cards.omitted and not cards.shown_keys)
-        rebuilt = False
-        if snapshot is None and (crowded
-                                 or delta.evidence_chars + evidence_add > budget
-                                 or delta.history_chars + history_add
-                                 > state_chars):
-            # **先存一份此刻的 D**:这一支的两条判据都可能走到回退,而重建的第一件
-            # 事就是清空 `blocks`、把两笔账重置成新 K 的长度。上文里那些标着"新增"
-            # 的块是模型已经读过的材料,抽掉它们等于让一整段上文凭空消失(拍板 Q4
-            # 「回退不清空已发出的 D」);而回退之后 P 那一支要按"档位池 − 保留 D"
-            # 给 K 定额度、并把保留 D 里已可见的键排除掉,所以键与两笔账一起存。
-            carried = _carried_delta(delta)
-            if crowded and delta.rebuilt_last_turn:
-                # ④ 迟滞:上一轮刚压紧过一版,这一轮又连一张新卡都装不下 ⇒ 这个
-                #    预算下压缩已经无效,第二次重建是纯空转。直接回退(不可逆),
-                #    已发出的 D 一格未动(这一支还没碰 `blocks`)。
-                _delta_fallback(delta, carried)
-                return None
-            # ④ 重建:零 LLM、零 I/O。`blocks` 整体清空、两个累计计数重置、游标
-            #    推到账本末尾(那些待追加的观察行由新 K 的近期窗接过去)。
-            rebuilt = True
-            snapshot = _build_delta_snapshot(
-                state, delta, observer, bound_keys=bound_keys,
-                fresh_keys=fresh_keys, budget=budget, state_chars=state_chars,
-                excerpt_chars=excerpt_chars, recent=recent, ratio=ratio,
-                table_excerpt_chars=table_excerpt_chars, detail_cards=detail_cards)
-            delta.generation += 1
-            delta.rebuilds += 1
-            # 重建把游标推到了账本末尾,所以这两个量必须**重算**:待追加的观察行
-            # 已经由新 K 的近期窗接过去,本轮的 D 里一行都没有,记账因此是 0。用
-            # 重建之前那个 `history_add` 的话,同一批行会被计两遍(一遍在新 K 的
-            # `snapshot_history` 里、一遍在这一笔追加里),而它最大可以接近整份
-            # `state_chars` ——重建刚做完就可能已经越过阈值,下一轮无条件再压一次。
-            pending_lines = [
-                render_observation_row(row)
-                for row in observer.rows[delta.observation_cursor:]]
-            cards = _delta_cards(
-                state, delta, observer, bound_keys=bound_keys,
-                fresh_keys=fresh_keys, budget=budget, max_cards=max_cards,
-                excerpt_chars=excerpt_chars, table_excerpt_chars=table_excerpt_chars,
-                detail_cards=detail_cards)
-            evidence_add, history_add = _delta_pending_charges(
-                cards.text, pending_lines, notes)
-            # ⑤ 本轮**有候选新卡、重建之后一张都装不下** ⇒ 压缩已经无效,本 run
-            #    剩余部分回退(拍板 Q4,不可逆)。没有候选新卡的那些轮不回退:那
-            #    是"这一轮没有新证据",不是"装不下新证据",而 D 本来就允许为空。
-            #    (不再合取"没有待追加的观察行":重建刚把游标推到账本末尾,那一格
-            #    在这个位置恒真,写上去只是让判据看起来比实际宽。)
-            #    重建之后两笔费用**重算一次**,但没有候选新卡时它们不再是回退判据
-            #    (拍板:那一形态照发,见这个方法 docstring 最后一段)。
-            if cards.omitted and not cards.shown_keys:
-                _delta_fallback(delta, carried)
-                return None
-        # 只登记**真发出去**的那一版 K 的键(设计 §4.4:绑定资格在最终渲染之后才
-        # 登记)。被丢弃那一次重建的选取在上面两条回退分支里已经 `return`,一格都
-        # 没登记——否则模型从没见过的卡会凭"它在某一版被选中过"取得绑定资格。
-        if snapshot is not None:
-            state.ever_shown_outline_keys.update(snapshot.shown_keys)
-        delta.rebuilt_last_turn = rebuilt
-        # ⑥ 追加。补充卡按拍板 Q8 用**新卡之后剩下的**那点预算,而且排在新卡之后:
-        #    新证据优先于同一条证据的更好摘录(两处口径必须一致,否则"优先"只活在
-        #    预算里、在模型眼里反而是补充卡先出现)。`supplement_for` 的调用契约要
-        #    求"先选定要发的键、非空返回值无条件拼进本块",所以剩余额度必须在调用
-        #    之前就算清楚。
-        supplements = _delta_supplements(
-            state, delta, observer, candidate_keys=bound_keys,
-            max_cards=max_cards, excerpt_chars=excerpt_chars,
-            table_excerpt_chars=table_excerpt_chars,
-            detail_cards=detail_cards,
-            visible_fallback=(optimization == _EVIDENCE_LAYOUT),
-            budget_left=(budget - delta.evidence_chars - _DELTA_HEAD_CHARS
-                         - len(cards.text)))
-        cards_text = "\n".join(
-            part for part in (cards.text, *supplements) if part)
-        block = build_delta_block(
-            cards_text, pending_lines, notes, generation=delta.generation)
-        if block:
-            delta.blocks.append(block)
-            delta.pending_aspect_notes.clear()
-            delta.observation_cursor = len(observer.rows)
-            # 记账口径:块头按每块一次计进**证据池**(与 K 把
-            # `EVIDENCE_BLOCK_TITLE` 算进 `used` 同一条);动作观察行与"已接受的
-            # 方面更新"那一句计进**历史池**(设计 §5.1:历史池计 K 的可压缩历史
-            # 摘要与各 D 的动作/历史判断)。判断在追加**之前**做,记账在之后,而
-            # 两处的加数由 `_delta_pending_charges` 一处给出——历史那一笔直接就是
-            # 它算的 `history_add`(观察行 + note 一起),证据那一笔要把补充卡也算
-            # 进去,而补充卡的额度上面已经按 `budget_left` 从同一份剩余里切过。
-            delta.evidence_chars += _DELTA_HEAD_CHARS + len(cards_text)
-            delta.history_chars += history_add
-            # **只登记真的渲染出来的键**(设计稿 §6.2):被预算或 `max_cards` 挤
-            # 出这一块的候选一个都不登记,模型没见过它就不该取得绑定资格。
-            for key, text in cards.cards:
-                delta.note_shown(key, text)
-                delta.block_keys.add(key)
-            state.ever_shown_outline_keys.update(cards.shown_keys)
-        measurement = self._reflect_measurement(
-            state, snapshot, optimization)
-        if measurement is not None:
-            _note_delta_measurement(measurement, delta)
-        # ⑦ 成型。K 的两块取投影上那两串**已经发出去过**的字节,不重新渲染:
-        #    "存了 A 发了 B"这种分叉不会有任何一条断言看得见。
-        return self._prefix_context(
-            state, summary, catalog,
-            evidence=delta.snapshot_evidence,
-            observations=delta.snapshot_history,
-            delta="\n\n".join(delta.blocks),
-            static_delta=True,
-            # L = D + 自评合同(计划 §0)。判据用调用方传下来的 `optimization`,
-            # 不第二次读策略位——理由见 `_prefix_context` 的 `static_lean`。
-            static_lean=(optimization == _LEAN_LAYOUT),
-            detail_cards=detail_cards,
-            prose_history_budget=(state_chars if optimization == _EVIDENCE_LAYOUT else None),
-            measurement=measurement)
-
-    def _absorb_assessment(
-        self, state: "_ReasoningRunState", decision: "ReflectDecision",
-        apply_outline, overflow_repair: bool, more_turns: bool,
-        outline_left: Optional[int] = None,
-    ) -> "ReflectDecision":
-        """把这一轮的 `assessment` 落进方面账,或把整份决定折成一条 invalid。
-
-        只在 v2 下被调用(`run()` 的 `capabilities is not None` 分支),关闭态一次
-        都不进来。
-
-        `assessment` 是同一次 reflect 的**附加**结果:缺省不算 invalid(模型完全
-        可以只给动作,设计稿 §7.1),所以 `None` 原样返回。
-
-        ⚠ **动作与 assessment 独立校验(设计稿 §6,T-BF7)。** 给了但越界的载荷
-        分两族,处理完全不同:
-
-        * **整份形状**不成立(`not_object` / `<group>_not_list` /
-          `item_not_object` / `invalid_status` …)⇒ 照旧走 T2 那条路:
-          `_reflect_invalid` 产出的伪动作决定,`run()` 的链尾记零 I/O 观察、扣
-          一步、进 stale 记账,原因码带上是哪一条边界
-          (`invalid_assessment:<why>`);
-        * **单个方面**不成立(`ASPECT_REJECTION_REASONS` 那个闭集)⇒ **这一轮的
-          动作照常执行**,只有那个方面的更新不落账(它保留旧状态,并在下一轮的
-          方面块里披露「服务端未采纳」),另记一条不产生动作观察的 skip 步。
-          生产 68 个 v2 run 里 17 轮整轮作废(每轮约 40 秒)全部来自这一族:模型
-          的动作参数已经通过了全部校验,吞掉它的是它自己写的一句自评。
-
-        ⚠ **逐方面全被拒的收尾轮不算"已自评"**(评审 P1):`outcome.accepted` 传给
-        `_nudge_missing_assessment`,空元组与空载荷在那里是同一件事,照走既有的
-        追问路径。否则一份"行很多、一格没落账"的收尾会当场结束 run,连同那几条
-        被拒的披露一起消失(它们要到下一轮的方面块才渲染)。
-
-        **一份 invalid 决定的 assessment 不被吸收**:`_reflect_invalid` 产出的
-        决定上根本没有这个字段。这是刻意的——整份载荷已经被判不成立,再采纳它的
-        另一半就是"接受半个决定",而模型下一轮看到的方面状态会来自一轮它自己都
-        没做成的判断。
-
-        合法键的口径是**两份服务端签发的身份的并集**:
-
-        * `outline_binding_keys`——候选池 ∩ 曾真实展示,即细粒度证据(KG 对象 /
-          元素 / 原文块)。它天然不含枚举条目 id 与来源 id(见那个函数的说明);
-        * `complete_enumeration_keys`——**已完整列出**的集合的身份键。§7.1 原来
-          那条边界收窄成「**未完整**枚举的集合身份不能冒充细粒度证据」:一份列完
-          了的目录是服务端自己记下的、可核对的事实,而目录题("这个库里有哪些
-          文档")要的支撑本来就是这件事,不是任何一条具体文档。没有它,一个
-          coverage 报了 complete 的目录方面在结构上永远拿不到 supported——模型引
-          什么键都会被剔掉,然后按 §7.1 降级。
-
-        未完整(`open`/`conflict`)的枚举链**不签发键**,所以它照旧不可能冒充。
-        模型自己拼一个 `enum:…` 出来同样被剔:合法集是服务端算出来的那一份,不是
-        按前缀放行。
-
-        这三条路各带一格测量落账(`assessment_rows`/`assessment_absent`,四臂通
-        写、门是测量开关)——**除了**折叠决定(`decision.invalid_reason` 非空:
-        degraded/解析失败/参数越界)那一支,它落在"载荷没带 assessment"这条路里
-        却根本不写:口径、缺席语义与"为什么 provider fallback 轮不在这里写"全部
-        见 `_note_assessment_measurement`。校验与折叠逻辑一行没动——那几句只往
-        `measurement.detail` 写整数与布尔,删掉它们这个方法的每一个决定逐字节
-        不变。
-        """
-        if state.aspects is None:
-            state.aspects = self._v2_build_aspect_ledger(state)
-        if not state.aspects.assessment_enabled:
-            decision.assessment = None
-            return decision
-        nudge_args = (apply_outline, overflow_repair, more_turns, outline_left)
-        if decision.assessment is None:
-            if not decision.invalid_reason:
-                _note_assessment_measurement(state, rows=0, absent=True)
-            return self._nudge_missing_assessment(state, decision, *nudge_args)
-        allowed = outline_binding_keys(
-            state.collected, state.elements, state.chunks,
-            state.ever_shown_outline_keys)
-        allowed |= complete_enumeration_keys(state.enum_chains)
-        outcome = state.aspects.apply(decision.assessment, allowed_keys=allowed)
-        if not outcome.error:
-            _note_assessment_measurement(
-                state, rows=len(outcome.accepted), absent=False)
-            # 逐方面被拒的那几条:合法动作照常执行,只记披露与 skip 步。
-            self._note_assessment_rejections(state, outcome.rejections)
-            if (outcome.accepted and state.reflect_delta is not None
-                    and not state.reflect_delta.fallback):
-                # `prefix_delta` 的 D 里那一节"上一轮已接受的方面更新"(设计 §4.4)。
-                # 写点只能在 `if not outcome.error:` 内(§5 风险 6):整份 assessment
-                # 越界时它已经被折成一条 invalid,一格都没落账——在外面写就会让 D
-                # 里出现一句"服务端已接受 a2",而账本上 a2 根本没动过。
-                #
-                # 回退之后不再 append:那一格从此没有任何消费者(D 不再追加),继续
-                # 往里写就是一个只增不减、永不消费的 list。回退分支自己把它清空一
-                # 次,这里挡住此后每一轮。
-                #
-                # 只记"接受了哪些 id"这条历史事实,方面的**当前状态**整块仍在 T
-                # (计划 §1 M2 的冲突 C1:那个渲染函数带着两处消费副作用,搬进一块
-                # 再也不重渲染的 D 里就永远消费不掉了)。
-                state.reflect_delta.pending_aspect_notes.append(
-                    _DELTA_ACCEPTED_ASPECTS_NOTE.format(
-                        ids="、".join(outcome.accepted)))
-            # `accepted` 传下去:收尾轮的判据是「这一轮**实际落账**为空」,不是
-            # 「载荷里有没有行」(评审 P1,见 `_nudge_missing_assessment`)。
-            return self._nudge_missing_assessment(
-                state, decision, *nudge_args, accepted=outcome.accepted)
-        _note_assessment_measurement(state, rows=0, absent=False)
-        folded = _reflect_invalid(
-            f"{_V2_INVALID_ASSESSMENT_PREFIX}{outcome.error}",
-            decision.invalid_requested_action or decision.next_action)
-        # 这一族 invalid 与解析期那几族不同:动作参数**已经全部通过校验**,那次
-        # 请求是真实存在过的。身份串在折叠前算好带走,否则观察行会把一次
-        # `search_chunks "布局收敛"` 显示成"(无请求)",模型下一轮既看不出自己
-        # 请求了什么,也无从判断该不该重来一次。
-        folded.invalid_request_identity = v2_request_identity(decision)
-        return folded
-
-    def _note_assessment_rejections(
-        self, state: "_ReasoningRunState", rejections,
-    ) -> None:
-        """逐方面被拒的自评 → **每轮一条**零 I/O 的 `skip`(v2-only)。
-
-        ⚠ **一轮一条,不是一个方面一条**(T-BF7 评审 P2)。协议上限允许一份自评
-        带 16 个方面,一次形状笔误(比如整份都把 `evidence_keys` 写成字符串)因此
-        能在一轮里造出 16 条逐字相同的 skip 步——轨迹上出现一片重复行,观察账的
-        近 N 行窗口被它挤空,而它们表达的是同一件事:这一轮的自评没被采纳。合并
-        之后信息一条不少:`rejections` 是「原因码 → 条数」,`count` 是总条数,
-        `aspect_ids` 是本账本里受影响的那几个 id。
-
-        `reason` 取**第一条**被拒的原因码(主因),词面与整轮作废那一族逐字相同
-        (`invalid_assessment:<why>`):放量评估按原因码统计,换一套新词面等于让
-        T-BF7 之前的数据与之后的数据对不上。取第一条而不是取众数,与
-        `_mark_rejected` 只记第一个原因码同源——要的是一个稳定的、与它第一次出
-        问题同源的码。两族仍然分得开:后缀属不属于 `ASPECT_REJECTION_REASONS`
-        就是判据。
-
-        `skip_reasons` 的口径因此从「拒了几个方面」变成「**有几轮**的自评被逐方面
-        拒过」,而「拒了几个方面」由投影键 `assessment_rejections` 按 `count` 累加
-        (见 `reasoning_trace_stats._assessment_rejections`)。
-
-        这条 skip **不产生动作观察**(见 `reasoning_observation
-        .NON_ACTION_ASSESSMENT_SKIP_REASONS`):同一轮那个动作真的执行了,它自己
-        另有一行;两行都记的话,同一次请求会在观察账上出现两遍。
-
-        `aspect_ids` 只写本账本自己的 id,而且**不为未知 id 留空位**——那串是模型
-        的自由文本,服务端的轨迹里一个字都不留(`AssessmentOutcome.rejections`
-        同款口径);未知 id 的条数照样在 `rejections["unknown_aspect"]` 与 `count`
-        里数得出来。排队记账的理由见 `_TraceRecorder.defer`。
-        """
-        if not rejections:
-            return
-        counts: Dict[str, int] = {}
-        aspect_ids: List[str] = []
-        for aspect_id, why in rejections:
-            counts[why] = counts.get(why, 0) + 1
-            if aspect_id and aspect_id not in aspect_ids:
-                aspect_ids.append(aspect_id)
-        state.record.defer(TraceStep(
-            step_type="skip",
-            summary=_ASSESSMENT_REJECTED_SKIP_SUMMARY.format(
-                count=len(rejections)),
-            detail={
-                "reason": f"{_V2_INVALID_ASSESSMENT_PREFIX}{rejections[0][1]}",
-                "rejections": counts,
-                "count": len(rejections),
-                "aspect_ids": aspect_ids,
-            }))
-
-    def _nudge_missing_assessment(
-        self, state: "_ReasoningRunState", decision: "ReflectDecision",
-        apply_outline=None, overflow_repair: bool = False,
-        more_turns: bool = True, outline_left: Optional[int] = None,
-        accepted: "Optional[Tuple[str, ...]]" = None,
-    ) -> "ReflectDecision":
-        """收尾载荷没有自评任何方面 ⇒ 退回一次并追问(§7.1)。v2-only。
-
-        **判据 = run() 的收尾条件本身**:`next_action == "answer"` 或
-        `sufficient is True`。这两种载荷都会让 `run()` 当场 break,而收尾那一刻
-        方面账就是"这次检索到底拿到了什么"的唯一记录——载荷里没有 `assessment`,
-        账本一格都不更新,同一份决定于是在两处给出互相矛盾的读数(模型说到此为止 /
-        服务端的清单上全是 unknown),`classify_termination` 据后者判 `model_partial`,
-        合成 prompt 恒挂一句「仍有方面没有完整支撑」。2026-09-08 实测里 16 个 run
-        全部落在这个形状上,14 个的直接原因就是这一格空着。
-
-        ⚠ **「没有自评」的判据是「这一轮实际落账为空」,不是「载荷里有没有行」**
-        (T-BF7 评审 P1)。逐方面解耦之后,一份收尾载荷可以带着满满几行自评而
-        **一格都没落账**——每一行都被逐方面拒了(未知 id、写错 `status`、证据键
-        超限……)。此时账本的读数与彻底沉默逐字相同,而按"有行"过闸的话 run 当场
-        收尾:追问没了,那几条被拒的披露也永远等不到下一轮渲染,模型连"我哪里写
-        错了"都不知道。所以调用方(`_absorb_assessment`)把 `apply` 返回的
-        `accepted` 传下来,空元组与空载荷在这里是同一件事,共用既有的追问路径
-        (追问仍然只发一次,`REFLECT_ASSESSMENT_MAX_PROMPTS` 一个字没改)。
-        `accepted is None` = 调用方没说(`assessment` 缺省那条路,以及直调这个方法
-        的测试),行为与加这一条之前完全一致。
-
-        判据**不能**只认 `answer`:`update_outline`(以及别的不产证据的动作)与
-        `sufficient=true` 并存是合法的——prompt 教的正是"最后一批绑定补上、同一轮
-        宣布够了",而 exhaustive 档的真机 run 就是这么收尾的。只认 `answer` 的话,
-        真机上最常见的那种收尾一次都不会被追问,`assessment_omitted` 也永远不会被
-        标上。带了**检索**动作的轮次不在此列:`sufficient=true` + 产证据的动作在
-        解析期就已经是 `sufficient_with_retrieval_action`。
-
-        退回走 T2 已有的那条路(`_reflect_invalid` 伪动作 → 链尾零 I/O 观察 → 扣
-        一步),不新造第二种"这一轮不算数"的机制。**但这一轮对 stale 持平、不
-        递增**(`run()` 链尾那句判据,与送达了内容的 consult 轮同款——见那处
-        注释):追问的上限已经由 `REFLECT_ASSESSMENT_MAX_PROMPTS=1` 兜住,不会
-        被反复利用,递增 stale 只会让"退回一次换一份自评"这个纯记账动作更容易
-        撞上熔断,而它换回的读数与真的空转背道而驰。追问只发一次:第二次仍然
-        空着,`note_missing_assessment` 返回 False,这份收尾照原样被接受,快照
-        里的 `assessment_omitted` 记下"问过了、它不给"。
-
-        ⚠ **折叠之前必须先把同一轮的大纲载荷应用掉。** `update_outline` 收尾那
-        一轮带的是模型刚补齐的最后一批绑定;折成 invalid 之后 `run()` 走的是
-        REFLECT_INVALID 那条 skip 分支,6723 那里的 `apply_outline_update` 再也不
-        会被调到,于是"退回一轮让它补自评"的代价变成**丢掉它这一轮真正做成的事**
-        ——下一轮它看到的大纲还是上一轮那份带空节的。所以这里用调用方传下来的
-        **同一个** `apply_outline_update`(预算/校验/trace 语义因此不可能分叉),
-        `overflow_repair` 也用 `run()` 本来会用的那一份。
-
-        `more_turns=False`(步数用尽,或这一轮是强制的大纲溢出纠错轮)时不退回:
-        见 `note_missing_assessment` 的 `may_prompt`。
-
-        「还有下一轮」还有**动作面**那一半:退回之后的下一轮如果只剩 `answer`
-        可执行,`run()` 会在发出模型调用之前就按 `only_answer` 收尾——追问句根本
-        没机会送到模型面前,而这一轮模型自己的 `sufficient` 判读已经被换成一句
-        `no_executable_action`。最省的判据只看大纲额度:收尾动作是
-        `update_outline` 且 `outline_left <= 1`(本次 apply 就吃掉最后一格)时不
-        退回,按「第二次沉默」记 `assessment_omitted`。这是**保守近似**——那一轮
-        可能还有别的检索动作可用、也可能还剩一次溢出纠错机会,于是偶尔会少问一次
-        本可以送达的追问;反过来那一边的代价大得多(白折一轮 + 终态被改写 + 一格
-        自评仍然没有),所以宁可少问。`outline_left is None` = 调用方没说(直调这个
-        方法的测试),按有额度处理,行为与加这一条之前一致。
-
-        ⚠ **折叠路径不安排 overflow 纠错轮**(知情取舍):`run()` 里那句
-        `forced_overflow_repair` 只挂在收尾分支上,而被折成 invalid 的这一轮走的是
-        REFLECT_INVALID 那条 skip 分支,于是「大纲绑定溢出、再给一轮换键」的机会
-        在这次收尾上不会被安排。不补的理由:补它要在 skip 分支上复制收尾分支的
-        溢出判据(两处同义分支正是本期一直在消灭的东西),换回的只是一次换键机会
-        ——而溢出本身在终态里**仍然被如实披露**
-        (`outline_evidence_overflow_unresolved`),没有任何东西被悄悄丢掉。模型
-        下一轮补上自评之后,那一轮的收尾照常可以安排纠错轮。
-        """
-        closing = decision.next_action == "answer" or decision.sufficient is True
-        if not closing or not (
-                accepted == () or assessment_is_empty(decision.assessment)):
-            return decision
-        if (decision.next_action == OUTLINE_ACTION
-                and outline_left is not None and outline_left <= 1):
-            more_turns = False
-        if not state.aspects.note_missing_assessment(may_prompt=more_turns):
-            return decision
-        if decision.next_action == OUTLINE_ACTION and apply_outline is not None:
-            apply_outline(decision, overflow_repair=overflow_repair)
-        folded = _reflect_invalid(
-            _V2_MISSING_ASSESSMENT,
-            decision.invalid_requested_action or decision.next_action)
-        # 与 `invalid_assessment:` 同理:这一轮模型真的请求了那个动作,观察行该
-        # 显示它,而不是一句"(无请求)"。`answer` 没有参数,身份串因此是空的;
-        # `update_outline` 有——这里带走的是**动作 id**(上面那个参数)与身份串
-        # 两件事,各按各的既有口径。
-        folded.invalid_request_identity = v2_request_identity(decision)
-        return folded
-
-    def _open_v2_ledgers(self, state: "_ReasoningRunState") -> None:
-        """v2 的两本账,都开在首轮**之前**(§6.1 / §7.1)。
-
-        观察账:首轮播种也要进账、与循环动作共用同一次转换。方面清单:按**冻结
-        的**意图契约定型,不随检索变——所以它读 `state` 上首轮之前就已经定好的
-        那两格,而不是循环里的任何中间产物。
-
-        关闭态(`reflect_v2_active()` 为假)一次都不进来,不构造任何新状态。
-        """
-        state.record.observer = ActionObservationLedger()
-        state.aspects = self._v2_build_aspect_ledger(state)
-
-    def _v2_build_aspect_ledger(
-        self, state: "_ReasoningRunState",
-    ) -> "AspectLedger":
-        """本 run 方面账的**唯一**产地(PR-4 计划 §3 T-PL5;拍板 Q1/Q2)。
-
-        存在的理由只有一个:`AspectLedger.lean_assessment` 是一格 **run 级冻结**
-        的自评合同开关(L 那条臂上「收尾缺自评不追问」的唯一闸,见
-        `AspectLedger.note_missing_assessment`),而这个模块里建账的地方有**三处**
-        ——首轮的 `_open_v2_ledgers`,以及总闸在一次 run 中途被翻开时
-        `_reflect_v2_context` / `_absorb_assessment` 各自那条防御重建。三处各写一
-        遍 `lean=` 的后果是最难看见的那一种:漏掉的那一条路上,run 在 L 的臂标签
-        下跑着 D 的追问合同,不崩、不报错,只在 A/B 表上比出一个假的差异。所以
-        `build_aspect_ledger(` 在本模块**只允许有这一个直调点**(守卫在
-        `test_the_aspect_ledger_has_exactly_one_construction_point`,AST 判据)。
-
-        策略位在这里读**一次**,建账那一刻定型(拍板 Q2):中途翻位不改这次 run
-        的追问合同,`lean_assessment` 也没有 setter 挡着(它是只读 property)。
-        prompt 侧那两处 lean 文本走的是另一条路——`_reflect_v2_context` 已经算好
-        的 `optimization` 局部值传下来,不在这里第二次读(理由见 `_prefix_context`
-        的 `static_lean`)。
-
-        `off` / `prefix_snapshot` / `prefix_delta` 与关闭态一律拿到
-        `lean=False`,即 `build_aspect_ledger` 的默认值 ⇒ 三臂逐字节回到接入前。
-        """
-        optimization = self.reflect_optimization()
-        return build_aspect_ledger(
-            state.intent_detail, state.question,
-            lean=optimization == _LEAN_LAYOUT,
-            assessment_enabled=optimization != _EVIDENCE_LAYOUT)
-
-    def _v2_note_turn(
-        self, state: "_ReasoningRunState", decision: "ReflectDecision",
-        budget_left: int, apply_outline=None, overflow_repair: bool = False,
-        has_next_turn: bool = True, outline_left: Optional[int] = None,
-    ) -> "ReflectDecision":
-        """一轮 reflect 决定的 v2 记账:先处理调用失败,再吸收方面自评,最后
-        登记动作观察。
-
-        顺序是硬的:`_survive_reflect_failure` 可能把一份 fail-open 兜底决定折成
-        可继续的 invalid 伪动作,`_absorb_assessment` 可能把一份正常决定折成另一
-        种 invalid 伪动作,而观察账要记的是**折叠之后**那个决定(否则账上会出现
-        一次实际没有发生的检索请求)。返回的就是后续 `run()` 唯一该认的那份决定。
-
-        兜底决定不进 `_absorb_assessment`:它的 `assessment` 恒为 None、
-        `next_action` 恒为 `answer`、`sufficient` 恒为 True——那三格**不是模型
-        填的**,拿它去触发"收尾必须自评"的追问,等于对着一次 provider 故障要求
-        模型补交作业。
-
-        后四个参数只为「收尾必须自评」那条路服务(见 `_nudge_missing_assessment`):
-        `apply_outline` / `overflow_repair` 是 `run()` 本轮**本来就会用的**那次
-        大纲应用,折叠前先把它做掉;`has_next_turn` 是「退回之后真的还有下一轮吗」
-        —— `budget_left >= 1`(这一轮之后还剩几步)与「这一轮不是强制的溢出纠错轮」
-        两件事的合取,由 `run()` 算好传下来;`outline_left` 是**本轮应用之前**还
-        剩几次大纲更新额度,判「下一轮还有没有除 answer 外可执行的动作」用
-        (`None` = 调用方没说,按有额度处理)。
-        """
-        decision = self._survive_reflect_failure(state, decision)
-        if not decision.fallback:
-            decision = self._absorb_assessment(
-                state, decision, apply_outline, overflow_repair,
-                has_next_turn and budget_left >= 1, outline_left)
-        state.record.observer.note_decision(
-            decision.invalid_requested_action or decision.next_action,
-            v2_request_identity(decision), decision.reason,
-            f"剩余步数 {budget_left}", v2_request_query_text(decision))
-        return decision
-
-    def _survive_reflect_failure(
-        self, state: "_ReasoningRunState", decision: "ReflectDecision",
-    ) -> "ReflectDecision":
-        """一次反思调用失败**不再直接终止整次检索**(v2-only)。
-
-        接入前的合同是:provider/JSON 在既有重试之后仍失败 ⇒ `_reflect_fallback`
-        产出 `answer` + `sufficient=True` ⇒ `run()` 当场 break。于是一次抖动
-        (2026-09-08 实测:118 次调用里 24 次正文为空)就把整次检索砍掉,而**已经
-        到手的证据与刚播下的方向全部作废**——这与"模型看着证据决定停下"在结果上
-        无法区分,只在 `fallback_reason` 那一格留了个记号。
-
-        新合同:第一次失败折成一条零 I/O 的降级观察,这一轮当作没有进展的 stale
-        轮继续走(链尾的 no_progress/stale 记账原样生效,所以反复失败仍然会被既有
-        熔断收住);**连续第二次**失败才把兜底决定原样交回去,由 `run()` 按既有
-        fail-open 收尾,`classify_termination` 读到那条带 `fallback_reason` 的
-        reflect 步,终态 `model_degraded`。首轮失败走同一条路——首轮没有任何豁免
-        理由,那时作废的东西反而最多(整次检索还没开始)。
-
-        中间任何一轮成功都清零:计数问的是"这条模型通道是不是塌了",而不是"这次
-        run 一共抖过几次"。取消(`AskCancelled`)与 `fail_closed` 的阶段错误从不
-        到这里——它们在 `_reflect_v2` 里照常上抛。
-        """
-        if not decision.fallback:
-            state.reflect_failures = 0
-            return decision
-        state.reflect_failures += 1
-        if state.reflect_failures >= REFLECT_MAX_CONSECUTIVE_FAILURES:
-            return decision
-        # 折成 invalid 伪动作而不是"带着 fallback 标记继续":`_terminal_marker`
-        # 认的正是 reflect 步 detail 上那一格 `fallback_reason`,留着它,一次已经
-        # 恢复了的抖动会在收尾时把终态写成 `model_degraded`——而 §7.2 的
-        # `model_degraded` 说的是"这次 run 是踩着一次失败结束的"。
-        folded = _reflect_invalid(
-            f"{_V2_MODEL_DEGRADED_PREFIX}{decision.fallback_reason}")
-        # 观察行上那句「原因=model_degraded:output_budget_exhausted」是给模型看
-        # 的:它据此知道下一轮该缩短输出,而不是只看到一句"上一轮没成"。
-        if state.aspects is not None:
-            # 这一轮的 prompt 已经渲染过了,追问那一句因此被本轮布局的那个渲染点
-            # (`off` 的 `render_aspect_block` / `prefix_snapshot` 的
-            # `render_aspect_status_block`,互斥)消费掉——可这次调用根本没成交,
-            # 模型一个字都没读到。两条臂认的是同一格 `nudge_pending`,所以这里不
-            # 分布局。重新置位,否则
-            # 服务端退回一整轮换来的是一句谁都没看见的话(两道闸在那个方法里)。
-            state.aspects.restore_pending_nudge()
-        return folded
-
-    def _run_termination(
-        self, state: "_ReasoningRunState",
-    ) -> "Optional[RetrievalTermination]":
-        """run 收尾:生成结束事实并落一条 trace 步(设计稿 §7.2)。
-
-        **v2-only**——`state.aspects` 为 None(关闭态)时返回 None 且一步都不记,
-        所以关闭态的 trace 键集逐字节不变。
-
-        判据全部读**已经发生的事实**:trace 里第一个终止标记、动作观察账里最后
-        一次真的执行过的检索、以及方面账当前的状态。刻意不在 `run()` 的每个
-        `break` 上再挂一个赋值——那几处都在零松弛长度天花板下的热函数里,而 trace
-        本来就是这些事实的权威记录(每一条都是执行处刚写下的结构化 detail),再抄
-        一份只会多出一处可以与它分叉的账。
-
-        trace 步复用既有的 `skip` 类型 + 一个稳定原因码,**不新增 step_type**:
-        前端怎么展示由 T4-B 决定,那之前它按既有的 skip 渲染路径显示一句中文。
-        `detail` 的几个键只在 v2 下出现。
-
-        **收尾兜底:追问从未被消费也要记账。** `nudge_pending` 到这里还是真的,
-        说明服务端退回过一轮、追问句却一次都没送到模型面前(下一轮在发出调用之前
-        就以 `only_answer` / 步数用尽收尾,或那一轮的模型调用降级了)。那种 run
-        的终态会被 `no_executable_action` 之类的原因改写,而方面账上**什么都没
-        记**——放量评估里它与"模型根本没走到收尾那一步"混成一堆。这里按「第二次
-        沉默」同一个入口收尾(`may_prompt=False`:接受现状、把没被判断过的方面标
-        上 `assessment_omitted`,不再发第二次追问),所以两条路径记的是同一件事、
-        用的是同一段代码。
-        """
-        if state.aspects is None:
-            return None
-        if state.aspects.nudge_pending:
-            state.aspects.note_missing_assessment(may_prompt=False)
-        observer = state.record.observer
-        termination = classify_termination(
-            state.trace,
-            observer.rows if observer is not None else (),
-            state.aspects,
-        )
-        state.record(TraceStep(
-            step_type="skip",
-            summary=termination_summary(
-                termination.reason,
-                assessment_enabled=termination.assessment_enabled),
-            detail={
-                "reason": TERMINATION_SKIP_REASON,
-                "termination": termination.reason,
-                "aspects": (len(termination.aspects)
-                            if termination.assessment_enabled else None),
-                "unresolved_aspects": (len(termination.unresolved_aspect_ids)
-                                       if termination.assessment_enabled else None),
-                "model_assessed_sufficient":
-                    termination.model_assessed_sufficient,
-                "aspect_source": state.aspects.source,
-                # 「服务端问过之后模型仍然没有自评」的方面数(§7.1)。与
-                # `unresolved_aspects` 分开:后者数的是"还没有支撑",而这一格数
-                # 的是"模型根本没参与判断"——放量评估要能把一次协议不合作与一次
-                # 正常的中途收尾分开,否则两者在终态上完全同形。
-                "aspects_assessment_omitted": (sum(
-                    1 for row in termination.aspects if row.assessment_omitted)
-                    if termination.assessment_enabled else None),
-                # 「模型一次都没判断过」的方面数(拍板 Q10)。与上面那一格是
-                # 拍板 Q5 的三格分工里的另外两格:`assessment_omitted` 判据里含
-                # 着一次真实发生过的追问(**L 下永不置位**),而这一格只说"这一
-                # 格没有模型的判断",不解释为什么没有。L 下它是这条臂的**主要
-                # 质量读数**——收尾不再被退回追问,于是省略成了常态,而一次
-                # "全部方面都没核验过就收尾"与一次"逐项核验后仍有缺口"在别的
-                # 每一格上完全同形。
-                #
-                # **v2 四臂无条件写**,不按臂分叉(已登记偏离,拍板 Q10):只在 L
-                # 写的话,D↔L 的配对表上这一列恒缺一半,而"L 少核验了几个方面"
-                # 正是它要回答的问题。`0` 与缺席分得开(读侧 `_aspects_unassessed`
-                # 缺席给 None),三臂的 prompt 字节一个都没动。
-                "aspects_unassessed": (sum(
-                    1 for row in termination.aspects if not row.model_assessed)
-                    if termination.assessment_enabled else None),
-                # 纯披露(§7.2):这次 run 里最后一次执行仍是失败的通道。它不参与
-                # `reason`,但必须说出去——"KG 那条路今天没走通"是用户重试/换问法
-                # 时唯一有用的那条线索,只留在服务器内存里等于没记。动作 id 是内部
-                # 词,与 trace 里其它步的 detail 同级,不进任何公开投影(见
-                # `conversation_public_view` 的白名单)。
-                "unrecovered_channels": list(termination.unrecovered_channels),
-            }))
-        return termination
-
     def reflect(self, question, candidates_summary, outline: bool = False,
-                consult_memory: bool = False, kg_actions: bool = True,
-                capabilities: "Optional[ReflectCapabilities]" = None,
-                context: "Optional[ReflectContext]" = None):
-        """``capabilities`` 非空 = 本轮走 v2 协议(设计稿 §5.2),由 `run()` 在
-        总闸开启时构造并传入;None(默认,以及全部既有调用方与测试替身)= legacy
-        路径,下面每一个字节与接入前相同。三把 legacy 闸(outline/consult_memory/
-        kg_actions)在 v2 下不再被读取——它们表达的条件已经并进能力投影里了。
+                consult_memory: bool = False, kg_actions: bool = True):
+        """规划后的轻量反思：判断材料是否齐备，或选择下一次检索。
 
         ``outline`` = 本 run 提供大纲便签动作(仅 exhaustive 档,见
         ``outline_wiring_active``)。默认 False,所以既有调用方(与关闭态)拿到的
@@ -6048,18 +2857,6 @@ class ReasoningRetriever:
             # 未配置也是兜底:它与「模型判定证据够了」在轨迹上同形,而两者对
             # 排查是天差地别的两件事(一个是部署没接好,一个是推理结论)。
             return _reflect_fallback("model_unconfigured")
-        if capabilities is not None:
-            # `context` 非空 = run() 已经把 user 段分好块(问题/服务器状态/证据卡/
-            # 观察账)。为空时退回"整段候选摘要"——T2 的窄用例与任何直接调
-            # `reflect(capabilities=...)` 的调用方因此不必改签名。
-            #
-            # 两个布局要的是同一批块的**不同顺序**,所以对象本身往下传一层,由
-            # `_reflect_v2_attempt` 二选一地拼(而不是在这里先拼好一份 off 的、
-            # 在 P 下白扔掉)。`candidates_summary` 仍然是 `context is None` 那条
-            # 既有回退路径的入参。
-            return self._reflect_v2(
-                question, candidates_summary, capabilities, client,
-                context=context)
         enumeration = self.enumeration_active()
         # `search_chunks` 的闸是部署级 kill switch,所以在这里现算而不是像
         # outline/consult_memory 那样从调用处传进来:它不看档位、不看请求,
@@ -6093,9 +2890,7 @@ class ReasoningRetriever:
                 timeout=self.settings.reasoning_timeout_seconds,
                 max_retries=self.settings.reasoning_max_retries,
                 cancel_event=self.cancel_event,
-                # 输出预算是**部署配置不是策略**:legacy 与 v2 同一个工种,拿同一
-                # 个数。这是 v2 总闸关着时 legacy 路径唯一改变的行为(prompt /
-                # schema / trace 逐字未动)。
+                # 与规划阶段共用部署配置的输出预算。
                 **reasoning_budget_kwargs(self.settings))
             data = json.loads(raw)
             if not isinstance(data, dict):
@@ -6194,11 +2989,6 @@ class ReasoningRetriever:
                 # id 不作为可检索的身份上屏,所以「列出《某某》里的公式」只能靠
                 # 标题表达。服务端在作用域源清单里确定性解析;id 优先(给了 id
                 # 就说明它是从服务端来的,不需要再猜)。
-                # 唯一的例外是集合完整性键(`enum_evidence_key`):限定了来源的
-                # 那种链,它的键里带一段 `src=<id>`,而那份键会在服务器状态块里
-                # 展示给模型。那是**证据身份**,不是可以填回这里的检索参数——模型
-                # 抄它回来只能进 assessment 的 evidence_keys;这里仍然只认标题
-                # (或服务端此前发出去的 id),所以上面那条解析路径不受影响。
                 d.enumerate_source_title = str(
                     enumerate_request.get("source_title", "")
                 ).strip()
@@ -6312,8 +3102,7 @@ class ReasoningRetriever:
             return _reflect_fallback(_reflect_fallback_reason(exc))
 
     # --- 编排 ---
-    def _quota_rerank(self, notebook_id, collected, used_queries, top_n,
-                      *, stats: Optional[dict] = None):
+    def _quota_rerank(self, notebook_id, collected, used_queries, top_n):
         """复合问题: 按子查询配额 round-robin 选 top_n。
         步骤 1: 每个子查询的全库打分——P1-B 优先复用 run 中留存的 map(一次 run 内
         图只读⇒与重跑逐位等价,见 search() 留存点);无留存(带 types 的子查询/
@@ -6321,17 +3110,7 @@ class ReasoningRetriever:
         步骤 2-4: 分组+轮转委托给通用 quota_fuse。
         返回 (top_hits, counts): counts[i]=第 i 个子查询贡献数, counts[-1]=兜底组。
 
-        ``stats`` 非空时按键累加这一段的成本口径(T-BF6):``reused`` / ``researched``
-        是复用与重跑的子查询数,``researched_ms`` 只计**重跑那几次**的墙钟——复用
-        分支是纯内存重建,把它算进去会让「缓存到底省了多少」这个数永远看不出来。
-        重跑抛错的那次也计时:那段时间照样花掉了,不计等于把失败说成免费。默认
-        `None` ⇒ 关闭态与既有调用方零改动、**这个方法自己**零额外分配(调用方
-        `_closing_rerank` 仍无条件建一个三键小 dict:它的两条支都要往里写,收进
-        `if measure:` 反而要在单查询支上多一处分支),**而且一次 `perf_counter`
-        都不多读**:轨迹步的耗时是相邻两次记账的时钟差,多读两次在真实时钟下无关
-        紧要,在合成时钟下(`generate_repository_contract_fixtures.py` 每读一次走
-        1ms)却会让关闭态的 `answer` 步耗时从 8 变成 10 —— 那是一份冻结 oracle 的
-        逐字节红线。"""
+        """
         from dataclasses import replace
         from app.services.retrieval import quota_fuse
         reuse = self.settings.reasoning_quota_enabled and getattr(
@@ -6344,54 +3123,22 @@ class ReasoningRetriever:
                 # 不随查询变,replace 版与重跑版字段级相同)。
                 per_q.append({oid: replace(collected[oid], relevance=rel, score=sc)
                               for oid, (rel, sc) in stored.items() if oid in collected})
-                if stats is not None:
-                    stats["reused"] = stats.get("reused", 0) + 1
                 continue
-            began = time.perf_counter() if stats is not None else 0.0
             try:
                 per_q.append({h.object_id: h for h in self.search(notebook_id, q)})
             except Exception:
                 if self.fail_closed:
                     raise
                 per_q.append({})
-            finally:
-                if stats is not None:
-                    stats["researched"] = stats.get("researched", 0) + 1
-                    stats["researched_ms"] = (
-                        stats.get("researched_ms", 0.0)
-                        + (time.perf_counter() - began) * 1000)
         return quota_fuse(collected, per_q, top_n)
 
     def _closing_rerank(self, notebook_id, question, collected, used_queries,
-                        top_n, outline, answer_detail, record):
-        """检索循环跑完之后的收尾重排,连同它自己的那条轨迹步(T-BF6)。
-
-        返回 `(top_hits, outline_evidence)`;`answer_detail["quota"]` 由配额分支
-        就地补上(与抽出来之前逐字相同)。
-
-        **为什么要有自己的一步**:`_TraceRecorder` 按相邻两次记账的墙钟差计时,
-        而这一段此前整个夹在上一步与 `answer` 步之间——生产上因此出现过 195 秒的
-        「合成候选」步,其中绝大部分花在这里(配额分支缓存未命中时会逐子查询重
-        检索,单查询分支则是一次全库 `retrieve_scored`),而 legacy 的同一条步多
-        为 1–2 ms。记在这里之后,`answer` 步的耗时才真的只剩「拼那份候选账」。
-
-        **门是 `reflect_v2_active()` 而不是调用方传进来的 `capabilities`**:两者
-        同源(能力投影正是在这个判据为真时才构造),但 `capabilities` 是 `run()`
-        反思循环里的局部名字——`max_steps` 为 0 时循环一次都不进,那个名字在收尾
-        处根本没有绑定。用一个可能未绑定的名字当闸,关闭态会以 `NameError` 的形
-        式炸在最不该炸的地方。
-
-        零新增调用与 I/O:重排本身一行没改,新增的只有计时与一条记账。
-        """
-        # 门只问一次,而且**它同时决定记不记步与计不计时**:关闭态一次
-        # `perf_counter` 都不多读(理由见 `_quota_rerank` 的 `stats` 说明)。
-        measure = self.reflect_v2_active()
-        stats: dict = {"reused": 0, "researched": 0, "researched_ms": 0.0}
+                        top_n, outline, answer_detail):
+        """保持既有配额融合、全局重排和大纲绑定证据补集。"""
         if self.settings.reasoning_quota_enabled and len(used_queries) >= 2:
             # 复合问题: 按子查询配额 round-robin, 避免一方通吃。
             top_hits, counts = self._quota_rerank(
-                notebook_id, collected, used_queries, top_n,
-                stats=stats if measure else None)
+                notebook_id, collected, used_queries, top_n)
             # 只暴露各子查询贡献数(不含兜底组), 便于观测。
             answer_detail["quota"] = counts[:len(used_queries)]
             # 配额融合没有全局重排 map,补集只能按"被选集挤出去的不会比选集里最差
@@ -6403,19 +3150,10 @@ class ReasoningRetriever:
             )
         else:
             # 单查询/开关关: 原全局重排(用原问题统一打分), 行为不变。
-            began = time.perf_counter() if measure else 0.0
             with retrieval_fanout_slot():
                 rescored = self.retrieval.retrieve_scored(
                     notebook_id, question
                 )
-            # 这一支只有一次打分,而且它数的是「原问题」这一次,与
-            # `used_queries` 的条数无关——所以 `researched` 恒 1、`reused` 恒 0,
-            # 而 detail 里的 `queries` 仍如实报本 run 攒下了几个子查询。两个数
-            # 对不上正是这一支的特征:配额关着(或只有一个子查询)时,重排根本
-            # 不按子查询走。计时只圈住那次调用:下面的过滤与排序是纯内存。
-            stats["researched"] = 1
-            if measure:
-                stats["researched_ms"] = (time.perf_counter() - began) * 1000
             scored_map = {
                 h.object_id: h
                 for h in self._filter_candidates(
@@ -6428,19 +3166,6 @@ class ReasoningRetriever:
             # 补集与选集共用**同一个** scored_map:零新查询,而且相关度同口径。
             outline_evidence = outline_truncated_kg_evidence(
                 outline, collected, top_hits, rescored=scored_map)
-        if measure:
-            # `researched_ms` 只圈住真发出去的那几次检索,而这一步的 `duration_ms`
-            # 是整段的墙钟 —— 两者之差就是**融合与补集那段纯内存工作**
-            # (`quota_fuse` / 全局重排的排序切片 + `outline_truncated_kg_evidence`)。
-            # 差得大 ⇒ 慢在本机计算;差得小 ⇒ 慢在检索侧,该看的是 `researched`。
-            record(TraceStep(
-                step_type="rerank",
-                summary="重排候选",
-                detail={"queries": len(used_queries),
-                        "reused": stats["reused"],
-                        "researched": stats["researched"],
-                        "researched_ms": round(stats["researched_ms"]),
-                        "top_n": top_n}))
         return top_hits, outline_evidence
 
     @staticmethod
@@ -6884,13 +3609,6 @@ class ReasoningRetriever:
             # 就让该方向的 KG 证据被静默永久丢弃(此前由 run 后独立
             # 检索兜底覆盖)。
             state.failed_search_queries.add(sq.query)
-            # 同一件事的模型侧披露(v2 only,`observer` 为 None 时零调用):
-            # `failed_search_queries` 只被 run 后的方向兜底读,模型看到的那条
-            # 观察行仍然是「执行了但零新增」——一次瞬态库故障因此在模型眼里与
-            # 「这个方向库里真的没有内容」完全同形。
-            observer = state.record.observer
-            if observer is not None:
-                observer.note_failed("kg_search_error")
             return []
 
     def _first_round_kg_disclosure(self, state: "_ReasoningRunState") -> None:
@@ -7021,12 +3739,6 @@ class ReasoningRetriever:
         # 字符串既进规划上下文、又进每一轮 reflect 的候选摘要尾部。
         # fail-open:地图建不出来时照常检索作答——它只是让模型「知道有多少」,
         # 不是任何一条证据的前提。记一条 skip 是为了别把这次失败吞得无影无踪。
-        #
-        # 先取**对象**再渲染,而不是调 `collection_map_text`(它就是这两步的
-        # 合成):同一次构建、同一批查询、同一个字符串,只是不再把对象丢掉。
-        # 地图上的那些计数是规模守卫的唯一输入,不留下对象就只能在执行层再查
-        # 一次库(见 `enumeration_map_count`)。
-        collection_map = state.collection_map
         if enumeration_active:
             try:
                 collection_map = (
@@ -7036,15 +3748,11 @@ class ReasoningRetriever:
             except AskCancelled:
                 raise
             except Exception as exc:  # noqa: BLE001 — 见上:地图不是必需品
-                # 对象与文本一起回到「没有地图」:半份地图(有对象没文本,或
-                # 反过来)会让 prompt 与守卫看到两个不同的世界。
-                collection_map = None
                 record(TraceStep(
                     step_type="skip",
                     summary="跳过内容清点(暂时读不到各类条目数量)",
                     detail={"reason": "collection_map_unavailable",
                             "error": str(exc)[:120]}))
-        state.collection_map = collection_map
         state.profile_block = profile_block
         state.profile_raw_blocks = profile_raw_blocks
         state.experience_block = experience_block
@@ -7298,15 +4006,11 @@ class ReasoningRetriever:
                 summary=f"按名称精确查找:新增 {len(found)} 段原文",
                 detail=_exact_seed_detail))
 
-    def _chunk_seed_search(self, notebook_id, query, take, observer=None):
+    def _chunk_seed_search(self, notebook_id, query, take):
         """播种里的一条子查询。失败语义与 `_first_round_search` 逐字一致:
         fail-open 吞掉、`fail_closed` 下照抛、`AskCancelled` 始终上抛——一条
         子查询炸掉不该拖垮整轮播种。
 
-        `observer` 非空(v2 挂了账本)时,吞掉的那次异常会经侧信道
-        `note_failed` 说出去:不打标的话,调用方随后照常记一条 `found: 0`,
-        而「没查成」与「查了没有」在观察账上完全同形——这两件事该导致的下一步
-        正好相反。legacy 传 None,行为逐字节不变。
         """
         raise_if_cancelled(self.cancel_event)
         try:
@@ -7316,8 +4020,6 @@ class ReasoningRetriever:
         except Exception:
             if self.fail_closed:
                 raise
-            if observer is not None:
-                observer.note_failed("chunk_search_error")
             return []
 
     def _keyword_seed_search(
@@ -7441,8 +4143,7 @@ class ReasoningRetriever:
             # 丢掉 per-user 的模型/日志路由。
             futures = [
                 ex.submit(contextvars.copy_context().run,
-                          self._chunk_seed_search, notebook_id, sq.query, take,
-                          state.record.observer)
+                          self._chunk_seed_search, notebook_id, sq.query, take)
                 for sq in subqueries
             ]
             # 按提交顺序 result:第 i 个结果仍对应第 i 个子查询,故去重与串行版
@@ -7547,19 +4248,12 @@ class ReasoningRetriever:
         """
         if state.kg_in_scope or not self.chunk_search_active():
             return 0
-        observer = state.record.observer
         new = take_distinct_chunk_hits(
-            self._chunk_seed_search(state.notebook_id, query, k,
-                                    observer=observer),
+            self._chunk_seed_search(state.notebook_id, query, k),
             state.seen_chunks, state.chunks)
         state.chunks.extend(new)
         if detail is not None:
             detail["chunks_found"] = len(new)
-        # 侧信道(v2 only,`observer` 为 None 时零调用):这批 chunk_id 刻意**不**
-        # 进 detail 的 `result_ids`(理由见上),于是"本轮新增"那一档对无图 run 的
-        # 原文半完全失明——刚捞到的段落进不了下一轮证据卡,模型只能看见历史材料。
-        if observer is not None:
-            observer.note_fresh_ids([c.chunk_id for c in new])
         return len(new)
 
     def _action_ppr_retrieve(
@@ -7721,15 +4415,6 @@ class ReasoningRetriever:
             record(TraceStep(step_type="skip",
                              summary="跳过横向对比(对比层不可用)",
                              detail={"reason": "community_error", "error": str(exc)[:120]}))
-            if state.record.observer is not None:
-                # 上面那条 skip 已经记成一次 failed 观察,但下面无条件还会再落
-                # 一条零结果的 `expand_community` 成功步(peers=[] 也是"执行了,
-                # 只是空")。两条都记的话,观察器按时间线取**最后一次**执行 ——
-                # 那条空成功会把这次真正的故障悄悄吃掉,`unrecovered_channels`
-                # 与 `retrieval_degraded` 都会漏掉它。这里在**下一条**观察上再
-                # 打一次失败标记(`note_failed` 只对紧接着那一条生效),让最后
-                # 落下的仍然是 failed,不伪造一次"通道又走通了"。
-                state.record.observer.note_failed("community_error")
             peers, peer_source = [], "community"
         # 总量帽(见 _COMMUNITY_PEERS_CAP_FACTOR 注释):合并各库结果后才截断,
         # 取自 mounted_base_ids 的确定性遍历顺序(MOUNT_ORDER)+ list.append 的
@@ -7741,13 +4426,6 @@ class ReasoningRetriever:
         if len(peers) > peers_cap:
             peers = peers[:peers_cap]
         added, names = 0, []
-        # 本次真正新进池子的对象标识。detail 只写 `new`(一个数)与 `peers`
-        # (实体名),没有一把承载标识的键,而 legacy 的 trace 键集是冻结基线——
-        # 所以它们经侧信道交给观察者,不进 detail(见 `note_fresh_ids`)。关闭态
-        # (`observer is None`)不收集这份列表:侧信道本来就不会被消费,收集了
-        # 也只是一份从未离开这个函数的分配——关闭态零新状态的承诺包括这一份。
-        observing = state.record.observer is not None
-        new_ids: List[str] = []
         for pname in peers:
             raise_if_cancelled(self.cancel_event)
             key = _norm_query(pname)
@@ -7759,8 +4437,6 @@ class ReasoningRetriever:
                     collected[h.object_id] = h
                     added += 1
                     got += 1
-                    if observing:
-                        new_ids.append(h.object_id)
             attempted[key] = _QueryAttempt(query=pname, new=got, tries=1)
             if pname not in used_queries:
                 used_queries.append(pname)
@@ -7770,31 +4446,9 @@ class ReasoningRetriever:
         step_summary = (f"横向对比(共提):纳入 {len(names)} 个同类实体,新增候选 {added}"
                         if peer_source == "comention"
                         else f"横向对比:纳入 {len(names)} 个同社区实体,新增候选 {added}")
-        if observing:
-            state.record.observer.note_fresh_ids(new_ids)
         record(TraceStep(step_type="expand_community", summary=step_summary,
                          detail={"focal": focal_name, "peers": names,
                                  "new": added, "source": peer_source}))
-
-    @staticmethod
-    def _note_fresh_elements(state: "_ReasoningRunState", added: List) -> List:
-        """把刚并入的元素标识送进观察账的侧信道,并原样交回那批元素。
-
-        `search_elements` 的两个写点(首轮空证据兜底、reflect 的降级查原文)记的
-        `fallback` 步 detail 只有 `query` 与 `found` ——**没有**承载标识的键,而
-        legacy 的 trace 键集是冻结基线,不能为此加一把新键。于是"本轮新增"那一
-        档对整条元素通道结构性失明:刚查到的高分元素进不了下一轮的证据卡,模型
-        看到的仍然只有历史材料,于是重复请求同一件已经到手的东西。
-
-        写成"穿过去"的形状(收什么交什么)是为了让两个调用点都能就地包在既有那
-        一行上,不必各加两行——其中一个在 `run()` 里,而 `run()` 是零松弛长度天
-        花板下的热函数。`observer` 为 None(关闭态)时零调用、零分配。
-        """
-        observer = state.record.observer
-        if observer is not None:
-            observer.note_fresh_ids(
-                [str(getattr(el, "element_id", "")) for el in added])
-        return added
 
     def _first_round_empty_fallback(
         self, state: "_ReasoningRunState",
@@ -7819,8 +4473,7 @@ class ReasoningRetriever:
         ):
             elements_searches = 1
             found = self.search_elements(notebook_id, question)
-            added = self._note_fresh_elements(
-                state, merge_element_hits(elements, found))
+            added = merge_element_hits(elements, found)
             record(TraceStep(
                 step_type="fallback",
                 summary=f"初始证据未命中，补查来源原文，新增 {len(added)} 段",
@@ -8013,59 +4666,6 @@ class ReasoningRetriever:
         # 反复请求同一已访问节点 / 反复 search_elements, 这里强制收尾, 不空转到上限。
         state.stale = 1 if state.no_progress else 0
 
-    def _enum_budget(
-        self, state: "_ReasoningRunState", *, collection: str, kind: str,
-        local_only: bool, source_id: str, rows_left: int, pages_left: int,
-        payload_left: int,
-    ) -> EnumerationBudget:
-        """本次枚举动作的四道天花板,含**清单规模守卫**(计划 T-BF1)。
-
-        守卫只改一个数:一份远大于本轮额度的清单,`max_rows` 从「整轮剩余行池」
-        降到「一页」。它不改范围、不拒绝动作、不换集合——模型请求的仍然是那份
-        清单,拿到的仍然是那份清单的开头,只是没有把整轮额度押在一段无序前缀上。
-        生产上 48 839 篇的库正是这样一次动作吃光 300 行,后面三个池全空、每个
-        后续枚举都只能记 `enumeration_budget` skip。
-
-        三个条件缺一不可:
-        * `reflect_v2_active()` —— 关闭态逐字节不变是本次的硬约束,legacy 的
-          规模提示写在它自己的 prompt 里,行为一个字都不动;
-        * `rows_left > enum_page_size` —— 行池只剩不到一页时,守卫连数字都改不
-          了(`min(rows_left, page_size)` 就是 `rows_left`),改的只有原因码,
-          而那一句「额度没用光、池还留给后面的动作」在这里恰恰是**假话**:池本
-          来就只剩这么多。所以这一档自然落回 `TRUNCATED_BUDGET`;
-        * 与本次请求**同集合、同 kind、同范围**的地图计数已知且远超额度(分母
-          怎么对齐见 `enumeration_map_count`,倍数见 `oversize_listing`)。
-
-        守卫封的是**单次动作的行数**,不是行池本身:`state.enum_rows_used` 只按
-        实际返回的行数扣,能力投影里的 `enum_rows_left` 因此仍然是整池的真实剩
-        余(质量评审 P3-2 刻意不改)——那个数回答的是「这一轮还能列多少」,而它
-        确实没变;守卫回答的是「这一个动作值不值得把池花在这份清单上」。
-        """
-        enum_limits = state.enum_limits
-        oversize = (
-            self.reflect_v2_active()
-            and rows_left > enum_limits.enum_page_size
-            and oversize_listing(
-                enumeration_map_count(
-                    state.collection_map, collection=collection, kind=kind,
-                    local_only=local_only, source_id=source_id),
-                rows_left)
-        )
-        return EnumerationBudget(
-            page_size=enum_limits.enum_page_size,
-            max_rows=(min(rows_left, enum_limits.enum_page_size)
-                      if oversize else rows_left),
-            max_pages=pages_left,
-            max_payload_chars=payload_left,
-            excerpt_chars=enum_limits.cell_excerpt_chars,
-            # 诚实披露(T-BF2):这份清单短**不是**因为额度用光了——池确实还剩
-            # 着,这由上面 `rows_left > enum_page_size` 那一条保证(少了它,池
-            # 只剩半页时这句话就成了假话)。报成 `budget` 会同时骗两边:告诉读
-            # 的人这一轮没地方了(不是),又藏起唯一能为这份短清单辩护的事实
-            # (再翻也没用)。
-            oversize_sample=oversize,
-        )
-
     def _run_enumeration(
         self, state: "_ReasoningRunState", decision: "ReflectDecision",
     ) -> None:
@@ -8119,9 +4719,7 @@ class ReasoningRetriever:
             decision.enumerate_source_title if is_elements else ""
         )
         label = _collection_label(collection, kind)
-        # 「列出《某某》里的公式」只能按**名字**表达:内部 source id 不作为可检索
-        # 的身份上屏(唯一例外是集合完整性键 `enum:…:src=<id>`——那是证据身份,只
-        # 能进 assessment 的 evidence_keys,不是这里的参数;见 `enum_evidence_key`)。
+        # 「列出《某某》里的公式」按名字表达；内部 source id 不作为可检索身份上屏。
         # 所以先做一次确定性的名字→id 解析,再进下面所有以 source_id 为键的逻辑
         # (续跑链的键、执行器的作用域校验)。给了 id 就以服务端发出的那个 id 为准。
         # None = 本轮没做过解析(要么给了 id,要么根本没给名字)。
@@ -8232,11 +4830,11 @@ class ReasoningRetriever:
                 # EnumerationBudget 直接 ValueError,而这个异常一旦穿出 run()
                 # 就会被 ask_service 的 broad except 吞成「整轮检索失败」——
                 # 用户看到的是「依据不足」,而不是「这一个动作没跑」。
-                budget = self._enum_budget(
-                    state, collection=collection, kind=kind,
-                    local_only=local_only, source_id=source_id,
-                    rows_left=rows_left, pages_left=pages_left,
-                    payload_left=payload_left)
+                budget = EnumerationBudget(
+                    page_size=enum_limits.enum_page_size,
+                    max_rows=rows_left, max_pages=pages_left,
+                    max_payload_chars=payload_left,
+                    excerpt_chars=enum_limits.cell_excerpt_chars)
                 if is_elements:
                     listed = self.collection_enumeration.enumerate_elements(
                         notebook_id, kind, source_id=source_id,
@@ -8263,7 +4861,7 @@ class ReasoningRetriever:
                 if self.fail_closed:
                     raise
                 record(_enumeration_rejection(
-                    exc, label, collection, kind, self.reflect_v2_active()))
+                    exc, label, collection, kind))
             except Exception as exc:  # noqa: BLE001 — 同上,清单不是必需品
                 if self.fail_closed:
                     raise
@@ -8345,8 +4943,6 @@ class ReasoningRetriever:
             max_steps=max_steps, intent_queries=intent_queries,
             limits=limits, intent_detail=intent_detail,
         )
-        if self.reflect_v2_active():
-            self._open_v2_ledgers(state)     # 观察账 + 方面账(见那个方法)
         self._run_first_round(state)
 
         # --- 首轮 → reflect 循环的交接 ---------------------------------------
@@ -8640,30 +5236,9 @@ class ReasoningRetriever:
                 outline_terminal_repair_used = True
                 forced_overflow_repair = False
             steps += 1
-            # reflect v2(设计稿 §5.1):一次纯内存能力投影,prompt/schema/解析
-            # 白名单三处共用它。总闸关着时**不构造**,`run()` 因此逐字节回到
-            # 接入前——这一个判断是整个循环里唯一问"现在是哪套协议"的地方。
-            capabilities = self._reflect_capabilities(
-                state, steps=steps, elements_searches=elements_searches,
-                exact_lookups=exact_lookups, consult_used=consult_used,
-                follow_chain_searches=follow_chain_searches,
-                outline_updates=outline_updates,
-                outline_overflow=bool(outline_overflow),
-                outline_cap_repair_used=outline_cap_repair_used,
-                terminal_overflow_repair=terminal_overflow_repair,
-            ) if self.reflect_v2_active() else None
-            if capabilities is not None and capabilities.only_answer:
-                # 除 answer 外无可执行动作:服务端直接以能力原因收尾,不再花一次
-                # 模型调用去请求一个只可能回 answer 的决定,也不伪造一条"模型判定
-                # 充分"的 reflect 步(设计稿 §5.1)。
-                record(TraceStep(
-                    step_type="skip",
-                    summary="除作答外已无可执行的检索动作,直接收尾",
-                    detail={"reason": "no_executable_action"}))
-                break
             summary = self._reflection_summary(
                 collected, elements, chunks, chains, outline_active,
-                ever_shown_outline_keys if capabilities is None else None, limits, outline)
+                ever_shown_outline_keys, limits, outline)
             if no_progress:
                 # 首轮空手与「查了好几轮都没新增」是两件不同的事,提示也必须不同
                 # (见 first_round_empty_note):前者要的是换通道,后者才是收尾。
@@ -8677,14 +5252,9 @@ class ReasoningRetriever:
                     if first_reflect else NO_NEW_EVIDENCE_NOTE
                 )
             first_reflect = False
-            # legacy 的四段散文账目(visited / 邻居截断 / 子查询 / 精查名称)。
-            # v2 不拼它们:同一批事实由动作观察账一次性投影(设计稿 §6.1),而
-            # visited、方向身份、精查名称这些**状态本身**仍由原处拥有,观察账只是
-            # 它们的投影,不是可以分叉的第二份权威。
-            if capabilities is None:
-                summary += legacy_action_ledger_note(
-                    visited, collected, neighbor_truncated,
-                    neighbor_expand_limit, attempted, exact_lookup_log)
+            summary += legacy_action_ledger_note(
+                visited, collected, neighbor_truncated,
+                neighbor_expand_limit, attempted, exact_lookup_log)
             # 未执行的已确认方向回喂 reflect(镜像上面几份账目):模型据此知道哪些
             # 用户确认过的方向还没跑过,可以优先用 add_subquery 把它们补上,而不是
             # 另起炉灶猜一个新角度。每轮按 attempted 现算 —— 模型真把某条补上了,
@@ -8828,12 +5398,6 @@ class ReasoningRetriever:
                 reflect_kwargs["outline"] = True
             if consult_memory_flag:
                 reflect_kwargs["consult_memory"] = True
-            if capabilities is not None:
-                reflect_kwargs["capabilities"] = capabilities
-                # `summary` 到这里已经是完整的**服务器状态**块;证据卡与观察账是
-                # 另外两块,由这个 helper 各按自己的预算装配(设计稿 §6.3)。
-                reflect_kwargs["context"] = self._reflect_v2_context(
-                    state, summary, outline)
             decision = self.reflect(question, summary, **reflect_kwargs)
             raise_if_cancelled(self.cancel_event)
             # 这一轮的大纲提交算不算「溢出纠错」:提前算与原地算等价(四个输入只由
@@ -8841,11 +5405,6 @@ class ReasoningRetriever:
             overflow_repair_submission = terminal_overflow_repair or (
                 bool(outline_overflow) and not outline_cap_repair_used
                 and outline_updates >= max_outline_updates)
-            if capabilities is not None:
-                decision = self._v2_note_turn(          # 见 `_v2_note_turn`
-                    state, decision, max_steps - steps, apply_outline_update,
-                    overflow_repair_submission, not terminal_overflow_repair,
-                    max_outline_updates - outline_updates)
             reflect_detail = {"next_action": decision.next_action,
                               "sufficient": decision.sufficient,
                               "no_progress": no_progress, "stale": stale}
@@ -8911,16 +5470,7 @@ class ReasoningRetriever:
                 len(collected) + len(elements) + len(chunks) + len(chains)
                 + state.enum_rows_used
             )
-            if decision.next_action == REFLECT_INVALID_ACTION:
-                # v2:模型选了一个本轮不可执行的动作、或参数缺失/矛盾。零工具
-                # I/O 记一条观察,再落到链尾与其它 skip **同一份**
-                # no_progress/stale 记账(设计稿 §5.2)。不能裸 continue——那会绕过
-                # 链尾记账,反复提交非法动作就规避了熔断。
-                record(TraceStep(
-                    step_type="skip",
-                    summary=_REFLECT_INVALID_SKIP_SUMMARY,
-                    detail={"reason": decision.invalid_reason}))
-            elif (
+            if (
                 decision.next_action in (
                     ENUMERATE_ELEMENTS_ACTION, ENUMERATE_KG_OBJECTS_ACTION
                 )
@@ -9103,7 +5653,7 @@ class ReasoningRetriever:
                     eq = decision.elements_query or question
                     found = self.search_elements(notebook_id, eq)
                     raise_if_cancelled(self.cancel_event)
-                    els = self._note_fresh_elements(state, merge_element_hits(elements, found))
+                    els = merge_element_hits(elements, found)
                     record(TraceStep(step_type="fallback",
                                      summary=f"降级查原文: {eq},新增 {len(els)} 段",
                                      detail={"query": eq, "found": len(els)}))
@@ -9499,12 +6049,8 @@ class ReasoningRetriever:
                 len(collected) + len(elements) + len(chunks) + len(chains)
                 + state.enum_rows_used
             ) == before
-            if no_progress and (consult_delivered_this_turn or decision.invalid_reason == _V2_MISSING_ASSESSMENT):
-                # codex #538 R3 P2 + missing_assessment 退回轮,对 stale 都**持平**——
-                # consult 送达内容但不带新证据(不能清零,否则反复回想能把熔断空转
-                # 上限无限抬高),也不能递增(模型在 stale 逼近上限时最可能选它,
-                # 递增会让刚送达的材料到不了下一轮 reflect)。missing_assessment
-                # 已经扣步、记观察(§7.1),max_prompts=1 兜住重复利用,不必再罚 stale。
+            if no_progress and consult_delivered_this_turn:
+                # consult 送达了新建议但不带新证据，stale 持平：不清零也不递增。
                 # skip 各态(cap/nothing_new/block_full/unavailable)照常递增。
                 pass
             else:
@@ -9569,7 +6115,6 @@ class ReasoningRetriever:
                             "pending": len(still),
                             "directions": shown}))
 
-        termination = self._run_termination(state)   # 结束原因(设计稿 §7.2)
         # 证据预算在此(而非入口)解析:used_queries 到这里才定型(含 add_subquery /
         # expand_community 兄弟),预算随"问题的方面数"走。
         top_n = effective_top_n(
@@ -9582,12 +6127,10 @@ class ReasoningRetriever:
                          "enumerations": len(enumerations),
                          "enumerated_items": state.enum_rows_used}
         raise_if_cancelled(self.cancel_event)
-        # 收尾重排(配额分支 / 单查询全局重排两支)整块在 `_closing_rerank` 里,
-        # 连同它自己那条 `rerank` 轨迹步——放在这里会让整段耗时被算进下面的
-        # `answer` 步(T-BF6)。
+        # 收尾重排保持配额分支和单查询全局重排两支，耗时归入合成候选步骤。
         top_hits, outline_evidence = self._closing_rerank(
             notebook_id, question, collected, used_queries, top_n, outline,
-            answer_detail, record)
+            answer_detail)
         if self._unsafe_scope_restricted():
             chains = []
             enumerations = []
@@ -9653,7 +6196,6 @@ class ReasoningRetriever:
             collection_map_text=collection_map_text, outline=outline,
             outline_evidence=outline_evidence,
             baseline_manifest=baseline_manifest,
-            termination=termination,
             # `failed` 是**稀疏**键:只有检索本身抛过异常且未被后续成功清除的
             # 查询才带它——常规行形状逐字不变(reflect 回喂/trace 消费方按具名
             # 键取值,多余键中性)。报告的 run 后方向兜底据它把「检索炸了」与

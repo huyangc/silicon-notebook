@@ -1,3 +1,5 @@
+> 历史档案（2026-09-13）：V2 实验已退役，本文不再是实施或启用指引。当前仅保留 Legacy；参见 [当前状态](../../../fangan_done.md#32-reflect-实验退役与-legacy-保留2026-09-13) 和 [产品/API 合同](../../product-and-api_zh.md)。
+
 # reflect 前缀复用 · PR-4 实施计划:T3 `prefix_delta_lean` 轻量自评
 
 日期:2026-09-10。上游设计:[reflect 上下文与前缀复用最终设计](2026-09-09-reflect-prefix-cache-final-design_zh.md) **§6**(核心)、§2.3(末两行)、§4.5、§5.2(回退保留 L 设置)、§7、§11(T3 行)、§12、§13。前置:PR-1([v2 基线修复](2026-09-09-reflect-v2-baseline-fixes_zh.md),T-BF7 的逐方面解耦已在基线)、PR-2([T0+T1](2026-09-09-reflect-prefix-snapshot-plan_zh.md),#706)、PR-3([T2 `prefix_delta`](2026-09-10-reflect-prefix-delta-plan_zh.md),#707)。主 agent review 调整第 1 条(assessment 与动作解耦进公共基线,B/P/D/L 共用)已由 PR-1 兑现,本期**不再重做解耦**。机制核实由 Plan 代理(opus)针对 master @ `9fcdcb58f` 完成,行号以该基线为准。

@@ -41,8 +41,6 @@
 | 能力档（capability scope，`ask:execute` 这类协议串同样不上屏） | 按动作说人话（提问 / 查资料 / 添加资料…） |
 | 回答风格偏好（search profile, user_profiles.search_profile_json） | 我的回答偏好 |
 | consult_memory（模型主动拉取检索经验的 reflect 动作／trace 步） | 回想 |
-| 必答方面（aspect，`RetrievalTermination.aspects`；用户确认过的必答清单在服务端的记账名） | 方面（轨迹里说「已处理 x/N 方面」） |
-| undelivered（`aspects_undelivered`；支撑全被预算或过滤挡在合成之外） | 未送达 |
 | spreadsheet analysis / workbook analysis（用户界面） | Excel 专业分析 |
 | analysis issue / parse failure（管理员界面） | 解析问题 |
 
@@ -59,22 +57,6 @@
   `communities.centrality` 使用「核心度」；`basis` 映射为：`usable_live` →
   「整理当时的实时口径」、`community_snapshot` → 「上次主题板块划分」、
   `unified_rebuild_snapshot` → 「上次整理时的规模」。
-- `unrecovered_channels`（该检索通道本次 run 最后一次执行仍失败）在界面上**只报条数**
-  ——「z 条通道未恢复」。通道名是内部动作 id（`add_subquery`、`ppr_retrieve`…），不登记
-  界面词也不上屏：用户没有对应它的词汇表，显示出来只会让人去猜。要排查的人在轨迹
-  detail 原文里读得到。
-- 「未送达」与「未处理」是两件事，轨迹里各占一格，不许合并成一个分数：前者是
-  「模型认为这个方面有支撑，但那些证据全被最终装配的预算/过滤挡在了合成之外」，
-  后者是「这个方面到检索结束都没找到支撑」。合起来说会让「模型判断」与「服务端
-  实际送了什么进合成」再也分不开。结束原因的中文短句由服务端给（
-  `termination_summary`），前端只渲染字段，不在前端另立一份 reason 码→文案映射。
-  服务端那份短句表（`reasoning_aspects._TERMINATION_SUMMARIES`）与前端渲染文本、后端
-  `user_error()` 一样在 `scripts/check_ui_vocabulary.py` 的扫描面里（第三条通道）。
-- 检索收尾那条轨迹步复用 `skip` 这个 `step_type`，但界面标签是**「结束」**而不是
-  「跳过」：它不是跳过了什么，它就是这次检索的结束。真正被跳过的步（重复子查询、
-  达次数上限、范围不允许）仍然叫「跳过」，`TRACE_STEP_LABELS.skip` 不变；判据是
-  `detail.reason === "retrieval_termination"`（`getTraceStepLabel`）。
-
 ## 答案正文内的标记
 
 问答与深度报告正文里句首/段首出现的「（推断）」「(推断)」「Likely,」与「【通识】」是模型输出

@@ -1,100 +1,53 @@
 #!/usr/bin/env python3
-"""reflect v2 开闸前 T0 · 影子轨迹 rig(设计规格 2026-09-08 §2.3)。
+"""Legacy retrieval diagnostics: seed, ask, report, search, restart, export and teardown.
 
-在**本地一次性 PG 测试库**上灌真实语料与真实提问,同一批问题在 legacy 与 v2
-两种策略下各跑一遍,Ask 与 Report 都跑。Ask 的轨迹落库、由
-`scripts/export_reasoning_traces.py` 导出;Report 的逐节轨迹不落库,由本脚本
-**进程内**捕获成 JSONL(§2.3)。
-
-另有一条**不建测试库**的路:`search` 直接对**主库(只读)**里两个既有笔记本
-跑检索过程(plan + reflect 循环),轨迹在进程内投影成 JSONL。它不建库、不建图、
-不合成答案,也因此不写 ask_jobs / answers / conversations 任何一行。
-
-第三条路是 `ab`(A/B 设计规格 `2026-09-09-reflect-ab-design_zh.md`):在 `seed`
-建出来的**一次性测试库**上进程内跑**完整 Ask**(意图契约 → 检索 → 合成 → 引用
-绑定),同题同档的 legacy / v2 **背靠背**跑、臂序随机。它与 `search` 的分工是
-「search-only 量不出答案质量」;与 `ask`(HTTP)的分工是「HTTP 换策略必须重启
-后端,两条臂只能整批分开、相隔数小时,provider 的漂移会整块落在臂的差上」。
-
-    python scripts/reflect_shadow_rig.py --dry-run seed
-    python scripts/reflect_shadow_rig.py --dry-run ask
-    python scripts/reflect_shadow_rig.py --dry-run report
-    python scripts/reflect_shadow_rig.py --dry-run --limit 5 search
-    python scripts/reflect_shadow_rig.py --dry-run --limit 2 \
-        --database-url postgresql://127.0.0.1:5432/silicon_notebook_t0_test \
-        --source-db-url postgresql://127.0.0.1:5432/silicon_notebook ab
-    python scripts/reflect_shadow_rig.py --dry-run --seed 7 prefix-probe
-
-子命令:`seed` / `ask` / `report` / `search` / `ab` / `restart` / `export` /
-`teardown` / `prefix-probe`。
-
-第四条路是 `prefix-probe`(E1,前缀敏感性探针,实施规格
-`2026-09-11-reflect-prefix-experiments-plan_zh.md` §3 T-EX4):**零数据库、零
-检索、零 reflect**,只在同一个 `reasoning_agent` workload 上跑一段固定正文,
-两臂只在头/尾标记的稳定性上不同,量的是「稳定前缀有没有可重复的墙钟收益」这
-一件事,不回答命中率/token 节省/provider 是否关闭缓存。
-**`--dry-run` 打印将要做的每一步与每个 `client_request_id` 的编码,不连库、不
-起后端、不发任何请求**——它是唯一进标准门的路径(rig 本体要网络与真实模型)。
-
-三条红线,代码层面的落点在下面各处注释里:
-
-* **主库只读**:`seed` 碰主库时只用 `--source-db-url` 显式给出的连接、只跑一条
-  SELECT(重建 A 语料的 markdown),写入全在测试库;`search` 整条路对
-  `--database-url`(必须显式给出的主库连接)只读——仓储走 `_search_repository`,
-  即 `create_repository(..., migrate=False, seed=False)`(codex #700 R1
-  P1):默认的 `migrate=True, seed=True` 会在 PostgreSQL 上无条件跑一次
-  `bundle._initialize`,先迁移再用 `settings.admin_password` 重写 admin 密码
-  哈希——这是一次真实的、非幂等的写,已经在生产主库上真实发生过一次
-  (`users` 表 admin 行的 `updated_at` 被改)。跑前跑后各点一次
-  `READONLY_TABLES` 的行数 + `users.updated_at` 的最大值(`_readonly_counts`),
-  不等就报错;后一项是因为 admin 密码重写是 `UPDATE`,行数断言对它是瞎的,
-  这次真实事故就是从这个盲区钻过去的。**没有**额外在连接串上强制
-  `default_transaction_read_only=on`:`app/repositories/postgres/search.py`
-  的知识图谱检索用到 `CREATE TEMP TABLE` scratch 表,而这条路径恰恰是
-  `search` 的 `B_kg` 语料格要跑的那一半——把整个会话钉成服务端强制只读,
-  真出问题时会把"这条防线生效了"和"知识图谱检索本身跑不动了"混成同一个
-  报错,分不清是谁挡的。防线因此只有两层:构造入口不迁移/不 seed,加上
-  跑前跑后的值断言,而不是第三层"会话级只读"。
-* **策略靠重启**(HTTP 路径):`REASONING_REFLECT_V2_ENABLED` 是进程级 Settings,
-  rig 不去热改它;`ask` / `report` 每次只跑**一个** `--policy`,换策略 = 换一次
-  后端。`restart` 是唯一的换策略手段:优雅停掉 state 里记的那台后端、按新
-  `--policy` 重起同一份端口/DB/env-file 配置;`ask` / `report` 开跑前会核对
-  state 里记的策略与这次的 `--policy` 是否一致,不一致直接报错,而不是悄悄
-  跑出一批策略对不上号的轨迹。**`search` 不在此列**:它是进程内直调
-  `ReasoningRetriever`,而那个类读的是**传进去的**那份 Settings,所以两个策略
-  各构造一份 Settings 就能在同一次进程里交替跑(见 `_settings_by_policy`)。
-* **编号不进问题文本**:题号/语料格/策略/档位只编进 `client_request_id`(见
-  `encode_client_request_id`),导出时据它打标。模型永远看不到这些编号。
-  `search` 不经 job,标签直接进投影行;问题原文一个字都不进它的日志与 JSONL。
+--dry-run previews the operation without models, network calls or database writes.
+Search keeps the existing read-only repository, identity and scope boundaries.
 """
+
 from __future__ import annotations
 
 import argparse
+
 import json
+
 import mimetypes
+
 import os
-import random
+
 import re
+
 import secrets
+
 import shlex
+
 import signal
+
 import subprocess
+
 import sys
+
 import threading
+
 import time
+
 import uuid
+
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
 from pathlib import Path
+
 from typing import Any, Iterable, Mapping, Sequence
 
 ROOT = Path(__file__).resolve().parents[1]
+
 sys.path.insert(0, str(ROOT / "backend"))
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from app.domain.reasoning_trace_stats import (  # noqa: E402
     CORPUS_CELLS,
     MAX_REFLECT_STEPS,
-    OPTIMIZATIONS,
     assert_closed,
     assert_projection_values,
     merge_key,
@@ -102,96 +55,34 @@ from app.domain.reasoning_trace_stats import (  # noqa: E402
     project_run,
     project_search_run,
 )
-#: 臂的解析与命名是**纯函数**(零 I/O、不读 Settings、不连库),与上面那份
-#: domain 投影同一条理由放在模块顶部:`--dry-run` 要用它们枚举计划,而 dry-run
-#: 的硬约束是「不 import `app.core.config`」。`reflect_ab` 只依赖 domain 与
-#: `citation_markers`,两者都零配置。
-from app.eval.reflect_ab import (  # noqa: E402
-    ARMS,
-    PAIR_ARM_COUNT,
-    ArmSpecError,
-    arm_label,
-    format_arm,
-    parse_arms,
-)
-#: T-EX8 manifest:纯构造 + 闭集 + 隐私断言,与上面那两个 import 同一条
-#: 「零 I/O、零 Settings」理由——manifest 的形状校验是 dry-run 也够得到的
-#: 纯函数(dry-run 本身不写 manifest,但闭集/隐私守卫要能在标准门里被测)。
-from app.eval.reflect_manifest import build_manifest  # noqa: E402
-#: T-EX7:E2 的驱动器/代理/记录面全在这个模块(纯逻辑,`app.services.*` 都是
-#: 函数内导入,见该模块 docstring),rig 只做薄适配。这份列表与 dry-run 要用到
-#: 的纯函数/常量同一条「零 I/O」理由放在顶部——`load_state_probe_case_set` 本身
-#: 有一次文件读(读 `state_probes.json`,不是模型/数据库),dry-run 需要它来打
-#: 印真实的 12 例枚举,与 `load_questions()` 同一条口径。
-from app.eval.reflect_state_probe import (  # noqa: E402
-    PROBE_FAILED_STATUSES,
-    PROBE_ROW_KEYS,
-    REFLECT_CHAT_WORKLOAD,
-    STATE_POINT_COUNT,
-    STATE_POINT_LABELS,
-    StateProbeCase,
-    StateProbeError,
-    assert_probe_row_closed,
-    load_state_probe_case_set,
-    prepare_frozen_intent,
-    run_state_probe_point,
-    state_probe_manifest_facts,
-    summarize_state_probe,
-)
-from app.eval.reflect_t0 import load_questions  # noqa: E402
-from export_reasoning_traces import RIG_FIELDS, RIG_PREFIX  # noqa: E402
+
+from app.eval.reflect_t0 import load_questions
+
+from export_reasoning_traces import RIG_FIELDS, RIG_PREFIX
 
 DEFAULT_TEST_DB = "silicon_notebook_t0_test"
+
 DEFAULT_PORT = 8001
+
 EFFORTS: tuple[str, ...] = ("standard", "deep")
-POLICIES: tuple[str, ...] = ("legacy", "v2")
-#: `state-probe`(E2)默认三臂(计划 U2 拍板:off/prefix_snapshot/prefix_delta;
-#: `prefix_delta_lean` 由 `--arms` 显式加入)。**这三格是** `OPTIMIZATIONS`
-#: **的一个有序子集**,不是 `ab` 的 `(policy, optimization)` 两维臂:design
-#: §9.2 的 B 本来就是「当前 v2 snapshot」(`("v2","off")`),E2 结构上只有
-#: `reflect_optimization()` 这一维,`policy` 恒 `v2`——所以这里不复用
-#: `reflect_ab.ARMS`/`parse_arms`(两维臂的合法组合闭集与非法组合校验,拿来读
-#: 一维输入没有意义)。
-STATE_PROBE_DEFAULT_ARMS: tuple[str, ...] = ("off", "prefix_snapshot", "prefix_delta")
-#: E2 的固定精力档。case 集里没有 `effort` 这一维(`state_probe_manifest_facts`
-#: 的 `matrix` 子键契约里也没有 `efforts`——三个状态点的轮号已经把每例的剧本
-#: 长度钉死,档位只影响 `ask_retrieval_limits` 的首轮宽度与 `max_reasoning_steps`
-#: 上限),所以只固定一档而不是像 `ab` 那样再开一维:`standard` 的
-#: `max_reasoning_steps=8`,覆盖案例集里最长的状态点(第 6 轮 + 1 轮转发)。
-STATE_PROBE_EFFORT = "standard"
-#: 测试库要装的扩展(与 memory `local-pg-test-db` 同一份清单)。
+
 PG_EXTENSIONS: tuple[str, ...] = ("pg_trgm", "btree_gin")
-#: fixture 用户名。**必须过 `app.domain.auth_utils.USERNAME_RE`(单个小写字母 +
-#: 八位数字)**——注册端点用同一条正则,任何别的形状都会被 400 挡在门外,而
-#: 那时前面的建库/起后端已经白做了一遍。
+
 DEFAULT_USER = "t00000001"
-#: 一次上传的文件数上限,与 `app.core.config.SOURCE_UPLOAD_MAX_FILES_PER_BATCH`
-#: 同值。超出的批会被解析器以 413 拒绝,所以 rig 自己先切片。
+
 UPLOAD_BATCH = 20
-#: 来源解析的终态(`source_ingestion` 的 `_emit_status` 三个落点)。轮询等的是
-#: 「不再变」,不是「成功」——failed 也要停,否则一个坏文件把整次 seed 挂死。
+
 PARSE_TERMINAL: frozenset[str] = frozenset({"extracted", "failed", "metadata-only"})
-#: `search` 跑的两个语料格。**它们是主库里既有的事实,不是 rig 造出来的**:
-#: `--source-notebook-a` 那个笔记本一个 knowledge_object 都没有,
-#: `--source-notebook-b` 那个有四万多个。`search` 不建库也不建图,所以另外两格
-#: (`A_kg` / `B_nokg`)在主库上根本不存在,不在这条路的枚举里。
+
 SEARCH_CELLS: tuple[str, ...] = ("A_nokg", "B_kg")
-#: `search` 的只读断言盯的表。前四张是 Ask / 答案 / 会话 / 图的写入面;
-#: `retrieval_experiences` 是 `ReasoningRetriever.run` 全程**唯一**的写路径
-#: (收尾那一次有界 `note_adopted` UPDATE,只在注入开着时可达——而 rig 另外把
-#: 注入开关强制关掉,见 `_search_process_env`)。表不存在时那一格记 `None` =
-#: 「这次不看它」,而不是当成 0:否则一次改名会静默通过。
+
 READONLY_TABLES: tuple[str, ...] = (
     "ask_jobs", "answers", "conversations", "knowledge_objects",
     "retrieval_experiences",
 )
 
-
-# --- client_request_id 编码 -------------------------------------------------
-
-
 def encode_client_request_id(
-    *, question_key: str, corpus_cell: str, policy: str, effort: str,
+    *, question_key: str, corpus_cell: str, effort: str,
     requested_mode: str,
 ) -> str:
     """把「题号/语料格/策略/档位/请求 mode」编成一个幂等键。
@@ -206,7 +97,7 @@ def encode_client_request_id(
     """
     values = {
         "question_key": question_key, "corpus_cell": corpus_cell,
-        "policy": policy, "effort": effort, "requested_mode": requested_mode,
+        "policy": "legacy", "effort": effort, "requested_mode": requested_mode,
     }
     for name, value in values.items():
         text = str(value)
@@ -215,15 +106,12 @@ def encode_client_request_id(
     return RIG_PREFIX + ":".join(str(values[field]) for field in RIG_FIELDS)
 
 
-# --- 计划(dry-run 与真跑共用同一份枚举) -----------------------------------
-
-
 def corpus_cells(selected: Sequence[str]) -> list[str]:
     return [cell for cell in CORPUS_CELLS if not selected or cell in selected]
 
 
 def ask_plan(
-    questions: dict, *, cells: Sequence[str], policy: str, limit: int | None,
+    questions: dict, *, cells: Sequence[str], limit: int | None,
     lang: str, mode: str, efforts: Sequence[str],
     only_questions: Sequence[str] = (),
 ) -> list[dict]:
@@ -255,7 +143,6 @@ def ask_plan(
                     plan.append({
                         "question_key": key,
                         "corpus_cell": cell,
-                        "policy": policy,
                         "effort": effort,
                         "requested_mode": mode,
                         "lang": language,
@@ -268,7 +155,7 @@ def ask_plan(
                             row.get("scope_source_titles") or ()
                         ),
                         "client_request_id": encode_client_request_id(
-                            question_key=key, corpus_cell=cell, policy=policy,
+                            question_key=key, corpus_cell=cell,
                             effort=effort, requested_mode=mode,
                         ),
                         "question": text,
@@ -281,42 +168,21 @@ def search_cells(selected: Sequence[str]) -> list[str]:
 
 
 def search_plan(
-    questions: dict, *, cells: Sequence[str], policies: Sequence[str],
-    limit: int | None, lang: str, efforts: Sequence[str],
-    only_questions: Sequence[str] = (),
+    questions: dict, *, cells: Sequence[str], limit: int | None,
+    lang: str, efforts: Sequence[str], only_questions: Sequence[str] = (),
 ) -> list[dict]:
-    """`search` 要跑的全部 run,一条一行。**枚举复用 `ask_plan`**。
-
-    两条路的枚举必须是同一份:`search` 与 `ask` 出的行进的是同一张对照表
-    (`analyze_reasoning_trace.py` 按 `question_key` + `corpus_cell` + `effort`
-    配对),各写一份枚举就等于给「哪些题在哪些格上跑」立两个权威。
-
-    与 `ask` 的两点不同:
-
-    * **一次跑两侧策略**。`search` 是进程内直调,换策略只是换一份 Settings
-      (`_settings_by_policy`),不用重启后端,所以 legacy/v2 在同一次调用里
-      跑完——这正是配对最干净的形状。
-    * **丢掉 `client_request_id`**。那个键的全部意义是「幂等键落进 `ask_jobs`、
-      导出时据它打标」,而 `search` 一条 `ask_jobs` 都不写。留着它会让人以为
-      能按它在库里查到这批 run。
-
-    `only_questions` 是 `--only-question` 的落点,转发给 `ask_plan`(那边负责
-    「先筛后限」的次序)。`--only-cell` 不在这里处理——它收窄的是调用方传入的
-    `cells` 本身(见 `cmd_search`),不属于这份枚举内部的过滤规则。
-    """
-    plan: list[dict] = []
-    for policy in policies:
-        for item in ask_plan(
-            questions, cells=cells, policy=policy, limit=limit, lang=lang,
-            mode="reasoning", efforts=efforts, only_questions=only_questions,
-        ):
-            item.pop("client_request_id", None)
-            plan.append(item)
+    """Reuse the Ask question/scope plan for read-only retrieval runs."""
+    plan = ask_plan(
+        questions, cells=cells, limit=limit, lang=lang, mode="reasoning",
+        efforts=efforts, only_questions=only_questions,
+    )
+    for item in plan:
+        item.pop("client_request_id", None)
     return plan
 
 
 def report_plan(
-    questions: dict, *, cell: str, policy: str, limit: int | None,
+    questions: dict, *, cell: str, limit: int | None,
 ) -> list[dict]:
     rows = questions["report"]
     if limit is not None:
@@ -325,7 +191,6 @@ def report_plan(
         {
             "question_key": row["key"],
             "corpus_cell": cell,
-            "policy": policy,
             "depth": int(row["depth"]),
             "profile": row["profile"],
             "question": row["question"],
@@ -334,12 +199,9 @@ def report_plan(
     ]
 
 
-# --- A 语料:从主库只读重建 markdown ---------------------------------------
-
-#: 标题元素的层级键。`source_elements` **没有** `section_path` 列(那住在
-#: chunks 与 metadata 里),所以重建按 `ordinal` 顺序拼,标题靠 `element_type`
-#: 与 `metadata.heading_level` 还原成 markdown 的 `#` 级别。
 HEADING_LEVEL_KEY = "heading_level"
+
+
 DEFAULT_HEADING_LEVEL = 2
 
 
@@ -390,9 +252,6 @@ def rebuild_source_markdown(source_db_url: str, notebook_id: str) -> dict[str, s
             _element_markdown(str(row.get("element_type") or ""), text, metadata)
         )
     return {sid: "\n\n".join(blocks) + "\n" for sid, blocks in documents.items()}
-
-
-# --- 真跑侧的薄执行器 -------------------------------------------------------
 
 
 _SAFE_ERROR_CODE = re.compile(r"^[A-Za-z0-9_.:\-]{1,64}$")
@@ -545,12 +404,6 @@ class Runner:
         self.write(self.state_path(), json.dumps(state, ensure_ascii=False, indent=2))
 
 
-# --- multipart 上传体(只用标准库) -----------------------------------------
-
-#: `/api/notebooks/{id}/sources` 受理的**全部**表单字段,与
-#: `app.api.source_routes._SOURCE_UPLOAD_FORM_KEYS` 同一份清单。多出任何一个键
-#: 都是 422(那条校验是 `set(form) - _SOURCE_UPLOAD_FORM_KEYS`),所以这里不是
-#: 「随便发点什么」,而是逐字对着后端的闭集发。
 UPLOAD_FORM_KEYS = ("files", "doc_types", "doc_type_explicit")
 
 
@@ -685,15 +538,6 @@ def await_index(
         time.sleep(10)
 
 
-# --- 日志脱敏(codex #700 R1 P2) --------------------------------------------
-#
-# `rig-state.json` 与内部变量该存什么原样存什么——`_teardown_targets_this_run`
-# 就是靠 state 里那份逐字的 `database_url` 才能核对"这次真的是同一个库"
-# (见上面的 docstring)。脱敏只发生在**打印给人看**的这一层,不动任何被后续
-# 逻辑读回去比较的值。
-
-#: 大小写不敏感,子串匹配。命中就把整个值换成 `<redacted>`,不猜哪一部分是
-#: 密钥——环境变量的值从不需要在日志里部分可读。
 _SENSITIVE_ENV_KEY_MARKERS: tuple[str, ...] = ("DATABASE_URL", "API_KEY", "PASSWORD")
 
 
@@ -738,11 +582,8 @@ def _redact_env_for_log(env: dict[str, str]) -> str:
     return ",".join(parts)
 
 
-# --- 子命令 -----------------------------------------------------------------
-
-
-def backend_env(args: argparse.Namespace, policy: str) -> dict[str, str]:
-    """临时后端的环境变量。策略开关在这里,而不是在运行时改 Settings。
+def backend_env(args: argparse.Namespace) -> dict[str, str]:
+    """临时后端的隔离环境与模型服务配置。
 
     `SILICON_NOTEBOOK_ENV_FILE` 是把主 checkout 的 `.env`(模型服务配置与
     密钥)接进来的**唯一**手段——`Settings` 的 `env_file` 默认指向**当前
@@ -753,7 +594,6 @@ def backend_env(args: argparse.Namespace, policy: str) -> dict[str, str]:
         "DATABASE_URL": args.database_url,
         "SILICON_NOTEBOOK_STORAGE_DIR": args.storage_dir,
         "SILICON_NOTEBOOK_AUTH_OPTIONAL": "true",
-        "REASONING_REFLECT_V2_ENABLED": "true" if policy == "v2" else "false",
         # 语料格的「有图/无图」靠 rig 只对 *_kg 格调 `/kg/build` 来区分;继承的
         # 环境或 `--env-file` 若开着 KG_AUTO_EXTRACT,上传即自动建图,A_nokg /
         # B_nokg 就不再无图、`--skip-kg` 也拦不住(codex #700 R12 P2)。显式关掉。
@@ -762,6 +602,7 @@ def backend_env(args: argparse.Namespace, policy: str) -> dict[str, str]:
         # `rig_event_log_dir`):rig 起的后端不该往用户平时看的
         # `.local/logs/events-*.jsonl` 里灌几百条实验事件。
         "EVENT_LOG_DIR": rig_event_log_dir(args.out_dir),
+        "LLM_LOG_PATH": rig_llm_log_path(args.out_dir),
         "PORT": str(args.port),
     }
     if args.env_file:
@@ -777,7 +618,7 @@ def _apply_process_env(args: argparse.Namespace) -> None:
     `cmd_report` 因此在函数第一行调它,而 `app.*` 的 import 全在更下面的函数体
     里(模块顶部只 import 了零 I/O 的 domain 投影)。
     """
-    os.environ.update(backend_env(args, args.policy))
+    os.environ.update(backend_env(args))
 
 
 def _backend_command(args: argparse.Namespace) -> list[str]:
@@ -808,8 +649,8 @@ def cmd_seed(args: argparse.Namespace, runner: Runner) -> int:
 
     runner.say("start backend",
                shlex.join(_backend_command(args))
-               + "  env=" + _redact_env_for_log(backend_env(args, "legacy")))
-    backend = _start_backend(args, "legacy") if not runner.dry_run else None
+               + "  env=" + _redact_env_for_log(backend_env(args)))
+    backend = _start_backend(args) if not runner.dry_run else None
     try:
         return _seed_notebooks(args, runner, corpus, cells,
                                backend_pid=backend.pid if backend else 0,
@@ -896,10 +737,8 @@ def _seed_notebooks(
         "user": args.user, "token": token, "backend_pid": backend_pid,
         "backend_identity": backend_identity,
         "notebooks": {},
-        # `restart` 靠这几项在只有 `--policy` 的情况下重起同一台后端(§2.3):
         # 它读的是这次 seed 真的用了哪套配置,而不是 `restart` 调用自己的
         # 命令行默认值。
-        "policy": "legacy",
         "port": args.port,
         "database_url": args.database_url,
         "storage_dir": args.storage_dir,
@@ -1011,7 +850,7 @@ def _create_test_database(args: argparse.Namespace) -> None:
             conn.execute(f'CREATE EXTENSION IF NOT EXISTS "{extension}"')
 
 
-def _start_backend(args: argparse.Namespace, policy: str) -> subprocess.Popen:
+def _start_backend(args: argparse.Namespace) -> subprocess.Popen:
     """起一台临时后端,等到它**真的**就绪。
 
     判据是 `/api/ready` 的 `{"ready": true}`,不是「这个 URL 能连上」:那个探针
@@ -1023,7 +862,7 @@ def _start_backend(args: argparse.Namespace, policy: str) -> subprocess.Popen:
 
     _assert_endpoint_free(args.base_url)
     env = dict(os.environ)
-    env.update(backend_env(args, policy))
+    env.update(backend_env(args))
     process = subprocess.Popen(_backend_command(args), env=env, cwd=str(ROOT))
     deadline = time.monotonic() + args.ready_timeout
     while time.monotonic() < deadline:
@@ -1046,9 +885,9 @@ def _read_raw_state(state_path: Path) -> dict:
     """原始 state 读取,**不经过** `Runner.load_state` 的 dry-run 短路。
 
     `Runner.load_state` 在 `--dry-run` 下故意不读磁盘上真的那份 state(其他
-    命令的 dry-run 要打印的是「从零开始会做什么」)。但 `restart` 与策略核对
+    命令的 dry-run 要打印的是「从零开始会做什么」)。但 `restart`
     天生只对「现在这台后端」有意义——dry-run 也该照真实 state 打印停/起计划、
-    照真实 state 核对策略,而不是对着一份假的占位状态算。这只是读一个已经
+    使用真实 state,而不是对着一份假的占位状态算。这只是读一个已经
     存在的文件,不写任何东西,不违反 dry-run 的零副作用承诺。
     """
     if not state_path.exists():
@@ -1060,39 +899,13 @@ def _read_raw_state(state_path: Path) -> dict:
     return raw if isinstance(raw, dict) else {}
 
 
-def _read_state_policy(state_path: Path) -> str | None:
-    """state 里记的策略,`None` = 不知道(文件不存在,或从没写过这个键)。"""
-    policy = _read_raw_state(state_path).get("policy")
-    return policy if isinstance(policy, str) else None
-
-
-def _assert_policy_matches_backend(runner: Runner, policy: str) -> None:
-    """`ask` / `report` 开跑前的策略闸(§2.3)。
-
-    后端当前真的跑在哪个策略上,只有 `restart`(和 `seed`)落过的 state 知道。
-    不一致时继续跑只会把 legacy 轨迹当成 v2 导出(或反过来)——一个要等到
-    分析阶段才会被发现的静默错误,这里让它当场报响亮失败。
-    """
-    recorded = _read_state_policy(runner.state_path())
-    if recorded is not None and recorded != policy:
-        raise RuntimeError(
-            f"state 记录的后端策略是 {recorded!r},但这次要用 --policy="
-            f"{policy!r}。先执行 `restart --policy {policy}` 切到位,"
-            "再跑这条命令"
-        )
-
-
 def cmd_ask(args: argparse.Namespace, runner: Runner) -> int:
-    _assert_policy_matches_backend(runner, args.policy)
     questions = load_questions()
     state = runner.load_state()
     plan = ask_plan(
-        questions, cells=corpus_cells(args.cell), policy=args.policy,
+        questions, cells=corpus_cells(args.cell),
         limit=args.limit, lang=args.lang, mode=args.mode, efforts=EFFORTS,
     )
-    runner.say("policy", f"{args.policy} (REASONING_REFLECT_V2_ENABLED="
-                         f"{backend_env(args, args.policy)['REASONING_REFLECT_V2_ENABLED']}"
-                         "; 换策略必须重启后端)")
     runner.say("planned runs", str(len(plan)))
     token = str(state.get("token") or "")
     verified = runner.dry_run
@@ -1221,14 +1034,13 @@ def _assert_tag_landed(
 
 
 def cmd_report(args: argparse.Namespace, runner: Runner) -> int:
-    """4 道综述题 × 当前策略 × B 有图格,**进程内**调 `ReportEngine`。
+    """4 道综述题 × B 有图格,**进程内**调 `ReportEngine`。
 
     逐节轨迹不落库(`reports.sections_json` 只存结果级字段),所以这里不走
     HTTP,而是在进程内拿到生产接线的引擎,用一个只加 tee 的 `ReportEngine`
     子类把 `_deep_dive` 的 `on_step` 复制一份进 JSONL。**子类住在 rig 里,生产
     代码一行不动。**
     """
-    _assert_policy_matches_backend(runner, args.policy)
     if not runner.dry_run:
         # dry-run 连 os.environ 都不碰:它的全部承诺是「只打印」。
         _apply_process_env(args)
@@ -1236,12 +1048,9 @@ def cmd_report(args: argparse.Namespace, runner: Runner) -> int:
     state = runner.load_state()
     plan = report_plan(
         questions, cell=args.cell[0] if args.cell else "B_kg",
-        policy=args.policy, limit=args.limit,
+        limit=args.limit,
     )
-    out = runner.out_dir / f"report-trace-{args.policy}.jsonl"
-    runner.say("policy", f"{args.policy}(进程内 Settings 由环境变量决定;"
-                         "REASONING_REFLECT_V2_ENABLED 由本命令自己设进 os.environ,"
-                         "在 import app.core.config 之前)")
+    out = runner.out_dir / "report-trace.jsonl"
     runner.say("in-process ReportEngine",
                "app.bootstrap.create_application_repository(Settings()) -> "
                "_runtime.report_execution.engine_factory")
@@ -1469,29 +1278,6 @@ def _report_rows(
     repo: Any, notebook: str, report_id: str, item: dict,
     captured: dict[int, list[dict]], *, gate_reason: str | None = None,
 ) -> Iterable[dict]:
-    """逐节**一行**:轨迹投影与结果级投影按 `merge_key` 当场合成。
-
-    `gate_reason` 非 `None`(见 `_generate_report`)时是这条不变量唯一的例外:
-    报告卡在澄清门、代答也没能解开,没有一节可对——但也不能一行都不产出,
-    「静默 0 行」和「这份报告本来就没内容」在聚合表里长得一模一样
-    (codex #700 R2 P2)。这里显式记一行 `status=failed`,不带 `merge_key`
-    (没有轨迹半份可以对)。
-
-    轨迹那一半走的是与 Ask 完全相同的 `project_run`——报告的逐节深挖跑的就是
-    `ReasoningRetriever.run`,换一份投影只会让两边的口径分叉。结果级那一半走
-    `project_report_section`,与 `export_reasoning_traces.py --reports` 是同一个
-    函数,所以「rig 出的」和「从库里导的」不可能长出不同的键。
-
-    **合成成一行,而不是各写一行**:分析脚本按格子数 `n_runs`,每节写两行会让
-    一份 3 节的报告报成 6 个 run,而每个指标恰好一半「缺失」——§4.1 那套
-    「n_observed 用来分辨『真的没记』和『本来就没有』」的分母就此报废,而且它
-    看起来完全像一份正常的表。`merge_key(report_id, section_index)` 本来就是为
-    了把两半对上(单向哈希,读不回 report id),这里直接用它当场对。
-
-    两半的键除 `policy_version` 外取值相同。冲突的那一个让**轨迹**赢:它是按
-    「有没有 v2 终态步」判出来的证据,而结果级那一半只能照抄 rig 的声明——rig
-    声明跑的是 v2、而轨迹里一个 v2 终态步都没有时,该被记下来的正是这件事。
-    """
     from app.services.report_engine import report_retrieval_effort
 
     report = repo.get_report(notebook, report_id)
@@ -1501,7 +1287,6 @@ def _report_rows(
         "question_key": item["question_key"],
         "consumer": "report_section",
         "trace_source": "in_process",
-        "policy_version": item["policy"],
     }
     # 报告没有 Ask 那份 answer payload,但投影要读的三样东西报告都有确定的来源
     # (codex #700 R6 P2):档位按生产的 `report_retrieval_effort(depth)` 映射
@@ -1528,12 +1313,10 @@ def _report_rows(
         row["section_index"] = None
         row["status"] = "failed"
         # 成功行是「结果级 + 轨迹级」合成的一行,带 effort/mode/trace_source/
-        # policy_version;失败行也要带同样的工作负载维度,否则 `pair_table` 按这
         # 几个维度分格时,失败的那一侧掉进另一个格,对照整个消失(codex #700 R14
         # P2)。这些值都是 rig 已知的声明,不是编造的证据。
         row.update({
             "effort": effort, "mode": "reasoning", "trace_source": "in_process",
-            "policy_version": item["policy"],
             "has_intent_contract": bool(report.get("understanding")),
             # `project_report_section({})` 把 `failed` 初始化成 False——那是「这一
             # 节没失败」的观测值,而这里根本没有节:整份报告在规划/生成阶段失败
@@ -1566,25 +1349,7 @@ def _report_rows(
         yield row
 
 
-# --- search:主库只读的进程内检索 run --------------------------------------
-
-
 def cmd_search(args: argparse.Namespace, runner: Runner) -> int:
-    """两个既有笔记本 × 两个策略 × 两个档位,**进程内只跑检索过程**。
-
-    与 `ask` 的分工:`ask` 是「建测试库 → 起后端 → 走 HTTP → 答案落库 → 轨迹
-    从库里导」;`search` 是「对**主库只读**跑 plan + reflect 循环 → 轨迹在进程
-    内投影成 JSONL」。它**不建测试库、不建图、不合成答案**,所以 ask_jobs /
-    answers / conversations 一行都不写,`knowledge_objects` 也一个字节不动。
-
-    策略切换不重启:`reasoning_reflect_v2_enabled` 是 Settings 字段,而
-    `ReasoningRetriever.from_repository(repo, settings)` 用的是**传入的**那份
-    settings(`reflect_v2_active()` 只读 `self.settings` 与 `allow_reflect_v2`,
-    两者都不经 repo)。所以这里为两个策略各构造一份 Settings,在同一个 repo 上
-    交替跑,一次进程跑完整批。每个 run 开跑前还会当场核对
-    `retriever.reflect_v2_active()` 与这条 run 声明的策略一致——协议对不对号是
-    这批数据唯一的立身之本,不能只靠"我设过那个环境变量"。
-    """
     questions = load_questions()
     cells = search_cells(args.cell)
     if args.only_cell:
@@ -1601,11 +1366,9 @@ def cmd_search(args: argparse.Namespace, runner: Runner) -> int:
         print("ERROR: " + _search_preflight(args, cells, notebooks),
               file=sys.stderr)
         return 2
-    # `--only-policy` 只在重跑某一侧(如一侧被网络故障整批打废)时用:配对表
     # 靠 question_key+corpus_cell+effort 对上,两侧分两次进程跑不影响配对。
-    policies = tuple(args.only_policy) if args.only_policy else POLICIES
     plan = search_plan(
-        questions, cells=cells, policies=policies, limit=args.limit,
+        questions, cells=cells, limit=args.limit,
         lang=args.lang, efforts=EFFORTS, only_questions=args.only_question,
     )
     unique_questions = {
@@ -1618,24 +1381,21 @@ def cmd_search(args: argparse.Namespace, runner: Runner) -> int:
     for cell in cells:
         runner.say("corpus cell",
                    f"{cell} -> notebook={notebooks.get(cell) or '<required>'}")
-    runner.say("policies",
-               ", ".join(policies) + "(同进程换 Settings,不重启后端)")
     runner.say("efforts", ", ".join(EFFORTS))
     runner.say("planned runs",
-               f"{len(plan)}({len(unique_questions)} 题 × {len(policies)} 策略 "
-               f"× {len(EFFORTS)} 档)")
+               f"{len(plan)}({len(unique_questions)} 题 × {len(EFFORTS)} 档)")
     runner.say("model calls (estimate)",
                _search_call_estimate(plan, len(unique_questions),
                                      no_intent=args.no_intent))
     runner.say("out",
-               f"{runner.out_dir}/search-<policy>.jsonl + search-runs.log"
+               f"{runner.out_dir}/search.jsonl + search-runs.log"
                + ("" if args.no_intent else
                   f" + {runner.out_dir}/intents.jsonl(**不进数据集/仓库**)"))
     if args.keep_raw_trace:
         runner.say(
             "raw trace",
-            f"{runner.out_dir}/raw/<policy>/<question_key>_<corpus_cell>_"
-            "<effort>.json(每个 run 一份原始 TraceStep 列表 + termination DTO,"
+            f"{runner.out_dir}/raw/<question_key>_<corpus_cell>_"
+            "<effort>.json(每个 run 一份原始 TraceStep 列表,"
             "**含标题与模型 reason,不进数据集/仓库**)",
         )
     runner.say(
@@ -1651,7 +1411,7 @@ def cmd_search(args: argparse.Namespace, runner: Runner) -> int:
             runner.say(
                 "search",
                 f"{item['question_key']} cell={item['corpus_cell']} "
-                f"policy={item['policy']} effort={item['effort']}{scope_note}",
+                f"effort={item['effort']}{scope_note}",
             )
         return 0
     return _run_search(args, runner, plan, notebooks, cells)
@@ -1687,66 +1447,17 @@ def _search_call_estimate(
 
 
 def rig_llm_log_path(out_dir: str) -> str:
-    """rig 的两条进程内路径把 LLM 交互日志改落到**这次跑批自己的 out-dir**。
-
-    默认落点(`.local/logs/llm.jsonl`)是**整台机器共用**的:同一天里在同一个
-    checkout 上跑过的每个后端、每次冒烟、每个别的 rig 会话,都往同一个
-    `llm-YYYY-MM-DD.jsonl` 里追加。`ab` 的成本三键靠时间窗切片归因(§7.2),
-    在共用日志上切片会把**同机别的进程**的模型调用记到本 run 头上——那不是
-    「数得不准」,是数了别人的(codex 质量评审 P1-2 / 规格评审 P2-2)。
-
-    换成 out-dir 之后,读侧(`_ab_llm_log_dir`)读的是同一份 `Settings
-    .llm_log_path`,所以两侧天然同源:改这一条不需要同时改读侧。
-    """
     return str((Path(out_dir).expanduser() / "llm" / "llm.jsonl").resolve())
 
 
 def rig_event_log_dir(out_dir: str) -> str:
-    """rig 的两条进程内路径把**事件日志**也改落到这次跑批自己的 out-dir。
-
-    与 `rig_llm_log_path` 是同一条理由的另一半,而这一半此前是漏的:
-    `EVENT_LOG_DIR` 的默认值 `.local/logs` 同样是**整台机器共用**的,rig 一跑就
-    往用户平时看的 `events-YYYY-MM-DD.jsonl` 里灌几百条 `model_scheduler`——rig
-    的调度事件与这台机器上真实使用产生的事件从此混在一份文件里,两个方向都坏:
-    看日志的人被灌一批实验噪声,而 per-call 表(`reflect_context_bench.join_calls`)
-    的右表里混进了别的进程的调用行(计划 §3 T-PS5 的 G5)。
-
-    落点是 `<out-dir>/events`,与 llm 日志的 `<out-dir>/llm` **并列而不同目录**。
-    这会让 `repository_runtime` 打一行「LLM_LOG_PATH 的目录与 EVENT_LOG_DIR 不
-    一致」的告警——那条告警说的是「日志查看器读不到 per-user 的 llm 日志」,而
-    rig 的产物没有查看器要读,两份日志各自按自己的 glob 读(见
-    `AB_LLM_LOG_GLOB` / `RIG_EVENT_LOG_GLOB`)。合成一个目录能消掉那行告警,但
-    会让两串按天分文件的日志挤在一起,`export`/归档时更难分。
-    """
+    """Keep scheduler logs in this run's own events directory."""
     return str((Path(out_dir).expanduser() / "events").resolve())
 
 
 def _rig_process_env(
     args: argparse.Namespace, *, database_url: str,
 ) -> dict[str, str]:
-    """rig 的进程内路径(`search` / `ab`)装进**本进程**的环境变量。
-    必须在 import `app.core.config` 之前设。
-
-    **一份清单、两个调用方**(codex 质量评审 P2-9):这几项此前在
-    `_search_process_env` 与 `_ab_process_env` 里逐字重复了两遍,而漏一项在数据
-    上看不出任何区别——`search` 加了闸、`ab` 忘了加,产出的两批数据形状完全
-    一样。键集相同由用例钉住。
-
-    `DATABASE_URL` 由调用方给:`search` 指主库(只读跑检索),`ab` 指
-    `seed` 建出来的一次性测试库(要往里写 conversation 与 answer 行)。两条都
-    显式覆盖、不从 `.env` 猜——那个文件里写的是这台机器平时连的库。
-
-    三把**注入闸强制关**(§5.5-4)。它们本来就默认关、而且 `from_repository`
-    压根不接 `agent_profile` / `retrieval_experiences` / `identity_store` 三个
-    端口(所以注入在结构上就不可达),这里再关一次是为了让「注入面全关」不
-    依赖于「那三个端口恰好没接线」这个会随重构漂移的前提:注入闸一关,
-    `experience_wiring_active` 恒假,收尾那条 `note_adopted` UPDATE 就连分支
-    都进不去。
-
-    `LLM_LOG_PATH` 见 `rig_llm_log_path`,`EVENT_LOG_DIR` 见 `rig_event_log_dir`
-    ——两条都把机器共用的默认落点换成本次 out-dir,rig 因此**不再往
-    `.local/logs/events.jsonl` 写一个字节**。
-    """
     env = {
         "DATABASE_URL": database_url,
         "RETRIEVAL_EXPERIENCE_INJECT_ENABLED": "false",
@@ -1765,98 +1476,6 @@ def _search_process_env(args: argparse.Namespace) -> dict[str, str]:
     return _rig_process_env(args, database_url=args.database_url)
 
 
-def _settings_by_policy() -> dict[str, Any]:
-    """两个策略各一份 `Settings`。**不重启后端,也不热改已构造好的那一份**。
-
-    构造走环境变量而不是 `model_copy(update=...)`:`Settings` 带跨字段校验与
-    别名解析,绕过构造器改一个布尔位不会重跑它们,而这里要的正是「像后端那样
-    按 `REASONING_REFLECT_V2_ENABLED` 起来的一份配置」。显式环境变量优先于
-    env_file,所以 `--env-file` 里就算写了这一项也盖不住;万一被盖住,下面那
-    条断言当场报错,而不是安静地跑出一批策略对不上号的轨迹。
-    """
-    from app.core.config import Settings
-
-    built: dict[str, Any] = {}
-    for policy in POLICIES:
-        os.environ["REASONING_REFLECT_V2_ENABLED"] = (
-            "true" if policy == "v2" else "false"
-        )
-        settings = Settings()
-        if bool(settings.reasoning_reflect_v2_enabled) is not (policy == "v2"):
-            raise RuntimeError(
-                f"Settings 没有按 {policy!r} 起来:REASONING_REFLECT_V2_ENABLED "
-                "被别处盖掉了"
-            )
-        built[policy] = settings
-    return built
-
-
-def _settings_by_arm(
-    arms: Sequence[tuple[str, str]],
-) -> dict[tuple[str, str], Any]:
-    """`ab` 的每条臂各一份 `Settings`,按 `(policy, optimization)` 索引。
-
-    与 `_settings_by_policy`(`search` 用的那一份)同一条构造纪律——走环境变量而
-    不是 `model_copy(update=...)`,因为 `Settings` 带跨字段校验与别名解析,绕过
-    构造器改一个字段不会重跑它们,而这里要的正是「像后端那样起来的一份配置」。
-    多出来的只有**第二维**:每条臂在构造前把 `REASONING_REFLECT_OPTIMIZATION`
-    设成自己那一格。
-
-    两条断言都是「不断言就会安静跑出一批臂对不上号的数据」:
-
-    * v2 总闸按 policy 对号(与 `_settings_by_policy` 逐字同一条);
-    * optimization 按声明对号。不在 `Literal` 闭集里的拼写(比如手滑写成
-      `prefix_delta_leen`)由 pydantic 在**构造期**就抛 `ValidationError`,所以
-      那条路径不会走到这里;这条断言挡的是**别名或接线漂移**——`Settings` 的
-      字段别名改了名、`--arms` 的取值与配置枚举分了叉、或者这个函数哪天不再
-      逐臂设那个环境变量。
-      它挡不住的是「被 `--env-file` 盖住」:pydantic-settings 默认 env > dotenv,
-      而 `--arms` 那几行是显式环境变量,`--env-file` 盖不过它(实测确认)。
-    * 测量开关按 `_ab_process_env` 的约定核一次:两臂都必须是开的,否则差值表
-      只有一侧有数。
-
-    进程环境在这里被**逐臂改写**,离开时留在最后一条臂上——与
-    `_settings_by_policy` 同一个既有形态。它不影响任何东西:两条臂各自读的是
-    自己那份已经构造好的 `Settings`(臂由 repo 承载,见 `run_ab_once`),而
-    `Settings()` 在这个函数之后不再被构造。
-    """
-    from app.core.config import Settings
-
-    built: dict[tuple[str, str], Any] = {}
-    for policy, optimization in arms:
-        os.environ["REASONING_REFLECT_V2_ENABLED"] = (
-            "true" if policy == "v2" else "false"
-        )
-        os.environ["REASONING_REFLECT_OPTIMIZATION"] = optimization
-        settings = Settings()
-        label = format_arm(policy, optimization)
-        if bool(settings.reasoning_reflect_v2_enabled) is not (policy == "v2"):
-            raise RuntimeError(
-                f"Settings 没有按 {label!r} 起来:REASONING_REFLECT_V2_ENABLED "
-                "被别处盖掉了"
-            )
-        if str(settings.reasoning_reflect_optimization) != optimization:
-            raise RuntimeError(
-                f"Settings 没有按 {label!r} 起来:"
-                "REASONING_REFLECT_OPTIMIZATION 实际是 "
-                f"{settings.reasoning_reflect_optimization!r}。显式环境变量胜过 "
-                "--env-file,所以这不是被 .env 盖住——多半是字段别名或这里的接线"
-                "改了名,rig 设的那个环境变量已经没人读"
-            )
-        if not bool(settings.reasoning_reflect_measure_context):
-            raise RuntimeError(
-                f"臂 {label!r} 的 REASONING_REFLECT_MEASURE_CONTEXT 没开:两臂必须"
-                "用同一把尺子(拍板 Q2),只有一侧有测量列的差值表出不了结论"
-            )
-        built[(policy, optimization)] = settings
-    return built
-
-
-#: `_readonly_counts` 除了 `READONLY_TABLES` 的行数,还额外带一个**按值**的
-#: 信号(codex #700 R1 P1)。`bundle._initialize` 的 admin 密码重写是一次
-#: `UPDATE users`,行数一根毫毛不动——`READONLY_TABLES` 那套按 `COUNT(*)` 的
-#: 断言对它是瞎的,这条真实事故(生产主库 `users` 表 admin 行的 `updated_at`
-#: 被改)就是从这个盲区钻过去的。
 USERS_UPDATED_AT_MAX_KEY = "users_updated_at_max"
 
 
@@ -1953,8 +1572,6 @@ def resolve_scope_source_ids(
     return resolved
 
 
-#: `_assert_readonly` 逐个比对的键:`READONLY_TABLES` 的行数,加上按值比对的
-#: `USERS_UPDATED_AT_MAX_KEY`(行数断言看不见的那一类写)。
 READONLY_CHECKED_KEYS: tuple[str, ...] = (*READONLY_TABLES, USERS_UPDATED_AT_MAX_KEY)
 
 
@@ -1965,37 +1582,6 @@ def _format_counts(counts: dict[str, int | str | None]) -> str:
     )
 
 
-#: 「主库这次真的连上了」的证据表。`_readonly_counts` 对每张数不出来的表都记
-#: `None`,而 before/after 全 `None` 会**相等** ⇒ `_assert_readonly` 报「readonly
-#: ok」——一条指错库、或者压根连不上的 `--source-db-url`,于是让 §5.5-2 那条
-#: 「主库零接触」的硬断言静默通过(codex 质量评审 P1-1)。这三张是 Ask 这条路
-#: 的写入面,任何一台真正的主库上都必然存在;三张全数不出来只能是「没连上」。
-READONLY_PROOF_TABLES: tuple[str, ...] = ("ask_jobs", "answers", "conversations")
-
-#: 只读断言那句报错里「哪个库变了」的说法,按子命令。缺省(不在表里的子命令)
-#: 是主库——`search`/`ab` 量的就是它。`state-probe` 量的是 `seed` 建出来的一次性
-#: 测试库(Q7),它压根不连主库,报一句「主库变了」会把读者送去查错的库
-#: (T-EX7 质量评审 P3-7)。
-READONLY_DB_LABEL_BY_COMMAND: dict[str, str] = {"state-probe": "一次性测试库"}
-
-
-def readonly_baseline_problem(counts: dict[str, int | str | None]) -> str:
-    """基线快照够不够格当证据。返回空串 = 够,否则是要打给用户的那句话。
-
-    未验证不等于通过:三张证据表一张都数不出来时,后面那次 before==after 的
-    比较证明不了任何事,所以这里直接把整批挡在第一个模型调用之前。
-    """
-    if any(counts.get(table) is not None for table in READONLY_PROOF_TABLES):
-        return ""
-    return (
-        "主库基线点不出任何一张证据表("
-        + "/".join(READONLY_PROOF_TABLES)
-        + ")——`--source-db-url` 多半指错库或连不上。"
-        "跑前跑后全是 unknown 会让「主库零接触」这条断言恒等成立(§5.5-2),"
-        "而未验证不等于通过"
-    )
-
-
 def _assert_readonly(
     runner: Runner,
     before: dict[str, int | str | None],
@@ -2003,14 +1589,6 @@ def _assert_readonly(
     *,
     command: str = "跑批",
 ) -> None:
-    """跑前跑后,`READONLY_CHECKED_KEYS` 逐项必须相等。不等就标红并报错。
-
-    `command` 只进错误文案。写死「search」会让 `ab` 的读者以为报错来自另一条
-    根本没跑的命令。**量的是哪个库也跟着 `command` 说**(T-EX7 质量评审 P3-7):
-    `search`/`ab` 那两条量的是主库(§5.5-2「主库零接触」),`state-probe` 量的是
-    `seed` 建出来的一次性测试库(Q7)——写死「主库」会让 E2 的读者拿着一句报错
-    去查一个这次根本没连的库。
-    """
     drifted = {
         key: (before.get(key), after.get(key))
         for key in READONLY_CHECKED_KEYS
@@ -2024,7 +1602,7 @@ def _assert_readonly(
     )
     print(f"\033[31m[READ-ONLY VIOLATION]\033[0m {detail}", file=sys.stderr)
     raise RuntimeError(
-        f"{READONLY_DB_LABEL_BY_COMMAND.get(command, '主库')}"
+        "主库"
         f"在这次 {command} 之后变了: " + detail
     )
 
@@ -2043,7 +1621,7 @@ class _IntentCache:
     键取 `question_key`,不带语料格:契约是 **corpus-blind** 的
     (`plan_query_intent` 一个字的语料都不读),而 A/B 两格的题号本来就不同。
 
-    每题单独 single-flight，同题所有臂/档位共享一次规划的终态，包括阻断。
+    每题单独 single-flight，同题所有档位共享一次规划的终态，包括阻断。
     全局 `_lock` 只保护缓存与写文件，不盖住模型调用；不同题仍可并发规划。
     """
 
@@ -2162,32 +1740,51 @@ def auto_clarification_answers(seed: dict) -> list[dict]:
     return []
 
 
-def _prepare_search_intent(
-    contract: dict | None, question: str, effort: str,
-) -> dict | None:
-    """已确认契约 → `run()` 的三个入参,逐字照 `_prepare_reasoning_ask`。
-
-    * `research_question`:合成后的检索问题(`confirmed_research_question`);
-    * `intent_queries`:首轮种子。**非空时 `run()` 不调 plan 的 LLM**——已确认
-      意图是权威,检索器直接拿它当首轮子查询;
-    * `intent_detail`:`ReasoningIntentProjection.as_json_mapping()`,v2 的方面
-      账从它拿 `mandatory_topics`。
-
-    `max_queries` 与 Ask 同式 `max(max_initial_subqueries, 1 + 必答方面数)`:
-    档位限的是首轮**并发宽度**,不是「哪些必答方面配得到一个种子」;按宽度截会
-    在检索器看到它们之前就丢掉靠后的方面。
-
-    **函数体只剩两件事**:`contract is None` 那半(`search`/`ab` 的
-    `--no-intent` 与「这题没契约」两条路)留在 rig 侧,剩下的一字不做,直接调
-    `app.eval.reflect_state_probe.prepare_frozen_intent`(T-EX7 评审 F5:那份与
-    这份此前是同一段逻辑的两份实现;`authoritative` 判据已经被单侧改过一次
-    ——codex #700 R2 P2——再分叉一次就会让 `search`/`ab` 与 E2 拿到不同的首轮
-    种子,而四臂一致核/轮数核/「不执行」核全部照过)。方向只能是 rig → 那边:
-    E2 的编排住在 `app/eval/`(纯逻辑、进标准门),反过来会让实验模块依赖 CLI。
-    """
+def _prepare_search_intent(contract: dict | None, question: str, effort: str) -> dict | None:
+    """Prepare the reviewed intent through the same contracts as production Ask."""
     if contract is None:
         return None
-    return prepare_frozen_intent(contract, question, effort)
+    from app.application.ask_reasoning import ReasoningIntentProjection
+    from app.core.ask_retrieval_policy import ask_retrieval_limits
+    from app.models.ask import QueryIntentContract
+    from app.services.query_intent import (
+        confirmed_intent_queries,
+        confirmed_research_question,
+    )
+
+    frozen = QueryIntentContract(**dict(contract))
+    payload = frozen.model_dump()
+    # Match production Ask authority: without submitted clarification answers,
+    # the user's original objective remains authoritative.
+    authoritative = (
+        not frozen.needs_clarification and not frozen.clarification_answers
+    )
+    limits = ask_retrieval_limits(effort)
+    return {
+        "research_question": confirmed_research_question(
+            payload, question, objective_is_authoritative=authoritative,
+        ),
+        "intent_queries": confirmed_intent_queries(
+            payload, question, objective_is_authoritative=authoritative,
+            max_queries=max(
+                limits.max_initial_subqueries, 1 + len(frozen.mandatory_topics)
+            ),
+        ),
+        "intent_detail": ReasoningIntentProjection(
+            resolved_question=frozen.resolved_question,
+            result_scope=frozen.result_scope,
+            completeness_required=frozen.completeness_required,
+            retrieval_effort=effort,
+            entities=tuple(frozen.entities),
+            constraints=tuple(frozen.constraints),
+            excluded_topics=tuple(frozen.excluded_topics),
+            assumptions=tuple(frozen.assumptions),
+            expected_output=frozen.expected_output,
+            mandatory_topics=tuple(
+                topic.question for topic in frozen.mandatory_topics
+            ),
+        ).as_json_mapping(),
+    }
 
 
 def run_search_once(
@@ -2224,11 +1821,6 @@ def run_search_once(
     from app.services.source_scope import source_scope_context
 
     retriever = ReasoningRetriever.from_repository(repo, settings, cancel_event)
-    if retriever.reflect_v2_active() is not (item["policy"] == "v2"):
-        raise RuntimeError(
-            f"retriever 的协议与声明的 --policy={item['policy']!r} 不符:"
-            f"reflect_v2_active()={retriever.reflect_v2_active()}"
-        )
     question = (prepared or {}).get("research_question") or item["question"]
     seeds = list((prepared or {}).get("intent_queries") or [])
     scope = (
@@ -2271,7 +1863,7 @@ def raw_trace_step_row(step: Any) -> dict:
 
     与 `trace_step_row` 的唯一区别是带上 `summary`(那条人话摘要,里面可能有
     问题原文的只言片语与模型的自由文本)。只在这一条命令行开关打开时才收集,
-    产物写进 `--out-dir` 下的 `raw/`,不进 `search-<policy>.jsonl`(见
+    产物写进 `--out-dir` 下的 `raw/`,不进 `search.jsonl`(见
     `SYNTHESIS_ONLY_KEYS`/§6 的隐私闭集与 `_raw_trace_path` 的说明)。
     """
     return {
@@ -2282,45 +1874,31 @@ def raw_trace_step_row(step: Any) -> dict:
     }
 
 
-def _raw_trace_path(out_dir: Path, policy: str, item: dict) -> Path:
+def _raw_trace_path(out_dir: Path, item: dict) -> Path:
     return (
-        out_dir / "raw" / policy
+        out_dir / "raw"
         / f"{item['question_key']}_{item['corpus_cell']}_{item['effort']}.json"
     )
 
 
-def raw_trace_payload(raw_steps: Sequence[dict], result: Any) -> dict:
-    """`--keep-raw-trace` 一个 run 的落盘内容:原始步 + 结束事实(若有)。
-
-    `result.termination` 只在 v2 下不是 `None`(`RetrievalTermination`,一个
-    `frozen` dataclass,见 `app.domain.retrieval_termination`);legacy 恒
-    `None`,这里如实写 `None`,不用 `infer_legacy_termination` 反推去填——这份
-    文件是给人核对反推口径用的原始证据,自己先做一次反推就失去了核对的意义。
-    """
-    import dataclasses
-
-    termination = getattr(result, "termination", None)
-    return {
-        "trace_steps": list(raw_steps),
-        "termination": (
-            dataclasses.asdict(termination) if termination is not None else None
-        ),
-    }
+def raw_trace_payload(raw_steps: Sequence[dict]) -> dict:
+    """Explicit opt-in source-bearing trace; never part of aggregate diagnostics."""
+    return {"trace_steps": list(raw_steps)}
 
 
 def write_raw_trace(
-    out_dir: Path, policy: str, item: dict, raw_steps: Sequence[dict], result: Any,
+    out_dir: Path, item: dict, raw_steps: Sequence[dict],
 ) -> None:
-    """把一个 run 的 `raw_trace_payload` 写到 `<out-dir>/raw/<policy>/…json`。
+    """把一个 run 的 `raw_trace_payload` 写到 `<out-dir>/raw/…json`。
 
     **这份文件含标题与模型 reason,刻意不进数据集/不进仓库**(§6 的闭集约束
-    只管 `search-<policy>.jsonl`,不管这里)——它的用途是人工核对反推口径,
+    只管 `search.jsonl`,不管这里)——它的用途是人工核对反推口径,
     不是喂给 `analyze_reasoning_trace.py`。
     """
-    path = _raw_trace_path(out_dir, policy, item)
+    path = _raw_trace_path(out_dir, item)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        json.dumps(raw_trace_payload(raw_steps, result), ensure_ascii=False,
+        json.dumps(raw_trace_payload(raw_steps), ensure_ascii=False,
                    indent=2, sort_keys=True),
         encoding="utf-8",
     )
@@ -2416,12 +1994,14 @@ def _run_search(
     from app.core.request_context import reset_request_user, set_request_user
     from app.services.reasoning_retrieval import kg_in_scope_for
 
-    settings_by_policy = _settings_by_policy()
+    from app.core.config import Settings
+
+    settings = Settings()
     concurrency = _resolve_concurrency(
-        runner, args.database_url, settings_by_policy["legacy"],
+        runner, args.database_url, settings,
         args.concurrency,
     )
-    repo = _search_repository(settings_by_policy["legacy"])
+    repo = _search_repository(settings)
     profile = repo.maintenance.resolve_owner_profile(args.owner)
     if profile is None:
         print(f"ERROR: 主库里找不到属主: {args.owner or '<第一个 admin>'}",
@@ -2443,12 +2023,12 @@ def _run_search(
             # `ThreadPoolExecutor(max_workers=1)`也会把每次调用挪到另一个
             # 线程,单是这一点就足以让 ContextVar 的可见性行为变掉。
             failed = _search_loop(
-                args, runner, plan, facts, repo, settings_by_policy,
+                args, runner, plan, facts, repo, settings,
                 actor_id=actor_id, cancel_event=threading.Event(),
             )
         else:
             failed = _search_loop_concurrent(
-                args, runner, plan, facts, repo, settings_by_policy,
+                args, runner, plan, facts, repo, settings,
                 actor_id=actor_id, profile=profile, concurrency=concurrency,
             )
     finally:
@@ -2497,11 +2077,7 @@ def _scope_unresolved_row(item: dict, fact: dict) -> dict:
     **一行**,`status="failed"`、`scope_narrowed=None`(没跑,不知道)——不是
     悄悄跳过、也不是退化成一次不设限的全库检索(codex #700 R3 P2)。
 
-    走的还是 `project_search_run` 那一份闭集投影(`steps=[]`、
-    `result=None`):空轨迹让 `termination`/`reflect_turns` 等字段如实落成
-    「零步」「unknown」,不是编造的假证据。这一行**不参与**
-    `_search_loop`/`_search_loop_concurrent` 的「声明策略 vs 轨迹证据」核对
-    ——它没跑,没有协议证据可对。
+    空轨迹沿用通用闭集投影，步骤为零，未观测字段保持 unknown。
     """
     return _failed_run_row(item, fact)
 
@@ -2522,18 +2098,13 @@ def _failed_run_row(
     偏向跑成的那一侧)共用这一行——投影是闭集,失败原因只进 `search-runs.log`。
     """
     row = project_search_run(
-        list(steps), result=None, effort=item["effort"], policy=item["policy"],
+        list(steps), effort=item["effort"],
         question_key=item["question_key"], corpus_cell=item["corpus_cell"],
         kg_in_scope=fact["kg_in_scope"], has_intent_contract=has_intent_contract,
         sources_count=fact["sources"],
     )
     row["status"] = "failed"
     row["scope_narrowed"] = None
-    # 空轨迹没有协议证据,`project_search_run` 会把它推成 legacy——v2 的失败
-    # run 就会被分析脚本记到 legacy 那一列(codex #700 R9 P2)。失败行按 rig
-    # **声明**的策略归组(它本来就写在 `search-<policy>.jsonl` 里),不参与
-    # 「声明 vs 证据」核对。
-    row["policy_version"] = item["policy"]
     # 手改过 `project_search_run` 已经验过的行,再验一遍:调用方直接把这一行
     # 写进 JSONL,不会再经过一次共同的校验点。
     assert_closed(row)
@@ -2542,30 +2113,6 @@ def _failed_run_row(
 
 
 def stamp_run_wall_ms(row: dict, elapsed_ms: int | None) -> dict:
-    """把 rig 手上的 **run 墙钟**写进投影行的 `run_wall_ms`,就地返回同一行。
-
-    这一列的产地只有一个,就是 rig(计划 §3 T-PS5;`project_run` 那一侧恒写
-    `None` 并在注释里说明理由):轨迹里没有这件事实——`total_ms` 是各步耗时之
-    和,漏掉排队、模型侧调度与步与步之间的空隙,而设计 §8.1 要的「检索 run ·
-    `run_wall_ms`」正是含这些空隙的那个数。
-
-    **这条「轨迹里没有」只对 `search` 成立**:那条路的 `project_search_run` 压根
-    不收 latency。`ab` 那条路的 `latency_ms_total` 与这里的 `run_wall_ms` 是**同
-    一个**变量(`_run_ab_arm` 里那个 `latency_ms`,一次 `time.monotonic()` 差),
-    成功行上两列逐字相同,只在失败行分岔——`AB_FAILED_UNKNOWN_KEYS` 把
-    `latency_ms_total` 清成 `None`,而墙钟照写。两列同源不是 bug,但读这张表的
-    人别把它们当成两次独立的测量,改其中一处也要想到另一处。
-
-    **失败的 run 也写**:它崩在半路,但它确实占了这么久的墙钟,而「哪一侧更容易
-    崩、崩之前烧了多少时间」正是要量的东西之一。
-
-    `None` 留给**压根没开跑**的行(范围解析失败:两臂各落一行 `status=failed`,
-    却一次模型都没调)——给它写 0 会被读成「这个 run 零耗时跑完了」,那是一句
-    关于这一行的假话,而且 0 会真的进 P50/P95 的分位数。
-
-    写完当场重验一次形状:调用方拿到的这一行接着就被 `json.dumps` 进 JSONL,
-    中间不会再经过一次共同的校验点(与 `_failed_run_row` 同一条纪律)。
-    """
     row["run_wall_ms"] = elapsed_ms
     assert_projection_values(row)
     return row
@@ -2588,7 +2135,7 @@ def _resolve_item_scope(
 
 def _search_loop(
     args: argparse.Namespace, runner: Runner, plan: Sequence[dict],
-    facts: dict[str, dict], repo: Any, settings_by_policy: dict[str, Any],
+    facts: dict[str, dict], repo: Any, settings: Any,
     *, actor_id: str, cancel_event: Any,
 ) -> int:
     """整批 run。每个 run 一行 JSONL + 一行日志,**都不含任何问题原文**。"""
@@ -2605,8 +2152,7 @@ def _search_loop(
     try:
         for index, item in enumerate(plan, 1):
             fact = facts[item["corpus_cell"]]
-            policy = item["policy"]
-            settings = settings_by_policy[policy]
+
             scope_ids, scope_failed = _resolve_item_scope(args, item, fact)
             clarification_failed = False
             prepared = None
@@ -2634,7 +2180,7 @@ def _search_loop(
                 elapsed_ms = None
                 reason_line = (
                     f"{item['question_key']} {item['corpus_cell']} "
-                    f"{policy} {item['effort']} FAILED "
+                    f"{item['effort']} FAILED "
                     "reason=clarification_required run_not_started"
                 )
                 log.write(reason_line + "\n")
@@ -2674,17 +2220,17 @@ def _search_loop(
                     runner.say(
                         "search failed",
                         f"{item['question_key']} {item['corpus_cell']} "
-                        f"{policy} {type(exc).__name__}",
+                        f"{type(exc).__name__}",
                     )
                     log.write(
                         f"{item['question_key']} {item['corpus_cell']} "
-                        f"{policy} {item['effort']} FAILED {type(exc).__name__}\n"
+                        f"{item['effort']} FAILED {type(exc).__name__}\n"
                     )
                     log.flush()
                 else:
                     elapsed_ms = round((time.monotonic() - started) * 1000)
                     row = project_search_run(
-                        steps, result=result, effort=item["effort"], policy=policy,
+                        steps, effort=item["effort"],
                         question_key=item["question_key"],
                         corpus_cell=item["corpus_cell"],
                         kg_in_scope=fact["kg_in_scope"],
@@ -2694,20 +2240,20 @@ def _search_loop(
                     row["scope_narrowed"] = bool(scope_ids)
                     stamp_run_wall_ms(row, elapsed_ms)
                     if args.keep_raw_trace:
-                        write_raw_trace(runner.out_dir, policy, item, raw_steps, result)
+                        write_raw_trace(runner.out_dir, item, raw_steps)
             assert_closed(row)
             assert_projection_values(row)
-            handle = handles.get(policy)
+            handle = handles.get("runs")
             if handle is None:
-                handle = handles[policy] = (
-                    runner.out_dir / f"search-{policy}.jsonl"
+                handle = handles["runs"] = (
+                    runner.out_dir / "search.jsonl"
                 ).open("a", encoding="utf-8")
             handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
             handle.flush()
             status_suffix = "" if row.get("status") != "failed" else " status=failed"
             line = (
                 f"{index:03d}/{len(plan)} {item['question_key']} "
-                f"{item['corpus_cell']} {policy} {item['effort']} "
+                f"{item['corpus_cell']} {item['effort']} "
                 f"{elapsed_ms}ms reflect_turns={row['reflect_turns']} "
                 f"termination={row['termination_reason']}{status_suffix}"
             )
@@ -2715,28 +2261,8 @@ def _search_loop(
             log.flush()
             runner.say("search done", line)
             if row.get("status") == "failed":
-                # 没跑,没有协议证据可对——不参与下面这道「声明策略 vs 轨迹
-                # 证据」的核对,也不该被它当成第一个样本消费掉;但要计进失败数
-                # (codex #700 R9 P2)。
                 failed += 1
                 continue
-            if policy not in verified:
-                # **每个策略的第一个 run 之后**就把「声明的策略」与「轨迹里真的
-                # 发生了什么」对上一次。整批跑完再发现 v2 那半其实跑的是 legacy,
-                # 代价是几百次模型调用;这里的代价是一次比较。
-                if row["policy_version"] != policy:
-                    raise RuntimeError(
-                        f"声明 --policy={policy!r},但这个 run 的证据是 "
-                        f"{row['policy_version']!r}(v2 的判据是 run 产出了 "
-                        "termination 事实)。先修再跑整批"
-                    )
-                verified.add(policy)
-                runner.say(
-                    "first run ok",
-                    f"policy={row['policy_version']} "
-                    f"reflect_turns={row['reflect_turns']} "
-                    f"termination={row['termination_reason']}",
-                )
     finally:
         log.close()
         for handle in handles.values():
@@ -2746,20 +2272,9 @@ def _search_loop(
 
 def _precompute_intents(
     args: argparse.Namespace, runner: Runner, plan: Sequence[dict],
-    facts: dict[str, dict], repo: Any, settings_by_policy: dict[str, Any],
+    facts: dict[str, dict], repo: Any, settings: Any,
     *, actor_id: str, profile: Any, concurrency: int,
 ) -> "_IntentCache":
-    """并发路的第一阶段:把这批题**各算一次**意图契约,缓存写文件加锁。
-
-    契约是 corpus-blind 且不分策略的(`_IntentCache` 的说明),固定用
-    `settings_by_policy["legacy"]` 这一份去算——两个策略共用同一份意图契约本来
-    就是这条路的前提(`search_plan` 的说明),这里不该让"契约用哪份 Settings"
-    变成一个隐藏的、可能因字典迭代顺序而漂移的不确定量。
-
-    去重在**提交前**做:`plan` 里每题最多出现 `len(POLICIES) × len(EFFORTS)`
-    次,不去重会让同一题被排进多个 worker、靠 `_IntentCache` 内部的锁互相
-    等——能跑对,但白白把并发度浪费在锁等待上。
-    """
     intents = _IntentCache(
         runner.out_dir / "intents.jsonl", enabled=not args.no_intent,
     )
@@ -2779,7 +2294,6 @@ def _precompute_intents(
         "precompute intents",
         f"{len(pending)}/{len(unique_items)} 题,concurrency={concurrency}",
     )
-    settings = settings_by_policy["legacy"]
 
     def worker(item: dict) -> None:
         from app.core.request_context import reset_request_user, set_request_user
@@ -2807,38 +2321,14 @@ def _precompute_intents(
 
 def _search_loop_concurrent(
     args: argparse.Namespace, runner: Runner, plan: Sequence[dict],
-    facts: dict[str, dict], repo: Any, settings_by_policy: dict[str, Any],
+    facts: dict[str, dict], repo: Any, settings: Any,
     *, actor_id: str, profile: Any, concurrency: int,
 ) -> int:
-    """并发版整批 run(`concurrency > 1`)。
-
-    两阶段:`_precompute_intents` 先把意图契约并发算完,再把全部 run(legacy /
-    v2 **合并进同一个池**,总吞吐最高)提交给 `ThreadPoolExecutor`。
-
-    ContextVar 与取消事件都是**每个 worker 自己的**:`model_work_scope` /
-    `retrieval_run` / `source_scope_context` 已经在 `run_search_once` 内部按
-    `with` 块设置/重置,天然是"每次调用一份"、不需要额外处理;但
-    `set_request_user` 是在 `_run_search` 里对**整段**外层调用设的一次
-    ContextVar——线程池的 worker 线程不继承调用方线程已经 `.set()` 过的那份
-    context(这与 asyncio 任务默认 `copy_context()` 不同),所以这里在每个
-    worker 内部重新 `set_request_user(profile)`,用完立即 reset。`cancel_event`
-    同理:每个 run 自建一个 `threading.Event()`,不共享——共享一个事件对象会让
-    "取消其中一个 run" 变成"取消全体在跑的 run"。
-
-    输出用一把 `write_lock` 保护:`search-<policy>.jsonl` 与
-    `search-runs.log` 的写入(含 flush)都在这把锁内做,完成顺序可以乱,但
-    每一行仍是一份完整的投影,不会被另一个线程的写入截断或交错。
-
-    第一个**完成**(不一定是第一个提交)的 run 校验一次"声明的策略与轨迹证据
-    是否一致";不一致就 `abort()`——给所有仍在跑的 run 的 `cancel_event` 各
-    `.set()` 一次,再 `executor.shutdown(cancel_futures=True)` 撤掉还没开始跑的
-    任务。`AskCancelled` 与 `KeyboardInterrupt` 走同一条 `abort()` 路径。
-    """
     from app.core.request_context import reset_request_user, set_request_user
     from app.services.cancellation import AskCancelled
 
     intents = _precompute_intents(
-        args, runner, plan, facts, repo, settings_by_policy,
+        args, runner, plan, facts, repo, settings,
         actor_id=actor_id, profile=profile, concurrency=concurrency,
     )
     runner.out_dir.mkdir(parents=True, exist_ok=True)
@@ -2891,8 +2381,7 @@ def _search_loop_concurrent(
             active_events.append(cancel_event)
         ctx = set_request_user(profile)
         try:
-            policy = item["policy"]
-            settings = settings_by_policy[policy]
+
             try:
                 prepared = _prepare_search_intent(
                     intents.get(repo, settings, item, actor_id=actor_id,
@@ -2932,7 +2421,7 @@ def _search_loop_concurrent(
                 return row, elapsed_ms, None, exc
             elapsed_ms = round((time.monotonic() - started) * 1000)
             row = project_search_run(
-                steps, result=result, effort=item["effort"], policy=policy,
+                steps, effort=item["effort"],
                 question_key=item["question_key"],
                 corpus_cell=item["corpus_cell"],
                 kg_in_scope=fact["kg_in_scope"],
@@ -2953,12 +2442,12 @@ def _search_loop_concurrent(
                 if cancel_event in active_events:
                     active_events.remove(cancel_event)
 
-    def _jsonl_handle(policy: str) -> Any:
+    def _jsonl_handle() -> Any:
         # 只在 `write_lock` 内调用。
-        handle = handles.get(policy)
+        handle = handles.get("runs")
         if handle is None:
-            handle = handles[policy] = (
-                runner.out_dir / f"search-{policy}.jsonl"
+            handle = handles["runs"] = (
+                runner.out_dir / "search.jsonl"
             ).open("a", encoding="utf-8")
         return handle
 
@@ -2984,11 +2473,11 @@ def _search_loop_concurrent(
                     with write_lock:
                         log.write(
                             f"{item['question_key']} {item['corpus_cell']} "
-                            f"{item['policy']} {item['effort']} FAILED "
+                            f"{item['effort']} FAILED "
                             f"{type(exc).__name__}\n"
                         )
                         log.flush()
-                        handle = _jsonl_handle(item["policy"])
+                        handle = _jsonl_handle()
                         handle.write(json.dumps(
                             # run **之外**失败(worker 都没进到计时那一段),没有
                             # 墙钟可报 ⇒ unknown,不是 0(见 `stamp_run_wall_ms`)。
@@ -3002,15 +2491,15 @@ def _search_loop_concurrent(
                     runner.say(
                         "search failed",
                         f"{item['question_key']} {item['corpus_cell']} "
-                        f"{item['policy']} {type(exc).__name__}",
+                        f"{type(exc).__name__}",
                     )
                     continue
                 if outcome is None:
                     continue
                 row, elapsed_ms, raw_steps, result = outcome
-                policy = item["policy"]
+
                 with write_lock:
-                    handle = _jsonl_handle(policy)
+                    handle = _jsonl_handle()
                     handle.write(
                         json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n"
                     )
@@ -3020,7 +2509,7 @@ def _search_loop_concurrent(
                         # 与其余输出共用同一个「不交错」的写纪律,不是为了防真的
                         # 路径冲突。
                         write_raw_trace(
-                            runner.out_dir, policy, item, raw_steps, result,
+                            runner.out_dir, item, raw_steps,
                         )
                     completed += 1
                     if row.get("status") == "failed":
@@ -3045,42 +2534,14 @@ def _search_loop_concurrent(
                     )
                     line = (
                         f"done {done_n}/{total}  {item['question_key']} "
-                        f"{item['corpus_cell']} {policy} {item['effort']} "
+                        f"{item['corpus_cell']} {item['effort']} "
                         f"reflect={row['reflect_turns']} "
                         f"term={row['termination_reason']} "
                         f"{elapsed_label}{status_suffix}"
                     )
                     log.write(line + "\n")
                     log.flush()
-                    # `status=failed`(范围解析不到位、没真的跑)不参与「声明
-                    # 策略 vs 轨迹证据」核对,也不消费这个策略的「第一个样本」
-                    # 名额——留给下一个真的跑了的 run 去验。
-                    first_for_policy = (
-                        row.get("status") != "failed" and policy not in verified
-                    )
-                    if first_for_policy:
-                        verified.add(policy)
                 runner.say("search done", line)
-                if first_for_policy:
-                    # **第一个完成的 run**,不一定是第一个提交的:并发下完成
-                    # 顺序由调度决定,校验按到达顺序做,而不是按 `plan` 里的
-                    # 下标——按下标等,会在下标 0 的那个 run 恰好跑得慢时白白
-                    # 拖住已经能验的另一侧。
-                    if row["policy_version"] != policy:
-                        message = (
-                            f"声明 --policy={policy!r},但第一个完成的 run 证据"
-                            f"是 {row['policy_version']!r}(v2 的判据是 run 产出"
-                            "了 termination 事实)。先修再跑整批"
-                        )
-                        abort(message)
-                        fatal = RuntimeError(message)
-                        break
-                    runner.say(
-                        "first run ok(第一个完成的 run)",
-                        f"policy={row['policy_version']} "
-                        f"reflect_turns={row['reflect_turns']} "
-                        f"termination={row['termination_reason']}",
-                    )
         except KeyboardInterrupt as exc:
             abort("KeyboardInterrupt")
             fatal = exc
@@ -3100,3202 +2561,7 @@ def _search_loop_concurrent(
     return failed
 
 
-# ===========================================================================
-# `ab`:进程内跑**完整 Ask**,两臂背靠背配对
-# (A/B 设计规格 `docs/superpowers/specs/2026-09-09-reflect-ab-design_zh.md`)
-# ===========================================================================
-
-#: `ab` 的主矩阵语料格(§4.1)。`B_nokg` 是 P1 探针,要跑它得显式 `--cell B_nokg`
-#: ——它不进主表,单出一节。四个格子都必须已经由 `seed` 建在测试库里。
-AB_DEFAULT_CELLS: tuple[str, ...] = ("A_nokg", "B_kg")
-#: `ab` **不给 `--arms` 时**的两条臂。与二维化之前逐字等价(`legacy` / `v2` 各
-#: 一条,optimization 都是 `off`),所以既有命令与既有产物路径一个字节没变。
-#:
-#: 臂是 rig 的**声明**,一条 run 的身份是 `(policy, optimization)` 这一对;两维
-#: 各自的证据来源不同——`policy_version` 从轨迹反推,optimization 只有运行时
-#: 直接读数(见 `reflect_ab.assert_optimization_matches_evidence`)。合法组合的
-#: 闭集在 `reflect_ab.ARMS`,这里只是默认值。
-AB_DEFAULT_ARMS: tuple[tuple[str, str], ...] = (("legacy", "off"), ("v2", "off"))
-
-
-def ab_arms(args: argparse.Namespace) -> list[tuple[str, str]]:
-    """这一批真的要跑的臂。`--dry-run` 与真跑读的是**同一份**解析。
-
-    三条口径:
-
-    * **不给** `--arms` ⇒ `AB_DEFAULT_ARMS`(一维两臂,与二维化之前逐字相同)。
-      判据是 `is None`(argparse 的默认值)而不是真值:`--arms ""` 是**给了一个
-      空写法**,得走下面那条响亮拒绝,不能悄悄退化成默认两臂——脚本里写
-      `--arms "$ARMS"` 而变量恰好为空时,整批上百次调用会安静地跑成
-      legacy-vs-v2,而那不是要做的实验;
-    * 给了 `--arms` ⇒ `reflect_ab.parse_arms` 的结果,非法写法当场抛
-      `ArmSpecError`(空写法、空段、未知取值、`legacy:prefix_snapshot` 这类合法
-      值的非法组合、重复臂);
-    * `--only-policy` 仍然按 policy 过滤**默认**臂(既有语义,用于一侧被网络故障
-      整批打废后的重跑)。它与 `--arms` 同时给是**矛盾指令**,由 `_ab_preflight`
-      挡在跑批之前:`--arms v2:off,v2:prefix_snapshot --only-policy v2` 里的
-      「只跑 v2」既可以读成「两条都留」也可以读成「留一条」,而两种读法产出的
-      数据集不一样,paired 也不一样。
-    """
-    if getattr(args, "arms", None) is not None:
-        return parse_arms(args.arms)
-    if args.only_policy:
-        return [
-            arm for arm in AB_DEFAULT_ARMS if arm[0] in set(args.only_policy)
-        ]
-    return list(AB_DEFAULT_ARMS)
-#: 测试库名的强制后缀(§5.4「必填,不读 .env」+ §5.5-2「主库零接触」)。`ab` 会
-#: 往库里写 conversation + answer 行,所以拿错连接的代价不是一次读脏数据,而是
-#: 往用户的活库里写。一个后缀挡不住所有误用,但它挡住了最常见的那一种:把
-#: `search` 用惯的主库 URL 直接抄过来。
-AB_TEST_DB_SUFFIX = "_test"
-#: `seed` 给每个语料格建的笔记本名(见 `_seed_notebooks`)。`ab` 按它在测试库里
-#: 反查 notebook id,而不是读 `--out-dir` 下的 `rig-state.json`:两条命令的
-#: `--out-dir` 通常不是同一个(§5.4 的产物落在 `.local/ab`),而库里那个名字是
-#: `seed` 自己写下的、与 out-dir 无关的事实。
-AB_NOTEBOOK_NAME = "t0-{cell}"
-
-
-def ab_cells(selected: Sequence[str]) -> list[str]:
-    """`--cell` 选中的格。**不给就是主矩阵两格**,不是「四格全跑」。
-
-    与 `corpus_cells`(seed 的口径:不给 = 全跑)刻意不同:`ab` 的第三、第四格
-    (`A_kg` / `B_nokg`)一个是刻意不做的(§11:A 是单篇,KG 增益小),一个是
-    单出一节的 P1 探针(§4.3)。把它们卷进默认值,等于让每一次 `ab` 都默默多
-    跑一倍预算。
-    """
-    if not selected:
-        return list(AB_DEFAULT_CELLS)
-    return [cell for cell in CORPUS_CELLS if cell in selected]
-
-
-def ab_plan(
-    questions: dict, *, cells: Sequence[str], efforts: Sequence[str],
-    repeats: int, round_: int | None, lang: str, limit: int | None,
-    only_questions: Sequence[str] = (),
-) -> list[dict]:
-    """`ab` 要跑的全部**配对单元**,一条一行。跑批顺序就是这份列表的顺序。
-
-    顺序是 `repeat → effort → question`(§4.2),两条臂在**每个单元内部**背靠背
-    跑、臂序按 run 随机(见 `_run_ab_unit`)。两条约束各自换来一件事:
-
-    * **重复轮在最外层** ⇒ 任何被预算或故障截断的前缀都是一份配对完整、平衡的
-      数据集(第 1 轮跑完就有一份能出结论的 n=1 数据);
-    * **两臂在最内层背靠背** ⇒ provider 的排队与限流漂移对两臂等量,臂序本身
-      不成为系统偏差。这正是选进程内路径(而不是 HTTP)的直接原因(§5.1)。
-
-    题面枚举复用 `ask_plan`——`ab` 与 `search`/`ask` 出的行进的是同一张对照表,
-    各写一份枚举就等于给「哪些题在哪些格上跑」立两个权威。`policy` 那一维在这里
-    被丢掉:臂是单元内部的事,不是枚举的一维。
-    """
-    rounds = [round_] if round_ is not None else list(range(1, repeats + 1))
-    units: list[dict] = []
-    for repeat in rounds:
-        for effort in efforts:
-            for item in ask_plan(
-                # `policy` 这一维在 `ab` 里被丢掉(下面就 `pop`),给哪一个都
-                # 一样;写死 `POLICIES[0]` 而不是「臂列表的第一条」,是因为
-                # 这份枚举与这一批跑几条臂无关。
-                questions, cells=cells, policy=POLICIES[0], limit=limit,
-                lang=lang, mode="reasoning", efforts=(effort,),
-                only_questions=only_questions,
-            ):
-                item.pop("client_request_id", None)
-                item.pop("policy", None)
-                item["repeat"] = repeat
-                units.append(item)
-    return units
-
-
-#: 一次**逻辑调用**最多真正发出去几个请求(设计 §8.1「真实模型调用次数」)。
-#: `app/core/llm.py` 的重试循环上界是 `1 + max_retries`,reflect 那条路的
-#: `max_retries` 来自 `REASONING_MAX_RETRIES`(`config.py` 默认 1)。
-#:
-#: 这个乘数**只是上界的一半**:静默 fallback(`response_format` 被拒后的明文
-#: 重试、`stream_options` 被拒后的重建流)各自会多发一次请求,却不留任何日志行,
-#: 而它发不发取决于对面的端点,配置里查不出来。所以 rig 打的那一行明说这是
-#: 「重试预算内的上界」——真实请求数由 llm.jsonl 行上的 `attempts` 事后给出,
-#: 不由这里预测。改了 `REASONING_MAX_RETRIES` 要同 diff 改这里。
 REASONING_ATTEMPT_BUDGET = 1 + 1
-
-#: 与 `Settings.reasoning_timeout_seconds` 的**默认值**同步(`config.py`
-#: `REASONING_TIMEOUT_SECONDS`,默认 90)。`ab` 的 dry-run 不构造 `Settings`
-#: (零副作用承诺,理由见 `_resolve_concurrency`),T-EX8 的「单次超时」那一行
-#: 因此打这个镜像常量,不打真实配置;真跑时 manifest 的 `budgets.
-#: reasoning_timeout_seconds` 改读 `settings_by_arm[reference_arm]` 的真实值。
-#: 改了 config.py 那个默认值要同 diff 改这里——`REASONING_ATTEMPT_BUDGET` 有一条
-#: 钉住配置默认值的守卫,这个常量按同一条纪律也有一条(见
-#: `test_reflect_t0_scripts.py` 的
-#: `test_the_single_call_timeout_mirror_tracks_the_config_default`):不钉的失败
-#: 场景是配置默认调到 120 之后 rig 与用例**一致地**停在陈旧的 90,操作者按 90s
-#: 估整批墙钟预算、把 `--max-wall-minutes` 定小了(评审 F3 / P3-1)。
-REASONING_TIMEOUT_SECONDS_DEFAULT = 90
-
-
-def _ab_call_estimate(
-    units: Sequence[dict], question_count: int, *, no_intent: bool,
-    arms: Sequence[tuple[str, str]] = AB_DEFAULT_ARMS,
-) -> str:
-    """每个单元的模型调用估计。**是上界,不是预测**(措辞沿用 T0
-    `_search_call_estimate`,理由也一样:reflect 的轮数是模型自己决定的,只有
-    档位的硬上限是确定的)。
-
-    与 `search` 的两点不同,都是「跑的是完整 Ask」带来的:
-
-    * 每个单元有**两个** run(两条臂),所以检索侧的每一项都乘臂数;
-    * 每个 run 在检索之后还有一次**合成**调用(`search` 整条路不合成)。合成
-      的重试与按节合成不计——那是下界之上的浮动,而这是一条上界。
-
-    末尾另报一条**请求上界**(计划 §3 T-PS5:dry-run 打印调用数与请求上界)。
-    两个数不是一个:上面那个数的是**逻辑调用**(llm.jsonl 的行数、`model_calls`
-    的口径),请求上界数的是**真正发出去的请求**(行上 `attempts` 的口径)。混
-    用会把一次静默 fallback 记成一次额外的推理,反过来则会低报端点负载
-    (见 `reflect_ab.slice_llm_usage` 的同一条说明)。
-
-    意图契约仍是每题一次并缓存,两臂共用同一份冻结契约(§5.4)——这不是省钱的
-    小聪明,而是 A/B 成立的前提:契约不同,必答方面就不同,两臂根本不在比同一
-    件事。
-    """
-    runs = len(units) * len(arms)
-    intent_calls = 0 if no_intent else question_count
-    plan_calls = runs if no_intent else 0
-    reflect_ceiling = sum(
-        MAX_REFLECT_STEPS.get(unit["effort"], 0) for unit in units
-    ) * len(arms)
-    total = intent_calls + plan_calls + reflect_ceiling + runs
-    return (
-        f"intent {intent_calls} + plan {plan_calls} + reflect ≤ "
-        f"{reflect_ceiling} + synthesis {runs}  ⇒  ≤ {total} 次逻辑调用;"
-        f"请求上界 ≤ {total * REASONING_ATTEMPT_BUDGET}"
-        f"(重试预算 ×{REASONING_ATTEMPT_BUDGET};静默 fallback 另计,不留日志行)"
-    )
-
-
-def _wall_budget_problem(max_wall_minutes: float | None) -> str:
-    """`--max-wall-minutes` 的取值判据。空串 = 通过,否则是要打给用户的那句话。
-
-    **`ab` 与 `prefix-probe` 共用这一处**(评审 F8 / P2-3):那两条命令读的是
-    同一个全局参数,判据分成两份的失败场景是「`ab` 拒了、`prefix-probe` 照跑」
-    ——而后者产出的坏数据集看起来和一次正常的跑批一模一样。
-
-    与 `--round` 同一条纪律(不 clamp、越界响亮报错),两种坏值各自的后果都是
-    「一份看起来正常的计划产出一份不能用的数据集」(评审 F10 / P3-2):
-
-    * `<= 0` ⇒ deadline 一开始就在过去:走完全部 preflight(含主库快照、gold
-      解析)之后零派发、写一份 `stopped_by_budget=true` 的 manifest、退 1——读
-      的人分不清是参数打错还是预算真用完;
-    * `nan` ⇒ 所有 `>= deadline` 比较**恒假**,预算从此永不生效(既不早停也不
-      报错),同时 `budgets` 里落一个 `NaN`,写出的 `manifest.json` 不再是合法
-      JSON(`reflect_manifest` 模块 docstring 已登记这条与兄弟模块共担的限制)。
-
-    `budget != budget` 是 NaN 的判据(不 import math:这个模块的 dry-run 路径
-    刻意只用标准库里已经在用的那几个名字)。`inf` 不拦——它的语义「不设上限」
-    与不给这个参数一致,而且 `>= deadline` 恒假不会产出坏数据。
-    """
-    if max_wall_minutes is None:
-        return ""
-    budget = float(max_wall_minutes)
-    if budget != budget or budget <= 0:
-        return (f"--max-wall-minutes 必须是一个正数分钟数,拿到 {budget}。"
-                "不 clamp:0/负数会让整批走完全部 preflight 之后零派发、"
-                "留下一份空数据集 + stopped_by_budget=true 的 manifest;"
-                "nan 会让预算判据恒假(永不早停)且 manifest.json 不再是"
-                "合法 JSON。不想设上限就干脆不给这个参数")
-    return ""
-
-
-def _ab_preflight(args: argparse.Namespace, cells: Sequence[str]) -> str:
-    """真跑前的硬前提。返回空串 = 通过,否则是要打给用户的那句话。
-
-    每一条都在 `--dry-run` 下也拦(枚举为空的那条尤其):一份「零个 run」的
-    计划看起来完全像一次正常的预演。
-    """
-    if not cells:
-        return (f"--cell 选中的格子不在 ab 的范围里(可选 "
-                f"{', '.join(CORPUS_CELLS)};默认 {', '.join(AB_DEFAULT_CELLS)})")
-    if args.arms is not None and args.only_policy:
-        # 矛盾指令,不猜(见 `ab_arms`):`--arms v2:off,v2:prefix_snapshot
-        # --only-policy v2` 的「只跑 v2」既可以读成「两条都留」也可以读成「留
-        # 一条」,两种读法产出的数据集与 `paired` 都不一样。
-        return ("--arms 与 --only-policy 不能同时给:前者已经把这一批的臂点全了,"
-                "后者是一维时代按 policy 过滤默认两臂的写法。只跑一条臂就直接写 "
-                "`--arms v2:prefix_snapshot`")
-    if args.arms is not None:
-        # `is not None`(不是真值):`--arms ""` 是给了一个空写法,由 `parse_arms`
-        # 的第 1 类响亮拒绝,不能悄悄跑成默认两臂(见 `ab_arms`)。
-        try:
-            parsed = parse_arms(args.arms)
-        except ArmSpecError as exc:
-            return str(exc)
-        if len(parsed) > PAIR_ARM_COUNT:
-            # 一次一对。三条臂的批次里每个配对单元落三行,`mark_paired` 的门槛
-            # 是 `PAIR_ARM_COUNT`,于是整批 `paired` 全 False、配对差值表凭空
-            # 空掉——而每一行看起来完全正常,行数、投影、日志都对。这是「各自
-            # 正确的一半拼出错误整体」的那种失败,只能拦在跑批之前。
-            return (
-                f"--arms 一次只收一对臂(给了 {len(parsed)} 条:"
-                + ", ".join(format_arm(*arm) for arm in parsed)
-                + ")。配对差值表按**对**出:三条臂的单元里 `paired` 会全线 False,"
-                  "整批数据看起来正常却出不了任何配对结论。分两批跑,每批一对"
-            )
-    if not ab_arms(args):
-        # `--only-policy` 过滤之后零臂。**今天在 CLI 上到不了**:那个参数的
-        # `choices` 就是 `POLICIES`,两个值都在 `AB_DEFAULT_ARMS` 里,过滤永远
-        # 非空;与 `--arms` 同时给已被上一条拦掉。留着是防两个集合日后分叉
-        # (往 `POLICIES` 加了第三种协议、却没往 `AB_DEFAULT_ARMS` 加对应臂),
-        # 因为零臂的计划长得完全像一次正常的预演——连 dry-run 都看不出来。
-        return (f"--only-policy {args.only_policy} 过滤之后一条臂都不剩(默认臂 "
-                + ", ".join(format_arm(*arm) for arm in AB_DEFAULT_ARMS) + ")")
-    if not args.database_url_explicit:
-        return ("ab 必须显式给 --database-url(§5.4:必填,不读 .env)。"
-                "它是 `seed` 建出来的一次性测试库——ab 会往里写 conversation "
-                "与 answer 行(§5.2)")
-    if not str(args.database_url).rstrip("/").endswith(AB_TEST_DB_SUFFIX):
-        return (f"ab 的 --database-url 必须指向名字以 {AB_TEST_DB_SUFFIX!r} 结尾"
-                "的一次性测试库(§5.5-2 主库零接触)")
-    if not args.source_db_url:
-        return ("ab 需要 --source-db-url(**主库**连接,全程只读):§5.5-2 的"
-                "「主库零接触」是一条硬断言,跑前跑后各点一次主库的 "
-                f"{'/'.join(READONLY_PROOF_TABLES)} 行数。没有它这条断言只能记"
-                "「未验证」,而未验证不等于通过")
-    if (str(args.source_db_url).rstrip("/")
-            == str(args.database_url).rstrip("/")):
-        # 两个 URL 同指一处时,「主库」快照量的是 ab 自己正在写的那个库:跑完
-        # 必然对不上,而对不上会被读成「主库被污染了」。更坏的是反过来——同一个
-        # 库既当测试库又当主库,这条断言从此什么都证明不了(codex 质量评审 P1-1)。
-        return ("ab 的 --source-db-url(主库,只读)不能与 --database-url"
-                "(一次性测试库,会被写)是同一个连接:§5.5-2 的快照要量的是"
-                "**另一个**库")
-    if args.no_intent:
-        # 两臂共用同一份冻结契约是 A/B 成立的前提(§5.4/§5.5-3)。`--no-intent`
-        # 下 `_IntentCache` 恒返回 `None`,§5.5-3 那条同一性断言退化成
-        # `digest(None) == digest(None)` 恒真,而两条臂各自现算的检索方向可以
-        # 完全不同——那时比的已经不是同一件事(codex 质量评审 P2-8)。
-        return ("ab 不接受 --no-intent:两臂必须引用同一条冻结契约(§5.5-3),"
-                "而 --no-intent 下根本没有契约可比,§5.5-3 的断言会退化成恒真。"
-                "省那一次/题的意图调用换不来一份能出结论的数据")
-    if args.round is not None and not (1 <= args.round <= args.repeats):
-        # `--round` 是一个下标,不 clamp:越界该报错。clamp 成边界值会让
-        # `--round 4 --repeats 3` 安静地重跑第 3 轮,把两轮数据混进一格。
-        return (f"--round 必须落在 1..{args.repeats} 之间(--repeats="
-                f"{args.repeats}),拿到 {args.round}")
-    return _wall_budget_problem(args.max_wall_minutes)
-
-
-def cmd_ab(args: argparse.Namespace, runner: Runner) -> int:
-    """两条臂 × 两个档位 × N 轮重复,**进程内跑完整 Ask**(§5)。
-
-    与 `search` 的分工:`search` 是「对主库只读跑 plan + reflect 循环,不合成
-    答案」;`ab` 是「在 `seed` 的一次性测试库上跑意图契约 + 检索 + 合成 + 引用
-    绑定」。search-only 量不出答案质量,而 A/B 要补的正是那一半(§0-5)。
-
-    与 `ask`(HTTP)的分工:`ask` 换策略必须重启后端,两条臂只能整批分开、相隔
-    数小时,provider 的漂移会整块落在臂的差上;`ab` 在同一个进程里为两个策略各
-    构造一份 `Settings` **和一个 repo**,同题同档背靠背跑(§5.1)。两个 repo 而
-    不是两份 Settings 的理由见 `run_ab_once`。
-    """
-    questions = load_questions()
-    cells = ab_cells(args.cell)
-    # **dry-run 也拦**:一份跑在错库上、或者枚举为空的计划,预演出来看起来完全
-    # 像一次正常的预演(见 `_ab_preflight`)。
-    problem = _ab_preflight(args, cells)
-    if problem:
-        print("ERROR: " + problem, file=sys.stderr)
-        return 2
-    efforts = tuple(args.efforts) if args.efforts else EFFORTS
-    units = ab_plan(
-        questions, cells=cells, efforts=efforts, repeats=args.repeats,
-        round_=args.round, lang=args.lang, limit=args.limit,
-        only_questions=args.only_question,
-    )
-    unique_questions = {
-        (unit["corpus_cell"], unit["question_key"]) for unit in units
-    }
-    runner.say("target", "一次性测试库:意图契约 + 检索 + 合成 + 引用绑定")
-    runner.say("database-url", f"<given>(测试库,以 {AB_TEST_DB_SUFFIX} 结尾)")
-    runner.say("main database (read-only probe)", "<given>")
-    for cell in cells:
-        runner.say("corpus cell", f"{cell} -> notebook name="
-                                  + AB_NOTEBOOK_NAME.format(cell=cell))
-    arms = ab_arms(args)
-    runner.say("arms", ", ".join(format_arm(*arm) for arm in arms)
-               + "(同进程各一个 repo;每单元内背靠背,臂序按 run 随机)")
-    runner.say(
-        "measurement",
-        "REASONING_REFLECT_MEASURE_CONTEXT=true(**两臂都开**,拍板 Q2:测量开关"
-        "与 optimization 正交,对照要的正是同一把尺子);每条臂另按声明设 "
-        "REASONING_REFLECT_OPTIMIZATION",
-    )
-    runner.say("efforts", ", ".join(efforts))
-    rounds = 1 if args.round is not None else args.repeats
-    runner.say("repeats", f"{args.repeats}"
-               + (f",只跑第 {args.round} 轮" if args.round is not None else ""))
-    runner.say("planned runs",
-               f"{len(units) * len(arms)}({len(units)} 个配对单元 × "
-               f"{len(arms)} 臂;{len(unique_questions)} 题 × "
-               f"{len(efforts)} 档 × {rounds} 轮)")
-    runner.say("model calls (estimate)",
-               _ab_call_estimate(units, len(unique_questions),
-                                 no_intent=args.no_intent, arms=arms))
-    # T-EX8 要点 3:三行新增文案(整批墙钟预算 / 单次超时 / 到点行为),
-    # dry-run 与真跑共用这段前缀,与上面几行同一条打印纪律。
-    runner.say(
-        "wall-clock budget",
-        (
-            f"--max-wall-minutes {args.max_wall_minutes}"
-            if args.max_wall_minutes is not None
-            else "未设置(--max-wall-minutes 不给,今天的行为逐字相同:"
-                 "不设上限、不早停)"
-        ),
-    )
-    runner.say(
-        "single-call timeout",
-        f"{REASONING_TIMEOUT_SECONDS_DEFAULT}s"
-        "(REASONING_TIMEOUT_SECONDS 的默认值;dry-run 不构造 Settings,"
-        "真跑按各臂 settings_by_arm 的实际值,见 manifest 的 budgets)",
-    )
-    runner.say(
-        "on budget",
-        "到点会停止派发新单元、cancel_event 唤醒在途、"
-        "shutdown(cancel_futures=True) 撤掉队列里未派发的;"
-        "在途未完成单元落 status=cancelled 行,保留未完成/不成对标记,"
-        "不偷偷补跑到矩阵齐全",
-    )
-    runner.say("out", f"{runner.out_dir}/ab-runs.jsonl + ab-runs.log + "
-                      + ", ".join(f"calls-{arm_label(*arm)}.jsonl"
-                                  for arm in arms)
-                      + "(per-call 表:llm.jsonl ⋈ events.jsonl on support_id)")
-    runner.say(
-        "isolated logs",
-        f"LLM_LOG_PATH={runner.out_dir}/llm/llm.jsonl、"
-        f"EVENT_LOG_DIR={runner.out_dir}/events"
-        "——rig 不往机器共用的 .local/logs 写一个字节(计划 §3 T-PS5 G5)",
-    )
-    runner.say(
-        "local only",
-        f"{runner.out_dir}/raw/<arm>/<key>_<cell>_<effort>_r<n>.json"
-        "(答案正文/引用/锚点/契约/原始 TraceStep)+ "
-        f"{runner.out_dir}/intents.jsonl(含问题原文)"
-        "——**两者都不进数据集/不进仓库**(§7.3)",
-    )
-    if runner.dry_run:
-        # 真跑时这一行改在 clamp **之后**打(见 `_run_ab`):`--concurrency 2`
-        # 被连接池 clamp 回 1 时,clamp 之前那句「成本三键将是 unknown」是一句
-        # 假话——那一批的成本三键其实照常记了值(codex 规格评审 P3)。dry-run
-        # 不构造 Settings、也就没有 clamp,所以这里打的是「请求值」。
-        runner.say("concurrency (requested)",
-                   _ab_concurrency_note(args.concurrency)
-                   + "。--dry-run 不做连接池 clamp,真跑时按池容量再收一次")
-        for index, unit in enumerate(units, 1):
-            titles = unit.get("scope_source_titles") or ()
-            scope_note = f" scope={len(titles)} sources" if titles else ""
-            runner.say(
-                "ab unit",
-                f"{index:03d} {unit['question_key']} "
-                f"cell={unit['corpus_cell']} effort={unit['effort']} "
-                f"r{unit['repeat']} "
-                f"arms={'/'.join(format_arm(*arm) for arm in arms)}(序随机)"
-                f"{scope_note}",
-            )
-        return 0
-    return _run_ab(args, runner, units, cells)
-
-
-def _ab_concurrency_note(concurrency: int) -> str:
-    """`--concurrency` 那一行日志。>1 时必须当场说清成本三键会变成 unknown。
-
-    理由不是保守(§4.4):token 归因靠 LLM 日志的**时间窗切片**(§7.2),并发下
-    窗口重叠,切片会把别的 run 的 token 记到本 run 上。那种数比没有更坏,所以
-    rig 强制把 `prompt_tokens` / `completion_tokens` / `model_calls` 三个键写成
-    unknown,只保留自己掐的 `latency_ms_total`。
-    """
-    if concurrency <= 1:
-        return "1(默认;成本三键按 LLM 日志的时间窗切片归因)"
-    return (
-        f"{concurrency}(并发单元数;每个单元内部两臂仍背靠背)。"
-        "⚠ 成本三键(prompt_tokens / completion_tokens / model_calls)将强制写成 "
-        "unknown:窗口重叠,时间窗切片会把别的 run 的 token 记到本 run 上"
-    )
-
-
-def _ab_process_env(args: argparse.Namespace) -> dict[str, str]:
-    """`ab` 的那一份。`DATABASE_URL` 指向**测试库**(与 `search` 相反)。
-
-    其余每一项都与 `_search_process_env` 逐字同源(`_rig_process_env`)——
-    包括把 LLM 交互日志与事件日志圈进本次 out-dir 的那两条,成本三键与 per-call
-    表的归因正确性直接建在它们上面。
-
-    `ab` 独有的一项是**测量开关恒开**(拍板 Q2):
-    `REASONING_REFLECT_MEASURE_CONTEXT` 与 `optimization` 正交,`off` 臂也能出
-    `message_prefix_bytes`——对照实验要的正是两条臂用**同一把尺子**量。只给
-    `prefix_snapshot` 那一臂开,`off` 臂的那几列会整列缺失,差值表于是只剩一侧
-    有数,而每一行看起来都很正常。
-    每条臂各自的 `REASONING_REFLECT_OPTIMIZATION` **不在这里**:它按臂不同,由
-    `_settings_by_arm` 在构造每一份 `Settings` 时设(进程环境只能有一个值)。
-    """
-    env = _rig_process_env(args, database_url=args.database_url)
-    env["REASONING_REFLECT_MEASURE_CONTEXT"] = "true"
-    return env
-
-
-def _ab_notebook_ids(database_url: str, cells: Sequence[str]) -> dict[str, str]:
-    """测试库里每个语料格的 notebook id,按 `seed` 写下的名字反查。
-
-    每个名字必须**恰好**命中一个笔记本。命中 0 个 = 这个格还没 seed;命中 ≥2 个
-    = 同一个测试库被 seed 过两次,两份语料混在一起——两种都必须响亮失败,不能
-    随便挑一个跑出一批不知道跑在哪份语料上的数据。
-    """
-    from export_reasoning_traces import _Reader
-
-    out: dict[str, str] = {}
-    with _Reader(database_url) as reader:
-        for cell in cells:
-            name = AB_NOTEBOOK_NAME.format(cell=cell)
-            rows = reader.query(
-                "SELECT id FROM notebooks WHERE name = ?", (name,)
-            )
-            if len(rows) != 1:
-                raise RuntimeError(
-                    f"测试库里名为 {name!r} 的笔记本有 {len(rows)} 个(必须恰好 "
-                    "1 个)。先跑 `seed`,或换一个干净的测试库"
-                )
-            out[cell] = str(rows[0]["id"])
-    return out
-
-
-def _ab_source_rows(database_url: str, notebook_id: str) -> list[dict]:
-    """一个笔记本的 `(id, title, updated_at)` 全表,只读。四处消费:
-
-    1. `resolve_gold_sources` —— B 格 gold 短名的唯一解析(§5.5-6);
-    2. `citations_out_of_scope` 的允许集合(题目没声明范围时 = 全库);
-    3. `anchors_on_gold` 的 B 格第三跳(来源 → 标题)。
-    4. `_ab_corpus_signature` —— 语料指纹的 `(id, title, updated_at)` 那一段
-       (codex #703 R1 P2)。
-
-    标题/`updated_at` **只留在进程内**:它们进不了投影行(闭集里没有这两个
-    键),只在 `.local` 的 raw 存档里出现(§7.3);进指纹的只是它们的短哈希。
-    """
-    from export_reasoning_traces import _Reader
-
-    with _Reader(database_url) as reader:
-        rows = reader.query(
-            "SELECT id, title, updated_at FROM sources WHERE notebook_id = ?",
-            (notebook_id,),
-        )
-    return [
-        {
-            "id": str(row["id"]), "title": str(row["title"] or ""),
-            "updated_at": str(row["updated_at"] or ""),
-        }
-        for row in rows
-    ]
-
-
-def _ab_unique_ids(ids: Sequence[str]) -> list[str]:
-    """一批 id 去重去空后的排序列表。**空 id 先滤掉,再判空集**。
-
-    `["", "", ""]` 是一个非空列表,但它的唯一 id 集合是空的——直接拿它拼
-    `IN ()`,在 SQLite 上返回 `[]`(于是每个锚点都「查不到」⇒ 整键 unknown),
-    在 PostgreSQL 上则是一句语法错、被外层的大 `except` 吞成同一个 unknown
-    (codex 规格评审 P2-1)。两条都错,而且错得静悄悄。
-    """
-    return sorted({str(value).strip() for value in ids if str(value or "").strip()})
-
-
-def _ab_chunk_sections(
-    database_url: str, chunk_ids: Sequence[str],
-) -> dict[str, str] | None:
-    """`chunk_id` → `chunks.section_path`。`anchors_on_gold` 的 chunk 那一跳。
-
-    与 `_ab_element_sections` 不同,`chunks.section_path` 是一列**真实的列**
-    (`0001_initial.sql:113`),不需要在 Python 侧解 metadata。
-
-    这一跳只在锚点自己没带 `location_label` 时才走得到(`reflect_ab
-    ._anchor_section` 的第三条路):chunk 锚点的 `location_label` 恒等于
-    `chunk.section_path`,所以正常情况下这个函数一次也不会被查到东西——它兜的
-    是「证据上下文那一侧哪天不再把 section_path 写进锚点」。查库失败 ⇒ `None`
-    = unknown,与元素那一跳同口径。
-    """
-    from export_reasoning_traces import _Reader
-
-    unique = _ab_unique_ids(chunk_ids)
-    if not unique:
-        return {}
-    placeholders = ",".join("?" for _ in unique)
-    try:
-        with _Reader(database_url) as reader:
-            rows = reader.query(
-                f"SELECT id, section_path FROM chunks WHERE id IN ({placeholders})",
-                tuple(unique),
-            )
-    except Exception:  # noqa: BLE001 — 查不出来就是 unknown,不猜「零命中」
-        return None
-    return {str(row["id"]): str(row["section_path"] or "") for row in rows}
-
-
-def _ab_element_sections(
-    database_url: str, element_ids: Sequence[str],
-) -> dict[str, str] | None:
-    """`element_id` → `metadata.section_path`。`anchors_on_gold` 的 A 格第二跳。
-
-    `source_elements` 表**没有** `section_path` 列(2026-09-09 复核
-    `0001_initial.sql:609`:只有 id / source_id / element_type / location_label
-    / text / metadata / created_at / ordinal),那个值住在 `metadata` 这一列的
-    jsonb 里——两侧仓储都按 `metadata.get("section_path")` 读它
-    (`postgres/catalog_store.py:445`、`sqlite/catalog_store.py:539`),所以这里
-    也在 Python 侧解 metadata,而不是写一句只在 PG 上成立的 `->>` SQL。
-
-    查库本身失败 ⇒ 返回 `None` = unknown(调用方据此把 `anchors_on_gold` 整键
-    落 `None`),不是「一个都没解析到」。查得到但某个 id 不在结果里,是**另一
-    件事**:那是一次真实的解析失败,由 `count_anchors_on_gold` 判成 unknown。
-    """
-    from export_reasoning_traces import _Reader
-
-    unique = _ab_unique_ids(element_ids)
-    if not unique:
-        return {}
-    placeholders = ",".join("?" for _ in unique)
-    try:
-        with _Reader(database_url) as reader:
-            rows = reader.query(
-                f"SELECT id, metadata FROM source_elements WHERE id IN ({placeholders})",
-                tuple(unique),
-            )
-    except Exception:  # noqa: BLE001 — 查不出来就是 unknown,不猜「零命中」
-        return None
-    out: dict[str, str] = {}
-    for row in rows:
-        raw = row["metadata"]
-        if isinstance(raw, (str, bytes, bytearray)):
-            try:
-                raw = json.loads(raw)
-            except ValueError:
-                raw = {}
-        meta = raw if isinstance(raw, dict) else {}
-        out[str(row["id"])] = str(meta.get("section_path") or "")
-    return out
-
-
-def _ab_model_contract(settings: Any) -> tuple[str | None, str]:
-    """`(短码, 人读串)`。短码进投影行,人读串只进 `ab-runs.log`。
-
-    §3.3 要求复用 `ModelSamplingContract` 的**形状**(provider / model /
-    prompt_version / temperature / top_p / seed,另加 `thinking_mode`);这里
-    刻意只把它**压成一个短码**写进数据集,理由是投影的值形状闭集
-    (`assert_projection_values`):字典的值半只到数值这一层,一个字段是字符串的
-    dataclass 塞不进去,而为它放宽那道闸就等于给整份数据集开一个自由文本口子。
-    短码是 `merge_key` 的单向哈希——「跨批次混用当场可见」这件事它办得到(不同
-    配置 ⇒ 不同短码),而「看得懂是哪个模型」由日志那一份负责。
-
-    取值来自 `SystemModelServiceRegistry.load(settings)`,不连库、不发请求:
-    服务定义自带 `fingerprint`(配置指纹),两个反思相关的 workload
-    (`reasoning_agent` 出反思决策,`ask_answer` 出最终答案)各取一份。
-
-    读不出来(没有部署 TOML、或它的形状变了)⇒ 短码是 `None` = unknown,整批
-    照跑:这一列是「跨批次混用当场可见」的辅助信号,不是判据;为它把一次几小时
-    的批跑挡在门外,换来的只是少一个提示。真正拦门的是 §5.5 那六条。
-    """
-    from app.services.model_registry import SystemModelServiceRegistry
-
-    try:
-        registry = SystemModelServiceRegistry.load(settings)
-    except Exception as exc:  # noqa: BLE001 — 读不出配置就是 unknown,不是硬失败
-        return None, f"<unavailable: {type(exc).__name__}>"
-    parts: list[str] = []
-    readable: list[str] = []
-    for workload_id in ("reasoning_agent", "ask_answer"):
-        service = registry.service_for(workload_id)
-        thinking = registry.thinking_mode_for(workload_id)
-        model = getattr(service, "model", "") if service is not None else ""
-        top_p = getattr(service, "top_p", None) if service is not None else None
-        fingerprint = (
-            getattr(service, "fingerprint", "") if service is not None else ""
-        )
-        parts.extend([workload_id, model, fingerprint, str(top_p), str(thinking)])
-        readable.append(
-            f"{workload_id}={model or '<unbound>'} top_p={top_p} "
-            f"thinking={thinking}"
-        )
-    return merge_key(*parts), "; ".join(readable)
-
-
-def _ab_corpus_signature(
-    cell: str, fact: Mapping, database_url: str,
-) -> str:
-    """语料/索引指纹(§7.1)。同样是短码:跨 `seed` 混用时当场可见。
-
-    单靠语料格、来源条数、图在不在范围内(旧实现)测不出「同一个格换了一篇
-    论文」或「同一批来源重新分块/重新抽取元素/重建了 KG」——这三件事都不改
-    来源**条数**,签名却必须跟着变(codex #703 R1 P2)。进指纹的因此还有:
-
-    * 每个来源的 `(id, title, updated_at)` 按 `id` 排序后有序拼接——换一篇
-      论文(标题变)、重新解析同一份文件(`updated_at` 变)都会让这一段变;
-    * `chunks` / `source_elements` 的行数——重新分块/重新抽取元素会改行数,
-      即使来源条数、标题、`updated_at` 都不变;
-    * `unified_kg_state.object_count`——KG 对象数,是这张状态表上现成的计数
-      列,不用现场数 `knowledge_objects` 的行。这个笔记本还没建过 KG(表里没
-      有那一行)时记 `None` = unknown,不是 `0`——「还没建过」与「建过但空」是
-      两件不同的事,不能用同一个数字表示。
-
-    `notebook id` 本身**不**进指纹——它是一个数据库 id,投影行里一个 id 都不
-    许有(§7.3);它对指纹的贡献已经被上面这几项(尤其是来源的 `id`,只作为
-    指纹的哈希输入,不是原样落进投影行)覆盖。查询失败(测试库连不上/表不存
-    在)不兜底——这是跑批前一次性的语料事实收集(`_ab_corpus_facts`),与
-    `_ab_source_rows` 同一批查询同一条口径:查不出来就是配置错误,响亮失败,
-    不能悄悄退化成一份看起来正常、其实没量到东西的签名。
-    """
-    from export_reasoning_traces import _Reader
-
-    notebook_id = fact["notebook"]
-    source_key = "|".join(
-        f"{row['id']}:{row['title']}:{row.get('updated_at', '')}"
-        for row in sorted(fact["source_rows"], key=lambda row: row["id"])
-    )
-    with _Reader(database_url) as reader:
-        chunk_rows = reader.query(
-            "SELECT COUNT(*) AS n FROM chunks WHERE notebook_id = ?",
-            (notebook_id,),
-        )
-        element_rows = reader.query(
-            "SELECT COUNT(*) AS n FROM source_elements se "
-            "JOIN sources s ON se.source_id = s.id WHERE s.notebook_id = ?",
-            (notebook_id,),
-        )
-        kg_rows = reader.query(
-            "SELECT object_count FROM unified_kg_state WHERE notebook_id = ?",
-            (notebook_id,),
-        )
-    chunk_count = int(chunk_rows[0]["n"]) if chunk_rows else 0
-    element_count = int(element_rows[0]["n"]) if element_rows else 0
-    kg_object_count = int(kg_rows[0]["object_count"]) if kg_rows else None
-    return merge_key(
-        cell, fact.get("sources"), fact.get("kg_in_scope"),
-        source_key, chunk_count, element_count, kg_object_count,
-    )
-
-
-def _ab_llm_log_dir(settings: Any) -> Path:
-    """LLM 交互日志的目录(`app.core.llm_logging` 的落点)。
-
-    `LLMInteractionLogger` 把 `llm_log_path` 的**目录**当 base,按 owner 分子
-    目录、按天分文件(`llm-YYYY-MM-DD.jsonl`,见 `EventLogger._target_path_for_day`)。
-    rig 因此不认文件名,只认这个目录,读的时候按 `**/llm-*.jsonl` 铺开。
-    """
-    path = Path(getattr(settings, "llm_log_path", ".local/logs/llm.jsonl"))
-    if not path.is_absolute():
-        path = ROOT / path
-    return path.parent
-
-
-#: LLM 交互日志的文件名形状(`EventLogger._target_path_for_day` 按天分文件,
-#: 按 owner 分子目录,所以只能按 glob 认)。
-AB_LLM_LOG_GLOB = "**/llm-*.jsonl"
-
-#: 事件日志的文件名形状。同一条 `EventLogger` 规则,只是 channel 叫 `events`
-#: (`repository_runtime` 里 `EventLogger(settings, channel="events",
-#: per_user=True)`)。两串日志落在两个并列目录里(见 `rig_event_log_dir`),
-#: 所以两个 glob 互不相交,不需要在同一个目录里靠前缀区分。
-RIG_EVENT_LOG_GLOB = "**/events-*.jsonl"
-
-
-def _ab_llm_offsets(
-    log_dir: Path, *, glob: str = AB_LLM_LOG_GLOB,
-) -> dict[str, int]:
-    """跑一个 run **之前**,把日志目录里每个文件当下的字节长度记一份。
-
-    `glob` 让**事件日志**复用同一份实现(`RIG_EVENT_LOG_GLOB`):两串日志的分文件
-    规则出自同一个 `EventLogger`,各写一遍偏移逻辑只会分叉。
-
-    没有这一份 offset,每个 run 结束都要把当天整份日志重读一遍并 json.loads
-    每一行:一批 408 个 run 于是把同一批行读了 408 遍(O(N²)),内存尖峰还是
-    整天日志的大小(codex 质量评审 P2-6)。有了它,一个 run 只读它自己那一段。
-
-    读不到目录(第一个 run 之前它还不存在)⇒ 空字典 = 「每个文件都从头读」,
-    与旧行为一致。
-    """
-    offsets: dict[str, int] = {}
-    try:
-        paths = sorted(log_dir.glob(glob))
-    except OSError:
-        return offsets
-    for path in paths:
-        try:
-            offsets[str(path)] = path.stat().st_size
-        except OSError:  # 刚被轮转掉的文件:当它不存在,从头读
-            continue
-    return offsets
-
-
-def _ab_read_llm_records(
-    log_dir: Path, offsets: Mapping[str, int], *, glob: str = AB_LLM_LOG_GLOB,
-) -> list[dict]:
-    """只读 `offsets` → EOF 的**增量**,解析成记录列表。
-
-    `glob` 见 `_ab_llm_offsets`:事件日志走同一条读法。
-
-    按字节读(`"rb"` + `seek`)而不是文本模式:文本模式的 `seek` 只接受
-    `tell()` 发的不透明 cookie,拿一个字节偏移去 seek 是未定义行为。解码放在
-    读完之后做,`errors="replace"` 与旧实现一致。
-
-    **只取数值字段的那几行原样返回**,正文的裁剪交给 `slice_llm_usage`(它只读
-    `ts` / `usage` / `finish_reason`,prompt / response 片段一个字都不碰,§7.2)。
-
-    日志目录本身还不存在(第一个 run 之前它还没被建出来)⇒ 空列表,与
-    `_ab_llm_offsets` 同一条口径,这是正常的第一次状态,不算失败。但目录**存在**
-    之后,任何一个被 glob 到的文件打不开/读不出来(权限、磁盘错误)⇒ `OSError`
-    原样往上抛,不吞掉——调用方(`_ab_usage_for_window`)据此把这个 run 的成本
-    三键落成 unknown,而不是「这个文件此刻没有新增行」那种沉默的 0(codex #703
-    R1 P2)。
-    """
-    records: list[dict] = []
-    try:
-        paths = sorted(log_dir.glob(glob))
-    except OSError:
-        return records
-    for path in paths:
-        start = int(offsets.get(str(path), 0) or 0)
-        with path.open("rb") as handle:
-            handle.seek(start)
-            blob = handle.read()
-        for line in blob.decode("utf-8", errors="replace").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                row = json.loads(line)
-            except ValueError:
-                continue
-            if isinstance(row, dict):
-                records.append(row)
-    return records
-
-
-def _ab_usage_for_window(
-    log_dir: Path, started: "datetime", ended: "datetime", *, concurrency: int,
-    offsets: Mapping[str, int] | None = None, llm_log_enabled: bool = True,
-) -> Any:
-    """一个 run 的成本三键。`concurrency > 1` 时**恒 unknown**(§4.4/§7.2)。
-
-    `offsets` 是这个 run 开跑之前 `_ab_llm_offsets` 记下的那一份;时间窗切片
-    仍然照做——offset 只负责「不重读别的 run 已经数过的行」,归因的判据还是
-    `[started, ended]` 这个闭区间。
-
-    `llm_log_enabled=False`(`settings.llm_log_enabled` 关着)⇒ 恒 unknown,连
-    读都不读:Ask 在这个开关关着时照样调模型,只是不写交互日志,这时候把空
-    列表喂给 `slice_llm_usage` 会投出一整批看起来精确、实则全错的
-    `model_calls=0`(codex #703 R1 P2)。
-    """
-    from app.eval.reflect_ab import UNKNOWN_USAGE, slice_llm_usage
-
-    if concurrency > 1 or not llm_log_enabled:
-        return UNKNOWN_USAGE
-    try:
-        records = _ab_read_llm_records(log_dir, offsets or {})
-    except OSError:
-        # 文件打不开/读不出来就是 unknown,不当成「这个 run 一次模型都没调」。
-        return UNKNOWN_USAGE
-    return slice_llm_usage(records, start=started, end=ended)
-
-
-def _write_manifest(manifest: Mapping, *, runner: Runner) -> None:
-    """`manifest.json`(最新,覆盖)+ `manifests.jsonl`(历史,追加)——**三条
-    通道共用这一个函数**(pr5-followups.md「T-EX8 quality 评审 → 拍板」P3-7:
-    T-EX4/T-EX7 照做,T-EX11 回填 Q9;T-EX4 评审 P3-18:E3 那一份内联实现改调
-    这里,不留第二份)。
-
-    两份都要的理由:同一个 out-dir 里 `ab-runs.jsonl` / `probe-*.jsonl` 本来就
-    是 append 模式、默认 out-dir 又是固定的 `.local/t0`。只覆盖写的话,在 SHA
-    a1 跑一批、改代码到 b2 再跑一批之后,数据文件里两批的行都在,manifest 只剩
-    b2 ⇒ a1 那些行被归到 b2 的代码上,`code_sha` 这个锚点反过来说了假话。
-
-    `manifest.json` 走 `Runner.write` 而不是自己 `write_text`:那一层自带
-    `dry_run` 短路、`mkdir(parents=True)` 与一行 `write` 日志(评审 P3-6)。
-    追加那一份没有 `dry_run` 短路——两条调用方都只在非 dry-run 路径上到这里
-    (那条短路是死分支,评审 P3-17),`mkdir` 保证 `Runner.write` 之后目录一定
-    在,不靠调用顺序。
-    """
-    payload = dict(manifest)
-    text = json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2)
-    runner.write(runner.out_dir / "manifest.json", text)
-    history_path = runner.out_dir / "manifests.jsonl"
-    history_path.parent.mkdir(parents=True, exist_ok=True)
-    with history_path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
-    runner.say("manifest", f"{runner.out_dir}/manifest.json(最新)+ "
-                           f"{runner.out_dir}/manifests.jsonl(历史,追加)")
-
-
-# --- per-call 表(`calls-<arm>.jsonl`;计划 §3 T-PS5) ------------------------
-
-#: 并发下 per-call 行落在这个标签下。臂那一维在并发跑批里**不成立**:run→call
-#: 的归因靠时间窗,窗口重叠;`support_id` 只把日志行与调度事件对上号,它不知道
-#: 这次调用属于哪个 run。所以那一批的 run 级标签(含 `arm`)一律 unknown,文件
-#: 名跟着叫 unknown——不是把它们塞进某条臂的文件里,那才叫猜。
-CALLS_UNATTRIBUTED_LABEL = "unknown"
-
-
-def _rig_call_rows(
-    log_dir: Path, event_dir: Path, *,
-    llm_offsets: Mapping[str, int], event_offsets: Mapping[str, int],
-    tags: Mapping | None,
-) -> list[dict]:
-    """一段窗口里的 per-call 行。**薄适配**:找文件、读增量、递给纯函数。
-
-    归因逻辑一行都不在这里——它在 `app.eval.reflect_context_bench.join_calls`
-    (纯函数,fixture 可钉;设计 §11「CLI 保持薄适配」)。这里只做三件 I/O:
-    按 glob 铺开两个目录、按偏移读增量、把两串记录递进去。
-
-    读不出来(目录还不存在、文件权限、磁盘错误)⇒ **空列表**,不抛:per-call
-    表是诊断产物,读不到它不该让一个跑成了的 run 整体作废(与 `_ab_usage_for_window`
-    把 `OSError` 折成 unknown 同一条口径,只是这里 unknown 的形态是「这一段没有
-    行」而不是「有行但值是 None」)。
-
-    `ValueError` 一并折掉,是**第二层**而不是第一层:`join_calls` 里那几列已经
-    自己把不合形状的 provider 串收成 unknown(见 `reflect_context_bench._short_code`)
-    ——第一层保住的是「这一行的别的列照样是真的」,这一层保住的只是「整批不会
-    在第 N 个单元中止」。只留这一层会让一整段调用连着表一起消失(串行路这个
-    表达式在 `_run_ab_arm` 的 `return` 里求值,并发路它在 `_ab_loop` 的
-    `finally` 里,抛出去还会顶掉在途异常),那不是降级,那是丢账。
-    """
-    from app.eval.reflect_context_bench import join_calls
-
-    try:
-        llm_records = _ab_read_llm_records(log_dir, llm_offsets)
-        events = _ab_read_llm_records(
-            event_dir, event_offsets, glob=RIG_EVENT_LOG_GLOB,
-        )
-        return join_calls(llm_records, events, tags=tags)
-    except (OSError, ValueError):
-        return []
-
-
-def _rig_call_tags(
-    unit: Mapping, arm: tuple[str, str], *, attributed: bool,
-) -> dict | None:
-    """per-call 行的 run 级标签。`attributed=False` ⇒ `None` = 一列都不写。
-
-    并发下这几列必须是 unknown 而不是某个看起来合理的臂名(见
-    `CALLS_UNATTRIBUTED_LABEL`)。传 `None` 而不是传一份全 `None` 的字典,是为了
-    让「不归因」这件事在调用点上看得见。
-    """
-    if not attributed:
-        return None
-    return {
-        "arm": arm[0],
-        "optimization": arm[1],
-        "question_key": unit["question_key"],
-        "corpus_cell": unit["corpus_cell"],
-        "effort": unit["effort"],
-        "repeat": int(unit["repeat"]),
-    }
-
-
-def _write_call_rows(
-    out_dir: Path, label: str, rows: Sequence[dict], *, mode: str = "a",
-) -> None:
-    """把 per-call 行写进 `calls-<label>.jsonl`。
-
-    `mode="a"`(默认,`ab` 的既有调用一个字都不改):**追加**。调用方负责
-    串行化(`ab` 那条路在 `state["lock"]` 里调):同一条臂的这个文件在并发下
-    会被多个单元写,一行被另一个线程截断就再也解析不回来。零行不追加,也不
-    新建文件——这一段行为逐字保留。
-
-    `mode="w"`(`prefix-probe`/E1 专用):**每次运行覆盖**,与
-    `probe-*.jsonl`/`probe-summary.*` 同寿命(codex #709 R2 P2-2:E1 全程
-    串行、一个进程一次运行只写这一份表,不像 `ab` 那样有多单元并发写同一
-    文件的顾虑,追加语义在这里只会造成同一个 out-dir 换 `--marker-variant`
-    重跑时,旧一批的调用行排在这份**唯一按位置对齐**的 per-call 表开头,与
-    新一批的 `probe-*.jsonl` 错位,破坏 `scripts/README.md` 那条对齐契约)。
-    覆盖模式下即使这次运行零行也要把旧文件砍掉(`unlink`):不然同一个
-    out-dir 上一次跑了 96 格、这一次因为预算提前到期一格都没派发,
-    `probe-*.jsonl` 已经如实变成空文件,`calls-e1.jsonl` 却还留着上一次的
-    调用行——这与追加模式的错位是同一类账目,只是更隐蔽(`probe-*.jsonl`
-    明明显示零调用,per-call 表里却凭空多出一批对不上号的行)。
-    """
-    path = out_dir / f"calls-{label}.jsonl"
-    if not rows:
-        if mode == "w" and path.exists():
-            path.unlink()
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open(mode, encoding="utf-8") as handle:
-        for row in rows:
-            handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True)
-                         + "\n")
-
-
-def ab_intent_confirmation(contract: Mapping, question: str) -> Any:
-    """冻结契约 → `AskRequest.intent`。**同一份契约两臂共用**(§5.5-3)。
-
-    这一步不是简单地把契约塞进请求:`AskService._confirmed_reasoning_intent`
-    会对提交上来的契约**再跑一次** `finalize_query_intent`,而 T0 的
-    `_IntentCache` 存的已经是 finalize **之后**的那一份(`ambiguities` 被清空、
-    `clarification_answers` 已填)。直接提交会让那批代答在第二次 finalize 里
-    被清掉(`submitted` 只认还在 `ambiguities` 里的 id),于是:
-
-    * 契约的 `clarification_answers` 变空 ⇒ `confirmed_research_question` 少了
-      「用户确认」那几条补充,检索问题与 T0 的 `search` 那条路不再逐字相同;
-    * `auto_confirmed_clear_intent` 反而变真 ⇒ 权威从「确认后的方向」翻回
-      「用户原文」,与 `_prepare_search_intent` 的判据相反。
-
-    所以这里把 `ambiguities` 按 `clarification_answers` 原样**还原**再提交:
-    id 与 question 都是当初记下来的原值,不是编的;第二次 finalize 于是拿到与
-    第一次逐字相同的输入,输出也逐字相同(`finalize_query_intent` 在这条路上
-    是幂等的)。没有代答的题走 else 分支,两侧同样逐字不变。
-    """
-    from app.models.ask import (
-        AskIntentConfirmation, QueryIntentAmbiguity, QueryIntentContract,
-    )
-
-    payload = dict(contract)
-    answers = [
-        row for row in (payload.get("clarification_answers") or [])
-        if isinstance(row, Mapping) and str(row.get("id") or "").strip()
-    ]
-    payload["ambiguities"] = [
-        QueryIntentAmbiguity(
-            id=str(row["id"]),
-            question=str(row.get("question") or row["id"]),
-            required=True,
-        ).model_dump()
-        for row in answers
-    ]
-    return AskIntentConfirmation(
-        contract=QueryIntentContract(**payload),
-        resolved_question=str(payload.get("resolved_question") or question),
-        answers=[
-            {"id": str(row["id"]), "answer": str(row.get("answer") or "")}
-            for row in answers
-            if str(row.get("answer") or "").strip()
-        ],
-    )
-
-
-def assert_knowhow_reflect_v2_off(repo: Any, settings: Any) -> None:
-    """§5.5-5:Knowhow 路径的 `reflect_v2_active()` 必须为假,**即使 v2 开着**。
-
-    Knowhow 不设臂(§4.3):它构造检索器时把 `allow_reflect_v2` 关掉,两条臂对
-    它逐字相同。这里按 `app/services/knowhow/api.py` 的那一行原样复现一次构造
-    并当场断言——断言失败就整批停,因为那意味着「Knowhow 不受这次开闸影响」这
-    个前提在这份代码上已经不成立了,而整批 A/B 的结论都建在它上面。
-    """
-    from app.services.reasoning_retrieval import ReasoningRetriever
-
-    retriever = ReasoningRetriever.from_repository(repo, settings, None)
-    retriever.allow_reflect_v2 = False
-    if retriever.reflect_v2_active():
-        raise RuntimeError(
-            "Knowhow 断言失败:allow_reflect_v2=False 的检索器仍然报告 "
-            "reflect_v2_active()=True。开闸会连带改到 Knowhow,先修再跑"
-        )
-
-
-def run_ab_once(
-    repo: Any, *, notebook: str, item: dict, arm: str,
-    contract: dict | None, on_trace: Any, cancel_event: Any, actor_id: str,
-    scope_source_ids: Sequence[str] | None = None,
-    optimization: str = "off",
-) -> Any:
-    """一个 run:三层 scope + `repo.ask_reasoning`。生产接线的逐字复刻。
-
-    三层 scope 与 `run_search_once` 同形、同理由(模型调度归属 / 请求级检索预算
-    / 来源范围)。两处不同,都是「这次要跑完整 Ask」带来的:
-
-    * 调的是 `repo.ask_reasoning(...)`,不是 `ReasoningRetriever.run`。它 =
-      `_prepare_reasoning_ask` + `_run_reasoning_stage(...).response`,所以意图
-      契约、gap 补取、结构化预览、合成与引用绑定全在里面——rig 侧不重造任何一
-      段(§5.3:重造就变成「评测 rig 自己的合成」)。
-    * `job_id` 走默认空串 ⇒ `_prepare_turn` 的 legacy create-or-continue 分支:
-      不建 durable job、不写 `ask_trace_steps`。轨迹经 `on_trace` 在进程内拿,
-      所以也不需要 `export` 那一步(§5.2)。
-
-    **合成会落库**(conversation + answer),落在一次性测试库里,这是接受的、
-    不是绕过:语料是公开论文,题面公开,答案是模型对公开论文的作答。`.local`
-    的隔离是仓库卫生,不是保密(§5.2 / §7.3)。
-
-    **臂由 `repo` 本身承载,不由一个额外的 settings 参数承载。** 这一点与
-    `run_search_once` 相反,而且是这条路唯一容易写错、写错了还照样跑得出数据的
-    地方:`search` 直调 `ReasoningRetriever.from_repository(repo, settings)`,
-    检索器读的是**传进去**的那一份;而 Ask 走
-    `AskService._build_reasoning_retriever`,它写死 `settings=self.settings`
-    ——即构造这个 repo 时用的那一份(已核实 `repo.settings is
-    ask_component.settings`)。给 `ask_reasoning` 递一份别的 Settings 没有任何
-    入口,所以两条臂必须是**两个 repo**(见 `_run_ab` 的 `repos_by_arm`)。用
-    一个 repo 加一个 settings 参数,两条臂会双双跑 legacy,而产出的数据从形状
-    上完全看不出这件事。
-
-    开跑前当场核对 `retriever.reflect_v2_active()` 与这条 run 声明的臂一致
-    (§5.5-1)。核对用的检索器是另外构造的一份,但它读的正是 `repo.settings`
-    ——与 Ask 内部那一个逐字同源。这一步是「协议对不对号」的唯一事前证据;
-    事后还有一次,由投影出来的 `policy_version` 对(见
-    `assert_arm_matches_evidence`)。
-
-    **臂的第二维(`optimization`)只有这一次核对**,没有事后那一半:两条 v2 臂的
-    轨迹形状逐字相同,产物里反推不出它——差别全在发给 provider 的消息怎么分块
-    (见 `reflect_ab.assert_optimization_matches_evidence`)。所以这里读的
-    `probe.reflect_optimization()` 是**全仓唯一读点**的直接读数,而不是从
-    settings 字段自己再判一次:v2 总闸关、Knowhow 否决、已实现闭集之外的取值
-    折回 `off` 这三条降级路径都只在那个方法里,绕过它等于把降级本身漏掉。
-    """
-    from app.eval.reflect_ab import assert_optimization_matches_evidence
-    from app.models.ask import AskRequest
-    from app.models.source_scope import SourceScope
-    from app.services.model_work import ModelPriority, model_work_scope
-    from app.services.reasoning_retrieval import ReasoningRetriever
-    from app.services.retrieval_run import retrieval_run
-    from app.services.source_scope import source_scope_context
-
-    probe = ReasoningRetriever.from_repository(repo, repo.settings, cancel_event)
-    if probe.reflect_v2_active() is not (arm == "v2"):
-        raise RuntimeError(
-            f"repo 的协议与声明的 arm={arm!r} 不符:"
-            f"reflect_v2_active()={probe.reflect_v2_active()}"
-            "(臂由 repo 承载——Ask 读的是构造这个 repo 的那一份 Settings)"
-        )
-    assert_optimization_matches_evidence(
-        optimization, probe.reflect_optimization())
-    scope = (
-        SourceScope(
-            mode="include", source_ids=list(scope_source_ids), narrowed=True,
-        )
-        if scope_source_ids else None
-    )
-    payload = AskRequest(
-        question=item["question"], mode="reasoning",
-        retrieval_effort=item["effort"], source_scope=scope,
-        intent=(
-            ab_intent_confirmation(contract, item["question"])
-            if contract is not None else None
-        ),
-    )
-    with model_work_scope(
-        priority=ModelPriority.INTERACTIVE, actor_id=actor_id,
-        notebook_id=notebook, question=item["question"],
-    ):
-        with retrieval_run(
-            run_kind="ask_reasoning", event_log=None, actor_id=actor_id,
-            cancel_event=cancel_event,
-        ):
-            with source_scope_context(notebook, scope, None):
-                return repo.ask_reasoning(
-                    notebook, payload, on_trace, cancel_event,
-                )
-
-
-def ab_raw_payload(item: dict, arm: str, response: Any, raw_steps: Sequence[dict],
-                   contract: dict | None) -> dict:
-    """`.local` 的一份 run 存档:答案正文、引用、锚点、契约、原始 TraceStep。
-
-    **只在 `.local`,不进数据集/不进仓库**(§5.4 的产物表、§7.3)。它的用途是
-    人工抽样(§6 第二层)与核对确定性判据的命中,所以这里刻意**不**做任何收
-    窄——收窄过的存档没法用来裁决收窄本身。
-    """
-    return {
-        "question_key": item["question_key"],
-        "corpus_cell": item["corpus_cell"],
-        "effort": item["effort"],
-        "repeat": item["repeat"],
-        "arm": arm,
-        "question": item["question"],
-        "intent_contract": contract,
-        "answer": str(getattr(response, "answer", "") or ""),
-        "conclusion": str(getattr(response, "conclusion", "") or ""),
-        "evidence_level": str(getattr(response, "evidence_level", "") or ""),
-        "citations": [
-            row.model_dump() if hasattr(row, "model_dump") else dict(row)
-            for row in (getattr(response, "citations", None) or ())
-        ],
-        "anchors": [
-            row.model_dump() if hasattr(row, "model_dump") else dict(row)
-            for row in (getattr(response, "anchors", None) or ())
-        ],
-        "trace_steps": list(raw_steps),
-    }
-
-
-def _ab_raw_path(out_dir: Path, label: str, item: dict) -> Path:
-    """`.local` 存档的路径。`label` 是 `arm_label(policy, optimization)`,**不是**
-    光秃秃的 policy:两条 v2 臂的存档否则会撞进同一个 `raw/v2/` 文件名(理由与
-    取舍见 `reflect_ab.arm_label`)。"""
-    return (
-        out_dir / "raw" / label
-        / f"{item['question_key']}_{item['corpus_cell']}_{item['effort']}"
-          f"_r{item['repeat']}.json"
-    )
-
-
-def _ab_coverage_complete(response: Any) -> bool | None:
-    """这次 run 的**枚举链终态**:complete / 不 complete / 没有枚举(`None`)。
-
-    权威在 `AskResponse.result_sets[*].coverage.complete`,不在
-    `result_coverage`(codex 规格评审 P1-1)。两者是**两条不同的链**:
-
-    * `result_coverage` 是 `StructuredBatchCoverage`,只有表格批量那条路会写
-      (`ask_service.py` 里它恒是 `structured_batch.coverage() if
-      structured_batch else None`);
-    * 目录/元素/知识对象的枚举终态住在 `result_sets` 里那个
-      `TypedCollectionResult.coverage`——模型文件原话:「their coverage object
-      is the authority for complete/partial」。
-
-    只读 `result_coverage` 的后果不是少一个信号,而是**反号**:一道目录题真的
-    枚举完整时 `result_coverage` 仍是 `None`,`completeness_claim_candidate` 于
-    是把答案里那句「共 12 篇」判成虚报候选,两条臂的目录题因此全被强制进人工。
-
-    合并规则(codex #703 R3 P2):**所有**在场的 coverage 都 complete 才算
-    complete;有任何一条 partial 就是 False——答案里那句「共 N 篇」可能正是关于
-    那条没枚举完的集合说的,一条无关的 complete 集合不能替它免掉人工复核
-    (表格批量里「单表耗尽但批次漏了别的表」正是文档点名的那种区别)。一条
-    coverage 都没有才是 `None` = 「没有任何东西背书那句完整性断言」。
-    """
-    coverages = [
-        getattr(row, "coverage", None)
-        for row in (getattr(response, "result_sets", None) or ())
-    ]
-    coverages.append(getattr(response, "result_coverage", None))
-    values = [
-        getattr(coverage, "complete", None)
-        for coverage in coverages
-        if coverage is not None
-    ]
-    seen = [value for value in values if isinstance(value, bool)]
-    if not seen:
-        return None
-    return all(seen)
-
-
-def _run_ab(
-    args: argparse.Namespace, runner: Runner, units: Sequence[dict],
-    cells: Sequence[str],
-) -> int:
-    """`ab` 的真跑路径。§5.5 的六条硬断言全部落在这个函数与它直接调的那几个里。
-
-    断言与落点的对账(改这里之前先读一遍):
-
-    1. **策略对号** —— 事前 `run_ab_once` 里核 `reflect_v2_active()`;事后每条
-       臂的第一个 run 之后核 `policy_version`(`assert_arm_matches_evidence`)。
-    2. **主库零接触** —— `--database-url` 必须以 `_test` 结尾(`_ab_preflight`),
-       跑前跑后各点一次**主库**的 `_readonly_counts`(`_assert_readonly`)。
-    3. **契约一致** —— 两臂共用 `_IntentCache` 里同一条缓存行,`_run_ab_unit`
-       在提交前比一次 hash。
-    4. **注入面全关** —— `_ab_process_env` 的三把闸。
-    5. **Knowhow 断言** —— `assert_knowhow_reflect_v2_off`,一次性。
-    6. **gold 可解析** —— `resolve_gold_sources` 在跑批**之前**把每个短名解析
-       成恰好一个 `source_id`,解析不到就整批不跑。
-
-    **T-EX8**:`--max-wall-minutes` 给了才计算 `deadline`(单调时钟,这里**一次**
-    算出绝对到点时刻,不在批里反复重算);不给 ⇒ `deadline=None`,`_ab_loop`/
-    `_ab_run_batch`/`_run_ab_arm` 的每一条新分支都先判 `is not None`,行为逐字
-    不变。收尾处写 `manifest.json`(`app.eval.reflect_manifest.build_manifest`
-    的 E3 通道),`stopped_by_budget` 如实记这批是不是因为预算到点提前收尾——
-    是的话即便 `failed == 0` 也以非零退出码收尾(§13「不偷偷补跑到矩阵齐全」
-    的另一半:也不能让预算掐断看起来像一次干净的成功跑批)。
-    """
-    from datetime import datetime
-
-    # 必须在 import `app.core.config` 之前(与 `_search_process_env` 同一条理由)。
-    os.environ.update(_ab_process_env(args))
-
-    from app.core.request_context import reset_request_user, set_request_user
-    from app.eval.reflect_ab import load_ab_gold, resolve_gold_sources
-    from app.services.reasoning_retrieval import kg_in_scope_for
-
-    # 单调时钟,一次计算(T-EX8 要点 1)。`None` = 不给 `--max-wall-minutes`,
-    # 下游每一条新分支都先判 `is not None`,行为逐字不变。
-    deadline = (
-        None if args.max_wall_minutes is None
-        else time.monotonic() + float(args.max_wall_minutes) * 60.0
-    )
-    arms = ab_arms(args)
-    settings_by_arm = _settings_by_arm(arms)
-    # **参照臂**:一批里那些与臂无关的事实(连接池容量、模型契约、`llm_log_enabled`、
-    # 日志目录、语料点数、意图契约)只需要一份,固定取 `arms[0]`——即用户在
-    # `--arms` 里写的第一条。取「第一条」而不是「legacy 那一条」,是因为二维化之
-    # 后一批可以压根没有 legacy 臂(`--arms v2:off,v2:prefix_snapshot`);取有序
-    # 列表的下标 0 而不是从 dict 里挑,是为了不让它随字典迭代顺序漂移(与
-    # `_precompute_intents` 同一条口径)。
-    reference_arm = arms[0]
-    # 按**一份**连接池的容量 clamp,不按两份除以二:`ab` 是每条臂一个 repo、
-    # 因此两个 `psycopg_pool.ConnectionPool`,但并发的是**单元**,而一个单元
-    # 内部两条臂是背靠背跑的(`_run_ab_unit`)——任一时刻一个单元最多占住一条
-    # 连接,而且只占其中一个池子的。所以最坏情况是 N 个单元恰好都停在同一条臂
-    # 上,即某一个池子被要走 N 条连接;`N ≤ pool_max` 正是这里 clamp 的那一条
-    # (codex 规格评审存疑项)。
-    concurrency = _resolve_concurrency(
-        runner, args.database_url, settings_by_arm[reference_arm],
-        args.concurrency,
-    )
-    runner.say("concurrency", _ab_concurrency_note(concurrency))
-    # **每条臂一个 repo**,不是「一个 repo + 两份 Settings」。`search` 那条路能
-    # 共用一个 repo,是因为它直调 `ReasoningRetriever.from_repository(repo,
-    # settings)`,检索器读的是传进去的那一份;而 Ask 走
-    # `AskService._build_reasoning_retriever`,那里写死 `settings=self.settings`
-    # ——构造这个 repo 时用的那一份(`repo.settings is ask_component.settings`,
-    # 已核实)。共用一个 repo 会让两条臂双双跑 legacy,而数据从形状上看不出来。
-    # `create_repository(settings, migrate=False, seed=False)`,不是默认值:默认
-    # 的 `seed=True` 会用 `settings.admin_password` 重写 admin 密码哈希(codex
-    # #700 R1 P1)。测试库已经由 `seed` 子命令建好并迁移过,这里只需要连上去。
-    repos_by_arm = {
-        arm: _search_repository(settings_by_arm[arm]) for arm in arms
-    }
-    runner.say("arm repositories",
-               f"{len(arms)} 条臂各一个 repo(Ask 读构造期的 Settings,换不了)")
-    repo = repos_by_arm[reference_arm]
-    profile = repo.maintenance.resolve_owner_profile(args.user)
-    if profile is None:
-        print(f"ERROR: 测试库里找不到 fixture 用户: {args.user}", file=sys.stderr)
-        return 2
-    actor_id = str(getattr(profile, "id", "") or "")
-    # §5.5-5 只对 **v2** 那一侧成立(判据是 `allow_reflect_v2=False` 把 v2 否
-    # 决掉)。二维化之后一批可以压根没有 v2 臂(`--arms legacy`),那时这条断言
-    # 没有对象——**说出来**而不是静默跳过:一条没跑过的硬断言不等于通过。
-    v2_arm = next((arm for arm in arms if arm[0] == "v2"), None)
-    if v2_arm is None:
-        runner.say("knowhow assertion",
-                   "这一批没有 v2 臂,§5.5-5 没有对象(未验证 ≠ 通过)")
-    else:
-        assert_knowhow_reflect_v2_off(
-            repos_by_arm[v2_arm], settings_by_arm[v2_arm])
-        runner.say("knowhow assertion",
-                   "allow_reflect_v2=False ⇒ reflect_v2_active() 为假(§5.5-5)")
-
-    notebooks = _ab_notebook_ids(args.database_url, cells)
-    facts = _ab_corpus_facts(args, runner, repo, cells, notebooks, kg_in_scope_for)
-    gold_by_key = load_ab_gold(load_questions())
-    _ab_assert_gold_resolves(
-        runner, units, gold_by_key, facts, resolve_gold_sources,
-    )
-    contract_short, contract_readable = _ab_model_contract(
-        settings_by_arm[reference_arm])
-    runner.say("model contract", f"{contract_short}  ({contract_readable})")
-
-    # 每条臂共用同一份进程环境构造(`_settings_by_arm` 只翻那两个 reflect 开关),
-    # `llm_log_enabled` 恒同,取参照臂那一份就够。
-    # 关着时 Ask 照样调模型,只是不写交互日志——这时候成本三键必须整批记
-    # unknown,不能把空日志喂给 `slice_llm_usage` 投出一批假的 0(codex #703
-    # R1 P2)。
-    llm_log_enabled = bool(
-        getattr(settings_by_arm[reference_arm], "llm_log_enabled", True)
-    )
-    if not llm_log_enabled:
-        runner.say(
-            "llm log disabled",
-            "LLM_LOG_ENABLED=false,这一批的成本三键"
-            "(model_calls/prompt_tokens/completion_tokens)整批记 unknown",
-        )
-
-    before = _readonly_counts(args.source_db_url)
-    runner.say("main database baseline", _format_counts(before))
-    baseline_problem = readonly_baseline_problem(before)
-    if baseline_problem:
-        print("ERROR: " + baseline_problem, file=sys.stderr)
-        return 2
-    context = set_request_user(profile)
-    failed = 0
-    stopped_by_budget = False
-    intent_digests: dict[str, str] = {}
-    started_at = datetime.now().isoformat()
-    try:
-        failed, stopped_by_budget, intent_digests = _ab_loop(
-            args, runner, units, facts, repos_by_arm,
-            actor_id=actor_id, profile=profile, concurrency=concurrency,
-            gold_by_key=gold_by_key, model_contract=contract_short,
-            log_dir=_ab_llm_log_dir(settings_by_arm[reference_arm]),
-            event_dir=Path(rig_event_log_dir(args.out_dir)),
-            arms=arms, reference_arm=reference_arm,
-            clock=datetime.now, llm_log_enabled=llm_log_enabled,
-            deadline=deadline,
-        )
-    finally:
-        reset_request_user(context)
-        # **在 `finally` 里**(codex 质量评审 P2-5):跑批中途抛出去时,「主库
-        # 零接触」这条断言此前整个被跳过——而那正是最该量一次的时刻(异常路径
-        # 上谁也说不清收尾走到了哪一步)。断言自己再抛的话会盖掉原始异常,所以
-        # 这里只在没有别的异常在飞时才让它抛;有异常在飞时降级成一行告警。
-        _assert_readonly_on_exit(runner, before, args.source_db_url)
-    finished_at = datetime.now().isoformat()
-    _write_ab_manifest(
-        runner, args, units=units, cells=cells, arms=arms, facts=facts,
-        model_contract=contract_short, settings=settings_by_arm[reference_arm],
-        intent_contract_digest_by_question=intent_digests,
-        started_at=started_at, finished_at=finished_at,
-        stopped_by_budget=stopped_by_budget,
-    )
-    if stopped_by_budget:
-        # 预算到点是这一批提前收尾的**理由**,即便 0 个 run 落成 failed 也不能
-        # 让它看起来像一次干净跑完的成功批次(T-EX8 要点 1「整批以预算到点为由
-        # 非零退出」)。
-        #
-        # 这条 `return` 在 `if failed:` **之前**,所以两件事同时成立时只打这一
-        # 句——那就把 `failed` 数带进这一句里(评审 P3-8):失败数既不进 manifest
-        # 闭集(没有这个键)、也不该因为预算先掐断就从 stderr 上整个消失,否则
-        # 「预算到点」会盖掉「这一批里还有 N 个 run 真的崩了」。
-        print(
-            "ERROR: 整批墙钟预算到点提前收尾"
-            f"(--max-wall-minutes={args.max_wall_minutes}),不补跑;"
-            f"另有 {failed} 个 run FAILED(见 ab-runs.log);"
-            "manifest.json 的 stopped_by_budget=true", file=sys.stderr,
-        )
-        return 1
-    if failed:
-        # 失败 run 已各自落成 `status=failed` 行;整批仍以非零退出码收尾,不能
-        # 让「每个 run 都失败」看起来像一次成功的跑批(与 `search` 同口径)。
-        print(f"ERROR: {failed} 个 run FAILED,见 ab-runs.log", file=sys.stderr)
-        return 1
-    return 0
-
-
-def _assert_readonly_on_exit(
-    runner: Runner, before: dict[str, int | str | None], source_db_url: str,
-    *, command: str = "ab",
-) -> None:
-    """收尾那次只读核对。**不掩盖正在飞的异常**。
-
-    `sys.exc_info()` 非空 ⇒ 我们正在一条异常路径上退出:此时再抛一个
-    `RuntimeError` 会把根因换成一句关于行数的话。那种情况下把结果打成告警,
-    原始异常照常往上走。
-
-    `command` 默认 `"ab"`(那条调用点因此一个字节不用改),`state-probe` 传
-    `"state-probe"` —— 它量的是一次性测试库,文案跟着
-    `READONLY_DB_LABEL_BY_COMMAND` 说对库。**两条路共用这一个函数**(T-EX7 质量
-    评审 P3-7):此前 E2 那份是整函数复制,只差一个字符串,而「异常在飞时降级成
-    告警」这条纪律有两处就要同步维护两次。
-    """
-    in_flight = sys.exc_info()[0] is not None
-    try:
-        _assert_readonly(
-            runner, before, _readonly_counts(source_db_url), command=command,
-        )
-    except Exception:  # noqa: BLE001 — 见 docstring
-        if not in_flight:
-            raise
-        print("\033[31m[READ-ONLY VIOLATION]\033[0m "
-              "(另有异常正在向上抛,见下方 traceback)", file=sys.stderr)
-
-
-def _ab_corpus_facts(
-    args: argparse.Namespace, runner: Runner, repo: Any, cells: Sequence[str],
-    notebooks: dict[str, str], kg_in_scope_for: Any,
-) -> dict[str, dict]:
-    """每个语料格的事实,**跑之前一次点清**。与 `_search_corpus_facts` 同形,
-    另外多带两样 A/B 才用得上的东西:来源的 `(id, title)` 全表(gold 解析、范围
-    判据、锚点第三跳都要它)与该格的 `corpus_signature`。
-    """
-    facts: dict[str, dict] = {}
-    for cell in cells:
-        notebook = notebooks[cell]
-        repo.get_notebook(notebook)  # 不存在直接 KeyError,而不是跑出一批空 run
-        rows = _ab_source_rows(args.database_url, notebook)
-        fact = {
-            "notebook": notebook,
-            "sources": len(rows),
-            "source_rows": rows,
-            "source_titles": {row["id"]: row["title"] for row in rows},
-            "kg_in_scope": bool(kg_in_scope_for(repo.retrieval, notebook)),
-        }
-        fact["corpus_signature"] = _ab_corpus_signature(
-            cell, fact, args.database_url,
-        )
-        facts[cell] = fact
-        runner.say(
-            "corpus fact",
-            f"{cell}: sources={fact['sources']} "
-            f"kg_in_scope={fact['kg_in_scope']} "
-            f"corpus_signature={fact['corpus_signature']}",
-        )
-    return facts
-
-
-def _ab_assert_gold_resolves(
-    runner: Runner, units: Sequence[dict], gold_by_key: Mapping,
-    facts: Mapping, resolve_gold_sources: Any,
-) -> int:
-    """§5.5-6:跑批**之前**把每道题的 `gold_sources` 解析一遍,解析不到就整批停。
-
-    §3.2 的原话是「解析不到任何一个就是配置错误,跑批之前响亮失败,不能静默变
-    成 0」。这一步刻意放在第一个模型调用之前:一次 408 run 的批要跑几个小时,
-    而这条错在第一秒就看得见。
-
-    缓存键是 **`(corpus_cell, question_key)`**,不是只有 `question_key`:同时
-    选 `B_kg` 与 `B_nokg` 时,同一道题会跑在两个不同的笔记本上,`gold_sources`
-    短名在其中一个笔记本里缺失或歧义,不能因为另一个笔记本先解析通过了就被
-    绕过——那会让这道题在跑坏的那一格上悄悄产出一行误导的 0 或虚高
-    (codex #703 R2 P2-2)。
-
-    解析结果本身**刻意不留**:`anchors_on_gold` 的 B 格第三跳走的是同一条
-    「标题包含短名」的规则(`count_anchors_on_gold` 里),把一份等价的 id 集合
-    再传一遍,只会多出一个可能与它分叉的第二真源。这里要的是那条断言,不是它
-    的返回值。返回的题数只用来打日志。
-    """
-    from app.eval.reflect_ab import GoldError, gold_for
-
-    checked: set[tuple[str, str]] = set()
-    for unit in units:
-        key = unit["question_key"]
-        cell = unit["corpus_cell"]
-        cache_key = (cell, key)
-        if cache_key in checked:
-            continue
-        gold = gold_for(gold_by_key, key)
-        if gold is None or not gold.gold_sources:
-            continue
-        try:
-            resolve_gold_sources(gold, facts[cell]["source_rows"])
-        except GoldError as exc:
-            raise GoldError(f"[{cell}] {exc}") from exc
-        checked.add(cache_key)
-    runner.say("gold sources resolved",
-               f"{len(checked)} 组(题×格)的 gold_sources 各解析到唯一来源"
-               "(§5.5-6)")
-    return len(checked)
-
-
-def _ab_loop(
-    args: argparse.Namespace, runner: Runner, units: Sequence[dict],
-    facts: dict[str, dict], repos_by_arm: dict[tuple[str, str], Any],
-    *, actor_id: str, profile: Any, concurrency: int, gold_by_key: Mapping,
-    model_contract: str | None, log_dir: Path, clock: Any,
-    event_dir: Path | None = None,
-    arms: Sequence[tuple[str, str]] | None = None,
-    reference_arm: tuple[str, str] | None = None,
-    llm_log_enabled: bool = True,
-    deadline: float | None = None,
-) -> tuple[int, bool, dict[str, str]]:
-    """整批配对单元。每个单元产出**两行**(两臂),一起写、一起标 `paired`。
-
-    返回 `(failed, stopped_by_budget, intent_contract_digest_by_question)`:
-
-    * `failed` —— 落成 `status="failed"` 的行数(不含 `status="cancelled"`,
-      T-EX8 M5-4:预算掐断是删失观察,不是失败)。整批据此以非零退出码收尾
-      (与 `search` 同口径):「每个 run 都失败」不能看起来像一次成功的跑批。
-    * `stopped_by_budget` —— `deadline`(T-EX8 `--max-wall-minutes`)是否真的
-      让这一批提前收尾;`deadline is None`(不给)时恒 `False`。
-    * `intent_contract_digest_by_question` —— `question_key → ab_contract_
-      digest(...)`,manifest 的 `intent_contract_digest_by_question` 键直接
-      消费这份返回值,不重新遍历 `_IntentCache`。
-
-    `--concurrency > 1` 时并发的是**单元**,不是臂:臂序随机与背靠背是 A/B 的
-    立身之本(§4.2),把两条臂拆到不同线程会让「同题同档同时刻」这句话不再成
-    立。重复轮之间加一道栅栏(逐轮 `_ab_round_units`),这样被截断的前缀仍然是
-    一份**完整轮**的数据集——预算到点提前收尾时这条性质仍然成立:一轮里被掐
-    掉的单元落 `cancelled` 行,后续轮次(`state["stopped_by_budget"]` 已真)整
-    个不再开始(见下面循环顶部的检查),已完成的前缀因此还是**完整轮**。
-
-    并发时 per-call 表在**整批收尾**时一次出(见下面那段 `finally`):逐 run 的
-    时间窗在并发下切不干净,而 `support_id` 的 ⋈ 不受窗口影响。
-
-    `arms` / `reference_arm` / `event_dir` 的 `None` 语义见 `_run_ab_unit`。
-    """
-    arms = list(arms) if arms is not None else ab_arms(args)
-    reference_arm = reference_arm or arms[0]
-    if event_dir is None:
-        event_dir = Path(rig_event_log_dir(args.out_dir))
-    runner.out_dir.mkdir(parents=True, exist_ok=True)
-    intents = _IntentCache(
-        runner.out_dir / "intents.jsonl", enabled=not args.no_intent
-    )
-    # 进度分母按**这次真的要跑的臂数**算,不是恒按两臂:只跑一侧时恒按闭集大小
-    # 会让每一行日志都写着 `0007/0016`,而这批一共只有 8 个 run(codex 规格/质量
-    # 评审 P3)。二维化之后 `arms` 已经是「这一批要跑的臂」,直接取长度。
-    state = {
-        "verified": set(), "index": 0, "total": len(units) * len(arms),
-        "failed": 0, "lock": threading.Lock(),
-        # T-EX8:`deadline is None` 时这个键永远不会被翻成 `True`(见
-        # `_ab_run_batch`),下面 `return` 时恒 `False`——不给 `--max-wall-
-        # minutes` 的路径逐字相同。
-        "stopped_by_budget": False,
-    }
-    # 并发路径的整批窗口:批开跑之前记一次偏移,收尾时读到 EOF。
-    batch_llm_offsets = _ab_llm_offsets(log_dir)
-    batch_event_offsets = _ab_llm_offsets(event_dir, glob=RIG_EVENT_LOG_GLOB)
-    rows_handle = (runner.out_dir / "ab-runs.jsonl").open("a", encoding="utf-8")
-    log = (runner.out_dir / "ab-runs.log").open("a", encoding="utf-8")
-    if not llm_log_enabled:
-        # 整批一次(codex #703 R1 P2):落进 `ab-runs.log`,不是只打在终端——
-        # 事后翻这份数据的人不该靠回想「当时是不是关了日志」来解释一整批
-        # unknown。
-        log.write(
-            "NOTE: LLM_LOG_ENABLED=false,本批全部 run 的成本三键"
-            "(model_calls/prompt_tokens/completion_tokens)记 unknown\n"
-        )
-        log.flush()
-    try:
-        for repeat, batch in _ab_round_units(units):
-            # 预算已经在前一轮被掐断时,后续轮次**整个不开始**——不偷偷补跑到
-            # 矩阵齐全(§13 原文),这些单元不落行、不发调用。那道判在
-            # `_ab_run_batch` 的批入口(「已经过期 ⇒ 零派发」),这里**没有**
-            # 第二道:此前那一层是死分支(变异验证:删掉行为不变),而它自称的
-            # 唯一收益「少打一行 `repeat round rN`」在真实用例里也不成立——串行
-            # 路每轮只有一个单元时循环顶的 `break` 从不触发,进下一轮前
-            # `stopped_by_budget` 还是 `False`,那行日志照打(评审 F8 / P3-3)。
-            runner.say("repeat round", f"r{repeat}: {len(batch)} 个配对单元")
-            _ab_run_batch(
-                batch, args=args, runner=runner, facts=facts,
-                repos_by_arm=repos_by_arm, actor_id=actor_id,
-                profile=profile, concurrency=concurrency, intents=intents,
-                gold_by_key=gold_by_key, model_contract=model_contract,
-                log_dir=log_dir, event_dir=event_dir, arms=arms,
-                reference_arm=reference_arm, clock=clock, state=state,
-                rows_handle=rows_handle, log=log,
-                llm_log_enabled=llm_log_enabled, deadline=deadline,
-            )
-    finally:
-        log.close()
-        rows_handle.close()
-        if concurrency > 1:
-            # 并发跑批的 per-call 表:整批一次,run 级标签**全部 unknown**
-            # (`_rig_call_tags(..., attributed=False)`)。臂那一维在这里不成立
-            # ——`support_id` 只把日志行与它自己的调度事件对上号,它不知道这次
-            # 调用属于哪个 run。硬塞一条臂进去比不出表更坏:那是一批看起来精确、
-            # 实则一半记错了臂的行(与并发下成本三键强制 unknown 同一条口径)。
-            # 在 `finally` 里:跑批中途抛出去时,已经烧掉的那些调用仍然值得留一
-            # 份账。
-            _write_call_rows(runner.out_dir, CALLS_UNATTRIBUTED_LABEL,
-                             _rig_call_rows(
-                                 log_dir, event_dir,
-                                 llm_offsets=batch_llm_offsets,
-                                 event_offsets=batch_event_offsets,
-                                 tags=None,
-                             ))
-    # **只取这一批实跑的题**(评审 P2-1):`_IntentCache.__init__` 会把 out-dir
-    # 上已有的 `intents.jsonl` 全部读进 `_rows`(那个文件存在的理由就是断点重跑
-    # 不重付模型钱),而默认 out-dir 是固定的 `.local/t0`。不求交的话「先跑一次
-    # 全量、再跑 `--limit 1` 复现某题」会让 manifest 声称一道题的批用了两道题的
-    # 契约,`matrix.questions=1` 与这张表当场自相矛盾——而 manifest 的用途正是
-    # 「这批用的是哪一份冻结契约」。
-    batch_questions = {unit["question_key"] for unit in units}
-    intent_digests = {
-        key: ab_contract_digest(contract)
-        for key, contract in intents._rows.items()
-        if key in batch_questions
-    }
-    return int(state["failed"]), bool(state["stopped_by_budget"]), intent_digests
-
-
-def _ab_round_units(units: Sequence[dict]) -> list[tuple[int, list[dict]]]:
-    """按重复轮切段,**保持原顺序**。重复轮是最外层循环(§4.2)。"""
-    batches: dict[int, list[dict]] = {}
-    for unit in units:
-        batches.setdefault(int(unit["repeat"]), []).append(unit)
-    return [(repeat, batches[repeat]) for repeat in sorted(batches)]
-
-
-def _ab_run_batch(
-    batch: Sequence[dict], *, concurrency: int, deadline: float | None = None,
-    **kwargs: Any,
-) -> None:
-    """一轮里的全部配对单元。**首个逃逸出来的异常 ⇒ 整轮收摊**。
-
-    「逃逸出来的异常」是一个很窄的集合:单个 run 内部的失败已经在
-    `_run_ab_arm` 里被投影成 `status="failed"` 行并隔离掉了(与 `search` 同
-    口径),能到这里的只剩 §5.5 那几条硬断言不成立(契约不同一、声明的臂与
-    轨迹证据对不上)、`AskCancelled` 与 `KeyboardInterrupt`——每一条的正确反应
-    都是「先修再跑整批」,而不是接着烧几百次模型调用。
-
-    收摊要做两件事,少一件都不成立(codex 质量评审 P2-3):
-
-    * `cancel_event.set()` 唤醒**已经在跑**的单元——`shutdown(cancel_futures=
-      True)` 撤不掉已经被 worker 取出来的那些,它们只能靠自己的取消事件退出;
-    * `shutdown(cancel_futures=True)` 撤掉**还在队列里**的。此前这里是
-      `with ThreadPoolExecutor(...)` + `as_completed`,退出时走的是默认的
-      `shutdown(wait=True)`:剩下的单元一个不少地照跑完,Ctrl-C 也停不下来。
-
-    **T-EX8 整批墙钟预算**(`deadline` 非 `None` 时才生效,`None` = 今天的行为
-    逐字相同,下面每条新分支都先判 `deadline is not None`):
-
-    * 到点后**停止派发**——串行路在 `for unit in batch` 循环顶部判(`kwargs
-      ["state"]["stopped_by_budget"] = True` 后 `break`,批里剩下的单元不落行、
-      不发调用);并发路在整批开跑前若已过点直接**零派发**返回,mid-batch 那半
-      靠一个 `threading.Timer` 在 `deadline` 那一刻触发,复用**既有**的
-      `abort()`(设 `aborted` ⇒ `worker()` 入口不再派发新单元;唤醒
-      `active_events` ⇒ 在途单元的 `cancel_event` 被设,`run_ab_once` 尽快抛
-      `AskCancelled`)。`worker()` 入口另外**自己按墙钟判一次**:Timer 线程被
-      延迟时 `aborted` 在到点后短暂仍为假,只判它会漏派一个单元出去(评审
-      F5);那条早退也如实翻 `stopped_by_budget`,理由见该处注释。
-    * 在途单元的 `AskCancelled` 由 `_run_ab_arm` 按 `deadline` 转成一行
-      `status="cancelled"`(见该函数文档),**不**escaping 出 `worker()`,所以
-      这条预算路径不会触发 `except BaseException` 那条「先修再跑整批」的
-      `abort()`/`fatal` 级联——整批仍然干净地跑完,只是 `state
-      ["stopped_by_budget"]` 被标记为真,由 `_ab_loop`/`_run_ab` 读出并写进
-      manifest、决定退出码。
-    """
-    state = kwargs["state"]
-    if deadline is not None and time.monotonic() >= deadline:
-        # 已经过期的 deadline(常见于：预算在上一轮结束时就已经耗尽,这一整
-        # 轮从第一个单元开始就不该派发)。
-        state["stopped_by_budget"] = True
-        return
-    if concurrency <= 1:
-        # **不经过线程池**:`--concurrency 1` 的行为必须与并发落地前逐字一致,
-        # 包括「所有调用都在主线程里发生」这件事本身(与 `_search_loop` 同一条
-        # 理由:`ThreadPoolExecutor(max_workers=1)` 也会把调用挪到另一个线程,
-        # 单这一点就足以让 ContextVar 的可见性行为变掉)。
-        for unit in batch:
-            if deadline is not None and time.monotonic() >= deadline:
-                # 串行路没有「唤醒在途」这件事:检查点只在循环顶部,已经开跑的
-                # 单元此前从未被中途打断过,这里也不新引入这条能力(§13 只要求
-                # 「停止派发」,不要求串行路半路抢占)。
-                state["stopped_by_budget"] = True
-                break
-            _run_ab_unit(unit, concurrency=concurrency, deadline=deadline, **kwargs)
-        return
-    profile = kwargs["profile"]
-    runner: Runner = kwargs["runner"]
-    aborted = threading.Event()
-    active_events: list[threading.Event] = []
-    active_lock = threading.Lock()
-
-    def abort(reason: str) -> None:
-        # `aborted.set()` 与快照 `active_events` 在**同一把锁**里,`worker()` 的
-        # 登记处再复核一次——与 `_search_loop_concurrent` 逐字同形(codex #700
-        # R21 P2 在 T0 rig 上修过的同型缺陷,`ab` 这条路此前没跟上,评审 F5 /
-        # P2-3)。不这么做的失败场景:一个刚过了入口 `aborted` 检查的 worker 会
-        # 在快照之后才 append,带着一个**永远不会被 set** 的 `cancel_event` 开始
-        # 调模型,而 `shutdown(wait=True)` 只能等它跑完——`--max-wall-minutes`
-        # 因此被越过整整一次 Ask(最坏 `reasoning_timeout_seconds ×
-        # attempt_budget`),而那一行落的是 `status=done`,manifest 看不出来。
-        with active_lock:
-            if aborted.is_set():
-                return
-            aborted.set()
-            events = list(active_events)
-        for event in events:
-            event.set()
-        runner.say("ab aborted", reason)
-
-    budget_timer: threading.Timer | None = None
-    if deadline is not None:
-        def _budget_hit() -> None:
-            state["stopped_by_budget"] = True
-            abort("--max-wall-minutes 预算到点:停止派发、唤醒在途单元")
-
-        budget_timer = threading.Timer(
-            max(0.0, deadline - time.monotonic()), _budget_hit,
-        )
-        budget_timer.daemon = True
-        budget_timer.start()
-
-    def worker(unit: dict) -> None:
-        from app.core.request_context import reset_request_user, set_request_user
-
-        if deadline is not None and time.monotonic() >= deadline:
-            # 入口按**墙钟**直接判一次(T-EX8 要点 1 的字面要求),不只依赖
-            # `aborted`:Timer 线程被 GIL/OS 延迟时 `aborted` 在到点后短暂仍为
-            # 假,只判它的 worker 会在那个窗口里又从队列取一个新单元开跑
-            # (评审 F5)。
-            #
-            # 同时**如实翻** `stopped_by_budget`:队列里的单元确实因为预算没被
-            # 派发,而下面 `finally` 里的 `budget_timer.cancel()` 可能赶在 Timer
-            # 回调之前(全部 worker 都走这条早退、批循环因此立刻结束时),那一刻
-            # 只有这里能记下这件事。单键赋值在 GIL 下原子,与 `_budget_hit` 同
-            # 一条口径。
-            state["stopped_by_budget"] = True
-            return
-        if aborted.is_set():
-            # 已经决定收摊:还没真的开始跑的单元直接退出,不再发起模型调用。
-            # 预算到点(`_budget_hit` 调 `abort()`)与 §5.5 硬断言/
-            # `KeyboardInterrupt` 触发的收摊走的是同一个 `aborted` 标志,效果
-            # 相同——都是「不再派发新单元」。
-            return
-        cancel_event = threading.Event()
-        with active_lock:
-            # 与 `abort()` 在同一把锁下复核:收摊已经开始就不再登记、不再开跑
-            # (见 `abort()` 的说明;`_search_loop_concurrent` 同形)。
-            if aborted.is_set():
-                return
-            active_events.append(cancel_event)
-        ctx = set_request_user(profile)
-        try:
-            _run_ab_unit(
-                unit, concurrency=concurrency, cancel_event=cancel_event,
-                deadline=deadline, **kwargs,
-            )
-        finally:
-            reset_request_user(ctx)
-            with active_lock:
-                if cancel_event in active_events:
-                    active_events.remove(cancel_event)
-
-    pool = ThreadPoolExecutor(max_workers=concurrency)
-    fatal: BaseException | None = None
-    try:
-        futures = [pool.submit(worker, unit) for unit in batch]
-        try:
-            for future in as_completed(futures):
-                try:
-                    future.result()
-                except BaseException as exc:  # noqa: BLE001 — 见 docstring
-                    # 只传类名(codex #703 R1 P2):`str(exc)` 可能带本机路径
-                    # (如 `_write_ab_raw` 撞上 `PermissionError` 时把
-                    # `.local` 的绝对路径编进异常文本)或 provider 侧的请求
-                    # 细节,截 200 字不构成脱敏,进度日志与终端都不该收它。
-                    abort(type(exc).__name__)
-                    fatal = exc
-                    break
-        except KeyboardInterrupt as exc:
-            abort("KeyboardInterrupt")
-            fatal = exc
-    finally:
-        if budget_timer is not None:
-            budget_timer.cancel()
-        pool.shutdown(wait=True, cancel_futures=True)
-    if fatal is not None:
-        raise fatal
-
-
-def ab_contract_digest(contract: object) -> str:
-    """一份冻结契约的短码。§5.5-3「两臂必须引用同一条契约缓存行」的**比较对象**。
-
-    两臂共用同一份契约是 A/B 成立的前提(§5.4:契约不同,必答方面就不同,两臂
-    根本不在比同一件事)。今天它由构造保证——`_run_ab_unit` 只调一次
-    `_IntentCache.get`,两臂拿到的是同一个对象。断言的意义在于那条构造哪天被
-    改掉:把 `intents.get` 挪进臂的循环里,数据看起来照样出得来,而两臂已经在
-    比两件不同的事了。契约正文不进日志也不进数据集,所以比的是短码。
-    """
-    return merge_key(json.dumps(contract, ensure_ascii=False, sort_keys=True,
-                                default=str))
-
-
-#: 工作树有未提交改动时拼在 `code_sha` 后面的后缀;`git status` 自己也读不出来
-#: 时拼另一个(**不**默认干净:那会让 manifest 说一句它没验过的话)。两个后缀都
-#: 只用短码字符集里的字符(`-` 在 `[A-Za-z0-9_:\-.+→]` 内),40 位全 SHA 加上
-#: 它们仍在 `_is_short_code` 的 64 字符门槛内。
-_GIT_DIRTY_SUFFIX = "-dirty"
-_GIT_DIRTY_UNKNOWN_SUFFIX = "-dirty_unknown"
-
-
-def _ab_git_sha() -> str:
-    """`git rev-parse HEAD` 的**全 SHA**(40 位十六进制),读不出来(浅克隆、
-    非 git checkout、`git` 不在 PATH 上、超时)⇒ `"unknown"`,**不抛**
-    (T-EX8 要点 2)。
-
-    `code_sha` 是「冻结这一批跑在哪份代码上」的锚点,但它读不出来不该让一次
-    跑了几小时的批因为收尾时的一次诊断性 `git` 调用而报废——那不是这次跑批
-    要验的东西。`cwd=ROOT` 而不是当前工作目录:rig 可能被从任意目录调用。
-
-    **工作树脏就拼 `-dirty`**(评审 P3-5):rig 被 worktree 里的未提交改动驱动
-    是这个程序的常态,一个光秃秃的 commit SHA 会把这批数据锚到一份**不含实际
-    跑的代码**的提交上——而这个键的全部意义就是那条锚。`git status` 自己失败时
-    拼 `-dirty_unknown`,不静默当干净。
-    """
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True,
-            text=True, check=True, timeout=5,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return "unknown"
-    sha = result.stdout.strip()
-    if not sha:
-        return "unknown"
-    try:
-        status = subprocess.run(
-            ["git", "status", "--porcelain"], cwd=ROOT, capture_output=True,
-            text=True, check=True, timeout=5,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return sha + _GIT_DIRTY_UNKNOWN_SUFFIX
-    return sha + (_GIT_DIRTY_SUFFIX if status.stdout.strip() else "")
-
-
-def _write_ab_manifest(
-    runner: Runner, args: argparse.Namespace, *, units: Sequence[dict],
-    cells: Sequence[str], arms: Sequence[tuple[str, str]],
-    facts: Mapping[str, dict], model_contract: str | None, settings: Any,
-    intent_contract_digest_by_question: Mapping[str, str],
-    started_at: str, finished_at: str, stopped_by_budget: bool,
-) -> None:
-    """`ab` 收尾写 `<out-dir>/manifest.json`(T-EX8 要点 2;计划 Q9 · E3 通道)。
-
-    真正的闭集/隐私/`matrix` 子键契约全在 `app.eval.reflect_manifest`——这里
-    只把 `ab` 已经算好的事实翻成那份契约要的形状,不重新发明校验规则。
-
-    `matrix` 的基数子键(评审拍板,见 `reflect_manifest.
-    REQUIRED_MATRIX_KEYS_BY_CHANNEL["e3"]`)全部从 `units`/`arms` 直接数出来,
-    不借用 `cmd_ab` dry-run 那份 `unique_questions`(`(corpus_cell,
-    question_key)` 配对集合——按格去重会把「2 格 × 12 题」记成 24,这里要的是
-    12 道**真实**题)。`repeats` 是 `--round` 下的**这一轮**(等于 1),不是
-    `--repeats` 的总档位;轮号本身另记 `matrix["round_index"]`,不塞进
-    `repeats`。
-
-    **`cells` 与 `corpus_signature_by_cell` 从 `units` 实跑格收窄**(评审 F4 /
-    P1-2):`cells` 参数是 `--cell` 的**声明**格数,而 `ab_plan` 走 `ask_plan`
-    按 `row["corpus"] == corpus` 过滤——`--only-question A-q08`(只存在于 A 格)
-    在默认两格下出 6 个单元、全在 `A_nokg`,声明格数却是 2。不收窄的话
-    `corpus_signature_by_cell` 会带上一个这批压根没跑的格的签名,「冻结这批跑在
-    哪份语料上」这个事实当场变成假的。
-
-    **`planned_runs` 是这批 run 数的账**(额外子键,评审拍板;三条通道同规则):
-    E3 各格的题集**不相交**,所以五个基数相乘(`questions × cells × …`)比真实
-    run 数多出一个 `cells` 倍——`cells` 不是乘数。真正对得上的那个数只有
-    `len(units) × len(arms)`,单独写一个子键,不去改基数子键的语义。
-    """
-    ran_cells = {unit["corpus_cell"] for unit in units}
-    # 顺序按 `cells` 的声明顺序(与 dry-run 打印、`_ab_corpus_facts` 同序),
-    # 只是把没跑的格滤掉;不按集合迭代顺序,那会让 manifest 在两次相同的跑批
-    # 之间漂移。
-    ordered_cells = [cell for cell in cells if cell in ran_cells]
-    matrix: dict[str, Any] = {
-        "questions": len({unit["question_key"] for unit in units}),
-        "cells": len(ran_cells),
-        "efforts": len({unit["effort"] for unit in units}),
-        "arms": len(arms),
-        "repeats": 1 if args.round is not None else args.repeats,
-        "planned_runs": len(units) * len(arms),
-    }
-    if args.round is not None:
-        matrix["round_index"] = int(args.round)
-    budgets = {
-        "reasoning_timeout_seconds": int(
-            getattr(settings, "reasoning_timeout_seconds",
-                    REASONING_TIMEOUT_SECONDS_DEFAULT)
-        ),
-        # 复用那个常量,不再第三次抄一遍 `reasoning_max_retries` 的默认值
-        # (评审 P3-1:`getattr(settings, "reasoning_max_retries", 1)` 的兜底在
-        # 真跑里永远走不到,只被用例的 `SimpleNamespace()` 触发,而那个 `1` 是
-        # 同一个配置默认值的第三份镜像)。常量本身由一条守卫钉在
-        # `Settings().reasoning_max_retries` 上,与 dry-run 那行「请求上界」读的
-        # 是同一个数——两处从此不可能分叉。**登记的边界**:进程环境里把
-        # `REASONING_MAX_RETRIES` 显式调离默认值时,这个键仍写配置默认值算出的
-        # 预算;真实请求数由 llm.jsonl 行上的 `attempts` 事后给出(与
-        # `_ab_call_estimate` 同一条口径)。
-        "reasoning_attempt_budget": REASONING_ATTEMPT_BUDGET,
-        "max_wall_minutes": args.max_wall_minutes,
-        "batch_deadline_seconds": (
-            None if args.max_wall_minutes is None
-            else round(float(args.max_wall_minutes) * 60)
-        ),
-    }
-    row = build_manifest(
-        code_sha=_ab_git_sha(),
-        channel="e3",
-        arms=[format_arm(*arm) for arm in arms],
-        optimization_by_arm={format_arm(*arm): arm[1] for arm in arms},
-        common_baseline="off",
-        corpus_signature_by_cell={
-            cell: facts[cell]["corpus_signature"] for cell in ordered_cells
-        },
-        intent_contract_digest_by_question=dict(
-            intent_contract_digest_by_question),
-        model_contract=model_contract,
-        arm_order_seed=None,
-        matrix=matrix,
-        budgets=budgets,
-        started_at=started_at,
-        finished_at=finished_at,
-        stopped_by_budget=stopped_by_budget,
-    )
-    # `build_manifest` 内部已经验过一遍、并且 `deepcopy` 过,从它返回到写盘之间
-    # 这一行**没有任何手改**——所以这里不再复验一次(评审 F7 / P3-6:那是一行
-    # 死守卫,而它引的「与 `_ab_failed_row` 同一条纪律」也不成立:那边是先构造
-    # 再逐键覆写 `AB_FAILED_UNKNOWN_KEYS` 才复验,这里没有对应动作)。
-    # 落盘那两份走 `_write_manifest`——三条通道共用同一个写法(评审 P3-7 /
-    # T-EX4 P2 汇合项:E1/E2/E3 各内联一份的话,「最新 + 历史」这条规则会在
-    # 三处各自漂移)。
-    _write_manifest(row, runner=runner)
-
-
-# --- `state-probe`(E2:固定状态的真实 reflect 对照,T-EX7) -------------------
-#
-# 真正的驱动器/代理/记录面全在 `app.eval.reflect_state_probe`(纯逻辑,进标准
-# 门);这里只做薄适配:CLI 参数、臂枚举、跑前跑后只读证据、串行枚举
-# `(case, state_point, repeat, arm)`、写 `state-probe-<arm>.jsonl` 与
-# `.local/raw/`、收尾摘要与 manifest。与 `ab` 的关系:同样在 `seed` 建好的
-# 一次性测试库上进程内跑,但 E2 不合成、不落库(Q7)——**并发恒 1**:一条 run
-# 只有一次真实调用,并发只会污染排队时长,不像 `ab` 那样需要线程池。
-
-
-def state_probe_arms(args: argparse.Namespace) -> list[str]:
-    """`state-probe` 跑哪几条臂。**不给** ⇒ `STATE_PROBE_DEFAULT_ARMS`(U2 拍板
-    的默认三臂);给了就是逗号分隔的 `OPTIMIZATIONS` 词表子集,加
-    `prefix_delta_lean`(L)即可。
-
-    与 `ab_arms`/`reflect_ab.parse_arms` 是**同一个 `--arms` 参数、两套读法**:
-    那一套解析的是 `policy:optimization` 两维、且只认 `ARMS` 里的合法组合;
-    E2 结构上只有一维(`policy` 恒 `v2`,design §9.2 的 B 就是「当前 v2
-    snapshot」),拿两维的解析器读一维输入只会把 `off,prefix_snapshot` 错读成
-    `[("off","off"), ("prefix_snapshot","off")]` 这种没有意义的东西,所以这里
-    另开一份、不碰 `ab_arms`/`parse_arms` 本身一个字节。
-    """
-    if getattr(args, "arms", None) is None:
-        return list(STATE_PROBE_DEFAULT_ARMS)
-    tokens = [token.strip() for token in str(args.arms).split(",")]
-    if not tokens or any(not token for token in tokens):
-        raise ArmSpecError(
-            f"--arms 写法为空或有空段: {args.arms!r}(state-probe 是一维:逗号"
-            f"分隔的 {', '.join(OPTIMIZATIONS)} 子集,例如 "
-            "off,prefix_snapshot,prefix_delta)"
-        )
-    for token in tokens:
-        if token not in OPTIMIZATIONS:
-            raise ArmSpecError(
-                f"--arms 里的 {token!r} 不在 optimization 闭集里(可选 "
-                f"{', '.join(OPTIMIZATIONS)})"
-            )
-    duplicates = {token for token in tokens if tokens.count(token) > 1}
-    if duplicates:
-        raise ArmSpecError(
-            "--arms 里有重复的臂: " + ", ".join(sorted(duplicates)))
-    return tokens
-
-
-def _state_probe_looks_like_test_db(database_url: str) -> bool:
-    """`--database-url` 指的**库名**是不是以 `_test` 结尾。
-
-    库名按 URL 结构取(`urlsplit` 的 `path` 最后一段,再去掉文件扩展名),而不是
-    对整串 URL 做 `endswith`(T-EX7 质量评审 P3-6):
-
-    * `sqlite:///x_test.db` ⇒ 库名 `x_test` **收**(sqlite 路径带扩展名,`ab` 的
-      `AB_TEST_DB_SUFFIX` 判据是给没有扩展名的 PG 库名写的,照抄会把这个合法的
-      一次性测试库拒掉);
-    * `sqlite:///x_testing.db` ⇒ 库名 `x_testing` **拒**(不是 `_test` 结尾);
-    * `postgresql://h/db_test?sslmode=require` ⇒ 库名 `db_test` **收**(query
-      串不进库名,而 `endswith` 会被它挡住);
-    * `postgresql://u:p@h/prod?application_name=rig_test` ⇒ 库名 `prod` **拒**
-      (`endswith` 会被这串 query **骗过**去连生产库)。
-
-    与 `ab`(`AB_TEST_DB_SUFFIX` 的 `endswith`)于是在这四行上两侧分叉,**`ab`
-    刻意不动**(它的判据与用例是既有资产,改它是另一件事)——分叉本身登记给
-    T-EX11 统一。
-    """
-    from urllib.parse import urlsplit
-
-    path = urlsplit(str(database_url)).path
-    last_segment = path.rstrip("/").rsplit("/", 1)[-1]
-    stem = last_segment.rsplit(".", 1)[0] if "." in last_segment else last_segment
-    return stem.endswith(AB_TEST_DB_SUFFIX)
-
-
-def _state_probe_preflight(args: argparse.Namespace) -> str:
-    """真跑前(**`--dry-run` 下也拦**,同 `_ab_preflight` 的纪律)的硬前提。
-    返回空串 = 通过,否则是要打给用户的那句话。
-    """
-    if not args.database_url_explicit:
-        return ("state-probe 必须显式给 --database-url(计划 Q7:沿用 `seed` "
-                 "建好的一次性测试库,不读 .env 猜)")
-    if not _state_probe_looks_like_test_db(args.database_url):
-        return (f"state-probe 的 --database-url 必须指向名字以 "
-                 f"{AB_TEST_DB_SUFFIX!r} 结尾的一次性测试库(Q7:E2 结构上就"
-                 "不该跑在测试库之外的任何库上)")
-    try:
-        arms = state_probe_arms(args)
-    except ArmSpecError as exc:
-        return str(exc)
-    if not arms:
-        return "state-probe 至少要跑一条臂"
-    # 判据读的是**哨兵原值**(`--concurrency` 没给时是 `None`,给了就是用户敲的
-    # 那个数):`main()` 里的 `max(1, ...)` 会把 `0` clamp 成 `1`,读 clamp 之后
-    # 的值等于放行 `--concurrency 0`。
-    if args.concurrency_given is not None and args.concurrency_given != 1:
-        return (f"state-probe 的 --concurrency 恒为 1(给了 "
-                 f"{args.concurrency_given!r}):E2 每条 run 只有一次真实调用,"
-                 "并发只会污染排队时长——响亮拒绝,不降级")
-    return ""
-
-
-def _state_probe_repeats(args: argparse.Namespace) -> int:
-    """`--repeats` 的默认值 E2 与 `ab` 不同(2 次重复,design §9.2:12 例 ×
-    3 状态点 × 3 臂 × 2 重复 = 216 次逻辑调用),所以**不吃** `ab` 那份默认值
-    (3)。
-
-    「有没有显式给」由 argparse 的 `None` 哨兵回答(`main()` 把哨兵填成 `ab` 的
-    旧默认值之前先原样存一份 `repeats_given`),不是靠扫 `sys.argv` 找逐字的
-    `--repeats`:argparse 接受任何无歧义前缀缩写,`--repeat 5` 于是能让扫 argv
-    的那份判据答「没给」而 `args.repeats` 已经是 5 —— 用户要 5 会静默拿到 2
-    (T-EX7 评审 F8-5 / P2-2)。
-    """
-    if args.repeats_given is not None:
-        # 显式给了就照用 `args.repeats`——它是同一个值过了 `main()` 里那条共享
-        # `max(1, ...)` clamp 之后的样子(`--repeats 0` ⇒ 1,与 `ab` 逐字同款)。
-        return args.repeats
-    return 2
-
-
-#: 剧本步的 `arguments` 里承载**检索查询串**的键。一个键的值是串 ⇒ 一串;是
-#: 列表 ⇒ 按元素个数数(design 允许一轮多串,今天的案例集每轮恰好一串)。
-#: 数它们而不是数「轮数」:embedding 是按 distinct 查询串发的
-#: (`knowledge_query.embed_query` 逐串调),一轮两串就是两次。
-STATE_PROBE_QUERY_ARG_KEYS: tuple[str, ...] = ("query", "queries")
-
-
-def _state_probe_query_strings(step: Mapping[str, Any]) -> int:
-    """一个剧本步会发出多少个检索查询串(**下限 1**)。
-
-    枚举/精确查找类动作(`enumerate_kg_objects` / `exact_lookup` …)的
-    `arguments` 里没有查询串,它们未必真的触发 `retrieval_query_embedding`
-    ——但这一行是**上界**,所以按「这一轮至多一次」算,不按 0 算。
-    """
-    arguments = step.get("arguments") or {}
-    strings = 0
-    for key in STATE_PROBE_QUERY_ARG_KEYS:
-        value = arguments.get(key)
-        if isinstance(value, str):
-            strings += 1
-        elif isinstance(value, (list, tuple)):
-            strings += len(value)
-    return max(1, strings)
-
-
-def _state_probe_embedding_ceiling(
-    cases: Sequence[StateProbeCase], arms: Sequence[str], repeats: int,
-) -> tuple[int, int, int]:
-    """embedding 上界的三个组成部分:`(种子侧, 剧本侧, 总数)`。
-
-    **种子侧就是第 0 轮**(T-EX7 评审 F3 / P2-3):`run()` 拿到非空
-    `intent_queries` 之后先跑一轮种子检索(计划 M3:种子是 plan 的替代品),
-    每个 distinct 种子串各要一次 `retrieval_query_embedding`。种子数从冻结契约
-    确定性地算出来(`prepare_frozen_intent`,**零模型调用**),不是估的:
-    `max(max_initial_subqueries, 1 + 必答方面数)` 截过之后的那个长度。这一轮
-    与状态点无关——每一格 run 都从第 0 轮起跑,所以要乘 `STATE_POINT_COUNT`。
-
-    漏掉它的后果不是差一点:默认三臂两重复下种子侧和剧本侧几乎一样大,按只算
-    剧本侧的那个数去配 embedding 配额,批会在一半处配额耗尽,而 E2 没有按格
-    续跑的平衡机制。
-    """
-    seed_per_case = sum(
-        len(prepare_frozen_intent(
-            case.intent_contract, case.question, STATE_PROBE_EFFORT,
-        )["intent_queries"])
-        for case in cases
-    )
-    seed_side = seed_per_case * STATE_POINT_COUNT
-    script_side = sum(
-        sum(
-            _state_probe_query_strings(step)
-            for step in case.script[:turn]
-        )
-        for case in cases
-        for turn in case.state_points
-    )
-    per_run_set = seed_side + script_side
-    return (
-        seed_side * len(arms) * repeats,
-        script_side * len(arms) * repeats,
-        per_run_set * len(arms) * repeats,
-    )
-
-
-def _state_probe_call_estimate(
-    cases: Sequence[StateProbeCase], arms: Sequence[str], repeats: int,
-) -> tuple[str, str, str]:
-    """dry-run 打印的三个数(计划 T-EX7 要点):逻辑调用数(真实上界,不是估计
-    ——每格恰好一次真实转发,§9.2)、embedding 调用**上界(含首轮种子检索)**、
-    请求上界。
-    """
-    runs = len(cases) * STATE_POINT_COUNT * len(arms) * repeats
-    seed_calls, script_calls, embedding_ceiling = _state_probe_embedding_ceiling(
-        cases, arms, repeats)
-    calls_line = (
-        f"{runs}(= {len(cases)} 例 × {STATE_POINT_COUNT} 状态点 × "
-        f"{len(arms)} 臂 × {repeats} 重复;每格恰好一次真实转发,不是估计)"
-    )
-    embedding_line = (
-        f"≤ {embedding_ceiling}(上界,含首轮种子检索:种子侧 {seed_calls} + "
-        f"剧本侧 {script_calls};都已按 {len(arms)} 臂 × {repeats} 重复展开,"
-        "不计进上面的逻辑调用数。仍是上界而不是精确值——枚举/精确查找类动作"
-        "未必触发 embedding,请求内相同查询串也只算一次)"
-    )
-    request_line = (
-        f"≤ {runs * REASONING_ATTEMPT_BUDGET}(重试预算 ×"
-        f"{REASONING_ATTEMPT_BUDGET})"
-    )
-    return calls_line, embedding_line, request_line
-
-
-def _state_probe_bind_process_env(args: argparse.Namespace) -> None:
-    """把 E2 真跑要的环境变量装进**本进程**。**必须在任何
-    `import app.core.config` 之前**(与 `_ab_process_env` 同一条理由;
-    `app.core.config` 在 import 时就把 `SILICON_NOTEBOOK_ENV_FILE` 读成模块级
-    常量,晚一步 `--env-file` 就静默失效)。
-
-    `REASONING_REFLECT_MEASURE_CONTEXT=true` 全部臂都开(同 `ab` 拍板 Q2):
-    E2 量的正是上下文分块那几列,少了它整批测量列会静默缺失(逐臂回读硬门在
-    `_settings_by_arm`)。
-    """
-    env = _rig_process_env(args, database_url=args.database_url)
-    env["REASONING_REFLECT_MEASURE_CONTEXT"] = "true"
-    os.environ.update(env)
-
-
-def _state_probe_steps_problem(cases: Sequence[StateProbeCase]) -> str:
-    """状态点轮号与 `STATE_PROBE_EFFORT` 的 `max_reasoning_steps` 是否相容。
-    返回空串 = 相容,否则是要打给用户的那句话(`--dry-run` 下也拦)。
-
-    第 k 个状态点的跑法是「剧本推进 1..k 轮,第 k+1 轮转发」,所以这一格 run 至少
-    要跑到第 `k+1` 轮 —— 而档位的 `max_reasoning_steps` 是 `run()` 的轮数硬上限。
-    加载器的 `_assert_state_points` 只核 `< len(script)`,与档位无关(T-EX7 质量
-    评审 P3-10):案例集哪天写一例 `state_points=[1,3,8]`,那一格会在真跑到第
-    8 轮时以一句「has 8 reflect step(s), expected 9」停批,而那句话跟档位一个字
-    都没提。这条闸让它在第一个模型调用之前就说清是哪一例、差在哪。
-    """
-    from app.core.ask_retrieval_policy import ask_retrieval_limits
-
-    ceiling = ask_retrieval_limits(STATE_PROBE_EFFORT).max_reasoning_steps
-    over = [
-        (case.case_key, max(case.state_points))
-        for case in cases
-        if max(case.state_points) + 1 > ceiling
-    ]
-    if not over:
-        return ""
-    detail = ", ".join(f"{key}(最后一个状态点第 {turn} 轮)" for key, turn in over)
-    return (
-        f"state-probe 的 effort={STATE_PROBE_EFFORT} 只跑得到第 {ceiling} 轮"
-        f"(ask_retrieval_limits.max_reasoning_steps),而这几例的第 k+1 轮"
-        f"越界: {detail}"
-    )
-
-
-def cmd_state_probe(args: argparse.Namespace, runner: Runner) -> int:
-    """E2:固定状态的真实 reflect 对照(计划 T-EX7)。薄适配——真正的驱动器/
-    代理/记录面全在 `app.eval.reflect_state_probe`。
-
-    `--dry-run` 与真跑读**同一份**枚举(`load_state_probe_case_set()` +
-    `state_probe_arms(args)` + `_state_probe_repeats(args)`),先筛(`--only-case`)
-    后限(`--limit`),与 `search` 的既有口径同款。
-
-    真跑时 `_rig_process_env` 在**加载案例集之前**装进本进程(见
-    `_state_probe_bind_process_env`):`load_state_probe_case_set` 自己就要
-    `from app.core.config import Settings`(它按 `Settings.model_fields` 核
-    `settings_overrides`),而 `app.core.config` 在 **import 时**读一次
-    `SILICON_NOTEBOOK_ENV_FILE`——先加载再设环境,`--env-file` 会静默失效,
-    整批于是跑在当前 checkout 的 `.env` 上。
-    """
-    problem = _state_probe_preflight(args)
-    if problem:
-        print("ERROR: " + problem, file=sys.stderr)
-        return 2
-    arms = state_probe_arms(args)
-    repeats = _state_probe_repeats(args)
-    if not runner.dry_run:
-        _state_probe_bind_process_env(args)
-    cases, digest = load_state_probe_case_set()
-    if args.only_case:
-        wanted = set(args.only_case)
-        cases = [case for case in cases if case.case_key in wanted]
-    if args.limit is not None:
-        cases = cases[: args.limit]
-    if not cases:
-        print("ERROR: state-probe 筛完(--only-case/--limit)之后零个 case",
-              file=sys.stderr)
-        return 2
-    steps_problem = _state_probe_steps_problem(cases)
-    if steps_problem:
-        print("ERROR: " + steps_problem, file=sys.stderr)
-        return 2
-
-    runner.say("target", "一次性测试库(Q7):只跑检索、不合成、不落库")
-    runner.say("database-url", f"<given>(测试库,以 {AB_TEST_DB_SUFFIX} 结尾)")
-    runner.say(
-        "arms",
-        ", ".join(arms) + "(policy 恒 v2;off = design §9.2 的 B,"
-        "当前 v2 snapshot;并发恒 1)",
-    )
-    runner.say(
-        "measurement",
-        "REASONING_REFLECT_MEASURE_CONTEXT=true(全部臂都开,同 `ab` 拍板 Q2)",
-    )
-    runner.say("effort", STATE_PROBE_EFFORT)
-    runner.say("repeats", str(repeats))
-    runner.say("cases", f"{len(cases)} 例"
-               + (f"(digest={digest})" if not runner.dry_run else ""))
-    for index, label in enumerate(STATE_POINT_LABELS):
-        runner.say("state point", f"{index}={label}")
-    calls_line, embedding_line, request_line = _state_probe_call_estimate(
-        cases, arms, repeats)
-    # 行标是「整批总数」而不是「per state point」:这个数已经把三个状态点乘进去
-    # 了(评审 F8-6)。
-    runner.say("model calls (real, total)", calls_line)
-    runner.say("embedding calls (separate, upper bound)", embedding_line)
-    runner.say("request ceiling", request_line)
-    runner.say(
-        "timeout (per call)",
-        f"{REASONING_TIMEOUT_SECONDS_DEFAULT}s(镜像 Settings()."
-        "reasoning_timeout_seconds 的默认值,与 `ab`/`prefix-probe` 那一行读同"
-        "一个常量;真跑读的是构造出来的那一份,可能被 --env-file 覆盖)",
-    )
-    for case in cases:
-        runner.say(
-            "state probe case",
-            f"{case.case_key} corpus_cell={case.corpus_cell} "
-            f"turns={list(case.state_points)}",
-        )
-    runner.say(
-        "out",
-        f"{runner.out_dir}/state-probe-<arm>.jsonl + "
-        f"{runner.out_dir}/state-probe-summary.{{md,json}} + "
-        f"{runner.out_dir}/calls-<arm>.jsonl + "
-        f"{runner.out_dir}/manifest.json",
-    )
-    runner.say(
-        "local only",
-        f"{runner.out_dir}/raw/<case>-<point>-<arm>-<repeat>.json"
-        "(转发轮与剧本轮的消息/schema_hint/模型决定原文——不进数据集/"
-        "不进仓库)",
-    )
-    runner.say(
-        "not a real trajectory",
-        "模型选出的动作只记录不执行——这批数据测的是固定观察下的策略,"
-        "不是它自洽的真实轨迹(design §9.2)",
-    )
-    if runner.dry_run:
-        return 0
-    return _run_state_probe(args, runner, cases, arms, repeats, digest)
-
-
-def _state_probe_notebook_ids(
-    database_url: str, cases: Sequence[StateProbeCase],
-) -> dict[str, str]:
-    """这一批实际用到的语料格 → 测试库里的 notebook id。**从跑批的 case 集
-    收窄**(与 `ab` 的 `cells`→`ran_cells` 同一条纪律),不是
-    `ALLOWED_CORPUS_CELLS` 的全量——`--only-case`/`--limit` 筛完可能只剩一格。
-    """
-    cells = sorted({case.corpus_cell for case in cases})
-    return _ab_notebook_ids(database_url, cells)
-
-
-#: 一格失败行的 `status`。**取自 E2 自己的词表**(`PROBE_FAILED_STATUSES` =
-#: `{"cancelled", "error"}`,来源是 `app/core/llm.py` 的调用出口),不是 `ab` 的
-#: `JOB_STATUSES`。这两条通道的 `status` 是两套词表:写 `ab` 的 `"failed"` 会让
-#: `summarize_state_probe` 一格都数不到它——摘要于是在一批真有失败的数据上打
-#: 「失败(取消/出错):0」,而 `n_rows` 把它们算了进去(T-EX7 评审 F1 / P1)。
-#: rig 这一侧的失败是「这次调用死了」,所以落 `error`;`cancelled` 由 E2 自己的
-#: 取消路径写(rig 不传 `cancel_event`,结构上到不了)。
-STATE_PROBE_FAILED_ROW_STATUS = "error"
-#: 词表漂移时**导入期**就红:这个短码哪天不在 E2 的失败词表里,摘要与退出码会
-#: 一起把失败静默数成 0,而那是一个只有读表人几周后才会发现的错。
-assert STATE_PROBE_FAILED_ROW_STATUS in PROBE_FAILED_STATUSES
-
-
-def _probe_failed_row(
-    *, case: StateProbeCase, state_point_index: int, repeat: int, arm: str,
-) -> dict[str, Any]:
-    """一格没跑成的状态点。`PROBE_ROW_KEYS` 没有专门的失败形状,复用同一张
-    闭集表——失败行要能和成功行放进同一张按臂/按状态点分组的摘要
-    (与 `_ab_failed_row` 同一条纪律):除了标签四列与 `status`,其余全 `None`
-    (`_count`/`_flag`/`_short_code` 的「缺席=unknown」口径,不折成 0/False)。
-
-    `status` 见 `STATE_PROBE_FAILED_ROW_STATUS`:纪律照 `ab` 抄,**词表不能照抄**。
-    """
-    row: dict[str, Any] = {key: None for key in PROBE_ROW_KEYS}
-    row.update({
-        "case_key": case.case_key,
-        "state_point": state_point_index,
-        "repeat": repeat,
-        "arm": arm,
-        "optimization": arm,
-        "status": STATE_PROBE_FAILED_ROW_STATUS,
-    })
-    assert_probe_row_closed(row)
-    return row
-
-
-def _write_probe_raw(
-    runner: Runner, case: StateProbeCase, state_point_index: int, arm: str,
-    repeat: int, driver: Any,
-) -> None:
-    """转发轮的消息/schema_hint/模型决定原文的存档。**只进 `.local/raw/`**
-    (Q6:决定 JSON 全文与四臂各自的消息正文一个字都不进数据集)。
-
-    三样是 T-EX5 接口清单点名、T-EX7 评审 F4 要求补齐的:
-
-    * `forwarded.stats` —— 那一次真实调用的 `call_stats` 读数(含 provider 回的
-      `usage.cached_tokens`)。设计 §9.1/M2 说 `cached_tokens`「只作附录一个
-      计数」,而 E2 的行闭集(Q6)没有 `usage` 列 —— 不存这里,它在 E2 的任何
-      产物里都不存在;
-    * `scripted_turns` —— 前 k 轮**每一轮**的 messages/schema_hint/payload,不只是
-      `scripted_actions()` 那串动作名。四臂在同一状态点上的分块差异要靠逐轮
-      消息才复核得出来;
-    * 剧本轮与转发轮的消息因此都在同一份文件里,人工核对不用跨文件拼。
-    """
-    forwarded = driver.forwarded
-    payload = {
-        "case_key": case.case_key,
-        "state_point": state_point_index,
-        "arm": arm,
-        "repeat": repeat,
-        "scripted_actions": list(driver.scripted_actions()),
-        "scripted_turns": [
-            {
-                "turn": scripted.turn,
-                "messages": [dict(message) for message in scripted.messages],
-                "schema_hint": scripted.schema_hint,
-                "payload": dict(scripted.payload),
-            }
-            for scripted in driver.scripted_turns
-        ],
-        "forwarded": (
-            None if forwarded is None else {
-                "turn": forwarded.turn,
-                "messages": [dict(message) for message in forwarded.messages],
-                "schema_hint": forwarded.schema_hint,
-                "raw": forwarded.raw,
-                "stats": dict(forwarded.stats or {}),
-                "error": forwarded.error,
-            }
-        ),
-    }
-    path = (
-        runner.out_dir / "raw" /
-        f"{case.case_key}-{state_point_index}-{arm}-{repeat}.json"
-    )
-    runner.write(path, json.dumps(payload, ensure_ascii=False, indent=2))
-
-
-def _state_probe_call_tags(
-    case: StateProbeCase, arm: str, repeat: int,
-) -> dict[str, Any]:
-    """per-call 行的 run 级标签。E2 恒串行,所以臂那一维是**可信的**(不像 `ab`
-    的并发路要整批 unknown)。
-
-    键集是 `reflect_context_bench.CALL_TAG_KEYS` 的闭集(三条通道共用),里面
-    没有 `case_key`/`state_point` 两列:E2 的 `question_key` 与 case 一一对应
-    (12 例 12 个题号),所以 case 那一维不丢;**状态点那一维在这张表里表达不
-    出来**,per-call 行因此只归因到 `(case, arm, repeat)`,格内的三个状态点靠
-    文件里的行序区分。加这两列要动共用闭集,登记给 T-EX11。
-    """
-    return {
-        "arm": arm,
-        "optimization": arm,
-        "question_key": case.question_key,
-        "corpus_cell": case.corpus_cell,
-        "effort": STATE_PROBE_EFFORT,
-        "repeat": int(repeat),
-    }
-
-
-def _run_one_state_probe_point(
-    runner: Runner, case: StateProbeCase, state_point_index: int, repeat: int,
-    optimization: str, *, settings_by_arm: Mapping[str, Any],
-    repos_by_arm: Mapping[str, Any], notebooks: Mapping[str, str],
-    actor_id: str, log_dir: Path, event_dir: Path,
-) -> dict[str, Any]:
-    """一格 `(case, state_point, repeat, arm)`。
-
-    三类异常停批、其余按格隔离:
-
-    * `StateProbeError`(继承 `BaseException`)—— 「这一格的剧本/编排没对上
-      『同一状态点』这句话」(见该类型的 docstring);
-    * 裸 `ValueError` / `TypeError` —— 同样是「剧本没写对」(键改名、参数形状不
-      对),不是「这次模型调用失败了」。拍板(T-EX5 质量评审 → 给 T-EX7)是
-      **遇到任一都停批非零**:按格失败继续跑会让余下 200 多格照跑几个小时,产出
-      一批某臂某状态点缺格的不平衡数据,而根因本该在第一格就说清;
-    * 其余 `Exception` 是这一格真实失败,落一行 `status=error` 并继续跑批(与
-      `ab` 的 `_run_ab_arm` 同一条隔离纪律)。
-
-    per-call 行(`calls-<arm>.jsonl`)按**这一格自己的窗口**出:偏移在调用之前
-    记、`finally` 里读 —— 失败那一格也要出行,它那次调用的日志/事件同样在。
-    """
-    notebook_id = notebooks[case.corpus_cell]
-    repo = repos_by_arm[optimization]
-    llm_offsets = _ab_llm_offsets(log_dir)
-    event_offsets = _ab_llm_offsets(event_dir, glob=RIG_EVENT_LOG_GLOB)
-    try:
-        # `repo.chat(...)` 也在 try 里:一次瞬时的模型服务解析失败是这一格的
-        # 失败,不该作废整批(评审 P3-10)。
-        real_client = repo.chat(REFLECT_CHAT_WORKLOAD)
-        point = run_state_probe_point(
-            repo, settings_by_arm[optimization], case, state_point_index,
-            real_client, notebook_id=notebook_id, arm=optimization,
-            optimization=optimization, repeat=repeat,
-            effort=STATE_PROBE_EFFORT, cancel_event=None, actor_id=actor_id,
-        )
-    except (StateProbeError, ValueError, TypeError):
-        # `StateProbeError` 继承 `BaseException`,本来就穿过下面的
-        # `except Exception`;写在这里是**文档性**的(它与另两类同一条「停批」
-        # 语义,读者不必去翻类型定义才知道这一格不会被隔离)。
-        raise
-    except Exception as exc:  # noqa: BLE001 — 单格失败要隔离,不作废整批
-        runner.say(
-            "state probe failed",
-            f"{case.case_key} point={state_point_index} arm={optimization} "
-            f"r{repeat} FAILED {type(exc).__name__}",
-        )
-        return _probe_failed_row(
-            case=case, state_point_index=state_point_index, repeat=repeat,
-            arm=optimization,
-        )
-    finally:
-        _write_call_rows(
-            runner.out_dir, optimization,
-            _rig_call_rows(
-                log_dir, event_dir, llm_offsets=llm_offsets,
-                event_offsets=event_offsets,
-                tags=_state_probe_call_tags(case, optimization, repeat),
-            ),
-        )
-    _write_probe_raw(
-        runner, case, state_point_index, optimization, repeat, point.driver)
-    runner.say(
-        "state probe done",
-        f"{case.case_key} point={state_point_index} arm={optimization} "
-        f"r{repeat} call_wall_ms={point.row.get('call_wall_ms')} "
-        f"decision_action={point.row.get('decision_action')}",
-    )
-    return point.row
-
-
-def _render_state_probe_summary_md(summary: Mapping[str, Any]) -> str:
-    """`summarize_state_probe` 的产出 → 一份人读的 markdown。零比率,只有计数
-    与中位数(与该函数本身「不产出任何比率型结论」同一条纪律)。
-
-    六个顶层键用 `[]` 取值而不是 `.get()`(T-EX7 质量评审 P3-11):`.get()` 让
-    上游任何一次键改名都静默渲染成 `None`,而这份 md 正是几周后被人当结论读的
-    那一份。分格单元键仍用 `.get()`——那一层的缺席是「该臂这一格没有这项观测」,
-    是真的 unknown。
-    """
-    lines = [
-        "# state-probe 摘要(E2)",
-        "",
-        "**模型选出的动作只记录不执行——这批数据测的是固定观察下的策略,"
-        "不是它自洽的真实轨迹(design §9.2)。**",
-        "",
-        f"- 总行数:{summary['rows_total']}",
-        f"- 失败(取消/出错):{summary['failed_rows']}",
-        f"- 本地响应缓存出口(结构上该是 0,`bypass_cache=True`):"
-        f"{summary['local_cache_exit_rows']}",
-        f"- status 缺失:{summary['status_unknown_rows']}",
-        f"- 第三个状态点未越过压缩边界(如实标 False,不调剧本去凑):"
-        f"{summary['compaction_boundary_not_reached_rows']}",
-        f"- 压缩边界读数缺失(该臂无此观测,unknown ≠ False):"
-        f"{summary['compaction_boundary_unknown_rows']}",
-        "",
-    ]
-    for label, arms in (summary.get("by_state_point") or {}).items():
-        lines.append(f"## {label}")
-        lines.append("")
-        lines.append(
-            "| arm | n_rows | n_ok | n_failed | call_wall_ms_p50 | "
-            "response_chars_p50 |")
-        lines.append("| --- | --- | --- | --- | --- | --- |")
-        for arm, cell in arms.items():
-            lines.append(
-                f"| {arm} | {cell.get('n_rows')} | {cell.get('n_ok')} | "
-                f"{cell.get('n_failed')} | {cell.get('call_wall_ms_p50')} | "
-                f"{cell.get('response_chars_p50')} |"
-            )
-        lines.append("")
-    lines.append(
-        "**归因边界(design §5 风险 5)**:P↔B 的差里混着指令/工具说明的布局"
-        "改动,不能宣称纯缓存因果;D↔L 在固定状态点上只看得见净增的那一侧"
-        "(省的那一侧结构上看不见);臂序在每个 (case, 状态点, 重复) 块内按重复"
-        "轮号奇偶交替正/反序,块内的单调漂移(provider 预热、限流退避、连接池"
-        "升温)因此在两轮之间相互抵消而不是整份压在最后一臂上——但**单数轮的"
-        "批**(`--repeats 1`)没有那一半抵消,`call_wall_ms_p50` 的臂间差里仍混"
-        "着块内漂移。"
-    )
-    return "\n".join(lines) + "\n"
-
-
-#: E2 的枚举维度,**从外到内**。真实循环(`_state_probe_plan`)与 manifest 的
-#: `order` 串(`_state_probe_order_label`)都只认这一份。
-STATE_PROBE_ORDER_DIMENSIONS: tuple[str, ...] = (
-    "case", "state_point", "repeat", "arm",
-)
-
-
-def _state_probe_plan(
-    cases: Sequence[StateProbeCase], arms: Sequence[str], repeats: int,
-) -> list[tuple[StateProbeCase, int, int, str]]:
-    """整批的格序:`case → state_point → repeat → arm`,**臂在最内层**。
-
-    臂在最内层是 E2 的核心设计(design §9.2「四臂背靠背站在同一状态点上」):
-    块内的 provider 状态差异因此最小。
-
-    **臂序按重复轮号奇偶交替正/反序**(T-EX7 质量评审 P3-5):固定臂序会把块内
-    的单调漂移(预热、限流退避、连接池升温)整份压在最后一条臂上,而重复轮再多
-    也不抵消——顺序从不变。交替是**确定性**的(没有随机、没有种子,manifest 的
-    `arm_order_seed` 因此如实写 `None`),两轮之间那半漂移相互抵消。
-    """
-    plan: list[tuple[StateProbeCase, int, int, str]] = []
-    for case in cases:
-        for state_point_index in range(STATE_POINT_COUNT):
-            for repeat in range(1, repeats + 1):
-                ordered = (
-                    list(arms) if repeat % 2 == 1 else list(reversed(arms))
-                )
-                for optimization in ordered:
-                    plan.append(
-                        (case, state_point_index, repeat, optimization))
-    return plan
-
-
-#: 块内臂序在这一批里**真的**交替过(至少两个块的臂序不同)。
-STATE_PROBE_ARM_ORDER_ALTERNATING = "alt_by_repeat_parity"
-#: 交替在这一批里**观察不到**(只有一条臂,或只有一轮重复)——不是「没交替」。
-STATE_PROBE_ARM_ORDER_UNOBSERVED = "alt_unobserved"
-
-
-def _state_probe_order_label(
-    plan: Sequence[tuple[StateProbeCase, int, int, str]],
-) -> str:
-    """manifest 的 `order` 串,**从真实计划里读出来**(不是手写常量)。
-
-    手写的那种串与循环之间零关联:臂被挪到最外层时它照样说「臂在最内层」,而
-    这一键正是几周后判断「块内漂移抵不抵消」的唯一依据(T-EX7 质量评审 P2-4 /
-    P3-5)。这里按每一维的**分段数**排序得到嵌套顺序:内层维换值更频繁,分段
-    数更多。
-
-    只有一个取值的维度(`--arms off` 的 arm、`--repeats 1` 的 repeat)不带任何
-    位置信息 —— 它们的嵌套顺序在这一批里**观察不到**,所以按
-    `STATE_PROBE_ORDER_DIMENSIONS` 的声明位置补回原位,而不是让它们因为「没换过
-    值」冒充最外层。
-
-    末尾那一段(`:alt_by_repeat_parity` / `:alt_unobserved`)说的是**块内臂序有
-    没有真的交替过**,同样是数出来的。`arm_order_seed` 仍然如实写 `None`:交替
-    是确定性的,这里没有任何随机、也就没有种子。
-
-    值形状受 `reflect_manifest` 那道闸约束(短码:无空格、字符集
-    `[A-Za-z0-9_:\\-.+→]`、≤64 字),所以这里不写中文说明——臂序对读数的混淆
-    交代写在 `state-probe-summary.md` 的「归因边界」段里。
-    """
-    columns: dict[str, list[Any]] = {
-        "case": [cell[0].case_key for cell in plan],
-        "state_point": [cell[1] for cell in plan],
-        "repeat": [cell[2] for cell in plan],
-        "arm": [cell[3] for cell in plan],
-    }
-
-    def _segments(values: Sequence[Any]) -> int:
-        return 1 + sum(
-            1 for index in range(1, len(values))
-            if values[index] != values[index - 1]
-        )
-
-    segments = {name: _segments(values) for name, values in columns.items()}
-    varying = [
-        name for name in STATE_PROBE_ORDER_DIMENSIONS
-        if len(set(columns[name])) > 1
-    ]
-    observed = sorted(varying, key=lambda name: segments[name])
-    nesting = list(STATE_PROBE_ORDER_DIMENSIONS)
-    for slot, name in zip(
-        [index for index, dim in enumerate(nesting) if dim in varying],
-        observed,
-    ):
-        nesting[slot] = name
-    blocks: dict[tuple[str, int, int], list[str]] = {}
-    for case, state_point_index, repeat, optimization in plan:
-        blocks.setdefault(
-            (case.case_key, state_point_index, repeat), []).append(optimization)
-    arm_orders = {tuple(block) for block in blocks.values()}
-    alternation = (
-        STATE_PROBE_ARM_ORDER_ALTERNATING if len(arm_orders) > 1
-        else STATE_PROBE_ARM_ORDER_UNOBSERVED
-    )
-    return "→".join(nesting) + ":" + alternation
-
-
-def _run_state_probe(
-    args: argparse.Namespace, runner: Runner,
-    cases: Sequence[StateProbeCase], arms: Sequence[str], repeats: int,
-    case_set_digest_code: str,
-) -> int:
-    """`state-probe` 的真跑路径。与 `_run_ab` 同形的几件事:每臂一个 repo
-    (`_search_repository`,而不是一个 repo 加一个 settings 参数——理由与 `ab`
-    逐字相同,`from_repository` 读的是传进去的那份 Settings,但臂由代理决定
-    这一半这里成立,而 `notebook_id` 与 `actor_id` 仍需要参照臂一份);跑前
-    跑后各点一次**测试库自己**的只读证据(Q7);收尾写摘要与 manifest。
-
-    **并发恒 1**——没有线程池、没有 `deadline`/`cancel_event` 之外的花样:E2
-    每格只有一次真实调用,`_state_probe_preflight` 已经把
-    `--concurrency != 1` 挡在门外。
-
-    进程环境不在这里装:它必须早于 `load_state_probe_case_set()` 的
-    `app.core.config` import(见 `_state_probe_bind_process_env` 与
-    `cmd_state_probe` 的调用点)。
-    """
-    import contextlib
-    from datetime import datetime
-
-    from app.core.request_context import reset_request_user, set_request_user
-    from app.services.reasoning_retrieval import kg_in_scope_for
-
-    pair_arms = [("v2", optimization) for optimization in arms]
-    settings_by_pair = _settings_by_arm(pair_arms)
-    settings_by_arm = {
-        optimization: settings_by_pair[("v2", optimization)]
-        for optimization in arms
-    }
-    reference_arm = arms[0]
-    repos_by_arm = {
-        optimization: _search_repository(settings_by_arm[optimization])
-        for optimization in arms
-    }
-    reference_repo = repos_by_arm[reference_arm]
-    runner.say(
-        "arm repositories",
-        f"{len(arms)} 条臂各一个 repo(与 `ab` 同一条理由:Ask 读构造期的 "
-        "Settings,换不了)",
-    )
-    profile = reference_repo.maintenance.resolve_owner_profile(args.user)
-    if profile is None:
-        print(f"ERROR: 测试库里找不到 fixture 用户: {args.user}", file=sys.stderr)
-        return 2
-    actor_id = str(getattr(profile, "id", "") or "")
-
-    notebooks = _state_probe_notebook_ids(args.database_url, cases)
-    needed_cells = sorted(notebooks)
-    corpus_facts = _ab_corpus_facts(
-        args, runner, reference_repo, needed_cells, notebooks, kg_in_scope_for,
-    )
-    corpus_signature_by_cell = {
-        cell: corpus_facts[cell]["corpus_signature"] for cell in needed_cells
-    }
-    contract_short, contract_readable = _ab_model_contract(
-        settings_by_arm[reference_arm])
-    runner.say("model contract", f"{contract_short}  ({contract_readable})")
-
-    log_dir = _ab_llm_log_dir(settings_by_arm[reference_arm])
-    event_dir = Path(rig_event_log_dir(args.out_dir))
-
-    before = _readonly_counts(args.database_url)
-    runner.say("readonly baseline (test db)", _format_counts(before))
-
-    started_at = datetime.now().isoformat()
-    plan = _state_probe_plan(cases, arms, repeats)
-    all_rows: list[dict[str, Any]] = []
-    failed_count = 0
-    stopped_by_error: StateProbeError | None = None
-    # `set_request_user` / `mkdir` / 逐臂 `open` 三步全在 `ExitStack` 里
-    # (T-EX7 质量评审 P3-9):此前它们在 `try` **之外**,`--out-dir` 不可写、
-    # 第二条臂 open 撞上 EMFILE 这类失败会让 request user 不 reset、已开的句柄
-    # 泄漏、**跑后那条只读证据整条不跑** —— 一批「测试库被写过」的数据于是看起来
-    # 像干净收尾。
-    with contextlib.ExitStack() as stack:
-        # 跑后只读核第一个进栈 ⇒ **最后一个**退栈(`ExitStack` 是 LIFO):它必须
-        # 在句柄关闭、request user 复位之后才点第二次数——与旧 `finally` 一样
-        # 排在最后,句柄与 request user 两者之间的先后无所谓。
-        stack.callback(
-            _assert_readonly_on_exit, runner, before, args.database_url,
-            command="state-probe",
-        )
-        context = set_request_user(profile)
-        stack.callback(reset_request_user, context)
-        runner.out_dir.mkdir(parents=True, exist_ok=True)
-        # 不复用 `Runner.write`(那一层是「整份内容一次写」),这里要的是逐行
-        # 追加 + 显式 flush,好让中途 `StateProbeError` 停批时已经写下的行不因为
-        # 进程终止而卡在缓冲区里(T-EX7 用例 (f) 的「已写行保留」靠这个)。
-        handles: dict[str, Any] = {
-            optimization: stack.enter_context(
-                (runner.out_dir / f"state-probe-{optimization}.jsonl").open(
-                    "a", encoding="utf-8")
-            )
-            for optimization in arms
-        }
-        try:
-            for case, state_point_index, repeat, optimization in plan:
-                row = _run_one_state_probe_point(
-                    runner, case, state_point_index, repeat,
-                    optimization, settings_by_arm=settings_by_arm,
-                    repos_by_arm=repos_by_arm, notebooks=notebooks,
-                    actor_id=actor_id, log_dir=log_dir, event_dir=event_dir,
-                )
-                all_rows.append(row)
-                # 失败计数与摘要读**同一张词表**(`PROBE_FAILED_STATUSES`):
-                # 退出码与 `state-probe-summary.json` 的 `failed_rows` 因此不可能
-                # 各说一套(T-EX7 评审 F1)。
-                if row.get("status") in PROBE_FAILED_STATUSES:
-                    failed_count += 1
-                handle = handles[optimization]
-                handle.write(
-                    json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
-                handle.flush()
-        except StateProbeError as exc:
-            print(f"ERROR: state-probe 停批: {exc}", file=sys.stderr)
-            stopped_by_error = exc
-    finished_at = datetime.now().isoformat()
-
-    if stopped_by_error is not None:
-        return 1
-
-    summary = summarize_state_probe(all_rows)
-    runner.write(
-        runner.out_dir / "state-probe-summary.json",
-        json.dumps(summary, ensure_ascii=False, sort_keys=True, indent=2),
-    )
-    runner.write(
-        runner.out_dir / "state-probe-summary.md",
-        _render_state_probe_summary_md(summary),
-    )
-
-    facts = state_probe_manifest_facts(
-        cases=cases, arms=arms, repeats=repeats,
-        case_set_digest_code=case_set_digest_code,
-        optimization_by_arm={optimization: optimization for optimization in arms},
-        corpus_signature_by_cell=corpus_signature_by_cell,
-        common_baseline="off",
-        # `order` 从**真实计划**里读出来,不手写(见 `_state_probe_order_label`)。
-        order=_state_probe_order_label(plan),
-        code_sha=_ab_git_sha(),
-        started_at=started_at, finished_at=finished_at,
-        # `state_probe_manifest_facts` 的签名要一个 Mapping(它对
-        # `model_contract` 做 `dict(...)`),所以这里先按它的签名传字典,返回后
-        # 覆盖成**裸短码**——E3(`ab`)写的就是裸短码,而两条通道写进的是同一个
-        # `out_dir/manifests.jsonl`:同一键两种形状会让读侧必须分支(T-EX7 评审
-        # 拍板:统一为裸短码,ex5 模块不动)。读不出来时(`contract_short` 为
-        # `None`)整个不传这个键,让它落回「这次没有」而不是塞一个假值。
-        model_contract=(
-            None if contract_short is None else {"model": contract_short}
-        ),
-        budgets={
-            "reasoning_timeout_seconds": int(getattr(
-                settings_by_arm[reference_arm], "reasoning_timeout_seconds",
-                REASONING_TIMEOUT_SECONDS_DEFAULT)),
-            "reasoning_attempt_budget": REASONING_ATTEMPT_BUDGET,
-            "concurrency": 1,
-        },
-        stopped_by_budget=False,
-    )
-    if contract_short is not None:
-        facts["model_contract"] = contract_short
-    # `matrix.planned_runs` 由 `state_probe_manifest_facts` 自己算(四个基数的
-    # 积)——rig 这一侧原先那次同值覆盖是死写,删掉行为不变,留着的代价是「上游
-    # 哪天改了这个键的口径,rig 会静默盖回自己那一份」(评审 F8-3 / P3-8)。
-    _write_manifest(build_manifest(**facts), runner=runner)
-
-    if failed_count:
-        print(f"ERROR: {failed_count} 个状态点 FAILED,见 "
-              f"state-probe-<arm>.jsonl", file=sys.stderr)
-        return 1
-    return 0
-
-
-#: 失败 run 那一行里必须落成 unknown 的答案级/成本级键。`answer_chars=0` 会被
-#: 读成「模型答了个空字符串」,而真相是「这个 run 没跑到有答案的那一步」;成本
-#: 三键同理——崩在半路的 run,时间窗切到的是半截账。T0 那一半(轨迹派生的
-#: `reflect_turns` / `skip_reasons` / `termination_reason` …)刻意**保留**:失败
-#: 前捕获到的步是真的发生过的证据(codex #700 R13 P2 的同一条口径)。
-AB_FAILED_UNKNOWN_KEYS: tuple[str, ...] = (
-    "answer_chars", "answer_empty", "citations", "anchors_total",
-    "anchors_on_gold", "anchors_unresolved", "citations_out_of_scope",
-    "completeness_claim", "model_calls", "prompt_tokens", "completion_tokens",
-    "finish_reason_codes", "latency_ms_total",
-)
-
-
-def _ab_failed_row(
-    unit: dict, *, arm: str, fact: dict, model_contract: str | None,
-    steps: Sequence[dict] = (), has_intent_contract: bool = False,
-    optimization: str = "off", run_wall_ms: int | None = None,
-    status: str = "failed",
-) -> dict:
-    """没跑成的一条臂的那一行:键集与成功行**逐字相同**。
-
-    `status` 默认 `"failed"`(既有语义不变);T-EX8 的整批墙钟预算到点时,调用方
-    传 `status="cancelled"`——两者共用同一条「没有答案/没有成本三键」的落行
-    路径,唯一区别是 `JOB_STATUSES` 里那个闭集值,读侧据它把预算掐断的删失
-    观察与真实失败分开计(§10 M5-4)。
-
-    `optimization` 与 `arm` 同一条口径:声明照常落,失败行才能和成功行放进同一
-    张按臂分组的表。`run_wall_ms` 见 `stamp_run_wall_ms`——崩在半路的 run 有墙钟
-    (它确实占了这么久),压根没开跑的(范围解析失败)是 `None`。
-
-    范围解析失败(整个单元作废)与臂内抛异常共用这一行。此前两条路都是直接
-    `return` / 让异常往上抛,于是失败的 run 从 `ab-runs.jsonl` 里凭空消失——
-    分析脚本只读 JSONL,样本数因此偏向跑成的那一侧,而「哪一侧更容易崩」恰恰
-    是 A/B 要回答的问题之一(codex 质量评审 P2-4)。失败原因是自由文本,只进
-    `ab-runs.log`,不进数据集。
-
-    工作负载维度(题号 / 语料格 / 档位 / 轮次 / 臂 / kg_in_scope / 来源数 /
-    契约有无 / 语料指纹 / 模型短码)全部照常落:失败行要能和成功行放进同一张
-    分组表,否则「这一格失败多」这句话没法说(codex #700 R14 P2 的同一条口径)。
-    """
-    from app.domain.reasoning_trace_stats import assert_projection_values
-    from app.eval.reflect_ab import assert_ab_closed, project_ab_run
-
-    row = project_ab_run(
-        list(steps), arm=arm, effort=unit["effort"], repeat=int(unit["repeat"]),
-        optimization=optimization,
-        question_key=unit["question_key"], corpus_cell=unit["corpus_cell"],
-        answer="", citations=(), anchors=(), coverage_complete=None,
-        kg_in_scope=fact["kg_in_scope"], sources_count=fact["sources"],
-        has_intent_contract=has_intent_contract,
-        notebook_id=fact["notebook"], gold=None,
-        model_contract=model_contract,
-        corpus_signature=fact["corpus_signature"],
-        status=status,
-    )
-    for key in AB_FAILED_UNKNOWN_KEYS:
-        row[key] = None
-    stamp_run_wall_ms(row, run_wall_ms)
-    # 手改过 `project_ab_run` 已经验过的行,再验一遍:调用方直接把它写进 JSONL。
-    assert_ab_closed(row)
-    assert_projection_values(row)
-    return row
-
-
-def _run_ab_unit(
-    unit: dict, *, args: argparse.Namespace, runner: Runner,
-    facts: dict[str, dict], repos_by_arm: dict[tuple[str, str], Any],
-    actor_id: str, profile: Any, concurrency: int, intents: "_IntentCache",
-    gold_by_key: Mapping, model_contract: str | None, log_dir: Path,
-    clock: Any, state: dict, rows_handle: Any, log: Any,
-    event_dir: Path | None = None,
-    arms: Sequence[tuple[str, str]] | None = None,
-    reference_arm: tuple[str, str] | None = None,
-    cancel_event: Any = None, llm_log_enabled: bool = True,
-    deadline: float | None = None,
-) -> None:
-    """一个配对单元:同题同档同轮,两条臂背靠背跑完,两行一起落。
-
-    `deadline`(T-EX8)只是原样转发给 `_run_ab_arm`——这一层不判断是否到点,
-    到点后是否还继续跑本单元由调用方(`_ab_run_batch`)在派发前决定;这里只
-    保证已经派发的单元把 `deadline` 带到位,好让 `_run_ab_arm` 分清「预算掐断
-    的取消」与「§5.5 硬断言/KeyboardInterrupt 触发的取消」。
-
-    **臂序按 run 随机**(§4.2):provider 的排队与限流漂移对两臂等量,臂序本身
-    不成为系统偏差。随机不带种子——它要的就是不可预测,而这批数据的可复现性由
-    题号/档位/轮次那三维负责,不由臂序负责。
-
-    **意图契约每题只算一次**(`_IntentCache`,键取 `question_key`——英文题面有
-    自己的题号 `<key>-en`,所以 §5.4 说的 `question_key + lang` 已经被这一个键
-    覆盖),两臂共用同一份;同一性由 `ab_contract_digest` 当场比一次(§5.5-3)。
-    契约固定用**参照臂**那个 repo 去算:契约是 corpus-blind 且与反思策略无关的,
-    固定一侧是为了不让「契约用哪个 repo」变成一个会随字典迭代顺序漂移的隐藏不
-    确定量(与 `_precompute_intents` 同一条口径)。参照臂是 `--arms` 里写的第一
-    条,不是「legacy 那一条」——二维化之后一批可以压根没有 legacy 臂。
-
-    只跑一条臂时(`--only-policy` 或单臂 `--arms`),这一行的 `paired` 是
-    `False`:它进单臂基线表,不进配对差值表(§4.2)。
-
-    `arms` / `reference_arm` / `event_dir` 留 `None` ⇒ 就地从 `args` 推
-    (`ab_arms(args)`、`arms[0]`、`rig_event_log_dir(args.out_dir)`)。真跑路径
-    (`_run_ab` → `_ab_loop`)一律**显式传**,推导只是给直接调这一层的调用方
-    (用例)一条与 `args` 同源的省略写法——两条路读的是同一个 `ab_arms`,不会
-    因为一个默认值分叉出第二套臂解析。
-    """
-    from app.eval.reflect_ab import assert_arm_matches_evidence, gold_for, mark_paired
-
-    fact = facts[unit["corpus_cell"]]
-    unit_arms = list(arms) if arms is not None else ab_arms(args)
-    reference_arm = reference_arm or unit_arms[0]
-    if event_dir is None:
-        event_dir = Path(rig_event_log_dir(args.out_dir))
-    # **本地一份再洗**:`arms` 是整批共用的那一份,原地 shuffle 会让并发中的别的
-    # 单元看到一个正在被改的列表(而它同时还是进度分母与参照臂的来源)。
-    unit_arms = list(unit_arms)
-    random.shuffle(unit_arms)
-    intent_repo = repos_by_arm[reference_arm]
-
-    def _contract() -> dict | None:
-        return intents.get(
-            intent_repo, intent_repo.settings, unit, actor_id=actor_id,
-            notebook=fact["notebook"],
-        )
-
-    clarification_failed = False
-    try:
-        digest = ab_contract_digest(_contract())
-    except ClarificationRequiredError:
-        digest = None
-        clarification_failed = True
-    scope_ids, scope_failed = (
-        (None, False) if clarification_failed
-        else _resolve_item_scope(args, unit, fact)
-    )
-    rows: list[dict] = []
-    reasons: dict[tuple[str, str], str] = {}
-    call_rows: dict[str, list[dict]] = {}
-    if scope_failed or clarification_failed:
-        # 声明了范围却解析不到唯一匹配:整个单元作废,不退化成一次不设限的全库
-        # 检索(codex #700 R3 P2 的同一条口径)。两臂都不跑,但**每条臂各落一行
-        # `status=failed`**——直接 `return` 会让这个单元从数据集里凭空消失
-        # (codex 质量评审 P2-4)。
-        reason = "clarification_required" if clarification_failed else "scope_unresolved"
-        runner.say(
-            "ab not started",
-            f"{unit['question_key']} {unit['corpus_cell']} "
-            f"-> 每臂各落一行 status=failed reason={reason} run_not_started",
-        )
-        for arm in unit_arms:
-            rows.append(_ab_failed_row(
-                unit, arm=arm[0], optimization=arm[1], fact=fact,
-                model_contract=model_contract,
-                # 压根没开跑 ⇒ `run_wall_ms` 是 `None`,不是 0
-                # (见 `stamp_run_wall_ms`)。
-                run_wall_ms=None,
-            ))
-            reasons[arm] = reason
-    else:
-        for arm in unit_arms:
-            # **在臂的循环里各自取一次再比**(codex 规格评审 P2-3):在循环外
-            # 取一次、循环内拿同一个对象比自己的短码,那条断言恒真,而它要挡的
-            # 恰恰是「哪天有人把 `intents.get` 挪进臂的循环」——挪进来之后数据
-            # 照样出得来,两臂却已经在比两件不同的事了。
-            contract = _contract()
-            if ab_contract_digest(contract) != digest:
-                raise RuntimeError(
-                    f"{unit['question_key']}: 两臂拿到的意图契约不是同一份"
-                    "(§5.5-3)。这道题整题作废,先修再跑"
-                )
-            row, failure, calls = _run_ab_arm(
-                unit, arm=arm, fact=fact, repo=repos_by_arm[arm],
-                actor_id=actor_id, contract=contract, concurrency=concurrency,
-                scope_ids=scope_ids,
-                gold=gold_for(gold_by_key, unit["question_key"]),
-                model_contract=model_contract, log_dir=log_dir,
-                event_dir=event_dir, clock=clock,
-                out_dir=runner.out_dir, database_url=args.database_url,
-                cancel_event=cancel_event, llm_log_enabled=llm_log_enabled,
-                deadline=deadline,
-            )
-            rows.append(row)
-            if calls:
-                call_rows.setdefault(arm_label(*arm), []).extend(calls)
-            if failure:
-                # 一条臂崩了不作废另一条:同题同档的另一半仍然是一份有效读数,
-                # 而「哪一侧更容易崩」本身就是要量的东西之一。
-                reasons[arm] = failure
-                # 预算掐断在**人看的通道**上也不叫 FAILED(评审 P2-4):
-                # `--max-wall-minutes` 的批到点时,终端曾刷出 N 行
-                # `ab failed ... FAILED cancelled` 紧接一句「整批墙钟预算到点」
-                # ——与 §10 M5-4「cancelled 单列成删失、不混进失败率」在同一屏里
-                # 自相矛盾,操作者据此判断「这批模型全崩了」。JSONL 行与
-                # `ab-runs.log` 的 `status=cancelled` 本来就是对的,错的只有这一
-                # 条 say,所以只给它换一个独立标签与措辞。
-                cancelled = failure == "cancelled"
-                runner.say(
-                    "ab cancelled" if cancelled else "ab failed",
-                    f"{unit['question_key']} {unit['corpus_cell']} "
-                    f"{format_arm(*arm)} "
-                    f"{unit['effort']} r{unit['repeat']} "
-                    + ("CANCELLED 预算到点(删失观察,不计失败率)"
-                       if cancelled else f"FAILED {failure}"),
-                )
-    mark_paired(rows)
-    with state["lock"]:
-        for label, calls in call_rows.items():
-            # per-call 表与投影行在**同一把锁**里写:两者是同一份跑批账目的两半,
-            # 分开加锁会让「行写了、call 没写」出现在一次 Ctrl-C 上。
-            _write_call_rows(runner.out_dir, label, calls)
-        for row, arm in zip(rows, unit_arms):
-            state["index"] += 1
-            rows_handle.write(
-                json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n"
-            )
-            reason = reasons.get(arm, "")
-            line = (
-                f"{state['index']:04d}/{state['total']} {unit['question_key']} "
-                f"{unit['corpus_cell']} {format_arm(*arm)} {unit['effort']} "
-                f"r{unit['repeat']} {row['latency_ms_total']}ms "
-                f"run_wall_ms={row['run_wall_ms']} "
-                f"reflect_turns={row['reflect_turns']} "
-                f"termination={row['termination_reason']} "
-                f"answer_chars={row['answer_chars']} paired={row['paired']}"
-                + (f" status={row['status']} reason={reason}" if reason else "")
-            )
-            log.write(line + "\n")
-            runner.say("ab done", line)
-            if reason:
-                # 没跑成,没有协议证据可对——不参与「声明的臂 vs 轨迹证据」核对,
-                # 也不该消费掉这条臂的「第一个样本」名额。`reason == "cancelled"`
-                # (T-EX8 整批墙钟预算掐断)**不**计进 `state["failed"]`:那是一次
-                # 删失观察,不是一次真实失败——混进失败率会让预算掐断看起来像
-                # 「这一批模型全崩了」(§10 M5-4)。真实失败仍计入,整批因此以
-                # 非零退出码收尾(codex #700 R9 P2 的同一条口径)。
-                if reason != "cancelled":
-                    state["failed"] += 1
-                continue
-            if arm not in state["verified"]:
-                # **每条臂的第一个 run 之后**就把「声明的臂」与「轨迹里真的发生
-                # 了什么」对上一次(§5.5-1)。整批跑完再发现 v2 那半其实跑的是
-                # legacy,代价是几百次模型调用。
-                # 「第一个样本」的名额按 `(policy, optimization)` 记:只按 policy
-                # 记的话,`v2:off` 验过之后 `v2:prefix_snapshot` 就再也不验了。
-                # 第二维的对号在 `run_ab_once` 里事前做(轨迹反推不出它)。
-                assert_arm_matches_evidence(arm[0], row["policy_version"])
-                state["verified"].add(arm)
-        rows_handle.flush()
-        log.flush()
-
-
-def _ab_section_lookups(
-    database_url: str, gold: Any, anchors: Sequence[Any],
-) -> tuple[dict[str, str] | None, dict[str, str] | None]:
-    """A 格锚点解析要用的两张查询表 `(element_sections, chunk_sections)`。
-
-    **B 格不查库**(codex 质量评审 P3):`gold_sources` 那条路走的是
-    `source_titles`,它已经在 `_ab_corpus_facts` 里一次点清了;为它每个 run 再
-    往测试库打两条 `IN (...)` 查询,查出来的东西一次也不会被读。没有 gold 的题
-    同理——`count_anchors_on_gold` 对它恒返回 `None`。
-    """
-    if gold is None or not getattr(gold, "gold_section_path", ()):
-        return None, None
-    element_ids = [
-        str(getattr(anchor, "element_id", "") or "") for anchor in anchors
-    ]
-    # chunk 那一跳只在锚点自己没带 `location_label` 时才用得上(见
-    # `reflect_ab._anchor_section`),所以只把那几个 id 递进去。
-    chunk_ids = [
-        str(getattr(anchor, "object_id", "") or "")
-        for anchor in anchors
-        if not str(getattr(anchor, "element_id", "") or "")
-        and not str(getattr(anchor, "location_label", "") or "")
-        and str(getattr(anchor, "object_type", "") or "") == "chunk"
-    ]
-    return (
-        _ab_element_sections(database_url, element_ids),
-        _ab_chunk_sections(database_url, chunk_ids),
-    )
-
-
-def _run_ab_arm(
-    unit: dict, *, arm: tuple[str, str], fact: dict, repo: Any,
-    actor_id: str, contract: dict | None, concurrency: int,
-    scope_ids: Sequence[str] | None, gold: Any, model_contract: str | None,
-    log_dir: Path, event_dir: Path, clock: Any, out_dir: Path,
-    database_url: str,
-    cancel_event: Any = None, llm_log_enabled: bool = True,
-    deadline: float | None = None,
-) -> tuple[dict, str, list[dict]]:
-    """一条臂的一个 run。返回 `(投影行, 失败原因类名或空串, per-call 行)`。
-
-    `arm` 是 `(policy, optimization)` 这一对;`repo` 就是这条臂的那一个
-    (`repos_by_arm[arm]`)——臂由 repo 承载,见 `run_ab_once` 的说明。
-
-    单个 run 崩掉**不往上抛**:它被投影成一行 `status="failed"`,失败原因回给
-    调用方记日志(与 `search` 同口径,理由见 `_ab_failed_row`)。往上抛的只有
-    `AskCancelled`——那是整批收摊的信号,不是这一个 run 的失败。失败前捕获到的
-    轨迹步照常带进那一行(codex #700 R13 P2),`run_wall_ms` 也照常记:它崩在半
-    路,但确实占了这么久的墙钟。
-
-    **例外(T-EX8)**:`deadline` 非空且已经到点时接住 `AskCancelled`,落一行
-    `status="cancelled"` 而不是继续往上抛。判据是墙钟(`time.monotonic() >=
-    deadline`),不是「谁调用了 `cancel_event.set()`」——同一个 `cancel_event`
-    也被 `_ab_run_batch` 的既有异常收摊路复用(§5.5 硬断言不成立 /
-    `KeyboardInterrupt`),那两条路**没有**给 `deadline`(`_run_ab_unit` 只在
-    T-EX8 的批预算路上传非 `None` 的 `deadline`),所以这条分支只在预算到点的
-    场景下成立,不改变既有的「先修再跑整批」级联(`--max-wall-minutes` 不给时
-    `deadline` 恒 `None`,这条分支永远走不到,行为逐字不变)。
-
-    `clock` 是**墙钟**(`datetime.now`),不是 `time.monotonic`:成本三键靠 LLM
-    日志的时间窗切片归因(§7.2),而日志里那个 `ts` 是
-    `datetime.now().isoformat()` 写的,两边必须是同一个钟。`latency_ms_total`
-    与 `run_wall_ms` 另外用 `time.monotonic` 掐——它们量的是时长,不该受系统时间
-    调整影响。
-
-    **per-call 行只在串行下按 run 归因**(第三个返回值,并发下恒空):run→call
-    的归因靠同一份时间窗/偏移,并发下窗口重叠。并发那一批的 per-call 表由
-    `_ab_loop` 收尾时整批一次出,run 级标签全 unknown。
-    """
-    from app.eval.reflect_ab import project_ab_run
-    from app.services.cancellation import AskCancelled
-
-    item = dict(unit)
-    steps: list[dict] = []
-    raw_steps: list[dict] = []
-
-    def _on_trace(step: Any) -> None:
-        steps.append(trace_step_row(step))
-        raw_steps.append(raw_trace_step_row(step))
-
-    # 这个 run 开跑之前的日志字节位置:结束后只读它到 EOF 那一段(见
-    # `_ab_llm_offsets`)。并发下成本三键恒 unknown,那一份 glob 也就省掉。
-    serial = concurrency <= 1
-    offsets = _ab_llm_offsets(log_dir) if serial else {}
-    event_offsets = (
-        _ab_llm_offsets(event_dir, glob=RIG_EVENT_LOG_GLOB) if serial else {}
-    )
-
-    def _calls() -> list[dict]:
-        if not serial:
-            return []
-        return _rig_call_rows(
-            log_dir, event_dir, llm_offsets=offsets,
-            event_offsets=event_offsets,
-            tags=_rig_call_tags(unit, arm, attributed=True),
-        )
-
-    started_at = clock()
-    started = time.monotonic()
-    try:
-        response = run_ab_once(
-            repo, notebook=fact["notebook"], item=item, arm=arm[0],
-            optimization=arm[1],
-            contract=contract, on_trace=_on_trace,
-            cancel_event=cancel_event or threading.Event(), actor_id=actor_id,
-            scope_source_ids=scope_ids,
-        )
-    except AskCancelled:
-        if deadline is not None and time.monotonic() >= deadline:
-            # T-EX8:预算到点唤醒的在途单元——落一行 `status="cancelled"`
-            # (删失观察),不往上抛。`reason="cancelled"` 让调用方(`_run_ab_unit`)
-            # 既跳过 `assert_arm_matches_evidence`(没有协议证据可对,与失败行同
-            # 口径),又不把它计进「N 个 run FAILED」——预算掐断是预期收尾,不是
-            # 一次真实失败(§10 M5-4「cancelled 单列成删失,不混进失败率」)。
-            return _ab_failed_row(
-                unit, arm=arm[0], optimization=arm[1], fact=fact,
-                model_contract=model_contract,
-                steps=steps, has_intent_contract=contract is not None,
-                run_wall_ms=round((time.monotonic() - started) * 1000),
-                status="cancelled",
-            ), "cancelled", _calls()
-        raise
-    except Exception as exc:  # noqa: BLE001 — 单个 run 失败要隔离
-        return _ab_failed_row(
-            unit, arm=arm[0], optimization=arm[1], fact=fact,
-            model_contract=model_contract,
-            steps=steps, has_intent_contract=contract is not None,
-            run_wall_ms=round((time.monotonic() - started) * 1000),
-        ), type(exc).__name__, _calls()
-    latency_ms = round((time.monotonic() - started) * 1000)
-    ended_at = clock()
-    anchors = list(getattr(response, "anchors", None) or ())
-    element_sections, chunk_sections = _ab_section_lookups(
-        database_url, gold, anchors,
-    )
-    row = project_ab_run(
-        steps, arm=arm[0], effort=unit["effort"], repeat=int(unit["repeat"]),
-        optimization=arm[1],
-        question_key=unit["question_key"], corpus_cell=unit["corpus_cell"],
-        answer=str(getattr(response, "answer", "") or ""),
-        citations=list(getattr(response, "citations", None) or ()),
-        anchors=anchors,
-        coverage_complete=_ab_coverage_complete(response),
-        kg_in_scope=fact["kg_in_scope"], sources_count=fact["sources"],
-        has_intent_contract=contract is not None,
-        notebook_id=fact["notebook"], gold=gold,
-        element_sections=element_sections, chunk_sections=chunk_sections,
-        source_titles=fact["source_titles"],
-        # 题目声明了范围 ⇒ 允许集合就是解析出来的那几个;没声明 ⇒ 全库
-        # (`citations_out_of_scope` 的正确值在两种情况下都恒为 0,§9-1)。
-        allowed_source_ids=(
-            frozenset(scope_ids) if scope_ids
-            else frozenset(fact["source_titles"])
-        ),
-        usage=_ab_usage_for_window(
-            log_dir, started_at, ended_at, concurrency=concurrency,
-            offsets=offsets, llm_log_enabled=llm_log_enabled,
-        ),
-        latency_ms_total=latency_ms,
-        model_contract=model_contract,
-        corpus_signature=fact["corpus_signature"],
-    )
-    stamp_run_wall_ms(row, latency_ms)
-    _write_ab_raw(out_dir, arm, item, response, raw_steps, contract)
-    return row, "", _calls()
-
-
-def _write_ab_raw(
-    out_dir: Path, arm: tuple[str, str], item: dict, response: Any,
-    raw_steps: Sequence[dict], contract: dict | None,
-) -> None:
-    """`.local` 的一份 run 存档。**不进数据集/不进仓库**(§7.3)。
-
-    路径按 `arm_label` 分目录(两条 v2 臂不能撞进同一个 `raw/v2/`),存档正文里
-    的 `arm` 仍是**命令行写法**(`format_arm`),人工抽样时读起来与 `--arms`
-    里写的那一串逐字相同。
-    """
-    path = _ab_raw_path(out_dir, arm_label(*arm), item)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(
-            ab_raw_payload(item, format_arm(*arm), response, raw_steps,
-                           contract),
-            ensure_ascii=False, indent=2, sort_keys=True, default=str,
-        ),
-        encoding="utf-8",
-    )
 
 
 def cmd_export(args: argparse.Namespace, runner: Runner) -> int:
@@ -6313,12 +2579,37 @@ def cmd_export(args: argparse.Namespace, runner: Runner) -> int:
             "--database-url", args.database_url,
             "--reports", "--out", str(export_out),
         ])
-    parts = [export_out] + sorted(runner.out_dir.glob("report-trace-*.jsonl"))
+    parts = [export_out, runner.out_dir / "report-trace.jsonl"]
     runner.say("merge", " + ".join(str(part) for part in parts) + f" -> {out}")
+    runner.say("export call diagnostics", str(runner.out_dir / "calls.jsonl"))
     if runner.dry_run:
         return 0
     _merge_export_parts(parts, out)
+    _export_call_diagnostics(runner.out_dir)
     return 0
+
+
+def _export_call_diagnostics(out_dir: Path) -> None:
+    """Join only this run directory's provider and scheduler logs."""
+    from app.eval.reflect_context_bench import assert_call_row_closed, join_calls
+
+    def records(directory: Path) -> list[dict]:
+        rows = []
+        for path in sorted(directory.glob("*.jsonl")):
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                row = json.loads(line)
+                if isinstance(row, dict):
+                    rows.append(row)
+        return rows
+
+    rows = join_calls(records(out_dir / "llm"), records(out_dir / "events"))
+    with (out_dir / "calls.jsonl").open("w", encoding="utf-8") as handle:
+        for row in rows:
+            assert_call_row_closed(row)
+            assert_projection_values(row)
+            handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
 
 
 def _merge_export_parts(parts: Sequence[Path], out: Path) -> None:
@@ -6326,7 +2617,7 @@ def _merge_export_parts(parts: Sequence[Path], out: Path) -> None:
 
     `--reports` 从库里导出的结果级行(`export_reasoning_traces.py --reports`,
     `project_report_section` 直出,没有 `trace_steps` 键)与 rig 自己写的
-    `report-trace-*.jsonl`(同一份 `report_id`+`section_index` 已经按
+    `report-trace.jsonl`(同一份 `report_id`+`section_index` 已经按
     `merge_key` 把轨迹合成过,带 `trace_steps` 键)会撞同一个 `merge_key`——
     原来逐字节拼接文件会把它们各写一行,一份 3 节的报告就报成 6 个 run
     (codex #700 R2 P2,同 README 479–481 的不变量)。没有 `merge_key` 的行
@@ -6437,30 +2728,20 @@ def _stop_backend_gracefully(
 
 
 def cmd_restart(args: argparse.Namespace, runner: Runner) -> int:
-    """优雅停掉 state 里记的后端,按 `--policy` 重起同一份配置(§2.3)。
-
-    端口 / DB / storage-dir / env-file 从 state 取(seed 落的那份),不是这次
-    调用的命令行默认值——这样 `restart --policy v2` 不需要重复 `seed` 用过的
-    全部参数就能起同一台后端。重启复用 `_start_backend`,因此复用它的就绪
-    判据(`/api/ready` 的 `{"ready": true}`),不是「端口能连上」就算数。
-    """
     state = _read_raw_state(runner.state_path())
     pid = int(state.get("backend_pid") or 0)
     port = int(state.get("port") or args.port)
     database_url = str(state.get("database_url") or args.database_url)
     storage_dir = str(state.get("storage_dir") or args.storage_dir)
     env_file = state.get("env_file", args.env_file)
-    new_flag = backend_env(args, args.policy)["REASONING_REFLECT_V2_ENABLED"]
 
     runner.say(
         "stop backend",
-        f"pid={pid or '<unknown>'} policy {state.get('policy', '<unknown>')} "
-        f"-> {args.policy}",
+        f"pid={pid or '<unknown>'}",
     )
     runner.say(
         "start backend",
-        f"port={port} database_url={_redact_url(database_url)} "
-        f"REASONING_REFLECT_V2_ENABLED={new_flag}",
+        f"port={port} database_url={_redact_url(database_url)}",
     )
     if runner.dry_run:
         return 0
@@ -6476,17 +2757,17 @@ def cmd_restart(args: argparse.Namespace, runner: Runner) -> int:
     restart_args.storage_dir = storage_dir
     restart_args.env_file = env_file
     restart_args.base_url = f"http://127.0.0.1:{port}"
-    backend = _start_backend(restart_args, args.policy)
+    backend = _start_backend(restart_args)
 
     state.update({
         "backend_pid": backend.pid,
         "backend_identity": _process_identity(backend.pid),
-        "policy": args.policy, "port": port,
+        "port": port,
         "database_url": database_url, "storage_dir": storage_dir,
         "env_file": env_file,
     })
     runner.save_state(state)
-    runner.say("restarted", f"pid={backend.pid} policy={args.policy}")
+    runner.say("restarted", f"pid={backend.pid}")
     return 0
 
 
@@ -6644,1053 +2925,57 @@ def cmd_teardown(args: argparse.Namespace, runner: Runner) -> int:
     return 0
 
 
-# --- `prefix-probe`(E1 前缀敏感性探针;计划 §3 T-EX4)------------------------
-
-#: 预热调用的正文与标记(design Q4:「用不同正文与不同前缀」)。`tier="__warmup__"`
-#: 与 `block_index=-1` 不会与 `probe_plan` 产出的任何真实序列的
-#: `(tier, block_index)` 撞上,`build_marker_pair` 的输入因此天然与主批不相交。
-_PREFIX_PROBE_WARMUP_TIER = "__warmup__"
-
-#: 整批开头的预热调用次数(design Q4 原文就是**一次**)。写成常量而不是字面
-#: `+ 1`:dry-run 的调用数估计、`is_warmup` 单列的行数、以及请求上界三处读的
-#: 必须是同一个数(评审 P3-14)。
-PREFIX_PROBE_WARMUP_CALLS = 1
-
-#: 预热行落哪一份 jsonl(`probe-warmup.jsonl`)。**不是一条臂**:它与
-#: `ARM_STABLE`/`ARM_DISTURBED` 并列做 `rows_by_label` 的键,只是为了让「预热
-#: 单列、不进任何统计」这条 design §9.1 的要求在落盘这一层也成立。
-_PREFIX_PROBE_WARMUP_LABEL = "warmup"
-
-
-def _prefix_probe_warmup_messages() -> list[dict]:
-    from app.eval.reflect_prefix_probe import PROBE_OUTPUT_INSTRUCTION
-
-    return [{
-        "role": "user",
-        "content": (
-            "[warmup] 连接预热,正文与后续探针格无关,不参与任何统计。\n\n"
-            + PROBE_OUTPUT_INSTRUCTION
-        ),
-    }]
-
-
-def _prefix_probe_process_env(args: argparse.Namespace) -> dict[str, str]:
-    """E1 的进程环境:只圈日志隔离,**不碰 `DATABASE_URL`**。
-
-    这条命令结构上不连库(见 `cmd_prefix_probe` 对显式 `--database-url` 的响亮
-    拒绝),往 `DATABASE_URL` 里写任何占位值都只是徒增一次 `Settings()` 校验
-    失败的风险,没有任何收益(`normalize_database_url("")` 直接抛)。与
-    `_rig_process_env` 共用同一对日志隔离助手(`rig_llm_log_path`/
-    `rig_event_log_dir`),不复用它本身——那个函数的 `database_url` 是必填
-    参数。
-    """
-    env = {
-        "LLM_LOG_PATH": rig_llm_log_path(args.out_dir),
-        "EVENT_LOG_DIR": rig_event_log_dir(args.out_dir),
-    }
-    if args.env_file:
-        env["SILICON_NOTEBOOK_ENV_FILE"] = str(Path(args.env_file).expanduser())
-    return env
-
-
-def _prefix_probe_set_env(env: Mapping[str, str]) -> None:
-    """把 E1 的进程环境写进 `os.environ`。
-
-    单独一个函数**只为可注入**(评审 P2-8):`os.environ.update` 写下去的值在
-    进程里是永久的,而 pytest 的 worker 就是那个进程——四条非 dry-run 用例跑完
-    之后 `LLM_LOG_PATH` / `EVENT_LOG_DIR` 仍指向已被清掉的 `tmp_path`,同 worker
-    里后续任何构造 `Settings()` 并写日志的用例都被牵着走,`-n 4` 下受影响的是
-    哪几条还随分片漂。用例把这一步换成 `monkeypatch.setenv`,自带还原。
-    """
-    os.environ.update(env)
-
-
-def _prefix_probe_finish_reason(raw: object) -> str | None:
-    """`call_stats["finish_reason"]` → 行上那一列,收成短码或 `None`。
-
-    `None` 的语义是「**provider 没说**」,与 `app/core/llm.py` ok 出口传的
-    `finish_reason or ""`(那句注释明写 “servers may omit finish_reason
-    entirely”)同口径。
-
-    两条都必须折(评审 F1 / P1-1):
-
-    * **空串**——`_is_short_code("")` 为 False,原样写进行会让
-      `assert_probe_row_closed` 抛 `ValueError`。这不是操作失误,是一类真实
-      OpenAI 兼容端点的**正常返回**:一整批 96 格会在第一格(预热格)全灭,
-      连一行都产不出来;
-    * **非短码形状**——厂商自定义的 `finish_reason` 带空格、中文或超过 64
-      字符时同样抛。一次跑批不该因为一列诊断性的自由文本而报废,而把自由文本
-      原样落进 JSONL 又正是这份闭集要挡的事,所以折 `None`。
-    """
-    if not isinstance(raw, str):
-        # `None` 与任何非字符串(provider 回了个 dict/int)一律 unknown。
-        return None
-    from app.domain.reasoning_trace_stats import _is_short_code
-
-    return raw if _is_short_code(raw) else None
-
-
-#: `_prefix_probe_output_valid` 判合法要看的键——固定输出任务只锁这一个
-#: (`PROBE_OUTPUT_INSTRUCTION`/`PROBE_SCHEMA_HINT` 都只承诺 `{"ok": true}`,
-#: 两臂、三档共用同一份指令,见 `app/eval/reflect_prefix_probe.py`)。
-_PREFIX_PROBE_OUTPUT_KEY = "ok"
-
-
-def _prefix_probe_output_valid(content: object) -> bool:
-    """`chat_json` 这一格的返回是否真的完成了固定输出任务。
-
-    传输层报 `call_stats["status"] == "ok"` 只说「provider 回了点什么、没有
-    抛异常」,不说「回的是不是那个固定小 JSON」(`app/core/llm.py` 的
-    `chat_json` 把解析、校验响应形状的责任全部留给调用方——它自己只在
-    `strip_json_fences` 之后原样把 `content` 字符串递回来,从不检查里面是不是
-    一份合法 JSON,更不检查是不是长成调用方期待的 schema)。provider 端返回
-    畸形 JSON、空字符串、或压根没提到 `ok` 字段时,`chat_json` 的传输状态照样
-    是 `"ok"`——调用点如果只读 `call_stats`、丢掉返回内容,`summarize_probe`
-    就会把这些从没完成固定输出任务的调用悄悄算进成功计时观测(codex #709 R2
-    P2-1)。这个函数是 `_call_row` 用来把这两件事分开的唯一判据。
-
-    校验规则(拍板,宽松到只挡真正不成立的形状,不重新发明一遍 JSON Schema
-    校验器):
-
-    * `content` 必须是 `str`——`chat_json` 的真实返回类型就是 `str`(见
-      `app/core/llm.py` 的返回值),任何其它类型(比如异常路径上从没赋值、
-      仍是 `None`)直接判不合法;
-    * 必须能 `json.loads` 成功——解析失败(`"not json"` 这类自由文本、空
-      字符串)判不合法;
-    * 解析结果必须是 `dict`——`json.loads('[1,2]')`/`json.loads('true')` 这类
-      合法 JSON 但不是对象的返回同样判不合法;
-    * 必须含 `"ok"` 键,且值**恰好**是 `True`(`bool`,不接受任何其它
-      truthy 值,比如整数 `1` 或非空字符串——固定任务的指令原文就是
-      `{"ok": true}`,不是「随便一个真值」);
-    * **多余的键一律放行**——固定任务只锁 `ok` 这一个字段,不锁 provider
-      是否在同一个对象里多话(比如带了一个模型自己想加的 `note` 字段)。
-    """
-    if not isinstance(content, str):
-        return False
-    try:
-        parsed = json.loads(content)
-    except (json.JSONDecodeError, ValueError):
-        return False
-    if not isinstance(parsed, dict):
-        return False
-    return parsed.get(_PREFIX_PROBE_OUTPUT_KEY) is True
-
-
-def _prefix_probe_sample_path(args: argparse.Namespace) -> Path:
-    if args.sample_file:
-        return Path(args.sample_file).expanduser()
-    return ROOT / "backend" / "app" / "eval" / "reflect_t0" / "prefix_probe_sample.json"
-
-
-def _prefix_probe_plan(args: argparse.Namespace) -> list[dict]:
-    """这次要跑的**全部**探针调用,dry-run 与真跑共读同一份(与 `ab_plan`/
-    `search_plan` 同一条纪律)。
-
-    `--marker-variant` **不是** `probe_plan` 自己的参数(它只接受 `seed`)——
-    非零 variant 时,在这里用 `build_marker_pair` 按同一组
-    `(seed, tier, block_index, arm, call_index)` 重算一遍 head/tail 并原地
-    替换。这是一个可以商榷的取舍:更干净的做法是让 `probe_plan` 自己接一个
-    `marker_variant` 参数,把这段重算逻辑收回模块内部——本任务的红线是不改
-    `backend/app/**`,所以重算逻辑留在这一层,见任务报告「上游接口不够用」。
-    """
-    from app.eval.reflect_prefix_probe import (
-        DEFAULT_BLOCKS, SMOKE_BLOCKS, build_marker_pair, probe_plan,
-    )
-
-    blocks = SMOKE_BLOCKS if args.smoke else DEFAULT_BLOCKS
-    plan = probe_plan(seed=args.seed, blocks=blocks)
-    if args.marker_variant:
-        for row in plan:
-            head, tail = build_marker_pair(
-                args.seed, row["tier"], row["block_index"], row["arm"],
-                row["call_index"], marker_variant=args.marker_variant,
-            )
-            row["head"], row["tail"] = head, tail
-    return plan
-
-
-def _prefix_probe_call_estimate(plan_calls: int) -> str:
-    """与 `_search_call_estimate`/`_ab_call_estimate` 同一口径的那一句:
-    逻辑调用数与**请求上界**是两个数,不要混用(见两者各自的说明)。
-
-    **预热那一格算进这两个数**(评审 P3-14):它是一次真实的、要付钱的
-    `reasoning_agent` 调用,只是不进统计。少算它的后果是按配额规划的人拿到的
-    上界比真实请求数小 `1 × REASONING_ATTEMPT_BUDGET`——全量批实发 97 次而不是
-    96 次,上界 ≤194 而不是 ≤192。
-    """
-    total_calls = plan_calls + PREFIX_PROBE_WARMUP_CALLS
-    return (
-        f"{total_calls} 次逻辑调用({plan_calls} 格计划 + "
-        f"{PREFIX_PROBE_WARMUP_CALLS} 预热);请求上界 ≤ "
-        f"{total_calls * REASONING_ATTEMPT_BUDGET}"
-        f"(重试预算 ×{REASONING_ATTEMPT_BUDGET};静默 fallback 另计,不留日志行)"
-    )
-
-
-def _prefix_probe_say_sequence(runner: Runner, plan: Sequence[Mapping]) -> None:
-    """dry-run 的「序列顺序与区组」:计划前几行 + 每个 `(tier, block)` 的臂序。
-
-    design §9.1「各序列内部保持连续,不插入并发负载」——这里打的顺序就是真跑
-    会打的顺序,不是另一份摘要。
-
-    臂序那几行按 `plan` 里 `(tier, block)` 的**首次出现顺序**打,不排序(评审
-    P3-13):`sorted(...)` 会按 tier 的字典序打成 `long / medium / short`,而真跑
-    按 `DEFAULT_TIERS` 走 `short / medium / long`——操作者拿这几行去对
-    `probe-*.jsonl` 的前几行会对不上,而紧邻上方的 `plan row` 预览又是真顺序,
-    同一段输出自相矛盾。首次出现顺序**就是**派发顺序,不是它的一份近似。
-    """
-    preview = list(plan[:4])
-    for row in preview:
-        runner.say(
-            "plan row",
-            f"tier={row['tier']} block={row['block_index']} arm={row['arm']} "
-            f"call_index={row['call_index']} series={row['series_index']}",
-        )
-    if len(plan) > len(preview):
-        runner.say("plan row", f"...(其余 {len(plan) - len(preview)} 行同形状)")
-    order: dict[tuple[str, int], list[str]] = {}
-    for row in plan:
-        key = (row["tier"], row["block_index"])
-        if row["call_index"] == 0:
-            order.setdefault(key, []).append(row["arm"])
-    for key in order:
-        tier, block_index = key
-        runner.say(
-            "block arm order",
-            f"tier={tier} block={block_index} order={'/'.join(order[key])}",
-        )
-
-
-def _prefix_probe_client(settings: Any) -> tuple[Any, Any]:
-    """`(provider, client)`。拆成单独一个函数只是为了让用例能整体替身它
-    (T-EX4 用例 (d)/(e)/(f)/(g))——真实构造照抄 `mrl_truncation.run_gold_eval`
-    (计划 §1 M2):`RuntimeModelProvider(settings, EventLogger(settings,
-    channel="events", per_user=True))`,取 `.chat("reasoning_agent")`(与
-    reflect 同一个 workload/端点/thinking 配置)。
-    """
-    from app.core.event_logging import EventLogger
-    from app.services.model_provider import RuntimeModelProvider
-
-    provider = RuntimeModelProvider(
-        settings, EventLogger(settings, channel="events", per_user=True))
-    return provider, provider.chat("reasoning_agent")
-
-
-def _prefix_probe_now() -> str:
-    from datetime import datetime, timezone
-
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _render_probe_summary_markdown(
-    summary: Mapping, *, seed: int, smoke: bool, sample_path: Path,
-    marker_variant: int,
-) -> str:
-    lines = [
-        "# E1 前缀敏感性探针 · 摘要",
-        "",
-        "**这批只能支持『稳定前缀的时间收益』,不得报告命中率、不得报告省了多少 "
-        "token、不得报告 provider 是否关闭了缓存**(design §0/§9.1)。",
-        "",
-        f"- seed: {seed}",
-        f"- scale: {'smoke(48)' if smoke else 'full(96)'}",
-        f"- sample: {sample_path}",
-        f"- marker_variant: {marker_variant}",
-        f"- verdict: **{summary['verdict']}**",
-        f"- row_count_total: {summary['row_count_total']}",
-        f"- warmup_row_count: {summary['warmup_row_count']}",
-        f"- local_cache_exit_rows: {summary['local_cache_exit_rows']}",
-        f"- invalid_output_rows: {summary['invalid_output_rows']}",
-        f"- failed_row_count: {summary['failed_row_count']}",
-        f"- cached_tokens_observed: {summary['cached_tokens_observed']}",
-        "",
-        "## overall",
-        f"- n_regions_paired: {summary['overall']['n_regions_paired']}",
-        f"- median_wall_ms_delta: {summary['overall']['median_wall_ms_delta']}",
-        f"- median_wall_ms_ratio: {summary['overall']['median_wall_ms_ratio']}",
-        f"- consistency_ratio: {summary['overall']['consistency_ratio']}",
-        f"- first_observation: {summary['overall']['first_observation']}",
-        f"- repeat_observation: {summary['overall']['repeat_observation']}",
-        "",
-        "## by_tier",
-    ]
-    for tier in sorted(summary["by_tier"]):
-        scope = summary["by_tier"][tier]
-        lines.append(f"### {tier}")
-        lines.append(f"- n_regions_paired: {scope['n_regions_paired']}")
-        lines.append(f"- median_wall_ms_delta: {scope['median_wall_ms_delta']}")
-        lines.append(f"- median_wall_ms_ratio: {scope['median_wall_ms_ratio']}")
-        lines.append(f"- consistency_ratio: {scope['consistency_ratio']}")
-    lines.append("")
-    return "\n".join(lines)
-
-
-def cmd_prefix_probe(args: argparse.Namespace, runner: Runner) -> int:
-    """E1(前缀敏感性探针):**零数据库、零检索、零 reflect**,只调
-    `reasoning_agent` workload 本身,量两臂标记稳定性的墙钟差(design §9.1)。
-
-    与 `search`/`ab` 的分工:那两条命令的全部意义建在检索/合成上;E1 剥掉这
-    一切,只留「同一个 workload、同一个端点、同一个 thinking 配置」上的一段
-    固定正文,两臂只在头/尾标记的稳定性上不同(计划 M1/M2)。**新子命令**而
-    不是 `search`/`ab` 上的开关:E1 不跑检索、不连库、不建 repo,挂进任何一条
-    既有路都会让那条路多一条与语料/范围/意图全部无关的死分支(计划 M2)。
-
-    **per-call 表(`calls-e1.jsonl`)与探针行的对齐规则**(评审 F13):这张表
-    是**无标签**的(`tags=None`)——`CALL_TAG_KEYS` 是 A/B 的维度
-    (`question_key`/`corpus_cell`/`effort`),E1 一个都没有,硬塞会写出三列
-    恒 `None`。于是它与 `probe-*.jsonl` 没有共享键,只能**按顺序**对齐,而这条
-    对齐今天是成立的:E1 全程串行(一次一格,不并发),`join_calls` 给出的
-    `call_index` 稠密有序,所以第 0 行是**预热格**,其后第 i 行对应
-    `_prefix_probe_plan(args)[i - PREFIX_PROBE_WARMUP_CALLS]`,也就是
-    `probe-stable.jsonl` 与 `probe-disturbed.jsonl` 两份按 `series_index` /
-    `call_index` 归并回计划序之后的第 i 格。预算到点提前停批时,per-call 表的
-    行数按实发调用数收窄,前缀仍然对齐(停的是尾部)。**一旦 E1 改成并发派发,
-    这条规则立刻失效**——那时要么给这张表加维度,要么把对齐写进行里。
-    """
-    if args.database_url_explicit:
-        print(
-            "ERROR: prefix-probe 不连数据库,不接受 --database-url"
-            "(它照抄的多半是 ab/search 的命令行)",
-            file=sys.stderr,
-        )
-        return 2
-    if args.seed is None:
-        print(
-            "ERROR: prefix-probe 需要 --seed"
-            "(design M4:E1 的区组随机必须有种子)",
-            file=sys.stderr,
-        )
-        return 2
-    problem = _wall_budget_problem(args.max_wall_minutes)
-    if problem:
-        # **dry-run 也拦**(与 `_ab_preflight` 同一条纪律):一份 `nan` 预算的
-        # 计划预演出来看起来完全像一次正常的预演。
-        print("ERROR: " + problem, file=sys.stderr)
-        return 2
-
-    plan = _prefix_probe_plan(args)
-    sample_path = _prefix_probe_sample_path(args)
-
-    runner.say(
-        "target",
-        "E1 前缀敏感性探针:零数据库、零检索、零 reflect,只调 reasoning_agent "
-        "workload 本身(计划 M1/M2)",
-    )
-    runner.say("seed", str(args.seed))
-    runner.say("scale", "smoke(48)" if args.smoke else "full(96)")
-    runner.say("model calls (estimate)", _prefix_probe_call_estimate(len(plan)))
-    runner.say(
-        "timeout (per call)",
-        f"{REASONING_TIMEOUT_SECONDS_DEFAULT}s(镜像 Settings()."
-        "reasoning_timeout_seconds 的默认值,与 `ab` 那一行读同一个常量;"
-        "真跑读的是构造出来的那一份,可能被 --env-file 覆盖)",
-    )
-    runner.say(
-        "batch wall-clock budget",
-        f"{args.max_wall_minutes} 分钟(到点停止派发,不补跑到矩阵齐全)"
-        if args.max_wall_minutes is not None
-        else "未设(默认行为:跑到计划结束)",
-    )
-    runner.say(
-        "sample",
-        f"{sample_path}"
-        + ("(--sample-file)" if args.sample_file else "(仓库内默认 fixture)"),
-    )
-    runner.say("marker variant", str(args.marker_variant))
-    runner.say(
-        "warmup",
-        "整批开头一次连接预热,正文与标记均与主批不同,单列 is_warmup=True 行,"
-        "不进任何统计(design §9.1)",
-    )
-    _prefix_probe_say_sequence(runner, plan)
-    runner.say(
-        "out",
-        f"{runner.out_dir}/probe-stable.jsonl + probe-disturbed.jsonl + "
-        "probe-warmup.jsonl + probe-summary.{md,json} + manifest.json"
-        "(+ manifests.jsonl 历史)+ calls-e1.jsonl(per-call 表)",
-    )
-    runner.say(
-        "isolated logs",
-        f"LLM_LOG_PATH={runner.out_dir}/llm/llm.jsonl、"
-        f"EVENT_LOG_DIR={runner.out_dir}/events"
-        "——不往机器共用的 .local/logs 写一个字节",
-    )
-    runner.say(
-        "conclusion scope",
-        "这批只能支持『稳定前缀的时间收益』,不得报告命中率、不得报告省了多少 "
-        "token、不得报告 provider 是否关闭了缓存(design §0/§9.1)",
-    )
-    if runner.dry_run:
-        return 0
-    return _run_prefix_probe(args, runner, plan, sample_path)
-
-
-def _prefix_probe_preflight(
-    plan: Sequence[Mapping], sample: Mapping, args: argparse.Namespace,
-) -> dict:
-    """**首格之前**把这批要用到的纯计算全跑一遍,返回 manifest 事实。
-
-    存在的理由是钱(评审 P1-1 第 3 条):`render_sample` 与
-    `probe_manifest_facts` 各有一组响亮拒绝路径(样本地板不足、`tier_chars`
-    非严格递增、样本档位缺失、`--sample-file` 指了一份形状不对的 JSON),它们
-    全部只依赖参数与样本,与模型无关。不先算的话第一个抛出点在**预热格之后**
-    ——那一格已经付过钱了,而一整批 96 格连一行都产不出来。
-
-    三档正文按 `plan` 里 `(tier)` 的首次出现顺序各渲染一次(不是样本声明的
-    全部档位:`plan` 没跑的档位不该让这批跑不起来)。返回值就是收尾要写的
-    `facts`,不重算第二遍。
-
-    `matrix` 补两个**额外 int 子键**(`reflect_manifest` 的 `matrix` 允许额外
-    子键,`MANIFEST_KEYS` 闭集不用改):
-
-    * `planned_runs`(评审 F3;三条通道同规则)—— 这批**计划**的格数。读
-      manifest 的人不必自己把四个基数乘一遍,而一旦 `probe_plan` 的枚举维度
-      变化(比如某档不满跑),乘法就对不上账,这一列正是为对账设的;
-    * `marker_variant`(评审 F11)—— 不写的话,`--marker-variant 0` 与 `1` 跑
-      出来的两批 manifest 逐字节相同(seed / `sample_digest` / 四个基数全一致),
-      事后无法分辨哪批是哪个 variant,而 design §9.1「更换标记值重复验证」的
-      全部意义就是把这两批对起来看。
-    """
-    from app.eval.reflect_prefix_probe import probe_manifest_facts, render_sample
-
-    for tier in dict.fromkeys(row["tier"] for row in plan):
-        render_sample(tier, sample)
-    facts = dict(probe_manifest_facts(plan, sample, args.seed))
-    matrix = dict(facts["matrix"])
-    matrix["planned_runs"] = len(plan)
-    matrix["marker_variant"] = int(args.marker_variant)
-    facts["matrix"] = matrix
-    return facts
-
-
-def _prefix_probe_local_cache_exits(
-    summary: Mapping, rows_by_label: Mapping[str, Sequence[Mapping]],
-) -> tuple[int, int]:
-    """`(主批, 预热)` 两个本地缓存出口计数。
-
-    主批那个数**直接读 `summary["local_cache_exit_rows"]`**,不再由派发循环自己
-    数一遍(评审 P3-16):两个独立算出来的数没有任何守卫钉它们相等,而 stderr
-    上那句话恰恰宣称「该计数已单列进 probe-summary」。
-
-    预热那一格要单独数:`summarize_probe` 的分桶第一步就把 `is_warmup` 行整块
-    摘出去(design §9.1「预热成本单列」),所以它**不在**那一列里。而预热同样
-    走 `bypass_cache=True`,它命中本地缓存出口一样是「结构上不应出现」的事实,
-    一样要让整批以非零退出码收尾——不然一次预热就命中的批会静静地退 0。
-    """
-    from app.eval.reflect_prefix_probe import _LOCAL_CACHE_EXIT_STATUS
-
-    batch_exits = int(summary["local_cache_exit_rows"])
-    warmup_exits = sum(
-        1 for row in rows_by_label.get(_PREFIX_PROBE_WARMUP_LABEL, ())
-        if row.get("status") == _LOCAL_CACHE_EXIT_STATUS
-    )
-    return batch_exits, warmup_exits
-
-
-def _run_prefix_probe(
-    args: argparse.Namespace, runner: Runner, plan: Sequence[dict],
-    sample_path: Path,
-) -> int:
-    """E1 的真跑半边。**产物落盘与 `provider.close()` 都在 `finally` 上**。
-
-    那条 `try/finally` 不是防御性编程,是对已经花掉的钱负责(评审 F2 / P1-1):
-    循环体里 `render_sample` 的拒绝路径、行闭集自检、以及任何一次 `Ctrl-C`,都
-    会从循环里逃出去。裸语句版本下 `close()` 与全部落盘(三份 jsonl / 摘要 /
-    manifest / per-call 表)一个都不执行——真跑时等于「打完 60 个真实模型调用,
-    第 61 格一个 `ValueError` 把这 60 格的数据全部作废」,而 out-dir 连目录都
-    没建。`except BaseException` 也走这条 salvage(`KeyboardInterrupt` 不是
-    `Exception`,96 格 × 数十秒在第 80 分钟被 Ctrl-C 时最需要的正是这一条)。
-    """
-    _prefix_probe_set_env(_prefix_probe_process_env(args))
-    from app.core.config import Settings
-    from app.core.llm import (
-        CALL_STATS_KWARG, experiment_message_markers, provider_messages,
-        serialize_provider_messages,
-    )
-    from app.eval.reflect_manifest import build_manifest
-    from app.eval.reflect_prefix_probe import (
-        ARM_DISTURBED, ARM_STABLE, PROBE_SCHEMA_HINT, _INVALID_OUTPUT_STATUS,
-        _SUCCESS_STATUS, assert_probe_row_closed, build_marker_pair,
-        load_prefix_probe_sample, render_sample, summarize_probe,
-    )
-
-    sample = load_prefix_probe_sample(sample_path)
-    settings = Settings()
-    # 首格之前:三档正文 + manifest 事实各算一遍,坏样本不烧真调用。
-    try:
-        facts = _prefix_probe_preflight(plan, sample, args)
-    except (ValueError, KeyError, TypeError) as exc:
-        print(
-            "ERROR: prefix-probe preflight 不通过(样本或计划的纯计算就已经"
-            f"不成立,一次模型调用都没打):{exc}",
-            file=sys.stderr,
-        )
-        return 2
-
-    provider, client = _prefix_probe_client(settings)
-    try:
-        if not provider.configured("reasoning_agent"):
-            print(
-                "ERROR: reasoning_agent workload 没有配置模型服务;prefix-probe "
-                "需要一份真实模型配置(--env-file 或 .env)才能真跑",
-                file=sys.stderr,
-            )
-            return 2
-
-        contract_short, contract_readable = _ab_model_contract(settings)
-        runner.say("model contract", f"{contract_short}  ({contract_readable})")
-
-        log_dir = _ab_llm_log_dir(settings)
-        event_dir = Path(rig_event_log_dir(args.out_dir))
-        start_llm_offsets = _ab_llm_offsets(log_dir)
-        start_event_offsets = _ab_llm_offsets(event_dir, glob=RIG_EVENT_LOG_GLOB)
-
-        started_at = _prefix_probe_now()
-        deadline = (
-            time.monotonic() + args.max_wall_minutes * 60.0
-            if args.max_wall_minutes is not None else None
-        )
-
-        def _budget_expired() -> bool:
-            return deadline is not None and time.monotonic() >= deadline
-
-        rows_by_label: dict[str, list[dict]] = {
-            ARM_STABLE: [], ARM_DISTURBED: [], _PREFIX_PROBE_WARMUP_LABEL: [],
-        }
-        stopped_by_budget = False
-        # `series_index` → 上一格**返回**的单调时刻(不是发起时刻)。
-        prev_return_monotonic: dict[int, float] = {}
-
-        def _record_row(label: str, row: dict) -> None:
-            assert_probe_row_closed(row)
-            rows_by_label.setdefault(label, []).append(row)
-
-        def _call_row(
-            *, head: str, tail: str, messages: list[dict], timeout: float,
-            max_retries: int,
-        ) -> dict:
-            sink: dict[str, Any] = {}
-            content: object = None
-            try:
-                with experiment_message_markers(head, tail):
-                    content = client.chat_json(
-                        messages, PROBE_SCHEMA_HINT, timeout=timeout,
-                        max_retries=max_retries, bypass_cache=True,
-                        **{CALL_STATS_KWARG: sink},
-                    )
-            except Exception:
-                sink.setdefault("status", "error")
-            status = sink.get("status")
-            # 传输层报 `"ok"` 只说「provider 回了点什么、没有抛异常」——把
-            # `chat_json` 的返回内容读出来,按固定输出任务的形状(`{"ok":
-            # true}`)当场校验一遍,不通过就把这一格的 `status` 改写成
-            # `_INVALID_OUTPUT_STATUS`(codex #709 R2 P2-1)。只在传输层已经
-            # 报 `"ok"` 的格上做这件事:`"error"`/`"cancelled"`/`"cache_hit"`
-            # 这些状态各自已经说清楚了这一格发生了什么,不该被这条校验盖写。
-            if status == _SUCCESS_STATUS and not _prefix_probe_output_valid(content):
-                status = _INVALID_OUTPUT_STATUS
-            full_messages = provider_messages(
-                messages, PROBE_SCHEMA_HINT, markers=(head, tail))
-            usage = sink.get("usage") or {}
-            return {
-                "status": status,
-                "call_wall_ms": sink.get("call_wall_ms"),
-                "attempts": sink.get("attempts"),
-                "finish_reason": _prefix_probe_finish_reason(
-                    sink.get("finish_reason")),
-                "response_chars": sink.get("response_chars"),
-                "head_chars": len(head),
-                "tail_chars": len(tail),
-                "message_bytes_total": len(
-                    serialize_provider_messages(full_messages)),
-                "prompt_tokens": usage.get("prompt_tokens"),
-                "cached_tokens": usage.get("cached_tokens"),
-                "completion_tokens": usage.get("completion_tokens"),
-            }
-
-        def _finish() -> int:
-            """落盘 + 摘要 + manifest + per-call 表 + 退出码。
-
-            正常路径与 salvage 路径共用这一个函数——两条路各写一份的话,异常
-            那条(正是最需要产物的那条)会长期与正常那条分叉。
-            """
-            finished_at = _prefix_probe_now()
-            all_rows = [row for rows in rows_by_label.values() for row in rows]
-            summary = summarize_probe(all_rows)
-
-            # 三份 jsonl **一律出表**,零派发时是三个空文件(评审 P3-15):
-            # dry-run 的 `out` 行承诺了这三个落点,按固定名读的下游拿到
-            # `FileNotFoundError` 分不清「这批没跑起来」与「路径写错了」。
-            for label, rows in rows_by_label.items():
-                text = "".join(
-                    json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n"
-                    for row in rows
-                )
-                runner.write(runner.out_dir / f"probe-{label}.jsonl", text)
-
-            summary_md = _render_probe_summary_markdown(
-                summary, seed=args.seed, smoke=args.smoke,
-                sample_path=sample_path, marker_variant=args.marker_variant,
-            )
-            runner.write(runner.out_dir / "probe-summary.md", summary_md)
-            runner.write(
-                runner.out_dir / "probe-summary.json",
-                json.dumps(summary, ensure_ascii=False, sort_keys=True, indent=2),
-            )
-
-            manifest = build_manifest(
-                channel="e1",
-                code_sha=_ab_git_sha(),
-                started_at=started_at,
-                finished_at=finished_at,
-                stopped_by_budget=stopped_by_budget,
-                model_contract=contract_short,
-                budgets={
-                    "call_timeout_seconds": int(
-                        settings.reasoning_timeout_seconds),
-                    "attempt_budget": REASONING_ATTEMPT_BUDGET,
-                    "max_wall_minutes": args.max_wall_minutes,
-                },
-                **facts,
-            )
-            _write_manifest(manifest, runner=runner)
-
-            calls_rows = _rig_call_rows(
-                log_dir, event_dir, llm_offsets=start_llm_offsets,
-                event_offsets=start_event_offsets, tags=None,
-            )
-            _write_call_rows(runner.out_dir, "e1", calls_rows, mode="w")
-
-            # 退出码的**三个**来源,stderr 上各写清一句(评审 P2-4):混成一句
-            # 「非零」会让 `prefix-probe && analyze …` 的操作者分不清这批是被
-            # 预算截断、命中了不该命中的缓存出口,还是整批全灭。
-            #
-            # `invalid_output_rows` 不是这三个来源之一(拍板,codex #709 R2
-            # P2-1):它已经被 `_verdict` 的「过半非-ok 行判 undetermined」判据
-            # 兜住(那些行本来就不算 `"ok"`),再单独让退出码非零是同一件事
-            # 判两次;但操作者仍然应该在 stderr 上一眼看到这个数,所以这里单独
-            # 打一句提示,**不**碰 `exit_status`。
-            exit_status = 0
-            if stopped_by_budget:
-                print(
-                    "ERROR: 整批墙钟预算到点,提前停止派发(未完成/不成对标记见 "
-                    "manifest.stopped_by_budget)",
-                    file=sys.stderr,
-                )
-                exit_status = 1
-            batch_exits, warmup_exits = _prefix_probe_local_cache_exits(
-                summary, rows_by_label)
-            if batch_exits or warmup_exits:
-                print(
-                    f"ERROR: {batch_exits} 格(另有 {warmup_exits} 个预热格)"
-                    "命中本地响应缓存出口(status=cache_hit),bypass_cache=True "
-                    "下不应出现;主批那个数就是 probe-summary 的 "
-                    "local_cache_exit_rows(预热行按 design §9.1 不进任何统计,"
-                    "单独数)",
-                    file=sys.stderr,
-                )
-                exit_status = 1
-            ok_rows = (summary["first_observation_row_count"]
-                       + summary["repeat_observation_row_count"])
-            if ok_rows == 0:
-                print(
-                    "ERROR: 一格成功观测都没有(status=ok 的非预热行为 0;"
-                    f"failed_row_count={summary['failed_row_count']})。"
-                    "这批数据出不了任何结论,不要往 analyze 传",
-                    file=sys.stderr,
-                )
-                exit_status = 1
-            if summary["invalid_output_rows"]:
-                print(
-                    f"NOTE: {summary['invalid_output_rows']} 格传输层报 "
-                    "status=ok,但返回内容没通过固定输出任务的形状校验"
-                    "(status 已改记为 invalid_output;不计入 failed_row_count,"
-                    "也不单独让这次退出码非零,但已被剔除出 first/repeat 观测"
-                    "与主统计——见 probe-summary 的 invalid_output_rows)",
-                    file=sys.stderr,
-                )
-            return exit_status
-
-        try:
-            if not _budget_expired():
-                warmup_head, warmup_tail = build_marker_pair(
-                    args.seed, _PREFIX_PROBE_WARMUP_TIER, -1, ARM_STABLE, 0,
-                    marker_variant=args.marker_variant,
-                )
-                warmup_row = _call_row(
-                    head=warmup_head, tail=warmup_tail,
-                    messages=_prefix_probe_warmup_messages(),
-                    timeout=settings.reasoning_timeout_seconds,
-                    max_retries=settings.reasoning_max_retries,
-                )
-                warmup_row.update({
-                    "tier": None, "block_index": None, "arm": None,
-                    "call_index": None, "series_index": None,
-                    "is_warmup": True, "gap_ms": None,
-                })
-                _record_row(_PREFIX_PROBE_WARMUP_LABEL, warmup_row)
-                runner.say(
-                    "warmup done",
-                    f"status={warmup_row['status']} "
-                    f"wall_ms={warmup_row['call_wall_ms']}",
-                )
-
-                dispatched = 0
-                for entry in plan:
-                    if _budget_expired():
-                        stopped_by_budget = True
-                        break
-                    tier = entry["tier"]
-                    block_index, arm = entry["block_index"], entry["arm"]
-                    call_index = entry["call_index"]
-                    series_index = entry["series_index"]
-
-                    # `gap_ms` = 本格**发起** − 同序列上一格**返回**(评审 F6:
-                    # 「与上一次调用的间隔」是真实空闲,不是周期)。start-to-start
-                    # 的差值恰好等于上一格的整段墙钟,而在 E1 里那是数量级最大的
-                    # 一项:连续派发时它会记成 8000ms,而真实空闲接近 0——拿这个数
-                    # 去和 provider 前缀缓存的 TTL 比较,结论方向可以完全反过来。
-                    prev_return = prev_return_monotonic.get(series_index)
-                    call_started = time.monotonic()
-                    gap_ms = (
-                        None if prev_return is None
-                        else round((call_started - prev_return) * 1000)
-                    )
-
-                    row = _call_row(
-                        head=entry["head"], tail=entry["tail"],
-                        messages=render_sample(tier, sample),
-                        timeout=settings.reasoning_timeout_seconds,
-                        max_retries=settings.reasoning_max_retries,
-                    )
-                    # 返回时刻才是下一格 `gap_ms` 的起点。写在 `_record_row`
-                    # 之前:行闭集自检抛出去时这一格的返回时刻已经是事实。
-                    prev_return_monotonic[series_index] = time.monotonic()
-                    row.update({
-                        "tier": tier, "block_index": block_index, "arm": arm,
-                        "call_index": call_index, "series_index": series_index,
-                        "is_warmup": False, "gap_ms": gap_ms,
-                    })
-                    _record_row(arm, row)
-                    dispatched += 1
-                runner.say(
-                    "dispatched",
-                    f"{dispatched}/{len(plan)} 次调用"
-                    + ("(整批墙钟预算到点,提前停止派发)"
-                       if stopped_by_budget else ""),
-                )
-            else:
-                stopped_by_budget = True
-                runner.say("dispatched", "0(整批墙钟预算在开跑前就已到点)")
-        except BaseException:
-            # 已经打过的格是花了真钱的观测,不该跟着异常一起消失。salvage 自己
-            # 再抛的话会把原始异常盖掉(读的人拿到的是「写盘失败」而不是「样本
-            # 地板不足」),所以它单独兜一层,只打一句。
-            try:
-                _finish()
-            except BaseException as salvage_exc:  # noqa: BLE001
-                print(
-                    f"ERROR: 异常收尾时抢救产物也失败了:{salvage_exc!r}",
-                    file=sys.stderr,
-                )
-            else:
-                print(
-                    "ERROR: 派发中断,已把此前打完的格落盘到 "
-                    f"{runner.out_dir}(产物不完整,manifest 如实记录)",
-                    file=sys.stderr,
-                )
-            raise
-        return _finish()
-    finally:
-        provider.close()
-
-# --- CLI --------------------------------------------------------------------
-
-
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description=__doc__,
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    parser.add_argument(
-        "--dry-run", action="store_true",
-        help="只打印将要做的每一步与 client_request_id 编码;不连库、不起后端",
-    )
-    parser.add_argument("--db-name", default=DEFAULT_TEST_DB)
-    parser.add_argument(
-        # 默认值刻意留成 `None`,由 `main()` 填:`search` 要求这一项**显式给出**
-        # (它连的是主库),而「有没有显式给」只能靠一个哨兵分辨。其余子命令拿到
-        # 的默认值与从前逐字相同。
-        "--database-url",
-        help=f"**测试库**连接,所有写入都落在这里(默认 "
-             f"postgresql://127.0.0.1:5432/{DEFAULT_TEST_DB})。"
-             "`search` 例外:它连的是**主库**,必须显式给出,且全程只读",
-    )
-    parser.add_argument(
-        "--admin-url", default="postgresql://127.0.0.1:5432/postgres",
-        help="建库/删库用的维护连接",
-    )
-    parser.add_argument(
-        "--source-db-url",
-        help="**主库**连接,全程只读。两处消费:`seed` 重建 A 语料时读原文;"
-             "`ab` 必填,用它在跑前跑后各点一次主库行数,兑现 §5.5-2 的"
-             "「主库零接触」硬断言(不能与 --database-url 指同一个库)",
-    )
-    parser.add_argument(
-        "--source-notebook",
-        help="主库里 A 语料所在的 notebook id(刻意不写进仓库)",
-    )
-    parser.add_argument(
-        "--source-notebook-a",
-        help="`search` 的 A_nokg 格:主库里那个**无图**单篇笔记本的 id"
-             "(刻意不写进仓库)",
-    )
-    parser.add_argument(
-        "--source-notebook-b",
-        help="`search` 的 B_kg 格:主库里那个**有图**多篇笔记本的 id"
-             "(刻意不写进仓库)",
-    )
-    parser.add_argument(
-        "--owner",
-        help="`search` 用哪个主库用户的身份跑(用户名,大小写不敏感)。"
-             "默认 = users 表里最早的那个 admin",
-    )
-    parser.add_argument(
-        "--no-intent", action="store_true",
-        help="`search` 跳过意图契约(省一次/题的模型调用)。代价是 v2 只剩"
-             "整题一个方面,方面账那几列因此不可比",
-    )
-    parser.add_argument(
-        # 默认值刻意留成 `None`,由 `main()` 填成 1:`state-probe` 要「用户到底
-        # 有没有给」这个可判定的事实(与 `--database-url` 同一条哨兵理由),而
-        # 「值等于 1」分不清「显式敲了 1」和「压根没敲」。其余子命令拿到的值与
-        # 从前逐字相同。
-        "--concurrency", type=int, default=None,
-        help="`search` 用几个线程并发跑 run(默认 1,行为与不加这个参数逐字"
-             "一致)。两阶段:先按同一并发度并发算意图契约,再把全部 run 提交"
-             "给一个线程池。SQLite 主库真跑时强制 clamp 到 1;PG 主库按"
-             "POSTGRES_POOL_MAX_SIZE clamp——跑之前先确认模型服务的并发限流"
-             "与连接池都吃得下这个数,否则要么被限流打回、要么在拿连接时死等。"
-             "`state-probe`(E2)恒 1:显式给且不等于 1 当场响亮拒绝(退 2),"
-             "不降级——E2 每条 run 只有一次真实调用,并发只会污染排队时长",
-    )
-    parser.add_argument(
-        "--keep-raw-trace", action="store_true",
-        help="`search` 额外把每个 run 的原始 TraceStep 列表(含 summary)与 "
-             "termination DTO 写到 <out-dir>/raw/<policy>/<question_key>_"
-             "<corpus_cell>_<effort>.json。**这份文件含标题与模型 reason,"
-             "不进数据集/不进仓库**,只用来人工核对反推口径",
-    )
-    parser.add_argument(
-        "--only-question", action="append", default=[],
-        help="`search` 只跑这些题号(可多次,如 B-q03);筛选发生在 --limit "
-             "切片之前(先筛后限)。默认不筛,全量参与 --limit",
-    )
-    parser.add_argument(
-        "--only-cell", action="append", default=[],
-        choices=list(SEARCH_CELLS),
-        help="`search` 只跑这些语料格(可多次,取值同 SEARCH_CELLS:"
-             f"{', '.join(SEARCH_CELLS)})。在 --cell 选中的格子里再收窄一层,"
-             "与 --only-question 一样先筛后限",
-    )
-    parser.add_argument("--corpus-dir", help="B 语料 markdown 所在目录")
-    parser.add_argument(
-        "--base-url", default="",
-        help=f"默认 http://127.0.0.1:<--port>(缺省 {DEFAULT_PORT})",
-    )
-    parser.add_argument("--port", type=int, default=DEFAULT_PORT)
-    parser.add_argument("--storage-dir", default=".local/storage-t0")
-    parser.add_argument("--out-dir", default=".local/t0")
-    parser.add_argument(
-        "--env-file",
-        help="临时后端与进程内 report 读哪份 .env(模型服务配置)。"
-             "默认不设 ⇒ 用当前 checkout 的 .env;worktree 里通常要指向主 checkout",
-    )
-    parser.add_argument(
-        "--user", default=DEFAULT_USER,
-        help="fixture 用户名。必须是「单个小写字母+八位数字」(注册端点的正则)",
-    )
-    parser.add_argument(
-        "--skip-kg", action="store_true",
-        help="seed 不调 kg/build(有图格也留成无图)。给「没有模型配置」的冒烟跑用",
-    )
-    parser.add_argument(
-        "--skip-embed", action="store_true",
-        help="seed 只等解析终态,不等 index-status 就绪",
-    )
-    parser.add_argument(
-        "--skip-create-db", action="store_true",
-        help="库已存在(或不是 PG)时跳过建库/装扩展",
-    )
-    parser.add_argument("--ready-timeout", type=float, default=600.0)
-    parser.add_argument("--parse-timeout", type=float, default=3600.0)
-    parser.add_argument("--index-timeout", type=float, default=7200.0)
-    parser.add_argument(
-        "--policy", choices=POLICIES, default="legacy",
-        help="`ask` / `report` / `restart` 用它选策略。**`search` 不读它**:"
-             "那条路一次进程内跑完两侧,配对因此天然干净",
-    )
-    parser.add_argument(
-        "--only-policy", action="append", default=[], choices=list(POLICIES),
-        help="`search` 只跑这一侧策略(可多次;默认两侧都跑)。用于一侧被网络故障"
-             "整批打废后的重跑;配对靠 question_key+corpus_cell+effort,不受影响",
-    )
-    parser.add_argument(
-        "--cell", action="append", default=[], choices=list(CORPUS_CELLS),
-        help="只跑这些语料格(可多次);默认四格全跑",
-    )
-    parser.add_argument(
-        "--limit", type=int,
-        help="每个语料格只取前 N 题(先验证用);默认全量。"
-             "**`state-probe`(E2)读法不同**:它没有语料格这一维,这个数切的是"
-             "**case 集**(只跑前 N 例),在 --only-case 筛完之后切(先筛后限)",
-    )
-    parser.add_argument("--lang", choices=("zh", "en", "both"), default="zh")
-    # --- `ab` 专属(A/B 设计规格 §5.4) ---
-    parser.add_argument(
-        "--efforts", action="append", default=[], choices=list(EFFORTS),
-        help="`ab` 跑哪些档位(可多次;默认两档全跑)。`search`/`ask` 不读它"
-             "——它们的档位维度由 EFFORTS 定死",
-    )
-    parser.add_argument(
-        "--arms", default=None,
-        help="`ab` 跑哪几条臂,逗号分隔。**一次一对**(配对差值表按对出,三条臂"
-             "的批次会整批 paired=False,所以超过两条当场拒绝)。一维写法 "
-             "`legacy,v2`(= 不给时的默认);二维写法 "
-             "`v2:off,v2:prefix_snapshot` 把 REASONING_REFLECT_OPTIMIZATION 当"
-             "第二维(前缀复用最终设计 §11)。省略 `:优化` 一律补 `off`;"
-             "`legacy:prefix_snapshot` 这类合法值的非法组合、重复臂与空写法"
-             "(`--arms \"\"`)都当场拒绝,不退化成默认两臂。"
-             "与 --only-policy 互斥。`search`/`ask` 不读它。"
-             "证据展示与缓存布局新档显式写 `legacy,v2:prefix_delta_evidence`，"
-             "或 `v2:prefix_delta,v2:prefix_delta_evidence` 对照逐项自评。"
-             "**`state-probe`(E2)读法不同**:一维,逗号分隔的 off/"
-             "prefix_snapshot/prefix_delta/prefix_delta_lean/prefix_delta_evidence "
-             "子集(不给 = "
-             "默认三臂 off,prefix_snapshot,prefix_delta,U2 拍板;加"
-             "prefix_delta_lean 即可跑四臂),没有『一次一对』或『:优化』写法",
-    )
-    parser.add_argument(
-        # 同 `--concurrency`:哨兵 `None` 由 `main()` 填成 `ab` 的旧默认 3,
-        # `state-probe` 用「是不是 `None`」判显式(它自己的默认是 2)。
-        "--repeats", type=int, default=None,
-        help="`ab` 的重复轮数(§4.1 默认 3)。重复轮是**最外层**循环,所以任何"
-             "被预算或故障截断的前缀都是一份配对完整、平衡的数据集。"
-             "`state-probe`(E2)不吃这份默认值——不给时另有自己的默认 2"
-             "(design §9.2:12 例 × 3 状态点 × 3 臂 × 2 重复 = 216 次逻辑调用),"
-             "给了就照用(经过下面同一条 clamp)",
-    )
-    parser.add_argument(
-        "--only-case", action="append", default=[],
-        help="`state-probe`(E2)只跑这些 case_key(可多次)。筛选发生在 "
-             "--limit 切片之前(先筛后限),与 --only-question 同一条口径。"
-             "默认不筛,全量参与 --limit",
-    )
-    parser.add_argument(
-        "--round", type=int,
-        help="`ab` 只跑第 N 轮(与 --repeats 配合:先跑第 1 轮看结论,再补"
-             "第 2/3 轮)。不给就是 1..--repeats 全跑",
-    )
-    parser.add_argument(
-        "--max-wall-minutes", type=float, default=None,
-        help="`ab` 与 `prefix-probe` 共用的整批墙钟预算(分钟,T-EX8/T-EX4)。"
-             "**不给 = 今天的行为逐字相同**:不设上限、不早停。`ab` 到点后停止"
-             "派发新单元、cancel_event 唤醒在途、shutdown(cancel_futures=True) "
-             "撤掉队列里的;在途未完成单元落 status=cancelled 行(删失观察),不"
-             "偷偷补跑到矩阵齐全。`prefix-probe` 是串行的,到点停止派发**未开始"
-             "**的调用,同样不补跑到矩阵齐全。两者都以非零退出码收尾,并把"
-             " stopped_by_budget 如实写进 manifest.json。≤0 与 NaN 两条命令"
-             "共用同一处判据当场拒绝(`_wall_budget_problem`)",
-    )
-    parser.add_argument(
-        "--mode", choices=("reasoning", "chunk", "auto"), default="reasoning",
-    )
-    # --- `prefix-probe` 专属(E1,计划 §3 T-EX4)---
-    parser.add_argument(
-        "--seed", type=int, default=None,
-        help="`prefix-probe` 必填:区组内的臂序平衡随机与可复现都靠它"
-             "(design M4)。别的子命令不读它",
-    )
-    parser.add_argument(
-        "--smoke", action="store_true",
-        help="`prefix-probe` 走 48 次冒烟规模(区组数砍半),而不是默认的 96 次"
-             "全量。U4 拍板:可先冒烟,但不凭它直接定论",
-    )
-    parser.add_argument(
-        "--sample-file",
-        help="`prefix-probe` 用哪一份上下文样本 JSON。默认仓库内 fixture "
-             "(backend/app/eval/reflect_t0/prefix_probe_sample.json);"
-             "指向 --out-dir 之外、操作者 .local 下的真实样本时用这个",
-    )
-    parser.add_argument(
-        "--marker-variant", type=int, default=0,
-        help="`prefix-probe` 的标记版本号(design §9.1「更换标记值重复验证」);"
-             "同一组 (seed, tier, block, arm, call_index) 换一个 variant 就拿到"
-             "一组全新的标记值,计划形状不变",
-    )
-    parser.add_argument(
-        "command",
-        choices=("seed", "ask", "report", "search", "ab", "state-probe",
-                 "restart", "export", "teardown", "prefix-probe"),
-    )
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--dry-run', action='store_true', help='只打印将要做的每一步与 client_request_id 编码;不连库、不起后端')
+    parser.add_argument('--db-name', default=DEFAULT_TEST_DB)
+    parser.add_argument('--database-url', help=f'**测试库**连接,所有写入都落在这里(默认 postgresql://127.0.0.1:5432/{DEFAULT_TEST_DB})。`search` 例外:它连的是**主库**,必须显式给出,且全程只读')
+    parser.add_argument('--admin-url', default='postgresql://127.0.0.1:5432/postgres', help='建库/删库用的维护连接')
+    parser.add_argument('--source-db-url', help='主库只读连接，seed 用它读取来源正文。')
+    parser.add_argument('--source-notebook', help='主库里 A 语料所在的 notebook id(刻意不写进仓库)')
+    parser.add_argument('--source-notebook-a', help='`search` 的 A_nokg 格:主库里那个**无图**单篇笔记本的 id(刻意不写进仓库)')
+    parser.add_argument('--source-notebook-b', help='`search` 的 B_kg 格:主库里那个**有图**多篇笔记本的 id(刻意不写进仓库)')
+    parser.add_argument('--owner', help='`search` 用哪个主库用户的身份跑(用户名,大小写不敏感)。默认 = users 表里最早的那个 admin')
+    parser.add_argument('--no-intent', action='store_true', help='跳过意图准备，每个 run 自行规划。')
+    parser.add_argument('--concurrency', type=int, default=None, help='search 并发数；SQLite 强制 1，PostgreSQL 按连接池容量限制。')
+    parser.add_argument('--keep-raw-trace', action='store_true', help='显式保存原始轨迹到 out-dir/raw；含来源标题与模型文本，不进聚合日志。')
+    parser.add_argument('--only-question', action='append', default=[], help='`search` 只跑这些题号(可多次,如 B-q03);筛选发生在 --limit 切片之前(先筛后限)。默认不筛,全量参与 --limit')
+    parser.add_argument('--only-cell', action='append', default=[], choices=list(SEARCH_CELLS), help=f"`search` 只跑这些语料格(可多次,取值同 SEARCH_CELLS:{', '.join(SEARCH_CELLS)})。在 --cell 选中的格子里再收窄一层,与 --only-question 一样先筛后限")
+    parser.add_argument('--corpus-dir', help='B 语料 markdown 所在目录')
+    parser.add_argument('--base-url', default='', help=f'默认 http://127.0.0.1:<--port>(缺省 {DEFAULT_PORT})')
+    parser.add_argument('--port', type=int, default=DEFAULT_PORT)
+    parser.add_argument('--storage-dir', default='.local/storage-t0')
+    parser.add_argument('--out-dir', default='.local/t0')
+    parser.add_argument('--env-file', help='临时后端与进程内 report 读哪份 .env(模型服务配置)。默认不设 ⇒ 用当前 checkout 的 .env;worktree 里通常要指向主 checkout')
+    parser.add_argument('--user', default=DEFAULT_USER, help='fixture 用户名。必须是「单个小写字母+八位数字」(注册端点的正则)')
+    parser.add_argument('--skip-kg', action='store_true', help='seed 不调 kg/build(有图格也留成无图)。给「没有模型配置」的冒烟跑用')
+    parser.add_argument('--skip-embed', action='store_true', help='seed 只等解析终态,不等 index-status 就绪')
+    parser.add_argument('--skip-create-db', action='store_true', help='库已存在(或不是 PG)时跳过建库/装扩展')
+    parser.add_argument('--ready-timeout', type=float, default=600.0)
+    parser.add_argument('--parse-timeout', type=float, default=3600.0)
+    parser.add_argument('--index-timeout', type=float, default=7200.0)
+    parser.add_argument('--cell', action='append', default=[], choices=list(CORPUS_CELLS), help='只跑这些语料格(可多次);默认四格全跑')
+    parser.add_argument('--limit', type=int, help='每个语料格取前 N 题；在题号筛选之后应用。')
+    parser.add_argument('--lang', choices=('zh', 'en', 'both'), default='zh')
+    parser.add_argument('--mode', choices=('reasoning', 'chunk', 'auto'), default='reasoning')
+    parser.add_argument("command", choices=("seed", "ask", "report", "search", "restart", "export", "teardown"))
     return parser
 
 
 def apply_shared_arg_defaults(args: argparse.Namespace) -> argparse.Namespace:
-    """把 argparse 的哨兵默认值填成真正的默认值,并记下「用户到底给了什么」。
-
-    **一处填、所有调用方共用**:`main()` 在派发前调它一次;直接用
-    `build_parser()` 造 args 的调用方(用例里的几个 harness)也调它,免得
-    「哨兵→默认值」这一步在两处各填一半。
-    """
-    # `--concurrency` / `--repeats` 的默认值都是 argparse 的 `None` 哨兵,真正的
-    # 旧默认值(1 / 3)在下面填。**显式性靠哨兵,不靠扫 argv**:argparse 接受
-    # 任何无歧义前缀缩写,`--repeat 5` / `--concurren 2` 都会被它接受并写进
-    # `args`,而一份「argv 里有没有逐字 `--repeats`」的判据答「没给」——用户要 5
-    # 会静默拿到 `state-probe` 的默认 2,`--concurrency` 那条响亮拒绝更是整条被
-    # 跳过(T-EX7 评审 F8-5 / P2-2)。
-    #
-    # 这一份快照必须在下面的 `max(1, ...)` clamp **之前**取:clamp 会把
-    # `--concurrency 0` 变成 `1`,读 clamp 之后的值等于放行它。
-    args.concurrency_given = args.concurrency
-    args.repeats_given = args.repeats
-    if args.concurrency is None:
-        args.concurrency = 1
-    if args.repeats is None:
-        args.repeats = 3
-    # `--port` 与 `--base-url` 曾是两个各自独立的默认值:只改端口的人会拿到一台
-    # 起在 8011、却被对着 8001 轮询的后端。端口是真源,base-url 只在显式给出时
-    # 才覆盖(比如后端起在容器里)。
+    args.concurrency = max(1, int(args.concurrency or 1))
     args.base_url = args.base_url or f"http://127.0.0.1:{args.port}"
-    # `--database-url` 的默认值在这里填,而不是在 argparse 里:`search` 连的是
-    # **主库**,拿一个指向测试库的默认值去跑它是最坏的一种"能跑起来"。哨兵让
-    # 「有没有显式给」变成一个可判定的事实。
     args.database_url_explicit = args.database_url is not None
-    # 默认库名跟着 `--db-name` 走,不是常量:`--db-name another_t0 seed` 建的是
-    # another_t0,扩展与迁移却打到常量默认库上——那个库若恰好存在就被写了,不存在
-    # 就报一句和 `--db-name` 无关的连接错误(codex #700 R5 P2)。
-    args.database_url = (
-        args.database_url or f"postgresql://127.0.0.1:5432/{args.db_name}"
-    )
-    # 负数/零没有意义;`_resolve_concurrency` 的 clamp 是"往下调",这里只挡住
-    # 明显打错的值,不在这里做 SQLite/连接池那两条(它们要跑到真库连上才判断
-    # 得出来)。
-    args.concurrency = max(1, int(args.concurrency))
-    # `ab` 的重复轮数同理:0 或负数会让整批枚举变成空的,而那看起来完全像一次
-    # 「这批题都被过滤掉了」。`--round` 不 clamp——它是一个下标,越界该报错。
-    args.repeats = max(1, int(args.repeats))
+    args.database_url = args.database_url or f"postgresql://127.0.0.1:5432/{args.db_name}"
     return args
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = apply_shared_arg_defaults(build_parser().parse_args(argv))
     runner = Runner(dry_run=args.dry_run, out_dir=Path(args.out_dir))
-    handlers = {
-        "seed": cmd_seed, "ask": cmd_ask, "report": cmd_report,
-        "search": cmd_search, "ab": cmd_ab, "state-probe": cmd_state_probe,
-        "restart": cmd_restart, "export": cmd_export, "teardown": cmd_teardown,
-        "prefix-probe": cmd_prefix_probe,
-    }
+    handlers = {"seed": cmd_seed, "ask": cmd_ask, "report": cmd_report,
+                "search": cmd_search, "restart": cmd_restart,
+                "export": cmd_export, "teardown": cmd_teardown}
     return handlers[args.command](args, runner)
 
 

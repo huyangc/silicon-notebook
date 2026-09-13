@@ -574,45 +574,6 @@ def test_evidence_context_folds_clusters_without_merging_participant_maps():
     assert evidence["k1"]["object_id"] == "m1"
 
 
-def test_evidence_context_reports_the_folded_members_through_fold_sink():
-    """`fold_sink`(设计稿 2026-09-07 §7.2):被簇去重折叠掉的成员 → 代表。
-
-    零新增查询——折叠关系是 `_canonical()` 本来就要算的,这里只是把已经算出的
-    对应关系交出去,供 `reasoning_aspects.admitted_evidence_keys` 判断"绑在成员
-    id 上的证据到底进没进 prompt"。不交出去,多参考库场景下同一个概念在各库各有
-    一份对象 id,绑着成员 id 的那个方面会被误报「未送达」。
-
-    缺省(不传 sink)时函数行为逐字不变:上一条用例已经钉住去重语义本身。
-    """
-    class _SplitClusterKnowledge(_Knowledge):
-        def cluster_fold(self, notebook_id, object_ids):
-            table = (
-                {"m1": "c-active"} if notebook_id == "active"
-                else {"m1": "c-base", "m2": "c-base"}
-            )
-            return {oid: table[oid] for oid in object_ids if oid in table}
-
-    service = EvidenceContextService(
-        notebooks=_Notebooks(), sources=_Sources(),
-        knowledge=_SplitClusterKnowledge(), settings=Settings(),
-    )
-    hits = [
-        RetrievedKnowledge(
-            object_id="m1", object_type="concept", payload={"name": "First"},
-            evidence=[], tier="personal", notebook_id="active",
-        ),
-        RetrievedKnowledge(
-            object_id="m2", object_type="concept", payload={"name": "Second"},
-            evidence=[], tier="base", notebook_id="base",
-        ),
-    ]
-    fold: dict[str, str] = {}
-    _, evidence = service.knowledge_context("active", hits, fold_sink=fold)
-    # 进 prompt 的是代表 m1;被折叠的 m2 记一行「m2 → m1」。
-    assert list(evidence) == ["k1"] and evidence["k1"]["object_id"] == "m1"
-    assert fold == {"m2": "m1"}
-    # 代表自己不进 sink(它没有被折叠掉),自映射也不写。
-    assert "m1" not in fold
 
 
 def test_evidence_context_knowledge_context_never_loads_full_cluster_map():
