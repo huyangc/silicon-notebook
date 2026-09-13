@@ -55,7 +55,7 @@ class ReflectActionParameter:
     name: str                 # ^[a-z][a-z0-9_]{0,23}$
     description: str          # ≤ REFLECT_ACTION_PARAM_DESCRIPTION_MAX_CHARS
     kind: Literal["text", "enum"]
-    values: tuple[str, ...] = ()   # kind=="enum" 时非空，每个值 ^[a-z][a-z0-9_]{0,31}$
+    values: tuple[str, ...] = ()   # kind=="enum" 时 ≥ 2 个值，每个值 ^[a-z][a-z0-9_]{0,31}$
     required: bool = False
 
 @dataclass(frozen=True, slots=True)
@@ -128,11 +128,18 @@ class ReflectActionContributor(Protocol):
   或全部不可用）。`ReflectActionSpec` 是描述符加 `contribution_id`/`plugin_id` 的核心内
   部投影，模型看不到 plugin_id。
 - **按轮决定是否提供**（run 级事实闸，与 `kg_actions` 同类，不是路由）：本轮提供插件动作
-  当且仅当 `plugin_specs` 非空、档位不是 `quick`、`action_policy.max_plugin_actions > 0`、
-  **且**本 run 已出现过至少一次「库内通道空手」——`zero_hit_by_action` 有任一动作计数
-  > 0，或上一轮 `no_progress`/`stale`。首轮永远不提供。理由：描述符的用途就是「库内反复
-  找不到再走外部」，把这条前置写进事实闸而不只写进提示词，模型就没有机会在第一轮把外部
-  检索当成默认通道；它仍然自己决定要不要调、什么时候调、传什么参数。
+  当且仅当 `plugin_specs` 非空、档位不是 `overview`（仓库里最低档叫 overview，没有 quick；
+  报告/Knowhow 无档位 ⇒ `limits is None` 也关）、`action_policy.max_plugin_actions > 0`、
+  `plugin_egress_question` 非空（fail-closed，见 §九 1）、**且**本 run 已出现过至少一次
+  「库内通道空手」——`zero_hit_by_action` 有任一动作计数 > 0，或上一轮 `no_progress`/`stale`。
+  没有单独的轮次守卫：首轮检索本身零收获时，第一轮 reflect 就满足条件、就可以提供——这正是
+  「库内已经空手」的字面含义。理由：描述符的用途就是「库内反复找不到再走外部」，把这条前置
+  写进事实闸而不只写进提示词，模型就没有机会在库内还没试过时把外部检索当成默认通道；它
+  仍然自己决定要不要调、什么时候调、传什么参数。
+- **外部证据不计进度，但成功接纳本轮让 `stale` 持平**（T3 评审后裁决）：`run()` 的
+  `no_progress` 算术只看库内候选，插件带回条目不会**重置**熔断；但与 `consult_memory` 的
+  `consult_delivered_this_turn` 同形，成功接纳 ≥1 条的那一轮 `stale` 不递增——否则一次成功
+  调用就把 run 推到熔断，模型永远看不到刚花预算取回的外部块。skip 各态照旧递增。
 - 关闭态（上述任一不满足）传 `plugin_actions=()`：`reflect_prompt`/`reflect_schema_hint`
   /白名单三处逐字节等于接入前。
 
@@ -184,17 +191,30 @@ class ReflectActionContributor(Protocol):
 尾部追加有界段：
 
 ```
-[External evidence] (outside the library; citable, label 外部)
-x1 · IEEE Xplore · <title> · <excerpt 前 160 字符>
+[External evidence] (outside the library; citable, labelled [external · <source>])
+x1 · [external · IEEE Xplore] · <title> · <excerpt 前 160 字符>
 x2 · …
+Note: <插件那句观察，有才出>
 ```
+
+条目上的 `[external · <source_label>]` 前缀是**跨三处的同一个词**，不是排版选择：
+§3.2 的固定句向模型承诺候选里的外部材料就是这么标的（`labelled [external]`），
+§6.2 的合成块按 `[external · <源>]` 渲染，这里是模型第一次见到它的地方。三处任一
+改词，模型就会在候选里找不到提示词说会有的那个标记。
 
 - 键 `x{n}` 只是 reflect 阶段的显示编号，不是合成时的 `[k]` 号——合成阶段统一按
   `id_offset` 重编（§六），与 chunk/element 段的做法一致。
 - 段落预算 `EXTERNAL_EVIDENCE_REFLECT_BLOCK_CHARS`，超出截断并标 `…(+N)`。
 - 外部内容是不受信文本：一旦 `state.external_evidence` 非空，后续每轮 reflect 都插入
-  `UNTRUSTED_EVIDENCE_SYSTEM_INSTRUCTION` 系统消息（复用现有 `untrusted_evidence` 机制，
-  run 内置位而不是实例级）。
+  `UNTRUSTED_EVIDENCE_SYSTEM_INSTRUCTION` 系统消息（复用现有 `untrusted_evidence` 机制）。
+  这个常量在 T3 拆成了两段：**通用主体**（本条用的就是它）与 knowhow 补全专用的收束句
+  `KNOWHOW_COMPLETION_TASK_SENTENCE`。拆分的理由是原串末句写死「只围绕这次空格补全来
+  规划与反思」——对一次带外部证据的 Ask 提问，那是一句错话。knowhow 侧显式拼
+  `KNOWHOW_UNTRUSTED_EVIDENCE_SYSTEM_INSTRUCTION`，与拆分前逐字节相同（
+  `test_knowhow_completion.py` 钉住）。
+  开关落在**实例**上（`untrusted_evidence` / `untrusted_evidence_instruction`）而不是
+  run 级：Ask 每次提问都新建 `ReasoningRetriever`（`ask_service._build_reasoning_
+  retriever`），报告与 knowhow 也各自新建，没有任何生产路径跨 run 复用同一个实例。
 
 ## 四、注册与冲突规则（`extensions/registry.py` freeze 期校验）
 
@@ -211,7 +231,10 @@ x2 · …
   参数写进错误的槽位。
 - 跨插件动作名唯一；同一插件重复注册同名动作也拒。
 - 参数名不得为 `name`/`reason`（防与动作对象外的字段混淆），数量 ≤
-  `REFLECT_ACTION_PARAMETERS_MAX`；enum 值数量 ≤ `REFLECT_ACTION_ENUM_VALUES_MAX`。
+  `REFLECT_ACTION_PARAMETERS_MAX`；enum 值数量 ≥ 2 且 ≤
+  `REFLECT_ACTION_ENUM_VALUES_MAX`。下界不是风格要求：单值枚举渲染出来没有 `|`，而
+  `_validate_against_example` 正是靠这个字符判定「这是枚举」，于是模型看到的是一个封闭
+  选项、校验层放行的却是任意串——正好是 §3.3 承诺不会出现的那种提示词与校验层不一致。
 - `max_calls_per_run ≥ 1`；实际生效值 = `min(descriptor, policy.max_plugin_actions)`。
 - 描述符所有字符串在 freeze 期只校验、不改写：**空串、超限或含控制字符即注册失败**。
   控制字符类按「不能出现在一行提示词里的字符」定义，比 ASCII 控制符更宽：C0
@@ -226,15 +249,40 @@ x2 · …
 
 `ReflectActionHost` 复用 gap_consult 宿主的全部骨架，逐条对应：
 
+调用方先算 run 级前置再问拓扑：无宿主 / 无外泄串 / 无 `limits` / `overview` 档 /
+`max_plugin_actions <= 0` 时 `_offerable_plugin_specs` **一次都不碰宿主**——关闭态不该
+为一条本 run 不会提供的通道付探针、付线程或付一条事件。
+
 | gap_consult 宿主 | 本宿主 |
 | --- | --- |
-| 一个 `daemon=True` 私有线程跑探针 + `consult` | 一个私有线程跑探针 + `invoke` |
+| 一个 `daemon=True` 私有线程跑探针 + `consult` | 同款私有线程；**`specs()` 的每条可用性探针也各起一个**（探针只是合同上 I/O-free，不是结构上），超时/取消按不可用记事件 |
 | 50ms 切片 join，硬 wall-clock deadline | 同，deadline = `REASONING_PLUGIN_ACTION_TIMEOUT_SECONDS`（默认 8.0） |
 | `_SdkCancellation` 适配 raw Event | 原样复用（抽到共享模块，两处 import） |
 | 扫描上限 `_ADMISSION_SCAN_FACTOR`、strip 头部余量 | 原样复用 |
 | URL 只许 http/https；title/summary 限长 | 同；另加 `excerpt`/`location_label` 限长 |
 | `seen_urls` 去重 | run 内去重（跨多次调用、跨多个动作） |
-| 失败码 `gap_consult_failed` 等 | `plugin_action_failed` / `_timeout` / `_cancelled` / `_invalid_result` |
+| 失败码 `gap_consult_failed` 等 | `plugin_action_failed` / `_timeout` / `_cancelled` / `_invalid_result` / `_unavailable` |
+| 核心侧 `GapConsultCallContext` → SDK 侧 `GapConsultExtensionContext` | 同款两段式：核心侧 `ReflectActionCall`（`domain/reflect_action.py`）→ SDK 侧 `ReflectActionCallContext` |
+
+**调用上下文是两个类型，不是一个**：reflect 循环住在 `app.services`，而
+`scripts/check_architecture_boundaries.py` 只许组合根与插件实现 import
+`app.extension_sdk` —— 所以循环拼的是核心侧的 `ReflectActionCall`（domain 层，两边
+都能读），宿主在 worker 线程上把它逐字段翻成插件真正收到的
+`ReflectActionCallContext`，`cancellation` 在这一步被套上 SDK 的完整令牌面
+（`SdkCancellation`）。宿主的返回同样是核心类型 `ReflectActionOutcome`（domain），
+所以 SDK 形状一次都不跨这条缝。
+
+取消**不抛异常**，两个入口一致：`invoke` 返回 `plugin_action_cancelled`，`specs()` 把
+被取消（以及超时）的那条探针按不可用处理、记一条事件并把该动作排除在本轮之外。宿主
+只有一种失败形状。上抛发生在**核心侧**：`_action_plugin` 与 `_offerable_plugin_specs`
+在宿主返回后各重读一次**自己**的 `cancel_event` 再 `raise_if_cancelled`。取消仍在第一
+时间终止 run，判据却留在核心手里，而不是信一个宿主对它的转述。
+
+**外部证据不重置进度、但成功接纳的那一轮 `stale` 持平**：`run()` 的 `before`/
+`no_progress` 算术只数库内证据，所以插件带回的条目不会把熔断计数清零；与
+`consult_delivered_this_turn` 同形，真送达 ≥1 条的那一轮 `stale` 也不递增（否则两次成功
+调用就吃掉三轮熔断预算里的两轮，模型看不到刚花预算取回的外部块）。零条目与各态 skip
+照常递增。
 
 `run()` 的 elif 链只加分派一行：`elif decision.next_action in state.plugin_action_names:
 self._action_plugin(state, decision)`。`run` 是零松弛天花板的热函数，执行体住在
@@ -242,13 +290,26 @@ self._action_plugin(state, decision)`。`run` 是零松弛天花板的热函数�
 
 1. 纵深防御：本轮未提供该动作（闸未开或 spec 不在集合）→ skip `plugin_action_disabled`；
 2. 必填参数为空 → skip `plugin_action_missing_argument`，文案写明缺哪个、该给什么；
-3. 该动作已达 `max_calls_per_run` 或 run 已达 `max_plugin_actions` → skip
-   `plugin_action_cap`；
-4. 相同（动作, 规范化参数）已调用过 → skip `duplicate_plugin_action`；
-5. 已是最后一轮 → skip `plugin_action_last_turn`（同 consult_memory：产出只进下一轮
-   reflect，末轮无人消费）；
+3. 该动作已达 `max_calls_per_run` 或 run 已达 `max_plugin_actions`、或 run 级外部证据
+   额度已满 → skip `plugin_action_cap`；
+4. 已是最后一轮 → skip `plugin_action_last_turn`（同 consult_memory：产出只进下一轮
+   reflect，末轮无人消费）。**排在重复判据之前**：末轮对模型有用的信息是「来不及用
+   上了」而不是「这个参数问过了」，而且末轮一格预算都不该扣；
+5. 相同（动作, 规范化参数）**已经成功取回过材料** → skip `duplicate_plugin_action`。
+   判据是「成功过」而不是「发起过」：一次超时之后模型用同样的参数再试一次是合理的
+   （它一条材料都没拿到），重试风暴由第 3 条的预算挡住——预算在**发起调用之前**扣，
+   所以一个总是超时的插件最多花掉它自己那几格额度，不会把每一轮都变成一次满额的
+   墙钟等待；
 6. 调用宿主；结果按 §六 铸键并入 `state.external_evidence`；零条目则
-   `zero_hit_by_action[name] += 1`，否则清零。
+   `zero_hit_by_action[name] += 1`，否则清零。真送达 ≥1 条时置
+   `external_delivered_this_turn`，链尾记账让 `stale` **持平**（不清零、不递增）——
+   与 `consult_delivered_this_turn` 逐字同形。
+
+铸键这一步同时对 `title`/`excerpt`/`source_label`/`location_label`/`note` 过一次
+`fold_control_characters`：候选摘要外部段（§3.5）与合成上下文块（§6.2）都是「一行一
+条」的格式，而反向绑定照着这个形状读回来，所以一条 excerpt 里的换行会渲染成一整行核心
+从没写过的证据。折叠发生在**铸键处、只一次**，两个渲染点共用它的结果（渲染侧各自再折
+一次作纵深）。
 
 轨迹：新 `step_type="plugin_action"`（核心拥有的一个值，不按插件增长），`summary` 形如
 「调用扩展检索 search_ieee：<query>，新增 2 条外部材料」，`detail` =
@@ -273,13 +334,25 @@ self._action_plugin(state, decision)`。`run` 是零松弛天花板的热函数�
 `chunk_context` 同形：返回 `(block, evidence_by_id)`。每条：
 
 ```
-[k7] [external · IEEE Xplore] <title> (<location_label>) — <excerpt>
+k7: [external · IEEE Xplore] <title> (<location_label>) — <excerpt>
 ```
+
+行首是 `k7:` 而不是 `[k7]`：`_bounded_context_append` 按 `^k\d+:` 认哪些 key 真的留在了
+渲染文本里（截断之后只保留还看得见的那几个），与 `chunk_context`/`element_context` 同形。
+无 `location_label` 时省略括号那一段。**每条渲染字段（title/excerpt/source_label/
+location_label）都过 `domain.reflect_action.fold_control_characters`**：块是「一行一条」，
+一条摘录里塞进换行加 `k1: [chunk][personal] …` 就会伪造出一条核心从没写过的库内证据行。
+**`url` 为空或不是 `http(s)://` 开头的条目整条跳过**（§九 不变量 3 的运行期闸），且不占号——
+键号在**已接纳**条目上连续，不留空洞。
 
 `evidence_by_id[k]` 记录 `object_type="external"`、`object_id=key`、`name=title`、
 `snippet=excerpt`、`source_title=title`、`location_label`、`source_id=""`、`element_id=""`、
 `tier="external"`、`provenance={"kind":"external","plugin_id","action","url","source_label"}`。
-块在 KG/元素/chunk 三段之后拼接，`id_offset` 顺延，预算 `EXTERNAL_EVIDENCE_CONTEXT_CHARS`。
+块在 KG/元素/chunk 三段之后拼接，键号段 `_EXTERNAL_KEY_BASE = 6000`（5000 已是集合枚举的
+`_COLLECTION_KEY_BASE`，两者可同时出现在一次合成里；6000 仍低于按节合成的
+`OUTLINE_SECTION_KEY_STRIDE = 10000`），预算 `EXTERNAL_EVIDENCE_CONTEXT_CHARS`，超预算整条丢、
+不切半条（半句带出处的引文就是误引）。`ReasoningEvidenceSnapshot.from_result` 同步拷贝
+`external_evidence`，否则编排层拿到的快照里没有这个字段。
 `answer_prompt` 仅在块非空时追加一条规则：「`[external · …]` 项来自库外，可像其它条目一样
 用 `[k]` 引用，但不得表述为笔记本内容」；块为空时 prompt 逐字节不变。
 
@@ -291,6 +364,20 @@ self._action_plugin(state, decision)`。`run` 是零松弛天花板的热函数�
 - 回退列表：`citations_from` 只吃 `top_hits`；外部条目另建 `external_citations(items)` 追加
   到 `citations` 尾部，`label = f"{source_label} · {title}"`，`source_id`/`element_id` 空，
   `tier="external"`，`url` 非空。
+- **引用只发给真的进过至少一个 prompt 的条目。** `_answer_reasoning` 用 `external_sink`
+  回报本次装进上下文的 `ExternalEvidence.key` 集合，`_draft_reasoning_response` 按它过滤后
+  才交给 `external_citations`。引用是「答案可能引自这条材料」的声明，被外部段预算挤掉、
+  或因没有可打开 URL 被拒的条目模型从没见过，列进引用就是给一份没看过它的答案挂来源。
+  装入/丢弃两个数进合成轨迹步的 detail（`external_included` / `external_dropped`），
+  静默丢弃是零披露。
+- **按节合成每一节都装外部块。** 与只留在回退路径上的 Memory / 推导链 / 集合地图刻意相反：
+  外部材料不由大纲绑定，却是本轮唯一「库里查不到」的东西；只喂给某一节，别的节会在同一篇
+  答案里对着一个自己没见过的 `[k]` 号写作，而合并后的引用表偏偏认得它。各节的外部键落在
+  自己 `key_offset` 的号段内（`6000 + ≤EXTERNAL_EVIDENCE_MAX_PER_RUN ≪ 10000`），互不相交；
+  `external_sink` 收各节装入键的**并集**，同一条材料进了三节仍然只发一条引用。
+- 预算记账：外部段在 `context_block[:total_context_budget]` **之后**追加，所以
+  `baseline_sink["budget_chars"]` 记的是「总预算 + 本次外部段**实际**占用」，
+  `len(context_block) <= budget_chars` 这条不变量在有外部证据的一轮上照样成立。
 - `grounded`/`evidence_level` 语义不变（有合法锚点即 grounded）：外部锚点同样算。前端徽章
   另行区分（§七）。
 - `tier` 取值集从 `personal|base` 扩为 `personal|base|external`。所有按 tier 分桶的读取点
@@ -327,7 +414,11 @@ self._action_plugin(state, decision)`。`run` 是零松弛天花板的热函数�
 | `EXTERNAL_EVIDENCE_MAX_PER_RUN` | 10 | run 内接纳条目上限，跨动作累计 |
 
 `ReasoningActionPolicy` 加 `max_plugin_actions`（`reports/policy.py` 的
-`reasoning_action_policy` 读同名设置）。档位：`quick` 不提供；其余档位按策略值。
+`reasoning_action_policy` 读同名设置）。档位：本仓库的档位表是
+`overview|standard|deep|thorough|exhaustive`（`core/ask_retrieval_policy.py`），没有
+`quick` 这一档——**最省的 `overview` 即关闭档**（`_PLUGIN_ACTION_CLOSED_EFFORTS`），
+其余档位按策略值。没有 `limits` 的调用方（报告逐节深挖、knowhow 补全、窄测试替身）
+同样不提供：它们连档位这个概念都没有，而这条通道的成本必须由某一档明确买单。
 不加独立的 `*_ENABLED` 布尔：插件本身是显式配置 + 管理页运行时开关（#635 三闸口），
 `max=0` 已经是部署级关闭，再加一把只是多一处同步点。
 
