@@ -12,12 +12,13 @@ import pytest
 
 from app.core.config import Settings
 from app.domain.retrieval import RetrievedChunk
+from app.models.ask import QueryIntentContract
 from app.models.schemas import NotebookCreate
 from app.services.collection_enumeration import EnumerationCoverage, SourceItem
 from app.services.collection_enumeration_answer import enumeration_prompt_block
 from app.services.embedding import FakeEmbedder
 from app.services.prompt_layers import L1_FRAGMENTS, fragment_text
-from app.services.query_intent import plan_query_intent
+from app.services.query_intent import auto_ask_mode_from_intent, plan_query_intent
 from app.services.reasoning_retrieval import CollectionEnumerationOutcome
 from app.services.sqlite_repository import SQLiteRepository
 from tests.model_testkit import bind_all_embedding_clients, bind_chat_client
@@ -62,6 +63,12 @@ _BENCHMARK_EVIDENCE = (
     "| System B-v1 | 8 steps, no system prompt | 61.10 | 70.30 | 6.20 |\n"
     "| System B-v2 | 8 steps, no system prompt | 69.50 | 74.00 | 7.50 |\n"
     "| System A | 16 steps, with system prompt | 71.40 | 75.20 | 5.80 |\n"
+    "Table: Prompt variants, accuracy %. Slash order is without/with system prompt.\n"
+    "| Model | Accuracy |\n"
+    "| System A | 48.20 / 51.40 |\n"
+    "| System B-v1 | 49.75 / 50.10 |\n"
+    "Table: unlabeled paired scores, accuracy %. The source gives no label order.\n"
+    "| System C | 46.30 / 52.90 |\n"
     "Author's qualitative claim: System A outperforms the B family."
 )
 
@@ -134,6 +141,37 @@ def test_answer_fragments_and_numeric_conditions_reach_real_synthesis(
     ]
 
 
+@pytest.mark.parametrize("question", [
+    "比较评测表现，给出总体判断和重要例外。",
+    "逐项比较全部指标，输出包含每个版本和配置的完整数值矩阵。",
+])
+def test_comparison_granularity_never_projects_away_requested_matrix(repo, question):
+    """Both output requests reach synthesis with the same full evidence matrix.
+
+    Prompt retuning must neither pre-trim evidence for a concise request nor
+    rewrite an explicit full-matrix request. The fake does not grade the answer.
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="Mixed configurations"))
+    client = _RecordingAnswer("Values are supplied in the evaluation tables. [k1]")
+    baseline = {}
+    repo._runtime.ask_component._answer_reasoning(
+        notebook.id, question, [], [], answer_client=client,
+        chunks=[RetrievedChunk(
+            "comparison-chunk", "comparison-source", "Mixed configurations", "Tables",
+            _BENCHMARK_EVIDENCE,
+        )],
+        baseline_sink=baseline, chunk_context_chars=1200, kg_context_chars=500,
+    )
+    assert len(client.calls) == 1
+    prompt = client.calls[0][0][0]["content"]
+    assert f"Question: {question}\n" in prompt
+    assert _BENCHMARK_EVIDENCE in baseline["context_block"]
+    assert baseline["context_block"] in prompt
+    assert fragment_text("answer.numeric_attribution") in prompt
+    assert baseline["budget_chars"] == 1700
+    assert client.calls[0][2]["max_tokens"] == 913
+
+
 @pytest.mark.parametrize("complete", [True, False])
 def test_title_list_synthesis_keeps_duplicate_source_rows_and_coverage(repo, complete):
     notebook = repo.create_notebook(NotebookCreate(name="Title fixture"))
@@ -185,6 +223,7 @@ def test_title_list_synthesis_keeps_duplicate_source_rows_and_coverage(repo, com
     ("不要逐篇分析，只概述主要观点", "ranked"),
     ("不需逐篇介绍，挑两篇代表作即可", "ranked"),
     ("不用逐篇分析，逐一列出标题", "complete"),
+    ("逐项比较全部指标，输出包含每个版本和配置的完整数值矩阵。", "hybrid"),
 ])
 def test_intent_caller_preserves_overview_vs_explicit_inventory(question, scope):
     class Client:
@@ -214,3 +253,6 @@ def test_intent_caller_preserves_overview_vs_explicit_inventory(question, scope)
     assert contract["completeness_required"] is (scope != "ranked")
     assert contract["constraints"] == []
     assert contract["mandatory_topics"][0]["question"] == question
+    assert auto_ask_mode_from_intent(QueryIntentContract(**contract)) == (
+        "reasoning" if scope != "ranked" else "chunk"
+    )
