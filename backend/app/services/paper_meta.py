@@ -13,6 +13,8 @@ import re
 import unicodedata
 from typing import Any, Dict, List, Optional
 
+from app.core.model_values import as_text
+
 PAPER_META_SCHEMA_HINT = (
     '{"is_paper":true,"title":"","authors":[{"name":"","affiliations":[""]}],'
     '"venue":"","year":2024,"doi":"","keywords":[""]}'
@@ -122,12 +124,12 @@ def verify_paper_meta(data: Dict[str, Any], head_text: str, model: str) -> Dict[
     # list) is a negative, never a paper (codex #720 R2).
     is_paper = data.get("is_paper") is True
 
-    title = str(data.get("title") or "").strip() or None
+    title = as_text(data.get("title")) or None
     if title and not grounded(title, head_norm):
         dropped["title"] = title
         title = None
 
-    venue = str(data.get("venue") or "").strip() or None
+    venue = as_text(data.get("venue")) or None
     if venue and not grounded(venue, head_norm):
         dropped["venue"] = venue
         venue = None
@@ -151,7 +153,7 @@ def verify_paper_meta(data: Dict[str, Any], head_text: str, model: str) -> Dict[
         else:
             dropped["year"] = raw_year
 
-    doi = str(data.get("doi") or "").strip() or None
+    doi = as_text(data.get("doi")) or None
     if doi:
         if _DOI_RE.match(doi):
             # 子串包含会把截断前缀(10.5555/329 ⊂ 10.5555/3295222)误判为已
@@ -174,7 +176,7 @@ def verify_paper_meta(data: Dict[str, Any], head_text: str, model: str) -> Dict[
     for raw_kw in raw_keywords:
         if not isinstance(raw_kw, (str, int, float)):
             continue  # dict/list/None 等形状跳过,不参与接地判定。
-        keyword = str(raw_kw).strip()
+        keyword = as_text(raw_kw) if isinstance(raw_kw, str) else str(raw_kw).strip()
         if not keyword:
             continue
         (keywords if grounded(keyword, head_norm) else dropped_keywords).append(keyword)
@@ -194,7 +196,7 @@ def verify_paper_meta(data: Dict[str, Any], head_text: str, model: str) -> Dict[
             raw_author = {"name": raw_author, "affiliations": []}
         elif not isinstance(raw_author, dict):
             continue  # 其它形状(数字/list/None/…)跳过。
-        name = str(raw_author.get("name") or "").strip()
+        name = as_text(raw_author.get("name"))
         if not name:
             continue
         if not author_grounded(name, head_norm):
@@ -206,7 +208,7 @@ def verify_paper_meta(data: Dict[str, Any], head_text: str, model: str) -> Dict[
             raw_affs = [raw_affs]
         elif not isinstance(raw_affs, list):
             raw_affs = []  # 其它非 list 形状(数字/None/…)一律当空。
-        affiliations = [str(a).strip() for a in raw_affs if str(a).strip()]
+        affiliations = [as_text(a) for a in raw_affs if as_text(a)]
         kept = [a for a in affiliations if grounded(a, head_norm)]
         cleared_affiliations.extend(a for a in affiliations if a not in kept)
         authors.append(
