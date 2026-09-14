@@ -197,6 +197,32 @@ class AskStateStore:
             user_lines.append(f"User: {row['question']}")
         return "\n".join(lines), "\n".join(user_lines)
 
+    def conversation_user_history(
+        self, notebook_id: str, conversation_id: str, user_id: str, limit: int = 5
+    ) -> str:
+        """PR-C (T2): this member's own question-only history for a
+        followup-rewrite gate read. Ownership predicate copied VERBATIM from
+        ``ensure_conversation``'s continuation check (same three columns,
+        same order) so the two can never silently diverge; a mismatch or a
+        missing conversation returns ``""`` rather than raising."""
+        # One bounded statement: ownership folded in as EXISTS, only the
+        # question column, newest ``limit`` rows by the same ORDER BY expression
+        # ``_conversation_histories`` uses (reversed back to chronological, so
+        # the text is byte-for-byte its user-only projection). Reading
+        # ``payload`` here would drag every answer body of the conversation
+        # through Python for the sake of five one-line questions.
+        with self.database.connect() as db:
+            rows = db.execute(
+                "SELECT a.question FROM answers a "
+                "WHERE a.conversation_id = ? AND EXISTS ("
+                "SELECT 1 FROM conversations c WHERE c.id = a.conversation_id "
+                "AND c.notebook_id = ? AND c.created_by = ?) "
+                "ORDER BY julianday(a.created_at) DESC, a.created_at DESC, "
+                "a.rowid DESC LIMIT ?",
+                (conversation_id, notebook_id, user_id, max(0, int(limit))),
+            ).fetchall()
+        return "\n".join(f"User: {row['question']}" for row in reversed(rows))
+
     def prepare_turn(
         self,
         notebook_id: str,

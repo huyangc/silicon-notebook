@@ -3064,6 +3064,16 @@ SURFACE_MEMBERS = (
         ),
     ),
     SurfaceMember(
+        name='resolve_reasoning_followup',
+        owner='AskService',
+        kind='method',
+        consumers=(
+            ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>._validate_confirmed_reasoning_intent', kind='attribute', target='resolve_reasoning_followup'),
+        ),
+        patches=(
+        ),
+    ),
+    SurfaceMember(
         name='resolve_session',
         owner='IdentityStore',
         kind='method',

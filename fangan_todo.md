@@ -73,8 +73,12 @@
       模型判定直接作答的成本契约（规格 `docs/superpowers/specs/2026-09-07-reasoning-chunk-parity-keyword-arm-design_zh.md`），
       ✅ 已合入 PR #693；③ ✅ 2026-09-14 用户裁决直接下线请求级 `auto` 选择器，简化界面固定
       `reasoning` 标准档（本 PR），原「自动模式灰度」不再做；④ 前置：chunk 独有能力补进
-      reasoning——PR-A `read_document`（本 PR）；PR-B 引用卡 + 精确席位；PR-C 无 intent
-      跟进改写（待做）；④ 退役 chunk 流水线，待立规格。
+      reasoning——PR-A `read_document` ✅ #724；PR-B 引用卡 + 精确席位 ✅ #728；PR-C 无 intent
+      跟进改写（本 PR；MCP `ask_notebook` 已由 #721 的调用内理解步覆盖，不在此改）；
+      ④ 退役 chunk 流水线，待立规格。
+- [ ] **无条件跟进改写作为后续开关（PR-C 延后项）**：PR-C 只在确定性澄清闸命中时才读会话
+      历史并改写；chunk 模式那种「有历史就改写」的无条件形态若要给 reasoning 直连路径，
+      是一个独立开关（多一次改写模型调用换更好的检索词），用户裁决时明确不做。
       ④ 的硬前提：做 chunk/reasoning 对照前必须确认**界面路径的 chunk 向量检索基线已修复**
       （`docs/superpowers/specs/2026-09-07-scoped-chunk-vector-lane-design_zh.md`，已由 PR #697
       合入），否则两臂对比测的是一个坏掉的对照组；原「自动模式下 4 比 3 调用数」前提随

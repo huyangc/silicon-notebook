@@ -12,6 +12,7 @@ from app.models.source_scope import (
 
 from app.core.ask_retrieval_policy import (
     AMBIGUITY_QUESTION_MAX_CHARS,
+    RESOLVED_QUESTION_MAX_CHARS,
     AMBIGUITY_ROWS_MAX,
     DEFAULT_RETRIEVAL_EFFORT,
     ResultScope,
@@ -219,8 +220,9 @@ class QueryIntentContract(BaseModel):
     # Field(exclude=True) would hide the value from response bodies while still
     # leaking it into the public OpenAPI schema for /ask/intent.
     _understanding_succeeded: bool = PrivateAttr(default=True)
-    objective: str = Field(min_length=1, max_length=4000)
-    resolved_question: str = Field(min_length=1, max_length=4000)
+    objective: str = Field(min_length=1, max_length=RESOLVED_QUESTION_MAX_CHARS)
+    resolved_question: str = Field(
+        min_length=1, max_length=RESOLVED_QUESTION_MAX_CHARS)
     intent_type: str = "other"
     # ``ranked`` may stop after the best evidence.  The other scopes require a
     # collection-aware executor and must never use a relevance top-N as proof

@@ -51,6 +51,10 @@ from app.repositories.ports import (
     ConversationHasNoShareableAnswer,
     ConversationShareWatermarkStale,
 )
+from app.services.ask_followup import (
+    FollowupResolution,
+    followup_resolution_context,
+)
 from app.services.ask_modes import (
     ASK_MODES,
     UnknownAskMode,
@@ -59,9 +63,7 @@ from app.services.ask_modes import (
 )
 from app.services.cancellation import AskCancelled
 from app.services.query_intent import (
-    clarification_gate_message,
     conversation_intent_history,
-    plan_query_intent,
     validate_confirmed_intent,
 )
 from app.services.conversation_public_view import (
@@ -630,20 +632,34 @@ async def preview_ask_intent_stream(
     )
 
 
-def _validate_confirmed_reasoning_intent(payload: AskRequest, spec) -> None:
-    """Reject malformed reviewed intent before a durable Ask job exists."""
+def _validate_confirmed_reasoning_intent(
+    repo, notebook_id: str, payload: AskRequest, spec
+) -> FollowupResolution | None:
+    """Reject malformed reviewed intent — and unresolvable follow-ups — before
+    a durable Ask job exists.
+
+    Returns the follow-up resolution this run must execute under, which the
+    caller carries into the run via ``followup_resolution_context``. ``None``
+    means there is nothing to carry: a non-reasoning mode, or a request that
+    already arrived with a reviewed intent (the browser's ``/ask/intent`` path
+    resolves references there, with the user's own confirmation).
+    """
     if spec.id != "reasoning":
-        return
+        return None
     if payload.intent is None:
         # Direct compatibility clients may bypass /ask/intent. Keep clear
         # requests compatible, but fail closed on the same deterministic vague
         # wording before begin_durable_job can publish a transient session.
-        seed = plan_query_intent(
-            None, payload.question.strip(), "", max_topics=1
-        )
-        if seed.get("needs_clarification"):
-            raise user_error(422, clarification_gate_message(seed))
-        return
+        # The service runs that same deterministic gate first and on the same
+        # parameters; what it adds is one chance to resolve a rejected question
+        # from this member's own prior turns in this conversation. A clear
+        # question still costs zero model calls and zero reads, and an
+        # unresolvable one still fails closed here, with copy derived from the
+        # question as typed.
+        resolution = repo.resolve_reasoning_followup(notebook_id, payload)
+        if resolution.gate_message:
+            raise user_error(422, resolution.gate_message)
+        return resolution
     # Same rail MCP ask_notebook runs on a confirmed intent; the ValueError
     # text is complete user copy, so it is the 422 detail verbatim.
     try:
@@ -655,6 +671,7 @@ def _validate_confirmed_reasoning_intent(payload: AskRequest, spec) -> None:
         )
     except ValueError as exc:
         raise user_error(422, str(exc))
+    return None
 
 
 def _apply_resolved_scopes(
@@ -693,7 +710,9 @@ def ask(notebook_id: str, payload: AskRequest) -> AskResponse:
         raise HTTPException(status_code=422, detail={
             "error": "unknown ask mode", "mode": exc.mode,
             "valid": _valid_ask_mode_ids()})
-    _validate_confirmed_reasoning_intent(payload, spec)
+    followup = _validate_confirmed_reasoning_intent(
+        repo, notebook_id, payload, spec
+    )
     resolved_source_scope, resolved_base_scope = _require_ask_available(
         notebook, repo, payload.source_scope, payload.base_scope
     )
@@ -701,9 +720,10 @@ def ask(notebook_id: str, payload: AskRequest) -> AskResponse:
         payload, resolved_source_scope, resolved_base_scope
     )
     try:
-        # The whole synchronous ask runs inside this thread's context, so the
-        # receipt reaches AskService's single answer-persistence seam.
-        with retrieval_scope_receipt_context(
+        # The whole synchronous ask runs inside this thread's context, so both
+        # carriers reach their single seam inside AskService: the receipt its
+        # answer-persistence boundary, the follow-up resolution its intent step.
+        with followup_resolution_context(followup), retrieval_scope_receipt_context(
             _scope_receipt(notebook, resolved_source_scope, resolved_base_scope)
         ):
             return repo.ask(notebook_id, payload)
@@ -760,19 +780,23 @@ async def _stream_ask_events(
     request: Request,
     *,
     scope_receipt: RetrievalScopeReceipt | None = None,
+    followup: FollowupResolution | None = None,
 ):
     # Task 23: 执行编排(begin→register→started→合成 start→copy_context worker→
     # trace 持久化 fail-open→finish→unregister→空会话清理→终态事件→哨兵)整体在
     # runtime-owned AskExecutionCoordinator;本函数保留冻结签名,只剩启动编排、
     # 交付队列消费与断连轮询。Task 24: 执行体 = runtime-owned AskService(三模式
     # 注册表派发在服务内),不再是 facade runner 回调。
-    # ``scope_receipt`` is keyword-only with a default so every existing
-    # positional caller is unchanged. It cannot be set by ``ask_stream`` around
-    # its own body: the generator is iterated after that coroutine returns, so
-    # the context must be entered HERE, around the submit that snapshots it for
-    # the detached worker. The block contains no ``yield`` -- set and reset
-    # happen inside one ``__anext__``, never across a suspension point.
-    with retrieval_scope_receipt_context(scope_receipt):
+    # ``scope_receipt`` and ``followup`` are keyword-only with defaults so every
+    # existing positional caller is unchanged. Neither can be set by
+    # ``ask_stream`` around its own body: the generator is iterated after that
+    # coroutine returns, so both contexts must be entered HERE, around the
+    # submit that snapshots them for the detached worker. The block contains no
+    # ``yield`` -- set and reset happen inside one ``__anext__``, never across a
+    # suspension point. They are entered on one ``with`` for exactly that
+    # reason: two nested blocks would be two chances to get that wrong.
+    with retrieval_scope_receipt_context(scope_receipt), \
+            followup_resolution_context(followup):
         # Z4: repo.start_ask_stream() 本身是同步 DB/编排调用(register+begin+
         # 合成 start 事件),不下沉到线程会阻塞事件循环。asyncio.to_thread 会
         # copy_context() 后在该线程内跑 func,所以上面刚 set 的
@@ -852,7 +876,9 @@ async def ask_stream(notebook_id: str, request: Request, payload: AskRequest) ->
             raise HTTPException(status_code=422, detail={
                 "error": "unknown ask mode", "mode": exc.mode,
                 "valid": _valid_ask_mode_ids()})
-        _validate_confirmed_reasoning_intent(payload, spec)
+        followup = _validate_confirmed_reasoning_intent(
+            repo, notebook_id, payload, spec
+        )
         resolved_source_scope, resolved_base_scope = _require_ask_available(
             notebook, repo, payload.source_scope, payload.base_scope
         )  # 空库/空检索范围权威拒绝
@@ -861,7 +887,7 @@ async def ask_stream(notebook_id: str, request: Request, payload: AskRequest) ->
         )
         return (
             notebook, spec, updated_payload,
-            resolved_source_scope, resolved_base_scope,
+            resolved_source_scope, resolved_base_scope, followup,
         )
 
     if payload.client_request_id:
@@ -886,7 +912,7 @@ async def ask_stream(notebook_id: str, request: Request, payload: AskRequest) ->
 
     (
         notebook, spec, payload,
-        resolved_source_scope, resolved_base_scope,
+        resolved_source_scope, resolved_base_scope, followup,
     ) = await asyncio.to_thread(prepare_ask_stream)
 
     return StreamingResponse(
@@ -895,6 +921,7 @@ async def ask_stream(notebook_id: str, request: Request, payload: AskRequest) ->
             scope_receipt=_scope_receipt(
                 notebook, resolved_source_scope, resolved_base_scope
             ),
+            followup=followup,
         ),
         media_type="application/x-ndjson",
         headers=NDJSON_STREAM_HEADERS,
