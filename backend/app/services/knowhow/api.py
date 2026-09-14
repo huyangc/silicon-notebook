@@ -1092,7 +1092,8 @@ def optimize_cell(
             **control,
         )
         data = json.loads(raw)
-        suggestion = str(data.get("suggestion_md", "")).strip() if isinstance(data, dict) else ""
+        raw_suggestion = data.get("suggestion_md") if isinstance(data, dict) else None
+        suggestion = raw_suggestion.strip() if isinstance(raw_suggestion, str) else ""
         if not suggestion:
             raise ValueError("模型未返回有效的重写结果")
         return suggestion

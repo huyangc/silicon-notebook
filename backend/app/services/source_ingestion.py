@@ -638,7 +638,8 @@ class SourceIngestionService:
                     )}],
                     '{"summary": "one concise sentence"}',
                 )
-                summary = str(json.loads(raw).get("summary", "")).strip()
+                raw_summary = json.loads(raw).get("summary")
+                summary = raw_summary.strip() if isinstance(raw_summary, str) else ""
                 if summary:
                     return summary
             except Exception:
@@ -2002,8 +2003,9 @@ class SourceIngestionService:
                 )
                 parsed = json.loads(raw)
                 if isinstance(parsed, dict):
-                    name_val = str(parsed.get("name", "")).strip()
-                    desc_val = str(parsed.get("description", "")).strip()
+                    raw_name, raw_desc = parsed.get("name"), parsed.get("description")
+                    name_val = raw_name.strip() if isinstance(raw_name, str) else ""
+                    desc_val = raw_desc.strip() if isinstance(raw_desc, str) else ""
             except Exception:
                 name_val, desc_val = "", ""
 

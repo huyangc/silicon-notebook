@@ -6940,9 +6940,14 @@ class KnowledgeLifecycleService:
                 data = json.loads(raw)
             except Exception:
                 continue
-            title = str(data.get("title", "")).strip()
-            summary = str(data.get("summary", "")).strip()
-            findings = data.get("findings") if isinstance(data.get("findings"), list) else []
+            raw_title, raw_summary = data.get("title"), data.get("summary")
+            title = raw_title.strip() if isinstance(raw_title, str) else ""
+            summary = raw_summary.strip() if isinstance(raw_summary, str) else ""
+            raw_findings = data.get("findings")
+            findings = (
+                [f for f in raw_findings if isinstance(f, str)]
+                if isinstance(raw_findings, list) else []
+            )
             if not summary:
                 continue
             with self._write() as db:

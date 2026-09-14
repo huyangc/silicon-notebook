@@ -360,3 +360,17 @@ def test_on_chunk_runs_on_main_thread_even_with_concurrent_workers():
     assert fire_count == 6              # 每块恰好一次
     assert len(on_main_thread) == 6
     assert all(on_main_thread)           # 每次回调都发生在主线程
+
+
+def test_confidence_coercion_never_authorises_a_merge_from_a_non_number():
+    """codex #720 R3 P1: the lenient shape boundary delivers ``true`` /
+    ``"Infinity"`` / ``NaN`` unchanged; a confidence that authorises an
+    automatic merge must read them as 0.0, below every threshold."""
+    from app.services.concept_merge_review import _to_float
+
+    for bogus in (True, False, "Infinity", "-inf", "nan", float("inf"), float("nan"),
+                  "high", [0.9], {"v": 0.9}, None, ""):
+        assert _to_float(bogus) == 0.0, bogus
+    assert _to_float(0.9) == 0.9
+    assert _to_float("0.75") == 0.75
+    assert _to_float(1) == 1.0

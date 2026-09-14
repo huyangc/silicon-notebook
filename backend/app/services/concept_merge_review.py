@@ -4,6 +4,7 @@ import concurrent.futures
 import contextvars
 import json
 import logging
+import math
 from typing import Any, Callable, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -47,10 +48,22 @@ def _to_float(v: Any) -> float:
     for a numeric field. This must never raise — the value simply degrades to 0.0
     (below any auto-merge threshold), keeping the candidate pending.
     """
+    # A confidence authorises an automatic merge, so only a real finite number
+    # (or a numeric string) counts: ``True`` would read as 1.0 and
+    # ``"Infinity"`` as +inf, both above every threshold (codex #720 R3 P1).
+    if isinstance(v, bool):
+        return 0.0
+    if isinstance(v, str):
+        v = v.strip()
+        if not v or v.lower() in {"nan", "inf", "infinity", "-inf", "-infinity"}:
+            return 0.0
     try:
-        return float(v)
+        value = float(v)
     except (TypeError, ValueError):
         return 0.0
+    if not math.isfinite(value):
+        return 0.0
+    return value
 
 
 def _review_chunk(llm_client: Any, chunk: List[dict]) -> List[dict]:
