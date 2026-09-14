@@ -1078,8 +1078,12 @@ def test_completion_turns_off_every_channel_unsafe_for_a_json_envelope(monkeypat
 
     assert len(built) == 1
     retriever = built[0]
-    # 五个策略位都是**显式**关闭的(缺省是开,靠继承会随缺省一起漂)。
+    # 六个策略位都是**显式**关闭的(缺省是开,靠继承会随缺省一起漂)。
     assert retriever.allow_search_chunks is False
+    # PR-A 的按篇原文取样同理:补全的「查询」仍是那个 JSON 信封,而补全跑
+    # `fail_closed=True`。它还有第三层保险(补全从不传 `sources` 座位),但策略
+    # 位必须显式关,不能靠接线没接上这个偶然。
+    assert retriever.allow_document_read is False
     assert retriever.allow_community_expansion is False
     assert retriever.allow_ppr is False
     assert retriever.allow_exact_lookup is False

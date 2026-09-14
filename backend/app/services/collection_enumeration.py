@@ -146,6 +146,27 @@ TRUNCATED_CONCURRENT_CHANGE = "concurrent_change"
 # 服务端消费者都已经从这里 import 别的协议常量,不引入新的依赖边。
 LOCAL_ONLY_SCOPE_SUFFIX = "（仅当前笔记本）"
 
+# 一行来源花名册在**模型与用户眼里**的两个字面,同一条「别写第二份」的理由,
+# 同一个落点选择(执行器模块,不是任一消费者)。
+#
+#   * ``UNNAMED_SOURCE_LABEL`` —— 没有显示名的文档叫什么。合成 prompt 的预览行
+#     (``collection_enumeration_answer``)与前端结果卡(``answer-panel.tsx``,
+#     镜像)显示同一个占位串,``reasoning_retrieval._action_read_document`` 也按
+#     它解析模型抄回来的标题:三处一分叉,一篇无标题文档就会变成「列得出来、
+#     却永远读不到」——模型逐字复制它看到的占位串,解析侧却拿库里的空标题去比。
+#     它**绝不**退化成内部 id:id 是一个匹配不上任何东西的「名字」,而且一旦被
+#     模型抄进答案就是内部标识上屏。
+#   * ``SOURCE_ROW_FIELD_SEPARATOR`` —— 预览行里标题与其后各字段之间的分隔符
+#     (``标题 · 类型: 摘要``)。第二个读者是同一个解析点:模型把整行抄回来时,
+#     它按第一个分隔符切出标题再做一次**精确**匹配。两处写死不同的字面,就会
+#     出现「让模型逐字复制、它照做了、却被告知没有这篇」。
+#
+# 两个消费者模块都已经从这里 import 协议常量,不引入新的依赖边(反过来,把它们
+# 留在渲染侧再由检索侧 import,会在 ``collection_enumeration_answer`` 与
+# ``reasoning_retrieval`` 之间造出一个 import 环,架构门会红)。
+UNNAMED_SOURCE_LABEL = "未命名来源"
+SOURCE_ROW_FIELD_SEPARATOR = " · "
+
 # Per-item excerpt default, mirroring ``AskRetrievalLimits.cell_excerpt_chars``
 # (1 000 across all five efforts today).  It is a *budget field* rather than an
 # import because it is a per-effort field, not a module constant: reading the

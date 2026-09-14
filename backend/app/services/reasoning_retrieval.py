@@ -60,7 +60,24 @@ from app.services.collection_catalog import (
 from app.services.collection_enumeration import (
     LOCAL_ONLY_SCOPE_SUFFIX, TRUNCATED_CONCURRENT_CHANGE,
     EnumerationBudget,
+    # PR-A:来源标题 → 花名册条目的比较范式。**共用**枚举侧那一份而不是在这里
+    # 再写一个「trim + casefold」:两侧各写一份的话,模型从清单里逐字复制的标题
+    # 迟早会在一侧匹配、在另一侧落空。私有名故意直接引用,见那个函数的 docstring
+    # ——它是一条窄化规则(只求活过空白与大小写,绝不近似匹配)。
+    _normalized_title,
+    # PR-A:花名册那一行在**模型眼里**的两个字面(无名占位标题、行内字段分隔符)。
+    # 解析模型抄回来的标题必须拿模型看到的那个串去比,所以两者都与渲染方共用同
+    # 一份定义;它们落在执行器模块而不是渲染模块,是为了不在这里与
+    # ``collection_enumeration_answer`` 之间造出 import 环。
+    SOURCE_ROW_FIELD_SEPARATOR,
+    UNNAMED_SOURCE_LABEL,
 )
+from app.services.document_source_overview import prepare_source_overview
+# 按节合成的号段步长。`read_document` 的号段(`DOCUMENT_READ_KEY_BASE` 起,每次
+# 读取占一个池宽)必须整体落在它之内,否则第 2 节的证据会与按篇取样抢同一个
+# `[kN]`。import 而不是复制那个数:复制出来的两份一旦漂移,合并锚点时不会报错,
+# 只会静静地把引用指错。
+from app.services.outline_synthesis import OUTLINE_SECTION_KEY_STRIDE
 from app.services.prompts import (
     project_reflect_actions, reflect_prompt, reflect_schema_hint,
 )
@@ -211,9 +228,14 @@ def first_round_empty_note(chunk_search: bool, enumeration: bool) -> str:
 
 def legacy_action_ledger_note(
     visited, collected, neighbor_truncated, neighbor_expand_limit,
-    attempted, exact_lookup_log,
+    attempted, exact_lookup_log, document_reads=(),
 ) -> str:
-    """把已执行动作的四段账目拼到候选摘要之后。"""
+    """把已执行动作的五段账目拼到候选摘要之后。
+
+    ``document_reads`` 是 PR-A 的按篇取样账目(`DocumentReadOutcome` 列表)。它
+    带默认值是因为这份账目对**没有这个通道**的 run(关闭态、没接 `sources` 的
+    调用方)恒为空,而空序列渲染不出任何字节——关闭态因此逐字节等于接入前。
+    """
     note = ""
     # 已展开过的节点回喂 reflect, 提示模型勿重复请求(治"反复 expand 同节点"根源)。
     if visited:
@@ -275,6 +297,37 @@ def legacy_action_ledger_note(
                 f"{looked_up}。勿重复请求相同名称;新增为 0 说明本笔记本内"
                 "未定位到该名称对应的完整章节(挂载的参考库不在精确查找"
                 "范围),请改用其他动作。）")
+    # 已按篇读取过原文的文档回喂 reflect(镜像上面四份账目,PR-A):取样产物本身
+    # 进的是合成侧的原文分区,模型在反思轮看不到它读过哪几篇,于是会把同一篇再
+    # 请求一遍——纯烧预算,而且把同一批取样再送一遍。
+    #
+    # 空产物(`context_block` 为空)**单列**:它与「读过了」是两件事,合并成一句
+    # 会让模型以为那一篇已经有依据了。
+    #
+    # 原因**逐条渲染执行体自己的 `coverage_note`**,不写一句硬编码的猜测:空产物
+    # 有四种原因(见证失败、读取期间内容变化、这篇根本没解析出原文元素、份额为 0),
+    # 它们对「下一步该做什么」的指示完全不同——把「没有可读取的原文」说成「文档
+    # 正在重新解析」就是在账目里编造事实,而账目一旦会撒谎,模型据它做的每一个
+    # 决定都失去依据。这条纪律与 `_ExactLookupAttempt.note` 那份账目相同:被跳过
+    # 的行渲染执行体给出的教学措辞,而不是伪造一个「新增 N 段」。
+    #
+    # 标题走与上面那几份账目同一条截长范式(`intent_direction_label`):文档标题
+    # 可能是一整句话,原样重放会每轮顶掉半屏回喂预算。
+    if document_reads:
+        done = "".join(f"《{intent_direction_label(o.source_title)}》"
+                       for o in document_reads if o.context_block)
+        failed = "".join(
+            f"《{intent_direction_label(o.source_title)}》——{o.coverage_note}"
+            for o in document_reads if not o.context_block)
+        note = (
+            f"{note}\n\n（"
+            + (f"已按篇读取过原文的文档,勿重复请求: {done}。" if done else "")
+            + (f"本次没有取到原文的文档及各自原因: {failed}"
+               "请按各自的原因决定下一步,而不是重复请求同一篇;"
+               "拿不到原文的那几篇请改读别的文档,或如实说明它暂无依据。"
+               if failed else "")
+            + "）"
+        )
     return note
 
 
@@ -610,6 +663,91 @@ ENUMERATE_KG_OBJECTS_ACTION = "enumerate_kg_objects"
 # kind/object_type 分派(fail-open,与本分支其他非白名单值的处理同形)。
 ENUMERATE_SOURCES_COLLECTION = "sources"
 
+# PR-A:按篇读取有界原文取样。它**是**一个独立动作 id(与来源清单那个参数值
+# 相反):它不是「换一个集合来列」,而是另一件事——在已经列出来的那份花名册里
+# 挑一篇,把它的正文按文档顺序取样回来。参数值表达不了这件事,因为它要的输入
+# (哪一篇 + 取多深)与 enumerate 的 kind/object_type 无关。
+READ_DOCUMENT_ACTION = "read_document"
+# `read_document.coverage` 的取值。**字符串枚举而不是布尔**,与 ENUMERATE_SCOPES
+# 同一条纪律、同一个理由:`model_json._validate_against_example` 对布尔示例硬判
+# 类型,模型答 `"true"`/`"yes"` 会整轮反思掉进兜底(F1 修的正是这个);而字符串
+# 示例继承 F1 的宽容规则(空串永远接受),不懂这个旋钮的模型可以不填、动作照样
+# 落地。枚举值本身还说清了它做什么(等距取样 / 只读开头),`true` 则会让模型猜
+# 自己站在开关的哪一边。
+READ_DOCUMENT_COVERAGES = ("spread", "opening")
+READ_DOCUMENT_COVERAGE_DEFAULT = "spread"
+# 本 run 每次 read_document 产物的 `[kN]` 号段起点。
+# ⚠ 它必须与 `AskService._DOCUMENT_READ_KEY_BASE` **相等**:合成侧按同一个号段把
+# 这批取样缝进原文分区,两处各写一份数就会让证据键在装配时对不上。这条相等关系
+# 由 `test_reasoning_document_read_synthesis.py` 的相等用例钉住——不写成模块级
+# assert,是因为那会把 `ask_service` 变成本模块的 import 期依赖(反向依赖)。
+DOCUMENT_READ_KEY_BASE = 7000
+# 每次 read_document 从自己的字符份额里让出来的包头预留。合成侧(T5)给每一篇
+# 取样拼一行 `supplemental_excerpt_header` 形状的包头,不预留的话最后一篇会在
+# 装配时被自己的标题挤掉。
+#
+# 取整数而不是现算 header 长度:真实包头由
+# `document_source_overview.supplemental_excerpt_header(key, title)` 决定,而它
+# 的长度里有**标题**这个运行期事实——份额必须在读之前就定下来,所以这里是一个
+# 保守预留:它恒 ≥ 空标题时那行包头的实际长度,余量留给标题本身。回归门
+# (`test_reasoning_document_read`)按 `supplemental_excerpt_header("k7001", "")`
+# 现算那个下界并钉住这条不等式,包头措辞变长时会红。
+DOCUMENT_READ_HEADER_RESERVE_CHARS = 200
+# 一次取样里,一个元素至少要分到多少字符**才值得为它发一次单行分页查询**。
+#
+# 口径是**执行体计费的那一行**(`body`),不是净正文:执行体按
+# `len(f"kN: " + json.dumps(body)) + 1` 扣预算,而 `body` 本身是
+# `section_path + "\n" + 正文`。所以一个元素的这一行至少要装下
+#
+#   `kN: ` 前缀(约 8)+ JSON 的一对引号与转义(约 4)+ 一条**典型面包屑**
+#   (`section_path`,中文小节标题嵌套两三层约 40)+ 一句能读出内容的正文
+#   (中文约 60,英文约 260)
+#
+# 取 320 是按英文正文那一侧定的下界:面包屑与前缀是**按元素固定**的开销,份额
+# 低于它时二分会把正文整段截掉、只剩面包屑落地(极端情况下连面包屑都装不下,
+# 那一条被整个丢弃,见 `document_source_overview` 的零行取样分支)。早先写的 160
+# 是按「净正文」口径估的,漏掉了面包屑这段固定开销,于是在面包屑稍长的文档上,
+# 「够一个元素」的判断会比实际乐观一倍。
+#
+# 它把取样深度从「元素池份额」改成由**字符份额反推**:宽度优先(拿满元素份额)
+# 会让 16 次单行查询换回不到 50 字正文——每条都被二分截断到只剩章节标题,既贵
+# 又读不出这篇文档讲什么;深度优先按字符份额算得出几个元素,就只查几个,把 I/O
+# 降一个量级而送进合成的正文反而更长。
+DOCUMENT_READ_MIN_CHARS_PER_ELEMENT = 320
+
+
+_TITLE_WRAPPING_PAIRS = (
+    ("《", "》"), ("〈", "〉"), ("「", "」"), ("『", "』"),
+    ("“", "”"), ("‘", "’"), ('"', '"'), ("'", "'"),
+)
+
+
+def _strip_title_wrapping(value: str) -> str:
+    """Drop ONE matching pair of book-title marks or quotes around a title.
+
+    Deterministic and shallow on purpose: the model wrapping a roster title in
+    《》 is a copying habit, not a different title, and this file's own ledger
+    prints titles that way. Anything deeper (nested marks, a stray opener with
+    no closer) is left alone so the exact match still decides.
+    """
+    text = value.strip()
+    for opener, closer in _TITLE_WRAPPING_PAIRS:
+        if len(text) > len(opener) + len(closer) and text.startswith(opener) and text.endswith(closer):
+            return text[len(opener):-len(closer)].strip()
+    return text
+
+
+def _roster_display_title(row) -> str:
+    """一行花名册在**模型眼里**的标题。
+
+    `read_document.source` 的指令是「逐字复制清单里的标题」,所以解析必须拿
+    模型**看到的**那个串去比,而不是拿库里的列值:无标题的文档在预览行与结果卡
+    上都显示占位串 `UNNAMED_SOURCE_LABEL`,两处口径一分叉,那一篇就变成「列得
+    出来、永远读不到」。
+    """
+    return str(getattr(row, "source_title", "") or UNNAMED_SOURCE_LABEL)
+
+
 # 枚举范围常量从动作契约导入并原样 re-export，供历史调用方使用。
 
 
@@ -944,8 +1082,18 @@ def _source_titles_note(items) -> str:
     titles: List[str] = []
     used = 0
     for item in items:
-        raw = " ".join(str(getattr(item, "source_title", "") or "").split())
-        if not raw:
+        # 显示口径,不是库里的列值:没有显示名的文档在这里叫「未命名来源」,与
+        # 花名册预览行、结果卡、以及 `_action_read_document` 的标题解析完全一致。
+        # 之前这里按空标题 `continue`,于是那一篇在反思轮里**根本不存在**——模型
+        # 拿不到任何可以写进 `read_document.source` 的句柄,而这个动作最该覆盖的
+        # 恰恰是它(没有标题的文档通常也没有摘要,别的通道一个字都描述不了它)。
+        #
+        # 占位串**最多占一个标题位**:它对每一篇无名文档都是同一个字面,重复写
+        # N 遍既挤掉真标题、又不给模型任何新的可操作信息(两篇同名时这个动作按
+        # 标题本来就区分不开,只会 unresolved skip)。出现一次是「库里有这么一类
+        # 文档」,出现 N 次只是把有界预算烧在同一句话上。
+        raw = " ".join(_roster_display_title(item).split())
+        if not raw or (raw == UNNAMED_SOURCE_LABEL and raw in titles):
             continue
         if len(titles) >= _ENUM_NOTE_SOURCE_TITLES:
             break
@@ -2241,7 +2389,7 @@ class ReflectDecision:
     sufficient: bool = False
     # answer|expand_graph|add_subquery|search_elements|search_chunks|
     # ppr_retrieve|expand_community|follow_chain|exact_lookup|
-    # enumerate_elements|enumerate_kg_objects
+    # enumerate_elements|enumerate_kg_objects|read_document
     next_action: str = "answer"
     expand_object_id: str = ""
     expand_edge_type: Optional[str] = None
@@ -2280,6 +2428,21 @@ class ReflectDecision:
     # 本库。只对 `collection=="sources"` 有意义——另两个集合的执行器根本没有这个
     # 参数,所以 `_run_enumeration` 里换算成 `local_only` 时要与 `is_sources` 与上。
     enumerate_scope: str = ENUMERATE_SCOPE_ALL
+    # read_document 的参数(PR-A)。`source` 是模型从**本 run 已列出的来源花名册**
+    # 里逐字复制的显示标题;服务端只在那份花名册上做精确匹配(零额外 I/O),解析
+    # 不到就 skip 教模型先列清单。内部 source_id 从不上屏,所以这里没有 id 变体。
+    read_document_source: str = ""
+    # 取样形状。白名单内取之,其余(缺省、空串、非法字符串、非字符串)一律落回
+    # `spread` 且**不抛**——连 fail_closed 也不抛,与 `enumerate_scope` 同一条
+    # 纪律:形状不是动作合法性问题(动作照旧成立,只是按默认取样)。
+    # 这里**没有** `read_document_coverage_rejected` 那样的教学字段,与
+    # `enumerate_collection_rejected` 分道:`coverage` 的 schema 示例是
+    # `"spread|opening"`,而 `model_json._validate_against_example` 对含 `|` 的示例
+    # 按**封闭枚举**判——非空非法值在校验层就整轮被拒(`invalid_enum`),根本到不了
+    # 这个解析器。解析器这一侧只剩「缺省/空串/非字符串」要落回 `spread`,那不是
+    # 「你给错了」,没有任何教学文案要说,留一个只写不读的字段只会让下一个读者以为
+    # 它有消费者。
+    read_document_coverage: str = READ_DOCUMENT_COVERAGE_DEFAULT
     # update_outline 携带的**整份章节结构**;同 id 的证据 union/显式删除在 run()
     # 应用。解析期只夹形状与边界,证据 key 的合法性要看 run 局部候选集合——
     # reflect() 在这一层根本不知道候选是什么。
@@ -2333,6 +2496,48 @@ class CollectionEnumerationOutcome:
 
 
 @dataclass
+class DocumentReadOutcome:
+    """一次 `read_document` 动作的产物(PR-A)。
+
+    它与 `CollectionEnumerationOutcome` 并列而不是混进 `chunks`/`elements`:那两个
+    是相关性候选池,会被按分数截断,而这份取样的价值恰恰在于它是**按文档顺序**
+    走出来的一段有界摘录 —— 混进候选池等于把「这一篇讲什么」重新变成「哪些片段
+    像这个问题」。
+
+    `context_block` / `id_map` / `citations` 逐字来自
+    `document_source_overview.prepare_source_overview`,号段由 `key_offset` 决定;
+    合成侧(T5)按同一个号段把它缝进原文分区。
+
+    `summary_was_empty` 记的是**发起这次读取时**花名册上那一行有没有已存摘要——
+    它是这个动作的立身之本(摘要为空的文档没有别的通道能介绍),留在产物里让
+    合成侧的导读能如实说「这一篇没有已存摘要,以下只依据本次取样」。
+
+    空产物(`context_block` 为空)也会产生一条 outcome:它带着 `coverage_note`
+    进回喂账目,模型才知道这一篇没取到原文、以及**为什么**(见证失败、读取期间
+    内容变化、这篇根本没解析出原文元素、份额为 0 是四件不同的事),不必再请求
+    一次。
+    """
+
+    source_id: str
+    source_title: str
+    # 这一篇的**原始来源库 id**,未经 `foreign_notebook_id` 归一——它恒等于
+    # `SourceItem.notebook_id`,活动库自己的来源在这里也是活动库的 id,而不是空串。
+    # 它只服务本地判断(这一篇来自哪个库)。徽章与引用**只能**用
+    # `citations` / `id_map` 里那份归一后的值:那两处的空串表示「本库」,是前端
+    # 跨库徽章的判据,把这个字段当成同一口径就会给本库来源打上参考库徽章
+    # (A1 守卫 `tests/test_citation_notebook_id_guard.py` 防的正是这件事)。
+    notebook_id: str
+    tier: str
+    key_offset: int
+    context_block: str
+    id_map: dict
+    citations: list
+    coverage_note: str
+    summary_was_empty: bool
+    coverage: str
+
+
+@dataclass
 class _EnumChain:
     """一个集合的续跑状态。仅 run 局部,绝不持久化(游标是进程内句柄)。
 
@@ -2366,6 +2571,10 @@ class ReasoningResult:
     # 刻意**不**混进 elements/top_hits:那两个是相关性候选池,会被按分数截断,而
     # 清单的价值恰恰在于它没有被截断过 —— 混进去等于把「已列全」重新变成抽样。
     enumerations: List[CollectionEnumerationOutcome] = field(default_factory=list)
+    # 本 run 的 `read_document` 产物,每次动作一条(见 DocumentReadOutcome),
+    # 含见证失败那条空产物。与 `enumerations` 同款刻意**不**混进候选池;合成侧
+    # (T5)按各自的 `key_offset` 把它们缝进原文分区。
+    document_reads: List[DocumentReadOutcome] = field(default_factory=list)
     # 本 run 建出的集合地图(``[Collections in scope] ...``),原样带给合成层。
     # 带出来而不是让 ask_service 再建一次:地图是 run 内已经付过的若干次查询,
     # 而且 reflect prompt 明确教模型「集合太大就别枚举、直接用地图计数作答」——
@@ -2450,7 +2659,12 @@ class _ReasoningRunState:
       的扣减发生在 `_run_enumeration` 里(不在循环本体),解包成局部名就会读到
       扣减之前的旧数;
     * `enumeration_active` / `kg_in_scope` —— run 级不变量,`_new_run_state` 算一次,
-      循环直读。
+      循环直读;
+    * `document_reads_done` / `document_read_elements_used` /
+      `document_read_chars_used` / `document_reads` / `document_reads_by_id` ——
+      PR-A 的按篇取样账目。整组的读写都在 `_action_read_document` 里(`run` 是零
+      松弛长度天花板的热函数,执行体不记在它头上),与 `ppr_searches` /
+      `chunk_searches` 同款只走 `state.`,不解包。
 
     这样安排是为了让 reflect 循环本体一个字都不用改(本次结构项刻意不动它)。
 
@@ -2603,6 +2817,18 @@ class _ReasoningRunState:
     # 数 agent 动作。
     ppr_searches: int = 0
     chunk_searches: int = 0
+    # —— PR-A 的按篇原文取样账目。同样**不被 `run` 解包**(执行体整体住在
+    # `_action_read_document` 里)。三个计数器是 run 级的两个预算池 + 次数上限:
+    # 元素池 `settings.document_overview_max_elements`、字符池
+    # `limits.chunk_context_chars // 4`,每次读的份额 = 剩余 // 还能读几次
+    # (与 `document_catalog_overview.supplement_missing_summaries` 同形)。
+    # `document_reads_by_id` 按 source_id 防重:同一篇读两次只会烧预算,把同一批
+    # 取样再送一遍给模型。
+    document_reads_done: int = 0
+    document_read_elements_used: int = 0
+    document_read_chars_used: int = 0
+    document_reads: List["DocumentReadOutcome"] = field(default_factory=list)
+    document_reads_by_id: set = field(default_factory=set)
     # 这两个仍由 `run` 解包成局部标量(它们的分支还在 elif 链里)。
     follow_chain_searches: int = 0
     exact_lookups: int = 0
@@ -2660,6 +2886,8 @@ class ReasoningRetriever:
         fail_closed: bool = False,
         collection_catalog=None,
         collection_enumeration=None,
+        sources=None,
+        source_generation=None,
         agent_profile=None,
         profile_owner_id: str = "",
         retrieval_experiences=None,
@@ -2676,6 +2904,18 @@ class ReasoningRetriever:
         # (深度报告逐节深挖等)行为与接入前逐字相同——不注入地图、不提供动作。
         self.collection_catalog = collection_catalog
         self.collection_enumeration = collection_enumeration
+        # PR-A:按篇读取有界原文取样的两个座位。``sources`` 是 ``SourceStorePort``
+        # (分页读某一篇的原文元素),``source_generation`` 是那一篇的解析版本读取器
+        # ——它是「读取期间文档有没有被重新解析」这条见证的唯一依据,缺它时
+        # ``prepare_source_overview`` 绝不宣称读到了完整一篇。
+        #
+        # 两者同款缺省 None ⇒ 没接线的调用方(报告逐节深挖、knowhow 补全、窄测试
+        # 替身)与接入前逐字相同:``document_read_active`` 的第三个条件不成立,动作
+        # 不进 prompt / schema / allowed_actions 三处。``source_generation`` 缺省
+        # None 是**合法且安全**的取值(不是漏接):它只会让见证退化成「不宣称完整」,
+        # 而不是让读取本身失败。
+        self.sources = sources
+        self.source_generation = source_generation
         # Agentic Memory P1:Agent 对这个库的已有理解(``AgentProfileStorePort``)。
         # 同样缺省 None ⇒ 没接线的调用方与接入前逐字相同(见
         # ``profile_wiring_active``)。
@@ -2752,6 +2992,18 @@ class ReasoningRetriever:
         # knowhow completion sets it False — see that call site for why this
         # channel is unsafe against a JSON-envelope query.
         self.allow_search_chunks = True
+        # PR-A policy hook, mirroring allow_search_chunks in shape and
+        # discipline: True (Ask's and the report engine's behavior) keeps the
+        # ``read_document`` action live, False takes it away through the same
+        # single gate the deployment kill switch uses
+        # (``document_read_active``), so it never reaches the schema, the prompt
+        # or the allowed-action whitelist. knowhow completion sets it False
+        # explicitly — defense in depth, exactly like allow_consult_memory:
+        # completion never passes ``sources`` either, which alone keeps the
+        # action unreachable, but a future call site that starts passing one
+        # must not silently inherit a per-document reading channel whose
+        # "query" is a JSON envelope.
+        self.allow_document_read = True
         # Authoring flows whose synthesis only accepts server-issued evidence
         # keys (knowhow completion) turn this off: an enumerated list would
         # spend the run's budget on items their prompt cannot cite.
@@ -2828,6 +3080,84 @@ class ReasoningRetriever:
         就等于把最贵的那半留在关键路径上。
         """
         return chunk_search_wiring_active(self.settings) and self.allow_search_chunks
+
+    # --- 按篇原文取样通道的总闸(PR-A) ---
+    def document_read_active(
+        self, limits: "AskRetrievalLimits | None" = None,
+    ) -> bool:
+        """本 run 是否提供 `read_document` 动作。
+
+        与上面那把闸同款单点判定,**五处**共读同一个判据:reflect prompt 写不写
+        这个动作、schema 给不给 `read_document` 分支、动作在不在 allowed_actions
+        里、字段解析读不读那一格、执行体的第一道纵深防御。关闭态因此逐字节回到
+        接入前——模型压根看不到这个动作,`reasoning_max_document_reads` 也没有
+        消费者。
+
+        六个条件缺一不可:
+
+        * 部署开关 `REASONING_DOCUMENT_READ_ENABLED`;
+        * 调用方策略位 `allow_document_read`(knowhow 补全显式关掉);
+        * `sources` 端口在场——没有它连一页原文都读不出来;
+        * `enumeration_active()`:这个动作**只能**读本 run 已经列出来的花名册里的
+          文档(来源解析零 I/O、范围合法性由 `enumerate_sources` 兑现)。没有清单
+          工具就没有清单,动作在那种 run 里无论如何都只会 skip,不如根本不提供;
+        * 次数上限 > 0(`REASONING_MAX_DOCUMENT_READS=0` 是第二把部署级 kill
+          switch);
+        * **首读份额可行**(见下)。
+
+        每次调用现算、不缓存:六个输入在一个 run 内都恒定(策略读的是 settings 与
+        实例状态,`enumeration_active()` 自己也是现算的,`limits` 是 run 级档位),
+        与 `chunk_search_active` 同款。
+
+        ## 首读份额可行
+
+        三个旋钮(`REASONING_MAX_DOCUMENT_READS`、`DOCUMENT_OVERVIEW_MAX_ELEMENTS`、
+        档位的 `chunk_context_chars`)是各自独立配的,它们的**组合**可以让这个动作
+        在任何一轮都只会 skip:
+
+        * 字符份额减去包头预留之后连**一个元素的计费行**都装不下
+          (`< DOCUMENT_READ_MIN_CHARS_PER_ELEMENT`,那个常量的口径含 `kN: ` 前缀、
+          JSON 引号与章节面包屑),取样要么直接 budget skip、要么每条都被截成只剩
+          章节标题;
+        * 元素池份额不足 1 篇,首读就是 budget skip;
+        * 号段总宽 `DOCUMENT_READ_KEY_BASE + 次数 × 池宽` 越过
+          `OUTLINE_SECTION_KEY_STRIDE`,按篇取样的 `[kN]` 会与按节合成第 2 节的证据
+          撞号——那不会报错,只会把引用静静指错。
+
+        这三种都是**部署配置错误**,而这把闸的选择是静默降级:动作整体不提供(五处
+        同步消失),模型看到的仍是一个自洽的动作空间,而不是一个每次调用都被服务端
+        拒绝的工具。配错的信号留在配置本身与这份文档里,不靠运行期的一堆 skip 去
+        猜——那正是 `read_document` 接入前的行为,所以降级态是一个已知的好状态。
+
+        `limits` 是本 run 的档位预算(`reflect()` 与执行体都把 run 的那一份传进来)。
+        缺省时取默认档位:这个方法在 run 之外被单独调用时(测试、纵深防御)没有
+        run 级档位可读,而默认档正是 `run()` 在 `limits is None` 时用的那一份。
+        """
+        policy_reads = reasoning_action_policy(self.settings).max_document_reads
+        if policy_reads <= 0:
+            return False
+        # `getattr` 而不是直呼属性:这把闸在**每一轮 reflect** 上求值,而
+        # `ReasoningRetriever` 被大量老用例用「只带两三个字段的 settings 替身」
+        # 直接构造(`test_reflect_expand_community` 等)。直呼属性会让那些用例在
+        # 一个与本动作毫无关系的断言上抛 AttributeError。缺省 0 也是**正确的
+        # 降级语义**:连元素池这个旋钮都没有的部署撑不起按篇取样,下面
+        # `element_pool // policy_reads >= 1` 会把动作整体关掉。
+        element_pool = int(
+            getattr(self.settings, "document_overview_max_elements", 0) or 0)
+        budget = limits if limits is not None else ask_retrieval_limits(
+            DEFAULT_RETRIEVAL_EFFORT)
+        share_chars = (budget.chunk_context_chars // 4 // policy_reads
+                       - DOCUMENT_READ_HEADER_RESERVE_CHARS)
+        return bool(
+            getattr(self.settings, "reasoning_document_read_enabled", True)
+            and self.allow_document_read
+            and self.sources is not None
+            and self.enumeration_active()
+            and share_chars >= DOCUMENT_READ_MIN_CHARS_PER_ELEMENT
+            and element_pool // policy_reads >= 1
+            and (DOCUMENT_READ_KEY_BASE + policy_reads * element_pool
+                 <= OUTLINE_SECTION_KEY_STRIDE)
+        )
 
     def _kg_in_scope(self, notebook_id) -> bool:
         """本 run 的检索范围内有没有知识图谱。判据单点在 `kg_in_scope_for`。"""
@@ -3115,7 +3445,8 @@ class ReasoningRetriever:
 
     def reflect(self, question, candidates_summary, outline: bool = False,
                 consult_memory: bool = False, kg_actions: bool = True,
-                *, plugin_actions: "Sequence[ReflectActionSpec]" = ()):
+                *, plugin_actions: "Sequence[ReflectActionSpec]" = (),
+                limits: "AskRetrievalLimits | None" = None):
         """规划后的轻量反思：判断材料是否齐备，或选择下一次检索。
 
         ``outline`` = 本 run 提供大纲便签动作(仅 exhaustive 档,见
@@ -3144,7 +3475,13 @@ class ReasoningRetriever:
         与白名单由同一个纯函数 `project_reflect_actions` 出,理由与 `kg_actions`
         那段说的是同一件事,只是这里的动作描述来自部署方,靠评审同步不住。
         **仅限关键字**传入,与 `prompts` 两侧同形:它不是第六把闸,不该能靠位置
-        混进那串 bool 里。"""
+        混进那串 bool 里。
+
+        ``limits`` = 本 run 的档位预算,唯一读者是 ``document_read_active``(它的
+        「首读份额可行」判据要看 ``chunk_context_chars``)。由 ``run()`` 传进来
+        而不是在这里现算:执行体读的是 ``state.enum_limits``,两处各自兜底成默认档
+        就会出现「prompt 里提供了这个动作、执行时却恒 budget skip」的漂移。缺省
+        ``None`` 取默认档,与 ``run()`` 在 ``limits is None`` 时用的是同一份。"""
         raise_if_cancelled(self.cancel_event)
         client = self.model_clients.chat("reasoning_agent")
         if not getattr(client, "configured", False):
@@ -3158,6 +3495,19 @@ class ReasoningRetriever:
         # outline/consult_memory 那样从调用处传进来:它不看档位、不看请求,
         # run() 的调用形状因此一个字都不用改。
         chunk_search = self.chunk_search_active()
+        # PR-A 的按篇原文取样同理:它的判据里既有部署开关、也有 run 级事实(端口
+        # 在场、枚举工具开着、次数上限),但全都拿得到,所以与 `chunk_search` 一样
+        # 在这里现算,run() 的调用形状一个字都不用改。
+        read_document = self.document_read_active(limits)
+        # 报给模型的那个次数与 `_action_read_document` 的 cap skip 报的**是同一个
+        # 数**:告诉模型一个预算、再按另一个预算拒绝它,是最省事也最坏的一种漂移。
+        # 两处各自从**同一份 settings** 现算 `reasoning_action_policy(...)`(这里
+        # 没有 run state 可读,执行体那侧读的是 `state.action_policy`,而它就是
+        # `run()` 从同一份 settings 算出来的那一个)。
+        read_document_cap = (
+            reasoning_action_policy(self.settings).max_document_reads
+            if read_document else 0
+        )
         # 白名单从 collection_catalog import(唯一字面量定义点),prompt/schema/
         # 解析三处共用同一份,不各写一份副本。
         element_kinds = ENUMERABLE_ELEMENT_KINDS if enumeration else ()
@@ -3170,6 +3520,8 @@ class ReasoningRetriever:
                     element_kinds=element_kinds, object_types=object_types,
                     outline=outline, consult_memory=consult_memory,
                     search_chunks=chunk_search, kg_actions=kg_actions,
+                    read_document=read_document,
+                    read_document_cap=read_document_cap,
                     plugin_actions=plugin_actions,
                 ),
             }]
@@ -3183,6 +3535,7 @@ class ReasoningRetriever:
                 reflect_schema_hint(
                     element_kinds, object_types, outline, consult_memory,
                     chunk_search, kg_actions,
+                    read_document=read_document,
                     plugin_actions=plugin_actions,
                 ),
                 timeout=self.settings.reasoning_timeout_seconds,
@@ -3220,6 +3573,8 @@ class ReasoningRetriever:
             ) + (
                 (ENUMERATE_KG_OBJECTS_ACTION,)
                 if enumeration and kg_actions else ()
+            ) + (
+                (READ_DOCUMENT_ACTION,) if read_document else ()
             ) + ((OUTLINE_ACTION,) if outline else ()
             ) + ((CONSULT_MEMORY_ACTION,) if consult_memory else ()
             # 白名单条目与 prompt 行、schema 分支同源:三处都由
@@ -3334,6 +3689,28 @@ class ReasoningRetriever:
                 scope = enumerate_request.get("scope", "")
                 d.enumerate_scope = (
                     scope if scope in ENUMERATE_SCOPES else ENUMERATE_SCOPE_ALL
+                )
+            read_document_request = data.get("read_document")
+            if read_document and isinstance(read_document_request, dict):
+                # 与 enumerate/outline 分支同形:关闭态**连读都不读**,模型硬吐一个
+                # read_document 对象也不会有任何影响(动作本身不在白名单里,整份
+                # 载荷会走 `invalid_action` 兜底)。
+                #
+                # 标题只 strip,不做别的归一:真正的匹配范式是花名册那一侧的
+                # `collection_enumeration._normalized_title`(trim + casefold),
+                # 在这里再做一次同名不同形的清洗只会让两侧口径分叉。
+                d.read_document_source = str(
+                    read_document_request.get("source", "")
+                ).strip()
+                # 非法值一律落回默认,**不留**被拒原值:非空非法值在
+                # `model_json` 的校验层已经按封闭枚举(`"spread|opening"`)整轮
+                # 拒掉了,到得了这里的只有缺省/空串/非字符串,而那是模型不动这个
+                # 旋钮的正当写法,没有教学文案要说。见 `ReflectDecision` 那一格
+                # 的注释。
+                coverage = read_document_request.get("coverage", "")
+                d.read_document_coverage = (
+                    coverage if coverage in READ_DOCUMENT_COVERAGES
+                    else READ_DOCUMENT_COVERAGE_DEFAULT
                 )
             if outline:
                 # 与 enumerate 分支同形:只在这一把闸打开时才看这个字段,关闭态
@@ -4700,6 +5077,218 @@ class ReasoningRetriever:
                          summary=f"检索原文段落:{cq},新增 {len(new)} 段",
                          detail=_chunk_action_detail))
 
+    def _action_read_document(
+        self, state: "_ReasoningRunState", decision: "ReflectDecision",
+    ) -> None:
+        """reflect 的 `read_document` 动作分支(PR-A,与 `_action_search_chunks` 同形)。
+
+        整体住在这里而不是 `run` 的 elif 链里:`run` 是有零松弛长度天花板的热函数,
+        新通道的执行体按 `_action_ppr_retrieve`/`_action_search_chunks` 的先例不记
+        在它头上。五个 run 级账目就地读写 `state.`(本方法独占,`run` 不解包它们)。
+
+        **来源解析零额外 I/O**:只在 `state.enumerations` 里 `collection=="sources"`
+        的那批 `SourceItem` 上按 `_normalized_title` 精确匹配。范围合法性已经由
+        `enumerate_sources` 兑现过一次(它按勾选的参考库与 scope 收窄),所以这里
+        既不必、也不该再去库里解析一次标题——那会绕开清单的范围,打开一条模型能
+        用标题探测范围外文档的路。
+
+        六条 skip 全部零 I/O、不写 `result_ids`(硬判据:走到发起 I/O 的路径才无条件
+        写那把键,skip 分支一律不写)。**见证失败不是 skip**:那一次 I/O 真的发生过,
+        所以它记的是一条零命中的 `read_document` 步(`result_ids: []`),并把空产物
+        记进账目——模型据此知道那一篇读失败了,不必再请求一次。
+
+        次数账目在成功与见证失败两条路径上**都**推进。一次见证失败照样付了整轮
+        分页读,而「读取期间文档又被重新解析」是一个会持续成立的状态:不计次就等于
+        允许同一篇反复重试,把整个 run 的预算烧在一篇正在重新解析的文档上。元素/
+        字符两个池只在真的拿到产物时扣减——那两个池量的是「送进合成的材料有多少」,
+        失败时确实一个字都没送进去。
+        """
+        record = state.record
+        action_policy = state.action_policy
+        if not self.document_read_active(state.enum_limits):
+            # 纵深防御:关闭态该动作不在 allowed_actions 里,正常路径到不了这里;
+            # 测试替身或畸形响应仍可能直达,那也必须零 I/O。
+            record(TraceStep(step_type="skip",
+                             summary="跳过按篇读取原文(未启用)",
+                             detail={"reason": "document_read_disabled"}))
+            return
+        if state.document_reads_done >= action_policy.max_document_reads:
+            # 报的 N 与 reflect prompt 里那句「本轮最多读几篇」是同一个数:两处读
+            # 的都是 `ReasoningActionPolicy.max_document_reads`,这里经
+            # `state.action_policy`(run 算一次),`reflect()` 那侧没有 run state,
+            # 从**同一份 settings** 现算一次 `reasoning_action_policy(...)`。
+            record(TraceStep(
+                step_type="skip",
+                summary=("跳过按篇读取原文(已达次数上限 "
+                         f"{action_policy.max_document_reads})"),
+                detail={"reason": "document_read_cap"}))
+            return
+        # 花名册按 source_id 去重后再匹配:同一篇可能被两条范围不同的清单链各列
+        # 一次(「先只列本库、后要全部」是新开一条链),不先折叠的话它会被当成
+        # 「两篇同名」而误判成解析不出唯一目标。
+        roster: Dict[str, object] = {}
+        for listed in state.enumerations:
+            if listed.collection == ENUMERATE_SOURCES_COLLECTION:
+                for row in listed.items:
+                    roster.setdefault(row.source_id, row)
+        if not roster:
+            record(TraceStep(
+                step_type="skip",
+                summary=("跳过按篇读取原文:本轮还没有列出过来源清单,"
+                         "请先列出清单,再按清单里的标题读取"),
+                detail={"reason": "document_read_no_roster"}))
+            return
+        # 比对的显示串与**花名册渲染同一口径**:预览行写的是
+        # `str(item.source_title or UNNAMED_SOURCE_LABEL)`,所以一篇没有标题的
+        # 文档在模型眼里就叫「未命名来源」。这里若只比 `row.source_title`,模型
+        # 逐字复制它**看到的**那个占位串永远匹配不上——那类文档在花名册里可见、
+        # 却永远读不到,而它恰恰是这个动作最该覆盖的一行(没标题的文档通常也
+        # 没摘要,别的通道一个字都描述不了它)。
+        requested = str(decision.read_document_source or "")
+        wanted = _normalized_title(requested)
+        matches = ([row for row in roster.values()
+                    if _normalized_title(_roster_display_title(row)) == wanted]
+                   if wanted else [])
+        if not matches:
+            # 模型把标题包在一对书名号/引号里(`《部署手册.md》`)——真模型抽问里
+            # 第一次 unresolved 就是这个形状,而本文件的回喂账目自己就用书名号
+            # 括标题,不能怪它。只剥**一对**成对的包裹符再精确匹配一次;标题本身
+            # 就带书名号的文档在上面那次整串精确匹配里已经命中,走不到这里。
+            unwrapped = _strip_title_wrapping(requested)
+            if unwrapped != requested:
+                requested = unwrapped
+                wanted = _normalized_title(requested)
+                matches = ([row for row in roster.values()
+                            if _normalized_title(_roster_display_title(row)) == wanted]
+                           if wanted else [])
+        if not matches and SOURCE_ROW_FIELD_SEPARATOR in requested:
+            # 模型把**整行**抄了回来(预览行的形状是 `标题 · 类型: 摘要`,而指令
+            # 说的是「逐字复制标题」——两者差一步,模型会踩)。
+            #
+            # 兜底仍然是**确定性的精确匹配,不是猜**:按预览行自己的分隔符切掉
+            # 第一个 " · " 之后的部分,再原样精确匹配一次。切出来的前缀与真标题
+            # 不相等就照样 0 命中,不做任何模糊化——与 `_normalized_title` 那条
+            # 「只求活过空白与大小写,绝不近似匹配」的纪律一致。标题里本身含
+            # " · " 的文档不受影响:那种标题在上面那次整串精确匹配里就已经命中,
+            # 根本走不到这里。
+            head = _normalized_title(
+                requested.split(SOURCE_ROW_FIELD_SEPARATOR, 1)[0])
+            matches = ([row for row in roster.values()
+                        if _normalized_title(_roster_display_title(row)) == head]
+                       if head else [])
+        if len(matches) != 1:
+            # detail 只带模型自己给的标题(截断)与命中条数。内部 source_id 从不
+            # 上屏,而这条 skip 的用途恰恰是让模型看懂「你给的标题在清单里找不到
+            # /不唯一」,给它一个它没见过的 id 只会让它下一轮把 id 抄进标题里。
+            #
+            # 两种不命中的**下一步完全不同**,所以文案分叉:0 篇是抄错了标题,
+            # 重抄一次就能成;≥2 篇是这个动作的参数根本区分不开它们(参数就是
+            # 标题),再抄一次还是同样的结果——那时候该说的是「这里没办法」,而
+            # 不是继续教它复制标题,否则模型会把剩下的轮数全花在同一个死循环上。
+            record(TraceStep(
+                step_type="skip",
+                summary=(
+                    f"跳过按篇读取原文:清单里有 {len(matches)} 篇同名文档,"
+                    "这个动作按标题无法区分它们,请如实说明这一点或改读别的文档"
+                    if len(matches) > 1 else
+                    "跳过按篇读取原文:来源清单里没有匹配这个标题的文档,"
+                    "请从清单里逐字复制标题后重试"),
+                detail={"reason": "document_read_unresolved",
+                        "requested_title": decision.read_document_source[:200],
+                        "matches": len(matches)}))
+            return
+        item = matches[0]
+        if item.source_id in state.document_reads_by_id:
+            record(TraceStep(
+                step_type="skip",
+                summary=("跳过按篇读取原文:这篇本轮已经读取过,"
+                         "请改读别的文档或直接作答"),
+                detail={"reason": "document_read_repeat"}))
+            return
+        # 两个 run 级预算池按「剩余 // 还能读几次」切份额,与
+        # `document_catalog_overview.supplement_missing_summaries` 同形:先读的那
+        # 一篇不会把整池吃光,后面的文档还能各拿到一份可用的额度。字符份额再减
+        # 一段包头预留——合成侧要给每一篇拼一行 header,不预留的话最后一篇会在
+        # 装配时被自己的标题挤掉。
+        element_pool = int(self.settings.document_overview_max_elements)
+        char_pool = state.enum_limits.chunk_context_chars // 4
+        reads_left = action_policy.max_document_reads - state.document_reads_done
+        pool_share = (
+            element_pool - state.document_read_elements_used) // reads_left
+        share_chars = (
+            (char_pool - state.document_read_chars_used) // reads_left
+            - DOCUMENT_READ_HEADER_RESERVE_CHARS)
+        # **取样深度由字符份额反推**,元素池份额只当上界。两个池是同一次取样的
+        # 两个维度,而真正稀缺的是字符:执行体拿到 N 个元素份额就会发 N 次单行
+        # 分页查询,再把每条正文二分截到各自的字符份额里——宽度优先(直接用
+        # `pool_share`)在 overview 档能换来 16 次查询、每条不到 50 字正文,即每条
+        # 都被截得只剩章节标题,贵且读不出这篇文档讲什么。按
+        # `DOCUMENT_READ_MIN_CHARS_PER_ELEMENT` 反推能养活几个元素,I/O 降一个
+        # 量级,送进合成的正文反而更长。`max(1, ...)` 保证字符份额只够一个元素时
+        # 仍读一个(它随后会被 `share_chars <= 0` 那道闸兜住)。
+        share_elements = min(
+            pool_share,
+            max(1, share_chars // DOCUMENT_READ_MIN_CHARS_PER_ELEMENT))
+        if share_elements <= 0 or share_chars <= 0:
+            record(TraceStep(
+                step_type="skip",
+                summary=("跳过按篇读取原文:本轮的原文取样预算已经用完,"
+                         "请依据已有材料作答"),
+                detail={"reason": "document_read_budget"}))
+            return
+        # 号段按**池宽**(而不是本次份额)递进,所以两次读取的 `[kN]` 永不重叠。
+        key_offset = (DOCUMENT_READ_KEY_BASE
+                      + state.document_reads_done * element_pool)
+        overview = prepare_source_overview(
+            self.sources, item,
+            budget_chars=share_chars, max_elements=share_elements,
+            cancel_event=self.cancel_event,
+            active_notebook_id=state.notebook_id,
+            generation_reader=self.source_generation,
+            key_offset=key_offset,
+            coverage=decision.read_document_coverage,
+        )
+        outcome = DocumentReadOutcome(
+            source_id=item.source_id, source_title=item.source_title,
+            notebook_id=item.notebook_id, tier=item.tier,
+            key_offset=key_offset, context_block=overview.context_block,
+            id_map=overview.id_map, citations=overview.citations,
+            coverage_note=overview.coverage_note,
+            summary_was_empty=not str(item.summary or "").strip(),
+            coverage=decision.read_document_coverage,
+        )
+        state.document_reads.append(outcome)
+        state.document_reads_done += 1
+        state.document_reads_by_id.add(item.source_id)
+        if not overview.context_block:
+            # 见证失败:I/O 发起过,所以写 `result_ids: []` 而不是缺席那把键。
+            # `note` 就是执行体自己的 coverage_note——前端在 found==0 时显示它,
+            # 否则用户只看到一条「新增 0 段」而不知道为什么。
+            record(TraceStep(
+                step_type="read_document",
+                summary=(f"按篇读取原文取样:《{item.source_title}》,"
+                         "本次没有取到原文"),
+                detail={"source": item.source_title,
+                        "coverage": outcome.coverage, "found": 0,
+                        "result_ids": [], "note": overview.coverage_note}))
+            return
+        state.document_read_elements_used += len(overview.id_map)
+        state.document_read_chars_used += len(overview.context_block)
+        _read_ids, _read_ids_truncated = _capped_result_ids(
+            [str(entry.get("element_id", ""))
+             for entry in overview.id_map.values()])
+        _read_detail = {"source": item.source_title,
+                        "coverage": outcome.coverage,
+                        "found": len(overview.id_map),
+                        "result_ids": _read_ids}
+        if _read_ids_truncated:
+            _read_detail["result_ids_truncated"] = True
+        record(TraceStep(
+            step_type="read_document",
+            summary=(f"按篇读取原文取样:《{item.source_title}》,"
+                     f"新增 {len(overview.id_map)} 段"),
+            detail=_read_detail))
+
     def _plugin_action_timeout(self) -> float:
         return float(getattr(
             self.settings,
@@ -5927,7 +6516,8 @@ class ReasoningRetriever:
             first_reflect = False
             summary += legacy_action_ledger_note(
                 visited, collected, neighbor_truncated,
-                neighbor_expand_limit, attempted, exact_lookup_log)
+                neighbor_expand_limit, attempted, exact_lookup_log,
+                state.document_reads)
             # 未执行的已确认方向回喂 reflect(镜像上面几份账目):模型据此知道哪些
             # 用户确认过的方向还没跑过,可以优先用 add_subquery 把它们补上,而不是
             # 另起炉灶猜一个新角度。每轮按 attempted 现算 —— 模型真把某条补上了,
@@ -6067,7 +6657,10 @@ class ReasoningRetriever:
             # 关闭态、低档位与**有图** run 下调用形状与接入前逐字一致,既有的
             # reflect 测试替身不必为收不到的参数改签名。`kg_in_scope` 是 run 级
             # 不变量(`_new_run_state` 算一次),这里直读 state,不解包成局部名。
-            reflect_kwargs = {} if state.kg_in_scope else {"kg_actions": False}
+            # `limits` 是例外,恒传:`document_read_active` 的首读份额判据要看本
+            # run 的 `chunk_context_chars`,兜底成默认档会让它与执行体分叉。
+            reflect_kwargs = ({"limits": enum_limits} if state.kg_in_scope
+                              else {"kg_actions": False, "limits": enum_limits})
             if outline_active:
                 reflect_kwargs["outline"] = True
             if consult_memory_flag:
@@ -6144,7 +6737,7 @@ class ReasoningRetriever:
                 break
             before = (
                 len(collected) + len(elements) + len(chunks) + len(chains)
-                + state.enum_rows_used
+                + state.enum_rows_used + state.document_read_elements_used
             )
             if (
                 decision.next_action in (
@@ -6480,6 +7073,8 @@ class ReasoningRetriever:
                             step_type="skip",
                             summary="回想以往打法:读取记录失败,本轮跳过",
                             detail={"reason": "consult_memory_unavailable"}))
+            elif decision.next_action == READ_DOCUMENT_ACTION:
+                self._action_read_document(state, decision)
             elif decision.next_action == "search_chunks":
                 self._action_search_chunks(state, decision)
             elif decision.next_action == "ppr_retrieve":
@@ -6723,9 +7318,11 @@ class ReasoningRetriever:
             else:
                 break
             # 本轮动作后是否有新增(候选节点或原文段)。无新增 → 下一轮提示模型 + 累加 stale。
+            # 按篇取样不进候选池却确实带来新材料,故 `document_read_elements_used`
+            # 并进这把尺(见证失败时它不动,那一轮仍如实算作无进展)。
             no_progress = (
                 len(collected) + len(elements) + len(chunks) + len(chains)
-                + state.enum_rows_used
+                + state.enum_rows_used + state.document_read_elements_used
             ) == before
             if no_progress and (consult_delivered_this_turn
                                 or state.external_delivered_this_turn):
@@ -6873,6 +7470,7 @@ class ReasoningRetriever:
         return ReasoningResult(
             top_hits=top_hits, elements=elements, trace=trace, chunks=chunks,
             chains=chains, enumerations=enumerations,
+            document_reads=list(state.document_reads),
             collection_map_text=collection_map_text, outline=outline,
             outline_evidence=outline_evidence,
             external_evidence=list(state.external_evidence),

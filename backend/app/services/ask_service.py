@@ -486,6 +486,7 @@ def _synthesis_step_detail(
     counts: Mapping[str, Any],
     enumerated_collections: int,
     enumeration_block_dropped: bool,
+    document_read_block_dropped: bool,
     outline_planned: bool,
     sectioned: Any,
     outline_fallback: bool,
@@ -525,6 +526,14 @@ def _synthesis_step_detail(
             for key in ("external_included", "external_dropped")
             if key in counts
         },
+        # 按篇原文取样(``read_document``)真正进合成 prompt 的原文元素数。
+        # 同样**稀疏**、同样的理由:没有按篇取样的一轮的 detail 与接入这个特性
+        # 之前逐键相等。
+        **{
+            key: counts[key]
+            for key in ("included_document_reads",)
+            if key in counts
+        },
         # 本轮产生的类型化集合清单数(诊断字段,不上屏)。清单本身
         # 进合成 prompt / 结果卡由 T5 接管;在这里露一个数,是为了
         # 让「工具跑了但答案没体现」这种情况在轨迹里可查。
@@ -534,6 +543,16 @@ def _synthesis_step_detail(
         # 只是模型这一轮没看到清单预览。trace 已闭合,这是唯一
         # 挂点。
         "enumeration_block_dropped": enumeration_block_dropped,
+        # 同上,给按篇取样块的那一份:整块因子预算(structured 段不得超过
+        # ``chunk_context_chars`` 的一半)被挡在合成 prompt 之外。取样仍然发生过
+        # (它在检索轨迹的 ``read_document`` 步里,``result_ids`` 齐全),只是模型
+        # 这一轮没看到那几段原文。
+        #
+        # **稀疏**,与上面两组外部证据键同一条纪律、同一个理由:恒为 False 地写
+        # 进去会改掉每一条既有答案的持久化 payload(golden oracle 会红),而「没有
+        # 被挤掉」本来就是缺席该表达的事实。
+        **({"document_read_block_dropped": True}
+           if document_read_block_dropped else {}),
         # Agentic Memory P4 (T1): the answer's actually-bound
         # [k] anchors, by object_id — the raw material for
         # step→anchor attribution (see TRACE_ANCHOR_EVIDENCE_
@@ -625,6 +644,15 @@ class AskService:
     # 上界仍留在按节合成的 ``OUTLINE_SECTION_KEY_STRIDE``(10000)之内,所以节
     # 偏移照样把各节的号段隔开。
     _EXTERNAL_KEY_BASE = 6000
+    # 按篇原文取样(``read_document`` 反思动作)的独立号段。三个号段各归各的产
+    # 出者:5000 归确定性集合清单预览、6000 归插件带回的库外证据、7000 归本轮
+    # 按篇读到的有界原文摘录。三者在同一次合成里可以同时出现,共用号段会让
+    # ``[k5001]`` 在 id_map 合并时无声互相覆盖。与检索侧的
+    # ``reasoning_retrieval.DOCUMENT_READ_KEY_BASE`` 是同一个数:那边按它算
+    # ``key_offset``,这里按它做分区计数,对不上的话计数会把原文摘录算成清单行
+    # (``test_reasoning_document_read_synthesis`` 钉住两者相等)。号段上界仍留在
+    # 按节合成的 ``OUTLINE_SECTION_KEY_STRIDE``(10000)之内。
+    _DOCUMENT_READ_KEY_BASE = 7000
 
     def __init__(
         self,
@@ -2535,21 +2563,33 @@ class AskService:
         # 计数从第二节起全错。
         included_elements = 0
         included_collections = 0
+        included_document_reads = 0
         for key in source_map:
             try:
                 key_num = int(key[1:]) - key_offset
             except (TypeError, ValueError):
                 continue
-            if key_num >= self._COLLECTION_KEY_BASE:
+            # 7000+ 在 5000+ 之前判:按篇原文取样的号段在集合清单之上,反过来写
+            # 的话每一段原文摘录都会被算成一行清单。外部证据的 6000 段不在这里
+            # ——它是在 source_map/kg_map 合并之后才拼进 id_map 的。
+            if key_num >= self._DOCUMENT_READ_KEY_BASE:
+                included_document_reads += 1
+            elif key_num >= self._COLLECTION_KEY_BASE:
                 included_collections += 1
             elif key_num >= self._ELEMENT_KEY_BASE:
                 included_elements += 1
-        included_chunks = len(source_map) - included_elements - included_collections
+        included_chunks = (len(source_map) - included_elements
+                           - included_collections - included_document_reads)
         counts = {
             "included_kg": included_kg,
             "included_chunks": included_chunks,
             "included_elements": included_elements,
             "included_collections": included_collections,
+            # 按篇取样真正进 prompt 的原文元素数。**稀疏**,与下面的外部证据同
+            # 一条口径:没有按篇取样的一轮这里什么都不加,counts 与接入这个特性
+            # 之前逐键相等(恒零地写进去会改掉每一条既有答案的持久化 payload)。
+            **({"included_document_reads": included_document_reads}
+               if included_document_reads else {}),
             # 外部证据的装入/丢弃披露,**稀疏**:没有外部证据的一轮这里什么都不
             # 加,counts 与接入这个特性之前逐键相等(理由见
             # ``_append_external_context``)。
@@ -3935,6 +3975,12 @@ class AskService:
             # None ⇒ 报告与 knowhow 补全那两条自建 retriever 的路径不提供插件
             # 动作(设计文档 §一 非目标)。
             reflect_action_host=self.reflect_action_host,
+            # PR-A:按篇读取有界原文取样的两个座位(``read_document`` 动作)。
+            # 这里是**生产唯一**的接线点 —— ``document_read_active()`` 的五个
+            # 条件之一就是 ``sources is not None``,所以报告逐节深挖 / knowhow
+            # 补全那两条自建 retriever 的路径(不走这个方法)照旧一个字都不变。
+            sources=self.overview_sources,
+            source_generation=self.overview_source_generation,
             # ⚠ 外泄面的那一个串。**刻意不是** `run(question=...)` 收到的
             # `research_question` —— 那是已确认意图契约的合成串(目标 + 必答主题
             # + 约束 + 假设),`_egress_question` 的 docstring 逐条说明了它为什么
@@ -4351,6 +4397,8 @@ class AskService:
                 # 类型化集合清单(CollectionEnumerationOutcome)原样带出,本任务
                 # 不消费:进证据 prompt 与 AskResponse.result_sets 是 T5 的地盘。
                 enumerations = result.enumerations
+                # 本 run 的按篇原文取样产物(含见证失败的空产物)。同款原样带出。
+                document_reads = result.document_reads
                 # 本 run 的集合地图。run 内已经建过一次(计数走有界缓存),这里
                 # 带出来直接进合成上下文,不重建。
                 collection_map_text = result.collection_map_text
@@ -4374,6 +4422,7 @@ class AskService:
                     [], [], list(pre_trace), [], []
                 )
                 enumerations = []
+                document_reads = []
                 collection_map_text = ""
                 reasoning_outline = []
                 reasoning_outline_evidence = []
@@ -4410,6 +4459,7 @@ class AskService:
                     chunks=tuple(chunks),
                     chains=tuple(chains),
                     enumerations=tuple(enumerations),
+                    document_reads=tuple(document_reads),
                     collection_map_text=collection_map_text,
                     outline=tuple(reasoning_outline),
                     outline_evidence=tuple(reasoning_outline_evidence),
@@ -4473,6 +4523,82 @@ class AskService:
         # 持久化边界仍由 core 独占:最后一次取消检查与原子 save 都在
         # ``_commit_reasoning_draft`` 里,任何 stage 实现都够不到它们。
         return self._commit_reasoning_draft(draft, runtime, prepared)
+
+    def _assemble_document_read_block(
+        self,
+        document_reads,
+        structured_block: str,
+        structured_map: dict,
+        collection_item_citations: dict,
+        answer_client,
+        chunk_context_chars: int,
+    ) -> tuple[str, bool]:
+        """把本轮按篇读到的有界原文摘录缝进合成证据块(PR-A T5)。
+
+        装配位在**枚举预览之后**:先是「库里有这几篇」,紧接着才是「其中这几篇
+        我真的翻开读了几段」,读者(模型)看到的顺序与它自己的动作顺序一致。整体
+        仍然只经 ``structured_block`` 这一个参数进 ``_answer_reasoning``。
+
+        返回 ``(structured_block, dropped)``。``dropped`` 只在**子预算**把这一块
+        整体挡下时为真(见下),渲染失败与空产物都不是它——那两种情况下本来就没有
+        块可装,而 ``dropped`` 要回答的是「装得下的块被预算挤掉了吗」。
+
+        ## 子预算(与 ``enumeration_sub_budget`` 的第 3 层同形、同理由)
+
+        取样块与枚举预览同住 ``structured_block``,而这个参数整体与 chunks /
+        elements 争同一份 ``chunk_context_chars``。枚举那一侧已经把自己夹在了
+        一半以内;取样块**拼在它后面**,不夹的话两块加起来可以把另一半问题的证据
+        预算整个挤空——检索到的原文段落一条都进不了 prompt,而这个动作恰恰常与
+        `search_chunks` 同轮发生。
+
+        夹法是**整块不装**而不是截断:取样块的内部结构(每篇一个包头 + 它自己的
+        coverage 披露行 + 带 `[kN]` 的正文)在字符级截断下会碎成「有包头没正文」
+        或「有正文但披露行被切掉」——后者正是「模型以为自己读全了」的那条路。
+        执行体侧的份额切分已经把常态挡在预算之内,这里是**配置错误的兜底**,与
+        ``enumeration_block_dropped`` 一样只在轨迹上披露一次。
+
+        ## 全成功再写回
+
+        三件事同时发生(块拼进 prompt、反向绑定进 ``structured_map`` 让 ``[kN]``
+        解析得回 anchor、``Citation`` 进 ``collection_item_citations`` 让 anchor
+        出得了引用卡)。它们必须**同生共死**:留下「块进去了但引用解析不了」这种
+        半状态,会让模型引的号在响应侧变成悬空引用。所以三份产物先各自算好,
+        两次 ``update`` 放在**渲染全部成功之后**一起做——把 update 夹在渲染中间
+        的话,后一步抛异常就正好留下前一半,而 ``except`` 分支已经没法把它撤回了
+        (两个字典都是调用方的,不是本函数造的)。
+
+        ``collection_item_citations`` 的键语义是「这一行的查找身份」
+        (``collection_item_citations.get(anchor.object_id)``)。取样产物的 id_map
+        条目里 ``object_id == element_id == element.id``,所以这里按
+        ``citation.element_id`` 入键,与 anchor 对得上。
+
+        空产物(见证失败)在 ``document_read_answer`` 侧就被滤掉:它只属于回喂
+        账目。``answer_client`` 未配置时整段不做——那一轮压根不会有合成 prompt。
+        """
+        if not document_reads or not answer_client.configured:
+            return structured_block, False
+        try:
+            from app.services.document_read_answer import (
+                document_read_prompt_block,
+            )
+            preview = document_read_prompt_block(
+                document_reads, roster_map=structured_map)
+            if not preview.text:
+                return structured_block, False
+            combined = (f"{structured_block}\n\n{preview.text}"
+                        if structured_block else preview.text)
+            if len(combined) > int(chunk_context_chars) // 2:
+                return structured_block, True
+            citation_updates = {
+                citation.element_id: citation for citation in preview.citations}
+            structured_map.update(preview.evidence_by_id)
+            collection_item_citations.update(citation_updates)
+            return combined, False
+        except Exception as exc:  # noqa: BLE001 - cards survive prompt degradation
+            self.event_log.logger.warning(
+                "document read prompt rendering failed (%s)", type(exc).__name__
+            )
+            return structured_block, False
 
     def _add_sheet_prompt(
         self,
@@ -4751,6 +4877,11 @@ class AskService:
             except Exception:
                 typed_collection_result_sets = []
                 enumeration_block_dropped = False
+        structured_block, document_read_block_dropped = (
+            self._assemble_document_read_block(
+                stage.document_reads, structured_block, structured_map,
+                collection_item_citations, answer_client,
+                limits.chunk_context_chars))
         structured_block = self._add_sheet_prompt(
             structured_block, structured_map, spreadsheet_results, answer_client)
         def _synth_reasoning():
@@ -4874,6 +5005,8 @@ class AskService:
         # 工具接线成功且作用域里有可数的东西(空库在更早的早退里就返回了),
         # 所以这不是给空库额外加一次模型调用。外部证据同理且更强:模型正是在
         # 库内反复空手之后才去调插件动作的,漏掉它就是让唯一有材料的那轮没合成。
+        # `stage.document_reads` 不另列:总闸含 `enumeration_active()`、执行体无
+        # 花名册只会 skip,故有取样必有 `enumerations`(拆那把闸要同改这里)。
         elif answer_client.configured and (
                 top_hits or elements or chunks or chains or memory_hits
                 or structured_batch is not None or enumerations
@@ -5057,6 +5190,8 @@ class AskService:
         # 载荷计费(每张图约 +77 字节未计费),把「响应不会大于它声明的」这条
         # 保证拆掉;而清单卡本来就自带 `TypedCollectionItem.asset_id`,附图对它
         # 纯属冗余。k5001 锚点那条腿不受影响——锚点是另一批对象。
+        # 按篇取样(k7001+)的卡**也**被排除,但理由是另一条:它们是独立实例、不涉
+        # 共享计费,排除是为与「零锚点回退不带配图」这条已登记取舍一致(不重复计费)。
         self.evidence_context.attach_citation_images(
             anchor_image_targets(
                 anchors, {item.chunk_id: item.element_ids for item in chunks}
@@ -5087,6 +5222,7 @@ class AskService:
                     evidence_level=evidence_level, counts=reasoning_counts,
                     enumerated_collections=len(enumerations),
                     enumeration_block_dropped=enumeration_block_dropped,
+                    document_read_block_dropped=document_read_block_dropped,
                     outline_planned=outline_planned, sectioned=sectioned,
                     outline_fallback=outline_fallback,
                     outline_skipped=outline_skipped,

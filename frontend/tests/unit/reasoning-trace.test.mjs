@@ -229,6 +229,7 @@ test("NEXT_ACTION 覆盖后端全部真实取值(非机制名)", () => {
   // search_evidence 曾短暂作为一个动作存在(模型判断来源那一版),随该特性整体
   // 移除;它是这张表**减少**过的唯一一次,所以这里也留个记号:动作被删时同样要改这张表。
   // search_chunks(T1):原文段落检索一等动作,无图 run 与有图 run 均可选,是第 13 个。
+  // read_document(PR-A):按篇读取有界原文取样,以来源清单为通讯录,是第 14 个。
   const cases = {
     answer: "开始作答", expand_graph: "顺着相关内容继续找", add_subquery: "换个角度再查一遍",
     search_elements: "回原文里找细节", search_chunks: "在原文段落里检索",
@@ -238,6 +239,7 @@ test("NEXT_ACTION 覆盖后端全部真实取值(非机制名)", () => {
     expand_community: "找相似内容对比", follow_chain: "顺着推导链继续",
     exact_lookup: "按名称精确查找", update_outline: "整理大纲",
     consult_memory: "回想以往的查法",
+    read_document: "按篇读取原文取样",
   };
   for (const [action, zh] of Object.entries(cases)) {
     const out = getTraceStepDetail({ step_type: "reflect", detail: { next_action: action } });
@@ -1053,4 +1055,57 @@ test("已发出请求但失败的 skip 步（attempted:true）同样在展开态
     }),
     [],
   );
+});
+
+// read_document(PR-A T6):按篇读取有界原文取样(reflect 动作 read_document)。三条用例
+// 分别钉标签映射、next_action 映射、detail 渲染(含零命中带 note 与 opening)。
+test("read_document 有专属标签,不与 fallback(原文)/search_chunks(段落)同名", () => {
+  assert.equal(TRACE_STEP_LABELS.read_document, "取样");
+  assert.notEqual(TRACE_STEP_LABELS.read_document, TRACE_STEP_LABELS.fallback);
+  assert.notEqual(TRACE_STEP_LABELS.read_document, TRACE_STEP_LABELS.search_chunks);
+  assert.equal(
+    getReasoningTraceSummary([{ step_type: "read_document", summary: "" }], true).latestLabel,
+    "取样",
+  );
+});
+
+test("NEXT_ACTION 覆盖 read_document(PR-A 第 14 个动作)", () => {
+  const out = getTraceStepDetail({ step_type: "reflect", detail: { next_action: "read_document" } });
+  assert.equal(out, "按篇读取原文取样");
+  assert.notEqual(out, "read_document"); // 不泄漏英文机制名
+});
+
+test("read_document 步的 detail 显示《标题》与新增取样段数,不被通用 found 分支截胡", () => {
+  // detail 同时含 source 与 found:若通用 `typeof detail.found === "number"` 分支
+  // 排在前面,会先命中那条只返回「新增 3」,把标题吞掉——这是本条要防的回归。
+  const hit = {
+    step_type: "read_document",
+    summary: "",
+    detail: { source: "用户手册", coverage: "spread", found: 3, result_ids: ["el-1", "el-2", "el-3"] },
+  };
+  assert.equal(getTraceStepDetail(hit), "《用户手册》 新增 3 段取样");
+  assert.notEqual(getTraceStepDetail(hit), "新增 3");
+
+  // coverage: "opening" 只读了开头,不是等距覆盖全文,要在 detail 里说清楚。
+  const opening = {
+    step_type: "read_document",
+    summary: "",
+    detail: { source: "附录 A", coverage: "opening", found: 2, result_ids: ["el-9", "el-10"] },
+  };
+  assert.equal(getTraceStepDetail(opening), "《附录 A》 新增 2 段取样（只读开头）");
+
+  // 零命中且带 note(例如读取期间文档被重新解析):显示 note,不显示空洞的
+  // 「新增 0 段取样」。
+  const zeroWithNote = {
+    step_type: "read_document",
+    summary: "",
+    detail: {
+      source: "旧版说明书",
+      coverage: "spread",
+      found: 0,
+      result_ids: [],
+      note: "读取期间文档重新解析",
+    },
+  };
+  assert.equal(getTraceStepDetail(zeroWithNote), "《旧版说明书》 读取期间文档重新解析");
 });

@@ -84,6 +84,33 @@ def test_source_text_cannot_inject_anchor_or_extra_record():
     assert list(result.id_map) == ["k1"]
 
 
+def test_zero_sampled_lines_never_ask_the_model_to_introduce_from_them():
+    """有元素、但一条都没落地时,note 不得以「请仅依据这些原文介绍」结尾。
+
+    极长的章节面包屑配上极小的字符预算,会让每个元素的二分都停在面包屑本身,
+    执行体于是把每一条都整个丢掉——`total > 0` 而 `lines` 为空。这时再说「请仅
+    依据这些原文介绍」,就是在请模型依据**一份空证据**去介绍这篇文档,而那正是
+    无依据编造的入口。两条读取通道(目录补摘要与按篇取样)共享这一份措辞。
+    """
+    breadcrumb = "第一章 " * 60          # 面包屑本身就比整份预算还长
+    pages = SourcePages(["正文一", "正文二"])
+    for element in pages.elements:
+        element.metadata["section_path"] = breadcrumb
+    result = prepare_source_overview(pages, ITEM, 60, 4, active_notebook_id="nb",
+                                     generation_reader=lambda _: "v1")
+
+    assert result.context_block == "" and not result.id_map
+    assert not result.citations
+    assert "未能取样" in result.coverage_note
+    assert "2 个元素" in result.coverage_note
+    assert "暂无依据" in result.coverage_note
+    # 这条断言就是这个分支存在的全部理由。
+    assert "请仅依据这些原文介绍" not in result.coverage_note
+    # 也不许冒充成「这篇没有可读取的原文」——那是 total == 0 的另一件事,
+    # 对应的下一步是「先完成文档解析」,而这里解析是好的、只是预算太小。
+    assert "没有可读取的原文" not in result.coverage_note
+
+
 def test_empty_and_cancelled_source():
     result = prepare_source_overview(SourcePages([]), ITEM, 1000, 4, active_notebook_id="nb")
     assert "没有可读取的原文" in result.coverage_note
@@ -105,3 +132,39 @@ def test_mounted_library_source_keeps_its_notebook_id():
     assert result.citations and all(c.notebook_id == "base-nb" for c in result.citations)
     assert all(v["notebook_id"] == "base-nb" for v in result.id_map.values())
     assert all(c.tier == "base" for c in result.citations)
+
+
+def test_opening_coverage_reads_only_the_start_and_excludes_the_last_element():
+    pages = SourcePages(["开头", "二", "三", "四", "结论"])
+    result = prepare_source_overview(
+        pages, ITEM, 1000, 3, generation_reader=lambda _: "v1",
+        active_notebook_id="nb", coverage="opening",
+    )
+    assert [citation.element_id for citation in result.citations] == ["e0", "e1", "e2"]
+    assert "结论" not in result.context_block
+
+
+def test_opening_coverage_with_whole_document_still_reports_complete_reading():
+    pages = SourcePages(["开头", "中间", "结论"])
+    result = prepare_source_overview(
+        pages, ITEM, 1000, 10, generation_reader=lambda _: "v1",
+        active_notebook_id="nb", coverage="opening",
+    )
+    assert "已读取全部 3" in result.coverage_note
+    assert [citation.element_id for citation in result.citations] == ["e0", "e1", "e2"]
+
+
+def test_invalid_coverage_value_behaves_like_spread():
+    default_result = prepare_source_overview(
+        SourcePages(["开头", "二", "三", "四", "结论"]), ITEM, 1000, 3,
+        generation_reader=lambda _: "v1", active_notebook_id="nb",
+    )
+    bogus_result = prepare_source_overview(
+        SourcePages(["开头", "二", "三", "四", "结论"]), ITEM, 1000, 3,
+        generation_reader=lambda _: "v1", active_notebook_id="nb",
+        coverage="not-a-real-value",
+    )
+    assert ([citation.element_id for citation in bogus_result.citations]
+            == [citation.element_id for citation in default_result.citations])
+    assert bogus_result.context_block == default_result.context_block
+    assert bogus_result.coverage_note == default_result.coverage_note

@@ -134,6 +134,9 @@ CORE_REFLECT_ACTION_IDS = frozenset({
     "enumerate_kg_objects",
     "update_outline",
     "consult_memory",
+    # PR-A: bounded per-document source sampling (reuses
+    # ``document_source_overview.prepare_source_overview``).
+    "read_document",
 })
 
 # Every TOP-LEVEL field name of the reflect schema hint, with every gate open.
@@ -155,6 +158,9 @@ REFLECT_SCHEMA_TOP_LEVEL_FIELDS = frozenset({
     "ppr_query",
     "exact_term",
     "chunks_query",
+    # PR-A: the ``read_document`` action's own arguments (``source`` /
+    # ``coverage``) nest under this same-named top-level field.
+    "read_document",
 })
 
 # The union is what registration rejects.  It lives in ``app.domain`` rather

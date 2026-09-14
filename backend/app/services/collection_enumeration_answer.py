@@ -43,9 +43,11 @@ from app.services.collection_catalog import COLLECTION_MAP_MAX_CHARS
 from app.services.collection_enumeration import (
     LOCAL_ONLY_SCOPE_SUFFIX,
     MAX_EVIDENCE_REFS,
+    SOURCE_ROW_FIELD_SEPARATOR,
     TRUNCATED_BUDGET,
     TRUNCATED_CONCURRENT_CHANGE,
     TRUNCATED_PAYLOAD,
+    UNNAMED_SOURCE_LABEL,
     ElementItem,
     EnumerationCoverage,
     KgObjectItem,
@@ -380,11 +382,13 @@ _PROMPT_LINE_EXCERPT_CHARS = 200
 # retrieval producer.
 COLLECTION_KEY_BASE = 5000
 
-# What a document with no display name is called, in the prompt preview and on
-# the result card alike (``answer-panel.tsx`` renders the same words).  Kept as
-# one constant on this side so the two never drift into "未命名来源" on screen and
-# a raw source id in the prompt — the model quotes what it is given.
-UNNAMED_SOURCE_LABEL = "未命名来源"
+# ``UNNAMED_SOURCE_LABEL`` (what a document with no display name is called) and
+# ``SOURCE_ROW_FIELD_SEPARATOR`` (what separates a roster row's title from the
+# fields after it) are imported at the top of this module from the executor,
+# NOT defined here: ``reasoning_retrieval._action_read_document`` is a third
+# reader — it resolves the title a model copied out of this very line — and
+# importing them from here would close an import cycle between that module and
+# this one.  See their definition site for the full argument.
 
 # A single, one-time reminder that the preview is a SUBSET of what was
 # listed. Mirrors ``structured_prompt_block``'s coverage-header instruction
@@ -613,7 +617,7 @@ def _item_line(collection: str, item: object, key: str) -> str:
         parts = [str(item.source_title or UNNAMED_SOURCE_LABEL)]
         if item.doc_type_label:
             parts.append(str(item.doc_type_label))
-        line = " · ".join(parts)
+        line = SOURCE_ROW_FIELD_SEPARATOR.join(parts)
         head = f"{key}: [enumerated-source] {line}"
         return f"{head}: {summary}" if summary else head
     location = item.section_path or "—"

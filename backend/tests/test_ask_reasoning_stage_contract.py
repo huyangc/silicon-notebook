@@ -158,6 +158,42 @@ def test_reasoning_evidence_snapshot_breaks_container_aliases_without_deepcopy()
         snapshot.attempted[0]["new"] = 2
 
 
+def test_document_reads_default_to_empty_on_both_reasoning_envelopes():
+    """两个信封的 ``document_reads`` 是**缺省尾字段**(PR-A T5)。
+
+    与 ``external_evidence`` 同形、同理由:生产上只有编排器一处构造它们,但
+    stage 合同的用例是手搓的,而报告/knowhow 那两条自建 retriever 的路径产出的
+    ``ReasoningResult`` 也可能根本没有这个属性(降级分支里 ``result`` 甚至是上
+    一轮的对象)。缺省空元组因此是「接入前逐字不变」的那半合同——漏了它,一个
+    没有按篇取样的 run 会在信封构造处直接抛。
+    """
+    from app.models.ask import QueryIntentContract
+
+    assert ReasoningEvidenceSnapshot.from_result(
+        ReasoningResult()).document_reads == ()
+    assert ReasoningEvidenceSnapshot.from_result(
+        SimpleNamespace()).document_reads == ()
+
+    snapshot = ReasoningEvidenceSnapshot(
+        top_hits=(), elements=(), trace=(), chunks=(), chains=(),
+        attempted=(), enumerations=(), collection_map_text="",
+        outline=(), outline_evidence=(), baseline_manifest=None,
+    )
+    assert snapshot.document_reads == ()
+
+    draft_input = ResponseDraftInput(
+        prepared=_prepared_ask(),
+        intent_contract=QueryIntentContract(objective="q", resolved_question="q"),
+        top_hits=(), elements=(), trace=(), chunks=(), chains=(),
+        enumerations=(), collection_map_text="", outline=(),
+        outline_evidence=(), historical_chunks=(), memory_hits=(),
+        structured_batch=None, completeness_unavailable=False,
+        kg_required=False, candidate_manifest=None,
+    )
+    assert draft_input.document_reads == ()
+    assert isinstance(draft_input.document_reads, tuple)
+
+
 def test_legacy_reasoning_result_stays_mutable_for_report_working_copies():
     result = ReasoningResult(top_hits=["baseline"], attempted=[])
 

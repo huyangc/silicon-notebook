@@ -103,6 +103,9 @@ RETRIEVAL_ACTIONS: tuple[str, ...] = (
     "enumerate",
     "outline",
     "search_chunks",
+    # PR-A: appended, never inserted, for the same reason ``search_chunks``
+    # was -- this tuple is a persisted, content-addressed vocabulary.
+    "read_document",
 )
 
 RetrievalAction = Literal[
@@ -115,6 +118,7 @@ RetrievalAction = Literal[
     "enumerate",
     "outline",
     "search_chunks",
+    "read_document",
 ]
 
 #: An entry's verdict. Two values, and the second one carries most of the
