@@ -378,3 +378,18 @@ class TestEdgeCases:
             "left_ref", "right_ref",
         }
         assert set(verdicts[0].keys()) == required
+
+
+def test_confidence_from_a_non_number_never_reaches_the_auto_apply_threshold():
+    """codex #720 R4 P1: the lenient shape boundary delivers ``true`` /
+    ``"Infinity"`` / NaN unchanged; a confidence that can auto-apply a
+    destructive resolution must read them as 0.0."""
+    from app.services.kg.conflict_review import _confidence
+
+    for bogus in (True, False, "Infinity", "-inf", "nan", float("inf"), float("nan"),
+                  "high", [0.99], {"v": 0.99}, None, ""):
+        assert _confidence(bogus) == 0.0, bogus
+    assert _confidence(0.97) == 0.97
+    assert _confidence("0.97") == 0.97
+    assert _confidence(7) == 1.0
+    assert _confidence(-3) == 0.0
