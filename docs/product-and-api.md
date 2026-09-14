@@ -895,13 +895,62 @@ run considerably longer than the built-in modes, so its client-side read timeout
 headroom above the built-in defaults; see "Long-running tools heartbeat" above for the
 heartbeat/timeout mechanics this shares with every other tool on this surface.
 
-In `mode="reasoning"`, `ask_notebook` runs the same deterministic ambiguity gate the HTTP direct
-`/ask` entry point applies — looking only at the question's own wording: a referent that cannot be
-resolved from the question itself, or a bare generic request — before creating any conversation or
-job. A hit returns as a tool error whose message lists what needs to be added and appends "把对象名
-写进问题后重试。" `chunk` mode and plugin engines carry no such gate. This is a deliberate behaviour
-change: the same question previously failed only after a job already existed, leaving a failed job
-behind.
+In `mode="reasoning"`, `ask_notebook` follows the web UI's own "understand first, continue when
+clear, hand back when not" logic. A call without `intent` first runs the very corpus-blind
+understanding `POST /ask/intent` runs (the same `preview_reasoning_intent`; the history block is
+likewise the conversation's last five user questions; a `conversation_id` belonging to another owner
+or notebook contributes no history under this tool's existing silent convention, rather than the
+HTTP 404). A clear contract auto-confirms in the shape the browser submits (`resolved_question` as
+understood, empty `answers`, `understanding_ms` measured server-side and clamped to
+`ASK_UNDERSTANDING_MS_MAX`) and the same call continues to retrieval and the answer. A blocking
+ambiguity makes the call **return normally** rather than raise a tool error: `{"status":
+"needs_clarification", "mode": "reasoning", "intent_token": <opaque handle>, "intent": <review view>,
+"understanding_ms": <ms>, "next_step": <guidance for the Agent>}`, with no conversation, no job and no
+retrieval created. The review view is what the browser's review panel shows: `resolved_question`,
+`intent_type`, `result_scope`, `entities`, `comparison_axes`, `constraints`, `excluded_topics`,
+`assumptions`, `ambiguities[]` (`id`/`question`/`reason`/`required`/`options`) and `confidence`;
+it does **not** carry `mandatory_topics` or the rest of the retrieval decomposition. The whole
+`QueryIntentContract` stays server-side, parked on the current MCP session under `intent_token`
+(the same session state `select_notebook` uses), bound to owner and notebook, latest 8 per session.
+This differs in transport from the browser's "receive the whole contract, echo it back" on purpose:
+a contract repeats the question several times and carries every retrieval query, so a long CJK
+question or a topic-rich contract does not fit the 12,000-byte MCP response budget, a trimmed
+contract cannot be echoed, and the handle drops the Agent's verbatim-echo cost to zero. The review
+view is display-only, but under one invariant: every ambiguity row the server will later demand an
+answer for (its `id`, `required` flag and at least the 300-character display cap of its `question`),
+the `intent_token` and `next_step` must reach the caller whole. The view is built richest-first in
+four tiers, each dropping one class of extras whole (the descriptive lists, then per-row `reason`,
+then per-row `options`), counted in `truncation.omitted_items`; a tier is returned only after the
+budget pass verifiably left the rows, the handle and the instructions intact. The poorest tier fits
+any contract the models may produce; should it ever not, the call fails loudly with
+`reason: clarification_over_budget` rather than shipping a row set the Agent cannot complete.
+The caller relays every `intent.ambiguities` row whose `required` is true to the
+user, then calls again with the same `question` and `intent={"intent_token": <handle>, "answers":
+[{"id", "answer"}], "resolved_question": <optional confirmed wording; empty keeps the understood
+one>}`. The server fetches the contract by handle and, before any job exists, runs the same
+freeze-validation function HTTP `/ask` runs (`objective` must equal `question` byte for byte, every
+required ambiguity must carry an answer), rejecting with the same user-facing copy as a tool error;
+on success the `AskRequest.intent` handed to the engine matches the browser's `AskIntentConfirmation`
+field for field, with `understanding_ms` carried over from the first call so the clarification
+round's intent trace step keeps its duration. An invalid or expired handle (new session, another
+`select_notebook` call — which clears every handle of the session — or eviction by 8 newer ones)
+fails with "intent_token 无效或已过期"; ask again without `intent`. A handle is deliberately not
+consumed by a successful submission, so an ask that fails downstream can be retried with the same
+answers without paying for a fresh understanding call. `intent` is legal only in `reasoning`; passing one in `chunk` or a plugin mode is an error,
+and so is a blank `reasoning` question. Answered responses gain `status: "answered"`, and `reasoning`
+answers add an `intent` summary (`resolved_question`, `result_scope`, `entities`, `assumptions`,
+`constraints`, `excluded_topics`, `clarification_answers`, under its own 1,500-character sub-budget,
+bounded so it cannot squeeze the answer text the way an unbounded block would); `chunk` and plugin
+responses are unchanged apart from the new
+`status` key. **Cost, registered:** MCP reasoning used to make zero extra model calls and seed
+retrieval with the original question only; every reasoning call without `intent` now spends one
+understanding model call, and the understood mandatory topics (at most `reasoning_max_subqueries`)
+become retrieval authority exactly as on the web — the price of the user-decided parity, with no
+downgrade switch. **Compatibility:** a clarification response carries no `answer`/`answer_id`/
+`conversation_id`; dispatch on `status`, and scripted callers that read `answer` directly must
+check `status` first. This replaces the former wording-only deterministic gate: its two rules (an
+unresolvable referent, a bare generic request) still surface as required ambiguity rows of the
+contract, now returned structurally instead of as error text, and still before any durable state.
 
 `ask_notebook` accepts an optional `conversation_id` (at most 200 characters, mirroring
 `AskIntentPreviewRequest.conversation_id`) and returns the `conversation_id` the answer was

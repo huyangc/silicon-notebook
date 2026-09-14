@@ -27,6 +27,8 @@
 
 非目标（本轮明确不做，理由见「生产数据」与「v1 评审记录」）：
 
+> 2026-09-14 追记：下面关于 MCP 的三条非目标已由用户裁决推翻——MCP `ask_notebook` 的 `reasoning` 档现在与网页端同一套「先理解、清晰即自动继续、阻断歧义以 `status="needs_clarification"` 结构化返回、调用端带 `intent` 回传」逻辑，见 `docs/product-and-api_zh.md` 的 MCP `ask_notebook` 段落。当初否决的理由逐条处置：C7（整份合同原样回传放不进 MCP 响应预算）——合同不回传，留在会话上、只回传 `intent_token` 句柄；C9（澄清返回没有 `answer`，对脚本化调用方是破坏性变更）——接受并在产品文档登记为按 `status` 分派；D-3（MCP 调用方 `mandatory_topics=[]`）——不再成立，MCP 与网页端一样以理解出的必答主题为检索权威，成本已登记。本稿其余内容保持历史原状。
+
 - 不做浏览器回显、不给 `AskResponse` 加理解字段、不改自动路由、不给自动模式加澄清界面。
 - 不给 MCP 加 `on_ambiguity`/`intent` 入参，不引入 `needs_clarification` 成功终态，不让 MCP reasoning 跑模型理解。
 - 不做订正轮识别、上一轮证据接力、会话级约束注入（v1 评审 R-A 的替代建议）——4 条纠偏在下一轮全部自行修正，纠偏环路今天是通的，这些投资缺乏数据支撑。

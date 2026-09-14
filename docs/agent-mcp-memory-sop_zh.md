@@ -210,8 +210,9 @@ claude mcp list
 
 ### 长任务调用与客户端超时
 
-`mode="reasoning"` 的 `ask_notebook` 是一次几分钟的调用：规划、联邦检索、反思循环与答案合成
-全都发生在这**一次**工具调用里，答案出来之前什么都不返回。`mode` 同样接受任何已注册且实时
+`mode="reasoning"` 的 `ask_notebook` 是一次几分钟的调用：问题理解（排在最前，一次模型调用）、
+规划、联邦检索、反思循环与答案合成全都发生在这**一次**工具调用里；除非理解步骤发现阻断性
+歧义而提前以 `status: "needs_clarification"` 返回，否则答案出来之前什么都不返回。`mode` 同样接受任何已注册且实时
 可用的部署 `ask.engine` mode id，而插件引擎自己的检索/工具循环可能比内建 mode 跑得更久——
 具体多久取决于部署本身，所以留出的余量应该更宽，不能假设内建默认值够用。MCP 客户端不会无限
 等一次工具，所以这是 token 打通之后、唯一还需要关心客户端配置的地方。
@@ -394,7 +395,9 @@ auth | curl -K - -s -o /dev/null -w '%{http_code}\n' -X DELETE "$MCP_URL" \
 | 配置客户端时 `404` 或连接被拒 | 先照签发回执的接入说明**逐字**重试它印出的那个地址。补结尾斜杠、或回落到 `<host>:8000/mcp/`，都只适用于确认是直连后端的地址：有代理时它可能只路由公布的那条路径，后端端口可能是私有的，硬去够那个端口还可能把 token 降级成明文（第 4 节）。 |
 | `POST /mcp` 回 `307 Temporary Redirect` | 预期行为——MCP 应用挂在 `/mcp`，自身路由是 `/`。直接把 `/mcp/` 写进配置，不要指望客户端一定跟随重定向。 |
 | `reasoning` 档的 `ask_notebook` 跑了几十秒就被客户端以传输错误中断，而服务端继续把答案生成完 | 是客户端自己的 MCP 超时，不是服务端的。按第 4 节「长任务调用与客户端超时」调高。服务端每 5 秒发一次心跳，遵守 progress 通知的客户端本不该撞上；若仍出现，怀疑反向代理缓冲了响应流或有自己的读超时。 |
-| `reasoning` 档的 `ask_notebook` 返回「问题仍有关键歧义，请先确认问题理解：① …」 | 这是服务端确定性闸，不是模型故障；把文案里点名的具体对象名写进问题后重试，或改用 `chunk` 档（不加此闸）。 |
+| `reasoning` 档的 `ask_notebook` 正常返回 `status: "needs_clarification"` 而没有答案 | 不是故障：这是与网页端相同的问题理解步骤发现了会改变检索方向的歧义，此时没有建会话也没有建任务。把 `intent.ambiguities` 里 `required` 为 true 的问题转述给用户，拿到回答后用同一个 `question` 再调一次，并传 `intent={"intent_token": <响应里的 intent_token>, "answers": [{"id", "answer"}], "resolved_question": <可选，确认后的问法>}`；`chunk` 档没有理解步骤。 |
+| `reasoning` 档的 `ask_notebook` 报「请先回答所有必填澄清问题」或「问题理解与当前问题不匹配」 | 回传的答案没通过与 HTTP `/ask` 相同的冻结校验：必填歧义缺答案，或这次的 `question` 与首次调用不一致。补齐答案、保持 `question` 与首次调用完全相同后重试。 |
+| `reasoning` 档的 `ask_notebook` 报「intent_token 无效或已过期」 | 澄清合同只在当前 MCP 会话内、当前选中的笔记本下保留最近 8 份；换了会话、重新调过 `select_notebook`（会清空本会话全部句柄）或过了 8 次澄清后句柄失效。不带 `intent` 重新提问即可拿到新的合同。成功提交后句柄仍有效，引擎失败可用同一份答案重试。 |
 | `POST /mcp/` 返回 `406 Not Acceptable` | 该请求只接受了 `application/json`。传输以 SSE 应答，长任务的 progress 通知才到得了客户端；请发 `accept: application/json, text/event-stream`——这是 Streamable HTTP 规范的要求，所有真实客户端本来就这么发。 |
 | `400 Bad Request: Missing session ID` | 工具调用发生在 `initialize` + `notifications/initialized` 之前，或 `MCP-Session-Id` 头丢了。正式客户端会自动处理；手写 `curl` 不能跳过（第 8 节）。 |
 | Claude Code 把 `${...}` 当成 token 原样发出 | 变量没有在启动 `claude` 的 shell 里导出，或变量名拼错——未定义的变量会被原样透传。导出后新开会话。 |

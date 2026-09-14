@@ -342,7 +342,7 @@
   },
   "ports_protocol_method_count": 953,
   "function_length_ceiling": {
-    "backend/app/api/mcp_tools/memory_context.py::register_memory_context_tools.ask_notebook": 146,
+    "backend/app/api/mcp_tools/memory_context.py::register_memory_context_tools.ask_notebook": 142,
     "backend/app/extensions/ask.py::AskCompletedObserverHost.observe_application": 160,
     "backend/app/extensions/parser_chain.py::ParserProviderChainHost._run": 307,
     "backend/app/extensions/retrieval.py::RetrievalContributorHost._run": 363,

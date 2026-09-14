@@ -1,11 +1,17 @@
 """Memory recall, formal context, Ask, and Memory proposal MCP tools."""
 
 import logging
+import secrets
+import time
+from collections import OrderedDict
+from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Sequence
 
 import anyio
 from mcp.server.fastmcp import Context, FastMCP
+from pydantic import BaseModel, Field, ValidationError
 
+from app.api.deps import notebook_access_repository
 from app.domain.ask_engine import AskPluginEngineError
 from app.services.ask_modes import UnknownAskMode
 
@@ -18,14 +24,25 @@ from app.core.memory_inputs import (
     normalize_task_context,
     normalize_title,
 )
-from app.models.ask import ASK_QUESTION_MAX_CHARS, AskRequest
+from app.models.ask import (
+    ASK_QUESTION_MAX_CHARS,
+    ASK_UNDERSTANDING_MS_MAX,
+    AskIntentConfirmation,
+    AskRequest,
+    QueryIntentAnswer,
+    QueryIntentContract,
+)
 from app.services.agent_profile_block import resolve_agent_profile_names
-from app.services.query_intent import clarification_gate_message, plan_query_intent
+from app.services.query_intent import (
+    conversation_intent_history,
+    validate_confirmed_intent,
+)
 from app.services.search_concurrency import run_under_search_gate
 
 from ._shared import (
     RESULT_LIMIT,
     TEXT_LIMIT,
+    _PENDING_INTENTS_ATTR,
     _budget_response,
     _record_agent_call,
     _owner_request_context,
@@ -169,12 +186,115 @@ def _ask_actionable(repo: Any, notebook_id: str, payload: AskRequest) -> Any:
         raise ValueError(f"{message}（reason: {exc.code}）") from None
 
 
+def _validation_fields(exc: ValidationError) -> str:
+    """Name the offending fields of a pydantic error in one readable line."""
+    return "; ".join(
+        f"{'.'.join(str(part) for part in err.get('loc', ())) or 'intent'}: "
+        f"{err.get('msg', '')}"
+        for err in exc.errors()[:5]
+    )
+
+
+@dataclass(frozen=True)
+class _PendingIntent:
+    """A clarification the Agent still owes answers for, kept on the MCP session.
+
+    The browser gets the whole contract and echoes it back; an Agent gets a
+    handle instead. Echoing the contract through the 12,000-byte MCP output
+    budget failed for long CJK questions and topic-rich contracts (a contract
+    carries the question several times over, plus every retrieval query), and
+    a trimmed echo is worse than none. So the contract stays here, keyed by an
+    opaque token that lives exactly as long as the selected notebook does: the
+    session. Bound to owner and notebook so a token can never confirm a
+    contract for somebody else's question.
+    """
+    token: str
+    owner_id: str
+    notebook_id: str
+    contract: QueryIntentContract
+    understanding_ms: int
+
+
+class _IntentReply(BaseModel):
+    """The Agent's answer to a clarification: the handle plus the answers."""
+    intent_token: str = Field(min_length=1, max_length=64)
+    answers: list[QueryIntentAnswer] = Field(default_factory=list, max_length=8)
+    # Optional: the wording the user settled on. Empty keeps the understood
+    # wording, exactly as an unedited browser review does.
+    resolved_question: str = Field(default="", max_length=ASK_QUESTION_MAX_CHARS)
+
+
+_PENDING_INTENTS_MAX = 8
+
+
+def _pending_intents(ctx: Context) -> "OrderedDict[str, _PendingIntent]":
+    # select_notebook creates (and resets) the store on the event loop, and
+    # every ask_notebook call passes _selected_notebook first, so the lazy
+    # branch is only a guard against a session object that lost the attribute.
+    store = getattr(ctx.session, _PENDING_INTENTS_ATTR, None)
+    if store is None:
+        store = OrderedDict()
+        setattr(ctx.session, _PENDING_INTENTS_ATTR, store)
+    return store
+
+
+def _remember_pending_intent(ctx: Context, pending: _PendingIntent) -> None:
+    store = _pending_intents(ctx)
+    store[pending.token] = pending
+    while len(store) > _PENDING_INTENTS_MAX:
+        store.popitem(last=False)
+
+
+def _confirm_pending_intent(
+    ctx: Context, reply: "_IntentReply", principal: Any, notebook_id: str,
+    question: str,
+) -> AskIntentConfirmation:
+    """Resolve the handle, then freeze the contract with the rail HTTP runs.
+
+    The result is the very ``AskIntentConfirmation`` the browser submits
+    after its review: the contract as understood, the answers, the wording
+    (the Agent's if it gave one, else the understood one), and the
+    understanding wall clock carried over from the first call so the
+    persisted trace keeps that phase across the clarification round.
+
+    The handle is deliberately not consumed here: it stays valid until eight
+    newer clarifications evict it or the notebook is re-selected, so an ask
+    that fails downstream (engine error, transport cut) can be retried with
+    the same answers instead of paying for a fresh understanding call.
+    """
+    pending = _pending_intents(ctx).get(reply.intent_token)
+    if (
+        pending is None
+        or pending.owner_id != principal.owner_id
+        or pending.notebook_id != notebook_id
+    ):
+        raise ValueError(
+            "intent_token 无效或已过期：澄清合同只在本次 MCP 会话内、当前选中的"
+            f"笔记本下保留最近 {_PENDING_INTENTS_MAX} 份；请不带 intent 重新提问"
+            "以获得新的澄清合同"
+        )
+    resolved_question = reply.resolved_question.strip()
+    validate_confirmed_intent(
+        question,
+        pending.contract.model_dump(),
+        resolved_question=resolved_question,
+        answers=[row.model_dump() for row in reply.answers],
+    )
+    return AskIntentConfirmation(
+        contract=pending.contract,
+        resolved_question=resolved_question or pending.contract.resolved_question,
+        answers=reply.answers,
+        understanding_ms=pending.understanding_ms,
+    )
+
+
 def _validate_ask_notebook_inputs(
-    question: str, conversation_id: str, mode: str
-) -> None:
+    question: str, conversation_id: str, mode: str,
+    intent: Mapping[str, Any] | None,
+) -> _IntentReply | None:
     """Every ``ask_notebook`` input rail that must fail BEFORE any durable state.
 
-    All three live here, outside the tool body, rather than inline: the tool
+    All of them live here, outside the tool body, rather than inline: the tool
     is a hot function under the zero-slack length ratchet, and a rail that
     fails before ``repository_provider()`` is exactly the kind of statement
     that should not grow it.
@@ -192,15 +312,25 @@ def _validate_ask_notebook_inputs(
       characters is a question no Agent should need to exceed; past it the
       material belongs in an uploaded source, not in the prompt.
     * ``conversation_id`` length.
-    * The ``reasoning`` deterministic clarification gate -- the same
-      fail-closed gate the HTTP direct entry point applies in
-      ``_validate_confirmed_reasoning_intent`` (ask_routes.py), run here,
-      before any durable ask_job is created, rather than left to the
-      engine's own compatibility branch further down the call chain, which
-      only runs after ``begin_job_current`` has already published a job
-      row. History is passed as "" to match the HTTP gate: the deterministic
-      checks only look at the question's own wording, not at structured
-      conversation history.
+    * ``reasoning`` needs a non-blank question: the understanding step it
+      goes through has nothing to understand otherwise (``/ask/intent``
+      refuses the same with ``min_length=1``). Other modes are untouched.
+    * ``intent`` -- the Agent's reply to a clarification this session handed
+      out: the handle plus the answers (``_IntentReply``). Only its SHAPE is
+      checked here, so a malformed one reads as a field list rather than a
+      pydantic dump; resolving the handle needs the authenticated principal
+      and happens in ``_confirm_pending_intent``, which then runs the same
+      ``validate_confirmed_intent`` rail HTTP ``/ask`` runs. Only
+      ``reasoning`` accepts it -- the understanding step it answers does not
+      exist in ``chunk`` or plugin modes, so passing one there is a caller
+      mistake worth saying out loud rather than the HTTP entry point's
+      silent pass-through.
+
+    The deterministic vague-wording gate that used to run here moved into
+    the call body: a reasoning question without a confirmed intent now goes
+    through the same model-backed understanding ``/ask/intent`` runs, and a
+    blocking ambiguity comes back as a structured ``needs_clarification``
+    result rather than a tool error (see ``_run_ask_notebook``).
     """
     if len(question) > ASK_QUESTION_MAX_CHARS:
         raise ValueError(
@@ -210,12 +340,309 @@ def _validate_ask_notebook_inputs(
         )
     if len(conversation_id) > CONVERSATION_ID_MAX_LENGTH:
         raise ValueError("conversation_id too long")
-    if mode == "reasoning":
-        seed = plan_query_intent(None, question.strip(), "", max_topics=1)
-        if seed.get("needs_clarification"):
-            raise ValueError(
-                clarification_gate_message(seed) + " 把对象名写进问题后重试。"
+    if mode == "reasoning" and not question.strip():
+        raise ValueError("question 不能为空")
+    if intent is None:
+        return None
+    if mode != "reasoning":
+        raise ValueError(
+            'intent 只在 mode="reasoning" 下有效：chunk 与插件模式没有问题理解步骤，'
+            "不要传 intent"
+        )
+    try:
+        return _IntentReply.model_validate(intent)
+    except ValidationError as exc:
+        raise ValueError(
+            "intent 格式不合法，需要 {intent_token, answers, resolved_question?}："
+            + _validation_fields(exc)
+        ) from None
+
+
+def _reasoning_intent_history(
+    repo: Any, owner_id: str, notebook_id: str, conversation_id: str
+) -> str:
+    """The history block ``/ask/intent`` builds, under this tool's own
+    conversation convention.
+
+    HTTP answers 404 when the id belongs to another owner or notebook; MCP
+    ``ask_notebook`` documents that such an id silently starts a new
+    conversation instead, and the understanding step follows the same rule:
+    a foreign or unknown id contributes no history, exactly as the ask that
+    follows it will not continue that conversation. Ownership is read from
+    the access repository, the same port ``ask_routes._intent_history``
+    uses, rather than through the facade: the facade's
+    ``conversation_owner`` has no production consumer, and giving it one
+    here would widen the frozen facade surface for nothing.
+    """
+    if not conversation_id:
+        return ""
+    if notebook_access_repository().conversation_owner(conversation_id) != owner_id:
+        return ""
+    try:
+        detail = repo.get_conversation(conversation_id)
+    except KeyError:
+        return ""
+    if detail.notebook_id != notebook_id:
+        return ""
+    return conversation_intent_history(detail.turns)
+
+
+def _run_ask_notebook(
+    ctx: Context, repo: Any, principal: Any, notebook_id: str, question: str,
+    mode: str, conversation_id: str, reply: _IntentReply | None,
+) -> Any:
+    """``ask_notebook``'s blocking body: resolve a clarification reply if one
+    came in, the availability gate, then -- for a reasoning question nobody
+    has confirmed yet -- the very understanding step the browser runs through
+    ``/ask/intent``, then the ask.
+
+    Returns the answer, or a ``_PendingIntent`` when the understanding found
+    a blocking ambiguity. Nothing durable exists at that point (no
+    conversation, no ask_job); the contract is parked on the session and the
+    caller hands its handle back for the Agent to answer, which is the same
+    pause the browser's inline review is. A clear contract auto-confirms
+    exactly as the browser does: ``resolved_question`` as understood, no
+    answers, plus the understanding wall clock -- measured here rather than
+    by the client, because on this surface the phase runs inside the call --
+    so the persisted trace keeps that phase.
+
+    The clarification reply is resolved before the availability gate, in the
+    order HTTP validates a confirmed intent before ``_require_ask_available``.
+
+    Two deliberate differences from ``/ask/intent``, both following this
+    tool's own established semantics rather than HTTP's: a foreign
+    ``conversation_id`` contributes no history instead of a 404 (see
+    ``_reasoning_intent_history``), and the understanding call carries no
+    ``cancel_event`` -- HTTP sets one when the browser disconnects, while
+    this surface never abandons a call it is still executing (there is no
+    client cancel signal to forward).
+    """
+    with _owner_request_context(principal):
+        confirmation: AskIntentConfirmation | None = None
+        if reply is not None:
+            confirmation = _confirm_pending_intent(
+                ctx, reply, principal, notebook_id, question
             )
+        # 硬约束(PR#334):空库(ask_available=False)一律拒绝——与 /ask、/ask/stream
+        # 同一权威闸门,覆盖 MCP 这个 user-facing ask 入口(codex 第10轮 P2)。
+        # get_notebook 在 owner 上下文内,confirmed-memory 判定按调用者作用域。
+        # 排在理解步骤之前:空库不该先花一次理解模型调用再被拒。
+        notebook = repo.get_notebook(notebook_id)
+        if not notebook.ask_available:
+            raise ValueError(
+                "该笔记本还没有可用于回答的内容，请先添加来源，"
+                "或在「设置 → 编辑当前笔记本」里挂载一个参考库。"
+            )
+        if mode == "reasoning" and confirmation is None:
+            started = time.monotonic()
+            contract = repo.preview_reasoning_intent(
+                notebook_id,
+                question.strip(),
+                _reasoning_intent_history(
+                    repo, principal.owner_id, notebook_id, conversation_id
+                ),
+            )
+            # Clamped, not rejected: this surface never abandons a call it is
+            # still executing, and an understanding that really took longer
+            # than the trace field admits must not throw the run away.
+            understanding_ms = min(
+                int((time.monotonic() - started) * 1000),
+                ASK_UNDERSTANDING_MS_MAX,
+            )
+            if contract.needs_clarification:
+                pending = _PendingIntent(
+                    token=secrets.token_urlsafe(12),
+                    owner_id=principal.owner_id,
+                    notebook_id=notebook_id,
+                    contract=contract,
+                    understanding_ms=understanding_ms,
+                )
+                _remember_pending_intent(ctx, pending)
+                return pending
+            confirmation = AskIntentConfirmation(
+                contract=contract,
+                resolved_question=contract.resolved_question,
+                answers=[],
+                understanding_ms=understanding_ms,
+            )
+        return _ask_actionable(
+            repo,
+            notebook_id,
+            AskRequest(
+                question=question,
+                mode=mode,
+                conversation_id=conversation_id or None,
+                intent=confirmation,
+            ),
+        )
+
+
+_CLARIFICATION_NEXT_STEP = (
+    "尚未检索，也未创建会话或任务。把 intent.ambiguities 里 required 为 true 的每一项"
+    "转述给用户（options 只是候选），然后用同一个 question 再调 ask_notebook，传 intent="
+    '{"intent_token": <本响应的 intent_token>, "answers": [{"id", "answer"}], '
+    '"resolved_question": <可选>}。'
+)
+
+# Display caps for the review view. Everything in it is display-only (the
+# contract never leaves the session), so these sit far below the contract's
+# own field ceilings: the view has to fit the output budget by construction,
+# never by the convergence loop dropping a row the server will then demand
+# an answer for.
+_REVIEW_QUESTION_CHARS = 300
+_REVIEW_FIELD_LIMITS = {
+    "resolved_question": _REVIEW_QUESTION_CHARS,
+    "question": _REVIEW_QUESTION_CHARS,
+    "reason": 150, "options": 100, "entities": 100, "comparison_axes": 100,
+    "constraints": 100, "excluded_topics": 100, "assumptions": 100,
+}
+_REVIEW_LIST_KEYS = (
+    "entities", "comparison_axes", "constraints", "excluded_topics", "assumptions",
+)
+_REVIEW_LIST_ITEMS = 5
+# Richest first. Each tier drops one class of extras whole: the descriptive
+# lists, then per-row reasons, then per-row options. Ambiguity rows
+# themselves (id, question, required) are never dropped by any tier.
+_REVIEW_TIERS = (
+    (True, True, True), (False, True, True), (False, False, True),
+    (False, False, False),
+)
+
+
+def _review_view(
+    contract: QueryIntentContract, *, lists: bool, reasons: bool, options: bool
+) -> tuple[dict[str, Any], int]:
+    """One tier of the review view, and how many extras it left out."""
+    omitted = 0
+    rows: list[dict[str, Any]] = []
+    for row in contract.ambiguities:
+        item: dict[str, Any] = {
+            "id": row.id, "question": row.question, "required": row.required,
+        }
+        if row.options:
+            if options:
+                item["options"] = list(row.options[:4])
+            else:
+                omitted += len(row.options)
+        if row.reason:
+            if reasons:
+                item["reason"] = row.reason
+            else:
+                omitted += 1
+        rows.append(item)
+    view: dict[str, Any] = {
+        "resolved_question": contract.resolved_question,
+        "intent_type": contract.intent_type,
+        "result_scope": contract.result_scope,
+        "confidence": contract.confidence,
+        "ambiguities": rows,
+    }
+    for key in _REVIEW_LIST_KEYS:
+        values = list(getattr(contract, key))
+        if not values:
+            continue
+        if lists:
+            view[key] = values[:_REVIEW_LIST_ITEMS]
+            omitted += max(0, len(values) - _REVIEW_LIST_ITEMS)
+        else:
+            omitted += len(values)
+    return view, omitted
+
+
+def _review_delivered_whole(payload: Mapping[str, Any], pending: _PendingIntent) -> bool:
+    """Every ambiguity row, the handle and the instructions survived the budget.
+
+    A row counts as delivered when its id and required flag are exact and its
+    question is at least the display cap long (the sanitizer's own cap ends in
+    an ellipsis at exactly that length; anything shorter means the convergence
+    loop got to it).
+    """
+    intent = payload.get("intent")
+    rows = intent.get("ambiguities") if isinstance(intent, dict) else None
+    expected = pending.contract.ambiguities
+    if not isinstance(rows, list) or len(rows) != len(expected):
+        return False
+    for row, want in zip(rows, expected):
+        if not isinstance(row, dict):
+            return False
+        if row.get("id") != want.id or row.get("required") != want.required:
+            return False
+        shown = row.get("question")
+        if not isinstance(shown, str) or len(shown) < min(
+            len(want.question), _REVIEW_QUESTION_CHARS
+        ):
+            return False
+    return (
+        payload.get("intent_token") == pending.token
+        and payload.get("next_step") == _CLARIFICATION_NEXT_STEP
+    )
+
+
+def _clarification_payload(pending: _PendingIntent) -> dict[str, Any]:
+    """The structured pause, as the Agent sees it.
+
+    What the browser's review shows: the understood wording, the entities
+    and assumptions behind it, and every ambiguity with its options. What it
+    does not carry: the retrieval decomposition (``mandatory_topics``, the
+    budget hog), which stays with the contract on the session and is applied
+    unchanged when the handle comes back.
+
+    Invariant: every ambiguity row the server will later demand an answer
+    for reaches the Agent, with its id, its required flag and (at least the
+    display cap of) its question. The view is built richest-first and each
+    poorer tier drops one class of extras whole, which the ``truncation``
+    block reports as omitted items; a tier is accepted only after the budget
+    pass demonstrably left the rows, the handle and the instructions intact.
+    The poorest tier fits the budget for any contract the models may
+    produce; should that ever stop being true, the call fails loudly with a
+    reason code rather than shipping a row set the Agent cannot complete.
+    """
+    for lists, reasons, options in _REVIEW_TIERS:
+        view, omitted = _review_view(
+            pending.contract, lists=lists, reasons=reasons, options=options
+        )
+        payload = _budget_response({
+            "notebook_id": pending.notebook_id,
+            "status": "needs_clarification",
+            "mode": "reasoning",
+            "intent_token": pending.token,
+            "intent": view,
+            "understanding_ms": pending.understanding_ms,
+            "next_step": _CLARIFICATION_NEXT_STEP,
+        }, initial_omitted_items=omitted, field_limits=_REVIEW_FIELD_LIMITS)
+        if _review_delivered_whole(payload, pending):
+            return payload
+    raise ValueError(
+        "澄清问题超出 MCP 响应预算，无法完整投递给调用方"
+        "（reason: clarification_over_budget）"
+    )
+
+
+def _intent_entry(answer: Any) -> dict[str, Any]:
+    """The ``intent`` key of an answered payload, or nothing at all.
+
+    Only the reasoning surface carries a contract; chunk and plugin answers
+    omit the key, so apart from the ``status`` key every answered payload
+    gained, theirs is unchanged. The contract is not repeated whole (the
+    Agent already saw the review view when asked to clarify), only the parts
+    a user wants to hear back: the wording the run used, what it took for
+    granted, and the answers it was given.
+    """
+    contract = getattr(answer, "intent", None)
+    if contract is None:
+        return {}
+    return {"intent": {
+        "resolved_question": getattr(contract, "resolved_question", ""),
+        "result_scope": getattr(contract, "result_scope", "ranked"),
+        "entities": list(getattr(contract, "entities", ()) or ()),
+        "assumptions": list(getattr(contract, "assumptions", ()) or ()),
+        "constraints": list(getattr(contract, "constraints", ()) or ()),
+        "excluded_topics": list(getattr(contract, "excluded_topics", ()) or ()),
+        "clarification_answers": [
+            dict(row)
+            for row in getattr(contract, "clarification_answers", ()) or ()
+        ],
+    }}
 
 
 def register_memory_context_tools(
@@ -440,46 +867,46 @@ def register_memory_context_tools(
             "currently registered and available. Plugin engines can run for a "
             "long time -- configure the MCP client's read timeout generously; "
             "the server never gives up on a call it is still executing. In "
-            "reasoning mode, a question whose referent cannot be resolved "
-            "from the question itself (e.g. \"this flow\", \"the one above\") "
-            "or that is a bare generic request is rejected; the error text "
-            "lists what to add -- put the concrete object name into the "
-            "question and retry."
+            "reasoning mode the notebook first understands the question "
+            "without reading any source, exactly as the web UI does before a "
+            "reasoning run: a clear question auto-confirms and the call "
+            "continues to the answer; a question with a blocking ambiguity "
+            "returns status=\"needs_clarification\" with an intent_token, "
+            "the understood wording and every ambiguity in intent "
+            "(ambiguities[].id/question/options/required), and creates no "
+            "conversation or job. Relay those questions to the user, then "
+            "call again with the same question and intent={\"intent_token\": "
+            "<as returned>, \"answers\": [{\"id\", \"answer\"}], "
+            "\"resolved_question\": <optional confirmed wording>}; every "
+            "required ambiguity needs an answer, and the token lives only in "
+            "this MCP session. Answered responses carry status=\"answered\" and, in "
+            "reasoning mode, an intent summary of the wording and "
+            "assumptions the run used."
         )
     )
     async def ask_notebook(
         question: str, ctx: Context, mode: str = "chunk",
-        conversation_id: str = "",
+        conversation_id: str = "", intent: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         _validate_ask_mode(mode)
-        _validate_ask_notebook_inputs(question, conversation_id, mode)
+        reply = _validate_ask_notebook_inputs(
+            question, conversation_id, mode, intent
+        )
         repo = repository_provider()
         principal, notebook_id = await anyio.to_thread.run_sync(
             _selected_notebook, ctx, repo, "ask:execute"
         )
 
         def run_ask():
-            with _owner_request_context(principal):
-                # 硬约束(PR#334):空库(ask_available=False)一律拒绝——与 /ask、/ask/stream
-                # 同一权威闸门,覆盖 MCP 这个 user-facing ask 入口(codex 第10轮 P2)。
-                # get_notebook 在 owner 上下文内,confirmed-memory 判定按调用者作用域。
-                notebook = repo.get_notebook(notebook_id)
-                if not notebook.ask_available:
-                    raise ValueError(
-                        "该笔记本还没有可用于回答的内容，请先添加来源，"
-                        "或在「设置 → 编辑当前笔记本」里挂载一个参考库。"
-                    )
-                return _ask_actionable(
-                    repo,
-                    notebook_id,
-                    AskRequest(
-                        question=question,
-                        mode=mode,
-                        conversation_id=conversation_id or None,
-                    ),
-                )
+            return _run_ask_notebook(
+                ctx, repo, principal, notebook_id, question, mode,
+                conversation_id, reply,
+            )
 
-        answer = await _run_with_progress(ctx, run_ask, label="ask_notebook")
+        outcome = await _run_with_progress(ctx, run_ask, label="ask_notebook")
+        if isinstance(outcome, _PendingIntent):
+            return _clarification_payload(outcome)
+        answer = outcome
 
         def check_memory_scope() -> bool:
             # Mirrors search_notebook_context's allow_memory gate exactly: a
@@ -570,6 +997,7 @@ def register_memory_context_tools(
             citation_rows.append(row)
         return _budget_response({
             "notebook_id": notebook_id,
+            "status": "answered",
             "answer_id": answer.answer_id,
             "answer": answer.answer or answer.conclusion,
             "conclusion": answer.conclusion,
@@ -579,6 +1007,7 @@ def register_memory_context_tools(
             "conversation_id": answer.conversation_id,
             "anchors": anchor_rows,
             "citations": citation_rows,
+            **_intent_entry(answer),
         }, initial_omitted_items=(
                 max(0, len(answer.anchors) - RESULT_LIMIT)
                 # `visible_citations`, not `answer.citations` -- see the note
@@ -589,10 +1018,14 @@ def register_memory_context_tools(
             field_limits={"answer": 6_000, "conclusion": 1_000,
                           "object_type": 100, "label": 300,
                           "source_title": 300, "location_label": 300,
-                          "quoted_span": 200, "source_file_name": 300},
+                          "quoted_span": 200, "source_file_name": 300,
+                          "resolved_question": 1_000, "entities": 200,
+                          "assumptions": 300, "constraints": 300,
+                          "excluded_topics": 300, "question": 500},
             anchors_budget_chars=3_500,
             anchor_provenance_budget_chars=500,
-            citations_budget_chars=CITATIONS_BUDGET_CHARS)
+            citations_budget_chars=CITATIONS_BUDGET_CHARS,
+            intent_budget_chars=1_500)
 
     @server.tool(
         description=(

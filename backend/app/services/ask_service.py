@@ -1260,8 +1260,10 @@ class AskService:
             )
             return QueryIntentContract(**final)
 
-        # Repository/MCP compatibility callers may not have used the HTTP
-        # preview endpoint.  Preserve zero-extra-model-call behavior for clear
+        # Repository-level compatibility callers may not have used the HTTP
+        # preview endpoint (MCP ``ask_notebook`` no longer takes this branch:
+        # it runs the same understanding in-call and always arrives with a
+        # confirmed intent).  Preserve zero-extra-model-call behavior for clear
         # questions, while still failing closed on deterministic missing
         # referents/generic requests instead of retrieving against guesswork.
         seed = plan_query_intent(None, original, history, max_topics=4)
@@ -3571,8 +3573,9 @@ class AskService:
             step_type="intent",
             summary="已按确认后的问题理解开始检索",
             detail=intent_projection.as_json_mapping(),
-            # The understanding phase runs entirely in ``/ask/intent``, before
-            # this durable job exists, so the server cannot time it.  The UI
+            # The understanding phase runs before this durable job exists (in
+            # ``/ask/intent`` for the browser, inside the same tool call for
+            # MCP ``ask_notebook``), so this stage cannot time it.  The caller
             # reports what it measured; without it the replayed trace would
             # silently drop that whole phase from the run's total.
             duration_ms=(

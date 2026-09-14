@@ -680,10 +680,49 @@ audit。只有拷贝真的缩无可缩时才整次拒绝，不会返回被静默
 可能比内建 mode 长得多，客户端的读超时需要留出相应余量；心跳/超时机制与本节其余工具共用，
 见上文「长任务发心跳，传输走 SSE」一段。
 
-`mode="reasoning"` 时，`ask_notebook` 在创建任何会话或任务之前，先执行与 HTTP 直连 `/ask`
-同一条确定性歧义闸（只看问题本身：无法从问题解析的指代，或纯泛化请求），命中即以工具错误
-返回，文案逐条列出需要补充的信息并追加一句「把对象名写进问题后重试」。`chunk` 与插件模式
-不加这道闸。这是刻意的行为变化——此前同一问题会在任务已建立之后才失败，并留下一条失败任务。
+`mode="reasoning"` 时，`ask_notebook` 与网页端走同一套「先理解问题、清晰就继续、理解不了就交回
+调用端」的逻辑。未带 `intent` 的调用先由服务端执行与 `POST /ask/intent` 完全相同的不读语料的
+问题理解（同一个 `preview_reasoning_intent`；历史块同样只取该会话最近五轮的用户提问；属于其他
+owner 或其他笔记本的 `conversation_id` 按本工具既有口径静默视为无历史，而不是像 HTTP 那样 404）。
+理解结果清晰时，服务端按网页端自动确认的同一形态（`resolved_question` 取理解结果、`answers`
+为空、`understanding_ms` 为服务端量到的理解耗时并夹到 `ASK_UNDERSTANDING_MS_MAX`）在同一次调用
+里继续检索并返回答案。存在阻断性歧义时调用**正常返回**而不是报工具错误：`{"status":
+"needs_clarification", "mode": "reasoning", "intent_token": <不透明句柄>, "intent": <审阅视图>,
+"understanding_ms": <毫秒>, "next_step": <给 Agent 的续跑说明>}`，此时不创建会话、不创建任务、
+不做任何检索。审阅视图就是浏览器审阅面板展示的那部分：`resolved_question`、`intent_type`、
+`result_scope`、`entities`、`comparison_axes`、`constraints`、`excluded_topics`、`assumptions`、
+`ambiguities[]`（`id`/`question`/`reason`/`required`/`options`）与 `confidence`；**不含**
+`mandatory_topics` 等检索分解。整份 `QueryIntentContract` 留在服务端、按 `intent_token` 挂在
+当前 MCP 会话上（与 `select_notebook` 的会话态同一机制），并绑定 owner 与笔记本，每会话只保留
+最近 8 份。这与浏览器「拿到整份合同再原样回传」在传输形态上不同，是刻意的：合同里问题原文出现
+多次再加全部检索查询，中文长问题或多主题合同放不进 12,000 字节的 MCP 响应预算，被削短的合同又
+不能回传，句柄把 Agent 侧的逐字回传成本降为零。审阅视图只用于展示，但有一条不变量：服务端事后
+要求回答的每条歧义行（`id`、`required`、至少展示上限 300 字的 `question`）、`intent_token` 与
+`next_step` 必须完整到达调用方。视图按「最丰富优先」分四档构造，每档整块丢掉一类附加物（描述
+列表 → 每行 `reason` → 每行 `options`），丢掉的计入 `truncation.omitted_items`；只有预算裁剪后经
+核验歧义行、句柄、说明都完整的那一档才会返回。最贫的一档对模型可能产出的任何合同都放得下，万一
+放不下则以 `reason: clarification_over_budget` 的工具错误响亮失败，绝不静默少投一条必答行。
+调用方把 `intent.ambiguities` 中 `required` 为 true 的每项
+拿去问用户，然后用同一个 `question` 再调一次，传 `intent={"intent_token": <句柄>, "answers":
+[{"id", "answer"}], "resolved_question": <可选，确认后的问法；留空沿用理解结果>}`。服务端据句柄
+取回合同，在建任务前执行与 HTTP `/ask` 同一函数的冻结校验（`objective` 必须与 `question` 逐字
+相等、必填歧义必须都有答案），不通过以工具错误返回同一句用户文案；通过后交给引擎的
+`AskRequest.intent` 与浏览器提交的 `AskIntentConfirmation` 逐字段一致，`understanding_ms` 由
+服务端从首次调用带过来，澄清一轮的轨迹 intent 步因此不会丢耗时。句柄无效或过期（换会话、重新
+`select_notebook`——它会清空本会话的全部句柄、被更新的 8 份挤出）报「intent_token 无效或已过期」，
+不带 `intent` 重新提问即可；成功提交后句柄刻意不作废，引擎失败或传输中断时可用同一份答案重试而
+不必再付一次理解调用。`intent`
+只在 `reasoning` 下合法，`chunk` 与插件模式传了直接报错；`reasoning` 下空白问题也直接报错。已回答
+的响应新增 `status: "answered"`，`reasoning` 档另带 `intent` 摘要（`resolved_question`、
+`result_scope`、`entities`、`assumptions`、`constraints`、`excluded_topics`、
+`clarification_answers`，独立子预算 1,500 字符，有界因而不会像无界那样挤占答案正文），`chunk` 与插件模式的响应除
+新增的 `status` 外不变。**成本登记**：此前 MCP 的 reasoning 调用零额外模型调用、且检索种子只有
+原问题一条；现在每次未带 `intent` 的 reasoning 调用多一次理解模型调用，理解出的必答主题（至多
+`reasoning_max_subqueries` 个）与网页端一样成为检索权威——这是用户裁决的「与网页端一致」的代价，
+没有降级开关。**兼容性**：澄清返回不含 `answer`/`answer_id`/`conversation_id`，按 `status`
+分派；只读 `answer` 的脚本化调用方要先看 `status`。这替代了此前只看措辞的确定性歧义闸：那两条
+规则（无法解析的指代、纯泛化请求）仍作为理解合同里的必答歧义行出现，只是现在以结构化结果而不是
+错误文案返回，而且同样在任何持久状态建立之前。
 
 `ask_notebook` 接受可选的 `conversation_id`（至多 200 字符，与 `AskIntentPreviewRequest.conversation_id`
 同一上限），并回传本次答案实际记入的 `conversation_id`。传入 id 即接续该会话跨轮对话——包括
