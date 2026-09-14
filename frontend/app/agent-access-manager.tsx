@@ -29,7 +29,7 @@ import {
 } from "./agent-token-model";
 import { requestJson } from "./api-client.ts";
 import { copyTextSafely } from "./copy-text";
-import { httpErrorStatus, toUserMessage } from "./errors.ts";
+import { httpErrorStatus, logDiagnostic, toUserMessage } from "./errors.ts";
 import { subscribeMemorySessionAbort } from "./memory-model";
 import { label } from "./vocabulary";
 import type {
@@ -138,6 +138,11 @@ export function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSign
   const listControllerRef = useRef<AbortController | null>(null);
   const profilePageControllerRef = useRef<AbortController | null>(null);
   const tokenPageControllerRef = useRef<AbortController | null>(null);
+  const tokenReloadControllerRef = useRef<AbortController | null>(null);
+  // 行内保存的回执按序号记下。保存之前就已发出的列表/翻页请求晚到时,不许把这些行
+  // 覆盖回旧配置;保存之后发出的请求本来就读到新值,不受影响。
+  const saveSeqRef = useRef(0);
+  const savedTokensRef = useRef(new Map<string, { seq: number; token: AgentTokenSummary }>());
   const profileOffsetRef = useRef(0);
   const tokenOffsetRef = useRef(0);
   const mutationControllersRef = useRef(new Set<AbortController>());
@@ -148,6 +153,7 @@ export function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSign
     listControllerRef.current?.abort();
     profilePageControllerRef.current?.abort();
     tokenPageControllerRef.current?.abort();
+    tokenReloadControllerRef.current?.abort();
     mutationControllersRef.current.forEach((controller) => controller.abort());
   }), [sessionSignal]);
 
@@ -158,6 +164,7 @@ export function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSign
       listControllerRef.current?.abort();
       profilePageControllerRef.current?.abort();
       tokenPageControllerRef.current?.abort();
+      tokenReloadControllerRef.current?.abort();
       mutationControllersRef.current.forEach((controller) => controller.abort());
     };
   }, []);
@@ -171,6 +178,7 @@ export function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSign
   useEffect(() => {
     if (sessionSignal.aborted) return;
     const epoch = ++requestEpochRef.current;
+    const saveSeq = saveSeqRef.current;
     const controller = new AbortController();
     listControllerRef.current = controller;
     profileOffsetRef.current = 0;
@@ -186,7 +194,7 @@ export function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSign
     ]).then(([nextProfiles, nextTokens, nextNotebooks]) => {
       if (controller.signal.aborted || epoch !== requestEpochRef.current) return;
       setProfiles(nextProfiles);
-      setTokens(nextTokens);
+      setTokens(withNewerSaves(nextTokens, saveSeq));
       profileOffsetRef.current = nextProfiles.length;
       tokenOffsetRef.current = nextTokens.length;
       setProfileHasMore(agentPageHasMore(nextProfiles));
@@ -216,6 +224,8 @@ export function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSign
       profilePageControllerRef.current = null;
       tokenPageControllerRef.current?.abort();
       tokenPageControllerRef.current = null;
+      tokenReloadControllerRef.current?.abort();
+      tokenReloadControllerRef.current = null;
       if (listControllerRef.current === controller) listControllerRef.current = null;
       if (requestEpochRef.current === epoch) requestEpochRef.current += 1;
     };
@@ -250,9 +260,55 @@ export function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSign
     }
   }
 
+  function withNewerSaves(page: AgentTokenSummary[], requestSaveSeq: number): AgentTokenSummary[] {
+    return page.map((item) => {
+      const saved = savedTokensRef.current.get(item.id);
+      return saved && saved.seq > requestSaveSeq ? saved.token : item;
+    });
+  }
+
+  /** 按已经加载到的深度重拉 token 列表(不回到第一页),并保留列表之外已显示的行。
+   *  用于行内保存撞 409 之后:这一行与再次打开的编辑器都要以服务端现状为准,但用户经
+   *  「加载更多」翻到的行不能因此消失。 */
+  async function reloadLoadedTokens() {
+    if (sessionSignal.aborted) return;
+    const epoch = requestEpochRef.current;
+    const saveSeq = saveSeqRef.current;
+    const target = Math.max(tokenOffsetRef.current, 1);
+    const controller = new AbortController();
+    tokenReloadControllerRef.current?.abort();
+    tokenReloadControllerRef.current = controller;
+    try {
+      const rows: AgentTokenSummary[] = [];
+      let hasMore = true;
+      while (hasMore && rows.length < target) {
+        const page = await agentApi<AgentTokenSummary[]>(
+          agentPagePath("/agent-tokens", rows.length),
+          { signal: controller.signal },
+        );
+        rows.push(...page);
+        hasMore = agentPageHasMore(page);
+      }
+      if (controller.signal.aborted || epoch !== requestEpochRef.current || !mountedRef.current) return;
+      const fresh = withNewerSaves(rows, saveSeq);
+      const freshIds = new Set(fresh.map((item) => item.id));
+      setTokens((current) => [...fresh, ...current.filter((item) => !freshIds.has(item.id))]);
+      if (rows.length >= tokenOffsetRef.current) {
+        tokenOffsetRef.current = rows.length;
+        setTokenHasMore(hasMore);
+      }
+    } catch (cause) {
+      // 失败时保留当前列表;这一行的 409 文案已经落在编辑器里,不再叠一条顶部横幅。
+      if (!controller.signal.aborted) logDiagnostic("agent-access", cause);
+    } finally {
+      if (tokenReloadControllerRef.current === controller) tokenReloadControllerRef.current = null;
+    }
+  }
+
   async function loadMoreTokens() {
     if (loading || tokenPageLoading || !tokenHasMore || sessionSignal.aborted) return;
     const epoch = requestEpochRef.current;
+    const saveSeq = saveSeqRef.current;
     const controller = new AbortController();
     tokenPageControllerRef.current?.abort();
     tokenPageControllerRef.current = controller;
@@ -264,7 +320,7 @@ export function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSign
         { signal: controller.signal },
       );
       if (controller.signal.aborted || epoch !== requestEpochRef.current || !mountedRef.current) return;
-      setTokens((current) => mergeAgentPage(current, page));
+      setTokens((current) => mergeAgentPage(current, withNewerSaves(page, saveSeq)));
       tokenOffsetRef.current += page.length;
       setTokenHasMore(agentPageHasMore(page));
     } catch (cause) {
@@ -385,18 +441,17 @@ export function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSign
         signal: controller.signal,
       });
       if (controller.signal.aborted || !mountedRef.current) return;
+      saveSeqRef.current += 1;
+      savedTokensRef.current.set(saved.id, { seq: saveSeqRef.current, token: saved });
       setTokens((current) => current.map((item) => (item.id === saved.id ? saved : item)));
       setEdit(null);
       setSavedTokenId(saved.id);
-      // 重拉一次列表:保存期间已发出的旧列表请求会被新的 epoch 作废,
-      // 不会在「已保存」旁边把这一行覆盖回旧配置。
-      setRefresh((value) => value + 1);
     } catch (cause) {
       if (!controller.signal.aborted && mountedRef.current) {
         setEditError(toUserMessage(cause, "保存失败，请稍后重试"));
-        // 409:已撤销、Profile 已停用或已被别处改过——都重拉列表,让这一行
+        // 409:已撤销、Profile 已停用或已被别处改过——按已加载深度重拉,让这一行
         // 与再次打开的编辑器以服务端现状为准。
-        if (httpErrorStatus(cause) === 409) setRefresh((value) => value + 1);
+        if (httpErrorStatus(cause) === 409) void reloadLoadedTokens();
       }
     } finally {
       mutationControllersRef.current.delete(controller);
