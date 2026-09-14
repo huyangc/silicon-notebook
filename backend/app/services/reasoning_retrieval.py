@@ -669,11 +669,11 @@ ENUMERATE_SOURCES_COLLECTION = "sources"
 # (哪一篇 + 取多深)与 enumerate 的 kind/object_type 无关。
 READ_DOCUMENT_ACTION = "read_document"
 # `read_document.coverage` 的取值。**字符串枚举而不是布尔**,与 ENUMERATE_SCOPES
-# 同一条纪律、同一个理由:`model_json._validate_against_example` 对布尔示例硬判
-# 类型,模型答 `"true"`/`"yes"` 会整轮反思掉进兜底(F1 修的正是这个);而字符串
-# 示例继承 F1 的宽容规则(空串永远接受),不懂这个旋钮的模型可以不填、动作照样
-# 落地。枚举值本身还说清了它做什么(等距取样 / 只读开头),`true` 则会让模型猜
-# 自己站在开关的哪一边。
+# 同一条纪律、同一个理由:`model_json.validate_model_json_shape` 对布尔示例按
+# 类型记注记、对字符串枚举只在非空非法时记 `invalid_enum`,空串永远接受——不懂
+# 这个旋钮的模型可以不填、动作照样落地;而枚举值本身还说清了它做什么(等距取样
+# / 只读开头),`true` 则会让模型猜自己站在开关的哪一边。校验层只报告不拒收
+# (harness 原则,2026-09-14),非法值由解析器落回 `spread`。
 READ_DOCUMENT_COVERAGES = ("spread", "opening")
 READ_DOCUMENT_COVERAGE_DEFAULT = "spread"
 # 本 run 每次 read_document 产物的 `[kN]` 号段起点。
@@ -2518,12 +2518,10 @@ class ReflectDecision:
     # `spread` 且**不抛**——连 fail_closed 也不抛,与 `enumerate_scope` 同一条
     # 纪律:形状不是动作合法性问题(动作照旧成立,只是按默认取样)。
     # 这里**没有** `read_document_coverage_rejected` 那样的教学字段,与
-    # `enumerate_collection_rejected` 分道:`coverage` 的 schema 示例是
-    # `"spread|opening"`,而 `model_json._validate_against_example` 对含 `|` 的示例
-    # 按**封闭枚举**判——非空非法值在校验层就整轮被拒(`invalid_enum`),根本到不了
-    # 这个解析器。解析器这一侧只剩「缺省/空串/非字符串」要落回 `spread`,那不是
-    # 「你给错了」,没有任何教学文案要说,留一个只写不读的字段只会让下一个读者以为
-    # 它有消费者。
+    # `enumerate_collection_rejected` 分道:取样形状不是动作合法性问题,填错了
+    # 也只是按默认取样,没有任何教学文案要说;留一个只写不读的字段只会让下一个
+    # 读者以为它有消费者。校验层对非法值只记注记不拒收(harness 原则),所以非法
+    # 字符串会到达这里,同样落回 `spread`。
     read_document_coverage: str = READ_DOCUMENT_COVERAGE_DEFAULT
     # update_outline 携带的**整份章节结构**;同 id 的证据 union/显式删除在 run()
     # 应用。解析期只夹形状与边界,证据 key 的合法性要看 run 局部候选集合——

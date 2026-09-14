@@ -6,9 +6,10 @@
 这里不重测它。
 
 reflect 的参数一律经**生产的那两道校验**(``_ValidatingLLM``):`coverage` 是一个
-字符串枚举,而 `model_json._validate_against_example` 会在解析器之前先按 schema
-示例判一次形状——只测解析器的用例会给出「模型这样填是可以的」这个结论,而生产上
-那一轮早就被前一道打成兜底了。
+字符串枚举,`model_json.validate_model_json_shape` 会在解析器之前按 schema 示例
+过一遍形状。校验层只报告不拒收(harness 原则,2026-09-14):非法枚举值记一条注记、
+回复照常交付,落回默认是解析器的事;真正能挡下一个动作的是白名单。只测解析器的
+用例看不到这条分层,所以这里两道都过。
 """
 from __future__ import annotations
 
@@ -194,16 +195,16 @@ def test_an_absent_or_empty_coverage_lands_as_spread_and_keeps_the_turn(
                 if "fallback_reason" in s.detail]
 
 
-@pytest.mark.parametrize("coverage", ["true", "SPREAD", "全文"])
-def test_a_non_empty_illegal_coverage_costs_the_turn_at_the_validation_layer(
+@pytest.mark.parametrize("coverage", ["true", "SPREAD", "全文", 7, None])
+def test_an_off_shape_coverage_passes_the_boundary_and_falls_back_to_spread(
     repo, coverage,  # noqa: F811
 ):
-    """③ 非空非法值在**解析器之前**就被校验层拒掉(`invalid_enum`)。
+    """③ 校验层只报告不拒收(harness 原则,2026-09-14):非法字符串记 `invalid_enum`、
+    非字符串记 `invalid_type`,但回复照常交付;`coverage` 由解析器落回 `spread`
+    (与下面那条走 `_SeqLLM` 的纵深防御用例是同一个终点),动作成立、不走兜底。
 
-    这条用例的价值是钉住那个代价落在哪一层:与 `enumerate.scope`/`direction` 同
-    一条既有合同——`_validate_against_example` 对含 `|` 的示例按封闭集判,非空的
-    集外值废掉整轮反思。只测解析器的话会得出「模型这样填也可以」这个在生产上不
-    成立的结论。解析器那一侧的落回规则由下面那条纵深防御用例单独钉。
+    这条用例的价值是钉住那个代价落在哪一层:与 `enumerate.scope` 同一条契约——
+    模型填错 `coverage` 不会废掉整轮反思,也不会让它读错文档。
     """
     notebook = _notebook_with_documents(repo)
     llm = _ValidatingLLM([
@@ -213,18 +214,19 @@ def test_a_non_empty_illegal_coverage_costs_the_turn_at_the_validation_layer(
     ], plan={"sub_queries": [{"query": "版图设计"}]})
     result = _reader(repo, llm).run(notebook.id, "这个库讲了什么", "")
 
-    assert _steps(result, "read_document") == []
-    assert [s.detail["fallback_reason"] for s in _steps(result, "reflect")
-            if "fallback_reason" in s.detail] == ["invalid_enum"]
+    assert not [s for s in _steps(result, "reflect") if "fallback_reason" in s.detail]
+    step = next(s for s in _steps(result, "read_document"))
+    assert step.detail["coverage"] == "spread"
+    assert step.detail["found"] == 3
 
 
 @pytest.mark.parametrize("coverage", ["true", "SPREAD", "全文", 7, None])
 def test_the_parser_itself_falls_back_to_spread_and_never_raises(repo, coverage):  # noqa: F811
     """③ 纵深防御:绕过校验层(畸形响应/替身)时,解析器落回 spread 且不抛。
 
-    非法值一律落回默认、**不留**被拒原值:非空非法值在校验层就按封闭枚举整轮拒掉
-    (上面那条用例),到得了解析器的只有缺省/空串/非字符串,而那不是「给错了」,没有
-    教学文案要说。`fail_closed` 也不抛——取样形状不是动作合法性问题。
+    非法值一律落回默认、**不留**被拒原值:校验层只记注记不拒收(上面那条用例走
+    真实校验层),解析器无论拿到什么都落回 `spread`——取样形状不是动作合法性
+    问题,没有教学文案要说。`fail_closed` 也不抛。
     """
     from tests.test_reasoning_enumeration_tools import _SeqLLM
 
@@ -649,11 +651,12 @@ def test_skip_when_the_channel_is_switched_off_and_the_model_forces_it(repo):  #
     # 三处逐字节回到接入前。
     assert all("read_document" not in prompt for prompt in llm.reflect_prompts)
     assert all("read_document" not in hint for hint in llm.schema_hints)
-    # 代价落在校验层:这个动作名不在 schema 的 next_action 枚举里,所以整轮反思
-    # 在到达白名单之前就被拒了(`invalid_enum`)。白名单那一层的合同由下面那条
-    # 纵深防御用例单独钉。
+    # 校验层只报告不拒收(harness 原则,2026-09-14):这个动作名不在 schema 的
+    # next_action 枚举里只记一条 `invalid_enum` 注记、回复照常交付;真正把它挡下的
+    # 是白名单——`invalid_action:read_document` 兜底成 answer。白名单那一层的
+    # 合同由下面那条直调 reflect() 的纵深防御用例单独钉。
     assert [s.detail["fallback_reason"] for s in _steps(result, "reflect")
-            if "fallback_reason" in s.detail] == ["invalid_enum"]
+            if "fallback_reason" in s.detail] == ["invalid_action:read_document"]
 
 
 def test_the_action_whitelist_rejects_it_when_the_gate_is_shut(repo):  # noqa: F811
