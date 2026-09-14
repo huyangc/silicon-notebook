@@ -977,6 +977,18 @@ class AskExecutionPort(Protocol):
     def validate_reasoning_submission(
         self, notebook_id: str, payload: AskRequest
     ) -> None: ...
+    # PR-C: the entry point's follow-up preflight, run above the job-publishing
+    # step like ``validate_reasoning_submission``.  Returns a
+    # ``app.services.ask_followup.FollowupResolution``; the name is spelled as
+    # a string rather than imported because ``repositories`` may not grow a new
+    # import edge into ``services`` (see
+    # ``scripts/check_architecture_boundaries.py::
+    # repository_service_import_counts``, an intentional debt ceiling).  The
+    # module has ``from __future__ import annotations``, so nothing resolves it
+    # at runtime.
+    def resolve_reasoning_followup(
+        self, notebook_id: str, payload: AskRequest
+    ) -> "FollowupResolution": ...
     def ask(self, notebook_id: str, payload: AskRequest) -> AskResponse: ...
     def ask_chunk(self, notebook_id: str, payload: AskRequest, cancel_event: CancelEvent = None) -> AskResponse: ...
     def ask_reasoning(self, notebook_id: str, payload: AskRequest, on_trace: Callable[[Any], None] | None = None, cancel_event: CancelEvent = None) -> AskResponse: ...
@@ -3470,6 +3482,24 @@ class AskStateStorePort(Protocol):
     def answer_notebook_id(self, answer_id: str) -> str | None: ...
     def answer_memory_source(self, answer_id: str) -> dict[str, Any]: ...
     def conversation_history(self, db: object, conversation_id: str, limit: int = 5) -> str: ...
+    # PR-C (T2) — the reasoning-followup rewrite's ONE read of prior turns.
+    # Language-blind by construction: it returns the SAME text as
+    # ``_conversation_histories(db, conversation_id, limit)[1]`` — the
+    # member's own question lines, oldest -> newest, never an answer
+    # ``conclusion`` and never a citation. Owns its own connection (no caller
+    # ``db`` parameter) because, unlike ``conversation_history`` above, its
+    # callers are outside any existing write transaction.
+    #
+    # Ownership predicate is byte-for-byte ``ensure_conversation``'s
+    # continuation check (``id = ? AND notebook_id = ? AND created_by = ?`` /
+    # the ``%s`` twin) — the conversation must belong to BOTH
+    # ``notebook_id`` and ``user_id``. A mismatch on either, or a
+    # ``conversation_id`` that does not exist, returns ``""`` and never
+    # raises: this is a best-effort context read for a 422 gate, not an
+    # existence check the caller should fail on.
+    def conversation_user_history(
+        self, notebook_id: str, conversation_id: str, user_id: str, limit: int = 5
+    ) -> str: ...
     @staticmethod
     def read_trace(db: object, job_id: str) -> list: ...
     def ask_job_detail(self, job_id: str) -> dict: ...

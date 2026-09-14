@@ -9091,6 +9091,21 @@
     "scope": "module",
     "signature": "(token: 'RequestUserToken') -> 'None'"
   },
+  "resolve_reasoning_followup": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/ask_routes.py",
+        "scope": "<module>._validate_confirmed_reasoning_intent",
+        "target": "resolve_reasoning_followup"
+      }
+    ],
+    "kind": "method",
+    "owner": "AskService",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, notebook_id: 'str', payload: 'AskRequest') -> 'FollowupResolution'"
+  },
   "resolve_session": {
     "consumers": [
       {

@@ -36,6 +36,11 @@ RETRIEVAL_EFFORTS: tuple[RetrievalEffort, ...] = (
 # a question can be.
 AMBIGUITY_ROWS_MAX = 8
 AMBIGUITY_QUESTION_MAX_CHARS = 500
+# ``QueryIntentContract.objective`` / ``resolved_question`` 的协议上限。合同装配点
+# (``query_intent``:理解步的 normalized_question、跟进改写句)与 pydantic Field 同读
+# 这一份:模型产物的长度不受我们控制,闸口若按另一份数字放行,合同装配就会在
+# durable job 建好之后抛 ValidationError。
+RESOLVED_QUESTION_MAX_CHARS = 4000
 
 RESULT_SCOPES: tuple[ResultScope, ...] = (
     "ranked",

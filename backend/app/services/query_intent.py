@@ -12,6 +12,7 @@ from typing import Any, Iterable
 
 from app.core.model_values import as_text
 from app.core.ask_retrieval_policy import (
+    RESOLVED_QUESTION_MAX_CHARS,
     AMBIGUITY_QUESTION_MAX_CHARS,
     AMBIGUITY_ROWS_MAX,
     RESULT_SCOPES,
@@ -469,7 +470,8 @@ def plan_query_intent(
     if intent_type not in _INTENT_TYPES:
         intent_type = "other"
     normalized_question = (
-        as_text(data.get("normalized_question"))[:4000] or question
+        as_text(data.get("normalized_question"))[:RESOLVED_QUESTION_MAX_CHARS]
+        or question
     )
     result_scope, completeness_required = _result_scope(data, question, status=status)
     contract = {
@@ -582,6 +584,69 @@ def clarification_gate_message(seed: dict) -> str:
         for index, question in enumerate(questions)
     )
     return f"{_CLARIFICATION_GATE_PREFIX}：{numbered}"
+
+
+def followup_gate(
+    original: str,
+    resolved: str,
+    history: str = "",
+    *,
+    max_topics: int,
+) -> tuple[dict | None, str]:
+    """Judge a follow-up question's clarity, optionally through a rewrite.
+
+    The one construction every caller shares that must decide whether a
+    reasoning Ask may proceed without a client-confirmed intent. Returns
+    ``(seed, "")`` when the request may run and ``(None, message)`` when it
+    must fail closed, so each caller raises its own error type over identical
+    copy instead of re-deriving it.
+
+    ``resolved`` is a model rewrite of ``original`` (empty when no rewrite was
+    attempted). Two rules keep that rewrite from widening what the gate
+    accepts or from leaking into what the user reads:
+
+    * The gate copy always comes from ``original``'s own seed. A rewrite is
+      machine-generated text *about* the user's question, and echoing it back
+      inside "问题仍有关键歧义…" would ask the user to clarify wording they
+      never wrote.
+    * Only ``resolved_question`` follows the rewrite. ``objective``,
+      ``result_scope``, ``completeness_required`` and ``mandatory_topics``
+      stay the original seed's, so a rewrite that drops "全部" cannot silently
+      downgrade a complete-collection request to a ranked top-N.
+
+    ``history`` is forwarded to both deterministic plans for parity with the
+    engine's call shape, but with ``client=None`` it does not take part in
+    the verdict (no model reads it; the deterministic rules look only at the
+    question). It stays so a future model-backed probe needs no signature
+    change.
+
+    An empty rewrite — or one that is the original verbatim — takes the
+    original seed's own verdict, byte for byte what a caller with no rewrite
+    step does. So does a rewrite longer than ``RESOLVED_QUESTION_MAX_CHARS``:
+    it could not be assembled into a contract anyway (the model would raise
+    ``ValidationError`` after the entry gate had already let the request
+    through), and truncating it would hand retrieval half a sentence — an
+    over-long rewrite is a failed rewrite, not a shorter one.
+    """
+    seed = plan_query_intent(None, original, history, max_topics=max_topics)
+    rewritten = str(resolved or "").strip()
+    if len(rewritten) > RESOLVED_QUESTION_MAX_CHARS:
+        rewritten = ""
+    if not rewritten or rewritten == str(original or "").strip():
+        if seed.get("needs_clarification"):
+            return None, clarification_gate_message(seed)
+        return seed, ""
+    probe = plan_query_intent(None, rewritten, history, max_topics=max_topics)
+    if probe.get("needs_clarification"):
+        return None, clarification_gate_message(seed)
+    seed["resolved_question"] = rewritten
+    # The rewrite resolved what the original left open. ``needs_clarification``
+    # is this dict's own restatement of ``ambiguities`` (``plan_query_intent``
+    # derives one from the other), so clearing one without the other would
+    # hand consumers a contract that contradicts itself.
+    seed["ambiguities"] = []
+    seed["needs_clarification"] = False
+    return seed, ""
 
 
 def finalize_query_intent(

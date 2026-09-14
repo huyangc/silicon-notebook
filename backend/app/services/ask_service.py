@@ -73,6 +73,10 @@ from app.models.knowledge import (
     KnowledgeFieldValue,
     KnowledgeRecord,
 )
+from app.services.ask_followup import (
+    FollowupResolution,
+    current_followup_resolution,
+)
 from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
 from app.services.citation_markers import LOOSE_MARKER_RE, MARKER_RE, marker_keys
 from app.services.document_read_answer import document_read_block_reserve
@@ -654,6 +658,8 @@ class AskService:
     # ``key_offset``,这里按它做分区计数,对不上的话计数会把原文摘录算成清单行
     # (``test_reasoning_document_read_synthesis`` 钉住两者相等)。号段上界仍留在
     # 按节合成的 ``OUTLINE_SECTION_KEY_STRIDE``(10000)之内。
+    # 无 intent 跟进改写的预检超时(秒):见 resolve_reasoning_followup。
+    _FOLLOWUP_PRECHECK_TIMEOUT_SECONDS = 20.0
     _DOCUMENT_READ_KEY_BASE = 7000
 
     def __init__(
@@ -1279,16 +1285,105 @@ class AskService:
             return
         self._confirmed_reasoning_intent(payload, "")
 
+    def resolve_reasoning_followup(
+        self, notebook_id: str, payload: AskRequest,
+    ) -> FollowupResolution:
+        """Decide, before any durable Ask exists, whether an elliptical
+        follow-up can be resolved from this member's own prior turns.
+
+        The ONE place the follow-up rewrite model is called for a request that
+        arrives without a client-confirmed intent.  Ordered so the common cases
+        cost nothing:
+
+        1. A non-reasoning mode, or a request that already carries a reviewed
+           intent, is admitted untouched -- zero model calls, zero reads.
+        2. A question the deterministic gate already finds clear is admitted
+           untouched, on the SAME parameters the entry point used to judge it
+           (``max_topics=1``, no history).  This is the overwhelming majority
+           of requests, and it stays byte-for-byte what it was.
+        3. Only a question the gate rejects is worth spending anything on.  It
+           reads this member's own question lines in this conversation and
+           this notebook -- never an answer, never another member's wording --
+           and without them (no ``conversation_id``, somebody else's
+           conversation, a first turn) returns the very same 422 copy as
+           before.
+        4. With history, the rewrite runs and the gate judges its output.  A
+           rewrite that resolves the reference admits the run and becomes the
+           retrieval wording; one that does not leaves the original 422 copy
+           standing, and the rewrite itself is never shown to the user.
+
+        Failure is always the old behavior: ``_rewrite_followup_query``
+        swallows an unconfigured client, a malformed response and any
+        exception by returning the question unchanged, which walks straight
+        into the "still ambiguous" verdict of the original seed. There is no
+        cancel handle at this point (no durable job exists yet), so the
+        rewrite call is not cancellable; ``cancel_event`` is passed as None.
+        """
+        from app.services.query_intent import followup_gate
+
+        question = payload.question.strip()
+        admitted = FollowupResolution(
+            question=question,
+            resolved_question=question,
+            rewrite_ms=None,
+            gate_message="",
+        )
+        if self._resolve_ask_mode(getattr(payload, "mode", None)).id != "reasoning":
+            return admitted
+        if payload.intent is not None:
+            return admitted
+        _seed, gate_message = followup_gate(question, "", "", max_topics=1)
+        if not gate_message:
+            return admitted
+        history = self.ask_state.conversation_user_history(
+            notebook_id,
+            payload.conversation_id or "",
+            self.current_user_id(),
+            5,
+        )
+        if not history.strip():
+            return FollowupResolution(
+                question=question,
+                resolved_question=question,
+                rewrite_ms=None,
+                gate_message=gate_message,
+            )
+        # 这次改写跑在任何 durable job 之前:没有 job id 可取消、客户端断连也
+        # 停不下它,而它的失败本来就优雅(回到今天的 422)。所以只给一个短超时、
+        # 不重试——没有理由让一条注定要么 422 要么继续的预检占着入口 60s x 重试。
+        started = time.perf_counter()
+        rewritten = self._rewrite_followup_query(
+            history, question, cancel_event=None,
+            timeout=self._FOLLOWUP_PRECHECK_TIMEOUT_SECONDS, max_retries=0,
+        )
+        rewrite_ms = round((time.perf_counter() - started) * 1000)
+        _probe, gate_message = followup_gate(
+            question, rewritten, history, max_topics=1
+        )
+        if gate_message:
+            return FollowupResolution(
+                question=question,
+                resolved_question=question,
+                rewrite_ms=rewrite_ms,
+                gate_message=gate_message,
+            )
+        return FollowupResolution(
+            question=question,
+            resolved_question=rewritten.strip(),
+            rewrite_ms=rewrite_ms,
+            gate_message="",
+        )
+
     @staticmethod
     def _confirmed_reasoning_intent(
         payload: AskRequest,
         history: str,
+        resolved_question: str = "",
     ) -> QueryIntentContract:
         """Freeze submitted intent; direct legacy callers get deterministic guard."""
         from app.services.query_intent import (
-            clarification_gate_message,
             finalize_query_intent,
-            plan_query_intent,
+            followup_gate,
         )
 
         original = payload.question.strip()
@@ -1309,9 +1404,19 @@ class AskService:
         # confirmed intent).  Preserve zero-extra-model-call behavior for clear
         # questions, while still failing closed on deterministic missing
         # referents/generic requests instead of retrieving against guesswork.
-        seed = plan_query_intent(None, original, history, max_topics=4)
-        if seed.get("needs_clarification"):
-            raise ValueError(clarification_gate_message(seed))
+        # ``resolved_question`` is the entry point's follow-up rewrite when one
+        # was made and admitted (PR-C); it is empty for every caller that has
+        # no rewrite step of its own, and the shared gate then takes the
+        # original seed's verdict -- byte for byte the pre-PR-C behavior.  This
+        # function never runs the rewrite itself: it is a ``staticmethod`` on
+        # the engine's hot path, reached once per run, and a model call here
+        # would fire on replays and on direct ``repo.ask`` callers that the
+        # entry-point gate never saw.
+        seed, gate_message = followup_gate(
+            original, resolved_question, history, max_topics=4
+        )
+        if gate_message:
+            raise ValueError(gate_message)
         # A caller that bypasses preview has not reviewed decomposition
         # metadata. Keep its compatibility query byte-for-byte equal to the
         # original instead of silently promoting fallback topics to authority.
@@ -2188,6 +2293,9 @@ class AskService:
         history: str,
         question: str,
         cancel_event: CancelEvent = None,
+        *,
+        timeout: float | None = None,
+        max_retries: int | None = None,
     ) -> str:
         """Resolve an elliptical follow-up into a standalone retrieval query using
         prior turns. Runs whenever there IS history (any non-first turn) — the
@@ -2205,6 +2313,8 @@ class AskService:
             raw = client.chat_json(
                 [{"role": "user", "content": followup_rewrite_prompt(history, question)}],
                 FOLLOWUP_REWRITE_SCHEMA_HINT,
+                timeout=timeout,
+                max_retries=max_retries,
                 cancel_event=cancel_event,
             )
             data = json.loads(raw)
@@ -3581,7 +3691,17 @@ class AskService:
         # Agentic Memory P3(T8):合成侧的风格提示,一次点读、贯穿本次 ask_reasoning
         # 的单次合成与按节合成两条路径(见 _search_profile_style_block)。
         style_block = self._search_profile_style_block(user_id)
-        intent_contract = self._confirmed_reasoning_intent(payload, history)
+        # PR-C: the entry point may have resolved an elliptical follow-up into
+        # a standalone question before this job existed.  Trust it only for the
+        # question it was actually decided on — a context variable outlives the
+        # call that set it, and a rewrite of a different question must degrade
+        # to "no rewrite", not to answering the wrong thing.
+        followup = current_followup_resolution()
+        if followup is not None and followup.question != question:
+            followup = None
+        intent_contract = self._confirmed_reasoning_intent(
+            payload, history, followup.resolved_question if followup else "",
+        )
         reasoning_history = history
         limits = ask_retrieval_limits(payload.retrieval_effort)
         from app.services.query_intent import (
@@ -3642,11 +3762,16 @@ class AskService:
             detail=intent_projection.as_json_mapping(),
             # The understanding phase runs before this durable job exists (in
             # ``/ask/intent`` for the browser, inside the same tool call for
-            # MCP ``ask_notebook``), so this stage cannot time it.  The caller
-            # reports what it measured; without it the replayed trace would
-            # silently drop that whole phase from the run's total.
+            # MCP ``ask_notebook``), so this stage cannot time it.  Whoever ran
+            # it reports what it measured; without that the replayed trace
+            # would silently drop the whole phase from the run's total.  Two
+            # reporters, one slot: a reviewed intent carries the client's
+            # ``understanding_ms``, and a request that arrived without one
+            # carries the entry point's follow-up rewrite time (``None``
+            # whenever no rewrite ran, which is every clear question).
             duration_ms=(
-                payload.intent.understanding_ms if payload.intent is not None else None
+                payload.intent.understanding_ms if payload.intent is not None
+                else (followup.rewrite_ms if followup else None)
             ),
         )
         return PreparedReasoningAsk(

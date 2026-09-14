@@ -101,6 +101,7 @@ from app.models.knowledge import (
 )
 from app.domain.retrieval import ChunkRetrievalPlan
 from app.services import kg_ingest
+from app.services.ask_followup import FollowupResolution
 from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
 from app.services.vector_cache import LargeAwareLRUCache, LRUProcessCache
 from app.services.extraction_profiles import (
@@ -3723,6 +3724,16 @@ class RepositoryFacade:
     ) -> None:
         """Preflight a selected scope before API code creates a durable Ask."""
         return self._runtime.ask_component.validate_reasoning_submission(
+            notebook_id, payload
+        )
+
+    def resolve_reasoning_followup(
+        self, notebook_id: str, payload: AskRequest
+    ) -> FollowupResolution:
+        """PR-C: resolve an elliptical follow-up (or decide it cannot be)
+        before API code creates a durable Ask. Clear questions and requests
+        that already carry a reviewed intent cost nothing here."""
+        return self._runtime.ask_component.resolve_reasoning_followup(
             notebook_id, payload
         )
 

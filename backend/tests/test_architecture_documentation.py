@@ -965,6 +965,22 @@ def test_ask_mode_documentation_keeps_chunk_default_and_alias_only_retirement():
         assert 'mode="fast"' not in text
 
 
+def test_direct_compatibility_followup_rewrite_error_copy_pins_to_the_original_question():
+    """Un-`intent` `/ask`/`/ask/stream` calls only rewrite a follow-up after the
+    deterministic clarification gate itself fires; the resulting 422 copy must
+    always come from the original wording, never the rewritten one, in both
+    product docs and the architecture contract that names the contextvar seam.
+    """
+    _assert_phrases(
+        {
+            "docs/product-and-api_zh.md": "文案恒取自原句（改写产物绝不进入错误文案",
+            "docs/product-and-api.md": "whose message is always built from the original wording",
+            "architecture.md": "其文案固定取自原句（改写产物绝不进入错误文案）",
+        }
+    )
+    assert "followup_resolution_context" in _read("architecture.md")
+
+
 def test_knowhow_documentation_matches_projection_isolation_and_agent_scopes():
     """Knowhow-table contract phrases stay synchronized across the live docs.
 
