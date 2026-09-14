@@ -817,3 +817,39 @@ def test_an_obsolete_lexical_scope_is_not_frozen_by_confirmation():
     edited = finalize_query_intent(lexical_seed, resolved_question="介绍常见方法")
     assert edited["result_scope"] == "ranked"
     assert edited["completeness_required"] is False
+
+
+def test_a_negated_scope_in_a_clarification_answer_caps_a_model_chosen_scope():
+    """codex #725 R3: "总数不需要，介绍主要主题即可" carries no positive scope
+    choice, but its negation must still override the accepted aggregate."""
+    class _AggregateWithClarification(_IntentClient):
+        def chat_json(self, messages, schema_hint, **kwargs):
+            return json.dumps({
+                "normalized_question": "这个库的文章主要讲什么",
+                "intent_type": "other",
+                "result_scope": "aggregate",
+                "completeness_required": True,
+                "confidence": 0.9,
+                "entities": [],
+                "mandatory_topics": [],
+                "ambiguities": [{"id": "ambiguity-count", "question": "需要统计总数吗？",
+                                 "required": False, "options": []}],
+                "needs_clarification": True,
+            })
+
+    seed = plan_query_intent(_AggregateWithClarification(), "这个库的文章主要讲什么")
+    assert seed["result_scope"] == "aggregate"
+    ambiguity_id = seed["ambiguities"][0]["id"]
+
+    capped = finalize_query_intent(
+        seed, resolved_question="这个库的文章主要讲什么",
+        answers=[{"id": ambiguity_id, "answer": "总数不需要，介绍主要主题即可"}],
+    )
+    assert capped["result_scope"] == "ranked"
+    assert capped["completeness_required"] is False
+
+    kept = finalize_query_intent(
+        seed, resolved_question="这个库的文章主要讲什么",
+        answers=[{"id": ambiguity_id, "answer": "按主题分即可"}],
+    )
+    assert kept["result_scope"] == "aggregate"

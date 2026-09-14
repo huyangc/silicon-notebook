@@ -644,8 +644,11 @@ def finalize_query_intent(
                 _accepted_scope(seed), f"{resolved}\n{answer_text}"
             )
         else:
+            # No positive scope choice in the answer — but a negated one
+            # ("总数不需要") must still cap an accepted model scope, so the
+            # answer text stays in the judged wording (codex #725 R3).
             result_scope, completeness_required = _result_scope(
-                _accepted_scope(seed), resolved
+                _accepted_scope(seed), f"{resolved}\n{answer_text}"
             )
     elif wording_changed:
         result_scope, completeness_required = _result_scope(
