@@ -4035,6 +4035,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
+        "scope": "<module>.RepositoryFacade.resolve_reasoning_followup",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.resolve_session",
         "target": "_runtime"
       },
