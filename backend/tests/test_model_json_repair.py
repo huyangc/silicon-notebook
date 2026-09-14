@@ -456,3 +456,17 @@ def test_a_rewritten_reply_carrying_nan_fails_through_the_malformed_path():
         )
 
     assert caught.value.reason == "non_finite_number"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    ['{"score": NaN}', '{"score": Infinity}', '{"score": -Infinity}', '{"score": 1e999}',
+     '{"score": 0.5, "nested": {"x": [NaN]}}'],
+)
+def test_non_finite_numbers_are_rejected_on_the_strict_path(raw):
+    # codex #720 R7: json.loads accepts these; a +inf confidence would clamp
+    # to 1.0 downstream. One boundary check, no per-consumer guards.
+    with pytest.raises(ModelJsonRepairError) as caught:
+        validate_model_json_shape(raw, '{"score":0.0,"nested":{"x":[0.0]}}')
+
+    assert caught.value.reason == "non_finite_number"
