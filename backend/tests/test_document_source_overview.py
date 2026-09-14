@@ -154,6 +154,41 @@ def test_opening_coverage_with_whole_document_still_reports_complete_reading():
     assert [citation.element_id for citation in result.citations] == ["e0", "e1", "e2"]
 
 
+def test_opening_coverage_note_says_later_sections_were_not_sampled():
+    """codex #724 R3:opening 只读开头,合成侧拿到的只有这一行披露(不带 coverage
+    字段),沿用「分布取样」措辞会让模型把开头当成全文样本。"""
+    pages = SourcePages(["开头", "二", "三", "四", "结论"])
+    result = prepare_source_overview(
+        pages, ITEM, 1000, 3, generation_reader=lambda _: "v1",
+        active_notebook_id="nb", coverage="opening",
+    )
+    assert "只读取了文档开头的 3/5" in result.coverage_note
+    assert "后面的章节未取样" in result.coverage_note
+    assert "分布取样" not in result.coverage_note
+
+
+def test_singleton_spread_reads_the_last_element_not_the_first():
+    """codex #724 R3:spread 承诺「必含文档最后一个位置」;overview 档的份额常常只
+    够读一个元素,读首元素等于把 spread 变成 opening。单元素文档两者相同。"""
+    pages = SourcePages(["开头", "二", "三", "四", "结论"])
+    spread = prepare_source_overview(
+        pages, ITEM, 1000, 1, generation_reader=lambda _: "v1",
+        active_notebook_id="nb", coverage="spread",
+    )
+    opening = prepare_source_overview(
+        pages, ITEM, 1000, 1, generation_reader=lambda _: "v1",
+        active_notebook_id="nb", coverage="opening",
+    )
+    assert [c.element_id for c in spread.citations] == ["e4"]
+    assert "结论" in spread.context_block
+    assert [c.element_id for c in opening.citations] == ["e0"]
+    single = prepare_source_overview(
+        SourcePages(["唯一"]), ITEM, 1000, 1, generation_reader=lambda _: "v1",
+        active_notebook_id="nb", coverage="spread",
+    )
+    assert [c.element_id for c in single.citations] == ["e0"]
+
+
 def test_invalid_coverage_value_behaves_like_spread():
     default_result = prepare_source_overview(
         SourcePages(["开头", "二", "三", "四", "结论"]), ITEM, 1000, 3,

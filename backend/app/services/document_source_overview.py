@@ -96,11 +96,16 @@ def prepare_source_overview(
     count = min(total, max_elements)
     if coverage == "opening":
         offsets = list(range(count))
+    elif count > 1:
+        offsets = [index * (total - 1) // (count - 1) for index in range(count)]
+    elif count == 1:
+        # 单元素的 spread 读**末**元素,不是首元素(codex #724 R3):spread 的承诺是
+        # 「必含文档最后一个位置」,而 overview 档的按篇取样份额常常只够读一个——
+        # 读首元素等于把 spread 变成 opening,模型选 spread 想要的结论一段拿不到。
+        # 单元素文档两者相同。
+        offsets = [total - 1]
     else:
-        offsets = (
-            [index * (total - 1) // (count - 1) for index in range(count)]
-            if count > 1 else ([0] if count else [])
-        )
+        offsets = []
     elements = []
     stable_count = True
     seen = set()
@@ -192,6 +197,14 @@ def prepare_source_overview(
         )
     elif len(lines) == total and complete_text and generation_reader and before:
         note = f"已读取全部 {total} 个原文元素，读取期间文档解析版本未变化。"
+    elif coverage == "opening":
+        # opening 只读了开头(codex #724 R3):合成侧拿到的只有这一行披露,不带
+        # `coverage` 字段;沿用「分布取样」的措辞会让模型把只读了开头的证据当成
+        # 分布在全文的样本。要说清后面的章节**没有**取样。
+        note = (
+            f"本次只读取了文档开头的 {len(lines)}/{total} 个原文元素，后面的章节未取样；"
+            "不代表覆盖所有章节或全文，请仅依据这些原文介绍，并明确概述范围有限。"
+        )
     else:
         note = (
             f"本次提供 {len(lines)}/{total} 个原文元素的有界摘录，按来源详情顺序分布取样；"
