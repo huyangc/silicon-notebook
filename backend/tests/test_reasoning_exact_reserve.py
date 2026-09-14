@@ -24,7 +24,7 @@ import json
 
 import pytest
 
-from app.domain.retrieval import RetrievedChunk
+from app.domain.retrieval import RetrievedChunk, RetrievedElement
 from app.models.schemas import NotebookCreate
 from app.services.ask_service import AskService
 from app.services.retrieval import promote_bounded_prefix
@@ -87,10 +87,18 @@ def _spy_assembly(monkeypatch):
             self, chunks, budget_chars=budget_chars,
             notebook_id=notebook_id, id_offset=id_offset,
         )
-        captured["chunks"] = [chunk.chunk_id for chunk in chunks]
-        captured["block"] = block
-        captured["id_map"] = dict(id_map)
-        captured["budget"] = budget_chars
+        call = {
+            "chunks": [chunk.chunk_id for chunk in chunks],
+            "block": block,
+            "id_map": dict(id_map),
+            "budget": budget_chars,
+            "id_offset": id_offset,
+        }
+        # 一次装配可以调它两次:本节绑定的 chunk 段一次,尾随的注入段一次
+        # (`trailing_chunks`)。`calls` 按调用序保留两者;顶层键仍是最后一次,
+        # 供只有一段的既有用例照旧读取。
+        captured.setdefault("calls", []).append(call)
+        captured.update(call)
         return block, id_map
 
     monkeypatch.setattr(AskService, "_chunk_answer_context", _spy)
@@ -290,22 +298,31 @@ def test_the_neutral_comparison_is_not_a_dead_harness(repo, monkeypatch):
     assert identified["block"] != neutral["block"]
 
 
-# ------------------------------------- PR-B fix A: the injected copy is unmarked
+# ---------------------------- PR-B fix A: the injected copy is a TRAILING block
 #
-# `outline_synthesis.plan_outline_sections` injects an unbound exact hit into
-# every surviving section as a copy with `exact_lookup=False` (not the marked
-# original). This is the assembly-level motive for that choice: a *marked*
-# injected chunk rides `promote_bounded_prefix`'s prefix seat ahead of chunks
-# the model itself bound to the section, at their expense. Deliberately built
-# straight from `RetrievedChunk` rather than through `plan_outline_sections` —
-# this test pins what `_answer_reasoning` does with the two shapes, not how
-# outline_synthesis produces them (that is `test_reasoning_outline_synthesis`'s
-# job).
+# `outline_synthesis.plan_outline_sections` puts an unbound exact hit into every
+# surviving section's `exact_chunks` as a copy with `exact_lookup=False` (not the
+# marked original), and `_answer_reasoning` renders those through
+# `trailing_chunks`: their own "Exact-lookup passages" block, assembled AFTER the
+# section's bound chunk and element blocks and admitted only from the budget
+# those two leave behind.
+#
+# Stripping the marker alone is not enough, which is what these tests pin.
+# `_answer_reasoning` still sorts `chunks` by relevance, and an exact hit
+# typically scores 1.0 while a section's own bound chunks may score lower — so an
+# unmarked copy mixed into the same block still sorts ahead of them and eats the
+# whole chunk budget. A section bound to source elements is hit the same way,
+# because the chunk block is assembled BEFORE the element block.
+#
+# Deliberately built straight from `RetrievedChunk` rather than through
+# `plan_outline_sections` — these tests pin what `_answer_reasoning` does with
+# the two shapes, not how outline_synthesis produces them (that is
+# `test_reasoning_outline_synthesis`'s job).
 
 _MARKER_FREE_BUDGET = 49  # two full 24-char lines fit, a third does not — see below
 
 
-def _labeled_chunk(chunk_id, label, marked):
+def _labeled_chunk(chunk_id, label, marked, relevance=1.0):
     """20-char text, same length regardless of label, so every candidate
     costs the assembler exactly the same number of characters — the budget
     math below (line = 4-char prefix + 20-char text = 24 chars; two lines +
@@ -314,67 +331,174 @@ def _labeled_chunk(chunk_id, label, marked):
     assert len(text) == 20
     return RetrievedChunk(
         chunk_id=chunk_id, source_id="s1", source_title="t",
-        section_path="1", text=text, relevance=1.0, exact_lookup=marked,
+        section_path="1", text=text, relevance=relevance, exact_lookup=marked,
     )
+
+
+def _assemble(repo, monkeypatch, **kwargs):
+    """Run one `_answer_reasoning` assembly and return (spy capture, baseline).
+
+    The baseline sink carries the MERGED `id_map` (every block, after
+    `_bounded_context_append` filtered out the keys truncation ate), which is
+    the only place the two chunk blocks can be read back together.
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    bind_chat_client(repo, "ask_answer", _Echo())
+    baseline: dict = {}
+    with monkeypatch.context() as patch:
+        captured = _spy_assembly(patch)
+        repo._runtime.ask_service()._answer_reasoning(
+            notebook.id, IDENTIFIER_QUESTION, [], kwargs.pop("elements", []),
+            baseline_sink=baseline, **kwargs,
+        )
+    return captured, baseline
 
 
 def test_an_unmarked_injected_copy_does_not_outrank_the_bound_chunks(
     repo, monkeypatch
 ):
-    """Fix: bound1, bound2 (unmarked) and an unmarked injected copy, all tied
-    at relevance 1.0. A 49-char budget fits exactly the first two full lines
-    (see `_labeled_chunk`'s docstring). With no marker on the injected chunk,
-    `promote_bounded_prefix` has nothing to promote, so the stable sort keeps
-    insertion order and the budget goes to the two chunks the model actually
-    bound — exactly the outcome fix A exists to guarantee.
+    """(i) The injected copy scores 1.0 and both bound chunks score below it,
+    and the 49-char budget fits exactly two full lines (see `_labeled_chunk`).
+    Passed as `trailing_chunks`, the copy is assembled after the bound block —
+    which has already spent the budget — so the prompt carries the two chunks
+    the model actually bound, and not the injected one.
     """
-    notebook = repo.create_notebook(NotebookCreate(name="nb"))
-    bind_chat_client(repo, "ask_answer", _Echo())
-    bound1 = _labeled_chunk("bound1", "bound1", False)
-    bound2 = _labeled_chunk("bound2", "bound2", False)
-    injected = _labeled_chunk("inject", "inject", False)
+    _captured, baseline = _assemble(
+        repo, monkeypatch,
+        chunks=[_labeled_chunk("bound1", "bound1", False, relevance=0.4),
+                _labeled_chunk("bound2", "bound2", False, relevance=0.5)],
+        trailing_chunks=[_labeled_chunk("inject", "inject", False)],
+        chunk_context_chars=_MARKER_FREE_BUDGET,
+    )
 
-    with monkeypatch.context() as patch:
-        captured = _spy_assembly(patch)
-        repo._runtime.ask_service()._answer_reasoning(
-            notebook.id, IDENTIFIER_QUESTION, [], [],
-            chunks=[bound1, bound2, injected],
-            chunk_context_chars=_MARKER_FREE_BUDGET,
-        )
-
-    assert _object_ids(captured["id_map"]) == {"bound1", "bound2"}, (
-        f"the marker-free copy must lose the budget to the bound chunks, "
-        f"got {sorted(_object_ids(captured['id_map']))}")
+    assert _object_ids(baseline["id_map"]) == {"bound1", "bound2"}, (
+        f"the injected copy must take only what the bound block left, "
+        f"got {sorted(_object_ids(baseline['id_map']))}")
+    assert "Exact-lookup passages" not in baseline["context_block"]
 
 
-def test_mutation_a_marked_injected_copy_would_evict_a_bound_chunk(
+def test_mutation_the_injected_copy_inside_the_bound_block_evicts_a_bound_chunk(
     repo, monkeypatch
 ):
-    """Mutation control for the test above: same three chunks, but the
-    injected one keeps its original `exact_lookup=True` marker (as if fix A
-    had not stripped it). It now rides the prefix seat ahead of `bound2`,
-    which is exactly the regression fix A exists to prevent — this must be
-    red before the fix and is confirmed red here by construction, pinning
-    that the assertion above is not vacuously true for any three tied chunks.
+    """Mutation control for (i): the very same three chunks, but the injected
+    copy is handed in through `chunks=` (as it was when the copy was merely
+    unmarked and appended to the section's own chunk list). The relevance sort
+    now puts its 1.0 ahead of the bound 0.5/0.4 and it eats the budget — the
+    regression the trailing block exists to prevent. Red by construction, so
+    the assertion above is not vacuously true for any three candidates.
     """
-    notebook = repo.create_notebook(NotebookCreate(name="nb"))
-    bind_chat_client(repo, "ask_answer", _Echo())
-    bound1 = _labeled_chunk("bound1", "bound1", False)
-    bound2 = _labeled_chunk("bound2", "bound2", False)
-    injected_marked = _labeled_chunk("inject", "inject", True)
+    _captured, baseline = _assemble(
+        repo, monkeypatch,
+        chunks=[_labeled_chunk("bound1", "bound1", False, relevance=0.4),
+                _labeled_chunk("bound2", "bound2", False, relevance=0.5),
+                _labeled_chunk("inject", "inject", False)],
+        chunk_context_chars=_MARKER_FREE_BUDGET,
+    )
 
-    with monkeypatch.context() as patch:
-        captured = _spy_assembly(patch)
-        repo._runtime.ask_service()._answer_reasoning(
-            notebook.id, IDENTIFIER_QUESTION, [], [],
-            chunks=[bound1, bound2, injected_marked],
-            chunk_context_chars=_MARKER_FREE_BUDGET,
-        )
-
-    ids = _object_ids(captured["id_map"])
-    assert "inject" in ids, "a marked chunk takes the prefix seat"
+    ids = _object_ids(baseline["id_map"])
+    assert "inject" in ids, "relevance order alone promotes the injected copy"
     assert ids != {"bound1", "bound2"}, (
-        "and by taking it, evicts one of the two chunks the model bound")
+        "and by doing so, evicts one of the two chunks the model bound")
+
+
+# A long element text plus this budget: the element block alone spends the whole
+# source partition, so a trailing block assembled after it has nothing left.
+_ELEMENT_BUDGET = 200
+
+
+def _long_element():
+    return RetrievedElement(
+        element_id="e1", source_id="s1", source_title="t",
+        location_label="p1", element_type="paragraph",
+        text="元" * 500, score=0.9,
+    )
+
+
+def test_a_section_bound_only_to_elements_still_comes_first(repo, monkeypatch):
+    """(ii) The element block is assembled AFTER the bound chunk block but
+    BEFORE the trailing one. A section whose only bound evidence is a source
+    element must therefore still spend the budget first — moving the trailing
+    block back ahead of the elements turns this red.
+    """
+    _captured, baseline = _assemble(
+        repo, monkeypatch,
+        elements=[_long_element()],
+        trailing_chunks=[_labeled_chunk("inject", "inject", False)],
+        chunk_context_chars=_ELEMENT_BUDGET,
+    )
+
+    types = {entry["object_type"] for entry in baseline["id_map"].values()}
+    assert types == {"element"}, (
+        f"the element must keep the whole budget, got {sorted(types)}")
+    assert "Exact-lookup passages" not in baseline["context_block"]
+
+
+def test_with_room_to_spare_the_trailing_block_is_admitted_after_the_bound_keys(
+    repo, monkeypatch
+):
+    """(iii) The other half of the contract: a roomy budget really does admit
+    the injected copy, numbered past the bound segment, with the KG segment
+    still starting at `_MIX_KG_KEY_BASE`.
+    """
+    seen: list = []
+    original = AskService._answer_context
+
+    def _spy_kg(self, notebook_id, top_hits, id_offset=0, budget_chars=None):
+        seen.append(id_offset)
+        return original(self, notebook_id, top_hits, id_offset=id_offset,
+                        budget_chars=budget_chars)
+
+    monkeypatch.setattr(AskService, "_answer_context", _spy_kg)
+    counts: dict = {}
+    captured, baseline = _assemble(
+        repo, monkeypatch,
+        chunks=[_labeled_chunk("bound1", "bound1", False, relevance=0.4),
+                _labeled_chunk("bound2", "bound2", False, relevance=0.5)],
+        trailing_chunks=[_labeled_chunk("inject", "inject", False)],
+        chunk_context_chars=4000, counts_sink=counts,
+    )
+
+    # 装进 prompt 的注入块跟绑定块同一条计数口径:它们真的在上下文里,轨迹上
+    # 少报一条等于让「合成看见了多少原文」对不上 prompt。
+    assert counts["included_chunks"] == 3
+    assert len(captured["calls"]) == 2, "bound block, then the trailing block"
+    assert captured["calls"][1]["id_offset"] == 2, (
+        "the trailing segment is numbered past the bound chunks")
+    keys = {entry["object_id"]: key for key, entry in baseline["id_map"].items()}
+    assert set(keys) == {"bound1", "bound2", "inject"}
+    assert keys["inject"] == "k3"
+    assert "[Exact-lookup passages]" in baseline["context_block"]
+    assert seen == [AskService._MIX_KG_KEY_BASE]
+
+
+def test_a_section_with_only_trailing_chunks_still_moves_the_kg_segment(
+    repo, monkeypatch
+):
+    """(iv) A section that bound no chunk at all, only injected ones: the KG
+    segment must still start at `_MIX_KG_KEY_BASE`. Keying the offset off
+    `chunks` alone would restart KG at k1 and collide with the trailing block's
+    own k1 — two different objects behind one anchor, silently.
+    """
+    seen: list = []
+    original = AskService._answer_context
+
+    def _spy_kg(self, notebook_id, top_hits, id_offset=0, budget_chars=None):
+        seen.append(id_offset)
+        return original(self, notebook_id, top_hits, id_offset=id_offset,
+                        budget_chars=budget_chars)
+
+    monkeypatch.setattr(AskService, "_answer_context", _spy_kg)
+    captured, baseline = _assemble(
+        repo, monkeypatch,
+        trailing_chunks=[_labeled_chunk("inject", "inject", False)],
+        chunk_context_chars=4000,
+    )
+
+    assert captured["calls"][0]["id_offset"] == 0, (
+        "with no bound chunks the trailing segment starts the low namespace")
+    assert list(baseline["id_map"]) == ["k1"]
+    assert seen == [AskService._MIX_KG_KEY_BASE], (
+        "trailing chunks alone must still push the KG segment to 1001+")
 
 
 # --------------------------- P3-2: sort-then-promote, never promote-then-sort
