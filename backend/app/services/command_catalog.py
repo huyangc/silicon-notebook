@@ -1588,7 +1588,7 @@ def assignment_coverage(
             if not isinstance(raw_arg, Mapping):
                 continue
             returned += 1
-            hit = _assignment_claim(str(raw_arg.get("name") or "").strip(), names)
+            hit = _assignment_claim(as_text(raw_arg.get("name")), names)
             if hit:
                 claimed.add(hit)
     return AssignmentCoverage(
@@ -1740,7 +1740,7 @@ def validate_entry(
     assignment = tuple(str(name) for name in assigned or ())
     rejections: list[Rejection] = []
 
-    name = str(payload.get("command_name") or "").strip()
+    name = as_text(payload.get("command_name"))
     # Computed once and unconditionally, because two different questions read
     # it: the veto below (which the relay may waive) and `relayed` further
     # down (which asks whether the waiver was what carried the claim).
@@ -1799,14 +1799,14 @@ def validate_entry(
             )
             continue
         args_seen += 1
-        arg_name = str(raw_arg.get("name") or "").strip()
+        arg_name = as_text(raw_arg.get("name"))
         reason = _check_arg_name(arg_name, evidence)
         if not reason and assignment and arg_name not in assignment:
             reason = "arg_outside_slice"
         if reason:
             rejections.append(_reject(evidence, "arg", arg_name, reason))
             continue
-        default = str(raw_arg.get("default") or "").strip()
+        default = as_text(raw_arg.get("default"))
         if default:
             defaults_seen += 1
             # Token-bounded, not bare `in`: the manual's own "default value is
@@ -1832,7 +1832,7 @@ def validate_entry(
             )
         )
 
-    syntax = str(payload.get("syntax") or "").strip()
+    syntax = as_text(payload.get("syntax"))
     syntax_seen = bool(syntax)
     syntax_kept = syntax_seen and (
         normalize_syntax(syntax) in normalize_syntax(evidence)
