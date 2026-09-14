@@ -1051,9 +1051,9 @@ PR-A 补的是 chunk 通用问答已有、reasoning 此前没有的一项能力�
   互相挤兑——多读一篇原文会莫名其妙顶掉本该显示的直接元素卡，反过来也一样。
 
 - **`coverage` 为什么是字符串枚举，不是布尔**：与 `enumerate.scope` 同一条纪律（见 §6.2）。
-  `model_json._validate_against_example` 对布尔示例做硬类型校验，模型答 `"true"`/`"yes"`
-  会被直接拒收、整轮反思掉进 fail-open 兜底；字符串示例继承「空串永远合法」的宽容规则，模型
-  不填也能拿到默认值 `"spread"`。字符串取值本身还携带语义：`"spread"`/`"opening"` 直接说清
+  `model_json.validate_model_json_shape` 对布尔示例按类型记注记、对字符串枚举只在非空非法时记
+  `invalid_enum`，空串永远合法——模型不填也能拿到默认值 `"spread"`；校验层只报告不拒收
+  （harness 原则，2026-09-14），填错的值由解析器落回 `"spread"`，动作照常成立。字符串取值本身还携带语义：`"spread"`/`"opening"` 直接说清
   「等距取样」与「只读开头」是什么，`true`/`false` 则需要模型记住哪个布尔值对应哪种取样——
   一个纯粹的额外记忆负担，换不回任何表达力。
 
