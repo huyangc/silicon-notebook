@@ -295,6 +295,33 @@ def _sampled_outcome(body_chars=400):
     )
 
 
+def test_the_roster_preview_reserves_space_for_the_sampled_block():
+    """codex #724 R2:80 篇的花名册预览能把共享的那一半预算(standard 档 15000)
+    吃到只剩几十字,随后拼上来的 2500 字取样块整块被挡——读成功了却白读。
+
+    修法是先按取样块的真实渲染长度预留、再给枚举预览分预算,而且预留要从
+    **半预算上限**里扣(整份预算减两千仍远大于一半,夹到一半后花名册照样拿满)。
+    这里钉住两件事:预留 = 渲染长度 + 拼接符;扣完之后「花名册预算 + 取样块」
+    仍装得进一半——正是 `_assemble_document_read_block` 那道整块不装的判据。
+    """
+    from app.services.collection_enumeration_answer import enumeration_sub_budget
+    from app.services.document_read_answer import document_read_block_reserve
+
+    assert document_read_block_reserve([]) == 0
+    outcome = _sampled_outcome(body_chars=2400)
+    reserve = document_read_block_reserve([outcome])
+    rendered = document_read_prompt_block([outcome], roster_map={})
+    assert reserve == len(rendered.text) + 2
+
+    chunk_context_chars = 30000
+    roster_budget = max(0, enumeration_sub_budget(
+        chunk_context_chars=chunk_context_chars, structured_block_len=0,
+    ) - reserve)
+    assert roster_budget < chunk_context_chars // 2
+    # 花名册按预算拿满、取样块再拼上去,仍不超过一半——不会被整块挡下。
+    assert roster_budget + len(rendered.text) + 2 <= chunk_context_chars // 2
+
+
 def test_the_sampled_block_is_dropped_whole_when_it_would_eat_half_the_budget(repo):  # noqa: F811
     """④ structured 段(枚举预览 + 取样块)不得超过 `chunk_context_chars` 的一半。
 

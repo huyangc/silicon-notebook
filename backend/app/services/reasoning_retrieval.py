@@ -789,6 +789,16 @@ def _resolve_roster_rows(rows, requested: str) -> list:
         if wanted:
             matches = [row for row in rows
                        if _normalized_title(_roster_note_form(row)) == wanted]
+    if matches:
+        # 歧义按**模型看得见的形态**判(codex #724 R2):一篇标题恰好 60 字、另一篇
+        # 以同样 60 字开头时,账目里两行显示得一模一样;整串精确匹配只会命中短的
+        # 那一篇,静默选错。凡与已命中行在账目形态上撞车的行一并纳入,让调用方
+        # 按「多篇同名」如实报歧义,而不是替模型挑一篇。
+        visible = {_normalized_title(_roster_note_form(row)) for row in matches}
+        collisions = [row for row in rows
+                      if _normalized_title(_roster_note_form(row)) in visible]
+        if len(collisions) > len(matches):
+            matches = collisions
     return matches
 
 
@@ -1152,7 +1162,11 @@ def _source_titles_note(items) -> str:
         # 标题本来就区分不开,只会 unresolved skip)。出现一次是「库里有这么一类
         # 文档」,出现 N 次只是把有界预算烧在同一句话上。
         raw = " ".join(_roster_display_title(item).split())
-        if not raw or (raw == UNNAMED_SOURCE_LABEL and raw in titles):
+        # `titles` 存的是 (text, mark) 元组——占位串是否已占位要比 text 分量,直接
+        # `raw in titles` 永远为假(codex #724 R2:20 篇无名文档会把占位串重复
+        # 20 遍、把后面的真标题挤出账目)。
+        if not raw or (raw == UNNAMED_SOURCE_LABEL
+                       and any(text == raw for text, _ in titles)):
             continue
         if len(titles) >= _ENUM_NOTE_SOURCE_TITLES:
             break
