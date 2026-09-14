@@ -315,3 +315,23 @@ def test_a_recovered_retry_still_drops_only_its_own_answer_alarm(repo):
     assert ok is True
     assert [row["workload_id"] for row in sink] == ["evidence_refine"], (
         f"只有 ask_answer 那条该被摘掉,实得 {sink}")
+
+
+class _ListAnswer:
+    """A delivered off-type reply (the shape boundary reports, not rejects):
+    ``answer`` is a list. Must read as "no answer", not as the text "[]"."""
+    configured = True
+    model = "m"
+
+    def chat_json(self, *a, **k):
+        return _j.dumps({"answer": ["cascode", "raises rout"], "grounded": True})
+
+
+def test_chunk_non_string_answer_degrades_honestly(repo):
+    _chunk_only(repo)
+    bind_chat_client(repo, "ask_answer", _ListAnswer())
+    nb = _seed_chunks(repo)
+    resp = repo.ask_chunk(nb.id, AskRequest(question="cascode", mode="chunk"))
+    assert "[" not in resp.conclusion and "raises rout" not in resp.conclusion
+    assert resp.llm_mode == "synthesis_failed"
+    assert any(e.stage == "answer" for e in resp.model_errors)

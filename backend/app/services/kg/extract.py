@@ -513,7 +513,16 @@ def extract_window(client: Any, elements: List[SourceElementQ], section_path: st
         if not isinstance(it, dict):
             continue
         if not _typed_str(it.get("type"), EDGE_TYPES):
-            rejected_edges[(str(it.get("type") or "<missing>")[:64], "unknown_edge_type")] += 1
+            # Fixed categories only: the value is model-authored text (with a
+            # lenient boundary it may be a sentence or a dict of source text)
+            # and this counter is written to ordinary logs.
+            raw_type = it.get("type")
+            category = (
+                "<missing>" if raw_type in (None, "")
+                else "<off_vocabulary>" if isinstance(raw_type, str)
+                else "<off_type>"
+            )
+            rejected_edges[(category, "unknown_edge_type")] += 1
             continue
         s = by_local.get(str(it.get("source"))); t = by_local.get(str(it.get("target")))
         if not s or not t or s == t:

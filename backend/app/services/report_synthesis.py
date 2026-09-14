@@ -107,7 +107,7 @@ def normalize_report_frame(value: object, *, strict: bool = False) -> dict | Non
                 "id": facet_id,
                 "name": name,
                 "values": values,
-                "exclusive": bool(raw.get("exclusive", False)),
+                "exclusive": raw.get("exclusive", False) is True,
             })
 
         axes: list[dict] = []
@@ -624,7 +624,7 @@ def normalize_claim_ledger(
             "entities": _strings(raw.get("entities"), 12, 160),
             "evidence_keys": evidence_keys,
             "conditions": conditions,
-            "same_paper_baseline": bool(raw.get("same_paper_baseline", False)),
+            "same_paper_baseline": raw.get("same_paper_baseline", False) is True,
             "confidence": _confidence(raw.get("confidence", 0.0)),
             "frame_assignments": assignments,
         })

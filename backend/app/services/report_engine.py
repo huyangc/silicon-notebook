@@ -2390,8 +2390,13 @@ class ReportEngine:
                     **cap_kwargs(client, "report_section_max_tokens"))
                 data = json.loads(raw)
                 if isinstance(data, dict):
-                    markdown = str(data.get("markdown", "")).strip()
-                    llm_grounded = bool(data.get("grounded", False))
+                    # Prose must be a string: a delivered list/dict would
+                    # otherwise become the non-empty text "[]" and count as a
+                    # successful draft. Booleans must be real booleans — the
+                    # boundary already coerces "true"/"false" spellings.
+                    raw_markdown = data.get("markdown")
+                    markdown = raw_markdown.strip() if isinstance(raw_markdown, str) else ""
+                    llm_grounded = data.get("grounded", False) is True
                     raw_claims = data.get("claims")
                 attempt_status = "success" if markdown else "empty"
             except AskCancelled:
@@ -3268,7 +3273,8 @@ class ReportEngine:
                     summary_client, "report_summary_max_tokens",
                 ))
             data = json.loads(raw)
-            summary = str(data.get("summary", "")).strip()
+            raw_summary = data.get("summary")
+            summary = raw_summary.strip() if isinstance(raw_summary, str) else ""
             known_intents = {str(item.get("id") or "") for item in intent_catalog}
             for row in (data.get("coverage") or []):
                 if not isinstance(row, dict):

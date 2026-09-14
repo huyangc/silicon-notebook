@@ -210,3 +210,11 @@ def test_doi_wrapped_in_unicode_quotes_accepted():
     head = "Some text\n“10.9999/abc”\n"
     meta = verify_paper_meta(_base(doi="10.9999/abc"), head, model="m")
     assert meta["doi"] == "10.9999/abc"
+
+
+def test_only_a_real_json_true_marks_a_paper():
+    # The shape boundary coerces the spellings "true"/"false" before the
+    # reply reaches this parser; any other truthy value is a negative.
+    for negative in ("no", "unsure", ["yes"], 1):
+        meta = verify_paper_meta(_base(is_paper=negative), HEAD, model="m1")
+        assert meta["is_paper"] is False, negative

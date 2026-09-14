@@ -138,7 +138,8 @@ def expand_query(client, question: str, history: str = "", *,
             return []
         hl = _kw_list(data.get("high_level_keywords"))
         ll = _kw_list(data.get("low_level_keywords"))
-        query = str(data.get("query", "")).strip() or question
+        raw_query = data.get("query")
+        query = (raw_query.strip() if isinstance(raw_query, str) else "") or question
         comp = data.get("comparison")
         comparison = None
         if isinstance(comp, dict) and str(comp.get("focal", "")).strip():
