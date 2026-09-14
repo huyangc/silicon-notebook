@@ -733,3 +733,22 @@ def test_synthesis_prompt_lists_legal_facet_ids_when_provided():
     # Same discard-path reasoning as above: no plausible value slug in this
     # sentence either.
     assert "family:Transformer" not in prompt
+
+
+def test_a_string_baseline_flag_does_not_admit_an_unconditioned_comparison():
+    # codex #720 R6: the lenient boundary delivers "no" for a boolean hint;
+    # admission must use the same `is True` reading as the projection.
+    fact = "Attention is one mixer [k1]."
+    comparison = "A is faster than B [k1]."
+    markdown = f"## A\n\n{fact}\n\n{comparison}"
+    ledger = [{
+        "claim_id": "c1", "statement": fact, "type": "fact",
+        "evidence_keys": ["k1"],
+    }, {
+        "claim_id": "c2", "statement": comparison, "type": "comparison",
+        "evidence_keys": ["k1"], "conditions": [], "same_paper_baseline": "no",
+    }]
+    claims, status = normalize_claim_ledger(
+        ledger, markdown=markdown, legal_anchor_keys={"k1"}, frame=None)
+    assert status == "partial"
+    assert [row["claim_id"] for row in claims] == ["c1"]

@@ -589,8 +589,8 @@ def normalize_claim_ledger(
         if claim_type in {"fact", "comparison", "trend"} and not evidence_keys:
             continue
         conditions = _strings(raw.get("conditions"), 8, 300)
-        if claim_type == "comparison" and not conditions and not bool(
-            raw.get("same_paper_baseline", False)
+        if claim_type == "comparison" and not conditions and (
+            raw.get("same_paper_baseline", False) is not True
         ):
             continue
         # `frame_assignments` is an organizational tag, not evidence grounding,
@@ -758,7 +758,7 @@ def fair_editor_context(
             "entities": _strings(value.get("entities"), 12, 160),
             "evidence_keys": _strings(value.get("evidence_keys"), 16, 32),
             "conditions": _strings(value.get("conditions"), 8, 300),
-            "same_paper_baseline": bool(value.get("same_paper_baseline", False)),
+            "same_paper_baseline": value.get("same_paper_baseline", False) is True,
             "confidence": _confidence(value.get("confidence", 0.0)),
             "frame_assignments": assignments,
         }

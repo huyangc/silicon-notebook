@@ -322,3 +322,25 @@ def test_evidence_index_accepts_only_integer_labels():
     # name fallback still grounds a node whose label is unusable
     assert _resolve(ELEMENTS, True, "Engram") is ELEMENTS[2]
     assert _resolve(ELEMENTS, 0.5, "no such text") is None
+
+
+def test_refine_ignores_a_boolean_index_instead_of_deleting_node_one():
+    # codex #720 R6 P1: ``bool`` is an ``int`` subclass; a delivered
+    # ``{"index": true, "keep": false}`` must not remove nodes[1].
+    from app.services.kg.extract import refine_nodes
+
+    class _BoolIndex:
+        configured = True
+
+        def chat_json(self, messages, response_schema_hint, **kwargs):
+            return json.dumps({"items": [
+                {"index": True, "keep": False},
+                {"index": 0, "keep": True},
+            ]})
+
+    nodes = [
+        Node(id="W0-0", type="Concept", name="analog signal", section_path="1", evidence=[]),
+        Node(id="W0-1", type="Claim", name="Engram", section_path="1", evidence=[]),
+    ]
+    kept = refine_nodes(_BoolIndex(), ELEMENTS, list(nodes), "1")
+    assert [n.name for n in kept] == ["analog signal", "Engram"]
