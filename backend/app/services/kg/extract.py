@@ -380,7 +380,9 @@ def refine_nodes(client: Any, elements: List[SourceElementQ], nodes: List[Node],
         return nodes
     drop = set()
     for it in items:
-        if isinstance(it, dict) and isinstance(it.get("index"), int) \
+        # ``type(...) is int``: a delivered boolean index (``bool`` is an
+        # ``int`` subclass) would otherwise delete node 1 (codex #720 R6).
+        if isinstance(it, dict) and type(it.get("index")) is int \
                 and it.get("keep") is False:
             drop.add(it["index"])
     if not drop:
