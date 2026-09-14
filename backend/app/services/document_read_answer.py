@@ -49,17 +49,22 @@ from app.services.document_source_overview import supplemental_excerpt_header
 
 DOCUMENT_READ_GUIDANCE = (
     "[Bounded original-text samples read from the specific documents named "
-    "below, each sampled passage carrying its own [kN] handle. Introduce each "
-    "document in its own paragraph headed by that document's title, and write "
-    "its purpose, method and contribution only from that document's own "
-    "samples or its stored summary; when the supplied evidence does not "
-    "establish one of them, leave it empty and say so explicitly. Name one by "
-    "one every document in the directory listing that has neither a stored "
-    "summary nor a sample in this turn as lacking evidence sufficient to "
-    "introduce its body; never skip such a document and never infer its "
-    "contents from its title. A complete directory listing is not a full "
-    "reading: the sampling coverage of each block is stated by the coverage "
-    "line that follows its header.]"
+    "below, each sampled passage carrying its own [kN] handle. Cite them like "
+    "any other evidence; what a sample does not show is not established, and "
+    "a complete directory listing is not a full reading: the sampling "
+    "coverage of each block is stated by the coverage line that follows its "
+    "header. ONLY IF the question asks what the documents are about (what "
+    "each document covers, an overview of the library's documents): introduce "
+    "each document in its own paragraph headed by that document's title, "
+    "write its purpose, method and contribution only from that document's "
+    "own samples or its stored summary, leave empty and say so when the "
+    "evidence does not establish one of them, and name one by one every "
+    "document in the directory listing that has neither a stored summary nor "
+    "a sample in this turn as lacking evidence sufficient to introduce its "
+    "body — never skip such a document and never infer its contents from its "
+    "title. For any other question, use these samples solely as evidence for "
+    "that question and do not introduce documents the question did not ask "
+    "about.]"
 )
 
 

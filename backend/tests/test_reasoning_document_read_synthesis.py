@@ -322,6 +322,41 @@ def test_the_roster_preview_reserves_space_for_the_sampled_block():
     assert roster_budget + len(rendered.text) + 2 <= chunk_context_chars // 2
 
 
+def test_knowhow_content_does_not_count_against_the_roster_and_sample_half(repo):  # noqa: F811
+    """codex #724 R4:整块不装的判据要与枚举侧子预算同口径——knowhow 整表块不受
+    半预算约束(既有设计),受约束的是「花名册 + 取样」这一对。按裸的一半判,
+    4000 字 knowhow + 13000 字花名册 + 2000 字取样会把预留过席位的取样块照样挡下。
+    """
+    service = repo._runtime.ask_service()
+    structured_map = {"k5001": {"object_type": "source", "object_id": "s1"}}
+    knowhow = "K" * 4000
+    roster = "R" * 11000            # 花名册 + 取样块(约 3100 字)≤ 一半(15000)
+    structured_block = f"{knowhow}\n\n{roster}"
+    outcome = _sampled_outcome(body_chars=2000)
+
+    block, dropped = service._assemble_document_read_block(
+        [outcome], structured_block, dict(structured_map), {},
+        _AnswerClient(), 30000, len(knowhow))
+    assert dropped is False and "k7001" in block
+
+    # 不带 knowhow 长度(裸的一半)时同一份内容会被挡下——钉住这个参数是承重的。
+    block2, dropped2 = service._assemble_document_read_block(
+        [outcome], structured_block, dict(structured_map), {},
+        _AnswerClient(), 30000)
+    assert dropped2 is True and block2 == structured_block
+
+
+def test_the_introduction_shape_is_conditional_on_the_question():
+    """codex #724 R4:`read_document` 对任意问题都可用;逐篇导读与「逐一点名缺证据
+    文档」只在问题问「这些文档分别讲什么」时适用,聚焦型问题(比较两篇里的某个
+    方法)只把取样当证据用,不得被迫写目录导读。证据/覆盖率约束保持无条件。
+    """
+    assert DOCUMENT_READ_GUIDANCE.startswith("[Bounded original-text samples")
+    assert "ONLY IF the question asks what the documents are about" in DOCUMENT_READ_GUIDANCE
+    assert "For any other question, use these samples solely as evidence" in DOCUMENT_READ_GUIDANCE
+    assert "a complete directory listing is not a full reading" in DOCUMENT_READ_GUIDANCE
+
+
 def test_the_sampled_block_is_dropped_whole_when_it_would_eat_half_the_budget(repo):  # noqa: F811
     """④ structured 段(枚举预览 + 取样块)不得超过 `chunk_context_chars` 的一半。
 
