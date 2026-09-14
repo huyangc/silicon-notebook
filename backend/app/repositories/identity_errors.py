@@ -28,3 +28,8 @@ class AgentTokenInactiveError(Exception):
     def __init__(self, reason: Literal["revoked", "profile_disabled"]) -> None:
         super().__init__(reason)
         self.reason = reason
+
+
+class AgentTokenAccessConflictError(Exception):
+    """整体替换 token 访问配置时带的 ``expected`` 前置条件不再成立:配置在编辑器
+    打开之后已被别处改过。拒写而不是后写覆盖,免得旧编辑器悄悄恢复刚收回的权限。"""

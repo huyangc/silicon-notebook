@@ -7,14 +7,17 @@ from dataclasses import replace
 from typing import Any, Mapping, Sequence
 
 from app.models.memory import MemoryRevision, MemoryWrite
-from app.models.identity import AgentProfile, AgentTokenSummary
+from app.models.identity import AgentProfile, AgentTokenAccess, AgentTokenSummary
 from app.models.memory import (
     MemoryNotebookOption,
     MemoryRecord,
     PaginatedMemories,
 )
 from app.core.json_safety import strict_json_dumps
-from app.repositories.identity_errors import AgentTokenInactiveError
+from app.repositories.identity_errors import (
+    AgentTokenAccessConflictError,
+    AgentTokenInactiveError,
+)
 from app.repositories.sqlite.access_sql import (
     GRANT_PROBE_SQL,
     MEMBER_PROBE_SQL,
@@ -227,12 +230,15 @@ class MemoryStore:
         default_notebook_id: str,
         notebook_ids: Sequence[str],
         expires_at: str | None,
+        expected: AgentTokenAccess | None = None,
     ) -> AgentTokenSummary:
         # 一个写事务:sqlite ``write()`` 的进程内写锁串行化了读-判-写,所以下面
-        # 的「读撤销/停用状态」与「写新配置」之间不会被另一次并发撤销插入。
+        # 的「读撤销/停用状态与 expected 前置条件」与「写新配置」之间不会被另一次
+        # 并发撤销或修改插入。
         with self.database.write() as db:
             row = db.execute(
-                "SELECT t.revoked_at,p.status AS profile_status FROM agent_access_tokens t "
+                "SELECT t.*,p.name AS profile_name,p.status AS profile_status "
+                "FROM agent_access_tokens t "
                 "JOIN agent_profiles p ON p.id=t.agent_profile_id "
                 "WHERE t.id=? AND p.owner_id=?",
                 (token_id, owner_id),
@@ -243,6 +249,10 @@ class MemoryStore:
                 raise AgentTokenInactiveError("revoked")
             if row["profile_status"] != "active":
                 raise AgentTokenInactiveError("profile_disabled")
+            if expected is not None and not expected.matches(
+                self._token(row, self._token_notebooks_on(db, token_id))
+            ):
+                raise AgentTokenAccessConflictError(token_id)
             cursor = db.execute(
                 "UPDATE agent_access_tokens SET scopes_json=?,default_notebook_id=?,"
                 "expires_at=? WHERE id=? AND revoked_at IS NULL",

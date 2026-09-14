@@ -9,7 +9,11 @@ from fastapi.testclient import TestClient
 from app.api.deps import USER_MESSAGE_HEADER
 from app.core.config import Settings
 from app.models.schemas import NotebookCreate
-from app.repositories.identity_errors import AgentTokenInactiveError
+from app.models.identity import AgentTokenAccess
+from app.repositories.identity_errors import (
+    AgentTokenAccessConflictError,
+    AgentTokenInactiveError,
+)
 from app.services.sqlite_repository import (
     SQLiteRepository,
     reset_request_user,
@@ -227,6 +231,10 @@ def test_update_access_replaces_scopes_notebooks_and_default_live(token_context)
         original_hash = db.execute(
             "SELECT token_hash FROM agent_access_tokens WHERE id=?", (issued.id,)
         ).fetchone()["token_hash"]
+    # An already-connected Agent holds the principal it authenticated with
+    # before the edit; authorization must follow the live row, not this copy.
+    stale_principal = service.resolve_agent_token(issued.token)
+    assert stale_principal is not None
 
     updated = service.update_agent_token_access(
         alice.id, issued.id, ["memory:propose"], other.id, [other.id], None
@@ -268,6 +276,10 @@ def test_update_access_replaces_scopes_notebooks_and_default_live(token_context)
         service.require_agent_access(principal, "memory:propose", notebook.id)
     # ... and a newly granted scope/notebook is allowed right away.
     assert service.require_agent_access(principal, "memory:propose", other.id) is None
+    # The same holds for the pre-edit principal an MCP session still carries.
+    with pytest.raises(PermissionError):
+        service.require_agent_access(stale_principal, "memory:read", notebook.id)
+    assert service.require_agent_access(stale_principal, "memory:propose", other.id) is None
 
 
 def test_update_access_expiry_clear_expire_and_restore_follow_issue_rules(
@@ -307,6 +319,65 @@ def test_update_access_expiry_clear_expire_and_restore_follow_issue_rules(
     )
     assert restored.expires_at is not None
     assert service.resolve_agent_token(issued.token) is not None
+
+
+def test_update_access_expected_snapshot_refuses_a_stale_editor(token_context):
+    service, alice, _bob, notebook, other = token_context
+    profile = service.create_agent_profile(alice.id, "Two tabs", "")
+    issued = _issue(
+        service, alice, profile, notebook,
+        scopes=["memory:read", "sources:delete"],
+        expires_at="2030-01-02T03:04:05+00:00",
+    )
+    # Both editors open from the same stored configuration (a client may
+    # echo the expiry in any offset and list members in any order).
+    opened = AgentTokenAccess(
+        scopes=["sources:delete", "memory:read"],
+        default_notebook_id=notebook.id,
+        notebook_ids=[notebook.id],
+        expires_at="2030-01-02T11:04:05+08:00",
+    )
+
+    # Tab B narrows the token.
+    narrowed = service.update_agent_token_access(
+        alice.id, issued.id, ["memory:read"], notebook.id, [notebook.id],
+        "2030-01-02T03:04:05+00:00", opened,
+    )
+    assert narrowed.scopes == ["memory:read"]
+
+    # Tab A, still holding the old snapshot, only meant to add a notebook; it
+    # must not silently restore sources:delete.
+    with pytest.raises(AgentTokenAccessConflictError):
+        service.update_agent_token_access(
+            alice.id, issued.id, ["memory:read", "sources:delete"], notebook.id,
+            [notebook.id, other.id], "2030-01-02T03:04:05+00:00", opened,
+        )
+    listed = service.list_agent_tokens(alice.id)[0]
+    assert listed.scopes == ["memory:read"]
+    assert listed.notebook_ids == [notebook.id]
+
+    # Without a precondition the replace is last-writer-wins by contract.
+    service.update_agent_token_access(
+        alice.id, issued.id, ["memory:read"], notebook.id, [notebook.id, other.id],
+        None,
+    )
+    assert sorted(service.list_agent_tokens(alice.id)[0].notebook_ids) == sorted(
+        [notebook.id, other.id]
+    )
+
+
+def test_empty_expiry_string_means_no_expiry_on_issue_and_update(token_context):
+    service, alice, _bob, notebook, _other = token_context
+    profile = service.create_agent_profile(alice.id, "Blank expiry", "")
+    issued = service.issue_agent_token(
+        alice.id, profile.id, ["memory:read"], notebook.id, [notebook.id], ""
+    )
+    assert issued.expires_at is None
+    updated = service.update_agent_token_access(
+        alice.id, issued.id, ["memory:read"], notebook.id, [notebook.id], ""
+    )
+    assert updated.expires_at is None
+    assert service.list_agent_tokens(alice.id)[0].expires_at is None
 
 
 def test_update_access_rejects_revoked_disabled_foreign_and_invalid_input(
@@ -569,10 +640,10 @@ def test_update_access_endpoint_owner_private_and_error_mapping(tmp_path, monkey
     assert body["default_notebook_id"] == other_notebook_id
     assert body["notebook_ids"] == [other_notebook_id]
 
-    # someone else's token: 404, no X-User-Message leak of existence. Bob's
-    # payload targets a notebook HE can read so the rejection is proven to
-    # come from the store's owner-scoped lookup, not the notebook allowlist
-    # check that runs first.
+    # someone else's token: 404 with the same message a missing token gets, so
+    # existence is not revealed. Bob's payload targets a notebook HE can read
+    # so the rejection is proven to come from the store's owner-scoped lookup,
+    # not the notebook allowlist check that runs first.
     bob_notebook_id = client.post(
         "/api/notebooks", headers=bob_headers, json={"name": "Bob's own"}
     ).json()["id"]
@@ -587,6 +658,19 @@ def test_update_access_endpoint_owner_private_and_error_mapping(tmp_path, monkey
         },
     )
     assert foreign.status_code == 404
+    assert foreign.json()["detail"] == "没有找到这个 Token，可能已被删除"
+    missing = client.put(
+        "/api/agent-tokens/token-does-not-exist/access",
+        headers=bob_headers,
+        json={
+            "scopes": ["memory:read"],
+            "default_notebook_id": bob_notebook_id,
+            "notebook_ids": [bob_notebook_id],
+            "expires_at": None,
+        },
+    )
+    assert missing.status_code == 404
+    assert missing.json() == foreign.json()
 
     # revoked token: 409 with the X-User-Message marker the frontend trusts.
     revoke = client.delete(f"/api/agent-tokens/{token_id}", headers=alice_headers)
@@ -605,7 +689,7 @@ def test_update_access_endpoint_owner_private_and_error_mapping(tmp_path, monkey
     assert revoked_update.headers.get(USER_MESSAGE_HEADER) == "1"
     assert revoked_update.json()["detail"] == "这个 Token 已撤销，不能再修改权限"
 
-    # A second live token to exercise payload-shape validation.
+    # A second live token to exercise the precondition and payload shape.
     live = client.post(
         f"/api/agent-profiles/{profile_id}/tokens",
         headers=alice_headers,
@@ -616,6 +700,92 @@ def test_update_access_endpoint_owner_private_and_error_mapping(tmp_path, monkey
             "notebook_ids": [notebook_id],
         },
     ).json()
+
+    # a stale expected snapshot: 409 with its own user message.
+    stale = client.put(
+        f"/api/agent-tokens/{live['id']}/access",
+        headers=alice_headers,
+        json={
+            "scopes": ["memory:read", "memory:propose"],
+            "default_notebook_id": notebook_id,
+            "notebook_ids": [notebook_id],
+            "expires_at": None,
+            "expected": {
+                "scopes": ["memory:read", "memory:propose"],
+                "default_notebook_id": notebook_id,
+                "notebook_ids": [notebook_id],
+                "expires_at": None,
+            },
+        },
+    )
+    assert stale.status_code == 409
+    assert stale.headers.get(USER_MESSAGE_HEADER) == "1"
+    assert stale.json()["detail"] == "这个 Token 的权限刚在别处被修改过，请取消后重新打开再改"
+    fresh = client.put(
+        f"/api/agent-tokens/{live['id']}/access",
+        headers=alice_headers,
+        json={
+            "scopes": ["memory:read", "memory:propose"],
+            "default_notebook_id": notebook_id,
+            "notebook_ids": [notebook_id],
+            "expires_at": None,
+            "expected": {
+                "scopes": ["memory:read"],
+                "default_notebook_id": notebook_id,
+                "notebook_ids": [notebook_id],
+                "expires_at": None,
+            },
+        },
+    )
+    assert fresh.status_code == 200, fresh.text
+
+    # an allowlisted notebook the owner cannot read: 422 with a user message.
+    unreadable = client.put(
+        f"/api/agent-tokens/{live['id']}/access",
+        headers=alice_headers,
+        json={
+            "scopes": ["memory:read"],
+            "default_notebook_id": notebook_id,
+            "notebook_ids": [notebook_id, bob_notebook_id],
+            "expires_at": None,
+        },
+    )
+    assert unreadable.status_code == 422
+    assert unreadable.headers.get(USER_MESSAGE_HEADER) == "1"
+    assert unreadable.json()["detail"] == "白名单里有你已无权访问的笔记本，请取消勾选后再保存"
+
+    # a token whose Profile is disabled: its own 409 message.
+    disabled_profile_id = client.post(
+        "/api/agent-profiles", headers=alice_headers, json={"name": "Retired"}
+    ).json()["id"]
+    disabled_token = client.post(
+        f"/api/agent-profiles/{disabled_profile_id}/tokens",
+        headers=alice_headers,
+        json={
+            "agent_profile_id": disabled_profile_id,
+            "scopes": ["memory:read"],
+            "default_notebook_id": notebook_id,
+            "notebook_ids": [notebook_id],
+        },
+    ).json()
+    assert client.patch(
+        f"/api/agent-profiles/{disabled_profile_id}",
+        headers=alice_headers,
+        json={"status": "revoked"},
+    ).status_code == 200
+    disabled_update = client.put(
+        f"/api/agent-tokens/{disabled_token['id']}/access",
+        headers=alice_headers,
+        json={
+            "scopes": ["memory:read", "memory:propose"],
+            "default_notebook_id": notebook_id,
+            "notebook_ids": [notebook_id],
+            "expires_at": None,
+        },
+    )
+    assert disabled_update.status_code == 409
+    assert disabled_update.headers.get(USER_MESSAGE_HEADER) == "1"
+    assert disabled_update.json()["detail"] == "所属 Agent Profile 已停用，这个 Token 已失效"
 
     # missing required field (expires_at omitted entirely): 422.
     missing_field = client.put(

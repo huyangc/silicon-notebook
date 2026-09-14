@@ -417,7 +417,7 @@ auth | curl -K - -s -o /dev/null -w '%{http_code}\n' -X DELETE "$MCP_URL" \
 
 ## 10. 撤销与轮换
 
-在 **Agent 接入 → 已签发 Token** 点击 **撤销**，服务端会在后续每次数据工具调用时重新检查实时 token 状态。停用 Agent Profile 会让它的全部 token 立即失效。
+在 **Agent 接入 → 已签发 Token** 点击 **撤销**，再在同一行点 **确认撤销**，服务端会在后续每次数据工具调用时重新检查实时 token 状态。停用 Agent Profile 会让它的全部 token 立即失效。
 
 只想调整已有 token 能做什么时，点它的 **修改权限**：scopes、默认笔记本、白名单与过期时间一起保存，Agent 的下一次工具调用即按新配置执行，无需重签或重新配置客户端。已撤销的 token 不能修改。修改不会再次显示明文；token 本身丢失或泄露时，仍应签发新 token 并撤销旧的。
 

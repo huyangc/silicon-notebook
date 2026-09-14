@@ -8,14 +8,17 @@ from typing import Any, Mapping, Sequence
 from psycopg.errors import DeadlockDetected, SerializationFailure
 
 from app.models.memory import MemoryRevision, MemoryWrite
-from app.models.identity import AgentProfile, AgentTokenSummary
+from app.models.identity import AgentProfile, AgentTokenAccess, AgentTokenSummary
 from app.models.memory import (
     MemoryNotebookOption,
     MemoryRecord,
     PaginatedMemories,
 )
 from app.core.json_safety import strict_json_dumps
-from app.repositories.identity_errors import AgentTokenInactiveError
+from app.repositories.identity_errors import (
+    AgentTokenAccessConflictError,
+    AgentTokenInactiveError,
+)
 from app.repositories.postgres._store_utils import (
     execute_many,
     iso_timestamp,
@@ -259,12 +262,15 @@ class MemoryStore:
         default_notebook_id: str,
         notebook_ids: Sequence[str],
         expires_at: str | None,
+        expected: AgentTokenAccess | None = None,
     ) -> AgentTokenSummary:
         # 一个写事务:``FOR UPDATE OF t`` 锁住 token 行,使下面的「读撤销/停用
-        # 状态」与「写新配置」之间不会被另一次并发撤销插入。
+        # 状态与 expected 前置条件」与「写新配置」之间不会被另一次并发撤销或
+        # 修改插入(并发修改在行锁上排队,后到者读到的是先到者提交后的配置)。
         with self.database.write() as db:
             row = db.execute(
-                "SELECT t.revoked_at,p.status AS profile_status FROM agent_access_tokens t "
+                "SELECT t.*,p.name AS profile_name,p.status AS profile_status "
+                "FROM agent_access_tokens t "
                 "JOIN agent_profiles p ON p.id=t.agent_profile_id "
                 "WHERE t.id=%s AND p.owner_id=%s FOR UPDATE OF t",
                 (token_id, owner_id),
@@ -275,6 +281,10 @@ class MemoryStore:
                 raise AgentTokenInactiveError("revoked")
             if row["profile_status"] != "active":
                 raise AgentTokenInactiveError("profile_disabled")
+            if expected is not None and not expected.matches(
+                self._token(row, self._token_notebooks_on(db, token_id))
+            ):
+                raise AgentTokenAccessConflictError(token_id)
             cursor = db.execute(
                 "UPDATE agent_access_tokens SET scopes_json=%s,default_notebook_id=%s,"
                 "expires_at=%s WHERE id=%s AND revoked_at IS NULL",

@@ -91,7 +91,7 @@ If the current client uses a different MCP configuration format, create one Stre
 ## Verification and failure handling
 
 - An HTTP `401` usually means the token is incomplete, expired, or revoked.
-- A scope/allowlist refusal cannot be bypassed in client configuration; the user must issue a suitable least-privilege token.
+- A scope/allowlist refusal cannot be bypassed in client configuration. Ask the user to add only the missing scope or notebook with **修改权限** (edit access) on this token under **Agent 接入** in the web UI — it applies from the next tool call, with no new token or client restart — or to issue a suitable least-privilege token.
 - Remote/public deployments should expose the endpoint over HTTPS. Do not send a bearer token over an untrusted plain-HTTP network.
 - When finished, tell the user what was configured and whether `list_notebooks` plus `select_notebook` succeeded. Never print the token back.
 """

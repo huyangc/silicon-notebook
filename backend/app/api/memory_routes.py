@@ -28,7 +28,10 @@ from app.models.identity import (
     AgentTokenSummary,
     UserProfile,
 )
-from app.repositories.identity_errors import AgentTokenInactiveError
+from app.repositories.identity_errors import (
+    AgentTokenAccessConflictError,
+    AgentTokenInactiveError,
+)
 from app.models.memory import (
     AnswerMemoryLinksRequest,
     AnswerMemoryLinksResponse,
@@ -199,9 +202,12 @@ async def update_agent_token_access(
             payload.default_notebook_id,
             payload.notebook_ids,
             payload.expires_at,
+            payload.expected,
         )
     except KeyError:
         raise user_error(404, "没有找到这个 Token，可能已被删除")
+    except AgentTokenAccessConflictError:
+        raise user_error(409, "这个 Token 的权限刚在别处被修改过，请取消后重新打开再改")
     except AgentTokenInactiveError as exc:
         if exc.reason == "revoked":
             raise user_error(409, "这个 Token 已撤销，不能再修改权限")

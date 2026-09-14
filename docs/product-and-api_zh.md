@@ -567,14 +567,17 @@ tag 原始列表会先按 20 条限额校验，再 trim/去重；空白 tag 直�
 Agent profile，以及明文只显示一次的 token。
 Token 有过期时间、默认 notebook、notebook allowlist，并只授予所需的
 `knowledge:read`、`memory:read`、`memory:read_candidates`、`memory:propose`、
-`ask:execute`、`knowhow:code`、`sources:write`、`sources:delete`、`maintenance:execute`
-子集；可即时撤销。已签发 token 的访问配置可以原地修改：`PUT /api/agent-tokens/{token_id}/access`
+`ask:execute`、`knowhow:code`、`sources:write`、`sources:delete`、`maintenance:execute`、
+`agent_profile:read`、`agent_observation:write` 子集；可即时撤销。已签发 token 的访问配置可以原地修改：`PUT /api/agent-tokens/{token_id}/access`
 整体替换 scopes、默认 notebook、allowlist 与过期时间（四个字段都必填，`expires_at: null` 表示无到期
 时间），校验规则与签发完全相同；token 哈希、所属 Profile 与创建时间不变，明文也不会再次显示。Agent
 每次工具调用都会重读实时 token 状态，所以修改从下一次调用起生效，无需重签或重新配置客户端；把已过期
-token 的过期时间改到将来会让它重新可用。已撤销的 token、或所属 Profile 已停用的 token 返回 409；
-allowlist 中含 owner 已无权读取的 notebook 返回 422。浏览器在每个 token 行内编辑，忙碌、失败与
-「已保存」状态都落在该行。后端 requirements 已包含官方 `mcp>=1.26.0` client/server
+token 的过期时间改到将来会让它重新可用；签发与修改时 `expires_at` 传空串与 `null` 同义，都表示无到期
+时间。可选的 `expected` 对象携带编辑器上次读到的四个访问字段：给出且存储中的配置此后已变时，写入返回
+409 而不是覆盖（浏览器总会带上它，旧标签页因此不能悄悄恢复另一个标签页刚收回的权限；不带则后写覆盖）。
+已撤销的 token、或所属 Profile 已停用的 token 返回 409；allowlist 中含 owner 已无权读取的 notebook
+返回 422。浏览器在每个 token 行内编辑，忙碌、失败与「已保存」状态都落在该行；已撤销或所属 Profile
+已停用的 token 不提供修改入口，撤销需要在行内再确认一次。后端 requirements 已包含官方 `mcp>=1.26.0` client/server
 SDK。启动后，Streamable HTTP 服务位于 `/mcp/`（写 `/mcp` 会经 307 到达）。本机可用
 签发回执还会给出匿名 `GET /api/agent-mcp/onboarding`：这是一份机器可读的 Markdown 交接说明，
 把 `MCP_PUBLIC_URL` 逐字印成要配置的地址（绝不改写——代理可能只公布这一条精确路由），同时写明
