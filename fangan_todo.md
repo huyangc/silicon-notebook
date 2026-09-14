@@ -102,6 +102,15 @@
       或让首页之后的每次取页跳过存在性检查与计数（总数在首页已经拿到，执行体的
       `stable_count` 只需要最后再核一次）。零锚点路径与目录补摘要通道共享同一份收益。
       规模现状可接受（每次读取的元素数已由字符份额反推压到个位数），所以登记而不在 PR-A 内做。
+- [ ] **`structured_block` 挤空 reasoning 的原文段（PR-B 风险 a）**：`_answer_reasoning` 里
+      knowhow 整表预览与集合地图先于 chunk 段装配、共用同一份 `chunk_context_chars`，整表足够大
+      时 chunk 段可以一条不剩——`REASONING_EXACT_RESERVE` 的前缀席位只在 chunk 段拿到字符时才
+      有意义，救不了这一种。需要的是给 chunk 段一条下限夹（或给结构化预览一个上限），量纲与取舍
+      都是独立决定，PR-B 不做。
+- [ ] **reasoning 原文段引用卡重复三次批量读**：`_draft_reasoning_response` 的原文段腿对同一批
+      chunk 再做一次 `tier_map` / `citation_source_info` / `knowhow_refs_for`，而合成前的
+      `chunk_context` 已经做过（按节路径本来就是 N 次，这里再 +1）。形状与 chunk 模式一致、
+      KG-only run 零开销，所以只登记：把装配期结果沿 `baseline_sink` 带出来复用即可省两次。
 - [ ] **Prompt 三层化后的 per-notebook 定制与 self-evo**：接缝只有 `fragment_text()`；L1 片段分
       两类（A 类离线 GEPA + 人审，B 类只改示例槽位），尚未拍板开放。
 - [ ] **Agentic Memory 注入开闸与 A/B**：P1–P4 已合入，注入默认关闭，开闸是独立决定。

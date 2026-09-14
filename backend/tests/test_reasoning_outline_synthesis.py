@@ -1458,3 +1458,228 @@ def test_a_section_grounded_only_in_external_evidence_is_not_capped(
         "grounded", "grounded"]
     assert detail["ungrounded_sections"] == []
     assert response.evidence_level == "grounded"
+
+
+# ------------------------------- PR-B 乙 T5:精确命中的席位在按节合成里的位置
+#
+# 计划 serialized-dazzling-pie.md「PR-B」→「乙 精确席位」→「按节合成」。精确命中
+# 是本轮唯一「用户亲口点名」的东西,而大纲绑定是模型按语义做的:一段被指名的原文
+# 完全可能一个 evidence_key 也没拿到。单次合成路径上它由 `promote_bounded_prefix`
+# 的前缀席位保住,按节路径上如果不注入就整段消失。规则镜像外部证据(见上一节):
+# 未被任何节绑定的,每一节都装。
+
+
+def _exact_chunk(chunk_id, text="精确命中的原文", source_id="s1"):
+    """精确通道打过标的块(`exact_lookup.py::_build_chunks`,T3)。"""
+    return RetrievedChunk(
+        chunk_id=chunk_id, source_id=source_id, source_title="论文一",
+        section_path="1", text=text, relevance=0.8, exact_lookup=True,
+    )
+
+
+def test_an_unbound_exact_hit_is_appended_to_every_section():
+    chunk_by_id = {
+        "c1": _chunk("c1"), "c2": _chunk("c2"),
+        "x1": _exact_chunk("x1"),
+    }
+    slices, skipped = plan_outline_sections(
+        [_section("a", "第一节", "c1"), _section("b", "第二节", "c2")],
+        kg_by_id={}, element_by_id={}, chunk_by_id=chunk_by_id,
+        exact_reserve=4,
+    )
+    assert skipped == []
+    # 本节绑定的块在前,席位块追加在尾部。
+    assert [chunk.chunk_id for chunk in slices[0].chunks] == ["c1", "x1"]
+    assert [chunk.chunk_id for chunk in slices[1].chunks] == ["c2", "x1"]
+    # 注入的是不带席位标记的副本,按节各一份:原对象仍带标记,副本之间也不共享。
+    injected = [item.chunks[-1] for item in slices]
+    assert all(copy.exact_lookup is False for copy in injected)
+    assert injected[0] is not injected[1]
+    assert injected[0] == injected[1] == slices[0].chunks[-1]
+    assert [item.evidence_count for item in slices] == [2, 2]
+    # 注入不改动池子里的原对象:`chunk_by_id` 那份仍带标记,身份也没被替换。
+    # 缺了这条,「副本」这件事只在切片内部成立,池子本身悄悄被改也测不出来。
+    assert chunk_by_id["x1"].exact_lookup is True
+    assert injected[0] is not chunk_by_id["x1"]
+    assert injected[1] is not chunk_by_id["x1"]
+
+
+def test_a_bound_exact_hit_keeps_its_own_object_and_mark():
+    """已绑定到某一节的精确块不被替换成副本:仍是 `chunk_by_id` 里那个原对象,
+    标记仍是 `True`。绑定关系是模型的判断,注入兜底不该覆盖它——覆盖成副本会让
+    这段原文在它自己绑定的节里也丢掉前缀席位的资格。"""
+    chunk_by_id = {"xa": _exact_chunk("xa"), "c2": _chunk("c2")}
+    slices, _ = plan_outline_sections(
+        [_section("a", "绑了精确块的", "xa"), _section("b", "没绑的", "c2")],
+        kg_by_id={}, element_by_id={}, chunk_by_id=chunk_by_id,
+        exact_reserve=4,
+    )
+    assert slices[0].chunks[0] is chunk_by_id["xa"]
+    assert slices[0].chunks[0].exact_lookup is True
+
+
+def test_a_zero_reserve_leaves_every_slice_byte_for_byte_as_before():
+    """0 = 惰性:切片内容、顺序、evidence_count、skipped 全部等于不传这个参数。"""
+    pools = dict(
+        kg_by_id={"k1": _knowledge("k1")},
+        element_by_id={"e1": _element("e1")},
+        chunk_by_id={
+            "c1": _chunk("c1"), "x1": _exact_chunk("x1"),
+            "x2": _exact_chunk("x2"),
+        },
+    )
+    outline = [_section("a", "第一节", "c1"), _section("b", "第二节", "k1", "e1"),
+               _section("c", "空的")]
+    baseline, baseline_skipped = plan_outline_sections(outline, **pools)
+    zeroed, zeroed_skipped = plan_outline_sections(
+        outline, **pools, exact_reserve=0)
+
+    assert zeroed_skipped == baseline_skipped == ["空的"]
+    assert zeroed == baseline
+    for before, after in zip(baseline, zeroed):
+        assert [c.chunk_id for c in after.chunks] == [
+            c.chunk_id for c in before.chunks]
+        assert after.evidence_count == before.evidence_count
+    # 断言不是空转的:同一份池子在 reserve>0 时**确实**会变。
+    promoted, _ = plan_outline_sections(outline, **pools, exact_reserve=2)
+    assert promoted != baseline
+
+
+def test_the_reserve_caps_how_many_exact_hits_each_section_receives():
+    """上限就是 reserve,取的是 chunk_by_id 的迭代序(= 检索序)。"""
+    slices, _ = plan_outline_sections(
+        [_section("a", "第一节", "c1"), _section("b", "第二节", "c2")],
+        kg_by_id={}, element_by_id={},
+        chunk_by_id={
+            "c1": _chunk("c1"), "c2": _chunk("c2"),
+            "x1": _exact_chunk("x1"), "x2": _exact_chunk("x2"),
+            "x3": _exact_chunk("x3"),
+        },
+        exact_reserve=2,
+    )
+    assert [chunk.chunk_id for chunk in slices[0].chunks] == ["c1", "x1", "x2"]
+    assert [chunk.chunk_id for chunk in slices[1].chunks] == ["c2", "x1", "x2"]
+
+
+def test_an_exact_hit_bound_to_one_section_is_not_copied_into_the_others():
+    """绑定关系是模型的判断,比这里的兜底准。已绑定的块只留在它绑上的那一节。
+
+    复制过去的代价不是冗余而是错读:同一段原文会在两个号段里各拿一个 `[k]`,
+    合并锚点后就是两条引用,读者看见的是「两处不同证据」。
+    """
+    slices, _ = plan_outline_sections(
+        [_section("a", "绑了精确块的", "x1"), _section("b", "没绑的", "c2")],
+        kg_by_id={}, element_by_id={},
+        chunk_by_id={"x1": _exact_chunk("x1"), "c2": _chunk("c2")},
+        exact_reserve=4,
+    )
+    assert [chunk.chunk_id for chunk in slices[0].chunks] == ["x1"]
+    assert [chunk.chunk_id for chunk in slices[1].chunks] == ["c2"]
+
+
+def test_an_empty_section_is_not_revived_by_the_injected_exact_hit():
+    """空节是「问到了但没找到」的诚实记录(O1 合同),不许被一段跟它无关的精确块
+    填成一节真节 —— 那会让模型在一个它本来答不了的标题下写作。"""
+    slices, skipped = plan_outline_sections(
+        [_section("a", "有证据的", "c1"), _section("b", "空的"),
+         _section("c", "也有证据的", "c2")],
+        kg_by_id={}, element_by_id={},
+        chunk_by_id={
+            "c1": _chunk("c1"), "c2": _chunk("c2"),
+            "x1": _exact_chunk("x1"),
+        },
+        exact_reserve=4,
+    )
+    assert skipped == ["空的"]
+    assert [item.section.title for item in slices] == ["有证据的", "也有证据的"]
+    # 号段偏移仍按幸存节算,注入不占号段。
+    assert [item.key_offset for item in slices] == [
+        0, OUTLINE_SECTION_KEY_STRIDE]
+
+
+def test_an_unbound_chunk_without_the_exact_mark_is_not_injected():
+    """席位只给精确通道。普通召回块没进大纲就是模型判定它与本节无关。"""
+    slices, _ = plan_outline_sections(
+        [_section("a", "第一节", "c1"), _section("b", "第二节", "c2")],
+        kg_by_id={}, element_by_id={},
+        chunk_by_id={
+            "c1": _chunk("c1"), "c2": _chunk("c2"),
+            "loose": _chunk("loose"),
+        },
+        exact_reserve=4,
+    )
+    assert [chunk.chunk_id for chunk in slices[0].chunks] == ["c1"]
+    assert [chunk.chunk_id for chunk in slices[1].chunks] == ["c2"]
+
+
+# --- e2e:待 `_draft_reasoning_response` 的调用点接上 exact_reserve 后才会绿 ---
+
+SECTIONED_EXACT_TEXT = "SET DB CHUNKS 命令表参数说明"
+
+
+def test_each_section_prompt_carries_the_unbound_exact_hit(repo, monkeypatch):
+    """整条装配路径上的验收:两节各绑一个元素,一段用户点名的原文谁也没绑上,
+    两节的合成 prompt 里都必须看得见它。"""
+    notebook = _notebook(repo)
+    _stub_run(monkeypatch, _reasoning_result(
+        chunks=[_exact_chunk("x1", SECTIONED_EXACT_TEXT)],
+    ))
+    llm = _CaptureAnswerLLM()
+    response = _ask(repo, notebook, llm)
+
+    assert len(llm.prompts) == 2, "两节 = 两次合成调用"
+    for prompt in llm.prompts:
+        assert SECTIONED_EXACT_TEXT in prompt
+    assert response.answer.startswith("## 第一节")
+
+
+def test_a_zero_reserve_keeps_the_unbound_exact_hit_out_of_every_section(
+    repo, monkeypatch
+):
+    """0 = 惰性,按节路径回到注入之前:谁也没绑上的块不进任何一节。"""
+    notebook = _notebook(repo)
+    _stub_run(monkeypatch, _reasoning_result(
+        chunks=[_exact_chunk("x1", SECTIONED_EXACT_TEXT)],
+    ))
+    llm = _CaptureAnswerLLM()
+    service = _ask_service(repo, llm)
+    service.settings.reasoning_exact_reserve = 0
+    service.ask_reasoning(
+        notebook.id,
+        AskRequest(question="综述一下版图设计要点", mode="reasoning",
+                   retrieval_effort="exhaustive"),
+        user_id=repo.current_user().id,
+    )
+
+    assert len(llm.prompts) == 2
+    for prompt in llm.prompts:
+        assert SECTIONED_EXACT_TEXT not in prompt
+
+
+def test_the_call_site_passes_the_configured_reserve(repo, monkeypatch):
+    """接线断言:按节合成的切片规划必须拿到 `settings.reasoning_exact_reserve`,
+    而不是缺省的 0 —— 否则上面那条 e2e 的通过只是巧合。"""
+    from app.services import outline_synthesis
+
+    seen: list = []
+    original = outline_synthesis.plan_outline_sections
+
+    def _spy(*args, **kwargs):
+        seen.append(kwargs.get("exact_reserve"))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(outline_synthesis, "plan_outline_sections", _spy,
+                        raising=True)
+    notebook = _notebook(repo)
+    _stub_run(monkeypatch, _reasoning_result())
+    llm = _CaptureAnswerLLM()
+    service = _ask_service(repo, llm)
+    service.settings.reasoning_exact_reserve = 3
+    service.ask_reasoning(
+        notebook.id,
+        AskRequest(question="综述一下版图设计要点", mode="reasoning",
+                   retrieval_effort="exhaustive"),
+        user_id=repo.current_user().id,
+    )
+
+    assert seen == [3]

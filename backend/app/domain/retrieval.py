@@ -129,6 +129,12 @@ class RetrievedChunk:
     retrieval_supports: tuple[RetrievalSupport, ...] = field(
         default=(), compare=False
     )
+    # Provenance marker: this chunk was retrieved whole by the exact
+    # identifier channel (`exact_lookup`). Deliberately not folded into
+    # `RetrievalSupport.origin` — widening that vocabulary would touch every
+    # consumer that reads it (`is_graph_only_chunk` included). Reasoning's
+    # synthesis-assembly reserve identifies its candidates by this flag.
+    exact_lookup: bool = field(default=False, compare=False)
 
     @property
     def object_id(self) -> str:

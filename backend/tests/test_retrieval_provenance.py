@@ -7,6 +7,7 @@ from app.services.retrieval import (
     graph_reserve_rule,
     is_graph_only_chunk,
     merge_retrieval_supports,
+    prefer_stronger_chunk_candidate,
     select_with_graph_reserve,
     select_with_reserves,
     select_with_reserves_baseline_first,
@@ -14,7 +15,10 @@ from app.services.retrieval import (
 )
 
 
-def _chunk(chunk_id: str, tokens: int, *supports: RetrievalSupport, relevance=0.8):
+def _chunk(
+    chunk_id: str, tokens: int, *supports: RetrievalSupport,
+    relevance=0.8, exact_lookup=False,
+):
     # est_tokens uses ceil(chars/3.5); 7 chars are exactly two estimated tokens.
     return RetrievedChunk(
         chunk_id=chunk_id,
@@ -25,6 +29,7 @@ def _chunk(chunk_id: str, tokens: int, *supports: RetrievalSupport, relevance=0.
         element_ids=[f"e-{chunk_id}"],
         relevance=relevance,
         retrieval_supports=tuple(supports),
+        exact_lookup=exact_lookup,
     )
 
 
@@ -264,3 +269,37 @@ def test_naturally_selected_quota_holder_of_another_rule_is_not_evicted():
     # 驱逐受害者必须是 direct-2(最后一个普通候选),不是天然入选的 graph。
     assert "graph" in ids and "exact" in ids, ids
     assert "direct-2" not in ids, ids
+
+
+def test_prefer_stronger_chunk_candidate_unions_the_exact_lookup_marker():
+    """PR-B 乙 T3:两个候选合并成一个代表时,`exact_lookup` 取并集——不管哪一方
+    最终胜出,只要有一方来自精确通道,结果对象就必须带着这个标记。都不带时
+    结果也不该凭空带上。"""
+    marked = _chunk(
+        "c", 3, RetrievalSupport("lexical", "chunk", "c", 0.9),
+        relevance=0.9, exact_lookup=True,
+    )
+    unmarked_stronger = _chunk(
+        "c", 3, RetrievalSupport("semantic", "chunk", "c", 0.95),
+        relevance=0.95, exact_lookup=False,
+    )
+    chosen = prefer_stronger_chunk_candidate(marked, unmarked_stronger)
+    assert chosen is unmarked_stronger
+    assert chosen.exact_lookup is True
+
+    marked_candidate = _chunk(
+        "d", 3, RetrievalSupport("lexical", "chunk", "d", 0.9),
+        relevance=0.9, exact_lookup=True,
+    )
+    unmarked_existing = _chunk(
+        "d", 3, RetrievalSupport("semantic", "chunk", "d", 0.95),
+        relevance=0.95, exact_lookup=False,
+    )
+    chosen = prefer_stronger_chunk_candidate(unmarked_existing, marked_candidate)
+    assert chosen is unmarked_existing
+    assert chosen.exact_lookup is True
+
+    neither = _chunk("e", 3, RetrievalSupport("semantic", "chunk", "e", 0.9), relevance=0.9)
+    also_neither = _chunk("e", 3, RetrievalSupport("lexical", "chunk", "e", 0.5), relevance=0.5)
+    chosen = prefer_stronger_chunk_candidate(neither, also_neither)
+    assert chosen.exact_lookup is False

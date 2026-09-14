@@ -1360,6 +1360,16 @@ class Settings(BaseSettings):
     # mix 最终选择为精确小节 chunk 预留的席位数。与 chunk_graph_reserve 同构:
     # 只在既有 token 预算内预留,绝不扩预算,也不制造第二个 oversize 例外。
     exact_section_reserve: int = Field(4, validation_alias="EXACT_SECTION_RESERVE")
+    # reasoning 合成装配里为精确通道 chunk 预留的**前缀席位**数:排序之后、装进
+    # 合成上下文之前,把至多这么多条带 `exact_lookup` 标记的块稳定地提到最前。
+    # 刻意不与 `exact_section_reserve` 共用一个旋钮——那个是 mix **最终选择**里的
+    # token 席位(对 rerank 序生效),这个是**合成上下文**里的字符前缀(对相关度序
+    # 生效);量纲(token / 字符)、作用对象(选择 / 装配)、候选规模(mix 单次 ≤36,
+    # reasoning 一个 run 可到 144)三样都不同,把它们绑在一起等于用一个数字同时
+    # 回答两个不同的问题。0 = 完全惰性(与 `chunk_graph_reserve` 同一条惰性合同:
+    # 关掉之后这条通路逐字节回到接入之前)。席位只改顺序,绝不扩预算。
+    reasoning_exact_reserve: int = Field(
+        4, validation_alias="REASONING_EXACT_RESERVE")
     # chunk×graph mix token 预算(照 LightRAG 6000/8000/30000)。
     max_entity_tokens: int = Field(6000, validation_alias="MAX_ENTITY_TOKENS")
     max_relation_tokens: int = Field(8000, validation_alias="MAX_RELATION_TOKENS")

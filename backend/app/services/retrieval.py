@@ -885,6 +885,51 @@ def exact_section_reserve_rule(
     return ReserveRule(reserve=reserve, holds=_member, admits=_member)
 
 
+def promote_bounded_prefix(
+    chunks: Sequence["RetrievedChunk"],
+    holds: Callable[["RetrievedChunk"], bool],
+    reserve: int,
+) -> List["RetrievedChunk"]:
+    """Stably move at most ``reserve`` chunks satisfying ``holds`` to the front.
+
+    A *reordering*, not a selection: the result is always a permutation of the
+    input with every chunk still present, so the caller's downstream budget
+    decides what actually survives. Promotion only changes WHICH end of the cut
+    a chunk sits on, never how much fits.
+
+    Stability is the whole contract. The promoted chunks keep their relative
+    order, the remainder keeps its relative order, and nothing else moves — so
+    a run with no match (or ``reserve <= 0``) returns a same-order copy and is
+    byte-for-byte neutral for every consumer downstream.
+
+    The ``reserve`` clamp is deliberate rather than "promote everything that
+    holds": the exact channel can contribute up to 144 chunks in one reasoning
+    run (3 sections x 12 chunks x 4 calls), and hoisting all of them would let
+    one identifier's section evict every other retrieval lane from the
+    synthesis context. Bounding the prefix buys the first ``reserve`` of them a
+    seat and leaves the rest to compete on relevance like anything else.
+
+    Distinct from ``select_with_reserves``, which this deliberately does not
+    reuse: that one reserves seats measured in TOKENS against a ranked list
+    produced by the reranker, and it drops chunks to make room. This one
+    reorders a relevance-sorted list ahead of a CHARACTER budget and drops
+    nothing.
+    """
+    ordered = list(chunks)
+    if reserve <= 0:
+        return ordered
+    promoted: List["RetrievedChunk"] = []
+    remainder: List["RetrievedChunk"] = []
+    for chunk in ordered:
+        if len(promoted) < reserve and holds(chunk):
+            promoted.append(chunk)
+        else:
+            remainder.append(chunk)
+    if not promoted:
+        return ordered
+    return promoted + remainder
+
+
 def is_generated_question_only_chunk(chunk: "RetrievedChunk") -> bool:
     """Whether a chunk exists only because the optional question index hit it.
 
@@ -919,6 +964,10 @@ def prefer_stronger_chunk_candidate(
     chosen.retrieval_supports = merge_retrieval_supports(
         existing.retrieval_supports, candidate.retrieval_supports
     )
+    # Union, not overwrite: an exact-channel hit colliding with a semantic hit
+    # on the same content key must keep its `exact_lookup` marker even when
+    # the semantic representative is the one kept in place.
+    chosen.exact_lookup = existing.exact_lookup or candidate.exact_lookup
     return chosen
 
 

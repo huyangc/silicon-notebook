@@ -299,8 +299,11 @@ def _build_chunks(
     The support is recorded as ordinary `lexical` — which it truthfully is, a
     substring match. It deliberately does not mint a new `RetrievalSupport`
     origin: `is_graph_only_chunk` and the reserve logic read that vocabulary,
-    and "this came from the exact channel" is carried to the selector as an
-    explicit chunk-id set instead, where it cannot perturb existing consumers.
+    and it stays unexpanded. Chunk mode still drives `exact_section_reserve_rule`
+    off the caller's own `exact_ids` set, unchanged. Reasoning instead
+    recognises "this came from the exact channel" off the `exact_lookup` flag
+    set on the object below, an independent field that cannot perturb the
+    support vocabulary's existing consumers.
 
     Downstream consumers are unaffected by the scale of this score in the ways
     that would matter: mix's rerank decides the final order and the reserve
@@ -338,6 +341,7 @@ def _build_chunks(
                 retrieval_supports=(
                     RetrievalSupport("lexical", "chunk", chunk_id, relevance),
                 ),
+                exact_lookup=True,
             )
         )
     return chunks

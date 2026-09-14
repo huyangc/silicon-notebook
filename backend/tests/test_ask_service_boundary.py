@@ -226,6 +226,21 @@ class _MinimalEvidence:
     def citations_from(self, hits, element_ids, label, notebook_id=""):
         return []
 
+    def chunk_citations(self, chunks, *, notebook_id, anchors=None):
+        # PR-B 甲: chunk 模式的两个内联 Citation(...) 分支收进了这一个
+        # evidence-context 调用(卡片规则 + 三个批量读取 + 跨库归一)。同
+        # knowhow_refs_for / attach_citation_images——新声明的端口调用,这个
+        # 最小边界替身必须实现才能让 ask_chunk 保持可达。返回 (引用, 附图候选
+        # element_ids) 配对列表,零命中就是空列表。
+        return []
+
+    def element_citations(self, elements, anchors, *, notebook_id):
+        # PR-B 甲 T2: reasoning 装配点的 element 腿从内联 Citation(...) 收进了
+        # 这一个 evidence-context 调用(与 chunk_citations 同一次重构:腾出天花板
+        # 行数给新增的原文段腿)。同上——新声明的端口调用,这个最小边界替身必须
+        # 实现才能让 _draft_reasoning_response 保持可达。
+        return []
+
     def external_context(self, items, *, id_offset, budget_chars=None,
                          truncation_sink=None):
         # T4（reflect 插件动作）: the reasoning assembler now asks for the

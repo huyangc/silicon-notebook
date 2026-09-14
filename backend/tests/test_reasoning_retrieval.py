@@ -2806,6 +2806,41 @@ def test_chunk_accumulation_upgrades_duplicate_and_merges_supports():
     }
 
 
+def test_chunk_accumulation_keeps_the_exact_lookup_marker_across_a_content_fold():
+    """PR-B 乙 T3:精确命中与内容相同的语义命中撞 `source_chunk_content_key`
+    时,`take_distinct_chunk_hits` 只留一个代表——那个代表必须仍带
+    `exact_lookup=True`,不管哪一方赢得代表席位。这里让分高的语义命中(既有)
+    赢得代表席位,分低的精确命中(新到)只贡献 support 与标记——只有并集逻辑
+    才能把标记从落选的一方带过去。"""
+    from app.services.reasoning_retrieval import take_distinct_chunk_hits
+    from app.services.retrieval import RetrievedChunk, RetrievalSupport
+
+    def chunk(chunk_id, text, relevance, origin, exact_lookup):
+        return RetrievedChunk(
+            chunk_id=chunk_id, source_id="paper", source_title="Paper",
+            section_path=chunk_id, text=text, relevance=relevance,
+            retrieval_supports=(
+                RetrievalSupport(origin, "chunk", chunk_id, relevance),
+            ),
+            exact_lookup=exact_lookup,
+        )
+
+    semantic_strong = chunk(
+        "header-semantic", "Paper title", 0.9, "semantic", exact_lookup=False)
+    exact_weak = chunk(
+        "header-exact", " paper\n title ", 0.2, "lexical", exact_lookup=True)
+    existing = [semantic_strong]
+    seen_ids = {semantic_strong.chunk_id}
+
+    added = take_distinct_chunk_hits([exact_weak], seen_ids, existing)
+
+    # 既有的语义命中分数更高,赢得代表席位——保留原对象。
+    assert added == []
+    assert existing == [semantic_strong]
+    # 但代表对象必须从落选的精确命中那里并集拿到 exact_lookup 标记。
+    assert existing[0].exact_lookup is True
+
+
 def test_reflection_summary_uses_the_same_diverse_element_cap_as_synthesis(rrepo):
     """The agent must not declare sufficiency from passages that the final
     single-synthesis cap will replace with duplicate running headers."""
@@ -3008,6 +3043,8 @@ def test_run_exact_lookup_seed_pass_takes_the_whole_named_section(rrepo):
     # 整句问题打分会被问题里一堆不相关词拖到约 0.286(评审实测的回归值),把
     # 这个精确命中挤到合成排序垫底、还可能拖过 grounded 判定阈值。
     assert [c.relevance for c in res.chunks] == [1.0, 1.0]
+    # PR-B 乙 T3:两条都来自精确通道,`exact_lookup` 标记跟着对象一路传到结果。
+    assert [c.exact_lookup for c in res.chunks] == [True, True]
     assert calls == ['"set_db"']
     # seed 步排在初检索之后,天然被「轨迹覆盖整轮」包住。
     kinds = [t.step_type for t in res.trace]
