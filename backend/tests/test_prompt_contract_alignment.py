@@ -77,3 +77,9 @@ def test_catalog_prompt_spells_scalar_and_container_types():
     assert "write it as a JSON boolean (true/false), never as a quoted string" in source
     assert '`examples` is always an array of strings' in source
     assert 'is absent write "" (never null)' in source
+
+
+def test_intent_prompt_tells_the_model_its_scope_decides_and_how_confidence_is_read():
+    prompt = prompts.query_intent_prompt("Q")
+    assert "Your result_scope decides the retrieval executor" in prompt
+    assert "confidence below 0.5 is treated as a guess" in prompt
