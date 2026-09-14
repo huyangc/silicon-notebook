@@ -172,17 +172,18 @@ test("引用本身是图片元素时隐藏其解析描述，文字证据附近�
   expect(screen.getByText("真正被引用的文字摘录")).toBeInTheDocument();
 });
 
-test("chunk 锚点起始元素恰好是图时，摘录仍是整个 chunk 的文本，不按图片元素隐藏", async () => {
+test("纯图 chunk 锚点（起始元素即附图）与图片元素引用一样隐藏解析描述", async () => {
   const user = userEvent.setup();
-  const chunkStartingWithFigure = anchorAnswerWithImages("图后正文结论 [k1]。");
-  chunkStartingWithFigure.anchors[0].object_type = "chunk";
-  chunkStartingWithFigure.anchors[0].object_id = "chunk-1";
-  chunkStartingWithFigure.anchors[0].element_id = "img-el-1";
-  chunkStartingWithFigure.anchors[0].snippet = "图注 以及紧随其后的正文摘录";
-  renderAnswer(chunkStartingWithFigure);
+  const imageOnlyChunk = anchorAnswerWithImages("图片结论 [k1]。");
+  imageOnlyChunk.anchors[0].object_type = "chunk";
+  imageOnlyChunk.anchors[0].object_id = "chunk-1";
+  imageOnlyChunk.anchors[0].element_id = "img-el-1";
+  imageOnlyChunk.anchors[0].snippet = "图注与 AI 图片描述";
+  renderAnswer(imageOnlyChunk);
 
   await user.click(screen.getByRole("button", { name: "[1]" }));
-  expect(screen.getByText("图注 以及紧随其后的正文摘录")).toBeInTheDocument();
+  await screen.findByRole("dialog");
+  expect(screen.queryByText("图注与 AI 图片描述")).toBeNull();
 });
 
 test("点击正文图片请求页面内放大，并保留 caption 作为预览 alt", async () => {
