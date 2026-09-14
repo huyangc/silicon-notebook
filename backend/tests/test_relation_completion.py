@@ -867,3 +867,56 @@ def test_zero_model_budget_fails_closed_without_creating_or_advancing_state(
             (source_id,),
         ).fetchone()[0]
     assert count == 0
+
+
+def test_prompts_state_the_exact_key_contract_the_parsers_enforce():
+    """Prompt/parser alignment (audit B1/B2): the parsers keep an exact key
+    set per relation / verdict because every id is server-issued; the prompts
+    must say so (the verifier's ``reason`` key was never mentioned before)."""
+    seen = {}
+
+    class _Recording(_Proposer):
+        def chat_json(self, messages, schema):
+            seen["propose"] = messages[0]["content"]
+            return super().chat_json(messages, schema)
+
+    class _RecordingVerifier(_Verifier):
+        def chat_json(self, messages, schema):
+            seen["verify"] = messages[0]["content"]
+            return super().chat_json(messages, schema)
+
+    [proposal] = propose_batch(_Recording(), _candidates())
+    verify_batch(_RecordingVerifier(), [proposal])
+    assert "EXACTLY these six keys and no others" in seen["propose"]
+    assert '"evidence_element_ids" (a non-empty list of issued element ids, no duplicates)' in seen["propose"]
+    assert "EXACTLY these three keys" in seen["verify"]
+    assert '"reason" (a short string; use "" when you have nothing to add — the key itself is required)' in seen["verify"]
+    assert '"valid" (a JSON boolean true/false, never a string)' in seen["verify"]
+
+
+def test_extra_top_level_keys_do_not_fail_the_page():
+    """Audit B3: only a missing/non-list collection is an envelope failure
+    (the page is retried); a model-added top-level key rides along like at
+    every other consumer."""
+    class _Chatty(_Proposer):
+        def chat_json(self, messages, schema):
+            payload = json.loads(super().chat_json(messages, schema))
+            payload["notes"] = "model commentary"
+            return json.dumps(payload)
+
+    class _ChattyVerifier(_Verifier):
+        def chat_json(self, messages, schema):
+            payload = json.loads(super().chat_json(messages, schema))
+            payload["notes"] = "model commentary"
+            return json.dumps(payload)
+
+    proposals = propose_batch(_Chatty(), _candidates())
+    assert len(proposals) == 1
+    assert verify_batch(_ChattyVerifier(), proposals) == proposals
+
+    class _WrongType(_Proposer):
+        def chat_json(self, messages, schema):
+            return json.dumps({"relations": {"candidate_id": "x"}})
+
+    with pytest.raises(ValueError, match="proposal envelope"):
+        propose_batch(_WrongType(), _candidates())
