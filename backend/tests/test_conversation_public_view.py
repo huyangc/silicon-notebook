@@ -688,27 +688,27 @@ def test_image_reference_flag_compares_internal_ids_but_exposes_only_a_boolean()
     assert "NEARBY-IMAGE-ELEMENT" not in _all_strings(nearby)
 
 
-def test_public_reference_chunk_anchor_starting_with_a_figure_keeps_its_excerpt():
-    """A chunk anchor's element_id is only the chunk's first element (the
-    view-source locator); the excerpt is the whole chunk's text, so a chunk
-    that merely starts with a figure is not an image-only reference."""
+def test_public_reference_image_only_chunk_anchor_is_an_image_reference():
+    """A chunk anchor's element_id is the chunk's first element; an image-only
+    chunk (its one element IS the attached image) keeps the image-description
+    suppression the authenticated panel applies to direct image evidence."""
     chunk = public_turn(_turn("q", {
-        "answer": "图后正文 [k1]。",
+        "answer": "图 [k1]。",
         "anchors": [_anchor(
             "k1",
             object_type="chunk",
-            element_id="FIRST-IMAGE-ELEMENT",
+            element_id="ONLY-IMAGE-ELEMENT",
             images=[{
-                "element_id": "FIRST-IMAGE-ELEMENT",
-                "asset_id": "FIRST-ASSET",
+                "element_id": "ONLY-IMAGE-ELEMENT",
+                "asset_id": "ONLY-ASSET",
                 "caption": "图注",
             }],
         )],
         "citations": [],
     }))["references"][0]
 
-    assert chunk["is_image_reference"] is False
-    assert "FIRST-IMAGE-ELEMENT" not in _all_strings(chunk)
+    assert chunk["is_image_reference"] is True
+    assert "ONLY-IMAGE-ELEMENT" not in _all_strings(chunk)
 
 
 def test_reference_list_is_bounded():
