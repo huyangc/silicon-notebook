@@ -145,6 +145,14 @@ def _dict_items(value: Any) -> list[dict]:
     return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
 
 
+def _string_items(value: Any) -> list[str]:
+    """The non-empty string items of a model-supplied list; anything else
+    (a bare string, a dict, container items) is empty rather than stringified."""
+    if not isinstance(value, list):
+        return []
+    return [item.strip() for item in value if isinstance(item, str) and item.strip()]
+
+
 def audit_high_risk_assertions(markdown: str, id_map: dict[str, dict], *,
                                max_unsupported_ratio: float) -> dict[str, Any]:
     """Audit citation presence for deterministically recognisable risky prose.
@@ -847,12 +855,12 @@ class ReportEngine:
             data = json.loads(raw)
             sections = []
             for s in _dict_items(data.get("sections"))[: self.settings.report_max_sections]:
-                title = str(s.get("title", "")).strip()
-                subs = [str(q).strip() for q in (s.get("sub_queries") or []) if str(q).strip()]
+                title = _prose(s.get("title"))
+                subs = _string_items(s.get("sub_queries"))
                 if title and subs:
                     sections.append({
                         "title": title,
-                        "scope": str(s.get("scope", "")).strip(),
+                        "scope": _prose(s.get("scope")),
                         "sub_queries": subs[
                             : self.settings.report_max_subqueries_per_section
                         ],
@@ -1674,18 +1682,17 @@ class ReportEngine:
             )
             out = []
             for s in _dict_items(data.get("sections"))[: self.settings.report_max_sections]:
-                title = str(s.get("title", "")).strip()
-                subs = [str(q).strip() for q in (s.get("sub_queries") or []) if str(q).strip()]
+                title = _prose(s.get("title"))
+                subs = _string_items(s.get("sub_queries"))
                 if title and subs:
                     section = {
-                        "title": title, "scope": str(s.get("scope", "")).strip(),
+                        "title": title, "scope": _prose(s.get("scope")),
                         "sub_queries": subs[
                             : self.settings.report_max_subqueries_per_section
                         ],
-                        "intent_ids": [str(item).strip() for item in
-                                       (s.get("intent_ids") or []) if str(item).strip()],
-                        "perspectives": [str(p).strip() for p in (s.get("perspectives") or []) if str(p).strip()],
-                        "tensions": [str(t).strip() for t in (s.get("tensions") or []) if str(t).strip()]}
+                        "intent_ids": _string_items(s.get("intent_ids")),
+                        "perspectives": _string_items(s.get("perspectives")),
+                        "tensions": _string_items(s.get("tensions"))}
                     if report_frame:
                         section["report_frame"] = report_frame
                     out.append(section)

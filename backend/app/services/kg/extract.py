@@ -36,6 +36,23 @@ def _typed_str(value: Any, allowed) -> str:
     return value if isinstance(value, str) and value in allowed else ""
 
 
+def _evidence_index(value: Any) -> int:
+    """The ``ev`` label as an element index, or -1 when it is not one.
+
+    Only a JSON integer or a digit string counts: ``int()`` would turn
+    ``true`` into element 1 and ``0.5`` into element 0 and ground a node on
+    an unrelated element (codex #720 R5). -1 hands over to the name
+    fallback in ``_resolve``.
+    """
+    if isinstance(value, bool):
+        return -1
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    return -1
+
+
 def _name_str(value: Any) -> str:
     """A node/step name as text, or "" when the field is not a string — a
     delivered ``[]`` must never be persisted as the knowledge object "[]"."""
@@ -297,10 +314,7 @@ def _parse_validity_scope(raw: Any) -> Dict[str, Any]:
 
 def _resolve(elements: List[SourceElementQ], ev: Any,
              name: str) -> Optional[SourceElementQ]:
-    try:
-        i = int(ev)
-    except Exception:
-        i = -1
+    i = _evidence_index(ev)
     if 0 <= i < len(elements):
         return elements[i]
     # fallback: element whose text contains the node name (normalized substring)
