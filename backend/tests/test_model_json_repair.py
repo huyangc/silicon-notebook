@@ -270,7 +270,7 @@ def test_schema_shape_validation_reports_non_string_frame_assignment_values():
         '"frame_assignments":{"facet-id":"value"}}]}',
     )
     assert [(d.path, d.reason, d.fix) for d in shape.deviations] == [
-        ("claims[0].frame_assignments.mixer", "invalid_type", ""),
+        ("claims[0].frame_assignments[0]", "invalid_type", ""),
     ]
 
 
@@ -409,3 +409,50 @@ def test_nested_planning_string_must_remain_verbatim(monkeypatch):
             '{"sub_queries":[{"query":""}]}',
             allow_repair=True,
         )
+
+
+# ── codex #720 R1 ──────────────────────────────────────────────────────────
+
+
+def test_absorption_does_not_depend_on_the_diagnostic_cap():
+    from app.core.model_json import SHAPE_DEVIATIONS_MAX
+
+    # 32 report-only deviations fill the cap; a null AFTER them must still be
+    # dropped from the delivered content.
+    items = [{"query": index} for index in range(SHAPE_DEVIATIONS_MAX)]
+    items.append({"query": None, "types": []})
+    shape = validate_model_json_shape(json.dumps({"sub_queries": items}), PLAN_SCHEMA)
+
+    assert len(shape.deviations) == SHAPE_DEVIATIONS_MAX
+    assert shape.normalised is False  # the report never saw the fix …
+    assert json.loads(shape.content)["sub_queries"][-1] == {"types": []}  # … but it happened
+
+
+def test_frame_assignment_keys_never_reach_the_diagnostic_path():
+    shape = validate_model_json_shape(
+        '{"markdown":"ok","claims":[{"claim_id":"c1",'
+        '"frame_assignments":{"private source text":["SSM"]}}]}',
+        '{"markdown":"","claims":[{"claim_id":"",'
+        '"frame_assignments":{"facet-id":"value"}}]}',
+    )
+    [deviation] = shape.deviations
+    assert deviation.path == "claims[0].frame_assignments[0]"
+    assert "private" not in deviation.path
+
+
+def test_non_finite_numeric_strings_are_not_coerced():
+    shape = validate_model_json_shape('{"score":"1e999"}', '{"score":0.0}')
+
+    assert shape.content == '{"score":"1e999"}'
+    assert [(d.path, d.reason, d.fix) for d in shape.deviations] == [
+        ("score", "invalid_type", ""),
+    ]
+
+
+def test_a_rewritten_reply_carrying_nan_fails_through_the_malformed_path():
+    with pytest.raises(ModelJsonRepairError) as caught:
+        validate_model_json_shape(
+            '{"score": NaN, "note": null}', '{"score":0.0,"note":""}'
+        )
+
+    assert caught.value.reason == "non_finite_number"
