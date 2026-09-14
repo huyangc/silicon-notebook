@@ -276,6 +276,7 @@ def _normalise_shape(
     *,
     path: str,
     out: list[ShapeDeviation],
+    state: dict[str, int],
     field_name: str = "",
 ) -> Any:
     """Walk a reply against its example-shaped hint: absorb the deviations
@@ -313,6 +314,11 @@ def _normalise_shape(
     """
 
     def note(reason: str, fix: str = "") -> None:
+        # ``state["fixes"]`` counts every absorption, capped or not: whether
+        # the delivered content was rewritten must never depend on how many
+        # diagnostics fit in the report (codex #720 R1).
+        if fix:
+            state["fixes"] += 1
         if len(out) < SHAPE_DEVIATIONS_MAX:
             out.append(ShapeDeviation(path=path or "$", reason=reason, fix=fix))
 
@@ -378,8 +384,10 @@ def _normalise_shape(
         ):
             return value
         if isinstance(value, str) and _NUMBER_STRING_RE.fullmatch(value.strip()):
-            note("invalid_type", "coerced")
-            return float(value.strip())
+            number = float(value.strip())
+            if math.isfinite(number):
+                note("invalid_type", "coerced")
+                return number
         note("invalid_type")
         return value
     if isinstance(example, list):
@@ -400,7 +408,8 @@ def _normalise_shape(
         for index, item in enumerate(value):
             fixed = _normalise_shape(
                 item, item_example,
-                path=f"{path}[{index}]", out=out, field_name=field_name,
+                path=f"{path}[{index}]", out=out, state=state,
+                field_name=field_name,
             )
             if fixed is not _DROP:
                 items.append(fixed)
@@ -421,9 +430,13 @@ def _normalise_shape(
             # this shared walk owns only the advertised value type.
             item_example = next(iter(example.values()), "")
             rebuilt: dict[str, Any] = {}
-            for key, item in value.items():
+            for index, (key, item) in enumerate(value.items()):
+                # The keys here are model-authored text, not hint vocabulary:
+                # the diagnostic path names the entry by position so the
+                # event log stays content-free.
                 fixed = _normalise_shape(
-                    item, item_example, path=_join_path(path, key), out=out,
+                    item, item_example, path=f"{path}[{index}]",
+                    out=out, state=state,
                 )
                 if fixed is not _DROP:
                     rebuilt[key] = fixed
@@ -446,7 +459,8 @@ def _normalise_shape(
                 continue
             fixed = _normalise_shape(
                 item, example[key],
-                path=_join_path(path, key), out=out, field_name=key,
+                path=_join_path(path, key), out=out, state=state,
+                field_name=key,
             )
             if fixed is not _DROP:
                 rebuilt[key] = fixed
@@ -476,15 +490,24 @@ def validate_model_json_shape(content: str, schema_hint: str) -> ModelJsonShape:
     if not set(value).intersection(example):
         raise ModelJsonRepairError("missing_expected_key")
     deviations: list[ShapeDeviation] = []
-    fixed = _normalise_shape(value, example, path="", out=deviations)
-    if not any(item.fix for item in deviations):
+    state = {"fixes": 0}
+    fixed = _normalise_shape(
+        value, example, path="", out=deviations, state=state,
+    )
+    if not state["fixes"]:
         return ModelJsonShape(content=content, deviations=tuple(deviations))
     if not isinstance(fixed, dict) or not set(fixed).intersection(example):
         # Every advertised field was null: nothing usable survived.
         raise ModelJsonRepairError("missing_expected_key")
-    canonical = json.dumps(
-        fixed, ensure_ascii=False, allow_nan=False, separators=(",", ":"),
-    )
+    try:
+        canonical = json.dumps(
+            fixed, ensure_ascii=False, allow_nan=False, separators=(",", ":"),
+        )
+    except (TypeError, ValueError, RecursionError) as exc:
+        # ``json.loads`` accepts NaN/Infinity literals that JSON cannot carry;
+        # a rewritten reply must fail through the malformed-response path,
+        # not as an uncaught error past the scheduler.
+        raise ModelJsonRepairError("non_finite_number") from exc
     return ModelJsonShape(content=canonical, deviations=tuple(deviations))
 
 
