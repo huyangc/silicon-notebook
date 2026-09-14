@@ -308,3 +308,17 @@ def test_non_string_names_are_never_persisted_as_container_text():
 
     assert [n.name for n in nodes] == ["Engram"]
     assert [s.name for s in nodes[0].steps] == ["C_j"]
+
+
+def test_evidence_index_accepts_only_integer_labels():
+    # ``true`` used to read as element 1 and ``0.5`` as element 0 through a
+    # bare int(); both now hand over to the name fallback (codex #720 R5).
+    from app.services.kg.extract import _evidence_index, _resolve
+
+    assert _evidence_index(2) == 2
+    assert _evidence_index("2") == 2
+    for bogus in (True, False, 0.5, 1.0, "1.0", "x", None, [1], {}):
+        assert _evidence_index(bogus) == -1, bogus
+    # name fallback still grounds a node whose label is unusable
+    assert _resolve(ELEMENTS, True, "Engram") is ELEMENTS[2]
+    assert _resolve(ELEMENTS, 0.5, "no such text") is None

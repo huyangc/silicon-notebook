@@ -3542,3 +3542,15 @@ def test_deep_dive_keeps_mandatory_questions_in_the_authoritative_question(repo,
     assert "如何共享缓存" in captured[0] and "何时停止迭代" in captured[0]
     assert "适用边界范围" in captured[1]
     assert "如何共享缓存" not in captured[1]
+
+
+def test_outline_helpers_drop_container_valued_prose():
+    # Outline sections whose title/scope/sub_queries are containers must be
+    # dropped, not stringified into "[]" / "{}" (codex #720 R5).
+    from app.services.report_engine import _dict_items, _prose, _string_items
+
+    assert _prose([]) == "" and _prose({"a": 1}) == "" and _prose(" t ") == "t"
+    assert _string_items([{}, "a", "", ["b"], " c "]) == ["a", "c"]
+    assert _string_items("single string") == []
+    assert _dict_items([{"title": "x"}, "junk", 3]) == [{"title": "x"}]
+    assert _dict_items({"title": "x"}) == []
