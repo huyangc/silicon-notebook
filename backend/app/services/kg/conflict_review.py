@@ -16,6 +16,8 @@ import json
 import math
 from typing import Any, List
 
+from app.core.model_values import as_text
+
 # ---------------------------------------------------------------------------
 # Schema hint shown to the LLM (mirrors concept_merge_review's _SCHEMA)
 # ---------------------------------------------------------------------------
@@ -168,11 +170,11 @@ def review_conflict_candidates(llm_client: Any, items: List[dict]) -> List[dict]
             results.append(verdict)
             continue
 
-        conflict_type = str(data.get("conflict_type", "")).strip()
+        conflict_type = as_text(data.get("conflict_type"))
         if conflict_type not in _VALID_CONFLICT_TYPES:
             conflict_type = "none"
 
-        resolution = str(data.get("resolution", "")).strip()
+        resolution = as_text(data.get("resolution"))
         if resolution not in _VALID_RESOLUTIONS:
             resolution = "keep"
 
@@ -192,7 +194,7 @@ def review_conflict_candidates(llm_client: Any, items: List[dict]) -> List[dict]
 
         confidence = _confidence(data.get("confidence"))
 
-        rationale = str(data.get("rationale", "")).strip()[:500]
+        rationale = as_text(data.get("rationale"))[:500]
 
         results.append({
             "left_ref": cand["left_ref"],
