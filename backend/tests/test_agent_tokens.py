@@ -6,8 +6,10 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from fastapi.testclient import TestClient
 
+from app.api.deps import USER_MESSAGE_HEADER
 from app.core.config import Settings
 from app.models.schemas import NotebookCreate
+from app.repositories.identity_errors import AgentTokenInactiveError
 from app.services.sqlite_repository import (
     SQLiteRepository,
     reset_request_user,
@@ -214,6 +216,166 @@ def test_last_used_touch_is_throttled(token_context):
     assert second == first
 
 
+def test_update_access_replaces_scopes_notebooks_and_default_live(token_context):
+    service, alice, _bob, notebook, other = token_context
+    profile = service.create_agent_profile(alice.id, "Editable", "")
+    issued = _issue(
+        service, alice, profile, notebook,
+        scopes=["memory:read", "memory:read_candidates"],
+    )
+    with service.store.database.connect() as db:
+        original_hash = db.execute(
+            "SELECT token_hash FROM agent_access_tokens WHERE id=?", (issued.id,)
+        ).fetchone()["token_hash"]
+
+    updated = service.update_agent_token_access(
+        alice.id, issued.id, ["memory:propose"], other.id, [other.id], None
+    )
+
+    assert updated.id == issued.id
+    assert updated.scopes == ["memory:propose"]
+    assert updated.default_notebook_id == other.id
+    assert updated.notebook_ids == [other.id]
+    assert updated.agent_profile_id == profile.id
+    assert updated.created_at == issued.created_at
+
+    listed = service.list_agent_tokens(alice.id)[0]
+    assert listed.scopes == ["memory:propose"]
+    assert listed.default_notebook_id == other.id
+    assert listed.notebook_ids == [other.id]
+    with service.store.database.connect() as db:
+        row = db.execute(
+            "SELECT token_hash,agent_profile_id,created_at FROM agent_access_tokens "
+            "WHERE id=?",
+            (issued.id,),
+        ).fetchone()
+    assert row["token_hash"] == original_hash
+    assert row["agent_profile_id"] == profile.id
+    assert row["created_at"] == issued.created_at
+
+    # The original plaintext token still resolves (token_hash untouched) and
+    # the live principal carries the new scopes/allowlist immediately.
+    principal = service.resolve_agent_token(issued.token)
+    assert principal is not None
+    assert principal.scopes == ["memory:propose"]
+    assert principal.notebook_ids == [other.id]
+    assert principal.default_notebook_id == other.id
+
+    # A removed scope/notebook is denied right away ...
+    with pytest.raises(PermissionError):
+        service.require_agent_access(principal, "memory:read_candidates", other.id)
+    with pytest.raises(PermissionError):
+        service.require_agent_access(principal, "memory:propose", notebook.id)
+    # ... and a newly granted scope/notebook is allowed right away.
+    assert service.require_agent_access(principal, "memory:propose", other.id) is None
+
+
+def test_update_access_expiry_clear_expire_and_restore_follow_issue_rules(
+    token_context,
+):
+    service, alice, _bob, notebook, _other = token_context
+    profile = service.create_agent_profile(alice.id, "Expiring", "")
+    issued = _issue(
+        service,
+        alice,
+        profile,
+        notebook,
+        expires_at="2030-01-02T03:04:05+00:00",
+    )
+    scopes = ["memory:read", "memory:read_candidates"]
+
+    cleared = service.update_agent_token_access(
+        alice.id, issued.id, scopes, notebook.id, [notebook.id], None
+    )
+    assert cleared.expires_at is None
+    assert service.resolve_agent_token(issued.token) is not None
+
+    past = (
+        datetime.now(timezone.utc) - timedelta(minutes=1)
+    ).replace(microsecond=0).isoformat()
+    expired = service.update_agent_token_access(
+        alice.id, issued.id, scopes, notebook.id, [notebook.id], past
+    )
+    assert expired.expires_at is not None
+    assert service.resolve_agent_token(issued.token) is None
+
+    future = (
+        datetime.now(timezone.utc) + timedelta(days=1)
+    ).replace(microsecond=0).isoformat()
+    restored = service.update_agent_token_access(
+        alice.id, issued.id, scopes, notebook.id, [notebook.id], future
+    )
+    assert restored.expires_at is not None
+    assert service.resolve_agent_token(issued.token) is not None
+
+
+def test_update_access_rejects_revoked_disabled_foreign_and_invalid_input(
+    token_context, repo,
+):
+    service, alice, bob, notebook, other = token_context
+    profile = service.create_agent_profile(alice.id, "Guarded", "")
+    scopes = ["memory:read"]
+
+    revoked = _issue(service, alice, profile, notebook, scopes=scopes)
+    service.revoke_agent_token(alice.id, revoked.id)
+    with pytest.raises(AgentTokenInactiveError) as exc_info:
+        service.update_agent_token_access(
+            alice.id, revoked.id, scopes, notebook.id, [notebook.id], None
+        )
+    assert exc_info.value.reason == "revoked"
+
+    disabled_profile_token = _issue(service, alice, profile, notebook, scopes=scopes)
+    service.update_agent_profile(profile.id, alice.id, {"status": "revoked"})
+    with pytest.raises(AgentTokenInactiveError) as exc_info:
+        service.update_agent_token_access(
+            alice.id, disabled_profile_token.id, scopes, notebook.id,
+            [notebook.id], None,
+        )
+    assert exc_info.value.reason == "profile_disabled"
+
+    active_profile = service.create_agent_profile(alice.id, "Active", "")
+    live = _issue(service, alice, active_profile, notebook, scopes=scopes)
+    # Bob can read the notebook (so validation passes) but does not own the
+    # token's profile, so the store's owner-scoped lookup must still 404.
+    service.notebooks.add_member(notebook.id, bob.id)
+    try:
+        with pytest.raises(KeyError):
+            service.update_agent_token_access(
+                bob.id, live.id, scopes, notebook.id, [notebook.id], None
+            )
+    finally:
+        service.notebooks.remove_member(notebook.id, bob.id)
+
+    marker = set_request_user(bob)
+    try:
+        bob_notebook = repo.create_notebook(NotebookCreate(name="Bob private"))
+    finally:
+        reset_request_user(marker)
+    with pytest.raises(PermissionError):
+        service.update_agent_token_access(
+            alice.id, live.id, scopes, bob_notebook.id, [bob_notebook.id], None
+        )
+    with pytest.raises(ValueError):
+        service.update_agent_token_access(
+            alice.id, live.id, ["admin:all"], notebook.id, [notebook.id], None
+        )
+    with pytest.raises(ValueError):
+        service.update_agent_token_access(
+            alice.id, live.id, [], notebook.id, [notebook.id], None
+        )
+    with pytest.raises(ValueError):
+        service.update_agent_token_access(
+            alice.id, live.id, scopes, notebook.id, [other.id], None
+        )
+
+    # None of the rejected attempts mutated the token's stored allowlist.
+    unchanged = service.list_agent_tokens(alice.id)
+    still_live = next(item for item in unchanged if item.id == live.id)
+    assert still_live.scopes == scopes
+    assert still_live.notebook_ids == [notebook.id]
+    assert still_live.default_notebook_id == notebook.id
+
+
 def _register(client: TestClient, username: str) -> tuple[dict, str]:
     response = client.post(
         "/api/auth/register", json={"username": username, "password": "pw"}
@@ -356,3 +518,127 @@ def test_token_api_rejects_unknown_scope_and_default_outside_allowlist(
         },
     )
     assert naive_expiry.status_code == 422
+
+
+def test_update_access_endpoint_owner_private_and_error_mapping(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'token-access-api.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
+    monkeypatch.setenv("SILICON_NOTEBOOK_AUTH_OPTIONAL", "false")
+    monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    from app.main import create_app
+
+    client = TestClient(create_app())
+    alice_headers, _ = _register(client, "f00119006")
+    bob_headers, _ = _register(client, "g00119007")
+    notebook_id = client.post(
+        "/api/notebooks", headers=alice_headers, json={"name": "Access API"}
+    ).json()["id"]
+    other_notebook_id = client.post(
+        "/api/notebooks", headers=alice_headers, json={"name": "Access API 2"}
+    ).json()["id"]
+    profile_id = client.post(
+        "/api/agent-profiles", headers=alice_headers, json={"name": "Agent"}
+    ).json()["id"]
+    issued = client.post(
+        f"/api/agent-profiles/{profile_id}/tokens",
+        headers=alice_headers,
+        json={
+            "agent_profile_id": profile_id,
+            "scopes": ["memory:read"],
+            "default_notebook_id": notebook_id,
+            "notebook_ids": [notebook_id],
+        },
+    ).json()
+    token_id = issued["id"]
+
+    # owner: 200, whole-object replace takes effect.
+    updated = client.put(
+        f"/api/agent-tokens/{token_id}/access",
+        headers=alice_headers,
+        json={
+            "scopes": ["memory:read", "memory:propose"],
+            "default_notebook_id": other_notebook_id,
+            "notebook_ids": [other_notebook_id],
+            "expires_at": None,
+        },
+    )
+    assert updated.status_code == 200, updated.text
+    body = updated.json()
+    assert sorted(body["scopes"]) == ["memory:propose", "memory:read"]
+    assert body["default_notebook_id"] == other_notebook_id
+    assert body["notebook_ids"] == [other_notebook_id]
+
+    # someone else's token: 404, no X-User-Message leak of existence. Bob's
+    # payload targets a notebook HE can read so the rejection is proven to
+    # come from the store's owner-scoped lookup, not the notebook allowlist
+    # check that runs first.
+    bob_notebook_id = client.post(
+        "/api/notebooks", headers=bob_headers, json={"name": "Bob's own"}
+    ).json()["id"]
+    foreign = client.put(
+        f"/api/agent-tokens/{token_id}/access",
+        headers=bob_headers,
+        json={
+            "scopes": ["memory:read"],
+            "default_notebook_id": bob_notebook_id,
+            "notebook_ids": [bob_notebook_id],
+            "expires_at": None,
+        },
+    )
+    assert foreign.status_code == 404
+
+    # revoked token: 409 with the X-User-Message marker the frontend trusts.
+    revoke = client.delete(f"/api/agent-tokens/{token_id}", headers=alice_headers)
+    assert revoke.status_code == 200
+    revoked_update = client.put(
+        f"/api/agent-tokens/{token_id}/access",
+        headers=alice_headers,
+        json={
+            "scopes": ["memory:read"],
+            "default_notebook_id": other_notebook_id,
+            "notebook_ids": [other_notebook_id],
+            "expires_at": None,
+        },
+    )
+    assert revoked_update.status_code == 409
+    assert revoked_update.headers.get(USER_MESSAGE_HEADER) == "1"
+    assert revoked_update.json()["detail"] == "这个 Token 已撤销，不能再修改权限"
+
+    # A second live token to exercise payload-shape validation.
+    live = client.post(
+        f"/api/agent-profiles/{profile_id}/tokens",
+        headers=alice_headers,
+        json={
+            "agent_profile_id": profile_id,
+            "scopes": ["memory:read"],
+            "default_notebook_id": notebook_id,
+            "notebook_ids": [notebook_id],
+        },
+    ).json()
+
+    # missing required field (expires_at omitted entirely): 422.
+    missing_field = client.put(
+        f"/api/agent-tokens/{live['id']}/access",
+        headers=alice_headers,
+        json={
+            "scopes": ["memory:read"],
+            "default_notebook_id": notebook_id,
+            "notebook_ids": [notebook_id],
+        },
+    )
+    assert missing_field.status_code == 422
+
+    # extra/unknown field: 422 (extra="forbid").
+    extra_field = client.put(
+        f"/api/agent-tokens/{live['id']}/access",
+        headers=alice_headers,
+        json={
+            "scopes": ["memory:read"],
+            "default_notebook_id": notebook_id,
+            "notebook_ids": [notebook_id],
+            "expires_at": None,
+            "unexpected": "field",
+        },
+    )
+    assert extra_field.status_code == 422

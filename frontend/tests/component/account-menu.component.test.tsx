@@ -146,6 +146,17 @@ test("菜单提供许愿墙与管理员提问分析入口", async () => {
   expect(screen.getByRole("menuitem", { name: "提问分析" })).toHaveAttribute("href", "/admin/questions");
 });
 
+test("Agent 接入是账户菜单的一级入口,不必先进私有记忆", async () => {
+  const user = userEvent.setup();
+  renderMenu();
+
+  await user.click(screen.getByRole("button", { name: "账户菜单" }));
+
+  const items = screen.getAllByRole("menuitem").map((item) => item.textContent);
+  expect(screen.getByRole("menuitem", { name: "Agent 接入" })).toHaveAttribute("href", "/agents");
+  expect(items.indexOf("Agent 接入")).toBe(items.indexOf("私有记忆") + 1);
+});
+
 test("提问分析能力关闭时隐藏该入口但保留用户总览", async () => {
   const user = userEvent.setup();
   renderMenu(vi.fn(), false, vi.fn(), { activityViewEnabled: false });

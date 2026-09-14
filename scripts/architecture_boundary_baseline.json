@@ -291,6 +291,7 @@
         "unshare_notebook",
         "unshare_report",
         "update_agent_profile",
+        "update_agent_token_access",
         "update_knowhow_cell",
         "update_knowhow_cells",
         "update_knowhow_cells_bulk_guarded",

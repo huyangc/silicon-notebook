@@ -160,7 +160,7 @@ async def _run(args: argparse.Namespace) -> None:
     if not token:
         raise RuntimeError(
             "set SILICON_NOTEBOOK_AGENT_TOKEN to the one-time token issued in "
-            "私有记忆 → Agent 接入"
+            "账户菜单 → Agent 接入"
         )
 
     async with AsyncExitStack() as stack:

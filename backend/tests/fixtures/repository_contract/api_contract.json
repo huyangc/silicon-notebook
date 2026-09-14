@@ -1229,6 +1229,50 @@
           "title": "AgentProfileUpdate",
           "type": "object"
         },
+        "AgentTokenAccessUpdate": {
+          "additionalProperties": false,
+          "description": "``PUT /agent-tokens/{token_id}/access`` request body.\n\nA whole-object replace of the token's access configuration, so every\nfield is required — none has a default a caller could omit and silently\nnarrow (or widen) scopes/notebooks by accident. ``expires_at`` still\ncarries its ``Optional`` type (``null`` clears the expiry) but no default\nvalue, so the field itself must be present in the payload; leaving it out\nentirely is a 422, not \"leave unchanged\" (there is no partial-update\nsemantics here, unlike ``AgentProfileUpdate``/``SearchProfileUpdate``).",
+          "properties": {
+            "default_notebook_id": {
+              "minLength": 1,
+              "title": "Default Notebook Id",
+              "type": "string"
+            },
+            "expires_at": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Expires At"
+            },
+            "notebook_ids": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Notebook Ids",
+              "type": "array"
+            },
+            "scopes": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Scopes",
+              "type": "array"
+            }
+          },
+          "required": [
+            "scopes",
+            "default_notebook_id",
+            "notebook_ids",
+            "expires_at"
+          ],
+          "title": "AgentTokenAccessUpdate",
+          "type": "object"
+        },
         "AgentTokenCreate": {
           "additionalProperties": false,
           "properties": {
@@ -13717,6 +13761,55 @@
             }
           },
           "summary": "Revoke Agent Token"
+        }
+      },
+      "/api/agent-tokens/{token_id}/access": {
+        "put": {
+          "operationId": "update_agent_token_access_api_agent_tokens__token_id__access_put",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "token_id",
+              "required": true,
+              "schema": {
+                "title": "Token Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentTokenAccessUpdate"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/AgentTokenSummary"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Update Agent Token Access"
         }
       },
       "/api/agent/knowhow/rows/{row_id}": {

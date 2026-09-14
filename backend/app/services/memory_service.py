@@ -299,15 +299,19 @@ class MemoryService:
             raise ValueError("invalid profile status")
         return self.store.update_agent_profile(profile_id, owner_id, values)
 
-    def issue_agent_token(
+    def _validate_agent_access(
         self,
         owner_id: str,
-        agent_profile_id: str,
         scopes: Sequence[str],
         default_notebook_id: str,
         notebook_ids: Sequence[str],
         expires_at: str | None,
-    ) -> AgentTokenIssued:
+    ) -> tuple[list[str], list[str], str | None]:
+        """Shared scopes/notebook-allowlist/expiry validation for both
+        ``issue_agent_token`` (a fresh token) and ``update_agent_token_access``
+        (a whole-object replace of an existing one's access configuration) —
+        the same rules apply to a token's access configuration however it was
+        reached, so there is exactly one place that can drift."""
         clean_scopes = list(dict.fromkeys(str(scope) for scope in scopes))
         if not clean_scopes:
             raise ValueError("at least one scope is required")
@@ -326,6 +330,20 @@ class MemoryService:
         for notebook_id in clean_notebooks:
             if not self.notebooks.user_can_read_notebook(notebook_id, owner_id):
                 raise PermissionError(notebook_id)
+        return clean_scopes, clean_notebooks, expires_at
+
+    def issue_agent_token(
+        self,
+        owner_id: str,
+        agent_profile_id: str,
+        scopes: Sequence[str],
+        default_notebook_id: str,
+        notebook_ids: Sequence[str],
+        expires_at: str | None,
+    ) -> AgentTokenIssued:
+        clean_scopes, clean_notebooks, expires_at = self._validate_agent_access(
+            owner_id, scopes, default_notebook_id, notebook_ids, expires_at
+        )
         token_id = self.new_id("token")
         raw_token = f"snm_{token_id}.{secrets.token_urlsafe(32)}"
         token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
@@ -359,6 +377,27 @@ class MemoryService:
         self, owner_id: str, token_id: str
     ) -> AgentTokenSummary:
         return self.store.revoke_agent_token(token_id, owner_id)
+
+    def update_agent_token_access(
+        self,
+        owner_id: str,
+        token_id: str,
+        scopes: Sequence[str],
+        default_notebook_id: str,
+        notebook_ids: Sequence[str],
+        expires_at: str | None,
+    ) -> AgentTokenSummary:
+        clean_scopes, clean_notebooks, expires_at = self._validate_agent_access(
+            owner_id, scopes, default_notebook_id, notebook_ids, expires_at
+        )
+        return self.store.update_agent_token_access(
+            token_id,
+            owner_id,
+            clean_scopes,
+            default_notebook_id,
+            clean_notebooks,
+            expires_at,
+        )
 
     def resolve_agent_token(self, raw_token: str) -> AgentPrincipal | None:
         match = _AGENT_TOKEN_RE.fullmatch(raw_token or "")

@@ -46,8 +46,8 @@ curl -s http://127.0.0.1:8000/api/ready
 
 ## 3. 在界面创建 Agent Profile 与 Token
 
-1. 在笔记本列表页右上角打开账户菜单，选择 **私有记忆**。
-2. 在记忆总览页展开 **Agent 接入**。
+1. 在右上角打开账户菜单，选择 **Agent 接入**。它是一级入口，打开独立的 `/agents` 页；总 Memory 页里也有指向它的链接。
+2. 页面上依次是 **Agent Profile**、**签发 Token** 与 **已签发 Token** 三块。
 3. 在 **Agent Profile** 区域填写：
    - 名称：例如 `Codex local`；
    - 说明：例如 `MacBook / silicon-notebook repo`；
@@ -389,8 +389,8 @@ auth | curl -K - -s -o /dev/null -w '%{http_code}\n' -X DELETE "$MCP_URL" \
 | --- | --- |
 | `401 invalid or expired Agent token` | token 是否复制完整、是否过期/撤销；环境变量是否在启动 Agent 的同一进程环境中。 |
 | `select_notebook must be called before this tool` | 这是新 session；先重新调用 `list_notebooks` 和 `select_notebook`。 |
-| `notebook is outside the token allowlist` | 回到 Agent 接入签发包含该 notebook 的新 token；不要扩大旧 token 之外的隐式权限。 |
-| scope/permission error | 对照上方 scope 表重新签发最小权限 token。token scope 不可在客户端侧提升。 |
+| `notebook is outside the token allowlist` | 在 **Agent 接入 → 已签发 Token** 对该 token 点 **修改权限**，把该 notebook 加进白名单（下一次工具调用起生效）；或为它签发新 token。只加真正需要的 notebook。 |
+| scope/permission error | 对照上方 scope 表，用 **修改权限** 只补上缺的 scope，或重新签发最小权限 token。token scope 不可在客户端侧提升。 |
 | Codex 看不到服务 | 运行 `codex mcp list`，确认环境变量已在启动 Codex 前导出，然后新开 session/重启 app 或 extension。 |
 | 配置客户端时 `404` 或连接被拒 | 先照签发回执的接入说明**逐字**重试它印出的那个地址。补结尾斜杠、或回落到 `<host>:8000/mcp/`，都只适用于确认是直连后端的地址：有代理时它可能只路由公布的那条路径，后端端口可能是私有的，硬去够那个端口还可能把 token 降级成明文（第 4 节）。 |
 | `POST /mcp` 回 `307 Temporary Redirect` | 预期行为——MCP 应用挂在 `/mcp`，自身路由是 `/`。直接把 `/mcp/` 写进配置，不要指望客户端一定跟随重定向。 |
@@ -417,6 +417,8 @@ auth | curl -K - -s -o /dev/null -w '%{http_code}\n' -X DELETE "$MCP_URL" \
 
 ## 10. 撤销与轮换
 
-在 **私有记忆 → Agent 接入 → 已签发 Token** 点击 **撤销**，服务端会在后续每次数据工具调用时重新检查实时 token 状态。停用 Agent Profile 会让它的全部 token 立即失效。
+在 **Agent 接入 → 已签发 Token** 点击 **撤销**，服务端会在后续每次数据工具调用时重新检查实时 token 状态。停用 Agent Profile 会让它的全部 token 立即失效。
+
+只想调整已有 token 能做什么时，点它的 **修改权限**：scopes、默认笔记本、白名单与过期时间一起保存，Agent 的下一次工具调用即按新配置执行，无需重签或重新配置客户端。已撤销的 token 不能修改。修改不会再次显示明文；token 本身丢失或泄露时，仍应签发新 token 并撤销旧的。
 
 轮换时先签发新的短期 token、更新运行环境并验证新 session，再撤销旧 token。不要复用已经出现在日志、shell history 或客户端明文配置中的 token。

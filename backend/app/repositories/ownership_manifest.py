@@ -97,6 +97,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/eval/speed.py', scope='<module>.measure_speed', kind='import', target='app.services.sqlite_repository:SQLiteRepository'),
             ConsumerSite(path='backend/app/scripts/gen_recall_gold.py', scope='<module>', kind='import', target='app.services.sqlite_repository:SQLiteRepository'),
             ConsumerSite(path='backend/tests/test_replay_retrieval.py', scope='<module>.test_record_run_requires_retrieval_query_embedding', kind='patch', target='SQLiteRepository'),
+            ConsumerSite(path='backend/tests/test_replay_retrieval.py', scope='<module>.test_report_run_enters_report_generation_scope', kind='patch', target='SQLiteRepository'),
             ConsumerSite(path='scripts/backfill_knowhow_md.py', scope='<module>', kind='import', target='app.services.sqlite_repository:SQLiteRepository'),
             ConsumerSite(path='scripts/bench_sqlite_writes.py', scope='<module>._make_repo', kind='import', target='app.services.sqlite_repository:SQLiteRepository'),
             ConsumerSite(path='scripts/kg_product_smoke.py', scope='<module>', kind='import', target='app.services.sqlite_repository:SQLiteRepository'),
@@ -106,6 +107,7 @@ SURFACE_MEMBERS = (
         ),
         patches=(
             ConsumerSite(path='backend/tests/test_replay_retrieval.py', scope='<module>.test_record_run_requires_retrieval_query_embedding', kind='patch', target='SQLiteRepository'),
+            ConsumerSite(path='backend/tests/test_replay_retrieval.py', scope='<module>.test_report_run_enters_report_generation_scope', kind='patch', target='SQLiteRepository'),
         ),
     ),
     SurfaceMember(
@@ -273,6 +275,10 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/tests/test_scale_index_version_singleflight.py', scope='<module>.test_no_deadlock_with_reentrant_call_for_different_notebook', kind='patch', target='_connect'),
             ConsumerSite(path='backend/tests/test_scale_index_version_singleflight.py', scope='<module>.test_seq_bump_forces_exactly_one_recompute', kind='patch', target='_connect'),
             ConsumerSite(path='backend/tests/test_trackF_governance_promotion.py', scope='<module>.TestPromotionStateMachine.test_list_promotion_queue_batches_object_lookup_not_n_plus_1', kind='patch', target='_connect'),
+            ConsumerSite(path='scripts/bench_scale_build_paging.py', scope='<module>._primary_notebook', kind='attribute', target='_connect'),
+            ConsumerSite(path='scripts/bench_scale_build_paging.py', scope='<module>.cmd_drop', kind='attribute', target='_connect'),
+            ConsumerSite(path='scripts/bench_scale_build_paging.py', scope='<module>.cmd_evidence', kind='attribute', target='_connect'),
+            ConsumerSite(path='scripts/bench_scale_build_paging.py', scope='<module>.cmd_explain', kind='attribute', target='_connect'),
         ),
         patches=(
             ConsumerSite(path='backend/tests/test_language_policy.py', scope='<module>.test_notebook_langs_is_cached', kind='patch', target='_connect'),
@@ -359,6 +365,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/tests/test_notebook_copy_service.py', scope='<module>.test_failure_after_sentinel_compensates_only_destination', kind='patch', target='_insert_row'),
             ConsumerSite(path='backend/tests/test_notebook_share_copy.py', scope='<module>.test_copy_notebook_chunked_transactions_release_lock_between_chunks', kind='patch', target='_insert_row'),
             ConsumerSite(path='backend/tests/test_notebook_share_copy.py', scope='<module>.test_copy_notebook_crash_midway_leaves_no_visible_notebook_and_self_heals', kind='patch', target='_insert_row'),
+            ConsumerSite(path='backend/tests/test_notebook_share_copy.py', scope='<module>.test_half_copied_mount_edges_cannot_leak_past_compensation', kind='patch', target='_insert_row'),
         ),
         patches=(
             ConsumerSite(path='backend/tests/test_knowhow_copy.py', scope='<module>.test_copy_failure_compensation_removes_assets_dir', kind='patch', target='_insert_row'),
@@ -366,6 +373,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/tests/test_notebook_copy_service.py', scope='<module>.test_failure_after_sentinel_compensates_only_destination', kind='patch', target='_insert_row'),
             ConsumerSite(path='backend/tests/test_notebook_share_copy.py', scope='<module>.test_copy_notebook_chunked_transactions_release_lock_between_chunks', kind='patch', target='_insert_row'),
             ConsumerSite(path='backend/tests/test_notebook_share_copy.py', scope='<module>.test_copy_notebook_crash_midway_leaves_no_visible_notebook_and_self_heals', kind='patch', target='_insert_row'),
+            ConsumerSite(path='backend/tests/test_notebook_share_copy.py', scope='<module>.test_half_copied_mount_edges_cannot_leak_past_compensation', kind='patch', target='_insert_row'),
         ),
     ),
     SurfaceMember(
@@ -624,6 +632,7 @@ SURFACE_MEMBERS = (
         kind='instance_attribute',
         consumers=(
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.admin_query_repository', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/api/deps.py', scope='<module>.analysis_issue_repository', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.content_overview_service', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.extension_toggle_repository', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.group_repository', kind='attribute', target='_runtime'),
@@ -634,8 +643,10 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.model_status_service', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.notebook_access_repository', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.notebook_catalog_repository', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/api/deps.py', scope='<module>.notebook_delete_repository', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.notebook_sharing_repository', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.notebook_store_port', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/api/deps.py', scope='<module>.wish_repository', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.build_kg', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.rebuild_kg', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.resolve_conflicts', kind='attribute', target='_runtime'),
@@ -1093,6 +1104,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.unshare_notebook', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.unshare_report', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.update_agent_profile', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.update_agent_token_access', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.update_knowhow_cell', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.update_knowhow_cells', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.update_knowhow_cells_bulk_guarded', kind='attribute', target='_runtime'),
@@ -1129,6 +1141,9 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.close_local', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.db_path', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.maintenance', kind='attribute', target='_runtime'),
+            ConsumerSite(path='scripts/bench_scale_build_paging.py', scope='<module>._rss_child', kind='attribute', target='_runtime'),
+            ConsumerSite(path='scripts/bench_scale_build_paging.py', scope='<module>.cmd_evidence', kind='attribute', target='_runtime'),
+            ConsumerSite(path='scripts/verify_repository_snapshot.py', scope='<module>.verify_snapshot', kind='attribute', target='_runtime'),
         ),
         patches=(
         ),
@@ -1182,6 +1197,7 @@ SURFACE_MEMBERS = (
         consumers=(
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.__init__.<lambda>', kind='attribute', target='_write'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade._begin_extraction_run', kind='attribute', target='_write'),
+            ConsumerSite(path='scripts/bench_scale_build_paging.py', scope='<module>._seed_notebook', kind='attribute', target='_write'),
         ),
         patches=(
         ),
@@ -1267,6 +1283,7 @@ SURFACE_MEMBERS = (
         owner='SourceStore',
         kind='method',
         consumers=(
+            ConsumerSite(path='backend/app/api/admin_routes.py', scope='<module>.get_admin_user_notebook_source', kind='attribute', target='all_visible_source_ids'),
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>._validate_source_scope', kind='attribute', target='all_visible_source_ids'),
         ),
         patches=(
@@ -1394,6 +1411,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.run_index', kind='attribute', target='build_scale_index'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.run_kg._finalize', kind='attribute', target='build_scale_index'),
             ConsumerSite(path='backend/tests/test_batch_ingest.py', scope='<module>.test_run_index_prints_stage_timings', kind='patch', target='build_scale_index'),
+            ConsumerSite(path='scripts/bench_scale_build_paging.py', scope='<module>.cmd_build', kind='attribute', target='build_scale_index'),
         ),
         patches=(
             ConsumerSite(path='backend/tests/test_batch_ingest.py', scope='<module>.test_run_index_prints_stage_timings', kind='patch', target='build_scale_index'),
@@ -1436,6 +1454,7 @@ SURFACE_MEMBERS = (
         consumers=(
             ConsumerSite(path='backend/app/eval/sa_calibration.py', scope='<module>._run_arm', kind='attribute', target='chat'),
             ConsumerSite(path='scripts/kg_product_smoke.py', scope='<module>.main', kind='attribute', target='chat'),
+            ConsumerSite(path='scripts/reflect_shadow_rig.py', scope='<module>._plan_intent', kind='attribute', target='chat'),
         ),
         patches=(
         ),
@@ -1467,6 +1486,7 @@ SURFACE_MEMBERS = (
         kind='method',
         consumers=(
             ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>.confirm_report_intent', kind='attribute', target='claim_report_intent'),
+            ConsumerSite(path='scripts/reflect_shadow_rig.py', scope='<module>._generate_report', kind='attribute', target='claim_report_intent'),
         ),
         patches=(
         ),
@@ -1477,6 +1497,12 @@ SURFACE_MEMBERS = (
         kind='method',
         consumers=(
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.shutdown_repository_if_initialized', kind='attribute', target='close'),
+            ConsumerSite(path='scripts/bench_scale_build_paging.py', scope='<module>._rss_child', kind='attribute', target='close'),
+            ConsumerSite(path='scripts/bench_scale_build_paging.py', scope='<module>.cmd_build', kind='attribute', target='close'),
+            ConsumerSite(path='scripts/bench_scale_build_paging.py', scope='<module>.cmd_drop', kind='attribute', target='close'),
+            ConsumerSite(path='scripts/bench_scale_build_paging.py', scope='<module>.cmd_evidence', kind='attribute', target='close'),
+            ConsumerSite(path='scripts/bench_scale_build_paging.py', scope='<module>.cmd_explain', kind='attribute', target='close'),
+            ConsumerSite(path='scripts/bench_scale_build_paging.py', scope='<module>.cmd_seed', kind='attribute', target='close'),
         ),
         patches=(
         ),
@@ -1691,6 +1717,7 @@ SURFACE_MEMBERS = (
         consumers=(
             ConsumerSite(path='backend/app/eval/speed.py', scope='<module>.measure_speed', kind='attribute', target='create_notebook'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.ensure_notebook', kind='attribute', target='create_notebook'),
+            ConsumerSite(path='scripts/bench_scale_build_paging.py', scope='<module>._seed_notebook', kind='attribute', target='create_notebook'),
             ConsumerSite(path='scripts/bench_sqlite_writes.py', scope='<module>.main', kind='attribute', target='create_notebook'),
             ConsumerSite(path='scripts/kg_product_smoke.py', scope='<module>.main', kind='attribute', target='create_notebook'),
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>.check_kg_store_ask_and_conversations', kind='attribute', target='create_notebook'),
@@ -1728,6 +1755,7 @@ SURFACE_MEMBERS = (
         kind='method',
         consumers=(
             ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>.create_report', kind='attribute', target='create_report'),
+            ConsumerSite(path='scripts/reflect_shadow_rig.py', scope='<module>._run_reports', kind='attribute', target='create_report'),
         ),
         patches=(
         ),
@@ -1740,6 +1768,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>._own_conversation_or_404', kind='attribute', target='current_user'),
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>._stream_ask_events._start_ask_stream', kind='attribute', target='current_user'),
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>._validate_source_scope', kind='attribute', target='current_user'),
+            ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.ask_stream._attach_ask_stream', kind='attribute', target='current_user'),
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.cancel_ask_job', kind='attribute', target='current_user'),
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.get_ask_job', kind='attribute', target='current_user'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>._resolve_session_user', kind='attribute', target='current_user'),
@@ -1845,6 +1874,7 @@ SURFACE_MEMBERS = (
         kind='method',
         consumers=(
             ConsumerSite(path='backend/app/eval/speed.py', scope='<module>._cleanup', kind='attribute', target='delete_notebook'),
+            ConsumerSite(path='scripts/bench_scale_build_paging.py', scope='<module>.cmd_drop', kind='attribute', target='delete_notebook'),
         ),
         patches=(
         ),
@@ -2047,6 +2077,7 @@ SURFACE_MEMBERS = (
         consumers=(
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>._intent_history', kind='attribute', target='get_conversation'),
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.get_conversation', kind='attribute', target='get_conversation'),
+            ConsumerSite(path='backend/app/api/mcp_tools/memory_context.py', scope='<module>._reasoning_intent_history', kind='attribute', target='get_conversation'),
             ConsumerSite(path='backend/tests/test_admin_user_activity_api.py', scope='<module>.test_ask_detail_does_not_load_full_conversation_history', kind='patch', target='get_conversation'),
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>.check_kg_store_ask_and_conversations', kind='attribute', target='get_conversation'),
             ConsumerSite(path='scripts/verify_repository_snapshot.py', scope='<module>.exercise_reads', kind='attribute', target='get_conversation'),
@@ -2143,7 +2174,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.relink_kg', kind='attribute', target='get_notebook'),
             ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.resolve_conflicts', kind='attribute', target='get_notebook'),
             ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.review_all_unified_kg_merges', kind='attribute', target='get_notebook'),
-            ConsumerSite(path='backend/app/api/mcp_tools/memory_context.py', scope='<module>.register_memory_context_tools.ask_notebook.run_ask', kind='attribute', target='get_notebook'),
+            ConsumerSite(path='backend/app/api/mcp_tools/memory_context.py', scope='<module>._run_ask_notebook', kind='attribute', target='get_notebook'),
             ConsumerSite(path='backend/app/api/mcp_tools/session.py', scope='<module>.register_session_tools.list_notebooks.load', kind='attribute', target='get_notebook'),
             ConsumerSite(path='backend/app/api/mcp_tools/session.py', scope='<module>.register_session_tools.select_notebook.load', kind='attribute', target='get_notebook'),
             ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>._report_scope_recheck', kind='attribute', target='get_notebook'),
@@ -2160,12 +2191,15 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.run_question_index', kind='attribute', target='get_notebook'),
             ConsumerSite(path='backend/app/services/image_backfill_phase.py', scope='<module>.run_backfill_images', kind='attribute', target='get_notebook'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.__init__.<lambda>', kind='attribute', target='get_notebook'),
+            ConsumerSite(path='backend/tests/test_notebook_delete_review_fixes.py', scope='<module>.test_asset_recheck_survives_actor_access_loss', kind='patch', target='get_notebook'),
             ConsumerSite(path='scripts/denoise_reextract_nb.py', scope='<module>.main', kind='attribute', target='get_notebook'),
+            ConsumerSite(path='scripts/reflect_shadow_rig.py', scope='<module>._search_corpus_facts', kind='attribute', target='get_notebook'),
             ConsumerSite(path='scripts/replay_retrieval.py', scope='<module>.record_run', kind='attribute', target='get_notebook'),
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>.main', kind='attribute', target='get_notebook'),
             ConsumerSite(path='scripts/verify_repository_snapshot.py', scope='<module>.exercise_reads', kind='attribute', target='get_notebook'),
         ),
         patches=(
+            ConsumerSite(path='backend/tests/test_notebook_delete_review_fixes.py', scope='<module>.test_asset_recheck_survives_actor_access_loss', kind='patch', target='get_notebook'),
         ),
     ),
     SurfaceMember(
@@ -2176,8 +2210,11 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.public_conversation_asset_route', kind='attribute', target='get_notebook_asset'),
             ConsumerSite(path='backend/app/api/source_routes.py', scope='<module>.get_notebook_asset_file', kind='attribute', target='get_notebook_asset'),
             ConsumerSite(path='backend/app/services/knowhow/transfer.py', scope='<module>._remap', kind='attribute', target='get_notebook_asset'),
+            ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>._resolve_element_assets', kind='attribute', target='get_notebook_asset'),
+            ConsumerSite(path='backend/tests/test_source_ingestion_service.py', scope='<module>.test_resolve_element_assets_skips_one_failing_row_and_keeps_the_rest', kind='patch', target='get_notebook_asset'),
         ),
         patches=(
+            ConsumerSite(path='backend/tests/test_source_ingestion_service.py', scope='<module>.test_resolve_element_assets_skips_one_failing_row_and_keeps_the_rest', kind='patch', target='get_notebook_asset'),
         ),
     ),
     SurfaceMember(
@@ -2187,6 +2224,8 @@ SURFACE_MEMBERS = (
         consumers=(
             ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>._own_report_or_404', kind='attribute', target='get_report'),
             ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>.cancel_report_endpoint', kind='attribute', target='get_report'),
+            ConsumerSite(path='scripts/reflect_shadow_rig.py', scope='<module>._generate_report', kind='attribute', target='get_report'),
+            ConsumerSite(path='scripts/reflect_shadow_rig.py', scope='<module>._report_rows', kind='attribute', target='get_report'),
             ConsumerSite(path='scripts/verify_repository_snapshot.py', scope='<module>.exercise_reads', kind='attribute', target='get_report'),
         ),
         patches=(
@@ -2197,6 +2236,7 @@ SURFACE_MEMBERS = (
         owner='SourceStore',
         kind='method',
         consumers=(
+            ConsumerSite(path='backend/app/api/admin_routes.py', scope='<module>.get_admin_user_notebook_source', kind='attribute', target='get_source'),
             ConsumerSite(path='backend/app/api/mcp_tools/sources.py', scope='<module>._own_source', kind='attribute', target='get_source'),
             ConsumerSite(path='backend/app/api/source_routes.py', scope='<module>.reparse_sources', kind='attribute', target='get_source'),
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>._source_evidence', kind='attribute', target='get_source'),
@@ -2475,6 +2515,7 @@ SURFACE_MEMBERS = (
         kind='method',
         consumers=(
             ConsumerSite(path='backend/app/api/admin_routes.py', scope='<module>.get_admin_user_notebook_sources', kind='attribute', target='list_sources_page'),
+            ConsumerSite(path='backend/app/api/mcp_tools/sources.py', scope='<module>.register_source_tools.list_sources.load', kind='attribute', target='list_sources_page'),
         ),
         patches=(
         ),
@@ -2542,6 +2583,8 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='scripts/kg_product_smoke.py', scope='<module>.grounding_ok', kind='attribute', target='maintenance'),
             ConsumerSite(path='scripts/kg_product_smoke.py', scope='<module>.insert_source', kind='attribute', target='maintenance'),
             ConsumerSite(path='scripts/kg_product_smoke.py', scope='<module>.main', kind='attribute', target='maintenance'),
+            ConsumerSite(path='scripts/reflect_shadow_rig.py', scope='<module>._run_reports', kind='attribute', target='maintenance'),
+            ConsumerSite(path='scripts/reflect_shadow_rig.py', scope='<module>._run_search', kind='attribute', target='maintenance'),
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>._insert_rule', kind='attribute', target='maintenance'),
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>._latest_extraction_run', kind='attribute', target='maintenance'),
             ConsumerSite(path='scripts/verify_repository_snapshot.py', scope='<module>.exercise_reads', kind='attribute', target='maintenance'),
@@ -2730,8 +2773,10 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/api/system_routes.py', scope='<module>.me_pending_actions', kind='attribute', target='pending_actions'),
             ConsumerSite(path='backend/app/api/system_routes.py', scope='<module>.me_pending_stream.gen', kind='attribute', target='pending_actions'),
             ConsumerSite(path='backend/app/main.py', scope='<module>.create_app.<lambda>', kind='attribute', target='pending_actions'),
+            ConsumerSite(path='backend/tests/test_query_canceled_handler.py', scope='<module>.test_query_canceled_mid_stream_still_emits_the_query_timeout_event', kind='patch', target='pending_actions'),
         ),
         patches=(
+            ConsumerSite(path='backend/tests/test_query_canceled_handler.py', scope='<module>.test_query_canceled_mid_stream_still_emits_the_query_timeout_event', kind='patch', target='pending_actions'),
         ),
     ),
     SurfaceMember(
@@ -2775,6 +2820,7 @@ SURFACE_MEMBERS = (
         consumers=(
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.preview_ask_intent.run_preview', kind='attribute', target='preview_reasoning_intent'),
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.preview_ask_intent_stream.run_preview', kind='attribute', target='preview_reasoning_intent'),
+            ConsumerSite(path='backend/app/api/mcp_tools/memory_context.py', scope='<module>._run_ask_notebook', kind='attribute', target='preview_reasoning_intent'),
             ConsumerSite(path='backend/tests/test_ask_modes_api.py', scope='<module>.test_auto_is_a_retired_alias_for_reasoning', kind='patch', target='preview_reasoning_intent'),
         ),
         patches=(
@@ -2876,6 +2922,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/tests/test_batch_ingest.py', scope='<module>.test_run_reparse_disables_incremental_fusion_during_run', kind='patch', target='rebuild_unified_kg'),
             ConsumerSite(path='backend/tests/test_batch_ingest.py', scope='<module>.test_run_reparse_only_targets_sources_missing_elements', kind='patch', target='rebuild_unified_kg'),
             ConsumerSite(path='backend/tests/test_scale_index_repo.py', scope='<module>.test_run_kg_no_rebuild_skips_clustering', kind='patch', target='rebuild_unified_kg'),
+            ConsumerSite(path='scripts/bench_scale_build_paging.py', scope='<module>._seed_notebook', kind='attribute', target='rebuild_unified_kg'),
             ConsumerSite(path='scripts/denoise_reextract_nb.py', scope='<module>.main', kind='attribute', target='rebuild_unified_kg'),
         ),
         patches=(
@@ -2985,6 +3032,7 @@ SURFACE_MEMBERS = (
         consumers=(
             ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>._launch_generate_job', kind='attribute', target='report_execution'),
             ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>._launch_plan_job', kind='attribute', target='report_execution'),
+            ConsumerSite(path='scripts/reflect_shadow_rig.py', scope='<module>._generate_report', kind='attribute', target='report_execution'),
         ),
         patches=(
         ),
@@ -3144,6 +3192,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.federated_retrieve_relations', kind='attribute', target='retrieval'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.scale_ppr', kind='attribute', target='retrieval'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.maintenance.<lambda>', kind='attribute', target='retrieval'),
+            ConsumerSite(path='scripts/reflect_shadow_rig.py', scope='<module>._search_corpus_facts', kind='attribute', target='retrieval'),
             ConsumerSite(path='scripts/replay_retrieval.py', scope='<module>.record_run', kind='attribute', target='retrieval'),
         ),
         patches=(
@@ -3421,10 +3470,11 @@ SURFACE_MEMBERS = (
     ),
     SurfaceMember(
         name='start_ask_stream',
-        owner='AskExecutionCoordinator',
+        owner='AskService',
         kind='method',
         consumers=(
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>._stream_ask_events._start_ask_stream', kind='attribute', target='start_ask_stream'),
+            ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.ask_stream._attach_ask_stream', kind='attribute', target='start_ask_stream'),
         ),
         patches=(
         ),
@@ -3477,6 +3527,7 @@ SURFACE_MEMBERS = (
         owner='KnowledgeLifecycleService',
         kind='method',
         consumers=(
+            ConsumerSite(path='scripts/bench_scale_build_paging.py', scope='<module>._seed_notebook', kind='attribute', target='store_kg'),
             ConsumerSite(path='scripts/bench_sqlite_writes.py', scope='<module>._proc_work', kind='attribute', target='store_kg'),
             ConsumerSite(path='scripts/bench_sqlite_writes.py', scope='<module>._run_threads.work', kind='attribute', target='store_kg'),
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>.check_kg_store_ask_and_conversations', kind='attribute', target='store_kg'),

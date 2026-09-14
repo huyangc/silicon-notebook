@@ -144,6 +144,26 @@ class AgentTokenCreate(BaseModel):
     expires_at: Optional[str] = None
 
 
+class AgentTokenAccessUpdate(BaseModel):
+    """``PUT /agent-tokens/{token_id}/access`` request body.
+
+    A whole-object replace of the token's access configuration, so every
+    field is required — none has a default a caller could omit and silently
+    narrow (or widen) scopes/notebooks by accident. ``expires_at`` still
+    carries its ``Optional`` type (``null`` clears the expiry) but no default
+    value, so the field itself must be present in the payload; leaving it out
+    entirely is a 422, not "leave unchanged" (there is no partial-update
+    semantics here, unlike ``AgentProfileUpdate``/``SearchProfileUpdate``).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    scopes: List[str]
+    default_notebook_id: str = Field(min_length=1)
+    notebook_ids: List[str]
+    expires_at: Optional[str]
+
+
 class AgentTokenSummary(BaseModel):
     id: str
     agent_profile_id: str

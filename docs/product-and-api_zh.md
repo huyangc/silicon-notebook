@@ -563,11 +563,18 @@ reason 1,000 字符、task context 序列化 UTF-8 8,192 bytes、evidence 最多
 MCP 提案严格使用这些 Core 上限，不再叠加更窄的重复限制。
 tag 原始列表会先按 20 条限额校验，再 trim/去重；空白 tag 直接拒绝。
 
-总 Memory 页的“Agent 接入”可创建稳定 Agent profile，以及明文只显示一次的 token。
+“Agent 接入”页（`/agents`，账户菜单一级入口；总 Memory 页也有链接指向它）可创建稳定
+Agent profile，以及明文只显示一次的 token。
 Token 有过期时间、默认 notebook、notebook allowlist，并只授予所需的
 `knowledge:read`、`memory:read`、`memory:read_candidates`、`memory:propose`、
 `ask:execute`、`knowhow:code`、`sources:write`、`sources:delete`、`maintenance:execute`
-子集；可即时撤销。后端 requirements 已包含官方 `mcp>=1.26.0` client/server
+子集；可即时撤销。已签发 token 的访问配置可以原地修改：`PUT /api/agent-tokens/{token_id}/access`
+整体替换 scopes、默认 notebook、allowlist 与过期时间（四个字段都必填，`expires_at: null` 表示无到期
+时间），校验规则与签发完全相同；token 哈希、所属 Profile 与创建时间不变，明文也不会再次显示。Agent
+每次工具调用都会重读实时 token 状态，所以修改从下一次调用起生效，无需重签或重新配置客户端；把已过期
+token 的过期时间改到将来会让它重新可用。已撤销的 token、或所属 Profile 已停用的 token 返回 409；
+allowlist 中含 owner 已无权读取的 notebook 返回 422。浏览器在每个 token 行内编辑，忙碌、失败与
+「已保存」状态都落在该行。后端 requirements 已包含官方 `mcp>=1.26.0` client/server
 SDK。启动后，Streamable HTTP 服务位于 `/mcp/`（写 `/mcp` 会经 307 到达）。本机可用
 签发回执还会给出匿名 `GET /api/agent-mcp/onboarding`：这是一份机器可读的 Markdown 交接说明，
 把 `MCP_PUBLIC_URL` 逐字印成要配置的地址（绝不改写——代理可能只公布这一条精确路由），同时写明
@@ -2044,7 +2051,7 @@ frame、blueprint 或 claims 账本缺失/畸形时会丢弃新增结构，回�
 - `GET /api/notebooks/{id}/conversations`、`GET|PATCH|DELETE /api/conversations/{id}`
 - `POST /api/answers/{answer_id}/feedback`
 - Memory：`GET /api/memories`、`GET /api/notebooks/{id}/memories`、`GET|PATCH /api/memories/{memory_id}`、`POST /api/memories/{memory_id}/confirm|reject|deprecate|promote`、`POST /api/answers/{answer_id}/memory-preview/stream`（网页端；`/memory-preview` 保持 JSON 兼容）、`POST /api/notebooks/{id}/memories/from-answer`
-- Agent 接入：匿名机器可读说明 `GET /api/agent-mcp/onboarding`；认证管理面 `GET|POST /api/agent-profiles`、`PATCH /api/agent-profiles/{profile_id}`、`POST /api/agent-profiles/{profile_id}/tokens`、`GET /api/agent-tokens`、`DELETE /api/agent-tokens/{token_id}`；Streamable HTTP MCP 挂载在 `/mcp`
+- Agent 接入：匿名机器可读说明 `GET /api/agent-mcp/onboarding`；认证管理面 `GET|POST /api/agent-profiles`、`PATCH /api/agent-profiles/{profile_id}`、`POST /api/agent-profiles/{profile_id}/tokens`、`GET /api/agent-tokens`、`PUT /api/agent-tokens/{token_id}/access`、`DELETE /api/agent-tokens/{token_id}`；Streamable HTTP MCP 挂载在 `/mcp`
 - Knowhow agent 接入面：`GET /api/agent/knowhow/tables?notebook_id=`、`GET /api/agent/knowhow/tables/{table_id}/discrimination`、`GET /api/agent/knowhow/rows/{row_id}`、`GET|PUT|DELETE /api/agent/knowhow/rows/{row_id}/cells/{column_id}/code`——session 或 Agent Bearer token 均可访问；读需要 `knowledge:read`，代码写入需要 `knowhow:code`（见 [Memory 与 Agent MCP](#memory-与-agent-mcp)）
 - 统一 KG：`POST .../unified-kg/rebuild`、`GET .../unified-kg`、`GET .../unified-kg/pending-merges`、`POST .../unified-kg/merges/{id}/confirm|reject`
 - 重新合并（界面：知识图谱视图与「索引与构建」面板里的**「重新合并」**）：`POST /api/notebooks/{id}/unified-kg/rebuild` 启动**后台**任务并返回 `{status: "rebuilding", notebook_id, job_id}`——它不再返回 `{clusters: N}`，因为这件事的工作量取决于笔记本规模而不是这一次点击：内容版本闸让「输入没变」的库仍然毫秒级返回，但真正要重聚的那一趟会在整张图上流式扫种子代表（基准库规模是分钟到小时级，早已越过 PostgreSQL 的语句超时，而且整段时间钉着一个请求 worker）。它没有 LLM 前置条件——但并非严格零模型：`kg_merge_review` / `kg_concept_description` 已配置时会作为 fail-open 增强被调用。单飞**与补上关联共用同一个任务槽**：一本库一格，因为重新合并会整表重写 `concept_clusters` 与板块划分，而补上关联往聚类要读的那张图上追加边——并发不是多花一份钱，是一方在另一方还在读的输入上发布结果。再点一次、或另一件正在跑时点，都返回 409 并**点名真正占着槽的那个动作**。与补上关联一样，任务槽是**按进程**的（生产固定 `--workers 1`）；离线 CLI（`scripts/recluster_kg.py`、`batch_ingest`）是独立进程、直接调用这一趟，不在此列。完成信号是 `GET /api/notebooks/{id}/unified-kg/rebuild/status`（notebook 读权限），返回 `{job_id, notebook_id, status, running, clusters}`，`status` ∈ `running` / `succeeded` / `failed` / `idle`；`idle` 同时覆盖「从没跑过」「进程重启过」和「这一格现在被补上关联占着」，所以浏览器的有界轮询一定会收工，两个轮询也都不会挂在对方的任务上。任一终态都按当前范围重拉图谱、待确认合并与概念合并状态，忙碌指示按「在重新合并的是哪个笔记本」作用域。它与 `GET .../unified-kg/status` 刻意分开——后者的 `building` 说的是可视化产物。强制全量重聚（改了聚类**设置**，那是内容版本闸看不见的）仍然只在 CLI。待审队列以 canonical component 对为用户语义：重建时每个展示对只保留一条确定性的最高分代表；稳定的 rejected/deferred seed 决策经 confirmed union 投影成 component 级 cannot-link，因此同组另一个 seed 不能把刚分开的展示对重新生成。一次人工决定会按确定顺序锁住同展示对的完整行集，并把旧部署遗留的全部重复行原子收束为最新状态；只要任一兄弟行已经 confirmed，拒绝就按物化 union 翻转处理。重建发布替代 pending 代次前，会在同一个刷新事务里删掉旧代并重新应用实时决定，所以聚类之后才落库的决定也不会被旧快照重新发布。点全为待审状态展示对的**「分开」**既不改变当前簇也不改变检索产物，所以它会直接离队，不置 dirty、更不会启动重建；若把含任一 confirmed 行的展示对翻成 rejected，则仍须 invalidate + dirty，因为旧 union 可能已经物化。只有确认待审合并才立即触发重新聚类。确认合并若撞上共享任务槽（409），会在客户端记一个待补发标记，等占槽任务的终态轮询观测到时自动补发（补发本身撞到非 409 的瞬时失败同样保留标记续轮询，不会丢弃），且受同一次轮询的尝试上限兜底；这是一份**作用域限定在标签页保持打开期间的尽力承诺**。重载或重开页面即丢失客户端标记，不会有任何东西自动补发这条确认——这是刻意的：标记无法从泛化的 dirty 标志重建，因为普通的补上关联同样会把图谱标成 dirty，据此推断待补发会在用户没有请求的情况下自动发起一次可能数小时的全量重聚。兜底是既有的「待重建」dirty 标签加一次手动点击「重新合并」。能补上这个缺口的服务端持久重试队列是后续迭代的候选项，本次未实现。互斥面在批 3·W2 起再宽一档:这个共享任务槽与**分析作业**(buildkg-/rebuildkg-,含 MCP 的 build_kg)双向交叉互斥——分析在跑时点「重新合并/补上关联」得到 409「当前笔记本已有知识图谱分析任务正在运行」;反过来维护在跑时发起分析同样 409 并点名「正在重新合并/补上关联」(切换索引管线的保存 + 重建入口撞上维护槽时,意图已落库、返回同款「另一项知识图谱任务正在运行」409,可稍后在设置里点「重试重建」);独立的整库 KG 删除(维护面板)在维护槽在飞时同样被拒。另:`POST .../kg/build` 的分析收尾自带至多 3 轮**补漏轮**(接住抽取期间才落齐元素、且时间戳早于扫描游标的来源;只走增量谓词,绝不越过 target_limit),耗尽仍有未尝试目标时作业以 succeeded 结束但带 `error_code="kg_backfill_partial"`——语义是「下一次分析新增会继续」,不是失败。
