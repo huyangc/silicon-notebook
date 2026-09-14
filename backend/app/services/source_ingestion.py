@@ -2609,6 +2609,20 @@ class SourceIngestionService:
                     plugin_object_types=plugin_object_types,
                     plugin_limits=plugin_limits if plugin_kg_active else None,
                 )
+            if graph.failed_windows:
+                # 逐窗口失败的原因只在这里落盘:extract_graph 为隔离窗口吞掉了异常,
+                # 之前只剩 error_message 里的 windows_failed=N/T 计数,来源页把它一律
+                # 解释成网络问题。原因码见 kg_ingest._window_failure_category。
+                # 放在插件策略的 fail-closed 判定之前:那条路径遇到失败窗口直接抛错,
+                # 而它自己的 strategy 事件只有计数,原因码只有这里记(codex R1 P2)。
+                self.event_log.emit({
+                    "kind": "kg_window_failures",
+                    "notebook_id": source.notebook_id,
+                    "source_id": source_id,
+                    "failed": int(graph.failed_windows),
+                    "total": int(graph.total_windows),
+                    "reasons": dict(graph.failed_window_reasons),
+                })
             if plugin_kg_active:
                 self.event_log.emit(
                     {
@@ -2627,18 +2641,6 @@ class SourceIngestionService:
                 )
                 if graph.failed_windows:
                     raise IndexingPipelineKgExtractionFailedError()
-            if graph.failed_windows:
-                # 逐窗口失败的原因只在这里落盘:extract_graph 为隔离窗口吞掉了异常,
-                # 之前只剩 error_message 里的 windows_failed=N/T 计数,来源页把它一律
-                # 解释成网络问题。原因码见 kg_ingest._window_failure_category。
-                self.event_log.emit({
-                    "kind": "kg_window_failures",
-                    "notebook_id": source.notebook_id,
-                    "source_id": source_id,
-                    "failed": int(graph.failed_windows),
-                    "total": int(graph.total_windows),
-                    "reasons": dict(graph.failed_window_reasons),
-                })
             warn = self.settings.kg_window_warn_threshold
             if graph.total_windows > warn:
                 self.event_log.logger.warning(
