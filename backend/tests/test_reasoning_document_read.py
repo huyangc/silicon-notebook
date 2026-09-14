@@ -898,6 +898,51 @@ def test_the_second_read_gets_a_disjoint_key_segment(repo):  # noqa: F811
     assert second.summary_was_empty is False
 
 
+def test_a_document_deleted_after_the_roster_is_a_failed_read_not_a_voided_run(repo, monkeypatch):  # noqa: F811
+    """codex #724 R5:花名册列出之后文档被删除,`source_elements_page` 抛 KeyError。
+    这必须收成一次失败读取(零命中步 + 空产物进账目),而不是让异常逃出 `run()`
+    ——那会把本轮此前收集的全部证据、清单与轨迹一起丢掉。取消照旧上抛。"""
+    notebook = _notebook_with_documents(repo)
+
+    def _gone(*a, **k):
+        raise KeyError("s-empty")
+
+    monkeypatch.setattr(rr_module, "prepare_source_overview", _gone)
+    llm = _ValidatingLLM([
+        _enumerate_sources_action(),
+        _read_action("无摘要文档"),
+        ANSWER,
+    ], plan={"sub_queries": [{"query": "版图设计"}]})
+    result = _reader(repo, llm).run(notebook.id, "这个库讲了什么", "")
+
+    step = next(s for s in _steps(result, "read_document"))
+    assert step.detail["found"] == 0 and step.detail["result_ids"] == []
+    assert "不可用" in step.detail["note"] and "KeyError" in step.detail["note"]
+    assert len(result.document_reads) == 1 and result.document_reads[0].context_block == ""
+    # 花名册与其他轨迹步都还在——run 没有被废掉。
+    assert result.enumerations and _steps(result, "enumerate")
+    assert "不可用" in llm.reflect_prompts[-1]
+
+
+def test_cancellation_during_a_read_still_propagates(repo, monkeypatch):  # noqa: F811
+    """取消不是失败读取:`AskCancelled` 照旧上抛,不被收成空产物。"""
+    from app.services.cancellation import AskCancelled
+
+    notebook = _notebook_with_documents(repo)
+
+    def _cancelled(*a, **k):
+        raise AskCancelled()
+
+    monkeypatch.setattr(rr_module, "prepare_source_overview", _cancelled)
+    llm = _ValidatingLLM([
+        _enumerate_sources_action(),
+        _read_action("无摘要文档"),
+        ANSWER,
+    ], plan={"sub_queries": [{"query": "版图设计"}]})
+    with pytest.raises(AskCancelled):
+        _reader(repo, llm).run(notebook.id, "这个库讲了什么", "")
+
+
 def test_a_witness_failure_is_a_zero_hit_step_not_a_skip(repo, monkeypatch):  # noqa: F811
     """见证失败:I/O 真的发生过 ⇒ 记零命中 `read_document` 步(写 `result_ids: []`),
     空产物进账目,coverage_note 走 detail.note 并进回喂账目。"""

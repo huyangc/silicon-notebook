@@ -72,7 +72,7 @@ from app.services.collection_enumeration import (
     SOURCE_ROW_FIELD_SEPARATOR,
     UNNAMED_SOURCE_LABEL,
 )
-from app.services.document_source_overview import prepare_source_overview
+from app.services.document_source_overview import SourceOverview, prepare_source_overview
 # 按节合成的号段步长。`read_document` 的号段(`DOCUMENT_READ_KEY_BASE` 起,每次
 # 读取占一个池宽)必须整体落在它之内,否则第 2 节的证据会与按篇取样抢同一个
 # `[kN]`。import 而不是复制那个数:复制出来的两份一旦漂移,合并锚点时不会报错,
@@ -5289,15 +5289,29 @@ class ReasoningRetriever:
         # 号段按**池宽**(而不是本次份额)递进,所以两次读取的 `[kN]` 永不重叠。
         key_offset = (DOCUMENT_READ_KEY_BASE
                       + state.document_reads_done * element_pool)
-        overview = prepare_source_overview(
-            self.sources, item,
-            budget_chars=share_chars, max_elements=share_elements,
-            cancel_event=self.cancel_event,
-            active_notebook_id=state.notebook_id,
-            generation_reader=self.source_generation,
-            key_offset=key_offset,
-            coverage=decision.read_document_coverage,
-        )
+        try:
+            overview = prepare_source_overview(
+                self.sources, item,
+                budget_chars=share_chars, max_elements=share_elements,
+                cancel_event=self.cancel_event,
+                active_notebook_id=state.notebook_id,
+                generation_reader=self.source_generation,
+                key_offset=key_offset,
+                coverage=decision.read_document_coverage,
+            )
+        except AskCancelled:
+            raise
+        except Exception as exc:  # noqa: BLE001 - one failed read must not void the run
+            # 花名册列出之后文档被删除(两个仓库适配器的 `source_elements_page`
+            # 都抛 KeyError)、或库读瞬时失败:收成**一次失败读取**,与见证失败
+            # 同形(零命中步 + 空产物进账目),而不是让异常逃出 `run()` 去撞
+            # `_run_reasoning_stage` 的兜底——那会把本轮此前收集的全部证据、清单
+            # 与轨迹一起丢掉(codex #724 R5)。取消照旧上抛。
+            overview = SourceOverview(
+                "", {}, [],
+                f"读取期间这篇文档不可用（{type(exc).__name__}），本次未取到原文；"
+                "请改读别的文档或如实说明这一篇暂无依据。",
+            )
         outcome = DocumentReadOutcome(
             source_id=item.source_id, source_title=item.source_title,
             notebook_id=item.notebook_id, tier=item.tier,
