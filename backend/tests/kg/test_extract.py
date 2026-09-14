@@ -344,3 +344,18 @@ def test_refine_ignores_a_boolean_index_instead_of_deleting_node_one():
     ]
     kept = refine_nodes(_BoolIndex(), ELEMENTS, list(nodes), "1")
     assert [n.name for n in kept] == ["analog signal", "Engram"]
+
+
+class _ScalarEdgesFake:
+    def chat_json(self, messages, response_schema_hint):
+        # Bypasses the boundary (raw client), so the consumer must guard too.
+        return json.dumps({"nodes": [
+            {"local_id": "a", "type": "Concept", "name": "analog signal", "ev": 0}],
+            "edges": True})
+
+
+def test_scalar_collections_never_discard_the_extracted_nodes():
+    nodes, edges = extract_window(_ScalarEdgesFake(), ELEMENTS, "1 > 1.1", "textbook", win_idx=0)
+
+    assert [n.name for n in nodes] == ["analog signal"]
+    assert edges == []

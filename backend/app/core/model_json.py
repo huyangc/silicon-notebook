@@ -399,6 +399,13 @@ def _normalise_shape(
                 # One scalar where a list of scalars was advertised.
                 note("invalid_type", "wrapped")
                 value = [value]
+            elif isinstance(value, (str, int, float)):
+                # A scalar where a list of containers was advertised has no
+                # reading at all; consumers iterate these collections
+                # (``for it in data.get("edges") or []``), so deliver it as
+                # absent rather than as a TypeError (codex #720 R10).
+                note("invalid_type", "dropped")
+                return _DROP
             else:
                 note("invalid_type")
                 return value
