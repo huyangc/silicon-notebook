@@ -3343,8 +3343,8 @@ class AskService:
                 # "Retrieved N passage(s)" 那样的成功样子;如实说明并保留下方证据(citations)。
                 llm_mode = "synthesis_failed"
                 conclusion = (
-                    f"已检索到 {len(selected)} 条相关内容,但本次答案合成未产出内容"
-                    "(模型可能把输出预算耗在思维链上)。请重试该问题;下方为已检索到的证据。"
+                    f"已检索到 {len(selected)} 条相关内容,但本次答案合成未产出内容。"
+                    "请重试该问题;下方为已检索到的证据。"
                     if selected else
                     "本次答案合成未产出内容,请重试该问题。")
             else:
@@ -5105,8 +5105,8 @@ class AskService:
             # (那读起来像"成功但偷懒")。如实说明并保留下方证据(related_knowledge/citations)。
             llm_mode = "synthesis_failed"
             conclusion = (
-                f"已检索到 {len(top_hits)} 条相关证据,但本次答案合成未产出内容"
-                "(模型可能把输出预算耗在思维链上)。请重试该问题;下方为已检索到的证据。"
+                f"已检索到 {len(top_hits)} 条相关证据,但本次答案合成未产出内容。"
+                "请重试该问题;下方为已检索到的证据。"
                 if top_hits else
                 "本次答案合成未产出内容,请重试该问题。")
         else:

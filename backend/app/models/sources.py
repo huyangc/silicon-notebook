@@ -86,9 +86,13 @@ def extraction_warning_text(error_message: object) -> Optional[str]:
     if failed_windows <= 0:
         return None
     total_windows = int(match.group(2))
+    # 不写原因:失败窗口的异常在 kg_ingest.extract_graph 里被逐窗口隔离吞掉,这里只
+    # 剩一个计数,说不出是网络还是模型输出没过合同(生产 7 天归档证明多数是后者)。
+    # 原因码走 events.jsonl 的 kg_window_failures 事件;用户只需要知道少了多少段、
+    # 怎么补——带失败窗口的来源仍算待分析,「分析新增」会重跑它。
     return (
-        f"部分内容因网络问题未完成分析（{failed_windows}/{total_windows} 段失败），"
-        "建议重新上传或重试。"
+        f"部分内容未完成分析（{failed_windows}/{total_windows} 段失败），"
+        "点「分析新增」可重试。"
     )
 
 

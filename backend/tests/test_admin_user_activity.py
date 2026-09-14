@@ -514,7 +514,7 @@ def test_source_extraction_and_parse_quality_warnings(repo):
 
     degraded = by_id["src-degraded"]
     assert degraded["extraction_warning"] == (
-        "部分内容因网络问题未完成分析（2/5 段失败），建议重新上传或重试。"
+        "部分内容未完成分析（2/5 段失败），点「分析新增」可重试。"
     )
     assert degraded["parse_quality_warning"] is False
 

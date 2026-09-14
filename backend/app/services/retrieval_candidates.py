@@ -3464,6 +3464,13 @@ class CandidateRetrievalService(_RetrievalState):
                         cand_ids.append(cid)
                         # Candidate identity and semantic evidence stay separate:
                         # absence from chunk_sims means keyword-only fusion.
+            except ChunkLexicalSearchTimeout:
+                # 词法臂超时不是模型故障,也不该上「本次回答可能不完整」横幅:
+                # `_chunk_fts_hits` 已记 ask_stage=timeout 并关掉本轮词法臂,候选仍由
+                # ANN 臂产出。挂成 model_error 会显示成没有服务身份的「模型服务调用
+                # 失败」(生产 7 天 34 条横幅里 27 条是它),把一条补召回臂的缺席说成
+                # 答案不完整。只有真的影响结果的失败才显示给用户。
+                pass
             except Exception as exc:  # noqa: BLE001 — 词法失败不拖垮检索
                 self._note_model_error("chunk_fts", "", exc)
         t_fts = time.perf_counter()
@@ -3765,6 +3772,10 @@ class CandidateRetrievalService(_RetrievalState):
                 for chunk in scored
             })
             return scored
+        except ChunkLexicalSearchTimeout:
+            # 同 `_retrieve_chunks_ann` 的词法臂:超时已由 `_chunk_fts_hits` 记事件并
+            # 关闭本轮词法臂,不是模型故障,不上横幅。
+            return []
         except Exception as exc:  # noqa: BLE001 — lexical补召回失败绝不拖垮检索
             self._note_model_error("chunk_keyword_union", "", exc)
             return []

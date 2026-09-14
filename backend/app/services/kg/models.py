@@ -41,6 +41,9 @@ class KnowledgeGraph(BaseModel):
     edges: List[Edge] = Field(default_factory=list)
     total_windows: int = 0
     failed_windows: int = 0
+    # 失败窗口按稳定原因码计数(见 kg_ingest._window_failure_category):只含分类词,
+    # 不含回复内容或路径,供 kg_window_failures 事件落盘。
+    failed_window_reasons: Dict[str, int] = Field(default_factory=dict)
     windows_skipped: int = 0
     concepts_dropped: int = 0
     claims_dropped: int = 0
