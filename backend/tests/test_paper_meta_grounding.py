@@ -218,3 +218,25 @@ def test_only_a_real_json_true_marks_a_paper():
     for negative in ("no", "unsure", ["yes"], 1):
         meta = verify_paper_meta(_base(is_paper=negative), HEAD, model="m1")
         assert meta["is_paper"] is False, negative
+
+
+def test_container_valued_bibliographic_fields_are_never_persisted_as_text():
+    # codex #720 R12: the shape boundary delivers container-valued strings;
+    # grounding normalisation strips punctuation, so ["Ashish Vaswani"] used
+    # to ground against the head text and persist as "['Ashish Vaswani']".
+    meta = verify_paper_meta(_base(
+        title=["Attention Is All You Need"],
+        venue={"name": "NIPS"},
+        doi=["10.5555/3295222"],
+        authors=[{"name": ["Ashish Vaswani"], "affiliations": ["Google Brain"]},
+                 {"name": "Noam Shazeer", "affiliations": [["Google Research"], "Google Research"]}],
+        keywords=[["transformer"], "attention"],
+    ), HEAD, model="m1")
+    assert meta["paper_title"] is None
+    assert meta["venue"] is None
+    assert meta["doi"] is None
+    assert [a["name"] for a in meta["authors"]] == ["Noam Shazeer"]
+    assert meta["authors"][0]["affiliation"] == "Google Research"
+    assert meta["keywords"] == ["attention"]
+    encoded = json.dumps(meta, ensure_ascii=False)
+    assert "['" not in encoded and "{'" not in encoded
