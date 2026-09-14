@@ -217,7 +217,8 @@ def test_prompt_and_schema_offer_the_action_only_when_gated_on():
     assert "Do NOT open an outline for a single-fact question" in on
 
     schema_on = reflect_schema_hint(outline=True)
-    assert ('"outline":{"sections":[{"id":"","title":"","parent":"",'
+    # ``parent`` is spelled null: the prose calls it optional (audit A4).
+    assert ('"outline":{"sections":[{"id":"","title":"","parent":null,'
             '"evidence":[""],"remove_evidence":[""]}]}' in schema_on)
     assert f"|{OUTLINE_ACTION}" in schema_on
     # 关闭态逐字回到接入前:模块级常量(枚举工具的冻结基线钉的就是它)不受影响。
