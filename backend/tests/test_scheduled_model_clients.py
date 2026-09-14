@@ -1495,3 +1495,44 @@ def test_untyped_failures_carry_no_detail_and_deployment_codes_survive():
     assert raw_row["message"] == "upstream_error"
     assert (raw_row["detail"], raw_row["finish_reason"]) == ("", "")
     assert raw_row["service_id"] == "chat"
+
+
+def test_finish_reason_is_collected_without_a_caller_supplied_sink():
+    """Ordinary Ask synthesis passes no ``call_stats``; the adapter must still
+    read the transport's finish_reason back so the banner can say "truncated"
+    (codex #717 R1 P2)."""
+    class LengthStats(_Chat):
+        supports_call_stats = True
+
+        def chat_json(self, messages, response_schema_hint, **kwargs):
+            self.calls.append({"messages": messages, "kwargs": kwargs})
+            sink = kwargs.get(provider_mod.CALL_STATS_KWARG)
+            if isinstance(sink, dict):
+                sink["finish_reason"] = "length"
+            return ""
+
+    raw = LengthStats()
+    provider = _provider(chat=raw)
+    try:
+        with pytest.raises(provider_mod.ModelInvocationError) as caught:
+            provider.chat("ask_answer").chat_json([], '{"answer":"","grounded":true}')
+        [row] = _noted_rows(provider, "answer", caught.value, "ask_answer")
+    finally:
+        provider.close()
+
+    assert provider_mod.CALL_STATS_KWARG in raw.calls[0]["kwargs"]
+    assert caught.value.finish_reason == "length"
+    assert (row["detail"], row["finish_reason"]) == ("empty", "length")
+
+
+def test_no_stats_kwarg_is_forwarded_to_a_client_that_does_not_declare_it():
+    class Strict(_Chat):
+        def chat_json(self, messages, response_schema_hint, **kwargs):
+            assert provider_mod.CALL_STATS_KWARG not in kwargs
+            return self.result
+
+    provider = _provider(chat=Strict())
+    try:
+        assert provider.chat("ask_answer").chat_json([], "{}") == '{"ok": true}'
+    finally:
+        provider.close()
