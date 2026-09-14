@@ -12205,6 +12205,17 @@
               "title": "Kind",
               "type": "string"
             },
+            "status": {
+              "default": "open",
+              "enum": [
+                "open",
+                "in_progress",
+                "done",
+                "declined"
+              ],
+              "title": "Status",
+              "type": "string"
+            },
             "title": {
               "title": "Title",
               "type": "string"
@@ -12235,6 +12246,72 @@
             "updated_at"
           ],
           "title": "WishItem",
+          "type": "object"
+        },
+        "WishStatusUpdate": {
+          "additionalProperties": false,
+          "properties": {
+            "status": {
+              "enum": [
+                "open",
+                "in_progress",
+                "done",
+                "declined"
+              ],
+              "title": "Status",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "title": "WishStatusUpdate",
+          "type": "object"
+        },
+        "WishUpdate": {
+          "additionalProperties": false,
+          "description": "Author/admin edit. Every field is optional; at least one must be set.",
+          "properties": {
+            "content": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Content"
+            },
+            "kind": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "bug",
+                    "feature",
+                    "plan"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Kind"
+            },
+            "title": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Title"
+            }
+          },
+          "title": "WishUpdate",
           "type": "object"
         },
         "WishVoteResult": {
@@ -25156,6 +25233,28 @@
             },
             {
               "in": "query",
+              "name": "status",
+              "required": false,
+              "schema": {
+                "anyOf": [
+                  {
+                    "enum": [
+                      "open",
+                      "in_progress",
+                      "done",
+                      "declined"
+                    ],
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Status"
+              }
+            },
+            {
+              "in": "query",
               "name": "sort",
               "required": false,
               "schema": {
@@ -25251,6 +25350,135 @@
             }
           },
           "summary": "Create Wish"
+        }
+      },
+      "/api/wishes/{wish_id}": {
+        "delete": {
+          "operationId": "delete_wish_api_wishes__wish_id__delete",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "wish_id",
+              "required": true,
+              "schema": {
+                "title": "Wish Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "204": {
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Delete Wish"
+        },
+        "patch": {
+          "description": "Author or administrator edit of kind/title/content.\n\nOwnership and the plan rule are both decided inside the store's write\ntransaction (author_id and the current kind are read under the row lock):\nonly an administrator may turn a non-plan into a plan, while an author may\nkeep editing a plan an administrator already promoted, even when the\npayload repeats the unchanged kind.",
+          "operationId": "update_wish_api_wishes__wish_id__patch",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "wish_id",
+              "required": true,
+              "schema": {
+                "title": "Wish Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WishUpdate"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/WishItem"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Update Wish"
+        }
+      },
+      "/api/wishes/{wish_id}/status": {
+        "put": {
+          "operationId": "set_wish_status_api_wishes__wish_id__status_put",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "wish_id",
+              "required": true,
+              "schema": {
+                "title": "Wish Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WishStatusUpdate"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/WishItem"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Set Wish Status"
         }
       },
       "/api/wishes/{wish_id}/vote": {

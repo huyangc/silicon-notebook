@@ -7,6 +7,9 @@ const mocks = vi.hoisted(() => ({
   fetchMe: vi.fn(),
   listWishes: vi.fn(),
   createWish: vi.fn(),
+  updateWish: vi.fn(),
+  deleteWish: vi.fn(),
+  setWishStatus: vi.fn(),
   toggleWishVote: vi.fn(),
 }));
 
@@ -14,6 +17,9 @@ vi.mock("../../app/auth.ts", () => ({ fetchMe: mocks.fetchMe }));
 vi.mock("../../app/wish-wall-api.ts", () => ({
   listWishes: mocks.listWishes,
   createWish: mocks.createWish,
+  updateWish: mocks.updateWish,
+  deleteWish: mocks.deleteWish,
+  setWishStatus: mocks.setWishStatus,
   toggleWishVote: mocks.toggleWishVote,
 }));
 
@@ -26,6 +32,7 @@ const feature = {
   content: "整理大量资料时可以一次选择多个来源。",
   author_id: "user-1",
   author_name: "小林",
+  status: "open",
   vote_count: 7,
   voted_by_me: false,
   created_at: "2026-08-31T10:00:00+08:00",
@@ -238,7 +245,9 @@ test("加载超过单次上限后点赞会分块刷新窗口并保留遗漏卡�
     limit: 50,
   });
   expect(screen.getAllByText(feature.title)).toHaveLength(1);
-});
+  // 这条用例要渲染 100+ 张带完整动作区的卡片再做分块刷新，本机 ~1s，CI 慢 runner
+  // 曾以 15.16s 撞上全局 15s 上限（同一 SHA 的 Node26 泳道是过的），单独放宽。
+}, 60_000);
 
 test("点赞在途切换筛选后由当前代际窗口结束加载态", async () => {
   let resolveVote!: (value: { wish_id: string; voted: boolean; vote_count: number }) => void;

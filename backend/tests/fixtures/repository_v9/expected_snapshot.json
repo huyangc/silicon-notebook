@@ -2394,7 +2394,7 @@
       },
       {
         "name": "wishes",
-        "sql_sha256": "06e2b10a0b02e5940d802fcfa80d31ee3c09ac0d2b114f0ee99270c6b45b9755",
+        "sql_sha256": "d7ddbb2eb9a8f996e80d01676ac2d49b9c0c687728325c7f909165d9a24addb5",
         "type": "table"
       },
       {
@@ -2413,6 +2413,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 72
+    "user_version": 73
   }
 }

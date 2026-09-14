@@ -4,6 +4,7 @@ export const WISH_PAGE_MAX = 100;
 
 export type WishKind = "bug" | "feature" | "plan";
 export type WishSort = "priority" | "latest";
+export type WishStatus = "open" | "in_progress" | "done" | "declined";
 
 export type WishItem = {
   id: string;
@@ -12,6 +13,7 @@ export type WishItem = {
   content: string;
   author_id: string;
   author_name: string;
+  status: WishStatus;
   vote_count: number;
   voted_by_me: boolean;
   created_at: string;
@@ -35,4 +37,13 @@ export const WISH_KIND_LABELS: Record<WishKind, string> = {
   bug: "问题反馈",
   feature: "功能需求",
   plan: "更新计划",
+};
+
+export const WISH_STATUS_ORDER: readonly WishStatus[] = ["open", "in_progress", "done", "declined"];
+
+export const WISH_STATUS_LABELS: Record<WishStatus, string> = {
+  open: "待处理",
+  in_progress: "处理中",
+  done: "已完成",
+  declined: "不采纳",
 };

@@ -482,9 +482,26 @@ class WishStorePort(Protocol):
         *,
         actor_id: str,
         kind: str | None = None,
+        status: str | None = None,
         sort: str = "priority",
         offset: int = 0,
         limit: int = WISH_PAGE_DEFAULT,
+    ) -> dict: ...
+
+    def update_wish(
+        self,
+        wish_id: str,
+        *,
+        actor_id: str,
+        kind: str | None = None,
+        title: str | None = None,
+        content: str | None = None,
+    ) -> dict: ...
+
+    def delete_wish(self, wish_id: str, *, actor_id: str) -> None: ...
+
+    def set_wish_status(
+        self, wish_id: str, *, status: str, actor_id: str
     ) -> dict: ...
 
     def toggle_wish_vote(self, wish_id: str, actor_id: str) -> dict: ...
