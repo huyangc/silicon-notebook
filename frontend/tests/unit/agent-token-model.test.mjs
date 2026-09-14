@@ -182,6 +182,25 @@ test("access updates are full replacements that carry the opened snapshot, never
   assert.equal(agentTokenAccessPath("token/1"), "/agent-tokens/token%2F1/access");
 });
 
+test("an untouched expiry is sent back exactly as stored, an edited one is converted", () => {
+  const original = {
+    default_notebook_id: "notebook-1",
+    notebook_ids: ["notebook-1"],
+    scopes: ["memory:read"],
+    // 带秒:datetime-local 只到分钟,从草稿重算必然丢精度。
+    expires_at: "2026-11-01T06:30:45Z",
+  };
+  const untouched = { ...agentTokenEditDraft(original), scopes: ["memory:read", "knowledge:read"] };
+  assert.equal(agentTokenAccessRequest(untouched, original).expires_at, "2026-11-01T06:30:45Z");
+
+  const edited = { ...untouched, expires_at: "2031-02-03T04:05" };
+  assert.equal(agentTokenAccessRequest(edited, original).expires_at, localDateTimeToUtcIso("2031-02-03T04:05"));
+
+  const noExpiry = { ...original, expires_at: null };
+  const setNow = { ...agentTokenEditDraft(noExpiry), expires_at: "2031-02-03T04:05" };
+  assert.equal(agentTokenAccessRequest(setNow, noExpiry).expires_at, localDateTimeToUtcIso("2031-02-03T04:05"));
+});
+
 test("saving an edit requires a complete draft that differs from the stored access", () => {
   const token = {
     default_notebook_id: "notebook-1",
