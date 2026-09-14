@@ -676,3 +676,38 @@ def test_validate_confirmed_intent_raises_the_three_user_facing_messages():
     assert final["needs_clarification"] is False
     assert final["resolved_question"] == "分析 CMOS 反相器的阈值电压"
     assert final["clarification_answers"][0]["answer"] == "CMOS 反相器"
+
+
+def test_off_type_topic_prose_is_dropped_not_stringified():
+    """codex #720 R11: the shape boundary delivers container-valued topic
+    titles/questions; they must be dropped (falling back to the original
+    question), never planned as Python container syntax."""
+    class _ContainerTopics(_IntentClient):
+        def chat_json(self, messages, schema_hint, **kwargs):
+            return json.dumps({
+                "normalized_question": ["比较"],
+                "intent_type": "compare",
+                "result_scope": "ranked",
+                "completeness_required": False,
+                "entities": ["PLL A", {"name": "PLL B"}],
+                "mandatory_topics": [{
+                    "title": ["Caching"],
+                    "question": {"query": "cache invalidation"},
+                    "retrieval_queries": [["a"], "PLL A lock time"],
+                }],
+                "ambiguities": [{"question": ["哪个?"], "reason": {"zh": "x"}}],
+                "expected_output": {"format": "table"},
+                "confidence": 0.9,
+                "needs_clarification": False,
+            })
+
+    contract = plan_query_intent(_ContainerTopics(), "比较两个 PLL", max_topics=4,
+                                 purpose="step-by-step evidence-grounded answer")
+
+    assert contract["resolved_question"] == "比较两个 PLL"
+    assert contract["entities"] == ["PLL A"]
+    assert [t["question"] for t in contract["mandatory_topics"]] == ["比较两个 PLL"]
+    assert contract["expected_output"] == ""
+    assert all("[" not in a["question"] for a in contract["ambiguities"])
+    encoded = json.dumps(contract, ensure_ascii=False)
+    assert "['" not in encoded and "{'" not in encoded

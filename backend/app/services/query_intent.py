@@ -10,6 +10,7 @@ import json
 import re
 from typing import Any, Iterable
 
+from app.core.model_values import as_text
 from app.core.ask_retrieval_policy import (
     AMBIGUITY_QUESTION_MAX_CHARS,
     AMBIGUITY_ROWS_MAX,
@@ -218,10 +219,12 @@ def _result_scope(data: dict, question: str) -> tuple[str, bool]:
 def _bounded_strings(value: object, limit: int = 8, item_chars: int = 500) -> list[str]:
     if not isinstance(value, list):
         return []
+    # String-only: the shape boundary delivers off-type items, and str() would
+    # turn a dict/list item into container syntax that reads as prose.
     return [
-        str(item).strip()[:item_chars]
+        item.strip()[:item_chars]
         for item in value
-        if str(item).strip()
+        if isinstance(item, str) and item.strip()
     ][:limit]
 
 
@@ -274,8 +277,8 @@ def plan_query_intent(
         for index, topic in enumerate(raw_topics[:max_topics], 1):
             if not isinstance(topic, dict):
                 continue
-            topic_question = str(topic.get("question") or "").strip()[:1000]
-            title = str(topic.get("title") or topic_question).strip()[:200]
+            topic_question = as_text(topic.get("question"))[:1000]
+            title = (as_text(topic.get("title")) or topic_question)[:200]
             queries = _bounded_strings(topic.get("retrieval_queries"), 4, 1000)
             if not title or not topic_question:
                 continue
@@ -306,19 +309,19 @@ def plan_query_intent(
             if not isinstance(item, dict):
                 continue
             prompt = (
-                str(item.get("question") or "").strip()[:AMBIGUITY_QUESTION_MAX_CHARS]
+                as_text(item.get("question"))[:AMBIGUITY_QUESTION_MAX_CHARS]
             )
             if not prompt:
                 continue
             ambiguities.append({
                 "id": f"ambiguity-{index}",
                 "question": prompt,
-                "reason": str(item.get("reason") or "").strip()[:300],
+                "reason": as_text(item.get("reason"))[:300],
                 "required": item.get("required") is not False,
                 "options": _bounded_strings(item.get("options"), 4, 200),
             })
 
-    normalized_candidate = str(data.get("normalized_question") or "").strip()
+    normalized_candidate = as_text(data.get("normalized_question"))
     entities = _bounded_strings(data.get("entities"))
     context_for_referent = f"{question}\n{history}".casefold()
     has_verified_referent = any(
@@ -375,7 +378,7 @@ def plan_query_intent(
     if intent_type not in _INTENT_TYPES:
         intent_type = "other"
     normalized_question = (
-        str(data.get("normalized_question") or "").strip()[:4000] or question
+        as_text(data.get("normalized_question"))[:4000] or question
     )
     result_scope, completeness_required = _result_scope(data, question)
     contract = {
@@ -389,7 +392,7 @@ def plan_query_intent(
         "comparison_axes": _bounded_strings(data.get("comparison_axes")),
         "constraints": _bounded_strings(data.get("constraints")),
         "excluded_topics": _bounded_strings(data.get("excluded_topics")),
-        "expected_output": str(data.get("expected_output") or "").strip()[:1000],
+        "expected_output": as_text(data.get("expected_output"))[:1000],
         "assumptions": _bounded_strings(data.get("assumptions")),
         "ambiguities": ambiguities,
         "confidence": confidence,
