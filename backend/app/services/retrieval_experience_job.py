@@ -71,6 +71,7 @@ import threading
 import time
 from typing import Any, Mapping, Sequence
 
+from app.core.model_values import as_text
 from app.repositories.ports import (
     RETRIEVAL_EXPERIENCE_BATCH_RUNS,
     RETRIEVAL_EXPERIENCE_BATCH_STEPS,
@@ -806,7 +807,7 @@ def parse_distillation_reply(
         polarity = str(item.get("polarity") or "").strip().lower()
         if polarity not in EXPERIENCE_POLARITIES:
             continue
-        rationale = " ".join(str(item.get("rationale") or "").split())
+        rationale = " ".join(as_text(item.get("rationale")).split())
         if not rationale or len(rationale) > RETRIEVAL_EXPERIENCE_RATIONALE_MAX_CHARS:
             continue
         if _ID_SHAPE.search(rationale):

@@ -8024,3 +8024,16 @@ def test_api_dismiss_during_an_in_flight_reparse_is_a_user_readable_409(
     assert response.json()["detail"] == SOURCE_BUSY_MESSAGE
     # Untouched: a busy refusal never consumes the reviewer's work.
     assert _service(repo).catalog.candidate_counts(job_id)["candidate"] == 2
+
+
+def test_catalog_descriptions_are_string_only():
+    # codex #720 R8: a delivered object/list description must not become
+    # Python container syntax in an accepted entry.
+    from app.core.model_values import as_text, as_text_list
+
+    assert as_text({"summary": "text"}) == ""
+    assert as_text(["a"]) == ""
+    assert as_text(None) == ""
+    assert as_text("  keep  ") == "keep"
+    assert as_text_list("bare") == []
+    assert as_text_list(["a", {"b": 1}, " c ", ""]) == ["a", "c"]

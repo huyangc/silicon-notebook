@@ -13,6 +13,7 @@ import re
 from typing import Dict, List
 
 from app.core.config import Settings
+from app.core.model_values import as_text
 from app.models.knowledge import (
     ObjectSchemaCreate,
     ObjectSchemaModel,
@@ -560,14 +561,14 @@ class SchemaRegistryService:
                     try:
                         fields, primary, list_fields = _validated_schema_definition(
                             fields=fields,
-                            primary=str(item.get("primary", "")),
+                            primary=as_text(item.get("primary")),
                             list_fields=[],
                         )
                         _validate_schema_texts(
-                            str(item.get("plural", "")),
-                            str(item.get("description", "")),
-                            str(item.get("label", "")),
-                            str(item.get("rationale", "")),
+                            as_text(item.get("plural")),
+                            as_text(item.get("description")),
+                            as_text(item.get("label")),
+                            as_text(item.get("rationale")),
                         )
                     except ValueError:
                         continue
@@ -583,16 +584,15 @@ class SchemaRegistryService:
                         db,
                         notebook_id=notebook_id,
                         object_type=object_type,
-                        plural=str(item.get("plural", "")).strip()
-                        or f"{object_type}s",
+                        plural=as_text(item.get("plural")) or f"{object_type}s",
                         fields_json=json.dumps(fields, ensure_ascii=False),
                         primary=primary,
-                        description=str(item.get("description", "")).strip(),
-                        label=str(item.get("label", "")).strip() or object_type,
+                        description=as_text(item.get("description")),
+                        label=as_text(item.get("label")) or object_type,
                         list_fields_json=json.dumps(list_fields),
                         source="induced",
                         status="proposed",
-                        rationale=str(item.get("rationale", "")).strip(),
+                        rationale=as_text(item.get("rationale")),
                         created_by=self.current_user_id(),
                         now=now,
                     )
