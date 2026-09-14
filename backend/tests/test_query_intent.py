@@ -764,3 +764,45 @@ def test_off_type_topic_prose_is_dropped_not_stringified():
     assert all("[" not in a["question"] for a in contract["ambiguities"])
     encoded = json.dumps(contract, ensure_ascii=False)
     assert "['" not in encoded and "{'" not in encoded
+
+
+def test_confirmation_keeps_a_model_chosen_scope_unless_wording_overrides_it():
+    """codex #725 R1: a scope the model chose (no lexical keywords) used to
+    reset to ranked when the user answered an unrelated clarification or
+    lightly edited the wording; only the authoritative wording rules may
+    override it."""
+    class _CompleteWithClarification(_IntentClient):
+        def chat_json(self, messages, schema_hint, **kwargs):
+            return json.dumps({
+                "normalized_question": "当前笔记本有哪几篇文章",
+                "intent_type": "other",
+                "result_scope": "complete",
+                "completeness_required": True,
+                "confidence": 0.9,
+                "entities": [],
+                "mandatory_topics": [],
+                "ambiguities": [{"id": "ambiguity-topic", "question": "关注哪个主题？",
+                                 "required": False, "options": []}],
+                "needs_clarification": True,
+            })
+
+    seed = plan_query_intent(_CompleteWithClarification(), "当前笔记本有哪几篇文章")
+    assert seed["result_scope"] == "complete"
+    ambiguity_id = seed["ambiguities"][0]["id"]
+
+    # Unrelated clarification answer: the accepted scope survives.
+    kept = finalize_query_intent(
+        seed, resolved_question="当前笔记本有哪几篇文章",
+        answers=[{"id": ambiguity_id, "answer": "机器学习"}],
+    )
+    assert kept["result_scope"] == "complete"
+    assert kept["completeness_required"] is True
+
+    # Light wording edit without scope words: still kept.
+    edited = finalize_query_intent(seed, resolved_question="当前笔记本里有哪几篇文章？")
+    assert edited["result_scope"] == "complete"
+
+    # Authoritative wording that declines the full set still wins.
+    capped = finalize_query_intent(seed, resolved_question="不需要所有文章，只给最相关的几篇")
+    assert capped["result_scope"] == "ranked"
+    assert capped["completeness_required"] is False
