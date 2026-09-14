@@ -102,3 +102,17 @@ def test_expand_query_passes_cap_into_prompt():
 
     expand_query(_Fake(), "q", max_subqueries=7)
     assert "1-7 focused" in captured["prompt"]
+
+
+def test_off_type_sub_query_text_never_becomes_a_retrieval_plan():
+    # codex #720 R9: the shape boundary delivers ``{"query": []}``; it must
+    # be dropped, not searched as the literal text "[]". With every
+    # sub-query unusable the plan falls back to the original question.
+    ex = expand_query(
+        _FakeLLM({"query": "valid question", "sub_queries": [{"query": []}, {"query": {"zh": "x"}}]}),
+        "原问题", max_subqueries=4,
+    )
+    assert all(s.query != "[]" and "{" not in s.query for s in ex.sub_queries)
+    # No usable sub-query at all ⇒ the existing whole-plan fallback.
+    assert ex.query == "原问题"
+    assert [s.query for s in ex.sub_queries] == ["原问题"]

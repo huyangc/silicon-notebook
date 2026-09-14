@@ -5,6 +5,7 @@ import re
 from dataclasses import dataclass, field
 from typing import List, Optional
 
+from app.core.model_values import as_text
 from app.services.cancellation import AskCancelled, CancelEvent
 
 # 在字母↔数字边界插空格,让 "gpt4" 这类连写匹配上语料 "GPT-4"→tokens "gpt","4"。
@@ -113,7 +114,7 @@ def expand_query(client, question: str, history: str = "", *,
         for s in subs_raw:
             if not isinstance(s, dict):
                 continue
-            q = normalize_terms(str(s.get("query", "")).strip())
+            q = normalize_terms(as_text(s.get("query")))
             if not q or q in seen:
                 continue
             seen.add(q)
@@ -142,8 +143,9 @@ def expand_query(client, question: str, history: str = "", *,
         query = (raw_query.strip() if isinstance(raw_query, str) else "") or question
         comp = data.get("comparison")
         comparison = None
-        if isinstance(comp, dict) and str(comp.get("focal", "")).strip():
-            comparison = {"focal": str(comp["focal"]).strip()}
+        focal = as_text(comp.get("focal")) if isinstance(comp, dict) else ""
+        if focal:
+            comparison = {"focal": focal}
         return ExpandedQuery(query=query, sub_queries=out,
                              high_level_keywords=hl, low_level_keywords=ll,
                              comparison=comparison)

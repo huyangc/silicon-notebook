@@ -25,6 +25,7 @@ from app.core.ask_retrieval_policy import (
     ask_retrieval_limits,
 )
 from app.core.llm import budget_kwargs
+from app.core.model_values import as_text
 from app.core.config import (
     DEFAULT_EXTERNAL_EVIDENCE_MAX_PER_RUN,
     DEFAULT_REASONING_PER_QUERY_LIMIT,
@@ -3194,7 +3195,9 @@ class ReasoningRetriever:
                 if self.fail_closed:
                     raise ValueError("reasoning model returned a non-object reflection")
                 return _reflect_fallback("non_object")
-            action = str(data.get("next_action", "answer"))
+            # String-only (the boundary delivers off-type fields): a list here
+            # reads as "" and fails the whitelist like any unknown action.
+            action = as_text(data.get("next_action", "answer"))
             # 白名单与 reflect_prompt 都**不随 flag 改写**(沿用 ppr_retrieve 立下的
             # 先例:不把开关串进 prompt 签名)。exact_lookup_enabled=False 时该动作
             # 在执行处被 skip 掉,零 I/O;代价只是模型偶尔选到它浪费一轮反思,换来
@@ -3248,16 +3251,16 @@ class ReasoningRetriever:
                 return _reflect_fallback(f"invalid_action:{rejected_action}")
             d = ReflectDecision(
                 sufficient=sufficient_value is True,
-                next_action=action, reason=str(data.get("reason", "")))
+                next_action=action, reason=as_text(data.get("reason")))
             exp = data.get("expand")
             if isinstance(exp, dict):
-                d.expand_object_id = str(exp.get("object_id", ""))
+                d.expand_object_id = as_text(exp.get("object_id"))
                 et = exp.get("edge_type")
-                d.expand_edge_type = str(et) if et else None
+                d.expand_edge_type = as_text(et) or None
                 dr = exp.get("direction")
                 d.expand_direction = dr if dr in ("out", "in", "both") else "both"
             nsq = data.get("new_sub_query")
-            if isinstance(nsq, dict) and str(nsq.get("query", "")).strip():
+            if isinstance(nsq, dict) and as_text(nsq.get("query")):
                 _nsq_types = nsq.get("types")
                 types = [t for t in (_nsq_types if isinstance(_nsq_types, list) else []) if t in KG_TYPES]
                 # ``in`` on a dict needs a hashable key: a list/dict ``prefer``
@@ -3268,17 +3271,17 @@ class ReasoningRetriever:
                     _prefer if isinstance(_prefer, str) and _prefer in PREFER_WEIGHTS
                     else "balanced"
                 )
-                d.new_sub_query = SubQuery(query=str(nsq["query"]).strip(),
+                d.new_sub_query = SubQuery(query=as_text(nsq.get("query")),
                                            types=types, prefer=prefer,
-                                           reason=str(nsq.get("reason", "")))
-            d.community_focal = str(data.get("community_focal", "")).strip()
-            d.elements_query = str(data.get("elements_query", "")).strip()
-            d.ppr_query = str(data.get("ppr_query", "")).strip()
+                                           reason=as_text(nsq.get("reason")))
+            d.community_focal = as_text(data.get("community_focal"))
+            d.elements_query = as_text(data.get("elements_query"))
+            d.ppr_query = as_text(data.get("ppr_query"))
             # 与 enumerate/outline 分支同形:关闭态连读都不读,模型硬吐一个
             # chunks_query 也不会有任何影响(动作本身不在白名单里)。
             if chunk_search:
-                d.chunks_query = str(data.get("chunks_query", "")).strip()
-            d.exact_term = clean_exact_term(data.get("exact_term", ""))
+                d.chunks_query = as_text(data.get("chunks_query"))
+            d.exact_term = clean_exact_term(as_text(data.get("exact_term")))
             enumerate_request = data.get("enumerate")
             if enumeration and isinstance(enumerate_request, dict):
                 # 非白名单值不抛错、清成空串:run() 会记一条 skip 继续跑
@@ -3350,11 +3353,11 @@ class ReasoningRetriever:
                 )
             chain = data.get("follow_chain")
             if isinstance(chain, dict):
-                d.chain_start_object_id = str(chain.get("start_object_id", "")).strip()
-                d.chain_target_object_id = str(chain.get("target_object_id", "")).strip()
+                d.chain_start_object_id = as_text(chain.get("start_object_id"))
+                d.chain_target_object_id = as_text(chain.get("target_object_id"))
                 cet = chain.get("edge_type")
                 d.chain_edge_type = str(cet).strip() if cet else None
-                cdir = str(chain.get("direction", "out"))
+                cdir = as_text(chain.get("direction", "out"))
                 d.chain_direction = cdir if cdir in ("out", "in", "both") else "out"
             if self.fail_closed:
                 if action == "expand_graph" and not d.expand_object_id:

@@ -5753,3 +5753,24 @@ def test_reflect_survives_an_off_type_prefer_in_a_delivered_reply(rrepo):
     assert decision.new_sub_query is not None
     assert decision.new_sub_query.query == "MLA 的 KV 压缩"
     assert decision.new_sub_query.prefer == "balanced"
+
+
+def test_reflect_drops_off_type_query_fields_instead_of_searching_their_repr(rrepo):
+    """codex #720 R9: ``new_sub_query.query: []`` and a list ``ppr_query`` must
+    read as empty, never as the retrieval text "[]"."""
+    class _ListQueries:
+        configured = True
+
+        def chat_json(self, *_args, **_kwargs):
+            return json.dumps({
+                "next_action": "add_subquery",
+                "new_sub_query": {"query": []},
+                "ppr_query": ["a", "b"],
+                "reason": {"zh": "x"},
+            }, ensure_ascii=False)
+
+    decision = _reflect_once(rrepo, _ListQueries())
+
+    assert decision.new_sub_query is None
+    assert decision.ppr_query == ""
+    assert decision.reason == ""
