@@ -3,7 +3,7 @@
 ``ask_stream``'s synchronous DB prep (``repo.get_notebook`` +
 ``_require_ask_available`` -- which on a large notebook re-reads
 ``all_visible_source_ids``/``hidden_source_ids`` over tens of thousands of
-rows -- plus ``_intent_history``) and ``_stream_ask_events``'s first
+rows) and ``_stream_ask_events``'s first
 synchronous segment (``repo.start_ask_stream``) used to run directly on the
 event-loop thread. On a large notebook that stalls every other coroutine in
 the process for seconds, including ``/api/ready``. The fix mirrors the
@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -84,7 +86,11 @@ def test_ask_stream_db_prep_runs_inside_asyncio_to_thread() -> None:
     )
 
     prep_calls = {_dotted(call.func) for call in _calls(prep_fn)}
-    for required in ("repo.get_notebook", "_require_ask_available", "_intent_history"):
+    # ``_intent_history`` is deliberately absent: submitting an ask no longer
+    # reads conversation history at all (that was the retired request-level
+    # ``auto`` selector's classifier input). It is still guarded where it
+    # survives -- the two intent-preview endpoints, below.
+    for required in ("repo.get_notebook", "_require_ask_available"):
         assert required in prep_calls, (
             f"{required} must be called from inside the asyncio.to_thread-"
             "wrapped prep closure, not directly on ask_stream's event-loop "
@@ -101,6 +107,28 @@ def test_ask_stream_db_prep_runs_inside_asyncio_to_thread() -> None:
     }
     assert "repo.get_notebook" not in top_level_calls
     assert "_require_ask_available" not in top_level_calls
+
+
+@pytest.mark.parametrize(
+    "route", ["preview_ask_intent", "preview_ask_intent_stream"]
+)
+def test_intent_preview_history_read_runs_inside_asyncio_to_thread(route) -> None:
+    """``_intent_history`` reads the conversation (``get_conversation`` plus an
+    ownership lookup) — the same class of synchronous DB work as the rest of the
+    prep, so it must sit inside the threaded closure too. The ask-submission
+    path no longer calls it at all; these two endpoints are its only callers."""
+    fn = _find_function(_tree(), route)
+    nested_defs = _nested_function_defs(fn)
+    prep_fn = next((f for f in nested_defs if f.name == "prepare_preview"), None)
+    assert prep_fn is not None, f"{route} must keep its prepare_preview closure"
+    assert "_intent_history" in {_dotted(c.func) for c in _calls(prep_fn)}
+
+    nested_call_ids = {id(call) for f in nested_defs for call in _calls(f)}
+    top_level_calls = {
+        _dotted(call.func) for call in _calls(fn)
+        if id(call) not in nested_call_ids
+    }
+    assert "_intent_history" not in top_level_calls
 
 
 def test_stream_ask_events_start_ask_stream_runs_inside_asyncio_to_thread() -> None:

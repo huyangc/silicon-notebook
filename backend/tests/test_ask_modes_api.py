@@ -87,180 +87,70 @@ def test_chunk_mode_streams_start_then_final(tmp_path, monkeypatch):
         not events[-1]["response"]["reasoning_trace"]
 
 
-@pytest.mark.parametrize("selected", ["chunk", "reasoning"])
-def test_auto_mode_is_routed_by_backend_and_freezes_the_default_effort(
-    tmp_path, monkeypatch, selected
-):
-    import json
-    from app.api.ask_routes import repository
-    from app.models.ask import QueryIntentContract
-    from app.models.schemas import AskResponse
+def test_auto_is_a_retired_alias_for_reasoning(tmp_path, monkeypatch):
+    """`auto` 曾是简化界面的**请求级选择器**:后端先跑一次分类模型,再挑引擎。
+    选择器已下线(简化界面直接提交 reasoning),但 `auto` 作为**退役别名**继续被
+    接受并映射到 reasoning——尚未刷新的旧标签页不 422。
 
-    client = _client(tmp_path, monkeypatch)
-    nb = client.post("/api/notebooks", json={"name": "nb"}).json()["id"]
-    repo = repository()
-    seed_ask_evidence(repo, nb)
-    routed = []
-    def preview_auto_intent(
-        notebook_id, question, history="", cancel_event=None
-    ):
-        routed.append((notebook_id, question, history))
-        return QueryIntentContract(
-            objective=question,
-            resolved_question=question,
-            intent_type="compare" if selected == "reasoning" else "explain",
-        )
-
-    monkeypatch.setattr(repo, "preview_reasoning_intent", preview_auto_intent)
-    service = repo._runtime.ask_service()
-    seen = {}
-
-    def fake_ask(notebook_id, payload, **kwargs):
-        seen["mode"] = payload.mode
-        seen["retrieval_effort"] = payload.retrieval_effort
-        return AskResponse(
-            conclusion="routed",
-            conversation_id=payload.conversation_id or "",
-            mode=payload.mode,
-        )
-
-    monkeypatch.setattr(service, "ask", fake_ask, raising=False)
-    response = client.post(
-        f"/api/notebooks/{nb}/ask/stream",
-        json={
-            "question": "比较两个方案的取舍",
-            "mode": "auto",
-            "retrieval_effort": "exhaustive",
-        },
-    )
-
-    assert response.status_code == 200
-    events = [json.loads(line) for line in response.text.splitlines() if line.strip()]
-    assert routed == [(nb, "比较两个方案的取舍", "")]
-    assert seen["mode"] == selected
-    assert seen["retrieval_effort"] == "standard"
-    assert events[1]["step"]["detail"]["mode"] == selected
-    assert events[-1]["response"]["mode"] == selected
-
-
-def test_auto_mode_job_is_durable_before_the_classifier_runs(tmp_path, monkeypatch):
-    """auto 模式的会话 + job 必须在引擎选择之前就持久化。
-
-    以前 `_stream_auto_ask_events` 先在路由层跑分类模型、再 begin_durable_job:
-    这几秒里刷新/关标签/导航断连,问题就整个丢了。现在选择引擎在 detached worker
-    内进行——分类器被调用时,该 notebook 已经有了这次提问的会话,`started` 已经
-    排在交付队列最前面。
+    退役别名不是引擎:它不出现在 /ask-modes,也不出现在 422 的 valid 列表里。
+    这条路径上不再有任何路由模型调用:路由层的 `preview_reasoning_intent`
+    (分类器唯一的入口)零次被调,而两个端点都以 reasoning 执行——同步 /ask 的
+    响应、流的合成 start 步、以及持久化的 ask_jobs.mode 三处口径一致。
     """
     import json
     from app.api.ask_routes import repository
-    from app.models.ask import QueryIntentContract
-    from app.models.schemas import AskResponse
 
     client = _client(tmp_path, monkeypatch)
     nb = client.post("/api/notebooks", json={"name": "nb"}).json()["id"]
     repo = repository()
     seed_ask_evidence(repo, nb)
-    observed = {}
+    previewed = []
+    original_preview = repo.preview_reasoning_intent
 
-    def preview_auto_intent(
-        notebook_id, question, history="", cancel_event=None
-    ):
-        # 分类器跑的时候会话已经存在、job 行已在跑(mode 暂为 auto)。
-        conversations = repo.list_conversations(notebook_id)
-        observed["conversations"] = [c.id for c in conversations]
-        observed["cancel_event"] = cancel_event
-        return QueryIntentContract(
-            objective=question, resolved_question=question, intent_type="explain",
-        )
+    def counted_preview(*args, **kwargs):
+        previewed.append(args)
+        return original_preview(*args, **kwargs)
 
-    monkeypatch.setattr(repo, "preview_reasoning_intent", preview_auto_intent)
-    service = repo._runtime.ask_service()
-    seen = {}
+    monkeypatch.setattr(repo, "preview_reasoning_intent", counted_preview)
 
-    def fake_ask(notebook_id, payload, **kwargs):
-        seen["mode"] = payload.mode
-        seen["job_id"] = kwargs["job_id"]
-        seen["job_mode"] = repo._runtime.ask_state.ask_job_status(kwargs["job_id"])["mode"]
-        # The routed payload must carry the durable conversation id that
-        # begin_durable_job wrote onto the original payload — otherwise the
-        # answer would land in a second, freshly created conversation.
-        seen["conversation_id"] = payload.conversation_id
-        return AskResponse(
-            conclusion="routed",
-            conversation_id=payload.conversation_id or "",
-            mode=payload.mode,
-        )
-
-    monkeypatch.setattr(service, "ask", fake_ask, raising=False)
-    response = client.post(
+    # 清晰问题、不带 intent:兼容旧客户端的确定性闸放行,引擎侧也不额外调模型。
+    question = "RTL到GDSII流程"
+    streamed = client.post(
         f"/api/notebooks/{nb}/ask/stream",
-        json={"question": "解释一下建立时间", "mode": "auto"},
+        json={"question": question, "mode": "auto"},
     )
-
-    assert response.status_code == 200
-    events = [json.loads(line) for line in response.text.splitlines() if line.strip()]
+    assert streamed.status_code == 200
+    events = [json.loads(l) for l in streamed.text.splitlines() if l.strip()]
     assert events[0]["event"] == "started"
-    assert observed["conversations"] == [events[0]["conversation_id"]]
-    assert observed["cancel_event"] is not None
-    # 合成 start 步报告的是选定后的引擎,job 行的 mode 也已经改写。
-    assert events[1]["step"]["detail"]["mode"] == "chunk"
-    assert seen["mode"] == "chunk"
-    assert seen["job_mode"] == "chunk"
-    assert seen["conversation_id"] == events[0]["conversation_id"]
-    assert events[-1]["response"]["mode"] == "chunk"
-    # update_job_mode only ever touches a still-running row: the finished job
-    # keeps the engine that answered even if a late call tried to rewrite it.
-    ask_state = repo._runtime.ask_state
-    ask_state.update_job_mode(seen["job_id"], "reasoning")
-    assert ask_state.ask_job_status(seen["job_id"])["mode"] == "chunk"
+    assert events[1]["step"]["step_type"] == "start"
+    assert events[1]["step"]["detail"]["mode"] == "reasoning"
+    assert events[-1]["event"] == "final"
+    assert events[-1]["response"]["mode"] == "reasoning"
+    # 持久状态从建行那一刻起就是真正执行的引擎,没有事后改写。
+    job = repo._runtime.ask_state.ask_job_status(events[0]["job_id"])
+    assert job["mode"] == "reasoning"
 
+    synchronous = client.post(
+        f"/api/notebooks/{nb}/ask",
+        json={"question": question, "mode": "auto"},
+    )
+    assert synchronous.status_code == 200
+    assert synchronous.json()["mode"] == "reasoning"
 
-def test_auto_mode_stream_close_does_not_cancel_the_classifier(monkeypatch):
-    """断连不等于取消:选择引擎已在 detached worker 内,客户端关流只停止交付。"""
-    import asyncio
-    import queue
-
-    from app.api import ask_routes
-    from app.models.ask import AskRequest
-
-    seen = {}
-
-    class _Repo:
-        def current_user(self):
-            from types import SimpleNamespace
-            return SimpleNamespace(id="user-1")
-
-        def start_ask_stream(self, notebook_id, payload, mode, *, user_id, resolve=None):
-            seen["mode"] = mode
-            seen["resolve"] = resolve
-            events = queue.Queue()
-            events.put({"event": "started", "job_id": "job-1", "conversation_id": "conv-1"})
-            return events
-
-    class _Request:
-        async def is_disconnected(self):
-            return False
-
-    monkeypatch.setattr(ask_routes, "ASK_STREAM_HEARTBEAT_SECONDS", 0.0)
-
-    async def run():
-        stream = ask_routes._stream_auto_ask_events(
-            _Repo(),
-            "notebook-a",
-            AskRequest(question="q", mode="auto"),
-            "",
-            _Request(),
-            scope_receipt=None,
-        )
-        first = await anext(stream)
-        assert '"started"' in first
-        await stream.aclose()
-
-    asyncio.run(run())
-    # 路由层不再自己跑分类器:mode 未定(None),选择逻辑作为 resolve 交给编排器;
-    # 关流只是停止消费队列,不碰任何 cancel event。
-    assert seen["mode"] is None
-    assert callable(seen["resolve"])
+    assert previewed == []
+    # 零调用断言只有在计数器真的挂在路由使用的那个 seam 上才有意义:走一次确实
+    # 会调理解模型的端点,计数从 0 变 1,证明上面的零不是空断言。
+    previewed_intent = client.post(
+        f"/api/notebooks/{nb}/ask/intent", json={"question": question}
+    )
+    assert previewed_intent.status_code == 200
+    assert len(previewed) == 1
+    assert "auto" not in [m["id"] for m in client.get("/api/ask-modes").json()]
+    bad = client.post(
+        f"/api/notebooks/{nb}/ask/stream", json={"question": "q", "mode": "bogus"}
+    )
+    assert bad.status_code == 422
+    assert bad.json()["detail"]["valid"] == ["chunk", "reasoning"]
 
 
 def test_ask_stream_runs_through_the_runtime_ask_service(tmp_path, monkeypatch):

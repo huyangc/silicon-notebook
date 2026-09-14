@@ -20,6 +20,7 @@ import { findFunction, parseModule } from "../../test-support/semantic-source.mj
 const page = await parseModule("page.tsx");
 const sourceListPanel = await parseModule("source-list-panel.tsx");
 const askSession = await parseModule("use-ask-session.ts");
+const askModes = await parseModule("ask-modes.ts");
 const reportWorkspace = await parseModule("use-report-workspace.ts");
 
 
@@ -301,15 +302,28 @@ test("Report owner 在请求汇聚点按 policy.advanced 固定 auto_generate", 
   assert.match(depth.getText(reportWorkspace), /REPORT_DEFAULT_DEPTH_INDEX/);
 });
 
-test("Ask owner 的 submitMode 必须在提交汇聚点按 policy.advanced 改用后台自动路由", () => {
-  // 自动模式没有任何 Ask 模式控件，请求汇聚点必须发送 request-only auto selector；
-  // 高级模式则继续发送前端 state 中的具名引擎。
+test("Ask owner 的 submitMode 必须在提交汇聚点按 policy.advanced 固定内置 reasoning", () => {
+  // 简化界面（ui_mode="auto"，即「自动模式」这个界面选项）没有任何 Ask 模式
+  // 控件，请求汇聚点必须固定发内置 SIMPLIFIED_ASK_MODE（reasoning）；高级模式
+  // 则继续发送前端 state 中用户具名选择的引擎。下线的是请求级 mode="auto"
+  // 选择器，不是界面上的「自动模式」。
+  //
+  // 这条分叉只有一个实现：ask-modes.ts 的 submissionAskMode。可见选择器在简化
+  // 界面下仍可能是用户在高级界面留下的具名选择（"chunk"），所以任何「这次提交是
+  // 不是 reasoning」的判据都必须过这个函数，不能直接比可见 mode —— 确认闸曾经
+  // 直接比 modeRef.current，简化界面下每次歧义确认都必然走 bail 分支、问题被吞。
   assert.equal(askPolicyProperty("advanced"), "isAdvanced(uiMode)");
   const initializer = initializerOf("submitMode", askSession);
   const text = initializer.getText(askSession);
-  assert.ok(text.includes("currentPolicy.advanced"), `submitMode 初始化式必须按 policy.advanced 分叉：${text}`);
-  assert.ok(text.includes("AUTO_ASK_MODE"), `自动模式必须发送后台路由 selector：${text}`);
-  assert.match(text, /\?\s*mode\s*:\s*AUTO_ASK_MODE/);
+  assert.match(
+    text,
+    /^submissionAskMode\(\s*currentPolicy\.advanced\s*,\s*mode\s*\)$/,
+    `submitMode 必须是 submissionAskMode(currentPolicy.advanced, mode) 调用：${text}`,
+  );
+
+  // 唯一实现本身：advanced 直接交出用户具名选择，否则固定内置 reasoning。
+  const submission = findFunction(askModes, "submissionAskMode").getText(askModes);
+  assert.match(submission, /advanced\s*\?\s*selected\s*:\s*SIMPLIFIED_ASK_MODE/);
 
   // 移动变异防线：光有 submitMode 定义不够，executeAsk 的模式实参不许再直接用
   // mode（否则定义成了摆设）。全 hook 扫 executeAsk(...) 调用，第二实参不得是
@@ -330,6 +344,152 @@ test("Ask owner 的 submitMode 必须在提交汇聚点按 policy.advanced 改�
   }
   visitCalls(askSession);
   assert.deepEqual(offenders, [], "executeAsk 的模式实参不得绕过 submitMode 直接用 mode");
+});
+
+
+/** use-ask-session.ts 里全部 `submissionAskMode(...)` 调用节点。 */
+function submissionAskModeCalls() {
+  const calls = [];
+  function visit(node) {
+    if (
+      ts.isCallExpression(node)
+      && ts.isIdentifier(node.expression)
+      && node.expression.text === "submissionAskMode"
+    ) calls.push(node);
+    ts.forEachChild(node, visit);
+  }
+  visit(askSession);
+  return calls;
+}
+
+
+/** 包着该节点的 `useEffect(..., deps)` 的依赖数组文本；不在 effect 里则为 null。 */
+function enclosingEffectDeps(node) {
+  for (let current = node.parent; current; current = current.parent) {
+    if (
+      ts.isCallExpression(current)
+      && ts.isIdentifier(current.expression)
+      && current.expression.text === "useEffect"
+      && current.arguments.length === 2
+    ) return current.arguments[1].getText(askSession);
+  }
+  return null;
+}
+
+
+/** 包着该节点的具名函数（`function foo()` / `const foo = () =>`）名；没有则 null。 */
+function enclosingFunctionName(node) {
+  for (let current = node.parent; current; current = current.parent) {
+    if (ts.isFunctionDeclaration(current) && current.name) return current.name.text;
+    if (
+      (ts.isArrowFunction(current) || ts.isFunctionExpression(current))
+      && ts.isVariableDeclaration(current.parent)
+      && ts.isIdentifier(current.parent.name)
+    ) return current.parent.name.text;
+  }
+  return null;
+}
+
+
+test("三处提交引擎判据都必须过 submissionAskMode，且确认闸/放弃闸按 run 冻结的界面", () => {
+  // 判据一共只有三处，且各自读的「界面」是刻意不同的：
+  //   · 提交汇聚点读**当前**界面——这一刻才决定这次提交走哪个引擎；
+  //   · confirmIntent 的上下文变化闸与 mid-preview abandon effect 读**这条 run 提交时
+  //     冻结的**界面。头像菜单随时可点，审阅卡开着时切界面不能让确认闸判成 chunk 而
+  //     bail（问题连同澄清答案一起丢），也不能让随后任何一次可见 mode 回填
+  //     （applySessionDetail / attachDetachedRun / 模式投影）把在途预检 abort 掉。
+  const calls = submissionAskModeCalls();
+  const shapes = calls.map((call) => ({
+    args: call.arguments.map((argument) => argument.getText(askSession)),
+    fn: enclosingFunctionName(call),
+    deps: enclosingEffectDeps(call),
+  }));
+  assert.equal(
+    calls.length,
+    3,
+    `submissionAskMode 调用点应恰好三处（提交、确认闸、abandon effect），实际 ${calls.length}：${
+      JSON.stringify(shapes)}`,
+  );
+
+  const submitCall = shapes.find((shape) => shape.fn === "submit");
+  assert.ok(submitCall, `提交汇聚点缺少 submissionAskMode 调用：${JSON.stringify(shapes)}`);
+  assert.deepEqual(submitCall.args, ["currentPolicy.advanced", "mode"]);
+
+  const confirmCall = shapes.find((shape) => shape.fn === "confirmIntent");
+  assert.ok(confirmCall, `confirmIntent 缺少 submissionAskMode 调用：${JSON.stringify(shapes)}`);
+  assert.deepEqual(
+    confirmCall.args,
+    ["runAdvanced", "modeRef.current"],
+    "确认闸必须按 run 冻结的界面判定，不得读当前界面、更不得直接比可见 mode",
+  );
+
+  const abandonCall = shapes.find((shape) => shape.deps === "[conversationId, mode]");
+  assert.ok(
+    abandonCall,
+    `mid-preview abandon effect（deps [conversationId, mode]）缺少 submissionAskMode 调用：${
+      JSON.stringify(shapes)}`,
+  );
+  assert.deepEqual(
+    abandonCall.args,
+    ["runAdvanced", "mode"],
+    "abandon effect 必须按 run 冻结的界面判定",
+  );
+
+  // 两处 `runAdvanced` 必须真的是「run 有就用 run 的、没有才回退当前界面」，不是
+  // 换个名字的 policyRef.current.advanced。
+  const frozen = /const runAdvanced = run \? run\.advanced : policyRef\.current\.advanced;/g;
+  assert.equal(
+    (askSession.text.match(frozen) ?? []).length,
+    2,
+    "确认闸与 abandon effect 都必须把判据冻结在可见 run 的 advanced 标记上",
+  );
+});
+
+
+test("use-ask-session.ts 不得直接比可见 mode 与 \"reasoning\"", () => {
+  // 反向全扫，而不是只钉那三处调用：T2b 之后的评审验证过一个静默回归——把 abandon
+  // effect 的判据改回 `mode === "reasoning"`，全部既有测试仍然绿，而简化界面提交的
+  // 在途预检会被下一次可见 mode 回填悄悄 abort。可见 mode 是「用户在高级界面留下的
+  // 具名选择 / 按历史末轮回填的值」，不是这次提交用的引擎，任何 reasoning 判据读它
+  // 都是错的；唯一合法判据是 submissionAskMode(...)。
+  //
+  // 硬编码传参（`executeAsk(..., "reasoning", ...)`、`setMode("reasoning")`）不是
+  // 比较，不在此列。
+  const EQUALITY = new Set([
+    ts.SyntaxKind.EqualsEqualsEqualsToken,
+    ts.SyntaxKind.ExclamationEqualsEqualsToken,
+    ts.SyntaxKind.EqualsEqualsToken,
+    ts.SyntaxKind.ExclamationEqualsToken,
+  ]);
+  const unwrap = (node) => {
+    let current = node;
+    while (ts.isParenthesizedExpression(current)) current = current.expression;
+    return current;
+  };
+  const isReasoningLiteral = (node) => ts.isStringLiteral(node) && node.text === "reasoning";
+  const isVisibleMode = (node) => (
+    (ts.isIdentifier(node) && node.text === "mode")
+    || (ts.isPropertyAccessExpression(node) && node.getText(askSession) === "modeRef.current")
+  );
+
+  const offenders = [];
+  function visit(node) {
+    if (ts.isBinaryExpression(node) && EQUALITY.has(node.operatorToken.kind)) {
+      const left = unwrap(node.left);
+      const right = unwrap(node.right);
+      if (
+        (isReasoningLiteral(left) && isVisibleMode(right))
+        || (isReasoningLiteral(right) && isVisibleMode(left))
+      ) offenders.push(node.getText(askSession));
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(askSession);
+  assert.deepEqual(
+    offenders,
+    [],
+    "推理判据必须走 submissionAskMode，不得直接比可见 mode / modeRef.current",
+  );
 });
 
 test("自动模式不挂载整组 Ask 模式选择控件", () => {

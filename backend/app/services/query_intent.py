@@ -119,29 +119,6 @@ def _understanding_response_is_valid(data: object) -> bool:
     )
 
 
-def auto_ask_mode_from_intent(contract: Any) -> str:
-    """Map the model-produced corpus-blind intent onto a stable Ask engine.
-
-    Ambiguous or ordinary one-direction requests stay on ``chunk``.  Deep
-    routing requires an explicit structured signal from the understanding
-    model: collection completeness, multiple mandatory directions, or a
-    compare/diagnose/design/review operation.  The closed mapping prevents a
-    model-generated string from becoming a dispatch target.
-    """
-    if not bool(getattr(contract, "_understanding_succeeded", True)):
-        return "chunk"
-    if bool(getattr(contract, "needs_clarification", False)):
-        return "chunk"
-    if bool(getattr(contract, "completeness_required", False)):
-        return "reasoning"
-    if len(getattr(contract, "mandatory_topics", ()) or ()) > 1:
-        return "reasoning"
-    intent_type = str(getattr(contract, "intent_type", "") or "").strip().lower()
-    if intent_type in {"compare", "diagnose", "design", "review"}:
-        return "reasoning"
-    return "chunk"
-
-
 def _complete_match_is_negated(question: str, match: re.Match) -> bool:
     prefix = question[max(0, match.start() - 24):match.start()]
     prefix = re.split(r"[，,。；;!?！？]", prefix)[-1]

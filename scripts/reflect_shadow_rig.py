@@ -2957,7 +2957,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--cell', action='append', default=[], choices=list(CORPUS_CELLS), help='只跑这些语料格(可多次);默认四格全跑')
     parser.add_argument('--limit', type=int, help='每个语料格取前 N 题；在题号筛选之后应用。')
     parser.add_argument('--lang', choices=('zh', 'en', 'both'), default='zh')
-    parser.add_argument('--mode', choices=('reasoning', 'chunk', 'auto'), default='reasoning')
+    parser.add_argument('--mode', choices=('reasoning', 'chunk'), default='reasoning')
     parser.add_argument("command", choices=("seed", "ask", "report", "search", "restart", "export", "teardown"))
     return parser
 

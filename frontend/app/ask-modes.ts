@@ -38,9 +38,18 @@ export const ASK_MODES: readonly AskModeDef[] = Object.freeze([
 ]);
 
 export const DEFAULT_ASK_MODE: AskModeId = "chunk";
-// Request-only backend selector for the simplified interface. It is not a
-// visible engine and therefore stays outside ASK_MODES / AskModeId.
-export const AUTO_ASK_MODE = "auto";
+// 简化界面（ui_mode="auto"，即「自动模式」这个界面选项，本身保留）没有引擎
+// 控件；提交汇聚点固定发这个内置 id，档位固定 DEFAULT_ASK_RETRIEVAL_EFFORT。
+// 下线的是 Ask 请求级 mode="auto" 选择器，不是界面上的「自动模式」。
+export const SIMPLIFIED_ASK_MODE: AskModeId = "reasoning";
+
+// 本次提交实际使用的引擎。简化界面没有引擎控件，可见选择器状态与提交引擎解耦：
+// `selected` 是用户在高级界面留下的（或按历史末轮回填的）具名选择，简化界面下它
+// 只是一份不可见的记忆，提交固定走 SIMPLIFIED_ASK_MODE。凡是要问「这次提交到底
+// 是不是推理引擎」的判据都必须过这个函数，不能直接比可见 mode。
+export function submissionAskMode(advanced: boolean, selected: string): string {
+  return advanced ? selected : SIMPLIFIED_ASK_MODE;
+}
 
 export const ASK_MODE_GROUPS: { id: AskModeGroup; label: string }[] = [
   { id: "general", label: "通用问答" },

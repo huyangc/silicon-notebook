@@ -8,7 +8,6 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse, StreamingResponse
 
 from app.core.config import get_settings
-from app.core.ask_retrieval_policy import DEFAULT_RETRIEVAL_EFFORT
 from app.bootstrap import application_extension_runtime
 from app.domain.ask_engine import AskPluginEngineError
 
@@ -30,7 +29,6 @@ from app.models.source_scope import (
     SourceScope,
 )
 from app.models.ask import (
-    AskIntentConfirmation,
     AskIntentPreviewRequest,
     AskRequest,
     AskResponse,
@@ -55,14 +53,12 @@ from app.repositories.ports import (
 )
 from app.services.ask_modes import (
     ASK_MODES,
-    AUTO_MODE,
     UnknownAskMode,
     resolve_mode,
     user_facing_modes,
 )
 from app.services.cancellation import AskCancelled
 from app.services.query_intent import (
-    auto_ask_mode_from_intent,
     clarification_gate_message,
     finalize_query_intent,
     plan_query_intent,
@@ -75,7 +71,6 @@ from app.services.knowhow.assets import ALLOWED_MIME_EXTENSIONS, AssetService
 from app.services.search_concurrency import run_under_search_gate
 from app.services.source_scope import retrieval_scope_receipt_context
 from app.api.task_stream import (
-    ClosingStreamingResponse,
     NDJSON_STREAM_HEADERS,
     ndjson_line,
     task_stream_response,
@@ -103,9 +98,7 @@ def _extension_ask_modes():
 
 
 def _valid_ask_mode_ids() -> list[str]:
-    return [AUTO_MODE, *(
-        mode.id for mode in user_facing_modes(_extension_ask_modes())
-    )]
+    return [mode.id for mode in user_facing_modes(_extension_ask_modes())]
 
 
 def _plugin_engine_http_error(exc: AskPluginEngineError) -> HTTPException:
@@ -503,46 +496,6 @@ def _intent_history(repo, notebook_id: str, conversation_id: str | None,
     return "\n".join(lines)
 
 
-def _resolve_auto_ask_request(
-    repo,
-    notebook_id: str,
-    payload: AskRequest,
-    history: str = "",
-    cancel_event: threading.Event | None = None,
-):
-    """Resolve request-only ``mode=auto`` before durable state is created."""
-    question = payload.question.strip()
-    if not question:
-        spec = resolve_mode("chunk", _extension_ask_modes())
-        return payload.model_copy(update={"mode": spec.id}), spec
-    contract = repo.preview_reasoning_intent(
-        notebook_id,
-        question,
-        history,
-        cancel_event=cancel_event,
-    )
-    selected = auto_ask_mode_from_intent(contract)
-    # The classifier has a closed return contract, but the route still resolves
-    # through the canonical registry rather than trusting a model-adjacent value.
-    spec = resolve_mode(selected, _extension_ask_modes())
-    updates = {
-        "mode": spec.id,
-        # The simplified interface intentionally has no quality/cost control.
-        # Ignore values supplied by stale or direct clients and freeze the
-        # documented automatic-mode default before durable state is created.
-        "retrieval_effort": DEFAULT_RETRIEVAL_EFFORT,
-    }
-    if spec.id == "reasoning":
-        # Clear automatic-mode questions use the same model-produced contract
-        # as the advanced UI's clear-intent auto-confirm path.  This avoids a
-        # second understanding call and preserves its retrieval directions.
-        updates["intent"] = AskIntentConfirmation(
-            contract=contract,
-            resolved_question=contract.resolved_question,
-        )
-    return payload.model_copy(update=updates), spec
-
-
 @router.post(
     "/notebooks/{notebook_id}/ask/intent",
     response_model=QueryIntentContract,
@@ -736,35 +689,22 @@ def ask(notebook_id: str, payload: AskRequest) -> AskResponse:
         notebook = repo.get_notebook(notebook_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
-    # 先校验具名模式(422 malformed 请求),再查可用性(409 前置条件不满足),口径与
-    # stream 一致。auto 是请求级选择器,不是 registry engine；空库先 409，避免为
-    # 一次注定不能执行的请求花路由模型调用。
-    spec = None
-    if payload.mode != AUTO_MODE:
-        try:
-            spec = resolve_mode(payload.mode, _extension_ask_modes())
-        except UnknownAskMode as exc:
-            raise HTTPException(status_code=422, detail={
-                "error": "unknown ask mode", "mode": exc.mode,
-                "valid": _valid_ask_mode_ids()})
-        _validate_confirmed_reasoning_intent(payload, spec)
+    # 先校验 mode(422 malformed 请求),再查可用性(409 前置条件不满足),口径与
+    # stream 一致。``mode`` 只接受注册表 id(退役别名由 resolve_mode 归一),没有
+    # 请求级选择器,也就没有路由模型调用。
+    try:
+        spec = resolve_mode(payload.mode, _extension_ask_modes())
+    except UnknownAskMode as exc:
+        raise HTTPException(status_code=422, detail={
+            "error": "unknown ask mode", "mode": exc.mode,
+            "valid": _valid_ask_mode_ids()})
+    _validate_confirmed_reasoning_intent(payload, spec)
     resolved_source_scope, resolved_base_scope = _require_ask_available(
         notebook, repo, payload.source_scope, payload.base_scope
     )
     payload = _apply_resolved_scopes(
         payload, resolved_source_scope, resolved_base_scope
     )
-    if spec is None:
-        history = _intent_history(
-            repo,
-            notebook_id,
-            payload.conversation_id,
-            repo.current_user().id,
-        )
-        payload, spec = _resolve_auto_ask_request(
-            repo, notebook_id, payload, history
-        )
-        _validate_confirmed_reasoning_intent(payload, spec)
     try:
         # The whole synchronous ask runs inside this thread's context, so the
         # receipt reaches AskService's single answer-persistence seam.
@@ -825,11 +765,7 @@ async def _stream_ask_events(
     request: Request,
     *,
     scope_receipt: RetrievalScopeReceipt | None = None,
-    resolve=None,
 ):
-    # ``resolve`` (auto mode): engine selection runs inside the detached worker
-    # AFTER the durable job exists and ``started`` is queued, so leaving the page
-    # during selection can no longer lose the question (see the coordinator).
     # Task 23: 执行编排(begin→register→started→合成 start→copy_context worker→
     # trace 持久化 fail-open→finish→unregister→空会话清理→终态事件→哨兵)整体在
     # runtime-owned AskExecutionCoordinator;本函数保留冻结签名,只剩启动编排、
@@ -854,12 +790,9 @@ async def _stream_ask_events(
         # 调用面扫描(按字面 ``repo.start_ask_stream(...)`` 调用形态识别)仍能
         # 认出这个调用点——纯按引用传参会让它从「被调用」变成「被引用」。
         def _start_ask_stream():
-            # ``resolve`` only travels on the auto-mode path, so resolved-mode
-            # callers (and their narrow test doubles) keep the frozen call shape.
             return repo.start_ask_stream(
                 notebook_id, payload, spec,
                 user_id=repo.current_user().id,
-                **({"resolve": resolve} if resolve is not None else {}),
             )
 
         events = await asyncio.to_thread(_start_ask_stream)
@@ -902,54 +835,13 @@ async def _deliver_ask_events(events, request: Request):
             close()
 
 
-async def _stream_auto_ask_events(
-    repo,
-    notebook_id: str,
-    payload: AskRequest,
-    history: str,
-    request: Request,
-    *,
-    scope_receipt: RetrievalScopeReceipt,
-):
-    """Automatic mode: the durable job comes FIRST, engine selection second.
-
-    Engine selection is a model call that can take seconds. It used to run
-    here, before any durable state existed, so a refresh, a closed tab or a
-    navigation-triggered disconnect during that window lost the question
-    entirely. Now the coordinator begins the job under the request-only
-    ``auto`` id and queues ``started`` immediately; ``resolve`` runs inside the
-    detached worker (same copied request context), then the resolved engine is
-    recorded on the job row and executed. A transport disconnect therefore
-    behaves exactly like every other detached Ask — the job runs to completion
-    — and only the explicit cancel endpoint (via the cancel event ``resolve``
-    is handed) aborts selection.
-    """
-    def resolve(cancel_event: threading.Event):
-        routed_payload, spec = _resolve_auto_ask_request(
-            repo, notebook_id, payload, history, cancel_event,
-        )
-        _validate_confirmed_reasoning_intent(routed_payload, spec)
-        return routed_payload, spec
-
-    async for line in _stream_ask_events(
-        repo,
-        notebook_id,
-        payload,
-        None,
-        request,
-        scope_receipt=scope_receipt,
-        resolve=resolve,
-    ):
-        yield line
-
-
 @router.post("/notebooks/{notebook_id}/ask/stream", dependencies=[Depends(require_notebook_read)])
 async def ask_stream(notebook_id: str, request: Request, payload: AskRequest) -> StreamingResponse:
     repo = repository()
 
     # Z4: 这整段(get_notebook + _require_ask_available[含 48k 级 all_visible_
-    # source_ids/hidden_source_ids 回表] + _intent_history)原来在事件循环线程
-    # 上直接跑,大库上是秒级同步阻塞。逐字对齐 preview_ask_intent/
+    # source_ids/hidden_source_ids 回表])原来在事件循环线程上直接跑,大库上是
+    # 秒级同步阻塞。逐字对齐 preview_ask_intent/
     # preview_ask_intent_stream 的 prepare_preview() 包装形态:同一批同步调用
     # 打包成一个函数,整体丢进 asyncio.to_thread,异常(KeyError→404、
     # UnknownAskMode→422、_require_ask_available 的 409/422)原样从线程里抛出、
@@ -959,32 +851,22 @@ async def ask_stream(notebook_id: str, request: Request, payload: AskRequest) ->
             notebook = repo.get_notebook(notebook_id)
         except KeyError:
             raise HTTPException(status_code=404, detail="Notebook not found")
-        spec = None
-        if payload.mode != AUTO_MODE:
-            try:
-                spec = resolve_mode(payload.mode, _extension_ask_modes())
-            except UnknownAskMode as exc:
-                raise HTTPException(status_code=422, detail={
-                    "error": "unknown ask mode", "mode": exc.mode,
-                    "valid": _valid_ask_mode_ids()})
-            _validate_confirmed_reasoning_intent(payload, spec)
+        try:
+            spec = resolve_mode(payload.mode, _extension_ask_modes())
+        except UnknownAskMode as exc:
+            raise HTTPException(status_code=422, detail={
+                "error": "unknown ask mode", "mode": exc.mode,
+                "valid": _valid_ask_mode_ids()})
+        _validate_confirmed_reasoning_intent(payload, spec)
         resolved_source_scope, resolved_base_scope = _require_ask_available(
             notebook, repo, payload.source_scope, payload.base_scope
         )  # 空库/空检索范围权威拒绝
         updated_payload = _apply_resolved_scopes(
             payload, resolved_source_scope, resolved_base_scope
         )
-        history = None
-        if spec is None:
-            history = _intent_history(
-                repo,
-                notebook_id,
-                updated_payload.conversation_id,
-                repo.current_user().id,
-            )
         return (
             notebook, spec, updated_payload,
-            resolved_source_scope, resolved_base_scope, history,
+            resolved_source_scope, resolved_base_scope,
         )
 
     if payload.client_request_id:
@@ -1009,24 +891,9 @@ async def ask_stream(notebook_id: str, request: Request, payload: AskRequest) ->
 
     (
         notebook, spec, payload,
-        resolved_source_scope, resolved_base_scope, history,
+        resolved_source_scope, resolved_base_scope,
     ) = await asyncio.to_thread(prepare_ask_stream)
 
-    if spec is None:
-        return ClosingStreamingResponse(
-            _stream_auto_ask_events(
-                repo,
-                notebook_id,
-                payload,
-                history,
-                request,
-                scope_receipt=_scope_receipt(
-                    notebook, resolved_source_scope, resolved_base_scope
-                ),
-            ),
-            media_type="application/x-ndjson",
-            headers=NDJSON_STREAM_HEADERS,
-        )
     return StreamingResponse(
         _stream_ask_events(
             repo, notebook_id, payload, spec, request,

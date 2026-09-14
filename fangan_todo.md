@@ -71,12 +71,12 @@
       （T1–T5），原文段落检索一等动作 `search_chunks` + 无图首轮播种、按图存在收缩动作
       空间、早退收窄为零源、注册表与前端闸放行，已落地；② 无图首轮并入关键词臂 + 首轮后
       模型判定直接作答的成本契约（规格 `docs/superpowers/specs/2026-09-07-reasoning-chunk-parity-keyword-arm-design_zh.md`），
-      ✅ 已合入 PR #693；③ 自动模式灰度——前提有二：其一，reasoning 直接作答的调用数 =
-      chunk + 1 次 reflect，自动模式下 4 比 3；其二，**界面路径的 chunk 向量检索已修复**
-      （`docs/superpowers/specs/2026-09-07-scoped-chunk-vector-lane-design_zh.md`：冻结来源
-      范围曾让所有未建 scale 索引的库在 UI 路径上只走 FTS 词法候选，灰度前必须先把这条
-      基线拉回来，否则两臂对比测的是一个坏掉的对照组）；④ 退役 chunk 流水线。③–④ 各自
-      待立规格。
+      ✅ 已合入 PR #693；③ ✅ 2026-09-14 用户裁决直接下线请求级 `auto` 选择器，简化界面固定
+      `reasoning` 标准档（本 PR），原「自动模式灰度」不再做；④ 退役 chunk 流水线，待立规格。
+      ④ 的硬前提：做 chunk/reasoning 对照前必须确认**界面路径的 chunk 向量检索基线已修复**
+      （`docs/superpowers/specs/2026-09-07-scoped-chunk-vector-lane-design_zh.md`，已由 PR #697
+      合入），否则两臂对比测的是一个坏掉的对照组；原「自动模式下 4 比 3 调用数」前提随
+      auto 下线作废——现在两种界面都是意图预检 + reflect + answer，直答比 chunk 只多一次 reflect。
       v1（固定「直答」档位）与 v2（先合成、不足再查）均已撤回：用户裁决不设固定直答选项、
       问题理解与子问题检索不能省、检索效果优先于省一次调用；v2 的先合成本可把首轮后的
       reflect 并进合成再省一次调用，但代价是拆 `run()` 的重构与判定质量的不确定，按效果
@@ -96,7 +96,6 @@
       ask_responses.json` 与 `test_reasoning_retrieval.py` 钉住。眼下登记在
       `scripts/check_ui_vocabulary.py::GRANDFATHERED_TRACE_SUMMARIES`（逐字全串例外，改一个字
       就重新违规）；改它要同改文案、两份文档、既有用例与黄金 fixture，是独立的一次改动。
-- [ ] 自动模式对含「刚才 / 这个 / 那个」的订正句落 chunk+standard：登记为已知行为不修。
 
 ### 知识图谱
 

@@ -18,12 +18,12 @@ import {
 } from "./ask-api.ts";
 import {
   ASK_MODES,
-  AUTO_ASK_MODE,
   DEFAULT_ASK_MODE,
   groupOf,
   groupLabel,
   normalizeAskModeProjection,
   requiresKg,
+  submissionAskMode,
   type AskModeDef,
   modeFromTurn,
 } from "./ask-modes.ts";
@@ -48,6 +48,7 @@ import {
 } from "./ask-intent-trace.ts";
 import {
   claimIntentRun,
+  clearAdvancedPersistedIntentRuns,
   clearPersistedIntentRuns,
   findPersistedIntentRuns,
   newIntentRunId,
@@ -241,6 +242,10 @@ type AskIntentRunRecord = DetachableRecord & {
   question: string;
   askedAt: string;
   conversationIdAtStart: string | null;
+  // The UI surface this submission was made in, frozen like the scope and the
+  // effort: the storage mirror carries it so a reload can tell a simplified
+  // submission (resumable there) from an advanced one (never resumed there).
+  advanced: boolean;
   retrievalEffort: AskRetrievalEffortId;
   scopeSnapshot: { sourceScope: SourceScopePayload; baseScope: BaseScopePayload };
   controller: AbortController;
@@ -473,7 +478,15 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       askModesRef.current = modes;
       setAskModes(modes);
       setMode((current) => {
-        if (modeChoiceVersionRef.current !== choiceVersion) {
+        if (
+          modeChoiceVersionRef.current !== choiceVersion
+          // The simplified surface hides the engine selector: no control can
+          // change it and no visible state has to line up with a run, so the
+          // projection only sanitizes what is there. Anything else would
+          // overwrite the named choice the user left in the advanced surface,
+          // which must still be honoured when they switch back.
+          || !policyRef.current.advanced
+        ) {
           return modeFromTurn({ response: { mode: current } }, modes);
         }
         // A re-attached intent preview/review is reasoning-mode context in its
@@ -573,15 +586,19 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
   // The preview/review phase has no server-side trace, so the in-memory record
   // is mirrored to per-tab session storage: a reload of this tab resumes it
   // (see ask-intent-persist.ts). Mirrored on submit and on "needs
-  // clarification"; forgotten on hand-off, cancel, mode switch and tombstone.
+  // clarification"; forgotten on hand-off, cancel and tombstone. A switch to
+  // the simplified surface forgets only the records the ADVANCED surface left
+  // (`advanced: true`) — the simplified surface mirrors its own submissions now
+  // and keeps them across a surface round trip.
   function persistIntentRun(run: AskIntentRunRecord) {
     if (run.phase === "failed" || !run.mirrored) return;
     savePersistedIntentRun({
-      version: 1,
+      version: 2,
       id: run.persistId,
       savedAt: Date.now(),
       actorId: run.owner.actorId,
       notebookId: run.notebookId,
+      advanced: run.advanced,
       conversationIdAtStart: run.conversationIdAtStart,
       question: run.question,
       askedAt: run.askedAt,
@@ -602,11 +619,12 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
   function persistHandoff(run: AskIntentRunRecord, confirmation: AskIntentConfirmation) {
     if (!run.mirrored) return;
     savePersistedIntentRun({
-      version: 1,
+      version: 2,
       id: run.persistId,
       savedAt: Date.now(),
       actorId: run.owner.actorId,
       notebookId: run.notebookId,
+      advanced: run.advanced,
       conversationIdAtStart: run.conversationIdAtStart,
       question: run.question,
       askedAt: run.askedAt,
@@ -699,8 +717,15 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       setTurns([]);
       setConversationId(null);
     }
-    modeRef.current = "reasoning";
-    setMode("reasoning");
+    // Same rule as `attachIntentRun`: the selector is only the user's visible
+    // choice in the advanced surface, so only there does the intent flow write
+    // it. In the simplified surface the hidden selector is left alone by THIS
+    // flow — `attachDetachedRun` and `applySessionDetail` still backfill it from
+    // the last turn there, which is why no reasoning criterion may read it.
+    if (policyRef.current.advanced) {
+      modeRef.current = "reasoning";
+      setMode("reasoning");
+    }
     // The effort frozen at submission (normalised against bad storage), the
     // same expression the wiring guard pins for every re-sent frozen value.
     setRetrievalEffort(retrievalEffortFromTurn({ response: { retrieval_effort: record.retrievalEffort } }));
@@ -767,17 +792,23 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     list: readonly { id: string }[] | null,
     conversationId?: string,
   ): Promise<ResumedIntent | null> {
-    if (!policyRef.current.advanced) {
-      // The UI mode is per actor and may have been switched to automatic in
-      // another tab since these were stored: automatic mode must never resume
-      // a reasoning preview or re-open a review. Same outcome as the switch
-      // effect, one step later.
-      clearPersistedIntentRuns(owner.actorId);
-      return null;
-    }
+    // The UI mode is per actor and may have been switched since these were
+    // stored, so the surface decides per record, not for the whole store: the
+    // simplified surface produces records of its own now (same reasoning intent
+    // preview), and those it may resume. What it must never resume is an
+    // ADVANCED record — that one may carry a scope the user narrowed in a
+    // surface they can no longer see, and the product contract says the
+    // simplified surface never inherits it. The advanced surface resumes both.
+    const resumable = (candidate: PersistedIntentRun) => (
+      policyRef.current.advanced || !candidate.advanced
+    );
     let persisted = null;
     for (const candidate of findPersistedIntentRuns(owner.actorId, owner.notebookId)) {
       if (conversationId !== undefined && candidate.conversationIdAtStart !== conversationId) continue;
+      if (!resumable(candidate)) {
+        removePersistedIntentRun(candidate.id);
+        continue;
+      }
       if (
         candidate.conversationIdAtStart !== null
         && !(list ?? []).some((session) => session.id === candidate.conversationIdAtStart)
@@ -789,13 +820,14 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
         removePersistedIntentRun(candidate.id);
         continue;
       }
-      if (!policyRef.current.advanced) {
-        // The mode switched to automatic while the claim was pending: the
-        // switch effect already cleared storage; this claimed candidate must
-        // not be attached either. Same outcome as the check above, one await later.
+      if (!resumable(candidate)) {
+        // The surface switched to simplified while the claim was pending and
+        // this is an advanced record: drop this one (the switch effect has
+        // already cleared what it could see) and keep scanning — the same rule
+        // as above, one await later, applied per record rather than to all.
         releaseIntentRun(candidate.id);
-        clearPersistedIntentRuns(owner.actorId);
-        return null;
+        removePersistedIntentRun(candidate.id);
+        continue;
       }
       persisted = candidate;
       break;
@@ -825,6 +857,9 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       question: persisted.question,
       askedAt: persisted.askedAt,
       conversationIdAtStart: persisted.conversationIdAtStart,
+      // Backfilled from the mirror, not from the current policy: the surface is
+      // frozen at submission, and re-mirroring must not relabel the record.
+      advanced: persisted.advanced,
       retrievalEffort: retrievalEffortFromTurn({
         response: { retrieval_effort: persisted.retrievalEffort },
       }),
@@ -946,10 +981,20 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     askIntentTraceRef.current = run.trace;
     askIntentDraftRef.current = run.question;
     askIntentDraftOwnerRef.current = run.draftToken;
-    // The reasoning engine is part of this run's context: the mode projection
-    // and the context-change effect both honour a visible intent run.
-    modeRef.current = "reasoning";
-    setMode("reasoning");
+    // The reasoning engine is part of this run's context, and the mode
+    // projection honours a visible intent run — but only in the advanced
+    // surface, where the selector is the user's own visible choice. Writing
+    // "reasoning" in the simplified surface would silently overwrite the named
+    // choice the user left in the advanced surface (which must survive a switch
+    // back). That is a rule about who writes the selector, not a promise that
+    // the selector stands still there: `attachDetachedRun` and
+    // `applySessionDetail` still backfill it from the last turn. So no "is this
+    // a reasoning submission" criterion may read the selector — they all go
+    // through `submissionAskMode` with the surface frozen on the run.
+    if (policyRef.current.advanced) {
+      modeRef.current = "reasoning";
+      setMode("reasoning");
+    }
     setRetrievalEffort(run.retrievalEffort);
     setQuestion("");
     setConversationId(run.conversationIdAtStart);
@@ -1588,34 +1633,74 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
 
   useEffect(() => {
     // Changing conversation or engine mid-preview abandons the preview — unless
-    // the view is being set up to match a re-attached intent run.
+    // the view is being set up to match a re-attached intent run. "Engine" here
+    // is the engine THIS RUN's submission uses, which is decided by the surface
+    // frozen on the run, not by the surface the user happens to be in now: the
+    // avatar menu can switch surfaces while a review card is open, and a
+    // simplified-surface run must survive that (and every visible-mode write
+    // that follows it — `applySessionDetail`, `attachDetachedRun`, the mode
+    // projection). With no run on screen there is nothing to keep (the `run &&`
+    // guard below short-circuits, so the current-surface fallback is only the
+    // value that keeps `runAdvanced` total). A session switch still abandons.
     const run = visibleIntentRun();
-    if (run && conversationId === run.conversationIdAtStart && mode === "reasoning") return;
+    const runAdvanced = run ? run.advanced : policyRef.current.advanced;
+    if (
+      run
+      && conversationId === run.conversationIdAtStart
+      && submissionAskMode(runAdvanced, mode) === "reasoning"
+    ) return;
     abortIntentPreview();
   }, [conversationId, mode]);
 
   useEffect(() => {
     const wasAdvanced = advancedRef.current;
     advancedRef.current = policy.advanced;
-    if (!wasAdvanced || policy.advanced) return;
-    const draft = askIntentDraftRef.current;
-    abortIntentPreview();
-    if (draft) setQuestion(draft);
-    // The UI mode is per actor: a reasoning preview/review detached in any
-    // notebook must not start a reasoning job or re-open its review after the
-    // switch. Cancel it and let the next restore of that notebook hand the
+    if (wasAdvanced === policy.advanced) return;
+    if (policy.advanced) {
+      // Simplified -> advanced with a review card or an "understanding" turn on
+      // screen. The engine selector just became visible again, and this run IS a
+      // reasoning run, so normalise it the same way `attachIntentRun` does in
+      // this surface — otherwise the card would sit above a selector naming some
+      // other engine — and project the run's frozen effort the same way, so the
+      // effort chip that just became visible reads what this run will submit.
+      // This is the one path where a named advanced choice is overwritten:
+      // cancelling the review afterwards leaves the selector on reasoning. With
+      // nothing on screen the user's named choice stands.
+      const visible = visibleIntentRun();
+      if (visible) {
+        modeRef.current = "reasoning";
+        setMode("reasoning");
+        setRetrievalEffort(visible.retrievalEffort);
+      }
+      return;
+    }
+    // Advanced -> simplified. Only work that was SUBMITTED in the advanced
+    // surface is cancelled: it may carry a scope the user narrowed where the
+    // simplified surface cannot see it. A run the simplified surface started
+    // itself survives the round trip untouched — cancelling it would eat the
+    // user's own question on a switch they made for an unrelated reason.
+    const visible = visibleIntentRun();
+    if (!visible || visible.advanced) {
+      const draft = askIntentDraftRef.current;
+      abortIntentPreview();
+      if (draft) setQuestion(draft);
+    }
+    // The UI mode is per actor: an ADVANCED reasoning preview/review detached in
+    // any notebook must not start a reasoning job or re-open its review after
+    // the switch. Cancel it and let the next restore of that notebook hand the
     // question back with a reason, exactly like the visible one above.
     for (const run of intentRunsRef.current) {
-      if (run.cancelRequested || run.phase === "failed") continue;
+      if (run.cancelRequested || run.phase === "failed" || !run.advanced) continue;
       run.controller.abort();
       run.phase = "failed";
       run.failure = humanizedError("已切换到自动模式，未完成的问题理解已取消，问题已退回输入框");
       forgetPersistedIntent(run);
     }
     // Records that were never materialized in this instance (older sessions'
-    // previews/reviews after a reload) live only in storage: they belong to
-    // the same actor and must not resume once the user returns to advanced.
-    if (actorIdRef.current) clearPersistedIntentRuns(actorIdRef.current);
+    // previews/reviews after a reload) live only in storage: the advanced ones
+    // belong to the same actor and must not resume, the simplified ones are
+    // this surface's own and stay.
+    if (actorIdRef.current) clearAdvancedPersistedIntentRuns(actorIdRef.current);
   }, [policy.advanced]);
 
   async function executeAsk(
@@ -1892,7 +1977,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
         : "请先添加来源，或在「设置 → 编辑当前笔记本」里挂载一个参考库，再开始对话。");
       return;
     }
-    const submitMode = currentPolicy.advanced ? mode : AUTO_ASK_MODE;
+    const submitMode = submissionAskMode(currentPolicy.advanced, mode);
     if (requiresKg(submitMode, askModesRef.current) && !currentPolicy.kgAvailable) {
       effectsRef.current.notify(`${groupLabel(groupOf(submitMode, askModesRef.current))}需要知识图谱 — 可在「设置 → 编辑当前笔记本」里挂一个参考库，或先整理该笔记本的知识图谱`);
       return;
@@ -1916,6 +2001,7 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
       question: q,
       askedAt,
       conversationIdAtStart: conversationIdRef.current,
+      advanced: currentPolicy.advanced,
       retrievalEffort: currentPolicy.advanced ? retrievalEffort : DEFAULT_ASK_RETRIEVAL_EFFORT,
       scopeSnapshot,
       controller: new AbortController(),
@@ -2104,10 +2190,19 @@ export function useAskSession({ actorId, notebookId, policy, effects }: UseAskSe
     const draftToken = askIntentDraftOwnerRef.current ?? {};
     askIntentDraftOwnerRef.current = draftToken;
     const run = visibleIntentRun();
+    const runAdvanced = run ? run.advanced : policyRef.current.advanced;
     if (
       review.notebookId !== owner.notebookId
       || review.conversationId !== conversationIdRef.current
-      || modeRef.current !== "reasoning"
+      // The engine this confirmation would submit with, judged by the surface
+      // FROZEN ON THE RUN, not the visible selector and not the surface the user
+      // is in right now. In the simplified surface the selector still holds
+      // whatever the user last named in the advanced surface (there is no engine
+      // control to change it), so comparing it directly bails on every review;
+      // and the avatar menu can switch surfaces while this very card is open, so
+      // judging by the current surface throws the question and the clarification
+      // answers away at the last step.
+      || submissionAskMode(runAdvanced, modeRef.current) !== "reasoning"
     ) {
       if (run) {
         run.cancelRequested = true;

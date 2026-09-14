@@ -3067,7 +3067,6 @@ class AskStreamPort(Protocol):
         mode: "AskMode | None",
         *,
         user_id: str,
-        resolve: "Callable[[threading.Event], tuple[AskRequest, AskMode]] | None" = None,
         attach_only: bool = False,
     ) -> "queue.Queue[dict[str, object] | None] | None": ...
 
@@ -3441,7 +3440,6 @@ class AskStateStorePort(Protocol):
         user_id: str,
     ) -> str | None: ...
     def cancel_running_job(self, job_id: str, user_id: str) -> dict: ...
-    def update_job_mode(self, job_id: str, mode: str) -> None: ...
     def finish_job(
         self,
         job_id: str,

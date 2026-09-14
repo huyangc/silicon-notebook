@@ -1740,8 +1740,6 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>._own_conversation_or_404', kind='attribute', target='current_user'),
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>._stream_ask_events._start_ask_stream', kind='attribute', target='current_user'),
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>._validate_source_scope', kind='attribute', target='current_user'),
-            ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.ask', kind='attribute', target='current_user'),
-            ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.ask_stream.prepare_ask_stream', kind='attribute', target='current_user'),
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.cancel_ask_job', kind='attribute', target='current_user'),
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.get_ask_job', kind='attribute', target='current_user'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>._resolve_session_user', kind='attribute', target='current_user'),
@@ -2775,13 +2773,12 @@ SURFACE_MEMBERS = (
         owner='AskService',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>._resolve_auto_ask_request', kind='attribute', target='preview_reasoning_intent'),
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.preview_ask_intent.run_preview', kind='attribute', target='preview_reasoning_intent'),
             ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.preview_ask_intent_stream.run_preview', kind='attribute', target='preview_reasoning_intent'),
-            ConsumerSite(path='backend/tests/test_ask_modes_api.py', scope='<module>.test_auto_mode_is_resolved_by_backend_before_durable_job', kind='patch', target='preview_reasoning_intent'),
+            ConsumerSite(path='backend/tests/test_ask_modes_api.py', scope='<module>.test_auto_is_a_retired_alias_for_reasoning', kind='patch', target='preview_reasoning_intent'),
         ),
         patches=(
-            ConsumerSite(path='backend/tests/test_ask_modes_api.py', scope='<module>.test_auto_mode_is_resolved_by_backend_before_durable_job', kind='patch', target='preview_reasoning_intent'),
+            ConsumerSite(path='backend/tests/test_ask_modes_api.py', scope='<module>.test_auto_is_a_retired_alias_for_reasoning', kind='patch', target='preview_reasoning_intent'),
         ),
     ),
     SurfaceMember(

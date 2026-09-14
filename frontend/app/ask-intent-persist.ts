@@ -15,8 +15,10 @@
 // 命名、标签页关闭即释放）当跨标签页的所有权闸：拿不到锁 = 另一个标签页正在处理这
 // 条记录，本标签页删掉自己的副本、不续。没有 Web Locks 的环境退化为只靠 sessionStorage。
 //
-// 交接给 durable run、用户取消/中断、切到自动模式、会话被删除、预检失败退回草稿时
-// 清除；detach 不清除。
+// 交接给 durable run、用户取消/中断、会话被删除、预检失败退回草稿时清除；detach 不清除。
+// 切到简化界面（「自动模式」）不再清空整个 store：简化界面自己也会留记录（它走同一条
+// 推理意图预检），所以那次切换只清除 `advanced: true` 的记录——那些可能带着简化界面
+// 看不见也改不了的收窄范围；简化界面自己的记录留存，往返切换后仍可续上。
 
 import type { AskIntentConfirmation, QueryIntentContract } from "./ask-intent-model.ts";
 import type { AskRetrievalEffortId } from "./ask-retrieval-effort.ts";
@@ -26,11 +28,22 @@ export const PENDING_INTENT_STORAGE_KEY = "silicon_notebook_pending_intent";
 const LOCK_PREFIX = "silicon_notebook_pending_intent:";
 
 export type PersistedIntentRun = {
-  version: 1;
+  // Bumped to 2 when `advanced` was added: a version-1 entry cannot say which
+  // surface produced it, and the resume rules now turn on exactly that. Such an
+  // entry is read as invalid and dropped — sessionStorage is short-lived, and a
+  // version-1 entry can only have come from the advanced surface, which the
+  // simplified surface discarded anyway.
+  version: 2;
   id: string;
   savedAt: number;
   actorId: string;
   notebookId: string;
+  // The UI surface this submission was made in. The simplified surface now
+  // produces records too (it submits through the same reasoning intent
+  // preview), so "there is a record" no longer implies "the advanced surface
+  // left it": a record from the advanced surface may carry a narrowed scope the
+  // simplified surface must never inherit, and is dropped there instead.
+  advanced: boolean;
   conversationIdAtStart: string | null;
   question: string;
   askedAt: string;
@@ -150,11 +163,12 @@ export function isAskIntentConfirmationShape(value: unknown): value is AskIntent
 
 /** 只接受形状完整的条目；坏条目整条丢弃，绝不把半截状态续回界面。 */
 export function isPersistedIntentRun(value: unknown): value is PersistedIntentRun {
-  if (!isRecord(value) || value.version !== 1) return false;
+  if (!isRecord(value) || value.version !== 2) return false;
   if (typeof value.id !== "string" || !value.id) return false;
   if (typeof value.savedAt !== "number" || !Number.isFinite(value.savedAt)) return false;
   if (typeof value.actorId !== "string" || !value.actorId) return false;
   if (typeof value.notebookId !== "string" || !value.notebookId) return false;
+  if (typeof value.advanced !== "boolean") return false;
   if (value.conversationIdAtStart !== null && typeof value.conversationIdAtStart !== "string") return false;
   if (typeof value.question !== "string" || !value.question.trim()) return false;
   if (typeof value.askedAt !== "string") return false;
@@ -245,6 +259,22 @@ export function clearPersistedIntentRuns(
   if (!store) return;
   const runs = readPersistedIntentRuns(store);
   const kept = runs.filter((run) => run.actorId !== actorId);
+  if (kept.length !== runs.length) writeAll(store, kept);
+}
+
+/**
+ * 切到简化界面（「自动模式」）：只清掉该 actor **在高级界面留下**的条目。它们可能带着
+ * 简化界面看不见、也改不了的收窄检索范围，产品合同说简化界面绝不继承；而简化界面自己
+ * 留下的条目（`advanced: false`）在这次切换里必须原样留存——否则「简化 → 高级 → 简化」
+ * 这趟往返会把用户自己那条问题连同镜像一起吃掉。
+ */
+export function clearAdvancedPersistedIntentRuns(
+  actorId: string,
+  store: IntentRunStorage | null = sessionIntentStorage(),
+): void {
+  if (!store) return;
+  const runs = readPersistedIntentRuns(store);
+  const kept = runs.filter((run) => !(run.actorId === actorId && run.advanced));
   if (kept.length !== runs.length) writeAll(store, kept);
 }
 

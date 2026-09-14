@@ -519,10 +519,14 @@ all of them share that service's one scheduler and one concurrency budget.
 window sizes, batch sizes, and local ANN threads do not create another model
 gate.
 
-Backend Ask routing for the simplified interface reuses `reasoning_agent` for
-one corpus-blind question-understanding pass. If that workload is unbound or
-fails, automatic routing conservatively selects ordinary Q&A; it introduces no
-additional model-service binding.
+Auto mode (the simplified interface) always uses step-by-step reasoning
+(`reasoning`) at standard effort, going through the same `/ask/intent` intent
+preview (reusing the `reasoning_agent` workload) that the advanced interface
+uses when `reasoning` is selected; it introduces no additional model-service
+binding. When that workload is unbound or the call fails, question
+understanding fails open to an empty contract, the question is treated as
+clear, and the run still executes as `reasoning`; there is no longer an
+ordinary Q&A fallback.
 
 The optional `[thinking]` table controls thinking per **chat workload**, using
 `enabled`, `disabled`, or `provider_default`. The policy is workload-scoped

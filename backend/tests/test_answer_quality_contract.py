@@ -12,13 +12,12 @@ import pytest
 
 from app.core.config import Settings
 from app.domain.retrieval import RetrievedChunk
-from app.models.ask import QueryIntentContract
 from app.models.schemas import NotebookCreate
 from app.services.collection_enumeration import EnumerationCoverage, SourceItem
 from app.services.collection_enumeration_answer import enumeration_prompt_block
 from app.services.embedding import FakeEmbedder
 from app.services.prompt_layers import L1_FRAGMENTS, fragment_text
-from app.services.query_intent import auto_ask_mode_from_intent, plan_query_intent
+from app.services.query_intent import plan_query_intent
 from app.services.reasoning_retrieval import CollectionEnumerationOutcome
 from app.services.sqlite_repository import SQLiteRepository
 from tests.model_testkit import bind_all_embedding_clients, bind_chat_client
@@ -253,6 +252,3 @@ def test_intent_caller_preserves_overview_vs_explicit_inventory(question, scope)
     assert contract["completeness_required"] is (scope != "ranked")
     assert contract["constraints"] == []
     assert contract["mandatory_topics"][0]["question"] == question
-    assert auto_ask_mode_from_intent(QueryIntentContract(**contract)) == (
-        "reasoning" if scope != "ranked" else "chunk"
-    )

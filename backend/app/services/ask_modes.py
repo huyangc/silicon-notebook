@@ -32,18 +32,21 @@ ASK_MODES: dict[str, AskMode] = {
 }
 
 DEFAULT_MODE = "chunk"
-# Request-only selector used by the simplified UI.  It is intentionally not a
-# registry entry or user-facing engine, so ``resolve_mode("auto")`` raises.  The
-# backend resolves it to one of the two stable built-ins: the synchronous /ask
-# path before its durable job exists, the streaming path INSIDE the detached
-# worker — there the ``ask_jobs.mode`` row temporarily carries "auto" until
-# selection finishes (and keeps it if the job fails/cancels before that), so
-# never feed a job row's mode straight into ``resolve_mode``.
-AUTO_MODE = "auto"
 
-# 退役但曾合法的 mode id → 映射 chunk(保旧会话/书签持久化的 mode 不 422)。
-# 窄例外:仅这三个具名 id;其余未知 mode 仍 UnknownAskMode。
-_RETIRED_MODES = {"fast": "chunk", "global": "chunk", "graph": "chunk"}
+# 退役但曾合法的 mode id → 映射到某个内置 id:别名本身不再是 422 的成因,旧会话
+# /书签持久化的 mode 与未刷新的旧标签页照常解析。映射目标可以是任一内置 id,不必
+# 是同一个:fast/global/graph 是三个退役引擎,落回 chunk;``auto`` 曾是简化界面的
+# **请求级选择器**(后端跑分类模型再选引擎),现已下线——简化界面直接提交
+# reasoning,所以这个别名也映射 reasoning。别名只归一 id,不再像旧选择器那样把
+# retrieval_effort 压成 standard,也不替请求补 intent:旧标签页发来的模糊问题会被
+# reasoning 的确定性澄清闸拦成 422,刷新一次即消失。窄例外:仅这四个具名 id;其余
+# 未知 mode 仍 UnknownAskMode。
+_RETIRED_MODES = {
+    "fast": "chunk",
+    "global": "chunk",
+    "graph": "chunk",
+    "auto": "reasoning",
+}
 
 
 def resolve_mode(

@@ -2,10 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  ASK_MODES, DEFAULT_ASK_MODE, ASK_MODE_GROUPS,
+  ASK_MODES, DEFAULT_ASK_MODE, SIMPLIFIED_ASK_MODE, ASK_MODE_GROUPS,
   askModeIds, askModeLabels, groupOf, groupLabel, modeLabel,
   defaultModeForGroup, normalizeAskModeProjection, requiresKg, canUseMode,
-  modeFromTurn, streamsTrace,
+  modeFromTurn, streamsTrace, submissionAskMode,
 } from "../../app/ask-modes.ts";
 import {
   appSourceModules,
@@ -26,6 +26,24 @@ test("user-facing ids and default", () => {
   assert.deepEqual(askModeIds(), ["chunk", "reasoning"]);
   assert.equal(DEFAULT_ASK_MODE, "chunk");
   assert.deepEqual(ASK_MODE_GROUPS.map((g) => g.id), ["general", "strict", "extension"]);
+});
+
+// 简化界面(ui_mode="auto",即「自动模式」这个界面选项,不受影响、仍然保留)
+// 提交汇聚点固定发的内置 id。下线的是 Ask 请求级 mode="auto" 选择器,不是
+// 界面上的「自动模式」;SIMPLIFIED_ASK_MODE 必须是注册表里一个真实的内置 id。
+test("简化界面固定提交的内置 id 是注册表成员", () => {
+  assert.equal(SIMPLIFIED_ASK_MODE, "reasoning");
+  assert.ok(askModeIds().includes(SIMPLIFIED_ASK_MODE));
+});
+
+// 可见选择器与提交引擎解耦：简化界面没有引擎控件,选择器里仍可能留着用户上次在
+// 高级界面选的 "chunk"。提交引擎只认这个函数,直接比可见 mode 会把简化界面下的
+// 每一次歧义确认都判成「上下文已变化」。
+test("submissionAskMode 只在高级界面尊重可见选择", () => {
+  assert.equal(submissionAskMode(true, "chunk"), "chunk");
+  assert.equal(submissionAskMode(true, "reasoning"), "reasoning");
+  assert.equal(submissionAskMode(false, "chunk"), "reasoning");
+  assert.equal(submissionAskMode(false, "reasoning"), SIMPLIFIED_ASK_MODE);
 });
 
 test("deployment mode projection is data-driven, strict, and restorable", () => {
