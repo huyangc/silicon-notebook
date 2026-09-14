@@ -54,14 +54,17 @@ def paper_meta_prompt(head_text: str) -> str:
         "- Use ONLY the text below. Even if you recognize the paper, do NOT "
         "fill in anything from memory — omit whatever the text does not show.\n"
         "- If this is not an academic paper (web page, manual, slides, notes, "
-        '...), return {"is_paper": false} and leave every other field empty.\n'
+        '...), return exactly {"is_paper": false} and OMIT every other key — do '
+        "not write empty strings or null for them.\n"
         "- authors: in byline order, names EXACTLY as written in the text "
         "(original language/spelling). affiliations: that author's "
         "institutions per the superscript/layout mapping; use [] when unsure "
         "— never guess.\n"
         "- venue: journal/conference name only if it appears in the text; "
-        "year: publication year only if it appears in the text; doi: only if "
-        "a DOI string appears; keywords: only from an explicit keyword list.\n"
+        "year: the publication year as a bare integer (e.g. 2017) only if it "
+        "appears in the text — omit the key otherwise, never write \"\" or null; "
+        "doi: only if a DOI string appears; keywords: only from an explicit "
+        "keyword list. Every string field is a plain string, never a list or object.\n"
         "- Return JSON only.\n\n"
         f"Opening text:\n{head_text}"
     )

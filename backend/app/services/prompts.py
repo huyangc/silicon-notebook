@@ -807,8 +807,10 @@ def reflect_schema_hint(
         # copies from the candidates, and an empty list is a legal (and
         # meaningful) value — a section with no evidence yet is the whole point
         # of the scratchpad.
+        # ``parent`` is spelled null, not "": the prose calls it optional and a
+        # model's natural spelling of "no parent" is null (audit A4).
         outline_branch = (
-            '"outline":{"sections":[{"id":"","title":"","parent":"",'
+            '"outline":{"sections":[{"id":"","title":"","parent":null,'
             '"evidence":[""],"remove_evidence":[""]}]},'
         )
     # Appended LAST to the enum so every core word keeps the position (and the
@@ -1074,8 +1076,9 @@ def reflect_prompt(
         "treatment of a library, a comparison of several subjects, or any long "
         "answer the question asks you to fill in progressively. Keep that "
         "structure in outline.sections: each section has a short stable id, a "
-        "title in the question's language, an optional parent (ONE nesting level "
-        "— a section whose parent is itself a child is flattened), and evidence = "
+        "title in the question's language, an optional parent (null or omitted "
+        "for a top-level section; ONE nesting level — a section whose parent is "
+        "itself a child is flattened), and evidence = "
         "the ids of candidates above that support it, copied exactly as they "
         "appear in (id=...). This call REPLACES the section structure: send every "
         "section you still want, every time; an omitted section is dropped. For a "
@@ -1290,11 +1293,17 @@ def expand_query_prompt(question: str, history_block: str = "", want_types: bool
     # preamble states that boundary); it is NOT a scope or search-channel
     # instruction, unlike the profile/experience blocks above it.
     style_section = f"{style_block}\n\n" if style_block else ""
+    # The closing example is the same constant the transport advertises as the
+    # schema hint, so the model never sees two different templates (audit B7).
+    # ``types`` / ``prefer`` are read only when this run asks for them; the
+    # prose says what to do with them either way. ``reason`` is optional.
     types_line = (
         "- types: which KG node types to search (subset of concept/claim/formula/"
-        "procedure; omit/empty = all). prefer: keyword|semantic|balanced.\n"
-        if want_types else "")
-    types_schema = ',"types":[],"prefer":"balanced"' if want_types else ""
+        "procedure; omit/empty = all). prefer: keyword|semantic|balanced. "
+        "reason: an optional one-line note.\n"
+        if want_types else
+        "- types and prefer are not used in this run: leave them as [] and "
+        "\"balanced\". reason: an optional one-line note.\n")
     langs = [l for l in (corpus_langs or ["zh", "en"]) if l] or ["zh", "en"]
     if len(langs) > 1:
         kw_langs_rule = (
@@ -1333,9 +1342,7 @@ def expand_query_prompt(question: str, history_block: str = "", want_types: bool
         f"{style_section}"
         f"{collection_section}"
         f"Question: {question}\n\n"
-        'Return JSON only: {"query":"","high_level_keywords":[],'
-        '"low_level_keywords":[],"sub_queries":[{"query":""' + types_schema + '}],'
-        '"comparison":{"focal":""}}'
+        f"Return JSON only: {EXPAND_SCHEMA_HINT}"
     )
 
 
@@ -1581,7 +1588,9 @@ def report_section_prompt(section_title: str, section_scope: str, question: str,
         "reuse those ids and do not invent replacements. Statements not covered by "
         "a commitment claim use fresh unique ids; never reuse a commitment id for a "
         "different statement. frame_assignments may use "
-        "only ids and values from the confirmed frame.\n\n"
+        "only ids and values from the confirmed frame, exactly ONE value per facet "
+        "as a string — a claim that spans several values states them in "
+        "conditions instead of listing them here.\n\n"
         f"Knowledge items (id: [type][tier] name — context):\n{context_block}\n\n"
         f"{structure_block}"
         f"Return JSON only: {REPORT_SECTION_SCHEMA_HINT}"
@@ -1755,16 +1764,18 @@ def report_sufficiency_prompt(question: str, probe_block: str, *,
         "base_hits is only a governance-tier count, NOT a separate proof of authority "
         "or sufficiency. Trust these signals as the ground truth of coverage; your job "
         "is to interpret them into a verdict + a one-line gap note + a suggested "
-        "action. Diverse relevant families may be sufficient; few/only-tangential "
-        "→ 薄弱(supplement, note what's missing); ~0 hits → 缺失(external, the library "
-        "cannot support it). Do not invent coverage the signals don't show. "
+        "action. Diverse relevant families may be sufficient → 充足(keep); "
+        "few/only-tangential → 薄弱(supplement, note what's missing); ~0 hits → "
+        "缺失(external, the library cannot support it). sufficiency must be exactly "
+        "one of 充足 / 薄弱 / 缺失 and action exactly one of keep / supplement / "
+        "external, as strings. Do not invent coverage the signals don't show. "
         f"The confirmed result scope is {result_scope}; completeness_required="
         f"{str(bool(completeness_required)).lower()}. For a completeness request, "
         "ranked retrieval is not enumeration and must be judged by the stricter "
         "coverage standard.\n\n"
         f"Report question: {question}\n\n"
         f"Sections with hit counts:\n{probe_block}\n\n"
-        'Return JSON only: {"verdicts":[{"title":"","sufficiency":"","gap_note":"","action":""}]}'
+        f"Return JSON only: {REPORT_SUFFICIENCY_SCHEMA_HINT}"
     )
 
 

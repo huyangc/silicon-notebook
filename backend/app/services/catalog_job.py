@@ -3909,7 +3909,11 @@ Rules:
   that name may be claimed without appearing here); if you cannot find it,
   leave the field empty rather than guessing.
 - Do not translate, expand or tidy any identifier.
-- `required` is true only when the source text says the parameter is required.
+- `required` is true only when the source text says the parameter is required;
+  write it as a JSON boolean (true/false), never as a quoted string.
+- `syntax`, `description`, `desc` and `default` are plain strings; when a value
+  is absent write "" (never null). `examples` is always an array of strings —
+  `[]` when there are none, `["one example"]` even for a single one.
 
 Return JSON only, matching: {_SCHEMA_HINT}
 
