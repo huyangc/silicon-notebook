@@ -78,6 +78,19 @@ from app.services.citation_markers import LOOSE_MARKER_RE, MARKER_RE, marker_key
 from app.services.evidence_context import anchor_image_targets
 from app.services.model_work import MalformedModelResponse, ModelNotConfiguredError
 
+
+def _answer_text(data: dict) -> str:
+    """The synthesis reply's ``answer`` as prose, or "" when it is not a string.
+
+    The shape boundary delivers off-type fields (reported, not rejected), so
+    a list/dict/number here must read as "no answer" — a bare ``str()`` would
+    turn ``[]`` into the non-empty text "[]", count as a successful synthesis,
+    skip the empty-content retry and publish container syntax as the answer
+    (codex #720 R2). Empty is what ``_answer_with_retry`` already handles.
+    """
+    value = data.get("answer") if isinstance(data, dict) else None
+    return value.strip() if isinstance(value, str) else ""
+
 # 待确认中心「进行中的提问」的推送入口(同步 Ask 路径)。``pending_bus`` 是叶子
 # 模块,模块级 import 不构成 import SCC。
 from app.services.pending_bus import publish_snapshot
@@ -2077,7 +2090,7 @@ class AskService:
         data = json.loads(raw)
         if not isinstance(data, dict):
             raise ValueError("answer did not return a JSON object")
-        answer = str(data.get("answer", "")).strip()
+        answer = _answer_text(data)
         llm_grounded = data.get("grounded", False) is True
         anchors = self._parse_answer_anchors(answer, id_map)
         return answer, llm_grounded, anchors
@@ -2135,7 +2148,7 @@ class AskService:
         data = json.loads(raw)
         if not isinstance(data, dict):
             raise ValueError("answer did not return a JSON object")
-        answer = str(data.get("answer", "")).strip()
+        answer = _answer_text(data)
         llm_grounded = data.get("grounded", False) is True
         anchors = self._parse_answer_anchors(answer, id_map)
         return answer, llm_grounded, anchors
@@ -2167,7 +2180,8 @@ class AskService:
             data = json.loads(raw)
             if not isinstance(data, dict):
                 return question
-            rewritten = str(data.get("query", "")).strip()
+            raw_query = data.get("query")
+            rewritten = raw_query.strip() if isinstance(raw_query, str) else ""
             return rewritten or question
         except AskCancelled:
             raise
@@ -2590,7 +2604,7 @@ class AskService:
         data = json.loads(raw)
         if not isinstance(data, dict):
             raise ValueError("answer did not return a JSON object")
-        answer = str(data.get("answer", "")).strip()
+        answer = _answer_text(data)
         llm_grounded = data.get("grounded", False) is True
         # 节模式:先按本节号段清洗正文,再解析锚点。
         #
@@ -2905,7 +2919,7 @@ class AskService:
                         )
                         data = json.loads(raw)
                         text = (render_document_guide(data, catalog) if intent.kind == "catalog" and isinstance(data.get("documents"), list) and data["documents"]
-                                else str(data.get("answer", "")).strip() if intent.kind != "catalog" else "")
+                                else _answer_text(data) if intent.kind != "catalog" else "")
                         return text, False, self._parse_answer_anchors(text, prepared.id_map)
                     answer, _, anchors, ok = self._answer_with_retry(
                         synthesize, getattr(client, "model", ""),

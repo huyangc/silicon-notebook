@@ -117,7 +117,10 @@ def verify_paper_meta(data: Dict[str, Any], head_text: str, model: str) -> Dict[
     head_text = head_text or ""
     head_norm = _norm(head_text)
     dropped: Dict[str, Any] = {}
-    is_paper = bool(data.get("is_paper"))
+    # Only a real JSON true counts: the shape boundary already coerces the
+    # spellings "true"/"false", so any other truthy value ("no", "unsure", a
+    # list) is a negative, never a paper (codex #720 R2).
+    is_paper = data.get("is_paper") is True
 
     title = str(data.get("title") or "").strip() or None
     if title and not grounded(title, head_norm):
