@@ -188,18 +188,23 @@ class MemoryStore:
     def list_agent_tokens(
         self, owner_id: str, offset: int = 0, limit: int = 100
     ) -> list[AgentTokenSummary]:
+        # 白名单与 token 行同一条语句读出:编辑器拿这份列表当 expected 前置条件,
+        # 分开读可能拼出一份从未存在过的配置(见 agent_token_auth_row)。
         with self.database.connect() as db:
             rows = db.execute(
-                "SELECT t.*,p.name AS profile_name FROM agent_access_tokens t "
+                "SELECT t.*,p.name AS profile_name,"
+                "(SELECT json_group_array(n.notebook_id) FROM agent_token_notebooks n "
+                "WHERE n.token_id=t.id) AS notebook_ids_json "
+                "FROM agent_access_tokens t "
                 "JOIN agent_profiles p ON p.id=t.agent_profile_id "
                 "WHERE p.owner_id=? ORDER BY t.created_at DESC,t.id DESC "
                 "LIMIT ? OFFSET ?",
                 (owner_id, limit, offset),
             ).fetchall()
-            return [
-                self._token(row, self._token_notebooks_on(db, row["id"]))
-                for row in rows
-            ]
+        return [
+            self._token(row, sorted(_json_list(row["notebook_ids_json"])))
+            for row in rows
+        ]
 
     def revoke_agent_token(
         self, token_id: str, owner_id: str
@@ -281,17 +286,22 @@ class MemoryStore:
         return self._token(row, notebooks)
 
     def agent_token_auth_row(self, token_id: str) -> dict[str, Any] | None:
+        # 一条语句读完整份访问配置:token 配置可原地修改(update_agent_token_access),
+        # 分两次读的话,修改恰好提交在两次读之间,鉴权会拿到「旧 scopes + 新白名单」
+        # 这种两份配置都没授权过的组合。单条 SELECT 在 SQLite 里读的是同一快照。
         with self.database.connect() as db:
             row = db.execute(
-                "SELECT t.*,p.owner_id,p.name AS profile_name,p.status AS profile_status "
+                "SELECT t.*,p.owner_id,p.name AS profile_name,p.status AS profile_status,"
+                "(SELECT json_group_array(n.notebook_id) FROM agent_token_notebooks n "
+                "WHERE n.token_id=t.id) AS notebook_ids_json "
                 "FROM agent_access_tokens t JOIN agent_profiles p "
                 "ON p.id=t.agent_profile_id WHERE t.id=?",
                 (token_id,),
             ).fetchone()
-            if row is None:
-                return None
-            result = dict(row)
-            result["notebook_ids"] = self._token_notebooks_on(db, token_id)
+        if row is None:
+            return None
+        result = dict(row)
+        result["notebook_ids"] = sorted(_json_list(result.pop("notebook_ids_json")))
         return result
 
     def touch_agent_token(
