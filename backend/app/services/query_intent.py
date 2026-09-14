@@ -283,6 +283,14 @@ def _accepted_scope(seed: dict) -> dict:
     scope = as_text(seed.get("result_scope")).lower()
     if scope not in RESULT_SCOPES or scope == "ranked":
         return {}
+    # Provenance without a wire field: if the ORIGINAL question's wording
+    # already yields a non-ranked scope, the seed scope came from wording the
+    # user may have just removed, so the edited wording is judged from
+    # scratch. Only a scope the wording could not have produced was the
+    # model's decision (codex #725 R2).
+    lexical_scope, _ = _result_scope({}, as_text(seed.get("objective")))
+    if lexical_scope != "ranked":
+        return {}
     return {"result_scope": scope, "completeness_required": True, "confidence": 1.0}
 
 

@@ -806,3 +806,14 @@ def test_confirmation_keeps_a_model_chosen_scope_unless_wording_overrides_it():
     capped = finalize_query_intent(seed, resolved_question="不需要所有文章，只给最相关的几篇")
     assert capped["result_scope"] == "ranked"
     assert capped["completeness_required"] is False
+
+
+def test_an_obsolete_lexical_scope_is_not_frozen_by_confirmation():
+    """codex #725 R2: a scope that came only from wording the user has since
+    removed ("列出所有方法" → "介绍常见方法") is re-judged from the new
+    wording; only a model-chosen scope is carried over."""
+    lexical_seed = plan_query_intent(None, "列出所有方法")
+    assert lexical_seed["result_scope"] == "complete"
+    edited = finalize_query_intent(lexical_seed, resolved_question="介绍常见方法")
+    assert edited["result_scope"] == "ranked"
+    assert edited["completeness_required"] is False
