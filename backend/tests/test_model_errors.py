@@ -117,6 +117,8 @@ def test_scheduled_ask_failure_has_safe_support_metadata_and_no_fake_answer(
         "model": "safe-model",
         "message": code,
         "support_id": "mdl-support-safe",
+        "detail": "",
+        "finish_reason": "",
     }
     assert response.answer == ""
     assert response.llm_mode == "synthesis_failed"

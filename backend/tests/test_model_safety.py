@@ -2,8 +2,10 @@ import pytest
 
 from app.core.model_safety import (
     safe_model_error_code,
+    safe_model_error_detail,
     safe_model_error_service,
     safe_model_error_stage,
+    safe_model_finish_reason,
     safe_model_label,
 )
 from app.models.schemas import ModelError
@@ -78,6 +80,38 @@ def test_model_error_metadata_uses_explicit_allowlists():
     assert safe_model_error_stage("private_diagnostic") == "model_call"
     assert safe_model_error_code("missing_config") == "missing_config"
     assert safe_model_error_code("RuntimeError: private response") == "upstream_error"
+    # Deployment-shaped rejections the provider classifies keep their code
+    # instead of collapsing to the generic upstream label.
+    for code in (
+        "unknown_model", "model_not_found", "model_rejected",
+        "protocol_mismatch", "unsupported_protocol",
+        "capability_mismatch", "unsupported_capability",
+    ):
+        assert safe_model_error_code(code) == code
+    # The malformed-response detail and finish_reason are closed sets that
+    # fail to "" — never to the raw value.
+    assert safe_model_error_detail("empty") == "empty"
+    assert safe_model_error_detail("missing_expected_key") == "missing_expected_key"
+    assert safe_model_error_detail("empty_answer") == "empty_answer"
+    assert safe_model_error_detail("Traceback: secret body") == ""
+    assert safe_model_error_detail(None) == ""
+    assert safe_model_finish_reason("length") == "length"
+    assert safe_model_finish_reason("stop") == "stop"
+    assert safe_model_finish_reason("vendor-private-reason") == ""
+
+
+def test_model_error_detail_only_survives_on_malformed_response():
+    typed = ModelError(
+        stage="answer", message="malformed_response",
+        detail="empty", finish_reason="length",
+    )
+    assert (typed.detail, typed.finish_reason) == ("empty", "length")
+    unsafe = ModelError(
+        stage="answer", message="malformed_response",
+        detail="RuntimeError: provider https://10.0.0.8 body",
+        finish_reason="Bearer sk-secret",
+    )
+    assert (unsafe.detail, unsafe.finish_reason) == ("", "")
 
 
 def test_model_error_schema_defaults_and_legacy_values_are_safe():
@@ -91,6 +125,8 @@ def test_model_error_schema_defaults_and_legacy_values_are_safe():
         "model": "",
         "message": "missing_config",
         "support_id": "",
+        "detail": "",
+        "finish_reason": "",
     }
 
     legacy = ModelError(
@@ -108,6 +144,8 @@ def test_model_error_schema_defaults_and_legacy_values_are_safe():
         "model": "",
         "message": "upstream_error",
         "support_id": "",
+        "detail": "",
+        "finish_reason": "",
     }
 
 

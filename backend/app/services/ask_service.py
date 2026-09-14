@@ -76,7 +76,7 @@ from app.models.knowledge import (
 from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
 from app.services.citation_markers import LOOSE_MARKER_RE, MARKER_RE, marker_keys
 from app.services.evidence_context import anchor_image_targets
-from app.services.model_work import ModelNotConfiguredError
+from app.services.model_work import MalformedModelResponse, ModelNotConfiguredError
 
 # 待确认中心「进行中的提问」的推送入口(同步 Ask 路径)。``pending_bus`` 是叶子
 # 模块,模块级 import 不构成 import SCC。
@@ -2246,7 +2246,9 @@ class AskService:
         sink = _ASK_MODEL_ERRORS.get()
         mark = len(sink) if sink is not None else None
         answer, grounded, anchors = "", False, []
+        last_raised = False
         for _ in range(2):
+            last_raised = False
             try:
                 answer, grounded, anchors = synth()
             except AskCancelled:
@@ -2256,6 +2258,7 @@ class AskService:
                     "answer", exc, workload_id="ask_answer"
                 )
                 answer, grounded, anchors = "", False, []
+                last_raised = True
             if answer:
                 if mark is not None:
                     # 只摘**本次调用自己**记下的那条 answer 报警,不是「mark 之后
@@ -2271,13 +2274,25 @@ class AskService:
                         if item.get("workload_id") != "ask_answer"
                     ]
                 return answer, grounded, anchors, True
-        self.model_errors.note_model_error(
-            "answer",
+        # 终态报警。最后一次尝试**没抛异常却答空**时带 reason="empty_answer":JSON
+        # 本身合规、只是 answer 为空,与「返回格式异常」是两种现象,前端按 detail
+        # 分别措辞;code 是 malformed_response(模型行为,不动熔断器)。服务身份由
+        # note_model_error 按 workload 从注册表补齐,横幅因此能说出是哪个模型两次
+        # 都答空。最后一次是抛异常收场时,现象已经由上面那条按异常记下的报警说清,
+        # 终态这条只保留「检索到却答不出」的事实,不把上游故障冒充成答空。
+        terminal: Exception = (
             RuntimeError(
+                "answer synthesis failed after retry (both attempts raised)"
+            )
+            if last_raised
+            else MalformedModelResponse(
                 "answer synthesis produced empty content after retry "
-                "(reasoning model likely spent output budget on discarded chain-of-thought)"
-            ),
-            workload_id="ask_answer",
+                "(reasoning model likely spent output budget on discarded chain-of-thought)",
+                reason="empty_answer",
+            )
+        )
+        self.model_errors.note_model_error(
+            "answer", terminal, workload_id="ask_answer"
         )
         return answer, grounded, anchors, False
 

@@ -31,7 +31,9 @@ from app.core.model_safety import (
     MODEL_ERROR_UPSTREAM,
     safe_model_display_name,
     safe_model_error_code,
+    safe_model_error_detail,
     safe_model_error_stage,
+    safe_model_finish_reason,
     safe_model_label,
     safe_model_metadata_id,
     safe_model_support_id,
@@ -116,6 +118,8 @@ class ModelInvocationError(ModelProviderError):
         code: str,
         support_id: str,
         status_code: int | None = None,
+        detail: str = "",
+        finish_reason: str = "",
     ) -> None:
         self.service_id = service.id
         self.service_name = service.display_name
@@ -123,6 +127,12 @@ class ModelInvocationError(ModelProviderError):
         self.workload_label = workload.display_label
         self.model = service.model
         self.support_id = support_id
+        # Closed-vocabulary refinement of ``code`` (today only for
+        # ``malformed_response``: the JSON-contract rejection reason) and the
+        # provider's finish_reason. Carried so the Ask payload can say WHAT
+        # went wrong with the reply, not merely that one was rejected.
+        self.detail = detail
+        self.finish_reason = finish_reason
         super().__init__(
             (
                 f"{self.service_name} / {self.workload_label} failed "
@@ -244,16 +254,16 @@ def _validate_json_object(content: Any) -> str:
     try:
         return parse_model_json_object(content, "", allow_repair=False).content
     except ModelJsonRepairError as exc:
-        raise MalformedModelResponse() from exc
+        raise MalformedModelResponse(reason=exc.reason) from exc
 
 
 def _validate_rerank_rows(rows: Any, document_count: int) -> list[dict]:
     if not isinstance(rows, list):
-        raise MalformedModelResponse()
+        raise MalformedModelResponse(reason="invalid_rerank_rows")
     normalized: list[dict] = []
     for row in rows:
         if not isinstance(row, dict):
-            raise MalformedModelResponse()
+            raise MalformedModelResponse(reason="invalid_rerank_rows")
         index = row.get("index")
         score = row.get("relevance_score", row.get("score"))
         if (
@@ -264,7 +274,7 @@ def _validate_rerank_rows(rows: Any, document_count: int) -> list[dict]:
             or isinstance(score, bool)
             or not math.isfinite(float(score))
         ):
-            raise MalformedModelResponse()
+            raise MalformedModelResponse(reason="invalid_rerank_rows")
         normalized.append({"index": index, "relevance_score": float(score)})
     return normalized
 
@@ -283,6 +293,10 @@ def _invocation_error(
         code=_stable_error_code(error),
         support_id=call.context.support_id,
         status_code=_status_code(error),
+        # Only MalformedModelResponse carries these; every other exception
+        # class yields "" and the payload validators keep it that way.
+        detail=str(getattr(error, "reason", "") or ""),
+        finish_reason=str(getattr(error, "finish_reason", "") or ""),
     )
 
 
@@ -575,6 +589,7 @@ class ScheduledJsonChatClient(_ScheduledAdapter):
                         status="rejected", reason=exc.reason
                     )
                 raise MalformedModelResponse(
+                    reason=exc.reason,
                     finish_reason=str(
                         (call_stats or {}).get("finish_reason") or "")
                 ) from exc
@@ -587,7 +602,7 @@ class ScheduledJsonChatClient(_ScheduledAdapter):
                 )
                 if repair_mode == "shadow":
                     rejection_reason = "repairable_shadow"
-                    raise MalformedModelResponse()
+                    raise MalformedModelResponse(reason=rejection_reason)
             return parsed.content
 
         call = self._submit(runtime, invoke, cancel_event=cancel_event)
@@ -1414,12 +1429,22 @@ class RuntimeModelProvider:
         exc: Exception = legacy_error or (
             error if isinstance(error, Exception) else RuntimeError("model call failed")
         )
+        # ``reason``/``finish_reason`` exist only on MalformedModelResponse and
+        # ModelInvocationError; every other class reads back "".
+        detail = safe_model_error_detail(
+            getattr(exc, "detail", "") or getattr(exc, "reason", "")
+        )
+        finish_reason = safe_model_finish_reason(
+            getattr(exc, "finish_reason", "")
+        )
         self.event_log.emit({
             "kind": "model_error",
             "stage": stage,
             "workload_id": workload_id,
             "model": raw_model,
             "error": f"{type(exc).__name__}: {exc}"[:300],
+            "detail": detail,
+            "finish_reason": finish_reason,
             "status": "error",
         })
         sink = _ASK_MODEL_ERRORS.get()
@@ -1441,29 +1466,52 @@ class RuntimeModelProvider:
                 )
             except KeyError:
                 workload_label = ""
+        # Physical identity. A typed error names the runtime it actually ran
+        # on. An untyped one (a consumer-side verdict such as the empty-answer
+        # terminal alarm, or a legacy embed/rerank site) is attributed to the
+        # service the registry currently BINDS to that workload — that binding
+        # is the authoritative routing fact, not a caller hint, so it is safe
+        # to show. When nothing is bound (offline runtime, test doubles bound
+        # around the registry) the identity stays blank rather than invented.
+        service_id = safe_model_metadata_id(getattr(typed, "service_id", ""))
+        service_name = safe_model_display_name(
+            getattr(typed, "service_name", "")
+        )
+        model = safe_model_label(getattr(typed, "model", ""))
+        if typed is None and resolved_workload_id:
+            bound = self.registry.service_for(resolved_workload_id)
+            if bound is not None:
+                service_id = safe_model_metadata_id(bound.id)
+                service_name = safe_model_display_name(bound.display_name)
+                model = safe_model_label(bound.model)
         raw_code = str(getattr(exc, "code", "") or "")
         if raw_code == "model_not_configured":
             code = MODEL_ERROR_MISSING_CONFIG
-        elif typed is not None or isinstance(exc, ModelSchedulingError):
+        elif (
+            typed is not None
+            or isinstance(exc, (ModelSchedulingError, ModelProviderError))
+        ):
+            # ModelProviderError subclasses carry a stable code of their own
+            # (malformed_response, provider_error, …); without this branch a
+            # consumer-raised MalformedModelResponse rendered as a generic
+            # "connection failed".
             code = safe_model_error_code(raw_code)
         else:
             code = MODEL_ERROR_UPSTREAM
         sink.append({
-            "service_id": safe_model_metadata_id(
-                getattr(typed, "service_id", "")
-            ),
-            "service_name": safe_model_display_name(
-                getattr(typed, "service_name", "")
-            ),
+            "service_id": service_id,
+            "service_name": service_name,
             "workload_id": resolved_workload_id,
             "workload_label": workload_label,
             "stage": safe_model_error_stage(stage),
-            "model": safe_model_label(getattr(typed, "model", "")),
+            "model": model,
             "message": code,
             "support_id": safe_model_support_id(
                 getattr(typed, "support_id", "")
                 or getattr(exc, "support_id", "")
             ),
+            "detail": detail if code == "malformed_response" else "",
+            "finish_reason": finish_reason,
         })
 
     def primary_unconfigured(self) -> bool:

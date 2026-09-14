@@ -6956,6 +6956,16 @@
         },
         "ModelError": {
           "properties": {
+            "detail": {
+              "default": "",
+              "title": "Detail",
+              "type": "string"
+            },
+            "finish_reason": {
+              "default": "",
+              "title": "Finish Reason",
+              "type": "string"
+            },
             "message": {
               "title": "Message",
               "type": "string"

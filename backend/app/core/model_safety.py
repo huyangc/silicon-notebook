@@ -19,6 +19,57 @@ _MODEL_ERROR_CODES = frozenset({
     "provider_error",
     "malformed_response",
     "model_not_configured",
+    # Deployment-shaped rejections the provider already classifies
+    # (``model_provider._stable_error_code``). They used to fall through
+    # to ``upstream_error`` here, so a wrong model name or an endpoint that
+    # speaks a different protocol rendered as a generic "connection failed".
+    "unknown_model",
+    "model_not_found",
+    "model_rejected",
+    "protocol_mismatch",
+    "unsupported_protocol",
+    "capability_mismatch",
+    "unsupported_capability",
+})
+# Why a ``malformed_response`` was rejected: the JSON-contract boundary's
+# ``ModelJsonRepairError.reason`` vocabulary (``core.model_json``), plus the
+# two consumer-side verdicts that reuse the same code. Closed set: the client
+# renders each value from a fixed label table and anything else collapses to
+# "" (unknown), so a future reason can never leak raw diagnostics.
+_MODEL_ERROR_DETAILS = frozenset({
+    # ``parse_model_json_object`` / repair
+    "empty",
+    "invalid_json",
+    "non_object",
+    "incomplete_object",
+    "unsupported_syntax",
+    "repair_failed",
+    "string_changed",
+    "serialization_failed",
+    "non_finite_number",
+    "non_string_key",
+    "non_json_value",
+    # ``validate_model_json_shape`` against the schema example
+    "missing_expected_key",
+    "invalid_type",
+    "invalid_boolean",
+    "invalid_enum",
+    "unknown_key",
+    # provider-side verdicts that are not parse reasons
+    "repairable_shadow",
+    "invalid_rerank_rows",
+    # answer synthesis: JSON was well-formed but ``answer`` stayed empty on
+    # both attempts (ask_service._answer_with_retry)
+    "empty_answer",
+})
+# Provider ``finish_reason`` values worth telling the user about. Only the
+# OpenAI-compatible vocabulary; anything else is treated as unknown.
+_MODEL_FINISH_REASONS = frozenset({
+    "stop",
+    "length",
+    "content_filter",
+    "tool_calls",
+    "function_call",
 })
 _MODEL_SERVICES = frozenset({
     "llm",
@@ -143,6 +194,16 @@ def safe_model_error_code(value: object) -> str:
         if isinstance(value, str) and value in _MODEL_ERROR_CODES
         else MODEL_ERROR_UPSTREAM
     )
+
+
+def safe_model_error_detail(value: object) -> str:
+    """Closed-set reason behind a ``malformed_response``; unknown → ""."""
+    return value if isinstance(value, str) and value in _MODEL_ERROR_DETAILS else ""
+
+
+def safe_model_finish_reason(value: object) -> str:
+    """Provider finish_reason from the closed OpenAI vocabulary; unknown → ""."""
+    return value if isinstance(value, str) and value in _MODEL_FINISH_REASONS else ""
 
 
 _SAFE_ID_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}\Z")

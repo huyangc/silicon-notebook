@@ -265,8 +265,17 @@ class MalformedModelResponse(ModelProviderError):
     def __init__(
         self, message: str = "malformed model response", *,
         finish_reason: str = "",
+        reason: str = "",
     ) -> None:
         super().__init__(message, code="malformed_response")
+        #: WHY the reply was rejected, in the closed vocabulary of
+        #: ``core.model_json.ModelJsonRepairError.reason`` plus the consumer
+        #: verdicts listed in ``core.model_safety._MODEL_ERROR_DETAILS``
+        #: ("empty", "invalid_json", "missing_expected_key", "empty_answer",
+        #: …). ``code`` stays the single ``malformed_response`` for breaker
+        #: and status purposes; this is what lets the answer banner say
+        #: "the model returned nothing" instead of "format error".
+        self.reason = reason
         #: The provider's own reason for ending this completion ("length",
         #: "stop", …), when the caller asked the transport for it. It is
         #: DIAGNOSTIC CONTEXT, never a code to branch the error class on: an

@@ -940,6 +940,8 @@
         "mode": "reasoning",
         "model_errors": [
           {
+            "detail": "",
+            "finish_reason": "",
             "message": "missing_config",
             "model": "",
             "service_id": "",
@@ -991,6 +993,8 @@
         "mode": "reasoning",
         "model_errors": [
           {
+            "detail": "",
+            "finish_reason": "",
             "message": "missing_config",
             "model": "",
             "service_id": "",
