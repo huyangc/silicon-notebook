@@ -70,6 +70,14 @@ ARXIV_ID_MAX_CHARS = 64
 # the paper actually has. See `_authors` below.
 MAX_AUTHORS = 20
 
+# What this upstream is CALLED, wherever one of its records is put in front of
+# a person or a model: the gap suggestion's source badge and the reflect
+# action's `[external · arXiv]` citation label are the same word, and they must
+# stay the same word.  It lives beside the parser rather than in either
+# adapter because it is a fact about the upstream — an in-house variant that
+# replaces this module and `.client` replaces the name along with them.
+SOURCE_LABEL = "arXiv"
+
 _ABS_BASE = "https://arxiv.org/abs/"
 _PDF_BASE = "https://arxiv.org/pdf/"
 _INSECURE_PREFIX = "http://"

@@ -19,15 +19,11 @@ not a politeness slot, not a round trip, not a term scan.  In order:
 5. not enough of the deadline left to finish inside it;
 6. the request itself.
 
-**Step 5 is the one that is easy to get wrong.**  ``acquire_slot`` may sleep up
-to the budget it is given, and the HTTP call may then take up to
-``timeout_seconds``.  A budget of "everything that is left" therefore returns an
-answer exactly *on* the deadline — and core's join loop re-reads the deadline on
-every 50 ms slice, so an answer that lands on it is read by nobody.  The gate
-below refuses unless a *worst case* fits: a full politeness interval, a full
-timeout, and a margin for the return trip.  The budget handed to the throttle
-then subtracts the timeout and the margin back out, so the two agree by
-construction.
+**Step 5 is the one that is easy to get wrong**, and it is not written here:
+``settings.deadline_budget`` owns it, because the reflect-action contributor
+(:mod:`.reflect_search`) runs under a second core host with the same join-loop
+shape and has to answer the same question.  Read that function for why a
+budget of "everything that is left" is an answer nobody reads.
 
 The visible consequence, and it is the intended one: with this plugin's own
 defaults (3 s politeness, 10 s timeout) and core's default 4 s gap-consult
@@ -45,7 +41,6 @@ sufficient.
 """
 from __future__ import annotations
 
-import re
 import time
 from collections.abc import Callable
 
@@ -62,40 +57,14 @@ from app.extension_sdk import (
 )
 
 from . import client as arxiv_client
-from .atom import ArxivPaper
-from .settings import ArxivSearchSettings, egress_allowed, search_kwargs
-
-# Plugin-private bounds; registered for operators in the package README.
-#
-# The margin covers everything between "the response bytes arrived" and "core
-# read the return value": parsing the feed, mapping it, and the up-to-50 ms
-# slice core's join loop is sleeping in when the worker finishes.
-CONSULT_RETURN_MARGIN_SECONDS = 0.25
-SOURCE_LABEL = "arXiv"
-
-# A Latin word of two or more characters, allowing the punctuation that shows
-# up inside real identifiers (``GPT-4``, ``C++``, ``e.g``).
-_LATIN_TERM = re.compile(r"[A-Za-z][A-Za-z0-9+.#-]+")
-_TERM_EDGE = ".-+#"
-
-# English function words carry no retrieval signal and would crowd out the
-# terms that do, since the query is capped at ``MAX_QUERY_TERMS``.  Kept small
-# and plugin-private on purpose: this is a keyword extractor for one upstream,
-# not a linguistics contribution.
-_STOPWORDS = frozenset(
-    {
-        "about", "after", "all", "also", "and", "any", "are", "based", "been",
-        "before", "being", "between", "both", "but", "can", "could", "did",
-        "does", "doing", "done", "each", "even", "for", "from", "had", "has",
-        "have", "how", "into", "its", "just", "may", "might", "more", "most",
-        "much", "must", "not", "now", "one", "only", "other", "our", "out",
-        "over", "same", "should", "since", "some", "such", "than", "that",
-        "the", "their", "them", "then", "there", "these", "they", "this",
-        "those", "through", "under", "use", "used", "using", "very", "was",
-        "were", "what", "when", "where", "which", "while", "who", "why",
-        "will", "with", "would", "you", "your",
-    }
+from .atom import SOURCE_LABEL, ArxivPaper
+from .settings import (
+    ArxivSearchSettings,
+    deadline_budget,
+    egress_allowed,
+    search_kwargs,
 )
+from .terms import latin_terms
 
 
 class ArxivGapConsultContributor:
@@ -172,17 +141,13 @@ class ArxivGapConsultContributor:
                 ExtensionFailureKind.UNAVAILABLE, "arxiv_no_latin_terms"
             )
 
-        remaining = context.deadline_monotonic - time.monotonic()
-        floor = (
-            settings.politeness_interval_seconds
-            + settings.timeout_seconds
-            + CONSULT_RETURN_MARGIN_SECONDS
+        budget = deadline_budget(
+            settings, context.deadline_monotonic, now=time.monotonic()
         )
-        if remaining < floor:
+        if budget is None:
             return _unavailable(
                 ExtensionFailureKind.UNAVAILABLE, "arxiv_budget_too_small"
             )
-        budget = remaining - settings.timeout_seconds - CONSULT_RETURN_MARGIN_SECONDS
 
         try:
             papers = arxiv_client.search(
@@ -263,19 +228,11 @@ def _query_terms(query: GapConsultQuery) -> tuple[str, ...]:
     term of art the retrieval never covered, and a question full of ordinary
     English words can be carried by a single gap phrase naming the method.
     Dropping either half throws away the case the other one cannot serve.
+
+    Which strings to scan is this contributor's decision and stays here; *how*
+    a string yields terms belongs to :func:`.terms.latin_terms`, shared with
+    the reflect-action contributor — see that module for why the scan itself
+    must not exist twice.
     """
 
-    seen: set[str] = set()
-    terms: list[str] = []
-    for text in (query.question, *query.gaps):
-        if not isinstance(text, str):
-            continue
-        for match in _LATIN_TERM.finditer(text):
-            term = match.group(0).strip(_TERM_EDGE).lower()
-            if len(term) < 2 or term in _STOPWORDS or term in seen:
-                continue
-            seen.add(term)
-            terms.append(term)
-            if len(terms) >= arxiv_client.MAX_QUERY_TERMS:
-                return tuple(terms)
-    return tuple(terms)
+    return latin_terms(query.question, *query.gaps)

@@ -15,6 +15,13 @@ This document is written for the operator who enables it, not for someone
 extending the sample's own code — for that, read the source docstrings and
 the SOP.
 
+It now demonstrates **three** backend extension points, each gated on its own:
+an HTTP router (`plugin.http_router`, the human-driven search and import
+panel), a gap-consultation contributor (`ask.gap_consult`), and a reflect
+action (`ask.reflect_action`) — a function the plugin lends to the reasoning
+Ask retrieval agent, which the model itself may decide to call mid-run. The
+last two are outbound and both ship **off**; see §4.1 and §4.7.
+
 ## 0. UI sample shape
 
 The sample panel now uses the shared UI kit exported from
@@ -67,6 +74,8 @@ failure, not a silently ignored line.
 | `user_agent` | `silicon-notebook-arxiv-sample/0.1 (+https://arxiv.org/help/api)` | Non-empty, no control characters. Fail-fast at startup otherwise. |
 | `consult_enabled` | `false` | Boolean |
 | `consult_max_suggestions` | `3` | Integer, `1`–`5` |
+| `reflect_search_enabled` | `false` | Boolean |
+| `reflect_search_max_items` | `3` | Integer, `1`–`5` |
 
 `base_url` and `user_agent` are validated at startup (absolute `http(s)`
 with no query/fragment; non-blank with no control characters) — both values
@@ -100,7 +109,7 @@ registered instead.
 | `MAX_IMPORT_URLS` | 20 | `routes.py` | Per `/import` request |
 | `MAX_URL_CHARS` | 2048 | `routes.py` | Per URL in an import batch |
 | `START_MAX` | 10,000 | `routes.py` | Paging ceiling |
-| `CONSULT_RETURN_MARGIN_SECONDS` | 0.25 | `consult.py` | See §4.1 |
+| `RETURN_MARGIN_SECONDS` | 0.25 | `settings.py` | Shared by both outbound features — see §4.1 and §4.7 |
 
 `TITLE_MAX_CHARS`/`SUMMARY_MAX_CHARS` used to be pinned to the same values as
 core's own `GAP_SUGGESTION_TITLE_MAX_CHARS`/`GAP_SUGGESTION_SUMMARY_MAX_CHARS`
@@ -129,11 +138,11 @@ button and shows the same message once the box holds more than 8 words. The
 ninth word onward is **not** silently dropped: `build_query_url`'s own
 `query.split()[:MAX_QUERY_TERMS]` slice still exists, but only as defence in
 depth for a caller that reaches it directly — the route already refused any
-input the slice would have had to truncate, and gap-consult's own term
-extractor (`consult.py::_query_terms`) already bounds itself to
+input the slice would have had to truncate, and the shared term extractor both
+outbound features use (`terms.py::latin_terms`) already bounds itself to
 `MAX_QUERY_TERMS` terms before calling in, because its query is a handful of
-terms this plugin derived from the question and gap phrases, not user-edited
-text passed straight through.
+terms this plugin derived from the question, the gap phrases or the model's own
+argument, not user-edited text passed straight through.
 
 **`QUERY_MAX_CHARS` is the same story, one layer earlier (P2-3).**
 `routes.py::search` checks a query's *length* — in Unicode code points —
@@ -171,7 +180,7 @@ the entire `ask.gap_consult` extension point,
 finish inside that deadline is:
 
 ```
-politeness_interval_seconds + timeout_seconds + CONSULT_RETURN_MARGIN_SECONDS
+politeness_interval_seconds + timeout_seconds + RETURN_MARGIN_SECONDS
 = 3.0 + 10.0 + 0.25 = 13.25 seconds
 ```
 
@@ -188,7 +197,7 @@ so starting a request that cannot possibly finish in time is pure waste.
 
 The term-extraction pass scans the **question wording plus every gap
 phrase** together for Latin-alphabet search terms
-(`consult.py::_query_terms`). If none can be found at all, consultation
+(`consult.py::_query_terms`, over the shared `terms.py::latin_terms`). If none can be found at all, consultation
 returns a stable code (`arxiv_no_latin_terms`) with **zero network calls and
 zero politeness-slot usage** — never even attempting a request. The
 reasoning is that arXiv is a Latin-keyword index, so a question written
@@ -288,6 +297,54 @@ to `*.<mirror>` would let a caller import `<mirror>.evil.example` on the
 strength of a deployment's own configuration, so `sub.<mirror>` is refused
 the same as any other foreign host.
 
+### 4.7 Two settings, not one, for the reflect search action either
+
+`reflect_search_enabled = true` by itself is **not enough**, for exactly the
+reason §4.1 gives about consultation and with different numbers. Core places
+one hard deadline on each `ask.reflect_action` call,
+`REASONING_PLUGIN_ACTION_TIMEOUT_SECONDS` (default **8.0** seconds, shared by
+the availability probe and the call itself), and this plugin refuses to start
+a request it cannot finish inside it:
+
+```
+politeness_interval_seconds + timeout_seconds + RETURN_MARGIN_SECONDS
+= 3.0 + 10.0 + 0.25 = 13.25 seconds
+```
+
+Against an 8-second deadline the action is **not offered to the model at
+all**: the plugin's own availability probe runs this same arithmetic against
+core's deadline and answers DISABLED with the reason code
+`reflect_budget_too_small`, which core records on its own extension event. That
+is deliberate — offering a function that would then refuse every call spends
+the model's attention, and a slot of the run's action budget, on a channel that
+cannot work. To actually enable it you must **also** raise
+`REASONING_PLUGIN_ACTION_TIMEOUT_SECONDS` past 13.25 (the setting declares no
+upper bound, unlike `ASK_GAP_CONSULT_TIMEOUT_SECONDS`'s ceiling of 30 — but
+every second of it is a second a reader waits mid-answer), or lower
+`timeout_seconds` / `politeness_interval_seconds` far enough to fit
+underneath. Separately, `REASONING_MAX_PLUGIN_ACTIONS = 0` is core's own kill
+switch for the whole extension point and overrides anything in this plugin's
+TOML.
+
+### 4.8 The reflect action reads the model's `query` argument and nothing else
+
+When the model calls `search_arxiv`, the only text this plugin sends outward is
+the `query` argument the model itself wrote. It does **not** fall back to the
+question the reader typed, even though core hands that string over in the same
+call context: a fallback would mean the plugin sending text the model did not
+choose to send, on a call the model believed it was scoping itself. (Core
+records that argument verbatim in the run's `plugin_action` trace step, so the
+person who asked can always read exactly what left the deployment.)
+
+The consequence is the same Latin-index consequence §4.2 registers for
+consultation, one step earlier in the chain: a `query` with no Latin-alphabet
+word in it is refused with the stable code `arxiv_no_latin_terms`, before any
+network call and without spending a politeness slot. A model working in a
+Chinese notebook that types a Chinese `query` therefore gets nothing back and
+sees a skip step; the action's own description tells it to write English
+keywords, but nothing forces it to, and this plugin will not translate on its
+behalf.
+
 ## 5. Other registered limitations
 
 - **XML entity expansion.** `xml.etree` parses through libexpat, which has
@@ -312,7 +369,7 @@ the same as any other foreign host.
   for how a plugin that does need one should reference a secret by
   environment-variable name.
 
-## 6. What the two entry points each demonstrate
+## 6. What the three entry points each demonstrate
 
 1. **Human-driven search and import.** Side-panel entry → search dialog →
    select results → the plugin's **own** `/import` route → core's URL
@@ -324,14 +381,23 @@ the same as any other foreign host.
    installed plugins for pointers outside the notebook. The import button
    on the resulting suggestion card is **core's own UI, calling core's own
    endpoint** — it does not go through this plugin at all.
+3. **A function the model may call.** Core's `ask.reflect_action` point
+   projects `search_arxiv`, its description and its `query` parameter into
+   the reasoning-Ask reflect prompt, schema and action whitelist once a run
+   has already come back empty from the library. The model decides whether
+   to call it and what to type; what comes back enters synthesis as external
+   evidence, citable with `[k]` and rendered with an 「外部」 label, an open-link
+   action and the same import-as-source button a gap suggestion offers.
 
-**Two separate capability gates, not one.** `manifest.provides`'s
+**Three separate capability gates, not one.** `manifest.provides`'s
 capability only gates the side-panel entry ("is this plugin configured at
 all"). Outbound gap consultation is gated **separately**, per-contribution,
 by `ArxivGapConsultContributor`'s own availability probe ("has this
-deployment agreed to let it reach out to arXiv on its own"). Turning
-consultation off leaves the search panel and the import route exactly as
-they were.
+deployment agreed to let it reach out to arXiv on its own"), and the reflect
+action is gated by a third probe of its own
+(`ArxivReflectSearchAction.reflect_search_enabled`). Turning either outbound
+feature off leaves the search panel, the import route and the other outbound
+feature exactly as they were.
 
 ## 7. G2 lane and recovery
 

@@ -743,7 +743,7 @@ This repository ships one complete, **off-by-default** sample deployment plugin 
 
 It exists for two jobs at once:
 
-1. **A runnable example of this SOP.** It uses the same seams §3 and §4 describe, in the same order: a backend bundle with a settings model and two capability gates (§3.1–§3.3), an HTTP router with core's own notebook gates (§3.4), a `GapConsultContributor` (§3.5, §3.6), and a flat build-time UI package with one `workspace.side_panel` entry (§4).
+1. **A runnable example of this SOP.** It uses the same seams §3 and §4 describe, in the same order: a backend bundle with a settings model and three capability gates (§3.1–§3.3), an HTTP router with core's own notebook gates (§3.4), a `GapConsultContributor` and a `ReflectActionContributor` (§3.5, §3.6), and a flat build-time UI package with one `workspace.side_panel` entry (§4).
 2. **A machine-checked proof that a plugin needs no patch to the public tree.** `backend/tests/test_arxiv_sample_plugin_e2e.py::test_the_package_runs_from_outside_the_repository` copies the whole package to a temporary directory, puts only that copy on `sys.path`, boots a real application against a TOML naming it, and asserts every imported module's `__file__` is under the copy.
 
 ### What it demonstrates
@@ -752,12 +752,13 @@ It exists for two jobs at once:
 | --- | --- | --- |
 | Human-driven search and import | Side-panel entry → dialog → the plugin's own `POST /import` route → core's URL import port | A plugin route delegating to a core port that authorizes the request's own user |
 | Agent-triggered gap consultation | Core's `ask.gap_consult` point asks the plugin for pointers outside the notebook | A `GapConsultContributor` under a hard deadline, gated separately from the panel |
+| Model-chosen reflect action | Core's `ask.reflect_action` point offers `search_arxiv` to the retrieval agent | A `ReflectActionContributor` under the reasoning host's deadline, gated separately again by `reflect_search_enabled` |
 
-The two capability gates are deliberately different objects, and that is the sample's main teaching point about §3.3: `manifest.provides`'s capability gates only the side-panel entry ("is this plugin configured?"), while outbound consultation is gated per contribution through `ExtensionContribution.availability` ("has this deployment agreed to let it reach a third party?"). Turning consultation off leaves the panel and the import route untouched. `manifest.requires` is empty, and the sample's own comments record why.
+The three capability gates are deliberately different objects, and that is the sample's main teaching point about §3.3: `manifest.provides`'s capability gates only the side-panel entry ("is this plugin configured?"), while each outbound feature is gated per contribution through `ExtensionContribution.availability` ("has this deployment agreed to let it reach a third party?") — consultation by one probe, the reflect action by another, because they are two decisions a deployment makes one at a time. Turning either off leaves the panel, the import route and the other outbound feature untouched. `manifest.requires` is empty, and the sample's own comments record why.
 
 ### Where its numbers are registered
 
-The sample's private limits — the politeness interval, page size, timeouts, query-term cap, import batch cap, suggestion cap and the consult return margin — are registered in **its own README pair**, `examples/extensions/arxiv-search/README.md` / `README_zh.md`, not in `docs/product-and-api*.md`. That pair registers core rails; a sample plugin's own numbers are not core rails, and putting them there would imply this build enforces them. The README pair is also where the sample's registered limitations live (the per-process throttle, the socket-level timeout, the XML entity-expansion note, and the fact that enabling gap consultation takes two settings rather than one).
+The sample's private limits — the politeness interval, page size, timeouts, query-term cap, import batch cap, suggestion cap, reflect-action item cap and the shared return margin — are registered in **its own README pair**, `examples/extensions/arxiv-search/README.md` / `README_zh.md`, not in `docs/product-and-api*.md`. That pair registers core rails; a sample plugin's own numbers are not core rails, and putting them there would imply this build enforces them. The README pair is also where the sample's registered limitations live (the per-process throttle, the socket-level timeout, the XML entity-expansion note, and the fact that enabling gap consultation — or the reflect action — takes two settings rather than one).
 
 ### Two ways it deliberately differs from a real out-of-tree plugin
 

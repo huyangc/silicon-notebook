@@ -60,6 +60,23 @@ from tests.test_extension_discovery import (
     _plugin_import_isolation,  # noqa: F401 -- autouse pytest fixture, resolved by name
     frozen_runtime_reset,  # noqa: F401 -- pytest fixture, resolved by name
 )
+# The reflect-loop half of the run below is core's, and core already owns a
+# test kit for driving it through the production validation gates:
+# ``_ValidatingLLM`` replays a scripted reflect payload through
+# ``_validate_against_example`` (so an action the validator would reject is not
+# an action this sample can claim the model may call), ``DRY_TURN`` is the
+# in-library turn that opens the per-turn gate, and ``_retriever`` / ``_run`` /
+# ``_seed`` build the run.  Imported rather than copied: a second copy of that
+# harness here would drift from the contract it is supposed to be exercising.
+from tests.test_reasoning_plugin_action import (  # noqa: E402
+    DRY_TURN,
+    _retriever,
+    _run,
+    _seed,
+    _steps,
+    _ValidatingLLM,
+    repo,  # noqa: F401 -- pytest fixture, resolved by name
+)
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _PLUGIN_ROOT = _REPO_ROOT / "examples" / "extensions" / "arxiv-search"
@@ -167,12 +184,20 @@ def _clear_caches() -> None:
     deps.repository.cache_clear()
 
 
-def _config_text(*, consult_enabled: bool) -> str:
+def _config_text(
+    *,
+    consult_enabled: bool,
+    reflect_search_enabled: bool = False,
+    timeout_seconds: float | None = None,
+) -> str:
     # `politeness_interval_seconds = 0.0` is the one production default this
     # file deviates from, and only because honouring three seconds between
     # requests would make the suite sleep for no assertion's benefit. The
     # throttle itself is pinned by the unit tests; what is under test here is
     # the wiring around it.
+    timeout_line = (
+        "" if timeout_seconds is None else f"timeout_seconds = {timeout_seconds}\n"
+    )
     return textwrap.dedent(
         f"""
         [extensions."{_PLUGIN_ID}"]
@@ -184,8 +209,9 @@ def _config_text(*, consult_enabled: bool) -> str:
         max_results = 2
         politeness_interval_seconds = 0.0
         consult_enabled = {"true" if consult_enabled else "false"}
+        reflect_search_enabled = {"true" if reflect_search_enabled else "false"}
         """
-    ).lstrip()
+    ).lstrip() + timeout_line
 
 
 def _configure(
@@ -193,6 +219,8 @@ def _configure(
     monkeypatch,
     *,
     consult_enabled: bool = True,
+    reflect_search_enabled: bool = False,
+    timeout_seconds: float | None = None,
     src: Path | None = None,
 ) -> None:
     """Write a real TOML, point ``EXTENSIONS_CONFIG`` at it, clear the caches.
@@ -215,7 +243,14 @@ def _configure(
         importlib.invalidate_caches()
 
     config = tmp_path / "extensions.toml"
-    config.write_text(_config_text(consult_enabled=consult_enabled), encoding="utf-8")
+    config.write_text(
+        _config_text(
+            consult_enabled=consult_enabled,
+            reflect_search_enabled=reflect_search_enabled,
+            timeout_seconds=timeout_seconds,
+        ),
+        encoding="utf-8",
+    )
     monkeypatch.setenv("EXTENSIONS_CONFIG", str(config))
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path}/t.db")
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
@@ -288,6 +323,35 @@ def _gap_host():
     from app.extensions.bootstrap import default_extension_runtime
 
     return default_extension_runtime().gap_consult
+
+
+def _reflect_host():
+    from app.extensions.bootstrap import default_extension_runtime
+
+    return default_extension_runtime().reflect_actions
+
+
+def _configure_for_reflect(tmp_path, monkeypatch, *, enabled: bool = True) -> None:
+    """Load the plugin with the reflect action on and a deadline it can fit.
+
+    ``timeout_seconds`` is lowered here for the same reason
+    ``_GAP_CONSULT_TIMEOUT`` is raised above, from the other end: core's
+    reflect-action deadline is ``REASONING_PLUGIN_ACTION_TIMEOUT_SECONDS``
+    (default 8.0s) and this plugin's shipped worst case is 13.25s, so with the
+    defaults the plugin's own availability probe answers
+    ``reflect_budget_too_small`` and the action is never offered to the model
+    at all.  A deployment picks one end or the other; this file picks the
+    plugin's, because the reasoning run below reads core's setting from its own
+    ``Settings`` snapshot rather than from this file's environment.
+    """
+
+    _configure(
+        tmp_path,
+        monkeypatch,
+        consult_enabled=False,
+        reflect_search_enabled=enabled,
+        timeout_seconds=1.0,
+    )
 
 
 def _stub_ingestion(monkeypatch) -> None:
@@ -620,7 +684,15 @@ def test_the_package_runs_from_outside_the_repository(
 
     # What was actually imported, and from where.
     copy_root = str(outside)
-    for module_name in (_PACKAGE, f"{_PACKAGE}.bundle", f"{_PACKAGE}.client"):
+    for module_name in (
+        _PACKAGE,
+        f"{_PACKAGE}.bundle",
+        f"{_PACKAGE}.client",
+        # The two modules PR-B added travel with the package or the claim is
+        # only true of the half that existed before them.
+        f"{_PACKAGE}.reflect_search",
+        f"{_PACKAGE}.terms",
+    ):
         loaded = sys.modules[module_name]
         assert loaded.__file__ is not None
         assert loaded.__file__.startswith(copy_root), (
@@ -663,3 +735,113 @@ def test_no_network_is_dialled(tmp_path, monkeypatch, frozen_runtime_reset):
 
     assert response.status_code == 200, response.text
     assert len(spy.calls) == 1
+
+
+# --------------------------------------------------------------------------
+# The reflect search action, through the frozen host and a real reflect loop
+# --------------------------------------------------------------------------
+
+
+#: What the scripted model writes when it decides to call this plugin's action.
+#: The nested object is keyed by the action name, which is the descriptor's own
+#: ``name`` — so a rename in ``reflect_search.py`` that missed the projection
+#: would fail the shape gate here rather than silently stop being callable.
+_ARXIV_TURN = {
+    "next_action": "search_arxiv",
+    "reason": "库内没有这方面的材料",
+    "search_arxiv": {"query": "retrieval augmented generation"},
+}
+
+
+def test_the_reflect_action_reaches_the_answer_as_external_evidence(
+    tmp_path, monkeypatch, frozen_runtime_reset, repo  # noqa: F811
+):
+    """The whole chain: TOML → frozen host → reflect loop → external evidence.
+
+    Everything except the socket is real here — real discovery, the real frozen
+    ``ReflectActionHost`` out of the runtime, the real ``ReasoningRetriever``
+    and the real per-turn gate.  The model is scripted, because "which action a
+    model chooses" is not this plugin's contract; what it does with the choice
+    is.
+    """
+
+    _configure_for_reflect(tmp_path, monkeypatch)
+    host = _reflect_host()
+    spy = _install_fetch_spy(monkeypatch, _SAMPLE_FEED.read_bytes())
+
+    llm = _ValidatingLLM([DRY_TURN, _ARXIV_TURN, DRY_TURN])
+    retriever, limits = _retriever(repo, llm, host=host)
+    result = _run(retriever, _seed(repo), limits)
+
+    # One round trip, carrying this deployment's own endpoint and user agent —
+    # the settings binding is the real one, not a default.
+    assert len(spy.calls) == 1
+    url, timeout, user_agent = spy.calls[0]
+    assert url.startswith(_BASE_URL + "?")
+    assert timeout == 1.0
+    assert user_agent.startswith("silicon-notebook-arxiv-sample/")
+
+    # The material landed as external evidence with core-minted keys.
+    assert [item.source_label for item in result.external_evidence] == [
+        "arXiv", "arXiv"
+    ]
+    assert [item.action for item in result.external_evidence] == [
+        "search_arxiv", "search_arxiv"
+    ]
+    assert [item.key for item in result.external_evidence] == [
+        f"ext:{_PLUGIN_ID}:1", f"ext:{_PLUGIN_ID}:2"
+    ]
+    for item in result.external_evidence:
+        assert item.url.startswith("https://arxiv.org/pdf/")
+        assert item.excerpt
+        assert item.location_label.startswith("arXiv:")
+
+    # The trace step the front end renders, and the verbatim argument
+    # disclosure that is this feature's transparency mechanism.
+    (step,) = _steps(result, "plugin_action")
+    assert step.detail["found"] == 2
+    assert step.detail["plugin_id"] == _PLUGIN_ID
+    assert step.detail["action"] == "search_arxiv"
+    assert step.detail["arguments"] == {
+        "query": "retrieval augmented generation"
+    }
+
+    # And the next reflect turn really saw it, under the label core promises in
+    # the prompt — the same three-place word this plugin's ``source_label``
+    # feeds.
+    third = llm.reflect_prompts[2]
+    assert "[External evidence]" in third
+    assert "[external · arXiv]" in third
+    assert "[External evidence]" not in llm.reflect_prompts[1]
+
+
+def test_the_reflect_action_is_not_offered_at_all_when_disabled(
+    tmp_path, monkeypatch, frozen_runtime_reset, repo  # noqa: F811
+):
+    """``reflect_search_enabled = false`` removes it from the prompt entirely.
+
+    Not "offered and then refused": the contribution's own probe answers
+    DISABLED, the host leaves it out of ``specs()``, and the reflect prompt and
+    schema go back to byte-for-byte what a deployment with no such plugin sees.
+    The plugin is still loaded — the router still answers and the host still
+    reports a registered contribution — which is what makes this a gate rather
+    than an absence.
+    """
+
+    _configure_for_reflect(tmp_path, monkeypatch, enabled=False)
+    host = _reflect_host()
+    spy = _install_fetch_spy(monkeypatch, _SAMPLE_FEED.read_bytes())
+
+    llm = _ValidatingLLM([DRY_TURN, DRY_TURN])
+    retriever, limits = _retriever(repo, llm, host=host)
+    result = _run(retriever, _seed(repo), limits)
+
+    assert spy.calls == []
+    assert result.external_evidence == []
+    assert _steps(result, "plugin_action") == []
+    assert all("search_arxiv" not in hint for hint in llm.schema_hints)
+    assert all("search_arxiv" not in prompt for prompt in llm.reflect_prompts)
+
+    # Loaded, not absent: the topology still carries the contribution, it is
+    # only unavailable.
+    assert host.has_contributions() is True

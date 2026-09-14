@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import json
 import logging
 import re
 import sys
@@ -32,6 +33,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
@@ -51,12 +53,19 @@ from app.domain.extension_http import (
 )
 from app.extension_sdk import (
     AvailabilityStatus,
+    EXTERNAL_EVIDENCE_EXCERPT_MAX_CHARS,
+    EXTERNAL_EVIDENCE_LOCATION_LABEL_MAX_CHARS,
+    EXTERNAL_EVIDENCE_TITLE_MAX_CHARS,
     ExtensionResultStatus,
     GAP_SUGGESTION_SUMMARY_MAX_CHARS,
     GAP_SUGGESTION_TITLE_MAX_CHARS,
     GapConsultExtensionContext,
     GapConsultQuery,
+    REFLECT_ACTION_NOTE_MAX_CHARS,
+    ReflectActionAvailabilityContext,
+    ReflectActionCallContext,
 )
+from app.extensions.bootstrap import build_extension_runtime
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _PLUGIN_ROOT = _REPO_ROOT / "examples" / "extensions" / "arxiv-search"
@@ -69,7 +78,12 @@ from silicon_notebook_arxiv_search import atom as arxiv_atom  # noqa: E402
 from silicon_notebook_arxiv_search import bundle as arxiv_bundle  # noqa: E402
 from silicon_notebook_arxiv_search import client as arxiv_client  # noqa: E402
 from silicon_notebook_arxiv_search import consult as arxiv_consult  # noqa: E402
+from silicon_notebook_arxiv_search import (  # noqa: E402
+    reflect_search as arxiv_reflect_search,
+)
 from silicon_notebook_arxiv_search import routes as arxiv_routes  # noqa: E402
+from silicon_notebook_arxiv_search import settings as arxiv_settings  # noqa: E402
+from silicon_notebook_arxiv_search import terms as arxiv_terms  # noqa: E402
 from silicon_notebook_arxiv_search.bundle import (  # noqa: E402
     AVAILABLE_CAPABILITY,
     PLUGIN_ID,
@@ -378,7 +392,7 @@ def test_arxiv_id_over_the_length_ceiling_is_dropped():
 
 
 def test_pure_layer_cannot_reach_the_backend():
-    """Neither ``atom`` nor ``client`` may import anything under ``app.``.
+    """Neither ``atom``, ``client`` nor ``terms`` may import anything under ``app.``.
 
     ``test_parser_performs_no_io`` above already whitelists ``atom``'s exact
     import set and is left untouched; this is a separate, narrower assertion
@@ -387,7 +401,7 @@ def test_pure_layer_cannot_reach_the_backend():
     author reaching for ``app.*`` for its side effects without ever calling
     into it, which a behavioural "no I/O happens" test cannot see at all.
     """
-    for module in (arxiv_atom, arxiv_client):
+    for module in (arxiv_atom, arxiv_client, arxiv_terms):
         tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
         imported: set[str] = set()
         for node in ast.walk(tree):
@@ -651,6 +665,10 @@ def test_settings_defaults():
     assert settings.max_results == 10
     assert settings.timeout_seconds == 10.0
     assert settings.consult_max_suggestions == 3
+    # The second outbound feature is a second explicit yes, not something the
+    # first one carries with it.
+    assert settings.reflect_search_enabled is False
+    assert settings.reflect_search_max_items == 3
     assert "arxiv" in settings.user_agent.lower()
 
 
@@ -665,6 +683,8 @@ def test_settings_defaults():
         ("politeness_interval_seconds", 31),
         ("consult_max_suggestions", 0),
         ("consult_max_suggestions", 6),
+        ("reflect_search_max_items", 0),
+        ("reflect_search_max_items", 6),
     ],
 )
 def test_settings_reject_out_of_range(field, value):
@@ -770,7 +790,7 @@ def test_example_toml_worst_case_arithmetic_matches_the_constants():
     """The sample TOML's ⚠ block spells out arithmetic, not prose.
 
     ``politeness_interval_seconds`` + ``timeout_seconds`` (both settings
-    defaults) plus :data:`arxiv_consult.CONSULT_RETURN_MARGIN_SECONDS` is the
+    defaults) plus :data:`arxiv_settings.RETURN_MARGIN_SECONDS` is the
     plugin's own worst case, and core's default
     ``ask_gap_consult_timeout_seconds`` is the deadline it is compared
     against — together they are why gap consultation with every shipped
@@ -785,7 +805,7 @@ def test_example_toml_worst_case_arithmetic_matches_the_constants():
     worst_case = (
         settings.politeness_interval_seconds
         + settings.timeout_seconds
-        + arxiv_consult.CONSULT_RETURN_MARGIN_SECONDS
+        + arxiv_settings.RETURN_MARGIN_SECONDS
     )
     default_deadline = CoreSettings.model_fields[
         "ask_gap_consult_timeout_seconds"
@@ -849,7 +869,7 @@ def test_every_search_call_site_goes_through_the_shared_mapper():
     """
 
     call_sites = 0
-    for module in (arxiv_routes, arxiv_consult):
+    for module in (arxiv_routes, arxiv_consult, arxiv_reflect_search):
         tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
@@ -877,8 +897,9 @@ def test_every_search_call_site_goes_through_the_shared_mapper():
             assert isinstance(expansion.func, ast.Name), where
             assert expansion.func.id == "search_kwargs", where
 
-    # Vacuity guard: both call sites really were found.
-    assert call_sites == 2
+    # Vacuity guard: all three call sites really were found (the interactive
+    # route, the gap-consult contributor and the reflect action).
+    assert call_sites == 3
 
 
 def test_the_adapter_half_only_imports_the_extension_sdk():
@@ -892,7 +913,7 @@ def test_the_adapter_half_only_imports_the_extension_sdk():
     ``app.services`` would work perfectly until the day core moved the module.
     """
 
-    for module in (arxiv_routes, arxiv_consult, arxiv_bundle):
+    for module in (arxiv_routes, arxiv_consult, arxiv_reflect_search, arxiv_bundle):
         tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
         imported: set[str] = set()
         for node in ast.walk(tree):
@@ -1093,6 +1114,30 @@ def test_manifest_registrations_match_declarations():
     assert BUNDLE.manifest.ui_contributions[0].id not in declared
 
 
+def test_the_version_is_the_same_string_in_all_four_places():
+    """Backend manifest, package ``__version__``, wheel metadata, UI manifest.
+
+    The browser looks a UI contribution up by (plugin_id, version, id), so a
+    half-bumped pair does not raise anywhere — the side-panel entry simply
+    stops rendering, in every deployment, forever.  ``pyproject.toml`` is read
+    back rather than assumed because it is what a deployment actually installs,
+    and the SOP's own developer checklist says the two manifests move together.
+    """
+
+    version = BUNDLE.manifest.version
+    assert version == arxiv_package.__version__
+
+    pyproject = (_PLUGIN_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    assert f'version = "{version}"' in pyproject
+
+    ui_manifest = json.loads(
+        (_PLUGIN_ROOT / "ui" / "arxiv-search" / "ui-plugin.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert [row["version"] for row in ui_manifest["contributions"]] == [version]
+
+
 def test_provides_and_capability_decisions_agree():
     assert set(BUNDLE.capability_decisions) == set(BUNDLE.manifest.provides)
     assert BUNDLE.manifest.provides == (AVAILABLE_CAPABILITY,)
@@ -1123,9 +1168,15 @@ def test_manifest_requires_is_empty_so_the_router_survives_a_disabled_consult():
     assert BUNDLE.manifest.requires == ()
 
     consult = _contribution(BUNDLE, f"{PLUGIN_ID}.gap_consult")
+    search = _contribution(BUNDLE, f"{PLUGIN_ID}.reflect_search")
     router = _contribution(BUNDLE, f"{PLUGIN_ID}.router")
     assert consult.availability is not None
-    # And the router has none, so nothing about consultation can reach it.
+    # The reflect action carries its own probe, a different object from the
+    # consult one: two outbound features, two gates.
+    assert search.availability is not None
+    assert search.availability is not consult.availability
+    # And the router has none, so nothing about either outbound feature can
+    # reach it.
     assert router.availability is None
 
 
@@ -1176,13 +1227,142 @@ def test_consult_probe_is_available_when_enabled():
     assert bundle._consult_available(None).status is AvailabilityStatus.AVAILABLE
 
 
-def test_both_probes_perform_no_io(monkeypatch):
-    """Neither probe may dial anything.
+def test_reflect_search_probe_is_disabled_by_default():
+    """The third gate, and it is nobody else's gate.
 
-    The consult probe has a second reason beyond the SDK's general rule: core
-    runs it on the same deadline-bound worker thread as ``consult`` itself, so
-    a probe that called arXiv would spend the reader's own latency budget
-    deciding whether it was allowed to spend the reader's latency budget.
+    ``consult_enabled`` is deliberately turned ON here: agreeing to gap
+    consultation is not agreeing to lend the retrieval agent a function whose
+    results are quoted inside the answer, so the reflect probe must still
+    refuse.  A shared flag would pass this test only by making the two
+    decisions one decision.
+    """
+
+    bundle = _configured_bundle(consult_enabled=True)
+    decision = bundle._reflect_search_available(None)
+    assert decision.status is AvailabilityStatus.DISABLED
+    assert decision.reason_code == "reflect_search_disabled"
+
+    # …and the other two gates are untouched by this one being shut.
+    assert bundle._consult_available(None).status is AvailabilityStatus.AVAILABLE
+    assert (
+        bundle.capability_decisions[AVAILABLE_CAPABILITY](None).status
+        is AvailabilityStatus.AVAILABLE
+    )
+
+
+def test_reflect_search_probe_is_available_when_enabled():
+    bundle = _configured_bundle(reflect_search_enabled=True)
+    assert (
+        bundle._reflect_search_available(None).status
+        is AvailabilityStatus.AVAILABLE
+    )
+    # Symmetry with the test above: enabling the reflect action does not
+    # quietly enable consultation either.
+    assert bundle._consult_available(None).status is AvailabilityStatus.DISABLED
+
+
+def _availability_context(deadline_offset: float, contribution_id: str = ""):
+    return ReflectActionAvailabilityContext(
+        contribution_id or f"{PLUGIN_ID}.reflect_search",
+        time.monotonic() + deadline_offset,
+    )
+
+
+def test_reflect_search_probe_refuses_a_deadline_its_settings_cannot_fit():
+    """A misconfigured deployment does not get the action OFFERED at all.
+
+    The alternative — offer it, then refuse every call the model makes — costs
+    the model a turn's attention and a slot of the run's own action budget to
+    discover something the plugin already knew from its own settings and core's
+    own deadline.  So the probe answers the same question ``invoke`` would, and
+    core leaves a ``reflect_budget_too_small`` receipt on its event stream.
+    """
+
+    misconfigured = _configured_bundle(
+        reflect_search_enabled=True,
+        politeness_interval_seconds=3.0,
+        timeout_seconds=10.0,
+    )
+    default_deadline = CoreSettings.model_fields[
+        "reasoning_plugin_action_timeout_seconds"
+    ].default
+
+    decision = misconfigured._reflect_search_available(
+        _availability_context(default_deadline)
+    )
+    assert decision.status is AvailabilityStatus.DISABLED
+    assert decision.reason_code == "reflect_budget_too_small"
+
+    # The same bundle with timeouts that fit is available again — the gate is
+    # the arithmetic, not the feature.
+    fitting = _configured_bundle(
+        reflect_search_enabled=True,
+        politeness_interval_seconds=0.5,
+        timeout_seconds=1.0,
+    )
+    assert (
+        fitting._reflect_search_available(
+            _availability_context(default_deadline)
+        ).status
+        is AvailabilityStatus.AVAILABLE
+    )
+
+    # Disabled still beats budget: the reason a deployment sees first is the
+    # decision it actually made.
+    off = _configured_bundle(politeness_interval_seconds=0.5, timeout_seconds=1.0)
+    assert (
+        off._reflect_search_available(
+            _availability_context(default_deadline)
+        ).reason_code
+        == "reflect_search_disabled"
+    )
+
+
+def test_a_misconfigured_deadline_keeps_the_action_out_of_the_frozen_offer():
+    """The end of the same fact, read through the real host rather than the probe.
+
+    ``specs()`` is what the reflect loop asks, so this is the assertion that
+    matters to the model: with the shipped timeouts against core's default
+    reflect-action deadline, ``search_arxiv`` is simply not among the actions
+    offered — even though it is registered and the deployment enabled it.
+    """
+
+    default_deadline = CoreSettings.model_fields[
+        "reasoning_plugin_action_timeout_seconds"
+    ].default
+
+    for overrides, offered in (
+        ({"politeness_interval_seconds": 3.0, "timeout_seconds": 10.0}, False),
+        ({"politeness_interval_seconds": 0.5, "timeout_seconds": 1.0}, True),
+    ):
+        bundle = _configured_bundle(reflect_search_enabled=True, **overrides)
+        runtime = build_extension_runtime(
+            [bundle], capability_decisions=dict(bundle.capability_decisions)
+        )
+        # Registered either way: this is availability, not topology.
+        assert len(runtime.registry.reflect_action_specs()) == 1
+
+        events: list[dict] = []
+        specs = runtime.reflect_actions.specs(
+            time.monotonic() + default_deadline, event_sink=events.append
+        )
+        assert bool(specs) is offered, overrides
+        if offered:
+            assert events == []
+        else:
+            assert [event["code"] for event in events] == [
+                "reflect_budget_too_small"
+            ]
+
+
+def test_all_three_probes_perform_no_io(monkeypatch):
+    """No probe may dial anything.
+
+    The two outbound probes have a second reason beyond the SDK's general
+    rule: core runs each on the same deadline-bound worker thread as the call
+    it gates, so a probe that called arXiv would spend the reader's own
+    latency budget deciding whether it was allowed to spend the reader's
+    latency budget.
     """
 
     calls: list = []
@@ -1193,12 +1373,16 @@ def test_both_probes_perform_no_io(monkeypatch):
 
     monkeypatch.setattr(arxiv_client, "_fetch", spy)
 
-    bundle = _configured_bundle(consult_enabled=True)
+    bundle = _configured_bundle(consult_enabled=True, reflect_search_enabled=True)
     assert (
         bundle.capability_decisions[AVAILABLE_CAPABILITY](None).status
         is AvailabilityStatus.AVAILABLE
     )
     assert bundle._consult_available(None).status is AvailabilityStatus.AVAILABLE
+    assert (
+        bundle._reflect_search_available(None).status
+        is AvailabilityStatus.AVAILABLE
+    )
 
     assert calls == []
     # Not even a politeness slot: a probe that took the throttle would serialise
@@ -2256,7 +2440,7 @@ def test_consult_refuses_a_deadline_that_cannot_fit_the_worst_case(monkeypatch):
     contributor = _contributor(
         politeness_interval_seconds=3.0, timeout_seconds=10.0
     )
-    floor = 3.0 + 10.0 + arxiv_consult.CONSULT_RETURN_MARGIN_SECONDS
+    floor = 3.0 + 10.0 + arxiv_settings.RETURN_MARGIN_SECONDS
 
     # Core's own default gap-consult deadline is 4 seconds: with arXiv's
     # politeness terms that is structurally too small, so this contributor says
@@ -2300,7 +2484,7 @@ def test_consult_leaves_the_transport_a_budget_that_ends_before_the_deadline(
     # budget + timeout + margin must still land inside the deadline, so the
     # budget handed to the throttle is the remainder after both are reserved.
     assert budgets
-    assert budgets[0] <= 20.0 - 3.0 - arxiv_consult.CONSULT_RETURN_MARGIN_SECONDS
+    assert budgets[0] <= 20.0 - 3.0 - arxiv_settings.RETURN_MARGIN_SECONDS
     # …and it is still large enough for a full politeness wait, which is what
     # the floor check above guarantees.
     assert budgets[0] >= 2.0
@@ -2336,3 +2520,673 @@ def test_consult_maps_a_throttle_refusal_to_its_own_code(monkeypatch):
     # reading the event should see "we were being polite", not "arXiv broke".
     assert result.failure.code == "arxiv_throttled"
     assert calls == []
+
+
+# --------------------------------------------------------------------------
+# The reflect search action (``ask.reflect_action``)
+# --------------------------------------------------------------------------
+
+
+# The wording a reader typed, in English, so a test that expects a refusal on a
+# Chinese ``query`` proves the action ignored THIS rather than merely finding
+# nothing anywhere.
+REFLECT_QUESTION = "how does retrieval augmented generation ground answers"
+
+
+def _reflect_context(
+    query: str = "retrieval augmented generation",
+    *,
+    question: str = REFLECT_QUESTION,
+    max_items: int = 3,
+    cancellation: object | None = None,
+    deadline_offset: float = 30.0,
+) -> ReflectActionCallContext:
+    """A call context shaped exactly as core's host builds one.
+
+    ``arguments`` is a ``MappingProxyType`` because that is what the host
+    hands over — a read-only view over its own copy, so the trace entry
+    claiming "this is what left the deployment" cannot be edited from
+    underneath.  Building it the same way here means an implementation that
+    tried to mutate its arguments fails in the tests rather than in a run.
+    """
+
+    return ReflectActionCallContext(
+        question=question,
+        arguments=MappingProxyType({"query": query}),
+        cancellation=cancellation,
+        deadline_monotonic=time.monotonic() + deadline_offset,
+        max_items=max_items,
+    )
+
+
+def _search_action(**overrides):
+    bundle = _configured_bundle(reflect_search_enabled=True, **overrides)
+    return bundle.search_action
+
+
+def test_the_reflect_action_descriptor_survives_a_real_registry_freeze():
+    """The descriptor's rails are freeze-time rails, so freeze is the test.
+
+    Name pattern, the reserved-word union, parameter count and naming, string
+    lengths and the control-character class are all checked by
+    ``ExtensionRegistry.freeze`` — a startup failure, never a clamp.  Asserting
+    the descriptor's fields against themselves would prove none of that, so
+    this builds a real runtime out of this bundle and reads the topology back
+    out of the frozen registry.
+    """
+
+    bundle = _configured_bundle(reflect_search_enabled=True)
+    runtime = build_extension_runtime(
+        [bundle], capability_decisions=dict(bundle.capability_decisions)
+    )
+
+    specs = runtime.registry.reflect_action_specs()
+    assert len(specs) == 1
+    spec = specs[0]
+    assert spec.plugin_id == PLUGIN_ID
+    assert spec.contribution_id == f"{PLUGIN_ID}.reflect_search"
+
+    descriptor = spec.descriptor
+    assert descriptor.name == "search_arxiv"
+    assert descriptor.source_label == "arXiv"
+    assert descriptor.max_calls_per_run == 1
+    assert [p.name for p in descriptor.parameters] == ["query"]
+    parameter = descriptor.parameters[0]
+    assert parameter.kind == "text"
+    assert parameter.required is True
+    assert parameter.values == ()
+    # The two plugin-authored strings the model actually reads must say what
+    # the action is FOR and what it cannot do — the sample is the shape other
+    # plugins copy, and a one-word description is the thing to not copy.
+    assert "arXiv" in descriptor.description
+    assert "English" in parameter.description
+
+
+def test_reflect_search_is_unavailable_when_disabled_even_if_the_probe_is_bypassed(
+    monkeypatch,
+):
+    # Defence in depth, as in ``consult``: core evaluates the probe on the
+    # worker thread immediately before this call, so arriving here disabled
+    # means the probe stopped being consulted.  It must not become a request.
+    calls: list = []
+    monkeypatch.setattr(
+        arxiv_client, "_fetch", lambda *args: calls.append(args) or b""
+    )
+
+    for action in (
+        ArxivSearchBundle(BUNDLE.manifest).search_action,
+        _configured_bundle().search_action,
+        # Consultation on, reflect search off: the two gates are separate.
+        _configured_bundle(consult_enabled=True).search_action,
+    ):
+        result = action.invoke(_reflect_context())
+        assert result.status is ExtensionResultStatus.UNAVAILABLE
+        assert result.items == ()
+        assert result.note == ""
+        assert result.failure.code == "reflect_search_disabled"
+    assert calls == []
+
+
+def test_reflect_search_returns_empty_when_cancelled_rather_than_raising(monkeypatch):
+    """Cancellation returns; it never raises.
+
+    Core's host files anything thrown as ``plugin_action_failed``, so raising
+    here would relabel "the user pressed stop" as "the plugin broke".  The host
+    re-reads cancellation on every join slice and the reflect loop re-reads its
+    own token immediately after, so returning is sufficient.
+    """
+
+    calls: list = []
+    monkeypatch.setattr(
+        arxiv_client, "_fetch", lambda *args: calls.append(args) or b""
+    )
+
+    result = _search_action().invoke(_reflect_context(cancellation=_Cancelled()))
+
+    assert result.status is ExtensionResultStatus.UNAVAILABLE
+    assert result.failure.code == "arxiv_cancelled"
+    assert calls == []
+
+
+def test_reflect_search_makes_no_request_when_no_admission_slots_remain(monkeypatch):
+    calls: list = []
+    monkeypatch.setattr(
+        arxiv_client, "_fetch", lambda *args: calls.append(args) or b""
+    )
+
+    result = _search_action().invoke(_reflect_context(max_items=0))
+
+    assert result.failure.code == "arxiv_no_item_budget"
+    assert calls == []
+
+
+def test_reflect_search_refuses_a_query_with_no_latin_terms(monkeypatch):
+    calls: list = []
+    monkeypatch.setattr(
+        arxiv_client, "_fetch", lambda *args: calls.append(args) or b""
+    )
+
+    result = _search_action().invoke(_reflect_context(query="检索增强生成"))
+
+    assert result.status is ExtensionResultStatus.UNAVAILABLE
+    assert result.failure.code == "arxiv_no_latin_terms"
+    assert calls == []
+
+
+def test_reflect_search_never_falls_back_to_the_question(monkeypatch):
+    """The egress surface is the model's own argument, and only that.
+
+    Core hands the question over in the same context, and an implementation
+    that "helpfully" fell back to it would be sending text the model did not
+    choose to send on a call the model believed it was scoping itself.  The
+    question here is full of Latin terms and the argument has none: a fallback
+    would turn this into a successful request, so the refusal IS the assertion.
+    """
+
+    calls: list = []
+    monkeypatch.setattr(
+        arxiv_client, "_fetch", lambda *args: calls.append(args) or b""
+    )
+
+    result = _search_action().invoke(
+        _reflect_context(query="检索增强生成", question=REFLECT_QUESTION)
+    )
+
+    assert result.failure.code == "arxiv_no_latin_terms"
+    assert calls == []
+
+    # Vacuity guard: that question really would have produced terms.
+    assert arxiv_terms.latin_terms(REFLECT_QUESTION)
+
+
+def test_reflect_search_only_sends_terms_taken_from_the_query_argument(monkeypatch):
+    """The other direction of the same rule: what IS sent is only the argument."""
+
+    seen: list[str] = []
+
+    def stub(url, timeout, user_agent):
+        seen.append(url)
+        return b'<feed xmlns="http://www.w3.org/2005/Atom"></feed>'
+
+    monkeypatch.setattr(arxiv_client, "_fetch", stub)
+
+    _search_action().invoke(
+        _reflect_context(query="spectral clustering", question="graph reasoning")
+    )
+
+    assert len(seen) == 1
+    query = parse_qs(urlsplit(seen[0]).query)["search_query"][0]
+    assert "spectral" in query and "clustering" in query
+    assert "graph" not in query and "reasoning" not in query
+
+
+def test_reflect_search_refuses_a_deadline_that_cannot_fit_the_worst_case(monkeypatch):
+    """Same worst-case gate as consultation, against a different core deadline.
+
+    ``settings.deadline_budget`` is the one copy of the arithmetic; this proves
+    the reflect action really consults it rather than starting a request it
+    cannot finish inside core's 8-second reflect-action deadline.
+    """
+
+    calls: list = []
+    monkeypatch.setattr(
+        arxiv_client, "_fetch", lambda *args: calls.append(args) or b""
+    )
+
+    action = _search_action(
+        politeness_interval_seconds=3.0, timeout_seconds=10.0
+    )
+    floor = 3.0 + 10.0 + arxiv_settings.RETURN_MARGIN_SECONDS
+
+    default_deadline = CoreSettings.model_fields[
+        "reasoning_plugin_action_timeout_seconds"
+    ].default
+    assert floor > default_deadline
+    result = action.invoke(_reflect_context(deadline_offset=default_deadline))
+    assert result.failure.code == "arxiv_budget_too_small"
+    assert calls == []
+
+    # An already-expired deadline is the same refusal, not an exception.
+    assert (
+        action.invoke(_reflect_context(deadline_offset=-1.0)).failure.code
+        == "arxiv_budget_too_small"
+    )
+
+    # Vacuity guard: past the floor it really does go.
+    monkeypatch.setattr(
+        arxiv_client,
+        "_fetch",
+        lambda *args: b'<feed xmlns="http://www.w3.org/2005/Atom"></feed>',
+    )
+    monkeypatch.setattr(arxiv_client, "acquire_slot", lambda *args: True)
+    monkeypatch.setattr(arxiv_client, "release_slot", lambda: None)
+    opened = action.invoke(_reflect_context(deadline_offset=floor + 1.0))
+    assert opened.status is ExtensionResultStatus.AVAILABLE
+
+
+def test_reflect_search_leaves_the_transport_a_budget_that_ends_before_the_deadline(
+    monkeypatch,
+):
+    """The budget handed to the throttle must still land inside the deadline.
+
+    The same assertion ``consult`` makes, on the other contributor, because
+    they now share one implementation of the arithmetic
+    (``settings.deadline_budget``) and a regression there has two blast radii.
+    A mutation that handed the throttle everything that is left
+    (``budget_seconds = context.deadline_monotonic - time.monotonic()``) turns
+    a call that answers comfortably early into one that answers exactly ON the
+    deadline, which core's join loop has already stopped reading.
+    """
+
+    budgets: list[float] = []
+
+    def spy(interval, budget):
+        budgets.append(budget)
+        return True
+
+    monkeypatch.setattr(arxiv_client, "acquire_slot", spy)
+    monkeypatch.setattr(arxiv_client, "release_slot", lambda: None)
+    monkeypatch.setattr(
+        arxiv_client,
+        "_fetch",
+        lambda *args: b'<feed xmlns="http://www.w3.org/2005/Atom"></feed>',
+    )
+
+    action = _search_action(politeness_interval_seconds=2.0, timeout_seconds=3.0)
+    context = _reflect_context(deadline_offset=20.0)
+    before = time.monotonic()
+    action.invoke(context)
+
+    assert budgets
+    # Worst case in full — the politeness wait the throttle may spend, the
+    # socket timeout after it, and the return margin — still ends before the
+    # deadline core handed over.
+    assert (
+        budgets[0] + 3.0 + arxiv_settings.RETURN_MARGIN_SECONDS
+        <= context.deadline_monotonic - before
+    )
+    # …and it is still large enough for a full politeness wait, which is what
+    # the floor check guarantees.
+    assert budgets[0] >= 2.0
+
+
+def test_reflect_search_maps_a_throttle_refusal_to_its_own_code(monkeypatch):
+    calls: list = []
+    monkeypatch.setattr(
+        arxiv_client, "_fetch", lambda *args: calls.append(args) or b""
+    )
+    monkeypatch.setattr(arxiv_client, "acquire_slot", lambda *args: False)
+
+    result = _search_action().invoke(_reflect_context())
+
+    # Distinct from ``arxiv_upstream_failed``: nothing failed, and an operator
+    # reading the event should see "we were being polite", not "arXiv broke".
+    assert result.status is ExtensionResultStatus.UNAVAILABLE
+    assert result.failure.code == "arxiv_throttled"
+    assert calls == []
+
+
+def test_reflect_search_swallows_upstream_errors_into_a_stable_code(monkeypatch):
+    secret = "SECRET-REFLECT-DETAIL"
+
+    def boom(url, timeout, user_agent):
+        raise TimeoutError(f"{secret} at {url}")
+
+    monkeypatch.setattr(arxiv_client, "_fetch", boom)
+
+    result = _search_action().invoke(_reflect_context())
+
+    assert result.status is ExtensionResultStatus.UNAVAILABLE
+    assert result.items == ()
+    assert result.failure.code == "arxiv_upstream_failed"
+    assert secret not in repr(result)
+    assert "arxiv.example" not in repr(result)
+
+
+def test_reflect_search_maps_papers_onto_external_evidence_items(
+    monkeypatch, sample_feed
+):
+    monkeypatch.setattr(arxiv_client, "_fetch", lambda *args: sample_feed)
+
+    result = _search_action().invoke(_reflect_context())
+
+    assert result.status is ExtensionResultStatus.AVAILABLE
+    assert result.failure is None
+    # A successful call carries no note: the material speaks for itself, and a
+    # note core would render under the candidate summary costs the model
+    # attention for nothing.
+    assert result.note == ""
+    assert [item.title for item in result.items] == [
+        "Retrieval-Augmented Generation for Long Documents",
+        "Graph Reasoning Without a Graph",
+    ]
+    assert [item.location_label for item in result.items] == [
+        "arXiv:2401.00001v1",
+        "arXiv:2401.00002v2",
+    ]
+    for item in result.items:
+        # PDF direct links only, exactly as in ``consult``: the reader's "open
+        # link" button and the import button both address what they are given.
+        assert item.url.startswith("https://arxiv.org/pdf/")
+        # The excerpt is the abstract, verbatim — core never re-summarizes it,
+        # so this text is what a citation card shows.
+        assert item.excerpt
+
+
+def test_reflect_search_truncates_title_and_excerpt_to_cores_external_limits(
+    monkeypatch,
+):
+    """The cut happens here, not because ``.atom`` already trimmed it.
+
+    ``.atom``'s own ceilings (500/4000) are a wider display bound for the
+    interactive ``/search`` page, so a record can reach this mapping while
+    still being wider than an external-evidence item may carry.
+    """
+
+    long_title = " ".join(["term"] * 60)  # 299 chars: > core's 200, < atom's 500
+    long_summary = " ".join(["term"] * 400)  # 1999: > core's 800, < atom's 4000
+    assert (
+        EXTERNAL_EVIDENCE_TITLE_MAX_CHARS
+        < len(long_title)
+        < arxiv_atom.TITLE_MAX_CHARS
+    )
+    assert (
+        EXTERNAL_EVIDENCE_EXCERPT_MAX_CHARS
+        < len(long_summary)
+        < arxiv_atom.SUMMARY_MAX_CHARS
+    )
+
+    feed = _feed_with(long_title, long_summary)
+    monkeypatch.setattr(arxiv_client, "_fetch", lambda *args: feed)
+
+    # The parser must not already have cut these, or the assertions below
+    # would prove nothing about where the truncation happens.
+    parsed = arxiv_atom.parse_atom(feed, limit=1)[0]
+    assert parsed.title == long_title
+    assert parsed.summary == long_summary
+
+    result = _search_action().invoke(_reflect_context())
+
+    assert len(result.items) == 1
+    item = result.items[0]
+    assert item.title == long_title[:EXTERNAL_EVIDENCE_TITLE_MAX_CHARS]
+    assert item.excerpt == long_summary[:EXTERNAL_EVIDENCE_EXCERPT_MAX_CHARS]
+    assert len(item.location_label) <= EXTERNAL_EVIDENCE_LOCATION_LABEL_MAX_CHARS
+
+
+def test_reflect_search_drops_an_over_long_location_label_whole(monkeypatch):
+    """A clipped arXiv id is a different paper, not a shorter label.
+
+    ``.atom`` accepts an id up to ``ARXIV_ID_MAX_CHARS`` (64), so
+    ``arXiv:<id>`` can pass core's 60-character location-label rail.  Cutting
+    it would print an identifier that resolves to nothing beside a real title
+    and a real link, so the optional label is dropped whole instead — the URL
+    still says exactly which paper this is.
+    """
+
+    long_id = "hep-th/" + "9" * 50  # 57 chars: "arXiv:" + it is 63 > 60, < 64
+    assert len(long_id) < arxiv_atom.ARXIV_ID_MAX_CHARS
+    assert len(f"arXiv:{long_id}") > EXTERNAL_EVIDENCE_LOCATION_LABEL_MAX_CHARS
+
+    feed = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<feed xmlns="http://www.w3.org/2005/Atom">'
+        f"<entry><id>http://arxiv.org/abs/{long_id}</id>"
+        "<title>A paper with a very long identifier</title>"
+        "<summary>abstract</summary></entry>"
+        "</feed>"
+    ).encode("utf-8")
+    monkeypatch.setattr(arxiv_client, "_fetch", lambda *args: feed)
+
+    # The parser really did keep the whole id, so the drop below is this
+    # mapping's decision rather than an upstream truncation.
+    assert arxiv_atom.parse_atom(feed, limit=1)[0].arxiv_id == long_id
+
+    (item,) = _search_action().invoke(_reflect_context()).items
+    assert item.location_label == ""
+    # Everything else about the item survives — the label is the optional part.
+    assert item.title == "A paper with a very long identifier"
+    assert item.url.endswith(long_id)
+
+
+def test_reflect_search_drops_an_item_from_a_foreign_host(monkeypatch):
+    feed = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<feed xmlns="http://www.w3.org/2005/Atom">'
+        "<entry><id>http://arxiv.org/abs/2401.10001v1</id>"
+        "<title>Redirected elsewhere</title><summary>abstract</summary>"
+        '<link title="pdf" href="https://evil.example/paper.pdf"/>'
+        "</entry>"
+        "<entry><id>http://arxiv.org/abs/2401.10002v1</id>"
+        "<title>Ordinary paper</title><summary>abstract</summary></entry>"
+        "</feed>"
+    ).encode("utf-8")
+    monkeypatch.setattr(arxiv_client, "_fetch", lambda *args: feed)
+
+    result = _search_action().invoke(_reflect_context())
+
+    # The same policy layer both other call sites use: the parser reports what
+    # the feed said, and the deployment decides which hosts may reach a reader.
+    assert [item.url for item in result.items] == [
+        "https://arxiv.org/pdf/2401.10002v1"
+    ]
+
+
+def test_reflect_search_honours_the_smaller_of_context_and_settings_caps(monkeypatch):
+    seen: list[str] = []
+
+    def stub(url, timeout, user_agent):
+        seen.append(url)
+        return b'<feed xmlns="http://www.w3.org/2005/Atom"></feed>'
+
+    monkeypatch.setattr(arxiv_client, "_fetch", stub)
+
+    _search_action(reflect_search_max_items=5).invoke(_reflect_context(max_items=2))
+    _search_action(reflect_search_max_items=1).invoke(_reflect_context(max_items=5))
+
+    assert [parse_qs(urlsplit(url).query)["max_results"][0] for url in seen] == [
+        "2",
+        "1",
+    ]
+
+
+def test_reflect_search_reports_an_empty_page_as_a_note_not_a_failure(monkeypatch):
+    """Zero matches is a real answer to the model's question, not a fault.
+
+    Coming back UNAVAILABLE would make core record a skip step the model can
+    read nothing into; coming back AVAILABLE with a note tells it these
+    keywords are not the ones, and that giving up on outside material is a
+    legitimate next move.
+    """
+
+    monkeypatch.setattr(
+        arxiv_client,
+        "_fetch",
+        lambda *args: b'<feed xmlns="http://www.w3.org/2005/Atom"></feed>',
+    )
+
+    result = _search_action().invoke(_reflect_context())
+
+    assert result.status is ExtensionResultStatus.AVAILABLE
+    assert result.failure is None
+    assert result.items == ()
+    assert result.note == arxiv_reflect_search.EMPTY_RESULT_NOTE
+    # Core clamps a longer note rather than refusing it, but a sample that
+    # relied on that would be teaching the wrong habit.
+    assert 0 < len(result.note) <= REFLECT_ACTION_NOTE_MAX_CHARS
+
+
+def test_reflect_search_accepts_a_read_only_argument_mapping(monkeypatch):
+    """The host hands a ``MappingProxyType``; nothing here may try to write it.
+
+    ``_reflect_context`` already builds one, so every test above shares this
+    guarantee — this one states it, and additionally proves the mapping is
+    unchanged afterwards rather than merely un-crashed.
+    """
+
+    monkeypatch.setattr(
+        arxiv_client,
+        "_fetch",
+        lambda *args: b'<feed xmlns="http://www.w3.org/2005/Atom"></feed>',
+    )
+
+    context = _reflect_context(query="graph neural networks")
+    assert type(context.arguments) is MappingProxyType
+
+    result = _search_action().invoke(context)
+
+    assert result.status is ExtensionResultStatus.AVAILABLE
+    assert dict(context.arguments) == {"query": "graph neural networks"}
+
+
+def test_reflect_search_survives_an_argument_mapping_with_no_query_key(monkeypatch):
+    """A caller out of contract gets a refusal, not an exception.
+
+    Core's own host validates the argument shape before this frame and would
+    never send this — but ``invoke`` is a public entry point, and a plugin that
+    raised ``KeyError`` at one would be filed as ``plugin_action_failed``,
+    which reads as "arXiv broke".
+    """
+
+    calls: list = []
+    monkeypatch.setattr(
+        arxiv_client, "_fetch", lambda *args: calls.append(args) or b""
+    )
+
+    context = ReflectActionCallContext(
+        question=REFLECT_QUESTION,
+        arguments=MappingProxyType({}),
+        cancellation=None,
+        deadline_monotonic=time.monotonic() + 30.0,
+        max_items=3,
+    )
+
+    assert _search_action().invoke(context).failure.code == "arxiv_no_latin_terms"
+    assert calls == []
+
+
+def test_example_toml_reflect_worst_case_arithmetic_matches_the_constants():
+    """The sample TOML's second ⚠ block spells out arithmetic, not prose.
+
+    Same discipline as the gap-consult one above, against the other core
+    deadline: the worst case is regenerated from the real constants and the
+    file is grepped for the same digits, so a change to any of the four numbers
+    fails here instead of only in a future re-reading.
+    """
+
+    settings = ArxivSearchSettings()
+    worst_case = (
+        settings.politeness_interval_seconds
+        + settings.timeout_seconds
+        + arxiv_settings.RETURN_MARGIN_SECONDS
+    )
+    default_deadline = CoreSettings.model_fields[
+        "reasoning_plugin_action_timeout_seconds"
+    ].default
+
+    text = (_PLUGIN_ROOT / "extensions.example.toml").read_text(encoding="utf-8")
+    match = re.search(
+        r"that is ([\d.]+) seconds against an ([\d.]+)-second deadline", text
+    )
+    assert match is not None, "reflect worst-case sentence not found in the TOML"
+    assert float(match.group(1)) == pytest.approx(worst_case)
+    assert float(match.group(2)) == pytest.approx(default_deadline)
+    # And it is genuinely bigger than the deadline it is compared against —
+    # that gap is the whole point of the paragraph.
+    assert worst_case > default_deadline
+
+
+# --------------------------------------------------------------------------
+# The shared term extractor
+# --------------------------------------------------------------------------
+
+
+def test_latin_terms_drops_stopwords_and_single_letters():
+    """Function words would crowd out the terms that carry signal.
+
+    The query is capped at ``MAX_QUERY_TERMS``, so every slot an English
+    function word takes is a slot a real term does not get.
+    """
+
+    assert arxiv_terms.latin_terms(
+        "the effect of retrieval with a graph"
+    ) == ("effect", "of", "retrieval", "graph")
+
+
+def test_latin_terms_deduplicates_across_arguments_and_keeps_reading_order():
+    """One seen-set across every argument, and first-seen order is preserved.
+
+    Order is load-bearing rather than cosmetic: it is what reaches arXiv as the
+    query, and the two callers pass overlapping texts (a question and its gap
+    phrases) precisely because they say the same thing differently.
+    """
+
+    assert arxiv_terms.latin_terms(
+        "Retrieval augmented generation",
+        "retrieval quality",
+        "GENERATION speed",
+    ) == ("retrieval", "augmented", "generation", "quality", "speed")
+
+
+def test_latin_terms_stops_at_the_transport_ceiling():
+    """The bound is the transport's own, imported rather than restated."""
+
+    words = " ".join(f"term{index}" for index in range(20))
+
+    terms = arxiv_terms.latin_terms(words)
+
+    assert len(terms) == arxiv_client.MAX_QUERY_TERMS
+    assert terms == tuple(
+        f"term{index}" for index in range(arxiv_client.MAX_QUERY_TERMS)
+    )
+
+
+def test_latin_terms_strips_edge_punctuation_but_keeps_it_inside_identifiers():
+    """``GPT-4`` is one term; the comma after it is not part of it."""
+
+    assert arxiv_terms.latin_terms(
+        "GPT-4, transformers. (e.g. --alpha--)"
+    ) == ("gpt-4", "transformers", "e.g", "alpha")
+
+
+def test_latin_terms_skips_a_non_string_argument():
+    """Callers receive their text from core or from a model.
+
+    A non-string is one more empty source, not a reason to fail a live
+    question — the caller above would otherwise have to type the same
+    isinstance check twice.
+    """
+
+    assert arxiv_terms.latin_terms(None, 42, ["alpha"], "beta gamma") == (
+        "beta",
+        "gamma",
+    )
+
+
+def test_both_outbound_features_send_the_same_query_for_the_same_text(monkeypatch):
+    """One extractor, so one query — asserted end to end, not by inspection.
+
+    The two contributions reach arXiv by different routes and for different
+    reasons; a second hand-written copy of the scan would let them disagree
+    about the same words, and an operator comparing an event stream to a search
+    log would have no way to tell why.
+    """
+
+    text = "Retrieval-Augmented Generation for the long documents, e.g. GPT-4"
+    seen: list[str] = []
+
+    def stub(url, timeout, user_agent):
+        seen.append(parse_qs(urlsplit(url).query)["search_query"][0])
+        return b'<feed xmlns="http://www.w3.org/2005/Atom"></feed>'
+
+    monkeypatch.setattr(arxiv_client, "_fetch", stub)
+
+    _contributor().consult(_consult_context(question=text))
+    _search_action().invoke(_reflect_context(query=text))
+
+    assert len(seen) == 2
+    assert seen[0] == seen[1]
+    # Vacuity guard: it really did carry the terms, rather than both being the
+    # same empty string.
+    assert "generation" in seen[0]
+

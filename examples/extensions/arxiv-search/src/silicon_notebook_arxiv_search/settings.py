@@ -21,7 +21,8 @@ deployment's own decision against its own agreement with arXiv; ``0`` is
 accepted so tests and mirrors are not forced to sleep.
 
 :func:`search_kwargs` at the bottom is the one place deployment settings are
-mapped onto the transport's keyword arguments.  It belongs to the *adapter*
+mapped onto the transport's keyword arguments, for all three of its callers
+(the interactive route, gap consultation and the reflect search action).  It belongs to the *adapter*
 half of this package (settings / routes / consult / bundle), not to the
 replaceable arXiv half: :mod:`.client` deliberately knows nothing about this
 model, so something above it has to name the transport's parameters, and that
@@ -30,14 +31,25 @@ mapping by hand is how a plugin ends up sending its default user agent from one
 route and its configured one from another.
 
 :func:`egress_allowed` at the bottom is the same shape of argument applied to
-a different value: both ``.routes`` and ``.consult`` receive a URL parsed out
-of an untrusted upstream Atom feed (see :mod:`.atom`) and both have to decide
-whether that URL may reach a person before it does — one as a search result's
-``pdf_url``, the other as an unbidden gap-consult suggestion.  It lives here
+a different value: ``.routes``, ``.consult`` and ``.reflect_search`` each
+receive a URL parsed out of an untrusted upstream Atom feed (see :mod:`.atom`)
+and each has to decide whether that URL may reach a person before it does — as
+a search result's ``pdf_url``, as an unbidden gap-consult suggestion, or as a
+citable external-evidence link inside an answer.  It lives here
 rather than in :mod:`.atom` for the same reason ``search_kwargs`` does: the
 parser is the layer an in-house variant replaces wholesale, so teaching it a
 hard-coded arxiv.org policy would mean the replacement inherits a policy that
 is wrong for it.  Policy belongs to the policy layer.
+
+:func:`deadline_budget` at the bottom is the third member of that family, and
+the one with two contributors rather than two routes behind it: both
+:mod:`.consult` and :mod:`.reflect_search` run under a core host's hard
+wall-clock deadline, and both have to answer the same two questions before
+dialling — "does this deployment's *worst* case still fit inside what is
+left?" and "then how much of it may the throttle spend?".  The two answers are
+one piece of arithmetic (see the function), and a second hand-written copy of
+it is how one contributor ends up answering exactly *on* a deadline nobody is
+still reading.
 
 :func:`mirror_host` is the host-extraction primitive :func:`egress_allowed`
 is built from, and ``.routes``'s import allow-list (``_is_arxiv_url``) shares
@@ -76,6 +88,15 @@ class ArxivSearchSettings(BaseModel):
     # until a deployment says otherwise.
     consult_enabled: bool = False
     consult_max_suggestions: int = Field(3, ge=1, le=5)
+    # The same "installing is not consenting" rule, for the other outbound
+    # contribution: the reflect action this plugin lends the retrieval agent
+    # sends the model's own English keywords to arxiv.org from inside a live
+    # answer.  A deployment that agreed to gap consultation has not thereby
+    # agreed to this one — they leave on different triggers, at different
+    # moments, and what this one brings back is quoted in the answer — so it
+    # is a second, separate yes rather than a shared flag.
+    reflect_search_enabled: bool = False
+    reflect_search_max_items: int = Field(3, ge=1, le=5)
 
     @field_validator("base_url")
     @classmethod
@@ -149,10 +170,11 @@ def search_kwargs(
 ) -> dict[str, object]:
     """Map deployment settings onto :func:`.client.search`'s keyword arguments.
 
-    Both callers — the interactive search route and the gap-consult contributor
-    — go through here.  The three per-call values (``limit``, ``budget_seconds``
-    and ``start``) are arguments rather than settings because they are the two
-    callers' *only* legitimate difference: how many records this call wants,
+    All three callers — the interactive search route, the gap-consult
+    contributor and the reflect search action — go through here.  The three
+    per-call values (``limit``, ``budget_seconds`` and ``start``) are arguments
+    rather than settings because they are those callers' *only* legitimate
+    difference: how many records this call wants,
     how long it may spend, and where in the result set it starts.  Everything
     else about how this deployment talks to arXiv is settings, and a call site
     that reached past this function to restate one of them would be declaring
@@ -170,6 +192,48 @@ def search_kwargs(
         "user_agent": settings.user_agent,
         "start": start,
     }
+
+
+# Everything between "the response bytes arrived" and "the host read the
+# return value": parsing the feed, mapping it, and the up-to-50 ms slice a
+# core host's join loop is sleeping in when the worker finishes.  Shared by
+# both outbound contributions because both are joined by the same shape of
+# loop; it is not a deployment setting, so it is a constant here rather than a
+# key in the model above.
+RETURN_MARGIN_SECONDS = 0.25
+
+
+def deadline_budget(
+    settings: ArxivSearchSettings, deadline_monotonic: float, *, now: float
+) -> float | None:
+    """Seconds the throttle may spend, or ``None`` when the worst case cannot fit.
+
+    **This is the step that is easy to get wrong**, which is why both
+    contributors share one copy of it.  ``acquire_slot`` may sleep up to the
+    budget it is given, and the HTTP call may then take up to
+    ``timeout_seconds``.  A budget of "everything that is left" therefore
+    returns an answer exactly *on* the deadline — and a core host's join loop
+    re-reads that deadline on every 50 ms slice, so an answer landing on it is
+    read by nobody.  So the gate refuses unless a *worst* case fits (a full
+    politeness interval, a full timeout, and the return margin), and the
+    budget then subtracts the timeout and the margin back out.  The two agree
+    by construction: refuse when ``remaining < politeness + timeout + margin``,
+    hand over ``remaining - timeout - margin``, which is therefore never less
+    than one full politeness interval.
+
+    ``now`` is passed in rather than read here so the caller reads its clock
+    once, next to the deadline it was handed.
+    """
+
+    remaining = deadline_monotonic - now
+    floor = (
+        settings.politeness_interval_seconds
+        + settings.timeout_seconds
+        + RETURN_MARGIN_SECONDS
+    )
+    if remaining < floor:
+        return None
+    return remaining - settings.timeout_seconds - RETURN_MARGIN_SECONDS
 
 
 def mirror_host(base_url: str) -> str:
@@ -206,12 +270,13 @@ _EGRESS_HOSTS = frozenset({"arxiv.org", "export.arxiv.org"})
 def egress_allowed(url: str, base_url: str) -> bool:
     """True when ``url``'s host is arXiv's, or the deployment's own mirror.
 
-    Shared by :mod:`.routes` (a search result's ``pdf_url``) and
-    :mod:`.consult` (a gap-consult suggestion's ``url``): both values come
-    from the same untrusted upstream feed parser (:mod:`.atom`), and both
-    call sites need the same answer to "may this reach a reader", even
-    though what they do with a ``False`` differs — one falls back to an
-    id-derived link, the other drops the suggestion outright.
+    Shared by :mod:`.routes` (a search result's ``pdf_url``), :mod:`.consult`
+    (a gap-consult suggestion's ``url``) and :mod:`.reflect_search` (an
+    external-evidence item's ``url``): all three values come from the same
+    untrusted upstream feed parser (:mod:`.atom`), and all three call sites
+    need the same answer to "may this reach a reader", even though what they
+    do with a ``False`` differs — the first falls back to an id-derived link,
+    the other two drop the record outright.
     """
 
     try:

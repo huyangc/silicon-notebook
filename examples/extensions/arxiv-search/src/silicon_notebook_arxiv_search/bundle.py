@@ -33,12 +33,16 @@ rather than by what arXiv needs:
   emptiness is asserted by a test rather than left to be re-derived.
 * ``ExtensionContribution.availability`` is evaluated **per contribution**,
   by whichever consumer calls ``registry.availability()`` for that specific
-  contribution id (core's gap-consult host, for this plugin's
-  ``ASK_GAP_CONSULT_POINT`` registration).  That is where outbound
-  consultation is actually gated, so turning it off leaves the search panel
-  and the import route exactly as they were — because each contribution is
+  contribution id (core's gap-consult host and its reflect-action host, for
+  this plugin's ``ASK_GAP_CONSULT_POINT`` and ``ASK_REFLECT_ACTION_POINT``
+  registrations).  That is where each outbound feature is actually gated, so
+  turning one off leaves the search panel, the import route **and the other
+  outbound feature** exactly as they were — because each contribution is
   gated on its own, not because ``manifest.requires`` would otherwise have
-  reached them.
+  reached them.  With two outbound contributions the precision argument above
+  stops being hypothetical: a manifest-wide gate would have to mean
+  "consultation is on" and "the reflect action is on" at once, and those are
+  deliberately two separate decisions a deployment makes one at a time.
 
 ``manifest.provides`` then carries a third, separate thing: the capability the
 *workspace UI entry* is gated on.  "This plugin is configured" is the honest
@@ -46,10 +50,10 @@ question for a side-panel button; "may this deployment consult arXiv on its
 own" is not, and conflating them would hide the search panel from a deployment
 that deliberately keeps consultation off.
 
-Both probes are I/O-free, and the consult one has a second reason to be: core
-runs it on the same deadline-bound worker thread as ``consult`` itself, so a
-probe that dialled arXiv would spend the reader's own latency budget deciding
-whether it was allowed to spend the reader's latency budget.
+All three probes are I/O-free, and the two outbound ones have a second reason
+to be: core runs each on the same deadline-bound worker thread as the call it
+gates, so a probe that dialled arXiv would spend the reader's own latency
+budget deciding whether it was allowed to spend the reader's latency budget.
 """
 from __future__ import annotations
 
@@ -59,6 +63,7 @@ from dataclasses import dataclass, field
 from app.extension_sdk import (
     EXTENSION_API_VERSION,
     ASK_GAP_CONSULT_POINT,
+    ASK_REFLECT_ACTION_POINT,
     Availability,
     AvailabilityProbe,
     AvailabilityStatus,
@@ -71,6 +76,7 @@ from app.extension_sdk.http import PLUGIN_HTTP_ROUTER_POINT
 from app.extension_sdk.ui import UiContributionDeclaration
 
 from .consult import ArxivGapConsultContributor
+from .reflect_search import ArxivReflectSearchAction
 from .routes import build_router
 from .settings import ArxivSearchSettings
 
@@ -87,6 +93,14 @@ _ROUTER = ContributionDeclaration(
 _CONSULT = ContributionDeclaration(
     id=f"{PLUGIN_ID}.gap_consult",
     point=ASK_GAP_CONSULT_POINT,
+    kind=ContributionKind.CONTRIBUTOR,
+)
+# One contribution is one reflect action — the point is defined that way, so a
+# plugin offering a second function would declare a second contribution here
+# with its own id, its own probe and its own budget.
+_SEARCH = ContributionDeclaration(
+    id=f"{PLUGIN_ID}.reflect_search",
+    point=ASK_REFLECT_ACTION_POINT,
     kind=ContributionKind.CONTRIBUTOR,
 )
 # Metadata only: the browser half lives in ``ui/arxiv-search`` and is copied in
@@ -109,22 +123,24 @@ class ArxivSearchBundle:
     settings_model: type[ArxivSearchSettings] = ArxivSearchSettings
     settings: ArxivSearchSettings | None = None
     contributor: ArxivGapConsultContributor = field(init=False)
+    search_action: ArxivReflectSearchAction = field(init=False)
     capability_decisions: Mapping[str, AvailabilityProbe] = field(init=False)
 
     def __post_init__(self) -> None:
-        """Wire the two derived members every instance must have.
+        """Wire the three derived members every instance must have.
 
         Both are built here rather than assigned to the module-level ``BUNDLE``
         afterwards so that *any* instance is complete — a test that constructs
         a second bundle gets a working one, and neither member can be forgotten
         by a future edit that adds an instantiation somewhere else.
 
-        The contributor reads settings through ``lambda: self.settings`` rather
-        than taking the value: ``configure`` has not run yet at this point, so
-        a snapshot would be ``None`` for the life of the process.
+        Both contributors read settings through ``lambda: self.settings``
+        rather than taking the value: ``configure`` has not run yet at this
+        point, so a snapshot would be ``None`` for the life of the process.
         """
 
         self.contributor = ArxivGapConsultContributor(lambda: self.settings)
+        self.search_action = ArxivReflectSearchAction(lambda: self.settings)
         self.capability_decisions = {AVAILABLE_CAPABILITY: self._configured}
 
     def configure(self, settings: ArxivSearchSettings) -> None:
@@ -161,6 +177,13 @@ class ArxivSearchBundle:
                 availability=self._consult_available,
             )
         )
+        registrar.add_contributor(
+            ExtensionContribution(
+                declaration=_SEARCH,
+                implementation=self.search_action,
+                availability=self._reflect_search_available,
+            )
+        )
 
     # -- availability probes ------------------------------------------------
 
@@ -183,15 +206,42 @@ class ArxivSearchBundle:
             return Availability(AvailabilityStatus.DISABLED, "consult_disabled")
         return Availability.available()
 
+    def _reflect_search_available(self, context: object | None) -> Availability:
+        """Gates the reflect action the retrieval agent may call, and only that.
+
+        A separate probe from ``_consult_available`` rather than a shared one:
+        the two features leave the deployment at different moments and put
+        their results in different places (a suggestion beside the answer
+        versus quoted material inside it), so a deployment says yes to them
+        one at a time.  Core evaluates this on its own deadline-bound worker
+        immediately before every call, so it must stay I/O-free.
+
+        Unlike the consult probe this one is handed a ``context``, and it uses
+        it: ``unavailable_reason`` also answers "could a call under this
+        deadline finish at all?".  A deployment whose timeouts do not fit core's
+        reflect-action budget therefore never has the action offered to the
+        model, rather than having it offered and refused every time.
+        """
+
+        reason = self.search_action.unavailable_reason(context)
+        if reason is not None:
+            return Availability(AvailabilityStatus.DISABLED, reason)
+        return Availability.available()
+
 
 BUNDLE = ArxivSearchBundle(
     ExtensionManifest(
         id=PLUGIN_ID,
-        version="0.1.0",
+        # 0.2.0: the reflect-action contribution is a new capability of the
+        # same package, so both manifests (this one and `ui-plugin.json`) move
+        # together — the browser looks the panel up by
+        # (plugin_id, version, contribution_id) and a half-bumped pair simply
+        # stops rendering.
+        version="0.2.0",
         api_version=EXTENSION_API_VERSION,
         display_name="arXiv 文献检索（样板）",
         trust="deployment",
-        contributions=(_ROUTER, _CONSULT),
+        contributions=(_ROUTER, _CONSULT, _SEARCH),
         # Empty on purpose, and load-bearing.  See the module docstring.
         requires=(),
         provides=(AVAILABLE_CAPABILITY,),
