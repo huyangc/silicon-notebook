@@ -973,3 +973,123 @@ def test_external_context_accepts_an_upper_case_scheme_and_keeps_the_url_verbati
     assert sink == {"truncated": 0, "rejected": 0}
     (citation,) = _service().external_citations([_external(1, url=url)])
     assert citation.url == url
+
+
+def _chunk(chunk_id: str, **overrides) -> RetrievedChunk:
+    payload = {
+        "chunk_id": chunk_id, "source_id": "s1", "source_title": "Paper A",
+        "section_path": "1.1", "text": f"{chunk_id} text", "relevance": 0.9,
+        "notebook_id": "active", "element_ids": [f"{chunk_id}-el0",
+                                                 f"{chunk_id}-el1"],
+    }
+    payload.update(overrides)
+    return RetrievedChunk(**payload)
+
+
+def _anchor(key: str, object_id: str, object_type: str = "chunk"):
+    from app.models.ask import AnswerAnchor
+
+    return AnswerAnchor(
+        key=key, object_id=object_id, object_type=object_type, label=object_id,
+    )
+
+
+def test_chunk_citations_without_anchors_cards_every_chunk_in_input_order():
+    """非 mix 形态:每条 chunk 一卡且顺序就是入参顺序——前端零锚点回退列表按这个
+    顺序展示;chunk 模式传 rerank 序,所以重排等于换了「最相关在前」的含义。
+    每张卡的定位字段来自 chunk 自己:element_id 取首个元素(引用弹层「查看原文」
+    的翻页锚),quoted_span 是正文前 200 字(引用卡的摘录),而配对的第二元是
+    **整个** element_ids——附图元素通常不是 chunk 的第一个元素。"""
+    long_text = "x" * 500
+    chunks = [_chunk("c1"), _chunk("c2", text=long_text), _chunk("c3")]
+
+    pairs = _service().chunk_citations(chunks, notebook_id="active")
+
+    assert [c.element_id for c, _ids in pairs] == ["c1-el0", "c2-el0", "c3-el0"]
+    assert [ids for _c, ids in pairs] == [
+        ("c1-el0", "c1-el1"), ("c2-el0", "c2-el1"), ("c3-el0", "c3-el1")]
+    assert pairs[1][0].quoted_span == long_text[:200]
+    assert [c.location_label for c, _ids in pairs] == ["1.1", "1.1", "1.1"]
+    assert pairs[0][0].label == "Paper A · 1.1"
+
+
+def test_chunk_citations_with_anchors_follow_anchor_order_and_skip_non_chunks():
+    """mix 形态:候选池大到不可全列,只有被答案真正引用的 chunk 出卡,顺序是
+    锚点序而不是池序。非 chunk 锚点(KG/记忆/外部)与池外锚点必须静默略过——
+    前者不是原文段落,后者是本次没进候选池的 id,建卡就是凭空捏造一条引用。"""
+    chunks = [_chunk("c1"), _chunk("c2"), _chunk("c3")]
+    anchors = [
+        _anchor("k1", "c3"),
+        # object_type 的闸必须自己拦住:object_id 的命名空间不是 chunk 独占的,
+        # 一个 KG 锚点的 object_id 可以与池里某条 chunk 的 id 重合(这里刻意让
+        # 它等于 c2)。只按 object_id 查池会凭空多出一张原文卡。
+        _anchor("k2", "c2", object_type="concept"),
+        _anchor("k3", "c1"),
+        _anchor("k4", "c-not-in-pool"),
+    ]
+
+    pairs = _service().chunk_citations(
+        chunks, notebook_id="active", anchors=anchors)
+
+    assert [c.element_id for c, _ids in pairs] == ["c3-el0", "c1-el0"]
+    assert [ids for _c, ids in pairs] == [
+        ("c3-el0", "c3-el1"), ("c1-el0", "c1-el1")]
+
+
+def test_chunk_citations_blank_the_active_notebook_and_keep_a_mounted_one():
+    """PPR 概念漫游与联邦检索会对 active 库自己的命中打上 active 自己的 id
+    (并非只有跨库命中才打标)。等于本次 ask 的 notebook 必须归一成空串,否则
+    前端会多显示一个「来自「当前笔记本」」徽章;真正来自挂载库的那条要原样
+    带出 id 与 tier,不能连带误伤。"""
+    chunks = [
+        _chunk("c-self", notebook_id="active"),
+        _chunk("c-implicit", notebook_id=""),
+        _chunk("c-base", notebook_id="base"),
+    ]
+
+    pairs = _service().chunk_citations(chunks, notebook_id="active")
+    by_source = {c.element_id: c for c, _ids in pairs}
+
+    assert by_source["c-self-el0"].notebook_id == ""
+    assert by_source["c-self-el0"].tier == "personal"
+    assert by_source["c-implicit-el0"].notebook_id == ""
+    assert by_source["c-implicit-el0"].tier == "personal"
+    assert by_source["c-base-el0"].notebook_id == "base", (
+        "真正跨库的 chunk 必须原样带出 notebook_id,实为 "
+        f"{by_source['c-base-el0'].notebook_id!r}")
+    assert by_source["c-base-el0"].tier == "base"
+
+
+def test_chunk_citations_read_each_store_exactly_once_for_the_whole_batch():
+    """效率合同(运行效率是一等约束,镜像 citations_from 的批量口径):一次装配
+    无论建多少张卡,knowhow 定位(evidence_elements)与标题/原始上传名
+    (source_metadata)都各只发生一次读取,绝不逐条引用各查一次。两种调用形态
+    共用这一次:anchors 收窄的是出卡集合,不是读取批次。"""
+    service = _service()
+    reads: list[str] = []
+    inner_elements = service.sources.evidence_elements
+    inner_metadata = service.sources.source_metadata
+
+    def _counted_elements(element_ids):
+        reads.append("evidence_elements")
+        return inner_elements(element_ids)
+
+    def _counted_metadata(source_ids):
+        reads.append("source_metadata")
+        return inner_metadata(source_ids)
+
+    service.sources.evidence_elements = _counted_elements
+    service.sources.source_metadata = _counted_metadata
+    chunks = [_chunk(f"c{i}", source_id=f"s{i}") for i in range(7)]
+
+    pairs = service.chunk_citations(chunks, notebook_id="active")
+    assert len(pairs) == 7
+    assert sorted(reads) == ["evidence_elements", "source_metadata"], (
+        f"批量口径被破坏,实际读取序列为 {reads}")
+
+    reads.clear()
+    anchored = service.chunk_citations(
+        chunks, notebook_id="active", anchors=[_anchor("k1", "c4")])
+    assert len(anchored) == 1
+    assert sorted(reads) == ["evidence_elements", "source_metadata"], (
+        f"anchors 形态的读取批次必须相同,实际为 {reads}")

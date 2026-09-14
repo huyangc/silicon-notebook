@@ -11,7 +11,7 @@ DualGraph 借鉴的产出侧动机:一次性把全部证据喂给合成模型会
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Mapping, Sequence
 
 
@@ -87,6 +87,7 @@ def plan_outline_sections(
     kg_by_id: Mapping[str, Any],
     element_by_id: Mapping[str, Any],
     chunk_by_id: Mapping[str, Any],
+    exact_reserve: int = 0,
 ) -> tuple[list[OutlineSectionSlice], list[str]]:
     """把终态大纲切成 (可合成的切片, 被跳过的节标题)。切片按**文档序**排列。
 
@@ -106,10 +107,48 @@ def plan_outline_sections(
     序号与号段偏移都按这里的顺序分配,于是节级 prompt 里的「(2 of 5)」、进度轨迹步
     的「第 2/共 5 节」和答案里那一节的实际位置说的是同一件事。只在渲染时重排的话,
     这三处会各说各的 —— 模型被告知在写第 2 节,读者却在第 4 个标题下读到它。
+
+    ``exact_reserve``:**未被任何节绑定**的精确命中(用户在问题里逐字点名的那些
+    段落,``RetrievedChunk.exact_lookup``)按 ``chunk_by_id`` 迭代序取前 N 条,追加
+    到**每一节**切片的 chunks 尾部。缺省 0 = 不注入,此时切片内容、顺序、
+    ``evidence_count`` 与 ``skipped`` 逐字节等于接这个参数之前。
+
+    **为什么镜像外部证据的规则**:``_answer_reasoning_sections`` 已经立了同形的先例
+    ——外部材料不由大纲绑定,却是本轮唯一「库里查不到」的东西,于是每一节都装同一
+    份。精确命中是这条规则的另一半:它是本轮唯一「用户亲口点名」的东西。模型建大纲
+    时按语义把节绑在知识对象与元素上,一段用户指名要看的原文可能一个 ``evidence_key``
+    也没拿到;不注入的话,单次合成路径上被前缀席位保住的那段原文,在按节路径上会
+    整段消失——同一个问题,只因为大纲够到了两节就读不到自己点名的段落。所以这与
+    单次合成的前缀席位(``retrieval.promote_bounded_prefix``)是同一个意图,只是换了
+    一条装配路径。
+
+    **只注入未绑定的**:已经绑到某一节的精确块留在那一节,不复制到别处。同一个块在
+    两节里会拿到两个不同号段的 ``[k]``,合并锚点后就是两条指向同一段原文的引用——
+    读者看见的是「两处不同证据」,而实际只有一处。绑定关系是模型的判断,它比这里的
+    兜底更准,不该被兜底覆盖。
+
+    **只注入到幸存节**:空节的判定在注入之前、只按该节自己绑定的证据做。否则「问到
+    了但没找到」那条诚实记录会被一段跟它毫无关系的精确块填成一节真节,模型拿着这段
+    原文在一个它本来答不了的标题下写作。
+
+    **上限为什么是 reserve**:与单次合成共用 ``REASONING_EXACT_RESERVE`` 一个旋钮,
+    量纲相同(合成上下文里的块条数),于是「精确命中至多占多少席」这件事在两条装配
+    路径上是同一个数,用户调一次即可。注入只改切片内容,不扩预算:进了切片的块照样
+    在 ``_answer_reasoning`` 的 ``chunk_context_chars`` 里跟本节绑定的块竞争。
+
+    **注入的是不带席位标记的副本**(``exact_lookup=False``),不是原对象:
+    ``_answer_reasoning`` 会把带标记的块提到该节字符预算的最前(前缀席位),而那把
+    席位是为单次合成路径与上百个候选竞争时设计的。在节内,绑定关系是模型的判断;
+    带着标记注入等于让一段模型没绑进本节的原文按构造排在模型亲自绑上的块之前——
+    预算吃满的节会因此丢掉自己绑定的证据。去掉标记后,注入块按相关度稳定排序:与
+    本节绑定块同分时排在它们之后,预算不够就是它被切掉,而不是绑定块。已绑定到某
+    节的精确块仍是原对象、仍带标记,在那一节里照常拿席位。副本按节各建一份,任何
+    节内的就地修改都不会串到别的节或 ``stage.chunks``。
     """
     kept: list[Any] = []
     evidence: dict[int, tuple[list, list, list]] = {}
     skipped: list[str] = []
+    bound_chunk_keys: set[str] = set()
     for section in sections:
         hits: list = []
         elements: list = []
@@ -121,6 +160,7 @@ def plan_outline_sections(
                 elements.append(element_by_id[key])
             elif key in chunk_by_id:
                 chunks.append(chunk_by_id[key])
+                bound_chunk_keys.add(key)
         if not (hits or elements or chunks):
             skipped.append(str(getattr(section, "title", "")))
             continue
@@ -128,9 +168,28 @@ def plan_outline_sections(
         evidence[id(section)] = (hits, elements, chunks)
         kept.append(section)
 
+    # 空节判定已经做完(上面的循环),所以注入不可能让任何一节复活。
+    reserved: list = []
+    if int(exact_reserve or 0) > 0:
+        for key, chunk in chunk_by_id.items():
+            if key in bound_chunk_keys:
+                continue
+            if not getattr(chunk, "exact_lookup", False):
+                continue
+            reserved.append(chunk)
+            if len(reserved) >= int(exact_reserve):
+                break
+
     slices: list[OutlineSectionSlice] = []
     for section, parent_id in _document_order(kept):
         hits, elements, chunks = evidence[id(section)]
+        if reserved:
+            # 本节绑定的块在前,注入块在后:``_answer_reasoning`` 随后按相关度
+            # 稳定排序,同分时保留的正是这个插入序。副本去掉席位标记,理由见
+            # docstring 末段。
+            chunks = chunks + [
+                replace(chunk, exact_lookup=False) for chunk in reserved
+            ]
         slices.append(OutlineSectionSlice(
             section=section,
             index=len(slices),

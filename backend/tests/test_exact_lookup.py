@@ -315,6 +315,26 @@ def test_hits_fold_onto_the_command_so_subsections_never_take_extra_slots():
     assert [chunk.chunk_id for chunk in out] == ["row-Cmd > set_db"]
 
 
+def test_exact_lookup_chunks_are_marked_without_expanding_the_support_vocabulary():
+    """PR-B 乙 T3:通道产出的每条 chunk 都带 `exact_lookup=True`,但 provenance
+    仍记作普通 `lexical` support——词表本身不扩,标记走独立字段。"""
+    hits = [_hit("h1", "s1", "Cmd > set_db", "set_db")]
+    sections = {
+        ("s1", "Cmd > set_db"): [_row("r-set_db", "Cmd > set_db", "set_db 用于设置数据库属性。")],
+    }
+    stub = _StubDeps(hits=hits, sections=sections)
+    out = exact_lookup_chunks(
+        stub.as_deps(), "nb", "set_db 怎么用", ExactLookupLimits())
+
+    assert out
+    assert all(chunk.exact_lookup is True for chunk in out)
+    assert all(
+        support.origin == "lexical"
+        for chunk in out
+        for support in chunk.retrieval_supports
+    )
+
+
 def test_equal_hit_groups_are_ordered_by_the_shortest_breadcrumb():
     """组间同命中数时仍按最短面包屑定序——确定性,且偏向更浅/更泛的那个节点。"""
     hits = [

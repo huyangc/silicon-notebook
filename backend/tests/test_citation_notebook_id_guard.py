@@ -117,12 +117,15 @@ REGISTERED_SITES: Registry = {
         "Normalises once per hit into `hit_notebook_id` (helper call a few "
         "lines above) and reuses that local for every evidence row of the hit.",
     ),
-    (ASK_SERVICE, "AskService._draft_reasoning_response"): (
+    (EVIDENCE_CONTEXT, "EvidenceContextService.element_citations"): (
         ("''",),
         "Element citations are hydrated from `element_context`, which is "
         "single-notebook by construction (it tier-maps exactly the active "
         "notebook and writes an empty id_map notebook_id), so the constant "
-        "empty string is structurally the active notebook.",
+        "empty string is structurally the active notebook.  (PR-B 甲: this "
+        "site moved here verbatim from `AskService._draft_reasoning_response` "
+        "when the reasoning element leg was lifted into the shared "
+        "evidence-context layer; the argument text is unchanged.)",
     ),
 }
 

@@ -1374,6 +1374,123 @@ class EvidenceContextService:
             ))
         return citations
 
+    def element_citations(
+        self,
+        elements: Sequence[Any],
+        anchors: Sequence[AnswerAnchor],
+        *,
+        notebook_id: str,
+    ) -> list[Citation]:
+        """原文元素(element)锚点的引用卡批量装配——`citations_from` 的 element
+        对偶,逐字提自 ``AskService._draft_reasoning_response`` 的 element 腿。
+
+        只对 ``object_type == "element"`` 且 ``object_id`` 落在 ``elements``
+        里的锚点建卡,顺序是**锚点序**。非 element 锚点与池外锚点静默略过。
+
+        效率合同同 `citations_from` / `chunk_citations`:``knowhow_refs_for``
+        一次、``citation_source_info`` 一次、``tier_map`` 一次,与最终建几条卡
+        无关;三个批量都按整池算(锚点收窄不改读取次数)。
+
+        ``notebook_id`` 只用于解 ``tier``:element 检索是**单库**通道(跨库命中
+        走 KG/chunk 两条),``Citation.notebook_id`` 因此恒为空串——空串就是
+        「本库」,前端不会为它画跨库徽章。
+        """
+        element_by_id = {item.element_id: item for item in elements}
+        element_refs = self.knowhow_refs_for(element_by_id)
+        element_source_info = self.citation_source_info(
+            item.source_id for item in elements
+        )
+        element_tier = self.tier_map([notebook_id]).get(
+            notebook_id, "personal"
+        )
+        citations: list[Citation] = []
+        for anchor in anchors:
+            if anchor.object_type != "element" or anchor.object_id not in element_by_id:
+                continue
+            item = element_by_id[anchor.object_id]
+            source_info = element_source_info.get(item.source_id) or {}
+            source_title = source_info.get("title", item.source_title)
+            citations.append(Citation(
+                label=f"{source_title} · {item.location_label}".strip(" ·"),
+                source_id=item.source_id,
+                element_id=item.element_id,
+                location_label=item.location_label,
+                quoted_span=item.text[:200],
+                source_file_name=source_info.get("file_name", ""),
+                tier=element_tier,
+                notebook_id="",
+                knowhow=element_refs.get(item.element_id),
+            ))
+        return citations
+
+    def chunk_citations(
+        self,
+        chunks: Sequence[RetrievedChunk],
+        *,
+        notebook_id: str,
+        anchors: Sequence[AnswerAnchor] | None = None,
+    ) -> list[tuple[Citation, tuple[str, ...]]]:
+        """原文段落(chunk)的引用卡批量装配——`citations_from` 的 chunk 对偶。
+
+        两种调用形态,同一份卡片规则:
+
+        * ``anchors=None``——每条 chunk 一卡,顺序就是入参顺序;顺序的含义由调用方
+          的入参决定:chunk 模式传的是 rerank 序(最相关在前),reasoning 的原文段
+          腿传的是回过滤后的 stage 检索序(不是相关度序,也不是 prompt 里的
+          ``[k]`` 序)。本方法不重排。
+        * ``anchors`` 非空——只对 ``object_type == "chunk"`` 且 ``object_id``
+          落在本池内的锚点建卡,顺序是**锚点序**(答案引用了哪几段就列哪几段;
+          候选池大到不可全列时用这一形态)。非 chunk 锚点与池外锚点静默略过。
+
+        效率合同(与 `citations_from` 同口径,运行效率是一等约束):一次装配
+        无论最终建多少条卡,都只对每个批量读取点发生**恰好一次**——``tier_map``
+        一次、``knowhow_refs_for``(覆盖每条 chunk 的首个 element_id)一次、
+        ``citation_source_info``(标题 + 原始上传名)一次。三个批量都按整池算,
+        与 anchors 是否收窄无关,所以两种形态的读取次数相同。
+
+        返回 (引用, 该 chunk 的**整个** ``element_ids``) 配对:附图候选是整段
+        元素而不是上面 knowhow 用的首个 eid——配图元素通常不是 chunk 的第一个
+        元素;配对在这里做,因为 ``Citation`` 自己不带 chunk_id。调用方把第二元
+        直接交给 ``attach_citation_images``,或按自己的计费口径丢弃。
+
+        ``tier``:单库路径的 chunk 多数不带 ``notebook_id``,回退本次 ask 的
+        notebook;概念漫游(PPR)与联邦检索会掺入 base 库 chunk,那些带真实归属。
+        ``notebook_id`` 一律过 ``foreign_notebook_id``:同样这两条路径会对 active
+        库自己的命中打上 active 自己的 id,不归一前端就会多显示一个「来自「当前
+        笔记本」」徽章。
+        """
+        pool = list(chunks)
+        chunk_tier_map = self.tier_map(
+            list({c.notebook_id or notebook_id for c in pool}))
+        knowhow_refs = self.knowhow_refs_for(
+            c.element_ids[0] for c in pool if c.element_ids)
+        citation_source_info = self.citation_source_info(
+            c.source_id for c in pool
+        )
+        if anchors is None:
+            ordered = pool
+        else:
+            by_id = {c.chunk_id: c for c in pool}
+            ordered = [
+                by_id[a.object_id] for a in anchors
+                if a.object_type == "chunk" and a.object_id in by_id
+            ]
+        pairs: list[tuple[Citation, tuple[str, ...]]] = []
+        for c in ordered:
+            eid = c.element_ids[0] if c.element_ids else ""
+            source_info = citation_source_info.get(c.source_id) or {}
+            source_title = source_info.get("title", c.source_title)
+            pairs.append((Citation(
+                label=f"{source_title} · {c.section_path}".strip(" ·"),
+                source_id=c.source_id, element_id=eid,
+                location_label=c.section_path, quoted_span=c.text[:200],
+                source_file_name=source_info.get("file_name", ""),
+                tier=chunk_tier_map.get(
+                    c.notebook_id or notebook_id, "personal"),
+                notebook_id=foreign_notebook_id(c.notebook_id, notebook_id),
+                knowhow=knowhow_refs.get(eid)), tuple(c.element_ids)))
+        return pairs
+
     @staticmethod
     def truncate_kg_block(block: str, max_tokens: int) -> str:
         if est_tokens(block) <= max_tokens:

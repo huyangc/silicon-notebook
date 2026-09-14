@@ -202,7 +202,17 @@
         "answer": "Fixture evidence establishes stable gain [k1].",
         "answer_id": "<ans-id-1>",
         "answered_at": "<timestamp>",
-        "citations": [],
+        "citations": [
+          {
+            "element_id": "<el-id-1>",
+            "label": "Fixture amplifier notes · §1 Gain",
+            "location_label": "§1 Gain",
+            "quoted_span": "Fixture gain is stable because source degeneration adds feedback.",
+            "source_file_name": "fixture.md",
+            "source_id": "<src-id-1>",
+            "tier": "personal"
+          }
+        ],
         "conclusion": "Fixture evidence establishes stable gain .",
         "conversation_id": "<conv-id-1>",
         "evidence_level": "grounded",
@@ -330,7 +340,7 @@
                 "<chunk-id-1>"
               ],
               "anchors": 1,
-              "citations": 0,
+              "citations": 1,
               "enumerated_collections": 0,
               "enumeration_block_dropped": false,
               "evidence_level": "grounded",
@@ -370,7 +380,17 @@
         "answer": "Fixture evidence establishes stable gain [k1].",
         "answer_id": "<ans-id-1>",
         "answered_at": "<timestamp>",
-        "citations": [],
+        "citations": [
+          {
+            "element_id": "<el-id-1>",
+            "label": "Fixture amplifier notes · §1 Gain",
+            "location_label": "§1 Gain",
+            "quoted_span": "Fixture gain is stable because source degeneration adds feedback.",
+            "source_file_name": "fixture.md",
+            "source_id": "<src-id-1>",
+            "tier": "personal"
+          }
+        ],
         "conclusion": "Fixture evidence establishes stable gain .",
         "conversation_id": "<conv-id-1>",
         "evidence_level": "grounded",
@@ -498,7 +518,7 @@
                 "<chunk-id-1>"
               ],
               "anchors": 1,
-              "citations": 0,
+              "citations": 1,
               "enumerated_collections": 0,
               "enumeration_block_dropped": false,
               "evidence_level": "grounded",

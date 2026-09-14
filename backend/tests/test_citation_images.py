@@ -498,6 +498,49 @@ def _seed_source_with_a_captioned_figure(repo) -> tuple[str, str]:
     return notebook.id, source_id
 
 
+def _seed_source_with_the_figure_leading_its_chunk(repo) -> tuple[str, str]:
+    """同上，但配图排在正文**之前**，所以该 chunk 的 `element_ids[0]`——原文段
+    引用卡自己的 `element_id`——直接就是那张图的元素，不必借道 `element_ids`
+    的其余位。
+
+    这是 PR-B 乙 B 那条身份排除(`collection_citation_ids`)真正会被踩到的形态:
+    `_seed_source_with_a_captioned_figure`(正文在前)里 chunk 卡的 `element_id`
+    是段落，它自己永远解不出图，排不排除都测不出区别——那条 fixture 上的
+    `images == []` 断言是空转的，不排除也会绿。只有图在前，chunk 卡的
+    `element_id` 才会独立命中同一张图，让「排除掉」与「没排除」在 `.images`
+    上产生真实分歧。
+    """
+    notebook = repo.create_notebook(NotebookCreate(name="nb"))
+    source_id = "src-fig-lead"
+    now = "2026-01-01T00:00:00"
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO sources (id,notebook_id,title,source_type,file_name,"
+            "file_path,file_size,file_hash,summary,doc_type,parse_status,"
+            "created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (source_id, notebook.id, "时序手册", "document", "timing.md",
+             "/tmp/timing.md", 0, "h", "", "", "extracted", now, now),
+        )
+        db.execute(
+            "INSERT INTO source_elements "
+            "(id,source_id,element_type,location_label,text,metadata,created_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (f"el-{source_id}-0001", source_id, "image", "Markdown image 1",
+             FIGURE_CAPTION,
+             json.dumps({"asset_id": ASSET_ID, "caption": FIGURE_CAPTION},
+                        ensure_ascii=False), now),
+        )
+        db.execute(
+            "INSERT INTO source_elements "
+            "(id,source_id,element_type,location_label,text,metadata,created_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (f"el-{source_id}-0002", source_id, "paragraph", "p1",
+             f"{UNIQUE_TERM} 收敛需要在综合阶段预留时序裕量。", "{}", now),
+        )
+    repo._chunk_and_embed_source(source_id)
+    return notebook.id, source_id
+
+
 def _spy_on_image_asset_rows(repo, monkeypatch) -> list:
     """包住**真实** SourceStore.image_asset_rows，观察生产接线本身。
 
@@ -670,11 +713,14 @@ class _ReasoningLLM:
 def _seed_kg_concept(repo, notebook_id: str, source_id: str) -> None:
     """一个指向该来源正文元素的 concept 知识对象。
 
-    只为让 reasoning 装配点的**引用腿**非空：reasoning 的 `citations` 只由 KG
-    命中（`citations_from`）/ 记忆 / element 锚点 / 集合行产生，纯 chunk 命中不
-    产生引用。没有它，「锚点腿与引用腿拆成两次调用」的变异在这个装配点抓不到
-    ——空的那次会 early-return，调用数仍是 1。轻量 raw-SQL 造数，镜像
-    test_knowhow_citation.py 的同款做法，不经完整 KG 抽取管线。
+    只为让 reasoning 装配点的**引用腿**非空。写这条夹具时 reasoning 的
+    `citations` 只由 KG 命中（`citations_from`）/ 记忆 / element 锚点 / 集合行
+    产生；PR-B 甲之后原文段也出卡（进了合成 prompt 的 chunk 逐条一张，见
+    `_draft_reasoning_response` 的 chunk 腿），所以纯 chunk 命中的一轮引用腿
+    现在也非空。夹具**保留**：这个装配点的「锚点腿与引用腿拆成两次调用」变异
+    必须在**两条腿都非空**时才报红，而 KG 命中是这里唯一不依赖新腿的来源——
+    靠新腿撑着，等于让这条钉子测试的红/绿挂在另一条腿的实现上。轻量 raw-SQL
+    造数，镜像 test_knowhow_citation.py 的同款做法，不经完整 KG 抽取管线。
     """
     now = "2026-01-01T00:00:00"
     evidence = json.dumps([{
@@ -723,6 +769,85 @@ def test_reasoning_chunk_anchor_carries_the_section_figure(repo, monkeypatch):
     # 调用即预算翻倍，必须报红。
     assert response.citations, "reasoning 路径仍应产出引用回退列表"
     assert len(calls) == 1, calls
+
+
+class _NoMarkerLLM:
+    """reasoning 三段最小 stub：合成不吐任何 `[k]`，走零锚点回退列表分支。"""
+
+    configured = True
+    model = "fake-nomarker-llm"
+
+    def chat_json(self, messages, schema_hint, **kwargs):
+        if "sub_queries" in (schema_hint or ""):
+            return json.dumps({"sub_queries": [{"query": UNIQUE_TERM}]})
+        if "next_action" in (schema_hint or ""):
+            return json.dumps({"next_action": "answer", "sufficient": True})
+        return json.dumps({"answer": "时序基本稳定。", "grounded": False})
+
+
+def _the_chunk_citation_card(citations):
+    """原文段引用卡的身份判据：`location_label` 恒为该 chunk 的 `section_path`
+    （这个夹具的真实分块给出空串）。用 `_seed_source_with_the_figure_leading_
+    its_chunk` 时这条卡的 `element_id` 直接就是图片元素本身,所以不能像别处
+    那样靠 `element_id` 分辨——这里唯一可靠的判据是 `location_label`。"""
+    matches = [c for c in citations if c.location_label == ""]
+    assert len(matches) == 1, [(c.element_id, c.location_label) for c in citations]
+    return matches[0]
+
+
+def test_reasoning_chunk_citation_card_carries_no_image_though_its_anchor_does(
+    repo, monkeypatch
+):
+    """PR-B 乙 B：原文段引用卡与它的 chunk 锚点是同一段证据的两种呈现——锚点已经
+    带图（下方断言钉住这半),卡再带一次就是同一张图在 `CITATION_IMAGES_PER_
+    ANSWER` 预算里被扣两次。`_draft_reasoning_response` 因此把 `chunk_cards`
+    按 `id()` 排除出附图目标,这里钉另一半:锚点非空且带图时,对应的原文段卡
+    `images` 必须是 `[]`。
+
+    用图在前的夹具(`_seed_source_with_the_figure_leading_its_chunk`)而不是
+    上面锚点用例那个正文在前的版本:那个版本里卡的 `element_id` 是段落,自己
+    永远解不出图,排不排除都测不出区别,这里的断言会是空转。图在前时卡的
+    `element_id` 直接就是那张图的元素,排除是否生效在 `.images` 上才有真实
+    分歧——下面的变异验证只在这个夹具上会红。
+    """
+    notebook_id, source_id = _seed_source_with_the_figure_leading_its_chunk(repo)
+    client = _ReasoningLLM()
+    for workload in ("reasoning_agent", "evidence_refine", "ask_answer"):
+        bind_chat_client(repo, workload, client)
+
+    response = repo.ask(
+        notebook_id, AskRequest(question=UNIQUE_TERM, mode="reasoning"),
+    )
+
+    chunk_anchors = [a for a in response.anchors if a.object_type == "chunk"]
+    assert any(a.images for a in chunk_anchors), (
+        "前提:锚点必须真的带图,否则下面 == [] 的断言是空转")
+    card = _the_chunk_citation_card(response.citations)
+    assert card.images == []
+
+
+def test_a_zero_anchor_fallback_chunk_card_also_carries_no_image(repo, monkeypatch):
+    """零锚点回退不带配图是已登记的取舍(与 chunk 模式 `ask_chunk` 的引用回退
+    列表不同:那条路径**确实**发图,因为它是回答唯一的证据呈现。reasoning 的
+    原文段卡此前就不参与附图预算,不因为有没有锚点而改变——这里用零锚点(模型
+    一个 `[k]` 都没吐)的形态钉住:即便没有锚点先占走这张图的预算,卡也不补拿。
+    同上一条,用图在前的夹具让卡自己的 `element_id` 就能独立命中那张图,
+    使这条断言不是空转。
+    """
+    notebook_id, source_id = _seed_source_with_the_figure_leading_its_chunk(repo)
+    client = _NoMarkerLLM()
+    for workload in ("reasoning_agent", "evidence_refine", "ask_answer"):
+        bind_chat_client(repo, workload, client)
+
+    response = repo.ask(
+        notebook_id, AskRequest(question=UNIQUE_TERM, mode="reasoning"),
+    )
+
+    assert response.anchors == []
+    assert response.citations, "零锚点回退列表必须非空"
+    card = _the_chunk_citation_card(response.citations)
+    assert card.images == []
+
 
 # graph 模式（PPR 分支 + src_chunks/mix 分支，后者镜像见 test_knowhow_citation.py）
 # 曾各有一个装配点钉子测试，已随该 ask 模式退役一并删除。现存的两个装配点

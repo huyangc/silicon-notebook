@@ -107,6 +107,7 @@ from app.services.retrieval import (
     is_generated_question_only_chunk,
     merge_retrieval_supports,
     prefer_stronger_chunk_candidate,
+    promote_bounded_prefix,
 )
 from app.services.search_profile import render_style_block
 from app.services.source_graph_activation import (
@@ -2455,6 +2456,22 @@ class AskService:
             # 于是「参数表进不进 prompt」成了掷骰子。Python 的稳定排序保留插入序
             # (= 检索序 / 节内文档序),这既是确定的,也正好是该节该被读的顺序。
             ordered = sorted(chunks, key=lambda c: -c.relevance)
+            # 精确通道的块再往前提一小段(见 `promote_bounded_prefix`)。相关度
+            # 降序**不足以**保住它们,两条具体风险:①同分 1.0 洗牌——PPR / 词法
+            # 通道也会给出 relevance 1.0 的块,稳定排序下它们按插入序排在精确块
+            # **之前**,于是一次 PPR 丰收就能把整节命令表挤到预算之外;②切点落在
+            # 精确小节中间——主描述进了 prompt,`Arguments` 参数表没进,而「参数
+            # 表也要在」正是这条通道存在的理由。前缀席位把这两件事一起解掉。
+            # 残余是刻意的:一节 12 块时只有前 reserve 块拿到席位,其余照常按相关
+            # 度竞争——与 chunk 模式 `exact_section_reserve` 的 4/12 同义。席位
+            # 救不了的第三种形态:structured_block / collection_map_block 先于
+            # 原文段消费同一份预算,整表够大时原文段拿到 0 字符——已登记
+            # fangan_todo「结构化块挤空 reasoning 原文段」,本处不夹下限。
+            ordered = promote_bounded_prefix(
+                ordered,
+                lambda chunk: getattr(chunk, "exact_lookup", False),
+                self.settings.reasoning_exact_reserve,
+            )
             chunk_block, chunk_id_map = self._chunk_answer_context(
                 ordered, notebook_id=notebook_id, id_offset=key_offset,
                 budget_chars=max(0, chunk_budget - len(source_context)))
@@ -3272,73 +3289,19 @@ class AskService:
                 synth_failed = not _ok
             ask_stage("answer_llm", _t)
 
-            # 引用绑回 chunk。mix:绑到被答案引用的 chunk anchor(候选池大,不可全列)。
-            # 非 mix:每个精选 chunk 一条(字节等价于历史)。
-            # tier:selected 通常单库(personal),但概念漫游(PPR,第三路 merge 进
-            # _mix_retrieve 的 candidates)可掺 base 库 chunk——那些 c.notebook_id
-            # 非空;其余(单库路径)留空,回退本次 ask 的 notebook_id。一次批量
-            # 查询解出 {notebook_id: tier},citations 数量再多也只查一次。
-            citations: List[Citation] = []
+            # 引用绑回 chunk。mix:绑到被答案引用的 chunk anchor(候选池大,不可
+            # 全列)——传 anchors,按锚点序建卡。非 mix:每个精选 chunk 一条——
+            # 传 anchors=None。卡片规则、三个批量读取(tier / knowhow 首元素 /
+            # 标题与原始上传名)与跨库归一都在 chunk_citations 里,那里也是
+            # reasoning 腿将来复用同一份规则的入口。配对的第二元是该 chunk 的
+            # 整个 element_ids,供下面的附图目标使用。
             raise_if_cancelled(cancel_event)
-            chunk_tier_map = self._tier_map_for(
-                {c.notebook_id or notebook_id for c in selected})
-            def _chunk_tier(c) -> str:
-                return chunk_tier_map.get(c.notebook_id or notebook_id, "personal")
-            # Task 14 codex r4 fix: c.notebook_id 同样会被 PPR(_mix_retrieve 第三路
-            # 概念漫游,merge 进 selected 的 chunk)对 active 库自己的命中打上 active
-            # 自己的 id,并非只在跨库命中时才打标。下面两个构造点因此各自走共享的
-            # foreign_notebook_id(唯一定义在 domain/citation_origin.py),否则前端
-            # 会显示一个多余的「来自「当前笔记本」」徽章。
-            # Task 12b（引用跳转扩面）：chunk 模式此前从未富化过
-            # citation.knowhow（此前只有 reasoning 模式的 citations_from 会查）
-            # ——同池同权补上。批量查一次 knowhow 定位标签，覆盖 selected 里
-            # 每个 chunk 的首个 element_id；不管 mix/plain 哪条分支最终建多少
-            # 条引用，只发生一次 store 读取（运行效率是一等约束，镜像
-            # citations_from 的批量口径）。
-            knowhow_refs = self.evidence_context.knowhow_refs_for(
-                c.element_ids[0] for c in selected if c.element_ids)
-            citation_source_info = self.evidence_context.citation_source_info(
-                c.source_id for c in selected
-            )
-            # 本段附图: 每条 chunk 引用的候选是该 chunk 的**整个** element_ids,
-            # 不是上面 knowhow 用的首个 eid —— 配图元素通常不是 chunk 的第一个
-            # 元素。引用与它的 chunk 在这里配好对,因为 Citation 自己不带 chunk_id。
-            citation_image_targets: List[tuple[Citation, Sequence[str]]] = []
-            if overlay_on:
-                by_id = {c.chunk_id: c for c in selected}
-                for a in anchors:
-                    if a.object_type == "chunk" and a.object_id in by_id:
-                        c = by_id[a.object_id]
-                        eid = c.element_ids[0] if c.element_ids else ""
-                        source_info = citation_source_info.get(c.source_id) or {}
-                        source_title = source_info.get("title", c.source_title)
-                        citation = Citation(
-                            label=f"{source_title} · {c.section_path}".strip(" ·"),
-                            source_id=c.source_id, element_id=eid,
-                            location_label=c.section_path, quoted_span=c.text[:200],
-                            source_file_name=source_info.get("file_name", ""),
-                            tier=_chunk_tier(c),
-                            notebook_id=foreign_notebook_id(
-                                c.notebook_id, notebook_id),
-                            knowhow=knowhow_refs.get(eid))
-                        citations.append(citation)
-                        citation_image_targets.append((citation, c.element_ids))
-            else:
-                for c in selected:
-                    eid = c.element_ids[0] if c.element_ids else ""
-                    source_info = citation_source_info.get(c.source_id) or {}
-                    source_title = source_info.get("title", c.source_title)
-                    citation = Citation(
-                        label=f"{source_title} · {c.section_path}".strip(" ·"),
-                        source_id=c.source_id, element_id=eid,
-                        location_label=c.section_path, quoted_span=c.text[:200],
-                        source_file_name=source_info.get("file_name", ""),
-                        tier=_chunk_tier(c),
-                        notebook_id=foreign_notebook_id(
-                            c.notebook_id, notebook_id),
-                        knowhow=knowhow_refs.get(eid))
-                    citations.append(citation)
-                    citation_image_targets.append((citation, c.element_ids))
+            citation_pairs = self.evidence_context.chunk_citations(
+                selected, notebook_id=notebook_id,
+                anchors=anchors if overlay_on else None)
+            citations: List[Citation] = [c for c, _ids in citation_pairs]
+            citation_image_targets: List[tuple[Citation, Sequence[str]]] = list(
+                citation_pairs)
             citations.extend(self._memory_citations(anchors, memory_hits))
             # 锚点与引用一次调用(共享每答案预算,见 attach_citation_images
             # docstring),一次 store 读取。
@@ -4973,6 +4936,7 @@ class AskService:
                     kg_by_id=outline_kg_by_id,
                     element_by_id={item.element_id: item for item in elements},
                     chunk_by_id={item.chunk_id: item for item in chunks},
+                    exact_reserve=self.settings.reasoning_exact_reserve,
                 )
                 outline_planned = True
                 # 产出过集合清单/结构化整表枚举的 run 保持单次合成(codex r7):
@@ -5109,31 +5073,25 @@ class AskService:
             object_id=relation_id, relevance=relevance,
         ) for relation_id, relevance in relation_relevances.items()]
         citations.extend(self._memory_citations(anchors, memory_hits))
-        element_by_id = {item.element_id: item for item in elements}
-        element_refs = self.evidence_context.knowhow_refs_for(element_by_id)
-        element_source_info = self.evidence_context.citation_source_info(
-            item.source_id for item in elements
-        )
-        element_tier = self._tier_map_for({notebook_id}).get(
-            notebook_id, "personal"
-        )
-        for anchor in anchors:
-            if anchor.object_type != "element" or anchor.object_id not in element_by_id:
-                continue
-            item = element_by_id[anchor.object_id]
-            source_info = element_source_info.get(item.source_id) or {}
-            source_title = source_info.get("title", item.source_title)
-            citations.append(Citation(
-                label=f"{source_title} · {item.location_label}".strip(" ·"),
-                source_id=item.source_id,
-                element_id=item.element_id,
-                location_label=item.location_label,
-                quoted_span=item.text[:200],
-                source_file_name=source_info.get("file_name", ""),
-                tier=element_tier,
-                notebook_id="",
-                knowhow=element_refs.get(item.element_id),
-            ))
+        citations.extend(self.evidence_context.element_citations(
+            elements, anchors, notebook_id=notebook_id))
+        # 原文段(chunk)腿。候选集是**真正进了合成 prompt** 的那几段:由
+        # `reasoning_baseline["id_map"]`(合成前就填好,所以模型抛错的那一轮也
+        # 有)回过滤本次 `stage.chunks`,保留 stage 序。刻意不用 `chunks` 全量
+        # ——`chunk_context` 的字符预算挤掉的段没进过模型的视野,给它发卡就是
+        # 在「答案的依据」里列一条答案作者没看过的东西。按节合成路径各节的
+        # id_map 已合并进同一个 baseline(见上面的 sectioned 分支),所以这里
+        # 不需要按号段分区。清空闸(枚举答案零锚点)在下面自动适用;这些卡整体
+        # 不参与附图(见下面 attach_citation_images 处按身份排除的理由)。
+        prompt_chunk_ids = {
+            str(entry.get("object_id") or "")
+            for entry in dict(reasoning_baseline.get("id_map") or {}).values()
+            if entry.get("object_type") == "chunk"
+        }
+        chunk_cards = [c for c, _ids in self.evidence_context.chunk_citations(
+            [item for item in chunks if item.chunk_id in prompt_chunk_ids],
+            notebook_id=notebook_id)]
+        citations.extend(chunk_cards)
         # Typed collection rows have their own deterministic k5001+
         # bindings.  Mirror the cited rows into the fallback Citation
         # contract as well, while keeping the anchor path authoritative.
@@ -5142,7 +5100,7 @@ class AskService:
         # 里(`typed_collection_results` 把同一个对象挂进 `TypedCollectionItem
         # .citation`),所以下面那次 `attach_citation_images` 必须按身份把它们
         # 排除——理由写在那处。
-        collection_citation_ids: set[int] = set()
+        collection_citation_ids: set[int] = {id(c) for c in chunk_cards}
         for anchor in anchors:
             citation = collection_item_citations.get(anchor.object_id)
             if citation is None:
@@ -5210,8 +5168,8 @@ class AskService:
         # 本段附图: 统一挂在**锚点最终确定之后**——按节合成(sectioned)会整体
         # 换掉 anchors,在它之前富化等于富化一批被丢弃的对象;citations 也要等
         # 到上面那条枚举清零判完,否则会给一批马上要被扔掉的引用白发一次读取。
-        # 这里的引用(KG / element)各自都带 element_id,所以只有 chunk 锚点需要
-        # 额外候选。锚点与引用同一次调用,共享每答案预算。
+        # 这里的引用(KG / element / 原文段)各自都带 element_id,所以只有 chunk
+        # 锚点需要额外候选。锚点与引用同一次调用,共享每答案预算。
         #
         # **集合枚举行的引用按身份排除**(collection_citation_ids):它们是嵌在
         # `typed_collection_result_sets` 里的**同一个** Citation 实例,就地填
@@ -5221,6 +5179,8 @@ class AskService:
         # 纯属冗余。k5001 锚点那条腿不受影响——锚点是另一批对象。
         # 按篇取样(k7001+)的卡**也**被排除,但理由是另一条:它们是独立实例、不涉
         # 共享计费,排除是为与「零锚点回退不带配图」这条已登记取舍一致(不重复计费)。
+        # 原文段腿的卡(chunk_cards)同样按身份排除:其 element_id 是该段首元素,模型
+        # 引了同一段时锚点候选已含它——不排除就是同一张图在每答案预算里扣两次。
         self.evidence_context.attach_citation_images(
             anchor_image_targets(
                 anchors, {item.chunk_id: item.element_ids for item in chunks}

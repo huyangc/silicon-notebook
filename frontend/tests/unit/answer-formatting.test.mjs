@@ -177,6 +177,25 @@ test("computeSourceTierCounts returns all zeros for empty input", () => {
   assert.deepEqual(computeSourceTierCounts([]), { personal: 0, base: 0, external: 0 });
 });
 
+test("zero-anchor fallback: the badge counts every citation the backend sent", () => {
+  // PR-B 甲:reasoning 的纯原文命中现在也会产出 citations(每条进了合成 prompt
+  // 的原文段一张卡)。模型一个 [k] 都没吐时前端走 citations 回退分支,徽章的
+  // 三个桶加起来必须等于**后端发来的卡数**——少算一个,用户看到的「来源 N 篇」
+  // 就比下面实际列出的条目少,而这正是这条腿存在的那几种形态之一。
+  const citations = [
+    { label: "手册-1 · §1", source_id: "src-1", element_id: "e1", location_label: "§1", quoted_span: "q1", tier: "personal" },
+    { label: "手册-2 · §2", source_id: "src-2", element_id: "e2", location_label: "§2", quoted_span: "q2", tier: "personal" },
+    { label: "基准库手册 · §3", source_id: "src-3", element_id: "e3", location_label: "§3", quoted_span: "q3", tier: "base" },
+    { label: "IEEE Xplore · 外部论文-1", source_id: "", element_id: "", location_label: "§1", quoted_span: "q4", tier: "external" },
+  ];
+  const references = buildAnswerReferences("增益基本稳定。", [], citations);
+
+  assert.equal(references.length, citations.length);
+  const counts = computeSourceTierCounts(references);
+  assert.equal(counts.personal + counts.base + counts.external, citations.length);
+  assert.deepEqual(counts, { personal: 2, base: 1, external: 1 });
+});
+
 test("computeSourceTierCounts handles all-personal references", () => {
   const references = [
     { id: "a:k1", displayLabel: "[1]", anchor: { key: "k1", object_id: "ko-1", object_type: "chunk", label: "A", tier: "personal" } },

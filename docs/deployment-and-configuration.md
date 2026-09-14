@@ -770,6 +770,7 @@ EXACT_LOOKUP_FTS_K                 # exact hits sampled per identifier when rank
 EXACT_LOOKUP_MAX_SECTIONS          # sections fetched whole per question (default 3)
 EXACT_LOOKUP_MAX_CHUNKS_PER_SECTION  # chunks taken per section (default 12)
 EXACT_SECTION_RESERVE      # mix-selection seats reserved for those chunks, inside the existing budget (default 4)
+REASONING_EXACT_RESERVE    # reasoning's own synthesis-assembly prefix seats for exact-channel chunks, reordering only, no budget growth (default 4, 0=off)
 ```
 
 **Behaviour change — these settings no longer size a deep report's per-section

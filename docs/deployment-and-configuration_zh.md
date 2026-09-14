@@ -620,6 +620,7 @@ EXACT_LOOKUP_FTS_K                 # 每个标识符的精确命中采样窗口�
 EXACT_LOOKUP_MAX_SECTIONS          # 每个问题最多取齐几个小节（默认 3）
 EXACT_LOOKUP_MAX_CHUNKS_PER_SECTION  # 每个小节最多取几块（默认 12）
 EXACT_SECTION_RESERVE      # mix 最终选择为这些块预留的席位，仍在既有预算内（默认 4）
+REASONING_EXACT_RESERVE    # reasoning 合成装配为精确通道 chunk 预留的前缀席位，只改顺序不扩预算（默认 4，0=关闭）
 ```
 
 **行为变化——这几项不再决定深度报告逐节深挖的预算。** 逐节深挖现在把报告自己的

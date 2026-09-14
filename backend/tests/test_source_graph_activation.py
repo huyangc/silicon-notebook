@@ -367,6 +367,43 @@ def test_active_lane_appends_graph_chunks_after_baseline(monkeypatch):
     assert "text" not in events.rows[-1]
 
 
+def test_active_lane_preserves_the_baseline_chunk_exact_lookup_marker(monkeypatch):
+    """PR-B 乙 T3:reasoning 的精确席位提升(T4)靠这条透传站得住。
+
+    `BaselineProtectedEnrichmentService.run` 出于别名防护会先 `replace()` 一份
+    baseline(见其 docstring),所以不是同一个对象,但 `replace()` 携带全部
+    字段——`exact_lookup` 必须原样跟着那份冻结副本一路走到 result.chunks,
+    不能在这趟拷贝里悄悄丢掉。"""
+    baseline_chunk = _chunk("b", "a")
+    baseline_chunk.exact_lookup = True
+    baseline = [baseline_chunk]
+    ppr = SimpleNamespace(
+        hits=(),
+        cache_hit=True,
+        capability=SimpleNamespace(enabled=True, reason=""),
+    )
+    snapshot = SimpleNamespace(
+        allowed_source_ids=("a",),
+        scope_hash="scope",
+        nodes=(), relations=(), chunks=(), memberships=(),
+        degraded_reasons=(),
+    )
+    service, _events = _service(snapshot=snapshot, ppr=ppr)
+    monkeypatch.setattr(
+        service,
+        "_decision",
+        lambda _nb: SourceGraphRolloutDecision(True, False, "quality_approved"),
+    )
+
+    with source_scope_context(
+        "nb", {"mode": "include", "source_ids": ["a"], "narrowed": True}
+    ):
+        result = service.run("nb", baseline, source_titles=lambda _ids: {"a": "A"})
+
+    assert result.chunks[0].chunk_id == baseline_chunk.chunk_id
+    assert result.chunks[0].exact_lookup is True
+
+
 def test_report_activation_routes_each_graph_leaf_through_retrieval_run(monkeypatch):
     from app.services.retrieval_run import retrieval_run
 
