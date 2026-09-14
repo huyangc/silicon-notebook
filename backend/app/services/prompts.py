@@ -624,10 +624,11 @@ def project_reflect_actions(
                     f"({parameter.description}{optional})"
                 )
                 # Spelled as the ``a|b`` example string, never as a boolean and
-                # never as a closed-looking single value: that is what buys the
-                # validation layer's empty-string tolerance while still making a
-                # non-empty value outside the set an ``invalid_enum``
-                # (``model_json._validate_against_example``).
+                # never as a closed-looking single value: the hint then says
+                # exactly what the argument parser accepts (empty = unused,
+                # otherwise one of the listed values), and the shared shape
+                # walk (``model_json._collect_shape_deviations``) reports a
+                # non-empty value outside the set as ``invalid_enum`` drift.
                 fields.append(f'"{parameter.name}":"{values}"')
             else:
                 clauses.append(
@@ -779,12 +780,12 @@ def reflect_schema_hint(
         # for it.
         #
         # GENERAL DISCIPLINE, not a local taste: a tool parameter is spelled as
-        # a SELF-DESCRIBING STRING ENUM, never as a boolean.  The validation
-        # layer treats the two differently and only one of them is survivable.
-        # ``model_json._validate_against_example`` rejects a non-bool against a
-        # bool example outright (``invalid_boolean``), so a model answering
-        # ``"true"`` or ``"yes"`` — which they do — loses the WHOLE reflect turn
-        # to the fail-open fallback; that is the same root cause F1 fixed. A
+        # a SELF-DESCRIBING STRING ENUM, never as a boolean.  Models answer
+        # ``"true"`` or ``"yes"`` to a boolean knob as a matter of routine, and
+        # the argument parser reads strings; a bool example would make the
+        # hint promise a type the parser never relies on (and, before the
+        # shape boundary became lenient on 2026-09-14, cost the WHOLE reflect
+        # turn as ``invalid_boolean`` — the same root cause F1 fixed). A
         # string example carries F1's tolerance rule instead: empty is always
         # accepted, so a model that does not understand the knob can leave it
         # alone and still have its action land.  The enum values then say what

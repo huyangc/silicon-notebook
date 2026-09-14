@@ -5272,7 +5272,8 @@ class KnowledgeLifecycleService:
                     raw = desc_client.chat_json(
                         [{"role": "user", "content": concept_description_prompt(name, block)}],
                         CONCEPT_DESC_SCHEMA_HINT)
-                    desc = (json.loads(raw).get("description") or "").strip()
+                    raw_desc = json.loads(raw).get("description")
+                    desc = raw_desc.strip() if isinstance(raw_desc, str) else ""
                 except Exception:
                     desc = ""
                 return cid, desc, sig

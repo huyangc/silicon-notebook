@@ -57,26 +57,170 @@ def test_valid_json_is_returned_byte_for_byte():
     assert result.content == raw
 
 
+@pytest.mark.parametrize("raw", ["{}", '{"unrelated": 1}'])
+def test_a_reply_with_none_of_the_expected_keys_is_rejected(raw):
+    # The one usability gate the shared boundary keeps: a reply naming none
+    # of the hint's top-level fields cannot be consumed by anyone.
+    with pytest.raises(ModelJsonRepairError) as caught:
+        validate_model_json_shape(raw, ANSWER_SCHEMA)
+
+    assert caught.value.reason == "missing_expected_key"
+
+
 @pytest.mark.parametrize(
-    ("raw", "reason"),
+    ("raw", "schema", "expected"),
     [
-        ("{}", "missing_expected_key"),
-        ('{"answer": [], "grounded": true}', "invalid_type"),
-        ('{"items":[{}]}', "missing_expected_key"),
+        (
+            '{"answer": [], "grounded": true}', ANSWER_SCHEMA,
+            [("answer", "invalid_type", "")],
+        ),
+        (
+            '{"items":[{}]}', '{"items":[{"index":0}]}',
+            [("items[0]", "missing_expected_key", "")],
+        ),
+        (
+            '{"sufficient": false, "next_action": "delete_all"}', REFLECT_SCHEMA,
+            [("next_action", "invalid_enum", "")],
+        ),
+        (
+            '{"sub_queries": "not-a-list"}', PLAN_SCHEMA,
+            [("sub_queries", "invalid_type", "")],
+        ),
+        (
+            '{"sub_queries": [{"query": 5, "types": {"a": 1}}]}', PLAN_SCHEMA,
+            [
+                ("sub_queries[0].query", "invalid_type", ""),
+                ("sub_queries[0].types", "invalid_type", ""),
+            ],
+        ),
+        ('{"edge_type": 7}', OPTIONAL_SCHEMA, [("edge_type", "invalid_type", "")]),
     ],
 )
-def test_parseable_json_with_an_unusable_schema_shape_is_rejected(raw, reason):
-    schema = '{"items":[{"index":0}]}' if "items" in raw else ANSWER_SCHEMA
+def test_field_level_drift_with_more_than_one_reading_is_delivered_as_written(
+    raw, schema, expected,
+):
+    # Harness principle (2026-09-14): the prompt is precise, the boundary
+    # tolerates what a model plausibly does, and the domain parser decides.
+    # A wrong-typed or off-enum field used to fail the whole reply; it is now
+    # delivered byte-for-byte and reported as a located deviation.
+    shape = validate_model_json_shape(raw, schema)
+
+    assert shape.content == raw
+    assert shape.normalised is False
+    assert [(d.path, d.reason, d.fix) for d in shape.deviations] == expected
+
+
+@pytest.mark.parametrize(
+    ("raw", "schema", "content", "expected"),
+    [
+        # null where a value was advertised: absent and null mean the same
+        # thing to every consumer, and a bare str() downstream would have
+        # turned it into the literal text "None".
+        (
+            '{"answer": null, "grounded": true}', ANSWER_SCHEMA,
+            {"grounded": True},
+            [("answer", "invalid_type", "dropped")],
+        ),
+        (
+            '{"answer": "ok", "grounded": null}', ANSWER_SCHEMA,
+            {"answer": "ok"},
+            [("grounded", "invalid_boolean", "dropped")],
+        ),
+        # quoted booleans / numbers have exactly one reading
+        (
+            '{"answer": "ok", "grounded": "true"}', ANSWER_SCHEMA,
+            {"answer": "ok", "grounded": True},
+            [("grounded", "invalid_boolean", "coerced")],
+        ),
+        (
+            '{"answer": "ok", "grounded": " False "}', ANSWER_SCHEMA,
+            {"answer": "ok", "grounded": False},
+            [("grounded", "invalid_boolean", "coerced")],
+        ),
+        (
+            '{"items":[{"index":"2"},{"index":3.0}]}', '{"items":[{"index":0}]}',
+            {"items": [{"index": 2}, {"index": 3}]},
+            [
+                ("items[0].index", "invalid_type", "coerced"),
+                ("items[1].index", "invalid_type", "coerced"),
+            ],
+        ),
+        (
+            '{"score":"0.75"}', '{"score":0.0}',
+            {"score": 0.75},
+            [("score", "invalid_type", "coerced")],
+        ),
+        # one scalar where a list of scalars was advertised
+        (
+            '{"sub_queries": [{"query": "q", "types": "concept"}]}', PLAN_SCHEMA,
+            {"sub_queries": [{"query": "q", "types": ["concept"]}]},
+            [("sub_queries[0].types", "invalid_type", "wrapped")],
+        ),
+        # a null list item is removed, the rest survives
+        (
+            '{"sub_queries": [null, {"query": "q"}]}', PLAN_SCHEMA,
+            {"sub_queries": [{"query": "q"}]},
+            [("sub_queries[0]", "invalid_type", "dropped")],
+        ),
+        # extra keys ride along untouched through a rebuild
+        (
+            '{"answer": null, "grounded": true, "note": {"k": [1]}}', ANSWER_SCHEMA,
+            {"grounded": True, "note": {"k": [1]}},
+            [("answer", "invalid_type", "dropped")],
+        ),
+    ],
+)
+def test_single_reading_deviations_are_absorbed_and_reported(
+    raw, schema, content, expected,
+):
+    shape = validate_model_json_shape(raw, schema)
+
+    assert shape.normalised is True
+    assert json.loads(shape.content) == content
+    assert [(d.path, d.reason, d.fix) for d in shape.deviations] == expected
+
+
+def test_a_reply_whose_advertised_fields_are_all_null_is_unusable():
     with pytest.raises(ModelJsonRepairError) as caught:
-        validate_model_json_shape(raw, schema)
+        validate_model_json_shape('{"answer": null, "grounded": null}', ANSWER_SCHEMA)
+
+    assert caught.value.reason == "missing_expected_key"
+
+
+@pytest.mark.parametrize(
+    ("raw", "reason"),
+    [("[]", "non_object"), ('"text"', "non_object"), ("not json", "invalid_json")],
+)
+def test_the_boundary_still_refuses_non_object_replies(raw, reason):
+    # Consumers call ``json.loads(raw).get(...)`` on the delivered text: the
+    # lenient boundary keeps the object-ness guarantee they depend on.
+    with pytest.raises(ModelJsonRepairError) as caught:
+        validate_model_json_shape(raw, ANSWER_SCHEMA)
 
     assert caught.value.reason == reason
 
 
 def test_schema_shape_validation_allows_optional_and_provider_extra_fields():
-    validate_model_json_shape(
-        '{"answer":"ok","provider_note":"extra"}', ANSWER_SCHEMA
-    )
+    raw = '{"answer":"ok","provider_note":"extra"}'
+    shape = validate_model_json_shape(raw, ANSWER_SCHEMA)
+
+    assert shape.deviations == ()
+    assert shape.content == raw
+
+
+def test_shape_deviation_report_is_bounded_but_normalisation_is_not():
+    from app.core.model_json import SHAPE_DEVIATIONS_MAX
+
+    raw = json.dumps({"sub_queries": [{"query": index} for index in range(200)]})
+    shape = validate_model_json_shape(raw, PLAN_SCHEMA)
+    assert len(shape.deviations) == SHAPE_DEVIATIONS_MAX
+    assert shape.deviations[0].path == "sub_queries[0].query"
+
+    # Every null is dropped even past the report cap.
+    raw = json.dumps({"sub_queries": [{"query": None, "types": []}] * 200})
+    shape = validate_model_json_shape(raw, PLAN_SCHEMA)
+    assert len(shape.deviations) == SHAPE_DEVIATIONS_MAX
+    assert json.loads(shape.content) == {"sub_queries": [{"types": []}] * 200}
 
 
 @pytest.mark.parametrize(
@@ -118,14 +262,16 @@ def test_schema_shape_validation_accepts_empty_optional_validity_scope():
     )
 
 
-def test_schema_shape_validation_rejects_non_string_frame_assignment_values():
-    with pytest.raises(ModelJsonRepairError, match="invalid_type"):
-        validate_model_json_shape(
-            '{"markdown":"ok","claims":[{"claim_id":"c1",'
-            '"frame_assignments":{"mixer":["SSM"]}}]}',
-            '{"markdown":"","claims":[{"claim_id":"",'
-            '"frame_assignments":{"facet-id":"value"}}]}',
-        )
+def test_schema_shape_validation_reports_non_string_frame_assignment_values():
+    shape = validate_model_json_shape(
+        '{"markdown":"ok","claims":[{"claim_id":"c1",'
+        '"frame_assignments":{"mixer":["SSM"]}}]}',
+        '{"markdown":"","claims":[{"claim_id":"",'
+        '"frame_assignments":{"facet-id":"value"}}]}',
+    )
+    assert [(d.path, d.reason, d.fix) for d in shape.deviations] == [
+        ("claims[0].frame_assignments.mixer", "invalid_type", ""),
+    ]
 
 
 @pytest.mark.parametrize(
@@ -137,10 +283,7 @@ def test_schema_shape_validation_rejects_non_string_frame_assignment_values():
         ('{answer: "token budget cut, grounded: true}', "incomplete_object"),
         ('{sub_queries:[{query:"q",types:[]}', "incomplete_object"),
         ('["answer", "grounded"]', "non_object"),
-        ('{answer: "x", grounded: true, next_action: delete_all}', "unknown_key"),
-        ('{answer: "x", grounded: false_value}', "invalid_boolean"),
-        ('{answer: 123, grounded: true}', "invalid_type"),
-        ('{answer: true, grounded: true}', "invalid_type"),
+        ('{conclusion: "no advertised field"}', "missing_expected_key"),
         ('{answer: "x", garbage, grounded: true}', "unsupported_syntax"),
         (
             '{answer: "the garbage token appears", garbage, grounded: true}',
@@ -163,28 +306,54 @@ def test_repair_refuses_incomplete_or_schema_unsafe_responses(raw, reason):
 
 
 @pytest.mark.parametrize(
-    ("raw", "reason"),
+    ("raw", "expected"),
     [
-        ('{sub_queries: "not-a-list"}', "invalid_type"),
+        (
+            '{answer: "x", grounded: true, next_action: delete_all}',
+            {"answer": "x", "grounded": True, "next_action": "delete_all"},
+        ),
+        ('{answer: "x", grounded: false_value}', {"answer": "x", "grounded": "false_value"}),
+        ('{answer: 123, grounded: true}', {"answer": 123, "grounded": True}),
+        ('{answer: true, grounded: true}', {"answer": True, "grounded": True}),
+    ],
+)
+def test_repair_delivers_off_shape_fields_for_the_parser_to_judge(raw, expected):
+    # Repair restores delimiters. Whether ``answer: 123`` is acceptable is the
+    # consumer's call; the boundary reports it (see
+    # ``test_field_level_drift_is_reported_not_rejected``) but no longer
+    # turns a recoverable reply into a malformed_response.
+    result = parse_model_json_object(raw, ANSWER_SCHEMA, allow_repair=True)
+
+    assert result.repaired is True
+    assert json.loads(result.content) == expected
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ('{sub_queries: "not-a-list"}', {"sub_queries": "not-a-list"}),
         (
             '{sub_queries: [{query: "q", types: [], unexpected: "x"}]}',
-            "unknown_key",
+            {"sub_queries": [{"query": "q", "types": [], "unexpected": "x"}]},
         ),
     ],
 )
-def test_repair_recursively_enforces_schema_example_shape(raw, reason):
-    with pytest.raises(ModelJsonRepairError) as caught:
-        parse_model_json_object(raw, PLAN_SCHEMA, allow_repair=True)
+def test_repair_keeps_extra_and_off_type_nested_fields(raw, expected):
+    result = parse_model_json_object(raw, PLAN_SCHEMA, allow_repair=True)
 
-    assert caught.value.reason == reason
+    assert json.loads(result.content) == expected
 
 
 @pytest.mark.parametrize("value", ["true", "{}", "[]", "123"])
-def test_null_example_allows_only_optional_string_or_null(value):
-    with pytest.raises(ModelJsonRepairError, match="invalid_type"):
-        parse_model_json_object(
-            f'{{edge_type:{value}}}', OPTIONAL_SCHEMA, allow_repair=True
-        )
+def test_null_example_reports_non_string_values(value):
+    result = parse_model_json_object(
+        f'{{edge_type:{value}}}', OPTIONAL_SCHEMA, allow_repair=True
+    )
+    shape = validate_model_json_shape(result.content, OPTIONAL_SCHEMA)
+
+    assert [(d.path, d.reason, d.fix) for d in shape.deviations] == [
+        ("edge_type", "invalid_type", ""),
+    ]
 
 
 @pytest.mark.parametrize("value", ['"supports"', "null"])

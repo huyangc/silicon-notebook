@@ -250,3 +250,41 @@ def test_refine_gate_structural_rejections_hold_with_nodes():
     assert _refine_response_grounds(
         json.dumps({"items": [{"index": 0, "keep": 1}]}), _REFINE_NODES  # keep 非 bool
     ) is False
+
+
+class _OffTypeFake:
+    """A reply the shape boundary now DELIVERS (it reports ``invalid_type``
+    instead of rejecting): ``type`` as a list on one node and one edge."""
+
+    def chat_json(self, messages, response_schema_hint):
+        return json.dumps({"nodes": [
+            {"local_id": "a", "type": ["Concept"], "name": "analog signal", "ev": 0},
+            {"local_id": "b", "type": "Claim", "name": "Engram", "ev": 2},
+            {"local_id": "d", "type": {"kind": "Claim"}, "name": "C_j", "ev": 1}],
+            "edges": [
+            {"type": ["about"], "source": "b", "target": "a", "ev": 1},
+            {"type": "about", "source": "b", "target": "b", "ev": 1}]})
+
+
+def test_off_type_type_fields_are_dropped_per_item_not_per_window():
+    # Membership against a set used to raise TypeError (unhashable list/dict)
+    # and fail the whole window; only the off-type items are dropped now.
+    nodes, edges = extract_window(_OffTypeFake(), ELEMENTS, "1 > 1.1", "textbook", win_idx=0)
+
+    assert [n.name for n in nodes] == ["Engram"]
+    assert edges == []
+
+
+def test_gleaning_faults_never_discard_the_first_pass(monkeypatch):
+    from app.services.kg import extract as extract_mod
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("gleaning parser bug")
+
+    monkeypatch.setattr(extract_mod, "_glean_nodes", boom)
+
+    nodes, _edges = extract_window(
+        Fake(), ELEMENTS, "1 > 1.1", "textbook", win_idx=0, gleaning_rounds=1,
+    )
+
+    assert {n.name for n in nodes} == {"analog signal", "Engram"}

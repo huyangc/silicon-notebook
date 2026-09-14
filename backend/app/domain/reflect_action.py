@@ -230,9 +230,12 @@ class ReflectActionParameter:
     """One argument the model may write for a plugin action.
 
     ``kind`` is ``"text"`` or ``"enum"`` and there is deliberately no boolean
-    and no integer: ``model_json._validate_against_example`` type-checks a bool
-    example strictly, so a model answering ``"true"`` loses the whole reflect
-    turn, while a string example inherits the empty-string tolerance.
+    and no integer: the reflect argument parser reads every value as a string
+    (a model answering ``"true"`` or ``"yes"`` is routine), and a string
+    example is what the schema hint can express faithfully. The shared shape
+    walk (``model_json._collect_shape_deviations``) only reports a bool
+    mismatch nowadays, but the projection still spells choices as ``a|b``
+    strings so the hint and the parser describe the same contract.
     """
 
     name: str

@@ -23,6 +23,17 @@ from app.services.prompts import gleaning_prompt, refine_prompt, REFINE_SCHEMA_H
 
 NODE_TYPES = {"Concept", "Claim", "Formula", "Procedure"}
 EDGE_TYPES = VALID_EDGE_TYPES
+
+
+def _typed_str(value: Any, allowed) -> str:
+    """``value`` if it is a string in ``allowed``, else "".
+
+    The shape boundary delivers off-type fields now (a list or dict where the
+    hint shows a string) and reports them instead of rejecting the reply, so
+    a membership test against a set must first narrow to ``str`` — an
+    unhashable value would otherwise raise TypeError and fail the window.
+    """
+    return value if isinstance(value, str) and value in allowed else ""
 _EDGE_PROMPT_RULES = render_edge_prompt_rules()
 _log = logging.getLogger(__name__)
 
@@ -49,7 +60,7 @@ def _grounds_a_node(it: Any, elements: List[SourceElementQ]) -> bool:
     against): fall back to the minimal field set the real gate needs, a non-empty
     ``name`` AND an integer ``ev``. Conservative by construction (it cannot use the
     name-substring fallback), which only ever means "re-fetch", never "cache junk"."""
-    if not isinstance(it, dict) or it.get("type") not in NODE_TYPES:
+    if not isinstance(it, dict) or not _typed_str(it.get("type"), NODE_TYPES):
         return False
     name = str(it.get("name", "")).strip()
     if not name:
@@ -393,7 +404,7 @@ def _glean_nodes(client: Any, elements: List[SourceElementQ], section_path: str,
             return
         added = 0
         for it in (data.get("nodes") or []):
-            if not isinstance(it, dict) or it.get("type") not in NODE_TYPES:
+            if not isinstance(it, dict) or not _typed_str(it.get("type"), NODE_TYPES):
                 continue
             nm = _nm(str(it.get("name", "")))
             key = (it["type"], nm)
@@ -451,7 +462,7 @@ def extract_window(client: Any, elements: List[SourceElementQ], section_path: st
     by_local = {}
     type_by_node_id: Dict[str, str] = {}
     for it in (data.get("nodes") or []):
-        if not isinstance(it, dict) or it.get("type") not in NODE_TYPES:
+        if not isinstance(it, dict) or not _typed_str(it.get("type"), NODE_TYPES):
             continue
         el = _resolve(elements, it.get("ev"), str(it.get("name", "")))
         if el is None:
@@ -468,8 +479,17 @@ def extract_window(client: Any, elements: List[SourceElementQ], section_path: st
         if it.get("local_id"):
             by_local[str(it["local_id"])] = nid
     if gleaning_rounds and nodes:
-        _glean_nodes(glean_client or client, elements, section_path, doc_type, raw, nodes, win_idx,
-                     gleaning_rounds, base_filter=base_filter)
+        # Gleaning only ever ADDS to a window the first pass already
+        # extracted; a fault inside it must not discard those nodes. The
+        # function catches model/parse failures itself, this guards the
+        # remainder (abort still propagates — the user cancelled).
+        try:
+            _glean_nodes(glean_client or client, elements, section_path, doc_type, raw, nodes, win_idx,
+                         gleaning_rounds, base_filter=base_filter)
+        except KgBuildAborted:
+            raise
+        except Exception:
+            _log.warning("gleaning skipped for window %s", win_idx, exc_info=True)
     if refine and nodes:
         # refine is best-effort: a failure (incl. hard transport errors that
         # refine_nodes re-raises) must NOT discard a successfully extracted
@@ -492,8 +512,8 @@ def extract_window(client: Any, elements: List[SourceElementQ], section_path: st
     for it in (data.get("edges") or []):
         if not isinstance(it, dict):
             continue
-        if it.get("type") not in EDGE_TYPES:
-            rejected_edges[(str(it.get("type") or "<missing>"), "unknown_edge_type")] += 1
+        if not _typed_str(it.get("type"), EDGE_TYPES):
+            rejected_edges[(str(it.get("type") or "<missing>")[:64], "unknown_edge_type")] += 1
             continue
         s = by_local.get(str(it.get("source"))); t = by_local.get(str(it.get("target")))
         if not s or not t or s == t:

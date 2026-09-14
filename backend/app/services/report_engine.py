@@ -832,7 +832,10 @@ class ReportEngine:
                 REPORT_OUTLINE_SCHEMA_HINT, cancel_event=self.cancel_event)
             data = json.loads(raw)
             sections = []
-            for s in (data.get("sections") or [])[: self.settings.report_max_sections]:
+            raw_sections = data.get("sections")
+            for s in (raw_sections if isinstance(raw_sections, list) else [])[: self.settings.report_max_sections]:
+                if not isinstance(s, dict):
+                    continue
                 title = str(s.get("title", "")).strip()
                 subs = [str(q).strip() for q in (s.get("sub_queries") or []) if str(q).strip()]
                 if title and subs:
@@ -1659,7 +1662,10 @@ class ReportEngine:
                 normalize_report_frame(data.get("frame")) if frame_shape else None
             )
             out = []
-            for s in (data.get("sections") or [])[: self.settings.report_max_sections]:
+            raw_sections = data.get("sections")
+            for s in (raw_sections if isinstance(raw_sections, list) else [])[: self.settings.report_max_sections]:
+                if not isinstance(s, dict):
+                    continue
                 title = str(s.get("title", "")).strip()
                 subs = [str(q).strip() for q in (s.get("sub_queries") or []) if str(q).strip()]
                 if title and subs:
@@ -1818,7 +1824,10 @@ class ReportEngine:
                     completeness_required=completeness_required,
                 )}],
                 REPORT_SUFFICIENCY_SCHEMA_HINT, cancel_event=self.cancel_event)
-            for v in (json.loads(raw).get("verdicts") or []):
+            raw_verdicts = json.loads(raw).get("verdicts")
+            for v in (raw_verdicts if isinstance(raw_verdicts, list) else []):
+                if not isinstance(v, dict):
+                    continue
                 for s in sections:
                     if s["title"] == str(v.get("title", "")).strip():
                         verdict = str(v.get("sufficiency") or "")

@@ -1951,24 +1951,13 @@ def test_an_empty_local_notebook_still_lists_its_reference_libraries(repo):
 # 让模型不踩雷靠的是枚举值自描述 + 留空永远安全,不是把非法值也认下来。
 
 
-def test_an_illegal_scope_string_is_rejected_by_the_validation_layer(repo):
-    """非空非法字符串 ⇒ `invalid_enum`,整轮兜底(与 kind/direction 同一条规则)。"""
-    notebook = _seed_sources_only(repo, ["论文一"])
-    llm = _ValidatingLLM([
-        _enumerate_sources_action(scope="yes"),
-        {"next_action": "answer", "sufficient": True},
-    ])
-    retriever, limits = _retriever(repo, llm)
-
-    result = retriever.run(notebook.id, _CATALOG_QUESTION, "", limits=limits)
-
-    assert _fallback_reasons(result) == ["invalid_enum"]
-    assert _steps(result, "enumerate") == []
-
-
-@pytest.mark.parametrize("bogus", [1, None, {}])
-def test_a_non_string_scope_is_rejected_by_the_validation_layer(repo, bogus):
-    """非字符串 ⇒ `invalid_type`(示例值是字符串,类型判据先于枚举判据)。"""
+@pytest.mark.parametrize("bogus", ["yes", 1, None, {}])
+def test_an_off_shape_scope_passes_the_boundary_and_falls_back_to_the_default(
+    repo, bogus,
+):
+    """校验层只报告不拒收(harness 原则,2026-09-14):非法字符串记 `invalid_enum`、
+    非字符串记 `invalid_type`,但回复照常交付;范围值由解析器落回默认(与下面那条
+    走 `_SeqLLM` 的纵深防御用例是同一个终点),动作成立、不走兜底。"""
     notebook = _seed_sources_only(repo, ["论文一"])
     llm = _ValidatingLLM([
         _enumerate_sources_action(scope=bogus),
@@ -1978,8 +1967,10 @@ def test_a_non_string_scope_is_rejected_by_the_validation_layer(repo, bogus):
 
     result = retriever.run(notebook.id, _CATALOG_QUESTION, "", limits=limits)
 
-    assert _fallback_reasons(result) == ["invalid_type"]
-    assert _steps(result, "enumerate") == []
+    assert _fallback_reasons(result) == []
+    listed = _steps(result, "enumerate")
+    assert len(listed) == 1
+    assert _listed_titles(result) == ["论文一"]
 
 
 def test_the_parser_never_voids_an_action_over_the_scope_value(repo):
