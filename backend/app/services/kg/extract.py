@@ -34,6 +34,12 @@ def _typed_str(value: Any, allowed) -> str:
     unhashable value would otherwise raise TypeError and fail the window.
     """
     return value if isinstance(value, str) and value in allowed else ""
+
+
+def _name_str(value: Any) -> str:
+    """A node/step name as text, or "" when the field is not a string — a
+    delivered ``[]`` must never be persisted as the knowledge object "[]"."""
+    return value.strip() if isinstance(value, str) else ""
 _EDGE_PROMPT_RULES = render_edge_prompt_rules()
 _log = logging.getLogger(__name__)
 
@@ -62,7 +68,7 @@ def _grounds_a_node(it: Any, elements: List[SourceElementQ]) -> bool:
     name-substring fallback), which only ever means "re-fetch", never "cache junk"."""
     if not isinstance(it, dict) or not _typed_str(it.get("type"), NODE_TYPES):
         return False
-    name = str(it.get("name", "")).strip()
+    name = _name_str(it.get("name"))
     if not name:
         return False
     if elements:
@@ -319,7 +325,7 @@ def _parse_steps(elements: List[SourceElementQ], raw_steps: Any) -> List[Step]:
     for st in raw_steps:
         if not isinstance(st, dict):
             continue
-        nm = str(st.get("name", "")).strip()
+        nm = _name_str(st.get("name"))
         if not nm:
             continue
         el = _resolve(elements, st.get("ev"), nm)
@@ -406,15 +412,16 @@ def _glean_nodes(client: Any, elements: List[SourceElementQ], section_path: str,
         for it in (data.get("nodes") or []):
             if not isinstance(it, dict) or not _typed_str(it.get("type"), NODE_TYPES):
                 continue
-            nm = _nm(str(it.get("name", "")))
+            name = _name_str(it.get("name"))
+            nm = _nm(name)
             key = (it["type"], nm)
             if not nm or key in seen:
                 continue
-            el = _resolve(elements, it.get("ev"), str(it.get("name", "")))
+            el = _resolve(elements, it.get("ev"), name)
             if el is None:
                 continue
             node = Node(id=f"W{win_idx}-{len(nodes)}", type=it["type"],
-                        name=str(it.get("name", "")), section_path=section_path,
+                        name=name, section_path=section_path,
                         evidence=[_ev(el)])
             if it["type"] == "Procedure":
                 node.steps = _parse_steps(elements, it.get("steps"))
@@ -462,13 +469,14 @@ def extract_window(client: Any, elements: List[SourceElementQ], section_path: st
     by_local = {}
     type_by_node_id: Dict[str, str] = {}
     for it in (data.get("nodes") or []):
-        if not isinstance(it, dict) or not _typed_str(it.get("type"), NODE_TYPES):
+        name = _name_str(it.get("name")) if isinstance(it, dict) else ""
+        if not name or not _typed_str(it.get("type"), NODE_TYPES):
             continue
-        el = _resolve(elements, it.get("ev"), str(it.get("name", "")))
+        el = _resolve(elements, it.get("ev"), name)
         if el is None:
             continue
         nid = f"W{win_idx}-{len(nodes)}"
-        node = Node(id=nid, type=it["type"], name=str(it.get("name", "")),
+        node = Node(id=nid, type=it["type"], name=name,
                     section_path=section_path, evidence=[_ev(el)])
         if it["type"] == "Procedure":
             node.steps = _parse_steps(elements, it.get("steps"))
@@ -488,8 +496,9 @@ def extract_window(client: Any, elements: List[SourceElementQ], section_path: st
                          gleaning_rounds, base_filter=base_filter)
         except KgBuildAborted:
             raise
-        except Exception:
-            _log.warning("gleaning skipped for window %s", win_idx, exc_info=True)
+        except Exception as exc:
+            # Category only — exception text may carry paths or reply content.
+            _log.warning("gleaning skipped for window %s: %s", win_idx, type(exc).__name__)
     if refine and nodes:
         # refine is best-effort: a failure (incl. hard transport errors that
         # refine_nodes re-raises) must NOT discard a successfully extracted

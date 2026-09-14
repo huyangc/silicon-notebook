@@ -13,6 +13,7 @@ Mirrors the structure of ``app.services.concept_merge_review``:
 from __future__ import annotations
 
 import json
+import math
 from typing import Any, List
 
 # ---------------------------------------------------------------------------
@@ -78,6 +79,30 @@ def _prompt(item: dict) -> str:
 # ---------------------------------------------------------------------------
 # Safe fallback verdict (mirrors concept_merge_review's default-on-error)
 # ---------------------------------------------------------------------------
+
+def _confidence(value: Any) -> float:
+    """Clamp a model-supplied confidence to [0, 1]; anything that is not a
+    finite number reads as 0.0.
+
+    This value can cross the auto-apply threshold and discard or modify
+    knowledge without review, so ``True`` (float 1.0) and ``"Infinity"`` /
+    NaN must never count (codex #720 R4 P1) — the shape boundary delivers
+    them unchanged now that field-level drift is reported, not rejected.
+    """
+    if value is None or isinstance(value, bool):
+        return 0.0
+    if isinstance(value, str):
+        value = value.strip()
+        if not value or value.lower() in {"nan", "inf", "infinity", "-inf", "-infinity"}:
+            return 0.0
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(number):
+        return 0.0
+    return max(0.0, min(1.0, number))
+
 
 def _fallback(item: dict) -> dict:
     cand = item["candidate"]
@@ -165,11 +190,7 @@ def review_conflict_candidates(llm_client: Any, items: List[dict]) -> List[dict]
         else:
             resolved_payload = None
 
-        try:
-            confidence = float(data.get("confidence") or 0)
-        except (TypeError, ValueError):
-            confidence = 0.0
-        confidence = max(0.0, min(1.0, confidence))
+        confidence = _confidence(data.get("confidence"))
 
         rationale = str(data.get("rationale", "")).strip()[:500]
 

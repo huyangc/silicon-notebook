@@ -131,6 +131,20 @@ _HIGH_RISK_ASSERTION_EN = re.compile(
 )
 
 
+def _prose(value: Any) -> str:
+    """Model-supplied prose, or "" when the field is not a string.
+
+    The shape boundary delivers off-type fields (reported, not rejected); a
+    list/dict here must read as "nothing written", never as the text "[]".
+    """
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _dict_items(value: Any) -> list[dict]:
+    """The dict items of a model-supplied list; anything else is empty."""
+    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
 def audit_high_risk_assertions(markdown: str, id_map: dict[str, dict], *,
                                max_unsupported_ratio: float) -> dict[str, Any]:
     """Audit citation presence for deterministically recognisable risky prose.
@@ -832,10 +846,7 @@ class ReportEngine:
                 REPORT_OUTLINE_SCHEMA_HINT, cancel_event=self.cancel_event)
             data = json.loads(raw)
             sections = []
-            raw_sections = data.get("sections")
-            for s in (raw_sections if isinstance(raw_sections, list) else [])[: self.settings.report_max_sections]:
-                if not isinstance(s, dict):
-                    continue
+            for s in _dict_items(data.get("sections"))[: self.settings.report_max_sections]:
                 title = str(s.get("title", "")).strip()
                 subs = [str(q).strip() for q in (s.get("sub_queries") or []) if str(q).strip()]
                 if title and subs:
@@ -1662,10 +1673,7 @@ class ReportEngine:
                 normalize_report_frame(data.get("frame")) if frame_shape else None
             )
             out = []
-            raw_sections = data.get("sections")
-            for s in (raw_sections if isinstance(raw_sections, list) else [])[: self.settings.report_max_sections]:
-                if not isinstance(s, dict):
-                    continue
+            for s in _dict_items(data.get("sections"))[: self.settings.report_max_sections]:
                 title = str(s.get("title", "")).strip()
                 subs = [str(q).strip() for q in (s.get("sub_queries") or []) if str(q).strip()]
                 if title and subs:
@@ -1824,10 +1832,7 @@ class ReportEngine:
                     completeness_required=completeness_required,
                 )}],
                 REPORT_SUFFICIENCY_SCHEMA_HINT, cancel_event=self.cancel_event)
-            raw_verdicts = json.loads(raw).get("verdicts")
-            for v in (raw_verdicts if isinstance(raw_verdicts, list) else []):
-                if not isinstance(v, dict):
-                    continue
+            for v in _dict_items(json.loads(raw).get("verdicts")):
                 for s in sections:
                     if s["title"] == str(v.get("title", "")).strip():
                         verdict = str(v.get("sufficiency") or "")
@@ -2390,12 +2395,7 @@ class ReportEngine:
                     **cap_kwargs(client, "report_section_max_tokens"))
                 data = json.loads(raw)
                 if isinstance(data, dict):
-                    # Prose must be a string: a delivered list/dict would
-                    # otherwise become the non-empty text "[]" and count as a
-                    # successful draft. Booleans must be real booleans — the
-                    # boundary already coerces "true"/"false" spellings.
-                    raw_markdown = data.get("markdown")
-                    markdown = raw_markdown.strip() if isinstance(raw_markdown, str) else ""
+                    markdown = _prose(data.get("markdown"))
                     llm_grounded = data.get("grounded", False) is True
                     raw_claims = data.get("claims")
                 attempt_status = "success" if markdown else "empty"
@@ -3273,8 +3273,7 @@ class ReportEngine:
                     summary_client, "report_summary_max_tokens",
                 ))
             data = json.loads(raw)
-            raw_summary = data.get("summary")
-            summary = raw_summary.strip() if isinstance(raw_summary, str) else ""
+            summary = _prose(data.get("summary"))
             known_intents = {str(item.get("id") or "") for item in intent_catalog}
             for row in (data.get("coverage") or []):
                 if not isinstance(row, dict):

@@ -288,3 +288,23 @@ def test_gleaning_faults_never_discard_the_first_pass(monkeypatch):
     )
 
     assert {n.name for n in nodes} == {"analog signal", "Engram"}
+
+
+class _ListNameFake:
+    def chat_json(self, messages, response_schema_hint):
+        return json.dumps({"nodes": [
+            {"local_id": "a", "type": "Concept", "name": [], "ev": 0},
+            {"local_id": "b", "type": "Claim", "name": {"zh": "Engram"}, "ev": 2},
+            {"local_id": "c", "type": "Procedure", "name": "Engram", "ev": 2,
+             "steps": [{"name": ["step"], "ev": 1}, {"name": "C_j", "ev": 1}]}],
+            "edges": []})
+
+
+def test_non_string_names_are_never_persisted_as_container_text():
+    # A node whose ``name`` is a list/dict must be dropped before grounding
+    # (codex #720 R4): ``str([])`` would otherwise become the knowledge
+    # object "[]". Steps follow the same rule.
+    nodes, _edges = extract_window(_ListNameFake(), ELEMENTS, "1 > 1.1", "textbook", win_idx=0)
+
+    assert [n.name for n in nodes] == ["Engram"]
+    assert [s.name for s in nodes[0].steps] == ["C_j"]
