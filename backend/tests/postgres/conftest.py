@@ -287,6 +287,9 @@ def postgres_settings(postgres_scope: ScopedPostgres) -> Settings:
         postgres_pool_max_size=2,
         postgres_pool_acquire_timeout_seconds=1,
         postgres_statement_timeout_seconds=2,
+        # 全局语句超时刻意只给 2 秒;chunk 词法 deadline 的默认值已提到 3.0,
+        # 不显式压回来会被 validate_chunk_fts_timeout_ceiling 拒绝(codex #727 R1)。
+        postgres_chunk_fts_timeout_seconds=1.0,
         postgres_lock_timeout_seconds=1,
     )
 
