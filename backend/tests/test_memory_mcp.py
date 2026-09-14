@@ -1440,6 +1440,48 @@ async def test_ask_notebook_reasoning_auto_confirms_a_clear_question(
     assert isinstance(submitted.intent.understanding_ms, int)
 
 
+@pytest.mark.anyio
+async def test_ask_notebook_defaults_to_reasoning_when_mode_is_omitted(
+    mcp_env, monkeypatch
+):
+    """不传 `mode` 就是 reasoning(与网页端两种界面提交的同一引擎)。
+
+    默认值不是形参上的一个字面量那么简单:它决定不传 mode 的 Agent 是否会经过
+    调用内的理解步(`AskRequest.intent` 非空、清晰问题自动确认、模糊问题拿到
+    `needs_clarification`)。这里钉住引擎真正收到的 `mode` 与 `intent`,而不是
+    只看响应回显。chunk 仍可显式选择(上面的 chunk 用例不变)。
+    """
+    service = mcp_env["service"]
+    monkeypatch.setattr(
+        service, "get_notebook", lambda _id: _fake_notebook_summary(mcp_env)
+    )
+    seen: list = []
+
+    def capturing_ask(_notebook_id, payload):
+        seen.append(payload)
+        return SimpleNamespace(
+            answer_id="ans-default-mode", answer="ok", conclusion="ok",
+            grounded=True, evidence_level="grounded", mode="reasoning",
+            conversation_id="conv-default-mode", anchors=[], citations=[],
+        )
+
+    monkeypatch.setattr(service, "ask", capturing_ask)
+    question = "CMOS 反相器的阈值电压由什么决定"
+    async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
+        _payload(await client.call(
+            "select_notebook", {"notebook_id": mcp_env["notebook"].id}
+        ))
+        result = await client.call("ask_notebook", {"question": question})
+    assert not result.isError, result
+    payload = _payload(result)
+    assert payload["status"] == "answered"
+    assert payload["mode"] == "reasoning"
+    [submitted] = seen
+    assert submitted.mode == "reasoning"
+    assert submitted.intent is not None  # 走了调用内理解步
+    assert submitted.intent.contract.objective == question
+
+
 class _ReasoningSeqLLM:
     """plan 固定、reflect 直接收敛到 answer、答案固定——只为把一次真实的
     reasoning run 跑到合成,不做任何检索质量断言。"""

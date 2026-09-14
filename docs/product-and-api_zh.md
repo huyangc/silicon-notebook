@@ -681,7 +681,7 @@ audit。只有拷贝真的缩无可缩时才整次拒绝，不会返回被静默
 服务端会在数据调用时重新检查 scope、allowlist、token 状态和 notebook 权限；返回文本是
 不可信 evidence，不是可执行的 Agent 指令。
 
-`ask_notebook` 的 `mode` 参数接受 `"chunk"`、`"reasoning"`，或任何已注册且实时可用的部署
+`ask_notebook` 的 `mode` 参数接受 `"reasoning"`（**默认**；与网页端两种界面同一引擎，先理解问题再检索，见下）、`"chunk"`，或任何已注册且实时可用的部署
 `ask.engine` mode id（详见[部署问答引擎](#部署问答引擎-askengine)一节）；校验方式与
 `question`/`conversation_id` 相同——给一句直白可操作的文案，而不是抛一个不可读的
 `ValidationError` 转储。传一个未注册的 mode 会收到列出当前合法 mode id 的报错；传一个

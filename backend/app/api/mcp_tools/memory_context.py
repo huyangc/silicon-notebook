@@ -862,7 +862,7 @@ def register_memory_context_tools(
             "different notebook or owner, the server silently starts a new "
             "conversation instead of erroring -- compare the returned "
             "conversation_id against the one you sent to detect that. The mode "
-            "parameter accepts \"chunk\" (default) or \"reasoning\", plus the "
+            "parameter accepts \"reasoning\" (default) or \"chunk\", plus the "
             "mode id of any deployment-installed ask.engine plugin that is "
             "currently registered and available. Plugin engines can run for a "
             "long time -- configure the MCP client's read timeout generously; "
@@ -885,7 +885,7 @@ def register_memory_context_tools(
         )
     )
     async def ask_notebook(
-        question: str, ctx: Context, mode: str = "chunk",
+        question: str, ctx: Context, mode: str = "reasoning",
         conversation_id: str = "", intent: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         _validate_ask_mode(mode)
