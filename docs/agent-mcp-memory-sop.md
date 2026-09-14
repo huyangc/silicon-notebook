@@ -406,7 +406,7 @@ A `401` at step 1 is a token problem. `400 Missing session ID` at step 3 means t
 
 ## 10. Revoke and rotate
 
-Use **Agent access → issued tokens → revoke**. Every data tool rechecks live token state. Disabling a Profile invalidates all its tokens immediately.
+Use **Agent access → issued tokens → 撤销 (revoke)**, then **确认撤销** (confirm) on the same row. Every data tool rechecks live token state. Disabling a Profile invalidates all its tokens immediately.
 
 To change what an existing token may do, choose **修改权限** (edit access) on it instead: scopes, default notebook, allowlist, and expiry are saved together and the Agent's next tool call sees them, with no reissue or client reconfiguration. Revoked tokens cannot be edited. Editing never reveals the plaintext again; if the token itself was lost or exposed, issue a new one and revoke the old one.
 

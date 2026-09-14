@@ -344,8 +344,10 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
   notebook 搜索、Deep Report 与 `search_notebook_context` 只接收 confirmed。Memory 命中使用独立
   anchor/provenance，不伪造 source/element id。排序先判相关性，只有等分/冲突再应用
   `candidate < personal source < confirmed Memory < base KG/base source` 权威规则。
-- **Agent 接入 UI 与 token**：总 Memory 页可创建/停用稳定 Agent profile，签发明文只显示一次的
-  opaque token，配置默认 notebook、notebook allowlist、过期时间与最小 scope，并列出、撤销 token。
+- **Agent 接入 UI 与 token**：账户菜单一级入口「Agent 接入」（独立页 `/agents`，总 Memory 页留链接）
+  可创建/停用稳定 Agent profile，签发明文只显示一次的 opaque token，配置默认 notebook、notebook
+  allowlist、过期时间与最小 scope，并列出、撤销 token；已签发 token 的 scope、默认 notebook、
+  allowlist 与过期时间可经 `PUT /api/agent-tokens/{token_id}/access` 原地整体修改，下一次工具调用起生效。
   签发回执现同时提供公开、机器可读的 `GET /api/agent-mcp/onboarding` 链接：Markdown 使用
   `MCP_PUBLIC_URL` 给出精确 MCP 地址、从 `PUBLIC_TOOLS` 派生当前工具清单，且在 warm-up 期间也
   可匿名读取；token 与链接分开交付，端点不接收、不拼入也不回显 bearer token（方案 §19.3）。

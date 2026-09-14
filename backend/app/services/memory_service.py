@@ -15,6 +15,7 @@ from app.domain.agent_tools import AGENT_SCOPES
 from app.models.identity import (
     AgentPrincipal,
     AgentProfile,
+    AgentTokenAccess,
     AgentTokenIssued,
     AgentTokenSummary,
 )
@@ -325,8 +326,9 @@ class MemoryService:
             clean_notebooks = [default_notebook_id]
         if not default_notebook_id or default_notebook_id not in clean_notebooks:
             raise ValueError("default notebook must be in notebook allowlist")
-        if expires_at:
-            expires_at = _normalize_expiry(expires_at)
+        # An empty string means "no expiry" exactly like null; normalizing it
+        # here keeps SQLite (which would store '') and PostgreSQL (NULL) alike.
+        expires_at = _normalize_expiry(expires_at) if expires_at else None
         for notebook_id in clean_notebooks:
             if not self.notebooks.user_can_read_notebook(notebook_id, owner_id):
                 raise PermissionError(notebook_id)
@@ -386,6 +388,7 @@ class MemoryService:
         default_notebook_id: str,
         notebook_ids: Sequence[str],
         expires_at: str | None,
+        expected: AgentTokenAccess | None = None,
     ) -> AgentTokenSummary:
         clean_scopes, clean_notebooks, expires_at = self._validate_agent_access(
             owner_id, scopes, default_notebook_id, notebook_ids, expires_at
@@ -397,6 +400,7 @@ class MemoryService:
             default_notebook_id,
             clean_notebooks,
             expires_at,
+            expected,
         )
 
     def resolve_agent_token(self, raw_token: str) -> AgentPrincipal | None:

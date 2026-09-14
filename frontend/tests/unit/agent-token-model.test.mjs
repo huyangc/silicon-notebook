@@ -9,6 +9,7 @@ import {
   agentTokenAccessChanged,
   agentTokenAccessPath,
   agentTokenAccessRequest,
+  agentTokenAccessSnapshot,
   agentTokenDraft,
   agentTokenEditDraft,
   agentTokenRequest,
@@ -18,6 +19,8 @@ import {
   localDateTimeToUtcIso,
   utcIsoToLocalDateTime,
 } from "../../app/agent-token-model.ts";
+import { readFile } from "node:fs/promises";
+
 import {
   declarations,
   importsFrom,
@@ -124,6 +127,10 @@ test("global Memory keeps only a link to the Agent access page", async () => {
 
   assert.equal(declarationNames.has("AgentAccessManager"), false);
   assert.deepEqual(importsFrom(panel, "./agent-token-model"), []);
+  // 记忆审核、保存预览与 transfer-picker 仍用 .agent-check 勾选框;这条样式必须
+  // 留在记忆页自己的样式表里,Agent 接入页的样式表不会加载到首页。
+  const memoryCss = await readFile(new URL("../../app/memory-panel.css", import.meta.url), "utf8");
+  assert.match(memoryCss, /^\.agent-check \{/m);
   assert.equal(
     jsxElements(panel, "a").some((element) => element.attributes.href === "/agents"),
     true,
@@ -151,18 +158,33 @@ test("UTC expiry is rendered as the browser's local wall clock for datetime-loca
   assert.equal(utcIsoToLocalDateTime("not a date"), "");
 });
 
-test("access updates are full replacements that never carry a profile id", () => {
+test("access updates are full replacements that carry the opened snapshot, never a profile id", () => {
+  const original = {
+    id: "token-1",
+    agent_profile_id: "profile-1",
+    default_notebook_id: "notebook-1",
+    notebook_ids: ["notebook-1"],
+    scopes: ["knowledge:read", "retired:scope"],
+  };
   const payload = agentTokenAccessRequest({
     default_notebook_id: "notebook-1",
     notebook_ids: ["notebook-2"],
     scopes: ["knowledge:read", "knowledge:read"],
     expires_at: "",
-  });
+  }, original);
 
-  assert.deepEqual(Object.keys(payload).sort(), ["default_notebook_id", "expires_at", "notebook_ids", "scopes"]);
+  assert.deepEqual(Object.keys(payload).sort(), ["default_notebook_id", "expected", "expires_at", "notebook_ids", "scopes"]);
   assert.deepEqual(payload.notebook_ids, ["notebook-1", "notebook-2"]);
   assert.deepEqual(payload.scopes, ["knowledge:read"]);
   assert.equal(payload.expires_at, null);
+  // 前置条件是打开时服务端给的原样配置(含已下线 scope、缺省的到期时间归一为 null)。
+  assert.deepEqual(payload.expected, {
+    scopes: ["knowledge:read", "retired:scope"],
+    default_notebook_id: "notebook-1",
+    notebook_ids: ["notebook-1"],
+    expires_at: null,
+  });
+  assert.deepEqual(agentTokenAccessSnapshot(original), payload.expected);
   assert.equal(agentTokenAccessPath("token/1"), "/agent-tokens/token%2F1/access");
 });
 

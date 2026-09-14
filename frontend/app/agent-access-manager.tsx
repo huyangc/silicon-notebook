@@ -29,7 +29,7 @@ import {
 } from "./agent-token-model";
 import { requestJson } from "./api-client.ts";
 import { copyTextSafely } from "./copy-text";
-import { toUserMessage } from "./errors.ts";
+import { httpErrorStatus, toUserMessage } from "./errors.ts";
 import { subscribeMemorySessionAbort } from "./memory-model";
 import { label } from "./vocabulary";
 import type {
@@ -70,10 +70,12 @@ function AgentAccessFields({
   draft,
   setDraft,
   notebooks,
+  disabled = false,
 }: {
   draft: AgentTokenDraft;
   setDraft: (update: (current: AgentTokenDraft) => AgentTokenDraft) => void;
   notebooks: NotebookSummary[];
+  disabled?: boolean;
 }) {
   const known = new Set(notebooks.map((notebook) => notebook.id));
   const options = [
@@ -93,22 +95,22 @@ function AgentAccessFields({
 
   return (
     <>
-      <label>默认笔记本<select value={draft.default_notebook_id} onChange={(event) => setDefaultNotebook(event.target.value)}>
+      <label>默认笔记本<select value={draft.default_notebook_id} disabled={disabled} onChange={(event) => setDefaultNotebook(event.target.value)}>
         <option value="">选择笔记本</option>
         {options.map((notebook) => <option key={notebook.id} value={notebook.id}>{notebook.name}</option>)}
       </select></label>
       <fieldset><legend>笔记本白名单</legend>{options.map((notebook) => (
-        <label className="agent-check" key={notebook.id} title={known.has(notebook.id) ? undefined : notebook.id}><input type="checkbox" checked={draft.notebook_ids.includes(notebook.id)} disabled={draft.default_notebook_id === notebook.id} onChange={(event) => setDraft((current) => ({ ...current, notebook_ids: event.target.checked ? [...current.notebook_ids, notebook.id] : current.notebook_ids.filter((id) => id !== notebook.id) }))} />{notebook.name}</label>
+        <label className="agent-access-check" key={notebook.id} title={known.has(notebook.id) ? undefined : notebook.id}><input type="checkbox" checked={draft.notebook_ids.includes(notebook.id)} disabled={disabled || draft.default_notebook_id === notebook.id} onChange={(event) => setDraft((current) => ({ ...current, notebook_ids: event.target.checked ? [...current.notebook_ids, notebook.id] : current.notebook_ids.filter((id) => id !== notebook.id) }))} />{notebook.name}</label>
       ))}</fieldset>
       <fieldset><legend>Scopes</legend>{AGENT_SCOPE_OPTIONS.map((scope) => (
-        <label className="agent-check" key={scope.value}><input type="checkbox" checked={draft.scopes.includes(scope.value)} onChange={(event) => setDraft((current) => ({ ...current, scopes: event.target.checked ? [...current.scopes, scope.value] : current.scopes.filter((item) => item !== scope.value) }))} />{scope.label}</label>
+        <label className="agent-access-check" key={scope.value}><input type="checkbox" checked={draft.scopes.includes(scope.value)} disabled={disabled} onChange={(event) => setDraft((current) => ({ ...current, scopes: event.target.checked ? [...current.scopes, scope.value] : current.scopes.filter((item) => item !== scope.value) }))} />{scope.label}</label>
       ))}</fieldset>
-      <label>过期时间<input type="datetime-local" value={draft.expires_at} onChange={(event) => setDraft((current) => ({ ...current, expires_at: event.target.value }))} /></label>
+      <label>过期时间<input type="datetime-local" value={draft.expires_at} disabled={disabled} onChange={(event) => setDraft((current) => ({ ...current, expires_at: event.target.value }))} /></label>
     </>
   );
 }
 
-type TokenEdit = { tokenId: string; draft: AgentTokenDraft };
+type TokenEdit = { tokenId: string; original: AgentTokenSummary; draft: AgentTokenDraft };
 
 export function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSignal }) {
   const [profiles, setProfiles] = useState<AgentProfile[]>([]);
@@ -131,6 +133,7 @@ export function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSign
   const [editSaving, setEditSaving] = useState(false);
   const [editError, setEditError] = useState("");
   const [savedTokenId, setSavedTokenId] = useState<string | null>(null);
+  const [confirmRevokeId, setConfirmRevokeId] = useState<string | null>(null);
   const requestEpochRef = useRef(0);
   const listControllerRef = useRef<AbortController | null>(null);
   const profilePageControllerRef = useRef<AbortController | null>(null);
@@ -346,25 +349,31 @@ export function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSign
   }
 
   async function revokeToken(tokenId: string) {
+    setConfirmRevokeId(null);
     const token = await mutate<AgentTokenSummary>(`/agent-tokens/${encodeURIComponent(tokenId)}`, { method: "DELETE" });
     if (token) setRefresh((value) => value + 1);
   }
 
   function startEdit(token: AgentTokenSummary) {
     if (editSaving) return;
-    setEdit({ tokenId: token.id, draft: agentTokenEditDraft(token) });
+    setEdit({ tokenId: token.id, original: token, draft: agentTokenEditDraft(token) });
     setEditError("");
     setSavedTokenId(null);
+    setConfirmRevokeId(null);
   }
 
   function updateEditDraft(update: (current: AgentTokenDraft) => AgentTokenDraft) {
     setEdit((current) => current && { ...current, draft: update(current.draft) });
   }
 
+  const disabledProfileIds = new Set(
+    profiles.filter((profile) => profile.status !== "active").map((profile) => profile.id),
+  );
+
   async function saveTokenAccess(event: FormEvent, token: AgentTokenSummary) {
     event.preventDefault();
     if (!edit || edit.tokenId !== token.id || editSaving || sessionSignal.aborted) return;
-    if (!canSaveAgentTokenAccess(token, edit.draft)) return;
+    if (!canSaveAgentTokenAccess(edit.original, edit.draft)) return;
     const controller = new AbortController();
     mutationControllersRef.current.add(controller);
     setEditSaving(true);
@@ -372,16 +381,22 @@ export function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSign
     try {
       const saved = await agentApi<AgentTokenSummary>(agentTokenAccessPath(token.id), {
         method: "PUT",
-        body: JSON.stringify(agentTokenAccessRequest(edit.draft)),
+        body: JSON.stringify(agentTokenAccessRequest(edit.draft, edit.original)),
         signal: controller.signal,
       });
       if (controller.signal.aborted || !mountedRef.current) return;
       setTokens((current) => current.map((item) => (item.id === saved.id ? saved : item)));
       setEdit(null);
       setSavedTokenId(saved.id);
+      // 重拉一次列表:保存期间已发出的旧列表请求会被新的 epoch 作废,
+      // 不会在「已保存」旁边把这一行覆盖回旧配置。
+      setRefresh((value) => value + 1);
     } catch (cause) {
       if (!controller.signal.aborted && mountedRef.current) {
         setEditError(toUserMessage(cause, "保存失败，请稍后重试"));
+        // 409:已撤销、Profile 已停用或已被别处改过——都重拉列表,让这一行
+        // 与再次打开的编辑器以服务端现状为准。
+        if (httpErrorStatus(cause) === 409) setRefresh((value) => value + 1);
       }
     } finally {
       mutationControllersRef.current.delete(controller);
@@ -458,7 +473,10 @@ export function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSign
           <h3>已签发 Token</h3>
           <p>修改权限保存后立即对正在使用这个 token 的 Agent 生效，无需重新签发或重新配置。</p>
           {tokens.length === 0 ? <p>暂无 token。</p> : tokens.map((token) => {
-            const editing = edit?.tokenId === token.id && !token.revoked_at ? edit : null;
+            // 停用 Profile 不会写 token 的 revoked_at;按已加载的 Profile 状态判断,
+            // 免得给一个保存必然 409 的 token 留着「修改权限」。
+            const profileDisabled = disabledProfileIds.has(token.agent_profile_id);
+            const editing = edit?.tokenId === token.id && !token.revoked_at && !profileDisabled ? edit : null;
             const expired = isExpired(token);
             return (
               <article key={token.id} className={editing ? "editing" : undefined}>
@@ -475,23 +493,30 @@ export function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSign
                     {savedTokenId === token.id && (
                       <small className="agent-token-saved" role="status"><Check size={13} /> 已保存，立即生效</small>
                     )}
-                    {token.revoked_at ? <em>已撤销</em> : (
+                    {token.revoked_at ? <em>已撤销</em> : confirmRevokeId === token.id ? (
                       <>
-                        {!editing && (
+                        <small className="agent-token-confirm">撤销后立即失效，且不能恢复</small>
+                        <button type="button" className="danger" disabled={loading} onClick={() => revokeToken(token.id)}>确认撤销</button>
+                        <button type="button" disabled={loading} onClick={() => setConfirmRevokeId(null)}>不撤销</button>
+                      </>
+                    ) : (
+                      <>
+                        {profileDisabled && <em>Profile 已停用</em>}
+                        {!editing && !profileDisabled && (
                           <button type="button" disabled={loading || editSaving} onClick={() => startEdit(token)}><Pencil size={13} /> 修改权限</button>
                         )}
-                        <button type="button" className="danger" disabled={loading || (editSaving && Boolean(editing))} onClick={() => revokeToken(token.id)}>撤销</button>
+                        <button type="button" className="danger" disabled={loading || (editSaving && Boolean(editing))} onClick={() => setConfirmRevokeId(token.id)}>撤销</button>
                       </>
                     )}
                   </div>
                 </div>
                 {editing && (
                   <form className="agent-config-block agent-token-editor" aria-label={`修改 ${token.profile_name} 的 token 权限`} onSubmit={(event) => { void saveTokenAccess(event, token); }}>
-                    <AgentAccessFields draft={editing.draft} setDraft={updateEditDraft} notebooks={notebooks} />
+                    <AgentAccessFields draft={editing.draft} setDraft={updateEditDraft} notebooks={notebooks} disabled={editSaving} />
                     {!editing.draft.expires_at && <p>请设置过期时间。</p>}
                     {editError && <div className="agent-access-error" role="alert">{editError}</div>}
                     <div className="agent-token-editor-actions">
-                      <button type="submit" className="primary" disabled={editSaving || !canSaveAgentTokenAccess(token, editing.draft)}>
+                      <button type="submit" className="primary" disabled={editSaving || !canSaveAgentTokenAccess(editing.original, editing.draft)}>
                         {editSaving ? "保存中…" : "保存"}
                       </button>
                       <button type="button" disabled={editSaving} onClick={() => { setEdit(null); setEditError(""); }}>取消</button>

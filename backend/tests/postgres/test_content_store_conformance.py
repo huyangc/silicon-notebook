@@ -14,7 +14,11 @@ import pytest
 from app.core.config import Settings
 from app.models.ask import AskRequest, AskResponse
 from app.models.memory import MemoryWrite
-from app.repositories.identity_errors import AgentTokenInactiveError
+from app.models.identity import AgentTokenAccess
+from app.repositories.identity_errors import (
+    AgentTokenAccessConflictError,
+    AgentTokenInactiveError,
+)
 from app.repositories.postgres.ask_state_store import AskStateStore as PostgresAskStateStore
 from app.repositories.postgres.knowhow_store import KnowhowStore as PostgresKnowhowStore
 from app.repositories.postgres.knowhow_transfer_store import (
@@ -2143,6 +2147,28 @@ def test_memory_agent_token_access_update_round_trip_and_rejects_when_inactive(
     assert updated.expires_at is not None
     assert store.list_agent_tokens("user-content") == [updated]
 
+    # expected precondition: PostgreSQL echoes an offset timestamp, so a
+    # client snapshot in the normalized ``Z`` form must still match ...
+    snapshot = AgentTokenAccess(
+        scopes=["memory:propose"],
+        default_notebook_id="nb-content",
+        notebook_ids=["nb-content"],
+        expires_at="2027-01-01T00:00:00Z",
+    )
+    matched = store.update_agent_token_access(
+        issued.id, "user-content", ["memory:propose", "memory:read"],
+        "nb-content", ["nb-content"], "2027-01-01T00:00:00+00:00", snapshot,
+    )
+    assert sorted(matched.scopes) == ["memory:propose", "memory:read"]
+    # ... while a snapshot that is now stale is refused without writing.
+    with pytest.raises(AgentTokenAccessConflictError):
+        store.update_agent_token_access(
+            issued.id, "user-content", ["memory:propose"], "nb-content",
+            ["nb-content"], None, snapshot,
+        )
+    assert store.list_agent_tokens("user-content") == [matched]
+    updated = matched
+
     # A different owner's scoped lookup does not find this token.
     with pytest.raises(KeyError):
         store.update_agent_token_access(
@@ -2159,7 +2185,7 @@ def test_memory_agent_token_access_update_round_trip_and_rejects_when_inactive(
         )
     assert exc_info.value.reason == "revoked"
     still = store.list_agent_tokens("user-content")[0]
-    assert still.scopes == ["memory:propose"]
+    assert still.scopes == updated.scopes
 
     # Profile disabled: rejected too, even though the token itself is live.
     live_token = store.create_agent_token(

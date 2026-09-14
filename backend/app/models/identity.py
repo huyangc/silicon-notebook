@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -144,16 +145,53 @@ class AgentTokenCreate(BaseModel):
     expires_at: Optional[str] = None
 
 
+def _same_expiry(left: Optional[str], right: Optional[str]) -> bool:
+    """Compare two stored/echoed expiry values as instants.
+
+    SQLite echoes the normalized ``...Z`` form while PostgreSQL echoes an
+    offset form, so string equality would report a false conflict."""
+    if not left or not right:
+        return not left and not right
+    try:
+        return datetime.fromisoformat(left) == datetime.fromisoformat(right)
+    except ValueError:
+        return left == right
+
+
+class AgentTokenAccess(BaseModel):
+    """A token's access configuration exactly as a client last read it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    scopes: List[str]
+    default_notebook_id: str = Field(min_length=1)
+    notebook_ids: List[str]
+    expires_at: Optional[str]
+
+    def matches(self, token: "AgentTokenSummary") -> bool:
+        return (
+            set(self.scopes) == set(token.scopes)
+            and self.default_notebook_id == token.default_notebook_id
+            and set(self.notebook_ids) == set(token.notebook_ids)
+            and _same_expiry(self.expires_at, token.expires_at)
+        )
+
+
 class AgentTokenAccessUpdate(BaseModel):
     """``PUT /agent-tokens/{token_id}/access`` request body.
 
     A whole-object replace of the token's access configuration, so every
-    field is required — none has a default a caller could omit and silently
-    narrow (or widen) scopes/notebooks by accident. ``expires_at`` still
-    carries its ``Optional`` type (``null`` clears the expiry) but no default
-    value, so the field itself must be present in the payload; leaving it out
-    entirely is a 422, not "leave unchanged" (there is no partial-update
-    semantics here, unlike ``AgentProfileUpdate``/``SearchProfileUpdate``).
+    access field is required — none has a default a caller could omit and
+    silently narrow (or widen) scopes/notebooks by accident. ``expires_at``
+    still carries its ``Optional`` type (``null`` clears the expiry) but no
+    default value, so the field itself must be present in the payload;
+    leaving it out entirely is a 422, not "leave unchanged" (there is no
+    partial-update semantics here, unlike ``AgentProfileUpdate``).
+
+    ``expected`` is an optional compare-and-swap precondition: the access
+    configuration the editor started from. When present and the stored
+    configuration has changed since, the write is refused (409) instead of
+    silently restoring a permission another session just removed.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -162,6 +200,7 @@ class AgentTokenAccessUpdate(BaseModel):
     default_notebook_id: str = Field(min_length=1)
     notebook_ids: List[str]
     expires_at: Optional[str]
+    expected: Optional[AgentTokenAccess] = None
 
 
 class AgentTokenSummary(BaseModel):

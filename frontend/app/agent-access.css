@@ -73,8 +73,8 @@
 }
 
 .agent-config-block legend { color: #596273; font-size: 12px; font-weight: 700; }
-.agent-check { display: flex; align-items: center; gap: 7px; color: #3e4858; font-size: 12px; }
-.agent-check input { accent-color: var(--blue); }
+.agent-access-check { display: flex; align-items: center; gap: 7px; color: #3e4858; font-size: 12px; }
+.agent-access-check input { accent-color: var(--blue); }
 
 .agent-config-block button,
 .agent-profile-list button,
@@ -141,6 +141,8 @@
   font-size: 12px;
   font-weight: 600;
 }
+
+.agent-token-confirm { color: #a52d2d; font-size: 12px; }
 
 .agent-token-editor { border-color: #cdd9f5; background: #f7f9ff; }
 .agent-token-editor-actions { display: flex; flex-wrap: wrap; gap: 8px; }

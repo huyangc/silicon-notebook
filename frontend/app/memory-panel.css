@@ -627,6 +627,11 @@
   gap: 3px 7px;
 }
 
+/* 记忆审核、保存预览与 transfer-picker 的「同时整理进知识图谱」勾选框。类名沿用自
+   它最初所在的 Agent 接入区块;Agent 接入页自己用 .agent-access-check。 */
+.agent-check { display: flex; align-items: center; gap: 7px; color: #3e4858; font-size: 12px; }
+.agent-check input { accent-color: var(--blue); }
+
 .agent-access-link small {
   grid-column: 2;
   color: var(--muted);

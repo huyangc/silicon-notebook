@@ -126,9 +126,21 @@ export function agentTokenAccessPath(tokenId: string): string {
   return `/agent-tokens/${encodeURIComponent(tokenId)}/access`;
 }
 
-/** 整体替换语义:四个字段都显式给出,`expires_at` 为 null 即无到期时间。 */
-export function agentTokenAccessRequest(draft: AgentTokenDraft) {
-  return agentTokenAccessFields(draft);
+/** 编辑器打开时读到的访问配置,原样回传给服务端做前置条件比对。 */
+export function agentTokenAccessSnapshot(token: AgentTokenAccess) {
+  return {
+    scopes: [...token.scopes],
+    default_notebook_id: token.default_notebook_id,
+    notebook_ids: [...token.notebook_ids],
+    expires_at: token.expires_at ?? null,
+  };
+}
+
+/** 整体替换语义:四个字段都显式给出,`expires_at` 为 null 即无到期时间。
+ *  `expected` 是编辑器打开时的配置——期间若被别的标签页改过,服务端拒写(409),
+ *  而不是让这份旧草稿悄悄恢复刚被收回的权限。 */
+export function agentTokenAccessRequest(draft: AgentTokenDraft, original: AgentTokenAccess) {
+  return { ...agentTokenAccessFields(draft), expected: agentTokenAccessSnapshot(original) };
 }
 
 export function canSaveAgentTokenAccess(token: AgentTokenAccess, draft: AgentTokenDraft): boolean {

@@ -49,6 +49,7 @@ from app.core.llm import OpenAICompatibleClient, cap_kwargs
 from app.models.identity import (
     AgentPrincipal,
     AgentProfile,
+    AgentTokenAccess,
     AgentTokenIssued,
     AgentTokenSummary,
     UserProfile,
@@ -1399,6 +1400,7 @@ class RepositoryFacade:
         default_notebook_id: str,
         notebook_ids: List[str],
         expires_at: "str | None",
+        expected: AgentTokenAccess | None = None,
     ) -> AgentTokenSummary:
         return self._runtime.memory_service.update_agent_token_access(
             owner_id,
@@ -1407,6 +1409,7 @@ class RepositoryFacade:
             default_notebook_id,
             notebook_ids,
             expires_at,
+            expected,
         )
 
     def resolve_agent_token(self, raw_token: str) -> "AgentPrincipal | None":

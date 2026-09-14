@@ -58,6 +58,7 @@ from app.domain.retrieval import (
 from app.models.identity import (
     AgentPrincipal,
     AgentProfile,
+    AgentTokenAccess,
     AgentTokenIssued,
     AgentTokenSummary,
     UserProfile,
@@ -603,7 +604,7 @@ class MemoryRepository(Protocol):
     def update_agent_token_access(
         self, owner_id: str, token_id: str, scopes: Sequence[str],
         default_notebook_id: str, notebook_ids: Sequence[str],
-        expires_at: str | None,
+        expires_at: str | None, expected: AgentTokenAccess | None = None,
     ) -> AgentTokenSummary: ...
     def resolve_agent_token(self, raw_token: str) -> AgentPrincipal | None: ...
     def refresh_agent_principal(self, token_id: str) -> AgentPrincipal | None: ...
@@ -3759,7 +3760,7 @@ class MemoryStorePort(Protocol):
     def update_agent_token_access(
         self, token_id: str, owner_id: str, scopes: Sequence[str],
         default_notebook_id: str, notebook_ids: Sequence[str],
-        expires_at: str | None,
+        expires_at: str | None, expected: AgentTokenAccess | None = None,
     ) -> AgentTokenSummary: ...
     def agent_token_auth_row(self, token_id: str) -> dict[str, Any] | None: ...
     def touch_agent_token(

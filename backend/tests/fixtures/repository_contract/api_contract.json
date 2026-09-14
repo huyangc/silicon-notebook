@@ -1229,14 +1229,68 @@
           "title": "AgentProfileUpdate",
           "type": "object"
         },
-        "AgentTokenAccessUpdate": {
+        "AgentTokenAccess": {
           "additionalProperties": false,
-          "description": "``PUT /agent-tokens/{token_id}/access`` request body.\n\nA whole-object replace of the token's access configuration, so every\nfield is required — none has a default a caller could omit and silently\nnarrow (or widen) scopes/notebooks by accident. ``expires_at`` still\ncarries its ``Optional`` type (``null`` clears the expiry) but no default\nvalue, so the field itself must be present in the payload; leaving it out\nentirely is a 422, not \"leave unchanged\" (there is no partial-update\nsemantics here, unlike ``AgentProfileUpdate``/``SearchProfileUpdate``).",
+          "description": "A token's access configuration exactly as a client last read it.",
           "properties": {
             "default_notebook_id": {
               "minLength": 1,
               "title": "Default Notebook Id",
               "type": "string"
+            },
+            "expires_at": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Expires At"
+            },
+            "notebook_ids": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Notebook Ids",
+              "type": "array"
+            },
+            "scopes": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Scopes",
+              "type": "array"
+            }
+          },
+          "required": [
+            "scopes",
+            "default_notebook_id",
+            "notebook_ids",
+            "expires_at"
+          ],
+          "title": "AgentTokenAccess",
+          "type": "object"
+        },
+        "AgentTokenAccessUpdate": {
+          "additionalProperties": false,
+          "description": "``PUT /agent-tokens/{token_id}/access`` request body.\n\nA whole-object replace of the token's access configuration, so every\naccess field is required — none has a default a caller could omit and\nsilently narrow (or widen) scopes/notebooks by accident. ``expires_at``\nstill carries its ``Optional`` type (``null`` clears the expiry) but no\ndefault value, so the field itself must be present in the payload;\nleaving it out entirely is a 422, not \"leave unchanged\" (there is no\npartial-update semantics here, unlike ``AgentProfileUpdate``).\n\n``expected`` is an optional compare-and-swap precondition: the access\nconfiguration the editor started from. When present and the stored\nconfiguration has changed since, the write is refused (409) instead of\nsilently restoring a permission another session just removed.",
+          "properties": {
+            "default_notebook_id": {
+              "minLength": 1,
+              "title": "Default Notebook Id",
+              "type": "string"
+            },
+            "expected": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/AgentTokenAccess"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "expires_at": {
               "anyOf": [

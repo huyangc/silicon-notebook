@@ -748,16 +748,23 @@ The **Agent access** page (`/agents`, a first-level account-menu entry; the glob
 links to it) creates stable Agent profiles and one-time plaintext tokens. A token has an expiry,
 a default notebook, a notebook allowlist, and the smallest needed subset of `knowledge:read`,
 `memory:read`, `memory:read_candidates`, `memory:propose`, `ask:execute`, `knowhow:code`,
-`sources:write`, `sources:delete`, and `maintenance:execute`; it can be revoked immediately.
+`sources:write`, `sources:delete`, `maintenance:execute`, `agent_profile:read`, and
+`agent_observation:write`; it can be revoked immediately.
 An issued token's access can be edited in place: `PUT /api/agent-tokens/{token_id}/access`
 replaces scopes, default notebook, allowlist, and expiry together (all four fields are required;
 `expires_at: null` means no expiry) under the same validation as issuing, while the token hash,
 Profile, and creation time stay unchanged and the plaintext is never shown again. Because every
 Agent tool call rereads live token state, the change applies from the next call without
 reissuing or reconfiguring the client; moving an expired token's expiry into the future makes it
-usable again. A revoked token, or one whose Profile is disabled, returns 409; an allowlisted
-notebook the owner can no longer read returns 422. The browser edits each token inline, with
-busy, failure, and saved states on that token's row. Install the backend
+usable again; an empty-string `expires_at` means no expiry, like `null`, on both issue and edit.
+An optional `expected` object carries the four access fields as the editor last read them; when
+present and the stored configuration has changed since, the write returns 409 instead of
+overwriting (the browser always sends it, so a stale tab cannot silently restore a permission
+another tab just removed; omitting it is last-writer-wins). A revoked token, or one whose Profile
+is disabled, returns 409; an allowlisted notebook the owner can no longer read returns 422. The
+browser edits each token inline, with busy, failure, and saved states on that token's row, hides
+editing for revoked tokens and for tokens of a disabled Profile, and asks for an inline second
+confirmation before revoking. Install the backend
 requirements (which include the official `mcp>=1.26.0` client/server SDK), start the backend,
 then connect to the Streamable HTTP server at `/mcp/` (`/mcp` reaches it through a 307).
 The one-time token receipt also links to anonymous `GET /api/agent-mcp/onboarding`, a
