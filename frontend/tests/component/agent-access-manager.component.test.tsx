@@ -30,7 +30,7 @@ const activeToken = {
 
 const revokedToken = { ...activeToken, id: "token-2", profile_name: "Codex", revoked_at: "2026-09-02T00:00:00Z" };
 
-type Route = (options: RequestInit) => unknown;
+type Route = (options: RequestInit, path: string) => unknown;
 
 function routeRequests(routes: Record<string, Route>) {
   mocks.requestJson.mockImplementation(async (path: string, options: RequestInit = {}) => {
@@ -38,7 +38,7 @@ function routeRequests(routes: Record<string, Route>) {
     const key = `${method} ${path.split("?")[0]}`;
     const route = routes[key];
     if (!route) throw new Error(`unexpected request ${key}`);
-    return route(options);
+    return route(options, path);
   });
 }
 
@@ -73,9 +73,7 @@ afterEach(() => {
 
 test("已签发 token 可以回来修改权限,保存后行内确认并按整体替换提交", async () => {
   let resolveSave!: (value: unknown) => void;
-  let stored = activeToken;
   routeRequests(baseRoutes({
-    "GET /agent-tokens": () => [stored, revokedToken],
     "PUT /agent-tokens/token-1/access": () => new Promise((resolve) => { resolveSave = resolve; }),
   }));
   const user = userEvent.setup();
@@ -122,9 +120,8 @@ test("已签发 token 可以回来修改权限,保存后行内确认并按整体
 
   const listLoadsBeforeSave = requestsTo("GET /agent-tokens").length;
   vi.useFakeTimers();
-  stored = { ...activeToken, scopes: ["knowledge:read", "memory:read"], notebook_ids: ["nb-1", "nb-2"] };
   await act(async () => {
-    resolveSave(stored);
+    resolveSave({ ...activeToken, scopes: ["knowledge:read", "memory:read"], notebook_ids: ["nb-1", "nb-2"] });
   });
 
   const row = tokenRow("Claude Code");
@@ -132,8 +129,8 @@ test("已签发 token 可以回来修改权限,保存后行内确认并按整体
   expect(within(row).getByRole("status")).toHaveTextContent("已保存，立即生效");
   expect(row).toHaveTextContent("读取知识库 · 读取已确认记忆");
   expect(row).toHaveTextContent("允许 2 个笔记本");
-  // 保存成功后重拉列表,作废保存期间可能在途的旧列表请求。
-  expect(requestsTo("GET /agent-tokens").length).toBeGreaterThan(listLoadsBeforeSave);
+  // 成功回执本身就是新配置,不重拉列表(重拉会丢掉「加载更多」翻到的行)。
+  expect(requestsTo("GET /agent-tokens")).toHaveLength(listLoadsBeforeSave);
 
   await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
   expect(within(tokenRow("Claude Code")).queryByRole("status")).not.toBeInTheDocument();
@@ -158,6 +155,94 @@ test("保存失败时错误落在编辑行内,编辑内容保留以便重试", a
   expect(await within(editor).findByRole("alert")).toHaveTextContent("白名单里有你已无权访问的笔记本");
   expect(within(editor).getByRole("checkbox", { name: "执行笔记本问答" })).toBeChecked();
   expect(within(editor).getByRole("button", { name: "保存" })).toBeEnabled();
+});
+
+function pageOffset(path: string): number {
+  return Number(new URLSearchParams(path.split("?")[1]).get("offset"));
+}
+
+function pagedTokens() {
+  const firstPage = Array.from({ length: 25 }, (_, index) => ({
+    ...activeToken,
+    id: `token-p1-${index}`,
+    profile_name: `第一页代理${index}`,
+  }));
+  const secondPageToken = { ...activeToken, id: "token-p2", profile_name: "第二页代理" };
+  return { firstPage, secondPageToken };
+}
+
+test("「加载更多」翻到的 token 保存成功或撞 409 后仍留在列表里,反馈也留在该行", async () => {
+  const { firstPage, secondPageToken } = pagedTokens();
+  let saveAttempt = 0;
+  routeRequests(baseRoutes({
+    "GET /agent-tokens": (_options, path) => {
+      const offset = pageOffset(path);
+      return offset === 0 ? firstPage : [secondPageToken];
+    },
+    "PUT /agent-tokens/token-p2/access": () => {
+      saveAttempt += 1;
+      if (saveAttempt === 1) return { ...secondPageToken, scopes: ["knowledge:read", "memory:read"] };
+      throw humanizedError("这个 Token 的权限刚在别处被修改过，请取消后重新打开再改", 409);
+    },
+  }));
+  const user = userEvent.setup();
+  render(<AgentAccessManager sessionSignal={new AbortController().signal} />);
+
+  await screen.findByText("第一页代理0");
+  await user.click(screen.getByRole("button", { name: "加载更多 Token" }));
+  await screen.findByText("第二页代理");
+
+  await user.click(within(tokenRow("第二页代理")).getByRole("button", { name: /修改权限/ }));
+  let editor = screen.getByRole("form", { name: "修改 第二页代理 的 token 权限" });
+  await user.click(within(editor).getByRole("checkbox", { name: "读取已确认记忆" }));
+  const listLoads = requestsTo("GET /agent-tokens").length;
+  await user.click(within(editor).getByRole("button", { name: "保存" }));
+
+  expect(await within(tokenRow("第二页代理")).findByRole("status")).toHaveTextContent("已保存，立即生效");
+  expect(requestsTo("GET /agent-tokens")).toHaveLength(listLoads);
+
+  await user.click(within(tokenRow("第二页代理")).getByRole("button", { name: /修改权限/ }));
+  editor = screen.getByRole("form", { name: "修改 第二页代理 的 token 权限" });
+  await user.click(within(editor).getByRole("checkbox", { name: "执行笔记本问答" }));
+  await user.click(within(editor).getByRole("button", { name: "保存" }));
+
+  expect(await within(editor).findByRole("alert")).toHaveTextContent("这个 Token 的权限刚在别处被修改过");
+  // 按已加载深度重拉(第一页 + 第二页),而不是只回到第一页。
+  await waitFor(() => expect(requestsTo("GET /agent-tokens")).toHaveLength(listLoads + 2));
+  expect(screen.getByRole("form", { name: "修改 第二页代理 的 token 权限" })).toBeInTheDocument();
+  expect(within(tokenRow("第二页代理")).getByRole("form")).toHaveTextContent("这个 Token 的权限刚在别处被修改过");
+});
+
+test("保存之前就已发出的翻页请求晚到时,不会把刚保存的行覆盖回旧配置", async () => {
+  const { firstPage } = pagedTokens();
+  const edited = firstPage[0];
+  let resolveSave!: (value: unknown) => void;
+  let resolvePage!: (value: unknown) => void;
+  routeRequests(baseRoutes({
+    "GET /agent-tokens": (_options, path) => {
+      const offset = pageOffset(path);
+      if (offset === 0) return firstPage;
+      return new Promise((resolve) => { resolvePage = resolve; });
+    },
+    [`PUT /agent-tokens/${edited.id}/access`]: () => new Promise((resolve) => { resolveSave = resolve; }),
+  }));
+  const user = userEvent.setup();
+  render(<AgentAccessManager sessionSignal={new AbortController().signal} />);
+
+  await screen.findByText("第一页代理0");
+  await user.click(within(tokenRow("第一页代理0")).getByRole("button", { name: /修改权限/ }));
+  const editor = screen.getByRole("form", { name: "修改 第一页代理0 的 token 权限" });
+  await user.click(within(editor).getByRole("checkbox", { name: "读取已确认记忆" }));
+  await user.click(within(editor).getByRole("button", { name: "保存" }));
+  // 保存在途时翻页;这页响应里带着这一行保存前的旧副本。
+  await user.click(screen.getByRole("button", { name: "加载更多 Token" }));
+
+  await act(async () => { resolveSave({ ...edited, scopes: ["knowledge:read", "memory:read"] }); });
+  expect(tokenRow("第一页代理0")).toHaveTextContent("读取知识库 · 读取已确认记忆");
+  await act(async () => { resolvePage([edited, { ...activeToken, id: "token-late", profile_name: "晚到代理" }]); });
+
+  expect(await screen.findByText("晚到代理")).toBeInTheDocument();
+  expect(tokenRow("第一页代理0")).toHaveTextContent("读取知识库 · 读取已确认记忆");
 });
 
 test("409 冲突时错误留在编辑行内并重拉列表,以服务端现状为准", async () => {
