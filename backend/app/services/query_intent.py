@@ -166,6 +166,18 @@ def _has_unnegated_aggregate_request(question: str) -> bool:
     )
 
 
+def _has_negated_scope_request(question: str) -> bool:
+    """Whether the question explicitly declines a full-set / count request
+    (and no unnegated one is present — callers check those first)."""
+    return any(
+        _complete_match_is_negated(question, match)
+        for match in _COMPLETE_REQUEST.finditer(question)
+    ) or any(
+        _aggregate_match_is_negated(question, match)
+        for match in _AGGREGATE_REQUEST.finditer(question)
+    )
+
+
 def _clarification_scope_signal(answer: str) -> str:
     """Return the last non-negated explicit scope choice in an answer."""
     signals: list[tuple[int, str]] = []
@@ -186,34 +198,85 @@ def _clarification_scope_signal(answer: str) -> str:
     return max(signals, default=(-1, ""), key=lambda row: row[0])[1]
 
 
-def _result_scope(data: dict, question: str) -> tuple[str, bool]:
-    """Normalize model scope and deterministically protect full-set wording.
+# A model widening the scope on its own (no full-set wording in the question)
+# is trusted only when its reply is internally consistent AND it says it is
+# confident enough. Below this the classification counts as a guess and the
+# cheaper ranked retrieval stands; the user can still widen at confirmation.
+MODEL_SCOPE_MIN_CONFIDENCE = 0.5
 
-    The lexical fallback only upgrades completeness; it never lets a model turn
-    an explicit "all/every" request into ranked top-N.  Explicit negation (for
-    example "不需要所有") prevents a false upgrade.  Exact aggregate requests
-    also require full collection coverage even when they do not list every row.
+
+def _result_scope(
+    data: dict, question: str, *, status: dict | None = None,
+) -> tuple[str, bool]:
+    """Decide the result scope: the model decides, deterministic wording bounds it.
+
+    Harness principle (user decision, 2026-09-14): the model is the brain and
+    owns this classification; the server only catches the two ways it can be
+    wrong.
+
+    1. **Lexical floor.** Explicit full-set wording in the question ("所有 /
+       every / 一共多少 …", with clause-local negation respected) fixes the
+       scope deterministically — a model may never turn "list every method"
+       into a ranked top-N, and an exact count always needs full coverage.
+    2. **Model decision.** Without such wording the model's ``result_scope``
+       stands, including a widening to complete / aggregate / hybrid — *if*
+       the reply is consistent (``completeness_required`` true for a non-ranked
+       scope) and its ``confidence`` is at least ``MODEL_SCOPE_MIN_CONFIDENCE``.
+       A low-confidence or self-contradicting widening falls back to ranked:
+       collection enumeration is the expensive executor, so a guess does not
+       get to choose it. (Before this rule the server overrode the model
+       unconditionally and the prompt's classification instructions were
+       decoration.)
+
+    ``status["scope_source"]`` records which rule decided ("lexical", "model",
+    "default") so a run's trace can say why a collection scan happened.
     """
-    # Completeness changes the executor from relevance ranking to bounded
-    # collection enumeration, so the model may not upgrade it on its own.
-    # Only deterministic, reviewable request wording below can do that.  This
-    # avoids treating domain nouns such as “统计方法” or “数据完整性” as an
-    # instruction to scan an entire table.
-    raw_scope = str(data.get("result_scope") or "ranked").strip().lower()
-    scope = raw_scope if raw_scope in RESULT_SCOPES else "ranked"
+    raw_scope = as_text(data.get("result_scope")).lower()
+    model_scope = raw_scope if raw_scope in RESULT_SCOPES else ""
     wants_complete = _has_unnegated_complete_request(question)
     wants_aggregate = _has_unnegated_aggregate_request(question)
     wants_analysis = bool(_ANALYSIS_REQUEST.search(question)) or _has_per_document_analysis(question)
+    source = "default"
     if wants_aggregate:
         # "列出所有方法并比较优缺点" remains hybrid; a plain exact count/group
         # is aggregate.  Both still require complete collection coverage.
         scope = "hybrid" if wants_analysis else "aggregate"
+        source = "lexical"
     elif wants_complete:
         scope = "hybrid" if wants_analysis else "complete"
+        source = "lexical"
+    elif _has_negated_scope_request(question):
+        # "不需要所有方法，只给最相关的几个": the user explicitly declined the
+        # full set, which outranks a model that still wants to enumerate.
+        scope, source = "ranked", "lexical"
+    elif model_scope and model_scope != "ranked":
+        consistent = data.get("completeness_required") is True
+        confidence = _confidence_value(data.get("confidence"))
+        if consistent and confidence >= MODEL_SCOPE_MIN_CONFIDENCE:
+            scope, source = model_scope, "model"
+        else:
+            scope = "ranked"
     else:
         scope = "ranked"
+        if model_scope == "ranked":
+            source = "model"
+    if status is not None:
+        status["scope_source"] = source
     completeness_required = scope != "ranked"
     return scope, completeness_required
+
+
+def _confidence_value(value: object) -> float:
+    """The model's 0..1 confidence as a float; anything unusable is 0.0."""
+    if value is None or isinstance(value, bool):
+        return 0.0
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if number != number or number in (float("inf"), float("-inf")):
+        return 0.0
+    return max(0.0, min(1.0, number))
 
 
 def _bounded_strings(value: object, limit: int = 8, item_chars: int = 500) -> list[str]:
@@ -380,7 +443,7 @@ def plan_query_intent(
     normalized_question = (
         as_text(data.get("normalized_question"))[:4000] or question
     )
-    result_scope, completeness_required = _result_scope(data, question)
+    result_scope, completeness_required = _result_scope(data, question, status=status)
     contract = {
         "objective": question,
         "resolved_question": normalized_question,

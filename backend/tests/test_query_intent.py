@@ -163,22 +163,75 @@ def test_collection_scope_is_classified_per_instruction_clause(question, scope):
     assert contract["completeness_required"] is (scope != "ranked")
 
 
-def test_model_cannot_upgrade_ambiguous_nouns_to_collection_enumeration():
-    class _OvereagerScopeClient:
+def _scope_client(scope, *, completeness=True, confidence=0.9):
+    class _Client:
         configured = True
 
         def chat_json(self, *args, **kwargs):
             return json.dumps({
-                "result_scope": "aggregate",
-                "completeness_required": True,
+                "result_scope": scope,
+                "completeness_required": completeness,
+                "confidence": confidence,
+                "intent_type": "other",
                 "normalized_question": "解释统计方法的适用范围",
+                "mandatory_topics": [], "ambiguities": [],
+                "needs_clarification": False,
             })
 
+    return _Client()
+
+
+def test_the_model_decides_the_scope_when_the_wording_does_not():
+    """Harness principle (user decision, 2026-09-14): the model owns the
+    classification; without explicit full-set wording its widening stands
+    when the reply is consistent and confident enough."""
+    for scope in ("aggregate", "complete", "hybrid"):
+        status: dict = {}
+        contract = plan_query_intent(
+            _scope_client(scope), "解释统计方法的适用范围", status=status,
+        )
+        assert contract["result_scope"] == scope
+        assert contract["completeness_required"] is True
+        assert status["scope_source"] == "model"
+
+
+def test_a_guessed_or_inconsistent_widening_falls_back_to_ranked():
+    # Low confidence: the expensive executor is not chosen on a guess.
+    status: dict = {}
     contract = plan_query_intent(
-        _OvereagerScopeClient(), "解释统计方法的适用范围"
+        _scope_client("aggregate", confidence=0.3), "解释统计方法的适用范围",
+        status=status,
+    )
+    assert contract["result_scope"] == "ranked"
+    assert status["scope_source"] == "default"
+    # Self-contradicting reply: non-ranked scope with completeness_required=false.
+    contract = plan_query_intent(
+        _scope_client("complete", completeness=False), "解释统计方法的适用范围",
+    )
+    assert contract["result_scope"] == "ranked"
+    # Missing confidence counts as 0.
+    contract = plan_query_intent(
+        _scope_client("hybrid", confidence=None), "解释统计方法的适用范围",
+    )
+    assert contract["result_scope"] == "ranked"
+
+
+def test_explicit_wording_bounds_the_model_in_both_directions():
+    # Explicit full-set wording widens even when the model says ranked.
+    status: dict = {}
+    contract = plan_query_intent(
+        _scope_client("ranked", completeness=False), "列出所有方法", status=status,
+    )
+    assert contract["result_scope"] == "complete"
+    assert status["scope_source"] == "lexical"
+    # An explicit refusal of the full set caps a confident model at ranked.
+    status = {}
+    contract = plan_query_intent(
+        _scope_client("complete"), "不需要所有方法，只给最相关的几个", status=status,
     )
     assert contract["result_scope"] == "ranked"
     assert contract["completeness_required"] is False
+    assert status["scope_source"] == "lexical"
 
 
 def test_model_scope_is_bounded_and_non_ranked_scope_requires_completeness():
