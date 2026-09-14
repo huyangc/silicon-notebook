@@ -4533,8 +4533,16 @@ class AskService:
         collection_item_citations: dict,
         answer_client,
         chunk_context_chars: int,
+        knowhow_block_len: int = 0,
     ) -> tuple[str, bool]:
         """把本轮按篇读到的有界原文摘录缝进合成证据块(PR-A T5)。
+
+        ``knowhow_block_len`` 是花名册拼上来**之前** ``structured_block`` 的长度
+        (knowhow 整表块)。整块不装的判据与枚举侧的子预算同口径:knowhow 块本身
+        不受半预算约束(既有设计,PR-B 登记的风险 a),受约束的是「花名册 + 取样」
+        这一对——所以上限是 ``knowhow_block_len + 拼接符 + chunk_context_chars // 2``,
+        不是裸的一半(codex #724 R4:按裸的一半判,4000 字 knowhow + 13000 字
+        花名册 + 2000 字取样就会把预留过席位的取样块照样整块挡下)。
 
         装配位在**枚举预览之后**:先是「库里有这几篇」,紧接着才是「其中这几篇
         我真的翻开读了几段」,读者(模型)看到的顺序与它自己的动作顺序一致。整体
@@ -4588,7 +4596,10 @@ class AskService:
                 return structured_block, False
             combined = (f"{structured_block}\n\n{preview.text}"
                         if structured_block else preview.text)
-            if len(combined) > int(chunk_context_chars) // 2:
+            shared_cap = (int(knowhow_block_len)
+                          + (2 if knowhow_block_len else 0)
+                          + int(chunk_context_chars) // 2)
+            if len(combined) > shared_cap:
                 return structured_block, True
             citation_updates = {
                 citation.element_id: citation for citation in preview.citations}
@@ -4806,6 +4817,7 @@ class AskService:
         enumeration_block_dropped = False
         collection_item_citations: dict = {}
         structured_map: dict = {}
+        knowhow_block_len = len(structured_block)   # 花名册拼上来之前的长度
         if enumerations:
             try:
                 from app.services.collection_enumeration_answer import (
@@ -4887,7 +4899,7 @@ class AskService:
             self._assemble_document_read_block(
                 stage.document_reads, structured_block, structured_map,
                 collection_item_citations, answer_client,
-                limits.chunk_context_chars))
+                limits.chunk_context_chars, knowhow_block_len))
         structured_block = self._add_sheet_prompt(
             structured_block, structured_map, spreadsheet_results, answer_client)
         def _synth_reasoning():
