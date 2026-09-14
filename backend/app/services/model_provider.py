@@ -539,8 +539,19 @@ class ScheduledJsonChatClient(_ScheduledAdapter):
         # provider error.  An undeclared client simply leaves the sink empty,
         # which is exactly the "finish_reason unknown" branch every consumer
         # already handles.
-        forward_stats = call_stats is not None and getattr(
-            runtime.raw, "supports_call_stats", False)
+        raw_supports_stats = bool(getattr(runtime.raw, "supports_call_stats", False))
+        # The finish reason is part of the failure phenomenon the Ask banner
+        # names, and the ordinary synthesis callers (ask_service) pass no
+        # sink of their own. So when the physical client can report stats,
+        # always hand it one: the caller's dictionary when supplied, else an
+        # adapter-local one that exists only to read finish_reason back on
+        # rejection. Cost is one small dict per call; the transport already
+        # records it either way (codex #717 R1 P2).
+        stats_sink: dict[str, Any] | None = (
+            call_stats if call_stats is not None
+            else ({} if raw_supports_stats else None)
+        )
+        forward_stats = stats_sink is not None and raw_supports_stats
 
         def invoke() -> str:
             nonlocal raw_response, rejection_reason
@@ -567,7 +578,7 @@ class ScheduledJsonChatClient(_ScheduledAdapter):
                 # Forwarded only when the caller asked for it AND this
                 # physical client declares it, so every duck-typed client
                 # keeps its current signature (see ``forward_stats``).
-                **({CALL_STATS_KWARG: call_stats} if forward_stats else {}),
+                **({CALL_STATS_KWARG: stats_sink} if forward_stats else {}),
             )
             raw_response = content if isinstance(content, str) else str(content)
             repair_mode = (
@@ -591,7 +602,7 @@ class ScheduledJsonChatClient(_ScheduledAdapter):
                 raise MalformedModelResponse(
                     reason=exc.reason,
                     finish_reason=str(
-                        (call_stats or {}).get("finish_reason") or "")
+                        (stats_sink or {}).get("finish_reason") or "")
                 ) from exc
             if parsed.repaired:
                 self._emit_json_repair_event(
