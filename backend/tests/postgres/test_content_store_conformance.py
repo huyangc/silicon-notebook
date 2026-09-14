@@ -2207,6 +2207,75 @@ def test_memory_agent_token_access_update_round_trip_and_rejects_when_inactive(
     assert exc_info.value.reason == "profile_disabled"
 
 
+def test_memory_agent_token_auth_row_reads_one_snapshot_across_a_concurrent_edit(
+    content_harness, monkeypatch,
+):
+    """Token access is mutable, and READ COMMITTED gives every statement its
+    own snapshot: an edit committed between a split token read and allowlist
+    read would pair the old scopes with the new allowlist. The auth row must
+    come back entirely old or entirely new."""
+    from contextlib import contextmanager
+
+    store = content_harness.memory
+    with content_harness.database.write() as connection:
+        connection.execute(
+            "INSERT INTO notebooks(id,name,purpose,primary_domain,status,created_by,"
+            "created_at,updated_at,tier) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            (
+                "nb-content-extra", "Content extra", "", "engineering", "ready",
+                "user-content", NOW, NOW, "personal",
+            ),
+        )
+    profile = store.create_agent_profile(
+        "user-content", "MCP conformance snapshot", "PostgreSQL auth snapshot"
+    )
+    issued = store.create_agent_token(
+        "agent-token-content-snapshot",
+        "user-content",
+        profile.id,
+        "sha256-token-hash-snapshot",
+        ["sources:delete"],
+        "nb-content",
+        ["nb-content"],
+        None,
+    )
+    old = (["sources:delete"], ["nb-content"])
+    new = (["knowledge:read"], sorted(["nb-content", "nb-content-extra"]))
+    real_connect = store.database.connect
+    fired = []
+
+    class _EditAfterFirstRead:
+        def __init__(self, connection):
+            self._connection = connection
+
+        def execute(self, *args, **kwargs):
+            cursor = self._connection.execute(*args, **kwargs)
+            if not fired:
+                fired.append(True)
+                store.update_agent_token_access(
+                    issued.id, "user-content", new[0], "nb-content", new[1], None
+                )
+            return cursor
+
+        def __getattr__(self, name):
+            return getattr(self._connection, name)
+
+    @contextmanager
+    def interleaving_connect():
+        with real_connect() as connection:
+            yield _EditAfterFirstRead(connection)
+
+    monkeypatch.setattr(store.database, "connect", interleaving_connect)
+    row = store.agent_token_auth_row(issued.id)
+    monkeypatch.undo()
+
+    assert fired
+    seen = (json.loads(row["scopes_json"]), sorted(row["notebook_ids"]))
+    assert seen in (old, new), seen
+    fresh = store.agent_token_auth_row(issued.id)
+    assert (json.loads(fresh["scopes_json"]), sorted(fresh["notebook_ids"])) == new
+
+
 @pytest.mark.postgres_integration
 def test_postgres_memory_search_filters_scope_before_candidate_limit(
     postgres_database,

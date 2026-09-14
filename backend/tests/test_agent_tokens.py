@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -364,6 +365,63 @@ def test_update_access_expected_snapshot_refuses_a_stale_editor(token_context):
     assert sorted(service.list_agent_tokens(alice.id)[0].notebook_ids) == sorted(
         [notebook.id, other.id]
     )
+
+
+class _EditAfterFirstRead:
+    """Connection proxy that commits a token access edit right after the
+    first statement of an auth read, i.e. between the two statements a
+    split read would issue."""
+
+    def __init__(self, connection, edit):
+        self._connection = connection
+        self._edit = edit
+        self.fired = False
+
+    def __enter__(self):
+        self._connection.__enter__()
+        return self
+
+    def __exit__(self, *exc):
+        return self._connection.__exit__(*exc)
+
+    def execute(self, *args, **kwargs):
+        cursor = self._connection.execute(*args, **kwargs)
+        if not self.fired:
+            self.fired = True
+            self._edit()
+        return cursor
+
+    def __getattr__(self, name):
+        return getattr(self._connection, name)
+
+
+def test_auth_row_reads_one_access_snapshot_across_a_concurrent_edit(
+    token_context, monkeypatch,
+):
+    service, alice, _bob, notebook, other = token_context
+    store = service.store
+    profile = service.create_agent_profile(alice.id, "Interleaved", "")
+    issued = _issue(service, alice, profile, notebook, scopes=["sources:delete"])
+    old = (["sources:delete"], [notebook.id])
+    new = (["knowledge:read"], sorted([notebook.id, other.id]))
+
+    reader = _EditAfterFirstRead(
+        store.database.connect(),
+        lambda: store.update_agent_token_access(
+            issued.id, alice.id, new[0], notebook.id, new[1], None
+        ),
+    )
+    monkeypatch.setattr(store.database, "connect", lambda: reader)
+    row = store.agent_token_auth_row(issued.id)
+    monkeypatch.undo()
+
+    assert reader.fired
+    seen = (json.loads(row["scopes_json"]), sorted(row["notebook_ids"]))
+    # Never "old write scope + new allowlist": the read is all old or all new.
+    assert seen in (old, new), seen
+    # The edit itself did commit, and the next read sees all of it.
+    fresh = store.agent_token_auth_row(issued.id)
+    assert (json.loads(fresh["scopes_json"]), sorted(fresh["notebook_ids"])) == new
 
 
 def test_empty_expiry_string_means_no_expiry_on_issue_and_update(token_context):
