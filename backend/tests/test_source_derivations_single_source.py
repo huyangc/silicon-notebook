@@ -35,7 +35,7 @@ CONSUMERS = (
 )
 
 # 「抄了一份告警文案」的形状:文案本身出现在某个字符串字面量里。
-WARNING_MARKER = "部分内容因网络问题未完成分析"
+WARNING_MARKER = "部分内容未完成分析"
 # 「抄了一份四态派生」的形状:同一个函数作用域里同时出现这两个终态字面量。
 # 单独一个不算:source_ingestion 的抽取回执也返回 "not_paper",那是另一件事。
 STATUS_LITERALS = frozenset({"has_meta", "not_paper"})
@@ -47,7 +47,7 @@ SCANNED_ROOTS = ("backend/app", "scripts")
 
 def test_windows_failed_marker_becomes_the_user_warning():
     assert extraction_warning_text("kg objects=3 windows_failed=2/5") == (
-        "部分内容因网络问题未完成分析（2/5 段失败），建议重新上传或重试。"
+        "部分内容未完成分析（2/5 段失败），点「分析新增」可重试。"
     )
 
 

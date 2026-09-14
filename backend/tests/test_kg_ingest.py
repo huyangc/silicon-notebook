@@ -533,6 +533,33 @@ def test_extract_graph_grounds_nodes():
     assert len(g.edges) == 1              # edge endpoints survived
 
 
+def test_extract_graph_counts_failed_window_reasons_by_stable_code():
+    """失败窗口按稳定原因码计数:生产 client 重抛的 ``ModelInvocationError`` 带
+    code/detail,拼成 ``code:detail``;裸异常退回类名,异常正文一个字都不进。"""
+
+    class _Rejected(RuntimeError):
+        code = "malformed_response"
+        detail = "invalid_json"
+
+    class _Boom:
+        configured = True
+
+        def __init__(self, exc):
+            self._exc = exc
+
+        def chat_json(self, messages: list, response_schema_hint: str) -> str:
+            raise self._exc
+
+    g = kg_ingest.extract_graph(_Boom(_Rejected("private reply text")),
+                                ABS, "doc.md", "academic")
+    assert (g.total_windows, g.failed_windows) == (1, 1)
+    assert g.failed_window_reasons == {"malformed_response:invalid_json": 1}
+
+    g = kg_ingest.extract_graph(_Boom(RuntimeError("private detail")),
+                                ABS, "doc.md", "academic")
+    assert g.failed_window_reasons == {"RuntimeError": 1}
+
+
 def test_extract_graph_drops_and_reports_invalid_endpoint_pair(caplog):
     import json
 

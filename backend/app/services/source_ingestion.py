@@ -2627,6 +2627,18 @@ class SourceIngestionService:
                 )
                 if graph.failed_windows:
                     raise IndexingPipelineKgExtractionFailedError()
+            if graph.failed_windows:
+                # 逐窗口失败的原因只在这里落盘:extract_graph 为隔离窗口吞掉了异常,
+                # 之前只剩 error_message 里的 windows_failed=N/T 计数,来源页把它一律
+                # 解释成网络问题。原因码见 kg_ingest._window_failure_category。
+                self.event_log.emit({
+                    "kind": "kg_window_failures",
+                    "notebook_id": source.notebook_id,
+                    "source_id": source_id,
+                    "failed": int(graph.failed_windows),
+                    "total": int(graph.total_windows),
+                    "reasons": dict(graph.failed_window_reasons),
+                })
             warn = self.settings.kg_window_warn_threshold
             if graph.total_windows > warn:
                 self.event_log.logger.warning(

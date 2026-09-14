@@ -254,11 +254,27 @@ def test_extraction_warning_surfaced_on_failed_windows(repo, monkeypatch):
                               "Engram is a memory architecture.")
     # Force a single window, and fail it.
     bind_chat_client(repo, "kg_extract", _FlakyLLM(payload, fail_n=1))
+    events = []
+    real_emit = repo.event_log.emit
+    monkeypatch.setattr(
+        repo.event_log, "emit",
+        lambda event: (events.append(event), real_emit(event)),
+    )
     repo._run_extraction(src.id)
 
     detail = repo.get_source(src.id)
     assert detail.extraction_warning, "expected a warning when a window failed"
     assert "1/1" in detail.extraction_warning
+    # 用户文案不再断言原因(「网络问题」曾把模型输出没过合同的窗口也说成网络);
+    # 原因码走事件:每个失败窗口一个稳定分类词,不带异常正文。
+    assert "网络" not in detail.extraction_warning
+    failures = [e for e in events if e.get("kind") == "kg_window_failures"]
+    assert len(failures) == 1
+    assert failures[0]["source_id"] == src.id
+    assert (failures[0]["failed"], failures[0]["total"]) == (1, 1)
+    reasons = failures[0]["reasons"]
+    assert sum(reasons.values()) == 1
+    assert all(key and "\n" not in key and len(key) <= 64 for key in reasons)
     # The success run record carries the windows_failed token.
     with repo._connect() as db:
         row = db.execute(

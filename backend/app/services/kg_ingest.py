@@ -7,7 +7,7 @@ import bisect
 import concurrent.futures as cf
 import math
 import re
-from typing import Any, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 from app.core.llm import cap_kwargs
 from app.domain.indexing_pipeline import (
@@ -687,6 +687,34 @@ def drop_meta_claims(nodes: List[Node], edges: List[Edge]) -> Tuple[List[Node], 
     return kept_nodes, kept_edges, dropped
 
 
+def _window_failure_category(exc: BaseException) -> str:
+    """一个失败窗口的稳定原因码。只含分类词,不含回复内容、路径或异常正文。
+
+    生产里失败窗口一律被显示成「网络问题」,而 7 天归档证明多数是模型输出没过
+    JSON 合同。生产的抽取 client 把一切异常重抛成 ``ModelInvocationError``,它的
+    ``code``(provider_unavailable / malformed_response …)与 ``detail``(合同校验的
+    invalid_json / empty …)正是分类需要的两格;裸异常(测试替身、本地 bug)退回
+    类名。拼成 ``code:detail`` 写进 ``kg_window_failures`` 事件,下次不用再猜。
+    """
+    # 两格都只收「标识符形状」的短 token:别的异常类也可能挂着同名属性
+    # (FastAPI 的 HTTPException.detail 是给人读的句子),形状不对就当没有。
+    code = _failure_token(getattr(exc, "code", ""))
+    detail = _failure_token(
+        getattr(exc, "detail", "") or getattr(exc, "reason", "")
+    )
+    if not code:
+        return type(exc).__name__[:64]
+    return (f"{code}:{detail}" if detail else code)[:64]
+
+
+_FAILURE_TOKEN = re.compile(r"[A-Za-z0-9_.-]{1,48}\Z")
+
+
+def _failure_token(value: Any) -> str:
+    text = str(value or "").strip()
+    return text if _FAILURE_TOKEN.fullmatch(text) else ""
+
+
 def extract_graph(client: Any, raw_text: str, source_file: str, doc_type: str,
                   n: int = 9000, m: int = 450, whitelist=frozenset(),
                   refine: bool = False, gleaning_rounds: int = 0,
@@ -718,6 +746,7 @@ def extract_graph(client: Any, raw_text: str, source_file: str, doc_type: str,
     nodes: List[Node] = []
     edges: List[Edge] = []
     failed = 0
+    failure_reasons: Dict[str, int] = {}
     if pairs:
         if kg_strategy is not None and pipeline_id:
             if plugin_limits is None:
@@ -780,13 +809,17 @@ def extract_graph(client: Any, raw_text: str, source_file: str, doc_type: str,
                 # 单飞守卫,让新构建与它们重叠。排空必须逐层做。
                 _cancel_and_drain_windows()
                 raise
-            except Exception:
+            except Exception as exc:  # noqa: BLE001 — 逐窗口隔离,原因码随图带出
                 failed += 1
+                category = _window_failure_category(exc)
+                failure_reasons[category] = failure_reasons.get(category, 0) + 1
     nodes, edges, concepts_dropped = drop_noise_concepts(nodes, edges, whitelist)
     nodes, edges, claims_dropped = drop_meta_claims(nodes, edges)
     nodes, edges = canonicalize(nodes, edges, doc_id=source_file)
     return KnowledgeGraph(doc_id=source_file, doc_type=doc_type, nodes=nodes,
                           edges=edges, total_windows=len(pairs),
-                          failed_windows=failed, windows_skipped=windows_skipped,
+                          failed_windows=failed,
+                          failed_window_reasons=failure_reasons,
+                          windows_skipped=windows_skipped,
                           concepts_dropped=concepts_dropped,
                           claims_dropped=claims_dropped)

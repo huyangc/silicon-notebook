@@ -289,6 +289,72 @@ def test_chunk_fts_timeout_opens_run_circuit_and_skips_the_next_probe(
     assert "secret database diagnostic" not in json.dumps(events)
 
 
+def test_lexical_timeout_is_not_a_model_error(repo, monkeypatch):
+    """词法臂超时不上「本次回答可能不完整」横幅:``_chunk_fts_hits`` 已记
+    ask_stage=timeout 并关掉本轮词法臂,候选仍由其它臂产出;把它记成 model_error
+    会显示成没有服务身份的「模型服务调用失败」。别的词法异常照旧记。"""
+    from app.repositories.ports import ChunkLexicalSearchTimeout
+
+    nb, _ = _seed_chunks(repo, ["engram memory architecture " * 20])
+    noted = []
+
+    class _Sink:
+        def note_model_error(self, *args, **kwargs):
+            noted.append(args)
+
+    monkeypatch.setattr(repo.retrieval.candidates, "model_error_sink", _Sink())
+
+    def _timeout(*_args, **_kwargs):
+        raise ChunkLexicalSearchTimeout("secret database diagnostic")
+
+    monkeypatch.setattr(repo.retrieval.candidates, "_chunk_fts_hits", _timeout)
+    assert repo.retrieval.candidates._keyword_chunk_candidates(
+        nb.id, "engram memory"
+    ) == []
+    assert noted == []
+
+    def _broken(*_args, **_kwargs):
+        raise RuntimeError("legacy lib missing chunks_fts")
+
+    monkeypatch.setattr(repo.retrieval.candidates, "_chunk_fts_hits", _broken)
+    assert repo.retrieval.candidates._keyword_chunk_candidates(
+        nb.id, "engram memory"
+    ) == []
+    assert [args[0] for args in noted] == ["chunk_keyword_union"]
+
+
+def test_ann_union_lexical_timeout_is_not_a_model_error(repo, monkeypatch):
+    """ANN∪FTS 联合检索里词法臂超时:ANN 候选照常返回,不记 model_error(同上一条,
+    这是横幅里那 27 条「模型服务调用失败」真正走的路径)。"""
+    from app.repositories.ports import ChunkLexicalSearchTimeout
+
+    query = "engram memory architecture"
+    nb, _ = _seed_chunks(repo, [f"{query} " * 20])
+    repo.rebuild_unified_kg(nb.id)
+    repo.build_scale_index(nb.id)
+    idx = repo._scale_index(nb.id, allow_stale=True)
+    noted = []
+
+    class _Sink:
+        def note_model_error(self, *args, **kwargs):
+            noted.append(args)
+
+    monkeypatch.setattr(repo.retrieval.candidates, "model_error_sink", _Sink())
+    fts_calls = []
+
+    def _timeout(*_args, **_kwargs):
+        fts_calls.append("called")
+        raise ChunkLexicalSearchTimeout("secret database diagnostic")
+
+    monkeypatch.setattr(repo._runtime.knowledge, "chunk_fts_search", _timeout)
+    result = repo._retrieve_chunks_ann(
+        nb.id, query, repo._embed_query(query), idx, recall=2
+    )
+    assert result is not None
+    assert fts_calls == ["called"]
+    assert noted == []
+
+
 @pytest.mark.parametrize("query", ["set_db 命令", 'compare "timing exception"'])
 def test_report_ann_keeps_exact_channel_without_generic_fts_union(
     repo, monkeypatch, query
