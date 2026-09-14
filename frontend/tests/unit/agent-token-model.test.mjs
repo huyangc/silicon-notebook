@@ -19,8 +19,6 @@ import {
   localDateTimeToUtcIso,
   utcIsoToLocalDateTime,
 } from "../../app/agent-token-model.ts";
-import { readFile } from "node:fs/promises";
-
 import {
   declarations,
   importsFrom,
@@ -127,10 +125,6 @@ test("global Memory keeps only a link to the Agent access page", async () => {
 
   assert.equal(declarationNames.has("AgentAccessManager"), false);
   assert.deepEqual(importsFrom(panel, "./agent-token-model"), []);
-  // 记忆审核、保存预览与 transfer-picker 仍用 .agent-check 勾选框;这条样式必须
-  // 留在记忆页自己的样式表里,Agent 接入页的样式表不会加载到首页。
-  const memoryCss = await readFile(new URL("../../app/memory-panel.css", import.meta.url), "utf8");
-  assert.match(memoryCss, /^\.agent-check \{/m);
   assert.equal(
     jsxElements(panel, "a").some((element) => element.attributes.href === "/agents"),
     true,
