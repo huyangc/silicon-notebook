@@ -560,7 +560,7 @@ The composite chunk GIN index above remains required for ordinary Ask, exact/fal
 retrieval, notebook search, and rollback-quality operation. Increasing the global
 `POSTGRES_STATEMENT_TIMEOUT_SECONDS` is not the remedy for repeated Deep Report timeouts:
 it merely makes every failing probe wait longer. Generic PostgreSQL chunk lexical calls use
-their own savepoint-scoped `POSTGRES_CHUNK_FTS_TIMEOUT_SECONDS` budget (default 1 second).
+their own savepoint-scoped `POSTGRES_CHUNK_FTS_TIMEOUT_SECONDS` budget (default 3 seconds; it was 1 second until 2026-09-14, which sat right on the measured 0.96s tail of a gated 7k-chunk probe and timed out 34 of 283 production probes in one week).
 The transaction is rolled back to that savepoint on `QueryCanceled`, and the first timeout
 opens a per-notebook circuit for the rest of the current retrieval run; later generic calls
 skip the database statement. Calls already in flight are not forcibly cancelled. Exact

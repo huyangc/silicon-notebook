@@ -1529,8 +1529,13 @@ class Settings(BaseSettings):
     )
     # 通用 chunk FTS 是 fail-open 补召回/回退臂，不得占满整个全局
     # statement timeout。适配器在一个 savepoint 内仅缩短该词法语句。
+    # 默认 3.0 而不是原来的 1.0(2026-09-14 用户裁决):1.0 正压在语料门控后实测的
+    # 0.96s 尾部上,没有余量;生产 7 天 283 次词法探针里 34 次超时、再连带 108 次
+    # 同轮熔断跳过,丢的是向量臂补不回来的标识符与跨语言关键词召回。3.0 仍远低于
+    # 全局 statement timeout(30),超时时提问最多慢 2 秒。根治是给 chunks 补
+    # (notebook_id, text) 复合 trgm 索引,那是另一件事。
     postgres_chunk_fts_timeout_seconds: float = Field(
-        1.0,
+        3.0,
         gt=0,
         le=10,
         validation_alias="POSTGRES_CHUNK_FTS_TIMEOUT_SECONDS",
