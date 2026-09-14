@@ -390,7 +390,10 @@ def test_read_document_action_line_says_the_five_things_it_has_to_say():
 
     assert "copied EXACTLY as the roster above listed it" in prompt
     assert "if you have not listed the roster yet, do that FIRST" in prompt
-    assert "Prefer the rows the roster showed with NO stored summary" in prompt
+    # 选读依据是账目里的 (无摘要) 标记(codex #724 P2):账目只带标题不带摘要,
+    # prompt 必须点名这个标记模型才知道该把有限的读取次数花在哪几篇上。
+    assert "Prefer the rows the roster ledger marked (无摘要)" in prompt
+    assert "copy only the title, not the marker" in prompt
     assert "It is NOT search_chunks" in prompt
     assert "never state or imply that you have read the document in full" in prompt
     assert '"spread"' in prompt and '"opening"' in prompt

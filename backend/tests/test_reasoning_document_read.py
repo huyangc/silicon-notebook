@@ -386,6 +386,48 @@ def test_book_marks_around_a_wrong_title_are_not_a_fuzzy_match(repo):  # noqa: F
     assert _skips(result)["document_read_unresolved"].detail["matches"] == 0
 
 
+def test_a_title_copied_from_the_ledger_form_resolves_even_when_stored_title_is_longer(repo):  # noqa: F811
+    """④ codex #724 P2:账目把标题截到 60 字、折叠内部空白,模型只见过这个形态。
+    逐字复制账目里的形态必须能解析——比对的是 `_roster_note_form`(与账目同一
+    套变换),仍是精确相等,不是前缀模糊匹配。
+    """
+    from app.services import reasoning_retrieval as rr
+
+    notebook = repo.create_notebook(NotebookCreate(name="资料"))
+    long_title = "很长的标题" * 20            # 100 字,账目只显示前 60 字
+    spaced_title = "有  两个   空格 的标题"      # 账目折叠成单空格
+    _seed_document(repo, notebook.id, "s-long", long_title, "", ("正文一。", "正文二。"))
+    _seed_document(repo, notebook.id, "s-spaced", spaced_title, "", ("正文三。", "正文四。"))
+    llm = _ValidatingLLM([
+        _enumerate_sources_action(),
+        _read_action(long_title[:rr._ENUM_NOTE_TITLE_CHARS]),
+        _read_action("有 两个 空格 的标题"),
+        ANSWER,
+    ], plan={"sub_queries": [{"query": "标题"}]})
+    result = _reader(repo, llm).run(notebook.id, "这个库讲了什么", "")
+
+    assert "document_read_unresolved" not in _skips(result)
+    assert [o.source_id for o in result.document_reads] == ["s-long", "s-spaced"]
+    # 第二轮 reflect prompt 里那一行就是模型抄的形态:截断 + 无摘要标记。
+    assert f"《{long_title[:rr._ENUM_NOTE_TITLE_CHARS]}》{rr._ENUM_NOTE_NO_SUMMARY_MARK}" in llm.reflect_prompts[1]
+
+
+def test_a_copied_no_summary_marker_is_stripped_before_matching(repo):  # noqa: F811
+    """④ 模型把账目里的 `《标题》(无摘要)` 整个抄回来(标记一起):先剥标记再精确匹配。"""
+    from app.services import reasoning_retrieval as rr
+
+    notebook = _notebook_with_documents(repo)
+    llm = _ValidatingLLM([
+        _enumerate_sources_action(),
+        _read_action(f"《无摘要文档》{rr._ENUM_NOTE_NO_SUMMARY_MARK}"),
+        ANSWER,
+    ], plan={"sub_queries": [{"query": "版图设计"}]})
+    result = _reader(repo, llm).run(notebook.id, "这个库讲了什么", "")
+
+    assert "document_read_unresolved" not in _skips(result)
+    assert [o.source_id for o in result.document_reads] == ["s-empty"]
+
+
 def test_the_whole_line_fallback_stays_exact_and_never_guesses(repo):  # noqa: F811
     """② 前缀兜底不是模糊匹配:切出来的头与任何标题都不等时照样 unresolved。"""
     notebook = _notebook_with_documents(repo)
