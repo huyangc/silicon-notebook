@@ -553,6 +553,17 @@ def test_plugin_kg_failure_keeps_old_graph_and_identity_and_fails_job(
     assert strategy_event["status"] == "failed"
     assert "old source graph" not in repr(strategy_event)
     assert "not-a-window-handle" not in repr(strategy_event)
+    # 失败原因码在 fail-closed 抛错之前就已落盘(codex #726 R1 P2):strategy 事件
+    # 只有计数,原因只有 kg_window_failures 记。
+    window_failures = [
+        event for event in events if event.get("kind") == "kg_window_failures"
+    ]
+    assert len(window_failures) == 1
+    assert window_failures[0]["source_id"] == source_id
+    assert window_failures[0]["failed"] == strategy_event["failed_count"]
+    assert sum(window_failures[0]["reasons"].values()) == strategy_event["failed_count"]
+    assert "old source graph" not in repr(window_failures[0])
+    assert "not-a-window-handle" not in repr(window_failures[0])
 
 
 def test_plugin_kg_success_atomically_publishes_graph_facts_and_identity(
