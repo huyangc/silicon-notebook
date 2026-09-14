@@ -5,6 +5,8 @@ import contextvars
 import json
 import logging
 import math
+
+from app.core.model_values import as_text
 from typing import Any, Callable, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -94,15 +96,15 @@ def _review_chunk(llm_client: Any, chunk: List[dict]) -> List[dict]:
         if not isinstance(item, dict):
             continue
         try:
-            decision = str(item.get("decision", "")).strip()
+            decision = as_text(item.get("decision"))
             if decision not in {"merge", "keep_separate", "unsure"}:
                 continue
             out.append({
-                "candidate_id": str(item.get("candidate_id", "")).strip(),
+                "candidate_id": as_text(item.get("candidate_id")),
                 "decision": decision,
-                "canonical_name": str(item.get("canonical_name", "")).strip(),
+                "canonical_name": as_text(item.get("canonical_name")),
                 "confidence": _to_float(item.get("confidence", 0)),
-                "rationale": str(item.get("rationale", "")).strip()[:500],
+                "rationale": as_text(item.get("rationale"))[:500],
             })
         except Exception as err:  # noqa: BLE001 — a bad item never sinks the chunk
             logger.warning("merge-review: skipping malformed decision (%s)", err)

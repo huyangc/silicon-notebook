@@ -76,6 +76,7 @@ import string
 from dataclasses import dataclass, field
 from typing import Any, Collection, Mapping, Sequence
 
+from app.core.model_values import as_text
 from app.repositories.lexical_query import exact_probe_terms
 
 
@@ -1826,7 +1827,7 @@ def validate_entry(
             ValidatedArg(
                 name=arg_name,
                 required=required,
-                description=str(raw_arg.get("desc") or raw_arg.get("description") or ""),
+                description=as_text(raw_arg.get("desc")) or as_text(raw_arg.get("description")),
                 default=default,
             )
         )
@@ -1871,7 +1872,7 @@ def validate_entry(
         entry=ValidatedEntry(
             command_name=name,
             syntax=syntax,
-            description=str(payload.get("description") or ""),
+            description=as_text(payload.get("description")),
             args=tuple(args),
             examples=examples,
             suspect_related=suspect,

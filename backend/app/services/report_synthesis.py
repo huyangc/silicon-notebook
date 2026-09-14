@@ -56,7 +56,10 @@ def report_synthesis_requested(section_count: int) -> bool:
 
 
 def _text(value: object, chars: int) -> str:
-    return str(value or "").strip()[:chars]
+    # String-only: the shape boundary delivers off-type fields, and ``str()``
+    # would turn a list/dict/None into prose ("[]", "None") that passes every
+    # emptiness check.
+    return value.strip()[:chars] if isinstance(value, str) else ""
 
 
 def _strings(value: object, limit: int, chars: int) -> list[str]:

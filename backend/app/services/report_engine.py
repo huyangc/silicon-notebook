@@ -1853,10 +1853,10 @@ class ReportEngine:
                             verdict != "充足" or ceiling == "充足"
                         ):
                             s["sufficiency"] = verdict
-                        if v.get("gap_note") is not None:
-                            s["gap_note"] = str(v.get("gap_note", ""))
-                        if v.get("action"):
-                            s["action"] = str(v["action"])
+                        if _prose(v.get("gap_note")):
+                            s["gap_note"] = _prose(v.get("gap_note"))
+                        if _prose(v.get("action")):
+                            s["action"] = _prose(v.get("action"))
         except AskCancelled:
             raise
         except Exception:
