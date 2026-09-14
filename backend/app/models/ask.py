@@ -305,15 +305,25 @@ class AskIntentPreviewRequest(BaseModel):
     base_scope: Optional[BaseNotebookScope] = None
 
 
+# Ceiling on the reported understanding-phase wall clock (one hour). Mirrored
+# by `frontend/app/ask-intent-model.ts::UNDERSTANDING_MS_LIMIT`; MCP
+# `ask_notebook` clamps its own server-side measurement to it.
+ASK_UNDERSTANDING_MS_MAX = 3_600_000
+
+
 class AskIntentConfirmation(BaseModel):
     contract: QueryIntentContract
     resolved_question: str = Field(min_length=1, max_length=ASK_QUESTION_MAX_CHARS)
     answers: List[QueryIntentAnswer] = Field(default_factory=list, max_length=8)
-    # Wall-clock of the understanding phase, measured by the client: it runs in
-    # /ask/intent, before any durable job exists, so the server cannot time it.
-    # Reported back only so the persisted trace keeps that phase; it never feeds
-    # retrieval. Bounded so a bad client cannot inflate a run's reported total.
-    understanding_ms: Optional[int] = Field(default=None, ge=0, le=3_600_000)
+    # Wall-clock of the understanding phase. The browser measures it (the phase
+    # runs in /ask/intent, before any durable job exists, so the server cannot
+    # time it there); MCP ask_notebook measures it server-side because its
+    # understanding runs inside the same call. Reported back only so the
+    # persisted trace keeps that phase; it never feeds retrieval. Bounded so a
+    # bad client cannot inflate a run's reported total.
+    understanding_ms: Optional[int] = Field(
+        default=None, ge=0, le=ASK_UNDERSTANDING_MS_MAX
+    )
 
 
 class AskRequest(BaseModel):

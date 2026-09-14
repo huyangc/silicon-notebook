@@ -609,3 +609,70 @@ def test_clarification_gate_message_truncates_a_single_overlong_question():
         f"问题仍有关键歧义，请先确认问题理解：① {expected_body}"
     )
     assert len(long_question) > 500
+
+
+def test_plan_query_intent_fallback_topic_fits_the_contract_for_a_long_question():
+    """问题超过 1000 字且没有可用的模型主题(模型未配置/超时/JSON 坏了)时,兜底主题
+    过去把整段原文塞进 `QueryIntentTopic.question`,合同本身构造不出来——HTTP
+    `/ask/intent` 会 500,MCP `ask_notebook` 会吐一段裸 pydantic 转储。"""
+    from app.models.ask import QueryIntentContract
+
+    question = "CMOS 反相器" + "的阈值电压由什么决定" * 120
+    assert len(question) > 1000
+    contract = QueryIntentContract(**plan_query_intent(None, question))
+    assert contract.objective == question
+    assert contract.needs_clarification is False
+    [topic] = contract.mandatory_topics
+    assert len(topic.question) == 1000
+    assert topic.retrieval_queries == [question[:1000]]
+
+
+def test_conversation_intent_history_keeps_the_last_five_user_turns():
+    """HTTP `/ask/intent` 与 MCP `ask_notebook` 共用的历史块:只取最近五轮、只取
+    用户提问(助手回答是语料派生的,不得进入不读语料的理解步骤)。"""
+    from types import SimpleNamespace
+
+    from app.services.query_intent import conversation_intent_history
+
+    turns = [
+        SimpleNamespace(question=f"第{i}问", answer=f"助手回答{i}") for i in range(1, 7)
+    ]
+    assert conversation_intent_history(turns) == (
+        "User: 第2问\nUser: 第3问\nUser: 第4问\nUser: 第5问\nUser: 第6问"
+    )
+    assert conversation_intent_history([]) == ""
+
+
+def test_validate_confirmed_intent_raises_the_three_user_facing_messages():
+    """HTTP 422 与 MCP 工具错误共用的冻结校验只会抛这三句中文用户文案。"""
+    from app.services.query_intent import validate_confirmed_intent
+
+    contract = {
+        "objective": "分析一下",
+        "resolved_question": "分析一下",
+        "ambiguities": [{
+            "id": "ambiguity-input", "question": "你希望分析的具体对象是什么？",
+            "required": True, "options": [],
+        }],
+    }
+    with pytest.raises(ValueError, match="问题理解与当前问题不匹配，请重新确认"):
+        validate_confirmed_intent(
+            "分析 CMOS 反相器", contract, resolved_question="x", answers=[]
+        )
+    with pytest.raises(ValueError, match="请先回答所有必填澄清问题"):
+        validate_confirmed_intent(
+            "分析一下", contract, resolved_question="分析一下", answers=[]
+        )
+    with pytest.raises(ValueError, match="确认后的问题不能为空"):
+        validate_confirmed_intent(
+            "  ", {"objective": "", "resolved_question": "", "ambiguities": []},
+            resolved_question="", answers=[],
+        )
+    final = validate_confirmed_intent(
+        "分析一下", contract, resolved_question="分析 CMOS 反相器的阈值电压",
+        answers=[{"id": "ambiguity-input", "answer": "CMOS 反相器"}],
+    )
+    assert final["confirmed"] is True
+    assert final["needs_clarification"] is False
+    assert final["resolved_question"] == "分析 CMOS 反相器的阈值电压"
+    assert final["clarification_answers"][0]["answer"] == "CMOS 反相器"

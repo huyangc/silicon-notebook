@@ -211,9 +211,11 @@ credential: short expiry, least privilege, rotate and revoke.
 
 ### Long-running calls and client timeouts
 
-`ask_notebook` with `mode="reasoning"` is a minutes-long call: planning, federated
-retrieval, the reflect loop and answer synthesis all happen inside that one tool call, and
-nothing returns until the answer does. `mode` also admits any registered, live-available
+`ask_notebook` with `mode="reasoning"` is a minutes-long call: question understanding (first,
+one model call), planning, federated retrieval, the reflect loop and answer synthesis all
+happen inside that one tool call, and nothing returns until the answer does — unless the
+understanding step finds a blocking ambiguity and returns early with
+`status: "needs_clarification"`. `mode` also admits any registered, live-available
 deployment `ask.engine` mode id, and a plugin engine's own retrieval/tool-use loop can run
 considerably longer than the built-in modes — how long is deployment-specific, so budget
 generous headroom rather than assuming the built-in defaults suffice. MCP clients do not wait
@@ -382,7 +384,9 @@ A `401` at step 1 is a token problem. `400 Missing session ID` at step 3 means t
 | `404`, or a refused connection, while configuring a client | Retry the endpoint the deployment publishes, exactly as the token receipt's onboarding instructions print it. Adding a trailing slash, or falling back to `<host>:8000/mcp/`, applies only to a confirmed backend-direct endpoint: a proxy may route only the published path, its backend port may be private, and reaching for that port can also drop the token to cleartext (§4). |
 | `307 Temporary Redirect` on `POST /mcp` | Expected — the MCP app is mounted at `/mcp` with its own root route. Configure `/mcp/` instead of relying on the client to follow the redirect. |
 | A `reasoning` `ask_notebook` is cut off after tens of seconds with a client-side transport error, while the server goes on to finish the answer | The client's own MCP timeout, not the server's. Raise it (§4 "Long-running calls and client timeouts"). The server heartbeats every 5s, so a client that honours progress notifications should not hit this; if it persists, suspect a reverse proxy buffering the response stream or applying its own read timeout. |
-| A `reasoning` `ask_notebook` returns "问题仍有关键歧义，请先确认问题理解：① …" | The server's deterministic gate, not a model failure. Put the object the message names into the question and retry, or switch to `chunk` mode, which carries no such gate. |
+| A `reasoning` `ask_notebook` returns normally with `status: "needs_clarification"` and no answer | Not a failure: the same understanding step the web UI runs found an ambiguity that would change the retrieval direction, and no conversation or job was created. Relay every `intent.ambiguities` row whose `required` is true to the user, then call again with the same `question` and `intent={"intent_token": <from the response>, "answers": [{"id", "answer"}], "resolved_question": <optional confirmed wording>}`. `chunk` mode has no understanding step. |
+| A `reasoning` `ask_notebook` fails with "请先回答所有必填澄清问题" or "问题理解与当前问题不匹配" | The reply failed the same freeze validation HTTP `/ask` applies: a required ambiguity has no answer, or this call's `question` differs from the first call's. Fill in the answers, keep `question` identical to the first call, and retry. |
+| A `reasoning` `ask_notebook` fails with "intent_token 无效或已过期" | Clarification contracts live only in the current MCP session, under the currently selected notebook, and only the latest 8 are kept; a new session, another `select_notebook` call (which clears every handle of the session), or 8 further clarifications invalidate the handle. Ask again without `intent` to get a fresh contract. A handle survives a successful submission, so a failed engine run can be retried with the same answers. |
 | `406 Not Acceptable` on `POST /mcp/` | The request accepted only `application/json`. The transport answers over SSE so progress notifications can reach the client during a long call; send `accept: application/json, text/event-stream`, which the Streamable HTTP spec requires and every real client already does. |
 | `400 Bad Request: Missing session ID` | A tool call reached the server before `initialize` plus `notifications/initialized`, or the `MCP-Session-Id` header was lost. Real clients handle this; hand-written `curl` must not skip it (§8). |
 | Claude Code sends a literal `${...}` as the token | The variable was not exported in the shell that launched `claude`, or its name is misspelled — an undefined variable is passed through verbatim. Export it and start a new session. |

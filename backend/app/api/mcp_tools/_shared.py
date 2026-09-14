@@ -58,6 +58,11 @@ WHOLE_OR_NOTHING_FIELDS = frozenset({"url"})
 # generous. It is not a timeout of ours: nothing here gives up on the work.
 PROGRESS_HEARTBEAT_SECONDS = 5.0
 _SELECTED_ATTR = "_silicon_notebook_selected_notebook"
+# Clarification contracts ask_notebook parked on the session (see
+# memory_context._PendingIntent). select_notebook resets the store: a handle
+# is scoped to the notebook it was issued under, and resetting on the event
+# loop also means no worker thread ever races to create it.
+_PENDING_INTENTS_ATTR = "_silicon_notebook_pending_intents"
 _MCP_PRINCIPAL: contextvars.ContextVar[AgentPrincipal | None] = (
     contextvars.ContextVar("mcp_agent_principal", default=None)
 )
@@ -309,7 +314,7 @@ def _shrink_longest_string(
         return False
     identifier_fields = {
         "notebook_id", "selected_notebook_id", "memory_id", "answer_id",
-        "object_id", "source_id", "element_id", "key",
+        "object_id", "source_id", "element_id", "key", "intent_token",
     } | WHOLE_OR_NOTHING_FIELDS
     # Preserve ordinary identifiers exactly. They become shrinkable only if a
     # compromised downstream producer supplied an identifier large enough to
@@ -454,6 +459,7 @@ def _budget_response(
     anchors_budget_chars: int | None = None,
     anchor_provenance_budget_chars: int | None = None,
     citations_budget_chars: int | None = None,
+    intent_budget_chars: int | None = None,
 ) -> dict[str, Any]:
     """Return a useful response that strictly fits the public MCP JSON budget."""
     stats: dict[str, Any] = {
@@ -504,6 +510,18 @@ def _budget_response(
             citations,
             field="citations",
             char_budget=citations_budget_chars,
+            stats=stats,
+        )
+    intent = result.get("intent")
+    if intent_budget_chars is not None and isinstance(intent, dict):
+        # Same reason as citations: bounded, so the reasoning intent summary
+        # can never take the whole budget away from the answer text (it is a
+        # character budget against a byte total, so it bounds rather than
+        # eliminates the pressure).
+        result["intent"] = _fit_value_to_chars(
+            intent,
+            field="intent",
+            char_budget=intent_budget_chars,
             stats=stats,
         )
     result["truncation"] = stats

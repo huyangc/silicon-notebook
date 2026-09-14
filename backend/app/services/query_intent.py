@@ -286,11 +286,17 @@ def plan_query_intent(
                 "retrieval_queries": queries or [topic_question],
             })
     if not topics:
+        # Bounded like the model-supplied rows above: ``QueryIntentTopic``
+        # caps ``question`` and each retrieval query at 1000 characters, and a
+        # longer question with no usable model topics (model unconfigured,
+        # timed out, or malformed JSON) used to make the contract itself
+        # unconstructable. The whole question stays authoritative regardless:
+        # the first retrieval slot is always the confirmed question verbatim.
         topics = [{
             "id": "intent-1",
             "title": question[:80] or "分析",
-            "question": question,
-            "retrieval_queries": [question],
+            "question": question[:1000],
+            "retrieval_queries": [question[:1000]],
         }]
 
     ambiguities: list[dict] = []
@@ -393,6 +399,53 @@ def plan_query_intent(
         "confirmed": False,
     }
     return contract
+
+
+def conversation_intent_history(turns: Iterable[Any]) -> str:
+    """Render the history block the corpus-blind understanding step may see.
+
+    Only the user's own wording of the last five turns may resolve references.
+    Assistant answers are corpus-derived and would let retrieved material bias
+    this otherwise corpus-blind step indirectly. One construction shared by
+    the HTTP ``/ask/intent`` preview and MCP ``ask_notebook``'s in-call
+    understanding, so the two entry points cannot drift on what the model is
+    allowed to look at.
+    """
+    recent = list(turns)[-5:]
+    return "\n".join(f"User: {turn.question}" for turn in recent)
+
+
+_INTENT_MISMATCH_MESSAGE = "问题理解与当前问题不匹配，请重新确认"
+_MISSING_ANSWERS_MESSAGE = "请先回答所有必填澄清问题"
+_EMPTY_RESOLVED_MESSAGE = "确认后的问题不能为空"
+
+
+def validate_confirmed_intent(
+    question: str,
+    contract: dict,
+    *,
+    resolved_question: str,
+    answers: Iterable[dict],
+) -> dict:
+    """Freeze a client-confirmed intent, or raise the user-facing reason.
+
+    The one rail every entry point that accepts a confirmed intent runs
+    before a durable Ask job exists -- HTTP ``/ask`` and ``/ask/stream``
+    translate the ``ValueError`` into a 422, MCP ``ask_notebook`` surfaces it
+    as the tool error verbatim. The messages are complete user copy, so a
+    caller may show them as-is. ``objective`` must be the question byte for
+    byte: a contract reviewed for one question never confirms another.
+    """
+    if str(contract.get("objective") or "").strip() != question.strip():
+        raise ValueError(_INTENT_MISMATCH_MESSAGE)
+    try:
+        return finalize_query_intent(
+            contract, resolved_question=resolved_question, answers=answers
+        )
+    except ValueError as exc:
+        if "必填澄清" in str(exc):
+            raise ValueError(_MISSING_ANSWERS_MESSAGE) from None
+        raise ValueError(_EMPTY_RESOLVED_MESSAGE) from None
 
 
 _CLARIFICATION_GATE_PREFIX = "问题仍有关键歧义，请先确认问题理解"

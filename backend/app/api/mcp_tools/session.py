@@ -1,5 +1,6 @@
 """Session and notebook-selection MCP tools."""
 
+from collections import OrderedDict
 from typing import Any, Callable
 
 import anyio
@@ -7,6 +8,7 @@ from mcp.server.fastmcp import Context, FastMCP
 
 from ._shared import (
     RESULT_LIMIT,
+    _PENDING_INTENTS_ATTR,
     _SELECTED_ATTR,
     _budget_response,
     _live_principal,
@@ -77,6 +79,9 @@ def register_session_tools(
             ctx, load, label="select_notebook"
         )
         setattr(ctx.session, _SELECTED_ATTR, notebook_id)
+        # Clarification handles ask_notebook issued are scoped to the notebook
+        # they were issued under; (re)selecting starts a fresh, empty store.
+        setattr(ctx.session, _PENDING_INTENTS_ATTR, OrderedDict())
         return _budget_response({
             "notebook_id": summary.id,
             "name": summary.name,

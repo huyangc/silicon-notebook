@@ -537,3 +537,25 @@ descriptor 字符串超限或含控制字符是**启动失败**而不是静默�
 钉住。误配的判定落在**可用性探针**上而不是每次调用：探针拿同一份算术对核心 deadline
 判一次，答 DISABLED + `reflect_budget_too_small`，动作根本不会出现在模型的选项里，
 不烧 run 的动作预算。
+
+## 34. MCP `ask_notebook` 的 reasoning 档接上网页端的问题理解与澄清回合（2026-09-14）
+
+用户裁决：MCP 接口要与网页端同一套「先理解问题、清晰就自动继续、理解不了就交回调用端」
+逻辑，因为调用方都是 Agent，可以做多轮。此前 MCP 只有一道不调模型的确定性闸（指代不清 /
+纯泛化请求），其它歧义静默放行，且闸忽略会话历史。现在：未带 `intent` 的 reasoning 调用在
+同一次调用里先跑与 `POST /ask/intent` 相同的 `preview_reasoning_intent`（历史块同源，只取最近
+五轮用户提问；陌生 `conversation_id` 按 MCP 既有口径静默无历史）；清晰即按浏览器自动确认的
+同一形态继续；阻断歧义则正常返回 `status="needs_clarification"`、审阅视图（歧义列表等，不含
+检索分解）与 `intent_token`，不建会话/任务；整份合同留在 MCP 会话上（与 `select_notebook`
+同一会话态，绑定 owner+笔记本，保留最近 8 份）。调用方带 `intent={"intent_token","answers",
+"resolved_question"?}` 回传，服务端取回合同后用与 HTTP 同一函数 `validate_confirmed_intent`
+冻结（三句 422 文案一字不差），`understanding_ms` 由服务端跨澄清轮带过去。不回传合同是刻意的：
+中文长问题/多主题合同放不进 12,000 字节响应预算（评审实测 902 字即超），被削短的合同又不能
+回传；审阅视图分四档构造并自验「每条必答歧义行 + 句柄 + 续跑说明完整到达」，附加物按档整块
+丢并计入 truncation，放不下则响亮报 `clarification_over_budget`（复核 P1：收敛裁剪曾会静默
+丢掉必答行，让 Agent 陷入答不齐的死循环）。已回答响应加 `status="answered"`，reasoning 另带
+`intent` 摘要（独立 1,500 字符子预算），
+chunk/插件响应除 `status` 外不变。顺手修了 `plan_query_intent` 兜底主题不截断导致 >1000 字
+问题在无模型主题时合同构造失败的潜在 500。成本登记：每次 reasoning 调用多一次理解模型调用、
+检索种子从 1 条扩到必答主题数，用户裁决接受。文档：`docs/product-and-api*.md` MCP 段、
+`docs/agent-mcp-memory-sop*.md` 排障表与长任务段。

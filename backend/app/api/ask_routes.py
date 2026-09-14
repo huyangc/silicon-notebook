@@ -60,8 +60,9 @@ from app.services.ask_modes import (
 from app.services.cancellation import AskCancelled
 from app.services.query_intent import (
     clarification_gate_message,
-    finalize_query_intent,
+    conversation_intent_history,
     plan_query_intent,
+    validate_confirmed_intent,
 )
 from app.services.conversation_public_view import (
     public_conversation_payload,
@@ -487,13 +488,9 @@ def _intent_history(repo, notebook_id: str, conversation_id: str | None,
         raise HTTPException(status_code=404, detail="Conversation not found")
     if detail.notebook_id != notebook_id:
         raise HTTPException(status_code=404, detail="Conversation not found")
-    lines = []
-    for turn in detail.turns[-5:]:
-        # Only the user's own wording may resolve references. Assistant answers
-        # are corpus-derived and would let retrieved material bias this
-        # otherwise corpus-blind understanding step indirectly.
-        lines.append(f"User: {turn.question}")
-    return "\n".join(lines)
+    # Only the user's own wording may resolve references; the shared helper
+    # documents why and keeps MCP ask_notebook's history block identical.
+    return conversation_intent_history(detail.turns)
 
 
 @router.post(
@@ -647,19 +644,17 @@ def _validate_confirmed_reasoning_intent(payload: AskRequest, spec) -> None:
         if seed.get("needs_clarification"):
             raise user_error(422, clarification_gate_message(seed))
         return
-    seed = payload.intent.contract.model_dump()
-    if str(seed.get("objective") or "").strip() != payload.question.strip():
-        raise user_error(422, "问题理解与当前问题不匹配，请重新确认")
+    # Same rail MCP ask_notebook runs on a confirmed intent; the ValueError
+    # text is complete user copy, so it is the 422 detail verbatim.
     try:
-        finalize_query_intent(
-            seed,
+        validate_confirmed_intent(
+            payload.question,
+            payload.intent.contract.model_dump(),
             resolved_question=payload.intent.resolved_question,
             answers=[row.model_dump() for row in payload.intent.answers],
         )
     except ValueError as exc:
-        if "必填澄清" in str(exc):
-            raise user_error(422, "请先回答所有必填澄清问题")
-        raise user_error(422, "确认后的问题不能为空")
+        raise user_error(422, str(exc))
 
 
 def _apply_resolved_scopes(

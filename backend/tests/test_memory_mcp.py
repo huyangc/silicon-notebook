@@ -862,45 +862,504 @@ def _ask_jobs_row_count(mcp_env) -> int:
         return db.execute("SELECT COUNT(*) AS n FROM ask_jobs").fetchone()["n"]
 
 
+def _conversations_row_count(mcp_env) -> int:
+    with repository()._write() as db:
+        return db.execute("SELECT COUNT(*) AS n FROM conversations").fetchone()["n"]
+
+
+def _required_ambiguity(contract: dict) -> dict:
+    rows = [row for row in contract["ambiguities"] if row.get("required") is not False]
+    assert rows, contract
+    return rows[0]
+
+
+async def _clarification_for(client, question: str) -> dict:
+    result = await client.call(
+        "ask_notebook", {"question": question, "mode": "reasoning"},
+    )
+    assert not result.isError, result
+    payload = _payload(result)
+    assert payload["status"] == "needs_clarification"
+    return payload
+
+
 @pytest.mark.anyio
-async def test_ask_notebook_reasoning_rejects_an_unresolved_generic_question(
+async def test_ask_notebook_reasoning_returns_a_review_view_and_a_handle(
     mcp_env, monkeypatch
 ):
-    """T3: reasoning 模式的确定性歧义闸在建 ask_job 之前挡下模糊问题。
+    """网页端的「理解不了就交回调用端」在 MCP 上的形态:结构化结果,不是错误。
 
-    错误文案带上具体的歧义问题(不是裸的「问题仍有关键歧义」),并且不留下一条
-    failed 的 ask_jobs 行 —— 回归摸底结论第4条:MCP 之前没有自己的闸,直接撞
-    引擎内 `begin_job_current` 之后的那条,会留下 failed job。
+    模糊问题走与 `/ask/intent` 同一个理解步骤(这套夹具不配模型,理解退化为确定性
+    合同,歧义行就是老闸的那两条规则),然后**正常返回** `status=needs_clarification`、
+    审阅视图与 `intent_token`——Agent 要拿 `ambiguities[].id/question/options/required`
+    去问用户,错误文案里没有这些结构;整份合同留在会话上,凭句柄取回。此时既不建
+    ask_job 也不建会话,`repo.ask` 根本不被调用。
 
-    问题用「分析一下」而非规格草稿举例的「分析一下这个」:后者含「这个」,会先
-    撞 `_UNRESOLVED_REFERENCE`(产出「你提到的对象具体是什么？」),不撞
-    `_GENERIC_REQUEST`——两条路径都在 T3 范围之外、T3 之前就有,这里选择真正
-    触发「你希望分析的具体对象和最关心的问题是什么」这条文案的问句。
-
-    笔记本必须可问答(patch `get_notebook`):否则空库检查在 `repo.ask` 之前就把
-    调用挡下,行数断言在有闸/无闸两种形态下都是 0 == 0,守不住「不留 failed job」。
-    可问答且删掉前置闸时,引擎内那条后备闸在 `begin_job_current` 之后才抛,行数
-    会从 0 变 1——这才是本用例要红的形态。`service.ask` 保持真身,正是为了让这条
-    对照成立。
+    问题用「分析一下」而非「分析一下这个」:后者含「这个」,先撞 `_UNRESOLVED_REFERENCE`
+    (产出「你提到的对象具体是什么？」),这里选真正触发「你希望分析的具体对象和最关心
+    的问题是什么」这行的问句。笔记本必须可问答(patch `get_notebook`):空库检查排在
+    理解步骤之前,否则断言测的是空库拒绝而不是澄清。
     """
     service = mcp_env["service"]
     monkeypatch.setattr(
         service, "get_notebook", lambda _id: _fake_notebook_summary(mcp_env)
     )
-    before = _ask_jobs_row_count(mcp_env)
+
+    def never_ask(*_a, **_k):
+        raise AssertionError("a blocking ambiguity must not reach repo.ask")
+
+    monkeypatch.setattr(service, "ask", never_ask)
+    jobs_before = _ask_jobs_row_count(mcp_env)
+    conversations_before = _conversations_row_count(mcp_env)
     async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
         _payload(await client.call(
             "select_notebook", {"notebook_id": mcp_env["notebook"].id}
         ))
-        rejected = await client.call(
-            "ask_notebook", {"question": "分析一下", "mode": "reasoning"},
+        payload = await _clarification_for(client, "分析一下")
+    assert payload["mode"] == "reasoning"
+    assert payload["notebook_id"] == mcp_env["notebook"].id
+    assert payload["intent_token"]
+    review = payload["intent"]
+    # 审阅视图 = 浏览器审阅面板展示的那部分;检索分解留在服务端的合同里,不回传。
+    assert review["resolved_question"] == "分析一下"
+    assert "mandatory_topics" not in review
+    assert "objective" not in review
+    row = _required_ambiguity(review)
+    assert row["id"]
+    assert "你希望分析的具体对象和最关心的问题是什么" in row["question"]
+    assert isinstance(payload["understanding_ms"], int)
+    assert payload["understanding_ms"] >= 0
+    assert "intent_token" in payload["next_step"]
+    assert payload["truncation"]["truncated"] is False
+    assert _ask_jobs_row_count(mcp_env) == jobs_before
+    assert _conversations_row_count(mcp_env) == conversations_before
+
+
+@pytest.mark.anyio
+async def test_ask_notebook_reasoning_resubmits_the_answered_contract(
+    mcp_env, monkeypatch
+):
+    """第二次调用带句柄与回答:引擎收到的 `AskRequest.intent` 与浏览器提交的
+    `AskIntentConfirmation` 逐字段一致——合同是服务端留存的那份(含检索分解),
+    `understanding_ms` 由服务端从首次调用带过来,不靠 Agent 回显。"""
+    from app.models.ask import QueryIntentContract
+
+    service = mcp_env["service"]
+    monkeypatch.setattr(
+        service, "get_notebook", lambda _id: _fake_notebook_summary(mcp_env)
+    )
+    seen: list = []
+
+    def capturing_ask(_notebook_id, payload):
+        seen.append(payload)
+        return SimpleNamespace(
+            answer_id="ans-clarified", answer="ok", conclusion="ok",
+            grounded=True, evidence_level="grounded", mode="reasoning",
+            conversation_id="conv-clarified", anchors=[], citations=[],
+            intent=QueryIntentContract(
+                objective="分析一下", resolved_question="分析 CMOS 反相器的阈值电压",
+                entities=["CMOS 反相器"], assumptions=["按 0.18um 工艺"],
+                clarification_answers=[{
+                    "id": "ambiguity-input", "question": "q", "answer": "CMOS 反相器",
+                }],
+            ),
         )
+
+    monkeypatch.setattr(service, "ask", capturing_ask)
+    async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
+        _payload(await client.call(
+            "select_notebook", {"notebook_id": mcp_env["notebook"].id}
+        ))
+        first = await _clarification_for(client, "分析一下")
+        row = _required_ambiguity(first["intent"])
+        result = await client.call("ask_notebook", {
+            "question": "分析一下", "mode": "reasoning",
+            "intent": {
+                "intent_token": first["intent_token"],
+                "resolved_question": "分析 CMOS 反相器的阈值电压",
+                "answers": [{"id": row["id"], "answer": "CMOS 反相器"}],
+            },
+        })
+    assert not result.isError, result
+    payload = _payload(result)
+    assert payload["status"] == "answered"
+    assert payload["answer_id"] == "ans-clarified"
+    # 回答摘要:Agent 能告诉用户这次是按什么理解答的。
+    assert payload["intent"]["resolved_question"] == "分析 CMOS 反相器的阈值电压"
+    assert payload["intent"]["assumptions"] == ["按 0.18um 工艺"]
+    assert payload["intent"]["clarification_answers"][0]["answer"] == "CMOS 反相器"
+    [submitted] = seen
+    assert submitted.mode == "reasoning"
+    assert submitted.intent is not None
+    assert submitted.intent.contract.objective == "分析一下"
+    assert submitted.intent.contract.needs_clarification is True
+    # 服务端留存的合同带着检索分解回到引擎,不经 Agent 之手。
+    assert [t.id for t in submitted.intent.contract.mandatory_topics] == ["intent-1"]
+    assert submitted.intent.resolved_question == "分析 CMOS 反相器的阈值电压"
+    assert [(a.id, a.answer) for a in submitted.intent.answers] == [
+        (row["id"], "CMOS 反相器")
+    ]
+    assert submitted.intent.understanding_ms == first["understanding_ms"]
+
+
+@pytest.mark.anyio
+async def test_ask_notebook_reasoning_rejects_an_unanswered_or_mismatched_intent(
+    mcp_env, monkeypatch
+):
+    """与 HTTP `/ask` 同一条冻结校验、同一句用户文案;不通过时 `repo.ask` 不被调用。"""
+    service = mcp_env["service"]
+    monkeypatch.setattr(
+        service, "get_notebook", lambda _id: _fake_notebook_summary(mcp_env)
+    )
+    calls: list = []
+
+    def never_ask(*args, **_kwargs):
+        calls.append(args)
+        raise AssertionError("a rejected intent must not reach repo.ask")
+
+    monkeypatch.setattr(service, "ask", never_ask)
+    async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
+        _payload(await client.call(
+            "select_notebook", {"notebook_id": mcp_env["notebook"].id}
+        ))
+        first = await _clarification_for(client, "分析一下")
+        token = first["intent_token"]
+        answer_row = {
+            "id": _required_ambiguity(first["intent"])["id"], "answer": "CMOS 反相器",
+        }
+        unanswered = await client.call("ask_notebook", {
+            "question": "分析一下", "mode": "reasoning",
+            "intent": {"intent_token": token, "answers": []},
+        })
+        mismatched = await client.call("ask_notebook", {
+            "question": "分析 CMOS 反相器", "mode": "reasoning",
+            "intent": {"intent_token": token, "answers": [answer_row]},
+        })
+        malformed = await client.call("ask_notebook", {
+            "question": "分析一下", "mode": "reasoning",
+            "intent": {"contract": {"objective": "分析一下"}, "answers": []},
+        })
+        unknown = await client.call("ask_notebook", {
+            "question": "分析一下", "mode": "reasoning",
+            "intent": {"intent_token": "no-such-token", "answers": [answer_row]},
+        })
+        wrong_mode = await client.call("ask_notebook", {
+            "question": "分析一下", "mode": "chunk",
+            "intent": {"intent_token": token, "answers": [answer_row]},
+        })
+        blank = await client.call(
+            "ask_notebook", {"question": "   ", "mode": "reasoning"},
+        )
+    assert unanswered.isError
+    assert "请先回答所有必填澄清问题" in unanswered.content[0].text
+    assert mismatched.isError
+    assert "问题理解与当前问题不匹配" in mismatched.content[0].text
+    assert malformed.isError
+    assert "intent 格式不合法" in malformed.content[0].text
+    assert unknown.isError
+    assert "intent_token 无效或已过期" in unknown.content[0].text
+    assert wrong_mode.isError
+    assert 'intent 只在 mode="reasoning" 下有效' in wrong_mode.content[0].text
+    assert blank.isError
+    assert "question 不能为空" in blank.content[0].text
+    assert calls == []
+
+
+@pytest.mark.anyio
+async def test_ask_notebook_reasoning_understanding_sees_the_conversation_history(
+    mcp_env, monkeypatch
+):
+    """理解步骤拿到的历史块与 `/ask/intent` 相同(最近几轮的用户提问),但陌生
+    `conversation_id` 按本工具既有口径静默视为无历史,而不是 404。"""
+    from app.models.ask import QueryIntentContract
+
+    service = mcp_env["service"]
+    monkeypatch.setattr(
+        service, "get_notebook", lambda _id: _fake_notebook_summary(mcp_env)
+    )
+    histories: list[str] = []
+
+    def fake_preview(_notebook_id, question, history="", **_k):
+        histories.append(history)
+        return QueryIntentContract(objective=question, resolved_question=question)
+
+    owners = {"conv-mine": mcp_env["alice"].id, "conv-bob": mcp_env["bob"].id}
+    monkeypatch.setattr(service, "preview_reasoning_intent", fake_preview)
+    # 归属走访问仓库这个端口(与 ask_routes._intent_history 同源),不走 facade。
+    from app.api.mcp_tools import memory_context as memory_context_module
+
+    monkeypatch.setattr(
+        memory_context_module, "notebook_access_repository",
+        lambda: SimpleNamespace(conversation_owner=lambda cid: owners.get(cid)),
+    )
+    monkeypatch.setattr(
+        service, "get_conversation",
+        lambda cid: SimpleNamespace(
+            notebook_id=mcp_env["notebook"].id,
+            turns=[SimpleNamespace(question="先说说 CMOS 反相器"),
+                   SimpleNamespace(question="它的阈值电压呢")],
+        ),
+    )
+    monkeypatch.setattr(
+        service, "ask",
+        lambda *a, **k: SimpleNamespace(
+            answer_id="ans-hist", answer="ok", conclusion="ok", grounded=True,
+            evidence_level="grounded", mode="reasoning",
+            conversation_id="conv-mine", anchors=[], citations=[], intent=None,
+        ),
+    )
+    async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
+        _payload(await client.call(
+            "select_notebook", {"notebook_id": mcp_env["notebook"].id}
+        ))
+        for cid in ("conv-mine", "conv-bob", "conv-unknown"):
+            result = await client.call("ask_notebook", {
+                "question": "接着分析它的噪声容限", "mode": "reasoning",
+                "conversation_id": cid,
+            })
+            assert not result.isError, result
+    assert histories == [
+        "User: 先说说 CMOS 反相器\nUser: 它的阈值电压呢", "", "",
+    ]
+
+
+@pytest.mark.anyio
+async def test_ask_notebook_reasoning_clarifies_a_topic_rich_contract_by_handle(
+    mcp_env, monkeypatch
+):
+    """质量评审 P1-2 的反例:16 个满长主题的合同远超 12,000 字节预算。合同不回传、
+    只回传句柄,所以澄清照常返回,而带答案回来时引擎拿到的是服务端留存的整份合同。"""
+    from app.models.ask import QueryIntentContract
+
+    service = mcp_env["service"]
+    monkeypatch.setattr(
+        service, "get_notebook", lambda _id: _fake_notebook_summary(mcp_env)
+    )
+    huge = QueryIntentContract(
+        objective="分析一下", resolved_question="分析一下",
+        mandatory_topics=[{
+            "id": f"intent-{i}", "title": "题" * 200, "question": "问" * 1000,
+            "retrieval_queries": ["查" * 1000] * 4,
+        } for i in range(1, 17)],
+        ambiguities=[{"id": "ambiguity-1", "question": "哪个对象？",
+                      "required": True, "options": ["A", "B"]}],
+        needs_clarification=True,
+    )
+    monkeypatch.setattr(
+        service, "preview_reasoning_intent", lambda *a, **k: huge
+    )
+    seen: list = []
+
+    def capturing_ask(_notebook_id, payload):
+        seen.append(payload)
+        return SimpleNamespace(
+            answer_id="ans-huge", answer="ok", conclusion="ok", grounded=True,
+            evidence_level="grounded", mode="reasoning",
+            conversation_id="conv-huge", anchors=[], citations=[], intent=None,
+        )
+
+    monkeypatch.setattr(service, "ask", capturing_ask)
+    async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
+        _payload(await client.call(
+            "select_notebook", {"notebook_id": mcp_env["notebook"].id}
+        ))
+        first = await _clarification_for(client, "分析一下")
+        assert first["truncation"]["truncated"] is False
+        assert first["intent"]["ambiguities"][0]["options"] == ["A", "B"]
+        result = await client.call("ask_notebook", {
+            "question": "分析一下", "mode": "reasoning",
+            "intent": {"intent_token": first["intent_token"],
+                       "answers": [{"id": "ambiguity-1", "answer": "A"}]},
+        })
+    assert not result.isError, result
+    [submitted] = seen
+    assert len(submitted.intent.contract.mandatory_topics) == 16
+    assert submitted.intent.contract.mandatory_topics[0].question == "问" * 1000
+
+
+@pytest.mark.anyio
+async def test_ask_notebook_reasoning_delivers_every_required_row_of_a_maximal_contract(
+    mcp_env, monkeypatch
+):
+    """复核 P1 的反例:合同在每个字段上限都打满时,审阅视图必须仍把每条必答歧义的
+    id/required/问题(至少展示上限那么长)、句柄与续跑说明完整投递——收敛裁剪不许
+    静默丢行,否则 Agent 会永远答不齐服务端要求的必答项。丢掉的只能是 options/
+    reason/描述列表这些附加物,并如实计入 truncation。"""
+    from app.api.mcp_tools import memory_context as memory_context_module
+    from app.models.ask import QueryIntentContract
+
+    service = mcp_env["service"]
+    monkeypatch.setattr(
+        service, "get_notebook", lambda _id: _fake_notebook_summary(mcp_env)
+    )
+    maximal = QueryIntentContract(
+        objective="分析一下", resolved_question="问" * 4000,
+        entities=["实" * 500] * 8, comparison_axes=["轴" * 500] * 8,
+        constraints=["束" * 500] * 8, excluded_topics=["排" * 500] * 8,
+        assumptions=["设" * 500] * 8,
+        ambiguities=[{
+            "id": f"ambiguity-{i}", "question": f"{i}" + "歧" * 499,
+            "reason": "因" * 300, "required": True, "options": ["选" * 200] * 4,
+        } for i in range(1, 9)],
+        needs_clarification=True,
+    )
+    monkeypatch.setattr(
+        service, "preview_reasoning_intent", lambda *a, **k: maximal
+    )
+    seen: list = []
+
+    def capturing_ask(_notebook_id, payload):
+        seen.append(payload)
+        return SimpleNamespace(
+            answer_id="ans-max", answer="ok", conclusion="ok", grounded=True,
+            evidence_level="grounded", mode="reasoning",
+            conversation_id="conv-max", anchors=[], citations=[], intent=None,
+        )
+
+    monkeypatch.setattr(service, "ask", capturing_ask)
+    async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
+        _payload(await client.call(
+            "select_notebook", {"notebook_id": mcp_env["notebook"].id}
+        ))
+        first = await _clarification_for(client, "分析一下")
+        rows = first["intent"]["ambiguities"]
+        assert [row["id"] for row in rows] == [f"ambiguity-{i}" for i in range(1, 9)]
+        assert all(row["required"] is True for row in rows)
+        assert all(len(row["question"]) == 300 for row in rows)
+        assert first["next_step"] == memory_context_module._CLARIFICATION_NEXT_STEP
+        assert len(first["intent_token"]) == 16
+        assert first["truncation"]["truncated"] is True
+        assert first["truncation"]["omitted_items"] > 0
+        assert len(json.dumps(first, ensure_ascii=False)) <= MCP_OUTPUT_BUDGET
+        result = await client.call("ask_notebook", {
+            "question": "分析一下", "mode": "reasoning",
+            "intent": {"intent_token": first["intent_token"],
+                       "answers": [{"id": row["id"], "answer": "A"} for row in rows]},
+        })
+    assert not result.isError, result
+    [submitted] = seen
+    assert len(submitted.intent.answers) == 8
+
+
+@pytest.mark.anyio
+async def test_ask_notebook_intent_token_dies_with_the_notebook_selection(
+    mcp_env, monkeypatch
+):
+    """句柄绑定在签发它的笔记本上:同一会话里重新 select_notebook 后,旧句柄配同一个
+    问题回传也必须被拒(`objective == question` 的冻结校验拦不住这一种)。"""
+    service = mcp_env["service"]
+    monkeypatch.setattr(
+        service, "get_notebook", lambda _id: _fake_notebook_summary(mcp_env)
+    )
+    calls: list = []
+
+    def never_ask(*args, **_kwargs):
+        calls.append(args)
+        raise AssertionError("a handle from another notebook must not reach repo.ask")
+
+    monkeypatch.setattr(service, "ask", never_ask)
+    two_notebooks = service.issue_agent_token(
+        mcp_env["alice"].id, mcp_env["profile_a"].id,
+        ["knowledge:read", "memory:read", "ask:execute"],
+        mcp_env["notebook"].id, [mcp_env["notebook"].id, mcp_env["other"].id], None,
+    )
+    async with OfficialMcpClient(mcp_env["app"], two_notebooks.token) as client:
+        _payload(await client.call(
+            "select_notebook", {"notebook_id": mcp_env["notebook"].id}
+        ))
+        first = await _clarification_for(client, "分析一下")
+        answers = [{"id": _required_ambiguity(first["intent"])["id"], "answer": "X"}]
+        _payload(await client.call(
+            "select_notebook", {"notebook_id": mcp_env["other"].id}
+        ))
+        rejected = await client.call("ask_notebook", {
+            "question": "分析一下", "mode": "reasoning",
+            "intent": {"intent_token": first["intent_token"], "answers": answers},
+        })
     assert rejected.isError
-    text = rejected.content[0].text
-    assert "你希望分析的具体对象和最关心的问题是什么" in text
-    assert "把对象名写进问题后重试" in text
-    after = _ask_jobs_row_count(mcp_env)
-    assert after == before
+    assert "intent_token 无效或已过期" in rejected.content[0].text
+    assert calls == []
+
+
+@pytest.mark.anyio
+async def test_ask_notebook_reasoning_handles_long_questions_without_a_model(
+    mcp_env, monkeypatch
+):
+    """质量评审 P1-1/P1-2 的回归:模型未配置时,>1000 字的清晰问题要能自动确认到
+    引擎(兜底主题过去把整段原文塞进 1000 字上限的字段,合同构造直接炸),
+    900+ 字的模糊问题要能正常返回澄清(过去整份合同回传放不进预算)。"""
+    service = mcp_env["service"]
+    monkeypatch.setattr(
+        service, "get_notebook", lambda _id: _fake_notebook_summary(mcp_env)
+    )
+    seen: list = []
+
+    def capturing_ask(_notebook_id, payload):
+        seen.append(payload)
+        return SimpleNamespace(
+            answer_id="ans-long", answer="ok", conclusion="ok", grounded=True,
+            evidence_level="grounded", mode="reasoning",
+            conversation_id="conv-long", anchors=[], citations=[], intent=None,
+        )
+
+    monkeypatch.setattr(service, "ask", capturing_ask)
+    long_clear = "CMOS 反相器" + "的阈值电压由什么决定" * 120
+    long_vague = "分析一下这个流程" + "，并说明其中每一步的依据" * 80
+    assert len(long_clear) > 1000 and 900 < len(long_vague) < 1000
+    async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
+        _payload(await client.call(
+            "select_notebook", {"notebook_id": mcp_env["notebook"].id}
+        ))
+        answered = await client.call(
+            "ask_notebook", {"question": long_clear, "mode": "reasoning"},
+        )
+        clarified = await _clarification_for(client, long_vague)
+    assert not answered.isError, answered
+    assert _payload(answered)["status"] == "answered"
+    [submitted] = seen
+    assert submitted.intent.contract.objective == long_clear
+    assert "你提到的对象具体是什么" in _required_ambiguity(clarified["intent"])["question"]
+
+
+@pytest.mark.anyio
+async def test_ask_notebook_reasoning_clamps_a_runaway_understanding_clock(
+    mcp_env, monkeypatch
+):
+    """理解阶段真跑过一小时也只是把 understanding_ms 夹到上限,不能让
+    `AskIntentConfirmation` 的校验把整次调用丢掉——这个面从不放弃在执行的调用。"""
+    from app.api.mcp_tools import memory_context as memory_context_module
+    from app.models.ask import ASK_UNDERSTANDING_MS_MAX
+
+    service = mcp_env["service"]
+    monkeypatch.setattr(
+        service, "get_notebook", lambda _id: _fake_notebook_summary(mcp_env)
+    )
+    seen: list = []
+
+    def capturing_ask(_notebook_id, payload):
+        seen.append(payload)
+        return SimpleNamespace(
+            answer_id="ans-slow", answer="ok", conclusion="ok", grounded=True,
+            evidence_level="grounded", mode="reasoning",
+            conversation_id="conv-slow", anchors=[], citations=[], intent=None,
+        )
+
+    monkeypatch.setattr(service, "ask", capturing_ask)
+    ticks = iter([0.0, 2 * 3600.0])
+    monkeypatch.setattr(
+        memory_context_module, "time", SimpleNamespace(monotonic=lambda: next(ticks))
+    )
+    async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
+        _payload(await client.call(
+            "select_notebook", {"notebook_id": mcp_env["notebook"].id}
+        ))
+        result = await client.call(
+            "ask_notebook",
+            {"question": "CMOS 反相器的阈值电压由什么决定", "mode": "reasoning"},
+        )
+    assert not result.isError, result
+    [submitted] = seen
+    assert submitted.intent.understanding_ms == ASK_UNDERSTANDING_MS_MAX
 
 
 @pytest.mark.anyio
@@ -937,32 +1396,48 @@ async def test_ask_notebook_chunk_mode_is_not_blocked_by_the_reasoning_gate(
 
 
 @pytest.mark.anyio
-async def test_ask_notebook_reasoning_accepts_a_clear_question(mcp_env, monkeypatch):
-    """清晰问题在 reasoning 模式下不触发这道闸,行为与今天逐键相同。"""
+async def test_ask_notebook_reasoning_auto_confirms_a_clear_question(
+    mcp_env, monkeypatch
+):
+    """清晰问题不暂停:服务端按浏览器自动确认的同一形态(理解结果的
+    `resolved_question`、空 `answers`、量到的 `understanding_ms`)在同一次调用里
+    继续,引擎收到的 `AskRequest.intent` 与网页端提交的一致。"""
     service = mcp_env["service"]
     monkeypatch.setattr(
         service, "get_notebook", lambda _id: _fake_notebook_summary(mcp_env)
     )
-    monkeypatch.setattr(
-        service,
-        "ask",
-        lambda *a, **k: SimpleNamespace(
+    seen: list = []
+
+    def capturing_ask(_notebook_id, payload):
+        seen.append(payload)
+        return SimpleNamespace(
             answer_id="ans-reasoning-clear", answer="ok", conclusion="ok",
             grounded=True, evidence_level="grounded", mode="reasoning",
             conversation_id="conv-reasoning-clear", anchors=[], citations=[],
-        ),
-    )
+        )
+
+    monkeypatch.setattr(service, "ask", capturing_ask)
+    question = "CMOS 反相器的阈值电压由什么决定"
     async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
         _payload(await client.call(
             "select_notebook", {"notebook_id": mcp_env["notebook"].id}
         ))
         result = await client.call(
-            "ask_notebook",
-            {"question": "CMOS 反相器的阈值电压由什么决定", "mode": "reasoning"},
+            "ask_notebook", {"question": question, "mode": "reasoning"},
         )
     assert not result.isError, result
     payload = _payload(result)
+    assert payload["status"] == "answered"
     assert payload["answer_id"] == "ans-reasoning-clear"
+    # 假答案没有合同 → 没有 intent 键;chunk/插件答案除新增的 status 外由此保持不变。
+    assert "intent" not in payload
+    [submitted] = seen
+    assert submitted.intent is not None
+    assert submitted.intent.contract.objective == question
+    assert submitted.intent.contract.needs_clarification is False
+    assert submitted.intent.resolved_question == question
+    assert submitted.intent.answers == []
+    assert isinstance(submitted.intent.understanding_ms, int)
 
 
 class _ReasoningSeqLLM:
@@ -975,6 +1450,17 @@ class _ReasoningSeqLLM:
         self.answer_prompts: list[str] = []
 
     def chat_json(self, messages, schema_hint, **kwargs):
+        if "normalized_question" in schema_hint:
+            # 理解步骤(与 /ask/intent 同一个)现在也在 MCP 这条路上跑;给一份清晰、
+            # 有效的合同让它自动确认,否则这条 prompt 会落进 answer 分支,把
+            # 「跑到合成」的断言变成假阳性。
+            return json.dumps({
+                "normalized_question": "阈值电压由什么决定",
+                "intent_type": "explain", "result_scope": "ranked",
+                "completeness_required": False, "entities": [],
+                "mandatory_topics": [], "ambiguities": [],
+                "needs_clarification": False, "confidence": 0.9,
+            })
         if "sub_queries" in schema_hint:
             return json.dumps({"sub_queries": [{"query": "evidence"}]})
         if "next_action" in schema_hint:
