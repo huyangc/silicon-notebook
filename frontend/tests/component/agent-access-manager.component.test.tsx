@@ -7,7 +7,6 @@ const mocks = vi.hoisted(() => ({ requestJson: vi.fn() }));
 vi.mock("../../app/api-client.ts", () => ({ requestJson: mocks.requestJson }));
 
 import { AgentAccessManager } from "../../app/agent-access-manager";
-import { localDateTimeToUtcIso } from "../../app/agent-token-model";
 import { humanizedError } from "../../app/errors";
 
 const notebooks = [
@@ -107,7 +106,8 @@ test("已签发 token 可以回来修改权限,保存后行内确认并按整体
     scopes: ["knowledge:read", "memory:read"],
     default_notebook_id: "nb-1",
     notebook_ids: ["nb-1", "nb-2"],
-    expires_at: localDateTimeToUtcIso((within(editor).getByLabelText("过期时间") as HTMLInputElement).value),
+    // 过期时间没动:原样回传存储值,而不是从只到分钟的本地时间重算。
+    expires_at: "2030-01-01T00:00:00Z",
     // 编辑器打开时读到的配置,供服务端拒绝旧标签页的覆盖写。
     expected: {
       scopes: ["knowledge:read"],
@@ -116,7 +116,6 @@ test("已签发 token 可以回来修改权限,保存后行内确认并按整体
       expires_at: "2030-01-01T00:00:00Z",
     },
   });
-  expect(body.expires_at).toBe("2030-01-01T00:00:00.000Z");
 
   const listLoadsBeforeSave = requestsTo("GET /agent-tokens").length;
   vi.useFakeTimers();

@@ -140,7 +140,13 @@ export function agentTokenAccessSnapshot(token: AgentTokenAccess) {
  *  `expected` 是编辑器打开时的配置——期间若被别的标签页改过,服务端拒写(409),
  *  而不是让这份旧草稿悄悄恢复刚被收回的权限。 */
 export function agentTokenAccessRequest(draft: AgentTokenDraft, original: AgentTokenAccess) {
-  return { ...agentTokenAccessFields(draft), expected: agentTokenAccessSnapshot(original) };
+  // 过期时间没动就原样回传存储值:datetime-local 只到分钟,夏令时回拨那一小时的本地
+  // 时间还有歧义,从草稿重算会让「只改权限」的保存悄悄把到期时间改掉(甚至提前)。
+  const expiryUntouched = draft.expires_at === utcIsoToLocalDateTime(original.expires_at);
+  const fields = expiryUntouched
+    ? { ...agentTokenAccessFields({ ...draft, expires_at: "" }), expires_at: original.expires_at ?? null }
+    : agentTokenAccessFields(draft);
+  return { ...fields, expected: agentTokenAccessSnapshot(original) };
 }
 
 export function canSaveAgentTokenAccess(token: AgentTokenAccess, draft: AgentTokenDraft): boolean {
