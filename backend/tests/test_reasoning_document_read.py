@@ -428,6 +428,41 @@ def test_a_copied_no_summary_marker_is_stripped_before_matching(repo):  # noqa: 
     assert [o.source_id for o in result.document_reads] == ["s-empty"]
 
 
+def test_a_ledger_visible_collision_is_reported_as_ambiguity_not_silently_resolved():
+    """codex #724 R2:一篇标题恰好 60 字、另一篇以同样 60 字开头,账目里两行显示
+    得一模一样。整串精确匹配只命中短的那篇——静默选错。凡与已命中行在账目形态上
+    撞车的行一并纳入,让调用方按「多篇同名」报歧义。
+    """
+    from app.services import reasoning_retrieval as rr
+
+    class _Row:
+        def __init__(self, title):
+            self.source_title = title
+            self.summary = ""
+
+    short = "甲" * rr._ENUM_NOTE_TITLE_CHARS
+    rows = [_Row(short), _Row(short + "乙"), _Row("丙")]
+    assert len(rr._resolve_roster_rows(rows, short)) == 2
+    assert [r.source_title for r in rr._resolve_roster_rows(rows, "丙")] == ["丙"]
+
+
+def test_many_unnamed_documents_occupy_one_ledger_slot_and_never_hide_a_named_one():
+    """codex #724 R2:`titles` 存的是 (text, mark) 元组,占位串是否已占位要比
+    text 分量;之前 `raw in titles` 恒假,20 篇无名文档会把占位串重复 20 遍、把
+    后面的真标题挤出账目。
+    """
+    from app.services import reasoning_retrieval as rr
+
+    class _Card:
+        def __init__(self, title, summary):
+            self.source_title = title
+            self.summary = summary
+
+    note = rr._source_titles_note([_Card("", "") for _ in range(20)] + [_Card("有名", "x")])
+    assert note == f"，标题: 《未命名来源》{rr._ENUM_NOTE_NO_SUMMARY_MARK}《有名》"
+    assert "(+" not in note
+
+
 def test_the_whole_line_fallback_stays_exact_and_never_guesses(repo):  # noqa: F811
     """② 前缀兜底不是模糊匹配:切出来的头与任何标题都不等时照样 unresolved。"""
     notebook = _notebook_with_documents(repo)

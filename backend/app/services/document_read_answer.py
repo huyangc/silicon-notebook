@@ -96,6 +96,20 @@ def _roster_key(roster_map: Mapping[str, Mapping[str, Any]], source_id: str) -> 
     return ""
 
 
+def document_read_block_reserve(reads) -> int:
+    """Characters the sampled-text block will need, computed BEFORE the roster
+    preview is rendered so the preview cannot starve it (codex #724 R2).
+
+    Renders the block once with an empty roster map (headers then carry the
+    title only, which is never shorter than the tethered form by more than the
+    key's few characters) and adds the two-character joiner. Pure and cheap:
+    the same string work the real assembly does, on at most
+    ``REASONING_MAX_DOCUMENT_READS`` documents. Zero when nothing was read.
+    """
+    preview = document_read_prompt_block(reads, roster_map={})
+    return len(preview.text) + 2 if preview.text else 0
+
+
 def document_read_prompt_block(
     reads: Sequence[object], *, roster_map: Mapping[str, Mapping[str, Any]],
 ) -> DocumentReadPreview:

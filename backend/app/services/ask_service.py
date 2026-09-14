@@ -75,6 +75,7 @@ from app.models.knowledge import (
 )
 from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
 from app.services.citation_markers import LOOSE_MARKER_RE, MARKER_RE, marker_keys
+from app.services.document_read_answer import document_read_block_reserve
 from app.services.evidence_context import anchor_image_targets
 from app.services.model_work import MalformedModelResponse, ModelNotConfiguredError
 
@@ -4842,10 +4843,15 @@ class AskService:
                     # 拼接符本身的 2 个字符,再夹到 chunk_context_chars 的
                     # 一半,防止模型"顺便列出所有表格"把另一半问题
                     # (chunks/elements)的证据预算整个挤空。
-                    enum_budget_chars = enumeration_sub_budget(
+                    # 取样块的席位**先于**枚举预览预留(codex #724 R2):80 篇的
+                    # 花名册能把共享的那一半预算吃到只剩几十字,随后拼上来的
+                    # 取样块整块被挡——白读。按取样块真实渲染长度先扣。
+                    # 预留要从**半预算上限**里扣,不是从整份预算里扣:整份预算
+                    # 减掉两千字仍远大于一半,夹到一半后花名册照样拿满 15000。
+                    enum_budget_chars = max(0, enumeration_sub_budget(
                         chunk_context_chars=limits.chunk_context_chars,
                         structured_block_len=len(structured_block),
-                    )
+                    ) - document_read_block_reserve(stage.document_reads))
                     # 预览渲染的是**结果卡真正拿到的那份**:wire 闸裁过的
                     # 集合若照原 outcome 渲染,prompt 里会出现卡片没有的行,
                     # 头部还写着「complete」——prompt 与卡片对同一份清单说
